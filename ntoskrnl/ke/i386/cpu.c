@@ -1048,7 +1048,7 @@ KiI386PentiumLockErrataFixup(VOID)
     PointerPte = MiAddressToPte(NewIdt);
     ASSERT(PointerPte->u.Hard.Write == 1);
     PointerPte->u.Hard.Write = 0;
-    KeInvalidateTlbEntry(NewIdt);
+    KxFlushSingleCurrentTb(NewIdt);
 }
 
 BOOLEAN
@@ -1507,52 +1507,6 @@ KiFlushTargetEntireTb(IN PKIPI_CONTEXT PacketContext,
 
     /* Flush the TB for the Current CPU */
     KeFlushCurrentTb();
-}
-
-#ifdef CONFIG_SMP
-static
-VOID
-NTAPI
-KiFlushEntireTbIpiWorker(
-    _In_ PKIPI_CONTEXT PacketContext,
-    _In_ PVOID Parameter1,
-    _In_ PVOID Parameter2,
-    _In_ PVOID Parameter3)
-{
-    KeFlushCurrentTb();
-}
-#endif
-
-/*
- * @implemented
- */
-VOID
-NTAPI
-KeFlushEntireTb(IN BOOLEAN Invalid,
-                IN BOOLEAN AllProcessors)
-{
-#ifdef CONFIG_SMP
-    /* Flush every active processor, this one included, and wait for them */
-    KiIpiSendRequest(KeActiveProcessors,
-                     KiFlushEntireTbIpiWorker,
-                     NULL,
-                     NULL,
-                     NULL);
-#else
-    KIRQL OldIrql;
-
-    /* Raise the IRQL for the TB Flush */
-    OldIrql = KeRaiseIrqlToSynchLevel();
-
-    /* Flush the TB for the Current CPU */
-    KeFlushCurrentTb();
-
-    /* Return to original IRQL */
-    KeLowerIrql(OldIrql);
-#endif
-
-    /* Update the flush stamp */
-    InterlockedExchangeAdd(&KiTbFlushTimeStamp, 1);
 }
 
 /*

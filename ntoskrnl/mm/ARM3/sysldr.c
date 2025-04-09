@@ -2394,8 +2394,8 @@ MmChangeKernelResourceSectionProtection(IN ULONG_PTR ProtectionMask)
         MI_UPDATE_VALID_PTE(PointerPte, TempPte);
     }
 
-    /* Flush the TLB of every processor */
-    KeFlushEntireTb(TRUE, TRUE);
+    /* Only flush the current processor's TLB */
+    KxFlushEntireCurrentTb();
     return TRUE;
 }
 
