@@ -5,6 +5,7 @@
 @ stdcall InitOnceInitialize(ptr) NTDLL.RtlRunOnceInitialize
 
 @ stdcall GetFileInformationByHandleEx(long long ptr long)
+@ stdcall CancelIoEx(ptr ptr)
 @ stdcall GetQueuedCompletionStatusEx(ptr ptr long ptr long long)
 @ stdcall -ret64 GetTickCount64()
 
