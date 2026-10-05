@@ -231,15 +231,26 @@ KeReadStateQueue(IN PKQUEUE Queue)
 }
 
 /*
+ * Removes up to Count entries from the queue, waiting for the first one.
+ * Returns the number of entries written to EntryArray. When the wait ends
+ * without an entry, returns 1 and stores the wait status (STATUS_TIMEOUT,
+ * STATUS_USER_APC or STATUS_ALERTED) cast to PLIST_ENTRY in EntryArray[0],
+ * the same convention KeRemoveQueue uses for its return value.
+ *
  * @implemented
  */
-PLIST_ENTRY
+ULONG
 NTAPI
-KeRemoveQueue(IN PKQUEUE Queue,
-              IN KPROCESSOR_MODE WaitMode,
-              IN PLARGE_INTEGER Timeout OPTIONAL)
+KeRemoveQueueEx(IN PKQUEUE Queue,
+                IN KPROCESSOR_MODE WaitMode,
+                IN BOOLEAN Alertable,
+                IN PLARGE_INTEGER Timeout OPTIONAL,
+                OUT PLIST_ENTRY *EntryArray,
+                IN ULONG Count)
 {
     PLIST_ENTRY QueueEntry;
+    ULONG Removed = 0;
+    NTSTATUS WaitStatus;
     LONG_PTR Status;
     PKTHREAD Thread = KeGetCurrentThread();
     PKQUEUE PreviousQueue;
@@ -252,6 +263,7 @@ KeRemoveQueue(IN PKQUEUE Queue,
     ULONG Hand = 0;
     ASSERT_QUEUE(Queue);
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
+    ASSERT(Count != 0);
 
     /* Check if the Lock is already held */
     if (Thread->WaitNext)
@@ -266,6 +278,25 @@ KeRemoveQueue(IN PKQUEUE Queue,
         Thread->WaitIrql = KeRaiseIrqlToSynchLevel();
         KxQueueThreadWait();
         KiAcquireDispatcherLockAtSynchLevel();
+    }
+
+    /* Set the alertability of the wait prepared above */
+    Thread->Alertable = Alertable;
+
+    /*
+     * An alertable caller that is not yet associated with this queue gets its
+     * pending user APCs or alerts first, and is not associated with the queue.
+     */
+    if ((Alertable) && (Thread->Queue != Queue))
+    {
+        WaitStatus = KiCheckAlertability(Thread, Alertable, WaitMode);
+        if (WaitStatus != STATUS_WAIT_0)
+        {
+            KiReleaseDispatcherLockFromSynchLevel();
+            KiExitDispatcher(Thread->WaitIrql);
+            EntryArray[0] = (PLIST_ENTRY)(LONG_PTR)WaitStatus;
+            return 1;
+        }
     }
 
     /*
@@ -327,6 +358,27 @@ KeRemoveQueue(IN PKQUEUE Queue,
             /* Remove the Entry */
             RemoveEntryList(QueueEntry);
             QueueEntry->Flink = NULL;
+            EntryArray[Removed++] = QueueEntry;
+
+            /* Take whatever else is already queued, this thread is already counted as running */
+            while ((Removed < Count) &&
+                   (Queue->EntryListHead.Flink != &Queue->EntryListHead))
+            {
+                QueueEntry = Queue->EntryListHead.Flink;
+                if (!(QueueEntry->Flink) || !(QueueEntry->Blink))
+                {
+                    KeBugCheckEx(INVALID_WORK_QUEUE_ITEM,
+                                 (ULONG_PTR)QueueEntry,
+                                 (ULONG_PTR)Queue,
+                                 (ULONG_PTR)NULL,
+                                 (ULONG_PTR)((PWORK_QUEUE_ITEM)QueueEntry)->
+                                             WorkerRoutine);
+                }
+                Queue->Header.SignalState--;
+                RemoveEntryList(QueueEntry);
+                QueueEntry->Flink = NULL;
+                EntryArray[Removed++] = QueueEntry;
+            }
 
             /* Nothing to wait on */
             break;
@@ -344,12 +396,12 @@ KeRemoveQueue(IN PKQUEUE Queue,
             }
             else
             {
-                /* Fail if there's a User APC Pending */
-                if ((WaitMode != KernelMode) &&
-                    (Thread->ApcState.UserApcPending))
+                /* Fail if there's a User APC pending, or an alert for an alertable wait */
+                WaitStatus = KiCheckAlertability(Thread, Alertable, WaitMode);
+                if (WaitStatus != STATUS_WAIT_0)
                 {
                     /* Return the status and increase the pending threads */
-                    QueueEntry = (PLIST_ENTRY)STATUS_USER_APC;
+                    QueueEntry = (PLIST_ENTRY)(LONG_PTR)WaitStatus;
                     Queue->CurrentCount++;
                     break;
                 }
@@ -404,7 +456,11 @@ KeRemoveQueue(IN PKQUEUE Queue,
                 Thread->WaitReason = 0;
 
                 /* Check if we were executing an APC */
-                if (Status != STATUS_KERNEL_APC) return (PLIST_ENTRY)Status;
+                if (Status != STATUS_KERNEL_APC)
+                {
+                    EntryArray[0] = (PLIST_ENTRY)Status;
+                    return 1;
+                }
 
                 /* Check if we had a timeout */
                 if (Timeout)
@@ -419,6 +475,7 @@ KeRemoveQueue(IN PKQUEUE Queue,
             /* Start another wait */
             Thread->WaitIrql = KeRaiseIrqlToSynchLevel();
             KxQueueThreadWait();
+            Thread->Alertable = Alertable;
             KiAcquireDispatcherLockAtSynchLevel();
             Queue->CurrentCount--;
         }
@@ -427,6 +484,27 @@ KeRemoveQueue(IN PKQUEUE Queue,
     /* Unlock Database and return */
     KiReleaseDispatcherLockFromSynchLevel();
     KiExitDispatcher(Thread->WaitIrql);
+    if (Removed == 0)
+    {
+        /* The wait ended without an entry, QueueEntry holds the status */
+        EntryArray[0] = QueueEntry;
+        Removed = 1;
+    }
+    return Removed;
+}
+
+/*
+ * @implemented
+ */
+PLIST_ENTRY
+NTAPI
+KeRemoveQueue(IN PKQUEUE Queue,
+              IN KPROCESSOR_MODE WaitMode,
+              IN PLARGE_INTEGER Timeout OPTIONAL)
+{
+    PLIST_ENTRY QueueEntry;
+
+    KeRemoveQueueEx(Queue, WaitMode, FALSE, Timeout, &QueueEntry, 1);
     return QueueEntry;
 }
 
