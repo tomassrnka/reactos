@@ -355,8 +355,18 @@ KiSwapContextExit(IN PKTHREAD OldThread,
             }
         }
 
+#ifdef CONFIG_SMP
+        /* TLB flushes target the processors running a process, so join the
+           new one before loading its address space and leave the old after */
+        InterlockedOr((PLONG)&NewProcess->ActiveProcessors, (LONG)Pcr->PrcbData.SetMember);
+#endif
+
         /* Switch address space and flush TLB */
         __writecr3(NewProcess->DirectoryTableBase[0]);
+
+#ifdef CONFIG_SMP
+        InterlockedAnd((PLONG)&OldProcess->ActiveProcessors, ~(LONG)Pcr->PrcbData.SetMember);
+#endif
     }
 
     /* Update the old thread's cycle time */
