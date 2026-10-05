@@ -90,7 +90,7 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
 
     Irp->IoStatus.Information = ((PCHAR)&IPAddr[1]) - ((PCHAR)ListenReceive);
     Irp->IoStatus.Status = STATUS_SUCCESS;
-    (void)IoSetCancelRoutine(Irp, NULL);
+    AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
     return STATUS_SUCCESS;
 }
@@ -214,7 +214,7 @@ end:
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = Status;
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
-    (void)IoSetCancelRoutine(Irp, NULL);
+    AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
 
     return STATUS_SUCCESS;
@@ -246,7 +246,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
            NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
            NextIrp->IoStatus.Information = 0;
            if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-           (void)IoSetCancelRoutine(NextIrp, NULL);
+           AfdClearCancelRoutine(NextIrp);
            IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
 

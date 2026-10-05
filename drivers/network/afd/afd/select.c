@@ -87,7 +87,7 @@ VOID SignalSocket(
     UnlockHandles( AFD_HANDLES(PollReq), PollReq->HandleCount );
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AFD_DbgPrint(MID_TRACE,("Completing\n"));
-    (void)IoSetCancelRoutine(Irp, NULL);
+    AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
     AFD_DbgPrint(MID_TRACE,("Done\n"));
 }

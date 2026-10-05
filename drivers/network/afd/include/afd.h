@@ -299,6 +299,7 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
 ( PAFD_FCB FCB, NTSTATUS Status, PIRP Irp,
   UINT Information );
 VOID SocketStateUnlock( PAFD_FCB FCB );
+VOID AfdClearCancelRoutine( PIRP Irp );
 NTSTATUS LostSocket( PIRP Irp );
 PAFD_HANDLE LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );

@@ -371,13 +371,23 @@ VOID SocketStateUnlock( PAFD_FCB FCB ) {
     KeReleaseMutex(&FCB->Mutex, FALSE);
 }
 
+VOID AfdClearCancelRoutine( PIRP Irp ) {
+    KIRQL OldIrql;
+
+    /* IoCancelIrp claimed the routine and checks the IRP is not completed under the cancel lock */
+    if (!IoSetCancelRoutine(Irp, NULL) && Irp->Cancel) {
+        IoAcquireCancelSpinLock(&OldIrql);
+        IoReleaseCancelSpinLock(OldIrql);
+    }
+}
+
 NTSTATUS NTAPI UnlockAndMaybeComplete
 ( PAFD_FCB FCB, NTSTATUS Status, PIRP Irp,
   UINT Information ) {
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = Information;
     if ( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
-    (void)IoSetCancelRoutine(Irp, NULL);
+    AfdClearCancelRoutine(Irp);
     SocketStateUnlock( FCB );
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
     return Status;

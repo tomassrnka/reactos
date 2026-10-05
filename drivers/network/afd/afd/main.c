@@ -650,7 +650,7 @@ DisconnectComplete(PDEVICE_OBJECT DeviceObject,
         CurrentIrp->IoStatus.Status = Irp->IoStatus.Status;
         CurrentIrp->IoStatus.Information = 0;
         UnlockRequest(CurrentIrp, IoGetCurrentIrpStackLocation(CurrentIrp));
-        (void)IoSetCancelRoutine(CurrentIrp, NULL);
+        AfdClearCancelRoutine(CurrentIrp);
         IoCompleteRequest(CurrentIrp, IO_NETWORK_INCREMENT );
     }
 
@@ -801,7 +801,7 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     CurrentIrp->IoStatus.Status = STATUS_CANCELLED;
                     CurrentIrp->IoStatus.Information = 0;
                     UnlockRequest(CurrentIrp, IoGetCurrentIrpStackLocation(CurrentIrp));
-                    (void)IoSetCancelRoutine(CurrentIrp, NULL);
+                    AfdClearCancelRoutine(CurrentIrp);
                     IoCompleteRequest(CurrentIrp, IO_NETWORK_INCREMENT );
                 }
             }
@@ -1187,13 +1187,36 @@ CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_ACTIVE_
     }
 }
 
+static
+BOOLEAN
+AfdIsIrpQueued(PAFD_FCB FCB, PIRP Irp)
+{
+    PLIST_ENTRY CurrentEntry;
+    ULONG Function;
+
+    for (Function = 0; Function < MAX_FUNCTIONS; Function++)
+    {
+        for (CurrentEntry = FCB->PendingIrpList[Function].Flink;
+             CurrentEntry != &FCB->PendingIrpList[Function];
+             CurrentEntry = CurrentEntry->Flink)
+        {
+            if (CONTAINING_RECORD(CurrentEntry, IRP, Tail.Overlay.ListEntry) == Irp)
+                return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 VOID
 NTAPI
 AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
                  PIRP Irp)
 {
-    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
-    PFILE_OBJECT FileObject = IrpSp->FileObject;
+    PIO_STACK_LOCATION IrpSp;
+    /* Completion does not take the cancel lock and moves the current stack location,
+       so the socket comes from the IRP itself */
+    PFILE_OBJECT FileObject = Irp->Tail.Overlay.OriginalFileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     ULONG Function, IoctlCode;
     PIRP CurrentIrp;
@@ -1206,6 +1229,30 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
     if (!SocketAcquireStateLock(FCB))
         return;
+
+    KeAcquireSpinLock(&DeviceExt->Lock, &OldIrql);
+    for (CurrentEntry = DeviceExt->Polls.Flink;
+         CurrentEntry != &DeviceExt->Polls;
+         CurrentEntry = CurrentEntry->Flink)
+    {
+        Poll = CONTAINING_RECORD(CurrentEntry, AFD_ACTIVE_POLL, ListEntry);
+        if (Poll->Irp == Irp)
+        {
+            CleanupPendingIrp(FCB, Irp, IoGetCurrentIrpStackLocation(Irp), Poll);
+            KeReleaseSpinLock(&DeviceExt->Lock, OldIrql);
+            SocketStateUnlock(FCB);
+            return;
+        }
+    }
+    KeReleaseSpinLock(&DeviceExt->Lock, OldIrql);
+
+    /* Only an IRP still queued under the socket lock is ours; anything else completed meanwhile */
+    if (!AfdIsIrpQueued(FCB, Irp))
+    {
+        SocketStateUnlock(FCB);
+        return;
+    }
+    IrpSp = IoGetCurrentIrpStackLocation(Irp);
 
     switch (IrpSp->MajorFunction)
     {
@@ -1254,34 +1301,6 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
         case IOCTL_AFD_SUPER_ACCEPT:
             Function = FUNCTION_PREACCEPT;
             break;
-
-        case IOCTL_AFD_SELECT:
-            KeAcquireSpinLock(&DeviceExt->Lock, &OldIrql);
-
-            CurrentEntry = DeviceExt->Polls.Flink;
-            while (CurrentEntry != &DeviceExt->Polls)
-            {
-                Poll = CONTAINING_RECORD(CurrentEntry, AFD_ACTIVE_POLL, ListEntry);
-
-                if (Irp == Poll->Irp)
-                {
-                    CleanupPendingIrp(FCB, Irp, IrpSp, Poll);
-                    KeReleaseSpinLock(&DeviceExt->Lock, OldIrql);
-                    SocketStateUnlock(FCB);
-                    return;
-                }
-                else
-                {
-                    CurrentEntry = CurrentEntry->Flink;
-                }
-            }
-
-            KeReleaseSpinLock(&DeviceExt->Lock, OldIrql);
-
-            SocketStateUnlock(FCB);
-
-            DbgPrint("WARNING!!! IRP cancellation race could lead to a process hang! (IOCTL_AFD_SELECT)\n");
-            return;
 
         case IOCTL_AFD_DISCONNECT:
             Function = FUNCTION_DISCONNECT;
