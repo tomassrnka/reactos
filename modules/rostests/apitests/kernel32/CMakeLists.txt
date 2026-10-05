@@ -4,8 +4,10 @@ add_subdirectory(redirptest)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    CancelIoEx.c
     ConsoleCP.c
     CreateProcess.c
+    CreateWaitableTimerEx.c
     DefaultActCtx.c
     DeviceIoControl.c
     dosdev.c
@@ -49,6 +51,7 @@ list(APPEND SOURCE
     TerminateProcess.c
     TunnelCache.c
     UEFIFirmware.c
+    WerFlags.c
     WideCharToMultiByte.c
     WriteFile.c
 )

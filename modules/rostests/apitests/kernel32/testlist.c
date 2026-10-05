@@ -3,8 +3,10 @@
 #include <apitest.h>
 
 extern void func_ActCtxWithXmlNamespaces(void);
+extern void func_CancelIoEx(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateProcess(void);
+extern void func_CreateWaitableTimerEx(void);
 extern void func_DefaultActCtx(void);
 extern void func_DeviceIoControl(void);
 extern void func_dosdev(void);
@@ -46,13 +48,16 @@ extern void func_SystemFirmware(void);
 extern void func_TerminateProcess(void);
 extern void func_TunnelCache(void);
 extern void func_UEFIFirmware(void);
+extern void func_WerFlags(void);
 extern void func_WideCharToMultiByte(void);
 
 const struct test winetest_testlist[] =
 {
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
+    { "CancelIoEx",                  func_CancelIoEx },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateProcess",               func_CreateProcess },
+    { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DeviceIoControl",             func_DeviceIoControl },
     { "dosdev",                      func_dosdev },
@@ -94,6 +99,7 @@ const struct test winetest_testlist[] =
     { "TerminateProcess",            func_TerminateProcess },
     { "TunnelCache",                 func_TunnelCache },
     { "UEFIFirmware",                func_UEFIFirmware },
+    { "WerFlags",                    func_WerFlags },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
     { 0, 0 }
 };
