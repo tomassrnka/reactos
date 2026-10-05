@@ -108,8 +108,8 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     PAFD_SUPER_ACCEPT_INFO AcceptInfo = (PAFD_SUPER_ACCEPT_INFO)Irp->Tail.Overlay.DriverContext[0]; /* LockRequest stores the request in index 0 */
     PAFD_FCB FCB2 = NewFileObject->FsContext;
     NTSTATUS Status = SatisfyAccept(NULL, Irp, NewFileObject, Qelt, TRUE);
-    
-    ObDereferenceObject(NewFileObject);
+
+    /* The accept socket may be closed meanwhile; keep it referenced while FCB2 is used */
     Irp->Tail.Overlay.DriverContext[2] = NULL;
 
     BYTE *BufferPtr = MmGetSystemAddressForMdlSafe((PMDL)Irp->Tail.Overlay.DriverContext[3], NormalPagePriority);
@@ -180,6 +180,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
         if (Status == STATUS_PENDING)
             Status = STATUS_SUCCESS;
+        ObDereferenceObject(NewFileObject);
         return Status;
     }
     else
@@ -216,6 +217,7 @@ end:
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
+    ObDereferenceObject(NewFileObject);
 
     return STATUS_SUCCESS;
 }
