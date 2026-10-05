@@ -22,8 +22,9 @@ static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
 
     UNREFERENCED_PARAMETER(DeviceExt);
 
+    /* SatisfySuperAccept completes the IRP itself */
     if (!SocketAcquireStateLock(FCB))
-        return LostSocket( Irp );
+        return SuperAccept ? STATUS_FILE_CLOSED : LostSocket( Irp );
 
     /* Transfer the connection to the new socket, launch the opening read */
     AFD_DbgPrint(MID_TRACE,("Completing a real accept (FCB %p)\n", FCB));
@@ -111,6 +112,8 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
     /* The accept socket may be closed meanwhile; keep it referenced while FCB2 is used */
     Irp->Tail.Overlay.DriverContext[2] = NULL;
+    if (!NT_SUCCESS(Status))
+        goto end;
 
     BYTE *BufferPtr = MmGetSystemAddressForMdlSafe((PMDL)Irp->Tail.Overlay.DriverContext[3], NormalPagePriority);
     if (!BufferPtr)
@@ -528,7 +531,7 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
             AFD_DbgPrint(MID_TRACE,("Completed a wait for accept\n"));
 
-            ExFreePoolWithTag(PendingConnObj, TAG_AFD_ACCEPT_QUEUE);
+            FreeQueuedConnection(PendingConnObj);
 
             if( !IsListEmpty( &FCB->PendingConnections ) )
             {

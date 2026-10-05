@@ -248,6 +248,10 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
           Status = STATUS_PENDING;
           IoMarkIrpPending( Irp );
           (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+
+          /* A cancel that came before the routine was set found nothing to call */
+          if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL))
+              SignalSocket( Poll, NULL, PollReq, STATUS_CANCELLED );
        } else {
           AFD_DbgPrint(MAX_TRACE, ("FIXME: do something with the IRP!\n"));
           Status = STATUS_NO_MEMORY;
