@@ -580,6 +580,9 @@ KiDispatchInterrupt(VOID)
         NewThread->State = Running;
         OldThread->WaitReason = WrDispatchInt;
 
+        /* Another processor may pick the old thread once it is queued */
+        KiSetThreadSwapBusy(OldThread);
+
         /* Make the old thread ready */
         KxQueueReadyThread(OldThread, Prcb);
 
