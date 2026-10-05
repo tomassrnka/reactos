@@ -729,6 +729,22 @@ KiTrap07Handler(IN PKTRAP_FRAME TrapFrame)
     /* Save trap frame */
     KiEnterTrap(TrapFrame);
 
+#ifdef CONFIG_SMP
+    /*
+     * The NMI task switch sets TS even with interrupts disabled. On SMP the
+     * NPX owner is either NULL or the thread whose state is in the registers
+     * (the outgoing one during a context switch), so TS on a loaded state is
+     * spurious: clear it without touching any NPX state.
+     */
+    NpxThread = KeGetCurrentPrcb()->NpxThread;
+    if (NpxThread && (NpxThread->NpxState == NPX_STATE_LOADED) &&
+        !(KiGetThreadNpxArea(NpxThread)->Cr0NpxState & CR0_EM))
+    {
+        __writecr0(__readcr0() & ~CR0_TS);
+        KiEoiHelper(TrapFrame);
+    }
+#endif
+
     /* Try to handle NPX delay load */
     for (;;)
     {
