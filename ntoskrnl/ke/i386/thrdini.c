@@ -289,24 +289,34 @@ KiIdleLoop(VOID)
             /* Enable interrupts */
             _enable();
 
-            /* Capture current thread data */
-            OldThread = Prcb->CurrentThread;
-            NewThread = Prcb->NextThread;
-
-            /* Set new thread data */
-            Prcb->NextThread = NULL;
-            Prcb->CurrentThread = NewThread;
-
-            /* The thread is now running */
-            NewThread->State = Running;
-
 #ifdef CONFIG_SMP
             /* Do the swap at SYNCH_LEVEL */
             KfRaiseIrql(SYNCH_LEVEL);
 #endif
 
-            /* Switch away from the idle thread */
-            KiSwapContext(APC_LEVEL, OldThread);
+            /* Other processors replace NextThread under the PRCB lock */
+            KiAcquirePrcbLock(Prcb);
+            NewThread = Prcb->NextThread;
+            if (NewThread)
+            {
+                /* Capture current thread data */
+                OldThread = Prcb->CurrentThread;
+
+                /* Set new thread data */
+                Prcb->NextThread = NULL;
+                Prcb->CurrentThread = NewThread;
+
+                /* The thread is now running */
+                NewThread->State = Running;
+                KiReleasePrcbLock(Prcb);
+
+                /* Switch away from the idle thread */
+                KiSwapContext(APC_LEVEL, OldThread);
+            }
+            else
+            {
+                KiReleasePrcbLock(Prcb);
+            }
 
 #ifdef CONFIG_SMP
             /* Go back to DISPATCH_LEVEL */
@@ -551,9 +561,16 @@ KiDispatchInterrupt(VOID)
         /* Acquire the PRCB lock */
         KiAcquirePrcbLock(Prcb);
 
+        /* Another processor may have taken back the standby thread */
+        NewThread = Prcb->NextThread;
+        if (!NewThread)
+        {
+            KiReleasePrcbLock(Prcb);
+            return;
+        }
+
         /* Capture current thread data */
         OldThread = Prcb->CurrentThread;
-        NewThread = Prcb->NextThread;
 
         /* Set new thread data */
         Prcb->NextThread = NULL;
