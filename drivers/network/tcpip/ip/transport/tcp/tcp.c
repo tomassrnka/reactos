@@ -545,22 +545,26 @@ NTSTATUS TCPReceiveData
 
     NdisQueryBuffer(Buffer, &DataBuffer, &DataLen);
 
+    /* Allocated up front, so that the queue check and the insertion happen under one lock */
+    Bucket = ExAllocateFromNPagedLookasideList(&TdiBucketLookasideList);
+    if (!Bucket)
+    {
+        TI_DbgPrint(DEBUG_TCP,("[IP, TCPReceiveData] Failed to allocate bucket\n"));
+
+        return STATUS_NO_MEMORY;
+    }
+
+    /* Data arriving between an empty check and the insertion would find no
+       request to complete, and the read would wait for the next segment */
+    LockObject(Connection);
+
     Status = LibTCPGetDataFromConnectionQueue(Connection, DataBuffer, DataLen, &Received);
 
     if (Status == STATUS_PENDING)
     {
-        Bucket = ExAllocateFromNPagedLookasideList(&TdiBucketLookasideList);
-        if (!Bucket)
-        {
-            TI_DbgPrint(DEBUG_TCP,("[IP, TCPReceiveData] Failed to allocate bucket\n"));
-
-            return STATUS_NO_MEMORY;
-        }
-
         Bucket->Request.RequestNotifyObject = Complete;
         Bucket->Request.RequestContext = Context;
 
-        LockObject(Connection);
         InsertTailList( &Connection->ReceiveRequest, &Bucket->Entry );
         UnlockObject(Connection);
         TI_DbgPrint(DEBUG_TCP,("[IP, TCPReceiveData] Queued read irp\n"));
@@ -571,6 +575,9 @@ NTSTATUS TCPReceiveData
     }
     else
     {
+        UnlockObject(Connection);
+        ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
+
         (*BytesReceived) = Received;
     }
 
