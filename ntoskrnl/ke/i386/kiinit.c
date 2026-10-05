@@ -497,6 +497,9 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     Prcb->ParentNode = KeNodeBlock[0];
     Prcb->ParentNode->ProcessorMask |= Prcb->SetMember;
 
+    /* Every processor initializes below SYNCH_LEVEL, its idle thread takes locks */
+    KeLowerIrql(APC_LEVEL);
+
     /* Check if this is the Boot CPU */
     if (!Number)
     {
@@ -511,9 +514,6 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
 
         /* Set the current MP Master KPRCB to the Boot PRCB */
         Prcb->MultiThreadSetMaster = Prcb;
-
-        /* Lower to APC_LEVEL */
-        KeLowerIrql(APC_LEVEL);
 
         /* Initialize some spinlocks */
         KeInitializeSpinLock(&KiFreezeExecutionLock);
@@ -532,11 +532,6 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
                             PageDirectory,
                             FALSE);
         InitProcess->QuantumReset = MAXCHAR;
-    }
-    else
-    {
-        /* FIXME */
-        DPRINT1("Starting CPU#%u - you are brave\n", Number);
     }
 
     /* Setup the Idle Thread */
@@ -825,18 +820,6 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     RtlCopyMemory(&Idt[8], &DoubleFaultEntry, sizeof(KIDTENTRY));
 
 AppCpuInit:
-    //TODO: We don't setup IPIs yet so freeze other processors here.
-    if (Cpu)
-    {
-        KeMemoryBarrier();
-        LoaderBlock->Prcb = 0;
-
-        for (;;)
-        {
-            YieldProcessor();
-        }
-    }
-
     /* Loop until we can release the freeze lock */
     do
     {
@@ -850,7 +833,8 @@ AppCpuInit:
     __writefsdword(KPCR_SET_MEMBER_COPY, 1 << Cpu);
     __writefsdword(KPCR_PRCB_SET_MEMBER, 1 << Cpu);
 
-    KiVerifyCpuFeatures(Pcr->Prcb);
+    /* Pcr is only set up on the boot processor path above */
+    KiVerifyCpuFeatures(KeGetCurrentPrcb());
 
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
@@ -858,6 +842,9 @@ AppCpuInit:
     /* Set active processors */
     KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
     KeNumberProcessors++;
+
+    /* Let the next processor start */
+    InterlockedAnd((PLONG)&KiFreezeExecutionLock, 0);
 
     /* Check if this is the boot CPU */
     if (!Cpu)
