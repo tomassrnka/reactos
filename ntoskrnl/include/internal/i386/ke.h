@@ -439,6 +439,27 @@ KiSetTebBase(PKPCR Pcr, PNT_TIB TebAddress)
     Ke386SetGdtEntryBase(&Pcr->GDT[KGDT_R3_TEB / sizeof(KGDTENTRY)], TebAddress);
 }
 
+//
+// The NMI and double fault tasks return through the main TSS, and the task
+// switch reloads CR3 and LDTR from it without having saved them there.
+// Update the TSS first, so that an NMI in between returns to the new value.
+//
+FORCEINLINE
+VOID
+KiSetCr3(PKPCR Pcr, ULONG_PTR Cr3)
+{
+    Pcr->TSS->CR3 = Cr3;
+    __writecr3(Cr3);
+}
+
+FORCEINLINE
+VOID
+KiSetLdt(PKPCR Pcr, USHORT Selector)
+{
+    Pcr->TSS->LDT = Selector;
+    Ke386SetLocalDescriptorTable(Selector);
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI

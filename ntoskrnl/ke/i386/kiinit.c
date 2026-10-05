@@ -843,6 +843,10 @@ AppCpuInit:
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
 
+    /* The NMI task returns through the main TSS, see KiSetCr3 */
+    KeGetPcr()->TSS->CR3 = __readcr3();
+    KeGetPcr()->TSS->LDT = 0;
+
     /* Set active processors */
     KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
     KeNumberProcessors++;
