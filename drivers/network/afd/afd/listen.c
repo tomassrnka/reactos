@@ -95,6 +95,13 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
     return STATUS_SUCCESS;
 }
 
+static VOID FreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt)
+{
+    if (Qelt->ConnInfo)
+        ExFreePoolWithTag(Qelt->ConnInfo, TAG_AFD_TDI_CONNECTION_INFORMATION);
+    ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
+}
+
 static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt)
 {
     PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
@@ -311,6 +318,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         {
             RemoveEntryList(PendingConn);
             SatisfySuperAccept(FCB, PendingIrpPtr, ConnectionData);
+            FreeQueuedConnection(ConnectionData);
         }
         else
         {
@@ -603,6 +611,32 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     
     /* Proceed later in SatisfyAcceptEx */
     SocketStateUnlock(Fcb2);
+
+    /* Take a connection that is already waiting, the next one to arrive may never come */
+    if (!IsListEmpty(&Fcb->PendingConnections))
+    {
+        PLIST_ENTRY PendingConn = RemoveHeadList(&Fcb->PendingConnections);
+        PAFD_TDI_OBJECT_QELT Qelt = CONTAINING_RECORD(PendingConn, AFD_TDI_OBJECT_QELT, ListEntry);
+
+        /* The IRP completes either now or once the requested initial data is received */
+        IoMarkIrpPending(Irp);
+        SatisfySuperAccept(Fcb, Irp, Qelt);
+        FreeQueuedConnection(Qelt);
+
+        if (!IsListEmpty(&Fcb->PendingConnections))
+        {
+            Fcb->PollState |= AFD_EVENT_ACCEPT;
+            Fcb->PollStatus[FD_ACCEPT_BIT] = STATUS_SUCCESS;
+            PollReeval(Fcb->DeviceExt, Fcb->FileObject);
+        }
+        else
+        {
+            Fcb->PollState &= ~AFD_EVENT_ACCEPT;
+        }
+
+        SocketStateUnlock(Fcb);
+        return STATUS_PENDING;
+    }
 
     return LeaveIrpUntilLater(Fcb, Irp, FUNCTION_PREACCEPT);
 }
