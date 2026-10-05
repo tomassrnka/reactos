@@ -378,6 +378,13 @@ KiIpiSignalPacketDoneAndStall(
     IN volatile PULONG ReverseStall
 );
 
+extern PKPRCB KiFreezeOwner;
+
+BOOLEAN
+KiProcessorFreezeHandler(
+    _In_ PKTRAP_FRAME TrapFrame,
+    _In_ PKEXCEPTION_FRAME ExceptionFrame);
+
 VOID
 NTAPI
 KiIpiSendRequest(

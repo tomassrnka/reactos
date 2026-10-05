@@ -143,6 +143,14 @@ KiIpiSend(IN KAFFINITY TargetProcessors,
     KAFFINITY Remaining = TargetProcessors;
     ULONG Processor;
 
+    /* Freezing must reach processors running with interrupts disabled */
+    if (IpiRequest & IPI_FREEZE)
+    {
+        HalSendNMI(TargetProcessors);
+        IpiRequest &= ~IPI_FREEZE;
+        if (!IpiRequest) return;
+    }
+
     /* Mark the requests before interrupting, the interrupt takes them all */
     while (Remaining)
     {
@@ -335,6 +343,10 @@ KiIpiSendRequest(
        entire TLB when they thaw */
     if (KeGetCurrentIrql() > SYNCH_LEVEL)
     {
+#ifdef CONFIG_SMP
+        ASSERT((KiFreezeOwner == KeGetCurrentPrcb()) ||
+               ((TargetSet & KeActiveProcessors & ~KeGetCurrentPrcb()->SetMember) == 0));
+#endif
         if (TargetSet & KeGetCurrentPrcb()->SetMember)
             WorkerRoutine((PKIPI_CONTEXT)KeGetCurrentPrcb(), Parameter1, Parameter2, Parameter3);
         return;

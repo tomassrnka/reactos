@@ -537,8 +537,9 @@ KiTrap02Handler(VOID)
     /* Store the trap frame in the KPRCB */
     KiSaveProcessorState(&TrapFrame, NULL);
 
-    /* Call any registered NMI handlers and see if they handled it or not */
-    if (!KiHandleNmi())
+    /* Freeze requests from other processors come as NMIs; then call any
+       registered NMI handlers and see if they handled it or not */
+    if (!KiProcessorFreezeHandler(&TrapFrame, NULL) && !KiHandleNmi())
     {
         /*
          * They did not, so call the platform HAL routine to bugcheck the system
