@@ -441,6 +441,18 @@ KiSetTebBase(PKPCR Pcr, PNT_TIB TebAddress)
 
 CODE_SEG("INIT")
 VOID
+NTAPI
+KiInitializeTSS2(
+    IN PKTSS Tss,
+    IN PKGDTENTRY TssEntry OPTIONAL);
+
+VOID
+NTAPI
+KiInitializeTSS(
+    IN PKTSS Tss);
+
+CODE_SEG("INIT")
+VOID
 FASTCALL
 Ki386InitializeTss(
     IN PKTSS Tss,
