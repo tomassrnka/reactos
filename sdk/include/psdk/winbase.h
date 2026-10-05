@@ -2679,6 +2679,18 @@ BOOL WINAPI QueueUserWorkItem(LPTHREAD_START_ROUTINE,PVOID,ULONG);
 #endif
 void WINAPI RaiseException(DWORD,DWORD,DWORD,const ULONG_PTR*);
 
+#if (_WIN32_WINNT >= 0x0601)
+#define FAIL_FAST_GENERATE_EXCEPTION_ADDRESS 0x1
+#define FAIL_FAST_NO_HARD_ERROR_DLG 0x2
+
+VOID
+WINAPI
+RaiseFailFastException(
+  _In_opt_ PEXCEPTION_RECORD pExceptionRecord,
+  _In_opt_ PCONTEXT pContextRecord,
+  _In_ DWORD dwFlags);
+#endif
+
 BOOL
 WINAPI
 QueryInformationJobObject(
