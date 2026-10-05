@@ -300,9 +300,9 @@ ExpFreeHandleTableEntry(IN PHANDLE_TABLE HandleTable,
         /* Select a lock index */
         LockIndex = Handle.Index % 4;
 
-        /* Select which entry to use */
+        /* An allocator holding this lock may be popping the free list head */
         Free = (HandleTable->HandleTableLock[LockIndex].Locked) ?
-                &HandleTable->FirstFree : &HandleTable->LastFree;
+                &HandleTable->LastFree : &HandleTable->FirstFree;
     }
     else
     {
