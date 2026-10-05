@@ -28,8 +28,8 @@ typedef struct _IMAGE_SYMBOL_INFO_CACHE
 IMAGE_SYMBOL_INFO_CACHE, *PIMAGE_SYMBOL_INFO_CACHE;
 
 static BOOLEAN LoadSymbols = FALSE;
-static LIST_ENTRY SymbolsToLoad;
-static KSPIN_LOCK SymbolsToLoadLock;
+/* Lock-free, since the debugger queues entries with other processors frozen */
+static SLIST_HEADER SymbolsToLoad;
 static KEVENT SymbolsToLoadEvent;
 
 /* FUNCTIONS ****************************************************************/
@@ -192,6 +192,7 @@ KdbSymPrintAddress(
     return TRUE;
 }
 
+
 static KSTART_ROUTINE LoadSymbolsRoutine;
 /*! \brief          The symbol loader thread routine.
  *                  This opens the image file for reading and loads the symbols
@@ -212,8 +213,14 @@ LoadSymbolsRoutine(
 
     while (TRUE)
     {
-        PLIST_ENTRY ListEntry;
-        NTSTATUS Status = KeWaitForSingleObject(&SymbolsToLoadEvent, WrKernel, KernelMode, FALSE, NULL);
+        PSLIST_ENTRY ListEntry;
+        LARGE_INTEGER Interval;
+        NTSTATUS Status;
+
+        /* Entries queued while the debugger froze the other processors cannot
+           set the event, as that could wait for a lock a frozen processor holds */
+        Interval.QuadPart = -10 * 1000 * 1000;
+        Status = KeWaitForSingleObject(&SymbolsToLoadEvent, WrKernel, KernelMode, FALSE, &Interval);
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("KeWaitForSingleObject failed?! 0x%08x\n", Status);
@@ -221,9 +228,11 @@ LoadSymbolsRoutine(
             return;
         }
 
-        while ((ListEntry = ExInterlockedRemoveHeadList(&SymbolsToLoad, &SymbolsToLoadLock)))
+        ListEntry = InterlockedFlushSList(&SymbolsToLoad);
+        while (ListEntry)
         {
             PLDR_DATA_TABLE_ENTRY LdrEntry = CONTAINING_RECORD(ListEntry, LDR_DATA_TABLE_ENTRY, InInitializationOrderLinks);
+            ListEntry = ListEntry->Next;
             HANDLE FileHandle;
             OBJECT_ATTRIBUTES Attrib;
             IO_STATUS_BLOCK Iosb;
@@ -313,7 +322,10 @@ KdbSymProcessSymbols(
         return;
     }
 
-    if (RosSymCreateFromMem(LdrEntry->DllBase, LdrEntry->SizeOfImage, (PROSSYM_INFO*)&LdrEntry->PatchInformation))
+    /* Pool can only be allocated up to DISPATCH_LEVEL; the debugger runs higher
+     * when it froze other processors, so leave the work to the loader thread */
+    if (KeGetCurrentIrql() <= DISPATCH_LEVEL &&
+        RosSymCreateFromMem(LdrEntry->DllBase, LdrEntry->SizeOfImage, (PROSSYM_INFO*)&LdrEntry->PatchInformation))
     {
         return;
     }
@@ -322,11 +334,11 @@ KdbSymProcessSymbols(
     LdrEntry->LoadCount++;
 
     /* Tell our worker thread to read from it */
-    KeAcquireSpinLockAtDpcLevel(&SymbolsToLoadLock);
-    InsertTailList(&SymbolsToLoad, &LdrEntry->InInitializationOrderLinks);
-    KeReleaseSpinLockFromDpcLevel(&SymbolsToLoadLock);
+    InterlockedPushEntrySList(&SymbolsToLoad, (PSLIST_ENTRY)&LdrEntry->InInitializationOrderLinks);
 
-    KeSetEvent(&SymbolsToLoadEvent, IO_NO_INCREMENT, FALSE);
+    /* Above DISPATCH_LEVEL the loader thread finds the entry when its wait times out */
+    if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
+        KeSetEvent(&SymbolsToLoadEvent, IO_NO_INCREMENT, FALSE);
 }
 
 
@@ -432,8 +444,7 @@ KdbSymInit(
             return LoadSymbols;
 
         /* Launch our worker thread */
-        InitializeListHead(&SymbolsToLoad);
-        KeInitializeSpinLock(&SymbolsToLoadLock);
+        InitializeSListHead(&SymbolsToLoad);
         KeInitializeEvent(&SymbolsToLoadEvent, SynchronizationEvent, FALSE);
 
         Status = PsCreateSystemThread(&Thread,
