@@ -284,7 +284,7 @@ MiReleaseSystemPtes(IN PMMPTE StartingPte,
     //
     // Flush the TLB
     //
-    KeFlushRangeTb(StartingPte, NumberOfPtes, TRUE);
+    KeFlushRangeTb(MiPteToAddress(StartingPte), NumberOfPtes, TRUE);
 
     //
     // Acquire the System PTE lock
