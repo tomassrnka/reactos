@@ -164,5 +164,9 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
 
     UnlockObject(Listener);
 
+    /* A connection may have been established while no listen request was queued */
+    if (Status == STATUS_PENDING)
+        LibTCPClaimPendingAccept(Listener);
+
     return Status;
 }

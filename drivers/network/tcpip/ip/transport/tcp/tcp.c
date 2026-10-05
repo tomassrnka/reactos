@@ -124,6 +124,7 @@ PCONNECTION_ENDPOINT TCPAllocateConnectionEndpoint( PVOID ClientContext )
     InitializeListHead(&Connection->SendRequest);
     InitializeListHead(&Connection->ShutdownRequest);
     InitializeListHead(&Connection->PacketQueue);
+    InitializeListHead(&Connection->PendingAccepts);
 
     /* Initialize disconnect timer */
     KeInitializeTimer(&Connection->DisconnectTimer);

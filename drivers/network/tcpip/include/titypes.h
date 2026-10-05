@@ -255,6 +255,10 @@ typedef struct _CONNECTION_ENDPOINT {
 
     LIST_ENTRY PacketQueue;    /* Queued received packets waiting to be processed */
 
+    /* Accepted connections no listen request has taken yet (lwIP thread only) */
+    LIST_ENTRY PendingAccepts;
+    ULONG PendingAcceptCount;
+
     /* Disconnect Timer */
     KTIMER DisconnectTimer;
     KDPC DisconnectDpc;
