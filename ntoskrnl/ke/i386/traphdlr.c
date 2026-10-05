@@ -460,8 +460,6 @@ __cdecl
 KiTrap02Handler(VOID)
 {
     PKTSS Tss, NmiTss;
-    PKTHREAD Thread;
-    PKPROCESS Process;
     PKGDTENTRY TssGdt;
     KTRAP_FRAME TrapFrame;
     KIRQL OldIrql;
@@ -476,15 +474,12 @@ KiTrap02Handler(VOID)
      */
     _disable();
 
-    /* Get the current TSS, thread, and process */
+    /*
+     * Get the current TSS. The code that loads CR3, LDTR and the I/O map base
+     * keeps them current in it; the current thread cannot tell, since it is
+     * already the incoming one during a context switch.
+     */
     Tss = KeGetPcr()->TSS;
-    Thread = ((PKIPCR)KeGetPcr())->PrcbData.CurrentThread;
-    Process = Thread->ApcState.Process;
-
-    /* Save data usually not present in the TSS */
-    Tss->CR3 = Process->DirectoryTableBase[0];
-    Tss->IoMapBase = Process->IopmOffset;
-    Tss->LDT = Process->LdtDescriptor.LimitLow ? KGDT_LDT : 0;
 
     /* Now get the base address of the NMI TSS */
     TssGdt = &((PKIPCR)KeGetPcr())->GDT[KGDT_NMI_TSS / sizeof(KGDTENTRY)];
@@ -534,12 +529,16 @@ KiTrap02Handler(VOID)
     TrapFrame.DbgEip = Tss->Eip;
     TrapFrame.DbgEbp = Tss->Ebp;
 
+    /* Freeze requests from other processors come as NMIs and save the
+       processor state themselves; saving twice would record DR7 cleared */
+    if (KiProcessorFreezeHandler(&TrapFrame, NULL))
+        goto Handled;
+
     /* Store the trap frame in the KPRCB */
     KiSaveProcessorState(&TrapFrame, NULL);
 
-    /* Freeze requests from other processors come as NMIs; then call any
-       registered NMI handlers and see if they handled it or not */
-    if (!KiProcessorFreezeHandler(&TrapFrame, NULL) && !KiHandleNmi())
+    /* Call any registered NMI handlers and see if they handled it or not */
+    if (!KiHandleNmi())
     {
         /*
          * They did not, so call the platform HAL routine to bugcheck the system
@@ -554,6 +553,7 @@ KiTrap02Handler(VOID)
         KeGetPcr()->Irql = OldIrql;
     }
 
+Handled:
     /*
      * Although the CPU disabled NMIs, we just did a BIOS call, which could've
      * totally changed things.

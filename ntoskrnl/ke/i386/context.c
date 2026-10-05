@@ -39,16 +39,16 @@ KiSwapProcess(IN PKPROCESS NewProcess,
             KeSetGdtSelector(KGDT_LDT,
                              ((PULONG)&NewProcess->LdtDescriptor)[0],
                              ((PULONG)&NewProcess->LdtDescriptor)[1]);
-            Ke386SetLocalDescriptorTable(KGDT_LDT);
+            KiSetLdt((PKPCR)Pcr, KGDT_LDT);
         }
         else
         {
-            Ke386SetLocalDescriptorTable(0);
+            KiSetLdt((PKPCR)Pcr, 0);
         }
     }
 
     /* Update CR3 */
-    __writecr3(NewProcess->DirectoryTableBase[0]);
+    KiSetCr3((PKPCR)Pcr, NewProcess->DirectoryTableBase[0]);
 
     /* Clear GS */
     Ke386SetGs(0);
