@@ -647,7 +647,9 @@ ULONG
 NTAPI
 ExpMoveFreeHandles(IN PHANDLE_TABLE HandleTable)
 {
-    ULONG LastFree, i;
+    ULONG LastFree, FirstFree, Value, Next, i;
+    EXHANDLE Handle;
+    PHANDLE_TABLE_ENTRY Entry, Tail = NULL;
 
     /* Clear the last free index */
     LastFree = InterlockedExchange((PLONG) &HandleTable->LastFree, 0);
@@ -673,8 +675,40 @@ ExpMoveFreeHandles(IN PHANDLE_TABLE HandleTable)
         }
     }
 
-    /* We are strict FIFO, we need to reverse the entries */
-    ASSERT(FALSE);
+    /* The chain is ours alone now; frees push onto it, so strict FIFO reverses it */
+    Value = LastFree;
+    if (HandleTable->StrictFIFO) LastFree = 0;
+    while (Value)
+    {
+        Handle.Value = Value & FREE_HANDLE_MASK;
+        Entry = ExpLookupHandleTableEntry(HandleTable, Handle);
+        Next = Entry->NextFreeTableEntry;
+        if (HandleTable->StrictFIFO)
+        {
+            if (!Tail) Tail = Entry;
+            Entry->NextFreeTableEntry = LastFree;
+            LastFree = Value;
+        }
+        else
+        {
+            Tail = Entry;
+        }
+        Value = Next;
+    }
+
+    /* Frees that found their lock free went to FirstFree meanwhile; splice the chain in front */
+    for (;;)
+    {
+        FirstFree = *(volatile ULONG*)&HandleTable->FirstFree;
+        Tail->NextFreeTableEntry = FirstFree;
+        if (InterlockedCompareExchange((PLONG)&HandleTable->FirstFree,
+                                       LastFree,
+                                       FirstFree) == FirstFree)
+        {
+            break;
+        }
+    }
+
     return LastFree;
 }
 
