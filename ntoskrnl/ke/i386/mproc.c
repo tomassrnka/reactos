@@ -90,6 +90,11 @@ KeStartAllProcessors(VOID)
                         (PKTHREAD)&APInfo->Thread,
                         DPCStack);
 
+        /* Ring 0 entries from user mode load SS0 and ESP0 from this TSS,
+           so initialize it like the boot processor's */
+        KiInitializeTSS2(&APInfo->Tss, NULL);
+        KiInitializeTSS(&APInfo->Tss);
+
         // Prepare descriptor tables
         KDESCRIPTOR bspGdt, bspIdt;
         __sgdt(&bspGdt.Limit);
