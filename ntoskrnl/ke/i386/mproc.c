@@ -31,6 +31,9 @@ typedef struct _AP_SETUP_STACK
     PVOID KxLoaderBlock;
 } AP_SETUP_STACK, *PAP_SETUP_STACK; // Note: expected layout only for 32-bit x86
 
+extern UCHAR KiDoubleFaultTSS[KTSS_IO_MAPS];
+extern UCHAR KiNMITSS[KTSS_IO_MAPS];
+
 /* FUNCTIONS *****************************************************************/
 
 CODE_SEG("INIT")
@@ -102,11 +105,16 @@ KeStartAllProcessors(VOID)
         // Clear TSS Busy flag (aka set the type to "TSS (Available)")
         KiGetGdtEntry(&APInfo->Gdt, KGDT_TSS)->HighWord.Bits.Type = I386_TSS;
 
-        APInfo->TssDoubleFault.Esp0 = (ULONG_PTR)&APInfo->NMIStackData;
-        APInfo->TssDoubleFault.Esp = (ULONG_PTR)&APInfo->NMIStackData;
+        /* Double faults and NMIs switch to these tasks: start them like the
+           boot processor's, but on the top of this processor's own stack */
+        RtlCopyMemory(&APInfo->TssDoubleFault, KiDoubleFaultTSS, KTSS_IO_MAPS);
+        RtlCopyMemory(&APInfo->TssNMI, KiNMITSS, KTSS_IO_MAPS);
 
-        APInfo->TssNMI.Esp0 = (ULONG_PTR)&APInfo->NMIStackData;
-        APInfo->TssNMI.Esp = (ULONG_PTR)&APInfo->NMIStackData;
+        APInfo->TssDoubleFault.Esp0 = (ULONG_PTR)&APInfo->NMIStackData[DOUBLE_FAULT_STACK_SIZE];
+        APInfo->TssDoubleFault.Esp = (ULONG_PTR)&APInfo->NMIStackData[DOUBLE_FAULT_STACK_SIZE];
+
+        APInfo->TssNMI.Esp0 = (ULONG_PTR)&APInfo->NMIStackData[DOUBLE_FAULT_STACK_SIZE];
+        APInfo->TssNMI.Esp = (ULONG_PTR)&APInfo->NMIStackData[DOUBLE_FAULT_STACK_SIZE];
 
         // Fill the processor state
         PKPROCESSOR_STATE ProcessorState = &APInfo->Pcr.Prcb->ProcessorState;
