@@ -48,6 +48,10 @@ VOID
 HalpPrintApicTables(VOID);
 
 VOID
+HalpInitializeIpi(
+    _In_ ULONG ProcessorNumber);
+
+VOID
 FASTCALL
 HalpBroadcastClockIpi(
     _In_ UCHAR Vector);

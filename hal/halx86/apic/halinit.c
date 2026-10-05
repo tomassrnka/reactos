@@ -31,6 +31,7 @@ HalpInitProcessor(
     }
 
     HalpSetupProcessorsTable(ProcessorNumber);
+    HalpInitializeIpi(ProcessorNumber);
 
     /* Initialize the local APIC for this cpu */
     ApicInitializeLocalApic(ProcessorNumber);

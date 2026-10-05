@@ -8,6 +8,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <hal.h>
+#include "../apic/apicp.h"
 #include <smp.h>
 
 #define NDEBUG
@@ -46,3 +47,44 @@ HalSendSoftwareInterrupt(
 }
 
 #endif // _M_AMD64
+
+#ifdef _M_IX86
+
+VOID __cdecl HalpIpiInterrupt(VOID);
+
+VOID
+FASTCALL
+HalpIpiInterruptHandler(
+    _In_ PKTRAP_FRAME TrapFrame)
+{
+    KIRQL OldIrql;
+
+    /* Enter trap */
+    KiEnterInterruptTrap(TrapFrame);
+
+    /* Start the interrupt */
+    if (!HalBeginSystemInterrupt(IPI_LEVEL, APIC_IPI_VECTOR, &OldIrql))
+    {
+        /* Spurious, just end the interrupt */
+        KiEoiHelper(TrapFrame);
+        return;
+    }
+
+    /* Let the kernel process the requests sent to this processor */
+    KiIpiServiceRoutine(TrapFrame, NULL);
+
+    /* End the interrupt */
+    KiEndInterrupt(OldIrql, TrapFrame);
+}
+
+#endif // _M_IX86
+
+VOID
+HalpInitializeIpi(
+    _In_ ULONG ProcessorNumber)
+{
+#ifdef _M_IX86
+    /* Every processor has its own IDT */
+    KeRegisterInterruptHandler(APIC_IPI_VECTOR, HalpIpiInterrupt);
+#endif
+}
