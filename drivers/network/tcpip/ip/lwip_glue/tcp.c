@@ -466,7 +466,7 @@ done:
 }
 
 PTCP_PCB
-LibTCPListen(PCONNECTION_ENDPOINT Connection, const u8_t backlog)
+LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 {
     struct lwip_callback_msg *msg;
     PTCP_PCB ret;
@@ -476,7 +476,8 @@ LibTCPListen(PCONNECTION_ENDPOINT Connection, const u8_t backlog)
     {
         KeInitializeEvent(&msg->Event, NotificationEvent, FALSE);
         msg->Input.Listen.Connection = Connection;
-        msg->Input.Listen.Backlog = backlog;
+        /* lwIP keeps the backlog in a u8_t, a plain cast turned 1024 into 0 */
+        msg->Input.Listen.Backlog = (u8_t)min(Backlog, 0xFF);
 
         tcpip_callback_with_block(LibTCPListenCallback, msg, 1);
 
