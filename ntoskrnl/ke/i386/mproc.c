@@ -140,8 +140,8 @@ KeStartAllProcessors(VOID)
 
         // Update the LOADER_PARAMETER_BLOCK structure for the new processor
         KeLoaderBlock->KernelStack = (ULONG_PTR)KernelStack;
-        KeLoaderBlock->Prcb = (ULONG_PTR)&APInfo->Pcr.Prcb;
-        KeLoaderBlock->Thread = (ULONG_PTR)&APInfo->Pcr.Prcb->IdleThread;
+        KeLoaderBlock->Prcb = (ULONG_PTR)APInfo->Pcr.Prcb;
+        KeLoaderBlock->Thread = (ULONG_PTR)&APInfo->Thread;
 
         // Start the CPU
         DPRINT("Attempting to Start a CPU with number: %lu\n", ProcessorCount);
