@@ -1083,6 +1083,23 @@ KiSaveProcessorState(IN PKTRAP_FRAME TrapFrame,
     KiSaveProcessorControlState(&Prcb->ProcessorState);
 }
 
+VOID
+NTAPI
+KiRestoreProcessorState(
+    _Out_ PKTRAP_FRAME TrapFrame,
+    _Out_ PKEXCEPTION_FRAME ExceptionFrame)
+{
+    PKPRCB Prcb = KeGetCurrentPrcb();
+
+    /* Frozen processors resume through the NMI task, not through TrapFrame,
+       which the NMI handler only built from the interrupted TSS */
+    UNREFERENCED_PARAMETER(TrapFrame);
+    UNREFERENCED_PARAMETER(ExceptionFrame);
+
+    /* Restore control registers */
+    KiRestoreProcessorControlState(&Prcb->ProcessorState);
+}
+
 CODE_SEG("INIT")
 BOOLEAN
 NTAPI

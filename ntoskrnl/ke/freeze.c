@@ -84,3 +84,5 @@ KeThawExecution(IN BOOLEAN Enable)
     /* Re-enable interrupts */
     KeRestoreInterrupts(Enable);
 }
+
+/* EOF */
