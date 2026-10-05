@@ -41,6 +41,13 @@ HalpSetupProcessorsTable(
 }
 
 VOID
+HalpInitializeIpi(
+    _In_ ULONG ProcessorNumber)
+{
+    /* No inter-processor interrupts in UP mode */
+}
+
+VOID
 FASTCALL
 HalpBroadcastClockIpi(
     _In_ UCHAR Vector)
