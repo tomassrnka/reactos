@@ -836,6 +836,10 @@ AppCpuInit:
     /* Pcr is only set up on the boot processor path above */
     KiVerifyCpuFeatures(KeGetCurrentPrcb());
 
+    /* The boot processor sets these in KiInitMachineDependent; without
+       write protection kernel writes would bypass copy-on-write */
+    if (Cpu) KiSetCR0Bits();
+
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
 
