@@ -269,8 +269,11 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
 
     if (Irp->IoStatus.Status != STATUS_SUCCESS)
     {
-        SocketStateUnlock(FCB);
-        return Irp->IoStatus.Status;
+        /* Drop the connection of the failed listen and listen again, or the socket stops accepting */
+        TdiDisassociateAddressFile(FCB->Connection.Object);
+        ObDereferenceObject(FCB->Connection.Object);
+        ZwClose(FCB->Connection.Handle);
+        goto Relisten;
     }
 
     Qelt = ExAllocatePoolWithTag(NonPagedPool,
@@ -318,6 +321,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         }
     }
 
+Relisten:
     /* Launch new accept socket */
     Status = WarmSocketForConnection( FCB );
 
