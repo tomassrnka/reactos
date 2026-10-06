@@ -123,7 +123,7 @@ typedef struct _AFD_ACTIVE_POLL {
     KTIMER Timer;
     PKEVENT EventObject;
     BOOLEAN Exclusive;
-} AFD_ACTIVE_POLL, *PAFD_ACTIVE_POLL;
+} AFD_ACTIVE_POLL, *PAFD_ACTIVE_POLL; /* Irp is NULL once completed while its timeout DPC runs */
 
 typedef struct _IRP_LIST {
     LIST_ENTRY ListEntry;
