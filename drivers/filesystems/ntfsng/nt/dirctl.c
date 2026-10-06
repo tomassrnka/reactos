@@ -69,6 +69,75 @@ static int NgSnapFill(void *Context, const unsigned short *Name, unsigned int Le
     return 0;
 }
 
+/*
+ * NgMatchExpression: does Name match Expr (Expr already upcased, Name upcased per character)?
+ * Semantics as documented for FsRtlIsNameInExpression: '*' any run, '?' one character,
+ * DOS_STAR '<' any run that does not go past the last '.' of the name (a run that starts after
+ * the last '.' may take the rest), DOS_QM '>' one character, or nothing at a '.' or at the end
+ * (then the whole run of '>' is skipped), DOS_DOT '"' a '.' or nothing at the end.  DotEntry: the
+ * "." and ".." entries match as the name "." on which DOS_QM may take the '.'.
+ * Work: a (E+1) x (N+1) table filled backwards; Tab must hold that many bytes.
+ */
+static BOOLEAN NgMatchExpression(const WCHAR *Expr, USHORT E, const WCHAR *Name, USHORT N,
+                                 BOOLEAN DotEntry, UCHAR *Tab)
+{
+    LONG Last = -1;
+    USHORT i;
+    LONG p, j;
+#define T(p, j) Tab[(p) * (N + 1) + (j)]
+    for (i = 0; i < N; i++)
+        if (Name[i] == L'.')
+            Last = i;
+    for (j = 0; j <= N; j++)
+        T(E, j) = (j == N);
+    for (p = E - 1; p >= 0; p--)
+    {
+        WCHAR c = Expr[p];
+        for (j = N; j >= 0; j--)
+        {
+            BOOLEAN r = FALSE;
+            switch (c)
+            {
+            case L'*':
+                r = T(p + 1, j) || (j < N && T(p, j + 1));
+                break;
+            case L'<':
+                if (Last >= j)
+                    r = T(p + 1, j) || (j < Last ? T(p, j + 1) : T(p + 1, Last + 1));
+                else
+                    r = T(p + 1, j) || (j < N && T(p, j + 1));
+                break;
+            case L'?':
+                r = j < N && T(p + 1, j + 1);
+                break;
+            case L'>':
+                if (j < N && (Name[j] != L'.' || DotEntry) && T(p + 1, j + 1))
+                    r = TRUE;
+                else if (j == N || Name[j] == L'.')
+                {
+                    LONG q = p;
+                    while (q < E && Expr[q] == L'>')
+                        q++;
+                    r = T(q, j);
+                }
+                break;
+            case L'"':
+                if (j < N && Name[j] == L'.')
+                    r = T(p + 1, j + 1);
+                else if (j == N)
+                    r = T(p + 1, j);
+                break;
+            default:
+                r = j < N && RtlUpcaseUnicodeChar(Name[j]) == c && T(p + 1, j + 1);
+                break;
+            }
+            T(p, j) = r;
+        }
+    }
+    return T(0, 0);
+#undef T
+}
+
 /* Writes one entry; returns its unaligned size, or 0 if it does not fit in Room. */
 static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, PNG_DIRENT E,
                          const struct ngc_stat *St, ULONG Index)
@@ -166,6 +235,7 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ULONG Length, Used = 0, LastOffset = 0, Written = 0;
     BOOLEAN Restart, Single;
     PUCHAR Buffer;
+    PUCHAR MatchTab = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
     int Err;
 
@@ -245,6 +315,13 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Buffer = Irp->UserBuffer;
     if (!Buffer)
         return STATUS_INSUFFICIENT_RESOURCES;
+    if (!Ccb->PatternIsStar)
+    {
+        /* Work table of the matcher: (pattern length + 1) x (longest name + 1). */
+        MatchTab = ExAllocatePoolWithTag(PagedPool, (Ccb->Pattern.Length / sizeof(WCHAR) + 1) * 256, TAG_NTFSNG);
+        if (!MatchTab)
+            return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     while (Ccb->NextIndex < Ccb->EntryCount)
     {
@@ -256,7 +333,10 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
         Name.Buffer = E->Name;
         Name.Length = Name.MaximumLength = E->NameLength;
-        if (!Ccb->PatternIsStar && !FsRtlIsNameInExpression(&Ccb->Pattern, &Name, TRUE, NULL))
+        if (!Ccb->PatternIsStar &&
+            !NgMatchExpression(Ccb->Pattern.Buffer, Ccb->Pattern.Length / sizeof(WCHAR),
+                               E->IsDot ? L"." : E->Name, E->IsDot ? 1 : E->NameLength / sizeof(WCHAR),
+                               E->IsDot, MatchTab))
         {
             Ccb->NextIndex++;
             continue;
@@ -300,6 +380,8 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             break;
     }
 
+    if (MatchTab)
+        ExFreePoolWithTag(MatchTab, TAG_NTFSNG);
     if (!Written)
     {
         if (Status == STATUS_BUFFER_OVERFLOW)
