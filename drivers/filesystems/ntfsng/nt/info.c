@@ -203,22 +203,109 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return Status;
 }
 
+static NTSTATUS NgSetBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B)
+{
+    PNG_VCB Vcb = Fcb->Vcb;
+    long long Times[4];
+    unsigned int Attrs = 0, Mask = 0;
+    int Err;
+
+    /* 0 leaves a time alone; -1 (stop automatic updates for this handle) is treated the same. */
+    Times[0] = B->CreationTime.QuadPart > 0 ? B->CreationTime.QuadPart : 0;
+    Times[1] = B->LastAccessTime.QuadPart > 0 ? B->LastAccessTime.QuadPart : 0;
+    Times[2] = B->LastWriteTime.QuadPart > 0 ? B->LastWriteTime.QuadPart : 0;
+    Times[3] = B->ChangeTime.QuadPart > 0 ? B->ChangeTime.QuadPart : 0;
+    if (B->LastWriteTime.QuadPart)
+        Fcb->UserSetWriteTime = TRUE;
+    if (B->FileAttributes)
+    {
+        if (Fcb->IsDirectory && (B->FileAttributes & FILE_ATTRIBUTE_TEMPORARY))
+            return STATUS_INVALID_PARAMETER;
+        Attrs = B->FileAttributes & ~(FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_DIRECTORY);
+        Mask = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE |
+               FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+    }
+    if (!Times[0] && !Times[1] && !Times[2] && !Times[3] && !Mask)
+        return STATUS_SUCCESS;
+    NgAcquireCore(Vcb);
+    Err = NgEnsureNode(Fcb);
+    if (!Err)
+        Err = ngc_set_info(Vcb->Core, Fcb->Node, Times, Attrs, Mask);
+    if (!Err)
+    {
+        ngc_stat(Fcb->Node, &Fcb->Stat);
+        NgAfterChange(Vcb);
+    }
+    NgReleaseCore(Vcb);
+    return Err ? NgErrnoToStatus(Err) : STATUS_SUCCESS;
+}
+
 NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
     PFILE_OBJECT FileObject = Stack->FileObject;
-    UNREFERENCED_PARAMETER(DeviceObject);
+    PNG_FCB Fcb = FileObject->FsContext;
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    FILE_INFORMATION_CLASS Class = Stack->Parameters.SetFile.FileInformationClass;
+    ULONG Length = Stack->Parameters.SetFile.Length;
+    PVOID Buffer = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS Status;
 
     /* Moving the file pointer is the only change that does not touch the volume. */
-    if (Stack->Parameters.SetFile.FileInformationClass == FilePositionInformation)
+    if (Class == FilePositionInformation)
     {
-        PFILE_POSITION_INFORMATION P = Irp->AssociatedIrp.SystemBuffer;
-        if (Stack->Parameters.SetFile.Length < sizeof(*P))
+        PFILE_POSITION_INFORMATION P = Buffer;
+        if (Length < sizeof(*P))
             return STATUS_INVALID_PARAMETER;
         FileObject->CurrentByteOffset = P->CurrentByteOffset;
         return STATUS_SUCCESS;
     }
-    return STATUS_MEDIA_WRITE_PROTECTED;
+    if (Vcb->ReadOnly)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    if (!Fcb || Fcb->IsVolume || !Fcb->HasNode)
+        return STATUS_INVALID_PARAMETER;
+
+    switch (Class)
+    {
+        case FileBasicInformation:
+            if (Length < sizeof(FILE_BASIC_INFORMATION))
+                return STATUS_INVALID_PARAMETER;
+            ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+            Status = NgSetBasic(Fcb, Buffer);
+            ExReleaseResourceLite(Fcb->Header.Resource);
+            return Status;
+        case FileEndOfFileInformation:
+        case FileAllocationInformation:
+        {
+            LONGLONG New = ((PLARGE_INTEGER)Buffer)->QuadPart;
+            if (Length < sizeof(LARGE_INTEGER))
+                return STATUS_INVALID_PARAMETER;
+            if (Fcb->IsDirectory)
+                return STATUS_INVALID_PARAMETER;
+            ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+            if (Class == FileEndOfFileInformation && Stack->Parameters.SetFile.AdvanceOnly)
+            {
+                /* Cc advancing the on-disk EOF/VDL: the core's size is already current. */
+                Status = STATUS_SUCCESS;
+            }
+            else if (Class == FileAllocationInformation && New >= Fcb->Header.FileSize.QuadPart)
+            {
+                /* Preallocation beyond EOF is not kept (allocation follows the file size). */
+                Status = STATUS_SUCCESS;
+            }
+            else
+            {
+                Status = NgSetFileSize(Fcb, FileObject, New);
+            }
+            ExReleaseResourceLite(Fcb->Header.Resource);
+            return Status;
+        }
+        case FileValidDataLengthInformation:
+            /* Valid data length is kept equal to the file size; bytes past the on-disk VDL read as zeros. */
+            return STATUS_SUCCESS;
+        default:
+            return STATUS_INVALID_PARAMETER;
+    }
 }
 
 NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -232,6 +319,12 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     if (DeviceObject == NgGlobal.ControlDevice)
         return STATUS_INVALID_DEVICE_REQUEST;
+    if (!Vcb->ReadOnly)
+    {
+        NgAcquireCore(Vcb);
+        ngc_volinfo(Vcb->Core, &Vcb->Info);
+        NgReleaseCore(Vcb);
+    }
     switch (Stack->Parameters.QueryVolume.FsInformationClass)
     {
         case FileFsVolumeInformation:
@@ -295,7 +388,7 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 return STATUS_BUFFER_TOO_SMALL;
             A->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
                                       FILE_NAMED_STREAMS | FILE_SUPPORTS_SPARSE_FILES |
-                                      FILE_FILE_COMPRESSION | FILE_READ_ONLY_VOLUME;
+                                      FILE_FILE_COMPRESSION | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
             A->MaximumComponentNameLength = 255;
             A->FileSystemNameLength = sizeof(Name) - sizeof(WCHAR);
             Copy = min(A->FileSystemNameLength, Length - Fixed);

@@ -1,0 +1,494 @@
+/*
+ * PROJECT:     ReactOS NTFS-NG file system driver
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     IRP_MJ_WRITE (cached, non-cached, paging), size changes, flush, shutdown,
+ *              Cc callbacks and the per-volume metadata flusher
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+#include "ntfsng.h"
+
+/*
+ * Lock order: FCB MainResource -> FCB PagingIoResource -> Vcb->CoreLock -> core mutexes.
+ * CoreLock is never held across a Cc or Mm call or while touching unlocked user memory, and
+ * paging I/O takes only CoreLock, so Cc's lazy writer and Mm's writers cannot deadlock with a
+ * user thread that holds FCB resources while it waits inside Cc.
+ */
+
+BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait)
+{
+    PNG_FCB Fcb = Context;
+    if (!ExAcquireResourceSharedLite(Fcb->Header.PagingIoResource, Wait))
+        return FALSE;
+    ASSERT(IoGetTopLevelIrp() == NULL);
+    IoSetTopLevelIrp((PIRP)FSRTL_CACHE_TOP_LEVEL_IRP);
+    return TRUE;
+}
+
+VOID NTAPI NgReleaseFromLazyWrite(PVOID Context)
+{
+    PNG_FCB Fcb = Context;
+    if (IoGetTopLevelIrp() == (PIRP)FSRTL_CACHE_TOP_LEVEL_IRP)
+        IoSetTopLevelIrp(NULL);
+    ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+}
+
+BOOLEAN NTAPI NgAcquireForReadAhead(PVOID Context, BOOLEAN Wait)
+{
+    PNG_FCB Fcb = Context;
+    if (!ExAcquireResourceSharedLite(Fcb->Header.Resource, Wait))
+        return FALSE;
+    ASSERT(IoGetTopLevelIrp() == NULL);
+    IoSetTopLevelIrp((PIRP)FSRTL_CACHE_TOP_LEVEL_IRP);
+    return TRUE;
+}
+
+VOID NTAPI NgReleaseFromReadAhead(PVOID Context)
+{
+    PNG_FCB Fcb = Context;
+    if (IoGetTopLevelIrp() == (PIRP)FSRTL_CACHE_TOP_LEVEL_IRP)
+        IoSetTopLevelIrp(NULL);
+    ExReleaseResourceLite(Fcb->Header.Resource);
+}
+
+/* Under CoreLock, after a change: once the system is shutting down, nothing stays unsynced. */
+VOID NgAfterChange(PNG_VCB Vcb)
+{
+    if (Vcb->WriteThrough)
+    {
+        int Err = ngc_sync(Vcb->Core);
+        Vcb->Syncs++;
+        if (Err)
+            DPRINT1("ntfsng: write-through sync failed %d\n", Err);
+    }
+}
+
+/* Header sizes from the core inode (caller holds CoreLock and the node). */
+static VOID NgSizesFromCore(PNG_FCB Fcb)
+{
+    LONGLONG Alloc;
+    ngc_stat(Fcb->Node, &Fcb->Stat);
+    Alloc = (Fcb->Stat.size + PAGE_SIZE - 1) & ~(LONGLONG)(PAGE_SIZE - 1);
+    if ((LONGLONG)Fcb->Stat.alloc > Alloc)
+        Alloc = Fcb->Stat.alloc;
+    Fcb->Header.AllocationSize.QuadPart = Alloc;
+    Fcb->Header.FileSize.QuadPart = Fcb->Stat.size;
+    Fcb->Header.ValidDataLength.QuadPart = Fcb->Stat.size;
+}
+
+/* Last write and change time to now plus the archive bit, once per modification burst. */
+VOID NgApplyModified(PNG_FCB Fcb)
+{
+    static const long long Now[4] = { 0, 0, -1, -1 };
+    static const long long ChangeOnly[4] = { 0, 0, 0, -1 };
+    PNG_VCB Vcb = Fcb->Vcb;
+    if (!Fcb->Modified || Vcb->ReadOnly || !Fcb->HasNode || Fcb->Deleted)
+        return;
+    Fcb->Modified = FALSE;
+    NgAcquireCore(Vcb);
+    if (!NgEnsureNode(Fcb))
+    {
+        ngc_set_info(Vcb->Core, Fcb->Node, Fcb->UserSetWriteTime ? ChangeOnly : Now,
+                     FILE_ATTRIBUTE_ARCHIVE, Fcb->IsDirectory ? 0 : FILE_ATTRIBUTE_ARCHIVE);
+        NgAfterChange(Vcb);
+        if (Fcb->OpenHandles == 0)
+            NgParkNode(Fcb);
+    }
+    NgReleaseCore(Vcb);
+}
+
+/*
+ * EOF change.  Caller holds MainResource exclusive.  Core first, then the header, then Cc.
+ * A shrink flushes Cc first so the core's on-disk view of the surviving bytes is current.
+ */
+NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
+{
+    PNG_VCB Vcb = Fcb->Vcb;
+    LONGLONG OldSize = Fcb->Header.FileSize.QuadPart;
+    LARGE_INTEGER Li;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status = STATUS_SUCCESS;
+    int Err;
+
+    if (NewSize < 0)
+        return STATUS_INVALID_PARAMETER;
+    if (NewSize == OldSize)
+        return STATUS_SUCCESS;
+    if (NewSize < OldSize)
+    {
+        Li.QuadPart = NewSize;
+        if (!MmCanFileBeTruncated(&Fcb->SectionObjectPointers, &Li))
+            return STATUS_USER_MAPPED_FILE;
+        if (Fcb->SectionObjectPointers.DataSectionObject)
+            CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &Iosb);
+    }
+    ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
+    NgAcquireCore(Vcb);
+    Err = NgEnsureNode(Fcb);
+    if (!Err)
+        Err = ngc_set_size(Vcb->Core, Fcb->Node, (unsigned long long)NewSize);
+    if (Fcb->Node)
+        NgSizesFromCore(Fcb);
+    if (!Err)
+        NgAfterChange(Vcb);
+    NgReleaseCore(Vcb);
+    ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+    if (Err)
+    {
+        DPRINT1("ntfsng: set size of %I64x to %I64d failed %d\n", Fcb->MftNo, NewSize, Err);
+        Status = Err == -NGC_ENOSPC ? STATUS_DISK_FULL : NgErrnoToStatus(Err);
+    }
+    if (FileObject && Fcb->SectionObjectPointers.SharedCacheMap)
+    {
+        _SEH2_TRY
+        {
+            CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+    if (NT_SUCCESS(Status))
+        Fcb->Modified = TRUE;
+    return Status;
+}
+
+/* Paging write from the lazy writer or Mm: no FCB resources here, only CoreLock. */
+static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offset, ULONG Length)
+{
+    LONGLONG FileSize = Fcb->Header.FileSize.QuadPart;
+    PVOID Buffer;
+    ULONG Clipped;
+    long Done = 0;
+
+    Irp->IoStatus.Information = Length;
+    if (Fcb->Deleted || Offset >= FileSize)
+        return STATUS_SUCCESS;
+    Clipped = (ULONG)min((LONGLONG)Length, FileSize - Offset);
+    Buffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, HighPagePriority);
+    if (!Buffer)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    NgAcquireCore(Vcb);
+    Done = NgEnsureNode(Fcb);
+    if (!Done)
+        Done = ngc_write(Vcb->Core, Fcb->Node, Offset, Clipped, Buffer);
+    if (Done >= 0)
+        NgAfterChange(Vcb);
+    if (Fcb->OpenHandles == 0)
+        NgParkNode(Fcb);
+    NgReleaseCore(Vcb);
+    if (Done < 0)
+    {
+        DPRINT1("ntfsng: paging write of %I64x at %I64d len %lu failed %ld\n", Fcb->MftNo, Offset, Clipped, Done);
+        Irp->IoStatus.Information = 0;
+        return Done == -NGC_EROFS ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_UNEXPECTED_IO_ERROR;
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    PNG_FCB Fcb = FileObject->FsContext;
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    LARGE_INTEGER Offset = Stack->Parameters.Write.ByteOffset;
+    ULONG Length = Stack->Parameters.Write.Length;
+    BOOLEAN Paging = (Irp->Flags & IRP_PAGING_IO) != 0;
+    BOOLEAN NonCached = (Irp->Flags & IRP_NOCACHE) != 0;
+    BOOLEAN WriteThrough = (FileObject->Flags & FO_WRITE_THROUGH) || (Stack->Flags & SL_WRITE_THROUGH);
+    BOOLEAN Append = (Offset.LowPart == FILE_WRITE_TO_END_OF_FILE && Offset.HighPart == -1);
+    PMDL LockedMdl = NULL;
+    PVOID Buffer;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status = STATUS_SUCCESS;
+    LONGLONG End;
+    long Done;
+    int Err;
+
+    if (Stack->MinorFunction & IRP_MN_MDL)
+        return STATUS_INVALID_DEVICE_REQUEST;
+    if (!Fcb || Fcb->IsVolume || Fcb->IsDirectory || !Fcb->HasNode)
+        return STATUS_INVALID_DEVICE_REQUEST;
+    if (Vcb->ReadOnly)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    if (Length == 0)
+        return STATUS_SUCCESS;
+    if (Paging)
+        return NgPagingWrite(Vcb, Fcb, Irp, Offset.QuadPart, Length);
+
+    if (Offset.LowPart == FILE_USE_FILE_POINTER_POSITION && Offset.HighPart == -1)
+        Offset = FileObject->CurrentByteOffset;
+    if (NonCached && !Append && ((Offset.LowPart | Length) & (Vcb->SectorSize - 1)))
+        return STATUS_INVALID_PARAMETER;
+
+    /* The user buffer: locked before any core call so no page fault can happen under CoreLock. */
+    if (Irp->MdlAddress)
+    {
+        Buffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+        if (!Buffer)
+            return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    else if (NonCached)
+    {
+        LockedMdl = IoAllocateMdl(Irp->UserBuffer, Length, FALSE, FALSE, NULL);
+        if (!LockedMdl)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        _SEH2_TRY
+        {
+            MmProbeAndLockPages(LockedMdl, Irp->RequestorMode, IoReadAccess);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status))
+        {
+            IoFreeMdl(LockedMdl);
+            return Status;
+        }
+        Buffer = MmGetSystemAddressForMdlSafe(LockedMdl, NormalPagePriority);
+        if (!Buffer)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto out_mdl;
+        }
+    }
+    else
+    {
+        Buffer = Irp->UserBuffer;
+    }
+
+    ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+    if (Append)
+        Offset.QuadPart = Fcb->Header.FileSize.QuadPart;
+    End = Offset.QuadPart + Length;
+    if (End > Fcb->Header.FileSize.QuadPart)
+    {
+        Status = NgSetFileSize(Fcb, FileObject, End);
+        if (!NT_SUCCESS(Status))
+            goto out_unlock;
+    }
+
+    if (!NonCached)
+    {
+        _SEH2_TRY
+        {
+            if (!FileObject->PrivateCacheMap)
+            {
+                CcInitializeCacheMap(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize, FALSE,
+                                     &NgGlobal.CacheCallbacks, Fcb);
+            }
+            if (!CcCopyWrite(FileObject, &Offset, Length, TRUE, Buffer))
+                Status = STATUS_UNSUCCESSFUL;
+            else if (WriteThrough)
+            {
+                CcFlushCache(FileObject->SectionObjectPointer, &Offset, Length, &Iosb);
+                Status = Iosb.Status;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+    else
+    {
+        /* Keep Cc from holding stale pages of the range we write around it. */
+        if (Fcb->SectionObjectPointers.DataSectionObject)
+        {
+            ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
+            CcFlushCache(&Fcb->SectionObjectPointers, &Offset, Length, &Iosb);
+            CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Offset, Length, FALSE);
+            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+        }
+        NgAcquireCore(Vcb);
+        Err = NgEnsureNode(Fcb);
+        Done = Err ? Err : ngc_write(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
+        if (Done >= 0)
+            NgAfterChange(Vcb);
+        NgReleaseCore(Vcb);
+        if (Done < 0)
+        {
+            DPRINT1("ntfsng: write of %I64x at %I64d len %lu failed %ld\n", Fcb->MftNo, Offset.QuadPart, Length, Done);
+            Status = Done == -NGC_EROFS ? STATUS_MEDIA_WRITE_PROTECTED :
+                     Done == -NGC_ENOSPC ? STATUS_DISK_FULL : STATUS_UNEXPECTED_IO_ERROR;
+        }
+    }
+    if (NT_SUCCESS(Status))
+    {
+        Irp->IoStatus.Information = Length;
+        Fcb->Modified = TRUE;
+        if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+            FileObject->CurrentByteOffset.QuadPart = Offset.QuadPart + Length;
+        FileObject->Flags |= FO_FILE_MODIFIED;
+    }
+out_unlock:
+    ExReleaseResourceLite(Fcb->Header.Resource);
+out_mdl:
+    if (LockedMdl)
+    {
+        MmUnlockPages(LockedMdl);
+        IoFreeMdl(LockedMdl);
+    }
+    return Status;
+}
+
+/* Flushes every cached stream of the volume through Cc, then the core metadata. */
+VOID NgFlushVolume(PNG_VCB Vcb)
+{
+    PLIST_ENTRY Entry;
+    PNG_FCB *List;
+    ULONG Count = 0, Cap = 0, i;
+    IO_STATUS_BLOCK Iosb;
+    int Err;
+
+    if (Vcb->ReadOnly)
+        return;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+        Cap++;
+    List = Cap ? ExAllocatePoolWithTag(NonPagedPool, Cap * sizeof(PNG_FCB), TAG_NTFSNG) : NULL;
+    if (List)
+    {
+        for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < Cap; Entry = Entry->Flink)
+        {
+            PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+            InterlockedIncrement(&Fcb->RefCount);
+            List[Count++] = Fcb;
+        }
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    for (i = 0; i < Count; i++)
+    {
+        PNG_FCB Fcb = List[i];
+        if (Fcb->SectionObjectPointers.DataSectionObject)
+        {
+            ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
+            CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &Iosb);
+            ExReleaseResourceLite(Fcb->Header.Resource);
+        }
+        NgApplyModified(Fcb);
+        NgDereferenceFcb(Fcb);
+    }
+    if (List)
+        ExFreePoolWithTag(List, TAG_NTFSNG);
+    NgAcquireCore(Vcb);
+    Err = ngc_sync(Vcb->Core);
+    Vcb->Syncs++;
+    NgReleaseCore(Vcb);
+    if (Err)
+        DPRINT1("ntfsng: volume sync failed %d\n", Err);
+}
+
+NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    IO_STATUS_BLOCK Iosb;
+    int Err;
+
+    if (!Fcb || Vcb->ReadOnly)
+        return STATUS_SUCCESS;
+    if (Fcb->IsVolume)
+    {
+        NgFlushVolume(Vcb);
+        return STATUS_SUCCESS;
+    }
+    Iosb.Status = STATUS_SUCCESS;
+    if (Fcb->SectionObjectPointers.DataSectionObject)
+    {
+        ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+        CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &Iosb);
+        ExReleaseResourceLite(Fcb->Header.Resource);
+    }
+    NgApplyModified(Fcb);
+    NgAcquireCore(Vcb);
+    Err = ngc_sync(Vcb->Core);
+    Vcb->Syncs++;
+    NgReleaseCore(Vcb);
+    if (Err)
+        return STATUS_UNEXPECTED_IO_ERROR;
+    return Iosb.Status;
+}
+
+/*
+ * ReactOS sends IRP_MJ_SHUTDOWN to file system control devices in IoShutdownSystem(1), after
+ * the registry and Cc have flushed.  The lazy writer may still run afterwards, so every later
+ * change is synced immediately (WriteThrough) and the volume ends clean.
+ */
+NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PLIST_ENTRY Entry;
+    PNG_VCB Vcbs[16];
+    ULONG Count = 0, i;
+    unsigned long Writes, Syncs, Dirties;
+    unsigned long long Bytes;
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+
+    /* Volumes are never dismounted, so the pointers stay valid outside the list lock. */
+    ExAcquireFastMutex(&NgGlobal.VcbListLock);
+    for (Entry = NgGlobal.VcbList.Flink; Entry != &NgGlobal.VcbList && Count < RTL_NUMBER_OF(Vcbs); Entry = Entry->Flink)
+        Vcbs[Count++] = CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks);
+    ExReleaseFastMutex(&NgGlobal.VcbListLock);
+    for (i = 0; i < Count; i++)
+    {
+        PNG_VCB Vcb = Vcbs[i];
+        if (Vcb->ReadOnly)
+            continue;
+        NgFlushVolume(Vcb);
+        Vcb->WriteThrough = TRUE;
+        NgAcquireCore(Vcb);
+        ngc_sync(Vcb->Core);
+        ngc_volinfo(Vcb->Core, &Vcb->Info);
+        NgReleaseCore(Vcb);
+        DPRINT1("ntfsng: shutdown: volume %08lx flushed, %s, %lu syncs\n", Vcb->Vpb->SerialNumber,
+                Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs);
+    }
+    ngc_write_stats(&Writes, &Bytes, &Syncs, &Dirties);
+    DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs, %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",
+            Writes, Bytes, Syncs, Dirties, NgGlobal.MaxStackUsed, NgGlobal.MaxStackMajor, NgGlobal.MaxStackAtIo);
+    return STATUS_SUCCESS;
+}
+
+/* Linux's flusher stand-in: writes back dirty core metadata every NG_FLUSH_PERIOD_MS. */
+static VOID NTAPI NgFlusherThread(PVOID Context)
+{
+    PNG_VCB Vcb = Context;
+    LARGE_INTEGER Period;
+    Period.QuadPart = -10000LL * NG_FLUSH_PERIOD_MS;
+    for (;;)
+    {
+        if (KeWaitForSingleObject(&Vcb->FlusherStop, Executive, KernelMode, FALSE, &Period) == STATUS_SUCCESS)
+            break;
+        NgAcquireCore(Vcb);
+        if (ngc_dirty(Vcb->Core))
+        {
+            int Err = ngc_sync(Vcb->Core);
+            Vcb->Syncs++;
+            if (Err)
+                DPRINT1("ntfsng: background sync failed %d\n", Err);
+        }
+        NgReleaseCore(Vcb);
+    }
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+NTSTATUS NgStartFlusher(PNG_VCB Vcb)
+{
+    HANDLE Thread;
+    NTSTATUS Status;
+    KeInitializeEvent(&Vcb->FlusherStop, NotificationEvent, FALSE);
+    Status = PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, NgFlusherThread, Vcb);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    ObReferenceObjectByHandle(Thread, THREAD_ALL_ACCESS, NULL, KernelMode, (PVOID *)&Vcb->Flusher, NULL);
+    ZwClose(Thread);
+    return STATUS_SUCCESS;
+}

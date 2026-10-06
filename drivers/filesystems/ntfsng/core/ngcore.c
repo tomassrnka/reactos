@@ -4,7 +4,8 @@
  * way Linux's VFS does (fs_context mount, inode_operations->lookup,
  * file_operations->iterate_shared, address_space->read_folio through the
  * shim page cache) and hands the NT glue plain C values.  No NTFS format
- * logic lives here.
+ * logic lives here: writes go through the core's own attribute, cluster
+ * allocation, index and MFT writeback functions, driven as the VFS would.
  */
 #include <kshim.h>
 #include "ntfs/ntfs.h"
@@ -12,6 +13,8 @@
 #include "ntfs/dir.h"
 #include "ntfs/inode.h"
 #include "ntfs/mft.h"
+#include "ntfs/logfile.h"
+#include "ntfs/lcnalloc.h"
 #include "ngapi.h"
 
 extern initcall_t kshim_module_init;
@@ -22,11 +25,21 @@ void kshim_bdev_close(struct block_device *b);
 void kshim_mapping_shrink(struct address_space *m);
 extern unsigned long kshim_pc_pages, kshim_inodes_live, kshim_counter_reads;
 void kshim_dump_allocs(void);
+int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
+int kshim_sync(struct super_block *sb);
+bool kshim_sb_dirty(struct super_block *sb);
+int kshim_mapping_writeback(struct address_space *m);
+void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, size_t len);
+extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_dirty;
+extern unsigned long long kshim_counter_write_bytes;
 
 struct ngc_vol {
 	struct super_block *sb;
 	struct block_device *bdev;
+	u8 *bounce;                     /* NGC_BOUNCE bytes of pool: device writes never touch caller memory */
 };
+
+#define NGC_BOUNCE (64 * 1024)
 
 static DEFINE_MUTEX(ngc_mount_lock);
 static int ngc_inited;
@@ -35,6 +48,49 @@ static int ngc_inited;
 static long long ts_to_nt(struct timespec64 t)
 {
 	return t.tv_sec * 10000000LL + t.tv_nsec / 100 + NT_EPOCH_DELTA;
+}
+static struct timespec64 nt_to_ts(long long nt)
+{
+	struct timespec64 t;
+	long long u = nt - NT_EPOCH_DELTA;
+	t.tv_sec = u / 10000000LL;
+	t.tv_nsec = (long)(u % 10000000LL) * 100;
+	if (t.tv_nsec < 0) {
+		t.tv_nsec += 1000000000L;
+		t.tv_sec--;
+	}
+	return t;
+}
+
+/* The core's own "remount-ro" error policy value, looked up by name. */
+static int ngc_on_errors_remount_ro(void)
+{
+	for (const struct option_t *o = on_errors_arr; o->str; o++)
+		if (!strcmp(o->str, "remount-ro"))
+			return o->val;
+	return 0;
+}
+
+/*
+ * The core never checks that $LogFile was shut down cleanly before it empties it on a
+ * read-write mount.  A restart area with a log client in use and without
+ * RESTART_VOLUME_IS_CLEAN means another driver left transactions behind: stay read-only.
+ */
+static int ngc_logfile_clean(struct ntfs_volume *vol)
+{
+	struct restart_page_header *rp = NULL;
+	struct restart_area *ra;
+	int clean;
+	if (!vol->logfile_ino)
+		return 0;
+	if (!ntfs_check_logfile(vol->logfile_ino, &rp))
+		return 0;
+	if (!rp)
+		return 1;	/* empty log */
+	ra = (struct restart_area *)((u8 *)rp + le16_to_cpu(rp->restart_area_offset));
+	clean = ra->client_in_use_list == LOGFILE_NO_CLIENT || (ra->flags & RESTART_VOLUME_IS_CLEAN);
+	kvfree(rp);
+	return clean;
 }
 
 int ngc_init(void)
@@ -50,11 +106,13 @@ int ngc_init(void)
 	return err;
 }
 
-int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, ngc_vol **out)
+int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, int want_rw,
+		ngc_vol **out, const char **why_ro)
 {
 	struct fs_context *fc;
 	struct block_device *b;
 	struct ngc_vol *v;
+	struct ntfs_volume *vol;
 	int err;
 
 	*out = NULL;
@@ -75,8 +133,13 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, ng
 	err = kshim_fs_type->init_fs_context(fc);
 	if (err)
 		goto fail;
+	vol = fc->s_fs_info;
 	/* NT name lookups are case-insensitive; the core defaults to case-sensitive. */
-	NVolClearCaseSensitive((struct ntfs_volume *)fc->s_fs_info);
+	NVolClearCaseSensitive(vol);
+	/* Errors turn the volume read-only instead of being ignored (the default "continue"). */
+	vol->on_errors = ngc_on_errors_remount_ro();
+	/* Growing a non-sparse file allocates real clusters, as NTFS does; holes only in sparse files. */
+	NVolSetDisableSparse(vol);
 	mutex_lock(&ngc_mount_lock);
 	kshim_mount_bdev = b;
 	err = fc->ops->get_tree(fc);
@@ -87,6 +150,45 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, ng
 	v->sb = fc->kshim_sb;
 	v->bdev = b;
 	b->bd_super = v->sb;
+	v->sb->s_flags |= SB_ACTIVE;
+	*why_ro = want_rw ? NULL : "read-only requested";
+	if (want_rw) {
+		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
+		if (NVolErrors(vol))
+			*why_ro = "the core found errors at mount (MFTMirr, $LogFile or hibernation)";
+		else if (vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK)
+			*why_ro = (vol->vol_flags & VOLUME_IS_DIRTY) ? "volume is marked dirty" :
+				"volume has flags that force read-only (chkdsk/upgrade/resize)";
+		else if (!ngc_logfile_clean(vol))
+			*why_ro = "$LogFile was not shut down cleanly";
+		if (!*why_ro) {
+			struct fs_context *rc = kzalloc(sizeof(*rc), GFP_KERNEL);
+			if (!rc) {
+				*why_ro = "out of memory";
+			} else {
+				rc->ops = fc->ops;
+				rc->fs_type = fc->fs_type;
+				rc->root = v->sb->s_root;
+				rc->purpose = FS_CONTEXT_FOR_RECONFIGURE;
+				rc->sb_flags = 0;
+				b->kshim_remounting = 1;
+				err = fc->ops->reconfigure(rc);
+				b->kshim_remounting = 0;
+				kfree(rc);
+				if (err)
+					*why_ro = "the core refused to remount read-write";
+				else
+					v->sb->s_flags &= ~SB_RDONLY;
+			}
+		}
+	}
+	if (!sb_rdonly(v->sb)) {
+		v->bounce = kmalloc(NGC_BOUNCE, GFP_KERNEL);
+		if (!v->bounce) {
+			v->sb->s_flags |= SB_RDONLY;
+			*why_ro = "out of memory";
+		}
+	}
 	if (fc->ops->free)
 		fc->ops->free(fc);
 	kfree(fc);
@@ -129,6 +231,8 @@ void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi)
 	vi->sector_size = vol->sector_size;
 	vi->major = vol->major_ver;
 	vi->minor = vol->minor_ver;
+	vi->read_only = sb_rdonly(v->sb) ? 1 : 0;
+	vi->dirty = (vol->vol_flags & VOLUME_IS_DIRTY) ? 1 : 0;
 	mutex_lock(&vol->volume_label_lock);
 	if (vol->volume_label) {
 		int n = utf8s_to_utf16s(vol->volume_label, strlen((char *)vol->volume_label),
@@ -176,6 +280,7 @@ int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned 
 	}
 	vi = r ? r->d_inode : d->d_inode;
 	kfree(u8name);
+	kfree(d->kshim_ci_name);
 	kfree(d);
 	if (!vi)
 		return -ENOENT;
@@ -412,3 +517,279 @@ void ngc_debug_dump(void)
 			kshim_pc_pages, kshim_inodes_live, kshim_counter_reads);
 	kshim_dump_allocs();
 }
+
+/* ------------------------------------------------------------------ write side */
+
+int ngc_is_rw(ngc_vol *v)
+{
+	return !sb_rdonly(v->sb);
+}
+
+/*
+ * Sets VOLUME_IS_DIRTY before the first change after a clean point, and puts it on disk
+ * (with a device flush) before the change proceeds, so a crash always leaves it behind.
+ */
+int ngc_mark_dirty(ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	int err;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (vol->vol_flags & VOLUME_IS_DIRTY)
+		return 0;
+	err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+	if (!err)
+		err = write_inode_now(vol->vol_ino, 1);
+	if (!err)
+		err = blkdev_issue_flush(v->bdev);
+	return err;
+}
+
+/*
+ * The flusher: writes back every dirty mapping and inode, then (when nothing is left and the
+ * core saw no error) clears VOLUME_IS_DIRTY, so the flag on disk means "unsynced changes".
+ */
+int ngc_sync(ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	int err;
+	if (sb_rdonly(v->sb))
+		return 0;
+	err = kshim_sync(v->sb);
+	if (!err)
+		err = blkdev_issue_flush(v->bdev);
+	if (!err && !NVolErrors(vol) && (vol->vol_flags & VOLUME_IS_DIRTY) && !kshim_sb_dirty(v->sb)) {
+		err = ntfs_clear_volume_flags(vol, VOLUME_IS_DIRTY);
+		if (!err)
+			err = kshim_sync(v->sb);
+		if (!err)
+			err = blkdev_issue_flush(v->bdev);
+	}
+	return err;
+}
+
+int ngc_dirty(ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	if (sb_rdonly(v->sb))
+		return 0;
+	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY);
+}
+
+static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len)
+{
+	while (len) {
+		size_t n = (size_t)min_t(u64, len, NGC_BOUNCE);
+		int err;
+		if (buf)
+			memcpy(v->bounce, buf, n);
+		else
+			memset(v->bounce, 0, n);
+		err = kshim_dev_rw(v->bdev, 1, off, v->bounce, n);
+		if (err)
+			return err;
+		off += n;
+		len -= n;
+		if (buf)
+			buf += n;
+	}
+	return 0;
+}
+
+/* Writes [pos, pos+len) of a non-resident attribute in place; buf NULL writes zeros. */
+static int ngc_nr_write(struct ngc_vol *v, struct inode *vi, u64 pos, u64 len, const u8 *buf)
+{
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct ntfs_volume *vol = ni->vol;
+	u32 bits = vol->cluster_size_bits;
+	u64 cs = vol->cluster_size;
+	while (len) {
+		s64 vcn = pos >> bits, lcn = 0, cnt = 0;
+		u64 vofs = pos & (cs - 1), n, dev;
+		s64 maxc = (s64)((vofs + len + cs - 1) >> bits);
+		bool balloc = false;
+		int err;
+		mutex_lock(&ni->mrec_lock);
+		down_write(&ni->runlist.lock);
+		err = ntfs_attr_map_cluster(ni, vcn, &lcn, &cnt, maxc, &balloc, true, false);
+		up_write(&ni->runlist.lock);
+		mutex_unlock(&ni->mrec_lock);
+		if (err)
+			return err;
+		if (lcn < 0 || cnt <= 0)
+			return -EIO;
+		n = min_t(u64, len, ((u64)cnt << bits) - vofs);
+		dev = ((u64)lcn << bits) + vofs;
+		if (balloc) {
+			/* Fresh clusters for a hole: zero what this write does not cover. */
+			u64 first = (u64)lcn << bits, end = vofs + n;
+			u64 last = (u64)lcn << bits;
+			last += (end + cs - 1) & ~(cs - 1);
+			if (vofs && (err = ngc_dev_write(v, first, NULL, vofs)))
+				return err;
+			if (dev + n < last && (err = ngc_dev_write(v, dev + n, NULL, last - (dev + n))))
+				return err;
+		}
+		err = ngc_dev_write(v, dev, buf, n);
+		if (err)
+			return err;
+		pos += n;
+		len -= n;
+		if (buf)
+			buf += n;
+	}
+	return 0;
+}
+
+static int ngc_res_write(struct inode *vi, u64 pos, u64 len, const u8 *buf)
+{
+	struct ntfs_inode *ni = NTFS_I(vi), *base = NInoAttr(ni) ? ni->ext.base_ntfs_ino : ni;
+	struct ntfs_attr_search_ctx *ctx;
+	int err;
+	mutex_lock(&base->mrec_lock);
+	ctx = ntfs_attr_get_search_ctx(base, NULL);
+	if (!ctx) {
+		mutex_unlock(&base->mrec_lock);
+		return -ENOMEM;
+	}
+	err = ntfs_attr_lookup(ni->type, ni->name, ni->name_len, CASE_SENSITIVE, 0, NULL, 0, ctx);
+	if (!err) {
+		u8 *val = (u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset);
+		u32 vlen = le32_to_cpu(ctx->attr->data.resident.value_length);
+		if (ctx->attr->non_resident || pos + len > vlen) {
+			err = -EIO;
+		} else {
+			memcpy(val + pos, buf, len);
+			mark_mft_record_dirty(ctx->ntfs_ino);
+		}
+	}
+	ntfs_attr_put_search_ctx(ctx);
+	mutex_unlock(&base->mrec_lock);
+	return err;
+}
+
+/*
+ * The NT data path (non-cached and paging writes): in-place write of [off, off+len) clipped to
+ * the stream size.  Returns the bytes written (0 past EOF) or <0.
+ */
+long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	loff_t size = i_size_read(vi);
+	u64 end;
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if ((loff_t)off >= size || !len)
+		return 0;
+	if (off + len > (u64)size)
+		len = (unsigned int)(size - off);
+	end = off + len;
+	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni))
+		return -EOPNOTSUPP;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	if (!NInoNonResident(ni)) {
+		err = ngc_res_write(vi, off, len, buf);
+	} else {
+		loff_t init = ni->initialized_size;
+		if ((loff_t)off > init)
+			err = ngc_nr_write(v, vi, init, off - init, NULL);
+		if (!err)
+			err = ngc_nr_write(v, vi, off, len, buf);
+		if (!err && (loff_t)end > ni->initialized_size) {
+			mutex_lock(&ni->mrec_lock);
+			err = ntfs_attr_set_initialized_size(ni, end);
+			mutex_unlock(&ni->mrec_lock);
+		}
+	}
+	if (err)
+		return err;
+	kshim_mapping_update(vi->i_mapping, off, buf, len);
+	return len;
+}
+
+/* EOF change through the core (resident resize, conversion to non-resident, expand, shrink). */
+int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	loff_t old = i_size_read(vi);
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if ((loff_t)newsize == old)
+		return 0;
+	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni))
+		return -EOPNOTSUPP;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	if ((loff_t)newsize > old) {
+		mutex_lock(&ni->mrec_lock);
+		err = ntfs_attr_expand(ni, newsize, 0);
+		mutex_unlock(&ni->mrec_lock);
+	} else {
+		truncate_setsize(vi, newsize);
+		err = ntfs_truncate_vfs(vi, newsize, old);
+		if (err)
+			i_size_write(vi, old);
+	}
+	/* A resident->non-resident conversion left the old value in a dirty page-0 folio. */
+	if (kshim_mapping_writeback(vi->i_mapping) && !err)
+		err = -EIO;
+	mark_inode_dirty(VFS_I(NInoAttr(ni) ? ni->ext.base_ntfs_ino : ni));
+	return err;
+}
+
+#define NGC_SETTABLE_ATTRS (FILE_ATTR_READONLY | FILE_ATTR_HIDDEN | FILE_ATTR_SYSTEM | FILE_ATTR_ARCHIVE | \
+			    FILE_ATTR_TEMPORARY | FILE_ATTR_OFFLINE | FILE_ATTR_NOT_CONTENT_INDEXED)
+
+/*
+ * Times (NT format; 0 keeps a time, -1 means "now") and $STANDARD_INFORMATION attributes
+ * (attrs_mask selects which settable bits change).  Written back by write_inode.
+ */
+int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct timespec64 now = current_time(vi), t;
+	int err;
+
+	if (NInoAttr(ni)) {
+		ni = ni->ext.base_ntfs_ino;
+		vi = VFS_I(ni);
+	}
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	if (times) {
+#define NGC_T(x) (t = (x) == -1 ? now : nt_to_ts(x))
+		if (times[0]) ni->i_crtime = NGC_T(times[0]);
+		if (times[1]) inode_set_atime_to_ts(vi, NGC_T(times[1]));
+		if (times[2]) inode_set_mtime_to_ts(vi, NGC_T(times[2]));
+		if (times[3]) inode_set_ctime_to_ts(vi, NGC_T(times[3]));
+#undef NGC_T
+	}
+	attrs_mask &= le32_to_cpu(NGC_SETTABLE_ATTRS);
+	if (attrs_mask)
+		ni->flags = (ni->flags & ~cpu_to_le32(attrs_mask)) | cpu_to_le32(attrs & attrs_mask);
+	NInoSetFileNameDirty(ni);
+	mark_inode_dirty(vi);
+	return 0;
+}
+
+void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *dirties)
+{
+	*writes = kshim_counter_writes;
+	*bytes = kshim_counter_write_bytes;
+	*syncs = kshim_counter_syncs;
+	*dirties = kshim_counter_dirty;
+}
+

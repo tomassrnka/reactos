@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS NTFS-NG file system driver
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     NT glue around the vendored Linux fs/ntfs core (read-only prototype)
+ * PURPOSE:     NT glue around the vendored Linux fs/ntfs core
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -38,7 +38,15 @@ typedef struct _NG_VCB
     struct _NG_FCB *VolumeFcb;
     struct ngc_volinfo Info;
     ULONG SectorSize;
+    BOOLEAN ReadOnly;               /* mounted read-only: policy, registry or request */
+    BOOLEAN WriteThrough;           /* after IRP_MJ_SHUTDOWN: every change ends with a full sync */
+    LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
+    PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
+    KEVENT FlusherStop;
+    ULONG Syncs;
 } NG_VCB, *PNG_VCB;
+
+#define NG_FLUSH_PERIOD_MS 2000
 
 /* File control block: one per (MFT record, stream) open on a volume. */
 typedef struct _NG_FCB
@@ -58,6 +66,10 @@ typedef struct _NG_FCB
     BOOLEAN IsVolume;
     BOOLEAN IsDirectory;
     BOOLEAN IsRoot;
+    BOOLEAN Modified;               /* data changed since the last time update (cleanup/flush) */
+    BOOLEAN UserSetWriteTime;       /* LastWriteTime set through FileBasicInformation: keep it */
+    BOOLEAN DeletePending;          /* unlink at the last cleanup */
+    BOOLEAN Deleted;                /* unlinked: paging writes are dropped */
     ULONGLONG MftNo;
     UNICODE_STRING Stream;          /* empty for the unnamed $DATA */
     WCHAR StreamBuffer[256];
@@ -96,6 +108,9 @@ typedef struct _NG_GLOBAL
     LONG FcbLive;
     LONG Opens;
     ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
+    ULONG ForceReadOnly;            /* "ReadOnly" DWORD in the service key: mount every volume read-only */
+    FAST_MUTEX VcbListLock;
+    LIST_ENTRY VcbList;
 } NG_GLOBAL;
 
 extern NG_GLOBAL NgGlobal;
@@ -119,11 +134,26 @@ NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
 /* create.c */
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
 NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgClose(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
 /* read.c */
 NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
+/* write.c */
+NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
+VOID NgFlushVolume(PNG_VCB Vcb);
+VOID NgAfterChange(PNG_VCB Vcb);
+VOID NgApplyModified(PNG_FCB Fcb);
+NTSTATUS NgStartFlusher(PNG_VCB Vcb);
+BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait);
+VOID NTAPI NgReleaseFromLazyWrite(PVOID Context);
+BOOLEAN NTAPI NgAcquireForReadAhead(PVOID Context, BOOLEAN Wait);
+VOID NTAPI NgReleaseFromReadAhead(PVOID Context);
 
 /* dirctl.c */
 NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);

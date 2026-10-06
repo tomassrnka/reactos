@@ -20,6 +20,12 @@ typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
 #define NGC_ENAMETOOLONG 36
 #define NGC_EOPNOTSUPP 95
 #define NGC_EUCLEAN 117
+#define NGC_ENOSPC 28
+#define NGC_EEXIST 17
+#define NGC_ENOTEMPTY 39
+#define NGC_EACCES 13
+#define NGC_EPERM 1
+#define NGC_EFBIG 27
 
 #define NGC_ATTR_COMPRESSED 1
 #define NGC_ATTR_SPARSE 2
@@ -46,6 +52,8 @@ struct ngc_volinfo {
 	unsigned int label_len;          /* in UTF-16 units */
 	unsigned short label[64];
 	unsigned char major, minor;
+	unsigned char read_only;         /* mounted read-only (policy or request) */
+	unsigned char dirty;             /* VOLUME_IS_DIRTY currently set */
 };
 
 typedef int (*ngc_filldir_t)(void *ctx, const unsigned short *name, unsigned int len,
@@ -54,7 +62,9 @@ typedef int (*ngc_stream_t)(void *ctx, const unsigned short *name, unsigned int 
 		unsigned long long size, unsigned long long alloc);
 
 int ngc_init(void);
-int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, ngc_vol **out);
+/* Mounts; with want_rw the volume goes read-write unless policy refuses (*why_ro says why). */
+int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, int want_rw,
+		ngc_vol **out, const char **why_ro);
 void ngc_umount(ngc_vol *v);
 void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi);
 ngc_node *ngc_root(ngc_vol *v);
@@ -70,6 +80,15 @@ long ngc_read(ngc_node *n, unsigned long long off, unsigned int len, void *buf, 
 void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads);
 /* Drops the clean, unreferenced shim page-cache pages of a node. */
 void ngc_trim(ngc_node *n);
+/* Write side (all under the caller's volume lock). */
+int ngc_is_rw(ngc_vol *v);
+int ngc_mark_dirty(ngc_vol *v);
+int ngc_sync(ngc_vol *v);
+int ngc_dirty(ngc_vol *v);
+long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf);
+int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize);
+int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask);
+void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *dirties);
 /* Prints shim memory accounting (live allocations by call site, cache pages, inodes). */
 void ngc_debug_dump(void);
 

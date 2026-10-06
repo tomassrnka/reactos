@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS NTFS-NG file system driver
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Driver entry, dispatch, FCB lifetime, read-only refusals
+ * PURPOSE:     Driver entry, dispatch, FCB lifetime
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -23,6 +23,12 @@ NTSTATUS NgErrnoToStatus(int Err)
         case NGC_EROFS: return STATUS_MEDIA_WRITE_PROTECTED;
         case NGC_ENAMETOOLONG: return STATUS_OBJECT_NAME_INVALID;
         case NGC_EOPNOTSUPP: return STATUS_NOT_SUPPORTED;
+        case NGC_ENOSPC: return STATUS_DISK_FULL;
+        case NGC_EEXIST: return STATUS_OBJECT_NAME_COLLISION;
+        case NGC_ENOTEMPTY: return STATUS_DIRECTORY_NOT_EMPTY;
+        case NGC_EACCES:
+        case NGC_EPERM: return STATUS_ACCESS_DENIED;
+        case NGC_EFBIG: return STATUS_DISK_FULL;
         case NGC_EINVAL:
         case NGC_EUCLEAN: return STATUS_FILE_CORRUPT_ERROR;
         default: return STATUS_UNEXPECTED_IO_ERROR;
@@ -99,11 +105,11 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
     RtlZeroMemory(Fcb, sizeof(*Fcb));
     Fcb->Header.NodeTypeCode = NG_NODE_FCB;
     Fcb->Header.NodeByteSize = sizeof(NG_FCB);
-    Fcb->Header.IsFastIoPossible = FastIoIsPossible;
     Fcb->Header.Resource = &Fcb->MainResource;
     Fcb->Header.PagingIoResource = &Fcb->PagingIoResource;
     ExInitializeResourceLite(&Fcb->MainResource);
     ExInitializeResourceLite(&Fcb->PagingIoResource);
+    Fcb->Header.IsFastIoPossible = FastIoIsPossible;
     Fcb->Vcb = Vcb;
     Fcb->RefCount = 1;
     InterlockedIncrement(&NgGlobal.FcbLive);
@@ -196,31 +202,12 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
     ExFreePoolWithTag(Fcb, TAG_NTFSNG);
 }
 
-/* Cc callbacks: reads only, the core lock is taken inside the paging read itself. */
-static BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait)
-{
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Wait);
-    return TRUE;
-}
-
-static VOID NTAPI NgReleaseFromLazyWrite(PVOID Context)
-{
-    UNREFERENCED_PARAMETER(Context);
-}
-
+/* EA, volume label and security writes are not implemented. */
 static NTSTATUS NgRefuseWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DeviceObject);
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
     UNREFERENCED_PARAMETER(Irp);
-    return STATUS_MEDIA_WRITE_PROTECTED;
-}
-
-static NTSTATUS NgFlush(PDEVICE_OBJECT DeviceObject, PIRP Irp)
-{
-    UNREFERENCED_PARAMETER(DeviceObject);
-    UNREFERENCED_PARAMETER(Irp);
-    return STATUS_SUCCESS;
+    return Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_INVALID_DEVICE_REQUEST;
 }
 
 static NTSTATUS NgUnsupported(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -298,8 +285,11 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (DeviceObject == NgGlobal.ControlDevice && Major != IRP_MJ_FILE_SYSTEM_CONTROL)
     {
         /* The control device only accepts opens/closes and mount requests. */
-        Status = (Major == IRP_MJ_CREATE || Major == IRP_MJ_CLEANUP || Major == IRP_MJ_CLOSE)
-                 ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_REQUEST;
+        if (Major == IRP_MJ_SHUTDOWN)
+            Status = NgShutdown(DeviceObject, Irp);
+        else
+            Status = (Major == IRP_MJ_CREATE || Major == IRP_MJ_CLEANUP || Major == IRP_MJ_CLOSE)
+                     ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_REQUEST;
         if (Major == IRP_MJ_CREATE)
             Irp->IoStatus.Information = FILE_OPENED;
     }
@@ -309,6 +299,7 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Status = NgDeviceControl(DeviceObject, Irp);
         goto out;
     }
+
     else
     {
         Status = NgHandlers[Major](DeviceObject, Irp);
@@ -359,8 +350,12 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     ULONG i;
     int Err;
 
-    DPRINT1("ntfsng: read-only NTFS on the Linux fs/ntfs core (v7.3-rc6), loading\n");
+    DPRINT1("ntfsng: NTFS on the Linux fs/ntfs core (v7.3-rc6), loading\n");
+    ExInitializeFastMutex(&NgGlobal.VcbListLock);
+    InitializeListHead(&NgGlobal.VcbList);
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
+    NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
+    DPRINT1("ntfsng: ReadOnly=%lu\n", NgGlobal.ForceReadOnly);
     DPRINT1("ntfsng: service key %wZ, PermissiveOpen=%lu%s\n", RegistryPath, NgGlobal.PermissiveOpen,
             NgGlobal.PermissiveOpen ? " (opens with write access are granted, modifications are still refused)" : "");
 
@@ -387,13 +382,14 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgHandlers[IRP_MJ_CLEANUP] = NgCleanup;
     NgHandlers[IRP_MJ_CLOSE] = NgClose;
     NgHandlers[IRP_MJ_READ] = NgRead;
-    NgHandlers[IRP_MJ_WRITE] = NgRefuseWrite;
+    NgHandlers[IRP_MJ_WRITE] = NgWrite;
     NgHandlers[IRP_MJ_QUERY_INFORMATION] = NgQueryInformation;
     NgHandlers[IRP_MJ_SET_INFORMATION] = NgSetInformation;
     NgHandlers[IRP_MJ_SET_EA] = NgRefuseWrite;
     NgHandlers[IRP_MJ_SET_VOLUME_INFORMATION] = NgRefuseWrite;
     NgHandlers[IRP_MJ_SET_SECURITY] = NgRefuseWrite;
-    NgHandlers[IRP_MJ_FLUSH_BUFFERS] = NgFlush;
+    NgHandlers[IRP_MJ_FLUSH_BUFFERS] = NgFlushBuffers;
+    NgHandlers[IRP_MJ_SHUTDOWN] = NgShutdown;
     NgHandlers[IRP_MJ_QUERY_VOLUME_INFORMATION] = NgQueryVolumeInformation;
     NgHandlers[IRP_MJ_DIRECTORY_CONTROL] = NgDirectoryControl;
     NgHandlers[IRP_MJ_FILE_SYSTEM_CONTROL] = NgFileSystemControl;
@@ -407,8 +403,8 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
 
     NgGlobal.CacheCallbacks.AcquireForLazyWrite = NgAcquireForLazyWrite;
     NgGlobal.CacheCallbacks.ReleaseFromLazyWrite = NgReleaseFromLazyWrite;
-    NgGlobal.CacheCallbacks.AcquireForReadAhead = NgAcquireForLazyWrite;
-    NgGlobal.CacheCallbacks.ReleaseFromReadAhead = NgReleaseFromLazyWrite;
+    NgGlobal.CacheCallbacks.AcquireForReadAhead = NgAcquireForReadAhead;
+    NgGlobal.CacheCallbacks.ReleaseFromReadAhead = NgReleaseFromReadAhead;
 
     NgGlobal.ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
     IoRegisterFileSystem(NgGlobal.ControlDevice);

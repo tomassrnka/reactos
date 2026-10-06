@@ -1,4 +1,4 @@
-# NTFS-NG: read-only NTFS on the vendored, unmodified Linux fs/ntfs core
+# NTFS-NG: NTFS on the vendored, unmodified Linux fs/ntfs core
 # (torvalds/linux v7.3-rc6, a90ee4305c4a5df72c11b31dacfdc76e00fcf78a) behind a Linux-API shim.
 
 list(APPEND CORE_SOURCE
@@ -47,6 +47,7 @@ list(APPEND NT_SOURCE
     nt/ngos_nt.c
     nt/ntfsng.c
     nt/read.c
+    nt/write.c
     nt/ntfsng.h)
 
 # The Linux core and the shim see only the shim headers (no NT header), as GNU C11,

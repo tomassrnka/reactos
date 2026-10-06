@@ -183,7 +183,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
             return STATUS_MEDIA_WRITE_PROTECTED;
-        if ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen)
+        if ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen && Vcb->ReadOnly)
             return STATUS_MEDIA_WRITE_PROTECTED;
         return NgOpenVolume(Vcb, FileObject, Stack);
     }
@@ -288,7 +288,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         /* Only FILE_OPEN and FILE_OVERWRITE fail on a missing file; the others would create it. */
         if (Status == STATUS_OBJECT_NAME_NOT_FOUND && Disposition != FILE_OPEN && Disposition != FILE_OVERWRITE)
-            Status = STATUS_MEDIA_WRITE_PROTECTED;
+            Status = Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_ACCESS_DENIED;
         goto out;
     }
     if (Disposition == FILE_CREATE)
@@ -297,9 +297,9 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         goto out;
     }
     if ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) || (Options & FILE_DELETE_ON_CLOSE) ||
-        ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen))
+        ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen && Vcb->ReadOnly))
     {
-        Status = STATUS_MEDIA_WRITE_PROTECTED;
+        Status = Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_ACCESS_DENIED;
         goto out;
     }
 
@@ -404,6 +404,9 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExReleaseFastMutex(&Fcb->Vcb->FcbListLock);
     if (!Fcb->IsDirectory && !Fcb->IsVolume)
         CcUninitializeCacheMap(FileObject, NULL, NULL);
+    /* NTFS updates the last write time when a modified handle is cleaned up. */
+    if (Fcb->Modified && Fcb->HasNode)
+        NgApplyModified(Fcb);
     /* Mm may keep this FCB alive long after the last handle: park the core inode (see NgEnsureNode). */
     if (Last && Fcb->HasNode)
     {

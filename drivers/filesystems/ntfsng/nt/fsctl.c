@@ -42,6 +42,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ULONG SectorSize = 512, i;
     ULONGLONG Size = 0;
     NTSTATUS Status;
+    const char *WhyRo = NULL;
     int Err;
 
     if (DeviceObject != NgGlobal.ControlDevice)
@@ -91,7 +92,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vdo->SectorSize = (USHORT)SectorSize;
 
     NgAcquireCore(Vcb);
-    Err = ngc_mount(Target, Size, SectorSize, &Vcb->Core);
+    Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly, &Vcb->Core, &WhyRo);
     if (!Err)
         ngc_volinfo(Vcb->Core, &Vcb->Info);
     NgReleaseCore(Vcb);
@@ -108,22 +109,70 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vpb->VolumeLabelLength = (USHORT)(min(Vcb->Info.label_len, MAXIMUM_VOLUME_LABEL_LENGTH / sizeof(WCHAR)) * sizeof(WCHAR));
     for (i = 0; i < Vpb->VolumeLabelLength / sizeof(WCHAR); i++)
         Vpb->VolumeLabel[i] = Vcb->Info.label[i];
+    Vcb->ReadOnly = Vcb->Info.read_only ? TRUE : FALSE;
+    if (!Vcb->ReadOnly && !NT_SUCCESS(NgStartFlusher(Vcb)))
+    {
+        DPRINT1("ntfsng: no flusher thread, mounting read-only\n");
+        Vcb->ReadOnly = TRUE;
+    }
+    ExAcquireFastMutex(&NgGlobal.VcbListLock);
+    InsertTailList(&NgGlobal.VcbList, &Vcb->GlobalLinks);
+    ExReleaseFastMutex(&NgGlobal.VcbListLock);
     Vdo->Flags &= ~DO_DEVICE_INITIALIZING;
 
-    DPRINT1("ntfsng: mounted NTFS %u.%u size %I64u, sector %lu, cluster %u, %I64u clusters (%I64u free), serial %08lx\n",
+    DPRINT1("ntfsng: mounted NTFS %u.%u size %I64u, sector %lu, cluster %u, %I64u clusters (%I64u free), serial %08lx, %s%s%s\n",
             Vcb->Info.major, Vcb->Info.minor, Size, SectorSize, Vcb->Info.cluster_size,
-            Vcb->Info.total_clusters, Vcb->Info.free_clusters, Vpb->SerialNumber);
+            Vcb->Info.total_clusters, Vcb->Info.free_clusters, Vpb->SerialNumber,
+            Vcb->ReadOnly ? "READ-ONLY" : "read-write", WhyRo ? ": " : "", WhyRo ? WhyRo : "");
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
-    UNREFERENCED_PARAMETER(DeviceObject);
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
     switch (Stack->Parameters.FileSystemControl.FsControlCode)
     {
         case FSCTL_IS_VOLUME_MOUNTED:
             return STATUS_SUCCESS;
+        case FSCTL_SET_COMPRESSION:
+        {
+            /* Turning compression off on an uncompressed stream is a no-op (the registry asks). */
+            PUSHORT Format = Irp->AssociatedIrp.SystemBuffer;
+            if (Vcb->ReadOnly)
+                return STATUS_MEDIA_WRITE_PROTECTED;
+            if (!Format || Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(USHORT))
+                return STATUS_INVALID_PARAMETER;
+            if (*Format == COMPRESSION_FORMAT_NONE && Fcb && !(Fcb->Stat.flags & NGC_ATTR_COMPRESSED))
+                return STATUS_SUCCESS;
+            return STATUS_NOT_SUPPORTED;
+        }
+        case FSCTL_GET_COMPRESSION:
+        {
+            PUSHORT Format = Irp->AssociatedIrp.SystemBuffer;
+            if (!Format || Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(USHORT))
+                return STATUS_BUFFER_TOO_SMALL;
+            *Format = (Fcb && (Fcb->Stat.flags & NGC_ATTR_COMPRESSED)) ? COMPRESSION_FORMAT_LZNT1 : COMPRESSION_FORMAT_NONE;
+            Irp->IoStatus.Information = sizeof(USHORT);
+            return STATUS_SUCCESS;
+        }
+        case FSCTL_MARK_AS_SYSTEM_HIVE:
+            /* Advisory: the driver never dismounts a volume with open hives anyway. */
+            return STATUS_SUCCESS;
+        case FSCTL_IS_VOLUME_DIRTY:
+        {
+            PULONG Out = Irp->AssociatedIrp.SystemBuffer;
+            if (!Out || Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONG))
+                return STATUS_INVALID_PARAMETER;
+            NgAcquireCore(Vcb);
+            ngc_volinfo(Vcb->Core, &Vcb->Info);
+            NgReleaseCore(Vcb);
+            *Out = Vcb->Info.dirty ? VOLUME_IS_DIRTY : 0;
+            Irp->IoStatus.Information = sizeof(ULONG);
+            return STATUS_SUCCESS;
+        }
         case FSCTL_LOCK_VOLUME:
         case FSCTL_UNLOCK_VOLUME:
         case FSCTL_DISMOUNT_VOLUME:
