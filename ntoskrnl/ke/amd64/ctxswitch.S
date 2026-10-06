@@ -13,6 +13,14 @@
 #include <trapamd64.inc>
 
 /*
+ * VOID
+ * KiSwapContextSuspend(
+ *    _In_ PKTHREAD OldThread,
+ *    _In_ PKTHREAD NewThread)
+ */
+EXTERN KiSwapContextSuspend:PROC
+
+/*
  * BOOLEAN
  * KiSwapContextResume(
  *    _In_ KIRQL WaitIrql,
@@ -176,26 +184,74 @@ PUBLIC KiUserThreadStartupExit
     .allocstack (6 * 8)
     .endprolog
 
-    /* Wait for SwapBusy */
-.SwapBusySet:
-    cmp byte ptr [r8 + ThSwapBusy], 0
-    je .SwapBusyClear
-    pause
-    jmp .SwapBusySet
-.SwapBusyClear:
-
     /* Save WaitIrql as KSWITCH_FRAME::ApcBypass */
     mov [rsp + SwApcBypass], cl
 
-    /* Save kernel stack of old thread */
-    mov [rdx + KTHREAD_KernelStack], rsp
+    /* KiSwapContext saved the non-volatile registers, keep the threads there */
+    mov rbx, rdx
+    mov rsi, r8
 
+    /* Finish with the old thread while still on its stack */
+    mov rcx, rbx
+    mov rdx, rsi
+    call KiSwapContextSuspend
+
+    /*
+     * The old thread may resume on another processor as soon as its swap
+     * busy flag is clear, so from here on its stack is not used. Interrupts
+     * stay disabled until this processor runs on another stack; NMIs, double
+     * faults and machine checks switch to their own IST stacks. Releasing the
+     * old thread before waiting for the new one keeps two processors that
+     * exchange threads from waiting for each other.
+     */
+    cli
+    mov [rbx + KTHREAD_KernelStack], rsp
+    mov byte ptr [rbx + ThSwapBusy], 0
+
+    /* Usually the processor that last ran the new thread has left its stack */
+    cmp byte ptr [rsi + ThSwapBusy], 0
+    je .SwapBusyClear
+
+    /*
+     * Otherwise wait on the DPC stack, which is idle during a switch, with
+     * interrupts enabled: that processor may be waiting for this one to serve
+     * an IPI. Every switch runs at DISPATCH_LEVEL or above, so no DPC runs on
+     * that stack meanwhile.
+     */
+    mov rax, gs:[PcCurrentPrcb]
+    mov rax, [rax + PbDpcStack]
+    test rax, rax
+    jz .SwapBusySpin
+
+    /* Leave a frame with a null return address, so stack walks end here */
+    sub rax, 8 * 8
+    mov qword ptr [rax + 6 * 8], 0
+    mov qword ptr [rax + 7 * 8], 0
+    mov rsp, rax
+    sti
+.SwapBusyWait:
+    pause
+    cmp byte ptr [rsi + ThSwapBusy], 0
+    jne .SwapBusyWait
+    cli
+    jmp .SwapBusyClear
+
+    /* No DPC stack yet: early in boot nothing sends IPIs */
+.SwapBusySpin:
+    pause
+    cmp byte ptr [rsi + ThSwapBusy], 0
+    jne .SwapBusySpin
+
+.SwapBusyClear:
     /* Load stack of new thread */
-    mov rsp, [r8 + KTHREAD_KernelStack]
+    mov rsp, [rsi + KTHREAD_KernelStack]
 
     /* Reload APC bypass */
     mov cl, [rsp + SwApcBypass]
 
+    /* Finish the switch on the new stack; this enables interrupts */
+    mov rdx, rbx
+    mov r8, rsi
     call KiSwapContextResume
 
     /* Cleanup and return */
