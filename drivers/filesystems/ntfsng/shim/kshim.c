@@ -4,7 +4,8 @@
  * fs/ntfs read path calls, ported from the user-mode spike shim.  Memory is
  * nonpaged pool, locks are NT dispatcher objects and spin locks, block I/O
  * is IRP-based, all through ngos.h.  The writeback side (writeback_iter,
- * iomap_writepages, write_inode_now, the volume sync loop) is in kshim_wb.c.
+ * write_inode_now, the volume sync loop) is in kshim_wb.c, the iomap services
+ * in kshim_iomap.c.
  * APIs only reached from mmap, ioctl or VFS paths the NT glue never drives
  * are generated into kshim_stubs.c and stop the system with their name.
  */
@@ -847,142 +848,7 @@ void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, 
 	}
 }
 
-/* ------------------------------------------------------------------ iomap */
-int iomap_iter_continue(const struct iomap_iter *iter, struct iomap *iomap,
-		struct iomap *srcmap, int ret)
-{
-	const bool stale = iomap->flags & IOMAP_F_STALE;
-	const ssize_t_ advanced = iter->pos - iter->iter_start_pos;
-	if (ret < 0 && !advanced) return ret;
-	if (iter->status < 0) ret = iter->status;
-	else if (iter->len == 0 || (!advanced && !stale)) ret = 0;
-	else ret = 1;
-	if (ret <= 0) return ret;
-	memset(iomap, 0, sizeof(*iomap));
-	memset(srcmap, 0, sizeof(*srcmap));
-	return ret;
-}
-int iomap_iter(struct iomap_iter *iter, const struct iomap_ops *ops)
-{
-	int ret;
-	if (ops->iomap_next)
-		ret = ops->iomap_next(iter, &iter->iomap, &iter->srcmap);
-	else
-		ret = iomap_iter_next(iter, &iter->iomap, &iter->srcmap, ops->iomap_begin, ops->iomap_end);
-	iter->status = 0;
-	if (ret > 0)
-		iter->iter_start_pos = iter->pos;
-	return ret;
-}
-int iomap_iter_advance(struct iomap_iter *iter, u64 count)
-{
-	if (count > iter->len) return -EIO;
-	iter->pos += count; iter->len -= count;
-	return 0;
-}
-static const struct iomap *iomap_iter_srcmap(const struct iomap_iter *i)
-{ return i->srcmap.type != IOMAP_HOLE ? &i->srcmap : &i->iomap; }
-static inline sector_t iomap_sector(const struct iomap *iomap, loff_t pos)
-{ return (iomap->addr + pos - iomap->offset) >> SECTOR_SHIFT; }
-/* Per-folio pending byte count stands in for struct iomap_folio_state. */
-struct kshim_rstate { long pending; int err; };
-void iomap_finish_folio_read(struct folio *folio, size_t off, size_t len, int error)
-{
-	struct kshim_rstate *st = folio->private;
-	(void)off;
-	if (!st) { if (!error) folio_mark_uptodate(folio); folio_unlock(folio); return; }
-	if (error) st->err = error;
-	st->pending -= len;
-}
-int iomap_bio_read_folio_range(const struct iomap_iter *iter, struct iomap_read_folio_ctx *ctx, size_t plen)
-{
-	struct folio *folio = ctx->cur_folio;
-	struct bio *bio = ctx->read_ctx;
-	if (!bio || bio_end_sector(bio) != iomap_sector(&iter->iomap, iter->pos) ||
-	    !bio_add_folio(bio, folio, plen, offset_in_folio(folio, iter->pos))) {
-		if (bio) ctx->ops->submit_read(iter, ctx);
-		bio = bio_alloc(iter->iomap.bdev, 16, REQ_OP_READ, GFP_NOFS);
-		if (!bio) return -ENOMEM;
-		bio->bi_iter.bi_sector = iomap_sector(&iter->iomap, iter->pos);
-		bio_add_folio_nofail(bio, folio, plen, offset_in_folio(folio, iter->pos));
-		ctx->read_ctx = bio;
-		ctx->read_ctx_file_offset = iter->pos;
-	}
-	return 0;
-}
-void iomap_bio_submit_read_endio(const struct iomap_iter *iter, struct iomap_read_folio_ctx *ctx, bio_end_io_t end_io)
-{
-	struct bio *bio = ctx->read_ctx;
-	(void)iter;
-	if (!bio) return;
-	bio->bi_end_io = end_io;
-	submit_bio(bio);
-	ctx->read_ctx = NULL;
-}
-/* Follows fs/iomap/buffered-io.c iomap_read_folio_iter() for order-0 folios. */
-static int kshim_read_folio_iter(struct iomap_iter *iter, struct iomap_read_folio_ctx *ctx, struct kshim_rstate *st)
-{
-	const struct iomap *iomap = &iter->iomap;
-	struct folio *folio = ctx->cur_folio;
-	loff_t isize = i_size_read(iter->inode);
-	u64 length = iomap_length(iter);
-	unsigned bsize = 1U << iter->inode->i_blkbits;
-
-	if (iomap->type == IOMAP_INLINE) {
-		const struct iomap *src = iomap_iter_srcmap(iter);
-		size_t size = isize - src->offset;
-		size_t offset = offset_in_folio(folio, src->offset);
-		if (!src->inline_data || size > src->length) return -EIO;
-		folio_fill_tail(folio, offset, src->inline_data, size);
-		return iomap_iter_advance(iter, length);
-	}
-	length = min_t(u64, length, PAGE_SIZE - offset_in_folio(folio, iter->pos));
-	while (length) {
-		loff_t pos = iter->pos;
-		size_t poff = offset_in_folio(folio, pos);
-		u64 plen = length;
-		int r;
-		if (pos < isize && pos + plen > isize)
-			plen = min_t(u64, plen, round_up(isize, bsize) - pos);
-		if (iomap_iter_srcmap(iter)->type != IOMAP_MAPPED ||
-		    (iomap_iter_srcmap(iter)->flags & IOMAP_F_NEW) || pos >= isize) {
-			folio_zero_range(folio, poff, plen);
-		} else {
-			int ret;
-			st->pending += plen;
-			ret = ctx->ops->read_folio_range(iter, ctx, plen);
-			if (ret) return ret;
-		}
-		length -= plen;
-		r = iomap_iter_advance(iter, plen);
-		if (r) return r;
-	}
-	return 0;
-}
-void iomap_read_folio(const struct iomap_ops *ops, struct iomap_read_folio_ctx *ctx, void *private)
-{
-	struct folio *folio = ctx->cur_folio;
-	struct kshim_rstate st = { 0, 0 };
-	struct iomap_iter iter = {
-		.inode = folio->mapping->host, .pos = folio_pos(folio),
-		.len = folio_size(folio), .private = private,
-	};
-	int ret;
-	iter.iter_start_pos = iter.pos;
-	folio->private = &st;
-	while ((ret = iomap_iter(&iter, ops)) > 0)
-		iter.status = kshim_read_folio_iter(&iter, ctx, &st);
-	if (ctx->ops->submit_read) ctx->ops->submit_read(&iter, ctx);
-	folio->private = NULL;
-	if (ret < 0 || st.err || st.pending) {
-		printk(KERN_ERR "iomap_read_folio idx %lu failed ret=%d err=%d pending=%ld\n",
-				(unsigned long)folio->index, ret, st.err, st.pending);
-		folio_clear_uptodate(folio);
-	} else {
-		folio_mark_uptodate(folio);
-	}
-	folio_unlock(folio);
-}
+/* The iomap services (extent walk, folio read, writeback) are in kshim_iomap.c. */
 
 /* ------------------------------------------------------------------ inode */
 /*

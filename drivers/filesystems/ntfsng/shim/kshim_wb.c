@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * kshim_wb.c - writeback side of the kernel shim: what Linux's mm/page-writeback.c,
- * fs/iomap writeback and the flusher do for the core's metadata mappings.  All writes are
- * synchronous device writes through kshim_dev_rw.  Callers hold the NT glue's volume
- * lock, so there is no concurrent writeback.  Ported from the spike's kshim_wb.c.
+ * kshim_wb.c - writeback side of the kernel shim: dirty-folio iteration, inode writeback
+ * and the volume sync loop for the core's metadata mappings (iomap writeback itself is in
+ * kshim_iomap.c).  All writes are synchronous device writes through kshim_dev_rw.
+ * Callers hold the NT glue's volume lock, so there is no concurrent writeback.
  */
 #include <kshim.h>
 
@@ -18,7 +18,7 @@ static int cmp_folio(const void *a, const void *b)
 
 struct wb_state { struct folio **v; int n; };
 
-/* Returns each dirty folio of @m once, referenced and locked, dirty bit cleared (mm/page-writeback.c). */
+/* writeback_iter contract: each dirty folio of @m once, referenced and locked, dirty bit cleared. */
 struct folio *writeback_iter(struct address_space *m, struct writeback_control *w, struct folio *f, int *e)
 {
 	struct wb_state *st = w->kshim_priv;
@@ -70,52 +70,6 @@ struct folio *writeback_iter(struct address_space *m, struct writeback_control *
 void folio_start_writeback(struct folio *f) { set_bit(PG_writeback, &f->flags); }
 void folio_end_writeback(struct folio *f) { clear_bit(PG_writeback, &f->flags); }
 void folio_redirty_for_writepage(struct writeback_control *wbc, struct folio *f) { (void)wbc; folio_mark_dirty(f); }
-bool iomap_dirty_folio(struct address_space *m, struct folio *f) { (void)m; return folio_mark_dirty(f); }
-
-/* fs/iomap/buffered-io.c iomap_writepages() for order-0 folios, writing synchronously. */
-int iomap_writepages(struct iomap_writepage_ctx *wpc)
-{
-	struct address_space *m = wpc->inode->i_mapping;
-	struct folio *f = NULL;
-	int error = 0;
-	while ((f = writeback_iter(m, wpc->wbc, f, &error))) {
-		u64 pos = folio_pos(f), isize = i_size_read(wpc->inode);
-		u64 end_pos = min_t(u64, isize, folio_next_pos(f));
-		folio_start_writeback(f);
-		while (pos < end_pos) {
-			ssize_t_ n = wpc->ops->writeback_range(wpc, f, pos, end_pos - pos, end_pos);
-			if (n <= 0) {
-				error = n ? n : -EIO;
-				folio_mark_dirty(f);
-				break;
-			}
-			pos += n;
-		}
-		folio_end_writeback(f);
-		folio_unlock(f);
-	}
-	return wpc->ops->writeback_submit ? wpc->ops->writeback_submit(wpc, error) : error;
-}
-
-ssize_t_ iomap_add_to_ioend(struct iomap_writepage_ctx *wpc, struct folio *f, loff_t pos, loff_t end_pos,
-		unsigned int dirty_len)
-{
-	struct iomap *io = &wpc->iomap;
-	u64 len = min_t(u64, dirty_len, io->offset + io->length - pos);
-	(void)end_pos;
-	if (io->type == IOMAP_MAPPED || io->type == IOMAP_UNWRITTEN) {
-		/* Round the tail up to a sector: the bytes past EOF in the cluster are don't-care. */
-		u64 wlen = (len + 511) & ~511ULL;
-		if (offset_in_folio(f, pos) + wlen > PAGE_SIZE)
-			wlen = len;
-		int e = kshim_dev_rw(io->bdev, 1, io->addr + (pos - io->offset),
-				(char *)f->data + offset_in_folio(f, pos), wlen);
-		if (e)
-			return e;
-	}
-	return len;
-}
-int iomap_ioend_writeback_submit(struct iomap_writepage_ctx *wpc, int error) { (void)wpc; return error; }
 
 void d_instantiate(struct dentry *d, struct inode *i) { d->d_inode = i; }
 void d_instantiate_new(struct dentry *d, struct inode *i) { d->d_inode = i; unlock_new_inode(i); }

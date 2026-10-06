@@ -33,6 +33,7 @@ list(APPEND CORE_SOURCE
     fs/ntfs/upcase.c
     fs/ntfs/wof.c
     shim/kshim.c
+    shim/kshim_iomap.c
     shim/kshim_printf.c
     shim/kshim_stubs.c
     shim/kshim_wb.c

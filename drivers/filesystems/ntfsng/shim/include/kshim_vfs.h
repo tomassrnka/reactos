@@ -108,6 +108,7 @@ extern struct mnt_idmap nop_mnt_idmap;
 	void *data; \
 	int refcount; \
 	void *private; \
+	void *kshim_fill; /* read accounting, kshim_iomap.c */ \
 	struct folio *hnext;
 struct page { KSHIM_PAGE_FIELDS };
 struct folio { union { struct { KSHIM_PAGE_FIELDS }; struct page page; }; };
