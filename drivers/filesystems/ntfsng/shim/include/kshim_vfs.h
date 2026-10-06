@@ -73,6 +73,8 @@ struct dentry {
 	struct super_block *d_sb;
 	unsigned int d_flags;
 	unsigned char d_iname[256];
+	unsigned char *kshim_ci_name;	/* on-disk name when a lookup matched by case folding (d_add_ci) */
+	unsigned int kshim_ci_len;
 };
 static inline struct inode *d_inode(const struct dentry *d) { return d->d_inode; }
 static inline struct inode *d_backing_inode(const struct dentry *d) { return d->d_inode; }
@@ -218,6 +220,7 @@ struct address_space {
 	spinlock_t private_lock;
 	errseq_t wb_err;
 	unsigned long flags;
+	unsigned int kshim_eager_wb;	/* write dirty folios back as soon as the mapping is full (block device) */
 };
 static inline gfp_t mapping_gfp_mask(struct address_space *m) { return m->gfp_mask; }
 static inline void mapping_set_gfp_mask(struct address_space *m, gfp_t g) { m->gfp_mask = g; }
@@ -753,13 +756,14 @@ struct writeback_control { long nr_to_write; long pages_skipped; loff_t range_st
 struct folio *writeback_iter(struct address_space *m, struct writeback_control *w, struct folio *f, int *e);
 
 /* ---------------------------------------------------------------- block */
-struct block_device { void *osdev; u64 size; unsigned int logical_block_size; struct address_space *bd_mapping; struct inode *bd_inode; struct super_block *bd_super; };
+struct block_device { void *osdev; u64 size; unsigned int logical_block_size; struct address_space *bd_mapping; struct inode *bd_inode; struct super_block *bd_super;
+	int kshim_remounting; /* set by the adapter while the core switches the volume read-write */ };
 static inline u64 bdev_nr_bytes(struct block_device *b) { return b->size; }
 static inline unsigned int bdev_logical_block_size(struct block_device *b) { return b->logical_block_size; }
 static inline unsigned int bdev_physical_block_size(struct block_device *b) { return b->logical_block_size; }
 static inline unsigned int bdev_max_discard_sectors(struct block_device *b) { (void)b; return 0; }
 static inline unsigned int bdev_discard_granularity(struct block_device *b) { (void)b; return 0; }
-static inline bool bdev_read_only(struct block_device *b) { (void)b; return true; }
+static inline bool bdev_read_only(struct block_device *b) { (void)b; return false; }
 int bdev_freeze(struct block_device *b);
 int bdev_thaw(struct block_device *b);
 int sync_blockdev(struct block_device *b);

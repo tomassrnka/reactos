@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * kshim_wb.c - writeback side of the kernel shim: what Linux's mm/page-writeback.c,
+ * fs/iomap writeback and the flusher do for the core's metadata mappings.  All writes are
+ * synchronous device writes through kshim_dev_rw.  Callers hold the NT glue's volume
+ * lock, so there is no concurrent writeback.  Ported from the spike's kshim_wb.c.
+ */
+#include <kshim.h>
+
+int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
+int kshim_inodes_snapshot(struct super_block *sb, struct inode ***out);
+
+static int cmp_folio(const void *a, const void *b)
+{
+	pgoff_t x = (*(struct folio *const *)a)->index, y = (*(struct folio *const *)b)->index;
+	return x < y ? -1 : x > y;
+}
+
+struct wb_state { struct folio **v; int n; };
+
+/* Returns each dirty folio of @m once, referenced and locked, dirty bit cleared (mm/page-writeback.c). */
+struct folio *writeback_iter(struct address_space *m, struct writeback_control *w, struct folio *f, int *e)
+{
+	struct wb_state *st = w->kshim_priv;
+	(void)e;
+	if (f) {
+		/* The previous folio: the caller unlocked it (or left it locked on error). */
+		if (folio_test_locked(f))
+			folio_unlock(f);
+		folio_put(f);
+	}
+	if (!st) {
+		int cap = (int)m->nrpages + 1, b;
+		st = kzalloc(sizeof(*st), GFP_NOFS);
+		if (!st)
+			return NULL;
+		st->v = kmalloc_array(cap, sizeof(*st->v), GFP_NOFS);
+		if (!st->v) {
+			kfree(st);
+			return NULL;
+		}
+		/* The cache's own spin lock is not exported; callers serialise on the volume lock. */
+		for (b = 0; b < KSHIM_PC_BUCKETS; b++)
+			for (struct folio *x = m->pc[b]; x && st->n < cap; x = x->hnext)
+				if (folio_test_dirty(x)) {
+					folio_get(x);
+					st->v[st->n++] = x;
+				}
+		sort(st->v, st->n, sizeof(*st->v), cmp_folio, NULL);
+		w->kshim_priv = st;
+		w->kshim_pos = 0;
+	}
+	while (w->kshim_pos < st->n) {
+		struct folio *x = st->v[w->kshim_pos++];
+		folio_lock(x);
+		if (!folio_test_dirty(x) || x->mapping != m) {
+			folio_unlock(x);
+			folio_put(x);
+			continue;
+		}
+		clear_bit(PG_dirty, &x->flags);
+		return x;
+	}
+	kfree(st->v);
+	kfree(st);
+	w->kshim_priv = NULL;
+	return NULL;
+}
+
+void folio_start_writeback(struct folio *f) { set_bit(PG_writeback, &f->flags); }
+void folio_end_writeback(struct folio *f) { clear_bit(PG_writeback, &f->flags); }
+void folio_redirty_for_writepage(struct writeback_control *wbc, struct folio *f) { (void)wbc; folio_mark_dirty(f); }
+bool iomap_dirty_folio(struct address_space *m, struct folio *f) { (void)m; return folio_mark_dirty(f); }
+
+/* fs/iomap/buffered-io.c iomap_writepages() for order-0 folios, writing synchronously. */
+int iomap_writepages(struct iomap_writepage_ctx *wpc)
+{
+	struct address_space *m = wpc->inode->i_mapping;
+	struct folio *f = NULL;
+	int error = 0;
+	while ((f = writeback_iter(m, wpc->wbc, f, &error))) {
+		u64 pos = folio_pos(f), isize = i_size_read(wpc->inode);
+		u64 end_pos = min_t(u64, isize, folio_next_pos(f));
+		folio_start_writeback(f);
+		while (pos < end_pos) {
+			ssize_t_ n = wpc->ops->writeback_range(wpc, f, pos, end_pos - pos, end_pos);
+			if (n <= 0) {
+				error = n ? n : -EIO;
+				folio_mark_dirty(f);
+				break;
+			}
+			pos += n;
+		}
+		folio_end_writeback(f);
+		folio_unlock(f);
+	}
+	return wpc->ops->writeback_submit ? wpc->ops->writeback_submit(wpc, error) : error;
+}
+
+ssize_t_ iomap_add_to_ioend(struct iomap_writepage_ctx *wpc, struct folio *f, loff_t pos, loff_t end_pos,
+		unsigned int dirty_len)
+{
+	struct iomap *io = &wpc->iomap;
+	u64 len = min_t(u64, dirty_len, io->offset + io->length - pos);
+	(void)end_pos;
+	if (io->type == IOMAP_MAPPED || io->type == IOMAP_UNWRITTEN) {
+		/* Round the tail up to a sector: the bytes past EOF in the cluster are don't-care. */
+		u64 wlen = (len + 511) & ~511ULL;
+		if (offset_in_folio(f, pos) + wlen > PAGE_SIZE)
+			wlen = len;
+		int e = kshim_dev_rw(io->bdev, 1, io->addr + (pos - io->offset),
+				(char *)f->data + offset_in_folio(f, pos), wlen);
+		if (e)
+			return e;
+	}
+	return len;
+}
+int iomap_ioend_writeback_submit(struct iomap_writepage_ctx *wpc, int error) { (void)wpc; return error; }
+
+void d_instantiate(struct dentry *d, struct inode *i) { d->d_inode = i; }
+void d_instantiate_new(struct dentry *d, struct inode *i) { d->d_inode = i; unlock_new_inode(i); }
+struct timespec64 simple_rename_timestamp(struct inode *a, struct dentry *b, struct inode *c, struct dentry *d)
+{
+	(void)b; (void)c; (void)d;
+	return inode_set_ctime_current(a);
+}
+bool is_subdir(struct dentry *a, struct dentry *b)
+{
+	for (struct dentry *d = a; ; d = d->d_parent) {
+		if (d == b || (d->d_inode && b->d_inode && d->d_inode == b->d_inode))
+			return true;
+		if (d->d_parent == d)
+			return false;
+	}
+}
+
+bool kshim_mapping_dirty(struct address_space *m)
+{
+	for (int b = 0; b < KSHIM_PC_BUCKETS; b++)
+		for (struct folio *x = m->pc[b]; x; x = x->hnext)
+			if (folio_test_dirty(x))
+				return true;
+	return false;
+}
+
+int kshim_mapping_writeback(struct address_space *m)
+{
+	struct writeback_control wbc = { .sync_mode = WB_SYNC_ALL, .nr_to_write = LONG_MAX, .range_end = LLONG_MAX };
+	int err;
+	if (!m->a_ops || !m->a_ops->writepages || !kshim_mapping_dirty(m))
+		return 0;
+	err = m->a_ops->writepages(m, &wbc);
+	if (err)
+		printk(KERN_ERR "writepages(ino %llu) failed %d\n", (unsigned long long)m->host->i_ino, err);
+	return err;
+}
+int filemap_write_and_wait(struct address_space *m) { return kshim_mapping_writeback(m); }
+int filemap_write_and_wait_range(struct address_space *m, loff_t s, loff_t e) { (void)s; (void)e; return kshim_mapping_writeback(m); }
+
+int write_inode_now(struct inode *i, int sync)
+{
+	struct writeback_control wbc = { .sync_mode = sync ? WB_SYNC_ALL : WB_SYNC_NONE };
+	int err = kshim_mapping_writeback(i->i_mapping), e2;
+	i->i_state &= ~I_DIRTY_PAGES;
+	if (kshim_mapping_dirty(i->i_mapping))
+		i->i_state |= I_DIRTY_PAGES;
+	if (i->i_state & (I_DIRTY_SYNC | I_DIRTY_DATASYNC)) {
+		i->i_state &= ~(I_DIRTY_SYNC | I_DIRTY_DATASYNC);
+		if (i->i_sb->s_op->write_inode) {
+			e2 = i->i_sb->s_op->write_inode(i, &wbc);
+			if (e2) {
+				printk(KERN_ERR "write_inode(ino %llu) failed %d\n", (unsigned long long)i->i_ino, e2);
+				err = err ? err : e2;
+			}
+		}
+	}
+	return err;
+}
+
+int kshim_blkdev_writepages(struct address_space *m, struct writeback_control *w)
+{
+	struct folio *f = NULL;
+	int e = 0;
+	struct block_device *b = m->host->i_private;
+	while ((f = writeback_iter(m, w, f, &e))) {
+		int r = kshim_dev_rw(b, 1, (u64)f->index << PAGE_SHIFT, f->data, PAGE_SIZE);
+		if (r) {
+			e = r;
+			folio_mark_dirty(f);
+		}
+		folio_unlock(f);
+	}
+	return e;
+}
+
+/*
+ * The flusher and sync(2) stand-in: write back dirty mappings and dirty inodes of @sb until a
+ * pass finds nothing (writing one inode can dirty another: index entries, bitmaps, $MFT).
+ */
+unsigned long kshim_counter_syncs;
+int kshim_sync(struct super_block *sb)
+{
+	int pass, err = 0;
+	kshim_counter_syncs++;
+	for (pass = 0; pass < 8; pass++) {
+		struct inode **v;
+		int n = kshim_inodes_snapshot(sb, &v), any = 0;
+		if (n < 0)
+			return n;
+		for (int k = 0; k < n; k++) {
+			struct inode *i = v[k];
+			if ((i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping)) {
+				int e = write_inode_now(i, 1);
+				any = 1;
+				if (e && !err)
+					err = e;
+			}
+		}
+		for (int k = 0; k < n; k++)
+			iput(v[k]);
+		kfree(v);
+		if (kshim_mapping_dirty(sb->s_bdev->bd_mapping)) {
+			int e = kshim_mapping_writeback(sb->s_bdev->bd_mapping);
+			any = 1;
+			if (e && !err)
+				err = e;
+		}
+		if (!any)
+			break;
+	}
+	return err;
+}
+
+/* True while any inode or mapping of @sb has unwritten changes. */
+bool kshim_sb_dirty(struct super_block *sb)
+{
+	struct inode **v;
+	bool d = false;
+	int n = kshim_inodes_snapshot(sb, &v);
+	if (n < 0)
+		return true;
+	for (int k = 0; k < n; k++)
+		if ((v[k]->i_state & I_DIRTY) || kshim_mapping_dirty(v[k]->i_mapping))
+			d = true;
+	for (int k = 0; k < n; k++)
+		iput(v[k]);
+	kfree(v);
+	return d || kshim_mapping_dirty(sb->s_bdev->bd_mapping);
+}
+
+void sync_inodes_sb(struct super_block *sb) { kshim_sync(sb); }
+
+int blkdev_issue_flush(struct block_device *b)
+{
+	return ngos_dev_flush(b->osdev) ? -EIO : 0;
+}

@@ -121,14 +121,13 @@ static NTSTATUS NTAPI NgReadCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PV
 }
 
 /*
- * Reads from the volume's storage device.  The IRP is freed here rather than
- * by the I/O manager, so completion needs no APC: core reads can happen on a
- * paging-I/O path entered at APC_LEVEL, where IoBuildSynchronousFsdRequest's
- * APC-based completion would never run.
+ * Transfers to or from the volume's storage device.  The IRP is freed here rather than
+ * by the I/O manager, so completion needs no APC: core I/O can happen on a paging-I/O
+ * path entered at APC_LEVEL, where IoBuildSynchronousFsdRequest's APC-based completion
+ * would never run.
  */
-int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len)
+static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, void *buf, unsigned int len)
 {
-    PDEVICE_OBJECT Device = dev;
     LARGE_INTEGER Offset;
     IO_STATUS_BLOCK Iosb;
     KEVENT Event;
@@ -137,10 +136,14 @@ int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     Offset.QuadPart = (LONGLONG)off;
-    Irp = IoBuildAsynchronousFsdRequest(IRP_MJ_READ, Device, buf, len, &Offset, &Iosb);
+    Irp = IoBuildAsynchronousFsdRequest(Major, Device, Major == IRP_MJ_FLUSH_BUFFERS ? NULL : buf,
+                                        Major == IRP_MJ_FLUSH_BUFFERS ? 0 : len,
+                                        Major == IRP_MJ_FLUSH_BUFFERS ? NULL : &Offset, &Iosb);
     if (!Irp)
         return -1;
     IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
+    if (Major == IRP_MJ_WRITE)
+        IoGetNextIrpStackLocation(Irp)->Flags |= SL_WRITE_THROUGH;
     IoSetCompletionRoutine(Irp, NgReadCompletion, &Event, TRUE, TRUE, TRUE);
     Status = IoCallDriver(Device, Irp);
     if (Status == STATUS_PENDING)
@@ -149,7 +152,7 @@ int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len
     if (Irp->Flags & IRP_BUFFERED_IO)
     {
         /* Completion stopped before the I/O manager's copy-back: do it here. */
-        if (NT_SUCCESS(Status))
+        if (NT_SUCCESS(Status) && Major == IRP_MJ_READ)
             RtlCopyMemory(buf, Irp->AssociatedIrp.SystemBuffer, len);
         if (Irp->Flags & IRP_DEALLOCATE_BUFFER)
             ExFreePool(Irp->AssociatedIrp.SystemBuffer);
@@ -165,8 +168,28 @@ int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len
     NgStackSample();
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ntfsng: device read at %I64u len %u failed 0x%lx\n", off, len, Status);
+        /* A disk without a write cache may not implement flush. */
+        if (Major == IRP_MJ_FLUSH_BUFFERS && (Status == STATUS_INVALID_DEVICE_REQUEST || Status == STATUS_NOT_SUPPORTED ||
+                                             Status == STATUS_NOT_IMPLEMENTED))
+            return 0;
+        DPRINT1("ntfsng: device %s at %I64u len %u failed 0x%lx\n",
+                Major == IRP_MJ_READ ? "read" : Major == IRP_MJ_WRITE ? "write" : "flush", off, len, Status);
         return -1;
     }
     return 0;
+}
+
+int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len)
+{
+    return NgDevIo(IRP_MJ_READ, dev, off, buf, len);
+}
+
+int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len)
+{
+    return NgDevIo(IRP_MJ_WRITE, dev, off, buf, len);
+}
+
+int ngos_dev_flush(void *dev)
+{
+    return NgDevIo(IRP_MJ_FLUSH_BUFFERS, dev, 0, NULL, 0);
 }

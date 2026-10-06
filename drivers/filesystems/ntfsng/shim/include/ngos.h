@@ -34,5 +34,7 @@ unsigned long ngos_jiffies(void);
 void ngos_time(long long *sec, long *nsec);
 
 int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len);
+int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len);
+int ngos_dev_flush(void *dev);
 
 #endif

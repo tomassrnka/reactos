@@ -3,9 +3,10 @@
  * kshim.c - kernel-mode implementations of the Linux kernel APIs that the
  * fs/ntfs read path calls, ported from the user-mode spike shim.  Memory is
  * nonpaged pool, locks are NT dispatcher objects and spin locks, block I/O
- * is IRP-based, all through ngos.h.  APIs only reached from write, mmap,
- * ioctl or VFS paths the NT glue never drives are generated into
- * kshim_stubs.c and stop the system with their name if called.
+ * is IRP-based, all through ngos.h.  The writeback side (writeback_iter,
+ * iomap_writepages, write_inode_now, the volume sync loop) is in kshim_wb.c.
+ * APIs only reached from mmap, ioctl or VFS paths the NT glue never drives
+ * are generated into kshim_stubs.c and stop the system with their name.
  */
 #include <kshim.h>
 
@@ -17,6 +18,10 @@ int kshim_verbose;
 static uintptr_t kshim_a64_lock;
 static uintptr_t kshim_pc_lock;
 static DEFINE_MUTEX(kshim_inode_lock);
+/* kshim_wb.c */
+int kshim_mapping_writeback(struct address_space *m);
+bool kshim_mapping_dirty(struct address_space *m);
+int kshim_sync(struct super_block *sb);
 
 /* ------------------------------------------------------------- printk */
 int printk(const char *fmt, ...)
@@ -458,15 +463,63 @@ struct ctl_table_header *register_sysctl(const char *p, const struct ctl_table *
 void unregister_sysctl_table(struct ctl_table_header *h) { (void)h; }
 
 /* ------------------------------------------------------- block device */
-unsigned long kshim_counter_reads, kshim_counter_refused_writes;
+unsigned long kshim_counter_reads, kshim_counter_refused_writes, kshim_counter_writes;
+unsigned long long kshim_counter_write_bytes;
 int blk_status_to_errno(blk_status_t s) { return s ? -EIO : 0; }
+#define KSHIM_RMW_CHUNK (64 * 1024)
+/* Sector-granular read-modify-write for a write that does not start or end on a sector boundary. */
+static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, size_t len)
+{
+	unsigned int bs = b->logical_block_size;
+	u8 *sec = kmalloc(bs, GFP_NOFS), *mid = NULL;
+	int err = 0;
+	if (!sec)
+		return -ENOMEM;
+	while (len && !err) {
+		u64 base = off & ~(u64)(bs - 1);
+		size_t in = off - base, n;
+		if (in || len < bs) {
+			n = min_t(size_t, bs - in, len);
+			err = ngos_dev_read(b->osdev, base, sec, bs) ? -EIO : 0;
+			if (!err) {
+				memcpy(sec + in, buf, n);
+				err = ngos_dev_write(b->osdev, base, sec, bs) ? -EIO : 0;
+			}
+		} else {
+			/* The storage stack needs a word-aligned buffer (IDE DMA): bounce the middle part. */
+			n = min_t(size_t, len & ~(size_t)(bs - 1), KSHIM_RMW_CHUNK);
+			if (!mid)
+				mid = kmalloc(KSHIM_RMW_CHUNK, GFP_NOFS);
+			if (!mid) {
+				err = -ENOMEM;
+				break;
+			}
+			memcpy(mid, buf, n);
+			err = ngos_dev_write(b->osdev, off, mid, (unsigned int)n) ? -EIO : 0;
+		}
+		off += n; buf += n; len -= n;
+	}
+	kfree(sec);
+	kfree(mid);
+	return err;
+}
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len)
 {
 	if (write) {
-		kshim_counter_refused_writes++;
-		printk(KERN_ERR "refusing device write at %llu len %zu (read-only driver)\n",
-				(unsigned long long)off, len);
-		return -EROFS;
+		struct super_block *sb = b->bd_super;
+		if (!sb || (sb_rdonly(sb) && !b->kshim_remounting)) {
+			kshim_counter_refused_writes++;
+			printk(KERN_ERR "refusing device write at %llu len %zu (read-only mount)\n",
+					(unsigned long long)off, len);
+			return -EROFS;
+		}
+		if (off + len > b->size)
+			return -EIO;
+		kshim_counter_writes++;
+		kshim_counter_write_bytes += len;
+		if (((off | len) & (b->logical_block_size - 1)) || ((uintptr_t)buf & 3))
+			return kshim_dev_write_rmw(b, off, buf, len);
+		return ngos_dev_write(b->osdev, off, buf, (unsigned int)len) ? -EIO : 0;
 	}
 	kshim_counter_reads++;
 	if (off >= b->size) {
@@ -609,6 +662,7 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 {
 	struct folio *f, *nf = NULL, *drop = NULL;
 	unsigned char irql;
+	bool eager = false;
 	(void)g;
 	irql = ngos_spin_lock(&kshim_pc_lock);
 	f = pc_find_locked(m, idx);
@@ -629,8 +683,11 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 		if (f) {
 			f->refcount++;
 		} else {
-			if (m->nrpages >= KSHIM_PC_MAX)
+			if (m->nrpages >= KSHIM_PC_MAX) {
 				drop = pc_shrink_locked(m, idx);
+				if (!drop && m->kshim_eager_wb)
+					eager = true;
+			}
 			nf->hnext = m->pc[idx % KSHIM_PC_BUCKETS];
 			m->pc[idx % KSHIM_PC_BUCKETS] = nf;
 			m->nrpages++;
@@ -641,6 +698,9 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 		ngos_spin_unlock(&kshim_pc_lock, irql);
 		if (nf) { kfree(nf->data); kfree(nf); }
 		while (drop) { struct folio *n = drop->hnext; pc_free(drop); drop = n; }
+		/* A full block-device mapping of dirty folios (the $LogFile emptying) is written back here. */
+		if (eager)
+			kshim_mapping_writeback(m);
 	}
 	if (fgp & FGP_LOCK) folio_lock(f);
 	return f;
@@ -677,15 +737,16 @@ struct page *read_mapping_page(struct address_space *m, pgoff_t idx, struct file
 	struct folio *f = read_mapping_folio(m, idx, file);
 	return IS_ERR(f) ? (struct page *)f : &f->page;
 }
+unsigned long kshim_counter_dirty;
 bool folio_mark_dirty(struct folio *f)
 {
-	printk(KERN_ERR "folio_mark_dirty on a read-only mount (index %lu)\n", (unsigned long)f->index);
+	kshim_counter_dirty++;
+	if (f->mapping && f->mapping->host)
+		f->mapping->host->i_state |= I_DIRTY_PAGES;
 	return !test_and_set_bit(PG_dirty, &f->flags);
 }
 bool filemap_dirty_folio(struct address_space *m, struct folio *f) { (void)m; return folio_mark_dirty(f); }
 void __mark_inode_dirty(struct inode *i, int flags) { i->i_state |= flags; }
-int filemap_write_and_wait(struct address_space *m) { (void)m; return 0; }
-int filemap_write_and_wait_range(struct address_space *m, loff_t s, loff_t e) { (void)m; (void)s; (void)e; return 0; }
 void file_ra_state_init(struct file_ra_state *ra, struct address_space *m) { (void)m; ra->ra_pages = 32; }
 void page_cache_sync_readahead(struct address_space *m, void *ra, struct file *f, pgoff_t i, unsigned long n)
 { (void)m; (void)ra; (void)f; (void)i; (void)n; }
@@ -717,8 +778,74 @@ void kshim_mapping_shrink(struct address_space *m)
 	ngos_spin_unlock(&kshim_pc_lock, irql);
 	while (drop) { struct folio *n = drop->hnext; pc_free(drop); drop = n; }
 }
-void truncate_inode_pages(struct address_space *m, loff_t l) { (void)l; pc_drop_all(m); }
+/* Drops the folios at or past @l (dirty or not) and zeroes the tail of a partial folio, as Linux. */
+void truncate_inode_pages(struct address_space *m, loff_t l)
+{
+	pgoff_t first = (pgoff_t)((l + PAGE_SIZE - 1) >> PAGE_SHIFT);
+	struct folio *list = NULL, *part;
+	unsigned char irql;
+	if (l <= 0) {
+		pc_drop_all(m);
+		return;
+	}
+	irql = ngos_spin_lock(&kshim_pc_lock);
+	for (int b = 0; b < KSHIM_PC_BUCKETS; b++) {
+		struct folio **pp = &m->pc[b];
+		while (*pp) {
+			struct folio *f = *pp;
+			if (f->index >= first) {
+				if (f->refcount > 1)
+					printk(KERN_ERR "truncating referenced folio %lu (ref %d)\n", (unsigned long)f->index, f->refcount);
+				*pp = f->hnext;
+				m->nrpages--;
+				f->hnext = list;
+				list = f;
+			} else {
+				pp = &f->hnext;
+			}
+		}
+	}
+	part = (l & (PAGE_SIZE - 1)) ? pc_find_locked(m, (pgoff_t)(l >> PAGE_SHIFT)) : NULL;
+	if (part)
+		part->refcount++;
+	ngos_spin_unlock(&kshim_pc_lock, irql);
+	while (list) { struct folio *n = list->hnext; pc_free(list); list = n; }
+	if (part) {
+		folio_lock(part);
+		memset((char *)part->data + (l & (PAGE_SIZE - 1)), 0, PAGE_SIZE - (l & (PAGE_SIZE - 1)));
+		folio_unlock(part);
+		folio_put(part);
+	}
+}
 void truncate_inode_pages_final(struct address_space *m) { pc_drop_all(m); }
+void truncate_pagecache(struct inode *i, loff_t n) { truncate_inode_pages(i->i_mapping, n); }
+void truncate_setsize(struct inode *i, loff_t n) { loff_t old = i->i_size; i_size_write(i, n); if (n < old) truncate_pagecache(i, n); }
+void pagecache_isize_extended(struct inode *i, loff_t from, loff_t to) { (void)i; (void)from; (void)to; }
+unsigned long invalidate_mapping_pages(struct address_space *m, pgoff_t s, pgoff_t e) { (void)s; (void)e; kshim_mapping_shrink(m); return 0; }
+int inode_newsize_ok(const struct inode *i, loff_t n) { (void)i; return n < 0 ? -EINVAL : 0; }
+/* Copies @len bytes at @pos of @m's data into any cached, uptodate folios (NT wrote them to disk). */
+void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, size_t len)
+{
+	const u8 *src = buf;
+	while (len) {
+		pgoff_t idx = (pgoff_t)(pos >> PAGE_SHIFT);
+		size_t in = pos & (PAGE_SIZE - 1), n = min_t(size_t, PAGE_SIZE - in, len);
+		struct folio *f;
+		unsigned char irql = ngos_spin_lock(&kshim_pc_lock);
+		f = pc_find_locked(m, idx);
+		if (f)
+			f->refcount++;
+		ngos_spin_unlock(&kshim_pc_lock, irql);
+		if (f) {
+			folio_lock(f);
+			if (folio_test_uptodate(f))
+				memcpy((u8 *)f->data + in, src, n);
+			folio_unlock(f);
+			folio_put(f);
+		}
+		pos += n; src += n; len -= n;
+	}
+}
 
 /* ------------------------------------------------------------------ iomap */
 int iomap_iter_continue(const struct iomap_iter *iter, struct iomap *iomap,
@@ -990,6 +1117,27 @@ struct inode *find_inode_nowait(struct super_block *sb, unsigned long hashval,
 	mutex_unlock(&kshim_inode_lock);
 	return ret;
 }
+/* References every live, hashed inode of @sb into a new array (for the sync loop); returns the count. */
+int kshim_inodes_snapshot(struct super_block *sb, struct inode ***out)
+{
+	struct inode **v;
+	int n = 0, cap;
+	*out = NULL;
+	mutex_lock(&kshim_inode_lock);
+	cap = (int)kshim_inodes_live + 1;
+	v = kmalloc_array(cap, sizeof(*v), GFP_NOFS);
+	if (v) {
+		for (struct inode *i = sb->kshim_inodes; i && n < cap; i = i->kshim_next) {
+			if (i->i_state & (I_FREEING | I_NEW))
+				continue;
+			atomic_inc(&i->i_count);
+			v[n++] = i;
+		}
+	}
+	mutex_unlock(&kshim_inode_lock);
+	*out = v;
+	return v ? n : -ENOMEM;
+}
 void unlock_new_inode(struct inode *i) { i->i_state &= ~I_NEW; }
 void discard_new_inode(struct inode *i) { i->i_state &= ~I_NEW; i->i_state |= I_FREEING; iput(i); }
 void iget_failed(struct inode *i) { discard_new_inode(i); }
@@ -1016,6 +1164,14 @@ void iput(struct inode *i)
 		return;
 	if (!atomic_dec_and_test(&i->i_count))
 		return;
+	/* Linux writes an inode back before it can be evicted; do it now (resurrected meanwhile). */
+	if (i->i_nlink && !(i->i_state & (I_FREEING | I_NEW)) && i->i_sb && !sb_rdonly(i->i_sb) &&
+	    ((i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping))) {
+		atomic_inc(&i->i_count);
+		write_inode_now(i, 1);
+		if (!atomic_dec_and_test(&i->i_count))
+			return;
+	}
 	if (i->i_sb->s_op->drop_inode)
 		(void)i->i_sb->s_op->drop_inode(i);
 	kshim_evict(i);
@@ -1048,7 +1204,15 @@ struct dentry *d_splice_alias(struct inode *i, struct dentry *d)
 	d->d_inode = i;
 	return NULL;
 }
-struct dentry *d_add_ci(struct dentry *d, struct inode *i, struct qstr *n) { (void)n; return d_splice_alias(i, d); }
+struct dentry *d_add_ci(struct dentry *d, struct inode *i, struct qstr *n)
+{
+	if (n && n->name && !IS_ERR(i)) {
+		kfree(d->kshim_ci_name);
+		d->kshim_ci_name = kmemdup(n->name, n->len, GFP_NOFS);
+		d->kshim_ci_len = d->kshim_ci_name ? n->len : 0;
+	}
+	return d_splice_alias(i, d);
+}
 void d_add(struct dentry *d, struct inode *i) { d->d_inode = i; }
 void dput(struct dentry *d) { (void)d; }
 bool dir_emit_dots(struct file *f, struct dir_context *ctx)
@@ -1119,8 +1283,8 @@ static int kshim_vmsg(const char *pfx, const char *fmt, va_list ap)
 int invalf(struct fs_context *fc, const char *fmt, ...) { va_list ap; (void)fc; va_start(ap, fmt); kshim_vmsg("invalid: ", fmt, ap); va_end(ap); return -EINVAL; }
 int errorf(struct fs_context *fc, const char *fmt, ...) { va_list ap; (void)fc; va_start(ap, fmt); kshim_vmsg("error: ", fmt, ap); va_end(ap); return -EINVAL; }
 int warnf(struct fs_context *fc, const char *fmt, ...) { va_list ap; (void)fc; va_start(ap, fmt); kshim_vmsg("warning: ", fmt, ap); va_end(ap); return 0; }
-int sync_blockdev(struct block_device *b) { (void)b; return 0; }
-int sync_filesystem(struct super_block *sb) { (void)sb; return 0; }
+int sync_blockdev(struct block_device *b) { return b && b->bd_mapping ? filemap_write_and_wait(b->bd_mapping) : 0; }
+int sync_filesystem(struct super_block *sb) { return kshim_sync(sb); }
 void seq_printf(struct seq_file *m, const char *fmt, ...) { (void)m; (void)fmt; }
 void seq_puts(struct seq_file *m, const char *s) { (void)m; (void)s; }
 
@@ -1134,7 +1298,11 @@ static int kshim_blkdev_read_folio(struct file *f, struct folio *folio)
 	folio_unlock(folio);
 	return err;
 }
-static const struct address_space_operations kshim_blkdev_aops = { .read_folio = kshim_blkdev_read_folio };
+int kshim_blkdev_writepages(struct address_space *m, struct writeback_control *w);
+static const struct address_space_operations kshim_blkdev_aops = {
+	.read_folio = kshim_blkdev_read_folio,
+	.writepages = kshim_blkdev_writepages,
+};
 struct block_device *kshim_bdev_open(void *osdev, u64 size, unsigned int sector_size)
 {
 	struct block_device *b = kzalloc(sizeof(*b), GFP_KERNEL);
@@ -1149,6 +1317,7 @@ struct block_device *kshim_bdev_open(void *osdev, u64 size, unsigned int sector_
 	bi->i_mapping = &bi->i_data;
 	bi->i_data.host = bi;
 	bi->i_data.a_ops = &kshim_blkdev_aops;
+	bi->i_data.kshim_eager_wb = 1;
 	init_rwsem(&bi->i_rwsem);
 	init_rwsem(&bi->i_data.invalidate_lock);
 	b->bd_inode = bi;
