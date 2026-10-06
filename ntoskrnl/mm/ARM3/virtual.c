@@ -2382,15 +2382,11 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     PteContents.u.Hard.Valid = 0;
                     PteContents.u.Soft.Transition = 1;
                     PteContents.u.Trans.Protection = ProtectionMask;
-                    /* Decrease PFN share count and write the PTE */
-                    MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
+                    /* Write the PTE, and release the page only when no processor can still use it */
                     // FIXME: remove the page from the WS
                     MI_WRITE_INVALID_PTE(PointerPte, PteContents);
-
-#ifndef CONFIG_SMP
-                    /* Invalidate the TLB entry. On SMP we flush the process TLB below */
-                    KxFlushSingleCurrentTb(MiPteToAddress(PointerPte));
-#endif
+                    KeFlushSingleTb(MiPteToAddress(PointerPte), FALSE);
+                    MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
 
                     /* We are done for this PTE */
                     MiReleasePfnLock(OldIrql);
