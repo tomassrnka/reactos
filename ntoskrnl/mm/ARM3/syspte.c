@@ -231,11 +231,6 @@ MiReserveAlignedSystemPtes(IN ULONG NumberOfPtes,
     KeReleaseQueuedSpinLock(LockQueueSystemSpaceLock, OldIrql);
 
     //
-    // Flush the TLB
-    //
-    KeFlushEntireTb(TRUE, TRUE);
-
-    //
     // Return the reserved PTEs
     //
     return ReturnPte;
