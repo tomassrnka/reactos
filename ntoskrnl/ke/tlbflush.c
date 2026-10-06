@@ -32,7 +32,11 @@ KeFlushSingleTb(
     _In_ BOOLEAN AllProcessors)
 {
 #ifdef CONFIG_SMP
-    KAFFINITY TargetSet = AllProcessors ?
+    KAFFINITY TargetSet;
+
+    /* A processor that joins the process after this point sees the new PTEs */
+    KeMemoryBarrier();
+    TargetSet = AllProcessors ?
         KeActiveProcessors : KeGetCurrentProcess()->ActiveProcessors;
     KiIpiSendRequest(TargetSet,
                      KiFlushSingleTbIpiWorker,
@@ -87,7 +91,11 @@ KeFlushRangeTb(
     }
 
 #ifdef CONFIG_SMP
-    KAFFINITY TargetSet = Global ?
+    KAFFINITY TargetSet;
+
+    /* A processor that joins the process after this point sees the new PTEs */
+    KeMemoryBarrier();
+    TargetSet = Global ?
         KeActiveProcessors : KeGetCurrentProcess()->ActiveProcessors;
     KiIpiSendRequest(TargetSet,
                      KiFlushRangeTbIpiWorker,
@@ -118,6 +126,8 @@ NTAPI
 KeFlushProcessTb(VOID)
 {
 #ifdef CONFIG_SMP
+    /* A processor that joins the process after this point sees the new PTEs */
+    KeMemoryBarrier();
     KiIpiSendRequest(KeGetCurrentProcess()->ActiveProcessors,
                      KiFlushProcessTbIpiWorker,
                      NULL,
@@ -150,7 +160,11 @@ KeFlushEntireTb(
     _In_ BOOLEAN AllProcessors)
 {
 #ifdef CONFIG_SMP
-    KAFFINITY TargetSet = AllProcessors ?
+    KAFFINITY TargetSet;
+
+    /* A processor that joins the process after this point sees the new PTEs */
+    KeMemoryBarrier();
+    TargetSet = AllProcessors ?
         KeActiveProcessors : KeGetCurrentProcess()->ActiveProcessors;
     KiIpiSendRequest(TargetSet,
                      KiFlushEntireTbIpiWorker,
