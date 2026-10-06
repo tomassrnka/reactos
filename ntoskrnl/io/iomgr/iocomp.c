@@ -459,6 +459,9 @@ NtRemoveIoCompletion(IN HANDLE IoCompletionHandle,
     IO_STATUS_BLOCK IoStatus;
     PAGED_CODE();
 
+    /* All of it: {0} only sets the first union member with newer compilers */
+    RtlZeroMemory(&IoStatus, sizeof(IoStatus));
+
     /* Check if the call was from user mode */
     if (PreviousMode != KernelMode)
     {
