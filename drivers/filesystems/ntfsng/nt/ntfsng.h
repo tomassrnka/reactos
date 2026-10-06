@@ -107,6 +107,9 @@ VOID NgFillStat(PNG_FCB Fcb);
 int NgEnsureNode(PNG_FCB Fcb);
 VOID NgParkNode(PNG_FCB Fcb);
 
+/* diag.c */
+VOID NgDiagLogRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, NTSTATUS Status);
+
 /* fsctl.c */
 NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 

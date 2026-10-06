@@ -314,6 +314,7 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Status = NgHandlers[Major](DeviceObject, Irp);
     }
     {
+        NgDiagLogRequest(DeviceObject, Irp, Status);
         Irp->IoStatus.Status = Status;
         IoCompleteRequest(Irp, NT_SUCCESS(Status) ? IO_DISK_INCREMENT : IO_NO_INCREMENT);
     }
