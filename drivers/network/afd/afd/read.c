@@ -555,7 +555,17 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     } else if( Status == STATUS_PENDING ) {
         AFD_DbgPrint(MID_TRACE,("Leaving read irp\n"));
         IoMarkIrpPending( Irp );
-        (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+        /* A cancel that came before the routine was set found nothing to call */
+        IoAcquireCancelSpinLock(&Irp->CancelIrql);
+        if (!Irp->Cancel)
+        {
+            (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+            IoReleaseCancelSpinLock(Irp->CancelIrql);
+        }
+        else
+        {
+            AfdCancelHandler(IoGetCurrentIrpStackLocation(Irp)->DeviceObject, Irp);
+        }
     } else {
         AFD_DbgPrint(MID_TRACE,("Completed with status %x\n", Status));
     }
