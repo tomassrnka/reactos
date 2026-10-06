@@ -309,6 +309,27 @@ InternalPendingErrorEventHandler(void *arg, const err_t err)
     DereferenceObject(Listener);
 }
 
+static void LibTCPClaimPendingAcceptCallback(void *arg);
+
+static
+VOID
+LibTCPPostClaim(PCONNECTION_ENDPOINT Listener, u8_t Block)
+{
+    struct lwip_callback_msg *msg;
+
+    msg = ExAllocateFromNPagedLookasideList(&MessageLookasideList);
+    if (!msg)
+        return;
+
+    ReferenceObject(Listener);
+    msg->Input.Socket.Arg = Listener;
+    if (tcpip_callback_with_block(LibTCPClaimPendingAcceptCallback, msg, Block) != ERR_OK)
+    {
+        DereferenceObject(Listener);
+        ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
+    }
+}
+
 static
 BOOLEAN
 LibTCPQueuePendingAccept(PCONNECTION_ENDPOINT Listener, PTCP_PCB pcb)
@@ -354,6 +375,15 @@ InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
 
     /* lwIP gave the new PCB the listener's argument; only LibTCPAccept may set it */
     tcp_arg(newpcb, NULL);
+
+    /* Older connections are served first; the lwIP thread must not wait on its own queue */
+    if (!IsListEmpty(&((PCONNECTION_ENDPOINT)arg)->PendingAccepts))
+    {
+        if (!LibTCPQueuePendingAccept(arg, newpcb))
+            return ERR_CLSD;
+        LibTCPPostClaim(arg, 0);
+        return ERR_OK;
+    }
 
     TCPAcceptEventHandler(arg, newpcb);
 
@@ -413,20 +443,8 @@ LibTCPClaimPendingAcceptCallback(void *arg)
 VOID
 LibTCPClaimPendingAccept(PCONNECTION_ENDPOINT Listener)
 {
-    struct lwip_callback_msg *msg;
-
-    msg = ExAllocateFromNPagedLookasideList(&MessageLookasideList);
-    if (!msg)
-        return;
-
     /* Not waited for: the caller may hold locks the accept path takes */
-    ReferenceObject(Listener);
-    msg->Input.Socket.Arg = Listener;
-    if (tcpip_callback_with_block(LibTCPClaimPendingAcceptCallback, msg, 1) != ERR_OK)
-    {
-        DereferenceObject(Listener);
-        ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
-    }
+    LibTCPPostClaim(Listener, 1);
 }
 
 /* Runs on the lwIP thread when the listener closes */
