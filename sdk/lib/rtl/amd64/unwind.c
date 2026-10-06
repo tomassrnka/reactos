@@ -313,6 +313,9 @@ RtlpTryToUnwindEpilog(
     DWORD Instr;
     BYTE Reg, Mod;
     ULONG64 EndAddress;
+    PUNWIND_INFO UnwindInfo;
+    ULONG i, PushCount = 0, PopCount = 0;
+    BOOLEAN HasAllocation = FALSE, StackAdjusted = FALSE;
 
     /* Make a local copy of the context */
     LocalContext = *Context;
@@ -335,6 +338,7 @@ RtlpTryToUnwindEpilog(
             LocalContext.Rsp += *(DWORD*)(InstrPtr + 3);
             InstrPtr += 7;
         }
+        StackAdjusted = TRUE;
     }
     /* Check if first instruction of epilog is "lea rsp, ..." */
     else if ( (Instr & 0x38fffe) == 0x208d48 )
@@ -346,6 +350,8 @@ RtlpTryToUnwindEpilog(
         Reg += (Instr & 1) * 8;
 
         LocalContext.Rsp = GetReg(&LocalContext, Reg);
+
+        StackAdjusted = TRUE;
 
         /* Get addressing mode */
         Mod = (Instr >> 22) & 0x3;
@@ -368,11 +374,16 @@ RtlpTryToUnwindEpilog(
         }
     }
 
-    /* Loop the following instructions before the ret */
-    EndAddress = FunctionEntry->EndAddress + ImageBase - 1;
+    /* Loop the following instructions up to the ret. Compilers place code
+       after an epilog, so the ret need not be the last byte of the function */
+    EndAddress = FunctionEntry->EndAddress + ImageBase;
     while ((DWORD64)InstrPtr < EndAddress)
     {
         Instr = *(DWORD*)InstrPtr;
+
+        /* The ret ends the epilog */
+        if ((Instr & 0xff) == 0xc3)
+            break;
 
         /* Check for a simple pop */
         if ( (Instr & 0xf8) == 0x58 )
@@ -381,6 +392,7 @@ RtlpTryToUnwindEpilog(
             Reg = Instr & 0x7;
             PopReg(&LocalContext, ContextPointers, Reg);
             InstrPtr++;
+            PopCount++;
             continue;
         }
 
@@ -391,6 +403,7 @@ RtlpTryToUnwindEpilog(
             Reg = ((Instr >> 8) & 0x7) + 8;
             PopReg(&LocalContext, ContextPointers, Reg);
             InstrPtr += 2;
+            PopCount++;
             continue;
         }
 
@@ -403,17 +416,45 @@ RtlpTryToUnwindEpilog(
     // also allow end with jmp imm, jmp [target], iretq
 
     /* Check if we are at the ret instruction */
-    if ((DWORD64)InstrPtr != EndAddress)
+    if ((DWORD64)InstrPtr >= EndAddress)
     {
         /* If we went past the end of the function, something is broken! */
         ASSERT((DWORD64)InstrPtr <= EndAddress);
         return FALSE;
     }
 
-    /* Make sure this is really a ret instruction */
-    if (*InstrPtr != 0xc3)
+    /*
+     * Code follows this epilog. A return address can point to the start of
+     * such an epilog, after a call in the body, and there the frame's handler
+     * must still be found; unwinding through the prolog is correct for it.
+     * Only an epilog that has already begun to run must be finished here: an
+     * interrupt can stop a thread in the middle of one.
+     */
+    if ((DWORD64)InstrPtr != EndAddress - 1)
     {
-        return FALSE;
+        UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
+        if (UnwindInfo->Flags & UNW_FLAG_CHAININFO)
+            return FALSE;
+
+        for (i = 0; i < UnwindInfo->CountOfCodes; i += UnwindOpSlots(UnwindInfo->UnwindCode[i]))
+        {
+            switch (UnwindInfo->UnwindCode[i].UnwindOp)
+            {
+                case UWOP_PUSH_NONVOL:
+                    PushCount++;
+                    break;
+                case UWOP_ALLOC_LARGE:
+                case UWOP_ALLOC_SMALL:
+                case UWOP_SET_FPREG:
+                    HasAllocation = TRUE;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount))
+            return FALSE;
     }
 
     /* Unwind is finished, pop new Rip from Stack */
