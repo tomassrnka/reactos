@@ -533,6 +533,10 @@ NtRemoveIoCompletion(IN HANDLE IoCompletionHandle,
                 /* Save values */
                 Key = Packet->KeyContext;
                 Apc = Packet->ApcContext;
+#ifdef _WIN64
+                /* Status fills only part of the union */
+                IoStatus.Pointer = NULL;
+#endif
                 IoStatus.Status = Packet->IoStatus;
                 IoStatus.Information = Packet->IoStatusInformation;
 
