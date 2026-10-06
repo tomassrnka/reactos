@@ -34,6 +34,8 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     FileSize = Fcb->Header.FileSize.QuadPart;
     if (Offset.QuadPart >= FileSize)
         return STATUS_END_OF_FILE;
+    if (!Paging && !FsRtlCheckLockForReadAccess(&Fcb->FileLock, Irp))
+        return STATUS_FILE_LOCK_CONFLICT;
     if (!Paging && Offset.QuadPart + Length > FileSize)
         Length = (ULONG)(FileSize - Offset.QuadPart);
 
@@ -55,6 +57,12 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Done = NgEnsureNode(Fcb);
         if (!Done)
             Done = ngc_read(Fcb->Node, Offset.QuadPart, Length, Buffer, 1);
+        else if (Fcb->Deleted)
+        {
+            /* A deleted file's pages can still be faulted in by a mapping: zeros. */
+            RtlZeroMemory(Buffer, Length);
+            Done = Length;
+        }
         if (Paging && Fcb->OpenHandles == 0)
             NgParkNode(Fcb);
         NgReleaseCore(Vcb);

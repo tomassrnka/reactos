@@ -109,7 +109,8 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
     Fcb->Header.PagingIoResource = &Fcb->PagingIoResource;
     ExInitializeResourceLite(&Fcb->MainResource);
     ExInitializeResourceLite(&Fcb->PagingIoResource);
-    Fcb->Header.IsFastIoPossible = FastIoIsPossible;
+    FsRtlInitializeFileLock(&Fcb->FileLock, NULL, NULL);
+    Fcb->Header.IsFastIoPossible = FastIoIsQuestionable;
     Fcb->Vcb = Vcb;
     Fcb->RefCount = 1;
     InterlockedIncrement(&NgGlobal.FcbLive);
@@ -128,6 +129,8 @@ int NgEnsureNode(PNG_FCB Fcb)
     int Err;
     if (Fcb->Node || !Fcb->HasNode)
         return Fcb->Node ? 0 : -NGC_EINVAL;
+    if (Fcb->Deleted)
+        return -NGC_ENOENT;
     Err = ngc_iget(Fcb->Vcb->Core, Fcb->MftNo, &Base);
     if (Err)
         return Err;
@@ -166,6 +169,9 @@ VOID NgFillStat(PNG_FCB Fcb)
     }
     ngc_stat(Fcb->Node, &Fcb->Stat);
     NgReleaseCore(Fcb->Vcb);
+    if (Fcb->SectionObjectPointers.SharedCacheMap && Fcb->Header.FileSize.QuadPart != (LONGLONG)Fcb->Stat.size)
+        DPRINT1("ntfsng: BUG: cached %I64x header size %I64d, core size %I64u\n", Fcb->MftNo,
+                Fcb->Header.FileSize.QuadPart, Fcb->Stat.size);
     Fcb->MftNo = Fcb->Stat.mft_ref & 0xffffffffffffULL;
     Fcb->Header.FileSize.QuadPart = Fcb->Stat.size;
     Fcb->Header.ValidDataLength.QuadPart = Fcb->Stat.size;
@@ -196,6 +202,9 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
         ngc_put(Fcb->Node);
         NgReleaseCore(Vcb);
     }
+    FsRtlUninitializeFileLock(&Fcb->FileLock);
+    if (Fcb->DelPath.Buffer)
+        ExFreePoolWithTag(Fcb->DelPath.Buffer, TAG_NTFSNG);
     ExDeleteResourceLite(&Fcb->MainResource);
     ExDeleteResourceLite(&Fcb->PagingIoResource);
     InterlockedDecrement(&NgGlobal.FcbLive);
@@ -232,14 +241,15 @@ static BOOLEAN NTAPI NgFastIoCheckIfPossible(PFILE_OBJECT FileObject, PLARGE_INT
                                              BOOLEAN Wait, ULONG LockKey, BOOLEAN CheckForReadOperation,
                                              PIO_STATUS_BLOCK IoStatus, PDEVICE_OBJECT DeviceObject)
 {
-    UNREFERENCED_PARAMETER(FileObject);
-    UNREFERENCED_PARAMETER(FileOffset);
-    UNREFERENCED_PARAMETER(Length);
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
+    LARGE_INTEGER Len;
     UNREFERENCED_PARAMETER(Wait);
-    UNREFERENCED_PARAMETER(LockKey);
     UNREFERENCED_PARAMETER(IoStatus);
     UNREFERENCED_PARAMETER(DeviceObject);
-    return CheckForReadOperation;
+    if (!CheckForReadOperation || !Fcb || Fcb->IsVolume || Fcb->IsDirectory)
+        return FALSE;
+    Len.QuadPart = Length;
+    return FsRtlFastCheckLockForRead(&Fcb->FileLock, FileOffset, &Len, LockKey, FileObject, PsGetCurrentProcess());
 }
 
 static BOOLEAN NTAPI NgFastIoWrite(PFILE_OBJECT FileObject, PLARGE_INTEGER FileOffset, ULONG Length,
@@ -299,11 +309,17 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Status = NgDeviceControl(DeviceObject, Irp);
         goto out;
     }
-
+    else if (Major == IRP_MJ_LOCK_CONTROL)
+    {
+        /* FsRtl completes lock IRPs itself. */
+        Status = NgLockControl(DeviceObject, Irp);
+        goto out;
+    }
     else
     {
         Status = NgHandlers[Major](DeviceObject, Irp);
     }
+    if (Status != STATUS_PENDING)
     {
         NgDiagLogRequest(DeviceObject, Irp, Status);
         Irp->IoStatus.Status = Status;

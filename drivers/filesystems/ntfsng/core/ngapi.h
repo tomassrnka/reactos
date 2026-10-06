@@ -68,7 +68,9 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 void ngc_umount(ngc_vol *v);
 void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi);
 ngc_node *ngc_root(ngc_vol *v);
-int ngc_lookup(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned int len, ngc_node **out);
+/* Looks @name up in @dir; with @real (NTFS_MAX_NAME_LEN units) also returns the name as stored on disk. */
+int ngc_lookup(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned int len, ngc_node **out,
+		unsigned short *real, unsigned int *real_len);
 int ngc_open_stream(ngc_vol *v, ngc_node *base, const unsigned short *sname, unsigned int len, ngc_node **out);
 int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out);
 void ngc_put(ngc_node *n);
@@ -88,6 +90,12 @@ int ngc_dirty(ngc_vol *v);
 long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf);
 int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize);
 int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask);
+int ngc_create(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out);
+int ngc_unlink(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned int len, ngc_node *n);
+int ngc_rename(ngc_vol *v, ngc_node *odir, const unsigned short *oname, unsigned int olen, ngc_node *n,
+		ngc_node *ndir, const unsigned short *nname, unsigned int nlen, ngc_node *target);
+int ngc_link(ngc_vol *v, ngc_node *n, ngc_node *ndir, const unsigned short *nname, unsigned int nlen);
+int ngc_dir_empty(ngc_vol *v, ngc_node *dir);
 void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *dirties);
 /* Prints shim memory accounting (live allocations by call site, cache pages, inodes). */
 void ngc_debug_dump(void);

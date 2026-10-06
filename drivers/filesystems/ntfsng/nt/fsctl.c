@@ -87,6 +87,8 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExInitializeResourceLite(&Vcb->CoreLock);
     ExInitializeFastMutex(&Vcb->FcbListLock);
     InitializeListHead(&Vcb->FcbList);
+    InitializeListHead(&Vcb->DirNotifyList);
+    FsRtlNotifyInitializeSync(&Vcb->NotifySync);
     Vdo->StackSize = Target->StackSize + 1;
     Vdo->AlignmentRequirement = Target->AlignmentRequirement;
     Vdo->SectorSize = (USHORT)SectorSize;

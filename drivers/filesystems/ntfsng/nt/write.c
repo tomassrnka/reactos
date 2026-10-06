@@ -8,6 +8,9 @@
 
 #include "ntfsng.h"
 
+/* Cc maps files in views of this size (VACB_MAPPING_GRANULARITY). */
+#define NG_VACB_SIZE (256 * 1024)
+
 /*
  * Lock order: FCB MainResource -> FCB PagingIoResource -> Vcb->CoreLock -> core mutexes.
  * CoreLock is never held across a Cc or Mm call or while touching unlocked user memory, and
@@ -105,7 +108,7 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
 {
     PNG_VCB Vcb = Fcb->Vcb;
     LONGLONG OldSize = Fcb->Header.FileSize.QuadPart;
-    LARGE_INTEGER Li;
+    LARGE_INTEGER Li, Li2;
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status = STATUS_SUCCESS;
     int Err;
@@ -138,18 +141,50 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
         DPRINT1("ntfsng: set size of %I64x to %I64d failed %d\n", Fcb->MftNo, NewSize, Err);
         Status = Err == -NGC_ENOSPC ? STATUS_DISK_FULL : NgErrnoToStatus(Err);
     }
-    if (FileObject && Fcb->SectionObjectPointers.SharedCacheMap)
+    /*
+     * Keep Cc from showing bytes from before a truncation once the file grows again.  ReactOS's
+     * CcPurgeCacheSection skips a 256 KiB view that starts before the purge offset, and
+     * CcSetFileSizes purges only past the allocation, so pages past EOF can survive a shrink.
+     */
+    _SEH2_TRY
     {
-        _SEH2_TRY
+        if (FileObject && Fcb->SectionObjectPointers.SharedCacheMap)
         {
+            if (NewSize > OldSize && NT_SUCCESS(Status))
+            {
+                /* CcZeroData skips the work when the range straddles the cache map's valid data
+                 * length, so that is held at the old size while zeroing the exposed range. */
+                CC_FILE_SIZES Sizes;
+                Sizes.AllocationSize = Fcb->Header.AllocationSize;
+                Sizes.FileSize = Fcb->Header.FileSize;
+                Sizes.ValidDataLength.QuadPart = OldSize;
+                CcSetFileSizes(FileObject, &Sizes);
+                Li.QuadPart = OldSize;
+                Li2.QuadPart = NewSize;
+                CcZeroData(FileObject, &Li, &Li2, TRUE);
+            }
             CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
         }
-        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        else if (NewSize > OldSize && Fcb->SectionObjectPointers.DataSectionObject)
         {
-            Status = _SEH2_GetExceptionCode();
+            /* No cache map: drop whatever Mm still holds from the old EOF's view on. */
+            Li.QuadPart = OldSize & ~(LONGLONG)(NG_VACB_SIZE - 1);
+            CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Li, 0, FALSE);
         }
-        _SEH2_END;
+        if (NewSize < OldSize && NT_SUCCESS(Status) &&
+            (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject))
+        {
+            /* Everything was flushed above, so purging from the view boundary loses nothing. */
+            Li.QuadPart = NewSize & ~(LONGLONG)(NG_VACB_SIZE - 1);
+            if (!CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Li, 0, FALSE))
+                DPRINT1("ntfsng: purge of %I64x from %I64d after a shrink failed\n", Fcb->MftNo, Li.QuadPart);
+        }
     }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
     if (NT_SUCCESS(Status))
         Fcb->Modified = TRUE;
     return Status;
@@ -221,6 +256,11 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     if (Offset.LowPart == FILE_USE_FILE_POINTER_POSITION && Offset.HighPart == -1)
         Offset = FileObject->CurrentByteOffset;
+    /* A handle with FILE_APPEND_DATA but not FILE_WRITE_DATA writes at the end of the file. */
+    if (FileObject->FsContext2 && ((PNG_CCB)FileObject->FsContext2)->AppendOnly)
+        Append = TRUE;
+    if (!FsRtlCheckLockForWriteAccess(&Fcb->FileLock, Irp))
+        return STATUS_FILE_LOCK_CONFLICT;
     if (NonCached && !Append && ((Offset.LowPart | Length) & (Vcb->SectorSize - 1)))
         return STATUS_INVALID_PARAMETER;
 

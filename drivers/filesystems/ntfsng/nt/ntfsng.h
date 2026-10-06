@@ -42,6 +42,8 @@ typedef struct _NG_VCB
     BOOLEAN WriteThrough;           /* after IRP_MJ_SHUTDOWN: every change ends with a full sync */
     LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
     PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
+    PNOTIFY_SYNC NotifySync;        /* directory change notification (FsRtl) */
+    LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;
     ULONG Syncs;
 } NG_VCB, *PNG_VCB;
@@ -70,6 +72,11 @@ typedef struct _NG_FCB
     BOOLEAN UserSetWriteTime;       /* LastWriteTime set through FileBasicInformation: keep it */
     BOOLEAN DeletePending;          /* unlink at the last cleanup */
     BOOLEAN Deleted;                /* unlinked: paging writes are dropped */
+    ULONGLONG DelParentMftNo;       /* the name the delete removes (from the handle that asked) */
+    USHORT DelNameLength;           /* in WCHARs */
+    WCHAR DelName[256];
+    UNICODE_STRING DelPath;         /* full path for the change notification */
+    FILE_LOCK FileLock;             /* byte-range locks (FsRtl) */
     ULONGLONG MftNo;
     UNICODE_STRING Stream;          /* empty for the unnamed $DATA */
     WCHAR StreamBuffer[256];
@@ -87,6 +94,11 @@ typedef struct _NG_DIRENT
 typedef struct _NG_CCB
 {
     UNICODE_STRING Path;            /* "\\dir\\file[:stream]" as opened, from the volume root */
+    ULONGLONG ParentMftNo;          /* directory holding the name this handle was opened by */
+    USHORT NameLength;              /* that name as stored on disk, in WCHARs (0 for the root) */
+    WCHAR Name[256];
+    BOOLEAN DeleteOnClose;
+    BOOLEAN AppendOnly;             /* opened with FILE_APPEND_DATA but not FILE_WRITE_DATA */
     PNG_DIRENT *Entries;            /* directory snapshot taken at the first query */
     ULONG EntryCount;
     ULONG EntryCapacity;
@@ -134,7 +146,11 @@ NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
 /* create.c */
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp);
-
+PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo);
+VOID NgUnlistFcb(PNG_FCB Fcb);
+VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
+BOOLEAN NgValidName(PCUNICODE_STRING Name);
+VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);
 NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgClose(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
@@ -158,6 +174,9 @@ VOID NTAPI NgReleaseFromReadAhead(PVOID Context);
 /* dirctl.c */
 NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 VOID NgFreeDirSnapshot(PNG_CCB Ccb);
+
+/* lock control */
+NTSTATUS NgLockControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
 /* info.c */
 NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);

@@ -247,24 +247,20 @@ ngc_node *ngc_root(ngc_vol *v)
 	return (ngc_node *)igrab(d_inode(v->sb->s_root));
 }
 
-int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out)
+/* A dentry for @name (UTF-16) in the shape the core's inode operations expect; @inode may be NULL. */
+static struct dentry *ngc_mkdentry(ngc_vol *v, const unsigned short *name, unsigned int len, struct inode *inode)
 {
-	struct inode *dir = (struct inode *)dirn, *vi;
-	struct dentry *d, *r;
+	struct dentry *d;
 	u8 *u8name;
 	int n;
-
-	*out = NULL;
-	if (!S_ISDIR(dir->i_mode))
-		return -ENOTDIR;
 	if (!len || len > NTFS_MAX_NAME_LEN)
-		return -ENAMETOOLONG;
+		return ERR_PTR(-ENAMETOOLONG);
 	u8name = kmalloc(len * 4 + 1, GFP_NOFS);
 	d = kzalloc(sizeof(*d), GFP_NOFS);
 	if (!u8name || !d) {
 		kfree(u8name);
 		kfree(d);
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 	}
 	n = utf16s_to_utf8s(name, len, UTF16_LITTLE_ENDIAN, u8name, len * 4);
 	u8name[n > 0 ? n : 0] = 0;
@@ -272,16 +268,49 @@ int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned 
 	d->d_name.len = n > 0 ? n : 0;
 	d->d_sb = v->sb;
 	d->d_parent = d;
+	d->d_inode = inode;
+	return d;
+}
+
+static void ngc_freedentry(struct dentry *d)
+{
+	if (IS_ERR_OR_NULL(d))
+		return;
+	kfree(d->d_name.name);
+	kfree(d->kshim_ci_name);
+	kfree(d);
+}
+
+int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out,
+		unsigned short *real, unsigned int *real_len)
+{
+	struct inode *dir = (struct inode *)dirn, *vi;
+	struct dentry *d, *r;
+
+	*out = NULL;
+	if (!S_ISDIR(dir->i_mode))
+		return -ENOTDIR;
+	d = ngc_mkdentry(v, name, len, NULL);
+	if (IS_ERR(d))
+		return PTR_ERR(d);
 	r = dir->i_op->lookup(dir, d, 0);
 	if (IS_ERR(r)) {
-		kfree(u8name);
-		kfree(d);
+		ngc_freedentry(d);
 		return PTR_ERR(r);
 	}
 	vi = r ? r->d_inode : d->d_inode;
-	kfree(u8name);
-	kfree(d->kshim_ci_name);
-	kfree(d);
+	if (vi && real && real_len) {
+		/* The name as stored: the case-folded match, or exactly what was asked. */
+		if (d->kshim_ci_name) {
+			int n = utf8s_to_utf16s(d->kshim_ci_name, d->kshim_ci_len, UTF16_LITTLE_ENDIAN,
+					real, NTFS_MAX_NAME_LEN);
+			*real_len = n > 0 ? n : 0;
+		} else {
+			memcpy(real, name, len * sizeof(*real));
+			*real_len = len;
+		}
+	}
+	ngc_freedentry(d);
 	if (!vi)
 		return -ENOENT;
 	*out = (ngc_node *)vi;
@@ -793,3 +822,123 @@ void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned 
 	*dirties = kshim_counter_dirty;
 }
 
+/* ------------------------------------------------------------- namespace (Tier 2) */
+
+int ngc_create(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out)
+{
+	struct inode *dir = (struct inode *)dirn;
+	struct dentry *d;
+	int err;
+	*out = NULL;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (!S_ISDIR(dir->i_mode))
+		return -ENOTDIR;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	d = ngc_mkdentry(v, name, len, NULL);
+	if (IS_ERR(d))
+		return PTR_ERR(d);
+	if (is_dir) {
+		struct dentry *r = dir->i_op->mkdir(&nop_mnt_idmap, dir, d, S_IFDIR | 0755);
+		err = IS_ERR(r) ? PTR_ERR(r) : 0;
+	} else {
+		err = dir->i_op->create(&nop_mnt_idmap, dir, d, S_IFREG | 0644);
+	}
+	if (!err && !d->d_inode)
+		err = -EIO;
+	if (!err)
+		*out = (ngc_node *)d->d_inode;	/* the new inode's reference from new_inode() */
+	ngc_freedentry(d);
+	return err;
+}
+
+int ngc_unlink(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node *n)
+{
+	struct inode *dir = (struct inode *)dirn, *vi = (struct inode *)n;
+	struct dentry *d;
+	int err;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	d = ngc_mkdentry(v, name, len, vi);
+	if (IS_ERR(d))
+		return PTR_ERR(d);
+	err = S_ISDIR(vi->i_mode) ? dir->i_op->rmdir(dir, d) : dir->i_op->unlink(dir, d);
+	ngc_freedentry(d);
+	return err;
+}
+
+/* Renames (odir, oname) of @n to (ndir, nname); @target is the inode the new name replaces, or NULL. */
+int ngc_rename(ngc_vol *v, ngc_node *odirn, const unsigned short *oname, unsigned int olen, ngc_node *n,
+		ngc_node *ndirn, const unsigned short *nname, unsigned int nlen, ngc_node *target)
+{
+	struct inode *odir = (struct inode *)odirn, *ndir = (struct inode *)ndirn;
+	struct dentry *od, *nd;
+	int err;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	od = ngc_mkdentry(v, oname, olen, (struct inode *)n);
+	nd = ngc_mkdentry(v, nname, nlen, (struct inode *)target);
+	if (IS_ERR(od) || IS_ERR(nd)) {
+		err = IS_ERR(od) ? PTR_ERR(od) : PTR_ERR(nd);
+		ngc_freedentry(IS_ERR(od) ? NULL : od);
+		ngc_freedentry(IS_ERR(nd) ? NULL : nd);
+		return err;
+	}
+	err = odir->i_op->rename(&nop_mnt_idmap, odir, od, ndir, nd, 0);
+	ngc_freedentry(od);
+	ngc_freedentry(nd);
+	return err;
+}
+
+int ngc_link(ngc_vol *v, ngc_node *n, ngc_node *ndirn, const unsigned short *nname, unsigned int nlen)
+{
+	struct inode *ndir = (struct inode *)ndirn, *vi = (struct inode *)n;
+	struct dentry *od, *nd;
+	int err;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (S_ISDIR(vi->i_mode))
+		return -EPERM;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	od = ngc_mkdentry(v, nname, nlen, vi);
+	nd = ngc_mkdentry(v, nname, nlen, NULL);
+	if (IS_ERR(od) || IS_ERR(nd)) {
+		err = IS_ERR(od) ? PTR_ERR(od) : PTR_ERR(nd);
+		ngc_freedentry(IS_ERR(od) ? NULL : od);
+		ngc_freedentry(IS_ERR(nd) ? NULL : nd);
+		return err;
+	}
+	err = ndir->i_op->link(od, ndir, nd);
+	/* The core took a reference for the new dentry (ihold); our dentries hold none. */
+	if (!err)
+		iput(vi);
+	ngc_freedentry(od);
+	ngc_freedentry(nd);
+	return err;
+}
+
+static int ngc_any_entry(void *ctx, const unsigned short *name, unsigned int len, unsigned long long ino, unsigned int t)
+{
+	(void)ino; (void)t;
+	if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.'))
+		return 0;
+	*(int *)ctx = 1;
+	return 1;
+}
+
+/* 1 if the directory has no entries besides . and .., 0 if it has, <0 on error. */
+int ngc_dir_empty(ngc_vol *v, ngc_node *dirn)
+{
+	int any = 0, err = ngc_readdir(v, dirn, ngc_any_entry, &any);
+	return err < 0 ? err : !any;
+}

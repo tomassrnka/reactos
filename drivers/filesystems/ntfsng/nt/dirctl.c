@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS NTFS-NG file system driver
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     IRP_MJ_DIRECTORY_CONTROL: IRP_MN_QUERY_DIRECTORY
+ * PURPOSE:     IRP_MJ_DIRECTORY_CONTROL: query directory, change notification
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -170,7 +170,15 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     int Err;
 
     if (Stack->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY)
-        return STATUS_NOT_IMPLEMENTED;
+    {
+        if (!Fcb || !Ccb || !Fcb->IsDirectory)
+            return STATUS_INVALID_PARAMETER;
+        /* FsRtl keeps the IRP and completes it when a reported change matches the filter. */
+        FsRtlNotifyFullChangeDirectory(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb, (PSTRING)&Ccb->Path,
+                                       (Stack->Flags & SL_WATCH_TREE) != 0, FALSE,
+                                       Stack->Parameters.NotifyDirectory.CompletionFilter, Irp, NULL, NULL);
+        return STATUS_PENDING;
+    }
     if (Stack->MinorFunction != IRP_MN_QUERY_DIRECTORY)
         return STATUS_INVALID_DEVICE_REQUEST;
     if (!Fcb || !Ccb || !Fcb->IsDirectory)
