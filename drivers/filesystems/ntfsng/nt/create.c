@@ -179,16 +179,14 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         return STATUS_ACCESS_DENIED;
     if (Options & FILE_OPEN_BY_FILE_ID)
         return STATUS_NOT_IMPLEMENTED;
-    /* Read-only driver: anything that could modify the volume is refused up front. */
-    if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
-        return STATUS_MEDIA_WRITE_PROTECTED;
-    if (Options & FILE_DELETE_ON_CLOSE)
-        return STATUS_MEDIA_WRITE_PROTECTED;
-    if ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen)
-        return STATUS_MEDIA_WRITE_PROTECTED;
-
     if (FileObject->FileName.Length == 0 && (!RelatedFcb || RelatedFcb->IsVolume))
+    {
+        if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
+            return STATUS_MEDIA_WRITE_PROTECTED;
+        if ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen)
+            return STATUS_MEDIA_WRITE_PROTECTED;
         return NgOpenVolume(Vcb, FileObject, Stack);
+    }
 
     /* Absolute path from the volume root, built from the related open if any. */
     Full.MaximumLength = FileObject->FileName.Length + sizeof(WCHAR) * 2 +
@@ -282,11 +280,26 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ngc_stat(Node, &St);
     NgReleaseCore(Vcb);
 
+    /*
+     * Read-only driver: the name is resolved first, so callers see the same collision and
+     * not-found results as on a writable volume; whatever would modify the volume is refused.
+     */
     if (!NT_SUCCESS(Status))
     {
-        /* FILE_OPEN_IF would have to create the file. */
-        if (Status == STATUS_OBJECT_NAME_NOT_FOUND && Disposition == FILE_OPEN_IF)
+        /* Only FILE_OPEN and FILE_OVERWRITE fail on a missing file; the others would create it. */
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND && Disposition != FILE_OPEN && Disposition != FILE_OVERWRITE)
             Status = STATUS_MEDIA_WRITE_PROTECTED;
+        goto out;
+    }
+    if (Disposition == FILE_CREATE)
+    {
+        Status = STATUS_OBJECT_NAME_COLLISION;
+        goto out;
+    }
+    if ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) || (Options & FILE_DELETE_ON_CLOSE) ||
+        ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen))
+    {
+        Status = STATUS_MEDIA_WRITE_PROTECTED;
         goto out;
     }
 
