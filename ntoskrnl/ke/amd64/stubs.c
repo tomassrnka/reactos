@@ -182,15 +182,17 @@ KiSwapProcess(IN PKPROCESS NewProcess,
     PKIPCR Pcr = (PKIPCR)KeGetPcr();
 
 #ifdef CONFIG_SMP
-    /* Update active processor mask */
-    InterlockedXor64((PLONG64)&NewProcess->ActiveProcessors, Pcr->Prcb.SetMember);
-    NT_ASSERT((NewProcess->ActiveProcessors & Pcr->Prcb.SetMember) != 0);
-    InterlockedXor64((PLONG64)&OldProcess->ActiveProcessors, Pcr->Prcb.SetMember);
-    NT_ASSERT((OldProcess->ActiveProcessors & Pcr->Prcb.SetMember) == 0);
+    /* TLB flushes target the processors running a process, so join the new
+       one before loading its address space and leave the old one after */
+    InterlockedOr64((PLONG64)&NewProcess->ActiveProcessors, Pcr->Prcb.SetMember);
 #endif
 
     /* Update CR3 */
     __writecr3(NewProcess->DirectoryTableBase[0]);
+
+#ifdef CONFIG_SMP
+    InterlockedAnd64((PLONG64)&OldProcess->ActiveProcessors, ~(LONG64)Pcr->Prcb.SetMember);
+#endif
 
     /* Update IOPM offset */
     Pcr->TssBase->IoMapBase = NewProcess->IopmOffset;
