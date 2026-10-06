@@ -1,0 +1,76 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * ngapi.h - the interface between the NT glue (nt/, compiled with NT headers)
+ * and the fs/ntfs core plus shim (compiled with Linux-API headers only).
+ * Only basic C types cross it.  Errors are negative Linux errno values.
+ */
+#ifndef NGAPI_H
+#define NGAPI_H
+
+typedef struct ngc_vol ngc_vol;      /* a mounted fs/ntfs super_block */
+typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
+
+#define NGC_ENOENT 2
+#define NGC_EIO 5
+#define NGC_ENOMEM 12
+#define NGC_ENOTDIR 20
+#define NGC_EISDIR 21
+#define NGC_EINVAL 22
+#define NGC_EROFS 30
+#define NGC_ENAMETOOLONG 36
+#define NGC_EOPNOTSUPP 95
+#define NGC_EUCLEAN 117
+
+#define NGC_ATTR_COMPRESSED 1
+#define NGC_ATTR_SPARSE 2
+#define NGC_ATTR_ENCRYPTED 4
+
+struct ngc_stat {
+	unsigned long long mft_ref;      /* MFT number | sequence << 48 */
+	unsigned long long size;
+	unsigned long long alloc;        /* on-disk allocation (compressed size if compressed) */
+	long long crtime, atime, mtime, ctime;  /* NT time, 100 ns since 1601 */
+	unsigned int file_attributes;    /* $STANDARD_INFORMATION flags (FILE_ATTRIBUTE_* values) */
+	unsigned int nlink;
+	unsigned int flags;              /* NGC_ATTR_* of this stream */
+	int is_dir;
+	int is_link;
+};
+
+struct ngc_volinfo {
+	unsigned long long total_clusters;
+	unsigned long long free_clusters;
+	unsigned long long serial;
+	unsigned int cluster_size;
+	unsigned int sector_size;
+	unsigned int label_len;          /* in UTF-16 units */
+	unsigned short label[64];
+	unsigned char major, minor;
+};
+
+typedef int (*ngc_filldir_t)(void *ctx, const unsigned short *name, unsigned int len,
+		unsigned long long mft_no, unsigned int dtype);
+typedef int (*ngc_stream_t)(void *ctx, const unsigned short *name, unsigned int len,
+		unsigned long long size, unsigned long long alloc);
+
+int ngc_init(void);
+int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, ngc_vol **out);
+void ngc_umount(ngc_vol *v);
+void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi);
+ngc_node *ngc_root(ngc_vol *v);
+int ngc_lookup(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned int len, ngc_node **out);
+int ngc_open_stream(ngc_vol *v, ngc_node *base, const unsigned short *sname, unsigned int len, ngc_node **out);
+int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out);
+void ngc_put(ngc_node *n);
+void ngc_stat(ngc_node *n, struct ngc_stat *st);
+int ngc_readdir(ngc_vol *v, ngc_node *dir, ngc_filldir_t fn, void *ctx);
+int ngc_streams(ngc_node *n, ngc_stream_t fn, void *ctx);
+/* Reads [off, off+len) through the private page cache; bytes past EOF are zero.  Returns bytes copied or <0. */
+long ngc_read(ngc_node *n, unsigned long long off, unsigned int len, void *buf, int drop_cache);
+void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads);
+/* Drops the clean, unreferenced shim page-cache pages of a node. */
+void ngc_trim(ngc_node *n);
+/* Prints shim memory accounting (live allocations by call site, cache pages, inodes). */
+void ngc_debug_dump(void);
+
+#endif
