@@ -56,6 +56,7 @@ typedef struct _NG_FCB
     FSRTL_COMMON_FCB_HEADER Header; /* must be first: FsContext */
     SECTION_OBJECT_POINTERS SectionObjectPointers;
     LONGLONG CachedEnd;             /* highest AllocationSize the header has had: bounds Mm's pages */
+    LONGLONG LogicalVdl;            /* valid data length as SetFileValidData sees it (writes raise it) */
     ERESOURCE MainResource;
     ERESOURCE PagingIoResource;
     LIST_ENTRY VcbLinks;

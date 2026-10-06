@@ -228,14 +228,31 @@ static NTSTATUS NgUnsupported(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return STATUS_INVALID_DEVICE_REQUEST;
 }
 
-static NTSTATUS NgDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+/* TRUE for an open of the volume itself (\\.\C:), whose requests go to the storage stack. */
+static BOOLEAN NgIsVolumeOpen(PIRP Irp)
+{
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
+    return Fcb && Fcb->IsVolume;
+}
+
+/*
+ * Volume handles pass storage IOCTLs (geometry, partition info, mount manager queries)
+ * through.  Files and directories refuse device controls: kernel32 takes a
+ * directory whose handle answers IOCTL_MOUNTDEV_QUERY_DEVICE_NAME for a volume root.
+ */
+static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
-    NTSTATUS Status;
-    /* Volume handles pass storage IOCTLs (geometry, partition info) through. */
+    if (!NgIsVolumeOpen(Irp))
+    {
+        Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
     IoSkipCurrentIrpStackLocation(Irp);
-    Status = IoCallDriver(Vcb->StorageDevice, Irp);
-    return Status;
+    return IoCallDriver(Vcb->StorageDevice, Irp);
 }
 
 /* Fast I/O: cached reads go straight to Cc (FsRtlCopyRead); everything else takes the IRP path. */
@@ -308,7 +325,7 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     else if (Major == IRP_MJ_DEVICE_CONTROL && DeviceObject != NgGlobal.ControlDevice)
     {
         /* Passed down: the storage stack completes it. */
-        Status = NgDeviceControl(DeviceObject, Irp);
+        Status = NgPassToStorage(DeviceObject, Irp);
         goto out;
     }
     else if (Major == IRP_MJ_LOCK_CONTROL)

@@ -58,6 +58,7 @@ static NTSTATUS NgName(PNG_CCB Ccb, PFILE_NAME_INFORMATION N, ULONG Room, PULONG
 
 typedef struct _NG_STREAMS
 {
+    BOOLEAN NamedOnly;          /* a directory has no unnamed data stream */
     PUCHAR Buffer;
     ULONG Room;
     ULONG Used;
@@ -76,6 +77,8 @@ static int NgStreamFill(void *Context, const unsigned short *Name, unsigned int 
     ULONG Need = FIELD_OFFSET(FILE_STREAM_INFORMATION, StreamName) + NameBytes;
     PFILE_STREAM_INFORMATION P;
 
+    if (S->NamedOnly && Len == 0)
+        return 0;
     if (Offset + Need > S->Room)
     {
         S->Status = STATUS_BUFFER_OVERFLOW;
@@ -180,7 +183,7 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
         case FileStreamInformation:
         {
-            NG_STREAMS S = { Buffer, Length, 0, 0, 0, STATUS_SUCCESS };
+            NG_STREAMS S = { Fcb->IsDirectory, Buffer, Length, 0, 0, 0, STATUS_SUCCESS };
             int Err;
             if (Fcb->Stream.Length)
                 return STATUS_INVALID_PARAMETER;
@@ -191,6 +194,8 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             NgReleaseCore(Vcb);
             if (Err)
                 return NgErrnoToStatus(Err);
+            if (!S.Count && NT_SUCCESS(S.Status))
+                return STATUS_END_OF_FILE;      /* no streams (a directory): FindFirstStreamW's ERROR_HANDLE_EOF */
             Status = S.Status;
             Used = S.Used;
             break;
@@ -371,7 +376,13 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     {
         if ((TSt.mft_ref & 0xffffffffffffULL) == Fcb->MftNo)
         {
-            if (IsLink || NewDirMftNo != Ccb->ParentMftNo)
+            if (IsLink)
+            {
+                /* The name is already a link to this file: replacing it with itself changes nothing. */
+                Status = Replace ? STATUS_SUCCESS : STATUS_OBJECT_NAME_COLLISION;
+                goto out;
+            }
+            if (NewDirMftNo != Ccb->ParentMftNo)
             {
                 Status = Replace ? STATUS_ACCESS_DENIED : STATUS_OBJECT_NAME_COLLISION;
                 goto out;
@@ -435,6 +446,15 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                 Err = ngc_rename(Vcb->Core, NewDir, T.Buffer, T.Length / sizeof(WCHAR), Fcb->Node, NewDir,
                                  NewName.Buffer, NewName.Length / sizeof(WCHAR), NULL);
         }
+        else if (Target && !NgSameName(NewName.Buffer, NewName.Length / sizeof(WCHAR), RealT, (USHORT)RealTLen))
+        {
+            /* The core unlinks a replaced target by the new name, which must then be its exact name:
+             * when only the case differs, unlink the target by its own name first. */
+            Err = ngc_unlink(Vcb->Core, NewDir, RealT, RealTLen, Target);
+            if (!Err)
+                Err = ngc_rename(Vcb->Core, OldDir, Ccb->Name, Ccb->NameLength, Fcb->Node, NewDir,
+                                 NewName.Buffer, NewName.Length / sizeof(WCHAR), NULL);
+        }
         else
         {
             Err = ngc_rename(Vcb->Core, OldDir, Ccb->Name, Ccb->NameLength, Fcb->Node, NewDir,
@@ -469,16 +489,18 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     }
     else
     {
+        /* Within one directory a rename is reported as old/new name; a move to another directory
+         * as a removal from the old one and an addition to the new one (what Win32 watchers expect). */
+        BOOLEAN Moved = NewDirMftNo != Ccb->ParentMftNo;
+        ULONG Filter = Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME;
         OldPath = Ccb->Path;
-        NgNotify(Vcb, &OldPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
-                 FILE_ACTION_RENAMED_OLD_NAME);
+        NgNotify(Vcb, &OldPath, Filter, Moved ? FILE_ACTION_REMOVED : FILE_ACTION_RENAMED_OLD_NAME);
         Ccb->Path = NewPath;
         NewPath.Buffer = OldPath.Buffer;
         Ccb->ParentMftNo = NewDirMftNo;
         Ccb->NameLength = NewName.Length / sizeof(WCHAR);
         RtlCopyMemory(Ccb->Name, NewName.Buffer, NewName.Length);
-        NgNotify(Vcb, &Ccb->Path, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
-                 FILE_ACTION_RENAMED_NEW_NAME);
+        NgNotify(Vcb, &Ccb->Path, Filter, Moved ? FILE_ACTION_ADDED : FILE_ACTION_RENAMED_NEW_NAME);
     }
 out:
     if (Target || NewDir)
@@ -560,8 +582,24 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             return Status;
         }
         case FileValidDataLengthInformation:
-            /* Valid data length is kept equal to the file size; bytes past the on-disk VDL read as zeros. */
+        {
+            /*
+             * SetFileValidData: needs SeManageVolumePrivilege; the new length may not go below the
+             * current valid data length nor past the end of file.  The driver never exposes stale
+             * clusters (unwritten ranges read as zeros), so accepting it changes nothing on disk;
+             * only the logical valid data length is tracked for these checks.
+             */
+            LONGLONG New;
+            if (Length < sizeof(FILE_VALID_DATA_LENGTH_INFORMATION))
+                return STATUS_INVALID_PARAMETER;
+            if (!SeSinglePrivilegeCheck(RtlConvertLongToLuid(SE_MANAGE_VOLUME_PRIVILEGE), Irp->RequestorMode))
+                return STATUS_PRIVILEGE_NOT_HELD;
+            New = ((PFILE_VALID_DATA_LENGTH_INFORMATION)Buffer)->ValidDataLength.QuadPart;
+            if (Fcb->IsDirectory || New <= 0 || New < Fcb->LogicalVdl || New > Fcb->Header.FileSize.QuadPart)
+                return STATUS_INVALID_PARAMETER;
+            Fcb->LogicalVdl = New;
             return STATUS_SUCCESS;
+        }
         case FileDispositionInformation:
             if (Length < sizeof(FILE_DISPOSITION_INFORMATION))
                 return STATUS_INVALID_PARAMETER;
@@ -662,11 +700,12 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                                       FILE_NAMED_STREAMS | FILE_SUPPORTS_SPARSE_FILES |
                                       FILE_FILE_COMPRESSION | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
             A->MaximumComponentNameLength = 255;
-            A->FileSystemNameLength = sizeof(Name) - sizeof(WCHAR);
-            Copy = min(A->FileSystemNameLength, Length - Fixed);
+            /* On a short buffer the length reports what was copied (as FAT and the apitest expect). */
+            Copy = min(sizeof(Name) - sizeof(WCHAR), Length - Fixed);
+            A->FileSystemNameLength = Copy;
             RtlCopyMemory(A->FileSystemName, Name, Copy);
             Used = Fixed + Copy;
-            if (Copy < A->FileSystemNameLength)
+            if (Copy < sizeof(Name) - sizeof(WCHAR))
                 Status = STATUS_BUFFER_OVERFLOW;
             break;
         }

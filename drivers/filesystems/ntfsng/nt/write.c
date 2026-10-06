@@ -246,7 +246,11 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
     }
     _SEH2_END;
     if (NT_SUCCESS(Status))
+    {
         Fcb->Modified = TRUE;
+        if (Fcb->LogicalVdl > NewSize)
+            Fcb->LogicalVdl = NewSize;
+    }
     return Status;
 }
 
@@ -266,6 +270,12 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     if (!Buffer)
         return STATUS_INSUFFICIENT_RESOURCES;
     NgAcquireCore(Vcb);
+    /* Deleted under CoreLock: a page writer that raced with the last cleanup's delete drops its data. */
+    if (Fcb->Deleted)
+    {
+        NgReleaseCore(Vcb);
+        return STATUS_SUCCESS;
+    }
     Done = NgEnsureNode(Fcb);
     if (!Done)
         Done = ngc_write(Vcb->Core, Fcb->Node, Offset, Clipped, Buffer);
@@ -276,7 +286,8 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     NgReleaseCore(Vcb);
     if (Done < 0)
     {
-        DPRINT1("ntfsng: paging write of %I64x at %I64d len %lu failed %ld\n", Fcb->MftNo, Offset, Clipped, Done);
+        DPRINT1("ntfsng: paging write of %I64x at %I64d len %lu failed %ld (size %I64d, handles %ld, deleted %u)\n",
+                Fcb->MftNo, Offset, Clipped, Done, Fcb->Header.FileSize.QuadPart, Fcb->OpenHandles, Fcb->Deleted);
         Irp->IoStatus.Information = 0;
         return Done == -NGC_EROFS ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_UNEXPECTED_IO_ERROR;
     }
@@ -299,7 +310,7 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PVOID Buffer;
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status = STATUS_SUCCESS;
-    LONGLONG End;
+    LONGLONG End, OldSize;
     long Done;
     int Err;
 
@@ -315,7 +326,14 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         return NgPagingWrite(Vcb, Fcb, Irp, Offset.QuadPart, Length);
 
     if (Offset.LowPart == FILE_USE_FILE_POINTER_POSITION && Offset.HighPart == -1)
+    {
+        /* Only a synchronous handle has a file position. */
+        if (!(FileObject->Flags & FO_SYNCHRONOUS_IO))
+            return STATUS_INVALID_PARAMETER;
         Offset = FileObject->CurrentByteOffset;
+    }
+    if (Offset.QuadPart < 0 && !Append)
+        return STATUS_INVALID_PARAMETER;
     /* A handle with FILE_APPEND_DATA but not FILE_WRITE_DATA writes at the end of the file. */
     if (FileObject->FsContext2 && ((PNG_CCB)FileObject->FsContext2)->AppendOnly)
         Append = TRUE;
@@ -359,13 +377,31 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     else
     {
+        /* Checked before the file grows: a bad buffer must not leave a longer file behind. */
         Buffer = Irp->UserBuffer;
+        if (!Buffer)
+            return STATUS_INVALID_USER_BUFFER;
+        if (Irp->RequestorMode != KernelMode)
+        {
+            _SEH2_TRY
+            {
+                ProbeForRead(Buffer, Length, 1);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            if (!NT_SUCCESS(Status))
+                return Status;
+        }
     }
 
     ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
     if (Append)
         Offset.QuadPart = Fcb->Header.FileSize.QuadPart;
     End = Offset.QuadPart + Length;
+    OldSize = Fcb->Header.FileSize.QuadPart;
     if (End > Fcb->Header.FileSize.QuadPart)
     {
         Status = NgSetFileSize(Fcb, FileObject, End);
@@ -395,6 +431,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Status = _SEH2_GetExceptionCode();
         }
         _SEH2_END;
+        if (!NT_SUCCESS(Status) && End > OldSize && OldSize < Fcb->Header.FileSize.QuadPart)
+            NgSetFileSize(Fcb, FileObject, OldSize);
     }
     else
     {
@@ -423,6 +461,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         Irp->IoStatus.Information = Length;
         Fcb->Modified = TRUE;
+        if (End > Fcb->LogicalVdl)
+            Fcb->LogicalVdl = End;
         if (FileObject->Flags & FO_SYNCHRONOUS_IO)
             FileObject->CurrentByteOffset.QuadPart = Offset.QuadPart + Length;
         FileObject->Flags |= FO_FILE_MODIFIED;

@@ -643,8 +643,12 @@ static int ngc_nr_write(struct ngc_vol *v, struct inode *vi, u64 pos, u64 len, c
 		err = ntfs_attr_map_cluster(ni, vcn, &lcn, &cnt, maxc, &balloc, true, false);
 		up_write(&ni->runlist.lock);
 		mutex_unlock(&ni->mrec_lock);
-		if (err)
+		if (err) {
+			printk(KERN_ERR "ngc: map of ino %llu vcn %lld failed %d (size %lld, alloc %lld, init %lld)\n",
+			       (unsigned long long)ni->mft_no, (long long)vcn, err, (long long)ni->data_size,
+			       (long long)ni->allocated_size, (long long)ni->initialized_size);
 			return err;
+		}
 		if (lcn < 0 || cnt <= 0)
 			return -EIO;
 		n = min_t(u64, len, ((u64)cnt << bits) - vofs);

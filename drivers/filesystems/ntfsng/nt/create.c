@@ -140,6 +140,8 @@ static BOOLEAN NgSplitStream(PUNICODE_STRING Last, PUNICODE_STRING Stream)
     Stream->Buffer = Last->Buffer + i + 1;
     Stream->Length = Stream->MaximumLength = (n - i - 1) * sizeof(WCHAR);
     Last->Length = i * sizeof(WCHAR);
+    if (Stream->Length == 0)
+        return FALSE;   /* "name:" names no stream */
     for (i = 0; i < Stream->Length / sizeof(WCHAR) && Stream->Buffer[i] != L':'; i++)
         ;
     if (i < Stream->Length / sizeof(WCHAR))
@@ -200,6 +202,20 @@ BOOLEAN NgValidName(PCUNICODE_STRING Name)
             return FALSE;
     }
     return TRUE;
+}
+
+/* Characters no path component may hold (after the stream suffix is split off). */
+static BOOLEAN NgBadComponent(PCUNICODE_STRING Comp)
+{
+    USHORT i;
+    for (i = 0; i < Comp->Length / sizeof(WCHAR); i++)
+    {
+        WCHAR c = Comp->Buffer[i];
+        if (c < 0x20 || c == L'"' || c == L'*' || c == L'/' || c == L':' || c == L'<' || c == L'>' ||
+            c == L'?' || c == L'|')
+            return TRUE;
+    }
+    return FALSE;
 }
 
 /* Reports a change of the object at Path ("\\dir\\name") to directory change notification. */
@@ -335,7 +351,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Rest.Buffer += i + 1;
             Rest.Length -= (i + 1) * sizeof(WCHAR);
         }
-        if (Comp.Length == 0 || Comp.Length > 255 * sizeof(WCHAR))
+        if (Comp.Length == 0 || Comp.Length > 255 * sizeof(WCHAR) || NgBadComponent(&Comp))
         {
             Status = STATUS_OBJECT_NAME_INVALID;
             break;
@@ -364,8 +380,10 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 break;
             }
             Status = NgErrnoToStatus(Err);
-            if (Err == -NGC_ENOENT || Err == -NGC_ENOTDIR)
+            if (Err == -NGC_ENOENT)
                 Status = LastComp ? STATUS_OBJECT_NAME_NOT_FOUND : STATUS_OBJECT_PATH_NOT_FOUND;
+            else if (Err == -NGC_ENOTDIR)
+                Status = STATUS_OBJECT_PATH_NOT_FOUND;   /* a file used as a directory */
             break;
         }
         if (LastComp)
@@ -449,6 +467,18 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     IsDir = St.is_dir ? TRUE : FALSE;
     if (!Created)
     {
+        /* The type checks come first: CreateFile on a directory fails with access denied for any
+         * disposition, and a directory request on a file reports that before anything else. */
+        if ((Options & FILE_NON_DIRECTORY_FILE) && IsDir)
+        {
+            Status = STATUS_FILE_IS_A_DIRECTORY;
+            goto out;
+        }
+        if ((Options & FILE_DIRECTORY_FILE) && !IsDir)
+        {
+            Status = STATUS_NOT_A_DIRECTORY;
+            goto out;
+        }
         if (Disposition == FILE_CREATE)
         {
             Status = STATUS_OBJECT_NAME_COLLISION;
@@ -462,15 +492,16 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
         if (!IsDir && (St.file_attributes & FILE_ATTRIBUTE_READONLY))
         {
+            /* Supersede replaces the file and is allowed; overwrite keeps it and is not. */
+            if ((Access & (FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL)) ||
+                Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
+            {
+                Status = STATUS_ACCESS_DENIED;
+                goto out;
+            }
             if (Options & FILE_DELETE_ON_CLOSE)
             {
                 Status = STATUS_CANNOT_DELETE;
-                goto out;
-            }
-            if ((Access & (FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL)) ||
-                Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF || Disposition == FILE_SUPERSEDE)
-            {
-                Status = STATUS_ACCESS_DENIED;
                 goto out;
             }
         }
@@ -534,6 +565,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     RtlCopyUnicodeString(&Fcb->Stream, &Stream);
     Fcb->Stat = St;
     NgFillStat(Fcb);
+    Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
     Found = NgInsertOrFindFcb(Vcb, Fcb);
     if (Found != Fcb)
     {
@@ -544,6 +576,17 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         Status = STATUS_DELETE_PENDING;
         goto out;
+    }
+    if (!IsDir && Fcb->SectionObjectPointers.ImageSectionObject)
+    {
+        /* A file that is mapped as an image (a running program) cannot be opened for writing. */
+        ACCESS_MASK Mapped = Access;
+        RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
+        if ((Mapped & FILE_WRITE_DATA) && !MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForWrite))
+        {
+            Status = STATUS_SHARING_VIOLATION;
+            goto out;
+        }
     }
 
     ExAcquireFastMutex(&Vcb->FcbListLock);
