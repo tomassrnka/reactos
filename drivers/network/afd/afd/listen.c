@@ -96,7 +96,7 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
     return STATUS_SUCCESS;
 }
 
-static VOID FreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt)
+VOID FreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt)
 {
     if (Qelt->ConnInfo)
         ExFreePoolWithTag(Qelt->ConnInfo, TAG_AFD_TDI_CONNECTION_INFORMATION);
@@ -509,8 +509,7 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         if( PendingConnObj->Seq == AcceptData->SequenceNumber ) {
             PFILE_OBJECT NewFileObject = NULL;
 
-            RemoveEntryList( PendingConn );
-
+            /* A bad accept handle leaves the connection queued for a retry */
             Status = ObReferenceObjectByHandle
                 ( AcceptData->ListenHandle,
                   FILE_ALL_ACCESS,
@@ -520,6 +519,8 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                   NULL );
 
             if( !NT_SUCCESS(Status) ) return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+
+            RemoveEntryList( PendingConn );
 
             ASSERT(NewFileObject != FileObject);
             ASSERT(NewFileObject->FsContext != FCB);

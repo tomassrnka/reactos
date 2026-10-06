@@ -510,7 +510,7 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ObDereferenceObject(Qelt->Object.Object);
         ZwClose(Qelt->Object.Handle);
 
-        ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
+        FreeQueuedConnection(Qelt);
     }
 
     SocketStateUnlock( FCB );
