@@ -41,8 +41,8 @@ VOID
 NTAPI
 KeStartAllProcessors(VOID)
 {
-    PVOID KernelStack, DPCStack;
-    PAPINFO APInfo;
+    PVOID KernelStack = NULL, DPCStack = NULL;
+    PAPINFO APInfo = NULL;
     ULONG ProcessorCount;
     ULONG MaximumProcessors;
 
@@ -170,11 +170,18 @@ KeStartAllProcessors(VOID)
             KeMemoryBarrier();
             YieldProcessor();
         }
+
+        /* These now belong to the running processor */
+        APInfo = NULL;
+        KernelStack = NULL;
+        DPCStack = NULL;
     }
 
-    // The last CPU didn't start - clean the data
     ProcessorCount--;
 
+    // Free what was prepared for a processor that did not start
+    if (DPCStack)
+        KiProcessorBlock[ProcessorCount + 1] = NULL;
     if (APInfo)
         ExFreePoolWithTag(APInfo, TAG_KERNEL);
     if (KernelStack)
