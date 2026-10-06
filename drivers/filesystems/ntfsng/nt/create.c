@@ -7,9 +7,6 @@
 
 #include "ntfsng.h"
 
-#define NG_WRITE_ACCESS (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | \
-                         FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL)
-
 static PNG_CCB NgAllocateCcb(PCUNICODE_STRING Path)
 {
     PNG_CCB Ccb = ExAllocatePoolWithTag(PagedPool, sizeof(NG_CCB), TAG_NTFSNG);
@@ -185,7 +182,9 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     /* Read-only driver: anything that could modify the volume is refused up front. */
     if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
         return STATUS_MEDIA_WRITE_PROTECTED;
-    if ((Access & NG_WRITE_ACCESS) || (Options & FILE_DELETE_ON_CLOSE))
+    if (Options & FILE_DELETE_ON_CLOSE)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    if ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen)
         return STATUS_MEDIA_WRITE_PROTECTED;
 
     if (FileObject->FileName.Length == 0 && (!RelatedFcb || RelatedFcb->IsVolume))

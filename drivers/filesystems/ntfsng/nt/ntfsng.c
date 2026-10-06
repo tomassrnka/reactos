@@ -326,6 +326,32 @@ out:
     return Status;
 }
 
+/* Reads a REG_DWORD from the service key; 0 if it is absent. */
+static ULONG NgReadDword(PUNICODE_STRING KeyPath, PCWSTR Name)
+{
+    OBJECT_ATTRIBUTES Oa;
+    UNICODE_STRING ValueName;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    HANDLE Key;
+    ULONG Length, Value = 0;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&Oa, KeyPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ZwOpenKey(&Key, KEY_READ, &Oa);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ntfsng: cannot open %wZ (0x%08lx)\n", KeyPath, Status);
+        return 0;
+    }
+    RtlInitUnicodeString(&ValueName, Name);
+    Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+    if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+        Value = *(PULONG)Info->Data;
+    ZwClose(Key);
+    return Value;
+}
+
 NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 {
     UNICODE_STRING Name;
@@ -333,8 +359,10 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     ULONG i;
     int Err;
 
-    UNREFERENCED_PARAMETER(RegistryPath);
     DPRINT1("ntfsng: read-only NTFS on the Linux fs/ntfs core (v7.3-rc6), loading\n");
+    NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
+    DPRINT1("ntfsng: service key %wZ, PermissiveOpen=%lu%s\n", RegistryPath, NgGlobal.PermissiveOpen,
+            NgGlobal.PermissiveOpen ? " (opens with write access are granted, modifications are still refused)" : "");
 
     Err = ngc_init();
     if (Err)

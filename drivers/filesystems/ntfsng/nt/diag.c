@@ -31,8 +31,11 @@ static const char *const NgDispNames[] =
     "SUPERSEDE", "OPEN", "CREATE", "OPEN_IF", "OVERWRITE", "OVERWRITE_IF"
 };
 
-static BOOLEAN NgDiagIsRefusal(UCHAR Major, NTSTATUS Status)
+static BOOLEAN NgDiagIsRefusal(PIO_STACK_LOCATION Stack, NTSTATUS Status)
 {
+    UCHAR Major = Stack->MajorFunction;
+    if (Major == IRP_MJ_CREATE && NT_SUCCESS(Status))
+        return (Stack->Parameters.Create.SecurityContext->DesiredAccess & NG_WRITE_ACCESS) != 0;
     if (Major == IRP_MJ_FLUSH_BUFFERS || Major == IRP_MJ_SHUTDOWN)
         return TRUE;    /* succeeds as a no-op: still a write-path request */
     return Status == STATUS_MEDIA_WRITE_PROTECTED || Status == STATUS_INVALID_DEVICE_REQUEST ||
@@ -41,17 +44,25 @@ static BOOLEAN NgDiagIsRefusal(UCHAR Major, NTSTATUS Status)
            Status == STATUS_INVALID_PARAMETER;
 }
 
-static BOOLEAN NgDiagIsWrite(UCHAR Major, NTSTATUS Status)
+static BOOLEAN NgDiagIsWrite(PIO_STACK_LOCATION Stack, NTSTATUS Status)
 {
+    UCHAR Major = Stack->MajorFunction;
+    /* An FSCTL that requires FILE_WRITE_ACCESS modifies the file or the volume. */
+    if (Major == IRP_MJ_FILE_SYSTEM_CONTROL &&
+        (Stack->MinorFunction == IRP_MN_USER_FS_REQUEST || Stack->MinorFunction == IRP_MN_KERNEL_CALL) &&
+        ((Stack->Parameters.FileSystemControl.FsControlCode >> 14) & FILE_WRITE_ACCESS))
+        return TRUE;
     return Status == STATUS_MEDIA_WRITE_PROTECTED || Major == IRP_MJ_WRITE || Major == IRP_MJ_SET_INFORMATION ||
            Major == IRP_MJ_SET_EA || Major == IRP_MJ_SET_VOLUME_INFORMATION || Major == IRP_MJ_SET_SECURITY ||
            Major == IRP_MJ_FLUSH_BUFFERS;
 }
 
 /* Path of an open file object on one of our volumes, or an empty string. */
+static WCHAR NgDiagEmpty[1];
+
 static VOID NgDiagPath(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject, PUNICODE_STRING Path)
 {
-    RtlInitEmptyUnicodeString(Path, NULL, 0);
+    RtlInitEmptyUnicodeString(Path, NgDiagEmpty, 0);
     if (DeviceObject == NgGlobal.ControlDevice || !FileObject || !FileObject->FsContext2)
         return;
     *Path = ((PNG_CCB)FileObject->FsContext2)->Path;
@@ -112,9 +123,9 @@ VOID NgDiagLogRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, NTSTATUS Status)
     LONG Seq;
     BOOLEAN Write;
 
-    if (!NgDiagIsRefusal(Major, Status))
+    if (!NgDiagIsRefusal(Stack, Status))
         return;
-    Write = NgDiagIsWrite(Major, Status) ||
+    Write = NgDiagIsWrite(Stack, Status) ||
             (Major == IRP_MJ_CREATE && (Stack->Flags & SL_OPEN_PAGING_FILE));
     Seq = InterlockedIncrement(&NgDiagSeq);
     InterlockedIncrement(&NgDiagByMajor[Major]);
@@ -142,7 +153,7 @@ VOID NgDiagLogRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, NTSTATUS Status)
         UNICODE_STRING RelPath;
         NgDiagPath(DeviceObject, Related, &RelPath);
         DbgPrint("NGDIAG #%ld t=%lu.%03lus %c CREATE st=%08lx disp=%s acc=%08lx opt=%06lx share=%lx attr=%lx%s rel=%wZ name=%wZ\n",
-                 Seq, Ms / 1000, Ms % 1000, Write ? 'W' : 'U', Status,
+                 Seq, Ms / 1000, Ms % 1000, NT_SUCCESS(Status) ? 'I' : (Write ? 'W' : 'U'), Status,
                  Disp < RTL_NUMBER_OF(NgDispNames) ? NgDispNames[Disp] : "?",
                  Stack->Parameters.Create.SecurityContext->DesiredAccess,
                  Stack->Parameters.Create.Options & 0xffffff, (ULONG)Stack->Parameters.Create.ShareAccess,
@@ -153,7 +164,7 @@ VOID NgDiagLogRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, NTSTATUS Status)
     }
 
     NgDiagPath(DeviceObject, FileObject, &Path);
-    RtlInitEmptyUnicodeString(&Target, NULL, 0);
+    RtlInitEmptyUnicodeString(&Target, NgDiagEmpty, 0);
     switch (Major)
     {
         case IRP_MJ_WRITE:

@@ -18,6 +18,9 @@
 #define TAG_NTFSNG      'GNTN'
 #define TAG_NTFSNG_CORE 'cNTN'
 
+#define NG_WRITE_ACCESS (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | \
+                         FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL)
+
 #define NG_NODE_VCB 0x4e47
 #define NG_NODE_FCB 0x4e48
 
@@ -92,6 +95,7 @@ typedef struct _NG_GLOBAL
     UCHAR MaxStackMajor;
     LONG FcbLive;
     LONG Opens;
+    ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
 } NG_GLOBAL;
 
 extern NG_GLOBAL NgGlobal;
