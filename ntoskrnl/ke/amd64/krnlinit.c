@@ -131,7 +131,7 @@ KiInitializeHandBuiltThread(
     Thread->State = Running;
     Thread->Affinity = (ULONG_PTR)1 << Prcb->Number;
     Thread->WaitIrql = DISPATCH_LEVEL;
-    Process->ActiveProcessors |= (ULONG_PTR)1 << Prcb->Number;
+    InterlockedOr64((PLONG64)&Process->ActiveProcessors, (LONG64)Prcb->SetMember);
 
 }
 
