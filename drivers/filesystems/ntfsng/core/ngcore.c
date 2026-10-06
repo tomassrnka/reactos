@@ -75,6 +75,8 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, ng
 	err = kshim_fs_type->init_fs_context(fc);
 	if (err)
 		goto fail;
+	/* NT name lookups are case-insensitive; the core defaults to case-sensitive. */
+	NVolClearCaseSensitive((struct ntfs_volume *)fc->s_fs_info);
 	mutex_lock(&ngc_mount_lock);
 	kshim_mount_bdev = b;
 	err = fc->ops->get_tree(fc);
