@@ -293,8 +293,8 @@ MmDeleteVirtualMappingEx(
         PointerPte = MiAddressToPte(Address);
         OldPte.u.Long = InterlockedExchangePte(PointerPte, 0);
 
-        /* Flush the TLB entry for this process */
-        KeFlushSingleTb(Address, FALSE);
+        /* System space is shared by every processor, a process only by those running it */
+        KeFlushSingleTb(Address, Process == NULL);
 
         if (OldPte.u.Long != 0)
         {
