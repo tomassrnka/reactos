@@ -120,7 +120,7 @@ CcpGetAppropriateBcb(
     iBcb = ExAllocateFromNPagedLookasideList(&iBcbLookasideList);
     if (iBcb == NULL)
     {
-        CcRosReleaseVacb(SharedCacheMap, Vacb, FALSE, FALSE);
+        /* The caller releases its VACB reference */
         return NULL;
     }
 
