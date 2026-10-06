@@ -75,6 +75,8 @@ static VOID NgSizesFromCore(PNG_FCB Fcb)
     if ((LONGLONG)Fcb->Stat.alloc > Alloc)
         Alloc = Fcb->Stat.alloc;
     Fcb->Header.AllocationSize.QuadPart = Alloc;
+    if (Alloc > Fcb->CachedEnd)
+        Fcb->CachedEnd = Alloc;
     Fcb->Header.FileSize.QuadPart = Fcb->Stat.size;
     Fcb->Header.ValidDataLength.QuadPart = Fcb->Stat.size;
 }
@@ -101,6 +103,62 @@ VOID NgApplyModified(PNG_FCB Fcb)
 }
 
 /*
+ * Whole-stream flushes and purges always name an explicit range.  Given no range (or length 0),
+ * ReactOS MmFlushSegment and MmPurgeSegment end at the page table that was created last, which
+ * is not the highest one once a file has shrunk and grown: pages above it are neither flushed
+ * nor purged (stale data came back after a later grow).  The range ends past every size the
+ * stream has had, and goes in chunks because the length is a ULONG.
+ */
+#define NG_RANGE_CHUNK 0x40000000
+static LONGLONG NgCachedLimit(PNG_FCB Fcb)
+{
+    LONGLONG End = max(Fcb->CachedEnd, Fcb->Header.AllocationSize.QuadPart);
+    return ((End + NG_VACB_SIZE - 1) & ~(LONGLONG)(NG_VACB_SIZE - 1)) + NG_VACB_SIZE;
+}
+
+VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb)
+{
+    LARGE_INTEGER Li;
+    LONGLONG End;
+
+    Iosb->Status = STATUS_SUCCESS;
+    Iosb->Information = 0;
+    if (Fcb->SectionObjectPointers.SharedCacheMap)
+    {
+        /* Cc walks its views up to FileSize and hands Mm explicit ranges itself. */
+        CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, Iosb);
+        return;
+    }
+    if (!Fcb->SectionObjectPointers.DataSectionObject)
+        return;
+    End = NgCachedLimit(Fcb);
+    for (Li.QuadPart = 0; Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
+    {
+        IO_STATUS_BLOCK One;
+        One.Status = STATUS_SUCCESS;
+        CcFlushCache(&Fcb->SectionObjectPointers, &Li, (ULONG)min(End - Li.QuadPart, (LONGLONG)NG_RANGE_CHUNK), &One);
+        if (!NT_SUCCESS(One.Status) && NT_SUCCESS(Iosb->Status))
+            Iosb->Status = One.Status;
+    }
+}
+
+/* Drops every cached page of the stream from Start on; FALSE if something was in use. */
+BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start)
+{
+    LARGE_INTEGER Li;
+    LONGLONG End = NgCachedLimit(Fcb);
+    BOOLEAN Ok;
+
+    /* Cc's views first (its view walk handles an open end correctly), then Mm's pages by range. */
+    Li.QuadPart = Start;
+    Ok = CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Li, 0, FALSE);
+    for (; Ok && Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
+        Ok = CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Li,
+                                 (ULONG)min(End - Li.QuadPart, (LONGLONG)NG_RANGE_CHUNK), FALSE);
+    return Ok;
+}
+
+/*
  * EOF change.  Caller holds MainResource exclusive.  Core first, then the header, then Cc.
  * A shrink flushes Cc first so the core's on-disk view of the surviving bytes is current.
  */
@@ -122,8 +180,7 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
         Li.QuadPart = NewSize;
         if (!MmCanFileBeTruncated(&Fcb->SectionObjectPointers, &Li))
             return STATUS_USER_MAPPED_FILE;
-        if (Fcb->SectionObjectPointers.DataSectionObject)
-            CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &Iosb);
+        NgFlushStream(Fcb, &Iosb);
     }
     ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
     NgAcquireCore(Vcb);
@@ -167,16 +224,19 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
         }
         else if (NewSize > OldSize && Fcb->SectionObjectPointers.DataSectionObject)
         {
-            /* No cache map: drop whatever Mm still holds from the old EOF's view on. */
+            /* No cache map: drop whatever Mm still holds from the old EOF's view on (flushed first:
+             * the pages below the old EOF may be dirty). */
             Li.QuadPart = OldSize & ~(LONGLONG)(NG_VACB_SIZE - 1);
-            CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Li, 0, FALSE);
+            CcFlushCache(&Fcb->SectionObjectPointers, &Li, (ULONG)(OldSize - Li.QuadPart) + PAGE_SIZE, &Iosb);
+            if (!NgPurgeFrom(Fcb, Li.QuadPart))
+                DPRINT1("ntfsng: purge of %I64x from %I64d after a grow failed\n", Fcb->MftNo, Li.QuadPart);
         }
         if (NewSize < OldSize && NT_SUCCESS(Status) &&
             (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject))
         {
             /* Everything was flushed above, so purging from the view boundary loses nothing. */
             Li.QuadPart = NewSize & ~(LONGLONG)(NG_VACB_SIZE - 1);
-            if (!CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Li, 0, FALSE))
+            if (!NgPurgeFrom(Fcb, Li.QuadPart))
                 DPRINT1("ntfsng: purge of %I64x from %I64d after a shrink failed\n", Fcb->MftNo, Li.QuadPart);
         }
     }
@@ -409,7 +469,7 @@ VOID NgFlushVolume(PNG_VCB Vcb)
         if (Fcb->SectionObjectPointers.DataSectionObject)
         {
             ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
-            CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &Iosb);
+            NgFlushStream(Fcb, &Iosb);
             ExReleaseResourceLite(Fcb->Header.Resource);
         }
         NgApplyModified(Fcb);
@@ -444,7 +504,7 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Fcb->SectionObjectPointers.DataSectionObject)
     {
         ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
-        CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &Iosb);
+        NgFlushStream(Fcb, &Iosb);
         ExReleaseResourceLite(Fcb->Header.Resource);
     }
     NgApplyModified(Fcb);

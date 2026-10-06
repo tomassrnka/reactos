@@ -55,6 +55,7 @@ typedef struct _NG_FCB
 {
     FSRTL_COMMON_FCB_HEADER Header; /* must be first: FsContext */
     SECTION_OBJECT_POINTERS SectionObjectPointers;
+    LONGLONG CachedEnd;             /* highest AllocationSize the header has had: bounds Mm's pages */
     ERESOURCE MainResource;
     ERESOURCE PagingIoResource;
     LIST_ENTRY VcbLinks;
@@ -163,6 +164,8 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
 VOID NgFlushVolume(PNG_VCB Vcb);
+VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
+BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
 VOID NgAfterChange(PNG_VCB Vcb);
 VOID NgApplyModified(PNG_FCB Fcb);
 NTSTATUS NgStartFlusher(PNG_VCB Vcb);

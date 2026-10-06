@@ -400,8 +400,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                     Status = STATUS_ACCESS_DENIED;
                     goto out;
                 }
-                if (TargetFcb->SectionObjectPointers.SharedCacheMap)
-                    CcPurgeCacheSection(&TargetFcb->SectionObjectPointers, NULL, 0, FALSE);
+                if (TargetFcb->SectionObjectPointers.SharedCacheMap || TargetFcb->SectionObjectPointers.DataSectionObject)
+                    NgPurgeFrom(TargetFcb, 0);
             }
         }
     }

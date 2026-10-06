@@ -575,8 +575,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         unsigned int Attrs = (FileAttributes & NG_SETTABLE_ATTRS) | FILE_ATTRIBUTE_ARCHIVE;
         ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
         Status = NgSetFileSize(Fcb, FileObject, 0);
-        if (NT_SUCCESS(Status) && Fcb->SectionObjectPointers.SharedCacheMap)
-            CcPurgeCacheSection(&Fcb->SectionObjectPointers, NULL, 0, FALSE);
+        if (NT_SUCCESS(Status) && (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject))
+            NgPurgeFrom(Fcb, 0);
         if (NT_SUCCESS(Status))
         {
             NgAcquireCore(Vcb);
@@ -729,8 +729,8 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             LARGE_INTEGER Zero;
             Zero.QuadPart = 0;
             CcUninitializeCacheMap(FileObject, &Zero, NULL);
-            if (Fcb->SectionObjectPointers.SharedCacheMap)
-                CcPurgeCacheSection(&Fcb->SectionObjectPointers, NULL, 0, FALSE);
+            if (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject)
+                NgPurgeFrom(Fcb, 0);
         }
         else
         {

@@ -180,6 +180,8 @@ VOID NgFillStat(PNG_FCB Fcb)
     if ((LONGLONG)Fcb->Stat.alloc > Alloc)
         Alloc = Fcb->Stat.alloc;
     Fcb->Header.AllocationSize.QuadPart = Alloc;
+    if (Alloc > Fcb->CachedEnd)
+        Fcb->CachedEnd = Alloc;
 }
 
 VOID NgDereferenceFcb(PNG_FCB Fcb)
