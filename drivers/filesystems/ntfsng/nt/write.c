@@ -159,6 +159,28 @@ BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start)
 }
 
 /*
+ * Before a non-cached write.  ReactOS CcPurgeCacheSection drops only views that lie wholly
+ * inside the range and stops at the first view past an explicit end (its view list is not in
+ * offset order), so everything from the view holding Offset to the end of the stream is
+ * flushed and then purged.  FALSE if a view stayed in use.
+ */
+BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset)
+{
+    LONGLONG End = NgCachedLimit(Fcb);
+    LARGE_INTEGER Li;
+    IO_STATUS_BLOCK Iosb;
+    BOOLEAN Ok;
+
+    Offset &= ~(LONGLONG)(NG_VACB_SIZE - 1);
+    ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
+    for (Li.QuadPart = Offset; Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
+        CcFlushCache(&Fcb->SectionObjectPointers, &Li, (ULONG)min(End - Li.QuadPart, (LONGLONG)NG_RANGE_CHUNK), &Iosb);
+    Ok = NgPurgeFrom(Fcb, Offset);
+    ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+    return Ok;
+}
+
+/*
  * EOF change.  Caller holds MainResource exclusive.  Core first, then the header, then Cc.
  * A shrink flushes Cc first so the core's on-disk view of the surviving bytes is current.
  */
@@ -409,6 +431,16 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             goto out_unlock;
     }
 
+    /*
+     * A non-cached write must not leave older bytes in Cc.  When a view cannot be purged (in
+     * use), the write goes through the cache and straight on to disk instead.
+     */
+    if (NonCached && Fcb->SectionObjectPointers.DataSectionObject && !NgPurgeForNonCached(Fcb, Offset.QuadPart))
+    {
+        NonCached = FALSE;
+        WriteThrough = TRUE;
+        Vcb->NonCachedViaCache++;
+    }
     if (!NonCached)
     {
         _SEH2_TRY
@@ -436,14 +468,6 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     else
     {
-        /* Keep Cc from holding stale pages of the range we write around it. */
-        if (Fcb->SectionObjectPointers.DataSectionObject)
-        {
-            ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
-            CcFlushCache(&Fcb->SectionObjectPointers, &Offset, Length, &Iosb);
-            CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Offset, Length, FALSE);
-            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
-        }
         NgAcquireCore(Vcb);
         Err = NgEnsureNode(Fcb);
         Done = Err ? Err : ngc_write(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
@@ -589,8 +613,8 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ngc_volinfo(Vcb->Core, &Vcb->Info);
         ngc_jnl_report(Vcb->Core);
         NgReleaseCore(Vcb);
-        DPRINT1("ntfsng: shutdown: volume %08lx flushed, %s, %lu syncs\n", Vcb->Vpb->SerialNumber,
-                Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs);
+        DPRINT1("ntfsng: shutdown: volume %08lx flushed, %s, %lu syncs, %lu non-cached writes via Cc\n",
+                Vcb->Vpb->SerialNumber, Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs, Vcb->NonCachedViaCache);
     }
     ngc_write_stats(&Writes, &Bytes, &Syncs, &Dirties);
     DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs, %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",

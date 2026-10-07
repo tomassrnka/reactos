@@ -170,6 +170,14 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Buffer = Irp->UserBuffer;
     }
 
+    if (NonCached && !Paging && Fcb->SectionObjectPointers.DataSectionObject)
+    {
+        /* Dirty cached bytes of the range reach the disk before a non-cached read. */
+        IO_STATUS_BLOCK Iosb;
+        ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
+        CcFlushCache(&Fcb->SectionObjectPointers, &Offset, Length, &Iosb);
+        ExReleaseResourceLite(Fcb->Header.Resource);
+    }
     if (Paging || NonCached)
     {
         /* Through the shim page cache; bytes past EOF in the last page come back zeroed. */

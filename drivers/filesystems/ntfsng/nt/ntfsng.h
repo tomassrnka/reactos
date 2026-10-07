@@ -46,6 +46,7 @@ typedef struct _NG_VCB
     LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;
     ULONG Syncs;
+    ULONG NonCachedViaCache;            /* non-cached writes sent through Cc: a view could not be purged */
 } NG_VCB, *PNG_VCB;
 
 #define NG_FLUSH_PERIOD_MS 2000
@@ -167,6 +168,7 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
 VOID NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
+BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset);
 VOID NgAfterChange(PNG_VCB Vcb);
 VOID NgApplyModified(PNG_FCB Fcb);
 NTSTATUS NgStartFlusher(PNG_VCB Vcb);
