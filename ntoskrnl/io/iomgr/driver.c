@@ -813,7 +813,8 @@ IopGetDeviceObjectFromDeviceInstance(PUNICODE_STRING DeviceInstance);
 CODE_SEG("INIT")
 static
 BOOLEAN
-IopInitializeBuiltinDriver(IN PLDR_DATA_TABLE_ENTRY BootLdrEntry)
+IopInitializeBuiltinDriver(IN PLDR_DATA_TABLE_ENTRY BootLdrEntry,
+                           IN PUNICODE_STRING BootRegistryPath)
 {
     PDRIVER_OBJECT DriverObject;
     NTSTATUS Status;
@@ -886,8 +887,17 @@ IopInitializeBuiltinDriver(IN PLDR_DATA_TABLE_ENTRY BootLdrEntry)
     RtlAppendUnicodeStringToString(&RegistryPath, &ServiceName);
     RtlFreeUnicodeString(&ServiceName);
 
+    /*
+     * The loader names the service key of each boot driver (for example the boot file system
+     * service, whose ImagePath need not match the service name).  Use that key; the name derived
+     * from the image file is only the fallback (setupldr lists drivers without service keys).
+     */
     HANDLE serviceHandle;
-    Status = IopOpenRegistryKeyEx(&serviceHandle, NULL, &RegistryPath, KEY_READ);
+    Status = STATUS_OBJECT_NAME_NOT_FOUND;
+    if (BootRegistryPath && BootRegistryPath->Length)
+        Status = IopOpenRegistryKeyEx(&serviceHandle, NULL, BootRegistryPath, KEY_READ);
+    if (!NT_SUCCESS(Status))
+        Status = IopOpenRegistryKeyEx(&serviceHandle, NULL, &RegistryPath, KEY_READ);
     RtlFreeUnicodeString(&RegistryPath);
     if (!NT_SUCCESS(Status))
     {
@@ -1193,7 +1203,7 @@ IopInitializeBootDrivers(VOID)
             LdrEntry = DriverInfo->DataTableEntry->LdrEntry;
 
             /* Initialize it */
-            if (IopInitializeBuiltinDriver(LdrEntry))
+            if (IopInitializeBuiltinDriver(LdrEntry, &DriverInfo->DataTableEntry->RegistryPath))
             {
                 // it does not make sense to enumerate the tree if there are no new devices added
                 PiQueueDeviceAction(IopRootDeviceNode->PhysicalDeviceObject,

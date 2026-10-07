@@ -1,0 +1,758 @@
+/*
+ * PROJECT:     ReactOS NTFS-NG file system driver
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     IRP_MJ_QUERY/SET_INFORMATION, IRP_MJ_QUERY_VOLUME_INFORMATION
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+#include "ntfsng.h"
+
+ULONG NgFileAttributes(PNG_FCB Fcb, const struct ngc_stat *St)
+{
+    ULONG A = St->file_attributes & ~(FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_DIRECTORY);
+    UNREFERENCED_PARAMETER(Fcb);
+    if (St->is_dir)
+        A |= FILE_ATTRIBUTE_DIRECTORY;
+    if (St->flags & NGC_ATTR_SPARSE)
+        A |= FILE_ATTRIBUTE_SPARSE_FILE;
+    if (St->flags & NGC_ATTR_COMPRESSED)
+        A |= FILE_ATTRIBUTE_COMPRESSED;
+    return A ? A : FILE_ATTRIBUTE_NORMAL;
+}
+
+static VOID NgBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B)
+{
+    B->CreationTime.QuadPart = Fcb->Stat.crtime;
+    B->LastAccessTime.QuadPart = Fcb->Stat.atime;
+    B->LastWriteTime.QuadPart = Fcb->Stat.mtime;
+    B->ChangeTime.QuadPart = Fcb->Stat.ctime;
+    B->FileAttributes = NgFileAttributes(Fcb, &Fcb->Stat);
+}
+
+static VOID NgStandard(PNG_FCB Fcb, PFILE_STANDARD_INFORMATION S)
+{
+    S->AllocationSize.QuadPart = Fcb->IsDirectory ? 0 : Fcb->Stat.alloc;
+    S->EndOfFile.QuadPart = Fcb->IsDirectory ? 0 : Fcb->Stat.size;
+    S->NumberOfLinks = Fcb->Stat.nlink ? Fcb->Stat.nlink : 1;
+    S->DeletePending = Fcb->DeletePending;
+    S->Directory = Fcb->IsDirectory;
+}
+
+/* Copies the open name; returns STATUS_BUFFER_OVERFLOW with a truncated name if it does not fit. */
+static NTSTATUS NgName(PNG_CCB Ccb, PFILE_NAME_INFORMATION N, ULONG Room, PULONG Used)
+{
+    ULONG Fixed = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+    ULONG Len = Ccb->Path.Length ? Ccb->Path.Length : sizeof(WCHAR);
+    ULONG Copy;
+    if (Room < Fixed)
+        return STATUS_BUFFER_TOO_SMALL;
+    N->FileNameLength = Len;
+    Copy = min(Len, Room - Fixed);
+    if (Ccb->Path.Length)
+        RtlCopyMemory(N->FileName, Ccb->Path.Buffer, Copy);
+    else if (Copy)
+        N->FileName[0] = L'\\';
+    *Used = Fixed + Copy;
+    return Copy < Len ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+}
+
+typedef struct _NG_STREAMS
+{
+    BOOLEAN NamedOnly;          /* a directory has no unnamed data stream */
+    PUCHAR Buffer;
+    ULONG Room;
+    ULONG Used;
+    ULONG Last;
+    ULONG Count;
+    NTSTATUS Status;
+} NG_STREAMS;
+
+static int NgStreamFill(void *Context, const unsigned short *Name, unsigned int Len,
+                        unsigned long long Size, unsigned long long Alloc)
+{
+    NG_STREAMS *S = Context;
+    static const WCHAR Suffix[] = L":$DATA";
+    ULONG NameBytes = (1 + Len) * sizeof(WCHAR) + sizeof(Suffix) - sizeof(WCHAR);
+    ULONG Offset = S->Count ? ALIGN_UP_BY(S->Used, 8) : 0;
+    ULONG Need = FIELD_OFFSET(FILE_STREAM_INFORMATION, StreamName) + NameBytes;
+    PFILE_STREAM_INFORMATION P;
+
+    if (S->NamedOnly && Len == 0)
+        return 0;
+    if (Offset + Need > S->Room)
+    {
+        S->Status = STATUS_BUFFER_OVERFLOW;
+        return 1;
+    }
+    P = (PVOID)(S->Buffer + Offset);
+    P->NextEntryOffset = 0;
+    P->StreamNameLength = NameBytes;
+    P->StreamSize.QuadPart = Size;
+    P->StreamAllocationSize.QuadPart = Alloc;
+    P->StreamName[0] = L':';
+    RtlCopyMemory(P->StreamName + 1, Name, Len * sizeof(WCHAR));
+    RtlCopyMemory(P->StreamName + 1 + Len, Suffix, sizeof(Suffix) - sizeof(WCHAR));
+    if (S->Count)
+        ((PFILE_STREAM_INFORMATION)(S->Buffer + S->Last))->NextEntryOffset = Offset - S->Last;
+    S->Last = Offset;
+    S->Used = Offset + Need;
+    S->Count++;
+    return 0;
+}
+
+NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    PNG_FCB Fcb = FileObject->FsContext;
+    PNG_CCB Ccb = FileObject->FsContext2;
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    ULONG Length = Stack->Parameters.QueryFile.Length, Used = 0;
+    PVOID Buffer = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (!Fcb || !Ccb)
+        return STATUS_INVALID_PARAMETER;
+    if (Fcb->IsVolume)
+        return STATUS_INVALID_PARAMETER;
+    NgFillStat(Fcb);
+
+#define NEED(t) do { if (Length < sizeof(t)) return STATUS_BUFFER_TOO_SMALL; Used = sizeof(t); } while (0)
+    switch (Stack->Parameters.QueryFile.FileInformationClass)
+    {
+        case FileBasicInformation:
+            NEED(FILE_BASIC_INFORMATION);
+            NgBasic(Fcb, Buffer);
+            break;
+        case FileStandardInformation:
+            NEED(FILE_STANDARD_INFORMATION);
+            NgStandard(Fcb, Buffer);
+            break;
+        case FileInternalInformation:
+            NEED(FILE_INTERNAL_INFORMATION);
+            ((PFILE_INTERNAL_INFORMATION)Buffer)->IndexNumber.QuadPart = Fcb->Stat.mft_ref;
+            break;
+        case FileEaInformation:
+            NEED(FILE_EA_INFORMATION);
+            ((PFILE_EA_INFORMATION)Buffer)->EaSize = 0;
+            break;
+        case FilePositionInformation:
+            NEED(FILE_POSITION_INFORMATION);
+            ((PFILE_POSITION_INFORMATION)Buffer)->CurrentByteOffset = FileObject->CurrentByteOffset;
+            break;
+        case FileNameInformation:
+            Status = NgName(Ccb, Buffer, Length, &Used);
+            break;
+        case FileAlternateNameInformation:
+        {
+            /* The DOS name of the name this handle was opened by; none for a valid 8.3 name. */
+            PFILE_NAME_INFORMATION N = Buffer;
+            WCHAR Short[12];
+            unsigned int Chars = 0;
+            ULONG Fixed = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+            int Err;
+            if (Length < Fixed)
+                return STATUS_BUFFER_TOO_SMALL;
+            if (Fcb->IsRoot || Fcb->Stream.Length)
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            NgAcquireCore(Vcb);
+            Err = NgEnsureNode(Fcb);
+            if (!Err)
+                Err = ngc_short_name(Fcb->Node, Ccb->ParentMftNo, Short, &Chars);
+            NgReleaseCore(Vcb);
+            if (Err)
+                return NgErrnoToStatus(Err);
+            if (!Chars)
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            N->FileNameLength = Chars * sizeof(WCHAR);
+            if (Length < Fixed + N->FileNameLength)
+            {
+                RtlCopyMemory(N->FileName, Short, Length - Fixed);
+                Used = Length;
+                Status = STATUS_BUFFER_OVERFLOW;
+            }
+            else
+            {
+                RtlCopyMemory(N->FileName, Short, N->FileNameLength);
+                Used = Fixed + N->FileNameLength;
+            }
+            break;
+        }
+        case FileNetworkOpenInformation:
+        {
+            PFILE_NETWORK_OPEN_INFORMATION N = Buffer;
+            FILE_BASIC_INFORMATION B;
+            NEED(FILE_NETWORK_OPEN_INFORMATION);
+            NgBasic(Fcb, &B);
+            N->CreationTime = B.CreationTime;
+            N->LastAccessTime = B.LastAccessTime;
+            N->LastWriteTime = B.LastWriteTime;
+            N->ChangeTime = B.ChangeTime;
+            N->AllocationSize.QuadPart = Fcb->IsDirectory ? 0 : Fcb->Stat.alloc;
+            N->EndOfFile.QuadPart = Fcb->IsDirectory ? 0 : Fcb->Stat.size;
+            N->FileAttributes = B.FileAttributes;
+            break;
+        }
+        case FileAttributeTagInformation:
+            NEED(FILE_ATTRIBUTE_TAG_INFORMATION);
+            ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->FileAttributes = NgFileAttributes(Fcb, &Fcb->Stat);
+            ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->ReparseTag = 0;
+            break;
+        case FileAllInformation:
+        {
+            PFILE_ALL_INFORMATION A = Buffer;
+            ULONG NameUsed = 0;
+            if (Length < FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName))
+                return STATUS_BUFFER_TOO_SMALL;
+            NgBasic(Fcb, &A->BasicInformation);
+            NgStandard(Fcb, &A->StandardInformation);
+            A->InternalInformation.IndexNumber.QuadPart = Fcb->Stat.mft_ref;
+            A->EaInformation.EaSize = 0;
+            A->AccessInformation.AccessFlags = 0;
+            A->PositionInformation.CurrentByteOffset = FileObject->CurrentByteOffset;
+            A->ModeInformation.Mode = 0;
+            A->AlignmentInformation.AlignmentRequirement = DeviceObject->AlignmentRequirement;
+            Status = NgName(Ccb, &A->NameInformation, Length - FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation), &NameUsed);
+            Used = FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation) + NameUsed;
+            break;
+        }
+        case FileStreamInformation:
+        {
+            NG_STREAMS S = { Fcb->IsDirectory, Buffer, Length, 0, 0, 0, STATUS_SUCCESS };
+            int Err;
+            if (Fcb->Stream.Length)
+                return STATUS_INVALID_PARAMETER;
+            NgAcquireCore(Vcb);
+            Err = NgEnsureNode(Fcb);
+            if (!Err)
+                Err = ngc_streams(Fcb->Node, NgStreamFill, &S);
+            NgReleaseCore(Vcb);
+            if (Err)
+                return NgErrnoToStatus(Err);
+            if (!S.Count && NT_SUCCESS(S.Status))
+                return STATUS_END_OF_FILE;      /* no streams (a directory): FindFirstStreamW's ERROR_HANDLE_EOF */
+            Status = S.Status;
+            Used = S.Used;
+            break;
+        }
+        default:
+            return STATUS_INVALID_PARAMETER;
+    }
+#undef NEED
+    Irp->IoStatus.Information = Used;
+    return Status;
+}
+
+static NTSTATUS NgSetBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B)
+{
+    PNG_VCB Vcb = Fcb->Vcb;
+    long long Times[4];
+    unsigned int Attrs = 0, Mask = 0;
+    int Err;
+
+    /* 0 leaves a time alone; -1 (stop automatic updates for this handle) is treated the same. */
+    Times[0] = B->CreationTime.QuadPart > 0 ? B->CreationTime.QuadPart : 0;
+    Times[1] = B->LastAccessTime.QuadPart > 0 ? B->LastAccessTime.QuadPart : 0;
+    Times[2] = B->LastWriteTime.QuadPart > 0 ? B->LastWriteTime.QuadPart : 0;
+    Times[3] = B->ChangeTime.QuadPart > 0 ? B->ChangeTime.QuadPart : 0;
+    if (B->LastWriteTime.QuadPart)
+        Fcb->UserSetWriteTime = TRUE;
+    if (B->FileAttributes)
+    {
+        if (Fcb->IsDirectory && (B->FileAttributes & FILE_ATTRIBUTE_TEMPORARY))
+            return STATUS_INVALID_PARAMETER;
+        Attrs = B->FileAttributes & ~(FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_DIRECTORY);
+        Mask = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE |
+               FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+    }
+    if (!Times[0] && !Times[1] && !Times[2] && !Times[3] && !Mask)
+        return STATUS_SUCCESS;
+    NgAcquireCore(Vcb);
+    Err = NgEnsureNode(Fcb);
+    if (!Err)
+        Err = ngc_set_info(Vcb->Core, Fcb->Node, Times, Attrs, Mask);
+    if (!Err)
+    {
+        ngc_stat(Fcb->Node, &Fcb->Stat);
+        NgAfterChange(Vcb);
+    }
+    NgReleaseCore(Vcb);
+    return Err ? NgErrnoToStatus(Err) : STATUS_SUCCESS;
+}
+
+static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObject, PFILE_DISPOSITION_INFORMATION D)
+{
+    PNG_VCB Vcb = Fcb->Vcb;
+    int Empty = 1;
+    if (Fcb->IsRoot || !Ccb->NameLength)
+        return STATUS_CANNOT_DELETE;
+    if (!D->DeleteFile)
+    {
+        Fcb->DeletePending = FALSE;
+        FileObject->DeletePending = FALSE;
+        return STATUS_SUCCESS;
+    }
+    NgFillStat(Fcb);
+    if (Fcb->Stat.file_attributes & FILE_ATTRIBUTE_READONLY)
+        return STATUS_CANNOT_DELETE;
+    if (Fcb->IsDirectory)
+    {
+        NgAcquireCore(Vcb);
+        Empty = NgEnsureNode(Fcb);
+        if (!Empty)
+            Empty = ngc_dir_empty(Vcb->Core, Fcb->Node);
+        NgReleaseCore(Vcb);
+        if (Empty != 1)
+            return Empty < 0 ? NgErrnoToStatus(Empty) : STATUS_DIRECTORY_NOT_EMPTY;
+    }
+    else if (!MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForDelete))
+    {
+        return STATUS_CANNOT_DELETE;
+    }
+    NgSetDeletePending(Fcb, Ccb);
+    FileObject->DeletePending = TRUE;
+    return STATUS_SUCCESS;
+}
+
+static BOOLEAN NgSameName(const WCHAR *A, USHORT ALen, const WCHAR *B, USHORT BLen)
+{
+    return ALen == BLen && RtlCompareMemory(A, B, ALen * sizeof(WCHAR)) == ALen * sizeof(WCHAR);
+}
+
+/*
+ * FileRenameInformation and FileLinkInformation.  A target given as a path arrives with the
+ * target's directory already opened (SL_OPEN_TARGET_DIRECTORY) in SetFile.FileObject; a bare
+ * name renames within the current directory.  The final component of FileName is the new name.
+ */
+static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
+                               ULONG Length, BOOLEAN IsLink)
+{
+    PNG_VCB Vcb = Fcb->Vcb;
+    PFILE_OBJECT TargetFo = Stack->Parameters.SetFile.FileObject;
+    BOOLEAN Replace = Stack->Parameters.SetFile.ReplaceIfExists || R->ReplaceIfExists;
+    BOOLEAN CaseOnly = FALSE;
+    UNICODE_STRING NewName, NewDirPath, NewPath, OldPath;
+    ULONGLONG NewDirMftNo;
+    PNG_FCB TargetFcb = NULL;
+    ngc_node *OldDir = NULL, *NewDir = NULL, *Target = NULL;
+    struct ngc_stat TSt;
+    PWCHAR RealT = NULL;
+    unsigned int RealTLen = 0;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG n, i;
+    int Err;
+
+    if (Length < FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) ||
+        R->FileNameLength > Length - FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName))
+        return STATUS_INVALID_PARAMETER;
+    if (Fcb->IsRoot || Fcb->IsVolume || Fcb->Stream.Length || !Ccb->NameLength)
+        return STATUS_INVALID_PARAMETER;
+    if (IsLink && Fcb->IsDirectory)
+        return STATUS_FILE_IS_A_DIRECTORY;
+    n = R->FileNameLength / sizeof(WCHAR);
+    for (i = n; i > 0 && R->FileName[i - 1] != L'\\'; i--)
+        ;
+    NewName.Buffer = R->FileName + i;
+    NewName.Length = NewName.MaximumLength = (USHORT)((n - i) * sizeof(WCHAR));
+    if (!NgValidName(&NewName))
+        return STATUS_OBJECT_NAME_INVALID;
+    if (TargetFo)
+    {
+        PNG_FCB Tf = TargetFo->FsContext;
+        PNG_CCB Tc = TargetFo->FsContext2;
+        if (!Tf || !Tc || !Tf->IsDirectory || Tf->Vcb != Vcb)
+            return STATUS_INVALID_PARAMETER;
+        NewDirMftNo = Tf->MftNo;
+        NewDirPath = Tc->Path;
+    }
+    else
+    {
+        if (i)
+            return STATUS_INVALID_PARAMETER;
+        NewDirMftNo = Ccb->ParentMftNo;
+        NewDirPath = Ccb->Path;
+        while (NewDirPath.Length > sizeof(WCHAR) && NewDirPath.Buffer[NewDirPath.Length / sizeof(WCHAR) - 1] != L'\\')
+            NewDirPath.Length -= sizeof(WCHAR);
+        if (NewDirPath.Length > sizeof(WCHAR))
+            NewDirPath.Length -= sizeof(WCHAR);
+    }
+    NewPath.MaximumLength = NewDirPath.Length + NewName.Length + 2 * sizeof(WCHAR);
+    NewPath.Buffer = ExAllocatePoolWithTag(PagedPool, NewPath.MaximumLength, TAG_NTFSNG);
+    RealT = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
+    if (!NewPath.Buffer || !RealT)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto out;
+    }
+    NewPath.Length = 0;
+    RtlAppendUnicodeStringToString(&NewPath, &NewDirPath);
+    if (NewPath.Length != sizeof(WCHAR))
+        RtlAppendUnicodeToString(&NewPath, L"\\");
+    RtlAppendUnicodeStringToString(&NewPath, &NewName);
+
+    /* Look the new name up first: a replaced file's caches are dealt with outside CoreLock. */
+    NgAcquireCore(Vcb);
+    Err = ngc_iget(Vcb->Core, NewDirMftNo, &NewDir);
+    if (!Err)
+    {
+        Err = ngc_lookup(Vcb->Core, NewDir, NewName.Buffer, NewName.Length / sizeof(WCHAR), &Target, RealT, &RealTLen);
+        if (!Err)
+            ngc_stat(Target, &TSt);
+        else if (Err == -NGC_ENOENT)
+            Err = 0;
+    }
+    NgReleaseCore(Vcb);
+    if (Err)
+    {
+        Status = NgErrnoToStatus(Err);
+        goto out;
+    }
+    if (Target)
+    {
+        if ((TSt.mft_ref & 0xffffffffffffULL) == Fcb->MftNo)
+        {
+            if (IsLink)
+            {
+                /* The name is already a link to this file: replacing it with itself changes nothing. */
+                Status = Replace ? STATUS_SUCCESS : STATUS_OBJECT_NAME_COLLISION;
+                goto out;
+            }
+            if (NewDirMftNo != Ccb->ParentMftNo)
+            {
+                Status = Replace ? STATUS_ACCESS_DENIED : STATUS_OBJECT_NAME_COLLISION;
+                goto out;
+            }
+            if (NgSameName(NewName.Buffer, NewName.Length / sizeof(WCHAR), Ccb->Name, Ccb->NameLength))
+                goto out;   /* renaming to itself */
+            CaseOnly = TRUE;
+        }
+        else
+        {
+            if (!Replace)
+            {
+                Status = STATUS_OBJECT_NAME_COLLISION;
+                goto out;
+            }
+            if (TSt.is_dir || (TSt.file_attributes & FILE_ATTRIBUTE_READONLY))
+            {
+                Status = STATUS_ACCESS_DENIED;
+                goto out;
+            }
+            TargetFcb = NgFindFcb(Vcb, TSt.mft_ref & 0xffffffffffffULL);
+            if (TargetFcb)
+            {
+                if (TargetFcb->OpenHandles || !MmFlushImageSection(&TargetFcb->SectionObjectPointers, MmFlushForDelete))
+                {
+                    Status = STATUS_ACCESS_DENIED;
+                    goto out;
+                }
+                if (TargetFcb->SectionObjectPointers.SharedCacheMap || TargetFcb->SectionObjectPointers.DataSectionObject)
+                    NgPurgeFrom(TargetFcb, 0);
+            }
+        }
+    }
+
+    NgAcquireCore(Vcb);
+    Err = NgEnsureNode(Fcb);
+    if (!Err)
+        Err = ngc_iget(Vcb->Core, Ccb->ParentMftNo, &OldDir);
+    if (!Err)
+    {
+        if (IsLink)
+        {
+            if (Target)
+                Err = ngc_unlink(Vcb->Core, NewDir, RealT, RealTLen, Target);
+            if (!Err)
+                Err = ngc_link(Vcb->Core, Fcb->Node, NewDir, NewName.Buffer, NewName.Length / sizeof(WCHAR));
+        }
+        else if (CaseOnly)
+        {
+            /* The index collates case-insensitively: go through a temporary name. */
+            WCHAR Tmp[24], HexBuf[12];
+            UNICODE_STRING T, Hex;
+            RtlInitEmptyUnicodeString(&T, Tmp, sizeof(Tmp));
+            RtlInitEmptyUnicodeString(&Hex, HexBuf, sizeof(HexBuf));
+            RtlAppendUnicodeToString(&T, L"~ngren.");
+            RtlIntegerToUnicodeString((ULONG)Fcb->MftNo, 16, &Hex);
+            RtlAppendUnicodeStringToString(&T, &Hex);
+            Err = ngc_rename(Vcb->Core, OldDir, Ccb->Name, Ccb->NameLength, Fcb->Node, NewDir,
+                             T.Buffer, T.Length / sizeof(WCHAR), NULL);
+            if (!Err)
+                Err = ngc_rename(Vcb->Core, NewDir, T.Buffer, T.Length / sizeof(WCHAR), Fcb->Node, NewDir,
+                                 NewName.Buffer, NewName.Length / sizeof(WCHAR), NULL);
+        }
+        else if (Target && !NgSameName(NewName.Buffer, NewName.Length / sizeof(WCHAR), RealT, (USHORT)RealTLen))
+        {
+            /* The core unlinks a replaced target by the new name, which must then be its exact name:
+             * when only the case differs, unlink the target by its own name first. */
+            Err = ngc_unlink(Vcb->Core, NewDir, RealT, RealTLen, Target);
+            if (!Err)
+                Err = ngc_rename(Vcb->Core, OldDir, Ccb->Name, Ccb->NameLength, Fcb->Node, NewDir,
+                                 NewName.Buffer, NewName.Length / sizeof(WCHAR), NULL);
+        }
+        else
+        {
+            Err = ngc_rename(Vcb->Core, OldDir, Ccb->Name, Ccb->NameLength, Fcb->Node, NewDir,
+                             NewName.Buffer, NewName.Length / sizeof(WCHAR), CaseOnly ? NULL : Target);
+        }
+    }
+    if (!Err && !IsLink)
+    {
+        NgMakeShortName(Vcb, NewDir, Fcb->Node, NewName.Buffer, NewName.Length / sizeof(WCHAR));
+        if (!Fcb->IsDirectory)
+            NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Fcb->Stat.crtime);
+    }
+    if (!Err && TargetFcb)
+    {
+        TargetFcb->Deleted = TRUE;
+        NgUnlistFcb(TargetFcb);
+    }
+    if (!Err)
+        ngc_stat(Fcb->Node, &Fcb->Stat);
+    if (Target)
+    {
+        ngc_put(Target);
+        Target = NULL;
+    }
+    if (OldDir)
+        ngc_put(OldDir);
+    NgAfterChange(Vcb);
+    NgReleaseCore(Vcb);
+    if (Err)
+    {
+        DPRINT1("ntfsng: %s of %I64x failed %d\n", IsLink ? "link" : "rename", Fcb->MftNo, Err);
+        Status = NgErrnoToStatus(Err);
+        goto out;
+    }
+    if (IsLink)
+    {
+        NgNotify(Vcb, &NewPath, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
+    }
+    else
+    {
+        /* Within one directory a rename is reported as old/new name; a move to another directory
+         * as a removal from the old one and an addition to the new one (what Win32 watchers expect). */
+        BOOLEAN Moved = NewDirMftNo != Ccb->ParentMftNo;
+        ULONG Filter = Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME;
+        OldPath = Ccb->Path;
+        NgNotify(Vcb, &OldPath, Filter, Moved ? FILE_ACTION_REMOVED : FILE_ACTION_RENAMED_OLD_NAME);
+        Ccb->Path = NewPath;
+        NewPath.Buffer = OldPath.Buffer;
+        Ccb->ParentMftNo = NewDirMftNo;
+        Ccb->NameLength = NewName.Length / sizeof(WCHAR);
+        RtlCopyMemory(Ccb->Name, NewName.Buffer, NewName.Length);
+        NgNotify(Vcb, &Ccb->Path, Filter, Moved ? FILE_ACTION_ADDED : FILE_ACTION_RENAMED_NEW_NAME);
+    }
+out:
+    if (Target || NewDir)
+    {
+        NgAcquireCore(Vcb);
+        if (Target)
+            ngc_put(Target);
+        if (NewDir)
+            ngc_put(NewDir);
+        NgReleaseCore(Vcb);
+    }
+    if (TargetFcb)
+        NgDereferenceFcb(TargetFcb);
+    if (NewPath.Buffer)
+        ExFreePoolWithTag(NewPath.Buffer, TAG_NTFSNG);
+    if (RealT)
+        ExFreePoolWithTag(RealT, TAG_NTFSNG);
+    return Status;
+}
+
+NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    PNG_FCB Fcb = FileObject->FsContext;
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    FILE_INFORMATION_CLASS Class = Stack->Parameters.SetFile.FileInformationClass;
+    ULONG Length = Stack->Parameters.SetFile.Length;
+    PVOID Buffer = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS Status;
+
+    /* Moving the file pointer is the only change that does not touch the volume. */
+    if (Class == FilePositionInformation)
+    {
+        PFILE_POSITION_INFORMATION P = Buffer;
+        if (Length < sizeof(*P))
+            return STATUS_INVALID_PARAMETER;
+        FileObject->CurrentByteOffset = P->CurrentByteOffset;
+        return STATUS_SUCCESS;
+    }
+    if (Vcb->ReadOnly)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    if (!Fcb || Fcb->IsVolume || !Fcb->HasNode)
+        return STATUS_INVALID_PARAMETER;
+
+    switch (Class)
+    {
+        case FileBasicInformation:
+            if (Length < sizeof(FILE_BASIC_INFORMATION))
+                return STATUS_INVALID_PARAMETER;
+            ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+            Status = NgSetBasic(Fcb, Buffer);
+            ExReleaseResourceLite(Fcb->Header.Resource);
+            return Status;
+        case FileEndOfFileInformation:
+        case FileAllocationInformation:
+        {
+            LONGLONG New = ((PLARGE_INTEGER)Buffer)->QuadPart;
+            if (Length < sizeof(LARGE_INTEGER))
+                return STATUS_INVALID_PARAMETER;
+            if (Fcb->IsDirectory)
+                return STATUS_INVALID_PARAMETER;
+            ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+            if (Class == FileEndOfFileInformation && Stack->Parameters.SetFile.AdvanceOnly)
+            {
+                /* Cc advancing the on-disk EOF/VDL: the core's size is already current. */
+                Status = STATUS_SUCCESS;
+            }
+            else if (Class == FileAllocationInformation && New >= Fcb->Header.FileSize.QuadPart)
+            {
+                /* Preallocation beyond EOF is not kept (allocation follows the file size). */
+                Status = STATUS_SUCCESS;
+            }
+            else
+            {
+                Status = NgSetFileSize(Fcb, FileObject, New);
+            }
+            ExReleaseResourceLite(Fcb->Header.Resource);
+            return Status;
+        }
+        case FileValidDataLengthInformation:
+        {
+            /*
+             * SetFileValidData: needs SeManageVolumePrivilege; the new length may not go below the
+             * current valid data length nor past the end of file.  The driver never exposes stale
+             * clusters (unwritten ranges read as zeros), so accepting it changes nothing on disk;
+             * only the logical valid data length is tracked for these checks.
+             */
+            LONGLONG New;
+            if (Length < sizeof(FILE_VALID_DATA_LENGTH_INFORMATION))
+                return STATUS_INVALID_PARAMETER;
+            if (!SeSinglePrivilegeCheck(RtlConvertLongToLuid(SE_MANAGE_VOLUME_PRIVILEGE), Irp->RequestorMode))
+                return STATUS_PRIVILEGE_NOT_HELD;
+            New = ((PFILE_VALID_DATA_LENGTH_INFORMATION)Buffer)->ValidDataLength.QuadPart;
+            if (Fcb->IsDirectory || New <= 0 || New < Fcb->LogicalVdl || New > Fcb->Header.FileSize.QuadPart)
+                return STATUS_INVALID_PARAMETER;
+            Fcb->LogicalVdl = New;
+            return STATUS_SUCCESS;
+        }
+        case FileDispositionInformation:
+            if (Length < sizeof(FILE_DISPOSITION_INFORMATION))
+                return STATUS_INVALID_PARAMETER;
+            ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+            Status = NgSetDisposition(Fcb, FileObject->FsContext2, FileObject, Buffer);
+            ExReleaseResourceLite(Fcb->Header.Resource);
+            return Status;
+        case FileRenameInformation:
+        case FileLinkInformation:
+            ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+            Status = NgRenameOrLink(Fcb, FileObject->FsContext2, Stack, Buffer, Length, Class == FileLinkInformation);
+            ExReleaseResourceLite(Fcb->Header.Resource);
+            return Status;
+        default:
+            return STATUS_INVALID_PARAMETER;
+    }
+}
+
+NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    ULONG Length = Stack->Parameters.QueryVolume.Length, Used = 0;
+    PVOID Buffer = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG SectorsPerCluster = Vcb->Info.cluster_size / Vcb->SectorSize;
+
+    if (DeviceObject == NgGlobal.ControlDevice)
+        return STATUS_INVALID_DEVICE_REQUEST;
+    if (!Vcb->ReadOnly)
+    {
+        NgAcquireCore(Vcb);
+        ngc_volinfo(Vcb->Core, &Vcb->Info);
+        NgReleaseCore(Vcb);
+    }
+    switch (Stack->Parameters.QueryVolume.FsInformationClass)
+    {
+        case FileFsVolumeInformation:
+        {
+            PFILE_FS_VOLUME_INFORMATION V = Buffer;
+            ULONG Fixed = FIELD_OFFSET(FILE_FS_VOLUME_INFORMATION, VolumeLabel), Copy;
+            if (Length < Fixed)
+                return STATUS_BUFFER_TOO_SMALL;
+            V->VolumeCreationTime.QuadPart = 0;
+            V->VolumeSerialNumber = Vcb->Vpb->SerialNumber;
+            V->SupportsObjects = FALSE;
+            V->VolumeLabelLength = Vcb->Vpb->VolumeLabelLength;
+            Copy = min(V->VolumeLabelLength, Length - Fixed);
+            RtlCopyMemory(V->VolumeLabel, Vcb->Vpb->VolumeLabel, Copy);
+            Used = Fixed + Copy;
+            if (Copy < V->VolumeLabelLength)
+                Status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        case FileFsSizeInformation:
+        {
+            PFILE_FS_SIZE_INFORMATION S = Buffer;
+            if (Length < sizeof(*S))
+                return STATUS_BUFFER_TOO_SMALL;
+            S->TotalAllocationUnits.QuadPart = Vcb->Info.total_clusters;
+            S->AvailableAllocationUnits.QuadPart = Vcb->Info.free_clusters;
+            S->SectorsPerAllocationUnit = SectorsPerCluster;
+            S->BytesPerSector = Vcb->SectorSize;
+            Used = sizeof(*S);
+            break;
+        }
+        case FileFsFullSizeInformation:
+        {
+            PFILE_FS_FULL_SIZE_INFORMATION S = Buffer;
+            if (Length < sizeof(*S))
+                return STATUS_BUFFER_TOO_SMALL;
+            S->TotalAllocationUnits.QuadPart = Vcb->Info.total_clusters;
+            S->CallerAvailableAllocationUnits.QuadPart = Vcb->Info.free_clusters;
+            S->ActualAvailableAllocationUnits.QuadPart = Vcb->Info.free_clusters;
+            S->SectorsPerAllocationUnit = SectorsPerCluster;
+            S->BytesPerSector = Vcb->SectorSize;
+            Used = sizeof(*S);
+            break;
+        }
+        case FileFsDeviceInformation:
+        {
+            PFILE_FS_DEVICE_INFORMATION D = Buffer;
+            if (Length < sizeof(*D))
+                return STATUS_BUFFER_TOO_SMALL;
+            D->DeviceType = FILE_DEVICE_DISK;
+            D->Characteristics = Vcb->StorageDevice->Characteristics;
+            Used = sizeof(*D);
+            break;
+        }
+        case FileFsAttributeInformation:
+        {
+            PFILE_FS_ATTRIBUTE_INFORMATION A = Buffer;
+            static const WCHAR Name[] = L"NTFS";
+            ULONG Fixed = FIELD_OFFSET(FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName), Copy;
+            if (Length < Fixed)
+                return STATUS_BUFFER_TOO_SMALL;
+            A->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
+                                      FILE_NAMED_STREAMS | FILE_SUPPORTS_SPARSE_FILES |
+                                      FILE_FILE_COMPRESSION | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
+            A->MaximumComponentNameLength = 255;
+            /* On a short buffer the length reports what was copied (as FAT and the apitest expect). */
+            Copy = min(sizeof(Name) - sizeof(WCHAR), Length - Fixed);
+            A->FileSystemNameLength = Copy;
+            RtlCopyMemory(A->FileSystemName, Name, Copy);
+            Used = Fixed + Copy;
+            if (Copy < sizeof(Name) - sizeof(WCHAR))
+                Status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        default:
+            return STATUS_INVALID_PARAMETER;
+    }
+    Irp->IoStatus.Information = Used;
+    return Status;
+}
