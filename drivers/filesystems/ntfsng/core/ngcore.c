@@ -1399,7 +1399,8 @@ static long ngc_write_impl(ngc_vol *v, ngc_node *n, unsigned long long off, unsi
 	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni))
 		return -EOPNOTSUPP;
 	err = ngc_mark_dirty(v);
-	if (!err)
+	/* Only a sparse stream can allocate here; other clusters were allocated by set_size, after its own commit. */
+	if (!err && NInoSparse(ni))
 		err = ngc_before_alloc(v);
 	if (err)
 		return err;
