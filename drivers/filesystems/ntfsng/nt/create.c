@@ -385,6 +385,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         RelatedFcb = Related->FsContext;
         RelatedCcb = Related->FsContext2;
     }
+    if (Vcb->LockedBy)
+        return STATUS_ACCESS_DENIED;
     if (Options & FILE_OPEN_BY_FILE_ID)
     {
         /* Opened as the path of the file the ID names; such an open never creates anything. */
@@ -750,6 +752,13 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 
     ExAcquireFastMutex(&Vcb->FcbListLock);
+    if (Vcb->LockedBy)
+    {
+        /* The volume was locked after this open passed its first check. */
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        Status = STATUS_ACCESS_DENIED;
+        goto out;
+    }
     if (Fcb->OpenHandles)
     {
         Status = IoCheckShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject,
@@ -934,6 +943,8 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     if (!Fcb)
         return STATUS_SUCCESS;
+    if (Fcb->IsVolume && Vcb->LockedBy == FileObject)
+        NgUnlockVolume(Vcb);
     if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
         FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
     if (!Fcb->IsDirectory && !Fcb->IsVolume)

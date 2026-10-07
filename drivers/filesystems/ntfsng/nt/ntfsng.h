@@ -43,6 +43,7 @@ typedef struct _NG_VCB
     LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
     PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
     PNOTIFY_SYNC NotifySync;        /* directory change notification (FsRtl) */
+    PFILE_OBJECT LockedBy;          /* FSCTL_LOCK_VOLUME holder: no other open while set */
     LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;
     ULONG Syncs;
@@ -184,6 +185,9 @@ BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset);
 
 /* create.c */
 VOID NgMakeShortName(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PCWSTR Name, USHORT NameChars);
+
+/* fsctl.c */
+VOID NgUnlockVolume(PNG_VCB Vcb);
 
 /* security.c */
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);

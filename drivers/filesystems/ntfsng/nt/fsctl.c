@@ -129,6 +129,56 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return STATUS_SUCCESS;
 }
 
+/*
+ * FSCTL_LOCK_VOLUME through a volume handle: after a flush, granted only while that handle is the
+ * only open one on the volume; then every other open is refused until FSCTL_UNLOCK_VOLUME or the
+ * holder's cleanup.  Cached files without handles do not count.
+ */
+static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
+{
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
+    PLIST_ENTRY Entry;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (!Fcb || !Fcb->IsVolume)
+        return STATUS_INVALID_PARAMETER;
+    if (Vcb->LockedBy)
+        return STATUS_ACCESS_DENIED;
+    NgFlushVolume(Vcb);
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        if (F != Fcb && F->OpenHandles)
+        {
+            Status = STATUS_ACCESS_DENIED;
+            break;
+        }
+    }
+    if (NT_SUCCESS(Status) && Fcb->OpenHandles > 1)
+        Status = STATUS_ACCESS_DENIED;
+    if (NT_SUCCESS(Status))
+        Vcb->LockedBy = FileObject;
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (NT_SUCCESS(Status))
+    {
+        KIRQL Irql;
+        IoAcquireVpbSpinLock(&Irql);
+        Vcb->Vpb->Flags |= VPB_LOCKED;
+        IoReleaseVpbSpinLock(Irql);
+    }
+    return Status;
+}
+
+VOID NgUnlockVolume(PNG_VCB Vcb)
+{
+    KIRQL Irql;
+    Vcb->LockedBy = NULL;
+    IoAcquireVpbSpinLock(&Irql);
+    Vcb->Vpb->Flags &= ~VPB_LOCKED;
+    IoReleaseVpbSpinLock(Irql);
+}
+
 static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -176,9 +226,14 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             return STATUS_SUCCESS;
         }
         case FSCTL_LOCK_VOLUME:
+            return NgLockVolume(Vcb, FileObject);
         case FSCTL_UNLOCK_VOLUME:
+            if (!Fcb || !Fcb->IsVolume || Vcb->LockedBy != FileObject)
+                return STATUS_NOT_LOCKED;
+            NgUnlockVolume(Vcb);
+            return STATUS_SUCCESS;
         case FSCTL_DISMOUNT_VOLUME:
-            /* Dismount is not implemented in the prototype; volumes stay mounted until shutdown. */
+            /* Dismount is not implemented: volumes stay mounted until shutdown. */
             return STATUS_ACCESS_DENIED;
         default:
             return STATUS_INVALID_DEVICE_REQUEST;
