@@ -324,6 +324,78 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     return STATUS_SUCCESS;
 }
 
+/*
+ * Writes through a volume handle.  Only the boot code ($Boot, the first 8 KiB) may change under
+ * a mounted volume: setup installs the boot sector that way.  The write goes through the core's
+ * device path so the journal overlay and the cached boot sector see it; anything else needs a
+ * lock and dismount, which are not implemented.
+ */
+#define NG_BOOT_REGION 8192
+static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Length)
+{
+    PMDL Mdl = NULL;
+    PVOID Buffer;
+    NTSTATUS Status = STATUS_SUCCESS;
+    int Err;
+
+    if (Vcb->ReadOnly)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    if (Offset < 0 || ((ULONG)Offset | Length) & (Vcb->SectorSize - 1))
+        return STATUS_INVALID_PARAMETER;
+    if (Offset + Length > NG_BOOT_REGION)
+    {
+        DPRINT1("ntfsng: volume write at %I64d len %lu refused (outside the boot code; no lock/dismount)\n", Offset, Length);
+        return STATUS_ACCESS_DENIED;
+    }
+    if (Irp->MdlAddress)
+    {
+        Buffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+    }
+    else
+    {
+        Mdl = IoAllocateMdl(Irp->UserBuffer, Length, FALSE, FALSE, NULL);
+        if (!Mdl)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        _SEH2_TRY
+        {
+            MmProbeAndLockPages(Mdl, Irp->RequestorMode, IoReadAccess);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status))
+        {
+            IoFreeMdl(Mdl);
+            return Status;
+        }
+        Buffer = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
+    }
+    if (!Buffer)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto out;
+    }
+    NgAcquireCore(Vcb);
+    Err = ngc_raw_write(Vcb->Core, (unsigned long long)Offset, Buffer, Length);
+    if (!Err)
+        Err = ngc_sync(Vcb->Core);
+    NgReleaseCore(Vcb);
+    DPRINT1("ntfsng: boot code written through the volume handle at %I64d len %lu: %d\n", Offset, Length, Err);
+    if (Err)
+        Status = NgErrnoToStatus(Err);
+    else
+        Irp->IoStatus.Information = Length;
+out:
+    if (Mdl)
+    {
+        MmUnlockPages(Mdl);
+        IoFreeMdl(Mdl);
+    }
+    return Status;
+}
+
 NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -346,6 +418,15 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     if (Stack->MinorFunction & IRP_MN_MDL)
         return STATUS_INVALID_DEVICE_REQUEST;
+    if (Fcb && Fcb->IsVolume && Length)
+    {
+        if (Offset.LowPart == FILE_USE_FILE_POINTER_POSITION && Offset.HighPart == -1)
+            Offset = FileObject->CurrentByteOffset;
+        Status = NgWriteVolume(Vcb, Irp, Offset.QuadPart, Length);
+        if (NT_SUCCESS(Status) && (FileObject->Flags & FO_SYNCHRONOUS_IO))
+            FileObject->CurrentByteOffset.QuadPart = Offset.QuadPart + Irp->IoStatus.Information;
+        return Status;
+    }
     if (!Fcb || Fcb->IsVolume || Fcb->IsDirectory || !Fcb->HasNode)
         return STATUS_INVALID_DEVICE_REQUEST;
     if (Vcb->ReadOnly)

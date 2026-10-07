@@ -750,6 +750,20 @@ int ngc_runs(ngc_vol *v, ngc_node *n, ngc_run_t fn, void *ctx)
 	return err;
 }
 
+static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len);
+
+/* A raw write of volume bytes (the boot code): in place, seen by the overlay and the cached device pages. */
+int ngc_raw_write(ngc_vol *v, unsigned long long off, const void *buf, unsigned int len)
+{
+	int err;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	err = ngc_dev_write(v, off, buf, len);
+	if (!err)
+		kshim_mapping_update(v->bdev->bd_mapping, off, buf, len);
+	return err;
+}
+
 void ngc_set_journal_fault(unsigned long commit_no)
 {
 	kshim_jnl_fault = commit_no;
