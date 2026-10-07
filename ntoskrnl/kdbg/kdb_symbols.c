@@ -34,6 +34,8 @@ IMAGE_SYMBOL_INFO_CACHE, *PIMAGE_SYMBOL_INFO_CACHE;
 static BOOLEAN LoadSymbols = FALSE;
 /* Lock-free, since the debugger queues entries with other processors frozen */
 static SLIST_HEADER SymbolsToLoad;
+/* Symbols of modules unloaded above DISPATCH_LEVEL, freed by the loader thread */
+static SLIST_HEADER SymbolsToFree;
 static KEVENT SymbolsToLoadEvent;
 
 /* FUNCTIONS ****************************************************************/
@@ -232,6 +234,14 @@ LoadSymbolsRoutine(
             return;
         }
 
+        ListEntry = InterlockedFlushSList(&SymbolsToFree);
+        while (ListEntry)
+        {
+            PROSSYM_INFO RosSymInfo = (PROSSYM_INFO)ListEntry;
+            ListEntry = ListEntry->Next;
+            RosSymDelete(RosSymInfo);
+        }
+
         ListEntry = InterlockedFlushSList(&SymbolsToLoad);
         while (ListEntry)
         {
@@ -317,11 +327,18 @@ KdbSymProcessSymbols(
     /* Check if this is unload */
     if (!Load)
     {
+        PROSSYM_INFO RosSymInfo = LdrEntry->PatchInformation;
+
         /* Did we process it */
-        if (LdrEntry->PatchInformation)
+        if (RosSymInfo)
         {
-            RosSymDelete(LdrEntry->PatchInformation);
             LdrEntry->PatchInformation = NULL;
+
+            /* Pool can only be freed up to DISPATCH_LEVEL: above it, queue the block itself */
+            if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
+                RosSymDelete(RosSymInfo);
+            else
+                InterlockedPushEntrySList(&SymbolsToFree, (PSLIST_ENTRY)RosSymInfo);
         }
         return;
     }
@@ -449,6 +466,7 @@ KdbSymInit(
 
         /* Launch our worker thread */
         InitializeSListHead(&SymbolsToLoad);
+        InitializeSListHead(&SymbolsToFree);
         KeInitializeEvent(&SymbolsToLoadEvent, SynchronizationEvent, FALSE);
 
         Status = PsCreateSystemThread(&Thread,
