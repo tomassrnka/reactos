@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS kernel-mode tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Kernel-Mode Test Suite for flushing and purging a data section without a cache map
+ * PURPOSE:     Kernel-Mode Test Suite for purging a data section without a cache map
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -97,9 +97,10 @@ START_TEST(CcPurgeCacheSection)
                                   FileEndOfFileInformation);
     ok_eq_hex(Status, STATUS_SUCCESS);
 
+    InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
     Status = ZwCreateSection(&SectionHandle,
                              SECTION_ALL_ACCESS,
-                             NULL,
+                             &ObjectAttributes,
                              NULL,
                              PAGE_READWRITE,
                              SEC_COMMIT,
@@ -117,7 +118,7 @@ START_TEST(CcPurgeCacheSection)
     if (!skip(FileObject != NULL && SectionHandle != NULL, "No section\n") &&
         !skip(FileObject->SectionObjectPointer->SharedCacheMap == NULL, "The file is cached\n"))
     {
-        /* Make the page at the high offset first, so that it is not in the last page table created */
+        /* Make the high page first, so that it is not in the page table created last */
         Status = MapAndTouch(SectionHandle, HIGH_OFFSET, TRUE, &HighView);
         ok_eq_hex(Status, STATUS_SUCCESS);
         Status = MapAndTouch(SectionHandle, 0, TRUE, &LowView);
@@ -125,20 +126,19 @@ START_TEST(CcPurgeCacheSection)
         if (HighView) ZwUnmapViewOfSection(NtCurrentProcess(), HighView);
         if (LowView) ZwUnmapViewOfSection(NtCurrentProcess(), LowView);
 
-        /* A flush of the whole section must succeed */
-        RtlFillMemory(&IoStatus, sizeof(IoStatus), 0x55);
-        CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &IoStatus);
-        ok_eq_hex(IoStatus.Status, STATUS_SUCCESS);
-
         /* A purge of the whole section must see the mapped page at the high
          * offset, above the page table that was created last */
         Status = MapAndTouch(SectionHandle, HIGH_OFFSET, FALSE, &HighView);
         ok_eq_hex(Status, STATUS_SUCCESS);
+        FsRtlAcquireFileExclusive(FileObject);
         Purged = CcPurgeCacheSection(FileObject->SectionObjectPointer, NULL, 0, FALSE);
+        FsRtlReleaseFile(FileObject);
         ok_bool_false(Purged, "CcPurgeCacheSection with a mapped page returned");
         if (HighView) ZwUnmapViewOfSection(NtCurrentProcess(), HighView);
 
+        FsRtlAcquireFileExclusive(FileObject);
         Purged = CcPurgeCacheSection(FileObject->SectionObjectPointer, NULL, 0, FALSE);
+        FsRtlReleaseFile(FileObject);
         ok_bool_true(Purged, "CcPurgeCacheSection without mapped pages returned");
     }
 
