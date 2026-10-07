@@ -408,6 +408,11 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     InitializeListHead(&NgGlobal.VcbList);
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
+    {
+        /* The system-wide NTFS switch for short names (0 = create them, as on Windows). */
+        UNICODE_STRING Fs = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\FileSystem");
+        NgGlobal.Disable8dot3 = NgReadDword(&Fs, L"NtfsDisable8dot3NameCreation") == 1;
+    }
     DPRINT1("ntfsng: ReadOnly=%lu\n", NgGlobal.ForceReadOnly);
     i = NgReadDword(RegistryPath, L"JournalFault");
     if (i)

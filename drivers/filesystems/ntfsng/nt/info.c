@@ -143,6 +143,41 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FileNameInformation:
             Status = NgName(Ccb, Buffer, Length, &Used);
             break;
+        case FileAlternateNameInformation:
+        {
+            /* The DOS name of the name this handle was opened by; none for a valid 8.3 name. */
+            PFILE_NAME_INFORMATION N = Buffer;
+            WCHAR Short[12];
+            unsigned int Chars = 0;
+            ULONG Fixed = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+            int Err;
+            if (Length < Fixed)
+                return STATUS_BUFFER_TOO_SMALL;
+            if (Fcb->IsRoot || Fcb->Stream.Length)
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            NgAcquireCore(Vcb);
+            Err = NgEnsureNode(Fcb);
+            if (!Err)
+                Err = ngc_short_name(Fcb->Node, Ccb->ParentMftNo, Short, &Chars);
+            NgReleaseCore(Vcb);
+            if (Err)
+                return NgErrnoToStatus(Err);
+            if (!Chars)
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            N->FileNameLength = Chars * sizeof(WCHAR);
+            if (Length < Fixed + N->FileNameLength)
+            {
+                RtlCopyMemory(N->FileName, Short, Length - Fixed);
+                Used = Length;
+                Status = STATUS_BUFFER_OVERFLOW;
+            }
+            else
+            {
+                RtlCopyMemory(N->FileName, Short, N->FileNameLength);
+                Used = Fixed + N->FileNameLength;
+            }
+            break;
+        }
         case FileNetworkOpenInformation:
         {
             PFILE_NETWORK_OPEN_INFORMATION N = Buffer;
@@ -461,6 +496,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                              NewName.Buffer, NewName.Length / sizeof(WCHAR), CaseOnly ? NULL : Target);
         }
     }
+    if (!Err && !IsLink)
+        NgMakeShortName(Vcb, NewDir, Fcb->Node, NewName.Buffer, NewName.Length / sizeof(WCHAR));
     if (!Err && TargetFcb)
     {
         TargetFcb->Deleted = TRUE;

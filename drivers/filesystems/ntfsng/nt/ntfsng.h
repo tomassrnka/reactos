@@ -135,6 +135,7 @@ typedef struct _NG_GLOBAL
     LONG Opens;
     ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
     ULONG ForceReadOnly;            /* "ReadOnly" DWORD in the service key: mount every volume read-only */
+    BOOLEAN Disable8dot3;           /* NtfsDisable8dot3NameCreation == 1: no short names for new names */
     FAST_MUTEX VcbListLock;
     LIST_ENTRY VcbList;
 } NG_GLOBAL;
@@ -180,6 +181,9 @@ VOID NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
 BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset);
+
+/* create.c */
+VOID NgMakeShortName(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PCWSTR Name, USHORT NameChars);
 
 /* pagefile.c */
 NTSTATUS NgPagingFileMap(PNG_FCB Fcb);

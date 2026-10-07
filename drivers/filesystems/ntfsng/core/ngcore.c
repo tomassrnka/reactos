@@ -15,6 +15,7 @@
 #include "ntfs/mft.h"
 #include "ntfs/logfile.h"
 #include "ntfs/lcnalloc.h"
+#include "ntfs/index.h"
 #include "ngapi.h"
 #include <kshim_jnl.h>
 #include "ngjrec.h"
@@ -456,7 +457,7 @@ void ngc_stat(ngc_node *n, struct ngc_stat *st)
 	st->mtime = ts_to_nt(inode_get_mtime(bvi));
 	st->ctime = ts_to_nt(inode_get_ctime(bvi));
 	st->file_attributes = le32_to_cpu(bni->flags) & 0xffff;
-	st->nlink = bvi->i_nlink;
+	st->nlink = bvi->i_nlink > 1 ? ngc_links((ngc_node *)bvi) : bvi->i_nlink;
 	st->is_dir = S_ISDIR(bvi->i_mode) && vi == bvi;
 	st->is_link = S_ISLNK(bvi->i_mode);
 	if (NInoCompressed(ni)) st->flags |= NGC_ATTR_COMPRESSED;
@@ -1008,6 +1009,223 @@ void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned 
 	*bytes = kshim_counter_write_bytes;
 	*syncs = kshim_counter_syncs;
 	*dirties = kshim_counter_dirty;
+}
+
+/* ------------------------------------------------------------- short (8.3) names */
+
+/* The value of the $FILE_NAME attribute the search context stands on. */
+static struct file_name_attr *ngc_fn(struct ntfs_attr_search_ctx *ctx)
+{
+	return (struct file_name_attr *)((u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset));
+}
+
+/* Names that count as links for NT: every $FILE_NAME except the DOS-only ones. */
+int ngc_links(ngc_node *n)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	struct ntfs_attr_search_ctx *ctx;
+	int links = 0;
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	mutex_lock(&ni->mrec_lock);
+	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	if (ctx) {
+		while (!ntfs_attr_lookup(AT_FILE_NAME, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx))
+			if (!ctx->attr->non_resident && ngc_fn(ctx)->file_name_type != FILE_NAME_DOS)
+				links++;
+		ntfs_attr_put_search_ctx(ctx);
+	}
+	mutex_unlock(&ni->mrec_lock);
+	return links ? links : 1;
+}
+
+/* The DOS-only name of @n in directory @parent_mref, or *len = 0 when it has none. */
+int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	struct ntfs_attr_search_ctx *ctx;
+	*len = 0;
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	mutex_lock(&ni->mrec_lock);
+	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	if (!ctx) {
+		mutex_unlock(&ni->mrec_lock);
+		return -ENOMEM;
+	}
+	while (!ntfs_attr_lookup(AT_FILE_NAME, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+		struct file_name_attr *fn = ngc_fn(ctx);
+		if (ctx->attr->non_resident || fn->file_name_type != FILE_NAME_DOS || fn->file_name_length > 12 ||
+		    MREF_LE(fn->parent_directory) != MREF(parent_mref))
+			continue;
+		memcpy(out, fn->file_name, fn->file_name_length * sizeof(__le16));
+		*len = fn->file_name_length;
+		break;
+	}
+	ntfs_attr_put_search_ctx(ctx);
+	mutex_unlock(&ni->mrec_lock);
+	return 0;
+}
+
+/* Sets the namespace of @lfn's $FILE_NAME in @ni and of its index entry in @dir_ni (caller holds both locks). */
+static int ngc_set_fn_type(struct ntfs_inode *ni, struct ntfs_inode *dir_ni, const struct file_name_attr *lfn,
+		int lfn_len, u64 mref, u8 type)
+{
+	struct ntfs_attr_search_ctx *ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	struct ntfs_index_context *icx;
+	int err = -ENOENT;
+	if (!ctx)
+		return -ENOMEM;
+	while (!ntfs_attr_lookup(AT_FILE_NAME, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+		struct file_name_attr *fn = ngc_fn(ctx);
+		if (ctx->attr->non_resident || fn->parent_directory != lfn->parent_directory ||
+		    fn->file_name_length != lfn->file_name_length ||
+		    memcmp(fn->file_name, lfn->file_name, lfn->file_name_length * sizeof(__le16)) ||
+		    fn->file_name_type == FILE_NAME_DOS)
+			continue;
+		fn->file_name_type = type;
+		mark_mft_record_dirty(ctx->ntfs_ino);
+		err = 0;
+		break;
+	}
+	ntfs_attr_put_search_ctx(ctx);
+	if (err)
+		return err;
+	icx = ntfs_index_ctx_get(dir_ni, I30, 4);
+	if (!icx)
+		return -ENOMEM;
+	err = ntfs_index_lookup(lfn, lfn_len, icx);
+	if (!err && le64_to_cpu(icx->entry->data.dir.indexed_file) == mref) {
+		icx->entry->key.file_name.file_name_type = type;
+		ntfs_index_entry_mark_dirty(icx);
+	} else if (!err) {
+		err = -ENOENT;
+	}
+	ntfs_index_ctx_put(icx);
+	return err;
+}
+
+/*
+ * Gives the only name @lname of @n (in @dirn) the DOS name @sname, as NTFS on Windows does for a
+ * long name that is not a valid 8.3 name: a DOS $FILE_NAME with its own index entry is added
+ * (it counts in the MFT record's link count like any name), and then the long name moves from the
+ * POSIX to the Win32 namespace in its $FILE_NAME and its index entry, so that the core's unlink
+ * removes the pair.  Files with hard links or with a DOS name already get none.  On any failure
+ * the file is left as it was.
+ */
+int ngc_add_short_name(ngc_vol *v, ngc_node *dirn, ngc_node *n, const unsigned short *lname, unsigned int llen,
+		const unsigned short *sname, unsigned int slen)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n), *dir_ni = NTFS_I((struct inode *)dirn);
+	struct ntfs_attr_search_ctx *ctx;
+	struct file_name_attr *lfn = NULL, *dfn = NULL;
+	struct mft_record *mrec;
+	int lfn_len = 0, dfn_len, names = 0, err;
+	bool other = false;
+	u64 mref;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (NInoAttr(ni) || !slen || slen > 12 || !llen || llen > NTFS_MAX_NAME_LEN)
+		return -EINVAL;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	mutex_lock_nested(&ni->mrec_lock, NTFS_INODE_MUTEX_NORMAL);
+	mutex_lock_nested(&dir_ni->mrec_lock, NTFS_INODE_MUTEX_PARENT);
+	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	if (!ctx) {
+		err = -ENOMEM;
+		goto out;
+	}
+	/* Read-only pass: exactly one name, POSIX or Win32, in this directory, with this spelling. */
+	while (!ntfs_attr_lookup(AT_FILE_NAME, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+		struct file_name_attr *fn = ngc_fn(ctx);
+		if (ctx->attr->non_resident)
+			continue;
+		names++;
+		if (lfn || fn->file_name_type == FILE_NAME_DOS || fn->file_name_type == FILE_NAME_WIN32_AND_DOS ||
+		    MREF_LE(fn->parent_directory) != dir_ni->mft_no || fn->file_name_length != llen ||
+		    memcmp(fn->file_name, lname, llen * sizeof(__le16))) {
+			other = true;
+			continue;
+		}
+		lfn_len = le32_to_cpu(ctx->attr->data.resident.value_length);
+		lfn = kmemdup(fn, lfn_len, GFP_NOFS);
+		if (!lfn) {
+			err = -ENOMEM;
+			break;
+		}
+	}
+	ntfs_attr_put_search_ctx(ctx);
+	if (err || !lfn || other || names != 1)
+		goto out;	/* hard links, an existing DOS name, or the name is gone: no short name */
+	mrec = map_mft_record(ni);
+	if (IS_ERR(mrec)) {
+		err = PTR_ERR(mrec);
+		goto out;
+	}
+	mref = MK_MREF(ni->mft_no, le16_to_cpu(mrec->sequence_number));
+	unmap_mft_record(ni);
+	dfn_len = sizeof(*dfn) + slen * sizeof(__le16);
+	dfn = kzalloc(dfn_len, GFP_NOFS);
+	if (!dfn) {
+		err = -ENOMEM;
+		goto out;
+	}
+	memcpy(dfn, lfn, sizeof(*dfn));
+	dfn->file_name_length = slen;
+	dfn->file_name_type = FILE_NAME_DOS;
+	memcpy(dfn->file_name, sname, slen * sizeof(__le16));
+	err = ntfs_index_add_filename(dir_ni, dfn, mref);
+	if (err)
+		goto out;
+	err = ntfs_attr_add(ni, AT_FILE_NAME, AT_UNNAMED, 0, (u8 *)dfn, dfn_len);
+	if (err) {
+		ntfs_index_remove(dir_ni, dfn, dfn_len);
+		goto out;
+	}
+	mrec = map_mft_record(ni);
+	if (!IS_ERR(mrec)) {
+		mrec->link_count = cpu_to_le16(le16_to_cpu(mrec->link_count) + 1);
+		if (!S_ISDIR(VFS_I(ni)->i_mode))
+			inc_nlink(VFS_I(ni));
+		mark_mft_record_dirty(ni);
+		unmap_mft_record(ni);
+	}
+	if (lfn->file_name_type != FILE_NAME_WIN32) {
+		err = ngc_set_fn_type(ni, dir_ni, lfn, lfn_len, mref, FILE_NAME_WIN32);
+		if (err) {
+			/* Undo: the long name stays POSIX, the DOS name goes again. */
+			struct ntfs_attr_search_ctx *dctx;
+			ngc_set_fn_type(ni, dir_ni, lfn, lfn_len, mref, lfn->file_name_type);
+			ntfs_index_remove(dir_ni, dfn, dfn_len);
+			dctx = ntfs_attr_get_search_ctx(ni, NULL);
+			while (dctx && !ntfs_attr_lookup(AT_FILE_NAME, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, dctx)) {
+				if (!dctx->attr->non_resident && ngc_fn(dctx)->file_name_type == FILE_NAME_DOS) {
+					if (!ntfs_attr_record_rm(dctx)) {
+						mrec = map_mft_record(ni);
+						if (!IS_ERR(mrec)) {
+							mrec->link_count = cpu_to_le16(le16_to_cpu(mrec->link_count) - 1);
+							if (!S_ISDIR(VFS_I(ni)->i_mode))
+								drop_nlink(VFS_I(ni));
+							mark_mft_record_dirty(ni);
+							unmap_mft_record(ni);
+						}
+					}
+					break;
+				}
+			}
+			if (dctx)
+				ntfs_attr_put_search_ctx(dctx);
+		}
+	}
+out:
+	kfree(lfn);
+	kfree(dfn);
+	mutex_unlock(&dir_ni->mrec_lock);
+	mutex_unlock(&ni->mrec_lock);
+	return err;
 }
 
 /* ------------------------------------------------------------- namespace (Tier 2) */

@@ -234,6 +234,47 @@ VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action)
                            FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE | \
                            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
 
+/*
+ * A new long name that is not a valid 8.3 name gets a generated DOS name (LONGNA~1.EXT), unique in
+ * its directory, as NTFS on Windows creates one unless NtfsDisable8dot3NameCreation is 1.  Caller
+ * holds CoreLock.  A failure only leaves the file without a short name.
+ */
+VOID NgMakeShortName(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PCWSTR Name, USHORT NameChars)
+{
+    GENERATE_NAME_CONTEXT Ctx;
+    UNICODE_STRING Long, Short;
+    WCHAR ShortBuf[12];
+    BOOLEAN Spaces = FALSE;
+    ULONG i;
+    int Err;
+
+    if (NgGlobal.Disable8dot3 || !NameChars)
+        return;
+    Long.Buffer = (PWSTR)Name;
+    Long.Length = Long.MaximumLength = NameChars * sizeof(WCHAR);
+    if (RtlIsNameLegalDOS8Dot3(&Long, NULL, &Spaces) && !Spaces)
+        return;
+    RtlZeroMemory(&Ctx, sizeof(Ctx));
+    RtlInitEmptyUnicodeString(&Short, ShortBuf, sizeof(ShortBuf));
+    for (i = 0; i < 64; i++)
+    {
+        ngc_node *Other = NULL;
+        RtlGenerate8dot3Name(&Long, FALSE, &Ctx, &Short);
+        Err = ngc_lookup(Vcb->Core, Parent, Short.Buffer, Short.Length / sizeof(WCHAR), &Other, NULL, NULL);
+        if (Err == -NGC_ENOENT)
+            break;
+        if (Other)
+            ngc_put(Other);
+        if (Err)
+            return;
+    }
+    if (i == 64)
+        return;
+    Err = ngc_add_short_name(Vcb->Core, Parent, Node, Name, NameChars, Short.Buffer, Short.Length / sizeof(WCHAR));
+    if (Err)
+        DPRINT1("ntfsng: short name %wZ for %wZ failed %d\n", &Short, &Long, Err);
+}
+
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -434,6 +475,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         else
         {
             Err = ngc_create(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), WantDir, &Node);
+            if (!Err)
+                NgMakeShortName(Vcb, Parent, Node, Comp.Buffer, Comp.Length / sizeof(WCHAR));
             if (!Err)
             {
                 unsigned int Attrs = (FileAttributes & NG_SETTABLE_ATTRS) | (WantDir ? 0 : FILE_ATTRIBUTE_ARCHIVE);

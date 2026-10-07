@@ -92,6 +92,10 @@ void ngc_set_journal_fault(unsigned long commit_no);
 typedef int (*ngc_run_t)(void *ctx, unsigned long long vcn, long long lcn, unsigned long long len);
 int ngc_runs(ngc_vol *v, ngc_node *n, ngc_run_t fn, void *ctx);
 int ngc_raw_write(ngc_vol *v, unsigned long long off, const void *buf, unsigned int len);
+int ngc_links(ngc_node *n);
+int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len);
+int ngc_add_short_name(ngc_vol *v, ngc_node *dir, ngc_node *n, const unsigned short *lname, unsigned int llen,
+		const unsigned short *sname, unsigned int slen);
 long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf);
 int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize);
 int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask);

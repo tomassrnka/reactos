@@ -140,7 +140,7 @@ static BOOLEAN NgMatchExpression(const WCHAR *Expr, USHORT E, const WCHAR *Name,
 
 /* Writes one entry; returns its unaligned size, or 0 if it does not fit in Room. */
 static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, PNG_DIRENT E,
-                         const struct ngc_stat *St, ULONG Index)
+                         const struct ngc_stat *St, ULONG Index, PCWSTR Short, ULONG ShortChars)
 {
     ULONG Attributes = NgFileAttributes(NULL, St);
     LONGLONG Eof = St->is_dir ? 0 : St->size, Alloc = St->is_dir ? 0 : St->alloc;
@@ -190,8 +190,9 @@ static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, P
             if (Need > Room) return 0;
             NG_COMMON(P);
             P->EaSize = 0;
-            P->ShortNameLength = 0;
             RtlZeroMemory(P->ShortName, sizeof(P->ShortName));
+            P->ShortNameLength = (CCHAR)(ShortChars * sizeof(WCHAR));
+            RtlCopyMemory(P->ShortName, Short, ShortChars * sizeof(WCHAR));
             return Need;
         }
         case FileIdBothDirectoryInformation:
@@ -201,8 +202,9 @@ static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, P
             if (Need > Room) return 0;
             NG_COMMON(P);
             P->EaSize = 0;
-            P->ShortNameLength = 0;
             RtlZeroMemory(P->ShortName, sizeof(P->ShortName));
+            P->ShortNameLength = (CCHAR)(ShortChars * sizeof(WCHAR));
+            RtlCopyMemory(P->ShortName, Short, ShortChars * sizeof(WCHAR));
             P->FileId.QuadPart = St->mft_ref;
             return Need;
         }
@@ -330,13 +332,22 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         struct ngc_stat St;
         ngc_node *Node;
         ULONG Offset, Size;
+        WCHAR Short[12];
+        unsigned int ShortChars;
+        BOOLEAN Matched, WantShort, Spaces;
 
         Name.Buffer = E->Name;
         Name.Length = Name.MaximumLength = E->NameLength;
-        if (!Ccb->PatternIsStar &&
-            !NgMatchExpression(Ccb->Pattern.Buffer, Ccb->Pattern.Length / sizeof(WCHAR),
-                               E->IsDot ? L"." : E->Name, E->IsDot ? 1 : E->NameLength / sizeof(WCHAR),
-                               E->IsDot, MatchTab))
+        Matched = Ccb->PatternIsStar ||
+                  NgMatchExpression(Ccb->Pattern.Buffer, Ccb->Pattern.Length / sizeof(WCHAR),
+                                    E->IsDot ? L"." : E->Name, E->IsDot ? 1 : E->NameLength / sizeof(WCHAR),
+                                    E->IsDot, MatchTab);
+        /* A name that is not a valid 8.3 name may have a DOS name: patterns match either. */
+        Spaces = FALSE;
+        WantShort = !E->IsDot && (Class == FileBothDirectoryInformation || Class == FileIdBothDirectoryInformation ||
+                    !Matched) && !(RtlIsNameLegalDOS8Dot3(&Name, NULL, &Spaces) && !Spaces);
+        ShortChars = 0;
+        if ((!Matched && !WantShort) || (!Matched && E->IsDot))
         {
             Ccb->NextIndex++;
             continue;
@@ -352,6 +363,8 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (!Err)
             {
                 ngc_stat(Node, &St);
+                if (WantShort && ngc_short_name(Node, Fcb->Stat.mft_ref, Short, &ShortChars))
+                    ShortChars = 0;
                 ngc_put(Node);
             }
             NgReleaseCore(Vcb);
@@ -362,8 +375,15 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 continue;
             }
         }
+        if (!Matched && !(ShortChars &&
+            NgMatchExpression(Ccb->Pattern.Buffer, Ccb->Pattern.Length / sizeof(WCHAR), Short, ShortChars, FALSE, MatchTab)))
+        {
+            Ccb->NextIndex++;
+            continue;
+        }
         Offset = Written ? ALIGN_UP_BY(Used, 8) : 0;
-        Size = Offset < Length ? NgFillEntry(Class, Buffer + Offset, Length - Offset, E, &St, Ccb->NextIndex) : 0;
+        Size = Offset < Length ? NgFillEntry(Class, Buffer + Offset, Length - Offset, E, &St, Ccb->NextIndex,
+                                             Short, ShortChars) : 0;
         if (!Size)
         {
             if (!Written)
