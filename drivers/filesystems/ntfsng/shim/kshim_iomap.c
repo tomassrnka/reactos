@@ -14,6 +14,8 @@
 #include <kshim.h>
 
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
+/* Set by the adapter: true for inodes whose pages are file data (written in place, not journaled). */
+bool (*kshim_is_data_inode)(struct inode *i);
 
 /* ------------------------------------------------------------ extent walk */
 
@@ -286,7 +288,7 @@ ssize_t_ iomap_add_to_ioend(struct iomap_writepage_ctx *wpc, struct folio *f, lo
 	loff_t ext_end = e->offset + (loff_t)e->length;
 	size_t at = offset_in_folio(f, pos);
 	size_t n, io;
-	int err;
+	int err, direct;
 
 	(void)end_pos;
 	if (pos < e->offset || pos >= ext_end)
@@ -300,7 +302,10 @@ ssize_t_ iomap_add_to_ioend(struct iomap_writepage_ctx *wpc, struct folio *f, lo
 	io = round_up(n, (size_t)SECTOR_SIZE);
 	if (at + io > folio_size(f) || pos + (loff_t)io > ext_end)
 		io = n;
+	direct = kshim_is_data_inode && kshim_is_data_inode(wpc->inode);
+	e->bdev->kshim_direct += direct;
 	err = kshim_dev_rw(e->bdev, 1, e->addr + (u64)(pos - e->offset), (u8 *)folio_address(f) + at, io);
+	e->bdev->kshim_direct -= direct;
 	return err ? err : (ssize_t_)n;
 }
 

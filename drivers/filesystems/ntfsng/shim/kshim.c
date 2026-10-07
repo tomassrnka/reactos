@@ -10,6 +10,7 @@
  * are generated into kshim_stubs.c and stop the system with their name.
  */
 #include <kshim.h>
+#include <kshim_jnl.h>
 
 struct task_struct kshim_task;
 struct user_namespace init_user_ns;
@@ -199,6 +200,8 @@ s64 kshim_atomic64_add(atomic64_t *v, s64 d)
 	unsigned char irql = ngos_spin_lock(&kshim_a64_lock);
 	s64 r = (v->counter += d);
 	ngos_spin_unlock(&kshim_a64_lock, irql);
+	if (d > 0)
+		kshim_watch_hit(v);
 	return r;
 }
 void kshim_atomic64_set(atomic64_t *v, s64 i)
@@ -483,6 +486,7 @@ static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, s
 			n = min_t(size_t, bs - in, len);
 			err = ngos_dev_read(b->osdev, base, sec, bs) ? -EIO : 0;
 			if (!err) {
+				kshim_jnl_patch(b, 0, base, sec, bs);
 				memcpy(sec + in, buf, n);
 				err = ngos_dev_write(b->osdev, base, sec, bs) ? -EIO : 0;
 			}
@@ -518,6 +522,14 @@ int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t l
 			return -EIO;
 		kshim_counter_writes++;
 		kshim_counter_write_bytes += len;
+		if (b->jnl && !b->kshim_direct) {
+			int r = kshim_jnl_capture(b, off, buf, len);
+			if (r != -ENOMEM)
+				return r;
+			kshim_jnl_degrade(b);
+		}
+		if (b->jnl)
+			kshim_jnl_patch(b, 1, off, buf, len);
 		if (((off | len) & (b->logical_block_size - 1)) || ((uintptr_t)buf & 3))
 			return kshim_dev_write_rmw(b, off, buf, len);
 		return ngos_dev_write(b->osdev, off, buf, (unsigned int)len) ? -EIO : 0;
@@ -532,7 +544,10 @@ int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t l
 		memset((char *)buf + in, 0, len - in);
 		len = in;
 	}
-	return ngos_dev_read(b->osdev, off, buf, (unsigned int)len) ? -EIO : 0;
+	if (ngos_dev_read(b->osdev, off, buf, (unsigned int)len))
+		return -EIO;
+	kshim_jnl_patch(b, 0, off, buf, len);
+	return 0;
 }
 int bdev_rw_virt(struct block_device *b, sector_t s, void *data, size_t len, blk_opf_t op)
 {
@@ -1193,6 +1208,7 @@ struct block_device *kshim_bdev_open(void *osdev, u64 size, unsigned int sector_
 void kshim_bdev_close(struct block_device *b)
 {
 	if (!b) return;
+	kshim_jnl_deactivate(b);
 	truncate_inode_pages_final(b->bd_mapping);
 	kfree(b->bd_inode);
 	kfree(b);

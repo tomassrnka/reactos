@@ -587,6 +587,7 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgAcquireCore(Vcb);
         ngc_sync(Vcb->Core);
         ngc_volinfo(Vcb->Core, &Vcb->Info);
+        ngc_jnl_report(Vcb->Core);
         NgReleaseCore(Vcb);
         DPRINT1("ntfsng: shutdown: volume %08lx flushed, %s, %lu syncs\n", Vcb->Vpb->SerialNumber,
                 Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs);

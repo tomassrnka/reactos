@@ -37,7 +37,9 @@ list(APPEND CORE_SOURCE
     shim/kshim_printf.c
     shim/kshim_stubs.c
     shim/kshim_wb.c
-    core/ngcore.c)
+    shim/kshim_jnl.c
+    core/ngcore.c
+    core/ngjrec.c)
 
 list(APPEND NT_SOURCE
     nt/create.c

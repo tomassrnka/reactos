@@ -16,6 +16,8 @@
 #include "ntfs/logfile.h"
 #include "ntfs/lcnalloc.h"
 #include "ngapi.h"
+#include <kshim_jnl.h>
+#include "ngjrec.h"
 
 extern initcall_t kshim_module_init;
 extern struct file_system_type *kshim_fs_type;
@@ -32,12 +34,19 @@ int kshim_mapping_writeback(struct address_space *m);
 void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, size_t len);
 extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_dirty;
 extern unsigned long long kshim_counter_write_bytes;
+extern bool (*kshim_is_data_inode)(struct inode *i);
 
 struct ngc_vol {
 	struct super_block *sb;
 	struct block_device *bdev;
 	u8 *bounce;                     /* NGC_BOUNCE bytes of pool: device writes never touch caller memory */
+	struct ngj_vol *jv;             /* raw $LogFile location while the metadata journal is in use */
+	atomic64_t *watched;            /* the core's free-cluster count, watched for frees */
+	unsigned long frees_seen;       /* its increments at the last commit */
 };
+
+/* Pages held by the journal overlay that make the next operation commit first. */
+#define NGC_JNL_COMMIT_PAGES 2048
 
 #define NGC_BOUNCE (64 * 1024)
 
@@ -93,6 +102,13 @@ static int ngc_logfile_clean(struct ntfs_volume *vol)
 	return clean;
 }
 
+/* File data goes in place without the journal: $DATA of anything but the system files. */
+static bool ngc_is_data_inode(struct inode *i)
+{
+	struct ntfs_inode *ni = NTFS_I(i);
+	return ni->type == AT_DATA && ni->mft_no >= FILE_first_user;
+}
+
 int ngc_init(void)
 {
 	int err = 0;
@@ -101,6 +117,7 @@ int ngc_init(void)
 		err = kshim_module_init();
 		if (!err)
 			ngc_inited = 1;
+		kshim_is_data_inode = ngc_is_data_inode;
 	}
 	mutex_unlock(&ngc_mount_lock);
 	return err;
@@ -113,7 +130,8 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	struct block_device *b;
 	struct ngc_vol *v;
 	struct ntfs_volume *vol;
-	int err;
+	int err, jrec = NGJ_NONE;
+	u64 jseq = 0;
 
 	*out = NULL;
 	err = ngc_init();
@@ -125,6 +143,17 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	if (!v || !fc || !b) {
 		err = -ENOMEM;
 		goto fail;
+	}
+	/* Before the core reads anything: a journal left by a crash goes in place first. */
+	if (want_rw) {
+		v->jv = kmalloc(sizeof(*v->jv), GFP_KERNEL);
+		if (v->jv && !ngj_probe(osdev, size, v->jv) && v->jv->lf_pages >= 256) {
+			jrec = ngj_recover(v->jv, 1, &jseq);
+		} else {
+			printk(KERN_WARNING "journal: $LogFile not usable for the journal; metadata goes in place\n");
+			kfree(v->jv);
+			v->jv = NULL;
+		}
 	}
 	fc->fs_type = kshim_fs_type;
 	fc->sb_flags = SB_RDONLY;
@@ -154,7 +183,9 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	*why_ro = want_rw ? NULL : "read-only requested";
 	if (want_rw) {
 		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
-		if (NVolErrors(vol))
+		if (jrec == NGJ_REPAIR)
+			*why_ro = "the journal shows metadata written in place without it (needs repair)";
+		else if (NVolErrors(vol))
 			*why_ro = "the core found errors at mount (MFTMirr, $LogFile or hibernation)";
 		else if (vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK)
 			*why_ro = (vol->vol_flags & VOLUME_IS_DIRTY) ? "volume is marked dirty" :
@@ -182,6 +213,23 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 			}
 		}
 	}
+	if (!sb_rdonly(v->sb) && v->jv) {
+		/* The core's own mount-time writes ($LogFile emptied) go in place before the journal starts. */
+		int jerr = kshim_sync(v->sb);
+		if (!jerr)
+			jerr = blkdev_issue_flush(b);
+		if (vol->logfile_ino)
+			truncate_inode_pages(vol->logfile_ino->i_mapping, 0);
+		if (!jerr)
+			jerr = kshim_jnl_activate(b, v->jv->ext, v->jv->next, v->jv->lf_pages, v->jv->serial, jseq + 1);
+		if (jerr) {
+			printk(KERN_ERR "journal: not active (%d); metadata goes in place\n", jerr);
+		} else {
+			v->watched = &vol->free_clusters;
+			kshim_watch_add(v->watched);
+			v->frees_seen = kshim_watch_count(v->watched);
+		}
+	}
 	if (!sb_rdonly(v->sb)) {
 		v->bounce = kmalloc(NGC_BOUNCE, GFP_KERNEL);
 		if (!v->bounce) {
@@ -200,6 +248,8 @@ fail_fc:
 fail:
 	kfree(fc);
 	kshim_bdev_close(b);
+	if (v)
+		kfree(v->jv);
 	kfree(v);
 	return err;
 }
@@ -214,6 +264,11 @@ void ngc_umount(ngc_vol *v)
 	}
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
+	if (v->bdev->jnl)
+		kshim_jnl_commit(v->bdev);
+	if (v->watched)
+		kshim_watch_del(v->watched);
+	kfree(v->jv);
 	kfree(sb);
 	kshim_bdev_close(v->bdev);
 	kfree(v);
@@ -555,8 +610,38 @@ int ngc_is_rw(ngc_vol *v)
 }
 
 /*
+ * A consistency point: every dirty mapping and inode is written back, then (journal active)
+ * the transaction is committed and written in place, or (no journal) the device is flushed.
+ * Callers hold the volume lock between core operations, so the state written is whole.
+ */
+static int ngc_commit(struct ngc_vol *v)
+{
+	int err = kshim_sync(v->sb);
+	if (!v->bdev->jnl)
+		return err ? err : blkdev_issue_flush(v->bdev);
+	if (!err)
+		err = kshim_jnl_commit(v->bdev);
+	if (!err)
+		v->frees_seen = kshim_watch_count(v->watched);
+	return err;
+}
+
+/*
+ * File data is written in place at once, so a cluster freed by an uncommitted transaction
+ * must not receive data before that transaction commits: a crash would hand the old owner
+ * the new data.  Operations that allocate data clusters commit first when anything was freed.
+ */
+static int ngc_before_alloc(struct ngc_vol *v)
+{
+	if (v->bdev->jnl && kshim_watch_count(v->watched) != v->frees_seen)
+		return ngc_commit(v);
+	return 0;
+}
+
+/*
  * Sets VOLUME_IS_DIRTY before the first change after a clean point, and puts it on disk
- * (with a device flush) before the change proceeds, so a crash always leaves it behind.
+ * before the change proceeds, so a crash always leaves it behind.  Also commits when the
+ * journal overlay has grown large.
  */
 int ngc_mark_dirty(ngc_vol *v)
 {
@@ -565,12 +650,12 @@ int ngc_mark_dirty(ngc_vol *v)
 	if (sb_rdonly(v->sb))
 		return -EROFS;
 	if (vol->vol_flags & VOLUME_IS_DIRTY)
-		return 0;
+		return kshim_jnl_pending(v->bdev) > NGC_JNL_COMMIT_PAGES ? ngc_commit(v) : 0;
 	err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
 	if (!err)
 		err = write_inode_now(vol->vol_ino, 1);
 	if (!err)
-		err = blkdev_issue_flush(v->bdev);
+		err = ngc_commit(v);
 	return err;
 }
 
@@ -584,15 +669,11 @@ int ngc_sync(ngc_vol *v)
 	int err;
 	if (sb_rdonly(v->sb))
 		return 0;
-	err = kshim_sync(v->sb);
-	if (!err)
-		err = blkdev_issue_flush(v->bdev);
+	err = ngc_commit(v);
 	if (!err && !NVolErrors(vol) && (vol->vol_flags & VOLUME_IS_DIRTY) && !kshim_sb_dirty(v->sb)) {
 		err = ntfs_clear_volume_flags(vol, VOLUME_IS_DIRTY);
 		if (!err)
-			err = kshim_sync(v->sb);
-		if (!err)
-			err = blkdev_issue_flush(v->bdev);
+			err = ngc_commit(v);
 	}
 	return err;
 }
@@ -602,27 +683,32 @@ int ngc_dirty(ngc_vol *v)
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
 	if (sb_rdonly(v->sb))
 		return 0;
-	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY);
+	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY) || kshim_jnl_pending(v->bdev);
+}
+
+void ngc_jnl_report(ngc_vol *v)
+{
+	kshim_jnl_report(v->bdev);
 }
 
 static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len)
 {
-	while (len) {
+	int err = 0;
+	v->bdev->kshim_direct++;
+	while (len && !err) {
 		size_t n = (size_t)min_t(u64, len, NGC_BOUNCE);
-		int err;
 		if (buf)
 			memcpy(v->bounce, buf, n);
 		else
 			memset(v->bounce, 0, n);
 		err = kshim_dev_rw(v->bdev, 1, off, v->bounce, n);
-		if (err)
-			return err;
 		off += n;
 		len -= n;
 		if (buf)
 			buf += n;
 	}
-	return 0;
+	v->bdev->kshim_direct--;
+	return err;
 }
 
 /* Writes [pos, pos+len) of a non-resident attribute in place; buf NULL writes zeros. */
@@ -723,6 +809,8 @@ long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len
 	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni))
 		return -EOPNOTSUPP;
 	err = ngc_mark_dirty(v);
+	if (!err)
+		err = ngc_before_alloc(v);
 	if (err)
 		return err;
 	if (!NInoNonResident(ni)) {
@@ -760,6 +848,8 @@ int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize)
 	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni))
 		return -EOPNOTSUPP;
 	err = ngc_mark_dirty(v);
+	if (!err && (loff_t)newsize > old)
+		err = ngc_before_alloc(v);
 	if (err)
 		return err;
 	if ((loff_t)newsize > old) {
