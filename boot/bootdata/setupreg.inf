@@ -1,4 +1,14 @@
 [Version]
 Signature = "$Windows NT$"
 
+[AddReg]
+
+; ntfsng is loaded under its own name in setup (the boot driver list from txtsetup.sif); the installed
+; system runs it as the Ntfs service (hivesys.inf).
+HKLM,"SYSTEM\CurrentControlSet\Services\ntfsng","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ntfsng","Group",0x00000000,"Boot File System"
+HKLM,"SYSTEM\CurrentControlSet\Services\ntfsng","ImagePath",0x00020000,"system32\drivers\ntfsng.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\ntfsng","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\ntfsng","Type",0x00010001,0x00000002
+
 ; EOF
