@@ -531,6 +531,216 @@ static VOID Test_SpareCode(VOID)
     _SEH2_END;
 }
 
+/* push rbx; push rsi; sub rsp, 0x28; nops; add rsp, 0x28; pop rsi; pop rbx at 0x16 */
+static const UCHAR g_EpilogFunction[] =
+{
+    0x53, 0x56, 0x48, 0x83, 0xEC, 0x28, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x48, 0x83, 0xC4, 0x28, 0x5E, 0x5B,
+};
+
+#define EPILOG_START   0x10
+#define EPILOG_POP     0x14
+#define EPILOG_END     0x16
+#define EPILOG_HANDLER 0x0F00
+
+static TEST_UNWIND_INFO *
+SetupEpilogFunction(const UCHAR *End, ULONG EndLength, ULONG Flags)
+{
+    TEST_UNWIND_INFO *Info;
+
+    RtlFillMemory(g_Image.Code, sizeof(g_Image.Code), 0xCC);
+    RtlCopyMemory(g_Image.Code, g_EpilogFunction, sizeof(g_EpilogFunction));
+    RtlCopyMemory(g_Image.Code + EPILOG_END, End, EndLength);
+
+    Info = ResetUnwindInfo(1, 6, 3);
+    Info->Flags = Flags;
+    SetCode(Info, 0, 6, UWOP_ALLOC_SMALL, (0x28 / 8) - 1);
+    SetCode(Info, 1, 2, UWOP_PUSH_NONVOL, REG_RSI);
+    SetCode(Info, 2, 1, UWOP_PUSH_NONVOL, REG_RBX);
+    *(ULONG *)&Info->UnwindCode[4] = FIELD_OFFSET(IMAGE_STRUCT, Code) + EPILOG_HANDLER;
+    return Info;
+}
+
+static PVOID
+UnwindEpilogFunction(PCONTEXT Context, ULONG_PTR Rsp, ULONG FunctionEnd,
+                     ULONG UnwindOffset, ULONG CodeOffset)
+{
+    RUNTIME_FUNCTION Func =
+    {
+        FIELD_OFFSET(IMAGE_STRUCT, Code),
+        FIELD_OFFSET(IMAGE_STRUCT, Code) + FunctionEnd,
+        FIELD_OFFSET(IMAGE_STRUCT, Unwind) + UnwindOffset
+    };
+    PVOID HandlerData = NULL;
+    ULONG_PTR EstablisherFrame = 0;
+
+    InitContext(Context, Rsp);
+    return RtlVirtualUnwind(UNW_FLAG_EHANDLER,
+                            (ULONG_PTR)&g_Image,
+                            (ULONG_PTR)g_Image.Code + CodeOffset,
+                            &Func,
+                            Context,
+                            &HandlerData,
+                            &EstablisherFrame,
+                            NULL);
+}
+
+/* The body's frame: 0x28 bytes, saved RSI, saved RBX, return address */
+static VOID
+SetupEpilogStack(VOID)
+{
+    RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
+    g_StackBuffer[0x28 / 8] = 0x5151515151515151ULL;
+    g_StackBuffer[0x30 / 8] = 0xB0B0B0B0B0B0B0B0ULL;
+    g_StackBuffer[0x38 / 8] = 0x1234567812345678ULL;
+    /* What an unwind through the prolog reads when the stack was already released */
+    g_StackBuffer[0x60 / 8] = 0xBAD0BAD0BAD0BAD0ULL;
+}
+
+static VOID
+CheckEpilogUnwind(ULONG FunctionEnd, const char *Name)
+{
+    CONTEXT Ctx;
+    PVOID Handler;
+    ULONG_PTR Stack = (ULONG_PTR)g_StackBuffer;
+    PVOID ExpectedHandler = g_Image.Code + EPILOG_HANDLER;
+
+    SetupEpilogStack();
+
+    /* At the start of the epilog: unwound through the prolog, the handler is found */
+    Handler = UnwindEpilogFunction(&Ctx, Stack, FunctionEnd, 0, EPILOG_START);
+    ok(Handler == ExpectedHandler, "%s: handler %p at the epilog start\n", Name, Handler);
+    ok_eq_hex64(Ctx.Rsi, 0x5151515151515151ULL);
+    ok_eq_hex64(Ctx.Rbx, 0xB0B0B0B0B0B0B0B0ULL);
+    ok_eq_hex64(Ctx.Rip, 0x1234567812345678ULL);
+    ok_eq_hex64(Ctx.Rsp, Stack + 0x40);
+
+    /* After the stack release: the rest of the epilog is simulated */
+    Handler = UnwindEpilogFunction(&Ctx, Stack + 0x28, FunctionEnd, 0, EPILOG_POP);
+    ok(Handler == NULL, "%s: handler %p in the epilog\n", Name, Handler);
+    ok_eq_hex64(Ctx.Rsi, 0x5151515151515151ULL);
+    ok_eq_hex64(Ctx.Rbx, 0xB0B0B0B0B0B0B0B0ULL);
+    ok_eq_hex64(Ctx.Rip, 0x1234567812345678ULL);
+    ok_eq_hex64(Ctx.Rsp, Stack + 0x40);
+
+    /* At the instruction that leaves the function */
+    Handler = UnwindEpilogFunction(&Ctx, Stack + 0x38, FunctionEnd, 0, EPILOG_END);
+    ok(Handler == NULL, "%s: handler %p at the end of the epilog\n", Name, Handler);
+    ok_eq_hex64(Ctx.Rsi, 0);
+    ok_eq_hex64(Ctx.Rip, 0x1234567812345678ULL);
+    ok_eq_hex64(Ctx.Rsp, Stack + 0x40);
+}
+
+static VOID Test_EpilogRet(VOID)
+{
+    static const UCHAR Ret[] = { 0xC3 };
+    static const UCHAR RepRet[] = { 0xF3, 0xC3 };
+
+    SetupEpilogFunction(Ret, sizeof(Ret), UNW_FLAG_EHANDLER);
+    CheckEpilogUnwind(EPILOG_END + sizeof(Ret), "ret");
+
+    /* More code of the function follows the epilog */
+    SetupEpilogFunction(Ret, sizeof(Ret), UNW_FLAG_EHANDLER);
+    CheckEpilogUnwind(EPILOG_END + 0x20, "ret, code follows");
+
+    SetupEpilogFunction(RepRet, sizeof(RepRet), UNW_FLAG_EHANDLER);
+    CheckEpilogUnwind(EPILOG_END + sizeof(RepRet), "rep ret");
+}
+
+static VOID Test_EpilogTailCall(VOID)
+{
+    CONTEXT Ctx;
+    PVOID Handler;
+    ULONG_PTR Stack = (ULONG_PTR)g_StackBuffer;
+    UCHAR Jmp[5] = { 0xE9 };
+    static const UCHAR JmpShort[] = { 0xEB, 0x40 };
+    static const UCHAR JmpRip[] = { 0xFF, 0x25, 0x00, 0x01, 0x00, 0x00 };
+    static const UCHAR RexJmpRip[] = { 0x48, 0xFF, 0x25, 0x00, 0x01, 0x00, 0x00 };
+    static const UCHAR JmpReg[] = { 0xFF, 0xE0 };
+
+    /* jmp to a function at 0x800 */
+    *(LONG *)&Jmp[1] = 0x800 - (EPILOG_END + 5);
+    SetupEpilogFunction(Jmp, sizeof(Jmp), UNW_FLAG_EHANDLER);
+    CheckEpilogUnwind(EPILOG_END + sizeof(Jmp), "jmp rel32");
+
+    SetupEpilogFunction(JmpShort, sizeof(JmpShort), UNW_FLAG_EHANDLER);
+    CheckEpilogUnwind(EPILOG_END + sizeof(JmpShort), "jmp rel8");
+
+    SetupEpilogFunction(JmpRip, sizeof(JmpRip), UNW_FLAG_EHANDLER);
+    CheckEpilogUnwind(EPILOG_END + sizeof(JmpRip), "jmp [rip+disp32]");
+
+    SetupEpilogFunction(RexJmpRip, sizeof(RexJmpRip), UNW_FLAG_EHANDLER);
+    CheckEpilogUnwind(EPILOG_END + sizeof(RexJmpRip), "rex jmp [rip+disp32]");
+
+    /* A jmp back into the function is a branch in the body, not an epilog */
+    *(LONG *)&Jmp[1] = 0x06 - (EPILOG_END + 5);
+    SetupEpilogFunction(Jmp, sizeof(Jmp), 0);
+    SetupEpilogStack();
+    UnwindEpilogFunction(&Ctx, Stack + 0x28, EPILOG_END + sizeof(Jmp), 0, EPILOG_POP);
+    ok_eq_hex64(Ctx.Rip, 0xBAD0BAD0BAD0BAD0ULL);
+
+    /* jmp through a register is not an allowed epilog end */
+    SetupEpilogFunction(JmpReg, sizeof(JmpReg), UNW_FLAG_EHANDLER);
+    SetupEpilogStack();
+    Handler = UnwindEpilogFunction(&Ctx, Stack + 0x28, EPILOG_END + sizeof(JmpReg), 0, EPILOG_POP);
+    ok(Handler != NULL, "jmp reg: no handler\n");
+    ok_eq_hex64(Ctx.Rip, 0xBAD0BAD0BAD0BAD0ULL);
+}
+
+static VOID Test_EpilogChained(VOID)
+{
+    CONTEXT Ctx;
+    TEST_UNWIND_INFO *Fragment;
+    PRUNTIME_FUNCTION PrimaryFunc;
+    ULONG_PTR Stack = (ULONG_PTR)g_StackBuffer;
+    static const UCHAR Ret[] = { 0xC3 };
+    static const UCHAR FragmentCode[] = { 0x48, 0x83, 0xC4, 0x28, 0x5E, 0x5B, 0xC3 };
+
+    /* The primary function, and at 0x100 a fragment of it that is its epilog */
+    SetupEpilogFunction(Ret, sizeof(Ret), 0);
+    RtlCopyMemory(g_Image.Code + 0x100, FragmentCode, sizeof(FragmentCode));
+
+    Fragment = (TEST_UNWIND_INFO *)(g_Image.Unwind + 0x200);
+    RtlZeroMemory(Fragment, sizeof(*Fragment));
+    Fragment->Version = 1;
+    Fragment->Flags = UNW_FLAG_CHAININFO;
+    PrimaryFunc = (PRUNTIME_FUNCTION)&Fragment->UnwindCode[0];
+    PrimaryFunc->BeginAddress = FIELD_OFFSET(IMAGE_STRUCT, Code);
+    PrimaryFunc->EndAddress = FIELD_OFFSET(IMAGE_STRUCT, Code) + EPILOG_END + sizeof(Ret);
+    PrimaryFunc->UnwindData = FIELD_OFFSET(IMAGE_STRUCT, Unwind);
+
+    {
+        RUNTIME_FUNCTION Func =
+        {
+            FIELD_OFFSET(IMAGE_STRUCT, Code) + 0x100,
+            FIELD_OFFSET(IMAGE_STRUCT, Code) + 0x100 + sizeof(FragmentCode),
+            FIELD_OFFSET(IMAGE_STRUCT, Unwind) + 0x200
+        };
+        PVOID HandlerData = NULL;
+        ULONG_PTR EstablisherFrame = 0;
+
+        SetupEpilogStack();
+        InitContext(&Ctx, Stack + 0x28);
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, (ULONG_PTR)&g_Image,
+                         (ULONG_PTR)g_Image.Code + 0x104, &Func, &Ctx,
+                         &HandlerData, &EstablisherFrame, NULL);
+        ok_eq_hex64(Ctx.Rsi, 0x5151515151515151ULL);
+        ok_eq_hex64(Ctx.Rbx, 0xB0B0B0B0B0B0B0B0ULL);
+        ok_eq_hex64(Ctx.Rip, 0x1234567812345678ULL);
+        ok_eq_hex64(Ctx.Rsp, Stack + 0x40);
+
+        /* At the fragment's first instruction the whole frame is still there */
+        InitContext(&Ctx, Stack);
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, (ULONG_PTR)&g_Image,
+                         (ULONG_PTR)g_Image.Code + 0x100, &Func, &Ctx,
+                         &HandlerData, &EstablisherFrame, NULL);
+        ok_eq_hex64(Ctx.Rbx, 0xB0B0B0B0B0B0B0B0ULL);
+        ok_eq_hex64(Ctx.Rip, 0x1234567812345678ULL);
+        ok_eq_hex64(Ctx.Rsp, Stack + 0x40);
+    }
+}
+
 START_TEST(RtlVirtualUnwind)
 {
     RtlpInitialize();
@@ -550,4 +760,7 @@ START_TEST(RtlVirtualUnwind)
     Test_SaveXmm128Far();
     Test_Epilog();
     Test_SpareCode();
+    Test_EpilogRet();
+    Test_EpilogTailCall();
+    Test_EpilogChained();
 }
