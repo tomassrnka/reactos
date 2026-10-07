@@ -15,6 +15,11 @@
 
 #define AP_GDT_ENTRIES 128
 
+/* How long a started processor has to reach the kernel, in 100 us units */
+#define AP_STARTUP_TIMEOUT 50000
+
+volatile LONG KiApStartupState;
+
 typedef struct _APINFO
 {
     DECLSPEC_ALIGN(PAGE_SIZE) KIDTENTRY64 Idt[256];
@@ -96,7 +101,7 @@ KeStartAllProcessors(VOID)
     KDESCRIPTOR BspGdt, BspIdt;
     ULONG ProcessorCount;
     ULONG MaximumProcessors;
-    ULONG64 WaitStart;
+    ULONG Waited;
 
     MaximumProcessors = KeMaximumProcessors;
 
@@ -179,6 +184,7 @@ KeStartAllProcessors(VOID)
         KeLoaderBlock->KernelStack = (ULONG_PTR)Stacks.KernelStack;
         KeLoaderBlock->Prcb = (ULONG_PTR)&APInfo->Pcr.Prcb;
         KeLoaderBlock->Thread = (ULONG_PTR)&APInfo->Thread;
+        KiApStartupState = KI_AP_STARTUP_WAITING;
         KeMemoryBarrier();
 
         /* Start the CPU */
@@ -187,16 +193,27 @@ KeStartAllProcessors(VOID)
             break;
 
         /* And wait for it to start; it clears the PRCB once it is in its idle loop */
-        WaitStart = __rdtsc();
-        while (*(volatile ULONG_PTR*)&KeLoaderBlock->Prcb != 0)
+        for (Waited = 0; *(volatile ULONG_PTR*)&KeLoaderBlock->Prcb != 0; Waited++)
         {
-            /* Report a processor that does not come up, roughly after 10^10 cycles */
-            if (WaitStart && (__rdtsc() - WaitStart > 10000000000ULL))
+            /* Drop a processor that has not claimed its startup in time */
+            if ((Waited == AP_STARTUP_TIMEOUT) &&
+                (InterlockedCompareExchange(&KiApStartupState,
+                                            KI_AP_STARTUP_ABANDONED,
+                                            KI_AP_STARTUP_WAITING) == KI_AP_STARTUP_WAITING))
             {
-                DPRINT1("KeStartAllProcessors: still waiting for processor %lu\n", ProcessorCount);
-                WaitStart = 0;
+                break;
             }
-            YieldProcessor();
+            KeStallExecutionProcessor(100);
+        }
+
+        if (KiApStartupState == KI_AP_STARTUP_ABANDONED)
+        {
+            DPRINT1("KeStartAllProcessors: processor %lu did not start\n", ProcessorCount);
+
+            /* It may still run the startup code on these and halt, so keep them */
+            APInfo = NULL;
+            RtlZeroMemory(&Stacks, sizeof(Stacks));
+            break;
         }
 
         /* These now belong to the running processor */

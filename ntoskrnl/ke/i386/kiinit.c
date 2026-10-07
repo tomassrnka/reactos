@@ -745,6 +745,11 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     PKIPCR Pcr;
     KIRQL DummyIrql;
 
+#ifdef CONFIG_SMP
+    if (KeNumberProcessors != 0)
+        KiClaimProcessorStartup();
+#endif
+
     /* Boot cycles timestamp */
     BootCycles = __rdtsc();
 

@@ -493,6 +493,11 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     ULONG64 InitialStack;
     PKIPCR Pcr;
 
+#ifdef CONFIG_SMP
+    if (KeNumberProcessors != 0)
+        KiClaimProcessorStartup();
+#endif
+
     /* Boot cycles timestamp */
     BootCycles = __rdtsc();
 

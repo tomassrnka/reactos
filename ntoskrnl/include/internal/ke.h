@@ -314,6 +314,29 @@ KeStartAllProcessors(
     VOID
 );
 
+#ifdef CONFIG_SMP
+/* Start handshake with an application processor, see KeStartAllProcessors */
+#define KI_AP_STARTUP_WAITING   1
+#define KI_AP_STARTUP_CLAIMED   2
+#define KI_AP_STARTUP_ABANDONED 3
+
+extern volatile LONG KiApStartupState;
+
+FORCEINLINE
+VOID
+KiClaimProcessorStartup(VOID)
+{
+    /* Too late: the boot processor no longer waits for this one */
+    if (InterlockedCompareExchange((PLONG)&KiApStartupState,
+                                   KI_AP_STARTUP_CLAIMED,
+                                   KI_AP_STARTUP_WAITING) != KI_AP_STARTUP_WAITING)
+    {
+        _disable();
+        for (;;) __halt();
+    }
+}
+#endif
+
 /* gmutex.c ********************************************************************/
 
 VOID
