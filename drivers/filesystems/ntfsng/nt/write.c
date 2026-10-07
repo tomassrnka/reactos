@@ -733,6 +733,7 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         DPRINT1("ntfsng: shutdown: volume %08lx flushed, %s, %lu syncs, %lu non-cached writes via Cc, paging file %ld reads %ld writes\n",
                 Vcb->Vpb->SerialNumber, Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs, Vcb->NonCachedViaCache,
                 Vcb->PagingFileReads, Vcb->PagingFileWrites);
+        NgPrintLockStats(Vcb);
     }
     ngc_write_stats(&Writes, &Bytes, &Syncs, &Dirties);
     DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs, %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",

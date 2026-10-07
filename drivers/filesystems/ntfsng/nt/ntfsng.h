@@ -24,6 +24,30 @@
 #define NG_NODE_VCB 0x4e47
 #define NG_NODE_FCB 0x4e48
 
+/*
+ * CoreLock statistics per request type: the IRP major function of the top-level IRP, paging
+ * reads and writes, and requests without an IRP (lazy writer, flusher, fast I/O).  Updated by the
+ * lock holder only; read through FSCTL_NG_LOCK_STATS and printed at shutdown.
+ */
+#define NG_LOCK_PAGING_READ (IRP_MJ_MAXIMUM_FUNCTION + 1)
+#define NG_LOCK_PAGING_WRITE (IRP_MJ_MAXIMUM_FUNCTION + 2)
+#define NG_LOCK_NO_IRP (IRP_MJ_MAXIMUM_FUNCTION + 3)
+#define NG_LOCK_CATEGORIES (IRP_MJ_MAXIMUM_FUNCTION + 4)
+typedef struct _NG_LOCK_STAT
+{
+    ULONG Acquired;                 /* outermost acquisitions */
+    ULONG Contended;                /* of those, the ones that had to wait */
+    ULONGLONG WaitUs;               /* time spent waiting */
+    ULONGLONG HeldUs;               /* time the lock was held */
+} NG_LOCK_STAT;
+typedef struct _NG_LOCK_STATS
+{
+    ULONG Version;                  /* 1 */
+    ULONG Categories;               /* NG_LOCK_CATEGORIES */
+    NG_LOCK_STAT Stat[NG_LOCK_CATEGORIES];
+} NG_LOCK_STATS;
+#define FSCTL_NG_LOCK_STATS CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0xA41, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 /* Volume control block: the device extension of the volume device object. */
 typedef struct _NG_VCB
 {
@@ -50,6 +74,10 @@ typedef struct _NG_VCB
     ULONG Syncs;
     ULONG NonCachedViaCache;            /* non-cached writes sent through Cc: a view could not be purged */
     LONG PagingFileReads, PagingFileWrites;
+    ULONG CoreDepth;                /* recursion depth of CoreLock held by its owner */
+    UCHAR CoreCategory;             /* NG_LOCK_* of the outermost holder */
+    LARGE_INTEGER CoreSince;        /* performance counter when the outermost holder got it */
+    NG_LOCK_STATS LockStats;
 } NG_VCB, *PNG_VCB;
 
 #define NG_FLUSH_PERIOD_MS 2000
@@ -162,6 +190,9 @@ VOID NgDiagLogRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, NTSTATUS Status);
 
 /* fsctl.c */
 NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
+/* ntfsng.c */
+VOID NgPrintLockStats(PNG_VCB Vcb);
 
 /* create.c */
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp);
