@@ -28,6 +28,10 @@ ULONG ApicVersion;
 BOOLEAN HalpX2ApicEnabled;
 UCHAR HalpVectorToIndex[256];
 
+/* Processor that receives each device interrupt vector, and the next one to pick */
+static UCHAR HalpVectorTarget[256];
+static ULONG HalpNextInterruptTarget;
+
 /* The I/O APIC registers are reached through one select/data pair */
 KSPIN_LOCK HalpIoApicLock;
 
@@ -471,6 +475,19 @@ ApicInitializeLocalApic(ULONG Cpu)
 #endif
 }
 
+static
+UCHAR
+HalpChooseInterruptTarget(VOID)
+{
+    ULONG Count = (ULONG)KeNumberProcessors;
+
+    /* Spread device interrupts over the processors, leaving the boot processor
+       (it takes the clock interrupt) to the last ones */
+    if (Count <= 1)
+        return 0;
+    return (UCHAR)(1 + (HalpNextInterruptTarget++ % (Count - 1)));
+}
+
 UCHAR
 NTAPI
 HalpAllocateSystemInterrupt(
@@ -517,7 +534,7 @@ HalpGetRootInterruptVector(
     /* Get the vector currently registered */
     Vector = HalpIrqToVector(BusInterruptLevel);
 
-    /* Check if it's used */
+    /* Check if it's used; every device of a shared input gets its processor */
     if (Vector != APIC_FREE_VECTOR)
     {
         /* Calculate IRQL */
@@ -543,6 +560,9 @@ HalpGetRootInterruptVector(
                     /* Found one, allocate the interrupt */
                     Vector = HalpAllocateSystemInterrupt(BusInterruptLevel, Vector);
                     *OutIrql = Irql;
+
+                    /* The input goes to one processor, chosen in turn */
+                    HalpVectorTarget[Vector] = HalpChooseInterruptTarget();
                     goto Exit;
                 }
             }
@@ -556,8 +576,8 @@ HalpGetRootInterruptVector(
 
 Exit:
 
-    *OutAffinity = HalpDefaultInterruptAffinity;
-    ASSERT(HalpDefaultInterruptAffinity);
+    *OutAffinity = (KAFFINITY)1 << HalpVectorTarget[Vector];
+    ASSERT(*OutAffinity & HalpDefaultInterruptAffinity);
 
     return Vector;
 }
@@ -803,12 +823,15 @@ HalEnableSystemInterrupt(
     /* Check if the interrupt is already enabled */
     if (ReDirReg.Mask == FALSE)
     {
-        /* If the vector matches, there is nothing more to do,
-           otherwise something is wrong. */
-        return (ReDirReg.Vector == Vector);
+        /* If the vector doesn't match, something is wrong */
+        if (ReDirReg.Vector != Vector)
+            return FALSE;
+
+        return TRUE;
     }
 
-    /* Set up the redirection entry */
+    /* Set up the redirection entry; drivers connect on the processor that
+       HalpGetRootInterruptVector reported as the affinity */
     ReDirReg.Vector = Vector;
     ReDirReg.MessageType = APIC_MT_Fixed;
     ReDirReg.DestinationMode = APIC_DM_Physical;
