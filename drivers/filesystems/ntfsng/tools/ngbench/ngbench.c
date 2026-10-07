@@ -26,7 +26,29 @@ typedef struct
 {
     ULONG Version, Categories;
     LOCK_STAT Stat[NG_LOCK_CATEGORIES];
+} LOCKS;
+#define NG_PROFILE_STAGES 64
+#define FSCTL_NG_PROFILE CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0xA42, METHOD_BUFFERED, FILE_ANY_ACCESS)
+typedef struct
+{
+    ULONGLONG Count, Ticks, Bytes;
+} PROF_STAT;
+typedef struct
+{
+    ULONG Version, Stages;
+    ULONGLONG TicksPerSecond;
+    PROF_STAT Stage[NG_PROFILE_STAGES];
+} PROFILE;
+typedef struct
+{
+    LOCKS L;
+    PROFILE P;
+    BOOL HaveP;
 } LOCK_STATS;
+static const char *StageName[NG_PROFILE_STAGES] = {
+    "dev-read", "dev-write", "dev-flush", "commit", "writeback", "jnl-commit", "commit-full", "commit-alloc",
+    "sync", "lookup", "create", "unlink", "rename", "readdir", "iget", "put", "stat", "read", "write", "set-size",
+    "set-info", "short-name", "add-short-name", "security", "dir-empty", "link" };
 
 static const char *CatName[NG_LOCK_CATEGORIES] = {
     "create", "pipe", "close", "read", "write", "queryinfo", "setinfo", "queryea", "setea", "flush",
@@ -51,8 +73,10 @@ static BOOL Snap(LOCK_STATS *s)
 {
     DWORD n;
     memset(s, 0, sizeof(*s));
-    return Volume != INVALID_HANDLE_VALUE &&
-           DeviceIoControl(Volume, FSCTL_NG_LOCK_STATS, NULL, 0, s, sizeof(*s), &n, NULL) && n == sizeof(*s);
+    if (Volume == INVALID_HANDLE_VALUE)
+        return FALSE;
+    s->HaveP = DeviceIoControl(Volume, FSCTL_NG_PROFILE, NULL, 0, &s->P, sizeof(s->P), &n, NULL) && n == sizeof(s->P);
+    return DeviceIoControl(Volume, FSCTL_NG_LOCK_STATS, NULL, 0, &s->L, sizeof(s->L), &n, NULL) && n == sizeof(s->L);
 }
 
 static void LockReport(const char *wl, const LOCK_STATS *a, const LOCK_STATS *b)
@@ -63,9 +87,9 @@ static void LockReport(const char *wl, const LOCK_STATS *a, const LOCK_STATS *b)
     char line[512];
     for (i = 0; i < NG_LOCK_CATEGORIES; i++)
     {
-        ULONG da = b->Stat[i].Acquired - a->Stat[i].Acquired;
-        ULONG dc = b->Stat[i].Contended - a->Stat[i].Contended;
-        ULONGLONG dw = b->Stat[i].WaitUs - a->Stat[i].WaitUs, dh = b->Stat[i].HeldUs - a->Stat[i].HeldUs;
+        ULONG da = b->L.Stat[i].Acquired - a->L.Stat[i].Acquired;
+        ULONG dc = b->L.Stat[i].Contended - a->L.Stat[i].Contended;
+        ULONGLONG dw = b->L.Stat[i].WaitUs - a->L.Stat[i].WaitUs, dh = b->L.Stat[i].HeldUs - a->L.Stat[i].HeldUs;
         if (!da)
             continue;
         acq += da; cont += dc; wait += dw; held += dh;
@@ -78,6 +102,24 @@ static void LockReport(const char *wl, const LOCK_STATS *a, const LOCK_STATS *b)
               wait / 1000.0, held / 1000.0);
     OutputDebugStringA(line);
     fputs(line, stdout);
+    if (!a->HaveP || !b->HaveP || !b->P.TicksPerSecond)
+        return;
+    for (i = 0; i < NG_PROFILE_STAGES; i++)
+    {
+        ULONGLONG dc = b->P.Stage[i].Count - a->P.Stage[i].Count;
+        double ms = (double)(b->P.Stage[i].Ticks - a->P.Stage[i].Ticks) * 1000.0 / (double)b->P.TicksPerSecond;
+        char nm[32];
+        if (!dc)
+            continue;
+        if (i >= 32)
+            _snprintf(nm, sizeof(nm), "irp-%s", CatName[i - 32]);
+        else
+            _snprintf(nm, sizeof(nm), "%s", StageName[i] ? StageName[i] : "?");
+        _snprintf(line, sizeof(line), "NGB-PROF:%s %s n=%I64u ms=%.1f us_each=%.1f kb=%I64u\n", wl, nm, dc, ms,
+                  ms * 1000.0 / (double)dc, (b->P.Stage[i].Bytes - a->P.Stage[i].Bytes) / 1024);
+        OutputDebugStringA(line);
+        fputs(line, stdout);
+    }
 }
 
 static void Report(const char *wl, int threads, double ops, double bytes, double secs, const LOCK_STATS *a,

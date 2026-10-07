@@ -6,6 +6,7 @@
  */
 
 #include "ntfsng.h"
+#include "../shim/include/ngos.h"
 
 NG_GLOBAL NgGlobal;
 
@@ -373,6 +374,7 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     BOOLEAN TopLevel = FALSE;
     ULONG_PTR Low;
     NTSTATUS Status;
+    ULONGLONG T0 = __rdtsc();
 
     Low = NgStackFill();
     FsRtlEnterFileSystem();
@@ -420,6 +422,7 @@ out:
         IoSetTopLevelIrp(NULL);
     FsRtlExitFileSystem();
     NgStackScan(Low, Major);
+    ngos_prof(NGP_IRP + Major, T0, 0);
     return Status;
 }
 
@@ -470,6 +473,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         C1 = __rdtsc();
         if (P1.QuadPart > P0.QuadPart)
             NgPerfFrequency = (LONGLONG)((C1 - C0) * (ULONGLONG)F.QuadPart / (ULONGLONG)(P1.QuadPart - P0.QuadPart));
+        NgProfile.TicksPerSecond = (ULONGLONG)NgPerfFrequency;
         DPRINT1("ntfsng: lock timing at %I64d ticks/s\n", NgPerfFrequency);
     }
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");

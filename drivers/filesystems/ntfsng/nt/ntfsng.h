@@ -48,6 +48,24 @@ typedef struct _NG_LOCK_STATS
 } NG_LOCK_STATS;
 #define FSCTL_NG_LOCK_STATS CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0xA41, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* Time per stage (shim/include/ngos.h NGP_*): calls, ticks and bytes, read through FSCTL_NG_PROFILE. */
+#define NG_PROFILE_STAGES 64
+typedef struct _NG_PROF_STAT
+{
+    ULONGLONG Count;
+    ULONGLONG Ticks;
+    ULONGLONG Bytes;
+} NG_PROF_STAT;
+typedef struct _NG_PROFILE
+{
+    ULONG Version;                  /* 1 */
+    ULONG Stages;                   /* NG_PROFILE_STAGES */
+    ULONGLONG TicksPerSecond;
+    NG_PROF_STAT Stage[NG_PROFILE_STAGES];
+} NG_PROFILE;
+#define FSCTL_NG_PROFILE CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0xA42, METHOD_BUFFERED, FILE_ANY_ACCESS)
+extern NG_PROFILE NgProfile;
+
 /* Volume control block: the device extension of the volume device object. */
 typedef struct _NG_VCB
 {
