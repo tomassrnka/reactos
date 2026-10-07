@@ -35,6 +35,26 @@ KSPIN_LOCK ConnectionEndpointListLock;
  * RETURNS:
  *     Pointer to address file, NULL if none was found
  */
+/* Reference an address file found through the global list unless its last
+ * reference has already gone, which means AddrFileFree is about to unlink and
+ * free it. Returns whether the reference was taken. */
+static BOOLEAN ReferenceAddressFileIfLive(
+    PADDRESS_FILE AddrFile)
+{
+    LONG OldRefCount;
+
+    do
+    {
+        OldRefCount = *((volatile LONG *)&AddrFile->RefCount);
+        if (OldRefCount == 0)
+            return FALSE;
+    } while (InterlockedCompareExchange(&AddrFile->RefCount,
+                                        OldRefCount + 1,
+                                        OldRefCount) != OldRefCount);
+
+    return TRUE;
+}
+
 PADDRESS_FILE AddrSearchFirst(
     PIP_ADDRESS Address,
     USHORT Port,
@@ -42,6 +62,7 @@ PADDRESS_FILE AddrSearchFirst(
     PAF_SEARCH SearchContext)
 {
     KIRQL OldIrql;
+    PLIST_ENTRY Entry;
 
     SearchContext->Address  = Address;
     SearchContext->Port     = Port;
@@ -49,10 +70,17 @@ PADDRESS_FILE AddrSearchFirst(
 
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
 
-    SearchContext->Next = AddressFileListHead.Flink;
+    /* Hold a reference on the first entry that is still alive, so the walk in
+     * AddrSearchNext has a stable starting point */
+    for (Entry = AddressFileListHead.Flink;
+         Entry != &AddressFileListHead;
+         Entry = Entry->Flink)
+    {
+        if (ReferenceAddressFileIfLive(CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry)))
+            break;
+    }
 
-    if (!IsListEmpty(&AddressFileListHead))
-        ReferenceObject(CONTAINING_RECORD(SearchContext->Next, ADDRESS_FILE, ListEntry));
+    SearchContext->Next = Entry;
 
     TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 
@@ -267,7 +295,9 @@ PADDRESS_FILE AddrSearchNext(
         /* See if this address matches the search criteria */
         if ((Current->Port    == SearchContext->Port) &&
             (Current->Protocol == SearchContext->Protocol) &&
-            (AddrReceiveMatch(IPAddress, SearchContext->Address))) {
+            (AddrReceiveMatch(IPAddress, SearchContext->Address)) &&
+            /* Skip an address file that is already being freed */
+            ReferenceAddressFileIfLive(Current)) {
             /* We've found a match */
             Found = TRUE;
             break;
@@ -277,17 +307,15 @@ PADDRESS_FILE AddrSearchNext(
 
     if (Found)
     {
-        SearchContext->Next = CurrentEntry->Flink;
-
-        if (SearchContext->Next != &AddressFileListHead)
+        /* Hold a reference on the next live entry to prevent the link from
+         * disappearing behind our back */
+        for (SearchContext->Next = CurrentEntry->Flink;
+             SearchContext->Next != &AddressFileListHead;
+             SearchContext->Next = SearchContext->Next->Flink)
         {
-            /* Reference the next address file to prevent the link from disappearing behind our back */
-            ReferenceObject(CONTAINING_RECORD(SearchContext->Next, ADDRESS_FILE, ListEntry));
+            if (ReferenceAddressFileIfLive(CONTAINING_RECORD(SearchContext->Next, ADDRESS_FILE, ListEntry)))
+                break;
         }
-
-        /* Reference the returned address file before dereferencing the starting
-         * address file because it may be that Current == StartingAddrFile */
-        ReferenceObject(Current);
     }
     else
         Current = NULL;
