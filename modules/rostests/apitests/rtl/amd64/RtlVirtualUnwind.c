@@ -626,7 +626,7 @@ CheckEpilogUnwind(ULONG FunctionEnd, const char *Name, BOOLEAN EndsInJump)
 
     if (EndsInJump)
     {
-        /* A jmp alone is taken for a jump from the body, with the whole frame still there */
+        /* A direct jmp alone is taken for a jump from the body, with the whole frame still there */
         Handler = UnwindEpilogFunction(&Ctx, Stack, FunctionEnd, 0, EPILOG_END);
         ok(Handler == ExpectedHandler, "%s: handler %p at the jmp\n", Name, Handler);
         ok_eq_hex64(Ctx.Rsi, 0x5151515151515151ULL);
@@ -669,6 +669,7 @@ static VOID Test_EpilogTailCall(VOID)
     static const UCHAR JmpRip[] = { 0xFF, 0x25, 0x00, 0x01, 0x00, 0x00 };
     static const UCHAR RexJmpRip[] = { 0x48, 0xFF, 0x25, 0x00, 0x01, 0x00, 0x00 };
     static const UCHAR JmpReg[] = { 0xFF, 0xE0 };
+    static const UCHAR JmpMem[] = { 0xFF, 0x20 };
 
     /* jmp to a function at 0x800 */
     *(LONG *)&Jmp[1] = 0x800 - (EPILOG_END + 5);
@@ -679,10 +680,10 @@ static VOID Test_EpilogTailCall(VOID)
     CheckEpilogUnwind(EPILOG_END + sizeof(JmpShort), "jmp rel8", TRUE);
 
     SetupEpilogFunction(JmpRip, sizeof(JmpRip), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + sizeof(JmpRip), "jmp [rip+disp32]", TRUE);
+    CheckEpilogUnwind(EPILOG_END + sizeof(JmpRip), "jmp [rip+disp32]", FALSE);
 
     SetupEpilogFunction(RexJmpRip, sizeof(RexJmpRip), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + sizeof(RexJmpRip), "rex jmp [rip+disp32]", TRUE);
+    CheckEpilogUnwind(EPILOG_END + sizeof(RexJmpRip), "rex jmp [rip+disp32]", FALSE);
 
     /* A jmp back into the function is a branch in the body, not an epilog */
     *(LONG *)&Jmp[1] = 0x06 - (EPILOG_END + 5);
@@ -696,6 +697,13 @@ static VOID Test_EpilogTailCall(VOID)
     SetupEpilogStack();
     Handler = UnwindEpilogFunction(&Ctx, Stack + 0x28, EPILOG_END + sizeof(JmpReg), 0, EPILOG_POP);
     ok(Handler != NULL, "jmp reg: no handler\n");
+    ok_eq_hex64(Ctx.Rip, 0xBAD0BAD0BAD0BAD0ULL);
+
+    /* Neither is a jmp through a register's memory, the form of a switch table */
+    SetupEpilogFunction(JmpMem, sizeof(JmpMem), UNW_FLAG_EHANDLER);
+    SetupEpilogStack();
+    Handler = UnwindEpilogFunction(&Ctx, Stack + 0x28, EPILOG_END + sizeof(JmpMem), 0, EPILOG_POP);
+    ok(Handler != NULL, "jmp [reg]: no handler\n");
     ok_eq_hex64(Ctx.Rip, 0xBAD0BAD0BAD0BAD0ULL);
 }
 

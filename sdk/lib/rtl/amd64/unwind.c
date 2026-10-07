@@ -288,66 +288,40 @@ GetXmmReg(PCONTEXT Context, BYTE Reg)
     return ((M128A*)(&Context->Xmm0))[Reg];
 }
 
-/* Returns the length of a jmp that can end an epilog, or 0 */
+/* Checks for a jmp that can end an epilog: a direct jmp out of the function,
+   or a jmp through [rip + disp32] as calls through an import table compile to */
 static
 __inline
-ULONG
-RtlpGetEpilogJumpLength(
+BOOLEAN
+RtlpIsEpilogJump(
     _In_ BYTE *InstrPtr,
     _In_ ULONG64 ImageBase,
     _In_ PRUNTIME_FUNCTION FunctionEntry,
-    _In_ PRUNTIME_FUNCTION PrimaryEntry)
+    _In_ PRUNTIME_FUNCTION PrimaryEntry,
+    _Out_ PBOOLEAN IsDirect)
 {
-    ULONG64 Target, TargetRva;
-    ULONG Length, Prefix = 0;
-    BYTE ModRm;
+    ULONG64 TargetRva;
+    ULONG Prefix = 0;
 
-    /* A direct jmp ends an epilog only as a tail call out of the function */
     if ((InstrPtr[0] == 0xE9) || (InstrPtr[0] == 0xEB))
     {
-        Length = (InstrPtr[0] == 0xE9) ? 5 : 2;
-        Target = (ULONG64)InstrPtr + Length;
+        *IsDirect = TRUE;
         if (InstrPtr[0] == 0xE9)
-            Target += (LONG64)*(LONG UNALIGNED*)(InstrPtr + 1);
+            TargetRva = (ULONG64)InstrPtr + 5 + (LONG64)*(LONG UNALIGNED*)(InstrPtr + 1);
         else
-            Target += (LONG64)(CHAR)InstrPtr[1];
+            TargetRva = (ULONG64)InstrPtr + 2 + (LONG64)(CHAR)InstrPtr[1];
+        TargetRva -= ImageBase;
 
-        TargetRva = Target - ImageBase;
-        if (((TargetRva >= FunctionEntry->BeginAddress) && (TargetRva < FunctionEntry->EndAddress)) ||
-            ((TargetRva >= PrimaryEntry->BeginAddress) && (TargetRva < PrimaryEntry->EndAddress)))
-        {
-            return 0;
-        }
-
-        return Length;
+        return !(((TargetRva >= FunctionEntry->BeginAddress) && (TargetRva < FunctionEntry->EndAddress)) ||
+                 ((TargetRva >= PrimaryEntry->BeginAddress) && (TargetRva < PrimaryEntry->EndAddress)));
     }
 
-    /* Otherwise only an indirect jmp through memory with ModRM.mod 00, optionally with REX */
+    /* Other indirect forms are also switch table jumps of a function body */
+    *IsDirect = FALSE;
     if ((InstrPtr[0] & 0xF0) == 0x40)
         Prefix = 1;
 
-    if (InstrPtr[Prefix] != 0xFF)
-        return 0;
-
-    ModRm = InstrPtr[Prefix + 1];
-    if (((ModRm & 0xC0) != 0) || (((ModRm >> 3) & 7) != 4))
-        return 0;
-
-    Length = Prefix + 2;
-    if ((ModRm & 7) == 5)
-    {
-        /* [rip + disp32] */
-        Length += 4;
-    }
-    else if ((ModRm & 7) == 4)
-    {
-        /* SIB byte; a base of 101 means disp32 without a base */
-        Length += 1;
-        if ((InstrPtr[Prefix + 2] & 7) == 5)
-            Length += 4;
-    }
-
-    return Length;
+    return (InstrPtr[Prefix] == 0xFF) && (InstrPtr[Prefix + 1] == 0x25);
 }
 
 /*! RtlpTryToUnwindEpilog
@@ -376,7 +350,7 @@ RtlpTryToUnwindEpilog(
     PRUNTIME_FUNCTION PrimaryEntry;
     PUNWIND_INFO UnwindInfo;
     ULONG i, Links, Length, PushCount = 0, PopCount = 0;
-    BOOLEAN HasAllocation = FALSE, StackAdjusted = FALSE;
+    BOOLEAN HasAllocation = FALSE, StackAdjusted = FALSE, IsDirect;
 
     /* Count the prolog's pushes and allocations along the chained unwind info */
     PrimaryEntry = FunctionEntry;
@@ -507,10 +481,10 @@ RtlpTryToUnwindEpilog(
         }
 
         /* A tail call. GCC also jumps from the body to a cold part outside
-           the function, so a jmp ends an epilog only after a pop */
-        if (RtlpGetEpilogJumpLength(InstrPtr, ImageBase, FunctionEntry, PrimaryEntry) != 0)
+           the function, so a direct jmp ends an epilog only after a pop */
+        if (RtlpIsEpilogJump(InstrPtr, ImageBase, FunctionEntry, PrimaryEntry, &IsDirect))
         {
-            if (PopCount == 0)
+            if (IsDirect && (PopCount == 0))
                 return FALSE;
             break;
         }
