@@ -130,10 +130,8 @@ IopUnpackCompletionEntry(IN PLIST_ENTRY ListEntry,
         /* Save values */
         Entry->KeyContext = Packet->KeyContext;
         Entry->ApcContext = Packet->ApcContext;
-#ifdef _WIN64
-        /* Status fills only part of the union */
-        Entry->IoStatusBlock.Pointer = NULL;
-#endif
+        /* All of it: Status fills only part of the union on 64-bit */
+        RtlZeroMemory(&Entry->IoStatusBlock, sizeof(Entry->IoStatusBlock));
         Entry->IoStatusBlock.Status = Packet->IoStatus;
         Entry->IoStatusBlock.Information = Packet->IoStatusInformation;
 
