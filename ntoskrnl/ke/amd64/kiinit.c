@@ -556,12 +556,16 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
 
-    /* Set processor as active */
-    KeActiveProcessors |= 1ULL << Cpu;
+    /* Count the processor. An application processor joins the active ones
+       in KiSystemStartupBootStack, when it can take requests */
     KeNumberProcessors++;
+    if (Cpu == 0)
+    {
+        KeActiveProcessors |= 1ULL << Cpu;
 
-    /* We are running the initial system process now */
-    InterlockedOr64(&KiInitialProcess.Pcb.ActiveProcessors, 1ULL << Cpu);
+        /* We are running the initial system process now */
+        InterlockedOr64(&KiInitialProcess.Pcb.ActiveProcessors, 1ULL << Cpu);
+    }
 
     /* Release lock */
     InterlockedAnd64((PLONG64)&KiFreezeExecutionLock, 0);
