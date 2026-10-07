@@ -73,13 +73,15 @@ __asm__(
 #define _SEH3$_EMIT_DEFS_AND_PRAGMA__(Line, Type)                                   \
     /* Emit assembler constants with line number to be individual */                \
     __asm__ __volatile__ goto ("\n"                                                 \
-        "\t__seh2$$begin_try__" #Line "=%l0\n" /* Begin of tried code */            \
+        "\t__seh2$$begin_try__" #Line "=%l0 + 1\n" /* Begin of tried code */        \
         "\t__seh2$$end_try__" #Line "=%l1 + 1\n" /* End of tried code */            \
         "\t__seh2$$filter__" #Line "=%l2\n" /* Filter function */                   \
         "\t__seh2$$begin_except__" #Line "=%l3\n" /* Called on except */            \
             : /* No output */                                                       \
             : /* No input */                                                        \
-            : /* No clobber */                                                      \
+            : /* Handlers are entered with the dispatcher's registers */            \
+              "memory", "%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi",             \
+              "%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15"          \
             : __seh2$$begin_try__,                                                  \
               __seh2$$end_try__,                                                    \
               __seh2$$filter__,                                                     \
@@ -104,6 +106,8 @@ __asm__(
      * to properly set the handler data when we're done.                            \
      */                                                                             \
 __seh2$$begin_try__:                                                                \
+    /* A call to a noreturn function right before returns here: keep it out */      \
+    __asm__ __volatile__("nop");                                                    \
     {                                                                               \
         __label__ __seh2$$leave_scope__;
 
