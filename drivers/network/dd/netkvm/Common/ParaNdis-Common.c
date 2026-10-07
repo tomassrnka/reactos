@@ -1509,6 +1509,11 @@ void ReuseReceiveBufferRegular(PARANDIS_ADAPTER *pContext, pIONetDescriptor pBuf
             pContext->Counters.nReusedRxBuffers = 0;
             virtqueue_kick_always(pContext->NetReceiveQueue);
         }
+        else
+        {
+            /* A device that ran out of receive buffers waits for this notification */
+            virtqueue_kick(pContext->NetReceiveQueue);
+        }
 
         if (IsListEmpty(&pContext->NetReceiveBuffersWaiting))
         {
