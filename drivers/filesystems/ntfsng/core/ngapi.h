@@ -93,6 +93,9 @@ typedef int (*ngc_run_t)(void *ctx, unsigned long long vcn, long long lcn, unsig
 int ngc_runs(ngc_vol *v, ngc_node *n, ngc_run_t fn, void *ctx);
 int ngc_raw_write(ngc_vol *v, unsigned long long off, const void *buf, unsigned int len);
 int ngc_links(ngc_node *n);
+int ngc_get_security(ngc_vol *v, ngc_node *n, void **out, unsigned int *len);
+int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len);
+void ngc_free(void *p);
 int ngc_create_stream(ngc_vol *v, ngc_node *base, const unsigned short *sname, unsigned int len, ngc_node **out);
 int ngc_delete_stream(ngc_vol *v, ngc_node *n);
 int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len);

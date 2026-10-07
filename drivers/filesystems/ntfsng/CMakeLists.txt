@@ -51,6 +51,7 @@ list(APPEND NT_SOURCE
     nt/ntfsng.c
     nt/pagefile.c
     nt/read.c
+    nt/security.c
     nt/write.c
     nt/ntfsng.h)
 

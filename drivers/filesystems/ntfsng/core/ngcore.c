@@ -1085,6 +1085,152 @@ void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned 
 	*dirties = kshim_counter_dirty;
 }
 
+/* ------------------------------------------------------------- security descriptors */
+
+/* A $Secure:$SDS entry header, also the data of a $SII index entry. */
+struct ngc_sd_hdr {
+	__le32 hash;
+	__le32 security_id;
+	__le64 offset;
+	__le32 length;
+} __packed;
+
+static __le16 ngc_sii[] = { cpu_to_le16('$'), cpu_to_le16('S'), cpu_to_le16('I'), cpu_to_le16('I'), 0 };
+static __le16 ngc_sds[] = { cpu_to_le16('$'), cpu_to_le16('S'), cpu_to_le16('D'), cpu_to_le16('S'), 0 };
+
+/*
+ * The self-relative security descriptor of @n (kmalloc'd in *out): the file's own
+ * $SECURITY_DESCRIPTOR attribute, or else the $Secure entry its $STANDARD_INFORMATION names.
+ * *out stays NULL when the file has neither.
+ */
+int ngc_get_security(ngc_vol *v, ngc_node *n, void **out, unsigned int *len)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n), *sni;
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct ntfs_attr_search_ctx *ctx;
+	struct ntfs_index_context *icx;
+	struct sii_index_key key;
+	struct inode *sds;
+	u32 secid = 0, l = 0;
+	u64 off = 0;
+	s64 size;
+	void *sd;
+	u8 *buf;
+	long r;
+	int err;
+
+	*out = NULL;
+	*len = 0;
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	mutex_lock(&ni->mrec_lock);
+	if (ntfs_attr_exist(ni, AT_SECURITY_DESCRIPTOR, AT_UNNAMED, 0)) {
+		sd = ntfs_attr_readall(ni, AT_SECURITY_DESCRIPTOR, AT_UNNAMED, 0, &size);
+		mutex_unlock(&ni->mrec_lock);
+		if (IS_ERR(sd))
+			return PTR_ERR(sd);
+		if (size < 20 || size > 0x10000) {
+			kvfree(sd);
+			return -EIO;
+		}
+		*out = sd;
+		*len = (unsigned int)size;
+		return 0;
+	}
+	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	if (ctx) {
+		if (!ntfs_attr_lookup(AT_STANDARD_INFORMATION, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx) &&
+		    !ctx->attr->non_resident && le32_to_cpu(ctx->attr->data.resident.value_length) >= 0x38)
+			secid = get_unaligned_le32((u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset) + 0x34);
+		ntfs_attr_put_search_ctx(ctx);
+	}
+	mutex_unlock(&ni->mrec_lock);
+	if (!secid || !vol->secure_ino)
+		return 0;
+	sni = NTFS_I(vol->secure_ino);
+	mutex_lock(&sni->mrec_lock);
+	icx = ntfs_index_ctx_get(sni, ngc_sii, 4);
+	if (!icx) {
+		mutex_unlock(&sni->mrec_lock);
+		return -ENOMEM;
+	}
+	key.security_id = cpu_to_le32(secid);
+	err = ntfs_index_lookup(&key, sizeof(key), icx);
+	if (!err) {
+		struct ngc_sd_hdr *h = (struct ngc_sd_hdr *)((u8 *)icx->entry + le16_to_cpu(icx->entry->data.vi.data_offset));
+		off = le64_to_cpu(h->offset);
+		l = le32_to_cpu(h->length);
+	}
+	ntfs_index_ctx_put(icx);
+	mutex_unlock(&sni->mrec_lock);
+	if (err)
+		return err == -ENOENT ? 0 : err;
+	if (l < sizeof(struct ngc_sd_hdr) + 20 || l > 0x10000)
+		return -EIO;
+	sds = ntfs_attr_iget(vol->secure_ino, AT_DATA, ngc_sds, 4);
+	if (IS_ERR(sds))
+		return PTR_ERR(sds);
+	buf = kmalloc(l, GFP_NOFS);
+	r = buf ? ngc_read((ngc_node *)sds, off, l, buf, 0) : -ENOMEM;
+	iput(sds);
+	if (r < 0) {
+		kfree(buf);
+		return (int)r;
+	}
+	memmove(buf, buf + sizeof(struct ngc_sd_hdr), l - sizeof(struct ngc_sd_hdr));
+	*out = buf;
+	*len = l - sizeof(struct ngc_sd_hdr);
+	return 0;
+}
+
+void ngc_free(void *p)
+{
+	kvfree(p);
+}
+
+/*
+ * Stores a self-relative security descriptor as the file's own $SECURITY_DESCRIPTOR attribute
+ * (the format the core gives new files); a $Secure security_id in $STANDARD_INFORMATION is
+ * cleared so that every reader uses the new descriptor.
+ */
+int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	int err;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (len < 20 || len > 0x10000)
+		return -EINVAL;
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	mutex_lock(&ni->mrec_lock);
+	if (ntfs_attr_exist(ni, AT_SECURITY_DESCRIPTOR, AT_UNNAMED, 0))
+		err = ntfs_attr_remove(ni, AT_SECURITY_DESCRIPTOR, AT_UNNAMED, 0);
+	if (!err)
+		err = ntfs_attr_add(ni, AT_SECURITY_DESCRIPTOR, AT_UNNAMED, 0, (u8 *)sd, len);
+	if (!err) {
+		/* A $Secure security_id would take precedence elsewhere (ntfs-3g, Windows): drop it. */
+		struct ntfs_attr_search_ctx *ctx = ntfs_attr_get_search_ctx(ni, NULL);
+		if (ctx && !ntfs_attr_lookup(AT_STANDARD_INFORMATION, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx) &&
+		    !ctx->attr->non_resident && le32_to_cpu(ctx->attr->data.resident.value_length) >= 0x38) {
+			u8 *val = (u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset);
+			if (get_unaligned_le32(val + 0x34)) {
+				put_unaligned_le32(0, val + 0x34);
+				mark_mft_record_dirty(ctx->ntfs_ino);
+			}
+		}
+		if (ctx)
+			ntfs_attr_put_search_ctx(ctx);
+	}
+	mutex_unlock(&ni->mrec_lock);
+	if (!err)
+		mark_inode_dirty(VFS_I(ni));
+	return err;
+}
+
 /* ------------------------------------------------------------- short (8.3) names */
 
 /* The value of the $FILE_NAME attribute the search context stands on. */

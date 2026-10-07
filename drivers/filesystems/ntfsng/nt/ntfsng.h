@@ -185,6 +185,10 @@ BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset);
 /* create.c */
 VOID NgMakeShortName(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PCWSTR Name, USHORT NameChars);
 
+/* security.c */
+NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
 /* pagefile.c */
 NTSTATUS NgPagingFileMap(PNG_FCB Fcb);
 NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGLONG Offset, ULONG Length);
