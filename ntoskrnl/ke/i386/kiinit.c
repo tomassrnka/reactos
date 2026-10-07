@@ -548,7 +548,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     InitThread->State = Running;
     InitThread->Affinity = 1 << Number;
     InitThread->WaitIrql = DISPATCH_LEVEL;
-    InterlockedOr((PLONG)&InitProcess->ActiveProcessors, 1 << Number);
+    if (!Number) InterlockedOr((PLONG)&InitProcess->ActiveProcessors, 1 << Number);
 
     /* HACK for MmUpdatePageDir */
     ((PETHREAD)InitThread)->ThreadsProcess = (PEPROCESS)InitProcess;
@@ -632,6 +632,14 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
 
     /* Raise back to HIGH_LEVEL and clear the PRCB for the loader block */
     KeRaiseIrql(HIGH_LEVEL, &DummyIrql);
+    if (Number)
+    {
+        /* Become a target of TLB flushes and other requests right before
+           taking interrupts, then drop translations cached before that */
+        InterlockedOr((PLONG)&KeActiveProcessors, Prcb->SetMember);
+        InterlockedOr((PLONG)&InitProcess->ActiveProcessors, Prcb->SetMember);
+        KxFlushEntireCurrentTb();
+    }
     LoaderBlock->Prcb = 0;
 }
 
@@ -852,9 +860,10 @@ AppCpuInit:
     KeGetPcr()->TSS->CR3 = __readcr3();
     KeGetPcr()->TSS->LDT = 0;
 
-    /* Set active processors */
-    KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
+    /* Count the processor. An application processor joins the active ones
+       at the end of KiInitializeKernel, when it can take requests */
     KeNumberProcessors++;
+    if (!Cpu) KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
 
     /* Let the next processor start */
     InterlockedAnd((PLONG)&KiFreezeExecutionLock, 0);
