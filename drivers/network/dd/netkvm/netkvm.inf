@@ -45,6 +45,12 @@ CopyFiles       = kvmnet5.CopyFiles
 [kvmnet5.ndi.Services]
 AddService      = netkvm, 2, kvmnet5.Service, kvmnet5.EventLog
 
+[kvmnet5.ndi.HW]
+AddReg          = kvmnet5.MSI.Reg
+
+[kvmnet5.MSI.Reg]
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 1
+
 
 [kvmnet5.Reg]
 HKR,    ,                         BusNumber,           0, "0" 
