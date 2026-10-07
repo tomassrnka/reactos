@@ -110,6 +110,41 @@ mark_seh_function_noinline(void)
     DECL_DECLARED_INLINE_P(fndecl) = 0;
 }
 
+/*
+ * The scope table describes a try block as one address range, from its
+ * begin label to its end label. Block reordering, jump threading and tail
+ * merging can move code of the block past these labels, and a tail call
+ * leaves the frame: exceptions raised there bypass the handler. Turn them
+ * off for functions using SEH.
+ */
+static
+void
+keep_seh_blocks_contiguous(void)
+{
+    tree fndecl = current_function_decl;
+
+    if (fndecl == NULL_TREE)
+        return;
+
+    /* Done already, or the function has its own optimization options */
+    if (DECL_FUNCTION_SPECIFIC_OPTIMIZATION(fndecl) != NULL_TREE)
+        return;
+
+    struct gcc_options opts = global_options;
+    opts.x_flag_reorder_blocks = 0;
+    opts.x_flag_reorder_blocks_and_partition = 0;
+    opts.x_flag_thread_jumps = 0;
+    opts.x_flag_tree_dom = 0;
+    opts.x_flag_crossjumping = 0;
+    opts.x_flag_tree_tail_merge = 0;
+    opts.x_flag_optimize_sibling_calls = 0;
+#if GCCPLUGIN_VERSION_MAJOR >= 11
+    DECL_FUNCTION_SPECIFIC_OPTIMIZATION(fndecl) = build_optimization_node(&opts, &global_options_set);
+#else
+    DECL_FUNCTION_SPECIFIC_OPTIMIZATION(fndecl) = build_optimization_node(&opts);
+#endif
+}
+
 static
 void
 handle_seh_pragma(cpp_reader* UNUSED parser)
@@ -165,6 +200,8 @@ handle_seh_pragma(cpp_reader* UNUSED parser)
 
     /* Keep handlerdata generation canonical: one SEH block per function. */
     mark_seh_function_noinline();
+
+    keep_seh_blocks_contiguous();
 }
 
 static
