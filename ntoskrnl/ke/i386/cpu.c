@@ -1492,6 +1492,20 @@ KiFlushTargetEntireTb(IN PKIPI_CONTEXT PacketContext,
     KeFlushCurrentTb();
 }
 
+#ifdef CONFIG_SMP
+static
+VOID
+NTAPI
+KiFlushEntireTbIpiWorker(
+    _In_ PKIPI_CONTEXT PacketContext,
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Parameter3)
+{
+    KeFlushCurrentTb();
+}
+#endif
+
 /*
  * @implemented
  */
@@ -1500,52 +1514,28 @@ NTAPI
 KeFlushEntireTb(IN BOOLEAN Invalid,
                 IN BOOLEAN AllProcessors)
 {
-    KIRQL OldIrql;
 #ifdef CONFIG_SMP
-    KAFFINITY TargetAffinity;
-    PKPRCB Prcb = KeGetCurrentPrcb();
-#endif
+    /* Flush every active processor, this one included, and wait for them */
+    KiIpiSendRequest(KeActiveProcessors,
+                     KiFlushEntireTbIpiWorker,
+                     NULL,
+                     NULL,
+                     NULL);
+#else
+    KIRQL OldIrql;
 
     /* Raise the IRQL for the TB Flush */
     OldIrql = KeRaiseIrqlToSynchLevel();
 
-#ifdef CONFIG_SMP
-    /* FIXME: Use KiTbFlushTimeStamp to synchronize TB flush */
-
-    /* Get the current processor affinity, and exclude ourselves */
-    TargetAffinity = KeActiveProcessors;
-    TargetAffinity &= ~Prcb->SetMember;
-
-    /* Make sure this is MP */
-    if (TargetAffinity)
-    {
-        /* Send an IPI TB flush to the other processors */
-        KiIpiSendPacket(TargetAffinity,
-                        KiFlushTargetEntireTb,
-                        NULL,
-                        0,
-                        NULL);
-    }
-#endif
-
-    /* Flush the TB for the Current CPU, and update the flush stamp */
+    /* Flush the TB for the Current CPU */
     KeFlushCurrentTb();
 
-#ifdef CONFIG_SMP
-    /* If this is MP, wait for the other processors to finish */
-    if (TargetAffinity)
-    {
-        /* Sanity check */
-        ASSERT(Prcb == KeGetCurrentPrcb());
-
-        /* FIXME: TODO */
-        ASSERTMSG("Not yet implemented\n", FALSE);
-    }
+    /* Return to original IRQL */
+    KeLowerIrql(OldIrql);
 #endif
 
-    /* Update the flush stamp and return to original IRQL */
+    /* Update the flush stamp */
     InterlockedExchangeAdd(&KiTbFlushTimeStamp, 1);
-    KeLowerIrql(OldIrql);
 }
 
 /*
