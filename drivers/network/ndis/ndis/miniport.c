@@ -273,8 +273,8 @@ NdisReturnPackets(
 
     for (i = 0; i < NumberOfPackets; i++)
     {
-        PacketsToReturn[i]->WrapperReserved[0]--;
-        if (PacketsToReturn[i]->WrapperReserved[0] == 0)
+        /* The last reference gives the packet back, see MiniIndicateReceivePacket */
+        if (InterlockedDecrement(NDIS_PACKET_REFERENCES(PacketsToReturn[i])) == 0)
         {
             Adapter = (PVOID)(ULONG_PTR)PacketsToReturn[i]->Reserved[1];
 
@@ -308,8 +308,14 @@ MiniIndicateReceivePacket(
     PADAPTER_BINDING AdapterBinding;
     KIRQL OldIrql;
     UINT i;
+    LONG References;
 
     KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+
+    /* A protocol may return a packet on another processor before its reference
+       count is added here; the bias keeps the count from reaching zero meanwhile */
+    for (i = 0; i < NumberOfPackets; i++)
+        *NDIS_PACKET_REFERENCES(PacketArray[i]) = NDIS_INDICATION_REFERENCE_BIAS;
 
     CurrentEntry = Adapter->ProtocolListHead.Flink;
 
@@ -326,10 +332,12 @@ MiniIndicateReceivePacket(
                 NDIS_GET_PACKET_STATUS(PacketArray[i]) != NDIS_STATUS_RESOURCES)
             {
                 NDIS_DbgPrint(MID_TRACE, ("Indicating packet to protocol's ReceivePacket handler\n"));
-                PacketArray[i]->WrapperReserved[0] += (*AdapterBinding->ProtocolBinding->Chars.ReceivePacketHandler)(
-                                                       AdapterBinding->NdisOpenBlock.ProtocolBindingContext,
-                                                       PacketArray[i]);
-                NDIS_DbgPrint(MID_TRACE, ("Protocol is holding %d references to the packet\n", PacketArray[i]->WrapperReserved[0]));
+                References = (*AdapterBinding->ProtocolBinding->Chars.ReceivePacketHandler)(
+                                AdapterBinding->NdisOpenBlock.ProtocolBindingContext,
+                                PacketArray[i]);
+                if (References)
+                    InterlockedExchangeAdd(NDIS_PACKET_REFERENCES(PacketArray[i]), References);
+                NDIS_DbgPrint(MID_TRACE, ("Protocol is holding %d references to the packet\n", References));
             }
             else
             {
@@ -351,8 +359,7 @@ MiniIndicateReceivePacket(
                 if (!LookAheadBuffer)
                 {
                     NDIS_DbgPrint(MIN_TRACE, ("Failed to allocate lookahead buffer!\n"));
-                    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
-                    return;
+                    continue;
                 }
 
                 CopyBufferChainToBuffer(LookAheadBuffer,
@@ -389,11 +396,20 @@ MiniIndicateReceivePacket(
             continue;
         }
 
+        /* A serialized miniport learns from the status whether to wait for its return;
+           set it before a return on another processor can complete the packet */
+        if (!(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE))
+            NDIS_SET_PACKET_STATUS(PacketArray[i], NDIS_STATUS_PENDING);
+
+        /* Drop the bias; the protocols' returns may have dropped their references already */
+        References = InterlockedExchangeAdd(NDIS_PACKET_REFERENCES(PacketArray[i]),
+                                            -NDIS_INDICATION_REFERENCE_BIAS) - NDIS_INDICATION_REFERENCE_BIAS;
+
         /* Different behavior depending on whether it's serialized or not */
         if (Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE)
         {
             /* We need to check the reference count */
-            if (PacketArray[i]->WrapperReserved[0] == 0)
+            if (References == 0)
             {
                 /* NOTE: Unlike serialized miniports, this is REQUIRED to be called for each
                  * packet received that can be reused immediately, it is not implied! */
@@ -411,7 +427,7 @@ MiniIndicateReceivePacket(
         else
         {
             /* Check the reference count */
-            if (PacketArray[i]->WrapperReserved[0] == 0)
+            if (References == 0)
             {
                 /* NDIS_STATUS_SUCCESS means the miniport can have the packet back immediately */
                 NDIS_SET_PACKET_STATUS(PacketArray[i], NDIS_STATUS_SUCCESS);
@@ -420,9 +436,7 @@ MiniIndicateReceivePacket(
             }
             else
             {
-                /* NDIS_STATUS_PENDING means the miniport needs to wait for MiniportReturnPacket */
-                NDIS_SET_PACKET_STATUS(PacketArray[i], NDIS_STATUS_PENDING);
-
+                /* NDIS_STATUS_PENDING, set above, means the miniport needs to wait for MiniportReturnPacket */
                 NDIS_DbgPrint(MID_TRACE, ("Packet will be returned to miniport later (Serialized)\n"));
             }
         }
