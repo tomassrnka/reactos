@@ -405,6 +405,8 @@ MiReleaseSystemPtes(IN PMMPTE StartingPte,
                     IN MMSYSTEM_PTE_POOL_TYPE SystemPtePoolType)
 {
     KIRQL OldIrql;
+    ULONG i;
+    BOOLEAN WriteBack = TRUE;
 
     //
     // Check to make sure the PTE address is within bounds
@@ -413,10 +415,33 @@ MiReleaseSystemPtes(IN PMMPTE StartingPte,
     ASSERT(StartingPte >= MmSystemPtesStart[SystemPtePoolType]);
     ASSERT(StartingPte + NumberOfPtes - 1 <= MmSystemPtesEnd[SystemPtePoolType]);
 
+    /* A page must not stay cached in a TLB as uncached or write-combined while it is reused as write-back */
+    for (i = 0; i < NumberOfPtes; i++)
+    {
+        if (StartingPte[i].u.Hard.Valid &&
+            (StartingPte[i].u.Hard.CacheDisable ||
+             StartingPte[i].u.Hard.WriteThrough ||
+             StartingPte[i].u.Hard.LargePage))
+        {
+            WriteBack = FALSE;
+            break;
+        }
+    }
+
     //
     // Zero PTEs
     //
     RtlZeroMemory(StartingPte, NumberOfPtes * sizeof(MMPTE));
+
+    if (!WriteBack)
+    {
+        KeFlushRangeTb(MiPteToAddress(StartingPte), NumberOfPtes, TRUE);
+
+        OldIrql = KeAcquireQueuedSpinLock(LockQueueSystemSpaceLock);
+        MiInsertFreeSystemPtes(StartingPte, NumberOfPtes, SystemPtePoolType);
+        KeReleaseQueuedSpinLock(LockQueueSystemSpaceLock, OldIrql);
+        return;
+    }
 
     //
     // Acquire the System PTE lock
