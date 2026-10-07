@@ -407,11 +407,85 @@ int ngc_open_stream(ngc_vol *v, ngc_node *basen, const unsigned short *sname, un
 	memcpy(uname, sname, len * sizeof(__le16));
 	uname[len] = 0;
 	vi = ntfs_attr_iget(base, AT_DATA, uname, len);
+	if (IS_ERR(vi) && PTR_ERR(vi) == -ENOENT) {
+		/* NT stream names compare without case: look for the stored spelling. */
+		struct ntfs_inode *ni = NTFS_I(base);
+		struct ntfs_volume *vol = ni->vol;
+		struct ntfs_attr_search_ctx *ctx;
+		bool found = false;
+		mutex_lock(&ni->mrec_lock);
+		ctx = ntfs_attr_get_search_ctx(ni, NULL);
+		while (ctx && !ntfs_attr_lookup(AT_DATA, NULL, 0, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+			struct attr_record *a = ctx->attr;
+			if (a->name_length == len &&
+			    ntfs_are_names_equal((__le16 *)((u8 *)a + le16_to_cpu(a->name_offset)), len, uname, len,
+						 IGNORE_CASE, vol->upcase, vol->upcase_len)) {
+				memcpy(uname, (u8 *)a + le16_to_cpu(a->name_offset), len * sizeof(__le16));
+				found = true;
+				break;
+			}
+		}
+		if (ctx)
+			ntfs_attr_put_search_ctx(ctx);
+		mutex_unlock(&ni->mrec_lock);
+		if (found)
+			vi = ntfs_attr_iget(base, AT_DATA, uname, len);
+	}
 	kfree(uname);
 	if (IS_ERR(vi))
 		return PTR_ERR(vi);
 	*out = (ngc_node *)vi;
 	return 0;
+}
+
+/* Adds an empty named $DATA stream to @basen and opens it. */
+int ngc_create_stream(ngc_vol *v, ngc_node *basen, const unsigned short *sname, unsigned int len, ngc_node **out)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)basen);
+	__le16 *uname;
+	int err;
+	*out = NULL;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (NInoAttr(ni) || !len || len > NTFS_MAX_NAME_LEN)
+		return -EINVAL;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	uname = kmalloc((len + 1) * sizeof(__le16), GFP_NOFS);
+	if (!uname)
+		return -ENOMEM;
+	memcpy(uname, sname, len * sizeof(__le16));
+	uname[len] = 0;
+	mutex_lock(&ni->mrec_lock);
+	err = ntfs_attr_add(ni, AT_DATA, uname, len, NULL, 0);
+	mutex_unlock(&ni->mrec_lock);
+	kfree(uname);
+	if (err)
+		return err;
+	mark_inode_dirty(VFS_I(ni));
+	return ngc_open_stream(v, basen, sname, len, out);
+}
+
+/* Removes the named stream @n (an open stream node) from its file. */
+int ngc_delete_stream(ngc_vol *v, ngc_node *n)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n), *base;
+	int err;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (!NInoAttr(ni) || ni->type != AT_DATA || !ni->name_len)
+		return -EINVAL;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	base = ni->ext.base_ntfs_ino;
+	mutex_lock(&base->mrec_lock);
+	err = ntfs_attr_rm(ni);
+	mutex_unlock(&base->mrec_lock);
+	if (!err)
+		mark_inode_dirty(VFS_I(base));
+	return err;
 }
 
 int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out)

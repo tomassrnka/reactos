@@ -284,7 +284,7 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
 {
     PNG_VCB Vcb = Fcb->Vcb;
     int Empty = 1;
-    if (Fcb->IsRoot || Fcb->Stream.Length || !Ccb->NameLength)
+    if (Fcb->IsRoot || !Ccb->NameLength)
         return STATUS_CANNOT_DELETE;
     if (!D->DeleteFile)
     {

@@ -446,6 +446,17 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (NT_SUCCESS(Status) && !Missing && Stream.Length)
     {
         Err = ngc_open_stream(Vcb->Core, Node, Stream.Buffer, Stream.Length / sizeof(WCHAR), &Next);
+        if (Err == -NGC_ENOENT && Disposition != FILE_OPEN && Disposition != FILE_OVERWRITE)
+        {
+            /* A named stream of an existing file or directory is created on demand. */
+            if (Vcb->ReadOnly)
+                Err = -NGC_EROFS;
+            else if (!(Err = ngc_create_stream(Vcb->Core, Node, Stream.Buffer, Stream.Length / sizeof(WCHAR), &Next)))
+            {
+                Created = TRUE;
+                Information = FILE_CREATED;
+            }
+        }
         if (Err)
         {
             Status = Err == -NGC_ENOENT ? STATUS_OBJECT_NAME_NOT_FOUND : NgErrnoToStatus(Err);
@@ -464,8 +475,6 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Status = STATUS_OBJECT_NAME_NOT_FOUND;
         else if (Vcb->ReadOnly)
             Status = STATUS_MEDIA_WRITE_PROTECTED;
-        else if (Stream.Length)
-            Status = STATUS_ACCESS_DENIED;          /* named stream creation is not implemented */
         else if (!NgValidName(&Comp))
             Status = STATUS_OBJECT_NAME_INVALID;
         else if (Trailing && !WantDir)
@@ -483,6 +492,21 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 Created = TRUE;
                 Information = FILE_CREATED;
                 Err = ngc_set_info(Vcb->Core, Node, NULL, Attrs, NG_SETTABLE_ATTRS);
+            }
+            if (!Err && Stream.Length)
+            {
+                /* "file:stream" for a new file: the file, then the stream (or neither). */
+                ngc_node *S = NULL;
+                Err = ngc_create_stream(Vcb->Core, Node, Stream.Buffer, Stream.Length / sizeof(WCHAR), &S);
+                if (!Err)
+                {
+                    ngc_put(Node);
+                    Node = S;
+                }
+                else
+                {
+                    ngc_unlink(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), Node);
+                }
             }
             if (Err)
                 Status = NgErrnoToStatus(Err);
@@ -697,7 +721,9 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgNotify(Vcb, &Full, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_ATTRIBUTES,
                  FILE_ACTION_MODIFIED);
     }
-    if (Created)
+    if (Created && Stream.Length)
+        NgNotify(Vcb, &Full, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_ADDED_STREAM);
+    else if (Created)
         NgNotify(Vcb, &Full, IsDir ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
 
     Irp->IoStatus.Information = Information;
@@ -751,7 +777,9 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
         Err = ngc_iget(Vcb->Core, Fcb->DelParentMftNo, &Dir);
     if (!Err)
     {
-        if (Fcb->IsDirectory && ngc_dir_empty(Vcb->Core, Fcb->Node) != 1)
+        if (Fcb->Stream.Length)
+            Err = ngc_delete_stream(Vcb->Core, Fcb->Node);
+        else if (Fcb->IsDirectory && ngc_dir_empty(Vcb->Core, Fcb->Node) != 1)
             Err = -NGC_ENOTEMPTY;
         else
             Err = ngc_unlink(Vcb->Core, Dir, Fcb->DelName, Fcb->DelNameLength, Fcb->Node);
@@ -772,8 +800,11 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
     }
     else if (Fcb->DelPath.Buffer)
     {
-        NgNotify(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
-                 FILE_ACTION_REMOVED);
+        if (Fcb->Stream.Length)
+            NgNotify(Vcb, &Fcb->DelPath, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_REMOVED_STREAM);
+        else
+            NgNotify(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                     FILE_ACTION_REMOVED);
     }
 }
 
@@ -811,7 +842,7 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (!Fcb->IsDirectory && !Fcb->IsVolume)
         FsRtlFastUnlockAll(&Fcb->FileLock, FileObject, IoGetRequestorProcess(Irp), NULL);
     ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
-    if (Ccb && Ccb->DeleteOnClose && !Fcb->IsRoot && !Fcb->IsVolume && Ccb->NameLength && !Fcb->Stream.Length)
+    if (Ccb && Ccb->DeleteOnClose && !Fcb->IsRoot && !Fcb->IsVolume && Ccb->NameLength)
         NgSetDeletePending(Fcb, Ccb);
     ExAcquireFastMutex(&Vcb->FcbListLock);
     IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
