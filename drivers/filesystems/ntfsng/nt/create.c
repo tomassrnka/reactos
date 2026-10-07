@@ -947,7 +947,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Shared = FALSE;
     Fcb = NULL;
     Ccb = NULL;
-    if ((InterlockedIncrement(&NgGlobal.Opens) % 2000) == 0)
+    if ((InterlockedIncrement(&NgGlobal.Opens) % 2000) == 0 && NgGlobal.Verbose)
     {
         DPRINT1("ntfsng: %ld opens, %ld FCBs live\n", NgGlobal.Opens, NgGlobal.FcbLive);
         NgAcquireCore(Vcb);

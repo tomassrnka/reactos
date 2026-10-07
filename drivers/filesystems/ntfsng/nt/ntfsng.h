@@ -167,6 +167,7 @@ typedef struct _NG_GLOBAL
     LONG Opens;
     ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
     ULONG ForceReadOnly;            /* "ReadOnly" DWORD in the service key: mount every volume read-only */
+    ULONG Verbose;                  /* "Verbose" DWORD: request log (NGDIAG) and periodic core dumps on the debug port */
     BOOLEAN Disable8dot3;           /* NtfsDisable8dot3NameCreation == 1: no short names for new names */
     FAST_MUTEX VcbListLock;
     LIST_ENTRY VcbList;
