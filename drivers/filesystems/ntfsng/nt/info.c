@@ -197,6 +197,18 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             NEED(FILE_ATTRIBUTE_TAG_INFORMATION);
             ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->FileAttributes = NgFileAttributes(Fcb, &Fcb->Stat);
             ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->ReparseTag = 0;
+            if (Fcb->Stat.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            {
+                void *Data;
+                unsigned int Len;
+                NgAcquireCore(Vcb);
+                if (!NgEnsureNode(Fcb) && !ngc_get_reparse(Fcb->Node, &Data, &Len))
+                {
+                    ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->ReparseTag = ((PREPARSE_DATA_BUFFER)Data)->ReparseTag;
+                    ngc_free(Data);
+                }
+                NgReleaseCore(Vcb);
+            }
             break;
         case FileAllInformation:
         {

@@ -85,10 +85,10 @@ NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Status = NgGetSecurity(Vcb, Fcb, &Sd);
     if (!NT_SUCCESS(Status))
         return Status;
+    /* No probe: the buffer was checked by the caller, and RequestorMode is the thread's previous
+     * mode even for the kernel buffer of an object manager access check. */
     _SEH2_TRY
     {
-        if (Irp->RequestorMode != KernelMode && Length)
-            ProbeForWrite(Irp->UserBuffer, Length, 1);
         Status = SeQuerySecurityDescriptorInfo(&Info, Irp->UserBuffer, &Length, &Sd);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
