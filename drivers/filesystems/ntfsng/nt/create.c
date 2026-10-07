@@ -28,6 +28,13 @@ static PNG_CCB NgAllocateCcb(PCUNICODE_STRING Path)
 static VOID NgFreeCcb(PNG_CCB Ccb)
 {
     NgFreeDirSnapshot(Ccb);
+    while (Ccb->RetiredPaths)
+    {
+        PVOID *Node = Ccb->RetiredPaths;
+        Ccb->RetiredPaths = Node[0];
+        ExFreePoolWithTag(Node[1], TAG_NTFSNG);
+        ExFreePoolWithTag(Node, TAG_NTFSNG);
+    }
     if (Ccb->Pattern.Buffer)
         ExFreePoolWithTag(Ccb->Pattern.Buffer, TAG_NTFSNG);
     if (Ccb->Path.Buffer)

@@ -548,6 +548,18 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         NgNotify(Vcb, &OldPath, Filter, Moved ? FILE_ACTION_REMOVED : FILE_ACTION_RENAMED_OLD_NAME);
         Ccb->Path = NewPath;
         NewPath.Buffer = OldPath.Buffer;
+        if (Fcb->IsDirectory)
+        {
+            /* A change-notify registration may still point at the old name: keep it until close. */
+            PVOID *Node = ExAllocatePoolWithTag(PagedPool, 2 * sizeof(PVOID), TAG_NTFSNG);
+            if (Node)
+            {
+                Node[0] = Ccb->RetiredPaths;
+                Node[1] = OldPath.Buffer;
+                Ccb->RetiredPaths = Node;
+                NewPath.Buffer = NULL;
+            }
+        }
         Ccb->ParentMftNo = NewDirMftNo;
         Ccb->NameLength = NewName.Length / sizeof(WCHAR);
         RtlCopyMemory(Ccb->Name, NewName.Buffer, NewName.Length);

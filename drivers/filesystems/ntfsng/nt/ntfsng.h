@@ -124,6 +124,7 @@ typedef struct _NG_CCB
     BOOLEAN Enumerated;
     BOOLEAN AnyReturned;
     ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
+    PVOID RetiredPaths;             /* earlier Path buffers of a renamed directory (change notify keeps them) */
 } NG_CCB, *PNG_CCB;
 
 typedef struct _NG_GLOBAL
