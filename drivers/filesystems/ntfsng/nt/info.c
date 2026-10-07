@@ -334,6 +334,62 @@ static BOOLEAN NgSameName(const WCHAR *A, USHORT ALen, const WCHAR *B, USHORT BL
  * target's directory already opened (SL_OPEN_TARGET_DIRECTORY) in SetFile.FileObject; a bare
  * name renames within the current directory.  The final component of FileName is the new name.
  */
+/* TRUE if a file or directory below directory DirMftNo has open handles (first names, 64 levels). */
+static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
+{
+    ULONGLONG Open[64];
+    ULONG Count = 0, i, Depth;
+    PLIST_ENTRY Entry;
+    BOOLEAN Found = FALSE;
+    PWCHAR Name;
+
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        if (!F->OpenHandles || F->IsVolume || F->IsRoot || F->MftNo == DirMftNo)
+            continue;
+        if (Count == RTL_NUMBER_OF(Open))
+        {
+            Found = TRUE;       /* too many to check: refuse rather than guess */
+            break;
+        }
+        Open[Count++] = F->MftNo;
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (Found || !Count)
+        return Found;
+    Name = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
+    if (!Name)
+        return TRUE;
+    NgAcquireCore(Vcb);
+    for (i = 0; i < Count && !Found; i++)
+    {
+        ULONGLONG MftNo = Open[i], Parent;
+        unsigned int Len;
+        for (Depth = 0; Depth < 64 && MftNo != 5; Depth++)
+        {
+            ngc_node *N;
+            int Err = ngc_iget(Vcb->Core, MftNo, &N);
+            if (Err)
+                break;
+            Err = ngc_parent_name(N, &Parent, Name, &Len);
+            ngc_put(N);
+            if (Err)
+                break;
+            if (Parent == DirMftNo)
+            {
+                Found = TRUE;
+                break;
+            }
+            MftNo = Parent;
+        }
+    }
+    NgReleaseCore(Vcb);
+    ExFreePoolWithTag(Name, TAG_NTFSNG);
+    return Found;
+}
+
 static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
                                ULONG Length, BOOLEAN IsLink)
 {
@@ -462,6 +518,12 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         }
     }
 
+    if (!IsLink && Fcb->IsDirectory && NgDirHasOpenFiles(Vcb, Fcb->MftNo))
+    {
+        /* As on Windows: a directory with open files below it is not renamed. */
+        Status = STATUS_ACCESS_DENIED;
+        goto out;
+    }
     NgAcquireCore(Vcb);
     Err = NgEnsureNode(Fcb);
     if (!Err)
