@@ -45,6 +45,7 @@ KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
 KMT_TESTFUNC Test_KeEvent;
 KMT_TESTFUNC Test_KeFloatPointState;
+KMT_TESTFUNC Test_KeGenericCallDpc;
 KMT_TESTFUNC Test_KeGuardedMutex;
 KMT_TESTFUNC Test_KeIrql;
 KMT_TESTFUNC Test_KeMutex;
@@ -133,6 +134,7 @@ const KMT_TEST TestList[] =
     { "KeDpc",                              Test_KeDpc },
     { "KeEvent",                            Test_KeEvent },
     { "KeFloatPointState",                  Test_KeFloatPointState },
+    { "KeGenericCallDpc",                   Test_KeGenericCallDpc },
     { "KeGuardedMutex",                     Test_KeGuardedMutex },
     { "KeIrql",                             Test_KeIrql },
     { "KeMutex",                            Test_KeMutex },
