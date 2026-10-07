@@ -130,8 +130,10 @@ IopUnpackCompletionEntry(IN PLIST_ENTRY ListEntry,
         /* Save values */
         Entry->KeyContext = Packet->KeyContext;
         Entry->ApcContext = Packet->ApcContext;
-        /* Status fills only part of the union on 64-bit */
+#ifdef _WIN64
+        /* Status fills only part of the union */
         Entry->IoStatusBlock.Pointer = NULL;
+#endif
         Entry->IoStatusBlock.Status = Packet->IoStatus;
         Entry->IoStatusBlock.Information = Packet->IoStatusInformation;
 
