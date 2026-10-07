@@ -41,6 +41,17 @@ extern UCHAR KiNMITSS[KTSS_IO_MAPS];
 
 /* FUNCTIONS *****************************************************************/
 
+/* An application processor enters here. A late one may find INIT code freed, so this is not in INIT */
+DECLSPEC_NORETURN
+VOID
+NTAPI
+KiStartApplicationProcessor(
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
+{
+    KiClaimProcessorStartup();
+    KiSystemStartup(LoaderBlock);
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -149,7 +160,7 @@ KeStartAllProcessors(VOID)
         ProcessorState->SpecialRegisters.Tr = KGDT_TSS;
 
         ProcessorState->ContextFrame.Esp = (ULONG_PTR)KernelStack;
-        ProcessorState->ContextFrame.Eip = (ULONG_PTR)KiSystemStartup;
+        ProcessorState->ContextFrame.Eip = (ULONG_PTR)KiStartApplicationProcessor;
         ProcessorState->ContextFrame.EFlags = __readeflags() & ~EFLAGS_INTERRUPT_MASK;
 
         ProcessorState->ContextFrame.Esp = (ULONG)((ULONG_PTR)ProcessorState->ContextFrame.Esp - sizeof(AP_SETUP_STACK));

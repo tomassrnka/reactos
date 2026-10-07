@@ -52,6 +52,17 @@ KiInitializeProcessorBootStructures(
 
 /* FUNCTIONS *****************************************************************/
 
+/* An application processor enters here. A late one may find INIT code freed, so this is not in INIT */
+DECLSPEC_NORETURN
+VOID
+NTAPI
+KiStartApplicationProcessor(
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
+{
+    KiClaimProcessorStartup();
+    KiSystemStartup(LoaderBlock);
+}
+
 static
 VOID
 KiFreeApStacks(
@@ -174,10 +185,10 @@ KeStartAllProcessors(VOID)
         ProcessorState->ContextFrame.SegFs = KGDT64_R3_CMTEB | RPL_MASK;
         ProcessorState->ContextFrame.SegGs = KGDT64_R3_DATA | RPL_MASK;
 
-        /* KiSystemStartup(KeLoaderBlock) on the top of the kernel stack, leaving
+        /* KiStartApplicationProcessor(KeLoaderBlock) on the top of the kernel stack, leaving
            room for its home space; the startup code pushes a return address */
         ProcessorState->ContextFrame.Rsp = (ULONG64)Stacks.KernelStack - 0x40;
-        ProcessorState->ContextFrame.Rip = (ULONG64)KiSystemStartup;
+        ProcessorState->ContextFrame.Rip = (ULONG64)KiStartApplicationProcessor;
         ProcessorState->ContextFrame.Rcx = (ULONG64)KeLoaderBlock;
 
         /* Update the LOADER_PARAMETER_BLOCK structure for the new processor */
