@@ -794,6 +794,57 @@ CheckSomeDefaultAddresses(VOID)
     }
 }
 
+static
+VOID
+CheckRecommit(VOID)
+{
+    NTSTATUS Status;
+    PVOID BaseAddress = NULL, Address;
+    SIZE_T Size = 4 * 1024 * 1024, RegionSize;
+    ULONG i;
+
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &BaseAddress, 0, &Size, MEM_RESERVE, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    /* Pages that are already committed are not charged again: 512 x 1024 pages would wrap the 19-bit VAD charge on x86 */
+    for (i = 0; i < 512; i++)
+    {
+        Address = BaseAddress;
+        RegionSize = Size;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &RegionSize, MEM_COMMIT, PAGE_READWRITE);
+        if (!NT_SUCCESS(Status))
+            break;
+    }
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    *(volatile UCHAR *)BaseAddress = 1;
+
+    Address = BaseAddress;
+    RegionSize = Size;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &RegionSize, MEM_DECOMMIT);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_eq_size(RegionSize, Size);
+
+    /* A partial commit, the whole range again, then a decommit of all of it */
+    Address = BaseAddress;
+    RegionSize = Size / 2;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &RegionSize, MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    Address = BaseAddress;
+    RegionSize = Size;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &RegionSize, MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    Address = BaseAddress;
+    RegionSize = Size;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &RegionSize, MEM_DECOMMIT);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+
+    RegionSize = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &BaseAddress, &RegionSize, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+}
+
 #define RUNS 32
 
 START_TEST(NtAllocateVirtualMemory)
@@ -805,6 +856,7 @@ START_TEST(NtAllocateVirtualMemory)
     CheckAlignment();
     CheckAdjacentVADs();
     CheckSomeDefaultAddresses();
+    CheckRecommit();
 
     Size1 = 32;
     Mem1 = Allocate(Size1);
