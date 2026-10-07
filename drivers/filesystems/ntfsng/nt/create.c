@@ -670,6 +670,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Status = STATUS_OBJECT_NAME_NOT_FOUND;
         else if (Vcb->ReadOnly)
             Status = STATUS_MEDIA_WRITE_PROTECTED;
+        else if (Stack->Parameters.Create.EaLength)
+            Status = STATUS_EAS_NOT_SUPPORTED;      /* extended attributes are not stored */
         else if (!NgValidName(&Comp))
             Status = STATUS_OBJECT_NAME_INVALID;
         else if (Trailing && !WantDir)
