@@ -1014,9 +1014,14 @@ NdisMRegisterInterrupt(
   Interrupt->IsrRequested = RequestIsr;
   Interrupt->Miniport = &Adapter->NdisMiniportBlock;
 
-  MappedIRQ = HalGetInterruptVector(Adapter->NdisMiniportBlock.BusType, Adapter->NdisMiniportBlock.BusNumber,
-                                    InterruptLevel, InterruptVector, &DIrql,
-                                    &Affinity);
+  /* A message-signaled interrupt (message count in the high word of the level) belongs to
+     no bus; translate it the way the PnP manager did */
+  if (InterruptLevel >> 16)
+      MappedIRQ = HalGetInterruptVector(Internal, 0, InterruptLevel, InterruptVector, &DIrql, &Affinity);
+  else
+      MappedIRQ = HalGetInterruptVector(Adapter->NdisMiniportBlock.BusType, Adapter->NdisMiniportBlock.BusNumber,
+                                        InterruptLevel, InterruptVector, &DIrql,
+                                        &Affinity);
 
   NDIS_DbgPrint(MAX_TRACE, ("Connecting to interrupt vector (0x%X)  Affinity (0x%X).\n", MappedIRQ, Affinity));
 
