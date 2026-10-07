@@ -89,6 +89,8 @@ int ngc_sync(ngc_vol *v);
 int ngc_dirty(ngc_vol *v);
 void ngc_jnl_report(ngc_vol *v);
 void ngc_set_journal_fault(unsigned long commit_no);
+typedef int (*ngc_run_t)(void *ctx, unsigned long long vcn, long long lcn, unsigned long long len);
+int ngc_runs(ngc_vol *v, ngc_node *n, ngc_run_t fn, void *ctx);
 long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf);
 int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize);
 int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask);

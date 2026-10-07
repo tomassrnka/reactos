@@ -219,6 +219,8 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
         NgSizesFromCore(Fcb);
     if (!Err)
         NgAfterChange(Vcb);
+    if (!Err && Fcb->IsPagingFile && !NT_SUCCESS(NgPagingFileMap(Fcb)))
+        Err = -NGC_ENOMEM;
     NgReleaseCore(Vcb);
     ExReleaseResourceLite(Fcb->Header.PagingIoResource);
     if (Err)
@@ -350,6 +352,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         return STATUS_MEDIA_WRITE_PROTECTED;
     if (Length == 0)
         return STATUS_SUCCESS;
+    if (Paging && Fcb->IsPagingFile)
+        return NgPagingFileIo(Vcb, Fcb, Irp, TRUE, Offset.QuadPart, Length);
     if (Paging)
         return NgPagingWrite(Vcb, Fcb, Irp, Offset.QuadPart, Length);
 
@@ -619,8 +623,9 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ngc_volinfo(Vcb->Core, &Vcb->Info);
         ngc_jnl_report(Vcb->Core);
         NgReleaseCore(Vcb);
-        DPRINT1("ntfsng: shutdown: volume %08lx flushed, %s, %lu syncs, %lu non-cached writes via Cc\n",
-                Vcb->Vpb->SerialNumber, Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs, Vcb->NonCachedViaCache);
+        DPRINT1("ntfsng: shutdown: volume %08lx flushed, %s, %lu syncs, %lu non-cached writes via Cc, paging file %ld reads %ld writes\n",
+                Vcb->Vpb->SerialNumber, Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs, Vcb->NonCachedViaCache,
+                Vcb->PagingFileReads, Vcb->PagingFileWrites);
     }
     ngc_write_stats(&Writes, &Bytes, &Syncs, &Dirties);
     DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs, %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",

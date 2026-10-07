@@ -110,6 +110,7 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
     ExInitializeResourceLite(&Fcb->MainResource);
     ExInitializeResourceLite(&Fcb->PagingIoResource);
     FsRtlInitializeFileLock(&Fcb->FileLock, NULL, NULL);
+    KeInitializeSpinLock(&Fcb->RunLock);
     Fcb->Header.IsFastIoPossible = FastIoIsQuestionable;
     Fcb->Vcb = Vcb;
     Fcb->RefCount = 1;
@@ -205,6 +206,8 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
         NgReleaseCore(Vcb);
     }
     FsRtlUninitializeFileLock(&Fcb->FileLock);
+    if (Fcb->Runs)
+        ExFreePoolWithTag(Fcb->Runs, TAG_NTFSNG);
     if (Fcb->DelPath.Buffer)
         ExFreePoolWithTag(Fcb->DelPath.Buffer, TAG_NTFSNG);
     ExDeleteResourceLite(&Fcb->MainResource);
@@ -214,6 +217,21 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
 }
 
 /* EA, volume label and security writes are not implemented. */
+static NTSTATUS NgRefuseWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
+/*
+ * Security descriptors are not written yet.  Mm sets a DACL on a new paging file and gives up
+ * the paging file if that fails, so for a paging file the request succeeds without effect.
+ */
+static NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
+    if (Fcb && Fcb->IsPagingFile)
+        return STATUS_SUCCESS;
+    return NgRefuseWrite(DeviceObject, Irp);
+}
+
 static NTSTATUS NgRefuseWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
@@ -433,7 +451,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgHandlers[IRP_MJ_SET_INFORMATION] = NgSetInformation;
     NgHandlers[IRP_MJ_SET_EA] = NgRefuseWrite;
     NgHandlers[IRP_MJ_SET_VOLUME_INFORMATION] = NgRefuseWrite;
-    NgHandlers[IRP_MJ_SET_SECURITY] = NgRefuseWrite;
+    NgHandlers[IRP_MJ_SET_SECURITY] = NgSetSecurity;
     NgHandlers[IRP_MJ_FLUSH_BUFFERS] = NgFlushBuffers;
     NgHandlers[IRP_MJ_SHUTDOWN] = NgShutdown;
     NgHandlers[IRP_MJ_QUERY_VOLUME_INFORMATION] = NgQueryVolumeInformation;

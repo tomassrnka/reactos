@@ -731,6 +731,25 @@ void ngc_jnl_report(ngc_vol *v)
 	kshim_jnl_report(v->bdev);
 }
 
+/* Every run of a non-resident stream (-EINVAL while it is resident). */
+int ngc_runs(ngc_vol *v, ngc_node *n, ngc_run_t fn, void *ctx)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	struct runlist_element *rl;
+	int err;
+	(void)v;
+	if (!NInoNonResident(ni))
+		return -EINVAL;
+	mutex_lock(&ni->mrec_lock);
+	down_write(&ni->runlist.lock);
+	err = ntfs_attr_map_whole_runlist(ni);
+	for (rl = ni->runlist.rl; !err && rl && rl->length; rl++)
+		err = fn(ctx, rl->vcn, rl->lcn, rl->length);
+	up_write(&ni->runlist.lock);
+	mutex_unlock(&ni->mrec_lock);
+	return err;
+}
+
 void ngc_set_journal_fault(unsigned long commit_no)
 {
 	kshim_jnl_fault = commit_no;

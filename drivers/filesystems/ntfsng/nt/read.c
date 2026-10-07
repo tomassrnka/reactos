@@ -170,6 +170,8 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Buffer = Irp->UserBuffer;
     }
 
+    if (Paging && Fcb->IsPagingFile)
+        return NgPagingFileIo(Vcb, Fcb, Irp, FALSE, Offset.QuadPart, Length);
     if (NonCached && !Paging && Fcb->SectionObjectPointers.DataSectionObject)
     {
         /* Dirty cached bytes of the range reach the disk before a non-cached read. */

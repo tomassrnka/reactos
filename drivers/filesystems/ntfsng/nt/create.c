@@ -263,8 +263,6 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         RelatedFcb = Related->FsContext;
         RelatedCcb = Related->FsContext2;
     }
-    if (Stack->Flags & SL_OPEN_PAGING_FILE)
-        return STATUS_ACCESS_DENIED;
     if (Options & FILE_OPEN_BY_FILE_ID)
         return STATUS_NOT_IMPLEMENTED;
     if (Disposition > FILE_MAXIMUM_DISPOSITION)
@@ -612,6 +610,18 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = Ccb;
     FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    if (Stack->Flags & SL_OPEN_PAGING_FILE)
+    {
+        /* A paging file is a plain unnamed stream; its page I/O bypasses the core (pagefile.c). */
+        if (IsDir || Stream.Length || Vcb->ReadOnly)
+        {
+            FileObject->FsContext = NULL;
+            FileObject->FsContext2 = NULL;
+            Status = STATUS_ACCESS_DENIED;
+            goto out;
+        }
+        Fcb->IsPagingFile = TRUE;
+    }
 
     if (!Created && (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF || Disposition == FILE_SUPERSEDE))
     {

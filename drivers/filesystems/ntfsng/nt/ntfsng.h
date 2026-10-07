@@ -47,9 +47,16 @@ typedef struct _NG_VCB
     KEVENT FlusherStop;
     ULONG Syncs;
     ULONG NonCachedViaCache;            /* non-cached writes sent through Cc: a view could not be purged */
+    LONG PagingFileReads, PagingFileWrites;
 } NG_VCB, *PNG_VCB;
 
 #define NG_FLUSH_PERIOD_MS 2000
+
+/* One run of a paging file: VCN, LCN (negative for a hole) and length, in clusters. */
+typedef struct _NG_RUN
+{
+    LONGLONG Vcn, Lcn, Len;
+} NG_RUN, *PNG_RUN;
 
 /* File control block: one per (MFT record, stream) open on a volume. */
 typedef struct _NG_FCB
@@ -81,6 +88,10 @@ typedef struct _NG_FCB
     UNICODE_STRING DelPath;         /* full path for the change notification */
     FILE_LOCK FileLock;             /* byte-range locks (FsRtl) */
     ULONGLONG MftNo;
+    BOOLEAN IsPagingFile;           /* opened with SL_OPEN_PAGING_FILE: paging I/O goes through Runs */
+    KSPIN_LOCK RunLock;
+    PNG_RUN Runs;                   /* cluster map of a paging file (nonpaged) */
+    ULONG RunCount;
     UNICODE_STRING Stream;          /* empty for the unnamed $DATA */
     WCHAR StreamBuffer[256];
 } NG_FCB, *PNG_FCB;
@@ -169,6 +180,10 @@ VOID NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
 BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset);
+
+/* pagefile.c */
+NTSTATUS NgPagingFileMap(PNG_FCB Fcb);
+NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGLONG Offset, ULONG Length);
 VOID NgAfterChange(PNG_VCB Vcb);
 VOID NgApplyModified(PNG_FCB Fcb);
 NTSTATUS NgStartFlusher(PNG_VCB Vcb);

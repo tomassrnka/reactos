@@ -49,6 +49,7 @@ list(APPEND NT_SOURCE
     nt/info.c
     nt/ngos_nt.c
     nt/ntfsng.c
+    nt/pagefile.c
     nt/read.c
     nt/write.c
     nt/ntfsng.h)
