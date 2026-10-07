@@ -42,6 +42,51 @@ Is64BitSystem(VOID)
 #endif
 
 static
+DWORD
+WINAPI
+CloseHandleThread(
+    _In_ PVOID Parameter)
+{
+    return NtClose((HANDLE)Parameter);
+}
+
+static
+VOID
+TestNonFileHandle(VOID)
+{
+    NTSTATUS Status;
+    HANDLE EventHandle, ThreadHandle;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER ByteOffset;
+    CHAR Data = 'A';
+    DWORD Wait, ExitCode;
+
+    Status = NtCreateEvent(&EventHandle, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    ByteOffset.QuadPart = 0;
+    Status = NtWriteFile(EventHandle, NULL, NULL, NULL, &IoStatus, &Data, sizeof(Data), &ByteOffset, NULL);
+    ok_hex(Status, STATUS_OBJECT_TYPE_MISMATCH);
+
+    /* The failed write must not leave the handle locked: closing it must return */
+    ThreadHandle = CreateThread(NULL, 0, CloseHandleThread, EventHandle, 0, NULL);
+    ok(ThreadHandle != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (ThreadHandle == NULL)
+        return;
+
+    Wait = WaitForSingleObject(ThreadHandle, 10000);
+    ok(Wait == WAIT_OBJECT_0, "Closing the event handle did not return: %lu\n", Wait);
+    if (Wait == WAIT_OBJECT_0)
+    {
+        ok(GetExitCodeThread(ThreadHandle, &ExitCode), "GetExitCodeThread failed: %lu\n", GetLastError());
+        ok_hex(ExitCode, STATUS_SUCCESS);
+    }
+    CloseHandle(ThreadHandle);
+}
+
+static
 ULONG
 SizeOfMdl(VOID)
 {
@@ -187,6 +232,8 @@ START_TEST(NtWriteFile)
 
     trace("System is %d bits, Size of MDL: %lu\n", Is64BitSystem() ? 64 : 32, SizeOfMdl());
     trace("Max MDL data size: 0x%lx bytes\n", LargeMdlMaxDataSize);
+
+    TestNonFileHandle();
 
     ByteOffset.QuadPart = 0;
 
