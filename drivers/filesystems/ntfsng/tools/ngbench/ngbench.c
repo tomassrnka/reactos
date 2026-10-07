@@ -390,10 +390,16 @@ int main(int argc, char **argv)
         Big[i] = (BYTE)(i * 7);
     CreateDirectoryA(Root, NULL);
     vol[4] = Root[0];
-    Volume = CreateFileA(vol, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    Volume = CreateFileA(vol, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (Volume == INVALID_HANDLE_VALUE)
+        Volume = CreateFileA(vol, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     GetSystemInfo(&si);
-    _snprintf(line, sizeof(line), "NGB:START root=%s cpus=%lu threads=%d mb=%I64u ntfsng_lock_stats=%s\n", Root,
-              si.dwNumberOfProcessors, threads, mb, Snap(&s) ? "yes" : "no");
+    {
+        BOOL ok = Snap(&s);
+        _snprintf(line, sizeof(line), "NGB:START root=%s cpus=%lu threads=%d mb=%I64u ntfsng_lock_stats=%s (volume %s, error %lu)\n",
+                  Root, si.dwNumberOfProcessors, threads, mb, ok ? "yes" : "no",
+                  Volume == INVALID_HANDLE_VALUE ? "not opened" : "open", ok ? 0 : GetLastError());
+    }
     OutputDebugStringA(line);
     fputs(line, stdout);
 
