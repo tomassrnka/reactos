@@ -256,7 +256,6 @@ KiIpiServiceRoutine(IN PKTRAP_FRAME TrapFrame,
 
     if (Request & IPI_DPC)
     {
-        Prcb->DpcInterruptRequested = TRUE;
         HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
     }
 
