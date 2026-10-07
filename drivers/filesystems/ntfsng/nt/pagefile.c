@@ -186,7 +186,8 @@ NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGL
         }
         Done += N;
     }
-    InterlockedIncrement(Write ? &Vcb->PagingFileWrites : &Vcb->PagingFileReads);
+    if (InterlockedIncrement(Write ? &Vcb->PagingFileWrites : &Vcb->PagingFileReads) == 1)
+        DPRINT1("ntfsng: first paging file %s done (%lu bytes at %I64d)\n", Write ? "write" : "read", Length, Offset);
     Irp->IoStatus.Information = Length;
     return STATUS_SUCCESS;
 }

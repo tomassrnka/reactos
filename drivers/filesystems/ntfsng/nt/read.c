@@ -129,6 +129,9 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         return STATUS_FILE_LOCK_CONFLICT;
     if (!Paging && Offset.QuadPart + Length > FileSize)
         Length = (ULONG)(FileSize - Offset.QuadPart);
+    /* Before any mapping of Mm's MDL: the paging file's pages go straight to its clusters. */
+    if (Paging && Fcb->IsPagingFile)
+        return NgPagingFileIo(Vcb, Fcb, Irp, FALSE, Offset.QuadPart, Length);
 
     if (Irp->MdlAddress)
     {
@@ -170,8 +173,6 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Buffer = Irp->UserBuffer;
     }
 
-    if (Paging && Fcb->IsPagingFile)
-        return NgPagingFileIo(Vcb, Fcb, Irp, FALSE, Offset.QuadPart, Length);
     if (NonCached && !Paging && Fcb->SectionObjectPointers.DataSectionObject)
     {
         /* Dirty cached bytes of the range reach the disk before a non-cached read. */
