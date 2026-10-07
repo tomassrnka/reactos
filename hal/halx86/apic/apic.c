@@ -28,6 +28,9 @@ ULONG ApicVersion;
 BOOLEAN HalpX2ApicEnabled;
 UCHAR HalpVectorToIndex[256];
 
+/* The I/O APIC registers are reached through one select/data pair */
+KSPIN_LOCK HalpIoApicLock;
+
 #ifndef _M_AMD64
 const UCHAR
 HalpIRQLtoTPR[32] =
@@ -91,23 +94,56 @@ HalVectorToIRQL[16] =
 /* PRIVATE FUNCTIONS **********************************************************/
 
 FORCEINLINE
+ULONG_PTR
+IOApicLock(VOID)
+{
+    ULONG_PTR EFlags = __readeflags();
+
+    _disable();
+    while (InterlockedBitTestAndSet((PLONG)&HalpIoApicLock, 0))
+    {
+        while (*(volatile KSPIN_LOCK *)&HalpIoApicLock & 1)
+            YieldProcessor();
+    }
+    return EFlags;
+}
+
+FORCEINLINE
+VOID
+IOApicUnlock(ULONG_PTR EFlags)
+{
+    InterlockedAnd((PLONG)&HalpIoApicLock, 0);
+    __writeeflags(EFlags);
+}
+
+FORCEINLINE
 ULONG
 IOApicRead(UCHAR Register)
 {
+    ULONG_PTR EFlags;
+    ULONG Value;
+
     /* Select the register, then do the read */
     ASSERT(Register <= 0x3F);
+    EFlags = IOApicLock();
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
-    return READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
+    Value = READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
+    IOApicUnlock(EFlags);
+    return Value;
 }
 
 FORCEINLINE
 VOID
 IOApicWrite(UCHAR Register, ULONG Value)
 {
+    ULONG_PTR EFlags;
+
     /* Select the register, then do the write */
     ASSERT(Register <= 0x3F);
+    EFlags = IOApicLock();
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN), Value);
+    IOApicUnlock(EFlags);
 }
 
 FORCEINLINE
