@@ -387,7 +387,9 @@ KiIpiSendRequest(
 
 #ifdef CONFIG_SMP
     Prcb = KeGetCurrentPrcb();
-    Remote = TargetSet & KeActiveProcessors & ~Prcb->SetMember;
+    /* A starting processor serves its requests once it enables interrupts; it takes the
+       dispatcher and PRCB locks before that, so no request may be sent holding them */
+    Remote = TargetSet & KiGetTbFlushProcessors() & ~Prcb->SetMember;
     if (Remote)
     {
         KiIpiPublishPacket(Prcb, WorkerRoutine, Parameter1, Parameter2, Parameter3);
