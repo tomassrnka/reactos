@@ -609,7 +609,7 @@ PUBLIC KiApcInterrupt
     mov cr8, rax
 
     /* End the interrupt */
-    mov dword ptr [APIC_EOI], 0
+    SendApicEoi
 
     /* Enable interrupts  */
     sti
@@ -696,7 +696,7 @@ PUBLIC KiIpiInterrupt
     call KiIpiServiceRoutine
 
     /* End the interrupt */
-    mov dword ptr [APIC_EOI], 0
+    SendApicEoi
 
     /* Go back to the previous IRQL */
     movzx eax, byte ptr [rbp + KTRAP_FRAME_PreviousIrql]

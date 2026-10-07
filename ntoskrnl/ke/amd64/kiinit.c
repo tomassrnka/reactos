@@ -25,6 +25,9 @@ ULONG (*FrLdrDbgPrint)(const char *Format, ...);
 /* Spinlocks used only on X86 */
 KSPIN_LOCK KiFreezeExecutionLock;
 
+/* The local APIC is in x2APIC mode: EOIs are MSR writes */
+BOOLEAN KiX2ApicMode;
+
 
 KIPCR KiInitialPcr;
 
@@ -555,6 +558,10 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
+
+    /* The HAL may have switched the local APIC to x2APIC mode, which changes how to send an EOI */
+    if (Cpu == 0)
+        KiX2ApicMode = (__readmsr(MSR_APIC_BASE) & MSR_APIC_BASE_X2APIC_ENABLE) != 0;
 
     /* Count the processor. An application processor joins the active ones
        in KiSystemStartupBootStack, when it can take requests */

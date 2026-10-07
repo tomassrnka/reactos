@@ -313,10 +313,17 @@ typedef union _IOAPIC_REDIRECTION_REGISTER
 } IOAPIC_REDIRECTION_REGISTER;
 #include <poppack.h>
 
+#include "../x2apic/x2apicp.h"
+
+extern BOOLEAN HalpX2ApicEnabled;
+
 FORCEINLINE
 ULONG
 ApicRead(APIC_REGISTER Register)
 {
+    if (HalpX2ApicEnabled)
+        return (ULONG)__readmsr(X2APIC_MSR_BASE + (Register >> 4));
+
     return READ_REGISTER_ULONG((PULONG)(APIC_BASE + Register));
 }
 
@@ -324,7 +331,21 @@ FORCEINLINE
 VOID
 ApicWrite(APIC_REGISTER Register, ULONG Value)
 {
+    if (HalpX2ApicEnabled)
+    {
+        __writemsr(X2APIC_MSR_BASE + (Register >> 4), Value);
+        return;
+    }
+
     WRITE_REGISTER_ULONG((PULONG)(APIC_BASE + Register), Value);
+}
+
+FORCEINLINE
+ULONG
+ApicGetLocalId(VOID)
+{
+    /* The xAPIC ID is in the top byte, the x2APIC ID uses the whole register */
+    return HalpX2ApicEnabled ? ApicRead(APIC_ID) : (ApicRead(APIC_ID) >> 24);
 }
 
 VOID

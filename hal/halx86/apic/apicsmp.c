@@ -71,11 +71,13 @@ ApicRequestGlobalInterrupt(
     Flags = __readeflags();
     _disable();
 
-    /* Wait for the APIC to be idle */
-    do
+    /* Wait for the APIC to be idle; the x2APIC has no delivery status */
+    while (!HalpX2ApicEnabled)
     {
         Icr.Long0 = ApicRead(APIC_ICR0);
-    } while (Icr.DeliveryStatus);
+        if (!Icr.DeliveryStatus)
+            break;
+    }
 
     /* Setup the command register */
     Icr.LongLong = 0;
@@ -89,9 +91,17 @@ ApicRequestGlobalInterrupt(
     Icr.DestinationShortHand = DestinationShortHand;
     Icr.Destination = DestinationProcessor;
 
-    /* Write the low dword last to send the interrupt */
-    ApicWrite(APIC_ICR1, Icr.Long1);
-    ApicWrite(APIC_ICR0, Icr.Long0);
+    if (HalpX2ApicEnabled)
+    {
+        /* One write with the 32-bit destination in the high half */
+        __writemsr(X2APIC_MSR_ICR, ((ULONG64)DestinationProcessor << 32) | Icr.Long0);
+    }
+    else
+    {
+        /* Write the low dword last to send the interrupt */
+        ApicWrite(APIC_ICR1, Icr.Long1);
+        ApicWrite(APIC_ICR0, Icr.Long0);
+    }
 
     /* Finally, restore the original interrupt state */
     if (Flags & EFLAGS_INTERRUPT_MASK)
