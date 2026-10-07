@@ -15,7 +15,6 @@
 
 #include <hal.h>
 #include "apicp.h"
-#include <smp.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -327,21 +326,23 @@ VOID
 ApicSelectMode(
     _In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
 {
-    ULONG i;
+    X2APIC_BASE_ADDRESS_REGISTER BaseRegister;
 
     if (!X2ApicIsSupported())
         return;
 
+    /* Leaving x2APIC mode means disabling the APIC, so keep a mode the firmware chose */
+    BaseRegister.LongLong = __readmsr(MSR_APIC_BASE);
+    if (BaseRegister.Enable && BaseRegister.EnableX2Apic)
+    {
+        HalpX2ApicEnabled = TRUE;
+        return;
+    }
+
     if (LoaderBlock->LoadOptions && strstr(LoaderBlock->LoadOptions, "NOX2APIC"))
         return;
 
-    /* Without interrupt remapping the I/O APIC reaches only 8-bit APIC IDs */
-    for (i = 0; i < MAXIMUM_PROCESSORS; i++)
-    {
-        if (HalpProcessorIdentity[i].LapicId >= 0xFF)
-            return;
-    }
-
+    /* The I/O APIC reaches 8-bit APIC IDs without interrupt remapping, which the MADT parser ensures */
     HalpX2ApicEnabled = TRUE;
 }
 
