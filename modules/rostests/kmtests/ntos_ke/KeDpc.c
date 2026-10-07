@@ -151,6 +151,34 @@ START_TEST(KeDpc)
             ok_dpccount();
         }
         KeLowerIrql(Irql);
+
+        /* a DPC queued after a removed one runs as soon as the IRQL drops */
+        KeSetSystemAffinityThread((KAFFINITY)1 << KeGetCurrentProcessorNumber());
+        for (i = 0; i < 5; ++i)
+        {
+            KeRaiseIrql(DISPATCH_LEVEL, &Irql);
+            Ret = KeInsertQueueDpc(&Dpc, (PVOID)0xabc123, (PVOID)0x5678);
+            ok_bool_true(Ret, "KeInsertQueueDpc returned");
+            Ret = KeRemoveQueueDpc(&Dpc);
+            ok_bool_true(Ret, "KeRemoveQueueDpc returned");
+            KeLowerIrql(Irql);
+            ok_dpccount();
+            KeRaiseIrql(DISPATCH_LEVEL, &Irql);
+            Ret = KeInsertQueueDpc(&Dpc, (PVOID)0xabc123, (PVOID)0x5678);
+            ok_bool_true(Ret, "KeInsertQueueDpc returned");
+            KeLowerIrql(Irql);
+            ++ExpectedDpcCount;
+            ok_dpccount();
+
+            /* take it back if it is still waiting, so the next round starts clean */
+            KeRaiseIrql(DISPATCH_LEVEL, &Irql);
+            Ret = KeRemoveQueueDpc(&Dpc);
+            KeLowerIrql(Irql);
+            ok_bool_false(Ret, "KeRemoveQueueDpc returned");
+            if (Ret)
+                --ExpectedDpcCount;
+        }
+        KeRevertToUserAffinityThread();
     }
 
     /* parameter checks */
