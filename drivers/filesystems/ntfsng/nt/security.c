@@ -107,6 +107,28 @@ NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return Status;
 }
 
+/*
+ * Generic rights in effective DACL ACEs become file rights, as Windows stores them; ReactOS'
+ * SeSetSecurityDescriptorInfo leaves them as they came.  Inherit-only ACEs keep theirs.
+ */
+static VOID NgMapGenericDacl(PSECURITY_DESCRIPTOR Sd)
+{
+    BOOLEAN Present = FALSE, Defaulted;
+    PACL Dacl = NULL;
+    PACE_HEADER Ace;
+    ULONG i;
+
+    if (!NT_SUCCESS(RtlGetDaclSecurityDescriptor(Sd, &Present, &Dacl, &Defaulted)) || !Present || !Dacl)
+        return;
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+            break;
+        if (Ace->AceType <= SYSTEM_ALARM_ACE_TYPE && !(Ace->AceFlags & INHERIT_ONLY_ACE))
+            RtlMapGenericMask(&((PACCESS_ALLOWED_ACE)Ace)->Mask, IoGetFileObjectGenericMapping());
+    }
+}
+
 /* Merges the requested parts into the file's descriptor and stores it as the file's own. */
 NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -132,6 +154,7 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (NT_SUCCESS(Status))
         {
             ExFreePoolWithTag(Old, TAG_NTFSNG);
+            NgMapGenericDacl(Sd);
             NgAcquireCore(Vcb);
             Err = NgEnsureNode(Fcb);
             if (!Err)
