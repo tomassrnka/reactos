@@ -120,7 +120,7 @@ CcpGetAppropriateBcb(
     iBcb = ExAllocateFromNPagedLookasideList(&iBcbLookasideList);
     if (iBcb == NULL)
     {
-        CcRosReleaseVacb(SharedCacheMap, Vacb, FALSE, FALSE);
+        /* The caller releases its VACB reference */
         return NULL;
     }
 
@@ -143,38 +143,36 @@ CcpGetAppropriateBcb(
     {
         /* We will return that BCB */
         ++DupBcb->RefCount;
-        Result = TRUE;
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+        /* Delete the loser */
+        ExDeleteResourceLite(&iBcb->Lock);
+        ExFreeToNPagedLookasideList(&iBcbLookasideList, iBcb);
 
         if (ToPin)
         {
+            /* Pin the winner, as if the caller had found it */
             if (BooleanFlagOn(PinFlags, PIN_EXCLUSIVE))
             {
-                Result = ExAcquireResourceExclusiveLite(&iBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
+                Result = ExAcquireResourceExclusiveLite(&DupBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
             }
             else
             {
-                Result = ExAcquireSharedStarveExclusive(&iBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
+                Result = ExAcquireSharedStarveExclusive(&DupBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
             }
 
-            if (Result)
+            if (!Result)
             {
-                DupBcb->PinCount++;
-            }
-            else
-            {
+                /* The caller still owns its VACB reference */
                 CcpDereferenceBcb(SharedCacheMap, DupBcb);
-                DupBcb = NULL;
+                return NULL;
             }
+
+            DupBcb->PinCount++;
         }
 
-        if (DupBcb != NULL)
-        {
-            /* Delete the loser */
-            CcRosReleaseVacb(SharedCacheMap, Vacb, FALSE, FALSE);
-            ExDeleteResourceLite(&iBcb->Lock);
-            ExFreeToNPagedLookasideList(&iBcbLookasideList, iBcb);
-        }
+        /* The winner holds its own VACB reference */
+        CcRosReleaseVacb(SharedCacheMap, Vacb, FALSE, FALSE);
 
         /* Return the winner - no need to update buffer address, it's
          * relative to the VACB, which is unchanged.
