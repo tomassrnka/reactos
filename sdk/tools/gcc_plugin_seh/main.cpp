@@ -114,8 +114,10 @@ mark_seh_function_noinline(void)
  * The scope table describes a try block as one address range, from its
  * begin label to its end label. Block reordering, jump threading and tail
  * merging can move code of the block past these labels, and a tail call
- * leaves the frame: exceptions raised there bypass the handler. Turn them
- * off for functions using SEH.
+ * leaves the frame: exceptions raised there bypass the handler. Handlers can
+ * also run in the middle of the block, where GCC believes a variable that a
+ * handler reads is dead and lets another one share its stack slot. Turn all
+ * of these off for functions using SEH.
  */
 static
 void
@@ -138,6 +140,9 @@ keep_seh_blocks_contiguous(void)
     opts.x_flag_crossjumping = 0;
     opts.x_flag_tree_tail_merge = 0;
     opts.x_flag_optimize_sibling_calls = 0;
+    opts.x_flag_ira_share_spill_slots = 0;
+    opts.x_flag_ira_share_save_slots = 0;
+    opts.x_flag_stack_reuse = SR_NONE;
 #if GCCPLUGIN_VERSION_MAJOR >= 11
     DECL_FUNCTION_SPECIFIC_OPTIMIZATION(fndecl) = build_optimization_node(&opts, &global_options_set);
 #else
@@ -204,6 +209,45 @@ handle_seh_pragma(cpp_reader* UNUSED parser)
     keep_seh_blocks_contiguous();
 }
 
+
+static
+tree
+make_local_volatile(tree* tp, int* walk_subtrees, void* data)
+{
+    tree t = *tp;
+
+    if ((TREE_CODE(t) == VAR_DECL || TREE_CODE(t) == PARM_DECL) &&
+        DECL_CONTEXT(t) == (tree)data &&
+        !TREE_STATIC(t) &&
+        !DECL_EXTERNAL(t) &&
+        !(TREE_CODE(t) == VAR_DECL && DECL_HARD_REGISTER(t)))
+    {
+        TREE_THIS_VOLATILE(t) = 1;
+        TREE_SIDE_EFFECTS(t) = 1;
+    }
+    if (walk_subtrees != NULL && TYPE_P(t))
+        *walk_subtrees = 0;
+    return NULL_TREE;
+}
+
+/*
+ * A handler runs while its try block is in progress, but GCC assumes it runs
+ * after the block: a variable may still sit in a register, its store may be
+ * moved past the call that raised, or a value set before the block may only
+ * be stored at its end. The handler, and the code after an except block,
+ * then read stale values. Make the local variables and parameters of a
+ * function that uses SEH volatile, so that their values in memory are
+ * always current.
+ */
+static
+void
+make_seh_function_locals_volatile(tree fndecl)
+{
+    for (tree parm = DECL_ARGUMENTS(fndecl); parm != NULL_TREE; parm = DECL_CHAIN(parm))
+        make_local_volatile(&parm, NULL, fndecl);
+    walk_tree(&DECL_SAVED_TREE(fndecl), make_local_volatile, fndecl, NULL);
+}
+
 static
 void
 finish_seh_function(void* event_data, void* UNUSED user_data)
@@ -218,6 +262,8 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
     /* Get our SEH details and remove us from the map */
     seh_function* seh_fun = search->second;
     func_seh_map.erase(search);
+
+    make_seh_function_locals_volatile(fndef);
 
     if (DECL_FUNCTION_PERSONALITY(fndef) != nullptr)
     {
