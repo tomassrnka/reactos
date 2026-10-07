@@ -79,7 +79,9 @@ __asm__(
         "\t__seh2$$begin_except__" #Line "=%l3\n" /* Called on except */            \
             : /* No output */                                                       \
             : /* No input */                                                        \
-            : /* No clobber */                                                      \
+            : /* Handlers are entered with the dispatcher's registers */            \
+              "memory", "%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi",             \
+              "%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15"          \
             : __seh2$$begin_try__,                                                  \
               __seh2$$end_try__,                                                    \
               __seh2$$filter__,                                                     \
