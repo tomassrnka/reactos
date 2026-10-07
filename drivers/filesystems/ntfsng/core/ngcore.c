@@ -28,16 +28,24 @@ extern struct block_device *kshim_mount_bdev;
 struct block_device *kshim_bdev_open(void *osdev, u64 size, unsigned int sector_size);
 void kshim_bdev_close(struct block_device *b);
 void kshim_mapping_shrink(struct address_space *m);
+void kshim_icache_flush(struct super_block *sb, int all);
+void kshim_icache_trim(struct super_block *sb);
+void kshim_icache_lock(void);
+void kshim_icache_unlock(void);
+struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
+		int (*test)(struct inode *, void *), void *data);
 extern unsigned long kshim_pc_pages, kshim_inodes_live, kshim_counter_reads;
 void kshim_dump_allocs(void);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
 int kshim_sync(struct super_block *sb);
 bool kshim_sb_dirty(struct super_block *sb);
 int kshim_mapping_writeback(struct address_space *m);
+bool kshim_mapping_dirty(struct address_space *m);
 void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, size_t len);
 extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_dirty;
 extern unsigned long long kshim_counter_write_bytes;
 extern bool (*kshim_is_data_inode)(struct inode *i);
+extern bool (*kshim_icache_ok)(struct inode *i);
 
 struct ngc_vol {
 	struct super_block *sb;
@@ -115,6 +123,18 @@ static bool ngc_is_data_inode(struct inode *i)
 	return ni->type == AT_DATA && ni->mft_no >= FILE_first_user;
 }
 
+/*
+ * Which unused inodes may stay cached: files, directories and their index attributes.  Other
+ * attribute inodes are dropped at their last reference: the core removes and adds attributes such
+ * as $SECURITY_DESCRIPTOR, $REPARSE_POINT, $EA and named streams without invalidating an attribute
+ * inode, so a cached one would describe the removed attribute to the next ntfs_attr_iget.
+ */
+static bool ngc_icache_ok(struct inode *i)
+{
+	struct ntfs_inode *ni = NTFS_I(i);
+	return !NInoAttr(ni) || ni->type == AT_INDEX_ALLOCATION || ni->type == AT_BITMAP;
+}
+
 int ngc_init(void)
 {
 	int err = 0;
@@ -124,6 +144,7 @@ int ngc_init(void)
 		if (!err)
 			ngc_inited = 1;
 		kshim_is_data_inode = ngc_is_data_inode;
+		kshim_icache_ok = ngc_icache_ok;
 	}
 	mutex_unlock(&ngc_mount_lock);
 	return err;
@@ -263,6 +284,8 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	if (fc->ops->free)
 		fc->ops->free(fc);
 	kfree(fc);
+	/* MFT records are read for every lookup and listing: keep 16 MB of them (16k records) cached. */
+	NTFS_SB(v->sb)->mft_ino->i_mapping->kshim_pc_max = 4096;
 	*out = v;
 	return 0;
 fail_fc:
@@ -280,6 +303,7 @@ fail:
 void ngc_umount(ngc_vol *v)
 {
 	struct super_block *sb = v->sb;
+	kshim_icache_flush(sb, 1);
 	if (sb->s_root) {
 		iput(sb->s_root->d_inode);
 		kfree(sb->s_root);
@@ -371,7 +395,7 @@ static void ngc_fix_type(struct inode *vi)
 	ntfs_set_vfs_operations(vi, vi->i_mode, 0);
 }
 
-int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out,
+static int ngc_lookup_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out,
 		unsigned short *real, unsigned int *real_len)
 {
 	struct inode *dir = (struct inode *)dirn, *vi;
@@ -503,7 +527,7 @@ int ngc_delete_stream(ngc_vol *v, ngc_node *n)
 	return err;
 }
 
-int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
+static int ngc_iget_impl(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
 {
 	struct inode *vi = ntfs_iget(v->sb, mft_no);
 	*out = NULL;
@@ -514,7 +538,7 @@ int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
 	return 0;
 }
 
-void ngc_put(ngc_node *n)
+static void ngc_put_impl(ngc_node *n)
 {
 	iput((struct inode *)n);
 }
@@ -540,7 +564,7 @@ static int ngc_record_is_dir(struct ntfs_inode *ni)
 	return dir;
 }
 
-void ngc_stat(ngc_node *n, struct ngc_stat *st)
+static void ngc_stat_impl(ngc_node *n, struct ngc_stat *st)
 {
 	struct inode *vi = (struct inode *)n, *bvi = vi;
 	struct ntfs_inode *ni = NTFS_I(vi), *bni = ni;
@@ -601,7 +625,7 @@ static bool ngc_actor(struct dir_context *c, const char *name, int len, loff_t p
 	return true;
 }
 
-int ngc_readdir(ngc_vol *v, ngc_node *dirn, ngc_filldir_t fn, void *arg)
+static int ngc_readdir_impl(ngc_vol *v, ngc_node *dirn, ngc_filldir_t fn, void *arg)
 {
 	struct inode *dir = (struct inode *)dirn;
 	struct file *f;
@@ -647,6 +671,290 @@ out:
 	return err;
 }
 
+/*
+ * A directory listing in one pass over the $I30 index: the names, the 8.3 names (the DOS
+ * entries, paired by file reference) and the values the entries duplicate, which serve only
+ * when an inode cannot be read.  Same entries as ngc_readdir, in index order.
+ */
+/*
+ * ngc_stat of an in-memory inode without the record lock, for listings (the caller holds the
+ * inode-cache lock): false for what needs the record (a reparse point's tag, a junction's
+ * directory bit).  The link count is not filled.
+ */
+static bool ngc_stat_lite(struct inode *vi, struct ngc_stat *st)
+{
+	struct ntfs_inode *ni = NTFS_I(vi);
+	unsigned long flags;
+	if (NInoAttr(ni) || S_ISLNK(vi->i_mode) || (ni->flags & FILE_ATTR_REPARSE_POINT))
+		return false;
+	st->mft_ref = ni->mft_no | ((u64)ni->seq_no << 48);
+	read_lock_irqsave(&ni->size_lock, flags);
+	st->size = i_size_read(vi);
+	if (NInoNonResident(ni))
+		st->alloc = (NInoCompressed(ni) || NInoSparse(ni)) ? ni->itype.compressed.size : ni->allocated_size;
+	else
+		st->alloc = (st->size + 7) & ~7ULL;
+	read_unlock_irqrestore(&ni->size_lock, flags);
+	st->crtime = ts_to_nt(ni->i_crtime);
+	st->atime = ts_to_nt(inode_get_atime(vi));
+	st->mtime = ts_to_nt(inode_get_mtime(vi));
+	st->ctime = ts_to_nt(inode_get_ctime(vi));
+	st->file_attributes = le32_to_cpu(ni->flags) & 0xffff;
+	st->nlink = 1;
+	st->is_dir = S_ISDIR(vi->i_mode);
+	if (NInoCompressed(ni)) st->flags |= NGC_ATTR_COMPRESSED;
+	if (NInoSparse(ni)) st->flags |= NGC_ATTR_SPARSE;
+	if (NInoEncrypted(ni)) st->flags |= NGC_ATTR_ENCRYPTED;
+	return true;
+}
+
+struct ngc_rawent {
+	u64 mref;
+	u32 name_off, attrs, tag, dos;
+	u8 name_len, name_type;
+	s64 times[4];
+	u64 size, alloc;
+};
+
+static int ngc_dirwalk(struct ntfs_inode *ndir, struct ngc_rawent **out, u16 **names, int *count)
+{
+	struct ntfs_volume *vol = ndir->vol;
+	struct ntfs_index_context *ictx;
+	struct ntfs_attr_search_ctx *ctx;
+	struct index_root *ir;
+	struct index_entry *ie;
+	struct ngc_rawent *v = NULL;
+	u16 *nb = NULL;
+	int n = 0, cap = 0, ncap = 0, nused = 0, err = 0;
+
+	mutex_lock_nested(&ndir->mrec_lock, NTFS_INODE_MUTEX_PARENT);
+	ictx = ntfs_index_ctx_get(ndir, I30, 4);
+	ctx = ictx ? ntfs_attr_get_search_ctx(ndir, NULL) : NULL;
+	if (!ctx) {
+		err = -ENOMEM;
+		goto out;
+	}
+	if (ntfs_attr_lookup(AT_INDEX_ROOT, I30, 4, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+		ntfs_attr_put_search_ctx(ctx);
+		err = -EIO;
+		goto out;
+	}
+	ir = (struct index_root *)((u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset));
+	ictx->ir = ir;
+	ictx->actx = ctx;
+	ictx->parent_vcn[ictx->pindex] = VCN_INDEX_ROOT_PARENT;
+	ictx->is_in_root = true;
+	ictx->parent_pos[ictx->pindex] = 0;
+	ictx->block_size = le32_to_cpu(ir->index_block_size);
+	if (ictx->block_size < NTFS_BLOCK_SIZE) {
+		err = -EIO;
+		goto out;
+	}
+	ictx->vcn_size_bits = vol->cluster_size <= ictx->block_size ? vol->cluster_size_bits : NTFS_BLOCK_SIZE_BITS;
+	ictx->cr = ir->collation_rule;
+	ie = (struct index_entry *)((u8 *)&ir->index + le32_to_cpu(ir->index.entries_offset));
+	if (ie->flags & INDEX_ENTRY_NODE) {
+		ictx->ia_ni = ntfs_ia_open(ictx, ictx->idx_ni);
+		if (!ictx->ia_ni) {
+			err = -EINVAL;
+			goto out;
+		}
+		ie = ntfs_index_walk_down(ie, ictx);
+		if (IS_ERR(ie)) {
+			err = PTR_ERR(ie);
+			goto out;
+		}
+	}
+	if (ie && (ie->flags & INDEX_ENTRY_END))
+		ie = ntfs_index_next(ie, ictx);
+	while (ie && !IS_ERR(ie)) {
+		struct file_name_attr *fn = &ie->key.file_name;
+		struct ngc_rawent *r;
+		if (n == cap) {
+			void *p = krealloc(v, (cap = cap ? cap * 2 : 64) * sizeof(*v), GFP_NOFS);
+			if (!p) {
+				err = -ENOMEM;
+				goto out;
+			}
+			v = p;
+		}
+		if (nused + fn->file_name_length > ncap) {
+			void *p;
+			ncap = max(ncap * 2, nused + 256 + fn->file_name_length);
+			p = krealloc(nb, ncap * sizeof(u16), GFP_NOFS);
+			if (!p) {
+				err = -ENOMEM;
+				goto out;
+			}
+			nb = p;
+		}
+		r = &v[n++];
+		r->mref = le64_to_cpu(ie->data.dir.indexed_file);
+		r->name_off = nused;
+		r->name_len = fn->file_name_length;
+		r->name_type = fn->file_name_type;
+		r->attrs = le32_to_cpu(fn->file_attributes);
+		r->tag = (r->attrs & FILE_ATTR_REPARSE_POINT) ? le32_to_cpu(fn->type.rp.reparse_point_tag) : 0;
+		r->times[0] = le64_to_cpu(fn->creation_time);
+		r->times[1] = le64_to_cpu(fn->last_access_time);
+		r->times[2] = le64_to_cpu(fn->last_data_change_time);
+		r->times[3] = le64_to_cpu(fn->last_mft_change_time);
+		r->size = le64_to_cpu(fn->data_size);
+		r->alloc = le64_to_cpu(fn->allocated_size);
+		r->dos = 0;
+		memcpy(nb + nused, fn->file_name, fn->file_name_length * sizeof(u16));
+		nused += fn->file_name_length;
+		ie = ntfs_index_next(ie, ictx);
+	}
+	if (IS_ERR(ie))
+		err = PTR_ERR(ie);
+out:
+	if (ictx)
+		ntfs_index_ctx_put(ictx);
+	mutex_unlock(&ndir->mrec_lock);
+	if (err) {
+		kfree(v);
+		kfree(nb);
+		return err;
+	}
+	*out = v;
+	*names = nb;
+	*count = n;
+	return 0;
+}
+
+static int ngc_readdir_full_impl(ngc_vol *v, ngc_node *dirn, ngc_dirent_t fn, void *arg)
+{
+	struct inode *dir = (struct inode *)dirn;
+	struct ntfs_inode *ndir = NTFS_I(dir);
+	struct ntfs_volume *vol = ndir->vol;
+	struct ngc_rawent *r = NULL;
+	struct ngc_dirent e;
+	u16 *names = NULL, dot[2] = { '.', '.' };
+	unsigned long long t0;
+	int n = 0, err, k, j;
+
+	if (S_ISLNK(dir->i_mode) && ngc_record_is_dir(ndir))
+		return 0;
+	if (!S_ISDIR(dir->i_mode))
+		return -ENOTDIR;
+	t0 = ngos_ticks();
+	err = ngc_dirwalk(ndir, &r, &names, &n);
+	ngos_prof(NGP_DIRWALK, t0, (unsigned long long)n);
+	if (err)
+		return err;
+	/* An 8.3 name is a DOS-namespace entry for the same file as a Win32 entry: pair them by reference. */
+	{
+		unsigned int hs = 64, *h;
+		while (hs < 2 * (unsigned int)n)
+			hs <<= 1;
+		h = kcalloc(hs, sizeof(*h), GFP_NOFS);
+		for (k = 0; h && k < n; k++) {
+			if (r[k].name_type != FILE_NAME_WIN32)
+				continue;
+			for (j = (int)(r[k].mref % hs); h[j]; j = (j + 1) & (hs - 1))
+				;
+			h[j] = k + 1;
+		}
+		for (k = 0; k < n; k++) {
+			if (r[k].name_type != FILE_NAME_DOS)
+				continue;
+			if (h) {
+				for (j = (int)(r[k].mref % hs); h[j]; j = (j + 1) & (hs - 1))
+					if (r[h[j] - 1].mref == r[k].mref && !r[h[j] - 1].dos) {
+						r[h[j] - 1].dos = k + 1;
+						break;
+					}
+			} else {
+				for (j = 0; j < n; j++)
+					if (r[j].mref == r[k].mref && r[j].name_type == FILE_NAME_WIN32 && !r[j].dos) {
+						r[j].dos = k + 1;
+						break;
+					}
+			}
+		}
+		kfree(h);
+	}
+	memset(&e, 0, sizeof(e));
+	e.is_dot = 1;
+	for (k = 1; k <= 2; k++) {
+		e.name = dot;
+		e.len = k;
+		if (fn(arg, &e))
+			goto done;
+	}
+	/*
+	 * Times, sizes and attributes come from the inode.  The index entries duplicate them, but the core
+	 * copies the times into them from the $FILE_NAME attribute, which keeps the values of the file's
+	 * creation.  An inode in memory is read under the inode-cache lock without a reference (it cannot
+	 * be freed while the lock is held); any other inode is loaded.
+	 */
+	for (k = 0; k < n; k++) {
+		struct ngc_rawent *x = &r[k];
+		struct ntfs_attr na;
+		struct inode *child;
+		ngc_node *cn;
+		bool done;
+		if (x->name_type == FILE_NAME_DOS || MREF(x->mref) == FILE_root)
+			continue;
+		if (MREF(x->mref) < FILE_first_user && !NVolShowSystemFiles(vol))
+			continue;
+		if (!NVolShowHiddenFiles(vol) && (x->attrs & le32_to_cpu(FILE_ATTR_HIDDEN)))
+			continue;
+		memset(&e, 0, sizeof(e));
+		e.name = names + x->name_off;
+		e.len = x->name_len;
+		if (x->dos) {
+			struct ngc_rawent *d = &r[x->dos - 1];
+			e.short_len = min_t(unsigned int, d->name_len, 12);
+			memcpy(e.short_name, names + d->name_off, e.short_len * sizeof(u16));
+		}
+		na.mft_no = MREF(x->mref);
+		na.type = AT_UNUSED;
+		na.name = NULL;
+		na.name_len = 0;
+		kshim_icache_lock();
+		child = kshim_icache_peek(dir->i_sb, na.mft_no, ntfs_test_inode, &na);
+		done = child && ngc_stat_lite(child, &e.st);
+		kshim_icache_unlock();
+		if (!done && !ngc_iget(v, na.mft_no, &cn)) {
+			ngc_stat(cn, &e.st);
+			if (e.st.file_attributes & 0x400) {
+				void *data;
+				unsigned int len;
+				if (!ngc_get_reparse(cn, &data, &len)) {
+					if (len >= 4)
+						e.reparse_tag = *(u32 *)data;
+					kfree(data);
+				}
+			}
+			ngc_put(cn);
+			done = true;
+		}
+		if (!done) {
+			/* An unreadable inode: what its index entry says. */
+			e.st.mft_ref = x->mref;
+			e.st.crtime = x->times[0];
+			e.st.atime = x->times[1];
+			e.st.mtime = x->times[2];
+			e.st.ctime = x->times[3];
+			e.st.size = x->size;
+			e.st.alloc = x->alloc;
+			e.st.file_attributes = x->attrs & 0xffff;
+			e.st.nlink = 1;
+			e.st.is_dir = (x->attrs & le32_to_cpu(FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT)) != 0;
+			e.st.is_link = (x->attrs & le32_to_cpu(FILE_ATTR_REPARSE_POINT)) != 0;
+			e.reparse_tag = x->tag;
+		}
+		if (fn(arg, &e))
+			break;
+	}
+done:
+	kfree(r);
+	kfree(names);
+	return 0;
+}
+
 int ngc_streams(ngc_node *n, ngc_stream_t fn, void *arg)
 {
 	struct inode *vi = (struct inode *)n;
@@ -690,7 +998,7 @@ int ngc_streams(ngc_node *n, ngc_stream_t fn, void *arg)
 	return err < 0 ? err : 0;
 }
 
-long ngc_read(ngc_node *n, unsigned long long off, unsigned int len, void *buf, int drop_cache)
+static long ngc_read_impl(ngc_node *n, unsigned long long off, unsigned int len, void *buf, int drop_cache)
 {
 	struct inode *vi = (struct inode *)n;
 	loff_t size = i_size_read(vi);
@@ -720,6 +1028,63 @@ long ngc_read(ngc_node *n, unsigned long long off, unsigned int len, void *buf, 
 	return done;
 }
 
+/*
+ * Non-cached and paging reads of a non-resident, uncompressed stream: straight from its clusters
+ * into @buf, one device transfer per run, instead of page by page through the shim page cache.
+ * Bytes past the initialized size, holes, and bytes past EOF up to @len read as zeros.  -EAGAIN:
+ * the stream needs the page-cache path (resident, compressed, dirty pages, unaligned buffer).
+ */
+long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, void *buf)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct ntfs_volume *vol = ni->vol;
+	unsigned int bs = v->bdev->logical_block_size;
+	u64 end = off + len, data_end, pos = off;
+	struct runlist_element *rl;
+	int err;
+
+	if (!NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) ||
+	    ((uintptr_t)buf & 3) || ((off | len) & (bs - 1)) || kshim_mapping_dirty(vi->i_mapping))
+		return -EAGAIN;
+	data_end = min_t(u64, end, (u64)min_t(loff_t, ni->initialized_size, i_size_read(vi)));
+	mutex_lock(&ni->mrec_lock);
+	down_write(&ni->runlist.lock);
+	err = ntfs_attr_map_whole_runlist(ni);
+	rl = ni->runlist.rl;
+	while (!err && pos < data_end) {
+		s64 vcn = (s64)(pos >> vol->cluster_size_bits);
+		u64 run_end, n, rd;
+		while (rl && rl->length && rl->vcn + rl->length <= vcn)
+			rl++;
+		if (!rl || !rl->length || rl->vcn > vcn) {
+			err = -EIO;
+			break;
+		}
+		run_end = (u64)(rl->vcn + rl->length) << vol->cluster_size_bits;
+		n = min_t(u64, run_end, data_end) - pos;
+		if (rl->lcn == LCN_HOLE) {
+			memset((u8 *)buf + (pos - off), 0, n);
+		} else if (rl->lcn < 0) {
+			err = -EIO;
+			break;
+		} else {
+			/* Whole sectors: the tail past the initialized size is zeroed below. */
+			rd = min_t(u64, (n + bs - 1) & ~(u64)(bs - 1), end - pos);
+			err = kshim_dev_rw(v->bdev, 0, ((u64)rl->lcn << vol->cluster_size_bits) +
+					   (pos - ((u64)rl->vcn << vol->cluster_size_bits)), (u8 *)buf + (pos - off), (size_t)rd);
+		}
+		pos += n;
+	}
+	up_write(&ni->runlist.lock);
+	mutex_unlock(&ni->mrec_lock);
+	if (err)
+		return err;
+	if (data_end < end)
+		memset((u8 *)buf + (max_t(u64, data_end, off) - off), 0, end - max_t(u64, data_end, off));
+	return len;
+}
+
 void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads)
 {
 	*pages = kshim_pc_pages;
@@ -741,6 +1106,12 @@ void ngc_debug_dump(void)
 
 /* ------------------------------------------------------------------ write side */
 
+/* Evicts unused cached inodes beyond the cache limits; called between core operations. */
+void ngc_icache_trim(ngc_vol *v)
+{
+	kshim_icache_trim(v->sb);
+}
+
 int ngc_is_rw(ngc_vol *v)
 {
 	return !sb_rdonly(v->sb);
@@ -751,25 +1122,38 @@ int ngc_is_rw(ngc_vol *v)
  * the transaction is committed and written in place, or (no journal) the device is flushed.
  * Callers hold the volume lock between core operations, so the state written is whole.
  */
-static int ngc_commit(struct ngc_vol *v)
+static int ngc_commit_impl(struct ngc_vol *v)
 {
+	unsigned long long t0 = ngos_ticks();
 	int err = kshim_sync(v->sb);
 	for (int k = 0; !err && k < 4 && kshim_sb_dirty(v->sb); k++)
 		err = kshim_sync(v->sb);
+	ngos_prof(NGP_WRITEBACK, t0, 0);
 	if (!v->bdev->jnl)
 		return err ? err : blkdev_issue_flush(v->bdev);
 	if (NVolErrors(NTFS_SB(v->sb)))
 		kshim_jnl_mark_errors(v->bdev);
 	if (!err && kshim_sb_dirty(v->sb))
 		printk(KERN_ERR "journal: metadata still dirty after writeback; committing what was written\n");
-	if (!err)
+	if (!err) {
+		t0 = ngos_ticks();
 		err = kshim_jnl_commit(v->bdev);
+		ngos_prof(NGP_JNL_COMMIT, t0, 0);
+	}
 	if (!err)
 		err = blkdev_issue_flush(v->bdev);	/* nothing was committed: data writes still reach the medium */
 	if (err > 0)
 		err = 0;
 	if (!err && v->watched)
 		v->frees_seen = kshim_watch_count(v->watched);
+	return err;
+}
+
+static int ngc_commit(struct ngc_vol *v)
+{
+	unsigned long long t0 = ngos_ticks();
+	int err = ngc_commit_impl(v);
+	ngos_prof(NGP_COMMIT, t0, 0);
 	return err;
 }
 
@@ -786,8 +1170,12 @@ static unsigned long ngc_commit_threshold(struct ngc_vol *v)
  */
 static int ngc_before_alloc(struct ngc_vol *v)
 {
-	if (v->bdev->jnl && (!v->watched || kshim_watch_count(v->watched) != v->frees_seen))
-		return ngc_commit(v);
+	if (v->bdev->jnl && (!v->watched || kshim_watch_count(v->watched) != v->frees_seen)) {
+		unsigned long long t0 = ngos_ticks();
+		int err = ngc_commit(v);
+		ngos_prof(NGP_COMMIT_ALLOC, t0, 0);
+		return err;
+	}
 	return 0;
 }
 
@@ -802,8 +1190,15 @@ int ngc_mark_dirty(ngc_vol *v)
 	int err;
 	if (sb_rdonly(v->sb))
 		return -EROFS;
-	if (vol->vol_flags & VOLUME_IS_DIRTY)
-		return kshim_jnl_pending(v->bdev) > ngc_commit_threshold(v) ? ngc_commit(v) : 0;
+	if (vol->vol_flags & VOLUME_IS_DIRTY) {
+		unsigned long long t0;
+		if (kshim_jnl_pending(v->bdev) <= ngc_commit_threshold(v))
+			return 0;
+		t0 = ngos_ticks();
+		err = ngc_commit(v);
+		ngos_prof(NGP_COMMIT_FULL, t0, 0);
+		return err;
+	}
 	err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
 	if (!err)
 		err = write_inode_now(vol->vol_ino, 1);
@@ -816,7 +1211,7 @@ int ngc_mark_dirty(ngc_vol *v)
  * The flusher: writes back every dirty mapping and inode, then (when nothing is left and the
  * core saw no error) clears VOLUME_IS_DIRTY, so the flag on disk means "unsynced changes".
  */
-int ngc_sync(ngc_vol *v)
+static int ngc_sync_impl(ngc_vol *v)
 {
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
 	int err;
@@ -831,6 +1226,28 @@ int ngc_sync(ngc_vol *v)
 			err = ngc_commit(v);
 	}
 	return err;
+}
+
+/*
+ * A commit of everything changed so far that leaves VOLUME_IS_DIRTY as it is: FlushFileBuffers and the
+ * flusher while the volume is busy.  Clearing the flag costs two more commits (clear it, set it again
+ * at the next change), so only a quiet flusher pass does that (ngc_sync).
+ */
+int ngc_commit_now(ngc_vol *v)
+{
+	if (NVolErrors(NTFS_SB(v->sb)))
+		kshim_jnl_mark_errors(v->bdev);
+	if (sb_rdonly(v->sb))
+		return 0;
+	return ngc_commit(v);
+}
+
+/* True when metadata changed since the last commit (VOLUME_IS_DIRTY alone does not count). */
+int ngc_changed(ngc_vol *v)
+{
+	if (sb_rdonly(v->sb))
+		return 0;
+	return kshim_sb_dirty(v->sb) || kshim_jnl_pending(v->bdev);
 }
 
 int ngc_dirty(ngc_vol *v)
@@ -986,7 +1403,7 @@ static int ngc_res_write(struct inode *vi, u64 pos, u64 len, const u8 *buf)
  * The NT data path (non-cached and paging writes): in-place write of [off, off+len) clipped to
  * the stream size.  Returns the bytes written (0 past EOF) or <0.
  */
-long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf)
+static long ngc_write_impl(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf)
 {
 	struct inode *vi = (struct inode *)n;
 	struct ntfs_inode *ni = NTFS_I(vi);
@@ -1004,7 +1421,8 @@ long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len
 	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni))
 		return -EOPNOTSUPP;
 	err = ngc_mark_dirty(v);
-	if (!err)
+	/* Only a sparse stream can allocate here; other clusters were allocated by set_size, after its own commit. */
+	if (!err && NInoSparse(ni))
 		err = ngc_before_alloc(v);
 	if (err)
 		return err;
@@ -1029,7 +1447,7 @@ long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len
 }
 
 /* EOF change through the core (resident resize, conversion to non-resident, expand, shrink). */
-int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize)
+static int ngc_set_size_impl(ngc_vol *v, ngc_node *n, unsigned long long newsize)
 {
 	struct inode *vi = (struct inode *)n;
 	struct ntfs_inode *ni = NTFS_I(vi);
@@ -1087,7 +1505,7 @@ int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize)
  * Times (NT format; 0 keeps a time, -1 means "now") and $STANDARD_INFORMATION attributes
  * (attrs_mask selects which settable bits change).  Written back by write_inode.
  */
-int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask)
+static int ngc_set_info_impl(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask)
 {
 	struct inode *vi = (struct inode *)n;
 	struct ntfs_inode *ni = NTFS_I(vi);
@@ -1145,7 +1563,7 @@ static __le16 ngc_sds[] = { cpu_to_le16('$'), cpu_to_le16('S'), cpu_to_le16('D')
  * $SECURITY_DESCRIPTOR attribute, or else the $Secure entry its $STANDARD_INFORMATION names.
  * *out stays NULL when the file has neither.
  */
-int ngc_get_security(ngc_vol *v, ngc_node *n, void **out, unsigned int *len)
+static int ngc_get_security_impl(ngc_vol *v, ngc_node *n, void **out, unsigned int *len)
 {
 	struct ntfs_inode *ni = NTFS_I((struct inode *)n), *sni;
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
@@ -1235,7 +1653,7 @@ void ngc_free(void *p)
  * (the format the core gives new files); a $Secure security_id in $STANDARD_INFORMATION is
  * cleared so that every reader uses the new descriptor.
  */
-int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len)
+static int ngc_set_security_impl(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len)
 {
 	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
 	int err;
@@ -1589,7 +2007,7 @@ int ngc_parent_name(ngc_node *n, unsigned long long *parent, unsigned short *out
 }
 
 /* The DOS-only name of @n in directory @parent_mref, or *len = 0 when it has none. */
-int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len)
+static int ngc_short_name_impl(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len)
 {
 	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
 	struct ntfs_attr_search_ctx *ctx;
@@ -1662,7 +2080,7 @@ static int ngc_set_fn_type(struct ntfs_inode *ni, struct ntfs_inode *dir_ni, con
  * removes the pair.  Files with hard links or with a DOS name already get none.  On any failure
  * the file is left as it was.
  */
-int ngc_add_short_name(ngc_vol *v, ngc_node *dirn, ngc_node *n, const unsigned short *lname, unsigned int llen,
+static int ngc_add_short_name_impl(ngc_vol *v, ngc_node *dirn, ngc_node *n, const unsigned short *lname, unsigned int llen,
 		const unsigned short *sname, unsigned int slen)
 {
 	struct ntfs_inode *ni = NTFS_I((struct inode *)n), *dir_ni = NTFS_I((struct inode *)dirn);
@@ -1822,7 +2240,7 @@ static void ngc_strip_wsl_eas(struct inode *vi)
 	mark_inode_dirty(vi);
 }
 
-int ngc_create(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out)
+static int ngc_create_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out)
 {
 	struct inode *dir = (struct inode *)dirn;
 	struct dentry *d;
@@ -1855,7 +2273,7 @@ int ngc_create(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned 
 	return err;
 }
 
-int ngc_unlink(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node *n)
+static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node *n)
 {
 	struct inode *dir = (struct inode *)dirn, *vi = (struct inode *)n;
 	struct dentry *d;
@@ -1874,7 +2292,7 @@ int ngc_unlink(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned 
 }
 
 /* Renames (odir, oname) of @n to (ndir, nname); @target is the inode the new name replaces, or NULL. */
-int ngc_rename(ngc_vol *v, ngc_node *odirn, const unsigned short *oname, unsigned int olen, ngc_node *n,
+static int ngc_rename_impl(ngc_vol *v, ngc_node *odirn, const unsigned short *oname, unsigned int olen, ngc_node *n,
 		ngc_node *ndirn, const unsigned short *nname, unsigned int nlen, ngc_node *target)
 {
 	struct inode *odir = (struct inode *)odirn, *ndir = (struct inode *)ndirn;
@@ -1899,7 +2317,7 @@ int ngc_rename(ngc_vol *v, ngc_node *odirn, const unsigned short *oname, unsigne
 	return ngc_index_errno(err);
 }
 
-int ngc_link(ngc_vol *v, ngc_node *n, ngc_node *ndirn, const unsigned short *nname, unsigned int nlen)
+static int ngc_link_impl(ngc_vol *v, ngc_node *n, ngc_node *ndirn, const unsigned short *nname, unsigned int nlen)
 {
 	struct inode *ndir = (struct inode *)ndirn, *vi = (struct inode *)n;
 	struct dentry *od, *nd;
@@ -1938,10 +2356,173 @@ static int ngc_any_entry(void *ctx, const unsigned short *name, unsigned int len
 }
 
 /* 1 if the directory has no entries besides . and .., 0 if it has, <0 on error. */
-int ngc_dir_empty(ngc_vol *v, ngc_node *dirn)
+static int ngc_dir_empty_impl(ngc_vol *v, ngc_node *dirn)
 {
 	if (S_ISLNK(((struct inode *)dirn)->i_mode))
 		return ngc_record_is_dir(NTFS_I((struct inode *)dirn)) ? 1 : -ENOTDIR;
 	int any = 0, err = ngc_readdir(v, dirn, ngc_any_entry, &any);
 	return err < 0 ? err : !any;
+}
+
+/* ------------------------------------------------------------------ time per stage */
+
+int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out,
+		unsigned short *real, unsigned int *real_len)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_lookup_impl(v, dirn, name, len, out, real, real_len);
+	ngos_prof(NGP_LOOKUP, t0, 0);
+	return r;
+}
+
+int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_iget_impl(v, mft_no, out);
+	ngos_prof(NGP_IGET, t0, 0);
+	return r;
+}
+
+void ngc_put(ngc_node *n)
+{
+	unsigned long long t0 = ngos_ticks();
+	ngc_put_impl(n);
+	ngos_prof(NGP_PUT, t0, 0);
+}
+
+void ngc_stat(ngc_node *n, struct ngc_stat *st)
+{
+	unsigned long long t0 = ngos_ticks();
+	ngc_stat_impl(n, st);
+	ngos_prof(NGP_STAT, t0, 0);
+}
+
+int ngc_readdir(ngc_vol *v, ngc_node *dirn, ngc_filldir_t fn, void *arg)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_readdir_impl(v, dirn, fn, arg);
+	ngos_prof(NGP_READDIR, t0, 0);
+	return r;
+}
+
+long ngc_read(ngc_node *n, unsigned long long off, unsigned int len, void *buf, int drop_cache)
+{
+	unsigned long long t0 = ngos_ticks();
+	long r = ngc_read_impl(n, off, len, buf, drop_cache);
+	ngos_prof(NGP_READ, t0, 0);
+	return r;
+}
+
+int ngc_sync(ngc_vol *v)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_sync_impl(v);
+	ngos_prof(NGP_SYNC, t0, 0);
+	return r;
+}
+
+long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf)
+{
+	unsigned long long t0 = ngos_ticks();
+	long r = ngc_write_impl(v, n, off, len, buf);
+	ngos_prof(NGP_WRITE, t0, 0);
+	return r;
+}
+
+int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_set_size_impl(v, n, newsize);
+	ngos_prof(NGP_SET_SIZE, t0, 0);
+	return r;
+}
+
+int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_set_info_impl(v, n, times, attrs, attrs_mask);
+	ngos_prof(NGP_SET_INFO, t0, 0);
+	return r;
+}
+
+int ngc_get_security(ngc_vol *v, ngc_node *n, void **out, unsigned int *len)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_get_security_impl(v, n, out, len);
+	ngos_prof(NGP_SECURITY, t0, 0);
+	return r;
+}
+
+int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_set_security_impl(v, n, sd, len);
+	ngos_prof(NGP_SECURITY, t0, 0);
+	return r;
+}
+
+int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_short_name_impl(n, parent_mref, out, len);
+	ngos_prof(NGP_SHORT_NAME, t0, 0);
+	return r;
+}
+
+int ngc_add_short_name(ngc_vol *v, ngc_node *dirn, ngc_node *n, const unsigned short *lname, unsigned int llen,
+		const unsigned short *sname, unsigned int slen)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_add_short_name_impl(v, dirn, n, lname, llen, sname, slen);
+	ngos_prof(NGP_ADD_SHORT_NAME, t0, 0);
+	return r;
+}
+
+int ngc_create(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_create_impl(v, dirn, name, len, is_dir, out);
+	ngos_prof(NGP_CREATE, t0, 0);
+	return r;
+}
+
+int ngc_unlink(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node *n)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_unlink_impl(v, dirn, name, len, n);
+	ngos_prof(NGP_UNLINK, t0, 0);
+	return r;
+}
+
+int ngc_rename(ngc_vol *v, ngc_node *odirn, const unsigned short *oname, unsigned int olen, ngc_node *n,
+		ngc_node *ndirn, const unsigned short *nname, unsigned int nlen, ngc_node *target)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_rename_impl(v, odirn, oname, olen, n, ndirn, nname, nlen, target);
+	ngos_prof(NGP_RENAME, t0, 0);
+	return r;
+}
+
+int ngc_link(ngc_vol *v, ngc_node *n, ngc_node *ndirn, const unsigned short *nname, unsigned int nlen)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_link_impl(v, n, ndirn, nname, nlen);
+	ngos_prof(NGP_LINK, t0, 0);
+	return r;
+}
+
+int ngc_dir_empty(ngc_vol *v, ngc_node *dirn)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_dir_empty_impl(v, dirn);
+	ngos_prof(NGP_DIR_EMPTY, t0, 0);
+	return r;
+}
+
+int ngc_readdir_full(ngc_vol *v, ngc_node *dirn, ngc_dirent_t fn, void *arg)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_readdir_full_impl(v, dirn, fn, arg);
+	ngos_prof(NGP_READDIR, t0, 0);
+	return r;
 }

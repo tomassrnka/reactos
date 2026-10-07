@@ -37,4 +37,16 @@ int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len
 int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len);
 int ngos_dev_flush(void *dev);
 
+/* Time per stage (diagnostics, FSCTL_NG_PROFILE): ngos_prof adds the ticks since @since to stage @id. */
+enum {
+	NGP_DEV_READ, NGP_DEV_WRITE, NGP_DEV_FLUSH, NGP_COMMIT, NGP_WRITEBACK, NGP_JNL_COMMIT,
+	NGP_COMMIT_FULL, NGP_COMMIT_ALLOC, NGP_SYNC, NGP_LOOKUP, NGP_CREATE, NGP_UNLINK, NGP_RENAME,
+	NGP_READDIR, NGP_IGET, NGP_PUT, NGP_STAT, NGP_READ, NGP_WRITE, NGP_SET_SIZE, NGP_SET_INFO,
+	NGP_SHORT_NAME, NGP_ADD_SHORT_NAME, NGP_SECURITY, NGP_DIR_EMPTY, NGP_LINK, NGP_DIRWALK,
+	NGP_IRP = 32,		/* + the IRP major function */
+	NGP_STAGES = 64
+};
+unsigned long long ngos_ticks(void);
+void ngos_prof(int id, unsigned long long since, unsigned long long bytes);
+
 #endif

@@ -391,6 +391,18 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Irp->IoStatus.Information = sizeof(NG_LOCK_STATS);
             return STATUS_SUCCESS;
         }
+        case FSCTL_NG_PROFILE:
+        {
+            /* Diagnostic: a snapshot of the time per stage (benchmark tools diff two). */
+            ULONG Out = Stack->Parameters.FileSystemControl.OutputBufferLength;
+            if (!Irp->AssociatedIrp.SystemBuffer || Out < sizeof(NG_PROFILE))
+                return STATUS_BUFFER_TOO_SMALL;
+            NgProfile.Version = 1;
+            NgProfile.Stages = NG_PROFILE_STAGES;
+            RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, &NgProfile, sizeof(NG_PROFILE));
+            Irp->IoStatus.Information = sizeof(NG_PROFILE);
+            return STATUS_SUCCESS;
+        }
         case FSCTL_GET_REPARSE_POINT:
         case FSCTL_SET_REPARSE_POINT:
         case FSCTL_DELETE_REPARSE_POINT:

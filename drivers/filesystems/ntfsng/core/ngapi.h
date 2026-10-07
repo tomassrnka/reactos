@@ -12,6 +12,7 @@ typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
 
 #define NGC_ENOENT 2
 #define NGC_EIO 5
+#define NGC_EAGAIN 11
 #define NGC_ENOMEM 12
 #define NGC_ENOTDIR 20
 #define NGC_EISDIR 21
@@ -78,9 +79,23 @@ int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out);
 void ngc_put(ngc_node *n);
 void ngc_stat(ngc_node *n, struct ngc_stat *st);
 int ngc_readdir(ngc_vol *v, ngc_node *dir, ngc_filldir_t fn, void *ctx);
+
+/* One directory entry with what a directory listing shows (ngc_readdir_full). */
+struct ngc_dirent {
+	const unsigned short *name;
+	unsigned int len;                /* in UTF-16 units */
+	int is_dot;                      /* "." or ".." (st not filled) */
+	struct ngc_stat st;
+	unsigned short short_name[12];   /* the 8.3 name of this link in this directory, if any */
+	unsigned int short_len;
+	unsigned int reparse_tag;
+};
+typedef int (*ngc_dirent_t)(void *ctx, const struct ngc_dirent *e);
+int ngc_readdir_full(ngc_vol *v, ngc_node *dir, ngc_dirent_t fn, void *ctx);
 int ngc_streams(ngc_node *n, ngc_stream_t fn, void *ctx);
 /* Reads [off, off+len) through the private page cache; bytes past EOF are zero.  Returns bytes copied or <0. */
 long ngc_read(ngc_node *n, unsigned long long off, unsigned int len, void *buf, int drop_cache);
+long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, void *buf);
 void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads);
 /* Drops the clean, unreferenced shim page-cache pages of a node. */
 void ngc_trim(ngc_node *n);
@@ -88,6 +103,9 @@ void ngc_trim(ngc_node *n);
 int ngc_is_rw(ngc_vol *v);
 int ngc_mark_dirty(ngc_vol *v);
 int ngc_sync(ngc_vol *v);
+int ngc_commit_now(ngc_vol *v);
+int ngc_changed(ngc_vol *v);
+void ngc_icache_trim(ngc_vol *v);
 int ngc_dirty(ngc_vol *v);
 void ngc_jnl_report(ngc_vol *v);
 void ngc_set_journal_fault(unsigned long commit_no);

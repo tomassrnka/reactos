@@ -699,7 +699,7 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 		if (f) {
 			f->refcount++;
 		} else {
-			if (m->nrpages >= KSHIM_PC_MAX) {
+			if (m->nrpages >= (m->kshim_pc_max ? m->kshim_pc_max : KSHIM_PC_MAX)) {
 				drop = pc_shrink_locked(m, idx);
 				if (!drop && m->kshim_eager_wb)
 					eager = true;
@@ -867,12 +867,72 @@ void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, 
 
 /* ------------------------------------------------------------------ inode */
 /*
- * Inode cache: a per-superblock list under one shim mutex.  Unlike Linux,
- * an inode is evicted and freed as soon as its last reference goes: the NT
- * glue keeps its own FCB references, and Linux may evict any unused inode
- * at any time anyway.
+ * Inode cache: a per-superblock list of live inodes and a hash of the hashed
+ * ones, under one shim mutex.  As in Linux, an inode whose last reference goes
+ * stays cached (unused, on an LRU list) unless the file system drops it, so
+ * directory indexes and MFT state are not read again for every operation;
+ * the oldest unused inodes are evicted beyond KSHIM_ICACHE_UNUSED or when the
+ * shim's page count passes KSHIM_PC_PAGES_SOFT.  Eviction runs only from
+ * kshim_icache_trim, which the caller invokes with no file system lock held:
+ * evicting one inode in the middle of an operation on another would re-enter
+ * the file system (what GFP_NOFS prevents in Linux).
  */
-unsigned long kshim_inodes_live;
+#define KSHIM_ICACHE_UNUSED 4096
+#define KSHIM_PC_PAGES_SOFT 24576
+unsigned long kshim_inodes_live, kshim_icache_hits, kshim_icache_evicted;
+extern bool (*kshim_is_data_inode)(struct inode *i);
+bool (*kshim_icache_ok)(struct inode *i);
+static struct inode *kshim_lru_take(struct super_block *sb, bool more);
+static void kshim_lru_evict(struct inode *v);
+static void ihash_add_locked(struct inode *i)
+{
+	struct super_block *sb = i->i_sb;
+	unsigned b = (unsigned)((uintptr_t)i->kshim_test_data % KSHIM_IHASH);
+	if (i->kshim_hashed)
+		return;
+	i->kshim_hnext = sb->kshim_ihash[b];
+	sb->kshim_ihash[b] = i;
+	i->kshim_hashed = 1;
+}
+static void ihash_del_locked(struct inode *i)
+{
+	struct inode **pp;
+	if (!i->kshim_hashed)
+		return;
+	pp = &i->i_sb->kshim_ihash[(unsigned)((uintptr_t)i->kshim_test_data % KSHIM_IHASH)];
+	while (*pp && *pp != i)
+		pp = &(*pp)->kshim_hnext;
+	if (*pp)
+		*pp = i->kshim_hnext;
+	i->kshim_hnext = NULL;
+	i->kshim_hashed = 0;
+}
+static void lru_del_locked(struct inode *i)
+{
+	struct super_block *sb = i->i_sb;
+	if (!i->kshim_in_lru)
+		return;
+	if (i->kshim_lru_prev) i->kshim_lru_prev->kshim_lru_next = i->kshim_lru_next;
+	else sb->kshim_lru_head = i->kshim_lru_next;
+	if (i->kshim_lru_next) i->kshim_lru_next->kshim_lru_prev = i->kshim_lru_prev;
+	else sb->kshim_lru_tail = i->kshim_lru_prev;
+	i->kshim_lru_prev = i->kshim_lru_next = NULL;
+	i->kshim_in_lru = 0;
+	sb->kshim_lru_count--;
+}
+static void lru_add_locked(struct inode *i)
+{
+	struct super_block *sb = i->i_sb;
+	if (i->kshim_in_lru)
+		return;
+	i->kshim_lru_next = NULL;
+	i->kshim_lru_prev = sb->kshim_lru_tail;
+	if (sb->kshim_lru_tail) sb->kshim_lru_tail->kshim_lru_next = i;
+	else sb->kshim_lru_head = i;
+	sb->kshim_lru_tail = i;
+	i->kshim_in_lru = 1;
+	sb->kshim_lru_count++;
+}
 void inode_init_once(struct inode *i) { memset(i, 0, sizeof(*i)); }
 static void kshim_inode_init(struct super_block *sb, struct inode *i)
 {
@@ -909,16 +969,39 @@ struct inode *new_inode(struct super_block *sb)
 	mutex_unlock(&kshim_inode_lock);
 	return i;
 }
-void insert_inode_hash(struct inode *i) { i->i_hash.pprev = (void *)1; i->kshim_test_data = (void *)(uintptr_t)i->i_ino; }
-void remove_inode_hash(struct inode *i) { i->i_hash.pprev = NULL; }
+void insert_inode_hash(struct inode *i)
+{
+	mutex_lock(&kshim_inode_lock);
+	ihash_del_locked(i);
+	i->i_hash.pprev = (void *)1;
+	i->kshim_test_data = (void *)(uintptr_t)i->i_ino;
+	ihash_add_locked(i);
+	mutex_unlock(&kshim_inode_lock);
+}
+void remove_inode_hash(struct inode *i)
+{
+	mutex_lock(&kshim_inode_lock);
+	i->i_hash.pprev = NULL;
+	ihash_del_locked(i);
+	mutex_unlock(&kshim_inode_lock);
+}
 static struct inode *kshim_find(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data)
 {
-	for (struct inode *i = sb->kshim_inodes; i; i = i->kshim_next)
+	for (struct inode *i = sb->kshim_ihash[hashval % KSHIM_IHASH]; i; i = i->kshim_hnext)
 		if (i->i_hash.pprev && (uintptr_t)i->kshim_test_data == hashval &&
 		    !(i->i_state & I_FREEING) && (!test || test(i, data)))
 			return i;
 	return NULL;
+}
+/* A reference taken on a cached inode (lock held): it is in use again. */
+static void kshim_ref_locked(struct inode *i)
+{
+	atomic_inc(&i->i_count);
+	if (i->kshim_in_lru) {
+		lru_del_locked(i);
+		kshim_icache_hits++;
+	}
 }
 static struct inode *kshim_find_get(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data)
@@ -933,7 +1016,7 @@ static struct inode *kshim_find_get(struct super_block *sb, unsigned long hashva
 			ngos_yield();
 			continue;
 		}
-		if (i) atomic_inc(&i->i_count);
+		if (i) kshim_ref_locked(i);
 		mutex_unlock(&kshim_inode_lock);
 		return i;
 	}
@@ -949,7 +1032,7 @@ struct inode *ilookup5_nowait(struct super_block *sb, unsigned long hashval,
 	struct inode *i;
 	mutex_lock(&kshim_inode_lock);
 	i = kshim_find(sb, hashval, test, data);
-	if (i) atomic_inc(&i->i_count);
+	if (i) kshim_ref_locked(i);
 	mutex_unlock(&kshim_inode_lock);
 	if (isnew) *isnew = i ? (i->i_state & I_NEW) != 0 : false;
 	return i;
@@ -964,7 +1047,7 @@ struct inode *iget5_locked(struct super_block *sb, unsigned long hashval,
 	mutex_lock(&kshim_inode_lock);
 	i = kshim_find(sb, hashval, test, data);
 	if (i && !(i->i_state & I_NEW)) {
-		atomic_inc(&i->i_count);
+		kshim_ref_locked(i);
 		mutex_unlock(&kshim_inode_lock);
 		if (sb->s_op->free_inode) sb->s_op->free_inode(n);
 		else if (sb->s_op->destroy_inode) sb->s_op->destroy_inode(n);
@@ -980,6 +1063,7 @@ struct inode *iget5_locked(struct super_block *sb, unsigned long hashval,
 	n->kshim_test_data = (void *)(uintptr_t)hashval;
 	n->i_state |= I_NEW;
 	n->i_hash.pprev = (void *)1;
+	ihash_add_locked(n);
 	mutex_unlock(&kshim_inode_lock);
 	return n;
 }
@@ -989,7 +1073,7 @@ struct inode *find_inode_nowait(struct super_block *sb, unsigned long hashval,
 {
 	struct inode *ret = NULL;
 	mutex_lock(&kshim_inode_lock);
-	for (struct inode *i = sb->kshim_inodes; i; i = i->kshim_next) {
+	for (struct inode *i = sb->kshim_ihash[hashval % KSHIM_IHASH]; i; i = i->kshim_hnext) {
 		int r;
 		if (!i->i_hash.pprev) continue;
 		r = match(i, hashval, data);
@@ -1030,6 +1114,8 @@ static void kshim_evict(struct inode *i)
 	i->i_state |= I_FREEING;
 	mutex_lock(&kshim_inode_lock);
 	i->i_hash.pprev = NULL;
+	ihash_del_locked(i);
+	lru_del_locked(i);
 	mutex_unlock(&kshim_inode_lock);
 	if (sb->s_op->evict_inode) sb->s_op->evict_inode(i);
 	else truncate_inode_pages_final(i->i_mapping);
@@ -1039,23 +1125,120 @@ static void kshim_evict(struct inode *i)
 	if (sb->s_op->destroy_inode) sb->s_op->destroy_inode(i);
 	if (sb->s_op->free_inode) sb->s_op->free_inode(i);
 }
+/* Last reference gone and the file system keeps the inode: cache it as unused.  False: evict it now. */
+static bool kshim_icache_keep(struct inode *i)
+{
+	struct super_block *sb = i->i_sb;
+	bool kept = false;
+	if (sb->kshim_no_icache || !i->i_hash.pprev || (i->i_state & (I_FREEING | I_NEW)) || !i->i_nlink ||
+	    (kshim_icache_ok && !kshim_icache_ok(i)))
+		return false;
+	if (kshim_is_data_inode && kshim_is_data_inode(i))
+		kshim_mapping_shrink(i->i_mapping);
+	mutex_lock(&kshim_inode_lock);
+	if (i->i_hash.pprev && !(i->i_state & (I_FREEING | I_NEW))) {
+		if (!i->i_count.counter)
+			lru_add_locked(i);
+		kept = true;
+	}
+	mutex_unlock(&kshim_inode_lock);
+	return kept;
+}
+
+/* Evicts the oldest unused inodes beyond the limits.  The caller holds no file system lock. */
+void kshim_icache_trim(struct super_block *sb)
+{
+	struct inode *v;
+	int budget = 64;	/* the page count also holds pages of inodes in use: evict a bounded batch for it */
+	while ((v = kshim_lru_take(sb, sb->kshim_lru_count > KSHIM_ICACHE_UNUSED ||
+				   (sb->kshim_lru_count && kshim_pc_pages > KSHIM_PC_PAGES_SOFT && budget-- > 0))))
+		kshim_lru_evict(v);
+}
+
+/* Linux writes an inode back before it is evicted.  @i holds one reference (dropped here); true: still in use. */
+static bool kshim_writeback_last(struct inode *i)
+{
+	if (i->i_nlink && !(i->i_state & (I_FREEING | I_NEW)) && i->i_sb && !sb_rdonly(i->i_sb) &&
+	    ((i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping)))
+		write_inode_now(i, 1);
+	return !atomic_dec_and_test(&i->i_count);
+}
+
 void iput(struct inode *i)
 {
 	if (!i || IS_ERR(i))
 		return;
 	if (!atomic_dec_and_test(&i->i_count))
 		return;
-	/* Linux writes an inode back before it can be evicted; do it now (resurrected meanwhile). */
-	if (i->i_nlink && !(i->i_state & (I_FREEING | I_NEW)) && i->i_sb && !sb_rdonly(i->i_sb) &&
-	    ((i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping))) {
-		atomic_inc(&i->i_count);
-		write_inode_now(i, 1);
-		if (!atomic_dec_and_test(&i->i_count))
-			return;
+	/* A cached inode stays dirty until the next sync or its eviction writes it back. */
+	if (!(i->i_sb->s_op->drop_inode ? i->i_sb->s_op->drop_inode(i) : inode_generic_drop(i)) &&
+	    kshim_icache_keep(i))
+		return;
+	atomic_inc(&i->i_count);
+	if (kshim_writeback_last(i))
+		return;
+	/* Taken again by a lookup since the count reached 0: it stays. */
+	mutex_lock(&kshim_inode_lock);
+	if (i->i_count.counter) {
+		mutex_unlock(&kshim_inode_lock);
+		return;
 	}
-	if (i->i_sb->s_op->drop_inode)
-		(void)i->i_sb->s_op->drop_inode(i);
+	i->i_state |= I_FREEING;
+	mutex_unlock(&kshim_inode_lock);
 	kshim_evict(i);
+}
+
+/* Takes the oldest unused inode off the LRU and pins it, or returns NULL when @more is false or none is left. */
+static struct inode *kshim_lru_take(struct super_block *sb, bool more)
+{
+	struct inode *v;
+	mutex_lock(&kshim_inode_lock);
+	while (more && (v = sb->kshim_lru_head)) {
+		lru_del_locked(v);
+		if (v->i_count.counter || (v->i_state & (I_FREEING | I_NEW)))
+			continue;
+		atomic_inc(&v->i_count);
+		mutex_unlock(&kshim_inode_lock);
+		return v;
+	}
+	mutex_unlock(&kshim_inode_lock);
+	return NULL;
+}
+
+/* Writes back and evicts a pinned unused inode unless it was taken into use meanwhile. */
+static void kshim_lru_evict(struct inode *v)
+{
+	if (kshim_writeback_last(v))
+		return;
+	mutex_lock(&kshim_inode_lock);
+	if (v->i_count.counter || (v->i_state & (I_FREEING | I_NEW))) {
+		mutex_unlock(&kshim_inode_lock);
+		return;
+	}
+	v->i_state |= I_FREEING;
+	mutex_unlock(&kshim_inode_lock);
+	kshim_icache_evicted++;
+	kshim_evict(v);
+}
+
+void kshim_icache_lock(void) { mutex_lock(&kshim_inode_lock); }
+void kshim_icache_unlock(void) { mutex_unlock(&kshim_inode_lock); }
+/* Under kshim_icache_lock: the inode in memory for @hashval, without a reference, or NULL. */
+struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
+		int (*test)(struct inode *, void *), void *data)
+{
+	struct inode *i = kshim_find(sb, hashval, test, data);
+	return i && !(i->i_state & I_NEW) ? i : NULL;
+}
+
+/* Evicts the unused inodes of @sb; with @all also every later one (unmount). */
+void kshim_icache_flush(struct super_block *sb, int all)
+{
+	struct inode *v;
+	if (all)
+		sb->kshim_no_icache = 1;
+	while ((v = kshim_lru_take(sb, true)))
+		kshim_lru_evict(v);
 }
 void clear_inode(struct inode *i) { i->i_state |= I_CLEAR; }
 int generic_delete_inode(struct inode *i) { (void)i; return 1; }
