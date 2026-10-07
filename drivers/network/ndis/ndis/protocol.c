@@ -392,12 +392,25 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
    MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, FALSE);
    return NDIS_STATUS_PENDING;
 #else
-   KIRQL RaiseOldIrql;
+   KIRQL RaiseOldIrql, SerialOldIrql;
    NDIS_STATUS NdisStatus;
+   BOOLEAN Serialized = !(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE);
 
    NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
-   if(MiniIsBusy(Adapter, NdisWorkItemSend)) {
+   if (Serialized)
+   {
+      /* Queued behind the call that runs the miniport, see MiniEnterSerialized.
+         The one that runs it must not be preempted, the interrupt DPC waits for it */
+      KeRaiseIrql(DISPATCH_LEVEL, &SerialOldIrql);
+      NdisStatus = MiniEnterSerialized(Adapter, Packet);
+      if (NdisStatus != NDIS_STATUS_SUCCESS)
+      {
+         KeLowerIrql(SerialOldIrql);
+         return NdisStatus;
+      }
+   }
+   else if(MiniIsBusy(Adapter, NdisWorkItemSend)) {
       NDIS_DbgPrint(MID_TRACE, ("Busy: NdisWorkItemSend.\n"));
 
       MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, FALSE);
@@ -431,6 +444,8 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
                 MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, TRUE);
                 NdisStatus = NDIS_STATUS_PENDING;
             }
+            MiniLeaveSerialized(Adapter);
+            KeLowerIrql(SerialOldIrql);
         }
 
         if (NdisStatus != NDIS_STATUS_PENDING) {
@@ -458,6 +473,8 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
                 MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, TRUE);
                 NdisStatus = NDIS_STATUS_PENDING;
             }
+            MiniLeaveSerialized(Adapter);
+            KeLowerIrql(SerialOldIrql);
         }
 
         if (NdisStatus != NDIS_STATUS_PENDING) {
@@ -584,6 +601,18 @@ ProSendPackets(
     KIRQL RaiseOldIrql;
     NDIS_STATUS NdisStatus;
     UINT i;
+
+    /* A serialized miniport takes one send at a time, see MiniEnterSerialized */
+    if (!(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE))
+    {
+        for (i = 0; i < NumberOfPackets; i++)
+        {
+            NdisStatus = proSendPacketToMiniport(Adapter, PacketArray[i]);
+            if (NdisStatus != NDIS_STATUS_PENDING)
+                MiniSendComplete(Adapter, PacketArray[i], NdisStatus);
+        }
+        return;
+    }
 
     if(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler)
     {

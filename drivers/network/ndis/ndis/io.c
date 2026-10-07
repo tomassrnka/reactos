@@ -28,10 +28,25 @@ VOID NTAPI HandleDeferredProcessing(
  */
 {
   PLOGICAL_ADAPTER Adapter = GET_LOGICAL_ADAPTER(DeferredContext);
+  BOOLEAN Serialized = !(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE);
 
   NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
   ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+  /* A serialized miniport may be in its send handler on another processor */
+  if (Serialized)
+  {
+      KeAcquireSpinLockAtDpcLevel(&Adapter->NdisMiniportBlock.Lock);
+      if (Adapter->MiniportBusy)
+      {
+          Adapter->DpcDeferred = TRUE;
+          KeReleaseSpinLockFromDpcLevel(&Adapter->NdisMiniportBlock.Lock);
+          return;
+      }
+      Adapter->MiniportBusy = TRUE;
+      KeReleaseSpinLockFromDpcLevel(&Adapter->NdisMiniportBlock.Lock);
+  }
 
   /* Call the deferred interrupt service handler for this adapter */
   (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HandleInterruptHandler)(
@@ -42,6 +57,9 @@ VOID NTAPI HandleDeferredProcessing(
   if(Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.EnableInterruptHandler)
     (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.EnableInterruptHandler)(
         Adapter->NdisMiniportBlock.MiniportAdapterContext);
+
+  if (Serialized)
+      MiniLeaveSerialized(Adapter);
 
   NDIS_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }
@@ -705,12 +723,26 @@ NdisMDeregisterInterrupt(
  *     Interrupt = Pointer to interrupt object
  */
 {
+    PLOGICAL_ADAPTER Adapter = CONTAINING_RECORD(Interrupt->Miniport, LOGICAL_ADAPTER, NdisMiniportBlock);
+    KIRQL OldIrql;
+
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
     IoDisconnectInterrupt(Interrupt->InterruptObject);
     Interrupt->Miniport->RegisteredInterrupts--;
 
+    /* A deferred interrupt DPC must not be queued for this interrupt any more */
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
     if (Interrupt->Miniport->Interrupt == Interrupt)
+    {
         Interrupt->Miniport->Interrupt = NULL;
+        Adapter->DpcDeferred = FALSE;
+    }
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    /* The miniport frees the interrupt once this returns */
+    KeRemoveQueueDpc(&Interrupt->InterruptDpc);
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL)
+        KeFlushQueuedDpcs();
 }
 
 /*
