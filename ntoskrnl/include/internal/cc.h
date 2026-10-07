@@ -167,6 +167,31 @@ typedef struct _PFSN_PREFETCHER_GLOBALS
     LONG ActivePrefetches;
 } PFSN_PREFETCHER_GLOBALS, *PPFSN_PREFETCHER_GLOBALS;
 
+typedef struct _WORK_QUEUE_ENTRY
+{
+    LIST_ENTRY WorkQueueLinks;
+    union
+    {
+        struct
+        {
+            FILE_OBJECT *FileObject;
+        } Read;
+        struct
+        {
+            SHARED_CACHE_MAP *SharedCacheMap;
+        } Write;
+        struct
+        {
+            KEVENT *Event;
+        } Event;
+        struct
+        {
+            unsigned long Reason;
+        } Notification;
+    } Parameters;
+    unsigned char Function;
+} WORK_QUEUE_ENTRY, *PWORK_QUEUE_ENTRY;
+
 typedef struct _ROS_SHARED_CACHE_MAP
 {
     CSHORT NodeTypeCode;
@@ -194,6 +219,7 @@ typedef struct _ROS_SHARED_CACHE_MAP
     BOOLEAN PinAccess;
     KSPIN_LOCK CacheMapLock;
     KGUARDED_MUTEX FlushCacheLock;
+    WORK_QUEUE_ENTRY FlushDereferenceEntry; /* posted by CcFlushCache with its last reference */
 #if DBG
     BOOLEAN Trace; /* enable extra trace output for this cache map and it's VACBs */
 #endif
@@ -249,37 +275,13 @@ typedef struct _LAZY_WRITER
     BOOLEAN PendingTeardown;
 } LAZY_WRITER, *PLAZY_WRITER;
 
-typedef struct _WORK_QUEUE_ENTRY
-{
-    LIST_ENTRY WorkQueueLinks;
-    union
-    {
-        struct
-        {
-            FILE_OBJECT *FileObject;
-        } Read;
-        struct
-        {
-            SHARED_CACHE_MAP *SharedCacheMap;
-        } Write;
-        struct
-        {
-            KEVENT *Event;
-        } Event;
-        struct
-        {
-            unsigned long Reason;
-        } Notification;
-    } Parameters;
-    unsigned char Function;
-} WORK_QUEUE_ENTRY, *PWORK_QUEUE_ENTRY;
-
 typedef enum _WORK_QUEUE_FUNCTIONS
 {
     ReadAhead = 1,
     WriteBehind = 2,
     LazyScan = 3,
     SetDone = 4,
+    DereferenceSharedMap = 5, /* ReactOS: a reference CcFlushCache left behind */
 } WORK_QUEUE_FUNCTIONS, *PWORK_QUEUE_FUNCTIONS;
 
 extern LAZY_WRITER LazyWriter;
@@ -428,6 +430,10 @@ CcScheduleLazyWriteScan(BOOLEAN NoDelay);
 
 VOID
 CcPostDeferredWrites(VOID);
+
+VOID
+CcRosDereferenceFlushedCacheMap(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
 
 VOID
 CcPostWorkQueue(
