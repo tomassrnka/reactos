@@ -94,6 +94,7 @@ ApicRequestGlobalInterrupt(
     if (HalpX2ApicEnabled)
     {
         /* One write with the 32-bit destination in the high half */
+        X2ApicFenceBeforeIpi();
         __writemsr(X2APIC_MSR_ICR, ((ULONG64)DestinationProcessor << 32) | Icr.Long0);
     }
     else

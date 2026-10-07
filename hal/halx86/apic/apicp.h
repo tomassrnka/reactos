@@ -340,6 +340,15 @@ ApicWrite(APIC_REGISTER Register, ULONG Value)
     WRITE_REGISTER_ULONG((PULONG)(APIC_BASE + Register), Value);
 }
 
+/* A WRMSR to the x2APIC is not serializing: make earlier stores visible before an IPI */
+FORCEINLINE
+VOID
+X2ApicFenceBeforeIpi(VOID)
+{
+    _mm_mfence();
+    _mm_lfence();
+}
+
 FORCEINLINE
 ULONG
 ApicGetLocalId(VOID)

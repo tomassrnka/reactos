@@ -167,6 +167,7 @@ ApicRequestSelfInterrupt(IN UCHAR Vector, UCHAR TriggerMode)
     if (HalpX2ApicEnabled)
     {
         /* The self IPI register sends fixed edge-triggered interrupts only */
+        X2ApicFenceBeforeIpi();
         if (TriggerMode == APIC_TGM_Edge)
             __writemsr(X2APIC_MSR_SELF_IPI, Vector);
         else
