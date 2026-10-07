@@ -194,6 +194,8 @@ static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, 
 
     if (!Fcb || Fcb->IsVolume || Fcb->Stream.Length || !Fcb->HasNode)
         return STATUS_INVALID_PARAMETER;
+    if (Code != FSCTL_GET_REPARSE_POINT && Ccb && !(Ccb->Granted & (FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES)))
+        return STATUS_ACCESS_DENIED;
     /* The root and the $Extend metadata files never become reparse points. */
     if (Code == FSCTL_SET_REPARSE_POINT && (Fcb->IsRoot || !Ccb || Ccb->ParentMftNo == 11))
         return STATUS_ACCESS_DENIED;

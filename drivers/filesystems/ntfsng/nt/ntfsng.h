@@ -123,6 +123,7 @@ typedef struct _NG_CCB
     BOOLEAN PatternIsStar;
     BOOLEAN Enumerated;
     BOOLEAN AnyReturned;
+    ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
 } NG_CCB, *PNG_CCB;
 
 typedef struct _NG_GLOBAL

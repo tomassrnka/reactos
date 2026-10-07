@@ -816,9 +816,11 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     Ccb->DeleteOnClose = (Options & FILE_DELETE_ON_CLOSE) != 0;
     {
+        PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
         ACCESS_MASK Mapped = Access;
         RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
         Ccb->AppendOnly = (Mapped & FILE_APPEND_DATA) && !(Mapped & FILE_WRITE_DATA);
+        Ccb->Granted = Mapped | (As ? As->PreviouslyGrantedAccess : 0);
     }
     Fcb->Node = Node;
     Fcb->HasNode = TRUE;
