@@ -960,6 +960,16 @@ void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned 
 
 /* ------------------------------------------------------------- namespace (Tier 2) */
 
+/*
+ * A full volume makes the core's index code fail to move an attribute in or out of its MFT
+ * record with -EPERM ("cannot be resident/non-resident"); for a name operation that means no
+ * space, not access denied.
+ */
+static int ngc_index_errno(int err)
+{
+	return err == -EPERM ? -ENOSPC : err;
+}
+
 int ngc_create(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out)
 {
 	struct inode *dir = (struct inode *)dirn;
@@ -986,6 +996,7 @@ int ngc_create(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned 
 		err = -EIO;
 	if (!err)
 		*out = (ngc_node *)d->d_inode;	/* the new inode's reference from new_inode() */
+	err = ngc_index_errno(err);
 	ngc_freedentry(d);
 	return err;
 }
@@ -1031,7 +1042,7 @@ int ngc_rename(ngc_vol *v, ngc_node *odirn, const unsigned short *oname, unsigne
 	err = odir->i_op->rename(&nop_mnt_idmap, odir, od, ndir, nd, 0);
 	ngc_freedentry(od);
 	ngc_freedentry(nd);
-	return err;
+	return ngc_index_errno(err);
 }
 
 int ngc_link(ngc_vol *v, ngc_node *n, ngc_node *ndirn, const unsigned short *nname, unsigned int nlen)
@@ -1054,7 +1065,7 @@ int ngc_link(ngc_vol *v, ngc_node *n, ngc_node *ndirn, const unsigned short *nna
 		ngc_freedentry(IS_ERR(nd) ? NULL : nd);
 		return err;
 	}
-	err = ndir->i_op->link(od, ndir, nd);
+	err = ngc_index_errno(ndir->i_op->link(od, ndir, nd));
 	/* The core took a reference for the new dentry (ihold); our dentries hold none. */
 	if (!err)
 		iput(vi);
