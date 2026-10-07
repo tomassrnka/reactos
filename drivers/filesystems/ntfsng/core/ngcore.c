@@ -48,6 +48,9 @@ struct ngc_vol {
 /* Pages held by the journal overlay that make the next operation commit first. */
 #define NGC_JNL_COMMIT_PAGES 2048
 
+/* Largest single core allocation when a stream grows. */
+#define NGC_GROW_STEP (256LL << 20)
+
 #define NGC_BOUNCE (64 * 1024)
 
 static DEFINE_MUTEX(ngc_mount_lock);
@@ -895,9 +898,25 @@ int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize)
 	if (err)
 		return err;
 	if ((loff_t)newsize > old) {
-		mutex_lock(&ni->mrec_lock);
-		err = ntfs_attr_expand(ni, newsize, 0);
-		mutex_unlock(&ni->mrec_lock);
+		/*
+		 * In steps: one core allocation of more than about 1.9 GB failed with ENOSPC on a
+		 * volume whose free space is fragmented, while 256 MB steps reached 8 GB.  A failed
+		 * step takes the file back to its old size.
+		 */
+		loff_t cur = old;
+		while (!err && cur < (loff_t)newsize) {
+			loff_t next = min_t(loff_t, newsize, cur + NGC_GROW_STEP);
+			mutex_lock(&ni->mrec_lock);
+			err = ntfs_attr_expand(ni, next, 0);
+			mutex_unlock(&ni->mrec_lock);
+			if (!err)
+				cur = next;
+		}
+		if (err && cur > old) {
+			truncate_setsize(vi, old);
+			if (ntfs_truncate_vfs(vi, old, cur))
+				i_size_write(vi, cur);
+		}
 	} else {
 		truncate_setsize(vi, newsize);
 		err = ntfs_truncate_vfs(vi, newsize, old);
