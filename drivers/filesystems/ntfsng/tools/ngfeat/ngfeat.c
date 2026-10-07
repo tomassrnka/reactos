@@ -13,6 +13,7 @@
 #define FSCTL_OPLOCK_BREAK_ACKNOWLEDGE CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 3, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
 #include <stdio.h>
+#include <wchar.h>
 #include <string.h>
 
 static int Pass, Fail;
@@ -241,6 +242,110 @@ int main(int argc, char **argv)
         }
         else
             report("lock-busy-volume-refused", 0, "cannot open %s (%lu)", vol, GetLastError());
+    }
+
+    /* junction: a mount point reparse point on an empty directory redirects opens through it */
+    {
+        struct { DWORD Tag; WORD DataLength, Reserved; WORD SubOff, SubLen, PrintOff, PrintLen; WCHAR Path[600]; } rp;
+        char target[MAX_PATH], junction[MAX_PATH];
+        WCHAR wsub[300], wprint[300];
+        BYTE out[2048];
+        DWORD k, a, size;
+        HANDLE j;
+        int ns, np;
+        sprintf(target, "%s\\jtarget", dir);
+        sprintf(junction, "%s\\junction", dir);
+        CreateDirectoryA(target, NULL);
+        sprintf(p, "%s\\inside.txt", target);
+        writefile(p, "jt", CREATE_ALWAYS);
+        CreateDirectoryA(junction, NULL);
+        ns = _snwprintf(wsub, 299, L"\\??\\%hs", target);
+        np = _snwprintf(wprint, 299, L"%hs", target);
+        memset(&rp, 0, sizeof(rp));
+        rp.Tag = 0xA0000003;
+        rp.SubOff = 0; rp.SubLen = (WORD)(ns * 2);
+        rp.PrintOff = (WORD)((ns + 1) * 2); rp.PrintLen = (WORD)(np * 2);
+        memcpy(rp.Path, wsub, ns * 2);
+        memcpy(rp.Path + ns + 1, wprint, np * 2);
+        rp.DataLength = (WORD)(8 + (ns + 1 + np + 1) * 2);
+        size = 8 + rp.DataLength;
+        j = CreateFileA(junction, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        report("junction-set", j != INVALID_HANDLE_VALUE &&
+               DeviceIoControl(j, FSCTL_SET_REPARSE_POINT, &rp, size, NULL, 0, &k, NULL), "err=%lu", GetLastError());
+        if (j != INVALID_HANDLE_VALUE)
+        {
+            BOOL r = DeviceIoControl(j, FSCTL_GET_REPARSE_POINT, NULL, 0, out, sizeof(out), &k, NULL);
+            report("junction-get", r && k == size && *(DWORD *)out == 0xA0000003 && !memcmp(out, &rp, size),
+                   "r=%d len=%lu want %lu err=%lu", r, k, size, GetLastError());
+            CloseHandle(j);
+        }
+        a = GetFileAttributesA(junction);
+        report("junction-attr", a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT) &&
+               (a & FILE_ATTRIBUTE_DIRECTORY), "attr=0x%lx", a);
+        sprintf(p, "%s\\inside.txt", junction);
+        buf[0] = 0;
+        report("junction-traverse", readfile(p, buf, sizeof(buf)) == 2 && !memcmp(buf, "jt", 2), "%s", p);
+        sprintf(p, "%s\\through.txt", junction);
+        sprintf(q, "%s\\through.txt", target);
+        report("junction-create-through", writefile(p, "th", CREATE_NEW) && readfile(q, buf, sizeof(buf)) == 2, "%s", q);
+        j = CreateFileA(junction, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (j != INVALID_HANDLE_VALUE)
+        {
+            BOOL r;
+            memset(&rp, 0, 8);
+            rp.Tag = 0xA0000003;
+            r = DeviceIoControl(j, FSCTL_DELETE_REPARSE_POINT, &rp, 8, NULL, 0, &k, NULL);
+            CloseHandle(j);
+            a = GetFileAttributesA(junction);
+            sprintf(p, "%s\\inside.txt", junction);
+            report("junction-delete", r && a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                   readfile(p, buf, sizeof(buf)) < 0, "r=%d attr=0x%lx err=%lu", r, a, GetLastError());
+            sprintf(p, "%s\\after.txt", junction);
+            sprintf(q, "%s\\after.txt", target);
+            report("junction-delete-plain-dir", writefile(p, "af", CREATE_NEW) && readfile(q, buf, sizeof(buf)) < 0 &&
+                   DeleteFileA(p), "err=%lu", GetLastError());
+        }
+        else
+            report("junction-delete", 0, "open failed %lu", GetLastError());
+        j = CreateFileA(junction, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        rp.DataLength = (WORD)(size - 8);
+        rp.SubOff = 0; rp.SubLen = (WORD)(ns * 2); rp.PrintOff = (WORD)((ns + 1) * 2); rp.PrintLen = (WORD)(np * 2);
+        report("junction-set-again", j != INVALID_HANDLE_VALUE &&
+               DeviceIoControl(j, FSCTL_SET_REPARSE_POINT, &rp, size, NULL, 0, &k, NULL), "err=%lu", GetLastError());
+        if (j != INVALID_HANDLE_VALUE)
+            CloseHandle(j);
+        sprintf(p, "%s\\inside.txt", target);
+        report("junction-rmdir", RemoveDirectoryA(junction) && GetFileAttributesA(junction) == INVALID_FILE_ATTRIBUTES &&
+               readfile(p, buf, sizeof(buf)) == 2, "err=%lu", GetLastError());
+        /* a junction left on the volume for the offline checks, replaced once with a new target */
+        sprintf(junction, "%s\\kept", dir);
+        CreateDirectoryA(junction, NULL);
+        j = CreateFileA(junction, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (j != INVALID_HANDLE_VALUE)
+        {
+            BOOL r1 = DeviceIoControl(j, FSCTL_SET_REPARSE_POINT, &rp, size, NULL, 0, &k, NULL), r2;
+            sprintf(target, "%s\\jtarget2", dir);
+            CreateDirectoryA(target, NULL);
+            ns = _snwprintf(wsub, 299, L"\\??\\%hs", target);
+            np = _snwprintf(wprint, 299, L"%hs", target);
+            memset(&rp, 0, sizeof(rp));
+            rp.Tag = 0xA0000003;
+            rp.SubLen = (WORD)(ns * 2); rp.PrintOff = (WORD)((ns + 1) * 2); rp.PrintLen = (WORD)(np * 2);
+            memcpy(rp.Path, wsub, ns * 2);
+            memcpy(rp.Path + ns + 1, wprint, np * 2);
+            rp.DataLength = (WORD)(8 + (ns + 1 + np + 1) * 2);
+            size = 8 + rp.DataLength;
+            r2 = DeviceIoControl(j, FSCTL_SET_REPARSE_POINT, &rp, size, NULL, 0, &k, NULL);
+            report("junction-replace", r1 && r2 && DeviceIoControl(j, FSCTL_GET_REPARSE_POINT, NULL, 0, out, sizeof(out), &k, NULL) &&
+                   k == size && !memcmp(out, &rp, size), "r1=%d r2=%d err=%lu", r1, r2, GetLastError());
+            CloseHandle(j);
+        }
+        else
+            report("junction-replace", 0, "open failed %lu", GetLastError());
     }
 
     _snprintf(buf, sizeof(buf), "NGF:DONE pass=%d fail=%d\n", Pass, Fail);
