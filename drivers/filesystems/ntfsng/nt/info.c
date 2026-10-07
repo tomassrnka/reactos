@@ -220,9 +220,7 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             NgStandard(Fcb, &A->StandardInformation);
             A->InternalInformation.IndexNumber.QuadPart = Fcb->Stat.mft_ref;
             A->EaInformation.EaSize = 0;
-            A->AccessInformation.AccessFlags = 0;
             A->PositionInformation.CurrentByteOffset = FileObject->CurrentByteOffset;
-            A->ModeInformation.Mode = 0;
             A->AlignmentInformation.AlignmentRequirement = DeviceObject->AlignmentRequirement;
             Status = NgName(Ccb, &A->NameInformation, Length - FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation), &NameUsed);
             Used = FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation) + NameUsed;
@@ -336,6 +334,62 @@ static BOOLEAN NgSameName(const WCHAR *A, USHORT ALen, const WCHAR *B, USHORT BL
  * target's directory already opened (SL_OPEN_TARGET_DIRECTORY) in SetFile.FileObject; a bare
  * name renames within the current directory.  The final component of FileName is the new name.
  */
+/* TRUE if a file or directory below directory DirMftNo has open handles (first names, 64 levels). */
+static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
+{
+    ULONGLONG Open[64];
+    ULONG Count = 0, i, Depth;
+    PLIST_ENTRY Entry;
+    BOOLEAN Found = FALSE;
+    PWCHAR Name;
+
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        if (!F->OpenHandles || F->IsVolume || F->IsRoot || F->MftNo == DirMftNo)
+            continue;
+        if (Count == RTL_NUMBER_OF(Open))
+        {
+            Found = TRUE;       /* too many to check: refuse rather than guess */
+            break;
+        }
+        Open[Count++] = F->MftNo;
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (Found || !Count)
+        return Found;
+    Name = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
+    if (!Name)
+        return TRUE;
+    NgAcquireCore(Vcb);
+    for (i = 0; i < Count && !Found; i++)
+    {
+        ULONGLONG MftNo = Open[i], Parent;
+        unsigned int Len;
+        for (Depth = 0; Depth < 64 && MftNo != 5; Depth++)
+        {
+            ngc_node *N;
+            int Err = ngc_iget(Vcb->Core, MftNo, &N);
+            if (Err)
+                break;
+            Err = ngc_parent_name(N, &Parent, Name, &Len);
+            ngc_put(N);
+            if (Err)
+                break;
+            if (Parent == DirMftNo)
+            {
+                Found = TRUE;
+                break;
+            }
+            MftNo = Parent;
+        }
+    }
+    NgReleaseCore(Vcb);
+    ExFreePoolWithTag(Name, TAG_NTFSNG);
+    return Found;
+}
+
 static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
                                ULONG Length, BOOLEAN IsLink)
 {
@@ -464,6 +518,12 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         }
     }
 
+    if (!IsLink && Fcb->IsDirectory && NgDirHasOpenFiles(Vcb, Fcb->MftNo))
+    {
+        /* As on Windows: a directory with open files below it is not renamed. */
+        Status = STATUS_ACCESS_DENIED;
+        goto out;
+    }
     NgAcquireCore(Vcb);
     Err = NgEnsureNode(Fcb);
     if (!Err)
@@ -512,7 +572,12 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     {
         NgMakeShortName(Vcb, NewDir, Fcb->Node, NewName.Buffer, NewName.Length / sizeof(WCHAR));
         if (!Fcb->IsDirectory)
-            NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Fcb->Stat.crtime);
+        {
+            /* The old name leaves its creation time behind; the new name may take one over. */
+            LONGLONG Crtime = Fcb->Stat.crtime;
+            NgTunnelApply(Vcb, NewDir, Fcb->Node, &NewName);
+            NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Crtime);
+        }
     }
     if (!Err && TargetFcb)
     {
@@ -550,6 +615,18 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         NgNotify(Vcb, &OldPath, Filter, Moved ? FILE_ACTION_REMOVED : FILE_ACTION_RENAMED_OLD_NAME);
         Ccb->Path = NewPath;
         NewPath.Buffer = OldPath.Buffer;
+        if (Fcb->IsDirectory)
+        {
+            /* A change-notify registration may still point at the old name: keep it until close. */
+            PVOID *Node = ExAllocatePoolWithTag(PagedPool, 2 * sizeof(PVOID), TAG_NTFSNG);
+            if (Node)
+            {
+                Node[0] = Ccb->RetiredPaths;
+                Node[1] = OldPath.Buffer;
+                Ccb->RetiredPaths = Node;
+                NewPath.Buffer = NULL;
+            }
+        }
         Ccb->ParentMftNo = NewDirMftNo;
         Ccb->NameLength = NewName.Length / sizeof(WCHAR);
         RtlCopyMemory(Ccb->Name, NewName.Buffer, NewName.Length);

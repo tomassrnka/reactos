@@ -28,6 +28,13 @@ static PNG_CCB NgAllocateCcb(PCUNICODE_STRING Path)
 static VOID NgFreeCcb(PNG_CCB Ccb)
 {
     NgFreeDirSnapshot(Ccb);
+    while (Ccb->RetiredPaths)
+    {
+        PVOID *Node = Ccb->RetiredPaths;
+        Ccb->RetiredPaths = Node[0];
+        ExFreePoolWithTag(Node[1], TAG_NTFSNG);
+        ExFreePoolWithTag(Node, TAG_NTFSNG);
+    }
     if (Ccb->Pattern.Buffer)
         ExFreePoolWithTag(Ccb->Pattern.Buffer, TAG_NTFSNG);
     if (Ccb->Path.Buffer)
@@ -249,8 +256,8 @@ VOID NgTunnelAdd(PNG_VCB Vcb, ULONGLONG DirMftNo, PCWSTR Name, USHORT NameChars,
                           sizeof(CreationTime), &CreationTime);
 }
 
-/* Caller holds CoreLock; Node was just created as Name in Parent. */
-static VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name)
+/* Caller holds CoreLock; Node was just created (or renamed) as Name in Parent. */
+VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name)
 {
     struct ngc_stat Dir;
     WCHAR ShortBuf[12], LongBuf[64];
@@ -670,6 +677,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Status = STATUS_OBJECT_NAME_NOT_FOUND;
         else if (Vcb->ReadOnly)
             Status = STATUS_MEDIA_WRITE_PROTECTED;
+        else if (Stack->Parameters.Create.EaLength)
+            Status = STATUS_EAS_NOT_SUPPORTED;      /* extended attributes are not stored */
         else if (!NgValidName(&Comp))
             Status = STATUS_OBJECT_NAME_INVALID;
         else if (Trailing && !WantDir)
@@ -816,9 +825,11 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     Ccb->DeleteOnClose = (Options & FILE_DELETE_ON_CLOSE) != 0;
     {
+        PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
         ACCESS_MASK Mapped = Access;
         RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
         Ccb->AppendOnly = (Mapped & FILE_APPEND_DATA) && !(Mapped & FILE_WRITE_DATA);
+        Ccb->Granted = Mapped | (As ? As->PreviouslyGrantedAccess : 0);
     }
     Fcb->Node = Node;
     Fcb->HasNode = TRUE;
@@ -936,7 +947,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Shared = FALSE;
     Fcb = NULL;
     Ccb = NULL;
-    if ((InterlockedIncrement(&NgGlobal.Opens) % 2000) == 0)
+    if ((InterlockedIncrement(&NgGlobal.Opens) % 2000) == 0 && NgGlobal.Verbose)
     {
         DPRINT1("ntfsng: %ld opens, %ld FCBs live\n", NgGlobal.Opens, NgGlobal.FcbLive);
         NgAcquireCore(Vcb);

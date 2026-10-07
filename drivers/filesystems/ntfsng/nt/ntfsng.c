@@ -35,16 +35,84 @@ NTSTATUS NgErrnoToStatus(int Err)
     }
 }
 
+/* Lock timing uses the TSC (cheap to read), calibrated against the performance counter at load. */
+static LONGLONG NgPerfFrequency;
+
+static ULONGLONG NgTicksToUs(LONGLONG Ticks)
+{
+    return NgPerfFrequency ? (ULONGLONG)(Ticks * 1000000 / NgPerfFrequency) : 0;
+}
+
+/* The request a CoreLock acquisition serves, from the top-level IRP of the thread. */
+static UCHAR NgLockCategory(VOID)
+{
+    PIRP Top = IoGetTopLevelIrp();
+    PIO_STACK_LOCATION Stack;
+    if ((ULONG_PTR)Top <= FSRTL_MAX_TOP_LEVEL_IRP_FLAG)
+        return NG_LOCK_NO_IRP;
+    Stack = IoGetCurrentIrpStackLocation(Top);
+    if (Top->Flags & IRP_PAGING_IO)
+    {
+        if (Stack->MajorFunction == IRP_MJ_READ)
+            return NG_LOCK_PAGING_READ;
+        if (Stack->MajorFunction == IRP_MJ_WRITE)
+            return NG_LOCK_PAGING_WRITE;
+    }
+    return Stack->MajorFunction <= IRP_MJ_MAXIMUM_FUNCTION ? Stack->MajorFunction : NG_LOCK_NO_IRP;
+}
+
 VOID NgAcquireCore(PNG_VCB Vcb)
 {
+    LARGE_INTEGER T0, T1;
+    BOOLEAN Waited = FALSE;
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&Vcb->CoreLock, TRUE);
+    if (ExIsResourceAcquiredExclusiveLite(&Vcb->CoreLock))
+    {
+        ExAcquireResourceExclusiveLite(&Vcb->CoreLock, TRUE);
+        Vcb->CoreDepth++;
+        return;
+    }
+    T0.QuadPart = (LONGLONG)__rdtsc();
+    if (!ExAcquireResourceExclusiveLite(&Vcb->CoreLock, FALSE))
+    {
+        ExAcquireResourceExclusiveLite(&Vcb->CoreLock, TRUE);
+        Waited = TRUE;
+    }
+    T1.QuadPart = (LONGLONG)__rdtsc();
+    Vcb->CoreDepth = 1;
+    Vcb->CoreCategory = NgLockCategory();
+    Vcb->CoreSince = T1;
+    Vcb->LockStats.Stat[Vcb->CoreCategory].Acquired++;
+    if (Waited)
+    {
+        Vcb->LockStats.Stat[Vcb->CoreCategory].Contended++;
+        Vcb->LockStats.Stat[Vcb->CoreCategory].WaitUs += NgTicksToUs(T1.QuadPart - T0.QuadPart);
+    }
 }
 
 VOID NgReleaseCore(PNG_VCB Vcb)
 {
+    if (--Vcb->CoreDepth == 0)
+    {
+        LARGE_INTEGER T;
+        T.QuadPart = (LONGLONG)__rdtsc();
+        Vcb->LockStats.Stat[Vcb->CoreCategory].HeldUs += NgTicksToUs(T.QuadPart - Vcb->CoreSince.QuadPart);
+    }
     ExReleaseResourceLite(&Vcb->CoreLock);
     KeLeaveCriticalRegion();
+}
+
+/* Prints the request types that took CoreLock (at shutdown). */
+VOID NgPrintLockStats(PNG_VCB Vcb)
+{
+    ULONG i;
+    for (i = 0; i < NG_LOCK_CATEGORIES; i++)
+    {
+        NG_LOCK_STAT *S = &Vcb->LockStats.Stat[i];
+        if (S->Acquired)
+            DPRINT1("ntfsng: lock %02lx: %lu acquired, %lu contended, wait %I64u us, held %I64u us\n",
+                    i, S->Acquired, S->Contended, S->WaitUs, S->HeldUs);
+    }
 }
 
 /*
@@ -391,8 +459,22 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     DPRINT1("ntfsng: NTFS on the Linux fs/ntfs core (v7.3-rc6), loading\n");
     ExInitializeFastMutex(&NgGlobal.VcbListLock);
     InitializeListHead(&NgGlobal.VcbList);
+    {
+        LARGE_INTEGER F, P0, P1, Delay;
+        ULONGLONG C0, C1;
+        P0 = KeQueryPerformanceCounter(&F);
+        C0 = __rdtsc();
+        Delay.QuadPart = -20 * 10000LL;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        P1 = KeQueryPerformanceCounter(NULL);
+        C1 = __rdtsc();
+        if (P1.QuadPart > P0.QuadPart)
+            NgPerfFrequency = (LONGLONG)((C1 - C0) * (ULONGLONG)F.QuadPart / (ULONGLONG)(P1.QuadPart - P0.QuadPart));
+        DPRINT1("ntfsng: lock timing at %I64d ticks/s\n", NgPerfFrequency);
+    }
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
+    NgGlobal.Verbose = NgReadDword(RegistryPath, L"Verbose");
     {
         /* The system-wide NTFS switch for short names (0 = create them, as on Windows). */
         UNICODE_STRING Fs = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\FileSystem");

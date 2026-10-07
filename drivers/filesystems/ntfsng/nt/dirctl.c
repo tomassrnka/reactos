@@ -271,10 +271,9 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             return STATUS_INVALID_INFO_CLASS;
     }
 
-    if (Pattern && Pattern->Length && (!Ccb->Pattern.Buffer || Restart))
+    /* The search expression is fixed by the first query of the handle; later ones (also restarts) keep it. */
+    if (Pattern && Pattern->Length && !Ccb->Pattern.Buffer && !Ccb->PatternIsStar)
     {
-        if (Ccb->Pattern.Buffer)
-            ExFreePoolWithTag(Ccb->Pattern.Buffer, TAG_NTFSNG);
         Ccb->Pattern.Buffer = ExAllocatePoolWithTag(PagedPool, Pattern->Length, TAG_NTFSNG);
         if (!Ccb->Pattern.Buffer)
             return STATUS_INSUFFICIENT_RESOURCES;
@@ -306,16 +305,35 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
         Ccb->Enumerated = TRUE;
         Ccb->NextIndex = 0;
-        Ccb->AnyReturned = FALSE;
     }
     if (Stack->Flags & SL_INDEX_SPECIFIED)
         Ccb->NextIndex = Stack->Parameters.QueryDirectory.FileIndex;
 
-    if (Irp->MdlAddress)
-        Buffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
-    else
-        Buffer = Irp->UserBuffer;
-    if (!Buffer)
+    if (!Irp->MdlAddress && Length)
+    {
+        /* The volume device does neither buffered nor direct I/O: lock the caller's buffer
+         * (attached to the IRP, freed at completion) so a bad or vanishing buffer cannot fault here. */
+        NTSTATUS Lock = STATUS_SUCCESS;
+        if (!IoAllocateMdl(Irp->UserBuffer, Length, FALSE, FALSE, Irp))
+            return STATUS_INSUFFICIENT_RESOURCES;
+        _SEH2_TRY
+        {
+            MmProbeAndLockPages(Irp->MdlAddress, Irp->RequestorMode, IoWriteAccess);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Lock = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Lock))
+        {
+            IoFreeMdl(Irp->MdlAddress);
+            Irp->MdlAddress = NULL;
+            return Lock;
+        }
+    }
+    Buffer = Irp->MdlAddress ? MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority) : Irp->UserBuffer;
+    if (!Buffer && Length)
         return STATUS_INSUFFICIENT_RESOURCES;
     if (!Ccb->PatternIsStar)
     {
@@ -417,8 +435,10 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         if (Status == STATUS_BUFFER_OVERFLOW)
             return Status;
+        /* Only the first query of a handle reports that nothing matches at all. */
         Status = Ccb->AnyReturned ? STATUS_NO_MORE_FILES :
                  (Ccb->PatternIsStar ? STATUS_NO_MORE_FILES : STATUS_NO_SUCH_FILE);
+        Ccb->AnyReturned = TRUE;
         return Status;
     }
     Ccb->AnyReturned = TRUE;

@@ -123,7 +123,7 @@ VOID NgDiagLogRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp, NTSTATUS Status)
     LONG Seq;
     BOOLEAN Write;
 
-    if (!NgDiagIsRefusal(Stack, Status))
+    if (!NgGlobal.Verbose || !NgDiagIsRefusal(Stack, Status))
         return;
     Write = NgDiagIsWrite(Stack, Status) ||
             (Major == IRP_MJ_CREATE && (Stack->Flags & SL_OPEN_PAGING_FILE));

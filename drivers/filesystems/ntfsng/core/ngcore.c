@@ -1789,6 +1789,39 @@ static int ngc_index_errno(int err)
 	return err == -EPERM ? -ENOSPC : err;
 }
 
+/*
+ * The core gives every new file WSL EAs ($LXUID, $LXGID, $LXMOD and $EA_INFORMATION); no option
+ * turns that off.  Files created through NT carry none (as on Windows): remove them in the same
+ * transaction, with the packed EA size in the $FILE_NAME attributes and the parent's index entries.
+ */
+static void ngc_strip_wsl_eas(struct inode *vi)
+{
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct ntfs_attr_search_ctx *ctx;
+
+	mutex_lock(&ni->mrec_lock);
+	if (ntfs_attr_exist(ni, AT_EA, AT_UNNAMED, 0))
+		ntfs_attr_remove(ni, AT_EA, AT_UNNAMED, 0);
+	if (ntfs_attr_exist(ni, AT_EA_INFORMATION, AT_UNNAMED, 0))
+		ntfs_attr_remove(ni, AT_EA_INFORMATION, AT_UNNAMED, 0);
+	NInoClearHasEA(ni);
+	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	if (ctx) {
+		while (!ntfs_attr_lookup(AT_FILE_NAME, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+			struct file_name_attr *fn = (struct file_name_attr *)((u8 *)ctx->attr +
+					le16_to_cpu(ctx->attr->data.resident.value_offset));
+			if (!ctx->attr->non_resident && fn->type.ea.packed_ea_size) {
+				fn->type.ea.packed_ea_size = 0;
+				mark_mft_record_dirty(ctx->ntfs_ino);
+			}
+		}
+		ntfs_attr_put_search_ctx(ctx);
+	}
+	NInoSetFileNameDirty(ni);
+	mutex_unlock(&ni->mrec_lock);
+	mark_inode_dirty(vi);
+}
+
 int ngc_create(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out)
 {
 	struct inode *dir = (struct inode *)dirn;
@@ -1813,8 +1846,10 @@ int ngc_create(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned 
 	}
 	if (!err && !d->d_inode)
 		err = -EIO;
-	if (!err)
+	if (!err) {
+		ngc_strip_wsl_eas(d->d_inode);
 		*out = (ngc_node *)d->d_inode;	/* the new inode's reference from new_inode() */
+	}
 	err = ngc_index_errno(err);
 	ngc_freedentry(d);
 	return err;

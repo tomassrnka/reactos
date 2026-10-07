@@ -194,6 +194,8 @@ static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, 
 
     if (!Fcb || Fcb->IsVolume || Fcb->Stream.Length || !Fcb->HasNode)
         return STATUS_INVALID_PARAMETER;
+    if (Code != FSCTL_GET_REPARSE_POINT && Ccb && !(Ccb->Granted & (FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES)))
+        return STATUS_ACCESS_DENIED;
     /* The root and the $Extend metadata files never become reparse points. */
     if (Code == FSCTL_SET_REPARSE_POINT && (Fcb->IsRoot || !Ccb || Ccb->ParentMftNo == 11))
         return STATUS_ACCESS_DENIED;
@@ -375,6 +377,20 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FSCTL_OPLOCK_BREAK_NOTIFY:
         case FSCTL_OPLOCK_BREAK_ACK_NO_2:
             return STATUS_INVALID_OPLOCK_PROTOCOL;
+        case FSCTL_NG_LOCK_STATS:
+        {
+            /* Diagnostic: a snapshot of the CoreLock statistics (benchmark tools diff two). */
+            ULONG Out = Stack->Parameters.FileSystemControl.OutputBufferLength;
+            if (!Irp->AssociatedIrp.SystemBuffer || Out < sizeof(NG_LOCK_STATS))
+                return STATUS_BUFFER_TOO_SMALL;
+            NgAcquireCore(Vcb);
+            Vcb->LockStats.Version = 1;
+            Vcb->LockStats.Categories = NG_LOCK_CATEGORIES;
+            RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, &Vcb->LockStats, sizeof(NG_LOCK_STATS));
+            NgReleaseCore(Vcb);
+            Irp->IoStatus.Information = sizeof(NG_LOCK_STATS);
+            return STATUS_SUCCESS;
+        }
         case FSCTL_GET_REPARSE_POINT:
         case FSCTL_SET_REPARSE_POINT:
         case FSCTL_DELETE_REPARSE_POINT:
