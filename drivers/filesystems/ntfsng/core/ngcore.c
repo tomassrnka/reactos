@@ -28,6 +28,8 @@ extern struct block_device *kshim_mount_bdev;
 struct block_device *kshim_bdev_open(void *osdev, u64 size, unsigned int sector_size);
 void kshim_bdev_close(struct block_device *b);
 void kshim_mapping_shrink(struct address_space *m);
+void kshim_icache_flush(struct super_block *sb, int all);
+void kshim_icache_trim(struct super_block *sb);
 extern unsigned long kshim_pc_pages, kshim_inodes_live, kshim_counter_reads;
 void kshim_dump_allocs(void);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
@@ -38,6 +40,7 @@ void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, 
 extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_dirty;
 extern unsigned long long kshim_counter_write_bytes;
 extern bool (*kshim_is_data_inode)(struct inode *i);
+extern bool (*kshim_icache_ok)(struct inode *i);
 
 struct ngc_vol {
 	struct super_block *sb;
@@ -115,6 +118,18 @@ static bool ngc_is_data_inode(struct inode *i)
 	return ni->type == AT_DATA && ni->mft_no >= FILE_first_user;
 }
 
+/*
+ * Which unused inodes may stay cached: files, directories and their index attributes.  Other
+ * attribute inodes are dropped at their last reference: the core removes and adds attributes such
+ * as $SECURITY_DESCRIPTOR, $REPARSE_POINT, $EA and named streams without invalidating an attribute
+ * inode, so a cached one would describe the removed attribute to the next ntfs_attr_iget.
+ */
+static bool ngc_icache_ok(struct inode *i)
+{
+	struct ntfs_inode *ni = NTFS_I(i);
+	return !NInoAttr(ni) || ni->type == AT_INDEX_ALLOCATION || ni->type == AT_BITMAP;
+}
+
 int ngc_init(void)
 {
 	int err = 0;
@@ -124,6 +139,7 @@ int ngc_init(void)
 		if (!err)
 			ngc_inited = 1;
 		kshim_is_data_inode = ngc_is_data_inode;
+		kshim_icache_ok = ngc_icache_ok;
 	}
 	mutex_unlock(&ngc_mount_lock);
 	return err;
@@ -263,6 +279,8 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	if (fc->ops->free)
 		fc->ops->free(fc);
 	kfree(fc);
+	/* MFT records are read for every lookup and listing: keep 16 MB of them (16k records) cached. */
+	NTFS_SB(v->sb)->mft_ino->i_mapping->kshim_pc_max = 4096;
 	*out = v;
 	return 0;
 fail_fc:
@@ -280,6 +298,7 @@ fail:
 void ngc_umount(ngc_vol *v)
 {
 	struct super_block *sb = v->sb;
+	kshim_icache_flush(sb, 1);
 	if (sb->s_root) {
 		iput(sb->s_root->d_inode);
 		kfree(sb->s_root);
@@ -740,6 +759,12 @@ void ngc_debug_dump(void)
 }
 
 /* ------------------------------------------------------------------ write side */
+
+/* Evicts unused cached inodes beyond the cache limits; called between core operations. */
+void ngc_icache_trim(ngc_vol *v)
+{
+	kshim_icache_trim(v->sb);
+}
 
 int ngc_is_rw(ngc_vol *v)
 {

@@ -222,6 +222,7 @@ struct address_space {
 	errseq_t wb_err;
 	unsigned long flags;
 	unsigned int kshim_eager_wb;	/* write dirty folios back as soon as the mapping is full (block device) */
+	unsigned long kshim_pc_max;	/* folios kept before clean ones are dropped; 0: KSHIM_PC_MAX */
 };
 static inline gfp_t mapping_gfp_mask(struct address_space *m) { return m->gfp_mask; }
 static inline void mapping_set_gfp_mask(struct address_space *m, gfp_t g) { m->gfp_mask = g; }
@@ -316,6 +317,9 @@ struct inode {
 	struct hlist_node i_hash;
 	struct inode *kshim_next;
 	void *kshim_test_data;
+	struct inode *kshim_hnext;		/* hash chain (sb->kshim_ihash) while hashed */
+	struct inode *kshim_lru_prev, *kshim_lru_next;	/* unused-inode list while kshim_in_lru */
+	unsigned char kshim_hashed, kshim_in_lru;
 };
 static inline loff_t i_size_read(const struct inode *i) { return i->i_size; }
 static inline void i_size_write(struct inode *i, loff_t s) { i->i_size = s; }
@@ -431,6 +435,11 @@ struct super_block {
 	const struct xattr_handler * const *s_xattr;
 	errseq_t s_wb_err;
 	struct inode *kshim_inodes;
+#define KSHIM_IHASH 1024
+	struct inode *kshim_ihash[KSHIM_IHASH];
+	struct inode *kshim_lru_head, *kshim_lru_tail;	/* unused inodes, oldest first */
+	unsigned long kshim_lru_count;
+	int kshim_no_icache;			/* unmounting: evict at the last reference */
 	const struct dentry_operations *s_d_op;
 	struct user_namespace *s_user_ns;
 	u8 s_uuid[16];

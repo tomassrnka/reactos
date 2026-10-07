@@ -93,6 +93,8 @@ VOID NgAcquireCore(PNG_VCB Vcb)
 
 VOID NgReleaseCore(PNG_VCB Vcb)
 {
+    if (Vcb->CoreDepth == 1 && Vcb->Core)
+        ngc_icache_trim(Vcb->Core);
     if (--Vcb->CoreDepth == 0)
     {
         LARGE_INTEGER T;
