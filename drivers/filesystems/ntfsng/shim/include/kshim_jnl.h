@@ -15,7 +15,7 @@
 #define KJ_HDR_PAGE 3			/* $LogFile page of the header: never a power of two */
 #define KJ_FIRST_SLOT_PAGE 5
 
-enum { KJ_ST_ACTIVE = 1, KJ_ST_COMMITTED = 2, KJ_ST_UNJOURNALED = 3 };
+enum { KJ_ST_ACTIVE = 1, KJ_ST_COMMITTED = 2, KJ_ST_UNJOURNALED = 3, KJ_ST_ERRORS = 4 };
 
 struct kj_hdr {
 	char magic[8];
@@ -51,9 +51,14 @@ int kj_page_dev(const struct kj_ext *ext, int next, u64 page, u64 *dev);
 int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int next, u64 lf_pages,
 		u64 serial, u64 seq);
 void kshim_jnl_deactivate(struct block_device *b);
-int kshim_jnl_commit(struct block_device *b);
+int kshim_jnl_commit(struct block_device *b);	/* 1 committed (device flushed), 0 nothing to do, <0 error */
+void kshim_jnl_mark_errors(struct block_device *b);
+unsigned long kshim_jnl_capacity(struct block_device *b);
+int kshim_jnl_ro_page(struct block_device *b, u64 blk, u8 mask, const u8 *data);
 unsigned long kshim_jnl_pending(struct block_device *b);
 void kshim_jnl_report(struct block_device *b);
+/* Test only: nonzero stops the machine half way through writing that commit in place. */
+extern unsigned long kshim_jnl_fault;
 
 /* Used by kshim_dev_rw. */
 int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len);
@@ -61,7 +66,7 @@ void kshim_jnl_degrade(struct block_device *b);
 void kshim_jnl_patch(struct block_device *b, int to_overlay, u64 off, u8 *buf, size_t len);
 
 /* Positive increments of a watched counter (the core's free-cluster count) are counted. */
-void kshim_watch_add(atomic64_t *v);
+int kshim_watch_add(atomic64_t *v);
 void kshim_watch_del(atomic64_t *v);
 unsigned long kshim_watch_count(atomic64_t *v);
 void kshim_watch_hit(atomic64_t *v);

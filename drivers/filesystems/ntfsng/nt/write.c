@@ -169,13 +169,19 @@ BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset)
     LONGLONG End = NgCachedLimit(Fcb);
     LARGE_INTEGER Li;
     IO_STATUS_BLOCK Iosb;
-    BOOLEAN Ok;
+    BOOLEAN Ok = TRUE;
 
     Offset &= ~(LONGLONG)(NG_VACB_SIZE - 1);
     ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
-    for (Li.QuadPart = Offset; Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
+    for (Li.QuadPart = Offset; Ok && Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
+    {
+        Iosb.Status = STATUS_SUCCESS;
         CcFlushCache(&Fcb->SectionObjectPointers, &Li, (ULONG)min(End - Li.QuadPart, (LONGLONG)NG_RANGE_CHUNK), &Iosb);
-    Ok = NgPurgeFrom(Fcb, Offset);
+        /* Dirty pages that did not reach the disk must not be purged. */
+        Ok = NT_SUCCESS(Iosb.Status);
+    }
+    if (Ok)
+        Ok = NgPurgeFrom(Fcb, Offset);
     ExReleaseResourceLite(Fcb->Header.PagingIoResource);
     return Ok;
 }

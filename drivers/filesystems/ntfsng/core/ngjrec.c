@@ -19,9 +19,20 @@ static u16 g16(const u8 *p) { return p[0] | p[1] << 8; }
 static u32 g32(const u8 *p) { return g16(p) | (u32)g16(p + 2) << 16; }
 static u64 g64(const u8 *p) { return g32(p) | (u64)g32(p + 4) << 32; }
 
+/* Every raw access stays inside the volume and on device-sector boundaries (malformed volumes too). */
+static int inside(struct ngj_vol *jv, u64 off, u64 len)
+{
+	return off < jv->size && len <= jv->size - off && !((off | len) & (jv->devsec - 1));
+}
+
 static int dread(struct ngj_vol *jv, u64 off, void *buf, unsigned int len)
 {
-	return ngos_dev_read(jv->osdev, off, buf, len) ? -EIO : 0;
+	return inside(jv, off, len) && !ngos_dev_read(jv->osdev, off, buf, len) ? 0 : -EIO;
+}
+
+static int dwrite(struct ngj_vol *jv, u64 off, void *buf, unsigned int len)
+{
+	return inside(jv, off, len) && !ngos_dev_write(jv->osdev, off, buf, len) ? 0 : -EIO;
 }
 
 /* Multi-sector protection: check and undo the update sequence (stride 512). */
@@ -66,7 +77,7 @@ static u8 *find_attr(u8 *r, u32 size, u32 type)
 		if (t == AT_END_T || len < 16 || off + len > size)
 			return NULL;
 		if (t == type && a[9] == 0)
-			return a;
+			return len >= (a[8] ? 0x40u : 0x18u) ? a : NULL;
 		off += len;
 	}
 	return NULL;
@@ -92,6 +103,8 @@ static int decode_runs(const u8 *a, u32 alen, struct ngj_run *runs, int max)
 				d -= (s64)1 << (8 * ob);
 			lcn += d;
 		}
+		if (len <= 0 || len > (s64)1 << 40 || vcn > (s64)1 << 40 || lcn < 0 || lcn > (s64)1 << 40)
+			return -EIO;
 		runs[n].vcn = vcn;
 		runs[n].lcn = ob ? lcn : -1;
 		runs[n].len = len;
@@ -102,80 +115,58 @@ static int decode_runs(const u8 *a, u32 alen, struct ngj_run *runs, int max)
 	return n;
 }
 
-static int map_vcn(const struct ngj_run *runs, int n, s64 vcn, s64 *lcn)
+/*
+ * The first $MFT records are contiguous at mft_lcn and mirrored at mirr_lcn, so records 2 and 3
+ * are read there; $MFT record 0 is not used (a half-applied transaction may have changed it).
+ * A record that fails its update sequence check is taken from $MFTMirr.
+ */
+static int read_rec(struct ngj_vol *jv, u64 no, u8 *r)
 {
-	for (int i = 0; i < n; i++)
-		if (vcn >= runs[i].vcn && vcn < runs[i].vcn + runs[i].len && runs[i].lcn >= 0) {
-			*lcn = runs[i].lcn + (vcn - runs[i].vcn);
-			return 0;
-		}
+	if (!dread(jv, jv->mft_lcn * jv->cluster + no * jv->recsz, r, jv->recsz) && !unfix(r, jv->recsz))
+		return 0;
+	if (!dread(jv, jv->mirr_lcn * jv->cluster + no * jv->recsz, r, jv->recsz) && !unfix(r, jv->recsz))
+		return 0;
 	return -EIO;
 }
 
-/* Device offset of each cluster-or-record-sized piece of MFT record @no. */
-static int rec_off(struct ngj_vol *jv, u64 no, u32 piece, u64 *dev)
-{
-	u64 b = no * jv->recsz + piece;
-	s64 lcn;
-	if (map_vcn(jv->mft, jv->nmft, (s64)(b / jv->cluster), &lcn))
-		return -EIO;
-	*dev = (u64)lcn * jv->cluster + b % jv->cluster;
-	return 0;
-}
+static int pow2(u64 x) { return x && !(x & (x - 1)); }
 
-static int read_rec(struct ngj_vol *jv, u64 no, u8 *r)
-{
-	u32 step = min_t(u32, jv->recsz, jv->cluster);
-	for (u32 p = 0; p < jv->recsz; p += step) {
-		u64 dev;
-		if (rec_off(jv, no, p, &dev) || dread(jv, dev, r + p, step))
-			return -EIO;
-	}
-	return unfix(r, jv->recsz);
-}
-
-int ngj_probe(void *osdev, u64 size, struct ngj_vol *jv)
+int ngj_probe(void *osdev, u64 size, unsigned int devsec, struct ngj_vol *jv)
 {
 	u8 *bs = kmalloc(4096, GFP_KERNEL), *r = NULL, *a;
 	int err = -EINVAL, spc;
 	s8 cpr;
 	memset(jv, 0, sizeof(*jv));
 	jv->osdev = osdev;
+	jv->size = size;
+	jv->devsec = devsec;
 	if (!bs)
 		return -ENOMEM;
-	if (ngos_dev_read(osdev, 0, bs, 512) || memcmp(bs + 3, "NTFS    ", 8))
+	if (!pow2(devsec) || devsec < 512 || devsec > 4096 || dread(jv, 0, bs, devsec) || memcmp(bs + 3, "NTFS    ", 8))
 		goto out;
 	jv->bps = g16(bs + 0x0b);
 	spc = bs[0x0d];
 	if (spc > 0x80)
-		spc = 1 << (256 - spc);
+		spc = spc >= 0xec ? 1 << (256 - spc) : 0;
 	jv->cluster = jv->bps * spc;
 	jv->mft_lcn = g64(bs + 0x30);
 	jv->mirr_lcn = g64(bs + 0x38);
 	cpr = (s8)bs[0x40];
-	jv->recsz = cpr > 0 ? cpr * jv->cluster : 1u << -cpr;
+	if (cpr > 0 && cpr <= 4)
+		jv->recsz = cpr * jv->cluster;
+	else if (cpr >= -12 && cpr <= -10)
+		jv->recsz = 1u << -cpr;
 	jv->serial = g64(bs + 0x48);
-	if (jv->bps < 512 || jv->bps > 4096 || !jv->cluster || jv->cluster > 2u << 20 || jv->recsz < 1024 ||
-	    jv->recsz > 4096 || jv->mft_lcn * jv->cluster >= size)
+	if (!pow2(jv->bps) || jv->bps < devsec || jv->bps > 4096 || !pow2(jv->cluster) || jv->cluster > 2u << 20 ||
+	    jv->recsz < 1024 || jv->recsz > 4096 || jv->recsz % devsec ||
+	    jv->mft_lcn >= size / jv->cluster || jv->mirr_lcn >= size / jv->cluster)
 		goto out;
 	r = kmalloc(jv->recsz, GFP_KERNEL);
 	if (!r) {
 		err = -ENOMEM;
 		goto out;
 	}
-	/* $MFT record 0 at mft_lcn: its own $DATA runs locate the others. */
-	{
-		u32 step = min_t(u32, jv->recsz, jv->cluster);
-		for (u32 p = 0; p < jv->recsz; p += step)
-			if (dread(jv, jv->mft_lcn * jv->cluster + p, r + p, step))
-				goto out;
-	}
 	err = -EIO;
-	if (unfix(r, jv->recsz) || !(a = find_attr(r, jv->recsz, AT_DATA_T)) || !a[8])
-		goto out;
-	jv->nmft = decode_runs(a, g32(a + 4), jv->mft, NGJ_MAXRUNS);
-	if (jv->nmft <= 0)
-		goto out;
 	if (read_rec(jv, 2, r) || !(a = find_attr(r, jv->recsz, AT_DATA_T)) || !a[8])
 		goto out;
 	{
@@ -195,6 +186,16 @@ int ngj_probe(void *osdev, u64 size, struct ngj_vol *jv)
 			jv->ext[jv->next].dev = (u64)lr[i].lcn * jv->cluster;
 			jv->next++;
 		}
+		/* Only pages that are mapped from page 0 on, and at most 256 MiB of them. */
+		{
+			u64 covered = 0;
+			for (int i = 0; i < jv->next && jv->ext[i].page == covered; i++)
+				covered += jv->ext[i].npages;
+			if (jv->lf_pages > covered)
+				jv->lf_pages = covered;
+			if (jv->lf_pages > 65536)
+				jv->lf_pages = 65536;
+		}
 	}
 	err = 0;
 out:
@@ -212,19 +213,19 @@ static int lf_read(struct ngj_vol *jv, u64 page, void *buf)
 static int lf_write(struct ngj_vol *jv, u64 page, void *buf)
 {
 	u64 dev;
-	return kj_page_dev(jv->ext, jv->next, page, &dev) || ngos_dev_write(jv->osdev, dev, buf, KJ_PAGE) ? -EIO : 0;
+	return kj_page_dev(jv->ext, jv->next, page, &dev) || dwrite(jv, dev, buf, KJ_PAGE) ? -EIO : 0;
 }
 
 /* Clears VOLUME_IS_DIRTY in $Volume (record 3) and its $MFTMirr copy. */
 static int clear_dirty(struct ngj_vol *jv, int *was)
 {
 	u8 *r = kmalloc(jv->recsz, GFP_KERNEL), *a;
-	u32 step = min_t(u32, jv->recsz, jv->cluster);
 	int err = -EIO;
 	*was = 0;
 	if (!r)
 		return -ENOMEM;
-	if (read_rec(jv, 3, r) || !(a = find_attr(r, jv->recsz, AT_VOLINFO_T)) || a[8] || g32(a + 0x10) < 12)
+	if (read_rec(jv, 3, r) || !(a = find_attr(r, jv->recsz, AT_VOLINFO_T)) || a[8] || g32(a + 0x10) < 12 ||
+	    g16(a + 0x14) + 12u > g32(a + 4))
 		goto out;
 	a += g16(a + 0x14);
 	if (!(g16(a + 10) & VOL_DIRTY)) {
@@ -234,12 +235,8 @@ static int clear_dirty(struct ngj_vol *jv, int *was)
 	*was = 1;
 	a[10] &= ~VOL_DIRTY;
 	refix(r, jv->recsz);
-	for (u32 p = 0; p < jv->recsz; p += step) {
-		u64 dev;
-		if (rec_off(jv, 3, p, &dev) || ngos_dev_write(jv->osdev, dev, r + p, step))
-			goto out;
-	}
-	if (ngos_dev_write(jv->osdev, jv->mirr_lcn * jv->cluster + 3 * jv->recsz, r, jv->recsz))
+	if (dwrite(jv, jv->mft_lcn * jv->cluster + 3 * jv->recsz, r, jv->recsz) ||
+	    dwrite(jv, jv->mirr_lcn * jv->cluster + 3 * jv->recsz, r, jv->recsz))
 		goto out;
 	err = ngos_dev_flush(jv->osdev) ? -EIO : 0;
 out:
@@ -249,8 +246,10 @@ out:
 
 static int replay_sectors(struct ngj_vol *jv, const struct kj_desc *d, u8 *pg)
 {
+	if (d->blk >= jv->size / KJ_PAGE)
+		return -EIO;
 	for (int s = 0; s < 8; s++)
-		if (d->mask & (1u << s) && ngos_dev_write(jv->osdev, d->blk * KJ_PAGE + s * 512, pg + s * 512, 512))
+		if (d->mask & (1u << s) && dwrite(jv, d->blk * KJ_PAGE + s * 512, pg + s * 512, 512))
 			return -EIO;
 	return 0;
 }
@@ -260,12 +259,13 @@ static int replay_sectors(struct ngj_vol *jv, const struct kj_desc *d, u8 *pg)
  * NGJ_CLEAN (consistent after an optional replay; dirty flag cleared when @write) or
  * NGJ_REPAIR (metadata went in place without the journal: needs a repair).
  */
-int ngj_recover(struct ngj_vol *jv, int write, u64 *seq)
+int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 {
 	u8 *pg = kmalloc(KJ_PAGE, GFP_KERNEL), *dp = kmalloc(KJ_PAGE, GFP_KERNEL);
 	struct kj_hdr h;
 	int res = NGJ_NONE, was = 0;
 	*seq = 0;
+	jv->bdev = b;
 	if (!pg || !dp)
 		goto out;
 	/* Restart pages in use (Windows, or anything else that wrote a log): not ours. */
@@ -280,9 +280,10 @@ int ngj_recover(struct ngj_vol *jv, int write, u64 *seq)
 	    ((u64)h.serial_hi << 32 | h.serial_lo) != jv->serial || h.page_size != KJ_PAGE)
 		goto out;
 	*seq = h.seq;
-	if (h.state == KJ_ST_UNJOURNALED) {
+	if (h.state == KJ_ST_UNJOURNALED || h.state == KJ_ST_ERRORS) {
 		res = NGJ_REPAIR;
-		printk(KERN_ERR "journal: metadata was written in place without the journal (seq %llu): needs repair\n",
+		printk(KERN_ERR "journal: %s (seq %llu): needs repair\n", h.state == KJ_ST_ERRORS ?
+		       "the core reported errors in the last session" : "metadata was written in place without the journal",
 		       (unsigned long long)h.seq);
 		goto out;
 	}
@@ -291,8 +292,9 @@ int ngj_recover(struct ngj_vol *jv, int write, u64 *seq)
 	res = NGJ_CLEAN;
 	if (h.state == KJ_ST_COMMITTED) {
 		u32 crc = 0, total = h.ndesc + h.npages, i;
-		int ok = h.ndesc == (h.npages + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE &&
-			 kj_slot_page(total) <= jv->lf_pages;
+		int ok = h.npages && h.npages < (1u << 24) &&
+			 h.ndesc == (h.npages + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE &&
+			 kj_slot_page(total - 1) < jv->lf_pages;
 		for (i = 0; ok && i < total; i++) {
 			if (lf_read(jv, kj_slot_page(i), pg)) {
 				ok = 0;
@@ -308,9 +310,14 @@ int ngj_recover(struct ngj_vol *jv, int write, u64 *seq)
 					res = NGJ_REPAIR;
 					goto out;
 				}
-				if (!write)
+				if (!write) {
+					if (kshim_jnl_ro_page(jv->bdev, d->blk, d->mask, pg)) {
+						res = NGJ_REPAIR;
+						goto out;
+					}
 					continue;
-				if (d->mask == 0xff ? ngos_dev_write(jv->osdev, d->blk * KJ_PAGE, pg, KJ_PAGE) :
+				}
+				if (d->mask == 0xff ? (d->blk >= jv->size / KJ_PAGE || dwrite(jv, d->blk * KJ_PAGE, pg, KJ_PAGE)) :
 				    replay_sectors(jv, d, pg)) {
 					res = NGJ_REPAIR;
 					goto out;
@@ -338,7 +345,7 @@ int ngj_recover(struct ngj_vol *jv, int write, u64 *seq)
 	printk(KERN_WARNING "journal: found seq %llu state %u: %s%s, dirty flag %s\n",
 	       (unsigned long long)h.seq, h.state,
 	       jv->replayed ? "replayed a committed transaction" : jv->torn ? "transaction not committed (ignored)" : "nothing to replay",
-	       write ? "" : " (read-only: not written)", was ? "cleared" : "was clear");
+	       write ? "" : " (read-only mount: shown through the overlay, not written)", was ? "cleared" : write ? "was clear" : "not touched");
 	if (jv->replayed)
 		printk(KERN_WARNING "journal: replayed %u pages\n", jv->replayed);
 out:

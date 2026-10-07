@@ -391,6 +391,17 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
     DPRINT1("ntfsng: ReadOnly=%lu\n", NgGlobal.ForceReadOnly);
+    i = NgReadDword(RegistryPath, L"JournalFault");
+    if (i)
+    {
+        /* Test only: stop the machine inside one commit between JournalFault and 2*JournalFault. */
+        LARGE_INTEGER Now;
+        ULONG Target;
+        KeQuerySystemTime(&Now);
+        Target = i + (ULONG)((ULONGLONG)Now.QuadPart / 10000 % i);
+        ngc_set_journal_fault(Target);
+        DPRINT1("ntfsng: JournalFault: the system stops in the middle of commit %lu\n", Target);
+    }
     DPRINT1("ntfsng: service key %wZ, PermissiveOpen=%lu%s\n", RegistryPath, NgGlobal.PermissiveOpen,
             NgGlobal.PermissiveOpen ? " (opens with write access are granted, modifications are still refused)" : "");
 

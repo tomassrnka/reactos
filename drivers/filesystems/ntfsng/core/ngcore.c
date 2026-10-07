@@ -71,11 +71,11 @@ static struct timespec64 nt_to_ts(long long nt)
 	return t;
 }
 
-/* The core's own "remount-ro" error policy value, looked up by name. */
-static int ngc_on_errors_remount_ro(void)
+/* One of the core's error policy values ("remount-ro", "continue"), looked up by name. */
+static int ngc_on_errors(const char *name)
 {
 	for (const struct option_t *o = on_errors_arr; o->str; o++)
-		if (!strcmp(o->str, "remount-ro"))
+		if (!strcmp(o->str, name))
 			return o->val;
 	return 0;
 }
@@ -144,16 +144,26 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 		err = -ENOMEM;
 		goto fail;
 	}
-	/* Before the core reads anything: a journal left by a crash goes in place first. */
-	if (want_rw) {
-		v->jv = kmalloc(sizeof(*v->jv), GFP_KERNEL);
-		if (v->jv && !ngj_probe(osdev, size, v->jv) && v->jv->lf_pages >= 256) {
-			jrec = ngj_recover(v->jv, 1, &jseq);
-		} else {
-			printk(KERN_WARNING "journal: $LogFile not usable for the journal; metadata goes in place\n");
+	/*
+	 * Before the core reads anything: a journal left by a crash goes in place first (read-only
+	 * mounts see it through the overlay instead).
+	 */
+	v->jv = kmalloc(sizeof(*v->jv), GFP_KERNEL);
+	if (v->jv && !ngj_probe(osdev, size, sector_size, v->jv) && v->jv->lf_pages >= 256) {
+		jrec = ngj_recover(v->jv, b, want_rw, &jseq);
+		if (!want_rw) {
 			kfree(v->jv);
 			v->jv = NULL;
+		} else {
+			/* Test only: a mount that had to recover does not inject the fault again. */
+			if (v->jv->replayed || v->jv->torn)
+				kshim_jnl_fault = 0;
 		}
+	} else {
+		if (want_rw)
+			printk(KERN_WARNING "journal: $LogFile not usable for the journal; metadata goes in place\n");
+		kfree(v->jv);
+		v->jv = NULL;
 	}
 	fc->fs_type = kshim_fs_type;
 	fc->sb_flags = SB_RDONLY;
@@ -166,7 +176,7 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	/* NT name lookups are case-insensitive; the core defaults to case-sensitive. */
 	NVolClearCaseSensitive(vol);
 	/* Errors turn the volume read-only instead of being ignored (the default "continue"). */
-	vol->on_errors = ngc_on_errors_remount_ro();
+	vol->on_errors = ngc_on_errors("remount-ro");
 	/* Growing a non-sparse file allocates real clusters, as NTFS does; holes only in sparse files. */
 	NVolSetDisableSparse(vol);
 	mutex_lock(&ngc_mount_lock);
@@ -224,9 +234,8 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 			jerr = kshim_jnl_activate(b, v->jv->ext, v->jv->next, v->jv->lf_pages, v->jv->serial, jseq + 1);
 		if (jerr) {
 			printk(KERN_ERR "journal: not active (%d); metadata goes in place\n", jerr);
-		} else {
+		} else if (!kshim_watch_add(&vol->free_clusters)) {
 			v->watched = &vol->free_clusters;
-			kshim_watch_add(v->watched);
 			v->frees_seen = kshim_watch_count(v->watched);
 		}
 	}
@@ -264,7 +273,7 @@ void ngc_umount(ngc_vol *v)
 	}
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
-	if (v->bdev->jnl)
+	if (v->bdev->jnl && !NVolErrors(NTFS_SB(sb)))
 		kshim_jnl_commit(v->bdev);
 	if (v->watched)
 		kshim_watch_del(v->watched);
@@ -617,13 +626,29 @@ int ngc_is_rw(ngc_vol *v)
 static int ngc_commit(struct ngc_vol *v)
 {
 	int err = kshim_sync(v->sb);
+	for (int k = 0; !err && k < 4 && kshim_sb_dirty(v->sb); k++)
+		err = kshim_sync(v->sb);
 	if (!v->bdev->jnl)
 		return err ? err : blkdev_issue_flush(v->bdev);
+	if (NVolErrors(NTFS_SB(v->sb)))
+		kshim_jnl_mark_errors(v->bdev);
+	if (!err && kshim_sb_dirty(v->sb))
+		printk(KERN_ERR "journal: metadata still dirty after writeback; committing what was written\n");
 	if (!err)
 		err = kshim_jnl_commit(v->bdev);
 	if (!err)
+		err = blkdev_issue_flush(v->bdev);	/* nothing was committed: data writes still reach the medium */
+	if (err > 0)
+		err = 0;
+	if (!err && v->watched)
 		v->frees_seen = kshim_watch_count(v->watched);
 	return err;
+}
+
+/* Overlay pages that make the next operation commit first: half the journal, at most NGC_JNL_COMMIT_PAGES. */
+static unsigned long ngc_commit_threshold(struct ngc_vol *v)
+{
+	return min_t(unsigned long, NGC_JNL_COMMIT_PAGES, kshim_jnl_capacity(v->bdev) / 2);
 }
 
 /*
@@ -633,7 +658,7 @@ static int ngc_commit(struct ngc_vol *v)
  */
 static int ngc_before_alloc(struct ngc_vol *v)
 {
-	if (v->bdev->jnl && kshim_watch_count(v->watched) != v->frees_seen)
+	if (v->bdev->jnl && (!v->watched || kshim_watch_count(v->watched) != v->frees_seen))
 		return ngc_commit(v);
 	return 0;
 }
@@ -650,7 +675,7 @@ int ngc_mark_dirty(ngc_vol *v)
 	if (sb_rdonly(v->sb))
 		return -EROFS;
 	if (vol->vol_flags & VOLUME_IS_DIRTY)
-		return kshim_jnl_pending(v->bdev) > NGC_JNL_COMMIT_PAGES ? ngc_commit(v) : 0;
+		return kshim_jnl_pending(v->bdev) > ngc_commit_threshold(v) ? ngc_commit(v) : 0;
 	err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
 	if (!err)
 		err = write_inode_now(vol->vol_ino, 1);
@@ -667,6 +692,8 @@ int ngc_sync(ngc_vol *v)
 {
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
 	int err;
+	if (NVolErrors(vol))
+		kshim_jnl_mark_errors(v->bdev);
 	if (sb_rdonly(v->sb))
 		return 0;
 	err = ngc_commit(v);
@@ -681,6 +708,8 @@ int ngc_sync(ngc_vol *v)
 int ngc_dirty(ngc_vol *v)
 {
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	if (NVolErrors(vol))
+		kshim_jnl_mark_errors(v->bdev);
 	if (sb_rdonly(v->sb))
 		return 0;
 	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY) || kshim_jnl_pending(v->bdev);
@@ -689,6 +718,11 @@ int ngc_dirty(ngc_vol *v)
 void ngc_jnl_report(ngc_vol *v)
 {
 	kshim_jnl_report(v->bdev);
+}
+
+void ngc_set_journal_fault(unsigned long commit_no)
+{
+	kshim_jnl_fault = commit_no;
 }
 
 static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len)
