@@ -1259,6 +1259,35 @@ int ngc_links(ngc_node *n)
 	return links ? links : 1;
 }
 
+/* A name of @n (not a DOS-only one) and its directory's MFT number: for paths from a file ID. */
+int ngc_parent_name(ngc_node *n, unsigned long long *parent, unsigned short *out, unsigned int *len)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	struct ntfs_attr_search_ctx *ctx;
+	int err = -ENOENT;
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	mutex_lock(&ni->mrec_lock);
+	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	if (!ctx) {
+		mutex_unlock(&ni->mrec_lock);
+		return -ENOMEM;
+	}
+	while (!ntfs_attr_lookup(AT_FILE_NAME, AT_UNNAMED, 0, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+		struct file_name_attr *fn = ngc_fn(ctx);
+		if (ctx->attr->non_resident || fn->file_name_type == FILE_NAME_DOS)
+			continue;
+		memcpy(out, fn->file_name, fn->file_name_length * sizeof(__le16));
+		*len = fn->file_name_length;
+		*parent = MREF_LE(fn->parent_directory);
+		err = 0;
+		break;
+	}
+	ntfs_attr_put_search_ctx(ctx);
+	mutex_unlock(&ni->mrec_lock);
+	return err;
+}
+
 /* The DOS-only name of @n in directory @parent_mref, or *len = 0 when it has none. */
 int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len)
 {

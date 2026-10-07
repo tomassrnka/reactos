@@ -275,6 +275,85 @@ VOID NgMakeShortName(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PCWSTR Name,
         DPRINT1("ntfsng: short name %wZ for %wZ failed %d\n", &Short, &Long, Err);
 }
 
+/*
+ * The path from the volume root of the file a FILE_OPEN_BY_FILE_ID names (an 8-byte file
+ * reference; a nonzero sequence number must match), following $FILE_NAME parents up to the root.
+ */
+static NTSTATUS NgPathFromId(PNG_VCB Vcb, PCUNICODE_STRING Id, PUNICODE_STRING Path)
+{
+    ULONGLONG Ref, MftNo, Parent;
+    USHORT Seq;
+    ngc_node *Node = NULL, *Up;
+    struct ngc_stat St;
+    PWCHAR Name;
+    PWCHAR Buf;
+    ULONG Used = 0, Cap = 0x8000, Depth;
+    unsigned int Len;
+    int Err;
+
+    if (Id->Length != sizeof(ULONGLONG))
+        return Id->Length == 16 ? STATUS_NOT_IMPLEMENTED : STATUS_INVALID_PARAMETER;  /* object IDs */
+    RtlCopyMemory(&Ref, Id->Buffer, sizeof(Ref));
+    MftNo = Ref & 0xffffffffffffULL;
+    Seq = (USHORT)(Ref >> 48);
+    Buf = ExAllocatePoolWithTag(PagedPool, Cap * sizeof(WCHAR), TAG_NTFSNG);
+    Name = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
+    if (!Buf || !Name)
+    {
+        if (Buf) ExFreePoolWithTag(Buf, TAG_NTFSNG);
+        if (Name) ExFreePoolWithTag(Name, TAG_NTFSNG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    NgAcquireCore(Vcb);
+    Err = ngc_iget(Vcb->Core, MftNo, &Node);
+    if (!Err)
+    {
+        ngc_stat(Node, &St);
+        if (Seq && (USHORT)(St.mft_ref >> 48) != Seq)
+            Err = -NGC_ENOENT;
+    }
+    /* Built backwards from the end of Buf. */
+    for (Depth = 0; !Err && MftNo != 5 && Depth < 128; Depth++)
+    {
+        Err = ngc_parent_name(Node, &Parent, Name, &Len);
+        if (!Err && (Used + Len + 1 > Cap || (Used + Len + 1) * sizeof(WCHAR) > MAXUSHORT - sizeof(WCHAR)))
+            Err = -NGC_ENAMETOOLONG;
+        if (!Err)
+        {
+            Used += Len + 1;
+            RtlCopyMemory(Buf + Cap - Used + 1, Name, Len * sizeof(WCHAR));
+            Buf[Cap - Used] = L'\\';
+            Err = ngc_iget(Vcb->Core, Parent, &Up);
+        }
+        if (!Err)
+        {
+            ngc_put(Node);
+            Node = Up;
+            MftNo = Parent;
+        }
+    }
+    if (Node)
+        ngc_put(Node);
+    NgReleaseCore(Vcb);
+    ExFreePoolWithTag(Name, TAG_NTFSNG);
+    if (!Err && MftNo != 5)
+        Err = -NGC_ENOENT;
+    if (Err)
+    {
+        ExFreePoolWithTag(Buf, TAG_NTFSNG);
+        return Err == -NGC_ENOENT ? STATUS_INVALID_PARAMETER : NgErrnoToStatus(Err);
+    }
+    if (!Used)
+    {
+        Buf[Cap - 1] = L'\\';
+        Used = 1;
+    }
+    RtlMoveMemory(Buf, Buf + Cap - Used, Used * sizeof(WCHAR));
+    Path->Buffer = Buf;
+    Path->Length = Path->MaximumLength = (USHORT)(Used * sizeof(WCHAR));
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -295,6 +374,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     struct ngc_stat St, PSt;
     PWCHAR Real = NULL;
     unsigned int RealLen = 0;
+    UNICODE_STRING ById = { 0, 0, NULL };
+    PCUNICODE_STRING Name = &FileObject->FileName;
     NTSTATUS Status;
     USHORT i;
     int Err;
@@ -305,10 +386,22 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         RelatedCcb = Related->FsContext2;
     }
     if (Options & FILE_OPEN_BY_FILE_ID)
-        return STATUS_NOT_IMPLEMENTED;
+    {
+        /* Opened as the path of the file the ID names; such an open never creates anything. */
+        if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF && Disposition != FILE_OVERWRITE)
+            return STATUS_INVALID_PARAMETER;
+        Status = NgPathFromId(Vcb, &FileObject->FileName, &ById);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (Disposition == FILE_OPEN_IF)
+            Disposition = FILE_OPEN;
+        Name = &ById;
+        RelatedFcb = NULL;
+        RelatedCcb = NULL;
+    }
     if (Disposition > FILE_MAXIMUM_DISPOSITION)
         return STATUS_INVALID_PARAMETER;
-    if (FileObject->FileName.Length == 0 && (!RelatedFcb || RelatedFcb->IsVolume))
+    if (Name->Length == 0 && (!RelatedFcb || RelatedFcb->IsVolume))
     {
         if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
             return Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_ACCESS_DENIED;
@@ -318,7 +411,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 
     /* Absolute path from the volume root, built from the related open if any. */
-    Full.MaximumLength = FileObject->FileName.Length + sizeof(WCHAR) * 2 +
+    Full.MaximumLength = Name->Length + sizeof(WCHAR) * 2 +
                          (RelatedCcb ? RelatedCcb->Path.Length : 0);
     Full.Buffer = ExAllocatePoolWithTag(PagedPool, Full.MaximumLength, TAG_NTFSNG);
     Real = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
@@ -328,22 +421,24 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             ExFreePoolWithTag(Full.Buffer, TAG_NTFSNG);
         if (Real)
             ExFreePoolWithTag(Real, TAG_NTFSNG);
+        if (ById.Buffer)
+            ExFreePoolWithTag(ById.Buffer, TAG_NTFSNG);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     Full.Length = 0;
     if (RelatedCcb && !RelatedFcb->IsVolume)
     {
-        if (FileObject->FileName.Length && FileObject->FileName.Buffer[0] == L'\\')
+        if (Name->Length && Name->Buffer[0] == L'\\')
         {
             Status = STATUS_OBJECT_NAME_INVALID;
             goto out;
         }
         RtlCopyUnicodeString(&Full, &RelatedCcb->Path);
-        if (FileObject->FileName.Length &&
+        if (Name->Length &&
             (Full.Length == 0 || Full.Buffer[Full.Length / sizeof(WCHAR) - 1] != L'\\'))
             RtlAppendUnicodeToString(&Full, L"\\");
     }
-    RtlAppendUnicodeStringToString(&Full, &FileObject->FileName);
+    RtlAppendUnicodeStringToString(&Full, Name);
     if (Full.Length == 0 || Full.Buffer[0] != L'\\')
     {
         Status = STATUS_OBJECT_NAME_INVALID;
@@ -761,6 +856,8 @@ out:
         NgFreeCcb(Ccb);
     ExFreePoolWithTag(Real, TAG_NTFSNG);
     ExFreePoolWithTag(Full.Buffer, TAG_NTFSNG);
+    if (ById.Buffer)
+        ExFreePoolWithTag(ById.Buffer, TAG_NTFSNG);
     return Status;
 }
 
