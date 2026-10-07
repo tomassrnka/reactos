@@ -1228,6 +1228,28 @@ static int ngc_sync_impl(ngc_vol *v)
 	return err;
 }
 
+/*
+ * A commit of everything changed so far that leaves VOLUME_IS_DIRTY as it is: FlushFileBuffers and the
+ * flusher while the volume is busy.  Clearing the flag costs two more commits (clear it, set it again
+ * at the next change), so only a quiet flusher pass does that (ngc_sync).
+ */
+int ngc_commit_now(ngc_vol *v)
+{
+	if (NVolErrors(NTFS_SB(v->sb)))
+		kshim_jnl_mark_errors(v->bdev);
+	if (sb_rdonly(v->sb))
+		return 0;
+	return ngc_commit(v);
+}
+
+/* True when metadata changed since the last commit (VOLUME_IS_DIRTY alone does not count). */
+int ngc_changed(ngc_vol *v)
+{
+	if (sb_rdonly(v->sb))
+		return 0;
+	return kshim_sb_dirty(v->sb) || kshim_jnl_pending(v->bdev);
+}
+
 int ngc_dirty(ngc_vol *v)
 {
 	struct ntfs_volume *vol = NTFS_SB(v->sb);

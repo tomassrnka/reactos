@@ -103,6 +103,8 @@ void ngc_trim(ngc_node *n);
 int ngc_is_rw(ngc_vol *v);
 int ngc_mark_dirty(ngc_vol *v);
 int ngc_sync(ngc_vol *v);
+int ngc_commit_now(ngc_vol *v);
+int ngc_changed(ngc_vol *v);
 void ngc_icache_trim(ngc_vol *v);
 int ngc_dirty(ngc_vol *v);
 void ngc_jnl_report(ngc_vol *v);

@@ -690,7 +690,7 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     NgApplyModified(Fcb);
     NgAcquireCore(Vcb);
-    Err = ngc_sync(Vcb->Core);
+    Err = ngc_commit_now(Vcb->Core);
     Vcb->Syncs++;
     NgReleaseCore(Vcb);
     if (Err)
@@ -754,7 +754,8 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
         NgAcquireCore(Vcb);
         if (ngc_dirty(Vcb->Core))
         {
-            int Err = ngc_sync(Vcb->Core);
+            /* Busy: commit and keep VOLUME_IS_DIRTY.  Quiet for a whole period: also clear the flag. */
+            int Err = ngc_changed(Vcb->Core) ? ngc_commit_now(Vcb->Core) : ngc_sync(Vcb->Core);
             Vcb->Syncs++;
             if (Err)
                 DPRINT1("ntfsng: background sync failed %d\n", Err);
