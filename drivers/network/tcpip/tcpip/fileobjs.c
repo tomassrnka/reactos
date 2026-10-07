@@ -25,19 +25,10 @@ KSPIN_LOCK AddressFileListLock;
 LIST_ENTRY ConnectionEndpointListHead;
 KSPIN_LOCK ConnectionEndpointListLock;
 
-/*
- * FUNCTION: Searches through address file entries to find the first match
- * ARGUMENTS:
- *     Address       = IP address
- *     Port          = Port number
- *     Protocol      = Protocol number
- *     SearchContext = Pointer to search context
- * RETURNS:
- *     Pointer to address file, NULL if none was found
- */
 /* Reference an address file found through the global list unless its last
  * reference has already gone, which means AddrFileFree is about to unlink and
- * free it. Returns whether the reference was taken. */
+ * free it. Returns whether the reference was taken. The caller holds
+ * AddressFileListLock, which keeps the entry in memory until it is unlinked. */
 static BOOLEAN ReferenceAddressFileIfLive(
     PADDRESS_FILE AddrFile)
 {
@@ -55,6 +46,16 @@ static BOOLEAN ReferenceAddressFileIfLive(
     return TRUE;
 }
 
+/*
+ * FUNCTION: Searches through address file entries to find the first match
+ * ARGUMENTS:
+ *     Address       = IP address
+ *     Port          = Port number
+ *     Protocol      = Protocol number
+ *     SearchContext = Pointer to search context
+ * RETURNS:
+ *     Pointer to address file, NULL if none was found
+ */
 PADDRESS_FILE AddrSearchFirst(
     PIP_ADDRESS Address,
     USHORT Port,
@@ -296,7 +297,8 @@ PADDRESS_FILE AddrSearchNext(
         if ((Current->Port    == SearchContext->Port) &&
             (Current->Protocol == SearchContext->Protocol) &&
             (AddrReceiveMatch(IPAddress, SearchContext->Address)) &&
-            /* Skip an address file that is already being freed */
+            /* Skip an address file that is already being freed; referenced before
+             * StartingAddrFile is dereferenced, because it may be the same one */
             ReferenceAddressFileIfLive(Current)) {
             /* We've found a match */
             Found = TRUE;
