@@ -692,6 +692,79 @@ Quit:
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+/* kernel32 is built for an older _WIN32_WINNT */
+#ifndef FAIL_FAST_GENERATE_EXCEPTION_ADDRESS
+#define FAIL_FAST_GENERATE_EXCEPTION_ADDRESS 0x1
+#endif
+
+static NTSTATUS BasepFailFastCode;
+
+/* A debugger that continues a fail fast exception resumes the thread here */
+static
+DECLSPEC_NORETURN
+VOID
+NTAPI
+BasepFailFastExit(VOID)
+{
+    NtTerminateProcess(NtCurrentProcess(), BasepFailFastCode);
+    for (;;);
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+RaiseFailFastException(
+    _In_opt_ PEXCEPTION_RECORD pExceptionRecord,
+    _In_opt_ PCONTEXT pContextRecord,
+    _In_ DWORD dwFlags)
+{
+    EXCEPTION_RECORD ExceptionRecord;
+    CONTEXT Context;
+
+    if (pExceptionRecord)
+    {
+        ExceptionRecord = *pExceptionRecord;
+        if (dwFlags & FAIL_FAST_GENERATE_EXCEPTION_ADDRESS)
+            ExceptionRecord.ExceptionAddress = _ReturnAddress();
+    }
+    else
+    {
+        RtlZeroMemory(&ExceptionRecord, sizeof(ExceptionRecord));
+        ExceptionRecord.ExceptionCode = STATUS_FAIL_FAST_EXCEPTION;
+        ExceptionRecord.ExceptionAddress = _ReturnAddress();
+    }
+    ExceptionRecord.ExceptionFlags |= EXCEPTION_NONCONTINUABLE;
+
+    if (pContextRecord)
+    {
+        Context = *pContextRecord;
+    }
+    else
+    {
+        /* The x86 capture leaves the flags to the caller */
+        RtlCaptureContext(&Context);
+        Context.ContextFlags = CONTEXT_FULL;
+#if defined(_M_IX86)
+        Context.Eip = (ULONG_PTR)BasepFailFastExit;
+#elif defined(_M_AMD64)
+        Context.Rip = (ULONG_PTR)BasepFailFastExit;
+        Context.Rsp = (Context.Rsp & ~(ULONG64)15) - 8;
+#endif
+    }
+
+    DPRINT1("Fail fast exception 0x%lx at %p\n",
+            ExceptionRecord.ExceptionCode, ExceptionRecord.ExceptionAddress);
+
+    /* Bypass every handler and only show a debugger the second chance. Without
+       one, the exception port could continue the thread instead of ending it */
+    BasepFailFastCode = ExceptionRecord.ExceptionCode;
+    if (NtCurrentPeb()->BeingDebugged)
+        NtRaiseException(&ExceptionRecord, &Context, FALSE);
+    NtTerminateProcess(NtCurrentProcess(), ExceptionRecord.ExceptionCode);
+}
+
 /*
  * @implemented
  */

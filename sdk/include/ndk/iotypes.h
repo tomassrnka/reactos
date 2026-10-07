@@ -808,13 +808,6 @@ typedef struct _FILE_DIRECTORY_INFORMATION
     WCHAR FileName[1];
 } FILE_DIRECTORY_INFORMATION, *PFILE_DIRECTORY_INFORMATION;
 
-typedef struct _FILE_IO_COMPLETION_INFORMATION
-{
-    PVOID KeyContext;
-    PVOID ApcContext;
-    IO_STATUS_BLOCK IoStatusBlock;
-} FILE_IO_COMPLETION_INFORMATION, *PFILE_IO_COMPLETION_INFORMATION;
-
 typedef struct _FILE_ATTRIBUTE_TAG_INFORMATION
 {
     ULONG FileAttributes;
@@ -933,6 +926,16 @@ typedef struct _IO_ERROR_LOG_MESSAGE
 } IO_ERROR_LOG_MESSAGE, *PIO_ERROR_LOG_MESSAGE;
 
 #endif
+
+//
+// Entry returned by NtRemoveIoCompletionEx
+//
+typedef struct _FILE_IO_COMPLETION_INFORMATION
+{
+    PVOID KeyContext;
+    PVOID ApcContext;
+    IO_STATUS_BLOCK IoStatusBlock;
+} FILE_IO_COMPLETION_INFORMATION, *PFILE_IO_COMPLETION_INFORMATION;
 
 //
 // I/O Completion Information structures

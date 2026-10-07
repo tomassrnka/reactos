@@ -5,6 +5,8 @@
 @ stdcall InitOnceInitialize(ptr) NTDLL.RtlRunOnceInitialize
 
 @ stdcall GetFileInformationByHandleEx(long long ptr long)
+@ stdcall CancelIoEx(ptr ptr)
+@ stdcall GetQueuedCompletionStatusEx(ptr ptr long ptr long long)
 @ stdcall -ret64 GetTickCount64()
 
 @ stdcall InitializeSRWLock(ptr)
@@ -88,3 +90,6 @@
 @ stdcall WaitForThreadpoolTimerCallbacks(ptr long) ntdll_vista.TpWaitForTimer
 @ stdcall WaitForThreadpoolWaitCallbacks(ptr long) ntdll_vista.TpWaitForWait
 @ stdcall WaitForThreadpoolWorkCallbacks(ptr long) ntdll_vista.TpWaitForWork
+
+@ stdcall WerGetFlags(ptr ptr)
+@ stdcall WerSetFlags(long)

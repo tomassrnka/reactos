@@ -1439,6 +1439,8 @@ extern KSPIN_LOCK IopDeviceTreeLock;
 extern ULONG IopTraceLevel;
 extern ULONG IopCaseInsensitive;
 extern GENERAL_LOOKASIDE IopMdlLookasideList;
+#define IOP_THREAD_IRP_LIST_LOCKS 16
+extern KSPIN_LOCK IopThreadIrpListLocks[IOP_THREAD_IRP_LIST_LOCKS];
 extern GENERIC_MAPPING IopCompletionMapping;
 extern GENERIC_MAPPING IopFileMapping;
 extern POBJECT_TYPE _IoFileObjectType;

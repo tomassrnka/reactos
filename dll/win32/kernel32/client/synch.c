@@ -338,6 +338,34 @@ CreateWaitableTimerW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
                                bManualReset ? NotificationTimer : SynchronizationTimer);
 }
 
+#ifndef CREATE_WAITABLE_TIMER_MANUAL_RESET
+#define CREATE_WAITABLE_TIMER_MANUAL_RESET 0x00000001
+#endif
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+CreateWaitableTimerExW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
+                       IN LPCWSTR lpTimerName OPTIONAL,
+                       IN DWORD dwFlags,
+                       IN DWORD dwDesiredAccess)
+{
+    /* High resolution timers are not supported, callers fall back when the flag is rejected */
+    if (dwFlags & ~CREATE_WAITABLE_TIMER_MANUAL_RESET)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    CreateNtObjectFromWin32Api(WaitableTimer, Timer, dwDesiredAccess,
+                               lpTimerAttributes,
+                               lpTimerName,
+                               (dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ?
+                               NotificationTimer : SynchronizationTimer);
+}
+
 /*
  * @implemented
  */

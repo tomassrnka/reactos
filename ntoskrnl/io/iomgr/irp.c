@@ -16,6 +16,7 @@
 #include <debug.h>
 
 PIRP IopDeadIrp;
+KSPIN_LOCK IopThreadIrpListLocks[IOP_THREAD_IRP_LIST_LOCKS];
 RESERVE_IRP_ALLOCATOR IopReserveIrpAllocator;
 
 /* PRIVATE FUNCTIONS  ********************************************************/
@@ -155,9 +156,11 @@ IopDisassociateThreadIrp(VOID)
     }
 
     /* Disown the IRP! */
+    KeAcquireSpinLockAtDpcLevel(IopGetThreadIrpListLock(IrpThread));
     IopDeadIrp->Tail.Overlay.Thread = NULL;
     RemoveHeadList(&IrpThread->IrpList);
     InitializeListHead(&IopDeadIrp->ThreadListEntry);
+    KeReleaseSpinLockFromDpcLevel(IopGetThreadIrpListLock(IrpThread));
 
     /* Get the stack location and check if it's valid */
     IoStackLocation = IoGetCurrentIrpStackLocation(IopDeadIrp);
