@@ -132,24 +132,34 @@ KiIdleLoop(VOID)
             /* Enable interrupts */
             _enable();
 
-            /* Capture current thread data */
-            OldThread = Prcb->CurrentThread;
-            NewThread = Prcb->NextThread;
-
-            /* Set new thread data */
-            Prcb->NextThread = NULL;
-            Prcb->CurrentThread = NewThread;
-
-            /* The thread is now running */
-            NewThread->State = Running;
-
 #ifdef CONFIG_SMP
             /* Do the swap at SYNCH_LEVEL */
             KfRaiseIrql(SYNCH_LEVEL);
 #endif
 
-            /* Switch away from the idle thread */
-            KiSwapContext(APC_LEVEL, OldThread);
+            /* Other processors replace NextThread under the PRCB lock */
+            KiAcquirePrcbLock(Prcb);
+            NewThread = Prcb->NextThread;
+            if (NewThread)
+            {
+                /* Capture current thread data */
+                OldThread = Prcb->CurrentThread;
+
+                /* Set new thread data */
+                Prcb->NextThread = NULL;
+                Prcb->CurrentThread = NewThread;
+
+                /* The thread is now running */
+                NewThread->State = Running;
+                KiReleasePrcbLock(Prcb);
+
+                /* Switch away from the idle thread */
+                KiSwapContext(APC_LEVEL, OldThread);
+            }
+            else
+            {
+                KiReleasePrcbLock(Prcb);
+            }
 
 #ifdef CONFIG_SMP
             /* Go back to DISPATCH_LEVEL */
@@ -172,15 +182,17 @@ KiSwapProcess(IN PKPROCESS NewProcess,
     PKIPCR Pcr = (PKIPCR)KeGetPcr();
 
 #ifdef CONFIG_SMP
-    /* Update active processor mask */
-    InterlockedXor64((PLONG64)&NewProcess->ActiveProcessors, Pcr->Prcb.SetMember);
-    NT_ASSERT((NewProcess->ActiveProcessors & Pcr->Prcb.SetMember) != 0);
-    InterlockedXor64((PLONG64)&OldProcess->ActiveProcessors, Pcr->Prcb.SetMember);
-    NT_ASSERT((OldProcess->ActiveProcessors & Pcr->Prcb.SetMember) == 0);
+    /* TLB flushes target the processors running a process, so join the new
+       one before loading its address space and leave the old one after */
+    InterlockedOr64((PLONG64)&NewProcess->ActiveProcessors, Pcr->Prcb.SetMember);
 #endif
 
     /* Update CR3 */
     __writecr3(NewProcess->DirectoryTableBase[0]);
+
+#ifdef CONFIG_SMP
+    InterlockedAnd64((PLONG64)&OldProcess->ActiveProcessors, ~(LONG64)Pcr->Prcb.SetMember);
+#endif
 
     /* Update IOPM offset */
     Pcr->TssBase->IoMapBase = NewProcess->IopmOffset;

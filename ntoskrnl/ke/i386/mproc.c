@@ -31,10 +31,26 @@ typedef struct _AP_SETUP_STACK
     PVOID KxLoaderBlock;
 } AP_SETUP_STACK, *PAP_SETUP_STACK; // Note: expected layout only for 32-bit x86
 
+/* How long a started processor has to reach the kernel, in 100 us units */
+#define AP_STARTUP_TIMEOUT 50000
+
+volatile LONG KiApStartupState;
+
 extern UCHAR KiDoubleFaultTSS[KTSS_IO_MAPS];
 extern UCHAR KiNMITSS[KTSS_IO_MAPS];
 
 /* FUNCTIONS *****************************************************************/
+
+/* An application processor enters here. A late one may find INIT code freed, so this is not in INIT */
+DECLSPEC_NORETURN
+VOID
+NTAPI
+KiStartApplicationProcessor(
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
+{
+    KiClaimProcessorStartup();
+    KiSystemStartup(LoaderBlock);
+}
 
 CODE_SEG("INIT")
 VOID
@@ -45,6 +61,7 @@ KeStartAllProcessors(VOID)
     PAPINFO APInfo = NULL;
     ULONG ProcessorCount;
     ULONG MaximumProcessors;
+    ULONG Waited;
 
     /* NOTE: NT6+ HAL exports HalEnumerateProcessors() and
      * HalQueryMaximumProcessorCount() that help determining
@@ -143,7 +160,7 @@ KeStartAllProcessors(VOID)
         ProcessorState->SpecialRegisters.Tr = KGDT_TSS;
 
         ProcessorState->ContextFrame.Esp = (ULONG_PTR)KernelStack;
-        ProcessorState->ContextFrame.Eip = (ULONG_PTR)KiSystemStartup;
+        ProcessorState->ContextFrame.Eip = (ULONG_PTR)KiStartApplicationProcessor;
         ProcessorState->ContextFrame.EFlags = __readeflags() & ~EFLAGS_INTERRUPT_MASK;
 
         ProcessorState->ContextFrame.Esp = (ULONG)((ULONG_PTR)ProcessorState->ContextFrame.Esp - sizeof(AP_SETUP_STACK));
@@ -155,6 +172,8 @@ KeStartAllProcessors(VOID)
         KeLoaderBlock->KernelStack = (ULONG_PTR)KernelStack;
         KeLoaderBlock->Prcb = (ULONG_PTR)APInfo->Pcr.Prcb;
         KeLoaderBlock->Thread = (ULONG_PTR)&APInfo->Thread;
+        KiApStartupState = KI_AP_STARTUP_WAITING;
+        KeMemoryBarrier();
 
         // Start the CPU
         DPRINT("Attempting to Start a CPU with number: %lu\n", ProcessorCount);
@@ -164,11 +183,29 @@ KeStartAllProcessors(VOID)
         }
 
         // And wait for it to start
-        while (KeLoaderBlock->Prcb != 0)
+        for (Waited = 0; *(volatile ULONG_PTR*)&KeLoaderBlock->Prcb != 0; Waited++)
         {
-            //TODO: Add a time out so we don't wait forever
-            KeMemoryBarrier();
-            YieldProcessor();
+            /* Drop a processor that has not claimed its startup in time */
+            if ((Waited == AP_STARTUP_TIMEOUT) &&
+                (InterlockedCompareExchange(&KiApStartupState,
+                                            KI_AP_STARTUP_ABANDONED,
+                                            KI_AP_STARTUP_WAITING) == KI_AP_STARTUP_WAITING))
+            {
+                break;
+            }
+            KeStallExecutionProcessor(100);
+        }
+
+        if (KiApStartupState == KI_AP_STARTUP_ABANDONED)
+        {
+            DPRINT1("KeStartAllProcessors: processor %lu did not start\n", ProcessorCount);
+
+            /* It may still run the startup code on these and halt, so keep them */
+            KiProcessorBlock[ProcessorCount] = NULL;
+            APInfo = NULL;
+            KernelStack = NULL;
+            DPCStack = NULL;
+            break;
         }
 
         /* These now belong to the running processor */

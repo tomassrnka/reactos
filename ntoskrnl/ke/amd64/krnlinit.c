@@ -131,8 +131,6 @@ KiInitializeHandBuiltThread(
     Thread->State = Running;
     Thread->Affinity = (ULONG_PTR)1 << Prcb->Number;
     Thread->WaitIrql = DISPATCH_LEVEL;
-    Process->ActiveProcessors |= (ULONG_PTR)1 << Prcb->Number;
-
 }
 
 CODE_SEG("INIT")
@@ -202,6 +200,14 @@ KiSystemStartupBootStack(VOID)
 
     /* Raise back to HIGH_LEVEL and clear the PRCB for the loader block */
     KfRaiseIrql(HIGH_LEVEL);
+    if (Prcb->Number != 0)
+    {
+        /* Become a target of TLB flushes and other requests right before
+           taking interrupts, then drop translations cached before that */
+        InterlockedOr64((PLONG64)&KeActiveProcessors, (LONG64)Prcb->SetMember);
+        InterlockedOr64((PLONG64)&Process->ActiveProcessors, (LONG64)Prcb->SetMember);
+        KxFlushEntireCurrentTb();
+    }
     LoaderBlock->Prcb = 0;
 
     /* Set the priority of this thread to 0 */

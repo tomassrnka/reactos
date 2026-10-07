@@ -25,6 +25,9 @@ ULONG (*FrLdrDbgPrint)(const char *Format, ...);
 /* Spinlocks used only on X86 */
 KSPIN_LOCK KiFreezeExecutionLock;
 
+/* The local APIC is in x2APIC mode: EOIs are MSR writes */
+BOOLEAN KiX2ApicMode;
+
 
 KIPCR KiInitialPcr;
 
@@ -187,8 +190,9 @@ KiInitializeCpu(PKIPCR Pcr)
         KeBugCheck(0);
     }
 
-    /* Set DEP to always on */
-    SharedUserData->NXSupportPolicy = NX_SUPPORT_POLICY_ALWAYSON;
+    /* Set DEP to always on; the boot processor's policy applies to all */
+    if (Pcr->Prcb.Number == 0)
+        SharedUserData->NXSupportPolicy = NX_SUPPORT_POLICY_ALWAYSON;
     FeatureBits |= KF_NX_ENABLED;
 
     /* Save feature bits */
@@ -499,11 +503,8 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     FrLdrDbgPrint = LoaderBlock->u.I386.CommonDataArea;
     //FrLdrDbgPrint("Hello from KiSystemStartup!!!\n");
 
-    /* Get the current CPU number */
-    Cpu = KeNumberProcessors++; // FIXME
-
     /* LoaderBlock initialization for Cpu 0 */
-    if (Cpu == 0)
+    if (KeNumberProcessors == 0)
     {
         /* Save the loader block */
         KeLoaderBlock = LoaderBlock;
@@ -512,8 +513,10 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
         KiInitializeP0BootStructures(LoaderBlock);
     }
 
-    /* Get Pcr from loader block */
+    /* Get Pcr from loader block. KeStartAllProcessors numbered the PRCB of
+       an application processor */
     Pcr = CONTAINING_RECORD(LoaderBlock->Prcb, KIPCR, Prcb);
+    Cpu = Pcr->Prcb.Number;
 
     /* Set the PRCB for this Processor */
     KiProcessorBlock[Cpu] = &Pcr->Prcb;
@@ -551,11 +554,20 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
 
-    /* Set processor as active */
-    KeActiveProcessors |= 1ULL << Cpu;
+    /* The HAL may have switched the local APIC to x2APIC mode, which changes how to send an EOI */
+    if (Cpu == 0)
+        KiX2ApicMode = (__readmsr(MSR_APIC_BASE) & MSR_APIC_BASE_X2APIC_ENABLE) != 0;
 
-    /* We are running the initial system process now */
-    InterlockedOr64(&KiInitialProcess.Pcb.ActiveProcessors, 1ULL << Cpu);
+    /* Count the processor. An application processor joins the active ones
+       in KiSystemStartupBootStack, when it can take requests */
+    KeNumberProcessors++;
+    if (Cpu == 0)
+    {
+        KeActiveProcessors |= 1ULL << Cpu;
+
+        /* We are running the initial system process now */
+        InterlockedOr64(&KiInitialProcess.Pcb.ActiveProcessors, 1ULL << Cpu);
+    }
 
     /* Release lock */
     InterlockedAnd64((PLONG64)&KiFreezeExecutionLock, 0);

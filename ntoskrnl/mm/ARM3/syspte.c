@@ -35,7 +35,24 @@ const UCHAR MmSysPteTables[] = { 0, // 1
                                };
 LONG MmSysPteListBySizeCount[5];
 
+/* Released PTEs wait here until one flush of every processor's TLB covers them */
+#define MI_SYSTEM_PTE_FLUSH_ENTRIES 64
+#define MI_SYSTEM_PTE_FLUSH_PTES 1024
+
+typedef struct _MI_SYSTEM_PTE_FLUSH_ENTRY
+{
+    PMMPTE StartingPte;
+    ULONG NumberOfPtes;
+    MMSYSTEM_PTE_POOL_TYPE SystemPtePoolType;
+} MI_SYSTEM_PTE_FLUSH_ENTRY;
+
+static MI_SYSTEM_PTE_FLUSH_ENTRY MiSystemPteFlushList[MI_SYSTEM_PTE_FLUSH_ENTRIES];
+static ULONG MiSystemPteFlushCount;
+static ULONG MiSystemPteFlushPtes;
+
 /* PRIVATE FUNCTIONS **********************************************************/
+
+static VOID MiFlushReleasedSystemPtes(VOID);
 
 //
 // The free System Page Table Entries are stored in a bunch of clusters,
@@ -103,6 +120,7 @@ MiReserveAlignedSystemPtes(IN ULONG NumberOfPtes,
     //
     OldIrql = KeAcquireQueuedSpinLock(LockQueueSystemSpaceLock);
 
+Retry:
     //
     // Find the last cluster in the list that doesn't contain enough PTEs
     //
@@ -133,6 +151,12 @@ MiReserveAlignedSystemPtes(IN ULONG NumberOfPtes,
     //
     if (PreviousPte->u.List.NextEntry == MM_EMPTY_PTE_LIST)
     {
+        if (MiSystemPteFlushCount != 0)
+        {
+            MiFlushReleasedSystemPtes();
+            goto Retry;
+        }
+
         //
         // Release the System PTE lock and return failure
         //
@@ -231,11 +255,6 @@ MiReserveAlignedSystemPtes(IN ULONG NumberOfPtes,
     KeReleaseQueuedSpinLock(LockQueueSystemSpaceLock, OldIrql);
 
     //
-    // Flush the TLB
-    //
-    KeFlushEntireTb(TRUE, TRUE);
-
-    //
     // Return the reserved PTEs
     //
     return ReturnPte;
@@ -259,37 +278,14 @@ MiReserveSystemPtes(IN ULONG NumberOfPtes,
     return PointerPte;
 }
 
+static
 VOID
-NTAPI
-MiReleaseSystemPtes(IN PMMPTE StartingPte,
-                    IN ULONG NumberOfPtes,
-                    IN MMSYSTEM_PTE_POOL_TYPE SystemPtePoolType)
+MiInsertFreeSystemPtes(IN PMMPTE StartingPte,
+                       IN ULONG NumberOfPtes,
+                       IN MMSYSTEM_PTE_POOL_TYPE SystemPtePoolType)
 {
-    KIRQL OldIrql;
     ULONG ClusterSize;
     PMMPTE PreviousPte, NextPte, InsertPte;
-
-    //
-    // Check to make sure the PTE address is within bounds
-    //
-    ASSERT(NumberOfPtes != 0);
-    ASSERT(StartingPte >= MmSystemPtesStart[SystemPtePoolType]);
-    ASSERT(StartingPte + NumberOfPtes - 1 <= MmSystemPtesEnd[SystemPtePoolType]);
-
-    //
-    // Zero PTEs
-    //
-    RtlZeroMemory(StartingPte, NumberOfPtes * sizeof(MMPTE));
-
-    //
-    // Flush the TLB
-    //
-    KeFlushRangeTb(MiPteToAddress(StartingPte), NumberOfPtes, TRUE);
-
-    //
-    // Acquire the System PTE lock
-    //
-    OldIrql = KeAcquireQueuedSpinLock(LockQueueSystemSpaceLock);
 
     //
     // Increase availability
@@ -380,6 +376,92 @@ MiReleaseSystemPtes(IN PMMPTE StartingPte,
     //
     StartingPte->u.List.NextEntry = InsertPte->u.List.NextEntry;
     InsertPte->u.List.NextEntry = StartingPte - MmSystemPteBase;
+}
+
+/* Called with the System PTE lock held */
+static
+VOID
+MiFlushReleasedSystemPtes(VOID)
+{
+    ULONG i;
+
+    KeFlushEntireTb(TRUE, TRUE);
+
+    for (i = 0; i < MiSystemPteFlushCount; i++)
+    {
+        MiInsertFreeSystemPtes(MiSystemPteFlushList[i].StartingPte,
+                               MiSystemPteFlushList[i].NumberOfPtes,
+                               MiSystemPteFlushList[i].SystemPtePoolType);
+    }
+
+    MiSystemPteFlushCount = 0;
+    MiSystemPteFlushPtes = 0;
+}
+
+VOID
+NTAPI
+MiReleaseSystemPtes(IN PMMPTE StartingPte,
+                    IN ULONG NumberOfPtes,
+                    IN MMSYSTEM_PTE_POOL_TYPE SystemPtePoolType)
+{
+    KIRQL OldIrql;
+    ULONG i;
+    BOOLEAN WriteBack = TRUE;
+
+    //
+    // Check to make sure the PTE address is within bounds
+    //
+    ASSERT(NumberOfPtes != 0);
+    ASSERT(StartingPte >= MmSystemPtesStart[SystemPtePoolType]);
+    ASSERT(StartingPte + NumberOfPtes - 1 <= MmSystemPtesEnd[SystemPtePoolType]);
+
+    /* A page must not stay cached in a TLB as uncached or write-combined while it is reused as write-back */
+    for (i = 0; i < NumberOfPtes; i++)
+    {
+        if (StartingPte[i].u.Hard.Valid &&
+            (StartingPte[i].u.Hard.CacheDisable ||
+             StartingPte[i].u.Hard.WriteThrough ||
+             StartingPte[i].u.Hard.LargePage))
+        {
+            WriteBack = FALSE;
+            break;
+        }
+    }
+
+    //
+    // Zero PTEs
+    //
+    RtlZeroMemory(StartingPte, NumberOfPtes * sizeof(MMPTE));
+
+    if (!WriteBack)
+    {
+        KeFlushRangeTb(MiPteToAddress(StartingPte), NumberOfPtes, TRUE);
+
+        OldIrql = KeAcquireQueuedSpinLock(LockQueueSystemSpaceLock);
+        MiInsertFreeSystemPtes(StartingPte, NumberOfPtes, SystemPtePoolType);
+        KeReleaseQueuedSpinLock(LockQueueSystemSpaceLock, OldIrql);
+        return;
+    }
+
+    //
+    // Acquire the System PTE lock
+    //
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueSystemSpaceLock);
+
+    //
+    // The PTEs become free once every processor's TLB has been flushed
+    //
+    MiSystemPteFlushList[MiSystemPteFlushCount].StartingPte = StartingPte;
+    MiSystemPteFlushList[MiSystemPteFlushCount].NumberOfPtes = NumberOfPtes;
+    MiSystemPteFlushList[MiSystemPteFlushCount].SystemPtePoolType = SystemPtePoolType;
+    MiSystemPteFlushCount++;
+    MiSystemPteFlushPtes += NumberOfPtes;
+
+    if ((MiSystemPteFlushCount == MI_SYSTEM_PTE_FLUSH_ENTRIES) ||
+        (MiSystemPteFlushPtes >= MI_SYSTEM_PTE_FLUSH_PTES))
+    {
+        MiFlushReleasedSystemPtes();
+    }
 
     //
     // Release the System PTE lock

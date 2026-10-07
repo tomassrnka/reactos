@@ -25,6 +25,7 @@
 /* GLOBALS ********************************************************************/
 
 ULONG ApicVersion;
+BOOLEAN HalpX2ApicEnabled;
 UCHAR HalpVectorToIndex[256];
 
 #ifndef _M_AMD64
@@ -162,15 +163,27 @@ ApicRequestSelfInterrupt(IN UCHAR Vector, UCHAR TriggerMode)
     Flags = __readeflags();
     _disable();
 
-    /* Wait for the APIC to be idle */
-    do
+    if (HalpX2ApicEnabled)
     {
-        IcrStatus.Long0 = ApicRead(APIC_ICR0);
-    } while (IcrStatus.DeliveryStatus);
+        /* The self IPI register sends fixed edge-triggered interrupts only */
+        X2ApicFenceBeforeIpi();
+        if (TriggerMode == APIC_TGM_Edge)
+            __writemsr(X2APIC_MSR_SELF_IPI, Vector);
+        else
+            __writemsr(X2APIC_MSR_ICR, Icr.Long0);
+    }
+    else
+    {
+        /* Wait for the APIC to be idle */
+        do
+        {
+            IcrStatus.Long0 = ApicRead(APIC_ICR0);
+        } while (IcrStatus.DeliveryStatus);
 
-    /* Write high dword first, then low dword to send the interrupt */
-    ApicWrite(APIC_ICR1, Icr.Long1);
-    ApicWrite(APIC_ICR0, Icr.Long0);
+        /* Write high dword first, then low dword to send the interrupt */
+        ApicWrite(APIC_ICR1, Icr.Long1);
+        ApicWrite(APIC_ICR0, Icr.Long0);
+    }
 
     /* Wait until we see the interrupt request.
      * It will stay in requested state until we re-enable interrupts.
@@ -287,6 +300,52 @@ HalpSendEOI(VOID)
     ApicSendEOI();
 }
 
+BOOLEAN
+NTAPI
+X2ApicIsSupported(VOID)
+{
+    INT CpuInfo[4];
+
+    __cpuid(CpuInfo, 1);
+    return (CpuInfo[2] & (1 << CPUID_X2APIC_FEATURE_BIT)) != 0;
+}
+
+VOID
+NTAPI
+X2ApicEnable(VOID)
+{
+    X2APIC_BASE_ADDRESS_REGISTER BaseRegister;
+
+    BaseRegister.LongLong = __readmsr(MSR_APIC_BASE);
+    BaseRegister.Enable = 1;
+    BaseRegister.EnableX2Apic = 1;
+    __writemsr(MSR_APIC_BASE, BaseRegister.LongLong);
+}
+
+VOID
+ApicSelectMode(
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
+{
+    X2APIC_BASE_ADDRESS_REGISTER BaseRegister;
+
+    if (!X2ApicIsSupported())
+        return;
+
+    /* Leaving x2APIC mode means disabling the APIC, so keep a mode the firmware chose */
+    BaseRegister.LongLong = __readmsr(MSR_APIC_BASE);
+    if (BaseRegister.Enable && BaseRegister.EnableX2Apic)
+    {
+        HalpX2ApicEnabled = TRUE;
+        return;
+    }
+
+    if (LoaderBlock->LoadOptions && strstr(LoaderBlock->LoadOptions, "NOX2APIC"))
+        return;
+
+    /* The I/O APIC reaches 8-bit APIC IDs without interrupt remapping, which the MADT parser ensures */
+    HalpX2ApicEnabled = TRUE;
+}
+
 VOID
 NTAPI
 ApicInitializeLocalApic(ULONG Cpu)
@@ -301,6 +360,10 @@ ApicInitializeLocalApic(ULONG Cpu)
     BaseRegister.BootStrapCPUCore = (Cpu == 0);
     __writemsr(MSR_APIC_BASE, BaseRegister.LongLong);
 
+    /* Every processor uses the mode the boot processor chose, before any other APIC access */
+    if (HalpX2ApicEnabled)
+        X2ApicEnable();
+
     /* Set spurious vector and SoftwareEnable to 1 */
     SpIntRegister.Long = ApicRead(APIC_SIVR);
     SpIntRegister.Vector = APIC_SPURIOUS_VECTOR;
@@ -311,11 +374,15 @@ ApicInitializeLocalApic(ULONG Cpu)
     /* Read the version and save it globally */
     if (Cpu == 0) ApicVersion = ApicRead(APIC_VER);
 
-    /* Set the mode to flat (max 8 CPUs supported!) */
-    ApicWrite(APIC_DFR, APIC_DF_Flat);
+    /* In x2APIC mode the logical ID is derived from the APIC ID and there is no DFR */
+    if (!HalpX2ApicEnabled)
+    {
+        /* Set the mode to flat (max 8 CPUs supported!) */
+        ApicWrite(APIC_DFR, APIC_DF_Flat);
 
-    /* Set logical apic ID */
-    ApicWrite(APIC_LDR, ApicLogicalId(Cpu) << 24);
+        /* Set logical apic ID */
+        ApicWrite(APIC_LDR, ApicLogicalId(Cpu) << 24);
+    }
 
     /* Set the spurious ISR */
     KeRegisterInterruptHandler(APIC_SPURIOUS_VECTOR, ApicSpuriousService);
@@ -334,10 +401,14 @@ ApicInitializeLocalApic(ULONG Cpu)
     ApicWrite(APIC_TMRLVTR, LvtEntry.Long);
     ApicWrite(APIC_THRMLVTR, LvtEntry.Long);
     ApicWrite(APIC_PCLVTR, LvtEntry.Long);
-    ApicWrite(APIC_EXT0LVTR, LvtEntry.Long);
-    ApicWrite(APIC_EXT1LVTR, LvtEntry.Long);
-    ApicWrite(APIC_EXT2LVTR, LvtEntry.Long);
-    ApicWrite(APIC_EXT3LVTR, LvtEntry.Long);
+    /* The x2APIC register space ends before the AMD extended registers */
+    if (!HalpX2ApicEnabled)
+    {
+        ApicWrite(APIC_EXT0LVTR, LvtEntry.Long);
+        ApicWrite(APIC_EXT1LVTR, LvtEntry.Long);
+        ApicWrite(APIC_EXT2LVTR, LvtEntry.Long);
+        ApicWrite(APIC_EXT3LVTR, LvtEntry.Long);
+    }
 
     /* LINT0 */
     LvtEntry.Vector = APIC_SPURIOUS_VECTOR;
@@ -385,7 +456,7 @@ HalpAllocateSystemInterrupt(
     ReDirReg.TriggerMode = APIC_TGM_Edge;
     ReDirReg.Mask = 1;
     ReDirReg.Reserved = 0;
-    ReDirReg.Destination = ApicRead(APIC_ID) >> 24;
+    ReDirReg.Destination = ApicGetLocalId();
 
     /* Initialize entry */
     ApicWriteIORedirectionEntry(Irq, ReDirReg);
@@ -484,7 +555,7 @@ ApicInitializeIOApic(VOID)
     ReDirReg.TriggerMode = APIC_TGM_Edge;
     ReDirReg.Mask = 1;
     ReDirReg.Reserved = 0;
-    ReDirReg.Destination = ApicRead(APIC_ID) >> 24;
+    ReDirReg.Destination = ApicGetLocalId();
 
     /* Loop all table entries */
     for (Index = 0; Index < APIC_MAX_IRQ; Index++)
@@ -505,7 +576,7 @@ ApicInitializeIOApic(VOID)
     ReDirReg.DestinationMode = APIC_DM_Physical;
     ReDirReg.TriggerMode = APIC_TGM_Level;
     ReDirReg.Mask = 1;
-    ReDirReg.Destination = ApicRead(APIC_ID) >> 24;
+    ReDirReg.Destination = ApicGetLocalId();
     ApicWriteIORedirectionEntry(APIC_CLOCK_INDEX, ReDirReg);
 }
 
@@ -705,7 +776,7 @@ HalEnableSystemInterrupt(
     ReDirReg.Vector = Vector;
     ReDirReg.MessageType = APIC_MT_Fixed;
     ReDirReg.DestinationMode = APIC_DM_Physical;
-    ReDirReg.Destination = ApicRead(APIC_ID) >> 24;
+    ReDirReg.Destination = ApicGetLocalId();
     ReDirReg.TriggerMode = (InterruptMode == LevelSensitive) ?
         APIC_TGM_Level : APIC_TGM_Edge;
     ReDirReg.Mask = FALSE;
