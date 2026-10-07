@@ -5031,18 +5031,6 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     LastPte = MiAddressToPte(EndingAddress);
 
     //
-    // Update the commit charge in the VAD as well as in the process, and check
-    // if this commit charge was now higher than the last recorded peak, in which
-    // case we also update the peak
-    //
-    FoundVad->u.VadFlags.CommitCharge += (1 + LastPte - PointerPte);
-    Process->CommitCharge += (1 + LastPte - PointerPte);
-    if (Process->CommitCharge > Process->CommitChargePeak)
-    {
-        Process->CommitChargePeak = Process->CommitCharge;
-    }
-
-    //
     // Lock the working set while we play with user pages and page tables
     //
     MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
@@ -5080,6 +5068,9 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
             // And now write the invalid demand-zero PTE as requested
             //
             MI_WRITE_INVALID_PTE(PointerPte, TempPte);
+
+            /* In a MEM_COMMIT reservation this page was charged when the VAD was inserted */
+            if (!FoundVad->u.VadFlags.MemCommit) QuotaCharge++;
         }
         else if (PointerPte->u.Long == MmDecommittedPte.u.Long)
         {
@@ -5088,6 +5079,7 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
             // but to write the new demand-zero PTE
             //
             MI_WRITE_INVALID_PTE(PointerPte, TempPte);
+            QuotaCharge++;
         }
         else if (!(ChangeProtection) && (Protect != MiGetPageProtection(PointerPte)))
         {
@@ -5111,6 +5103,18 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         // Move to the next PTE
         //
         PointerPte++;
+    }
+
+    //
+    // Charge only the pages this call committed. A page that was already
+    // committed stays charged once, so the VAD charge matches what a later
+    // decommit takes back. Update the peak if the charge is now higher.
+    //
+    FoundVad->u.VadFlags.CommitCharge += QuotaCharge;
+    Process->CommitCharge += QuotaCharge;
+    if (Process->CommitCharge > Process->CommitChargePeak)
+    {
+        Process->CommitChargePeak = Process->CommitCharge;
     }
 
     //
