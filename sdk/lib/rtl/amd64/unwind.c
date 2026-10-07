@@ -288,6 +288,68 @@ GetXmmReg(PCONTEXT Context, BYTE Reg)
     return ((M128A*)(&Context->Xmm0))[Reg];
 }
 
+/* Returns the length of a jmp that can end an epilog, or 0 */
+static
+__inline
+ULONG
+RtlpGetEpilogJumpLength(
+    _In_ BYTE *InstrPtr,
+    _In_ ULONG64 ImageBase,
+    _In_ PRUNTIME_FUNCTION FunctionEntry,
+    _In_ PRUNTIME_FUNCTION PrimaryEntry)
+{
+    ULONG64 Target, TargetRva;
+    ULONG Length, Prefix = 0;
+    BYTE ModRm;
+
+    /* A direct jmp ends an epilog only as a tail call out of the function */
+    if ((InstrPtr[0] == 0xE9) || (InstrPtr[0] == 0xEB))
+    {
+        Length = (InstrPtr[0] == 0xE9) ? 5 : 2;
+        Target = (ULONG64)InstrPtr + Length;
+        if (InstrPtr[0] == 0xE9)
+            Target += (LONG64)*(LONG UNALIGNED*)(InstrPtr + 1);
+        else
+            Target += (LONG64)(CHAR)InstrPtr[1];
+
+        TargetRva = Target - ImageBase;
+        if (((TargetRva >= FunctionEntry->BeginAddress) && (TargetRva < FunctionEntry->EndAddress)) ||
+            ((TargetRva >= PrimaryEntry->BeginAddress) && (TargetRva < PrimaryEntry->EndAddress)))
+        {
+            return 0;
+        }
+
+        return Length;
+    }
+
+    /* Otherwise only an indirect jmp through memory with ModRM.mod 00, optionally with REX */
+    if ((InstrPtr[0] & 0xF0) == 0x40)
+        Prefix = 1;
+
+    if (InstrPtr[Prefix] != 0xFF)
+        return 0;
+
+    ModRm = InstrPtr[Prefix + 1];
+    if (((ModRm & 0xC0) != 0) || (((ModRm >> 3) & 7) != 4))
+        return 0;
+
+    Length = Prefix + 2;
+    if ((ModRm & 7) == 5)
+    {
+        /* [rip + disp32] */
+        Length += 4;
+    }
+    else if ((ModRm & 7) == 4)
+    {
+        /* SIB byte; a base of 101 means disp32 without a base */
+        Length += 1;
+        if ((InstrPtr[Prefix + 2] & 7) == 5)
+            Length += 4;
+    }
+
+    return Length;
+}
+
 /*! RtlpTryToUnwindEpilog
  * \brief Helper function that tries to unwind epilog instructions.
  * \return TRUE if we have been in an epilog and it could be unwound.
@@ -295,8 +357,6 @@ GetXmmReg(PCONTEXT Context, BYTE Reg)
  * \ref
  *  https://docs.microsoft.com/en-us/cpp/build/unwind-procedure
  *  https://docs.microsoft.com/en-us/cpp/build/prolog-and-epilog
- * \todo
- *  - Test and compare with Windows behaviour
  */
 static
 __inline
@@ -311,11 +371,44 @@ RtlpTryToUnwindEpilog(
     CONTEXT LocalContext;
     BYTE *InstrPtr;
     DWORD Instr;
-    BYTE Reg, Mod;
+    BYTE Reg, Mod, Sib;
     ULONG64 EndAddress;
+    PRUNTIME_FUNCTION PrimaryEntry;
     PUNWIND_INFO UnwindInfo;
-    ULONG i, PushCount = 0, PopCount = 0;
+    ULONG i, Links, Length, PushCount = 0, PopCount = 0;
     BOOLEAN HasAllocation = FALSE, StackAdjusted = FALSE;
+
+    /* Count the prolog's pushes and allocations along the chained unwind info */
+    PrimaryEntry = FunctionEntry;
+    UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
+    for (Links = 0; ; Links++)
+    {
+        for (i = 0; i < UnwindInfo->CountOfCodes; i += UnwindOpSlots(UnwindInfo->UnwindCode[i]))
+        {
+            switch (UnwindInfo->UnwindCode[i].UnwindOp)
+            {
+                case UWOP_PUSH_NONVOL:
+                    PushCount++;
+                    break;
+                case UWOP_ALLOC_LARGE:
+                case UWOP_ALLOC_SMALL:
+                case UWOP_SET_FPREG:
+                    HasAllocation = TRUE;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        if (!(UnwindInfo->Flags & UNW_FLAG_CHAININFO))
+            break;
+
+        if (Links >= 32)
+            return FALSE;
+
+        PrimaryEntry = (PRUNTIME_FUNCTION)&UnwindInfo->UnwindCode[(UnwindInfo->CountOfCodes + 1) & ~1];
+        UnwindInfo = RVA(ImageBase, PrimaryEntry->UnwindData);
+    }
 
     /* Make a local copy of the context */
     LocalContext = *Context;
@@ -323,7 +416,7 @@ RtlpTryToUnwindEpilog(
     InstrPtr = (BYTE*)ControlPc;
 
     /* Check if first instruction of epilog is "add rsp, x" */
-    Instr = *(DWORD*)InstrPtr;
+    Instr = *(DWORD UNALIGNED*)InstrPtr;
     if ( (Instr & 0x00fffdff) == 0x00c48148 )
     {
         if ( (Instr & 0x0000ff00) == 0x8300 )
@@ -335,54 +428,60 @@ RtlpTryToUnwindEpilog(
         else
         {
             /* This is "add rsp, 0x???????? */
-            LocalContext.Rsp += *(DWORD*)(InstrPtr + 3);
+            LocalContext.Rsp += *(DWORD UNALIGNED*)(InstrPtr + 3);
             InstrPtr += 7;
         }
         StackAdjusted = TRUE;
     }
-    /* Check if first instruction of epilog is "lea rsp, ..." */
+    /* Check if first instruction of epilog is "lea rsp, [reg + disp]" */
     else if ( (Instr & 0x38fffe) == 0x208d48 )
     {
-        /* Get the register */
-        Reg = (Instr >> 16) & 0x7;
+        /* Get the register, REX.B extends it */
+        Reg = ((Instr >> 16) & 0x7) + (Instr & 1) * 8;
+        Mod = (Instr >> 22) & 0x3;
+        Length = 3;
 
-        /* REX.R */
-        Reg += (Instr & 1) * 8;
+        /* A base of rsp or r12 needs a SIB byte, which must not have an index */
+        if ((Reg & 7) == 4)
+        {
+            Sib = InstrPtr[3];
+            if (((Sib >> 3) & 7) != 4)
+                return FALSE;
+            Reg = (Sib & 7) + (Instr & 1) * 8;
+            Length = 4;
+        }
+
+        /* Without displacement, a base of rbp or r13 means rip-relative or no base */
+        if ((Mod == 3) || ((Mod == 0) && ((Reg & 7) == 5)))
+            return FALSE;
 
         LocalContext.Rsp = GetReg(&LocalContext, Reg);
 
-        StackAdjusted = TRUE;
-
-        /* Get addressing mode */
-        Mod = (Instr >> 22) & 0x3;
-        if (Mod == 0)
-        {
-            /* No displacement */
-            InstrPtr += 3;
-        }
-        else if (Mod == 1)
+        if (Mod == 1)
         {
             /* 1 byte displacement */
-            LocalContext.Rsp += (LONG)(CHAR)(Instr >> 24);
-            InstrPtr += 4;
+            LocalContext.Rsp += (LONG)(CHAR)InstrPtr[Length];
+            Length += 1;
         }
         else if (Mod == 2)
         {
             /* 4 bytes displacement */
-            LocalContext.Rsp += *(LONG*)(InstrPtr + 3);
-            InstrPtr += 7;
+            LocalContext.Rsp += *(LONG UNALIGNED*)(InstrPtr + Length);
+            Length += 4;
         }
+
+        InstrPtr += Length;
+        StackAdjusted = TRUE;
     }
 
-    /* Loop the following instructions up to the ret. Compilers place code
-       after an epilog, so the ret need not be the last byte of the function */
+    /* Loop the pops up to the ret or jmp; code can follow an epilog */
     EndAddress = FunctionEntry->EndAddress + ImageBase;
     while ((DWORD64)InstrPtr < EndAddress)
     {
-        Instr = *(DWORD*)InstrPtr;
+        Instr = *(DWORD UNALIGNED*)InstrPtr;
 
-        /* The ret ends the epilog */
-        if ((Instr & 0xff) == 0xc3)
+        /* "ret" or "rep ret" */
+        if (((Instr & 0xff) == 0xc3) || ((Instr & 0xffff) == 0xc3f3))
             break;
 
         /* Check for a simple pop */
@@ -407,15 +506,15 @@ RtlpTryToUnwindEpilog(
             continue;
         }
 
+        /* A tail call */
+        if (RtlpGetEpilogJumpLength(InstrPtr, ImageBase, FunctionEntry, PrimaryEntry) != 0)
+            break;
+
         /* Opcode not allowed for Epilog */
         return FALSE;
     }
 
-    // check for popfq
-
-    // also allow end with jmp imm, jmp [target], iretq
-
-    /* Check if we are at the ret instruction */
+    /* Check if we are at the ret or jmp instruction */
     if ((DWORD64)InstrPtr >= EndAddress)
     {
         /* If we went past the end of the function, something is broken! */
@@ -423,39 +522,9 @@ RtlpTryToUnwindEpilog(
         return FALSE;
     }
 
-    /*
-     * Code follows this epilog. A return address can point to the start of
-     * such an epilog, after a call in the body, and there the frame's handler
-     * must still be found; unwinding through the prolog is correct for it.
-     * Only an epilog that has already begun to run must be finished here: an
-     * interrupt can stop a thread in the middle of one.
-     */
-    if ((DWORD64)InstrPtr != EndAddress - 1)
-    {
-        UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
-        if (UnwindInfo->Flags & UNW_FLAG_CHAININFO)
-            return FALSE;
-
-        for (i = 0; i < UnwindInfo->CountOfCodes; i += UnwindOpSlots(UnwindInfo->UnwindCode[i]))
-        {
-            switch (UnwindInfo->UnwindCode[i].UnwindOp)
-            {
-                case UWOP_PUSH_NONVOL:
-                    PushCount++;
-                    break;
-                case UWOP_ALLOC_LARGE:
-                case UWOP_ALLOC_SMALL:
-                case UWOP_SET_FPREG:
-                    HasAllocation = TRUE;
-                    break;
-                default:
-                    break;
-            }
-        }
-
-        if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount))
-            return FALSE;
-    }
+    /* A return address can point to an epilog's start, so finish only one that has begun */
+    if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount))
+        return FALSE;
 
     /* Unwind is finished, pop new Rip from Stack */
     LocalContext.Rip = *(DWORD64*)LocalContext.Rsp;
@@ -555,7 +624,8 @@ RtlVirtualUnwind(
     *EstablisherFrame = GetEstablisherFrame(Context, UnwindInfo, CodeOffset);
 
     /* Check if we are in the function epilog and try to finish it */
-    if ((CodeOffset > UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0))
+    if (((CodeOffset > UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0)) ||
+        ((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->Flags & UNW_FLAG_CHAININFO)))
     {
         if (RtlpTryToUnwindEpilog(Context, ControlPc, ContextPointers, ImageBase, FunctionEntry))
         {
