@@ -66,22 +66,29 @@ TestNonFileHandle(VOID)
     if (!NT_SUCCESS(Status))
         return;
 
+    /* Create the closing thread first: without the fix, no close returns after the write */
+    ThreadHandle = CreateThread(NULL, 0, CloseHandleThread, EventHandle, CREATE_SUSPENDED, NULL);
+    ok(ThreadHandle != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (ThreadHandle == NULL)
+    {
+        NtClose(EventHandle);
+        return;
+    }
+
     ByteOffset.QuadPart = 0;
     Status = NtWriteFile(EventHandle, NULL, NULL, NULL, &IoStatus, &Data, sizeof(Data), &ByteOffset, NULL);
     ok_hex(Status, STATUS_OBJECT_TYPE_MISMATCH);
 
     /* The failed write must not leave the handle locked: closing it must return */
-    ThreadHandle = CreateThread(NULL, 0, CloseHandleThread, EventHandle, 0, NULL);
-    ok(ThreadHandle != NULL, "CreateThread failed: %lu\n", GetLastError());
-    if (ThreadHandle == NULL)
-        return;
-
+    ok(ResumeThread(ThreadHandle) != (DWORD)-1, "ResumeThread failed: %lu\n", GetLastError());
     Wait = WaitForSingleObject(ThreadHandle, 10000);
     ok(Wait == WAIT_OBJECT_0, "Closing the event handle did not return: %lu\n", Wait);
     if (Wait == WAIT_OBJECT_0)
     {
-        ok(GetExitCodeThread(ThreadHandle, &ExitCode), "GetExitCodeThread failed: %lu\n", GetLastError());
-        ok_hex(ExitCode, STATUS_SUCCESS);
+        if (GetExitCodeThread(ThreadHandle, &ExitCode))
+            ok_hex(ExitCode, STATUS_SUCCESS);
+        else
+            ok(FALSE, "GetExitCodeThread failed: %lu\n", GetLastError());
     }
     CloseHandle(ThreadHandle);
 }
