@@ -268,37 +268,77 @@ static int cmp_ent(const void *a, const void *b)
 	return x < y ? -1 : x > y;
 }
 
-static int kj_apply(struct block_device *b, struct kj_ent **v, unsigned long n)
+/* Writes to consecutive device offsets in transfers of up to KJ_BATCH bytes, an ATA command's maximum (buf NULL: one by one). */
+#define KJ_BATCH (128 * 1024)
+struct kj_batch {
+	struct block_device *b;
+	u8 *buf;
+	u64 dev;
+	size_t len;
+	int err;
+};
+
+static void kj_batch_flush(struct kj_batch *w)
 {
-	for (unsigned long i = 0; i < n; i++) {
-		struct kj_ent *e = v[i];
-		u64 base = e->blk * KJ_PAGE;
-		if (e->mask == 0xff) {
-			if (ngos_dev_write(b->osdev, base, e->data, KJ_PAGE))
-				return -EIO;
-			continue;
-		}
-		for (int s = 0; s < 8; s++) {
-			int z = s;
-			if (!(e->mask & (1u << s)))
-				continue;
-			while (z + 1 < 8 && (e->mask & (1u << (z + 1))))
-				z++;
-			if (ngos_dev_write(b->osdev, base + s * KJ_SECT, e->data + s * KJ_SECT, (z - s + 1) * KJ_SECT))
-				return -EIO;
-			s = z;
-		}
-	}
-	return 0;
+	if (w->len && !w->err && ngos_dev_write(w->b->osdev, w->dev, w->buf, (unsigned int)w->len))
+		w->err = -EIO;
+	w->len = 0;
 }
 
+static void kj_batch_add(struct kj_batch *w, u64 dev, const void *data, size_t len)
+{
+	if (w->err)
+		return;
+	if (!w->buf) {
+		if (ngos_dev_write(w->b->osdev, dev, (void *)data, (unsigned int)len))
+			w->err = -EIO;
+		return;
+	}
+	if (w->len && (w->dev + w->len != dev || w->len + len > KJ_BATCH))
+		kj_batch_flush(w);
+	if (!w->len)
+		w->dev = dev;
+	memcpy(w->buf + w->len, data, len);
+	w->len += len;
+}
+
+static void kj_apply_ent(struct kj_batch *w, struct kj_ent *e)
+{
+	u64 base = e->blk * KJ_PAGE;
+	if (e->mask == 0xff) {
+		kj_batch_add(w, base, e->data, KJ_PAGE);
+		return;
+	}
+	for (int s = 0; s < 8; s++) {
+		int z = s;
+		if (!(e->mask & (1u << s)))
+			continue;
+		while (z + 1 < 8 && (e->mask & (1u << (z + 1))))
+			z++;
+		kj_batch_add(w, base + s * KJ_SECT, e->data + s * KJ_SECT, (z - s + 1) * KJ_SECT);
+		s = z;
+	}
+}
+
+/* In place, in block order (v sorted), adjacent pages in one transfer. */
+static int kj_apply(struct block_device *b, struct kj_ent **v, unsigned long n)
+{
+	struct kj_batch w = { b, kmalloc(KJ_BATCH, GFP_NOFS), 0, 0, 0 };
+	for (unsigned long i = 0; i < n && !w.err; i++)
+		kj_apply_ent(&w, v[i]);
+	kj_batch_flush(&w);
+	kfree(w.buf);
+	return w.err;
+}
+
+/* In place without allocating (the out-of-memory fallback). */
 static int kj_apply_buckets(struct block_device *b, struct kshim_jnl *j)
 {
-	for (int i = 0; i < KJ_BUCKETS; i++)
-		for (struct kj_ent *e = j->hash[i]; e; e = e->next)
-			if (kj_apply(b, &e, 1))
-				return -EIO;
-	return 0;
+	struct kj_batch w = { b, NULL, 0, 0, 0 };
+	for (int i = 0; i < KJ_BUCKETS && !w.err; i++)
+		for (struct kj_ent *e = j->hash[i]; e && !w.err; e = e->next)
+			kj_apply_ent(&w, e);
+	return w.err;
 }
 
 /* Merge-sort replacement for the shim's insertion sort: a transaction can hold thousands of pages. */
@@ -377,25 +417,35 @@ int kshim_jnl_commit(struct block_device *b)
 		err = -ENOMEM;
 		goto out;
 	}
-	for (unsigned long p = 0; p < ndesc && !err; p++) {
-		u64 dev;
-		memset(d, 0, KJ_PAGE);
-		for (unsigned long q = 0; q < KJ_DESC_PER_PAGE && p * KJ_DESC_PER_PAGE + q < n; q++) {
-			struct kj_ent *e = v[p * KJ_DESC_PER_PAGE + q];
-			d[q].blk = e->blk;
-			d[q].mask = e->mask;
-			d[q].crc = kj_crc32(0, e->data, KJ_PAGE);
+	{
+		/* Descriptor and data slots, adjacent slots in one transfer. */
+		struct kj_batch w = { b, kmalloc(KJ_BATCH, GFP_NOFS), 0, 0, 0 };
+		for (unsigned long p = 0; p < ndesc && !w.err; p++) {
+			u64 dev;
+			memset(d, 0, KJ_PAGE);
+			for (unsigned long q = 0; q < KJ_DESC_PER_PAGE && p * KJ_DESC_PER_PAGE + q < n; q++) {
+				struct kj_ent *e = v[p * KJ_DESC_PER_PAGE + q];
+				d[q].blk = e->blk;
+				d[q].mask = e->mask;
+				d[q].crc = kj_crc32(0, e->data, KJ_PAGE);
+			}
+			crc = kj_crc32(crc, d, KJ_PAGE);
+			if (kj_page_dev(j->ext, j->next, kj_slot_page(p), &dev))
+				w.err = -EIO;
+			else
+				kj_batch_add(&w, dev, d, KJ_PAGE);
 		}
-		crc = kj_crc32(crc, d, KJ_PAGE);
-		if (kj_page_dev(j->ext, j->next, kj_slot_page(p), &dev) || ngos_dev_write(b->osdev, dev, d, KJ_PAGE))
-			err = -EIO;
-	}
-	for (unsigned long i = 0; i < n && !err; i++) {
-		u64 dev;
-		crc = kj_crc32(crc, v[i]->data, KJ_PAGE);
-		if (kj_page_dev(j->ext, j->next, kj_slot_page(ndesc + i), &dev) ||
-		    ngos_dev_write(b->osdev, dev, v[i]->data, KJ_PAGE))
-			err = -EIO;
+		for (unsigned long i = 0; i < n && !w.err; i++) {
+			u64 dev;
+			crc = kj_crc32(crc, v[i]->data, KJ_PAGE);
+			if (kj_page_dev(j->ext, j->next, kj_slot_page(ndesc + i), &dev))
+				w.err = -EIO;
+			else
+				kj_batch_add(&w, dev, v[i]->data, KJ_PAGE);
+		}
+		kj_batch_flush(&w);
+		kfree(w.buf);
+		err = w.err;
 	}
 	if (err)
 		goto out;
