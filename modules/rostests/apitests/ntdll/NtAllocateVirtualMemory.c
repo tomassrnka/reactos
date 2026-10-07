@@ -794,6 +794,205 @@ CheckSomeDefaultAddresses(VOID)
     }
 }
 
+#define CHARGE_UNKNOWN ((SIZE_T)-1)
+
+/* The commit charge of the current process, in the unit the system reports it in */
+static
+SIZE_T
+QueryCommitCharge(
+    _In_ PVOID Buffer,
+    _In_ ULONG BufferSize)
+{
+    PSYSTEM_PROCESS_INFORMATION ProcessInfo = Buffer;
+    NTSTATUS Status;
+
+    Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, BufferSize, NULL);
+    if (!NT_SUCCESS(Status))
+        return CHARGE_UNKNOWN;
+
+    for (;;)
+    {
+        if (ProcessInfo->UniqueProcessId == NtCurrentTeb()->ClientId.UniqueProcess)
+            return ProcessInfo->PrivatePageCount;
+        if (ProcessInfo->NextEntryOffset == 0)
+            return CHARGE_UNKNOWN;
+        ProcessInfo = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)ProcessInfo + ProcessInfo->NextEntryOffset);
+    }
+}
+
+static
+NTSTATUS
+CommitRange(
+    _In_ PVOID BaseAddress,
+    _In_ SIZE_T Size)
+{
+    PVOID Address = BaseAddress;
+    SIZE_T RegionSize = Size;
+
+    return NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &RegionSize, MEM_COMMIT, PAGE_READWRITE);
+}
+
+static
+NTSTATUS
+DecommitRange(
+    _In_ PVOID BaseAddress,
+    _In_ SIZE_T Size)
+{
+    PVOID Address = BaseAddress;
+    SIZE_T RegionSize = Size;
+
+    return NtFreeVirtualMemory(NtCurrentProcess(), &Address, &RegionSize, MEM_DECOMMIT);
+}
+
+/* Measure into Var; without a measurement the rest of the test cannot run */
+#define MEASURE(Var)                                                        \
+    do {                                                                    \
+        (Var) = QueryCommitCharge(InfoBuffer, (ULONG)InfoSize);             \
+        if ((Var) == CHARGE_UNKNOWN)                                        \
+        {                                                                   \
+            skip("The commit charge of this process cannot be read\n");     \
+            goto Cleanup;                                                   \
+        }                                                                   \
+    } while (0)
+
+/* The charge must be Expected, within a sixteenth of one commit of the 4 MB range */
+#define ok_charge(Charge, Expected, What)                                                   \
+    ok((Charge) + OneCommit / 16 > (Expected) && (Charge) < (Expected) + OneCommit / 16,    \
+       "%s: commit charge is %Id against the expected value (one commit: %Iu)\n",           \
+       What, (SSIZE_T)((Charge) - (Expected)), OneCommit)
+
+static
+VOID
+CheckRecommit(VOID)
+{
+    NTSTATUS Status;
+    PVOID BaseAddress = NULL, SubAddress = NULL, InfoBuffer = NULL;
+    SIZE_T Size = 4 * 1024 * 1024, SubSize = 1024 * 1024, InfoSize = 4 * 1024 * 1024, RegionSize;
+    SIZE_T Charge0, Charge1, Charge2, Charge, OneCommit = 0;
+    ULONG i;
+
+    /* The buffer for the measurements, allocated before the first one */
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &InfoBuffer, 0, &InfoSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &BaseAddress, 0, &Size, MEM_RESERVE, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    /* What one commit of the 4 MB range charges, in the unit the system reports */
+    MEASURE(Charge0);
+    Status = CommitRange(BaseAddress, Size);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    MEASURE(Charge1);
+    if (Charge1 <= Charge0)
+    {
+        skip("No commit charge reported for this process (%Iu, %Iu)\n", Charge0, Charge1);
+        goto Cleanup;
+    }
+    OneCommit = Charge1 - Charge0;
+
+    /* Committing pages that are already committed must not charge them again */
+    for (i = 0; i < 16; i++)
+    {
+        Status = CommitRange(BaseAddress, Size);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+    MEASURE(Charge);
+    ok_charge(Charge, Charge1, "16 commits of a committed range");
+    if (Charge >= Charge1 + OneCommit / 16)
+    {
+        /* Stop on a kernel that charges committed pages again: on x86 the loop below could wrap the
+           19-bit VAD charge to 0, and the decommit after it would assert */
+        skip("Skipping the rest on a kernel that charges committed pages again\n");
+        goto Cleanup;
+    }
+
+    /* A MEM_COMMIT allocation is charged when it is made, once, and its pages are untouched */
+    MEASURE(Charge2);
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &SubAddress, 0, &SubSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2 + OneCommit / 4, "A 1 MB MEM_COMMIT allocation");
+    for (i = 0; i < 4; i++)
+    {
+        Status = CommitRange(SubAddress, SubSize);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2 + OneCommit / 4, "4 commits of the MEM_COMMIT allocation");
+    Status = DecommitRange(SubAddress, SubSize);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2, "Decommit of the MEM_COMMIT allocation");
+    Status = CommitRange(SubAddress, SubSize);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2 + OneCommit / 4, "Commit of the decommitted MEM_COMMIT allocation");
+    RegionSize = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &SubAddress, &RegionSize, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    SubAddress = NULL;
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2, "Release of the committed MEM_COMMIT allocation");
+    if (Charge + OneCommit / 16 <= Charge2 || Charge >= Charge2 + OneCommit / 16)
+    {
+        /* The release gave back a VAD charge that differs from the process charge: on x86 the loop
+           below could wrap such a VAD charge to 0, and the decommit after it would assert */
+        skip("Skipping the rest on a kernel whose VAD and process charges differ\n");
+        goto Cleanup;
+    }
+
+    /* 495 more: 512 commits of the 4 MB range in all, which would wrap an x86 VAD charge to 0 if each was charged */
+    for (i = 0; i < 495; i++)
+    {
+        Status = CommitRange(BaseAddress, Size);
+        if (!NT_SUCCESS(Status))
+            break;
+    }
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    /* One valid page, so that the decommit also takes the path for valid PTEs */
+    *(volatile UCHAR *)BaseAddress = 1;
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2, "512 commits of a committed range");
+
+    /* A decommit takes the pages back once, a commit of decommitted pages charges them once */
+    Status = DecommitRange(BaseAddress, Size);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2 - OneCommit, "Decommit");
+    Status = CommitRange(BaseAddress, Size / 2);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2 - OneCommit / 2, "Commit of half of the decommitted range");
+    Status = CommitRange(BaseAddress, Size);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2, "Commit of all of the range");
+
+    /* Releasing the committed range without a decommit takes the charge back too */
+    RegionSize = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &BaseAddress, &RegionSize, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    BaseAddress = NULL;
+    MEASURE(Charge);
+    ok_charge(Charge, Charge2 - OneCommit, "Release of the committed range");
+
+Cleanup:
+    RegionSize = 0;
+    if (SubAddress)
+        NtFreeVirtualMemory(NtCurrentProcess(), &SubAddress, &RegionSize, MEM_RELEASE);
+    RegionSize = 0;
+    if (BaseAddress)
+        NtFreeVirtualMemory(NtCurrentProcess(), &BaseAddress, &RegionSize, MEM_RELEASE);
+    RegionSize = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &InfoBuffer, &RegionSize, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+}
+
 #define RUNS 32
 
 START_TEST(NtAllocateVirtualMemory)
@@ -805,6 +1004,7 @@ START_TEST(NtAllocateVirtualMemory)
     CheckAlignment();
     CheckAdjacentVADs();
     CheckSomeDefaultAddresses();
+    CheckRecommit();
 
     Size1 = 32;
     Mem1 = Allocate(Size1);
