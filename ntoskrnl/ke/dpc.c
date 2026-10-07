@@ -751,9 +751,6 @@ KeInsertQueueDpc(IN PKDPC Dpc,
         Cpu = Prcb->Number;
     }
 
-    /* ROS Sanity Check */
-    ASSERT(Prcb == CurrentPrcb);
-
     /* Check if this is a threaded DPC and threaded DPCs are enabled */
     if ((Dpc->Type == ThreadedDpcObject) && (Prcb->ThreadDpcEnable))
     {
@@ -811,14 +808,12 @@ KeInsertQueueDpc(IN PKDPC Dpc,
                 {
                     /*
                      * Check if the DPC is of high importance or above the
-                     * maximum depth. If it is, then make sure that the CPU
-                     * isn't idle, or that it's sleeping.
+                     * maximum depth. An idle processor halts, so it needs
+                     * the interrupt as well.
                      */
-                    if (((Dpc->Importance == HighImportance) ||
+                    if ((Dpc->Importance == HighImportance) ||
                         (DpcData->DpcQueueDepth >=
-                         Prcb->MaximumDpcQueueDepth)) &&
-                        (!(AFFINITY_MASK(Cpu) & KiIdleSummary) ||
-                         (Prcb->Sleeping)))
+                         Prcb->MaximumDpcQueueDepth))
                     {
                         /* Set interrupt requested */
                         Prcb->DpcInterruptRequested = TRUE;
@@ -1003,25 +998,66 @@ NTAPI
 KeGenericCallDpc(IN PKDEFERRED_ROUTINE Routine,
                  IN PVOID Context)
 {
-    ULONG Barrier = KeNumberProcessors;
+    ULONG Barrier;
     KIRQL OldIrql;
     DEFERRED_REVERSE_BARRIER ReverseBarrier;
+#ifdef CONFIG_SMP
+    KAFFINITY Active, Others;
+    ULONG Processor;
+    PKDPC Dpc;
+#endif
     ASSERT(KeGetCurrentIrql () < DISPATCH_LEVEL);
+
+#ifdef CONFIG_SMP
+    /* The processors' call DPCs serve one call at a time */
+    ExAcquireFastMutex(&KiGenericCallDpcMutex);
+#endif
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
 
     //
     // The barrier is the number of processors, each processor will decrement it
     // by one, so when all processors have run the DPC, the barrier reaches zero
     //
+#ifdef CONFIG_SMP
+    Active = KeActiveProcessors;
+    for (Barrier = 0, Others = Active; Others; Others &= Others - 1) Barrier++;
+#else
+    Barrier = 1;
+#endif
     ReverseBarrier.Barrier = Barrier;
     ReverseBarrier.TotalProcessors = Barrier;
 
-    //
-    // But we don't need the barrier on UP, since we can simply call the routine
-    // directly while at DISPATCH_LEVEL and not worry about anything else
-    //
-    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+#ifdef CONFIG_SMP
+    /* Every other active processor runs the routine in its call DPC */
+    Others = Active & ~KeGetCurrentPrcb()->SetMember;
+    while (Others)
+    {
+        BitScanForwardAffinity(&Processor, Others);
+        Others &= Others - 1;
+
+        Dpc = &KiProcessorBlock[Processor]->CallDpc;
+        KeInitializeDpc(Dpc, Routine, Context);
+        KeSetImportanceDpc(Dpc, HighImportance);
+        KeSetTargetProcessorDpc(Dpc, (CCHAR)Processor);
+        KeInsertQueueDpc(Dpc, &Barrier, &ReverseBarrier);
+    }
+#endif
+
+    /* This processor runs it directly, at the same IRQL */
     Routine(&KeGetCurrentPrcb()->CallDpc, Context, &Barrier, &ReverseBarrier);
+
+#ifdef CONFIG_SMP
+    /* The barrier and the reverse barrier live on this stack */
+    while (*(volatile ULONG *)&Barrier != 0)
+    {
+        YieldProcessor();
+    }
+#endif
+
     KeLowerIrql(OldIrql);
+#ifdef CONFIG_SMP
+    ExReleaseFastMutex(&KiGenericCallDpcMutex);
+#endif
 }
 
 /*
@@ -1044,11 +1080,35 @@ BOOLEAN
 NTAPI
 KeSignalCallDpcSynchronize(IN PVOID SystemArgument2)
 {
+#ifdef CONFIG_SMP
+    PDEFERRED_REVERSE_BARRIER ReverseBarrier = SystemArgument2;
+    LONG Sense, Remaining;
+
+    /* The top bit flips each time all processors have arrived, so the
+       routine can synchronize more than once */
+    Sense = *(volatile LONG *)&ReverseBarrier->Barrier & 0x80000000;
+    Remaining = InterlockedDecrement((PLONG)&ReverseBarrier->Barrier) & 0x7FFFFFFF;
+    if (Remaining == 0)
+    {
+        /* The last processor to arrive resets the barrier and returns TRUE */
+        InterlockedExchange((PLONG)&ReverseBarrier->Barrier,
+                            (Sense ^ 0x80000000) | ReverseBarrier->TotalProcessors);
+        return TRUE;
+    }
+
+    while ((*(volatile LONG *)&ReverseBarrier->Barrier & 0x80000000) == Sense)
+    {
+        YieldProcessor();
+    }
+
+    return FALSE;
+#else
     //
     // There is nothing to do on UP systems -- the processor calling this wins
     //
     UNREFERENCED_PARAMETER(SystemArgument2);
     return TRUE;
+#endif
 }
 
 /* EOF */
