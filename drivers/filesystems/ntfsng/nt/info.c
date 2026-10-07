@@ -510,7 +510,12 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     {
         NgMakeShortName(Vcb, NewDir, Fcb->Node, NewName.Buffer, NewName.Length / sizeof(WCHAR));
         if (!Fcb->IsDirectory)
-            NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Fcb->Stat.crtime);
+        {
+            /* The old name leaves its creation time behind; the new name may take one over. */
+            LONGLONG Crtime = Fcb->Stat.crtime;
+            NgTunnelApply(Vcb, NewDir, Fcb->Node, &NewName);
+            NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Crtime);
+        }
     }
     if (!Err && TargetFcb)
     {

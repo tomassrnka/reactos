@@ -220,6 +220,7 @@ BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset);
 /* create.c */
 VOID NgMakeShortName(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PCWSTR Name, USHORT NameChars);
 VOID NgTunnelAdd(PNG_VCB Vcb, ULONGLONG DirMftNo, PCWSTR Name, USHORT NameChars, LONGLONG CreationTime);
+VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name);
 
 /* fsctl.c */
 VOID NgUnlockVolume(PNG_VCB Vcb);

@@ -256,8 +256,8 @@ VOID NgTunnelAdd(PNG_VCB Vcb, ULONGLONG DirMftNo, PCWSTR Name, USHORT NameChars,
                           sizeof(CreationTime), &CreationTime);
 }
 
-/* Caller holds CoreLock; Node was just created as Name in Parent. */
-static VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name)
+/* Caller holds CoreLock; Node was just created (or renamed) as Name in Parent. */
+VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name)
 {
     struct ngc_stat Dir;
     WCHAR ShortBuf[12], LongBuf[64];
