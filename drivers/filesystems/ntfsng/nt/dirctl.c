@@ -9,14 +9,38 @@
 
 VOID NgFreeDirSnapshot(PNG_CCB Ccb)
 {
-    ULONG i;
-    for (i = 0; i < Ccb->EntryCount; i++)
-        ExFreePoolWithTag(Ccb->Entries[i], TAG_NTFSNG);
+    while (Ccb->Arena)
+    {
+        PNG_ARENA Next = Ccb->Arena->Next;
+        ExFreePoolWithTag(Ccb->Arena, TAG_NTFSNG);
+        Ccb->Arena = Next;
+    }
     if (Ccb->Entries)
         ExFreePoolWithTag(Ccb->Entries, TAG_NTFSNG);
     Ccb->Entries = NULL;
     Ccb->EntryCount = Ccb->EntryCapacity = 0;
     Ccb->Enumerated = FALSE;
+}
+
+static PVOID NgArenaAlloc(PNG_CCB Ccb, ULONG Size)
+{
+    PNG_ARENA A = Ccb->Arena;
+    PVOID P;
+    Size = ALIGN_UP_BY(Size, sizeof(ULONGLONG));
+    if (!A || A->Used + Size > A->Size)
+    {
+        ULONG Chunk = max(Size, 64 * 1024 - (ULONG)FIELD_OFFSET(NG_ARENA, Data));
+        A = ExAllocatePoolWithTag(PagedPool, FIELD_OFFSET(NG_ARENA, Data) + Chunk, TAG_NTFSNG);
+        if (!A)
+            return NULL;
+        A->Next = Ccb->Arena;
+        A->Used = 0;
+        A->Size = Chunk;
+        Ccb->Arena = A;
+    }
+    P = (PUCHAR)A->Data + A->Used;
+    A->Used += Size;
+    return P;
 }
 
 typedef struct _NG_SNAP
@@ -26,14 +50,13 @@ typedef struct _NG_SNAP
     BOOLEAN Failed;
 } NG_SNAP;
 
-static int NgSnapFill(void *Context, const unsigned short *Name, unsigned int Len,
-                      unsigned long long MftNo, unsigned int Type)
+static int NgSnapFill(void *Context, const struct ngc_dirent *D)
 {
     NG_SNAP *Snap = Context;
     PNG_CCB Ccb = Snap->Ccb;
-    BOOLEAN IsDot = (Len == 1 && Name[0] == L'.') || (Len == 2 && Name[0] == L'.' && Name[1] == L'.');
+    BOOLEAN IsDot = D->is_dot != 0;
+    unsigned int Len = D->len;
     PNG_DIRENT Entry;
-    UNREFERENCED_PARAMETER(Type);
 
     /* The root of an NT volume has no "." and ".." entries. */
     if (IsDot && Snap->IsRoot)
@@ -55,16 +78,19 @@ static int NgSnapFill(void *Context, const unsigned short *Name, unsigned int Le
         Ccb->Entries = New;
         Ccb->EntryCapacity = Cap;
     }
-    Entry = ExAllocatePoolWithTag(PagedPool, FIELD_OFFSET(NG_DIRENT, Name) + Len * sizeof(WCHAR), TAG_NTFSNG);
+    Entry = NgArenaAlloc(Ccb, FIELD_OFFSET(NG_DIRENT, Name) + Len * sizeof(WCHAR));
     if (!Entry)
     {
         Snap->Failed = TRUE;
         return 1;
     }
-    Entry->MftNo = MftNo;
+    Entry->Stat = D->st;
+    Entry->Tag = D->reparse_tag;
     Entry->NameLength = (USHORT)(Len * sizeof(WCHAR));
+    Entry->ShortChars = (USHORT)D->short_len;
     Entry->IsDot = IsDot;
-    RtlCopyMemory(Entry->Name, Name, Len * sizeof(WCHAR));
+    RtlCopyMemory(Entry->Short, D->short_name, sizeof(Entry->Short));
+    RtlCopyMemory(Entry->Name, D->name, Len * sizeof(WCHAR));
     Ccb->Entries[Ccb->EntryCount++] = Entry;
     return 0;
 }
@@ -296,7 +322,7 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgAcquireCore(Vcb);
         Err = NgEnsureNode(Fcb);
         if (!Err)
-            Err = ngc_readdir(Vcb->Core, Fcb->Node, NgSnapFill, &Snap);
+            Err = ngc_readdir_full(Vcb->Core, Fcb->Node, NgSnapFill, &Snap);
         NgReleaseCore(Vcb);
         if (Err || Snap.Failed)
         {
@@ -347,12 +373,9 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         PNG_DIRENT E = Ccb->Entries[Ccb->NextIndex];
         UNICODE_STRING Name;
-        struct ngc_stat St;
-        ngc_node *Node;
+        const struct ngc_stat *St;
         ULONG Offset, Size;
-        WCHAR Short[12];
         unsigned int ShortChars;
-        ULONG Tag = 0;
         BOOLEAN Matched, WantShort, Spaces;
 
         Name.Buffer = E->Name;
@@ -371,48 +394,18 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Ccb->NextIndex++;
             continue;
         }
-        if (E->IsDot)
-        {
-            St = Fcb->Stat;
-        }
-        else
-        {
-            NgAcquireCore(Vcb);
-            Err = ngc_iget(Vcb->Core, E->MftNo, &Node);
-            if (!Err)
-            {
-                ngc_stat(Node, &St);
-                if (St.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
-                {
-                    void *Data;
-                    unsigned int Len;
-                    if (!ngc_get_reparse(Node, &Data, &Len))
-                    {
-                        Tag = ((PREPARSE_DATA_BUFFER)Data)->ReparseTag;
-                        ngc_free(Data);
-                    }
-                }
-                if (WantShort && ngc_short_name(Node, Fcb->Stat.mft_ref, Short, &ShortChars))
-                    ShortChars = 0;
-                ngc_put(Node);
-            }
-            NgReleaseCore(Vcb);
-            if (Err)
-            {
-                DPRINT1("ntfsng: directory entry %wZ: inode %I64u unreadable (%d), skipped\n", &Name, E->MftNo, Err);
-                Ccb->NextIndex++;
-                continue;
-            }
-        }
+        St = E->IsDot ? &Fcb->Stat : &E->Stat;
+        if (WantShort)
+            ShortChars = E->ShortChars;
         if (!Matched && !(ShortChars &&
-            NgMatchExpression(Ccb->Pattern.Buffer, Ccb->Pattern.Length / sizeof(WCHAR), Short, ShortChars, FALSE, MatchTab)))
+            NgMatchExpression(Ccb->Pattern.Buffer, Ccb->Pattern.Length / sizeof(WCHAR), E->Short, ShortChars, FALSE, MatchTab)))
         {
             Ccb->NextIndex++;
             continue;
         }
         Offset = Written ? ALIGN_UP_BY(Used, 8) : 0;
-        Size = Offset < Length ? NgFillEntry(Class, Buffer + Offset, Length - Offset, E, &St, Ccb->NextIndex,
-                                             Short, ShortChars, Tag) : 0;
+        Size = Offset < Length ? NgFillEntry(Class, Buffer + Offset, Length - Offset, E, St, Ccb->NextIndex,
+                                             E->Short, ShortChars, E->Tag) : 0;
         if (!Size)
         {
             if (!Written)

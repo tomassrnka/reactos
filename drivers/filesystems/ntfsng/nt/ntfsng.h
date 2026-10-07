@@ -144,11 +144,22 @@ typedef struct _NG_FCB
     WCHAR StreamBuffer[256];
 } NG_FCB, *PNG_FCB;
 
+/* Directory snapshot storage: entries are carved from 64 KB chunks freed together. */
+typedef struct _NG_ARENA
+{
+    struct _NG_ARENA *Next;
+    ULONG Used, Size;
+    ULONGLONG Data[ANYSIZE_ARRAY];
+} NG_ARENA, *PNG_ARENA;
+
 typedef struct _NG_DIRENT
 {
-    ULONGLONG MftNo;
+    struct ngc_stat Stat;           /* not filled for "." and ".." */
+    ULONG Tag;                      /* reparse tag, 0 if none */
     USHORT NameLength;              /* bytes */
+    USHORT ShortChars;
     BOOLEAN IsDot;
+    WCHAR Short[12];
     WCHAR Name[ANYSIZE_ARRAY];
 } NG_DIRENT, *PNG_DIRENT;
 
@@ -162,6 +173,7 @@ typedef struct _NG_CCB
     BOOLEAN DeleteOnClose;
     BOOLEAN AppendOnly;             /* opened with FILE_APPEND_DATA but not FILE_WRITE_DATA */
     PNG_DIRENT *Entries;            /* directory snapshot taken at the first query */
+    PNG_ARENA Arena;                /* storage of the snapshot's entries */
     ULONG EntryCount;
     ULONG EntryCapacity;
     ULONG NextIndex;

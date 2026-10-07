@@ -30,6 +30,10 @@ void kshim_bdev_close(struct block_device *b);
 void kshim_mapping_shrink(struct address_space *m);
 void kshim_icache_flush(struct super_block *sb, int all);
 void kshim_icache_trim(struct super_block *sb);
+void kshim_icache_lock(void);
+void kshim_icache_unlock(void);
+struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
+		int (*test)(struct inode *, void *), void *data);
 extern unsigned long kshim_pc_pages, kshim_inodes_live, kshim_counter_reads;
 void kshim_dump_allocs(void);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
@@ -665,6 +669,290 @@ out:
 	kfree(d);
 	kfree(f);
 	return err;
+}
+
+/*
+ * A directory listing in one pass over the $I30 index: the names, the 8.3 names (the DOS
+ * entries, paired by file reference) and the values the entries duplicate, which serve only
+ * when an inode cannot be read.  Same entries as ngc_readdir, in index order.
+ */
+/*
+ * ngc_stat of an in-memory inode without the record lock, for listings (the caller holds the
+ * inode-cache lock): false for what needs the record (a reparse point's tag, a junction's
+ * directory bit).  The link count is not filled.
+ */
+static bool ngc_stat_lite(struct inode *vi, struct ngc_stat *st)
+{
+	struct ntfs_inode *ni = NTFS_I(vi);
+	unsigned long flags;
+	if (NInoAttr(ni) || S_ISLNK(vi->i_mode) || (ni->flags & FILE_ATTR_REPARSE_POINT))
+		return false;
+	st->mft_ref = ni->mft_no | ((u64)ni->seq_no << 48);
+	read_lock_irqsave(&ni->size_lock, flags);
+	st->size = i_size_read(vi);
+	if (NInoNonResident(ni))
+		st->alloc = (NInoCompressed(ni) || NInoSparse(ni)) ? ni->itype.compressed.size : ni->allocated_size;
+	else
+		st->alloc = (st->size + 7) & ~7ULL;
+	read_unlock_irqrestore(&ni->size_lock, flags);
+	st->crtime = ts_to_nt(ni->i_crtime);
+	st->atime = ts_to_nt(inode_get_atime(vi));
+	st->mtime = ts_to_nt(inode_get_mtime(vi));
+	st->ctime = ts_to_nt(inode_get_ctime(vi));
+	st->file_attributes = le32_to_cpu(ni->flags) & 0xffff;
+	st->nlink = 1;
+	st->is_dir = S_ISDIR(vi->i_mode);
+	if (NInoCompressed(ni)) st->flags |= NGC_ATTR_COMPRESSED;
+	if (NInoSparse(ni)) st->flags |= NGC_ATTR_SPARSE;
+	if (NInoEncrypted(ni)) st->flags |= NGC_ATTR_ENCRYPTED;
+	return true;
+}
+
+struct ngc_rawent {
+	u64 mref;
+	u32 name_off, attrs, tag, dos;
+	u8 name_len, name_type;
+	s64 times[4];
+	u64 size, alloc;
+};
+
+static int ngc_dirwalk(struct ntfs_inode *ndir, struct ngc_rawent **out, u16 **names, int *count)
+{
+	struct ntfs_volume *vol = ndir->vol;
+	struct ntfs_index_context *ictx;
+	struct ntfs_attr_search_ctx *ctx;
+	struct index_root *ir;
+	struct index_entry *ie;
+	struct ngc_rawent *v = NULL;
+	u16 *nb = NULL;
+	int n = 0, cap = 0, ncap = 0, nused = 0, err = 0;
+
+	mutex_lock_nested(&ndir->mrec_lock, NTFS_INODE_MUTEX_PARENT);
+	ictx = ntfs_index_ctx_get(ndir, I30, 4);
+	ctx = ictx ? ntfs_attr_get_search_ctx(ndir, NULL) : NULL;
+	if (!ctx) {
+		err = -ENOMEM;
+		goto out;
+	}
+	if (ntfs_attr_lookup(AT_INDEX_ROOT, I30, 4, CASE_SENSITIVE, 0, NULL, 0, ctx)) {
+		ntfs_attr_put_search_ctx(ctx);
+		err = -EIO;
+		goto out;
+	}
+	ir = (struct index_root *)((u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset));
+	ictx->ir = ir;
+	ictx->actx = ctx;
+	ictx->parent_vcn[ictx->pindex] = VCN_INDEX_ROOT_PARENT;
+	ictx->is_in_root = true;
+	ictx->parent_pos[ictx->pindex] = 0;
+	ictx->block_size = le32_to_cpu(ir->index_block_size);
+	if (ictx->block_size < NTFS_BLOCK_SIZE) {
+		err = -EIO;
+		goto out;
+	}
+	ictx->vcn_size_bits = vol->cluster_size <= ictx->block_size ? vol->cluster_size_bits : NTFS_BLOCK_SIZE_BITS;
+	ictx->cr = ir->collation_rule;
+	ie = (struct index_entry *)((u8 *)&ir->index + le32_to_cpu(ir->index.entries_offset));
+	if (ie->flags & INDEX_ENTRY_NODE) {
+		ictx->ia_ni = ntfs_ia_open(ictx, ictx->idx_ni);
+		if (!ictx->ia_ni) {
+			err = -EINVAL;
+			goto out;
+		}
+		ie = ntfs_index_walk_down(ie, ictx);
+		if (IS_ERR(ie)) {
+			err = PTR_ERR(ie);
+			goto out;
+		}
+	}
+	if (ie && (ie->flags & INDEX_ENTRY_END))
+		ie = ntfs_index_next(ie, ictx);
+	while (ie && !IS_ERR(ie)) {
+		struct file_name_attr *fn = &ie->key.file_name;
+		struct ngc_rawent *r;
+		if (n == cap) {
+			void *p = krealloc(v, (cap = cap ? cap * 2 : 64) * sizeof(*v), GFP_NOFS);
+			if (!p) {
+				err = -ENOMEM;
+				goto out;
+			}
+			v = p;
+		}
+		if (nused + fn->file_name_length > ncap) {
+			void *p;
+			ncap = max(ncap * 2, nused + 256 + fn->file_name_length);
+			p = krealloc(nb, ncap * sizeof(u16), GFP_NOFS);
+			if (!p) {
+				err = -ENOMEM;
+				goto out;
+			}
+			nb = p;
+		}
+		r = &v[n++];
+		r->mref = le64_to_cpu(ie->data.dir.indexed_file);
+		r->name_off = nused;
+		r->name_len = fn->file_name_length;
+		r->name_type = fn->file_name_type;
+		r->attrs = le32_to_cpu(fn->file_attributes);
+		r->tag = (r->attrs & FILE_ATTR_REPARSE_POINT) ? le32_to_cpu(fn->type.rp.reparse_point_tag) : 0;
+		r->times[0] = le64_to_cpu(fn->creation_time);
+		r->times[1] = le64_to_cpu(fn->last_access_time);
+		r->times[2] = le64_to_cpu(fn->last_data_change_time);
+		r->times[3] = le64_to_cpu(fn->last_mft_change_time);
+		r->size = le64_to_cpu(fn->data_size);
+		r->alloc = le64_to_cpu(fn->allocated_size);
+		r->dos = 0;
+		memcpy(nb + nused, fn->file_name, fn->file_name_length * sizeof(u16));
+		nused += fn->file_name_length;
+		ie = ntfs_index_next(ie, ictx);
+	}
+	if (IS_ERR(ie))
+		err = PTR_ERR(ie);
+out:
+	if (ictx)
+		ntfs_index_ctx_put(ictx);
+	mutex_unlock(&ndir->mrec_lock);
+	if (err) {
+		kfree(v);
+		kfree(nb);
+		return err;
+	}
+	*out = v;
+	*names = nb;
+	*count = n;
+	return 0;
+}
+
+static int ngc_readdir_full_impl(ngc_vol *v, ngc_node *dirn, ngc_dirent_t fn, void *arg)
+{
+	struct inode *dir = (struct inode *)dirn;
+	struct ntfs_inode *ndir = NTFS_I(dir);
+	struct ntfs_volume *vol = ndir->vol;
+	struct ngc_rawent *r = NULL;
+	struct ngc_dirent e;
+	u16 *names = NULL, dot[2] = { '.', '.' };
+	unsigned long long t0;
+	int n = 0, err, k, j;
+
+	if (S_ISLNK(dir->i_mode) && ngc_record_is_dir(ndir))
+		return 0;
+	if (!S_ISDIR(dir->i_mode))
+		return -ENOTDIR;
+	t0 = ngos_ticks();
+	err = ngc_dirwalk(ndir, &r, &names, &n);
+	ngos_prof(NGP_DIRWALK, t0, (unsigned long long)n);
+	if (err)
+		return err;
+	/* An 8.3 name is a DOS-namespace entry for the same file as a Win32 entry: pair them by reference. */
+	{
+		unsigned int hs = 64, *h;
+		while (hs < 2 * (unsigned int)n)
+			hs <<= 1;
+		h = kcalloc(hs, sizeof(*h), GFP_NOFS);
+		for (k = 0; h && k < n; k++) {
+			if (r[k].name_type != FILE_NAME_WIN32)
+				continue;
+			for (j = (int)(r[k].mref % hs); h[j]; j = (j + 1) & (hs - 1))
+				;
+			h[j] = k + 1;
+		}
+		for (k = 0; k < n; k++) {
+			if (r[k].name_type != FILE_NAME_DOS)
+				continue;
+			if (h) {
+				for (j = (int)(r[k].mref % hs); h[j]; j = (j + 1) & (hs - 1))
+					if (r[h[j] - 1].mref == r[k].mref && !r[h[j] - 1].dos) {
+						r[h[j] - 1].dos = k + 1;
+						break;
+					}
+			} else {
+				for (j = 0; j < n; j++)
+					if (r[j].mref == r[k].mref && r[j].name_type == FILE_NAME_WIN32 && !r[j].dos) {
+						r[j].dos = k + 1;
+						break;
+					}
+			}
+		}
+		kfree(h);
+	}
+	memset(&e, 0, sizeof(e));
+	e.is_dot = 1;
+	for (k = 1; k <= 2; k++) {
+		e.name = dot;
+		e.len = k;
+		if (fn(arg, &e))
+			goto done;
+	}
+	/*
+	 * Times, sizes and attributes come from the inode.  The index entries duplicate them, but the core
+	 * copies the times into them from the $FILE_NAME attribute, which keeps the values of the file's
+	 * creation.  An inode in memory is read under the inode-cache lock without a reference (it cannot
+	 * be freed while the lock is held); any other inode is loaded.
+	 */
+	for (k = 0; k < n; k++) {
+		struct ngc_rawent *x = &r[k];
+		struct ntfs_attr na;
+		struct inode *child;
+		ngc_node *cn;
+		bool done;
+		if (x->name_type == FILE_NAME_DOS || MREF(x->mref) == FILE_root)
+			continue;
+		if (MREF(x->mref) < FILE_first_user && !NVolShowSystemFiles(vol))
+			continue;
+		if (!NVolShowHiddenFiles(vol) && (x->attrs & le32_to_cpu(FILE_ATTR_HIDDEN)))
+			continue;
+		memset(&e, 0, sizeof(e));
+		e.name = names + x->name_off;
+		e.len = x->name_len;
+		if (x->dos) {
+			struct ngc_rawent *d = &r[x->dos - 1];
+			e.short_len = min_t(unsigned int, d->name_len, 12);
+			memcpy(e.short_name, names + d->name_off, e.short_len * sizeof(u16));
+		}
+		na.mft_no = MREF(x->mref);
+		na.type = AT_UNUSED;
+		na.name = NULL;
+		na.name_len = 0;
+		kshim_icache_lock();
+		child = kshim_icache_peek(dir->i_sb, na.mft_no, ntfs_test_inode, &na);
+		done = child && ngc_stat_lite(child, &e.st);
+		kshim_icache_unlock();
+		if (!done && !ngc_iget(v, na.mft_no, &cn)) {
+			ngc_stat(cn, &e.st);
+			if (e.st.file_attributes & 0x400) {
+				void *data;
+				unsigned int len;
+				if (!ngc_get_reparse(cn, &data, &len)) {
+					if (len >= 4)
+						e.reparse_tag = *(u32 *)data;
+					kfree(data);
+				}
+			}
+			ngc_put(cn);
+			done = true;
+		}
+		if (!done) {
+			/* An unreadable inode: what its index entry says. */
+			e.st.mft_ref = x->mref;
+			e.st.crtime = x->times[0];
+			e.st.atime = x->times[1];
+			e.st.mtime = x->times[2];
+			e.st.ctime = x->times[3];
+			e.st.size = x->size;
+			e.st.alloc = x->alloc;
+			e.st.file_attributes = x->attrs & 0xffff;
+			e.st.nlink = 1;
+			e.st.is_dir = (x->attrs & le32_to_cpu(FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT)) != 0;
+			e.st.is_link = (x->attrs & le32_to_cpu(FILE_ATTR_REPARSE_POINT)) != 0;
+			e.reparse_tag = x->tag;
+		}
+		if (fn(arg, &e))
+			break;
+	}
+done:
+	kfree(r);
+	kfree(names);
+	return 0;
 }
 
 int ngc_streams(ngc_node *n, ngc_stream_t fn, void *arg)
@@ -2205,5 +2493,13 @@ int ngc_dir_empty(ngc_vol *v, ngc_node *dirn)
 	unsigned long long t0 = ngos_ticks();
 	int r = ngc_dir_empty_impl(v, dirn);
 	ngos_prof(NGP_DIR_EMPTY, t0, 0);
+	return r;
+}
+
+int ngc_readdir_full(ngc_vol *v, ngc_node *dirn, ngc_dirent_t fn, void *arg)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_readdir_full_impl(v, dirn, fn, arg);
+	ngos_prof(NGP_READDIR, t0, 0);
 	return r;
 }

@@ -48,7 +48,7 @@ typedef struct
 static const char *StageName[NG_PROFILE_STAGES] = {
     "dev-read", "dev-write", "dev-flush", "commit", "writeback", "jnl-commit", "commit-full", "commit-alloc",
     "sync", "lookup", "create", "unlink", "rename", "readdir", "iget", "put", "stat", "read", "write", "set-size",
-    "set-info", "short-name", "add-short-name", "security", "dir-empty", "link" };
+    "set-info", "short-name", "add-short-name", "security", "dir-empty", "link", "dirwalk" };
 
 static const char *CatName[NG_LOCK_CATEGORIES] = {
     "create", "pipe", "close", "read", "write", "queryinfo", "setinfo", "queryea", "setea", "flush",
