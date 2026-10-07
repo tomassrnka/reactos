@@ -8,6 +8,9 @@
 
 #include "ntfsng.h"
 
+/* ngos_nt.c */
+int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len);
+
 /* Cc maps files in views of this size (VACB_MAPPING_GRANULARITY). */
 #define NG_VACB_SIZE (256 * 1024)
 
@@ -347,6 +350,8 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
         DPRINT1("ntfsng: volume write at %I64d len %lu refused (outside the boot code; no lock/dismount)\n", Offset, Length);
         return STATUS_ACCESS_DENIED;
     }
+    if (Offset == 0 && Length < 512)
+        return STATUS_INVALID_PARAMETER;
     if (Irp->MdlAddress)
     {
         Buffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
@@ -376,6 +381,27 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto out;
+    }
+    if (Offset == 0)
+    {
+        /* Only the boot code may change: the BPB and the signature must stay as they are. */
+        PUCHAR Old = ExAllocatePoolWithTag(NonPagedPool, 512, TAG_NTFSNG);
+        BOOLEAN Same;
+        if (!Old)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto out;
+        }
+        Same = !ngos_dev_read(Vcb->StorageDevice, 0, Old, 512) &&
+               RtlCompareMemory(Old + 3, (PUCHAR)Buffer + 3, 0x54 - 3) == 0x54 - 3 &&
+               RtlCompareMemory(Old + 510, (PUCHAR)Buffer + 510, 2) == 2;
+        ExFreePoolWithTag(Old, TAG_NTFSNG);
+        if (!Same)
+        {
+            DPRINT1("ntfsng: volume write at 0 refused: it changes the BPB\n");
+            Status = STATUS_ACCESS_DENIED;
+            goto out;
+        }
     }
     NgAcquireCore(Vcb);
     Err = ngc_raw_write(Vcb->Core, (unsigned long long)Offset, Buffer, Length);
