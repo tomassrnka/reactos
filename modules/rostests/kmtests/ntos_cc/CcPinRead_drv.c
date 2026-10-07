@@ -395,6 +395,70 @@ PinInAnotherThreadExclusive(IN PVOID Context)
     return;
 }
 
+#define PIN_RACE_ROUNDS 200
+#define PIN_RACE_MAX_THREADS 4
+
+static LONG PinRaceThreads;
+static volatile LONG PinRaceArrived;
+static volatile LONG PinRaceGeneration;
+static volatile LONG PinRaceOwners;
+static volatile LONG PinRaceOverlaps;
+static volatile LONG PinRaceFailures;
+
+static
+VOID
+NTAPI
+PinRaceThread(IN PVOID Context)
+{
+    LONG Round, Generation;
+    LARGE_INTEGER Offset;
+    PVOID Bcb, Buffer;
+    BOOLEAN Ret;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    for (Round = 0; Round < PIN_RACE_ROUNDS; Round++)
+    {
+        /* Release all threads at once, so that they all miss the BCB lookup */
+        Generation = PinRaceGeneration;
+        if (InterlockedIncrement(&PinRaceArrived) == PinRaceThreads)
+        {
+            PinRaceArrived = 0;
+            InterlockedIncrement(&PinRaceGeneration);
+        }
+        else
+        {
+            while (PinRaceGeneration == Generation)
+                YieldProcessor();
+        }
+
+        Offset.QuadPart = 0;
+        Ret = FALSE;
+        _SEH2_TRY
+        {
+            Ret = CcPinRead(TestFileObject, &Offset, PAGE_SIZE, PIN_WAIT | PIN_EXCLUSIVE, &Bcb, &Buffer);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Ret = FALSE;
+        }
+        _SEH2_END;
+
+        if (!Ret)
+        {
+            InterlockedIncrement(&PinRaceFailures);
+            continue;
+        }
+
+        if (InterlockedIncrement(&PinRaceOwners) != 1)
+            InterlockedIncrement(&PinRaceOverlaps);
+        KeStallExecutionProcessor(10);
+        InterlockedDecrement(&PinRaceOwners);
+
+        CcUnpinData(Bcb);
+    }
+}
+
 static
 VOID
 PerformTest(
@@ -429,7 +493,7 @@ PerformTest(
             TestFileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
 
             KmtStartSeh();
-            if (TestId < 6)
+            if (TestId != 6)
             {
                 CcInitializeCacheMap(TestFileObject, &FileSizes, PinAccess, &Callbacks, NULL);
             }
@@ -678,6 +742,29 @@ PerformTest(
                         CcSetDirtyPinnedData(Bcb, NULL);
 
                         CcUnpinData(Bcb);
+                    }
+                }
+                else if (TestId == 7)
+                {
+                    PKTHREAD Threads[PIN_RACE_MAX_THREADS];
+                    LONG i;
+
+                    PinRaceThreads = min(KeNumberProcessors, PIN_RACE_MAX_THREADS);
+                    if (!skip(PinRaceThreads >= 2, "Concurrent pinning needs at least two processors\n"))
+                    {
+                        PinRaceArrived = 0;
+                        PinRaceGeneration = 0;
+                        PinRaceOwners = 0;
+                        PinRaceOverlaps = 0;
+                        PinRaceFailures = 0;
+
+                        for (i = 0; i < PinRaceThreads; i++)
+                            Threads[i] = KmtStartThread(PinRaceThread, NULL);
+                        for (i = 0; i < PinRaceThreads; i++)
+                            KmtFinishThread(Threads[i], NULL);
+
+                        ok_eq_long(PinRaceFailures, 0L);
+                        ok_eq_long(PinRaceOverlaps, 0L);
                     }
                 }
             }
