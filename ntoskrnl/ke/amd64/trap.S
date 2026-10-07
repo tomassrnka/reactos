@@ -388,12 +388,13 @@ FUNC KiStackFault
     /* We have an error code */
     EnterTrap (TF_HAS_ERROR_CODE OR TF_SAVE_ALL)
 
-    /* Check if the frame was from kernelmode */
+    /* Check if the frame was from user mode */
     test word ptr [rbp + KTRAP_FRAME_SegCs], 3
     jnz KiStackFaultUserMode
 
     /* Bugcheck */
     Fatal EXCEPTION_STACK_FAULT
+    jmp $
 
 KiStackFaultUserMode:
     /* Enable interrupts for user-mode */
