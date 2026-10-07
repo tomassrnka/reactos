@@ -1191,6 +1191,7 @@ CcFlushCache (
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     LONGLONG FlushStart, FlushEnd;
     NTSTATUS Status;
+    KIRQL OldIrql;
 
     CCTRACE(CC_API_DEBUG, "SectionObjectPointers=%p FileOffset=0x%I64X Length=%lu\n",
         SectionObjectPointers, FileOffset ? FileOffset->QuadPart : 0LL, Length);
@@ -1201,21 +1202,29 @@ CcFlushCache (
         goto quit;
     }
 
-    if (!SectionObjectPointers->SharedCacheMap)
+    /*
+     * Reference the shared cache map for the flush: the lazy writer drops its own reference
+     * after releasing the file system's locks, and deletes the map if that was the last one.
+     */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    SharedCacheMap = SectionObjectPointers->SharedCacheMap;
+    if (SharedCacheMap)
+        SharedCacheMap->OpenCount++;
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+    if (!SharedCacheMap)
     {
         /* Forward this to Mm */
         MmFlushSegment(SectionObjectPointers, FileOffset, Length, IoStatus);
         return;
     }
 
-    SharedCacheMap = SectionObjectPointers->SharedCacheMap;
-    ASSERT(SharedCacheMap);
     if (FileOffset)
     {
         FlushStart = FileOffset->QuadPart;
         Status = RtlLongLongAdd(FlushStart, Length, &FlushEnd);
         if (!NT_SUCCESS(Status))
-            goto quit;
+            goto dereference;
     }
     else
     {
@@ -1308,6 +1317,12 @@ CcFlushCache (
     }
 
     KeReleaseGuardedMutex(&SharedCacheMap->FlushCacheLock);
+
+dereference:
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    if (--SharedCacheMap->OpenCount == 0)
+        CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 
 quit:
     if (IoStatus)
