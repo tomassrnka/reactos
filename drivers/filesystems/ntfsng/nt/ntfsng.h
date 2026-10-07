@@ -209,6 +209,14 @@ extern NG_GLOBAL NgGlobal;
 NTSTATUS NgErrnoToStatus(int Err);
 VOID NgAcquireCore(PNG_VCB Vcb);
 VOID NgReleaseCore(PNG_VCB Vcb);
+typedef struct _NG_SHARED_HOLD
+{
+    ULONGLONG Since;
+    UCHAR Category;
+    BOOLEAN Nested;                 /* inside the thread's own exclusive hold */
+} NG_SHARED_HOLD;
+VOID NgAcquireCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold);
+VOID NgReleaseCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold);
 VOID NgStackSample(VOID);
 PNG_FCB NgAllocateFcb(PNG_VCB Vcb);
 VOID NgDereferenceFcb(PNG_FCB Fcb);

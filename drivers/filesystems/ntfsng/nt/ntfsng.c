@@ -105,6 +105,50 @@ VOID NgReleaseCore(PNG_VCB Vcb)
     KeLeaveCriticalRegion();
 }
 
+/*
+ * CoreLock shared: requests that only read core state (data reads, listings, stat, security and
+ * stream queries).  The core runs them under its own per-inode locks, as Linux runs lookups and
+ * reads in parallel; nothing under a shared hold writes metadata, parks an FCB's node or evicts
+ * inodes.  The statistics are updated with interlocked operations.
+ */
+VOID NgAcquireCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
+{
+    ULONGLONG T0;
+    NG_LOCK_STAT *S;
+    if (ExIsResourceAcquiredExclusiveLite(&Vcb->CoreLock))
+    {
+        Hold->Nested = TRUE;
+        NgAcquireCore(Vcb);
+        return;
+    }
+    Hold->Nested = FALSE;
+    KeEnterCriticalRegion();
+    Hold->Category = NgLockCategory();
+    S = &Vcb->LockStats.Stat[Hold->Category];
+    T0 = __rdtsc();
+    if (!ExAcquireResourceSharedLite(&Vcb->CoreLock, FALSE))
+    {
+        ExAcquireResourceSharedLite(&Vcb->CoreLock, TRUE);
+        InterlockedIncrement((PLONG)&S->Contended);
+        ExInterlockedAddLargeStatistic((PLARGE_INTEGER)&S->WaitUs, (ULONG)NgTicksToUs(__rdtsc() - T0));
+    }
+    InterlockedIncrement((PLONG)&S->Acquired);
+    Hold->Since = __rdtsc();
+}
+
+VOID NgReleaseCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
+{
+    if (Hold->Nested)
+    {
+        NgReleaseCore(Vcb);
+        return;
+    }
+    ExInterlockedAddLargeStatistic((PLARGE_INTEGER)&Vcb->LockStats.Stat[Hold->Category].HeldUs,
+                                   (ULONG)NgTicksToUs(__rdtsc() - Hold->Since));
+    ExReleaseResourceLite(&Vcb->CoreLock);
+    KeLeaveCriticalRegion();
+}
+
 /* Prints the request types that took CoreLock (at shutdown). */
 VOID NgPrintLockStats(PNG_VCB Vcb)
 {
@@ -214,10 +258,13 @@ int NgEnsureNode(PNG_FCB Fcb)
             return Err;
         Base = Stream;
     }
-    Fcb->Node = Base;
+    /* Two shared holders may get here at once: the first node stays. */
+    if (InterlockedCompareExchangePointer((PVOID *)&Fcb->Node, Base, NULL) != NULL)
+        ngc_put(Base);
     return 0;
 }
 
+/* Only under an exclusive hold: a shared holder may be using the node. */
 VOID NgParkNode(PNG_FCB Fcb)
 {
     if (Fcb->Node && !Fcb->IsRoot)
@@ -231,16 +278,20 @@ VOID NgParkNode(PNG_FCB Fcb)
 VOID NgFillStat(PNG_FCB Fcb)
 {
     LONGLONG Alloc;
+    NG_SHARED_HOLD Hold;
+    struct ngc_stat St;
     if (!Fcb->HasNode)
         return;
-    NgAcquireCore(Fcb->Vcb);
+    NgAcquireCoreShared(Fcb->Vcb, &Hold);
     if (NgEnsureNode(Fcb))
     {
-        NgReleaseCore(Fcb->Vcb);
+        NgReleaseCoreShared(Fcb->Vcb, &Hold);
         return;
     }
-    ngc_stat(Fcb->Node, &Fcb->Stat);
-    NgReleaseCore(Fcb->Vcb);
+    /* Filled in a local: another shared holder may be reading or filling Fcb->Stat. */
+    ngc_stat(Fcb->Node, &St);
+    NgReleaseCoreShared(Fcb->Vcb, &Hold);
+    Fcb->Stat = St;
     if (Fcb->SectionObjectPointers.SharedCacheMap && Fcb->Header.FileSize.QuadPart != (LONGLONG)Fcb->Stat.size)
         DPRINT1("ntfsng: BUG: cached %I64x header size %I64d, core size %I64u\n", Fcb->MftNo,
                 Fcb->Header.FileSize.QuadPart, Fcb->Stat.size);

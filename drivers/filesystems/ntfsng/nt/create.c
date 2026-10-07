@@ -458,6 +458,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_CCB RelatedCcb = NULL, Ccb = NULL;
     ngc_node *Node = NULL, *Parent = NULL, *Next;
     BOOLEAN Trailing = FALSE, IsDir, Missing = FALSE, TargetExists = FALSE, Created = FALSE, Shared = FALSE;
+    BOOLEAN Exclusive = (Disposition == FILE_CREATE || Disposition == FILE_SUPERSEDE);
+    NG_SHARED_HOLD Hold;
     ULONG_PTR Information = FILE_OPENED;
     struct ngc_stat St, PSt;
     PWCHAR Real = NULL;
@@ -546,8 +548,15 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         goto out;
     }
 
-    /* Walk the path.  Parent keeps the directory of the last component. */
-    NgAcquireCore(Vcb);
+    /*
+     * Walk the path.  Parent keeps the directory of the last component.  The walk takes CoreLock
+     * shared; when it finds that the open creates something, it starts again exclusive.
+     */
+walk:
+    if (Exclusive)
+        NgAcquireCore(Vcb);
+    else
+        NgAcquireCoreShared(Vcb, &Hold);
     Node = ngc_root(Vcb->Core);
     Rest.Buffer = Full.Buffer + 1;
     Rest.Length = Rest.MaximumLength = Full.Length - sizeof(WCHAR);
@@ -630,8 +639,25 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Status == STATUS_REPARSE)
     {
-        NgReleaseCore(Vcb);
+        if (Exclusive)
+            NgReleaseCore(Vcb);
+        else
+            NgReleaseCoreShared(Vcb, &Hold);
         goto out;
+    }
+    if (!Exclusive && NT_SUCCESS(Status) && !OpenTarget &&
+        ((Missing && Disposition != FILE_OPEN && Disposition != FILE_OVERWRITE) || (!Missing && Stream.Length)))
+    {
+        /* Something may be created (a file, a directory or a named stream): again, exclusive. */
+        if (Node)
+            ngc_put(Node);
+        if (Parent)
+            ngc_put(Parent);
+        Node = Parent = NULL;
+        Missing = FALSE;
+        NgReleaseCoreShared(Vcb, &Hold);
+        Exclusive = TRUE;
+        goto walk;
     }
     if (NT_SUCCESS(Status) && OpenTarget)
     {
@@ -728,7 +754,10 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ngc_stat(Parent, &PSt);
     else
         PSt.mft_ref = 5;    /* the root is its own parent */
-    NgReleaseCore(Vcb);
+    if (Exclusive)
+        NgReleaseCore(Vcb);
+    else
+        NgReleaseCoreShared(Vcb, &Hold);
 
     if (!NT_SUCCESS(Status))
     {
