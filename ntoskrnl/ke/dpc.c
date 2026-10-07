@@ -652,6 +652,10 @@ KiRetireDpcList(IN PKPRCB Prcb)
         /* Clear DPC Flags */
         Prcb->DpcRoutineActive = FALSE;
         Prcb->DpcInterruptRequested = FALSE;
+#ifdef CONFIG_SMP
+        /* Pairs with the barrier in KeInsertQueueDpc for a DPC from another processor */
+        KeMemoryBarrier();
+#endif
 
 #ifdef CONFIG_SMP
         /* Check if we have deferred threads */
@@ -775,6 +779,9 @@ KeInsertQueueDpc(IN PKDPC Dpc,
         DpcData->DpcQueueDepth++;
         DpcData->DpcCount++;
         DpcConfigured = TRUE;
+
+        /* The target clears its DPC flags without the DPC lock, see KiRetireDpcList */
+        if (Prcb != CurrentPrcb) KeMemoryBarrier();
 
         /* Check if this is a high importance DPC */
         if (Dpc->Importance == HighImportance)
