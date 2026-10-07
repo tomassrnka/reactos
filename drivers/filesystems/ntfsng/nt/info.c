@@ -497,7 +497,11 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         }
     }
     if (!Err && !IsLink)
+    {
         NgMakeShortName(Vcb, NewDir, Fcb->Node, NewName.Buffer, NewName.Length / sizeof(WCHAR));
+        if (!Fcb->IsDirectory)
+            NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Fcb->Stat.crtime);
+    }
     if (!Err && TargetFcb)
     {
         TargetFcb->Deleted = TRUE;

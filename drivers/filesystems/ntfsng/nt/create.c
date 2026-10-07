@@ -235,6 +235,40 @@ VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action)
                            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
 
 /*
+ * Tunnel cache: a name that goes away (delete, rename) leaves its creation time for a few
+ * seconds, and a file created under that name in the same directory takes it over, as on
+ * Windows (programs that save by writing a new file and renaming keep the creation time).
+ */
+VOID NgTunnelAdd(PNG_VCB Vcb, ULONGLONG DirMftNo, PCWSTR Name, USHORT NameChars, LONGLONG CreationTime)
+{
+    UNICODE_STRING Long, Short;
+    Long.Buffer = (PWSTR)Name;
+    Long.Length = Long.MaximumLength = NameChars * sizeof(WCHAR);
+    RtlInitEmptyUnicodeString(&Short, NULL, 0);
+    FsRtlAddToTunnelCache(&Vcb->Tunnel, DirMftNo & 0xffffffffffffULL, &Short, &Long, FALSE,
+                          sizeof(CreationTime), &CreationTime);
+}
+
+/* Caller holds CoreLock; Node was just created as Name in Parent. */
+static VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name)
+{
+    struct ngc_stat Dir;
+    WCHAR ShortBuf[12], LongBuf[64];
+    UNICODE_STRING Short, Long;
+    LONGLONG Times[4] = { 0, 0, 0, 0 };
+    ULONG Length = sizeof(Times[0]);
+
+    ngc_stat(Parent, &Dir);
+    RtlInitEmptyUnicodeString(&Short, ShortBuf, sizeof(ShortBuf));
+    RtlInitEmptyUnicodeString(&Long, LongBuf, sizeof(LongBuf));
+    if (FsRtlFindInTunnelCache(&Vcb->Tunnel, Dir.mft_ref & 0xffffffffffffULL, Name, &Short, &Long, &Length, &Times[0]) &&
+        Length == sizeof(Times[0]))
+        ngc_set_info(Vcb->Core, Node, Times, 0, 0);
+    if (Long.Buffer && Long.Buffer != LongBuf)
+        ExFreePool(Long.Buffer);
+}
+
+/*
  * A new long name that is not a valid 8.3 name gets a generated DOS name (LONGNA~1.EXT), unique in
  * its directory, as NTFS on Windows creates one unless NtfsDisable8dot3NameCreation is 1.  Caller
  * holds CoreLock.  A failure only leaves the file without a short name.
@@ -582,7 +616,11 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         {
             Err = ngc_create(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), WantDir, &Node);
             if (!Err)
+            {
                 NgMakeShortName(Vcb, Parent, Node, Comp.Buffer, Comp.Length / sizeof(WCHAR));
+                if (!WantDir)
+                    NgTunnelApply(Vcb, Parent, Node, &Comp);
+            }
             if (!Err)
             {
                 unsigned int Attrs = (FileAttributes & NG_SETTABLE_ATTRS) | (WantDir ? 0 : FILE_ATTRIBUTE_ARCHIVE);
@@ -893,6 +931,8 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
     }
     if (!Err)
     {
+        if (!Fcb->Stream.Length && !Fcb->IsDirectory)
+            NgTunnelAdd(Vcb, Fcb->DelParentMftNo, Fcb->DelName, Fcb->DelNameLength, Fcb->Stat.crtime);
         Fcb->Deleted = TRUE;
         NgUnlistFcb(Fcb);
         NgParkNode(Fcb);
