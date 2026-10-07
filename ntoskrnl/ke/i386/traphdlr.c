@@ -460,8 +460,6 @@ __cdecl
 KiTrap02Handler(VOID)
 {
     PKTSS Tss, NmiTss;
-    PKTHREAD Thread;
-    PKPROCESS Process;
     PKGDTENTRY TssGdt;
     KTRAP_FRAME TrapFrame;
     KIRQL OldIrql;
@@ -476,15 +474,12 @@ KiTrap02Handler(VOID)
      */
     _disable();
 
-    /* Get the current TSS, thread, and process */
+    /*
+     * Get the current TSS. The code that loads CR3, LDTR and the I/O map base
+     * keeps them current in it; the current thread cannot tell, since it is
+     * already the incoming one during a context switch.
+     */
     Tss = KeGetPcr()->TSS;
-    Thread = ((PKIPCR)KeGetPcr())->PrcbData.CurrentThread;
-    Process = Thread->ApcState.Process;
-
-    /* Save data usually not present in the TSS */
-    Tss->CR3 = Process->DirectoryTableBase[0];
-    Tss->IoMapBase = Process->IopmOffset;
-    Tss->LDT = Process->LdtDescriptor.LimitLow ? KGDT_LDT : 0;
 
     /* Now get the base address of the NMI TSS */
     TssGdt = &((PKIPCR)KeGetPcr())->GDT[KGDT_NMI_TSS / sizeof(KGDTENTRY)];
@@ -534,6 +529,11 @@ KiTrap02Handler(VOID)
     TrapFrame.DbgEip = Tss->Eip;
     TrapFrame.DbgEbp = Tss->Ebp;
 
+    /* Freeze requests from other processors come as NMIs and save the
+       processor state themselves; saving twice would record DR7 cleared */
+    if (KiProcessorFreezeHandler(&TrapFrame, NULL))
+        goto Handled;
+
     /* Store the trap frame in the KPRCB */
     KiSaveProcessorState(&TrapFrame, NULL);
 
@@ -553,6 +553,7 @@ KiTrap02Handler(VOID)
         KeGetPcr()->Irql = OldIrql;
     }
 
+Handled:
     /*
      * Although the CPU disabled NMIs, we just did a BIOS call, which could've
      * totally changed things.
@@ -727,6 +728,22 @@ KiTrap07Handler(IN PKTRAP_FRAME TrapFrame)
 
     /* Save trap frame */
     KiEnterTrap(TrapFrame);
+
+#ifdef CONFIG_SMP
+    /*
+     * The NMI task switch sets TS even with interrupts disabled. On SMP the
+     * NPX owner is either NULL or the thread whose state is in the registers
+     * (the outgoing one during a context switch), so TS on a loaded state is
+     * spurious: clear it without touching any NPX state.
+     */
+    NpxThread = KeGetCurrentPrcb()->NpxThread;
+    if (NpxThread && (NpxThread->NpxState == NPX_STATE_LOADED) &&
+        !(KiGetThreadNpxArea(NpxThread)->Cr0NpxState & CR0_EM))
+    {
+        __writecr0(__readcr0() & ~CR0_TS);
+        KiEoiHelper(TrapFrame);
+    }
+#endif
 
     /* Try to handle NPX delay load */
     for (;;)

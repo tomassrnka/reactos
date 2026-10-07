@@ -48,6 +48,10 @@ VOID
 HalpPrintApicTables(VOID);
 
 VOID
+HalpInitializeIpi(
+    _In_ ULONG ProcessorNumber);
+
+VOID
 FASTCALL
 HalpBroadcastClockIpi(
     _In_ UCHAR Vector);
@@ -76,13 +80,13 @@ HalRequestIpiSpecifyVector(
     _In_ KAFFINITY TargetSet,
     _In_ UCHAR Vector);
 
-#ifdef _M_AMD64
-
 NTHALAPI
 VOID
 NTAPI
 HalpSendNMI(
     _In_ KAFFINITY TargetSet);
+
+#ifdef _M_AMD64
 
 NTHALAPI
 VOID

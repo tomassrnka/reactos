@@ -378,6 +378,22 @@ KiIpiSignalPacketDoneAndStall(
     IN volatile PULONG ReverseStall
 );
 
+extern PKPRCB KiFreezeOwner;
+
+BOOLEAN
+KiProcessorFreezeHandler(
+    _In_ PKTRAP_FRAME TrapFrame,
+    _In_ PKEXCEPTION_FRAME ExceptionFrame);
+
+VOID
+NTAPI
+KiIpiSendRequest(
+    _In_ KAFFINITY TargetSet,
+    _In_ PKIPI_WORKER WorkerRoutine,
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Parameter3);
+
 /* next file ***************************************************************/
 
 UCHAR
@@ -825,7 +841,26 @@ KiHandleNmi(VOID);
 
 VOID
 NTAPI
-KeFlushCurrentTb(VOID);
+KeFlushSingleTb(
+    _In_ PVOID Address,
+    _In_ BOOLEAN AllProcessors);
+
+VOID
+NTAPI
+KeFlushRangeTb(
+    _In_ PVOID Address,
+    _In_ ULONG NumberOfPages,
+    _In_ BOOLEAN Global);
+
+VOID
+NTAPI
+KeFlushProcessTb(VOID);
+
+VOID
+NTAPI
+KeFlushEntireTb(
+    _In_ BOOLEAN Invalid,
+    _In_ BOOLEAN AllProcessors);
 
 BOOLEAN
 NTAPI

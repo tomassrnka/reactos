@@ -23,12 +23,11 @@ KiSwapProcess(IN PKPROCESS NewProcess,
 {
     PKIPCR Pcr = (PKIPCR)KeGetPcr();
 #ifdef CONFIG_SMP
-    LONG SetMember;
+    LONG SetMember = (LONG)Pcr->PrcbData.SetMember;
 
-    /* Update active processor mask */
-    SetMember = (LONG)Pcr->SetMember;
-    InterlockedXor((PLONG)&NewProcess->ActiveProcessors, SetMember);
-    InterlockedXor((PLONG)&OldProcess->ActiveProcessors, SetMember);
+    /* Join the new process before its address space is loaded, so its flushes reach this processor */
+    if (NewProcess != OldProcess)
+        InterlockedOr((PLONG)&NewProcess->ActiveProcessors, SetMember);
 #endif
 
     /* Check for new LDT */
@@ -39,16 +38,22 @@ KiSwapProcess(IN PKPROCESS NewProcess,
             KeSetGdtSelector(KGDT_LDT,
                              ((PULONG)&NewProcess->LdtDescriptor)[0],
                              ((PULONG)&NewProcess->LdtDescriptor)[1]);
-            Ke386SetLocalDescriptorTable(KGDT_LDT);
+            KiSetLdt((PKPCR)Pcr, KGDT_LDT);
         }
         else
         {
-            Ke386SetLocalDescriptorTable(0);
+            KiSetLdt((PKPCR)Pcr, 0);
         }
     }
 
     /* Update CR3 */
-    __writecr3(NewProcess->DirectoryTableBase[0]);
+    KiSetCr3((PKPCR)Pcr, NewProcess->DirectoryTableBase[0]);
+
+#ifdef CONFIG_SMP
+    /* Leave the old process once its address space is no longer loaded */
+    if (NewProcess != OldProcess)
+        InterlockedAnd((PLONG)&OldProcess->ActiveProcessors, ~SetMember);
+#endif
 
     /* Clear GS */
     Ke386SetGs(0);

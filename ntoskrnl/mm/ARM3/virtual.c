@@ -522,7 +522,7 @@ MiDeletePte(IN PMMPTE PointerPte,
     }
 
     /* Flush the TLB */
-    KeFlushCurrentTb();
+    KeFlushEntireTb(TRUE, TRUE);
 }
 
 VOID
@@ -2382,15 +2382,11 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     PteContents.u.Hard.Valid = 0;
                     PteContents.u.Soft.Transition = 1;
                     PteContents.u.Trans.Protection = ProtectionMask;
-                    /* Decrease PFN share count and write the PTE */
-                    MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
+                    /* Write the PTE, and release the page only when no processor can still use it */
                     // FIXME: remove the page from the WS
                     MI_WRITE_INVALID_PTE(PointerPte, PteContents);
-#ifdef CONFIG_SMP
-                    // FIXME: Should invalidate entry in every CPU TLB
-                    ASSERT(KeNumberProcessors == 1);
-#endif
-                    KeInvalidateTlbEntry(MiPteToAddress(PointerPte));
+                    KeFlushSingleTb(MiPteToAddress(PointerPte), FALSE);
+                    MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
 
                     /* We are done for this PTE */
                     MiReleasePfnLock(OldIrql);
@@ -2421,6 +2417,12 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
             /* Move to the next PTE */
             PointerPte++;
         }
+
+#ifdef CONFIG_SMP
+        KeFlushRangeTb((PVOID)StartingAddress,
+                       (EndingAddress + 1 - StartingAddress) / PAGE_SIZE,
+                       FALSE);
+#endif
 
         /* Unlock the working set */
         MiUnlockProcessWorkingSetUnsafe(Process, Thread);
@@ -2583,7 +2585,7 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
     // All the PTEs have been dereferenced and made invalid, flush the TLB now
     // and then release the PFN lock
     //
-    KeFlushCurrentTb();
+    KeFlushEntireTb(TRUE, TRUE);
     MiReleasePfnLock(OldIrql);
 }
 

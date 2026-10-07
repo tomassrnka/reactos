@@ -289,24 +289,34 @@ KiIdleLoop(VOID)
             /* Enable interrupts */
             _enable();
 
-            /* Capture current thread data */
-            OldThread = Prcb->CurrentThread;
-            NewThread = Prcb->NextThread;
-
-            /* Set new thread data */
-            Prcb->NextThread = NULL;
-            Prcb->CurrentThread = NewThread;
-
-            /* The thread is now running */
-            NewThread->State = Running;
-
 #ifdef CONFIG_SMP
             /* Do the swap at SYNCH_LEVEL */
             KfRaiseIrql(SYNCH_LEVEL);
 #endif
 
-            /* Switch away from the idle thread */
-            KiSwapContext(APC_LEVEL, OldThread);
+            /* Other processors replace NextThread under the PRCB lock */
+            KiAcquirePrcbLock(Prcb);
+            NewThread = Prcb->NextThread;
+            if (NewThread)
+            {
+                /* Capture current thread data */
+                OldThread = Prcb->CurrentThread;
+
+                /* Set new thread data */
+                Prcb->NextThread = NULL;
+                Prcb->CurrentThread = NewThread;
+
+                /* The thread is now running */
+                NewThread->State = Running;
+                KiReleasePrcbLock(Prcb);
+
+                /* Switch away from the idle thread */
+                KiSwapContext(APC_LEVEL, OldThread);
+            }
+            else
+            {
+                KiReleasePrcbLock(Prcb);
+            }
 
 #ifdef CONFIG_SMP
             /* Go back to DISPATCH_LEVEL */
@@ -327,45 +337,24 @@ KiSwapContextExit(IN PKTHREAD OldThread,
                   IN PKSWITCHFRAME SwitchFrame)
 {
     PKIPCR Pcr = (PKIPCR)KeGetPcr();
-    PKPROCESS OldProcess, NewProcess;
+    PKPROCESS NewProcess;
     PKTHREAD NewThread;
-    ULONG64 CurrentCycleTime, ElapsedCycles, NewCycleTime;
+    ULONG Cr0, NewCr0;
 
-    /* We are on the new thread stack now */
+    /* We are on the new thread stack now, with interrupts still disabled */
     NewThread = Pcr->PrcbData.CurrentThread;
-
-    /* Now we are the new thread. Check if it's in a new process */
-    OldProcess = OldThread->ApcState.Process;
     NewProcess = NewThread->ApcState.Process;
-    if (OldProcess != NewProcess)
-    {
-        /* Check if there is a different LDT */
-        if (*(PULONGLONG)&OldProcess->LdtDescriptor != *(PULONGLONG)&NewProcess->LdtDescriptor)
-        {
-            if (NewProcess->LdtDescriptor.LimitLow)
-            {
-                KeSetGdtSelector(KGDT_LDT,
-                                 ((PULONG)&NewProcess->LdtDescriptor)[0],
-                                 ((PULONG)&NewProcess->LdtDescriptor)[1]);
-                Ke386SetLocalDescriptorTable(KGDT_LDT);
-            }
-            else
-            {
-                Ke386SetLocalDescriptorTable(0);
-            }
-        }
 
-        /* Switch address space and flush TLB */
-        __writecr3(NewProcess->DirectoryTableBase[0]);
-    }
+    /* Set the incoming thread's CR0 state, which is final now that the
+       processor that last ran it has saved it */
+    Cr0 = __readcr0();
+    NewCr0 = NewThread->NpxState |
+             (Cr0 & ~(CR0_MP | CR0_EM | CR0_TS)) |
+             KiGetThreadNpxArea(NewThread)->Cr0NpxState;
+    if (Cr0 != NewCr0)  __writecr0(NewCr0);
 
-    /* Update the old thread's cycle time */
-    CurrentCycleTime = __rdtsc();
-    ElapsedCycles = CurrentCycleTime - Pcr->PrcbData.StartCycles;
-    NewCycleTime = ((PETHREAD)OldThread)->CycleTime + ElapsedCycles;
-    KiWriteThreadCycleTime(OldThread, NewCycleTime);
-    InterlockedAdd64((PLONG64)&((PEPROCESS)OldProcess)->CycleTime, ElapsedCycles);
-    Pcr->PrcbData.StartCycles = CurrentCycleTime;
+    /* ISRs may run again */
+    _enable();
 
     /* Clear GS */
     Ke386SetGs(0);
@@ -424,8 +413,10 @@ KiSwapContextEntry(IN PKSWITCHFRAME SwitchFrame,
 {
     PKIPCR Pcr = (PKIPCR)KeGetPcr();
     PKTHREAD OldThread, NewThread;
-    ULONG Cr0, NewCr0;
+    PKPROCESS OldProcess, NewProcess;
+    ULONG64 CurrentCycleTime, ElapsedCycles, NewCycleTime;
 #ifdef CONFIG_SMP
+    ULONG Cr0;
     PKTHREAD NpxThread;
     PFX_SAVE_AREA NpxSaveArea;
 #endif
@@ -450,16 +441,13 @@ KiSwapContextEntry(IN PKSWITCHFRAME SwitchFrame,
     /* Get the old thread and set its kernel stack */
     OldThread->KernelStack = SwitchFrame;
 
-    /* Set swapbusy to false for the new thread */
-    NewThread->SwapBusy = FALSE;
-
     /* ISRs can change FPU state, so disable interrupts while checking */
     _disable();
 
+#ifdef CONFIG_SMP
     /* Get the current CR0 state */
     Cr0 = __readcr0();
 
-#ifdef CONFIG_SMP
     /*
      * The outgoing thread's NPX state lives in this processor's registers.
      * Save it and drop local ownership so the thread can resume on any processor.
@@ -483,15 +471,51 @@ KiSwapContextEntry(IN PKSWITCHFRAME SwitchFrame,
     }
 #endif
 
-    /* Set the incoming thread's CR0 state */
-    NewCr0 = NewThread->NpxState |
-             (Cr0 & ~(CR0_MP | CR0_EM | CR0_TS)) |
-             KiGetThreadNpxArea(NewThread)->Cr0NpxState;
-    if (Cr0 != NewCr0)  __writecr0(NewCr0);
+    /* Switch to the new thread's address space while still on the old stack */
+    OldProcess = OldThread->ApcState.Process;
+    NewProcess = NewThread->ApcState.Process;
+    if (OldProcess != NewProcess)
+    {
+        /* Check if there is a different LDT */
+        if (*(PULONGLONG)&OldProcess->LdtDescriptor != *(PULONGLONG)&NewProcess->LdtDescriptor)
+        {
+            if (NewProcess->LdtDescriptor.LimitLow)
+            {
+                KeSetGdtSelector(KGDT_LDT,
+                                 ((PULONG)&NewProcess->LdtDescriptor)[0],
+                                 ((PULONG)&NewProcess->LdtDescriptor)[1]);
+                KiSetLdt((PKPCR)Pcr, KGDT_LDT);
+            }
+            else
+            {
+                KiSetLdt((PKPCR)Pcr, 0);
+            }
+        }
 
-    /* Now enable interrupts and do the switch */
-    _enable();
-    KiSwitchThreads(OldThread, NewThread->KernelStack);
+#ifdef CONFIG_SMP
+        /* TLB flushes target the processors running a process, so join the
+           new one before loading its address space and leave the old after */
+        InterlockedOr((PLONG)&NewProcess->ActiveProcessors, (LONG)Pcr->PrcbData.SetMember);
+#endif
+
+        /* Switch address space and flush TLB */
+        KiSetCr3((PKPCR)Pcr, NewProcess->DirectoryTableBase[0]);
+
+#ifdef CONFIG_SMP
+        InterlockedAnd((PLONG)&OldProcess->ActiveProcessors, ~(LONG)Pcr->PrcbData.SetMember);
+#endif
+    }
+
+    /* Update the old thread's cycle time */
+    CurrentCycleTime = __rdtsc();
+    ElapsedCycles = CurrentCycleTime - Pcr->PrcbData.StartCycles;
+    NewCycleTime = ((PETHREAD)OldThread)->CycleTime + ElapsedCycles;
+    KiWriteThreadCycleTime(OldThread, NewCycleTime);
+    InterlockedAdd64((PLONG64)&((PEPROCESS)OldProcess)->CycleTime, ElapsedCycles);
+    Pcr->PrcbData.StartCycles = CurrentCycleTime;
+
+    /* Release the old thread, wait for the new one and switch stacks */
+    KiSwitchThreads(OldThread, NewThread);
 }
 
 VOID
@@ -537,9 +561,16 @@ KiDispatchInterrupt(VOID)
         /* Acquire the PRCB lock */
         KiAcquirePrcbLock(Prcb);
 
+        /* Another processor may have taken back the standby thread */
+        NewThread = Prcb->NextThread;
+        if (!NewThread)
+        {
+            KiReleasePrcbLock(Prcb);
+            return;
+        }
+
         /* Capture current thread data */
         OldThread = Prcb->CurrentThread;
-        NewThread = Prcb->NextThread;
 
         /* Set new thread data */
         Prcb->NextThread = NULL;
@@ -548,6 +579,9 @@ KiDispatchInterrupt(VOID)
         /* The thread is now running */
         NewThread->State = Running;
         OldThread->WaitReason = WrDispatchInt;
+
+        /* Another processor may pick the old thread once it is queued */
+        KiSetThreadSwapBusy(OldThread);
 
         /* Make the old thread ready */
         KxQueueReadyThread(OldThread, Prcb);
