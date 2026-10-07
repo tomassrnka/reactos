@@ -36,6 +36,7 @@ int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t l
 int kshim_sync(struct super_block *sb);
 bool kshim_sb_dirty(struct super_block *sb);
 int kshim_mapping_writeback(struct address_space *m);
+bool kshim_mapping_dirty(struct address_space *m);
 void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, size_t len);
 extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_dirty;
 extern unsigned long long kshim_counter_write_bytes;
@@ -737,6 +738,63 @@ static long ngc_read_impl(ngc_node *n, unsigned long long off, unsigned int len,
 	if (drop_cache && vi->i_mapping->nrpages > 256)
 		kshim_mapping_shrink(vi->i_mapping);
 	return done;
+}
+
+/*
+ * Non-cached and paging reads of a non-resident, uncompressed stream: straight from its clusters
+ * into @buf, one device transfer per run, instead of page by page through the shim page cache.
+ * Bytes past the initialized size, holes, and bytes past EOF up to @len read as zeros.  -EAGAIN:
+ * the stream needs the page-cache path (resident, compressed, dirty pages, unaligned buffer).
+ */
+long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, void *buf)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct ntfs_volume *vol = ni->vol;
+	unsigned int bs = v->bdev->logical_block_size;
+	u64 end = off + len, data_end, pos = off;
+	struct runlist_element *rl;
+	int err;
+
+	if (!NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) ||
+	    ((uintptr_t)buf & 3) || ((off | len) & (bs - 1)) || kshim_mapping_dirty(vi->i_mapping))
+		return -EAGAIN;
+	data_end = min_t(u64, end, (u64)min_t(loff_t, ni->initialized_size, i_size_read(vi)));
+	mutex_lock(&ni->mrec_lock);
+	down_write(&ni->runlist.lock);
+	err = ntfs_attr_map_whole_runlist(ni);
+	rl = ni->runlist.rl;
+	while (!err && pos < data_end) {
+		s64 vcn = (s64)(pos >> vol->cluster_size_bits);
+		u64 run_end, n, rd;
+		while (rl && rl->length && rl->vcn + rl->length <= vcn)
+			rl++;
+		if (!rl || !rl->length || rl->vcn > vcn) {
+			err = -EIO;
+			break;
+		}
+		run_end = (u64)(rl->vcn + rl->length) << vol->cluster_size_bits;
+		n = min_t(u64, run_end, data_end) - pos;
+		if (rl->lcn == LCN_HOLE) {
+			memset((u8 *)buf + (pos - off), 0, n);
+		} else if (rl->lcn < 0) {
+			err = -EIO;
+			break;
+		} else {
+			/* Whole sectors: the tail past the initialized size is zeroed below. */
+			rd = min_t(u64, (n + bs - 1) & ~(u64)(bs - 1), end - pos);
+			err = kshim_dev_rw(v->bdev, 0, ((u64)rl->lcn << vol->cluster_size_bits) +
+					   (pos - ((u64)rl->vcn << vol->cluster_size_bits)), (u8 *)buf + (pos - off), (size_t)rd);
+		}
+		pos += n;
+	}
+	up_write(&ni->runlist.lock);
+	mutex_unlock(&ni->mrec_lock);
+	if (err)
+		return err;
+	if (data_end < end)
+		memset((u8 *)buf + (max_t(u64, data_end, off) - off), 0, end - max_t(u64, data_end, off));
+	return len;
 }
 
 void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads)

@@ -187,7 +187,11 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgAcquireCore(Vcb);
         Done = NgEnsureNode(Fcb);
         if (!Done)
-            Done = ngc_read(Fcb->Node, Offset.QuadPart, Length, Buffer, 1);
+        {
+            Done = ngc_read_direct(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
+            if (Done == -NGC_EAGAIN)
+                Done = ngc_read(Fcb->Node, Offset.QuadPart, Length, Buffer, 1);
+        }
         else if (Fcb->Deleted)
         {
             /* A deleted file's pages can still be faulted in by a mapping: zeros. */

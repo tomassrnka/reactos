@@ -12,6 +12,7 @@ typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
 
 #define NGC_ENOENT 2
 #define NGC_EIO 5
+#define NGC_EAGAIN 11
 #define NGC_ENOMEM 12
 #define NGC_ENOTDIR 20
 #define NGC_EISDIR 21
@@ -81,6 +82,7 @@ int ngc_readdir(ngc_vol *v, ngc_node *dir, ngc_filldir_t fn, void *ctx);
 int ngc_streams(ngc_node *n, ngc_stream_t fn, void *ctx);
 /* Reads [off, off+len) through the private page cache; bytes past EOF are zero.  Returns bytes copied or <0. */
 long ngc_read(ngc_node *n, unsigned long long off, unsigned int len, void *buf, int drop_cache);
+long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, void *buf);
 void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads);
 /* Drops the clean, unreferenced shim page-cache pages of a node. */
 void ngc_trim(ngc_node *n);
