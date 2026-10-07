@@ -81,7 +81,7 @@ NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     NTSTATUS Status;
 
     if (!Fcb || Fcb->IsVolume || !Fcb->HasNode)
-        return STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_DEVICE_REQUEST;   /* the I/O manager supplies its default */
     Status = NgGetSecurity(Vcb, Fcb, &Sd);
     if (!NT_SUCCESS(Status))
         return Status;
@@ -141,7 +141,7 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     int Err;
 
     if (!Fcb || Fcb->IsVolume || !Fcb->HasNode)
-        return STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_DEVICE_REQUEST;   /* the I/O manager supplies its default */
     if (Vcb->ReadOnly)
         return STATUS_MEDIA_WRITE_PROTECTED;
     ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);

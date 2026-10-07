@@ -220,9 +220,7 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             NgStandard(Fcb, &A->StandardInformation);
             A->InternalInformation.IndexNumber.QuadPart = Fcb->Stat.mft_ref;
             A->EaInformation.EaSize = 0;
-            A->AccessInformation.AccessFlags = 0;
             A->PositionInformation.CurrentByteOffset = FileObject->CurrentByteOffset;
-            A->ModeInformation.Mode = 0;
             A->AlignmentInformation.AlignmentRequirement = DeviceObject->AlignmentRequirement;
             Status = NgName(Ccb, &A->NameInformation, Length - FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation), &NameUsed);
             Used = FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation) + NameUsed;
