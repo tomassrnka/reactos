@@ -10,6 +10,7 @@
     #define LWIP_TAG         'PIwl'
     #define LWIP_MESSAGE_TAG 'sMwl'
     #define LWIP_QUEUE_TAG   'uQwl'
+    #define LWIP_ACCEPT_TAG  'cAwl'
 #endif
 
 typedef struct tcp_pcb* PTCP_PCB;
@@ -104,7 +105,8 @@ extern void TCPRecvEventHandler(void *arg);
 PTCP_PCB    LibTCPSocket(void *arg);
 VOID        LibTCPFreeSocket(PTCP_PCB pcb);
 err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
-PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, const u8_t backlog);
+PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog);
+VOID        LibTCPClaimPendingAccept(PCONNECTION_ENDPOINT Listener);
 err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe);
 err_t       LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
 err_t       LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shut_tx);

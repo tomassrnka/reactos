@@ -183,7 +183,7 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
             NextIrp->IoStatus.Information = 0;
             if( NextIrp == Irp ) RetStatus = Status;
             if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-            (void)IoSetCancelRoutine(NextIrp, NULL);
+            AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
     } else {
@@ -222,7 +222,7 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
                     RetStatus = Status;
                 }
                 if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-                (void)IoSetCancelRoutine(NextIrp, NULL);
+                AfdClearCancelRoutine(NextIrp);
                 IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
             }
         }
@@ -279,7 +279,7 @@ AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
     FCB->AcceptIrp->IoStatus.Status = Irp->IoStatus.Status;
     if (FCB->AcceptIrp->MdlAddress)
         UnlockRequest(FCB->AcceptIrp, IoGetCurrentIrpStackLocation(FCB->AcceptIrp));
-    (void)IoSetCancelRoutine(FCB->AcceptIrp, NULL);
+    AfdClearCancelRoutine(FCB->AcceptIrp);
     IoCompleteRequest(FCB->AcceptIrp, IO_NETWORK_INCREMENT);
     FCB->AcceptIrp = NULL;
 
@@ -321,7 +321,7 @@ NTSTATUS NTAPI ReceiveComplete
             NextIrp->IoStatus.Information = 0;
             UnlockBuffers(RecvReq->BufferArray, RecvReq->BufferCount, FALSE);
             if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-            (void)IoSetCancelRoutine(NextIrp, NULL);
+            AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
         SocketStateUnlock( FCB );
@@ -555,7 +555,17 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     } else if( Status == STATUS_PENDING ) {
         AFD_DbgPrint(MID_TRACE,("Leaving read irp\n"));
         IoMarkIrpPending( Irp );
-        (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+        /* A cancel that came before the routine was set found nothing to call */
+        IoAcquireCancelSpinLock(&Irp->CancelIrql);
+        if (!Irp->Cancel)
+        {
+            (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+            IoReleaseCancelSpinLock(Irp->CancelIrql);
+        }
+        else
+        {
+            AfdCancelHandler(IoGetCurrentIrpStackLocation(Irp)->DeviceObject, Irp);
+        }
     } else {
         AFD_DbgPrint(MID_TRACE,("Completed with status %x\n", Status));
     }
@@ -600,7 +610,7 @@ PacketSocketRecvComplete(
             NextIrp->IoStatus.Information = 0;
             UnlockBuffers(RecvReq->BufferArray, RecvReq->BufferCount, CheckUnlockExtraBuffers(FCB, NextIrpSp));
             if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-            (void)IoSetCancelRoutine(NextIrp, NULL);
+            AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
 
@@ -691,7 +701,7 @@ PacketSocketRecvComplete(
         if ( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
 
         AFD_DbgPrint(MID_TRACE,("Completing\n"));
-        (void)IoSetCancelRoutine(NextIrp, NULL);
+        AfdClearCancelRoutine(NextIrp);
         NextIrp->IoStatus.Status = Status;
 
         IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );

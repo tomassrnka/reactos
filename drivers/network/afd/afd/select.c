@@ -66,9 +66,12 @@ VOID SignalSocket(
 
     if (Poll)
     {
-        KeCancelTimer( &Poll->Timer );
         RemoveEntryList( &Poll->ListEntry );
-        ExFreePoolWithTag(Poll, TAG_AFD_ACTIVE_POLL);
+        /* A timeout DPC that already runs owns the poll and frees it */
+        if (KeCancelTimer( &Poll->Timer ) || KeRemoveQueueDpc( &Poll->TimeoutDpc ))
+            ExFreePoolWithTag(Poll, TAG_AFD_ACTIVE_POLL);
+        else
+            Poll->Irp = NULL;
     }
 
     Irp->IoStatus.Status = Status;
@@ -87,7 +90,7 @@ VOID SignalSocket(
     UnlockHandles( AFD_HANDLES(PollReq), PollReq->HandleCount );
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AFD_DbgPrint(MID_TRACE,("Completing\n"));
-    (void)IoSetCancelRoutine(Irp, NULL);
+    AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
     AFD_DbgPrint(MID_TRACE,("Done\n"));
 }
@@ -109,14 +112,17 @@ static VOID NTAPI SelectTimeout( PKDPC Dpc,
 
     AFD_DbgPrint(MID_TRACE,("Called\n"));
 
-    Irp = Poll->Irp;
     DeviceExt = Poll->DeviceExt;
-    PollReq = Irp->AssociatedIrp.SystemBuffer;
-
-    ZeroEvents( PollReq->Handles, PollReq->HandleCount );
 
     KeAcquireSpinLock( &DeviceExt->Lock, &OldIrql );
-    SignalSocket( Poll, NULL, PollReq, STATUS_TIMEOUT );
+    Irp = Poll->Irp;
+    if (Irp)
+    {
+        PollReq = Irp->AssociatedIrp.SystemBuffer;
+        ZeroEvents( PollReq->Handles, PollReq->HandleCount );
+        SignalSocket( Poll, NULL, PollReq, STATUS_TIMEOUT );
+    }
+    ExFreePoolWithTag(Poll, TAG_AFD_ACTIVE_POLL);
     KeReleaseSpinLock( &DeviceExt->Lock, OldIrql );
 
     AFD_DbgPrint(MID_TRACE,("Timeout\n"));
@@ -152,6 +158,8 @@ VOID KillSelectsForFCB( PAFD_DEVICE_EXTENSION DeviceExt,
                 (!OnlyExclusive || (OnlyExclusive && Poll->Exclusive)) ) {
                 ZeroEvents( PollReq->Handles, PollReq->HandleCount );
                 SignalSocket( Poll, NULL, PollReq, STATUS_CANCELLED );
+                /* The poll and its request are gone */
+                break;
             }
         }
     }
@@ -248,6 +256,10 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
           Status = STATUS_PENDING;
           IoMarkIrpPending( Irp );
           (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+
+          /* A cancel that came before the routine was set found nothing to call */
+          if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL))
+              SignalSocket( Poll, NULL, PollReq, STATUS_CANCELLED );
        } else {
           AFD_DbgPrint(MAX_TRACE, ("FIXME: do something with the IRP!\n"));
           Status = STATUS_NO_MEMORY;
