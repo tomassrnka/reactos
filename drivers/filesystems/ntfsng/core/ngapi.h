@@ -26,6 +26,8 @@ typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
 #define NGC_EACCES 13
 #define NGC_EPERM 1
 #define NGC_EFBIG 27
+#define NGC_EXDEV 18
+#define NGC_ENODATA 61
 
 #define NGC_ATTR_COMPRESSED 1
 #define NGC_ATTR_SPARSE 2
@@ -99,6 +101,10 @@ int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len);
 void ngc_free(void *p);
 int ngc_create_stream(ngc_vol *v, ngc_node *base, const unsigned short *sname, unsigned int len, ngc_node **out);
 int ngc_delete_stream(ngc_vol *v, ngc_node *n);
+int ngc_is_reparse(ngc_node *n);
+int ngc_get_reparse(ngc_node *n, void **out, unsigned int *len);
+int ngc_set_reparse(ngc_vol *v, ngc_node *n, const void *data, unsigned int len);
+int ngc_delete_reparse(ngc_vol *v, ngc_node *n, unsigned int tag);
 int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *out, unsigned int *len);
 int ngc_add_short_name(ngc_vol *v, ngc_node *dir, ngc_node *n, const unsigned short *lname, unsigned int llen,
 		const unsigned short *sname, unsigned int slen);

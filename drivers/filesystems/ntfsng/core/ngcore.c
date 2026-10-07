@@ -16,6 +16,8 @@
 #include "ntfs/logfile.h"
 #include "ntfs/lcnalloc.h"
 #include "ntfs/index.h"
+#include "ntfs/reparse.h"
+#include "ntfs/ea.h"
 #include "ngapi.h"
 #include <kshim_jnl.h>
 #include "ngjrec.h"
@@ -357,6 +359,18 @@ static void ngc_freedentry(struct dentry *d)
 	kfree(d);
 }
 
+/*
+ * The core ORs a reparse point's symlink type into the mode it loaded from a $LXMOD EA, so a
+ * junction the core created as a directory loads as S_IFLNK|S_IFDIR: make it the symlink it means.
+ */
+static void ngc_fix_type(struct inode *vi)
+{
+	if ((vi->i_mode & S_IFMT) != (S_IFLNK | S_IFDIR))
+		return;
+	vi->i_mode = (vi->i_mode & ~S_IFMT) | S_IFLNK;
+	ntfs_set_vfs_operations(vi, vi->i_mode, 0);
+}
+
 int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out,
 		unsigned short *real, unsigned int *real_len)
 {
@@ -389,6 +403,7 @@ int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned 
 	ngc_freedentry(d);
 	if (!vi)
 		return -ENOENT;
+	ngc_fix_type(vi);
 	*out = (ngc_node *)vi;
 	return 0;
 }
@@ -494,6 +509,7 @@ int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
 	*out = NULL;
 	if (IS_ERR(vi))
 		return PTR_ERR(vi);
+	ngc_fix_type(vi);
 	*out = (ngc_node *)vi;
 	return 0;
 }
@@ -501,6 +517,27 @@ int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
 void ngc_put(ngc_node *n)
 {
 	iput((struct inode *)n);
+}
+
+/* A junction loads as a symlink inode: its MFT record still says whether it is a directory. */
+static int ngc_record_is_dir_locked(struct ntfs_inode *ni)
+{
+	struct mft_record *m = map_mft_record(ni);
+	int dir = 0;
+	if (!IS_ERR(m)) {
+		dir = !!(m->flags & MFT_RECORD_IS_DIRECTORY);
+		unmap_mft_record(ni);
+	}
+	return dir;
+}
+
+static int ngc_record_is_dir(struct ntfs_inode *ni)
+{
+	int dir;
+	mutex_lock(&ni->mrec_lock);
+	dir = ngc_record_is_dir_locked(ni);
+	mutex_unlock(&ni->mrec_lock);
+	return dir;
 }
 
 void ngc_stat(ngc_node *n, struct ngc_stat *st)
@@ -534,6 +571,8 @@ void ngc_stat(ngc_node *n, struct ngc_stat *st)
 	st->nlink = bvi->i_nlink > 1 ? ngc_links((ngc_node *)bvi) : bvi->i_nlink;
 	st->is_dir = S_ISDIR(bvi->i_mode) && vi == bvi;
 	st->is_link = S_ISLNK(bvi->i_mode);
+	if (st->is_link && vi == bvi)
+		st->is_dir = ngc_record_is_dir(bni);
 	if (NInoCompressed(ni)) st->flags |= NGC_ATTR_COMPRESSED;
 	if (NInoSparse(ni)) st->flags |= NGC_ATTR_SPARSE;
 	if (NInoEncrypted(ni)) st->flags |= NGC_ATTR_ENCRYPTED;
@@ -570,6 +609,9 @@ int ngc_readdir(ngc_vol *v, ngc_node *dirn, ngc_filldir_t fn, void *arg)
 	int err = 0;
 	(void)v;
 
+	/* A junction directory (loaded as a symlink) lists as empty. */
+	if (S_ISLNK(dir->i_mode) && ngc_record_is_dir(NTFS_I(dir)))
+		return 0;
 	if (!S_ISDIR(dir->i_mode))
 		return -ENOTDIR;
 	f = kzalloc(sizeof(*f), GFP_NOFS);
@@ -1231,6 +1273,264 @@ int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len)
 	return err;
 }
 
+/* ------------------------------------------------------------- reparse points */
+
+/* Nonzero if @n (its file) is a reparse point. */
+int ngc_is_reparse(ngc_node *n)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	return !!(ni->flags & FILE_ATTR_REPARSE_POINT);
+}
+
+/* The raw $REPARSE_POINT value (REPARSE_DATA_BUFFER layout); -ENODATA when there is none. */
+int ngc_get_reparse(ngc_node *n, void **out, unsigned int *len)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	void *buf = NULL;
+	s64 size = 0;
+	*out = NULL;
+	*len = 0;
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	mutex_lock(&ni->mrec_lock);
+	if ((ni->flags & FILE_ATTR_REPARSE_POINT) && ntfs_attr_exist(ni, AT_REPARSE_POINT, AT_UNNAMED, 0))
+		buf = ntfs_attr_readall(ni, AT_REPARSE_POINT, AT_UNNAMED, 0, &size);
+	mutex_unlock(&ni->mrec_lock);
+	if (!buf)
+		return -ENODATA;
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+	if (size < 8 || size > 16 * 1024) {
+		kvfree(buf);
+		return -EIO;
+	}
+	*out = buf;
+	*len = (unsigned int)size;
+	return 0;
+}
+
+/* $Extend\$Reparse:$R, the index of reparse points by (tag, file reference). */
+static struct ntfs_index_context *ngc_reparse_index(struct ntfs_volume *vol)
+{
+	static __le16 rname[] = { cpu_to_le16('$'), cpu_to_le16('R'), cpu_to_le16('e'), cpu_to_le16('p'),
+				  cpu_to_le16('a'), cpu_to_le16('r'), cpu_to_le16('s'), cpu_to_le16('e') };
+	struct ntfs_index_context *xr = NULL;
+	struct ntfs_name *name = NULL;
+	struct inode *dir, *vi;
+	u64 mref;
+
+	dir = ntfs_iget(vol->sb, FILE_Extend);
+	if (IS_ERR(dir))
+		return NULL;
+	mutex_lock_nested(&NTFS_I(dir)->mrec_lock, NTFS_EXTEND_MUTEX_PARENT);
+	mref = ntfs_lookup_inode_by_name(NTFS_I(dir), rname, 8, &name);
+	mutex_unlock(&NTFS_I(dir)->mrec_lock);
+	kfree(name);
+	iput(dir);
+	if (IS_ERR_MREF(mref))
+		return NULL;
+	vi = ntfs_iget(vol->sb, MREF(mref));
+	if (IS_ERR(vi))
+		return NULL;
+	xr = ntfs_index_ctx_get(NTFS_I(vi), reparse_index_name, 2);
+	if (!xr)
+		iput(vi);
+	return xr;
+}
+
+/* Removes the $REPARSE_POINT attribute itself (the index entry is handled by the caller). */
+static int ngc_reparse_attr_rm(struct ntfs_inode *ni)
+{
+	struct inode *rp = ntfs_attr_iget(VFS_I(ni), AT_REPARSE_POINT, AT_UNNAMED, 0);
+	int err;
+	if (IS_ERR(rp))
+		return PTR_ERR(rp);
+	err = ntfs_attr_rm(NTFS_I(rp));
+	iput(rp);
+	return err;
+}
+
+/*
+ * After a reparse point change: the inode type the core would give the file when it loads it
+ * (a junction or symlink loads as a symlink), so lookups and listings match a later reload.
+ */
+static void ngc_reparse_retype(struct ntfs_inode *ni)
+{
+	struct inode *vi = VFS_I(ni);
+	unsigned int mode = 0;
+	if (!(ni->flags & FILE_ATTR_REPARSE_POINT) || ntfs_parse_reparse(ni, &mode) || !mode)
+		mode = ngc_record_is_dir_locked(ni) ? S_IFDIR : S_IFREG;
+	if ((vi->i_mode & S_IFMT) == mode)
+		return;
+	vi->i_mode = (vi->i_mode & ~S_IFMT) | mode;
+	ntfs_set_vfs_operations(vi, vi->i_mode, 0);
+	/* Files the core created carry their mode in a $LXMOD EA, which a reload applies first. */
+	if (NInoHasEA(ni))
+		ntfs_ea_set_wsl_inode(vi, 0, NULL, NTFS_EA_MODE);
+}
+
+/* Removes the $Reparse index entry (tag, file reference) of @ni if there is one. */
+static int ngc_reparse_unindex(struct ntfs_inode *ni, struct ntfs_index_context *xr, __le32 tag)
+{
+	struct reparse_index_key key;
+	key.reparse_tag = tag;
+	key.file_id = cpu_to_le64(MK_MREF(ni->mft_no, ni->seq_no));
+	ntfs_index_ctx_reinit(xr);
+	if (ntfs_index_lookup(&key, sizeof(key), xr))
+		return 0;
+	return ntfs_index_rm(xr);
+}
+
+/*
+ * Gives @n the reparse data @data (validated by the caller) and indexes it in $Reparse.  An existing
+ * reparse point must carry the same tag (-EXDEV otherwise) and is replaced.  Data the core would
+ * refuse when it loads the file, or data too large to stay resident, is rolled back (-EINVAL,
+ * -EFBIG).  Any failure after the old reparse point is gone leaves the file without one.
+ */
+int ngc_set_reparse(ngc_vol *v, ngc_node *n, const void *data, unsigned int len)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n), *xrni;
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct ntfs_index_context *xr;
+	struct {
+		struct index_entry_header header;
+		struct reparse_index_key key;
+		__le32 filling;
+	} __packed ie;
+	__le32 tag = ((const struct reparse_point *)data)->reparse_tag;
+	struct inode *rp;
+	unsigned int mode;
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (NInoAttr(ni) || len < 8 || len > 16 * 1024 || ni->mft_no < FILE_first_user)
+		return -EINVAL;
+	if (vol->major_ver < 3)
+		return -EOPNOTSUPP;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	xr = ngc_reparse_index(vol);
+	if (!xr)
+		return -EIO;
+	xrni = xr->idx_ni;
+	if (xrni == ni) {
+		err = -EINVAL;
+		goto put;
+	}
+	mutex_lock(&ni->mrec_lock);
+	mutex_lock_nested(&xrni->mrec_lock, NTFS_EXTEND_MUTEX_PARENT);
+	if (ntfs_attr_exist(ni, AT_REPARSE_POINT, AT_UNNAMED, 0)) {
+		void *old;
+		s64 size = 0;
+		__le32 otag;
+		old = ntfs_attr_readall(ni, AT_REPARSE_POINT, AT_UNNAMED, 0, &size);
+		if (IS_ERR_OR_NULL(old) || size < 4) {
+			err = IS_ERR(old) ? PTR_ERR(old) : -EIO;
+			if (!IS_ERR_OR_NULL(old))
+				kvfree(old);
+			goto out;
+		}
+		otag = ((struct reparse_point *)old)->reparse_tag;
+		kvfree(old);
+		if (otag != tag) {
+			err = -EXDEV;
+			goto out;
+		}
+		err = ngc_reparse_unindex(ni, xr, otag);
+		if (!err)
+			err = ngc_reparse_attr_rm(ni);
+		if (err)
+			goto fail;
+	}
+	err = ntfs_attr_add(ni, AT_REPARSE_POINT, AT_UNNAMED, 0, (u8 *)data, len);
+	if (err)
+		goto fail;
+	rp = ntfs_attr_iget(VFS_I(ni), AT_REPARSE_POINT, AT_UNNAMED, 0);
+	if (IS_ERR(rp)) {
+		err = PTR_ERR(rp);
+		goto fail;
+	}
+	/* The core reads the tag for the parent's index entry from a resident value only. */
+	err = NInoNonResident(NTFS_I(rp)) ? -EFBIG : 0;
+	iput(rp);
+	if (err)
+		goto fail;
+	ni->flags |= FILE_ATTR_REPARSE_POINT;
+	err = ntfs_parse_reparse(ni, &mode);
+	if (err) {
+		err = -EINVAL;
+		goto fail;
+	}
+	memset(&ie, 0, sizeof(ie));
+	ie.header.data.vi.data_offset = cpu_to_le16(sizeof(struct index_entry_header) + sizeof(ie.key));
+	ie.header.length = cpu_to_le16(sizeof(ie));
+	ie.header.key_length = cpu_to_le16(sizeof(ie.key));
+	ie.key.reparse_tag = tag;
+	ie.key.file_id = cpu_to_le64(MK_MREF(ni->mft_no, ni->seq_no));
+	ntfs_index_ctx_reinit(xr);
+	err = ntfs_ie_add(xr, (struct index_entry *)&ie);
+	if (!err)
+		goto done;
+fail:
+	if (ntfs_attr_exist(ni, AT_REPARSE_POINT, AT_UNNAMED, 0))
+		ngc_reparse_attr_rm(ni);
+	ni->flags &= ~FILE_ATTR_REPARSE_POINT;
+done:
+	ngc_reparse_retype(ni);
+	NInoSetFileNameDirty(ni);
+	mark_mft_record_dirty(ni);
+	mark_mft_record_dirty(xrni);
+out:
+	mutex_unlock(&xrni->mrec_lock);
+	mutex_unlock(&ni->mrec_lock);
+	mark_inode_dirty(VFS_I(ni));
+put:
+	ntfs_index_ctx_put(xr);
+	iput(VFS_I(xrni));
+	return err;
+}
+
+/* Removes the reparse point of @n if its tag is @tag (-EXDEV otherwise, -ENODATA if none). */
+int ngc_delete_reparse(ngc_vol *v, ngc_node *n, unsigned int tag)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	void *old;
+	unsigned int len;
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (NInoAttr(ni))
+		return -EINVAL;
+	err = ngc_get_reparse(n, &old, &len);
+	if (err)
+		return err;
+	err = le32_to_cpu(((struct reparse_point *)old)->reparse_tag) == tag ? 0 : -EXDEV;
+	kvfree(old);
+	if (err)
+		return err;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	mutex_lock(&ni->mrec_lock);
+	/* Clears the flag only once the index entry is gone. */
+	err = ntfs_delete_reparse_index(ni);
+	if (err > 0)
+		err = 0;
+	if (!err)
+		err = ngc_reparse_attr_rm(ni);
+	ngc_reparse_retype(ni);
+	NInoSetFileNameDirty(ni);
+	mark_mft_record_dirty(ni);
+	mutex_unlock(&ni->mrec_lock);
+	mark_inode_dirty(VFS_I(ni));
+	return err;
+}
+
 /* ------------------------------------------------------------- short (8.3) names */
 
 /* The value of the $FILE_NAME attribute the search context stands on. */
@@ -1605,6 +1905,8 @@ static int ngc_any_entry(void *ctx, const unsigned short *name, unsigned int len
 /* 1 if the directory has no entries besides . and .., 0 if it has, <0 on error. */
 int ngc_dir_empty(ngc_vol *v, ngc_node *dirn)
 {
+	if (S_ISLNK(((struct inode *)dirn)->i_mode))
+		return ngc_record_is_dir(NTFS_I((struct inode *)dirn)) ? 1 : -ENOTDIR;
 	int any = 0, err = ngc_readdir(v, dirn, ngc_any_entry, &any);
 	return err < 0 ? err : !any;
 }

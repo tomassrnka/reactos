@@ -180,6 +180,137 @@ VOID NgUnlockVolume(PNG_VCB Vcb)
     IoReleaseVpbSpinLock(Irql);
 }
 
+/* FSCTL_GET/SET/DELETE_REPARSE_POINT on a file or directory (not a stream, not the volume). */
+static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, PIO_STACK_LOCATION Stack, ULONG Code)
+{
+    PREPARSE_DATA_BUFFER Rp = Irp->AssociatedIrp.SystemBuffer;
+    ULONG In = Stack->Parameters.FileSystemControl.InputBufferLength;
+    ULONG Out = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    ULONG Header;
+    NTSTATUS Status = STATUS_SUCCESS;
+    void *Data = NULL;
+    unsigned int Len = 0;
+    int Err;
+
+    if (!Fcb || Fcb->IsVolume || Fcb->Stream.Length || !Fcb->HasNode)
+        return STATUS_INVALID_PARAMETER;
+    /* The root and the $Extend metadata files never become reparse points. */
+    if (Code == FSCTL_SET_REPARSE_POINT && (Fcb->IsRoot || !Ccb || Ccb->ParentMftNo == 11))
+        return STATUS_ACCESS_DENIED;
+    if (Code != FSCTL_GET_REPARSE_POINT && Vcb->ReadOnly)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    if (Code != FSCTL_GET_REPARSE_POINT)
+    {
+        /* The buffer is a REPARSE_DATA_BUFFER, or the GUID form for third-party tags. */
+        if (!Rp || In < REPARSE_DATA_BUFFER_HEADER_SIZE || In > MAXIMUM_REPARSE_DATA_BUFFER_SIZE)
+            return STATUS_IO_REPARSE_DATA_INVALID;
+        if (Rp->ReparseTag == IO_REPARSE_TAG_RESERVED_ZERO || Rp->ReparseTag == IO_REPARSE_TAG_RESERVED_ONE)
+            return STATUS_IO_REPARSE_TAG_INVALID;
+        Header = IsReparseTagMicrosoft(Rp->ReparseTag) ? REPARSE_DATA_BUFFER_HEADER_SIZE : REPARSE_GUID_DATA_BUFFER_HEADER_SIZE;
+        if (In < Header || Rp->ReparseDataLength + Header != In)
+            return STATUS_IO_REPARSE_DATA_INVALID;
+        if (Code == FSCTL_DELETE_REPARSE_POINT && Rp->ReparseDataLength)
+            return STATUS_IO_REPARSE_DATA_INVALID;
+        /* Tags the core would turn into special files, or read data through (WOF), are refused. */
+        if (Code == FSCTL_SET_REPARSE_POINT &&
+            (Rp->ReparseTag == 0x80000017 /* WOF */ || Rp->ReparseTag == 0x80000023 /* AF_UNIX */ ||
+             Rp->ReparseTag == 0x80000024 || Rp->ReparseTag == 0x80000025 || Rp->ReparseTag == 0x80000026 ||
+             Rp->ReparseTag == 0xA000001D /* LX_* */))
+            return STATUS_IO_REPARSE_TAG_INVALID;
+        if (Code == FSCTL_SET_REPARSE_POINT && Rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+        {
+            ULONG Path = In - FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer);
+            if (In < FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+                (ULONG)Rp->MountPointReparseBuffer.SubstituteNameOffset + Rp->MountPointReparseBuffer.SubstituteNameLength > Path ||
+                (ULONG)Rp->MountPointReparseBuffer.PrintNameOffset + Rp->MountPointReparseBuffer.PrintNameLength > Path ||
+                ((Rp->MountPointReparseBuffer.SubstituteNameOffset | Rp->MountPointReparseBuffer.SubstituteNameLength |
+                  Rp->MountPointReparseBuffer.PrintNameOffset | Rp->MountPointReparseBuffer.PrintNameLength) & 1) ||
+                !Rp->MountPointReparseBuffer.SubstituteNameLength)
+                return STATUS_IO_REPARSE_DATA_INVALID;
+            if (!Fcb->IsDirectory)
+                return STATUS_NOT_A_DIRECTORY;
+        }
+    }
+
+    ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+    NgAcquireCore(Vcb);
+    Err = NgEnsureNode(Fcb);
+    if (!Err && Code == FSCTL_GET_REPARSE_POINT)
+    {
+        Err = ngc_get_reparse(Fcb->Node, &Data, &Len);
+        if (Err == -NGC_ENODATA)
+            Status = STATUS_NOT_A_REPARSE_POINT;
+        Err = Status == STATUS_SUCCESS ? Err : 0;
+    }
+    else if (!Err && !IsReparseTagMicrosoft(Rp->ReparseTag) && !ngc_get_reparse(Fcb->Node, &Data, &Len) &&
+             ((PREPARSE_GUID_DATA_BUFFER)Data)->ReparseTag == Rp->ReparseTag &&
+             (Len < REPARSE_GUID_DATA_BUFFER_HEADER_SIZE ||
+              !IsEqualGUID(&((PREPARSE_GUID_DATA_BUFFER)Data)->ReparseGuid, &((PREPARSE_GUID_DATA_BUFFER)Rp)->ReparseGuid)))
+    {
+        /* A third-party tag is also identified by its GUID. */
+        Status = STATUS_REPARSE_ATTRIBUTE_CONFLICT;
+    }
+    else if (!Err && Code == FSCTL_SET_REPARSE_POINT)
+    {
+        /* A directory becomes a reparse point only while it is empty. */
+        if (Fcb->IsDirectory && ngc_dir_empty(Vcb->Core, Fcb->Node) != 1)
+            Status = STATUS_DIRECTORY_NOT_EMPTY;
+        else
+            Err = ngc_set_reparse(Vcb->Core, Fcb->Node, Rp, In);
+    }
+    else if (!Err)
+    {
+        Err = ngc_delete_reparse(Vcb->Core, Fcb->Node, Rp->ReparseTag);
+        if (Err == -NGC_ENODATA)
+        {
+            Status = STATUS_NOT_A_REPARSE_POINT;
+            Err = 0;
+        }
+    }
+    if (Code != FSCTL_GET_REPARSE_POINT && Data)
+    {
+        ngc_free(Data);
+        Data = NULL;
+    }
+    if (Err == -NGC_EXDEV)
+        Status = STATUS_IO_REPARSE_TAG_MISMATCH;
+    else if (Err == -NGC_EINVAL || Err == -NGC_EFBIG)
+        Status = STATUS_IO_REPARSE_DATA_INVALID;
+    else if (Err)
+        Status = NgErrnoToStatus(Err);
+    if (Code != FSCTL_GET_REPARSE_POINT)
+    {
+        /* Also after a failure: a failed replace may have removed the old reparse point. */
+        ngc_stat(Fcb->Node, &Fcb->Stat);
+        NgAfterChange(Vcb);
+    }
+    NgReleaseCore(Vcb);
+    ExReleaseResourceLite(Fcb->Header.Resource);
+
+    if (Code == FSCTL_GET_REPARSE_POINT && NT_SUCCESS(Status))
+    {
+        PVOID Buf = Irp->AssociatedIrp.SystemBuffer;
+        if (!Buf || Out < REPARSE_DATA_BUFFER_HEADER_SIZE)
+            Status = STATUS_BUFFER_TOO_SMALL;
+        else if (Out < Len)
+        {
+            RtlCopyMemory(Buf, Data, Out);
+            Irp->IoStatus.Information = Out;
+            Status = STATUS_BUFFER_OVERFLOW;
+        }
+        else
+        {
+            RtlCopyMemory(Buf, Data, Len);
+            Irp->IoStatus.Information = Len;
+        }
+    }
+    if (Data)
+        ngc_free(Data);
+    if (Code != FSCTL_GET_REPARSE_POINT && NT_SUCCESS(Status) && Ccb)
+        NgNotify(Vcb, &Ccb->Path, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
+    return Status;
+}
+
 static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -244,6 +375,11 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FSCTL_OPLOCK_BREAK_NOTIFY:
         case FSCTL_OPLOCK_BREAK_ACK_NO_2:
             return STATUS_INVALID_OPLOCK_PROTOCOL;
+        case FSCTL_GET_REPARSE_POINT:
+        case FSCTL_SET_REPARSE_POINT:
+        case FSCTL_DELETE_REPARSE_POINT:
+            return NgReparseFsctl(Vcb, Fcb, FileObject ? FileObject->FsContext2 : NULL, Irp, Stack,
+                                  Stack->Parameters.FileSystemControl.FsControlCode);
         case FSCTL_DISMOUNT_VOLUME:
             /* Dismount is not implemented: volumes stay mounted until shutdown. */
             return STATUS_ACCESS_DENIED;

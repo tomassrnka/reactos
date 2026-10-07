@@ -388,6 +388,53 @@ static NTSTATUS NgPathFromId(PNG_VCB Vcb, PCUNICODE_STRING Id, PUNICODE_STRING P
     return STATUS_SUCCESS;
 }
 
+/*
+ * A junction (mount point reparse point) on the path: the open goes back to the I/O manager with
+ * STATUS_REPARSE and the reparse data, whose Reserved field counts the bytes at the end of the
+ * file name that follow the junction.  Other reparse tags open the file itself.  Caller holds CoreLock.
+ */
+static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE_OBJECT FileObject, ULONG Tail)
+{
+    PREPARSE_DATA_BUFFER Rp, Copy;
+    void *Data;
+    unsigned int Len;
+    ULONG Path;
+
+    if (!ngc_is_reparse(Node) || Tail > FileObject->FileName.Length)
+        return STATUS_SUCCESS;
+    if (ngc_get_reparse(Node, &Data, &Len))
+        return STATUS_SUCCESS;
+    Rp = Data;
+    if (Rp->ReparseTag != IO_REPARSE_TAG_MOUNT_POINT)
+    {
+        ngc_free(Data);
+        return STATUS_SUCCESS;
+    }
+    Path = Len - FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer);
+    if (Len < FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+        (ULONG)Rp->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE != Len ||
+        (ULONG)Rp->MountPointReparseBuffer.SubstituteNameOffset + Rp->MountPointReparseBuffer.SubstituteNameLength > Path ||
+        (ULONG)Rp->MountPointReparseBuffer.PrintNameOffset + Rp->MountPointReparseBuffer.PrintNameLength > Path ||
+        !Rp->MountPointReparseBuffer.SubstituteNameLength)
+    {
+        ngc_free(Data);
+        return STATUS_IO_REPARSE_DATA_INVALID;
+    }
+    Copy = ExAllocatePoolWithTag(PagedPool, Len, TAG_NTFSNG);
+    if (!Copy)
+    {
+        ngc_free(Data);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(Copy, Data, Len);
+    ngc_free(Data);
+    Copy->Reserved = (USHORT)Tail;
+    Irp->Tail.Overlay.AuxiliaryBuffer = (PCHAR)Copy;
+    Irp->IoStatus.Information = IO_REPARSE_TAG_MOUNT_POINT;
+    UNREFERENCED_PARAMETER(Vcb);
+    return STATUS_REPARSE;
+}
+
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -411,7 +458,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     UNICODE_STRING ById = { 0, 0, NULL };
     PCUNICODE_STRING Name = &FileObject->FileName;
     NTSTATUS Status;
-    USHORT i;
+    USHORT i, FullLength;
     int Err;
 
     if (Related)
@@ -480,6 +527,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Status = STATUS_OBJECT_NAME_INVALID;
         goto out;
     }
+    FullLength = Full.Length;
     while (Full.Length > sizeof(WCHAR) && Full.Buffer[Full.Length / sizeof(WCHAR) - 1] == L'\\')
     {
         Full.Length -= sizeof(WCHAR);
@@ -556,11 +604,27 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 Status = STATUS_OBJECT_PATH_NOT_FOUND;   /* a file used as a directory */
             break;
         }
+        if (Name == &FileObject->FileName && (!LastComp || (!(Options & FILE_OPEN_REPARSE_POINT) &&
+                                                           Disposition != FILE_CREATE)))
+        {
+            Status = NgMountPointReparse(Vcb, Next, Irp, FileObject,
+                                         FullLength - (ULONG)(Comp.Buffer + Comp.Length / sizeof(WCHAR) - Full.Buffer) * sizeof(WCHAR));
+            if (Status != STATUS_SUCCESS)
+            {
+                ngc_put(Next);
+                break;
+            }
+        }
         if (LastComp)
             Parent = Node;
         else
             ngc_put(Node);
         Node = Next;
+    }
+    if (Status == STATUS_REPARSE)
+    {
+        NgReleaseCore(Vcb);
+        goto out;
     }
     if (NT_SUCCESS(Status) && OpenTarget)
     {

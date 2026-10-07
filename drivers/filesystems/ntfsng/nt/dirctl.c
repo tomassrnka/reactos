@@ -138,9 +138,9 @@ static BOOLEAN NgMatchExpression(const WCHAR *Expr, USHORT E, const WCHAR *Name,
 #undef T
 }
 
-/* Writes one entry; returns its unaligned size, or 0 if it does not fit in Room. */
+/* Writes one entry; returns its unaligned size, or 0 if it does not fit in Room.  Tag: a reparse point's tag, in EaSize. */
 static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, PNG_DIRENT E,
-                         const struct ngc_stat *St, ULONG Index, PCWSTR Short, ULONG ShortChars)
+                         const struct ngc_stat *St, ULONG Index, PCWSTR Short, ULONG ShortChars, ULONG Tag)
 {
     ULONG Attributes = NgFileAttributes(NULL, St);
     LONGLONG Eof = St->is_dir ? 0 : St->size, Alloc = St->is_dir ? 0 : St->alloc;
@@ -170,7 +170,7 @@ static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, P
             Need = FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName) + E->NameLength;
             if (Need > Room) return 0;
             NG_COMMON(P);
-            P->EaSize = 0;
+            P->EaSize = Tag;
             return Need;
         }
         case FileIdFullDirectoryInformation:
@@ -179,7 +179,7 @@ static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, P
             Need = FIELD_OFFSET(FILE_ID_FULL_DIR_INFORMATION, FileName) + E->NameLength;
             if (Need > Room) return 0;
             NG_COMMON(P);
-            P->EaSize = 0;
+            P->EaSize = Tag;
             P->FileId.QuadPart = St->mft_ref;
             return Need;
         }
@@ -189,7 +189,7 @@ static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, P
             Need = FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName) + E->NameLength;
             if (Need > Room) return 0;
             NG_COMMON(P);
-            P->EaSize = 0;
+            P->EaSize = Tag;
             RtlZeroMemory(P->ShortName, sizeof(P->ShortName));
             P->ShortNameLength = (CCHAR)(ShortChars * sizeof(WCHAR));
             RtlCopyMemory(P->ShortName, Short, ShortChars * sizeof(WCHAR));
@@ -201,7 +201,7 @@ static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, P
             Need = FIELD_OFFSET(FILE_ID_BOTH_DIR_INFORMATION, FileName) + E->NameLength;
             if (Need > Room) return 0;
             NG_COMMON(P);
-            P->EaSize = 0;
+            P->EaSize = Tag;
             RtlZeroMemory(P->ShortName, sizeof(P->ShortName));
             P->ShortNameLength = (CCHAR)(ShortChars * sizeof(WCHAR));
             RtlCopyMemory(P->ShortName, Short, ShortChars * sizeof(WCHAR));
@@ -334,6 +334,7 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ULONG Offset, Size;
         WCHAR Short[12];
         unsigned int ShortChars;
+        ULONG Tag = 0;
         BOOLEAN Matched, WantShort, Spaces;
 
         Name.Buffer = E->Name;
@@ -363,6 +364,16 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (!Err)
             {
                 ngc_stat(Node, &St);
+                if (St.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                {
+                    void *Data;
+                    unsigned int Len;
+                    if (!ngc_get_reparse(Node, &Data, &Len))
+                    {
+                        Tag = ((PREPARSE_DATA_BUFFER)Data)->ReparseTag;
+                        ngc_free(Data);
+                    }
+                }
                 if (WantShort && ngc_short_name(Node, Fcb->Stat.mft_ref, Short, &ShortChars))
                     ShortChars = 0;
                 ngc_put(Node);
@@ -383,7 +394,7 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
         Offset = Written ? ALIGN_UP_BY(Used, 8) : 0;
         Size = Offset < Length ? NgFillEntry(Class, Buffer + Offset, Length - Offset, E, &St, Ccb->NextIndex,
-                                             Short, ShortChars) : 0;
+                                             Short, ShortChars, Tag) : 0;
         if (!Size)
         {
             if (!Written)
