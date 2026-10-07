@@ -233,6 +233,17 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 return STATUS_NOT_LOCKED;
             NgUnlockVolume(Vcb);
             return STATUS_SUCCESS;
+        case FSCTL_REQUEST_OPLOCK_LEVEL_1:
+        case FSCTL_REQUEST_OPLOCK_LEVEL_2:
+        case FSCTL_REQUEST_BATCH_OPLOCK:
+        case FSCTL_REQUEST_FILTER_OPLOCK:
+            /* Oplocks are never granted; callers fall back to uncached sharing. */
+            return STATUS_OPLOCK_NOT_GRANTED;
+        case FSCTL_OPLOCK_BREAK_ACKNOWLEDGE:
+        case FSCTL_OPBATCH_ACK_CLOSE_PENDING:
+        case FSCTL_OPLOCK_BREAK_NOTIFY:
+        case FSCTL_OPLOCK_BREAK_ACK_NO_2:
+            return STATUS_INVALID_OPLOCK_PROTOCOL;
         case FSCTL_DISMOUNT_VOLUME:
             /* Dismount is not implemented: volumes stay mounted until shutdown. */
             return STATUS_ACCESS_DENIED;
