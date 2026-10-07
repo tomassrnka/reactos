@@ -506,9 +506,14 @@ RtlpTryToUnwindEpilog(
             continue;
         }
 
-        /* A tail call */
+        /* A tail call. GCC also jumps from the body to a cold part outside
+           the function, so a jmp ends an epilog only after a pop */
         if (RtlpGetEpilogJumpLength(InstrPtr, ImageBase, FunctionEntry, PrimaryEntry) != 0)
+        {
+            if (PopCount == 0)
+                return FALSE;
             break;
+        }
 
         /* Opcode not allowed for Epilog */
         return FALSE;

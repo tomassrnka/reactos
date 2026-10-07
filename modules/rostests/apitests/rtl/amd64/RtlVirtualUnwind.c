@@ -599,7 +599,7 @@ SetupEpilogStack(VOID)
 }
 
 static VOID
-CheckEpilogUnwind(ULONG FunctionEnd, const char *Name)
+CheckEpilogUnwind(ULONG FunctionEnd, const char *Name, BOOLEAN EndsInJump)
 {
     CONTEXT Ctx;
     PVOID Handler;
@@ -624,6 +624,17 @@ CheckEpilogUnwind(ULONG FunctionEnd, const char *Name)
     ok_eq_hex64(Ctx.Rip, 0x1234567812345678ULL);
     ok_eq_hex64(Ctx.Rsp, Stack + 0x40);
 
+    if (EndsInJump)
+    {
+        /* A jmp alone is taken for a jump from the body, with the whole frame still there */
+        Handler = UnwindEpilogFunction(&Ctx, Stack, FunctionEnd, 0, EPILOG_END);
+        ok(Handler == ExpectedHandler, "%s: handler %p at the jmp\n", Name, Handler);
+        ok_eq_hex64(Ctx.Rsi, 0x5151515151515151ULL);
+        ok_eq_hex64(Ctx.Rip, 0x1234567812345678ULL);
+        ok_eq_hex64(Ctx.Rsp, Stack + 0x40);
+        return;
+    }
+
     /* At the instruction that leaves the function */
     Handler = UnwindEpilogFunction(&Ctx, Stack + 0x38, FunctionEnd, 0, EPILOG_END);
     ok(Handler == NULL, "%s: handler %p at the end of the epilog\n", Name, Handler);
@@ -638,14 +649,14 @@ static VOID Test_EpilogRet(VOID)
     static const UCHAR RepRet[] = { 0xF3, 0xC3 };
 
     SetupEpilogFunction(Ret, sizeof(Ret), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + sizeof(Ret), "ret");
+    CheckEpilogUnwind(EPILOG_END + sizeof(Ret), "ret", FALSE);
 
     /* More code of the function follows the epilog */
     SetupEpilogFunction(Ret, sizeof(Ret), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + 0x20, "ret, code follows");
+    CheckEpilogUnwind(EPILOG_END + 0x20, "ret, code follows", FALSE);
 
     SetupEpilogFunction(RepRet, sizeof(RepRet), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + sizeof(RepRet), "rep ret");
+    CheckEpilogUnwind(EPILOG_END + sizeof(RepRet), "rep ret", FALSE);
 }
 
 static VOID Test_EpilogTailCall(VOID)
@@ -662,16 +673,16 @@ static VOID Test_EpilogTailCall(VOID)
     /* jmp to a function at 0x800 */
     *(LONG *)&Jmp[1] = 0x800 - (EPILOG_END + 5);
     SetupEpilogFunction(Jmp, sizeof(Jmp), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + sizeof(Jmp), "jmp rel32");
+    CheckEpilogUnwind(EPILOG_END + sizeof(Jmp), "jmp rel32", TRUE);
 
     SetupEpilogFunction(JmpShort, sizeof(JmpShort), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + sizeof(JmpShort), "jmp rel8");
+    CheckEpilogUnwind(EPILOG_END + sizeof(JmpShort), "jmp rel8", TRUE);
 
     SetupEpilogFunction(JmpRip, sizeof(JmpRip), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + sizeof(JmpRip), "jmp [rip+disp32]");
+    CheckEpilogUnwind(EPILOG_END + sizeof(JmpRip), "jmp [rip+disp32]", TRUE);
 
     SetupEpilogFunction(RexJmpRip, sizeof(RexJmpRip), UNW_FLAG_EHANDLER);
-    CheckEpilogUnwind(EPILOG_END + sizeof(RexJmpRip), "rex jmp [rip+disp32]");
+    CheckEpilogUnwind(EPILOG_END + sizeof(RexJmpRip), "rex jmp [rip+disp32]", TRUE);
 
     /* A jmp back into the function is a branch in the body, not an epilog */
     *(LONG *)&Jmp[1] = 0x06 - (EPILOG_END + 5);
