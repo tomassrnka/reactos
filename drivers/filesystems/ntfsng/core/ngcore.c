@@ -175,7 +175,7 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	vol = fc->s_fs_info;
 	/* NT name lookups are case-insensitive; the core defaults to case-sensitive. */
 	NVolClearCaseSensitive(vol);
-	/* Errors turn the volume read-only instead of being ignored (the default "continue"). */
+	/* During the mount, errors keep the volume read-only (the core's mount-time checks use this policy). */
 	vol->on_errors = ngc_on_errors("remount-ro");
 	/* Growing a non-sparse file allocates real clusters, as NTFS does; holes only in sparse files. */
 	NVolSetDisableSparse(vol);
@@ -239,6 +239,14 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 			v->frees_seen = kshim_watch_count(v->watched);
 		}
 	}
+	/*
+	 * Once mounted, an error fails the operation and leaves the volume writable, as on Windows:
+	 * with remount-ro, running out of space while growing the MFT made the system volume
+	 * read-only.  Errors that mean corruption set NVolErrors, which keeps the dirty flag and
+	 * makes the journal header demand a repair.
+	 */
+	if (!sb_rdonly(v->sb))
+		vol->on_errors = ngc_on_errors("continue");
 	if (!sb_rdonly(v->sb)) {
 		v->bounce = kmalloc(NGC_BOUNCE, GFP_KERNEL);
 		if (!v->bounce) {
