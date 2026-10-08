@@ -2375,6 +2375,25 @@ static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 		return PTR_ERR(d);
 	err = S_ISDIR(vi->i_mode) ? dir->i_op->rmdir(dir, d) : dir->i_op->unlink(dir, d);
 	ngc_freedentry(d);
+	if (!err) {
+		/*
+		 * A directory with a reparse point is typed as a link (ngc_fix_type), so the core's
+		 * unlink dropped the VFS count once per name (Win32 and DOS) from the 1 a directory
+		 * gets: it wrapped and the inode was never freed.  The record's own count decides.
+		 */
+		struct ntfs_inode *ni = NTFS_I(vi);
+		struct mft_record *m;
+		mutex_lock(&ni->mrec_lock);
+		m = map_mft_record(ni);
+		if (!IS_ERR(m)) {
+			if (!le16_to_cpu(m->link_count))
+				clear_nlink(vi);
+			else if ((int)vi->i_nlink <= 0)
+				set_nlink(vi, 1);
+			unmap_mft_record(ni);
+		}
+		mutex_unlock(&ni->mrec_lock);
+	}
 	return err;
 }
 
