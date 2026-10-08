@@ -274,7 +274,7 @@ VOID NgUnlockVolume(PNG_VCB Vcb);
 /* security.c */
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
-int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN IsDir);
+int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN IsDir, NTSTATUS *Rejected);
 
 /* pagefile.c */
 NTSTATUS NgPagingFileMap(PNG_FCB Fcb);

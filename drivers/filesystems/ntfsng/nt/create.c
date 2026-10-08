@@ -860,6 +860,7 @@ walk:
             Status = STATUS_INVALID_PARAMETER;
         else
         {
+            NTSTATUS SecStatus = STATUS_SUCCESS;
             Err = ngc_create(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), WantDir, &Node);
             if (!Err)
             {
@@ -874,7 +875,8 @@ walk:
                 Information = FILE_CREATED;
                 Err = ngc_set_info(Vcb->Core, Node, NULL, Attrs, NG_SETTABLE_ATTRS);
                 if (!Err)
-                    Err = NgStoreCreateSecurity(Vcb, Node, Stack->Parameters.Create.SecurityContext->AccessState, WantDir);
+                    Err = NgStoreCreateSecurity(Vcb, Node, Stack->Parameters.Create.SecurityContext->AccessState, WantDir,
+                                                &SecStatus);
                 if (Err)
                     ngc_unlink(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), Node);
             }
@@ -894,7 +896,7 @@ walk:
                 }
             }
             if (Err)
-                Status = NgErrnoToStatus(Err);
+                Status = NT_SUCCESS(SecStatus) ? NgErrnoToStatus(Err) : SecStatus;
             else
                 NgAfterChange(Vcb);
         }

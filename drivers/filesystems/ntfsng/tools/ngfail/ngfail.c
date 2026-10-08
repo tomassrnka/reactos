@@ -367,6 +367,32 @@ int main(int argc, char **argv)
                st, got ? got->AceCount : 0);
         NtClose(h);
     }
+    /* An owner the creator may not assign: the create fails with the security status, not a generic one. */
+    {
+        SID_IDENTIFIER_AUTHORITY nt = { SECURITY_NT_AUTHORITY };
+        PSID stranger = NULL;
+        SECURITY_DESCRIPTOR sd2;
+        RtlAllocateAndInitializeSid(&nt, 5, SECURITY_NT_NON_UNIQUE, 11, 22, 33, DOMAIN_USER_RID_ADMIN, 0, 0, 0, &stranger);
+        RtlCreateSecurityDescriptor(&sd2, SECURITY_DESCRIPTOR_REVISION);
+        RtlSetDaclSecurityDescriptor(&sd2, TRUE, acl, FALSE);
+        RtlSetOwnerSecurityDescriptor(&sd2, stranger, FALSE);
+        _snwprintf(p, MAX_PATH, L"%s\\sd-owner.txt", dir);
+        st = ntopen(p, FILE_READ_DATA | READ_CONTROL, FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL, 0, &sd2, &h);
+        report("sd-create-bad-owner", st == STATUS_INVALID_OWNER || NT_SUCCESS(st),
+               "status 0x%08lx, want STATUS_INVALID_OWNER (or success with the privilege to restore)", st);
+        if (NT_SUCCESS(st))
+            NtClose(h);
+        else
+        {
+            HANDLE h2;
+            NTSTATUS s2 = ntopen(p, FILE_READ_ATTRIBUTES, FILE_OPEN, 0, NULL, 0, NULL, &h2);
+            report("sd-create-bad-owner-no-file", s2 == STATUS_OBJECT_NAME_NOT_FOUND, "status 0x%08lx", s2);
+            if (NT_SUCCESS(s2))
+                NtClose(h2);
+        }
+        if (stranger)
+            RtlFreeSid(stranger);
+    }
     if (everyone)
         RtlFreeSid(everyone);
 

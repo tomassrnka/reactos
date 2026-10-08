@@ -184,7 +184,7 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
  * descriptor: owner and group default from the creator's token, generic rights are mapped.
  * Called with the core lock held, before the create completes; an error fails the create.
  */
-int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN IsDir)
+int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN IsDir, NTSTATUS *Rejected)
 {
     PSECURITY_DESCRIPTOR New = NULL;
     NTSTATUS Status;
@@ -196,8 +196,10 @@ int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN
                               IoGetFileObjectGenericMapping(), PagedPool);
     if (!NT_SUCCESS(Status))
     {
+        /* The create fails with SeAssignSecurity's own status (invalid owner, privilege not held, ...). */
         DPRINT1("ntfsng: create-time security descriptor rejected (0x%08lx)\n", Status);
-        return Status == STATUS_INSUFFICIENT_RESOURCES ? -NGC_ENOMEM : -NGC_EINVAL;
+        *Rejected = Status;
+        return -NGC_EINVAL;
     }
     NgMapGenericDacl(New);
     Err = ngc_set_security(Vcb->Core, Node, New, RtlLengthSecurityDescriptor(New));
