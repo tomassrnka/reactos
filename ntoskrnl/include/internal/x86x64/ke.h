@@ -120,6 +120,14 @@ KiHvInitializeProcessor(
 VOID
 NTAPI
 KiHvInitializeHypercalls(VOID);
+
+BOOLEAN
+NTAPI
+KiHvFlushTb(
+    _In_ KAFFINITY TargetSet,
+    _In_ BOOLEAN NonGlobalOnly,
+    _In_opt_ PVOID Address,
+    _In_ ULONG NumberOfPages);
 #endif
 
 #ifdef __cplusplus
