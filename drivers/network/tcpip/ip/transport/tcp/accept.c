@@ -106,7 +106,8 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 
 BOOLEAN TCPAbortListenForSocket
 (   PCONNECTION_ENDPOINT Listener,
-    PCONNECTION_ENDPOINT Connection)
+    PCONNECTION_ENDPOINT Connection,
+    PIRP Irp)
 {
     PLIST_ENTRY ListEntry;
     PTDI_BUCKET Bucket;
@@ -119,7 +120,8 @@ BOOLEAN TCPAbortListenForSocket
     {
         Bucket = CONTAINING_RECORD(ListEntry, TDI_BUCKET, Entry);
 
-        if (Bucket->AssociatedEndpoint == Connection)
+        if (Bucket->AssociatedEndpoint == Connection &&
+            Bucket->Request.RequestContext == Irp)
         {
             DereferenceObject(Bucket->AssociatedEndpoint);
             RemoveEntryList( &Bucket->Entry );
