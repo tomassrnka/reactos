@@ -13,7 +13,7 @@
 
 #define KJ_PAGE 4096
 #define KJ_MAGIC "NTFSNGJ1"
-#define KJ_VERSION 1
+#define KJ_VERSION 2
 #define KJ_HDR_PAGE 3			/* $LogFile page of the header: never a power of two */
 #define KJ_FIRST_SLOT_PAGE 5
 
@@ -30,6 +30,14 @@ struct kj_hdr {
 	u32 serial_lo, serial_hi;
 	u32 page_size;
 	u64 hwm;		/* highest slot count ever used */
+	/*
+	 * Update sequence number of $MFT record 3 ($Volume) on disk before and after the in-place pass
+	 * of this transaction (equal for ACTIVE).  Every driver writes that record when it marks the
+	 * volume dirty, and every write changes the number: a different number means another driver
+	 * changed the volume since this header was written, and the header must not be acted on.
+	 */
+	u16 vol_usn_old, vol_usn_new;
+	u32 flags;
 	u32 hdr_crc;		/* CRC-32 of this structure up to here */
 };
 
@@ -48,10 +56,12 @@ struct kshim_jnl;
 
 u32 kj_crc32(u32 crc, const void *p, size_t n);
 u64 kj_slot_page(u64 slot);
+int kj_rec_usn(const u8 *rec, size_t avail, u16 *usn);
 int kj_page_dev(const struct kj_ext *ext, int next, u64 page, u64 *dev);
 
 int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int next, u64 lf_pages,
-		u64 serial, u64 seq);
+		u64 serial, u64 seq, u64 vol_rec_off);
+int kshim_jnl_retire(struct block_device *b);
 void kshim_jnl_deactivate(struct block_device *b);
 int kshim_jnl_commit(struct block_device *b);	/* 1 committed (device flushed), 0 nothing to do, <0 error */
 void kshim_jnl_mark_errors(struct block_device *b);
