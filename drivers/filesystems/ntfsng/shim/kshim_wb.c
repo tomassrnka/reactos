@@ -28,6 +28,7 @@ struct wb_state { struct folio **v; int n; int err; };
 struct folio *writeback_iter(struct address_space *m, struct writeback_control *w, struct folio *f, int *e)
 {
 	struct wb_state *st = w->kshim_priv;
+	kshim_wb_scope_point();
 	if (f) {
 		/* The previous folio: the caller unlocked it (or left it locked on error). */
 		if (folio_test_locked(f))
@@ -115,7 +116,9 @@ int kshim_mapping_writeback(struct address_space *m)
 	int err;
 	if (!m->a_ops || !m->a_ops->writepages || !kshim_mapping_dirty(m))
 		return 0;
+	kshim_wb_scope_enter();
 	err = m->a_ops->writepages(m, &wbc);
+	kshim_wb_scope_exit();
 	if (err)
 		printk(KERN_ERR "writepages(ino %llu) failed %d\n", (unsigned long long)m->host->i_ino, err);
 	return err;
@@ -133,7 +136,9 @@ int write_inode_now(struct inode *i, int sync)
 	if (i->i_state & (I_DIRTY_SYNC | I_DIRTY_DATASYNC)) {
 		i->i_state &= ~(I_DIRTY_SYNC | I_DIRTY_DATASYNC);
 		if (i->i_sb->s_op->write_inode) {
+			kshim_wb_scope_enter();
 			e2 = i->i_sb->s_op->write_inode(i, &wbc);
+			kshim_wb_scope_exit();
 			if (e2) {
 				printk(KERN_ERR "write_inode(ino %llu) failed %d\n", (unsigned long long)i->i_ino, e2);
 				err = err ? err : e2;
