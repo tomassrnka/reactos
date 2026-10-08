@@ -931,6 +931,19 @@ RtlSetIoCompletionCallback(IN HANDLE FileHandle,
             return Status;
     }
 
+    /* The callbacks run in the non-I/O worker threads, make sure one exists */
+    Status = RtlEnterCriticalSection(&ThreadPoolLock);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (ThreadPoolWorkerThreads == 0)
+        Status = RtlpStartWorkerThread(RtlpWorkerThreadProc);
+
+    RtlLeaveCriticalSection(&ThreadPoolLock);
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
     FileCompletionInfo.Port = ThreadPoolCompletionPort;
     FileCompletionInfo.Key = (PVOID)Callback;
 
