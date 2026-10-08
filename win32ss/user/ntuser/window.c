@@ -1677,8 +1677,17 @@ NtUserBuildHwndList(
       ObDereferenceObject(Thread);
    }
 
-   *pcHwndNeeded = dwCount;
-   Status = STATUS_SUCCESS;
+   _SEH2_TRY
+   {
+      ProbeForWrite(pcHwndNeeded, sizeof(*pcHwndNeeded), 1);
+      *pcHwndNeeded = dwCount;
+      Status = STATUS_SUCCESS;
+   }
+   _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+   {
+      Status = _SEH2_GetExceptionCode();
+   }
+   _SEH2_END;
 
 Quit:
    SetLastNtError(Status);
