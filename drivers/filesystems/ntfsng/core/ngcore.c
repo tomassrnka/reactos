@@ -300,9 +300,14 @@ fail:
 	return err;
 }
 
-void ngc_umount(ngc_vol *v)
+void ngc_umount(ngc_vol *v, int discard)
 {
 	struct super_block *sb = v->sb;
+	if (discard) {
+		/* Pending journal pages are dropped and the core sees a read-only volume: put_super writes nothing. */
+		kshim_jnl_deactivate(v->bdev);
+		sb->s_flags |= SB_RDONLY;
+	}
 	kshim_icache_flush(sb, 1);
 	if (sb->s_root) {
 		iput(sb->s_root->d_inode);
@@ -316,6 +321,7 @@ void ngc_umount(ngc_vol *v)
 	if (v->watched)
 		kshim_watch_del(v->watched);
 	kfree(v->jv);
+	kfree(v->bounce);
 	kfree(sb);
 	kshim_bdev_close(v->bdev);
 	kfree(v);

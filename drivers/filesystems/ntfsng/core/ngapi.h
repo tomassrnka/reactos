@@ -68,7 +68,8 @@ int ngc_init(void);
 /* Mounts; with want_rw the volume goes read-write unless policy refuses (*why_ro says why). */
 int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, int want_rw,
 		ngc_vol **out, const char **why_ro);
-void ngc_umount(ngc_vol *v);
+/* Unmounts; with discard nothing of the mounted state is written (the disk was rewritten behind it). */
+void ngc_umount(ngc_vol *v, int discard);
 void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi);
 ngc_node *ngc_root(ngc_vol *v);
 /* Looks @name up in @dir; with @real (NTFS_MAX_NAME_LEN units) also returns the name as stored on disk. */

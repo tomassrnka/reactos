@@ -188,6 +188,128 @@ VOID NgUnlockVolume(PNG_VCB Vcb)
     IoReleaseVpbSpinLock(Irql);
 }
 
+/* The I/O manager frees a VPB that lost its last reference with this tag (TAG_VPB). */
+#define NG_TAG_VPB ' BPV'
+
+/*
+ * FSCTL_DISMOUNT_VOLUME through the handle that holds the volume lock (a busy volume is not
+ * dismounted by force).  The volume is flushed unless the lock holder already wrote the disk
+ * directly, the core is unmounted, and the storage device gets a new VPB, so the next open mounts
+ * the volume again; the file objects of this mount, the dismounting handle among them, keep the
+ * old one.  That handle still reads and writes the disk directly; every other request on this
+ * mount fails with STATUS_VOLUME_DISMOUNTED.  Not for a volume with a paging file.
+ */
+static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
+{
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
+    PNG_CCB Ccb = FileObject ? FileObject->FsContext2 : NULL;
+    PNG_FCB *List = NULL;
+    ULONG Count = 0, i;
+    PLIST_ENTRY Entry;
+    BOOLEAN Discard;
+    PVPB NewVpb;
+    KIRQL Irql;
+
+    if (!Fcb || !Fcb->IsVolume || !Ccb)
+        return STATUS_INVALID_PARAMETER;
+    if (!Ccb->ManageVolume)
+        return STATUS_INVALID_PARAMETER;
+    if (Vcb->LockedBy != FileObject)
+        return STATUS_ACCESS_DENIED;
+    NewVpb = ExAllocatePoolWithTag(NonPagedPool, sizeof(VPB), NG_TAG_VPB);
+    if (!NewVpb)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        if (F->IsPagingFile)
+        {
+            ExReleaseFastMutex(&Vcb->FcbListLock);
+            ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
+            return STATUS_ACCESS_DENIED;
+        }
+        Count++;
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
+
+    Discard = Vcb->RawWritten;
+    if (!Discard && !Vcb->ReadOnly)
+        NgFlushVolume(Vcb);
+
+    /* Cached files lose their views; later paging I/O on them fails. */
+    if (Count)
+        List = ExAllocatePoolWithTag(PagedPool, Count * sizeof(PNG_FCB), TAG_NTFSNG);
+    Count = 0;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Vcb->FcbList.Flink; List && Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        F->Header.IsFastIoPossible = FastIoIsNotPossible;
+        InterlockedIncrement(&F->RefCount);
+        List[Count++] = F;
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    for (i = 0; i < Count; i++)
+    {
+        if (List[i]->SectionObjectPointers.DataSectionObject || List[i]->SectionObjectPointers.SharedCacheMap)
+            CcPurgeCacheSection(&List[i]->SectionObjectPointers, NULL, 0, FALSE);
+        if (List[i]->SectionObjectPointers.ImageSectionObject)
+            MmFlushImageSection(&List[i]->SectionObjectPointers, MmFlushForDelete);
+    }
+    Vcb->Dismounted = TRUE;
+
+    ExAcquireFastMutex(&NgGlobal.VcbListLock);
+    RemoveEntryList(&Vcb->GlobalLinks);
+    ExReleaseFastMutex(&NgGlobal.VcbListLock);
+    if (Vcb->Flusher)
+    {
+        KeSetEvent(&Vcb->FlusherStop, IO_NO_INCREMENT, FALSE);
+        KeWaitForSingleObject(Vcb->Flusher, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(Vcb->Flusher);
+        Vcb->Flusher = NULL;
+    }
+
+    NgAcquireCore(Vcb);
+    for (i = 0; i < Count; i++)
+    {
+        List[i]->Deleted = TRUE;
+        if (List[i]->Node)
+        {
+            ngc_put(List[i]->Node);
+            List[i]->Node = NULL;
+        }
+    }
+    if (!Discard && !Vcb->ReadOnly)
+        ngc_sync(Vcb->Core);
+    ngc_umount(Vcb->Core, Discard);
+    Vcb->Core = NULL;
+    NgReleaseCore(Vcb);
+    for (i = 0; i < Count; i++)
+        NgDereferenceFcb(List[i]);
+    if (List)
+        ExFreePoolWithTag(List, TAG_NTFSNG);
+
+    RtlZeroMemory(NewVpb, sizeof(VPB));
+    NewVpb->Type = IO_TYPE_VPB;
+    NewVpb->Size = sizeof(VPB);
+    IoAcquireVpbSpinLock(&Irql);
+    NewVpb->RealDevice = Vcb->Vpb->RealDevice;
+    NewVpb->Flags = Vcb->Vpb->Flags & VPB_REMOVE_PENDING;
+    if (Vcb->Vpb->RealDevice->Vpb == Vcb->Vpb)
+    {
+        Vcb->Vpb->RealDevice->Vpb = NewVpb;
+        NewVpb = NULL;
+    }
+    IoReleaseVpbSpinLock(Irql);
+    if (NewVpb)
+        ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
+    DPRINT1("ntfsng: volume %08lx dismounted%s\n", Vcb->Vpb->SerialNumber,
+            Discard ? " (written directly by the lock holder: mounted state dropped)" : "");
+    return STATUS_SUCCESS;
+}
+
 /* FSCTL_GET/SET/DELETE_REPARSE_POINT on a file or directory (not a stream, not the volume). */
 static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, PIO_STACK_LOCATION Stack, ULONG Code)
 {
@@ -421,8 +543,7 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             return NgReparseFsctl(Vcb, Fcb, FileObject ? FileObject->FsContext2 : NULL, Irp, Stack,
                                   Stack->Parameters.FileSystemControl.FsControlCode);
         case FSCTL_DISMOUNT_VOLUME:
-            /* Dismount is not implemented: volumes stay mounted until shutdown. */
-            return STATUS_ACCESS_DENIED;
+            return NgDismountVolume(Vcb, FileObject);
         default:
             return STATUS_INVALID_DEVICE_REQUEST;
     }

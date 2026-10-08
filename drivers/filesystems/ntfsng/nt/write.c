@@ -360,8 +360,8 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG
 static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Length)
 {
     PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
-    BOOLEAN Holder = Vcb->LockedBy == FileObject;
-    BOOLEAN Raw = FALSE;
+    BOOLEAN Holder = Vcb->LockedBy == FileObject || Vcb->Dismounted;
+    BOOLEAN Raw = Vcb->Dismounted;
     PMDL Mdl = NULL;
     PVOID Buffer;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -436,7 +436,7 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
     }
     if (Raw || Vcb->ReadOnly)
     {
-        if (!Vcb->RawWritten)
+        if (!Vcb->RawWritten && !Vcb->Dismounted)
             DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): the mounted state is dropped at dismount\n",
                     Offset, Length);
         Vcb->RawWritten = TRUE;

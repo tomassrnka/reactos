@@ -380,6 +380,65 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return IoCallDriver(Vcb->StorageDevice, Irp);
 }
 
+/* IRP_MJ_CLEANUP on a dismounted volume: only the handle's own state, the core is gone. */
+static NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
+{
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    PNG_FCB Fcb = FileObject->FsContext;
+    PNG_CCB Ccb = FileObject->FsContext2;
+
+    if (!Fcb)
+        return STATUS_SUCCESS;
+    if (Fcb->IsVolume && Vcb->LockedBy == FileObject)
+        NgUnlockVolume(Vcb);
+    if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
+        FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
+    if (!Fcb->IsDirectory && !Fcb->IsVolume)
+    {
+        FsRtlFastUnlockAll(&Fcb->FileLock, FileObject, IoGetRequestorProcess(Irp), NULL);
+        CcUninitializeCacheMap(FileObject, NULL, NULL);
+    }
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
+    Fcb->OpenHandles--;
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    FileObject->Flags |= FO_CLEANUP_COMPLETE;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Requests on a dismounted volume: closes and cleanups go on, the volume handle reads, writes and
+ * controls the disk directly and may unlock; everything else fails with STATUS_VOLUME_DISMOUNTED.
+ */
+static NTSTATUS NgDismountedRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    PNG_FCB Fcb = Stack->FileObject ? Stack->FileObject->FsContext : NULL;
+    BOOLEAN Volume = Fcb && Fcb->IsVolume;
+
+    switch (Stack->MajorFunction)
+    {
+        case IRP_MJ_CLOSE:
+            return NgClose(DeviceObject, Irp);
+        case IRP_MJ_CLEANUP:
+            return NgCleanupDismounted(Vcb, Irp);
+        case IRP_MJ_READ:
+            return Volume ? NgRead(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
+        case IRP_MJ_WRITE:
+            return Volume ? NgWrite(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
+        case IRP_MJ_FLUSH_BUFFERS:
+            return Volume ? STATUS_SUCCESS : STATUS_VOLUME_DISMOUNTED;
+        case IRP_MJ_FILE_SYSTEM_CONTROL:
+            if (Volume && (Stack->MinorFunction == IRP_MN_USER_FS_REQUEST || Stack->MinorFunction == IRP_MN_KERNEL_CALL) &&
+                Stack->Parameters.FileSystemControl.FsControlCode == FSCTL_UNLOCK_VOLUME)
+                return NgFileSystemControl(DeviceObject, Irp);
+            return STATUS_VOLUME_DISMOUNTED;
+        default:
+            return STATUS_VOLUME_DISMOUNTED;
+    }
+}
+
 /* Fast I/O: cached reads go straight to Cc (FsRtlCopyRead); everything else takes the IRP path. */
 static BOOLEAN NTAPI NgFastIoCheckIfPossible(PFILE_OBJECT FileObject, PLARGE_INTEGER FileOffset, ULONG Length,
                                              BOOLEAN Wait, ULONG LockKey, BOOLEAN CheckForReadOperation,
@@ -447,6 +506,11 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                      ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_REQUEST;
         if (Major == IRP_MJ_CREATE)
             Irp->IoStatus.Information = FILE_OPENED;
+    }
+    else if (DeviceObject != NgGlobal.ControlDevice && ((PNG_VCB)DeviceObject->DeviceExtension)->Dismounted &&
+             !(Major == IRP_MJ_DEVICE_CONTROL && NgIsVolumeOpen(Irp)))
+    {
+        Status = NgDismountedRequest(DeviceObject, Irp);
     }
     else if (Major == IRP_MJ_DEVICE_CONTROL && DeviceObject != NgGlobal.ControlDevice)
     {
