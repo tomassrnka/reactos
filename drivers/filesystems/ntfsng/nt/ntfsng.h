@@ -300,6 +300,7 @@ NTSTATUS NgPagingFileMap(PNG_FCB Fcb);
 NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGLONG Offset, ULONG Length);
 VOID NgAfterChange(PNG_VCB Vcb);
 NTSTATUS NgCheckMedium(PNG_VCB Vcb);
+VOID NgSetFlushOptional(PDEVICE_OBJECT Device);
 VOID NgApplyModified(PNG_FCB Fcb);
 NTSTATUS NgStartFlusher(PNG_VCB Vcb);
 BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait);

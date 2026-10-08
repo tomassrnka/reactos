@@ -154,6 +154,39 @@ void ngos_time(long long *sec, long *nsec)
     *nsec = (long)((Unix100ns % 10000000ULL) * 100);
 }
 
+/*
+ * Devices whose stack refuses flushes but whose disk reports no volatile write cache (NgFlushUsable at
+ * mount): only there does a refused flush count as done.
+ */
+static PDEVICE_OBJECT NgFlushOptional[32];
+static KSPIN_LOCK NgFlushOptionalLock;
+
+VOID NgSetFlushOptional(PDEVICE_OBJECT Device)
+{
+    KIRQL Irql;
+    ULONG i;
+    KeAcquireSpinLock(&NgFlushOptionalLock, &Irql);
+    for (i = 0; i < RTL_NUMBER_OF(NgFlushOptional); i++)
+        if (!NgFlushOptional[i] || NgFlushOptional[i] == Device)
+        {
+            NgFlushOptional[i] = Device;
+            break;
+        }
+    KeReleaseSpinLock(&NgFlushOptionalLock, Irql);
+}
+
+static BOOLEAN NgIsFlushOptional(PDEVICE_OBJECT Device)
+{
+    KIRQL Irql;
+    ULONG i;
+    BOOLEAN Found = FALSE;
+    KeAcquireSpinLock(&NgFlushOptionalLock, &Irql);
+    for (i = 0; i < RTL_NUMBER_OF(NgFlushOptional) && !Found; i++)
+        Found = NgFlushOptional[i] == Device;
+    KeReleaseSpinLock(&NgFlushOptionalLock, Irql);
+    return Found;
+}
+
 static IO_COMPLETION_ROUTINE NgReadCompletion;
 static NTSTATUS NTAPI NgReadCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
 {
@@ -214,17 +247,12 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
     if (!NT_SUCCESS(Status))
     {
         /*
-         * A disk without a write cache may not implement flush.  A stack that refuses flushes on a disk
-         * that has one voids every durability step of the journal, so say so (once).
+         * A disk without a write cache may not implement flush.  On any other disk a refused flush is
+         * a failed one: it voids every durability step of the journal.
          */
         if (Major == IRP_MJ_FLUSH_BUFFERS && (Status == STATUS_INVALID_DEVICE_REQUEST || Status == STATUS_NOT_SUPPORTED ||
-                                             Status == STATUS_NOT_IMPLEMENTED))
-        {
-            static LONG Warned;
-            if (!InterlockedExchange(&Warned, 1))
-                DPRINT1("ntfsng: the storage stack refused a flush (0x%lx): if the disk caches writes, a power cut can lose committed changes\n", Status);
+                                             Status == STATUS_NOT_IMPLEMENTED) && NgIsFlushOptional(Device))
             return 0;
-        }
         DPRINT1("ntfsng: device %s at %I64u len %u failed 0x%lx\n",
                 Major == IRP_MJ_READ ? "read" : Major == IRP_MJ_WRITE ? "write" : "flush", off, len, Status);
         return -1;
