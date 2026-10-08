@@ -524,6 +524,9 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (FCB->Recv.Window)
         ExFreePoolWithTag(FCB->Recv.Window, TAG_AFD_DATA_BUFFER);
 
+    if (FCB->RecvRelaunchWorkItem)
+        IoFreeWorkItem(FCB->RecvRelaunchWorkItem);
+
     if (FCB->Send.Window)
         ExFreePoolWithTag(FCB->Send.Window, TAG_AFD_DATA_BUFFER);
 

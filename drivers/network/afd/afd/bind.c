@@ -41,6 +41,14 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
                                                &FCB->Recv.Size);
         }
 
+        /* Used to restart the receive from a system thread (read.c) */
+        if (NT_SUCCESS(Status) && !FCB->RecvRelaunchWorkItem)
+        {
+            FCB->RecvRelaunchWorkItem = IoAllocateWorkItem(FCB->FileObject->DeviceObject);
+            if (!FCB->RecvRelaunchWorkItem)
+                Status = STATUS_NO_MEMORY;
+        }
+
         if (NT_SUCCESS(Status) && !FCB->Recv.Window)
         {
             FCB->Recv.Window = ExAllocatePoolWithTag(PagedPool,

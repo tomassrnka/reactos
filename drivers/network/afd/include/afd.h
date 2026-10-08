@@ -206,6 +206,8 @@ typedef struct _AFD_FCB {
     LIST_ENTRY PendingIrpList[MAX_FUNCTIONS];
     LIST_ENTRY DatagramList;
     LIST_ENTRY PendingConnections;
+    PIO_WORKITEM RecvRelaunchWorkItem;
+    BOOLEAN RecvRelaunchQueued;
 } AFD_FCB, *PAFD_FCB;
 
 /* bind.c */
