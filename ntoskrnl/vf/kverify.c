@@ -64,6 +64,9 @@ static ULONG KvCpuBtCount[KV_MAX_CPUS];
 
 /* ONE-SHOT REPORTING ********************************************************/
 
+/* Not instrumented: the UBSan handlers call it, and a check firing in here
+ * before the site is claimed would recurse. */
+__attribute__((no_sanitize_undefined))
 BOOLEAN
 NTAPI
 KvLogOnce(IN PVOID SiteKey)
@@ -454,9 +457,6 @@ KvInitialize(IN ULONG Phase, IN PVOID LoaderBlock)
      * it again here, where the debug channel is live. */
     DbgPrint("KVERIFY: active, flags 0x%lx, deadlock %lu s\n",
              KvFlags, KvDeadlockSeconds);
-
-    if (KvFlags & KV_UBSAN)
-        KvUbsanInitDrain();
 
     if ((KvFlags & KV_LOCKDEP) && !KvLockdepInit())
     {

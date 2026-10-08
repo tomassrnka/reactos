@@ -55,7 +55,6 @@ VOID NTAPI KvPoolLeakSample(VOID);
 
 /* (f) UBSan reports are queued by the handlers and printed here (kvubsan.c). */
 VOID NTAPI KvUbsanDrain(VOID);
-VOID NTAPI KvUbsanInitDrain(VOID);
 
 FORCEINLINE BOOLEAN KvEnabled(ULONG Feature)
 {

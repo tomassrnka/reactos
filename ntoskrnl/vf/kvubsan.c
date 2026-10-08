@@ -75,7 +75,7 @@ struct kv_pointer_overflow_data
     struct kv_source_location Loc;
 };
 
-static const char *
+static KV_UBSAN_FN const char *
 KvUbsanType(struct kv_type_descriptor *Type)
 {
     return (Type != NULL) ? Type->TypeName : "?";
@@ -85,8 +85,14 @@ KvUbsanType(struct kv_type_descriptor *Type)
  * Reports are queued, never printed from the handler: a check can fire inside
  * the debug print, trap or exception path while it holds the debugger's lock,
  * and a DbgPrint from there re-enters that lock and bugchecks. The watchdog
- * thread drains the ring at PASSIVE_LEVEL; a bug-check callback drains it on
- * a crash. A slot is published by writing Loc last.
+ * thread is the only consumer and drains the ring every period at
+ * PASSIVE_LEVEL. Nothing drains it on a crash: printing after the other CPUs
+ * are frozen can spin on a debugger lock one of them holds, so the reports of
+ * the last period stay in KvUbsanRing, readable from KDBG or a dump.
+ *
+ * A producer takes a ticket only when the ring has room, so a dropped report
+ * never leaves a hole that would stall the consumer. A slot is published by
+ * writing Loc last, after a barrier.
  */
 #define KV_UBSAN_RING 2048   /* holds the boot burst before the drainer starts */
 
@@ -97,37 +103,46 @@ typedef struct _KV_UBSAN_ENTRY
     PCSTR Detail;
 } KV_UBSAN_ENTRY;
 
-static KV_UBSAN_ENTRY KvUbsanRing[KV_UBSAN_RING];
+KV_UBSAN_ENTRY KvUbsanRing[KV_UBSAN_RING];
 static volatile LONG KvUbsanHead;
 static volatile LONG KvUbsanTail;
 static volatile LONG KvUbsanDropped;
-static KBUGCHECK_CALLBACK_RECORD KvUbsanBugCheckRecord;
 
 static KV_UBSAN_FN VOID
 KvUbsanReport(struct kv_source_location *Loc, PCSTR Kind, PCSTR Detail)
 {
-    LONG Index;
+    ULONG Head;
     KV_UBSAN_ENTRY *Entry;
 
     if (!(KvFlags & KV_UBSAN) || Loc == NULL)
         return;
-    /* Key the one-shot on the static location record (unique per site). */
+    /* Key the one-shot on the static location record (unique per site). A
+     * site dropped below is not reported again; only the count is printed. */
     if (!KvLogOnce((PVOID)Loc))
         return;
 
-    Index = InterlockedIncrement(&KvUbsanHead) - 1;
-    Entry = &KvUbsanRing[(ULONG)Index % KV_UBSAN_RING];
-    if ((ULONG)(Index - KvUbsanTail) >= KV_UBSAN_RING || Entry->Loc != NULL)
+    for (;;)
     {
-        InterlockedIncrement(&KvUbsanDropped);
-        return;
+        Head = (ULONG)KvUbsanHead;
+        if (Head - (ULONG)KvUbsanTail >= KV_UBSAN_RING)
+        {
+            InterlockedIncrement(&KvUbsanDropped);
+            return;
+        }
+        if ((ULONG)InterlockedCompareExchange(&KvUbsanHead, (LONG)(Head + 1),
+                                              (LONG)Head) == Head)
+            break;
     }
+
+    /* The consumer clears Loc before it advances Tail, so this slot is free. */
+    Entry = &KvUbsanRing[Head % KV_UBSAN_RING];
     Entry->Kind = Kind;
     Entry->Detail = Detail ? Detail : "";
-    InterlockedExchangePointer((PVOID volatile *)&Entry->Loc, Loc);
+    KeMemoryBarrier();
+    Entry->Loc = Loc;
 }
 
-/* Single consumer: the watchdog thread, or the bug-check callback. */
+/* Single consumer: the watchdog thread. */
 KV_UBSAN_FN VOID
 NTAPI
 KvUbsanDrain(VOID)
@@ -137,42 +152,23 @@ KvUbsanDrain(VOID)
         KV_UBSAN_ENTRY *Entry = &KvUbsanRing[(ULONG)KvUbsanTail % KV_UBSAN_RING];
         struct kv_source_location *Loc = Entry->Loc;
 
+        /* An empty slot is either the end or a producer still writing it. */
         if (Loc == NULL)
             break;
+        KeMemoryBarrier();
         DbgPrint("KVERIFY: [UBSAN] %s at %s:%lu:%lu %s\n",
                  Entry->Kind,
                  Loc->FileName ? Loc->FileName : "?",
                  (ULONG)Loc->Line, (ULONG)Loc->Column,
                  Entry->Detail);
-        InterlockedExchangePointer((PVOID volatile *)&Entry->Loc, NULL);
+        Entry->Loc = NULL;
+        KeMemoryBarrier();
         InterlockedIncrement(&KvUbsanTail);
     }
     if (KvUbsanDropped != 0)
     {
         DbgPrint("KVERIFY: [UBSAN] %ld reports dropped (ring full)\n",
                  InterlockedExchange(&KvUbsanDropped, 0));
-    }
-}
-
-static KV_UBSAN_FN VOID
-NTAPI
-KvUbsanBugCheckCallback(IN PVOID Buffer, IN ULONG Length)
-{
-    UNREFERENCED_PARAMETER(Buffer);
-    UNREFERENCED_PARAMETER(Length);
-    KvUbsanDrain();
-}
-
-KV_UBSAN_FN VOID
-NTAPI
-KvUbsanInitDrain(VOID)
-{
-    KeInitializeCallbackRecord(&KvUbsanBugCheckRecord);
-    if (!KeRegisterBugCheckCallback(&KvUbsanBugCheckRecord,
-                                    KvUbsanBugCheckCallback,
-                                    NULL, 0, (PUCHAR)"KVUBSAN"))
-    {
-        DbgPrint("KVERIFY: [UBSAN] bug-check callback not registered\n");
     }
 }
 
