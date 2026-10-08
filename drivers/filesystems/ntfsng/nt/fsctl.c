@@ -280,7 +280,7 @@ static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
     PNG_CCB Ccb = FileObject ? FileObject->FsContext2 : NULL;
     PNG_FCB *List = NULL;
-    ULONG Count = 0, i;
+    ULONG Count = 0, Capacity, i;
     PLIST_ENTRY Entry;
     BOOLEAN Discard;
     PVPB NewVpb;
@@ -314,12 +314,30 @@ static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     if (!Discard && !Vcb->ReadOnly)
         NgFlushVolume(Vcb);
 
-    /* Cached files lose their views; later paging I/O on them fails. */
-    if (Count)
-        List = ExAllocatePoolWithTag(PagedPool, Count * sizeof(PNG_FCB), TAG_NTFSNG);
+    /* Cached files lose their views; later paging I/O on them fails.  Every FCB is taken, also one a
+     * create published after the count: the array is sized again until it fits. */
+    for (Capacity = Count + 16;; Capacity = Count + 16)
+    {
+        List = ExAllocatePoolWithTag(PagedPool, Capacity * sizeof(PNG_FCB), TAG_NTFSNG);
+        if (!List)
+        {
+            /* Without the snapshot the teardown would leave core inodes behind: the volume stays mounted. */
+            FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT_FAILED);
+            ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        Count = 0;
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+            Count++;
+        if (Count <= Capacity)
+            break;
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        ExFreePoolWithTag(List, TAG_NTFSNG);
+        List = NULL;
+    }
     Count = 0;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
-    for (Entry = Vcb->FcbList.Flink; List && Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
         F->Header.IsFastIoPossible = FastIoIsNotPossible;
