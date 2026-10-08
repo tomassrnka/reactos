@@ -166,7 +166,8 @@ START_TEST(NtWriteFile)
                          NULL);
     ok_hex(Status, IsWow64() ? STATUS_INVALID_PARAMETER : STATUS_ACCESS_VIOLATION); // Different to NtReadFile
 
-    /* Buffer probing fails */
+    /* Buffer probing fails. The MDL is allocated before the buffer is probed,
+     * so with the pre-Vista MDL size limit this fails like "too large" above */
     Status = NtWriteFile(FileHandle,
                          NULL,
                          NULL,
@@ -176,7 +177,10 @@ START_TEST(NtWriteFile)
                          2 * LargeMdlMaxDataSize,
                          &ByteOffset,
                          NULL);
-    ok_hex(Status, Is64BitSystem() ? STATUS_INVALID_USER_BUFFER: STATUS_INSUFFICIENT_RESOURCES); // Different to NtReadFile
+    if (Is64BitSystem() && GetNTVersion() >= _WIN32_WINNT_VISTA)
+        ok_hex(Status, STATUS_INVALID_USER_BUFFER); // Different to NtReadFile
+    else
+        ok_hex(Status, STATUS_INSUFFICIENT_RESOURCES);
 
     /* non-cached, unaligned -- fails with invalid parameter */
     Status = NtWriteFile(FileHandle,
