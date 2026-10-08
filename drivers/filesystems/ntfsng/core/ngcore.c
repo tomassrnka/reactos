@@ -47,6 +47,7 @@ extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_di
 extern unsigned long long kshim_counter_write_bytes;
 extern bool (*kshim_is_data_inode)(struct inode *i);
 extern bool (*kshim_icache_ok)(struct inode *i);
+unsigned long kshim_pc_soft_limit(void);
 
 struct ngc_vol {
 	struct super_block *sb;
@@ -354,8 +355,8 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 	if (fc->ops->free)
 		fc->ops->free(fc);
 	kfree(fc);
-	/* MFT records are read for every lookup and listing: keep 16 MB of them (16k records) cached. */
-	NTFS_SB(v->sb)->mft_ino->i_mapping->kshim_pc_max = 4096;
+	/* MFT records are read for every lookup and listing: keep up to 16 MB of them cached (less on small machines). */
+	NTFS_SB(v->sb)->mft_ino->i_mapping->kshim_pc_max = min_t(unsigned long, 4096, kshim_pc_soft_limit() / 2);
 	*out = v;
 	return 0;
 fail_fc:

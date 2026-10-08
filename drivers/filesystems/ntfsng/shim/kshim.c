@@ -171,7 +171,7 @@ char *kstrndup(const char *s, size_t n, gfp_t g)
 	return p;
 }
 void *kmemdup(const void *s, size_t n, gfp_t g) { void *p = kmalloc_site(n, g, __builtin_return_address(0)); if (p) memcpy(p, s, n); return p; }
-unsigned long totalram_pages(void) { return 1UL << 18; }
+unsigned long totalram_pages(void) { return ngos_physical_pages(); }
 struct kmem_cache *kmem_cache_create(const char *name, unsigned int size,
 		unsigned int align, unsigned long flags, void (*ctor)(void *))
 {
@@ -905,7 +905,17 @@ void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, 
  * the file system (what GFP_NOFS prevents in Linux).
  */
 #define KSHIM_ICACHE_UNUSED 4096
-#define KSHIM_PC_PAGES_SOFT 24576
+/* Folio pages (nonpaged pool) before unused inodes are evicted: 96 MB, or 1/16 of memory if less. */
+#define KSHIM_PC_PAGES_SOFT kshim_pc_soft_limit()
+unsigned long kshim_pc_soft_limit(void)
+{
+	static unsigned long lim;
+	if (!lim) {
+		unsigned long l = ngos_physical_pages() / 16;
+		lim = l > 24576 ? 24576 : l < 1024 ? 1024 : l;
+	}
+	return lim;
+}
 unsigned long kshim_inodes_live, kshim_icache_hits, kshim_icache_evicted;
 extern bool (*kshim_is_data_inode)(struct inode *i);
 bool (*kshim_icache_ok)(struct inode *i);
