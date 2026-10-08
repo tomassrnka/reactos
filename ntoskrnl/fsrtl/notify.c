@@ -1218,6 +1218,7 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                                 }
                                 /* Now, we start looking for matching parts (unless we watch root) */
                                 TargetNumberOfParts = 0;
+                                LastPartOffset = 0;
                                 if (!(NotifyChange->Flags & WATCH_ROOT))
                                 {
                                     FullNumberOfParts = 1;
