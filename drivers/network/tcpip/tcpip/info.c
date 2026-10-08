@@ -17,8 +17,28 @@ VOID AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
     KIRQL OldIrql;
     ULONG i, Instance = 0;
     BOOLEAN ChoseIndex = FALSE;
+    TDIEntityInfo *NewList;
 
     TcpipAcquireSpinLock(&EntityListLock, &OldIrql);
+
+    /* Every address file has an entity, so the list must grow with them */
+    if (EntityCount == EntityMax)
+    {
+        NewList = ExAllocatePoolWithTag(NonPagedPool,
+                                        sizeof(TDIEntityInfo) * EntityMax * 2,
+                                        TDI_ENTITY_TAG);
+        if (!NewList)
+        {
+            TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+            DbgPrint("TCPIP: No memory to grow the entity list, entity %lu not added\n", EntityType);
+            return;
+        }
+
+        RtlCopyMemory(NewList, EntityList, sizeof(TDIEntityInfo) * EntityCount);
+        ExFreePoolWithTag(EntityList, TDI_ENTITY_TAG);
+        EntityList = NewList;
+        EntityMax *= 2;
+    }
 
     while (!ChoseIndex)
     {
