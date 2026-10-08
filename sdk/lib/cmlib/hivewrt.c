@@ -130,7 +130,7 @@ HvpWriteLog(
      * Now calculate the bitmap and buffer sizes to hold up our
      * contents in a buffer.
      */
-    BitmapSize = ROUND_UP(sizeof(ULONG) + RegistryHive->DirtyVector.SizeOfBitMap, HSECTOR_SIZE);
+    BitmapSize = HV_LOG_DIRTY_VECTOR_SIZE(RegistryHive->Storage[Stable].Length);
     BufferSize = HV_LOG_HEADER_SIZE + BitmapSize;
 
     /* Now allocate the base header block buffer */
@@ -177,7 +177,8 @@ HvpWriteLog(
         /* Check if the block is clean or we're past the last block */
         LastIndex = BlockIndex;
         BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
+        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex ||
+            BlockIndex >= RegistryHive->Storage[Stable].Length)
         {
             break;
         }
@@ -212,7 +213,8 @@ HvpWriteLog(
         /* Check if the block is clean or we're past the last block */
         LastIndex = BlockIndex;
         BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
+        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex ||
+            BlockIndex >= RegistryHive->Storage[Stable].Length)
         {
             break;
         }

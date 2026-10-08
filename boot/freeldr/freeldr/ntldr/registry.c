@@ -171,7 +171,8 @@ RegLoadHiveLog(
     _In_ PCSTR DirectoryPath,
     _In_ ULONG LogFileOffset,
     _In_ PCSTR LogName,
-    _Out_ PVOID *LogData)
+    _Out_ PVOID *LogData,
+    _Out_opt_ PULONG LogDataSize)
 {
     ARC_STATUS Status;
     ULONG LogId;
@@ -247,6 +248,8 @@ RegLoadHiveLog(
     }
 
     *LogData = LogDataVirtual;
+    if (LogDataSize)
+        *LogDataSize = BytesRead;
     ArcClose(LogId);
     return TRUE;
 }
@@ -288,7 +291,7 @@ RegRecoverHeaderHive(
     /* Build the complete path of the hive log */
     RtlStringCbCopyA(FullLogFileName, sizeof(FullLogFileName), LogName);
     RtlStringCbCatA(FullLogFileName, sizeof(FullLogFileName), ".LOG");
-    Success = RegLoadHiveLog(DirectoryPath, 0, FullLogFileName, &LogData);
+    Success = RegLoadHiveLog(DirectoryPath, 0, FullLogFileName, &LogData, NULL);
     if (!Success)
     {
         ERR("Failed to read the hive log\n");
@@ -360,11 +363,12 @@ RegRecoverDataHive(
     PVOID LogData;
     PUCHAR LogDataPhysical;
     PHBASE_BLOCK HiveBaseBlock;
+    ULONG LogDataSize, VectorSize;
 
     /* Build the complete path of the hive log */
     RtlStringCbCopyA(FullLogFileName, sizeof(FullLogFileName), LogName);
     RtlStringCbCatA(FullLogFileName, sizeof(FullLogFileName), ".LOG");
-    Success = RegLoadHiveLog(DirectoryPath, HV_LOG_HEADER_SIZE, FullLogFileName, &LogData);
+    Success = RegLoadHiveLog(DirectoryPath, HV_LOG_HEADER_SIZE, FullLogFileName, &LogData, &LogDataSize);
     if (!Success)
     {
         ERR("Failed to read the hive log\n");
@@ -384,6 +388,13 @@ RegRecoverDataHive(
     BlockIndex = 0;
     HiveBaseBlock = GET_HBASE_BLOCK(ChunkBase);
     StorageLength = HiveBaseBlock->Length / HBLOCK_SIZE;
+    /* The dirty blocks follow the whole vector (see HvpWriteLog), which can be longer than a sector */
+    VectorSize = HV_LOG_DIRTY_VECTOR_SIZE(StorageLength);
+    if (VectorSize > LogDataSize)
+    {
+        ERR("The hive log is shorter than its dirty vector\n");
+        return FALSE;
+    }
     for (; BlockIndex < StorageLength; ++BlockIndex)
     {
         /* Skip this block if it's not dirty and go to the next one */
@@ -393,7 +404,12 @@ RegRecoverDataHive(
         }
 
         /* Read the dirty block and copy it at right offsets */
-        BlockPtr = (PUCHAR)((ULONG_PTR)LogDataPhysical + 2 * HSECTOR_SIZE + LogIndex * HBLOCK_SIZE);
+        if (VectorSize + (LogIndex + 1) * HBLOCK_SIZE > LogDataSize)
+        {
+            ERR("The hive log ends before its dirty block %lu\n", BlockIndex);
+            return FALSE;
+        }
+        BlockPtr = (PUCHAR)((ULONG_PTR)LogDataPhysical + VectorSize + LogIndex * HBLOCK_SIZE);
         BlockDest = (PUCHAR)((ULONG_PTR)ChunkBase + (BlockIndex + 1) * HBLOCK_SIZE);
         RtlCopyMemory(BlockDest, BlockPtr, HBLOCK_SIZE);
 

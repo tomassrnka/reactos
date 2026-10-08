@@ -56,6 +56,14 @@
 #define HV_LOG_DIRTY_BLOCK 0xFF
 #define HV_LOG_DIRTY_SIGNATURE 0x54524944 // "DIRT"
 
+/*
+ * Bytes of a log's dirty vector: the signature, one byte per block of the dirty bitmap (whose size is
+ * the block count rounded up to 32, as HvpWriteLog has always sized it), whole sectors.  The dirty
+ * blocks follow it.
+ */
+#define HV_LOG_DIRTY_VECTOR_SIZE(Blocks) \
+    ((((sizeof(ULONG) + (((Blocks) + 31) & ~31)) + HSECTOR_SIZE - 1) / HSECTOR_SIZE) * HSECTOR_SIZE)
+
 //
 // Hive structure identifiers
 //

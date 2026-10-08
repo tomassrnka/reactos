@@ -905,8 +905,24 @@ HvpRecoverDataFromLog(
     ULONG BlockIndex;
     ULONG LogIndex;
     ULONG StorageLength;
-    UCHAR DirtyVector[HSECTOR_SIZE];
+    ULONG VectorSize;
+    PUCHAR DirtyVector;
+    RESULT Result = HiveSuccess;
     UCHAR Buffer[HBLOCK_SIZE];
+
+    /*
+     * The dirty vector holds one byte per block of the hive as it was when the log was
+     * written, and the dirty blocks follow it (see HvpWriteLog): beyond 508 blocks it is
+     * longer than one sector.
+     */
+    StorageLength = BaseBlock->Length / HBLOCK_SIZE;
+    VectorSize = HV_LOG_DIRTY_VECTOR_SIZE(StorageLength);
+    DirtyVector = Hive->Allocate(VectorSize, FALSE, TAG_CM);
+    if (!DirtyVector)
+    {
+        DPRINT1("No memory for the log's dirty vector (%lu bytes)\n", VectorSize);
+        return Fail;
+    }
 
     /* Read the dirty data from the log */
     FileOffset = HV_LOG_HEADER_SIZE;
@@ -914,13 +930,14 @@ HvpRecoverDataFromLog(
                              HFILE_TYPE_LOG,
                              &FileOffset,
                              DirtyVector,
-                             HSECTOR_SIZE);
+                             VectorSize);
     if (!Success)
     {
         if (!CmIsSelfHealEnabled(FALSE))
         {
             DPRINT1("The log couldn't be read and self-healing mode is disabled\n");
-            return Fail;
+            Result = Fail;
+            goto Quit;
         }
 
         /*
@@ -932,7 +949,8 @@ HvpRecoverDataFromLog(
          * thing that can happen? Data loss, that's it.
          */
         DPRINT1("Triggering self-heal mode, DATA LOSS IS IMMINENT\n");
-        return SelfHeal;
+        Result = SelfHeal;
+        goto Quit;
     }
 
     /* Check the dirty vector */
@@ -941,7 +959,8 @@ HvpRecoverDataFromLog(
         if (!CmIsSelfHealEnabled(FALSE))
         {
             DPRINT1("The log's dirty vector signature is not valid\n");
-            return Fail;
+            Result = Fail;
+            goto Quit;
         }
 
         /*
@@ -951,12 +970,12 @@ HvpRecoverDataFromLog(
          * garbage.
          */
         DPRINT1("Triggering self-heal mode, DATA LOSS IS IMMINENT\n");
-        return SelfHeal;
+        Result = SelfHeal;
+        goto Quit;
     }
 
     /* Now read each data individually and write it back to hive */
     LogIndex = 0;
-    StorageLength = BaseBlock->Length / HBLOCK_SIZE;
     for (BlockIndex = 0; BlockIndex < StorageLength; BlockIndex++)
     {
         /* Skip this block if it's not dirty and go to the next one */
@@ -965,7 +984,7 @@ HvpRecoverDataFromLog(
             continue;
         }
 
-        FileOffset = HSECTOR_SIZE + HSECTOR_SIZE + LogIndex * HBLOCK_SIZE;
+        FileOffset = HV_LOG_HEADER_SIZE + VectorSize + LogIndex * HBLOCK_SIZE;
         Success = Hive->FileRead(Hive,
                                  HFILE_TYPE_LOG,
                                  &FileOffset,
@@ -974,7 +993,8 @@ HvpRecoverDataFromLog(
         if (!Success)
         {
             DPRINT1("Failed to read the dirty block (index %u)\n", BlockIndex);
-            return Fail;
+            Result = Fail;
+            goto Quit;
         }
 
         FileOffset = HBLOCK_SIZE + BlockIndex * HBLOCK_SIZE;
@@ -986,14 +1006,17 @@ HvpRecoverDataFromLog(
         if (!Success)
         {
             DPRINT1("Failed to write dirty block to hive (index %u)\n", BlockIndex);
-            return Fail;
+            Result = Fail;
+            goto Quit;
         }
 
         /* Increment the index in log as we continue further */
         LogIndex++;
     }
 
-    return HiveSuccess;
+Quit:
+    Hive->Free(DirtyVector, 0);
+    return Result;
 }
 #endif
 
