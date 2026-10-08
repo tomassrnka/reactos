@@ -47,6 +47,7 @@ list(APPEND SOURCE
     QueueUserAPC.c
     RaiseFailFastException.c
     ReadFile.c
+    RegisterWait.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c
     SetCurrentDirectory.c
