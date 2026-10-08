@@ -35,6 +35,17 @@
 #include "balloon.tmh"
 #endif
 
+static VOID BalloonCopyPfns(OUT u32 *Table, IN PMDL Mdl, IN ULONG Count)
+{
+    PPFN_NUMBER Pfns = MmGetMdlPfnArray(Mdl);
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+    {
+        Table[i] = (u32)Pfns[i];
+    }
+}
+
 NTSTATUS
 BalloonInit(IN WDFOBJECT WdfDevice)
 {
@@ -151,11 +162,12 @@ BalloonFill(IN WDFOBJECT WdfDevice, IN size_t num)
     }
 #endif // !BALLOON_INFLATE_IGNORE_LOWMEM
 
-    num = min(num, PAGE_SIZE / sizeof(PFN_NUMBER));
+    num = min(num, PAGE_SIZE / sizeof(ctx->pfns_table[0]));
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_HW_ACCESS, "Inflate balloon with %d pages.\n", num);
 
     LowAddress.QuadPart = 0;
-    HighAddress.QuadPart = (ULONGLONG)-1;
+    /* Only pages whose frame number fits the 32-bit entries of the protocol */
+    HighAddress.QuadPart = ((ULONGLONG)1 << (32 + PAGE_SHIFT)) - 1;
     SkipBytes.QuadPart = 0;
 
     pPageMdl = MmAllocatePagesForMdlEx(LowAddress,
@@ -199,7 +211,7 @@ BalloonFill(IN WDFOBJECT WdfDevice, IN size_t num)
     ctx->num_pfns = (ULONG)num;
     ctx->num_pages += ctx->num_pfns;
 
-    RtlCopyMemory(ctx->pfns_table, MmGetMdlPfnArray(pPageMdl), ctx->num_pfns * sizeof(PFN_NUMBER));
+    BalloonCopyPfns(ctx->pfns_table, pPageMdl, ctx->num_pfns);
 
     status = BalloonTellHost(WdfDevice, ctx->InfVirtQueue);
 
@@ -232,7 +244,7 @@ BalloonLeak(IN WDFOBJECT WdfDevice, IN size_t num)
     ctx->num_pfns = (ULONG)num;
     ctx->num_pages -= ctx->num_pfns;
 
-    RtlCopyMemory(ctx->pfns_table, MmGetMdlPfnArray(pPageMdl), ctx->num_pfns * sizeof(PFN_NUMBER));
+    BalloonCopyPfns(ctx->pfns_table, pPageMdl, ctx->num_pfns);
 
     MmFreePagesFromMdl(pPageMdl);
     ExFreePool(pPageMdl);

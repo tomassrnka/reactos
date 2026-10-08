@@ -251,7 +251,7 @@ BalloonEvtDevicePrepareHardware(IN WDFDEVICE Device,
     /* use BALLOON_MGMT_POOL_TAG also for tagging common memory blocks */
     if (NT_SUCCESS(status))
     {
-        devCtx->pfns_table = (PPFN_NUMBER)VirtIOWdfDeviceAllocDmaMemory(&devCtx->VDevice.VIODevice,
+        devCtx->pfns_table = (u32 *)VirtIOWdfDeviceAllocDmaMemory(&devCtx->VDevice.VIODevice,
                                                                         PAGE_SIZE,
                                                                         BALLOON_MGMT_POOL_TAG);
     }

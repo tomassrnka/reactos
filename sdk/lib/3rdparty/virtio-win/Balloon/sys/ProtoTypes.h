@@ -81,7 +81,7 @@ typedef struct _DEVICE_CONTEXT
 
     volatile ULONG num_pages;
     ULONG num_pfns;
-    PPFN_NUMBER pfns_table;
+    u32 *pfns_table; /* the device takes 32-bit page frame numbers */
     NPAGED_LOOKASIDE_LIST LookAsideList;
     BOOLEAN bListInitialized;
     SINGLE_LIST_ENTRY PageListHead;

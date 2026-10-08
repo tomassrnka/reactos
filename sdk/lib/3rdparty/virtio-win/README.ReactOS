@@ -44,3 +44,14 @@ paths are unchanged; only how the drivers report traces differs:
   "static __inline", because FORCEINLINE expands to "extern inline" with
   GCC in ReactOS.
 - Balloon/sys/memstat.c no longer pastes "." with a field name in a macro.
+
+Fixes
+-----
+Defects of the upstream code fixed here (to be offered upstream):
+
+- Balloon: the device takes 32-bit page frame numbers, but on 64-bit
+  Windows the driver sent its native 64-bit PFN_NUMBER array, so the host
+  read every second entry as frame 0 and released guest page 0 once per
+  ballooned page. The driver now sends a 32-bit array, sized one page as
+  before (1024 frames per batch on both architectures), and allocates only
+  pages whose frame numbers fit in 32 bits.
