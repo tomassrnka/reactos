@@ -344,6 +344,13 @@ FORCEINLINE
 VOID
 KiSendEOI(VOID)
 {
+    PLONG EoiAssist;
+
+    /* With EOI assist, clearing the hypervisor's no-EOI-required mark is the EOI */
+    EoiAssist = (PLONG)__readgsqword(FIELD_OFFSET(KPCR, HalReserved[PCR_HAL_RESERVED_EOI_ASSIST]));
+    if (EoiAssist && InterlockedBitTestAndReset(EoiAssist, 0))
+        return;
+
     /* Write 0 to the apic EOI register */
     if (KiX2ApicMode)
         __writemsr(X2APIC_MSR_EOI, 0);

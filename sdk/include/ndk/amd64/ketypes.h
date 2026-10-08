@@ -1007,6 +1007,10 @@ typedef struct _KIPCR
 
 } KIPCR, *PKIPCR;
 
+/* ReactOS: HalReserved[14..15] hold the processor's VP assist page while the
+   HAL uses the hypervisor's EOI assist, else NULL; the kernel's EOIs read it */
+#define PCR_HAL_RESERVED_EOI_ASSIST 14
+
 //
 // TSS Definition
 //

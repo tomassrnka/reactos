@@ -60,17 +60,24 @@ X2APIC_MSR_EOI = HEX(80B)
 EXTERN APIC_X2APIC_MODE:BYTE
 
 /*
- * SendApicEoi - End the interrupt at the local APIC, preserving all registers
+ * SendApicEoi - End the interrupt at the local APIC, preserving all registers.
+ * With EOI assist, clearing the hypervisor's no-EOI-required mark is the EOI.
  */
 MACRO(SendApicEoi)
-    LOCAL x2apic_eoi, eoi_done
+    LOCAL apic_eoi, x2apic_eoi, eoi_done
 
+    push rax
+    mov rax, gs:[PcEoiAssistPage]
+    test rax, rax
+    jz apic_eoi
+    lock btr dword ptr [rax], 0
+    jc eoi_done
+apic_eoi:
     cmp byte ptr [rip+APIC_X2APIC_MODE], 0
     jne x2apic_eoi
     mov dword ptr [APIC_EOI], 0
     jmp eoi_done
 x2apic_eoi:
-    push rax
     push rcx
     push rdx
     mov ecx, X2APIC_MSR_EOI
@@ -79,8 +86,8 @@ x2apic_eoi:
     wrmsr
     pop rdx
     pop rcx
-    pop rax
 eoi_done:
+    pop rax
 ENDM
 
 TF_SEGMENTS             = HEX(08)
@@ -220,7 +227,7 @@ ENDM
  *  ExitTrap - Restore registers and free stack space
  */
 MACRO(ExitTrap, Flags)
-    LOCAL kernel_mode_return
+    LOCAL kernel_mode_return, kernel_mode_eoi
 
     ASSERT_TRAP_FRAME_IRQL_VALID rbp
 
@@ -239,7 +246,7 @@ MACRO(ExitTrap, Flags)
 
     /* Check if we came from user mode */
     test byte ptr [rbp + KTRAP_FRAME_SegCs], 1
-    jz kernel_mode_return
+    jz kernel_mode_eoi
 
     if (Flags AND TF_CHECKUSERAPC)
         mov r10, gs:[PcCurrentThread]
@@ -251,8 +258,19 @@ MACRO(ExitTrap, Flags)
 
     cli
 
+    /* SendApicEoi reads the PCR through gs */
+    if (Flags AND TF_SEND_EOI)
+        SendApicEoi
+    endif
+
     /* Swap gs to user mode */
     swapgs
+    jmp kernel_mode_return
+
+kernel_mode_eoi:
+    if (Flags AND TF_SEND_EOI)
+        SendApicEoi
+    endif
 
 kernel_mode_return:
 
@@ -281,10 +299,6 @@ kernel_mode_return:
 
     /* Adjust stack pointer */
     add rsp, KTRAP_FRAME_Rip
-
-    if (Flags AND TF_SEND_EOI)
-        SendApicEoi
-    endif
 
     /* Return from the trap */
     iretq

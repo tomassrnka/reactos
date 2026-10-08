@@ -31,6 +31,10 @@ static PUCHAR HalpHvAssistPages;
 static ULONG64 HalpHvAssistPagesPhysical;
 static ULONG HalpHvAssistPageCount;
 
+#ifdef _M_AMD64
+C_ASSERT(HAL_EOI_ASSIST_PAGE == PCR_HAL_RESERVED_EOI_ASSIST);
+#endif
+
 #ifdef CONFIG_SMP
 extern HALP_APIC_INFO_TABLE HalpApicInfoTable;
 #define HalpHvProcessorCount() min(HalpApicInfoTable.ProcessorCount, MAXIMUM_PROCESSORS)
