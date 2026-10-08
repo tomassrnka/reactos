@@ -70,6 +70,23 @@ VOID NgAfterChange(PNG_VCB Vcb)
     }
 }
 
+/*
+ * A write-through write completes only once its data, the metadata it changed (sizes, the contents
+ * of a file resident in its MFT record) and their journal commit are on the medium.  The commit
+ * flushes the device even when no metadata changed.
+ */
+static NTSTATUS NgCommitWriteThrough(PNG_VCB Vcb)
+{
+    int Err;
+    NgAcquireCore(Vcb);
+    Err = ngc_commit_now(Vcb->Core);
+    Vcb->Syncs++;
+    NgReleaseCore(Vcb);
+    if (Err)
+        DPRINT1("ntfsng: write-through commit failed %d\n", Err);
+    return Err ? STATUS_UNEXPECTED_IO_ERROR : STATUS_SUCCESS;
+}
+
 /* Header sizes from the core inode (caller holds CoreLock and the node). */
 static VOID NgSizesFromCore(PNG_FCB Fcb)
 {
@@ -591,6 +608,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             {
                 CcFlushCache(FileObject->SectionObjectPointer, &Offset, Length, &Iosb);
                 Status = Iosb.Status;
+                if (NT_SUCCESS(Status))
+                    Status = NgCommitWriteThrough(Vcb);
             }
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -607,7 +626,11 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Err = NgEnsureNode(Fcb);
         Done = Err ? Err : ngc_write(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
         if (Done >= 0)
+        {
             NgAfterChange(Vcb);
+            if (WriteThrough && ngc_commit_now(Vcb->Core))
+                Done = -NGC_EIO;
+        }
         NgReleaseCore(Vcb);
         if (Done < 0)
         {
