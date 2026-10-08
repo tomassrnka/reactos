@@ -1,6 +1,7 @@
 
 #define IOCTL_TEST_TDI      1
 #define IOCTL_TEST_CONNECT  2
+#define IOCTL_TEST_LISTEN_CANCEL 3
 
 /* For the TDI_CONNECT test */
 #define TEST_CONNECT_SERVER_PORT 12345
