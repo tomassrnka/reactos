@@ -1512,6 +1512,7 @@ QSI_DEF(SystemVdmBopInformation)
 QSI_DEF(SystemFileCacheInformation)
 {
     SYSTEM_FILECACHE_INFORMATION *Sci = (SYSTEM_FILECACHE_INFORMATION *) Buffer;
+    ULONG PagesUsed;
 
     *ReqSize = sizeof(SYSTEM_FILECACHE_INFORMATION);
 
@@ -1522,11 +1523,14 @@ QSI_DEF(SystemFileCacheInformation)
 
     RtlZeroMemory(Sci, sizeof(SYSTEM_FILECACHE_INFORMATION));
 
-    /* Return the Byte size not the page size. */
-    Sci->CurrentSize = MiMemoryConsumers[MC_USER].PagesUsed; /* FIXME */
-    Sci->PeakSize = MiMemoryConsumers[MC_USER].PagesUsed; /* FIXME */
+    /* One read, so that the fields agree while other processors change the count */
+    PagesUsed = *(volatile ULONG *)&MiMemoryConsumers[MC_USER].PagesUsed;
+
+    /* The sizes are in bytes, the ones including transition pages in pages */
+    Sci->CurrentSize = (SIZE_T)PagesUsed << PAGE_SHIFT; /* FIXME */
+    Sci->PeakSize = (SIZE_T)PagesUsed << PAGE_SHIFT; /* FIXME */
     /* Taskmgr multiplies this one by page size right away */
-    Sci->CurrentSizeIncludingTransitionInPages = MiMemoryConsumers[MC_USER].PagesUsed; /* FIXME: Should be */
+    Sci->CurrentSizeIncludingTransitionInPages = PagesUsed; /* FIXME: Should be */
     /* system working set and standby pages. */
     Sci->PageFaultCount = 0; /* FIXME */
     Sci->MinimumWorkingSet = 0; /* FIXME */
