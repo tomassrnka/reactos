@@ -48,6 +48,7 @@ KMT_TESTFUNC Test_KeFloatPointState;
 KMT_TESTFUNC Test_KeGuardedMutex;
 KMT_TESTFUNC Test_KeIrql;
 KMT_TESTFUNC Test_KeMutex;
+KMT_TESTFUNC Test_KePriority;
 KMT_TESTFUNC Test_KeProcessor;
 KMT_TESTFUNC Test_KeSpinLock;
 KMT_TESTFUNC Test_KeTimer;
@@ -136,6 +137,7 @@ const KMT_TEST TestList[] =
     { "KeGuardedMutex",                     Test_KeGuardedMutex },
     { "KeIrql",                             Test_KeIrql },
     { "KeMutex",                            Test_KeMutex },
+    { "KePriority",                         Test_KePriority },
     { "-KeProcessor",                       Test_KeProcessor },
     { "KeSpinLock",                         Test_KeSpinLock },
     { "KeTimer",                            Test_KeTimer },
