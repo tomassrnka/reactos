@@ -2297,13 +2297,13 @@ UserFault:
 
                 LockIrql = MiAcquirePfnLock();
 
-                ASSERT(MmAvailablePages > 0);
-
                 MI_SET_USAGE(MI_USAGE_COW);
                 MI_SET_PROCESS(CurrentProcess);
 
                 /* Allocate a new page and copy it */
-                PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_PROCESS_COLOR(CurrentProcess));
+                PageFrameIndex = 0;
+                if (MiGetFreeOrZeroedPageCount() != 0)
+                    PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_PROCESS_COLOR(CurrentProcess));
                 if (PageFrameIndex == 0)
                 {
                     MiReleasePfnLock(LockIrql);
