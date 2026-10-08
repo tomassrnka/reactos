@@ -751,17 +751,20 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
             else
                 Terminate = TRUE;
 
-            RtlLeaveCriticalSection(&ThreadPoolLock);
-
             if (Terminate)
             {
                 /* Prevent termination as long as IO is pending */
                 Terminate = !RtlpIsIoPending(NULL);
             }
 
+            /* Leave the pool under the lock that guards the check above */
+            if (Terminate)
+                InterlockedDecrement(&ThreadPoolWorkerThreads);
+
+            RtlLeaveCriticalSection(&ThreadPoolLock);
+
             if (Terminate)
             {
-                InterlockedDecrement(&ThreadPoolWorkerThreads);
                 Status = STATUS_SUCCESS;
                 break;
             }
