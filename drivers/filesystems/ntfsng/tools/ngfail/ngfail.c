@@ -314,12 +314,12 @@ int main(int argc, char **argv)
         existing("compressed", argv[3], FILE_ATTRIBUTE_COMPRESSED);
     }
 
-    /* Dismount: refused, the volume stays mounted and writable. */
+    /* Dismount without holding the volume lock: refused, the volume stays mounted and writable (ngvol covers real dismounts). */
     st = ntopen(L"\\\\.\\C:", FILE_READ_DATA | FILE_WRITE_DATA, FILE_OPEN, 0, NULL, 0, NULL, &v);
     if (NT_SUCCESS(st))
     {
         st = fsctl(v, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
-        report("dismount", st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
+        report("dismount-unlocked-refused", st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
         NtClose(v);
         _snwprintf(p, MAX_PATH, L"%s\\after-dismount.txt", dir);
         st = ntopen(p, FILE_READ_DATA | FILE_WRITE_DATA, FILE_OVERWRITE_IF, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
