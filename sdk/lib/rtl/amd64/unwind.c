@@ -902,13 +902,6 @@ RtlpUnwindInternal(
         /* Check if we have an exception routine */
         if (ExceptionRoutine != NULL)
         {
-            /* Check if this is the target frame */
-            if (EstablisherFrame == (ULONG64)TargetFrame)
-            {
-                /* Set flag to inform the language handler */
-                ExceptionRecord->ExceptionFlags |= EXCEPTION_TARGET_UNWIND;
-            }
-
             /* Log the exception if it's enabled */
             RtlpCheckLogException(ExceptionRecord,
                                   &UnwindContext,
@@ -928,6 +921,15 @@ RtlpUnwindInternal(
              /* Loop all nested handlers */
             do
             {
+                /* Check if this is the target frame. This is also needed
+                   after a collided unwind, which continues in the frame
+                   of the previous unwind. */
+                if (EstablisherFrame == (ULONG64)TargetFrame)
+                {
+                    /* Set flag to inform the language handler */
+                    ExceptionRecord->ExceptionFlags |= EXCEPTION_TARGET_UNWIND;
+                }
+
                 /* Call the language specific handler */
                 Disposition = RtlpExecuteHandlerForUnwind(ExceptionRecord,
                                                           (PVOID)EstablisherFrame,
@@ -981,8 +983,11 @@ RtlpUnwindInternal(
                                      &EstablisherFrame,
                                      NULL);
 
-                    /* Restore the context pointer and establisher frame. */
-                    DispatcherContext.ContextRecord = &UnwindContext;
+                    /* Restore the context pointer, which the handler replaced
+                       with the one of the previous unwind, and the
+                       establisher frame. */
+                    DispatcherContext.ContextRecord =
+                        (HandlerType == UNW_FLAG_UHANDLER) ? ContextRecord : &UnwindContext;
                     EstablisherFrame = DispatcherContext.EstablisherFrame;
 
                     /* Set the exception flags to indicate that we collided
