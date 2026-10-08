@@ -1614,6 +1614,7 @@ SepAccessCheck(
     ULONG ResultListIndex;
     PTOKEN Token;
     NTSTATUS Status;
+    GENERIC_MAPPING CapturedGenericMapping;
 
     PAGED_CODE();
 
@@ -1670,6 +1671,7 @@ SepAccessCheck(
 
         /* Capture the privilege set length and the mapping */
         CapturedPrivilegeSetLength = *PrivilegeSetLength;
+        CapturedGenericMapping = *GenericMapping;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1912,7 +1914,7 @@ SepAccessCheck(
                              CapturedObjectTypeList,
                              ObjectTypeListLength,
                              PreviouslyGrantedAccess,
-                             GenericMapping,
+                             &CapturedGenericMapping,
                              PreviousMode,
                              UseResultList,
                              NULL,
