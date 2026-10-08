@@ -270,6 +270,9 @@ InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
     if (!arg)
         return ERR_CLSD;
 
+    /* lwIP gave the new PCB the listener argument; only LibTCPAccept sets it */
+    tcp_arg(newpcb, NULL);
+
     TCPAcceptEventHandler(arg, newpcb);
 
     /* Set in LibTCPAccept (called from TCPAcceptEventHandler) */
