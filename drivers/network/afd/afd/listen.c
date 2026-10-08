@@ -214,6 +214,77 @@ end:
 }
 
 static IO_COMPLETION_ROUTINE ListenComplete;
+
+/* Connections waiting for an accept count against the listen backlog */
+static ULONG CountPendingConnections( PAFD_FCB FCB ) {
+    PLIST_ENTRY Entry;
+    ULONG Count = 0;
+
+    for( Entry = FCB->PendingConnections.Flink;
+         Entry != &FCB->PendingConnections;
+         Entry = Entry->Flink )
+        Count++;
+
+    return Count;
+}
+
+/* Wait for the next connection on the connection object FCB holds ready */
+static NTSTATUS IssueListen( PAFD_FCB FCB ) {
+    NTSTATUS Status;
+
+    Status = TdiBuildNullConnectionInfoInPlace(FCB->ListenIrp.ConnectionCallInfo,
+                                               FCB->LocalAddress->Address[0].AddressType);
+    ASSERT(Status == STATUS_SUCCESS);
+
+    Status = TdiBuildNullConnectionInfoInPlace(FCB->ListenIrp.ConnectionReturnInfo,
+                                               FCB->LocalAddress->Address[0].AddressType);
+    ASSERT(Status == STATUS_SUCCESS);
+
+    Status = TdiListen( &FCB->ListenIrp.InFlightRequest,
+                        FCB->Connection.Object,
+                        &FCB->ListenIrp.ConnectionCallInfo,
+                        &FCB->ListenIrp.ConnectionReturnInfo,
+                        ListenComplete,
+                        FCB );
+
+    if (Status == STATUS_PENDING)
+        Status = STATUS_SUCCESS;
+
+    return Status;
+}
+
+/* AcceptEx requests wait for a listen to complete, then take the oldest
+ * queued connection */
+static BOOLEAN HasQueuedSuperAccept( PAFD_FCB FCB ) {
+    PLIST_ENTRY Entry;
+    PIRP Irp;
+
+    for( Entry = FCB->PendingIrpList[FUNCTION_PREACCEPT].Flink;
+         Entry != &FCB->PendingIrpList[FUNCTION_PREACCEPT];
+         Entry = Entry->Flink ) {
+        Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        if (Irp->Tail.Overlay.DriverContext[2] && Irp->Tail.Overlay.DriverContext[3])
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Listen again on a listener that stopped at its backlog, or after a listen
+ * failed, once the queue has room. Force listens with a full queue too, for
+ * an AcceptEx request. After a failure the listener stays stopped, and the
+ * next accept, wait for a connection or AcceptEx tries again. */
+static VOID ResumeListen( PAFD_FCB FCB, BOOLEAN Force ) {
+    if (!FCB->ListenThrottled || FCB->ListenIrp.InFlightRequest)
+        return;
+
+    if (!Force && CountPendingConnections(FCB) >= FCB->Backlog)
+        return;
+
+    if (NT_SUCCESS(IssueListen(FCB)))
+        FCB->ListenThrottled = FALSE;
+}
+
 static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
                                       PIRP Irp,
                                       PVOID Context ) {
@@ -269,17 +340,32 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
 
     if (Irp->IoStatus.Status != STATUS_SUCCESS)
     {
+        /* Let ResumeListen try again */
+        FCB->ListenThrottled = TRUE;
         SocketStateUnlock(FCB);
         return Irp->IoStatus.Status;
     }
 
-    Qelt = ExAllocatePoolWithTag(NonPagedPool,
-                                 sizeof(*Qelt),
-                                 TAG_AFD_ACCEPT_QUEUE);
+    /* A listen forced for an AcceptEx request that was cancelled meanwhile
+     * must not grow a full queue: close the connection instead */
+    if (CountPendingConnections(FCB) >= FCB->Backlog &&
+        !HasQueuedSuperAccept(FCB))
+    {
+        TdiDisassociateAddressFile(FCB->Connection.Object);
+        ObDereferenceObject(FCB->Connection.Object);
+        ZwClose(FCB->Connection.Handle);
+        Qelt = NULL;
+    }
+    else
+    {
+        Qelt = ExAllocatePoolWithTag(NonPagedPool,
+                                     sizeof(*Qelt),
+                                     TAG_AFD_ACCEPT_QUEUE);
+        if (!Qelt)
+            Status = STATUS_NO_MEMORY;
+    }
 
-    if( !Qelt ) {
-        Status = STATUS_NO_MEMORY;
-    } else {
+    if( Qelt ) {
         UINT AddressType =
             FCB->LocalAddress->Address[0].AddressType;
 
@@ -318,28 +404,24 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         }
     }
 
-    /* Launch new accept socket */
+    /* Launch new accept socket. With a full backlog, stop listening, so the
+     * transport resets further connections; ResumeListen listens again. */
     Status = WarmSocketForConnection( FCB );
 
     if (NT_SUCCESS(Status))
     {
-        Status = TdiBuildNullConnectionInfoInPlace(FCB->ListenIrp.ConnectionCallInfo,
-                                                   FCB->LocalAddress->Address[0].AddressType);
-        ASSERT(Status == STATUS_SUCCESS);
-
-        Status = TdiBuildNullConnectionInfoInPlace(FCB->ListenIrp.ConnectionReturnInfo,
-                                                   FCB->LocalAddress->Address[0].AddressType);
-        ASSERT(Status == STATUS_SUCCESS);
-
-        Status = TdiListen( &FCB->ListenIrp.InFlightRequest,
-                            FCB->Connection.Object,
-                            &FCB->ListenIrp.ConnectionCallInfo,
-                            &FCB->ListenIrp.ConnectionReturnInfo,
-                            ListenComplete,
-                            FCB );
-
-        if (Status == STATUS_PENDING)
-            Status = STATUS_SUCCESS;
+        /* Waiting AcceptEx requests need the next connection */
+        if (CountPendingConnections(FCB) < FCB->Backlog ||
+            HasQueuedSuperAccept(FCB))
+        {
+            Status = IssueListen(FCB);
+            if (!NT_SUCCESS(Status))
+                FCB->ListenThrottled = TRUE;
+        }
+        else
+        {
+            FCB->ListenThrottled = TRUE;
+        }
     }
 
     /* Trigger a select return if appropriate */
@@ -379,6 +461,14 @@ NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     FCB->DelayedAccept = ListenReq->UseDelayedAcceptance;
+
+    /* A backlog of 0 still queues one connection */
+    FCB->Backlog = ListenReq->Backlog;
+    if (FCB->Backlog == 0)
+        FCB->Backlog = 1;
+    else if (FCB->Backlog > AFD_MAX_BACKLOG)
+        FCB->Backlog = AFD_MAX_BACKLOG;
+    FCB->ListenThrottled = FALSE;
 
     AFD_DbgPrint(MID_TRACE,("ADDRESSFILE: %p\n", FCB->AddressFile.Handle));
 
@@ -434,6 +524,9 @@ NTSTATUS AfdWaitForListen( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     AFD_DbgPrint(MID_TRACE,("Called\n"));
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
+
+    /* Retry a listen that could not be issued */
+    ResumeListen(FCB, FALSE);
 
     if( !IsListEmpty( &FCB->PendingConnections ) ) {
         PLIST_ENTRY PendingConn = FCB->PendingConnections.Flink;
@@ -506,7 +599,11 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                   (PVOID *)&NewFileObject,
                   NULL );
 
-            if( !NT_SUCCESS(Status) ) return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+            if( !NT_SUCCESS(Status) )
+            {
+                ResumeListen(FCB, FALSE);
+                return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+            }
 
             ASSERT(NewFileObject != FileObject);
             ASSERT(NewFileObject->FsContext != FCB);
@@ -519,6 +616,9 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             AFD_DbgPrint(MID_TRACE,("Completed a wait for accept\n"));
 
             ExFreePoolWithTag(PendingConnObj, TAG_AFD_ACCEPT_QUEUE);
+
+            /* The queue has room again */
+            ResumeListen(FCB, FALSE);
 
             if( !IsListEmpty( &FCB->PendingConnections ) )
             {
@@ -603,6 +703,8 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     
     /* Proceed later in SatisfyAcceptEx */
     SocketStateUnlock(Fcb2);
+
+    ResumeListen(Fcb, TRUE);
 
     return LeaveIrpUntilLater(Fcb, Irp, FUNCTION_PREACCEPT);
 }

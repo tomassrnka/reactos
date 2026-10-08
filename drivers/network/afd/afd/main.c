@@ -491,6 +491,24 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
     }
 
+    /* Without a listen in flight, ListenComplete does not free these */
+    if (!FCB->ListenIrp.InFlightRequest)
+    {
+        if (FCB->ListenIrp.ConnectionCallInfo)
+        {
+            ExFreePoolWithTag(FCB->ListenIrp.ConnectionCallInfo,
+                              TAG_AFD_TDI_CONNECTION_INFORMATION);
+            FCB->ListenIrp.ConnectionCallInfo = NULL;
+        }
+
+        if (FCB->ListenIrp.ConnectionReturnInfo)
+        {
+            ExFreePoolWithTag(FCB->ListenIrp.ConnectionReturnInfo,
+                              TAG_AFD_TDI_CONNECTION_INFORMATION);
+            FCB->ListenIrp.ConnectionReturnInfo = NULL;
+        }
+    }
+
     KillSelectsForFCB( FCB->DeviceExt, FileObject, FALSE );
 
     ASSERT(IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECT]));
