@@ -318,7 +318,9 @@ NpListen(IN PDEVICE_OBJECT DeviceObject,
 
             Status = NpSetListeningPipeState(Ccb, Irp, List);
 
-            NpUninitializeSecurity(Ccb);
+            /* A connected client keeps the security context it opened with */
+            if (Status != STATUS_PIPE_CONNECTED)
+                NpUninitializeSecurity(Ccb);
 
             ExReleaseResourceLite(&Ccb->NonPagedCcb->Lock);
         }
