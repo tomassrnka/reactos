@@ -205,13 +205,18 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	struct block_device *b;
 	struct ngc_vol *v;
 	struct ntfs_volume *vol;
-	int err, jrec = NGJ_NONE;
+	int err, jrec = NGJ_NONE, big_sectors = 0;
 	u64 jseq = 0;
 
 	*out = NULL;
 	err = ngc_init();
 	if (err)
 		return err;
+	/* The journal keeps 512-byte sectors (masks, replay, partial-page capture): not on 4Kn disks. */
+	if (want_rw && sector_size != 512) {
+		want_rw = 0;
+		big_sectors = 1;
+	}
 	v = kzalloc(sizeof(*v), GFP_KERNEL);
 	fc = kzalloc(sizeof(*fc), GFP_KERNEL);
 	b = kshim_bdev_open(osdev, size, sector_size);
@@ -265,7 +270,7 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	v->bdev = b;
 	b->bd_super = v->sb;
 	v->sb->s_flags |= SB_ACTIVE;
-	*why_ro = want_rw ? NULL : "read-only requested";
+	*why_ro = want_rw ? NULL : big_sectors ? "sectors larger than 512 bytes (the journal needs 512)" : "read-only requested";
 	if (want_rw) {
 		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
 		if (jrec == NGJ_REPAIR)
