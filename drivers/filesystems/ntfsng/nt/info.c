@@ -637,6 +637,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     }
     if (!Err && TargetFcb)
     {
+        /* Its node goes too: a referenced inode keeps the freed record and clusters in use. */
+        NgParkNode(TargetFcb);
         TargetFcb->Deleted = TRUE;
         NgUnlistFcb(TargetFcb);
     }
