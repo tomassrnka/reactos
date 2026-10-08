@@ -1,0 +1,56 @@
+; balloon.inf
+;
+; Installation file for the VirtIO memory balloon device
+;
+; Based on balloon.inx from virtio-win (BSD-3-Clause, Copyright Red Hat, Inc.)
+;
+
+[Version]
+Signature  = "$Windows NT$"
+Class      = System
+ClassGuid  = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider   = %ReactOS%
+DriverVer  = 10/08/2026,1.00
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%RedHatMfg% = RedHatMfg
+
+[RedHatMfg]
+%BALLOON.DeviceDesc% = BALLOON_Device, PCI\VEN_1AF4&DEV_1002
+%BALLOON.DeviceDesc% = BALLOON_Device, PCI\VEN_1AF4&DEV_1045
+
+;----------------------------- BALLOON DRIVER -------------------------------
+
+[BALLOON_Device.NT]
+CopyFiles = BALLOON_CopyFiles.NT
+
+[BALLOON_CopyFiles.NT]
+balloon.sys
+
+[BALLOON_Device.NT.HW]
+AddReg = BALLOON_SD
+
+[BALLOON_SD]
+; Only the system may open the device
+HKR,,Security,,"D:P(A;;GA;;;SY)"
+
+[BALLOON_Device.NT.Services]
+AddService = BALLOON, 0x00000002, BALLOON_Service_Inst
+
+[BALLOON_Service_Inst]
+DisplayName    = %BALLOON.SVCDESC%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\balloon.sys
+
+;-------------------------------- STRINGS -----------------------------------
+
+[Strings]
+ReactOS = "ReactOS Team"
+RedHatMfg = "Red Hat, Inc."
+BALLOON.DeviceDesc = "VirtIO Balloon Device"
+BALLOON.SVCDESC = "VirtIO Balloon Service"
