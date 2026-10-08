@@ -405,6 +405,14 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     //
     OldIrql = MiAcquirePfnLock();
 
+    /* Fail the stack instead of using page 0 when no page is free */
+    if (MiGetFreeOrZeroedPageCount() < StackPages)
+    {
+        MiReleasePfnLock(OldIrql);
+        MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
+        return NULL;
+    }
+
     //
     // Loop each stack page
     //
@@ -494,6 +502,15 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     // Acquire the PFN DB lock
     //
     OldIrql = MiAcquirePfnLock();
+
+    /* Fail the growth instead of using page 0 when no page is free */
+    if ((LimitPte >= NewLimitPte) &&
+        (MiGetFreeOrZeroedPageCount() <
+         (PFN_NUMBER)(LimitPte - NewLimitPte + 1)))
+    {
+        MiReleasePfnLock(OldIrql);
+        return STATUS_NO_MEMORY;
+    }
 
     //
     // Loop each stack page
