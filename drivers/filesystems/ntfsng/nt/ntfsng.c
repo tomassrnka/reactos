@@ -253,6 +253,17 @@ int NgEnsureNode(PNG_FCB Fcb)
     Err = ngc_iget(Fcb->Vcb->Core, Fcb->MftNo, &Base);
     if (Err)
         return Err;
+    if (Fcb->Stat.mft_ref >> 48)
+    {
+        /* The record number may have been reused since the node was parked: compare the sequence. */
+        struct ngc_stat St;
+        ngc_stat(Base, &St);
+        if ((St.mft_ref >> 48) != (Fcb->Stat.mft_ref >> 48))
+        {
+            ngc_put(Base);
+            return -NGC_ENOENT;
+        }
+    }
     if (Fcb->Stream.Length)
     {
         Err = ngc_open_stream(Fcb->Vcb->Core, Base, Fcb->Stream.Buffer, Fcb->Stream.Length / sizeof(WCHAR), &Stream);
