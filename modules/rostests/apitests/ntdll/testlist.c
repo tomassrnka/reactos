@@ -97,6 +97,7 @@ extern void func_RtlDoesFileExists(void);
 extern void func_RtlDosPathNameToNtPathName_U(void);
 extern void func_RtlDosSearchPath_U(void);
 extern void func_RtlDosSearchPath_Ustr(void);
+extern void func_RtlFailFast(void);
 extern void func_RtlFirstFreeAce(void);
 extern void func_RtlGenerate8dot3Name(void);
 extern void func_RtlGenericTable(void);
@@ -240,6 +241,7 @@ const struct test winetest_testlist[] =
     { "RtlDosPathNameToNtPathName_U",   func_RtlDosPathNameToNtPathName_U },
     { "RtlDosSearchPath_U",             func_RtlDosSearchPath_U },
     { "RtlDosSearchPath_Ustr",          func_RtlDosSearchPath_Ustr },
+    { "RtlFailFast",                    func_RtlFailFast },
     { "RtlFirstFreeAce",                func_RtlFirstFreeAce },
     { "RtlGenerate8dot3Name",           func_RtlGenerate8dot3Name },
     { "RtlGenericTable",                func_RtlGenericTable },

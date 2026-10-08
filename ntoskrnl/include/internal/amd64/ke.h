@@ -409,6 +409,7 @@ VOID KiMcheckAbort(VOID);
 VOID KiXmmException(VOID);
 VOID KiApcInterrupt(VOID);
 VOID KiRaiseAssertion(VOID);
+VOID KiRaiseSecurityCheckFailure(VOID);
 VOID KiDebugServiceTrap(VOID);
 VOID KiDpcInterrupt(VOID);
 VOID KiIpiInterrupt(VOID);

@@ -110,6 +110,7 @@ list(APPEND SOURCE
     RtlDosPathNameToNtPathName_U.c
     RtlDosSearchPath_U.c
     RtlDosSearchPath_Ustr.c
+    RtlFailFast.c
     RtlFirstFreeAce.c
     RtlGenerate8dot3Name.c
     RtlGenericTable.c
