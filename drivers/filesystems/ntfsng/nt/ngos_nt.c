@@ -94,6 +94,11 @@ void ngos_spin_unlock(uintptr_t *lock, unsigned char irql)
     KeReleaseSpinLock((PKSPIN_LOCK)lock, irql);
 }
 
+void *ngos_current_thread(void)
+{
+    return KeGetCurrentThread();
+}
+
 void ngos_yield(void)
 {
     LARGE_INTEGER Delay;

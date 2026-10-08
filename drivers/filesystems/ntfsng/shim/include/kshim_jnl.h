@@ -64,7 +64,9 @@ int kj_page_dev(const struct kj_ext *ext, int next, u64 page, u64 *dev);
 int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int next, u64 lf_pages,
 		u64 serial, u64 seq, u64 vol_rec_off);
 int kshim_jnl_retire(struct block_device *b);
+int kshim_jnl_retire_pending(struct block_device *b);
 int kshim_jnl_failed(struct block_device *b);	/* a write could not be protected: all writes refused */
+int kshim_jnl_errors_pending(struct block_device *b);	/* errors known, not yet on the medium */
 void kshim_jnl_deactivate(struct block_device *b);
 int kshim_jnl_commit(struct block_device *b);	/* 1 committed (device flushed), 0 nothing to do, <0 error */
 void kshim_jnl_mark_errors(struct block_device *b);
