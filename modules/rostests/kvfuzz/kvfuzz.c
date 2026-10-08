@@ -7,14 +7,16 @@
  *
  * The call sequence is a pure function of the seed: replaying a seed with the
  * same range reproduces the exact calls, so a crash is reproduced from its seed
- * and call index, and minimised by bisecting the range (--from). Each call is
- * printed to the debugger (serial log) before it runs, so the last calls before
- * a bugcheck survive in the log.
+ * and call index, and minimised by bisecting the range (--from). Unless --quiet
+ * is given, each call is printed to the debugger (serial log) before it runs, so
+ * the last calls before a bugcheck survive in the log; with --quiet a progress
+ * line every 1024 steps bounds the crash window instead.
  */
 
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <io.h>
 
 #include "kvfuzz_syscalls.h"   /* generated: KfSyscalls[], KfSyscallCount */
 
@@ -261,6 +263,16 @@ static void Dispatch(unsigned callno, const char *name, void *fn, int isW32,
     }
 }
 
+static void PrintCall(char *line, size_t size, unsigned callno,
+                      const KF_SYSCALL *sc, ULONG_PTR *a)
+{
+    if (g_quiet) return;
+    _snprintf(line, size - 1, "KVFUZZ: #%u %s(%u) a0=%p a1=%p a2=%p\n",
+              callno, sc->Name, sc->Args, (void*)a[0], (void*)a[1], (void*)a[2]);
+    line[size - 1] = 0;
+    OutputDebugStringA(line);
+}
+
 /*
  * One deterministic step: always draws the same PRNG values (selection index
  * then one GenArg per argument) so a skipped step and an executed step consume
@@ -281,19 +293,12 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
 
     if (!Execute || IsDangerous(sc->Name)) return;
 
-    if (!g_quiet)
-    {
-        _snprintf(line, sizeof(line) - 1, "KVFUZZ: #%u %s(%u) a0=%p a1=%p a2=%p\n",
-                  callno, sc->Name, sc->Args, (void*)a[0], (void*)a[1], (void*)a[2]);
-        line[sizeof(line)-1] = 0;
-        OutputDebugStringA(line);
-    }
-
     if (sc->Target == KF_NT)
     {
         fn = (void*)GetProcAddress(ntdll, sc->Name);
         if (fn)
         {
+            PrintCall(line, sizeof(line), callno, sc, a);
             g_exec++;
             Dispatch(callno, sc->Name, fn, 0, 0, a, sc->Args);
         }
@@ -301,6 +306,7 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
     else
     {
 #if defined(_M_IX86) || defined(__i386__)
+        PrintCall(line, sizeof(line), callno, sc, a);
         g_exec++;
         Dispatch(callno, sc->Name, NULL, 1, 0x1000u | sc->W32Index, a, sc->Args);
 #endif
@@ -310,7 +316,14 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
 static void WriteState(unsigned long long seed, unsigned callno)
 {
     FILE *f = fopen("C:\\kvfuzz_state.txt", "w");
-    if (f) { fprintf(f, "seed=%llu callno=%u\n", seed, callno); fflush(f); fclose(f); }
+    if (f)
+    {
+        fprintf(f, "seed=%llu callno=%u\n", seed, callno);
+        fflush(f);
+        /* Commit to disk: after a bugcheck the cache is gone. */
+        FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(f)));
+        fclose(f);
+    }
 }
 
 int main(int argc, char **argv)
@@ -333,10 +346,11 @@ int main(int argc, char **argv)
     InitPool();
     BuildSelection(target);
     {
-        char hdr[96];
+        char hdr[160];
         HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-        _snprintf(hdr, sizeof(hdr)-1, "KVFUZZ: start seed=%llu max=%u from=%u target=%s sel=%u\n",
-                  seed, maxcalls, fromcall, target, g_selCount);
+        _snprintf(hdr, sizeof(hdr)-1, "KVFUZZ: start seed=%llu max=%u from=%u target=%s sel=%u quiet=%d\n",
+                  seed, maxcalls, fromcall, target, g_selCount, g_quiet);
+        hdr[sizeof(hdr)-1] = 0;
         OutputDebugStringA(hdr);
         WriteState(seed, 0);
 
@@ -347,10 +361,11 @@ int main(int argc, char **argv)
              * the harness bisects --from upward until the crash disappears. */
             StepCall(ntdll, i, i >= fromcall);
             if ((i & 0xFF) == 0) WriteState(seed, i);
-            if (g_quiet && (i & 0x1FFF) == 0)
+            if (g_quiet && (i & 0x3FF) == 0)
             {
                 char prg[64];
                 _snprintf(prg, sizeof(prg)-1, "KVFUZZ: at #%u exec=%u\n", i, g_exec);
+                prg[sizeof(prg)-1] = 0;
                 OutputDebugStringA(prg);
             }
         }
@@ -358,6 +373,7 @@ int main(int argc, char **argv)
             char fin[64];
             _snprintf(fin, sizeof(fin)-1, "KVFUZZ: done calls=%u exec=%u\n",
                       maxcalls, g_exec);
+            fin[sizeof(fin)-1] = 0;
             OutputDebugStringA(fin);
         }
     }
