@@ -1058,7 +1058,7 @@ QueueUserAPC(IN PAPCFUNC pfnAPC,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -1067,6 +1067,7 @@ SetThreadStackGuarantee(IN OUT PULONG StackSizeInBytes)
     PTEB Teb = NtCurrentTeb();
     ULONG GuaranteedStackBytes;
     ULONG AllocationSize;
+    ULONG_PTR StackSize, RoundedSize;
 
     if (!StackSizeInBytes)
     {
@@ -1091,11 +1092,26 @@ SetThreadStackGuarantee(IN OUT PULONG StackSizeInBytes)
         return TRUE;
     }
 
-    // FIXME: Unimplemented!
-    UNIMPLEMENTED_ONCE;
+    /* It must fit in the stack reservation */
+    StackSize = (ULONG_PTR)Teb->NtTib.StackBase - (ULONG_PTR)Teb->DeallocationStack;
+    if (AllocationSize >= StackSize)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
 
-    // Temporary HACK for supporting applications!
-    return TRUE; // FALSE;
+    /* The guarantee is kept in whole pages, at least two on 64-bit */
+    RoundedSize = max(ALIGN_UP_BY(AllocationSize, PAGE_SIZE),
+                      PAGE_SIZE * sizeof(PVOID) / sizeof(ULONG));
+    if ((RoundedSize >= StackSize) || (RoundedSize > MAXULONG))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* The kernel reads it when the stack overflows */
+    Teb->GuaranteedStackBytes = (ULONG)RoundedSize;
+    return TRUE;
 }
 
 /*
