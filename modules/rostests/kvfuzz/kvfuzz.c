@@ -71,7 +71,7 @@ static void InitPool(void)
         name[sizeof(name) - 1] = 0;
         h = CreateFileA(name, GENERIC_READ | GENERIC_WRITE,
                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        NULL, CREATE_ALWAYS, 0, NULL);
+                        NULL, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, NULL);
     }
     PoolAdd(h);
     PoolAdd(RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM", 0, KEY_READ, &k) == ERROR_SUCCESS ? (HANDLE)k : NULL);
@@ -120,7 +120,8 @@ typedef ULONG_PTR (NTAPI *FN)(ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,
                               ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR,ULONG_PTR);
 #define A(i) a[i]
 /* Not inlined: on i386 a stdcall stub pops fewer than the 17 arguments pushed
- * by the default case, and only this function's frame pointer restores ESP. */
+ * by the default case, and only this function's frame pointer restores ESP
+ * (ReactOS builds i386 with -fno-omit-frame-pointer). */
 static __attribute__((noinline)) ULONG_PTR CallNt(void *fn, ULONG_PTR *a, int n)
 {
     switch (n)
@@ -216,14 +217,20 @@ static unsigned g_stuck;
 static DWORD WINAPI WorkerProc(LPVOID Param)
 {
     KF_WORKER *w = (KF_WORKER *)Param;
+    unsigned idle = 0;
     for (;;)
     {
         LONG seq, prev;
-        if (WaitForSingleObject(w->Go, 100) == WAIT_FAILED)
+        /* A reused handle value can leave Go permanently signalled: back off. */
+        if (WaitForSingleObject(w->Go, 100) == WAIT_FAILED || idle > 8)
             Sleep(100);
         seq = InterlockedCompareExchange(&w->Seq, 0, 0);
         if (seq == w->Claim)
+        {
+            idle++;
             continue;
+        }
+        idle = 0;
         /* Main may have cancelled this job by claiming it first. */
         prev = (LONG)((ULONG)seq - 1u);
         if (InterlockedCompareExchange(&w->Claim, seq, prev) != prev)
@@ -312,6 +319,9 @@ static void Dispatch(unsigned callno, const char *name, void *fn, int isW32,
             RetireWorker("lost-worker", callno, name);
             continue;
         }
+        /* It may have finished between the last check and the claim test. */
+        if (InterlockedCompareExchange(&w->DoneSeq, 0, 0) == seq)
+            return;
         RetireWorker("stuck", callno, name);
         return;
     }
@@ -372,7 +382,8 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
 /* Best effort: a fresh handle each time, because a fuzzed NtClose can hit any
  * long-lived handle, and a write-through rewrite of one small record in place.
  * A torn record is possible, though not across one sector; the serial
- * progress line is the fallback. */
+ * progress line is the fallback. Numbers are left-aligned and padded on the
+ * right, because a leading zero would make --seed and --from read octal. */
 static void WriteState(unsigned long long seed, unsigned callno)
 {
     char rec[64];
@@ -380,14 +391,19 @@ static void WriteState(unsigned long long seed, unsigned callno)
     HANDLE f;
     int n;
 
-    n = _snprintf(rec, sizeof(rec) - 1, "seed=%020llu callno=%010u\r\n", seed, callno);
+    n = _snprintf(rec, sizeof(rec) - 1, "seed=%-20llu callno=%-10u\r\n", seed, callno);
     rec[sizeof(rec) - 1] = 0;
     if (n <= 0) return;
     f = CreateFileA("C:\\kvfuzz_state.txt", GENERIC_WRITE, FILE_SHARE_READ, NULL,
                     OPEN_ALWAYS, FILE_FLAG_WRITE_THROUGH, NULL);
-    if (f == INVALID_HANDLE_VALUE) return;
+    if (f == INVALID_HANDLE_VALUE)
+    {
+        OutputDebugStringA("KVFUZZ: state file open failed\n");
+        return;
+    }
     if (SetFilePointer(f, 0, NULL, FILE_BEGIN) != 0 ||
-        !WriteFile(f, rec, (DWORD)n, &done, NULL) || done != (DWORD)n)
+        !WriteFile(f, rec, (DWORD)n, &done, NULL) || done != (DWORD)n ||
+        !FlushFileBuffers(f))
     {
         OutputDebugStringA("KVFUZZ: state file write failed\n");
     }
@@ -402,13 +418,15 @@ int main(int argc, char **argv)
 
     for (i = 1; (int)i < argc; i++)
     {
-        if (!strcmp(argv[i], "--seed") && (int)i+1 < argc) seed = strtoull(argv[++i], NULL, 0);
-        else if (!strcmp(argv[i], "--max") && (int)i+1 < argc) maxcalls = (unsigned)strtoul(argv[++i], NULL, 0);
-        else if (!strcmp(argv[i], "--from") && (int)i+1 < argc) fromcall = (unsigned)strtoul(argv[++i], NULL, 0);
+        if (!strcmp(argv[i], "--seed") && (int)i+1 < argc) seed = strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--max") && (int)i+1 < argc) maxcalls = (unsigned)strtoul(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--from") && (int)i+1 < argc) fromcall = (unsigned)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--target") && (int)i+1 < argc) target = argv[++i];
         else if (!strcmp(argv[i], "--quiet")) g_quiet = 1;
-        else if (!strcmp(argv[i], "--step-ms") && (int)i+1 < argc) g_stepMs = (DWORD)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--step-ms") && (int)i+1 < argc) g_stepMs = (DWORD)strtoul(argv[++i], NULL, 10);
     }
+    /* Below the worker's 100 ms poll a lost wake-up would read as lost-worker. */
+    if (g_stepMs < 250) g_stepMs = 250;
     if (seed == 0) seed = ((unsigned long long)GetTickCount() << 16) ^ GetCurrentProcessId();
 
     g_state = seed;
@@ -417,8 +435,8 @@ int main(int argc, char **argv)
     {
         char hdr[160];
         HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-        _snprintf(hdr, sizeof(hdr)-1, "KVFUZZ: start seed=%llu max=%u from=%u target=%s sel=%u quiet=%d\n",
-                  seed, maxcalls, fromcall, target, g_selCount, g_quiet);
+        _snprintf(hdr, sizeof(hdr)-1, "KVFUZZ: start seed=%llu max=%u from=%u target=%s sel=%u quiet=%d step=%lu\n",
+                  seed, maxcalls, fromcall, target, g_selCount, g_quiet, (unsigned long)g_stepMs);
         hdr[sizeof(hdr)-1] = 0;
         OutputDebugStringA(hdr);
         WriteState(seed, 0);
