@@ -361,6 +361,19 @@ HvpWriteHive(
         return FALSE;
     }
 
+    /*
+     * The new primary sequence must be on the medium before any bin: a disk
+     * with a write cache may otherwise keep some bins and lose the base
+     * block, and a hive whose sequences still match is not recovered from
+     * its log after a power cut.
+     */
+    Success = RegistryHive->FileFlush(RegistryHive, FileType, NULL, 0);
+    if (!Success)
+    {
+        DPRINT1("Failed to flush the primary hive (primary sequence)\n");
+        return FALSE;
+    }
+
     /* Write the whole primary hive, block by block */
     BlockIndex = 0;
     while (BlockIndex < RegistryHive->Storage[Stable].Length)
@@ -377,7 +390,8 @@ HvpWriteHive(
             /* Check if the block is clean or we're past the last block */
             LastIndex = BlockIndex;
             BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-            if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
+            if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex ||
+                BlockIndex >= RegistryHive->Storage[Stable].Length)
             {
                 break;
             }
