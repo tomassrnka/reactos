@@ -918,7 +918,7 @@ walked:
         if (!IsDir && (St.file_attributes & FILE_ATTRIBUTE_READONLY))
         {
             /* Supersede replaces the file and is allowed; overwrite keeps it and is not. */
-            if ((Access & (FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED)) ||
+            if ((Access & (FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL)) ||
                 Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
             {
                 Status = STATUS_ACCESS_DENIED;
@@ -984,8 +984,29 @@ walked:
     RtlMapGenericMask(&Effective, IoGetFileObjectGenericMapping());
     if (Check)
         Effective = As->PreviouslyGrantedAccess;
-    else if (Effective & MAXIMUM_ALLOWED)
-        Effective = (Effective & ~MAXIMUM_ALLOWED) | FILE_ALL_ACCESS;
+    else
+    {
+        /* A trusted kernel open carries backup/restore-granted bits in PreviouslyGrantedAccess. */
+        Effective |= As ? As->PreviouslyGrantedAccess : 0;
+        if (Effective & MAXIMUM_ALLOWED)
+            Effective = (Effective & ~MAXIMUM_ALLOWED) | FILE_ALL_ACCESS;
+    }
+    /* A read-only file, or a metadata file, resolves MAXIMUM_ALLOWED and generic rights to write
+     * bits the caller did not explicitly request; drop them so the open reads rather than fails. */
+    if (!CreatedNode && !IsDir &&
+        !(Access & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
+                    WRITE_DAC | WRITE_OWNER | DELETE | FILE_DELETE_CHILD | GENERIC_WRITE | GENERIC_ALL)) &&
+        Disposition != FILE_OVERWRITE && Disposition != FILE_OVERWRITE_IF && Disposition != FILE_SUPERSEDE &&
+        !(Options & FILE_DELETE_ON_CLOSE) && !Stream.Length &&
+        (((St.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE) ||
+         (St.file_attributes & FILE_ATTRIBUTE_READONLY)))
+    {
+        ACCESS_MASK W = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
+                        WRITE_DAC | WRITE_OWNER | DELETE | FILE_DELETE_CHILD;
+        Effective &= ~W;
+        if (Check)
+            As->PreviouslyGrantedAccess &= ~W;
+    }
 
     Ccb = NgAllocateCcb(&Full);
     Fcb = NgAllocateFcb(Vcb);
@@ -1024,9 +1045,10 @@ walked:
         Status = STATUS_DELETE_PENDING;
         goto out;
     }
-    if ((St.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE && !Fcb->IsRoot)
+    if (((St.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE || Ccb->ParentMftNo == 11) && !Fcb->IsRoot)
     {
-        /* The NTFS metadata files ($MFT, $LogFile, $Bitmap, ...) are never opened for writing,
+        /* The NTFS metadata files ($MFT, $LogFile, $Bitmap, ...) and the $Extend children are never
+         * opened for writing,
          * truncated, deleted, retitled or given a stream; as on Windows, only reads are allowed.
          * The granted access is tested, so MAXIMUM_ALLOWED and backup intent cannot slip a write in. */
         if ((Effective & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
@@ -1062,9 +1084,9 @@ walked:
         if (!Created)
         {
             if (Disposition == FILE_SUPERSEDE)
-                Added = DELETE & ~Access;
+                Added = DELETE & ~Effective;
             else if (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
-                Added = (FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES) & ~Access;
+                Added = (FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES) & ~Effective;
         }
         BOOLEAN Paging = (Stack->Flags & SL_OPEN_PAGING_FILE) != 0;
         Status = STATUS_SUCCESS;
@@ -1075,15 +1097,15 @@ walked:
         else if (Paging && Fcb->OpenHandles && !Fcb->IsPagingFile)
             Status = STATUS_SHARING_VIOLATION;
         if (NT_SUCCESS(Status) && Fcb->OpenHandles && Added)
-            Status = IoCheckShareAccess(Access | Added, Stack->Parameters.Create.ShareAccess, FileObject,
+            Status = IoCheckShareAccess(Effective | Added, Stack->Parameters.Create.ShareAccess, FileObject,
                                         &Fcb->ShareAccess, FALSE);
         if (NT_SUCCESS(Status))
         {
             if (Fcb->OpenHandles)
-                Status = IoCheckShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject,
+                Status = IoCheckShareAccess(Effective, Stack->Parameters.Create.ShareAccess, FileObject,
                                             &Fcb->ShareAccess, TRUE);
             else
-                IoSetShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject, &Fcb->ShareAccess);
+                IoSetShareAccess(Effective, Stack->Parameters.Create.ShareAccess, FileObject, &Fcb->ShareAccess);
         }
         if (NT_SUCCESS(Status) && Paging && !Fcb->IsPagingFile)
         {
@@ -1110,8 +1132,6 @@ walked:
          * IsPagingFile was published under the lock above; undo it here if this open is rejected. */
         if (IsDir || Stream.Length || Vcb->ReadOnly)
         {
-            if (SetPaging)
-                Fcb->IsPagingFile = FALSE;
             FileObject->FsContext = NULL;
             FileObject->FsContext2 = NULL;
             Status = STATUS_ACCESS_DENIED;
@@ -1173,8 +1193,8 @@ out:
         ExAcquireFastMutex(&Vcb->FcbListLock);
         IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
         Fcb->OpenHandles--;
-        if (SetPaging)
-            Fcb->IsPagingFile = FALSE;   /* this open promoted it to a paging file, then failed */
+        if (SetPaging && Fcb->OpenHandles == 0)
+            Fcb->IsPagingFile = FALSE;   /* this open promoted it, then failed, and holds the only ref */
         ExReleaseFastMutex(&Vcb->FcbListLock);
     }
     if (Node || Parent)
@@ -1237,15 +1257,10 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
             else
             {
                 /* The file lives on under another name: this FCB is not deleted, so opens of the
-                 * surviving link through it must not see STATUS_DELETE_PENDING. */
+                 * surviving link through it must not see STATUS_DELETE_PENDING.  DelPath is kept for
+                 * the removal notification below and freed with the FCB. */
                 ngc_stat(Fcb->Node, &Fcb->Stat);   /* the link count dropped */
                 Fcb->DeletePending = FALSE;
-                if (Fcb->DelPath.Buffer)
-                {
-                    ExFreePoolWithTag(Fcb->DelPath.Buffer, TAG_NTFSNG);
-                    Fcb->DelPath.Buffer = NULL;
-                    Fcb->DelPath.Length = Fcb->DelPath.MaximumLength = 0;
-                }
             }
             NgParkNode(Fcb);
             NgAfterChange(Vcb);

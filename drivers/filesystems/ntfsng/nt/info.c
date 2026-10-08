@@ -294,8 +294,8 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
 {
     PNG_VCB Vcb = Fcb->Vcb;
     int Empty = 1;
-    if (Fcb->IsRoot || !Ccb->NameLength || Fcb->MftNo < 16)
-        return STATUS_CANNOT_DELETE;   /* the metadata files are never deleted */
+    if (Fcb->IsRoot || !Ccb->NameLength || Fcb->MftNo < 16 || Ccb->ParentMftNo == 11)
+        return STATUS_CANNOT_DELETE;   /* the metadata files and $Extend children are never deleted */
     if (!D->DeleteFile)
     {
         Fcb->DeletePending = FALSE;
@@ -426,8 +426,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         return STATUS_INVALID_PARAMETER;
     if (Fcb->IsRoot || Fcb->IsVolume || Fcb->Stream.Length || !Ccb->NameLength)
         return STATUS_INVALID_PARAMETER;
-    if (Fcb->MftNo < 16)
-        return STATUS_ACCESS_DENIED;   /* the metadata files are never renamed or linked */
+    if (Fcb->MftNo < 16 || Ccb->ParentMftNo == 11)
+        return STATUS_ACCESS_DENIED;   /* metadata files and $Extend children are never renamed or linked */
     if (IsLink && Fcb->IsDirectory)
         return STATUS_FILE_IS_A_DIRECTORY;
     n = R->FileNameLength / sizeof(WCHAR);
@@ -619,10 +619,11 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Crtime);
         }
     }
-    if (!Err && TargetFcb && TSt.nlink <= 1)
+    if (!Err && TargetFcb && ngc_links(Target) <= 0)
     {
-        /* The replaced target had just this name: retire its FCB.  If it had other hard links the
-         * core keeps the file, so the FCB and the surviving links' cached data stay valid. */
+        /* The replace removed the target's last name (checked live under the lock): retire its FCB.
+         * If other hard links remain, the core keeps the file, so the FCB and the surviving links'
+         * cached data stay valid. */
         TargetFcb->Deleted = TRUE;
         NgUnlistFcb(TargetFcb);
     }
