@@ -535,9 +535,22 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
             BaseVaStart = BaseVa;
 
             //
-            // Lock the PFN database and loop pages
+            // Lock the PFN database and check that enough pages are available
+            // for the new page tables, as the nonpaged path does:
+            // MiRemoveAnyPage returns page 0 when none is available
             //
             OldIrql = MiAcquirePfnLock();
+            if (MmAvailablePages < PageTableCount)
+            {
+                MiReleasePfnLock(OldIrql);
+
+                /* Nothing was changed yet: the allocation map search failed */
+                KeReleaseGuardedMutex(&MmPagedPoolMutex);
+                DPRINT1("OUT OF AVAILABLE PAGES for paged pool expansion! Required %lu, Available %Iu\n",
+                        PageTableCount, MmAvailablePages);
+                return NULL;
+            }
+
             do
             {
                 //
