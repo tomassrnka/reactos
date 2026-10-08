@@ -517,6 +517,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PWCHAR Real = NULL;
     unsigned int RealLen = 0;
     UNICODE_STRING ById = { 0, 0, NULL };
+    ULONGLONG ByIdRef = 0;
     PCUNICODE_STRING Name = &FileObject->FileName;
     PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
     BOOLEAN Check = NgCreateChecksAccess(Irp, Stack), Traverse;
@@ -538,6 +539,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         /* Opened as the path of the file the ID names; such an open never creates anything. */
         if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF && Disposition != FILE_OVERWRITE)
             return STATUS_INVALID_PARAMETER;
+        if (FileObject->FileName.Length == sizeof(ULONGLONG))
+            ByIdRef = *(ULONGLONG UNALIGNED *)FileObject->FileName.Buffer;
         Status = NgPathFromId(Vcb, &FileObject->FileName, &ById);
         if (!NT_SUCCESS(Status))
             return Status;
@@ -835,6 +838,15 @@ walked:
     }
     if (NT_SUCCESS(Status))
         ngc_stat(Node, &St);
+    if (NT_SUCCESS(Status) && ByIdRef)
+    {
+        /* The path was re-walked without the lock: a concurrent rename could have put another
+         * file where the ID's path now leads.  Refuse unless it is still the record the ID named. */
+        ULONGLONG Want = ByIdRef & 0xffffffffffffULL;
+        USHORT WantSeq = (USHORT)(ByIdRef >> 48);
+        if ((St.mft_ref & 0xffffffffffffULL) != Want || (WantSeq && (USHORT)(St.mft_ref >> 48) != WantSeq))
+            Status = STATUS_INVALID_PARAMETER;
+    }
     if (Parent)
         ngc_stat(Parent, &PSt);
     else
