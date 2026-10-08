@@ -210,8 +210,145 @@ static void Test_NtFreeVirtualMemory_Parameters(void)
     ok(Status == STATUS_INVALID_PARAMETER_4, "NtFreeVirtualMemory returned status : 0x%08lx\n", Status);
 }
 
+static ULONG GetAvailablePages(void)
+{
+    /* Larger than any version's structure: only AvailablePages is read */
+    ULONG Buffer[256];
+    PSYSTEM_PERFORMANCE_INFORMATION Info = (PSYSTEM_PERFORMANCE_INFORMATION)Buffer;
+    ULONG Length = 0;
+    NTSTATUS Status;
+
+    Status = NtQuerySystemInformation(SystemPerformanceInformation, Buffer, sizeof(Buffer), &Length);
+    if (!NT_SUCCESS(Status) || Length < FIELD_OFFSET(SYSTEM_PERFORMANCE_INFORMATION, AvailablePages) + sizeof(ULONG))
+        return 0;
+    return Info->AvailablePages;
+}
+
+/* Pages that were touched and then made inaccessible must be freed by MEM_DECOMMIT */
+static void Test_NtFreeVirtualMemory_DecommitInaccessible(void)
+{
+    const ULONG PageCount = 16, Rounds = 512;
+    PVOID Base = NULL, Address;
+    SIZE_T Size = PageCount * PAGE_SIZE;
+    MEMORY_BASIC_INFORMATION Mbi;
+    ULONG i, Old, AvailableBefore, AvailableAfter;
+    PUCHAR Bytes;
+    NTSTATUS Status;
+
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Bytes = Base;
+    for (i = 0; i < PageCount; i++)
+        Bytes[i * PAGE_SIZE] = (UCHAR)(i + 1);
+
+    /* Half of the pages no-access, half guard pages */
+    for (i = 0; i < PageCount; i++)
+    {
+        Address = Bytes + i * PAGE_SIZE;
+        Size = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size,
+                                        (i & 1) ? (PAGE_READWRITE | PAGE_GUARD) : PAGE_NOACCESS, &Old);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+
+    Address = Base;
+    Size = PageCount * PAGE_SIZE;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_DECOMMIT);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Base, MemoryBasicInformation, &Mbi, sizeof(Mbi), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_hex(Mbi.State, MEM_RESERVE);
+    ok_size_t(Mbi.RegionSize, PageCount * PAGE_SIZE);
+
+    /* Committed again, the pages must read as zero */
+    Address = Base;
+    Size = PageCount * PAGE_SIZE;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        for (i = 0; i < PageCount; i++)
+            ok(Bytes[i * PAGE_SIZE] == 0, "Page %lu holds %u after decommit and commit\n", i, Bytes[i * PAGE_SIZE]);
+    }
+
+    /* The physical pages must come back: a rough check of the system-wide count, which a leak of one page per round fails on a quiet system */
+    AvailableBefore = GetAvailablePages();
+    for (i = 0; i < Rounds; i++)
+    {
+        Address = Base;
+        Size = PAGE_SIZE;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+        if (!NT_SUCCESS(Status))
+            break;
+        Bytes[0] = 1;
+        Address = Base;
+        Size = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, PAGE_NOACCESS, &Old);
+        if (!NT_SUCCESS(Status))
+            break;
+        Address = Base;
+        Size = PAGE_SIZE;
+        Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_DECOMMIT);
+        if (!NT_SUCCESS(Status))
+            break;
+    }
+    ok(i == Rounds, "Round %lu failed with 0x%08lx\n", i, Status);
+    AvailableAfter = GetAvailablePages();
+    /* Other activity moves the count on Windows: check the loss on ReactOS only */
+    if (!is_reactos())
+        skip("Not checking the available page count\n");
+    else if (!AvailableBefore || !AvailableAfter)
+        ok(0, "SystemPerformanceInformation failed\n");
+    else
+        ok(AvailableAfter + Rounds / 2 > AvailableBefore,
+           "Available pages went from %lu to %lu in %lu rounds\n", AvailableBefore, AvailableAfter, Rounds);
+
+    /* A locked page made inaccessible, then decommitted */
+    Address = Base;
+    Size = PAGE_SIZE;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Bytes[0] = 1;
+        if (VirtualLock(Base, PAGE_SIZE))
+        {
+            Address = Base;
+            Size = PAGE_SIZE;
+            Status = NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, PAGE_NOACCESS, &Old);
+            /* Windows unlocks the page here or on the decommit, and says so */
+            ok(Status == STATUS_SUCCESS || Status == STATUS_WAS_UNLOCKED, "Protecting a locked page returned 0x%08lx\n", Status);
+            Address = Base;
+            Size = PAGE_SIZE;
+            Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_DECOMMIT);
+            ok(Status == STATUS_SUCCESS || Status == STATUS_WAS_UNLOCKED, "Decommitting a locked page returned 0x%08lx\n", Status);
+            Status = NtQueryVirtualMemory(NtCurrentProcess(), Base, MemoryBasicInformation, &Mbi, sizeof(Mbi), NULL);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            ok_hex(Mbi.State, MEM_RESERVE);
+            Address = Base;
+            Size = PAGE_SIZE;
+            Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+                ok(Bytes[0] == 0, "Locked page holds %u after decommit and commit\n", Bytes[0]);
+        }
+        else
+        {
+            skip("VirtualLock failed with %lu\n", GetLastError());
+        }
+    }
+
+    Address = Base;
+    Size = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtFreeVirtualMemory)
 {
     Test_NtFreeVirtualMemory();
     Test_NtFreeVirtualMemory_Parameters();
+    Test_NtFreeVirtualMemory_DecommitInaccessible();
 }
