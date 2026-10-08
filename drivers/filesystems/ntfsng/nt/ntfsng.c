@@ -391,7 +391,7 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 }
 
 /* IRP_MJ_CLEANUP on a dismounted volume: only the handle's own state, the core is gone. */
-static NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
+NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
 {
     PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
     PNG_FCB Fcb = FileObject->FsContext;
@@ -399,8 +399,8 @@ static NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
 
     if (!Fcb)
         return STATUS_SUCCESS;
-    if (Fcb->IsVolume && Vcb->LockedBy == FileObject)
-        NgUnlockVolume(Vcb);
+    if (Fcb->IsVolume)
+        NgUnlockVolume(Vcb, FileObject, TRUE);
     if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
         FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
     if (!Fcb->IsDirectory && !Fcb->IsVolume)

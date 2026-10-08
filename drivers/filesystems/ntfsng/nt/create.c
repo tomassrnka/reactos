@@ -642,7 +642,7 @@ static NTSTATUS NgCheckTraverse(PNG_VCB Vcb, PACCESS_STATE As, ngc_node *Dir)
     return Status;
 }
 
-NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
     PFILE_OBJECT FileObject = Stack->FileObject;
@@ -1428,6 +1428,31 @@ out:
     return Status;
 }
 
+static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
+/*
+ * IRP_MJ_CLEANUP.  A volume handle is marked cleaned up and gives up the volume lock first; the rest
+ * runs with the create gate shared, so the metadata changes of a last cleanup (a delete, timestamps)
+ * never land after a volume lock's flush or during a dismount.
+ */
+NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    PNG_FCB Fcb = FileObject->FsContext;
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    NTSTATUS Status;
+
+    if (!Fcb)
+        return STATUS_SUCCESS;
+    if (Fcb->IsVolume)
+        NgUnlockVolume(Vcb, FileObject, TRUE);
+    ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
+    /* A dismount that ran while this cleanup waited for the gate left no core behind. */
+    Status = Vcb->Dismounted ? NgCleanupDismounted(Vcb, Irp) : NgCleanupGated(DeviceObject, Irp);
+    ExReleaseResourceLite(&Vcb->CreateGate);
+    return Status;
+}
+
 /* ngc_streams callback: counts the named streams of a file. */
 static int NgCountNamedStream(void *Ctx, const unsigned short *Name, unsigned int Len, unsigned long long Size,
                               unsigned long long Alloc)
@@ -1436,6 +1461,24 @@ static int NgCountNamedStream(void *Ctx, const unsigned short *Name, unsigned in
     if (Len)
         (*(PULONG)Ctx)++;
     return 0;
+}
+
+/*
+ * IRP_MJ_CREATE.  A create holds CreateGate shared from before its volume checks to its end, and
+ * FSCTL_LOCK_VOLUME takes it exclusive to decide the lock, so a lock (and the dismount it allows)
+ * never comes while a create runs; one that starts later sees the lock, or the dismount.
+ */
+NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    NTSTATUS Status;
+    ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
+    if (Vcb->Dismounted)
+        Status = STATUS_VOLUME_DISMOUNTED;
+    else
+        Status = NgCreateLocked(DeviceObject, Irp);
+    ExReleaseResourceLite(&Vcb->CreateGate);
+    return Status;
 }
 
 /* Unlinks a delete-pending file at its last cleanup (caller holds MainResource exclusive). */
@@ -1531,7 +1574,7 @@ VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb)
     }
 }
 
-NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
     PNG_FCB Fcb = FileObject->FsContext;
@@ -1539,10 +1582,6 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
     BOOLEAN Last, Delete;
 
-    if (!Fcb)
-        return STATUS_SUCCESS;
-    if (Fcb->IsVolume && Vcb->LockedBy == FileObject)
-        NgUnlockVolume(Vcb);
     if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
         FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
     if (!Fcb->IsDirectory && !Fcb->IsVolume)

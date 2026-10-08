@@ -166,6 +166,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vcb->Vpb = Vpb;
     Vcb->SectorSize = SectorSize;
     ExInitializeResourceLite(&Vcb->CoreLock);
+    ExInitializeResourceLite(&Vcb->CreateGate);
     ExInitializeFastMutex(&Vcb->FcbListLock);
     InitializeListHead(&Vcb->FcbList);
     InitializeListHead(&Vcb->DirNotifyList);
@@ -184,6 +185,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         DPRINT1("ntfsng: fs/ntfs refused the volume (%d), leaving it to other file systems\n", Err);
         ExDeleteResourceLite(&Vcb->CoreLock);
+        ExDeleteResourceLite(&Vcb->CreateGate);
         IoDeleteDevice(Vdo);
         return STATUS_UNRECOGNIZED_VOLUME;
     }
@@ -227,11 +229,22 @@ static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
 
     if (!Fcb || !Fcb->IsVolume)
         return STATUS_INVALID_PARAMETER;
-    if (Vcb->LockedBy)
-        return STATUS_ACCESS_DENIED;
+    /* No create runs while the lock is decided, the volume flushed for it, or a dismount runs:
+     * a running create finishes first (see NgCreate). */
+    ExAcquireResourceExclusiveLite(&Vcb->CreateGate, TRUE);
+    if (Vcb->Dismounted || Vcb->LockedBy || !FileObject->FsContext2)
+    {
+        Status = Vcb->Dismounted ? STATUS_VOLUME_DISMOUNTED : STATUS_ACCESS_DENIED;
+        ExReleaseResourceLite(&Vcb->CreateGate);
+        return Status;
+    }
     NgFlushVolume(Vcb);
     ExAcquireFastMutex(&Vcb->FcbListLock);
-    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    /* Checked again after the flush, in the hold that publishes the lock: also refused for a handle
+     * whose cleanup ran meanwhile (nothing would ever unlock it). */
+    if (Vcb->Dismounted || Vcb->LockedBy || ((PNG_CCB)FileObject->FsContext2)->CleanedUp)
+        Status = STATUS_ACCESS_DENIED;
+    for (Entry = Vcb->FcbList.Flink; NT_SUCCESS(Status) && Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
         if (F != Fcb && F->OpenHandles)
@@ -240,28 +253,47 @@ static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
             break;
         }
     }
-    if (NT_SUCCESS(Status) && Fcb->OpenHandles > 1)
+    if (NT_SUCCESS(Status) && Fcb->OpenHandles != 1)
         Status = STATUS_ACCESS_DENIED;
     if (NT_SUCCESS(Status))
-        Vcb->LockedBy = FileObject;
-    ExReleaseFastMutex(&Vcb->FcbListLock);
-    if (NT_SUCCESS(Status))
     {
+        /* Owner and VPB flag in one hold: an unlock or cleanup in between cannot leave either behind. */
         KIRQL Irql;
+        Vcb->LockedBy = FileObject;
         IoAcquireVpbSpinLock(&Irql);
         Vcb->Vpb->Flags |= VPB_LOCKED;
         IoReleaseVpbSpinLock(Irql);
     }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    ExReleaseResourceLite(&Vcb->CreateGate);
     return Status;
 }
 
-VOID NgUnlockVolume(PNG_VCB Vcb)
+/*
+ * Unlocks the volume if FileObject holds the lock, checked under FcbListLock, the lock the volume lock
+ * is published under (a later holder's lock is not dropped); with Cleanup the handle is also marked
+ * cleaned up, so a lock request still running on it is refused.  Not under the create gate: a create
+ * holding it only reads the lock at its start, and a dismount, which takes the gate exclusive, waits
+ * for running creates.  FALSE if FileObject did not hold the lock.
+ */
+BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup)
 {
-    KIRQL Irql;
-    Vcb->LockedBy = NULL;
-    IoAcquireVpbSpinLock(&Irql);
-    Vcb->Vpb->Flags &= ~VPB_LOCKED;
-    IoReleaseVpbSpinLock(Irql);
+    PNG_CCB Ccb = FileObject->FsContext2;
+    BOOLEAN Held;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    if (Cleanup && Ccb)
+        Ccb->CleanedUp = TRUE;
+    Held = Vcb->LockedBy == FileObject;
+    if (Held)
+    {
+        KIRQL Irql;
+        Vcb->LockedBy = NULL;
+        IoAcquireVpbSpinLock(&Irql);
+        Vcb->Vpb->Flags &= ~VPB_LOCKED;
+        IoReleaseVpbSpinLock(Irql);
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    return Held;
 }
 
 /* The I/O manager frees a VPB that lost its last reference with this tag (TAG_VPB). */
@@ -275,7 +307,7 @@ VOID NgUnlockVolume(PNG_VCB Vcb)
  * old one.  That handle still reads and writes the disk directly; every other request on this
  * mount fails with STATUS_VOLUME_DISMOUNTED.  Not for a volume with a paging file.
  */
-static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
+static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
 {
     PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
     PNG_CCB Ccb = FileObject ? FileObject->FsContext2 : NULL;
@@ -308,21 +340,19 @@ static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         Count++;
     }
     ExReleaseFastMutex(&Vcb->FcbListLock);
-    FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
 
     Discard = Vcb->RawWritten;
     if (!Discard && !Vcb->ReadOnly)
         NgFlushVolume(Vcb);
 
-    /* Cached files lose their views; later paging I/O on them fails.  Every FCB is taken, also one a
-     * create published after the count: the array is sized again until it fits. */
+    /* Cached files lose their views; later paging I/O on them fails.  Every FCB is taken (the array is
+     * sized again if the list grew, which the create gate now prevents). */
     for (Capacity = Count + 16;; Capacity = Count + 16)
     {
         List = ExAllocatePoolWithTag(PagedPool, Capacity * sizeof(PNG_FCB), TAG_NTFSNG);
         if (!List)
         {
             /* Without the snapshot the teardown would leave core inodes behind: the volume stays mounted. */
-            FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT_FAILED);
             ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
@@ -402,6 +432,29 @@ static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     DPRINT1("ntfsng: volume %08lx dismounted%s\n", Vcb->Vpb->SerialNumber,
             Discard ? " (written directly by the lock holder: mounted state dropped)" : "");
     return STATUS_SUCCESS;
+}
+
+/*
+ * The dismount runs with the create gate held exclusive: no create, cleanup or shutdown flush is
+ * inside the core it frees.  The dismount notification goes out before the gate is taken
+ * (its callbacks may open files on the volume from another thread).
+ */
+static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
+{
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
+    PNG_CCB Ccb = FileObject ? FileObject->FsContext2 : NULL;
+    NTSTATUS Status;
+    if (!Fcb || !Fcb->IsVolume || !Ccb || !Ccb->ManageVolume)
+        return STATUS_INVALID_PARAMETER;
+    if (Vcb->LockedBy != FileObject)
+        return STATUS_ACCESS_DENIED;
+    FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
+    ExAcquireResourceExclusiveLite(&Vcb->CreateGate, TRUE);
+    Status = Vcb->Dismounted ? STATUS_VOLUME_DISMOUNTED : NgDismountVolumeGated(Vcb, FileObject);
+    ExReleaseResourceLite(&Vcb->CreateGate);
+    if (!NT_SUCCESS(Status) && Status != STATUS_VOLUME_DISMOUNTED)
+        FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT_FAILED);
+    return Status;
 }
 
 /* FSCTL_GET/SET/DELETE_REPARSE_POINT on a file or directory (not a stream, not the volume). */
@@ -590,9 +643,8 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FSCTL_UNLOCK_VOLUME:
             if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
                 return STATUS_INVALID_PARAMETER;
-            if (!Fcb || !Fcb->IsVolume || Vcb->LockedBy != FileObject)
+            if (!Fcb || !Fcb->IsVolume || !NgUnlockVolume(Vcb, FileObject, FALSE))
                 return STATUS_NOT_LOCKED;
-            NgUnlockVolume(Vcb);
             return STATUS_SUCCESS;
         case FSCTL_REQUEST_OPLOCK_LEVEL_1:
         case FSCTL_REQUEST_OPLOCK_LEVEL_2:

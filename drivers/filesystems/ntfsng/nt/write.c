@@ -731,7 +731,8 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     UNREFERENCED_PARAMETER(DeviceObject);
     UNREFERENCED_PARAMETER(Irp);
 
-    /* Volumes are never dismounted, so the pointers stay valid outside the list lock. */
+    /* A VCB is never freed after its mount, so the pointers stay valid outside the list lock; a
+     * dismount is waited for (create gate) and its volume skipped. */
     ExAcquireFastMutex(&NgGlobal.VcbListLock);
     for (Entry = NgGlobal.VcbList.Flink; Entry != &NgGlobal.VcbList && Count < RTL_NUMBER_OF(Vcbs); Entry = Entry->Flink)
         Vcbs[Count++] = CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks);
@@ -741,6 +742,13 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         PNG_VCB Vcb = Vcbs[i];
         if (Vcb->ReadOnly)
             continue;
+        ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
+        if (Vcb->Dismounted || Vcb->RawWritten)
+        {
+            /* Gone, or the lock holder wrote the disk directly: mounted state is not written over it. */
+            ExReleaseResourceLite(&Vcb->CreateGate);
+            continue;
+        }
         NgFlushVolume(Vcb);
         Vcb->WriteThrough = TRUE;
         NgAcquireCore(Vcb);
@@ -752,6 +760,7 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 Vcb->Vpb->SerialNumber, Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs, Vcb->NonCachedViaCache,
                 Vcb->PagingFileReads, Vcb->PagingFileWrites);
         NgPrintLockStats(Vcb);
+        ExReleaseResourceLite(&Vcb->CreateGate);
     }
     ngc_write_stats(&Writes, &Bytes, &Syncs, &Dirties);
     DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs, %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",

@@ -89,6 +89,7 @@ typedef struct _NG_VCB
     PNOTIFY_SYNC NotifySync;        /* directory change notification (FsRtl) */
     TUNNEL Tunnel;                  /* creation times of names that just went away (FsRtl tunnel cache) */
     PFILE_OBJECT LockedBy;          /* FSCTL_LOCK_VOLUME holder: no other open while set */
+    ERESOURCE CreateGate;           /* creates and cleanups shared; volume lock and dismount exclusive */
     BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: never write the mounted state back */
     BOOLEAN Dismounted;             /* FSCTL_DISMOUNT_VOLUME done: no core, the storage device has a new VPB */
     LIST_ENTRY DirNotifyList;
@@ -189,6 +190,7 @@ typedef struct _NG_CCB
     LONG QueryBusy;                 /* a directory query of this handle is running (dirctl.c) */
     ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
     BOOLEAN ManageVolume;           /* a volume open that may lock, unlock and dismount the volume */
+    BOOLEAN CleanedUp;              /* a volume handle's cleanup ran (set under FcbListLock) */
     PVOID RetiredPaths;             /* earlier Path buffers of a renamed directory (change notify keeps them) */
 } NG_CCB, *PNG_CCB;
 
@@ -213,6 +215,7 @@ typedef struct _NG_GLOBAL
 extern NG_GLOBAL NgGlobal;
 
 /* ntfsng.c */
+NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp);
 NTSTATUS NgErrnoToStatus(int Err);
 VOID NgAcquireCore(PNG_VCB Vcb);
 VOID NgReleaseCore(PNG_VCB Vcb);
@@ -272,7 +275,7 @@ VOID NgTunnelAdd(PNG_VCB Vcb, ULONGLONG DirMftNo, PCWSTR Name, USHORT NameChars,
 VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name);
 
 /* fsctl.c */
-VOID NgUnlockVolume(PNG_VCB Vcb);
+BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup);
 
 /* security.c */
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
