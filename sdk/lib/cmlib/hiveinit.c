@@ -907,8 +907,22 @@ HvpRecoverDataFromLog(
     ULONG BlockIndex;
     ULONG LogIndex;
     ULONG StorageLength;
-    UCHAR DirtyVector[HSECTOR_SIZE];
+    ULONG VectorSize;
+    ULONGLONG LogEnd;
+    PUCHAR DirtyVector;
     UCHAR Buffer[HBLOCK_SIZE];
+    RESULT Result = HiveSuccess;
+
+    /*
+     * The log holds the dirty vector (one byte per block, rounded up as
+     * HvpWriteLog does it) after the header, then the dirty blocks.
+     */
+    StorageLength = BaseBlock->Length / HBLOCK_SIZE;
+    VectorSize = ROUND_UP(sizeof(HV_LOG_DIRTY_SIGNATURE) + ROUND_UP(StorageLength, sizeof(ULONG) * 8), HSECTOR_SIZE);
+    DirtyVector = Hive->Allocate(VectorSize, FALSE, TAG_CM);
+    if (!DirtyVector)
+        return Fail;
+    RtlZeroMemory(DirtyVector, VectorSize);
 
     /* Read the dirty data from the log */
     FileOffset = HV_LOG_HEADER_SIZE;
@@ -916,9 +930,10 @@ HvpRecoverDataFromLog(
                              HFILE_TYPE_LOG,
                              &FileOffset,
                              DirtyVector,
-                             HSECTOR_SIZE);
+                             VectorSize);
     if (!Success)
     {
+        Hive->Free(DirtyVector, VectorSize);
         if (!CmIsSelfHealEnabled(FALSE))
         {
             DPRINT1("The log couldn't be read and self-healing mode is disabled\n");
@@ -937,12 +952,26 @@ HvpRecoverDataFromLog(
         return SelfHeal;
     }
 
-    /* Check the dirty vector */
-    if (*((PULONG)DirtyVector) != HV_LOG_DIRTY_SIGNATURE)
+    /*
+     * Check the dirty vector, and that the log holds every dirty block:
+     * a read that ends early still succeeds, so read the last sector the
+     * blocks need (or the last sector of the vector) on its own first.
+     * The log is read without buffering, so the probe is a whole sector.
+     */
+    for (BlockIndex = 0, LogIndex = 0; BlockIndex < StorageLength; BlockIndex++)
     {
+        if (DirtyVector[BlockIndex + sizeof(HV_LOG_DIRTY_SIGNATURE)] == HV_LOG_DIRTY_BLOCK)
+            LogIndex++;
+    }
+    LogEnd = HV_LOG_HEADER_SIZE + (ULONGLONG)VectorSize + (ULONGLONG)LogIndex * HBLOCK_SIZE;
+    FileOffset = (ULONG)(LogEnd - HSECTOR_SIZE);
+    if (*((PULONG)DirtyVector) != HV_LOG_DIRTY_SIGNATURE || LogEnd > 0xFFFFFFFFULL ||
+        !Hive->FileRead(Hive, HFILE_TYPE_LOG, &FileOffset, Buffer, HSECTOR_SIZE))
+    {
+        Hive->Free(DirtyVector, VectorSize);
         if (!CmIsSelfHealEnabled(FALSE))
         {
-            DPRINT1("The log's dirty vector signature is not valid\n");
+            DPRINT1("The log's dirty vector signature is not valid or the log is too short\n");
             return Fail;
         }
 
@@ -958,7 +987,6 @@ HvpRecoverDataFromLog(
 
     /* Now read each data individually and write it back to hive */
     LogIndex = 0;
-    StorageLength = BaseBlock->Length / HBLOCK_SIZE;
     for (BlockIndex = 0; BlockIndex < StorageLength; BlockIndex++)
     {
         /* Skip this block if it's not dirty and go to the next one */
@@ -967,7 +995,7 @@ HvpRecoverDataFromLog(
             continue;
         }
 
-        FileOffset = HSECTOR_SIZE + HSECTOR_SIZE + LogIndex * HBLOCK_SIZE;
+        FileOffset = HV_LOG_HEADER_SIZE + VectorSize + LogIndex * HBLOCK_SIZE;
         Success = Hive->FileRead(Hive,
                                  HFILE_TYPE_LOG,
                                  &FileOffset,
@@ -976,7 +1004,8 @@ HvpRecoverDataFromLog(
         if (!Success)
         {
             DPRINT1("Failed to read the dirty block (index %u)\n", BlockIndex);
-            return Fail;
+            Result = Fail;
+            break;
         }
 
         FileOffset = HBLOCK_SIZE + BlockIndex * HBLOCK_SIZE;
@@ -988,14 +1017,16 @@ HvpRecoverDataFromLog(
         if (!Success)
         {
             DPRINT1("Failed to write dirty block to hive (index %u)\n", BlockIndex);
-            return Fail;
+            Result = Fail;
+            break;
         }
 
         /* Increment the index in log as we continue further */
         LogIndex++;
     }
 
-    return HiveSuccess;
+    Hive->Free(DirtyVector, VectorSize);
+    return Result;
 }
 #endif
 
