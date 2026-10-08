@@ -566,12 +566,6 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         }
     }
 
-    if (!IsLink && Fcb->IsDirectory && NewDirMftNo != Ccb->ParentMftNo && NgIsInSubtree(Vcb, NewDirMftNo, Fcb->MftNo))
-    {
-        /* A directory cannot move into itself or below itself. */
-        Status = STATUS_INVALID_PARAMETER;
-        goto out;
-    }
     if (!IsLink && Fcb->IsDirectory && NgDirHasOpenFiles(Vcb, Fcb->MftNo))
     {
         /* As on Windows: a directory with open files below it is not renamed. */
@@ -579,6 +573,13 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         goto out;
     }
     NgAcquireCore(Vcb);
+    /* A directory cannot move into itself or below itself; checked under the lock the move holds. */
+    if (!IsLink && Fcb->IsDirectory && NgIsInSubtree(Vcb, NewDirMftNo, Fcb->MftNo))
+    {
+        NgReleaseCore(Vcb);
+        Status = STATUS_INVALID_PARAMETER;
+        goto out;
+    }
     Err = NgEnsureNode(Fcb);
     if (!Err)
         Err = ngc_iget(Vcb->Core, Ccb->ParentMftNo, &OldDir);
