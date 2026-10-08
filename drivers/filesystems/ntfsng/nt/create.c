@@ -182,6 +182,58 @@ PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo)
     return Found;
 }
 
+/*
+ * Before record MftNo loses its last name: its named-stream FCBs other than Self.  With Retire
+ * FALSE only checks that none has open handles.  With Retire TRUE (core lock held exclusive)
+ * drops their nodes, so the core's delete can evict the stream inodes (an attribute inode that
+ * stays referenced makes it loop forever), marks them deleted and takes them off the list, so a
+ * reused record number never reattaches them.  FALSE if a stream is open.
+ */
+BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Retire)
+{
+    PNG_FCB Found[32];
+    ULONG Count, i;
+    BOOLEAN Open, More;
+    PLIST_ENTRY Entry;
+
+    do
+    {
+        Count = 0;
+        Open = More = FALSE;
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+        {
+            PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+            if (F == Self || F->MftNo != MftNo || !F->Stream.Length)
+                continue;
+            if (F->OpenHandles)
+            {
+                Open = TRUE;
+                break;
+            }
+            if (Count == RTL_NUMBER_OF(Found))
+            {
+                More = TRUE;
+                break;
+            }
+            InterlockedIncrement(&F->RefCount);
+            Found[Count++] = F;
+        }
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        for (i = 0; i < Count; i++)
+        {
+            if (Retire && !Open)
+            {
+                NgParkNode(Found[i]);
+                Found[i]->Deleted = TRUE;
+                NgUnlistFcb(Found[i]);
+            }
+            NgDereferenceFcb(Found[i]);
+        }
+    } while (More && Retire && !Open);
+    return !Open;
+}
+
 /* Takes a deleted FCB out of the lookup list: its MFT record number may be reused. */
 VOID NgUnlistFcb(PNG_FCB Fcb)
 {
@@ -497,7 +549,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
             return Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_ACCESS_DENIED;
-        if ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen && Vcb->ReadOnly)
+        if ((Access & NG_WRITE_ACCESS) && !(NgGlobal.PermissiveOpen || Vcb->Damaged) && Vcb->ReadOnly)
             return STATUS_MEDIA_WRITE_PROTECTED;
         return NgOpenVolume(Vcb, FileObject, Stack);
     }
@@ -726,6 +778,10 @@ walk:
                 Created = TRUE;
                 Information = FILE_CREATED;
                 Err = ngc_set_info(Vcb->Core, Node, NULL, Attrs, NG_SETTABLE_ATTRS);
+                if (!Err)
+                    Err = NgStoreCreateSecurity(Vcb, Node, Stack->Parameters.Create.SecurityContext->AccessState, WantDir);
+                if (Err)
+                    ngc_unlink(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), Node);
             }
             if (!Err && Stream.Length)
             {
@@ -787,7 +843,7 @@ walk:
             goto out;
         }
         if (Vcb->ReadOnly && ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) ||
-                              (Options & FILE_DELETE_ON_CLOSE) || ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen)))
+                              (Options & FILE_DELETE_ON_CLOSE) || ((Access & NG_WRITE_ACCESS) && !(NgGlobal.PermissiveOpen || Vcb->Damaged))))
         {
             Status = STATUS_MEDIA_WRITE_PROTECTED;
             goto out;
@@ -880,6 +936,20 @@ walk:
     {
         Status = STATUS_DELETE_PENDING;
         goto out;
+    }
+    if (!IsDir && (Fcb->Stat.flags & NGC_ATTR_NOWRITE))
+    {
+        /* Writes to compressed, encrypted, WOF and sparse streams are not implemented: refuse them here,
+         * before Cc or a mapped view could accept data that a paging write would later drop. */
+        ACCESS_MASK Mapped = Access;
+        RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
+        if ((Mapped & (FILE_WRITE_DATA | FILE_APPEND_DATA)) ||
+            (!Created && (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF || Disposition == FILE_SUPERSEDE)))
+        {
+            DPRINT1("ntfsng: write open of a compressed/encrypted/sparse stream %I64x refused\n", Fcb->MftNo);
+            Status = STATUS_ACCESS_DENIED;
+            goto out;
+        }
     }
     if (!IsDir && Fcb->SectionObjectPointers.ImageSectionObject)
     {
@@ -1029,6 +1099,8 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
             Err = ngc_delete_stream(Vcb->Core, Fcb->Node);
         else if (Fcb->IsDirectory && ngc_dir_empty(Vcb->Core, Fcb->Node) != 1)
             Err = -NGC_ENOTEMPTY;
+        else if (Fcb->Stat.nlink <= 1 && !NgRetireStreams(Vcb, Fcb->MftNo, Fcb, TRUE))
+            Err = -NGC_EBUSY;      /* a named stream of the file is still open */
         else
             Err = ngc_unlink(Vcb->Core, Dir, Fcb->DelName, Fcb->DelNameLength, Fcb->Node);
         ngc_put(Dir);

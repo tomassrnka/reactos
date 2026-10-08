@@ -251,13 +251,8 @@ static ULONG NgFillEntry(FILE_INFORMATION_CLASS Class, PUCHAR Out, ULONG Room, P
 #undef NG_COMMON
 }
 
-NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb)
 {
-    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
-    PFILE_OBJECT FileObject = Stack->FileObject;
-    PNG_FCB Fcb = FileObject->FsContext;
-    PNG_CCB Ccb = FileObject->FsContext2;
-    PNG_VCB Vcb = DeviceObject->DeviceExtension;
     FILE_INFORMATION_CLASS Class;
     PUNICODE_STRING Pattern;
     ULONG Length, Used = 0, LastOffset = 0, Written = 0;
@@ -266,21 +261,6 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PUCHAR MatchTab = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
     int Err;
-
-    if (Stack->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY)
-    {
-        if (!Fcb || !Ccb || !Fcb->IsDirectory)
-            return STATUS_INVALID_PARAMETER;
-        /* FsRtl keeps the IRP and completes it when a reported change matches the filter. */
-        FsRtlNotifyFullChangeDirectory(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb, (PSTRING)&Ccb->Path,
-                                       (Stack->Flags & SL_WATCH_TREE) != 0, FALSE,
-                                       Stack->Parameters.NotifyDirectory.CompletionFilter, Irp, NULL, NULL);
-        return STATUS_PENDING;
-    }
-    if (Stack->MinorFunction != IRP_MN_QUERY_DIRECTORY)
-        return STATUS_INVALID_DEVICE_REQUEST;
-    if (!Fcb || !Ccb || !Fcb->IsDirectory)
-        return STATUS_INVALID_PARAMETER;
 
     Class = Stack->Parameters.QueryDirectory.FileInformationClass;
     Length = Stack->Parameters.QueryDirectory.Length;
@@ -438,4 +418,45 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Ccb->AnyReturned = TRUE;
     Irp->IoStatus.Information = Used;
     return STATUS_SUCCESS;
+}
+
+/*
+ * One query at a time per handle: the snapshot, pattern and cursor live in the CCB, and the I/O
+ * manager serialises requests only on synchronous file objects.
+ */
+static VOID NgLockQuery(PNG_CCB Ccb)
+{
+    LARGE_INTEGER Delay;
+    Delay.QuadPart = -10000;
+    while (InterlockedCompareExchange(&Ccb->QueryBusy, 1, 0))
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+}
+
+NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    PNG_FCB Fcb = FileObject->FsContext;
+    PNG_CCB Ccb = FileObject->FsContext2;
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    NTSTATUS Status;
+
+    if (Stack->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY)
+    {
+        if (!Fcb || !Ccb || !Fcb->IsDirectory)
+            return STATUS_INVALID_PARAMETER;
+        /* FsRtl keeps the IRP and completes it when a reported change matches the filter. */
+        FsRtlNotifyFullChangeDirectory(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb, (PSTRING)&Ccb->Path,
+                                       (Stack->Flags & SL_WATCH_TREE) != 0, FALSE,
+                                       Stack->Parameters.NotifyDirectory.CompletionFilter, Irp, NULL, NULL);
+        return STATUS_PENDING;
+    }
+    if (Stack->MinorFunction != IRP_MN_QUERY_DIRECTORY)
+        return STATUS_INVALID_DEVICE_REQUEST;
+    if (!Fcb || !Ccb || !Fcb->IsDirectory)
+        return STATUS_INVALID_PARAMETER;
+    NgLockQuery(Ccb);
+    Status = NgQueryDirectory(Irp, Stack, Vcb, Fcb, Ccb);
+    InterlockedExchange(&Ccb->QueryBusy, 0);
+    return Status;
 }

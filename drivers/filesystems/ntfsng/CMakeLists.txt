@@ -39,7 +39,8 @@ list(APPEND CORE_SOURCE
     shim/kshim_wb.c
     shim/kshim_jnl.c
     core/ngcore.c
-    core/ngjrec.c)
+    core/ngjrec.c
+    core/ngfsck.c)
 
 list(APPEND NT_SOURCE
     nt/create.c
@@ -69,3 +70,5 @@ add_subdirectory(tools/ngchk)
 add_subdirectory(tools/ngstress)
 add_subdirectory(tools/ngfeat)
 add_subdirectory(tools/ngbench)
+add_subdirectory(tools/ngfail)
+add_subdirectory(tools/ngedge)

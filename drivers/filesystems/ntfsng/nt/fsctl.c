@@ -7,6 +7,7 @@
 
 #include "ntfsng.h"
 #include "../shim/include/ngos.h"
+#include <ntstrsafe.h>
 
 static NTSTATUS NgDeviceIoctl(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength)
 {
@@ -27,6 +28,78 @@ static NTSTATUS NgDeviceIoctl(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULON
         Status = Iosb.Status;
     }
     return Status;
+}
+
+NTSYSAPI NTSTATUS NTAPI ExRaiseHardError(NTSTATUS ErrorStatus, ULONG NumberOfParameters, ULONG UnicodeStringParameterMask,
+                                          PULONG_PTR Parameters, ULONG ValidResponseOptions, PULONG Response);
+
+#define NG_HARDERROR_OVERRIDE_ERRORMODE 0x10000000
+#define NG_OPTION_OK 1
+#define NG_RESPONSE_RETURN_TO_CALLER 0
+#define NG_MB_ICONERROR 0x10
+
+typedef struct _NG_DAMAGE_NOTE
+{
+    UNICODE_STRING Text, Caption;
+    WCHAR Buffer[512];
+} NG_DAMAGE_NOTE, *PNG_DAMAGE_NOTE;
+
+/*
+ * Tells the user that a volume was mounted read-only because it is damaged: a message box through
+ * the hard error port once the session's error port exists (until then ExRaiseHardError returns
+ * ResponseReturnToCaller without showing anything), for at most about ten minutes after the mount.
+ */
+static VOID NTAPI NgDamageNotifyThread(PVOID Context)
+{
+    PNG_DAMAGE_NOTE Note = Context;
+    ULONG_PTR Params[3] = { (ULONG_PTR)&Note->Text, (ULONG_PTR)&Note->Caption, NG_MB_ICONERROR };
+    ULONG Response = NG_RESPONSE_RETURN_TO_CALLER, Try;
+    LARGE_INTEGER Delay;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+
+    Delay.QuadPart = -10 * 1000 * 1000 * 5LL;
+    for (Try = 0; Try < 120; Try++)
+    {
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        Status = ExRaiseHardError(STATUS_SERVICE_NOTIFICATION | NG_HARDERROR_OVERRIDE_ERRORMODE, 3, 3, Params,
+                                  NG_OPTION_OK, &Response);
+        if (NT_SUCCESS(Status) && Response != NG_RESPONSE_RETURN_TO_CALLER)
+            break;
+    }
+    DPRINT1("ntfsng: damage notice %s (status %lx, response %lu, %lu tries)\n",
+            Response != NG_RESPONSE_RETURN_TO_CALLER ? "shown" : "NOT shown", Status, Response, Try + 1);
+    ExFreePoolWithTag(Note, TAG_NTFSNG);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static VOID NgReportDamage(PNG_VCB Vcb, const char *Why)
+{
+    PNG_DAMAGE_NOTE Note;
+    HANDLE Thread;
+    ULONG i;
+
+    for (i = 0; i < 3; i++)
+        DPRINT1("ntfsng: ********** VOLUME %08lx IS DAMAGED: mounted READ-ONLY, nothing will be written to it **********\n",
+                Vcb->Vpb->SerialNumber);
+    DPRINT1("ntfsng: damage: %s\n", Why ? Why : "?");
+    Note = ExAllocatePoolWithTag(PagedPool, sizeof(*Note), TAG_NTFSNG);
+    if (!Note)
+        return;
+    RtlZeroMemory(Note, sizeof(*Note));
+    RtlInitUnicodeString(&Note->Caption, L"NTFS volume damaged");
+    Note->Text.Buffer = Note->Buffer;
+    Note->Text.MaximumLength = sizeof(Note->Buffer) - 2 * sizeof(WCHAR);
+    RtlStringCbPrintfW(Note->Buffer, Note->Text.MaximumLength,
+                       L"The NTFS volume with serial number %04lX-%04lX is damaged (%hs).\n\n"
+                       L"It was mounted read-only to protect it: changes made to it in this session, "
+                       L"including registry changes on the system volume, are not saved. "
+                       L"Check and repair the volume with a disk checker on another system.",
+                       Vcb->Vpb->SerialNumber >> 16, Vcb->Vpb->SerialNumber & 0xffff, Why ? Why : "unknown");
+    Note->Text.Length = (USHORT)(wcslen(Note->Buffer) * sizeof(WCHAR));
+    if (NT_SUCCESS(PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, NgDamageNotifyThread, Note)))
+        ZwClose(Thread);
+    else
+        ExFreePoolWithTag(Note, TAG_NTFSNG);
 }
 
 static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -113,6 +186,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     for (i = 0; i < Vpb->VolumeLabelLength / sizeof(WCHAR); i++)
         Vpb->VolumeLabel[i] = Vcb->Info.label[i];
     Vcb->ReadOnly = Vcb->Info.read_only ? TRUE : FALSE;
+    Vcb->Damaged = Vcb->Info.damaged ? TRUE : FALSE;
     if (!Vcb->ReadOnly && !NT_SUCCESS(NgStartFlusher(Vcb)))
     {
         DPRINT1("ntfsng: no flusher thread, mounting read-only\n");
@@ -127,6 +201,8 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Vcb->Info.major, Vcb->Info.minor, Size, SectorSize, Vcb->Info.cluster_size,
             Vcb->Info.total_clusters, Vcb->Info.free_clusters, Vpb->SerialNumber,
             Vcb->ReadOnly ? "READ-ONLY" : "read-write", WhyRo ? ": " : "", WhyRo ? WhyRo : "");
+    if (Vcb->Damaged)
+        NgReportDamage(Vcb, WhyRo);
     return STATUS_SUCCESS;
 }
 

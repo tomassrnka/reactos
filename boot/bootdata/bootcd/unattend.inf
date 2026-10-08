@@ -38,10 +38,11 @@ FormatPartition=1
 ; 0 - disabled
 AutoPartition = 1
 
-; Choose default file system type.
+; Choose default file system type (NTFS when this setting is absent).
 ; 0 - FAT
 ; 1 - BtrFS
-FsType = 0
+; 2 - NTFS
+FsType = 2
 
 ; Choose if RAPPS can download optional components during setup.
 ; yes - Download addons from RAPPS

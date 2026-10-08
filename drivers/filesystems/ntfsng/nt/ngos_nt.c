@@ -110,6 +110,26 @@ void ngos_sleep_ms(unsigned int ms)
     KeDelayExecutionThread(KernelMode, FALSE, &Delay);
 }
 
+NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(ULONG Class, PVOID Info, ULONG Length, PULONG ReturnLength);
+
+/* SystemBasicInformation (class 0) as documented in winternl.h. */
+typedef struct
+{
+    ULONG Reserved, TimerResolution, PageSize, NumberOfPhysicalPages, LowestPhysicalPageNumber,
+          HighestPhysicalPageNumber, AllocationGranularity;
+    ULONG_PTR MinimumUserModeAddress, MaximumUserModeAddress, ActiveProcessorsAffinityMask;
+    CCHAR NumberOfProcessors;
+} NG_SYSTEM_BASIC_INFORMATION;
+
+unsigned long ngos_physical_pages(void)
+{
+    static ULONG Pages;
+    NG_SYSTEM_BASIC_INFORMATION Info;
+    if (!Pages && NT_SUCCESS(ZwQuerySystemInformation(0, &Info, sizeof(Info), NULL)))
+        Pages = Info.NumberOfPhysicalPages;
+    return Pages ? Pages : 65536;
+}
+
 unsigned long ngos_jiffies(void)
 {
     LARGE_INTEGER Ticks;

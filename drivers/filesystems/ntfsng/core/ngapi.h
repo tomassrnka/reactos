@@ -29,10 +29,12 @@ typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
 #define NGC_EFBIG 27
 #define NGC_EXDEV 18
 #define NGC_ENODATA 61
+#define NGC_EBUSY 16
 
 #define NGC_ATTR_COMPRESSED 1
 #define NGC_ATTR_SPARSE 2
 #define NGC_ATTR_ENCRYPTED 4
+#define NGC_ATTR_NOWRITE 8      /* compressed, encrypted, WOF or sparse: the driver does not write it */
 
 struct ngc_stat {
 	unsigned long long mft_ref;      /* MFT number | sequence << 48 */
@@ -57,7 +59,11 @@ struct ngc_volinfo {
 	unsigned char major, minor;
 	unsigned char read_only;         /* mounted read-only (policy or request) */
 	unsigned char dirty;             /* VOLUME_IS_DIRTY currently set */
+	unsigned char damaged;           /* the mount-time consistency check found damage (read-only) */
 };
+
+/* Mount-time consistency check: 0 never, 1 after an unclean shutdown or for small MFTs, 2 always. */
+extern int ngc_check_policy;
 
 typedef int (*ngc_filldir_t)(void *ctx, const unsigned short *name, unsigned int len,
 		unsigned long long mft_no, unsigned int dtype);

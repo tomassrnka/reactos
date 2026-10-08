@@ -171,7 +171,7 @@ char *kstrndup(const char *s, size_t n, gfp_t g)
 	return p;
 }
 void *kmemdup(const void *s, size_t n, gfp_t g) { void *p = kmalloc_site(n, g, __builtin_return_address(0)); if (p) memcpy(p, s, n); return p; }
-unsigned long totalram_pages(void) { return 1UL << 18; }
+unsigned long totalram_pages(void) { return ngos_physical_pages(); }
 struct kmem_cache *kmem_cache_create(const char *name, unsigned int size,
 		unsigned int align, unsigned long flags, void (*ctor)(void *))
 {
@@ -617,9 +617,26 @@ static struct folio *pc_find_locked(struct address_space *m, pgoff_t idx)
 		if (f->index == idx) return f;
 	return NULL;
 }
+/*
+ * Folio data: one page straight from the pool, which hands out whole pages page aligned.  Through
+ * kmalloc's header a folio took 4,128 bytes (two pages) and its data was only 32-byte aligned,
+ * too little for storage stacks that need sector-aligned buffers for unbounced transfers.
+ */
+static void *pc_data_alloc(void)
+{
+	void *p = ngos_alloc(PAGE_SIZE);
+	if (p)
+		memset(p, 0, PAGE_SIZE);
+	return p;
+}
+static void pc_data_free(void *p)
+{
+	if (p)
+		ngos_free(p);
+}
 static void pc_free(struct folio *f)
 {
-	kfree(f->data);
+	pc_data_free(f->data);
 	kfree(f);
 	__atomic_sub_fetch(&kshim_pc_pages, 1, __ATOMIC_SEQ_CST);
 }
@@ -662,7 +679,7 @@ struct page *alloc_page(gfp_t g)
 	struct folio *f = kzalloc(sizeof(struct folio), g);
 	if (!f)
 		return NULL;
-	f->data = kzalloc(PAGE_SIZE, g);
+	f->data = pc_data_alloc();
 	if (!f->data) { kfree(f); return NULL; }
 	f->refcount = 1;
 	__atomic_add_fetch(&kshim_pc_pages, 1, __ATOMIC_SEQ_CST);
@@ -691,7 +708,7 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 		nf = kzalloc(sizeof(*nf), GFP_NOFS);
 		if (!nf)
 			return ERR_PTR(-ENOMEM);
-		nf->data = kzalloc(PAGE_SIZE, GFP_NOFS);
+		nf->data = pc_data_alloc();
 		if (!nf->data) { kfree(nf); return ERR_PTR(-ENOMEM); }
 		nf->mapping = m; nf->index = idx; nf->refcount = 2;  /* the cache's own reference + ours */
 		irql = ngos_spin_lock(&kshim_pc_lock);
@@ -712,7 +729,7 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 			__atomic_add_fetch(&kshim_pc_pages, 1, __ATOMIC_SEQ_CST);
 		}
 		ngos_spin_unlock(&kshim_pc_lock, irql);
-		if (nf) { kfree(nf->data); kfree(nf); }
+		if (nf) { pc_data_free(nf->data); kfree(nf); }
 		while (drop) { struct folio *n = drop->hnext; pc_free(drop); drop = n; }
 		/* A full block-device mapping of dirty folios (the $LogFile emptying) is written back here. */
 		if (eager)
@@ -766,6 +783,21 @@ void __mark_inode_dirty(struct inode *i, int flags) { i->i_state |= flags; }
 void file_ra_state_init(struct file_ra_state *ra, struct address_space *m) { (void)m; ra->ra_pages = 32; }
 void page_cache_sync_readahead(struct address_space *m, void *ra, struct file *f, pgoff_t i, unsigned long n)
 { (void)m; (void)ra; (void)f; (void)i; (void)n; }
+/*
+ * A folio leaving its mapping (lock held): unreferenced ones go on @list to be freed; one that
+ * another holder still references is only detached, and its holder's last folio_put frees it.
+ */
+static void pc_detach_or_list(struct folio *f, struct folio **list)
+{
+	if (f->refcount > 1) {
+		f->mapping = NULL;
+		f->hnext = NULL;
+		__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST);
+		return;
+	}
+	f->hnext = *list;
+	*list = f;
+}
 static void pc_drop_all(struct address_space *m)
 {
 	struct folio *list = NULL;
@@ -774,9 +806,7 @@ static void pc_drop_all(struct address_space *m)
 		struct folio *f = m->pc[b];
 		while (f) {
 			struct folio *n = f->hnext;
-			if (f->refcount > 1)
-				printk(KERN_ERR "dropping referenced folio %lu (ref %d)\n", (unsigned long)f->index, f->refcount);
-			f->hnext = list; list = f;
+			pc_detach_or_list(f, &list);
 			f = n;
 		}
 		m->pc[b] = NULL;
@@ -810,12 +840,9 @@ void truncate_inode_pages(struct address_space *m, loff_t l)
 		while (*pp) {
 			struct folio *f = *pp;
 			if (f->index >= first) {
-				if (f->refcount > 1)
-					printk(KERN_ERR "truncating referenced folio %lu (ref %d)\n", (unsigned long)f->index, f->refcount);
 				*pp = f->hnext;
 				m->nrpages--;
-				f->hnext = list;
-				list = f;
+				pc_detach_or_list(f, &list);
 			} else {
 				pp = &f->hnext;
 			}
@@ -878,7 +905,17 @@ void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, 
  * the file system (what GFP_NOFS prevents in Linux).
  */
 #define KSHIM_ICACHE_UNUSED 4096
-#define KSHIM_PC_PAGES_SOFT 24576
+/* Folio pages (nonpaged pool) before unused inodes are evicted: 96 MB, or 1/16 of memory if less. */
+#define KSHIM_PC_PAGES_SOFT kshim_pc_soft_limit()
+unsigned long kshim_pc_soft_limit(void)
+{
+	static unsigned long lim;
+	if (!lim) {
+		unsigned long l = ngos_physical_pages() / 16;
+		lim = l > 24576 ? 24576 : l < 1024 ? 1024 : l;
+	}
+	return lim;
+}
 unsigned long kshim_inodes_live, kshim_icache_hits, kshim_icache_evicted;
 extern bool (*kshim_is_data_inode)(struct inode *i);
 bool (*kshim_icache_ok)(struct inode *i);

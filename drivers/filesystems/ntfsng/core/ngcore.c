@@ -21,6 +21,7 @@
 #include "ngapi.h"
 #include <kshim_jnl.h>
 #include "ngjrec.h"
+#include "ngfsck.h"
 
 extern initcall_t kshim_module_init;
 extern struct file_system_type *kshim_fs_type;
@@ -46,6 +47,7 @@ extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_di
 extern unsigned long long kshim_counter_write_bytes;
 extern bool (*kshim_is_data_inode)(struct inode *i);
 extern bool (*kshim_icache_ok)(struct inode *i);
+unsigned long kshim_pc_soft_limit(void);
 
 struct ngc_vol {
 	struct super_block *sb;
@@ -54,7 +56,47 @@ struct ngc_vol {
 	struct ngj_vol *jv;             /* raw $LogFile location while the metadata journal is in use */
 	atomic64_t *watched;            /* the core's free-cluster count, watched for frees */
 	unsigned long frees_seen;       /* its increments at the last commit */
+	int damaged;                    /* the mount-time check found damage: read-only */
+	char why[160];
 };
+
+/* Mount-time consistency check: 0 never, 1 after an unclean shutdown or when $MFT is at most 64 MB, 2 always. */
+int ngc_check_policy = 1;
+
+/*
+ * Runs the consistency check on the read-only mounted volume.  Returns a reason to stay read-only
+ * (kept in @v), or NULL.  A check that cannot run (out of memory, an MFT too large) keeps the
+ * volume writable, since nothing was found.
+ */
+static const char *ngc_mount_check(struct ngc_vol *v, struct ntfs_volume *vol, struct block_device *b, int unclean)
+{
+	struct ngc_fsck_res *r;
+	int err;
+	if (!ngc_check_policy ||
+	    (ngc_check_policy == 1 && !unclean && i_size_read(vol->mft_ino) > (64LL << 20)))
+		return NULL;
+	r = kzalloc(sizeof(*r), GFP_KERNEL);
+	if (!r) {
+		printk(KERN_ERR "CHECK: not run (out of memory)\n");
+		return NULL;
+	}
+	err = ngc_fsck(vol, b, r);
+	if (err) {
+		printk(KERN_ERR "CHECK: not run (%d)\n", err);
+	} else {
+		printk(KERN_WARNING "CHECK: %s: %llu records (%llu in use), %llu directories (%u not walked), "
+		       "%llu index entries, %llu clusters%s, %u leaks (%llu clusters), %u errors, %u ms%s\n",
+		       r->fatal ? "DAMAGED" : "consistent", r->records, r->inuse, r->dirs, r->dirs_skipped, r->ientries,
+		       r->clusters, r->clusters_skipped ? " (cluster map not checked: volume too large)" : "",
+		       r->leaks, r->leaked_clusters, r->fatal, r->ms, unclean ? " (after an unclean shutdown)" : "");
+		if (r->fatal) {
+			v->damaged = 1;
+			snprintf(v->why, sizeof(v->why), "the consistency check found %u errors, first: %s", r->fatal, r->why);
+		}
+	}
+	kfree(r);
+	return v->damaged ? v->why : NULL;
+}
 
 /* Pages held by the journal overlay that make the next operation commit first. */
 #define NGC_JNL_COMMIT_PAGES 2048
@@ -150,14 +192,27 @@ int ngc_init(void)
 	return err;
 }
 
-int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, int want_rw,
+void ngc_umount(ngc_vol *v);
+
+/* Mount passes: read-only, the read-only check of a volume that is to go read-write, the write pass. */
+enum { NGC_PASS_RO, NGC_PASS_CHECK, NGC_PASS_WRITE };
+#define NGC_NEED_WRITE_PASS 1
+
+/*
+ * One mount of the volume.  NGC_PASS_CHECK recovers the journal into the overlay only (nothing is
+ * written), mounts read-only and runs the consistency check on that view.  A damaged volume stays
+ * mounted read-only; a consistent one goes read-write on the same mount when nothing has to be
+ * written first, otherwise the mount is undone and NGC_NEED_WRITE_PASS asks for NGC_PASS_WRITE,
+ * which replays in place, clears the dirty flag and goes read-write.
+ */
+static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sector_size, int pass,
 		ngc_vol **out, const char **why_ro)
 {
 	struct fs_context *fc;
 	struct block_device *b;
 	struct ngc_vol *v;
 	struct ntfs_volume *vol;
-	int err, jrec = NGJ_NONE;
+	int err, jrec = NGJ_NONE, want_rw = pass != NGC_PASS_RO;
 	u64 jseq = 0;
 
 	*out = NULL;
@@ -172,12 +227,12 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 		goto fail;
 	}
 	/*
-	 * Before the core reads anything: a journal left by a crash goes in place first (read-only
-	 * mounts see it through the overlay instead).
+	 * Before the core reads anything: a journal left by a crash goes in place first (the write
+	 * pass) or is shown through the overlay (read-only and check passes).
 	 */
 	v->jv = kmalloc(sizeof(*v->jv), GFP_KERNEL);
 	if (v->jv && !ngj_probe(osdev, size, sector_size, v->jv) && v->jv->lf_pages >= 256) {
-		jrec = ngj_recover(v->jv, b, want_rw, &jseq);
+		jrec = ngj_recover(v->jv, b, pass == NGC_PASS_WRITE, &jseq);
 		if (!want_rw) {
 			kfree(v->jv);
 			v->jv = NULL;
@@ -219,16 +274,32 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	v->sb->s_flags |= SB_ACTIVE;
 	*why_ro = want_rw ? NULL : "read-only requested";
 	if (want_rw) {
+		/* Our journal clears the dirty flag in the write pass: in the check pass it only marks an unclean shutdown. */
+		int ours = jrec == NGJ_CLEAN, dirty = !!(vol->vol_flags & VOLUME_IS_DIRTY);
+		int need_write = ours && (v->jv->replayed || v->jv->torn || dirty);
 		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
 		if (jrec == NGJ_REPAIR)
 			*why_ro = "the journal shows metadata written in place without it (needs repair)";
 		else if (NVolErrors(vol))
 			*why_ro = "the core found errors at mount (MFTMirr, $LogFile or hibernation)";
-		else if (vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK)
-			*why_ro = (vol->vol_flags & VOLUME_IS_DIRTY) ? "volume is marked dirty" :
+		else if ((vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK & ~(ours && pass == NGC_PASS_CHECK ? VOLUME_IS_DIRTY : 0)))
+			*why_ro = dirty ? "volume is marked dirty" :
 				"volume has flags that force read-only (chkdsk/upgrade/resize)";
 		else if (!ngc_logfile_clean(vol))
 			*why_ro = "$LogFile was not shut down cleanly";
+		else if (pass == NGC_PASS_CHECK)
+			*why_ro = ngc_mount_check(v, vol, b, need_write || dirty);
+		if (*why_ro) {
+			/* Read-only from here on: nothing is written, the journal (if any) is only shown. */
+			kfree(v->jv);
+			v->jv = NULL;
+		} else if (pass == NGC_PASS_CHECK && need_write) {
+			if (fc->ops->free)
+				fc->ops->free(fc);
+			kfree(fc);
+			ngc_umount(v);
+			return NGC_NEED_WRITE_PASS;
+		}
 		if (!*why_ro) {
 			struct fs_context *rc = kzalloc(sizeof(*rc), GFP_KERNEL);
 			if (!rc) {
@@ -284,8 +355,8 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	if (fc->ops->free)
 		fc->ops->free(fc);
 	kfree(fc);
-	/* MFT records are read for every lookup and listing: keep 16 MB of them (16k records) cached. */
-	NTFS_SB(v->sb)->mft_ino->i_mapping->kshim_pc_max = 4096;
+	/* MFT records are read for every lookup and listing: keep up to 16 MB of them cached (less on small machines). */
+	NTFS_SB(v->sb)->mft_ino->i_mapping->kshim_pc_max = min_t(unsigned long, 4096, kshim_pc_soft_limit() / 2);
 	*out = v;
 	return 0;
 fail_fc:
@@ -298,6 +369,18 @@ fail:
 		kfree(v->jv);
 	kfree(v);
 	return err;
+}
+
+int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, int want_rw,
+		ngc_vol **out, const char **why_ro)
+{
+	int err;
+	if (!want_rw)
+		return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_RO, out, why_ro);
+	err = ngc_mount_pass(osdev, size, sector_size, NGC_PASS_CHECK, out, why_ro);
+	if (err != NGC_NEED_WRITE_PASS)
+		return err;
+	return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_WRITE, out, why_ro);
 }
 
 void ngc_umount(ngc_vol *v)
@@ -335,6 +418,7 @@ void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi)
 	vi->minor = vol->minor_ver;
 	vi->read_only = sb_rdonly(v->sb) ? 1 : 0;
 	vi->dirty = (vol->vol_flags & VOLUME_IS_DIRTY) ? 1 : 0;
+	vi->damaged = v->damaged ? 1 : 0;
 	mutex_lock(&vol->volume_label_lock);
 	if (vol->volume_label) {
 		int n = utf8s_to_utf16s(vol->volume_label, strlen((char *)vol->volume_label),
@@ -600,6 +684,8 @@ static void ngc_stat_impl(ngc_node *n, struct ngc_stat *st)
 	if (NInoCompressed(ni)) st->flags |= NGC_ATTR_COMPRESSED;
 	if (NInoSparse(ni)) st->flags |= NGC_ATTR_SPARSE;
 	if (NInoEncrypted(ni)) st->flags |= NGC_ATTR_ENCRYPTED;
+	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) || NInoSparse(ni))
+		st->flags |= NGC_ATTR_NOWRITE;
 }
 
 struct ngc_dirctx {
@@ -705,6 +791,8 @@ static bool ngc_stat_lite(struct inode *vi, struct ngc_stat *st)
 	if (NInoCompressed(ni)) st->flags |= NGC_ATTR_COMPRESSED;
 	if (NInoSparse(ni)) st->flags |= NGC_ATTR_SPARSE;
 	if (NInoEncrypted(ni)) st->flags |= NGC_ATTR_ENCRYPTED;
+	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) || NInoSparse(ni))
+		st->flags |= NGC_ATTR_NOWRITE;
 	return true;
 }
 
@@ -2288,6 +2376,25 @@ static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 		return PTR_ERR(d);
 	err = S_ISDIR(vi->i_mode) ? dir->i_op->rmdir(dir, d) : dir->i_op->unlink(dir, d);
 	ngc_freedentry(d);
+	if (!err) {
+		/*
+		 * A directory with a reparse point is typed as a link (ngc_fix_type), so the core's
+		 * unlink dropped the VFS count once per name (Win32 and DOS) from the 1 a directory
+		 * gets: it wrapped and the inode was never freed.  The record's own count decides.
+		 */
+		struct ntfs_inode *ni = NTFS_I(vi);
+		struct mft_record *m;
+		mutex_lock(&ni->mrec_lock);
+		m = map_mft_record(ni);
+		if (!IS_ERR(m)) {
+			if (!le16_to_cpu(m->link_count))
+				clear_nlink(vi);
+			else if ((int)vi->i_nlink <= 0)
+				set_nlink(vi, 1);
+			unmap_mft_record(ni);
+		}
+		mutex_unlock(&ni->mrec_lock);
+	}
 	return err;
 }
 

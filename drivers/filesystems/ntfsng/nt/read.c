@@ -217,6 +217,8 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     else
     {
+        /* Shared with other readers, but not with a write that purges and rewrites the range. */
+        ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
         _SEH2_TRY
         {
             if (!FileObject->PrivateCacheMap)
@@ -235,6 +237,7 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Irp->IoStatus.Information = 0;
         }
         _SEH2_END;
+        ExReleaseResourceLite(Fcb->Header.Resource);
     }
 
     if (NT_SUCCESS(Status) && !Paging && (FileObject->Flags & FO_SYNCHRONOUS_IO))

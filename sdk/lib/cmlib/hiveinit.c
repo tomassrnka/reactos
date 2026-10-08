@@ -650,10 +650,12 @@ HvpGetHiveHeader(
 }
 
 /*
- * FIXME: Disable compilation for AMD64 for now since it makes
- * the FreeLdr binary size so large it makes booting impossible.
+ * FIXME: Disable compilation for the AMD64 boot loader for now since it
+ * makes the FreeLdr binary size so large it makes booting impossible.
+ * The kernel needs it: without it a hive whose flush was interrupted
+ * cannot be loaded.
  */
-#if !defined(_M_AMD64)
+#if !defined(_M_AMD64) || !defined(_BLDR_)
 /**
  * @brief
  * Computes the hive space size by querying
@@ -1035,7 +1037,7 @@ HvLoadHive(
     BOOLEAN Success;
     PHBASE_BLOCK BaseBlock = NULL;
 /* FIXME: See the comment above (near HvpQueryHiveSize) */
-#if defined(_M_AMD64)
+#if defined(_M_AMD64) && defined(_BLDR_)
     ULONG Result;
 #else
     ULONG Result, Result2;
@@ -1086,7 +1088,7 @@ HvLoadHive(
         /* Hive header needs a repair */
         case RecoverHeader:
 /* FIXME: See the comment above (near HvpQueryHiveSize) */
-#if defined(_M_AMD64)
+#if defined(_M_AMD64) && defined(_BLDR_)
         {
             return STATUS_REGISTRY_CORRUPT;
         }
@@ -1434,7 +1436,7 @@ HvInitialize(
             }
 
 /* FIXME: See the comment above (near HvpQueryHiveSize) */
-#if !defined(_M_AMD64)
+#if !defined(_M_AMD64) || !defined(_BLDR_)
             /*
              * Check if we have recovered this hive. We are responsible to
              * flush the primary hive back to backing storage afterwards.

@@ -11,6 +11,7 @@
 NG_GLOBAL NgGlobal;
 
 #define NG_STACK_FILL 0x4e474e47UL
+#define NG_STACK_MAX_SPAN (128 * 1024)
 
 NTSTATUS NgErrnoToStatus(int Err)
 {
@@ -30,6 +31,7 @@ NTSTATUS NgErrnoToStatus(int Err)
         case NGC_EACCES:
         case NGC_EPERM: return STATUS_ACCESS_DENIED;
         case NGC_EFBIG: return STATUS_DISK_FULL;
+        case NGC_EBUSY: return STATUS_SHARING_VIOLATION;
         case NGC_EINVAL:
         case NGC_EUCLEAN: return STATUS_FILE_CORRUPT_ERROR;
         default: return STATUS_UNEXPECTED_IO_ERROR;
@@ -111,42 +113,22 @@ VOID NgReleaseCore(PNG_VCB Vcb)
  * reads in parallel; nothing under a shared hold writes metadata, parks an FCB's node or evicts
  * inodes.  The statistics are updated with interlocked operations.
  */
+/*
+ * The "shared" acquisitions (reads, listings, stat, lookups) take CoreLock exclusive.  Parts of the
+ * shim were written for one caller at a time (inode reference drops racing lookups, page-cache
+ * walks racing a shrink, FGP_NOWAIT not honoured), so the core runs serialised until they are
+ * made safe for parallel callers.
+ */
 VOID NgAcquireCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
 {
-    ULONGLONG T0;
-    NG_LOCK_STAT *S;
-    if (ExIsResourceAcquiredExclusiveLite(&Vcb->CoreLock))
-    {
-        Hold->Nested = TRUE;
-        NgAcquireCore(Vcb);
-        return;
-    }
-    Hold->Nested = FALSE;
-    KeEnterCriticalRegion();
-    Hold->Category = NgLockCategory();
-    S = &Vcb->LockStats.Stat[Hold->Category];
-    T0 = __rdtsc();
-    if (!ExAcquireResourceSharedLite(&Vcb->CoreLock, FALSE))
-    {
-        ExAcquireResourceSharedLite(&Vcb->CoreLock, TRUE);
-        InterlockedIncrement((PLONG)&S->Contended);
-        ExInterlockedAddLargeStatistic((PLARGE_INTEGER)&S->WaitUs, (ULONG)NgTicksToUs(__rdtsc() - T0));
-    }
-    InterlockedIncrement((PLONG)&S->Acquired);
-    Hold->Since = __rdtsc();
+    Hold->Nested = TRUE;
+    NgAcquireCore(Vcb);
 }
 
 VOID NgReleaseCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
 {
-    if (Hold->Nested)
-    {
-        NgReleaseCore(Vcb);
-        return;
-    }
-    ExInterlockedAddLargeStatistic((PLARGE_INTEGER)&Vcb->LockStats.Stat[Hold->Category].HeldUs,
-                                   (ULONG)NgTicksToUs(__rdtsc() - Hold->Since));
-    ExReleaseResourceLite(&Vcb->CoreLock);
-    KeLeaveCriticalRegion();
+    UNREFERENCED_PARAMETER(Hold);
+    NgReleaseCore(Vcb);
 }
 
 /* Prints the request types that took CoreLock (at shutdown). */
@@ -172,7 +154,8 @@ static ULONG_PTR NgStackFill(VOID)
 {
     ULONG_PTR Low, High, Here = (ULONG_PTR)&Low, P;
     IoGetStackLimits(&Low, &High);
-    if (Here <= Low || Here > High)
+    /* A diagnostic must not trust limits that do not describe a kernel stack around us. */
+    if (Here <= Low || Here > High || High - Low > NG_STACK_MAX_SPAN || (Low & (PAGE_SIZE - 1)))
         return 0;
     for (P = Low + 256; P + 512 < Here; P += sizeof(ULONG))
         *(volatile ULONG *)P = NG_STACK_FILL;
@@ -250,6 +233,17 @@ int NgEnsureNode(PNG_FCB Fcb)
     Err = ngc_iget(Fcb->Vcb->Core, Fcb->MftNo, &Base);
     if (Err)
         return Err;
+    if (Fcb->Stat.mft_ref >> 48)
+    {
+        /* The record number may have been reused since the node was parked: compare the sequence. */
+        struct ngc_stat St;
+        ngc_stat(Base, &St);
+        if ((St.mft_ref >> 48) != (Fcb->Stat.mft_ref >> 48))
+        {
+            ngc_put(Base);
+            return -NGC_ENOENT;
+        }
+    }
     if (Fcb->Stream.Length)
     {
         Err = ngc_open_stream(Fcb->Vcb->Core, Base, Fcb->Stream.Buffer, Fcb->Stream.Length / sizeof(WCHAR), &Stream);
@@ -275,7 +269,21 @@ VOID NgParkNode(PNG_FCB Fcb)
 }
 
 /* Fills Fcb->Stat and the Cc file sizes from the core inode. */
+static VOID NgFillStatLocked(PNG_FCB Fcb);
+
+/*
+ * Refreshes Fcb->Stat and the FCB header sizes from the core.  The main resource (shared) keeps
+ * this away from size changes, which hold it exclusive: a size sampled before an extending write
+ * and stored after it would make the next write shrink the file.
+ */
 VOID NgFillStat(PNG_FCB Fcb)
+{
+    ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
+    NgFillStatLocked(Fcb);
+    ExReleaseResourceLite(Fcb->Header.Resource);
+}
+
+static VOID NgFillStatLocked(PNG_FCB Fcb)
 {
     LONGLONG Alloc;
     NG_SHARED_HOLD Hold;
@@ -532,6 +540,9 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
     NgGlobal.Verbose = NgReadDword(RegistryPath, L"Verbose");
+    /* "MountCheck": 0 or absent = after an unclean shutdown and for small MFTs, 1 = always, 2 = never. */
+    i = NgReadDword(RegistryPath, L"MountCheck");
+    ngc_check_policy = i == 1 ? 2 : i == 2 ? 0 : 1;
     {
         /* The system-wide NTFS switch for short names (0 = create them, as on Windows). */
         UNICODE_STRING Fs = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\FileSystem");

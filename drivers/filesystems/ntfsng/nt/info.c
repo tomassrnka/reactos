@@ -305,6 +305,9 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
     NgFillStat(Fcb);
     if (Fcb->Stat.file_attributes & FILE_ATTRIBUTE_READONLY)
         return STATUS_CANNOT_DELETE;
+    /* The last name of a file whose named stream is open is not deleted (the core cannot evict it). */
+    if (!Fcb->Stream.Length && Fcb->Stat.nlink <= 1 && !NgRetireStreams(Vcb, Fcb->MftNo, Fcb, FALSE))
+        return STATUS_SHARING_VIOLATION;
     if (Fcb->IsDirectory)
     {
         NgAcquireCore(Vcb);
@@ -388,6 +391,46 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
     NgReleaseCore(Vcb);
     ExFreePoolWithTag(Name, TAG_NTFSNG);
     return Found;
+}
+
+/*
+ * TRUE if directory DirMftNo is directory AncestorMftNo or lies below it (parents from the first
+ * name).  A walk that cannot finish counts as TRUE: the caller refuses the move.
+ */
+static BOOLEAN NgIsInSubtree(PNG_VCB Vcb, ULONGLONG DirMftNo, ULONGLONG AncestorMftNo)
+{
+    ULONGLONG MftNo = DirMftNo, Parent;
+    ULONG Depth;
+    unsigned int Len;
+    BOOLEAN In = TRUE;
+    PWCHAR Name = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
+
+    if (!Name)
+        return TRUE;
+    NgAcquireCore(Vcb);
+    for (Depth = 0; Depth < 4096; Depth++)
+    {
+        ngc_node *N;
+        int Err;
+        if (MftNo == AncestorMftNo)
+            break;
+        if (MftNo == 5)
+        {
+            In = FALSE;
+            break;
+        }
+        Err = ngc_iget(Vcb->Core, MftNo, &N);
+        if (Err)
+            break;
+        Err = ngc_parent_name(N, &Parent, Name, &Len);
+        ngc_put(N);
+        if (Err || Parent == MftNo)
+            break;
+        MftNo = Parent;
+    }
+    NgReleaseCore(Vcb);
+    ExFreePoolWithTag(Name, TAG_NTFSNG);
+    return In;
 }
 
 static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
@@ -504,6 +547,11 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                 Status = STATUS_ACCESS_DENIED;
                 goto out;
             }
+            if (!NgRetireStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL, FALSE))
+            {
+                Status = STATUS_ACCESS_DENIED;      /* a named stream of the target is open */
+                goto out;
+            }
             TargetFcb = NgFindFcb(Vcb, TSt.mft_ref & 0xffffffffffffULL);
             if (TargetFcb)
             {
@@ -518,6 +566,12 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         }
     }
 
+    if (!IsLink && Fcb->IsDirectory && NewDirMftNo != Ccb->ParentMftNo && NgIsInSubtree(Vcb, NewDirMftNo, Fcb->MftNo))
+    {
+        /* A directory cannot move into itself or below itself. */
+        Status = STATUS_INVALID_PARAMETER;
+        goto out;
+    }
     if (!IsLink && Fcb->IsDirectory && NgDirHasOpenFiles(Vcb, Fcb->MftNo))
     {
         /* As on Windows: a directory with open files below it is not renamed. */
@@ -528,6 +582,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     Err = NgEnsureNode(Fcb);
     if (!Err)
         Err = ngc_iget(Vcb->Core, Ccb->ParentMftNo, &OldDir);
+    if (!Err && Target && !CaseOnly && TSt.nlink <= 1 && !NgRetireStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL, TRUE))
+        Err = -NGC_EBUSY;
     if (!Err)
     {
         if (IsLink)
@@ -581,6 +637,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     }
     if (!Err && TargetFcb)
     {
+        /* Its node goes too: a referenced inode keeps the freed record and clusters in use. */
+        NgParkNode(TargetFcb);
         TargetFcb->Deleted = TRUE;
         NgUnlistFcb(TargetFcb);
     }
@@ -827,8 +885,7 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (Length < Fixed)
                 return STATUS_BUFFER_TOO_SMALL;
             A->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
-                                      FILE_NAMED_STREAMS | FILE_SUPPORTS_SPARSE_FILES |
-                                      FILE_FILE_COMPRESSION | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
+                                      FILE_NAMED_STREAMS | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
             A->MaximumComponentNameLength = 255;
             /* On a short buffer the length reports what was copied (as FAT and the apitest expect). */
             Copy = min(sizeof(Name) - sizeof(WCHAR), Length - Fixed);

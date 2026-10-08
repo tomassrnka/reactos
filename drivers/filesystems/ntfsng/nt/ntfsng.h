@@ -81,6 +81,8 @@ typedef struct _NG_VCB
     struct ngc_volinfo Info;
     ULONG SectorSize;
     BOOLEAN ReadOnly;               /* mounted read-only: policy, registry or request */
+    BOOLEAN Damaged;                /* read-only because the mount-time check found damage: write opens are
+                                       granted and every modification refused, so a damaged system volume boots */
     BOOLEAN WriteThrough;           /* after IRP_MJ_SHUTDOWN: every change ends with a full sync */
     LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
     PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
@@ -181,6 +183,7 @@ typedef struct _NG_CCB
     BOOLEAN PatternIsStar;
     BOOLEAN Enumerated;
     BOOLEAN AnyReturned;
+    LONG QueryBusy;                 /* a directory query of this handle is running (dirctl.c) */
     ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
     PVOID RetiredPaths;             /* earlier Path buffers of a renamed directory (change notify keeps them) */
 } NG_CCB, *PNG_CCB;
@@ -237,6 +240,7 @@ VOID NgPrintLockStats(PNG_VCB Vcb);
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo);
 VOID NgUnlistFcb(PNG_FCB Fcb);
+BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Retire);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
 BOOLEAN NgValidName(PCUNICODE_STRING Name);
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);
@@ -267,6 +271,7 @@ VOID NgUnlockVolume(PNG_VCB Vcb);
 /* security.c */
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN IsDir);
 
 /* pagefile.c */
 NTSTATUS NgPagingFileMap(PNG_FCB Fcb);
