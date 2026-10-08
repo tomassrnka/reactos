@@ -20,12 +20,20 @@ UINT TransferDataCompleteCalled = 0;
 #define CCS_ROOT L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet"
 #define TCPIP_GUID L"{4D36E972-E325-11CE-BFC1-08002BE10318}"
 
+/* TCP segments that may wait in an adapter's receive queue */
+#define LAN_RECEIVE_QUEUE_LIMIT 1024
+
+/* Miniport packets among them; later segments are copied so the miniport's
+   receive buffers do not run out while the worker is busy */
+#define LAN_MAX_HELD_PACKETS 32
+
 typedef struct _LAN_WQ_ITEM {
     LIST_ENTRY ListEntry;
     PNDIS_PACKET Packet;
     PLAN_ADAPTER Adapter;
     UINT BytesTransferred;
     BOOLEAN LegacyReceive;
+    BOOLEAN Held;
 } LAN_WQ_ITEM, *PLAN_WQ_ITEM;
 
 typedef struct _RECONFIGURE_CONTEXT {
@@ -176,6 +184,8 @@ VOID FreeAdapter(
  *     Adapter = Pointer to LAN_ADAPTER structure to free
  */
 {
+    ChewSerialRundown(&Adapter->ReceiveQueue);
+
     ExFreePoolWithTag(Adapter, LAN_ADAPTER_TAG);
 }
 
@@ -304,15 +314,17 @@ VOID NTAPI ProtocolSendComplete(
     FreeNdisPacket(Packet);
 }
 
-VOID LanReceiveWorker( PVOID Context ) {
-    ULONG PacketType;
-    PLAN_WQ_ITEM WorkItem = (PLAN_WQ_ITEM)Context;
+static VOID LanReceivePacket(
+    PLAN_ADAPTER Adapter,
+    PNDIS_PACKET Packet,
+    UINT BytesTransferred,
+    BOOLEAN LegacyReceive);
+
+static VOID LanReceiveItem( PLAN_WQ_ITEM WorkItem ) {
     PNDIS_PACKET Packet;
     PLAN_ADAPTER Adapter;
     UINT BytesTransferred;
-    IP_PACKET IPPacket;
-    BOOLEAN LegacyReceive;
-    PIP_INTERFACE Interface;
+    BOOLEAN LegacyReceive, Held;
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
@@ -320,8 +332,33 @@ VOID LanReceiveWorker( PVOID Context ) {
     Adapter = WorkItem->Adapter;
     BytesTransferred = WorkItem->BytesTransferred;
     LegacyReceive = WorkItem->LegacyReceive;
+    Held = WorkItem->Held;
 
     ExFreePoolWithTag(WorkItem, WQ_CONTEXT_TAG);
+
+    LanReceivePacket(Adapter, Packet, BytesTransferred, LegacyReceive);
+
+    /* The miniport's packet has left the queue */
+    if (Held)
+        InterlockedDecrement(&Adapter->HeldPackets);
+}
+
+static VOID LanReceiveWorker( PLIST_ENTRY Entry ) {
+    LanReceiveItem(CONTAINING_RECORD(Entry, LAN_WQ_ITEM, ListEntry));
+}
+
+static VOID LanReceiveWorkItem( PVOID Context ) {
+    LanReceiveItem(Context);
+}
+
+static VOID LanReceivePacket(
+    PLAN_ADAPTER Adapter,
+    PNDIS_PACKET Packet,
+    UINT BytesTransferred,
+    BOOLEAN LegacyReceive) {
+    ULONG PacketType;
+    IP_PACKET IPPacket;
+    PIP_INTERFACE Interface;
 
     Interface = Adapter->Context;
 
@@ -385,26 +422,68 @@ VOID LanReceiveWorker( PVOID Context ) {
     }
 }
 
-VOID LanSubmitReceiveWork(
+/* An IPv4 TCP segment; the packet is a frame, or the data after the frame's
+   media header (LegacyReceive) */
+static BOOLEAN LanIsTcpPacket(
+    PLAN_ADAPTER Adapter,
+    PNDIS_PACKET Packet,
+    BOOLEAN LegacyReceive) {
+    UCHAR Header[sizeof(ETH_HEADER) + 10];
+    UINT Offset = 0;
+
+    if (LegacyReceive) {
+        if (PC(Packet)->PacketType != ETYPE_IPv4 ||
+            CopyPacketToBuffer((PCHAR)Header, Packet, 0, 10) != 10)
+            return FALSE;
+    } else {
+        if (Adapter->Media != NdisMedium802_3 ||
+            CopyPacketToBuffer((PCHAR)Header, Packet, 0, sizeof(Header)) != sizeof(Header) ||
+            ((PETH_HEADER)Header)->EType != ETYPE_IPv4)
+            return FALSE;
+        Offset = sizeof(ETH_HEADER);
+    }
+
+    /* Version 4, protocol TCP */
+    return (Header[Offset] >> 4) == 4 && Header[Offset + 9] == IPPROTO_TCP;
+}
+
+/* Returns FALSE if the packet was not queued; the caller still owns it then.
+   Tcp is LanIsTcpPacket's answer for the packet */
+BOOLEAN LanSubmitReceiveWork(
     NDIS_HANDLE BindingContext,
     PNDIS_PACKET Packet,
     UINT BytesTransferred,
-    BOOLEAN LegacyReceive) {
+    BOOLEAN LegacyReceive,
+    BOOLEAN Tcp) {
     PLAN_WQ_ITEM WQItem = ExAllocatePoolWithTag(NonPagedPool, sizeof(LAN_WQ_ITEM),
                                                 WQ_CONTEXT_TAG);
     PLAN_ADAPTER Adapter = (PLAN_ADAPTER)BindingContext;
+    BOOLEAN Queued;
 
     TI_DbgPrint(DEBUG_DATALINK,("called\n"));
 
-    if (!WQItem) return;
+    if (!WQItem) return FALSE;
 
     WQItem->Packet = Packet;
     WQItem->Adapter = Adapter;
     WQItem->BytesTransferred = BytesTransferred;
     WQItem->LegacyReceive = LegacyReceive;
+    WQItem->Held = Tcp && !LegacyReceive;
 
-    if (!ChewCreate( LanReceiveWorker, WQItem ))
+    /* TCP segments go through one worker per adapter, so they reach TCP in the order
+       they were indicated. Other frames keep a work item each: nothing they wait for
+       (an ARP reply, a socket's lock) can hold up TCP or each other */
+    if (Tcp)
+        Queued = ChewSerialInsert(&Adapter->ReceiveQueue, &WQItem->ListEntry);
+    else
+        Queued = ChewCreate(LanReceiveWorkItem, WQItem);
+
+    if (!Queued) {
         ExFreePoolWithTag(WQItem, WQ_CONTEXT_TAG);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 VOID NTAPI ProtocolTransferDataComplete(
@@ -433,10 +512,38 @@ VOID NTAPI ProtocolTransferDataComplete(
 
     if( Status != NDIS_STATUS_SUCCESS ) return;
 
-    LanSubmitReceiveWork(BindingContext,
-                         Packet,
-                         BytesTransferred,
-                         TRUE);
+    if (!LanSubmitReceiveWork(BindingContext,
+                              Packet,
+                              BytesTransferred,
+                              TRUE,
+                              LanIsTcpPacket(BindingContext, Packet, TRUE)))
+        FreeNdisPacket(Packet);
+}
+
+/* Queues a copy of a miniport's TCP segment, as ProtocolReceive does */
+static VOID LanSubmitReceiveCopy(
+    PLAN_ADAPTER Adapter,
+    PNDIS_PACKET NdisPacket) {
+    PNDIS_PACKET Copy;
+    ULONG PacketType;
+    UINT Length, Size;
+    PCHAR Data;
+
+    NdisQueryPacketLength(NdisPacket, &Length);
+    if (Length <= Adapter->HeaderSize ||
+        GetPacketTypeFromNdisPacket(Adapter, NdisPacket, &PacketType) != NDIS_STATUS_SUCCESS)
+        return;
+
+    Length -= Adapter->HeaderSize;
+    if (AllocatePacketWithBuffer(&Copy, NULL, Length) != NDIS_STATUS_SUCCESS)
+        return;
+
+    GetDataPtr(Copy, 0, &Data, &Size);
+    CopyPacketToBuffer(Data, NdisPacket, Adapter->HeaderSize, Length);
+    PC(Copy)->PacketType = PacketType;
+
+    if (!LanSubmitReceiveWork(Adapter, Copy, Length, TRUE, TRUE))
+        FreeNdisPacket(Copy);
 }
 
 INT NTAPI ProtocolReceivePacket(
@@ -444,16 +551,30 @@ INT NTAPI ProtocolReceivePacket(
     PNDIS_PACKET NdisPacket)
 {
     PLAN_ADAPTER Adapter = BindingContext;
+    BOOLEAN Tcp;
 
     if (Adapter->State != LAN_STATE_STARTED) {
         TI_DbgPrint(DEBUG_DATALINK, ("Adapter is stopped.\n"));
         return 0;
     }
 
-    LanSubmitReceiveWork(BindingContext,
-                         NdisPacket,
-                         0, /* Unused */
-                         FALSE);
+    Tcp = LanIsTcpPacket(Adapter, NdisPacket, FALSE);
+
+    if (Tcp && InterlockedIncrement(&Adapter->HeldPackets) > LAN_MAX_HELD_PACKETS) {
+        InterlockedDecrement(&Adapter->HeldPackets);
+        LanSubmitReceiveCopy(Adapter, NdisPacket);
+        return 0;
+    }
+
+    if (!LanSubmitReceiveWork(BindingContext,
+                              NdisPacket,
+                              0, /* Unused */
+                              FALSE,
+                              Tcp)) {
+        if (Tcp)
+            InterlockedDecrement(&Adapter->HeldPackets);
+        return 0;
+    }
 
     /* Hold 1 reference on this packet */
     return 1;
@@ -1478,6 +1599,11 @@ NDIS_STATUS LANRegisterAdapter(
 
     RtlZeroMemory(IF, sizeof(LAN_ADAPTER));
 
+    if (!ChewSerialInit(&IF->ReceiveQueue, LanReceiveWorker, LAN_RECEIVE_QUEUE_LIMIT)) {
+        ExFreePoolWithTag(IF, LAN_ADAPTER_TAG);
+        return NDIS_STATUS_RESOURCES;
+    }
+
     /* Put adapter in stopped state */
     IF->State = LAN_STATE_STOPPED;
 
@@ -1508,7 +1634,7 @@ NDIS_STATUS LANRegisterAdapter(
         KeWaitForSingleObject(&IF->Event, UserRequest, KernelMode, FALSE, NULL);
     else if (NdisStatus != NDIS_STATUS_SUCCESS) {
 	TI_DbgPrint(DEBUG_DATALINK,("denying adapter %wZ\n", AdapterName));
-	ExFreePoolWithTag(IF, LAN_ADAPTER_TAG);
+	FreeAdapter(IF);
         return NdisStatus;
     }
 
@@ -1533,7 +1659,7 @@ NDIS_STATUS LANRegisterAdapter(
     default:
         /* Unsupported media */
         TI_DbgPrint(MIN_TRACE, ("Unsupported media.\n"));
-        ExFreePoolWithTag(IF, LAN_ADAPTER_TAG);
+        FreeAdapter(IF);
         return NDIS_STATUS_NOT_SUPPORTED;
     }
 
@@ -1556,14 +1682,14 @@ NDIS_STATUS LANRegisterAdapter(
                           IF->HWAddressLength);
     if (NdisStatus != NDIS_STATUS_SUCCESS) {
         TI_DbgPrint(MIN_TRACE, ("Query for current hardware address failed.\n"));
-        ExFreePoolWithTag(IF, LAN_ADAPTER_TAG);
+        FreeAdapter(IF);
         return NdisStatus;
     }
 
     /* Bind adapter to IP layer */
     if( !BindAdapter(IF, RegistryPath) ) {
 	TI_DbgPrint(DEBUG_DATALINK,("denying adapter %wZ (BindAdapter)\n", AdapterName));
-	ExFreePoolWithTag(IF, LAN_ADAPTER_TAG);
+	FreeAdapter(IF);
 	return NDIS_STATUS_NOT_ACCEPTED;
     }
 
@@ -1595,7 +1721,13 @@ NDIS_STATUS LANUnregisterAdapter(
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
     /* Unlink the adapter from the list */
+    TcpipAcquireSpinLock(&AdapterListLock, &OldIrql);
     RemoveEntryList(&Adapter->ListEntry);
+    TcpipReleaseSpinLock(&AdapterListLock, OldIrql);
+
+    /* Queued TCP segments use the IP interface: deliver or refuse them before it goes
+       away (the work items of other frames are not tracked, as before) */
+    ChewSerialRundown(&Adapter->ReceiveQueue);
 
     /* Unbind adapter from IP layer */
     UnbindAdapter(Adapter);
@@ -1635,24 +1767,21 @@ LANUnregisterProtocol(VOID)
 
     if (ProtocolRegistered) {
         NDIS_STATUS NdisStatus;
-        PLIST_ENTRY CurrentEntry;
-        PLIST_ENTRY NextEntry;
         PLAN_ADAPTER Current;
         KIRQL OldIrql;
 
-        TcpipAcquireSpinLock(&AdapterListLock, &OldIrql);
+        /* Unregister every adapter; that waits, so not under the list lock */
+        for (;;) {
+            TcpipAcquireSpinLock(&AdapterListLock, &OldIrql);
+            if (IsListEmpty(&AdapterListHead)) {
+                TcpipReleaseSpinLock(&AdapterListLock, OldIrql);
+                break;
+            }
+            Current = CONTAINING_RECORD(AdapterListHead.Flink, LAN_ADAPTER, ListEntry);
+            TcpipReleaseSpinLock(&AdapterListLock, OldIrql);
 
-        /* Search the list and remove every adapter we find */
-        CurrentEntry = AdapterListHead.Flink;
-        while (CurrentEntry != &AdapterListHead) {
-            NextEntry = CurrentEntry->Flink;
-            Current = CONTAINING_RECORD(CurrentEntry, LAN_ADAPTER, ListEntry);
-            /* Unregister it */
             LANUnregisterAdapter(Current);
-            CurrentEntry = NextEntry;
         }
-
-        TcpipReleaseSpinLock(&AdapterListLock, OldIrql);
 
         NdisDeregisterProtocol(&NdisStatus, NdisProtocolHandle);
         ProtocolRegistered = FALSE;
