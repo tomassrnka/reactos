@@ -66,6 +66,7 @@ list(APPEND SOURCE
     NtLoadUnloadKey.c
     NtMapViewOfSection.c
     NtMutant.c
+    NtNotifyChangeDirectoryFile.c
     NtNotifyChangeMultipleKeys.c
     NtOpenKey.c
     NtOpenProcessToken.c
