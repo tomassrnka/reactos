@@ -589,6 +589,7 @@ KiSetPriorityThread(IN PKTHREAD Thread,
     BOOLEAN RequestInterrupt = FALSE;
     KPRIORITY OldPriority;
     PKTHREAD NewThread;
+    UCHAR State;
     ASSERT((Priority >= 0) && (Priority <= HIGH_PRIORITY));
 
     /* Check if priority changed */
@@ -597,8 +598,15 @@ KiSetPriorityThread(IN PKTHREAD Thread,
         /* Loop priority setting in case we need to start over */
         for (;;)
         {
+            /*
+             * Read the state once. Other processors move the thread out of
+             * Ready, Standby or Running holding only their PRCB lock, so the
+             * branches below confirm it under that lock and start over.
+             */
+            State = *(volatile UCHAR *)&Thread->State;
+
             /* Choose action based on thread's state */
-            if (Thread->State == Ready)
+            if (State == Ready)
             {
                 /* Make sure we're not on the ready queue */
                 if (!Thread->ProcessReadyQueue)
@@ -646,7 +654,7 @@ KiSetPriorityThread(IN PKTHREAD Thread,
                     Thread->Priority = (SCHAR)Priority;
                 }
             }
-            else if (Thread->State == Standby)
+            else if (State == Standby)
             {
                 /* Get the PRCB for the thread and lock it */
                 Processor = Thread->NextProcessor;
@@ -686,7 +694,7 @@ KiSetPriorityThread(IN PKTHREAD Thread,
                     continue;
                 }
             }
-            else if (Thread->State == Running)
+            else if (State == Running)
             {
                 /* Get the PRCB for the thread and lock it */
                 Processor = Thread->NextProcessor;
@@ -735,7 +743,7 @@ KiSetPriorityThread(IN PKTHREAD Thread,
                     continue;
                 }
             }
-            else if (Thread->State == DeferredReady)
+            else if (State == DeferredReady)
             {
                 /* FIXME: TODO */
                 DPRINT1("Deferred state not yet supported\n");
