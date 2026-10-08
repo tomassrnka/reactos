@@ -397,6 +397,11 @@ KvInitialize(IN ULONG Phase, IN PVOID LoaderBlock)
         return;
     KvThreadsStarted = TRUE;
 
+    /* The phase-0 banner can be lost before the debugger serial is up; print
+     * it again here, where the debug channel is live. */
+    DbgPrint("KVERIFY: active, flags 0x%lx, deadlock %lu s\n",
+             KvFlags, KvDeadlockSeconds);
+
     if ((KvFlags & KV_LOCKDEP) && !KvLockdepInit())
     {
         KvFlags &= ~KV_LOCKDEP;
