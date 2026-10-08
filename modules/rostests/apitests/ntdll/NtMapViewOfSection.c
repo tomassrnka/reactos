@@ -2060,6 +2060,109 @@ Test_Truncate(VOID)
     ok(Success == TRUE, "DeleteFileW failed with %lu\n", GetLastError());
 }
 
+/* A view keeps the file from being truncated under it, also once its section handle is closed */
+static void
+Test_TruncateAfterSectionClose(void)
+{
+    WCHAR TempPath[MAX_PATH], FileName[MAX_PATH];
+    HANDLE Handle, SectionHandle;
+    PVOID BaseAddress = NULL;
+    SIZE_T ViewSize = 0;
+    UCHAR Buffer[3 * 4096];
+    LARGE_INTEGER FileSize;
+    DWORD Written, Error;
+    ULONG Attributes;
+    NTSTATUS Status;
+    BOOL Success;
+
+    if (!GetTempPathW(MAX_PATH, TempPath) || !GetTempFileNameW(TempPath, L"ntt", 0, FileName))
+    {
+        skip("No temporary file name: %lu\n", GetLastError());
+        return;
+    }
+    Handle = CreateFileW(FileName, FILE_ALL_ACCESS, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "CreateFileW failed with %lu\n", GetLastError());
+    if (Handle == INVALID_HANDLE_VALUE)
+        return;
+    memset(Buffer, 0x5A, sizeof(Buffer));
+    Success = WriteFile(Handle, Buffer, sizeof(Buffer), &Written, NULL);
+    ok(Success && Written == sizeof(Buffer), "WriteFile failed with %lu\n", GetLastError());
+
+    Status = NtCreateSection(&SectionHandle, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_READ,
+                             NULL, NULL, PAGE_READONLY, SEC_COMMIT, Handle);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    Status = NtMapViewOfSection(SectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewShare, 0, PAGE_READONLY);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    NtClose(SectionHandle);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    /* Growing the file under the view is fine */
+    SetFilePointer(Handle, 4 * 4096, NULL, FILE_BEGIN);
+    Success = SetEndOfFile(Handle);
+    ok(Success == TRUE, "Extending a mapped file failed with %lu\n", GetLastError());
+
+    /* Shrinking it below the view is not */
+    SetFilePointer(Handle, 4096, NULL, FILE_BEGIN);
+    Success = SetEndOfFile(Handle);
+    Error = GetLastError();
+    ok(Success == FALSE, "SetEndOfFile shrank a mapped file\n");
+    ok(Error == ERROR_USER_MAPPED_FILE, "SetEndOfFile set error %lu\n", Error);
+    FileSize.QuadPart = -1;
+    Success = GetFileSizeEx(Handle, &FileSize);
+    ok(Success && FileSize.QuadPart == 4 * 4096, "File size is %I64d\n", FileSize.QuadPart);
+
+    Status = NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    Success = SetEndOfFile(Handle);
+    ok(Success == TRUE, "SetEndOfFile failed with %lu once the view is gone\n", GetLastError());
+    FileSize.QuadPart = -1;
+    Success = GetFileSizeEx(Handle, &FileSize);
+    ok(Success && FileSize.QuadPart == 4096, "File size is %I64d\n", FileSize.QuadPart);
+
+    /*
+     * The file was mapped larger before: a new view of the small file, with
+     * its section closed, must still let it grow, and must not let it shrink,
+     * also for a section created with SEC_RESERVE
+     */
+    for (Attributes = SEC_COMMIT; Attributes; Attributes = (Attributes == SEC_COMMIT) ? SEC_RESERVE : 0)
+    {
+        BaseAddress = NULL;
+        ViewSize = 0;
+        Status = NtCreateSection(&SectionHandle, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_READ,
+                                 NULL, NULL, PAGE_READONLY, Attributes, Handle);
+        if (!NT_SUCCESS(Status))
+        {
+            skip("NtCreateSection(0x%lx) failed with 0x%lx\n", Attributes, Status);
+            continue;
+        }
+        Status = NtMapViewOfSection(SectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewShare, 0, PAGE_READONLY);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        NtClose(SectionHandle);
+        if (!NT_SUCCESS(Status))
+            continue;
+        SetFilePointer(Handle, 2 * 4096, NULL, FILE_BEGIN);
+        Success = SetEndOfFile(Handle);
+        ok(Success == TRUE, "Extending a mapped file (0x%lx) failed with %lu\n", Attributes, GetLastError());
+        SetFilePointer(Handle, 0, NULL, FILE_BEGIN);
+        Success = SetEndOfFile(Handle);
+        Error = GetLastError();
+        ok(Success == FALSE, "SetEndOfFile shrank a mapped file (0x%lx)\n", Attributes);
+        ok(Error == ERROR_USER_MAPPED_FILE, "SetEndOfFile set error %lu (0x%lx)\n", Error, Attributes);
+        Status = NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        SetFilePointer(Handle, 4096, NULL, FILE_BEGIN);
+        Success = SetEndOfFile(Handle);
+        ok(Success == TRUE, "SetEndOfFile failed with %lu once the view is gone\n", GetLastError());
+    }
+
+Cleanup:
+    CloseHandle(Handle);
+    DeleteFileW(FileName);
+}
+
 START_TEST(NtMapViewOfSection)
 {
     Test_PageFileSection();
@@ -2072,4 +2175,5 @@ START_TEST(NtMapViewOfSection)
     Test_RawSize(2);
     Test_EmptyFile();
     Test_Truncate();
+    Test_TruncateAfterSectionClose();
 }
