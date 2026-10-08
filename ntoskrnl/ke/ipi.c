@@ -371,8 +371,13 @@ KiIpiSendRequest(
     /* Above SYNCH_LEVEL no other processor may be waited for. That happens
        while this is the only one running, and in the debugger with the others
        frozen; it requests TLB flushes, and frozen processors flush their
-       entire TLB when they thaw */
-    if (KeGetCurrentIrql() > SYNCH_LEVEL)
+       entire TLB when they thaw. KDBG lowers the IRQL to DISPATCH_LEVEL while
+       the others stay frozen, so the freeze owner never waits either */
+    if ((KeGetCurrentIrql() > SYNCH_LEVEL)
+#ifdef CONFIG_SMP
+        || (KiFreezeOwner == KeGetCurrentPrcb())
+#endif
+       )
     {
 #ifdef CONFIG_SMP
         ASSERT((KiFreezeOwner == KeGetCurrentPrcb()) ||
