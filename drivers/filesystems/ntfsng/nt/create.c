@@ -995,6 +995,12 @@ walked:
             goto out;
         }
     }
+    if (Fcb->IsPagingFile && !(Stack->Flags & SL_OPEN_PAGING_FILE))
+    {
+        /* The active paging file is open to Mm only, as on FastFAT. */
+        Status = STATUS_SHARING_VIOLATION;
+        goto out;
+    }
     if (!IsDir && Fcb->SectionObjectPointers.ImageSectionObject)
     {
         /* A file that is mapped as an image (a running program) cannot be opened for writing. */
@@ -1045,6 +1051,13 @@ walked:
             FileObject->FsContext = NULL;
             FileObject->FsContext2 = NULL;
             Status = STATUS_ACCESS_DENIED;
+            goto out;
+        }
+        if (Fcb->OpenHandles > 1 && !Fcb->IsPagingFile)
+        {
+            FileObject->FsContext = NULL;
+            FileObject->FsContext2 = NULL;
+            Status = STATUS_SHARING_VIOLATION;
             goto out;
         }
         Fcb->IsPagingFile = TRUE;
