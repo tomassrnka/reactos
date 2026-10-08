@@ -18,6 +18,8 @@
 #define KJ_FIRST_SLOT_PAGE 5
 
 enum { KJ_ST_ACTIVE = 1, KJ_ST_COMMITTED = 2, KJ_ST_UNJOURNALED = 3, KJ_ST_ERRORS = 4 };
+/* Header flags: the core reported errors in this session (kept by every later header, COMMITTED included). */
+#define KJ_FL_ERRORS 1
 
 struct kj_hdr {
 	char magic[8];

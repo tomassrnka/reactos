@@ -321,8 +321,9 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 			 kj_slot_page(total - 1) < jv->lf_pages;
 		for (i = 0; ok && i < total; i++) {
 			if (lf_read(jv, kj_slot_page(i), pg)) {
-				ok = 0;
-				break;
+				/* Unreadable, not torn: the transaction may be half in place, keep the evidence. */
+				res = NGJ_REPAIR;
+				goto out;
 			}
 			crc = kj_crc32(crc, pg, KJ_PAGE);
 		}
@@ -355,6 +356,13 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		} else {
 			jv->torn = 1;
 		}
+	}
+	if (h.flags & KJ_FL_ERRORS) {
+		/* The transaction is in place (or shown), but the core found errors in that session. */
+		res = NGJ_REPAIR;
+		printk(KERN_ERR "journal: seq %llu: the core reported errors in the last session: needs repair\n",
+		       (unsigned long long)h.seq);
+		goto out;
 	}
 	if (write) {
 		if (clear_dirty(jv, &was)) {
