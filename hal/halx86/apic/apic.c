@@ -117,6 +117,11 @@ KSPIN_LOCK HalpIoApicLock;
 /* Serializes the lookup and allocation of interrupt vectors */
 KSPIN_LOCK HalpVectorAllocationLock;
 
+#ifdef APIC_LAZY_IRQL
+/* Trigger mode of each redirection entry, for the lazy IRQL deferral in interrupt context */
+UCHAR HalpIoApicTriggerMode[APIC_MAX_IRQ];
+#endif
+
 FORCEINLINE
 ULONG
 IOApicRead(UCHAR Register)
@@ -160,6 +165,9 @@ ApicWriteIORedirectionEntry(
     IOAPIC_REDIRECTION_REGISTER ReDirReg)
 {
     ASSERT(Index < APIC_MAX_IRQ);
+#ifdef APIC_LAZY_IRQL
+    HalpIoApicTriggerMode[Index] = (UCHAR)ReDirReg.TriggerMode;
+#endif
     IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
     IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
 }
@@ -302,6 +310,9 @@ FASTCALL
 HalpIrqToVector(UCHAR Irq)
 {
     IOAPIC_REDIRECTION_REGISTER ReDirReg;
+
+    if (Irq >= APIC_MAX_IRQ)
+        return APIC_FREE_VECTOR;
 
     /* Read low dword of the redirection entry */
     ReDirReg.Long0 = IOApicRead(IOAPIC_REDTBL + 2 * Irq);
@@ -451,6 +462,14 @@ HalpGetRootInterruptVector(
     UCHAR Vector;
     KIRQL Irql;
     ULONG_PTR Flags;
+
+    if (BusInterruptLevel >= APIC_MAX_IRQ)
+    {
+        DPRINT1("IRQ %lu is not an I/O APIC input\n", BusInterruptLevel);
+        *OutAffinity = 0;
+        *OutIrql = 0;
+        return 0;
+    }
 
     /* Concurrent lookups could otherwise allocate two vectors for one IRQ, or one vector
        for two IRQs. Interrupts stay disabled: the lock does not raise the IRQL. */
@@ -741,9 +760,9 @@ HalEnableSystemInterrupt(
     Index = HalpVectorToIndex[Vector];
 
     /* Check if its valid */
-    if (Index == APIC_FREE_VECTOR)
+    if (Index >= APIC_MAX_IRQ)
     {
-        /* Interrupt is not in use */
+        /* Interrupt is not in use, or not an I/O APIC input */
         return FALSE;
     }
 
@@ -785,6 +804,11 @@ HalDisableSystemInterrupt(
     ASSERT(Vector < RTL_NUMBER_OF(HalpVectorToIndex));
 
     Index = HalpVectorToIndex[Vector];
+    if (Index >= APIC_MAX_IRQ)
+    {
+        /* Not an I/O APIC input */
+        return;
+    }
 
     /* Read lower dword of redirection entry */
     ReDirReg.Long0 = IOApicRead(IOAPIC_REDTBL + 2 * Index);
@@ -812,7 +836,6 @@ HalBeginSystemInterrupt(
     /* Check if this interrupt is allowed */
     if (CurrentIrql >= Irql)
     {
-        IOAPIC_REDIRECTION_REGISTER RedirReg;
         UCHAR Index;
 
         /* It is not, set the real Irql in the TPR! */
@@ -830,11 +853,10 @@ HalBeginSystemInterrupt(
         /* Check if it's valid */
         if (Index < APIC_MAX_IRQ)
         {
-            /* Read the I/O redirection entry */
-            RedirReg = ApicReadIORedirectionEntry(Index);
-
-            /* Re-request the interrupt to be handled later */
-            ApicRequestSelfInterrupt(Vector, (UCHAR)RedirReg.TriggerMode);
+            /* Re-request the interrupt to be handled later, with the saved trigger mode:
+               reading the redirection entry here would take the I/O APIC lock and make
+               four uncached register accesses in interrupt context */
+            ApicRequestSelfInterrupt(Vector, HalpIoApicTriggerMode[Index]);
        }
        else
        {
