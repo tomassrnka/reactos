@@ -183,8 +183,9 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Paging || NonCached)
     {
-        /* Through the shim page cache; bytes past EOF in the last page come back zeroed. */
-        NgAcquireCore(Vcb);
+        /* Straight from the clusters or through the shim page cache; bytes past EOF come back zeroed. */
+        NG_SHARED_HOLD Hold;
+        NgAcquireCoreShared(Vcb, &Hold);
         Done = NgEnsureNode(Fcb);
         if (!Done)
         {
@@ -198,9 +199,9 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             RtlZeroMemory(Buffer, Length);
             Done = Length;
         }
-        if (Paging && Fcb->OpenHandles == 0)
+        if (Paging && Fcb->OpenHandles == 0 && Hold.Nested)
             NgParkNode(Fcb);
-        NgReleaseCore(Vcb);
+        NgReleaseCoreShared(Vcb, &Hold);
         if (LockedMdl)
         {
             MmUnlockPages(LockedMdl);

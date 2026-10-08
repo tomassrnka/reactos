@@ -683,7 +683,7 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 	irql = ngos_spin_lock(&kshim_pc_lock);
 	f = pc_find_locked(m, idx);
 	if (f)
-		f->refcount++;
+		__atomic_add_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST);
 	ngos_spin_unlock(&kshim_pc_lock, irql);
 	if (!f) {
 		if (!(fgp & FGP_CREAT))
@@ -697,7 +697,7 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 		irql = ngos_spin_lock(&kshim_pc_lock);
 		f = pc_find_locked(m, idx);
 		if (f) {
-			f->refcount++;
+			__atomic_add_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST);
 		} else {
 			if (m->nrpages >= (m->kshim_pc_max ? m->kshim_pc_max : KSHIM_PC_MAX)) {
 				drop = pc_shrink_locked(m, idx);
@@ -823,7 +823,7 @@ void truncate_inode_pages(struct address_space *m, loff_t l)
 	}
 	part = (l & (PAGE_SIZE - 1)) ? pc_find_locked(m, (pgoff_t)(l >> PAGE_SHIFT)) : NULL;
 	if (part)
-		part->refcount++;
+		__atomic_add_fetch(&part->refcount, 1, __ATOMIC_SEQ_CST);
 	ngos_spin_unlock(&kshim_pc_lock, irql);
 	while (list) { struct folio *n = list->hnext; pc_free(list); list = n; }
 	if (part) {
@@ -850,7 +850,7 @@ void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, 
 		unsigned char irql = ngos_spin_lock(&kshim_pc_lock);
 		f = pc_find_locked(m, idx);
 		if (f)
-			f->refcount++;
+			__atomic_add_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST);
 		ngos_spin_unlock(&kshim_pc_lock, irql);
 		if (f) {
 			folio_lock(f);
@@ -1040,18 +1040,23 @@ struct inode *ilookup5_nowait(struct super_block *sb, unsigned long hashval,
 struct inode *iget5_locked(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), int (*set)(struct inode *, void *), void *data)
 {
-	struct inode *i = kshim_find_get(sb, hashval, test, data), *n;
-	if (i) return i;
-	n = sb->s_op->alloc_inode(sb);
-	if (!n) return NULL;
-	mutex_lock(&kshim_inode_lock);
-	i = kshim_find(sb, hashval, test, data);
-	if (i && !(i->i_state & I_NEW)) {
-		kshim_ref_locked(i);
+	struct inode *i, *n = NULL;
+	for (;;) {
+		i = kshim_find_get(sb, hashval, test, data);
+		if (i) {
+			if (n) {
+				if (sb->s_op->free_inode) sb->s_op->free_inode(n);
+				else if (sb->s_op->destroy_inode) sb->s_op->destroy_inode(n);
+			}
+			return i;
+		}
+		if (!n && !(n = sb->s_op->alloc_inode(sb)))
+			return NULL;
+		mutex_lock(&kshim_inode_lock);
+		if (!kshim_find(sb, hashval, test, data))
+			break;
+		/* Another thread hashed one meanwhile (maybe still I_NEW): wait for it and take it. */
 		mutex_unlock(&kshim_inode_lock);
-		if (sb->s_op->free_inode) sb->s_op->free_inode(n);
-		else if (sb->s_op->destroy_inode) sb->s_op->destroy_inode(n);
-		return i;
 	}
 	kshim_inode_init(sb, n);
 	if (set && set(n, data)) {
@@ -1104,7 +1109,13 @@ int kshim_inodes_snapshot(struct super_block *sb, struct inode ***out)
 	return v ? n : -ENOMEM;
 }
 void unlock_new_inode(struct inode *i) { i->i_state &= ~I_NEW; }
-void discard_new_inode(struct inode *i) { i->i_state &= ~I_NEW; i->i_state |= I_FREEING; iput(i); }
+void discard_new_inode(struct inode *i)
+{
+	mutex_lock(&kshim_inode_lock);
+	i->i_state = (i->i_state & ~I_NEW) | I_FREEING;
+	mutex_unlock(&kshim_inode_lock);
+	iput(i);
+}
 void iget_failed(struct inode *i) { discard_new_inode(i); }
 struct inode *igrab(struct inode *i) { atomic_inc(&i->i_count); return i; }
 void ihold(struct inode *i) { atomic_inc(&i->i_count); }

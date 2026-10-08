@@ -319,11 +319,12 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Snap.Ccb = Ccb;
         Snap.IsRoot = Fcb->IsRoot;
         Snap.Failed = FALSE;
-        NgAcquireCore(Vcb);
+        NG_SHARED_HOLD Hold;
+        NgAcquireCoreShared(Vcb, &Hold);
         Err = NgEnsureNode(Fcb);
         if (!Err)
             Err = ngc_readdir_full(Vcb->Core, Fcb->Node, NgSnapFill, &Snap);
-        NgReleaseCore(Vcb);
+        NgReleaseCoreShared(Vcb, &Hold);
         if (Err || Snap.Failed)
         {
             NgFreeDirSnapshot(Ccb);

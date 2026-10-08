@@ -44,12 +44,14 @@ static NTSTATUS NgGetSecurity(PNG_VCB Vcb, PNG_FCB Fcb, PSECURITY_DESCRIPTOR *Ou
     PSECURITY_DESCRIPTOR Sd;
     int Err;
 
+    NG_SHARED_HOLD Hold;
+
     *Out = NULL;
-    NgAcquireCore(Vcb);
+    NgAcquireCoreShared(Vcb, &Hold);
     Err = NgEnsureNode(Fcb);
     if (!Err)
         Err = ngc_get_security(Vcb->Core, Fcb->Node, &Raw, &Len);
-    NgReleaseCore(Vcb);
+    NgReleaseCoreShared(Vcb, &Hold);
     if (Err)
         return NgErrnoToStatus(Err);
     if (!Raw)
