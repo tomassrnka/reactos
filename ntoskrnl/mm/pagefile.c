@@ -345,6 +345,8 @@ MmAllocSwapPage(VOID)
                 KeReleaseGuardedMutex(&MmPageFileCreationLock);
                 return(STATUS_UNSUCCESSFUL);
             }
+            MmPagingFile[i]->FreeSpace--;
+            MmPagingFile[i]->CurrentUsage++;
             MiUsedSwapPages++;
             MiFreeSwapPages--;
             UpdateTotalCommittedPages(1);
