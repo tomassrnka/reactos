@@ -2060,6 +2060,86 @@ Test_Truncate(VOID)
     ok(Success == TRUE, "DeleteFileW failed with %lu\n", GetLastError());
 }
 
+/* Unmap an image view after its section handle was closed, before any page of it was touched */
+static void
+Test_ImageSectionUnmapAfterClose(void)
+{
+    WCHAR SystemDll[MAX_PATH], TempDir[MAX_PATH], Copy[MAX_PATH];
+    UNICODE_STRING NtPath;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatus;
+    HANDLE FileHandle, SectionHandle;
+    PVOID BaseAddress;
+    SIZE_T ViewSize;
+    NTSTATUS Status;
+    BOOL Deleted;
+    ULONG i;
+
+    if (!GetSystemDirectoryW(SystemDll, _countof(SystemDll)) ||
+        FAILED(StringCchCatW(SystemDll, _countof(SystemDll), L"\\shlwapi.dll")) ||
+        !GetTempPathW(_countof(TempDir), TempDir) ||
+        wcslen(TempDir) >= _countof(TempDir) - 14)
+    {
+        skip("No source DLL or temporary directory\n");
+        return;
+    }
+
+    for (i = 0; i < 32; i++)
+    {
+        /* A new file each time, so no image section or page of it exists yet */
+        if (!GetTempFileNameW(TempDir, L"nui", 0, Copy))
+        {
+            skip("GetTempFileNameW failed with %lu\n", GetLastError());
+            return;
+        }
+        if (!CopyFileW(SystemDll, Copy, FALSE))
+        {
+            skip("Cannot make a copy of the DLL: %lu\n", GetLastError());
+            DeleteFileW(Copy);
+            return;
+        }
+        if (!RtlDosPathNameToNtPathName_U(Copy, &NtPath, NULL, NULL))
+        {
+            skip("RtlDosPathNameToNtPathName_U failed\n");
+            DeleteFileW(Copy);
+            return;
+        }
+        InitializeObjectAttributes(&ObjectAttributes, &NtPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&FileHandle, GENERIC_READ | GENERIC_EXECUTE | SYNCHRONIZE, &ObjectAttributes, &IoStatus,
+                            FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+        RtlFreeUnicodeString(&NtPath);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+        {
+            DeleteFileW(Copy);
+            return;
+        }
+
+        Status = NtCreateSection(&SectionHandle, SECTION_ALL_ACCESS, NULL, NULL, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandle);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        NtClose(FileHandle);
+        if (!NT_SUCCESS(Status))
+        {
+            DeleteFileW(Copy);
+            return;
+        }
+
+        BaseAddress = NULL;
+        ViewSize = 0;
+        Status = NtMapViewOfSection(SectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, NULL, &ViewSize, ViewShare, 0, PAGE_EXECUTE_READ);
+        ok(NT_SUCCESS(Status), "NtMapViewOfSection failed with 0x%08lx\n", Status);
+        Status = NtClose(SectionHandle);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (BaseAddress)
+        {
+            Status = NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+        }
+        Deleted = DeleteFileW(Copy);
+        ok(Deleted, "DeleteFileW failed with %lu\n", GetLastError());
+    }
+}
+
 START_TEST(NtMapViewOfSection)
 {
     Test_PageFileSection();
@@ -2072,4 +2152,5 @@ START_TEST(NtMapViewOfSection)
     Test_RawSize(2);
     Test_EmptyFile();
     Test_Truncate();
+    Test_ImageSectionUnmapAfterClose();
 }
