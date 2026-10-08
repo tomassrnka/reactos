@@ -468,9 +468,10 @@ ApicInitializeLocalApic(ULONG Cpu)
     LvtEntry.TriggerMode = APIC_TGM_Level;
     ApicWrite(APIC_LINT1, LvtEntry.Long);
 
-    /* Enable error LVTR */
+    /* Enable error LVTR; it has no trigger mode, the bit is reserved there */
     LvtEntry.Vector = APIC_ERROR_VECTOR;
     LvtEntry.MessageType = APIC_MT_Fixed;
+    LvtEntry.TriggerMode = APIC_TGM_Edge;
     ApicWrite(APIC_ERRLVTR, LvtEntry.Long);
 
     /* Set the IRQL from the PCR */
