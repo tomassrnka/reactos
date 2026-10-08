@@ -41,21 +41,15 @@ NtfsGetSystemTimeAsFileTime(OUT PFILETIME lpFileTime)
 BYTE
 GetSectorsPerCluster(VOID)
 {
-    // Default NTFS cluster size selection based on the volume size,
-    // mirroring the classic Windows defaults (for 512-byte sectors):
-    //   <= 512 MB : 512 B, <= 1 GB : 1 KB, <= 2 GB : 2 KB, else 4 KB.
+    // Default NTFS cluster size by volume size, as current Windows versions
+    // pick it: 4 KiB up to 16 TiB, then doubled per doubling of the volume
+    // (8 KiB up to 32 TiB ... 64 KiB up to 256 TiB).
     ULONGLONG Size = DISK_LEN->Length.QuadPart;
     ULONG     Bps  = BYTES_PER_SECTOR;
-    ULONG     ClusterBytes;
+    ULONG     ClusterBytes = 4096;
 
-    if (Size <= (512ULL * 1024 * 1024))
-        ClusterBytes = 512;
-    else if (Size <= (1024ULL * 1024 * 1024))
-        ClusterBytes = 1024;
-    else if (Size <= (2048ULL * 1024 * 1024))
-        ClusterBytes = 2048;
-    else
-        ClusterBytes = 4096;
+    while (ClusterBytes < 65536 && Size > (16ULL << 40) / 4096 * ClusterBytes)
+        ClusterBytes <<= 1;
 
     if (ClusterBytes < Bps)
         ClusterBytes = Bps;
