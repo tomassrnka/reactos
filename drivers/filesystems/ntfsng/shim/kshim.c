@@ -792,8 +792,9 @@ static void pc_detach_or_list(struct folio *f, struct folio **list)
 	if (f->refcount > 1) {
 		f->mapping = NULL;
 		f->hnext = NULL;
-		__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST);
-		return;
+		/* The other holder may have dropped its reference since the test: then it is freed here. */
+		if (__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST))
+			return;
 	}
 	f->hnext = *list;
 	*list = f;
