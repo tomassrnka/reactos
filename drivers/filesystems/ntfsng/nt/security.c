@@ -64,6 +64,17 @@ NTSTATUS NgReadSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR *Out)
         DPRINT1("ntfsng: invalid security descriptor, using the default\n");
         return NgDefaultSecurity(Out);
     }
+    {
+        /* SeAccessCheck dereferences the owner SID; a descriptor without one (some Windows-written
+         * metadata) would fault, so fall back to the default. */
+        PSID Owner = NULL;
+        BOOLEAN Defaulted;
+        if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(Raw, &Owner, &Defaulted)) || !Owner)
+        {
+            ngc_free(Raw);
+            return NgDefaultSecurity(Out);
+        }
+    }
     Sd = ExAllocatePoolWithTag(PagedPool, Len, TAG_NTFSNG);
     if (Sd)
         RtlCopyMemory(Sd, Raw, Len);

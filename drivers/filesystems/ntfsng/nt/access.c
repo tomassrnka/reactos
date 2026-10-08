@@ -73,12 +73,19 @@ NTSTATUS NgCheckExistingAccess(PACCESS_STATE As, PSECURITY_DESCRIPTOR Sd, PSECUR
     RtlMapGenericMask(&Desired, IoGetFileObjectGenericMapping());
     Maximum = (Desired & MAXIMUM_ALLOWED) != 0;
     Implied &= ~(Desired | Previous);
+    if (!Maximum && (Desired & ~Previous) == 0 && Implied == 0)
+    {
+        /* Nothing left to check (e.g. a bare FILE_READ_ATTRIBUTES already granted, or access 0):
+         * SeAccessCheck fails a zero mask, so grant what is already held. */
+        NgGrant(As, Previous);
+        return STATUS_SUCCESS;
+    }
     SeLockSubjectContext(Subject);
     if (!NgSeCheck(Sd, Subject, As, Desired | Implied, Previous, &Granted, &Status) || Maximum)
     {
         if (ParentSd)
         {
-            if ((Desired & (DELETE | MAXIMUM_ALLOWED)) && !(Previous & DELETE) && !(Granted & DELETE) &&
+            if (((Desired | Implied) & (DELETE | MAXIMUM_ALLOWED)) && !(Previous & DELETE) && !(Granted & DELETE) &&
                 NgSdGrants(ParentSd, Subject, FILE_DELETE_CHILD))
                 FromParent |= DELETE;
             if ((Desired & (FILE_READ_ATTRIBUTES | MAXIMUM_ALLOWED)) && !(Previous & FILE_READ_ATTRIBUTES) &&
@@ -111,6 +118,8 @@ NTSTATUS NgCheckExistingAccess(PACCESS_STATE As, PSECURITY_DESCRIPTOR Sd, PSECUR
 NTSTATUS NgCheckAccessRight(PACCESS_STATE As, PSECURITY_DESCRIPTOR Sd, ACCESS_MASK Right)
 {
     BOOLEAN Ok;
+    if ((As->PreviouslyGrantedAccess & Right) == Right)
+        return STATUS_SUCCESS;   /* already granted (backup/restore, or a parent check) */
     SeLockSubjectContext(&As->SubjectSecurityContext);
     Ok = NgSdGrants(Sd, &As->SubjectSecurityContext, Right);
     SeUnlockSubjectContext(&As->SubjectSecurityContext);

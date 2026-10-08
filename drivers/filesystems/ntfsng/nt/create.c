@@ -471,7 +471,7 @@ static NTSTATUS NgCheckOpen(PNG_VCB Vcb, PACCESS_STATE As, ngc_node *Node, ngc_n
 
     NgAcquireCoreShared(Vcb, &Hold);
     Status = NgReadSecurity(Vcb, Node, &Sd);
-    if (NT_SUCCESS(Status) && Parent && (Desired & MAXIMUM_ALLOWED))
+    if (NT_SUCCESS(Status) && Parent && ((Desired & MAXIMUM_ALLOWED) || (Implied & DELETE)))
         Status = NgReadSecurity(Vcb, Parent, &ParentSd);
     NgReleaseCoreShared(Vcb, &Hold);
     if (NT_SUCCESS(Status))
@@ -519,6 +519,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_CCB RelatedCcb = NULL, Ccb = NULL;
     ngc_node *Node = NULL, *Parent = NULL, *Next;
     BOOLEAN Trailing = FALSE, IsDir, Missing = FALSE, TargetExists = FALSE, Created = FALSE, Shared = FALSE;
+    BOOLEAN CreatedNode = FALSE, StreamChecked = FALSE, SetPaging = FALSE;
+    ACCESS_MASK Effective;
     BOOLEAN Exclusive = (Disposition == FILE_CREATE || Disposition == FILE_SUPERSEDE);
     NG_SHARED_HOLD Hold;
     ULONG_PTR Information = FILE_OPENED;
@@ -754,17 +756,26 @@ walk:
         Err = ngc_open_stream(Vcb->Core, Node, Stream.Buffer, Stream.Length / sizeof(WCHAR), &Next);
         if (Err == -NGC_ENOENT && Disposition != FILE_OPEN && Disposition != FILE_OVERWRITE)
         {
-            /* A named stream of an existing file or directory is created on demand; that needs
-             * write access to the file. */
+            /* A named stream of an existing file or directory is created on demand; it shares the
+             * file's descriptor, so the whole requested access (including WRITE_DAC and DELETE,
+             * which would otherwise rewrite or remove the base) is checked against it first. */
             PSECURITY_DESCRIPTOR FileSd = NULL;
+            struct ngc_stat BSt;
+            ngc_stat(Node, &BSt);
             if (Vcb->ReadOnly)
                 Err = -NGC_EROFS;
+            else if ((BSt.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE)
+            {
+                Status = STATUS_ACCESS_DENIED;   /* no streams on the metadata files */
+                Err = 0;
+            }
             else if (Check && (!NT_SUCCESS(Status = NgReadSecurity(Vcb, Node, &FileSd)) ||
-                               !NT_SUCCESS(Status = NgCheckAccessRight(As, FileSd, FILE_WRITE_DATA))))
+                               !NT_SUCCESS(Status = NgCheckExistingAccess(As, FileSd, NULL, FILE_WRITE_DATA))))
                 Err = 0;
             else if (!(Err = ngc_create_stream(Vcb->Core, Node, Stream.Buffer, Stream.Length / sizeof(WCHAR), &Next)))
             {
                 Created = TRUE;
+                StreamChecked = Check;   /* access already authorised against the base descriptor */
                 Information = FILE_CREATED;
             }
             if (FileSd)
@@ -783,6 +794,8 @@ walk:
         }
     }
 walked:
+    if (NT_SUCCESS(Status) && Missing && Parent)
+        ngc_stat(Parent, &PSt);
     if (NT_SUCCESS(Status) && Missing)
     {
         /* Create the missing last component. */
@@ -799,6 +812,9 @@ walked:
             Status = STATUS_OBJECT_NAME_INVALID;
         else if (WantDir && (FileAttributes & FILE_ATTRIBUTE_TEMPORARY))
             Status = STATUS_INVALID_PARAMETER;
+        else if ((PSt.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE &&
+                 (PSt.mft_ref & 0xffffffffffffULL) != 5)
+            Status = STATUS_ACCESS_DENIED;   /* no new entries inside the metadata directories */
         else if (!NT_SUCCESS(Status = NgReadSecurity(Vcb, Parent, &ParentSd)))
             ;
         else if (Check && !NT_SUCCESS(Status = NgCheckCreateAccess(As, ParentSd, WantDir)))
@@ -816,6 +832,7 @@ walked:
             {
                 unsigned int Attrs = (FileAttributes & NG_SETTABLE_ATTRS) | (WantDir ? 0 : FILE_ATTRIBUTE_ARCHIVE);
                 Created = TRUE;
+                CreatedNode = TRUE;
                 Information = FILE_CREATED;
                 Err = ngc_set_info(Vcb->Core, Node, NULL, Attrs, NG_SETTABLE_ATTRS);
                 /* Never the core's own default (Everyone full access): what the directory passes on. */
@@ -901,7 +918,7 @@ walked:
         if (!IsDir && (St.file_attributes & FILE_ATTRIBUTE_READONLY))
         {
             /* Supersede replaces the file and is allowed; overwrite keeps it and is not. */
-            if ((Access & (FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL)) ||
+            if ((Access & (FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED)) ||
                 Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
             {
                 Status = STATUS_ACCESS_DENIED;
@@ -944,12 +961,12 @@ walked:
         Status = STATUS_OBJECT_NAME_INVALID;
         goto out;
     }
-    if (Check && Created)
+    if (Check && CreatedNode)
     {
-        /* The creator gets what it asked for, whatever the new descriptor grants. */
+        /* The creator of a new file or directory gets what it asked for. */
         NgGrantNewFile(As);
     }
-    else if (Check)
+    else if (Check && !StreamChecked)
     {
         ACCESS_MASK Implied = 0;
         if (Disposition == FILE_SUPERSEDE)
@@ -960,6 +977,15 @@ walked:
         if (!NT_SUCCESS(Status))
             goto out;
     }
+
+    /* The access the handle actually holds, after the check: MAXIMUM_ALLOWED and backup/restore are
+     * resolved here, so the sharing, read-only, image and metadata gates below see the real grant. */
+    Effective = Access;
+    RtlMapGenericMask(&Effective, IoGetFileObjectGenericMapping());
+    if (Check)
+        Effective = As->PreviouslyGrantedAccess;
+    else if (Effective & MAXIMUM_ALLOWED)
+        Effective = (Effective & ~MAXIMUM_ALLOWED) | FILE_ALL_ACCESS;
 
     Ccb = NgAllocateCcb(&Full);
     Fcb = NgAllocateFcb(Vcb);
@@ -975,12 +1001,8 @@ walked:
         RtlCopyMemory(Ccb->Name, Real, RealLen * sizeof(WCHAR));
     }
     Ccb->DeleteOnClose = (Options & FILE_DELETE_ON_CLOSE) != 0;
-    {
-        ACCESS_MASK Mapped = Access;
-        RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
-        Ccb->AppendOnly = (Mapped & FILE_APPEND_DATA) && !(Mapped & FILE_WRITE_DATA);
-        Ccb->Granted = Check ? As->PreviouslyGrantedAccess : Mapped | (As ? As->PreviouslyGrantedAccess : 0);
-    }
+    Ccb->AppendOnly = (Effective & FILE_APPEND_DATA) && !(Effective & FILE_WRITE_DATA);
+    Ccb->Granted = Effective;
     Fcb->Node = Node;
     Fcb->HasNode = TRUE;
     Node = NULL;
@@ -1005,10 +1027,10 @@ walked:
     if ((St.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE && !Fcb->IsRoot)
     {
         /* The NTFS metadata files ($MFT, $LogFile, $Bitmap, ...) are never opened for writing,
-         * truncated, deleted or given a stream; as on Windows, only reads are allowed. */
-        ACCESS_MASK Mapped = Access;
-        RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
-        if ((Mapped & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | WRITE_DAC | WRITE_OWNER | DELETE)) ||
+         * truncated, deleted, retitled or given a stream; as on Windows, only reads are allowed.
+         * The granted access is tested, so MAXIMUM_ALLOWED and backup intent cannot slip a write in. */
+        if ((Effective & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
+                          WRITE_DAC | WRITE_OWNER | DELETE | FILE_DELETE_CHILD)) ||
             Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF || Disposition == FILE_SUPERSEDE ||
             (Options & FILE_DELETE_ON_CLOSE) || Stream.Length)
         {
@@ -1016,22 +1038,12 @@ walked:
             goto out;
         }
     }
-    if (Fcb->IsPagingFile && !(Stack->Flags & SL_OPEN_PAGING_FILE))
+    if (!IsDir && Fcb->SectionObjectPointers.ImageSectionObject &&
+        (Effective & FILE_WRITE_DATA) && !MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForWrite))
     {
-        /* The active paging file is open to Mm only, as on FastFAT. */
+        /* A file mapped as an image (a running program) cannot be opened for writing. */
         Status = STATUS_SHARING_VIOLATION;
         goto out;
-    }
-    if (!IsDir && Fcb->SectionObjectPointers.ImageSectionObject)
-    {
-        /* A file that is mapped as an image (a running program) cannot be opened for writing. */
-        ACCESS_MASK Mapped = Access;
-        RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
-        if ((Mapped & FILE_WRITE_DATA) && !MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForWrite))
-        {
-            Status = STATUS_SHARING_VIOLATION;
-            goto out;
-        }
     }
 
     ExAcquireFastMutex(&Vcb->FcbListLock);
@@ -1054,8 +1066,15 @@ walked:
             else if (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
                 Added = (FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES) & ~Access;
         }
+        BOOLEAN Paging = (Stack->Flags & SL_OPEN_PAGING_FILE) != 0;
         Status = STATUS_SUCCESS;
-        if (Fcb->OpenHandles && Added)
+        /* The active paging file is open to Mm only; both the guard and the promotion happen here,
+         * under the lock, so an ordinary open cannot slip in while Mm promotes the FCB. */
+        if (Fcb->IsPagingFile && !Paging)
+            Status = STATUS_SHARING_VIOLATION;
+        else if (Paging && Fcb->OpenHandles && !Fcb->IsPagingFile)
+            Status = STATUS_SHARING_VIOLATION;
+        if (NT_SUCCESS(Status) && Fcb->OpenHandles && Added)
             Status = IoCheckShareAccess(Access | Added, Stack->Parameters.Create.ShareAccess, FileObject,
                                         &Fcb->ShareAccess, FALSE);
         if (NT_SUCCESS(Status))
@@ -1065,6 +1084,11 @@ walked:
                                             &Fcb->ShareAccess, TRUE);
             else
                 IoSetShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject, &Fcb->ShareAccess);
+        }
+        if (NT_SUCCESS(Status) && Paging && !Fcb->IsPagingFile)
+        {
+            Fcb->IsPagingFile = TRUE;
+            SetPaging = TRUE;   /* roll back if the paging open fails below */
         }
     }
     if (NT_SUCCESS(Status))
@@ -1082,22 +1106,17 @@ walked:
     FileObject->Vpb = Vcb->Vpb;
     if (Stack->Flags & SL_OPEN_PAGING_FILE)
     {
-        /* A paging file is a plain unnamed stream; its page I/O bypasses the core (pagefile.c). */
+        /* A paging file is a plain unnamed stream; its page I/O bypasses the core (pagefile.c).
+         * IsPagingFile was published under the lock above; undo it here if this open is rejected. */
         if (IsDir || Stream.Length || Vcb->ReadOnly)
         {
+            if (SetPaging)
+                Fcb->IsPagingFile = FALSE;
             FileObject->FsContext = NULL;
             FileObject->FsContext2 = NULL;
             Status = STATUS_ACCESS_DENIED;
             goto out;
         }
-        if (Fcb->OpenHandles > 1 && !Fcb->IsPagingFile)
-        {
-            FileObject->FsContext = NULL;
-            FileObject->FsContext2 = NULL;
-            Status = STATUS_SHARING_VIOLATION;
-            goto out;
-        }
-        Fcb->IsPagingFile = TRUE;
     }
 
     if (!Created && (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF || Disposition == FILE_SUPERSEDE))
@@ -1154,6 +1173,8 @@ out:
         ExAcquireFastMutex(&Vcb->FcbListLock);
         IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
         Fcb->OpenHandles--;
+        if (SetPaging)
+            Fcb->IsPagingFile = FALSE;   /* this open promoted it to a paging file, then failed */
         ExReleaseFastMutex(&Vcb->FcbListLock);
     }
     if (Node || Parent)
@@ -1215,7 +1236,16 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
             }
             else
             {
+                /* The file lives on under another name: this FCB is not deleted, so opens of the
+                 * surviving link through it must not see STATUS_DELETE_PENDING. */
                 ngc_stat(Fcb->Node, &Fcb->Stat);   /* the link count dropped */
+                Fcb->DeletePending = FALSE;
+                if (Fcb->DelPath.Buffer)
+                {
+                    ExFreePoolWithTag(Fcb->DelPath.Buffer, TAG_NTFSNG);
+                    Fcb->DelPath.Buffer = NULL;
+                    Fcb->DelPath.Length = Fcb->DelPath.MaximumLength = 0;
+                }
             }
             NgParkNode(Fcb);
             NgAfterChange(Vcb);

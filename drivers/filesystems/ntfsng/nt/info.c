@@ -294,8 +294,8 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
 {
     PNG_VCB Vcb = Fcb->Vcb;
     int Empty = 1;
-    if (Fcb->IsRoot || !Ccb->NameLength)
-        return STATUS_CANNOT_DELETE;
+    if (Fcb->IsRoot || !Ccb->NameLength || Fcb->MftNo < 16)
+        return STATUS_CANNOT_DELETE;   /* the metadata files are never deleted */
     if (!D->DeleteFile)
     {
         Fcb->DeletePending = FALSE;
@@ -426,6 +426,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         return STATUS_INVALID_PARAMETER;
     if (Fcb->IsRoot || Fcb->IsVolume || Fcb->Stream.Length || !Ccb->NameLength)
         return STATUS_INVALID_PARAMETER;
+    if (Fcb->MftNo < 16)
+        return STATUS_ACCESS_DENIED;   /* the metadata files are never renamed or linked */
     if (IsLink && Fcb->IsDirectory)
         return STATUS_FILE_IS_A_DIRECTORY;
     n = R->FileNameLength / sizeof(WCHAR);
@@ -486,6 +488,11 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         Status = NgErrnoToStatus(Err);
         goto out;
     }
+    if (Target && (TSt.mft_ref & 0xffffffffffffULL) < 16)
+    {
+        Status = STATUS_ACCESS_DENIED;   /* never replace a metadata file */
+        goto out;
+    }
     if (Target)
     {
         if ((TSt.mft_ref & 0xffffffffffffULL) == Fcb->MftNo)
@@ -544,7 +551,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                     Status = STATUS_ACCESS_DENIED;
                     goto out;
                 }
-                if (TargetFcb->SectionObjectPointers.SharedCacheMap || TargetFcb->SectionObjectPointers.DataSectionObject)
+                if ((TSt.nlink <= 1) &&
+                    (TargetFcb->SectionObjectPointers.SharedCacheMap || TargetFcb->SectionObjectPointers.DataSectionObject))
                     NgPurgeFrom(TargetFcb, 0);
             }
         }
@@ -611,8 +619,10 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Crtime);
         }
     }
-    if (!Err && TargetFcb)
+    if (!Err && TargetFcb && TSt.nlink <= 1)
     {
+        /* The replaced target had just this name: retire its FCB.  If it had other hard links the
+         * core keeps the file, so the FCB and the surviving links' cached data stay valid. */
         TargetFcb->Deleted = TRUE;
         NgUnlistFcb(TargetFcb);
     }
