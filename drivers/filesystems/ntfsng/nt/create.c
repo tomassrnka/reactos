@@ -130,6 +130,14 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
         NgDereferenceFcb(Fcb);
         return Status;
     }
+    {
+        /* As FastFAT: access to the volume beyond traverse, or the manage-volume privilege. */
+        PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
+        KPROCESSOR_MODE Mode = (Stack->Flags & SL_FORCE_ACCESS_CHECK) ? UserMode : ExGetPreviousMode();
+        Ccb->ManageVolume = Mode == KernelMode ||
+                            (As && (As->PreviouslyGrantedAccess & (SPECIFIC_RIGHTS_ALL ^ FILE_TRAVERSE))) ||
+                            SeSinglePrivilegeCheck(SeExports->SeManageVolumePrivilege, Mode);
+    }
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = Ccb;
     FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;

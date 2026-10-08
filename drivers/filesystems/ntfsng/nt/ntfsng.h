@@ -183,6 +183,7 @@ typedef struct _NG_CCB
     BOOLEAN Enumerated;
     BOOLEAN AnyReturned;
     ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
+    BOOLEAN ManageVolume;           /* a volume open that may lock, unlock and dismount the volume */
     PVOID RetiredPaths;             /* earlier Path buffers of a renamed directory (change notify keeps them) */
 } NG_CCB, *PNG_CCB;
 

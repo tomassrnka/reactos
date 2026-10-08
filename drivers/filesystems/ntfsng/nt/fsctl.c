@@ -368,8 +368,12 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             return STATUS_SUCCESS;
         }
         case FSCTL_LOCK_VOLUME:
+            if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+                return STATUS_INVALID_PARAMETER;
             return NgLockVolume(Vcb, FileObject);
         case FSCTL_UNLOCK_VOLUME:
+            if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+                return STATUS_INVALID_PARAMETER;
             if (!Fcb || !Fcb->IsVolume || Vcb->LockedBy != FileObject)
                 return STATUS_NOT_LOCKED;
             NgUnlockVolume(Vcb);
