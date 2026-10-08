@@ -201,14 +201,14 @@ KvLockAcquireImpl(IN PVOID Lock, IN KV_LOCK_KIND Kind, IN PVOID Site)
 
     if (!KvLdReady) return;
 
-    Ctx = KvLdGetContext(Kind, TRUE);
-    if (Ctx == NULL || Ctx->Depth >= KV_LD_DEPTH)
-        return;                               /* too deep: stop tracking here */
-
-    /* Hold the graph lock at DISPATCH_LEVEL or above so it is never preempted
-     * or re-entered by a kernel APC on the same processor (which would
-     * self-deadlock the raw lock). If we are already above DISPATCH (a queued
-     * spin lock context) no raise is needed. */
+    /*
+     * Raise first, then take the graph lock, then claim the context and touch
+     * the held stack - all inside the critical section. Doing the slot claim
+     * and the depth check under the lock closes a TOCTOU where a colliding
+     * thread could re-use a per-thread slot between the check and the write
+     * and overrun the held stack. Raising to DISPATCH_LEVEL also stops a
+     * same-thread APC from re-entering and self-deadlocking the raw lock.
+     */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
         KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
@@ -217,35 +217,39 @@ KvLockAcquireImpl(IN PVOID Lock, IN KV_LOCK_KIND Kind, IN PVOID Site)
 
     KvLdEnter();
 
-    NewClass = KvLdClassForSite(Site);
-    if (NewClass != 0)
+    Ctx = KvLdGetContext(Kind, TRUE);
+    if (Ctx != NULL && Ctx->Depth < KV_LD_DEPTH)
     {
-        for (i = 0; i < Ctx->Depth; i++)
+        NewClass = KvLdClassForSite(Site);
+        if (NewClass != 0)
         {
-            USHORT Held = Ctx->Held[i].ClassId;
-            if (Held == 0 || Held == NewClass)
-                continue;
-            if (!KvLdTestBit(KvLdRow(Held), NewClass))
+            for (i = 0; i < Ctx->Depth; i++)
             {
-                /* New ordering Held -> NewClass. If NewClass already reaches
-                 * Held, the two locks have been taken in both orders. */
-                if (KvLdReaches(NewClass, Held))
+                USHORT Held = Ctx->Held[i].ClassId;
+                if (Held == 0 || Held == NewClass)
+                    continue;
+                if (!KvLdTestBit(KvLdRow(Held), NewClass))
                 {
-                    KvLdLeave();
-                    KvReport("LOCKDEP", Site,
-                             "lock-order inversion: class %p taken while holding "
-                             "%p, but the reverse order was seen before",
-                             KvLdClassSite[NewClass], KvLdClassSite[Held]);
-                    KvLdEnter();
+                    /* New ordering Held -> NewClass. If NewClass already reaches
+                     * Held, the two locks have been taken in both orders. The
+                     * report runs with the lock held (DbgPrint is safe at
+                     * DISPATCH_LEVEL and nothing else takes this lock). */
+                    if (KvLdReaches(NewClass, Held))
+                        KvReport("LOCKDEP", Site,
+                                 "lock-order inversion: class %p taken while "
+                                 "holding %p, but the reverse order was seen "
+                                 "before",
+                                 KvLdClassSite[NewClass], KvLdClassSite[Held]);
+                    KvLdSetBit(KvLdRow(Held), NewClass);
                 }
-                KvLdSetBit(KvLdRow(Held), NewClass);
             }
         }
+
+        Ctx->Held[Ctx->Depth].Lock = Lock;
+        Ctx->Held[Ctx->Depth].ClassId = NewClass;
+        Ctx->Depth++;
     }
 
-    Ctx->Held[Ctx->Depth].Lock = Lock;
-    Ctx->Held[Ctx->Depth].ClassId = NewClass;
-    Ctx->Depth++;
     KvLdLeave();
     if (Raised) KeLowerIrql(OldIrql);
 }
@@ -261,36 +265,38 @@ KvLockReleaseImpl(IN PVOID Lock, IN KV_LOCK_KIND Kind)
 
     if (!KvLdReady) return;
 
-    Ctx = KvLdGetContext(Kind, FALSE);
-    if (Ctx == NULL || Ctx->Depth == 0) return;
-
-    /* Keep the held-stack edit atomic against an APC or preemption that would
-     * modify the same per-thread slot mid-shift. */
+    /* Same discipline as acquire: raise, take the graph lock, then touch the
+     * context, so the slot, the held stack and the owner field are all edited
+     * under one serialized, non-preemptible section. */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
         KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
         Raised = TRUE;
     }
 
-    /* Remove the matching lock (usually the top; handle out-of-order too). */
-    for (i = Ctx->Depth; i > 0; i--)
+    KvLdEnter();
+
+    Ctx = KvLdGetContext(Kind, FALSE);
+    if (Ctx != NULL && Ctx->Depth != 0)
     {
-        if (Ctx->Held[i - 1].Lock == Lock)
+        /* Remove the matching lock (usually the top; handle out-of-order). */
+        for (i = Ctx->Depth; i > 0; i--)
         {
-            ULONG j;
-            for (j = i - 1; j + 1 < Ctx->Depth; j++)
-                Ctx->Held[j] = Ctx->Held[j + 1];
-            Ctx->Depth--;
-            break;
+            if (Ctx->Held[i - 1].Lock == Lock)
+            {
+                ULONG j;
+                for (j = i - 1; j + 1 < Ctx->Depth; j++)
+                    Ctx->Held[j] = Ctx->Held[j + 1];
+                Ctx->Depth--;
+                break;
+            }
         }
+
+        if (Ctx->Depth == 0 && Ctx->Owner == KeGetCurrentThread())
+            Ctx->Owner = NULL;                /* release the per-thread slot */
     }
 
-    if (Ctx->Depth == 0 && Ctx->Owner != NULL &&
-        Ctx->Owner == KeGetCurrentThread())
-    {
-        Ctx->Owner = NULL;                    /* release the per-thread slot */
-    }
-
+    KvLdLeave();
     if (Raised) KeLowerIrql(OldIrql);
 }
 
