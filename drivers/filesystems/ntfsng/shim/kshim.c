@@ -617,9 +617,26 @@ static struct folio *pc_find_locked(struct address_space *m, pgoff_t idx)
 		if (f->index == idx) return f;
 	return NULL;
 }
+/*
+ * Folio data: one page straight from the pool, which hands out whole pages page aligned.  Through
+ * kmalloc's header a folio took 4,128 bytes (two pages) and its data was only 32-byte aligned,
+ * too little for storage stacks that need sector-aligned buffers for unbounced transfers.
+ */
+static void *pc_data_alloc(void)
+{
+	void *p = ngos_alloc(PAGE_SIZE);
+	if (p)
+		memset(p, 0, PAGE_SIZE);
+	return p;
+}
+static void pc_data_free(void *p)
+{
+	if (p)
+		ngos_free(p);
+}
 static void pc_free(struct folio *f)
 {
-	kfree(f->data);
+	pc_data_free(f->data);
 	kfree(f);
 	__atomic_sub_fetch(&kshim_pc_pages, 1, __ATOMIC_SEQ_CST);
 }
@@ -662,7 +679,7 @@ struct page *alloc_page(gfp_t g)
 	struct folio *f = kzalloc(sizeof(struct folio), g);
 	if (!f)
 		return NULL;
-	f->data = kzalloc(PAGE_SIZE, g);
+	f->data = pc_data_alloc();
 	if (!f->data) { kfree(f); return NULL; }
 	f->refcount = 1;
 	__atomic_add_fetch(&kshim_pc_pages, 1, __ATOMIC_SEQ_CST);
@@ -691,7 +708,7 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 		nf = kzalloc(sizeof(*nf), GFP_NOFS);
 		if (!nf)
 			return ERR_PTR(-ENOMEM);
-		nf->data = kzalloc(PAGE_SIZE, GFP_NOFS);
+		nf->data = pc_data_alloc();
 		if (!nf->data) { kfree(nf); return ERR_PTR(-ENOMEM); }
 		nf->mapping = m; nf->index = idx; nf->refcount = 2;  /* the cache's own reference + ours */
 		irql = ngos_spin_lock(&kshim_pc_lock);
@@ -712,7 +729,7 @@ struct folio *__filemap_get_folio(struct address_space *m, pgoff_t idx, fgf_t fg
 			__atomic_add_fetch(&kshim_pc_pages, 1, __ATOMIC_SEQ_CST);
 		}
 		ngos_spin_unlock(&kshim_pc_lock, irql);
-		if (nf) { kfree(nf->data); kfree(nf); }
+		if (nf) { pc_data_free(nf->data); kfree(nf); }
 		while (drop) { struct folio *n = drop->hnext; pc_free(drop); drop = n; }
 		/* A full block-device mapping of dirty folios (the $LogFile emptying) is written back here. */
 		if (eager)
