@@ -54,6 +54,9 @@ extern "C"
 /* CPUID 0x80000001 - EDX extended flags */
 #define X86_FEATURE_NX          0x00100000 /* NX support present */
 
+/* The vector of IPI_LEVEL requests; the APIC HAL connects it to KiIpiServiceRoutine */
+#define KI_IPI_VECTOR 0xE1
+
 //
 // One-liners for getting and setting special purpose registers in portable code
 //

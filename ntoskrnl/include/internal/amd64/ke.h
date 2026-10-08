@@ -89,6 +89,9 @@ extern "C" {
 #define MSR_APIC_BASE_X2APIC_ENABLE 0x400
 #define X2APIC_MSR_EOI 0x80B
 
+/* The vector of IPI_LEVEL requests (KiIpiInterrupt); the APIC HAL uses the same */
+#define KI_IPI_VECTOR 0xE1
+
 #ifndef __ASM__
 
 extern SIZE_T KeXStateLength;

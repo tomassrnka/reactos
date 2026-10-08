@@ -36,6 +36,11 @@ static ULONG KiHvPrivileges;
 static ULONG KiHvRecommendations;
 static BOOLEAN KiHvSuppressed;
 
+/* The HAL put the local APIC in x2APIC mode: one IPI is one ICR write */
+static BOOLEAN KiHvX2Apic;
+#define KI_HV_MSR_APIC_BASE             0x1B
+#define KI_HV_APIC_BASE_X2APIC_ENABLE   (1ULL << 10)
+
 /* Hypervisor index of each processor; HV_ANY_VP until the processor read its own */
 static volatile ULONG KiHvVpIndex[MAXIMUM_PROCESSORS];
 
@@ -342,6 +347,8 @@ KiHvInitializeHypercalls(VOID)
     for (i = 0; i < MAXIMUM_PROCESSORS; i++)
         KiHvInputGpa[i] = MmGetPhysicalAddress(KiHvInput[i]).QuadPart;
 
+    KiHvX2Apic = (__readmsr(KI_HV_MSR_APIC_BASE) & KI_HV_APIC_BASE_X2APIC_ENABLE) != 0;
+
     KiHvHypercallPage = Page;
     KeMemoryBarrier();
     KiHvEnlightenments = Enlightenments;
@@ -418,6 +425,66 @@ KiHvFlushTb(
     KiHvReleaseInput(Processor, Enable);
 
     return KiHvCheckResult(Result, KI_HV_REMOTE_FLUSH);
+}
+
+/*
+ * Sends the IPI_LEVEL interrupt to the target processors with one
+ * hypercall (10.5), except a single target in x2APIC mode. Returns FALSE
+ * when the caller must ask the HAL.
+ */
+BOOLEAN
+FASTCALL
+KiHvRequestIpi(
+    _In_ KAFFINITY TargetSet)
+{
+    PULONG64 Input;
+    ULONG64 Mask, Result;
+    ULONG Processor, Banks;
+    BOOLEAN Enable;
+
+    if (!(KiHvEnlightenments & KI_HV_CLUSTER_IPI))
+        return FALSE;
+
+    /* In x2APIC mode one target is one ICR write, which measured cheaper
+       than the hypercall on KVM; in xAPIC mode the HAL needs more accesses */
+    if (KiHvX2Apic && !(TargetSet & (TargetSet - 1)))
+        return FALSE;
+
+    /* Like an x2APIC ICR write, a hypercall may not order earlier stores */
+    KeMemoryBarrier();
+
+    if (KiHvGetVpMask(TargetSet, &Mask))
+    {
+        /* Fast hypercall: the vector and VTL, then the processor mask */
+        Result = KiHvHypercall(HvCallSendSyntheticClusterIpi | HV_HYPERCALL_FAST,
+                               KI_IPI_VECTOR,
+                               Mask);
+        return KiHvCheckResult(Result, KI_HV_CLUSTER_IPI);
+    }
+
+    if (!(KiHvEnlightenments & KI_HV_EX_PROCESSOR_SETS))
+        return FALSE;
+
+    Input = KiHvAcquireInput(&Processor, &Enable);
+    if (!Input)
+        return FALSE;
+
+    /* Vector, then VTL 0 with the reserved bytes */
+    Input[0] = KI_IPI_VECTOR;
+    Banks = KiHvBuildVpSet(TargetSet, &Input[1]);
+    if (!Banks)
+    {
+        KiHvReleaseInput(Processor, Enable);
+        return FALSE;
+    }
+
+    Result = KiHvHypercall(HvCallSendSyntheticClusterIpiEx |
+                           ((ULONG64)Banks << HV_HYPERCALL_VARIABLE_HEADER_SHIFT),
+                           KiHvInputGpa[Processor],
+                           0);
+    KiHvReleaseInput(Processor, Enable);
+
+    return KiHvCheckResult(Result, KI_HV_CLUSTER_IPI);
 }
 
 #endif /* CONFIG_SMP */

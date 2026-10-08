@@ -43,7 +43,7 @@ KIDT_INIT KiInterruptInitTable[] =
     {0x2C, 0x03, 0x00, KiRaiseAssertion},
     {0x2D, 0x03, 0x00, KiDebugServiceTrap},
     {0x2F, 0x00, 0x00, KiDpcInterrupt},
-    {0xE1, 0x00, 0x00, KiIpiInterrupt},
+    {KI_IPI_VECTOR, 0x00, 0x00, KiIpiInterrupt},
     {0, 0, 0, 0}
 };
 

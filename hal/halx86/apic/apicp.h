@@ -58,6 +58,9 @@
     #define APIC_PROFILE_LEVEL HIGH_LEVEL
 #endif
 
+/* The kernel may send its IPIs itself, through a hypervisor */
+C_ASSERT(APIC_IPI_VECTOR == KI_IPI_VECTOR);
+
 #define APIC_MAX_IRQ 24
 #define APIC_FREE_VECTOR 0xFF
 #define APIC_RESERVED_VECTOR 0xFE

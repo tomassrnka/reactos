@@ -128,6 +128,11 @@ KiHvFlushTb(
     _In_ BOOLEAN NonGlobalOnly,
     _In_opt_ PVOID Address,
     _In_ ULONG NumberOfPages);
+
+BOOLEAN
+FASTCALL
+KiHvRequestIpi(
+    _In_ KAFFINITY TargetSet);
 #endif
 
 #ifdef __cplusplus

@@ -64,6 +64,20 @@ extern KSPIN_LOCK KiReverseStallIpiLock;
 
 #ifdef CONFIG_SMP
 
+/* Interrupts the target processors at IPI_LEVEL */
+FORCEINLINE
+VOID
+KiIpiRequestInterrupt(
+    _In_ KAFFINITY TargetSet)
+{
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* One hypercall for the whole set when the hypervisor recommends it */
+    if (KiHvRequestIpi(TargetSet))
+        return;
+#endif
+    HalRequestIpi(TargetSet);
+}
+
 static
 VOID
 KiIpiPublishPacket(
@@ -82,6 +96,53 @@ KiIpiPublishPacket(
     KeMemoryBarrier();
 }
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+/*
+ * With the IPI hypercall one interrupt request reaches several processors:
+ * claim every free slot, then signal the claimed targets together. Interrupts
+ * stay disabled from the first claim to the signal, as below.
+ */
+static
+VOID
+KiIpiDeliverPacketBatched(
+    _In_ PKPRCB Prcb,
+    _In_ KAFFINITY TargetSet)
+{
+    KAFFINITY Remaining = TargetSet, Claimed, Set;
+    PKPRCB TargetPrcb;
+    ULONG Processor;
+    BOOLEAN Enable;
+
+    while (Remaining)
+    {
+        Claimed = 0;
+        Enable = KeDisableInterrupts();
+
+        for (Set = Remaining; Set; Set &= Set - 1)
+        {
+            BitScanForwardAffinity(&Processor, Set);
+            TargetPrcb = KiProcessorBlock[Processor];
+
+            if (InterlockedCompareExchangePointer((PVOID*)&KiIpiSlot(TargetPrcb), Prcb, NULL) == NULL)
+            {
+                KiIpiJoinTargetSet(Prcb, AFFINITY_MASK(Processor));
+                KiIpiOrSummary(TargetPrcb, IPI_PACKET_READY);
+                Claimed |= AFFINITY_MASK(Processor);
+            }
+        }
+
+        if (Claimed)
+            KiIpiRequestInterrupt(Claimed);
+
+        KeRestoreInterrupts(Enable);
+
+        Remaining &= ~Claimed;
+        if (Remaining)
+            YieldProcessor();
+    }
+}
+#endif
+
 static
 VOID
 KiIpiDeliverPacket(
@@ -91,6 +152,14 @@ KiIpiDeliverPacket(
     KAFFINITY Remaining = TargetSet;
     PKPRCB TargetPrcb;
     ULONG Processor;
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    if (KiHvEnlightenments & KI_HV_CLUSTER_IPI)
+    {
+        KiIpiDeliverPacketBatched(Prcb, TargetSet);
+        return;
+    }
+#endif
 
     while (Remaining)
     {
@@ -191,7 +260,7 @@ KiIpiSend(IN KAFFINITY TargetProcessors,
         KiIpiOrSummary(KiProcessorBlock[Processor], IpiRequest);
     }
 
-    HalRequestIpi(TargetProcessors);
+    KiIpiRequestInterrupt(TargetProcessors);
 #else
     /* Uniprocessor systems have no other processor to signal */
     ASSERT(FALSE);
