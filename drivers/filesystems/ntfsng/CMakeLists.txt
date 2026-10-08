@@ -43,6 +43,7 @@ list(APPEND CORE_SOURCE
     core/ngfsck.c)
 
 list(APPEND NT_SOURCE
+    nt/access.c
     nt/create.c
     nt/diag.c
     nt/dirctl.c
@@ -72,3 +73,4 @@ add_subdirectory(tools/ngfeat)
 add_subdirectory(tools/ngbench)
 add_subdirectory(tools/ngfail)
 add_subdirectory(tools/ngedge)
+add_subdirectory(tools/ngvol)

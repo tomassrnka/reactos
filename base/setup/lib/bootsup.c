@@ -1404,6 +1404,53 @@ InstallNtfsBootcodeToPartition(
     return STATUS_SUCCESS;
 }
 
+/**
+ * @brief
+ * Adds to the 'freeldr.ini' of the system partition an entry that boots the
+ * volume boot record of another partition from the disk, e.g. the boot
+ * partition of a Windows installation that is no longer the active one.
+ **/
+NTSTATUS
+NTAPI
+AddPartitionBootEntry(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ ULONG DiskNumber,
+    _In_ ULONG PartitionNumber,
+    _In_ PCWSTR Section,
+    _In_ PCWSTR Description)
+{
+    NTSTATUS Status;
+    PVOID BootStoreHandle;
+    UCHAR xxBootEntry[FIELD_OFFSET(BOOT_STORE_ENTRY, OsOptions) + sizeof(BOOTSECTOR_OPTIONS)];
+    PBOOT_STORE_ENTRY BootEntry = (PBOOT_STORE_ENTRY)&xxBootEntry;
+    PBOOTSECTOR_OPTIONS Options = (PBOOTSECTOR_OPTIONS)&BootEntry->OsOptions;
+    WCHAR BootPath[MAX_PATH];
+
+    RtlStringCchPrintfW(BootPath, _countof(BootPath),
+                        L"multi(0)disk(0)rdisk(%lu)partition(%lu)",
+                        DiskNumber, PartitionNumber);
+
+    Status = OpenBootStore(&BootStoreHandle, SystemRootPath->Buffer, FreeLdr,
+                           BS_OpenExisting, BS_ReadWriteAccess);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    BootEntry->Version = FreeLdr;
+    BootEntry->BootFilePath = NULL;
+    BootEntry->OsOptionsLength = sizeof(BOOTSECTOR_OPTIONS);
+    RtlCopyMemory(Options->Signature,
+                  BOOTSECTOR_OPTIONS_SIGNATURE,
+                  RTL_FIELD_SIZE(BOOTSECTOR_OPTIONS, Signature));
+    /* No boot sector file: FreeLoader reads the partition's own boot record */
+    Options->BootPath = BootPath;
+    Options->FileName = L"";
+    BootEntry->FriendlyName = Description;
+    Status = AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(Section));
+
+    CloseBootStore(BootStoreHandle);
+    return Status;
+}
+
 static
 NTSTATUS
 InstallVBRToPartition(

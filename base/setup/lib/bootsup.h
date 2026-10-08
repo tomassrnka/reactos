@@ -18,6 +18,15 @@ InstallBootManagerAndBootEntries(
 
 NTSTATUS
 NTAPI
+AddPartitionBootEntry(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ ULONG DiskNumber,
+    _In_ ULONG PartitionNumber,
+    _In_ PCWSTR Section,
+    _In_ PCWSTR Description);
+
+NTSTATUS
+NTAPI
 InstallBootcodeToRemovable(
     _In_ ARCHITECTURE_TYPE ArchType,
     _In_ PCUNICODE_STRING RemovableRootPath,

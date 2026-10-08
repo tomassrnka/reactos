@@ -194,7 +194,7 @@ int ngc_init(void)
 	return err;
 }
 
-void ngc_umount(ngc_vol *v);
+void ngc_umount(ngc_vol *v, int discard);
 
 /* Mount passes: read-only, the read-only check of a volume that is to go read-write, the write pass. */
 enum { NGC_PASS_RO, NGC_PASS_CHECK, NGC_PASS_WRITE };
@@ -299,7 +299,7 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			if (fc->ops->free)
 				fc->ops->free(fc);
 			kfree(fc);
-			ngc_umount(v);
+			ngc_umount(v, 0);
 			return NGC_NEED_WRITE_PASS;
 		}
 		if (!*why_ro) {
@@ -385,10 +385,15 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_WRITE, out, why_ro);
 }
 
-void ngc_umount(ngc_vol *v)
+void ngc_umount(ngc_vol *v, int discard)
 {
 	struct super_block *sb = v->sb;
 	int errors;
+	if (discard) {
+		/* Pending journal pages are dropped and the core sees a read-only volume: put_super writes nothing. */
+		kshim_jnl_deactivate(v->bdev);
+		sb->s_flags |= SB_RDONLY;
+	}
 	kshim_icache_flush(sb, 1);
 	if (sb->s_root) {
 		iput(sb->s_root->d_inode);
@@ -404,6 +409,7 @@ void ngc_umount(ngc_vol *v)
 	if (v->watched)
 		kshim_watch_del(v->watched);
 	kfree(v->jv);
+	kfree(v->bounce);
 	kfree(sb);
 	kshim_bdev_close(v->bdev);
 	kfree(v);
