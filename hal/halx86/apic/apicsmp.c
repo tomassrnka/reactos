@@ -99,9 +99,7 @@ ApicRequestGlobalInterrupt(
     }
     else
     {
-        /* Write the low dword last to send the interrupt */
-        ApicWrite(APIC_ICR1, Icr.Long1);
-        ApicWrite(APIC_ICR0, Icr.Long0);
+        ApicWriteIcr(Icr.Long1, Icr.Long0);
     }
 
     /* Finally, restore the original interrupt state */

@@ -26,6 +26,9 @@ static BOOLEAN HalpHvSuppressed;
 PHV_REFERENCE_TSC_PAGE HalpHvReferenceTscPage;
 static BOOLEAN HalpHvReferenceTscInvalid;
 
+/* EOI, ICR and TPR through the synthetic MSRs instead of the xAPIC page (10.2) */
+BOOLEAN HalpHvApicMsrs;
+
 /* One VP assist page per processor for EOI assist (7.8.7, 10.3) */
 static PUCHAR HalpHvAssistPages;
 static ULONG64 HalpHvAssistPagesPhysical;
@@ -200,6 +203,15 @@ HalpHvInitialize(
             HalpHvAssistPageCount = Count;
         }
     }
+
+    /* The x2APIC registers are MSRs already; this replaces the memory-mapped
+       accesses of the xAPIC mode, each an intercept the hypervisor decodes */
+    if ((HalpHvPrivileges & HV_ACCESS_INTR_CTRL_REGS) &&
+        (HalpHvRecommendations & HV_RECOMMEND_APIC_MSRS) &&
+        !HalpX2ApicEnabled)
+    {
+        HalpHvApicMsrs = TRUE;
+    }
 }
 
 /* Reports the enlightenments once the debugger is up */
@@ -217,9 +229,10 @@ HalpHvReport(VOID)
             HalpHvPrivileges, HalpHvFeatures, HalpHvRecommendations);
     if (HalpHvReferenceTscInvalid)
         DPRINT1("The reference TSC page is not valid, keeping the TSC\n");
-    DPRINT1("Hypervisor enlightenments (HAL): reference time %s, EOI assist %s\n",
+    DPRINT1("Hypervisor enlightenments (HAL): reference time %s, EOI assist %s, APIC MSRs %s\n",
             HalpHvReferenceTscPage ? "yes" : "no",
-            HalpHvAssistPages ? "yes" : "no");
+            HalpHvAssistPages ? "yes" : "no",
+            HalpHvApicMsrs ? "yes" : "no");
 }
 
 /*

@@ -321,6 +321,7 @@ typedef union _IOAPIC_REDIRECTION_REGISTER
 #include <x86x64/HvTlfs.h>
 
 extern BOOLEAN HalpX2ApicEnabled;
+extern BOOLEAN HalpHvApicMsrs;
 
 FORCEINLINE
 ULONG
@@ -328,6 +329,15 @@ ApicRead(APIC_REGISTER Register)
 {
     if (HalpX2ApicEnabled)
         return (ULONG)__readmsr(X2APIC_MSR_BASE + (Register >> 4));
+
+    /* The hypervisor's MSRs for the registers it accelerates (TLFS 10.2) */
+    if (HalpHvApicMsrs)
+    {
+        if (Register == APIC_ICR0)
+            return (ULONG)__readmsr(HV_X64_MSR_ICR);
+        if (Register == APIC_TPR)
+            return (ULONG)__readmsr(HV_X64_MSR_TPR);
+    }
 
     return READ_REGISTER_ULONG((PULONG)(APIC_BASE + Register));
 }
@@ -342,7 +352,39 @@ ApicWrite(APIC_REGISTER Register, ULONG Value)
         return;
     }
 
+    if (HalpHvApicMsrs)
+    {
+        if (Register == APIC_EOI)
+        {
+            __writemsr(HV_X64_MSR_EOI, Value);
+            return;
+        }
+        if (Register == APIC_TPR)
+        {
+            __writemsr(HV_X64_MSR_TPR, Value);
+            return;
+        }
+    }
+
     WRITE_REGISTER_ULONG((PULONG)(APIC_BASE + Register), Value);
+}
+
+/* Sends an interrupt in xAPIC mode */
+FORCEINLINE
+VOID
+ApicWriteIcr(ULONG IcrHigh, ULONG IcrLow)
+{
+    /* One MSR write for both halves (TLFS 10.2), not serializing */
+    if (HalpHvApicMsrs)
+    {
+        _mm_mfence();
+        __writemsr(HV_X64_MSR_ICR, ((ULONG64)IcrHigh << 32) | IcrLow);
+        return;
+    }
+
+    /* Write the low dword last to send the interrupt */
+    ApicWrite(APIC_ICR1, IcrHigh);
+    ApicWrite(APIC_ICR0, IcrLow);
 }
 
 /* A WRMSR to the x2APIC is not serializing: make earlier stores visible before an IPI */

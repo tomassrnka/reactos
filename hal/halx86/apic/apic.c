@@ -237,9 +237,7 @@ ApicRequestSelfInterrupt(IN UCHAR Vector, UCHAR TriggerMode)
             IcrStatus.Long0 = ApicRead(APIC_ICR0);
         } while (IcrStatus.DeliveryStatus);
 
-        /* Write high dword first, then low dword to send the interrupt */
-        ApicWrite(APIC_ICR1, Icr.Long1);
-        ApicWrite(APIC_ICR0, Icr.Long0);
+        ApicWriteIcr(Icr.Long1, Icr.Long0);
     }
 
     /* Wait until we see the interrupt request.
