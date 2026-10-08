@@ -76,6 +76,8 @@ int ngc_lookup(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned i
 		unsigned short *real, unsigned int *real_len);
 int ngc_open_stream(ngc_vol *v, ngc_node *base, const unsigned short *sname, unsigned int len, ngc_node **out);
 int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out);
+int ngc_iget_by_id(ngc_vol *v, unsigned long long mft_no, ngc_node **out);	/* caller-supplied number */
+void ngc_medium_gone(ngc_vol *v);
 void ngc_put(ngc_node *n);
 void ngc_stat(ngc_node *n, struct ngc_stat *st);
 int ngc_readdir(ngc_vol *v, ngc_node *dir, ngc_filldir_t fn, void *ctx);

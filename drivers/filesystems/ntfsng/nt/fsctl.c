@@ -31,11 +31,14 @@ NTSTATUS NgCheckMedium(PNG_VCB Vcb)
     if (Vcb->WrongMedia)
         return STATUS_WRONG_VOLUME;
     Status = NgDeviceIoctlEx(Vcb->StorageDevice, IOCTL_DISK_CHECK_VERIFY, NULL, 0, FALSE);
+    if (!NT_SUCCESS(Status) && Status != STATUS_VERIFY_REQUIRED)
+        return Status;      /* no medium, device error: nothing cached may be used */
     if (NT_SUCCESS(Status) && !(Real->Flags & DO_VERIFY_VOLUME))
     {
         /* Some drivers (floppy) notice a change only when they touch the medium: read one sector. */
         PVOID Sector = ExAllocatePoolWithTag(NonPagedPool, Vcb->SectorSize, TAG_NTFSNG);
-        if (Sector)
+        if (!Sector)
+            return STATUS_INSUFFICIENT_RESOURCES;
         {
             IO_STATUS_BLOCK Iosb;
             LARGE_INTEGER Offset;
@@ -44,6 +47,7 @@ NTSTATUS NgCheckMedium(PNG_VCB Vcb)
             Offset.QuadPart = 0;
             KeInitializeEvent(&Event, NotificationEvent, FALSE);
             Irp = IoBuildSynchronousFsdRequest(IRP_MJ_READ, Vcb->StorageDevice, Sector, Vcb->SectorSize, &Offset, &Event, &Iosb);
+            Status = STATUS_INSUFFICIENT_RESOURCES;
             if (Irp)
             {
                 Status = IoCallDriver(Vcb->StorageDevice, Irp);
@@ -54,13 +58,17 @@ NTSTATUS NgCheckMedium(PNG_VCB Vcb)
                 }
             }
             ExFreePoolWithTag(Sector, TAG_NTFSNG);
+            if (!NT_SUCCESS(Status) && Status != STATUS_VERIFY_REQUIRED)
+                return Status;
         }
     }
     if (Status == STATUS_VERIFY_REQUIRED || (Real->Flags & DO_VERIFY_VOLUME))
     {
-        IoVerifyVolume(Real, FALSE);
+        Status = IoVerifyVolume(Real, FALSE);
         if (Vcb->WrongMedia)
             return STATUS_WRONG_VOLUME;
+        if (!NT_SUCCESS(Status))
+            return Status;
     }
     return STATUS_SUCCESS;
 }
@@ -552,8 +560,13 @@ static NTSTATUS NgVerifyVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Boot = ExAllocatePoolWithTag(NonPagedPool, 4096, TAG_NTFSNG);
     if (!Boot)
         return STATUS_INSUFFICIENT_RESOURCES;
-    if (!ngos_dev_read(Vcb->StorageDevice, 0, Boot, Vcb->SectorSize) &&
-        RtlCompareMemory(Boot + 3, "NTFS    ", 8) == 8 &&
+    if (ngos_dev_read(Vcb->StorageDevice, 0, Boot, Vcb->SectorSize))
+    {
+        /* Unreadable is not "another medium": keep the volume, verify again later. */
+        ExFreePoolWithTag(Boot, TAG_NTFSNG);
+        return STATUS_IO_DEVICE_ERROR;
+    }
+    if (RtlCompareMemory(Boot + 3, "NTFS    ", 8) == 8 &&
         *(ULONGLONG UNALIGNED *)(Boot + 0x48) == Vcb->Info.serial &&
         *(ULONGLONG UNALIGNED *)(Boot + 0x28) == Vcb->BootSectors &&
         *(USHORT UNALIGNED *)(Boot + 0x0b) == Vcb->Info.sector_size)
@@ -567,6 +580,7 @@ static NTSTATUS NgVerifyVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgAcquireCore(Vcb);
         Vcb->WrongMedia = TRUE;
         Vcb->ReadOnly = TRUE;
+        ngc_medium_gone(Vcb->Core);     /* requests already past dispatch fail in the core */
         NgReleaseCore(Vcb);
         DPRINT1("ntfsng: volume %08lx: the medium was changed; the volume is no longer usable\n", Vpb->SerialNumber);
     }

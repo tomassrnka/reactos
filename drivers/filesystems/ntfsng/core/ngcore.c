@@ -1100,6 +1100,8 @@ long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned i
 	struct runlist_element *rl;
 	int err;
 
+	if (v->bdev->kshim_gone)
+		return -EIO;
 	if (!NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) ||
 	    ((uintptr_t)buf & 3) || ((off | len) & (bs - 1)) || kshim_mapping_dirty(vi->i_mapping))
 		return -EAGAIN;
@@ -1166,6 +1168,13 @@ void ngc_debug_dump(void)
 void ngc_icache_trim(ngc_vol *v)
 {
 	kshim_icache_trim(v->sb);
+}
+
+/* The medium was replaced: no device I/O of this volume may happen any more (caller holds the volume lock). */
+void ngc_medium_gone(ngc_vol *v)
+{
+	v->bdev->kshim_gone = 1;
+	v->sb->s_flags |= SB_RDONLY;
 }
 
 int ngc_is_rw(ngc_vol *v)

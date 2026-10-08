@@ -34,6 +34,9 @@ static NTSTATUS NgPagingDevIo(PNG_VCB Vcb, UCHAR Major, ULONGLONG Dev, PMDL Mdl,
     NTSTATUS Status;
     PIRP Irp;
 
+    /* Paging I/O cannot wait for the core lock: a transfer issued before a verify completes still goes out. */
+    if (Vcb->WrongMedia)
+        return STATUS_FILE_INVALID;
     Irp = IoAllocateIrp(Target->StackSize, FALSE);
     if (!Irp)
         return STATUS_INSUFFICIENT_RESOURCES;

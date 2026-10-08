@@ -20,6 +20,7 @@ static NTSTATUS NgReadVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Lengt
     PUCHAR Buffer, Bounce;
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG Done = 0;
+    NG_SHARED_HOLD Hold;
 
     if (((ULONG)Offset | Length) & (Vcb->SectorSize - 1) || Offset < 0)
         return STATUS_INVALID_PARAMETER;
@@ -60,10 +61,21 @@ static NTSTATUS NgReadVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Lengt
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto out;
     }
+    /* Per chunk under the core lock: a verify cannot mark the medium gone between the check and the read. */
     while (Done < Length)
     {
         ULONG n = min(Length - Done, 64 * 1024);
-        if (ngos_dev_read(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n))
+        BOOLEAN Failed;
+        NgAcquireCoreShared(Vcb, &Hold);
+        if (Vcb->WrongMedia)
+        {
+            NgReleaseCoreShared(Vcb, &Hold);
+            Status = STATUS_FILE_INVALID;
+            break;
+        }
+        Failed = ngos_dev_read(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n) != 0;
+        NgReleaseCoreShared(Vcb, &Hold);
+        if (Failed)
         {
             Status = Done ? STATUS_SUCCESS : STATUS_END_OF_FILE;
             break;

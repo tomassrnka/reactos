@@ -596,6 +596,8 @@ static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, s
 }
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len)
 {
+	if (b->kshim_gone)
+		return -EIO;
 	if (write) {
 		struct super_block *sb = b->bd_super;
 		if (!sb || (sb_rdonly(sb) && !b->kshim_remounting)) {

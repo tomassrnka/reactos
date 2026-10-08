@@ -744,7 +744,12 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     /* Volumes are never dismounted, so the pointers stay valid outside the list lock. */
     ExAcquireFastMutex(&NgGlobal.VcbListLock);
     for (Entry = NgGlobal.VcbList.Flink; Entry != &NgGlobal.VcbList && Count < RTL_NUMBER_OF(Vcbs); Entry = Entry->Flink)
-        Vcbs[Count++] = CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks);
+    {
+        /* Volumes whose medium went away stay listed: they must not take the slots of live ones. */
+        PNG_VCB V = CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks);
+        if (!V->WrongMedia)
+            Vcbs[Count++] = V;
+    }
     ExReleaseFastMutex(&NgGlobal.VcbListLock);
     for (i = 0; i < Count; i++)
     {
