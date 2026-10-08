@@ -306,6 +306,7 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     /* Get the PRCB and lock it */
     Prcb = KiProcessorBlock[Processor];
     KiAcquirePrcbLock(Prcb);
+    ASSERT(Thread != Prcb->IdleThread);
 
 #ifndef CONFIG_SMP
     /* Check if we have an idle summary */
@@ -332,6 +333,16 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         /* Check if priority changed */
         if (OldPriority > NextThread->Priority)
         {
+            /* Never ready the idle thread: replace it and leave it Running */
+            if (NextThread == Prcb->IdleThread)
+            {
+                NextThread->State = Running;
+                Thread->State = Standby;
+                Prcb->NextThread = Thread;
+                KiReleasePrcbLock(Prcb);
+                return;
+            }
+
             /* Preempt the thread */
             NextThread->Preempted = TRUE;
 
