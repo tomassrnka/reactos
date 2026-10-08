@@ -277,7 +277,21 @@ VOID NgParkNode(PNG_FCB Fcb)
 }
 
 /* Fills Fcb->Stat and the Cc file sizes from the core inode. */
+static VOID NgFillStatLocked(PNG_FCB Fcb);
+
+/*
+ * Refreshes Fcb->Stat and the FCB header sizes from the core.  The main resource (shared) keeps
+ * this away from size changes, which hold it exclusive: a size sampled before an extending write
+ * and stored after it would make the next write shrink the file.
+ */
 VOID NgFillStat(PNG_FCB Fcb)
+{
+    ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
+    NgFillStatLocked(Fcb);
+    ExReleaseResourceLite(Fcb->Header.Resource);
+}
+
+static VOID NgFillStatLocked(PNG_FCB Fcb)
 {
     LONGLONG Alloc;
     NG_SHARED_HOLD Hold;
