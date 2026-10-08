@@ -230,25 +230,37 @@ CcPurgeCacheSection (
         Vacb = CONTAINING_RECORD(ListEntry, ROS_VACB, CacheMapVacbListEntry);
         ListEntry = ListEntry->Flink;
 
-        /* Skip VACBs outside the range, or only partially in range */
-        if (Vacb->FileOffset.QuadPart < StartOffset)
-        {
-            continue;
-        }
-        ViewEnd = min(Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY,
-                      SharedCacheMap->SectionSize.QuadPart);
-        if (ViewEnd >= EndOffset)
+        /* The list is sorted by file offset: stop at the first VACB past the range */
+        if (Vacb->FileOffset.QuadPart >= EndOffset)
         {
             break;
         }
 
-        /* Still in use, it cannot be purged, fail
-         * Allow one ref: VACB is supposed to be always 1-referenced
-         */
-        Refs = CcRosVacbGetRefCount(Vacb);
-        if ((Refs > 1 && !Vacb->Dirty) ||
-            (Refs > 2 && Vacb->Dirty))
+        /* Skip VACBs that end before the range starts */
+        if (Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY <= StartOffset)
         {
+            continue;
+        }
+
+        Refs = CcRosVacbGetRefCount(Vacb);
+        ViewEnd = min(Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY,
+                      SharedCacheMap->SectionSize.QuadPart);
+        if (Vacb->FileOffset.QuadPart < StartOffset || ViewEnd > EndOffset)
+        {
+            /* Only partly in range: release it only when clean and idle, as
+             * its dirty data outside the range would leave the lazy writer's
+             * list. Otherwise MmPurgeSegment checks the pages it maps */
+            if (Vacb->Dirty || Refs > 1)
+            {
+                continue;
+            }
+        }
+        else if ((Refs > 1 && !Vacb->Dirty) ||
+                 (Refs > 2 && Vacb->Dirty))
+        {
+            /* Still in use, it cannot be purged, fail
+             * Allow one ref: VACB is supposed to be always 1-referenced
+             */
             Success = FALSE;
             break;
         }
