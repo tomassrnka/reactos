@@ -1416,6 +1416,11 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                         }
                     }
                 }
+                else
+                {
+                    /* No buffer to record the change in: the watcher must re-enumerate */
+                    NotifyChange->Flags |= NOTIFY_IMMEDIATELY;
+                }
             }
 
             /* If asking for old name in case of a rename, notify later on,
