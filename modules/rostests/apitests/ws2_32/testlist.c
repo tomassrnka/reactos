@@ -19,6 +19,7 @@ extern void func_send(void);
 extern void func_WSAAsync(void);
 extern void func_WSAIoctl(void);
 extern void func_WSARecv(void);
+extern void func_WSARecvFrom(void);
 extern void func_WSAStartup(void);
 
 const struct test winetest_testlist[] =
@@ -40,6 +41,7 @@ const struct test winetest_testlist[] =
     { "WSAAsync", func_WSAAsync },
     { "WSAIoctl", func_WSAIoctl },
     { "WSARecv", func_WSARecv },
+    { "WSARecvFrom", func_WSARecvFrom },
     { "WSAStartup", func_WSAStartup },
     { 0, 0 }
 };
