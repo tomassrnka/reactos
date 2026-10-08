@@ -16,6 +16,7 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif()
 
 add_subdirectory(apitests)
+add_subdirectory(kvfuzz)
 #add_subdirectory(dibtests)
 add_subdirectory(drivers)
 #add_subdirectory(dxtest)
