@@ -703,7 +703,7 @@ RtlVirtualUnwind(
     *EstablisherFrame = GetEstablisherFrame(Context, UnwindInfo, CodeOffset);
 
     /* Check if we are in the function epilog and try to finish it */
-    if (((CodeOffset > UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0)) ||
+    if (((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0)) ||
         ((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->Flags & UNW_FLAG_CHAININFO)))
     {
         if (RtlpTryToUnwindEpilog(Context, ControlPc, ContextPointers, ImageBase, FunctionEntry))
