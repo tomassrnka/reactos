@@ -120,6 +120,12 @@ Used Version: git commit 16022c5
 License: MS-PL (https://spdx.org/licenses/MS-PL.html)
 URL: https://github.com/microsoft/Windows-driver-samples/tree/master/filesys/fastfat
 
+Title: virtio-win VirtIO library (KMDF) and memory balloon driver
+Path: sdk/lib/3rdparty/virtio-win
+Used Version: mm324 (b1a462514ad70f30e5f2df4bd8e5cdc4b40193f5)
+License: BSD-3-Clause (https://spdx.org/licenses/BSD-3-Clause.html)
+URL: https://github.com/virtio-win/kvm-guest-drivers-windows
+
 Title: VirtIO NetKVM Windows guest driver
 Path: drivers/network/dd/netkvm
 Used Version: git commit 5e01b36

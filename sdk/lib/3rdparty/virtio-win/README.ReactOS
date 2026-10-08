@@ -1,0 +1,21 @@
+virtio-win guest drivers for Windows, imported from upstream
+============================================================
+
+Upstream:  https://github.com/virtio-win/kvm-guest-drivers-windows
+Tag:       mm324
+Commit:    b1a462514ad70f30e5f2df4bd8e5cdc4b40193f5 (2026-09-14)
+License:   BSD-3-Clause (LICENSE in this directory and in each subdirectory)
+Authors:   Red Hat, Inc. and the other copyright holders named in LICENSE
+           and in the file headers
+
+Imported subset, unmodified at import time:
+- LICENSE
+- VirtIO/          VirtIO PCI and ring library, and its KMDF layer (VirtIO/WDF)
+- Balloon/sys/     memory balloon driver (KMDF)
+
+Not imported: Visual Studio project and solution files, .props files, batch
+scripts and .clang-format. Changes made for the ReactOS build are listed below.
+
+ReactOS changes
+---------------
+(none yet)
