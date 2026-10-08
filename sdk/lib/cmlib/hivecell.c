@@ -113,6 +113,8 @@ HvMarkCellDirty(
 {
     ULONG CellBlock;
     ULONG CellLastBlock;
+    ULONG CellSize;
+    LONG RawSize;
 
     ASSERT(RegistryHive->ReadOnly == FALSE);
 
@@ -122,11 +124,27 @@ HvMarkCellDirty(
     if (HvGetCellType(CellIndex) != Stable)
         return TRUE;
 
+    /* Flat hives (FreeLdr) are read-only and have no block list or dirty vector */
+    if (RegistryHive->Flat)
+        return TRUE;
+
+    /* Allocated cells have a negative size, free cells a positive one */
+    RawSize = HvpGetCellHeader(RegistryHive, CellIndex)->Size;
+    CellSize = (ULONG)RawSize;
+    if (RawSize < 0)
+        CellSize = 0 - CellSize;
+    if (CellSize < sizeof(HCELL))
+        CellSize = sizeof(HCELL);
+
+    /* Mark every block from the first to the last byte of the cell */
     CellBlock     = HvGetCellBlock(CellIndex);
-    CellLastBlock = HvGetCellBlock(CellIndex + HBLOCK_SIZE - 1);
+    CellLastBlock = CellBlock +
+                    ((CellIndex & (HBLOCK_SIZE - 1)) + CellSize - 1) / HBLOCK_SIZE;
+    if (CellLastBlock >= RegistryHive->Storage[Stable].Length)
+        CellLastBlock = RegistryHive->Storage[Stable].Length - 1;
 
     RtlSetBits(&RegistryHive->DirtyVector,
-               CellBlock, CellLastBlock - CellBlock);
+               CellBlock, CellLastBlock - CellBlock + 1);
     RegistryHive->DirtyCount++;
 
     /*
