@@ -258,7 +258,8 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 		if (vol->logfile_ino)
 			truncate_inode_pages(vol->logfile_ino->i_mapping, 0);
 		if (!jerr)
-			jerr = kshim_jnl_activate(b, v->jv->ext, v->jv->next, v->jv->lf_pages, v->jv->serial, jseq + 1);
+			jerr = kshim_jnl_activate(b, v->jv->ext, v->jv->next, v->jv->lf_pages, v->jv->serial, jseq + 1,
+						  v->jv->mft_lcn * v->jv->cluster + 3 * v->jv->recsz);
 		if (jerr) {
 			printk(KERN_ERR "journal: not active (%d); metadata goes in place\n", jerr);
 		} else if (!kshim_watch_add(&vol->free_clusters)) {
@@ -311,8 +312,9 @@ void ngc_umount(ngc_vol *v)
 	}
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
-	if (v->bdev->jnl && !NVolErrors(NTFS_SB(sb)))
-		kshim_jnl_commit(v->bdev);
+	if (v->bdev->jnl && !NVolErrors(NTFS_SB(sb)) && kshim_jnl_commit(v->bdev) >= 0 &&
+	    !(NTFS_SB(sb)->vol_flags & VOLUME_IS_DIRTY))
+		kshim_jnl_retire(v->bdev);
 	if (v->watched)
 		kshim_watch_del(v->watched);
 	kfree(v->jv);
@@ -1225,6 +1227,9 @@ static int ngc_sync_impl(ngc_vol *v)
 		if (!err)
 			err = ngc_commit(v);
 	}
+	/* Clean on disk: no header stays behind for a later mount to trust after another driver's session. */
+	if (!err && !NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY) && !kshim_sb_dirty(v->sb))
+		err = kshim_jnl_retire(v->bdev);
 	return err;
 }
 
