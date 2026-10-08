@@ -113,42 +113,22 @@ VOID NgReleaseCore(PNG_VCB Vcb)
  * reads in parallel; nothing under a shared hold writes metadata, parks an FCB's node or evicts
  * inodes.  The statistics are updated with interlocked operations.
  */
+/*
+ * The "shared" acquisitions (reads, listings, stat, lookups) take CoreLock exclusive.  Parts of the
+ * shim were written for one caller at a time (inode reference drops racing lookups, page-cache
+ * walks racing a shrink, FGP_NOWAIT not honoured), so the core runs serialised until they are
+ * made safe for parallel callers.
+ */
 VOID NgAcquireCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
 {
-    ULONGLONG T0;
-    NG_LOCK_STAT *S;
-    if (ExIsResourceAcquiredExclusiveLite(&Vcb->CoreLock))
-    {
-        Hold->Nested = TRUE;
-        NgAcquireCore(Vcb);
-        return;
-    }
-    Hold->Nested = FALSE;
-    KeEnterCriticalRegion();
-    Hold->Category = NgLockCategory();
-    S = &Vcb->LockStats.Stat[Hold->Category];
-    T0 = __rdtsc();
-    if (!ExAcquireResourceSharedLite(&Vcb->CoreLock, FALSE))
-    {
-        ExAcquireResourceSharedLite(&Vcb->CoreLock, TRUE);
-        InterlockedIncrement((PLONG)&S->Contended);
-        ExInterlockedAddLargeStatistic((PLARGE_INTEGER)&S->WaitUs, (ULONG)NgTicksToUs(__rdtsc() - T0));
-    }
-    InterlockedIncrement((PLONG)&S->Acquired);
-    Hold->Since = __rdtsc();
+    Hold->Nested = TRUE;
+    NgAcquireCore(Vcb);
 }
 
 VOID NgReleaseCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
 {
-    if (Hold->Nested)
-    {
-        NgReleaseCore(Vcb);
-        return;
-    }
-    ExInterlockedAddLargeStatistic((PLARGE_INTEGER)&Vcb->LockStats.Stat[Hold->Category].HeldUs,
-                                   (ULONG)NgTicksToUs(__rdtsc() - Hold->Since));
-    ExReleaseResourceLite(&Vcb->CoreLock);
-    KeLeaveCriticalRegion();
+    UNREFERENCED_PARAMETER(Hold);
+    NgReleaseCore(Vcb);
 }
 
 /* Prints the request types that took CoreLock (at shutdown). */
