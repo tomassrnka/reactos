@@ -299,9 +299,30 @@ VOID
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID)
 {
-    ASSERT(PsGetCurrentProcess()->AddressCreationLock.Owner != KeGetCurrentThread());
-    ASSERT(!MM_ANY_WS_LOCK_HELD(PsGetCurrentThread()));
     ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
+
+    /*
+     * A fault taken while this thread holds an address space lock (a page
+     * table brought in by NtAllocateVirtualMemory, for example) must not
+     * wait for a balancer pass, which may need that lock to page out; nor
+     * can the balancer wait for itself when it faults while writing pages
+     * back. Start it, give it a moment, and let the caller retry. This does
+     * not guarantee progress: the balancer still blocks if it needs the
+     * lock this thread keeps across the retries.
+     */
+    if ((PsGetCurrentProcess()->AddressCreationLock.Owner == KeGetCurrentThread()) ||
+        (MmGetKernelAddressSpace() &&
+         (CONTAINING_RECORD(MmGetKernelAddressSpace(), EPROCESS, Vm)->AddressCreationLock.Owner == KeGetCurrentThread())) ||
+        MM_ANY_WS_LOCK_HELD(PsGetCurrentThread()) ||
+        (PsGetCurrentThreadId() == MiBalancerThreadId.UniqueThread))
+    {
+        LARGE_INTEGER Delay;
+
+        Delay.QuadPart = -10 * 10000;
+        MmRebalanceMemoryConsumers();
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        return;
+    }
 
     KeResetEvent(&MiBalancerDoneEvent);
     MmRebalanceMemoryConsumers();
