@@ -262,7 +262,7 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 	struct block_device *b;
 	struct ngc_vol *v;
 	struct ntfs_volume *vol;
-	int err, jrec = NGJ_NONE, want_rw = pass != NGC_PASS_RO, big_sectors = 0;
+	int err, jrec = NGJ_NONE, want_rw = pass != NGC_PASS_RO, jerr0, big_sectors = 0;
 	u64 jseq = 0;
 
 	*out = NULL;
@@ -286,7 +286,8 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 	 * pass) or is shown through the overlay (read-only and check passes).
 	 */
 	v->jv = kmalloc(sizeof(*v->jv), GFP_KERNEL);
-	if (v->jv && !ngj_probe(osdev, size, sector_size, v->jv) && v->jv->lf_pages >= 256) {
+	jerr0 = v->jv ? ngj_probe(osdev, size, sector_size, v->jv) : -ENOMEM;
+	if (!jerr0 && v->jv->lf_pages >= 256) {
 		jrec = ngj_recover(v->jv, b, pass == NGC_PASS_WRITE, &jseq);
 		if (!want_rw) {
 			kfree(v->jv);
@@ -296,6 +297,10 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			if (v->jv->replayed || v->jv->torn)
 				kshim_jnl_fault = 0;
 		}
+	} else if (jerr0 == -EIO || jerr0 == -ENOMEM) {
+		jrec = NGJ_UNREAD;
+		kfree(v->jv);
+		v->jv = NULL;
 	} else {
 		if (want_rw)
 			printk(KERN_WARNING "journal: $LogFile not usable for the journal; metadata goes in place\n");
@@ -335,6 +340,8 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
 		if (jrec == NGJ_REPAIR)
 			*why_ro = "the journal says the volume needs repair (core errors, or metadata written in place without it)";
+		else if (jrec == NGJ_UNREAD)
+			*why_ro = "the journal could not be read (device error, a damaged $LogFile record, or no memory)";
 		else if (NVolErrors(vol))
 			*why_ro = "the core found errors at mount (MFTMirr, $LogFile or hibernation)";
 		else if ((vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK & ~(ours && pass == NGC_PASS_CHECK ? VOLUME_IS_DIRTY : 0)))

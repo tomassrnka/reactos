@@ -3,7 +3,7 @@
 #define NGJREC_H
 
 #define NGJ_MAXRUNS 32
-enum { NGJ_NONE, NGJ_CLEAN, NGJ_REPAIR };
+enum { NGJ_NONE, NGJ_CLEAN, NGJ_REPAIR, NGJ_UNREAD };
 
 struct ngj_run { s64 vcn, lcn, len; };
 
