@@ -1091,7 +1091,9 @@ UserServerHardError(
     WCHAR LocalCaptionBuffer[256];
     NTSTATUS Status;
 
-    ASSERT(ThreadData->Process != NULL);
+    /* Hard errors raised by threads that are not CSR threads, such as
+     * kernel system threads, come without a CSR thread. */
+    ASSERT(!ThreadData || ThreadData->Process != NULL);
 
     /* Default to not handled */
     Message->Response = ResponseNotHandled;
