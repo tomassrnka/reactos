@@ -268,7 +268,7 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
-VOID NgFlushVolume(PNG_VCB Vcb);
+int NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
 

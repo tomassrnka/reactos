@@ -60,6 +60,7 @@ struct ngc_vol {
 	unsigned long frees_seen;       /* its increments at the last commit */
 	int damaged;                    /* the mount-time check found damage: read-only */
 	char why[160];
+	int failed;                     /* a consistency point was abandoned for good: every later one fails */
 };
 
 /* Mount-time consistency check: 0 never, 1 after an unclean shutdown or when $MFT is at most 64 MB, 2 always. */
@@ -432,7 +433,7 @@ void ngc_umount(ngc_vol *v, int discard)
 	}
 	/* put_super frees the volume: read its error state first. It clears the dirty flag of a
 	 * read-write volume without errors; a read-only volume keeps the flag it had. */
-	errors = NVolErrors(NTFS_SB(sb));
+	errors = NVolErrors(NTFS_SB(sb)) || v->failed;
 	clean = !errors && (!sb_rdonly(sb) || !(NTFS_SB(sb)->vol_flags & VOLUME_IS_DIRTY));
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
@@ -1258,11 +1259,14 @@ int ngc_is_rw(ngc_vol *v)
 static int ngc_writeback_failed(struct ngc_vol *v, int err)
 {
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	int later = err == -ENOMEM || err == -EAGAIN || err == -ENOSPC || err == -EDQUOT;
 	printk(KERN_ERR "ngc: writeback failed %d: nothing committed%s\n", err,
-	       err == -ENOMEM || err == -EAGAIN ? ", retried later" : "; the volume needs repair and is read-only now");
+	       later ? ", retried later" : "; the volume needs repair and is read-only now");
 	if (err == -EAGAIN)
 		return -EIO;
-	if (err != -ENOMEM) {
+	if (!later) {
+		/* Sticky: the uncommitted changes can never be committed, so no later flush may succeed. */
+		v->failed = 1;
 		NVolSetErrors(vol);
 		kshim_jnl_mark_errors(v->bdev);
 		v->sb->s_flags |= SB_RDONLY;
@@ -1280,12 +1284,22 @@ static int ngc_commit_impl(struct ngc_vol *v)
 	unsigned long long t0 = ngos_ticks();
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
 	int err;
+	if (v->failed)
+		return -EIO;
 	/* Known errors keep VOLUME_IS_DIRTY on disk, so other systems check the volume too. */
-	if (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY) && !sb_rdonly(v->sb))
-		ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+	if (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY) && !sb_rdonly(v->sb)) {
+		err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+		if (err)
+			return err;
+	}
 	err = kshim_sync(v->sb);
 	for (int k = 0; err == -EAGAIN && k < 4; k++)
 		err = kshim_sync(v->sb);
+	if (v->bdev->kshim_wb_err) {
+		/* An MFT write failed inside writeback: that folio is clean now, so this error wins. */
+		err = v->bdev->kshim_wb_err;
+		v->bdev->kshim_wb_err = 0;
+	}
 	ngos_prof(NGP_WRITEBACK, t0, 0);
 	if (err)
 		return ngc_writeback_failed(v, err);
@@ -1375,6 +1389,8 @@ static int ngc_sync_impl(ngc_vol *v)
 	int err;
 	if (NVolErrors(vol))
 		kshim_jnl_mark_errors(v->bdev);
+	if (v->failed || kshim_jnl_failed(v->bdev))
+		return -EIO;
 	if (sb_rdonly(v->sb))
 		return 0;
 	err = ngc_commit(v);
@@ -1398,6 +1414,8 @@ int ngc_commit_now(ngc_vol *v)
 {
 	if (NVolErrors(NTFS_SB(v->sb)))
 		kshim_jnl_mark_errors(v->bdev);
+	if (v->failed || kshim_jnl_failed(v->bdev))
+		return -EIO;
 	if (sb_rdonly(v->sb))
 		return 0;
 	return ngc_commit(v);
