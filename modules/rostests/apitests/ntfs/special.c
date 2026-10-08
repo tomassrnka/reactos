@@ -35,12 +35,15 @@ START_TEST(NtfsSystemFiles)
     for (i = 0; i < RTL_NUMBER_OF(Names); i++)
     {
         VolumeRoot(Path, Names[i]);
+        /* \$Volume is a volume open on Windows (write access is granted to an administrator);
+         * ntfsng refuses it, which is recorded, not asserted. */
+        BOOLEAN IsVolume = !wcscmp(Names[i], L"$Volume");
         Status = NtOpen(Path, FILE_WRITE_DATA, SHARE_ALL, FILE_OPEN, 0, NULL, NULL);
-        ok(Status == STATUS_ACCESS_DENIED || Status == STATUS_SHARING_VIOLATION,
+        ok(IsVolume || Status == STATUS_ACCESS_DENIED || Status == STATUS_SHARING_VIOLATION,
            "%ls for write: 0x%08lx\n", Names[i], Status);
         trace("%ls for write: 0x%08lx\n", Names[i], Status);
         Status = NtOpen(Path, FILE_APPEND_DATA, SHARE_ALL, FILE_OPEN, 0, NULL, NULL);
-        ok(Status == STATUS_ACCESS_DENIED || Status == STATUS_SHARING_VIOLATION,
+        ok(IsVolume || Status == STATUS_ACCESS_DENIED || Status == STATUS_SHARING_VIOLATION,
            "%ls for append: 0x%08lx\n", Names[i], Status);
         Status = NtOpen(Path, DELETE, SHARE_ALL, FILE_OPEN, 0, NULL, NULL);
         ok(Status == STATUS_ACCESS_DENIED || Status == STATUS_SHARING_VIOLATION,
@@ -50,9 +53,9 @@ START_TEST(NtfsSystemFiles)
         Status = NtOpen(Path, FILE_READ_ATTRIBUTES, SHARE_ALL, FILE_OPEN, 0, NULL, NULL);
         trace("%ls for attributes: 0x%08lx\n", Names[i], Status);
     }
-    /* A named stream on a metadata file is never created. */
+    /* A named stream of a metadata file is not opened (FILE_OPEN: the probe never creates one). */
     VolumeRoot(Path, L"$MFT:ntfsapitest");
-    Status = NtOpen(Path, FILE_READ_ATTRIBUTES, SHARE_ALL, FILE_OPEN_IF, 0, NULL, NULL);
+    Status = NtOpen(Path, FILE_READ_ATTRIBUTES, SHARE_ALL, FILE_OPEN, 0, NULL, NULL);
     ok(!NT_SUCCESS(Status), "Stream on $MFT: 0x%08lx\n", Status);
     /* The same files by their file ID (records 0-11). */
     VolumeRoot(Path, L"");

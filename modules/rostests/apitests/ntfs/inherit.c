@@ -37,10 +37,10 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
     PSECURITY_DESCRIPTOR Sd;
     PACL Dacl;
     LONG i;
-    /* Auto-inheritance (INHERITED_ACE marks, explicit ACEs merged with inherited ones) applies when
-     * the directory's DACL is SE_DACL_AUTO_INHERITED; otherwise ACEs are inherited unmarked and an
-     * explicit DACL replaces them. */
-    const BYTE Inh = Auto ? INHERITED_ACE : 0;
+    /* A create through NtCreateFile inherits ACEs unmarked (no INHERITED_ACE, no
+     * SE_DACL_AUTO_INHERITED) and lets an explicit DACL replace them, also when the directory's
+     * DACL is marked auto-inherited (Windows Server 2008 R2 and Windows 10 22H2 both do this). */
+    const BYTE Inh = 0;
     const BYTE AllFlags = 0x1f;
     WCHAR Name[64];
 
@@ -90,7 +90,7 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
         SECURITY_DESCRIPTOR_CONTROL Control = 0;
         ULONG Rev;
         RtlGetControlSecurityDescriptor(Sd, &Control, &Rev);
-        ok(((Control & SE_DACL_AUTO_INHERITED) != 0) == Auto, "SE_DACL_AUTO_INHERITED 0x%04x\n", Control);
+        ok((Control & SE_DACL_AUTO_INHERITED) == 0, "SE_DACL_AUTO_INHERITED 0x%04x\n", Control);
         ok((Control & SE_DACL_PROTECTED) == 0, "SE_DACL_PROTECTED set\n");
         LocalFree(Sd);
     }
@@ -127,10 +127,7 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
     trace("explicit.txt: %s\n", Text);
     i = NtFindAce(Dacl, SidEveryone, FILE_GENERIC_READ, AllFlags, 0, FALSE);
     ok(i == 0, "Explicit ACE at %ld\n", i);
-    if (Auto)
-        ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, Inh, FALSE) > 0, "Inherited ACEs not merged\n");
-    else
-        ok(Dacl && Dacl->AceCount == 1, "explicit.txt has %u ACEs\n", Dacl ? Dacl->AceCount : 0);
+    ok(Dacl && Dacl->AceCount == 1, "explicit.txt has %u ACEs\n", Dacl ? Dacl->AceCount : 0);
     if (Sd)
         LocalFree(Sd);
     Sd = NtMakeSd(Aces, 1, TRUE);
