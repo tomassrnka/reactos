@@ -678,6 +678,20 @@ ExAllocatePoolQuotaUninitialized(
   return ExAllocatePoolWithQuotaTag(PoolType, NumberOfBytes, Tag);
 }
 
+#define DrvRtPoolNxOptIn 0x00000001
+
+/* A driver built with POOL_NX_OPTIN calls this to make its non-paged pool
+ * allocations non-executable where the system supports it. The headers do
+ * not redirect NonPagedPool for such drivers, so their allocations stay
+ * executable, as on a system without NX non-paged pool. */
+FORCEINLINE
+VOID
+ExInitializeDriverRuntime(
+  _In_ ULONG RuntimeFlags)
+{
+  UNREFERENCED_PARAMETER(RuntimeFlags);
+}
+
 FORCEINLINE
 __drv_allocatesMem(Mem)
 _When_((PoolType & PagedPool) != 0, _IRQL_requires_max_(APC_LEVEL))
