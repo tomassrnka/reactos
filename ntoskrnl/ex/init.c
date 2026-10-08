@@ -1603,6 +1603,14 @@ Phase1InitializationDiscard(IN PVOID Context)
     if (!HalAllProcessorsStarted()) KeBugCheck(HAL1_INITIALIZATION_FAILED);
 
 #ifdef CONFIG_SMP
+    /* The System process was created while only the boot processor ran, and
+       system threads inherit its affinity: let them run on every processor.
+       This thread stays on the boot processor: on x86 the machine-dependent
+       initialization in KeInitSystem returns to it after visiting the others
+       and then sets the boot processor's CR0 bits */
+    KeSetAffinityProcess(&PsInitialSystemProcess->Pcb, KeActiveProcessors);
+    KeSetAffinityThread(KeGetCurrentThread(), AFFINITY_MASK(0));
+
     /* HACK: We should use RtlFindMessage and not only fallback to this */
     MpString = "MultiProcessor Kernel\r\n";
 #endif
