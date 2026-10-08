@@ -135,6 +135,34 @@ static bool ngc_icache_ok(struct inode *i)
 	return !NInoAttr(ni) || ni->type == AT_INDEX_ALLOCATION || ni->type == AT_BITMAP;
 }
 
+/*
+ * The core's error reports that mean the metadata on disk is (or would be) inconsistent.  They pass
+ * through ntfs_error, which with on_errors=continue does nothing, and most of them do not set
+ * NVolErrors.  Out-of-space and out-of-memory reports do not match and leave the volume as it is.
+ */
+static bool ngc_msg_means_corruption(const char *msg)
+{
+	static const char *const words[] = { "inconsisten", "chkdsk", "corrupt" };
+	for (const char *p = msg; *p; p++)
+		for (size_t w = 0; w < ARRAY_SIZE(words); w++) {
+			size_t k = 0;
+			while (words[w][k] && (p[k] >= 'A' && p[k] <= 'Z' ? p[k] + 32 : p[k]) == words[w][k])
+				k++;
+			if (!words[w][k])
+				return true;
+		}
+	return false;
+}
+
+static void ngc_core_error(struct super_block *sb, const char *msg)
+{
+	struct ntfs_volume *vol = NTFS_SB(sb);
+	if (!vol || NVolErrors(vol) || !ngc_msg_means_corruption(msg))
+		return;
+	NVolSetErrors(vol);
+	kshim_jnl_mark_errors(sb->s_bdev);
+}
+
 int ngc_init(void)
 {
 	int err = 0;
@@ -145,6 +173,7 @@ int ngc_init(void)
 			ngc_inited = 1;
 		kshim_is_data_inode = ngc_is_data_inode;
 		kshim_icache_ok = ngc_icache_ok;
+		kshim_core_error = ngc_core_error;
 	}
 	mutex_unlock(&ngc_mount_lock);
 	return err;
@@ -221,7 +250,7 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	if (want_rw) {
 		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
 		if (jrec == NGJ_REPAIR)
-			*why_ro = "the journal shows metadata written in place without it (needs repair)";
+			*why_ro = "the journal says the volume needs repair (core errors, or metadata written in place without it)";
 		else if (NVolErrors(vol))
 			*why_ro = "the core found errors at mount (MFTMirr, $LogFile or hibernation)";
 		else if (vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK)
@@ -1149,7 +1178,12 @@ static int ngc_writeback_failed(struct ngc_vol *v, int err)
 static int ngc_commit_impl(struct ngc_vol *v)
 {
 	unsigned long long t0 = ngos_ticks();
-	int err = kshim_sync(v->sb);
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	int err;
+	/* Known errors keep VOLUME_IS_DIRTY on disk, so other systems check the volume too. */
+	if (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY) && !sb_rdonly(v->sb))
+		ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+	err = kshim_sync(v->sb);
 	for (int k = 0; err == -EAGAIN && k < 4; k++)
 		err = kshim_sync(v->sb);
 	ngos_prof(NGP_WRITEBACK, t0, 0);
@@ -1157,7 +1191,7 @@ static int ngc_commit_impl(struct ngc_vol *v)
 		return ngc_writeback_failed(v, err);
 	if (!v->bdev->jnl)
 		return blkdev_issue_flush(v->bdev);
-	if (NVolErrors(NTFS_SB(v->sb)))
+	if (NVolErrors(vol))
 		kshim_jnl_mark_errors(v->bdev);
 	if (!err) {
 		t0 = ngos_ticks();

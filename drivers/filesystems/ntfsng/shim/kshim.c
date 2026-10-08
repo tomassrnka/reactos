@@ -26,6 +26,24 @@ bool kshim_mapping_dirty(struct address_space *m);
 int kshim_sync(struct super_block *sb);
 
 /* ------------------------------------------------------------- printk */
+static char kshim_last_err[256];
+static uintptr_t kshim_err_lock;
+void (*kshim_core_error)(struct super_block *sb, const char *msg);
+
+int kshim_errseq_check(errseq_t *e, errseq_t since)
+{
+	struct super_block *sb = container_of(e, struct super_block, s_wb_err);
+	char msg[sizeof(kshim_last_err)];
+	unsigned char irql;
+	(void)since;
+	irql = ngos_spin_lock(&kshim_err_lock);
+	memcpy(msg, kshim_last_err, sizeof(msg));
+	ngos_spin_unlock(&kshim_err_lock, irql);
+	if (kshim_core_error)
+		kshim_core_error(sb, msg);
+	return 0;
+}
+
 int printk(const char *fmt, ...)
 {
 	va_list ap;
@@ -45,6 +63,11 @@ int printk(const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(buf + 8, 512 - 8, fmt, ap);
 	va_end(ap);
+	if (lvl <= 3) {
+		unsigned char irql = ngos_spin_lock(&kshim_err_lock);
+		strncpy(kshim_last_err, buf + 8, sizeof(kshim_last_err) - 1);
+		ngos_spin_unlock(&kshim_err_lock, irql);
+	}
 	ngos_print(buf);
 	ngos_free(buf);
 	return 0;

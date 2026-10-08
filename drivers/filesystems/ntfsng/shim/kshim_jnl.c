@@ -169,6 +169,7 @@ static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, 
 	h->hwm = j->hwm;
 	h->vol_usn_old = j->vol_usn;
 	h->vol_usn_new = usn_new;
+	h->flags = j->errors ? KJ_FL_ERRORS : 0;
 	h->hdr_crc = kj_crc32(0, h, offsetof(struct kj_hdr, hdr_crc));
 	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || ngos_dev_write(b->osdev, dev, j->hdrpage, KJ_PAGE))
 		return -EIO;
