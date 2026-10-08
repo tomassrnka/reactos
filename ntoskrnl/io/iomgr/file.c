@@ -2410,6 +2410,14 @@ IopQueryAttributesFile(IN POBJECT_ATTRIBUTES ObjectAttributes,
                                 &Handle);
     if (OpenPacket.ParseCheck == FALSE)
     {
+        /* Check if Ob opened an object that is not a file */
+        if (NT_SUCCESS(Status))
+        {
+            /* Close the handle, the object was not parsed as a file */
+            ZwClose(Handle);
+            Status = STATUS_OBJECT_TYPE_MISMATCH;
+        }
+
         /* Parse failed */
         DPRINT("IopQueryAttributesFile failed for '%wZ' with 0x%lx\n",
                ObjectAttributes->ObjectName, Status);
@@ -3328,6 +3336,14 @@ IoFastQueryNetworkAttributes(IN POBJECT_ATTRIBUTES ObjectAttributes,
                                 &Handle);
     if (OpenPacket.ParseCheck == FALSE)
     {
+        /* Check if Ob opened an object that is not a file */
+        if (NT_SUCCESS(Status))
+        {
+            /* Close the handle, the object was not parsed as a file */
+            ZwClose(Handle);
+            Status = STATUS_OBJECT_TYPE_MISMATCH;
+        }
+
         /* Parse failed */
         IoStatus->Status = Status;
     }
@@ -4187,7 +4203,19 @@ NtDeleteFile(IN POBJECT_ATTRIBUTES ObjectAttributes)
                                 DELETE,
                                 &OpenPacket,
                                 &Handle);
-    if (OpenPacket.ParseCheck == FALSE) return Status;
+    if (OpenPacket.ParseCheck == FALSE)
+    {
+        /* Check if Ob opened an object that is not a file */
+        if (NT_SUCCESS(Status))
+        {
+            /* Close the handle, the object was not parsed as a file */
+            ZwClose(Handle);
+            Status = STATUS_OBJECT_TYPE_MISMATCH;
+        }
+
+        /* Parse failed */
+        return Status;
+    }
 
     /* Retrn the Io status */
     return OpenPacket.FinalStatus;
