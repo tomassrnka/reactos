@@ -5071,8 +5071,14 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
             //
             MI_WRITE_INVALID_PTE(PointerPte, TempPte);
 
-            /* In a MEM_COMMIT reservation this page was charged when the VAD was inserted */
-            if (!FoundVad->u.VadFlags.MemCommit) QuotaCharge++;
+            //
+            // In a MEM_COMMIT reservation this page was charged when the VAD
+            // was inserted
+            //
+            if (!FoundVad->u.VadFlags.MemCommit)
+            {
+                QuotaCharge++;
+            }
         }
         else if (PointerPte->u.Long == MmDecommittedPte.u.Long)
         {
@@ -5400,8 +5406,10 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
             EndingAddress = (Vad->EndingVpn << PAGE_SHIFT) | (PAGE_SIZE - 1);
 
             //
-            // Finally lock the working set and remove the VAD from the VAD tree
+            // Return what the VAD still charges, then lock the working set and
+            // remove the VAD from the VAD tree
             //
+            CommitReduction = Vad->u.VadFlags.CommitCharge;
             MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
             ASSERT(Process->VadRoot.NumberGenericTableElements >= 1);
             MiRemoveNode((PMMADDRESS_NODE)Vad, &Process->VadRoot);
@@ -5435,6 +5443,7 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
                     // the code path above when the caller sets a zero region size
                     // and the whole VAD is destroyed
                     //
+                    CommitReduction = Vad->u.VadFlags.CommitCharge;
                     MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
                     ASSERT(Process->VadRoot.NumberGenericTableElements >= 1);
                     MiRemoveNode((PMMADDRESS_NODE)Vad, &Process->VadRoot);

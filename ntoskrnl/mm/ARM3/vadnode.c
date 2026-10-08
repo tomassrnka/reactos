@@ -374,6 +374,16 @@ MiInsertVadEx(
         CurrentProcess->PeakVirtualSize = CurrentProcess->VirtualSize;
     }
 
+    /* A committed private allocation is charged to the process as well (the PEB and TEBs are not) */
+    if (Vad->u.VadFlags.PrivateMemory && Vad->u.VadFlags.MemCommit && !Vad->u.VadFlags.NoChange)
+    {
+        CurrentProcess->CommitCharge += ViewSize / PAGE_SIZE;
+        if (CurrentProcess->CommitCharge > CurrentProcess->CommitChargePeak)
+        {
+            CurrentProcess->CommitChargePeak = CurrentProcess->CommitCharge;
+        }
+    }
+
     /* Unlock the address space */
     KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
 
