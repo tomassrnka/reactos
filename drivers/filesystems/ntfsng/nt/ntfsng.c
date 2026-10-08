@@ -108,12 +108,6 @@ VOID NgReleaseCore(PNG_VCB Vcb)
 }
 
 /*
- * CoreLock shared: requests that only read core state (data reads, listings, stat, security and
- * stream queries).  The core runs them under its own per-inode locks, as Linux runs lookups and
- * reads in parallel; nothing under a shared hold writes metadata, parks an FCB's node or evicts
- * inodes.  The statistics are updated with interlocked operations.
- */
-/*
  * The "shared" acquisitions (reads, listings, stat, lookups) take CoreLock exclusive.  Parts of the
  * shim were written for one caller at a time (inode reference drops racing lookups, page-cache
  * walks racing a shrink, FGP_NOWAIT not honoured), so the core runs serialised until they are
@@ -529,6 +523,8 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     int Err;
 
     DPRINT1("ntfsng: NTFS on the Linux fs/ntfs core (v7.3-rc6), loading\n");
+    /* Queried once here, at PASSIVE_LEVEL: later callers may hold a spin lock. */
+    ngos_physical_pages();
     ExInitializeFastMutex(&NgGlobal.VcbListLock);
     InitializeListHead(&NgGlobal.VcbList);
     {
