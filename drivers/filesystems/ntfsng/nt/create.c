@@ -782,7 +782,7 @@ walked:
             Status = STATUS_OBJECT_NAME_INVALID;
         else if (WantDir && (FileAttributes & FILE_ATTRIBUTE_TEMPORARY))
             Status = STATUS_INVALID_PARAMETER;
-        else if (Check && !NT_SUCCESS(Status = NgReadSecurity(Vcb, Parent, &ParentSd)))
+        else if (!NT_SUCCESS(Status = NgReadSecurity(Vcb, Parent, &ParentSd)))
             ;
         else if (Check && !NT_SUCCESS(Status = NgCheckCreateAccess(As, ParentSd, WantDir)))
             ;
@@ -801,6 +801,11 @@ walked:
                 Created = TRUE;
                 Information = FILE_CREATED;
                 Err = ngc_set_info(Vcb->Core, Node, NULL, Attrs, NG_SETTABLE_ATTRS);
+                /* Never the core's own default (Everyone full access): what the directory passes on. */
+                if (!Err)
+                    Err = NgAssignNewSecurity(Vcb, Node, ParentSd, As, WantDir);
+                if (Err)
+                    ngc_unlink(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), Node);
             }
             if (!Err && Stream.Length)
             {

@@ -268,6 +268,7 @@ VOID NgUnlockVolume(PNG_VCB Vcb);
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgReadSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR *Out);
+int NgAssignNewSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR ParentSd, PACCESS_STATE As, BOOLEAN IsDir);
 
 /* access.c */
 BOOLEAN NgCreateChecksAccess(PIRP Irp, PIO_STACK_LOCATION Stack);

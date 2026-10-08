@@ -196,3 +196,31 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return Status;
 }
 
+/*
+ * The descriptor of a new file or directory: inherited from its directory's descriptor ParentSd
+ * (CREATOR OWNER and CREATOR GROUP replaced, generic rights mapped, inheritance flags applied),
+ * merged with a descriptor given to the create; owner and group come from the creator's token.
+ * Stored as the file's own descriptor before the create completes; caller holds CoreLock
+ * exclusive, so the new file and its descriptor reach the volume in one transaction.
+ */
+int NgAssignNewSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR ParentSd, PACCESS_STATE As, BOOLEAN IsDir)
+{
+    PSECURITY_DESCRIPTOR New = NULL;
+    NTSTATUS Status;
+    int Err;
+
+    if (!As)
+        return 0;
+    Status = SeAssignSecurityEx(ParentSd, As->SecurityDescriptor, &New, NULL, IsDir,
+                                SEF_DACL_AUTO_INHERIT | SEF_SACL_AUTO_INHERIT, &As->SubjectSecurityContext,
+                                IoGetFileObjectGenericMapping(), PagedPool);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ntfsng: no descriptor for a new file (0x%08lx)\n", Status);
+        return Status == STATUS_INSUFFICIENT_RESOURCES ? -NGC_ENOMEM : -NGC_EINVAL;
+    }
+    NgMapGenericDacl(New);
+    Err = ngc_set_security(Vcb->Core, Node, New, RtlLengthSecurityDescriptor(New));
+    SeDeassignSecurity(&New);
+    return Err;
+}
