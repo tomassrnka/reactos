@@ -23,6 +23,7 @@ list(APPEND SOURCE
     GetLocaleInfo.c
     GetModuleFileName.c
     GetVolumeInformation.c
+    IdleProcessor.c
     InitOnce.c
     interlck.c
     IsDBCSLeadByteEx.c
