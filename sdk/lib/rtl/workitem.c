@@ -717,8 +717,10 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
 
             _SEH2_TRY
             {
-                /* Call the APC routine */
-                ApcRoutine(NULL,
+                /* Call the APC routine. An I/O completion callback takes the
+                   Win32 error code of the I/O as its first argument; work
+                   items are queued with STATUS_SUCCESS and ignore it. */
+                ApcRoutine((PVOID)(ULONG_PTR)RtlNtStatusToDosErrorNoTeb(IoStatusBlock.Status),
                            (PVOID)IoStatusBlock.Information,
                            SystemArgument2);
             }
