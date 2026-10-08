@@ -118,8 +118,10 @@ KiFindIdealProcessor(
 static
 ULONG
 KiSelectNextProcessor(
-    _In_ PKTHREAD Thread)
+    _In_ PKTHREAD Thread,
+    _Out_ PBOOLEAN Idle)
 {
+    PKPRCB Prcb = KeGetCurrentPrcb();
     KAFFINITY PreferredSet, IdleSet;
     ULONG Processor;
 
@@ -128,14 +130,30 @@ KiSelectNextProcessor(
 
     /* If we have matching idle processors, use them */
     IdleSet = PreferredSet & KiIdleSummary;
+    *Idle = (IdleSet != 0);
     if (IdleSet != 0)
     {
-        PreferredSet = IdleSet;
-    }
+        /* The ideal processor, then the one the thread was last given to,
+           whose cache may still hold its data, then this one, which needs
+           no interrupt */
+        if (IdleSet & AFFINITY_MASK(Thread->IdealProcessor))
+            return Thread->IdealProcessor;
+        if (IdleSet & AFFINITY_MASK(Thread->NextProcessor))
+            return Thread->NextProcessor;
+        if (IdleSet & Prcb->SetMember)
+            return Prcb->Number;
 
-    /* Check if we can use the ideal processor */
-    if (PreferredSet & AFFINITY_MASK(Thread->IdealProcessor))
+        /* Otherwise the first idle processor after this one, so that
+           processors readying threads at the same time pick different ones */
+        PreferredSet = IdleSet & ~(Prcb->SetMember | (Prcb->SetMember - 1));
+        if (PreferredSet == 0)
+        {
+            PreferredSet = IdleSet;
+        }
+    }
+    else if (PreferredSet & AFFINITY_MASK(Thread->IdealProcessor))
     {
+        /* Check if we can use the ideal processor */
         return Thread->IdealProcessor;
     }
 
@@ -145,8 +163,19 @@ KiSelectNextProcessor(
 
     return Processor;
 }
+
+static
+BOOLEAN
+KiIsProcessorIdle(
+    _In_ PKPRCB Prcb)
+{
+    /* Called with the PRCB lock held */
+    return (Prcb->NextThread == Prcb->IdleThread) ||
+           ((Prcb->NextThread == NULL) && (Prcb->CurrentThread == Prcb->IdleThread));
+}
 #else
-#define KiSelectNextProcessor(Thread) 0
+#define KiSelectNextProcessor(Thread, Idle) (*(Idle) = FALSE, 0)
+#define KiIsProcessorIdle(Prcb) TRUE
 #endif
 
 VOID
@@ -154,8 +183,8 @@ FASTCALL
 KiDeferredReadyThread(IN PKTHREAD Thread)
 {
     PKPRCB Prcb;
-    BOOLEAN Preempted;
-    ULONG Processor;
+    BOOLEAN Preempted, Idle;
+    ULONG Processor, Attempt;
     KPRIORITY OldPriority;
     PKTHREAD NextThread;
 
@@ -303,13 +332,21 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     OldPriority = Thread->Priority;
     Thread->Preempted = FALSE;
 
-    /* Select a processor to run on */
-    Processor = KiSelectNextProcessor(Thread);
-    Thread->NextProcessor = Processor;
+    for (Attempt = 0; ; Attempt++)
+    {
+        /* Select a processor to run on */
+        Processor = KiSelectNextProcessor(Thread, &Idle);
 
-    /* Get the PRCB and lock it */
-    Prcb = KiProcessorBlock[Processor];
-    KiAcquirePrcbLock(Prcb);
+        /* Get the PRCB and lock it */
+        Prcb = KiProcessorBlock[Processor];
+        KiAcquirePrcbLock(Prcb);
+
+        /* Another processor may have given the idle processor a thread
+           since the selection; pick again while others are idle */
+        if (!Idle || KiIsProcessorIdle(Prcb) || (Attempt == 2)) break;
+        KiReleasePrcbLock(Prcb);
+    }
+    Thread->NextProcessor = Processor;
 
 #ifndef CONFIG_SMP
     /* Check if we have an idle summary */
