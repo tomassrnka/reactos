@@ -388,6 +388,11 @@ VOID
 NTAPI
 HalpHvReport(VOID);
 
+VOID
+NTAPI
+HalpHvInitializeProcessor(
+    _In_ ULONG ProcessorNumber);
+
 ULONG64
 NTAPI
 HalpHvReadReferenceTime(VOID);

@@ -10,6 +10,7 @@
 
 #include <hal.h>
 #include "apicp.h"
+#include <smp.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -24,6 +25,18 @@ static BOOLEAN HalpHvSuppressed;
 /* The reference TSC page, when the performance counter uses it */
 PHV_REFERENCE_TSC_PAGE HalpHvReferenceTscPage;
 static BOOLEAN HalpHvReferenceTscInvalid;
+
+/* One VP assist page per processor for EOI assist (7.8.7, 10.3) */
+static PUCHAR HalpHvAssistPages;
+static ULONG64 HalpHvAssistPagesPhysical;
+static ULONG HalpHvAssistPageCount;
+
+#ifdef CONFIG_SMP
+extern HALP_APIC_INFO_TABLE HalpApicInfoTable;
+#define HalpHvProcessorCount() min(HalpApicInfoTable.ProcessorCount, MAXIMUM_PROCESSORS)
+#else
+#define HalpHvProcessorCount() 1
+#endif
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
@@ -166,6 +179,23 @@ HalpHvInitialize(
             }
         }
     }
+
+    /* The VP assist pages are RAM only the hypervisor and their processor use */
+    if (HalpHvPrivileges & HV_ACCESS_INTR_CTRL_REGS)
+    {
+        ULONG Count = HalpHvProcessorCount();
+        PVOID Pages;
+
+        PhysicalAddress.QuadPart = HalpHvAllocatePages(LoaderBlock, Count);
+        Pages = PhysicalAddress.QuadPart ? HalpMapPhysicalMemory64(PhysicalAddress, Count) : NULL;
+        if (Pages)
+        {
+            RtlZeroMemory(Pages, Count * PAGE_SIZE);
+            HalpHvAssistPages = Pages;
+            HalpHvAssistPagesPhysical = PhysicalAddress.QuadPart;
+            HalpHvAssistPageCount = Count;
+        }
+    }
 }
 
 /* Reports the enlightenments once the debugger is up */
@@ -183,8 +213,39 @@ HalpHvReport(VOID)
             HalpHvPrivileges, HalpHvFeatures, HalpHvRecommendations);
     if (HalpHvReferenceTscInvalid)
         DPRINT1("The reference TSC page is not valid, keeping the TSC\n");
-    DPRINT1("Hypervisor enlightenments (HAL): reference time %s\n",
-            HalpHvReferenceTscPage ? "yes" : "no");
+    DPRINT1("Hypervisor enlightenments (HAL): reference time %s, EOI assist %s\n",
+            HalpHvReferenceTscPage ? "yes" : "no",
+            HalpHvAssistPages ? "yes" : "no");
+}
+
+/*
+ * Enables EOI assist on this processor after its local APIC is set up, and
+ * publishes the VP assist page to the EOI paths.
+ */
+VOID
+NTAPI
+HalpHvInitializeProcessor(
+    _In_ ULONG ProcessorNumber)
+{
+    PVOID Page = NULL;
+    ULONG64 Value;
+
+    if (HalpHvAssistPages && (ProcessorNumber < HalpHvAssistPageCount))
+    {
+        Value = __readmsr(HV_X64_MSR_VP_ASSIST_PAGE);
+        __writemsr(HV_X64_MSR_VP_ASSIST_PAGE,
+                   (Value & HV_X64_MSR_PAGE_RESERVED_MASK) |
+                   (HalpHvAssistPagesPhysical + (ULONG64)ProcessorNumber * PAGE_SIZE) |
+                   HV_X64_MSR_VP_ASSIST_PAGE_ENABLE);
+        if (__readmsr(HV_X64_MSR_VP_ASSIST_PAGE) & HV_X64_MSR_VP_ASSIST_PAGE_ENABLE)
+            Page = HalpHvAssistPages + (ULONG_PTR)ProcessorNumber * PAGE_SIZE;
+    }
+
+#ifdef _M_AMD64
+    __writegsqword(FIELD_OFFSET(KPCR, HalReserved[HAL_EOI_ASSIST_PAGE]), (ULONG64)Page);
+#else
+    __writefsdword(FIELD_OFFSET(KPCR, HalReserved[HAL_EOI_ASSIST_PAGE]), (ULONG)Page);
+#endif
 }
 
 /*

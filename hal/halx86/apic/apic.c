@@ -261,6 +261,18 @@ FORCEINLINE
 VOID
 ApicSendEOI(void)
 {
+    PLONG EoiAssist;
+
+    /* With EOI assist the hypervisor may have marked the interrupt as needing
+       no EOI; clearing the mark is the EOI then (TLFS 10.3) */
+#ifdef _M_AMD64
+    EoiAssist = (PLONG)__readgsqword(FIELD_OFFSET(KPCR, HalReserved[HAL_EOI_ASSIST_PAGE]));
+#else
+    EoiAssist = (PLONG)__readfsdword(FIELD_OFFSET(KPCR, HalReserved[HAL_EOI_ASSIST_PAGE]));
+#endif
+    if (EoiAssist && InterlockedBitTestAndReset(EoiAssist, 0))
+        return;
+
     ApicWrite(APIC_EOI, 0);
 }
 
@@ -491,6 +503,9 @@ ApicInitializeLocalApic(ULONG Cpu)
     /* Save the new hard IRQL in the IRR field */
     KeGetPcr()->IRR = KeGetPcr()->Irql;
 #endif
+
+    /* EOI assist, before this processor takes interrupts */
+    HalpHvInitializeProcessor(Cpu);
 }
 
 static

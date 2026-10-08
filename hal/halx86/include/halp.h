@@ -54,6 +54,10 @@ VOID
 #define HAL_PROFILING_INTERVAL      0
 #define HAL_PROFILING_MULTIPLIER    1
 
+/* HalReserved[14] (with [15] on x64): this processor's VP assist page while
+   EOI assist is on, else NULL; the x64 kernel's EOI paths read it too */
+#define HAL_EOI_ASSIST_PAGE         14
+
 /* Usage flags */
 #define IDT_REGISTERED          0x01
 #define IDT_LATCHED             0x02
