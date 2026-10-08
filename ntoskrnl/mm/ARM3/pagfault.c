@@ -1002,6 +1002,22 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     return Status;
 }
 
+/*
+ * A page taken back from the standby or modified list into use keeps its
+ * OriginalPte, which MiUnlinkPageFromList clears: for a prototype page it
+ * holds the protection its PTE gets when the page goes into transition
+ * again.
+ */
+static
+VOID
+MiUnlinkPageFromListKeepOriginalPte(IN PMMPFN Pfn1)
+{
+    MMPTE OriginalPte = Pfn1->OriginalPte;
+
+    MiUnlinkPageFromList(Pfn1);
+    Pfn1->OriginalPte = OriginalPte;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -1077,7 +1093,7 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     {
         /* Otherwise, the page is removed from its list */
         DPRINT("Transition page in free/zero list\n");
-        MiUnlinkPageFromList(Pfn1);
+        MiUnlinkPageFromListKeepOriginalPte(Pfn1);
         MiReferenceUnusedPageAndBumpLockCount(Pfn1);
     }
 
@@ -1109,6 +1125,14 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     ASSERT(PointerPte->u.Hard.Valid == 0);
     ASSERT(PointerPte->u.Trans.Prototype == 0);
     ASSERT(PointerPte->u.Trans.Transition == 1);
+
+    /*
+     * A private page reports the protection kept in its PFN once valid: take
+     * the one its transition PTE has now, which NtProtectVirtualMemory or a
+     * consumed guard page may have changed meanwhile
+     */
+    if (Pfn1->u3.e1.PrototypePte == 0)
+        Pfn1->OriginalPte.u.Soft.Protection = PointerPte->u.Trans.Protection;
     TempPte.u.Long = (PointerPte->u.Long & ~0xFFF) |
                      (MmProtectToPteMask[PointerPte->u.Trans.Protection]) |
                      MiDetermineUserGlobalPteMask(PointerPte);
@@ -1481,7 +1505,7 @@ MiDispatchFault(IN ULONG FaultCode,
                     ASSERT(Pfn1->u4.InPageError == 0);
 
                     /* Get the page */
-                    MiUnlinkPageFromList(Pfn1);
+                    MiUnlinkPageFromListKeepOriginalPte(Pfn1);
 
                     /* Bump its reference count */
                     ASSERT(Pfn1->u2.ShareCount == 0);
