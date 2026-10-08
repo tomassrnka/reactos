@@ -1186,12 +1186,6 @@ VOID LANTransmit(
 		   ((PCHAR)LinkAddress)[5] & 0xff));
 	}
 
-    if (Adapter->MTU < Size) {
-        /* This is NOT a pointer. MSDN explicitly says so. */
-        NDIS_PER_PACKET_INFO_FROM_PACKET(NdisPacket,
-                                         TcpLargeSendPacketInfo) = (PVOID)((ULONG_PTR)Adapter->MTU);
-    }
-
     /* Update interface stats */
     Interface->Stats.OutBytes += Size;
 
