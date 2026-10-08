@@ -448,6 +448,12 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Major == IRP_MJ_CREATE)
             Irp->IoStatus.Information = FILE_OPENED;
     }
+    else if (DeviceObject != NgGlobal.ControlDevice && ((PNG_VCB)DeviceObject->DeviceExtension)->WrongMedia &&
+             Major != IRP_MJ_CLEANUP && Major != IRP_MJ_CLOSE &&
+             !(Major == IRP_MJ_FILE_SYSTEM_CONTROL && Stack->MinorFunction == IRP_MN_VERIFY_VOLUME))
+    {
+        Status = STATUS_FILE_INVALID;
+    }
     else if (Major == IRP_MJ_DEVICE_CONTROL && DeviceObject != NgGlobal.ControlDevice)
     {
         /* Passed down: the storage stack completes it. */

@@ -82,6 +82,9 @@ typedef struct _NG_VCB
     ULONG SectorSize;
     BOOLEAN ReadOnly;               /* mounted read-only: policy, registry or request */
     BOOLEAN WriteThrough;           /* after IRP_MJ_SHUTDOWN: every change ends with a full sync */
+    BOOLEAN Removable;              /* removable media: mounted read-only */
+    BOOLEAN WrongMedia;             /* a verify found another medium: every request but close fails */
+    ULONGLONG BootSectors;          /* boot sector's sector count, compared again at verify */
     LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
     PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
     PNOTIFY_SYNC NotifySync;        /* directory change notification (FsRtl) */
@@ -272,6 +275,7 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgPagingFileMap(PNG_FCB Fcb);
 NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGLONG Offset, ULONG Length);
 VOID NgAfterChange(PNG_VCB Vcb);
+NTSTATUS NgCheckMedium(PNG_VCB Vcb);
 VOID NgApplyModified(PNG_FCB Fcb);
 NTSTATUS NgStartFlusher(PNG_VCB Vcb);
 BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait);

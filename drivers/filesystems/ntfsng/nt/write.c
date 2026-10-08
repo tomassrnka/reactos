@@ -744,7 +744,7 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     for (i = 0; i < Count; i++)
     {
         PNG_VCB Vcb = Vcbs[i];
-        if (Vcb->ReadOnly)
+        if (Vcb->ReadOnly || Vcb->WrongMedia)
             continue;
         NgFlushVolume(Vcb);
         Vcb->WriteThrough = TRUE;
@@ -775,7 +775,7 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
         if (KeWaitForSingleObject(&Vcb->FlusherStop, Executive, KernelMode, FALSE, &Period) == STATUS_SUCCESS)
             break;
         NgAcquireCore(Vcb);
-        if (ngc_dirty(Vcb->Core))
+        if (!Vcb->WrongMedia && ngc_dirty(Vcb->Core))
         {
             /* Busy: commit and keep VOLUME_IS_DIRTY.  Quiet for a whole period: also clear the flag. */
             int Err = ngc_changed(Vcb->Core) ? ngc_commit_now(Vcb->Core) : ngc_sync(Vcb->Core);

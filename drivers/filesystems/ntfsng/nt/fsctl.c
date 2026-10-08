@@ -8,7 +8,64 @@
 #include "ntfsng.h"
 #include "../shim/include/ngos.h"
 
+static NTSTATUS NgDeviceIoctlEx(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength, BOOLEAN Override);
+
 static NTSTATUS NgDeviceIoctl(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength)
+{
+    return NgDeviceIoctlEx(Device, Code, Out, OutLength, TRUE);
+}
+
+/*
+ * Before an open on removable media: the device driver reports a medium change when asked
+ * (IOCTL_DISK_CHECK_VERIFY), and the volume is verified then.  The I/O manager does not verify
+ * on its own, and the volume's own device I/O overrides verification, so without this a swapped
+ * medium would never be noticed.
+ */
+NTSTATUS NgCheckMedium(PNG_VCB Vcb)
+{
+    PDEVICE_OBJECT Real = Vcb->Vpb->RealDevice;
+    NTSTATUS Status;
+
+    if (!Vcb->Removable)
+        return STATUS_SUCCESS;
+    if (Vcb->WrongMedia)
+        return STATUS_WRONG_VOLUME;
+    Status = NgDeviceIoctlEx(Vcb->StorageDevice, IOCTL_DISK_CHECK_VERIFY, NULL, 0, FALSE);
+    if (NT_SUCCESS(Status) && !(Real->Flags & DO_VERIFY_VOLUME))
+    {
+        /* Some drivers (floppy) notice a change only when they touch the medium: read one sector. */
+        PVOID Sector = ExAllocatePoolWithTag(NonPagedPool, Vcb->SectorSize, TAG_NTFSNG);
+        if (Sector)
+        {
+            IO_STATUS_BLOCK Iosb;
+            LARGE_INTEGER Offset;
+            KEVENT Event;
+            PIRP Irp;
+            Offset.QuadPart = 0;
+            KeInitializeEvent(&Event, NotificationEvent, FALSE);
+            Irp = IoBuildSynchronousFsdRequest(IRP_MJ_READ, Vcb->StorageDevice, Sector, Vcb->SectorSize, &Offset, &Event, &Iosb);
+            if (Irp)
+            {
+                Status = IoCallDriver(Vcb->StorageDevice, Irp);
+                if (Status == STATUS_PENDING)
+                {
+                    KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+                    Status = Iosb.Status;
+                }
+            }
+            ExFreePoolWithTag(Sector, TAG_NTFSNG);
+        }
+    }
+    if (Status == STATUS_VERIFY_REQUIRED || (Real->Flags & DO_VERIFY_VOLUME))
+    {
+        IoVerifyVolume(Real, FALSE);
+        if (Vcb->WrongMedia)
+            return STATUS_WRONG_VOLUME;
+    }
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NgDeviceIoctlEx(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength, BOOLEAN Override)
 {
     IO_STATUS_BLOCK Iosb;
     KEVENT Event;
@@ -19,7 +76,8 @@ static NTSTATUS NgDeviceIoctl(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULON
     Irp = IoBuildDeviceIoControlRequest(Code, Device, NULL, 0, Out, OutLength, FALSE, &Event, &Iosb);
     if (!Irp)
         return STATUS_INSUFFICIENT_RESOURCES;
-    IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
+    if (Override)
+        IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
     Status = IoCallDriver(Device, Irp);
     if (Status == STATUS_PENDING)
     {
@@ -40,9 +98,10 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_VCB Vcb;
     PUCHAR Boot;
     ULONG SectorSize = 512, i;
-    ULONGLONG Size = 0;
+    ULONGLONG Size = 0, BootSectors;
     NTSTATUS Status;
     const char *WhyRo = NULL;
+    BOOLEAN Removable;
     int Err;
 
     if (DeviceObject != NgGlobal.ControlDevice)
@@ -71,7 +130,15 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         /* No partition information (superfloppy): trust the boot sector, plus its backup copy. */
         Size = (*(ULONGLONG UNALIGNED *)(Boot + 0x28) + 1) * *(USHORT UNALIGNED *)(Boot + 0x0b);
     }
+    BootSectors = *(ULONGLONG UNALIGNED *)(Boot + 0x28);
     ExFreePoolWithTag(Boot, TAG_NTFSNG);
+    /*
+     * Device I/O carries SL_OVERRIDE_VERIFY_VOLUME (the core cannot stop half way through an
+     * operation to verify), so after a media change it would reach the new medium.  Removable
+     * media are therefore mounted read-only: nothing of this volume can be written over another.
+     */
+    Removable = (Target->Characteristics & FILE_REMOVABLE_MEDIA) ||
+                (Vpb->RealDevice && (Vpb->RealDevice->Characteristics & FILE_REMOVABLE_MEDIA));
 
     Status = IoCreateDevice(NgGlobal.DriverObject, sizeof(NG_VCB), NULL, FILE_DEVICE_DISK_FILE_SYSTEM,
                             0, FALSE, &Vdo);
@@ -84,6 +151,8 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vcb->StorageDevice = Target;
     Vcb->Vpb = Vpb;
     Vcb->SectorSize = SectorSize;
+    Vcb->Removable = Removable;
+    Vcb->BootSectors = BootSectors;
     ExInitializeResourceLite(&Vcb->CoreLock);
     ExInitializeFastMutex(&Vcb->FcbListLock);
     InitializeListHead(&Vcb->FcbList);
@@ -95,7 +164,9 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vdo->SectorSize = (USHORT)SectorSize;
 
     NgAcquireCore(Vcb);
-    Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly, &Vcb->Core, &WhyRo);
+    Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly && !Removable, &Vcb->Core, &WhyRo);
+    if (!Err && Removable && !NgGlobal.ForceReadOnly)
+        WhyRo = "removable media";
     if (!Err)
         ngc_volinfo(Vcb->Core, &Vcb->Info);
     NgReleaseCore(Vcb);
@@ -416,6 +487,55 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 }
 
+/*
+ * IRP_MN_VERIFY_VOLUME: the storage driver saw a possible media change.  The medium is this volume
+ * only while its boot sector still says so (OEM name, serial number, sector size and count).
+ * Otherwise every later request on the volume fails, nothing more is written to the device, and the
+ * I/O manager mounts the new medium (STATUS_WRONG_VOLUME).
+ */
+static NTSTATUS NgVerifyVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PVPB Vpb = Stack->Parameters.VerifyVolume.Vpb;
+    PNG_VCB Vcb;
+    PUCHAR Boot;
+    NTSTATUS Status = STATUS_WRONG_VOLUME;
+
+    if (DeviceObject == NgGlobal.ControlDevice)
+        return STATUS_INVALID_DEVICE_REQUEST;
+    Vcb = DeviceObject->DeviceExtension;
+    if (Vcb->WrongMedia)
+    {
+        Vpb->RealDevice->Flags &= ~DO_VERIFY_VOLUME;
+        return STATUS_WRONG_VOLUME;
+    }
+    if (!(Vpb->RealDevice->Flags & DO_VERIFY_VOLUME))
+        return STATUS_SUCCESS;
+    Boot = ExAllocatePoolWithTag(NonPagedPool, 4096, TAG_NTFSNG);
+    if (!Boot)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    if (!ngos_dev_read(Vcb->StorageDevice, 0, Boot, Vcb->SectorSize) &&
+        RtlCompareMemory(Boot + 3, "NTFS    ", 8) == 8 &&
+        *(ULONGLONG UNALIGNED *)(Boot + 0x48) == Vcb->Info.serial &&
+        *(ULONGLONG UNALIGNED *)(Boot + 0x28) == Vcb->BootSectors &&
+        *(USHORT UNALIGNED *)(Boot + 0x0b) == Vcb->Info.sector_size)
+    {
+        Status = STATUS_SUCCESS;
+    }
+    ExFreePoolWithTag(Boot, TAG_NTFSNG);
+    if (Status == STATUS_WRONG_VOLUME)
+    {
+        /* Stops the flusher and every request before the next one reaches the new medium. */
+        NgAcquireCore(Vcb);
+        Vcb->WrongMedia = TRUE;
+        Vcb->ReadOnly = TRUE;
+        NgReleaseCore(Vcb);
+        DPRINT1("ntfsng: volume %08lx: the medium was changed; the volume is no longer usable\n", Vpb->SerialNumber);
+    }
+    Vpb->RealDevice->Flags &= ~DO_VERIFY_VOLUME;
+    return Status;
+}
+
 NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -424,9 +544,7 @@ NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case IRP_MN_MOUNT_VOLUME:
             return NgMountVolume(DeviceObject, Irp);
         case IRP_MN_VERIFY_VOLUME:
-            /* Fixed media only: the volume never changes underneath us. */
-            Stack->Parameters.VerifyVolume.Vpb->RealDevice->Flags &= ~DO_VERIFY_VOLUME;
-            return STATUS_SUCCESS;
+            return NgVerifyVolume(DeviceObject, Irp);
         case IRP_MN_USER_FS_REQUEST:
         case IRP_MN_KERNEL_CALL:
             if (DeviceObject == NgGlobal.ControlDevice)

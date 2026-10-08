@@ -477,6 +477,9 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Vcb->LockedBy)
         return STATUS_ACCESS_DENIED;
+    Status = NgCheckMedium(Vcb);
+    if (!NT_SUCCESS(Status))
+        return Status;
     if (Options & FILE_OPEN_BY_FILE_ID)
     {
         /* Opened as the path of the file the ID names; such an open never creates anything. */
