@@ -162,32 +162,6 @@ BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start)
 }
 
 /*
- * Before a non-cached write; the caller holds PagingIoResource exclusive and keeps it until the
- * write is on disk, so no read can bring the old bytes back into the cache in between.
- * Everything from the view holding Offset to the end of the stream is flushed and then purged.
- * FALSE if a view stayed in use.
- */
-BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset)
-{
-    LONGLONG End = NgCachedLimit(Fcb);
-    LARGE_INTEGER Li;
-    IO_STATUS_BLOCK Iosb;
-    BOOLEAN Ok = TRUE;
-
-    Offset &= ~(LONGLONG)(NG_VACB_SIZE - 1);
-    for (Li.QuadPart = Offset; Ok && Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
-    {
-        Iosb.Status = STATUS_SUCCESS;
-        CcFlushCache(&Fcb->SectionObjectPointers, &Li, (ULONG)min(End - Li.QuadPart, (LONGLONG)NG_RANGE_CHUNK), &Iosb);
-        /* Dirty pages that did not reach the disk must not be purged. */
-        Ok = NT_SUCCESS(Iosb.Status);
-    }
-    if (Ok)
-        Ok = NgPurgeFrom(Fcb, Offset);
-    return Ok;
-}
-
-/*
  * EOF change.  Caller holds MainResource exclusive.  Core first, then the header, then Cc.
  * A shrink flushes Cc first so the core's on-disk view of the surviving bytes is current.
  */
@@ -437,7 +411,6 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status = STATUS_SUCCESS;
     LONGLONG End, OldSize;
-    BOOLEAN PagingHeld = FALSE;
     long Done;
     int Err;
 
@@ -550,21 +523,16 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 
     /*
-     * A non-cached write must not leave older bytes in Cc.  When a view cannot be purged (in
-     * use), the write goes through the cache and straight on to disk instead.
+     * A non-cached write must not leave older bytes in Cc or in a mapped view, and a paging read
+     * can bring a purged range back at any time.  While a data section exists the write goes
+     * through the cache and straight on to disk.  Without one, the main resource held exclusive
+     * keeps a section from being created and cached reads out until the write is on disk.
      */
-    if (NonCached)
+    if (NonCached && Fcb->SectionObjectPointers.DataSectionObject)
     {
-        ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
-        PagingHeld = TRUE;
-        if (Fcb->SectionObjectPointers.DataSectionObject && !NgPurgeForNonCached(Fcb, Offset.QuadPart))
-        {
-            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
-            PagingHeld = FALSE;
-            NonCached = FALSE;
-            WriteThrough = TRUE;
-            Vcb->NonCachedViaCache++;
-        }
+        NonCached = FALSE;
+        WriteThrough = TRUE;
+        Vcb->NonCachedViaCache++;
     }
     if (!NonCached)
     {
@@ -599,11 +567,6 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Done >= 0)
             NgAfterChange(Vcb);
         NgReleaseCore(Vcb);
-        if (PagingHeld)
-        {
-            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
-            PagingHeld = FALSE;
-        }
         if (Done < 0)
         {
             DPRINT1("ntfsng: write of %I64x at %I64d len %lu failed %ld\n", Fcb->MftNo, Offset.QuadPart, Length, Done);
