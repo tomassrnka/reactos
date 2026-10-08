@@ -35,12 +35,6 @@ static ULONG HalpNextInterruptTarget;
 /* Message vectors whose interrupt was disconnected; a new message reuses them */
 static BOOLEAN HalpMessageVectorUnused[256];
 
-/* Protects the vector allocation */
-static KSPIN_LOCK HalpVectorLock;
-
-/* The I/O APIC registers are reached through one select/data pair */
-KSPIN_LOCK HalpIoApicLock;
-
 #ifndef _M_AMD64
 const UCHAR
 HalpIRQLtoTPR[32] =
@@ -103,42 +97,55 @@ HalVectorToIRQL[16] =
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/* apic.c is built once for the UP and the SMP HALs, without CONFIG_SMP, so its locks
+   cannot use KxAcquireSpinLock, which takes the lock only when CONFIG_SMP is defined */
 FORCEINLINE
-ULONG_PTR
-IOApicLock(VOID)
+VOID
+HalpAcquireApicLock(
+    _Inout_ PKSPIN_LOCK SpinLock)
 {
-    ULONG_PTR EFlags = __readeflags();
-
-    _disable();
-    while (InterlockedBitTestAndSet((PLONG)&HalpIoApicLock, 0))
+    while (InterlockedBitTestAndSet((PLONG)SpinLock, 0))
     {
-        while (*(volatile KSPIN_LOCK *)&HalpIoApicLock & 1)
+        while (*(volatile KSPIN_LOCK *)SpinLock & 1)
             YieldProcessor();
     }
-    return EFlags;
 }
 
 FORCEINLINE
 VOID
-IOApicUnlock(ULONG_PTR EFlags)
+HalpReleaseApicLock(
+    _Inout_ PKSPIN_LOCK SpinLock)
 {
-    InterlockedAnd((PLONG)&HalpIoApicLock, 0);
-    __writeeflags(EFlags);
+    InterlockedAnd((PLONG)SpinLock, 0);
 }
+
+/* All processors share the select and window registers */
+KSPIN_LOCK HalpIoApicLock;
+
+/* Serializes the lookup and allocation of interrupt vectors */
+KSPIN_LOCK HalpVectorAllocationLock;
+
+#ifdef APIC_LAZY_IRQL
+/* Trigger mode of each redirection entry, for the lazy IRQL deferral in interrupt context */
+UCHAR HalpIoApicTriggerMode[APIC_MAX_IRQ];
+#endif
 
 FORCEINLINE
 ULONG
 IOApicRead(UCHAR Register)
 {
-    ULONG_PTR EFlags;
+    ULONG_PTR Flags;
     ULONG Value;
 
     /* Select the register, then do the read */
     ASSERT(Register <= 0x3F);
-    EFlags = IOApicLock();
+    Flags = __readeflags();
+    _disable();
+    HalpAcquireApicLock(&HalpIoApicLock);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
     Value = READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
-    IOApicUnlock(EFlags);
+    HalpReleaseApicLock(&HalpIoApicLock);
+    __writeeflags(Flags);
     return Value;
 }
 
@@ -146,14 +153,17 @@ FORCEINLINE
 VOID
 IOApicWrite(UCHAR Register, ULONG Value)
 {
-    ULONG_PTR EFlags;
+    ULONG_PTR Flags;
 
     /* Select the register, then do the write */
     ASSERT(Register <= 0x3F);
-    EFlags = IOApicLock();
+    Flags = __readeflags();
+    _disable();
+    HalpAcquireApicLock(&HalpIoApicLock);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN), Value);
-    IOApicUnlock(EFlags);
+    HalpReleaseApicLock(&HalpIoApicLock);
+    __writeeflags(Flags);
 }
 
 FORCEINLINE
@@ -163,6 +173,9 @@ ApicWriteIORedirectionEntry(
     IOAPIC_REDIRECTION_REGISTER ReDirReg)
 {
     ASSERT(Index < APIC_MAX_IRQ);
+#ifdef APIC_LAZY_IRQL
+    HalpIoApicTriggerMode[Index] = (UCHAR)ReDirReg.TriggerMode;
+#endif
     IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
     IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
 }
@@ -317,6 +330,9 @@ FASTCALL
 HalpIrqToVector(UCHAR Irq)
 {
     IOAPIC_REDIRECTION_REGISTER ReDirReg;
+
+    if (Irq >= APIC_MAX_IRQ)
+        return APIC_FREE_VECTOR;
 
     /* Read low dword of the redirection entry */
     ReDirReg.Long0 = IOApicRead(IOAPIC_REDTBL + 2 * Irq);
@@ -690,12 +706,30 @@ HalpGetRootInterruptVector(
     _Out_ PKAFFINITY OutAffinity)
 {
     ULONG Vector;
-    KIRQL OldIrql;
+    KIRQL Irql;
+    KAFFINITY Affinity;
+    ULONG_PTR Flags;
 
-    /* Choosing a free vector and taking it is one step */
-    KeAcquireSpinLock(&HalpVectorLock, &OldIrql);
-    Vector = HalpGetRootInterruptVectorLocked(BusInterruptLevel, BusInterruptVector, OutIrql, OutAffinity);
-    KeReleaseSpinLock(&HalpVectorLock, OldIrql);
+    if (!(BusInterruptLevel >> 16) && (BusInterruptLevel >= APIC_MAX_IRQ))
+    {
+        DPRINT1("IRQ %lu is not an I/O APIC input\n", BusInterruptLevel);
+        *OutAffinity = 0;
+        *OutIrql = 0;
+        return 0;
+    }
+
+    /* Concurrent lookups could otherwise allocate two vectors for one IRQ, or one vector
+       for two IRQs. Interrupts stay disabled: the lock does not raise the IRQL. */
+    Flags = __readeflags();
+    _disable();
+    HalpAcquireApicLock(&HalpVectorAllocationLock);
+    Vector = HalpGetRootInterruptVectorLocked(BusInterruptLevel, BusInterruptVector, &Irql, &Affinity);
+    HalpReleaseApicLock(&HalpVectorAllocationLock);
+    __writeeflags(Flags);
+
+    /* The caller's output may be pageable: write it with its interrupt state restored */
+    *OutIrql = Irql;
+    *OutAffinity = Affinity;
 
     return Vector;
 }
@@ -932,18 +966,18 @@ HalEnableSystemInterrupt(
     /* Get the irq for this vector */
     Index = HalpVectorToIndex[Vector];
 
-    /* Check if its valid */
-    if (Index == APIC_FREE_VECTOR)
-    {
-        /* Interrupt is not in use */
-        return FALSE;
-    }
-
     /* A message-signaled interrupt is enabled and masked in the device */
     if (Index == APIC_MSI_INDEX)
     {
         HalpMessageVectorUnused[Vector] = FALSE;
         return TRUE;
+    }
+
+    /* Check if its valid */
+    if (Index >= APIC_MAX_IRQ)
+    {
+        /* Interrupt is not in use, or not an I/O APIC input */
+        return FALSE;
     }
 
     /* Read the redirection entry */
@@ -1023,7 +1057,6 @@ HalBeginSystemInterrupt(
     /* Check if this interrupt is allowed */
     if (CurrentIrql >= Irql)
     {
-        IOAPIC_REDIRECTION_REGISTER RedirReg;
         UCHAR Index;
 
         /* It is not, set the real Irql in the TPR! */
@@ -1041,11 +1074,10 @@ HalBeginSystemInterrupt(
         /* Check if it's valid */
         if (Index < APIC_MAX_IRQ)
         {
-            /* Read the I/O redirection entry */
-            RedirReg = ApicReadIORedirectionEntry(Index);
-
-            /* Re-request the interrupt to be handled later */
-            ApicRequestSelfInterrupt(Vector, (UCHAR)RedirReg.TriggerMode);
+            /* Re-request the interrupt to be handled later, with the saved trigger mode:
+               reading the redirection entry here would take the I/O APIC lock and make
+               four uncached register accesses in interrupt context */
+            ApicRequestSelfInterrupt(Vector, HalpIoApicTriggerMode[Index]);
        }
        else
        {
