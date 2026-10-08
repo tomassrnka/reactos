@@ -7,6 +7,9 @@
 
 #include "ntfsng.h"
 
+/* MFT records below this are the NTFS metadata files ($MFT, $LogFile, ...). */
+#define NG_FIRST_USER_FILE 16
+
 static PNG_CCB NgAllocateCcb(PCUNICODE_STRING Path)
 {
     PNG_CCB Ccb = ExAllocatePoolWithTag(PagedPool, sizeof(NG_CCB), TAG_NTFSNG);
@@ -337,6 +340,8 @@ static NTSTATUS NgPathFromId(PNG_VCB Vcb, PCUNICODE_STRING Id, PUNICODE_STRING P
     RtlCopyMemory(&Ref, Id->Buffer, sizeof(Ref));
     MftNo = Ref & 0xffffffffffffULL;
     Seq = (USHORT)(Ref >> 48);
+    if (MftNo < NG_FIRST_USER_FILE && MftNo != 5)
+        return STATUS_INVALID_PARAMETER;   /* the metadata files are not opened by ID */
     Buf = ExAllocatePoolWithTag(PagedPool, Cap * sizeof(WCHAR), TAG_NTFSNG);
     Name = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
     if (!Buf || !Name)
@@ -975,6 +980,20 @@ walked:
     {
         Status = STATUS_DELETE_PENDING;
         goto out;
+    }
+    if ((St.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE && !Fcb->IsRoot)
+    {
+        /* The NTFS metadata files ($MFT, $LogFile, $Bitmap, ...) are never opened for writing,
+         * truncated, deleted or given a stream; as on Windows, only reads are allowed. */
+        ACCESS_MASK Mapped = Access;
+        RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
+        if ((Mapped & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | WRITE_DAC | WRITE_OWNER | DELETE)) ||
+            Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF || Disposition == FILE_SUPERSEDE ||
+            (Options & FILE_DELETE_ON_CLOSE) || Stream.Length)
+        {
+            Status = STATUS_ACCESS_DENIED;
+            goto out;
+        }
     }
     if (!IsDir && Fcb->SectionObjectPointers.ImageSectionObject)
     {
