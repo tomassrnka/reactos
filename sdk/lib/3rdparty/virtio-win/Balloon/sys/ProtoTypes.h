@@ -161,6 +161,8 @@ BalloonFill(IN WDFOBJECT WdfDevice, IN size_t num);
 NTSTATUS
 BalloonLeak(IN WDFOBJECT WdfDevice, IN size_t num);
 
+VOID BalloonFreeAllPages(IN WDFOBJECT WdfDevice);
+
 VOID BalloonMemStats(IN WDFOBJECT WdfDevice);
 
 NTSTATUS

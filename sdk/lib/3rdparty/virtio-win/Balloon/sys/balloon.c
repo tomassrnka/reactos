@@ -257,6 +257,20 @@ BalloonLeak(IN WDFOBJECT WdfDevice, IN size_t num)
     return status;
 }
 
+VOID BalloonFreeAllPages(IN WDFOBJECT WdfDevice)
+{
+    PDEVICE_CONTEXT ctx = GetDeviceContext(WdfDevice);
+    PPAGE_LIST_ENTRY pPageListEntry;
+
+    while ((pPageListEntry = (PPAGE_LIST_ENTRY)PopEntryList(&ctx->PageListHead)) != NULL)
+    {
+        ctx->num_pages -= MmGetMdlByteCount(pPageListEntry->PageMdl) / PAGE_SIZE;
+        MmFreePagesFromMdl(pPageListEntry->PageMdl);
+        ExFreePool(pPageListEntry->PageMdl);
+        ExFreeToNPagedLookasideList(&ctx->LookAsideList, pPageListEntry);
+    }
+}
+
 NTSTATUS
 BalloonTellHost(IN WDFOBJECT WdfDevice, IN PVIOQUEUE vq)
 {

@@ -62,3 +62,7 @@ Defects of the upstream code fixed here (to be offered upstream):
   and starts its worker thread only after the interrupt is connected
   (EvtDeviceD0EntryPostInterruptsEnabled instead of EvtDeviceD0Entry), so
   a failed interrupt connection cannot leave the worker waiting.
+- Balloon: pages still in the balloon when the device's hardware is
+  released (a failed power-up, or removal while in a low-power state) were
+  never freed. ReleaseHardware now frees them, after the reset the device
+  got when it left D0, and reports an empty balloon to the host.

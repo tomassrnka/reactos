@@ -290,6 +290,19 @@ BalloonEvtDeviceReleaseHardware(IN WDFDEVICE Device, IN WDFCMRESLIST ResourcesTr
 
     WdfObjectReleaseLock(Device);
 
+    /*
+     * Pages still in the balloon here never went back through the deflate
+     * queue: a power-up failed, or the device was removed while in a low-power
+     * state. The device was reset when it left D0 (BalloonTerm), so the host no
+     * longer holds them; free them and report an empty balloon while the
+     * registers are still mapped.
+     */
+    if (devCtx->num_pages)
+    {
+        BalloonFreeAllPages(Device);
+        BalloonSetSize(Device, devCtx->num_pages);
+    }
+
     VirtIOWdfShutdown(&devCtx->VDevice);
 
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_PNP, "<-- %s\n", __FUNCTION__);
