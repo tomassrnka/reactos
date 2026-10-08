@@ -745,6 +745,73 @@ LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shu
 
 static
 void
+LibTCPAbortCallback(void *arg)
+{
+    struct lwip_callback_msg *msg = arg;
+    PCONNECTION_ENDPOINT Connection = msg->Input.Shutdown.Connection;
+    PTCP_PCB pcb = Connection->SocketContext;
+
+    if (!pcb)
+    {
+        msg->Output.Shutdown.Error = ERR_CLSD;
+        KeSetEvent(&msg->Event, IO_NO_INCREMENT, FALSE);
+        return;
+    }
+
+    /* A listening PCB has no peer to reset */
+    if (pcb->state == LISTEN)
+    {
+        msg->Input.Shutdown.shut_rx = 1;
+        msg->Input.Shutdown.shut_tx = 1;
+        LibTCPShutdownCallback(msg);
+        return;
+    }
+
+    /* The PCB is not ours anymore; tcp_abort frees it after it sends a reset.
+     * Hold the connection lock so readers of SocketContext under it are done. */
+    LockObject(Connection);
+    Connection->SocketContext = NULL;
+    tcp_arg(pcb, NULL);
+    tcp_abort(pcb);
+
+    Connection->ReceiveShutdown = TRUE;
+    Connection->ReceiveShutdownStatus = STATUS_FILE_CLOSED;
+    Connection->SendShutdown = TRUE;
+    UnlockObject(Connection);
+
+    msg->Output.Shutdown.Error = ERR_OK;
+    TCPFinEventHandler(Connection, ERR_CLSD);
+
+    KeSetEvent(&msg->Event, IO_NO_INCREMENT, FALSE);
+}
+
+err_t
+LibTCPAbort(PCONNECTION_ENDPOINT Connection)
+{
+    struct lwip_callback_msg *msg;
+    err_t ret;
+
+    msg = ExAllocateFromNPagedLookasideList(&MessageLookasideList);
+    if (!msg)
+        return ERR_MEM;
+
+    KeInitializeEvent(&msg->Event, NotificationEvent, FALSE);
+    msg->Input.Shutdown.Connection = Connection;
+
+    if (tcpip_callback_with_block(LibTCPAbortCallback, msg, 1) != ERR_OK)
+        ret = ERR_MEM;
+    else if (WaitForEventSafely(&msg->Event))
+        ret = msg->Output.Shutdown.Error;
+    else
+        ret = ERR_CLSD;
+
+    ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
+
+    return ret;
+}
+
+static
+void
 LibTCPCloseCallback(void *arg)
 {
     struct lwip_callback_msg *msg = arg;

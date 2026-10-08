@@ -505,7 +505,11 @@ NTSTATUS TCPDisconnect
             FlushShutdownQueue(Connection, STATUS_FILE_CLOSED);
             ReferenceObject(Connection);
             UnlockObject(Connection);
-            Status = TCPTranslateError(LibTCPShutdown(Connection, 1, 1));
+            /* An abortive disconnect resets the connection */
+            if (Flags & TDI_DISCONNECT_ABORT)
+                Status = TCPTranslateError(LibTCPAbort(Connection));
+            else
+                Status = TCPTranslateError(LibTCPShutdown(Connection, 1, 1));
             DereferenceObject(Connection);
         }
         else
@@ -738,10 +742,15 @@ TCPSetNoDelay(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPSetNoDelay(Connection->SocketContext, Set);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -753,10 +762,15 @@ TCPSetKeepAlive(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPSetKeepAlive(Connection->SocketContext, Value);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -769,10 +783,15 @@ TCPSetKeepAliveValues(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTcpSetKeepAliveValues(Connection->SocketContext, KeepAliveTime, KeepAliveInterval);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -784,10 +803,15 @@ TCPGetSocketStatus(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPGetSocketStatus(Connection->SocketContext, State);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 

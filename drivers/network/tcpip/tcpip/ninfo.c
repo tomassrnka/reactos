@@ -241,8 +241,8 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
                 TcpRow.dwRemoteAddr = EndPoint.Address[0].Address[0].in_addr;
                 TcpRow.dwRemotePort = ntohs(EndPoint.Address[0].Address[0].sin_port);
 
+                /* Fails if the connection was closed meanwhile; the row is skipped then */
                 Status = TCPGetSocketStatus(AddrFile->Connection, &TcpRow.dwState);
-                ASSERT(NT_SUCCESS(Status));
             }
         }
     }
