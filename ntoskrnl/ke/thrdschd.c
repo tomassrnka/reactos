@@ -360,6 +360,13 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             Thread->State = Standby;
             Prcb->NextThread = Thread;
 
+            /* The processor is no longer idle */
+            if (KiIdleSummary & Prcb->SetMember)
+            {
+                InterlockedAndAffinity((PLONG_PTR)&KiIdleSummary,
+                                       ~(LONG_PTR)Prcb->SetMember);
+            }
+
             /* Release the lock */
             KiReleasePrcbLock(Prcb);
 
