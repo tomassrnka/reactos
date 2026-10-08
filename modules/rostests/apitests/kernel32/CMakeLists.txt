@@ -8,6 +8,7 @@ list(APPEND SOURCE
     ConsoleCP.c
     CreateProcess.c
     DefaultActCtx.c
+    DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
     EnumSystemCodePages.c
