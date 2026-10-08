@@ -783,6 +783,21 @@ void __mark_inode_dirty(struct inode *i, int flags) { i->i_state |= flags; }
 void file_ra_state_init(struct file_ra_state *ra, struct address_space *m) { (void)m; ra->ra_pages = 32; }
 void page_cache_sync_readahead(struct address_space *m, void *ra, struct file *f, pgoff_t i, unsigned long n)
 { (void)m; (void)ra; (void)f; (void)i; (void)n; }
+/*
+ * A folio leaving its mapping (lock held): unreferenced ones go on @list to be freed; one that
+ * another holder still references is only detached, and its holder's last folio_put frees it.
+ */
+static void pc_detach_or_list(struct folio *f, struct folio **list)
+{
+	if (f->refcount > 1) {
+		f->mapping = NULL;
+		f->hnext = NULL;
+		__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST);
+		return;
+	}
+	f->hnext = *list;
+	*list = f;
+}
 static void pc_drop_all(struct address_space *m)
 {
 	struct folio *list = NULL;
@@ -791,9 +806,7 @@ static void pc_drop_all(struct address_space *m)
 		struct folio *f = m->pc[b];
 		while (f) {
 			struct folio *n = f->hnext;
-			if (f->refcount > 1)
-				printk(KERN_ERR "dropping referenced folio %lu (ref %d)\n", (unsigned long)f->index, f->refcount);
-			f->hnext = list; list = f;
+			pc_detach_or_list(f, &list);
 			f = n;
 		}
 		m->pc[b] = NULL;
@@ -827,12 +840,9 @@ void truncate_inode_pages(struct address_space *m, loff_t l)
 		while (*pp) {
 			struct folio *f = *pp;
 			if (f->index >= first) {
-				if (f->refcount > 1)
-					printk(KERN_ERR "truncating referenced folio %lu (ref %d)\n", (unsigned long)f->index, f->refcount);
 				*pp = f->hnext;
 				m->nrpages--;
-				f->hnext = list;
-				list = f;
+				pc_detach_or_list(f, &list);
 			} else {
 				pp = &f->hnext;
 			}
