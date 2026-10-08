@@ -64,8 +64,13 @@ MiniportSend(
     ASSERT((sgList->Elements[0].Address.LowPart & 3) == 0);
     ASSERT(sgList->Elements[0].Length <= MAXIMUM_FRAME_SIZE);
 
+    /* NDIS calls a serialized miniport at DISPATCH_LEVEL but does not keep
+       other processors out, so the ring needs its own lock on SMP */
+    NdisDprAcquireSpinLock(&Adapter->SendLock);
+
     if (Adapter->TxFull)
     {
+        NdisDprReleaseSpinLock(&Adapter->SendLock);
         NDIS_DbgPrint(MIN_TRACE, ("All TX descriptors are full\n"));
         return NDIS_STATUS_RESOURCES;
     }
@@ -75,6 +80,7 @@ MiniportSend(
     Adapter->TransmitPackets[Adapter->CurrentTxDesc] = Packet;
 
     Status = NICTransmitPacket(Adapter, TransmitBuffer, TransmitLength);
+    NdisDprReleaseSpinLock(&Adapter->SendLock);
     if (Status != NDIS_STATUS_SUCCESS)
     {
         NDIS_DbgPrint(MIN_TRACE, ("Transmit packet failed\n"));
