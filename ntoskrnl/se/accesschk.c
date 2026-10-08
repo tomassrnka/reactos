@@ -968,6 +968,7 @@ SepAccessCheckWorker(
     BOOLEAN AccessIsGranted = FALSE;
     PACCESS_TOKEN Token = NULL;
     ACCESS_CHECK_RIGHTS AccessCheckRights = {0};
+    BOOLEAN ResultListFilled = FALSE;
 
     PAGED_CODE();
 
@@ -1300,6 +1301,7 @@ SepAccessCheckWorker(
             }
 
             /* We are done here */
+            ResultListFilled = TRUE;
             goto ReturnCommonStatus;
         }
     }
@@ -1440,6 +1442,15 @@ ReturnCommonStatus:
     {
         *GrantedAccessList = PreviouslyGrantedAccess;
         *AccessStatusList = Status;
+    }
+    else if (!ResultListFilled)
+    {
+        /* The result was decided before the per-object checks; it applies to every entry */
+        for (ResultListIndex = 0; ResultListIndex < ObjectTypeListLength; ResultListIndex++)
+        {
+            GrantedAccessList[ResultListIndex] = PreviouslyGrantedAccess;
+            AccessStatusList[ResultListIndex] = Status;
+        }
     }
 
 #if DBG
