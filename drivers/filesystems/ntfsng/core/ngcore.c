@@ -81,7 +81,7 @@ static const char *ngc_mount_check(struct ngc_vol *v, struct ntfs_volume *vol, s
 		return NULL;
 	}
 	err = ngc_fsck(vol, b, r);
-	if (err) {
+	if (err && !r->fatal) {
 		printk(KERN_ERR "CHECK: not run (%d)\n", err);
 	} else {
 		printk(KERN_WARNING "CHECK: %s: %llu records (%llu in use), %llu directories (%u not walked), "
