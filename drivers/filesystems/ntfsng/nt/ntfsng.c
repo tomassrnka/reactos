@@ -214,7 +214,8 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
  * Mm and Cc keep file objects (and so FCBs) of cached files alive long after
  * the last handle is closed.  An FCB without open handles therefore parks its
  * core inode and re-acquires it by MFT number on the next paging read.
- * Both run under the core lock.
+ * Both run under the core lock, by a caller that holds a counted reference to
+ * the FCB (NgDereferenceFcb relies on it).
  */
 int NgEnsureNode(PNG_FCB Fcb)
 {
@@ -320,23 +321,48 @@ static VOID NgFillStatLocked(PNG_FCB Fcb)
 VOID NgDereferenceFcb(PNG_FCB Fcb)
 {
     PNG_VCB Vcb = Fcb->Vcb;
-    BOOLEAN Free;
+    BOOLEAN Free, Core = FALSE;
 
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    /*
+     * A last reference to an FCB with a node is dropped under CoreLock, held from before the FCB
+     * leaves the list until its node is put: a dismount either finds the FCB in its snapshot or,
+     * as it unmounts under CoreLock, waits for the put.  Every new reference is taken under
+     * FcbListLock, and whoever attaches or parks a node holds a counted reference, so with
+     * RefCount 1 seen under it nobody else can give the FCB a node meanwhile.
+     */
+    for (;;)
+    {
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        if (Core || Fcb->RefCount != 1 || !Fcb->Node)
+            break;
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        NgAcquireCore(Vcb);
+        Core = TRUE;
+    }
     Free = (InterlockedDecrement(&Fcb->RefCount) == 0);
     if (Free && Fcb->VcbLinks.Flink)
         RemoveEntryList(&Fcb->VcbLinks);
     if (Free && Vcb->VolumeFcb == Fcb)
         Vcb->VolumeFcb = NULL;
     ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (Free && Fcb->Node)
+    {
+        /* Unreachable without CoreLock (a node with RefCount 1 was seen above); never put into a
+         * core a dismount has freed. */
+        if (!Core)
+        {
+            NgAcquireCore(Vcb);
+            Core = TRUE;
+        }
+        if (Vcb->Core)
+            ngc_put(Fcb->Node);
+        else
+            DPRINT1("ntfsng: BUG: FCB %p for %I64x kept a node across the dismount\n", Fcb, Fcb->MftNo);
+    }
+    if (Core)
+        NgReleaseCore(Vcb);
     if (!Free)
         return;
-    if (Fcb->Node)
-    {
-        NgAcquireCore(Vcb);
-        ngc_put(Fcb->Node);
-        NgReleaseCore(Vcb);
-    }
     FsRtlUninitializeFileLock(&Fcb->FileLock);
     if (Fcb->Runs)
         ExFreePoolWithTag(Fcb->Runs, TAG_NTFSNG);
