@@ -67,6 +67,20 @@ u64 kj_slot_page(u64 slot)
 	return p;
 }
 
+/* The journal's own device I/O: nothing reaches a medium that replaced the volume's. */
+static int kj_dev_read(struct block_device *b, u64 off, void *buf, unsigned int len)
+{
+	return b->kshim_gone || ngos_dev_read(b->osdev, off, buf, len);
+}
+static int kj_dev_write(struct block_device *b, u64 off, void *buf, unsigned int len)
+{
+	return b->kshim_gone || ngos_dev_write(b->osdev, off, buf, len);
+}
+static int kj_dev_flush(struct block_device *b)
+{
+	return b->kshim_gone || ngos_dev_flush(b->osdev);
+}
+
 int kj_page_dev(const struct kj_ext *ext, int next, u64 page, u64 *dev)
 {
 	for (int i = 0; i < next; i++)
@@ -98,7 +112,7 @@ static int kj_read_vol_usn(struct block_device *b, u64 off, u16 *usn, u8 *buf)
 	u64 base = off & ~(u64)(bs - 1);
 	if (bs > KJ_PAGE)
 		return -EIO;
-	return ngos_dev_read(b->osdev, base, buf, bs) ? -EIO : kj_rec_usn(buf + (off - base), bs - (size_t)(off - base), usn);
+	return kj_dev_read(b, base, buf, bs) ? -EIO : kj_rec_usn(buf + (off - base), bs - (size_t)(off - base), usn);
 }
 
 static struct kj_ent *kj_find(struct kshim_jnl *j, u64 blk);
@@ -193,10 +207,10 @@ static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, 
 	h->vol_usn_new = usn_new;
 	h->flags = j->errors ? KJ_FL_ERRORS : 0;
 	h->hdr_crc = kj_crc32(0, h, offsetof(struct kj_hdr, hdr_crc));
-	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || ngos_dev_write(b->osdev, dev, j->hdrpage, KJ_PAGE))
+	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE))
 		return -EIO;
 	j->retired = 0;
-	if (flush && ngos_dev_flush(b->osdev))
+	if (flush && kj_dev_flush(b))
 		return -EIO;
 	return 0;
 }
@@ -213,8 +227,8 @@ int kshim_jnl_retire(struct block_device *b)
 	if (!j || j->readonly || j->retired || j->npages || j->degraded || j->errors || j->failed)
 		return 0;
 	memset(j->hdrpage, 0xff, KJ_PAGE);
-	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || ngos_dev_write(b->osdev, dev, j->hdrpage, KJ_PAGE) ||
-	    ngos_dev_flush(b->osdev))
+	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE) ||
+	    kj_dev_flush(b))
 		return -EIO;
 	j->retired = 1;
 	return 0;
@@ -320,7 +334,7 @@ int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len
 		/* A partial sector not held yet starts from the device copy; bits change only after that. */
 		for (size_t s = in / KJ_SECT * KJ_SECT; s < in + n; s += KJ_SECT)
 			if (!(e->mask & (1u << (s / KJ_SECT))) && (s < in || s + KJ_SECT > in + n) &&
-			    ngos_dev_read(b->osdev, blk * KJ_PAGE + s, e->data + s, KJ_SECT))
+			    kj_dev_read(b, blk * KJ_PAGE + s, e->data + s, KJ_SECT))
 				return -EIO;
 		memcpy(e->data + in, buf, n);
 		for (size_t s = in / KJ_SECT * KJ_SECT; s < in + n; s += KJ_SECT)
@@ -379,7 +393,7 @@ struct kj_batch {
 
 static void kj_batch_flush(struct kj_batch *w)
 {
-	if (w->len && !w->err && ngos_dev_write(w->b->osdev, w->dev, w->buf, (unsigned int)w->len))
+	if (w->len && !w->err && kj_dev_write(w->b, w->dev, w->buf, (unsigned int)w->len))
 		w->err = -EIO;
 	w->len = 0;
 }
@@ -389,7 +403,7 @@ static void kj_batch_add(struct kj_batch *w, u64 dev, const void *data, size_t l
 	if (w->err)
 		return;
 	if (!w->buf) {
-		if (ngos_dev_write(w->b->osdev, dev, (void *)data, (unsigned int)len))
+		if (kj_dev_write(w->b, dev, (void *)data, (unsigned int)len))
 			w->err = -EIO;
 		return;
 	}
@@ -488,7 +502,7 @@ int kshim_jnl_commit(struct block_device *b)
 				goto out;	/* nothing went in place: the overlay stays for the next attempt */
 			j->degraded = 1;	/* until the whole overlay is in place */
 			err = kj_apply_buckets(b, j);
-			if (!err && ngos_dev_flush(b->osdev))
+			if (!err && kj_dev_flush(b))
 				err = -EIO;
 			if (!err)
 				err = kj_resync_vol_usn(b, j);	/* failing: stays degraded, the next commit redoes it */
@@ -513,7 +527,7 @@ int kshim_jnl_commit(struct block_device *b)
 			goto out;
 		j->degraded = 1;
 		err = kj_apply(b, v, n);
-		if (!err && ngos_dev_flush(b->osdev))
+		if (!err && kj_dev_flush(b))
 			err = -EIO;
 		if (!err)
 			err = kj_resync_vol_usn(b, j);
@@ -563,7 +577,7 @@ int kshim_jnl_commit(struct block_device *b)
 	 * the medium before the record that makes replay install the metadata pointing at them: a
 	 * volatile write cache may otherwise keep the header and lose them.
 	 */
-	if (!err && ngos_dev_flush(b->osdev))
+	if (!err && kj_dev_flush(b))
 		err = -EIO;
 	if (err)
 		goto out;
@@ -575,13 +589,13 @@ int kshim_jnl_commit(struct block_device *b)
 		goto out;
 	if (kshim_jnl_fault && j->commits + 1 >= kshim_jnl_fault && n >= 2) {
 		kj_apply(b, v, n / 2);
-		ngos_dev_flush(b->osdev);
+		kj_dev_flush(b);
 		printk(KERN_ERR "journal: fault injected in commit %lu seq %llu: %lu of %lu pages in place\n",
 		       j->commits + 1, (unsigned long long)j->seq, n / 2, n);
 		ngos_bugcheck("journal fault injection", __FILE__, __LINE__);
 	}
 	err = kj_apply(b, v, n);
-	if (!err && ngos_dev_flush(b->osdev))
+	if (!err && kj_dev_flush(b))
 		err = -EIO;
 	if (err) {
 		/*

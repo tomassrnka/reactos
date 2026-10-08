@@ -512,6 +512,43 @@ typedef NTSTATUS (*NG_HANDLER)(PDEVICE_OBJECT, PIRP);
 static NG_HANDLER NgHandlers[IRP_MJ_MAXIMUM_FUNCTION + 1];
 
 /*
+ * A request on a volume whose medium was replaced fails (cleanup and close aside).  On removable media
+ * a pending media change is verified first, so requests on open handles notice it too, not only opens
+ * (creates verify in NgCreate, where a new medium means a reparse).  Requests that cannot wait for a
+ * verify (paging I/O, raised IRQL) fail while one is pending.
+ */
+static NTSTATUS NgMediumGone(PNG_VCB Vcb, PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    UCHAR Major = Stack->MajorFunction;
+    NTSTATUS Status;
+    if (Major == IRP_MJ_CLEANUP || Major == IRP_MJ_CLOSE ||
+        (Major == IRP_MJ_FILE_SYSTEM_CONTROL && Stack->MinorFunction == IRP_MN_VERIFY_VOLUME))
+        return STATUS_SUCCESS;
+    /* Locking the volume and ejecting the medium stay possible on a volume whose medium is gone. */
+    if (Major == IRP_MJ_FILE_SYSTEM_CONTROL && Stack->MinorFunction == IRP_MN_USER_FS_REQUEST &&
+        (Stack->Parameters.FileSystemControl.FsControlCode == FSCTL_LOCK_VOLUME ||
+         Stack->Parameters.FileSystemControl.FsControlCode == FSCTL_UNLOCK_VOLUME ||
+         Stack->Parameters.FileSystemControl.FsControlCode == FSCTL_DISMOUNT_VOLUME))
+        return STATUS_SUCCESS;
+    if (Major == IRP_MJ_DEVICE_CONTROL &&
+        (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_STORAGE_EJECT_MEDIA ||
+         Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_DISK_EJECT_MEDIA ||
+         Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_STORAGE_MEDIA_REMOVAL ||
+         Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_DISK_MEDIA_REMOVAL))
+        return STATUS_SUCCESS;
+    if (Vcb->Removable && !Vcb->WrongMedia && Major != IRP_MJ_CREATE &&
+        (Vcb->Vpb->RealDevice->Flags & DO_VERIFY_VOLUME))
+    {
+        if ((Irp->Flags & IRP_PAGING_IO) || KeGetCurrentIrql() != PASSIVE_LEVEL)
+            return STATUS_VERIFY_REQUIRED;
+        Status = NgCheckMedium(Vcb);
+        if (!NT_SUCCESS(Status))
+            return Vcb->WrongMedia ? STATUS_FILE_INVALID : Status;
+    }
+    return Vcb->WrongMedia ? STATUS_FILE_INVALID : STATUS_SUCCESS;
+}
+
+/*
  * The single dispatch entry: enters the file system, measures stack use and
  * completes the IRP with the handler's status (handlers never pend).
  */
@@ -548,11 +585,10 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         Status = NgDismountedRequest(DeviceObject, Irp);
     }
-    else if (DeviceObject != NgGlobal.ControlDevice && ((PNG_VCB)DeviceObject->DeviceExtension)->WrongMedia &&
-             Major != IRP_MJ_CLEANUP && Major != IRP_MJ_CLOSE &&
-             !(Major == IRP_MJ_FILE_SYSTEM_CONTROL && Stack->MinorFunction == IRP_MN_VERIFY_VOLUME))
+    else if (DeviceObject != NgGlobal.ControlDevice &&
+             !NT_SUCCESS(Status = NgMediumGone((PNG_VCB)DeviceObject->DeviceExtension, Irp, Stack)))
     {
-        Status = STATUS_FILE_INVALID;
+        /* Status says why */
     }
     else if (Major == IRP_MJ_DEVICE_CONTROL && DeviceObject != NgGlobal.ControlDevice)
     {
