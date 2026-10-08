@@ -306,6 +306,9 @@ VOID ProcessFragment(
     IPDR->Id         = IPv4Header->Id;
     IPDR->Protocol   = IPv4Header->Protocol;
     IPDR->TimeoutCount = 0;
+    IPDR->IPv4Header = NULL;
+    IPDR->HeaderSize = 0;
+    IPDR->DataSize   = 0;
     InitializeListHead(&IPDR->FragmentListHead);
     InitializeListHead(&IPDR->HoleListHead);
     InsertTailList(&IPDR->HoleListHead, &Hole->ListEntry);
