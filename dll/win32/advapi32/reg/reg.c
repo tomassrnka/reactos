@@ -2625,9 +2625,12 @@ RegEnumKeyExW(
                               KeyInfo->Node.NameLength);
                 *lpcbName = KeyInfo->Node.NameLength / sizeof(WCHAR);
                 lpName[*lpcbName] = 0;
-                RtlCopyMemory(lpClass,
-                              (PVOID)((ULONG_PTR)KeyInfo->Node.Name + KeyInfo->Node.ClassOffset),
-                              KeyInfo->Node.ClassLength);
+                if (KeyInfo->Node.ClassLength)
+                {
+                    RtlCopyMemory(lpClass,
+                                  (PVOID)((ULONG_PTR)&KeyInfo->Node + KeyInfo->Node.ClassOffset),
+                                  KeyInfo->Node.ClassLength);
+                }
                 *lpcbClass = (DWORD)(KeyInfo->Node.ClassLength / sizeof(WCHAR));
                 lpClass[*lpcbClass] = 0;
             }
