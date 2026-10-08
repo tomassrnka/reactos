@@ -57,6 +57,7 @@ X2APIC_MSR_EOI = HEX(80B)
 #ifndef APIC_X2APIC_MODE
 #define APIC_X2APIC_MODE KiX2ApicMode
 #endif
+EXTERN APIC_X2APIC_MODE:BYTE
 
 /*
  * SendApicEoi - End the interrupt at the local APIC, preserving all registers
