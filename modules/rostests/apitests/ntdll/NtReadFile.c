@@ -44,6 +44,91 @@ SizeOfMdl(VOID)
     return Is64BitSystem() ? 48 : 28;
 }
 
+static
+VOID
+TestPartlyInvalidBuffer(VOID)
+{
+    NTSTATUS Status;
+    HANDLE FileHandle;
+    UNICODE_STRING FileName = RTL_CONSTANT_STRING(L"\\SystemRoot\\ntdll-apitest-NtReadFile-invalid.bin");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER ByteOffset;
+    FILE_DISPOSITION_INFORMATION DispositionInfo;
+    PVOID Buffer = NULL;
+    SIZE_T BufferSize = 2 * PAGE_SIZE;
+
+    /* Reserve two pages, commit only the first one */
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Buffer, 0, &BufferSize, MEM_RESERVE, PAGE_READWRITE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    BufferSize = PAGE_SIZE;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Buffer, 0, &BufferSize, MEM_COMMIT, PAGE_READWRITE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Free;
+    RtlFillMemory(Buffer, PAGE_SIZE, 'A');
+
+    InitializeObjectAttributes(&ObjectAttributes, &FileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtCreateFile(&FileHandle,
+                          FILE_READ_DATA | FILE_WRITE_DATA | DELETE | SYNCHRONIZE,
+                          &ObjectAttributes,
+                          &IoStatus,
+                          NULL,
+                          0,
+                          0,
+                          FILE_SUPERSEDE,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                          NULL,
+                          0);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Free;
+
+    /* Two valid pages of data, so that the reads below reach the second page */
+    ByteOffset.QuadPart = 0;
+    Status = NtWriteFile(FileHandle, NULL, NULL, NULL, &IoStatus, Buffer, PAGE_SIZE, &ByteOffset, NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    ByteOffset.QuadPart = PAGE_SIZE;
+    Status = NtWriteFile(FileHandle, NULL, NULL, NULL, &IoStatus, Buffer, PAGE_SIZE, &ByteOffset, NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+
+    /* Cached write from a buffer whose second page is not committed: the
+       probe checks only the range, so the cache manager faults in its copy */
+    ByteOffset.QuadPart = 0;
+    Status = NtWriteFile(FileHandle, NULL, NULL, NULL, &IoStatus, Buffer, 2 * PAGE_SIZE, &ByteOffset, NULL);
+    ok(Status == STATUS_INVALID_USER_BUFFER || (!is_reactos() && broken(Status == STATUS_ACCESS_VIOLATION)),
+       "Write from a partly invalid buffer returned 0x%lx\n", Status);
+
+    /* Read into the same buffer: the probe touches every page, so this
+       fails before the request reaches the file system */
+    ByteOffset.QuadPart = 0;
+    Status = NtReadFile(FileHandle, NULL, NULL, NULL, &IoStatus, Buffer, 2 * PAGE_SIZE, &ByteOffset, NULL);
+    ok_hex(Status, STATUS_ACCESS_VIOLATION);
+
+    /* The handle still works */
+    ByteOffset.QuadPart = PAGE_SIZE;
+    Status = NtReadFile(FileHandle, NULL, NULL, NULL, &IoStatus, Buffer, PAGE_SIZE, &ByteOffset, NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulongptr(IoStatus.Information, PAGE_SIZE);
+
+    DispositionInfo.DeleteFile = TRUE;
+    Status = NtSetInformationFile(FileHandle,
+                                  &IoStatus,
+                                  &DispositionInfo,
+                                  sizeof(DispositionInfo),
+                                  FileDispositionInformation);
+    ok_hex(Status, STATUS_SUCCESS);
+    Status = NtClose(FileHandle);
+    ok_hex(Status, STATUS_SUCCESS);
+
+Free:
+    BufferSize = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Buffer, &BufferSize, MEM_RELEASE);
+    ok_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtReadFile)
 {
     NTSTATUS Status;
@@ -60,6 +145,8 @@ START_TEST(NtReadFile)
 
     trace("System is %d bits, Size of MDL: %lu\n", Is64BitSystem() ? 64 : 32, SizeOfMdl());
     trace("Max MDL data size: 0x%lx bytes\n", LargeMdlMaxDataSize);
+
+    TestPartlyInvalidBuffer();
 
     ByteOffset.QuadPart = 0;
 
