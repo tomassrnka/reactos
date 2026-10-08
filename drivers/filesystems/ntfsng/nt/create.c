@@ -442,6 +442,53 @@ static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE
     return STATUS_REPARSE;
 }
 
+/*
+ * Access check of an open of an existing Node (Parent: the directory it was found in, or NULL);
+ * Implied: rights the disposition needs beyond the desired access.  The directory's descriptor is
+ * read only when it can grant something (MAXIMUM_ALLOWED, or a refused DELETE or
+ * FILE_READ_ATTRIBUTES).  Node and Parent stay referenced by the caller.
+ */
+static NTSTATUS NgCheckOpen(PNG_VCB Vcb, PACCESS_STATE As, ngc_node *Node, ngc_node *Parent, ACCESS_MASK Implied)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL, ParentSd = NULL;
+    ACCESS_MASK Desired = As->RemainingDesiredAccess;
+    NG_SHARED_HOLD Hold;
+    NTSTATUS Status;
+
+    NgAcquireCoreShared(Vcb, &Hold);
+    Status = NgReadSecurity(Vcb, Node, &Sd);
+    if (NT_SUCCESS(Status) && Parent && (Desired & MAXIMUM_ALLOWED))
+        Status = NgReadSecurity(Vcb, Parent, &ParentSd);
+    NgReleaseCoreShared(Vcb, &Hold);
+    if (NT_SUCCESS(Status))
+        Status = NgCheckExistingAccess(As, Sd, ParentSd, Implied);
+    if (Status == STATUS_ACCESS_DENIED && Parent && !ParentSd && (Desired & (DELETE | FILE_READ_ATTRIBUTES)))
+    {
+        NgAcquireCoreShared(Vcb, &Hold);
+        Status = NgReadSecurity(Vcb, Parent, &ParentSd);
+        NgReleaseCoreShared(Vcb, &Hold);
+        if (NT_SUCCESS(Status))
+            Status = NgCheckExistingAccess(As, Sd, ParentSd, Implied);
+    }
+    if (Sd)
+        ExFreePoolWithTag(Sd, TAG_NTFSNG);
+    if (ParentSd)
+        ExFreePoolWithTag(ParentSd, TAG_NTFSNG);
+    return Status;
+}
+
+/* FILE_TRAVERSE on directory Dir, for a caller without the traverse privilege; caller holds CoreLock. */
+static NTSTATUS NgCheckTraverse(PNG_VCB Vcb, PACCESS_STATE As, ngc_node *Dir)
+{
+    PSECURITY_DESCRIPTOR Sd;
+    NTSTATUS Status = NgReadSecurity(Vcb, Dir, &Sd);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = NgCheckAccessRight(As, Sd, FILE_TRAVERSE);
+    ExFreePoolWithTag(Sd, TAG_NTFSNG);
+    return Status;
+}
+
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -466,6 +513,10 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     unsigned int RealLen = 0;
     UNICODE_STRING ById = { 0, 0, NULL };
     PCUNICODE_STRING Name = &FileObject->FileName;
+    PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
+    BOOLEAN Check = NgCreateChecksAccess(Irp, Stack), Traverse;
+    PSECURITY_DESCRIPTOR ParentSd = NULL;
+    ULONG RelatedChars = 0;
     NTSTATUS Status;
     USHORT i, FullLength;
     int Err;
@@ -529,6 +580,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Name->Length &&
             (Full.Length == 0 || Full.Buffer[Full.Length / sizeof(WCHAR) - 1] != L'\\'))
             RtlAppendUnicodeToString(&Full, L"\\");
+        RelatedChars = Full.Length / sizeof(WCHAR);
     }
     RtlAppendUnicodeStringToString(&Full, Name);
     if (Full.Length == 0 || Full.Buffer[0] != L'\\')
@@ -547,6 +599,9 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Status = STATUS_OBJECT_NAME_INVALID;
         goto out;
     }
+    /* Directories on the path need FILE_TRAVERSE unless the caller holds SeChangeNotifyPrivilege;
+     * an open by file ID has no path, a relative open starts below its directory. */
+    Traverse = Check && !(As->Flags & TOKEN_HAS_TRAVERSE_PRIVILEGE) && Name == &FileObject->FileName;
 
     /*
      * Walk the path.  Parent keeps the directory of the last component.  The walk takes CoreLock
@@ -589,6 +644,12 @@ walk:
         {
             Status = STATUS_OBJECT_NAME_INVALID;
             break;
+        }
+        if (Traverse && (ULONG)(Comp.Buffer - Full.Buffer) >= RelatedChars)
+        {
+            Status = NgCheckTraverse(Vcb, As, Node);
+            if (!NT_SUCCESS(Status))
+                break;
         }
         if (LastComp && OpenTarget)
         {
@@ -676,14 +737,23 @@ walk:
         Err = ngc_open_stream(Vcb->Core, Node, Stream.Buffer, Stream.Length / sizeof(WCHAR), &Next);
         if (Err == -NGC_ENOENT && Disposition != FILE_OPEN && Disposition != FILE_OVERWRITE)
         {
-            /* A named stream of an existing file or directory is created on demand. */
+            /* A named stream of an existing file or directory is created on demand; that needs
+             * write access to the file. */
+            PSECURITY_DESCRIPTOR FileSd = NULL;
             if (Vcb->ReadOnly)
                 Err = -NGC_EROFS;
+            else if (Check && (!NT_SUCCESS(Status = NgReadSecurity(Vcb, Node, &FileSd)) ||
+                               !NT_SUCCESS(Status = NgCheckAccessRight(As, FileSd, FILE_WRITE_DATA))))
+                Err = 0;
             else if (!(Err = ngc_create_stream(Vcb->Core, Node, Stream.Buffer, Stream.Length / sizeof(WCHAR), &Next)))
             {
                 Created = TRUE;
                 Information = FILE_CREATED;
             }
+            if (FileSd)
+                ExFreePoolWithTag(FileSd, TAG_NTFSNG);
+            if (!NT_SUCCESS(Status))
+                goto walked;
         }
         if (Err)
         {
@@ -695,6 +765,7 @@ walk:
             Node = Next;
         }
     }
+walked:
     if (NT_SUCCESS(Status) && Missing)
     {
         /* Create the missing last component. */
@@ -711,6 +782,10 @@ walk:
             Status = STATUS_OBJECT_NAME_INVALID;
         else if (WantDir && (FileAttributes & FILE_ATTRIBUTE_TEMPORARY))
             Status = STATUS_INVALID_PARAMETER;
+        else if (Check && !NT_SUCCESS(Status = NgReadSecurity(Vcb, Parent, &ParentSd)))
+            ;
+        else if (Check && !NT_SUCCESS(Status = NgCheckCreateAccess(As, ParentSd, WantDir)))
+            ;
         else
         {
             Err = ngc_create(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), WantDir, &Node);
@@ -838,6 +913,22 @@ walk:
         Status = STATUS_OBJECT_NAME_INVALID;
         goto out;
     }
+    if (Check && Created)
+    {
+        /* The creator gets what it asked for, whatever the new descriptor grants. */
+        NgGrantNewFile(As);
+    }
+    else if (Check)
+    {
+        ACCESS_MASK Implied = 0;
+        if (Disposition == FILE_SUPERSEDE)
+            Implied = DELETE;
+        else if (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
+            Implied = FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
+        Status = NgCheckOpen(Vcb, As, Node, Name == &FileObject->FileName ? Parent : NULL, Implied);
+        if (!NT_SUCCESS(Status))
+            goto out;
+    }
 
     Ccb = NgAllocateCcb(&Full);
     Fcb = NgAllocateFcb(Vcb);
@@ -854,11 +945,10 @@ walk:
     }
     Ccb->DeleteOnClose = (Options & FILE_DELETE_ON_CLOSE) != 0;
     {
-        PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
         ACCESS_MASK Mapped = Access;
         RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
         Ccb->AppendOnly = (Mapped & FILE_APPEND_DATA) && !(Mapped & FILE_WRITE_DATA);
-        Ccb->Granted = Mapped | (As ? As->PreviouslyGrantedAccess : 0);
+        Ccb->Granted = Check ? As->PreviouslyGrantedAccess : Mapped | (As ? As->PreviouslyGrantedAccess : 0);
     }
     Fcb->Node = Node;
     Fcb->HasNode = TRUE;
@@ -1005,6 +1095,8 @@ out:
         NgDereferenceFcb(Fcb);
     if (Ccb)
         NgFreeCcb(Ccb);
+    if (ParentSd)
+        ExFreePoolWithTag(ParentSd, TAG_NTFSNG);
     ExFreePoolWithTag(Real, TAG_NTFSNG);
     ExFreePoolWithTag(Full.Buffer, TAG_NTFSNG);
     if (ById.Buffer)

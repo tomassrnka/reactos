@@ -42,6 +42,7 @@ list(APPEND CORE_SOURCE
     core/ngjrec.c)
 
 list(APPEND NT_SOURCE
+    nt/access.c
     nt/create.c
     nt/diag.c
     nt/dirctl.c

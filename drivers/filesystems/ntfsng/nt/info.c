@@ -391,7 +391,7 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
 }
 
 static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
-                               ULONG Length, BOOLEAN IsLink)
+                               ULONG Length, BOOLEAN IsLink, BOOLEAN Check)
 {
     PNG_VCB Vcb = Fcb->Vcb;
     PFILE_OBJECT TargetFo = Stack->Parameters.SetFile.FileObject;
@@ -503,6 +503,25 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             {
                 Status = STATUS_ACCESS_DENIED;
                 goto out;
+            }
+            if (Check)
+            {
+                /* Replacing a file deletes it: DELETE on it or FILE_DELETE_CHILD on its directory. */
+                PSECURITY_DESCRIPTOR TargetSd = NULL, DirSd = NULL;
+                NG_SHARED_HOLD Hold;
+                NgAcquireCoreShared(Vcb, &Hold);
+                Status = NgReadSecurity(Vcb, Target, &TargetSd);
+                if (NT_SUCCESS(Status))
+                    Status = NgReadSecurity(Vcb, NewDir, &DirSd);
+                NgReleaseCoreShared(Vcb, &Hold);
+                if (NT_SUCCESS(Status))
+                    Status = NgCheckDeleteEntry(TargetSd, DirSd);
+                if (TargetSd)
+                    ExFreePoolWithTag(TargetSd, TAG_NTFSNG);
+                if (DirSd)
+                    ExFreePoolWithTag(DirSd, TAG_NTFSNG);
+                if (!NT_SUCCESS(Status))
+                    goto out;
             }
             TargetFcb = NgFindFcb(Vcb, TSt.mft_ref & 0xffffffffffffULL);
             if (TargetFcb)
@@ -740,7 +759,8 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FileRenameInformation:
         case FileLinkInformation:
             ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
-            Status = NgRenameOrLink(Fcb, FileObject->FsContext2, Stack, Buffer, Length, Class == FileLinkInformation);
+            Status = NgRenameOrLink(Fcb, FileObject->FsContext2, Stack, Buffer, Length, Class == FileLinkInformation,
+                                    Irp->RequestorMode != KernelMode);
             ExReleaseResourceLite(Fcb->Header.Resource);
             return Status;
         default:
