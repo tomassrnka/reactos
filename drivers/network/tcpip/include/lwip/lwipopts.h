@@ -20,6 +20,11 @@
 #define LOCK_TCPIP_CORE()               sys_lock_tcpip_core()
 #define UNLOCK_TCPIP_CORE()             sys_unlock_tcpip_core()
 
+/* Received packets enter lwIP on the receive worker of their adapter, under
+   the core lock, instead of being posted to the tcpip thread. tcpip_input is
+   only called from those workers, at PASSIVE_LEVEL with no lock held */
+#define LWIP_TCPIP_CORE_LOCKING_INPUT   1
+
 #define LWIP_ARP                        0
 
 #define ETH_PAD_SIZE                    2
