@@ -183,6 +183,7 @@ typedef struct _NG_CCB
     BOOLEAN PatternIsStar;
     BOOLEAN Enumerated;
     BOOLEAN AnyReturned;
+    LONG QueryBusy;                 /* a directory query of this handle is running (dirctl.c) */
     ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
     PVOID RetiredPaths;             /* earlier Path buffers of a renamed directory (change notify keeps them) */
 } NG_CCB, *PNG_CCB;
