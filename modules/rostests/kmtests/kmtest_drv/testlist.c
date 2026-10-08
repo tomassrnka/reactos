@@ -54,6 +54,7 @@ KMT_TESTFUNC Test_KeGenericCallDpc;
 KMT_TESTFUNC Test_KeGuardedMutex;
 KMT_TESTFUNC Test_KeIrql;
 KMT_TESTFUNC Test_KeMutex;
+KMT_TESTFUNC Test_KePriority;
 KMT_TESTFUNC Test_KeProcessor;
 KMT_TESTFUNC Test_KeQpc;
 KMT_TESTFUNC Test_KeSpinLock;
@@ -149,6 +150,7 @@ const KMT_TEST TestList[] =
     { "KeGuardedMutex",                     Test_KeGuardedMutex },
     { "KeIrql",                             Test_KeIrql },
     { "KeMutex",                            Test_KeMutex },
+    { "KePriority",                         Test_KePriority },
     { "-KeProcessor",                       Test_KeProcessor },
     { "KeQpc",                              Test_KeQpc },
     { "KeSpinLock",                         Test_KeSpinLock },

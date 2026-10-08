@@ -96,6 +96,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeGuardedMutex.c
     ntos_ke/KeIrql.c
     ntos_ke/KeMutex.c
+    ntos_ke/KePriority.c
     ntos_ke/KeProcessor.c
     ntos_ke/KeQpc.c
     ntos_ke/KeSpinLock.c
