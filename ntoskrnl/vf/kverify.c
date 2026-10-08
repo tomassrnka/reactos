@@ -272,9 +272,13 @@ KvWatchdogThread(IN PVOID Context)
             while (Thread != NULL)
             {
                 PKTHREAD Tcb = &Thread->Tcb;
-                /* Only kernel-mode waits on a lock count; a guarded mutex waits
-                 * in the GateWait state rather than Waiting. */
-                if ((Tcb->State == Waiting || Tcb->State == GateWait) &&
+                /* Only kernel-mode lock waits count. GateWait is excluded on
+                 * purpose: KeWaitForGate does not stamp WaitTime, so a gate
+                 * wait carries an earlier wait's timestamp and ages wrong.
+                 * Guarded-mutex and push-lock deadlocks are left to the
+                 * lock-order checker until the watchdog keeps its own
+                 * first-seen tick per (thread, object). */
+                if (Tcb->State == Waiting &&
                     Tcb->WaitMode == KernelMode &&
                     KvIsLockWait(Tcb->WaitReason))
                 {
