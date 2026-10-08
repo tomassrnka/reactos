@@ -23,6 +23,7 @@ extern void func_getservbyport(void);
 extern void func_iocpskip(void);
 extern void func_ioctlsocket(void);
 extern void func_listen(void);
+extern void func_udpconnreset(void);
 extern void func_nonblocking(void);
 extern void func_nostartup(void);
 extern void func_open_osfhandle(void);
@@ -66,6 +67,7 @@ const struct test winetest_testlist[] =
     { "iocpskip", func_iocpskip },
     { "ioctlsocket", func_ioctlsocket },
     { "listen", func_listen },
+    { "udpconnreset", func_udpconnreset },
     { "nonblocking", func_nonblocking },
     { "nostartup", func_nostartup },
     { "open_osfhandle", func_open_osfhandle },

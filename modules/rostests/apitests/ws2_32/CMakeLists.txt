@@ -19,6 +19,7 @@ list(APPEND SOURCE
     iocpskip.c
     ioctlsocket.c
     listen.c
+    udpconnreset.c
     nonblocking.c
     nostartup.c
     open_osfhandle.c
