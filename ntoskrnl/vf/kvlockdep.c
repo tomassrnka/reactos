@@ -196,12 +196,24 @@ KvLockAcquireImpl(IN PVOID Lock, IN KV_LOCK_KIND Kind, IN PVOID Site)
     KV_LD_CONTEXT *Ctx;
     USHORT NewClass;
     ULONG i;
+    KIRQL OldIrql = PASSIVE_LEVEL;
+    BOOLEAN Raised = FALSE;
 
     if (!KvLdReady) return;
 
     Ctx = KvLdGetContext(Kind, TRUE);
     if (Ctx == NULL || Ctx->Depth >= KV_LD_DEPTH)
         return;                               /* too deep: stop tracking here */
+
+    /* Hold the graph lock at DISPATCH_LEVEL or above so it is never preempted
+     * or re-entered by a kernel APC on the same processor (which would
+     * self-deadlock the raw lock). If we are already above DISPATCH (a queued
+     * spin lock context) no raise is needed. */
+    if (KeGetCurrentIrql() < DISPATCH_LEVEL)
+    {
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Raised = TRUE;
+    }
 
     KvLdEnter();
 
@@ -235,6 +247,7 @@ KvLockAcquireImpl(IN PVOID Lock, IN KV_LOCK_KIND Kind, IN PVOID Site)
     Ctx->Held[Ctx->Depth].ClassId = NewClass;
     Ctx->Depth++;
     KvLdLeave();
+    if (Raised) KeLowerIrql(OldIrql);
 }
 
 VOID
@@ -243,11 +256,21 @@ KvLockReleaseImpl(IN PVOID Lock, IN KV_LOCK_KIND Kind)
 {
     KV_LD_CONTEXT *Ctx;
     ULONG i;
+    KIRQL OldIrql = PASSIVE_LEVEL;
+    BOOLEAN Raised = FALSE;
 
     if (!KvLdReady) return;
 
     Ctx = KvLdGetContext(Kind, FALSE);
     if (Ctx == NULL || Ctx->Depth == 0) return;
+
+    /* Keep the held-stack edit atomic against an APC or preemption that would
+     * modify the same per-thread slot mid-shift. */
+    if (KeGetCurrentIrql() < DISPATCH_LEVEL)
+    {
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Raised = TRUE;
+    }
 
     /* Remove the matching lock (usually the top; handle out-of-order too). */
     for (i = Ctx->Depth; i > 0; i--)
@@ -267,6 +290,8 @@ KvLockReleaseImpl(IN PVOID Lock, IN KV_LOCK_KIND Kind)
     {
         Ctx->Owner = NULL;                    /* release the per-thread slot */
     }
+
+    if (Raised) KeLowerIrql(OldIrql);
 }
 
 #endif /* CONFIG_KERNEL_VERIFIER */
