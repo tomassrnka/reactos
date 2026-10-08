@@ -10,6 +10,7 @@ list(APPEND SOURCE
     QueryServiceConfig2.c
     RegCreateKeyEx.c
     RegEnumKey.c
+    RegEnumKeyClass.c
     RegEnumValueW.c
     RegOpenKeyExW.c
     RegQueryInfoKey.c
