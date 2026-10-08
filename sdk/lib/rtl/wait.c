@@ -170,18 +170,21 @@ RtlRegisterWait(PHANDLE NewWaitObject,
     Flags = Flags & (WT_EXECUTEINIOTHREAD | WT_EXECUTEINPERSISTENTTHREAD |
                      WT_EXECUTELONGFUNCTION | WT_TRANSFER_IMPERSONATION);
 
+    /* The callback may run, and use the handle, before RtlQueueWorkItem returns */
+    *NewWaitObject = Wait;
+
     Status = RtlQueueWorkItem( Wait_thread_proc,
                                Wait,
                                Flags );
 
     if (Status != STATUS_SUCCESS)
     {
+        *NewWaitObject = NULL;
         NtClose( Wait->CancelEvent );
         RtlFreeHeap( RtlGetProcessHeap(), 0, Wait );
         return Status;
     }
 
-    *NewWaitObject = Wait;
     return Status;
 }
 
