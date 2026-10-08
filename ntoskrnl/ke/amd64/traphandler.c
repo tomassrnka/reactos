@@ -124,7 +124,7 @@ Exit:
     }
 }
 
-#define MAX_SYSCALL_PARAMS 16
+#define MAX_SYSCALL_PARAMS (MAX_SYSCALL_PARAM_SIZE / sizeof(ULONG64))
 
 NTSTATUS
 NtSyscallFailure(void)
@@ -233,6 +233,7 @@ KiSystemCallHandler(
     {
         switch (Count)
         {
+            case 17: KernelParams[16] = UserParams[16];
             case 16: KernelParams[15] = UserParams[15];
             case 15: KernelParams[14] = UserParams[14];
             case 14: KernelParams[13] = UserParams[13];
@@ -253,8 +254,10 @@ KiSystemCallHandler(
                 break;
 
             default:
+                /* No in-tree service takes more than 17 arguments */
                 ASSERT(FALSE);
-                break;
+                TrapFrame->Rax = STATUS_INVALID_SYSTEM_SERVICE;
+                _SEH2_YIELD(return (PVOID)NtSyscallFailure);
         }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
