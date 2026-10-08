@@ -29,6 +29,9 @@ struct kshim_jnl {
 	int errors;			/* the core reported errors: the header keeps saying so */
 	int readonly;			/* only a replay overlay for a read-only mount: no journal writes */
 	int retired;			/* the header page is 0xff: the volume was clean when it was written */
+	int failed;			/* a metadata write could not be protected: no write may reach the device */
+	int errors_durable;		/* a header with the errors mark has reached the medium */
+	int errors_writing;
 	u64 vol_rec_off;		/* device offset of $MFT record 3 ($Volume) */
 	u16 vol_usn;			/* its update sequence number on disk (after the last in-place pass) */
 	u8 *hdrpage;
@@ -88,17 +91,14 @@ int kj_rec_usn(const u8 *rec, size_t avail, u16 *usn)
 }
 
 /* $Volume's number as it is on the device (at activation, before the overlay holds anything). */
-static int kj_read_vol_usn(struct block_device *b, u64 off, u16 *usn)
+/* @buf: KJ_PAGE bytes of scratch (the header page buffer, between header writes): no allocation. */
+static int kj_read_vol_usn(struct block_device *b, u64 off, u16 *usn, u8 *buf)
 {
 	unsigned int bs = b->logical_block_size >= KJ_SECT ? b->logical_block_size : KJ_SECT;
 	u64 base = off & ~(u64)(bs - 1);
-	u8 *buf = kmalloc(bs, GFP_KERNEL);
-	int err;
-	if (!buf)
-		return -ENOMEM;
-	err = ngos_dev_read(b->osdev, base, buf, bs) ? -EIO : kj_rec_usn(buf + (off - base), bs - (size_t)(off - base), usn);
-	kfree(buf);
-	return err;
+	if (bs > KJ_PAGE)
+		return -EIO;
+	return ngos_dev_read(b->osdev, base, buf, bs) ? -EIO : kj_rec_usn(buf + (off - base), bs - (size_t)(off - base), usn);
 }
 
 static struct kj_ent *kj_find(struct kshim_jnl *j, u64 blk);
@@ -112,6 +112,28 @@ static u16 kj_vol_usn_after(struct kshim_jnl *j)
 	if (e && (e->mask & (1u << (in / KJ_SECT))) && !kj_rec_usn(e->data + in, KJ_SECT - in % KJ_SECT, &usn))
 		return usn;
 	return j->vol_usn;
+}
+
+/*
+ * After an in-place pass that did not come from the overlay alone (degraded writes went straight to the
+ * device): the number as it is on the medium now.
+ */
+/* Nonzero: the number on the medium is unknown, so no header may be written that records one. */
+static int kj_resync_vol_usn(struct block_device *b, struct kshim_jnl *j)
+{
+	return kj_read_vol_usn(b, j->vol_rec_off, &j->vol_usn, j->hdrpage);
+}
+
+int kshim_jnl_failed(struct block_device *b)
+{
+	return b->jnl && b->jnl->failed;
+}
+
+/* A clean volume whose header is still on the medium: the flusher retires it (an earlier retire failed). */
+int kshim_jnl_retire_pending(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	return j && !j->readonly && !j->retired && !j->npages && !j->degraded && !j->errors && !j->failed;
 }
 
 static int kj_in_area(struct kshim_jnl *j, u64 off, size_t len)
@@ -226,9 +248,17 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 	j->vol_rec_off = vol_rec_off;
 	while (kj_slot_page(j->capacity) < lf_pages)
 		j->capacity++;
-	err = kj_read_vol_usn(b, vol_rec_off, &j->vol_usn);
-	if (!err)
-		err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 1, j->vol_usn);
+	/*
+	 * The volume is clean at activation (recovery cleared the dirty flag, or the mount refused a dirty
+	 * one), so no header is left on the medium: the first commit writes one.
+	 */
+	err = kj_read_vol_usn(b, vol_rec_off, &j->vol_usn, j->hdrpage);
+	if (!err) {
+		b->jnl = j;
+		if (kshim_jnl_retire(b))
+			printk(KERN_ERR "journal: could not retire the header at mount; the flusher tries again\n");
+		b->jnl = NULL;
+	}
 	if (err) {
 		kfree(j->ext);
 		kfree(j->hdrpage);
