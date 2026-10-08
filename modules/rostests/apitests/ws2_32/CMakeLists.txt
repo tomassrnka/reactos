@@ -6,6 +6,7 @@ list(APPEND SOURCE
     getaddrinfo.c
     gethostname.c
     getnameinfo.c
+    getpeername.c
     getservbyname.c
     getservbyport.c
     helpers.c
