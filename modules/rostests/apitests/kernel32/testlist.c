@@ -39,6 +39,7 @@ extern void func_lstrlen(void);
 extern void func_MailslotRead(void);
 extern void func_MultiByteToWideChar(void);
 extern void func_Pipes(void);
+extern void func_PipeSqos(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_QueueUserAPC(void);
 extern void func_RaiseFailFastException(void);
@@ -92,6 +93,7 @@ const struct test winetest_testlist[] =
     { "MailslotRead",                func_MailslotRead },
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
     { "Pipes",                       func_Pipes },
+    { "PipeSqos",                    func_PipeSqos },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
     { "QueueUserAPC",                func_QueueUserAPC },
     { "RaiseFailFastException",      func_RaiseFailFastException },

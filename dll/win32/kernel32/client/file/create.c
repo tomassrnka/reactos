@@ -66,6 +66,7 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 			    HANDLE			hTemplateFile)
 {
    OBJECT_ATTRIBUTES ObjectAttributes;
+   SECURITY_QUALITY_OF_SERVICE SecurityQos;
    IO_STATUS_BLOCK IoStatusBlock;
    UNICODE_STRING NtPathU;
    LPCWSTR pszConsoleFileName;
@@ -289,6 +290,19 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 
    if(!(dwFlagsAndAttributes & FILE_FLAG_POSIX_SEMANTICS))
     ObjectAttributes.Attributes |= OBJ_CASE_INSENSITIVE;
+
+   /* the caller limits what the server end of a pipe may do with its identity */
+   if (dwFlagsAndAttributes & SECURITY_SQOS_PRESENT)
+   {
+      SecurityQos.Length = sizeof(SecurityQos);
+      SecurityQos.ImpersonationLevel = (dwFlagsAndAttributes >> 16) & 0x3;
+      SecurityQos.ContextTrackingMode =
+         (dwFlagsAndAttributes & SECURITY_CONTEXT_TRACKING) ?
+         SECURITY_DYNAMIC_TRACKING : SECURITY_STATIC_TRACKING;
+      SecurityQos.EffectiveOnly =
+         (dwFlagsAndAttributes & SECURITY_EFFECTIVE_ONLY) ? TRUE : FALSE;
+      ObjectAttributes.SecurityQualityOfService = &SecurityQos;
+   }
 
    /* perform the call */
    Status = NtCreateFile (&FileHandle,

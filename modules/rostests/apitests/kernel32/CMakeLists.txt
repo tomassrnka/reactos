@@ -40,6 +40,7 @@ list(APPEND SOURCE
     Mailslot.c
     MultiByteToWideChar.c
     Pipes.c
+    PipeSqos.c
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
     RaiseFailFastException.c
