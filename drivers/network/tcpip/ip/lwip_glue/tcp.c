@@ -26,7 +26,11 @@ static const char * const tcp_state_str[] = {
  * functions. Since this is the case, for each of our LibTCP* functions, we queue a request
  * for a callback to "tcpip thread" which calls our LibTCP*Callback functions. Yes, this is
  * a lot of unnecessary thread swapping and it could definitely be faster, but I don't want
- * to going messing around in lwIP because I have no desire to create another mess like oskittcp */
+ * to going messing around in lwIP because I have no desire to create another mess like oskittcp
+ *
+ * lwIP's core locking (LOCK_TCPIP_CORE) lets any thread call the raw API while it holds the core
+ * lock, as the tcpip thread does while it runs these callbacks. Sends and received packets use it
+ * to stay on their own threads; the other requests still go through the tcpip thread. */
 
 extern KEVENT TerminationEvent;
 extern NPAGED_LOOKASIDE_LIST MessageLookasideList;
@@ -684,112 +688,136 @@ LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
     return NULL;
 }
 
+/* Called with the core lock held */
+static
+err_t
+LibTCPSendLocked(PCONNECTION_ENDPOINT Connection, void *Data, u16_t DataLength, PTDI_BUCKET Bucket, u32_t *Information)
+{
+    PTCP_PCB pcb = Connection->SocketContext;
+    ULONG SendLength;
+    UCHAR SendFlags;
+    err_t Error;
+
+    ASSERT(sys_tcpip_core_locked());
+
+    if (!pcb || Connection->SendShutdown)
+        return ERR_CLSD;
+
+    SendFlags = TCP_WRITE_FLAG_COPY;
+    SendLength = DataLength;
+    if (tcp_sndbuf(pcb) == 0)
+    {
+        /* No buffer space so return pending */
+        Error = ERR_INPROGRESS;
+    }
+    else
+    {
+        if (tcp_sndbuf(pcb) < SendLength)
+        {
+            /* We've got some room so let's send what we can */
+            SendLength = tcp_sndbuf(pcb);
+
+            /* Don't set the push flag */
+            SendFlags |= TCP_WRITE_FLAG_MORE;
+        }
+
+        Error = tcp_write(pcb, Data, SendLength, SendFlags);
+        if (Error == ERR_OK)
+        {
+            /* Queued successfully so try to send it */
+            tcp_output(pcb);
+            *Information = SendLength;
+        }
+        else if (Error == ERR_MEM)
+        {
+            /* The queue is too long */
+            Error = ERR_INPROGRESS;
+        }
+    }
+
+    /* Sent events are delivered under the core lock, so the request is in the queue
+     * before the next one can look for it */
+    if (Error == ERR_INPROGRESS && Bucket)
+    {
+        LockObject(Connection);
+        InsertTailList(&Connection->SendRequest, &Bucket->Entry);
+        UnlockObject(Connection);
+    }
+
+    return Error;
+}
+
 static
 void
 LibTCPSendCallback(void *arg)
 {
     struct lwip_callback_msg *msg = arg;
-    PTCP_PCB pcb = msg->Input.Send.Connection->SocketContext;
-    ULONG SendLength;
-    UCHAR SendFlags;
 
     ASSERT(msg);
 
-    if (!msg->Input.Send.Connection->SocketContext)
-    {
-        msg->Output.Send.Error = ERR_CLSD;
-        goto done;
-    }
-
-    if (msg->Input.Send.Connection->SendShutdown)
-    {
-        msg->Output.Send.Error = ERR_CLSD;
-        goto done;
-    }
-
-    SendFlags = TCP_WRITE_FLAG_COPY;
-    SendLength = msg->Input.Send.DataLength;
-    if (tcp_sndbuf(pcb) == 0)
-    {
-        /* No buffer space so return pending */
-        msg->Output.Send.Error = ERR_INPROGRESS;
-        goto done;
-    }
-    else if (tcp_sndbuf(pcb) < SendLength)
-    {
-        /* We've got some room so let's send what we can */
-        SendLength = tcp_sndbuf(pcb);
-
-        /* Don't set the push flag */
-        SendFlags |= TCP_WRITE_FLAG_MORE;
-    }
-
-    msg->Output.Send.Error = tcp_write(pcb,
-                                       msg->Input.Send.Data,
-                                       SendLength,
-                                       SendFlags);
-    if (msg->Output.Send.Error == ERR_OK)
-    {
-        /* Queued successfully so try to send it */
-        tcp_output((PTCP_PCB)msg->Input.Send.Connection->SocketContext);
-        msg->Output.Send.Information = SendLength;
-    }
-    else if (msg->Output.Send.Error == ERR_MEM)
-    {
-        /* The queue is too long */
-        msg->Output.Send.Error = ERR_INPROGRESS;
-    }
-
-done:
-    /* Sent events are delivered under the core lock, so the request is in the queue
-     * before the next one can look for it */
-    if (msg->Output.Send.Error == ERR_INPROGRESS && msg->Input.Send.Bucket)
-    {
-        LockObject(msg->Input.Send.Connection);
-        InsertTailList(&msg->Input.Send.Connection->SendRequest, &msg->Input.Send.Bucket->Entry);
-        UnlockObject(msg->Input.Send.Connection);
-    }
+    msg->Output.Send.Error = LibTCPSendLocked(msg->Input.Send.Connection,
+                                              msg->Input.Send.Data,
+                                              msg->Input.Send.DataLength,
+                                              msg->Input.Send.Bucket,
+                                              &msg->Output.Send.Information);
 
     KeSetEvent(&msg->Event, IO_NO_INCREMENT, FALSE);
 }
+
+/* Stack a sender must have left to run lwIP's output path on its own thread */
+#define LIBTCP_SEND_INLINE_STACK (KERNEL_STACK_SIZE / 2)
 
 /* Bucket, if not NULL, is queued as a waiting send request if the data cannot be sent now */
 err_t
 LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket)
 {
     err_t ret;
+    u32_t Information = 0;
     struct lwip_callback_msg *msg;
 
-    msg = ExAllocateFromNPagedLookasideList(&MessageLookasideList);
-    if (msg)
+    if (safe)
     {
+        /* From a sent event: the core lock is already held */
+        ret = LibTCPSendLocked(Connection, dataptr, len, Bucket, &Information);
+    }
+    else if (IoGetRemainingStackSize() >= LIBTCP_SEND_INLINE_STACK)
+    {
+        /* Send on the caller's thread rather than switching to the tcpip thread and back */
+        LOCK_TCPIP_CORE();
+        ret = LibTCPSendLocked(Connection, dataptr, len, Bucket, &Information);
+        UNLOCK_TCPIP_CORE();
+    }
+    else
+    {
+        msg = ExAllocateFromNPagedLookasideList(&MessageLookasideList);
+        if (!msg)
+            return ERR_MEM;
+
         KeInitializeEvent(&msg->Event, NotificationEvent, FALSE);
         msg->Input.Send.Connection = Connection;
         msg->Input.Send.Data = dataptr;
         msg->Input.Send.DataLength = len;
         msg->Input.Send.Bucket = Bucket;
 
-        if (safe)
-            LibTCPSendCallback(msg);
-        else
-            tcpip_callback_with_block(LibTCPSendCallback, msg, 1);
+        tcpip_callback_with_block(LibTCPSendCallback, msg, 1);
 
         if (WaitForEventSafely(&msg->Event))
+        {
             ret = msg->Output.Send.Error;
+            Information = msg->Output.Send.Information;
+        }
         else
             ret = ERR_CLSD;
 
-        if (ret == ERR_OK)
-            *sent = msg->Output.Send.Information;
-        else
-            *sent = 0;
-
         ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
-
-        return ret;
     }
 
-    return ERR_MEM;
+    if (ret == ERR_OK)
+        *sent = Information;
+    else
+        *sent = 0;
+
+    return ret;
 }
 
 static
