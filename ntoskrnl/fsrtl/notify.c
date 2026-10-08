@@ -426,7 +426,7 @@ FsRtlNotifyCompleteIrpList(IN PNOTIFY_CHANGE NotifyChange,
 
     DataLength = NotifyChange->DataLength;
 
-    NotifyChange->Flags &= (NOTIFY_IMMEDIATELY | WATCH_TREE);
+    NotifyChange->Flags &= (NOTIFY_IMMEDIATELY | WATCH_TREE | WATCH_ROOT);
     NotifyChange->DataLength = 0;
     NotifyChange->LastEntry = 0;
 
