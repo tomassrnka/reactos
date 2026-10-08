@@ -675,6 +675,7 @@ RtlVirtualUnwind(
     UNWIND_CODE UnwindCode;
     BYTE Reg;
     PULONG LanguageHandler;
+    BOOLEAN InProlog;
 
     /* Get relative virtual address */
     ControlRva = ControlPc - ImageBase;
@@ -694,6 +695,11 @@ RtlVirtualUnwind(
 
     /* Calculate relative offset to function start */
     CodeOffset = ControlRva - FunctionEntry->BeginAddress;
+
+    /* A function's handler does not cover its prolog; the prolog of a
+       chained fragment's function has run */
+    InProlog = (CodeOffset < UnwindInfo->SizeOfProlog) &&
+               !(UnwindInfo->Flags & UNW_FLAG_CHAININFO);
 
     *EstablisherFrame = GetEstablisherFrame(Context, UnwindInfo, CodeOffset);
 
@@ -829,7 +835,8 @@ RepeatChainedInfo:
 Exit:
 
     /* Check if we have a handler and return it */
-    if (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER)))
+    if (!InProlog &&
+        (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER))))
     {
         *HandlerData = (LanguageHandler + 1);
         return RVA(ImageBase, *LanguageHandler);
