@@ -246,6 +246,10 @@ ServiceMain(DWORD argc, LPTSTR *argv)
 
     UpdateServiceStatus(SERVICE_START_PENDING, 1);
 
+    /* PnpEventThread uses the notification list; set it up first */
+    InitializeListHead(&NotificationListHead);
+    RtlInitializeResource(&NotificationListLock);
+
     hThread = CreateThread(NULL,
                            0,
                            PnpEventThread,
