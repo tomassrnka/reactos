@@ -279,8 +279,12 @@ KiIdleLoop(VOID)
             /* Quiesce the DPC software interrupt */
             HalClearSoftwareInterrupt(DISPATCH_LEVEL);
 
-            /* Handle it */
-            KiRetireDpcList(Prcb);
+            /*
+             * Retire the DPCs on the DPC stack, as KiDispatchInterrupt does:
+             * processor 0's idle thread runs on the boot stack, which has only
+             * two usable pages above its guard page.
+             */
+            KiRetireDpcListInDpcStack(Prcb, Prcb->DpcStack);
         }
 
         /* Check if a new thread is scheduled for execution */
