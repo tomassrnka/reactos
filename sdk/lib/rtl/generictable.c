@@ -460,13 +460,14 @@ RtlGetElementGenericTable(IN PRTL_GENERIC_TABLE Table,
         }
         else
         {
-            /* Follow the list directly instead */
+            /* Walk forwards from the list head instead */
             OrderedNode = &Table->InsertOrderList;
-            while (NextI)
+            DeltaUp = NextI;
+            while (DeltaUp)
             {
                 /* Get next node */
                 OrderedNode = OrderedNode->Flink;
-                NextI--;
+                DeltaUp--;
             }
         }
     }
@@ -483,13 +484,13 @@ RtlGetElementGenericTable(IN PRTL_GENERIC_TABLE Table,
             while (DeltaUp)
             {
                 /* Get next node */
-                OrderedNode = OrderedNode->Blink;
+                OrderedNode = OrderedNode->Flink;
                 DeltaUp--;
             }
         }
         else
         {
-            /* Do the search downwards, since this takes less iterations */
+            /* Walk backwards from the list head, it takes fewer steps */
             OrderedNode = &Table->InsertOrderList;
             while (DeltaDown)
             {
