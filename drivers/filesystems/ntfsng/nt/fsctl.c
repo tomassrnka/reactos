@@ -216,7 +216,8 @@ static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         return STATUS_INVALID_PARAMETER;
     if (Vcb->LockedBy)
         return STATUS_ACCESS_DENIED;
-    NgFlushVolume(Vcb);
+    if (NgFlushVolume(Vcb))
+        return STATUS_UNEXPECTED_IO_ERROR;
     ExAcquireFastMutex(&Vcb->FcbListLock);
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {

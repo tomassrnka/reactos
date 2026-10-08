@@ -545,6 +545,8 @@ int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t l
 			return -EIO;
 		kshim_counter_writes++;
 		kshim_counter_write_bytes += len;
+		if (b->jnl && kshim_jnl_failed(b))
+			return -EIO;
 		if (b->jnl && !b->kshim_direct) {
 			int r = kshim_jnl_capture(b, off, buf, len);
 			if (r != -ENOMEM)
@@ -621,7 +623,9 @@ static int kshim_bio_do(struct bio *b)
 }
 void submit_bio(struct bio *b)
 {
-	kshim_bio_do(b);
+	/* The core's MFT write completion ignores bi_status: keep the error for the next consistency point. */
+	if (kshim_bio_do(b) && (b->bi_opf & REQ_OP_MASK) == REQ_OP_WRITE && !b->bi_bdev->kshim_wb_err)
+		b->bi_bdev->kshim_wb_err = -EIO;
 	if (b->bi_end_io) b->bi_end_io(b);
 }
 int submit_bio_wait(struct bio *b) { return kshim_bio_do(b); }

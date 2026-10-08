@@ -769,7 +769,9 @@ struct folio *writeback_iter(struct address_space *m, struct writeback_control *
 struct block_device { void *osdev; u64 size; unsigned int logical_block_size; struct address_space *bd_mapping; struct inode *bd_inode; struct super_block *bd_super;
 	int kshim_remounting; /* set by the adapter while the core switches the volume read-write */
 	struct kshim_jnl *jnl; /* metadata journal (kshim_jnl.c) while active */
-	int kshim_direct; /* nonzero while file data is written: bypasses the journal */ };
+	int kshim_direct; /* nonzero while file data is written: bypasses the journal */
+	int kshim_wb_err; /* first failed write of an asynchronous bio (its completion cannot report it) */
+	int kshim_gone; /* the medium was replaced: every device read and write fails */ };
 static inline u64 bdev_nr_bytes(struct block_device *b) { return b->size; }
 static inline unsigned int bdev_logical_block_size(struct block_device *b) { return b->logical_block_size; }
 static inline unsigned int bdev_physical_block_size(struct block_device *b) { return b->logical_block_size; }

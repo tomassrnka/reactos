@@ -210,7 +210,7 @@ int kshim_jnl_retire(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
 	u64 dev;
-	if (!j || j->readonly || j->retired || j->npages || j->degraded || j->errors)
+	if (!j || j->readonly || j->retired || j->npages || j->degraded || j->errors || j->failed)
 		return 0;
 	memset(j->hdrpage, 0xff, KJ_PAGE);
 	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || ngos_dev_write(b->osdev, dev, j->hdrpage, KJ_PAGE) ||
@@ -468,6 +468,8 @@ int kshim_jnl_commit(struct block_device *b)
 	u32 crc = 0;
 	int err = 0;
 	u16 usn_new;
+	if (j && j->failed)
+		return -EIO;
 	if (!j || (!j->npages && !j->degraded))
 		return 0;	/* nothing written: the caller flushes the device itself */
 	n = j->npages;
@@ -481,15 +483,17 @@ int kshim_jnl_commit(struct block_device *b)
 		if (!v || !tmp) {
 			/* No memory to build a transaction: in place, under an UNJOURNALED header. */
 			j->fallbacks++;
-			j->degraded = 1;	/* until the whole overlay is in place */
 			err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
-			if (!err)
-				err = kj_apply_buckets(b, j);
+			if (err)
+				goto out;	/* nothing went in place: the overlay stays for the next attempt */
+			j->degraded = 1;	/* until the whole overlay is in place */
+			err = kj_apply_buckets(b, j);
 			if (!err && ngos_dev_flush(b->osdev))
 				err = -EIO;
+			if (!err)
+				err = kj_resync_vol_usn(b, j);	/* failing: stays degraded, the next commit redoes it */
 			if (!err) {
 				j->degraded = 0;
-				j->vol_usn = usn_new;
 				err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 1, j->vol_usn);
 			}
 			goto done;
@@ -504,15 +508,17 @@ int kshim_jnl_commit(struct block_device *b)
 		j->fallbacks++;
 		printk(KERN_WARNING "journal: %lu pages do not fit (%llu slots) or degraded=%d: writing in place\n",
 		       n, (unsigned long long)j->capacity, j->degraded);
-		j->degraded = 1;
 		err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
-		if (!err)
-			err = kj_apply(b, v, n);
+		if (err)
+			goto out;
+		j->degraded = 1;
+		err = kj_apply(b, v, n);
 		if (!err && ngos_dev_flush(b->osdev))
 			err = -EIO;
+		if (!err)
+			err = kj_resync_vol_usn(b, j);
 		if (!err) {
 			j->degraded = 0;
-			j->vol_usn = usn_new;
 			err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 1, j->vol_usn);
 		}
 		goto done;
@@ -584,7 +590,11 @@ int kshim_jnl_commit(struct block_device *b)
 		 * pass of the whole overlay succeeds.
 		 */
 		j->degraded = 1;
-		kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
+		if (kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn)) {
+			/* Neither the transaction nor the marker: only a replay of the COMMITTED one can help now. */
+			j->failed = 1;
+			printk(KERN_ERR "journal: device writes failing: no further writes until the next mount\n");
+		}
 		goto out;
 	}
 	j->vol_usn = usn_new;
@@ -710,6 +720,8 @@ int kshim_jnl_ro_page(struct block_device *b, u64 blk, u8 mask, const u8 *data)
 int kshim_jnl_degrade(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
+	if (j && j->failed)
+		return -EIO;
 	if (!j || j->degraded)
 		return 0;
 	printk(KERN_ERR "journal: out of memory for the overlay: writing in place until the next commit\n");

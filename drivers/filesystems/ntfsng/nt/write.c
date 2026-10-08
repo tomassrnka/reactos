@@ -643,20 +643,25 @@ out_mdl:
 }
 
 /* Flushes every cached stream of the volume through Cc, then the core metadata. */
-VOID NgFlushVolume(PNG_VCB Vcb)
+int NgFlushVolume(PNG_VCB Vcb)
 {
     PLIST_ENTRY Entry;
     PNG_FCB *List;
     ULONG Count = 0, Cap = 0, i;
     IO_STATUS_BLOCK Iosb;
-    int Err;
+    int Err, StreamErr = 0;
 
     if (Vcb->ReadOnly)
-        return;
+        return 0;
     ExAcquireFastMutex(&Vcb->FcbListLock);
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
         Cap++;
     List = Cap ? ExAllocatePoolWithTag(NonPagedPool, Cap * sizeof(PNG_FCB), TAG_NTFSNG) : NULL;
+    if (Cap && !List)
+    {
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        return -NGC_ENOMEM;     /* the streams cannot be listed, so their cached data cannot be flushed */
+    }
     if (List)
     {
         for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < Cap; Entry = Entry->Flink)
@@ -675,6 +680,8 @@ VOID NgFlushVolume(PNG_VCB Vcb)
             ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
             NgFlushStream(Fcb, &Iosb);
             ExReleaseResourceLite(Fcb->Header.Resource);
+            if (!NT_SUCCESS(Iosb.Status) && !StreamErr)
+                StreamErr = -NGC_EIO;
         }
         NgApplyModified(Fcb);
         NgDereferenceFcb(Fcb);
@@ -687,6 +694,7 @@ VOID NgFlushVolume(PNG_VCB Vcb)
     NgReleaseCore(Vcb);
     if (Err)
         DPRINT1("ntfsng: volume sync failed %d\n", Err);
+    return StreamErr ? StreamErr : Err;
 }
 
 NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -700,10 +708,7 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (!Fcb || Vcb->ReadOnly)
         return STATUS_SUCCESS;
     if (Fcb->IsVolume)
-    {
-        NgFlushVolume(Vcb);
-        return STATUS_SUCCESS;
-    }
+        return NgFlushVolume(Vcb) ? STATUS_UNEXPECTED_IO_ERROR : STATUS_SUCCESS;
     Iosb.Status = STATUS_SUCCESS;
     if (Fcb->SectionObjectPointers.DataSectionObject)
     {
