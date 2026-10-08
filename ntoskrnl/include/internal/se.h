@@ -692,10 +692,11 @@ NTSTATUS
 SepPropagateAcl(
     _Out_writes_bytes_opt_(DaclLength) PACL AclDest,
     _Inout_ PULONG AclLength,
-    _In_reads_bytes_(AclSource->AclSize) PACL AclSource,
+    _In_opt_ PACL ExplicitAcl,
+    _In_opt_ PACL ParentAcl,
     _In_ PSID Owner,
     _In_ PSID Group,
-    _In_ BOOLEAN IsInherited,
+    _In_ BOOLEAN AutoInherit,
     _In_ BOOLEAN IsDirectoryObject,
     _In_ PGENERIC_MAPPING GenericMapping);
 
@@ -710,7 +711,9 @@ SepSelectAcl(
     _In_ PSID Owner,
     _In_ PSID Group,
     _Out_ PBOOLEAN AclPresent,
-    _Out_ PBOOLEAN IsInherited,
+    _Out_ PACL *InheritedAcl,
+    _In_ BOOLEAN ExplicitProtected,
+    _In_ BOOLEAN AutoInherit,
     _In_ BOOLEAN IsDirectoryObject,
     _In_ PGENERIC_MAPPING GenericMapping);
 

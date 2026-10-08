@@ -1308,14 +1308,16 @@ SeAssignSecurityEx(
     PACL ParentAcl;
     PACL Dacl = NULL;
     PACL Sacl = NULL;
-    BOOLEAN DaclIsInherited;
-    BOOLEAN SaclIsInherited;
+    PACL DaclInherited;
+    PACL SaclInherited;
+    BOOLEAN ExplicitProtected;
+    BOOLEAN DaclAutoInherit = BooleanFlagOn(AutoInheritFlags, SEF_DACL_AUTO_INHERIT);
+    BOOLEAN SaclAutoInherit = BooleanFlagOn(AutoInheritFlags, SEF_SACL_AUTO_INHERIT);
     BOOLEAN DaclPresent;
     BOOLEAN SaclPresent;
     NTSTATUS Status;
 
     DBG_UNREFERENCED_PARAMETER(ObjectType);
-    DBG_UNREFERENCED_PARAMETER(AutoInheritFlags);
     UNREFERENCED_PARAMETER(PoolType);
 
     PAGED_CODE();
@@ -1414,6 +1416,7 @@ SeAssignSecurityEx(
     ExplicitAcl = NULL;
     ExplicitPresent = FALSE;
     ExplicitDefaulted = FALSE;
+    ExplicitProtected = FALSE;
     if (ExplicitDescriptor != NULL &&
         (ExplicitDescriptor->Control & SE_DACL_PRESENT))
     {
@@ -1421,6 +1424,8 @@ SeAssignSecurityEx(
         ExplicitPresent = TRUE;
         if (ExplicitDescriptor->Control & SE_DACL_DEFAULTED)
             ExplicitDefaulted = TRUE;
+        else if (ExplicitDescriptor->Control & SE_DACL_PROTECTED)
+            ExplicitProtected = TRUE;
     }
     ParentAcl = NULL;
     if (ParentDescriptor != NULL &&
@@ -1437,11 +1442,17 @@ SeAssignSecurityEx(
                         Owner,
                         Group,
                         &DaclPresent,
-                        &DaclIsInherited,
+                        &DaclInherited,
+                        ExplicitProtected,
+                        DaclAutoInherit,
                         IsDirectoryObject,
                         GenericMapping);
     if (DaclPresent)
         Control |= SE_DACL_PRESENT;
+    if (ExplicitProtected)
+        Control |= SE_DACL_PROTECTED;
+    if (DaclAutoInherit)
+        Control |= SE_DACL_AUTO_INHERITED;
     ASSERT(DaclLength % sizeof(ULONG) == 0);
 
     /* Inherit the SACL */
@@ -1449,6 +1460,7 @@ SeAssignSecurityEx(
     ExplicitAcl = NULL;
     ExplicitPresent = FALSE;
     ExplicitDefaulted = FALSE;
+    ExplicitProtected = FALSE;
     if (ExplicitDescriptor != NULL &&
         (ExplicitDescriptor->Control & SE_SACL_PRESENT))
     {
@@ -1456,6 +1468,8 @@ SeAssignSecurityEx(
         ExplicitPresent = TRUE;
         if (ExplicitDescriptor->Control & SE_SACL_DEFAULTED)
             ExplicitDefaulted = TRUE;
+        else if (ExplicitDescriptor->Control & SE_SACL_PROTECTED)
+            ExplicitProtected = TRUE;
     }
     ParentAcl = NULL;
     if (ParentDescriptor != NULL &&
@@ -1472,12 +1486,25 @@ SeAssignSecurityEx(
                         Owner,
                         Group,
                         &SaclPresent,
-                        &SaclIsInherited,
+                        &SaclInherited,
+                        ExplicitProtected,
+                        SaclAutoInherit,
                         IsDirectoryObject,
                         GenericMapping);
     if (SaclPresent)
         Control |= SE_SACL_PRESENT;
+    if (ExplicitProtected)
+        Control |= SE_SACL_PROTECTED;
+    if (SaclAutoInherit)
+        Control |= SE_SACL_AUTO_INHERITED;
     ASSERT(SaclLength % sizeof(ULONG) == 0);
+
+    /* A merged ACL can exceed what AclSize can describe */
+    if (DaclLength > MAXUSHORT || SaclLength > MAXUSHORT)
+    {
+        SeUnlockSubjectContext(SubjectContext);
+        return STATUS_BAD_INHERITANCE_ACL;
+    }
 
     /* Allocate and initialize the new security descriptor */
     Length = sizeof(SECURITY_DESCRIPTOR_RELATIVE) +
@@ -1510,9 +1537,10 @@ SeAssignSecurityEx(
         Status = SepPropagateAcl((PACL)((PUCHAR)Descriptor + Current),
                                  &SaclLength,
                                  Sacl,
+                                 SaclInherited,
                                  Owner,
                                  Group,
-                                 SaclIsInherited,
+                                 SaclAutoInherit,
                                  IsDirectoryObject,
                                  GenericMapping);
         ASSERT(Status == STATUS_SUCCESS);
@@ -1525,9 +1553,10 @@ SeAssignSecurityEx(
         Status = SepPropagateAcl((PACL)((PUCHAR)Descriptor + Current),
                                  &DaclLength,
                                  Dacl,
+                                 DaclInherited,
                                  Owner,
                                  Group,
-                                 DaclIsInherited,
+                                 DaclAutoInherit,
                                  IsDirectoryObject,
                                  GenericMapping);
         ASSERT(Status == STATUS_SUCCESS);
