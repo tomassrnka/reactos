@@ -534,6 +534,9 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
     NgGlobal.Verbose = NgReadDword(RegistryPath, L"Verbose");
+    /* "MountCheck": 0 or absent = after an unclean shutdown and for small MFTs, 1 = always, 2 = never. */
+    i = NgReadDword(RegistryPath, L"MountCheck");
+    ngc_check_policy = i == 1 ? 2 : i == 2 ? 0 : 1;
     {
         /* The system-wide NTFS switch for short names (0 = create them, as on Windows). */
         UNICODE_STRING Fs = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\FileSystem");

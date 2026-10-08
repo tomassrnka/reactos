@@ -57,7 +57,11 @@ struct ngc_volinfo {
 	unsigned char major, minor;
 	unsigned char read_only;         /* mounted read-only (policy or request) */
 	unsigned char dirty;             /* VOLUME_IS_DIRTY currently set */
+	unsigned char damaged;           /* the mount-time consistency check found damage (read-only) */
 };
+
+/* Mount-time consistency check: 0 never, 1 after an unclean shutdown or for small MFTs, 2 always. */
+extern int ngc_check_policy;
 
 typedef int (*ngc_filldir_t)(void *ctx, const unsigned short *name, unsigned int len,
 		unsigned long long mft_no, unsigned int dtype);
