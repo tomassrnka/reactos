@@ -53,6 +53,10 @@ VOID NTAPI KvLockReleaseImpl(IN PVOID Lock, IN KV_LOCK_KIND Kind);
 /* (d) pool-leak sampler step - called by the sampler thread. */
 VOID NTAPI KvPoolLeakSample(VOID);
 
+/* (f) UBSan reports are queued by the handlers and printed here (kvubsan.c). */
+VOID NTAPI KvUbsanDrain(VOID);
+VOID NTAPI KvUbsanInitDrain(VOID);
+
 FORCEINLINE BOOLEAN KvEnabled(ULONG Feature)
 {
     return (BOOLEAN)((KvFlags & Feature) != 0);

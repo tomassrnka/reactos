@@ -257,6 +257,8 @@ KvWatchdogThread(IN PVOID Context)
         PEPROCESS Process;
 
         KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+        if (KvEnabled(KV_UBSAN))
+            KvUbsanDrain();
         if (!KvEnabled(KV_DEADLOCK))
             continue;
 
@@ -452,6 +454,9 @@ KvInitialize(IN ULONG Phase, IN PVOID LoaderBlock)
      * it again here, where the debug channel is live. */
     DbgPrint("KVERIFY: active, flags 0x%lx, deadlock %lu s\n",
              KvFlags, KvDeadlockSeconds);
+
+    if (KvFlags & KV_UBSAN)
+        KvUbsanInitDrain();
 
     if ((KvFlags & KV_LOCKDEP) && !KvLockdepInit())
     {
