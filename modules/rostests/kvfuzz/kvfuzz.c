@@ -190,7 +190,6 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
 
     if (!Execute || IsDangerous(sc->Name)) return;
 
-    g_exec++;
     if (!g_quiet)
     {
         _snprintf(line, sizeof(line) - 1, "KVFUZZ: #%u %s(%u) a0=%p a1=%p a2=%p\n",
@@ -202,10 +201,17 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
     if (sc->Target == KF_NT)
     {
         fn = (void*)GetProcAddress(ntdll, sc->Name);
-        if (fn) CallNt(fn, a, sc->Args);
+        if (fn)
+        {
+            g_exec++;
+            CallNt(fn, a, sc->Args);
+        }
     }
     else
     {
+#if defined(_M_IX86) || defined(__i386__)
+        g_exec++;
+#endif
         CallW32(0x1000u | sc->W32Index, a, sc->Args);
     }
 }
