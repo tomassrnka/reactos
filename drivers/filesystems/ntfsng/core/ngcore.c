@@ -1220,6 +1220,28 @@ int ngc_is_rw(ngc_vol *v)
 }
 
 /*
+ * Writeback did not complete, so committing now would publish part of an operation (an MFT record
+ * without its bitmap change).  Nothing is committed: the overlay and the dirty pages stay, the
+ * volume on disk keeps the last committed state, and the caller's operation fails.  Out of memory
+ * (or writeback still finding work after every pass) is retried at the next consistency point.
+ * A device error marks the volume as needing repair and stops further changes.
+ */
+static int ngc_writeback_failed(struct ngc_vol *v, int err)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	printk(KERN_ERR "ngc: writeback failed %d: nothing committed%s\n", err,
+	       err == -ENOMEM || err == -EAGAIN ? ", retried later" : "; the volume needs repair and is read-only now");
+	if (err == -EAGAIN)
+		return -EIO;
+	if (err != -ENOMEM) {
+		NVolSetErrors(vol);
+		kshim_jnl_mark_errors(v->bdev);
+		v->sb->s_flags |= SB_RDONLY;
+	}
+	return err;
+}
+
+/*
  * A consistency point: every dirty mapping and inode is written back, then (journal active)
  * the transaction is committed and written in place, or (no journal) the device is flushed.
  * Callers hold the volume lock between core operations, so the state written is whole.
@@ -1228,15 +1250,15 @@ static int ngc_commit_impl(struct ngc_vol *v)
 {
 	unsigned long long t0 = ngos_ticks();
 	int err = kshim_sync(v->sb);
-	for (int k = 0; !err && k < 4 && kshim_sb_dirty(v->sb); k++)
+	for (int k = 0; err == -EAGAIN && k < 4; k++)
 		err = kshim_sync(v->sb);
 	ngos_prof(NGP_WRITEBACK, t0, 0);
+	if (err)
+		return ngc_writeback_failed(v, err);
 	if (!v->bdev->jnl)
-		return err ? err : blkdev_issue_flush(v->bdev);
+		return blkdev_issue_flush(v->bdev);
 	if (NVolErrors(NTFS_SB(v->sb)))
 		kshim_jnl_mark_errors(v->bdev);
-	if (!err && kshim_sb_dirty(v->sb))
-		printk(KERN_ERR "journal: metadata still dirty after writeback; committing what was written\n");
 	if (!err) {
 		t0 = ngos_ticks();
 		err = kshim_jnl_commit(v->bdev);

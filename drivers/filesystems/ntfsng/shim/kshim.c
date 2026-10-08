@@ -526,7 +526,8 @@ int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t l
 			int r = kshim_jnl_capture(b, off, buf, len);
 			if (r != -ENOMEM)
 				return r;
-			kshim_jnl_degrade(b);
+			if (kshim_jnl_degrade(b))
+				return -EIO;
 		}
 		if (b->jnl)
 			kshim_jnl_patch(b, 1, off, buf, len);
@@ -1199,17 +1200,35 @@ void kshim_icache_trim(struct super_block *sb)
 {
 	struct inode *v;
 	int budget = 64;	/* the page count also holds pages of inodes in use: evict a bounded batch for it */
-	while ((v = kshim_lru_take(sb, sb->kshim_lru_count > KSHIM_ICACHE_UNUSED ||
+	long tries = sb->kshim_lru_count + 64;	/* an inode whose writeback fails goes back on the list */
+	while (tries-- > 0 && (v = kshim_lru_take(sb, sb->kshim_lru_count > KSHIM_ICACHE_UNUSED ||
 				   (sb->kshim_lru_count && kshim_pc_pages > KSHIM_PC_PAGES_SOFT && budget-- > 0))))
 		kshim_lru_evict(v);
 }
 
-/* Linux writes an inode back before it is evicted.  @i holds one reference (dropped here); true: still in use. */
+/*
+ * Linux writes an inode back before it is evicted.  @i holds one reference (dropped here); true: still
+ * in use, or kept because its writeback failed: it stays cached and unused, dirty, so the next sync
+ * writes it, instead of eviction dropping its dirty pages.
+ */
+unsigned long kshim_counter_wb_kept;
 static bool kshim_writeback_last(struct inode *i)
 {
 	if (i->i_nlink && !(i->i_state & (I_FREEING | I_NEW)) && i->i_sb && !sb_rdonly(i->i_sb) &&
-	    ((i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping)))
-		write_inode_now(i, 1);
+	    ((i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping))) {
+		int err = write_inode_now(i, 1);
+		if (err || (i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping)) {
+			if (kshim_counter_wb_kept++ < 8)
+				printk(KERN_ERR "writeback of ino %llu failed %d: kept in memory\n",
+				       (unsigned long long)i->i_ino, err);
+			i->i_state |= I_DIRTY_PAGES;
+			mutex_lock(&kshim_inode_lock);
+			if (atomic_dec_and_test(&i->i_count) && i->i_hash.pprev && !(i->i_state & (I_FREEING | I_NEW)))
+				lru_add_locked(i);
+			mutex_unlock(&kshim_inode_lock);
+			return true;
+		}
+	}
 	return !atomic_dec_and_test(&i->i_count);
 }
 
@@ -1298,9 +1317,10 @@ int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
 void kshim_icache_flush(struct super_block *sb, int all)
 {
 	struct inode *v;
+	long tries = sb->kshim_lru_count + 64;
 	if (all)
 		sb->kshim_no_icache = 1;
-	while ((v = kshim_lru_take(sb, true)))
+	while (tries-- > 0 && (v = kshim_lru_take(sb, true)))
 		kshim_lru_evict(v);
 }
 void clear_inode(struct inode *i) { i->i_state |= I_CLEAR; }
