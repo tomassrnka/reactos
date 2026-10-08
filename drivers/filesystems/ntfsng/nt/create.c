@@ -497,7 +497,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         if (Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF)
             return Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_ACCESS_DENIED;
-        if ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen && Vcb->ReadOnly)
+        if ((Access & NG_WRITE_ACCESS) && !(NgGlobal.PermissiveOpen || Vcb->Damaged) && Vcb->ReadOnly)
             return STATUS_MEDIA_WRITE_PROTECTED;
         return NgOpenVolume(Vcb, FileObject, Stack);
     }
@@ -787,7 +787,7 @@ walk:
             goto out;
         }
         if (Vcb->ReadOnly && ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) ||
-                              (Options & FILE_DELETE_ON_CLOSE) || ((Access & NG_WRITE_ACCESS) && !NgGlobal.PermissiveOpen)))
+                              (Options & FILE_DELETE_ON_CLOSE) || ((Access & NG_WRITE_ACCESS) && !(NgGlobal.PermissiveOpen || Vcb->Damaged))))
         {
             Status = STATUS_MEDIA_WRITE_PROTECTED;
             goto out;

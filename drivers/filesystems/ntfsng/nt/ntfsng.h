@@ -81,6 +81,8 @@ typedef struct _NG_VCB
     struct ngc_volinfo Info;
     ULONG SectorSize;
     BOOLEAN ReadOnly;               /* mounted read-only: policy, registry or request */
+    BOOLEAN Damaged;                /* read-only because the mount-time check found damage: write opens are
+                                       granted and every modification refused, so a damaged system volume boots */
     BOOLEAN WriteThrough;           /* after IRP_MJ_SHUTDOWN: every change ends with a full sync */
     LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
     PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
