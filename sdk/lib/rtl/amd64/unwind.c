@@ -332,6 +332,58 @@ RtlpIsEpilogJump(
  *  https://docs.microsoft.com/en-us/cpp/build/unwind-procedure
  *  https://docs.microsoft.com/en-us/cpp/build/prolog-and-epilog
  */
+/*
+ * Whether the instruction that ends at ControlPc is a call, so that ControlPc
+ * is a return address. The common encodings only; a false match keeps the
+ * caller in its body, which is what the unwind through the prolog assumes.
+ */
+static
+BOOLEAN
+RtlpFollowsCall(
+    _In_ ULONG64 ControlPc,
+    _In_ ULONG64 FunctionStart)
+{
+    const BYTE *Pc = (const BYTE*)ControlPc;
+    ULONG64 Room = ControlPc - FunctionStart;
+    ULONG Length, Need;
+    BYTE ModRm, Mod, Rm;
+
+    /* call rel32 */
+    if ((Room >= 5) && (Pc[-5] == 0xE8))
+        return TRUE;
+
+    /* call r/m64 (FF /2), also with a REX prefix: try each instruction length
+       and check that the ModRM byte implies it */
+    for (Length = 2; (Length <= 7) && (Length <= Room); Length++)
+    {
+        if (Pc[-(LONG)Length] != 0xFF)
+            continue;
+        ModRm = Pc[-(LONG)Length + 1];
+        if (((ModRm >> 3) & 7) != 2)
+            continue;
+        Mod = ModRm >> 6;
+        Rm = ModRm & 7;
+        if (Mod == 3)
+        {
+            if (Length == 2) return TRUE;
+            continue;
+        }
+
+        /* Opcode, ModRM, a SIB byte for rm 4, then the displacement */
+        Need = 2 + (Rm == 4);
+        if (Mod == 1)
+            Need += 1;
+        else if ((Mod == 2) || ((Mod == 0) && (Rm == 5)))
+            Need += 4;
+        else if ((Mod == 0) && (Rm == 4) && ((Pc[-(LONG)Length + 2] & 7) == 5))
+            Need += 4;
+        if (Need == Length)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 static
 __inline
 BOOLEAN
@@ -501,8 +553,12 @@ RtlpTryToUnwindEpilog(
         return FALSE;
     }
 
-    /* A return address can point to an epilog's start, so finish only one that has begun */
-    if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount))
+    /* An epilog is finished from its first instruction, except when a call
+       ends right before it: then ControlPc is a return address in a caller
+       whose compiler did not separate the call from the epilog (GCC), and the
+       caller is still in its body, with its handler */
+    if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount) &&
+        RtlpFollowsCall(ControlPc, ImageBase + FunctionEntry->BeginAddress))
         return FALSE;
 
     /* Unwind is finished, pop new Rip from Stack */
