@@ -189,19 +189,22 @@ KvTicksToSeconds(ULONG Ticks)
 
 static
 BOOLEAN
-KvBenignWait(UCHAR WaitReason)
+KvIsLockWait(UCHAR WaitReason)
 {
-    /* Long waits that are normal and must not be flagged as stuck. */
+    /*
+     * Allowlist the wait reasons that mean "blocked on a kernel lock", rather
+     * than blocklisting the benign ones: ReactOS uses the plain reasons
+     * (DelayExecution, UserRequest, Executive) for ordinary long waits, so a
+     * blocklist would flag every Sleep() and idle worker as a deadlock.
+     */
     switch (WaitReason)
     {
-        case Suspended:
-        case WrSuspended:
-        case WrDelayExecution:
-        case WrUserRequest:
-        case WrEventPair:
-        case WrQueue:
-        case WrLpcReceive:
-        case WrLpcReply:
+        case WrExecutive:
+        case WrResource:
+        case WrPushLock:
+        case WrMutex:
+        case WrFastMutex:
+        case WrGuardedMutex:
             return TRUE;
         default:
             return FALSE;
@@ -238,21 +241,31 @@ KvWatchdogThread(IN PVOID Context)
             while (Thread != NULL)
             {
                 PKTHREAD Tcb = &Thread->Tcb;
-                if (Tcb->State == Waiting && !KvBenignWait(Tcb->WaitReason))
+                /* Only kernel-mode waits on a lock count; a guarded mutex waits
+                 * in the GateWait state rather than Waiting. */
+                if ((Tcb->State == Waiting || Tcb->State == GateWait) &&
+                    Tcb->WaitMode == KernelMode &&
+                    KvIsLockWait(Tcb->WaitReason))
                 {
                     LARGE_INTEGER Tick;
-                    LONGLONG Delta;
+                    LONG Age;
 
-                    /* Read the tick per thread: a wait that started during the
-                     * scan has WaitTime > now and must not wrap to a huge age. */
+                    /* WaitTime is the low 32 bits of the tick count; subtract in
+                     * 32 bits so the comparison is wrap-safe, and read the tick
+                     * per thread so a wait that began during the scan is not
+                     * seen as ancient. */
                     KeQueryTickCount(&Tick);
-                    Delta = Tick.QuadPart - (LONGLONG)Tcb->WaitTime;
-                    if (Delta > 0)
+                    Age = (LONG)((ULONG)Tick.LowPart - Tcb->WaitTime);
+                    if (Age > 0)
                     {
-                        ULONG Secs = KvTicksToSeconds((ULONG)Delta);
-                        /* Report each distinct stuck thread once; do not stop
-                         * at the first one. */
-                        if (Secs >= KvDeadlockSeconds && KvLogOnce(Thread))
+                        ULONG Secs = KvTicksToSeconds((ULONG)Age);
+                        /* Key the one-shot on the thread and this wait episode so
+                         * a later wait on the same thread is still reported, and
+                         * report every distinct stuck thread (do not stop at the
+                         * first). */
+                        PVOID Key = (PVOID)((ULONG_PTR)Thread ^
+                                            (ULONG_PTR)Tcb->WaitTime);
+                        if (Secs >= KvDeadlockSeconds && KvLogOnce(Key))
                         {
                             DbgPrint("KVERIFY: [DEADLOCK] thread %p (pid %p "
                                      "tid %p) waiting %lu s, WaitReason %u\n",
