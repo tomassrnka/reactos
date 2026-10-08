@@ -52,6 +52,13 @@ typedef struct _NTFS_VOLUME_INFO
     PNTFS_ATTR_CONTEXT MFTContext;
     ULONG DeviceId;
     PUCHAR TemporarySector;
+    /* Committed transaction of the ntfsng metadata journal, shown over the disk (see NtfsJournalLoad) */
+    ULONG JnlCount;
+    PULONGLONG JnlBlock;        /* volume offset / 4096 of each page, ascending */
+    PULONGLONG JnlSlot;         /* volume offset of its copy in $LogFile */
+    PUCHAR JnlMask;             /* valid 512-byte sectors of the copy */
+    PUCHAR JnlPage;
+    ULONG JnlLoaded;            /* index of the copy in JnlPage, or JnlCount */
 } NTFS_VOLUME_INFO;
 
 PNTFS_VOLUME_INFO NtfsVolumes[MAX_FDS];
@@ -144,12 +151,16 @@ static VOID NtfsReleaseAttributeContext(PNTFS_ATTR_CONTEXT Context)
     FrLdrTempFree(Context, TAG_NTFS_CONTEXT);
 }
 
+static BOOLEAN NtfsJournalPatch(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, ULONGLONG Length, PCHAR Buffer);
+
 static BOOLEAN NtfsDiskRead(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, ULONGLONG Length, PCHAR Buffer)
 {
     LARGE_INTEGER Position;
     ULONG Count;
     ULONG ReadLength;
     ARC_STATUS Status;
+    ULONGLONG OrigOffset = Offset, OrigLength = Length;
+    PCHAR OrigBuffer = Buffer;
 
     TRACE("NtfsDiskRead - Offset: %I64u Length: %I64u\n", Offset, Length);
 
@@ -218,7 +229,7 @@ static BOOLEAN NtfsDiskRead(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, ULONGLON
             return FALSE;
     }
 
-    return TRUE;
+    return NtfsJournalPatch(Volume, OrigOffset, OrigLength, OrigBuffer);
 }
 
 static ULONG NtfsReadAttribute(PNTFS_VOLUME_INFO Volume, PNTFS_ATTR_CONTEXT Context, ULONGLONG Offset, PCHAR Buffer, ULONG Length)
@@ -1062,6 +1073,339 @@ const DEVVTBL NtfsFuncTable =
     L"ntfs",
 };
 
+/*
+ * The ntfsng driver keeps a metadata journal of its own inside $LogFile (header in page 3, descriptor
+ * and data slots from page 5 on, pages at power-of-two offsets skipped).  A crash during the in-place
+ * pass of a committed transaction leaves metadata half written until the driver replays it at mount,
+ * and the loader reads the volume before that: a committed transaction is therefore shown over the
+ * disk here, read-only, exactly as the driver's read-only mount does.
+ */
+#define NTFSNG_PAGE 4096
+#define NTFSNG_HDR_PAGE 3
+#define NTFSNG_FIRST_SLOT 5
+#define NTFSNG_DESC_PER_PAGE (NTFSNG_PAGE / 16)
+#define NTFSNG_MAX_PAGES 65536
+#define NTFSNG_MAX_RUNS 32
+
+typedef struct { ULONGLONG Page, Count, Dev; } NTFSNG_EXTENT;
+
+static ULONG NtfsJnlCrcTable[256];
+
+static ULONG NtfsJnlCrc(ULONG Crc, const UCHAR *Data, ULONG Length)
+{
+    ULONG i, k, c;
+    if (!NtfsJnlCrcTable[1])
+    {
+        for (i = 0; i < 256; i++)
+        {
+            for (c = i, k = 0; k < 8; k++)
+                c = (c & 1) ? 0xedb88320 ^ (c >> 1) : c >> 1;
+            NtfsJnlCrcTable[i] = c;
+        }
+    }
+    Crc = ~Crc;
+    while (Length--)
+        Crc = NtfsJnlCrcTable[(Crc ^ *Data++) & 0xff] ^ (Crc >> 8);
+    return ~Crc;
+}
+
+static USHORT NtfsJnlG16(const UCHAR *p) { return p[0] | (p[1] << 8); }
+static ULONG NtfsJnlG32(const UCHAR *p) { return NtfsJnlG16(p) | ((ULONG)NtfsJnlG16(p + 2) << 16); }
+static ULONGLONG NtfsJnlG64(const UCHAR *p) { return NtfsJnlG32(p) | ((ULONGLONG)NtfsJnlG32(p + 4) << 32); }
+
+static ULONGLONG NtfsJnlSlotPage(ULONGLONG Slot)
+{
+    ULONGLONG p = NTFSNG_FIRST_SLOT + Slot, q;
+    for (q = 8; q <= p; q <<= 1)
+        p++;
+    return p;
+}
+
+static BOOLEAN NtfsJnlRaw(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, PVOID Buffer, ULONG Length)
+{
+    LARGE_INTEGER Position;
+    ULONG Count;
+    Position.QuadPart = Offset;
+    return ArcSeek(Volume->DeviceId, &Position, SeekAbsolute) == ESUCCESS &&
+           ArcRead(Volume->DeviceId, Buffer, Length, &Count) == ESUCCESS && Count == Length;
+}
+
+static BOOLEAN NtfsJnlLfPage(const NTFSNG_EXTENT *Ext, ULONG NumExt, ULONGLONG Page, PULONGLONG Dev)
+{
+    ULONG i;
+    for (i = 0; i < NumExt; i++)
+    {
+        if (Page >= Ext[i].Page && Page < Ext[i].Page + Ext[i].Count)
+        {
+            *Dev = Ext[i].Dev + (Page - Ext[i].Page) * NTFSNG_PAGE;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* MFT record @Index from the first, contiguous records (mirror as fallback), fixups undone. */
+static BOOLEAN NtfsJnlRecord(PNTFS_VOLUME_INFO Volume, ULONG Index, PUCHAR Record)
+{
+    ULONG Size = Volume->MftRecordSize, Copy, i;
+    ULONGLONG Lcn[2];
+    Lcn[0] = Volume->BootSector.MftLocation;
+    Lcn[1] = Volume->BootSector.MftMirrorLocation;
+    for (Copy = 0; Copy < 2; Copy++)
+    {
+        USHORT Uo, Uc;
+        BOOLEAN Ok = TRUE;
+        if (!NtfsJnlRaw(Volume, Lcn[Copy] * Volume->ClusterSize + (ULONGLONG)Index * Size, Record, Size))
+            continue;
+        Uo = NtfsJnlG16(Record + 4);
+        Uc = NtfsJnlG16(Record + 6);
+        if (NtfsJnlG32(Record) != 0x454c4946 || Uc != Size / 512 + 1 || (Uo & 1) || Uo + 2 * Uc > Size)
+            continue;
+        for (i = 1; i < Uc && Ok; i++)
+        {
+            PUCHAR e = Record + i * 512 - 2;
+            if (e[0] != Record[Uo] || e[1] != Record[Uo + 1])
+                Ok = FALSE;
+            e[0] = Record[Uo + 2 * i];
+            e[1] = Record[Uo + 2 * i + 1];
+        }
+        if (Ok)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * FALSE only when a committed transaction of this volume was recognised but cannot be supplied (a read
+ * or an allocation failed): the disk then holds half of it, and the volume must not be read as it is.
+ */
+static BOOLEAN NtfsJournalLoad(PNTFS_VOLUME_INFO Volume)
+{
+    BOOLEAN Ok = TRUE;
+    PUCHAR Rec = NULL, Page = NULL, Desc = NULL, a = NULL, p, End;
+    NTFSNG_EXTENT Ext[NTFSNG_MAX_RUNS];
+    ULONG NumExt = 0, Off, Len, NPages, NDesc, Crc, i, Uo;
+    ULONGLONG LfPages, Covered, Vcn, Dev, Seq;
+    LONGLONG Lcn = 0;
+    USHORT Usn, UsnOld, UsnNew;
+
+    if (Volume->MftRecordSize < 1024 || Volume->MftRecordSize > 4096 || Volume->ClusterSize < 512 ||
+        (Volume->ClusterSize < NTFSNG_PAGE ? NTFSNG_PAGE % Volume->ClusterSize : Volume->ClusterSize % NTFSNG_PAGE))
+        return TRUE;
+    Rec = FrLdrTempAlloc(Volume->MftRecordSize, TAG_NTFS_DATA);
+    Page = FrLdrTempAlloc(NTFSNG_PAGE, TAG_NTFS_DATA);
+    Desc = FrLdrTempAlloc(NTFSNG_PAGE, TAG_NTFS_DATA);
+    /* Below, a read or allocation failure means "cannot tell", which fails the mount (Ok FALSE) */
+    if (!Rec || !Page || !Desc)
+        goto unknown;
+
+    /* $LogFile ($MFT record 2): the runs of its unnamed $DATA attribute, in pages */
+    if (!NtfsJnlRecord(Volume, 2, Rec))
+        goto unknown;
+    for (Off = NtfsJnlG16(Rec + 0x14); Off + 16 <= Volume->MftRecordSize; Off += Len)
+    {
+        Len = NtfsJnlG32(Rec + Off + 4);
+        if (NtfsJnlG32(Rec + Off) == 0xffffffff || Len < 16 || Len > Volume->MftRecordSize - Off)
+            goto out;
+        if (NtfsJnlG32(Rec + Off) == 0x80 && Rec[Off + 9] == 0)
+        {
+            a = Rec + Off;
+            break;
+        }
+    }
+    if (!a || !a[8] || Len < 0x40 || NtfsJnlG16(a + 0x20) >= Len)
+        goto out;
+    LfPages = NtfsJnlG64(a + 0x30) / NTFSNG_PAGE;
+    Vcn = NtfsJnlG64(a + 0x10);
+    End = a + Len;
+    if (Vcn > ((ULONGLONG)1 << 40))
+        goto out;
+    for (p = a + NtfsJnlG16(a + 0x20); p < End && *p; )
+    {
+        ULONG lb = *p & 0xf, ob = *p >> 4, k;
+        ULONGLONG Count = 0, Delta = 0;
+        if (NumExt == NTFSNG_MAX_RUNS || !lb || lb > 8 || ob > 8 || p + 1 + lb + ob > End || !ob)
+            goto out;
+        for (k = lb; k > 0; k--)
+            Count = (Count << 8) | p[k];
+        for (k = ob; k > 0; k--)
+            Delta = (Delta << 8) | p[lb + k];
+        /* Sign-extend the offset in unsigned arithmetic (8-byte offsets are already full width) */
+        if (ob < 8 && (p[lb + ob] & 0x80))
+            Delta |= ~(ULONGLONG)0 << (8 * ob);
+        if ((LONGLONG)Delta > ((LONGLONG)1 << 41) || (LONGLONG)Delta < -((LONGLONG)1 << 41))
+            goto out;   /* out of range anyway; no overflow in the sum */
+        Lcn += (LONGLONG)Delta;
+        if (!Count || Count > ((ULONGLONG)1 << 40) || Lcn < 0 || Lcn > ((LONGLONG)1 << 40) ||
+            ((Vcn * Volume->ClusterSize) % NTFSNG_PAGE) || ((Count * Volume->ClusterSize) % NTFSNG_PAGE))
+            goto out;
+        Ext[NumExt].Page = Vcn * Volume->ClusterSize / NTFSNG_PAGE;
+        Ext[NumExt].Count = Count * Volume->ClusterSize / NTFSNG_PAGE;
+        Ext[NumExt].Dev = Lcn * Volume->ClusterSize;
+        NumExt++;
+        Vcn += Count;
+        p += 1 + lb + ob;
+    }
+    for (Covered = 0, i = 0; i < NumExt && Ext[i].Page == Covered; i++)
+        Covered += Ext[i].Count;
+    LfPages = min(min(LfPages, Covered), NTFSNG_MAX_PAGES);
+    if (LfPages < 256)
+        goto out;
+
+    /* Restart pages in use (Windows wrote a log): not ours */
+    for (i = 0; i < 2; i++)
+    {
+        if (!NtfsJnlLfPage(Ext, NumExt, i, &Dev))
+            goto out;
+        if (!NtfsJnlRaw(Volume, Dev, Page, NTFSNG_PAGE))
+            goto unknown;
+        if (NtfsJnlG32(Page) != 0xffffffff)
+            goto out;
+    }
+
+    /* Header: a committed transaction of this volume, format 2, checksum right */
+    if (!NtfsJnlLfPage(Ext, NumExt, NTFSNG_HDR_PAGE, &Dev))
+        goto out;
+    if (!NtfsJnlRaw(Volume, Dev, Page, NTFSNG_PAGE))
+        goto unknown;
+    if (!RtlEqualMemory(Page, "NTFSNGJ1", 8) || NtfsJnlG32(Page + 8) != 2 || NtfsJnlG32(Page + 12) != 2 ||
+        NtfsJnlG32(Page + 64) != NtfsJnlCrc(0, Page, 64) || NtfsJnlG64(Page + 36) != Volume->BootSector.VolumeSerialNumber ||
+        NtfsJnlG32(Page + 44) != NTFSNG_PAGE)
+        goto out;
+    Seq = NtfsJnlG64(Page + 16);
+    NPages = NtfsJnlG32(Page + 24);
+    NDesc = NtfsJnlG32(Page + 28);
+    Crc = NtfsJnlG32(Page + 32);
+    UsnOld = NtfsJnlG16(Page + 56);
+    UsnNew = NtfsJnlG16(Page + 58);
+    if (!NPages || NPages >= LfPages || NDesc != (NPages + NTFSNG_DESC_PER_PAGE - 1) / NTFSNG_DESC_PER_PAGE ||
+        NtfsJnlSlotPage(NDesc + NPages - 1) >= LfPages)
+        goto out;
+
+    /* Still ours only while $Volume (record 3) carries a number the header recorded */
+    if (!NtfsJnlRaw(Volume, Volume->BootSector.MftLocation * Volume->ClusterSize + 3 * Volume->MftRecordSize, Rec, 512))
+        goto unknown;
+    if (NtfsJnlG32(Rec) != 0x454c4946 || (Uo = NtfsJnlG16(Rec + 4)) + 2 > 512)
+        goto out;
+    Usn = NtfsJnlG16(Rec + Uo);
+    if (Usn != UsnOld && Usn != UsnNew)
+        goto out;
+
+    /* Whole payload checksum, then every data page against its descriptor */
+    {
+        ULONG Sum = 0;
+        for (i = 0; i < NDesc + NPages; i++)
+        {
+            if (!NtfsJnlLfPage(Ext, NumExt, NtfsJnlSlotPage(i), &Dev))
+                goto out;
+            if (!NtfsJnlRaw(Volume, Dev, Page, NTFSNG_PAGE))
+                goto fail;      /* unreadable is not torn: the transaction may be half in place */
+            Sum = NtfsJnlCrc(Sum, Page, NTFSNG_PAGE);
+        }
+        if (Sum != Crc)
+            goto out;       /* torn: the transaction never reached its place */
+    }
+    Volume->JnlBlock = FrLdrTempAlloc(NPages * sizeof(ULONGLONG), TAG_NTFS_DATA);
+    Volume->JnlSlot = FrLdrTempAlloc(NPages * sizeof(ULONGLONG), TAG_NTFS_DATA);
+    Volume->JnlMask = FrLdrTempAlloc(NPages, TAG_NTFS_DATA);
+    if (!Volume->JnlBlock || !Volume->JnlSlot || !Volume->JnlMask)
+        goto fail;
+    for (i = 0; i < NPages; i++)
+    {
+        PUCHAR d = Desc + (i % NTFSNG_DESC_PER_PAGE) * 16;
+        if (i % NTFSNG_DESC_PER_PAGE == 0 &&
+            (!NtfsJnlLfPage(Ext, NumExt, NtfsJnlSlotPage(i / NTFSNG_DESC_PER_PAGE), &Dev) ||
+             !NtfsJnlRaw(Volume, Dev, Desc, NTFSNG_PAGE)))
+            goto fail;
+        if (!NtfsJnlLfPage(Ext, NumExt, NtfsJnlSlotPage(NDesc + i), &Dev) || !NtfsJnlRaw(Volume, Dev, Page, NTFSNG_PAGE) ||
+            NtfsJnlCrc(0, Page, NTFSNG_PAGE) != NtfsJnlG32(d + 8) || (i && NtfsJnlG64(d) <= Volume->JnlBlock[i - 1]))
+            goto fail;
+        Volume->JnlBlock[i] = NtfsJnlG64(d);
+        Volume->JnlSlot[i] = Dev;
+        Volume->JnlMask[i] = d[12];
+    }
+    Volume->JnlPage = Page;
+    Page = NULL;
+    Volume->JnlCount = NPages;
+    Volume->JnlLoaded = NPages;
+    WARN("NTFS: showing the committed ntfsng journal transaction (seq %I64u, %lu pages)\n", Seq, NPages);
+    goto out;
+fail:
+    if (Volume->JnlBlock)
+        FrLdrTempFree(Volume->JnlBlock, TAG_NTFS_DATA);
+    if (Volume->JnlSlot)
+        FrLdrTempFree(Volume->JnlSlot, TAG_NTFS_DATA);
+    if (Volume->JnlMask)
+        FrLdrTempFree(Volume->JnlMask, TAG_NTFS_DATA);
+    Volume->JnlBlock = Volume->JnlSlot = NULL;
+    Volume->JnlMask = NULL;
+    ERR("NTFS: the ntfsng journal holds a committed transaction that cannot be read\n");
+    Ok = FALSE;
+    goto out;
+unknown:
+    ERR("NTFS: cannot read enough of the volume to look for an ntfsng journal\n");
+    Ok = FALSE;
+out:
+    if (Rec)
+        FrLdrTempFree(Rec, TAG_NTFS_DATA);
+    if (Page)
+        FrLdrTempFree(Page, TAG_NTFS_DATA);
+    if (Desc)
+        FrLdrTempFree(Desc, TAG_NTFS_DATA);
+    return Ok;
+}
+
+/*
+ * Copies the journal's sectors over a buffer just read from the disk at @Offset.  FALSE: a sector the
+ * transaction holds could not be read, so the read must fail rather than return the disk's version.
+ */
+static BOOLEAN NtfsJournalPatch(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, ULONGLONG Length, PCHAR Buffer)
+{
+    ULONGLONG Block, Last, a, z, Start, Stop;
+    ULONG Lo, Hi, Mid, s;
+
+    if (!Volume->JnlCount || !Length)
+        return TRUE;
+    Last = (Offset + Length - 1) / NTFSNG_PAGE;
+    for (Block = Offset / NTFSNG_PAGE; Block <= Last; Block++)
+    {
+        Lo = 0;
+        Hi = Volume->JnlCount;
+        while (Lo < Hi)
+        {
+            Mid = (Lo + Hi) / 2;
+            if (Volume->JnlBlock[Mid] < Block)
+                Lo = Mid + 1;
+            else
+                Hi = Mid;
+        }
+        if (Lo == Volume->JnlCount || Volume->JnlBlock[Lo] != Block)
+            continue;
+        if (Volume->JnlLoaded != Lo)
+        {
+            Volume->JnlLoaded = Volume->JnlCount;
+            if (!NtfsJnlRaw(Volume, Volume->JnlSlot[Lo], Volume->JnlPage, NTFSNG_PAGE))
+            {
+                ERR("NTFS: cannot read the ntfsng journal\n");
+                return FALSE;
+            }
+            Volume->JnlLoaded = Lo;
+        }
+        for (s = 0; s < NTFSNG_PAGE / 512; s++)
+        {
+            if (!(Volume->JnlMask[Lo] & (1 << s)))
+                continue;
+            Start = Block * NTFSNG_PAGE + s * 512;
+            Stop = Start + 512;
+            a = max(Start, Offset);
+            z = min(Stop, Offset + Length);
+            if (a < z)
+                RtlCopyMemory(Buffer + (a - Offset), Volume->JnlPage + (a - Block * NTFSNG_PAGE), (SIZE_T)(z - a));
+        }
+    }
+    return TRUE;
+}
+
 const DEVVTBL* NtfsMount(ULONG DeviceId)
 {
     PNTFS_VOLUME_INFO Volume;
@@ -1125,29 +1469,16 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     TRACE("IndexRecordSize: 0x%x\n", Volume->IndexRecordSize);
 
     //
-    // Read MFT index
+    // Keep device id
     //
-    TRACE("Reading MFT index...\n");
-    Volume->MasterFileTable = FrLdrTempAlloc(Volume->MftRecordSize, TAG_NTFS_MFT);
-    if (!Volume->MasterFileTable)
+    Volume->DeviceId = DeviceId;
+
+    //
+    // A committed ntfsng journal transaction is read over the disk from here on
+    //
+    if (!NtfsJournalLoad(Volume))
     {
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
-        return NULL;
-    }
-    Position.QuadPart = Volume->BootSector.MftLocation * Volume->ClusterSize;
-    Status = ArcSeek(DeviceId, &Position, SeekAbsolute);
-    if (Status != ESUCCESS)
-    {
-        FileSystemError("Failed to seek to Master File Table record.");
-        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
-        return NULL;
-    }
-    Status = ArcRead(DeviceId, Volume->MasterFileTable, Volume->MftRecordSize, &Count);
-    if (Status != ESUCCESS || Count != Volume->MftRecordSize)
-    {
-        FileSystemError("Failed to read the Master File Table record.");
-        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
+        FileSystemError("The NTFS journal holds changes that cannot be read.");
         FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
         return NULL;
     }
@@ -1159,15 +1490,28 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     if (!Volume->TemporarySector)
     {
         FileSystemError("Failed to allocate memory.");
-        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
         FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
         return NULL;
     }
 
     //
-    // Keep device id
+    // Read MFT index
     //
-    Volume->DeviceId = DeviceId;
+    TRACE("Reading MFT index...\n");
+    Volume->MasterFileTable = FrLdrTempAlloc(Volume->MftRecordSize, TAG_NTFS_MFT);
+    if (!Volume->MasterFileTable)
+    {
+        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        return NULL;
+    }
+    if (!NtfsDiskRead(Volume, Volume->BootSector.MftLocation * Volume->ClusterSize, Volume->MftRecordSize,
+                      (PCHAR)Volume->MasterFileTable))
+    {
+        FileSystemError("Failed to read the Master File Table record.");
+        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
+        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        return NULL;
+    }
 
     //
     // Search DATA attribute
