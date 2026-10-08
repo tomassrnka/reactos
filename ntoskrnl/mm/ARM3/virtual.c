@@ -2195,7 +2195,7 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     MMPTE PteContents;
     PMMPFN Pfn1;
     ULONG ProtectionMask, OldProtect;
-    BOOLEAN Committed;
+    BOOLEAN Committed, Unlocked = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
     PETHREAD Thread = PsGetCurrentThread();
     TABLE_SEARCH_RESULT Result;
@@ -2402,6 +2402,15 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                 {
                     KIRQL OldIrql = MiAcquirePfnLock();
 
+                    /* A page locked with VirtualLock is unlocked, as on Windows */
+                    if (Pfn1->Wsle.u1.e1.LockedInWs)
+                    {
+                        Pfn1->Wsle.u1.e1.LockedInWs = 0;
+                        if (!Pfn1->Wsle.u1.e1.LockedInMemory)
+                            MiDereferencePfnAndDropLockCount(Pfn1);
+                        Unlocked = TRUE;
+                    }
+
                     /* Mark the PTE as transition and change its protection */
                     PteContents.u.Hard.Valid = 0;
                     PteContents.u.Soft.Transition = 1;
@@ -2457,7 +2466,7 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     *NumberOfBytesToProtect = EndingAddress - StartingAddress + 1;
     *BaseAddress = (PVOID)StartingAddress;
     *OldAccessProtection = OldProtect;
-    return STATUS_SUCCESS;
+    return Unlocked ? STATUS_WAS_UNLOCKED : STATUS_SUCCESS;
 
 FailPath:
     /* Unlock the address space and return the failure code */
