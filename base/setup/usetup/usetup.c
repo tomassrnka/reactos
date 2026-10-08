@@ -2441,7 +2441,7 @@ Restart:
                 DefaultFs = L"NTFS";
                 break;
 
-            /* If we don't understand input, default to FAT */
+            /* 0 is for FAT; if we don't understand input, default to FAT */
             default:
                 DefaultFs = L"FAT";
                 break;
@@ -2449,8 +2449,12 @@ Restart:
     }
     else
     {
-        /* By default select the "FAT" file system */
-        DefaultFs = L"FAT";
+        /*
+         * By default the volume ReactOS is installed on gets NTFS; any other
+         * volume (a separate system partition with the boot files) gets FAT.
+         * Every registered file system stays selectable.
+         */
+        DefaultFs = (Volume == InstallVolume) ? L"NTFS" : L"FAT";
     }
 
     /* Create the file system list */
