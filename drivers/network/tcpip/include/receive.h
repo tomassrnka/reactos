@@ -29,10 +29,9 @@ typedef struct IPDATAGRAM_HOLE {
     UINT Last;            /* Offset of last octet of the hole */
 } IPDATAGRAM_HOLE, *PIPDATAGRAM_HOLE;
 
-/* IP datagram reassembly information */
+/* IP datagram reassembly information, protected by ReassemblyListLock */
 typedef struct IPDATAGRAM_REASSEMBLY {
     LIST_ENTRY ListEntry;        /* Entry on list */
-    KSPIN_LOCK Lock;             /* Protecting spin lock */
     UINT DataSize;               /* Size of datagram data area */
     IP_ADDRESS SrcAddr;          /* Source address */
     IP_ADDRESS DstAddr;          /* Destination address */
