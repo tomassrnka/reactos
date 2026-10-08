@@ -764,15 +764,21 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         /* Receive direction only */
         if ((DisReq->DisconnectType & AFD_DISCONNECT_RECV) &&
-            !(DisReq->DisconnectType & AFD_DISCONNECT_SEND))
+            !(DisReq->DisconnectType & (AFD_DISCONNECT_SEND | AFD_DISCONNECT_ABORT)))
         {
             /* No need to tell the transport driver for receive direction only */
             return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, 0 );
         }
-        else
+        else if ((DisReq->DisconnectType & AFD_DISCONNECT_ABORT) ||
+                 (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
         {
             /* Perform an abortive disconnect */
             Flags = TDI_DISCONNECT_ABORT;
+        }
+        else
+        {
+            /* Both directions: the send direction still closes gracefully */
+            Flags = TDI_DISCONNECT_RELEASE;
         }
     }
 
