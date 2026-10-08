@@ -18,6 +18,7 @@ extern void func_CreateFontIndirect(void);
 extern void func_CreateIconIndirect(void);
 extern void func_CreatePen(void);
 extern void func_CreateRectRgn(void);
+extern void func_D3DKMTCreateDCFromMemory(void);
 extern void func_DPtoLP(void);
 extern void func_EngAcquireSemaphore(void);
 extern void func_EngCreateSemaphore(void);
@@ -97,6 +98,7 @@ const struct test winetest_testlist[] =
     { "CreateIconIndirect", func_CreateIconIndirect },
     { "CreatePen", func_CreatePen },
     { "CreateRectRgn", func_CreateRectRgn },
+    { "D3DKMTCreateDCFromMemory", func_D3DKMTCreateDCFromMemory },
     { "DPtoLP", func_DPtoLP },
     { "EngAcquireSemaphore", func_EngAcquireSemaphore },
     { "EngCreateSemaphore", func_EngCreateSemaphore },
