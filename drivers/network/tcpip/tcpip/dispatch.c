@@ -129,13 +129,13 @@ VOID NTAPI DispCancelRequest(
     PTRANSPORT_CONTEXT TranContext;
     PFILE_OBJECT FileObject;
     UCHAR MinorFunction;
-    PCONNECTION_ENDPOINT Connection;
+    PCONNECTION_ENDPOINT Connection = NULL;
+    PADDRESS_FILE AddrFile = NULL;
     BOOLEAN DequeuedIrp = TRUE;
-
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
 
     TI_DbgPrint(DEBUG_IRP, ("Called.\n"));
 
+    /* IRPFinish takes the cancel lock, so the IRP cannot complete before we release it */
     IrpSp         = IoGetCurrentIrpStackLocation(Irp);
     FileObject    = IrpSp->FileObject;
     TranContext   = (PTRANSPORT_CONTEXT)FileObject->FsContext;
@@ -143,47 +143,51 @@ VOID NTAPI DispCancelRequest(
 
     TI_DbgPrint(DEBUG_IRP, ("IRP at (0x%X)  MinorFunction (0x%X)  IrpSp (0x%X).\n", Irp, MinorFunction, IrpSp));
 
-    Irp->IoStatus.Status = STATUS_CANCELLED;
-    Irp->IoStatus.Information = 0;
-
 #if DBG
     if (!Irp->Cancel)
         TI_DbgPrint(MIN_TRACE, ("Irp->Cancel is FALSE, should be TRUE.\n"));
 #endif
 
-    /* Try canceling the request */
     switch(MinorFunction) {
     case TDI_SEND:
     case TDI_RECEIVE:
-	DequeuedIrp = TCPRemoveIRP( TranContext->Handle.ConnectionContext, Irp );
+    case TDI_CONNECT:
+    case TDI_DISCONNECT:
+        Connection = (PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
+        ReferenceObject(Connection);
         break;
 
     case TDI_SEND_DATAGRAM:
-        if (FileObject->FsContext2 != (PVOID)TDI_TRANSPORT_ADDRESS_FILE) {
-            TI_DbgPrint(MIN_TRACE, ("TDI_SEND_DATAGRAM, but no address file.\n"));
-            break;
-        }
-
-        DequeuedIrp = DGRemoveIRP(TranContext->Handle.AddressHandle, Irp);
-        break;
-
     case TDI_RECEIVE_DATAGRAM:
-        if (FileObject->FsContext2 != (PVOID)TDI_TRANSPORT_ADDRESS_FILE) {
-            TI_DbgPrint(MIN_TRACE, ("TDI_RECEIVE_DATAGRAM, but no address file.\n"));
+        if (FileObject->FsContext2 == (PVOID)TDI_TRANSPORT_ADDRESS_FILE) {
+            AddrFile = (PADDRESS_FILE)TranContext->Handle.AddressHandle;
+            ReferenceObject(AddrFile);
+        }
+        break;
+    }
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    /* Try canceling the request. Only a request we dequeue is ours to complete */
+    switch(MinorFunction) {
+    case TDI_SEND:
+    case TDI_RECEIVE:
+    case TDI_CONNECT:
+        DequeuedIrp = TCPRemoveIRP(Connection, Irp);
+        break;
+
+    case TDI_SEND_DATAGRAM:
+    case TDI_RECEIVE_DATAGRAM:
+        if (!AddrFile) {
+            TI_DbgPrint(MIN_TRACE, ("Datagram request, but no address file.\n"));
             break;
         }
 
-        DequeuedIrp = DGRemoveIRP(TranContext->Handle.AddressHandle, Irp);
-        break;
-
-    case TDI_CONNECT:
-        DequeuedIrp = TCPRemoveIRP(TranContext->Handle.ConnectionContext, Irp);
+        DequeuedIrp = DGRemoveIRP(AddrFile, Irp);
         break;
 
     case TDI_DISCONNECT:
-        Connection = (PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
-
-        DequeuedIrp = TCPRemoveIRP(TranContext->Handle.ConnectionContext, Irp);
+        DequeuedIrp = TCPRemoveIRP(Connection, Irp);
         if (DequeuedIrp)
         {
             if (KeCancelTimer(&Connection->DisconnectTimer))
@@ -200,7 +204,15 @@ VOID NTAPI DispCancelRequest(
     }
 
     if (DequeuedIrp)
-       IRPFinish(Irp, STATUS_CANCELLED);
+    {
+        Irp->IoStatus.Information = 0;
+        IRPFinish(Irp, STATUS_CANCELLED);
+    }
+
+    if (Connection)
+        DereferenceObject(Connection);
+    if (AddrFile)
+        DereferenceObject(AddrFile);
 
     TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }
@@ -219,12 +231,13 @@ VOID NTAPI DispCancelListenRequest(
     PIO_STACK_LOCATION IrpSp;
     PTRANSPORT_CONTEXT TranContext;
     PFILE_OBJECT FileObject;
-    PCONNECTION_ENDPOINT Connection;
-
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
+    PCONNECTION_ENDPOINT Connection, Listener = NULL;
+    PADDRESS_FILE AddrFile;
+    BOOLEAN DequeuedIrp = FALSE;
 
     TI_DbgPrint(DEBUG_IRP, ("Called.\n"));
 
+    /* IRPFinish takes the cancel lock, so the IRP cannot complete before we release it */
     IrpSp         = IoGetCurrentIrpStackLocation(Irp);
     FileObject    = IrpSp->FileObject;
     TranContext   = (PTRANSPORT_CONTEXT)FileObject->FsContext;
@@ -237,15 +250,42 @@ VOID NTAPI DispCancelListenRequest(
         TI_DbgPrint(MIN_TRACE, ("Irp->Cancel is FALSE, should be TRUE.\n"));
 #endif
 
-    /* Try canceling the request */
     Connection = (PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
+    ReferenceObject(Connection);
 
-    if (TCPAbortListenForSocket(Connection->AddressFile->Listener,
-                                Connection))
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    /* A reset clears the address file of an accepted connection and a
+     * close clears the listener; the request is then not in a listen queue */
+    LockObject(Connection);
+    AddrFile = Connection->AddressFile;
+    if (AddrFile)
+        ReferenceObject(AddrFile);
+    UnlockObject(Connection);
+
+    if (AddrFile)
+    {
+        LockObject(AddrFile);
+        Listener = AddrFile->Listener;
+        if (Listener)
+            ReferenceObject(Listener);
+        UnlockObject(AddrFile);
+        DereferenceObject(AddrFile);
+    }
+
+    if (Listener)
+    {
+        DequeuedIrp = TCPAbortListenForSocket(Listener, Connection, Irp);
+        DereferenceObject(Listener);
+    }
+
+    if (DequeuedIrp)
     {
         Irp->IoStatus.Information = 0;
         IRPFinish(Irp, STATUS_CANCELLED);
     }
+
+    DereferenceObject(Connection);
 
     TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }

@@ -101,7 +101,8 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
                                PTDI_REQUEST_KERNEL Request);
 NTSTATUS TCPListen( PCONNECTION_ENDPOINT Connection, UINT Backlog );
 BOOLEAN TCPAbortListenForSocket( PCONNECTION_ENDPOINT Listener,
-			         PCONNECTION_ENDPOINT Connection );
+			         PCONNECTION_ENDPOINT Connection,
+			         PIRP Irp );
 NTSTATUS TCPAccept
 ( PTDI_REQUEST Request,
   PCONNECTION_ENDPOINT Listener,
