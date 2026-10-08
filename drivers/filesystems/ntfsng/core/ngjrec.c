@@ -74,7 +74,8 @@ static u8 *find_attr(u8 *r, u32 size, u32 type)
 	while (off + 16 <= size) {
 		u8 *a = r + off;
 		u32 t = g32(a), len = g32(a + 4);
-		if (t == AT_END_T || len < 16 || off + len > size)
+		/* off + 16 <= size here, so the subtraction cannot wrap (off + len can, in 32 bits). */
+		if (t == AT_END_T || len < 16 || len > size - off)
 			return NULL;
 		if (t == type && a[9] == 0)
 			return len >= (a[8] ? 0x40u : 0x18u) ? a : NULL;
@@ -86,21 +87,30 @@ static u8 *find_attr(u8 *r, u32 size, u32 type)
 /* Mapping pairs of a non-resident attribute into runs (vcn, lcn, len); lcn -1 for a hole. */
 static int decode_runs(const u8 *a, u32 alen, struct ngj_run *runs, int max)
 {
-	const u8 *p = a + g16(a + 0x20), *end = a + alen;
+	const u8 *p, *end = a + alen;
 	s64 vcn = (s64)g64(a + 0x10), lcn = 0;
 	int n = 0;
+	if (g16(a + 0x20) >= alen)
+		return -EIO;
+	p = a + g16(a + 0x20);
 	while (p < end && *p) {
 		int lb = *p & 0xf, ob = *p >> 4;
-		s64 len = 0, d = 0;
+		u64 ulen = 0, ud = 0;
+		s64 len, d;
 		if (!lb || lb > 8 || ob > 8 || p + 1 + lb + ob > end || n >= max)
 			return -EIO;
 		for (int i = lb - 1; i >= 0; i--)
-			len = len << 8 | p[1 + i];
+			ulen = ulen << 8 | p[1 + i];
+		len = (s64)ulen;
 		if (ob) {
 			for (int i = ob - 1; i >= 0; i--)
-				d = d << 8 | p[1 + lb + i];
-			if (p[lb + ob] & 0x80)
-				d -= (s64)1 << (8 * ob);
+				ud = ud << 8 | p[1 + lb + i];
+			/* Sign extension in unsigned arithmetic: an 8-byte offset is already full width. */
+			if (ob < 8 && (p[lb + ob] & 0x80))
+				ud |= ~(u64)0 << (8 * ob);
+			d = (s64)ud;
+			if (d > ((s64)1 << 41) || d < -((s64)1 << 41))
+				return -EIO;	/* the result would be out of range anyway; no overflow in the sum */
 			lcn += d;
 		}
 		if (len <= 0 || len > (s64)1 << 40 || vcn > (s64)1 << 40 || lcn < 0 || lcn > (s64)1 << 40)
