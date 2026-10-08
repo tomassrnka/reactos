@@ -827,8 +827,7 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (Length < Fixed)
                 return STATUS_BUFFER_TOO_SMALL;
             A->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
-                                      FILE_NAMED_STREAMS | FILE_SUPPORTS_SPARSE_FILES |
-                                      FILE_FILE_COMPRESSION | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
+                                      FILE_NAMED_STREAMS | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
             A->MaximumComponentNameLength = 255;
             /* On a short buffer the length reports what was copied (as FAT and the apitest expect). */
             Copy = min(sizeof(Name) - sizeof(WCHAR), Length - Fixed);

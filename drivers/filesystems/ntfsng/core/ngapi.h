@@ -33,6 +33,7 @@ typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
 #define NGC_ATTR_COMPRESSED 1
 #define NGC_ATTR_SPARSE 2
 #define NGC_ATTR_ENCRYPTED 4
+#define NGC_ATTR_NOWRITE 8      /* compressed, encrypted, WOF or sparse: the driver does not write it */
 
 struct ngc_stat {
 	unsigned long long mft_ref;      /* MFT number | sequence << 48 */

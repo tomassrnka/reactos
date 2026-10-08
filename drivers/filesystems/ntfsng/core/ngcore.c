@@ -683,6 +683,8 @@ static void ngc_stat_impl(ngc_node *n, struct ngc_stat *st)
 	if (NInoCompressed(ni)) st->flags |= NGC_ATTR_COMPRESSED;
 	if (NInoSparse(ni)) st->flags |= NGC_ATTR_SPARSE;
 	if (NInoEncrypted(ni)) st->flags |= NGC_ATTR_ENCRYPTED;
+	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) || NInoSparse(ni))
+		st->flags |= NGC_ATTR_NOWRITE;
 }
 
 struct ngc_dirctx {
@@ -788,6 +790,8 @@ static bool ngc_stat_lite(struct inode *vi, struct ngc_stat *st)
 	if (NInoCompressed(ni)) st->flags |= NGC_ATTR_COMPRESSED;
 	if (NInoSparse(ni)) st->flags |= NGC_ATTR_SPARSE;
 	if (NInoEncrypted(ni)) st->flags |= NGC_ATTR_ENCRYPTED;
+	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) || NInoSparse(ni))
+		st->flags |= NGC_ATTR_NOWRITE;
 	return true;
 }
 

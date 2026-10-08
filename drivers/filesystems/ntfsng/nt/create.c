@@ -885,6 +885,20 @@ walk:
         Status = STATUS_DELETE_PENDING;
         goto out;
     }
+    if (!IsDir && (Fcb->Stat.flags & NGC_ATTR_NOWRITE))
+    {
+        /* Writes to compressed, encrypted, WOF and sparse streams are not implemented: refuse them here,
+         * before Cc or a mapped view could accept data that a paging write would later drop. */
+        ACCESS_MASK Mapped = Access;
+        RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
+        if ((Mapped & (FILE_WRITE_DATA | FILE_APPEND_DATA)) ||
+            (!Created && (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF || Disposition == FILE_SUPERSEDE)))
+        {
+            DPRINT1("ntfsng: write open of a compressed/encrypted/sparse stream %I64x refused\n", Fcb->MftNo);
+            Status = STATUS_ACCESS_DENIED;
+            goto out;
+        }
+    }
     if (!IsDir && Fcb->SectionObjectPointers.ImageSectionObject)
     {
         /* A file that is mapped as an image (a running program) cannot be opened for writing. */

@@ -461,6 +461,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         return STATUS_SUCCESS;
     if (Paging && Fcb->IsPagingFile)
         return NgPagingFileIo(Vcb, Fcb, Irp, TRUE, Offset.QuadPart, Length);
+    if (Fcb->Stat.flags & NGC_ATTR_NOWRITE)
+        return STATUS_ACCESS_DENIED;
     if (Paging)
         return NgPagingWrite(Vcb, Fcb, Irp, Offset.QuadPart, Length);
 
