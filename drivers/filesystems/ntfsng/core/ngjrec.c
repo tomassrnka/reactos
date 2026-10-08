@@ -152,7 +152,13 @@ int ngj_probe(void *osdev, u64 size, unsigned int devsec, struct ngj_vol *jv)
 	jv->devsec = devsec;
 	if (!bs)
 		return -ENOMEM;
-	if (!pow2(devsec) || devsec < 512 || devsec > 4096 || dread(jv, 0, bs, devsec) || memcmp(bs + 3, "NTFS    ", 8))
+	if (!pow2(devsec) || devsec < 512 || devsec > 4096)
+		goto out;
+	if (dread(jv, 0, bs, devsec)) {
+		err = -EIO;
+		goto out;
+	}
+	if (memcmp(bs + 3, "NTFS    ", 8))
 		goto out;
 	jv->bps = g16(bs + 0x0b);
 	spc = bs[0x0d];
@@ -176,8 +182,11 @@ int ngj_probe(void *osdev, u64 size, unsigned int devsec, struct ngj_vol *jv)
 		err = -ENOMEM;
 		goto out;
 	}
-	err = -EIO;
-	if (read_rec(jv, 2, r) || !(a = find_attr(r, jv->recsz, AT_DATA_T)) || !a[8])
+	if (read_rec(jv, 2, r)) {
+		err = -EIO;
+		goto out;
+	}
+	if (!(a = find_attr(r, jv->recsz, AT_DATA_T)) || !a[8])
 		goto out;
 	{
 		struct ngj_run lr[NGJ_MAXRUNS];
@@ -288,7 +297,7 @@ static int vol_usn(struct ngj_vol *jv, u8 *buf, u16 *usn)
 	u64 off = jv->mft_lcn * jv->cluster + 3 * jv->recsz, base = off & ~(u64)(jv->devsec - 1);
 	if (dread(jv, base, buf, jv->devsec))
 		return -EIO;
-	return kj_rec_usn(buf + (off - base), jv->devsec - (size_t)(off - base), usn);
+	return kj_rec_usn(buf + (off - base), jv->devsec - (size_t)(off - base), usn) ? -EINVAL : 0;
 }
 
 static int replay_sectors(struct ngj_vol *jv, const struct kj_desc *d, u8 *pg)
@@ -302,7 +311,8 @@ static int replay_sectors(struct ngj_vol *jv, const struct kj_desc *d, u8 *pg)
 }
 
 /*
- * Returns NGJ_NONE (no journal of ours: the caller's usual dirty-volume policy applies),
+ * Returns NGJ_NONE (no journal of ours: the caller's usual dirty-volume policy applies), NGJ_UNREAD
+ * (the log or $Volume could not be read, or no memory: whether a journal is pending is unknown),
  * NGJ_CLEAN (consistent after an optional replay; dirty flag cleared when @write) or
  * NGJ_REPAIR (metadata went in place without the journal: needs a repair).
  */
@@ -310,17 +320,24 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 {
 	u8 *pg = kmalloc(KJ_PAGE, GFP_KERNEL), *dp = kmalloc(KJ_PAGE, GFP_KERNEL);
 	struct kj_hdr h;
-	int res = NGJ_NONE, was = 0;
+	/* What cannot be read is not "no journal": a transient failure must not let a mount go read-write. */
+	int res = NGJ_UNREAD, was = 0;
 	*seq = 0;
 	jv->bdev = b;
 	if (!pg || !dp)
 		goto out;
 	/* Restart pages in use (Windows, or anything else that wrote a log): not ours. */
-	for (u64 p = 0; p < 2; p++)
-		if (lf_read(jv, p, pg) || g32(pg) != 0xffffffffu)
+	for (u64 p = 0; p < 2; p++) {
+		if (lf_read(jv, p, pg))
 			goto out;
+		if (g32(pg) != 0xffffffffu) {
+			res = NGJ_NONE;
+			goto out;
+		}
+	}
 	if (lf_read(jv, KJ_HDR_PAGE, pg))
 		goto out;
+	res = NGJ_NONE;
 	memcpy(&h, pg, sizeof(h));
 	if (memcmp(h.magic, KJ_MAGIC, 8) || h.version != KJ_VERSION ||
 	    h.hdr_crc != kj_crc32(0, &h, offsetof(struct kj_hdr, hdr_crc)) ||
@@ -344,7 +361,12 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 	 */
 	{
 		u16 usn;
-		if (vol_usn(jv, pg, &usn) || (usn != h.vol_usn_new && usn != h.vol_usn_old)) {
+		int e = vol_usn(jv, pg, &usn);
+		if (e == -EIO) {
+			res = NGJ_UNREAD;
+			goto out;
+		}
+		if (e || (usn != h.vol_usn_new && usn != h.vol_usn_old)) {
 			printk(KERN_WARNING "journal: header seq %llu state %u is older than the volume ($Volume usn %u, header %u/%u): ignored\n",
 			       (unsigned long long)h.seq, h.state, usn, h.vol_usn_old, h.vol_usn_new);
 			goto out;
