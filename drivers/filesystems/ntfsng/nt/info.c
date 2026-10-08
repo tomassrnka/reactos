@@ -337,7 +337,8 @@ static BOOLEAN NgSameName(const WCHAR *A, USHORT ALen, const WCHAR *B, USHORT BL
  * target's directory already opened (SL_OPEN_TARGET_DIRECTORY) in SetFile.FileObject; a bare
  * name renames within the current directory.  The final component of FileName is the new name.
  */
-/* TRUE if a file or directory anywhere below directory DirMftNo has an open handle (64 levels). */
+/* TRUE if a file or directory anywhere below directory DirMftNo has an open handle or a create in
+ * progress (64 levels). */
 static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
 {
     ULONGLONG *Open = NULL;
@@ -346,13 +347,13 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
     BOOLEAN Found = FALSE;
     PWCHAR Name;
 
-    /* Snapshot the MFT numbers of every open file (the parent walk needs CoreLock, which must not
-     * be taken under FcbListLock): size the array to the open FCBs, then fill it. */
+    /* Snapshot the MFT numbers of every open file and create in progress (the parent walk needs
+     * CoreLock, which must not be taken under FcbListLock): size the array, then fill it. */
     ExAcquireFastMutex(&Vcb->FcbListLock);
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
-        if (F->OpenHandles && !F->IsVolume && !F->IsRoot && F->MftNo != DirMftNo)
+        if ((F->OpenHandles || F->Opening) && !F->IsVolume && !F->IsRoot && F->MftNo != DirMftNo)
             Cap++;
     }
     if (Cap)
@@ -362,7 +363,7 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
         for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < Cap; Entry = Entry->Flink)
         {
             PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
-            if (F->OpenHandles && !F->IsVolume && !F->IsRoot && F->MftNo != DirMftNo)
+            if ((F->OpenHandles || F->Opening) && !F->IsVolume && !F->IsRoot && F->MftNo != DirMftNo)
                 Open[Count++] = F->MftNo;
         }
     }
