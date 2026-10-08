@@ -82,6 +82,7 @@ list(APPEND SOURCE
     NtQuerySystemEnvironmentValue.c
     NtQuerySystemInformation.c
     NtQueryValueKey.c
+    NtQueryVirtualMemory.c
     NtQueryVolumeInformationFile.c
     NtReadFile.c
     NtSaveKey.c
