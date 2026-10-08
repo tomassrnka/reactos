@@ -188,82 +188,85 @@ KvTicksToSeconds(ULONG Ticks)
 }
 
 static
+BOOLEAN
+KvBenignWait(UCHAR WaitReason)
+{
+    /* Long waits that are normal and must not be flagged as stuck. */
+    switch (WaitReason)
+    {
+        case Suspended:
+        case WrSuspended:
+        case WrDelayExecution:
+        case WrUserRequest:
+        case WrEventPair:
+        case WrQueue:
+        case WrLpcReceive:
+        case WrLpcReply:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+static
 VOID
 NTAPI
 KvWatchdogThread(IN PVOID Context)
 {
     LARGE_INTEGER Interval;
-    LARGE_INTEGER Tick;
     UNREFERENCED_PARAMETER(Context);
 
     Interval.QuadPart = -(LONGLONG)KV_WATCH_PERIOD * 10000000LL;
 
     for (;;)
     {
-        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+        PEPROCESS Process;
 
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
         if (!KvEnabled(KV_DEADLOCK))
             continue;
 
-        KeQueryTickCount(&Tick);
-
-        KeAcquireGuardedMutex(&PspActiveProcessMutex);
+        /*
+         * Enumerate with the reference-counted helpers so we never follow a
+         * freed process or thread: each returned object is referenced and the
+         * list walk is serialized inside the helper. Runs at PASSIVE_LEVEL.
+         */
+        Process = PsGetNextProcess(NULL);
+        while (Process != NULL)
         {
-            PLIST_ENTRY ProcEntry = PsActiveProcessHead.Flink;
-            PEPROCESS StuckProcess = NULL;
-            PETHREAD StuckThread = NULL;
-            ULONG StuckSeconds = 0;
-
-            while (ProcEntry != &PsActiveProcessHead && StuckThread == NULL)
+            PETHREAD Thread = PsGetNextProcessThread(Process, NULL);
+            while (Thread != NULL)
             {
-                PEPROCESS Process =
-                    CONTAINING_RECORD(ProcEntry, EPROCESS, ActiveProcessLinks);
-                PLIST_ENTRY ThrEntry = Process->Pcb.ThreadListHead.Flink;
-
-                while (ThrEntry != &Process->Pcb.ThreadListHead)
+                PKTHREAD Tcb = &Thread->Tcb;
+                if (Tcb->State == Waiting && !KvBenignWait(Tcb->WaitReason))
                 {
-                    PKTHREAD KThread =
-                        CONTAINING_RECORD(ThrEntry, KTHREAD, ThreadListEntry);
-                    PETHREAD Thread = (PETHREAD)KThread;
+                    LARGE_INTEGER Tick;
+                    LONGLONG Delta;
 
-                    if (KThread->State == Waiting &&
-                        KThread->WaitReason != WrQueue)
+                    /* Read the tick per thread: a wait that started during the
+                     * scan has WaitTime > now and must not wrap to a huge age. */
+                    KeQueryTickCount(&Tick);
+                    Delta = Tick.QuadPart - (LONGLONG)Tcb->WaitTime;
+                    if (Delta > 0)
                     {
-                        ULONG WaitedTicks =
-                            (ULONG)(Tick.QuadPart - (LONGLONG)KThread->WaitTime);
-                        ULONG Secs = KvTicksToSeconds(WaitedTicks);
-                        if (Secs >= KvDeadlockSeconds && Secs > StuckSeconds)
+                        ULONG Secs = KvTicksToSeconds((ULONG)Delta);
+                        /* Report each distinct stuck thread once; do not stop
+                         * at the first one. */
+                        if (Secs >= KvDeadlockSeconds && KvLogOnce(Thread))
                         {
-                            StuckProcess = Process;
-                            StuckThread = Thread;
-                            StuckSeconds = Secs;
+                            DbgPrint("KVERIFY: [DEADLOCK] thread %p (pid %p "
+                                     "tid %p) waiting %lu s, WaitReason %u\n",
+                                     Thread, PsGetProcessId(Process),
+                                     Thread->Cid.UniqueThread, Secs,
+                                     Tcb->WaitReason);
+                            KvDumpAllCpuStacks();
                         }
                     }
-                    ThrEntry = ThrEntry->Flink;
                 }
-                ProcEntry = ProcEntry->Flink;
+                Thread = PsGetNextProcessThread(Process, Thread);
             }
-
-            if (StuckThread != NULL)
-            {
-                PKTHREAD Tcb = &StuckThread->Tcb;
-                /* Report once per (thread) so a genuinely stuck thread does
-                 * not spam every scan. */
-                if (KvLogOnce(StuckThread))
-                {
-                    KeReleaseGuardedMutex(&PspActiveProcessMutex);
-                    DbgPrint("KVERIFY: [DEADLOCK] thread %p (pid %p tid %p) "
-                             "waiting %lu s, WaitReason %u\n",
-                             StuckThread,
-                             StuckProcess->UniqueProcessId,
-                             StuckThread->Cid.UniqueThread,
-                             StuckSeconds, Tcb->WaitReason);
-                    KvDumpAllCpuStacks();
-                    continue;
-                }
-            }
+            Process = PsGetNextProcess(Process);
         }
-        KeReleaseGuardedMutex(&PspActiveProcessMutex);
     }
 }
 
