@@ -390,6 +390,46 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
     return Found;
 }
 
+/*
+ * TRUE if directory DirMftNo is directory AncestorMftNo or lies below it (parents from the first
+ * name).  A walk that cannot finish counts as TRUE: the caller refuses the move.
+ */
+static BOOLEAN NgIsInSubtree(PNG_VCB Vcb, ULONGLONG DirMftNo, ULONGLONG AncestorMftNo)
+{
+    ULONGLONG MftNo = DirMftNo, Parent;
+    ULONG Depth;
+    unsigned int Len;
+    BOOLEAN In = TRUE;
+    PWCHAR Name = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
+
+    if (!Name)
+        return TRUE;
+    NgAcquireCore(Vcb);
+    for (Depth = 0; Depth < 4096; Depth++)
+    {
+        ngc_node *N;
+        int Err;
+        if (MftNo == AncestorMftNo)
+            break;
+        if (MftNo == 5)
+        {
+            In = FALSE;
+            break;
+        }
+        Err = ngc_iget(Vcb->Core, MftNo, &N);
+        if (Err)
+            break;
+        Err = ngc_parent_name(N, &Parent, Name, &Len);
+        ngc_put(N);
+        if (Err || Parent == MftNo)
+            break;
+        MftNo = Parent;
+    }
+    NgReleaseCore(Vcb);
+    ExFreePoolWithTag(Name, TAG_NTFSNG);
+    return In;
+}
+
 static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
                                ULONG Length, BOOLEAN IsLink)
 {
@@ -518,6 +558,12 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         }
     }
 
+    if (!IsLink && Fcb->IsDirectory && NewDirMftNo != Ccb->ParentMftNo && NgIsInSubtree(Vcb, NewDirMftNo, Fcb->MftNo))
+    {
+        /* A directory cannot move into itself or below itself. */
+        Status = STATUS_INVALID_PARAMETER;
+        goto out;
+    }
     if (!IsLink && Fcb->IsDirectory && NgDirHasOpenFiles(Vcb, Fcb->MftNo))
     {
         /* As on Windows: a directory with open files below it is not renamed. */
