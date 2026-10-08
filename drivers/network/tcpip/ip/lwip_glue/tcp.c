@@ -741,11 +741,21 @@ LibTCPSendCallback(void *arg)
     }
 
 done:
+    /* Sent events are delivered under the core lock, so the request is in the queue
+     * before the next one can look for it */
+    if (msg->Output.Send.Error == ERR_INPROGRESS && msg->Input.Send.Bucket)
+    {
+        LockObject(msg->Input.Send.Connection);
+        InsertTailList(&msg->Input.Send.Connection->SendRequest, &msg->Input.Send.Bucket->Entry);
+        UnlockObject(msg->Input.Send.Connection);
+    }
+
     KeSetEvent(&msg->Event, IO_NO_INCREMENT, FALSE);
 }
 
+/* Bucket, if not NULL, is queued as a waiting send request if the data cannot be sent now */
 err_t
-LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe)
+LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket)
 {
     err_t ret;
     struct lwip_callback_msg *msg;
@@ -757,6 +767,7 @@ LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len
         msg->Input.Send.Connection = Connection;
         msg->Input.Send.Data = dataptr;
         msg->Input.Send.DataLength = len;
+        msg->Input.Send.Bucket = Bucket;
 
         if (safe)
             LibTCPSendCallback(msg);

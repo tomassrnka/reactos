@@ -334,7 +334,7 @@ TCPSendEventHandler(void *arg, const u16_t space)
 
         Status = TCPTranslateError(LibTCPSend(Connection,
                                               SendBuffer,
-                                              SendLen, &BytesSent, TRUE));
+                                              SendLen, &BytesSent, TRUE, NULL));
 
         TI_DbgPrint(DEBUG_TCP,("TCP Bytes: %d\n", BytesSent));
 
