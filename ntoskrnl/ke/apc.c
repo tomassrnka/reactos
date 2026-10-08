@@ -191,6 +191,13 @@ KiInsertQueueApc(IN PKAPC Apc,
                 /* Kernel-mode APC, set us pending */
                 Thread->ApcState.KernelApcPending = TRUE;
 
+                /*
+                 * A thread becomes Running under its processor's PRCB lock,
+                 * not the dispatcher lock, and then checks the flag. Order
+                 * the flag before the state check, or both may miss.
+                 */
+                KeMemoryBarrier();
+
                 /* Are we currently running? */
                 if (Thread->State == Running)
                 {
