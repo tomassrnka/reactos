@@ -957,9 +957,11 @@ KeFlushQueuedDpcs(VOID)
         /* Get the target processor's PRCB */
         TargetPrcb = KiProcessorBlock[ProcessorIndex];
 
-        /* Check if there are DPCs on either queues */
+        /* Check if there are DPCs on either queues, or one is running: it
+           left the queue before it started */
         if ((TargetPrcb->DpcData[DPC_NORMAL].DpcQueueDepth > 0) ||
-            (TargetPrcb->DpcData[DPC_THREADED].DpcQueueDepth > 0))
+            (TargetPrcb->DpcData[DPC_THREADED].DpcQueueDepth > 0) ||
+            TargetPrcb->DpcRoutineActive)
         {
             /* Check if this is the current processor */
             if (TargetPrcb == KeGetCurrentPrcb())
