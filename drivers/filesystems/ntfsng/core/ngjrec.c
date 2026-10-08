@@ -244,6 +244,15 @@ out:
 	return err;
 }
 
+/* The update sequence number of $MFT record 3 ($Volume) as it is on disk (no fixup check: one sector is enough). */
+static int vol_usn(struct ngj_vol *jv, u8 *buf, u16 *usn)
+{
+	u64 off = jv->mft_lcn * jv->cluster + 3 * jv->recsz, base = off & ~(u64)(jv->devsec - 1);
+	if (dread(jv, base, buf, jv->devsec))
+		return -EIO;
+	return kj_rec_usn(buf + (off - base), jv->devsec - (size_t)(off - base), usn);
+}
+
 static int replay_sectors(struct ngj_vol *jv, const struct kj_desc *d, u8 *pg)
 {
 	if (d->blk >= jv->size / KJ_PAGE)
@@ -289,6 +298,21 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 	}
 	if (h.state != KJ_ST_ACTIVE && h.state != KJ_ST_COMMITTED)
 		goto out;
+	/*
+	 * Ours only while $Volume still carries the number this header recorded (either side of the
+	 * transaction's in-place pass).  Otherwise another driver wrote the volume after this header
+	 * (the Linux core, for one, leaves an empty-looking $LogFile alone): neither replay the old
+	 * transaction over its changes nor clear the dirty flag it may have set.
+	 */
+	{
+		u16 usn;
+		if (vol_usn(jv, pg, &usn) ||
+		    (usn != h.vol_usn_new && (h.state != KJ_ST_COMMITTED || usn != h.vol_usn_old))) {
+			printk(KERN_WARNING "journal: header seq %llu state %u is older than the volume ($Volume usn %u, header %u/%u): ignored\n",
+			       (unsigned long long)h.seq, h.state, usn, h.vol_usn_old, h.vol_usn_new);
+			goto out;
+		}
+	}
 	res = NGJ_CLEAN;
 	if (h.state == KJ_ST_COMMITTED) {
 		u32 crc = 0, total = h.ndesc + h.npages, i;
