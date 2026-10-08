@@ -270,8 +270,10 @@ FsRtlCheckNotifyForDelete(IN PLIST_ENTRY NotifyList,
              NextEntry = NextEntry->Flink)
         {
             NotifyChange = CONTAINING_RECORD(NextEntry, NOTIFY_CHANGE, NotifyList);
-            /* If the current record matches with the given context, it's the good one */
-            if (NotifyChange->FsContext == FsContext && !IsListEmpty(&(NotifyChange->NotifyIrps)))
+            /* The FSD identifies the deleted directory by its stream context,
+             * saved as StreamID, or by the context the watcher registered with */
+            if ((NotifyChange->StreamID == FsContext || NotifyChange->FsContext == FsContext) &&
+                !IsListEmpty(&(NotifyChange->NotifyIrps)))
             {
                 FsRtlNotifyCompleteIrpList(NotifyChange, STATUS_DELETE_PENDING);
             }
