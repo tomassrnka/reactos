@@ -318,6 +318,7 @@ typedef union _IOAPIC_REDIRECTION_REGISTER
 #include <poppack.h>
 
 #include "../x2apic/x2apicp.h"
+#include <x86x64/HvTlfs.h>
 
 extern BOOLEAN HalpX2ApicEnabled;
 
@@ -374,3 +375,24 @@ NTAPI
 HalpInitApicInfo(IN PLOADER_PARAMETER_BLOCK KeLoaderBlock);
 
 VOID __cdecl ApicSpuriousService(VOID);
+
+/* Hypervisor enlightenments, hyperv.c */
+extern PHV_REFERENCE_TSC_PAGE HalpHvReferenceTscPage;
+
+VOID
+NTAPI
+HalpHvInitialize(
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock);
+
+VOID
+NTAPI
+HalpHvReport(VOID);
+
+ULONG64
+NTAPI
+HalpHvReadReferenceTime(VOID);
+
+BOOLEAN
+NTAPI
+HalpHvGetTscFrequency(
+    _Out_ PULONG64 Frequency);

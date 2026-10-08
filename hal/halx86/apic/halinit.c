@@ -33,6 +33,9 @@ HalpInitProcessor(
     {
         HalpParseApicTables(LoaderBlock);
         ApicSelectMode(LoaderBlock);
+
+        /* Before the first read of the performance counter */
+        HalpHvInitialize(LoaderBlock);
     }
 
     HalpSetupProcessorsTable(ProcessorNumber);
@@ -56,6 +59,7 @@ HalpInitPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
             (HalpBuildType & PRCB_BUILD_DEBUG) ? "DBG" : "REL");
 
     HalpPrintApicTables();
+    HalpHvReport();
 
     /* Enable clock interrupt handler */
     HalpEnableInterruptHandler(IDT_INTERNAL,

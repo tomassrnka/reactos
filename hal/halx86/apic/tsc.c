@@ -120,9 +120,15 @@ VOID
 NTAPI
 HalpCalibrateStallExecution(VOID)
 {
+    ULONG64 Frequency;
+
     // Timer interrupt is now active
 
-    HalpInitializeTsc();
+    /* A hypervisor may report the TSC frequency; then the TSC is not reset either */
+    if (HalpHvGetTscFrequency(&Frequency))
+        HalpCpuClockFrequency.QuadPart = Frequency;
+    else
+        HalpInitializeTsc();
 
     KeGetPcr()->StallScaleFactor = (ULONG)(HalpCpuClockFrequency.QuadPart / 1000000);
 }
@@ -135,6 +141,16 @@ KeQueryPerformanceCounter(
     OUT PLARGE_INTEGER PerformanceFrequency OPTIONAL)
 {
     LARGE_INTEGER Result;
+
+    /* Under a hypervisor with a reference TSC page, the reference time:
+       the same on every processor and across migrations, at 10 MHz */
+    if (HalpHvReferenceTscPage)
+    {
+        if (PerformanceFrequency)
+            PerformanceFrequency->QuadPart = HV_REFERENCE_TIME_FREQUENCY;
+        Result.QuadPart = HalpHvReadReferenceTime();
+        return Result;
+    }
 
     /* Make sure it's calibrated */
     ASSERT(HalpCpuClockFrequency.QuadPart != 0);
