@@ -3077,6 +3077,8 @@ CallQS[] =
 
     // Vista and later
     SI_QX(SystemModuleInformationEx),
+    /* Same structure and data as SystemFileCacheInformation */
+    [SystemFileCacheInformationEx] = {QSI_USE(SystemFileCacheInformation), SSI_USE(SystemFileCacheInformation)},
     SI_QX(SystemProcessorIdleCycleTimeInformation),
     SI_QX(SystemProcessorBrandString),
 };

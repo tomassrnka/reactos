@@ -53,7 +53,7 @@ Test_FileCacheInformation(
 
 START_TEST(NtQuerySystemInformation)
 {
-    SYSTEM_FILECACHE_INFORMATION FileCache;
+    SYSTEM_FILECACHE_INFORMATION FileCache, FileCacheEx;
     NTSTATUS Status;
 
     Status = NtQuerySystemInformation(0, NULL, 0, NULL);
@@ -64,4 +64,20 @@ START_TEST(NtQuerySystemInformation)
 
     RtlZeroMemory(&FileCache, sizeof(FileCache));
     Test_FileCacheInformation(SystemFileCacheInformation, &FileCache);
+
+    /* The Ex class returns the same structure and data. Like the other classes
+     * from 77 on it is Vista or later (ndk/extypes.h); ReactOS reports an older
+     * version but implements it */
+    if (!is_reactos() && GetNTVersion() < _WIN32_WINNT_VISTA)
+    {
+        skip("SystemFileCacheInformationEx needs Windows Vista or later\n");
+        return;
+    }
+    RtlFillMemory(&FileCacheEx, sizeof(FileCacheEx), 0x55);
+    Test_FileCacheInformation(SystemFileCacheInformationEx, &FileCacheEx);
+    ok(FileCacheEx.MinimumWorkingSet == FileCache.MinimumWorkingSet, "MinimumWorkingSet 0x%Ix != 0x%Ix\n",
+       FileCacheEx.MinimumWorkingSet, FileCache.MinimumWorkingSet);
+    ok(FileCacheEx.MaximumWorkingSet == FileCache.MaximumWorkingSet, "MaximumWorkingSet 0x%Ix != 0x%Ix\n",
+       FileCacheEx.MaximumWorkingSet, FileCache.MaximumWorkingSet);
+    ok_hex(FileCacheEx.Flags, FileCache.Flags);
 }
