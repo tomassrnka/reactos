@@ -323,6 +323,13 @@ KiDeliverApc(IN KPROCESSOR_MODE DeliveryMode,
     /* Clear Kernel APC Pending */
     Thread->ApcState.KernelApcPending = FALSE;
 
+    /*
+     * The list check below must not pass the clear: an APC that another
+     * processor queues meanwhile sets the flag again after linking itself,
+     * and a clear that landed after that would hide it.
+     */
+    KeMemoryBarrier();
+
     /* Check if Special APCs are disabled */
     if (Thread->SpecialApcDisable) goto Quickie;
 
