@@ -690,9 +690,21 @@ MiDeleteVirtualAddresses(
                         }
                     }
 
+                    /* Check for a user mapping of a locked MDL */
+                    if ((Vad) && (Vad->u.VadFlags.VadType == VadDevicePhysicalMemory))
+                    {
+                        /* The page belongs to the MDL owner, and might not even have
+                         * a PFN entry: only drop the page table share count that
+                         * MiMapLockedPagesInUserSpace took for this PTE. */
+                        ASSERT(TempPte.u.Hard.Valid == 1);
+                        MI_ERASE_PTE(PointerPte);
+                        MiDecrementShareCount(MiGetPfnEntry(PointerPde->u.Hard.PageFrameNumber),
+                                              PointerPde->u.Hard.PageFrameNumber);
+                        KeFlushCurrentTb();
+                    }
                     /* Check for prototype PTE */
-                    if ((TempPte.u.Hard.Valid == 0) &&
-                        (TempPte.u.Soft.Prototype == 1))
+                    else if ((TempPte.u.Hard.Valid == 0) &&
+                             (TempPte.u.Soft.Prototype == 1))
                     {
                         /* Just nuke it */
                         MI_ERASE_PTE(PointerPte);
