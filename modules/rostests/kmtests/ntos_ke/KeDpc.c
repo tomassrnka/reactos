@@ -63,6 +63,81 @@ DpcHandler(
     }
 }
 
+#ifdef _M_IX86
+static KEVENT IdleDpcEvent;
+static volatile LONG IdleDpcSamples, IdleDpcOnDpcStack;
+
+static
+VOID
+NTAPI
+IdleDpcHandler(
+    IN PRKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2)
+{
+    PKPRCB Prcb = KeGetCurrentPrcb();
+    volatile UCHAR Local[512];
+    ULONG_PTR Top = (ULONG_PTR)Prcb->DpcStack;
+
+    Local[0] = 1;
+    if (KeGetCurrentThread() == Prcb->IdleThread)
+    {
+        /* Retired by the idle loop: this must run on the DPC stack, not on the idle thread's stack */
+        InterlockedIncrement(&IdleDpcSamples);
+        if (((ULONG_PTR)Local < Top) && ((ULONG_PTR)Local >= Top - KERNEL_STACK_SIZE))
+            InterlockedIncrement(&IdleDpcOnDpcStack);
+    }
+    KeSetEvent(&IdleDpcEvent, IO_NO_INCREMENT, FALSE);
+}
+
+static
+VOID
+TestIdleDpcStack(VOID)
+{
+    KDPC Dpc;
+    KTIMER Timer;
+    LARGE_INTEGER DueTime, Timeout;
+    ULONG i;
+    NTSTATUS Status;
+
+    /* The stack a DPC runs on is a ReactOS design choice: only check it there */
+    if (*(volatile ULONG *)((ULONG_PTR)SharedUserData + 0xFFC) != 0x8EAC705)
+    {
+        skip(FALSE, "Not ReactOS\n");
+        return;
+    }
+
+    IdleDpcSamples = IdleDpcOnDpcStack = 0;
+    KeInitializeEvent(&IdleDpcEvent, SynchronizationEvent, FALSE);
+    KeInitializeDpc(&Dpc, IdleDpcHandler, NULL);
+    KeSetTargetProcessorDpc(&Dpc, 0);
+    KeInitializeTimer(&Timer);
+    /* Wait on processor 0 so that it is idle when the timer expires */
+    KeSetSystemAffinityThread(1);
+    for (i = 0; i < 200 && IdleDpcSamples < 10; i++)
+    {
+        DueTime.QuadPart = -10 * 1000 * 10;
+        KeSetTimer(&Timer, DueTime, &Dpc);
+        Timeout.QuadPart = -2000 * 1000 * 10;
+        Status = KeWaitForSingleObject(&IdleDpcEvent, Executive, KernelMode, FALSE, &Timeout);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (Status != STATUS_SUCCESS)
+            break;
+    }
+    KeRevertToUserAffinityThread();
+    KeCancelTimer(&Timer);
+    KeFlushQueuedDpcs();
+
+    trace("%ld of %lu timer DPCs were retired by the idle loop\n", IdleDpcSamples, i);
+    /* Processor 0 is idle only when nothing else is ready to run there */
+    if (skip(IdleDpcSamples != 0, "No DPC was retired by the idle loop in %lu tries\n", i))
+        return;
+    ok(IdleDpcOnDpcStack == IdleDpcSamples, "%ld of %ld DPCs retired by the idle loop ran on the DPC stack\n",
+       IdleDpcOnDpcStack, IdleDpcSamples);
+}
+#endif
+
 START_TEST(KeDpc)
 {
     NTSTATUS Status = STATUS_SUCCESS;
@@ -189,4 +264,8 @@ START_TEST(KeDpc)
     ok_dpccount();
     ok_irql(PASSIVE_LEVEL);
     trace("Final Dpc count: %ld, expected %ld\n", DpcCount, ExpectedDpcCount);
+
+#ifdef _M_IX86
+    TestIdleDpcStack();
+#endif
 }
