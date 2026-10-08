@@ -384,6 +384,45 @@ RtlpFollowsCall(
     return FALSE;
 }
 
+/*
+ * Whether a direct jmp stays in the frame of the function that executes it
+ * rather than being a tail call: it goes into the middle of a function (GCC
+ * jumps to labels inside cold parts, and from cold parts back into the body)
+ * or to the start of a fragment (GCC's cold parts and chained fragments have
+ * function entries without a prolog of their own). A jump to the start of a
+ * function with a prolog, or to code without an entry, is taken for a tail
+ * call, as Windows does. This looks up the target's function entry.
+ */
+static
+BOOLEAN
+RtlpJumpsToFragment(
+    _In_ BYTE *InstrPtr)
+{
+    PRUNTIME_FUNCTION TargetEntry;
+    PUNWIND_INFO TargetInfo;
+    ULONG64 Target, TargetBase;
+
+    if (InstrPtr[0] == 0xE9)
+        Target = (ULONG64)InstrPtr + 5 + (LONG64)*(LONG UNALIGNED*)(InstrPtr + 1);
+    else
+        Target = (ULONG64)InstrPtr + 2 + (LONG64)(CHAR)InstrPtr[1];
+
+    TargetEntry = RtlLookupFunctionEntry(Target, &TargetBase, NULL);
+    if (TargetEntry == NULL)
+        return FALSE;
+    if (Target - TargetBase != TargetEntry->BeginAddress)
+        return TRUE;
+
+    /* An entry whose unwind data points to another entry describes a fragment */
+    if (TargetEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT)
+        return TRUE;
+
+    TargetInfo = RVA(TargetBase, TargetEntry->UnwindData);
+    if (TargetInfo->Flags & UNW_FLAG_CHAININFO)
+        return TRUE;
+    return (TargetInfo->SizeOfProlog == 0) && (TargetInfo->CountOfCodes > 0);
+}
+
 static
 __inline
 BOOLEAN
@@ -533,10 +572,10 @@ RtlpTryToUnwindEpilog(
         }
 
         /* A tail call. GCC also jumps from the body to a cold part outside
-           the function, so a direct jmp ends an epilog only after a pop */
+           the function, with the whole frame in place */
         if (RtlpIsEpilogJump(InstrPtr, ImageBase, FunctionEntry, PrimaryEntry, &IsDirect))
         {
-            if (IsDirect && (PopCount == 0))
+            if (IsDirect && (PopCount == 0) && RtlpJumpsToFragment(InstrPtr))
                 return FALSE;
             break;
         }

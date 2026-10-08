@@ -623,10 +623,16 @@ CheckEpilogUnwind(ULONG FunctionEnd, const char *Name, BOOLEAN EndsInJump)
     ok_eq_hex64(Ctx.Rip, 0x1234567812345678ULL);
     ok_eq_hex64(Ctx.Rsp, Stack + 0x40);
 
-    /* Not checked at a direct jmp alone: ReactOS cannot tell it from a jump
-       from the body to a cold part (GCC) and unwinds through the prolog */
     if (EndsInJump)
+    {
+        /* A direct jmp to code that is not a function fragment ends the
+           epilog even with the frame still there, as on Windows */
+        Handler = UnwindEpilogFunction(&Ctx, Stack, FunctionEnd, 0, EPILOG_END);
+        ok(Handler == NULL, "%s: handler %p at the jmp\n", Name, Handler);
+        ok_eq_hex64(Ctx.Rip, *(ULONG64 *)Stack);
+        ok_eq_hex64(Ctx.Rsp, Stack + 8);
         return;
+    }
 
     /* At the instruction that leaves the function */
     Handler = UnwindEpilogFunction(&Ctx, Stack + 0x38, FunctionEnd, 0, EPILOG_END);
