@@ -994,7 +994,8 @@ walked:
     /* A read-only file, or a metadata file, resolves MAXIMUM_ALLOWED and generic rights to write
      * bits the caller did not explicitly request; drop them so the open reads rather than fails. */
     if (!CreatedNode && !IsDir &&
-        !(Access & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
+        !((Access | (As ? As->OriginalDesiredAccess : 0)) &
+          (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
                     WRITE_DAC | WRITE_OWNER | DELETE | FILE_DELETE_CHILD | GENERIC_WRITE | GENERIC_ALL)) &&
         Disposition != FILE_OVERWRITE && Disposition != FILE_OVERWRITE_IF && Disposition != FILE_SUPERSEDE &&
         !(Options & FILE_DELETE_ON_CLOSE) && !Stream.Length &&

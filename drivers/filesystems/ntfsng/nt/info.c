@@ -619,13 +619,18 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Crtime);
         }
     }
-    if (!Err && TargetFcb && ngc_links(Target) <= 0)
+    if (!Err && TargetFcb)
     {
-        /* The replace removed the target's last name (checked live under the lock): retire its FCB.
-         * If other hard links remain, the core keeps the file, so the FCB and the surviving links'
-         * cached data stay valid. */
-        TargetFcb->Deleted = TRUE;
-        NgUnlistFcb(TargetFcb);
+        /* Retire the target's FCB only when the replace removed its last name (live count under the
+         * lock; ngc_stat reports 0 once the final $FILE_NAME is gone).  If other hard links remain,
+         * the core keeps the file, so the FCB and the surviving links' cached data stay valid. */
+        struct ngc_stat TgtNow;
+        ngc_stat(Target, &TgtNow);
+        if (TgtNow.nlink == 0)
+        {
+            TargetFcb->Deleted = TRUE;
+            NgUnlistFcb(TargetFcb);
+        }
     }
     if (!Err)
         ngc_stat(Fcb->Node, &Fcb->Stat);
