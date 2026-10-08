@@ -4220,21 +4220,12 @@ NtQueryVolumeInformationFile(IN HANDLE FileHandle,
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    /* Check if we should use Sync IO or not */
-    if (FileObject->Flags & FO_SYNCHRONOUS_IO)
-    {
-        /* Lock it */
-        Status = IopLockFileObject(FileObject, PreviousMode);
-        if (Status != STATUS_SUCCESS)
-        {
-            ObDereferenceObject(FileObject);
-            return Status;
-        }
-    }
-
     /*
      * Quick path for FileFsDeviceInformation - the kernel has enough
-     * info to reply instead of the driver, excepted for network file systems
+     * info to reply instead of the driver, excepted for network file systems.
+     * It only reads the device object, so do it before taking the file
+     * object lock: the caller (e.g. GetFileType) must not wait behind a
+     * synchronous request pending on the same file object.
      */
     if (FsInformationClass == FileFsDeviceInformation &&
         (BooleanFlagOn(FileObject->Flags, FO_DIRECT_DEVICE_OPEN) || FileObject->DeviceObject->DeviceType != FILE_DEVICE_NETWORK_FILE_SYSTEM))
@@ -4258,13 +4249,6 @@ NtQueryVolumeInformationFile(IN HANDLE FileHandle,
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
-            /* Check if we had a file lock */
-            if (BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO))
-            {
-                /* Release it */
-                IopUnlockFileObject(FileObject);
-            }
-
             /* Dereference the FO */
             ObDereferenceObject(FileObject);
 
@@ -4272,20 +4256,26 @@ NtQueryVolumeInformationFile(IN HANDLE FileHandle,
         }
         _SEH2_END;
 
-        /* Check if we had a file lock */
-        if (BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO))
-        {
-            /* Release it */
-            IopUnlockFileObject(FileObject);
-        }
-
         /* Dereference the FO */
         ObDereferenceObject(FileObject);
 
         return STATUS_SUCCESS;
     }
+
+    /* Check if we should use Sync IO or not */
+    if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+    {
+        /* Lock it */
+        Status = IopLockFileObject(FileObject, PreviousMode);
+        if (Status != STATUS_SUCCESS)
+        {
+            ObDereferenceObject(FileObject);
+            return Status;
+        }
+    }
+
     /* This is to be handled by the kernel, not by FSD */
-    else if (FsInformationClass == FileFsDriverPathInformation)
+    if (FsInformationClass == FileFsDriverPathInformation)
     {
         _SEH2_VOLATILE PFILE_FS_DRIVER_PATH_INFORMATION DriverPathInfo = NULL;
 
