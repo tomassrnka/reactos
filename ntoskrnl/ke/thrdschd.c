@@ -333,6 +333,22 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         /* Sanity check */
         ASSERT(NextThread->State == Standby);
 
+        /* The processor is about to switch to its idle thread: take its
+           place, the idle thread is never queued */
+        if (NextThread == Prcb->IdleThread)
+        {
+            Thread->State = Standby;
+            Prcb->NextThread = Thread;
+            InterlockedAndClearMember(&KiIdleSummary, Prcb->SetMember);
+            KiReleasePrcbLock(Prcb);
+
+            if (KeGetCurrentProcessorNumber() != Processor)
+            {
+                KiIpiSend(AFFINITY_MASK(Processor), IPI_DPC);
+            }
+            return;
+        }
+
         /* Check if priority changed */
         if (OldPriority > NextThread->Priority)
         {
@@ -353,9 +369,13 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     }
     else
     {
-        /* Set the next thread as the current thread */
+        /* Set the next thread as the current thread. An idle processor
+           takes a thread of any priority, its idle loop does not look at
+           the ready lists; during phase 0 the boot processor's idle thread
+           runs the initialization at a high priority */
         NextThread = Prcb->CurrentThread;
-        if (OldPriority > NextThread->Priority)
+        if ((OldPriority > NextThread->Priority) ||
+            ((NextThread == Prcb->IdleThread) && (NextThread->Priority == 0)))
         {
             /* Preempt it if it's already running */
             if (NextThread->State == Running) NextThread->Preempted = TRUE;
