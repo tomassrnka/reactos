@@ -131,6 +131,7 @@ extern void func_RtlUnicodeStringToAnsiString(void);
 extern void func_RtlUnicodeStringToCountedOemString(void);
 extern void func_RtlUnicodeToOemN(void);
 extern void func_RtlUnwind(void);
+extern void func_RtlUnwindEx(void);
 extern void func_RtlUpcaseUnicodeStringToCountedOemString(void);
 extern void func_RtlValidateUnicodeString(void);
 extern void func_RtlVirtualUnwind(void);
@@ -282,6 +283,7 @@ const struct test winetest_testlist[] =
 #endif
 #ifdef _M_AMD64
     { "RtlCaptureContext",              func_RtlCaptureContext },
+    { "RtlUnwindEx",                    func_RtlUnwindEx },
     { "RtlVirtualUnwind",               func_RtlVirtualUnwind },
 #endif
 

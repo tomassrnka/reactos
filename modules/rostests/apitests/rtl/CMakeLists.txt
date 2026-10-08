@@ -19,6 +19,7 @@ elseif(ARCH STREQUAL "amd64")
     )
     list(APPEND SOURCE
         amd64/RtlCaptureContext.c
+        amd64/RtlUnwindEx.c
         amd64/RtlVirtualUnwind.c
     )
 elseif(ARCH STREQUAL "arm")
