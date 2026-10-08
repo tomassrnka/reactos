@@ -340,6 +340,8 @@ FsRtlNotifyCompleteIrp(IN PIRP Irp,
     Stack = IoGetCurrentIrpStackLocation(Irp);
     if (!DataLength || Stack->Parameters.NotifyDirectory.Length < DataLength)
     {
+        /* The watcher re-enumerates, so a pending overflow has been reported */
+        NotifyChange->Flags &= ~NOTIFY_IMMEDIATELY;
         Status = STATUS_NOTIFY_ENUM_DIR;
         goto Completion;
     }
