@@ -332,6 +332,13 @@ HvpCreateHiveFreeCellList(
         while (FreeOffset < Bin->Size)
         {
             FreeBlock = (PHCELL)((ULONG_PTR)Bin + FreeOffset);
+            if (FreeBlock->Size == 0)
+            {
+                /* A damaged bin (for one, a self-healed one): the walk would never advance */
+                DPRINT1("Cell of size 0 in the bin at offset 0x%lx, rest of the bin skipped\n",
+                        (ULONG)Bin->FileOffset + FreeOffset);
+                break;
+            }
             if (FreeBlock->Size > 0)
             {
                 Status = HvpAddFree(Hive, FreeBlock, Bin->FileOffset + FreeOffset);
@@ -346,6 +353,8 @@ HvpCreateHiveFreeCellList(
             }
         }
 
+        if (Bin->Size < HBLOCK_SIZE)
+            return STATUS_REGISTRY_CORRUPT;
         BlockIndex += Bin->Size / HBLOCK_SIZE;
         BlockOffset += Bin->Size;
     }

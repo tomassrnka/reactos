@@ -368,7 +368,8 @@ HvpInitializeMemoryHive(
     {
         Bin = (PHBIN)((ULONG_PTR)ChunkBase + (BlockIndex + 1) * HBLOCK_SIZE);
         if (Bin->Signature != HV_HBIN_SIGNATURE ||
-           (Bin->Size % HBLOCK_SIZE) != 0 ||
+            Bin->Size == 0 || (Bin->Size % HBLOCK_SIZE) != 0 ||
+            Bin->Size / HBLOCK_SIZE > Hive->Storage[Stable].Length - BlockIndex ||
            (Bin->FileOffset / HBLOCK_SIZE) != BlockIndex)
         {
             /*
