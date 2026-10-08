@@ -26,18 +26,72 @@ bool kshim_mapping_dirty(struct address_space *m);
 int kshim_sync(struct super_block *sb);
 
 /* ------------------------------------------------------------- printk */
-static char kshim_last_err[256];
+/*
+ * Error-level messages, kept per thread for kshim_errseq_check: the core prints a report and then,
+ * on the same thread, reaches errseq_check through ntfs_handle_error.  Other threads (other volumes,
+ * shared readers) cannot replace a thread's message in between.
+ */
+#define KSHIM_ERR_SLOTS 64
+static struct { void *thread; unsigned long long stamp; char msg[192]; } kshim_err_slot[KSHIM_ERR_SLOTS];
+static unsigned long long kshim_err_stamp;
+#define KSHIM_ERR_LOST 16
+static void *kshim_err_lost[KSHIM_ERR_LOST];	/* threads whose slot was reused: their check cannot trust "no message" */
+static unsigned int kshim_err_lost_next;
+static int kshim_err_lost_overflow;	/* a lost thread fell out of the ring too: no check can trust "no message" */
 static uintptr_t kshim_err_lock;
 void (*kshim_core_error)(struct super_block *sb, const char *msg);
+
+static void kshim_err_record(const char *msg)
+{
+	void *t = ngos_current_thread();
+	unsigned char irql = ngos_spin_lock(&kshim_err_lock);
+	unsigned int i;
+	for (i = 0; i < KSHIM_ERR_SLOTS && kshim_err_slot[i].thread != t; i++)
+		;
+	if (i == KSHIM_ERR_SLOTS)
+		for (i = 0; i < KSHIM_ERR_SLOTS && kshim_err_slot[i].thread; i++)
+			;
+	if (i == KSHIM_ERR_SLOTS) {
+		/* The oldest report goes: reports never checked (a read-only volume) are the first to. */
+		i = 0;
+		for (unsigned int k = 1; k < KSHIM_ERR_SLOTS; k++)
+			if (kshim_err_slot[k].stamp < kshim_err_slot[i].stamp)
+				i = k;
+		if (kshim_err_lost[kshim_err_lost_next % KSHIM_ERR_LOST])
+			kshim_err_lost_overflow = 1;
+		kshim_err_lost[kshim_err_lost_next++ % KSHIM_ERR_LOST] = kshim_err_slot[i].thread;
+	}
+	kshim_err_slot[i].thread = t;
+	kshim_err_slot[i].stamp = ++kshim_err_stamp;
+	strncpy(kshim_err_slot[i].msg, msg, sizeof(kshim_err_slot[i].msg) - 1);
+	kshim_err_slot[i].msg[sizeof(kshim_err_slot[i].msg) - 1] = 0;
+	ngos_spin_unlock(&kshim_err_lock, irql);
+}
 
 int kshim_errseq_check(errseq_t *e, errseq_t since)
 {
 	struct super_block *sb = container_of(e, struct super_block, s_wb_err);
-	char msg[sizeof(kshim_last_err)];
+	char msg[sizeof(kshim_err_slot[0].msg)];
+	void *t = ngos_current_thread();
 	unsigned char irql;
 	(void)since;
+	msg[0] = 0;
 	irql = ngos_spin_lock(&kshim_err_lock);
-	memcpy(msg, kshim_last_err, sizeof(msg));
+	for (unsigned int i = 0; i < KSHIM_ERR_SLOTS; i++)
+		if (kshim_err_slot[i].thread == t) {
+			memcpy(msg, kshim_err_slot[i].msg, sizeof(msg));
+			kshim_err_slot[i].thread = NULL;
+			break;
+		}
+	if (!msg[0])
+		for (unsigned int i = 0; i < KSHIM_ERR_LOST; i++)
+			if (kshim_err_lost[i] == t) {
+				kshim_err_lost[i] = NULL;
+				strcpy(msg, "corrupt? (the report was lost)");	/* unknown: counted as damage */
+				break;
+			}
+	if (!msg[0] && kshim_err_lost_overflow)
+		strcpy(msg, "corrupt? (reports were lost)");
 	ngos_spin_unlock(&kshim_err_lock, irql);
 	if (kshim_core_error)
 		kshim_core_error(sb, msg);
@@ -57,17 +111,26 @@ int printk(const char *fmt, ...)
 	if (lvl > 4 && !kshim_verbose)
 		return 0;
 	buf = ngos_alloc(512);
-	if (!buf)
+	if (!buf) {
+		/* An error report still reaches the classifier: formatted into a spare buffer, not printed. */
+		if (lvl <= 3) {
+			static char spare[256];
+			static uintptr_t spare_lock;
+			unsigned char irql = ngos_spin_lock(&spare_lock);
+			va_start(ap, fmt);
+			vsnprintf(spare, sizeof(spare), fmt, ap);
+			va_end(ap);
+			kshim_err_record(spare);
+			ngos_spin_unlock(&spare_lock, irql);
+		}
 		return 0;
+	}
 	memcpy(buf, "ntfsng: ", 8);
 	va_start(ap, fmt);
 	vsnprintf(buf + 8, 512 - 8, fmt, ap);
 	va_end(ap);
-	if (lvl <= 3) {
-		unsigned char irql = ngos_spin_lock(&kshim_err_lock);
-		strncpy(kshim_last_err, buf + 8, sizeof(kshim_last_err) - 1);
-		ngos_spin_unlock(&kshim_err_lock, irql);
-	}
+	if (lvl <= 3)
+		kshim_err_record(buf + 8);
 	ngos_print(buf);
 	ngos_free(buf);
 	return 0;

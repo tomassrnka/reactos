@@ -667,11 +667,26 @@ void kshim_watch_hit(atomic64_t *v)
 void kshim_jnl_mark_errors(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
-	if (!j || j->errors || j->readonly)
+	if (!j || j->readonly)
 		return;
-	j->errors = 1;
-	printk(KERN_ERR "journal: the core reported errors: the volume stays marked for repair\n");
-	kj_hdr_write(b, j, KJ_ST_ERRORS, 0, 0, 0, 1, j->vol_usn);
+	if (!__atomic_exchange_n(&j->errors, 1, __ATOMIC_SEQ_CST))
+		printk(KERN_ERR "journal: the core reported errors: the volume stays marked for repair\n");
+	/*
+	 * Not over a COMMITTED header whose transaction could not be applied (failed): its replay is
+	 * what the next mount needs.  Reached from shared (read) holders too: one writer at a time,
+	 * and tried again (ngc_dirty) until the header is on the medium.
+	 */
+	if (j->failed || j->errors_durable || __atomic_exchange_n(&j->errors_writing, 1, __ATOMIC_SEQ_CST))
+		return;
+	if (!kj_hdr_write(b, j, KJ_ST_ERRORS, 0, 0, 0, 1, j->vol_usn))
+		j->errors_durable = 1;
+	__atomic_store_n(&j->errors_writing, 0, __ATOMIC_SEQ_CST);
+}
+
+int kshim_jnl_errors_pending(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	return j && !j->readonly && j->errors && !j->errors_durable && !j->failed;
 }
 
 unsigned long kshim_jnl_capacity(struct block_device *b)

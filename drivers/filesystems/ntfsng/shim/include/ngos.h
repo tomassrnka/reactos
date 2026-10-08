@@ -29,6 +29,7 @@ unsigned char ngos_spin_lock(uintptr_t *lock);
 void ngos_spin_unlock(uintptr_t *lock, unsigned char irql);
 
 void ngos_yield(void);
+void *ngos_current_thread(void);
 void ngos_sleep_ms(unsigned int ms);
 unsigned long ngos_jiffies(void);
 void ngos_time(long long *sec, long *nsec);
