@@ -907,13 +907,16 @@ walk:
              * file's descriptor, so the whole requested access (including WRITE_DAC and DELETE,
              * which would otherwise rewrite or remove the base) is checked against it first. */
             PSECURITY_DESCRIPTOR FileSd = NULL;
-            struct ngc_stat BSt;
+            struct ngc_stat BSt, DirSt;
             ngc_stat(Node, &BSt);
+            DirSt.mft_ref = 0;
+            if (Parent)
+                ngc_stat(Parent, &DirSt);
             if (Vcb->ReadOnly)
                 Err = -NGC_EROFS;
-            else if ((BSt.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE)
+            else if ((BSt.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE || (DirSt.mft_ref & 0xffffffffffffULL) == 11)
             {
-                Status = STATUS_ACCESS_DENIED;   /* no streams on the metadata files */
+                Status = STATUS_ACCESS_DENIED;   /* no streams on the metadata files and the $Extend children */
                 Err = 0;
             }
             else if (Check && (!NT_SUCCESS(Status = NgReadSecurity(Vcb, Node, &FileSd)) ||
