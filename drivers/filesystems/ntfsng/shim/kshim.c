@@ -644,18 +644,153 @@ int bdev_rw_virt(struct block_device *b, sector_t s, void *data, size_t len, blk
 {
 	return kshim_dev_rw(b, (op & REQ_OP_MASK) == REQ_OP_WRITE, s << SECTOR_SHIFT, data, len);
 }
-struct bio *bio_alloc(struct block_device *b, unsigned short nr, blk_opf_t op, gfp_t g)
+/*
+ * Linux's bio_alloc with a waiting gfp mask does not fail, and the core's MFT writers use its result
+ * unchecked: when the pool is empty a write bio comes from a reserve instead, waiting for a slot if need
+ * be.  A writer can hold one bio while it takes a second for the MFT mirror, which it submits and puts
+ * at once; so a thread that already holds a first-tier slot takes from a second tier of the same size,
+ * whose holders never wait, and every first-tier holder can finish.  Reads check for NULL themselves.
+ * The core abandons a bio on one MFT writeback error exit: a reserve bio taken inside a writeback scope
+ * (kshim_wb_scope_enter/exit, per thread, nested) that is still out when that scope reaches its next
+ * folio or returns belonged to a frame that is gone, so it is put back then.
+ */
+#define KSHIM_BIO_RESERVE 8
+#define KSHIM_BIO_RESERVE_VECS 64
+static struct kshim_bio_slot {
+	struct bio bio; struct bio_vec vec[KSHIM_BIO_RESERVE_VECS]; int used; void *owner; int depth;
+} kshim_bio_reserve[2][KSHIM_BIO_RESERVE];
+#define KSHIM_WB_SCOPES 256
+static struct { void *thread; int depth; } kshim_wb_scope[KSHIM_WB_SCOPES];
+static uintptr_t kshim_wb_scope_lock;
+static int kshim_wb_find_locked(void *t)
+{
+	for (int i = 0; i < KSHIM_WB_SCOPES; i++)
+		if (kshim_wb_scope[i].thread == t)
+			return i;
+	return -1;
+}
+static int kshim_wb_depth_locked(void *t)
+{
+	int i = kshim_wb_find_locked(t);
+	return i < 0 ? 0 : kshim_wb_scope[i].depth;
+}
+/* Puts back the thread's reserve bios taken at scope depth @depth or deeper (> 0): their frames have returned. */
+static void kshim_wb_reclaim_locked(void *t, int depth)
+{
+	for (int r = 0; r < 2; r++)
+		for (int k = 0; k < KSHIM_BIO_RESERVE; k++) {
+			struct kshim_bio_slot *sl = &kshim_bio_reserve[r][k];
+			if (__atomic_load_n(&sl->used, __ATOMIC_SEQ_CST) && sl->owner == t && sl->depth >= depth) {
+				__atomic_store_n(&sl->owner, NULL, __ATOMIC_SEQ_CST);
+				__atomic_store_n(&sl->used, 0, __ATOMIC_SEQ_CST);
+			}
+		}
+}
+void kshim_wb_scope_enter(void)
+{
+	void *t = ngos_current_thread();
+	for (;;) {
+		unsigned char irql = ngos_spin_lock(&kshim_wb_scope_lock);
+		int i = kshim_wb_find_locked(t);
+		if (i < 0)
+			i = kshim_wb_find_locked(NULL);
+		if (i >= 0) {
+			kshim_wb_scope[i].thread = t;
+			kshim_wb_scope[i].depth++;
+			ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+			return;
+		}
+		ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+		ngos_yield();	/* every entry in use: wait for a scope to end, so that every scope is tracked */
+	}
+}
+void kshim_wb_scope_exit(void)
+{
+	void *t = ngos_current_thread();
+	unsigned char irql = ngos_spin_lock(&kshim_wb_scope_lock);
+	int i = kshim_wb_find_locked(t);
+	if (i >= 0) {
+		kshim_wb_reclaim_locked(t, kshim_wb_scope[i].depth);
+		if (!--kshim_wb_scope[i].depth)
+			kshim_wb_scope[i].thread = NULL;
+	}
+	ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+}
+/* Between two folios of one writepages walk: the frames that wrote the last folio have returned. */
+void kshim_wb_scope_point(void)
+{
+	void *t = ngos_current_thread();
+	unsigned char irql = ngos_spin_lock(&kshim_wb_scope_lock);
+	int i = kshim_wb_find_locked(t);
+	if (i >= 0)
+		kshim_wb_reclaim_locked(t, kshim_wb_scope[i].depth);
+	ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+}
+static struct bio *bio_alloc_pool(unsigned short n, gfp_t g)
 {
 	struct bio *bio = kzalloc(sizeof(*bio), g);
+	if (bio) {
+		bio->bi_io_vec = kcalloc(n, sizeof(struct bio_vec), g);
+		if (!bio->bi_io_vec) {
+			kfree(bio);
+			bio = NULL;
+		}
+	}
+	return bio;
+}
+static struct bio *bio_alloc_reserve(void)
+{
+	void *t = ngos_current_thread();
+	int tier = 0;
+	for (int i = 0; i < KSHIM_BIO_RESERVE; i++)
+		if (__atomic_load_n(&kshim_bio_reserve[0][i].owner, __ATOMIC_SEQ_CST) == t)
+			tier = 1;
+	for (int i = 0; i < KSHIM_BIO_RESERVE; i++) {
+		struct kshim_bio_slot *sl = &kshim_bio_reserve[tier][i];
+		if (!__atomic_exchange_n(&sl->used, 1, __ATOMIC_SEQ_CST)) {
+			memset(&sl->bio, 0, sizeof(sl->bio));
+			memset(sl->vec, 0, sizeof(sl->vec));
+			sl->bio.bi_io_vec = sl->vec;
+			{
+				unsigned char irql = ngos_spin_lock(&kshim_wb_scope_lock);
+				sl->depth = kshim_wb_depth_locked(t);
+				ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+			}
+			__atomic_store_n(&sl->owner, t, __ATOMIC_SEQ_CST);
+			return &sl->bio;
+		}
+	}
+	return NULL;
+}
+struct bio *bio_alloc(struct block_device *b, unsigned short nr, blk_opf_t op, gfp_t g)
+{
+	unsigned short n = nr ? nr : 1;
+	struct bio *bio = bio_alloc_pool(n, g);
+	while (!bio && n <= KSHIM_BIO_RESERVE_VECS && (op & REQ_OP_MASK) == REQ_OP_WRITE) {
+		bio = bio_alloc_reserve();
+		if (!bio) {
+			ngos_yield();
+			bio = bio_alloc_pool(n, g);
+		}
+	}
 	if (!bio)
 		return NULL;
 	bio->bi_bdev = b; bio->bi_opf = op;
-	bio->bi_max_vecs = nr ? nr : 1;
-	bio->bi_io_vec = kcalloc(bio->bi_max_vecs, sizeof(struct bio_vec), g);
-	if (!bio->bi_io_vec) { kfree(bio); return NULL; }
+	bio->bi_max_vecs = n;
 	return bio;
 }
-void bio_put(struct bio *b) { kfree(b->bi_io_vec); kfree(b); }
+void bio_put(struct bio *b)
+{
+	for (int t = 0; t < 2; t++)
+		for (int i = 0; i < KSHIM_BIO_RESERVE; i++)
+			if (b == &kshim_bio_reserve[t][i].bio) {
+				__atomic_store_n(&kshim_bio_reserve[t][i].owner, NULL, __ATOMIC_SEQ_CST);
+				__atomic_store_n(&kshim_bio_reserve[t][i].used, 0, __ATOMIC_SEQ_CST);
+				return;
+			}
+	kfree(b->bi_io_vec);
+	kfree(b);
+}
 int bio_add_page(struct bio *b, struct page *p, unsigned int len, unsigned int off)
 {
 	/* Like the block layer, merge a range contiguous with the last segment of the same page. */
