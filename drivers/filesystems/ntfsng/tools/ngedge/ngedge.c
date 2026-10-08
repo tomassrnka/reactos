@@ -7,7 +7,7 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * usage: ngedge DIR TEST [ARG]
- *   TEST: rename-subtree | delete-open-stream | dir-async | size-race | cache-mix | parallel
+ *   TEST: rename-subtree | rename-cycle | delete-open-stream | dir-async | size-race | cache-mix | parallel
  *         | stream-reuse | replace | junction-dos | read-pattern FILE | all
  *   One NGE: line per check, NGE:DONE pass=N fail=M at the end.  A test that hangs leaves the
  *   machine to the harness timeout (the watchdog prints NGE:HANG first when it still can).
@@ -119,6 +119,80 @@ static void t_rename_subtree(void)
     report("rename-out-of-subtree-works", r, "error %lu", GetLastError());
 }
 
+/* Two threads move two sibling directories into each other: never both at once (a cycle). */
+static WCHAR CycA[MAX_PATH], CycB[MAX_PATH], CycAB[MAX_PATH], CycBA[MAX_PATH];
+static volatile LONG CycMoves[2];
+static HANDLE CycGo;
+static DWORD WINAPI cycle_mover(LPVOID arg)
+{
+    const WCHAR *from = arg ? CycB : CycA, *to = arg ? CycAB : CycBA;
+    int i;
+    WaitForSingleObject(CycGo, INFINITE);
+    for (i = 0; i < 3000 && !Stop; i++)
+    {
+        if (MoveFileW(from, to))
+        {
+            InterlockedIncrement(&CycMoves[arg ? 1 : 0]);
+            MoveFileW(to, from);
+        }
+        if (!(i & 63))
+            InterlockedIncrement(&Current);
+    }
+    return 0;
+}
+
+static void t_rename_cycle(void)
+{
+    HANDLE t[2];
+    BOOL a, b, ab, ba;
+    path(CycA, L"rc-a");
+    path(CycB, L"rc-b");
+    path(CycAB, L"rc-a\\rc-b");
+    path(CycBA, L"rc-b\\rc-a");
+    /* Leftovers of an earlier run in the same directory go first. */
+    RemoveDirectoryW(CycAB);
+    RemoveDirectoryW(CycBA);
+    RemoveDirectoryW(CycA);
+    RemoveDirectoryW(CycB);
+    if (!CreateDirectoryW(CycA, NULL) || !CreateDirectoryW(CycB, NULL))
+    {
+        report("rename-cycle-setup", 0, "CreateDirectory error %lu", GetLastError());
+        return;
+    }
+    CycMoves[0] = CycMoves[1] = 0;
+    Stop = 0;
+    /* Both workers start together, so their moves can overlap. */
+    CycGo = CreateEventW(NULL, TRUE, FALSE, NULL);
+    t[0] = CreateThread(NULL, 0, cycle_mover, (LPVOID)0, 0, NULL);
+    t[1] = CreateThread(NULL, 0, cycle_mover, (LPVOID)1, 0, NULL);
+    if (!CycGo || !t[0] || !t[1])
+    {
+        report("rename-cycle-setup", 0, "CreateThread/CreateEvent error %lu", GetLastError());
+        Stop = 1;
+        if (CycGo) SetEvent(CycGo);
+        if (t[0]) { WaitForSingleObject(t[0], INFINITE); CloseHandle(t[0]); }
+        if (t[1]) { WaitForSingleObject(t[1], INFINITE); CloseHandle(t[1]); }
+        if (CycGo) CloseHandle(CycGo);
+        return;
+    }
+    SetEvent(CycGo);
+    if (WaitForMultipleObjects(2, t, TRUE, INFINITE) != WAIT_OBJECT_0)
+        report("rename-cycle-join", 0, "error %lu", GetLastError());
+    CloseHandle(t[0]);
+    CloseHandle(t[1]);
+    CloseHandle(CycGo);
+    a = GetFileAttributesW(CycA) != INVALID_FILE_ATTRIBUTES;
+    b = GetFileAttributesW(CycB) != INVALID_FILE_ATTRIBUTES;
+    ab = GetFileAttributesW(CycAB) != INVALID_FILE_ATTRIBUTES;
+    ba = GetFileAttributesW(CycBA) != INVALID_FILE_ATTRIBUTES;
+    if (ab) RemoveDirectoryW(CycAB);
+    if (ba) RemoveDirectoryW(CycBA);
+    RemoveDirectoryW(CycA);
+    RemoveDirectoryW(CycB);
+    report("rename-cycle-both-reachable", CycMoves[0] && CycMoves[1] && ((a && (b || ab)) || (b && ba)),
+           "moves %ld and %ld; rc-a %d rc-b %d rc-a\\rc-b %d rc-b\\rc-a %d", CycMoves[0], CycMoves[1], a, b, ab, ba);
+}
+
 /* ---------------------------------------------------------------- delete with an open stream */
 static void t_delete_open_stream(void)
 {
@@ -146,7 +220,14 @@ static void t_delete_open_stream(void)
     if (hb != INVALID_HANDLE_VALUE)
         CloseHandle(hb);
     report("delete-on-close-with-open-stream-returns", 1, NULL);
-    report("stream-still-readable", SetFilePointer(hs, 0, NULL, FILE_BEGIN) == 0 && WriteFile(hs, "x", 1, &n, NULL), NULL);
+    /* The record cannot go while its stream is open: the file and the stream's data stay. */
+    report("file-kept-while-stream-open", GetFileAttributesW(f) != INVALID_FILE_ATTRIBUTES ||
+           GetLastError() == ERROR_ACCESS_DENIED, "error %lu", GetLastError());
+    {
+        char got[16] = {0};
+        BOOL rd = SetFilePointer(hs, 0, NULL, FILE_BEGIN) == 0 && ReadFile(hs, got, 11, &n, NULL) && n == 11;
+        report("stream-data-intact", rd && !memcmp(got, "stream data", 11), "read ok=%d, %lu bytes", rd, n);
+    }
     CloseHandle(hs);
     r = DeleteFileW(f);
     report("delete-after-stream-closed", r || GetFileAttributesW(f) == INVALID_FILE_ATTRIBUTES, "ok=%d error %lu", r, GetLastError());
@@ -154,16 +235,67 @@ static void t_delete_open_stream(void)
 }
 
 /* ---------------------------------------------------------------- two async queries on one handle */
+static HANDLE DirH;
+static volatile LONG DirBad, DirRounds;
+static volatile NTSTATUS DirLast;
+
+/* A FILE_BOTH_DIR_INFORMATION buffer whose entry chain and names stay inside the returned length. */
+static int dir_buffer_ok(const UCHAR *b, ULONG len)
+{
+    ULONG ofs = 0;
+    for (;;)
+    {
+        const FILE_BOTH_DIR_INFORMATION *e = (const FILE_BOTH_DIR_INFORMATION *)(b + ofs);
+        if (len - ofs < FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName) ||
+            e->FileNameLength > len - ofs - FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName) || !e->FileNameLength)
+            return 0;
+        if (!e->NextEntryOffset)
+            return 1;
+        if (e->NextEntryOffset & 7 || e->NextEntryOffset > len - ofs)
+            return 0;
+        ofs += e->NextEntryOffset;
+    }
+}
+
+static DWORD WINAPI dir_querier(LPVOID arg)
+{
+    static UCHAR bufs[2][65536];
+    UCHAR *buf = bufs[(ULONG_PTR)arg];
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, NULL);
+    int i;
+    for (i = 0; i < 2000 && !Stop; i++)
+    {
+        IO_STATUS_BLOCK q;
+        NTSTATUS st;
+        ResetEvent(ev);
+        st = NtQueryDirectoryFile(DirH, ev, NULL, NULL, &q, buf, 65536, FileBothDirectoryInformation, FALSE, NULL,
+                                  (i + (int)(ULONG_PTR)arg) % 3 == 0);
+        if (st == STATUS_PENDING)
+        {
+            WaitForSingleObject(ev, 30000);
+            st = q.Status;
+        }
+        DirLast = st;
+        if (NT_SUCCESS(st) && !dir_buffer_ok(buf, (ULONG)q.Information))
+            InterlockedIncrement(&DirBad);
+        else if (!NT_SUCCESS(st) && st != STATUS_NO_MORE_FILES)
+            InterlockedIncrement(&DirBad);
+        InterlockedIncrement(&DirRounds);
+        InterlockedIncrement(&Current);
+    }
+    CloseHandle(ev);
+    return 0;
+}
+
 static void t_dir_async(void)
 {
     WCHAR d[MAX_PATH], f[MAX_PATH];
     UNICODE_STRING name;
     OBJECT_ATTRIBUTES oa;
-    IO_STATUS_BLOCK io, q[2];
-    HANDLE h, ev[2];
+    IO_STATUS_BLOCK io;
+    HANDLE t[2];
     NTSTATUS st;
-    static UCHAR buf[2][65536];
-    int i, k, ok = 1;
+    int i;
     path(d, L"da");
     CreateDirectoryW(d, NULL);
     for (i = 0; i < 1500; i++)
@@ -174,33 +306,25 @@ static void t_dir_async(void)
     if (!RtlDosPathNameToNtPathName_U(d, &name, NULL, NULL))
         return;
     InitializeObjectAttributes(&oa, &name, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    st = NtOpenFile(&h, FILE_LIST_DIRECTORY | SYNCHRONIZE, &oa, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    FILE_DIRECTORY_FILE);   /* no FILE_SYNCHRONOUS_IO_*: queries are not serialised */
+    st = NtOpenFile(&DirH, FILE_LIST_DIRECTORY | SYNCHRONIZE, &oa, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    FILE_DIRECTORY_FILE);   /* no FILE_SYNCHRONOUS_IO_*: the I/O manager does not serialise */
     RtlFreeUnicodeString(&name);
     if (!NT_SUCCESS(st))
     {
         report("dir-async-open", 0, "status 0x%08lx", st);
         return;
     }
-    ev[0] = CreateEventW(NULL, TRUE, FALSE, NULL);
-    ev[1] = CreateEventW(NULL, TRUE, FALSE, NULL);
-    for (i = 0; i < 3000 && ok; i++)
-    {
-        for (k = 0; k < 2; k++)
-        {
-            ResetEvent(ev[k]);
-            st = NtQueryDirectoryFile(h, ev[k], NULL, NULL, &q[k], buf[k], sizeof(buf[k]), FileBothDirectoryInformation,
-                                      FALSE, NULL, (i + k) % 3 == 0);
-            if (st != STATUS_PENDING && !NT_SUCCESS(st) && st != STATUS_NO_MORE_FILES)
-                ok = 0;
-        }
-        WaitForMultipleObjects(2, ev, TRUE, 30000);
-        InterlockedIncrement(&Current);
-    }
-    report("dir-async-two-queries", ok, "%d rounds, last status 0x%08lx", i, st);
-    CloseHandle(ev[0]);
-    CloseHandle(ev[1]);
-    NtClose(h);
+    /* Two threads query the one handle at the same time; each buffer must be whole. */
+    DirBad = DirRounds = 0;
+    Stop = 0;
+    t[0] = CreateThread(NULL, 0, dir_querier, (LPVOID)0, 0, NULL);
+    t[1] = CreateThread(NULL, 0, dir_querier, (LPVOID)1, 0, NULL);
+    WaitForMultipleObjects(2, t, TRUE, INFINITE);
+    report("dir-async-two-threads", DirBad == 0 && DirRounds == 4000, "%ld queries, %ld bad, last status 0x%08lx",
+           DirRounds, DirBad, DirLast);
+    CloseHandle(t[0]);
+    CloseHandle(t[1]);
+    NtClose(DirH);
 }
 
 /* ---------------------------------------------------------------- size queries racing appends */
@@ -272,6 +396,7 @@ static void t_size_race(void)
 #define MIXPAGES 256
 static WCHAR MixFile[MAX_PATH];
 static volatile LONG NcVer[MIXPAGES], CVer[MIXPAGES];
+static volatile LONG MixWrites[3], MixReads, MixErrors;
 static DWORD WINAPI nc_writer(LPVOID arg)
 {
     HANDLE h = CreateFileW(MixFile, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
@@ -293,7 +418,12 @@ static DWORD WINAPI nc_writer(LPVOID arg)
         memset(&ov, 0, sizeof(ov));
         ov.Offset = p * 4096;
         if (WriteFile(h, b, 2048, &n, &ov) && n == 2048)
+        {
             NcVer[p] = v;
+            InterlockedIncrement(&MixWrites[0]);
+        }
+        else
+            InterlockedIncrement(&MixErrors);
     }
     CloseHandle(h);
     return 0;
@@ -313,13 +443,18 @@ static DWORD WINAPI c_writer(LPVOID arg)
         OVERLAPPED ov;
         DWORD n;
         seed = seed * 1103515245 + 12345;
-        p = (seed >> 8) % MIXPAGES;
+        p = ((seed >> 8) % MIXPAGES) & ~1;     /* even pages; the mapped writer has the odd ones */
         v = CVer[p] + 1;
         memset(b, (int)(0x80 | (v & 0x7f)), sizeof(b));
         memset(&ov, 0, sizeof(ov));
         ov.Offset = p * 4096 + 2048;
         if (WriteFile(h, b, sizeof(b), &n, &ov) && n == sizeof(b))
+        {
             CVer[p] = v;
+            InterlockedIncrement(&MixWrites[1]);
+        }
+        else
+            InterlockedIncrement(&MixErrors);
     }
     CloseHandle(h);
     return 0;
@@ -340,17 +475,70 @@ static DWORD WINAPI c_reader(LPVOID arg)
         seed = seed * 1103515245 + 12345;
         memset(&ov, 0, sizeof(ov));
         ov.Offset = ((seed >> 8) % MIXPAGES) * 4096;
-        ReadFile(h, b, sizeof(b), &n, &ov);
+        if (ReadFile(h, b, sizeof(b), &n, &ov) && n == sizeof(b))
+            InterlockedIncrement(&MixReads);
+        else
+            InterlockedIncrement(&MixErrors);
     }
     CloseHandle(h);
     return 0;
 }
 
+/* Writes the second half of odd pages through a mapped view: page faults and partial page updates. */
+static DWORD WINAPI m_writer(LPVOID arg)
+{
+    HANDLE h = CreateFileW(MixFile, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    HANDLE m;
+    UCHAR *v;
+    ULONG seed = 31, k = 0;
+    (void)arg;
+    if (h == INVALID_HANDLE_VALUE)
+        return 1;
+    m = CreateFileMappingW(h, NULL, PAGE_READWRITE, 0, MIXPAGES * 4096, NULL);
+    v = m ? MapViewOfFile(m, FILE_MAP_WRITE, 0, 0, MIXPAGES * 4096) : NULL;
+    if (!v)
+    {
+        if (m)
+            CloseHandle(m);
+        CloseHandle(h);
+        return 1;
+    }
+    while (!Stop)
+    {
+        LONG p, ver;
+        seed = seed * 1103515245 + 12345;
+        p = ((seed >> 8) % MIXPAGES) | 1;
+        ver = CVer[p] + 1;
+        memset(v + p * 4096 + 2048, (int)(0x80 | (ver & 0x7f)), 2048);
+        CVer[p] = ver;
+        InterlockedIncrement(&MixWrites[2]);
+        if (!(++k & 63) && !FlushViewOfFile(v, 0))
+            InterlockedIncrement(&MixErrors);
+        if (!(k & 1023))
+        {
+            /* Drop the view now and then so the pages have to come back from the file. */
+            FlushViewOfFile(v, 0);
+            UnmapViewOfFile(v);
+            v = MapViewOfFile(m, FILE_MAP_WRITE, 0, 0, MIXPAGES * 4096);
+            if (!v)
+                break;
+        }
+    }
+    if (v)
+    {
+        FlushViewOfFile(v, 0);
+        UnmapViewOfFile(v);
+    }
+    CloseHandle(m);
+    CloseHandle(h);
+    return v ? 0 : 1;
+}
+
 static void t_cache_mix(void)
 {
-    HANDLE t[4], h;
+    HANDLE t[5], h;
     UCHAR *b;
-    DWORD i, n, bad = 0, t0;
+    DWORD i, n = 0, bad = 0, t0, code, exits = 0;
     path(MixFile, L"mix.bin");
     b = VirtualAlloc(NULL, MIXPAGES * 4096, MEM_COMMIT, PAGE_READWRITE);
     h = CreateFileW(MixFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
@@ -369,20 +557,37 @@ static void t_cache_mix(void)
     WriteFile(h, b, MIXPAGES * 4096, &n, NULL);
     CloseHandle(h);
     Stop = 0;
+    MixWrites[0] = MixWrites[1] = MixWrites[2] = MixReads = MixErrors = 0;
     t[0] = CreateThread(NULL, 0, nc_writer, NULL, 0, NULL);
     t[1] = CreateThread(NULL, 0, c_writer, NULL, 0, NULL);
     t[2] = CreateThread(NULL, 0, c_reader, NULL, 0, NULL);
     t[3] = CreateThread(NULL, 0, c_reader, NULL, 0, NULL);
+    t[4] = CreateThread(NULL, 0, m_writer, NULL, 0, NULL);
     for (t0 = GetTickCount(); GetTickCount() - t0 < 30000;)
     {
         Sleep(1000);
         InterlockedIncrement(&Current);
     }
     Stop = 1;
-    WaitForMultipleObjects(4, t, TRUE, 60000);
+    WaitForMultipleObjects(5, t, TRUE, 60000);
+    for (i = 0; i < 5; i++)
+    {
+        if (!GetExitCodeThread(t[i], &code) || code)
+            exits++;
+        CloseHandle(t[i]);
+    }
+    report("cache-mix-workers", !exits && !MixErrors && MixWrites[0] && MixWrites[1] && MixWrites[2] && MixReads,
+           "%lu workers failed, %ld errors, writes nc=%ld cached=%ld mapped=%ld, %ld reads", exits, MixErrors,
+           MixWrites[0], MixWrites[1], MixWrites[2], MixReads);
     /* Every half page holds its own writer's last version, read back without the cache. */
     h = CreateFileW(MixFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
-    ReadFile(h, b, MIXPAGES * 4096, &n, NULL);
+    if (h == INVALID_HANDLE_VALUE || !ReadFile(h, b, MIXPAGES * 4096, &n, NULL) || n != MIXPAGES * 4096)
+    {
+        report("cache-mix-no-stale-data", 0, "read back failed: error %lu, %lu bytes", GetLastError(), n);
+        if (h != INVALID_HANDLE_VALUE)
+            CloseHandle(h);
+        return;
+    }
     CloseHandle(h);
     for (i = 0; i < MIXPAGES; i++)
     {
@@ -538,7 +743,7 @@ static void t_junction_dos(void)
     WCHAR d[MAX_PATH], target[MAX_PATH];
     NG_MP_REPARSE r;
     HANDLE h;
-    DWORD n, i, ok = 0;
+    DWORD n, i, ok = 0, set = 0;
     for (i = 0; i < 10; i++)
     {
         USHORT len;
@@ -557,11 +762,14 @@ static void t_junction_dos(void)
         r.PrintLength = 0;
         memcpy(r.Path, target, len);
         r.DataLength = (USHORT)(8 + len + 2 * sizeof(WCHAR));
-        DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, &r, 8 + r.DataLength, NULL, 0, &n, NULL);
+        if (DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, &r, 8 + r.DataLength, NULL, 0, &n, NULL) &&
+            (GetFileAttributesW(d) & FILE_ATTRIBUTE_REPARSE_POINT))
+            set++;
         CloseHandle(h);
         if (RemoveDirectoryW(d))
             ok++;
     }
+    report("junction-dos-set", set == 10, "%lu of 10 junctions set", set);
     report("junction-dos-removed", ok == 10, "%lu of 10 removed (the offline check looks for leftover records)", ok);
 }
 
@@ -623,7 +831,7 @@ static void t_read_pattern(const char *file)
     WCHAR w[MAX_PATH];
     static UCHAR b[65536];
     HANDLE h;
-    DWORD n, i, bad = 0;
+    DWORD n, i, bad = 0, err;
     LONGLONG total = 0;
     MultiByteToWideChar(CP_ACP, 0, file, -1, w, MAX_PATH);
     h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -632,15 +840,20 @@ static void t_read_pattern(const char *file)
         report("read-pattern", 0, "open error %lu", GetLastError());
         return;
     }
-    while (ReadFile(h, b, sizeof(b), &n, NULL) && n)
+    LARGE_INTEGER size = {0};
+    BOOL rd;
+    GetFileSizeEx(h, &size);
+    while ((rd = ReadFile(h, b, sizeof(b), &n, NULL)) && n)
     {
         for (i = 0; i < n; i++)
             if (b[i] != (UCHAR)(((total + i) * 7 + 3) & 0xff))
                 bad++;
         total += n;
     }
+    err = rd ? 0 : GetLastError();
     CloseHandle(h);
-    report("read-pattern", total > 0 && bad == 0, "%I64d bytes, %lu wrong", total, bad);
+    report("read-pattern", total > 0 && total == size.QuadPart && bad == 0 && !err,
+           "%I64d of %I64d bytes, %lu wrong, read error %lu", total, size.QuadPart, bad, err);
 }
 
 int main(int argc, char **argv)
@@ -658,6 +871,7 @@ int main(int argc, char **argv)
     all = !strcmp(argv[2], "all");
 #define RUN(n, f) if (all || !strcmp(argv[2], n)) { TestName = n; InterlockedIncrement(&Current); f; }
     RUN("rename-subtree", t_rename_subtree());
+    RUN("rename-cycle", t_rename_cycle());
     RUN("delete-open-stream", t_delete_open_stream());
     RUN("dir-async", t_dir_async());
     RUN("size-race", t_size_race());
