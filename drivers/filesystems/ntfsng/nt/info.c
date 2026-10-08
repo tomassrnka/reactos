@@ -334,34 +334,46 @@ static BOOLEAN NgSameName(const WCHAR *A, USHORT ALen, const WCHAR *B, USHORT BL
  * target's directory already opened (SL_OPEN_TARGET_DIRECTORY) in SetFile.FileObject; a bare
  * name renames within the current directory.  The final component of FileName is the new name.
  */
-/* TRUE if a file or directory below directory DirMftNo has open handles (first names, 64 levels). */
+/* TRUE if a file or directory anywhere below directory DirMftNo has an open handle (64 levels). */
 static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
 {
-    ULONGLONG Open[64];
-    ULONG Count = 0, i, Depth;
+    ULONGLONG *Open = NULL;
+    ULONG Count = 0, Cap = 0, i, Depth;
     PLIST_ENTRY Entry;
     BOOLEAN Found = FALSE;
     PWCHAR Name;
 
+    /* Snapshot the MFT numbers of every open file (the parent walk needs CoreLock, which must not
+     * be taken under FcbListLock): size the array to the open FCBs, then fill it. */
     ExAcquireFastMutex(&Vcb->FcbListLock);
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
-        if (!F->OpenHandles || F->IsVolume || F->IsRoot || F->MftNo == DirMftNo)
-            continue;
-        if (Count == RTL_NUMBER_OF(Open))
+        if (F->OpenHandles && !F->IsVolume && !F->IsRoot && F->MftNo != DirMftNo)
+            Cap++;
+    }
+    if (Cap)
+        Open = ExAllocatePoolWithTag(PagedPool, Cap * sizeof(ULONGLONG), TAG_NTFSNG);
+    if (Open)
+    {
+        for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < Cap; Entry = Entry->Flink)
         {
-            Found = TRUE;       /* too many to check: refuse rather than guess */
-            break;
+            PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+            if (F->OpenHandles && !F->IsVolume && !F->IsRoot && F->MftNo != DirMftNo)
+                Open[Count++] = F->MftNo;
         }
-        Open[Count++] = F->MftNo;
     }
     ExReleaseFastMutex(&Vcb->FcbListLock);
-    if (Found || !Count)
-        return Found;
+    if (!Cap)
+        return FALSE;
+    if (!Open)
+        return TRUE;        /* out of memory: refuse rather than rename over open files */
     Name = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
     if (!Name)
+    {
+        ExFreePoolWithTag(Open, TAG_NTFSNG);
         return TRUE;
+    }
     NgAcquireCore(Vcb);
     for (i = 0; i < Count && !Found; i++)
     {
@@ -387,6 +399,7 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
     }
     NgReleaseCore(Vcb);
     ExFreePoolWithTag(Name, TAG_NTFSNG);
+    ExFreePoolWithTag(Open, TAG_NTFSNG);
     return Found;
 }
 
