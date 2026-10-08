@@ -114,6 +114,9 @@ HalpReleaseApicLock(
 /* All processors share the select and window registers */
 KSPIN_LOCK HalpIoApicLock;
 
+/* Serializes the lookup and allocation of interrupt vectors */
+KSPIN_LOCK HalpVectorAllocationLock;
+
 FORCEINLINE
 ULONG
 IOApicRead(UCHAR Register)
@@ -447,6 +450,13 @@ HalpGetRootInterruptVector(
 {
     UCHAR Vector;
     KIRQL Irql;
+    ULONG_PTR Flags;
+
+    /* Concurrent lookups could otherwise allocate two vectors for one IRQ, or one vector
+       for two IRQs. Interrupts stay disabled: the lock does not raise the IRQL. */
+    Flags = __readeflags();
+    _disable();
+    HalpAcquireApicLock(&HalpVectorAllocationLock);
 
     /* Get the vector currently registered */
     Vector = HalpIrqToVector(BusInterruptLevel);
@@ -456,7 +466,7 @@ HalpGetRootInterruptVector(
     {
         /* Calculate IRQL */
         NT_ASSERT(HalpVectorToIndex[Vector] == BusInterruptLevel);
-        *OutIrql = HalpVectorToIrql(Vector);
+        Irql = HalpVectorToIrql(Vector);
     }
     else
     {
@@ -476,11 +486,13 @@ HalpGetRootInterruptVector(
                 {
                     /* Found one, allocate the interrupt */
                     Vector = HalpAllocateSystemInterrupt(BusInterruptLevel, Vector);
-                    *OutIrql = Irql;
                     goto Exit;
                 }
             }
         }
+
+        HalpReleaseApicLock(&HalpVectorAllocationLock);
+        __writeeflags(Flags);
 
         DPRINT1("Failed to get an interrupt vector for IRQ %lu\n", BusInterruptLevel);
         *OutAffinity = 0;
@@ -489,6 +501,11 @@ HalpGetRootInterruptVector(
     }
 
 Exit:
+    HalpReleaseApicLock(&HalpVectorAllocationLock);
+    __writeeflags(Flags);
+
+    /* The caller's output may be pageable: write it with its interrupt state restored */
+    *OutIrql = Irql;
 
     *OutAffinity = HalpDefaultInterruptAffinity;
     ASSERT(HalpDefaultInterruptAffinity);
