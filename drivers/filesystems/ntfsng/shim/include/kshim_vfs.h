@@ -930,7 +930,9 @@ void sort(void *base, size_t num, size_t size, int (*cmp)(const void *, const vo
 struct ratelimit_state { int dummy; };
 #define DEFINE_RATELIMIT_STATE(n, i, b) struct ratelimit_state n
 #define __ratelimit(r) 1
-#define errseq_check(e, s) 0
+/* Reached from ntfs_handle_error with on_errors=continue, right after the error message: see kshim_core_error. */
+int kshim_errseq_check(errseq_t *e, errseq_t since);
+#define errseq_check(e, s) kshim_errseq_check(e, s)
 #define errseq_set(e, v) do { } while (0)
 #define errseq_sample(e) 0
 #define freezable_schedule() do { } while (0)
