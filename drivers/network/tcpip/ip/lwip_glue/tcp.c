@@ -143,8 +143,9 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
 
             if (qp != NULL)
             {
-                /* Use this special pbuf free callback function because we're outside tcpip thread */
-                pbuf_free_callback(qp->p);
+                /* lwIP's memory functions may be called from any thread (SYS_LIGHTWEIGHT_PROT);
+                 * the segment is ours since the receive callback took it */
+                pbuf_free(qp->p);
 
                 ExFreeToNPagedLookasideList(&QueueEntryLookasideList, qp);
             }
@@ -228,9 +229,12 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
 
     if (p)
     {
+        /* A reader may consume and free the segment as soon as it is queued */
+        u16_t Length = p->tot_len;
+
         LibTCPEnqueuePacket(Connection, p);
 
-        tcp_recved(pcb, p->tot_len);
+        tcp_recved(pcb, Length);
 
         TCPRecvEventHandler(arg);
     }
