@@ -158,9 +158,8 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
                                         Major == IRP_MJ_FLUSH_BUFFERS ? NULL : &Offset, &Iosb);
     if (!Irp)
         return -1;
+    /* No SL_WRITE_THROUGH: durability comes from the flushes at each commit (and FUA is not honoured everywhere). */
     IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
-    if (Major == IRP_MJ_WRITE)
-        IoGetNextIrpStackLocation(Irp)->Flags |= SL_WRITE_THROUGH;
     IoSetCompletionRoutine(Irp, NgReadCompletion, &Event, TRUE, TRUE, TRUE);
     Status = IoCallDriver(Device, Irp);
     if (Status == STATUS_PENDING)
@@ -187,10 +186,18 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
     NgStackSample();
     if (!NT_SUCCESS(Status))
     {
-        /* A disk without a write cache may not implement flush. */
+        /*
+         * A disk without a write cache may not implement flush.  A stack that refuses flushes on a disk
+         * that has one voids every durability step of the journal, so say so (once).
+         */
         if (Major == IRP_MJ_FLUSH_BUFFERS && (Status == STATUS_INVALID_DEVICE_REQUEST || Status == STATUS_NOT_SUPPORTED ||
                                              Status == STATUS_NOT_IMPLEMENTED))
+        {
+            static LONG Warned;
+            if (!InterlockedExchange(&Warned, 1))
+                DPRINT1("ntfsng: the storage stack refused a flush (0x%lx): if the disk caches writes, a power cut can lose committed changes\n", Status);
             return 0;
+        }
         DPRINT1("ntfsng: device %s at %I64u len %u failed 0x%lx\n",
                 Major == IRP_MJ_READ ? "read" : Major == IRP_MJ_WRITE ? "write" : "flush", off, len, Status);
         return -1;
