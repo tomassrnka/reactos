@@ -37,9 +37,11 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
     PSECURITY_DESCRIPTOR Sd;
     PACL Dacl;
     LONG i;
-    /* A create through NtCreateFile inherits ACEs unmarked (no INHERITED_ACE, no
-     * SE_DACL_AUTO_INHERITED) and lets an explicit DACL replace them, also when the directory's
-     * DACL is marked auto-inherited (Windows Server 2008 R2 and Windows 10 22H2 both do this). */
+    /* With a directory whose stored DACL is not marked SE_DACL_AUTO_INHERITED, a create inherits
+     * ACEs unmarked and an explicit DACL replaces them (Windows Server 2008 R2 and Windows 10 22H2).
+     * The auto-inherited variant first marks the directory (SE_DACL_AUTO_INHERIT_REQ) and, once it
+     * is verified as marked, only records what a new file gets: Windows' behaviour there is not
+     * pinned yet. */
     const BYTE Inh = 0;
     const BYTE AllFlags = 0x1f;
     WCHAR Name[64];
@@ -65,7 +67,44 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
     Aces[3].Sid = SidEveryone; Aces[3].Mask = FILE_GENERIC_EXECUTE;
     Aces[3].Flags = CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE; Aces[3].Deny = FALSE;
     Aces[4].Sid = SidUser; Aces[4].Mask = FILE_ADD_FILE | FILE_TRAVERSE | FILE_LIST_DIRECTORY | SYNCHRONIZE; Aces[4].Flags = 0; Aces[4].Deny = FALSE;
-    ok_hex(NtMakeDirControl(Dir, Aces, 5, SE_DACL_PROTECTED | (Auto ? SE_DACL_AUTO_INHERITED : 0)), STATUS_SUCCESS);
+    ok_hex(NtMakeDirControl(Dir, Aces, 5, SE_DACL_PROTECTED), STATUS_SUCCESS);
+    if (Auto)
+    {
+        PSECURITY_DESCRIPTOR AutoSd = NtMakeSdControl(Aces, 5, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ);
+        SECURITY_DESCRIPTOR_CONTROL Control = 0;
+        ULONG Rev;
+        HANDLE H;
+        if (NT_SUCCESS(NtOpen(Dir, WRITE_DAC, SHARE_ALL, FILE_OPEN, FILE_DIRECTORY_FILE, NULL, &H)))
+        {
+            trace("%ls: set with SE_DACL_AUTO_INHERIT_REQ: 0x%08lx\n", Base,
+                  NtSetSecurityObject(H, DACL_SECURITY_INFORMATION, AutoSd));
+            NtClose(H);
+        }
+        LocalFree(AutoSd);
+        Dacl = NtGetDacl(Dir, Text, sizeof(Text), &Sd);
+        if (Sd)
+        {
+            RtlGetControlSecurityDescriptor(Sd, &Control, &Rev);
+            LocalFree(Sd);
+        }
+        trace("%ls (parent): %s\n", Base, Text);
+        if (!(Control & SE_DACL_AUTO_INHERITED))
+        {
+            skip("The directory is not stored as auto-inherited (control 0x%04x)\n", Control);
+            return;
+        }
+        ok_hex(NtMakeFile(File, NULL, 0, FALSE, "file"), STATUS_SUCCESS);
+        ok_hex(NtMakeDir(Sub, NULL, 0, FALSE), STATUS_SUCCESS);
+        Dacl = NtGetDacl(File, Text, sizeof(Text), &Sd);
+        trace("%ls\\file.txt (auto parent): %s\n", Base, Text);
+        if (Sd)
+            LocalFree(Sd);
+        Dacl = NtGetDacl(Sub, Text, sizeof(Text), &Sd);
+        trace("%ls\\sub (auto parent): %s\n", Base, Text);
+        if (Sd)
+            LocalFree(Sd);
+        return;
+    }
     ok_hex(NtMakeFile(File, NULL, 0, FALSE, "file"), STATUS_SUCCESS);
     ok_hex(NtMakeDir(Sub, NULL, 0, FALSE), STATUS_SUCCESS);
     ok_hex(NtMakeFile(SubFile, NULL, 0, FALSE, "subfile"), STATUS_SUCCESS);

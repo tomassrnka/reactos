@@ -53,7 +53,9 @@ START_TEST(NtfsSystemFiles)
         Status = NtOpen(Path, FILE_READ_ATTRIBUTES, SHARE_ALL, FILE_OPEN, 0, NULL, NULL);
         trace("%ls for attributes: 0x%08lx\n", Names[i], Status);
     }
-    /* A named stream of a metadata file is not opened (FILE_OPEN: the probe never creates one). */
+    /* No named stream of a metadata file can be opened.  FILE_OPEN keeps the probe from creating
+     * one on a driver that would allow it, so this does not test the refusal to create a stream;
+     * that refusal is in the create path and was checked by code review only. */
     VolumeRoot(Path, L"$MFT:ntfsapitest");
     Status = NtOpen(Path, FILE_READ_ATTRIBUTES, SHARE_ALL, FILE_OPEN, 0, NULL, NULL);
     ok(!NT_SUCCESS(Status), "Stream on $MFT: 0x%08lx\n", Status);
