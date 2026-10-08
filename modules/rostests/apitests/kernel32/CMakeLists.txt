@@ -4,11 +4,13 @@ add_subdirectory(redirptest)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    BindIoCompletionCallback.c
     CancelIoEx.c
     ConsoleCP.c
     CreateProcess.c
     CreateWaitableTimerEx.c
     DefaultActCtx.c
+    DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
     EnumSystemCodePages.c
