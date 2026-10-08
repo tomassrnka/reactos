@@ -1623,9 +1623,17 @@ SepAccessCheck(
     PPRIVILEGE_SET Privileges = NULL;
     ULONG CapturedPrivilegeSetLength, RequiredPrivilegeSetLength;
     ULONG ResultListIndex;
-    PTOKEN Token;
+    PTOKEN Token = NULL;
     NTSTATUS Status;
-    GENERIC_MAPPING CapturedGenericMapping;
+    GENERIC_MAPPING CapturedGenericMapping = {0};
+    PACCESS_MASK ResultGrantedAccess;
+    PNTSTATUS ResultAccessStatus;
+    ACCESS_MASK SingleGrantedAccess = 0;
+    NTSTATUS SingleAccessStatus = STATUS_ACCESS_DENIED;
+    BOOLEAN TokenLocked = FALSE;
+    BOOLEAN OutputAccessResults = FALSE;
+    BOOLEAN WriteRequiredLength = FALSE;
+    NTSTATUS FunctionStatus = STATUS_SUCCESS;
 
     PAGED_CODE();
 
@@ -1739,6 +1747,32 @@ SepAccessCheck(
         return Status;
     }
 
+    /* Results are computed in kernel memory and copied out under SEH at the end */
+    if (UseResultList)
+    {
+        ResultGrantedAccess = ExAllocatePoolWithTag(PagedPool,
+                                                    sizeof(ACCESS_MASK) * ObjectTypeListLength,
+                                                    TAG_SE);
+        ResultAccessStatus = ExAllocatePoolWithTag(PagedPool,
+                                                   sizeof(NTSTATUS) * ObjectTypeListLength,
+                                                   TAG_SE);
+        if (ResultGrantedAccess == NULL || ResultAccessStatus == NULL)
+        {
+            if (ResultGrantedAccess != NULL)
+                ExFreePoolWithTag(ResultGrantedAccess, TAG_SE);
+            if (ResultAccessStatus != NULL)
+                ExFreePoolWithTag(ResultAccessStatus, TAG_SE);
+            SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
+            ObDereferenceObject(Token);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+    else
+    {
+        ResultGrantedAccess = &SingleGrantedAccess;
+        ResultAccessStatus = &SingleAccessStatus;
+    }
+
     /* Check for ACCESS_SYSTEM_SECURITY and WRITE_OWNER access */
     Status = SePrivilegePolicyCheck(&DesiredAccess,
                                     &PreviouslyGrantedAccess,
@@ -1749,8 +1783,6 @@ SepAccessCheck(
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("SePrivilegePolicyCheck failed (Status 0x%08lx)\n", Status);
-        SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
-        ObDereferenceObject(Token);
 
         /*
          * The caller does not have the required access to do an access check.
@@ -1761,17 +1793,19 @@ SepAccessCheck(
         {
             for (ResultListIndex = 0; ResultListIndex < ObjectTypeListLength; ResultListIndex++)
             {
-                AccessStatus[ResultListIndex] = Status;
-                GrantedAccess[ResultListIndex] = 0;
+                ResultAccessStatus[ResultListIndex] = Status;
+                ResultGrantedAccess[ResultListIndex] = 0;
             }
         }
         else
         {
-            *AccessStatus = Status;
-            *GrantedAccess = 0;
+            *ResultAccessStatus = Status;
+            *ResultGrantedAccess = 0;
         }
 
-        return STATUS_SUCCESS;
+        OutputAccessResults = TRUE;
+        FunctionStatus = STATUS_SUCCESS;
+        goto Cleanup;
     }
 
     /* Check the size of the privilege set and return the privileges */
@@ -1785,20 +1819,28 @@ SepAccessCheck(
         /* Fail if the privilege set buffer is too small */
         if (CapturedPrivilegeSetLength < RequiredPrivilegeSetLength)
         {
-            SeFreePrivileges(Privileges);
-            SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
-            ObDereferenceObject(Token);
-            *PrivilegeSetLength = RequiredPrivilegeSetLength;
-            return STATUS_BUFFER_TOO_SMALL;
+            WriteRequiredLength = TRUE;
+            FunctionStatus = STATUS_BUFFER_TOO_SMALL;
+            goto Cleanup;
         }
 
         /* Copy the privilege set to the caller */
-        RtlCopyMemory(PrivilegeSet,
-                      Privileges,
-                      RequiredPrivilegeSetLength);
+        _SEH2_TRY
+        {
+            RtlCopyMemory(PrivilegeSet,
+                          Privileges,
+                          RequiredPrivilegeSetLength);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            FunctionStatus = _SEH2_GetExceptionCode();
+            _SEH2_YIELD(goto Cleanup);
+        }
+        _SEH2_END;
 
         /* Free the local privilege set */
         SeFreePrivileges(Privileges);
+        Privileges = NULL;
     }
     else
     {
@@ -1807,15 +1849,24 @@ SepAccessCheck(
         /* Fail if the privilege set buffer is too small */
         if (CapturedPrivilegeSetLength < sizeof(PRIVILEGE_SET))
         {
-            SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
-            ObDereferenceObject(Token);
-            *PrivilegeSetLength = sizeof(PRIVILEGE_SET);
-            return STATUS_BUFFER_TOO_SMALL;
+            RequiredPrivilegeSetLength = sizeof(PRIVILEGE_SET);
+            WriteRequiredLength = TRUE;
+            FunctionStatus = STATUS_BUFFER_TOO_SMALL;
+            goto Cleanup;
         }
 
         /* Initialize the privilege set */
-        PrivilegeSet->PrivilegeCount = 0;
-        PrivilegeSet->Control = 0;
+        _SEH2_TRY
+        {
+            PrivilegeSet->PrivilegeCount = 0;
+            PrivilegeSet->Control = 0;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            FunctionStatus = _SEH2_GetExceptionCode();
+            _SEH2_YIELD(goto Cleanup);
+        }
+        _SEH2_END;
     }
 
     /* Capture the security descriptor */
@@ -1827,18 +1878,16 @@ SepAccessCheck(
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Failed to capture the Security Descriptor\n");
-        SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
-        ObDereferenceObject(Token);
-        return Status;
+        FunctionStatus = Status;
+        goto Cleanup;
     }
 
     /* Check the captured security descriptor */
     if (CapturedSecurityDescriptor == NULL)
     {
         DPRINT1("Security Descriptor is NULL\n");
-        SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
-        ObDereferenceObject(Token);
-        return STATUS_INVALID_SECURITY_DESCR;
+        FunctionStatus = STATUS_INVALID_SECURITY_DESCR;
+        goto Cleanup;
     }
 
     /* Check security descriptor for valid owner and group */
@@ -1846,12 +1895,8 @@ SepAccessCheck(
         SepGetGroupFromDescriptor(CapturedSecurityDescriptor) == NULL)
     {
         DPRINT1("Security Descriptor does not have a valid group or owner\n");
-        SeReleaseSecurityDescriptor(CapturedSecurityDescriptor,
-                                    PreviousMode,
-                                    FALSE);
-        SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
-        ObDereferenceObject(Token);
-        return STATUS_INVALID_SECURITY_DESCR;
+        FunctionStatus = STATUS_INVALID_SECURITY_DESCR;
+        goto Cleanup;
     }
 
     /* Capture the principal self SID if we have one */
@@ -1865,12 +1910,8 @@ SepAccessCheck(
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("Failed to capture the principal self SID (Status 0x%08lx)\n", Status);
-            SeReleaseSecurityDescriptor(CapturedSecurityDescriptor,
-                                        PreviousMode,
-                                        FALSE);
-            SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
-            ObDereferenceObject(Token);
-            return Status;
+            FunctionStatus = Status;
+            goto Cleanup;
         }
     }
 
@@ -1879,6 +1920,7 @@ SepAccessCheck(
 
     /* Lock the token */
     SepAcquireTokenLockShared(Token);
+    TokenLocked = TRUE;
 
     /* Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights */
     if (DesiredAccess & (WRITE_DAC | READ_CONTROL | MAXIMUM_ALLOWED))
@@ -1904,14 +1946,14 @@ SepAccessCheck(
         {
             for (ResultListIndex = 0; ResultListIndex < ObjectTypeListLength; ResultListIndex++)
             {
-                AccessStatus[ResultListIndex] = STATUS_SUCCESS;
-                GrantedAccess[ResultListIndex] = PreviouslyGrantedAccess;
+                ResultAccessStatus[ResultListIndex] = STATUS_SUCCESS;
+                ResultGrantedAccess[ResultListIndex] = PreviouslyGrantedAccess;
             }
         }
         else
         {
-            *GrantedAccess = PreviouslyGrantedAccess;
-            *AccessStatus = STATUS_SUCCESS;
+            *ResultGrantedAccess = PreviouslyGrantedAccess;
+            *ResultAccessStatus = STATUS_SUCCESS;
         }
     }
     else
@@ -1929,13 +1971,20 @@ SepAccessCheck(
                              PreviousMode,
                              UseResultList,
                              NULL,
-                             GrantedAccess,
-                             AccessStatus);
+                             ResultGrantedAccess,
+                             ResultAccessStatus);
     }
 
+    OutputAccessResults = TRUE;
+    FunctionStatus = STATUS_SUCCESS;
+
+Cleanup:
     /* Release subject context and unlock the token */
-    SeReleaseSubjectContext(&SubjectSecurityContext);
-    SepReleaseTokenLock(Token);
+    if (TokenLocked)
+    {
+        SeReleaseSubjectContext(&SubjectSecurityContext);
+        SepReleaseTokenLock(Token);
+    }
 
     /* Release the caputed principal self SID */
     SepReleaseSid(CapturedPrincipalSelfSid,
@@ -1947,14 +1996,55 @@ SepAccessCheck(
                                 PreviousMode,
                                 FALSE);
 
+    /* Free the local privilege set if it is still held */
+    if (Privileges != NULL)
+        SeFreePrivileges(Privileges);
+
     /* Release the object type list */
     SeReleaseObjectTypeList(CapturedObjectTypeList, PreviousMode);
+
+    /* The caller's pages may have changed since the probe */
+    _SEH2_TRY
+    {
+        if (OutputAccessResults)
+        {
+            if (UseResultList)
+            {
+                RtlCopyMemory(GrantedAccess,
+                              ResultGrantedAccess,
+                              sizeof(ACCESS_MASK) * ObjectTypeListLength);
+                RtlCopyMemory(AccessStatus,
+                              ResultAccessStatus,
+                              sizeof(NTSTATUS) * ObjectTypeListLength);
+            }
+            else
+            {
+                *GrantedAccess = SingleGrantedAccess;
+                *AccessStatus = SingleAccessStatus;
+            }
+        }
+        else if (WriteRequiredLength)
+        {
+            *PrivilegeSetLength = RequiredPrivilegeSetLength;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        FunctionStatus = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    /* Free the result storage */
+    if (UseResultList)
+    {
+        ExFreePoolWithTag(ResultGrantedAccess, TAG_SE);
+        ExFreePoolWithTag(ResultAccessStatus, TAG_SE);
+    }
 
     /* Dereference the token */
     ObDereferenceObject(Token);
 
-    /* Check succeeded */
-    return STATUS_SUCCESS;
+    return FunctionStatus;
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
