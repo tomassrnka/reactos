@@ -536,6 +536,18 @@ MsafdReturnWithErrno(
     }
 }
 
+FORCEINLINE
+SOCKET
+MsafdReturnInvalidSocket(
+    _In_ NTSTATUS Status,
+    _Out_opt_ LPINT Errno)
+{
+    if (Errno)
+        *Errno = TranslateNtStatusError(Status);
+
+    return INVALID_SOCKET;
+}
+
 VOID
 MsafdWaitForAlert(
     _In_ HANDLE hObject);
