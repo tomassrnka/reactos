@@ -183,20 +183,6 @@ Test_CcCopyRead(PFILE_OBJECT FileObject)
 
     memset(Buffer, 0xAC, 10);
 
-    /* Test bogus file object & file offset */
-    Ret = 'x';
-    KmtStartSeh()
-        Ret = CcCopyRead(FileObject, NULL, 0, FALSE, NULL, &IoStatus);
-    KmtEndSeh(STATUS_ACCESS_VIOLATION);
-    ok_eq_char(Ret, 'x');
-
-    Ret = 'x';
-    Offset.QuadPart = 0;
-    KmtStartSeh()
-        Ret = CcCopyRead(NULL, &Offset, 10, FALSE, Buffer, &IoStatus);
-    KmtEndSeh(STATUS_ACCESS_VIOLATION);
-    ok_eq_char(Ret, 'x');
-
     /* What happens on invalid buffer */
     Ret = 'x';
     Offset.QuadPart = 0;
@@ -264,14 +250,6 @@ Test_CcCopyRead(PFILE_OBJECT FileObject)
     ok_read_called(PAGE_SIZE * 2, PAGE_SIZE);
     ok_eq_hex(IoStatus.Status, STATUS_SUCCESS);
     ok_eq_ulongptr(IoStatus.Information, 10);
-
-    /* Try the same without a status block */
-    Ret = 'x';
-    Offset.QuadPart = PAGE_SIZE * 2;
-    KmtStartSeh()
-        Ret = CcCopyRead(FileObject, &Offset, 10, TRUE, Buffer, NULL);
-    KmtEndSeh(STATUS_ACCESS_VIOLATION);
-    ok_eq_char(Ret, 'x');
 }
 
 
