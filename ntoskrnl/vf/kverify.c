@@ -157,7 +157,7 @@ KvCaptureStack(PVOID *Buffer, ULONG Max)
     {
         ULONG_PTR Cur = (ULONG_PTR)Fp;
         if ((Cur & (sizeof(void *) - 1)) != 0) break;       /* misaligned     */
-        if (Cur < Lo || Cur + 2 * sizeof(void *) > Hi) break; /* off-stack    */
+        if (Cur < Lo || Cur >= Hi || Hi - Cur < 2 * sizeof(void *)) break; /* off-stack */
         if (Cur <= Prev) break;                             /* not ascending  */
         Buffer[Count++] = Fp[1];                            /* return address */
         Prev = Cur;
