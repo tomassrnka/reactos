@@ -5312,6 +5312,8 @@ MmCheckDirtySegment(
                 }
                 else
                 {
+                    /* The page may have had this entry saved already: forget it */
+                    MmSetSavedSwapEntryPage(Page, 0);
                     MmFreeSwapPage(SwapEntry);
                 }
             }
