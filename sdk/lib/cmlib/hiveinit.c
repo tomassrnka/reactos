@@ -310,8 +310,9 @@ HvpCreateHive(
  * Returns STATUS_SUCCESS if the function has initialized the
  * hive descriptor successfully. STATUS_REGISTRY_CORRUPT is
  * returned if the base block header contains invalid header
- * data. STATUS_NO_MEMORY is returned if memory could not
- * be allocated for registry stuff.
+ * data, or if a bin or a cell is damaged beyond self-heal.
+ * STATUS_NO_MEMORY is returned if memory could not be
+ * allocated for registry stuff.
  */
 NTSTATUS
 CMAPI
@@ -326,6 +327,7 @@ HvpInitializeMemoryHive(
     ULONG BitmapSize;
     PULONG BitmapBuffer;
     SIZE_T ChunkSize;
+    NTSTATUS Status;
 
     ChunkSize = ChunkBase->Length;
     DPRINT("ChunkSize: %zx\n", ChunkSize);
@@ -422,11 +424,12 @@ HvpInitializeMemoryHive(
         BlockIndex += Bin->Size / HBLOCK_SIZE;
     }
 
-    if (!NT_SUCCESS(HvpCreateHiveFreeCellList(Hive)))
+    Status = HvpCreateHiveFreeCellList(Hive);
+    if (!NT_SUCCESS(Status))
     {
         HvpFreeHiveBins(Hive);
         Hive->Free(Hive->BaseBlock, Hive->BaseBlockAlloc);
-        return STATUS_NO_MEMORY;
+        return Status;
     }
 
     BitmapSize = ROUND_UP(Hive->Storage[Stable].Length,
