@@ -1328,6 +1328,13 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
                                           (ULONG)TempPte.u.Soft.Protection,
                                           Process,
                                           OldIrql);
+
+        /* Out of pages: the PFN lock is released, let the caller wait and retry */
+        if (!NT_SUCCESS(Status))
+        {
+            ASSERT(Status == STATUS_NO_MEMORY);
+            return Status;
+        }
 #if MI_TRACE_PFNS
         /* Update debug info */
         if (TrapInformation)
@@ -1335,8 +1342,6 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
         else
             MiGetPfnEntry(PointerProtoPte->u.Hard.PageFrameNumber)->CallSite = _ReturnAddress();
 #endif
-
-        ASSERT(NT_SUCCESS(Status));
     }
 
     /* Complete the prototype PTE fault -- this will release the PFN lock */
@@ -1420,7 +1425,7 @@ MiDispatchFault(IN ULONG FaultCode,
                                             Process,
                                             LockIrql,
                                             TrapInformation);
-            ASSERT(Status == STATUS_SUCCESS);
+            ASSERT((Status == STATUS_SUCCESS) || (Status == STATUS_NO_MEMORY));
 
             /* Complete this as a transition fault */
             ASSERT(OldIrql == KeGetCurrentIrql());
