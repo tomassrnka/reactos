@@ -94,17 +94,18 @@ TestPartlyInvalidBuffer(VOID)
     Status = NtWriteFile(FileHandle, NULL, NULL, NULL, &IoStatus, Buffer, PAGE_SIZE, &ByteOffset, NULL);
     ok_hex(Status, STATUS_SUCCESS);
 
-    /* Cached write from a buffer whose second page is not committed: the cache manager faults in the copy */
+    /* Cached write from a buffer whose second page is not committed: the
+       probe checks only the range, so the cache manager faults in its copy */
     ByteOffset.QuadPart = 0;
     Status = NtWriteFile(FileHandle, NULL, NULL, NULL, &IoStatus, Buffer, 2 * PAGE_SIZE, &ByteOffset, NULL);
-    ok(Status == STATUS_INVALID_USER_BUFFER || Status == STATUS_ACCESS_VIOLATION,
+    ok(Status == STATUS_INVALID_USER_BUFFER || (!is_reactos() && broken(Status == STATUS_ACCESS_VIOLATION)),
        "Write from a partly invalid buffer returned 0x%lx\n", Status);
 
-    /* Cached read into the same buffer */
+    /* Read into the same buffer: the probe touches every page, so this
+       fails before the request reaches the file system */
     ByteOffset.QuadPart = 0;
     Status = NtReadFile(FileHandle, NULL, NULL, NULL, &IoStatus, Buffer, 2 * PAGE_SIZE, &ByteOffset, NULL);
-    ok(Status == STATUS_INVALID_USER_BUFFER || Status == STATUS_ACCESS_VIOLATION,
-       "Read into a partly invalid buffer returned 0x%lx\n", Status);
+    ok_hex(Status, STATUS_ACCESS_VIOLATION);
 
     /* The handle still works */
     ByteOffset.QuadPart = PAGE_SIZE;
@@ -144,6 +145,8 @@ START_TEST(NtReadFile)
 
     trace("System is %d bits, Size of MDL: %lu\n", Is64BitSystem() ? 64 : 32, SizeOfMdl());
     trace("Max MDL data size: 0x%lx bytes\n", LargeMdlMaxDataSize);
+
+    TestPartlyInvalidBuffer();
 
     ByteOffset.QuadPart = 0;
 
@@ -354,6 +357,4 @@ START_TEST(NtReadFile)
                                  &BufferSize,
                                  MEM_RELEASE);
     ok_hex(Status, STATUS_SUCCESS);
-
-    TestPartlyInvalidBuffer();
 }
