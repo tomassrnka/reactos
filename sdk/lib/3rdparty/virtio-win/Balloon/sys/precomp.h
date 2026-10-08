@@ -40,7 +40,7 @@
 #include "osdep.h"
 
 #include "virtio_pci.h"
-#include "virtio.h"
+#include "VirtIO.h"
 #include "VirtIOWdf.h"
 
 #include "public.h"

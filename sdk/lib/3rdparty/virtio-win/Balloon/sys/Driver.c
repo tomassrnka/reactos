@@ -38,7 +38,7 @@
 #pragma alloc_text(INIT, DriverEntry)
 #pragma alloc_text(PAGE, EvtDriverContextCleanup)
 
-NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
+NTSTATUS NTAPI DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
 {
     WDF_DRIVER_CONFIG config;
     NTSTATUS status;
@@ -69,7 +69,7 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Registry
     return status;
 }
 
-VOID EvtDriverContextCleanup(IN WDFOBJECT Driver)
+VOID NTAPI EvtDriverContextCleanup(IN WDFOBJECT Driver)
 {
     UNREFERENCED_PARAMETER(Driver);
     PAGED_CODE();

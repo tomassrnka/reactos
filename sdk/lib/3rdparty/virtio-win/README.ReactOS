@@ -18,4 +18,29 @@ scripts and .clang-format. Changes made for the ReactOS build are listed below.
 
 ReactOS changes
 ---------------
-(none yet)
+The ReactOS build uses GCC on case-sensitive file systems and does not run
+the WPP trace preprocessor. These changes adapt the code to that. The code
+paths are unchanged; only how the drivers report traces differs:
+
+- Include file names match the files' case ("VirtIO.h", <ntddk.h>) and use
+  forward slashes.
+- VirtIO/osdep.h defines "inline" as __forceinline only for MSVC, and
+  VirtIO/linux/types.h defines __attribute__ away only for compilers other
+  than GCC, because GCC needs both as they are.
+- VirtIO/kdebugprint.h and Balloon/sys/trace.h use ##__VA_ARGS__, so a
+  message without arguments compiles with GCC.
+- Balloon/sys/trace.h does not define EVENT_TRACING (WPP) for ReactOS; the
+  driver prints through DbgPrintEx instead, and Balloon/sys/utils.c limits
+  the driver's own traces to warnings and errors, because every message
+  reaches the debugger and the interrupt and DPC traces would flood it.
+  The VirtIO library's DPrintf messages up to level 4 still print, at
+  device start.
+- Callback functions that KMDF or the kernel call through a typed pointer
+  are declared NTAPI. The WDK compiles x86 drivers with __stdcall as the
+  default convention (/Gz); GCC defaults to __cdecl.
+- Inline functions defined in headers (Balloon/sys/ProtoTypes.h,
+  VirtIO/virtio_pci.h) are static, since GCC's C99 inline semantics differ
+  from MSVC's. In VirtIO/WDF/Dma.c, "static FORCEINLINE" became
+  "static __inline", because FORCEINLINE expands to "extern inline" with
+  GCC in ReactOS.
+- Balloon/sys/memstat.c no longer pastes "." with a field name in a macro.

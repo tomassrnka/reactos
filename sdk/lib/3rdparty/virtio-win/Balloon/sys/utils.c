@@ -124,7 +124,11 @@ void InitializeDebugPrints(IN PDRIVER_OBJECT DriverObject, PUNICODE_STRING Regis
     VirtioDebugPrintProc = NoDebugPrintFunc;
 #endif
     driverDebugFlags = 0xffffffff;
+#ifdef __REACTOS__
+    driverDebugLevel = TRACE_LEVEL_WARNING;
+#else
     driverDebugLevel = TRACE_LEVEL_VERBOSE;
+#endif
     virtioDebugLevel = 4;
 }
 

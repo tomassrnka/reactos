@@ -28,7 +28,9 @@
  */
 #include "kdebugprint.h"
 
+#ifndef __REACTOS__
 #define EVENT_TRACING
+#endif
 
 #if !defined(EVENT_TRACING)
 
@@ -70,7 +72,7 @@ extern int driverDebugLevel;
     {                                                                                                                  \
     }                                                                                                                  \
     else                                                                                                               \
-        VirtioDebugPrintProc(message, __VA_ARGS__)
+        VirtioDebugPrintProc(message, ##__VA_ARGS__)
 
 #define WPP_INIT_TRACING(a, b)
 #define WPP_CLEANUP(DriverObject)

@@ -20,7 +20,9 @@
 #define ENOSPC 28
 #endif
 
+#if !defined(__REACTOS__) || defined(_MSC_VER)
 #define inline __forceinline
+#endif
 
 #if !defined(__cplusplus) && !defined(bool)
 // Important note: in MSFT C++ bool length is 1 bytes

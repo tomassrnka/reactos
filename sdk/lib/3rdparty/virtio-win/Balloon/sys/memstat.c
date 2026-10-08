@@ -175,7 +175,7 @@ NTSTATUS GatherKernelStats(BALLOON_STAT stats[VIRTIO_BALLOON_S_NR])
                     outLen);
     }
 
-#define UpdateNoOverflow(x) UpdateOverflowFreeCounter(&Counters[_##x], perfInfo.##x)
+#define UpdateNoOverflow(x) UpdateOverflowFreeCounter(&Counters[_##x], perfInfo.x)
     UpdateStat(&stats[idx++], VIRTIO_BALLOON_S_SWAP_IN, UpdateNoOverflow(PageReadCount) << PAGE_SHIFT);
     UpdateStat(&stats[idx++],
                VIRTIO_BALLOON_S_SWAP_OUT,
@@ -223,7 +223,7 @@ NTSTATUS StatInitializeWorkItem(IN WDFDEVICE Device)
  * Still use devCtx->MemStats cause it points to non-paged pool,
  * for virtio/host that access stats via physical memory.
  */
-VOID StatWorkItemWorker(IN WDFWORKITEM WorkItem)
+VOID NTAPI StatWorkItemWorker(IN WDFWORKITEM WorkItem)
 {
     WDFDEVICE Device = WdfWorkItemGetParentObject(WorkItem);
     PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);

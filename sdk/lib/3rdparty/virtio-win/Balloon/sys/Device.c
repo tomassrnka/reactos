@@ -52,6 +52,7 @@ DECLARE_CONST_UNICODE_STRING(evLowMemString, LOMEMEVENTNAME);
 #endif // !BALLOON_INFLATE_IGNORE_LOWMEM
 
 NTSTATUS
+NTAPI
 BalloonDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit)
 {
     NTSTATUS status = STATUS_SUCCESS;
@@ -189,7 +190,7 @@ BalloonDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit)
     return status;
 }
 
-VOID BalloonEvtDeviceContextCleanup(IN WDFOBJECT Device)
+VOID NTAPI BalloonEvtDeviceContextCleanup(IN WDFOBJECT Device)
 {
     PDEVICE_CONTEXT devCtx = GetDeviceContext((WDFDEVICE)Device);
 
@@ -207,6 +208,7 @@ VOID BalloonEvtDeviceContextCleanup(IN WDFOBJECT Device)
 }
 
 NTSTATUS
+NTAPI
 BalloonEvtDevicePrepareHardware(IN WDFDEVICE Device,
                                 IN WDFCMRESLIST ResourceList,
                                 IN WDFCMRESLIST ResourceListTranslated)
@@ -266,6 +268,7 @@ BalloonEvtDevicePrepareHardware(IN WDFDEVICE Device,
 }
 
 NTSTATUS
+NTAPI
 BalloonEvtDeviceReleaseHardware(IN WDFDEVICE Device, IN WDFCMRESLIST ResourcesTranslated)
 {
     PDEVICE_CONTEXT devCtx = NULL;
@@ -379,6 +382,7 @@ BalloonCloseWorkerThread(IN WDFDEVICE Device)
 }
 
 NTSTATUS
+NTAPI
 BalloonEvtDeviceD0Entry(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE PreviousState)
 {
     NTSTATUS status = STATUS_SUCCESS;
@@ -415,6 +419,7 @@ Terminate:
 }
 
 NTSTATUS
+NTAPI
 BalloonEvtDeviceD0Exit(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE TargetState)
 {
     PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);
@@ -449,6 +454,7 @@ BalloonEvtDeviceD0Exit(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE TargetStat
 }
 
 NTSTATUS
+NTAPI
 BalloonEvtDeviceD0ExitPreInterruptsDisabled(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE TargetState)
 {
     PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);
@@ -470,7 +476,7 @@ BalloonEvtDeviceD0ExitPreInterruptsDisabled(IN WDFDEVICE Device, IN WDF_POWER_DE
     return STATUS_SUCCESS;
 }
 
-VOID BalloonEvtDeviceSurpriseRemoval(IN WDFDEVICE Device)
+VOID NTAPI BalloonEvtDeviceSurpriseRemoval(IN WDFDEVICE Device)
 {
     PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);
     TraceEvents(TRACE_LEVEL_INFORMATION, DBG_PNP, "<--> %s\n", __FUNCTION__);
@@ -482,6 +488,7 @@ VOID BalloonEvtDeviceSurpriseRemoval(IN WDFDEVICE Device)
 }
 
 BOOLEAN
+NTAPI
 BalloonInterruptIsr(IN WDFINTERRUPT WdfInterrupt, IN ULONG MessageID)
 {
     PDEVICE_CONTEXT devCtx = NULL;
@@ -505,7 +512,7 @@ BalloonInterruptIsr(IN WDFINTERRUPT WdfInterrupt, IN ULONG MessageID)
     return FALSE;
 }
 
-VOID BalloonInterruptDpc(IN WDFINTERRUPT WdfInterrupt, IN WDFOBJECT WdfDevice)
+VOID NTAPI BalloonInterruptDpc(IN WDFINTERRUPT WdfInterrupt, IN WDFOBJECT WdfDevice)
 {
     unsigned int len;
     PDEVICE_CONTEXT devCtx = GetDeviceContext(WdfDevice);
@@ -589,6 +596,7 @@ VOID BalloonInterruptDpc(IN WDFINTERRUPT WdfInterrupt, IN WDFOBJECT WdfDevice)
 }
 
 NTSTATUS
+NTAPI
 BalloonInterruptEnable(IN WDFINTERRUPT WdfInterrupt, IN WDFDEVICE WdfDevice)
 {
     PDEVICE_CONTEXT devCtx = NULL;
@@ -604,6 +612,7 @@ BalloonInterruptEnable(IN WDFINTERRUPT WdfInterrupt, IN WDFDEVICE WdfDevice)
 }
 
 NTSTATUS
+NTAPI
 BalloonInterruptDisable(IN WDFINTERRUPT WdfInterrupt, IN WDFDEVICE WdfDevice)
 {
     PDEVICE_CONTEXT devCtx = NULL;
@@ -619,7 +628,7 @@ BalloonInterruptDisable(IN WDFINTERRUPT WdfInterrupt, IN WDFDEVICE WdfDevice)
 }
 
 #ifdef USE_BALLOON_SERVICE
-VOID BalloonEvtFileClose(IN WDFFILEOBJECT FileObject)
+VOID NTAPI BalloonEvtFileClose(IN WDFFILEOBJECT FileObject)
 {
     WDFDEVICE Device = WdfFileObjectGetDevice(FileObject);
     PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);
@@ -660,7 +669,7 @@ BalloonGetSize(IN WDFOBJECT WdfDevice)
     return (LONGLONG)v - devCtx->num_pages;
 }
 
-VOID BalloonRoutine(IN PVOID pContext)
+VOID NTAPI BalloonRoutine(IN PVOID pContext)
 {
     WDFOBJECT Device = (WDFOBJECT)pContext;
     PDEVICE_CONTEXT devCtx = GetDeviceContext(Device);

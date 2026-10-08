@@ -30,7 +30,7 @@
 #if !defined(_PROTOTYPES_H_)
 #define _PROTOTYPES_H_
 
-#include "virtio.h"
+#include "VirtIO.h"
 #include "public.h"
 #include "trace.h"
 
@@ -135,15 +135,18 @@ EVT_WDF_FILE_CLOSE BalloonEvtFileClose;
 EVT_WDF_WORKITEM StatWorkItemWorker;
 #endif // USE_BALLOON_SERVICE
 
-VOID BalloonInterruptDpc(IN WDFINTERRUPT WdfInterrupt, IN WDFOBJECT WdfDevice);
+VOID NTAPI BalloonInterruptDpc(IN WDFINTERRUPT WdfInterrupt, IN WDFOBJECT WdfDevice);
 
 BOOLEAN
+NTAPI
 BalloonInterruptIsr(IN WDFINTERRUPT Interrupt, IN ULONG MessageID);
 
 NTSTATUS
+NTAPI
 BalloonInterruptEnable(IN WDFINTERRUPT WdfInterrupt, IN WDFDEVICE WdfDevice);
 
 NTSTATUS
+NTAPI
 BalloonInterruptDisable(IN WDFINTERRUPT WdfInterrupt, IN WDFDEVICE WdfDevice);
 
 NTSTATUS
@@ -162,7 +165,7 @@ VOID BalloonMemStats(IN WDFOBJECT WdfDevice);
 NTSTATUS
 BalloonTellHost(IN WDFOBJECT WdfDevice, IN PVIOQUEUE vq);
 
-__inline VOID EnableInterrupt(IN WDFINTERRUPT WdfInterrupt, IN WDFCONTEXT Context)
+static __inline VOID EnableInterrupt(IN WDFINTERRUPT WdfInterrupt, IN WDFCONTEXT Context)
 {
     PDEVICE_CONTEXT devCtx = (PDEVICE_CONTEXT)Context;
     UNREFERENCED_PARAMETER(WdfInterrupt);
@@ -179,7 +182,7 @@ __inline VOID EnableInterrupt(IN WDFINTERRUPT WdfInterrupt, IN WDFCONTEXT Contex
     }
 }
 
-__inline VOID DisableInterrupt(IN PDEVICE_CONTEXT devCtx)
+static __inline VOID DisableInterrupt(IN PDEVICE_CONTEXT devCtx)
 {
     virtqueue_disable_cb(devCtx->InfVirtQueue);
     virtqueue_disable_cb(devCtx->DefVirtQueue);
@@ -197,10 +200,10 @@ BalloonGetSize(IN WDFOBJECT WdfDevice);
 NTSTATUS
 BalloonCloseWorkerThread(IN WDFDEVICE Device);
 
-VOID BalloonRoutine(IN PVOID pContext);
+VOID NTAPI BalloonRoutine(IN PVOID pContext);
 
 #ifndef BALLOON_INFLATE_IGNORE_LOWMEM
-__inline BOOLEAN IsLowMemory(IN WDFOBJECT WdfDevice)
+static __inline BOOLEAN IsLowMemory(IN WDFOBJECT WdfDevice)
 {
     LARGE_INTEGER TimeOut = {0};
     PDEVICE_CONTEXT devCtx = GetDeviceContext(WdfDevice);

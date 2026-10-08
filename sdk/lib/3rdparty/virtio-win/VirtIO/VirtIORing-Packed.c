@@ -32,10 +32,10 @@
 
 #include "osdep.h"
 #include "virtio_pci.h"
-#include "virtio.h"
+#include "VirtIO.h"
 #include "kdebugprint.h"
 #include "virtio_ring.h"
-#include "windows\virtio_ring_allocation.h"
+#include "windows/virtio_ring_allocation.h"
 
 #include <pshpack1.h>
 

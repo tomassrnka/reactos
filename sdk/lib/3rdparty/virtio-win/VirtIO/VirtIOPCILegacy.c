@@ -32,11 +32,11 @@
  */
 #include "osdep.h"
 #include "virtio_pci.h"
-#include "virtio.h"
+#include "VirtIO.h"
 #include "kdebugprint.h"
 #include "virtio_ring.h"
 #include "virtio_pci_common.h"
-#include "windows\virtio_ring_allocation.h"
+#include "windows/virtio_ring_allocation.h"
 
 #ifdef WPP_EVENT_TRACING
 #include "VirtIOPCILegacy.tmh"

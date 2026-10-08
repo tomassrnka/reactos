@@ -31,7 +31,7 @@
  */
 #pragma once
 
-#include <Ntddk.h>
+#include <ntddk.h>
 #include <wdf.h>
 #include "kdebugprint.h"
 

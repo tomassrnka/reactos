@@ -35,7 +35,7 @@ BalloonQueueInitialize(IN WDFDEVICE Device)
     return status;
 }
 
-VOID BalloonIoWrite(IN WDFQUEUE Queue, IN WDFREQUEST Request, IN size_t Length)
+VOID NTAPI BalloonIoWrite(IN WDFQUEUE Queue, IN WDFREQUEST Request, IN size_t Length)
 {
     PVOID buffer = NULL;
     size_t buffSize;
@@ -114,7 +114,7 @@ VOID BalloonIoWrite(IN WDFQUEUE Queue, IN WDFREQUEST Request, IN size_t Length)
     }
 }
 
-VOID BalloonIoStop(IN WDFQUEUE Queue, IN WDFREQUEST Request, IN ULONG ActionFlags)
+VOID NTAPI BalloonIoStop(IN WDFQUEUE Queue, IN WDFREQUEST Request, IN ULONG ActionFlags)
 {
     UNREFERENCED_PARAMETER(Queue);
 
@@ -148,7 +148,7 @@ end_io_stop:
     TraceEvents(TRACE_LEVEL_VERBOSE, DBG_READ, "<-- %!FUNC!");
 }
 
-VOID BalloonEvtRequestCancel(IN WDFREQUEST Request)
+VOID NTAPI BalloonEvtRequestCancel(IN WDFREQUEST Request)
 {
     PDEVICE_CONTEXT devCtx = GetDeviceContext(WdfIoQueueGetDevice(WdfRequestGetIoQueue(Request)));
 

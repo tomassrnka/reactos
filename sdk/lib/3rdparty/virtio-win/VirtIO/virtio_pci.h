@@ -352,7 +352,7 @@ void virtio_delete_queues(VirtIODevice *vdev);
 u32 virtio_get_queue_size(struct virtqueue *vq);
 unsigned long virtio_get_indirect_page_capacity();
 
-ULONG __inline virtio_get_queue_descriptor_size()
+static __inline ULONG virtio_get_queue_descriptor_size()
 {
     return sizeof(VirtIOQueueInfo);
 }

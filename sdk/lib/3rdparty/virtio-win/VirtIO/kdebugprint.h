@@ -8,7 +8,7 @@ extern tDebugPrintFunc VirtioDebugPrintProc;
 #define DPrintf(Level, MSG, ...)                      \
     if ((!bDebugPrint) || Level > virtioDebugLevel) { \
     } else                                            \
-        VirtioDebugPrintProc(MSG, __VA_ARGS__)
+        VirtioDebugPrintProc(MSG, ##__VA_ARGS__)
 
 #define DEBUG_ENTRY(level) DPrintf(level, "[%s]=>\n", __FUNCTION__)
 #define DEBUG_EXIT_STATUS(level, status) \

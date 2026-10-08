@@ -270,7 +270,7 @@ PVIRTIO_DMA_MEMORY_SLICED VirtIOWdfDeviceAllocDmaMemorySliced(VirtIODevice *vdev
     return p;
 }
 
-VOID OnDmaTransactionDestroy(WDFOBJECT Object)
+VOID NTAPI OnDmaTransactionDestroy(WDFOBJECT Object)
 {
     PVIRTIO_WDF_DMA_TRANSACTION_CONTEXT ctx = GetDmaTransactionContext(Object);
     DPrintf(1, "%s %p\n", __FUNCTION__, Object);
@@ -284,19 +284,19 @@ VOID OnDmaTransactionDestroy(WDFOBJECT Object)
     }
 }
 
-static FORCEINLINE void RefTransaction(PVIRTIO_WDF_DMA_TRANSACTION_CONTEXT ctx)
+static __inline void RefTransaction(PVIRTIO_WDF_DMA_TRANSACTION_CONTEXT ctx)
 {
     InterlockedIncrement(&ctx->refCount);
 }
 
-static FORCEINLINE void DerefTransaction(PVIRTIO_WDF_DMA_TRANSACTION_CONTEXT ctx)
+static __inline void DerefTransaction(PVIRTIO_WDF_DMA_TRANSACTION_CONTEXT ctx)
 {
     if (!InterlockedDecrement(&ctx->refCount)) {
         WdfObjectDelete(ctx->parameters.transaction);
     }
 }
 
-BOOLEAN OnDmaTransactionProgramDma(WDFDMATRANSACTION Transaction, WDFDEVICE Device,
+BOOLEAN NTAPI OnDmaTransactionProgramDma(WDFDMATRANSACTION Transaction, WDFDEVICE Device,
                                    WDFCONTEXT Context, WDF_DMA_DIRECTION Direction,
                                    PSCATTER_GATHER_LIST SgList)
 {
