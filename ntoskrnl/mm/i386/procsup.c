@@ -26,13 +26,17 @@ MiArchCreateProcessAddressSpace(
     MMPTE PdePte, TempPte;
     PMMPTE PteTable;
     ULONG PdeOffset;
-    KIRQL OldIrql;
+    KIRQL OldIrql, MapIrql;
 
     /* Get a PTE  */
     PointerPte = MiReserveSystemPtes(1, SystemPteSpace);
     if (!PointerPte)
         return FALSE;
     PteTable = MiPteToAddress(PointerPte);
+
+    /* The PTE is remapped below with a flush of this processor's TLB only,
+       so stay on this processor until it is released */
+    KeRaiseIrql(DISPATCH_LEVEL, &MapIrql);
 
     /* Build a page table for hyper space */
     MI_MAKE_HARDWARE_PTE_KERNEL(&PdePte,
@@ -88,6 +92,7 @@ MiArchCreateProcessAddressSpace(
 
     /* Let go of the system PTE */
     MiReleaseSystemPtes(PointerPte, 1, SystemPteSpace);
+    KeLowerIrql(MapIrql);
 
     /* Insert us into the Mm process list */
     OldIrql = MiAcquireExpansionLock();
