@@ -16,6 +16,8 @@
 #include <ndk/iofuncs.h>
 #include <ndk/rtlfuncs.h>
 #include <ndk/obfuncs.h>
+#include <ndk/mmfuncs.h>
+#include <ndk/setypes.h>
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <winioctl.h>
@@ -142,6 +144,52 @@ static void existing(const char *what, const char *path, ULONG attr)
     st = ntopen(w, FILE_READ_DATA, FILE_OVERWRITE, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
     report(name, st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
     if (NT_SUCCESS(st)) NtClose(h);
+    _snprintf(name, sizeof(name), "%s-max-allowed", what);
+    st = ntopen(w, MAXIMUM_ALLOWED, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
+    if (NT_SUCCESS(st))
+    {
+        OBJECT_BASIC_INFORMATION obi;
+        HANDLE sec = NULL;
+        NTSTATUS qs = NtQueryObject(h, ObjectBasicInformation, &obi, sizeof(obi), NULL);
+        NTSTATUS ss = NtCreateSection(&sec, SECTION_ALL_ACCESS, NULL, NULL, PAGE_READWRITE, SEC_COMMIT, h);
+        if (NT_SUCCESS(ss))
+            NtClose(sec);
+        report(name, NT_SUCCESS(qs) && !(obi.GrantedAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA)) && !NT_SUCCESS(ss),
+               "granted 0x%lx (query 0x%08lx), read-write section 0x%08lx", NT_SUCCESS(qs) ? obi.GrantedAccess : 0, qs, ss);
+        NtClose(h);
+    }
+    else
+        report(name, 0, "open failed 0x%08lx", st);
+    _snprintf(name, sizeof(name), "%s-max-allowed-write", what);
+    st = ntopen(w, MAXIMUM_ALLOWED | FILE_WRITE_DATA, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
+    report(name, st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
+    if (NT_SUCCESS(st)) NtClose(h);
+    {
+        /* With backup intent and the restore privilege the I/O manager grants write rights itself. */
+        BOOLEAN was;
+        if (NT_SUCCESS(RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, TRUE, FALSE, &was)))
+        {
+            _snprintf(name, sizeof(name), "%s-backup-max-allowed-write", what);
+            st = ntopen(w, MAXIMUM_ALLOWED | FILE_WRITE_DATA, FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT,
+                        NULL, 0, NULL, &h);
+            report(name, st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
+            if (NT_SUCCESS(st)) NtClose(h);
+            _snprintf(name, sizeof(name), "%s-backup-max-allowed", what);
+            st = ntopen(w, MAXIMUM_ALLOWED, FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT, NULL, 0, NULL, &h);
+            if (NT_SUCCESS(st))
+            {
+                OBJECT_BASIC_INFORMATION obi;
+                NTSTATUS qs = NtQueryObject(h, ObjectBasicInformation, &obi, sizeof(obi), NULL);
+                report(name, NT_SUCCESS(qs) && !(obi.GrantedAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA)),
+                       "granted 0x%lx (query 0x%08lx)", NT_SUCCESS(qs) ? obi.GrantedAccess : 0, qs);
+                NtClose(h);
+            }
+            else
+                report(name, 0, "open failed 0x%08lx", st);
+            if (!was)
+                RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, FALSE, FALSE, &was);
+        }
+    }
     _snprintf(name, sizeof(name), "%s-read", what);
     st = ntopen(w, FILE_READ_DATA | FILE_READ_ATTRIBUTES, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
     if (!NT_SUCCESS(st))

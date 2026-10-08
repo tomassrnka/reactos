@@ -941,9 +941,19 @@ walk:
     {
         /* Writes to compressed, encrypted, WOF and sparse streams are not implemented: refuse them here,
          * before Cc or a mapped view could accept data that a paging write would later drop. */
-        ACCESS_MASK Mapped = Access;
-        RtlMapGenericMask(&Mapped, IoGetFileObjectGenericMapping());
-        if ((Mapped & (FILE_WRITE_DATA | FILE_APPEND_DATA)) ||
+        PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
+        ACCESS_MASK Asked = (As ? As->OriginalDesiredAccess : Access) & ~MAXIMUM_ALLOWED, Wanted;
+        RtlMapGenericMask(&Asked, IoGetFileObjectGenericMapping());
+        if (!(Asked & (FILE_WRITE_DATA | FILE_APPEND_DATA)) && (Access & MAXIMUM_ALLOWED) && As)
+        {
+            /* Resolved here (the object manager would make it GENERIC_ALL): everything but data writes,
+             * also when a backup privilege already granted them for the maximum. */
+            As->PreviouslyGrantedAccess = (As->PreviouslyGrantedAccess | FILE_ALL_ACCESS) & ~(FILE_WRITE_DATA | FILE_APPEND_DATA);
+            As->RemainingDesiredAccess &= ~(MAXIMUM_ALLOWED | FILE_WRITE_DATA | FILE_APPEND_DATA);
+            Ccb->Granted = As->PreviouslyGrantedAccess;
+        }
+        Wanted = Ccb->Granted | (As ? As->RemainingDesiredAccess : 0);
+        if ((Wanted & (FILE_WRITE_DATA | FILE_APPEND_DATA)) ||
             (!Created && (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF || Disposition == FILE_SUPERSEDE)))
         {
             DPRINT1("ntfsng: write open of a compressed/encrypted/sparse stream %I64x refused\n", Fcb->MftNo);
