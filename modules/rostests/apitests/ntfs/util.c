@@ -129,7 +129,11 @@ static BOOLEAN NtPrepare(VOID)
         NtSetPrivilege(Process, L"SeRestorePrivilege", TRUE);
         CloseHandle(Process);
     }
-    NtPrepareUser();
+    {
+        WCHAR NoUser[4];
+        if (!GetEnvironmentVariableW(L"NTFS_APITEST_NOUSER", NoUser, RTL_NUMBER_OF(NoUser)))
+            NtPrepareUser();
+    }
     trace("NTFS tests in %ls, volume %ls, test user %s\n", TestRoot, Volume, UserToken ? "ready" : "unavailable");
     return TRUE;
 }

@@ -1041,6 +1041,21 @@ walked:
         goto out;
     }
     IsDir = St.is_dir ? TRUE : FALSE;
+    if (!Created && !Stream.Length && !(Stack->Flags & SL_OPEN_PAGING_FILE))
+    {
+        /* The active paging file refuses every other open with a sharing violation, before the
+         * attribute checks of an overwrite could answer access denied (as Windows does).  The
+         * authoritative check is repeated under the FCB list lock below. */
+        PNG_FCB Pf = NgFindFcb(Vcb, St.mft_ref & 0xffffffffffffULL);
+        BOOLEAN Paging = Pf && Pf->IsPagingFile;
+        if (Pf)
+            NgDereferenceFcb(Pf);
+        if (Paging)
+        {
+            Status = STATUS_SHARING_VIOLATION;
+            goto out;
+        }
+    }
     if (!Created)
     {
         /* The type checks come first: CreateFile on a directory fails with access denied for any
