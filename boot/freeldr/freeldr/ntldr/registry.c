@@ -155,6 +155,10 @@ RegInitializeHive(
  * specified offset set up by the caller, that is used
  * to where to start reading from the hive log.
  *
+ * @param[out] LogDataSize
+ * If not NULL, receives the number of bytes read
+ * from the hive log, starting at LogFileOffset.
+ *
  * @return
  * Returns TRUE if the hive log was loaded and read
  * successfully, FALSE otherwise.
@@ -327,6 +331,10 @@ RegRecoverHeaderHive(
  * which the damaged hive data is to be replaced
  * with healthy data from the corresponding hive log.
  *
+ * @param[in] ChunkSize
+ * The size of the registry hive chunk in memory.
+ * Dirty blocks are restored only within it.
+ *
  * @param[in] DirectoryPath
  * A pointer to a string that denotes the directory
  * path of the hives and logs location.
@@ -386,7 +394,12 @@ RegRecoverDataHive(
 
     /* Make sure the dirty vector signature is there otherwise the hive log is corrupt */
     LogDataPhysical = (PUCHAR)VaToPa(LogData);
-    if (LogSize < VectorSize || *((PULONG)LogDataPhysical) != HV_LOG_DIRTY_SIGNATURE)
+    if (LogSize < VectorSize)
+    {
+        ERR("The hive log is shorter than its dirty vector\n");
+        return FALSE;
+    }
+    if (*((PULONG)LogDataPhysical) != HV_LOG_DIRTY_SIGNATURE)
     {
         ERR("The hive log dirty signature could not be found\n");
         return FALSE;
