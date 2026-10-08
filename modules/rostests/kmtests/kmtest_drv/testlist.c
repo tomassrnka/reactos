@@ -28,6 +28,7 @@ KMT_TESTFUNC Test_FsRtlMcb;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
 #if defined(_M_IX86) || defined(_M_AMD64)
+KMT_TESTFUNC Test_HalDmaBounce;
 KMT_TESTFUNC Test_HalPortIo;
 #endif
 KMT_TESTFUNC Test_HalSystemInfo;
@@ -116,6 +117,7 @@ const KMT_TEST TestList[] =
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
 #if defined(_M_IX86) || defined(_M_AMD64)
+    { "HalDmaBounce",                       Test_HalDmaBounce },
     { "HalPortIo",                          Test_HalPortIo },
 #endif
     { "HalSystemInfo",                      Test_HalSystemInfo },
