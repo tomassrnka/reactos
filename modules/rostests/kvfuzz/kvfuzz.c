@@ -170,6 +170,97 @@ static int IsDangerous(const char *name)
     return 0;
 }
 
+/* ------- dispatch on a worker thread ------- */
+/*
+ * A fuzzed call can legitimately block for ever, for example a wait with no
+ * timeout on one of the pool's unsignalled objects. Calls run on a worker
+ * thread; one that has not returned within KF_STEP_MS is abandoned, left
+ * blocked, and a fresh worker takes over. Arguments are still drawn on the main
+ * thread, so the sequence stays a pure function of the seed.
+ */
+#define KF_STEP_MS   2000
+#define KF_MAX_STUCK 64
+
+typedef struct _KF_WORKER
+{
+    HANDLE Go, Done;
+    void *Fn;
+    unsigned W32Number;
+    int IsW32, Args;
+    ULONG_PTR a[20];
+} KF_WORKER;
+
+static KF_WORKER *g_worker;
+static unsigned g_stuck;
+
+static DWORD WINAPI WorkerProc(LPVOID Param)
+{
+    KF_WORKER *w = (KF_WORKER *)Param;
+    for (;;)
+    {
+        if (WaitForSingleObject(w->Go, INFINITE) != WAIT_OBJECT_0)
+            return 0;
+        if (w->IsW32)
+            CallW32(w->W32Number, w->a, w->Args);
+        else
+            CallNt(w->Fn, w->a, w->Args);
+        SetEvent(w->Done);
+    }
+}
+
+static KF_WORKER *NewWorker(void)
+{
+    KF_WORKER *w = (KF_WORKER *)calloc(1, sizeof(*w));
+    HANDLE t;
+    if (!w) return NULL;
+    w->Go = CreateEventA(NULL, FALSE, FALSE, NULL);
+    w->Done = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!w->Go || !w->Done) return NULL;
+    t = CreateThread(NULL, 0, WorkerProc, w, 0, NULL);
+    if (!t) return NULL;
+    CloseHandle(t);
+    return w;
+}
+
+static void Dispatch(unsigned callno, const char *name, void *fn, int isW32,
+                     unsigned w32Number, ULONG_PTR *a, int args)
+{
+    DWORD r;
+    char msg[160];
+
+    if (!g_worker && !(g_worker = NewWorker()))
+    {
+        OutputDebugStringA("KVFUZZ: cannot create a worker thread\n");
+        ExitProcess(3);
+    }
+    g_worker->Fn = fn;
+    g_worker->IsW32 = isW32;
+    g_worker->W32Number = w32Number;
+    g_worker->Args = args;
+    memcpy(g_worker->a, a, sizeof(g_worker->a));
+    if (!SetEvent(g_worker->Go))
+    {
+        /* A fuzzed NtClose hit one of the worker's events: replace it. */
+        g_worker = NULL;
+        return;
+    }
+    r = WaitForSingleObject(g_worker->Done, KF_STEP_MS);
+    if (r == WAIT_OBJECT_0)
+        return;
+
+    /* Printed even with --quiet: a stuck call is a result to triage. */
+    _snprintf(msg, sizeof(msg) - 1, "KVFUZZ: stuck #%u %s (wait %lu)\n",
+              callno, name, (unsigned long)r);
+    msg[sizeof(msg) - 1] = 0;
+    OutputDebugStringA(msg);
+    g_worker = NULL;
+    if (++g_stuck >= KF_MAX_STUCK)
+    {
+        OutputDebugStringA("KVFUZZ: too many stuck calls, stopping\n");
+        ExitProcess(4);
+    }
+}
+
 /*
  * One deterministic step: always draws the same PRNG values (selection index
  * then one GenArg per argument) so a skipped step and an executed step consume
@@ -204,15 +295,15 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
         if (fn)
         {
             g_exec++;
-            CallNt(fn, a, sc->Args);
+            Dispatch(callno, sc->Name, fn, 0, 0, a, sc->Args);
         }
     }
     else
     {
 #if defined(_M_IX86) || defined(__i386__)
         g_exec++;
+        Dispatch(callno, sc->Name, NULL, 1, 0x1000u | sc->W32Index, a, sc->Args);
 #endif
-        CallW32(0x1000u | sc->W32Index, a, sc->Args);
     }
 }
 
