@@ -19,6 +19,12 @@ static PVOID CurrentBuffer;
 static PMDL CurrentMdl;
 static PVOID CurrentUser;
 static SIZE_T NonCachedLength;
+static PVOID ExitBuffer;
+static PMDL ExitMdl;
+static PEPROCESS ExitProcess;
+
+static BOOLEAN ExitProcessHasExited(VOID);
+static VOID FreeExitBuffer(_In_ BOOLEAN Locked);
 
 NTSTATUS
 TestEntry(
@@ -47,6 +53,10 @@ TestUnload(
     IN PDRIVER_OBJECT DriverObject)
 {
     PAGED_CODE();
+
+    /* Pages still mapped into a live helper process are leaked on purpose */
+    if (ExitMdl != NULL && ExitProcessHasExited())
+        FreeExitBuffer(TRUE);
 }
 
 VOID
@@ -96,6 +106,40 @@ TestCleanEverything(VOID)
         ExFreePoolWithTag(CurrentBuffer, 'MLPC');
     }
     CurrentMdl = NULL;
+}
+
+static
+VOID
+FreeExitBuffer(
+    _In_ BOOLEAN Locked)
+{
+    if (ExitMdl != NULL)
+    {
+        if (Locked)
+            MmUnlockPages(ExitMdl);
+        IoFreeMdl(ExitMdl);
+        ExitMdl = NULL;
+    }
+    if (ExitBuffer != NULL)
+    {
+        ExFreePoolWithTag(ExitBuffer, 'MLPC');
+        ExitBuffer = NULL;
+    }
+    if (ExitProcess != NULL)
+    {
+        ObDereferenceObject(ExitProcess);
+        ExitProcess = NULL;
+    }
+}
+
+static
+BOOLEAN
+ExitProcessHasExited(VOID)
+{
+    LARGE_INTEGER Timeout;
+
+    Timeout.QuadPart = 0;
+    return KeWaitForSingleObject(ExitProcess, Executive, KernelMode, FALSE, &Timeout) == STATUS_SUCCESS;
 }
 
 static
@@ -251,6 +295,114 @@ TestMessageHandler(
         case IOCTL_CLEAN:
         {
             TestCleanEverything();
+            break;
+        }
+        case IOCTL_MAP_IN_PROCESS:
+        {
+            PEXIT_BUFFER Exit = Buffer;
+            PEPROCESS Process;
+            KAPC_STATE ApcState;
+            PULONG User = NULL;
+
+            ok_eq_pointer(ExitBuffer, NULL);
+            if (skip(Buffer && InLength >= sizeof(EXIT_BUFFER) && *OutLength >= sizeof(EXIT_BUFFER), "Cannot read/write from/to buffer!\n") ||
+                skip(ExitBuffer == NULL, "Previous mapping still in use\n"))
+            {
+                break;
+            }
+
+            *OutLength = sizeof(EXIT_BUFFER);
+            Exit->Buffer = NULL;
+            Exit->Status = PsLookupProcessByProcessId((HANDLE)Exit->ProcessId, &Process);
+            ok_eq_hex(Exit->Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Exit->Status))
+            {
+                break;
+            }
+            ExitProcess = Process;
+
+            ExitBuffer = ExAllocatePoolWithTag(NonPagedPool, EXIT_BUFFER_LENGTH, 'MLPC');
+            ok(ExitBuffer != NULL, "ExAllocatePool failed!\n");
+            if (ExitBuffer != NULL)
+            {
+                RtlFillMemoryUlong(ExitBuffer, EXIT_BUFFER_LENGTH, WRITE_PATTERN);
+                ExitMdl = IoAllocateMdl(ExitBuffer, EXIT_BUFFER_LENGTH, FALSE, FALSE, NULL);
+                ok(ExitMdl != NULL, "IoAllocateMdl failed!\n");
+            }
+            if (ExitMdl == NULL)
+            {
+                Exit->Status = STATUS_INSUFFICIENT_RESOURCES;
+                FreeExitBuffer(FALSE);
+                break;
+            }
+
+            _SEH2_TRY
+            {
+                MmProbeAndLockPages(ExitMdl, KernelMode, IoWriteAccess);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Exit->Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            ok_eq_hex(Exit->Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Exit->Status))
+            {
+                FreeExitBuffer(FALSE);
+                break;
+            }
+
+            /* Map into the helper process and leave the mapping in place */
+            KeStackAttachProcess(&Process->Pcb, &ApcState);
+            _SEH2_TRY
+            {
+                User = MmMapLockedPagesSpecifyCache(ExitMdl, UserMode, MmCached, NULL, FALSE, NormalPagePriority);
+                if (User != NULL)
+                {
+                    ok_eq_hex(User[0], WRITE_PATTERN);
+                    ok_eq_hex(User[EXIT_BUFFER_LENGTH / sizeof(ULONG) - 1], WRITE_PATTERN);
+                }
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Exit->Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            KeUnstackDetachProcess(&ApcState);
+
+            ok_eq_hex(Exit->Status, STATUS_SUCCESS);
+            ok(User != NULL, "MmMapLockedPagesSpecifyCache failed!\n");
+            if (User == NULL)
+            {
+                FreeExitBuffer(TRUE);
+            }
+            Exit->Buffer = User;
+            break;
+        }
+        case IOCTL_CHECK_EXITED:
+        {
+            ULONG i;
+            ULONG Mismatches = 0;
+            PULONG Pattern = ExitBuffer;
+
+            if (skip(ExitMdl != NULL, "No mapping\n"))
+            {
+                break;
+            }
+            if (skip(ExitProcessHasExited(), "Helper process is still alive\n"))
+            {
+                break;
+            }
+
+            /* The helper process is gone; the pages must still be ours and unchanged */
+            for (i = 0; i < EXIT_BUFFER_LENGTH / sizeof(ULONG); i++)
+            {
+                if (Pattern[i] != WRITE_PATTERN)
+                    Mismatches++;
+            }
+            ok_eq_ulong(Mismatches, 0UL);
+
+            FreeExitBuffer(TRUE);
             break;
         }
         default:
