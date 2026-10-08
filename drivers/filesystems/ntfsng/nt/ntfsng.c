@@ -11,6 +11,7 @@
 NG_GLOBAL NgGlobal;
 
 #define NG_STACK_FILL 0x4e474e47UL
+#define NG_STACK_MAX_SPAN (128 * 1024)
 
 NTSTATUS NgErrnoToStatus(int Err)
 {
@@ -172,7 +173,8 @@ static ULONG_PTR NgStackFill(VOID)
 {
     ULONG_PTR Low, High, Here = (ULONG_PTR)&Low, P;
     IoGetStackLimits(&Low, &High);
-    if (Here <= Low || Here > High)
+    /* A diagnostic must not trust limits that do not describe a kernel stack around us. */
+    if (Here <= Low || Here > High || High - Low > NG_STACK_MAX_SPAN || (Low & (PAGE_SIZE - 1)))
         return 0;
     for (P = Low + 256; P + 512 < Here; P += sizeof(ULONG))
         *(volatile ULONG *)P = NG_STACK_FILL;
