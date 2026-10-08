@@ -178,3 +178,29 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgNotify(Vcb, &((PNG_CCB)Stack->FileObject->FsContext2)->Path, FILE_NOTIFY_CHANGE_SECURITY, FILE_ACTION_MODIFIED);
     return Status;
 }
+
+/*
+ * A descriptor given at create time (the ACCESS_STATE of the create) becomes the new file's own
+ * descriptor: owner and group default from the creator's token, generic rights are mapped.
+ * Called with the core lock held, before the create completes; an error fails the create.
+ */
+int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN IsDir)
+{
+    PSECURITY_DESCRIPTOR New = NULL;
+    NTSTATUS Status;
+    int Err;
+
+    if (!As || !As->SecurityDescriptor)
+        return 0;
+    Status = SeAssignSecurity(NULL, As->SecurityDescriptor, &New, IsDir, &As->SubjectSecurityContext,
+                              IoGetFileObjectGenericMapping(), PagedPool);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ntfsng: create-time security descriptor rejected (0x%08lx)\n", Status);
+        return Status == STATUS_INSUFFICIENT_RESOURCES ? -NGC_ENOMEM : -NGC_EINVAL;
+    }
+    NgMapGenericDacl(New);
+    Err = ngc_set_security(Vcb->Core, Node, New, RtlLengthSecurityDescriptor(New));
+    SeDeassignSecurity(&New);
+    return Err;
+}

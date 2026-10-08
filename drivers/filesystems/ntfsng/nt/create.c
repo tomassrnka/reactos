@@ -726,6 +726,10 @@ walk:
                 Created = TRUE;
                 Information = FILE_CREATED;
                 Err = ngc_set_info(Vcb->Core, Node, NULL, Attrs, NG_SETTABLE_ATTRS);
+                if (!Err)
+                    Err = NgStoreCreateSecurity(Vcb, Node, Stack->Parameters.Create.SecurityContext->AccessState, WantDir);
+                if (Err)
+                    ngc_unlink(Vcb->Core, Parent, Comp.Buffer, Comp.Length / sizeof(WCHAR), Node);
             }
             if (!Err && Stream.Length)
             {
