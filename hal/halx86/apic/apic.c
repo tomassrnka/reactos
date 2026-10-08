@@ -89,24 +89,65 @@ HalVectorToIRQL[16] =
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/* apic.c is built once for the UP and the SMP HALs, without CONFIG_SMP, so its locks
+   cannot use KxAcquireSpinLock, which takes the lock only when CONFIG_SMP is defined */
+FORCEINLINE
+VOID
+HalpAcquireApicLock(
+    _Inout_ PKSPIN_LOCK SpinLock)
+{
+    while (InterlockedBitTestAndSet((PLONG)SpinLock, 0))
+    {
+        while (*(volatile KSPIN_LOCK *)SpinLock & 1)
+            YieldProcessor();
+    }
+}
+
+FORCEINLINE
+VOID
+HalpReleaseApicLock(
+    _Inout_ PKSPIN_LOCK SpinLock)
+{
+    InterlockedAnd((PLONG)SpinLock, 0);
+}
+
+/* All processors share the select and window registers */
+KSPIN_LOCK HalpIoApicLock;
+
 FORCEINLINE
 ULONG
 IOApicRead(UCHAR Register)
 {
+    ULONG_PTR Flags;
+    ULONG Value;
+
     /* Select the register, then do the read */
     ASSERT(Register <= 0x3F);
+    Flags = __readeflags();
+    _disable();
+    HalpAcquireApicLock(&HalpIoApicLock);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
-    return READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
+    Value = READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
+    HalpReleaseApicLock(&HalpIoApicLock);
+    __writeeflags(Flags);
+    return Value;
 }
 
 FORCEINLINE
 VOID
 IOApicWrite(UCHAR Register, ULONG Value)
 {
+    ULONG_PTR Flags;
+
     /* Select the register, then do the write */
     ASSERT(Register <= 0x3F);
+    Flags = __readeflags();
+    _disable();
+    HalpAcquireApicLock(&HalpIoApicLock);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN), Value);
+    HalpReleaseApicLock(&HalpIoApicLock);
+    __writeeflags(Flags);
 }
 
 FORCEINLINE
