@@ -30,6 +30,7 @@ static BOOLEAN TestSizing = FALSE;
 static BOOLEAN TestDirtying = FALSE;
 static BOOLEAN TestUncaching = FALSE;
 static BOOLEAN TestWritten = FALSE;
+static UCHAR TestFillByte = 0xBA;
 
 NTSTATUS
 TestEntry(
@@ -144,6 +145,57 @@ MapAndLockUserBuffer(
 
 static
 VOID
+TestPurgeAndReread(
+    _In_ PFILE_OBJECT FileObject,
+    _In_ LONGLONG PurgeOffset,
+    _In_ ULONG PurgeLength,
+    _In_ LONGLONG CheckOffset)
+{
+    PVOID Bcb = NULL;
+    BOOLEAN Ret = FALSE;
+    PULONG Buffer = NULL;
+    LARGE_INTEGER Offset;
+
+    /* Bring the whole view in, then unpin it so that it is idle */
+    Offset.QuadPart = 0;
+    KmtStartSeh();
+    Ret = CcMapData(FileObject, &Offset, VACB_MAPPING_GRANULARITY - PAGE_SIZE, MAP_WAIT, &Bcb, (PVOID *)&Buffer);
+    KmtEndSeh(STATUS_SUCCESS);
+
+    if (skip(Ret == TRUE && Buffer != NULL, "CcMapData failed\n"))
+        return;
+
+    ok_eq_ulong(Buffer[CheckOffset / sizeof(ULONG)], 0xBABABABA);
+    CcUnpinData(Bcb);
+
+    /* The file changes underneath the cache */
+    TestFillByte = 0xCE;
+
+    Offset.QuadPart = PurgeOffset;
+    Ret = FALSE;
+    KmtStartSeh();
+    Ret = CcPurgeCacheSection(FileObject->SectionObjectPointer, &Offset, PurgeLength, FALSE);
+    KmtEndSeh(STATUS_SUCCESS);
+    ok(Ret == TRUE, "CcPurgeCacheSection(0x%I64x, 0x%lx) failed\n", PurgeOffset, PurgeLength);
+
+    /* The purged page must be read again */
+    Offset.QuadPart = CheckOffset;
+    Ret = FALSE;
+    Bcb = NULL;
+    Buffer = NULL;
+    KmtStartSeh();
+    Ret = CcMapData(FileObject, &Offset, sizeof(ULONG), MAP_WAIT, &Bcb, (PVOID *)&Buffer);
+    KmtEndSeh(STATUS_SUCCESS);
+
+    if (!skip(Ret == TRUE && Buffer != NULL, "CcMapData failed\n"))
+    {
+        ok_eq_ulong(*Buffer, 0xCECECECE);
+        CcUnpinData(Bcb);
+    }
+}
+
+static
+VOID
 PerformTest(
     ULONG TestId,
     PDEVICE_OBJECT DeviceObject)
@@ -160,6 +212,7 @@ PerformTest(
     ok_eq_ulong(TestTestId, -1);
 
     TestWritten = FALSE;
+    TestFillByte = 0xBA;
     TestDeviceObject = DeviceObject;
     TestTestId = TestId;
     TestFileObject = IoCreateStreamFileObject(NULL, DeviceObject);
@@ -178,7 +231,7 @@ PerformTest(
             Fcb->Header.FileSize.QuadPart = VACB_MAPPING_GRANULARITY - PAGE_SIZE;
             Fcb->Header.ValidDataLength.QuadPart = VACB_MAPPING_GRANULARITY - PAGE_SIZE;
 
-            if ((TestId > 1 && TestId < 4) || TestId >= 5)
+            if ((TestId > 1 && TestId < 4) || TestId == 5 || TestId == 6)
             {
                 Fcb->Header.AllocationSize.QuadPart = VACB_MAPPING_GRANULARITY - PAGE_SIZE;
             }
@@ -334,6 +387,16 @@ PerformTest(
                     if (Ret == TRUE)
                         CcUnpinData(Bcb);
                 }
+                else if (TestId == 7)
+                {
+                    /* Unaligned range that starts inside the view */
+                    TestPurgeAndReread(TestFileObject, PAGE_SIZE + 0x123, 2 * PAGE_SIZE, 2 * PAGE_SIZE);
+                }
+                else if (TestId == 8)
+                {
+                    /* Range that ends exactly at the end of the view */
+                    TestPurgeAndReread(TestFileObject, 0, VACB_MAPPING_GRANULARITY, VACB_MAPPING_GRANULARITY - PAGE_SIZE - sizeof(ULONG));
+                }
             }
         }
     }
@@ -467,7 +530,7 @@ TestIrpHandler(
 
         if (Offset.QuadPart < Fcb->Header.FileSize.QuadPart)
         {
-            RtlFillMemory(Buffer, min(Length, Fcb->Header.FileSize.QuadPart - Offset.QuadPart), 0xBA);
+            RtlFillMemory(Buffer, min(Length, Fcb->Header.FileSize.QuadPart - Offset.QuadPart), TestFillByte);
             Buffer = (PVOID)((ULONG_PTR)Buffer + (ULONG_PTR)min(Length, Fcb->Header.FileSize.QuadPart - Offset.QuadPart));
 
             if (Length > (Fcb->Header.FileSize.QuadPart - Offset.QuadPart))
