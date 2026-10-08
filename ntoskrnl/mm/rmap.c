@@ -105,10 +105,16 @@ GetEntry:
     MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, Address);
     if (MemoryArea == NULL || MemoryArea->DeleteInProgress)
     {
+        /*
+         * The view is being unmapped, which drops this mapping, or it is
+         * gone: leave the page for a later pass. Retrying here spins the
+         * balancer, which runs at a real-time priority, for as long as the
+         * unmap takes.
+         */
         MmUnlockAddressSpace(AddressSpace);
         ExReleaseRundownProtection(&Process->RundownProtect);
         ObDereferenceObject(Process);
-        goto GetEntry;
+        return STATUS_UNSUCCESSFUL;
     }
 
 
