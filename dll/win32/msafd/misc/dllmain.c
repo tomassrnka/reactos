@@ -2877,6 +2877,29 @@ WSPIoctl(IN  SOCKET Handle,
             Errno = NO_ERROR;
             Ret = NO_ERROR;
             break;
+        case SIO_UDP_CONNRESET:
+        case SIO_UDP_NETRESET:
+            /* These control whether a datagram socket reports a prior ICMP
+             * port- or network-unreachable as a receive error. Our transport
+             * never reports it, so the state they request is already in effect;
+             * accept the request on datagram sockets (Windows fails it with
+             * WSAEINVAL on other socket types) so applications such as the Go
+             * runtime, which disables connection reset on every UDP socket, can
+             * create datagram sockets. */
+            if (Socket->SharedData->SocketType != SOCK_DGRAM)
+            {
+                Errno = WSAEINVAL;
+                break;
+            }
+            if (IS_INTRESOURCE(lpvInBuffer) || cbInBuffer < sizeof(BOOL))
+            {
+                Errno = WSAEFAULT;
+                break;
+            }
+            cbRet = 0;
+            Errno = NO_ERROR;
+            Ret = NO_ERROR;
+            break;
         default:
             Errno = Socket->HelperData->WSHIoctl(Socket->HelperContext,
                                                  Handle,
