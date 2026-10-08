@@ -31,6 +31,7 @@ NTSTATUS NgErrnoToStatus(int Err)
         case NGC_EACCES:
         case NGC_EPERM: return STATUS_ACCESS_DENIED;
         case NGC_EFBIG: return STATUS_DISK_FULL;
+        case NGC_EBUSY: return STATUS_SHARING_VIOLATION;
         case NGC_EINVAL:
         case NGC_EUCLEAN: return STATUS_FILE_CORRUPT_ERROR;
         default: return STATUS_UNEXPECTED_IO_ERROR;

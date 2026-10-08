@@ -29,6 +29,7 @@ typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
 #define NGC_EFBIG 27
 #define NGC_EXDEV 18
 #define NGC_ENODATA 61
+#define NGC_EBUSY 16
 
 #define NGC_ATTR_COMPRESSED 1
 #define NGC_ATTR_SPARSE 2

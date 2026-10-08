@@ -305,6 +305,9 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
     NgFillStat(Fcb);
     if (Fcb->Stat.file_attributes & FILE_ATTRIBUTE_READONLY)
         return STATUS_CANNOT_DELETE;
+    /* The last name of a file whose named stream is open is not deleted (the core cannot evict it). */
+    if (!Fcb->Stream.Length && Fcb->Stat.nlink <= 1 && !NgRetireStreams(Vcb, Fcb->MftNo, Fcb, FALSE))
+        return STATUS_SHARING_VIOLATION;
     if (Fcb->IsDirectory)
     {
         NgAcquireCore(Vcb);
@@ -544,6 +547,11 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                 Status = STATUS_ACCESS_DENIED;
                 goto out;
             }
+            if (!NgRetireStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL, FALSE))
+            {
+                Status = STATUS_ACCESS_DENIED;      /* a named stream of the target is open */
+                goto out;
+            }
             TargetFcb = NgFindFcb(Vcb, TSt.mft_ref & 0xffffffffffffULL);
             if (TargetFcb)
             {
@@ -574,6 +582,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     Err = NgEnsureNode(Fcb);
     if (!Err)
         Err = ngc_iget(Vcb->Core, Ccb->ParentMftNo, &OldDir);
+    if (!Err && Target && !CaseOnly && TSt.nlink <= 1 && !NgRetireStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL, TRUE))
+        Err = -NGC_EBUSY;
     if (!Err)
     {
         if (IsLink)

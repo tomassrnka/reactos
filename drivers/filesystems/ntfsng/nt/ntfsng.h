@@ -240,6 +240,7 @@ VOID NgPrintLockStats(PNG_VCB Vcb);
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo);
 VOID NgUnlistFcb(PNG_FCB Fcb);
+BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Retire);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
 BOOLEAN NgValidName(PCUNICODE_STRING Name);
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);
