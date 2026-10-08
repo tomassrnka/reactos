@@ -51,6 +51,7 @@ KMT_TESTFUNC Test_KeGuardedMutex;
 KMT_TESTFUNC Test_KeIrql;
 KMT_TESTFUNC Test_KeMutex;
 KMT_TESTFUNC Test_KeProcessor;
+KMT_TESTFUNC Test_KeProcessorGroup;
 KMT_TESTFUNC Test_KeQpc;
 KMT_TESTFUNC Test_KeSpinLock;
 KMT_TESTFUNC Test_KeTimer;
@@ -142,6 +143,7 @@ const KMT_TEST TestList[] =
     { "KeIrql",                             Test_KeIrql },
     { "KeMutex",                            Test_KeMutex },
     { "-KeProcessor",                       Test_KeProcessor },
+    { "KeProcessorGroup",                   Test_KeProcessorGroup },
     { "KeQpc",                              Test_KeQpc },
     { "KeSpinLock",                         Test_KeSpinLock },
     { "KeTimer",                            Test_KeTimer },

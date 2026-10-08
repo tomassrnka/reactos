@@ -196,6 +196,15 @@ KeReadyThread(
     IN PKTHREAD Thread
 );
 
+/* Processor group routines (ke/processor.c); the public prototypes need NTDDI_WIN7 */
+ULONG NTAPI KeQueryActiveProcessorCountEx(_In_ USHORT GroupNumber);
+ULONG NTAPI KeQueryMaximumProcessorCountEx(_In_ USHORT GroupNumber);
+USHORT NTAPI KeQueryActiveGroupCount(VOID);
+USHORT NTAPI KeQueryMaximumGroupCount(VOID);
+ULONG NTAPI KeGetCurrentProcessorNumberEx(_Out_opt_ PPROCESSOR_NUMBER ProcNumber);
+NTSTATUS NTAPI KeGetProcessorNumberFromIndex(_In_ ULONG ProcIndex, _Out_ PPROCESSOR_NUMBER ProcNumber);
+ULONG NTAPI KeGetProcessorIndexFromNumber(_In_ PPROCESSOR_NUMBER ProcNumber);
+
 BOOLEAN
 NTAPI
 KeSetDisableBoostThread(

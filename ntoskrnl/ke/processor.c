@@ -73,3 +73,87 @@ NtGetCurrentProcessorNumberEx(
 
     return STATUS_SUCCESS;
 }
+
+/*
+ * Processor groups. The kernel runs all processors in group 0: processor
+ * numbers are contiguous from 0 to KeNumberProcessors - 1, so a processor's
+ * system-wide index equals its number in the group. Processors are not
+ * added after startup, so the maximum count is the active count, not the
+ * configured limit KeMaximumProcessors.
+ */
+
+ULONG
+NTAPI
+KeQueryActiveProcessorCountEx(
+    _In_ USHORT GroupNumber)
+{
+    if ((GroupNumber != 0) && (GroupNumber != ALL_PROCESSOR_GROUPS))
+        return 0;
+
+    return (ULONG)KeNumberProcessors;
+}
+
+ULONG
+NTAPI
+KeQueryMaximumProcessorCountEx(
+    _In_ USHORT GroupNumber)
+{
+    return KeQueryActiveProcessorCountEx(GroupNumber);
+}
+
+USHORT
+NTAPI
+KeQueryActiveGroupCount(VOID)
+{
+    return 1;
+}
+
+USHORT
+NTAPI
+KeQueryMaximumGroupCount(VOID)
+{
+    return 1;
+}
+
+ULONG
+NTAPI
+KeGetCurrentProcessorNumberEx(
+    _Out_opt_ PPROCESSOR_NUMBER ProcNumber)
+{
+    ULONG Number = KeGetCurrentProcessorNumber();
+
+    if (ProcNumber)
+    {
+        ProcNumber->Group = 0;
+        ProcNumber->Number = (UCHAR)Number;
+        ProcNumber->Reserved = 0;
+    }
+
+    return Number;
+}
+
+NTSTATUS
+NTAPI
+KeGetProcessorNumberFromIndex(
+    _In_ ULONG ProcIndex,
+    _Out_ PPROCESSOR_NUMBER ProcNumber)
+{
+    if (ProcIndex >= (ULONG)KeNumberProcessors)
+        return STATUS_INVALID_PARAMETER;
+
+    ProcNumber->Group = 0;
+    ProcNumber->Number = (UCHAR)ProcIndex;
+    ProcNumber->Reserved = 0;
+    return STATUS_SUCCESS;
+}
+
+ULONG
+NTAPI
+KeGetProcessorIndexFromNumber(
+    _In_ PPROCESSOR_NUMBER ProcNumber)
+{
+    if ((ProcNumber->Group != 0) || (ProcNumber->Number >= (ULONG)KeNumberProcessors))
+        return INVALID_PROCESSOR_INDEX;
+
+    return ProcNumber->Number;
+}
