@@ -162,10 +162,10 @@ BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start)
 }
 
 /*
- * Before a non-cached write.  ReactOS CcPurgeCacheSection drops only views that lie wholly
- * inside the range and stops at the first view past an explicit end (its view list is not in
- * offset order), so everything from the view holding Offset to the end of the stream is
- * flushed and then purged.  FALSE if a view stayed in use.
+ * Before a non-cached write; the caller holds PagingIoResource exclusive and keeps it until the
+ * write is on disk, so no read can bring the old bytes back into the cache in between.
+ * Everything from the view holding Offset to the end of the stream is flushed and then purged.
+ * FALSE if a view stayed in use.
  */
 BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset)
 {
@@ -175,7 +175,6 @@ BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset)
     BOOLEAN Ok = TRUE;
 
     Offset &= ~(LONGLONG)(NG_VACB_SIZE - 1);
-    ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
     for (Li.QuadPart = Offset; Ok && Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
     {
         Iosb.Status = STATUS_SUCCESS;
@@ -185,7 +184,6 @@ BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset)
     }
     if (Ok)
         Ok = NgPurgeFrom(Fcb, Offset);
-    ExReleaseResourceLite(Fcb->Header.PagingIoResource);
     return Ok;
 }
 
@@ -439,6 +437,7 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status = STATUS_SUCCESS;
     LONGLONG End, OldSize;
+    BOOLEAN PagingHeld = FALSE;
     long Done;
     int Err;
 
@@ -554,11 +553,18 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
      * A non-cached write must not leave older bytes in Cc.  When a view cannot be purged (in
      * use), the write goes through the cache and straight on to disk instead.
      */
-    if (NonCached && Fcb->SectionObjectPointers.DataSectionObject && !NgPurgeForNonCached(Fcb, Offset.QuadPart))
+    if (NonCached)
     {
-        NonCached = FALSE;
-        WriteThrough = TRUE;
-        Vcb->NonCachedViaCache++;
+        ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
+        PagingHeld = TRUE;
+        if (Fcb->SectionObjectPointers.DataSectionObject && !NgPurgeForNonCached(Fcb, Offset.QuadPart))
+        {
+            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+            PagingHeld = FALSE;
+            NonCached = FALSE;
+            WriteThrough = TRUE;
+            Vcb->NonCachedViaCache++;
+        }
     }
     if (!NonCached)
     {
@@ -593,6 +599,11 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Done >= 0)
             NgAfterChange(Vcb);
         NgReleaseCore(Vcb);
+        if (PagingHeld)
+        {
+            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+            PagingHeld = FALSE;
+        }
         if (Done < 0)
         {
             DPRINT1("ntfsng: write of %I64x at %I64d len %lu failed %ld\n", Fcb->MftNo, Offset.QuadPart, Length, Done);
