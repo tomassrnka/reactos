@@ -163,8 +163,19 @@ ApicWriteIORedirectionEntry(
     IOAPIC_REDIRECTION_REGISTER ReDirReg)
 {
     ASSERT(Index < APIC_MAX_IRQ);
-    IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
-    IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
+
+    /* The low half holds the mask: mask before changing the destination and
+       unmask only after it, so no interrupt goes to the old destination */
+    if (ReDirReg.Mask)
+    {
+        IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
+        IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
+    }
+    else
+    {
+        IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
+        IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
+    }
 }
 
 FORCEINLINE
