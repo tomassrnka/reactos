@@ -450,6 +450,12 @@ KeWaitForSingleObject(IN PVOID Object,
                (KeGetCurrentIrql() == DISPATCH_LEVEL &&
                 Timeout && Timeout->QuadPart == 0));
 
+    /* Verifier: a blocking wait needs IRQL <= APC_LEVEL; a zero-timeout poll
+     * may run up to DISPATCH_LEVEL. Logged once per site, continues. */
+    if (!Thread->WaitNext)
+        KvCheckIrqlMax((Timeout && Timeout->QuadPart == 0) ? DISPATCH_LEVEL : APC_LEVEL,
+                       "KeWaitForSingleObject", _ReturnAddress());
+
     /* Check if the lock is already held */
     if (!Thread->WaitNext) goto WaitStart;
 
@@ -624,6 +630,11 @@ KeWaitForMultipleObjects(IN ULONG Count,
     }
     else
         ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
+
+    /* Verifier: same IRQL ceiling as the single-object wait. */
+    if (!Thread->WaitNext)
+        KvCheckIrqlMax((Timeout && Timeout->QuadPart == 0) ? DISPATCH_LEVEL : APC_LEVEL,
+                       "KeWaitForMultipleObjects", _ReturnAddress());
 
     /* Make sure the Wait Count is valid */
     if (!WaitBlockArray)

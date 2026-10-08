@@ -1922,6 +1922,10 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
     ASSERT(NumberOfBytes != 0);
     ExpCheckPoolIrqlLevel(PoolType, NumberOfBytes, NULL);
 
+    /* Verifier: documented allocation IRQL ceiling, logged once per site. */
+    KvCheckIrqlMax((PoolType & 1) ? APC_LEVEL : DISPATCH_LEVEL,
+                   "ExAllocatePoolWithTag", _ReturnAddress());
+
     //
     // Not supported in ReactOS
     //
