@@ -676,6 +676,7 @@ RtlVirtualUnwind(
     BYTE Reg;
     PULONG LanguageHandler;
     BOOLEAN InProlog;
+    ULONG64 FrameBase;
 
     /* Get relative virtual address */
     ControlRva = ControlPc - ImageBase;
@@ -713,6 +714,11 @@ RtlVirtualUnwind(
             return NULL;
         }
     }
+
+    /* Registers saved with mov lie relative to the stack pointer after the
+       fixed allocation; once a frame register is set, the frame register is
+       what that stack pointer is derived from */
+    FrameBase = *EstablisherFrame;
 
     /* Skip all Ops with an offset greater than the current Offset */
     i = 0;
@@ -767,14 +773,14 @@ RepeatChainedInfo:
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
                 /* The slot stores offset / 8; adding it to a DWORD64* scales it back to bytes.
                  * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L831 */
-                SetRegFromStackValue(Context, ContextPointers, Reg, (DWORD64*)Context->Rsp + Offset);
+                SetRegFromStackValue(Context, ContextPointers, Reg, (DWORD64*)FrameBase + Offset);
                 i += 2;
                 break;
 
             case UWOP_SAVE_NONVOL_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetRegFromStackValue(Context, ContextPointers, Reg, (PDWORD64)(Context->Rsp + Offset));
+                SetRegFromStackValue(Context, ContextPointers, Reg, (PDWORD64)(FrameBase + Offset));
                 i += 3;
                 break;
 
@@ -792,14 +798,14 @@ RepeatChainedInfo:
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
                 /* The slot stores offset / 16; adding it to an M128A* scales it back to bytes.
                  * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L890 */
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)Context->Rsp + Offset);
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)FrameBase + Offset);
                 i += 2;
                 break;
 
             case UWOP_SAVE_XMM128_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(Context->Rsp + Offset));
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(FrameBase + Offset));
                 i += 3;
                 break;
 
