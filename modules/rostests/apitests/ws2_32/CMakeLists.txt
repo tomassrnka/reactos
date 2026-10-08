@@ -19,6 +19,7 @@ list(APPEND SOURCE
     WSAAsync.c
     WSAIoctl.c
     WSARecv.c
+    WSARecvFrom.c
     WSAStartup.c)
 
 list(APPEND PCH_SKIP_SOURCE
