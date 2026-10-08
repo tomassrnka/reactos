@@ -501,8 +501,11 @@ KiQuantumEnd(VOID)
             /* Check if a new thread is scheduled */
             if (!Prcb->NextThread)
             {
-                /* Get a new ready thread */
-                NextThread = KiSelectReadyThread(Thread->Priority, Prcb);
+                /* Get a new ready thread; one that waits on another
+                   processor's list must have a higher priority */
+                NextThread = KiSelectReadyThreadAny(Prcb,
+                                                    Thread->Priority,
+                                                    Thread->Priority + 1);
                 if (NextThread)
                 {
                     /* Found one, set it on standby */

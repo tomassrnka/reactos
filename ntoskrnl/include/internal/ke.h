@@ -280,6 +280,25 @@ KiIdleSchedule(
     IN PKPRCB Prcb
 );
 
+#ifdef CONFIG_SMP
+PKTHREAD
+FASTCALL
+KiSelectReadyThreadAny(
+    _In_ PKPRCB Prcb,
+    _In_ KPRIORITY Priority,
+    _In_ KPRIORITY RemotePriority
+);
+
+BOOLEAN
+FASTCALL
+KiIdleTakeReadyThread(
+    _In_ PKPRCB Prcb
+);
+#else
+#define KiSelectReadyThreadAny(Prcb, Priority, RemotePriority) \
+    KiSelectReadyThread((Priority), (Prcb))
+#endif
+
 VOID
 FASTCALL
 KiProcessDeferredReadyList(
