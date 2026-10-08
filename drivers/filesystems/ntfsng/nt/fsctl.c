@@ -160,6 +160,40 @@ static VOID NgReportDamage(PNG_VCB Vcb, const char *Why)
         ExFreePoolWithTag(Note, TAG_NTFSNG);
 }
 
+/*
+ * The journal orders its writes with cache flushes.  A stack that refuses them is acceptable only on a
+ * disk that reports no volatile write cache; otherwise the volume is mounted read-only.
+ */
+static BOOLEAN NgFlushUsable(PDEVICE_OBJECT Target)
+{
+    DISK_CACHE_INFORMATION Cache;
+    IO_STATUS_BLOCK Iosb;
+    KEVENT Event;
+    NTSTATUS Status;
+    PIRP Irp;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_FLUSH_BUFFERS, Target, NULL, 0, NULL, &Event, &Iosb);
+    if (!Irp)
+        return FALSE;
+    IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
+    Status = IoCallDriver(Target, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Iosb.Status;
+    }
+    if (NT_SUCCESS(Status))
+        return TRUE;
+    if (Status != STATUS_INVALID_DEVICE_REQUEST && Status != STATUS_NOT_SUPPORTED && Status != STATUS_NOT_IMPLEMENTED)
+        return FALSE;
+    if (!NT_SUCCESS(NgDeviceIoctl(Target, IOCTL_DISK_GET_CACHE_INFORMATION, &Cache, sizeof(Cache))) ||
+        Cache.WriteCacheEnabled)
+        return FALSE;
+    NgSetFlushOptional(Target);
+    return TRUE;
+}
+
 static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -174,7 +208,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ULONGLONG Size = 0, BootSectors;
     NTSTATUS Status;
     const char *WhyRo = NULL;
-    BOOLEAN Removable;
+    BOOLEAN Removable, NoFlush;
     int Err;
 
     if (DeviceObject != NgGlobal.ControlDevice)
@@ -246,9 +280,12 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vdo->SectorSize = (USHORT)SectorSize;
 
     NgAcquireCore(Vcb);
-    Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly && !Removable, &Vcb->Core, &WhyRo);
+    NoFlush = !NgGlobal.ForceReadOnly && !Removable && !NgFlushUsable(Target);
+    Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly && !Removable && !NoFlush, &Vcb->Core, &WhyRo);
     if (!Err && Removable && !NgGlobal.ForceReadOnly)
         WhyRo = "removable media";
+    if (!Err && NoFlush)
+        WhyRo = "the storage stack cannot flush the disk's write cache";
     if (!Err)
         ngc_volinfo(Vcb->Core, &Vcb->Info);
     NgReleaseCore(Vcb);
