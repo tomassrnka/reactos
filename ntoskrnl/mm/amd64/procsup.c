@@ -24,6 +24,7 @@ MiArchCreateProcessAddressSpace(
 {
     KIRQL OldIrql;
     PFN_NUMBER TableBasePfn, HyperPfn, HyperPdPfn, HyperPtPfn;
+    BOOLEAN ZeroHyperPd, ZeroHyperPt;
     PMMPTE SystemPte;
     MMPTE TempPte, PdePte;
     ULONG TableIndex;
@@ -34,38 +35,37 @@ MiArchCreateProcessAddressSpace(
     TableBasePfn = DirectoryTableBase[0] >> PAGE_SHIFT;
     HyperPfn = DirectoryTableBase[1] >> PAGE_SHIFT;
 
-    /*
-     * Lock PFN database. Try getting zero pages.
-     * If that doesn't work, we take the slow path
-     * outside of the PFN lock.
-     */
-    OldIrql = MiAcquirePfnLock();
-    PageColor = MI_GET_NEXT_PROCESS_COLOR(Process);
-    HyperPdPfn = MiRemoveZeroPageSafe(PageColor);
-    if(!HyperPdPfn)
-    {
-        HyperPdPfn = MiRemoveAnyPage(PageColor);
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(HyperPdPfn);
-        OldIrql = MiAcquirePfnLock();
-    }
-    PageColor = MI_GET_NEXT_PROCESS_COLOR(Process);
-    HyperPtPfn = MiRemoveZeroPageSafe(PageColor);
-    if(!HyperPtPfn)
-    {
-        HyperPtPfn = MiRemoveAnyPage(PageColor);
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(HyperPtPfn);
-    }
-    else
-    {
-        MiReleasePfnLock(OldIrql);
-    }
-
     /* Get a PTE to map the page directory */
     SystemPte = MiReserveSystemPtes(1, SystemPteSpace);
     if (!SystemPte)
         return FALSE;
+
+    /* Lock PFN database */
+    OldIrql = MiAcquirePfnLock();
+
+    /* Fail the process instead of using page 0 when no page is free */
+    if (MiGetFreeOrZeroedPageCount() < 2)
+    {
+        MiReleasePfnLock(OldIrql);
+        MiReleaseSystemPtes(SystemPte, 1, SystemPteSpace);
+        return FALSE;
+    }
+
+    /* Try getting zero pages, others are zeroed outside the PFN lock */
+    PageColor = MI_GET_NEXT_PROCESS_COLOR(Process);
+    HyperPdPfn = MiRemoveZeroPageSafe(PageColor);
+    ZeroHyperPd = (HyperPdPfn == 0);
+    if (ZeroHyperPd)
+        HyperPdPfn = MiRemoveAnyPage(PageColor);
+    PageColor = MI_GET_NEXT_PROCESS_COLOR(Process);
+    HyperPtPfn = MiRemoveZeroPageSafe(PageColor);
+    ZeroHyperPt = (HyperPtPfn == 0);
+    if (ZeroHyperPt)
+        HyperPtPfn = MiRemoveAnyPage(PageColor);
+    MiReleasePfnLock(OldIrql);
+
+    if (ZeroHyperPd) MiZeroPhysicalPage(HyperPdPfn);
+    if (ZeroHyperPt) MiZeroPhysicalPage(HyperPtPfn);
 
     /* Get its address */
     PageTablePointer = MiPteToAddress(SystemPte);
