@@ -2191,6 +2191,9 @@ MmArmInitSystem(IN ULONG Phase,
         /* Count physical pages on the system */
         MiScanMemoryDescriptors(LoaderBlock);
 
+        /* Honour the SPECIALPOOL= boot option before special pool init. */
+        MiInitSpecialPoolOption(LoaderBlock);
+
         /* Initialize the phase 0 temporary event */
         KeInitializeEvent(&MiTempEvent, NotificationEvent, FALSE);
 

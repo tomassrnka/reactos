@@ -53,6 +53,12 @@ PFN_COUNT MiSpecialPagesNonPagedMaximum;
 
 BOOLEAN MmSpecialPoolCatchOverruns = TRUE;
 
+/* Rotating-subset special pool, selected by the SPECIALPOOL=N/M boot
+ * option: a tag gets special pool when hash(Tag) % Mod == Sel. Mod 0
+ * means the rotating mode is off. Fork-only. */
+ULONG MiSpecialPoolRotateMod = 0;
+ULONG MiSpecialPoolRotateSel = 0;
+
 typedef struct _MI_FREED_SPECIAL_POOL
 {
     POOL_HEADER OverlaidPoolHeader;
@@ -80,6 +86,13 @@ MmUseSpecialPool(SIZE_T NumberOfBytes, ULONG Tag)
     if (NumberOfBytes > (PAGE_SIZE - sizeof(POOL_HEADER)))
     {
         return FALSE;
+    }
+
+    if (MiSpecialPoolRotateMod != 0)
+    {
+        /* Spread tags across the rotating window. */
+        ULONG Hash = (ULONG)(((ULONG_PTR)Tag * 2654435761U) >> 24);
+        return (Hash % MiSpecialPoolRotateMod) == MiSpecialPoolRotateSel;
     }
 
     if (MmSpecialPoolTag == '*')
@@ -116,6 +129,71 @@ MmIsSpecialPoolAddressFree(PVOID P)
 
     /* Free PTE */
     return TRUE;
+}
+
+/*
+ * MiInitSpecialPoolOption
+ *
+ * Sets MmSpecialPoolTag (and the rotating-subset globals) from the
+ * SPECIALPOOL= boot option. Must run before MiInitializeSpecialPool.
+ * Accepted values: '*' (all tags), 'N/M' (rotating slice N of M), or a
+ * four-character pool tag. Fork-only; absent option means no change.
+ */
+VOID
+NTAPI
+MiInitSpecialPoolOption(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
+{
+    CHAR Buffer[256];
+    PCHAR Opt, Value;
+    SIZE_T Len;
+    ULONG i;
+
+    if (LoaderBlock == NULL || LoaderBlock->LoadOptions == NULL) return;
+
+    /* Work on a private upper-cased copy; never touch the shared string. */
+    Len = strlen(LoaderBlock->LoadOptions);
+    if (Len >= sizeof(Buffer)) Len = sizeof(Buffer) - 1;
+    RtlCopyMemory(Buffer, LoaderBlock->LoadOptions, Len);
+    Buffer[Len] = ANSI_NULL;
+    _strupr(Buffer);
+
+    Opt = strstr(Buffer, "SPECIALPOOL");
+    if (Opt == NULL) return;
+    Value = strstr(Opt, "=");
+    if (Value == NULL) return;
+    Value++;
+
+    if (Value[0] == '*')
+    {
+        MmSpecialPoolTag = '*';
+        return;
+    }
+
+    /* Rotating subset: N/M. */
+    {
+        PCHAR Slash = strstr(Value, "/");
+        if (Slash != NULL)
+        {
+            ULONG Sel = (ULONG)atol(Value);
+            ULONG Mod = (ULONG)atol(Slash + 1);
+            if (Mod != 0)
+            {
+                MiSpecialPoolRotateMod = Mod;
+                MiSpecialPoolRotateSel = Sel % Mod;
+                /* Any non-zero tag makes MiInitializeSpecialPool reserve PTEs. */
+                MmSpecialPoolTag = '*';
+                return;
+            }
+        }
+    }
+
+    /* Four-character tag. */
+    {
+        ULONG Tag = 0;
+        for (i = 0; i < 4 && Value[i] > ' ' && Value[i] != ','; i++)
+            Tag |= ((ULONG)(UCHAR)Value[i]) << (8 * i);
+        if (Tag != 0) MmSpecialPoolTag = Tag;
+    }
 }
 
 VOID
