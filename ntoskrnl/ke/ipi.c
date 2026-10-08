@@ -345,6 +345,7 @@ KiIpiSendRequest(
     {
 #ifdef CONFIG_SMP
         ASSERT((KiFreezeOwner == KeGetCurrentPrcb()) ||
+               (KeGetCurrentPrcb()->IpiFrozen & IPI_FROZEN_FLAG_ACTIVE) ||
                ((TargetSet & KeActiveProcessors & ~KeGetCurrentPrcb()->SetMember) == 0));
 #endif
         if (TargetSet & KeGetCurrentPrcb()->SetMember)
@@ -357,7 +358,14 @@ KiIpiSendRequest(
 
 #ifdef CONFIG_SMP
     Prcb = KeGetCurrentPrcb();
-    Remote = TargetSet & KeActiveProcessors & ~Prcb->SetMember;
+
+    /* KDBG lowers the IRQL while the others stay frozen, and after a KD
+       processor switch the debugger runs on a frozen processor: do not
+       wait there */
+    if (Prcb->IpiFrozen & IPI_FROZEN_FLAG_ACTIVE)
+        Remote = 0;
+    else
+        Remote = TargetSet & KeActiveProcessors & ~Prcb->SetMember;
     if (Remote)
     {
         KiIpiPublishPacket(Prcb, WorkerRoutine, Parameter1, Parameter2, Parameter3);
