@@ -273,7 +273,7 @@ ExSetTimerResolution(IN ULONG DesiredTime,
         if (ExpKernelResolutionCount)
         {
             /* Obey remark 4 */
-            if (--ExpKernelResolutionCount)
+            if (!--ExpKernelResolutionCount)
             {
                 /*
                  * All kernel drivers have requested the original frequency to
@@ -281,7 +281,7 @@ ExSetTimerResolution(IN ULONG DesiredTime,
                  * ongoing clock interrupt frequency change, so make sure that
                  * this isn't the case.
                  */
-                if (--ExpTimerResolutionCount)
+                if (!--ExpTimerResolutionCount)
                 {
                     /* Force this thread on one CPU so that it doesn't drift */
                     KeSetSystemAffinityThread(1);
@@ -683,6 +683,7 @@ NtSetTimerResolution(IN ULONG DesiredResolution,
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     PEPROCESS Process = PsGetCurrentProcess();
     ULONG NewResolution;
+    BOOLEAN HadResolution;
 
     /* Check if the call came from user-mode */
     if (PreviousMode != KernelMode)
@@ -700,8 +701,30 @@ NtSetTimerResolution(IN ULONG DesiredResolution,
         _SEH2_END;
     }
 
-    /* Set and return the new resolution */
-    NewResolution = ExSetTimerResolution(DesiredResolution, SetResolution);
+    /* Keep the per-process state in step with the counts (the lock nests) */
+    ExAcquireTimeRefreshLock(TRUE);
+    HadResolution = Process->SetTimerResolution;
+
+    if (SetResolution)
+    {
+        /* A process holds one request; a later one only applies the new rate */
+        NewResolution = ExSetTimerResolution(DesiredResolution, TRUE);
+        if (HadResolution) ExSetTimerResolution(0, FALSE);
+        PspSetProcessFlag(Process, PSF_SET_TIMER_RESOLUTION_BIT);
+    }
+    else if (HadResolution)
+    {
+        /* Rescind the request of this process */
+        NewResolution = ExSetTimerResolution(0, FALSE);
+        PspClearProcessFlag(Process, PSF_SET_TIMER_RESOLUTION_BIT);
+    }
+    else
+    {
+        /* There is no request to rescind, so only return the current value */
+        NewResolution = KeTimeIncrement;
+    }
+
+    ExReleaseTimeRefreshLock();
 
     if (PreviousMode != KernelMode)
     {
@@ -721,7 +744,7 @@ NtSetTimerResolution(IN ULONG DesiredResolution,
         *CurrentResolution = NewResolution;
     }
 
-    if (SetResolution || Process->SetTimerResolution)
+    if (SetResolution || HadResolution)
     {
         /* The resolution has been changed now or in an earlier call */
         Status = STATUS_SUCCESS;
@@ -731,9 +754,6 @@ NtSetTimerResolution(IN ULONG DesiredResolution,
         /* The resolution hasn't been changed */
         Status = STATUS_TIMER_RESOLUTION_NOT_SET;
     }
-
-    /* Update the flag */
-    Process->SetTimerResolution = SetResolution;
 
     return Status;
 }
