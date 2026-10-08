@@ -364,6 +364,22 @@ MiDeleteSystemPageableVm(IN PMMPTE PointerPte,
     return ActualPages;
 }
 
+/* A VirtualLock on a private page goes with its PTE: drop the lock reference */
+static
+BOOLEAN
+MiDropVirtualLock(IN PMMPFN Pfn1)
+{
+    MI_ASSERT_PFN_LOCK_HELD();
+
+    if (!Pfn1->Wsle.u1.e1.LockedInWs && !Pfn1->Wsle.u1.e1.LockedInMemory)
+        return FALSE;
+
+    Pfn1->Wsle.u1.e1.LockedInWs = 0;
+    Pfn1->Wsle.u1.e1.LockedInMemory = 0;
+    MiDereferencePfnAndDropLockCount(Pfn1);
+    return TRUE;
+}
+
 VOID
 NTAPI
 MiDeletePte(IN PMMPTE PointerPte,
@@ -418,8 +434,15 @@ MiDeletePte(IN PMMPTE PointerPte,
             /* Delete the PFN */
             MI_SET_PFN_DELETED(Pfn1);
 
-            /* It must be either free (refcount == 0) or being written (refcount == 1) */
-            ASSERT(Pfn1->u3.e2.ReferenceCount == Pfn1->u3.e1.WriteInProgress);
+            /* Dropping a VirtualLock frees the page, unless an MDL still holds it */
+            if (MiDropVirtualLock(Pfn1))
+                return;
+
+            /*
+             * It is either on a list (refcount == 0), being written, or still
+             * locked by an MDL, whose unlock frees it.
+             */
+            ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
 
             /* See if we must free it ourselves, or if it will be freed once I/O is over */
             if (Pfn1->u3.e2.ReferenceCount == 0)
@@ -515,6 +538,7 @@ MiDeletePte(IN PMMPTE PointerPte,
 
         /* Mark the PFN for deletion and dereference what should be the last ref */
         MI_SET_PFN_DELETED(Pfn1);
+        MiDropVirtualLock(Pfn1);
         MiDecrementShareCount(Pfn1, PageFrameIndex);
 
         /* We should eventually do this */
@@ -2571,6 +2595,7 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
         //
         MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
         MI_SET_PFN_DELETED(Pfn1);
+        MiDropVirtualLock(Pfn1);
         MiDecrementShareCount(Pfn1, PageFrameIndex);
 
         //
