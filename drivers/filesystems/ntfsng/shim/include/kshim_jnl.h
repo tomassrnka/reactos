@@ -2,9 +2,11 @@
 /*
  * kshim_jnl.h - metadata block journal of the shim.  While active, every device write that is
  * not marked direct (file data) is held in an in-memory overlay; reads see the overlay.  A
- * commit writes the overlay to the journal area (inside $LogFile) with a checksummed header,
- * flushes, writes it in place, flushes and marks the header applied.  A crash leaves either the
- * last applied state or a committed transaction that the next mount writes in place again.
+ * commit writes the overlay to the journal area (inside $LogFile), flushes (which also makes the
+ * file data written since the last commit durable), writes a checksummed header that commits the
+ * transaction, flushes, writes it in place, flushes and marks the header applied.  A crash leaves
+ * either the last applied state or a committed transaction that the next mount writes in place
+ * again.
  */
 #ifndef KSHIM_JNL_H
 #define KSHIM_JNL_H
