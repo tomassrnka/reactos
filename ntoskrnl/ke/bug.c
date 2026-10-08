@@ -1281,6 +1281,12 @@ KeRegisterBugCheckCallback(IN PKBUGCHECK_CALLBACK_RECORD CallbackRecord,
         CallbackRecord->Buffer = Buffer;
         CallbackRecord->Component = Component;
         CallbackRecord->CallbackRoutine = CallbackRoutine;
+
+        /* KiDoBugCheckCallbacks only calls a record whose checksum matches */
+        CallbackRecord->Checksum = (ULONG_PTR)CallbackRoutine +
+                                   (ULONG_PTR)Buffer +
+                                   (ULONG_PTR)Length +
+                                   (ULONG_PTR)Component;
         CallbackRecord->State = BufferInserted;
         InsertTailList(&KeBugcheckCallbackListHead, &CallbackRecord->Entry);
         Status = TRUE;
