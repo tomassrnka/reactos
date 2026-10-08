@@ -33,6 +33,16 @@ if((CMAKE_C_COMPILER_ID STREQUAL "Clang") OR (CMAKE_C_COMPILER_ID STREQUAL "GNU"
     add_compile_options(-mxsave)
 endif()
 
+# Fork-only undefined-behaviour sanitizer for the kernel. The compiler emits
+# recoverable handler calls (-fsanitize-recover) that our ntoskrnl/vf/kvubsan.c
+# runtime services; no external runtime library is linked.
+if(KERNEL_UBSAN AND (CMAKE_C_COMPILER_ID STREQUAL "GNU"))
+    set(_KV_UBSAN_CHECKS shift,signed-integer-overflow,integer-divide-by-zero,bounds,alignment,null,object-size)
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:C>:-fsanitize=${_KV_UBSAN_CHECKS}>
+        $<$<COMPILE_LANGUAGE:C>:-fsanitize-recover=${_KV_UBSAN_CHECKS}>)
+endif()
+
 list(APPEND PCH_SKIP_SOURCE
     guid.c)
 
