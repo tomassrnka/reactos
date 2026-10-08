@@ -309,7 +309,11 @@ static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         ExReleaseResourceLite(&Vcb->CreateGate);
         return Status;
     }
-    NgFlushVolume(Vcb);
+    if (NgFlushVolume(Vcb))
+    {
+        ExReleaseResourceLite(&Vcb->CreateGate);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
     ExAcquireFastMutex(&Vcb->FcbListLock);
     /* Checked again after the flush, in the hold that publishes the lock: also refused for a handle
      * whose cleanup ran meanwhile (nothing would ever unlock it). */
