@@ -174,8 +174,109 @@ TestFreeNoAccess(void)
     }
 }
 
+#ifdef _WIN64
+#define TOP_LEVEL_REGION_SIZE 0x8000000000ULL
+
+/*
+ * Commit 16 pages in a 512 GB region that this process never used, so that
+ * it has no page map level 4 entry. Returns NULL if no such region is free.
+ */
+static
+PVOID
+AllocateInUntouchedTopLevelRegion(ULONG_PTR *Next)
+{
+    static const ULONG_PTR Candidates[] = { 0x50000000000ULL, 0x58000000000ULL, 0x60000000000ULL,
+                                            0x68000000000ULL, 0x70000000000ULL, 0x78000000000ULL };
+    MEMORY_BASIC_INFORMATION Mbi;
+    PVOID Base;
+    SIZE_T Size;
+    NTSTATUS Status;
+
+    for (; *Next < _countof(Candidates); (*Next)++)
+    {
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), (PVOID)Candidates[*Next],
+                                      MemoryBasicInformation, &Mbi, sizeof(Mbi), NULL);
+        if (!NT_SUCCESS(Status) || Mbi.State != MEM_FREE ||
+            (ULONG_PTR)Mbi.BaseAddress + Mbi.RegionSize < Candidates[*Next] + TOP_LEVEL_REGION_SIZE)
+            continue;
+        Base = (PVOID)Candidates[*Next];
+        Size = 16 * PAGE_SIZE;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size,
+                                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (NT_SUCCESS(Status))
+        {
+            (*Next)++;
+            return Base;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Committed memory that was never touched has no page tables. Releasing part
+ * of it counts its committed pages, and protecting it checks that the whole
+ * range is committed: both walks skip the absent top-level entry, which used
+ * to make them continue from a PTE address computed from the wrong pointer.
+ */
+static
+void
+TestUntouchedTopLevelRegion(void)
+{
+    MEMORY_BASIC_INFORMATION Mbi;
+    ULONG_PTR Next = 0;
+    PVOID Base, Address;
+    SIZE_T Size;
+    ULONG OldProtect;
+    NTSTATUS Status;
+
+    /* Release the middle of an untouched allocation */
+    Base = AllocateInUntouchedTopLevelRegion(&Next);
+    if (!Base)
+    {
+        skip("No untouched 512 GB region is free\n");
+        return;
+    }
+    Address = (PUCHAR)Base + 4 * PAGE_SIZE;
+    Size = 4 * PAGE_SIZE;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), (PUCHAR)Base + 4 * PAGE_SIZE,
+                                  MemoryBasicInformation, &Mbi, sizeof(Mbi), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_hex(Mbi.State, MEM_FREE);
+    Address = Base;
+    Size = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    Address = (PUCHAR)Base + 8 * PAGE_SIZE;
+    Size = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+
+    /* Protect an untouched allocation in another region */
+    Base = AllocateInUntouchedTopLevelRegion(&Next);
+    if (!Base)
+    {
+        skip("No second untouched 512 GB region is free\n");
+        return;
+    }
+    Address = Base;
+    Size = 16 * PAGE_SIZE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, PAGE_READONLY, &OldProtect);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_hex(OldProtect, PAGE_READWRITE);
+    Address = Base;
+    Size = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+}
+#endif
+
 START_TEST(NtProtectVirtualMemory)
 {
     TestReadWrite();
     TestFreeNoAccess();
+#ifdef _WIN64
+    TestUntouchedTopLevelRegion();
+#endif
 }
