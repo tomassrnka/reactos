@@ -29,6 +29,11 @@ static unsigned long long Next(void)
 }
 static unsigned Rnd(unsigned n) { return n ? (unsigned)(Next() % n) : 0; }
 
+/* --quiet drops the per-call serial print so throughput is CPU-bound rather
+ * than limited by the debugger channel; g_exec counts the calls that ran. */
+static int g_quiet;
+static unsigned g_exec;
+
 /* ------- object pool and buffers ------- */
 #define POOL_MAX 64
 static HANDLE g_pool[POOL_MAX];
@@ -185,10 +190,14 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
 
     if (!Execute || IsDangerous(sc->Name)) return;
 
-    _snprintf(line, sizeof(line) - 1, "KVFUZZ: #%u %s(%u) a0=%p a1=%p a2=%p\n",
-              callno, sc->Name, sc->Args, (void*)a[0], (void*)a[1], (void*)a[2]);
-    line[sizeof(line)-1] = 0;
-    OutputDebugStringA(line);
+    g_exec++;
+    if (!g_quiet)
+    {
+        _snprintf(line, sizeof(line) - 1, "KVFUZZ: #%u %s(%u) a0=%p a1=%p a2=%p\n",
+                  callno, sc->Name, sc->Args, (void*)a[0], (void*)a[1], (void*)a[2]);
+        line[sizeof(line)-1] = 0;
+        OutputDebugStringA(line);
+    }
 
     if (sc->Target == KF_NT)
     {
@@ -219,6 +228,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--max") && (int)i+1 < argc) maxcalls = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--from") && (int)i+1 < argc) fromcall = (unsigned)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--target") && (int)i+1 < argc) target = argv[++i];
+        else if (!strcmp(argv[i], "--quiet")) g_quiet = 1;
     }
     if (seed == 0) seed = ((unsigned long long)GetTickCount() << 16) ^ GetCurrentProcessId();
 
@@ -240,8 +250,19 @@ int main(int argc, char **argv)
              * the harness bisects --from upward until the crash disappears. */
             StepCall(ntdll, i, i >= fromcall);
             if ((i & 0xFF) == 0) WriteState(seed, i);
+            if (g_quiet && (i & 0x1FFF) == 0)
+            {
+                char prg[64];
+                _snprintf(prg, sizeof(prg)-1, "KVFUZZ: at #%u exec=%u\n", i, g_exec);
+                OutputDebugStringA(prg);
+            }
         }
-        OutputDebugStringA("KVFUZZ: done\n");
+        {
+            char fin[64];
+            _snprintf(fin, sizeof(fin)-1, "KVFUZZ: done calls=%u exec=%u\n",
+                      maxcalls, g_exec);
+            OutputDebugStringA(fin);
+        }
     }
     return 0;
 }
