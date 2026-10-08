@@ -135,6 +135,37 @@ KvCheckIrqlMaxImpl(IN KIRQL Max, IN PCSTR Api, IN PVOID Site)
 
 /* (e) DEADLOCK WATCHDOG *****************************************************/
 
+/*
+ * Walk the frame-pointer chain by hand into Buffer, bounded to the current
+ * kernel stack so a bad frame pointer can never fault. RtlWalkFrameChain
+ * returns nothing above DISPATCH_LEVEL, so it is unusable from the IPI worker;
+ * this reads only memory and works at any IRQL (ReactOS keeps frame pointers,
+ * -fno-omit-frame-pointer).
+ */
+static
+ULONG
+KvCaptureStack(PVOID *Buffer, ULONG Max)
+{
+    PKTHREAD Thread = KeGetCurrentThread();
+    ULONG_PTR Lo = (ULONG_PTR)Thread->StackLimit;
+    ULONG_PTR Hi = (ULONG_PTR)Thread->StackBase;
+    ULONG_PTR Prev = 0;
+    void **Fp = (void **)__builtin_frame_address(0);
+    ULONG Count = 0;
+
+    while (Count < Max)
+    {
+        ULONG_PTR Cur = (ULONG_PTR)Fp;
+        if ((Cur & (sizeof(void *) - 1)) != 0) break;       /* misaligned     */
+        if (Cur < Lo || Cur + 2 * sizeof(void *) > Hi) break; /* off-stack    */
+        if (Cur <= Prev) break;                             /* not ascending  */
+        Buffer[Count++] = Fp[1];                            /* return address */
+        Prev = Cur;
+        Fp = (void **)Fp[0];                                /* saved frame ptr*/
+    }
+    return Count;
+}
+
 static
 ULONG_PTR
 NTAPI
@@ -150,8 +181,8 @@ KvCaptureCpuBroadcast(IN ULONG_PTR Context)
 
     if (Cpu < KV_MAX_CPUS)
     {
-        KvCpuBtCount[Cpu] = RtlWalkFrameChain(&KvCpuBackTrace[Cpu][0],
-                                              KV_BT_FRAMES, 0);
+        KvCpuBtCount[Cpu] = KvCaptureStack(&KvCpuBackTrace[Cpu][0],
+                                           KV_BT_FRAMES);
     }
     return 0;
 }
