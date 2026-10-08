@@ -141,6 +141,7 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = Ccb;
     FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    FileObject->Vpb = Vcb->Vpb;
     return STATUS_SUCCESS;
 }
 
@@ -1078,6 +1079,7 @@ walked:
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = Ccb;
     FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    FileObject->Vpb = Vcb->Vpb;
     if (Stack->Flags & SL_OPEN_PAGING_FILE)
     {
         /* A paging file is a plain unnamed stream; its page I/O bypasses the core (pagefile.c). */
