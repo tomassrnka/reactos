@@ -1677,7 +1677,8 @@ IoFreeAdapterChannel(IN PADAPTER_OBJECT AdapterObject)
         AdapterObject->CurrentWcb = WaitContextBlock;
         AdapterObject->NumberOfMapRegisters = WaitContextBlock->NumberOfMapRegisters;
 
-        if ((WaitContextBlock->NumberOfMapRegisters) && (AdapterObject->MasterAdapter))
+        /* Same test as HalAllocateAdapterChannel: only these adapters use map registers */
+        if ((WaitContextBlock->NumberOfMapRegisters) && (AdapterObject->NeedsMapRegisters))
         {
             KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
 
