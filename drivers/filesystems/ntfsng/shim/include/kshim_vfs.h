@@ -815,6 +815,9 @@ struct bio {
 	struct bio *kshim_chain;
 };
 struct bio *bio_alloc(struct block_device *b, unsigned short nr, blk_opf_t op, gfp_t g);
+void kshim_wb_scope_enter(void);	/* around a call into core writeback: reserve bios it abandons come back */
+void kshim_wb_scope_exit(void);
+void kshim_wb_scope_point(void);	/* between folios of a writepages walk */
 void bio_put(struct bio *b);
 bool bio_add_folio(struct bio *b, struct folio *f, size_t len, size_t off);
 void bio_add_folio_nofail(struct bio *b, struct folio *f, size_t len, size_t off);
