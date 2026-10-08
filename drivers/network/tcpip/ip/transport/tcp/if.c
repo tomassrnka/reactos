@@ -8,6 +8,23 @@
 #include "lwip/tcpip.h"
 #include <ipifcons.h>
 
+/* TCP segments that may wait for an unresolved neighbour: on one, and in all */
+#define TCP_UNRESOLVED_PER_NEIGHBOR 16
+#define TCP_UNRESOLVED_TOTAL        256
+
+static LONG TCPUnresolvedSegments;
+
+/* Context is non-NULL for a segment counted in TCPUnresolvedSegments */
+static
+VOID
+TCPSendDataComplete(PVOID Context, PNDIS_PACKET NdisPacket, NDIS_STATUS NdisStatus)
+{
+    if (Context)
+        InterlockedDecrement(&TCPUnresolvedSegments);
+
+    FreeNdisPacket(NdisPacket);
+}
+
 err_t
 TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
 {
@@ -18,6 +35,7 @@ TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
     PIPv4_HEADER Header;
     ULONG Length;
     ULONG TotalLength;
+    BOOLEAN Unresolved;
 
     /* The caller frees the pbuf struct */
 
@@ -70,6 +88,44 @@ TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
     Packet.TotalSize = TotalLength;
     Packet.SrcAddr = LocalAddress;
     Packet.DstAddr = RemoteAddress;
+
+    /* lwIP's output runs under the core lock, and IPSendDatagram waits until the packet has
+     * left, which includes resolving the neighbour's address: a neighbour that does not answer
+     * held the lock for seconds. lwIP builds a complete datagram and fragments it to its
+     * interface's MTU, so queue it on the neighbour as it is and free it when it has left.
+     * Segments to unresolved neighbours (such as resets to spoofed sources) are limited, so
+     * they cannot take the packet pool from other traffic */
+    if (TotalLength <= NCE->Interface->MTU)
+    {
+        Unresolved = (NCE->State & NUD_INCOMPLETE) != 0;
+
+        if (Unresolved && InterlockedIncrement(&TCPUnresolvedSegments) > TCP_UNRESOLVED_TOTAL)
+        {
+            InterlockedDecrement(&TCPUnresolvedSegments);
+            FreeNdisPacket(Packet.NdisPacket);
+            return ERR_MEM;
+        }
+
+        if (!NBQueuePacketLimited(NCE, Packet.NdisPacket, TCPSendDataComplete,
+                                  Unresolved ? &TCPUnresolvedSegments : NULL,
+                                  TCP_UNRESOLVED_PER_NEIGHBOR))
+        {
+            if (Unresolved)
+                InterlockedDecrement(&TCPUnresolvedSegments);
+            FreeNdisPacket(Packet.NdisPacket);
+            return ERR_MEM;
+        }
+
+        return ERR_OK;
+    }
+
+    /* IPSendDatagram fragments it and waits for each fragment, which for an unresolved
+     * neighbour means waiting for resolution under the core lock: let lwIP try again later */
+    if (NCE->State & NUD_INCOMPLETE)
+    {
+        FreeNdisPacket(Packet.NdisPacket);
+        return ERR_MEM;
+    }
 
     NdisStatus = IPSendDatagram(&Packet, NCE);
     if (!NT_SUCCESS(NdisStatus))
@@ -148,6 +204,10 @@ TCPUpdateInterfaceIPInformation(PIP_INTERFACE IF)
     ip_addr_t gw;
 
     gw.addr = 0;
+
+    /* The netif is created before the interface knows its MTU; lwIP limits its segments and
+     * fragments its datagrams to this value, and skips both while it is 0 */
+    ((struct netif *)IF->TCPContext)->mtu = (u16_t)min(IF->MTU, 0xFFFF);
 
     GetInterfaceIPv4Address(IF,
                             ADE_UNICAST,
