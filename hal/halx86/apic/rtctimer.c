@@ -135,12 +135,6 @@ HalpInitializeClock(VOID)
     /* Enable the timer interrupt */
     HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
 
-    /* An interrupt that came before the pin was enabled was lost: read
-       register C so that the RTC can raise the next one */
-    HalpAcquireCmosSpinLock();
-    HalpReadCmos(RTC_REGISTER_C);
-    HalpReleaseCmosSpinLock();
-
     DPRINT1("Clock initialized\n");
 }
 

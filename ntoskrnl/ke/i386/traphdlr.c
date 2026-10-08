@@ -463,7 +463,6 @@ KiTrap02Handler(VOID)
     PKGDTENTRY TssGdt;
     KTRAP_FRAME TrapFrame;
     KIRQL OldIrql;
-    BOOLEAN Frozen;
 
     /*
      * In some sort of strange recursion case, we might end up here with the IF
@@ -532,8 +531,7 @@ KiTrap02Handler(VOID)
 
     /* Freeze requests from other processors come as NMIs and save the
        processor state themselves; saving twice would record DR7 cleared */
-    Frozen = KiProcessorFreezeHandler(&TrapFrame, NULL);
-    if (Frozen)
+    if (KiProcessorFreezeHandler(&TrapFrame, NULL))
         goto Handled;
 
     /* Store the trap frame in the KPRCB */
@@ -579,16 +577,6 @@ Handled:
 
     /* Restore nested flag */
     __writeeflags(__readeflags() | EFLAGS_NESTED_TASK);
-
-    /*
-     * A freeze target reports that it runs again only now, with the NMI TSS
-     * busy, so that the next freeze NMI cannot task-switch into the NMI TSS
-     * while this handler still uses it. If that NMI arrives before the iretd,
-     * which some hypervisors allow, it raises a GPF on the busy NMI TSS and
-     * KiTrap0DHandler freezes this processor from there.
-     */
-    if (Frozen)
-        KeGetCurrentPrcb()->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
 
     /* Handled, return from interrupt */
 }
@@ -1012,15 +1000,6 @@ KiTrap0DHandler(IN PKTRAP_FRAME TrapFrame)
 
     /* Save trap frame */
     KiEnterTrap(TrapFrame);
-
-    /* A freeze NMI that arrived while the NMI handler was returning (see KiTrap02Handler) */
-    if ((TrapFrame->ErrCode == (KGDT_NMI_TSS | 1)) &&
-        (Ke386GetTr() == KGDT_NMI_TSS) &&
-        KiProcessorFreezeHandler(TrapFrame, NULL))
-    {
-        KeGetCurrentPrcb()->IpiFrozen = IPI_FROZEN_STATE_RUNNING;
-        KiTrapReturn(TrapFrame);
-    }
 
     /* Check for user-mode GPF */
     if (KiUserTrap(TrapFrame))

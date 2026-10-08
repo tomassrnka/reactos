@@ -305,7 +305,6 @@ KiIdleLoop(VOID)
                 /* Set new thread data */
                 Prcb->NextThread = NULL;
                 Prcb->CurrentThread = NewThread;
-                InterlockedAnd((PLONG)&KiIdleSummary, ~(LONG)Prcb->SetMember);
 
                 /* The thread is now running */
                 NewThread->State = Running;

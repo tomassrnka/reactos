@@ -31,8 +31,7 @@ typedef struct _E1000_ADAPTER
     NDIS_PHYSICAL_ADDRESS IoAddress;
     ULONG IoLength;
 
-    /* Serializes the transmit ring between MiniportSend and the interrupt DPC */
-    NDIS_SPIN_LOCK SendLock;
+    // NDIS_SPIN_LOCK AdapterLock;
 
     NDIS_HANDLE AdapterHandle;
     USHORT VendorID;

@@ -812,13 +812,9 @@ HalpApcInterruptHandler(IN PKTRAP_FRAME TrapFrame)
     KiEnterInterruptTrap(TrapFrame);
 
 #ifdef APIC_LAZY_IRQL
-    /* Send the EOI before interrupts are enabled: a DPC interrupt could
-       switch threads first and leave this vector in service */
-    OldIrql = ApicGetCurrentIrql();
-    if (OldIrql >= APC_LEVEL)
+    if (!HalBeginSystemInterrupt(APC_LEVEL, APC_VECTOR, &OldIrql))
     {
-        /* Not allowed now: defer it and end this one */
-        HalBeginSystemInterrupt(APC_LEVEL, APC_VECTOR, &OldIrql);
+        /* "Spurious" interrupt, exit the interrupt */
         KiEoiHelper(TrapFrame);
     }
 #else
