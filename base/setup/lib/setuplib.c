@@ -859,6 +859,11 @@ InitSystemPartition(
 
     *pSystemPartition = SystemPartition;
 
+    /* Another system's boot partition that loses the active flag stays bootable through FreeLoader */
+    PartitionList->ForeignBootPartition = NULL;
+    if (OldActivePart && OldActivePart != SystemPartition && IsForeignNtfsBootPartition(OldActivePart))
+        PartitionList->ForeignBootPartition = OldActivePart;
+
     /*
      * If the system partition can be created in some
      * non-partitioned space, create it now.

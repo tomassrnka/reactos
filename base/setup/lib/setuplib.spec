@@ -78,4 +78,5 @@
 
 ;; bootsup
 @ stdcall InstallBootManagerAndBootEntries(long ptr ptr ptr ptr)
+@ stdcall AddPartitionBootEntry(ptr long long ptr ptr)
 @ stdcall InstallBootcodeToRemovable(long ptr ptr ptr)
