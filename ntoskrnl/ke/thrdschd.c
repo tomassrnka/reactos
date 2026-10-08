@@ -430,8 +430,12 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             /* Check if we're running on another CPU */
             if (KeGetCurrentProcessorNumber() != Processor)
             {
-                /* We are, send an IPI */
-                KiIpiSend(AFFINITY_MASK(Processor), IPI_DPC);
+                /* The idle loop checks for a next thread after any interrupt
+                   ends its halt; a busy processor needs a DPC interrupt to
+                   switch. The idle loop runs at DISPATCH_LEVEL, so a DPC
+                   request would only fire later, uselessly, in the new thread */
+                KiIpiSend(AFFINITY_MASK(Processor),
+                          (NextThread == Prcb->IdleThread) ? 0 : IPI_DPC);
             }
             return;
         }

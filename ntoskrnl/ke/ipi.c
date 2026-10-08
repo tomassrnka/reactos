@@ -182,8 +182,9 @@ KiIpiSend(IN KAFFINITY TargetProcessors,
         if (!IpiRequest) return;
     }
 
-    /* Mark the requests before interrupting, the interrupt takes them all */
-    while (Remaining)
+    /* Mark the requests before interrupting, the interrupt takes them all;
+       an IPI without requests only ends a halt */
+    while (Remaining && IpiRequest)
     {
         BitScanForwardAffinity(&Processor, Remaining);
         Remaining &= Remaining - 1;
