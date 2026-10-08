@@ -1960,7 +1960,6 @@ _WARN("Session space stuff is not implemented yet!")
                 return STATUS_IN_PAGE_ERROR | 0x10000000;
             }
         }
-RetryKernel:
         /* Acquire the working set lock */
         KeRaiseIrql(APC_LEVEL, &LockIrql);
         MiLockWorkingSet(CurrentThread, WorkingSet);
@@ -2127,13 +2126,7 @@ RetryKernel:
         MiUnlockWorkingSet(CurrentThread, WorkingSet);
         KeLowerIrql(LockIrql);
 
-        if (Status == STATUS_NO_MEMORY)
-        {
-            MmRebalanceMemoryConsumersAndWait();
-            goto RetryKernel;
-        }
-
-        /* We are done! */
+        /* We are done! STATUS_NO_MEMORY is retried by MmAccessFault */
         DPRINT("Fault resolved with status: %lx\n", Status);
         return Status;
     }
@@ -2655,12 +2648,7 @@ ExitUser:
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
     MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
 
-    if (Status == STATUS_NO_MEMORY)
-    {
-        MmRebalanceMemoryConsumersAndWait();
-        goto UserFault;
-    }
-
+    /* STATUS_NO_MEMORY is retried by MmAccessFault */
     return Status;
 }
 
