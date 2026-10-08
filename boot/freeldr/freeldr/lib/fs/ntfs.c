@@ -484,11 +484,25 @@ static PNTFS_ATTR_CONTEXT NtfsFindAttributeHelper(
 
     while (AttrRecord < AttrRecordEnd)
     {
-        ULONG AttrType = AttrRecord->Type;
-        ULONG AttrInstance = AttrRecord->Instance;
+        ULONG_PTR Remaining = (PCHAR)AttrRecordEnd - (PCHAR)AttrRecord;
+        ULONG AttrType, AttrInstance;
 
+        if (Remaining < sizeof(ULONG))
+            break;
+        AttrType = AttrRecord->Type;
         if (AttrType == NTFS_ATTR_TYPE_END)
             break;
+
+        /* A header, name, value or mapping pairs that do not fit the length, or a length past the record
+         * (a damaged record), end the walk */
+        if (Remaining < 0x18 || AttrRecord->Length > Remaining || (AttrRecord->Length & 7) ||
+            AttrRecord->Length < (AttrRecord->IsNonResident ? 0x40U : 0x18U) ||
+            AttrRecord->NameOffset + AttrRecord->NameLength * sizeof(WCHAR) > AttrRecord->Length ||
+            (AttrRecord->IsNonResident ?
+                AttrRecord->NonResident.MappingPairsOffset >= AttrRecord->Length :
+                AttrRecord->Resident.ValueOffset + (ULONGLONG)AttrRecord->Resident.ValueLength > AttrRecord->Length))
+            break;
+        AttrInstance = AttrRecord->Instance;
 
         TRACE("RecursionLimit = %u, AttrType = 0x%x\n", RecursionLimit, AttrType);
 
@@ -553,8 +567,6 @@ static PNTFS_ATTR_CONTEXT NtfsFindAttributeHelper(
         }
 
 skip:
-        if (AttrRecord->Length == 0)
-            break;
         AttrRecord = (PNTFS_ATTR_RECORD)((PCHAR)AttrRecord + AttrRecord->Length);
     }
 

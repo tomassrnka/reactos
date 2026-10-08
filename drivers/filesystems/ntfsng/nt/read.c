@@ -217,8 +217,16 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     else
     {
-        /* Shared with other readers, but not with a write that purges and rewrites the range. */
+        /* Shared with other readers, but not with a write or a size change; the size is read again under it. */
         ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
+        FileSize = Fcb->Header.FileSize.QuadPart;
+        if (Offset.QuadPart >= FileSize)
+        {
+            ExReleaseResourceLite(Fcb->Header.Resource);
+            return STATUS_END_OF_FILE;
+        }
+        if (Offset.QuadPart + Length > FileSize)
+            Length = (ULONG)(FileSize - Offset.QuadPart);
         _SEH2_TRY
         {
             if (!FileObject->PrivateCacheMap)

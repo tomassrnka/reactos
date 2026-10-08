@@ -52,14 +52,3 @@ void setattr_prepare(void) { kshim_unimpl("setattr_prepare"); }
 void strndup_user(void) { kshim_unimpl("strndup_user"); }
 void vfs_setpos(void) { kshim_unimpl("vfs_setpos"); }
 void vma_desc_test_all(void) { kshim_unimpl("vma_desc_test_all"); }
-
-/*
- * Written by hand (drop these names from a regenerated list): reachable from data on disk, so
- * they must not stop the system.  vmap fails, and WOF chunks larger than a page (XPRESS8K/16K,
- * LZX) are decoded through the core's per-chunk buffer; discard and zeroing report an error.
- */
-void *vmap(void *pages, unsigned int count, unsigned long flags, int prot) { (void)pages; (void)count; (void)flags; (void)prot; return 0; }
-void vunmap(const void *addr) { (void)addr; }
-int blkdev_issue_discard(void) { return -95; /* -EOPNOTSUPP */ }
-int blkdev_issue_zeroout(void) { return -95; }
-int iomap_zero_range(void) { return -95; }

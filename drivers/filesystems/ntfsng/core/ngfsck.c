@@ -40,6 +40,7 @@ struct ngf {
 	u8 *ref;		/* clusters referenced by records */
 	u16 *seq;		/* per record: sequence number, 0 = not in use */
 	u8 *isdir;
+	u8 *ok;			/* records pass 1 validated: the only ones pass 2 parses */
 	u64 nrec;
 	u8 *rec;		/* one record */
 	u8 *chunk;		/* records being walked */
@@ -105,11 +106,15 @@ static int ngf_read_rl(struct ngf *f, struct runlist_element *rl, u64 off, u8 *b
 	return 0;
 }
 
-/* The whole stream of a system inode ($Bitmap, $MFT:$BITMAP) through the core's page cache. */
-static u8 *ngf_read_inode(struct ngf *f, struct inode *vi, u64 *size)
+/*
+ * The whole stream of a system inode ($Bitmap, $MFT:$BITMAP) through the core's page cache.
+ * NULL with *err -ENOMEM (no memory, or too large to check) or -EIO (unreadable).
+ */
+static u8 *ngf_read_inode(struct ngf *f, struct inode *vi, u64 *size, int *err)
 {
 	u64 sz = (u64)i_size_read(vi), pos;
 	u8 *buf;
+	*err = -ENOMEM;
 	if (sz == 0 || sz > (64u << 20))
 		return NULL;
 	buf = kvmalloc((size_t)((sz + PAGE_SIZE - 1) & ~(u64)(PAGE_SIZE - 1)), GFP_KERNEL);
@@ -119,12 +124,14 @@ static u8 *ngf_read_inode(struct ngf *f, struct inode *vi, u64 *size)
 		struct folio *fo = read_mapping_folio(vi->i_mapping, (pgoff_t)(pos >> PAGE_SHIFT), NULL);
 		if (IS_ERR(fo)) {
 			kvfree(buf);
+			*err = -EIO;
 			return NULL;
 		}
 		memcpy(buf + pos, fo->data, min_t(u64, PAGE_SIZE, sz - pos));
 		folio_put(fo);
 	}
 	*size = sz;
+	*err = 0;
 	return buf;
 }
 
@@ -134,6 +141,8 @@ static void ngf_runs(struct ngf *f, u64 mft_no, struct attr_record *a)
 	struct ntfs_volume *vol = f->vol;
 	struct runlist_element *rl, *r;
 	size_t cnt = 0;
+	if (f->r->fatal > 1000)
+		return;
 	rl = ntfs_mapping_pairs_decompress(vol, a, NULL, &cnt);
 	if (IS_ERR(rl)) {
 		ngf_fatal(f, "record %llu: attribute 0x%x has bad mapping pairs", mft_no, le32_to_cpu(a->type));
@@ -143,6 +152,10 @@ static void ngf_runs(struct ngf *f, u64 mft_no, struct attr_record *a)
 		s64 c;
 		if (r->lcn < 0)
 			continue;
+		if (r->length < 0 || f->r->clusters > 2 * (u64)vol->nr_clusters) {
+			ngf_fatal(f, "record %llu: runs reference more clusters than the volume has", mft_no);
+			break;
+		}
 		if (r->lcn + r->length > vol->nr_clusters) {
 			ngf_fatal(f, "record %llu: run %lld+%lld past the end of the volume", mft_no, r->lcn, r->length);
 			continue;
@@ -163,38 +176,45 @@ static void ngf_runs(struct ngf *f, u64 mft_no, struct attr_record *a)
 	kvfree(rl);
 }
 
-/* Validates one in-use record (fixups already applied) and walks its attributes. */
-static void ngf_record(struct ngf *f, u64 mft_no, struct mft_record *m)
+/*
+ * Validates one in-use record (fixups already applied) and walks its attributes; false when the
+ * record is malformed (pass 2 then leaves it alone).  Ranges are checked by subtraction.
+ */
+static bool ngf_record(struct ngf *f, u64 mft_no, struct mft_record *m)
 {
 	struct ntfs_volume *vol = f->vol;
 	u32 used = le32_to_cpu(m->bytes_in_use), ofs = le16_to_cpu(m->attrs_offset);
-	if (ntfs_mft_record_check(vol, m, mft_no)) {
+	if (ntfs_mft_record_check(vol, m, mft_no) || used > vol->mft_record_size || ofs > used) {
 		ngf_fatal(f, "record %llu: corrupt header", mft_no);
-		return;
+		return false;
 	}
-	while (ofs + 8 <= used) {
+	while (used - ofs >= 8) {
 		struct attr_record *a = (struct attr_record *)((u8 *)m + ofs);
 		u32 alen;
 		if (a->type == AT_END)
-			return;
+			return true;
 		alen = le32_to_cpu(a->length);
-		if (alen < 16 || (alen & 7) || ofs + alen > used) {
+		if (alen < 24 || (alen & 7) || alen > used - ofs) {
 			ngf_fatal(f, "record %llu: attribute at %u has length %u", mft_no, ofs, alen);
-			return;
+			return false;
 		}
 		if (a->non_resident) {
 			if (alen < 64 || le16_to_cpu(a->data.non_resident.mapping_pairs_offset) >= alen) {
 				ngf_fatal(f, "record %llu: non-resident attribute at %u is truncated", mft_no, ofs);
-				return;
+				return false;
 			}
 			ngf_runs(f, mft_no, a);
-		} else if (le16_to_cpu(a->data.resident.value_offset) + le32_to_cpu(a->data.resident.value_length) > alen) {
-			ngf_fatal(f, "record %llu: resident value at %u overruns its attribute", mft_no, ofs);
-			return;
+		} else {
+			u32 vo = le16_to_cpu(a->data.resident.value_offset), vl = le32_to_cpu(a->data.resident.value_length);
+			if (vo > alen || vl > alen - vo) {
+				ngf_fatal(f, "record %llu: resident value at %u overruns its attribute", mft_no, ofs);
+				return false;
+			}
 		}
 		ofs += alen;
 	}
 	ngf_fatal(f, "record %llu: no end marker", mft_no);
+	return false;
 }
 
 /* One index entry list (in the root or in an index block): every entry must name an in-use record. */
@@ -235,10 +255,15 @@ static void ngf_dir(struct ngf *f, u64 dir, struct mft_record *m)
 	u32 ibs = 0, blen = 0;
 	struct attr_record *alloc = NULL, *bmp = NULL;
 	u8 *bits = NULL;
-	while (ofs + 8 <= used) {
+	bool alist = false;
+	/* Pass 1 validated this record; the length test only keeps a bug elsewhere from looping. */
+	while (ofs <= used && used - ofs >= 8) {
 		struct attr_record *a = (struct attr_record *)((u8 *)m + ofs);
-		if (a->type == AT_END || le32_to_cpu(a->length) < 16)
+		u32 alen = le32_to_cpu(a->length);
+		if (a->type == AT_END || alen < 24 || (alen & 7) || alen > used - ofs)
 			break;
+		if (a->type == AT_ATTRIBUTE_LIST)
+			alist = true;
 		if (a->name_length == 4 && a->type == AT_INDEX_ROOT && !a->non_resident) {
 			struct index_root *ir = (struct index_root *)((u8 *)a + le16_to_cpu(a->data.resident.value_offset));
 			u32 vlen = le32_to_cpu(a->data.resident.value_length);
@@ -254,14 +279,23 @@ static void ngf_dir(struct ngf *f, u64 dir, struct mft_record *m)
 		} else if (a->name_length == 4 && a->type == AT_BITMAP) {
 			bmp = a;
 		}
-		ofs += le32_to_cpu(a->length);
+		ofs += alen;
+	}
+	if (alist && (!alloc || !bmp)) {
+		/* With an attribute list the allocation or its bitmap may live in an extension record. */
+		f->r->dirs_skipped++;
+		return;
 	}
 	if (alloc && ibs >= 512 && ibs <= 65536 && !(ibs & (ibs - 1))) {
 		size_t cnt = 0;
-		u64 size = le64_to_cpu(alloc->data.non_resident.data_size), pos;
+		u64 size = le64_to_cpu(alloc->data.non_resident.data_size), pos, limit;
+		u64 asize = le64_to_cpu(alloc->data.non_resident.allocated_size);
 		struct runlist_element *rl;
-		if (le64_to_cpu(alloc->data.non_resident.highest_vcn) + 1 <
-		    (s64)((le64_to_cpu(alloc->data.non_resident.allocated_size)) >> vol->cluster_size_bits)) {
+		if (size > asize) {
+			ngf_fatal(f, "directory %llu: index data size %llu beyond its allocation %llu", dir, size, asize);
+			return;
+		}
+		if (le64_to_cpu(alloc->data.non_resident.highest_vcn) + 1 < (s64)(asize >> vol->cluster_size_bits)) {
 			/* The allocation continues in extension records: its blocks are not walked here. */
 			f->r->dirs_skipped++;
 			return;
@@ -300,10 +334,19 @@ static void ngf_dir(struct ngf *f, u64 dir, struct mft_record *m)
 				kfree(bits);
 			return;		/* reported by the record pass */
 		}
-		for (pos = 0; pos + ibs <= size; pos += ibs) {
+		/* Every index block needs a bit, as the core requires when it loads the index. */
+		if ((u64)blen * 8 < size / ibs) {
+			ngf_fatal(f, "directory %llu: index bitmap of %u bytes too small for %llu bytes of index", dir, blen, size);
+			if (bmp->non_resident)
+				kfree(bits);
+			kvfree(rl);
+			return;
+		}
+		limit = size;
+		for (pos = 0; limit >= ibs && pos <= limit - ibs; pos += ibs) {
 			struct index_block *ib = (struct index_block *)f->ib;
 			u64 bn = pos / ibs;
-			if (bn >= (u64)blen * 8 || !tbit(bits, bn))
+			if (!tbit(bits, bn))
 				continue;
 			if (ngf_read_rl(f, rl, pos, f->ib, ibs)) {
 				ngf_fatal(f, "directory %llu: index block at %llu unreadable", dir, pos);
@@ -340,27 +383,42 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 	f.rec = kmalloc(rs, GFP_KERNEL);
 	f.chunk = kmalloc(NGF_CHUNK, GFP_KERNEL);
 	f.ib = kmalloc(65536, GFP_KERNEL);
-	f.mftbmp = ngf_read_inode(&f, vol->mftbmp_ino, &f.mftbmp_bits);
-	f.lcnbmp = ngf_read_inode(&f, vol->lcnbmp_ino, &lcnsize);
-	if (!f.rec || !f.chunk || !f.ib || !f.mftbmp || !f.lcnbmp) {
+	if (!f.rec || !f.chunk || !f.ib) {
 		err = -ENOMEM;
+		goto out;
+	}
+	f.mftbmp = ngf_read_inode(&f, vol->mftbmp_ino, &f.mftbmp_bits, &err);
+	if (err == -EIO)
+		ngf_fatal(&f, "$MFT:$BITMAP unreadable");
+	if (!err) {
+		f.lcnbmp = ngf_read_inode(&f, vol->lcnbmp_ino, &lcnsize, &err);
+		if (err == -EIO)
+			ngf_fatal(&f, "$Bitmap unreadable");
+	}
+	if (err) {
+		/* An unreadable bitmap is damage (reported); no memory means the check could not run. */
+		if (err == -EIO)
+			err = 0;
 		goto out;
 	}
 	f.mftbmp_bits *= 8;
 	mftsize = (u64)i_size_read(vol->mft_ino);
 	f.nrec = min_t(u64, mftsize / rs, f.mftbmp_bits);
+	r->records = f.nrec;
 	if (f.nrec > (4u << 20) || rs > NGF_CHUNK) {
 		err = -EFBIG;
 		goto out;
 	}
 	f.seq = kvmalloc((size_t)f.nrec * sizeof(u16), GFP_KERNEL);
 	f.isdir = kvmalloc((size_t)(f.nrec + 7) / 8, GFP_KERNEL);
-	if (!f.seq || !f.isdir) {
+	f.ok = kvmalloc((size_t)(f.nrec + 7) / 8, GFP_KERNEL);
+	if (!f.seq || !f.isdir || !f.ok) {
 		err = -ENOMEM;
 		goto out;
 	}
 	memset(f.seq, 0, (size_t)f.nrec * sizeof(u16));
 	memset(f.isdir, 0, (size_t)(f.nrec + 7) / 8);
+	memset(f.ok, 0, (size_t)(f.nrec + 7) / 8);
 	cbytes = ((u64)vol->nr_clusters + 7) / 8;
 	if (cbytes <= NGF_MAX_CBMP && lcnsize >= cbytes) {
 		f.ref = kvmalloc((size_t)cbytes, GFP_KERNEL);
@@ -372,8 +430,11 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 	down_write(&mni->runlist.lock);
 	err = ntfs_attr_map_whole_runlist(mni);
 	up_write(&mni->runlist.lock);
-	if (err)
+	if (err) {
+		ngf_fatal(&f, "$MFT runlist unreadable (%d)", err);
+		err = 0;
 		goto out;
+	}
 	/* Pass 0: sequence numbers of in-use records.  Pass 1: records, then directory indexes. */
 	for (pass = 0; pass < 3 && !err; pass++) {
 		for (i = 0; i < f.nrec; i += NGF_CHUNK / rs) {
@@ -389,8 +450,10 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 			err = ngf_read_rl(&f, mni->runlist.rl, i * rs, f.chunk, (u32)(n * rs));
 			up_read(&mni->runlist.lock);
 			if (err) {
-				ngf_fatal(&f, "$MFT unreadable at record %llu", i);
-				break;
+				/* Damage, not a check that could not run (a chunk may be reported by more than one pass). */
+				ngf_fatal(&f, "$MFT unreadable at record %llu (pass %d)", i, pass);
+				err = 0;
+				continue;
 			}
 			for (k = 0; k < n; k++) {
 				u64 no = i + k;
@@ -399,6 +462,8 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 				memcpy(f.rec, f.chunk + k * rs, rs);
 				inuse = ntfs_is_file_record(m->magic) && (m->flags & MFT_RECORD_IN_USE);
 				if (!inuse && !inbmp)
+					continue;
+				if (pass == 2 && !tbit(f.ok, no))
 					continue;
 				if (inuse && post_read_mst_fixup((struct ntfs_record *)m, rs)) {
 					if (pass == 1)
@@ -416,12 +481,16 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 					if (inuse && !inbmp) {
 						ngf_fatal(&f, "record %llu: in use but free in $MFT:$BITMAP", no);
 					} else if (!inuse) {
-						if (no >= 24)
+						/* Neither FILE nor zeros (a torn "BAAD" record, garbage) is damage; a free FILE record a leak. */
+						if (no >= 24 && !ntfs_is_file_record(m->magic) && *(u32 *)m)
+							ngf_fatal(&f, "record %llu: marked in $MFT:$BITMAP but unreadable", no);
+						else if (no >= 24)
 							ngf_leak(&f, "record %llu: marked in $MFT:$BITMAP but not in use", no);
 						continue;
 					}
 					r->inuse++;
-					ngf_record(&f, no, m);
+					if (ngf_record(&f, no, m))
+						sbit(f.ok, no);
 					if (MREF_LE(m->base_mft_record)) {
 						u64 base = MREF_LE(m->base_mft_record);
 						if (base >= f.nrec || !f.seq[base])
@@ -438,7 +507,6 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 				break;
 		}
 	}
-	r->records = f.nrec;
 	/* Clusters marked used that no record references: leaks. */
 	if (!err && f.ref) {
 		u64 c, run = 0, first = 0;
@@ -463,6 +531,7 @@ out:
 	kvfree(f.ref);
 	kvfree(f.seq);
 	kvfree(f.isdir);
+	kvfree(f.ok);
 	kvfree(f.mftbmp);
 	kvfree(f.lcnbmp);
 	kfree(f.ib);

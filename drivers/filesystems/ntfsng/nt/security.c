@@ -10,18 +10,26 @@
 #define NDEBUG
 #include <debug.h>
 
-/* A file without any descriptor (neither its own nor a $Secure one): Everyone owns it, no DACL. */
+/*
+ * A file without a usable descriptor (none of its own, no $Secure entry, or an invalid one) is
+ * treated as owned by the administrators, with only SYSTEM and the administrators allowed in.
+ */
 static NTSTATUS NgDefaultSecurity(PSECURITY_DESCRIPTOR *Out)
 {
     SECURITY_DESCRIPTOR Abs;
+    UCHAR AclBuffer[sizeof(ACL) + 2 * (sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE)];
+    PACL Dacl = (PACL)AclBuffer;
     ULONG Len = 0;
     PSECURITY_DESCRIPTOR Rel;
     NTSTATUS Status;
 
+    RtlCreateAcl(Dacl, sizeof(AclBuffer), ACL_REVISION);
+    RtlAddAccessAllowedAce(Dacl, ACL_REVISION, FILE_ALL_ACCESS, SeExports->SeLocalSystemSid);
+    RtlAddAccessAllowedAce(Dacl, ACL_REVISION, FILE_ALL_ACCESS, SeExports->SeAliasAdminsSid);
     RtlCreateSecurityDescriptor(&Abs, SECURITY_DESCRIPTOR_REVISION);
-    RtlSetOwnerSecurityDescriptor(&Abs, SeExports->SeWorldSid, FALSE);
-    RtlSetGroupSecurityDescriptor(&Abs, SeExports->SeWorldSid, FALSE);
-    RtlSetDaclSecurityDescriptor(&Abs, TRUE, NULL, FALSE);
+    RtlSetOwnerSecurityDescriptor(&Abs, SeExports->SeAliasAdminsSid, FALSE);
+    RtlSetGroupSecurityDescriptor(&Abs, SeExports->SeLocalSystemSid, FALSE);
+    RtlSetDaclSecurityDescriptor(&Abs, TRUE, Dacl, FALSE);
     RtlAbsoluteToSelfRelativeSD(&Abs, NULL, &Len);
     Rel = ExAllocatePoolWithTag(PagedPool, Len, TAG_NTFSNG);
     if (!Rel)
@@ -36,22 +44,16 @@ static NTSTATUS NgDefaultSecurity(PSECURITY_DESCRIPTOR *Out)
     return STATUS_SUCCESS;
 }
 
-/* The file's descriptor in paged pool (the caller frees it with ExFreePoolWithTag). */
-static NTSTATUS NgGetSecurity(PNG_VCB Vcb, PNG_FCB Fcb, PSECURITY_DESCRIPTOR *Out)
+/* The descriptor of Node in paged pool (ExFreePoolWithTag); caller holds CoreLock. */
+NTSTATUS NgReadSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR *Out)
 {
     void *Raw = NULL;
     unsigned int Len = 0;
     PSECURITY_DESCRIPTOR Sd;
     int Err;
 
-    NG_SHARED_HOLD Hold;
-
     *Out = NULL;
-    NgAcquireCoreShared(Vcb, &Hold);
-    Err = NgEnsureNode(Fcb);
-    if (!Err)
-        Err = ngc_get_security(Vcb->Core, Fcb->Node, &Raw, &Len);
-    NgReleaseCoreShared(Vcb, &Hold);
+    Err = ngc_get_security(Vcb->Core, Node, &Raw, &Len);
     if (Err)
         return NgErrnoToStatus(Err);
     if (!Raw)
@@ -59,8 +61,19 @@ static NTSTATUS NgGetSecurity(PNG_VCB Vcb, PNG_FCB Fcb, PSECURITY_DESCRIPTOR *Ou
     if (!RtlValidRelativeSecurityDescriptor(Raw, Len, 0))
     {
         ngc_free(Raw);
-        DPRINT1("ntfsng: invalid security descriptor on %I64x, using the default\n", Fcb->MftNo);
+        DPRINT1("ntfsng: invalid security descriptor, using the default\n");
         return NgDefaultSecurity(Out);
+    }
+    {
+        /* SeAccessCheck dereferences the owner SID; a descriptor without one (some Windows-written
+         * metadata) would fault, so fall back to the default. */
+        PSID Owner = NULL;
+        BOOLEAN Defaulted;
+        if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(Raw, &Owner, &Defaulted)) || !Owner)
+        {
+            ngc_free(Raw);
+            return NgDefaultSecurity(Out);
+        }
     }
     Sd = ExAllocatePoolWithTag(PagedPool, Len, TAG_NTFSNG);
     if (Sd)
@@ -70,6 +83,21 @@ static NTSTATUS NgGetSecurity(PNG_VCB Vcb, PNG_FCB Fcb, PSECURITY_DESCRIPTOR *Ou
         return STATUS_INSUFFICIENT_RESOURCES;
     *Out = Sd;
     return STATUS_SUCCESS;
+}
+
+/* The file's descriptor in paged pool (the caller frees it with ExFreePoolWithTag). */
+static NTSTATUS NgGetSecurity(PNG_VCB Vcb, PNG_FCB Fcb, PSECURITY_DESCRIPTOR *Out)
+{
+    NG_SHARED_HOLD Hold;
+    NTSTATUS Status;
+    int Err;
+
+    *Out = NULL;
+    NgAcquireCoreShared(Vcb, &Hold);
+    Err = NgEnsureNode(Fcb);
+    Status = Err ? NgErrnoToStatus(Err) : NgReadSecurity(Vcb, Fcb->Node, Out);
+    NgReleaseCoreShared(Vcb, &Hold);
+    return Status;
 }
 
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -180,24 +208,31 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 }
 
 /*
- * A descriptor given at create time (the ACCESS_STATE of the create) becomes the new file's own
- * descriptor: owner and group default from the creator's token, generic rights are mapped.
- * Called with the core lock held, before the create completes; an error fails the create.
+ * The descriptor of a new file or directory: inherited from its directory's descriptor ParentSd
+ * (CREATOR OWNER and CREATOR GROUP replaced, generic rights mapped, inheritance flags applied),
+ * merged with a descriptor given to the create; owner and group come from the creator's token.
+ * Stored as the file's own descriptor before the create completes; caller holds CoreLock
+ * exclusive, so the new file and its descriptor reach the volume in one transaction.  When
+ * SeAssignSecurityEx refuses (invalid owner, privilege not held, ...), its status is in *Rejected.
  */
-int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN IsDir)
+int NgAssignNewSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR ParentSd, PACCESS_STATE As, BOOLEAN IsDir,
+                        NTSTATUS *Rejected)
 {
     PSECURITY_DESCRIPTOR New = NULL;
     NTSTATUS Status;
     int Err;
 
-    if (!As || !As->SecurityDescriptor)
+    if (!As)
         return 0;
-    Status = SeAssignSecurity(NULL, As->SecurityDescriptor, &New, IsDir, &As->SubjectSecurityContext,
-                              IoGetFileObjectGenericMapping(), PagedPool);
+    Status = SeAssignSecurityEx(ParentSd, As->SecurityDescriptor, &New, NULL, IsDir,
+                                SEF_DACL_AUTO_INHERIT | SEF_SACL_AUTO_INHERIT, &As->SubjectSecurityContext,
+                                IoGetFileObjectGenericMapping(), PagedPool);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ntfsng: create-time security descriptor rejected (0x%08lx)\n", Status);
-        return Status == STATUS_INSUFFICIENT_RESOURCES ? -NGC_ENOMEM : -NGC_EINVAL;
+        /* The create fails with SeAssignSecurityEx's own status. */
+        DPRINT1("ntfsng: no descriptor for a new file (0x%08lx)\n", Status);
+        *Rejected = Status;
+        return -NGC_EINVAL;
     }
     NgMapGenericDacl(New);
     Err = ngc_set_security(Vcb->Core, Node, New, RtlLengthSecurityDescriptor(New));

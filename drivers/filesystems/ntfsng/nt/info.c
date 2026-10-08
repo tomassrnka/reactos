@@ -294,8 +294,8 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
 {
     PNG_VCB Vcb = Fcb->Vcb;
     int Empty = 1;
-    if (Fcb->IsRoot || !Ccb->NameLength)
-        return STATUS_CANNOT_DELETE;
+    if (Fcb->IsRoot || !Ccb->NameLength || Fcb->MftNo < 16 || Ccb->ParentMftNo == 11)
+        return STATUS_CANNOT_DELETE;   /* the metadata files and $Extend children are never deleted */
     if (!D->DeleteFile)
     {
         Fcb->DeletePending = FALSE;
@@ -305,9 +305,6 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
     NgFillStat(Fcb);
     if (Fcb->Stat.file_attributes & FILE_ATTRIBUTE_READONLY)
         return STATUS_CANNOT_DELETE;
-    /* The last name of a file whose named stream is open is not deleted (the core cannot evict it). */
-    if (!Fcb->Stream.Length && Fcb->Stat.nlink <= 1 && !NgRetireStreams(Vcb, Fcb->MftNo, Fcb, FALSE))
-        return STATUS_SHARING_VIOLATION;
     if (Fcb->IsDirectory)
     {
         NgAcquireCore(Vcb);
@@ -322,6 +319,9 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
     {
         return STATUS_CANNOT_DELETE;
     }
+    /* The last name of a file whose named stream is open is not deleted (the core cannot evict it). */
+    if (!NgMarkDeletePending(Vcb, Fcb, !Fcb->Stream.Length && Fcb->Stat.nlink <= 1))
+        return STATUS_SHARING_VIOLATION;
     NgSetDeletePending(Fcb, Ccb);
     FileObject->DeletePending = TRUE;
     return STATUS_SUCCESS;
@@ -337,34 +337,47 @@ static BOOLEAN NgSameName(const WCHAR *A, USHORT ALen, const WCHAR *B, USHORT BL
  * target's directory already opened (SL_OPEN_TARGET_DIRECTORY) in SetFile.FileObject; a bare
  * name renames within the current directory.  The final component of FileName is the new name.
  */
-/* TRUE if a file or directory below directory DirMftNo has open handles (first names, 64 levels). */
+/* TRUE if a file or directory anywhere below directory DirMftNo has an open handle or a create in
+ * progress (64 levels). */
 static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
 {
-    ULONGLONG Open[64];
-    ULONG Count = 0, i, Depth;
+    ULONGLONG *Open = NULL;
+    ULONG Count = 0, Cap = 0, i, Depth;
     PLIST_ENTRY Entry;
     BOOLEAN Found = FALSE;
     PWCHAR Name;
 
+    /* Snapshot the MFT numbers of every open file and create in progress (the parent walk needs
+     * CoreLock, which must not be taken under FcbListLock): size the array, then fill it. */
     ExAcquireFastMutex(&Vcb->FcbListLock);
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
-        if (!F->OpenHandles || F->IsVolume || F->IsRoot || F->MftNo == DirMftNo)
-            continue;
-        if (Count == RTL_NUMBER_OF(Open))
+        if ((F->OpenHandles || F->Opening) && !F->IsVolume && !F->IsRoot && F->MftNo != DirMftNo)
+            Cap++;
+    }
+    if (Cap)
+        Open = ExAllocatePoolWithTag(PagedPool, Cap * sizeof(ULONGLONG), TAG_NTFSNG);
+    if (Open)
+    {
+        for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < Cap; Entry = Entry->Flink)
         {
-            Found = TRUE;       /* too many to check: refuse rather than guess */
-            break;
+            PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+            if ((F->OpenHandles || F->Opening) && !F->IsVolume && !F->IsRoot && F->MftNo != DirMftNo)
+                Open[Count++] = F->MftNo;
         }
-        Open[Count++] = F->MftNo;
     }
     ExReleaseFastMutex(&Vcb->FcbListLock);
-    if (Found || !Count)
-        return Found;
+    if (!Cap)
+        return FALSE;
+    if (!Open)
+        return TRUE;        /* out of memory: refuse rather than rename over open files */
     Name = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
     if (!Name)
+    {
+        ExFreePoolWithTag(Open, TAG_NTFSNG);
         return TRUE;
+    }
     NgAcquireCore(Vcb);
     for (i = 0; i < Count && !Found; i++)
     {
@@ -390,6 +403,7 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
     }
     NgReleaseCore(Vcb);
     ExFreePoolWithTag(Name, TAG_NTFSNG);
+    ExFreePoolWithTag(Open, TAG_NTFSNG);
     return Found;
 }
 
@@ -434,7 +448,7 @@ static BOOLEAN NgIsInSubtree(PNG_VCB Vcb, ULONGLONG DirMftNo, ULONGLONG Ancestor
 }
 
 static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
-                               ULONG Length, BOOLEAN IsLink)
+                               ULONG Length, BOOLEAN IsLink, BOOLEAN Check)
 {
     PNG_VCB Vcb = Fcb->Vcb;
     PFILE_OBJECT TargetFo = Stack->Parameters.SetFile.FileObject;
@@ -456,6 +470,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         return STATUS_INVALID_PARAMETER;
     if (Fcb->IsRoot || Fcb->IsVolume || Fcb->Stream.Length || !Ccb->NameLength)
         return STATUS_INVALID_PARAMETER;
+    if (Fcb->MftNo < 16 || Ccb->ParentMftNo == 11)
+        return STATUS_ACCESS_DENIED;   /* metadata files and $Extend children are never renamed or linked */
     if (IsLink && Fcb->IsDirectory)
         return STATUS_FILE_IS_A_DIRECTORY;
     n = R->FileNameLength / sizeof(WCHAR);
@@ -516,6 +532,11 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         Status = NgErrnoToStatus(Err);
         goto out;
     }
+    if (Target && (TSt.mft_ref & 0xffffffffffffULL) < 16)
+    {
+        Status = STATUS_ACCESS_DENIED;   /* never replace a metadata file */
+        goto out;
+    }
     if (Target)
     {
         if ((TSt.mft_ref & 0xffffffffffffULL) == Fcb->MftNo)
@@ -552,6 +573,25 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                 Status = STATUS_ACCESS_DENIED;      /* a named stream of the target is open */
                 goto out;
             }
+            if (Check)
+            {
+                /* Replacing a file deletes it: DELETE on it or FILE_DELETE_CHILD on its directory. */
+                PSECURITY_DESCRIPTOR TargetSd = NULL, DirSd = NULL;
+                NG_SHARED_HOLD Hold;
+                NgAcquireCoreShared(Vcb, &Hold);
+                Status = NgReadSecurity(Vcb, Target, &TargetSd);
+                if (NT_SUCCESS(Status))
+                    Status = NgReadSecurity(Vcb, NewDir, &DirSd);
+                NgReleaseCoreShared(Vcb, &Hold);
+                if (NT_SUCCESS(Status))
+                    Status = NgCheckDeleteEntry(TargetSd, DirSd);
+                if (TargetSd)
+                    ExFreePoolWithTag(TargetSd, TAG_NTFSNG);
+                if (DirSd)
+                    ExFreePoolWithTag(DirSd, TAG_NTFSNG);
+                if (!NT_SUCCESS(Status))
+                    goto out;
+            }
             TargetFcb = NgFindFcb(Vcb, TSt.mft_ref & 0xffffffffffffULL);
             if (TargetFcb)
             {
@@ -560,18 +600,13 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                     Status = STATUS_ACCESS_DENIED;
                     goto out;
                 }
-                if (TargetFcb->SectionObjectPointers.SharedCacheMap || TargetFcb->SectionObjectPointers.DataSectionObject)
+                if ((TSt.nlink <= 1) &&
+                    (TargetFcb->SectionObjectPointers.SharedCacheMap || TargetFcb->SectionObjectPointers.DataSectionObject))
                     NgPurgeFrom(TargetFcb, 0);
             }
         }
     }
 
-    if (!IsLink && Fcb->IsDirectory && NewDirMftNo != Ccb->ParentMftNo && NgIsInSubtree(Vcb, NewDirMftNo, Fcb->MftNo))
-    {
-        /* A directory cannot move into itself or below itself. */
-        Status = STATUS_INVALID_PARAMETER;
-        goto out;
-    }
     if (!IsLink && Fcb->IsDirectory && NgDirHasOpenFiles(Vcb, Fcb->MftNo))
     {
         /* As on Windows: a directory with open files below it is not renamed. */
@@ -579,11 +614,24 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         goto out;
     }
     NgAcquireCore(Vcb);
+    /* A directory cannot move into itself or below itself; checked under the lock the move holds. */
+    if (!IsLink && Fcb->IsDirectory && NgIsInSubtree(Vcb, NewDirMftNo, Fcb->MftNo))
+    {
+        NgReleaseCore(Vcb);
+        Status = STATUS_INVALID_PARAMETER;
+        goto out;
+    }
     Err = NgEnsureNode(Fcb);
     if (!Err)
         Err = ngc_iget(Vcb->Core, Ccb->ParentMftNo, &OldDir);
-    if (!Err && Target && !CaseOnly && TSt.nlink <= 1 && !NgRetireStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL, TRUE))
-        Err = -NGC_EBUSY;
+    if (!Err && Target && !CaseOnly)
+    {
+        /* The replaced file's last name goes: not while its named stream is open or being opened. */
+        struct ngc_stat Now;
+        ngc_stat(Target, &Now);
+        if (Now.nlink <= 1 && !NgRetireStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL, TRUE))
+            Err = -NGC_EBUSY;
+    }
     if (!Err)
     {
         if (IsLink)
@@ -635,12 +683,18 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Crtime);
         }
     }
-    if (!Err && TargetFcb)
+    if (Target && !CaseOnly && NgNodeGone(Target))
     {
-        /* Its node goes too: a referenced inode keeps the freed record and clusters in use. */
-        NgParkNode(TargetFcb);
-        TargetFcb->Deleted = TRUE;
-        NgUnlistFcb(TargetFcb);
+        /* The replaced file's record is free (also when a later step failed): its FCBs go, a node
+         * first (a referenced inode keeps the freed record and clusters in use).  With another
+         * name left it stays as it is. */
+        if (TargetFcb)
+        {
+            NgParkNode(TargetFcb);
+            TargetFcb->Deleted = TRUE;
+            NgUnlistFcb(TargetFcb);
+        }
+        NgDeleteStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL);
     }
     if (!Err)
         ngc_stat(Fcb->Node, &Fcb->Stat);
@@ -798,7 +852,8 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FileRenameInformation:
         case FileLinkInformation:
             ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
-            Status = NgRenameOrLink(Fcb, FileObject->FsContext2, Stack, Buffer, Length, Class == FileLinkInformation);
+            Status = NgRenameOrLink(Fcb, FileObject->FsContext2, Stack, Buffer, Length, Class == FileLinkInformation,
+                                    Irp->RequestorMode != KernelMode);
             ExReleaseResourceLite(Fcb->Header.Resource);
             return Status;
         default:

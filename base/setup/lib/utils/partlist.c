@@ -14,6 +14,7 @@
 #include "volutil.h"
 #include "fsrec.h" // For FileSystemToMBRPartitionType()
 #include "devutils.h"
+#include "filesup.h" // For DoesFileExist_2()
 
 #include "registry.h"
 
@@ -2061,6 +2062,7 @@ CreatePartitionList(VOID)
         return NULL;
 
     List->SystemPartition = NULL;
+    List->ForeignBootPartition = NULL;
 
     InitializeListHead(&List->DiskListHead);
     InitializeListHead(&List->BiosDiskListHead);
@@ -3207,6 +3209,34 @@ DeletePartition(
     return TRUE;
 }
 
+/*
+ * TRUE for an NTFS volume that holds the boot loader of another operating
+ * system (Windows Boot Manager or NTLDR) and no FreeLoader. Setup does not
+ * make such a volume its system partition: the NTFS boot code it installs
+ * replaces the volume's own, whose remaining sectors the saved first sector
+ * still needs, so the other system would no longer boot.
+ */
+BOOLEAN
+IsForeignNtfsBootPartition(
+    _In_ PPARTENTRY PartEntry)
+{
+    PVOLENTRY Volume = PartEntry->Volume;
+    WCHAR Root[RTL_NUMBER_OF_FIELD(VOLINFO, DeviceName) + 1];
+
+    if (!Volume || Volume->FormatState != Formatted ||
+        _wcsicmp(Volume->Info.FileSystem, L"NTFS") != 0)
+    {
+        return FALSE;
+    }
+
+    RtlStringCchPrintfW(Root, _countof(Root), L"%s\\", Volume->Info.DeviceName);
+    if (DoesFileExist_2(Root, L"freeldr.sys"))
+        return FALSE;
+    return DoesFileExist_2(Root, L"bootmgr") ||
+           DoesFileExist_2(Root, L"NTLDR") ||
+           DoesFileExist_2(Root, L"Boot\\BCD");
+}
+
 static
 BOOLEAN
 IsSupportedActivePartition(
@@ -3265,6 +3295,12 @@ IsSupportedActivePartition(
             _wcsicmp(Volume->Info.FileSystem, L"NTFS")  == 0 ||
             _wcsicmp(Volume->Info.FileSystem, L"BTRFS") == 0)
         {
+            if (IsForeignNtfsBootPartition(PartEntry))
+            {
+                DPRINT1("Partition %lu in disk %lu holds another system's boot loader on NTFS, not taking it over\n",
+                        PartEntry->PartitionNumber, PartEntry->DiskEntry->DiskNumber);
+                return FALSE;
+            }
             return TRUE;
         }
         else

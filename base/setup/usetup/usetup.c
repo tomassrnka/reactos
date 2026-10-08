@@ -2426,9 +2426,14 @@ Restart:
 
     ASSERT(!FileSystemList);
 
-    if (IsUnattendedSetup)
+    if (IsUnattendedSetup && Volume != InstallVolume)
     {
-        /* In unattended mode, preselect the file system */
+        /* A separate system partition (the boot files) gets FAT, whatever FsType says */
+        DefaultFs = L"FAT";
+    }
+    else if (IsUnattendedSetup)
+    {
+        /* In unattended mode, preselect the file system of the installation volume */
         switch (USetupData.FsType)
         {
             /* 1 is for BtrFS */
@@ -3655,6 +3660,17 @@ BootLoaderHardDiskPage(PINPUT_RECORD Ir)
                 (USetupData.BootLoaderLocation == 2)
                    ? 1 /* Install MBR and VBR */
                    : 0 /* Install VBR only */);
+    if (Status == STATUS_SUCCESS && PartitionList->ForeignBootPartition)
+    {
+        /* Keep the other system bootable from the FreeLoader menu */
+        PPARTENTRY Foreign = PartitionList->ForeignBootPartition;
+        NTSTATUS EntryStatus = AddPartitionBootEntry(&USetupData.SystemRootPath,
+                                                     Foreign->DiskEntry->DiskNumber,
+                                                     Foreign->PartitionNumber,
+                                                     L"Windows", L"\"Microsoft Windows\"");
+        if (!NT_SUCCESS(EntryStatus))
+            DPRINT1("AddPartitionBootEntry() failed: Status 0x%lx\n", EntryStatus);
+    }
     if (Status == STATUS_SUCCESS)
         return TRUE; /* Successful installation */
 

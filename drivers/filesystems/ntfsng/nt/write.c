@@ -10,6 +10,7 @@
 
 /* ngos_nt.c */
 int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len);
+int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len);
 
 /* Cc maps files in views of this size (VACB_MAPPING_GRANULARITY). */
 #define NG_VACB_SIZE (256 * 1024)
@@ -162,32 +163,6 @@ BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start)
 }
 
 /*
- * Before a non-cached write; the caller holds PagingIoResource exclusive and keeps it until the
- * write is on disk, so no read can bring the old bytes back into the cache in between.
- * Everything from the view holding Offset to the end of the stream is flushed and then purged.
- * FALSE if a view stayed in use.
- */
-BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset)
-{
-    LONGLONG End = NgCachedLimit(Fcb);
-    LARGE_INTEGER Li;
-    IO_STATUS_BLOCK Iosb;
-    BOOLEAN Ok = TRUE;
-
-    Offset &= ~(LONGLONG)(NG_VACB_SIZE - 1);
-    for (Li.QuadPart = Offset; Ok && Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
-    {
-        Iosb.Status = STATUS_SUCCESS;
-        CcFlushCache(&Fcb->SectionObjectPointers, &Li, (ULONG)min(End - Li.QuadPart, (LONGLONG)NG_RANGE_CHUNK), &Iosb);
-        /* Dirty pages that did not reach the disk must not be purged. */
-        Ok = NT_SUCCESS(Iosb.Status);
-    }
-    if (Ok)
-        Ok = NgPurgeFrom(Fcb, Offset);
-    return Ok;
-}
-
-/*
  * EOF change.  Caller holds MainResource exclusive.  Core first, then the header, then Cc.
  * A shrink flushes Cc first so the core's on-disk view of the surviving bytes is current.
  */
@@ -325,28 +300,57 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     return STATUS_SUCCESS;
 }
 
+/* Writes a locked buffer straight to the storage device, through a sector-aligned pool buffer. */
+static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
+{
+    PUCHAR Bounce = ExAllocatePoolWithTag(NonPagedPool, 64 * 1024, TAG_NTFSNG);
+    ULONG Done = 0;
+
+    if (!Bounce)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    while (Done < Length)
+    {
+        ULONG n = min(Length - Done, 64 * 1024);
+        RtlCopyMemory(Bounce, Buffer + Done, n);
+        if (ngos_dev_write(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n))
+            break;
+        Done += n;
+    }
+    ExFreePoolWithTag(Bounce, TAG_NTFSNG);
+    return Done == Length ? STATUS_SUCCESS : STATUS_UNEXPECTED_IO_ERROR;
+}
+
 /*
- * Writes through a volume handle.  Only the boot code ($Boot, the first 8 KiB) may change under
- * a mounted volume: setup installs the boot sector that way.  The write goes through the core's
- * device path so the journal overlay and the cached boot sector see it; anything else needs a
- * lock and dismount, which are not implemented.
+ * Writes through a volume handle.  The handle that holds the volume lock writes anywhere, as on
+ * Windows (formatters lock the volume and write it); from then on the mounted state no longer
+ * describes the disk, so nothing of it is written back when the volume is dismounted.  Without
+ * the lock only the boot code ($Boot, the first 8 KiB) may change under the mounted volume: setup
+ * installs the boot sector that way, through the core's device path so the journal overlay and
+ * the cached boot sector see it.
  */
 #define NG_BOOT_REGION 8192
 static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Length)
 {
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    BOOLEAN Holder = Vcb->LockedBy == FileObject || Vcb->Dismounted;
+    BOOLEAN Raw = Vcb->Dismounted;
     PMDL Mdl = NULL;
     PVOID Buffer;
     NTSTATUS Status = STATUS_SUCCESS;
     int Err;
 
-    if (Vcb->ReadOnly)
+    if (Vcb->ReadOnly && !Holder)
         return STATUS_MEDIA_WRITE_PROTECTED;
     if (Offset < 0 || ((ULONG)Offset | Length) & (Vcb->SectorSize - 1))
         return STATUS_INVALID_PARAMETER;
     if (Offset + Length > NG_BOOT_REGION)
     {
-        DPRINT1("ntfsng: volume write at %I64d len %lu refused (outside the boot code; no lock/dismount)\n", Offset, Length);
-        return STATUS_ACCESS_DENIED;
+        if (!Holder)
+        {
+            DPRINT1("ntfsng: volume write at %I64d len %lu refused (outside the boot code, volume not locked)\n", Offset, Length);
+            return STATUS_ACCESS_DENIED;
+        }
+        Raw = TRUE;
     }
     if (Offset == 0 && Length < 512)
         return STATUS_INVALID_PARAMETER;
@@ -380,9 +384,9 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto out;
     }
-    if (Offset == 0)
+    if (Offset == 0 && !Raw)
     {
-        /* Only the boot code may change: the BPB and the signature must stay as they are. */
+        /* Only the boot code may change under the mounted volume: the BPB and the signature stay. */
         PUCHAR Old = ExAllocatePoolWithTag(NonPagedPool, 512, TAG_NTFSNG);
         BOOLEAN Same;
         if (!Old)
@@ -394,12 +398,24 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
                RtlCompareMemory(Old + 3, (PUCHAR)Buffer + 3, 0x54 - 3) == 0x54 - 3 &&
                RtlCompareMemory(Old + 510, (PUCHAR)Buffer + 510, 2) == 2;
         ExFreePoolWithTag(Old, TAG_NTFSNG);
-        if (!Same)
+        if (!Same && !Holder)
         {
             DPRINT1("ntfsng: volume write at 0 refused: it changes the BPB\n");
             Status = STATUS_ACCESS_DENIED;
             goto out;
         }
+        Raw = !Same;
+    }
+    if (Raw || Vcb->ReadOnly)
+    {
+        if (!Vcb->RawWritten && !Vcb->Dismounted)
+            DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): the mounted state is dropped at dismount\n",
+                    Offset, Length);
+        Vcb->RawWritten = TRUE;
+        Status = NgWriteDevice(Vcb, Offset, Buffer, Length);
+        if (NT_SUCCESS(Status))
+            Irp->IoStatus.Information = Length;
+        goto out;
     }
     NgAcquireCore(Vcb);
     Err = ngc_raw_write(Vcb->Core, (unsigned long long)Offset, Buffer, Length);
@@ -437,7 +453,6 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status = STATUS_SUCCESS;
     LONGLONG End, OldSize;
-    BOOLEAN PagingHeld = FALSE;
     long Done;
     int Err;
 
@@ -550,21 +565,16 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 
     /*
-     * A non-cached write must not leave older bytes in Cc.  When a view cannot be purged (in
-     * use), the write goes through the cache and straight on to disk instead.
+     * A non-cached write must not leave older bytes in Cc or in a mapped view, and a paging read
+     * can bring a purged range back at any time.  While a data section exists the write goes
+     * through the cache and straight on to disk.  Without one, the main resource held exclusive
+     * keeps a section from being created and cached reads out until the write is on disk.
      */
-    if (NonCached)
+    if (NonCached && Fcb->SectionObjectPointers.DataSectionObject)
     {
-        ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
-        PagingHeld = TRUE;
-        if (Fcb->SectionObjectPointers.DataSectionObject && !NgPurgeForNonCached(Fcb, Offset.QuadPart))
-        {
-            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
-            PagingHeld = FALSE;
-            NonCached = FALSE;
-            WriteThrough = TRUE;
-            Vcb->NonCachedViaCache++;
-        }
+        NonCached = FALSE;
+        WriteThrough = TRUE;
+        Vcb->NonCachedViaCache++;
     }
     if (!NonCached)
     {
@@ -599,11 +609,6 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Done >= 0)
             NgAfterChange(Vcb);
         NgReleaseCore(Vcb);
-        if (PagingHeld)
-        {
-            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
-            PagingHeld = FALSE;
-        }
         if (Done < 0)
         {
             DPRINT1("ntfsng: write of %I64x at %I64d len %lu failed %ld\n", Fcb->MftNo, Offset.QuadPart, Length, Done);
@@ -726,7 +731,8 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     UNREFERENCED_PARAMETER(DeviceObject);
     UNREFERENCED_PARAMETER(Irp);
 
-    /* Volumes are never dismounted, so the pointers stay valid outside the list lock. */
+    /* A VCB is never freed after its mount, so the pointers stay valid outside the list lock; a
+     * dismount is waited for (create gate) and its volume skipped. */
     ExAcquireFastMutex(&NgGlobal.VcbListLock);
     for (Entry = NgGlobal.VcbList.Flink; Entry != &NgGlobal.VcbList && Count < RTL_NUMBER_OF(Vcbs); Entry = Entry->Flink)
         Vcbs[Count++] = CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks);
@@ -736,6 +742,13 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         PNG_VCB Vcb = Vcbs[i];
         if (Vcb->ReadOnly)
             continue;
+        ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
+        if (Vcb->Dismounted || Vcb->RawWritten)
+        {
+            /* Gone, or the lock holder wrote the disk directly: mounted state is not written over it. */
+            ExReleaseResourceLite(&Vcb->CreateGate);
+            continue;
+        }
         NgFlushVolume(Vcb);
         Vcb->WriteThrough = TRUE;
         NgAcquireCore(Vcb);
@@ -747,6 +760,7 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 Vcb->Vpb->SerialNumber, Vcb->Info.dirty ? "STILL DIRTY" : "clean", Vcb->Syncs, Vcb->NonCachedViaCache,
                 Vcb->PagingFileReads, Vcb->PagingFileWrites);
         NgPrintLockStats(Vcb);
+        ExReleaseResourceLite(&Vcb->CreateGate);
     }
     ngc_write_stats(&Writes, &Bytes, &Syncs, &Dirties);
     DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs, %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",

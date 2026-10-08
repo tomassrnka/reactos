@@ -125,9 +125,11 @@ unsigned long ngos_physical_pages(void)
 {
     static ULONG Pages;
     NG_SYSTEM_BASIC_INFORMATION Info;
-    if (!Pages && NT_SUCCESS(ZwQuerySystemInformation(0, &Info, sizeof(Info), NULL)))
-        Pages = Info.NumberOfPhysicalPages;
-    return Pages ? Pages : 65536;
+    /* Asked once: a failed query is not retried later, perhaps under a spin lock. */
+    if (!Pages)
+        Pages = NT_SUCCESS(ZwQuerySystemInformation(0, &Info, sizeof(Info), NULL)) && Info.NumberOfPhysicalPages ?
+                Info.NumberOfPhysicalPages : 65536;
+    return Pages;
 }
 
 unsigned long ngos_jiffies(void)

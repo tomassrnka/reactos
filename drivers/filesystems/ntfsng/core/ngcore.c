@@ -35,6 +35,8 @@ void kshim_icache_lock(void);
 void kshim_icache_unlock(void);
 struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data);
+int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
+		int (*test)(struct inode *, void *), void *data);
 extern unsigned long kshim_pc_pages, kshim_inodes_live, kshim_counter_reads;
 void kshim_dump_allocs(void);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
@@ -81,7 +83,7 @@ static const char *ngc_mount_check(struct ngc_vol *v, struct ntfs_volume *vol, s
 		return NULL;
 	}
 	err = ngc_fsck(vol, b, r);
-	if (err) {
+	if (err && !r->fatal) {
 		printk(KERN_ERR "CHECK: not run (%d)\n", err);
 	} else {
 		printk(KERN_WARNING "CHECK: %s: %llu records (%llu in use), %llu directories (%u not walked), "
@@ -192,7 +194,7 @@ int ngc_init(void)
 	return err;
 }
 
-void ngc_umount(ngc_vol *v);
+void ngc_umount(ngc_vol *v, int discard);
 
 /* Mount passes: read-only, the read-only check of a volume that is to go read-write, the write pass. */
 enum { NGC_PASS_RO, NGC_PASS_CHECK, NGC_PASS_WRITE };
@@ -297,7 +299,7 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			if (fc->ops->free)
 				fc->ops->free(fc);
 			kfree(fc);
-			ngc_umount(v);
+			ngc_umount(v, 0);
 			return NGC_NEED_WRITE_PASS;
 		}
 		if (!*why_ro) {
@@ -383,22 +385,31 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 	return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_WRITE, out, why_ro);
 }
 
-void ngc_umount(ngc_vol *v)
+void ngc_umount(ngc_vol *v, int discard)
 {
 	struct super_block *sb = v->sb;
+	int errors;
+	if (discard) {
+		/* Pending journal pages are dropped and the core sees a read-only volume: put_super writes nothing. */
+		kshim_jnl_deactivate(v->bdev);
+		sb->s_flags |= SB_RDONLY;
+	}
 	kshim_icache_flush(sb, 1);
 	if (sb->s_root) {
 		iput(sb->s_root->d_inode);
 		kfree(sb->s_root);
 		sb->s_root = NULL;
 	}
+	/* put_super frees the volume: read its error state first. */
+	errors = NVolErrors(NTFS_SB(sb));
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
-	if (v->bdev->jnl && !NVolErrors(NTFS_SB(sb)))
+	if (v->bdev->jnl && !errors)
 		kshim_jnl_commit(v->bdev);
 	if (v->watched)
 		kshim_watch_del(v->watched);
 	kfree(v->jv);
+	kfree(v->bounce);
 	kfree(sb);
 	kshim_bdev_close(v->bdev);
 	kfree(v);
@@ -2361,6 +2372,25 @@ static int ngc_create_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 	return err;
 }
 
+/* An attribute or extent inode of record @data, as the core's unlink looks them up. */
+static int ngc_test_inode_attr(struct inode *vi, void *data)
+{
+	struct ntfs_inode *ni = NTFS_I(vi);
+	return ni->mft_no == (u64)(uintptr_t)data && (NInoAttr(ni) || ni->nr_extents == -1);
+}
+
+/*
+ * True when removing a name of @vi frees its record (its last name other than a DOS name) while
+ * one of its attribute inodes is still referenced (a named stream being opened or still open).
+ * The core's unlink would wait for that reference forever under the volume lock.
+ */
+static bool ngc_unlink_busy(struct inode *vi)
+{
+	struct ntfs_inode *ni = NTFS_I(vi);
+	return ngc_links((ngc_node *)vi) <= 1 &&
+	       kshim_icache_busy(vi->i_sb, ni->mft_no, ngc_test_inode_attr, (void *)(uintptr_t)ni->mft_no);
+}
+
 static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node *n)
 {
 	struct inode *dir = (struct inode *)dirn, *vi = (struct inode *)n;
@@ -2368,6 +2398,8 @@ static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 	int err;
 	if (sb_rdonly(v->sb))
 		return -EROFS;
+	if (ngc_unlink_busy(vi))
+		return -EBUSY;
 	err = ngc_mark_dirty(v);
 	if (err)
 		return err;
@@ -2407,6 +2439,8 @@ static int ngc_rename_impl(ngc_vol *v, ngc_node *odirn, const unsigned short *on
 	int err;
 	if (sb_rdonly(v->sb))
 		return -EROFS;
+	if (target && ngc_unlink_busy((struct inode *)target))
+		return -EBUSY;
 	err = ngc_mark_dirty(v);
 	if (err)
 		return err;

@@ -108,12 +108,6 @@ VOID NgReleaseCore(PNG_VCB Vcb)
 }
 
 /*
- * CoreLock shared: requests that only read core state (data reads, listings, stat, security and
- * stream queries).  The core runs them under its own per-inode locks, as Linux runs lookups and
- * reads in parallel; nothing under a shared hold writes metadata, parks an FCB's node or evicts
- * inodes.  The statistics are updated with interlocked operations.
- */
-/*
  * The "shared" acquisitions (reads, listings, stat, lookups) take CoreLock exclusive.  Parts of the
  * shim were written for one caller at a time (inode reference drops racing lookups, page-cache
  * walks racing a shrink, FGP_NOWAIT not honoured), so the core runs serialised until they are
@@ -220,7 +214,8 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
  * Mm and Cc keep file objects (and so FCBs) of cached files alive long after
  * the last handle is closed.  An FCB without open handles therefore parks its
  * core inode and re-acquires it by MFT number on the next paging read.
- * Both run under the core lock.
+ * Both run under the core lock, by a caller that holds a counted reference to
+ * the FCB (NgDereferenceFcb relies on it).
  */
 int NgEnsureNode(PNG_FCB Fcb)
 {
@@ -266,6 +261,14 @@ VOID NgParkNode(PNG_FCB Fcb)
         ngc_put(Fcb->Node);
         Fcb->Node = NULL;
     }
+}
+
+/* After an unlink (CoreLock held): TRUE when the node's record lost its last name and is free. */
+BOOLEAN NgNodeGone(ngc_node *Node)
+{
+    struct ngc_stat St;
+    ngc_stat(Node, &St);
+    return St.nlink == 0;
 }
 
 /* Fills Fcb->Stat and the Cc file sizes from the core inode. */
@@ -318,23 +321,48 @@ static VOID NgFillStatLocked(PNG_FCB Fcb)
 VOID NgDereferenceFcb(PNG_FCB Fcb)
 {
     PNG_VCB Vcb = Fcb->Vcb;
-    BOOLEAN Free;
+    BOOLEAN Free, Core = FALSE;
 
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    /*
+     * A last reference to an FCB with a node is dropped under CoreLock, held from before the FCB
+     * leaves the list until its node is put: a dismount either finds the FCB in its snapshot or,
+     * as it unmounts under CoreLock, waits for the put.  Every new reference is taken under
+     * FcbListLock, and whoever attaches or parks a node holds a counted reference, so with
+     * RefCount 1 seen under it nobody else can give the FCB a node meanwhile.
+     */
+    for (;;)
+    {
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        if (Core || Fcb->RefCount != 1 || !Fcb->Node)
+            break;
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        NgAcquireCore(Vcb);
+        Core = TRUE;
+    }
     Free = (InterlockedDecrement(&Fcb->RefCount) == 0);
     if (Free && Fcb->VcbLinks.Flink)
         RemoveEntryList(&Fcb->VcbLinks);
     if (Free && Vcb->VolumeFcb == Fcb)
         Vcb->VolumeFcb = NULL;
     ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (Free && Fcb->Node)
+    {
+        /* Unreachable without CoreLock (a node with RefCount 1 was seen above); never put into a
+         * core a dismount has freed. */
+        if (!Core)
+        {
+            NgAcquireCore(Vcb);
+            Core = TRUE;
+        }
+        if (Vcb->Core)
+            ngc_put(Fcb->Node);
+        else
+            DPRINT1("ntfsng: BUG: FCB %p for %I64x kept a node across the dismount\n", Fcb, Fcb->MftNo);
+    }
+    if (Core)
+        NgReleaseCore(Vcb);
     if (!Free)
         return;
-    if (Fcb->Node)
-    {
-        NgAcquireCore(Vcb);
-        ngc_put(Fcb->Node);
-        NgReleaseCore(Vcb);
-    }
     FsRtlUninitializeFileLock(&Fcb->FileLock);
     if (Fcb->Runs)
         ExFreePoolWithTag(Fcb->Runs, TAG_NTFSNG);
@@ -386,6 +414,65 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     IoSkipCurrentIrpStackLocation(Irp);
     return IoCallDriver(Vcb->StorageDevice, Irp);
+}
+
+/* IRP_MJ_CLEANUP on a dismounted volume: only the handle's own state, the core is gone. */
+NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
+{
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    PNG_FCB Fcb = FileObject->FsContext;
+    PNG_CCB Ccb = FileObject->FsContext2;
+
+    if (!Fcb)
+        return STATUS_SUCCESS;
+    if (Fcb->IsVolume)
+        NgUnlockVolume(Vcb, FileObject, TRUE);
+    if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
+        FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
+    if (!Fcb->IsDirectory && !Fcb->IsVolume)
+    {
+        FsRtlFastUnlockAll(&Fcb->FileLock, FileObject, IoGetRequestorProcess(Irp), NULL);
+        CcUninitializeCacheMap(FileObject, NULL, NULL);
+    }
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
+    Fcb->OpenHandles--;
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    FileObject->Flags |= FO_CLEANUP_COMPLETE;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Requests on a dismounted volume: closes and cleanups go on, the volume handle reads, writes and
+ * controls the disk directly and may unlock; everything else fails with STATUS_VOLUME_DISMOUNTED.
+ */
+static NTSTATUS NgDismountedRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    PNG_FCB Fcb = Stack->FileObject ? Stack->FileObject->FsContext : NULL;
+    BOOLEAN Volume = Fcb && Fcb->IsVolume;
+
+    switch (Stack->MajorFunction)
+    {
+        case IRP_MJ_CLOSE:
+            return NgClose(DeviceObject, Irp);
+        case IRP_MJ_CLEANUP:
+            return NgCleanupDismounted(Vcb, Irp);
+        case IRP_MJ_READ:
+            return Volume ? NgRead(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
+        case IRP_MJ_WRITE:
+            return Volume ? NgWrite(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
+        case IRP_MJ_FLUSH_BUFFERS:
+            return Volume ? STATUS_SUCCESS : STATUS_VOLUME_DISMOUNTED;
+        case IRP_MJ_FILE_SYSTEM_CONTROL:
+            if (Volume && (Stack->MinorFunction == IRP_MN_USER_FS_REQUEST || Stack->MinorFunction == IRP_MN_KERNEL_CALL) &&
+                Stack->Parameters.FileSystemControl.FsControlCode == FSCTL_UNLOCK_VOLUME)
+                return NgFileSystemControl(DeviceObject, Irp);
+            return STATUS_VOLUME_DISMOUNTED;
+        default:
+            return STATUS_VOLUME_DISMOUNTED;
+    }
 }
 
 /* Fast I/O: cached reads go straight to Cc (FsRtlCopyRead); everything else takes the IRP path. */
@@ -456,6 +543,11 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Major == IRP_MJ_CREATE)
             Irp->IoStatus.Information = FILE_OPENED;
     }
+    else if (DeviceObject != NgGlobal.ControlDevice && ((PNG_VCB)DeviceObject->DeviceExtension)->Dismounted &&
+             !(Major == IRP_MJ_DEVICE_CONTROL && NgIsVolumeOpen(Irp)))
+    {
+        Status = NgDismountedRequest(DeviceObject, Irp);
+    }
     else if (Major == IRP_MJ_DEVICE_CONTROL && DeviceObject != NgGlobal.ControlDevice)
     {
         /* Passed down: the storage stack completes it. */
@@ -521,6 +613,8 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     int Err;
 
     DPRINT1("ntfsng: NTFS on the Linux fs/ntfs core (v7.3-rc6), loading\n");
+    /* Queried once here, at PASSIVE_LEVEL: later callers may hold a spin lock. */
+    ngos_physical_pages();
     ExInitializeFastMutex(&NgGlobal.VcbListLock);
     InitializeListHead(&NgGlobal.VcbList);
     {

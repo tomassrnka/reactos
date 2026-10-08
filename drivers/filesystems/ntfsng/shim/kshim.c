@@ -792,8 +792,9 @@ static void pc_detach_or_list(struct folio *f, struct folio **list)
 	if (f->refcount > 1) {
 		f->mapping = NULL;
 		f->hnext = NULL;
-		__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST);
-		return;
+		/* The other holder may have dropped its reference since the test: then it is freed here. */
+		if (__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_SEQ_CST))
+			return;
 	}
 	f->hnext = *list;
 	*list = f;
@@ -1277,6 +1278,20 @@ struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
 {
 	struct inode *i = kshim_find(sb, hashval, test, data);
 	return i && !(i->i_state & I_NEW) ? i : NULL;
+}
+
+/* The number of inodes for @hashval that match @test and hold a reference. */
+int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
+		int (*test)(struct inode *, void *), void *data)
+{
+	int n = 0;
+	mutex_lock(&kshim_inode_lock);
+	for (struct inode *i = sb->kshim_ihash[hashval % KSHIM_IHASH]; i; i = i->kshim_hnext)
+		if (i->i_hash.pprev && (uintptr_t)i->kshim_test_data == hashval && !(i->i_state & I_FREEING) &&
+		    atomic_read(&i->i_count) > 0 && test(i, data))
+			n++;
+	mutex_unlock(&kshim_inode_lock);
+	return n;
 }
 
 /* Evicts the unused inodes of @sb; with @all also every later one (unmount). */

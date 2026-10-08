@@ -89,6 +89,9 @@ typedef struct _NG_VCB
     PNOTIFY_SYNC NotifySync;        /* directory change notification (FsRtl) */
     TUNNEL Tunnel;                  /* creation times of names that just went away (FsRtl tunnel cache) */
     PFILE_OBJECT LockedBy;          /* FSCTL_LOCK_VOLUME holder: no other open while set */
+    ERESOURCE CreateGate;           /* creates and cleanups shared; volume lock and dismount exclusive */
+    BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: never write the mounted state back */
+    BOOLEAN Dismounted;             /* FSCTL_DISMOUNT_VOLUME done: no core, the storage device has a new VPB */
     LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;
     ULONG Syncs;
@@ -121,6 +124,7 @@ typedef struct _NG_FCB
     PNG_VCB Vcb;
     LONG RefCount;                  /* file objects not yet closed */
     LONG OpenHandles;               /* file objects not yet cleaned up */
+    LONG Opening;                   /* creates between finding this FCB and counting their handle (FcbListLock) */
     SHARE_ACCESS ShareAccess;
     ngc_node *Node;                 /* referenced core inode while handles are open; NULL when parked */
     BOOLEAN HasNode;                /* a regular FCB (not the volume) that can re-acquire its node */
@@ -185,6 +189,8 @@ typedef struct _NG_CCB
     BOOLEAN AnyReturned;
     LONG QueryBusy;                 /* a directory query of this handle is running (dirctl.c) */
     ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
+    BOOLEAN ManageVolume;           /* a volume open that may lock, unlock and dismount the volume */
+    BOOLEAN CleanedUp;              /* a volume handle's cleanup ran (set under FcbListLock) */
     PVOID RetiredPaths;             /* earlier Path buffers of a renamed directory (change notify keeps them) */
 } NG_CCB, *PNG_CCB;
 
@@ -209,6 +215,7 @@ typedef struct _NG_GLOBAL
 extern NG_GLOBAL NgGlobal;
 
 /* ntfsng.c */
+NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp);
 NTSTATUS NgErrnoToStatus(int Err);
 VOID NgAcquireCore(PNG_VCB Vcb);
 VOID NgReleaseCore(PNG_VCB Vcb);
@@ -241,6 +248,9 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo);
 VOID NgUnlistFcb(PNG_FCB Fcb);
 BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Retire);
+VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self);
+BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams);
+BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
 BOOLEAN NgValidName(PCUNICODE_STRING Name);
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);
@@ -258,7 +268,6 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
 VOID NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
-BOOLEAN NgPurgeForNonCached(PNG_FCB Fcb, LONGLONG Offset);
 
 /* create.c */
 VOID NgMakeShortName(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PCWSTR Name, USHORT NameChars);
@@ -266,12 +275,22 @@ VOID NgTunnelAdd(PNG_VCB Vcb, ULONGLONG DirMftNo, PCWSTR Name, USHORT NameChars,
 VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name);
 
 /* fsctl.c */
-VOID NgUnlockVolume(PNG_VCB Vcb);
+BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup);
 
 /* security.c */
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
-int NgStoreCreateSecurity(PNG_VCB Vcb, ngc_node *Node, PACCESS_STATE As, BOOLEAN IsDir);
+NTSTATUS NgReadSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR *Out);
+int NgAssignNewSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR ParentSd, PACCESS_STATE As, BOOLEAN IsDir,
+                        NTSTATUS *Rejected);
+
+/* access.c */
+BOOLEAN NgCreateChecksAccess(PIRP Irp, PIO_STACK_LOCATION Stack);
+NTSTATUS NgCheckExistingAccess(PACCESS_STATE As, PSECURITY_DESCRIPTOR Sd, PSECURITY_DESCRIPTOR ParentSd, ACCESS_MASK Implied);
+NTSTATUS NgCheckAccessRight(PACCESS_STATE As, PSECURITY_DESCRIPTOR Sd, ACCESS_MASK Right);
+NTSTATUS NgCheckCreateAccess(PACCESS_STATE As, PSECURITY_DESCRIPTOR ParentSd, BOOLEAN IsDir);
+VOID NgGrantNewFile(PACCESS_STATE As);
+NTSTATUS NgCheckDeleteEntry(PSECURITY_DESCRIPTOR Sd, PSECURITY_DESCRIPTOR DirSd);
 
 /* pagefile.c */
 NTSTATUS NgPagingFileMap(PNG_FCB Fcb);

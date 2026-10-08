@@ -16,6 +16,8 @@
 #include <ndk/iofuncs.h>
 #include <ndk/rtlfuncs.h>
 #include <ndk/obfuncs.h>
+#include <ndk/mmfuncs.h>
+#include <ndk/setypes.h>
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
 #include <winioctl.h>
@@ -142,6 +144,52 @@ static void existing(const char *what, const char *path, ULONG attr)
     st = ntopen(w, FILE_READ_DATA, FILE_OVERWRITE, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
     report(name, st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
     if (NT_SUCCESS(st)) NtClose(h);
+    _snprintf(name, sizeof(name), "%s-max-allowed", what);
+    st = ntopen(w, MAXIMUM_ALLOWED, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
+    if (NT_SUCCESS(st))
+    {
+        OBJECT_BASIC_INFORMATION obi;
+        HANDLE sec = NULL;
+        NTSTATUS qs = NtQueryObject(h, ObjectBasicInformation, &obi, sizeof(obi), NULL);
+        NTSTATUS ss = NtCreateSection(&sec, SECTION_ALL_ACCESS, NULL, NULL, PAGE_READWRITE, SEC_COMMIT, h);
+        if (NT_SUCCESS(ss))
+            NtClose(sec);
+        report(name, NT_SUCCESS(qs) && !(obi.GrantedAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA)) && !NT_SUCCESS(ss),
+               "granted 0x%lx (query 0x%08lx), read-write section 0x%08lx", NT_SUCCESS(qs) ? obi.GrantedAccess : 0, qs, ss);
+        NtClose(h);
+    }
+    else
+        report(name, 0, "open failed 0x%08lx", st);
+    _snprintf(name, sizeof(name), "%s-max-allowed-write", what);
+    st = ntopen(w, MAXIMUM_ALLOWED | FILE_WRITE_DATA, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
+    report(name, st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
+    if (NT_SUCCESS(st)) NtClose(h);
+    {
+        /* With backup intent and the restore privilege the I/O manager grants write rights itself. */
+        BOOLEAN was;
+        if (NT_SUCCESS(RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, TRUE, FALSE, &was)))
+        {
+            _snprintf(name, sizeof(name), "%s-backup-max-allowed-write", what);
+            st = ntopen(w, MAXIMUM_ALLOWED | FILE_WRITE_DATA, FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT,
+                        NULL, 0, NULL, &h);
+            report(name, st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
+            if (NT_SUCCESS(st)) NtClose(h);
+            _snprintf(name, sizeof(name), "%s-backup-max-allowed", what);
+            st = ntopen(w, MAXIMUM_ALLOWED, FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT, NULL, 0, NULL, &h);
+            if (NT_SUCCESS(st))
+            {
+                OBJECT_BASIC_INFORMATION obi;
+                NTSTATUS qs = NtQueryObject(h, ObjectBasicInformation, &obi, sizeof(obi), NULL);
+                report(name, NT_SUCCESS(qs) && !(obi.GrantedAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA)),
+                       "granted 0x%lx (query 0x%08lx)", NT_SUCCESS(qs) ? obi.GrantedAccess : 0, qs);
+                NtClose(h);
+            }
+            else
+                report(name, 0, "open failed 0x%08lx", st);
+            if (!was)
+                RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, FALSE, FALSE, &was);
+        }
+    }
     _snprintf(name, sizeof(name), "%s-read", what);
     st = ntopen(w, FILE_READ_DATA | FILE_READ_ATTRIBUTES, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
     if (!NT_SUCCESS(st))
@@ -266,12 +314,12 @@ int main(int argc, char **argv)
         existing("compressed", argv[3], FILE_ATTRIBUTE_COMPRESSED);
     }
 
-    /* Dismount: refused, the volume stays mounted and writable. */
+    /* Dismount without holding the volume lock: refused, the volume stays mounted and writable (ngvol covers real dismounts). */
     st = ntopen(L"\\\\.\\C:", FILE_READ_DATA | FILE_WRITE_DATA, FILE_OPEN, 0, NULL, 0, NULL, &v);
     if (NT_SUCCESS(st))
     {
         st = fsctl(v, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
-        report("dismount", st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
+        report("dismount-unlocked-refused", st == STATUS_ACCESS_DENIED, "status 0x%08lx, want STATUS_ACCESS_DENIED", st);
         NtClose(v);
         _snwprintf(p, MAX_PATH, L"%s\\after-dismount.txt", dir);
         st = ntopen(p, FILE_READ_DATA | FILE_WRITE_DATA, FILE_OVERWRITE_IF, FILE_NON_DIRECTORY_FILE, NULL, 0, NULL, &h);
@@ -318,6 +366,32 @@ int main(int argc, char **argv)
         report("sd-create-dir-dacl", NT_SUCCESS(st) && present && got && got->AceCount == 1, "status 0x%08lx, %u ACEs",
                st, got ? got->AceCount : 0);
         NtClose(h);
+    }
+    /* An owner the creator may not assign: the create fails with the security status, not a generic one. */
+    {
+        SID_IDENTIFIER_AUTHORITY nt = { SECURITY_NT_AUTHORITY };
+        PSID stranger = NULL;
+        SECURITY_DESCRIPTOR sd2;
+        RtlAllocateAndInitializeSid(&nt, 5, SECURITY_NT_NON_UNIQUE, 11, 22, 33, DOMAIN_USER_RID_ADMIN, 0, 0, 0, &stranger);
+        RtlCreateSecurityDescriptor(&sd2, SECURITY_DESCRIPTOR_REVISION);
+        RtlSetDaclSecurityDescriptor(&sd2, TRUE, acl, FALSE);
+        RtlSetOwnerSecurityDescriptor(&sd2, stranger, FALSE);
+        _snwprintf(p, MAX_PATH, L"%s\\sd-owner.txt", dir);
+        st = ntopen(p, FILE_READ_DATA | READ_CONTROL, FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL, 0, &sd2, &h);
+        report("sd-create-bad-owner", st == STATUS_INVALID_OWNER || NT_SUCCESS(st),
+               "status 0x%08lx, want STATUS_INVALID_OWNER (or success with the privilege to restore)", st);
+        if (NT_SUCCESS(st))
+            NtClose(h);
+        else
+        {
+            HANDLE h2;
+            NTSTATUS s2 = ntopen(p, FILE_READ_ATTRIBUTES, FILE_OPEN, 0, NULL, 0, NULL, &h2);
+            report("sd-create-bad-owner-no-file", s2 == STATUS_OBJECT_NAME_NOT_FOUND, "status 0x%08lx", s2);
+            if (NT_SUCCESS(s2))
+                NtClose(h2);
+        }
+        if (stranger)
+            RtlFreeSid(stranger);
     }
     if (everyone)
         RtlFreeSid(everyone);

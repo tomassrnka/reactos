@@ -204,6 +204,34 @@ bool kshim_sb_dirty(struct super_block *sb)
 
 void sync_inodes_sb(struct super_block *sb) { kshim_sync(sb); }
 
+/*
+ * Reachable from data on disk, so they must not stop the system.  vmap fails, and WOF chunks
+ * larger than a page (XPRESS8K/16K, LZX) are decoded through the core's per-chunk buffer;
+ * discard and zeroing report that they are not supported.
+ */
+void *vmap(void *pages, unsigned int count, unsigned long flags, int prot)
+{
+	(void)pages; (void)count; (void)flags; (void)prot;
+	return NULL;
+}
+void vunmap(const void *addr) { (void)addr; }
+int blkdev_issue_discard(struct block_device *b, sector_t s, sector_t n, gfp_t g)
+{
+	(void)b; (void)s; (void)n; (void)g;
+	return -EOPNOTSUPP;
+}
+int blkdev_issue_zeroout(struct block_device *b, sector_t s, sector_t n, gfp_t g, unsigned f)
+{
+	(void)b; (void)s; (void)n; (void)g; (void)f;
+	return -EOPNOTSUPP;
+}
+int iomap_zero_range(struct inode *inode, loff_t pos, loff_t len, bool *did_zero, const struct iomap_ops *ops,
+		const struct iomap_write_ops *write_ops, void *private)
+{
+	(void)inode; (void)pos; (void)len; (void)did_zero; (void)ops; (void)write_ops; (void)private;
+	return -EOPNOTSUPP;
+}
+
 int blkdev_issue_flush(struct block_device *b)
 {
 	return ngos_dev_flush(b->osdev) ? -EIO : 0;
