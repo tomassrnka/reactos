@@ -691,8 +691,6 @@ RtlVirtualUnwind(
     /* Get a pointer to the unwind info */
     UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
 
-    /* The language specific handler data follows the unwind info */
-    LanguageHandler = ALIGN_UP_POINTER_BY(&UnwindInfo->UnwindCode[UnwindInfo->CountOfCodes], sizeof(ULONG));
 
     /* Calculate relative offset to function start */
     CodeOffset = ControlRva - FunctionEntry->BeginAddress;
@@ -844,6 +842,8 @@ Exit:
     if (!InProlog &&
         (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER))))
     {
+        /* After a chain the handler follows the primary unwind info */
+        LanguageHandler = ALIGN_UP_POINTER_BY(&UnwindInfo->UnwindCode[UnwindInfo->CountOfCodes], sizeof(ULONG));
         *HandlerData = (LanguageHandler + 1);
         return RVA(ImageBase, *LanguageHandler);
     }
