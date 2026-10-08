@@ -176,8 +176,19 @@ ApicWriteIORedirectionEntry(
 #ifdef APIC_LAZY_IRQL
     HalpIoApicTriggerMode[Index] = (UCHAR)ReDirReg.TriggerMode;
 #endif
-    IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
-    IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
+
+    /* The low dword holds the mask bit: mask an entry before changing its destination,
+       and unmask it only after */
+    if (ReDirReg.Mask)
+    {
+        IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
+        IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
+    }
+    else
+    {
+        IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
+        IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
+    }
 }
 
 FORCEINLINE
@@ -980,7 +991,10 @@ HalEnableSystemInterrupt(
         return FALSE;
     }
 
-    /* Read the redirection entry */
+    /* Read the redirection entry. This read-modify-write needs no lock of its own:
+       KeConnectInterrupt and KeDisconnectInterrupt hold the dispatcher lock, the HAL's
+       own callers run before the other processors start, and allocation only writes
+       free entries. */
     ReDirReg = ApicReadIORedirectionEntry(Index);
 
     /* Check if the interrupt is already enabled */
