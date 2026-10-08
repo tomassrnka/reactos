@@ -447,6 +447,13 @@ int kshim_jnl_commit(struct block_device *b)
 		kfree(w.buf);
 		err = w.err;
 	}
+	/*
+	 * The file data written in place since the last commit and the slots just written must be on
+	 * the medium before the record that makes replay install the metadata pointing at them: a
+	 * volatile write cache may otherwise keep the header and lose them.
+	 */
+	if (!err && ngos_dev_flush(b->osdev))
+		err = -EIO;
 	if (err)
 		goto out;
 	j->seq++;
