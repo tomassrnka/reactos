@@ -55,3 +55,10 @@ Defects of the upstream code fixed here (to be offered upstream):
   ballooned page. The driver now sends a 32-bit array, sized one page as
   before (1024 frames per batch on both architectures), and allocates only
   pages whose frame numbers fit in 32 bits.
+- Balloon: the driver waited one second for the host to acknowledge an
+  inflate or deflate buffer and then went on, reusing the frame number
+  table and possibly freeing pages the host had not processed yet. It now
+  waits until the host acknowledges or the device is surprise-removed,
+  and starts its worker thread only after the interrupt is connected
+  (EvtDeviceD0EntryPostInterruptsEnabled instead of EvtDeviceD0Entry), so
+  a failed interrupt connection cannot leave the worker waiting.

@@ -75,6 +75,7 @@ BalloonDeviceAdd(IN WDFDRIVER Driver, IN PWDFDEVICE_INIT DeviceInit)
     pnpPowerCallbacks.EvtDevicePrepareHardware = BalloonEvtDevicePrepareHardware;
     pnpPowerCallbacks.EvtDeviceReleaseHardware = BalloonEvtDeviceReleaseHardware;
     pnpPowerCallbacks.EvtDeviceD0Entry = BalloonEvtDeviceD0Entry;
+    pnpPowerCallbacks.EvtDeviceD0EntryPostInterruptsEnabled = BalloonEvtDeviceD0EntryPostInterruptsEnabled;
     pnpPowerCallbacks.EvtDeviceD0Exit = BalloonEvtDeviceD0Exit;
     pnpPowerCallbacks.EvtDeviceD0ExitPreInterruptsDisabled = BalloonEvtDeviceD0ExitPreInterruptsDisabled;
     pnpPowerCallbacks.EvtDeviceSurpriseRemoval = BalloonEvtDeviceSurpriseRemoval;
@@ -398,13 +399,6 @@ BalloonEvtDeviceD0Entry(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE PreviousS
         goto Terminate;
     }
 
-    status = BalloonCreateWorkerThread(Device);
-    if (!NT_SUCCESS(status))
-    {
-        TraceEvents(TRACE_LEVEL_ERROR, DBG_PNP, "BalloonCreateWorkerThread failed with status 0x%08x\n", status);
-        goto Terminate;
-    }
-
 #ifndef BALLOON_INFLATE_IGNORE_LOWMEM
     devCtx->evLowMem = IoCreateNotificationEvent((PUNICODE_STRING)&evLowMemString, &devCtx->hLowMem);
 #endif // !BALLOON_INFLATE_IGNORE_LOWMEM
@@ -415,6 +409,29 @@ Terminate:
         BalloonTerm(Device);
     }
 
+    return status;
+}
+
+/*
+ * The worker waits for the host to acknowledge every buffer it submits, so it
+ * starts only once the interrupt that delivers the acknowledgement is connected.
+ */
+NTSTATUS
+NTAPI
+BalloonEvtDeviceD0EntryPostInterruptsEnabled(IN WDFDEVICE Device, IN WDF_POWER_DEVICE_STATE PreviousState)
+{
+    NTSTATUS status;
+
+    UNREFERENCED_PARAMETER(PreviousState);
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INIT, "--> %s\n", __FUNCTION__);
+
+    status = BalloonCreateWorkerThread(Device);
+    if (!NT_SUCCESS(status))
+    {
+        TraceEvents(TRACE_LEVEL_ERROR, DBG_PNP, "BalloonCreateWorkerThread failed with status 0x%08x\n", status);
+    }
+
+    TraceEvents(TRACE_LEVEL_INFORMATION, DBG_INIT, "<-- %s\n", __FUNCTION__);
     return status;
 }
 

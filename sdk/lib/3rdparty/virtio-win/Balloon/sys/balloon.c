@@ -291,12 +291,21 @@ BalloonTellHost(IN WDFOBJECT WdfDevice, IN PVIOQUEUE vq)
         virtqueue_notify(vq);
     }
 
+    /*
+     * The host owns pfns_table and the pages in it until it acknowledges the
+     * buffer: reusing the table or freeing the pages earlier lets a slow host
+     * act on the wrong frames. Keep waiting unless the device was surprise-removed.
+     */
     timeout.QuadPart = Int32x32To64(1000, -10000);
-    status = KeWaitForSingleObject(&devCtx->HostAckEvent, Executive, KernelMode, FALSE, &timeout);
-    ASSERT(NT_SUCCESS(status));
-    if (STATUS_TIMEOUT == status)
+    for (;;)
     {
-        TraceEvents(TRACE_LEVEL_WARNING, DBG_HW_ACCESS, "<--> TimeOut\n");
+        status = KeWaitForSingleObject(&devCtx->HostAckEvent, Executive, KernelMode, FALSE, &timeout);
+        ASSERT(NT_SUCCESS(status));
+        if (STATUS_TIMEOUT != status || devCtx->SurpriseRemoval)
+        {
+            break;
+        }
+        TraceEvents(TRACE_LEVEL_WARNING, DBG_HW_ACCESS, "<--> TimeOut, still waiting for the host\n");
     }
 
     return status;
