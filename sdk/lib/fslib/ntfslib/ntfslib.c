@@ -199,7 +199,7 @@ ComputeLayout(IN ULONG ClusterSize)
     LAYOUT.RootIdxClusters = (ULONG)CEIL_DIV((ULONGLONG)INDEX_RECORD_SIZE, (ULONGLONG)C);
 
     // $Secure:$SDS: the 8 default descriptors plus their mirror 256 KiB later.
-    LAYOUT.SdsClusters = (ULONG)CEIL_DIV((ULONGLONG)NTFS_SDS_MIRROR + C, (ULONGLONG)C);
+    LAYOUT.SdsClusters = (ULONG)CEIL_DIV((ULONGLONG)NTFS_SDS_MIRROR + GetDefaultSdsLength(), (ULONGLONG)C);
 
     // $Secure:$SDH: one INDX block (large view index).
     LAYOUT.SdhIdxClusters = (ULONG)CEIL_DIV((ULONGLONG)INDEX_RECORD_SIZE, (ULONGLONG)C);

@@ -866,6 +866,21 @@ WriteRegion(IN ULONGLONG    Lcn,
 }
 
 
+/* Bytes the default descriptors take in $SDS (one copy, without the mirror). */
+ULONG
+GetDefaultSdsLength(VOID)
+{
+    ULONG Sds = 0, Last = 0, i;
+
+    for (i = 0; i < NTFS_DEFAULT_SD_COUNT; i++)
+    {
+        Last = Sds + 0x14 + DefaultSdLen[i];
+        Sds = ALIGN_UP_BY(Last, 16);
+    }
+    return Last;
+}
+
+
 /* THE METADATA BUILDER *****************************************************/
 
 NTSTATUS
@@ -901,6 +916,12 @@ WriteMetafiles(VOID)
     }
     SdsContentLen = SdSdsOff[NTFS_DEFAULT_SD_COUNT - 1] + 0x14 +
                     DefaultSdLen[NTFS_DEFAULT_SD_COUNT - 1];
+    if ((ULONGLONG)NTFS_SDS_MIRROR + SdsContentLen > (ULONGLONG)LAYOUT.SdsClusters * C)
+    {
+        DPRINT1("ERROR: $SDS needs %lu bytes, the layout has %lu clusters\n",
+                NTFS_SDS_MIRROR + SdsContentLen, LAYOUT.SdsClusters);
+        return STATUS_INTERNAL_ERROR;
+    }
 
     /* --- Build the MFT in memory (records 0..35) ------------------------ */
     Mft = RtlAllocateHeap(RtlGetProcessHeap(), 0, MREC_COUNT * MFT_RECORD_SIZE);
