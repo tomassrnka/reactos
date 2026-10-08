@@ -281,3 +281,58 @@ START_TEST(MmMapLockedPagesSpecifyCache)
     KmtCloseDriver();
     KmtUnloadDriver();
 }
+
+START_TEST(MmMapLockedPagesProcessExit)
+{
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    WCHAR FileName[MAX_PATH];
+    EXIT_BUFFER ExitBuffer;
+    DWORD Length;
+    DWORD Error;
+    DWORD Wait;
+    BOOL Ret;
+
+    Error = KmtLoadAndOpenDriver(L"MmMapLockedPagesSpecifyCache", FALSE);
+    ok_eq_int(Error, ERROR_SUCCESS);
+    if (Error)
+        return;
+
+    /* A suspended copy of ourselves provides an address space that never runs */
+    Length = GetModuleFileNameW(NULL, FileName, RTL_NUMBER_OF(FileName));
+    ok(Length != 0 && Length < RTL_NUMBER_OF(FileName), "GetModuleFileNameW failed: %lu\n", GetLastError());
+    if (Length == 0 || Length >= RTL_NUMBER_OF(FileName))
+        goto Cleanup;
+    Ret = CreateProcessW(FileName, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED,
+                         NULL, NULL, &StartupInfo, &ProcessInfo);
+    ok(Ret, "CreateProcessW failed: %lu\n", GetLastError());
+    if (!Ret)
+        goto Cleanup;
+
+    ExitBuffer.ProcessId = ProcessInfo.dwProcessId;
+    ExitBuffer.Buffer = NULL;
+    ExitBuffer.Status = STATUS_UNSUCCESSFUL;
+    Length = sizeof(ExitBuffer);
+    Error = KmtSendBufferToDriver(IOCTL_MAP_IN_PROCESS, &ExitBuffer, sizeof(ExitBuffer), &Length);
+    ok_eq_int(Error, ERROR_SUCCESS);
+    ok_eq_hex(ExitBuffer.Status, STATUS_SUCCESS);
+    ok(ExitBuffer.Buffer != NULL, "Buffer is NULL\n");
+
+    /* The process exits while the driver's pages are still mapped into it */
+    Ret = TerminateProcess(ProcessInfo.hProcess, 0);
+    ok(Ret, "TerminateProcess failed: %lu\n", GetLastError());
+    Wait = WaitForSingleObject(ProcessInfo.hProcess, 30 * 1000);
+    ok_eq_int(Wait, WAIT_OBJECT_0);
+    CloseHandle(ProcessInfo.hThread);
+    CloseHandle(ProcessInfo.hProcess);
+
+    if (Error == ERROR_SUCCESS && ExitBuffer.Buffer != NULL && Wait == WAIT_OBJECT_0)
+    {
+        Error = KmtSendToDriver(IOCTL_CHECK_EXITED);
+        ok_eq_int(Error, ERROR_SUCCESS);
+    }
+
+Cleanup:
+    KmtCloseDriver();
+    KmtUnloadDriver();
+}
