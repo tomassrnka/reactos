@@ -4023,10 +4023,8 @@ NtUnlockVirtualMemory(IN HANDLE ProcessHandle,
     }
     _SEH2_END;
 
-    //
-    // Return status
-    //
-    return STATUS_SUCCESS;
+    /* Return what MiUnlockVirtualMemory reported */
+    return Status;
 }
 
 NTSTATUS
