@@ -227,30 +227,58 @@ static int lf_write(struct ngj_vol *jv, u64 page, void *buf)
 }
 
 /* Clears VOLUME_IS_DIRTY in $Volume (record 3) and its $MFTMirr copy. */
-static int clear_dirty(struct ngj_vol *jv, int *was)
+/*
+ * Clears VOLUME_IS_DIRTY in $Volume (record 3) and makes its $MFTMirr copy the same.  The primary copy
+ * is written and flushed before the mirror, so a crash leaves at most one of them behind, and a later
+ * call finishes the job: a clean primary with an old mirror only gets the mirror rewritten.  A primary
+ * whose update sequence does not check out is rebuilt from the mirror.  @check: write nothing, report
+ * in *primary whether the primary copy must be rewritten (dirty or damaged), in *mirror the mirror.
+ */
+static int clear_dirty(struct ngj_vol *jv, int *primary, int *mirror, int check)
 {
-	u8 *r = kmalloc(jv->recsz, GFP_KERNEL), *a;
-	int err = -EIO;
-	*was = 0;
-	if (!r)
-		return -ENOMEM;
-	if (read_rec(jv, 3, r) || !(a = find_attr(r, jv->recsz, AT_VOLINFO_T)) || a[8] || g32(a + 0x10) < 12 ||
-	    g16(a + 0x14) + 12u > g32(a + 4))
-		goto out;
-	a += g16(a + 0x14);
-	if (!(g16(a + 10) & VOL_DIRTY)) {
-		err = 0;
+	u32 rs = jv->recsz;
+	u64 po = jv->mft_lcn * jv->cluster + 3 * rs, mo = jv->mirr_lcn * jv->cluster + 3 * rs;
+	u8 *r = kmalloc(rs, GFP_KERNEL), *rp = kmalloc(rs, GFP_KERNEL), *rm = kmalloc(rs, GFP_KERNEL), *a;
+	int err = -EIO, pok = 0, mok, dirty;
+	*primary = *mirror = 0;
+	if (!r || !rp || !rm) {
+		err = -ENOMEM;
 		goto out;
 	}
-	*was = 1;
-	a[10] &= ~VOL_DIRTY;
-	refix(r, jv->recsz);
-	if (dwrite(jv, jv->mft_lcn * jv->cluster + 3 * jv->recsz, r, jv->recsz) ||
-	    dwrite(jv, jv->mirr_lcn * jv->cluster + 3 * jv->recsz, r, jv->recsz))
+	if (!dread(jv, po, rp, rs)) {
+		memcpy(r, rp, rs);
+		pok = !unfix(r, rs);
+	}
+	mok = !dread(jv, mo, rm, rs);
+	if (!pok) {
+		memcpy(r, rm, rs);
+		if (!mok || unfix(r, rs))
+			goto out;
+	}
+	if (!(a = find_attr(r, rs, AT_VOLINFO_T)) || a[8] || g32(a + 0x10) < 12 || g16(a + 0x14) + 12u > g32(a + 4))
 		goto out;
-	err = ngos_dev_flush(jv->osdev) ? -EIO : 0;
+	a += g16(a + 0x14);
+	dirty = (g16(a + 10) & VOL_DIRTY) != 0;
+	*primary = dirty || !pok;
+	*mirror = *primary || !mok || memcmp(rp, rm, rs);
+	err = 0;
+	if (check)
+		goto out;
+	err = -EIO;
+	if (*primary) {
+		a[10] &= ~VOL_DIRTY;
+		refix(r, rs);
+		if (dwrite(jv, po, r, rs) || ngos_dev_flush(jv->osdev))
+			goto out;
+		memcpy(rp, r, rs);
+	}
+	if (*mirror && (dwrite(jv, mo, rp, rs) || ngos_dev_flush(jv->osdev)))
+		goto out;
+	err = 0;
 out:
 	kfree(r);
+	kfree(rp);
+	kfree(rm);
 	return err;
 }
 
@@ -316,8 +344,7 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 	 */
 	{
 		u16 usn;
-		if (vol_usn(jv, pg, &usn) ||
-		    (usn != h.vol_usn_new && (h.state != KJ_ST_COMMITTED || usn != h.vol_usn_old))) {
+		if (vol_usn(jv, pg, &usn) || (usn != h.vol_usn_new && usn != h.vol_usn_old)) {
 			printk(KERN_WARNING "journal: header seq %llu state %u is older than the volume ($Volume usn %u, header %u/%u): ignored\n",
 			       (unsigned long long)h.seq, h.state, usn, h.vol_usn_old, h.vol_usn_new);
 			goto out;
@@ -375,7 +402,38 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		goto out;
 	}
 	if (write) {
-		if (clear_dirty(jv, &was)) {
+		/*
+		 * Clearing the dirty flag rewrites $Volume, which moves its update sequence number on, before
+		 * the header is retired.  So that a crash in between does not leave a header that no longer
+		 * matches (and a dirty volume nobody recovers), the header first says ACTIVE for both numbers.
+		 * Only when the flag is set: a header naming a number nothing will write would match the
+		 * first write of another driver.
+		 */
+		struct kj_hdr a = h;
+		u16 usn, next;
+		int mirror;
+		if (clear_dirty(jv, &was, &mirror, 1) || vol_usn(jv, pg, &usn)) {
+			res = NGJ_REPAIR;
+			goto out;
+		}
+		if (!was)
+			goto clear;	/* at most the mirror: the primary's number does not move */
+		next = (u16)(usn + 1);
+		if (next == 0 || next == 0xffff)
+			next = 1;	/* as refix() numbers it */
+		a.state = KJ_ST_ACTIVE;
+		a.npages = a.ndesc = a.payload_crc = 0;
+		a.vol_usn_old = usn;
+		a.vol_usn_new = next;
+		a.hdr_crc = kj_crc32(0, &a, offsetof(struct kj_hdr, hdr_crc));
+		memset(pg, 0, KJ_PAGE);
+		memcpy(pg, &a, sizeof(a));
+		if (lf_write(jv, KJ_HDR_PAGE, pg) || ngos_dev_flush(jv->osdev)) {
+			res = NGJ_REPAIR;
+			goto out;
+		}
+clear:
+		if (clear_dirty(jv, &was, &mirror, 0)) {
 			res = NGJ_REPAIR;
 			goto out;
 		}
