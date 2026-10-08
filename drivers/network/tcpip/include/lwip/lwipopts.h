@@ -15,6 +15,11 @@
 
 #define MEM_ALIGNMENT                   4
 
+/* The core lock is ours (sys_arch.c): it tracks its owner and keeps
+   the owner from being suspended while it holds the lock */
+#define LOCK_TCPIP_CORE()               sys_lock_tcpip_core()
+#define UNLOCK_TCPIP_CORE()             sys_unlock_tcpip_core()
+
 #define LWIP_ARP                        0
 
 #define ETH_PAD_SIZE                    2
