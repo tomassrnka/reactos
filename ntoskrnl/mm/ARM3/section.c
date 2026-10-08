@@ -1471,7 +1471,6 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    *Segment = NewSegment;
 
     /* Now allocate the control area, which has the subsection structure */
     ControlArea = ExAllocatePoolWithTag(NonPagedPool,
@@ -1479,9 +1478,10 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
                                         'tCmM');
     if (!ControlArea)
     {
-        ExFreePoolWithTag(Segment, 'tSmM');
+        ExFreePoolWithTag(NewSegment, 'tSmM');
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    *Segment = NewSegment;
 
     /* And zero it out, filling the basic segmnet pointer and reference fields */
     RtlZeroMemory(ControlArea, sizeof(CONTROL_AREA) + sizeof(SUBSECTION));
