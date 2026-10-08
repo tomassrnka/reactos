@@ -450,6 +450,7 @@ int kshim_jnl_commit(struct block_device *b)
 		if (!v || !tmp) {
 			/* No memory to build a transaction: in place, under an UNJOURNALED header. */
 			j->fallbacks++;
+			j->degraded = 1;	/* until the whole overlay is in place */
 			err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
 			if (!err)
 				err = kj_apply_buckets(b, j);
@@ -472,6 +473,7 @@ int kshim_jnl_commit(struct block_device *b)
 		j->fallbacks++;
 		printk(KERN_WARNING "journal: %lu pages do not fit (%llu slots) or degraded=%d: writing in place\n",
 		       n, (unsigned long long)j->capacity, j->degraded);
+		j->degraded = 1;
 		err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
 		if (!err)
 			err = kj_apply(b, v, n);
@@ -670,13 +672,18 @@ int kshim_jnl_ro_page(struct block_device *b, u64 blk, u8 mask, const u8 *data)
 	return 0;
 }
 
-/* The overlay could not take a write: everything goes in place until the next commit. */
-void kshim_jnl_degrade(struct block_device *b)
+/*
+ * The overlay could not take a write: everything goes in place until the next commit, once the
+ * UNJOURNALED header is on the medium.  Nonzero: it is not, and the write must fail.
+ */
+int kshim_jnl_degrade(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
 	if (!j || j->degraded)
-		return;
-	j->degraded = 1;
+		return 0;
 	printk(KERN_ERR "journal: out of memory for the overlay: writing in place until the next commit\n");
-	kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
+	if (kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn))
+		return -EIO;
+	j->degraded = 1;
+	return 0;
 }
