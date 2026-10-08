@@ -42,6 +42,7 @@ list(APPEND SOURCE
     Pipes.c
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
+    RaiseFailFastException.c
     ReadFile.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c
