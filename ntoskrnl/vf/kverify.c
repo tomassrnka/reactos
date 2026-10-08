@@ -43,6 +43,7 @@ ULONG KvDeadlockSeconds = 30;   /* default watchdog threshold, seconds */
 /* One-shot report table: open-addressed set of site keys. */
 #define KV_ONCE_SLOTS   4096
 static PVOID KvOnceTable[KV_ONCE_SLOTS];
+static volatile LONG KvOnceOverflow;
 
 /* Per-tag history for the leak sampler, allocated to PoolTrackTableSize. */
 typedef struct _KV_LEAK_SLOT
@@ -97,8 +98,10 @@ KvLogOnce(IN PVOID SiteKey)
         Index = (Index + 1) & (KV_ONCE_SLOTS - 1);
     }
 
-    /* Table full: report to be safe rather than silently drop. */
-    return TRUE;
+    /* Table full: count and drop. Reporting every hit instead would flood
+     * the output and let one hot site keep the UBSan ring permanently full. */
+    InterlockedIncrement(&KvOnceOverflow);
+    return FALSE;
 }
 
 VOID
@@ -262,6 +265,11 @@ KvWatchdogThread(IN PVOID Context)
         KeDelayExecutionThread(KernelMode, FALSE, &Interval);
         if (KvEnabled(KV_UBSAN))
             KvUbsanDrain();
+        if (KvOnceOverflow != 0)
+        {
+            DbgPrint("KVERIFY: one-shot table full, %ld reports dropped\n",
+                     InterlockedExchange(&KvOnceOverflow, 0));
+        }
         if (!KvEnabled(KV_DEADLOCK))
             continue;
 

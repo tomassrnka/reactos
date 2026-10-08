@@ -91,9 +91,12 @@ KvUbsanType(struct kv_type_descriptor *Type)
  * the last period stay in KvUbsanRing, readable from KDBG or a dump.
  *
  * A producer takes a ticket only when the ring has room, so a dropped report
- * never leaves a hole that would stall the consumer. A slot is published by
- * writing Loc last, after a barrier.
+ * never leaves a hole that would stall the consumer, and it holds interrupts
+ * off from the ticket to the publication, so it cannot be descheduled between
+ * them. A slot is published by writing Loc last, after a barrier. KvLogOnce
+ * bounds the number of reports, so the counters never wrap.
  */
+#define KV_BARRIER() do { _ReadWriteBarrier(); KeMemoryBarrier(); } while (0)
 #define KV_UBSAN_RING 2048   /* holds the boot burst before the drainer starts */
 
 typedef struct _KV_UBSAN_ENTRY
@@ -111,7 +114,8 @@ static volatile LONG KvUbsanDropped;
 static KV_UBSAN_FN VOID
 KvUbsanReport(struct kv_source_location *Loc, PCSTR Kind, PCSTR Detail)
 {
-    ULONG Head;
+    ULONG Head, Tail, Retry;
+    ULONG_PTR Flags;
     KV_UBSAN_ENTRY *Entry;
 
     if (!(KvFlags & KV_UBSAN) || Loc == NULL)
@@ -121,12 +125,20 @@ KvUbsanReport(struct kv_source_location *Loc, PCSTR Kind, PCSTR Detail)
     if (!KvLogOnce((PVOID)Loc))
         return;
 
-    for (;;)
+    Flags = __readeflags();
+    _disable();
+    for (Retry = 0;; )
     {
+        /* Tail first: it never passes Head, so the distance cannot go negative. */
+        Tail = (ULONG)KvUbsanTail;
+        KV_BARRIER();
         Head = (ULONG)KvUbsanHead;
-        if (Head - (ULONG)KvUbsanTail >= KV_UBSAN_RING)
+        if (Head - Tail >= KV_UBSAN_RING)
         {
+            if (Tail != (ULONG)KvUbsanTail && ++Retry < 4)
+                continue;
             InterlockedIncrement(&KvUbsanDropped);
+            __writeeflags(Flags);
             return;
         }
         if ((ULONG)InterlockedCompareExchange(&KvUbsanHead, (LONG)(Head + 1),
@@ -138,16 +150,20 @@ KvUbsanReport(struct kv_source_location *Loc, PCSTR Kind, PCSTR Detail)
     Entry = &KvUbsanRing[Head % KV_UBSAN_RING];
     Entry->Kind = Kind;
     Entry->Detail = Detail ? Detail : "";
-    KeMemoryBarrier();
+    KV_BARRIER();
     Entry->Loc = Loc;
+    __writeeflags(Flags);
 }
 
-/* Single consumer: the watchdog thread. */
+/* Single consumer: the watchdog thread. At most one ring's worth per call,
+ * so the watchdog always gets back to its own work. */
 KV_UBSAN_FN VOID
 NTAPI
 KvUbsanDrain(VOID)
 {
-    for (;;)
+    ULONG Budget;
+
+    for (Budget = 0; Budget < KV_UBSAN_RING; Budget++)
     {
         KV_UBSAN_ENTRY *Entry = &KvUbsanRing[(ULONG)KvUbsanTail % KV_UBSAN_RING];
         struct kv_source_location *Loc = Entry->Loc;
@@ -155,14 +171,13 @@ KvUbsanDrain(VOID)
         /* An empty slot is either the end or a producer still writing it. */
         if (Loc == NULL)
             break;
-        KeMemoryBarrier();
+        KV_BARRIER();
         DbgPrint("KVERIFY: [UBSAN] %s at %s:%lu:%lu %s\n",
                  Entry->Kind,
                  Loc->FileName ? Loc->FileName : "?",
                  (ULONG)Loc->Line, (ULONG)Loc->Column,
                  Entry->Detail);
         Entry->Loc = NULL;
-        KeMemoryBarrier();
         InterlockedIncrement(&KvUbsanTail);
     }
     if (KvUbsanDropped != 0)
