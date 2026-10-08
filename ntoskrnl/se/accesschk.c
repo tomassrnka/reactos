@@ -1645,7 +1645,8 @@ SepAccessCheck(
         /* Probe all pointers */
         ProbeForRead(GenericMapping, sizeof(GENERIC_MAPPING), sizeof(ULONG));
         ProbeForRead(PrivilegeSetLength, sizeof(ULONG), sizeof(ULONG));
-        ProbeForWrite(PrivilegeSet, *PrivilegeSetLength, sizeof(ULONG));
+        CapturedPrivilegeSetLength = *PrivilegeSetLength;
+        ProbeForWrite(PrivilegeSet, CapturedPrivilegeSetLength, sizeof(ULONG));
 
         /*
          * Probe the access and status list based on the way
@@ -1669,8 +1670,7 @@ SepAccessCheck(
             ProbeForWrite(AccessStatus, sizeof(NTSTATUS), sizeof(ULONG));
         }
 
-        /* Capture the privilege set length and the mapping */
-        CapturedPrivilegeSetLength = *PrivilegeSetLength;
+        /* Capture the mapping */
         CapturedGenericMapping = *GenericMapping;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
