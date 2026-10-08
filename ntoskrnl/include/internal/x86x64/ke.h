@@ -104,6 +104,24 @@ KxFlushEntireCurrentTb(
     }
 }
 
+/* Hypervisor enlightenments in use, see ke/x86x64/hypervisor.c */
+#define KI_HV_REMOTE_FLUSH          0x1
+#define KI_HV_CLUSTER_IPI           0x2
+#define KI_HV_EX_PROCESSOR_SETS     0x4
+
+#ifdef CONFIG_SMP
+extern ULONG KiHvEnlightenments;
+
+VOID
+NTAPI
+KiHvInitializeProcessor(
+    _In_ ULONG Processor);
+
+VOID
+NTAPI
+KiHvInitializeHypercalls(VOID);
+#endif
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

@@ -852,6 +852,11 @@ AppCpuInit:
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
 
+#ifdef CONFIG_SMP
+    /* Learn this processor's hypervisor index before it can be a flush target */
+    KiHvInitializeProcessor(Cpu);
+#endif
+
     /* The NMI task returns through the main TSS, see KiSetCr3 */
     KeGetPcr()->TSS->CR3 = __readcr3();
     KeGetPcr()->TSS->LDT = 0;

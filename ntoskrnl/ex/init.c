@@ -1625,6 +1625,11 @@ Phase1InitializationDiscard(IN PVOID Context)
         }
     }
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* Flush TLBs and send IPIs with hypercalls before other processors start */
+    KiHvInitializeHypercalls();
+#endif
+
     /* Start Application Processors */
     KeStartAllProcessors();
 

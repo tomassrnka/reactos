@@ -558,6 +558,11 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     if (Cpu == 0)
         KiX2ApicMode = (__readmsr(MSR_APIC_BASE) & MSR_APIC_BASE_X2APIC_ENABLE) != 0;
 
+#ifdef CONFIG_SMP
+    /* Learn this processor's hypervisor index before it can be a flush target */
+    KiHvInitializeProcessor(Cpu);
+#endif
+
     /* Count the processor. An application processor joins the active ones
        in KiSystemStartupBootStack, when it can take requests */
     KeNumberProcessors++;
