@@ -49,9 +49,10 @@ static unsigned char *g_ro[NBUF];   /* read-only pages */
 
 static void InitPool(void)
 {
-    char name[64];
+    char name[MAX_PATH];
     unsigned i;
     HANDLE h;
+    HKEY k;
 
     PoolAdd(GetCurrentThread());
     for (i = 0; i < 4; i++)
@@ -63,15 +64,17 @@ static void InitPool(void)
         sprintf(name, "kvfuzz_sec_%u", i);
         h = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 0x1000, name); PoolAdd(h);
     }
-    sprintf(name, "%s\\kvfuzz_file_%lu.tmp", getenv("TEMP") ? getenv("TEMP") : "C:",
-            GetCurrentProcessId());
-    h = CreateFileA(name, GENERIC_READ | GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    NULL, CREATE_ALWAYS, 0, NULL); PoolAdd(h);
+    h = NULL;
+    if (_snprintf(name, sizeof(name) - 1, "%s\\kvfuzz_file_%lu.tmp",
+                  getenv("TEMP") ? getenv("TEMP") : "C:", GetCurrentProcessId()) > 0)
     {
-        HKEY k;
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM", 0, KEY_READ, &k) == ERROR_SUCCESS) PoolAdd((HANDLE)k);
+        name[sizeof(name) - 1] = 0;
+        h = CreateFileA(name, GENERIC_READ | GENERIC_WRITE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, CREATE_ALWAYS, 0, NULL);
     }
+    PoolAdd(h);
+    PoolAdd(RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM", 0, KEY_READ, &k) == ERROR_SUCCESS ? (HANDLE)k : NULL);
 
     for (i = 0; i < NBUF; i++)
     {
@@ -95,7 +98,8 @@ static ULONG_PTR GenArg(void)
         case 3: return (ULONG_PTR)0xDEADBEEF;                                      /* bad handle */
         case 4: { unsigned char *b = g_rw[Rnd(NBUF)]; return (ULONG_PTR)b; }       /* writable */
         case 5: { unsigned char *b = g_ro[Rnd(NBUF)]; return (ULONG_PTR)b; }       /* read-only */
-        case 6: { unsigned char *b = g_rw[Rnd(NBUF)]; return b ? (ULONG_PTR)(b + 0x1000 - Rnd(8)) : 0; } /* near page end */
+        case 6: { unsigned char *b = g_rw[Rnd(NBUF)]; unsigned off = Rnd(8);       /* near page end */
+                  return b ? (ULONG_PTR)(b + 0x1000 - off) : 0; }
         case 7: return (ULONG_PTR)0x1;                                             /* unmapped low */
         case 8: return (ULONG_PTR)0x80000000;                                      /* kernel range */
         case 9: return (ULONG_PTR)Rnd(17);                                         /* small int */
@@ -214,14 +218,15 @@ static DWORD WINAPI WorkerProc(LPVOID Param)
     KF_WORKER *w = (KF_WORKER *)Param;
     for (;;)
     {
-        LONG seq;
+        LONG seq, prev;
         if (WaitForSingleObject(w->Go, 100) == WAIT_FAILED)
             Sleep(100);
         seq = InterlockedCompareExchange(&w->Seq, 0, 0);
         if (seq == w->Claim)
             continue;
         /* Main may have cancelled this job by claiming it first. */
-        if (InterlockedCompareExchange(&w->Claim, seq, seq - 1) != seq - 1)
+        prev = (LONG)((ULONG)seq - 1u);
+        if (InterlockedCompareExchange(&w->Claim, seq, prev) != prev)
             continue;
         if (w->IsW32)
             CallW32(w->W32Number, w->a, w->Args);
@@ -270,7 +275,7 @@ static void Dispatch(unsigned callno, const char *name, void *fn, int isW32,
     for (attempt = 0; attempt < 3; attempt++)
     {
         KF_WORKER *w;
-        LONG seq;
+        LONG seq, prev;
         DWORD start, elapsed;
 
         if (!g_worker && !(g_worker = NewWorker()))
@@ -301,7 +306,8 @@ static void Dispatch(unsigned callno, const char *name, void *fn, int isW32,
 
         /* Timed out. If no worker took the job, take it back and retry it on
          * a fresh worker: the call did not run. Otherwise it is stuck. */
-        if (InterlockedCompareExchange(&w->Claim, seq, seq - 1) == seq - 1)
+        prev = (LONG)((ULONG)seq - 1u);
+        if (InterlockedCompareExchange(&w->Claim, seq, prev) == prev)
         {
             RetireWorker("lost-worker", callno, name);
             continue;
@@ -363,27 +369,29 @@ static void StepCall(HMODULE ntdll, unsigned callno, int Execute)
     }
 }
 
-static HANDLE g_stateFile = INVALID_HANDLE_VALUE;
-
-/* A fixed-width record rewritten in place with write-through, so a bugcheck
- * leaves either the previous record or the new one, never an empty file. */
+/* Best effort: a fresh handle each time, because a fuzzed NtClose can hit any
+ * long-lived handle, and a write-through rewrite of one small record in place.
+ * A torn record is possible, though not across one sector; the serial
+ * progress line is the fallback. */
 static void WriteState(unsigned long long seed, unsigned callno)
 {
     char rec[64];
-    DWORD done;
+    DWORD done = 0;
+    HANDLE f;
     int n;
-    if (g_stateFile == INVALID_HANDLE_VALUE)
-    {
-        g_stateFile = CreateFileA("C:\\kvfuzz_state.txt", GENERIC_WRITE,
-                                  FILE_SHARE_READ, NULL, OPEN_ALWAYS,
-                                  FILE_FLAG_WRITE_THROUGH, NULL);
-        if (g_stateFile == INVALID_HANDLE_VALUE) return;
-    }
+
     n = _snprintf(rec, sizeof(rec) - 1, "seed=%020llu callno=%010u\r\n", seed, callno);
     rec[sizeof(rec) - 1] = 0;
-    if (n < 0) return;
-    SetFilePointer(g_stateFile, 0, NULL, FILE_BEGIN);
-    WriteFile(g_stateFile, rec, (DWORD)n, &done, NULL);
+    if (n <= 0) return;
+    f = CreateFileA("C:\\kvfuzz_state.txt", GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                    OPEN_ALWAYS, FILE_FLAG_WRITE_THROUGH, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    if (SetFilePointer(f, 0, NULL, FILE_BEGIN) != 0 ||
+        !WriteFile(f, rec, (DWORD)n, &done, NULL) || done != (DWORD)n)
+    {
+        OutputDebugStringA("KVFUZZ: state file write failed\n");
+    }
+    CloseHandle(f);
 }
 
 int main(int argc, char **argv)
