@@ -594,6 +594,43 @@ static int ngc_iget_impl(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
 	return 0;
 }
 
+/*
+ * An MFT number that comes from a caller (open by file ID): loaded only if it names an in-use base
+ * record.  The core treats a record it cannot load (an extension record, a number past the end of
+ * $MFT, a free record) as damage and records an error for the volume, which a caller must not be able
+ * to cause.
+ */
+static int ngc_iget_by_id_impl(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	u32 rs = vol->mft_record_size;
+	u64 off = mft_no << vol->mft_record_size_bits;
+	struct folio *f;
+	struct mft_record *m;
+	u8 *rec;
+	int err = 0;
+	*out = NULL;
+	if (rs > PAGE_SIZE || mft_no >= (u64)(i_size_read(vol->mft_ino) >> vol->mft_record_size_bits))
+		return -ENOENT;
+	rec = kmalloc(rs, GFP_NOFS);
+	if (!rec)
+		return -ENOMEM;
+	f = read_mapping_folio(vol->mft_ino->i_mapping, (pgoff_t)(off >> PAGE_SHIFT), NULL);
+	if (IS_ERR(f)) {
+		kfree(rec);
+		return PTR_ERR(f);
+	}
+	memcpy(rec, (u8 *)folio_address(f) + (off & (PAGE_SIZE - 1)), rs);
+	folio_put(f);
+	m = (struct mft_record *)rec;
+	/* No links: the reserved records 12-15 are in use without being files. */
+	if (m->magic != magic_FILE || post_read_mst_fixup((struct ntfs_record *)rec, rs) ||
+	    !(m->flags & MFT_RECORD_IN_USE) || m->base_mft_record || !m->link_count)
+		err = -ENOENT;
+	kfree(rec);
+	return err ? err : ngc_iget_impl(v, mft_no, out);
+}
+
 static void ngc_put_impl(ngc_node *n)
 {
 	iput((struct inode *)n);
@@ -2496,6 +2533,11 @@ int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
 	int r = ngc_iget_impl(v, mft_no, out);
 	ngos_prof(NGP_IGET, t0, 0);
 	return r;
+}
+
+int ngc_iget_by_id(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
+{
+	return ngc_iget_by_id_impl(v, mft_no, out);
 }
 
 void ngc_put(ngc_node *n)

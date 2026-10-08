@@ -346,7 +346,7 @@ static NTSTATUS NgPathFromId(PNG_VCB Vcb, PCUNICODE_STRING Id, PUNICODE_STRING P
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     NgAcquireCore(Vcb);
-    Err = ngc_iget(Vcb->Core, MftNo, &Node);
+    Err = ngc_iget_by_id(Vcb->Core, MftNo, &Node);
     if (!Err)
     {
         ngc_stat(Node, &St);
