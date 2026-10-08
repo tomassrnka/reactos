@@ -88,11 +88,12 @@ Wait_thread_proc(LPVOID Arg)
             break;
     }
 
-    completion_event = Wait->CompletionEvent;
-    if (completion_event) NtSetEvent( completion_event, NULL );
-
+    /* Whichever of this thread and RtlDeregisterWaitEx comes last signals */
     if (InterlockedIncrement( &Wait->DeleteCount ) == 2 )
     {
+       completion_event = Wait->CompletionEvent;
+       if (completion_event) NtSetEvent( completion_event, NULL );
+
        NtClose( Wait->CancelEvent );
        RtlFreeHeap( RtlGetProcessHeap(), 0, Wait );
     }
@@ -204,50 +205,49 @@ RtlDeregisterWaitEx(HANDLE WaitHandle,
 {
     PRTLP_WAIT Wait = (PRTLP_WAIT) WaitHandle;
     NTSTATUS Status = STATUS_SUCCESS;
+    HANDLE LocalEvent = NULL;
+    BOOLEAN CallbackInProgress;
 
     //TRACE( "(%p)\n", WaitHandle );
 
-    NtSetEvent( Wait->CancelEvent, NULL );
-    if (Wait->CallbackInProgress)
+    if (CompletionEvent == INVALID_HANDLE_VALUE)
     {
-        if (CompletionEvent != NULL)
-        {
-            if (CompletionEvent == INVALID_HANDLE_VALUE)
-            {
-                Status = NtCreateEvent( &CompletionEvent,
-                                         EVENT_ALL_ACCESS,
-                                         NULL,
-                                         NotificationEvent,
-                                         FALSE );
+        Status = NtCreateEvent( &LocalEvent,
+                                EVENT_ALL_ACCESS,
+                                NULL,
+                                NotificationEvent,
+                                FALSE );
 
-                if (Status != STATUS_SUCCESS)
-                    return Status;
+        if (Status != STATUS_SUCCESS)
+            return Status;
 
-                (void)InterlockedExchangePointer( &Wait->CompletionEvent, CompletionEvent );
-
-                if (Wait->CallbackInProgress)
-                    NtWaitForSingleObject( CompletionEvent, FALSE, NULL );
-
-                NtClose( CompletionEvent );
-            }
-            else
-            {
-                (void)InterlockedExchangePointer( &Wait->CompletionEvent, CompletionEvent );
-
-                if (Wait->CallbackInProgress)
-                    Status = STATUS_PENDING;
-            }
-        }
-        else
-            Status = STATUS_PENDING;
+        CompletionEvent = LocalEvent;
     }
+
+    /* Publish the event before the wait thread can see the cancellation */
+    (void)InterlockedExchangePointer( &Wait->CompletionEvent, CompletionEvent );
+    NtSetEvent( Wait->CancelEvent, NULL );
+    CallbackInProgress = Wait->CallbackInProgress;
 
     if (InterlockedIncrement( &Wait->DeleteCount ) == 2 )
     {
-        Status = STATUS_SUCCESS;
+        /* The wait thread has exited: no callback can run any more */
+        if (CompletionEvent) NtSetEvent( CompletionEvent, NULL );
+
         NtClose( Wait->CancelEvent );
         RtlFreeHeap( RtlGetProcessHeap(), 0, Wait );
     }
+    else if (LocalEvent)
+    {
+        /* The wait thread sets the event after its last callback returned */
+        NtWaitForSingleObject( LocalEvent, FALSE, NULL );
+    }
+    else if (CallbackInProgress)
+    {
+        Status = STATUS_PENDING;
+    }
+
+    if (LocalEvent) NtClose( LocalEvent );
 
     return Status;
 }
