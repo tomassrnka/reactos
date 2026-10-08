@@ -10,6 +10,7 @@
 
 /* ngos_nt.c */
 int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len);
+int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len);
 
 /* Cc maps files in views of this size (VACB_MAPPING_GRANULARITY). */
 #define NG_VACB_SIZE (256 * 1024)
@@ -327,28 +328,57 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     return STATUS_SUCCESS;
 }
 
+/* Writes a locked buffer straight to the storage device, through a sector-aligned pool buffer. */
+static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
+{
+    PUCHAR Bounce = ExAllocatePoolWithTag(NonPagedPool, 64 * 1024, TAG_NTFSNG);
+    ULONG Done = 0;
+
+    if (!Bounce)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    while (Done < Length)
+    {
+        ULONG n = min(Length - Done, 64 * 1024);
+        RtlCopyMemory(Bounce, Buffer + Done, n);
+        if (ngos_dev_write(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n))
+            break;
+        Done += n;
+    }
+    ExFreePoolWithTag(Bounce, TAG_NTFSNG);
+    return Done == Length ? STATUS_SUCCESS : STATUS_UNEXPECTED_IO_ERROR;
+}
+
 /*
- * Writes through a volume handle.  Only the boot code ($Boot, the first 8 KiB) may change under
- * a mounted volume: setup installs the boot sector that way.  The write goes through the core's
- * device path so the journal overlay and the cached boot sector see it; anything else needs a
- * lock and dismount, which are not implemented.
+ * Writes through a volume handle.  The handle that holds the volume lock writes anywhere, as on
+ * Windows (formatters lock the volume and write it); from then on the mounted state no longer
+ * describes the disk, so nothing of it is written back when the volume is dismounted.  Without
+ * the lock only the boot code ($Boot, the first 8 KiB) may change under the mounted volume: setup
+ * installs the boot sector that way, through the core's device path so the journal overlay and
+ * the cached boot sector see it.
  */
 #define NG_BOOT_REGION 8192
 static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Length)
 {
+    PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
+    BOOLEAN Holder = Vcb->LockedBy == FileObject;
+    BOOLEAN Raw = FALSE;
     PMDL Mdl = NULL;
     PVOID Buffer;
     NTSTATUS Status = STATUS_SUCCESS;
     int Err;
 
-    if (Vcb->ReadOnly)
+    if (Vcb->ReadOnly && !Holder)
         return STATUS_MEDIA_WRITE_PROTECTED;
     if (Offset < 0 || ((ULONG)Offset | Length) & (Vcb->SectorSize - 1))
         return STATUS_INVALID_PARAMETER;
     if (Offset + Length > NG_BOOT_REGION)
     {
-        DPRINT1("ntfsng: volume write at %I64d len %lu refused (outside the boot code; no lock/dismount)\n", Offset, Length);
-        return STATUS_ACCESS_DENIED;
+        if (!Holder)
+        {
+            DPRINT1("ntfsng: volume write at %I64d len %lu refused (outside the boot code, volume not locked)\n", Offset, Length);
+            return STATUS_ACCESS_DENIED;
+        }
+        Raw = TRUE;
     }
     if (Offset == 0 && Length < 512)
         return STATUS_INVALID_PARAMETER;
@@ -382,9 +412,9 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto out;
     }
-    if (Offset == 0)
+    if (Offset == 0 && !Raw)
     {
-        /* Only the boot code may change: the BPB and the signature must stay as they are. */
+        /* Only the boot code may change under the mounted volume: the BPB and the signature stay. */
         PUCHAR Old = ExAllocatePoolWithTag(NonPagedPool, 512, TAG_NTFSNG);
         BOOLEAN Same;
         if (!Old)
@@ -396,12 +426,24 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
                RtlCompareMemory(Old + 3, (PUCHAR)Buffer + 3, 0x54 - 3) == 0x54 - 3 &&
                RtlCompareMemory(Old + 510, (PUCHAR)Buffer + 510, 2) == 2;
         ExFreePoolWithTag(Old, TAG_NTFSNG);
-        if (!Same)
+        if (!Same && !Holder)
         {
             DPRINT1("ntfsng: volume write at 0 refused: it changes the BPB\n");
             Status = STATUS_ACCESS_DENIED;
             goto out;
         }
+        Raw = !Same;
+    }
+    if (Raw || Vcb->ReadOnly)
+    {
+        if (!Vcb->RawWritten)
+            DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): the mounted state is dropped at dismount\n",
+                    Offset, Length);
+        Vcb->RawWritten = TRUE;
+        Status = NgWriteDevice(Vcb, Offset, Buffer, Length);
+        if (NT_SUCCESS(Status))
+            Irp->IoStatus.Information = Length;
+        goto out;
     }
     NgAcquireCore(Vcb);
     Err = ngc_raw_write(Vcb->Core, (unsigned long long)Offset, Buffer, Length);
