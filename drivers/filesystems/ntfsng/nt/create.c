@@ -1033,15 +1033,30 @@ walked:
         Status = STATUS_ACCESS_DENIED;
         goto out;
     }
-    if (Fcb->OpenHandles)
     {
-        Status = IoCheckShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject,
-                                    &Fcb->ShareAccess, TRUE);
-    }
-    else
-    {
-        IoSetShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject, &Fcb->ShareAccess);
+        /* Overwrite and supersede modify the file, so they are checked for sharing against the
+         * access they imply (write, or DELETE for supersede) as FastFAT does, even when the caller
+         * did not ask for it; the handle itself takes only the access it requested. */
+        ACCESS_MASK Added = 0;
+        if (!Created)
+        {
+            if (Disposition == FILE_SUPERSEDE)
+                Added = DELETE & ~Access;
+            else if (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
+                Added = (FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES) & ~Access;
+        }
         Status = STATUS_SUCCESS;
+        if (Fcb->OpenHandles && Added)
+            Status = IoCheckShareAccess(Access | Added, Stack->Parameters.Create.ShareAccess, FileObject,
+                                        &Fcb->ShareAccess, FALSE);
+        if (NT_SUCCESS(Status))
+        {
+            if (Fcb->OpenHandles)
+                Status = IoCheckShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject,
+                                            &Fcb->ShareAccess, TRUE);
+            else
+                IoSetShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject, &Fcb->ShareAccess);
+        }
     }
     if (NT_SUCCESS(Status))
     {
