@@ -20,12 +20,25 @@ START_TEST(CcCopyRead)
     UNICODE_STRING ReallySmallAlignmentTest = RTL_CONSTANT_STRING(L"\\Device\\Kmtest-CcCopyRead\\ReallySmallAlignmentTest");
     UNICODE_STRING FileBig = RTL_CONSTANT_STRING(L"\\Device\\Kmtest-CcCopyRead\\FileBig");
     UNICODE_STRING BehaviourTestFile = RTL_CONSTANT_STRING(L"\\Device\\Kmtest-CcCopyRead\\BehaviourTestFile");
+    UNICODE_STRING BufferTestFile = RTL_CONSTANT_STRING(L"\\Device\\Kmtest-CcCopyRead\\BufferTestFile");
     DWORD Error;
 
     Error = KmtLoadAndOpenDriver(L"CcCopyRead", FALSE);
     ok_eq_int(Error, ERROR_SUCCESS);
     if (Error)
         return;
+
+    /* The driver calls CcCopyRead with a partly committed user buffer */
+    InitializeObjectAttributes(&ObjectAttributes, &BufferTestFile, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Handle, FILE_ALL_ACCESS, &ObjectAttributes, &IoStatusBlock, 0, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ByteOffset.QuadPart = 0;
+        Status = NtReadFile(Handle, NULL, NULL, NULL, &IoStatusBlock, Buffer, 1024, &ByteOffset, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        NtClose(Handle);
+    }
 
     InitializeObjectAttributes(&ObjectAttributes, &SmallAlignmentTest, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = NtOpenFile(&Handle, FILE_ALL_ACCESS, &ObjectAttributes, &IoStatusBlock, 0, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
