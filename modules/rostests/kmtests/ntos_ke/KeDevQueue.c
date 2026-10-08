@@ -223,8 +223,10 @@ Test_InsertByKey(VOID)
 
     Entry = KeRemoveDeviceQueue(&Queue);
     ok(Entry == &Entries[1], "Got entry %p, expected the one with key 1 (%p)\n", Entry, &Entries[1]);
+    ok(!Entries[1].Inserted, "Removed entry with key 1 is still marked as inserted\n");
     Entry = KeRemoveDeviceQueue(&Queue);
     ok(Entry == &Entries[0], "Got entry %p, expected the one with key 3 (%p)\n", Entry, &Entries[0]);
+    ok(!Entries[0].Inserted, "Removed entry with key 3 is still marked as inserted\n");
     ok(KeRemoveDeviceQueue(&Queue) == NULL, "Queue is not empty\n");
     ok(!Queue.Busy, "Queue is still busy\n");
 
