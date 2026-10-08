@@ -2426,9 +2426,14 @@ Restart:
 
     ASSERT(!FileSystemList);
 
-    if (IsUnattendedSetup)
+    if (IsUnattendedSetup && Volume != InstallVolume)
     {
-        /* In unattended mode, preselect the file system */
+        /* A separate system partition (the boot files) gets FAT, whatever FsType says */
+        DefaultFs = L"FAT";
+    }
+    else if (IsUnattendedSetup)
+    {
+        /* In unattended mode, preselect the file system of the installation volume */
         switch (USetupData.FsType)
         {
             /* 1 is for BtrFS */
