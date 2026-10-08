@@ -386,15 +386,18 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 void ngc_umount(ngc_vol *v)
 {
 	struct super_block *sb = v->sb;
+	int errors;
 	kshim_icache_flush(sb, 1);
 	if (sb->s_root) {
 		iput(sb->s_root->d_inode);
 		kfree(sb->s_root);
 		sb->s_root = NULL;
 	}
+	/* put_super frees the volume: read its error state first. */
+	errors = NVolErrors(NTFS_SB(sb));
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
-	if (v->bdev->jnl && !NVolErrors(NTFS_SB(sb)))
+	if (v->bdev->jnl && !errors)
 		kshim_jnl_commit(v->bdev);
 	if (v->watched)
 		kshim_watch_del(v->watched);
