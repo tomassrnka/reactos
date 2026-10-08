@@ -1014,6 +1014,13 @@ MiUnlinkPageFromListKeepOriginalPte(IN PMMPFN Pfn1)
 {
     MMPTE OriginalPte = Pfn1->OriginalPte;
 
+    /* A page that a lock (VirtualLock or an MDL) kept referenced is on no list */
+    if (Pfn1->u3.e1.PageLocation == TransitionPage)
+    {
+        ASSERT(Pfn1->u3.e2.ReferenceCount != 0);
+        return;
+    }
+
     MiUnlinkPageFromList(Pfn1);
     Pfn1->OriginalPte = OriginalPte;
 }
