@@ -1291,6 +1291,17 @@ PnpRootPdoPnpControl(
     Status = Irp->IoStatus.Status;
     IrpSp = IoGetCurrentIrpStackLocation(Irp);
 
+    /* A removed device has no device info left; only a remove or a
+     * surprise removal request is let through */
+    if (DeviceExtension->DeviceInfo == NULL &&
+        IrpSp->MinorFunction != IRP_MN_REMOVE_DEVICE &&
+        IrpSp->MinorFunction != IRP_MN_SURPRISE_REMOVAL)
+    {
+        Irp->IoStatus.Status = STATUS_NO_SUCH_DEVICE;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_NO_SUCH_DEVICE;
+    }
+
     switch (IrpSp->MinorFunction)
     {
         case IRP_MN_START_DEVICE: /* 0x00 */
@@ -1327,34 +1338,48 @@ PnpRootPdoPnpControl(
             break;
 
         case IRP_MN_REMOVE_DEVICE:
-            /* Remove the device from the device list and decrement the device count*/
+        {
+            PPNPROOT_DEVICE DeviceInfo;
+
+            /* Take the device info out of the device list and the extension.
+             * The PnP manager can send a second remove request for this
+             * device, which must not free the device info again. */
             KeAcquireGuardedMutex(&FdoDeviceExtension->DeviceListLock);
-            RemoveEntryList(&DeviceExtension->DeviceInfo->ListEntry);
-            FdoDeviceExtension->DeviceListCount--;
+            DeviceInfo = DeviceExtension->DeviceInfo;
+            DeviceExtension->DeviceInfo = NULL;
+            if (DeviceInfo != NULL)
+            {
+                RemoveEntryList(&DeviceInfo->ListEntry);
+                FdoDeviceExtension->DeviceListCount--;
+            }
             KeReleaseGuardedMutex(&FdoDeviceExtension->DeviceListLock);
 
-            /* Free some strings we created */
-            RtlFreeUnicodeString(&DeviceExtension->DeviceInfo->DeviceDescription);
-            RtlFreeUnicodeString(&DeviceExtension->DeviceInfo->DeviceID);
-            RtlFreeUnicodeString(&DeviceExtension->DeviceInfo->InstanceID);
+            if (DeviceInfo != NULL)
+            {
+                /* Free some strings we created */
+                RtlFreeUnicodeString(&DeviceInfo->DeviceDescription);
+                RtlFreeUnicodeString(&DeviceInfo->DeviceID);
+                RtlFreeUnicodeString(&DeviceInfo->InstanceID);
 
-            /* Free the resource requirements list */
-            if (DeviceExtension->DeviceInfo->ResourceRequirementsList != NULL)
-            ExFreePool(DeviceExtension->DeviceInfo->ResourceRequirementsList);
+                /* Free the resource requirements list */
+                if (DeviceInfo->ResourceRequirementsList != NULL)
+                    ExFreePool(DeviceInfo->ResourceRequirementsList);
 
-            /* Free the boot resources list */
-            if (DeviceExtension->DeviceInfo->ResourceList != NULL)
-            ExFreePool(DeviceExtension->DeviceInfo->ResourceList);
+                /* Free the boot resources list */
+                if (DeviceInfo->ResourceList != NULL)
+                    ExFreePool(DeviceInfo->ResourceList);
 
-            /* Free the device info */
-            ExFreePool(DeviceExtension->DeviceInfo);
+                /* Free the device info */
+                ExFreePool(DeviceInfo);
 
-            /* Finally, delete the device object */
-            IoDeleteDevice(DeviceObject);
+                /* Finally, delete the device object */
+                IoDeleteDevice(DeviceObject);
+            }
 
             /* Return success */
             Status = STATUS_SUCCESS;
             break;
+        }
 
         case IRP_MN_QUERY_ID: /* 0x13 */
             Status = PdoQueryId(DeviceObject, Irp, IrpSp);
