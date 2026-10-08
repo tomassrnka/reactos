@@ -119,8 +119,14 @@ HalpCalibrateStallExecution(VOID)
 
     do
     {
-        /* Next delay count to try */
+        /*
+         * Next delay count to try. A try stretched past a whole timer period
+         * can read as too short; enough such misses would wrap the count to 0,
+         * and a stall of 0 loops almost never ends the loop. Start over instead.
+         */
         delay_count <<= 1;
+        if (!delay_count)
+            delay_count = 2;
 
         WaitFor8254Wraparound();
 
