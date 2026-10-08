@@ -29,6 +29,21 @@
 KAFFINITY KiIdleSummary;
 KAFFINITY KiIdleSMTSummary;
 
+#ifdef CONFIG_SMP
+/* Set while the processor's idle loop polls for work instead of halting */
+typedef struct DECLSPEC_ALIGN(64) _KI_IDLE_POLL
+{
+    volatile LONG Polling;
+} KI_IDLE_POLL;
+
+static KI_IDLE_POLL KiIdlePollState[MAXIMUM_PROCESSORS];
+ULONG KiIdlePollMicroseconds;
+
+#define KiIsProcessorPolling(Number) (KiIdlePollState[(Number)].Polling != FALSE)
+#else
+#define KiIsProcessorPolling(Number) FALSE
+#endif
+
 /* FUNCTIONS *****************************************************************/
 
 PKTHREAD
@@ -162,6 +177,52 @@ KiSelectNextProcessor(
     ASSERT(Processor < KeNumberProcessors);
 
     return Processor;
+}
+
+FORCEINLINE
+BOOLEAN
+KiIdleHasWork(
+    _In_ PKPRCB Prcb)
+{
+    /* Other processors and interrupts change these while the loop polls */
+    return (*(struct _KTHREAD * volatile *)&Prcb->NextThread != NULL) ||
+           (Prcb->DpcData[0].DpcQueueDepth != 0) ||
+           (*(volatile ULONG_PTR *)&Prcb->TimerRequest != 0) ||
+           (*(PSINGLE_LIST_ENTRY volatile *)&Prcb->DeferredReadyListHead.Next != NULL);
+}
+
+/*
+ * Called by the idle loop with interrupts disabled, instead of halting at
+ * once; returns with interrupts disabled. Under a hypervisor a halt usually
+ * exits to the host and waking the halted processor takes an IPI and a host
+ * wake-up; a thread readied onto a polling processor is seen within the
+ * loop, and the readying processor sends no IPI.
+ */
+BOOLEAN
+FASTCALL
+KiIdlePollForWork(
+    _In_ PKPRCB Prcb)
+{
+    volatile LONG *Polling = &KiIdlePollState[Prcb->Number].Polling;
+    ULONG64 End;
+    BOOLEAN Work;
+
+    *Polling = TRUE;
+    _enable();
+
+    End = __rdtsc() + (ULONG64)KiIdlePollMicroseconds * Prcb->MHz;
+    do
+    {
+        YieldProcessor();
+        Work = KiIdleHasWork(Prcb);
+    } while (!Work && ((LONG64)(__rdtsc() - End) < 0));
+
+    _disable();
+
+    /* A processor that saw the flag set did not interrupt this one, and it
+       published the next thread before reading the flag: look again */
+    InterlockedExchange(Polling, FALSE);
+    return KiIdleHasWork(Prcb);
 }
 
 static
@@ -431,11 +492,25 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             if (KeGetCurrentProcessorNumber() != Processor)
             {
                 /* The idle loop checks for a next thread after any interrupt
-                   ends its halt; a busy processor needs a DPC interrupt to
-                   switch. The idle loop runs at DISPATCH_LEVEL, so a DPC
-                   request would only fire later, uselessly, in the new thread */
-                KiIpiSend(AFFINITY_MASK(Processor),
-                          (NextThread == Prcb->IdleThread) ? 0 : IPI_DPC);
+                   ends its halt, and while it polls it needs no interrupt at
+                   all; a busy processor needs a DPC interrupt to switch. The
+                   idle loop runs at DISPATCH_LEVEL, so a DPC request would only
+                   fire later, uselessly, in the new thread */
+                if (NextThread != Prcb->IdleThread)
+                {
+                    KiIpiSend(AFFINITY_MASK(Processor), IPI_DPC);
+                }
+                else
+                {
+                    /* Order the next thread before the polling flag (see
+                       KiIdlePollForWork); the interlocked PRCB lock release
+                       does too, but a release need not be a full barrier */
+                    KeMemoryBarrier();
+                    if (!KiIsProcessorPolling(Processor))
+                    {
+                        KiIpiSend(AFFINITY_MASK(Processor), 0);
+                    }
+                }
             }
             return;
         }

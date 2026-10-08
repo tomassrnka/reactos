@@ -155,6 +155,8 @@ extern LIST_ENTRY KiProcessInSwapListHead, KiProcessOutSwapListHead;
 extern LIST_ENTRY KiStackInSwapListHead;
 extern KEVENT KiSwapEvent;
 extern KAFFINITY KiIdleSummary;
+extern ULONG KiIdlePollMicroseconds;
+#define KI_IDLE_POLL_DEFAULT 50
 extern PVOID KeUserApcDispatcher;
 extern PVOID KeUserCallbackDispatcher;
 extern PVOID KeUserExceptionDispatcher;
@@ -265,6 +267,12 @@ KiExitDispatcher(KIRQL OldIrql);
 VOID
 FASTCALL
 KiDeferredReadyThread(IN PKTHREAD Thread);
+
+BOOLEAN
+FASTCALL
+KiIdlePollForWork(
+    _In_ PKPRCB Prcb
+);
 
 PKTHREAD
 FASTCALL

@@ -327,6 +327,10 @@ KiIdleLoop(VOID)
         }
         else
         {
+#ifdef CONFIG_SMP
+            /* Poll for a while before halting (see KiIdlePollForWork) */
+            if (KiIdlePollMicroseconds && KiIdlePollForWork(Prcb)) continue;
+#endif
             /* Continue staying idle. Note the HAL returns with interrupts on */
             Prcb->PowerState.IdleFunction(&Prcb->PowerState);
         }

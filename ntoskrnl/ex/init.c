@@ -1370,6 +1370,10 @@ Phase1InitializationDiscard(IN PVOID Context)
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE KeyHandle, OptionHandle;
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters = NULL;
+#ifdef CONFIG_SMP
+    BOOLEAN IdlePollSpecified = FALSE;
+    ULONG IdlePoll = 0;
+#endif
 
     /* Allocate the initialization buffer */
     InitBuffer = ExAllocatePoolWithTag(NonPagedPool,
@@ -1593,10 +1597,54 @@ Phase1InitializationDiscard(IN PVOID Context)
          * as existing the maximum number of processors that can be handled */
         if (strstr(CommandLine, "MAXPROC"))
             KeMaximumProcessors = MAXIMUM_PROCESSORS;
+
+        /* Check for IDLEPOLL (ReactOS): microseconds an idle processor
+         * looks for work before it halts, 0 disables, at most 1000 */
+        for (Option = strstr(CommandLine, "IDLEPOLL=");
+             Option;
+             Option = strstr(Option + 1, "IDLEPOLL="))
+        {
+            PCHAR Digit = Option + sizeof("IDLEPOLL=") - 1;
+            ULONG Value = 0;
+
+            /* Only a whole option with a decimal value */
+            if ((Option != CommandLine) && (Option[-1] != ' ') && (Option[-1] != '/'))
+                continue;
+            if ((*Digit < '0') || (*Digit > '9'))
+                continue;
+            for (; (*Digit >= '0') && (*Digit <= '9'); Digit++)
+            {
+                Value = min(Value * 10 + (*Digit - '0'), 1000);
+            }
+            if ((*Digit != ANSI_NULL) && (*Digit != ' ') && (*Digit != '/'))
+                continue;
+
+            IdlePoll = Value;
+            IdlePollSpecified = TRUE;
+            break;
+        }
     }
 
     /* Start Application Processors */
     KeStartAllProcessors();
+
+    /* Halting is cheap on hardware, but under a hypervisor a halt usually
+       exits to the host and a wake-up of a halted processor is an IPI and
+       a host wake-up (CPUID leaf 1, ECX bit 31: hypervisor) */
+    if (!IdlePollSpecified && (KeNumberProcessors > 1))
+    {
+        INT CpuInfo[4];
+
+        __cpuid(CpuInfo, 1);
+        if (CpuInfo[2] & 0x80000000)
+            IdlePoll = KI_IDLE_POLL_DEFAULT;
+    }
+
+    /* The polling window is measured with the time stamp counter. Set it
+       only now: the processors started above already run their idle loops
+       (on x86 a processor polls from when its frequency is measured) */
+    if (KeFeatureBits & KF_RDTSC)
+        KiIdlePollMicroseconds = IdlePoll;
 #endif
 
     /* Initialize all processors */
