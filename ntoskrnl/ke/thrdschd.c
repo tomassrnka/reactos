@@ -371,10 +371,10 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             KiReleasePrcbLock(Prcb);
 
             /* Check if we're running on another CPU */
-            if (KeGetCurrentProcessorNumber() != Thread->NextProcessor)
+            if (KeGetCurrentProcessorNumber() != Processor)
             {
                 /* We are, send an IPI */
-                KiIpiSend(AFFINITY_MASK(Thread->NextProcessor), IPI_DPC);
+                KiIpiSend(AFFINITY_MASK(Processor), IPI_DPC);
             }
             return;
         }
