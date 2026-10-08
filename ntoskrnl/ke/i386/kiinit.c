@@ -634,10 +634,11 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     KeRaiseIrql(HIGH_LEVEL, &DummyIrql);
     if (Number)
     {
-        /* Become a target of TLB flushes and other requests right before
-           taking interrupts, then drop translations cached before that */
+        /* Become a target of all requests right before taking interrupts. Flushes
+           sent above SYNCH_LEVEL meanwhile were local only, so flush once more */
         InterlockedOr((PLONG)&KeActiveProcessors, Prcb->SetMember);
         InterlockedOr((PLONG)&InitProcess->ActiveProcessors, Prcb->SetMember);
+        InterlockedAnd((PLONG)&KiStartingProcessors, ~Prcb->SetMember);
         KxFlushEntireCurrentTb();
     }
     LoaderBlock->Prcb = 0;
@@ -858,7 +859,17 @@ AppCpuInit:
     /* Count the processor. An application processor joins the active ones
        at the end of KiInitializeKernel, when it can take requests */
     KeNumberProcessors++;
-    if (!Cpu) KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
+    if (!Cpu)
+    {
+        KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
+    }
+    else
+    {
+        /* Take TLB flushes from now on (served once interrupts are enabled),
+           then drop the translations cached before */
+        InterlockedOr((PLONG)&KiStartingProcessors, __readfsdword(KPCR_SET_MEMBER));
+        KxFlushEntireCurrentTb();
+    }
 
     /* Let the next processor start */
     InterlockedAnd((PLONG)&KiFreezeExecutionLock, 0);

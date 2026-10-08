@@ -568,6 +568,13 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
         /* We are running the initial system process now */
         InterlockedOr64(&KiInitialProcess.Pcb.ActiveProcessors, 1ULL << Cpu);
     }
+    else
+    {
+        /* Take TLB flushes from now on (served once interrupts are enabled),
+           then drop the translations cached before */
+        InterlockedOr64((PLONG64)&KiStartingProcessors, 1LL << Cpu);
+        KxFlushEntireCurrentTb();
+    }
 
     /* Release lock */
     InterlockedAnd64((PLONG64)&KiFreezeExecutionLock, 0);

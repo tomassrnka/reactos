@@ -98,9 +98,18 @@ typedef struct _LOGICAL_ADAPTER
     PMINIPORT_BUGCHECK_CONTEXT  BugcheckContext;        /* Adapter's shutdown handler */
     BUS_INTERFACE_STANDARD     BusInterface;
     BOOLEAN                    BusInterfaceQueried;
+    BOOLEAN                    MiniportBusy;           /* A serialized miniport runs a send, work item or its interrupt DPC */
+    BOOLEAN                    DpcDeferred;            /* Its interrupt DPC waits for MiniportBusy to clear */
+    BOOLEAN                    WorkerDeferred;         /* So does a work item worker */
+    BOOLEAN                    WorkerScheduled;        /* A work item worker is queued and has not started */
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)
+
+/* References to an indicated packet: the protocols' and, while it is being indicated, a bias */
+/* WrapperReservedEx: a miniport may use MiniportReservedEx, which overlaps the start of WrapperReserved */
+#define NDIS_PACKET_REFERENCES(Packet) ((PLONG)(Packet)->WrapperReservedEx)
+#define NDIS_INDICATION_REFERENCE_BIAS 0x10000
 
 extern LIST_ENTRY MiniportListHead;
 extern KSPIN_LOCK MiniportListLock;
@@ -201,5 +210,14 @@ VOID
 MiniWorkItemComplete(
     PLOGICAL_ADAPTER     Adapter,
     NDIS_WORK_ITEM_TYPE  WorkItemType);
+
+NDIS_STATUS
+MiniEnterSerialized(
+    PLOGICAL_ADAPTER Adapter,
+    PNDIS_PACKET     QueuePacket);
+
+VOID
+MiniLeaveSerialized(
+    PLOGICAL_ADAPTER Adapter);
 
 /* EOF */

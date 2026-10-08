@@ -1111,7 +1111,8 @@ IopLegacyResourceAllocation(
     }
 
     Status = IopFixupResourceListWithRequirements(ResourceRequirements,
-                                                  AllocatedResources);
+                                                  AllocatedResources,
+                                                  FALSE);
     if (!NT_SUCCESS(Status))
     {
         if (Status == STATUS_CONFLICTING_ADDRESSES)

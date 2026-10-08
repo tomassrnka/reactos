@@ -284,14 +284,15 @@ NDIS_STATUS NTAPI ParaNdis_FinishSpecificInitialization(
     NdisInitializeTimer(&pContext->ConnectTimer, OnConnectTimer, pContext);
     NdisInitializeTimer(&pContext->DPCPostProcessTimer, OnDPCPostProcessTimer, pContext);
 
+    /* An MSI-X message is edge-triggered and belongs to this device alone */
     status = NdisMRegisterInterrupt(
         &pContext->Interrupt,
         pContext->MiniportHandle,
         pContext->AdapterResources.Vector,
         pContext->AdapterResources.Level,
         TRUE,
-        TRUE,
-        NdisInterruptLevelSensitive);
+        !pContext->bUsingMSIX,
+        pContext->bUsingMSIX ? NdisInterruptLatched : NdisInterruptLevelSensitive);
 
     if (status == NDIS_STATUS_SUCCESS)
     {

@@ -872,6 +872,24 @@ KeInsertQueueDpc(IN PKDPC Dpc,
     return DpcConfigured;
 }
 
+static
+VOID
+KiClearDpcInterruptRequest(
+    _In_ PKDPC_DATA DpcData)
+{
+    ULONG i;
+
+    /* Called with the DPC lock held, which KeInsertQueueDpc holds to read the flag */
+    for (i = 0; i < (ULONG)KeNumberProcessors; i++)
+    {
+        if (KiProcessorBlock[i] && (DpcData == &KiProcessorBlock[i]->DpcData[DPC_NORMAL]))
+        {
+            KiProcessorBlock[i]->DpcInterruptRequested = FALSE;
+            break;
+        }
+    }
+}
+
 /*
  * @implemented
  */
@@ -901,6 +919,11 @@ KeRemoveQueueDpc(IN PKDPC Dpc)
             RemoveEntryList(&Dpc->DpcListEntry);
             Dpc->DpcData = NULL;
             Removed = TRUE;
+
+            /* The DPC interrupt finds nothing to retire and leaves the request flag set,
+               so the next KeInsertQueueDpc would not request an interrupt */
+            if (DpcData->DpcQueueDepth == 0)
+                KiClearDpcInterruptRequest(DpcData);
         }
 
         /* Release the lock */

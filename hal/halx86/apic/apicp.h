@@ -61,6 +61,7 @@
 #define APIC_MAX_IRQ 24
 #define APIC_FREE_VECTOR 0xFF
 #define APIC_RESERVED_VECTOR 0xFE
+#define APIC_MSI_INDEX 0xFD /* vector of a message-signaled interrupt */
 
 /* The IMCR is supported by two read/writable or write-only I/O ports,
    22h and 23h, which receive address and data respectively.

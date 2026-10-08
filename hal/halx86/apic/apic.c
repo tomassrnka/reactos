@@ -28,6 +28,19 @@ ULONG ApicVersion;
 BOOLEAN HalpX2ApicEnabled;
 UCHAR HalpVectorToIndex[256];
 
+/* Processor that receives each device interrupt vector, and the next one to pick */
+static UCHAR HalpVectorTarget[256];
+static ULONG HalpNextInterruptTarget;
+
+/* Message vectors whose interrupt was disconnected; a new message reuses them */
+static BOOLEAN HalpMessageVectorUnused[256];
+
+/* Protects the vector allocation */
+static KSPIN_LOCK HalpVectorLock;
+
+/* The I/O APIC registers are reached through one select/data pair */
+KSPIN_LOCK HalpIoApicLock;
+
 #ifndef _M_AMD64
 const UCHAR
 HalpIRQLtoTPR[32] =
@@ -91,23 +104,56 @@ HalVectorToIRQL[16] =
 /* PRIVATE FUNCTIONS **********************************************************/
 
 FORCEINLINE
+ULONG_PTR
+IOApicLock(VOID)
+{
+    ULONG_PTR EFlags = __readeflags();
+
+    _disable();
+    while (InterlockedBitTestAndSet((PLONG)&HalpIoApicLock, 0))
+    {
+        while (*(volatile KSPIN_LOCK *)&HalpIoApicLock & 1)
+            YieldProcessor();
+    }
+    return EFlags;
+}
+
+FORCEINLINE
+VOID
+IOApicUnlock(ULONG_PTR EFlags)
+{
+    InterlockedAnd((PLONG)&HalpIoApicLock, 0);
+    __writeeflags(EFlags);
+}
+
+FORCEINLINE
 ULONG
 IOApicRead(UCHAR Register)
 {
+    ULONG_PTR EFlags;
+    ULONG Value;
+
     /* Select the register, then do the read */
     ASSERT(Register <= 0x3F);
+    EFlags = IOApicLock();
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
-    return READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
+    Value = READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
+    IOApicUnlock(EFlags);
+    return Value;
 }
 
 FORCEINLINE
 VOID
 IOApicWrite(UCHAR Register, ULONG Value)
 {
+    ULONG_PTR EFlags;
+
     /* Select the register, then do the write */
     ASSERT(Register <= 0x3F);
+    EFlags = IOApicLock();
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN), Value);
+    IOApicUnlock(EFlags);
 }
 
 FORCEINLINE
@@ -435,6 +481,119 @@ ApicInitializeLocalApic(ULONG Cpu)
 #endif
 }
 
+static
+UCHAR
+HalpChooseInterruptTarget(VOID)
+{
+    ULONG Count = (ULONG)KeNumberProcessors;
+
+    /* Spread device interrupts over the processors, leaving the boot processor
+       (it takes the clock interrupt) to the last ones */
+    if (Count <= 1)
+        return 0;
+    return (UCHAR)(1 + (HalpNextInterruptTarget++ % (Count - 1)));
+}
+
+static
+UCHAR
+HalpFindFreeVector(
+    _Out_ PKIRQL OutIrql)
+{
+    ULONG Offset;
+    KIRQL Irql;
+    UCHAR Vector;
+
+    /* Outer loop to find alternative slots, when all IRQLs are in use */
+    for (Offset = 0; Offset < 15; Offset++)
+    {
+        /* Loop allowed IRQL range */
+        for (Irql = CLOCK_LEVEL - 1; Irql >= CMCI_LEVEL; Irql--)
+        {
+            /* Calculate the vector and check if it is free */
+            Vector = IrqlToTpr(Irql) + Offset;
+            if (HalpVectorToIrq(Vector) == APIC_FREE_VECTOR)
+            {
+                *OutIrql = Irql;
+                return Vector;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * A message-signaled interrupt has its own vector and goes to one processor:
+ * the device writes the vector to that processor's local APIC (Intel SDM,
+ * "Message Signalled Interrupts"; the bus driver programs the device).
+ * BusInterruptVector is CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN to allocate one,
+ * or a vector allocated before, to translate it again.
+ */
+static
+ULONG
+HalpGetMessageInterruptVector(
+    _In_ ULONG MessageCount,
+    _In_ ULONG BusInterruptVector,
+    _Out_ PKIRQL OutIrql,
+    _Out_ PKAFFINITY OutAffinity)
+{
+    ULONG Index;
+    UCHAR Vector = 0;
+    KIRQL Irql;
+
+    *OutIrql = 0;
+    *OutAffinity = 0;
+
+    /* Each message has its own descriptor */
+    if (MessageCount != 1)
+        return 0;
+
+    if (BusInterruptVector == CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN)
+    {
+        /* Prefer a message vector that was given up, so stopping and starting
+           a device does not use up the vectors */
+        for (Index = 0; Index < RTL_NUMBER_OF(HalpMessageVectorUnused); Index++)
+        {
+            if (HalpMessageVectorUnused[Index])
+            {
+                Vector = (UCHAR)Index;
+                Irql = HalpVectorToIrql(Vector);
+                break;
+            }
+        }
+
+        if (Vector == 0)
+            Vector = HalpFindFreeVector(&Irql);
+        if (Vector == 0)
+        {
+            DPRINT1("Failed to get a vector for a message-signaled interrupt\n");
+            return 0;
+        }
+
+        HalpVectorToIndex[Vector] = APIC_MSI_INDEX;
+        HalpMessageVectorUnused[Vector] = FALSE;
+        HalpVectorTarget[Vector] = HalpChooseInterruptTarget();
+
+        /* Report the IRQL a later translation of the vector reports */
+        Irql = HalpVectorToIrql(Vector);
+    }
+    else
+    {
+        if ((BusInterruptVector >= RTL_NUMBER_OF(HalpVectorToIndex)) ||
+            (HalpVectorToIndex[BusInterruptVector] != APIC_MSI_INDEX))
+        {
+            return 0;
+        }
+
+        Vector = (UCHAR)BusInterruptVector;
+        Irql = HalpVectorToIrql(Vector);
+    }
+
+    *OutIrql = Irql;
+    *OutAffinity = (KAFFINITY)1 << HalpVectorTarget[Vector];
+    return Vector;
+}
+
 UCHAR
 NTAPI
 HalpAllocateSystemInterrupt(
@@ -467,9 +626,9 @@ HalpAllocateSystemInterrupt(
     return Vector;
 }
 
+static
 ULONG
-NTAPI
-HalpGetRootInterruptVector(
+HalpGetRootInterruptVectorLocked(
     _In_ ULONG BusInterruptLevel,
     _In_ ULONG BusInterruptVector,
     _Out_ PKIRQL OutIrql,
@@ -478,10 +637,19 @@ HalpGetRootInterruptVector(
     UCHAR Vector;
     KIRQL Irql;
 
+    /* The high word of the level of a message-signaled interrupt is its message count */
+    if (BusInterruptLevel >> 16)
+    {
+        return HalpGetMessageInterruptVector(BusInterruptLevel >> 16,
+                                             BusInterruptVector,
+                                             OutIrql,
+                                             OutAffinity);
+    }
+
     /* Get the vector currently registered */
     Vector = HalpIrqToVector(BusInterruptLevel);
 
-    /* Check if it's used */
+    /* Check if it's used; every device of a shared input gets its processor */
     if (Vector != APIC_FREE_VECTOR)
     {
         /* Calculate IRQL */
@@ -490,38 +658,44 @@ HalpGetRootInterruptVector(
     }
     else
     {
-        ULONG Offset;
-
-        /* Outer loop to find alternative slots, when all IRQLs are in use */
-        for (Offset = 0; Offset < 15; Offset++)
+        /* Find a free vector and allocate the interrupt */
+        Vector = HalpFindFreeVector(&Irql);
+        if (Vector == 0)
         {
-            /* Loop allowed IRQL range */
-            for (Irql = CLOCK_LEVEL - 1; Irql >= CMCI_LEVEL; Irql--)
-            {
-                /* Calculate the vactor */
-                Vector = IrqlToTpr(Irql) + Offset;
-
-                /* Check if the vector is free */
-                if (HalpVectorToIrq(Vector) == APIC_FREE_VECTOR)
-                {
-                    /* Found one, allocate the interrupt */
-                    Vector = HalpAllocateSystemInterrupt(BusInterruptLevel, Vector);
-                    *OutIrql = Irql;
-                    goto Exit;
-                }
-            }
+            DPRINT1("Failed to get an interrupt vector for IRQ %lu\n", BusInterruptLevel);
+            *OutAffinity = 0;
+            *OutIrql = 0;
+            return 0;
         }
 
-        DPRINT1("Failed to get an interrupt vector for IRQ %lu\n", BusInterruptLevel);
-        *OutAffinity = 0;
-        *OutIrql = 0;
-        return 0;
+        Vector = HalpAllocateSystemInterrupt(BusInterruptLevel, Vector);
+        *OutIrql = Irql;
+
+        /* The input goes to one processor, chosen in turn */
+        HalpVectorTarget[Vector] = HalpChooseInterruptTarget();
     }
 
-Exit:
+    *OutAffinity = (KAFFINITY)1 << HalpVectorTarget[Vector];
+    ASSERT(*OutAffinity & HalpDefaultInterruptAffinity);
 
-    *OutAffinity = HalpDefaultInterruptAffinity;
-    ASSERT(HalpDefaultInterruptAffinity);
+    return Vector;
+}
+
+ULONG
+NTAPI
+HalpGetRootInterruptVector(
+    _In_ ULONG BusInterruptLevel,
+    _In_ ULONG BusInterruptVector,
+    _Out_ PKIRQL OutIrql,
+    _Out_ PKAFFINITY OutAffinity)
+{
+    ULONG Vector;
+    KIRQL OldIrql;
+
+    /* Choosing a free vector and taking it is one step */
+    KeAcquireSpinLock(&HalpVectorLock, &OldIrql);
+    Vector = HalpGetRootInterruptVectorLocked(BusInterruptLevel, BusInterruptVector, OutIrql, OutAffinity);
+    KeReleaseSpinLock(&HalpVectorLock, OldIrql);
 
     return Vector;
 }
@@ -761,18 +935,28 @@ HalEnableSystemInterrupt(
         return FALSE;
     }
 
+    /* A message-signaled interrupt is enabled and masked in the device */
+    if (Index == APIC_MSI_INDEX)
+    {
+        HalpMessageVectorUnused[Vector] = FALSE;
+        return TRUE;
+    }
+
     /* Read the redirection entry */
     ReDirReg = ApicReadIORedirectionEntry(Index);
 
     /* Check if the interrupt is already enabled */
     if (ReDirReg.Mask == FALSE)
     {
-        /* If the vector matches, there is nothing more to do,
-           otherwise something is wrong. */
-        return (ReDirReg.Vector == Vector);
+        /* If the vector doesn't match, something is wrong */
+        if (ReDirReg.Vector != Vector)
+            return FALSE;
+
+        return TRUE;
     }
 
-    /* Set up the redirection entry */
+    /* Set up the redirection entry; drivers connect on the processor that
+       HalpGetRootInterruptVector reported as the affinity */
     ReDirReg.Vector = Vector;
     ReDirReg.MessageType = APIC_MT_Fixed;
     ReDirReg.DestinationMode = APIC_DM_Physical;
@@ -799,6 +983,15 @@ HalDisableSystemInterrupt(
     ASSERT(Vector < RTL_NUMBER_OF(HalpVectorToIndex));
 
     Index = HalpVectorToIndex[Vector];
+
+    /* Only I/O APIC inputs can be masked here; a message vector whose
+       interrupt is gone can be handed to the next message */
+    if (Index >= APIC_MAX_IRQ)
+    {
+        if (Index == APIC_MSI_INDEX)
+            HalpMessageVectorUnused[Vector] = TRUE;
+        return;
+    }
 
     /* Read lower dword of redirection entry */
     ReDirReg.Long0 = IOApicRead(IOAPIC_REDTBL + 2 * Index);
@@ -852,8 +1045,8 @@ HalBeginSystemInterrupt(
        }
        else
        {
-            /* This should be a reserved vector! */
-            ASSERT(Index == APIC_RESERVED_VECTOR);
+            /* This should be a reserved vector or a message-signaled interrupt */
+            ASSERT((Index == APIC_RESERVED_VECTOR) || (Index == APIC_MSI_INDEX));
 
             /* Re-request the interrupt to be handled later */
             ApicRequestSelfInterrupt(Vector, APIC_TGM_Edge);

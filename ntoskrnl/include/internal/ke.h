@@ -104,8 +104,20 @@ extern USHORT KeProcessorLevel;
 extern USHORT KeProcessorRevision;
 extern ULONG64 KeFeatureBits;
 extern KAFFINITY KeActiveProcessors;
+extern KAFFINITY KiStartingProcessors;
 extern PKPRCB KiProcessorBlock[];
 #ifdef CONFIG_SMP
+/* A processor joins KeActiveProcessors before it leaves KiStartingProcessors,
+   so reading the starting set first never misses it */
+FORCEINLINE
+KAFFINITY
+KiGetTbFlushProcessors(VOID)
+{
+    KAFFINITY Starting = *(volatile KAFFINITY *)&KiStartingProcessors;
+    _ReadBarrier();
+    return Starting | *(volatile KAFFINITY *)&KeActiveProcessors;
+}
+
 extern ULONG KeMaximumProcessors;
 extern ULONG KeNumprocSpecified;
 extern ULONG KeBootprocSpecified;

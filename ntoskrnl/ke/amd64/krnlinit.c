@@ -202,10 +202,11 @@ KiSystemStartupBootStack(VOID)
     KfRaiseIrql(HIGH_LEVEL);
     if (Prcb->Number != 0)
     {
-        /* Become a target of TLB flushes and other requests right before
-           taking interrupts, then drop translations cached before that */
+        /* Become a target of all requests right before taking interrupts. Flushes
+           sent above SYNCH_LEVEL meanwhile were local only, so flush once more */
         InterlockedOr64((PLONG64)&KeActiveProcessors, (LONG64)Prcb->SetMember);
         InterlockedOr64((PLONG64)&Process->ActiveProcessors, (LONG64)Prcb->SetMember);
+        InterlockedAnd64((PLONG64)&KiStartingProcessors, ~(LONG64)Prcb->SetMember);
         KxFlushEntireCurrentTb();
     }
     LoaderBlock->Prcb = 0;

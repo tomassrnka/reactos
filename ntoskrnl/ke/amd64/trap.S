@@ -737,8 +737,8 @@ FUNC KiUnexpectedInterrupt
     call KeBugCheckWithTf
     jmp $
 #endif
-    /* Return */
-    ExitTrap TF_SAVE_ALL
+    /* Return; a device interrupt without a handler is in service until the EOI */
+    ExitTrap (TF_SAVE_ALL or TF_SEND_EOI)
 ENDFUNC
 
 PUBLIC KiInterruptDispatch
