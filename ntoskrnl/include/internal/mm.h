@@ -949,6 +949,23 @@ struct _MM_RMAP_ENTRY*
 NTAPI
 MmGetRmapListHeadPage(PFN_NUMBER Page);
 
+PVOID
+NTAPI
+MmAllocateRmapEntry(VOID);
+
+VOID
+NTAPI
+MmFreeRmapEntry(PVOID Entry);
+
+VOID
+NTAPI
+MmInsertRmapEntry(
+    PFN_NUMBER Page,
+    struct _EPROCESS *Process,
+    PVOID Address,
+    PVOID Entry
+);
+
 VOID
 NTAPI
 MmInsertRmap(
