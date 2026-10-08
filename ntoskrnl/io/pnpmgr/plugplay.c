@@ -28,6 +28,7 @@ typedef struct _IOP_FIND_DEVICE_INSTANCE_TRAVERSE_CONTEXT
 /* GLOBALS *******************************************************************/
 
 static LIST_ENTRY IopPnpEventQueueHead;
+static FAST_MUTEX IopPnpEventQueueLock;
 static KEVENT IopPnpNotifyEvent;
 
 /* FUNCTIONS *****************************************************************/
@@ -40,12 +41,25 @@ NTSTATUS
 IopInitPlugPlayEvents(VOID)
 {
     InitializeListHead(&IopPnpEventQueueHead);
+    ExInitializeFastMutex(&IopPnpEventQueueLock);
 
     KeInitializeEvent(&IopPnpNotifyEvent,
                       SynchronizationEvent,
                       FALSE);
 
     return STATUS_SUCCESS;
+}
+
+static
+VOID
+IopQueuePnpEvent(
+    _In_ PPNP_EVENT_ENTRY EventEntry)
+{
+    ExAcquireFastMutex(&IopPnpEventQueueLock);
+    InsertHeadList(&IopPnpEventQueueHead, &EventEntry->ListEntry);
+    ExReleaseFastMutex(&IopPnpEventQueueLock);
+
+    KeSetEvent(&IopPnpNotifyEvent, 0, FALSE);
 }
 
 NTSTATUS
@@ -84,11 +98,7 @@ IopQueueDeviceChangeEvent(
                   SymbolicLinkName->Buffer, SymbolicLinkName->Length);
     EventEntry->Event.DeviceClass.SymbolicLinkName[SymbolicLinkName->Length / sizeof(WCHAR)] = UNICODE_NULL;
 
-    InsertHeadList(&IopPnpEventQueueHead,
-                   &EventEntry->ListEntry);
-    KeSetEvent(&IopPnpNotifyEvent,
-               0,
-               FALSE);
+    IopQueuePnpEvent(EventEntry);
 
     return STATUS_SUCCESS;
 }
@@ -125,9 +135,7 @@ IopQueueDeviceInstallEvent(
                   DeviceId->Buffer, DeviceId->Length);
     EventEntry->Event.InstallDevice.DeviceId[DeviceId->Length / sizeof(WCHAR)] = UNICODE_NULL;
 
-    InsertHeadList(&IopPnpEventQueueHead, &EventEntry->ListEntry);
-
-    KeSetEvent(&IopPnpNotifyEvent, 0, FALSE);
+    IopQueuePnpEvent(EventEntry);
 
     return STATUS_SUCCESS;
 }
@@ -173,11 +181,7 @@ IopQueueTargetDeviceEvent(const GUID *Guid,
         return Status;
     }
 
-    InsertHeadList(&IopPnpEventQueueHead,
-                   &EventEntry->ListEntry);
-    KeSetEvent(&IopPnpNotifyEvent,
-               0,
-               FALSE);
+    IopQueuePnpEvent(EventEntry);
 
     return STATUS_SUCCESS;
 }
@@ -391,14 +395,25 @@ NTSTATUS
 IopRemovePlugPlayEvent(
     _In_ PPLUGPLAY_CONTROL_USER_RESPONSE_DATA ResponseData)
 {
+    PPNP_EVENT_ENTRY Entry = NULL;
+    BOOLEAN MoreEvents;
+
     /* Remove a pnp event entry from the tail of the queue */
+    ExAcquireFastMutex(&IopPnpEventQueueLock);
     if (!IsListEmpty(&IopPnpEventQueueHead))
     {
-        ExFreePool(CONTAINING_RECORD(RemoveTailList(&IopPnpEventQueueHead), PNP_EVENT_ENTRY, ListEntry));
+        Entry = CONTAINING_RECORD(RemoveTailList(&IopPnpEventQueueHead), PNP_EVENT_ENTRY, ListEntry);
+    }
+    MoreEvents = !IsListEmpty(&IopPnpEventQueueHead);
+    ExReleaseFastMutex(&IopPnpEventQueueLock);
+
+    if (Entry)
+    {
+        ExFreePool(Entry);
     }
 
     /* Signal the next pnp event in the queue */
-    if (!IsListEmpty(&IopPnpEventQueueHead))
+    if (MoreEvents)
     {
         KeSetEvent(&IopPnpNotifyEvent,
                    0,
@@ -1465,18 +1480,26 @@ NtGetPlugPlayEvent(IN ULONG Reserved1,
         return STATUS_PRIVILEGE_NOT_HELD;
     }
 
-    /* Wait for a PnP event */
-    DPRINT("Waiting for pnp notification event\n");
-    Status = KeWaitForSingleObject(&IopPnpNotifyEvent,
-                                   UserRequest,
-                                   UserMode,
-                                   FALSE,
-                                   NULL);
-    if (!NT_SUCCESS(Status) || Status == STATUS_USER_APC)
+    for (;;)
     {
-        DPRINT("KeWaitForSingleObject() failed (Status %lx)\n", Status);
-        ASSERT(Status == STATUS_USER_APC);
-        return Status;
+        /* Wait for a PnP event */
+        DPRINT("Waiting for pnp notification event\n");
+        Status = KeWaitForSingleObject(&IopPnpNotifyEvent,
+                                       UserRequest,
+                                       UserMode,
+                                       FALSE,
+                                       NULL);
+        if (!NT_SUCCESS(Status) || Status == STATUS_USER_APC)
+        {
+            DPRINT("KeWaitForSingleObject() failed (Status %lx)\n", Status);
+            ASSERT(Status == STATUS_USER_APC);
+            return Status;
+        }
+
+        ExAcquireFastMutex(&IopPnpEventQueueLock);
+        if (!IsListEmpty(&IopPnpEventQueueHead))
+            break;
+        ExReleaseFastMutex(&IopPnpEventQueueLock);
     }
 
     /* Get entry from the tail of the queue */
@@ -1488,24 +1511,35 @@ NtGetPlugPlayEvent(IN ULONG Reserved1,
     if (BufferSize < Entry->Event.TotalSize)
     {
         DPRINT1("Buffer is too small for the pnp-event\n");
-        return STATUS_BUFFER_TOO_SMALL;
+        Status = STATUS_BUFFER_TOO_SMALL;
     }
+    else
+    {
+        /* Copy event data to the user buffer; the lock keeps the entry alive */
+        Status = STATUS_SUCCESS;
+        _SEH2_TRY
+        {
+            ProbeForWrite(Buffer,
+                          Entry->Event.TotalSize,
+                          sizeof(UCHAR));
+            RtlCopyMemory(Buffer,
+                          &Entry->Event,
+                          Entry->Event.TotalSize);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+    ExReleaseFastMutex(&IopPnpEventQueueLock);
 
-    /* Copy event data to the user buffer */
-    _SEH2_TRY
+    if (!NT_SUCCESS(Status))
     {
-        ProbeForWrite(Buffer,
-                      Entry->Event.TotalSize,
-                      sizeof(UCHAR));
-        RtlCopyMemory(Buffer,
-                      &Entry->Event,
-                      Entry->Event.TotalSize);
+        /* The event stays queued: signal it again for the next call */
+        KeSetEvent(&IopPnpNotifyEvent, 0, FALSE);
+        return Status;
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        _SEH2_YIELD(return _SEH2_GetExceptionCode());
-    }
-    _SEH2_END;
 
     DPRINT("NtGetPlugPlayEvent() done\n");
 
