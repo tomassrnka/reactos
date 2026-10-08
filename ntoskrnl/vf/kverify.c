@@ -24,6 +24,9 @@
 /* PoolTrackTableSize is a private pool.c global; declare it here. */
 extern SIZE_T PoolTrackTableSize;
 
+/* Lock-order checker init (kvlockdep.c). */
+extern BOOLEAN NTAPI KvLockdepInit(VOID);
+
 /* GLOBALS *******************************************************************/
 
 ULONG KvFlags = 0;
@@ -393,6 +396,12 @@ KvInitialize(IN ULONG Phase, IN PVOID LoaderBlock)
     if (KvThreadsStarted || KvFlags == 0)
         return;
     KvThreadsStarted = TRUE;
+
+    if ((KvFlags & KV_LOCKDEP) && !KvLockdepInit())
+    {
+        KvFlags &= ~KV_LOCKDEP;
+        DbgPrint("KVERIFY: lockdep allocation failed, feature disabled\n");
+    }
 
     if (KvFlags & KV_POOLLEAK)
     {

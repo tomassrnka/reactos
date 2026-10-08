@@ -54,6 +54,7 @@ ExAcquireFastMutex(IN OUT PFAST_MUTEX FastMutex)
 {
     /* Call the inline */
     _ExAcquireFastMutex(FastMutex);
+    KvLockAcquire(FastMutex, KvLockFastMutex, _ReturnAddress());
 }
 
 /*
@@ -63,6 +64,7 @@ VOID
 FASTCALL
 ExReleaseFastMutex(IN OUT PFAST_MUTEX FastMutex)
 {
+    KvLockRelease(FastMutex, KvLockFastMutex);
     /* Call the inline */
     _ExReleaseFastMutex(FastMutex);
 }
@@ -76,6 +78,7 @@ ExAcquireFastMutexUnsafe(IN OUT PFAST_MUTEX FastMutex)
 {
     /* Acquire the mutex unsafely */
     _ExAcquireFastMutexUnsafe(FastMutex);
+    KvLockAcquire(FastMutex, KvLockFastMutex, _ReturnAddress());
 }
 
 /*
@@ -85,6 +88,7 @@ VOID
 FASTCALL
 ExReleaseFastMutexUnsafe(IN OUT PFAST_MUTEX FastMutex)
 {
+    KvLockRelease(FastMutex, KvLockFastMutex);
     /* Release the mutex unsafely */
     _ExReleaseFastMutexUnsafe(FastMutex);
 }

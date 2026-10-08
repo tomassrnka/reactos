@@ -495,6 +495,7 @@ VOID
 FASTCALL
 ExfAcquirePushLockExclusive(PEX_PUSH_LOCK PushLock)
 {
+    KvLockAcquire(PushLock, KvLockPushLock, _ReturnAddress());
     EX_PUSH_LOCK OldValue = *PushLock, NewValue, TempValue;
     BOOLEAN NeedWake;
     EX_PUSH_LOCK_WAIT_BLOCK Block;
@@ -832,6 +833,7 @@ VOID
 FASTCALL
 ExfReleasePushLock(PEX_PUSH_LOCK PushLock)
 {
+    KvLockRelease(PushLock, KvLockPushLock);
     EX_PUSH_LOCK OldValue = *PushLock, NewValue, WakeValue;
     PEX_PUSH_LOCK_WAIT_BLOCK WaitBlock, LastWaitBlock;
 
@@ -994,6 +996,7 @@ VOID
 FASTCALL
 ExfReleasePushLockShared(PEX_PUSH_LOCK PushLock)
 {
+    KvLockRelease(PushLock, KvLockPushLock);
     EX_PUSH_LOCK OldValue = *PushLock, NewValue, WakeValue;
     PEX_PUSH_LOCK_WAIT_BLOCK WaitBlock, LastWaitBlock;
 
@@ -1145,6 +1148,7 @@ VOID
 FASTCALL
 ExfReleasePushLockExclusive(PEX_PUSH_LOCK PushLock)
 {
+    KvLockRelease(PushLock, KvLockPushLock);
     EX_PUSH_LOCK NewValue, WakeValue;
     EX_PUSH_LOCK OldValue = *PushLock;
 
