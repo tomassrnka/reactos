@@ -121,6 +121,7 @@ typedef struct _NG_FCB
     PNG_VCB Vcb;
     LONG RefCount;                  /* file objects not yet closed */
     LONG OpenHandles;               /* file objects not yet cleaned up */
+    LONG Opening;                   /* creates between finding this FCB and counting their handle (FcbListLock) */
     SHARE_ACCESS ShareAccess;
     ngc_node *Node;                 /* referenced core inode while handles are open; NULL when parked */
     BOOLEAN HasNode;                /* a regular FCB (not the volume) that can re-acquire its node */
@@ -241,6 +242,9 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo);
 VOID NgUnlistFcb(PNG_FCB Fcb);
 BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Retire);
+VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self);
+BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams);
+BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
 BOOLEAN NgValidName(PCUNICODE_STRING Name);
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);

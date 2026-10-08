@@ -305,9 +305,6 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
     NgFillStat(Fcb);
     if (Fcb->Stat.file_attributes & FILE_ATTRIBUTE_READONLY)
         return STATUS_CANNOT_DELETE;
-    /* The last name of a file whose named stream is open is not deleted (the core cannot evict it). */
-    if (!Fcb->Stream.Length && Fcb->Stat.nlink <= 1 && !NgRetireStreams(Vcb, Fcb->MftNo, Fcb, FALSE))
-        return STATUS_SHARING_VIOLATION;
     if (Fcb->IsDirectory)
     {
         NgAcquireCore(Vcb);
@@ -322,6 +319,9 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
     {
         return STATUS_CANNOT_DELETE;
     }
+    /* The last name of a file whose named stream is open is not deleted (the core cannot evict it). */
+    if (!NgMarkDeletePending(Vcb, Fcb, !Fcb->Stream.Length && Fcb->Stat.nlink <= 1))
+        return STATUS_SHARING_VIOLATION;
     NgSetDeletePending(Fcb, Ccb);
     FileObject->DeletePending = TRUE;
     return STATUS_SUCCESS;
@@ -583,8 +583,14 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     Err = NgEnsureNode(Fcb);
     if (!Err)
         Err = ngc_iget(Vcb->Core, Ccb->ParentMftNo, &OldDir);
-    if (!Err && Target && !CaseOnly && TSt.nlink <= 1 && !NgRetireStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL, TRUE))
-        Err = -NGC_EBUSY;
+    if (!Err && Target && !CaseOnly)
+    {
+        /* The replaced file's last name goes: not while its named stream is open or being opened. */
+        struct ngc_stat Now;
+        ngc_stat(Target, &Now);
+        if (Now.nlink <= 1 && !NgRetireStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL, TRUE))
+            Err = -NGC_EBUSY;
+    }
     if (!Err)
     {
         if (IsLink)
@@ -636,12 +642,18 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             NgTunnelAdd(Vcb, Ccb->ParentMftNo, Ccb->Name, Ccb->NameLength, Crtime);
         }
     }
-    if (!Err && TargetFcb)
+    if (Target && !CaseOnly && NgNodeGone(Target))
     {
-        /* Its node goes too: a referenced inode keeps the freed record and clusters in use. */
-        NgParkNode(TargetFcb);
-        TargetFcb->Deleted = TRUE;
-        NgUnlistFcb(TargetFcb);
+        /* The replaced file's record is free (also when a later step failed): its FCBs go, a node
+         * first (a referenced inode keeps the freed record and clusters in use).  With another
+         * name left it stays as it is. */
+        if (TargetFcb)
+        {
+            NgParkNode(TargetFcb);
+            TargetFcb->Deleted = TRUE;
+            NgUnlistFcb(TargetFcb);
+        }
+        NgDeleteStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL);
     }
     if (!Err)
         ngc_stat(Fcb->Node, &Fcb->Stat);

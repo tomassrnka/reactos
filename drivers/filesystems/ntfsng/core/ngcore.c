@@ -35,6 +35,8 @@ void kshim_icache_lock(void);
 void kshim_icache_unlock(void);
 struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data);
+int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
+		int (*test)(struct inode *, void *), void *data);
 extern unsigned long kshim_pc_pages, kshim_inodes_live, kshim_counter_reads;
 void kshim_dump_allocs(void);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
@@ -2364,6 +2366,25 @@ static int ngc_create_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 	return err;
 }
 
+/* An attribute or extent inode of record @data, as the core's unlink looks them up. */
+static int ngc_test_inode_attr(struct inode *vi, void *data)
+{
+	struct ntfs_inode *ni = NTFS_I(vi);
+	return ni->mft_no == (u64)(uintptr_t)data && (NInoAttr(ni) || ni->nr_extents == -1);
+}
+
+/*
+ * True when removing a name of @vi frees its record (its last name other than a DOS name) while
+ * one of its attribute inodes is still referenced (a named stream being opened or still open).
+ * The core's unlink would wait for that reference forever under the volume lock.
+ */
+static bool ngc_unlink_busy(struct inode *vi)
+{
+	struct ntfs_inode *ni = NTFS_I(vi);
+	return ngc_links((ngc_node *)vi) <= 1 &&
+	       kshim_icache_busy(vi->i_sb, ni->mft_no, ngc_test_inode_attr, (void *)(uintptr_t)ni->mft_no);
+}
+
 static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node *n)
 {
 	struct inode *dir = (struct inode *)dirn, *vi = (struct inode *)n;
@@ -2371,6 +2392,8 @@ static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 	int err;
 	if (sb_rdonly(v->sb))
 		return -EROFS;
+	if (ngc_unlink_busy(vi))
+		return -EBUSY;
 	err = ngc_mark_dirty(v);
 	if (err)
 		return err;
@@ -2410,6 +2433,8 @@ static int ngc_rename_impl(ngc_vol *v, ngc_node *odirn, const unsigned short *on
 	int err;
 	if (sb_rdonly(v->sb))
 		return -EROFS;
+	if (target && ngc_unlink_busy((struct inode *)target))
+		return -EBUSY;
 	err = ngc_mark_dirty(v);
 	if (err)
 		return err;

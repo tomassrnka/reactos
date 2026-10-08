@@ -1279,6 +1279,20 @@ struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
 	return i && !(i->i_state & I_NEW) ? i : NULL;
 }
 
+/* The number of inodes for @hashval that match @test and hold a reference. */
+int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
+		int (*test)(struct inode *, void *), void *data)
+{
+	int n = 0;
+	mutex_lock(&kshim_inode_lock);
+	for (struct inode *i = sb->kshim_ihash[hashval % KSHIM_IHASH]; i; i = i->kshim_hnext)
+		if (i->i_hash.pprev && (uintptr_t)i->kshim_test_data == hashval && !(i->i_state & I_FREEING) &&
+		    atomic_read(&i->i_count) > 0 && test(i, data))
+			n++;
+	mutex_unlock(&kshim_inode_lock);
+	return n;
+}
+
 /* Evicts the unused inodes of @sb; with @all also every later one (unmount). */
 void kshim_icache_flush(struct super_block *sb, int all)
 {

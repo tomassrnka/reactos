@@ -268,6 +268,14 @@ VOID NgParkNode(PNG_FCB Fcb)
     }
 }
 
+/* After an unlink (CoreLock held): TRUE when the node's record lost its last name and is free. */
+BOOLEAN NgNodeGone(ngc_node *Node)
+{
+    struct ngc_stat St;
+    ngc_stat(Node, &St);
+    return St.nlink == 0;
+}
+
 /* Fills Fcb->Stat and the Cc file sizes from the core inode. */
 static VOID NgFillStatLocked(PNG_FCB Fcb);
 

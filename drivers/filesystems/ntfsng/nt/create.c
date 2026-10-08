@@ -42,7 +42,10 @@ static VOID NgFreeCcb(PNG_CCB Ccb)
     ExFreePoolWithTag(Ccb, TAG_NTFSNG);
 }
 
-/* Finds the FCB for (MFT record, stream) or inserts Candidate; returns the FCB to use. */
+/*
+ * Finds the FCB for (MFT record, stream) or inserts Candidate; returns the FCB to use, counted in
+ * Opening until the create counts its handle or fails, so a delete of the file's last name sees it.
+ */
 static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
 {
     PLIST_ENTRY Entry;
@@ -56,11 +59,13 @@ static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
             if (Fcb->Deleted)
                 DPRINT1("ntfsng: BUG: deleted FCB %p for %I64x still listed\n", Fcb, Fcb->MftNo);
             InterlockedIncrement(&Fcb->RefCount);
+            Fcb->Opening++;
             ExReleaseFastMutex(&Vcb->FcbListLock);
             return Fcb;
         }
     }
     InsertTailList(&Vcb->FcbList, &Candidate->VcbLinks);
+    Candidate->Opening++;
     ExReleaseFastMutex(&Vcb->FcbListLock);
     return Candidate;
 }
@@ -182,35 +187,47 @@ PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo)
     return Found;
 }
 
+/* TRUE when a named-stream FCB of record MftNo other than Self has a handle or a create in progress. */
+static BOOLEAN NgStreamsInUseLocked(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
+{
+    PLIST_ENTRY Entry;
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        if (F != Self && F->MftNo == MftNo && F->Stream.Length && (F->OpenHandles || F->Opening))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /*
- * Before record MftNo loses its last name: its named-stream FCBs other than Self.  With Retire
- * FALSE only checks that none has open handles.  With Retire TRUE (core lock held exclusive)
- * drops their nodes, so the core's delete can evict the stream inodes (an attribute inode that
- * stays referenced makes it loop forever), marks them deleted and takes them off the list, so a
- * reused record number never reattaches them.  FALSE if a stream is open.
+ * The named-stream FCBs of record MftNo other than Self, before the record's last name goes: FALSE
+ * when one has a handle or a create in progress (Opening).  Without Retire that is all.  With
+ * Retire (caller holds CoreLock) the others give their core inode back, so the core can free the
+ * record, and the check is made again after that: a create that found one of them meanwhile makes
+ * it FALSE, and one that holds a stream inode it has not published yet makes the core refuse the
+ * unlink.  Nothing is marked deleted here: a parked FCB gets its node again if the unlink fails or
+ * does not happen, and NgDeleteStreams follows an unlink that freed the record.
  */
 BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Retire)
 {
     PNG_FCB Found[32];
     ULONG Count, i;
-    BOOLEAN Open, More;
+    BOOLEAN Busy, More;
     PLIST_ENTRY Entry;
 
     do
     {
+        /* A parked FCB has no node and is not collected again, so the batches end. */
         Count = 0;
-        Open = More = FALSE;
+        More = FALSE;
         ExAcquireFastMutex(&Vcb->FcbListLock);
-        for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+        Busy = NgStreamsInUseLocked(Vcb, MftNo, Self);
+        for (Entry = Vcb->FcbList.Flink; Retire && !Busy && Entry != &Vcb->FcbList; Entry = Entry->Flink)
         {
             PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
-            if (F == Self || F->MftNo != MftNo || !F->Stream.Length)
+            if (F == Self || F->MftNo != MftNo || !F->Stream.Length || !F->Node)
                 continue;
-            if (F->OpenHandles)
-            {
-                Open = TRUE;
-                break;
-            }
             if (Count == RTL_NUMBER_OF(Found))
             {
                 More = TRUE;
@@ -222,16 +239,86 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
         ExReleaseFastMutex(&Vcb->FcbListLock);
         for (i = 0; i < Count; i++)
         {
-            if (Retire && !Open)
-            {
-                NgParkNode(Found[i]);
-                Found[i]->Deleted = TRUE;
-                NgUnlistFcb(Found[i]);
-            }
+            NgParkNode(Found[i]);
             NgDereferenceFcb(Found[i]);
         }
-    } while (More && Retire && !Open);
-    return !Open;
+    } while (More);
+    if (Busy || !Retire)
+        return !Busy;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    Busy = NgStreamsInUseLocked(Vcb, MftNo, Self);
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    return !Busy;
+}
+
+/*
+ * Sets Fcb's delete pending unless CheckStreams and a named stream of its record has a handle or a
+ * create in progress: one FcbListLock hold, the one a stream create counts its handle under.
+ */
+BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams)
+{
+    BOOLEAN Ok;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    Ok = !CheckStreams || !NgStreamsInUseLocked(Vcb, Fcb->MftNo, Fcb);
+    if (Ok)
+        Fcb->DeletePending = TRUE;
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    return Ok;
+}
+
+/* TRUE when the unnamed-stream FCB of record MftNo has a delete pending (caller holds FcbListLock). */
+static BOOLEAN NgBaseDeletePendingLocked(PNG_VCB Vcb, ULONGLONG MftNo)
+{
+    PLIST_ENTRY Entry;
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        if (F->MftNo == MftNo && !F->Stream.Length && F->DeletePending)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOLEAN NgBaseDeletePending(PNG_VCB Vcb, ULONGLONG MftNo)
+{
+    BOOLEAN Pending;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    Pending = NgBaseDeletePendingLocked(Vcb, MftNo);
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    return Pending;
+}
+
+/* After an unlink freed record MftNo: its named-stream FCBs (except Self) are deleted and leave the lookup list. */
+VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
+{
+    PNG_FCB Found[32];
+    ULONG Count, i;
+    PLIST_ENTRY Entry, Next;
+
+    do
+    {
+        /* Marked and unlisted under the lock a create checks Deleted under. */
+        Count = 0;
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < RTL_NUMBER_OF(Found); Entry = Next)
+        {
+            PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+            Next = Entry->Flink;
+            if (F == Self || F->MftNo != MftNo || !F->Stream.Length)
+                continue;
+            F->Deleted = TRUE;
+            RemoveEntryList(&F->VcbLinks);
+            F->VcbLinks.Flink = F->VcbLinks.Blink = NULL;
+            InterlockedIncrement(&F->RefCount);
+            Found[Count++] = F;
+        }
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        for (i = 0; i < Count; i++)
+        {
+            NgParkNode(Found[i]);
+            NgDereferenceFcb(Found[i]);
+        }
+    } while (Count == RTL_NUMBER_OF(Found));
 }
 
 /* Takes a deleted FCB out of the lookup list: its MFT record number may be reused. */
@@ -509,7 +596,7 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_FCB RelatedFcb = NULL, Fcb = NULL, Found;
     PNG_CCB RelatedCcb = NULL, Ccb = NULL;
     ngc_node *Node = NULL, *Parent = NULL, *Next;
-    BOOLEAN Trailing = FALSE, IsDir, Missing = FALSE, TargetExists = FALSE, Created = FALSE, Shared = FALSE;
+    BOOLEAN Trailing = FALSE, IsDir, Missing = FALSE, TargetExists = FALSE, Created = FALSE, Shared = FALSE, Opening = FALSE;
     BOOLEAN Exclusive = (Disposition == FILE_CREATE || Disposition == FILE_SUPERSEDE);
     NG_SHARED_HOLD Hold;
     ULONG_PTR Information = FILE_OPENED;
@@ -725,6 +812,14 @@ walk:
     }
     if (NT_SUCCESS(Status) && !Missing && Stream.Length)
     {
+        /* A stream of a file whose delete is pending is neither opened nor created. */
+        struct ngc_stat Base;
+        ngc_stat(Node, &Base);
+        if (NgBaseDeletePending(Vcb, Base.mft_ref & 0xffffffffffffULL))
+            Status = STATUS_DELETE_PENDING;
+    }
+    if (NT_SUCCESS(Status) && !Missing && Stream.Length)
+    {
         Err = ngc_open_stream(Vcb->Core, Node, Stream.Buffer, Stream.Length / sizeof(WCHAR), &Next);
         if (Err == -NGC_ENOENT && Disposition != FILE_OPEN && Disposition != FILE_OVERWRITE)
         {
@@ -927,6 +1022,7 @@ walk:
     NgFillStat(Fcb);
     Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
     Found = NgInsertOrFindFcb(Vcb, Fcb);
+    Opening = TRUE;
     if (Found != Fcb)
     {
         NgDereferenceFcb(Fcb);
@@ -981,7 +1077,12 @@ walk:
         Status = STATUS_ACCESS_DENIED;
         goto out;
     }
-    if (Fcb->OpenHandles)
+    if (Fcb->Deleted || Fcb->DeletePending || (Fcb->Stream.Length && NgBaseDeletePendingLocked(Vcb, Fcb->MftNo)))
+    {
+        /* Its record went with the file's last name while this create ran, or that delete is pending now. */
+        Status = STATUS_DELETE_PENDING;
+    }
+    else if (Fcb->OpenHandles)
     {
         Status = IoCheckShareAccess(Access, Stack->Parameters.Create.ShareAccess, FileObject,
                                     &Fcb->ShareAccess, TRUE);
@@ -996,6 +1097,8 @@ walk:
         Fcb->OpenHandles++;
         Shared = TRUE;
     }
+    Fcb->Opening--;
+    Opening = FALSE;
     ExReleaseFastMutex(&Vcb->FcbListLock);
     if (!NT_SUCCESS(Status))
         goto out;
@@ -1065,6 +1168,12 @@ walk:
     }
 
 out:
+    if (Opening)
+    {
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        Fcb->Opening--;
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+    }
     if (Shared)
     {
         ExAcquireFastMutex(&Vcb->FcbListLock);
@@ -1109,10 +1218,18 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
             Err = ngc_delete_stream(Vcb->Core, Fcb->Node);
         else if (Fcb->IsDirectory && ngc_dir_empty(Vcb->Core, Fcb->Node) != 1)
             Err = -NGC_ENOTEMPTY;
-        else if (Fcb->Stat.nlink <= 1 && !NgRetireStreams(Vcb, Fcb->MftNo, Fcb, TRUE))
-            Err = -NGC_EBUSY;      /* a named stream of the file is still open */
         else
-            Err = ngc_unlink(Vcb->Core, Dir, Fcb->DelName, Fcb->DelNameLength, Fcb->Node);
+        {
+            /* The last name of a file whose named stream is open or being opened stays. */
+            struct ngc_stat Now;
+            ngc_stat(Fcb->Node, &Now);
+            if (Now.nlink <= 1 && !NgRetireStreams(Vcb, Fcb->MftNo, Fcb, TRUE))
+                Err = -NGC_EBUSY;
+            else
+                Err = ngc_unlink(Vcb->Core, Dir, Fcb->DelName, Fcb->DelNameLength, Fcb->Node);
+            if (!Err && NgNodeGone(Fcb->Node))
+                NgDeleteStreams(Vcb, Fcb->MftNo, Fcb);
+        }
         ngc_put(Dir);
     }
     if (!Err)
