@@ -327,6 +327,11 @@ Arm3Done:
         MmRebalanceMemoryConsumersAndWait();
         goto Again;
     }
+
+    /* The address became a ReactOS Mm view after the choice above */
+    if (Status == STATUS_MM_RESTART_OPERATION)
+        goto Again;
+
     return Status;
 }
 

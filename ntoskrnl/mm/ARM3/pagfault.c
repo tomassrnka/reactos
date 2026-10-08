@@ -2146,6 +2146,21 @@ UserFault:
 
     ProtectionCode = MM_INVALID_PROTECTION;
 
+    /*
+     * MmAccessFault chose ARM3 before this lock was taken. If another thread
+     * has since replaced the mapping with a ReactOS Mm view, let it choose
+     * again.
+     */
+    if (Address <= MM_HIGHEST_USER_ADDRESS)
+    {
+        PMMVAD CurrentVad = MiLocateAddress(Address);
+        if ((CurrentVad != NULL) && MI_IS_ROSMM_VAD(CurrentVad))
+        {
+            MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
+            return STATUS_MM_RESTART_OPERATION;
+        }
+    }
+
 #if (_MI_PAGING_LEVELS == 4)
     /* Check if the PXE is valid */
     if (PointerPxe->u.Hard.Valid == 0)
