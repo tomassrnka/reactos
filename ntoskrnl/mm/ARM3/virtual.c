@@ -1942,7 +1942,6 @@ MiQueryMemoryBasicInformation(IN HANDLE ProcessHandle,
         MemoryInfo.BaseAddress = Address;
         MemoryInfo.AllocationBase = (PVOID)(Vad->StartingVpn << PAGE_SHIFT);
         MemoryInfo.AllocationProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
-        MemoryInfo.Type = MEM_PRIVATE;
 
         /* Acquire the working set lock (shared is enough) */
         MiLockProcessWorkingSetShared(TargetProcess, PsGetCurrentThread());
