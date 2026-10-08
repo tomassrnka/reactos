@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_ActCtxWithXmlNamespaces(void);
+extern void func_BindIoCompletionCallback(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateProcess(void);
 extern void func_DefaultActCtx(void);
@@ -50,6 +51,7 @@ extern void func_WideCharToMultiByte(void);
 const struct test winetest_testlist[] =
 {
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
+    { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateProcess",               func_CreateProcess },
     { "DefaultActCtx",               func_DefaultActCtx },
