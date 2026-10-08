@@ -418,8 +418,12 @@ MiDeletePte(IN PMMPTE PointerPte,
             /* Delete the PFN */
             MI_SET_PFN_DELETED(Pfn1);
 
-            /* It must be either free (refcount == 0) or being written (refcount == 1) */
-            ASSERT(Pfn1->u3.e2.ReferenceCount == Pfn1->u3.e1.WriteInProgress);
+            /*
+             * It is either on a list (refcount == 0), being written, or still
+             * locked. An I/O or MDL unlock frees it later; a VirtualLock
+             * reference is not dropped here and keeps the page.
+             */
+            ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
 
             /* See if we must free it ourselves, or if it will be freed once I/O is over */
             if (Pfn1->u3.e2.ReferenceCount == 0)
@@ -2688,13 +2692,25 @@ MiDecommitPages(IN PVOID StartingAddress,
                     }
                     ValidPteList[PteCount++] = PointerPte;
                 }
+                else if ((PteContents.u.Soft.Prototype == 0) &&
+                         (PteContents.u.Soft.Transition == 1))
+                {
+                    //
+                    // A page made PAGE_NOACCESS or PAGE_GUARD after it was
+                    // touched is in transition. Free it as MEM_RELEASE does,
+                    // then decommit the PTE.
+                    //
+                    KIRQL OldIrql = MiAcquirePfnLock();
+                    MiDeletePte(PointerPte, MiPteToAddress(PointerPte), Process, NULL);
+                    MiReleasePfnLock(OldIrql);
+                    MI_WRITE_INVALID_PTE(PointerPte, MmDecommittedPte);
+                }
                 else
                 {
                     //
                     // We do not support any of these other scenarios at the moment
                     //
                     ASSERT(PteContents.u.Soft.Prototype == 0);
-                    ASSERT(PteContents.u.Soft.Transition == 0);
                     ASSERT(PteContents.u.Soft.PageFileHigh == 0);
 
                     //
