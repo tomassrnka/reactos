@@ -22,6 +22,8 @@ typedef struct _ICMP_PACKET_CONTEXT
     LONG nReplies;
     PIO_WORKITEM FinishWorker;
     KTIMER TimeoutTimer;
+    UINT16 Identifier;
+    UINT16 Seq;
 } ICMP_PACKET_CONTEXT, *PICMP_PACKET_CONTEXT;
 
 static volatile INT16 IcmpSequence = 0;
@@ -63,6 +65,57 @@ GetReplyStatus(PICMP_HEADER IcmpHeader)
             return IP_PARAM_PROBLEM;
         default:
             return IP_REQ_TIMED_OUT;
+    }
+}
+
+/*
+ * Every ICMP packet the host receives is indicated to every open ICMP
+ * address file, so take only the messages that answer our own request:
+ * an echo reply with our identifier and sequence number, or an error
+ * message that quotes our echo request (RFC 792: the IP header and the
+ * first 64 bits of the datagram that caused the error).
+ */
+static
+BOOLEAN
+IsReplyToRequest(
+    _In_ PICMP_PACKET_CONTEXT Context,
+    _In_ PICMP_HEADER IcmpHeader,
+    _In_reads_bytes_(DataSize) PUCHAR Data,
+    _In_ INT32 DataSize)
+{
+    PIPv4_HEADER OriginalIpHeader;
+    PICMP_HEADER OriginalIcmpHeader;
+    UINT32 OriginalIpHeaderSize;
+
+    switch (IcmpHeader->Type)
+    {
+        case ICMP_TYPE_ECHO_REPLY:
+            return IcmpHeader->Identifier == Context->Identifier &&
+                   IcmpHeader->Seq == Context->Seq;
+
+        case ICMP_TYPE_DEST_UNREACH:
+        case ICMP_TYPE_SOURCE_QUENCH:
+        case ICMP_TYPE_TIME_EXCEEDED:
+        case ICMP_TYPE_PARAMETER:
+            if (DataSize < (INT32)sizeof(IPv4_HEADER))
+                return FALSE;
+
+            OriginalIpHeader = (PIPv4_HEADER)Data;
+            OriginalIpHeaderSize = (OriginalIpHeader->VerIHL & 0x0F) * 4;
+            if (OriginalIpHeaderSize < sizeof(IPv4_HEADER) ||
+                (UINT32)DataSize < OriginalIpHeaderSize + sizeof(ICMP_HEADER) ||
+                OriginalIpHeader->Protocol != IPPROTO_ICMP)
+            {
+                return FALSE;
+            }
+
+            OriginalIcmpHeader = (PICMP_HEADER)(Data + OriginalIpHeaderSize);
+            return OriginalIcmpHeader->Type == ICMP_TYPE_ECHO_REQUEST &&
+                   OriginalIcmpHeader->Identifier == Context->Identifier &&
+                   OriginalIcmpHeader->Seq == Context->Seq;
+
+        default:
+            return FALSE;
     }
 }
 
@@ -163,8 +216,8 @@ ReceiveDatagram(
     PICMP_ECHO_REPLY CurrentReply;
     PUCHAR CurrentUserBuffer;
 
-    // do not handle echo requests
-    if (DataSize >= 0 && IcmpHeader->Type == ICMP_TYPE_ECHO_REQUEST)
+    // ignore anything that does not answer this request, echo requests included
+    if (DataSize < 0 || !IsReplyToRequest(Context, IcmpHeader, DataBuffer, DataSize))
     {
         return STATUS_SUCCESS;
     }
@@ -376,8 +429,10 @@ DispEchoRequest(
     ((PICMP_HEADER)Buffer)->Type = ICMP_TYPE_ECHO_REQUEST;
     ((PICMP_HEADER)Buffer)->Code = ICMP_TYPE_ECHO_REPLY;
     ((PICMP_HEADER)Buffer)->Checksum = 0;
-    ((PICMP_HEADER)Buffer)->Identifier = (UINT_PTR)PsGetCurrentProcessId() & UINT16_MAX;
-    ((PICMP_HEADER)Buffer)->Seq = InterlockedIncrement16(&IcmpSequence);
+    SendContext->Identifier = (UINT_PTR)PsGetCurrentProcessId() & UINT16_MAX;
+    SendContext->Seq = InterlockedIncrement16(&IcmpSequence);
+    ((PICMP_HEADER)Buffer)->Identifier = SendContext->Identifier;
+    ((PICMP_HEADER)Buffer)->Seq = SendContext->Seq;
     memcpy(Buffer + sizeof(ICMP_HEADER), (PUCHAR)Request + Request->DataOffset, Request->DataSize);
     ((PICMP_HEADER)Buffer)->Checksum = IPv4Checksum(Buffer, RequestSize, 0);
     SavedTtl = Request->Ttl;
