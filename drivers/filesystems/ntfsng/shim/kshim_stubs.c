@@ -3,8 +3,6 @@
 void kshim_unimpl(const char *name) __attribute__((noreturn));
 void bdev_freeze(void) { kshim_unimpl("bdev_freeze"); }
 void bdev_thaw(void) { kshim_unimpl("bdev_thaw"); }
-void blkdev_issue_discard(void) { kshim_unimpl("blkdev_issue_discard"); }
-void blkdev_issue_zeroout(void) { kshim_unimpl("blkdev_issue_zeroout"); }
 void copy_folio_from_iter_atomic(void) { kshim_unimpl("copy_folio_from_iter_atomic"); }
 void copy_to_user(void) { kshim_unimpl("copy_to_user"); }
 void d_obtain_alias(void) { kshim_unimpl("d_obtain_alias"); }
@@ -43,7 +41,6 @@ void iomap_release_folio(void) { kshim_unimpl("iomap_release_folio"); }
 void iomap_seek_data(void) { kshim_unimpl("iomap_seek_data"); }
 void iomap_seek_hole(void) { kshim_unimpl("iomap_seek_hole"); }
 void iomap_swapfile_activate(void) { kshim_unimpl("iomap_swapfile_activate"); }
-void iomap_zero_range(void) { kshim_unimpl("iomap_zero_range"); }
 void iter_file_splice_write(void) { kshim_unimpl("iter_file_splice_write"); }
 void kfree_link(void) { kshim_unimpl("kfree_link"); }
 void kill_block_super(void) { kshim_unimpl("kill_block_super"); }
@@ -55,5 +52,14 @@ void setattr_prepare(void) { kshim_unimpl("setattr_prepare"); }
 void strndup_user(void) { kshim_unimpl("strndup_user"); }
 void vfs_setpos(void) { kshim_unimpl("vfs_setpos"); }
 void vma_desc_test_all(void) { kshim_unimpl("vma_desc_test_all"); }
-void vmap(void) { kshim_unimpl("vmap"); }
-void vunmap(void) { kshim_unimpl("vunmap"); }
+
+/*
+ * Written by hand (drop these names from a regenerated list): reachable from data on disk, so
+ * they must not stop the system.  vmap fails, and WOF chunks larger than a page (XPRESS8K/16K,
+ * LZX) are decoded through the core's per-chunk buffer; discard and zeroing report an error.
+ */
+void *vmap(void *pages, unsigned int count, unsigned long flags, int prot) { (void)pages; (void)count; (void)flags; (void)prot; return 0; }
+void vunmap(const void *addr) { (void)addr; }
+int blkdev_issue_discard(void) { return -95; /* -EOPNOTSUPP */ }
+int blkdev_issue_zeroout(void) { return -95; }
+int iomap_zero_range(void) { return -95; }
