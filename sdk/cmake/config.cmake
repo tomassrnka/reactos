@@ -111,6 +111,13 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     option(STACK_PROTECTOR "Whether to enable the GCC stack checker while compiling" OFF)
 endif()
 
+# Fork-only kernel verifier extensions (special pool control, IRQL checks,
+# lock-order checker, pool-leak sampler, deadlock watchdog). Off by default.
+option(KERNEL_VERIFIER "Build the fork-only kernel verifier extensions." OFF)
+# Fork-only undefined-behaviour sanitizer for the kernel (needs KERNEL_VERIFIER).
+cmake_dependent_option(KERNEL_UBSAN "Instrument the kernel with -fsanitize=undefined." OFF
+                       "KERNEL_VERIFIER" OFF)
+
 set(USE_DUMMY_PSEH FALSE CACHE BOOL
 "Whether to disable PSEH support.")
 

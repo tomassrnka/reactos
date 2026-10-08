@@ -1000,6 +1000,9 @@ ExpInitializeExecutive(IN ULONG Cpu,
     {
         /* Upcase it for comparison and check if we're in performance mode */
         _strupr(CommandLine);
+
+        /* Parse the verifier boot option. */
+        KvInitialize(0, LoaderBlock);
         PerfMem = strstr(CommandLine, "PERFMEM");
         if (PerfMem)
         {
@@ -2002,6 +2005,9 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Initialize the SRM in phase 1 */
     if (!SeRmInitPhase1()) KeBugCheck(PROCESS1_INITIALIZATION_FAILED);
+
+    /* Start the verifier worker threads (idle unless enabled). */
+    KvInitialize(1, NULL);
 
     /* Update progress bar */
     InbvUpdateProgressBar(100);

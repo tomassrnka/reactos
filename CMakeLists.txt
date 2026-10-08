@@ -223,6 +223,10 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         add_definitions(-DDBG=0)
     endif()
 
+    if(KERNEL_VERIFIER)
+        add_compile_definitions(CONFIG_KERNEL_VERIFIER=1)
+    endif()
+
     if(ENABLE_CCACHE)
         message(WARNING "-- Disabling precompiled headers support (ccache).")
         option(PCH "Whether to use precompiled headers" OFF)

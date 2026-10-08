@@ -129,6 +129,7 @@ C_ASSERT(MAX_WIN32_PATH == MAX_PATH);
 /* Internal Headers */
 #include "config.h"
 #include "internal/ntoskrnl.h"
+#include "internal/kverify.h"
 
 #include <reactos/probe.h>
 #include "internal/probe.h"
