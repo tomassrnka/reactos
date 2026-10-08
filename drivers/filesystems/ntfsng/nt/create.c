@@ -1181,22 +1181,35 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
         Err = ngc_iget(Vcb->Core, Fcb->DelParentMftNo, &Dir);
     if (!Err)
     {
+        /* More than one name for a file: removing this one leaves the others, and the data the
+         * cache holds belongs to them, so it is kept and the FCB stays listed and alive. */
+        BOOLEAN Gone = TRUE;
         if (Fcb->Stream.Length)
             Err = ngc_delete_stream(Vcb->Core, Fcb->Node);
         else if (Fcb->IsDirectory && ngc_dir_empty(Vcb->Core, Fcb->Node) != 1)
             Err = -NGC_ENOTEMPTY;
         else
+        {
+            Gone = ngc_links(Fcb->Node) <= 1;
             Err = ngc_unlink(Vcb->Core, Dir, Fcb->DelName, Fcb->DelNameLength, Fcb->Node);
+        }
         ngc_put(Dir);
-    }
-    if (!Err)
-    {
-        if (!Fcb->Stream.Length && !Fcb->IsDirectory)
-            NgTunnelAdd(Vcb, Fcb->DelParentMftNo, Fcb->DelName, Fcb->DelNameLength, Fcb->Stat.crtime);
-        Fcb->Deleted = TRUE;
-        NgUnlistFcb(Fcb);
-        NgParkNode(Fcb);
-        NgAfterChange(Vcb);
+        if (!Err)
+        {
+            if (!Fcb->Stream.Length && !Fcb->IsDirectory)
+                NgTunnelAdd(Vcb, Fcb->DelParentMftNo, Fcb->DelName, Fcb->DelNameLength, Fcb->Stat.crtime);
+            if (Gone)
+            {
+                Fcb->Deleted = TRUE;
+                NgUnlistFcb(Fcb);
+            }
+            else
+            {
+                ngc_stat(Fcb->Node, &Fcb->Stat);   /* the link count dropped */
+            }
+            NgParkNode(Fcb);
+            NgAfterChange(Vcb);
+        }
     }
     NgReleaseCore(Vcb);
     if (Err)
@@ -1257,9 +1270,26 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Last = (--Fcb->OpenHandles == 0);
     ExReleaseFastMutex(&Vcb->FcbListLock);
     Delete = Last && Fcb->DeletePending && !Fcb->Deleted;
+    if (Delete && !Fcb->IsDirectory && Fcb->SectionObjectPointers.ImageSectionObject &&
+        !MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForDelete))
+    {
+        /* A running program's file is not deleted (FILE_DELETE_ON_CLOSE skipped this check). */
+        Fcb->DeletePending = FALSE;
+        Delete = FALSE;
+    }
     if (!Fcb->IsDirectory && !Fcb->IsVolume)
     {
-        if (Delete)
+        BOOLEAN LastLink = FALSE;
+        if (Delete && !Fcb->Stream.Length)
+        {
+            /* Discard the cache only when this is the file's last name; another hard link's data
+             * (and its paging writes through this FCB) must survive the delete of one name. */
+            NgAcquireCore(Vcb);
+            if (!NgEnsureNode(Fcb))
+                LastLink = ngc_links(Fcb->Node) <= 1;
+            NgReleaseCore(Vcb);
+        }
+        if (Delete && (Fcb->Stream.Length || LastLink))
         {
             LARGE_INTEGER Zero;
             Zero.QuadPart = 0;
