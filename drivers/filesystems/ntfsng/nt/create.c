@@ -1410,6 +1410,16 @@ out:
     return Status;
 }
 
+/* ngc_streams callback: counts the named streams of a file. */
+static int NgCountNamedStream(void *Ctx, const unsigned short *Name, unsigned int Len, unsigned long long Size,
+                              unsigned long long Alloc)
+{
+    (void)Name; (void)Size; (void)Alloc;
+    if (Len)
+        (*(PULONG)Ctx)++;
+    return 0;
+}
+
 /* Unlinks a delete-pending file at its last cleanup (caller holds MainResource exclusive). */
 static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
 {
@@ -1537,22 +1547,52 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (!Fcb->IsDirectory && !Fcb->IsVolume)
     {
         BOOLEAN LastLink = FALSE;
+        ULONG NamedStreams = 0;
         if (Delete && !Fcb->Stream.Length)
         {
             /* Discard the cache only when this is the file's last name; another hard link's data
              * (and its paging writes through this FCB) must survive the delete of one name. */
             NgAcquireCore(Vcb);
             if (!NgEnsureNode(Fcb))
+            {
                 LastLink = ngc_links(Fcb->Node) <= 1;
+                /* A failed enumeration counts as having named streams (the safe side). */
+                if (LastLink && ngc_streams(Fcb->Node, NgCountNamedStream, &NamedStreams))
+                    NamedStreams = 1;
+            }
             NgReleaseCore(Vcb);
+            if (LastLink && !NgRetireStreams(Vcb, Fcb->MftNo, Fcb, FALSE))
+            {
+                /* A named stream is open: the delete would be refused, so the file and its cached data stay. */
+                DPRINT1("ntfsng: delete of %I64x at last close refused, a named stream is open\n", Fcb->MftNo);
+                Fcb->DeletePending = FALSE;
+                Delete = FALSE;
+                LastLink = FALSE;
+            }
         }
         if (Delete && (Fcb->Stream.Length || LastLink))
         {
             LARGE_INTEGER Zero;
+            IO_STATUS_BLOCK Iosb;
             Zero.QuadPart = 0;
-            CcUninitializeCacheMap(FileObject, &Zero, NULL);
-            if (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject)
-                NgPurgeFrom(Fcb, 0);
+            Iosb.Status = STATUS_SUCCESS;
+            /* A stream being opened now can still make the delete fail: the data goes to disk first. */
+            if (NamedStreams)
+                NgFlushStream(Fcb, &Iosb);
+            if (!NT_SUCCESS(Iosb.Status))
+            {
+                /* Not on disk: the delete is dropped and the cache kept. */
+                DPRINT1("ntfsng: delete of %I64x at last close dropped, flush failed 0x%08lx\n", Fcb->MftNo, Iosb.Status);
+                Fcb->DeletePending = FALSE;
+                Delete = FALSE;
+                CcUninitializeCacheMap(FileObject, NULL, NULL);
+            }
+            else
+            {
+                CcUninitializeCacheMap(FileObject, &Zero, NULL);
+                if (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject)
+                    NgPurgeFrom(Fcb, 0);
+            }
         }
         else
         {

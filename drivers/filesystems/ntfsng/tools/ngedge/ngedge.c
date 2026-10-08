@@ -220,6 +220,23 @@ static void t_delete_open_stream(void)
     if (hb != INVALID_HANDLE_VALUE)
         CloseHandle(hb);
     report("delete-on-close-with-open-stream-returns", 1, NULL);
+    /* A delete-on-close handle that wrote: the delete is refused (stream open), and what it wrote stays. */
+    hb = CreateFileW(f, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                     OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    if (hb != INVALID_HANDLE_VALUE)
+    {
+        char got[8] = {0};
+        HANDLE hr;
+        WriteFile(hb, "written", 7, &n, NULL);
+        CloseHandle(hb);
+        hr = CreateFileW(f, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+        r = hr != INVALID_HANDLE_VALUE && ReadFile(hr, got, 7, &n, NULL) && n == 7 && !memcmp(got, "written", 7);
+        report("refused-delete-keeps-data", r, "open %d, read %lu bytes", hr != INVALID_HANDLE_VALUE, n);
+        if (hr != INVALID_HANDLE_VALUE)
+            CloseHandle(hr);
+    }
+    else
+        report("refused-delete-keeps-data", 0, "open error %lu", GetLastError());
     /* The record cannot go while its stream is open: the file and the stream's data stay. */
     report("file-kept-while-stream-open", GetFileAttributesW(f) != INVALID_FILE_ATTRIBUTES ||
            GetLastError() == ERROR_ACCESS_DENIED, "error %lu", GetLastError());
