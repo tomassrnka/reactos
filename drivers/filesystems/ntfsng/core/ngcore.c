@@ -185,11 +185,10 @@ static bool ngc_icache_ok(struct inode *i)
  * through ntfs_error, which with on_errors=continue does nothing, and most of them do not set
  * NVolErrors.  Out-of-space and out-of-memory reports do not match and leave the volume as it is.
  */
-static bool ngc_msg_means_corruption(const char *msg)
+static bool ngc_msg_has(const char *msg, const char *const *words, size_t n)
 {
-	static const char *const words[] = { "inconsisten", "chkdsk", "corrupt" };
 	for (const char *p = msg; *p; p++)
-		for (size_t w = 0; w < ARRAY_SIZE(words); w++) {
+		for (size_t w = 0; w < n; w++) {
 			size_t k = 0;
 			while (words[w][k] && (p[k] >= 'A' && p[k] <= 'Z' ? p[k] + 32 : p[k]) == words[w][k])
 				k++;
@@ -197,6 +196,25 @@ static bool ngc_msg_means_corruption(const char *msg)
 				return true;
 		}
 	return false;
+}
+
+static bool ngc_msg_means_corruption(const char *msg)
+{
+	/*
+	 * Specific phrases rather than words such as "invalid": a caller can make the core print some
+	 * reports about data it just supplied ("Invalid reparse point."), which is not damage.
+	 */
+	static const char *const damage[] = { "inconsisten", "inconstant", "chkdsk", "corrupt", "invalid lcn",
+		"invalid lowest_vcn", "invalid empty mapping", "invalid length in mapping", "invalid s64",
+		"invalid zero-sized", "invalid index entry", "invalid attribute data size", "stale extent",
+		"stale mft reference", "bad runlist", "overflow in mapping", "overflow from index",
+		"entries overflow", "out of bounds", "beyond volume boundary", "beyond end of volume",
+		"no file magic", "leaf node", "unindexed", "negative vcn", "non-resident $index_root",
+		"smaller than the sector size", "restore old mapping pairs" };
+	/* Resource failures that some of those reports also print (an inode load that failed for memory). */
+	static const char *const resource[] = { "error code -12", "error code -28", "enomem", "enospc",
+		"eoverflow", "memory", "collation error" };
+	return ngc_msg_has(msg, damage, ARRAY_SIZE(damage)) && !ngc_msg_has(msg, resource, ARRAY_SIZE(resource));
 }
 
 static void ngc_core_error(struct super_block *sb, const char *msg)
@@ -1436,7 +1454,10 @@ int ngc_dirty(ngc_vol *v)
 		kshim_jnl_mark_errors(v->bdev);
 	if (sb_rdonly(v->sb))
 		return 0;
-	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY) || kshim_jnl_pending(v->bdev);
+	/* Also errors not yet marked on disk, and a clean volume whose header is still to be retired. */
+	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY) || kshim_jnl_pending(v->bdev) ||
+	       (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY)) || kshim_jnl_retire_pending(v->bdev) ||
+	       kshim_jnl_errors_pending(v->bdev);
 }
 
 void ngc_jnl_report(ngc_vol *v)
