@@ -513,6 +513,9 @@ static BOOLEAN NTAPI NgFastIoCheckIfPossible(PFILE_OBJECT FileObject, PLARGE_INT
     UNREFERENCED_PARAMETER(DeviceObject);
     if (!CheckForReadOperation || !Fcb || Fcb->IsVolume || Fcb->IsDirectory)
         return FALSE;
+    /* Cached data of a medium that is gone, or may be: the IRP path verifies first. */
+    if (Fcb->Vcb->WrongMedia || (Fcb->Vcb->Removable && (Fcb->Vcb->Vpb->RealDevice->Flags & DO_VERIFY_VOLUME)))
+        return FALSE;
     Len.QuadPart = Length;
     return FsRtlFastCheckLockForRead(&Fcb->FileLock, FileOffset, &Len, LockKey, FileObject, PsGetCurrentProcess());
 }
