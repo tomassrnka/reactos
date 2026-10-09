@@ -47,6 +47,7 @@ list(APPEND SOURCE
     ntgdi/NtGdiSetPixel.c
     ntgdi/NtGdiTransformPoints.c
 
+    ntuser/NtUserBuildHwndList.c
 #    ntuser/NtUserCallHwnd.c
 #    ntuser/NtUserCallHwndLock.c
 #    ntuser/NtUserCallHwndOpt.c
