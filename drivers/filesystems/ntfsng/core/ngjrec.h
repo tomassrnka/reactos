@@ -19,6 +19,7 @@ struct ngj_vol {
 	struct block_device *bdev;
 	u32 replayed;
 	int torn, cleared_dirty;
+	int pair_pending;	/* read-only view: the $Volume pair is shown repaired, the write pass must write it */
 };
 
 int ngj_probe(void *osdev, u64 size, unsigned int devsec, struct ngj_vol *jv);

@@ -336,7 +336,7 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 	if (want_rw) {
 		/* Our journal clears the dirty flag in the write pass: in the check pass it only marks an unclean shutdown. */
 		int ours = jrec == NGJ_CLEAN, dirty = !!(vol->vol_flags & VOLUME_IS_DIRTY);
-		int need_write = ours && (v->jv->replayed || v->jv->torn || dirty);
+		int need_write = ours && (v->jv->replayed || v->jv->torn || v->jv->pair_pending || dirty);
 		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
 		if (jrec == NGJ_REPAIR)
 			*why_ro = "the journal says the volume needs repair (core errors, or metadata written in place without it)";

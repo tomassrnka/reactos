@@ -243,7 +243,7 @@ static int lf_write(struct ngj_vol *jv, u64 page, void *buf)
  * whose update sequence does not check out is rebuilt from the mirror.  @check: write nothing, report
  * in *primary whether the primary copy must be rewritten (dirty or damaged), in *mirror the mirror.
  */
-static int clear_dirty(struct ngj_vol *jv, int *primary, int *mirror, int check)
+static int clear_dirty(struct ngj_vol *jv, int *primary, int *mirror, int check, u16 *next_usn)
 {
 	u32 rs = jv->recsz;
 	u64 po = jv->mft_lcn * jv->cluster + 3 * rs, mo = jv->mirr_lcn * jv->cluster + 3 * rs;
@@ -268,6 +268,11 @@ static int clear_dirty(struct ngj_vol *jv, int *primary, int *mirror, int check)
 		goto out;
 	a += g16(a + 0x14);
 	dirty = (g16(a + 10) & VOL_DIRTY) != 0;
+	if (next_usn) {
+		/* What refix() will number the rewritten primary: from the copy used, the mirror for a torn primary. */
+		u16 n = g16(r + g16(r + 4)) + 1;
+		*next_usn = n == 0 || n == 0xffff ? 1 : n;
+	}
 	*primary = dirty || !pok;
 	*mirror = *primary || !mok || memcmp(rp, rm, rs);
 	err = 0;
@@ -288,6 +293,61 @@ out:
 	kfree(r);
 	kfree(rp);
 	kfree(rm);
+	return err;
+}
+
+/* Shows @len bytes at device offset @off (sector-aligned) through the read-only overlay. */
+static int show_bytes(struct ngj_vol *jv, u64 off, const u8 *buf, u32 len)
+{
+	u8 *pg = kmalloc(KJ_PAGE, GFP_KERNEL);
+	int err = pg ? 0 : -ENOMEM;
+	while (!err && len) {
+		u32 in = (u32)(off % KJ_PAGE), n = min_t(u32, len, KJ_PAGE - in);
+		u8 mask = 0;
+		memcpy(pg + in, buf, n);
+		for (u32 s = in / 512; s < (in + n) / 512; s++)
+			mask |= 1u << s;
+		err = kshim_jnl_ro_page(jv->bdev, off / KJ_PAGE, mask, pg);
+		off += n;
+		buf += n;
+		len -= n;
+	}
+	kfree(pg);
+	return err;
+}
+
+/*
+ * Read-only and check mounts: a recovery that stopped between the $Volume primary and its mirror
+ * (clear_dirty) left two different copies, or one torn by the crash.  The core's $MFTMirr check
+ * would then find errors before the write pass that finishes the job could run, on every mount.
+ * Show the pair as that pass makes it consistent (the primary in both places, or the mirror when
+ * the primary does not check out) and report it pending in jv->pair_pending.
+ */
+static int show_volume_pair(struct ngj_vol *jv)
+{
+	u32 rs = jv->recsz;
+	u64 po = jv->mft_lcn * jv->cluster + 3 * rs, mo = jv->mirr_lcn * jv->cluster + 3 * rs;
+	u8 *rp = kmalloc(rs, GFP_KERNEL), *rm = kmalloc(rs, GFP_KERNEL), *r = kmalloc(rs, GFP_KERNEL);
+	int err = -ENOMEM, pok, mok;
+	if (!rp || !rm || !r)
+		goto out;
+	err = -EIO;
+	if (dread(jv, po, rp, rs) || dread(jv, mo, rm, rs))
+		goto out;
+	memcpy(r, rp, rs);
+	pok = !unfix(r, rs);
+	memcpy(r, rm, rs);
+	mok = !unfix(r, rs);
+	err = 0;
+	if ((pok && mok && !memcmp(rp, rm, rs)) || (!pok && !mok))
+		goto out;	/* consistent, or nothing to repair from (left to the core) */
+	err = pok ? show_bytes(jv, mo, rp, rs) : show_bytes(jv, po, rm, rs);
+	if (!err)
+		jv->pair_pending = 1;
+out:
+	kfree(rp);
+	kfree(rm);
+	kfree(r);
 	return err;
 }
 
@@ -423,6 +483,14 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		       (unsigned long long)h.seq);
 		goto out;
 	}
+	if (!write && !jv->replayed) {
+		/* With a transaction shown the overlay holds its $Volume pages: the write pass repairs the pair. */
+		int e = show_volume_pair(jv);
+		if (e) {
+			res = NGJ_UNREAD;
+			goto out;
+		}
+	}
 	if (write) {
 		/*
 		 * Clearing the dirty flag rewrites $Volume, which moves its update sequence number on, before
@@ -434,15 +502,17 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		struct kj_hdr a = h;
 		u16 usn, next;
 		int mirror;
-		if (clear_dirty(jv, &was, &mirror, 1) || vol_usn(jv, pg, &usn)) {
+		if (clear_dirty(jv, &was, &mirror, 1, &next) || vol_usn(jv, pg, &usn)) {
 			res = NGJ_REPAIR;
 			goto out;
 		}
 		if (!was)
 			goto clear;	/* at most the mirror: the primary's number does not move */
-		next = (u16)(usn + 1);
-		if (next == 0 || next == 0xffff)
-			next = 1;	/* as refix() numbers it */
+		/*
+		 * The old number is what the primary's first sector says now, the new one what the rewrite will
+		 * carry: for a torn primary rebuilt from the mirror that follows the mirror's number, not the
+		 * torn sector's, so the header never names a number nothing writes.
+		 */
 		a.state = KJ_ST_ACTIVE;
 		a.npages = a.ndesc = a.payload_crc = 0;
 		a.vol_usn_old = usn;
@@ -455,7 +525,7 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 			goto out;
 		}
 clear:
-		if (clear_dirty(jv, &was, &mirror, 0)) {
+		if (clear_dirty(jv, &was, &mirror, 0, NULL)) {
 			res = NGJ_REPAIR;
 			goto out;
 		}
@@ -464,6 +534,8 @@ clear:
 		if (lf_write(jv, KJ_HDR_PAGE, pg) || ngos_dev_flush(jv->osdev))
 			res = NGJ_REPAIR;
 	}
+	if (jv->pair_pending)
+		printk(KERN_WARNING "journal: $Volume and its $MFTMirr copy differ (recovery interrupted): shown repaired until a read-write mount writes it\n");
 	printk(KERN_WARNING "journal: found seq %llu state %u: %s%s, dirty flag %s\n",
 	       (unsigned long long)h.seq, h.state,
 	       jv->replayed ? "replayed a committed transaction" : jv->torn ? "transaction not committed (ignored)" : "nothing to replay",
