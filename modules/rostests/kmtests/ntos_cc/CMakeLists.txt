@@ -32,6 +32,20 @@ target_compile_definitions(cccopywrite_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET cccopywrite_drv)
 
 #
+# CcLazyWriteDelete
+#
+list(APPEND CCLAZYWRITEDELETE_DRV_SOURCE
+    ../kmtest_drv/kmtest_standalone.c
+    CcLazyWriteDelete_drv.c)
+
+add_library(cclazywritedelete_drv MODULE ${CCLAZYWRITEDELETE_DRV_SOURCE})
+set_module_type(cclazywritedelete_drv kernelmodedriver)
+target_link_libraries(cclazywritedelete_drv kmtest_printf ${PSEH_LIB})
+add_importlibs(cclazywritedelete_drv ntoskrnl hal)
+target_compile_definitions(cclazywritedelete_drv PRIVATE KMT_STANDALONE_DRIVER)
+add_rostests_file(TARGET cclazywritedelete_drv)
+
+#
 # CcMapData
 #
 list(APPEND CCMAPDATA_DRV_SOURCE
