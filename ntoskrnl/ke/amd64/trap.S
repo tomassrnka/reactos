@@ -53,6 +53,15 @@ MACRO(Fatal, BugcheckCode)
     call KiSystemFatalException
 ENDM
 
+/* Enable interrupts if the interrupted code ran with interrupts enabled */
+MACRO(EnableInterruptsIfEnabledBefore)
+    LOCAL InterruptsStayDisabled
+    test dword ptr [rbp + KTRAP_FRAME_EFlags], EFLAGS_IF_MASK
+    jz InterruptsStayDisabled
+    sti
+InterruptsStayDisabled:
+ENDM
+
 
 /* FUNCTIONS *****************************************************************/
 
@@ -169,8 +178,8 @@ FUNC KiDivideErrorFault
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
-    /* Enable interrupts */
-    sti
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Dispatch the exception */
     DispatchException STATUS_INTEGER_DIVIDE_BY_ZERO, 0, 0, 0, 0
@@ -256,8 +265,8 @@ FUNC KiOverflowTrap
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
-    /* Enable interrupts */
-    sti
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Dispatch the exception */
     DispatchException STATUS_INTEGER_OVERFLOW, 3, 0, 0, 0
@@ -296,8 +305,8 @@ FUNC KiInvalidOpcodeFault
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
-    /* Enable interrupts */
-    sti
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Check if the frame was from kernelmode */
     test word ptr [rbp + KTRAP_FRAME_SegCs], 3
@@ -320,6 +329,9 @@ PUBLIC KiNpxNotAvailableFault
 FUNC KiNpxNotAvailableFault
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
+
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Call the C handler */
     mov rcx, rbp
@@ -419,6 +431,9 @@ PUBLIC KiGeneralProtectionFault
 FUNC KiGeneralProtectionFault
     /* We have an error code */
     EnterTrap (TF_HAS_ERROR_CODE OR TF_SAVE_ALL)
+
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Call the C handler */
     mov rcx, rbp
@@ -569,6 +584,9 @@ FUNC KiXmmException
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
+
     /* Call the C handler */
     mov rcx, rbp
     call KiXmmExceptionHandler
@@ -598,6 +616,14 @@ FUNC KiRaiseAssertion
     /* Decrement RIP to point to the INT2C instruction (2 bytes, not 1 like INT3) */
     sub qword ptr [rbp + KTRAP_FRAME_Rip], 2
 
+    /* Check if the frame was from kernelmode */
+    test word ptr [rbp + KTRAP_FRAME_SegCs], 3
+    jz KiRaiseAssertionKMode
+
+    /* Enable interrupts for user-mode */
+    sti
+
+KiRaiseAssertionKMode:
     /* Dispatch the exception */
     DispatchException STATUS_ASSERTION_FAILURE, 0, 0, 0, 0
 
@@ -643,6 +669,14 @@ FUNC KiDebugServiceTrap
     /* Increase Rip to skip the int3 */
     inc qword ptr [rbp + KTRAP_FRAME_Rip]
 
+    /* Check if the frame was from kernelmode */
+    test word ptr [rbp + KTRAP_FRAME_SegCs], 3
+    jz KiDebugServiceTrapKMode
+
+    /* Enable interrupts for user-mode */
+    sti
+
+KiDebugServiceTrapKMode:
     /* Dispatch the exception (Params = service, buffer, legth) */
     DispatchException STATUS_BREAKPOINT, 3, [rbp+KTRAP_FRAME_Rax], [rbp+KTRAP_FRAME_Rcx], [rbp+KTRAP_FRAME_Rdx]
 

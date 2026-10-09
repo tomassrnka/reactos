@@ -9,6 +9,7 @@ list(APPEND SOURCE
     ConsoleCP.c
     CreateProcess.c
     CreateWaitableTimerEx.c
+    DebugTrapInterrupts.c
     DefaultActCtx.c
     DeleteTimerQueueEx.c
     DeviceIoControl.c

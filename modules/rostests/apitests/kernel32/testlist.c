@@ -8,6 +8,7 @@ extern void func_CancelIoEx(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateProcess(void);
 extern void func_CreateWaitableTimerEx(void);
+extern void func_DebugTrapInterrupts(void);
 extern void func_DefaultActCtx(void);
 extern void func_DeleteTimerQueueEx(void);
 extern void func_DeviceIoControl(void);
@@ -70,6 +71,7 @@ const struct test winetest_testlist[] =
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateProcess",               func_CreateProcess },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
+    { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
     { "DeviceIoControl",             func_DeviceIoControl },
