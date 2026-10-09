@@ -143,8 +143,15 @@ TestChild(
     ok(ExitCode != CHILD_BIND_FAILED, "%ls: BindIoCompletionCallback failed\n", Mode);
     ok(ExitCode != CHILD_NO_CALLBACK, "%ls: the callback did not run\n", Mode);
     ok(ExitCode != CHILD_BAD_ARGUMENTS, "%ls: wrong overlapped or byte count\n", Mode);
-    ok(ExitCode == ERROR_BROKEN_PIPE, "%ls: callback error code is 0x%lx, expected %u\n",
-       Mode, ExitCode, ERROR_BROKEN_PIPE);
+    /* For this pipe read, Windows passes the NTSTATUS (STATUS_PIPE_BROKEN) to
+     * the callback; ReactOS passes the translated Win32 error. Anything else
+     * is a failure on both. */
+    ok(ExitCode == (DWORD)STATUS_PIPE_BROKEN ||
+       (is_reactos() && ExitCode == ERROR_BROKEN_PIPE),
+       "%ls: unexpected callback error code 0x%lx\n", Mode, ExitCode);
+    todo_if(is_reactos())
+    ok(ExitCode == (DWORD)STATUS_PIPE_BROKEN, "%ls: callback error code is 0x%lx, expected 0x%lx\n",
+       Mode, ExitCode, (DWORD)STATUS_PIPE_BROKEN);
 }
 
 START_TEST(BindIoCompletionCallback)
