@@ -575,7 +575,11 @@ TranslateNtStatusError(NTSTATUS Status)
 
        case STATUS_REMOTE_NOT_LISTENING:
        case STATUS_REMOTE_DISCONNECT:
+       case STATUS_CONNECTION_REFUSED:
           return WSAECONNREFUSED;
+
+       case STATUS_CONNECTION_RESET:
+          return WSAECONNRESET;
 
        case STATUS_NETWORK_UNREACHABLE:
           return WSAENETUNREACH;

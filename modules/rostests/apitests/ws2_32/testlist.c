@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_abortiveclose(void);
 extern void func_accept(void);
 extern void func_bind(void);
 extern void func_broadcast(void);
@@ -27,6 +28,7 @@ extern void func_WSAStartup(void);
 
 const struct test winetest_testlist[] =
 {
+    { "abortiveclose", func_abortiveclose },
     { "accept", func_accept },
     { "bind", func_bind },
     { "broadcast", func_broadcast },

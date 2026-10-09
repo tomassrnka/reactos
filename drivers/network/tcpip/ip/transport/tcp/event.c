@@ -171,8 +171,11 @@ FlushAllQueues(PCONNECTION_ENDPOINT Connection, NTSTATUS Status)
     // flush send queue
     FlushSendQueue(Connection, Status);
 
-    // flush connect queue
-    FlushConnectQueue(Connection, Status);
+    // flush connect queue (a reset of a connect means it was refused)
+    if (Status == STATUS_CONNECTION_RESET)
+        FlushConnectQueue(Connection, STATUS_CONNECTION_REFUSED);
+    else
+        FlushConnectQueue(Connection, Status);
 
     // flush shutdown queue
     FlushShutdownQueue(Connection, Status);

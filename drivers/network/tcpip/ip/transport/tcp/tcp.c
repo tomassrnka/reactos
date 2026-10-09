@@ -282,7 +282,7 @@ NTSTATUS TCPTranslateError(const err_t err)
         case ERR_USE: Status = STATUS_ADDRESS_ALREADY_EXISTS; break; //-8
         case ERR_ISCONN: Status = STATUS_UNSUCCESSFUL; break; //-9 (FIXME)
         case ERR_ABRT: Status = STATUS_LOCAL_DISCONNECT; break; //-10
-        case ERR_RST: Status = STATUS_REMOTE_DISCONNECT; break; //-11
+        case ERR_RST: Status = STATUS_CONNECTION_RESET; break; //-11
         case ERR_CLSD: Status = STATUS_FILE_CLOSED; break; //-12
         case ERR_CONN: Status = STATUS_INVALID_CONNECTION; break; //-13
         case ERR_ARG: Status = STATUS_INVALID_PARAMETER; break; //-14
@@ -506,7 +506,11 @@ NTSTATUS TCPDisconnect
             FlushShutdownQueue(Connection, STATUS_FILE_CLOSED);
             ReferenceObject(Connection);
             UnlockObject(Connection);
-            Status = TCPTranslateError(LibTCPShutdown(Connection, 1, 1));
+            /* An abortive disconnect resets the connection */
+            if (Flags & TDI_DISCONNECT_ABORT)
+                Status = TCPTranslateError(LibTCPAbort(Connection));
+            else
+                Status = TCPTranslateError(LibTCPShutdown(Connection, 1, 1));
             DereferenceObject(Connection);
         }
         else
@@ -746,10 +750,15 @@ TCPSetNoDelay(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPSetNoDelay(Connection->SocketContext, Set);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -761,10 +770,15 @@ TCPSetKeepAlive(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPSetKeepAlive(Connection->SocketContext, Value);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -777,10 +791,15 @@ TCPSetKeepAliveValues(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTcpSetKeepAliveValues(Connection->SocketContext, KeepAliveTime, KeepAliveInterval);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -792,10 +811,15 @@ TCPGetSocketStatus(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPGetSocketStatus(Connection->SocketContext, State);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
