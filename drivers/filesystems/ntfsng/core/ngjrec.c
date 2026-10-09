@@ -235,65 +235,84 @@ static int lf_write(struct ngj_vol *jv, u64 page, void *buf)
 	return kj_page_dev(jv->ext, jv->next, page, &dev) || dwrite(jv, dev, buf, KJ_PAGE) ? -EIO : 0;
 }
 
-/* Clears VOLUME_IS_DIRTY in $Volume (record 3) and its $MFTMirr copy. */
 /*
- * Clears VOLUME_IS_DIRTY in $Volume (record 3) and makes its $MFTMirr copy the same.  The primary copy
- * is written and flushed before the mirror, so a crash leaves at most one of them behind, and a later
- * call finishes the job: a clean primary with an old mirror only gets the mirror rewritten.  A primary
- * whose update sequence does not check out is rebuilt from the mirror.  @check: write nothing, report
- * in *primary whether the primary copy must be rewritten (dirty or damaged), in *mirror the mirror.
+ * $Volume (record 3) and its $MFTMirr copy, read once for the write pass.  Everything that pass
+ * does with the pair (the protective header's numbers and the bytes it writes) comes from this one
+ * reading, so a read that fails in between cannot make the header and the writes disagree.
  */
-static int clear_dirty(struct ngj_vol *jv, int *primary, int *mirror, int check, u16 *next_usn)
+struct vol_pair {
+	u8 *r, *rp, *rm;	/* the rewritten primary (complete, fixed up), the primary and the mirror as read */
+	int primary, mirror;	/* which copies to write */
+	u16 usn_old, usn_new;	/* the primary's number on disk now, and the one r carries */
+};
+
+static void pair_free(struct vol_pair *p)
+{
+	kfree(p->r);
+	kfree(p->rp);
+	kfree(p->rm);
+}
+
+/*
+ * Decides how to clear VOLUME_IS_DIRTY and make the two copies the same: a dirty primary is
+ * rewritten clean, a primary whose update sequence does not check out is rebuilt from the mirror,
+ * and a mirror that differs from the (new) primary is rewritten.  A primary that cannot be read is
+ * not taken for a torn one: rebuilding it from the mirror could replace newer content, so that
+ * returns -EIO (unknown, as a failed journal read) instead.  -EINVAL: no copy checks out, no
+ * volume information, or no number in the primary's first sector.
+ */
+static int pair_read(struct ngj_vol *jv, struct vol_pair *p)
 {
 	u32 rs = jv->recsz;
 	u64 po = jv->mft_lcn * jv->cluster + 3 * rs, mo = jv->mirr_lcn * jv->cluster + 3 * rs;
-	u8 *r = kmalloc(rs, GFP_KERNEL), *rp = kmalloc(rs, GFP_KERNEL), *rm = kmalloc(rs, GFP_KERNEL), *a;
-	int err = -EIO, pok = 0, mok, dirty;
-	*primary = *mirror = 0;
-	if (!r || !rp || !rm) {
-		err = -ENOMEM;
-		goto out;
-	}
-	if (!dread(jv, po, rp, rs)) {
-		memcpy(r, rp, rs);
-		pok = !unfix(r, rs);
-	}
-	mok = !dread(jv, mo, rm, rs);
+	int pok, mok, dirty;
+	u8 *a;
+	memset(p, 0, sizeof(*p));
+	p->r = kmalloc(rs, GFP_KERNEL);
+	p->rp = kmalloc(rs, GFP_KERNEL);
+	p->rm = kmalloc(rs, GFP_KERNEL);
+	if (!p->r || !p->rp || !p->rm)
+		return -ENOMEM;
+	if (dread(jv, po, p->rp, rs))
+		return -EIO;
+	memcpy(p->r, p->rp, rs);
+	pok = !unfix(p->r, rs);
+	mok = !dread(jv, mo, p->rm, rs);
 	if (!pok) {
-		memcpy(r, rm, rs);
-		if (!mok || unfix(r, rs))
-			goto out;
+		if (!mok)
+			return -EIO;
+		memcpy(p->r, p->rm, rs);
+		if (unfix(p->r, rs))
+			return -EINVAL;
 	}
-	if (!(a = find_attr(r, rs, AT_VOLINFO_T)) || a[8] || g32(a + 0x10) < 12 || g16(a + 0x14) + 12u > g32(a + 4))
-		goto out;
+	/* The primary's first sector, as the ownership check reads it. */
+	if (kj_rec_usn(p->rp, jv->devsec, &p->usn_old))
+		return -EINVAL;
+	if (!(a = find_attr(p->r, rs, AT_VOLINFO_T)) || a[8] || g32(a + 0x10) < 12 || g16(a + 0x14) + 12u > g32(a + 4))
+		return -EINVAL;
 	a += g16(a + 0x14);
 	dirty = (g16(a + 10) & VOL_DIRTY) != 0;
-	if (next_usn) {
-		/* What refix() will number the rewritten primary: from the copy used, the mirror for a torn primary. */
-		u16 n = g16(r + g16(r + 4)) + 1;
-		*next_usn = n == 0 || n == 0xffff ? 1 : n;
-	}
-	*primary = dirty || !pok;
-	*mirror = *primary || !mok || memcmp(rp, rm, rs);
-	err = 0;
-	if (check)
-		goto out;
-	err = -EIO;
-	if (*primary) {
+	p->primary = dirty || !pok;
+	p->mirror = p->primary || !mok || memcmp(p->rp, p->rm, rs);
+	p->usn_new = p->usn_old;
+	if (p->primary) {
 		a[10] &= ~VOL_DIRTY;
-		refix(r, rs);
-		if (dwrite(jv, po, r, rs) || ngos_dev_flush(jv->osdev))
-			goto out;
-		memcpy(rp, r, rs);
+		refix(p->r, rs);
+		p->usn_new = g16(p->r + g16(p->r + 4));
 	}
-	if (*mirror && (dwrite(jv, mo, rp, rs) || ngos_dev_flush(jv->osdev)))
-		goto out;
-	err = 0;
-out:
-	kfree(r);
-	kfree(rp);
-	kfree(rm);
-	return err;
+	return 0;
+}
+
+/* Writes what pair_read() decided: the primary first and flushed, so a crash leaves at most one copy behind. */
+static int pair_write(struct ngj_vol *jv, const struct vol_pair *p)
+{
+	u32 rs = jv->recsz;
+	u64 po = jv->mft_lcn * jv->cluster + 3 * rs, mo = jv->mirr_lcn * jv->cluster + 3 * rs;
+	if (p->primary && (dwrite(jv, po, p->r, rs) || ngos_dev_flush(jv->osdev)))
+		return -EIO;
+	if (p->mirror && (dwrite(jv, mo, p->primary ? p->r : p->rp, rs) || ngos_dev_flush(jv->osdev)))
+		return -EIO;
+	return 0;
 }
 
 /* Shows @len bytes at device offset @off (sector-aligned) through the read-only overlay. */
@@ -495,37 +514,37 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		/*
 		 * Clearing the dirty flag rewrites $Volume, which moves its update sequence number on, before
 		 * the header is retired.  So that a crash in between does not leave a header that no longer
-		 * matches (and a dirty volume nobody recovers), the header first says ACTIVE for both numbers.
-		 * Only when the flag is set: a header naming a number nothing will write would match the
-		 * first write of another driver.
+		 * matches (and a dirty volume nobody recovers), the header first says ACTIVE for the number
+		 * on disk now and the one the prepared rewrite carries (for a torn primary rebuilt from the
+		 * mirror, the mirror's successor, not the torn sector's).  Only when the primary is rewritten:
+		 * a header naming a number nothing writes would match the first write of another driver.
 		 */
-		struct kj_hdr a = h;
-		u16 usn, next;
-		int mirror;
-		if (clear_dirty(jv, &was, &mirror, 1, &next) || vol_usn(jv, pg, &usn)) {
-			res = NGJ_REPAIR;
+		struct vol_pair vp;
+		int e = pair_read(jv, &vp);
+		if (e) {
+			res = e == -EIO || e == -ENOMEM ? NGJ_UNREAD : NGJ_REPAIR;
+			pair_free(&vp);
 			goto out;
 		}
-		if (!was)
-			goto clear;	/* at most the mirror: the primary's number does not move */
-		/*
-		 * The old number is what the primary's first sector says now, the new one what the rewrite will
-		 * carry: for a torn primary rebuilt from the mirror that follows the mirror's number, not the
-		 * torn sector's, so the header never names a number nothing writes.
-		 */
-		a.state = KJ_ST_ACTIVE;
-		a.npages = a.ndesc = a.payload_crc = 0;
-		a.vol_usn_old = usn;
-		a.vol_usn_new = next;
-		a.hdr_crc = kj_crc32(0, &a, offsetof(struct kj_hdr, hdr_crc));
-		memset(pg, 0, KJ_PAGE);
-		memcpy(pg, &a, sizeof(a));
-		if (lf_write(jv, KJ_HDR_PAGE, pg) || ngos_dev_flush(jv->osdev)) {
-			res = NGJ_REPAIR;
-			goto out;
+		was = vp.primary;
+		if (was) {
+			struct kj_hdr a = h;
+			a.state = KJ_ST_ACTIVE;
+			a.npages = a.ndesc = a.payload_crc = 0;
+			a.vol_usn_old = vp.usn_old;
+			a.vol_usn_new = vp.usn_new;
+			a.hdr_crc = kj_crc32(0, &a, offsetof(struct kj_hdr, hdr_crc));
+			memset(pg, 0, KJ_PAGE);
+			memcpy(pg, &a, sizeof(a));
+			if (lf_write(jv, KJ_HDR_PAGE, pg) || ngos_dev_flush(jv->osdev)) {
+				res = NGJ_REPAIR;
+				pair_free(&vp);
+				goto out;
+			}
 		}
-clear:
-		if (clear_dirty(jv, &was, &mirror, 0, NULL)) {
+		e = pair_write(jv, &vp);
+		pair_free(&vp);
+		if (e) {
 			res = NGJ_REPAIR;
 			goto out;
 		}
