@@ -19,6 +19,7 @@ list(APPEND SOURCE
     CreateIconIndirect.c
     CreatePen.c
     CreateRectRgn.c
+    D3DKMTCreateDCFromMemory.c
     DPtoLP.c
     EngAcquireSemaphore.c
     EngCreateSemaphore.c

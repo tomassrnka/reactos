@@ -38,15 +38,32 @@ NtGdiDdDDICreateDCFromMemory(D3DKMT_CREATEDCFROMMEMORY *desc)
         { D3DDDIFMT_P8,       8,  BI_RGB,       256, 0x00000000, 0x00000000, 0x00000000 },
     };
 
+    D3DKMT_CREATEDCFROMMEMORY Desc;
+    ULONGLONG BufferSize;
+    HBITMAP hBitmap;
+    NTSTATUS Status;
+
     if (!desc)
         return STATUS_INVALID_PARAMETER;
 
-    if (!desc->pMemory)
+    /* The descriptor is caller memory: capture it once */
+    _SEH2_TRY
+    {
+        ProbeForWrite(desc, sizeof(*desc), 1);
+        Desc = *desc;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (!Desc.pMemory)
         return STATUS_INVALID_PARAMETER;
 
     for (i = 0; i < sizeof(format_info) / sizeof(*format_info); ++i)
     {
-        if (format_info[i].format == desc->Format)
+        if (format_info[i].format == Desc.Format)
         {
             format = &format_info[i];
             break;
@@ -56,34 +73,57 @@ NtGdiDdDDICreateDCFromMemory(D3DKMT_CREATEDCFROMMEMORY *desc)
     if (!format)
         return STATUS_INVALID_PARAMETER;
 
-    if (desc->Width > (UINT_MAX & ~3) / (format->bit_count / 8) ||
-        !desc->Pitch || desc->Pitch < (((desc->Width * format->bit_count + 31) >> 3) & ~3) ||
-        !desc->Height || desc->Height > UINT_MAX / desc->Pitch)
+    if (Desc.Width > (UINT_MAX & ~3) / (format->bit_count / 8) ||
+        !Desc.Pitch || Desc.Pitch < ((((ULONGLONG)Desc.Width * format->bit_count + 31) >> 3) & ~3) ||
+        !Desc.Height || Desc.Height > UINT_MAX / Desc.Pitch)
     {
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (!desc->hDeviceDc || !(hDC = NtGdiCreateCompatibleDC(desc->hDeviceDc)))
+    /* The surface converts the pitch to bits in 32 bits and draws with
+       signed 32-bit offsets, and it rounds its stride up to 4 bytes */
+    if (Desc.Pitch > MAXULONG / 8)
+        return STATUS_INVALID_PARAMETER;
+    BufferSize = (((ULONGLONG)Desc.Pitch + 3) & ~3ULL) * Desc.Height;
+    if (BufferSize > MAXLONG)
+        return STATUS_INVALID_PARAMETER;
+
+    /* The surface bits stay in the caller's memory: it must be user memory */
+    _SEH2_TRY
+    {
+        ProbeForRead(Desc.pMemory, (SIZE_T)BufferSize, 1);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (!Desc.hDeviceDc || !(hDC = NtGdiCreateCompatibleDC(Desc.hDeviceDc)))
     {
         return STATUS_INVALID_PARAMETER;
     }
 
     /* Allocate a surface */
     psurf = SURFACE_AllocSurface(STYPE_BITMAP,
-                                 desc->Width,
-                                 desc->Height,
+                                 Desc.Width,
+                                 Desc.Height,
                                  BitmapFormat(format->bit_count, format->compression),
                                  BMF_TOPDOWN | BMF_NOZEROINIT,
-                                 desc->Pitch,
-                                 0,
-                                 desc->pMemory);
+                                 Desc.Pitch,
+                                 (ULONG)BufferSize,
+                                 Desc.pMemory);
+    if (!psurf)
+    {
+        NtGdiDeleteObjectApp(hDC);
+        return STATUS_NO_MEMORY;
+    }
 
     /* Mark as API bitmap */
     psurf->flags |= (DDB_SURFACE | API_BITMAP);
 
-    desc->hDc = hDC;
     /* Get the handle for the bitmap */
-    desc->hBitmap = (HBITMAP)psurf->SurfObj.hsurf;
+    hBitmap = (HBITMAP)psurf->SurfObj.hsurf;
 
     /* Allocate a palette for this surface */
     if (format->bit_count <= 8)
@@ -99,24 +139,67 @@ NtGdiDdDDICreateDCFromMemory(D3DKMT_CREATEDCFROMMEMORY *desc)
     /* Unlock the surface and return */
     SURFACE_UnlockSurface(psurf);
 
-    NtGdiSelectBitmap(desc->hDc, desc->hBitmap);
+    NtGdiSelectBitmap(hDC, hBitmap);
 
-    return STATUS_SUCCESS;
+    Status = STATUS_SUCCESS;
+    _SEH2_TRY
+    {
+        desc->hDc = hDC;
+        desc->hBitmap = hBitmap;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        /* The caller cannot learn the handles, so do not leak them, and do
+           not leave a deleted handle behind if the first write went through */
+        NtGdiDeleteObjectApp(hDC);
+        NtGdiDeleteObjectApp(hBitmap);
+        _SEH2_TRY
+        {
+            desc->hDc = Desc.hDc;
+            desc->hBitmap = Desc.hBitmap;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            NOTHING;
+        }
+        _SEH2_END;
+    }
+
+    return Status;
 }
 
 DWORD
 APIENTRY
 NtGdiDdDDIDestroyDCFromMemory(const D3DKMT_DESTROYDCFROMMEMORY *desc)
 {
+    D3DKMT_DESTROYDCFROMMEMORY Desc;
+
     if (!desc)
         return STATUS_INVALID_PARAMETER;
 
-    if (GDI_HANDLE_GET_TYPE(desc->hDc) != GDI_OBJECT_TYPE_DC ||
-        GDI_HANDLE_GET_TYPE(desc->hBitmap) != GDI_OBJECT_TYPE_BITMAP)
+    _SEH2_TRY
+    {
+        ProbeForRead(desc, sizeof(*desc), 1);
+        Desc = *desc;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (GDI_HANDLE_GET_TYPE(Desc.hDc) != GDI_OBJECT_TYPE_DC ||
+        GDI_HANDLE_GET_TYPE(Desc.hBitmap) != GDI_OBJECT_TYPE_BITMAP)
         return STATUS_INVALID_PARAMETER;
 
-    NtGdiDeleteObjectApp(desc->hBitmap);
-    NtGdiDeleteObjectApp(desc->hDc);
+    NtGdiDeleteObjectApp(Desc.hBitmap);
+    NtGdiDeleteObjectApp(Desc.hDc);
 
     return STATUS_SUCCESS;
 }
