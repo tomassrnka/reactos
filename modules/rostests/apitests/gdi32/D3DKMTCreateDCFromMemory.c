@@ -116,8 +116,12 @@ START_TEST(D3DKMTCreateDCFromMemory)
     Desc.Height = 1;
     Desc.Pitch = 4;
     Status = pD3DKMTCreateDCFromMemory(&Desc);
-    ok(Status == STATUS_INVALID_PARAMETER, "Got unexpected status 0x%lx\n", Status);
-    ok(Desc.hDc == (HDC)(ULONG_PTR)0x010baade, "Got unexpected dc %p\n", Desc.hDc);
+    /* Windows (Server 2008 R2 and Windows 10) does not check the size and
+       creates the DC; ReactOS rejects it */
+    ok(Status == STATUS_INVALID_PARAMETER || (!is_reactos() && Status == STATUS_SUCCESS),
+       "Got unexpected status 0x%lx\n", Status);
+    if (Status != STATUS_SUCCESS)
+        ok(Desc.hDc == (HDC)(ULONG_PTR)0x010baade, "Got unexpected dc %p\n", Desc.hDc);
     if (Status == STATUS_SUCCESS)
     {
         DestroyDesc.hDc = Desc.hDc;
