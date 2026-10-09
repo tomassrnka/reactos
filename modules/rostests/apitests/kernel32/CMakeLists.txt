@@ -30,6 +30,7 @@ list(APPEND SOURCE
     GetModuleFileName.c
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
+    IdleProcessor.c
     InitOnce.c
     interlck.c
     IsDBCSLeadByteEx.c

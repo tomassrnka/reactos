@@ -15,13 +15,9 @@
 #ifdef _WIN64
 # define InterlockedOrSetMember(Destination, SetMember) \
     InterlockedOr64((PLONG64)Destination, SetMember);
-# define InterlockedAndClearMember(Destination, SetMember) \
-    InterlockedAnd64((PLONG64)Destination, ~(LONG64)(SetMember));
 #else
 # define InterlockedOrSetMember(Destination, SetMember) \
     InterlockedOr((PLONG)Destination, SetMember);
-# define InterlockedAndClearMember(Destination, SetMember) \
-    InterlockedAnd((PLONG)Destination, ~(LONG)(SetMember));
 #endif
 
 /* GLOBALS *******************************************************************/
@@ -336,6 +332,35 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         /* Check if priority changed */
         if (OldPriority > NextThread->Priority)
         {
+            /* Check if the processor was about to go idle */
+            if (NextThread == Prcb->IdleThread)
+            {
+                /* Put this one as the next one instead */
+                Thread->State = Standby;
+                Prcb->NextThread = Thread;
+
+                /* The idle thread is never made ready, it stays in place */
+                NextThread->State = Running;
+
+                /* The processor is no longer idle */
+                if (KiIdleSummary & Prcb->SetMember)
+                {
+                    InterlockedAndAffinity((PLONG_PTR)&KiIdleSummary,
+                                           ~(LONG_PTR)Prcb->SetMember);
+                }
+
+                /* Release the lock */
+                KiReleasePrcbLock(Prcb);
+
+                /* Check if we're running on another CPU */
+                if (KeGetCurrentProcessorNumber() != Thread->NextProcessor)
+                {
+                    /* We are, send an IPI */
+                    KiIpiSend(AFFINITY_MASK(Thread->NextProcessor), IPI_DPC);
+                }
+                return;
+            }
+
             /* Preempt the thread */
             NextThread->Preempted = TRUE;
 
@@ -364,8 +389,12 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             Thread->State = Standby;
             Prcb->NextThread = Thread;
 
-            /* The processor is no longer idle, so others pick another idle processor */
-            InterlockedAndClearMember(&KiIdleSummary, Prcb->SetMember);
+            /* The processor is no longer idle */
+            if (KiIdleSummary & Prcb->SetMember)
+            {
+                InterlockedAndAffinity((PLONG_PTR)&KiIdleSummary,
+                                       ~(LONG_PTR)Prcb->SetMember);
+            }
 
             /* Release the lock */
             KiReleasePrcbLock(Prcb);

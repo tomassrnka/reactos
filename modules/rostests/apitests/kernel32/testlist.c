@@ -29,6 +29,7 @@ extern void func_GetLocaleInfo(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetVolumeInformation(void);
+extern void func_IdleProcessor(void);
 extern void func_InitOnce(void);
 extern void func_interlck(void);
 extern void func_IsDBCSLeadByteEx(void);
@@ -87,6 +88,7 @@ const struct test winetest_testlist[] =
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
     { "GetVolumeInformation",        func_GetVolumeInformation },
+    { "IdleProcessor",               func_IdleProcessor },
     { "InitOnce",                    func_InitOnce },
     { "interlck",                    func_interlck },
     { "IsDBCSLeadByteEx",            func_IsDBCSLeadByteEx },
