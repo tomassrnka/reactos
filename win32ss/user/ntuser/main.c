@@ -59,6 +59,7 @@ AllocW32Process(IN  PEPROCESS Process,
                 OUT PPROCESSINFO* W32Process)
 {
     PPROCESSINFO ppiCurrent;
+    NTSTATUS Status;
 
     TRACE_CH(UserProcess, "In AllocW32Process(0x%p)\n", Process);
 
@@ -82,7 +83,15 @@ AllocW32Process(IN  PEPROCESS Process,
 
     RtlZeroMemory(ppiCurrent, sizeof(*ppiCurrent));
 
-    PsSetProcessWin32Process(Process, ppiCurrent, NULL);
+    /* Fails once the process is terminating; its thread can still get here */
+    Status = PsSetProcessWin32Process(Process, ppiCurrent, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        TRACE_CH(UserProcess, "Cannot set ppi for PID:0x%lx, Status 0x%08lx\n",
+                 HandleToUlong(Process->UniqueProcessId), Status);
+        ExFreePoolWithTag(ppiCurrent, USERTAG_PROCESSINFO);
+        return Status;
+    }
     IntReferenceProcessInfo(ppiCurrent);
 
     *W32Process = ppiCurrent;
@@ -248,8 +257,8 @@ InitProcessCallback(PEPROCESS Process)
     Status = AllocW32Process(Process, &ppiCurrent);
     if (!NT_SUCCESS(Status))
     {
-        ERR_CH(UserProcess, "Failed to allocate ppi for PID:0x%lx\n",
-               HandleToUlong(Process->UniqueProcessId));
+        ERR_CH(UserProcess, "Failed to allocate ppi for PID:0x%lx, Status 0x%08lx\n",
+               HandleToUlong(Process->UniqueProcessId), Status);
         return Status;
     }
 

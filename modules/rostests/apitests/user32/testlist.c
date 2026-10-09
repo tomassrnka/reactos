@@ -40,6 +40,7 @@ extern void func_MessageStateAnalyzer(void);
 extern void func_NcPaintRgn(void);
 extern void func_NextDlgItem(void);
 extern void func_PrivateExtractIcons(void);
+extern void func_ProcessConnectTerminate(void);
 extern void func_RealGetWindowClass(void);
 extern void func_RedrawWindow(void);
 extern void func_RegisterHotKey(void);
@@ -108,6 +109,7 @@ const struct test winetest_testlist[] =
     { "NcPaintRgn", func_NcPaintRgn },
     { "NextDlgItem", func_NextDlgItem },
     { "PrivateExtractIcons", func_PrivateExtractIcons },
+    { "ProcessConnectTerminate", func_ProcessConnectTerminate },
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedrawWindow", func_RedrawWindow },
     { "RegisterHotKey", func_RegisterHotKey },
