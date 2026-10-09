@@ -1637,14 +1637,32 @@ MiQueryAddressState(IN PVOID Va,
                 /* Get protection state of this page */
                 Protect = MiGetPageProtection(PointerPte);
 
-                /* Check if this is an image-backed VAD */
+                /* Check if this PTE points to a prototype PTE of a section */
                 if ((TempPte.u.Soft.Valid == 0) &&
                     (TempPte.u.Soft.Prototype == 1) &&
                     (Vad->u.VadFlags.PrivateMemory == 0) &&
                     (Vad->ControlArea))
                 {
-                    DPRINT1("Not supported\n");
-                    ASSERT(FALSE);
+                    /* Get the prototype PTE, which holds the real state */
+                    if (TempPte.u.Soft.PageFileHigh == MI_PTE_LOOKUP_NEEDED)
+                    {
+                        ProtoPte = MI_GET_PROTOTYPE_PTE_FOR_VPN(Vad,
+                                                                (ULONG_PTR)Va >> PAGE_SHIFT);
+                    }
+                    else
+                    {
+                        ProtoPte = MiProtoPteToPte(&TempPte);
+                    }
+
+                    /* An empty prototype PTE is a reserved page, for example
+                       an uncommitted page of a SEC_RESERVE view that was
+                       accessed. Like the demand-zero path below, this reads
+                       the paged prototype PTE with the working set lock held */
+                    if (!ProtoPte->u.Long)
+                    {
+                        State = MEM_RESERVE;
+                        Protect = 0;
+                    }
                 }
             }
         }
@@ -1960,7 +1978,6 @@ MiQueryMemoryBasicInformation(IN HANDLE ProcessHandle,
         MemoryInfo.BaseAddress = Address;
         MemoryInfo.AllocationBase = (PVOID)(Vad->StartingVpn << PAGE_SHIFT);
         MemoryInfo.AllocationProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
-        MemoryInfo.Type = MEM_PRIVATE;
 
         /* Acquire the working set lock (shared is enough) */
         MiLockProcessWorkingSetShared(TargetProcess, PsGetCurrentThread());
