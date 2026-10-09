@@ -54,5 +54,7 @@ ULONGLONG NtFileId(HANDLE Handle);
 PACL NtGetDacl(PCWSTR Path, PSTR Text, ULONG TextSize, PSECURITY_DESCRIPTOR *SdOut);
 /* Index of the first ACE of Dacl matching (Sid, Mask, flags & FlagMask == Flags, type), or -1. */
 LONG NtFindAce(PACL Dacl, PSID Sid, ACCESS_MASK Mask, BYTE FlagMask, BYTE Flags, BOOLEAN Deny);
+/* Removes Path, a file or a directory tree (as administrator, with backup semantics). */
+VOID NtRemove(PCWSTR Path);
 /* Removes the test directory tree (as administrator, with backup semantics). */
 VOID NtCleanup(VOID);

@@ -461,6 +461,11 @@ static VOID NtRemoveTree(PCWSTR Path, ULONG Depth)
     NtClose(H);
 }
 
+VOID NtRemove(PCWSTR Path)
+{
+    NtRemoveTree(Path, 0);
+}
+
 VOID NtCleanup(VOID)
 {
     if (TestDir[0])
