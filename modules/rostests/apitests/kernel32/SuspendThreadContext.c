@@ -144,6 +144,7 @@ ProbeStack(VOID)
     /* Top down, one guard page at a time */
     for (i = STACK_PROBE; i > 0; i -= 256)
         Probe[i - 1] = 0;
+    (void)Probe[0];
 }
 
 static
