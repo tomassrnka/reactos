@@ -317,7 +317,10 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     return STATUS_SUCCESS;
 }
 
-/* Writes a locked buffer straight to the storage device, through a sector-aligned pool buffer. */
+/*
+ * Writes a locked buffer straight to the storage device, through a sector-aligned pool buffer.  Nothing
+ * of the journal orders these writes, so the request completes only once they are on the medium.
+ */
 static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
 {
     PUCHAR Bounce = ExAllocatePoolWithTag(NonPagedPool, 64 * 1024, TAG_NTFSNG);
@@ -329,11 +332,13 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG
     {
         ULONG n = min(Length - Done, 64 * 1024);
         RtlCopyMemory(Bounce, Buffer + Done, n);
-        if (ngos_dev_write(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n))
+        if (NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n))
             break;
         Done += n;
     }
     ExFreePoolWithTag(Bounce, TAG_NTFSNG);
+    if (Done == Length && NgDevFlushDurable(Vcb->StorageDevice))
+        Done = 0;
     return Done == Length ? STATUS_SUCCESS : STATUS_UNEXPECTED_IO_ERROR;
 }
 
