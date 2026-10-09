@@ -1048,14 +1048,17 @@ MmInitializeProcessAddressSpace(IN PEPROCESS Process,
     ASSERT(Process->Pcb.DirectoryTableBase[0] == PageFrameNumber * PAGE_SIZE);
     MiInitializePfn(PageFrameNumber, PointerPte, TRUE);
 
-    /* Do the same for hyperspace */
-    PointerPde = MiAddressToPde(HYPER_SPACE);
-    PageFrameNumber = PFN_FROM_PTE(PointerPde);
-    MiInitializePfn(PageFrameNumber, (PMMPTE)PointerPde, TRUE);
-#if (_MI_PAGING_LEVELS == 2)
+    /*
+     * Do the same for hyperspace, top level first: MiInitializePfn adds a
+     * share to the page table that maps the page, and that page table must
+     * already be initialized or its count is overwritten.
+     */
+#if (_MI_PAGING_LEVELS == 4)
+    PointerPxe = MiAddressToPxe((PVOID)HYPER_SPACE);
+    PageFrameNumber = PFN_FROM_PTE(PointerPxe);
+    MiInitializePfn(PageFrameNumber, PointerPxe, TRUE);
     ASSERT(Process->Pcb.DirectoryTableBase[1] == PageFrameNumber * PAGE_SIZE);
 #endif
-
 #if (_MI_PAGING_LEVELS >= 3)
     PointerPpe = MiAddressToPpe((PVOID)HYPER_SPACE);
     PageFrameNumber = PFN_FROM_PTE(PointerPpe);
@@ -1064,10 +1067,10 @@ MmInitializeProcessAddressSpace(IN PEPROCESS Process,
     ASSERT(Process->Pcb.DirectoryTableBase[1] == PageFrameNumber * PAGE_SIZE);
 #endif
 #endif
-#if (_MI_PAGING_LEVELS == 4)
-    PointerPxe = MiAddressToPxe((PVOID)HYPER_SPACE);
-    PageFrameNumber = PFN_FROM_PTE(PointerPxe);
-    MiInitializePfn(PageFrameNumber, PointerPxe, TRUE);
+    PointerPde = MiAddressToPde(HYPER_SPACE);
+    PageFrameNumber = PFN_FROM_PTE(PointerPde);
+    MiInitializePfn(PageFrameNumber, (PMMPTE)PointerPde, TRUE);
+#if (_MI_PAGING_LEVELS == 2)
     ASSERT(Process->Pcb.DirectoryTableBase[1] == PageFrameNumber * PAGE_SIZE);
 #endif
 
@@ -1443,9 +1446,26 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
 
         /* Nuke it */
         MI_SET_PFN_DELETED(Pfn1);
+        PageFrameIndex = Pfn1->u4.PteFrame;
         MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
         MiDecrementShareCount(Pfn1, Process->WorkingSetPage);
         ASSERT((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress));
+
+#if (_MI_PAGING_LEVELS >= 3)
+        /* Free the hyperspace page tables between the working set page and DirectoryTableBase[1] */
+        for (ULONG Level = 0; Level < _MI_PAGING_LEVELS - 2; Level++)
+        {
+            Pfn1 = MiGetPfnEntry(PageFrameIndex);
+            Pfn2 = MiGetPfnEntry(Pfn1->u4.PteFrame);
+            ASSERT(Pfn1->u2.ShareCount == 1);
+
+            MI_SET_PFN_DELETED(Pfn1);
+            MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
+            MiDecrementShareCount(Pfn1, PageFrameIndex);
+            PageFrameIndex = MiGetPfnEntryIndex(Pfn2);
+        }
+        ASSERT(PageFrameIndex == (Process->Pcb.DirectoryTableBase[1] >> PAGE_SHIFT));
+#endif
 
         /* Now map hyperspace and its page table */
         PageFrameIndex = Process->Pcb.DirectoryTableBase[1] >> PAGE_SHIFT;
