@@ -364,6 +364,22 @@ MiDeleteSystemPageableVm(IN PMMPTE PointerPte,
     return ActualPages;
 }
 
+/* A VirtualLock on a private page goes with its PTE: drop the lock reference */
+static
+BOOLEAN
+MiDropVirtualLock(IN PMMPFN Pfn1)
+{
+    MI_ASSERT_PFN_LOCK_HELD();
+
+    if (!Pfn1->Wsle.u1.e1.LockedInWs && !Pfn1->Wsle.u1.e1.LockedInMemory)
+        return FALSE;
+
+    Pfn1->Wsle.u1.e1.LockedInWs = 0;
+    Pfn1->Wsle.u1.e1.LockedInMemory = 0;
+    MiDereferencePfnAndDropLockCount(Pfn1);
+    return TRUE;
+}
+
 VOID
 NTAPI
 MiDeletePte(IN PMMPTE PointerPte,
@@ -418,10 +434,13 @@ MiDeletePte(IN PMMPTE PointerPte,
             /* Delete the PFN */
             MI_SET_PFN_DELETED(Pfn1);
 
+            /* Dropping a VirtualLock frees the page, unless an MDL still holds it */
+            if (MiDropVirtualLock(Pfn1))
+                return;
+
             /*
              * It is either on a list (refcount == 0), being written, or still
-             * locked. An I/O or MDL unlock frees it later; a VirtualLock
-             * reference is not dropped here and keeps the page.
+             * locked by an MDL, whose unlock frees it.
              */
             ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
 
@@ -519,6 +538,7 @@ MiDeletePte(IN PMMPTE PointerPte,
 
         /* Mark the PFN for deletion and dereference what should be the last ref */
         MI_SET_PFN_DELETED(Pfn1);
+        MiDropVirtualLock(Pfn1);
         MiDecrementShareCount(Pfn1, PageFrameIndex);
 
         /* We should eventually do this */
@@ -2187,7 +2207,7 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     MMPTE PteContents;
     PMMPFN Pfn1;
     ULONG ProtectionMask, OldProtect;
-    BOOLEAN Committed;
+    BOOLEAN Committed, Unlocked = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
     PETHREAD Thread = PsGetCurrentThread();
     TABLE_SEARCH_RESULT Result;
@@ -2394,6 +2414,15 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                 {
                     KIRQL OldIrql = MiAcquirePfnLock();
 
+                    /* A page locked with VirtualLock is unlocked, as on Windows */
+                    if (Pfn1->Wsle.u1.e1.LockedInWs)
+                    {
+                        Pfn1->Wsle.u1.e1.LockedInWs = 0;
+                        if (!Pfn1->Wsle.u1.e1.LockedInMemory)
+                            MiDereferencePfnAndDropLockCount(Pfn1);
+                        Unlocked = TRUE;
+                    }
+
                     /* Mark the PTE as transition and change its protection */
                     PteContents.u.Hard.Valid = 0;
                     PteContents.u.Soft.Transition = 1;
@@ -2451,7 +2480,7 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     *NumberOfBytesToProtect = EndingAddress - StartingAddress + 1;
     *BaseAddress = (PVOID)StartingAddress;
     *OldAccessProtection = OldProtect;
-    return STATUS_SUCCESS;
+    return Unlocked ? STATUS_WAS_UNLOCKED : STATUS_SUCCESS;
 
 FailPath:
     /* Unlock the address space and return the failure code */
@@ -2589,6 +2618,7 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
         //
         MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
         MI_SET_PFN_DELETED(Pfn1);
+        MiDropVirtualLock(Pfn1);
         MiDecrementShareCount(Pfn1, PageFrameIndex);
 
         //
@@ -4019,10 +4049,8 @@ NtUnlockVirtualMemory(IN HANDLE ProcessHandle,
     }
     _SEH2_END;
 
-    //
-    // Return status
-    //
-    return STATUS_SUCCESS;
+    /* Return what MiUnlockVirtualMemory reported */
+    return Status;
 }
 
 NTSTATUS
