@@ -177,7 +177,8 @@ HvpWriteLog(
         /* Check if the block is clean or we're past the last block */
         LastIndex = BlockIndex;
         BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
+        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex ||
+            BlockIndex >= RegistryHive->Storage[Stable].Length)
         {
             break;
         }
@@ -212,7 +213,8 @@ HvpWriteLog(
         /* Check if the block is clean or we're past the last block */
         LastIndex = BlockIndex;
         BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
+        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex ||
+            BlockIndex >= RegistryHive->Storage[Stable].Length)
         {
             break;
         }
@@ -377,7 +379,8 @@ HvpWriteHive(
             /* Check if the block is clean or we're past the last block */
             LastIndex = BlockIndex;
             BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-            if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
+            if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex ||
+                BlockIndex >= RegistryHive->Storage[Stable].Length)
             {
                 break;
             }
