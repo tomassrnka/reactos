@@ -116,6 +116,7 @@ intDdCreateSurfaceOrBuffer(HANDLE hDirectDrawLocal,
 
   if (!(SurfaceCaps & DDSCAPS_VISIBLE) && !(peDdGl->ddCallbacks.dwFlags & DDHAL_CB32_CREATESURFACE))
   {
+      InterlockedDecrement((VOID*)&peDdL->pobj.cExclusiveLock);
       intDdSetCreateSurfaceResult(pDdCreateSurfaceData, E_FAIL);
       return FALSE;
   }
