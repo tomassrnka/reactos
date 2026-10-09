@@ -1555,12 +1555,41 @@ MmAlterViewAttributes(PMMSUPPORT AddressSpace,
     MmUnlockSectionSegment(Segment);
 }
 
+/*
+ * A section fault that will map a page into a process takes the page's
+ * rmap entry before it locks the segment or maps anything, so that
+ * running out of nonpaged pool fails the fault with STATUS_NO_MEMORY,
+ * which MmAccessFault waits out and retries, instead of bugchecking in
+ * MmInsertRmap after the page is mapped. The segment association that
+ * MmSetPageEntrySectionSegment inserts still allocates on its own.
+ */
+static
 NTSTATUS
-NTAPI
-MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
+MiReserveFaultRmap(PEPROCESS Process, PVOID *RmapEntry)
+{
+    if (Process == NULL || *RmapEntry != NULL)
+        return STATUS_SUCCESS;
+
+    *RmapEntry = MmAllocateRmapEntry();
+    return (*RmapEntry != NULL) ? STATUS_SUCCESS : STATUS_NO_MEMORY;
+}
+
+/* A macro, so that the debug caller of each rmap entry is its fault path */
+#define MiInsertFaultRmap(Page, Process, Address, RmapEntry)                 \
+    do                                                                        \
+    {                                                                         \
+        ASSERT(*(RmapEntry) != NULL);                                         \
+        MmInsertRmapEntry((Page), (Process), (Address), *(RmapEntry));        \
+        *(RmapEntry) = NULL;                                                  \
+    } while (0)
+
+static
+NTSTATUS
+MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
                              MEMORY_AREA* MemoryArea,
                              PVOID Address,
-                             BOOLEAN Locked)
+                             BOOLEAN Locked,
+                             PVOID *RmapEntry)
 {
     LARGE_INTEGER Offset;
     PFN_NUMBER Page;
@@ -1630,6 +1659,14 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         }
 
         return STATUS_GUARD_PAGE_VIOLATION;
+    }
+
+    /* Every path below maps a page or waits for one; physical memory has no rmap */
+    if (!((*Segment->Flags) & MM_PHYSICALMEMORY_SEGMENT))
+    {
+        Status = MiReserveFaultRmap(Process, RmapEntry);
+        if (!NT_SUCCESS(Status))
+            return Status;
     }
 
     HasSwapEntry = MmIsPageSwapEntry(Process, Address);
@@ -1702,7 +1739,7 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         /*
          * Add the page to the process's working set
          */
-        if (Process) MmInsertRmap(Page, Process, Address);
+        if (Process) MiInsertFaultRmap(Page, Process, Address, RmapEntry);
         /*
          * Finish the operation
          */
@@ -1789,7 +1826,7 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
             }
             ASSERT(MmIsPagePresent(Process, PAddress));
             if (Process)
-                MmInsertRmap(Page, Process, Address);
+                MiInsertFaultRmap(Page, Process, Address, RmapEntry);
 
             DPRINT("Address 0x%p\n", Address);
             return STATUS_SUCCESS;
@@ -1893,7 +1930,7 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
             KeBugCheck(MEMORY_MANAGEMENT);
         }
         if (Process)
-            MmInsertRmap(Page, Process, Address);
+            MiInsertFaultRmap(Page, Process, Address, RmapEntry);
 
         /*
          * Mark the offset within the section as having valid, in-memory
@@ -1922,7 +1959,7 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         }
 
         if (Process)
-            MmInsertRmap(Page, Process, Address);
+            MiInsertFaultRmap(Page, Process, Address, RmapEntry);
 
         /* Take a reference on it */
         MmSharePageEntrySectionSegment(Segment, &Offset);
@@ -1954,12 +1991,13 @@ MiKeepViewAttributes(
     UNREFERENCED_PARAMETER(NewProtect);
 }
 
+static
 NTSTATUS
-NTAPI
-MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
+MiAccessFaultSectionView(PMMSUPPORT AddressSpace,
                          MEMORY_AREA* MemoryArea,
                          PVOID Address,
-                         BOOLEAN Locked)
+                         BOOLEAN Locked,
+                         PVOID *RmapEntry)
 {
     PMM_SECTION_SEGMENT Segment;
     PFN_NUMBER OldPage;
@@ -1988,7 +2026,7 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
     /* Make sure we have a page mapping for this address.  */
     if (!MmIsPagePresent(Process, Address))
     {
-        NTSTATUS Status = MmNotPresentFaultSectionView(AddressSpace, MemoryArea, Address, Locked);
+        Status = MiNotPresentFaultSectionView(AddressSpace, MemoryArea, Address, Locked, RmapEntry);
         if (!NT_SUCCESS(Status))
         {
             /* This is invalid access ! */
@@ -2015,6 +2053,11 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
         MmSetPageProtect(Process, Address, Region->Protect);
         return STATUS_SUCCESS;
     }
+
+    /* The copy below maps a new page: reserve before changing anything */
+    Status = MiReserveFaultRmap(Process, RmapEntry);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     /*
      * Calculate the new protection. The region is updated only once the page
@@ -2102,7 +2145,7 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
     }
 
     if (Process)
-        MmInsertRmap(NewPage, Process, PAddress);
+        MiInsertFaultRmap(NewPage, Process, PAddress, RmapEntry);
 
 UpdateRegion:
     /* The PTE already has the new protection: only record it in the region */
@@ -2116,6 +2159,38 @@ UpdateRegion:
 
     DPRINT("Address 0x%p\n", Address);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
+                             MEMORY_AREA* MemoryArea,
+                             PVOID Address,
+                             BOOLEAN Locked)
+{
+    PVOID RmapEntry = NULL;
+    NTSTATUS Status;
+
+    Status = MiNotPresentFaultSectionView(AddressSpace, MemoryArea, Address, Locked, &RmapEntry);
+    if (RmapEntry != NULL)
+        MmFreeRmapEntry(RmapEntry);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
+                         MEMORY_AREA* MemoryArea,
+                         PVOID Address,
+                         BOOLEAN Locked)
+{
+    PVOID RmapEntry = NULL;
+    NTSTATUS Status;
+
+    Status = MiAccessFaultSectionView(AddressSpace, MemoryArea, Address, Locked, &RmapEntry);
+    if (RmapEntry != NULL)
+        MmFreeRmapEntry(RmapEntry);
+    return Status;
 }
 
 NTSTATUS
