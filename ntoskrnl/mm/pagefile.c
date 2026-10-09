@@ -305,7 +305,17 @@ MmFreeSwapPage(SWAPENTRY Entry)
         KeBugCheck(MEMORY_MANAGEMENT);
     }
 
-    RtlClearBit(PagingFile->Bitmap, off >> 5);
+    /* Refuse an entry that cannot be in use: MM_WAIT_ENTRY, outside the bitmap, bit clear */
+    if ((Entry == MM_WAIT_ENTRY) ||
+        (off >= PagingFile->Bitmap->SizeOfBitMap) ||
+        !RtlTestBit(PagingFile->Bitmap, (ULONG)off))
+    {
+        KeReleaseGuardedMutex(&MmPageFileCreationLock);
+        DPRINT1("MmFreeSwapPage: entry %Ix is not in use\n", Entry);
+        ASSERT(FALSE);
+        return;
+    }
+    RtlClearBit(PagingFile->Bitmap, (ULONG)off);
 
     PagingFile->FreeSpace++;
     PagingFile->CurrentUsage--;
