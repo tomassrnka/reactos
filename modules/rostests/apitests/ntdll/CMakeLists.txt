@@ -47,6 +47,7 @@ list(APPEND SOURCE
     NtAccessCheck.c
     NtAccessCheckByType.c
     NtAccessCheckByTypeResultList.c
+    NtAccessCheckByTypeResultListAndAuditAlarmByHandle.c
     NtAdjustGroupsToken.c
     NtAdjustPrivilegesToken.c
     NtAllocateVirtualMemory.c

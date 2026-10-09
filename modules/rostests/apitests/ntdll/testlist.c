@@ -35,6 +35,7 @@ extern void func_NtAcceptConnectPort(void);
 extern void func_NtAccessCheck(void);
 extern void func_NtAccessCheckByType(void);
 extern void func_NtAccessCheckByTypeResultList(void);
+extern void func_NtAccessCheckByTypeResultListAndAuditAlarmByHandle(void);
 extern void func_NtAdjustGroupsToken(void);
 extern void func_NtAdjustPrivilegesToken(void);
 extern void func_NtAllocateVirtualMemory(void);
@@ -186,6 +187,7 @@ const struct test winetest_testlist[] =
     { "NtAccessCheck",                  func_NtAccessCheck },
     { "NtAccessCheckByType",            func_NtAccessCheckByType },
     { "NtAccessCheckByTypeResultList",  func_NtAccessCheckByTypeResultList },
+    { "NtAccessCheckByTypeResultListAndAuditAlarmByHandle", func_NtAccessCheckByTypeResultListAndAuditAlarmByHandle },
     { "NtAdjustGroupsToken",            func_NtAdjustGroupsToken },
     { "NtAdjustPrivilegesToken",        func_NtAdjustPrivilegesToken },
     { "NtAllocateVirtualMemory",        func_NtAllocateVirtualMemory },
