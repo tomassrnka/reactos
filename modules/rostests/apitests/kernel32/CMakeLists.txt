@@ -54,6 +54,7 @@ list(APPEND SOURCE
     SetConsoleWindowInfo.c
     SetCurrentDirectory.c
     SetSearchPathMode.c
+    SetThreadStackGuarantee.c
     SetUnhandledExceptionFilter.c
     SystemFirmware.c
     TerminateProcess.c
