@@ -52,6 +52,7 @@ list(APPEND SOURCE
     SystemFirmware.c
     TerminateProcess.c
     ThreadContextNpx.c
+    ThreadContextObjects.c
     TunnelCache.c
     UEFIFirmware.c
     WerFlags.c

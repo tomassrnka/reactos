@@ -49,6 +49,7 @@ extern void func_SuspendThreadContext(void);
 extern void func_SystemFirmware(void);
 extern void func_TerminateProcess(void);
 extern void func_ThreadContextNpx(void);
+extern void func_ThreadContextObjects(void);
 extern void func_TunnelCache(void);
 extern void func_UEFIFirmware(void);
 extern void func_WerFlags(void);
@@ -103,6 +104,7 @@ const struct test winetest_testlist[] =
     { "SystemFirmware",              func_SystemFirmware },
     { "TerminateProcess",            func_TerminateProcess },
     { "ThreadContextNpx",            func_ThreadContextNpx },
+    { "ThreadContextObjects",        func_ThreadContextObjects },
     { "TunnelCache",                 func_TunnelCache },
     { "UEFIFirmware",                func_UEFIFirmware },
     { "WerFlags",                    func_WerFlags },
