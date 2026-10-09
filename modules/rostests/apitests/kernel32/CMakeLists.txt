@@ -24,6 +24,7 @@ list(APPEND SOURCE
     GetCurrentDirectory.c
     GetDriveType.c
     GetEnvironmentVariable.c
+    GetFileType.c
     GetFinalPathNameByHandle.c
     GetLocaleInfo.c
     GetModuleFileName.c
