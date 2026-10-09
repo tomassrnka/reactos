@@ -812,13 +812,47 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
 
 VOID ReconfigureAdapterWorker(PVOID Context)
 {
-    PRECONFIGURE_CONTEXT ReconfigureContext = Context;
+    PLAN_ADAPTER Adapter = Context;
+    RECONFIGURE_CONTEXT ReconfigureContext;
+    BOOLEAN ResetEnd, Success;
+    ULONG Requests;
+    KIRQL OldIrql;
 
-    /* Complete the reconfiguration asynchronously */
-    ReconfigureAdapter(ReconfigureContext);
+    ReconfigureContext.Adapter = Adapter;
 
-    /* Free the context */
-    ExFreePool(ReconfigureContext);
+    /* Apply the latest requested state until no new request came in meanwhile */
+    TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    for (;;)
+    {
+        Requests = Adapter->ReconfigureRequests;
+        ReconfigureContext.State = Adapter->QueuedState;
+        ResetEnd = Adapter->QueuedResetEnd;
+        Adapter->QueuedResetEnd = FALSE;
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+
+        /*
+         * A link that went down and came back before this pass needs nothing.
+         * After a reset, only the link information of the restored state is
+         * read again; a media change since then needs a full reconfiguration.
+         */
+        Success = TRUE;
+        if (ResetEnd || ReconfigureContext.State != Adapter->State)
+        {
+            Adapter->CompletingReset = (ReconfigureContext.State == Adapter->State);
+            Success = ReconfigureAdapter(&ReconfigureContext);
+        }
+
+        TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+        if (Requests == Adapter->ReconfigureRequests)
+        {
+            /* Let the next indication retry a reconfiguration that failed */
+            if (!Success)
+                Adapter->QueuedState = LAN_STATE_OPENING;
+            Adapter->ReconfigureQueued = FALSE;
+            break;
+        }
+    }
+    TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
 }
 
 VOID NTAPI ProtocolStatus(
@@ -836,7 +870,9 @@ VOID NTAPI ProtocolStatus(
  */
 {
     PLAN_ADAPTER Adapter = BindingContext;
-    PRECONFIGURE_CONTEXT Context;
+    UCHAR State = LAN_STATE_OPENING;
+    BOOLEAN ResetEnd = FALSE, QueueWorker = FALSE;
+    KIRQL OldIrql;
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
@@ -844,59 +880,84 @@ VOID NTAPI ProtocolStatus(
     if (!Adapter->Context)
         return;
 
-    Context = ExAllocatePoolWithTag(NonPagedPool, sizeof(RECONFIGURE_CONTEXT), CONTEXT_TAG);
-    if (!Context)
-        return;
-
-    Context->Adapter = Adapter;
-
+    /*
+     * NDIS calls this with the miniport lock held, and LANTransmit calls
+     * NdisSend with Adapter->Lock held, so only the reconfiguration lock is
+     * taken here.
+     */
     switch(GeneralStatus)
     {
         case NDIS_STATUS_MEDIA_CONNECT:
             DbgPrint("NDIS_STATUS_MEDIA_CONNECT\n");
-
-            if (Adapter->State == LAN_STATE_STARTED)
-            {
-                ExFreePoolWithTag(Context, CONTEXT_TAG);
-                return;
-            }
-
-            Context->State = LAN_STATE_STARTED;
+            State = LAN_STATE_STARTED;
             break;
 
         case NDIS_STATUS_MEDIA_DISCONNECT:
             DbgPrint("NDIS_STATUS_MEDIA_DISCONNECT\n");
-
-            if (Adapter->State == LAN_STATE_STOPPED)
-            {
-                ExFreePoolWithTag(Context, CONTEXT_TAG);
-                return;
-            }
-
-            Context->State = LAN_STATE_STOPPED;
+            State = LAN_STATE_STOPPED;
             break;
 
         case NDIS_STATUS_RESET_START:
             Adapter->OldState = Adapter->State;
             Adapter->State = LAN_STATE_RESETTING;
             /* Nothing else to do here */
-            ExFreePoolWithTag(Context, CONTEXT_TAG);
             return;
 
         case NDIS_STATUS_RESET_END:
-            Adapter->CompletingReset = TRUE;
-            Context->State = Adapter->OldState;
+            /*
+             * The adapter takes requests again: go back to the state applied
+             * before the reset at once, so that the worker can query it. A
+             * media change requested meanwhile stays requested.
+             */
+            Adapter->State = Adapter->OldState;
+            ResetEnd = TRUE;
             break;
 
         default:
             DbgPrint("Unhandled status: %x", GeneralStatus);
-            ExFreePoolWithTag(Context, CONTEXT_TAG);
             return;
     }
 
-    /* Queue the work item */
-    if (!ChewCreate(ReconfigureAdapterWorker, Context))
-        ExFreePoolWithTag(Context, CONTEXT_TAG);
+    /*
+     * One worker per adapter applies the latest request. A media change is
+     * compared with the last request, not with the state applied so far, so
+     * that a quick disconnect and reconnect does not leave the adapter
+     * stopped.
+     */
+    TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    if (ResetEnd)
+    {
+        /* Never filtered: the worker reads the link information again */
+        Adapter->QueuedResetEnd = TRUE;
+        if (Adapter->QueuedState == LAN_STATE_OPENING)
+            Adapter->QueuedState = Adapter->OldState;
+    }
+    else if (State == Adapter->QueuedState)
+    {
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+        return;
+    }
+    else
+    {
+        Adapter->QueuedState = State;
+    }
+    Adapter->ReconfigureRequests++;
+    if (!Adapter->ReconfigureQueued)
+    {
+        Adapter->ReconfigureQueued = TRUE;
+        QueueWorker = TRUE;
+    }
+    TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+
+    if (QueueWorker && !ChewCreate(ReconfigureAdapterWorker, Adapter))
+    {
+        /* Do not filter the next indication against a request that was lost */
+        TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+        Adapter->ReconfigureQueued = FALSE;
+        Adapter->QueuedResetEnd = FALSE;
+        Adapter->QueuedState = LAN_STATE_OPENING;
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    }
 }
 
 VOID NTAPI ProtocolStatusComplete(NDIS_HANDLE NdisBindingContext)
@@ -1483,6 +1544,7 @@ NDIS_STATUS LANRegisterAdapter(
 
     /* Initialize protecting spin lock */
     KeInitializeSpinLock(&IF->Lock);
+    KeInitializeSpinLock(&IF->ReconfigureLock);
 
     KeInitializeEvent(&IF->Event, SynchronizationEvent, FALSE);
 

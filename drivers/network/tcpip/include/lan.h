@@ -41,6 +41,11 @@ typedef struct LAN_ADAPTER {
     KSPIN_LOCK Lock;                        /* Lock for this structure */
     UCHAR State, OldState;                  /* State of the adapter */
     BOOLEAN CompletingReset;                /* Reset is finishing */
+    KSPIN_LOCK ReconfigureLock;             /* Protects the next four; never held across NDIS calls */
+    BOOLEAN ReconfigureQueued;              /* Reconfiguration worker queued or running */
+    BOOLEAN QueuedResetEnd;                 /* The queued request completes a reset */
+    UCHAR QueuedState;                      /* Last state requested from that worker */
+    ULONG ReconfigureRequests;              /* Requests made, to see new ones while it runs */
     KEVENT Event;                           /* Opening event */
     PVOID Context;                          /* Upper layer context information */
     NDIS_HANDLE NdisHandle;                 /* NDIS binding handle */
