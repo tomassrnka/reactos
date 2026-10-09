@@ -305,7 +305,22 @@ typedef struct _DUAL
     HCELL_INDEX FreeDisplay[24]; // FREE_DISPLAY FreeDisplay[24];
     ULONG FreeSummary;
     LIST_ENTRY FreeBins;
+
+    /* Entries allocated in BlockList, and the block lists it replaced */
+    ULONG BlockListCapacity;
+    struct _HMAP_RETIRED_LIST *RetiredBlockLists;
 } DUAL, *PDUAL;
+
+/*
+ * A block list replaced by a larger one when the storage grows. Readers
+ * resolve cells without a lock, so a reader can still index the old list
+ * after the switch: it is kept until the hive is freed.
+ */
+typedef struct _HMAP_RETIRED_LIST
+{
+    struct _HMAP_RETIRED_LIST *Next;
+    PHMAP_ENTRY BlockList;
+} HMAP_RETIRED_LIST, *PHMAP_RETIRED_LIST;
 
 typedef struct _HHIVE
 {

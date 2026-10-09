@@ -1959,14 +1959,18 @@ CmFlushKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
     }
     else
     {
+        /* Don't touch the hive */
+        CmpLockHiveFlusherExclusive(CmHive);
+
 #if DBG
-        /* Make sure the registry hive we're going to flush is OK */
+        /*
+         * Make sure the registry hive we're going to flush is OK. Writers of
+         * other keys hold the flusher lock shared, so check only once it is
+         * held exclusively: the check repairs what it takes for damage.
+         */
         CheckStatus = CmCheckRegistry(CmHive, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
 #endif
-
-        /* Don't touch the hive */
-        CmpLockHiveFlusherExclusive(CmHive);
 
         ASSERT(CmHive->ViewLock);
         KeAcquireGuardedMutex(CmHive->ViewLock);

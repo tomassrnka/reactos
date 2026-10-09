@@ -93,6 +93,7 @@ HvpFreeHiveBins(
     ULONG i;
     PHBIN Bin;
     ULONG Storage;
+    PHMAP_RETIRED_LIST Retired;
 
     for (Storage = 0; Storage < Hive->StorageTypeCount; Storage++)
     {
@@ -112,6 +113,15 @@ HvpFreeHiveBins(
 
         if (Hive->Storage[Storage].Length)
             Hive->Free(Hive->Storage[Storage].BlockList, 0);
+
+        while (Hive->Storage[Storage].RetiredBlockLists)
+        {
+            Retired = Hive->Storage[Storage].RetiredBlockLists;
+            Hive->Storage[Storage].RetiredBlockLists = Retired->Next;
+            Hive->Free(Retired->BlockList, 0);
+            Hive->Free(Retired, 0);
+        }
+        Hive->Storage[Storage].BlockListCapacity = 0;
     }
 }
 
