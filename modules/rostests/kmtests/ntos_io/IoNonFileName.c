@@ -44,23 +44,54 @@ CallQueryFullAttributesFile(
     return ZwQueryFullAttributesFile(ObjectAttributes, &NetworkInfo);
 }
 
+typedef struct _FAST_QUERY
+{
+    POBJECT_ATTRIBUTES ObjectAttributes;
+    BOOLEAN Result;
+    NTSTATUS Status;
+} FAST_QUERY, *PFAST_QUERY;
+
+static
+VOID
+NTAPI
+FastQueryThread(
+    _In_ PVOID Context)
+{
+    PFAST_QUERY Query = Context;
+    IO_STATUS_BLOCK IoStatus;
+    FILE_NETWORK_OPEN_INFORMATION NetworkInfo;
+
+    IoStatus.Status = STATUS_PENDING;
+    Query->Result = IoFastQueryNetworkAttributes(Query->ObjectAttributes,
+                                                 FILE_READ_ATTRIBUTES,
+                                                 0,
+                                                 &IoStatus,
+                                                 &NetworkInfo);
+    Query->Status = IoStatus.Status;
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+/* On the thread of a test request, IoFastQueryNetworkAttributes sets
+ * STATUS_ACCESS_VIOLATION on Windows for these kernel addresses. The cause is
+ * probably the user previous mode of that thread, and a system thread has
+ * kernel previous mode. */
 static
 NTSTATUS
 CallFastQueryNetworkAttributes(
     _In_ POBJECT_ATTRIBUTES ObjectAttributes)
 {
-    BOOLEAN Result;
-    IO_STATUS_BLOCK IoStatus;
-    FILE_NETWORK_OPEN_INFORMATION NetworkInfo;
+    FAST_QUERY Query;
+    PKTHREAD Thread;
 
-    IoStatus.Status = STATUS_PENDING;
-    Result = IoFastQueryNetworkAttributes(ObjectAttributes,
-                                          FILE_READ_ATTRIBUTES,
-                                          0,
-                                          &IoStatus,
-                                          &NetworkInfo);
-    ok_bool_true(Result, "IoFastQueryNetworkAttributes returned");
-    return IoStatus.Status;
+    Query.ObjectAttributes = ObjectAttributes;
+    Query.Result = FALSE;
+    Query.Status = STATUS_PENDING;
+    Thread = KmtStartThread(FastQueryThread, &Query);
+    KmtFinishThread(Thread, NULL);
+    if (!Thread)
+        return STATUS_UNSUCCESSFUL;
+    ok_bool_true(Query.Result, "IoFastQueryNetworkAttributes returned");
+    return Query.Status;
 }
 
 static
