@@ -565,14 +565,13 @@ MiDereferenceImports(IN PLOAD_IMPORTS ImportList)
 
     /* Check if there's no imports or if we're a boot driver */
     if ((ImportList == MM_SYSLDR_NO_IMPORTS) ||
-        (ImportList == MM_SYSLDR_BOOT_LOADED) ||
-        (ImportList->Count == 0))
+        (ImportList == MM_SYSLDR_BOOT_LOADED))
     {
         /* Then there's nothing to do */
         return STATUS_SUCCESS;
     }
 
-    /* Check for single-entry */
+    /* Check for single-entry: the tagged pointer is an image, not a list */
     if ((ULONG_PTR)ImportList & MM_SYSLDR_SINGLE_ENTRY)
     {
         /* Set it up */
@@ -581,6 +580,11 @@ MiDereferenceImports(IN PLOAD_IMPORTS ImportList)
 
         /* Use this as the import list */
         ImportList = &SingleEntry;
+    }
+    else if (ImportList->Count == 0)
+    {
+        /* Nothing to do */
+        return STATUS_SUCCESS;
     }
 
     /* Loop the import list */
