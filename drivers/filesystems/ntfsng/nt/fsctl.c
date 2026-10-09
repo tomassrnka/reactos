@@ -461,9 +461,13 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     }
     ExReleaseFastMutex(&Vcb->FcbListLock);
 
+    /* A volume that cannot be flushed stays mounted (and locked), as NgLockVolume does. */
     Discard = Vcb->RawWritten;
-    if (!Discard && !Vcb->ReadOnly)
-        NgFlushVolume(Vcb);
+    if (!Discard && !Vcb->ReadOnly && NgFlushVolume(Vcb))
+    {
+        ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
 
     /* Cached files lose their views; later paging I/O on them fails.  Every FCB is taken (the array is
      * sized again if the list grew, which the create gate now prevents). */
@@ -525,8 +529,17 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
             List[i]->Node = NULL;
         }
     }
-    if (!Discard && !Vcb->ReadOnly)
-        ngc_sync(Vcb->Core);
+    /*
+     * Past the purge there is no way back.  After a final sync that fails the teardown writes nothing
+     * more (a discard): what is on the medium then decides whether the next mount replays the journal
+     * or finds the volume in need of repair.
+     */
+    if (!Discard && !Vcb->ReadOnly && ngc_sync(Vcb->Core))
+    {
+        DPRINT1("ntfsng: volume %08lx: the last sync before the dismount failed: nothing more is written, uncommitted changes are dropped\n",
+                Vcb->Vpb->SerialNumber);
+        Discard = TRUE;
+    }
     ngc_umount(Vcb->Core, Discard);
     Vcb->Core = NULL;
     NgReleaseCore(Vcb);
@@ -550,7 +563,7 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     if (NewVpb)
         ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
     DPRINT1("ntfsng: volume %08lx dismounted%s\n", Vcb->Vpb->SerialNumber,
-            Discard ? " (written directly by the lock holder: mounted state dropped)" : "");
+            Vcb->RawWritten ? " (written directly by the lock holder: mounted state dropped)" : "");
     return STATUS_SUCCESS;
 }
 

@@ -771,6 +771,7 @@ struct block_device { void *osdev; u64 size; unsigned int logical_block_size; st
 	struct kshim_jnl *jnl; /* metadata journal (kshim_jnl.c) while active */
 	int kshim_direct; /* nonzero while file data is written: bypasses the journal */
 	int kshim_wb_err; /* first failed write of an asynchronous bio (its completion cannot report it) */
+	unsigned long kshim_wr_failed; /* device writes that failed, all paths (unmount: commit nothing after one) */
 	int kshim_gone; /* the medium was replaced: every device read and write fails */ };
 static inline u64 bdev_nr_bytes(struct block_device *b) { return b->size; }
 static inline unsigned int bdev_logical_block_size(struct block_device *b) { return b->logical_block_size; }

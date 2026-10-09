@@ -449,6 +449,7 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 void ngc_umount(ngc_vol *v, int discard)
 {
 	struct super_block *sb = v->sb;
+	unsigned long wr_failed;
 	int errors, clean;
 	if (discard) {
 		/* Pending journal pages are dropped and the core sees a read-only volume: put_super writes nothing. */
@@ -465,8 +466,15 @@ void ngc_umount(ngc_vol *v, int discard)
 	 * read-write volume without errors; a read-only volume keeps the flag it had. */
 	errors = NVolErrors(NTFS_SB(sb)) || v->failed;
 	clean = !errors && (!sb_rdonly(sb) || !(NTFS_SB(sb)->vol_flags & VOLUME_IS_DIRTY));
+	wr_failed = v->bdev->kshim_wr_failed;
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
+	/*
+	 * put_super drops the results of its writes (and a synchronous bio's error is not latched): a write
+	 * that failed in it, or an asynchronous one before it, is missing from the overlay: commit nothing.
+	 */
+	if (v->bdev->kshim_wb_err || v->bdev->kshim_wr_failed != wr_failed)
+		errors = 1;
 	if (v->bdev->jnl && !errors && kshim_jnl_commit(v->bdev) >= 0 && clean)
 		kshim_jnl_retire(v->bdev);
 	if (v->watched)

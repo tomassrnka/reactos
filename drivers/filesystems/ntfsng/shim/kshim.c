@@ -594,7 +594,15 @@ static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, s
 	kfree(mid);
 	return err;
 }
+static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf, size_t len);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len)
+{
+	int err = kshim_dev_rw_do(b, write, off, buf, len);
+	if (err && write)
+		b->kshim_wr_failed++;
+	return err;
+}
+static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf, size_t len)
 {
 	if (b->kshim_gone)
 		return -EIO;
