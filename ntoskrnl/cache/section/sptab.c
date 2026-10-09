@@ -185,7 +185,6 @@ _MmSetPageEntrySectionSegment(PMM_SECTION_SEGMENT Segment,
     PCACHE_SECTION_PAGE_TABLE PageTable;
 
     ASSERT(Segment->Locked);
-    ASSERT(!IS_SWAP_FROM_SSE(Entry) || !IS_DIRTY_SSE(Entry));
 
     PageTable = MiSectionPageTableGetOrAllocate(&Segment->PageTable, Offset);
 
