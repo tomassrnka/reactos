@@ -172,7 +172,11 @@ typedef struct _AFD_FCB {
     PFILE_OBJECT FileObject;
     PAFD_DEVICE_EXTENSION DeviceExt;
     BOOLEAN DelayedAccept;
-    BOOLEAN ListenThrottled;
+    BOOLEAN ListenWorkQueued, Relistening;
+    PIO_WORKITEM ListenWorkItem;
+    KEVENT ListenWorkIdle;
+    KTIMER ListenWorkTimer;
+    KDPC ListenWorkDpc;
     ULONG Backlog;
     UINT ConnSeq;
     USHORT DisconnectFlags;
@@ -283,6 +287,7 @@ AfdGetPeerName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS AfdWaitForListen( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			   PIO_STACK_LOCATION IrpSp );
 
+VOID StopListenWork(PAFD_FCB FCB);
 NTSTATUS AfdListenSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			 PIO_STACK_LOCATION IrpSp);
 

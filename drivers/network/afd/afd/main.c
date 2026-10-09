@@ -528,10 +528,13 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ObDereferenceObject(Qelt->Object.Object);
         ZwClose(Qelt->Object.Handle);
 
+        ExFreePoolWithTag(Qelt->ConnInfo, TAG_AFD_TDI_CONNECTION_INFORMATION);
         ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
     }
 
     SocketStateUnlock( FCB );
+
+    StopListenWork(FCB);
 
     if( FCB->EventSelect )
         ObDereferenceObject( FCB->EventSelect );
@@ -604,6 +607,7 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         ExFreePoolWithTag(FCB->TdiDeviceName.Buffer, TAG_AFD_TRANSPORT_ADDRESS);
     }
+
 
     ExFreePoolWithTag(FCB, TAG_AFD_FCB);
 
