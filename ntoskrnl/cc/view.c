@@ -426,12 +426,31 @@ CcRosFlushDirtyPages (
         {
             DPRINT("Not locked\n");
             ASSERT(!Wait);
-            CcRosVacbDecRefCount(current);
             OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+
+            /*
+             * The dirty list may have changed while the lock was released: a cache map that
+             * was deleted meanwhile took its views off it, and the next entry read before the
+             * release may be one of them. Go on after this view if it is still listed, from
+             * the start otherwise.
+             */
+            if (IsListEmpty(&current->DirtyVacbListEntry))
+                current_entry = DirtyVacbListHead.Flink;
+            else
+                current_entry = current->DirtyVacbListEntry.Flink;
+
+            /* The cache map still holds the view, so this is not its last reference */
+            CcRosVacbDecRefCount(current);
+
             SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
 
             if (--SharedCacheMap->OpenCount == 0)
+            {
                 CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
+
+                /* That released the lock as well */
+                current_entry = DirtyVacbListHead.Flink;
+            }
 
             continue;
         }
