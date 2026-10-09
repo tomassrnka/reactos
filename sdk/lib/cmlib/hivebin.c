@@ -8,6 +8,13 @@
 
 #include "cmlib.h"
 
+/* A compiler and processor barrier: GCC's MemoryBarrier alone does not stop the compiler */
+#ifdef CMLIB_HOST
+#define HvpPublishBarrier()
+#else
+#define HvpPublishBarrier() do { _ReadWriteBarrier(); MemoryBarrier(); _ReadWriteBarrier(); } while (0)
+#endif
+
 PHBIN CMAPI
 HvpAddBin(
     PHHIVE RegistryHive,
@@ -21,6 +28,9 @@ HvpAddBin(
     ULONG BitmapSize;
     ULONG BlockCount;
     ULONG OldBlockListSize;
+    ULONG NewBlockListSize;
+    ULONG Capacity;
+    PHMAP_RETIRED_LIST Retired;
     PHCELL Block;
 
     BinSize = ROUND_UP(Size + sizeof(HBIN), HBLOCK_SIZE);
@@ -36,34 +46,85 @@ HvpAddBin(
                       HBLOCK_SIZE;
     Bin->Size = BinSize;
 
-    /* Allocate new block list */
     OldBlockListSize = RegistryHive->Storage[Storage].Length;
-    BlockList = RegistryHive->Allocate(sizeof(HMAP_ENTRY) *
-                                       (OldBlockListSize + BlockCount),
-                                       TRUE,
-                                       TAG_CM);
-    if (BlockList == NULL)
+    NewBlockListSize = OldBlockListSize + BlockCount;
+    Capacity = RegistryHive->Storage[Storage].BlockListCapacity;
+    if (Capacity < OldBlockListSize)
+        Capacity = OldBlockListSize;
+
+    if (NewBlockListSize > Capacity)
     {
-        RegistryHive->Free(Bin, 0);
-        return NULL;
+        /*
+         * Readers resolve cells through the block list without the hive
+         * lock. Grow the list geometrically and keep every list it replaces
+         * until the hive is freed, so a reader holding the old pointer still
+         * finds the same entries there.
+         */
+        Capacity *= 2;
+        if (Capacity < NewBlockListSize)
+            Capacity = NewBlockListSize;
+        BlockList = RegistryHive->Allocate(sizeof(HMAP_ENTRY) * Capacity,
+                                           TRUE,
+                                           TAG_CM);
+        if (BlockList == NULL)
+        {
+            RegistryHive->Free(Bin, 0);
+            return NULL;
+        }
+
+        Retired = NULL;
+        if (OldBlockListSize > 0)
+        {
+            Retired = RegistryHive->Allocate(sizeof(HMAP_RETIRED_LIST), TRUE, TAG_CM);
+            if (Retired == NULL)
+            {
+                RegistryHive->Free(BlockList, 0);
+                RegistryHive->Free(Bin, 0);
+                return NULL;
+            }
+
+            RtlCopyMemory(BlockList, RegistryHive->Storage[Storage].BlockList,
+                          OldBlockListSize * sizeof(HMAP_ENTRY));
+        }
+        RtlZeroMemory(BlockList + OldBlockListSize,
+                      (Capacity - OldBlockListSize) * sizeof(HMAP_ENTRY));
+    }
+    else
+    {
+        BlockList = RegistryHive->Storage[Storage].BlockList;
+        Retired = NULL;
     }
 
-    if (OldBlockListSize > 0)
-    {
-        RtlCopyMemory(BlockList, RegistryHive->Storage[Storage].BlockList,
-                      OldBlockListSize * sizeof(HMAP_ENTRY));
-        RegistryHive->Free(RegistryHive->Storage[Storage].BlockList, 0);
-    }
-
-    RegistryHive->Storage[Storage].BlockList = BlockList;
-    RegistryHive->Storage[Storage].Length += BlockCount;
-
+    /* The new entries are past Length, so no reader can look them up yet */
     for (i = 0; i < BlockCount; i++)
     {
-        RegistryHive->Storage[Storage].BlockList[OldBlockListSize + i].BlockAddress =
+        BlockList[OldBlockListSize + i].BlockAddress =
             ((ULONG_PTR)Bin + (i * HBLOCK_SIZE));
-        RegistryHive->Storage[Storage].BlockList[OldBlockListSize + i].BinAddress = (ULONG_PTR)Bin;
+        BlockList[OldBlockListSize + i].BinAddress = (ULONG_PTR)Bin;
     }
+
+    if (BlockList != RegistryHive->Storage[Storage].BlockList)
+    {
+        if (Retired != NULL)
+        {
+            Retired->BlockList = RegistryHive->Storage[Storage].BlockList;
+            Retired->Next = RegistryHive->Storage[Storage].RetiredBlockLists;
+            RegistryHive->Storage[Storage].RetiredBlockLists = Retired;
+        }
+        else if (RegistryHive->Storage[Storage].BlockList != NULL)
+        {
+            /* An empty list that no cell can reference */
+            RegistryHive->Free(RegistryHive->Storage[Storage].BlockList, 0);
+        }
+
+        /* Publish the filled list before the length that covers the new bin */
+        HvpPublishBarrier();
+        RegistryHive->Storage[Storage].BlockList = BlockList;
+        RegistryHive->Storage[Storage].BlockListCapacity = Capacity;
+    }
+
+    HvpPublishBarrier();
+    RegistryHive->Storage[Storage].Length = NewBlockListSize;
 
     /* Initialize a free block in this heap. */
     Block = (PHCELL)(Bin + 1);
