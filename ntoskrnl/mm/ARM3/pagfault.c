@@ -1328,6 +1328,13 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
                                           (ULONG)TempPte.u.Soft.Protection,
                                           Process,
                                           OldIrql);
+
+        /* Out of pages: the PFN lock is released, let the caller wait and retry */
+        if (!NT_SUCCESS(Status))
+        {
+            ASSERT(Status == STATUS_NO_MEMORY);
+            return Status;
+        }
 #if MI_TRACE_PFNS
         /* Update debug info */
         if (TrapInformation)
@@ -1335,8 +1342,6 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
         else
             MiGetPfnEntry(PointerProtoPte->u.Hard.PageFrameNumber)->CallSite = _ReturnAddress();
 #endif
-
-        ASSERT(NT_SUCCESS(Status));
     }
 
     /* Complete the prototype PTE fault -- this will release the PFN lock */
@@ -1420,7 +1425,7 @@ MiDispatchFault(IN ULONG FaultCode,
                                             Process,
                                             LockIrql,
                                             TrapInformation);
-            ASSERT(Status == STATUS_SUCCESS);
+            ASSERT((Status == STATUS_SUCCESS) || (Status == STATUS_NO_MEMORY));
 
             /* Complete this as a transition fault */
             ASSERT(OldIrql == KeGetCurrentIrql());
@@ -1960,7 +1965,6 @@ _WARN("Session space stuff is not implemented yet!")
                 return STATUS_IN_PAGE_ERROR | 0x10000000;
             }
         }
-RetryKernel:
         /* Acquire the working set lock */
         KeRaiseIrql(APC_LEVEL, &LockIrql);
         MiLockWorkingSet(CurrentThread, WorkingSet);
@@ -2127,13 +2131,7 @@ RetryKernel:
         MiUnlockWorkingSet(CurrentThread, WorkingSet);
         KeLowerIrql(LockIrql);
 
-        if (Status == STATUS_NO_MEMORY)
-        {
-            MmRebalanceMemoryConsumersAndWait();
-            goto RetryKernel;
-        }
-
-        /* We are done! */
+        /* We are done! STATUS_NO_MEMORY is retried by MmAccessFault */
         DPRINT("Fault resolved with status: %lx\n", Status);
         return Status;
     }
@@ -2147,6 +2145,21 @@ UserFault:
     MiLockProcessWorkingSet(CurrentProcess, CurrentThread);
 
     ProtectionCode = MM_INVALID_PROTECTION;
+
+    /*
+     * MmAccessFault chose ARM3 before this lock was taken. If another thread
+     * has since replaced the mapping with a ReactOS Mm view, let it choose
+     * again.
+     */
+    if (Address <= MM_HIGHEST_USER_ADDRESS)
+    {
+        PMMVAD CurrentVad = MiLocateAddress(Address);
+        if ((CurrentVad != NULL) && MI_IS_ROSMM_VAD(CurrentVad))
+        {
+            MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
+            return STATUS_MM_RESTART_OPERATION;
+        }
+    }
 
 #if (_MI_PAGING_LEVELS == 4)
     /* Check if the PXE is valid */
@@ -2655,12 +2668,7 @@ ExitUser:
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
     MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
 
-    if (Status == STATUS_NO_MEMORY)
-    {
-        MmRebalanceMemoryConsumersAndWait();
-        goto UserFault;
-    }
-
+    /* STATUS_NO_MEMORY is retried by MmAccessFault */
     return Status;
 }
 
