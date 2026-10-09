@@ -25,10 +25,15 @@ Recurse(ULONG Depth, volatile UCHAR *Previous)
     return Recurse(Depth - 1, Frame) + Frame[sizeof(Frame) - 1];
 }
 
+/* Set by the worker's own thread churn: its process lives on, so every allocation must be freed.
+   The churn passes modes below 384 (a multiple of 8, 3 and 128), so the flag never collides. */
+#define CHILD_THREAD_FREE 0x80000000
+
 static DWORD WINAPI
 ChildThread(PVOID Context)
 {
-    ULONG Mode = (ULONG)(ULONG_PTR)Context;
+    BOOL AlwaysFree = ((ULONG)(ULONG_PTR)Context & CHILD_THREAD_FREE) != 0;
+    ULONG Mode = (ULONG)(ULONG_PTR)Context & ~CHILD_THREAD_FREE;
     PUCHAR P;
     SIZE_T Size = (Mode % 8 + 1) * 64 * 1024, i;
 
@@ -37,7 +42,7 @@ ChildThread(PVOID Context)
     {
         for (i = 0; i < Size; i += PAGE_SIZE)
             P[i] = (UCHAR)i;
-        if (Mode & 1)
+        if ((Mode & 1) || AlwaysFree)
             VirtualFree(P, 0, MEM_RELEASE);
     }
     if (Mode % 3 == 0)
@@ -241,16 +246,32 @@ ThreadChurn(PVOID Context)
     {
         HANDLE Threads[16];
         ULONG i, Count = 0;
+        DWORD Wait;
         for (i = 0; i < 16; i++)
         {
-            Threads[Count] = CreateThread(NULL, (i & 3) ? 0 : 128 * 1024, ChildThread, (PVOID)(ULONG_PTR)(n + i), 0, NULL);
+            Threads[Count] = CreateThread(NULL, (i & 3) ? 0 : 128 * 1024, ChildThread,
+                                         (PVOID)(ULONG_PTR)(((n + i) % 384) | CHILD_THREAD_FREE), 0, NULL);
             if (Threads[Count])
                 Count++;
         }
-        if (WaitForMultipleObjects(Count, Threads, TRUE, 120000) != WAIT_OBJECT_0)
-            MmtFail("procs: threads did not end within 120 s");
+        if (!Count)
+        {
+            MmtFail("procs: CreateThread failed %lu", GetLastError());
+            Sleep(500);
+            continue;
+        }
+        Wait = WaitForMultipleObjects(Count, Threads, TRUE, 120000);
+        if (Wait != WAIT_OBJECT_0)
+        {
+            MmtFail("procs: threads did not end within 120 s (%lx)", Wait == WAIT_FAILED ? GetLastError() : Wait);
+            /* Closing the handles would not end them: wait for this round, and start no other unless it ends */
+            while (Wait == WAIT_TIMEOUT && !MmtShouldStop())
+                Wait = WaitForMultipleObjects(Count, Threads, TRUE, 10000);
+        }
         for (i = 0; i < Count; i++)
             CloseHandle(Threads[i]);
+        if (Wait != WAIT_OBJECT_0)
+            break;
         n += 16;
         MmtProgress(Slot);
     }
