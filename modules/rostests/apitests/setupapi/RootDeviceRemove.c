@@ -74,11 +74,27 @@ START_TEST(RootDeviceRemove)
             ok(Cr == CR_SUCCESS, "CM_Locate_DevNodeW #%lu failed: 0x%lx\n", i, Cr);
             if (Cr != CR_SUCCESS)
                 continue;
+            /* A root key made by hand stays a phantom device node on Windows 10 */
+            if (!is_reactos())
+            {
+                Cr = CM_Locate_DevNodeW(&DevInst, (DEVINSTID_W)DEVICE_INSTANCE,
+                                        CM_LOCATE_DEVNODE_NORMAL);
+                if (Cr == CR_NO_SUCH_DEVNODE)
+                {
+                    skip("The root key is not enumerated: a phantom device node\n");
+                    break;
+                }
+                ok(Cr == CR_SUCCESS, "CM_Locate_DevNodeW #%lu failed: 0x%lx\n", i, Cr);
+                if (Cr != CR_SUCCESS)
+                    break;
+            }
             Cr = CM_Get_DevNode_Status(&Status, &Problem, DevInst, 0);
             ok(Cr == CR_SUCCESS, "CM_Get_DevNode_Status #%lu failed: 0x%lx\n", i, Cr);
             if (Cr == CR_SUCCESS)
             {
-                ok(Problem == CM_PROB_FAILED_ADD, "Pass %lu: problem %lu\n", i, Problem);
+                /* The device that ReactOS fails to add; not measured on Windows */
+                if (is_reactos())
+                    ok(Problem == CM_PROB_FAILED_ADD, "Pass %lu: problem %lu\n", i, Problem);
                 trace("Pass %lu: status 0x%lx, problem %lu\n", i, Status, Problem);
             }
         }
