@@ -27,7 +27,7 @@ static BOOLEAN GetOwner(PCWSTR Path, PSID Owner)
     return Ok;
 }
 
-static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
+static VOID TestInherit(PCWSTR Base)
 {
     WCHAR Dir[MAX_PATH], File[MAX_PATH], Sub[MAX_PATH], SubFile[MAX_PATH], Explicit[MAX_PATH], Prot[MAX_PATH];
     WCHAR NoInh[MAX_PATH], NoInhFile[MAX_PATH], UserFile[MAX_PATH];
@@ -39,9 +39,9 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
     LONG i;
     /* With a directory whose stored DACL is not marked SE_DACL_AUTO_INHERITED, a create inherits
      * ACEs unmarked and an explicit DACL replaces them (Windows Server 2008 R2 and Windows 10 22H2).
-     * The auto-inherited variant first marks the directory (SE_DACL_AUTO_INHERIT_REQ) and, once it
-     * is verified as marked, only records what a new file gets: Windows' behaviour there is not
-     * pinned yet. */
+     * Neither version stores the mark from a caller's descriptor (SE_DACL_AUTO_INHERITED or
+     * SE_DACL_AUTO_INHERIT_REQ, at create or by NtSetSecurityObject); TestAutoInherited covers a
+     * directory that inherited the mark. */
     const BYTE Inh = 0;
     const BYTE AllFlags = 0x1f;
     WCHAR Name[64];
@@ -68,43 +68,6 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
     Aces[3].Flags = CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE; Aces[3].Deny = FALSE;
     Aces[4].Sid = SidUser; Aces[4].Mask = FILE_ADD_FILE | FILE_TRAVERSE | FILE_LIST_DIRECTORY | SYNCHRONIZE; Aces[4].Flags = 0; Aces[4].Deny = FALSE;
     ok_hex(NtMakeDirControl(Dir, Aces, 5, SE_DACL_PROTECTED), STATUS_SUCCESS);
-    if (Auto)
-    {
-        PSECURITY_DESCRIPTOR AutoSd = NtMakeSdControl(Aces, 5, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ);
-        SECURITY_DESCRIPTOR_CONTROL Control = 0;
-        ULONG Rev;
-        HANDLE H;
-        if (NT_SUCCESS(NtOpen(Dir, WRITE_DAC, SHARE_ALL, FILE_OPEN, FILE_DIRECTORY_FILE, NULL, &H)))
-        {
-            trace("%ls: set with SE_DACL_AUTO_INHERIT_REQ: 0x%08lx\n", Base,
-                  NtSetSecurityObject(H, DACL_SECURITY_INFORMATION, AutoSd));
-            NtClose(H);
-        }
-        LocalFree(AutoSd);
-        Dacl = NtGetDacl(Dir, Text, sizeof(Text), &Sd);
-        if (Sd)
-        {
-            RtlGetControlSecurityDescriptor(Sd, &Control, &Rev);
-            LocalFree(Sd);
-        }
-        trace("%ls (parent): %s\n", Base, Text);
-        if (!(Control & SE_DACL_AUTO_INHERITED))
-        {
-            skip("The directory is not stored as auto-inherited (control 0x%04x)\n", Control);
-            return;
-        }
-        ok_hex(NtMakeFile(File, NULL, 0, FALSE, "file"), STATUS_SUCCESS);
-        ok_hex(NtMakeDir(Sub, NULL, 0, FALSE), STATUS_SUCCESS);
-        Dacl = NtGetDacl(File, Text, sizeof(Text), &Sd);
-        trace("%ls\\file.txt (auto parent): %s\n", Base, Text);
-        if (Sd)
-            LocalFree(Sd);
-        Dacl = NtGetDacl(Sub, Text, sizeof(Text), &Sd);
-        trace("%ls\\sub (auto parent): %s\n", Base, Text);
-        if (Sd)
-            LocalFree(Sd);
-        return;
-    }
     ok_hex(NtMakeFile(File, NULL, 0, FALSE, "file"), STATUS_SUCCESS);
     ok_hex(NtMakeDir(Sub, NULL, 0, FALSE), STATUS_SUCCESS);
     ok_hex(NtMakeFile(SubFile, NULL, 0, FALSE, "subfile"), STATUS_SUCCESS);
@@ -191,7 +154,7 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
 
     /* A directory without inheritable ACEs: the new file gets the creator's default DACL. */
     Aces[0].Sid = SidAdmins; Aces[0].Mask = FILE_ALL_ACCESS; Aces[0].Flags = 0; Aces[0].Deny = FALSE;
-    ok_hex(NtMakeDirControl(NoInh, Aces, 1, SE_DACL_PROTECTED | (Auto ? SE_DACL_AUTO_INHERITED : 0)), STATUS_SUCCESS);
+    ok_hex(NtMakeDirControl(NoInh, Aces, 1, SE_DACL_PROTECTED), STATUS_SUCCESS);
     ok_hex(NtMakeFile(NoInhFile, NULL, 0, FALSE, "x"), STATUS_SUCCESS);
     Dacl = NtGetDacl(NoInhFile, Text, sizeof(Text), &Sd);
     trace("noinh\\file.txt: %s\n", Text);
@@ -202,11 +165,241 @@ static VOID TestInherit(PCWSTR Base, BOOLEAN Auto)
 #undef NT_SUB
 }
 
+/* Self-relative descriptor (LocalFree) with the given parts; a NULL Dacl with DaclPresent is a NULL DACL. */
+static PSECURITY_DESCRIPTOR MakeSdParts(PSID Owner, BOOLEAN DaclPresent, PACL Dacl, BOOLEAN DaclDefaulted, PACL Sacl)
+{
+    SECURITY_DESCRIPTOR Abs;
+    DWORD Size = 0;
+    PSECURITY_DESCRIPTOR Rel;
+    InitializeSecurityDescriptor(&Abs, SECURITY_DESCRIPTOR_REVISION);
+    if (Owner)
+        SetSecurityDescriptorOwner(&Abs, Owner, FALSE);
+    if (DaclPresent)
+        SetSecurityDescriptorDacl(&Abs, TRUE, Dacl, DaclDefaulted);
+    if (Sacl)
+        SetSecurityDescriptorSacl(&Abs, TRUE, Sacl, FALSE);
+    MakeSelfRelativeSD(&Abs, NULL, &Size);
+    Rel = LocalAlloc(LMEM_FIXED, Size);
+    if (Rel && !MakeSelfRelativeSD(&Abs, Rel, &Size))
+    {
+        LocalFree(Rel);
+        Rel = NULL;
+    }
+    return Rel;
+}
+
+/* The control word of Path's descriptor and a copy of its SACL (LocalFree, NULL if none). */
+static PACL GetSacl(PCWSTR Path, SECURITY_DESCRIPTOR_CONTROL *Control)
+{
+    UCHAR Buffer[1024];
+    BOOLEAN Present = FALSE, Defaulted;
+    PACL Sacl = NULL, Copy = NULL;
+    ULONG Len, Rev;
+    HANDLE H;
+
+    *Control = 0;
+    if (!NT_SUCCESS(NtOpen(Path, ACCESS_SYSTEM_SECURITY, SHARE_ALL, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT, NULL, &H)))
+        return NULL;
+    if (NT_SUCCESS(NtQuerySecurityObject(H, SACL_SECURITY_INFORMATION, Buffer, sizeof(Buffer), &Len)))
+    {
+        RtlGetControlSecurityDescriptor(Buffer, Control, &Rev);
+        if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(Buffer, &Present, &Sacl, &Defaulted)) && Present && Sacl)
+        {
+            Copy = LocalAlloc(LMEM_FIXED, Sacl->AclSize);
+            if (Copy)
+                RtlCopyMemory(Copy, Sacl, Sacl->AclSize);
+        }
+    }
+    NtClose(H);
+    return Copy;
+}
+
+/* Number of ACEs of Acl whose flags have all of Set and none of Clear. */
+static ULONG CountAces(PACL Acl, BYTE Set, BYTE Clear)
+{
+    ULONG i, n = 0;
+    for (i = 0; Acl && i < Acl->AceCount; i++)
+    {
+        PACE_HEADER Ace;
+        if (GetAce(Acl, i, (PVOID *)&Ace) && (Ace->AceFlags & Set) == Set && !(Ace->AceFlags & Clear))
+            n++;
+    }
+    return n;
+}
+
+/*
+ * A directory created without a descriptor below an auto-inherited directory (on Windows, the
+ * volume's tree) is auto-inherited itself.  Below it, Windows Server 2008 R2 and Windows 10 22H2:
+ * - a create that supplies no DACL (no descriptor, an owner only, a SACL only) gets the inherited
+ *   ACEs marked INHERITED_ACE and a DACL marked SE_DACL_AUTO_INHERITED;
+ * - a create that supplies a DACL gets exactly that DACL: no inherited ACEs are added, a creator ACE
+ *   already marked INHERITED_ACE stays, and the DACL is not marked auto-inherited;
+ * - a defaulted DACL gives way to the inherited ACEs, which are then not marked;
+ * - a SACL set on the directory is not marked auto-inherited (also with SE_SACL_AUTO_INHERIT_REQ),
+ *   so a new file inherits its ACEs unmarked.
+ * Where the test directory's tree is not auto-inherited (a volume whose root is not marked), only
+ * the cases that do not depend on the mark run.  Control bits are checked where the query returns
+ * them (ReactOS' SeQuerySecurityDescriptorInfo drops SE_DACL_AUTO_INHERITED and SE_DACL_PROTECTED).
+ */
+static VOID TestAutoInherited(VOID)
+{
+    WCHAR Dir[MAX_PATH], P[MAX_PATH];
+    UCHAR DaclBuf[128], SaclBuf[128], SaclInhBuf[128];
+    PACL Dacl = (PACL)DaclBuf, Sacl = (PACL)SaclBuf, SaclInh = (PACL)SaclInhBuf, Acl;
+    CHAR Text[1024];
+    PSECURITY_DESCRIPTOR Sd, Got;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0, DirControl;
+    BOOLEAN Marked, HaveSacl = FALSE;
+    ULONG Rev;
+    HANDLE H;
+    NT_ACE Ace[2];
+
+#define AUTO_PATH(Name) (_snwprintf(P, MAX_PATH - 1, L"%ls\\%ls", Dir, Name), P[MAX_PATH - 1] = 0, P)
+#define CONTROL_OF(SdVar) (SdVar ? (RtlGetControlSecurityDescriptor(SdVar, &Control, &Rev), Control) : 0)
+    _snwprintf(Dir, MAX_PATH - 1, L"%ls-auto", NtTestDir());
+    Dir[MAX_PATH - 1] = 0;
+    NtRemove(Dir);
+    ok_hex(NtOpen(Dir, FILE_LIST_DIRECTORY | SYNCHRONIZE, SHARE_ALL, FILE_CREATE,
+                  FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, NULL), STATUS_SUCCESS);
+    /* Marked: its own ACEs came from a marked parent (ReactOS does not return SE_DACL_AUTO_INHERITED). */
+    Acl = NtGetDacl(Dir, Text, sizeof(Text), &Got);
+    DirControl = CONTROL_OF(Got);
+    Marked = Acl && Acl->AceCount > 0 && CountAces(Acl, INHERITED_ACE, 0) == Acl->AceCount;
+    trace("auto directory: %s\n", Text);
+    if (DirControl & SE_DACL_AUTO_INHERITED)
+        ok(Marked, "Auto-inherited directory with unmarked ACEs\n");
+    if (Got)
+        LocalFree(Got);
+
+    /* A mask no volume tree passes on, so a kept creator ACE is not mistaken for an inherited one. */
+    InitializeAcl(Dacl, sizeof(DaclBuf), ACL_REVISION);
+    AddAccessAllowedAceEx(Dacl, ACL_REVISION, 0, FILE_READ_EA | FILE_WRITE_EA, SidEveryone);
+    InitializeAcl(Sacl, sizeof(SaclBuf), ACL_REVISION);
+    AddAuditAccessAce(Sacl, ACL_REVISION, FILE_READ_DATA, SidEveryone, TRUE, FALSE);
+    InitializeAcl(SaclInh, sizeof(SaclInhBuf), ACL_REVISION);
+    AddAuditAccessAce(SaclInh, ACL_REVISION, FILE_WRITE_DATA, SidEveryone, TRUE, TRUE);
+    ((PACE_HEADER)(SaclInh + 1))->AceFlags |= OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+
+    /* An explicit DACL is kept as given, with its pre-marked ACE. */
+    Ace[0].Sid = SidEveryone; Ace[0].Mask = FILE_GENERIC_READ; Ace[0].Flags = 0; Ace[0].Deny = FALSE;
+    Ace[1].Sid = SidSystem; Ace[1].Mask = FILE_ALL_ACCESS; Ace[1].Flags = INHERITED_ACE; Ace[1].Deny = FALSE;
+    Sd = NtMakeSd(Ace, 2, FALSE);
+    ok_hex(NtOpen(AUTO_PATH(L"explicit.txt"), FILE_GENERIC_WRITE, 0, FILE_CREATE, FILE_NON_DIRECTORY_FILE, Sd, NULL), STATUS_SUCCESS);
+    LocalFree(Sd);
+    Acl = NtGetDacl(P, Text, sizeof(Text), &Got);
+    trace("auto\\explicit.txt: %s\n", Text);
+    ok(Acl && Acl->AceCount == 2, "explicit.txt has %u ACEs\n", Acl ? Acl->AceCount : 0);
+    ok(NtFindAce(Acl, SidEveryone, FILE_GENERIC_READ, 0xff, 0, FALSE) == 0, "No unmarked explicit ACE first\n");
+    ok(NtFindAce(Acl, SidSystem, FILE_ALL_ACCESS, 0xff, INHERITED_ACE, FALSE) == 1, "The pre-marked creator ACE is gone\n");
+    ok((CONTROL_OF(Got) & SE_DACL_AUTO_INHERITED) == 0, "explicit.txt: SE_DACL_AUTO_INHERITED 0x%04x\n", Control);
+    if (Got)
+        LocalFree(Got);
+
+    /* A defaulted DACL gives way to inheritance without marks. */
+    Sd = MakeSdParts(NULL, TRUE, Dacl, TRUE, NULL);
+    ok_hex(NtOpen(AUTO_PATH(L"defaulted.txt"), FILE_GENERIC_WRITE, 0, FILE_CREATE, FILE_NON_DIRECTORY_FILE, Sd, NULL), STATUS_SUCCESS);
+    LocalFree(Sd);
+    Acl = NtGetDacl(P, Text, sizeof(Text), &Got);
+    trace("auto\\defaulted.txt: %s\n", Text);
+    ok(Acl && Acl->AceCount > 0, "defaulted.txt has no ACEs\n");
+    ok(NtFindAce(Acl, SidEveryone, FILE_READ_EA | FILE_WRITE_EA, 0, 0, FALSE) < 0, "The defaulted DACL was kept\n");
+    ok(CountAces(Acl, INHERITED_ACE, 0) == 0, "defaulted.txt has %lu marked ACEs\n", CountAces(Acl, INHERITED_ACE, 0));
+    ok((CONTROL_OF(Got) & SE_DACL_AUTO_INHERITED) == 0, "defaulted.txt: SE_DACL_AUTO_INHERITED 0x%04x\n", Control);
+    if (Got)
+        LocalFree(Got);
+
+    /* A SACL set on the directory, with and without the request bit, is inherited unmarked. */
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &H))
+    {
+        HaveSacl = NtSetPrivilege(H, L"SeSecurityPrivilege", TRUE);
+        CloseHandle(H);
+    }
+    if (!HaveSacl)
+    {
+        skip("SeSecurityPrivilege not available\n");
+    }
+    else
+    {
+        static const SECURITY_DESCRIPTOR_CONTROL Req[] = { 0, SE_SACL_AUTO_INHERIT_REQ };
+        static const PCWSTR Names[] = { L"sacl.txt", L"saclreq.txt" };
+        ULONG i;
+        for (i = 0; i < RTL_NUMBER_OF(Req); i++)
+        {
+            Sd = MakeSdParts(NULL, FALSE, NULL, FALSE, SaclInh);
+            if (Req[i])
+                SetSecurityDescriptorControl(Sd, Req[i], Req[i]);
+            ok_hex(NtOpen(Dir, ACCESS_SYSTEM_SECURITY, SHARE_ALL, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT, NULL, &H), STATUS_SUCCESS);
+            ok_hex(NtSetSecurityObject(H, SACL_SECURITY_INFORMATION, Sd), STATUS_SUCCESS);
+            NtClose(H);
+            LocalFree(Sd);
+            Acl = GetSacl(Dir, &Control);
+            ok((Control & SE_SACL_AUTO_INHERITED) == 0, "SACL set (0x%x): SE_SACL_AUTO_INHERITED 0x%04x\n", Req[i], Control);
+            if (Acl)
+                LocalFree(Acl);
+            ok_hex(NtMakeFile(AUTO_PATH(Names[i]), NULL, 0, FALSE, "s"), STATUS_SUCCESS);
+            Acl = GetSacl(P, &Control);
+            ok(Acl && Acl->AceCount == 1, "%ls: %u SACL ACEs\n", Names[i], Acl ? Acl->AceCount : 0);
+            ok(Acl && CountAces(Acl, SUCCESSFUL_ACCESS_ACE_FLAG | FAILED_ACCESS_ACE_FLAG, VALID_INHERIT_FLAGS) == 1,
+               "%ls: the inherited audit ACE is marked or missing\n", Names[i]);
+            ok((Control & SE_SACL_AUTO_INHERITED) == 0, "%ls: SE_SACL_AUTO_INHERITED 0x%04x\n", Names[i], Control);
+            if (Acl)
+                LocalFree(Acl);
+        }
+    }
+
+    if (!Marked)
+    {
+        skip("%ls is not auto-inherited (control 0x%04x): marking below it is not tested\n", Dir, DirControl);
+    }
+    else
+    {
+        /* No DACL supplied: inherited ACEs marked, the DACL marked auto-inherited.  The SACL-only sets
+         * above must not have cleared the directory's mark. */
+        static const PCWSTR Names[] = { L"none.txt", L"owner.txt", L"saclonly.txt", L"none" };
+        ULONG i;
+        for (i = 0; i < RTL_NUMBER_OF(Names); i++)
+        {
+            BOOLEAN IsDir = (i == 3);
+            Sd = NULL;
+            if (i == 1)
+                Sd = MakeSdParts(SidAdmins, FALSE, NULL, FALSE, NULL);
+            else if (i == 2)
+                Sd = HaveSacl ? MakeSdParts(NULL, FALSE, NULL, FALSE, Sacl) : NULL;
+            if (i == 2 && !Sd)
+                continue;
+            ok_hex(NtOpen(AUTO_PATH(Names[i]), (IsDir ? (FILE_LIST_DIRECTORY | SYNCHRONIZE) : FILE_GENERIC_WRITE) |
+                          (i == 2 ? ACCESS_SYSTEM_SECURITY : 0),
+                          SHARE_ALL, FILE_CREATE,
+                          (IsDir ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE) | FILE_SYNCHRONOUS_IO_NONALERT, Sd, NULL),
+                   STATUS_SUCCESS);
+            if (Sd)
+                LocalFree(Sd);
+            Acl = NtGetDacl(P, Text, sizeof(Text), &Got);
+            trace("auto\\%ls: %s\n", Names[i], Text);
+            ok(Acl && Acl->AceCount > 0 && CountAces(Acl, INHERITED_ACE, 0) == Acl->AceCount,
+               "%ls: %lu of %u ACEs marked\n", Names[i], CountAces(Acl, INHERITED_ACE, 0), Acl ? Acl->AceCount : 0);
+            if (DirControl & SE_DACL_AUTO_INHERITED)
+                ok((CONTROL_OF(Got) & SE_DACL_AUTO_INHERITED) != 0, "%ls: SE_DACL_AUTO_INHERITED not set (0x%04x)\n",
+                   Names[i], Control);
+            if (Got)
+                LocalFree(Got);
+        }
+    }
+    if (HaveSacl && OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &H))
+    {
+        NtSetPrivilege(H, L"SeSecurityPrivilege", FALSE);
+        CloseHandle(H);
+    }
+    NtRemove(Dir);
+#undef CONTROL_OF
+#undef AUTO_PATH
+}
+
 START_TEST(NtfsInherit)
 {
     if (!NtInit("NtfsInherit") || !NtHaveUser())
         return;
-    TestInherit(L"legacy", FALSE);
-    TestInherit(L"auto", TRUE);
+    TestInherit(L"legacy");
+    TestAutoInherited();
     NtCleanup();
 }
