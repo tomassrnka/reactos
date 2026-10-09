@@ -25,6 +25,15 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* Used to restart the receive from a system thread (read.c). Allocated
+     * before the address is opened, so that its failure leaves nothing open */
+    if ((FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) && !FCB->RecvRelaunchWorkItem)
+    {
+        FCB->RecvRelaunchWorkItem = IoAllocateWorkItem(FCB->FileObject->DeviceObject);
+        if (!FCB->RecvRelaunchWorkItem)
+            return STATUS_NO_MEMORY;
+    }
+
     Status = TdiOpenAddressFile(&FCB->TdiDeviceName,
                                 FCB->LocalAddress,
                                 ShareType,
@@ -39,14 +48,6 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
         {
             Status = TdiQueryMaxDatagramLength(FCB->AddressFile.Object,
                                                &FCB->Recv.Size);
-        }
-
-        /* Used to restart the receive from a system thread (read.c) */
-        if (NT_SUCCESS(Status) && !FCB->RecvRelaunchWorkItem)
-        {
-            FCB->RecvRelaunchWorkItem = IoAllocateWorkItem(FCB->FileObject->DeviceObject);
-            if (!FCB->RecvRelaunchWorkItem)
-                Status = STATUS_NO_MEMORY;
         }
 
         if (NT_SUCCESS(Status) && !FCB->Recv.Window)
