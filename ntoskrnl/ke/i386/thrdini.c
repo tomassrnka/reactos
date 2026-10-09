@@ -469,6 +469,7 @@ KiSwapContextEntry(IN PKSWITCHFRAME SwitchFrame,
             NpxSaveArea = KiGetThreadNpxArea(NpxThread);
             Ke386SaveFpuState(NpxSaveArea);
             NpxSaveArea->NpxSavedCpu = 0;
+            KeMemoryBarrierWithoutFence();
             NpxThread->NpxState = NPX_STATE_NOT_LOADED;
         }
 
