@@ -363,7 +363,7 @@ MmAllocSwapPage(VOID)
 
             KeReleaseGuardedMutex(&MmPageFileCreationLock);
 
-            entry = ENTRY_FROM_FILE_OFFSET(i, off + 1);
+            entry = ENTRY_FROM_FILE_OFFSET((SWAPENTRY)i, (SWAPENTRY)off + 1);
             return(entry);
         }
     }
