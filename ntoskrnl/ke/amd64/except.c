@@ -241,7 +241,8 @@ KiPrepareUserDebugData(void)
     }
     _SEH2_END;
 
-    _disable();
+    /* Leave interrupts enabled: the kernel debugger and the debug port,
+       which the caller calls next, can wait */
 }
 
 VOID
