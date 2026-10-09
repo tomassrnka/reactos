@@ -293,6 +293,8 @@ MmFreeMemoryArea(
             if (MmIsPageSwapEntry(Process, (PVOID)Address))
             {
                 MmDeletePageFileMapping(Process, (PVOID)Address, &SwapEntry);
+                /* MmUnmapViewOfSegment waits for paging file I/O on the view first */
+                ASSERT(SwapEntry != MM_WAIT_ENTRY);
                 /* We'll have to do some cleanup when we're on the page file */
                 DoFree = TRUE;
             }
@@ -508,6 +510,18 @@ MiRosCleanupMemoryArea(
 
     MemoryArea = (PMEMORY_AREA)Vad;
     BaseAddress = (PVOID)MA_GetStartingAddress(MemoryArea);
+
+    /* Another thread is unmapping this view and waits for paging file I/O on it: let it finish */
+    if (MemoryArea->DeleteInProgress)
+    {
+        LARGE_INTEGER Delay;
+
+        Delay.QuadPart = -10 * 1000;
+        MmUnlockAddressSpace(&Process->Vm);
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        MmLockAddressSpace(&Process->Vm);
+        return;
+    }
 
     if (MemoryArea->Type == MEMORY_AREA_SECTION_VIEW)
     {

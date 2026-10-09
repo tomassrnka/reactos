@@ -3673,6 +3673,47 @@ MmFreeSectionPage(PVOID Context, MEMORY_AREA* MemoryArea, PVOID Address,
     }
 }
 
+static
+VOID
+MiWaitForViewPagingIo(
+    _In_ PMMSUPPORT AddressSpace,
+    _In_ PMEMORY_AREA MemoryArea)
+{
+    PEPROCESS Process = MmGetAddressSpaceOwner(AddressSpace);
+    ULONG_PTR Address, EndAddress;
+    SWAPENTRY SwapEntry;
+    LARGE_INTEGER Delay;
+    BOOLEAN Attached = FALSE;
+
+    /* Paging file I/O with a wait entry only happens in user-mode views */
+    if (Process == NULL)
+        return;
+
+    if (Process != PsGetCurrentProcess())
+    {
+        KeAttachProcess(&Process->Pcb);
+        Attached = TRUE;
+    }
+
+    Delay.QuadPart = -10 * 1000;
+    EndAddress = (ULONG_PTR)MM_ROUND_UP(MA_GetEndingAddress(MemoryArea), PAGE_SIZE);
+    for (Address = MA_GetStartingAddress(MemoryArea); Address < EndAddress; Address += PAGE_SIZE)
+    {
+        while (MmIsPageSwapEntry(Process, (PVOID)Address))
+        {
+            MmGetPageFileMapping(Process, (PVOID)Address, &SwapEntry);
+            if (SwapEntry != MM_WAIT_ENTRY)
+                break;
+            MmUnlockAddressSpace(AddressSpace);
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+            MmLockAddressSpace(AddressSpace);
+        }
+    }
+
+    if (Attached)
+        KeDetachProcess();
+}
+
 static NTSTATUS
 MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
                      PVOID BaseAddress)
@@ -3705,6 +3746,14 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
 #endif
 
     MemoryArea->DeleteInProgress = TRUE;
+
+    /*
+     * Let paging file I/O already started on private pages of the view
+     * finish: it left MM_WAIT_ENTRY in the process PTE, dropped the address
+     * space lock and still uses the view's regions when it relocks. New I/O
+     * does not start on a view being deleted.
+     */
+    MiWaitForViewPagingIo(AddressSpace, MemoryArea);
 
     MmLockSectionSegment(Segment);
 
@@ -3794,18 +3843,43 @@ MiRosUnmapViewOfSection(
         InterlockedIncrement64(Segment->ReferenceCount);
 
         /* Search for the current segment within the section segments
-         * and calculate the image base address */
+         * and calculate the image base address from the start of its view
+         * (BaseAddress can be anywhere in it) */
         for (i = 0; i < NrSegments; i++)
         {
             if (Segment == &SectionSegments[i])
             {
-                ImageBaseAddress = (char*)BaseAddress - (ULONG_PTR)SectionSegments[i].Image.VirtualAddress;
+                ImageBaseAddress = (char*)MA_GetStartingAddress(MemoryArea) - PAGE_ROUND_DOWN(SectionSegments[i].Image.VirtualAddress);
                 break;
             }
         }
         if (i >= NrSegments)
         {
             KeBugCheck(MEMORY_MANAGEMENT);
+        }
+
+        /*
+         * Claim the views of every segment before MmUnmapViewOfSegment drops
+         * the address space lock to wait for paging file I/O, so that an
+         * unmap through another segment's address sees them going away
+         */
+        for (i = 0; i < NrSegments; i++)
+        {
+            PMEMORY_AREA SegmentArea = MmLocateMemoryAreaByAddress(AddressSpace,
+                (PVOID)((char*)ImageBaseAddress + (ULONG_PTR)SectionSegments[i].Image.VirtualAddress));
+            if ((SegmentArea != NULL) && (SegmentArea != MemoryArea) && SegmentArea->DeleteInProgress)
+            {
+                /* Another thread is unmapping this image */
+                MemoryArea->DeleteInProgress = FALSE;
+                return STATUS_NOT_MAPPED_VIEW;
+            }
+        }
+        for (i = 0; i < NrSegments; i++)
+        {
+            PMEMORY_AREA SegmentArea = MmLocateMemoryAreaByAddress(AddressSpace,
+                (PVOID)((char*)ImageBaseAddress + (ULONG_PTR)SectionSegments[i].Image.VirtualAddress));
+            if (SegmentArea != NULL)
+                SegmentArea->DeleteInProgress = TRUE;
         }
 
         for (i = 0; i < NrSegments; i++)
