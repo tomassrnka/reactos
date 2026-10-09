@@ -255,5 +255,8 @@ int iomap_zero_range(struct inode *inode, loff_t pos, loff_t len, bool *did_zero
 
 int blkdev_issue_flush(struct block_device *b)
 {
+	/* As kshim_dev_rw: nothing goes to a replaced medium, not even a flush. */
+	if (b->kshim_gone)
+		return -EIO;
 	return ngos_dev_flush(b->osdev) ? -EIO : 0;
 }

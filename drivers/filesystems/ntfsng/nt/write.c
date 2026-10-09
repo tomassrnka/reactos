@@ -319,11 +319,17 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
 
 /*
  * Writes a locked buffer straight to the storage device, through a sector-aligned pool buffer.  Nothing
- * of the journal orders these writes, so the request completes only once they are on the medium.
+ * of the journal orders these writes, so the request completes only once they are on the medium.  A
+ * dismounted volume skips the medium check at dispatch, so each chunk is checked here, under the core
+ * lock a verify marks the medium gone under: a medium a verify found replaced is never written through
+ * this volume.  (A swap after the dismount that no verify sees is not caught: a dismounted volume is not
+ * verified again, and the storage driver reports the change only to a mounted volume.)
  */
 static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
 {
     PUCHAR Bounce = ExAllocatePoolWithTag(NonPagedPool, 64 * 1024, TAG_NTFSNG);
+    NTSTATUS Status = STATUS_SUCCESS;
+    NG_SHARED_HOLD Hold;
     ULONG Done = 0;
 
     if (!Bounce)
@@ -331,15 +337,36 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG
     while (Done < Length)
     {
         ULONG n = min(Length - Done, 64 * 1024);
+        BOOLEAN Failed;
         RtlCopyMemory(Bounce, Buffer + Done, n);
-        if (NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n))
+        NgAcquireCoreShared(Vcb, &Hold);
+        if (Vcb->WrongMedia)
+        {
+            NgReleaseCoreShared(Vcb, &Hold);
+            Status = STATUS_FILE_INVALID;
             break;
+        }
+        Failed = NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n) != 0;
+        NgReleaseCoreShared(Vcb, &Hold);
+        if (Failed)
+        {
+            Status = STATUS_UNEXPECTED_IO_ERROR;
+            break;
+        }
         Done += n;
     }
     ExFreePoolWithTag(Bounce, TAG_NTFSNG);
-    if (Done == Length && NgDevFlushDurable(Vcb->StorageDevice))
-        Done = 0;
-    return Done == Length ? STATUS_SUCCESS : STATUS_UNEXPECTED_IO_ERROR;
+    if (NT_SUCCESS(Status))
+    {
+        /* Under the same lock: a medium found gone before the flush makes the write fail, not succeed. */
+        NgAcquireCoreShared(Vcb, &Hold);
+        if (Vcb->WrongMedia)
+            Status = STATUS_FILE_INVALID;
+        else if (NgDevFlushDurable(Vcb->StorageDevice))
+            Status = STATUS_UNEXPECTED_IO_ERROR;
+        NgReleaseCoreShared(Vcb, &Hold);
+    }
+    return Status;
 }
 
 /*
