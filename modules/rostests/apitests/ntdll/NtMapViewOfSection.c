@@ -2060,6 +2060,73 @@ Test_Truncate(VOID)
     ok(Success == TRUE, "DeleteFileW failed with %lu\n", GetLastError());
 }
 
+/* A write to a copy-on-write view of a pagefile-backed section gets a private copy */
+static void
+Test_CopyOnWritePageFileSection(void)
+{
+    LARGE_INTEGER MaximumSize;
+    HANDLE SectionHandle;
+    volatile UCHAR *Shared = NULL, *Copy = NULL;
+    PVOID SharedBase = NULL, CopyBase = NULL;
+    SIZE_T ViewSize;
+    NTSTATUS Status, WriteStatus;
+    ULONG i;
+
+    MaximumSize.QuadPart = 4 * PAGE_SIZE;
+    Status = NtCreateSection(&SectionHandle, SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_READWRITE, SEC_COMMIT, NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    ViewSize = 0;
+    Status = NtMapViewOfSection(SectionHandle, NtCurrentProcess(), &SharedBase, 0, 0, NULL, &ViewSize, ViewShare, 0, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ViewSize = 0;
+    Status = NtMapViewOfSection(SectionHandle, NtCurrentProcess(), &CopyBase, 0, 0, NULL, &ViewSize, ViewShare, 0, PAGE_WRITECOPY);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!SharedBase || !CopyBase)
+        goto Cleanup;
+    Shared = SharedBase;
+    Copy = CopyBase;
+
+    memset(SharedBase, 0x11, 4 * PAGE_SIZE);
+    for (i = 0; i < 4; i++)
+    {
+        /* Page 0 is written without a read first; the others are read, then written */
+        if (i != 0)
+            ok(Copy[i * PAGE_SIZE] == 0x11, "Page %lu reads %02x through the copy view\n", i, Copy[i * PAGE_SIZE]);
+        WriteStatus = STATUS_SUCCESS;
+        _SEH2_TRY
+        {
+            Copy[i * PAGE_SIZE] = 0x22;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            WriteStatus = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        ok(WriteStatus == STATUS_SUCCESS, "Write to page %lu of the copy view raised 0x%08lx\n", i, WriteStatus);
+        if (WriteStatus != STATUS_SUCCESS)
+            continue;
+
+        /* The private copy holds the whole page and the write; the shared page is unchanged */
+        ok(Copy[i * PAGE_SIZE] == 0x22, "Page %lu of the copy view holds %02x\n", i, Copy[i * PAGE_SIZE]);
+        ok(Copy[i * PAGE_SIZE + PAGE_SIZE - 1] == 0x11, "Page %lu of the copy view ends with %02x\n", i, Copy[i * PAGE_SIZE + PAGE_SIZE - 1]);
+        ok(Shared[i * PAGE_SIZE] == 0x11, "Page %lu of the shared view holds %02x\n", i, Shared[i * PAGE_SIZE]);
+
+        /* Later writes to the shared page no longer show in the copy */
+        Shared[i * PAGE_SIZE + 1] = 0x33;
+        ok(Copy[i * PAGE_SIZE + 1] == 0x11, "Page %lu of the copy view follows the shared page: %02x\n", i, Copy[i * PAGE_SIZE + 1]);
+    }
+
+Cleanup:
+    if (CopyBase)
+        NtUnmapViewOfSection(NtCurrentProcess(), CopyBase);
+    if (SharedBase)
+        NtUnmapViewOfSection(NtCurrentProcess(), SharedBase);
+    NtClose(SectionHandle);
+}
+
 START_TEST(NtMapViewOfSection)
 {
     Test_PageFileSection();
@@ -2072,4 +2139,5 @@ START_TEST(NtMapViewOfSection)
     Test_RawSize(2);
     Test_EmptyFile();
     Test_Truncate();
+    Test_CopyOnWritePageFileSection();
 }
