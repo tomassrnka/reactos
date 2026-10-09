@@ -2127,6 +2127,66 @@ Cleanup:
     NtClose(SectionHandle);
 }
 
+/* Writes through a copy-on-write view of a file, not at the start of a page, must stay private */
+static void
+Test_CopyOnWriteUnalignedWrite(void)
+{
+    WCHAR TempPath[MAX_PATH], FileName[MAX_PATH];
+    HANDLE Handle, Mapping;
+    volatile UCHAR *Copy = NULL, *Read = NULL;
+    UCHAR Buffer[2 * 4096];
+    DWORD Written;
+    BOOL Success;
+
+    if (!GetTempPathW(MAX_PATH, TempPath) || !GetTempFileNameW(TempPath, L"ncw", 0, FileName))
+    {
+        skip("No temporary file name: %lu\n", GetLastError());
+        return;
+    }
+    Handle = CreateFileW(FileName, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "CreateFileW failed with %lu\n", GetLastError());
+    if (Handle == INVALID_HANDLE_VALUE)
+    {
+        DeleteFileW(FileName);
+        return;
+    }
+    memset(Buffer, 0x5A, sizeof(Buffer));
+    Success = WriteFile(Handle, Buffer, sizeof(Buffer), &Written, NULL);
+    ok(Success && Written == sizeof(Buffer), "WriteFile failed with %lu\n", GetLastError());
+    if (!Success || Written != sizeof(Buffer))
+    {
+        CloseHandle(Handle);
+        DeleteFileW(FileName);
+        return;
+    }
+
+    Mapping = CreateFileMappingW(Handle, NULL, PAGE_READWRITE, 0, 0, NULL);
+    ok(Mapping != NULL, "CreateFileMappingW failed with %lu\n", GetLastError());
+    if (Mapping)
+    {
+        Copy = MapViewOfFile(Mapping, FILE_MAP_COPY, 0, 0, 0);
+        Read = MapViewOfFile(Mapping, FILE_MAP_READ, 0, 0, 0);
+        ok(Copy != NULL && Read != NULL, "MapViewOfFile failed with %lu\n", GetLastError());
+    }
+    if (Copy && Read)
+    {
+        /* The first write is in the middle of page 0, the second at the start of page 1 */
+        Copy[0x800] = 0x11;
+        Copy[0x1010] = 0x22;
+        ok(Copy[0x800] == 0x11 && Copy[0x1010] == 0x22, "Copy holds %x %x\n", Copy[0x800], Copy[0x1010]);
+        ok(Read[0x800] == 0x5A, "Shared page 0 changed to %x\n", Read[0x800]);
+        ok(Read[0x1010] == 0x5A, "Shared page 1 changed to %x\n", Read[0x1010]);
+    }
+    if (Copy)
+        UnmapViewOfFile((PVOID)Copy);
+    if (Read)
+        UnmapViewOfFile((PVOID)Read);
+    if (Mapping)
+        CloseHandle(Mapping);
+    CloseHandle(Handle);
+    DeleteFileW(FileName);
+}
+
 START_TEST(NtMapViewOfSection)
 {
     Test_PageFileSection();
@@ -2140,4 +2200,5 @@ START_TEST(NtMapViewOfSection)
     Test_EmptyFile();
     Test_Truncate();
     Test_CopyOnWritePageFileSection();
+    Test_CopyOnWriteUnalignedWrite();
 }

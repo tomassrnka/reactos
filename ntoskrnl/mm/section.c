@@ -1933,6 +1933,27 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
     }
 }
 
+/* MmAlterRegion callback for a region change whose PTEs are already right */
+static
+VOID
+MiKeepViewAttributes(
+    PMMSUPPORT AddressSpace,
+    PVOID BaseAddress,
+    SIZE_T RegionSize,
+    ULONG OldType,
+    ULONG OldProtect,
+    ULONG NewType,
+    ULONG NewProtect)
+{
+    UNREFERENCED_PARAMETER(AddressSpace);
+    UNREFERENCED_PARAMETER(BaseAddress);
+    UNREFERENCED_PARAMETER(RegionSize);
+    UNREFERENCED_PARAMETER(OldType);
+    UNREFERENCED_PARAMETER(OldProtect);
+    UNREFERENCED_PARAMETER(NewType);
+    UNREFERENCED_PARAMETER(NewProtect);
+}
+
 NTSTATUS
 NTAPI
 MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
@@ -1995,7 +2016,12 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
         return STATUS_SUCCESS;
     }
 
-    /* Calculate the new protection & check if we should update the region */
+    /*
+     * Calculate the new protection. The region is updated only once the page
+     * is private: unless the segment itself is copy-on-write, a region marked
+     * writable makes the next fault on the page map it writable, and until
+     * then that is still the shared page.
+     */
     NewProtect = Region->Protect;
     if (NewProtect & PAGE_IS_WRITECOPY)
     {
@@ -2004,10 +2030,6 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
             NewProtect |= PAGE_EXECUTE_READWRITE;
         else
             NewProtect |= PAGE_READWRITE;
-        MmAlterRegion(AddressSpace, (PVOID)MA_GetStartingAddress(MemoryArea),
-                &MemoryArea->SectionData.RegionListHead,
-                Address, PAGE_SIZE, Region->Type, NewProtect,
-                MmAlterViewAttributes);
     }
 
     /*
@@ -2032,7 +2054,7 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
         MmUnlockSectionSegment(Segment);
         /* This is a private page. We must only change the page protection. */
         MmSetPageProtect(Process, PAddress, NewProtect);
-        return STATUS_SUCCESS;
+        goto UpdateRegion;
     }
 
     /*
@@ -2081,6 +2103,16 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
 
     if (Process)
         MmInsertRmap(NewPage, Process, PAddress);
+
+UpdateRegion:
+    /* The PTE already has the new protection: only record it in the region */
+    if (Region->Protect & PAGE_IS_WRITECOPY)
+    {
+        MmAlterRegion(AddressSpace, (PVOID)MA_GetStartingAddress(MemoryArea),
+                &MemoryArea->SectionData.RegionListHead,
+                PAddress, PAGE_SIZE, Region->Type, NewProtect,
+                MiKeepViewAttributes);
+    }
 
     DPRINT("Address 0x%p\n", Address);
     return STATUS_SUCCESS;
