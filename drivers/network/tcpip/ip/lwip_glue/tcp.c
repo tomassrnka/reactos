@@ -1035,7 +1035,8 @@ LibTCPGetHostName(PTCP_PCB pcb, ip_addr_t *const ipaddr, u16_t *const port)
         return ERR_CLSD;
 
     *ipaddr = pcb->local_ip;
-    *port = pcb->local_port;
+    /* lwIP keeps ports in host order, our callers want network order */
+    *port = lwip_htons(pcb->local_port);
 
     return ERR_OK;
 }
@@ -1047,7 +1048,7 @@ LibTCPGetPeerName(PTCP_PCB pcb, ip_addr_t * const ipaddr, u16_t * const port)
         return ERR_CLSD;
 
     *ipaddr = pcb->remote_ip;
-    *port = pcb->remote_port;
+    *port = lwip_htons(pcb->remote_port);
 
     return ERR_OK;
 }

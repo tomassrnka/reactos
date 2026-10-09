@@ -9,6 +9,7 @@ extern void func_close(void);
 extern void func_getaddrinfo(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
+extern void func_getpeername(void);
 extern void func_getservbyname(void);
 extern void func_getservbyport(void);
 extern void func_ioctlsocket(void);
@@ -33,6 +34,7 @@ const struct test winetest_testlist[] =
     { "getaddrinfo", func_getaddrinfo },
     { "gethostname", func_gethostname },
     { "getnameinfo", func_getnameinfo },
+    { "getpeername", func_getpeername },
     { "getservbyname", func_getservbyname },
     { "getservbyport", func_getservbyport },
     { "ioctlsocket", func_ioctlsocket },
