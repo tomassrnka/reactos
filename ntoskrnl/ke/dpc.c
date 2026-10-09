@@ -992,8 +992,15 @@ BOOLEAN
 NTAPI
 KeIsExecutingDpc(VOID)
 {
-    /* Return if the Dpc Routine is active */
-    return KeGetCurrentPrcb()->DpcRoutineActive;
+    /* One load: a thread moved to another processor between finding its
+       PRCB and reading the flag would see that processor's DPC state */
+#if defined(_M_IX86)
+    return __readfsbyte(FIELD_OFFSET(KIPCR, PrcbData.DpcRoutineActive)) != 0;
+#elif defined(_M_AMD64)
+    return __readgsbyte(FIELD_OFFSET(KIPCR, Prcb.DpcRoutineActive)) != 0;
+#else
+    return KeGetCurrentPrcb()->DpcRoutineActive != 0;
+#endif
 }
 
 /*
