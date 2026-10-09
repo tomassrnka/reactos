@@ -94,6 +94,11 @@ void ngos_spin_unlock(uintptr_t *lock, unsigned char irql)
     KeReleaseSpinLock((PKSPIN_LOCK)lock, irql);
 }
 
+void *ngos_current_thread(void)
+{
+    return KeGetCurrentThread();
+}
+
 void ngos_yield(void)
 {
     LARGE_INTEGER Delay;
@@ -149,6 +154,39 @@ void ngos_time(long long *sec, long *nsec)
     *nsec = (long)((Unix100ns % 10000000ULL) * 100);
 }
 
+/*
+ * Devices whose stack refuses flushes but whose disk reports no volatile write cache (NgFlushUsable at
+ * mount): only there does a refused flush count as done.
+ */
+static PDEVICE_OBJECT NgFlushOptional[32];
+static KSPIN_LOCK NgFlushOptionalLock;
+
+VOID NgSetFlushOptional(PDEVICE_OBJECT Device)
+{
+    KIRQL Irql;
+    ULONG i;
+    KeAcquireSpinLock(&NgFlushOptionalLock, &Irql);
+    for (i = 0; i < RTL_NUMBER_OF(NgFlushOptional); i++)
+        if (!NgFlushOptional[i] || NgFlushOptional[i] == Device)
+        {
+            NgFlushOptional[i] = Device;
+            break;
+        }
+    KeReleaseSpinLock(&NgFlushOptionalLock, Irql);
+}
+
+static BOOLEAN NgIsFlushOptional(PDEVICE_OBJECT Device)
+{
+    KIRQL Irql;
+    ULONG i;
+    BOOLEAN Found = FALSE;
+    KeAcquireSpinLock(&NgFlushOptionalLock, &Irql);
+    for (i = 0; i < RTL_NUMBER_OF(NgFlushOptional) && !Found; i++)
+        Found = NgFlushOptional[i] == Device;
+    KeReleaseSpinLock(&NgFlushOptionalLock, Irql);
+    return Found;
+}
+
 static IO_COMPLETION_ROUTINE NgReadCompletion;
 static NTSTATUS NTAPI NgReadCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
 {
@@ -164,7 +202,9 @@ static NTSTATUS NTAPI NgReadCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PV
  * path entered at APC_LEVEL, where IoBuildSynchronousFsdRequest's APC-based completion
  * would never run.
  */
-static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, void *buf, unsigned int len)
+#define NG_IO_WRITE_THROUGH 1   /* SL_WRITE_THROUGH on the write */
+#define NG_IO_REFUSAL_OK    2   /* a flush the stack does not implement counts as done */
+static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, void *buf, unsigned int len, ULONG Flags)
 {
     LARGE_INTEGER Offset;
     IO_STATUS_BLOCK Iosb;
@@ -180,8 +220,9 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
                                         Major == IRP_MJ_FLUSH_BUFFERS ? NULL : &Offset, &Iosb);
     if (!Irp)
         return -1;
+    /* No SL_WRITE_THROUGH: durability comes from the flushes at each commit (and FUA is not honoured everywhere). */
     IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
-    if (Major == IRP_MJ_WRITE)
+    if (Flags & NG_IO_WRITE_THROUGH)
         IoGetNextIrpStackLocation(Irp)->Flags |= SL_WRITE_THROUGH;
     IoSetCompletionRoutine(Irp, NgReadCompletion, &Event, TRUE, TRUE, TRUE);
     Status = IoCallDriver(Device, Irp);
@@ -209,9 +250,12 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
     NgStackSample();
     if (!NT_SUCCESS(Status))
     {
-        /* A disk without a write cache may not implement flush. */
+        /*
+         * A disk without a write cache may not implement flush.  On any other disk a refused flush is
+         * a failed one: it voids every durability step of the journal.
+         */
         if (Major == IRP_MJ_FLUSH_BUFFERS && (Status == STATUS_INVALID_DEVICE_REQUEST || Status == STATUS_NOT_SUPPORTED ||
-                                             Status == STATUS_NOT_IMPLEMENTED))
+                                             Status == STATUS_NOT_IMPLEMENTED) && ((Flags & NG_IO_REFUSAL_OK) || NgIsFlushOptional(Device)))
             return 0;
         DPRINT1("ntfsng: device %s at %I64u len %u failed 0x%lx\n",
                 Major == IRP_MJ_READ ? "read" : Major == IRP_MJ_WRITE ? "write" : "flush", off, len, Status);
@@ -222,15 +266,31 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
 
 int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len)
 {
-    return NgDevIo(IRP_MJ_READ, dev, off, buf, len);
+    return NgDevIo(IRP_MJ_READ, dev, off, buf, len, 0);
 }
 
 int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len)
 {
-    return NgDevIo(IRP_MJ_WRITE, dev, off, buf, len);
+    return NgDevIo(IRP_MJ_WRITE, dev, off, buf, len, 0);
 }
 
 int ngos_dev_flush(void *dev)
 {
-    return NgDevIo(IRP_MJ_FLUSH_BUFFERS, dev, 0, NULL, 0);
+    return NgDevIo(IRP_MJ_FLUSH_BUFFERS, dev, 0, NULL, 0, 0);
+}
+
+/*
+ * Writes through a volume handle (formatters, the lock holder, a dismounted volume) bypass the journal
+ * and its flushes: each one is durable when it completes.  The write asks for write-through and is
+ * followed by a cache flush, for stacks that drop FUA; a stack that does not implement flush keeps
+ * what write-through gave.
+ */
+int NgDevWriteDurable(PDEVICE_OBJECT Device, unsigned long long off, void *buf, unsigned int len)
+{
+    return NgDevIo(IRP_MJ_WRITE, Device, off, buf, len, NG_IO_WRITE_THROUGH);
+}
+
+int NgDevFlushDurable(PDEVICE_OBJECT Device)
+{
+    return NgDevIo(IRP_MJ_FLUSH_BUFFERS, Device, 0, NULL, 0, NG_IO_REFUSAL_OK);
 }

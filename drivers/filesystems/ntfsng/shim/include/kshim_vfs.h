@@ -769,7 +769,10 @@ struct folio *writeback_iter(struct address_space *m, struct writeback_control *
 struct block_device { void *osdev; u64 size; unsigned int logical_block_size; struct address_space *bd_mapping; struct inode *bd_inode; struct super_block *bd_super;
 	int kshim_remounting; /* set by the adapter while the core switches the volume read-write */
 	struct kshim_jnl *jnl; /* metadata journal (kshim_jnl.c) while active */
-	int kshim_direct; /* nonzero while file data is written: bypasses the journal */ };
+	int kshim_direct; /* nonzero while file data is written: bypasses the journal */
+	int kshim_wb_err; /* first failed write of an asynchronous bio (its completion cannot report it) */
+	unsigned long kshim_wr_failed; /* device writes that failed, all paths (unmount: commit nothing after one) */
+	int kshim_gone; /* the medium was replaced: every device read and write fails */ };
 static inline u64 bdev_nr_bytes(struct block_device *b) { return b->size; }
 static inline unsigned int bdev_logical_block_size(struct block_device *b) { return b->logical_block_size; }
 static inline unsigned int bdev_physical_block_size(struct block_device *b) { return b->logical_block_size; }
@@ -813,6 +816,9 @@ struct bio {
 	struct bio *kshim_chain;
 };
 struct bio *bio_alloc(struct block_device *b, unsigned short nr, blk_opf_t op, gfp_t g);
+void kshim_wb_scope_enter(void);	/* around a call into core writeback: reserve bios it abandons come back */
+void kshim_wb_scope_exit(void);
+void kshim_wb_scope_point(void);	/* between folios of a writepages walk */
 void bio_put(struct bio *b);
 bool bio_add_folio(struct bio *b, struct folio *f, size_t len, size_t off);
 void bio_add_folio_nofail(struct bio *b, struct folio *f, size_t len, size_t off);
@@ -930,7 +936,9 @@ void sort(void *base, size_t num, size_t size, int (*cmp)(const void *, const vo
 struct ratelimit_state { int dummy; };
 #define DEFINE_RATELIMIT_STATE(n, i, b) struct ratelimit_state n
 #define __ratelimit(r) 1
-#define errseq_check(e, s) 0
+/* Reached from ntfs_handle_error with on_errors=continue, right after the error message: see kshim_core_error. */
+int kshim_errseq_check(errseq_t *e, errseq_t since);
+#define errseq_check(e, s) kshim_errseq_check(e, s)
 #define errseq_set(e, v) do { } while (0)
 #define errseq_sample(e) 0
 #define freezable_schedule() do { } while (0)

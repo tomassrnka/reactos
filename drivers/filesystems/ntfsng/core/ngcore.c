@@ -60,6 +60,7 @@ struct ngc_vol {
 	unsigned long frees_seen;       /* its increments at the last commit */
 	int damaged;                    /* the mount-time check found damage: read-only */
 	char why[160];
+	int failed;                     /* a consistency point was abandoned for good: every later one fails */
 };
 
 /* Mount-time consistency check: 0 never, 1 after an unclean shutdown or when $MFT is at most 64 MB, 2 always. */
@@ -179,6 +180,52 @@ static bool ngc_icache_ok(struct inode *i)
 	return !NInoAttr(ni) || ni->type == AT_INDEX_ALLOCATION || ni->type == AT_BITMAP;
 }
 
+/*
+ * The core's error reports that mean the metadata on disk is (or would be) inconsistent.  They pass
+ * through ntfs_error, which with on_errors=continue does nothing, and most of them do not set
+ * NVolErrors.  Out-of-space and out-of-memory reports do not match and leave the volume as it is.
+ */
+static bool ngc_msg_has(const char *msg, const char *const *words, size_t n)
+{
+	for (const char *p = msg; *p; p++)
+		for (size_t w = 0; w < n; w++) {
+			size_t k = 0;
+			while (words[w][k] && (p[k] >= 'A' && p[k] <= 'Z' ? p[k] + 32 : p[k]) == words[w][k])
+				k++;
+			if (!words[w][k])
+				return true;
+		}
+	return false;
+}
+
+static bool ngc_msg_means_corruption(const char *msg)
+{
+	/*
+	 * Specific phrases rather than words such as "invalid": a caller can make the core print some
+	 * reports about data it just supplied ("Invalid reparse point."), which is not damage.
+	 */
+	static const char *const damage[] = { "inconsisten", "inconstant", "chkdsk", "corrupt", "invalid lcn",
+		"invalid lowest_vcn", "invalid empty mapping", "invalid length in mapping", "invalid s64",
+		"invalid zero-sized", "invalid index entry", "invalid attribute data size", "stale extent",
+		"stale mft reference", "bad runlist", "overflow in mapping", "overflow from index",
+		"entries overflow", "out of bounds", "beyond volume boundary", "beyond end of volume",
+		"no file magic", "leaf node", "unindexed", "negative vcn", "non-resident $index_root",
+		"smaller than the sector size", "restore old mapping pairs" };
+	/* Resource failures that some of those reports also print (an inode load that failed for memory). */
+	static const char *const resource[] = { "error code -12", "error code -28", "enomem", "enospc",
+		"eoverflow", "memory", "collation error" };
+	return ngc_msg_has(msg, damage, ARRAY_SIZE(damage)) && !ngc_msg_has(msg, resource, ARRAY_SIZE(resource));
+}
+
+static void ngc_core_error(struct super_block *sb, const char *msg)
+{
+	struct ntfs_volume *vol = NTFS_SB(sb);
+	if (!vol || NVolErrors(vol) || !ngc_msg_means_corruption(msg))
+		return;
+	NVolSetErrors(vol);
+	kshim_jnl_mark_errors(sb->s_bdev);
+}
+
 int ngc_init(void)
 {
 	int err = 0;
@@ -189,6 +236,7 @@ int ngc_init(void)
 			ngc_inited = 1;
 		kshim_is_data_inode = ngc_is_data_inode;
 		kshim_icache_ok = ngc_icache_ok;
+		kshim_core_error = ngc_core_error;
 	}
 	mutex_unlock(&ngc_mount_lock);
 	return err;
@@ -214,13 +262,18 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 	struct block_device *b;
 	struct ngc_vol *v;
 	struct ntfs_volume *vol;
-	int err, jrec = NGJ_NONE, want_rw = pass != NGC_PASS_RO;
+	int err, jrec = NGJ_NONE, want_rw = pass != NGC_PASS_RO, jerr0, big_sectors = 0;
 	u64 jseq = 0;
 
 	*out = NULL;
 	err = ngc_init();
 	if (err)
 		return err;
+	/* The journal keeps 512-byte sectors (masks, replay, partial-page capture): not on 4Kn disks. */
+	if (want_rw && sector_size != 512) {
+		want_rw = 0;
+		big_sectors = 1;
+	}
 	v = kzalloc(sizeof(*v), GFP_KERNEL);
 	fc = kzalloc(sizeof(*fc), GFP_KERNEL);
 	b = kshim_bdev_open(osdev, size, sector_size);
@@ -233,7 +286,8 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 	 * pass) or is shown through the overlay (read-only and check passes).
 	 */
 	v->jv = kmalloc(sizeof(*v->jv), GFP_KERNEL);
-	if (v->jv && !ngj_probe(osdev, size, sector_size, v->jv) && v->jv->lf_pages >= 256) {
+	jerr0 = v->jv ? ngj_probe(osdev, size, sector_size, v->jv) : -ENOMEM;
+	if (!jerr0 && v->jv->lf_pages >= 256) {
 		jrec = ngj_recover(v->jv, b, pass == NGC_PASS_WRITE, &jseq);
 		if (!want_rw) {
 			kfree(v->jv);
@@ -243,6 +297,10 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			if (v->jv->replayed || v->jv->torn)
 				kshim_jnl_fault = 0;
 		}
+	} else if (jerr0 == -EIO || jerr0 == -ENOMEM) {
+		jrec = NGJ_UNREAD;
+		kfree(v->jv);
+		v->jv = NULL;
 	} else {
 		if (want_rw)
 			printk(KERN_WARNING "journal: $LogFile not usable for the journal; metadata goes in place\n");
@@ -274,14 +332,16 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 	v->bdev = b;
 	b->bd_super = v->sb;
 	v->sb->s_flags |= SB_ACTIVE;
-	*why_ro = want_rw ? NULL : "read-only requested";
+	*why_ro = want_rw ? NULL : big_sectors ? "sectors larger than 512 bytes (the journal needs 512)" : "read-only requested";
 	if (want_rw) {
 		/* Our journal clears the dirty flag in the write pass: in the check pass it only marks an unclean shutdown. */
 		int ours = jrec == NGJ_CLEAN, dirty = !!(vol->vol_flags & VOLUME_IS_DIRTY);
-		int need_write = ours && (v->jv->replayed || v->jv->torn || dirty);
+		int need_write = ours && (v->jv->replayed || v->jv->torn || v->jv->pair_pending || dirty);
 		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
 		if (jrec == NGJ_REPAIR)
-			*why_ro = "the journal shows metadata written in place without it (needs repair)";
+			*why_ro = "the journal says the volume needs repair (core errors, or metadata written in place without it)";
+		else if (jrec == NGJ_UNREAD)
+			*why_ro = "the journal could not be read (device error, a damaged $LogFile record, or no memory)";
 		else if (NVolErrors(vol))
 			*why_ro = "the core found errors at mount (MFTMirr, $LogFile or hibernation)";
 		else if ((vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK & ~(ours && pass == NGC_PASS_CHECK ? VOLUME_IS_DIRTY : 0)))
@@ -291,6 +351,15 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			*why_ro = "$LogFile was not shut down cleanly";
 		else if (pass == NGC_PASS_CHECK)
 			*why_ro = ngc_mount_check(v, vol, b, need_write || dirty);
+		/*
+		 * The journal demands a repair, or cannot say whether one is needed: read-only for good, as a
+		 * volume the check found damaged, so a system volume still boots (read-only, with a notice).
+		 */
+		if (jrec == NGJ_REPAIR || jrec == NGJ_UNREAD) {
+			v->damaged = 1;
+			snprintf(v->why, sizeof(v->why), "%s", *why_ro);
+			*why_ro = v->why;
+		}
 		if (*why_ro) {
 			/* Read-only from here on: nothing is written, the journal (if any) is only shown. */
 			kfree(v->jv);
@@ -331,7 +400,8 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 		if (vol->logfile_ino)
 			truncate_inode_pages(vol->logfile_ino->i_mapping, 0);
 		if (!jerr)
-			jerr = kshim_jnl_activate(b, v->jv->ext, v->jv->next, v->jv->lf_pages, v->jv->serial, jseq + 1);
+			jerr = kshim_jnl_activate(b, v->jv->ext, v->jv->next, v->jv->lf_pages, v->jv->serial, jseq + 1,
+						  v->jv->mft_lcn * v->jv->cluster + 3 * v->jv->recsz);
 		if (jerr) {
 			printk(KERN_ERR "journal: not active (%d); metadata goes in place\n", jerr);
 		} else if (!kshim_watch_add(&vol->free_clusters)) {
@@ -388,7 +458,8 @@ int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, in
 void ngc_umount(ngc_vol *v, int discard)
 {
 	struct super_block *sb = v->sb;
-	int errors;
+	unsigned long wr_failed;
+	int errors, clean;
 	if (discard) {
 		/* Pending journal pages are dropped and the core sees a read-only volume: put_super writes nothing. */
 		kshim_jnl_deactivate(v->bdev);
@@ -400,12 +471,21 @@ void ngc_umount(ngc_vol *v, int discard)
 		kfree(sb->s_root);
 		sb->s_root = NULL;
 	}
-	/* put_super frees the volume: read its error state first. */
-	errors = NVolErrors(NTFS_SB(sb));
+	/* put_super frees the volume: read its error state first. It clears the dirty flag of a
+	 * read-write volume without errors; a read-only volume keeps the flag it had. */
+	errors = NVolErrors(NTFS_SB(sb)) || v->failed;
+	clean = !errors && (!sb_rdonly(sb) || !(NTFS_SB(sb)->vol_flags & VOLUME_IS_DIRTY));
+	wr_failed = v->bdev->kshim_wr_failed;
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
-	if (v->bdev->jnl && !errors)
-		kshim_jnl_commit(v->bdev);
+	/*
+	 * put_super drops the results of its writes (and a synchronous bio's error is not latched): a write
+	 * that failed in it, or an asynchronous one before it, is missing from the overlay: commit nothing.
+	 */
+	if (v->bdev->kshim_wb_err || v->bdev->kshim_wr_failed != wr_failed)
+		errors = 1;
+	if (v->bdev->jnl && !errors && kshim_jnl_commit(v->bdev) >= 0 && clean)
+		kshim_jnl_retire(v->bdev);
 	if (v->watched)
 		kshim_watch_del(v->watched);
 	kfree(v->jv);
@@ -631,6 +711,43 @@ static int ngc_iget_impl(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
 	ngc_fix_type(vi);
 	*out = (ngc_node *)vi;
 	return 0;
+}
+
+/*
+ * An MFT number that comes from a caller (open by file ID): loaded only if it names an in-use base
+ * record.  The core treats a record it cannot load (an extension record, a number past the end of
+ * $MFT, a free record) as damage and records an error for the volume, which a caller must not be able
+ * to cause.
+ */
+static int ngc_iget_by_id_impl(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	u32 rs = vol->mft_record_size;
+	u64 off = mft_no << vol->mft_record_size_bits;
+	struct folio *f;
+	struct mft_record *m;
+	u8 *rec;
+	int err = 0;
+	*out = NULL;
+	if (rs > PAGE_SIZE || mft_no >= (u64)(i_size_read(vol->mft_ino) >> vol->mft_record_size_bits))
+		return -ENOENT;
+	rec = kmalloc(rs, GFP_NOFS);
+	if (!rec)
+		return -ENOMEM;
+	f = read_mapping_folio(vol->mft_ino->i_mapping, (pgoff_t)(off >> PAGE_SHIFT), NULL);
+	if (IS_ERR(f)) {
+		kfree(rec);
+		return PTR_ERR(f);
+	}
+	memcpy(rec, (u8 *)folio_address(f) + (off & (PAGE_SIZE - 1)), rs);
+	folio_put(f);
+	m = (struct mft_record *)rec;
+	/* No links: the reserved records 12-15 are in use without being files. */
+	if (m->magic != magic_FILE || post_read_mst_fixup((struct ntfs_record *)rec, rs) ||
+	    !(m->flags & MFT_RECORD_IN_USE) || m->base_mft_record || !m->link_count)
+		err = -ENOENT;
+	kfree(rec);
+	return err ? err : ngc_iget_impl(v, mft_no, out);
 }
 
 static void ngc_put_impl(ngc_node *n)
@@ -1143,6 +1260,8 @@ long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned i
 	struct runlist_element *rl;
 	int err;
 
+	if (v->bdev->kshim_gone)
+		return -EIO;
 	if (!NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) ||
 	    ((uintptr_t)buf & 3) || ((off | len) & (bs - 1)) || kshim_mapping_dirty(vi->i_mapping))
 		return -EAGAIN;
@@ -1211,9 +1330,41 @@ void ngc_icache_trim(ngc_vol *v)
 	kshim_icache_trim(v->sb);
 }
 
+/* The medium was replaced: no device I/O of this volume may happen any more (caller holds the volume lock). */
+void ngc_medium_gone(ngc_vol *v)
+{
+	v->bdev->kshim_gone = 1;
+	v->sb->s_flags |= SB_RDONLY;
+}
+
 int ngc_is_rw(ngc_vol *v)
 {
 	return !sb_rdonly(v->sb);
+}
+
+/*
+ * Writeback did not complete, so committing now would publish part of an operation (an MFT record
+ * without its bitmap change).  Nothing is committed: the overlay and the dirty pages stay, the
+ * volume on disk keeps the last committed state, and the caller's operation fails.  Out of memory
+ * (or writeback still finding work after every pass) is retried at the next consistency point.
+ * A device error marks the volume as needing repair and stops further changes.
+ */
+static int ngc_writeback_failed(struct ngc_vol *v, int err)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	int later = err == -ENOMEM || err == -EAGAIN || err == -ENOSPC || err == -EDQUOT;
+	printk(KERN_ERR "ngc: writeback failed %d: nothing committed%s\n", err,
+	       later ? ", retried later" : "; the volume needs repair and is read-only now");
+	if (err == -EAGAIN)
+		return -EIO;
+	if (!later) {
+		/* Sticky: the uncommitted changes can never be committed, so no later flush may succeed. */
+		v->failed = 1;
+		NVolSetErrors(vol);
+		kshim_jnl_mark_errors(v->bdev);
+		v->sb->s_flags |= SB_RDONLY;
+	}
+	return err;
 }
 
 /*
@@ -1224,16 +1375,31 @@ int ngc_is_rw(ngc_vol *v)
 static int ngc_commit_impl(struct ngc_vol *v)
 {
 	unsigned long long t0 = ngos_ticks();
-	int err = kshim_sync(v->sb);
-	for (int k = 0; !err && k < 4 && kshim_sb_dirty(v->sb); k++)
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	int err;
+	if (v->failed)
+		return -EIO;
+	/* Known errors keep VOLUME_IS_DIRTY on disk, so other systems check the volume too. */
+	if (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY) && !sb_rdonly(v->sb)) {
+		err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+		if (err)
+			return err;
+	}
+	err = kshim_sync(v->sb);
+	for (int k = 0; err == -EAGAIN && k < 4; k++)
 		err = kshim_sync(v->sb);
+	if (v->bdev->kshim_wb_err) {
+		/* An MFT write failed inside writeback: that folio is clean now, so this error wins. */
+		err = v->bdev->kshim_wb_err;
+		v->bdev->kshim_wb_err = 0;
+	}
 	ngos_prof(NGP_WRITEBACK, t0, 0);
+	if (err)
+		return ngc_writeback_failed(v, err);
 	if (!v->bdev->jnl)
-		return err ? err : blkdev_issue_flush(v->bdev);
-	if (NVolErrors(NTFS_SB(v->sb)))
+		return blkdev_issue_flush(v->bdev);
+	if (NVolErrors(vol))
 		kshim_jnl_mark_errors(v->bdev);
-	if (!err && kshim_sb_dirty(v->sb))
-		printk(KERN_ERR "journal: metadata still dirty after writeback; committing what was written\n");
 	if (!err) {
 		t0 = ngos_ticks();
 		err = kshim_jnl_commit(v->bdev);
@@ -1316,6 +1482,8 @@ static int ngc_sync_impl(ngc_vol *v)
 	int err;
 	if (NVolErrors(vol))
 		kshim_jnl_mark_errors(v->bdev);
+	if (v->failed || kshim_jnl_failed(v->bdev))
+		return -EIO;
 	if (sb_rdonly(v->sb))
 		return 0;
 	err = ngc_commit(v);
@@ -1324,6 +1492,9 @@ static int ngc_sync_impl(ngc_vol *v)
 		if (!err)
 			err = ngc_commit(v);
 	}
+	/* Clean on disk: no header stays behind for a later mount to trust after another driver's session. */
+	if (!err && !NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY) && !kshim_sb_dirty(v->sb))
+		err = kshim_jnl_retire(v->bdev);
 	return err;
 }
 
@@ -1336,6 +1507,8 @@ int ngc_commit_now(ngc_vol *v)
 {
 	if (NVolErrors(NTFS_SB(v->sb)))
 		kshim_jnl_mark_errors(v->bdev);
+	if (v->failed || kshim_jnl_failed(v->bdev))
+		return -EIO;
 	if (sb_rdonly(v->sb))
 		return 0;
 	return ngc_commit(v);
@@ -1356,7 +1529,10 @@ int ngc_dirty(ngc_vol *v)
 		kshim_jnl_mark_errors(v->bdev);
 	if (sb_rdonly(v->sb))
 		return 0;
-	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY) || kshim_jnl_pending(v->bdev);
+	/* Also errors not yet marked on disk, and a clean volume whose header is still to be retired. */
+	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY) || kshim_jnl_pending(v->bdev) ||
+	       (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY)) || kshim_jnl_retire_pending(v->bdev) ||
+	       kshim_jnl_errors_pending(v->bdev);
 }
 
 void ngc_jnl_report(ngc_vol *v)
@@ -2522,6 +2698,11 @@ int ngc_iget(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
 	int r = ngc_iget_impl(v, mft_no, out);
 	ngos_prof(NGP_IGET, t0, 0);
 	return r;
+}
+
+int ngc_iget_by_id(ngc_vol *v, unsigned long long mft_no, ngc_node **out)
+{
+	return ngc_iget_by_id_impl(v, mft_no, out);
 }
 
 void ngc_put(ngc_node *n)

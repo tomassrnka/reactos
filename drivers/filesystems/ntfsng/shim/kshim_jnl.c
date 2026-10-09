@@ -28,6 +28,12 @@ struct kshim_jnl {
 	int degraded;			/* the overlay failed: writes go in place under an UNJOURNALED header */
 	int errors;			/* the core reported errors: the header keeps saying so */
 	int readonly;			/* only a replay overlay for a read-only mount: no journal writes */
+	int retired;			/* the header page is 0xff: the volume was clean when it was written */
+	int failed;			/* a metadata write could not be protected: no write may reach the device */
+	int errors_durable;		/* a header with the errors mark has reached the medium */
+	int errors_writing;
+	u64 vol_rec_off;		/* device offset of $MFT record 3 ($Volume) */
+	u16 vol_usn;			/* its update sequence number on disk (after the last in-place pass) */
 	u8 *hdrpage;
 	unsigned long commits, committed_pages, max_tx, fallbacks, dropped, replay_pages;
 };
@@ -61,6 +67,20 @@ u64 kj_slot_page(u64 slot)
 	return p;
 }
 
+/* The journal's own device I/O: nothing reaches a medium that replaced the volume's. */
+static int kj_dev_read(struct block_device *b, u64 off, void *buf, unsigned int len)
+{
+	return b->kshim_gone || ngos_dev_read(b->osdev, off, buf, len);
+}
+static int kj_dev_write(struct block_device *b, u64 off, void *buf, unsigned int len)
+{
+	return b->kshim_gone || ngos_dev_write(b->osdev, off, buf, len);
+}
+static int kj_dev_flush(struct block_device *b)
+{
+	return b->kshim_gone || ngos_dev_flush(b->osdev);
+}
+
 int kj_page_dev(const struct kj_ext *ext, int next, u64 page, u64 *dev)
 {
 	for (int i = 0; i < next; i++)
@@ -69,6 +89,65 @@ int kj_page_dev(const struct kj_ext *ext, int next, u64 page, u64 *dev)
 			return 0;
 		}
 	return -EIO;
+}
+
+/* The update sequence number of an MFT record from its first bytes (the array lies in the first sector). */
+int kj_rec_usn(const u8 *rec, size_t avail, u16 *usn)
+{
+	u16 uo;
+	if (avail < 8 || memcmp(rec, "FILE", 4))
+		return -EIO;
+	uo = rec[4] | rec[5] << 8;
+	if ((uo & 1) || (size_t)uo + 2 > avail || uo + 2 > 512)
+		return -EIO;
+	*usn = rec[uo] | rec[uo + 1] << 8;
+	return 0;
+}
+
+/* $Volume's number as it is on the device (at activation, before the overlay holds anything). */
+/* @buf: KJ_PAGE bytes of scratch (the header page buffer, between header writes): no allocation. */
+static int kj_read_vol_usn(struct block_device *b, u64 off, u16 *usn, u8 *buf)
+{
+	unsigned int bs = b->logical_block_size >= KJ_SECT ? b->logical_block_size : KJ_SECT;
+	u64 base = off & ~(u64)(bs - 1);
+	if (bs > KJ_PAGE)
+		return -EIO;
+	return kj_dev_read(b, base, buf, bs) ? -EIO : kj_rec_usn(buf + (off - base), bs - (size_t)(off - base), usn);
+}
+
+static struct kj_ent *kj_find(struct kshim_jnl *j, u64 blk);
+
+/* $Volume's number once the overlay is in place: from the overlay when it holds the record's first sector. */
+static u16 kj_vol_usn_after(struct kshim_jnl *j)
+{
+	struct kj_ent *e = kj_find(j, j->vol_rec_off / KJ_PAGE);
+	size_t in = (size_t)(j->vol_rec_off % KJ_PAGE);
+	u16 usn;
+	if (e && (e->mask & (1u << (in / KJ_SECT))) && !kj_rec_usn(e->data + in, KJ_SECT - in % KJ_SECT, &usn))
+		return usn;
+	return j->vol_usn;
+}
+
+/*
+ * After an in-place pass that did not come from the overlay alone (degraded writes went straight to the
+ * device): the number as it is on the medium now.
+ */
+/* Nonzero: the number on the medium is unknown, so no header may be written that records one. */
+static int kj_resync_vol_usn(struct block_device *b, struct kshim_jnl *j)
+{
+	return kj_read_vol_usn(b, j->vol_rec_off, &j->vol_usn, j->hdrpage);
+}
+
+int kshim_jnl_failed(struct block_device *b)
+{
+	return b->jnl && b->jnl->failed;
+}
+
+/* A clean volume whose header is still on the medium: the flusher retires it (an earlier retire failed). */
+int kshim_jnl_retire_pending(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	return j && !j->readonly && !j->retired && !j->npages && !j->degraded && !j->errors && !j->failed;
 }
 
 static int kj_in_area(struct kshim_jnl *j, u64 off, size_t len)
@@ -104,7 +183,7 @@ static void kj_drop_all(struct kshim_jnl *j)
 }
 
 static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, u32 npages, u32 ndesc,
-		u32 pcrc, int flush)
+		u32 pcrc, int flush, u16 usn_new)
 {
 	struct kj_hdr *h = (struct kj_hdr *)j->hdrpage;
 	u64 dev;
@@ -124,16 +203,39 @@ static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, 
 	h->serial_hi = (u32)(j->serial >> 32);
 	h->page_size = KJ_PAGE;
 	h->hwm = j->hwm;
+	h->vol_usn_old = j->vol_usn;
+	h->vol_usn_new = usn_new;
+	h->flags = j->errors ? KJ_FL_ERRORS : 0;
 	h->hdr_crc = kj_crc32(0, h, offsetof(struct kj_hdr, hdr_crc));
-	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || ngos_dev_write(b->osdev, dev, j->hdrpage, KJ_PAGE))
+	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE))
 		return -EIO;
-	if (flush && ngos_dev_flush(b->osdev))
+	j->retired = 0;
+	if (flush && kj_dev_flush(b))
 		return -EIO;
 	return 0;
 }
 
+/*
+ * The volume is clean on disk (VOLUME_IS_DIRTY cleared and committed, nothing held): the header page
+ * goes back to 0xff, so no later mount acts on a header older than what another driver may write
+ * next.  The next commit writes a header again before anything goes in place.
+ */
+int kshim_jnl_retire(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	u64 dev;
+	if (!j || j->readonly || j->retired || j->npages || j->degraded || j->errors || j->failed)
+		return 0;
+	memset(j->hdrpage, 0xff, KJ_PAGE);
+	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE) ||
+	    kj_dev_flush(b))
+		return -EIO;
+	j->retired = 1;
+	return 0;
+}
+
 int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int next, u64 lf_pages,
-		u64 serial, u64 seq)
+		u64 serial, u64 seq, u64 vol_rec_off)
 {
 	struct kshim_jnl *j;
 	int err;
@@ -157,9 +259,20 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 	j->lf_pages = lf_pages;
 	j->serial = serial;
 	j->seq = seq;
+	j->vol_rec_off = vol_rec_off;
 	while (kj_slot_page(j->capacity) < lf_pages)
 		j->capacity++;
-	err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 1);
+	/*
+	 * The volume is clean at activation (recovery cleared the dirty flag, or the mount refused a dirty
+	 * one), so no header is left on the medium: the first commit writes one.
+	 */
+	err = kj_read_vol_usn(b, vol_rec_off, &j->vol_usn, j->hdrpage);
+	if (!err) {
+		b->jnl = j;
+		if (kshim_jnl_retire(b))
+			printk(KERN_ERR "journal: could not retire the header at mount; the flusher tries again\n");
+		b->jnl = NULL;
+	}
 	if (err) {
 		kfree(j->ext);
 		kfree(j->hdrpage);
@@ -221,7 +334,7 @@ int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len
 		/* A partial sector not held yet starts from the device copy; bits change only after that. */
 		for (size_t s = in / KJ_SECT * KJ_SECT; s < in + n; s += KJ_SECT)
 			if (!(e->mask & (1u << (s / KJ_SECT))) && (s < in || s + KJ_SECT > in + n) &&
-			    ngos_dev_read(b->osdev, blk * KJ_PAGE + s, e->data + s, KJ_SECT))
+			    kj_dev_read(b, blk * KJ_PAGE + s, e->data + s, KJ_SECT))
 				return -EIO;
 		memcpy(e->data + in, buf, n);
 		for (size_t s = in / KJ_SECT * KJ_SECT; s < in + n; s += KJ_SECT)
@@ -280,7 +393,7 @@ struct kj_batch {
 
 static void kj_batch_flush(struct kj_batch *w)
 {
-	if (w->len && !w->err && ngos_dev_write(w->b->osdev, w->dev, w->buf, (unsigned int)w->len))
+	if (w->len && !w->err && kj_dev_write(w->b, w->dev, w->buf, (unsigned int)w->len))
 		w->err = -EIO;
 	w->len = 0;
 }
@@ -290,7 +403,7 @@ static void kj_batch_add(struct kj_batch *w, u64 dev, const void *data, size_t l
 	if (w->err)
 		return;
 	if (!w->buf) {
-		if (ngos_dev_write(w->b->osdev, dev, (void *)data, (unsigned int)len))
+		if (kj_dev_write(w->b, dev, (void *)data, (unsigned int)len))
 			w->err = -EIO;
 		return;
 	}
@@ -368,9 +481,13 @@ int kshim_jnl_commit(struct block_device *b)
 	unsigned long n, k = 0, ndesc;
 	u32 crc = 0;
 	int err = 0;
+	u16 usn_new;
+	if (j && j->failed)
+		return -EIO;
 	if (!j || (!j->npages && !j->degraded))
 		return 0;	/* nothing written: the caller flushes the device itself */
 	n = j->npages;
+	usn_new = kj_vol_usn_after(j);
 	ndesc = (n + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE;
 	if (j->readonly)
 		return 0;
@@ -380,14 +497,18 @@ int kshim_jnl_commit(struct block_device *b)
 		if (!v || !tmp) {
 			/* No memory to build a transaction: in place, under an UNJOURNALED header. */
 			j->fallbacks++;
-			err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1);
-			if (!err)
-				err = kj_apply_buckets(b, j);
-			if (!err && ngos_dev_flush(b->osdev))
+			err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
+			if (err)
+				goto out;	/* nothing went in place: the overlay stays for the next attempt */
+			j->degraded = 1;	/* until the whole overlay is in place */
+			err = kj_apply_buckets(b, j);
+			if (!err && kj_dev_flush(b))
 				err = -EIO;
+			if (!err)
+				err = kj_resync_vol_usn(b, j);	/* failing: stays degraded, the next commit redoes it */
 			if (!err) {
 				j->degraded = 0;
-				err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 1);
+				err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 1, j->vol_usn);
 			}
 			goto done;
 		}
@@ -401,14 +522,18 @@ int kshim_jnl_commit(struct block_device *b)
 		j->fallbacks++;
 		printk(KERN_WARNING "journal: %lu pages do not fit (%llu slots) or degraded=%d: writing in place\n",
 		       n, (unsigned long long)j->capacity, j->degraded);
-		err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1);
-		if (!err)
-			err = kj_apply(b, v, n);
-		if (!err && ngos_dev_flush(b->osdev))
+		err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
+		if (err)
+			goto out;
+		j->degraded = 1;
+		err = kj_apply(b, v, n);
+		if (!err && kj_dev_flush(b))
 			err = -EIO;
+		if (!err)
+			err = kj_resync_vol_usn(b, j);
 		if (!err) {
 			j->degraded = 0;
-			err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 1);
+			err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 1, j->vol_usn);
 		}
 		goto done;
 	}
@@ -447,23 +572,30 @@ int kshim_jnl_commit(struct block_device *b)
 		kfree(w.buf);
 		err = w.err;
 	}
+	/*
+	 * The file data written in place since the last commit and the slots just written must be on
+	 * the medium before the record that makes replay install the metadata pointing at them: a
+	 * volatile write cache may otherwise keep the header and lose them.
+	 */
+	if (!err && kj_dev_flush(b))
+		err = -EIO;
 	if (err)
 		goto out;
 	j->seq++;
 	if (ndesc + n > j->hwm)
 		j->hwm = ndesc + n;
-	err = kj_hdr_write(b, j, KJ_ST_COMMITTED, (u32)n, (u32)ndesc, crc, 1);
+	err = kj_hdr_write(b, j, KJ_ST_COMMITTED, (u32)n, (u32)ndesc, crc, 1, usn_new);
 	if (err)
 		goto out;
 	if (kshim_jnl_fault && j->commits + 1 >= kshim_jnl_fault && n >= 2) {
 		kj_apply(b, v, n / 2);
-		ngos_dev_flush(b->osdev);
+		kj_dev_flush(b);
 		printk(KERN_ERR "journal: fault injected in commit %lu seq %llu: %lu of %lu pages in place\n",
 		       j->commits + 1, (unsigned long long)j->seq, n / 2, n);
 		ngos_bugcheck("journal fault injection", __FILE__, __LINE__);
 	}
 	err = kj_apply(b, v, n);
-	if (!err && ngos_dev_flush(b->osdev))
+	if (!err && kj_dev_flush(b))
 		err = -EIO;
 	if (err) {
 		/*
@@ -472,10 +604,15 @@ int kshim_jnl_commit(struct block_device *b)
 		 * pass of the whole overlay succeeds.
 		 */
 		j->degraded = 1;
-		kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1);
+		if (kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn)) {
+			/* Neither the transaction nor the marker: only a replay of the COMMITTED one can help now. */
+			j->failed = 1;
+			printk(KERN_ERR "journal: device writes failing: no further writes until the next mount\n");
+		}
 		goto out;
 	}
-	err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 0);
+	j->vol_usn = usn_new;
+	err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 0, j->vol_usn);
 done:
 	if (!err) {
 		j->commits++;
@@ -544,11 +681,26 @@ void kshim_watch_hit(atomic64_t *v)
 void kshim_jnl_mark_errors(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
-	if (!j || j->errors || j->readonly)
+	if (!j || j->readonly)
 		return;
-	j->errors = 1;
-	printk(KERN_ERR "journal: the core reported errors: the volume stays marked for repair\n");
-	kj_hdr_write(b, j, KJ_ST_ERRORS, 0, 0, 0, 1);
+	if (!__atomic_exchange_n(&j->errors, 1, __ATOMIC_SEQ_CST))
+		printk(KERN_ERR "journal: the core reported errors: the volume stays marked for repair\n");
+	/*
+	 * Not over a COMMITTED header whose transaction could not be applied (failed): its replay is
+	 * what the next mount needs.  Reached from shared (read) holders too: one writer at a time,
+	 * and tried again (ngc_dirty) until the header is on the medium.
+	 */
+	if (j->failed || j->errors_durable || __atomic_exchange_n(&j->errors_writing, 1, __ATOMIC_SEQ_CST))
+		return;
+	if (!kj_hdr_write(b, j, KJ_ST_ERRORS, 0, 0, 0, 1, j->vol_usn))
+		j->errors_durable = 1;
+	__atomic_store_n(&j->errors_writing, 0, __ATOMIC_SEQ_CST);
+}
+
+int kshim_jnl_errors_pending(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	return j && !j->readonly && j->errors && !j->errors_durable && !j->failed;
 }
 
 unsigned long kshim_jnl_capacity(struct block_device *b)
@@ -590,13 +742,20 @@ int kshim_jnl_ro_page(struct block_device *b, u64 blk, u8 mask, const u8 *data)
 	return 0;
 }
 
-/* The overlay could not take a write: everything goes in place until the next commit. */
-void kshim_jnl_degrade(struct block_device *b)
+/*
+ * The overlay could not take a write: everything goes in place until the next commit, once the
+ * UNJOURNALED header is on the medium.  Nonzero: it is not, and the write must fail.
+ */
+int kshim_jnl_degrade(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
+	if (j && j->failed)
+		return -EIO;
 	if (!j || j->degraded)
-		return;
-	j->degraded = 1;
+		return 0;
 	printk(KERN_ERR "journal: out of memory for the overlay: writing in place until the next commit\n");
-	kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1);
+	if (kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn))
+		return -EIO;
+	j->degraded = 1;
+	return 0;
 }

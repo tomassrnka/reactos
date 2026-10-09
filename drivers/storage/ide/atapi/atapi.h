@@ -228,6 +228,7 @@ typedef struct _ATAPORT_IO_CONTEXT
 #define SRB_FLAG_RETRY_COUNT_MASK  0x000000FF
 #define SRB_FLAG_LOW_MEM_RETRY     0x00000100
 #define SRB_FLAG_PIO_RETRY         0x00000200
+#define SRB_FLAG_FUA_FLUSH         0x00000400 /* the write of an emulated FUA write is done, flush next */
 
 #define SRB_SET_FLAGS(Srb, Flags) \
     ((Srb)->SrbExtension = (PVOID)((ULONG_PTR)(Srb)->SrbExtension | (Flags)))

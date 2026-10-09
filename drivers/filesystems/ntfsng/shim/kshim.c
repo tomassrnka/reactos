@@ -26,6 +26,78 @@ bool kshim_mapping_dirty(struct address_space *m);
 int kshim_sync(struct super_block *sb);
 
 /* ------------------------------------------------------------- printk */
+/*
+ * Error-level messages, kept per thread for kshim_errseq_check: the core prints a report and then,
+ * on the same thread, reaches errseq_check through ntfs_handle_error.  Other threads (other volumes,
+ * shared readers) cannot replace a thread's message in between.
+ */
+#define KSHIM_ERR_SLOTS 64
+static struct { void *thread; unsigned long long stamp; char msg[192]; } kshim_err_slot[KSHIM_ERR_SLOTS];
+static unsigned long long kshim_err_stamp;
+#define KSHIM_ERR_LOST 16
+static void *kshim_err_lost[KSHIM_ERR_LOST];	/* threads whose slot was reused: their check cannot trust "no message" */
+static unsigned int kshim_err_lost_next;
+static int kshim_err_lost_overflow;	/* a lost thread fell out of the ring too: no check can trust "no message" */
+static uintptr_t kshim_err_lock;
+void (*kshim_core_error)(struct super_block *sb, const char *msg);
+
+static void kshim_err_record(const char *msg)
+{
+	void *t = ngos_current_thread();
+	unsigned char irql = ngos_spin_lock(&kshim_err_lock);
+	unsigned int i;
+	for (i = 0; i < KSHIM_ERR_SLOTS && kshim_err_slot[i].thread != t; i++)
+		;
+	if (i == KSHIM_ERR_SLOTS)
+		for (i = 0; i < KSHIM_ERR_SLOTS && kshim_err_slot[i].thread; i++)
+			;
+	if (i == KSHIM_ERR_SLOTS) {
+		/* The oldest report goes: reports never checked (a read-only volume) are the first to. */
+		i = 0;
+		for (unsigned int k = 1; k < KSHIM_ERR_SLOTS; k++)
+			if (kshim_err_slot[k].stamp < kshim_err_slot[i].stamp)
+				i = k;
+		if (kshim_err_lost[kshim_err_lost_next % KSHIM_ERR_LOST])
+			kshim_err_lost_overflow = 1;
+		kshim_err_lost[kshim_err_lost_next++ % KSHIM_ERR_LOST] = kshim_err_slot[i].thread;
+	}
+	kshim_err_slot[i].thread = t;
+	kshim_err_slot[i].stamp = ++kshim_err_stamp;
+	strncpy(kshim_err_slot[i].msg, msg, sizeof(kshim_err_slot[i].msg) - 1);
+	kshim_err_slot[i].msg[sizeof(kshim_err_slot[i].msg) - 1] = 0;
+	ngos_spin_unlock(&kshim_err_lock, irql);
+}
+
+int kshim_errseq_check(errseq_t *e, errseq_t since)
+{
+	struct super_block *sb = container_of(e, struct super_block, s_wb_err);
+	char msg[sizeof(kshim_err_slot[0].msg)];
+	void *t = ngos_current_thread();
+	unsigned char irql;
+	(void)since;
+	msg[0] = 0;
+	irql = ngos_spin_lock(&kshim_err_lock);
+	for (unsigned int i = 0; i < KSHIM_ERR_SLOTS; i++)
+		if (kshim_err_slot[i].thread == t) {
+			memcpy(msg, kshim_err_slot[i].msg, sizeof(msg));
+			kshim_err_slot[i].thread = NULL;
+			break;
+		}
+	if (!msg[0])
+		for (unsigned int i = 0; i < KSHIM_ERR_LOST; i++)
+			if (kshim_err_lost[i] == t) {
+				kshim_err_lost[i] = NULL;
+				strcpy(msg, "corrupt? (the report was lost)");	/* unknown: counted as damage */
+				break;
+			}
+	if (!msg[0] && kshim_err_lost_overflow)
+		strcpy(msg, "corrupt? (reports were lost)");
+	ngos_spin_unlock(&kshim_err_lock, irql);
+	if (kshim_core_error)
+		kshim_core_error(sb, msg);
+	return 0;
+}
+
 int printk(const char *fmt, ...)
 {
 	va_list ap;
@@ -39,12 +111,26 @@ int printk(const char *fmt, ...)
 	if (lvl > 4 && !kshim_verbose)
 		return 0;
 	buf = ngos_alloc(512);
-	if (!buf)
+	if (!buf) {
+		/* An error report still reaches the classifier: formatted into a spare buffer, not printed. */
+		if (lvl <= 3) {
+			static char spare[256];
+			static uintptr_t spare_lock;
+			unsigned char irql = ngos_spin_lock(&spare_lock);
+			va_start(ap, fmt);
+			vsnprintf(spare, sizeof(spare), fmt, ap);
+			va_end(ap);
+			kshim_err_record(spare);
+			ngos_spin_unlock(&spare_lock, irql);
+		}
 		return 0;
+	}
 	memcpy(buf, "ntfsng: ", 8);
 	va_start(ap, fmt);
 	vsnprintf(buf + 8, 512 - 8, fmt, ap);
 	va_end(ap);
+	if (lvl <= 3)
+		kshim_err_record(buf + 8);
 	ngos_print(buf);
 	ngos_free(buf);
 	return 0;
@@ -508,8 +594,18 @@ static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, s
 	kfree(mid);
 	return err;
 }
+static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf, size_t len);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len)
 {
+	int err = kshim_dev_rw_do(b, write, off, buf, len);
+	if (err && write)
+		b->kshim_wr_failed++;
+	return err;
+}
+static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf, size_t len)
+{
+	if (b->kshim_gone)
+		return -EIO;
 	if (write) {
 		struct super_block *sb = b->bd_super;
 		if (!sb || (sb_rdonly(sb) && !b->kshim_remounting)) {
@@ -522,11 +618,14 @@ int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t l
 			return -EIO;
 		kshim_counter_writes++;
 		kshim_counter_write_bytes += len;
+		if (b->jnl && kshim_jnl_failed(b))
+			return -EIO;
 		if (b->jnl && !b->kshim_direct) {
 			int r = kshim_jnl_capture(b, off, buf, len);
 			if (r != -ENOMEM)
 				return r;
-			kshim_jnl_degrade(b);
+			if (kshim_jnl_degrade(b))
+				return -EIO;
 		}
 		if (b->jnl)
 			kshim_jnl_patch(b, 1, off, buf, len);
@@ -553,18 +652,153 @@ int bdev_rw_virt(struct block_device *b, sector_t s, void *data, size_t len, blk
 {
 	return kshim_dev_rw(b, (op & REQ_OP_MASK) == REQ_OP_WRITE, s << SECTOR_SHIFT, data, len);
 }
-struct bio *bio_alloc(struct block_device *b, unsigned short nr, blk_opf_t op, gfp_t g)
+/*
+ * Linux's bio_alloc with a waiting gfp mask does not fail, and the core's MFT writers use its result
+ * unchecked: when the pool is empty a write bio comes from a reserve instead, waiting for a slot if need
+ * be.  A writer can hold one bio while it takes a second for the MFT mirror, which it submits and puts
+ * at once; so a thread that already holds a first-tier slot takes from a second tier of the same size,
+ * whose holders never wait, and every first-tier holder can finish.  Reads check for NULL themselves.
+ * The core abandons a bio on one MFT writeback error exit: a reserve bio taken inside a writeback scope
+ * (kshim_wb_scope_enter/exit, per thread, nested) that is still out when that scope reaches its next
+ * folio or returns belonged to a frame that is gone, so it is put back then.
+ */
+#define KSHIM_BIO_RESERVE 8
+#define KSHIM_BIO_RESERVE_VECS 64
+static struct kshim_bio_slot {
+	struct bio bio; struct bio_vec vec[KSHIM_BIO_RESERVE_VECS]; int used; void *owner; int depth;
+} kshim_bio_reserve[2][KSHIM_BIO_RESERVE];
+#define KSHIM_WB_SCOPES 256
+static struct { void *thread; int depth; } kshim_wb_scope[KSHIM_WB_SCOPES];
+static uintptr_t kshim_wb_scope_lock;
+static int kshim_wb_find_locked(void *t)
+{
+	for (int i = 0; i < KSHIM_WB_SCOPES; i++)
+		if (kshim_wb_scope[i].thread == t)
+			return i;
+	return -1;
+}
+static int kshim_wb_depth_locked(void *t)
+{
+	int i = kshim_wb_find_locked(t);
+	return i < 0 ? 0 : kshim_wb_scope[i].depth;
+}
+/* Puts back the thread's reserve bios taken at scope depth @depth or deeper (> 0): their frames have returned. */
+static void kshim_wb_reclaim_locked(void *t, int depth)
+{
+	for (int r = 0; r < 2; r++)
+		for (int k = 0; k < KSHIM_BIO_RESERVE; k++) {
+			struct kshim_bio_slot *sl = &kshim_bio_reserve[r][k];
+			if (__atomic_load_n(&sl->used, __ATOMIC_SEQ_CST) && sl->owner == t && sl->depth >= depth) {
+				__atomic_store_n(&sl->owner, NULL, __ATOMIC_SEQ_CST);
+				__atomic_store_n(&sl->used, 0, __ATOMIC_SEQ_CST);
+			}
+		}
+}
+void kshim_wb_scope_enter(void)
+{
+	void *t = ngos_current_thread();
+	for (;;) {
+		unsigned char irql = ngos_spin_lock(&kshim_wb_scope_lock);
+		int i = kshim_wb_find_locked(t);
+		if (i < 0)
+			i = kshim_wb_find_locked(NULL);
+		if (i >= 0) {
+			kshim_wb_scope[i].thread = t;
+			kshim_wb_scope[i].depth++;
+			ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+			return;
+		}
+		ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+		ngos_yield();	/* every entry in use: wait for a scope to end, so that every scope is tracked */
+	}
+}
+void kshim_wb_scope_exit(void)
+{
+	void *t = ngos_current_thread();
+	unsigned char irql = ngos_spin_lock(&kshim_wb_scope_lock);
+	int i = kshim_wb_find_locked(t);
+	if (i >= 0) {
+		kshim_wb_reclaim_locked(t, kshim_wb_scope[i].depth);
+		if (!--kshim_wb_scope[i].depth)
+			kshim_wb_scope[i].thread = NULL;
+	}
+	ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+}
+/* Between two folios of one writepages walk: the frames that wrote the last folio have returned. */
+void kshim_wb_scope_point(void)
+{
+	void *t = ngos_current_thread();
+	unsigned char irql = ngos_spin_lock(&kshim_wb_scope_lock);
+	int i = kshim_wb_find_locked(t);
+	if (i >= 0)
+		kshim_wb_reclaim_locked(t, kshim_wb_scope[i].depth);
+	ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+}
+static struct bio *bio_alloc_pool(unsigned short n, gfp_t g)
 {
 	struct bio *bio = kzalloc(sizeof(*bio), g);
+	if (bio) {
+		bio->bi_io_vec = kcalloc(n, sizeof(struct bio_vec), g);
+		if (!bio->bi_io_vec) {
+			kfree(bio);
+			bio = NULL;
+		}
+	}
+	return bio;
+}
+static struct bio *bio_alloc_reserve(void)
+{
+	void *t = ngos_current_thread();
+	int tier = 0;
+	for (int i = 0; i < KSHIM_BIO_RESERVE; i++)
+		if (__atomic_load_n(&kshim_bio_reserve[0][i].owner, __ATOMIC_SEQ_CST) == t)
+			tier = 1;
+	for (int i = 0; i < KSHIM_BIO_RESERVE; i++) {
+		struct kshim_bio_slot *sl = &kshim_bio_reserve[tier][i];
+		if (!__atomic_exchange_n(&sl->used, 1, __ATOMIC_SEQ_CST)) {
+			memset(&sl->bio, 0, sizeof(sl->bio));
+			memset(sl->vec, 0, sizeof(sl->vec));
+			sl->bio.bi_io_vec = sl->vec;
+			{
+				unsigned char irql = ngos_spin_lock(&kshim_wb_scope_lock);
+				sl->depth = kshim_wb_depth_locked(t);
+				ngos_spin_unlock(&kshim_wb_scope_lock, irql);
+			}
+			__atomic_store_n(&sl->owner, t, __ATOMIC_SEQ_CST);
+			return &sl->bio;
+		}
+	}
+	return NULL;
+}
+struct bio *bio_alloc(struct block_device *b, unsigned short nr, blk_opf_t op, gfp_t g)
+{
+	unsigned short n = nr ? nr : 1;
+	struct bio *bio = bio_alloc_pool(n, g);
+	while (!bio && n <= KSHIM_BIO_RESERVE_VECS && (op & REQ_OP_MASK) == REQ_OP_WRITE) {
+		bio = bio_alloc_reserve();
+		if (!bio) {
+			ngos_yield();
+			bio = bio_alloc_pool(n, g);
+		}
+	}
 	if (!bio)
 		return NULL;
 	bio->bi_bdev = b; bio->bi_opf = op;
-	bio->bi_max_vecs = nr ? nr : 1;
-	bio->bi_io_vec = kcalloc(bio->bi_max_vecs, sizeof(struct bio_vec), g);
-	if (!bio->bi_io_vec) { kfree(bio); return NULL; }
+	bio->bi_max_vecs = n;
 	return bio;
 }
-void bio_put(struct bio *b) { kfree(b->bi_io_vec); kfree(b); }
+void bio_put(struct bio *b)
+{
+	for (int t = 0; t < 2; t++)
+		for (int i = 0; i < KSHIM_BIO_RESERVE; i++)
+			if (b == &kshim_bio_reserve[t][i].bio) {
+				__atomic_store_n(&kshim_bio_reserve[t][i].owner, NULL, __ATOMIC_SEQ_CST);
+				__atomic_store_n(&kshim_bio_reserve[t][i].used, 0, __ATOMIC_SEQ_CST);
+				return;
+			}
+	kfree(b->bi_io_vec);
+	kfree(b);
+}
 int bio_add_page(struct bio *b, struct page *p, unsigned int len, unsigned int off)
 {
 	/* Like the block layer, merge a range contiguous with the last segment of the same page. */
@@ -597,7 +831,9 @@ static int kshim_bio_do(struct bio *b)
 }
 void submit_bio(struct bio *b)
 {
-	kshim_bio_do(b);
+	/* The core's MFT write completion ignores bi_status: keep the error for the next consistency point. */
+	if (kshim_bio_do(b) && (b->bi_opf & REQ_OP_MASK) == REQ_OP_WRITE && !b->bi_bdev->kshim_wb_err)
+		b->bi_bdev->kshim_wb_err = -EIO;
 	if (b->bi_end_io) b->bi_end_io(b);
 }
 int submit_bio_wait(struct bio *b) { return kshim_bio_do(b); }
@@ -1199,17 +1435,35 @@ void kshim_icache_trim(struct super_block *sb)
 {
 	struct inode *v;
 	int budget = 64;	/* the page count also holds pages of inodes in use: evict a bounded batch for it */
-	while ((v = kshim_lru_take(sb, sb->kshim_lru_count > KSHIM_ICACHE_UNUSED ||
+	long tries = sb->kshim_lru_count + 64;	/* an inode whose writeback fails goes back on the list */
+	while (tries-- > 0 && (v = kshim_lru_take(sb, sb->kshim_lru_count > KSHIM_ICACHE_UNUSED ||
 				   (sb->kshim_lru_count && kshim_pc_pages > KSHIM_PC_PAGES_SOFT && budget-- > 0))))
 		kshim_lru_evict(v);
 }
 
-/* Linux writes an inode back before it is evicted.  @i holds one reference (dropped here); true: still in use. */
+/*
+ * Linux writes an inode back before it is evicted.  @i holds one reference (dropped here); true: still
+ * in use, or kept because its writeback failed: it stays cached and unused, dirty, so the next sync
+ * writes it, instead of eviction dropping its dirty pages.
+ */
+unsigned long kshim_counter_wb_kept;
 static bool kshim_writeback_last(struct inode *i)
 {
 	if (i->i_nlink && !(i->i_state & (I_FREEING | I_NEW)) && i->i_sb && !sb_rdonly(i->i_sb) &&
-	    ((i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping)))
-		write_inode_now(i, 1);
+	    ((i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping))) {
+		int err = write_inode_now(i, 1);
+		if (err || (i->i_state & I_DIRTY) || kshim_mapping_dirty(i->i_mapping)) {
+			if (kshim_counter_wb_kept++ < 8)
+				printk(KERN_ERR "writeback of ino %llu failed %d: kept in memory\n",
+				       (unsigned long long)i->i_ino, err);
+			i->i_state |= I_DIRTY_PAGES;
+			mutex_lock(&kshim_inode_lock);
+			if (atomic_dec_and_test(&i->i_count) && i->i_hash.pprev && !(i->i_state & (I_FREEING | I_NEW)))
+				lru_add_locked(i);
+			mutex_unlock(&kshim_inode_lock);
+			return true;
+		}
+	}
 	return !atomic_dec_and_test(&i->i_count);
 }
 
@@ -1298,9 +1552,10 @@ int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
 void kshim_icache_flush(struct super_block *sb, int all)
 {
 	struct inode *v;
+	long tries = sb->kshim_lru_count + 64;
 	if (all)
 		sb->kshim_no_icache = 1;
-	while ((v = kshim_lru_take(sb, true)))
+	while (tries-- > 0 && (v = kshim_lru_take(sb, true)))
 		kshim_lru_evict(v);
 }
 void clear_inode(struct inode *i) { i->i_state |= I_CLEAR; }

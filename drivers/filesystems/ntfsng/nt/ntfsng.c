@@ -398,6 +398,32 @@ static BOOLEAN NgIsVolumeOpen(PIRP Irp)
 }
 
 /*
+ * Requests on a volume handle that may reach the core run under the create gate (shared), as creates
+ * and cleanups do: a dismount, which takes it exclusive, then either runs before them (they see the
+ * volume dismounted) or after them, never while they use the core it frees.  The lock holder can send
+ * them on other threads of an asynchronous handle while its own dismount runs.  Lock and dismount take
+ * the gate themselves; unlock only changes the lock owner and the VPB, without the core.
+ */
+static BOOLEAN NgVolumeRequestGated(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    UCHAR Major = Stack->MajorFunction;
+    if (!NgIsVolumeOpen(Irp) || (Irp->Flags & IRP_PAGING_IO))
+        return FALSE;
+    if (Major == IRP_MJ_CREATE || Major == IRP_MJ_CLEANUP || Major == IRP_MJ_CLOSE ||
+        Major == IRP_MJ_DEVICE_CONTROL || Major == IRP_MJ_LOCK_CONTROL)
+        return FALSE;
+    if (Major == IRP_MJ_FILE_SYSTEM_CONTROL)
+    {
+        ULONG Code = Stack->Parameters.FileSystemControl.FsControlCode;
+        if (Stack->MinorFunction != IRP_MN_USER_FS_REQUEST && Stack->MinorFunction != IRP_MN_KERNEL_CALL)
+            return FALSE;
+        if (Code == FSCTL_LOCK_VOLUME || Code == FSCTL_UNLOCK_VOLUME || Code == FSCTL_DISMOUNT_VOLUME)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/*
  * Volume handles pass storage IOCTLs (geometry, partition info, mount manager queries)
  * through.  Files and directories refuse device controls: kernel32 takes a
  * directory whose handle answers IOCTL_MOUNTDEV_QUERY_DEVICE_NAME for a volume root.
@@ -487,6 +513,9 @@ static BOOLEAN NTAPI NgFastIoCheckIfPossible(PFILE_OBJECT FileObject, PLARGE_INT
     UNREFERENCED_PARAMETER(DeviceObject);
     if (!CheckForReadOperation || !Fcb || Fcb->IsVolume || Fcb->IsDirectory)
         return FALSE;
+    /* Cached data of a medium that is gone, or may be: the IRP path verifies first. */
+    if (Fcb->Vcb->WrongMedia || (Fcb->Vcb->Removable && (Fcb->Vcb->Vpb->RealDevice->Flags & DO_VERIFY_VOLUME)))
+        return FALSE;
     Len.QuadPart = Length;
     return FsRtlFastCheckLockForRead(&Fcb->FileLock, FileOffset, &Len, LockKey, FileObject, PsGetCurrentProcess());
 }
@@ -512,6 +541,43 @@ typedef NTSTATUS (*NG_HANDLER)(PDEVICE_OBJECT, PIRP);
 static NG_HANDLER NgHandlers[IRP_MJ_MAXIMUM_FUNCTION + 1];
 
 /*
+ * A request on a volume whose medium was replaced fails (cleanup and close aside).  On removable media
+ * a pending media change is verified first, so requests on open handles notice it too, not only opens
+ * (creates verify in NgCreate, where a new medium means a reparse).  Requests that cannot wait for a
+ * verify (paging I/O, raised IRQL) fail while one is pending.
+ */
+static NTSTATUS NgMediumGone(PNG_VCB Vcb, PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    UCHAR Major = Stack->MajorFunction;
+    NTSTATUS Status;
+    if (Major == IRP_MJ_CLEANUP || Major == IRP_MJ_CLOSE ||
+        (Major == IRP_MJ_FILE_SYSTEM_CONTROL && Stack->MinorFunction == IRP_MN_VERIFY_VOLUME))
+        return STATUS_SUCCESS;
+    /* Locking the volume and ejecting the medium stay possible on a volume whose medium is gone. */
+    if (Major == IRP_MJ_FILE_SYSTEM_CONTROL && Stack->MinorFunction == IRP_MN_USER_FS_REQUEST &&
+        (Stack->Parameters.FileSystemControl.FsControlCode == FSCTL_LOCK_VOLUME ||
+         Stack->Parameters.FileSystemControl.FsControlCode == FSCTL_UNLOCK_VOLUME ||
+         Stack->Parameters.FileSystemControl.FsControlCode == FSCTL_DISMOUNT_VOLUME))
+        return STATUS_SUCCESS;
+    if (Major == IRP_MJ_DEVICE_CONTROL &&
+        (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_STORAGE_EJECT_MEDIA ||
+         Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_DISK_EJECT_MEDIA ||
+         Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_STORAGE_MEDIA_REMOVAL ||
+         Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_DISK_MEDIA_REMOVAL))
+        return STATUS_SUCCESS;
+    if (Vcb->Removable && !Vcb->WrongMedia && Major != IRP_MJ_CREATE &&
+        (Vcb->Vpb->RealDevice->Flags & DO_VERIFY_VOLUME))
+    {
+        if ((Irp->Flags & IRP_PAGING_IO) || KeGetCurrentIrql() != PASSIVE_LEVEL)
+            return STATUS_VERIFY_REQUIRED;
+        Status = NgCheckMedium(Vcb);
+        if (!NT_SUCCESS(Status))
+            return Vcb->WrongMedia ? STATUS_FILE_INVALID : Status;
+    }
+    return Vcb->WrongMedia ? STATUS_FILE_INVALID : STATUS_SUCCESS;
+}
+
+/*
  * The single dispatch entry: enters the file system, measures stack use and
  * completes the IRP with the handler's status (handlers never pend).
  */
@@ -520,6 +586,7 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
     UCHAR Major = Stack->MajorFunction;
     BOOLEAN TopLevel = FALSE;
+    PERESOURCE Gate = NULL;
     ULONG_PTR Low;
     NTSTATUS Status;
     ULONGLONG T0 = __rdtsc();
@@ -532,6 +599,11 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         TopLevel = TRUE;
     }
     Irp->IoStatus.Information = 0;
+    if (DeviceObject != NgGlobal.ControlDevice && NgVolumeRequestGated(Irp, Stack))
+    {
+        Gate = &((PNG_VCB)DeviceObject->DeviceExtension)->CreateGate;
+        ExAcquireResourceSharedLite(Gate, TRUE);
+    }
     if (DeviceObject == NgGlobal.ControlDevice && Major != IRP_MJ_FILE_SYSTEM_CONTROL)
     {
         /* The control device only accepts opens/closes and mount requests. */
@@ -547,6 +619,11 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
              !(Major == IRP_MJ_DEVICE_CONTROL && NgIsVolumeOpen(Irp)))
     {
         Status = NgDismountedRequest(DeviceObject, Irp);
+    }
+    else if (DeviceObject != NgGlobal.ControlDevice &&
+             !NT_SUCCESS(Status = NgMediumGone((PNG_VCB)DeviceObject->DeviceExtension, Irp, Stack)))
+    {
+        /* Status says why */
     }
     else if (Major == IRP_MJ_DEVICE_CONTROL && DeviceObject != NgGlobal.ControlDevice)
     {
@@ -564,6 +641,12 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         Status = NgHandlers[Major](DeviceObject, Irp);
     }
+    if (Gate)
+    {
+        /* Before completion: a completion routine may lock or dismount the volume, which takes the gate exclusive. */
+        ExReleaseResourceLite(Gate);
+        Gate = NULL;
+    }
     if (Status != STATUS_PENDING)
     {
         NgDiagLogRequest(DeviceObject, Irp, Status);
@@ -571,6 +654,8 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         IoCompleteRequest(Irp, NT_SUCCESS(Status) ? IO_DISK_INCREMENT : IO_NO_INCREMENT);
     }
 out:
+    if (Gate)
+        ExReleaseResourceLite(Gate);
     if (TopLevel)
         IoSetTopLevelIrp(NULL);
     FsRtlExitFileSystem();

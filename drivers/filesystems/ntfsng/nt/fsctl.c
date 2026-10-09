@@ -9,7 +9,72 @@
 #include "../shim/include/ngos.h"
 #include <ntstrsafe.h>
 
+static NTSTATUS NgDeviceIoctlEx(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength, BOOLEAN Override);
+
 static NTSTATUS NgDeviceIoctl(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength)
+{
+    return NgDeviceIoctlEx(Device, Code, Out, OutLength, TRUE);
+}
+
+/*
+ * Before an open on removable media: the device driver reports a medium change when asked
+ * (IOCTL_DISK_CHECK_VERIFY), and the volume is verified then.  The I/O manager does not verify
+ * on its own, and the volume's own device I/O overrides verification, so without this a swapped
+ * medium would never be noticed.
+ */
+NTSTATUS NgCheckMedium(PNG_VCB Vcb)
+{
+    PDEVICE_OBJECT Real = Vcb->Vpb->RealDevice;
+    NTSTATUS Status;
+
+    if (!Vcb->Removable)
+        return STATUS_SUCCESS;
+    if (Vcb->WrongMedia)
+        return STATUS_WRONG_VOLUME;
+    Status = NgDeviceIoctlEx(Vcb->StorageDevice, IOCTL_DISK_CHECK_VERIFY, NULL, 0, FALSE);
+    if (!NT_SUCCESS(Status) && Status != STATUS_VERIFY_REQUIRED)
+        return Status;      /* no medium, device error: nothing cached may be used */
+    if (NT_SUCCESS(Status) && !(Real->Flags & DO_VERIFY_VOLUME))
+    {
+        /* Some drivers (floppy) notice a change only when they touch the medium: read one sector. */
+        PVOID Sector = ExAllocatePoolWithTag(NonPagedPool, Vcb->SectorSize, TAG_NTFSNG);
+        if (!Sector)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        {
+            IO_STATUS_BLOCK Iosb;
+            LARGE_INTEGER Offset;
+            KEVENT Event;
+            PIRP Irp;
+            Offset.QuadPart = 0;
+            KeInitializeEvent(&Event, NotificationEvent, FALSE);
+            Irp = IoBuildSynchronousFsdRequest(IRP_MJ_READ, Vcb->StorageDevice, Sector, Vcb->SectorSize, &Offset, &Event, &Iosb);
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            if (Irp)
+            {
+                Status = IoCallDriver(Vcb->StorageDevice, Irp);
+                if (Status == STATUS_PENDING)
+                {
+                    KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+                    Status = Iosb.Status;
+                }
+            }
+            ExFreePoolWithTag(Sector, TAG_NTFSNG);
+            if (!NT_SUCCESS(Status) && Status != STATUS_VERIFY_REQUIRED)
+                return Status;
+        }
+    }
+    if (Status == STATUS_VERIFY_REQUIRED || (Real->Flags & DO_VERIFY_VOLUME))
+    {
+        Status = IoVerifyVolume(Real, FALSE);
+        if (Vcb->WrongMedia)
+            return STATUS_WRONG_VOLUME;
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NgDeviceIoctlEx(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength, BOOLEAN Override)
 {
     IO_STATUS_BLOCK Iosb;
     KEVENT Event;
@@ -20,7 +85,8 @@ static NTSTATUS NgDeviceIoctl(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULON
     Irp = IoBuildDeviceIoControlRequest(Code, Device, NULL, 0, Out, OutLength, FALSE, &Event, &Iosb);
     if (!Irp)
         return STATUS_INSUFFICIENT_RESOURCES;
-    IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
+    if (Override)
+        IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
     Status = IoCallDriver(Device, Irp);
     if (Status == STATUS_PENDING)
     {
@@ -72,34 +138,76 @@ static VOID NTAPI NgDamageNotifyThread(PVOID Context)
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
-static VOID NgReportDamage(PNG_VCB Vcb, const char *Why)
+/* Damage, or a disk the volume cannot be written to safely: both keep the volume read-only for good. */
+static VOID NgReportDamage(PNG_VCB Vcb, const char *Why, BOOLEAN Damage)
 {
     PNG_DAMAGE_NOTE Note;
     HANDLE Thread;
     ULONG i;
 
     for (i = 0; i < 3; i++)
-        DPRINT1("ntfsng: ********** VOLUME %08lx IS DAMAGED: mounted READ-ONLY, nothing will be written to it **********\n",
-                Vcb->Vpb->SerialNumber);
-    DPRINT1("ntfsng: damage: %s\n", Why ? Why : "?");
+        DPRINT1("ntfsng: ********** VOLUME %08lx %s: mounted READ-ONLY, nothing will be written to it **********\n",
+                Vcb->Vpb->SerialNumber, Damage ? "IS DAMAGED" : "CANNOT BE WRITTEN SAFELY");
+    DPRINT1("ntfsng: %s: %s\n", Damage ? "damage" : "read-only", Why ? Why : "?");
     Note = ExAllocatePoolWithTag(PagedPool, sizeof(*Note), TAG_NTFSNG);
     if (!Note)
         return;
     RtlZeroMemory(Note, sizeof(*Note));
-    RtlInitUnicodeString(&Note->Caption, L"NTFS volume damaged");
+    RtlInitUnicodeString(&Note->Caption, Damage ? L"NTFS volume damaged" : L"NTFS volume read-only");
     Note->Text.Buffer = Note->Buffer;
     Note->Text.MaximumLength = sizeof(Note->Buffer) - 2 * sizeof(WCHAR);
-    RtlStringCbPrintfW(Note->Buffer, Note->Text.MaximumLength,
-                       L"The NTFS volume with serial number %04lX-%04lX is damaged (%hs).\n\n"
-                       L"It was mounted read-only to protect it: changes made to it in this session, "
-                       L"including registry changes on the system volume, are not saved. "
-                       L"Check and repair the volume with a disk checker on another system.",
-                       Vcb->Vpb->SerialNumber >> 16, Vcb->Vpb->SerialNumber & 0xffff, Why ? Why : "unknown");
+    if (Damage)
+        RtlStringCbPrintfW(Note->Buffer, Note->Text.MaximumLength,
+                           L"The NTFS volume with serial number %04lX-%04lX is damaged (%hs).\n\n"
+                           L"It was mounted read-only to protect it: changes made to it in this session, "
+                           L"including registry changes on the system volume, are not saved. "
+                           L"Check and repair the volume with a disk checker on another system.",
+                           Vcb->Vpb->SerialNumber >> 16, Vcb->Vpb->SerialNumber & 0xffff, Why ? Why : "unknown");
+    else
+        RtlStringCbPrintfW(Note->Buffer, Note->Text.MaximumLength,
+                           L"The NTFS volume with serial number %04lX-%04lX was mounted read-only (%hs).\n\n"
+                           L"Changes made to it in this session, including registry changes on the system "
+                           L"volume, are not saved.",
+                           Vcb->Vpb->SerialNumber >> 16, Vcb->Vpb->SerialNumber & 0xffff, Why ? Why : "unknown");
     Note->Text.Length = (USHORT)(wcslen(Note->Buffer) * sizeof(WCHAR));
     if (NT_SUCCESS(PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, NgDamageNotifyThread, Note)))
         ZwClose(Thread);
     else
         ExFreePoolWithTag(Note, TAG_NTFSNG);
+}
+
+/*
+ * The journal orders its writes with cache flushes.  A stack that refuses them is acceptable only on a
+ * disk that reports no volatile write cache; otherwise the volume is mounted read-only.
+ */
+static BOOLEAN NgFlushUsable(PDEVICE_OBJECT Target)
+{
+    DISK_CACHE_INFORMATION Cache;
+    IO_STATUS_BLOCK Iosb;
+    KEVENT Event;
+    NTSTATUS Status;
+    PIRP Irp;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_FLUSH_BUFFERS, Target, NULL, 0, NULL, &Event, &Iosb);
+    if (!Irp)
+        return FALSE;
+    IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
+    Status = IoCallDriver(Target, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Iosb.Status;
+    }
+    if (NT_SUCCESS(Status))
+        return TRUE;
+    if (Status != STATUS_INVALID_DEVICE_REQUEST && Status != STATUS_NOT_SUPPORTED && Status != STATUS_NOT_IMPLEMENTED)
+        return FALSE;
+    if (!NT_SUCCESS(NgDeviceIoctl(Target, IOCTL_DISK_GET_CACHE_INFORMATION, &Cache, sizeof(Cache))) ||
+        Cache.WriteCacheEnabled)
+        return FALSE;
+    NgSetFlushOptional(Target);
+    return TRUE;
 }
 
 static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -113,9 +221,10 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_VCB Vcb;
     PUCHAR Boot;
     ULONG SectorSize = 512, i;
-    ULONGLONG Size = 0;
+    ULONGLONG Size = 0, BootSectors;
     NTSTATUS Status;
     const char *WhyRo = NULL;
+    BOOLEAN Removable, NoFlush;
     int Err;
 
     if (DeviceObject != NgGlobal.ControlDevice)
@@ -144,7 +253,15 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         /* No partition information (superfloppy): trust the boot sector, plus its backup copy. */
         Size = (*(ULONGLONG UNALIGNED *)(Boot + 0x28) + 1) * *(USHORT UNALIGNED *)(Boot + 0x0b);
     }
+    BootSectors = *(ULONGLONG UNALIGNED *)(Boot + 0x28);
     ExFreePoolWithTag(Boot, TAG_NTFSNG);
+    /*
+     * Device I/O carries SL_OVERRIDE_VERIFY_VOLUME (the core cannot stop half way through an
+     * operation to verify), so after a media change it would reach the new medium.  Removable
+     * media are therefore mounted read-only: nothing of this volume can be written over another.
+     */
+    Removable = (Target->Characteristics & FILE_REMOVABLE_MEDIA) ||
+                (Vpb->RealDevice && (Vpb->RealDevice->Characteristics & FILE_REMOVABLE_MEDIA));
 
     /* The page index is 32 bits, so a byte offset at or above 16 TiB (2^32 pages of 4 KiB) wraps.
      * Refuse such a volume rather than alias its block-device and file I/O onto low offsets. */
@@ -165,6 +282,8 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vcb->StorageDevice = Target;
     Vcb->Vpb = Vpb;
     Vcb->SectorSize = SectorSize;
+    Vcb->Removable = Removable;
+    Vcb->BootSectors = BootSectors;
     ExInitializeResourceLite(&Vcb->CoreLock);
     ExInitializeResourceLite(&Vcb->CreateGate);
     ExInitializeFastMutex(&Vcb->FcbListLock);
@@ -177,7 +296,12 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vdo->SectorSize = (USHORT)SectorSize;
 
     NgAcquireCore(Vcb);
-    Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly, &Vcb->Core, &WhyRo);
+    NoFlush = !NgGlobal.ForceReadOnly && !Removable && !NgFlushUsable(Target);
+    Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly && !Removable && !NoFlush, &Vcb->Core, &WhyRo);
+    if (!Err && Removable && !NgGlobal.ForceReadOnly)
+        WhyRo = "removable media";
+    if (!Err && NoFlush)
+        WhyRo = "the storage stack cannot flush the disk's write cache";
     if (!Err)
         ngc_volinfo(Vcb->Core, &Vcb->Info);
     NgReleaseCore(Vcb);
@@ -196,7 +320,11 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     for (i = 0; i < Vpb->VolumeLabelLength / sizeof(WCHAR); i++)
         Vpb->VolumeLabel[i] = Vcb->Info.label[i];
     Vcb->ReadOnly = Vcb->Info.read_only ? TRUE : FALSE;
-    Vcb->Damaged = Vcb->Info.damaged ? TRUE : FALSE;
+    /*
+     * Read-only for good on a disk that cannot flush, or whose sectors the journal cannot use: the
+     * system volume boots read-only there, as a damaged one does.
+     */
+    Vcb->Damaged = Vcb->Info.damaged || NoFlush || (SectorSize != 512 && !Removable && !NgGlobal.ForceReadOnly) ? TRUE : FALSE;
     if (!Vcb->ReadOnly && !NT_SUCCESS(NgStartFlusher(Vcb)))
     {
         DPRINT1("ntfsng: no flusher thread, mounting read-only\n");
@@ -212,7 +340,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Vcb->Info.total_clusters, Vcb->Info.free_clusters, Vpb->SerialNumber,
             Vcb->ReadOnly ? "READ-ONLY" : "read-write", WhyRo ? ": " : "", WhyRo ? WhyRo : "");
     if (Vcb->Damaged)
-        NgReportDamage(Vcb, WhyRo);
+        NgReportDamage(Vcb, WhyRo, Vcb->Info.damaged ? TRUE : FALSE);
     return STATUS_SUCCESS;
 }
 
@@ -238,7 +366,11 @@ static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         ExReleaseResourceLite(&Vcb->CreateGate);
         return Status;
     }
-    NgFlushVolume(Vcb);
+    if (NgFlushVolume(Vcb))
+    {
+        ExReleaseResourceLite(&Vcb->CreateGate);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
     ExAcquireFastMutex(&Vcb->FcbListLock);
     /* Checked again after the flush, in the hold that publishes the lock: also refused for a handle
      * whose cleanup ran meanwhile (nothing would ever unlock it). */
@@ -341,9 +473,13 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     }
     ExReleaseFastMutex(&Vcb->FcbListLock);
 
+    /* A volume that cannot be flushed stays mounted (and locked), as NgLockVolume does. */
     Discard = Vcb->RawWritten;
-    if (!Discard && !Vcb->ReadOnly)
-        NgFlushVolume(Vcb);
+    if (!Discard && !Vcb->ReadOnly && NgFlushVolume(Vcb))
+    {
+        ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
 
     /* Cached files lose their views; later paging I/O on them fails.  Every FCB is taken (the array is
      * sized again if the list grew, which the create gate now prevents). */
@@ -405,8 +541,17 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
             List[i]->Node = NULL;
         }
     }
-    if (!Discard && !Vcb->ReadOnly)
-        ngc_sync(Vcb->Core);
+    /*
+     * Past the purge there is no way back.  After a final sync that fails the teardown writes nothing
+     * more (a discard): what is on the medium then decides whether the next mount replays the journal
+     * or finds the volume in need of repair.
+     */
+    if (!Discard && !Vcb->ReadOnly && ngc_sync(Vcb->Core))
+    {
+        DPRINT1("ntfsng: volume %08lx: the last sync before the dismount failed: nothing more is written, uncommitted changes are dropped\n",
+                Vcb->Vpb->SerialNumber);
+        Discard = TRUE;
+    }
     ngc_umount(Vcb->Core, Discard);
     Vcb->Core = NULL;
     NgReleaseCore(Vcb);
@@ -430,7 +575,7 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     if (NewVpb)
         ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
     DPRINT1("ntfsng: volume %08lx dismounted%s\n", Vcb->Vpb->SerialNumber,
-            Discard ? " (written directly by the lock holder: mounted state dropped)" : "");
+            Vcb->RawWritten ? " (written directly by the lock holder: mounted state dropped)" : "");
     return STATUS_SUCCESS;
 }
 
@@ -695,6 +840,66 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 }
 
+/*
+ * IRP_MN_VERIFY_VOLUME: the storage driver saw a possible media change.  The medium is this volume
+ * only while its boot sector still says so (OEM name, serial number, sector size and count).
+ * Otherwise every later request on the volume fails, nothing more is written to the device, and the
+ * I/O manager mounts the new medium (STATUS_WRONG_VOLUME).
+ */
+static NTSTATUS NgVerifyVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PVPB Vpb = Stack->Parameters.VerifyVolume.Vpb;
+    PNG_VCB Vcb;
+    PUCHAR Boot;
+    NTSTATUS Status = STATUS_WRONG_VOLUME;
+
+    if (DeviceObject == NgGlobal.ControlDevice)
+        return STATUS_INVALID_DEVICE_REQUEST;
+    Vcb = DeviceObject->DeviceExtension;
+    if (Vcb->WrongMedia)
+    {
+        Vpb->RealDevice->Flags &= ~DO_VERIFY_VOLUME;
+        return STATUS_WRONG_VOLUME;
+    }
+    if (!(Vpb->RealDevice->Flags & DO_VERIFY_VOLUME))
+        return STATUS_SUCCESS;
+    Boot = ExAllocatePoolWithTag(NonPagedPool, 4096, TAG_NTFSNG);
+    if (!Boot)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    if (ngos_dev_read(Vcb->StorageDevice, 0, Boot, Vcb->SectorSize))
+    {
+        /* Unreadable is not "another medium": keep the volume, verify again later. */
+        ExFreePoolWithTag(Boot, TAG_NTFSNG);
+        return STATUS_IO_DEVICE_ERROR;
+    }
+    if (RtlCompareMemory(Boot + 3, "NTFS    ", 8) == 8 &&
+        *(ULONGLONG UNALIGNED *)(Boot + 0x48) == Vcb->Info.serial &&
+        *(ULONGLONG UNALIGNED *)(Boot + 0x28) == Vcb->BootSectors &&
+        *(USHORT UNALIGNED *)(Boot + 0x0b) == Vcb->Info.sector_size)
+    {
+        Status = STATUS_SUCCESS;
+    }
+    ExFreePoolWithTag(Boot, TAG_NTFSNG);
+    if (Status == STATUS_WRONG_VOLUME)
+    {
+        /*
+         * Stops the flusher and every request before the next one reaches the new medium.  A dismount
+         * may have won the race for the lock (a verify does not take the create gate): its core is
+         * gone, but the dismounted volume handle must not write the new medium either.
+         */
+        NgAcquireCore(Vcb);
+        Vcb->WrongMedia = TRUE;
+        Vcb->ReadOnly = TRUE;
+        if (Vcb->Core)
+            ngc_medium_gone(Vcb->Core); /* requests already past dispatch fail in the core */
+        NgReleaseCore(Vcb);
+        DPRINT1("ntfsng: volume %08lx: the medium was changed; the volume is no longer usable\n", Vpb->SerialNumber);
+    }
+    Vpb->RealDevice->Flags &= ~DO_VERIFY_VOLUME;
+    return Status;
+}
+
 NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -703,9 +908,7 @@ NTSTATUS NgFileSystemControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case IRP_MN_MOUNT_VOLUME:
             return NgMountVolume(DeviceObject, Irp);
         case IRP_MN_VERIFY_VOLUME:
-            /* Fixed media only: the volume never changes underneath us. */
-            Stack->Parameters.VerifyVolume.Vpb->RealDevice->Flags &= ~DO_VERIFY_VOLUME;
-            return STATUS_SUCCESS;
+            return NgVerifyVolume(DeviceObject, Irp);
         case IRP_MN_USER_FS_REQUEST:
         case IRP_MN_KERNEL_CALL:
             if (DeviceObject == NgGlobal.ControlDevice)

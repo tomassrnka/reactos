@@ -9,6 +9,7 @@
 
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
 int kshim_inodes_snapshot(struct super_block *sb, struct inode ***out);
+bool kshim_sb_dirty(struct super_block *sb);
 
 static int cmp_folio(const void *a, const void *b)
 {
@@ -16,27 +17,38 @@ static int cmp_folio(const void *a, const void *b)
 	return x < y ? -1 : x > y;
 }
 
-struct wb_state { struct folio **v; int n; };
+struct wb_state { struct folio **v; int n; int err; };
 
-/* writeback_iter contract: each dirty folio of @m once, referenced and locked, dirty bit cleared. */
+/*
+ * writeback_iter contract: each dirty folio of @m once, referenced and locked, dirty bit cleared.
+ * As in Linux for WB_SYNC_ALL: *e is 0 on the first call, the caller stores each folio's result
+ * there, and the walk ends (NULL) with the first error in *e.  A failed allocation ends it at once
+ * with -ENOMEM, every folio still dirty.
+ */
 struct folio *writeback_iter(struct address_space *m, struct writeback_control *w, struct folio *f, int *e)
 {
 	struct wb_state *st = w->kshim_priv;
-	(void)e;
+	kshim_wb_scope_point();
 	if (f) {
 		/* The previous folio: the caller unlocked it (or left it locked on error). */
 		if (folio_test_locked(f))
 			folio_unlock(f);
 		folio_put(f);
+		if (st && *e && !st->err)
+			st->err = *e;
 	}
 	if (!st) {
 		int cap = (int)m->nrpages + 1, b;
+		*e = 0;
 		st = kzalloc(sizeof(*st), GFP_NOFS);
-		if (!st)
+		if (!st) {
+			*e = -ENOMEM;
 			return NULL;
+		}
 		st->v = kmalloc_array(cap, sizeof(*st->v), GFP_NOFS);
 		if (!st->v) {
 			kfree(st);
+			*e = -ENOMEM;
 			return NULL;
 		}
 		/* The cache's own spin lock is not exported; callers serialise on the volume lock. */
@@ -61,6 +73,7 @@ struct folio *writeback_iter(struct address_space *m, struct writeback_control *
 		clear_bit(PG_dirty, &x->flags);
 		return x;
 	}
+	*e = st->err;
 	kfree(st->v);
 	kfree(st);
 	w->kshim_priv = NULL;
@@ -103,7 +116,9 @@ int kshim_mapping_writeback(struct address_space *m)
 	int err;
 	if (!m->a_ops || !m->a_ops->writepages || !kshim_mapping_dirty(m))
 		return 0;
+	kshim_wb_scope_enter();
 	err = m->a_ops->writepages(m, &wbc);
+	kshim_wb_scope_exit();
 	if (err)
 		printk(KERN_ERR "writepages(ino %llu) failed %d\n", (unsigned long long)m->host->i_ino, err);
 	return err;
@@ -121,7 +136,9 @@ int write_inode_now(struct inode *i, int sync)
 	if (i->i_state & (I_DIRTY_SYNC | I_DIRTY_DATASYNC)) {
 		i->i_state &= ~(I_DIRTY_SYNC | I_DIRTY_DATASYNC);
 		if (i->i_sb->s_op->write_inode) {
+			kshim_wb_scope_enter();
 			e2 = i->i_sb->s_op->write_inode(i, &wbc);
+			kshim_wb_scope_exit();
 			if (e2) {
 				printk(KERN_ERR "write_inode(ino %llu) failed %d\n", (unsigned long long)i->i_ino, e2);
 				err = err ? err : e2;
@@ -150,15 +167,17 @@ int kshim_blkdev_writepages(struct address_space *m, struct writeback_control *w
 /*
  * The flusher and sync(2) stand-in: write back dirty mappings and dirty inodes of @sb until a
  * pass finds nothing (writing one inode can dirty another: index entries, bitmaps, $MFT).
+ * Returns the first writeback error, or -EAGAIN when 8 passes still found work.
  */
 unsigned long kshim_counter_syncs;
 int kshim_sync(struct super_block *sb)
 {
-	int pass, err = 0;
+	int pass, err = 0, any = 1;
 	kshim_counter_syncs++;
-	for (pass = 0; pass < 8; pass++) {
+	for (pass = 0; pass < 8 && any; pass++) {
 		struct inode **v;
-		int n = kshim_inodes_snapshot(sb, &v), any = 0;
+		int n = kshim_inodes_snapshot(sb, &v);
+		any = 0;
 		if (n < 0)
 			return n;
 		for (int k = 0; k < n; k++) {
@@ -179,9 +198,11 @@ int kshim_sync(struct super_block *sb)
 			if (e && !err)
 				err = e;
 		}
-		if (!any)
+		if (err)
 			break;
 	}
+	if (!err && any && kshim_sb_dirty(sb))
+		err = -EAGAIN;
 	return err;
 }
 
@@ -234,5 +255,8 @@ int iomap_zero_range(struct inode *inode, loff_t pos, loff_t len, bool *did_zero
 
 int blkdev_issue_flush(struct block_device *b)
 {
+	/* As kshim_dev_rw: nothing goes to a replaced medium, not even a flush. */
+	if (b->kshim_gone)
+		return -EIO;
 	return ngos_dev_flush(b->osdev) ? -EIO : 0;
 }

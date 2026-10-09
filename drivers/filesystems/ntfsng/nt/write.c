@@ -70,6 +70,23 @@ VOID NgAfterChange(PNG_VCB Vcb)
     }
 }
 
+/*
+ * A write-through write completes only once its data, the metadata it changed (sizes, the contents
+ * of a file resident in its MFT record) and their journal commit are on the medium.  The commit
+ * flushes the device even when no metadata changed.
+ */
+static NTSTATUS NgCommitWriteThrough(PNG_VCB Vcb)
+{
+    int Err;
+    NgAcquireCore(Vcb);
+    Err = ngc_commit_now(Vcb->Core);
+    Vcb->Syncs++;
+    NgReleaseCore(Vcb);
+    if (Err)
+        DPRINT1("ntfsng: write-through commit failed %d\n", Err);
+    return Err ? STATUS_UNEXPECTED_IO_ERROR : STATUS_SUCCESS;
+}
+
 /* Header sizes from the core inode (caller holds CoreLock and the node). */
 static VOID NgSizesFromCore(PNG_FCB Fcb)
 {
@@ -300,10 +317,19 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     return STATUS_SUCCESS;
 }
 
-/* Writes a locked buffer straight to the storage device, through a sector-aligned pool buffer. */
+/*
+ * Writes a locked buffer straight to the storage device, through a sector-aligned pool buffer.  Nothing
+ * of the journal orders these writes, so the request completes only once they are on the medium.  A
+ * dismounted volume skips the medium check at dispatch, so each chunk is checked here, under the core
+ * lock a verify marks the medium gone under: a medium a verify found replaced is never written through
+ * this volume.  (A swap after the dismount that no verify sees is not caught: a dismounted volume is not
+ * verified again, and the storage driver reports the change only to a mounted volume.)
+ */
 static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG Length)
 {
     PUCHAR Bounce = ExAllocatePoolWithTag(NonPagedPool, 64 * 1024, TAG_NTFSNG);
+    NTSTATUS Status = STATUS_SUCCESS;
+    NG_SHARED_HOLD Hold;
     ULONG Done = 0;
 
     if (!Bounce)
@@ -311,13 +337,36 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, LONGLONG Offset, PUCHAR Buffer, ULONG
     while (Done < Length)
     {
         ULONG n = min(Length - Done, 64 * 1024);
+        BOOLEAN Failed;
         RtlCopyMemory(Bounce, Buffer + Done, n);
-        if (ngos_dev_write(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n))
+        NgAcquireCoreShared(Vcb, &Hold);
+        if (Vcb->WrongMedia)
+        {
+            NgReleaseCoreShared(Vcb, &Hold);
+            Status = STATUS_FILE_INVALID;
             break;
+        }
+        Failed = NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n) != 0;
+        NgReleaseCoreShared(Vcb, &Hold);
+        if (Failed)
+        {
+            Status = STATUS_UNEXPECTED_IO_ERROR;
+            break;
+        }
         Done += n;
     }
     ExFreePoolWithTag(Bounce, TAG_NTFSNG);
-    return Done == Length ? STATUS_SUCCESS : STATUS_UNEXPECTED_IO_ERROR;
+    if (NT_SUCCESS(Status))
+    {
+        /* Under the same lock: a medium found gone before the flush makes the write fail, not succeed. */
+        NgAcquireCoreShared(Vcb, &Hold);
+        if (Vcb->WrongMedia)
+            Status = STATUS_FILE_INVALID;
+        else if (NgDevFlushDurable(Vcb->StorageDevice))
+            Status = STATUS_UNEXPECTED_IO_ERROR;
+        NgReleaseCoreShared(Vcb, &Hold);
+    }
+    return Status;
 }
 
 /*
@@ -591,6 +640,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             {
                 CcFlushCache(FileObject->SectionObjectPointer, &Offset, Length, &Iosb);
                 Status = Iosb.Status;
+                if (NT_SUCCESS(Status))
+                    Status = NgCommitWriteThrough(Vcb);
             }
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -607,7 +658,11 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Err = NgEnsureNode(Fcb);
         Done = Err ? Err : ngc_write(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
         if (Done >= 0)
+        {
             NgAfterChange(Vcb);
+            if (WriteThrough && ngc_commit_now(Vcb->Core))
+                Done = -NGC_EIO;
+        }
         NgReleaseCore(Vcb);
         if (Done < 0)
         {
@@ -638,20 +693,25 @@ out_mdl:
 }
 
 /* Flushes every cached stream of the volume through Cc, then the core metadata. */
-VOID NgFlushVolume(PNG_VCB Vcb)
+int NgFlushVolume(PNG_VCB Vcb)
 {
     PLIST_ENTRY Entry;
     PNG_FCB *List;
     ULONG Count = 0, Cap = 0, i;
     IO_STATUS_BLOCK Iosb;
-    int Err;
+    int Err, StreamErr = 0;
 
     if (Vcb->ReadOnly)
-        return;
+        return 0;
     ExAcquireFastMutex(&Vcb->FcbListLock);
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
         Cap++;
     List = Cap ? ExAllocatePoolWithTag(NonPagedPool, Cap * sizeof(PNG_FCB), TAG_NTFSNG) : NULL;
+    if (Cap && !List)
+    {
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        return -NGC_ENOMEM;     /* the streams cannot be listed, so their cached data cannot be flushed */
+    }
     if (List)
     {
         for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < Cap; Entry = Entry->Flink)
@@ -670,6 +730,8 @@ VOID NgFlushVolume(PNG_VCB Vcb)
             ExAcquireResourceSharedLite(Fcb->Header.Resource, TRUE);
             NgFlushStream(Fcb, &Iosb);
             ExReleaseResourceLite(Fcb->Header.Resource);
+            if (!NT_SUCCESS(Iosb.Status) && !StreamErr)
+                StreamErr = -NGC_EIO;
         }
         NgApplyModified(Fcb);
         NgDereferenceFcb(Fcb);
@@ -682,6 +744,7 @@ VOID NgFlushVolume(PNG_VCB Vcb)
     NgReleaseCore(Vcb);
     if (Err)
         DPRINT1("ntfsng: volume sync failed %d\n", Err);
+    return StreamErr ? StreamErr : Err;
 }
 
 NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
@@ -695,10 +758,7 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (!Fcb || Vcb->ReadOnly)
         return STATUS_SUCCESS;
     if (Fcb->IsVolume)
-    {
-        NgFlushVolume(Vcb);
-        return STATUS_SUCCESS;
-    }
+        return NgFlushVolume(Vcb) ? STATUS_UNEXPECTED_IO_ERROR : STATUS_SUCCESS;
     Iosb.Status = STATUS_SUCCESS;
     if (Fcb->SectionObjectPointers.DataSectionObject)
     {
@@ -735,12 +795,17 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
      * dismount is waited for (create gate) and its volume skipped. */
     ExAcquireFastMutex(&NgGlobal.VcbListLock);
     for (Entry = NgGlobal.VcbList.Flink; Entry != &NgGlobal.VcbList && Count < RTL_NUMBER_OF(Vcbs); Entry = Entry->Flink)
-        Vcbs[Count++] = CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks);
+    {
+        /* Volumes whose medium went away stay listed: they must not take the slots of live ones. */
+        PNG_VCB V = CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks);
+        if (!V->WrongMedia)
+            Vcbs[Count++] = V;
+    }
     ExReleaseFastMutex(&NgGlobal.VcbListLock);
     for (i = 0; i < Count; i++)
     {
         PNG_VCB Vcb = Vcbs[i];
-        if (Vcb->ReadOnly)
+        if (Vcb->ReadOnly || Vcb->WrongMedia)
             continue;
         ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
         if (Vcb->Dismounted || Vcb->RawWritten)
@@ -779,7 +844,7 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
         if (KeWaitForSingleObject(&Vcb->FlusherStop, Executive, KernelMode, FALSE, &Period) == STATUS_SUCCESS)
             break;
         NgAcquireCore(Vcb);
-        if (ngc_dirty(Vcb->Core))
+        if (!Vcb->WrongMedia && ngc_dirty(Vcb->Core))
         {
             /* Busy: commit and keep VOLUME_IS_DIRTY.  Quiet for a whole period: also clear the flag. */
             int Err = ngc_changed(Vcb->Core) ? ngc_commit_now(Vcb->Core) : ngc_sync(Vcb->Core);

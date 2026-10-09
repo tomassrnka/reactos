@@ -227,6 +227,9 @@ static inline int PTR_ERR_OR_ZERO(const void *p) { return IS_ERR(p) ? PTR_ERR(p)
 #define KERN_CONT ""
 extern int kshim_verbose;
 int printk(const char *fmt, ...) __printf(1, 2);
+struct super_block;
+/* Set by the adapter: the core reported an error on @sb; @msg is the last error-level message printed. */
+extern void (*kshim_core_error)(struct super_block *sb, const char *msg);
 #ifndef pr_fmt
 #define pr_fmt(fmt) fmt
 #endif

@@ -499,7 +499,7 @@ static NTSTATUS NgPathFromId(PNG_VCB Vcb, PCUNICODE_STRING Id, PUNICODE_STRING P
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     NgAcquireCore(Vcb);
-    Err = ngc_iget(Vcb->Core, MftNo, &Node);
+    Err = ngc_iget_by_id(Vcb->Core, MftNo, &Node);
     if (!Err)
     {
         ngc_stat(Node, &St);
@@ -684,6 +684,15 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Vcb->LockedBy)
         return STATUS_ACCESS_DENIED;
+    Status = NgCheckMedium(Vcb);
+    if (Status == STATUS_WRONG_VOLUME && !Related)
+    {
+        /* Another medium: the I/O manager mounted it, so parse the name again (there). */
+        Irp->IoStatus.Information = IO_REMOUNT;
+        return STATUS_REPARSE;
+    }
+    if (!NT_SUCCESS(Status))
+        return Status;
     if (Options & FILE_OPEN_BY_FILE_ID)
     {
         /* Opened as the path of the file the ID names; such an open never creates anything. */
