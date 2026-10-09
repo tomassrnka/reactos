@@ -394,8 +394,9 @@ FORCEINLINE
 PRKTHREAD
 KeGetCurrentThread(VOID)
 {
-    /* Return the current thread */
-    return ((PKIPCR)KeGetPcr())->PrcbData.CurrentThread;
+    /* One read: a thread moved between loading the PCR address and reading
+       through it would get the old processor's current thread */
+    return (PRKTHREAD)__readfsdword(FIELD_OFFSET(KIPCR, PrcbData.CurrentThread));
 }
 
 FORCEINLINE
