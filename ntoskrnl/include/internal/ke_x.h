@@ -531,21 +531,20 @@ KiReleaseThreadLock(IN PKTHREAD Thread)
     InterlockedAnd((PLONG)&Thread->ThreadLock, 0);
 }
 
+//
+// This routine tries once to acquire the thread lock, without spinning.
+// It returns FALSE when the caller now owns the lock, and TRUE when
+// another processor holds it.
+//
 FORCEINLINE
 BOOLEAN
 KiTryThreadLock(IN PKTHREAD Thread)
 {
-    LONG Value;
+    /* Skip the exchange when another processor visibly holds the lock */
+    if (Thread->ThreadLock) return TRUE;
 
-    /* If the lock isn't acquired, return false */
-    if (!Thread->ThreadLock) return FALSE;
-
-    /* Otherwise, try to acquire it and check the result */
-    Value = 1;
-    Value = InterlockedExchange((PLONG)&Thread->ThreadLock, Value);
-
-    /* Return the lock state */
-    return (Value == 1);
+    /* Try to acquire it; it is ours if it was free */
+    return (InterlockedExchange((PLONG)&Thread->ThreadLock, 1) != 0);
 }
 
 FORCEINLINE
