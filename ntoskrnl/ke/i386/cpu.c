@@ -1157,82 +1157,50 @@ NTAPI
 KiFlushNPXState(IN PFLOATING_SAVE_AREA SaveArea)
 {
     ULONG EFlags, Cr0;
-    PKTHREAD Thread, NpxThread;
+    PKPRCB Prcb;
+    PKTHREAD Thread;
     PFX_SAVE_AREA FxSaveArea;
+    BOOLEAN WasLoaded;
 
     /* Save volatiles and disable interrupts */
     EFlags = __readeflags();
     _disable();
 
-    /* Save the PCR and get the current thread */
+    Prcb = KeGetCurrentPrcb();
     Thread = KeGetCurrentThread();
+    FxSaveArea = KiGetThreadNpxArea(Thread);
 
-    /* Check if we're already loaded */
-    if (Thread->NpxState != NPX_STATE_LOADED)
+    /* If the state is in the NPX area and nobody wants it converted, quit */
+    if ((Thread->NpxState != NPX_STATE_LOADED) && !SaveArea)
     {
-        /* If there's nothing to load, quit */
-        if (!SaveArea)
-        {
-            /* Restore interrupt state and return */
-            __writeeflags(EFlags);
-            return;
-        }
+        __writeeflags(EFlags);
+        return;
+    }
 
-        /* Need FXSR support for this */
-        ASSERT(KeI386FxsrPresent == TRUE);
-
-        /* Check for sane CR0 */
-        Cr0 = __readcr0();
-        if (Cr0 & (CR0_MP | CR0_TS | CR0_EM))
-        {
-            /* Mask out FPU flags */
-            __writecr0(Cr0 & ~(CR0_MP | CR0_TS | CR0_EM));
-        }
-
-        /* Get the NPX thread and check its FPU state */
-        NpxThread = KeGetCurrentPrcb()->NpxThread;
-        if ((NpxThread) && (NpxThread->NpxState == NPX_STATE_LOADED))
-        {
-            /* Get the FX frame and store the state there */
-            FxSaveArea = KiGetThreadNpxArea(NpxThread);
-            Ke386FxSave(FxSaveArea);
-
-            /* NPX thread has lost its state */
-            NpxThread->NpxState = NPX_STATE_NOT_LOADED;
-        }
-
-        /* Now load NPX state from the NPX area */
-        FxSaveArea = KiGetThreadNpxArea(Thread);
-        Ke386FxStore(FxSaveArea);
+    /* Stay the loaded owner until after the last NPX instruction */
+    Cr0 = KiTakeNpxOwnership(Prcb, Thread, &WasLoaded);
+    if (WasLoaded)
+    {
+        /* Save the live state to the NPX area */
+        Ke386SaveFpuState(FxSaveArea);
     }
     else
     {
-        /* Check for sane CR0 */
-        Cr0 = __readcr0();
-        if (Cr0 & (CR0_MP | CR0_TS | CR0_EM))
-        {
-            /* Mask out FPU flags */
-            __writecr0(Cr0 & ~(CR0_MP | CR0_TS | CR0_EM));
-        }
+        /* Need FXSR support for this */
+        ASSERT(KeI386FxsrPresent == TRUE);
 
-        /* Get FX frame */
-        FxSaveArea = KiGetThreadNpxArea(Thread);
-        Thread->NpxState = NPX_STATE_NOT_LOADED;
-
-        /* Save state if supported by CPU */
-        if (KeI386FxsrPresent) Ke386FxSave(FxSaveArea);
+        /* Load the saved state, to convert it below */
+        Ke386FxStore(FxSaveArea);
     }
 
     /* Now save the FN state wherever it was requested */
     if (SaveArea) Ke386FnSave(SaveArea);
+    KeMemoryBarrierWithoutFence();
 
-    /* Clear NPX thread */
-    KeGetCurrentPrcb()->NpxThread = NULL;
-
-    /* Add the CR0 from the NPX frame */
-    Cr0 |= NPX_STATE_NOT_LOADED;
-    Cr0 |= FxSaveArea->Cr0NpxState;
-    __writecr0(Cr0);
+    /* The NPX area holds the state now, and nobody owns the registers */
+    Thread->NpxState = NPX_STATE_NOT_LOADED;
+    Prcb->NpxThread = NULL;
+    __writecr0(Cr0 | NPX_STATE_NOT_LOADED | FxSaveArea->Cr0NpxState);
 
     /* Restore interrupt state */
     __writeeflags(EFlags);
@@ -1291,8 +1259,8 @@ KeSaveFloatingPointState(
     _Out_ PKFLOATING_SAVE Save)
 {
     PFLOATING_SAVE_CONTEXT FsContext;
-    PFX_SAVE_AREA FxSaveAreaFrame;
     PKPRCB CurrentPrcb;
+    BOOLEAN WasLoaded;
 
     /* Sanity checks */
     ASSERT(Save);
@@ -1347,30 +1315,13 @@ KeSaveFloatingPointState(
     FsContext->CurrentThread = KeGetCurrentThread();
 
     /*
-     * Save the previous NPX thread state registers (aka Numeric
-     * Processor eXtension) into the current context so that
-     * we are informing the scheduler the current FPU state
-     * belongs to this thread.
+     * The current thread takes the NPX registers with its own state in
+     * them, which then goes to the context. Until the restore, the
+     * registers hold the caller's state.
      */
-    if (FsContext->CurrentThread != CurrentPrcb->NpxThread)
-    {
-        if ((CurrentPrcb->NpxThread != NULL) &&
-            (CurrentPrcb->NpxThread->NpxState == NPX_STATE_LOADED))
-        {
-            /* Get the FX frame */
-            FxSaveAreaFrame = KiGetThreadNpxArea(CurrentPrcb->NpxThread);
-
-            /* Save the FPU state */
-            Ke386SaveFpuState(FxSaveAreaFrame);
-
-            /* NPX thread has lost its state */
-            CurrentPrcb->NpxThread->NpxState = NPX_STATE_NOT_LOADED;
-            FxSaveAreaFrame->NpxSavedCpu = 0;
-        }
-
-        /* The new NPX thread is the current thread */
-        CurrentPrcb->NpxThread = FsContext->CurrentThread;
-    }
+    KiTakeNpxOwnership(CurrentPrcb, FsContext->CurrentThread, &WasLoaded);
+    if (!WasLoaded)
+        Ke386RestoreFpuState(KiGetThreadNpxArea(FsContext->CurrentThread));
 
     /* Perform the save */
     Ke386SaveFpuState(FsContext->PfxSaveArea);
@@ -1417,6 +1368,7 @@ KeRestoreFloatingPointState(
     _In_ PKFLOATING_SAVE Save)
 {
     PFLOATING_SAVE_CONTEXT FsContext;
+    BOOLEAN WasLoaded;
 
     /* Sanity checks */
     ASSERT(Save);
@@ -1460,6 +1412,9 @@ KeRestoreFloatingPointState(
 
     /* Disable interrupts */
     _disable();
+
+    /* The registers may have been saved at a context switch since: take them back */
+    KiTakeNpxOwnership(KeGetCurrentPrcb(), FsContext->CurrentThread, &WasLoaded);
 
     /*
      * The saved FPU state context is valid,

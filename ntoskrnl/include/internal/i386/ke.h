@@ -804,6 +804,47 @@ KiGetThreadNpxArea(IN PKTHREAD Thread)
     return (PFX_SAVE_AREA)((ULONG_PTR)Thread->InitialStack - sizeof(FX_SAVE_AREA));
 }
 
+/*
+ * With interrupts disabled, make the current thread the owner of the NPX
+ * registers, marked loaded, and clear TS, MP and EM; a previous owner's
+ * state is saved to its NPX area. The bookkeeping changes before the first
+ * NPX instruction, so that a TS set meanwhile by an NMI task switch traps
+ * as spurious: the lazy-load path would move registers between the wrong
+ * threads. Returns the new CR0, and whether the registers already held the
+ * thread's state.
+ */
+FORCEINLINE
+ULONG
+KiTakeNpxOwnership(
+    _In_ PKPRCB Prcb,
+    _In_ PKTHREAD Thread,
+    _Out_ PBOOLEAN WasLoaded)
+{
+    PKTHREAD NpxThread = Prcb->NpxThread;
+    PFX_SAVE_AREA NpxSaveArea;
+    ULONG Cr0;
+
+    *WasLoaded = (NpxThread == Thread) && (Thread->NpxState == NPX_STATE_LOADED);
+
+    Thread->NpxState = NPX_STATE_LOADED;
+    Prcb->NpxThread = Thread;
+    KeMemoryBarrierWithoutFence();
+
+    Cr0 = __readcr0() & ~(CR0_MP | CR0_TS | CR0_EM);
+    __writecr0(Cr0);
+
+    if (NpxThread && (NpxThread != Thread) && (NpxThread->NpxState == NPX_STATE_LOADED))
+    {
+        NpxSaveArea = KiGetThreadNpxArea(NpxThread);
+        Ke386SaveFpuState(NpxSaveArea);
+        NpxSaveArea->NpxSavedCpu = 0;
+        KeMemoryBarrierWithoutFence();
+        NpxThread->NpxState = NPX_STATE_NOT_LOADED;
+    }
+
+    return Cr0;
+}
+
 //
 // Sanitizes a selector
 //

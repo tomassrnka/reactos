@@ -735,27 +735,32 @@ FASTCALL
 KiTrap07Handler(IN PKTRAP_FRAME TrapFrame)
 {
     PKTHREAD Thread, NpxThread;
-    PFX_SAVE_AREA SaveArea, NpxSaveArea;
+    PFX_SAVE_AREA SaveArea;
     ULONG Cr0;
+    BOOLEAN WasLoaded;
 
     /* Save trap frame */
     KiEnterTrap(TrapFrame);
 
-#ifdef CONFIG_SMP
     /*
      * The NMI task switch sets TS even with interrupts disabled. On SMP the
      * NPX owner is either NULL or the thread whose state is in the registers
      * (the outgoing one during a context switch), so TS on a loaded state is
-     * spurious: clear it without touching any NPX state.
+     * spurious: clear it without touching any NPX state. On UP the owner
+     * keeps the registers across switches, so only TS on the current
+     * thread's own loaded state, without a delayed error, is spurious.
      */
     NpxThread = KeGetCurrentPrcb()->NpxThread;
     if (NpxThread && (NpxThread->NpxState == NPX_STATE_LOADED) &&
+#ifndef CONFIG_SMP
+        (NpxThread == KeGetCurrentThread()) &&
+        !(KiGetThreadNpxArea(NpxThread)->Cr0NpxState & CR0_TS) &&
+#endif
         !(KiGetThreadNpxArea(NpxThread)->Cr0NpxState & CR0_EM))
     {
         __writecr0(__readcr0() & ~CR0_TS);
         KiEoiHelper(TrapFrame);
     }
-#endif
 
     /* Try to handle NPX delay load */
     for (;;)
@@ -777,30 +782,9 @@ KiTrap07Handler(IN PKTRAP_FRAME TrapFrame)
         Cr0 = __readcr0();
         if (Thread->NpxState != NPX_STATE_LOADED)
         {
-            /* Update CR0 */
-            Cr0 &= ~(CR0_MP | CR0_EM | CR0_TS);
-            __writecr0(Cr0);
-
-            /* Get the NPX thread */
-            NpxThread = KeGetCurrentPrcb()->NpxThread;
-            if (NpxThread)
-            {
-                /* Get the NPX frame */
-                NpxSaveArea = KiGetThreadNpxArea(NpxThread);
-
-                /* Save FPU state */
-                Ke386SaveFpuState(NpxSaveArea);
-
-                /* Update NPX state */
-                NpxThread->NpxState = NPX_STATE_NOT_LOADED;
-           }
-
-            /* Load FPU state */
+            /* Own the registers before saving the previous owner, then load */
+            Cr0 = KiTakeNpxOwnership(KeGetCurrentPrcb(), Thread, &WasLoaded);
             Ke386LoadFpuState(SaveArea);
-
-            /* Update NPX state */
-            Thread->NpxState = NPX_STATE_LOADED;
-            KeGetCurrentPrcb()->NpxThread = Thread;
 
             /* Enable interrupts */
             _enable();
