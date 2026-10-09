@@ -138,29 +138,37 @@ static VOID NTAPI NgDamageNotifyThread(PVOID Context)
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
-static VOID NgReportDamage(PNG_VCB Vcb, const char *Why)
+/* Damage, or a disk the volume cannot be written to safely: both keep the volume read-only for good. */
+static VOID NgReportDamage(PNG_VCB Vcb, const char *Why, BOOLEAN Damage)
 {
     PNG_DAMAGE_NOTE Note;
     HANDLE Thread;
     ULONG i;
 
     for (i = 0; i < 3; i++)
-        DPRINT1("ntfsng: ********** VOLUME %08lx IS DAMAGED: mounted READ-ONLY, nothing will be written to it **********\n",
-                Vcb->Vpb->SerialNumber);
-    DPRINT1("ntfsng: damage: %s\n", Why ? Why : "?");
+        DPRINT1("ntfsng: ********** VOLUME %08lx %s: mounted READ-ONLY, nothing will be written to it **********\n",
+                Vcb->Vpb->SerialNumber, Damage ? "IS DAMAGED" : "CANNOT BE WRITTEN SAFELY");
+    DPRINT1("ntfsng: %s: %s\n", Damage ? "damage" : "read-only", Why ? Why : "?");
     Note = ExAllocatePoolWithTag(PagedPool, sizeof(*Note), TAG_NTFSNG);
     if (!Note)
         return;
     RtlZeroMemory(Note, sizeof(*Note));
-    RtlInitUnicodeString(&Note->Caption, L"NTFS volume damaged");
+    RtlInitUnicodeString(&Note->Caption, Damage ? L"NTFS volume damaged" : L"NTFS volume read-only");
     Note->Text.Buffer = Note->Buffer;
     Note->Text.MaximumLength = sizeof(Note->Buffer) - 2 * sizeof(WCHAR);
-    RtlStringCbPrintfW(Note->Buffer, Note->Text.MaximumLength,
-                       L"The NTFS volume with serial number %04lX-%04lX is damaged (%hs).\n\n"
-                       L"It was mounted read-only to protect it: changes made to it in this session, "
-                       L"including registry changes on the system volume, are not saved. "
-                       L"Check and repair the volume with a disk checker on another system.",
-                       Vcb->Vpb->SerialNumber >> 16, Vcb->Vpb->SerialNumber & 0xffff, Why ? Why : "unknown");
+    if (Damage)
+        RtlStringCbPrintfW(Note->Buffer, Note->Text.MaximumLength,
+                           L"The NTFS volume with serial number %04lX-%04lX is damaged (%hs).\n\n"
+                           L"It was mounted read-only to protect it: changes made to it in this session, "
+                           L"including registry changes on the system volume, are not saved. "
+                           L"Check and repair the volume with a disk checker on another system.",
+                           Vcb->Vpb->SerialNumber >> 16, Vcb->Vpb->SerialNumber & 0xffff, Why ? Why : "unknown");
+    else
+        RtlStringCbPrintfW(Note->Buffer, Note->Text.MaximumLength,
+                           L"The NTFS volume with serial number %04lX-%04lX was mounted read-only (%hs).\n\n"
+                           L"Changes made to it in this session, including registry changes on the system "
+                           L"volume, are not saved.",
+                           Vcb->Vpb->SerialNumber >> 16, Vcb->Vpb->SerialNumber & 0xffff, Why ? Why : "unknown");
     Note->Text.Length = (USHORT)(wcslen(Note->Buffer) * sizeof(WCHAR));
     if (NT_SUCCESS(PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, NgDamageNotifyThread, Note)))
         ZwClose(Thread);
@@ -312,7 +320,11 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     for (i = 0; i < Vpb->VolumeLabelLength / sizeof(WCHAR); i++)
         Vpb->VolumeLabel[i] = Vcb->Info.label[i];
     Vcb->ReadOnly = Vcb->Info.read_only ? TRUE : FALSE;
-    Vcb->Damaged = Vcb->Info.damaged ? TRUE : FALSE;
+    /*
+     * Read-only for good on a disk that cannot flush, or whose sectors the journal cannot use: the
+     * system volume boots read-only there, as a damaged one does.
+     */
+    Vcb->Damaged = Vcb->Info.damaged || NoFlush || (SectorSize != 512 && !Removable && !NgGlobal.ForceReadOnly) ? TRUE : FALSE;
     if (!Vcb->ReadOnly && !NT_SUCCESS(NgStartFlusher(Vcb)))
     {
         DPRINT1("ntfsng: no flusher thread, mounting read-only\n");
@@ -328,7 +340,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Vcb->Info.total_clusters, Vcb->Info.free_clusters, Vpb->SerialNumber,
             Vcb->ReadOnly ? "READ-ONLY" : "read-write", WhyRo ? ": " : "", WhyRo ? WhyRo : "");
     if (Vcb->Damaged)
-        NgReportDamage(Vcb, WhyRo);
+        NgReportDamage(Vcb, WhyRo, Vcb->Info.damaged ? TRUE : FALSE);
     return STATUS_SUCCESS;
 }
 

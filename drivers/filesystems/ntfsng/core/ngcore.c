@@ -351,6 +351,15 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			*why_ro = "$LogFile was not shut down cleanly";
 		else if (pass == NGC_PASS_CHECK)
 			*why_ro = ngc_mount_check(v, vol, b, need_write || dirty);
+		/*
+		 * The journal demands a repair, or cannot say whether one is needed: read-only for good, as a
+		 * volume the check found damaged, so a system volume still boots (read-only, with a notice).
+		 */
+		if (jrec == NGJ_REPAIR || jrec == NGJ_UNREAD) {
+			v->damaged = 1;
+			snprintf(v->why, sizeof(v->why), "%s", *why_ro);
+			*why_ro = v->why;
+		}
 		if (*why_ro) {
 			/* Read-only from here on: nothing is written, the journal (if any) is only shown. */
 			kfree(v->jv);
