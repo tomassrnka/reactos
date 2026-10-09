@@ -51,6 +51,7 @@ list(APPEND SOURCE
     SuspendThreadContext.c
     SystemFirmware.c
     TerminateProcess.c
+    ThreadContextNpx.c
     TunnelCache.c
     UEFIFirmware.c
     WerFlags.c
