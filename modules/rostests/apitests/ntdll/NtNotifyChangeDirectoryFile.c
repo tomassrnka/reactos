@@ -199,12 +199,15 @@ TestZeroLengthBuffer(VOID)
     ok_hex(Iosb.Status, STATUS_NOTIFY_ENUM_DIR);
     CancelPending(Dir, Wait);
 
-    /* Change made while no request is pending */
+    /* Change made while no request is pending. Windows does not keep it for
+     * a watcher without a buffer: the next request waits. ReactOS reports it
+     * to that request. */
     ok(TouchFile(Path, L"c"), "TouchFile failed: %lu\n", GetLastError());
     Status = Notify(Dir, &Iosb, NULL, 0, NAME_FILTER, FALSE);
     ok_hex(Status, STATUS_PENDING);
-    Wait = WaitForSingleObject(Event, WAIT_MS);
-    ok(Wait == WAIT_OBJECT_0, "Change made between requests was not reported (%lu)\n", Wait);
+    Wait = WaitForSingleObject(Event, 500);
+    todo_if(is_reactos())
+    ok(Wait == WAIT_TIMEOUT, "Change made between requests was reported, status 0x%lx\n", Iosb.Status);
     if (Wait == WAIT_OBJECT_0)
         ok_hex(Iosb.Status, STATUS_NOTIFY_ENUM_DIR);
     CancelPending(Dir, Wait);
