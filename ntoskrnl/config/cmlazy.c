@@ -79,7 +79,10 @@ CmpDoFlushNextHive(_In_  BOOLEAN ForceFlush,
                 /* Do the sync */
                 DPRINT("Flushing: %wZ\n", &CmHive->FileFullPath);
                 DPRINT("Handle: %p\n", CmHive->FileHandles[HFILE_TYPE_PRIMARY]);
+                /* Keep writers of other keys out while the hive is written */
+                CmpLockHiveFlusherExclusive(CmHive);
                 Status = HvSyncHive(&CmHive->Hive);
+                CmpUnlockHiveFlusher(CmHive);
                 if (!NT_SUCCESS(Status))
                 {
                     /* Let them know we failed */
