@@ -433,6 +433,10 @@ KiSwapThread(IN PKTHREAD CurrentThread,
     LONG_PTR WaitStatus;
     PKTHREAD NextThread;
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* Until the switch, this processor could not serve IPIs */
+    ASSERT(__readeflags() & EFLAGS_INTERRUPT_MASK);
+#endif
 
     /* Acquire the PRCB lock */
     KiAcquirePrcbLock(Prcb);
