@@ -226,14 +226,22 @@ int NgAssignNewSecurity(PNG_VCB Vcb, ngc_node *Node, PSECURITY_DESCRIPTOR Parent
                         NTSTATUS *Rejected)
 {
     PSECURITY_DESCRIPTOR New = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Parent, Creator;
+    ULONG AutoInherit = 0;
     NTSTATUS Status;
     int Err;
 
     if (!As)
         return 0;
-    Status = SeAssignSecurityEx(ParentSd, As->SecurityDescriptor, &New, NULL, IsDir,
-                                SEF_DACL_AUTO_INHERIT | SEF_SACL_AUTO_INHERIT, &As->SubjectSecurityContext,
-                                IoGetFileObjectGenericMapping(), PagedPool);
+    /* Auto-inheritance only below an ACL marked auto-inherited, and only for an ACL the create does not supply. */
+    Parent = ParentSd ? ((PISECURITY_DESCRIPTOR)ParentSd)->Control : 0;
+    Creator = As->SecurityDescriptor ? ((PISECURITY_DESCRIPTOR)As->SecurityDescriptor)->Control : 0;
+    if ((Parent & SE_DACL_AUTO_INHERITED) && !(Creator & SE_DACL_PRESENT))
+        AutoInherit |= SEF_DACL_AUTO_INHERIT;
+    if ((Parent & SE_SACL_AUTO_INHERITED) && !(Creator & SE_SACL_PRESENT))
+        AutoInherit |= SEF_SACL_AUTO_INHERIT;
+    Status = SeAssignSecurityEx(ParentSd, As->SecurityDescriptor, &New, NULL, IsDir, AutoInherit,
+                                &As->SubjectSecurityContext, IoGetFileObjectGenericMapping(), PagedPool);
     if (!NT_SUCCESS(Status))
     {
         /* The create fails with SeAssignSecurityEx's own status. */
