@@ -37,7 +37,35 @@ START_TEST(NtGdiDdCreateSurface)
     DD_SURFACE_LOCAL Local;
     DD_CREATESURFACEDATA Data;
     HANDLE hDirectDraw;
+    HMODULE hWin32u;
     HDC hdc;
+
+    /* Windows Server 2008 R2 has no win32u.dll and Windows 10 has no such
+       export, so the delay-loaded call would end the process. Older systems
+       load the DLLs that dlihook.c names. */
+    if (!is_reactos())
+    {
+        PCWSTR DllName = L"win32u.dll";
+        BOOL Found = FALSE;
+
+        switch (GetNTVersion())
+        {
+            case _WIN32_WINNT_WINXP: DllName = L"win32u_xpsp2.dll"; break;
+            case _WIN32_WINNT_WS03: DllName = L"win32u_2k3sp2.dll"; break;
+            case _WIN32_WINNT_VISTA: DllName = L"win32u_vista.dll"; break;
+        }
+        hWin32u = LoadLibraryW(DllName);
+        if (hWin32u)
+        {
+            Found = GetProcAddress(hWin32u, "NtGdiDdCreateSurface") != NULL;
+            FreeLibrary(hWin32u);
+        }
+        if (!Found)
+        {
+            skip("%ls does not export NtGdiDdCreateSurface\n", DllName);
+            return;
+        }
+    }
 
     ZeroMemory(&Local, sizeof(Local));
     Local.ddsCaps.dwCaps = DDSCAPS_VISIBLE;
