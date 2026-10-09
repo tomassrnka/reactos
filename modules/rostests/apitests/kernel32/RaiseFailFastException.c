@@ -168,6 +168,12 @@ TestChild(
                           Event.u.Exception.ExceptionRecord.ExceptionFlags);
                     ok(Event.u.Exception.ExceptionRecord.ExceptionFlags & EXCEPTION_NONCONTINUABLE,
                        "%s: exception flags 0x%lx\n", Mode, Event.u.Exception.ExceptionRecord.ExceptionFlags);
+                    /* On Windows a debugger that continues the exception resumes the
+                       process (Windows 10: the call returns, or the supplied context
+                       runs; Server 2008 R2: it raises again), so the debugger hands
+                       the exception back. ReactOS ends the process either way. */
+                    if (!is_reactos())
+                        Continue = DBG_EXCEPTION_NOT_HANDLED;
                 }
                 else if (Event.u.Exception.ExceptionRecord.ExceptionCode != EXCEPTION_BREAKPOINT)
                 {
@@ -186,7 +192,8 @@ TestChild(
         ContinueDebugEvent(Event.dwProcessId, Event.dwThreadId, Continue);
     }
 
-    /* The debugger continued the exception: the process still ends */
+    /* The process ends. On ReactOS this holds when the debugger continued the
+       exception, which is a ReactOS rule that Windows does not follow */
 #if defined(_M_IX86) || defined(_M_AMD64)
     if (Debug)
         ok(Seen >= 1, "%s: the debugger did not see exception 0x%lx\n", Mode, ExpectedCode);
