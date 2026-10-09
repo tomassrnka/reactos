@@ -7,6 +7,57 @@
 
 #include <kmt_test.h>
 
+#ifdef _M_IX86
+
+#define NPX_RUNDOWN_THREADS 64
+
+static
+VOID
+NTAPI
+NpxRundownThread(
+    _In_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+
+    /* Use the NPX, so that this thread's state gets loaded */
+#ifdef _MSC_VER
+    __asm fld1
+    __asm fstp st(0)
+#else
+    __asm__ __volatile__("fld1\n\tfstp %%st(0)" : : : "memory");
+#endif
+
+    /* Set CR0.TS under the loaded state, as the task switches of an NMI do,
+       then exit: the kernel must discard the state without a bugcheck */
+    __writecr0(__readcr0() | 0x8);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
+VOID
+TestNpxRundown(VOID)
+{
+    NTSTATUS Status;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Handle;
+    ULONG i;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    for (i = 0; i < NPX_RUNDOWN_THREADS; i++)
+    {
+        Status = PsCreateSystemThread(&Handle, SYNCHRONIZE, &ObjectAttributes, NULL, NULL, NpxRundownThread, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        Status = ZwWaitForSingleObject(Handle, FALSE, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(Handle);
+    }
+}
+
+#endif
+
 START_TEST(KeFloatPointState)
 {
     NTSTATUS Status;
@@ -44,4 +95,9 @@ START_TEST(KeFloatPointState)
     /* We're done */
     KeRestoreFloatingPointState(&FloatSave);
     KeLowerIrql(Irql);
+
+#ifdef _M_IX86
+    if (!skip(is_reactos(), "The NPX rundown test writes CR0 and runs on ReactOS only\n"))
+        TestNpxRundown();
+#endif
 }

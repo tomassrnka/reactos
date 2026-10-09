@@ -403,13 +403,30 @@ FORCEINLINE
 VOID
 KiRundownThread(IN PKTHREAD Thread)
 {
+    PKPRCB Prcb;
+    ULONG_PTR EFlags;
+    ULONG Cr0;
+
+    EFlags = __readeflags();
+    _disable();
+
     /* Check if this is the NPX Thread */
-    if (KeGetCurrentPrcb()->NpxThread == Thread)
+    Prcb = KeGetCurrentPrcb();
+    if (Prcb->NpxThread == Thread)
     {
-        /* Clear it */
-        KeGetCurrentPrcb()->NpxThread = NULL;
+        /* Stay the owner until after FNINIT, so that a TS set meanwhile by
+           an NMI task switch traps as spurious */
+        Cr0 = __readcr0() & ~(CR0_MP | CR0_EM | CR0_TS);
+        __writecr0(Cr0);
         Ke386FnInit();
+        KeMemoryBarrierWithoutFence();
+
+        Thread->NpxState = NPX_STATE_NOT_LOADED;
+        Prcb->NpxThread = NULL;
+        __writecr0(Cr0 | NPX_STATE_NOT_LOADED);
     }
+
+    __writeeflags(EFlags);
 }
 
 CODE_SEG("INIT")
