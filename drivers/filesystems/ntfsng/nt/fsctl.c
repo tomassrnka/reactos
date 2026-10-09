@@ -858,11 +858,16 @@ static NTSTATUS NgVerifyVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExFreePoolWithTag(Boot, TAG_NTFSNG);
     if (Status == STATUS_WRONG_VOLUME)
     {
-        /* Stops the flusher and every request before the next one reaches the new medium. */
+        /*
+         * Stops the flusher and every request before the next one reaches the new medium.  A dismount
+         * may have won the race for the lock (a verify does not take the create gate): its core is
+         * gone, but the dismounted volume handle must not write the new medium either.
+         */
         NgAcquireCore(Vcb);
         Vcb->WrongMedia = TRUE;
         Vcb->ReadOnly = TRUE;
-        ngc_medium_gone(Vcb->Core);     /* requests already past dispatch fail in the core */
+        if (Vcb->Core)
+            ngc_medium_gone(Vcb->Core); /* requests already past dispatch fail in the core */
         NgReleaseCore(Vcb);
         DPRINT1("ntfsng: volume %08lx: the medium was changed; the volume is no longer usable\n", Vpb->SerialNumber);
     }
