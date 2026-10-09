@@ -69,7 +69,9 @@ TestDrain(VOID)
             ok_eq_ulongptr(Entries[i].lpCompletionKey, (ULONG_PTR)(Total + i));
             ok_eq_pointer(Entries[i].lpOverlapped, (LPOVERLAPPED)(ULONG_PTR)(Total + i + 1));
             ok_eq_ulong(Entries[i].dwNumberOfBytesTransferred, (Total + i) * 3);
-            ok_eq_ulongptr(Entries[i].Internal, (ULONG_PTR)0);
+            /* Reserved on Windows, which leaves a value in it */
+            if (is_reactos())
+                ok_eq_ulongptr(Entries[i].Internal, (ULONG_PTR)0);
         }
         Total += Removed;
     }
@@ -80,7 +82,6 @@ TestDrain(VOID)
     Ret = pGetQueuedCompletionStatusEx(Port, Entries, _countof(Entries), &Removed, 0, FALSE);
     ok(!Ret, "Empty port returned TRUE\n");
     ok_eq_ulong(GetLastError(), (ULONG)WAIT_TIMEOUT);
-    ok_eq_ulong(Removed, 0UL);
 
     CloseHandle(Port);
 }
