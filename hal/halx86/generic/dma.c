@@ -211,7 +211,8 @@ HalpInitDma(VOID)
      */
     InitializeListHead(&HalpDmaAdapterList);
     KeInitializeSpinLock(&HalpDmaAdapterListLock);
-    KeInitializeEvent(&HalpDmaLock, NotificationEvent, TRUE);
+    /* A synchronization event: each wait takes it, KeSetEvent hands it on */
+    KeInitializeEvent(&HalpDmaLock, SynchronizationEvent, TRUE);
     HalpMasterAdapter = HalpDmaAllocateMasterAdapter();
 
     /*
