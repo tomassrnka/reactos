@@ -46,6 +46,9 @@ MmInitializeRmapList(VOID)
                                      50);
 }
 
+/* Pages written back (MiWritePage) or paged out (MmPageOutPhysicalAddress): an activity count */
+volatile LONG MiReclaimProgress;
+
 NTSTATUS
 NTAPI
 MmPageOutPhysicalAddress(PFN_NUMBER Page)
@@ -269,6 +272,7 @@ GetEntry:
             ExReleaseRundownProtection(&Process->RundownProtect);
             ObDereferenceObject(Process);
 
+            InterlockedIncrement(&MiReclaimProgress);
             return STATUS_SUCCESS;
         }
 
@@ -283,7 +287,11 @@ GetEntry:
         ExReleaseRundownProtection(&Process->RundownProtect);
         ObDereferenceObject(Process);
 
-        if (Released) return STATUS_SUCCESS;
+        if (Released)
+        {
+            InterlockedIncrement(&MiReclaimProgress);
+            return STATUS_SUCCESS;
+        }
     }
 #ifdef NEWCC
     else if (Type == MEMORY_AREA_CACHE)
@@ -314,6 +322,7 @@ WriteSegment:
 
         if (Released)
         {
+            InterlockedIncrement(&MiReclaimProgress);
             return STATUS_SUCCESS;
         }
     }

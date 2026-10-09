@@ -275,6 +275,9 @@ MiWritePage(PMM_SECTION_SEGMENT Segment,
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
     }
 
+    if (NT_SUCCESS(Status))
+        InterlockedIncrement(&MiReclaimProgress);
+
     return Status;
 }
 
@@ -1196,7 +1199,8 @@ MmMakeSegmentResident(
     _In_ LONGLONG Offset,
     _In_ ULONG Length,
     _In_opt_ PLARGE_INTEGER ValidDataLength,
-    _In_ BOOLEAN SetDirty)
+    _In_ BOOLEAN SetDirty,
+    _Out_opt_ PBOOLEAN OutOfPages)
 {
     /* Let's use a 64K granularity. */
     LONGLONG RangeStart, RangeEnd;
@@ -1363,6 +1367,8 @@ MmMakeSegmentResident(
                     /* Damn. Roll-back. */
                     for (UINT j = 0; j < i; j++)
                         MmReleasePageMemoryConsumer(MC_USER, Pages[j]);
+                    if (OutOfPages)
+                        *OutOfPages = TRUE;
                     goto Failed;
                 }
             }
@@ -1803,7 +1809,7 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
 
         PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject->FsContext;
 
-        Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE, &FcbHeader->ValidDataLength, FALSE);
+        Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE, &FcbHeader->ValidDataLength, FALSE, NULL);
 
         FsRtlReleaseFile(Segment->FileObject);
 
@@ -5043,14 +5049,70 @@ MmMakeDataSectionResident(
     _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
     _In_ LONGLONG Offset,
     _In_ ULONG Length,
-    _In_ PLARGE_INTEGER ValidDataLength)
+    _In_ PLARGE_INTEGER ValidDataLength,
+    _In_ BOOLEAN WaitForPages)
 {
     PMM_SECTION_SEGMENT Segment = MiGrabDataSection(SectionObjectPointer);
 
     /* There must be a segment for this call */
     ASSERT(Segment);
 
-    NTSTATUS Status = MmMakeSegmentResident(Segment, Offset, Length, ValidDataLength, FALSE);
+    BOOLEAN OutOfPages = FALSE;
+    NTSTATUS Status = MmMakeSegmentResident(Segment, Offset, Length, ValidDataLength, FALSE, &OutOfPages);
+
+    /*
+     * No page to read into. If the cache copies file data for a caller
+     * (WaitForPages), start the balancer and try again every 50 ms while
+     * reclamation progresses: stop when no page has been written back or
+     * paged out (MiReclaimProgress) for 30 seconds, or after 2 minutes for
+     * this range, with one last attempt. The caller of a copy holds file
+     * system resources (at least those of its file), and reclamation can
+     * depend on them: the balancer skips a page whose file it cannot lock
+     * without waiting (btrfs takes the main resource, which its writer
+     * holds). When reclamation stops, the failure goes back up and the
+     * caller releases its locks; write-back of other files can still keep
+     * such a caller waiting up to the 2 minutes. A pin or map of file
+     * system metadata fails at once: its caller can hold volume locks that
+     * the write-back needs. System threads do not wait: the balancer and
+     * the lazy writer free the pages, and read-ahead is optional. A thread
+     * that is being terminated stops between attempts. These checks run
+     * between attempts; a page-in that an attempt waits for is not bounded
+     * by them. A STATUS_NO_MEMORY that the paging read reports is not
+     * retried.
+     */
+    if (OutOfPages && WaitForPages && !PsIsSystemThread(PsGetCurrentThread()))
+    {
+        const ULONGLONG StallTime = 30 * 1000 * 10000ULL;    /* 30 s, in 100 ns units */
+        const ULONGLONG MaximumTime = 120 * 1000 * 10000ULL; /* 2 min */
+        ULONGLONG Start = KeQueryInterruptTime();
+        ULONGLONG Progress = Start;
+        ULONGLONG Now;
+        LONG Reclaimed = MiReclaimProgress;
+        BOOLEAN LastAttempt = FALSE;
+        LARGE_INTEGER Delay;
+
+        Delay.QuadPart = -50 * 10000LL;  /* 50 ms */
+        do
+        {
+            MmRebalanceMemoryConsumers();
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+
+            if (PsIsThreadTerminating(PsGetCurrentThread()))
+                break;
+
+            Now = KeQueryInterruptTime();
+            if (MiReclaimProgress != Reclaimed)
+            {
+                Reclaimed = MiReclaimProgress;
+                Progress = Now;
+            }
+            /* One last attempt: pages freed other ways do not move the count */
+            LastAttempt = (Now - Progress >= StallTime) || (Now - Start >= MaximumTime);
+
+            OutOfPages = FALSE;
+            Status = MmMakeSegmentResident(Segment, Offset, Length, ValidDataLength, FALSE, &OutOfPages);
+        } while (OutOfPages && !LastAttempt);
+    }
 
     MmDereferenceSegment(Segment);
 

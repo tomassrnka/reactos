@@ -935,6 +935,8 @@ NTAPI
 MmRebalanceMemoryConsumers(VOID);
 
 /* rmap.c **************************************************************/
+extern volatile LONG MiReclaimProgress;
+
 #define RMAP_SEGMENT_MASK ~((ULONG_PTR)0xff)
 #define RMAP_IS_SEGMENT(x) (((ULONG_PTR)(x) & RMAP_SEGMENT_MASK) == RMAP_SEGMENT_MASK)
 
@@ -1527,7 +1529,8 @@ MmMakeDataSectionResident(
     _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
     _In_ LONGLONG Offset,
     _In_ ULONG Length,
-    _In_ PLARGE_INTEGER ValidDataLength);
+    _In_ PLARGE_INTEGER ValidDataLength,
+    _In_ BOOLEAN WaitForPages);
 
 BOOLEAN
 NTAPI
