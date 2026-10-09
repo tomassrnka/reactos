@@ -3571,6 +3571,10 @@ MmMapViewOfSegment(
 
     InterlockedIncrement64(Segment->ReferenceCount);
 
+    /* A file truncation must not cut through a view of a process, even once the section is closed */
+    if (((*Segment->Flags) & MM_DATAFILE_SEGMENT) && (AddressSpace != MmGetKernelAddressSpace()))
+        InterlockedIncrement(&Segment->UserMapCount);
+
     MArea->SectionData.Segment = Segment;
     MArea->SectionData.ViewOffset = ViewOffset;
     if (AsImage)
@@ -3726,6 +3730,8 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
                                   MmFreeSectionPage,
                                   AddressSpace);
     }
+    if (((*Segment->Flags) & MM_DATAFILE_SEGMENT) && (AddressSpace != MmGetKernelAddressSpace()))
+        InterlockedDecrement(&Segment->UserMapCount);
     MmUnlockSectionSegment(Segment);
     MmDereferenceSegment(Segment);
     return Status;
@@ -4452,8 +4458,18 @@ MmCanFileBeTruncated(
     if ((Segment->SectionCount == 0) ||
         ((Segment->SectionCount == 1) && (SectionObjectPointer->SharedCacheMap != NULL)))
     {
-        /* If the cache is the only one holding a reference to the segment, then it's fine to resize */
-        Ret = TRUE;
+        if (Segment->UserMapCount == 0)
+        {
+            /* If the cache is the only one holding a reference to the segment, then it's fine to resize */
+            Ret = TRUE;
+        }
+        else
+        {
+            /* A process still maps the file, though its section is closed: it may grow, not shrink */
+            PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject->FsContext;
+
+            Ret = (NewFileSize != NULL) && (NewFileSize->QuadPart >= FcbHeader->FileSize.QuadPart);
+        }
     }
     else if (NewFileSize != NULL)
     {

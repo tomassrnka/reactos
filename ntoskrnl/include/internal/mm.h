@@ -207,6 +207,7 @@ typedef struct _MM_SECTION_SEGMENT
     LARGE_INTEGER Length;			/* absolute length of the segment */
     PLONG64 ReferenceCount;
 	ULONG SectionCount;
+    LONG UserMapCount;      /* data segments: views mapped in process address spaces */
     ULONG Protection;
     PULONG Flags;
     BOOLEAN WriteCopy;
