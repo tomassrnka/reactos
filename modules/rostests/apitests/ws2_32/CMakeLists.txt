@@ -15,6 +15,7 @@ list(APPEND SOURCE
     open_osfhandle.c
     recv.c
     send.c
+    udpbindretry.c
     udprecv.c
     WSAAsync.c
     WSAIoctl.c
