@@ -405,6 +405,14 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     //
     OldIrql = MiAcquirePfnLock();
 
+    /* Fail the stack instead of using page 0 when no page is free */
+    if (MiGetFreeOrZeroedPageCount() < StackPages)
+    {
+        MiReleasePfnLock(OldIrql);
+        MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
+        return NULL;
+    }
+
     //
     // Loop each stack page
     //
@@ -494,6 +502,15 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     // Acquire the PFN DB lock
     //
     OldIrql = MiAcquirePfnLock();
+
+    /* Fail the growth instead of using page 0 when no page is free */
+    if ((LimitPte >= NewLimitPte) &&
+        (MiGetFreeOrZeroedPageCount() <
+         (PFN_NUMBER)(LimitPte - NewLimitPte + 1)))
+    {
+        MiReleasePfnLock(OldIrql);
+        return STATUS_NO_MEMORY;
+    }
 
     //
     // Loop each stack page
@@ -1223,6 +1240,7 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
 {
     KIRQL OldIrql;
     PFN_NUMBER TableBaseIndex, HyperIndex, WsListIndex;
+    BOOLEAN ZeroTableBase, ZeroHyper, ZeroWsList;
     ULONG Color;
 
     /* Make sure we don't already have a page directory setup */
@@ -1239,55 +1257,44 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     /* Lock PFN database */
     OldIrql = MiAcquirePfnLock();
 
+    /* Fail the process instead of using page 0 when no page is free */
+    if (MiGetFreeOrZeroedPageCount() < 3)
+    {
+        MiReleasePfnLock(OldIrql);
+        return FALSE;
+    }
+
     /*
      * Get a page for the table base, one for hyper space & one for the working set list.
      * The PFNs for these pages will be initialized in MmInitializeProcessAddressSpace,
      * when we are already attached to the process.
      * The other pages (if any) are allocated in the arch-specific part.
+     * Take zeroed pages if there are any, others are zeroed outside the
+     * PFN lock.
      */
     Color = MI_GET_NEXT_PROCESS_COLOR(Process);
     MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
     TableBaseIndex = MiRemoveZeroPageSafe(Color);
-    if (!TableBaseIndex)
-    {
-        /* No zero pages, grab a free one */
+    ZeroTableBase = (TableBaseIndex == 0);
+    if (ZeroTableBase)
         TableBaseIndex = MiRemoveAnyPage(Color);
-
-        /* Zero it outside the PFN lock */
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(TableBaseIndex);
-        OldIrql = MiAcquirePfnLock();
-    }
     MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
     Color = MI_GET_NEXT_PROCESS_COLOR(Process);
     HyperIndex = MiRemoveZeroPageSafe(Color);
-    if (!HyperIndex)
-    {
-        /* No zero pages, grab a free one */
+    ZeroHyper = (HyperIndex == 0);
+    if (ZeroHyper)
         HyperIndex = MiRemoveAnyPage(Color);
-
-        /* Zero it outside the PFN lock */
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(HyperIndex);
-        OldIrql = MiAcquirePfnLock();
-    }
     MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
     Color = MI_GET_NEXT_PROCESS_COLOR(Process);
     WsListIndex = MiRemoveZeroPageSafe(Color);
-    if (!WsListIndex)
-    {
-        /* No zero pages, grab a free one */
+    ZeroWsList = (WsListIndex == 0);
+    if (ZeroWsList)
         WsListIndex = MiRemoveAnyPage(Color);
+    MiReleasePfnLock(OldIrql);
 
-        /* Zero it outside the PFN lock */
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(WsListIndex);
-    }
-    else
-    {
-        /* Release the PFN lock */
-        MiReleasePfnLock(OldIrql);
-    }
+    if (ZeroTableBase) MiZeroPhysicalPage(TableBaseIndex);
+    if (ZeroHyper) MiZeroPhysicalPage(HyperIndex);
+    if (ZeroWsList) MiZeroPhysicalPage(WsListIndex);
 
     /* Set the base directory pointers */
     Process->WorkingSetPage = WsListIndex;

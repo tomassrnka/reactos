@@ -2448,6 +2448,17 @@ MiInitializeGlobalPages(
 #endif
 
 //
+// Pages that MiRemoveAnyPage and MiRemoveZeroPage can hand out: standby
+// pages count as available but are not taken from their list yet
+//
+FORCEINLINE
+PFN_NUMBER
+MiGetFreeOrZeroedPageCount(VOID)
+{
+    return MmFreePageListHead.Total + MmZeroedPageListHead.Total;
+}
+
+//
 // MiRemoveZeroPage will use inline code to zero out the page manually if only
 // free pages are available. In some scenarios, we don't/can't run that piece of
 // code and would rather only have a real zero page. If we can't have a zero page,

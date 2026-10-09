@@ -1092,12 +1092,8 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
         }
     }
 
-    /* Windows checks there's some free pages and this isn't an in-page error */
-    ASSERT(MmAvailablePages > 0);
+    /* This isn't an in-page error. The page is reused: no free page is needed */
     ASSERT(Pfn1->u4.InPageError == 0);
-
-    /* ReactOS checks for this */
-    ASSERT(MmAvailablePages > 32);
 
     /* Was this a transition page in the valid list, or free/zero list? */
     if (Pfn1->u3.e1.PageLocation == ActiveAndValid)
@@ -2358,13 +2354,13 @@ UserFault:
 
                 LockIrql = MiAcquirePfnLock();
 
-                ASSERT(MmAvailablePages > 0);
-
                 MI_SET_USAGE(MI_USAGE_COW);
                 MI_SET_PROCESS(CurrentProcess);
 
                 /* Allocate a new page and copy it */
-                PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_PROCESS_COLOR(CurrentProcess));
+                PageFrameIndex = 0;
+                if (MiGetFreeOrZeroedPageCount() != 0)
+                    PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_PROCESS_COLOR(CurrentProcess));
                 if (PageFrameIndex == 0)
                 {
                     MiReleasePfnLock(LockIrql);
