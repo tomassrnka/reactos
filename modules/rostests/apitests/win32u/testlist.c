@@ -4,6 +4,7 @@
 
 extern void func_NtGdiDdCreateDirectDrawObject(void);
 extern void func_NtGdiDdCreateDirectDrawObject(void);
+extern void func_NtGdiDdCreateSurface(void);
 extern void func_NtGdiDdDeleteDirectDrawObject(void);
 extern void func_NtGdiDdQueryDirectDrawObject(void);
 
@@ -76,6 +77,7 @@ const struct test winetest_testlist[] =
 {
     /* ntdd*/
     { "NtGdiDdCreateDirectDrawObject", func_NtGdiDdCreateDirectDrawObject },
+    { "NtGdiDdCreateSurface", func_NtGdiDdCreateSurface },
     { "NtGdiDdDeleteDirectDrawObject", func_NtGdiDdDeleteDirectDrawObject },
     // { "NtGdiDdQueryDirectDrawObject", func_NtGdiDdQueryDirectDrawObject },
     { "NtGdiArcInternal", func_NtGdiArcInternal },
