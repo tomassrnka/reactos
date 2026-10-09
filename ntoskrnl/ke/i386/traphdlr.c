@@ -1715,6 +1715,9 @@ KiRaiseAssertionHandler(IN PKTRAP_FRAME TrapFrame)
     /* Decrement EIP to point to the INT2C instruction (2 bytes, not 1 like INT3) */
     TrapFrame->Eip -= 2;
 
+    /* Enable interrupts if the trap came from user-mode */
+    if (KiUserTrap(TrapFrame)) _enable();
+
     /* Dispatch the exception */
     KiDispatchException0Args(STATUS_ASSERTION_FAILURE,
                              TrapFrame->Eip,
