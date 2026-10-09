@@ -56,6 +56,7 @@ list(APPEND SOURCE
     SetSearchPathMode.c
     SetThreadStackGuarantee.c
     SetUnhandledExceptionFilter.c
+    SuspendThreadContext.c
     SystemFirmware.c
     TerminateProcess.c
     TunnelCache.c
