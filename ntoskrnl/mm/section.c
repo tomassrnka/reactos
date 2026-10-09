@@ -3700,6 +3700,7 @@ MiRosUnmapViewOfSection(
         PMM_SECTION_SEGMENT SectionSegments;
         PMM_SECTION_SEGMENT Segment;
         ULONG MapCount;
+        KIRQL OldIrql;
 
         Segment = MemoryArea->SectionData.Segment;
         ImageSectionObject = ImageSectionObjectFromSegment(Segment);
@@ -3707,6 +3708,9 @@ MiRosUnmapViewOfSection(
         NrSegments = ImageSectionObject->NrSegments;
 
         MemoryArea->DeleteInProgress = TRUE;
+
+        /* Keep the image section object alive until MapCount is updated */
+        InterlockedIncrement64(Segment->ReferenceCount);
 
         /* Search for the current segment within the section segments
          * and calculate the image base address */
@@ -3737,7 +3741,14 @@ MiRosUnmapViewOfSection(
             }
         }
         DPRINT("One mapping less for %p\n", ImageSectionObject->FileObject->SectionObjectPointer);
+
+        /*
+         * Under the PFN lock, which MmFlushImageSection holds while it checks
+         * MapCount, so it never sees MapCount == 0 while we hold a reference
+         */
+        OldIrql = MiAcquirePfnLock();
         MapCount = InterlockedDecrement(&ImageSectionObject->MapCount);
+        MmDereferenceSegmentWithLock(Segment, OldIrql);
         if (MapCount != 0)
             ImageBaseAddress = NULL;
     }
