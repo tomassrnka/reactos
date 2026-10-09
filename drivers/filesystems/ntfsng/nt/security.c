@@ -167,6 +167,7 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
     SECURITY_INFORMATION Info = Stack->Parameters.SetSecurity.SecurityInformation;
     PSECURITY_DESCRIPTOR Sd = NULL, Old;
+    SECURITY_DESCRIPTOR_CONTROL Keep = 0;
     NTSTATUS Status;
     int Err;
 
@@ -179,11 +180,17 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (NT_SUCCESS(Status))
     {
         Old = Sd;
+        /* An ACL the set does not replace keeps its marks; SeSetSecurityDescriptorInfo drops them. */
+        if (!(Info & DACL_SECURITY_INFORMATION))
+            Keep |= ((PISECURITY_DESCRIPTOR)Old)->Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED);
+        if (!(Info & SACL_SECURITY_INFORMATION))
+            Keep |= ((PISECURITY_DESCRIPTOR)Old)->Control & (SE_SACL_AUTO_INHERITED | SE_SACL_PROTECTED);
         Status = SeSetSecurityDescriptorInfo(NULL, &Info, Stack->Parameters.SetSecurity.SecurityDescriptor, &Sd,
                                              PagedPool, IoGetFileObjectGenericMapping());
         if (NT_SUCCESS(Status))
         {
             ExFreePoolWithTag(Old, TAG_NTFSNG);
+            ((PISECURITY_DESCRIPTOR)Sd)->Control |= Keep;
             NgMapGenericDacl(Sd);
             NgAcquireCore(Vcb);
             Err = NgEnsureNode(Fcb);
