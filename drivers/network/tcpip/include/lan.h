@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <chew.h>
+
 /* Media we support */
 #define MEDIA_ETH 0
 
@@ -64,6 +66,8 @@ typedef struct LAN_ADAPTER {
     UINT MacOptions;                        /* MAC options for NIC driver/adapter */
     UINT Speed;                             /* Link speed */
     UINT PacketFilter;                      /* Packet filter for this adapter */
+    CHEW_SERIAL_QUEUE ReceiveQueue;         /* Received packets, in arrival order */
+    LONG HeldPackets;                       /* Miniport packets waiting in ReceiveQueue */
 } LAN_ADAPTER, *PLAN_ADAPTER;
 
 /* LAN adapter state constants */

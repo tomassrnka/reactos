@@ -139,25 +139,29 @@ VOID RemoveIPDR(
 
 
 PIPDATAGRAM_REASSEMBLY GetReassemblyInfo(
-  PIP_PACKET IPPacket)
+  PIP_PACKET IPPacket,
+  PKIRQL OldIrql)
 /*
  * FUNCTION: Returns a pointer to an IP datagram reassembly structure
  * ARGUMENTS:
  *     IPPacket = Pointer to IP packet
+ *     OldIrql  = Receives the IRQL to restore when the structure's lock is released
+ * RETURNS:
+ *     The structure with its lock held, or NULL
  * NOTES:
  *     A datagram is identified by four paramters, which are
  *     Source and destination address, protocol number and
  *     identification number
  */
 {
-  KIRQL OldIrql;
   PLIST_ENTRY CurrentEntry;
   PIPDATAGRAM_REASSEMBLY Current;
   PIPv4_HEADER Header = (PIPv4_HEADER)IPPacket->Header;
 
   TI_DbgPrint(DEBUG_IP, ("Searching for IPDR for IP packet at (0x%X).\n", IPPacket));
 
-  TcpipAcquireSpinLock(&ReassemblyListLock, &OldIrql);
+retry:
+  TcpipAcquireSpinLock(&ReassemblyListLock, OldIrql);
 
   /* FIXME: Assume IPv4 */
 
@@ -168,14 +172,22 @@ PIPDATAGRAM_REASSEMBLY GetReassemblyInfo(
       (Header->Id == Current->Id) &&
       (Header->Protocol == Current->Protocol) &&
       (AddrIsEqual(&IPPacket->DstAddr, &Current->DstAddr))) {
-      TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
+      /* Lock it while it is on the list, so the timeout cannot free it first. Its holder
+         may be waiting for the list lock: only try, and look again after releasing it */
+      if (!KeTryToAcquireSpinLockAtDpcLevel(&Current->Lock)) {
+        TcpipReleaseSpinLock(&ReassemblyListLock, *OldIrql);
+        YieldProcessor();
+        goto retry;
+      }
+
+      TcpipReleaseSpinLockFromDpcLevel(&ReassemblyListLock);
 
       return Current;
     }
     CurrentEntry = CurrentEntry->Flink;
   }
 
-  TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
+  TcpipReleaseSpinLock(&ReassemblyListLock, *OldIrql);
 
   return NULL;
 }
@@ -262,8 +274,9 @@ static inline VOID Cleanup(
 {
   TI_DbgPrint(MIN_TRACE, ("Insufficient resources.\n"));
 
-  TcpipReleaseSpinLock(Lock, OldIrql);
+  /* Off the list before the lock goes, or a lookup could take it while it is freed */
   RemoveIPDR(IPDR);
+  TcpipReleaseSpinLock(Lock, OldIrql);
   FreeIPDR(IPDR);
 }
 
@@ -298,11 +311,10 @@ VOID ProcessFragment(
   IPv4Header = (PIPv4_HEADER)IPPacket->Header;
 
   /* Check if we already have an reassembly structure for this datagram */
-  IPDR = GetReassemblyInfo(IPPacket);
+  IPDR = GetReassemblyInfo(IPPacket, &OldIrql);
   if (IPDR) {
     TI_DbgPrint(DEBUG_IP, ("Continueing assembly.\n"));
-    /* We have a reassembly structure */
-    TcpipAcquireSpinLock(&IPDR->Lock, &OldIrql);
+    /* We have a reassembly structure, locked */
 
     /* Reset the timeout since we received a fragment */
     IPDR->TimeoutCount = 0;
@@ -314,6 +326,10 @@ VOID ProcessFragment(
     if (!IPDR)
       /* We don't have the resources to process this packet, discard it */
       return;
+
+    /* A reused structure still holds the freed header of its last datagram, which
+       only the first fragment replaces */
+    RtlZeroMemory(IPDR, sizeof(*IPDR));
 
     /* Create a descriptor spanning from zero to infinity.
        Actually, we use a value slightly greater than the
@@ -532,7 +548,14 @@ VOID IPDatagramReassemblyTimeout(
        NextEntry = CurrentEntry->Flink;
        CurrentIPDR = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_REASSEMBLY, ListEntry);
 
-       TcpipAcquireSpinLockAtDpcLevel(&CurrentIPDR->Lock);
+       /* The receive path holds a datagram's lock when it takes the list lock (to insert or
+          remove the datagram), so waiting for it here can deadlock. A datagram whose lock is
+          busy is being worked on; look at it again at the next timeout */
+       if (!KeTryToAcquireSpinLockAtDpcLevel(&CurrentIPDR->Lock))
+       {
+           CurrentEntry = NextEntry;
+           continue;
+       }
 
        if (++CurrentIPDR->TimeoutCount == MAX_TIMEOUT_COUNT)
        {

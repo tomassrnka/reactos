@@ -1,5 +1,8 @@
 #include <debug.h>
 #include <lwip/sys.h>
+#include <lwip/timeouts.h>
+#include <lwip/tcpip.h>
+#include <lwip/priv/tcpip_priv.h>
 
 #include "lwip_glue.h"
 
@@ -13,6 +16,34 @@ NPAGED_LOOKASIDE_LIST MessageLookasideList;
 NPAGED_LOOKASIDE_LIST QueueEntryLookasideList;
 
 static LARGE_INTEGER StartTime;
+
+/* The lwIP core lock (LOCK_TCPIP_CORE). It is held for microseconds by several threads, so it
+ * is not handed over to a waiter (that thread would first have to be scheduled, while the lock
+ * stays unusable): a releasing thread frees it and wakes one waiter, which competes for it again.
+ * A thread spins briefly before it waits */
+static volatile LONG CoreLockHeld;
+static volatile LONG CoreLockWaiters;
+static KEVENT CoreLockReleased;
+static PKTHREAD CoreLockOwner;
+
+#define CORE_LOCK_SPIN 256
+
+/* The tcpip thread, and when it next wakes up for a timeout (both under the core lock) */
+static PKTHREAD TcpipThread;
+static u32_t TcpipWakeTime;
+static BOOLEAN TcpipWakeForever;
+
+/* Wakes the tcpip thread early when another thread adds an earlier timeout */
+static KEVENT TimeoutChanged;
+
+/* What a wait without a timeout returns when woken that way: lwIP expects a message there */
+static struct tcpip_msg TimeoutChangedMsg;
+
+static void
+TimeoutChangedCallback(void *ctx)
+{
+    /* Nothing to do: the tcpip thread looks at the timeouts again before it waits */
+}
 
 typedef struct _thread_t
 {
@@ -29,6 +60,86 @@ u32_t sys_now(void)
     KeQuerySystemTime(&CurrentTime);
 
     return (CurrentTime.QuadPart - StartTime.QuadPart) / 10000;
+}
+
+void
+sys_lock_tcpip_core(void)
+{
+    PKTHREAD Thread = KeGetCurrentThread();
+
+    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+    ASSERT(CoreLockOwner != Thread);
+
+    /* Suspension and termination are kernel APCs; a thread holding the lock must not stop for them */
+    KeEnterCriticalRegion();
+
+    for (;;)
+    {
+        ULONG Spin;
+
+        for (Spin = (KeNumberProcessors > 1) ? CORE_LOCK_SPIN : 1; Spin > 0; Spin--)
+        {
+            if (!CoreLockHeld && !InterlockedCompareExchange(&CoreLockHeld, 1, 0))
+                goto Acquired;
+            YieldProcessor();
+        }
+
+        /* Counted before the last attempt, so a release either sees the waiter or is seen by it */
+        InterlockedIncrement(&CoreLockWaiters);
+        if (!InterlockedCompareExchange(&CoreLockHeld, 1, 0))
+        {
+            InterlockedDecrement(&CoreLockWaiters);
+            goto Acquired;
+        }
+        KeWaitForSingleObject(&CoreLockReleased, Executive, KernelMode, FALSE, NULL);
+        InterlockedDecrement(&CoreLockWaiters);
+    }
+
+Acquired:
+    CoreLockOwner = Thread;
+}
+
+void
+sys_unlock_tcpip_core(void)
+{
+    PKTHREAD Thread = KeGetCurrentThread();
+    u32_t SleepTime;
+    BOOLEAN Wake = FALSE;
+
+    ASSERT(CoreLockOwner == Thread);
+
+    /* The tcpip thread releases the lock only to wait for a message or its next timeout;
+     * lwIP computes that wait from the timeout list before the release and does not look
+     * at the list again until it wakes, so a timeout another thread adds meanwhile (the TCP
+     * timer when a connection becomes active) must wake it if it is earlier */
+    SleepTime = sys_timeouts_sleeptime();
+    if (Thread == TcpipThread)
+    {
+        TcpipWakeForever = (SleepTime == SYS_TIMEOUTS_SLEEPTIME_INFINITE);
+        TcpipWakeTime = sys_now() + SleepTime;
+    }
+    else if (SleepTime != SYS_TIMEOUTS_SLEEPTIME_INFINITE &&
+             (TcpipWakeForever || (s32_t)(sys_now() + SleepTime - TcpipWakeTime) < 0))
+    {
+        Wake = TRUE;
+    }
+
+    CoreLockOwner = NULL;
+    InterlockedExchange(&CoreLockHeld, 0);
+    if (CoreLockWaiters)
+        KeSetEvent(&CoreLockReleased, IO_NO_INCREMENT, FALSE);
+
+    /* After the release, so the woken thread does not wait for the lock */
+    if (Wake)
+        KeSetEvent(&TimeoutChanged, IO_NO_INCREMENT, FALSE);
+
+    KeLeaveCriticalRegion();
+}
+
+BOOLEAN
+sys_tcpip_core_locked(void)
+{
+    return CoreLockOwner == KeGetCurrentThread();
 }
 
 void
@@ -189,13 +300,20 @@ sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
     PLWIP_MESSAGE_CONTAINER Container;
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
-    PVOID WaitObjects[] = {&mbox->Semaphore, &TerminationEvent};
+    PVOID WaitObjects[] = {&mbox->Semaphore, &TerminationEvent, &TimeoutChanged};
+    ULONG WaitCount = 2;
 
     LargeTimeout.QuadPart = Int32x32To64(timeout, -10000);
 
+    /* The tcpip thread also wakes when another thread adds an earlier timeout. A timed wait then
+     * ends as if it had timed out; a wait without timeout (no timer pending: the IP reassembly
+     * timer keeps one pending unless its allocation failed) returns a callback that does nothing */
+    if (KeGetCurrentThread() == TcpipThread)
+        WaitCount = 3;
+
     KeQuerySystemTime(&PreWaitTime);
 
-    Status = KeWaitForMultipleObjects(2,
+    Status = KeWaitForMultipleObjects(WaitCount,
                                       WaitObjects,
                                       WaitAny,
                                       Executive,
@@ -234,6 +352,13 @@ sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 
         return 0;
     }
+    else if (Status == STATUS_WAIT_2 && timeout == 0)
+    {
+        if (msg)
+            *msg = &TimeoutChangedMsg;
+
+        return 0;
+    }
 
     return SYS_ARCH_TIMEOUT;
 }
@@ -261,6 +386,10 @@ LwipThreadMain(PVOID Context)
 {
     thread_t Container = (thread_t)Context;
     KIRQL OldIrql;
+
+    /* tcpip_thread is the only lwIP thread */
+    ASSERT(TcpipThread == NULL);
+    TcpipThread = KeGetCurrentThread();
 
     ExInterlockedInsertHeadList(&ThreadListHead, &Container->ListEntry, &ThreadListLock);
 
@@ -314,6 +443,14 @@ sys_init(void)
     KeQuerySystemTime(&StartTime);
 
     KeInitializeEvent(&TerminationEvent, NotificationEvent, FALSE);
+
+    KeInitializeEvent(&CoreLockReleased, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&TimeoutChanged, SynchronizationEvent, FALSE);
+
+    /* Never freed: lwIP leaves a static callback message alone after the call */
+    TimeoutChangedMsg.type = TCPIP_MSG_CALLBACK_STATIC;
+    TimeoutChangedMsg.msg.cb.function = TimeoutChangedCallback;
+    TimeoutChangedMsg.msg.cb.ctx = NULL;
 
     ExInitializeNPagedLookasideList(&MessageLookasideList,
                                     NULL,

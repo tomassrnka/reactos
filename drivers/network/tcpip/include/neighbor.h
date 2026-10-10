@@ -97,6 +97,13 @@ BOOLEAN NBQueuePacket(
     PNEIGHBOR_PACKET_COMPLETE PacketComplete,
     PVOID PacketContext);
 
+BOOLEAN NBQueuePacketLimited(
+    PNEIGHBOR_CACHE_ENTRY NCE,
+    PNDIS_PACKET NdisPacket,
+    PNEIGHBOR_PACKET_COMPLETE PacketComplete,
+    PVOID PacketContext,
+    UINT UnresolvedLimit);
+
 VOID NBRemoveNeighbor(
     PNEIGHBOR_CACHE_ENTRY NCE);
 
