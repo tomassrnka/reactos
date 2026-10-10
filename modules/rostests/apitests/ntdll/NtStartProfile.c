@@ -15,6 +15,7 @@ typedef ULONG_PTR PFN_NUMBER;
 
 static BOOL IsWow64;
 static KAFFINITY SystemAffinityMask;
+static DWORD_PTR CurrentProcessAffinity;
 static ULONG DummyBuffer[4096];
 
 /* The "Buffer[Offset]++;" should likely be within 128 bytes of the start
@@ -24,7 +25,9 @@ static ULONG DummyBuffer[4096];
 #define LOOP_FUNCTION_SIZE (1UL << LOOP_FUNCTION_SIZE_SHIFT)
 C_ASSERT(LOOP_FUNCTION_SIZE == 128);
 typedef void LOOP_FUNCTION(volatile ULONG *, ULONG, ULONG);
+/* The profiled range must hold the code that runs */
 static
+DECLSPEC_NOINLINE
 void
 LoopFunction(
     _Inout_updates_all_(BufferSize) volatile ULONG *Buffer,
@@ -121,15 +124,157 @@ ProfileLoopFunction(
     ok_hex(Status, STATUS_SUCCESS);
 }
 
+static
+void
+TestProfileInterval(void)
+{
+    NTSTATUS Status;
+    ULONG OldInterval, Interval, Counts, ElapsedMs, RunMs;
+    ULONG Buffer[3] = { 0 };
+    HANDLE ProfileHandle;
+    LARGE_INTEGER Frequency, Start, End;
+    FILETIME Creation, Exit, Kernel0, User0, Kernel1, User1;
+
+    Status = NtQueryIntervalProfile(ProfileTime, &OldInterval);
+    ok_hex(Status, STATUS_SUCCESS);
+    trace("Default interval %lu\n", OldInterval);
+
+    Status = NtSetIntervalProfile(10000, ProfileTime);
+    if (Status == STATUS_PRIVILEGE_NOT_HELD)
+    {
+        skip("Cannot set the profile interval\n");
+        return;
+    }
+    ok_hex(Status, STATUS_SUCCESS);
+
+    Status = NtQueryIntervalProfile(ProfileTime, &Interval);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Interval >= 5000 && Interval <= 20000, "Interval = %lu\n", Interval);
+    if (Interval == 0)
+        Interval = 10000;
+
+    Status = NtCreateProfile(&ProfileHandle,
+                             NtCurrentProcess(),
+                             (PVOID)((ULONG_PTR)LoopFunction - LOOP_FUNCTION_SIZE),
+                             3 * LOOP_FUNCTION_SIZE,
+                             LOOP_FUNCTION_SIZE_SHIFT,
+                             Buffer,
+                             sizeof(Buffer),
+                             ProfileTime,
+                             SystemAffinityMask);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtStartProfile(ProfileHandle);
+        ok_hex(Status, STATUS_SUCCESS);
+
+        QueryPerformanceFrequency(&Frequency);
+        GetThreadTimes(GetCurrentThread(), &Creation, &Exit, &Kernel0, &User0);
+        QueryPerformanceCounter(&Start);
+        LoopFunction(DummyBuffer, RTL_NUMBER_OF(DummyBuffer), 200000);
+        QueryPerformanceCounter(&End);
+        GetThreadTimes(GetCurrentThread(), &Creation, &Exit, &Kernel1, &User1);
+
+        Status = NtStopProfile(ProfileHandle);
+        ok_hex(Status, STATUS_SUCCESS);
+        Status = NtClose(ProfileHandle);
+        ok_hex(Status, STATUS_SUCCESS);
+
+        /* About one count per interval of the thread's run time, never more than wall time allows */
+        Counts = Buffer[0] + Buffer[1] + Buffer[2];
+        ElapsedMs = (ULONG)((End.QuadPart - Start.QuadPart) * 1000 / Frequency.QuadPart);
+        RunMs = (ULONG)(((((ULONGLONG)Kernel1.dwHighDateTime << 32) | Kernel1.dwLowDateTime) -
+                          (((ULONGLONG)Kernel0.dwHighDateTime << 32) | Kernel0.dwLowDateTime) +
+                          (((ULONGLONG)User1.dwHighDateTime << 32) | User1.dwLowDateTime) -
+                          (((ULONGLONG)User0.dwHighDateTime << 32) | User0.dwLowDateTime)) / 10000);
+        trace("%lu counts in %lu ms (%lu ms run) at interval %lu\n", Counts, ElapsedMs, RunMs, Interval);
+        ok(Counts >= (ULONGLONG)RunMs * 10000 / Interval / 4, "%lu counts in %lu ms run\n", Counts, RunMs);
+        ok(Counts <= (ULONGLONG)ElapsedMs * 10000 / Interval * 4 + 10, "%lu counts in %lu ms\n", Counts, ElapsedMs);
+    }
+
+    Status = NtSetIntervalProfile(OldInterval, ProfileTime);
+    ok_hex(Status, STATUS_SUCCESS);
+}
+
+static
+ULONG
+ProfileOnAffinity(
+    _In_ KAFFINITY Affinity,
+    _Out_ PNTSTATUS CreateStatus)
+{
+    NTSTATUS Status;
+    HANDLE ProfileHandle;
+    ULONG Buffer[3] = { 0 };
+
+    *CreateStatus = NtCreateProfile(&ProfileHandle,
+                                    NtCurrentProcess(),
+                                    (PVOID)((ULONG_PTR)LoopFunction - LOOP_FUNCTION_SIZE),
+                                    3 * LOOP_FUNCTION_SIZE,
+                                    LOOP_FUNCTION_SIZE_SHIFT,
+                                    Buffer,
+                                    sizeof(Buffer),
+                                    ProfileTime,
+                                    Affinity);
+    if (!NT_SUCCESS(*CreateStatus))
+        return 0;
+
+    Status = NtStartProfile(ProfileHandle);
+    ok_hex(Status, STATUS_SUCCESS);
+    LoopFunction(DummyBuffer, RTL_NUMBER_OF(DummyBuffer), 200000);
+    Status = NtStopProfile(ProfileHandle);
+    ok_hex(Status, STATUS_SUCCESS);
+    Status = NtClose(ProfileHandle);
+    ok_hex(Status, STATUS_SUCCESS);
+    return Buffer[0] + Buffer[1] + Buffer[2];
+}
+
+static
+void
+TestProfileAffinity(void)
+{
+    KAFFINITY Run, Other;
+    DWORD_PTR OldAffinity;
+    NTSTATUS Status;
+    ULONG Counts;
+
+    Counts = ProfileOnAffinity(0, &Status);
+    ok_hex(Status, STATUS_INVALID_PARAMETER);
+
+    /* Run on the lowest processor this process may use, profile on another one */
+    Run = CurrentProcessAffinity & SystemAffinityMask;
+    Run &= ~Run + 1;
+    Other = SystemAffinityMask & ~Run;
+    Other &= ~Other + 1;
+    if (!Other)
+    {
+        skip("Only one processor\n");
+        return;
+    }
+
+    OldAffinity = SetThreadAffinityMask(GetCurrentThread(), Run);
+    ok(OldAffinity != 0, "SetThreadAffinityMask failed with %lu\n", GetLastError());
+    if (!OldAffinity)
+        return;
+
+    Counts = ProfileOnAffinity(Other, &Status);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Counts == 0, "%lu counts from an excluded processor\n", Counts);
+
+    Counts = ProfileOnAffinity(Run, &Status);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Counts != 0, "No counts from the profiled processor\n");
+
+    SetThreadAffinityMask(GetCurrentThread(), OldAffinity);
+}
+
 START_TEST(NtStartProfile)
 {
     NTSTATUS Status;
     ULONG StackBuffer[3] = { 0 };
-    DWORD_PTR ProcessAffinityMask;
 
     IsWow64Process(GetCurrentProcess(), &IsWow64);
 
-    GetProcessAffinityMask(GetCurrentProcess(), &ProcessAffinityMask, &SystemAffinityMask);
+    GetProcessAffinityMask(GetCurrentProcess(), &CurrentProcessAffinity, &SystemAffinityMask);
 
     /* Parameter validation is pretty simple... */
     Status = NtStartProfile(NULL);
@@ -140,4 +285,7 @@ START_TEST(NtStartProfile)
                         StackBuffer,
                         sizeof(StackBuffer),
                         1);
+
+    TestProfileInterval();
+    TestProfileAffinity();
 }
