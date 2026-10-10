@@ -111,6 +111,9 @@ static PNTFS_ATTR_CONTEXT NtfsPrepareAttributeContext(PNTFS_ATTR_RECORD AttrReco
 
     Context = FrLdrTempAlloc(FIELD_OFFSET(NTFS_ATTR_CONTEXT, Record) + AttrRecord->Length,
                              TAG_NTFS_CONTEXT);
+    if (!Context)
+        return NULL;
+    Context->NextExtent = NULL;
     RtlCopyMemory(&Context->Record, AttrRecord, AttrRecord->Length);
     if (AttrRecord->IsNonResident)
     {
@@ -141,7 +144,14 @@ static PNTFS_ATTR_CONTEXT NtfsPrepareAttributeContext(PNTFS_ATTR_RECORD AttrReco
 
 static VOID NtfsReleaseAttributeContext(PNTFS_ATTR_CONTEXT Context)
 {
-    FrLdrTempFree(Context, TAG_NTFS_CONTEXT);
+    PNTFS_ATTR_CONTEXT NextExtent;
+
+    while (Context)
+    {
+        NextExtent = Context->NextExtent;
+        FrLdrTempFree(Context, TAG_NTFS_CONTEXT);
+        Context = NextExtent;
+    }
 }
 
 static BOOLEAN NtfsDiskRead(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, ULONGLONG Length, PCHAR Buffer)
@@ -221,7 +231,7 @@ static BOOLEAN NtfsDiskRead(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, ULONGLON
     return TRUE;
 }
 
-static ULONG NtfsReadAttribute(PNTFS_VOLUME_INFO Volume, PNTFS_ATTR_CONTEXT Context, ULONGLONG Offset, PCHAR Buffer, ULONG Length)
+static ULONG NtfsReadExtent(PNTFS_VOLUME_INFO Volume, PNTFS_ATTR_CONTEXT Context, ULONGLONG Offset, PCHAR Buffer, ULONG Length)
 {
     ULONGLONG LastLCN;
     PUCHAR DataRun;
@@ -311,7 +321,12 @@ static ULONG NtfsReadAttribute(PNTFS_VOLUME_INFO Volume, PNTFS_ATTR_CONTEXT Cont
         Buffer += ReadLength;
         AlreadyRead += ReadLength;
 
-        if (ReadLength == DataRunLength * Volume->ClusterSize - (Offset - CurrentOffset))
+        if (ReadLength == DataRunLength * Volume->ClusterSize - (Offset - CurrentOffset) && *DataRun == 0)
+        {
+            /* The read reached the end of the last run */
+            Length = 0;
+        }
+        else if (ReadLength == DataRunLength * Volume->ClusterSize - (Offset - CurrentOffset))
         {
             CurrentOffset += DataRunLength * Volume->ClusterSize;
             DataRun = NtfsDecodeRun(DataRun, &DataRunOffset, &DataRunLength);
@@ -369,6 +384,45 @@ static ULONG NtfsReadAttribute(PNTFS_VOLUME_INFO Volume, PNTFS_ATTR_CONTEXT Cont
     Context->CacheRunLength = DataRunLength;
     Context->CacheRunLastLCN = LastLCN;
     Context->CacheRunCurrentOffset = CurrentOffset;
+
+    return AlreadyRead;
+}
+
+/*
+ * A non-resident attribute that does not fit in one file record is stored as
+ * several extents, each with the mapping pairs of its own VCN range. Offsets
+ * are relative to the whole attribute.
+ */
+static ULONG NtfsReadAttribute(PNTFS_VOLUME_INFO Volume, PNTFS_ATTR_CONTEXT Context, ULONGLONG Offset, PCHAR Buffer, ULONG Length)
+{
+    PNTFS_ATTR_CONTEXT Extent;
+    ULONGLONG ExtentStart, ExtentEnd;
+    ULONG ReadLength, ExtentRead, AlreadyRead;
+
+    if (!Context->Record.IsNonResident || !Context->NextExtent)
+        return NtfsReadExtent(Volume, Context, Offset, Buffer, Length);
+
+    AlreadyRead = 0;
+    for (Extent = Context; Extent && Length > 0; Extent = Extent->NextExtent)
+    {
+        ExtentStart = Extent->Record.NonResident.LowestVCN * Volume->ClusterSize;
+        ExtentEnd = (Extent->Record.NonResident.HighestVCN + 1) * Volume->ClusterSize;
+
+        if (Offset >= ExtentEnd)
+            continue;
+        if (Offset < ExtentStart)
+            break;
+
+        ReadLength = (ExtentEnd - Offset < Length) ? (ULONG)(ExtentEnd - Offset) : Length;
+        ExtentRead = NtfsReadExtent(Volume, Extent, Offset - ExtentStart, Buffer, ReadLength);
+        AlreadyRead += ExtentRead;
+        if (ExtentRead != ReadLength)
+            break;
+
+        Offset += ExtentRead;
+        Buffer += ExtentRead;
+        Length -= ExtentRead;
+    }
 
     return AlreadyRead;
 }
@@ -566,10 +620,178 @@ skip:
     return Context;
 }
 
+/* The mapping pairs must hold at least one run and end with a terminator inside the attribute */
+static BOOLEAN NtfsMappingPairsValid(PNTFS_ATTR_RECORD AttrRecord)
+{
+    ULONG Offset = AttrRecord->NonResident.MappingPairsOffset;
+    UCHAR Header;
+
+    while (Offset < AttrRecord->Length)
+    {
+        Header = *((PUCHAR)AttrRecord + Offset);
+        if (Header == 0)
+            return Offset > AttrRecord->NonResident.MappingPairsOffset;
+        if ((Header & 0xF) == 0 || (Header & 0xF) > 8 || (Header >> 4) > 8)
+            return FALSE;
+        Offset += 1 + (Header & 0xF) + (Header >> 4);
+    }
+
+    return FALSE;
+}
+
+static PNTFS_ATTR_CONTEXT NtfsFindExtent(
+    PNTFS_VOLUME_INFO Volume,
+    PNTFS_MFT_RECORD MftRecord,
+    ULONG Type,
+    const WCHAR *Name,
+    ULONG NameLength,
+    ULONG Instance,
+    ULONGLONG LowestVcn)
+{
+    PNTFS_ATTR_RECORD AttrRecord;
+    ULONG Offset, Remaining;
+
+    Offset = MftRecord->AttributesOffset;
+    while (Offset + 0x18 <= Volume->MftRecordSize)
+    {
+        AttrRecord = (PNTFS_ATTR_RECORD)((PCHAR)MftRecord + Offset);
+        Remaining = Volume->MftRecordSize - Offset;
+        if (AttrRecord->Type == NTFS_ATTR_TYPE_END ||
+            AttrRecord->Length < 0x18 || AttrRecord->Length > Remaining)
+            break;
+
+        if (AttrRecord->Type == Type &&
+            (Instance == (ULONG)-1 || AttrRecord->Instance == Instance) &&
+            AttrRecord->IsNonResident &&
+            AttrRecord->Length >= 0x40 &&
+            AttrRecord->NameLength == NameLength &&
+            AttrRecord->NameOffset + NameLength * sizeof(WCHAR) <= AttrRecord->Length &&
+            AttrRecord->NonResident.MappingPairsOffset < AttrRecord->Length &&
+            AttrRecord->NonResident.LowestVCN == LowestVcn &&
+            AttrRecord->NonResident.HighestVCN >= LowestVcn &&
+            RtlEqualMemory((PCHAR)AttrRecord + AttrRecord->NameOffset, Name, NameLength * sizeof(WCHAR)) &&
+            NtfsMappingPairsValid(AttrRecord))
+        {
+            return NtfsPrepareAttributeContext(AttrRecord);
+        }
+
+        Offset += AttrRecord->Length;
+    }
+
+    return NULL;
+}
+
+/*
+ * NtfsFindAttribute returns the extent that starts at VCN 0. Chain the extents
+ * that hold the remaining VCNs, in order, from the attribute list of the base
+ * file record. Without them a read stops at the end of the first extent.
+ */
+static VOID NtfsLoadAttributeExtents(
+    PNTFS_VOLUME_INFO Volume,
+    PNTFS_MFT_RECORD MftRecord,
+    ULONGLONG MftIndex,
+    PNTFS_ATTR_CONTEXT Context,
+    ULONG Type,
+    const WCHAR *Name,
+    ULONG NameLength)
+{
+    PNTFS_ATTR_CONTEXT ListContext, LastExtent, Extent;
+    PNTFS_ATTR_LIST_ATTR ListRecord;
+    PNTFS_MFT_RECORD ExtentRecord;
+    PCHAR ListBuffer;
+    ULONGLONG ListSize, ListOffset, NextVcn, VcnCount, ExtentIndex;
+    USHORT ExtentSequence;
+    BOOLEAN Bootstrap;
+
+    if (!Context->Record.IsNonResident || Context->Record.NonResident.LowestVCN != 0)
+        return;
+
+    NextVcn = Context->Record.NonResident.HighestVCN + 1;
+    VcnCount = (ULONGLONG)Context->Record.NonResident.AllocatedSize / Volume->ClusterSize;
+    if (NextVcn >= VcnCount)
+        return;
+
+    ListContext = NtfsFindAttributeHelper(Volume, MftIndex,
+                                          (PNTFS_ATTR_RECORD)((PCHAR)MftRecord + MftRecord->AttributesOffset),
+                                          (PNTFS_ATTR_RECORD)((PCHAR)MftRecord + Volume->MftRecordSize),
+                                          NTFS_ATTR_TYPE_ATTRIBUTE_LIST, L"", 0, 1, -1);
+    if (!ListContext)
+        return;
+
+    ListSize = NtfsGetAttributeSize(&ListContext->Record);
+    ListBuffer = (ListSize <= 0xFFFFFFFF) ? FrLdrTempAlloc((ULONG)ListSize, TAG_NTFS_LIST) : NULL;
+    ExtentRecord = FrLdrTempAlloc(Volume->MftRecordSize, TAG_NTFS_MFT);
+
+    /* While the $MFT itself is being opened, its extent records are read through the extents found so far */
+    Bootstrap = (Volume->MFTContext == NULL);
+    if (Bootstrap)
+        Volume->MFTContext = Context;
+
+    if (ListBuffer && ExtentRecord &&
+        NtfsReadAttribute(Volume, ListContext, 0, ListBuffer, (ULONG)ListSize) == ListSize)
+    {
+        LastExtent = Context;
+        ListOffset = 0;
+        while (NextVcn < VcnCount && ListOffset + FIELD_OFFSET(NTFS_ATTR_LIST_ATTR, Name) <= ListSize)
+        {
+            ListRecord = (PNTFS_ATTR_LIST_ATTR)(ListBuffer + ListOffset);
+            if (ListRecord->Type == NTFS_ATTR_TYPE_END ||
+                ListRecord->RecLength < FIELD_OFFSET(NTFS_ATTR_LIST_ATTR, Name) ||
+                ListRecord->RecLength > ListSize - ListOffset)
+                break;
+
+            if (ListRecord->Type == Type &&
+                ListRecord->StartingVCN == NextVcn &&
+                ListRecord->NameLength == NameLength &&
+                ListRecord->NameOffset + NameLength * sizeof(WCHAR) <= ListRecord->RecLength &&
+                RtlEqualMemory((PCHAR)ListRecord + ListRecord->NameOffset, Name, NameLength * sizeof(WCHAR)))
+            {
+                Extent = NULL;
+                ExtentIndex = ListRecord->BaseFileRef & NTFS_MFT_MASK;
+                ExtentSequence = (USHORT)(ListRecord->BaseFileRef >> 48);
+                if (NtfsReadMftRecord(Volume, ExtentIndex, ExtentRecord) &&
+                    ExtentRecord->Magic == NTFS_FILE_RECORD_MAGIC &&
+                    (ExtentRecord->Flags & NTFS_FILE_RECORD_IN_USE) &&
+                    (ExtentSequence == 0 || ExtentSequence == ExtentRecord->SequenceNumber) &&
+                    (ExtentIndex == MftIndex ||
+                     (ExtentRecord->BaseMFTRecord != 0 &&
+                      (ExtentRecord->BaseMFTRecord & NTFS_MFT_MASK) == MftIndex &&
+                      ((ExtentRecord->BaseMFTRecord >> 48) == 0 ||
+                       (ExtentRecord->BaseMFTRecord >> 48) == MftRecord->SequenceNumber))))
+                {
+                    Extent = NtfsFindExtent(Volume, ExtentRecord, Type, Name, NameLength,
+                                            ListRecord->AttrId, NextVcn);
+                }
+                if (!Extent)
+                {
+                    ERR("Missing extent at VCN %I64u of attribute 0x%lx in file record %I64u\n",
+                        NextVcn, Type, MftIndex);
+                    break;
+                }
+
+                LastExtent->NextExtent = Extent;
+                LastExtent = Extent;
+                NextVcn = Extent->Record.NonResident.HighestVCN + 1;
+            }
+
+            ListOffset += ListRecord->RecLength;
+        }
+    }
+
+    if (Bootstrap)
+        Volume->MFTContext = NULL;
+    if (ExtentRecord)
+        FrLdrTempFree(ExtentRecord, TAG_NTFS_MFT);
+    if (ListBuffer)
+        FrLdrTempFree(ListBuffer, TAG_NTFS_LIST);
+    NtfsReleaseAttributeContext(ListContext);
+}
+
 static PNTFS_ATTR_CONTEXT NtfsFindAttribute(PNTFS_VOLUME_INFO Volume, PNTFS_MFT_RECORD MftRecord, ULONGLONG MftIndex, ULONG Type, const WCHAR *Name)
 {
     PNTFS_ATTR_RECORD AttrRecord;
     PNTFS_ATTR_RECORD AttrRecordEnd;
+    PNTFS_ATTR_CONTEXT Context;
     ULONG NameLength;
 
     AttrRecord = (PNTFS_ATTR_RECORD)((PCHAR)MftRecord + MftRecord->AttributesOffset);
@@ -577,15 +799,31 @@ static PNTFS_ATTR_CONTEXT NtfsFindAttribute(PNTFS_VOLUME_INFO Volume, PNTFS_MFT_
     for (NameLength = 0; Name[NameLength] != 0; NameLength++)
         ;
 
-    return NtfsFindAttributeHelper(Volume, MftIndex, AttrRecord, AttrRecordEnd, Type, Name, NameLength, NTFS_MAX_ATTRIBUTE_LIST_RECURSION, -1);
+    /* Opening the $MFT: no other file record can be read until its VCN-0 extent is known */
+    if (!Volume->MFTContext)
+        Context = NtfsFindExtent(Volume, MftRecord, Type, Name, NameLength, (ULONG)-1, 0);
+    else
+        Context = NtfsFindAttributeHelper(Volume, MftIndex, AttrRecord, AttrRecordEnd, Type, Name, NameLength, NTFS_MAX_ATTRIBUTE_LIST_RECURSION, -1);
+    if (Context)
+        NtfsLoadAttributeExtents(Volume, MftRecord, MftIndex, Context, Type, Name, NameLength);
+
+    return Context;
 }
 
-static BOOLEAN NtfsFixupRecord(PNTFS_VOLUME_INFO Volume, PNTFS_RECORD Record)
+static BOOLEAN NtfsFixupRecord(PNTFS_VOLUME_INFO Volume, PNTFS_RECORD Record, ULONG RecordSize)
 {
     USHORT *USA;
     USHORT USANumber;
     USHORT USACount;
     USHORT *Block;
+
+    /* The update sequence array and every sector it covers must lie inside the record */
+    if (Record->USACount == 0 ||
+        Record->USAOffset + Record->USACount * sizeof(USHORT) > RecordSize ||
+        (ULONG)(Record->USACount - 1) * Volume->BootSector.BytesPerSector > RecordSize)
+    {
+        return FALSE;
+    }
 
     USA = (USHORT*)((PCHAR)Record + Record->USAOffset);
     USANumber = *(USA++);
@@ -613,7 +851,7 @@ static BOOLEAN NtfsReadMftRecord(PNTFS_VOLUME_INFO Volume, ULONGLONG MFTIndex, P
         return FALSE;
 
     /* Apply update sequence array fixups. */
-    return NtfsFixupRecord(Volume, (PNTFS_RECORD)Buffer);
+    return NtfsFixupRecord(Volume, (PNTFS_RECORD)Buffer, Volume->MftRecordSize);
 }
 
 #if DBG
@@ -804,7 +1042,7 @@ NtfsFindMftRecord(
 
                 NtfsReadAttribute(Volume, IndexAllocationCtx, RecordOffset, IndexRecord, IndexBlockSize);
 
-                if (!NtfsFixupRecord(Volume, (PNTFS_RECORD)IndexRecord))
+                if (!NtfsFixupRecord(Volume, (PNTFS_RECORD)IndexRecord, Volume->IndexRecordSize))
                 {
                     break;
                 }
@@ -1144,7 +1382,8 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
         return NULL;
     }
     Status = ArcRead(DeviceId, Volume->MasterFileTable, Volume->MftRecordSize, &Count);
-    if (Status != ESUCCESS || Count != Volume->MftRecordSize)
+    if (Status != ESUCCESS || Count != Volume->MftRecordSize ||
+        !NtfsFixupRecord(Volume, (PNTFS_RECORD)Volume->MasterFileTable, Volume->MftRecordSize))
     {
         FileSystemError("Failed to read the Master File Table record.");
         FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
