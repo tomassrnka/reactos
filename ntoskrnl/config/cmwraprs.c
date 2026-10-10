@@ -91,12 +91,11 @@ CmpFileRead(IN PHHIVE RegistryHive,
                         Buffer, (ULONG)BufferLength, &_FileOffset, NULL);
     /* We do synchronous I/O for simplicity - see CmpOpenHiveFiles. */
     ASSERT(Status != STATUS_PENDING);
-
-    /* A log read that ends early (a truncated log) must not replay stale data */
-    if (NT_SUCCESS(Status) && FileType == HFILE_TYPE_LOG && IoStatusBlock.Information != BufferLength)
+    if (!NT_SUCCESS(Status))
         return FALSE;
 
-    return NT_SUCCESS(Status) ? TRUE : FALSE;
+    /* A read that returns fewer bytes than requested leaves the rest of the buffer unfilled */
+    return (IoStatusBlock.Information == BufferLength);
 }
 
 BOOLEAN
