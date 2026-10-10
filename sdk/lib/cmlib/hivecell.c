@@ -386,6 +386,7 @@ HvpCreateHiveFreeCellList(
     PHCELL FreeBlock;
     ULONG BlockIndex;
     ULONG FreeOffset;
+    ULONG CellSize;
     PHBIN Bin;
     NTSTATUS Status;
     ULONG Index;
@@ -408,6 +409,15 @@ HvpCreateHiveFreeCellList(
         while (FreeOffset < Bin->Size)
         {
             FreeBlock = (PHCELL)((ULONG_PTR)Bin + FreeOffset);
+            CellSize = (FreeBlock->Size >= 0) ? (ULONG)FreeBlock->Size
+                                              : 0 - (ULONG)FreeBlock->Size;
+            if (CellSize == 0 || CellSize > Bin->Size - FreeOffset)
+            {
+                /* Where this cell really ends is lost */
+                DPRINT1("Cell at offset 0x%lx has a bad size 0x%lx, the hive is corrupt\n",
+                        (ULONG)Bin->FileOffset + FreeOffset, (ULONG)FreeBlock->Size);
+                return STATUS_REGISTRY_CORRUPT;
+            }
             if (FreeBlock->Size > 0)
             {
                 Status = HvpAddFree(Hive, FreeBlock, Bin->FileOffset + FreeOffset);

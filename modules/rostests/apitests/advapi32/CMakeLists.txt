@@ -15,6 +15,7 @@ list(APPEND SOURCE
     RegEnumKeyClass.c
     RegEnumValueW.c
     RegFlushKey.c
+    RegLoadKey.c
     RegOpenKeyExW.c
     RegQueryInfoKey.c
     RegQueryValueExW.c

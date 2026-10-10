@@ -17,6 +17,10 @@ extern void func_RegEnumKey(void);
 extern void func_RegEnumKeyClass(void);
 extern void func_RegEnumValueW(void);
 extern void func_RegFlushKey(void);
+extern void func_RegLoadKeyBadBinSize(void);
+extern void func_RegLoadKeyBadSecondBin(void);
+extern void func_RegLoadKeyZeroBin(void);
+extern void func_RegLoadKeyZeroCell(void);
 extern void func_RegOpenKeyExW(void);
 extern void func_RegQueryInfoKey(void);
 extern void func_RegQueryValueExW(void);
@@ -43,6 +47,10 @@ const struct test winetest_testlist[] =
     { "RegEnumKeyClass", func_RegEnumKeyClass },
     { "RegEnumValueW", func_RegEnumValueW },
     { "RegFlushKey", func_RegFlushKey },
+    { "RegLoadKeyBadBinSize", func_RegLoadKeyBadBinSize },
+    { "RegLoadKeyBadSecondBin", func_RegLoadKeyBadSecondBin },
+    { "RegLoadKeyZeroBin", func_RegLoadKeyZeroBin },
+    { "RegLoadKeyZeroCell", func_RegLoadKeyZeroCell },
     { "RegQueryInfoKey", func_RegQueryInfoKey },
     { "RegOpenKeyExW", func_RegOpenKeyExW },
     { "RegQueryValueExW", func_RegQueryValueExW },

@@ -298,6 +298,28 @@ HvpCreateHive(
     return STATUS_SUCCESS;
 }
 
+/* Frees the stable bins of BlockList[0, BlockCount) and the block list;
+ * entries past BlockCount are not initialized yet */
+static
+VOID
+HvpFreePartialBins(
+    _In_ PHHIVE Hive,
+    _In_ SIZE_T BlockCount)
+{
+    SIZE_T i;
+    ULONG_PTR Bin = (ULONG_PTR)NULL;
+
+    for (i = 0; i < BlockCount; i++)
+    {
+        if (Hive->Storage[Stable].BlockList[i].BinAddress != Bin)
+        {
+            Bin = Hive->Storage[Stable].BlockList[i].BinAddress;
+            Hive->Free((PVOID)Bin, 0);
+        }
+    }
+    Hive->Free(Hive->Storage[Stable].BlockList, 0);
+}
+
 /**
  * @brief
  * Initializes a hive descriptor from an already loaded
@@ -322,8 +344,9 @@ HvpCreateHive(
  * Returns STATUS_SUCCESS if the function has initialized the
  * hive descriptor successfully. STATUS_REGISTRY_CORRUPT is
  * returned if the base block header contains invalid header
- * data. STATUS_NO_MEMORY is returned if memory could not
- * be allocated for registry stuff.
+ * data, or if a bin or a cell is damaged beyond self-heal.
+ * STATUS_NO_MEMORY is returned if memory could not be
+ * allocated for registry stuff.
  */
 NTSTATUS
 CMAPI
@@ -338,6 +361,7 @@ HvpInitializeMemoryHive(
     ULONG BitmapSize;
     PULONG BitmapBuffer;
     SIZE_T ChunkSize;
+    NTSTATUS Status;
 
     ChunkSize = ChunkBase->Length;
     DPRINT("ChunkSize: %zx\n", ChunkSize);
@@ -379,29 +403,43 @@ HvpInitializeMemoryHive(
     for (BlockIndex = 0; BlockIndex < Hive->Storage[Stable].Length; )
     {
         Bin = (PHBIN)((ULONG_PTR)ChunkBase + (BlockIndex + 1) * HBLOCK_SIZE);
+
+        /*
+         * The original extent of a bin cannot safely be inferred from a damaged
+         * size. Shrinking it to one block can split a multi-block bin and leave
+         * a referenced cell header that no free-cell walk reaches, with a size
+         * past its new bin, so refuse the hive instead.
+         */
+        if (Bin->Size == 0 ||
+            (Bin->Size % HBLOCK_SIZE) != 0 ||
+            Bin->Size / HBLOCK_SIZE > Hive->Storage[Stable].Length - BlockIndex)
+        {
+            DPRINT1("Bin at BlockIndex %lu has an unusable size 0x%x, the hive is corrupt\n",
+                    (unsigned long)BlockIndex, (unsigned)Bin->Size);
+            HvpFreePartialBins(Hive, BlockIndex);
+            Hive->Free(Hive->BaseBlock, Hive->BaseBlockAlloc);
+            return STATUS_REGISTRY_CORRUPT;
+        }
+
         if (Bin->Signature != HV_HBIN_SIGNATURE ||
-           (Bin->Size % HBLOCK_SIZE) != 0 ||
            (Bin->FileOffset / HBLOCK_SIZE) != BlockIndex)
         {
             /*
-             * Bin is toast but luckily either the signature, size or offset
-             * is out of order. For the signature it is obvious what we are going
-             * to do, for the offset we are re-positioning the bin back to where it
-             * was and for the size we will set it up to a block size, since technically
-             * a hive bin is large as a block itself to accommodate cells.
+             * The size is sound but the signature or the offset is out of
+             * order: restore both and keep the size, so a multi-block bin
+             * keeps all of its blocks.
              */
             if (!CmIsSelfHealEnabled(FALSE))
             {
                 DPRINT1("Invalid bin at BlockIndex %lu, Signature 0x%x, Size 0x%x. Self-heal not possible!\n",
                     (unsigned long)BlockIndex, (unsigned)Bin->Signature, (unsigned)Bin->Size);
-                Hive->Free(Hive->Storage[Stable].BlockList, 0);
+                HvpFreePartialBins(Hive, BlockIndex);
                 Hive->Free(Hive->BaseBlock, Hive->BaseBlockAlloc);
                 return STATUS_REGISTRY_CORRUPT;
             }
 
             /* Fix this bin */
             Bin->Signature = HV_HBIN_SIGNATURE;
-            Bin->Size = HBLOCK_SIZE;
             Bin->FileOffset = BlockIndex * HBLOCK_SIZE;
             ChunkBase->BootType |= HBOOT_TYPE_SELF_HEAL;
             DPRINT1("Bin at index %lu is corrupt and it has been repaired!\n", (unsigned long)BlockIndex);
@@ -410,7 +448,7 @@ HvpInitializeMemoryHive(
         NewBin = Hive->Allocate(Bin->Size, TRUE, TAG_CM);
         if (NewBin == NULL)
         {
-            Hive->Free(Hive->Storage[Stable].BlockList, 0);
+            HvpFreePartialBins(Hive, BlockIndex);
             Hive->Free(Hive->BaseBlock, Hive->BaseBlockAlloc);
             return STATUS_NO_MEMORY;
         }
@@ -433,11 +471,12 @@ HvpInitializeMemoryHive(
         BlockIndex += Bin->Size / HBLOCK_SIZE;
     }
 
-    if (!NT_SUCCESS(HvpCreateHiveFreeCellList(Hive)))
+    Status = HvpCreateHiveFreeCellList(Hive);
+    if (!NT_SUCCESS(Status))
     {
         HvpFreeHiveBins(Hive);
         Hive->Free(Hive->BaseBlock, Hive->BaseBlockAlloc);
-        return STATUS_NO_MEMORY;
+        return Status;
     }
 
     BitmapSize = ROUND_UP(Hive->Storage[Stable].Length,
