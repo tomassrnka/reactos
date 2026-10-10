@@ -9,6 +9,7 @@ add_subdirectory(fltmgr)
 add_subdirectory(hidparse)
 add_subdirectory(kernel32)
 add_subdirectory(ntos_cc)
+add_subdirectory(ntos_cm)
 add_subdirectory(ntos_io)
 add_subdirectory(ntos_mm)
 add_subdirectory(ntos_po)
@@ -185,6 +186,7 @@ list(APPEND KMTEST_SOURCE
     ntos_cc/CcPinMappedData_user.c
     ntos_cc/CcPinRead_user.c
     ntos_cc/CcSetFileSizes_user.c
+    ntos_cm/CmFlush_user.c
     ntos_io/IoCreateFile_user.c
     ntos_io/IoDeviceObject_user.c
     ntos_io/IoReadWrite_user.c
@@ -223,6 +225,7 @@ add_dependencies(kmtest_drivers
     poirp_drv
     tcpip_drv
     cccopyread_drv
+    cmflush_drv
     ccmapdata_drv)
 
 add_custom_target(kmtest_all)

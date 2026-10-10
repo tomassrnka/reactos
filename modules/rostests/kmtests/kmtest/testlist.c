@@ -14,6 +14,7 @@ KMT_TESTFUNC Test_CcPinMappedData;
 KMT_TESTFUNC Test_CcPinRead;
 KMT_TESTFUNC Test_CcPurgeCacheSectionView;
 KMT_TESTFUNC Test_CcSetFileSizes;
+KMT_TESTFUNC Test_CmFlush;
 KMT_TESTFUNC Test_Example;
 KMT_TESTFUNC Test_FileAttributes;
 KMT_TESTFUNC Test_FindFile;
@@ -54,6 +55,7 @@ const KMT_TEST TestList[] =
     { "-CcPinRead",                    Test_CcPinRead },
     { "-CcPurgeCacheSectionView",      Test_CcPurgeCacheSectionView },
     { "-CcSetFileSizes",               Test_CcSetFileSizes },
+    { "CmFlush",                      Test_CmFlush },
     { "-Example",                     Test_Example },
     { "FileAttributes",               Test_FileAttributes },
     { "FindFile",                     Test_FindFile },
