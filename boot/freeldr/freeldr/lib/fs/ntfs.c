@@ -739,6 +739,7 @@ NtfsFindMftRecord(
         IndexRecord = FrLdrTempAlloc(Volume->IndexRecordSize, TAG_NTFS_INDEX_REC);
         if (IndexRecord == NULL)
         {
+            NtfsReleaseAttributeContext(IndexRootCtx);
             FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
             return FALSE;
         }
@@ -776,6 +777,7 @@ NtfsFindMftRecord(
             if (IndexBitmapCtx == NULL)
             {
                 TRACE("Corrupted filesystem!\n");
+                FrLdrTempFree(IndexRecord, TAG_NTFS_INDEX_REC);
                 FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
                 return FALSE;
             }
@@ -788,6 +790,7 @@ NtfsFindMftRecord(
 
             if (BitmapData == NULL)
             {
+                NtfsReleaseAttributeContext(IndexBitmapCtx);
                 FrLdrTempFree(IndexRecord, TAG_NTFS_INDEX_REC);
                 FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
                 return FALSE;
