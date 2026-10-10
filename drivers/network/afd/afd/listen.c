@@ -227,6 +227,20 @@ end:
 
 static IO_COMPLETION_ROUTINE ListenComplete;
 
+/* Connections waiting for an accept count against the listen backlog */
+static ULONG CountPendingConnections(PAFD_FCB FCB)
+{
+    PLIST_ENTRY Entry;
+    ULONG Count = 0;
+
+    for (Entry = FCB->PendingConnections.Flink;
+         Entry != &FCB->PendingConnections;
+         Entry = Entry->Flink)
+        Count++;
+
+    return Count;
+}
+
 static NTSTATUS IssueListen(PAFD_FCB FCB)
 {
     NTSTATUS Status;
@@ -414,6 +428,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status = STATUS_SUCCESS;
     PAFD_FCB FCB = (PAFD_FCB)Context;
     PAFD_TDI_OBJECT_QELT Qelt;
+    BOOLEAN Queued = FALSE;
     PLIST_ENTRY NextIrpEntry;
     PIRP NextIrp;
 
@@ -465,9 +480,15 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         return Irp->IoStatus.Status;
     }
 
-    Qelt = ExAllocatePoolWithTag(NonPagedPool,
-                                 sizeof(*Qelt),
-                                 TAG_AFD_ACCEPT_QUEUE);
+    /* A full queue takes no more connections. Drop this one, which the peer
+     * sees closed, and listen again: a listener that stopped listening would
+     * have tcpip park the next connections beyond the backlog. */
+    if (CountPendingConnections(FCB) >= FCB->Backlog)
+        Qelt = NULL;
+    else
+        Qelt = ExAllocatePoolWithTag(NonPagedPool,
+                                     sizeof(*Qelt),
+                                     TAG_AFD_ACCEPT_QUEUE);
 
     if( !Qelt ) {
         Status = STATUS_NO_MEMORY;
@@ -490,14 +511,17 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
                ( Qelt->ConnInfo->RemoteAddress,
                  FCB->ListenIrp.ConnectionReturnInfo->RemoteAddress );
             InsertTailList( &FCB->PendingConnections, &Qelt->ListEntry );
+            Queued = TRUE;
         } else {
             FCB->Connection = Qelt->Object;
             ExFreePoolWithTag(Qelt, TAG_AFD_ACCEPT_QUEUE);
         }
     }
 
-    /* Satisfy a pre-accept request if one is available */
-    if( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) &&
+    /* Satisfy a pre-accept request if one is available; a dropped connection
+     * satisfies none, the queued ones were offered already */
+    if( Queued &&
+        !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) &&
         !IsListEmpty( &FCB->PendingConnections ) ) {
         PLIST_ENTRY PendingIrp  =
             RemoveHeadList( &FCB->PendingIrpList[FUNCTION_PREACCEPT] );
@@ -578,6 +602,13 @@ NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     FCB->DelayedAccept = ListenReq->UseDelayedAcceptance;
+
+    /* A backlog of 0 still queues one connection */
+    FCB->Backlog = ListenReq->Backlog;
+    if (FCB->Backlog == 0)
+        FCB->Backlog = 1;
+    else if (FCB->Backlog > AFD_MAX_BACKLOG)
+        FCB->Backlog = AFD_MAX_BACKLOG;
 
     AFD_DbgPrint(MID_TRACE,("ADDRESSFILE: %p\n", FCB->AddressFile.Handle));
 

@@ -4,6 +4,10 @@
 
 extern void func_abortiveclose(void);
 extern void func_accept(void);
+extern void func_backlog(void);
+extern void func_backlog_listen(void);
+extern void func_backlog_open(void);
+extern void func_backlog_replace(void);
 extern void func_bind(void);
 extern void func_broadcast(void);
 extern void func_close(void);
@@ -30,6 +34,10 @@ const struct test winetest_testlist[] =
 {
     { "abortiveclose", func_abortiveclose },
     { "accept", func_accept },
+    { "backlog", func_backlog },
+    { "backlog_listen", func_backlog_listen },
+    { "backlog_open", func_backlog_open },
+    { "backlog_replace", func_backlog_replace },
     { "bind", func_bind },
     { "broadcast", func_broadcast },
     { "close", func_close },

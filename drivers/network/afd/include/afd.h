@@ -160,6 +160,9 @@ typedef struct _AFD_STORED_DATAGRAM {
     CHAR Buffer[1];
 } AFD_STORED_DATAGRAM, *PAFD_STORED_DATAGRAM;
 
+/* Largest listen backlog, also used for SOMAXCONN, as on Windows */
+#define AFD_MAX_BACKLOG 200
+
 typedef struct _AFD_FCB {
     SOCK_SHARED_INFO SharedData;
     BOOLEAN Locked, Critical, NonBlocking, OobInline, TdiReceiveClosed, SendClosed;
@@ -169,6 +172,7 @@ typedef struct _AFD_FCB {
     PFILE_OBJECT FileObject;
     PAFD_DEVICE_EXTENSION DeviceExt;
     BOOLEAN DelayedAccept;
+    ULONG Backlog;
     UINT ConnSeq;
     USHORT DisconnectFlags;
     BOOLEAN DisconnectPending;
