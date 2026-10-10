@@ -19,6 +19,7 @@ list(APPEND SOURCE
     open_osfhandle.c
     recv.c
     send.c
+    timewait.c
     WSAAsync.c
     WSAIoctl.c
     WSARecv.c
