@@ -363,6 +363,7 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     KeInitializeMutex( &FCB->Mutex, 0 );
     KeInitializeEvent( &FCB->RelistenIdle, NotificationEvent, TRUE );
     KeInitializeEvent( &FCB->AcceptWorkIdle, NotificationEvent, TRUE );
+    KeInitializeEvent( &FCB->InFlightIdle, NotificationEvent, FALSE );
 
     for( i = 0; i < MAX_FUNCTIONS; i++ ) {
         InitializeListHead( &FCB->PendingIrpList[i] );
@@ -459,6 +460,34 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
 }
 
+/* Called with the state lock held. A cancel does not dequeue a request the
+ * transport already took and completes from a work item, and a worker or a
+ * completion may issue a request after the first cancel; their completions
+ * still use the FCB. Every unlock of the closed socket wakes the wait */
+static VOID
+WaitForInFlightRequests(PAFD_FCB FCB, PAFD_IN_FLIGHT_REQUEST *InFlightRequest)
+{
+    UINT i;
+
+    while (AfdHasInFlightRequest(FCB))
+    {
+        for (i = 0; i < IN_FLIGHT_REQUESTS; i++)
+        {
+            if (InFlightRequest[i]->InFlightRequest)
+                IoCancelIrp(InFlightRequest[i]->InFlightRequest);
+        }
+
+        if (!AfdHasInFlightRequest(FCB))
+            break;
+
+        /* Not SocketStateUnlock, which would wake this wait at once */
+        KeClearEvent(&FCB->InFlightIdle);
+        KeReleaseMutex(&FCB->Mutex, FALSE);
+        KeWaitForSingleObject(&FCB->InFlightIdle, Executive, KernelMode, FALSE, NULL);
+        SocketAcquireStateLock(FCB);
+    }
+}
+
 static NTSTATUS NTAPI
 AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                PIO_STACK_LOCATION IrpSp)
@@ -525,10 +554,10 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (FCB->AcceptWorkItem)
         KeWaitForSingleObject(&FCB->AcceptWorkIdle, Executive, KernelMode, FALSE, NULL);
 
-    /* Taking the lock waits for the worker; a listen in flight frees these when it completes */
+    /* Taking the lock waits for the worker */
     SocketAcquireStateLock(FCB);
-    if (!FCB->ListenIrp.InFlightRequest)
-        FreeListenConnectionInfo(FCB);
+    WaitForInFlightRequests(FCB, InFlightRequest);
+    FreeListenConnectionInfo(FCB);
     SocketStateUnlock(FCB);
 
     if (FCB->RelistenWorkItem)
@@ -1361,8 +1390,9 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
                 {
                     PAFD_FCB FCB2 = NewFileObject->FsContext;
                     FCB2->SharedData.State = SOCKET_STATE_CREATED;
-                    
-                    ObfDereferenceObject(NewFileObject);
+
+                    /* With the listener locked, never close the accept socket here */
+                    ObDereferenceObjectDeferDelete(NewFileObject);
                     Irp->Tail.Overlay.DriverContext[2] = NULL;
                 }
 

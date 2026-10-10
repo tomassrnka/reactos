@@ -367,7 +367,16 @@ BOOLEAN SocketAcquireStateLock( PAFD_FCB FCB ) {
                                  NULL);
 }
 
+BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB ) {
+    return FCB->ConnectIrp.InFlightRequest || FCB->ListenIrp.InFlightRequest ||
+           FCB->ReceiveIrp.InFlightRequest || FCB->SendIrp.InFlightRequest ||
+           FCB->DisconnectIrp.InFlightRequest;
+}
+
 VOID SocketStateUnlock( PAFD_FCB FCB ) {
+    /* Wakes AfdCloseSocket, which waits for the transport requests of a closed socket */
+    if (FCB->SharedData.State == SOCKET_STATE_CLOSED)
+        KeSetEvent(&FCB->InFlightIdle, IO_NO_INCREMENT, FALSE);
     KeReleaseMutex(&FCB->Mutex, FALSE);
 }
 

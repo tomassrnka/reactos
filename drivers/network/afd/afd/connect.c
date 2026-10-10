@@ -367,6 +367,17 @@ StreamSocketConnectSendComplete(
     return STATUS_SUCCESS;
 }
 
+/* The ConnectEx initial-send buffer, on paths where no send owns it */
+static VOID FreeConnectSendBuffer(PAFD_FCB FCB)
+{
+    if (FCB->OnConnectSendBuffer)
+    {
+        ExFreePoolWithTag(FCB->OnConnectSendBuffer, TAG_AFD_SUPER_CONNECT_BUFFER);
+        FCB->OnConnectSendBuffer = NULL;
+        FCB->OnConnectSendBufferSize = 0;
+    }
+}
+
 static IO_COMPLETION_ROUTINE StreamSocketConnectComplete;
 static
 NTSTATUS
@@ -478,24 +489,26 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         if (FCB->OnConnectSendBuffer)
         {
-            PFILE_OBJECT object = FCB->Connection.Object;
-            PVOID sendBuffer = FCB->OnConnectSendBuffer;
-            UINT sendBufferLength = FCB->OnConnectSendBufferSize;
-            SocketStateUnlock(FCB);
-
+            /* Issued with the lock held, so a close cannot pass its in-flight wait first */
             Status = TdiSend(&FCB->SendIrp.InFlightRequest,
-                             object,
+                             FCB->Connection.Object,
                              AFD_OVERLAPPED,
-                             sendBuffer,
-                             sendBufferLength,
+                             FCB->OnConnectSendBuffer,
+                             FCB->OnConnectSendBufferSize,
                              StreamSocketConnectSendComplete,
                              FCB);
 
+            /* TdiSend failed before the transport got the request, so no completion frees the buffer */
+            if (!NT_SUCCESS(Status) && FCB->OnConnectSendBuffer)
+                goto end;
+
+            SocketStateUnlock(FCB);
             return Status == STATUS_PENDING ? STATUS_SUCCESS : Status;
         }
     }
 
 end:
+    FreeConnectSendBuffer(FCB);
     while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]))
     {
         NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_CONNECTEX]);
@@ -738,6 +751,7 @@ AfdStreamSocketSuperConnect(
          else
              Status = STATUS_SUCCESS;
 
+         FreeConnectSendBuffer(FCB);
          return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
     }
 
@@ -821,5 +835,7 @@ AfdStreamSocketSuperConnect(
         break;
     }
 
+    /* No connect request carries the buffer on these paths */
+    FreeConnectSendBuffer(FCB);
     return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
 }
