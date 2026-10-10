@@ -772,6 +772,13 @@ NtfsFindMftRecord(
             TRACE("Large Index!\n");
 
             IndexBlockSize = IndexRoot->IndexBlockSize;
+            if (IndexBlockSize == 0 || IndexBlockSize > Volume->IndexRecordSize)
+            {
+                TRACE("Corrupted filesystem!\n");
+                FrLdrTempFree(IndexRecord, TAG_NTFS_INDEX_REC);
+                FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
+                return FALSE;
+            }
 
             IndexBitmapCtx = NtfsFindAttribute(Volume, MftRecord, MFTIndex, NTFS_ATTR_TYPE_BITMAP, L"$I30");
             if (IndexBitmapCtx == NULL)
@@ -795,7 +802,15 @@ NtfsFindMftRecord(
                 FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
                 return FALSE;
             }
-            NtfsReadAttribute(Volume, IndexBitmapCtx, 0, BitmapData, (ULONG)BitmapDataSize);
+            /* A short read (a failed disk or journal read) leaves stale data in the buffer */
+            if (NtfsReadAttribute(Volume, IndexBitmapCtx, 0, BitmapData, (ULONG)BitmapDataSize) != BitmapDataSize)
+            {
+                NtfsReleaseAttributeContext(IndexBitmapCtx);
+                FrLdrTempFree(BitmapData, TAG_NTFS_BITMAP);
+                FrLdrTempFree(IndexRecord, TAG_NTFS_INDEX_REC);
+                FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
+                return FALSE;
+            }
             NtfsReleaseAttributeContext(IndexBitmapCtx);
 
             IndexAllocationCtx = NtfsFindAttribute(Volume, MftRecord, MFTIndex, NTFS_ATTR_TYPE_INDEX_ALLOCATION, L"$I30");
@@ -828,7 +843,10 @@ NtfsFindMftRecord(
                     break;
                 }
 
-                NtfsReadAttribute(Volume, IndexAllocationCtx, RecordOffset, IndexRecord, IndexBlockSize);
+                if (NtfsReadAttribute(Volume, IndexAllocationCtx, RecordOffset, IndexRecord, IndexBlockSize) != IndexBlockSize)
+                {
+                    break;
+                }
 
                 if (!NtfsFixupRecord(Volume, (PNTFS_RECORD)IndexRecord))
                 {
