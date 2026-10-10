@@ -724,11 +724,24 @@ static int ngc_iget_by_id_impl(ngc_vol *v, unsigned long long mft_no, ngc_node *
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
 	u32 rs = vol->mft_record_size;
 	u64 off = mft_no << vol->mft_record_size_bits;
+	struct ntfs_attr na = { .mft_no = mft_no, .type = AT_UNUSED };
+	struct inode *vi;
 	struct folio *f;
 	struct mft_record *m;
 	u8 *rec;
 	int err = 0;
 	*out = NULL;
+	/* A cached inode's record is newer than $MFT's page cache, which gets it only at writeback. */
+	vi = ilookup5(v->sb, mft_no, ntfs_test_inode, &na);
+	if (vi) {
+		if (!vi->i_nlink) {
+			iput(vi);
+			return -ENOENT;
+		}
+		ngc_fix_type(vi);
+		*out = (ngc_node *)vi;
+		return 0;
+	}
 	if (rs > PAGE_SIZE || mft_no >= (u64)(i_size_read(vol->mft_ino) >> vol->mft_record_size_bits))
 		return -ENOENT;
 	rec = kmalloc(rs, GFP_NOFS);
