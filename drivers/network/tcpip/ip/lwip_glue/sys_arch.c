@@ -20,6 +20,8 @@ typedef struct _thread_t
     void (* ThreadFunction)(void *arg);
     void *ThreadContext;
     LIST_ENTRY ListEntry;
+    KEVENT Registered;
+    PVOID Thread;
 } *thread_t;
 
 u32_t sys_now(void)
@@ -263,6 +265,7 @@ LwipThreadMain(PVOID Context)
     KIRQL OldIrql;
 
     ExInterlockedInsertHeadList(&ThreadListHead, &Container->ListEntry, &ThreadListLock);
+    KeSetEvent(&Container->Registered, IO_NO_INCREMENT, FALSE);
 
     Container->ThreadFunction(Container->ThreadContext);
 
@@ -280,6 +283,7 @@ sys_thread_new(const char *name, lwip_thread_fn thread, void *arg, int stacksize
 {
     thread_t Container;
     NTSTATUS Status;
+    OBJECT_ATTRIBUTES ObjectAttributes;
 
     Container = ExAllocatePool(NonPagedPool, sizeof(*Container));
     if (!Container)
@@ -287,10 +291,12 @@ sys_thread_new(const char *name, lwip_thread_fn thread, void *arg, int stacksize
 
     Container->ThreadFunction = thread;
     Container->ThreadContext = arg;
+    KeInitializeEvent(&Container->Registered, NotificationEvent, FALSE);
 
+    InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
     Status = PsCreateSystemThread(&Container->Handle,
                                   THREAD_ALL_ACCESS,
-                                  NULL,
+                                  &ObjectAttributes,
                                   NULL,
                                   NULL,
                                   LwipThreadMain,
@@ -301,6 +307,16 @@ sys_thread_new(const char *name, lwip_thread_fn thread, void *arg, int stacksize
         ExFreePool(Container);
         return 0;
     }
+
+    /* sys_shutdown waits on the thread object; a kernel handle never fails this lookup */
+    Status = ObReferenceObjectByHandle(Container->Handle, SYNCHRONIZE, *PsThreadType,
+                                       KernelMode, &Container->Thread, NULL);
+    ASSERT(NT_SUCCESS(Status));
+    if (!NT_SUCCESS(Status))
+        Container->Thread = NULL;
+
+    /* A shutdown after startup returns must find the thread in the list */
+    KeWaitForSingleObject(&Container->Registered, Executive, KernelMode, FALSE, NULL);
 
     return 0;
 }
@@ -348,17 +364,15 @@ sys_shutdown(void)
 
         if (Container->ThreadFunction)
         {
-            PVOID Thread;
-
-            /* KeWaitForSingleObject takes the thread object, not its handle */
-            if (NT_SUCCESS(ObReferenceObjectByHandle(Container->Handle, SYNCHRONIZE, *PsThreadType,
-                                                     KernelMode, &Thread, NULL)))
+            if (Container->Thread)
             {
-                KeWaitForSingleObject(Thread, Executive, KernelMode, FALSE, NULL);
-                ObDereferenceObject(Thread);
+                KeWaitForSingleObject(Container->Thread, Executive, KernelMode, FALSE, NULL);
+                ObDereferenceObject(Container->Thread);
             }
-
             ZwClose(Container->Handle);
+
+            /* The thread ended in a wait for the termination event, so it did not free this */
+            ExFreePool(Container);
         }
     }
 
