@@ -567,6 +567,9 @@ TranslateNtStatusError(NTSTATUS Status)
        case STATUS_INVALID_CONNECTION:
           return WSAENOTCONN;
 
+       case STATUS_CONNECTION_ACTIVE:
+          return WSAEISCONN;
+
        case STATUS_PROTOCOL_NOT_SUPPORTED:
           return WSAEAFNOSUPPORT;
 
