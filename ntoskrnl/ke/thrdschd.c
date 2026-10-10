@@ -155,6 +155,7 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     KPRIORITY OldPriority;
     PKTHREAD NextThread;
 
+Restart:
     /* Sanity checks */
     ASSERT(Thread->State == DeferredReady);
     ASSERT((Thread->Priority >= 0) && (Thread->Priority <= HIGH_PRIORITY));
@@ -294,6 +295,15 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         Thread->AdjustReason = AdjustNone;
     }
 
+    /*
+     * Hold the thread lock until the thread has left the deferred ready
+     * state. KiSetPriorityThread changes the priority of a deferred ready
+     * thread under that lock, and the priority read here chooses the
+     * ready list the thread goes to. Release it before the PRCB lock:
+     * once that is released, the thread may run, exit and be freed.
+     */
+    KiAcquireThreadLock(Thread);
+
     /* Clear thread preemption status and save current values */
     Preempted = Thread->Preempted;
     OldPriority = Thread->Priority;
@@ -317,6 +327,7 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
         Prcb->NextThread = Thread;
 
         /* Unlock the PRCB and return */
+        KiReleaseThreadLock(Thread);
         KiReleasePrcbLock(Prcb);
         return;
     }
@@ -349,14 +360,16 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
                                            ~(LONG_PTR)Prcb->SetMember);
                 }
 
-                /* Release the lock */
+                /* Release the locks */
+                KiReleaseThreadLock(Thread);
                 KiReleasePrcbLock(Prcb);
 
-                /* Check if we're running on another CPU */
-                if (KeGetCurrentProcessorNumber() != Thread->NextProcessor)
+                /* Check if we're running on another CPU; the thread may have
+                   run and exited since the release, so do not look at it */
+                if (KeGetCurrentProcessorNumber() != Processor)
                 {
                     /* We are, send an IPI */
-                    KiIpiSend(AFFINITY_MASK(Thread->NextProcessor), IPI_DPC);
+                    KiIpiSend(AFFINITY_MASK(Processor), IPI_DPC);
                 }
                 return;
             }
@@ -371,9 +384,12 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             /* Set it in deferred ready mode */
             NextThread->State = DeferredReady;
             NextThread->DeferredProcessor = Prcb->Number;
+            KiReleaseThreadLock(Thread);
             KiReleasePrcbLock(Prcb);
-            KiDeferredReadyThread(NextThread);
-            return;
+
+            /* Make the displaced thread ready, without growing the stack */
+            Thread = NextThread;
+            goto Restart;
         }
     }
     else
@@ -396,14 +412,16 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
                                        ~(LONG_PTR)Prcb->SetMember);
             }
 
-            /* Release the lock */
+            /* Release the locks */
+            KiReleaseThreadLock(Thread);
             KiReleasePrcbLock(Prcb);
 
-            /* Check if we're running on another CPU */
-            if (KeGetCurrentProcessorNumber() != Thread->NextProcessor)
+            /* Check if we're running on another CPU; the thread may have
+               run and exited since the release, so do not look at it */
+            if (KeGetCurrentProcessorNumber() != Processor)
             {
                 /* We are, send an IPI */
-                KiIpiSend(AFFINITY_MASK(Thread->NextProcessor), IPI_DPC);
+                KiIpiSend(AFFINITY_MASK(Processor), IPI_DPC);
             }
             return;
         }
@@ -428,7 +446,8 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     /* Sanity check */
     ASSERT(OldPriority == Thread->Priority);
 
-    /* Release the lock */
+    /* Release the locks */
+    KiReleaseThreadLock(Thread);
     KiReleasePrcbLock(Prcb);
 }
 
@@ -785,9 +804,10 @@ KiSetPriorityThread(IN PKTHREAD Thread,
             }
             else if (State == DeferredReady)
             {
-                /* FIXME: TODO */
-                DPRINT1("Deferred state not yet supported\n");
-                ASSERT(FALSE);
+                /* The thread is on no ready list yet. KiDeferredReadyThread
+                   reads its priority under the thread lock, which is held
+                   here, so it queues the thread at the new priority */
+                Thread->Priority = (SCHAR)Priority;
             }
             else
             {
