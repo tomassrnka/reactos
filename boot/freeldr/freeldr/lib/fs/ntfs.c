@@ -1439,6 +1439,24 @@ static BOOLEAN NtfsJournalPatch(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, ULON
     return TRUE;
 }
 
+/* Frees a volume that fails to mount after NtfsJournalLoad, with its journal state */
+static VOID NtfsFreeVolume(PNTFS_VOLUME_INFO Volume)
+{
+    if (Volume->JnlBlock)
+        FrLdrTempFree(Volume->JnlBlock, TAG_NTFS_DATA);
+    if (Volume->JnlSlot)
+        FrLdrTempFree(Volume->JnlSlot, TAG_NTFS_DATA);
+    if (Volume->JnlMask)
+        FrLdrTempFree(Volume->JnlMask, TAG_NTFS_DATA);
+    if (Volume->JnlPage)
+        FrLdrTempFree(Volume->JnlPage, TAG_NTFS_DATA);
+    if (Volume->TemporarySector)
+        FrLdrTempFree(Volume->TemporarySector, TAG_NTFS_DATA);
+    if (Volume->MasterFileTable)
+        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
+    FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+}
+
 const DEVVTBL* NtfsMount(ULONG DeviceId)
 {
     PNTFS_VOLUME_INFO Volume;
@@ -1523,7 +1541,7 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     if (!Volume->TemporarySector)
     {
         FileSystemError("Failed to allocate memory.");
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        NtfsFreeVolume(Volume);
         return NULL;
     }
 
@@ -1534,15 +1552,14 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     Volume->MasterFileTable = FrLdrTempAlloc(Volume->MftRecordSize, TAG_NTFS_MFT);
     if (!Volume->MasterFileTable)
     {
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        NtfsFreeVolume(Volume);
         return NULL;
     }
     if (!NtfsDiskRead(Volume, Volume->BootSector.MftLocation * Volume->ClusterSize, Volume->MftRecordSize,
                       (PCHAR)Volume->MasterFileTable))
     {
         FileSystemError("Failed to read the Master File Table record.");
-        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        NtfsFreeVolume(Volume);
         return NULL;
     }
 
@@ -1554,8 +1571,7 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     if (!Volume->MFTContext)
     {
         FileSystemError("Can't find data attribute for Master File Table.");
-        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        NtfsFreeVolume(Volume);
         return NULL;
     }
 
