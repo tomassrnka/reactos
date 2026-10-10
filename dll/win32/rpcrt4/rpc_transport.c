@@ -84,6 +84,9 @@ typedef struct _RpcConnection_np
     IO_STATUS_BLOCK io_status;
     HANDLE event_cache;
     BOOL read_closed;
+#ifdef __REACTOS__
+    HANDLE read_closed_event;
+#endif
 } RpcConnection_np;
 
 static RpcConnection *rpcrt4_conn_np_alloc(void)
@@ -594,6 +597,12 @@ static void rpcrt4_conn_np_handoff(RpcConnection_np *old_npc, RpcConnection_np *
     new_npc->pipe = old_npc->pipe;
     old_npc->pipe = 0;
     assert(!old_npc->listen_event);
+#ifdef __REACTOS__
+    /* without the event close_read cannot stop this connection's reads, so refuse it */
+    new_npc->read_closed_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!new_npc->read_closed_event)
+        new_npc->read_closed = TRUE;
+#endif
 }
 
 static RPC_STATUS rpcrt4_ncacn_np_handoff(RpcConnection *old_conn, RpcConnection *new_conn)
@@ -694,6 +703,19 @@ static int rpcrt4_conn_np_read(RpcConnection *conn, void *buffer, unsigned int c
             NtCancelIoFileEx(connection->pipe, &connection->io_status, &io_status);
 #endif
         }
+#ifdef __REACTOS__
+        /* NtCancelIoFile only cancels I/O of the calling thread, so close_read
+         * wakes the reading thread to cancel its own read */
+        if (connection->read_closed_event)
+        {
+            HANDLE handles[2] = { event, connection->read_closed_event };
+            if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
+            {
+                IO_STATUS_BLOCK io_status;
+                NtCancelIoFile(connection->pipe, &io_status);
+            }
+        }
+#endif
         WaitForSingleObject(event, INFINITE);
         status = connection->io_status.Status;
     }
@@ -745,6 +767,13 @@ static int rpcrt4_conn_np_close(RpcConnection *conn)
         CloseHandle(connection->event_cache);
         connection->event_cache = 0;
     }
+#ifdef __REACTOS__
+    if (connection->read_closed_event)
+    {
+        CloseHandle(connection->read_closed_event);
+        connection->read_closed_event = 0;
+    }
+#endif
     return 0;
 }
 
@@ -756,6 +785,8 @@ static void rpcrt4_conn_np_close_read(RpcConnection *conn)
     connection->read_closed = TRUE;
 #ifdef __REACTOS__ /* FIXME: We should also cancel I/O for other threads */
     NtCancelIoFile(connection->pipe, &io_status);
+    if (connection->read_closed_event)
+        SetEvent(connection->read_closed_event);
 #else
     NtCancelIoFileEx(connection->pipe, &connection->io_status, &io_status);
 #endif
