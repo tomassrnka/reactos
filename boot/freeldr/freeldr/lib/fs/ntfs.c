@@ -587,6 +587,11 @@ static PNTFS_ATTR_CONTEXT NtfsFindAttributeHelper(
             PNTFS_ATTR_LIST_ATTR ListAttrRecordEnd;
 
             ListContext = NtfsPrepareAttributeContext(AttrRecord);
+            if (!ListContext)
+            {
+                TRACE("Failed to allocate memory for the attribute list context\n");
+                goto skip;
+            }
 
             ListSize = NtfsGetAttributeSize(&ListContext->Record);
             if (ListSize <= 0xFFFFFFFF)
