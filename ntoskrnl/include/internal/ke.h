@@ -789,6 +789,20 @@ KiDispatchException(
     BOOLEAN SearchFrames
 );
 
+/*
+ * The exception record of a fast fail (INT 29h), as the trap handlers raise it.
+ * A user mode NtRaiseException of the same non-continuable status matches too and
+ * is treated the same way at second chance: only that process is affected.
+ */
+FORCEINLINE
+BOOLEAN
+KiIsFastFailException(
+    _In_ PEXCEPTION_RECORD ExceptionRecord)
+{
+    return (ExceptionRecord->ExceptionCode == STATUS_STACK_BUFFER_OVERRUN) &&
+           (ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE);
+}
+
 VOID
 NTAPI
 KeTrapFrameToContext(

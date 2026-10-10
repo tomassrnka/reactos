@@ -378,7 +378,10 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
             /* Handled, get out */
             return;
         }
-        else if (DbgkForwardException(ExceptionRecord, FALSE, TRUE))
+        /* A fast fail must end the process with its own status, so it skips the
+           exception port, whose server may choose another status or continue it */
+        else if (!KiIsFastFailException(ExceptionRecord) &&
+                 DbgkForwardException(ExceptionRecord, FALSE, TRUE))
         {
             /* Handled, get out */
             return;

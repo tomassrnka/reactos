@@ -1579,37 +1579,38 @@ VOID
 FASTCALL
 KiRaiseSecurityCheckFailureHandler(IN PKTRAP_FRAME TrapFrame)
 {
+    EXCEPTION_RECORD ExceptionRecord;
+
     /* Save trap frame */
     KiEnterTrap(TrapFrame);
 
     /* Decrement EIP to point to the INT29 instruction (2 bytes, not 1 like INT3) */
     TrapFrame->Eip -= 2;
 
+    /* Describe the fast fail, the code is in ecx */
+    RtlZeroMemory(&ExceptionRecord, sizeof(ExceptionRecord));
+    ExceptionRecord.ExceptionCode = STATUS_STACK_BUFFER_OVERRUN;
+    ExceptionRecord.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+    ExceptionRecord.ExceptionRecord = NULL;
+    ExceptionRecord.ExceptionAddress = (PVOID)TrapFrame->Eip;
+    ExceptionRecord.NumberParameters = 1;
+    ExceptionRecord.ExceptionInformation[0] = TrapFrame->Ecx;
+
     /* Check if this is a user trap */
     if (KiUserTrap(TrapFrame))
     {
-        /* Dispatch exception to user mode */
-        KiDispatchExceptionFromTrapFrame(STATUS_STACK_BUFFER_OVERRUN,
-                                         EXCEPTION_NONCONTINUABLE,
-                                         TrapFrame->Eip,
-                                         1,
-                                         TrapFrame->Ecx,
-                                         0,
-                                         0,
-                                         TrapFrame);
+        /* The second chance path can wait for the debugger */
+        _enable();
+
+        /* Dispatch it as a second chance exception, so no handler of the process runs */
+        KiDispatchException(&ExceptionRecord, NULL, TrapFrame, UserMode, FALSE);
+
+        /* Return from this trap, to the INT 29h if the debugger continued it */
+        KiEoiHelper(TrapFrame);
     }
     else
     {
-        EXCEPTION_RECORD ExceptionRecord;
-
         /* Bugcheck the system */
-        ExceptionRecord.ExceptionCode = STATUS_STACK_BUFFER_OVERRUN;
-        ExceptionRecord.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
-        ExceptionRecord.ExceptionRecord = NULL;
-        ExceptionRecord.ExceptionAddress = (PVOID)TrapFrame->Eip;
-        ExceptionRecord.NumberParameters = 1;
-        ExceptionRecord.ExceptionInformation[0] = TrapFrame->Ecx;
-
         KeBugCheckWithTf(KERNEL_SECURITY_CHECK_FAILURE,
                          TrapFrame->Ecx,
                          (ULONG_PTR)TrapFrame,
