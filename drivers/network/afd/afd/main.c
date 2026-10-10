@@ -362,6 +362,7 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     KeInitializeMutex( &FCB->Mutex, 0 );
     KeInitializeEvent( &FCB->RelistenIdle, NotificationEvent, TRUE );
+    KeInitializeEvent( &FCB->AcceptWorkIdle, NotificationEvent, TRUE );
 
     for( i = 0; i < MAX_FUNCTIONS; i++ ) {
         InitializeListHead( &FCB->PendingIrpList[i] );
@@ -520,6 +521,10 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (FCB->RelistenWorkItem)
         KeWaitForSingleObject(&FCB->RelistenIdle, Executive, KernelMode, FALSE, NULL);
 
+    /* Likewise for the AcceptEx work item */
+    if (FCB->AcceptWorkItem)
+        KeWaitForSingleObject(&FCB->AcceptWorkIdle, Executive, KernelMode, FALSE, NULL);
+
     /* Taking the lock waits for the worker; a listen in flight frees these when it completes */
     SocketAcquireStateLock(FCB);
     if (!FCB->ListenIrp.InFlightRequest)
@@ -528,6 +533,9 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (FCB->RelistenWorkItem)
         IoFreeWorkItem(FCB->RelistenWorkItem);
+
+    if (FCB->AcceptWorkItem)
+        IoFreeWorkItem(FCB->AcceptWorkItem);
 
     if( FCB->EventSelect )
         ObDereferenceObject( FCB->EventSelect );

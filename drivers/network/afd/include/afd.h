@@ -211,6 +211,9 @@ typedef struct _AFD_FCB {
     BOOLEAN Relistening;
     BOOLEAN ListenConnectionReady;
     NTSTATUS ListenStatus;
+    PIO_WORKITEM AcceptWorkItem;
+    KEVENT AcceptWorkIdle;
+    BOOLEAN AcceptWorkQueued;
 } AFD_FCB, *PAFD_FCB;
 
 /* bind.c */

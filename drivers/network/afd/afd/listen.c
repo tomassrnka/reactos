@@ -355,6 +355,59 @@ static VOID NTAPI RelistenWorker(PDEVICE_OBJECT DeviceObject, PVOID Context)
     SocketStateUnlock(FCB);
 }
 
+/* Hands queued connections to waiting AcceptEx requests from a system thread:
+ * SatisfySuperAccept issues the accepted socket's first receive, and the I/O
+ * manager cancels a request issued on a caller's thread when that thread exits */
+static IO_WORKITEM_ROUTINE AcceptWorker;
+static VOID NTAPI AcceptWorker(PDEVICE_OBJECT DeviceObject, PVOID Context)
+{
+    PAFD_FCB FCB = Context;
+    PLIST_ENTRY Entry, PendingConn;
+    PAFD_TDI_OBJECT_QELT Qelt;
+    PIRP Irp;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    SocketAcquireStateLock(FCB);
+
+    if (FCB->SharedData.State == SOCKET_STATE_LISTENING)
+    {
+        Entry = FCB->PendingIrpList[FUNCTION_PREACCEPT].Flink;
+        while (Entry != &FCB->PendingIrpList[FUNCTION_PREACCEPT] &&
+               !IsListEmpty(&FCB->PendingConnections))
+        {
+            Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+            Entry = Entry->Flink;
+
+            /* Skip waits for a connection, and leave a cancelled request to AfdCancelHandler */
+            if (!Irp->Tail.Overlay.DriverContext[2] || !Irp->Tail.Overlay.DriverContext[3] || Irp->Cancel)
+                continue;
+
+            RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+            PendingConn = RemoveHeadList(&FCB->PendingConnections);
+            Qelt = CONTAINING_RECORD(PendingConn, AFD_TDI_OBJECT_QELT, ListEntry);
+            SatisfySuperAccept(FCB, Irp, Qelt);
+            FreeQueuedConnection(Qelt);
+        }
+
+        if (!IsListEmpty(&FCB->PendingConnections))
+        {
+            FCB->PollState |= AFD_EVENT_ACCEPT;
+            FCB->PollStatus[FD_ACCEPT_BIT] = STATUS_SUCCESS;
+            PollReeval(FCB->DeviceExt, FCB->FileObject);
+        }
+        else
+        {
+            FCB->PollState &= ~AFD_EVENT_ACCEPT;
+        }
+    }
+
+    /* Set under the lock: AfdCloseSocket waits for the event, then for the lock */
+    FCB->AcceptWorkQueued = FALSE;
+    KeSetEvent(&FCB->AcceptWorkIdle, IO_NO_INCREMENT, FALSE);
+    SocketStateUnlock(FCB);
+}
+
 static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
                                       PIRP Irp,
                                       PVOID Context ) {
@@ -514,6 +567,13 @@ NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         FCB->RelistenWorkItem = IoAllocateWorkItem(DeviceObject);
         if (!FCB->RelistenWorkItem)
+            return UnlockAndMaybeComplete(FCB, STATUS_INSUFFICIENT_RESOURCES, Irp, 0);
+    }
+
+    if (!FCB->AcceptWorkItem)
+    {
+        FCB->AcceptWorkItem = IoAllocateWorkItem(DeviceObject);
+        if (!FCB->AcceptWorkItem)
             return UnlockAndMaybeComplete(FCB, STATUS_INSUFFICIENT_RESOURCES, Irp, 0);
     }
 
@@ -753,31 +813,17 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* Proceed later in SatisfyAcceptEx */
     SocketStateUnlock(Fcb2);
 
+    Status = QueueUserModeIrp(Fcb, Irp, FUNCTION_PREACCEPT);
+
     /* Take a connection that is already waiting, the next one to arrive may never come */
-    if (!IsListEmpty(&Fcb->PendingConnections))
+    if (Status == STATUS_PENDING && !IsListEmpty(&Fcb->PendingConnections) &&
+        Fcb->AcceptWorkItem && !Fcb->AcceptWorkQueued)
     {
-        PLIST_ENTRY PendingConn = RemoveHeadList(&Fcb->PendingConnections);
-        PAFD_TDI_OBJECT_QELT Qelt = CONTAINING_RECORD(PendingConn, AFD_TDI_OBJECT_QELT, ListEntry);
-
-        /* The IRP completes either now or once the requested initial data is received */
-        IoMarkIrpPending(Irp);
-        SatisfySuperAccept(Fcb, Irp, Qelt);
-        FreeQueuedConnection(Qelt);
-
-        if (!IsListEmpty(&Fcb->PendingConnections))
-        {
-            Fcb->PollState |= AFD_EVENT_ACCEPT;
-            Fcb->PollStatus[FD_ACCEPT_BIT] = STATUS_SUCCESS;
-            PollReeval(Fcb->DeviceExt, Fcb->FileObject);
-        }
-        else
-        {
-            Fcb->PollState &= ~AFD_EVENT_ACCEPT;
-        }
-
-        SocketStateUnlock(Fcb);
-        return STATUS_PENDING;
+        Fcb->AcceptWorkQueued = TRUE;
+        KeClearEvent(&Fcb->AcceptWorkIdle);
+        IoQueueWorkItem(Fcb->AcceptWorkItem, AcceptWorker, DelayedWorkQueue, Fcb);
     }
 
-    return LeaveIrpUntilLater(Fcb, Irp, FUNCTION_PREACCEPT);
+    SocketStateUnlock(Fcb);
+    return Status;
 }
