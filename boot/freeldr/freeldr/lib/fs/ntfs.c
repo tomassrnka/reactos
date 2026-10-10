@@ -446,9 +446,11 @@ static PNTFS_ATTR_CONTEXT NtfsFindAttributeHelperList(
 
                 if (PrevMftIndex != MftIndex)
                 {
-                    PrevMftIndex = MftIndex;
+                    /* A failed read leaves no usable record in the buffer */
+                    PrevMftIndex = -1;
                     if (!NtfsReadMftRecord(Volume, MftIndex, MftRecord))
                         goto skip;
+                    PrevMftIndex = MftIndex;
                 }
 
                 AttrRecord = (PNTFS_ATTR_RECORD)((PCHAR)MftRecord + MftRecord->AttributesOffset);
