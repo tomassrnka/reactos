@@ -717,6 +717,7 @@ NtfsFindMftRecord(
     PNTFS_INDEX_ENTRY IndexEntry, IndexEntryEnd;
     ULONG RecordOffset;
     ULONG IndexBlockSize;
+    ULONG IndexRootSize;
     SIZE_T FileNameLen;
 
     FileNameLen = strlen(FileName);
@@ -738,7 +739,15 @@ NtfsFindMftRecord(
             return FALSE;
         }
 
-        IndexRecord = FrLdrTempAlloc(Volume->IndexRecordSize, TAG_NTFS_INDEX_REC);
+        /* The buffer holds the whole resident index root first, then one index block at a time */
+        if (IndexRootCtx->Record.IsNonResident)
+        {
+            NtfsReleaseAttributeContext(IndexRootCtx);
+            FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
+            return FALSE;
+        }
+        IndexRootSize = IndexRootCtx->Record.Resident.ValueLength;
+        IndexRecord = FrLdrTempAlloc(max(Volume->IndexRecordSize, IndexRootSize), TAG_NTFS_INDEX_REC);
         if (IndexRecord == NULL)
         {
             NtfsReleaseAttributeContext(IndexRootCtx);
@@ -746,7 +755,7 @@ NtfsFindMftRecord(
             return FALSE;
         }
 
-        NtfsReadAttribute(Volume, IndexRootCtx, 0, IndexRecord, Volume->IndexRecordSize);
+        NtfsReadAttribute(Volume, IndexRootCtx, 0, IndexRecord, IndexRootSize);
         IndexRoot = (PNTFS_INDEX_ROOT)IndexRecord;
         IndexEntry = (PNTFS_INDEX_ENTRY)((PCHAR)&IndexRoot->IndexHeader + IndexRoot->IndexHeader.EntriesOffset);
         /* Index root is always resident. */
