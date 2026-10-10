@@ -218,6 +218,8 @@ typedef struct _AFD_FCB {
     PIO_WORKITEM AcceptWorkItem;
     KEVENT AcceptWorkIdle;
     BOOLEAN AcceptWorkQueued;
+    PIO_WORKITEM RecvRelaunchWorkItem;
+    BOOLEAN RecvRelaunchQueued;
 } AFD_FCB, *PAFD_FCB;
 
 /* bind.c */

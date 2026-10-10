@@ -341,6 +341,76 @@ NTSTATUS NTAPI ReceiveComplete
     return STATUS_SUCCESS;
 }
 
+static IO_WORKITEM_ROUTINE RelaunchPacketReceiveWorker;
+
+/* Called with the socket state lock held */
+static VOID
+RelaunchPacketReceive(PAFD_FCB FCB)
+{
+    /* Nothing to do while a receive is in flight or about to be started, the
+     * socket is closing or shut down for receiving, or the stored datagrams
+     * still fill the receive window */
+    if (FCB->ReceiveIrp.InFlightRequest ||
+        FCB->RecvRelaunchQueued ||
+        FCB->SharedData.State == SOCKET_STATE_CLOSED ||
+        FCB->TdiReceiveClosed ||
+        !FCB->AddressFile.Object ||
+        FCB->Recv.Content >= FCB->Recv.Size)
+    {
+        return;
+    }
+
+    /* The receive IRP belongs to the thread that builds it and is cancelled
+     * when that thread exits, so an application thread hands the start over
+     * to a system worker thread. The work item is allocated at bind, so this
+     * cannot fail */
+    if (!PsIsSystemThread(PsGetCurrentThread()))
+    {
+        if (FCB->RecvRelaunchWorkItem)
+        {
+            FCB->RecvRelaunchQueued = TRUE;
+            /* Keeps the FCB until the worker has run */
+            ObReferenceObject(FCB->FileObject);
+            IoQueueWorkItem(FCB->RecvRelaunchWorkItem,
+                            RelaunchPacketReceiveWorker,
+                            DelayedWorkQueue,
+                            FCB);
+        }
+        return;
+    }
+
+    TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
+                       FCB->AddressFile.Object,
+                       0,
+                       FCB->Recv.Window,
+                       FCB->Recv.Size,
+                       FCB->AddressFrom,
+                       PacketSocketRecvComplete,
+                       FCB);
+}
+
+static
+VOID
+NTAPI
+RelaunchPacketReceiveWorker(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_opt_ PVOID Context)
+{
+    PAFD_FCB FCB = Context;
+    PFILE_OBJECT FileObject = FCB->FileObject;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    if (SocketAcquireStateLock(FCB))
+    {
+        FCB->RecvRelaunchQueued = FALSE;
+        RelaunchPacketReceive(FCB);
+        SocketStateUnlock(FCB);
+    }
+
+    ObDereferenceObject(FileObject);
+}
+
 static NTSTATUS NTAPI
 SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
                          PAFD_STORED_DATAGRAM DatagramRecv,
@@ -435,6 +505,10 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
         FCB->Recv.Content -= DatagramRecv->Len;
         ExFreePoolWithTag(DatagramRecv->Address, TAG_AFD_TRANSPORT_ADDRESS);
         ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
+
+        /* The receive stops while the stored datagrams fill the window;
+         * restart it now that there is room again */
+        RelaunchPacketReceive(FCB);
     }
 
     AFD_DbgPrint(MID_TRACE,("Done\n"));
@@ -628,6 +702,16 @@ PacketSocketRecvComplete(
 
     if (Irp->IoStatus.Status != STATUS_SUCCESS)
     {
+        /* A datagram larger than the receive window arrives truncated with
+         * STATUS_BUFFER_OVERFLOW: drop it and keep receiving. A cancel that
+         * is not from a close or a shutdown comes from the exit of the thread
+         * that owned the receive: start a new one */
+        if (Irp->IoStatus.Status == STATUS_BUFFER_OVERFLOW ||
+            Irp->IoStatus.Status == STATUS_CANCELLED)
+        {
+            RelaunchPacketReceive(FCB);
+        }
+
         SocketStateUnlock(FCB);
         return Irp->IoStatus.Status;
     }
@@ -661,6 +745,9 @@ PacketSocketRecvComplete(
         {
             ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
         }
+
+        /* The datagram is lost, but later ones can still be received */
+        RelaunchPacketReceive(FCB);
 
         SocketStateUnlock( FCB );
         return Status;
@@ -715,18 +802,8 @@ PacketSocketRecvComplete(
     } else
         FCB->PollState &= ~AFD_EVENT_RECEIVE;
 
-    if( NT_SUCCESS(Irp->IoStatus.Status) && FCB->Recv.Content < FCB->Recv.Size ) {
-        /* Now relaunch the datagram request */
-        Status = TdiReceiveDatagram
-            ( &FCB->ReceiveIrp.InFlightRequest,
-              FCB->AddressFile.Object,
-              0,
-              FCB->Recv.Window,
-              FCB->Recv.Size,
-              FCB->AddressFrom,
-              PacketSocketRecvComplete,
-              FCB );
-    }
+    /* Now relaunch the datagram request */
+    RelaunchPacketReceive(FCB);
 
     SocketStateUnlock( FCB );
 
