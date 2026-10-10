@@ -539,9 +539,10 @@ KeStartThread(IN OUT PKTHREAD Thread)
     ASSERT((Thread->UserAffinity & AFFINITY_MASK(IdealProcessor)));
 #endif
 
-    /* Set the Ideal Processor */
+    /* Set the Ideal Processor, also as the last one the thread was given to */
     Thread->IdealProcessor = IdealProcessor;
     Thread->UserIdealProcessor = IdealProcessor;
+    Thread->NextProcessor = IdealProcessor;
 
     /* Lock the Dispatcher Database */
     KiAcquireDispatcherLockAtSynchLevel();

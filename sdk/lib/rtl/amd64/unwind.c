@@ -332,6 +332,97 @@ RtlpIsEpilogJump(
  *  https://docs.microsoft.com/en-us/cpp/build/unwind-procedure
  *  https://docs.microsoft.com/en-us/cpp/build/prolog-and-epilog
  */
+/*
+ * Whether the instruction that ends at ControlPc is a call, so that ControlPc
+ * is a return address. The common encodings only; a false match keeps the
+ * caller in its body, which is what the unwind through the prolog assumes.
+ */
+static
+BOOLEAN
+RtlpFollowsCall(
+    _In_ ULONG64 ControlPc,
+    _In_ ULONG64 FunctionStart)
+{
+    const BYTE *Pc = (const BYTE*)ControlPc;
+    ULONG64 Room = ControlPc - FunctionStart;
+    ULONG Length, Need;
+    BYTE ModRm, Mod, Rm;
+
+    /* call rel32 */
+    if ((Room >= 5) && (Pc[-5] == 0xE8))
+        return TRUE;
+
+    /* call r/m64 (FF /2), also with a REX prefix: try each instruction length
+       and check that the ModRM byte implies it */
+    for (Length = 2; (Length <= 7) && (Length <= Room); Length++)
+    {
+        if (Pc[-(LONG)Length] != 0xFF)
+            continue;
+        ModRm = Pc[-(LONG)Length + 1];
+        if (((ModRm >> 3) & 7) != 2)
+            continue;
+        Mod = ModRm >> 6;
+        Rm = ModRm & 7;
+        if (Mod == 3)
+        {
+            if (Length == 2) return TRUE;
+            continue;
+        }
+
+        /* Opcode, ModRM, a SIB byte for rm 4, then the displacement */
+        Need = 2 + (Rm == 4);
+        if (Mod == 1)
+            Need += 1;
+        else if ((Mod == 2) || ((Mod == 0) && (Rm == 5)))
+            Need += 4;
+        else if ((Mod == 0) && (Rm == 4) && ((Pc[-(LONG)Length + 2] & 7) == 5))
+            Need += 4;
+        if (Need == Length)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * Whether a direct jmp stays in the frame of the function that executes it
+ * rather than being a tail call: it goes into the middle of a function (GCC
+ * jumps to labels inside cold parts, and from cold parts back into the body)
+ * or to the start of a fragment (GCC's cold parts and chained fragments have
+ * function entries without a prolog of their own). A jump to the start of a
+ * function with a prolog, or to code without an entry, is taken for a tail
+ * call, as Windows does. This looks up the target's function entry.
+ */
+static
+BOOLEAN
+RtlpJumpsToFragment(
+    _In_ BYTE *InstrPtr)
+{
+    PRUNTIME_FUNCTION TargetEntry;
+    PUNWIND_INFO TargetInfo;
+    ULONG64 Target, TargetBase;
+
+    if (InstrPtr[0] == 0xE9)
+        Target = (ULONG64)InstrPtr + 5 + (LONG64)*(LONG UNALIGNED*)(InstrPtr + 1);
+    else
+        Target = (ULONG64)InstrPtr + 2 + (LONG64)(CHAR)InstrPtr[1];
+
+    TargetEntry = RtlLookupFunctionEntry(Target, &TargetBase, NULL);
+    if (TargetEntry == NULL)
+        return FALSE;
+    if (Target - TargetBase != TargetEntry->BeginAddress)
+        return TRUE;
+
+    /* An entry whose unwind data points to another entry describes a fragment */
+    if (TargetEntry->UnwindData & RUNTIME_FUNCTION_INDIRECT)
+        return TRUE;
+
+    TargetInfo = RVA(TargetBase, TargetEntry->UnwindData);
+    if (TargetInfo->Flags & UNW_FLAG_CHAININFO)
+        return TRUE;
+    return (TargetInfo->SizeOfProlog == 0) && (TargetInfo->CountOfCodes > 0);
+}
+
 static
 __inline
 BOOLEAN
@@ -481,10 +572,10 @@ RtlpTryToUnwindEpilog(
         }
 
         /* A tail call. GCC also jumps from the body to a cold part outside
-           the function, so a direct jmp ends an epilog only after a pop */
+           the function, with the whole frame in place */
         if (RtlpIsEpilogJump(InstrPtr, ImageBase, FunctionEntry, PrimaryEntry, &IsDirect))
         {
-            if (IsDirect && (PopCount == 0))
+            if (IsDirect && (PopCount == 0) && RtlpJumpsToFragment(InstrPtr))
                 return FALSE;
             break;
         }
@@ -501,8 +592,12 @@ RtlpTryToUnwindEpilog(
         return FALSE;
     }
 
-    /* A return address can point to an epilog's start, so finish only one that has begun */
-    if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount))
+    /* An epilog is finished from its first instruction, except when a call
+       ends right before it: then ControlPc is a return address in a caller
+       whose compiler did not separate the call from the epilog (GCC), and the
+       caller is still in its body, with its handler */
+    if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount) &&
+        RtlpFollowsCall(ControlPc, ImageBase + FunctionEntry->BeginAddress))
         return FALSE;
 
     /* Unwind is finished, pop new Rip from Stack */
@@ -580,6 +675,8 @@ RtlVirtualUnwind(
     UNWIND_CODE UnwindCode;
     BYTE Reg;
     PULONG LanguageHandler;
+    BOOLEAN InProlog;
+    ULONG64 FrameBase;
 
     /* Get relative virtual address */
     ControlRva = ControlPc - ImageBase;
@@ -594,16 +691,19 @@ RtlVirtualUnwind(
     /* Get a pointer to the unwind info */
     UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
 
-    /* The language specific handler data follows the unwind info */
-    LanguageHandler = ALIGN_UP_POINTER_BY(&UnwindInfo->UnwindCode[UnwindInfo->CountOfCodes], sizeof(ULONG));
 
     /* Calculate relative offset to function start */
     CodeOffset = ControlRva - FunctionEntry->BeginAddress;
 
+    /* A function's handler does not cover its prolog; the prolog of a
+       chained fragment's function has run */
+    InProlog = (CodeOffset < UnwindInfo->SizeOfProlog) &&
+               !(UnwindInfo->Flags & UNW_FLAG_CHAININFO);
+
     *EstablisherFrame = GetEstablisherFrame(Context, UnwindInfo, CodeOffset);
 
     /* Check if we are in the function epilog and try to finish it */
-    if (((CodeOffset > UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0)) ||
+    if (((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0)) ||
         ((CodeOffset >= UnwindInfo->SizeOfProlog) && (UnwindInfo->Flags & UNW_FLAG_CHAININFO)))
     {
         if (RtlpTryToUnwindEpilog(Context, ControlPc, ContextPointers, ImageBase, FunctionEntry))
@@ -612,6 +712,11 @@ RtlVirtualUnwind(
             return NULL;
         }
     }
+
+    /* Registers saved with mov lie relative to the stack pointer after the
+       fixed allocation; once a frame register is set, the frame register is
+       what that stack pointer is derived from */
+    FrameBase = *EstablisherFrame;
 
     /* Skip all Ops with an offset greater than the current Offset */
     i = 0;
@@ -666,14 +771,14 @@ RepeatChainedInfo:
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
                 /* The slot stores offset / 8; adding it to a DWORD64* scales it back to bytes.
                  * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L831 */
-                SetRegFromStackValue(Context, ContextPointers, Reg, (DWORD64*)Context->Rsp + Offset);
+                SetRegFromStackValue(Context, ContextPointers, Reg, (DWORD64*)FrameBase + Offset);
                 i += 2;
                 break;
 
             case UWOP_SAVE_NONVOL_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetRegFromStackValue(Context, ContextPointers, Reg, (PDWORD64)(Context->Rsp + Offset));
+                SetRegFromStackValue(Context, ContextPointers, Reg, (PDWORD64)(FrameBase + Offset));
                 i += 3;
                 break;
 
@@ -691,14 +796,14 @@ RepeatChainedInfo:
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
                 /* The slot stores offset / 16; adding it to an M128A* scales it back to bytes.
                  * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L890 */
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)Context->Rsp + Offset);
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)FrameBase + Offset);
                 i += 2;
                 break;
 
             case UWOP_SAVE_XMM128_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(Context->Rsp + Offset));
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(FrameBase + Offset));
                 i += 3;
                 break;
 
@@ -734,8 +839,11 @@ RepeatChainedInfo:
 Exit:
 
     /* Check if we have a handler and return it */
-    if (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER)))
+    if (!InProlog &&
+        (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER))))
     {
+        /* After a chain the handler follows the primary unwind info */
+        LanguageHandler = ALIGN_UP_POINTER_BY(&UnwindInfo->UnwindCode[UnwindInfo->CountOfCodes], sizeof(ULONG));
         *HandlerData = (LanguageHandler + 1);
         return RVA(ImageBase, *LanguageHandler);
     }

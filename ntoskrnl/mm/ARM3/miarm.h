@@ -2041,6 +2041,12 @@ MiReserveSystemPtes(
 
 VOID
 NTAPI
+MiFlushReleasedSystemPtesBeforeUncachedMapping(
+    VOID
+);
+
+VOID
+NTAPI
 MiReleaseSystemPtes(
     IN PMMPTE StartingPte,
     IN ULONG NumberOfPtes,

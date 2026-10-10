@@ -17,6 +17,9 @@ typedef struct _CALL_CONTEXT
     LONG Winners[2];
     LONG InPhase;
     LONG PhaseViolations;
+    LONG Expected;
+    LONG Done;
+    PKTHREAD Caller;
 } CALL_CONTEXT, *PCALL_CONTEXT;
 
 static
@@ -42,11 +45,17 @@ CallRoutine(
     InterlockedIncrement(&Context->InPhase);
     if (KeSignalCallDpcSynchronize(SystemArgument2))
         InterlockedIncrement(&Context->Winners[0]);
-    if (Context->InPhase != (LONG)KeNumberProcessors)
+    if (Context->InPhase != Context->Expected)
         InterlockedIncrement(&Context->PhaseViolations);
 
     if (KeSignalCallDpcSynchronize(SystemArgument2))
         InterlockedIncrement(&Context->Winners[1]);
+
+    /* The other processors finish late, so a caller that does not wait for
+       every processor to be done returns before they count themselves */
+    if (KeGetCurrentThread() != Context->Caller)
+        KeStallExecutionProcessor(200);
+    InterlockedIncrement(&Context->Done);
 
     KeSignalCallDpcDone(SystemArgument1);
 }
@@ -54,20 +63,28 @@ CallRoutine(
 START_TEST(KeGenericCallDpc)
 {
     PCALL_CONTEXT Context;
-    KAFFINITY Active;
-    ULONG Round, Processor, Missed, Extra;
+    KAFFINITY Active, Set;
+    ULONG Round, Processor, Missed, Extra, Wait;
+    LONG Count;
 
     Context = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Context), 'tseT');
     if (skip(Context != NULL, "No memory\n"))
         return;
 
     Active = KeQueryActiveProcessors();
+    for (Count = 0, Set = Active; Set; Set &= Set - 1) Count++;
     trace("%u processors, active mask %Ix\n", KeNumberProcessors, Active);
 
     for (Round = 0; Round < 200; Round++)
     {
         RtlZeroMemory(Context, sizeof(*Context));
+        Context->Expected = Count;
+        Context->Caller = KeGetCurrentThread();
         KeGenericCallDpc(CallRoutine, Context);
+
+        /* Every processor counted itself before KeGenericCallDpc returned */
+        ok(Context->Done == Count, "Round %lu: %ld of %ld processors done at the return\n",
+           Round, Context->Done, Count);
 
         Missed = Extra = 0;
         for (Processor = 0; Processor < MAXIMUM_PROCESSORS; Processor++)
@@ -84,11 +101,20 @@ START_TEST(KeGenericCallDpc)
         ok_eq_long(Context->Winners[1], 1);
         ok_eq_long(Context->PhaseViolations, 0);
         if (Missed || Extra || Context->WrongIrql || Context->PhaseViolations ||
-            (Context->Winners[0] != 1) || (Context->Winners[1] != 1))
+            (Context->Winners[0] != 1) || (Context->Winners[1] != 1) ||
+            (Context->Done != Count))
         {
             break;
         }
     }
 
-    ExFreePoolWithTag(Context, 'tseT');
+    /* After a failure, processors may still use the context: wait for them,
+       and leave it allocated if they do not finish */
+    for (Wait = 0; (Wait < 1000) && (*(volatile LONG *)&Context->Done < Count); Wait++)
+        KeStallExecutionProcessor(1000);
+
+    if (*(volatile LONG *)&Context->Done >= Count)
+        ExFreePoolWithTag(Context, 'tseT');
+    else
+        ok(FALSE, "Processors still use the context, leaking it\n");
 }

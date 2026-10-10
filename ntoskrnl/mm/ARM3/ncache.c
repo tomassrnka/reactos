@@ -110,6 +110,9 @@ MmAllocateNonCachedMemory(IN SIZE_T NumberOfBytes)
     //
     TempPte = ValidKernelPte;
 
+    /* The pages must not still be cached as write-back elsewhere */
+    if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
     //
     // Now check what kind of caching we should use
     //

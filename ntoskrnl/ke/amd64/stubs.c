@@ -168,6 +168,13 @@ KiIdleLoop(VOID)
         }
         else
         {
+#ifdef CONFIG_SMP
+            /* Take a ready thread that waits behind a busy processor */
+            if (KiIdleTakeReadyThread(Prcb)) continue;
+
+            /* Poll for a while before halting (see KiIdlePollForWork) */
+            if (KiIdlePollMicroseconds && KiIdlePollForWork(Prcb)) continue;
+#endif
             /* Continue staying idle. Note the HAL returns with interrupts on */
             Prcb->PowerState.IdleFunction(&Prcb->PowerState);
         }

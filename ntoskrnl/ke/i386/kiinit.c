@@ -627,7 +627,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
 
     /* If there's no thread scheduled, put this CPU in the Idle summary */
     KiAcquirePrcbLock(Prcb);
-    if (!Prcb->NextThread) KiIdleSummary |= 1 << Number;
+    if (!Prcb->NextThread) InterlockedOr((PLONG)&KiIdleSummary, (LONG)Prcb->SetMember);
     KiReleasePrcbLock(Prcb);
 
     /* Raise back to HIGH_LEVEL and clear the PRCB for the loader block */

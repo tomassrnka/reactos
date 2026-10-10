@@ -26,33 +26,38 @@ PUBLIC HalpAPEntry64
  */
 .code
 .align 16
-.code16
 HalpAPEntry16:
-    cli
-
-    /* Address the data in the stub through DS */
-    mov ax, cs
-    mov ds, ax
+    /* Real-mode code, encoded by hand: ML64 assembles no 16-bit code */
+    .byte HEX(FA)                               /* cli */
+    .byte HEX(8C), HEX(C8)                      /* mov ax, cs */
+    .byte HEX(8E), HEX(D8)                      /* mov ds, ax: address the stub's data */
 
     /* Load the temporary GDT, its base is the stub's physical address */
-    data32 lgdt ds:[DATA(TempGdtLimit)]
+    .byte HEX(66), HEX(0F), HEX(01), HEX(16)    /* lgdt (32-bit base) ds:[TempGdtLimit] */
+    .word DATA(TempGdtLimit)
 
     /* Enable PAE with the temporary page tables */
-    mov eax, ds:[DATA(TempCr4)]
-    mov cr4, eax
-    mov eax, ds:[DATA(TempCr3)]
-    mov cr3, eax
+    .byte HEX(66), HEX(A1)                      /* mov eax, ds:[TempCr4] */
+    .word DATA(TempCr4)
+    .byte HEX(0F), HEX(22), HEX(E0)             /* mov cr4, eax */
+    .byte HEX(66), HEX(A1)                      /* mov eax, ds:[TempCr3] */
+    .word DATA(TempCr3)
+    .byte HEX(0F), HEX(22), HEX(D8)             /* mov cr3, eax */
 
     /* Enable long mode and no-execute: kernel PTEs carry the NX bit */
-    mov ecx, MSR_EFER
-    mov eax, ds:[DATA(TempEfer)]
-    mov edx, ds:[DATA(TempEfer) + 4]
-    wrmsr
+    .byte HEX(66), HEX(B9)                      /* mov ecx, MSR_EFER */
+    .long MSR_EFER
+    .byte HEX(66), HEX(A1)                      /* mov eax, ds:[TempEfer] */
+    .word DATA(TempEfer)
+    .byte HEX(66), HEX(8B), HEX(16)             /* mov edx, ds:[TempEfer + 4] */
+    .word DATA(TempEfer) + 4
+    .byte HEX(0F), HEX(30)                      /* wrmsr */
 
     /* Enable paging and protection together */
-    mov eax, cr0
-    or eax, HEX(80000001)
-    mov cr0, eax
+    .byte HEX(0F), HEX(20), HEX(C0)             /* mov eax, cr0 */
+    .byte HEX(66), HEX(0D)                      /* or eax, 80000001h */
+    .long HEX(80000001)
+    .byte HEX(0F), HEX(22), HEX(C0)             /* mov cr0, eax */
 
     /* Far jump to the 64-bit code segment, the target is a linear address */
     .byte HEX(66), HEX(EA)
@@ -83,7 +88,6 @@ ProcessorStatePtr:
 Entry64Ptr:
     .quad 0
 
-.code64
 HalpAPEntryLow64:
     /* Still in the stub. The kernel's upper half is mapped, so continue there */
     mov rsi, [rip + ProcessorStatePtr]

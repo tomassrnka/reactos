@@ -398,6 +398,27 @@ MiFlushReleasedSystemPtes(VOID)
     MiSystemPteFlushPtes = 0;
 }
 
+/*
+ * Called before a page is mapped uncached or write-combined. A page whose
+ * write-back mapping was released into the pending batch can still be in
+ * other processors' TLBs as write-back, and the same page must not be
+ * reachable with two memory types.
+ */
+VOID
+NTAPI
+MiFlushReleasedSystemPtesBeforeUncachedMapping(VOID)
+{
+    KIRQL OldIrql;
+
+    if (MiSystemPteFlushCount == 0)
+        return;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueSystemSpaceLock);
+    if (MiSystemPteFlushCount != 0)
+        MiFlushReleasedSystemPtes();
+    KeReleaseQueuedSpinLock(LockQueueSystemSpaceLock, OldIrql);
+}
+
 VOID
 NTAPI
 MiReleaseSystemPtes(IN PMMPTE StartingPte,

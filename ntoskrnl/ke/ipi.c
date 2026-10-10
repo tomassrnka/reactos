@@ -182,8 +182,9 @@ KiIpiSend(IN KAFFINITY TargetProcessors,
         if (!IpiRequest) return;
     }
 
-    /* Mark the requests before interrupting, the interrupt takes them all */
-    while (Remaining)
+    /* Mark the requests before interrupting, the interrupt takes them all;
+       an IPI without requests only ends a halt */
+    while (Remaining && IpiRequest)
     {
         BitScanForwardAffinity(&Processor, Remaining);
         Remaining &= Remaining - 1;
@@ -370,8 +371,13 @@ KiIpiSendRequest(
     /* Above SYNCH_LEVEL no other processor may be waited for. That happens
        while this is the only one running, and in the debugger with the others
        frozen; it requests TLB flushes, and frozen processors flush their
-       entire TLB when they thaw */
-    if (KeGetCurrentIrql() > SYNCH_LEVEL)
+       entire TLB when they thaw. KDBG lowers the IRQL to DISPATCH_LEVEL while
+       the others stay frozen, so the freeze owner never waits either */
+    if ((KeGetCurrentIrql() > SYNCH_LEVEL)
+#ifdef CONFIG_SMP
+        || (KiFreezeOwner == KeGetCurrentPrcb())
+#endif
+       )
     {
 #ifdef CONFIG_SMP
         ASSERT((KiFreezeOwner == KeGetCurrentPrcb()) ||
@@ -388,11 +394,11 @@ KiIpiSendRequest(
 
 #ifdef CONFIG_SMP
     Prcb = KeGetCurrentPrcb();
-    /* A starting processor serves its requests once it enables interrupts; it takes the
-       dispatcher and PRCB locks before that, so no request may be sent holding them.
-       KDBG lowers the IRQL while the others stay frozen, and after a KD
+    /* KDBG lowers the IRQL while the others stay frozen, and after a KD
        processor switch the debugger runs on a frozen processor: do not
-       wait there */
+       wait there. A starting processor serves its requests once it enables
+       interrupts; it takes the dispatcher and PRCB locks before that, so no
+       request may be sent holding them */
     if (Prcb->IpiFrozen & IPI_FROZEN_FLAG_ACTIVE)
         Remote = 0;
     else

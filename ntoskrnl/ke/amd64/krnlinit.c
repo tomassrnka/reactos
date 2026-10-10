@@ -195,7 +195,7 @@ KiSystemStartupBootStack(VOID)
 
     /* If there's no thread scheduled, put this CPU in the Idle summary */
     KiAcquirePrcbLock(Prcb);
-    if (!Prcb->NextThread) KiIdleSummary |= (ULONG_PTR)1 << Prcb->Number;
+    if (!Prcb->NextThread) InterlockedOr64((PLONG64)&KiIdleSummary, (LONG64)Prcb->SetMember);
     KiReleasePrcbLock(Prcb);
 
     /* Raise back to HIGH_LEVEL and clear the PRCB for the loader block */
