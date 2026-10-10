@@ -715,7 +715,7 @@ NtfsFindMftRecord(
     PCHAR BitmapData;
     PCHAR IndexRecord;
     PNTFS_INDEX_ENTRY IndexEntry, IndexEntryEnd;
-    ULONG RecordOffset;
+    ULONGLONG RecordOffset;
     ULONG IndexBlockSize;
     ULONG IndexRootSize;
     SIZE_T FileNameLen;
@@ -839,11 +839,17 @@ NtfsFindMftRecord(
 
             for (;;)
             {
-                TRACE("RecordOffset: %x IndexAllocationSize: %x\n", RecordOffset, IndexAllocationSize);
+                TRACE("RecordOffset: %I64x IndexAllocationSize: %I64x\n", RecordOffset, IndexAllocationSize);
                 for (; RecordOffset < IndexAllocationSize;)
                 {
                     UCHAR Bit = 1 << ((RecordOffset / IndexBlockSize) & 7);
-                    ULONG Byte = (RecordOffset / IndexBlockSize) >> 3;
+                    ULONGLONG Byte = (RecordOffset / IndexBlockSize) >> 3;
+                    /* No block past the end of the bitmap is in use */
+                    if (Byte >= BitmapDataSize)
+                    {
+                        RecordOffset = IndexAllocationSize;
+                        break;
+                    }
                     if ((BitmapData[Byte] & Bit))
                         break;
                     RecordOffset += IndexBlockSize;
