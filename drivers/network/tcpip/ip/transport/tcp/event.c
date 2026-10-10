@@ -43,9 +43,10 @@ CompleteBucket(PCONNECTION_ENDPOINT Connection, PTDI_BUCKET Bucket, const BOOLEA
     {
         BucketCompletionWorker(Bucket);
     }
-    else
+    else if (!ChewCreate(BucketCompletionWorker, Bucket))
     {
-        ChewCreate(BucketCompletionWorker, Bucket);
+        /* The bucket is off its queue, so a cancel cannot complete it */
+        ChewQueueReserved(&Bucket->ReservedItem, BucketCompletionWorker, Bucket);
     }
 }
 
@@ -341,6 +342,16 @@ TCPSendEventHandler(void *arg, const u16_t space)
         if( Status == STATUS_PENDING )
         {
             LockObject(Connection);
+
+            /* A cancel that ran while the request was out of the queue did not find it */
+            if (Irp->Cancel)
+            {
+                Bucket->Status = STATUS_CANCELLED;
+                Bucket->Information = 0;
+                CompleteBucket(Connection, Bucket, FALSE);
+                continue;
+            }
+
             InsertHeadList(&Connection->SendRequest, &Bucket->Entry);
             break;
         }

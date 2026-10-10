@@ -251,12 +251,14 @@ NTSTATUS TCPShutdown(VOID)
     if (!TCPInitialized)
         return STATUS_SUCCESS;
 
-    ExDeleteNPagedLookasideList(&TdiBucketLookasideList);
-
     LibIPShutdown();
 
     /* Deregister this protocol with IP layer */
     IPRegisterProtocol(IPPROTO_TCP, NULL);
+
+    /* A completion still running returns its bucket to the lookaside list */
+    ChewWaitIdle();
+    ExDeleteNPagedLookasideList(&TdiBucketLookasideList);
 
     TCPInitialized = FALSE;
 
