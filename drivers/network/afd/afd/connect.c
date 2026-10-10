@@ -714,26 +714,6 @@ AfdStreamSocketSuperConnect(
                     IrpSp->Parameters.DeviceIoControl.InputBufferLength);
 #endif
 
-    if (FCB->OnConnectSendBuffer)
-    {
-        ExFreePoolWithTag(FCB->OnConnectSendBuffer, TAG_AFD_SUPER_CONNECT_BUFFER);
-        FCB->OnConnectSendBuffer = NULL;
-        FCB->OnConnectSendBufferSize = 0;
-    }
-
-    if (Irp->UserBuffer)
-    {
-         FCB->OnConnectSendBufferSize = BufferSize;
-         FCB->OnConnectSendBuffer = ExAllocatePoolWithTag(PagedPool,
-                                                        BufferSize,
-                                                        TAG_AFD_SUPER_CONNECT_BUFFER);
-
-         if (!FCB->OnConnectSendBuffer)
-             return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
-
-         RtlCopyMemory(FCB->OnConnectSendBuffer, Irp->UserBuffer, BufferSize);
-    }
-
     if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
     {
         AFD_DbgPrint(MIN_TRACE,("Cannot call IOCTL_CONNECTEX on connectionless socket\n",
@@ -751,20 +731,55 @@ AfdStreamSocketSuperConnect(
          else
              Status = STATUS_SUCCESS;
 
-         FreeConnectSendBuffer(FCB);
          return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
     }
 
+    /* The state is checked before the buffer is touched: a pending connect or
+       initial send owns the buffer */
     switch (FCB->SharedData.State)
     {
     case SOCKET_STATE_CONNECTED:
-        Status = STATUS_SUCCESS;
-        break;
+        /* WSAEISCONN, as on Windows */
+        return UnlockAndMaybeComplete(FCB, STATUS_CONNECTION_ACTIVE, Irp, 0);
 
     case SOCKET_STATE_CONNECTING:
-        return LeaveIrpUntilLater( FCB, Irp, FUNCTION_CONNECTEX );
+        /* WSAEINVAL, as on Windows */
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
 
     case SOCKET_STATE_BOUND:
+        /* No request owns a buffer on a bound socket */
+        FreeConnectSendBuffer(FCB);
+
+        if (Irp->UserBuffer && BufferSize)
+        {
+            FCB->OnConnectSendBuffer = ExAllocatePoolWithTag(PagedPool,
+                                                             BufferSize,
+                                                             TAG_AFD_SUPER_CONNECT_BUFFER);
+            if (!FCB->OnConnectSendBuffer)
+                return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+
+            FCB->OnConnectSendBufferSize = BufferSize;
+            Status = STATUS_SUCCESS;
+            /* METHOD_NEITHER: the send buffer is the caller's raw pointer */
+            _SEH2_TRY
+            {
+                if (Irp->RequestorMode != KernelMode)
+                    ProbeForRead(Irp->UserBuffer, BufferSize, 1);
+                RtlCopyMemory(FCB->OnConnectSendBuffer, Irp->UserBuffer, BufferSize);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            if (!NT_SUCCESS(Status))
+            {
+                FreeConnectSendBuffer(FCB);
+                return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
+            }
+        }
+
         if (FCB->RemoteAddress)
         {
             ExFreePoolWithTag(FCB->RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
