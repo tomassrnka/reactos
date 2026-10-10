@@ -137,11 +137,14 @@ KiSelectNextProcessor(
     _Out_ PBOOLEAN Idle)
 {
     PKPRCB Prcb = KeGetCurrentPrcb();
-    KAFFINITY PreferredSet, IdleSet;
+    KAFFINITY PreferredSet, IdleSet, UsableSet;
     ULONG Processor;
 
-    /* Start with the affinity */
+    /* Start with the active processors of the affinity that are not busy
+       with DPCs since an earlier clock tick, unless there are none */
     PreferredSet = Thread->Affinity;
+    UsableSet = PreferredSet & KeActiveProcessors & ~KiDpcBoundSummary;
+    if (UsableSet) PreferredSet = UsableSet;
 
     /* If we have matching idle processors, use them */
     IdleSet = PreferredSet & KiIdleSummary;
@@ -281,10 +284,14 @@ KiTakeRemoteReadyThread(
     PKPRCB RemotePrcb;
     PKTHREAD Thread;
     PLIST_ENTRY ListHead, ListEntry;
-    ULONG Count, Number, Summary, Mask, Index;
+    ULONG Count, Number, Summary, Mask, Index, MinWait;
 
     if (Priority > HIGH_PRIORITY) return NULL;
     ASSERT(Priority >= 0);
+
+    /* A processor busy with DPCs would stop the thread it takes: it takes
+       only a thread that has waited a few ticks for any other processor */
+    MinWait = (KiDpcBoundSummary & Prcb->SetMember) ? KI_DPC_BOUND_TAKE_TICKS : 0;
 
     /* The ready summary bits of Priority and above */
     Mask = ~(PRIORITY_MASK(Priority) - 1);
@@ -323,6 +330,7 @@ KiTakeRemoteReadyThread(
                 {
                     Thread = CONTAINING_RECORD(ListEntry, KTHREAD, WaitListEntry);
                     if ((Thread->Affinity & Prcb->SetMember) &&
+                        (KeTickCount.LowPart - Thread->WaitTime >= MinWait) &&
                         KiTryAcquireThreadLock(Thread))
                     {
                         break;
@@ -356,6 +364,69 @@ KiTakeRemoteReadyThread(
     }
 
     return NULL;
+}
+
+/*
+ * Called at SYNCH_LEVEL by a processor that has retired DPCs since an
+ * earlier clock tick (KiRetireDpcList). The thread it was given waits until
+ * its DPC queue runs empty, and no other processor takes a standby thread:
+ * make it ready again; KiSelectNextProcessor passes over this processor
+ * while it stays busy. FALSE when the thread may run on no processor that
+ * is not busy with DPCs.
+ */
+BOOLEAN
+FASTCALL
+KiRedirectStandbyThread(
+    _In_ PKPRCB Prcb)
+{
+    PKTHREAD Thread, Current, NewThread;
+    KPRIORITY Priority;
+
+    ASSERT(Prcb == KeGetCurrentPrcb());
+    KiAcquirePrcbLock(Prcb);
+
+    Thread = Prcb->NextThread;
+    if (!Thread || (Thread == Prcb->IdleThread) ||
+        !(Thread->Affinity & KeActiveProcessors & ~KiDpcBoundSummary & ~Prcb->SetMember))
+    {
+        KiReleasePrcbLock(Prcb);
+        return FALSE;
+    }
+    ASSERT(Thread->State == Standby);
+
+    /*
+     * Put in its place what the processor runs without it: a thread of its
+     * own ready list that preempts the current thread (any one when the
+     * current thread is the idle thread, whose loop does not look at the
+     * ready list); when the current thread may no longer run here, any
+     * thread of the ready list or the idle thread; else nothing.
+     */
+    Current = Prcb->CurrentThread;
+    Priority = (Current == Prcb->IdleThread) ? 0 : (Current->Priority + 1);
+    NewThread = (Priority <= HIGH_PRIORITY) ? KiSelectReadyThread(Priority, Prcb) : NULL;
+    if (!NewThread && (Current != Prcb->IdleThread) && !(Current->Affinity & Prcb->SetMember))
+    {
+        NewThread = KiSelectReadyThread(0, Prcb);
+        if (!NewThread) NewThread = Prcb->IdleThread;
+    }
+
+    Prcb->NextThread = NewThread;
+    if (NewThread) NewThread->State = Standby;
+
+    /* Giving the thread marked the current one preempted */
+    if (!NewThread) Current->Preempted = FALSE;
+
+    /* Giving the thread took the processor out of the idle summary */
+    if ((NewThread == Prcb->IdleThread) ||
+        (!NewThread && (Current == Prcb->IdleThread)))
+    {
+        InterlockedOrSetMember(&KiIdleSummary, Prcb->SetMember);
+    }
+
+    KiInsertDeferredReadyList(Thread);
+    KiReleasePrcbLock(Prcb);
+    KiProcessDeferredReadyList(Prcb);
+    return TRUE;
 }
 
 /*

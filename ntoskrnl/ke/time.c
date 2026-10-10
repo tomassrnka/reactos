@@ -141,6 +141,10 @@ KeUpdateRunTime(IN PKTRAP_FRAME TrapFrame,
         return;
     }
 
+#ifdef CONFIG_SMP
+    KiCheckDpcBound(Prcb);
+#endif
+
     /* Increase interrupt count */
     Prcb->InterruptCount++;
 

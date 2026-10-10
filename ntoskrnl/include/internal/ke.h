@@ -294,6 +294,21 @@ FASTCALL
 KiIdleTakeReadyThread(
     _In_ PKPRCB Prcb
 );
+
+extern volatile KAFFINITY KiDpcBoundSummary;
+#define KI_DPC_BOUND_TAKE_TICKS 4
+
+VOID
+FASTCALL
+KiCheckDpcBound(
+    _In_ PKPRCB Prcb
+);
+
+BOOLEAN
+FASTCALL
+KiRedirectStandbyThread(
+    _In_ PKPRCB Prcb
+);
 #else
 #define KiSelectReadyThreadAny(Prcb, Priority, RemotePriority) \
     KiSelectReadyThread((Priority), (Prcb))

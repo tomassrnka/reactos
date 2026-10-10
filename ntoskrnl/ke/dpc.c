@@ -25,8 +25,64 @@ FAST_MUTEX KiGenericCallDpcMutex;
 KDPC KiTimerExpireDpc;
 ULONG KiTimeLimitIsrMicroseconds;
 ULONG KiDPCTimeout = 110;
+#ifdef CONFIG_SMP
+/* Processors that have retired DPCs without a break since an earlier clock
+   tick, or that did so for a whole tick in the last KI_DPC_BUSY_TICKS ticks */
+volatile KAFFINITY KiDpcBoundSummary;
+#define KI_DPC_BUSY_TICKS 16
+
+/* Written by the processor itself only */
+typedef struct DECLSPEC_ALIGN(64) _KI_DPC_RUN
+{
+    ULONG LongRunTick;
+    BOOLEAN Retiring;
+} KI_DPC_RUN;
+
+static KI_DPC_RUN KiDpcRun[MAXIMUM_PROCESSORS];
+#endif
 
 /* PRIVATE FUNCTIONS *********************************************************/
+
+#ifdef CONFIG_SMP
+static
+VOID
+KiMarkDpcBound(
+    _In_ PKPRCB Prcb)
+{
+#ifdef _WIN64
+    InterlockedOr64((PLONG64)&KiDpcBoundSummary, (LONG64)Prcb->SetMember);
+#else
+    InterlockedOr((PLONG)&KiDpcBoundSummary, (LONG)Prcb->SetMember);
+#endif
+}
+
+static
+VOID
+KiClearDpcBound(
+    _In_ PKPRCB Prcb)
+{
+#ifdef _WIN64
+    InterlockedAnd64((PLONG64)&KiDpcBoundSummary, ~(LONG64)Prcb->SetMember);
+#else
+    InterlockedAnd((PLONG)&KiDpcBoundSummary, ~(LONG)Prcb->SetMember);
+#endif
+}
+
+/* Clock tick: a processor outside KiRetireDpcList whose busy period ended is no longer marked */
+VOID
+FASTCALL
+KiCheckDpcBound(
+    _In_ PKPRCB Prcb)
+{
+    KI_DPC_RUN *Run = &KiDpcRun[Prcb->Number];
+
+    if ((KiDpcBoundSummary & Prcb->SetMember) && !Run->Retiring &&
+        (KeTickCount.LowPart - Run->LongRunTick >= KI_DPC_BUSY_TICKS))
+    {
+        KiClearDpcBound(Prcb);
+    }
+}
+#endif
 
 VOID
 NTAPI
@@ -572,11 +628,20 @@ KiRetireDpcList(IN PKPRCB Prcb)
     ULONG_PTR TimerHand;
 #ifdef CONFIG_SMP
     KIRQL OldIrql;
+    ULONG StartTick = KeTickCount.LowPart, DeclinedTick = 0;
+    BOOLEAN Bound = FALSE;
+    PKTHREAD NextThread, Declined = NULL;
+    KI_DPC_RUN *Run = &KiDpcRun[Prcb->Number];
 #endif
 
     /* Get data and list variables before starting anything else */
     DpcData = &Prcb->DpcData[DPC_NORMAL];
     ListHead = &DpcData->DpcListHead;
+
+#ifdef CONFIG_SMP
+    /* The clock tick leaves the mark alone until the end of this call */
+    Run->Retiring = TRUE;
+#endif
 
     /* Main outer loop */
     do
@@ -641,6 +706,33 @@ KiRetireDpcList(IN PKPRCB Prcb)
 
                 /* Disable interrupts and keep looping */
                 _disable();
+
+#ifdef CONFIG_SMP
+                /*
+                 * Under a steady interrupt load the queue can stay non-empty
+                 * for seconds, and a thread given to this processor waits for
+                 * that. Once the clock has ticked, KiSelectNextProcessor
+                 * passes over this processor, it takes no thread from another
+                 * processor, and its standby thread goes elsewhere.
+                 */
+                if (!Bound && (KeTickCount.LowPart != StartTick))
+                {
+                    Bound = TRUE;
+                    if (!(KiDpcBoundSummary & Prcb->SetMember)) KiMarkDpcBound(Prcb);
+                }
+                /* A thread that could not go elsewhere is looked at again after a tick */
+                NextThread = Prcb->NextThread;
+                if (Bound && NextThread &&
+                    ((NextThread != Declined) || (KeTickCount.LowPart != DeclinedTick)))
+                {
+                    _enable();
+                    OldIrql = KeRaiseIrqlToSynchLevel();
+                    Declined = KiRedirectStandbyThread(Prcb) ? NULL : NextThread;
+                    DeclinedTick = KeTickCount.LowPart;
+                    KeLowerIrql(OldIrql);
+                    _disable();
+                }
+#endif
             }
             else
             {
@@ -678,6 +770,19 @@ KiRetireDpcList(IN PKPRCB Prcb)
         }
 #endif
     } while (DpcData->DpcQueueDepth != 0);
+
+#ifdef CONFIG_SMP
+    /* After a run of a whole tick the processor stays marked for a while:
+       a thread it runs in a short break would be stopped by the next run */
+    if (KiDpcBoundSummary & Prcb->SetMember)
+    {
+        ULONG Now = KeTickCount.LowPart;
+
+        if (Now - StartTick >= 2) Run->LongRunTick = Now;
+        if (Now - Run->LongRunTick >= KI_DPC_BUSY_TICKS) KiClearDpcBound(Prcb);
+    }
+    Run->Retiring = FALSE;
+#endif
 }
 
 VOID
