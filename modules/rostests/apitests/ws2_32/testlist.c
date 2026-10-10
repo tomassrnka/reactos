@@ -6,6 +6,7 @@ extern void func_bind(void);
 extern void func_broadcast(void);
 extern void func_close(void);
 extern void func_closerace(void);
+extern void func_connectex(void);
 extern void func_getaddrinfo(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
@@ -28,6 +29,7 @@ const struct test winetest_testlist[] =
     { "broadcast", func_broadcast },
     { "close", func_close },
     { "closerace", func_closerace },
+    { "connectex", func_connectex },
     { "getaddrinfo", func_getaddrinfo },
     { "gethostname", func_gethostname },
     { "getnameinfo", func_getnameinfo },
