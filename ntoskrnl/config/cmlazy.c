@@ -21,6 +21,7 @@ KDPC CmpEnableLazyFlushDpc;
 BOOLEAN CmpLazyFlushPending;
 BOOLEAN CmpForceForceFlush;
 BOOLEAN CmpHoldLazyFlush = TRUE;
+BOOLEAN CmpLazyFlushRetry;
 ULONG CmpLazyFlushIntervalInSeconds = 5;
 ULONG CmpLazyFlushHiveCount = 7;
 ULONG CmpLazyFlushCount = 1;
@@ -34,10 +35,9 @@ CmpDoFlushNextHive(_In_  BOOLEAN ForceFlush,
                    _Out_ PBOOLEAN Error,
                    _Out_ PULONG DirtyCount)
 {
-    NTSTATUS Status;
     PLIST_ENTRY NextEntry;
     PCMHIVE CmHive;
-    BOOLEAN Result;
+    BOOLEAN Result, Synced;
     ULONG HiveCount = CmpLazyFlushHiveCount;
 
     /* Set Defaults */
@@ -79,16 +79,21 @@ CmpDoFlushNextHive(_In_  BOOLEAN ForceFlush,
                 /* Do the sync */
                 DPRINT("Flushing: %wZ\n", &CmHive->FileFullPath);
                 DPRINT("Handle: %p\n", CmHive->FileHandles[HFILE_TYPE_PRIMARY]);
-                Status = HvSyncHive(&CmHive->Hive);
-                if (!NT_SUCCESS(Status))
+                Synced = HvSyncHive(&CmHive->Hive);
+                if (!Synced)
                 {
-                    /* Let them know we failed */
-                    DPRINT1("Failed to flush %wZ on handle %p (status 0x%08lx)\n",
-                        &CmHive->FileFullPath,  CmHive->FileHandles[HFILE_TYPE_PRIMARY], Status);
+                    /*
+                     * Let them know we failed. The hive stays dirty and is
+                     * tried again in the next round; go on with the other
+                     * hives, so that a hive that keeps failing does not hold
+                     * them back.
+                     */
+                    DPRINT1("Failed to flush %wZ on handle %p\n",
+                        &CmHive->FileFullPath, CmHive->FileHandles[HFILE_TYPE_PRIMARY]);
                     *Error = TRUE;
-                    Result = FALSE;
-                    break;
                 }
+
+                /* Visited in this round */
                 CmHive->FlushCount = CmpLazyFlushCount;
             }
         }
@@ -174,7 +179,7 @@ VOID
 NTAPI
 CmpLazyFlushWorker(IN PVOID Parameter)
 {
-    BOOLEAN ForceFlush, Result, MoreWork = FALSE;
+    BOOLEAN ForceFlush, Result, MoreWork = FALSE, Retry = FALSE;
     ULONG DirtyCount = 0;
     PAGED_CODE();
 
@@ -204,10 +209,22 @@ CmpLazyFlushWorker(IN PVOID Parameter)
 
     /* Flush the next hive */
     MoreWork = CmpDoFlushNextHive(ForceFlush, &Result, &DirtyCount);
+    if (Result)
+    {
+        /* A hive failed: start another round once this one is done */
+        CmpLazyFlushRetry = TRUE;
+    }
     if (!MoreWork)
     {
         /* We're done */
         InterlockedIncrement((PLONG)&CmpLazyFlushCount);
+
+        /*
+         * Take the retry of this round while no other worker can run:
+         * one starts only once the pending flag is cleared below.
+         */
+        Retry = CmpLazyFlushRetry;
+        CmpLazyFlushRetry = FALSE;
     }
 
     /* Check if we have starved writers */
@@ -221,9 +238,12 @@ CmpLazyFlushWorker(IN PVOID Parameter)
     DPRINT("Lazy flush done. More work to be done: %s. Entries still dirty: %u.\n",
         MoreWork ? "Yes" : "No", DirtyCount);
 
-    if (MoreWork)
+    if (MoreWork || Retry)
     {
-        /* Relaunch the flush timer, so the remaining hives get flushed */
+        /*
+         * Relaunch the flush timer, so the remaining hives get flushed,
+         * or a hive that failed is tried again in the next round.
+         */
         CmpLazyFlush();
     }
 }

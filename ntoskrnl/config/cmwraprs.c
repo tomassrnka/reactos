@@ -209,9 +209,9 @@ CmpFileFlush(IN PHHIVE RegistryHive,
 
     Status = ZwFlushBuffersFile(HiveHandle, &IoStatusBlock);
 
-    /* This operation is always synchronous */
+    /* This operation is always synchronous. A failed flush need not fill the I/O status block. */
     ASSERT(Status != STATUS_PENDING);
-    ASSERT(Status == IoStatusBlock.Status);
+    ASSERT(!NT_SUCCESS(Status) || Status == IoStatusBlock.Status);
 
     return NT_SUCCESS(Status) ? TRUE : FALSE;
 }

@@ -92,6 +92,7 @@ HvpWriteLog(
     PVOID Block;
     UINT32 BitmapSize, BufferSize;
     PUCHAR HeaderBuffer, Ptr;
+    ULONG OldType;
 
     /*
      * The hive log we are going to write data into
@@ -149,6 +150,7 @@ HvpWriteLog(
      * increment the primary sequence number
      * as we are at the half of the work.
      */
+    OldType = RegistryHive->BaseBlock->Type;
     RegistryHive->BaseBlock->Type = HFILE_TYPE_LOG;
     RegistryHive->BaseBlock->Sequence1++;
     RegistryHive->BaseBlock->CheckSum = HvpHiveHeaderChecksum(RegistryHive->BaseBlock);
@@ -201,7 +203,7 @@ HvpWriteLog(
     if (!Success)
     {
         DPRINT1("Failed to write the hive header block to log (primary sequence)\n");
-        return FALSE;
+        goto RetryLater;
     }
 
     /* Now write the actual dirty data to log */
@@ -226,7 +228,7 @@ HvpWriteLog(
         if (!Success)
         {
             DPRINT1("Failed to write dirty block to log (block 0x%p, block index 0x%x)\n", Block, BlockIndex);
-            return FALSE;
+            goto RetryLater;
         }
 
         /* Grow up the file offset as we go to the next block */
@@ -242,7 +244,7 @@ HvpWriteLog(
     if (!Success)
     {
         DPRINT1("Failed to flush the log\n");
-        return FALSE;
+        goto RetryLater;
     }
 
     /*
@@ -275,6 +277,18 @@ HvpWriteLog(
     }
 
     return TRUE;
+
+RetryLater:
+    /*
+     * This sync fails before it writes the primary hive, so the hive is as
+     * the previous sync left it. Undo the primary sequence so that the next
+     * sync writes the whole log again instead of failing at the sequence
+     * check forever.
+     */
+    RegistryHive->BaseBlock->Type = OldType;
+    RegistryHive->BaseBlock->Sequence1 = RegistryHive->BaseBlock->Sequence2;
+    RegistryHive->BaseBlock->CheckSum = HvpHiveHeaderChecksum(RegistryHive->BaseBlock);
+    return FALSE;
 }
 
 /**
@@ -318,6 +332,7 @@ HvpWriteHive(
     ULONG BlockIndex;
     ULONG LastIndex;
     PVOID Block;
+    ULONG OldSequence2;
 
     ASSERT(!RegistryHive->ReadOnly);
     ASSERT(RegistryHive->BaseBlock->Length ==
@@ -419,6 +434,7 @@ HvpWriteHive(
      * same, indicating the write operation didn't
      * fail.
      */
+    OldSequence2 = RegistryHive->BaseBlock->Sequence2;
     RegistryHive->BaseBlock->Sequence2++;
     RegistryHive->BaseBlock->CheckSum = HvpHiveHeaderChecksum(RegistryHive->BaseBlock);
 
@@ -430,7 +446,7 @@ HvpWriteHive(
     if (!Success)
     {
         DPRINT1("Failed to write the base block header to primary hive (secondary sequence)\n");
-        return FALSE;
+        goto KeepUnequal;
     }
 
     /* Flush the hive immediately */
@@ -438,10 +454,24 @@ HvpWriteHive(
     if (!Success)
     {
         DPRINT1("Failed to flush the primary hive\n");
-        return FALSE;
+        goto KeepUnequal;
     }
 
     return TRUE;
+
+KeepUnequal:
+    /*
+     * The primary hive on disk may still carry the base block that marks it
+     * as being written. Keep the sequences unequal, as every earlier failure
+     * of this function does, so that no later sync overwrites the log that
+     * recovers this one.
+     */
+    if (FileType == HFILE_TYPE_PRIMARY)
+    {
+        RegistryHive->BaseBlock->Sequence2 = OldSequence2;
+        RegistryHive->BaseBlock->CheckSum = HvpHiveHeaderChecksum(RegistryHive->BaseBlock);
+    }
+    return FALSE;
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
