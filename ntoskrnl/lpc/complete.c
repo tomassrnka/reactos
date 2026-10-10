@@ -192,8 +192,13 @@ NtAcceptConnectPort(OUT PHANDLE PortHandle,
     ClientThread->LpcReplyMessage = NULL;
     ClientThread->LpcReplyMessageId = 0;
 
-    /* Clear the client port for now as well, then release the lock */
+    /*
+     * Take the client port and section out of the message as well, so that
+     * it holds no references when it goes back to the client thread.
+     */
     ConnectMessage->ClientPort = NULL;
+    ClientSectionToMap = ConnectMessage->SectionToMap;
+    ConnectMessage->SectionToMap = NULL;
     KeReleaseGuardedMutex(&LpcpLock);
 
     /* Check the connection information length */
@@ -265,12 +270,6 @@ NtAcceptConnectPort(OUT PHANDLE PortHandle,
     /* Also set the creator CID */
     ServerPort->Creator = PsGetCurrentThread()->Cid;
     ClientPort->Creator = Message->Request.ClientId;
-
-    /* Get the section associated and then clear it, while inside the lock */
-    KeAcquireGuardedMutex(&LpcpLock);
-    ClientSectionToMap = ConnectMessage->SectionToMap;
-    ConnectMessage->SectionToMap = NULL;
-    KeReleaseGuardedMutex(&LpcpLock);
 
     /* Now check if there's a client section */
     if (ClientSectionToMap)
@@ -380,8 +379,16 @@ NtAcceptConnectPort(OUT PHANDLE PortHandle,
 
     /* Set this message as the LPC Reply message while holding the lock */
     KeAcquireGuardedMutex(&LpcpLock);
-    ClientThread->LpcReplyMessage = Message;
-    KeReleaseGuardedMutex(&LpcpLock);
+    if (ClientThread->LpcExitThreadCalled)
+    {
+        /* The client is gone and will never collect it, free it */
+        LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
+    }
+    else
+    {
+        ClientThread->LpcReplyMessage = Message;
+        KeReleaseGuardedMutex(&LpcpLock);
+    }
 
     /* Clear the thread pointer so it doesn't get cleaned later */
     ClientThread = NULL;
@@ -397,10 +404,18 @@ Cleanup:
     if (ClientThread)
     {
         KeAcquireGuardedMutex(&LpcpLock);
-        ClientThread->LpcReplyMessage = Message;
-        LpcpPrepareToWakeClient(ClientThread);
-        KeReleaseGuardedMutex(&LpcpLock);
-        LpcpCompleteWait(&ClientThread->LpcReplySemaphore);
+        if (ClientThread->LpcExitThreadCalled)
+        {
+            /* The client is gone and will never collect it, free it */
+            LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
+        }
+        else
+        {
+            ClientThread->LpcReplyMessage = Message;
+            LpcpPrepareToWakeClient(ClientThread);
+            KeReleaseGuardedMutex(&LpcpLock);
+            LpcpCompleteWait(&ClientThread->LpcReplySemaphore);
+        }
         ObDereferenceObject(ClientThread);
     }
 

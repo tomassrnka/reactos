@@ -41,6 +41,7 @@ extern void func_NtAdjustPrivilegesToken(void);
 extern void func_NtAllocateVirtualMemory(void);
 extern void func_NtApphelpCacheControl(void);
 extern void func_NtCompareTokens(void);
+extern void func_NtConnectPortTerminate(void);
 extern void func_NtContinue(void);
 extern void func_NtCreateDirectoryObject(void);
 extern void func_NtCreateFile(void);
@@ -194,6 +195,7 @@ const struct test winetest_testlist[] =
     { "NtAllocateVirtualMemory",        func_NtAllocateVirtualMemory },
     { "NtApphelpCacheControl",          func_NtApphelpCacheControl },
     { "NtCompareTokens",                func_NtCompareTokens },
+    { "NtConnectPortTerminate",         func_NtConnectPortTerminate },
     { "NtContinue",                     func_NtContinue },
     { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },
     { "NtCreateFile",                   func_NtCreateFile },

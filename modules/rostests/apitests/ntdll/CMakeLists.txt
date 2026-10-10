@@ -53,6 +53,7 @@ list(APPEND SOURCE
     NtAllocateVirtualMemory.c
     NtApphelpCacheControl.c
     NtCompareTokens.c
+    NtConnectPortTerminate.c
     NtContinue.c
     NtCreateDirectoryObject.c
     NtCreateFile.c
