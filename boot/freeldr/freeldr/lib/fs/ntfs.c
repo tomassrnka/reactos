@@ -500,9 +500,11 @@ static PNTFS_ATTR_CONTEXT NtfsFindAttributeHelperList(
 
                 if (PrevMftIndex != MftIndex)
                 {
-                    PrevMftIndex = MftIndex;
+                    /* A failed read leaves no usable record in the buffer */
+                    PrevMftIndex = -1;
                     if (!NtfsReadMftRecord(Volume, MftIndex, MftRecord))
                         goto skip;
+                    PrevMftIndex = MftIndex;
                 }
 
                 AttrRecord = (PNTFS_ATTR_RECORD)((PCHAR)MftRecord + MftRecord->AttributesOffset);
@@ -951,8 +953,9 @@ NtfsFindMftRecord(
     PCHAR BitmapData;
     PCHAR IndexRecord;
     PNTFS_INDEX_ENTRY IndexEntry, IndexEntryEnd;
-    ULONG RecordOffset;
+    ULONGLONG RecordOffset;
     ULONG IndexBlockSize;
+    ULONG IndexRootSize;
     SIZE_T FileNameLen;
 
     FileNameLen = strlen(FileName);
@@ -974,14 +977,23 @@ NtfsFindMftRecord(
             return FALSE;
         }
 
-        IndexRecord = FrLdrTempAlloc(Volume->IndexRecordSize, TAG_NTFS_INDEX_REC);
+        /* The buffer holds the whole resident index root first, then one index block at a time */
+        if (IndexRootCtx->Record.IsNonResident)
+        {
+            NtfsReleaseAttributeContext(IndexRootCtx);
+            FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
+            return FALSE;
+        }
+        IndexRootSize = IndexRootCtx->Record.Resident.ValueLength;
+        IndexRecord = FrLdrTempAlloc(max(Volume->IndexRecordSize, IndexRootSize), TAG_NTFS_INDEX_REC);
         if (IndexRecord == NULL)
         {
+            NtfsReleaseAttributeContext(IndexRootCtx);
             FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
             return FALSE;
         }
 
-        NtfsReadAttribute(Volume, IndexRootCtx, 0, IndexRecord, Volume->IndexRecordSize);
+        NtfsReadAttribute(Volume, IndexRootCtx, 0, IndexRecord, IndexRootSize);
         IndexRoot = (PNTFS_INDEX_ROOT)IndexRecord;
         IndexEntry = (PNTFS_INDEX_ENTRY)((PCHAR)&IndexRoot->IndexHeader + IndexRoot->IndexHeader.EntriesOffset);
         /* Index root is always resident. */
@@ -1009,11 +1021,19 @@ NtfsFindMftRecord(
             TRACE("Large Index!\n");
 
             IndexBlockSize = IndexRoot->IndexBlockSize;
+            if (IndexBlockSize == 0 || IndexBlockSize > Volume->IndexRecordSize)
+            {
+                TRACE("Corrupted filesystem!\n");
+                FrLdrTempFree(IndexRecord, TAG_NTFS_INDEX_REC);
+                FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
+                return FALSE;
+            }
 
             IndexBitmapCtx = NtfsFindAttribute(Volume, MftRecord, MFTIndex, NTFS_ATTR_TYPE_BITMAP, L"$I30");
             if (IndexBitmapCtx == NULL)
             {
                 TRACE("Corrupted filesystem!\n");
+                FrLdrTempFree(IndexRecord, TAG_NTFS_INDEX_REC);
                 FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
                 return FALSE;
             }
@@ -1026,11 +1046,20 @@ NtfsFindMftRecord(
 
             if (BitmapData == NULL)
             {
+                NtfsReleaseAttributeContext(IndexBitmapCtx);
                 FrLdrTempFree(IndexRecord, TAG_NTFS_INDEX_REC);
                 FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
                 return FALSE;
             }
-            NtfsReadAttribute(Volume, IndexBitmapCtx, 0, BitmapData, (ULONG)BitmapDataSize);
+            /* A short read (a failed disk or journal read) leaves stale data in the buffer */
+            if (NtfsReadAttribute(Volume, IndexBitmapCtx, 0, BitmapData, (ULONG)BitmapDataSize) != BitmapDataSize)
+            {
+                NtfsReleaseAttributeContext(IndexBitmapCtx);
+                FrLdrTempFree(BitmapData, TAG_NTFS_BITMAP);
+                FrLdrTempFree(IndexRecord, TAG_NTFS_INDEX_REC);
+                FrLdrTempFree(MftRecord, TAG_NTFS_MFT);
+                return FALSE;
+            }
             NtfsReleaseAttributeContext(IndexBitmapCtx);
 
             IndexAllocationCtx = NtfsFindAttribute(Volume, MftRecord, MFTIndex, NTFS_ATTR_TYPE_INDEX_ALLOCATION, L"$I30");
@@ -1048,11 +1077,17 @@ NtfsFindMftRecord(
 
             for (;;)
             {
-                TRACE("RecordOffset: %x IndexAllocationSize: %x\n", RecordOffset, IndexAllocationSize);
+                TRACE("RecordOffset: %I64x IndexAllocationSize: %I64x\n", RecordOffset, IndexAllocationSize);
                 for (; RecordOffset < IndexAllocationSize;)
                 {
                     UCHAR Bit = 1 << ((RecordOffset / IndexBlockSize) & 7);
-                    ULONG Byte = (RecordOffset / IndexBlockSize) >> 3;
+                    ULONGLONG Byte = (RecordOffset / IndexBlockSize) >> 3;
+                    /* No block past the end of the bitmap is in use */
+                    if (Byte >= BitmapDataSize)
+                    {
+                        RecordOffset = IndexAllocationSize;
+                        break;
+                    }
                     if ((BitmapData[Byte] & Bit))
                         break;
                     RecordOffset += IndexBlockSize;
@@ -1063,7 +1098,10 @@ NtfsFindMftRecord(
                     break;
                 }
 
-                NtfsReadAttribute(Volume, IndexAllocationCtx, RecordOffset, IndexRecord, IndexBlockSize);
+                if (NtfsReadAttribute(Volume, IndexAllocationCtx, RecordOffset, IndexRecord, IndexBlockSize) != IndexBlockSize)
+                {
+                    break;
+                }
 
                 if (!NtfsFixupRecord(Volume, (PNTFS_RECORD)IndexRecord, Volume->IndexRecordSize))
                 {
@@ -1656,6 +1694,24 @@ static BOOLEAN NtfsJournalPatch(PNTFS_VOLUME_INFO Volume, ULONGLONG Offset, ULON
     return TRUE;
 }
 
+/* Frees a volume that fails to mount after NtfsJournalLoad, with its journal state */
+static VOID NtfsFreeVolume(PNTFS_VOLUME_INFO Volume)
+{
+    if (Volume->JnlBlock)
+        FrLdrTempFree(Volume->JnlBlock, TAG_NTFS_DATA);
+    if (Volume->JnlSlot)
+        FrLdrTempFree(Volume->JnlSlot, TAG_NTFS_DATA);
+    if (Volume->JnlMask)
+        FrLdrTempFree(Volume->JnlMask, TAG_NTFS_DATA);
+    if (Volume->JnlPage)
+        FrLdrTempFree(Volume->JnlPage, TAG_NTFS_DATA);
+    if (Volume->TemporarySector)
+        FrLdrTempFree(Volume->TemporarySector, TAG_NTFS_DATA);
+    if (Volume->MasterFileTable)
+        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
+    FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+}
+
 const DEVVTBL* NtfsMount(ULONG DeviceId)
 {
     PNTFS_VOLUME_INFO Volume;
@@ -1740,7 +1796,7 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     if (!Volume->TemporarySector)
     {
         FileSystemError("Failed to allocate memory.");
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        NtfsFreeVolume(Volume);
         return NULL;
     }
 
@@ -1751,7 +1807,7 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     Volume->MasterFileTable = FrLdrTempAlloc(Volume->MftRecordSize, TAG_NTFS_MFT);
     if (!Volume->MasterFileTable)
     {
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        NtfsFreeVolume(Volume);
         return NULL;
     }
     if (!NtfsDiskRead(Volume, Volume->BootSector.MftLocation * Volume->ClusterSize, Volume->MftRecordSize,
@@ -1759,8 +1815,7 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
         !NtfsFixupRecord(Volume, (PNTFS_RECORD)Volume->MasterFileTable, Volume->MftRecordSize))
     {
         FileSystemError("Failed to read the Master File Table record.");
-        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        NtfsFreeVolume(Volume);
         return NULL;
     }
 
@@ -1772,8 +1827,7 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
     if (!Volume->MFTContext)
     {
         FileSystemError("Can't find data attribute for Master File Table.");
-        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
-        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        NtfsFreeVolume(Volume);
         return NULL;
     }
 
