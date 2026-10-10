@@ -22,7 +22,9 @@ typedef enum _RESULT
     HiveSuccess,
     RecoverHeader,
     RecoverData,
-    SelfHeal
+    SelfHeal,
+    LogRefused,
+    LogUnusable
 } RESULT;
 
 /* PRIVATE FUNCTIONS ********************************************************/
@@ -520,6 +522,9 @@ HvpInitializeFlatHive(
  * A pointer returned by the function that contains
  * the hive header base block buffer obtained from
  * the primary hive file pointed by the Hive argument.
+ * When RecoverHeader is returned, it receives the base
+ * block as read from the hive file if that read succeeded,
+ * or NULL. The caller frees the returned buffer.
  * This parameter must not be NULL!
  *
  * @param[in,out] TimeStamp
@@ -619,9 +624,11 @@ HvpGetHiveHeader(
 
         /*
          * There's still hope for this hive so acknowledge the
-         * caller this hive needs a recoverable header.
+         * caller this hive needs a recoverable header. Nothing
+         * is known of the base block, its time stamp included.
          */
-        *TimeStamp = BaseBlock->TimeStamp;
+        Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
+        TimeStamp->QuadPart = 0;
         DPRINT1("The hive is not fully corrupt, the base block needs to be RECOVERED\n");
         return RecoverHeader;
     }
@@ -638,8 +645,8 @@ HvpGetHiveHeader(
     if (!HvpVerifyHiveHeader(BaseBlock, HFILE_TYPE_PRIMARY))
     {
         DPRINT1("The hive base header block needs to be RECOVERED\n");
+        *HiveBaseBlock = BaseBlock;
         *TimeStamp = BaseBlock->TimeStamp;
-        Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
         return RecoverHeader;
     }
 
@@ -647,6 +654,55 @@ HvpGetHiveHeader(
     *HiveBaseBlock = BaseBlock;
     *TimeStamp = BaseBlock->TimeStamp;
     return HiveSuccess;
+}
+
+/**
+ * @brief
+ * Queries the size of one of the files of a hive.
+ *
+ * @param[in] Hive
+ * A pointer to a hive descriptor.
+ *
+ * @param[in] FileType
+ * The file to query (HFILE_TYPE_PRIMARY or HFILE_TYPE_LOG).
+ *
+ * @param[out] FileSize
+ * Receives the size of the file in bytes.
+ *
+ * @return
+ * Returns TRUE if the size is known, FALSE otherwise.
+ * Only the kernel can query it; only the kernel loads
+ * hives from files (HINIT_FILE).
+ */
+BOOLEAN
+CMAPI
+HvpQueryFileSize(
+    _In_ PHHIVE Hive,
+    _In_ ULONG FileType,
+    _Out_ PLARGE_INTEGER FileSize)
+{
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+    NTSTATUS Status;
+    FILE_STANDARD_INFORMATION FileStandard;
+    IO_STATUS_BLOCK IoStatusBlock;
+
+    Status = ZwQueryInformationFile(((PCMHIVE)Hive)->FileHandles[FileType],
+                                    &IoStatusBlock,
+                                    &FileStandard,
+                                    sizeof(FILE_STANDARD_INFORMATION),
+                                    FileStandardInformation);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ZwQueryInformationFile returned 0x%lx\n", Status);
+        return FALSE;
+    }
+
+    *FileSize = FileStandard.EndOfFile;
+    return TRUE;
+#else
+    FileSize->QuadPart = 0;
+    return FALSE;
+#endif
 }
 
 /*
@@ -666,92 +722,113 @@ HvpGetHiveHeader(
  * hive length size is to be calculated.
  *
  * @return
- * Returns the computed hive size.
+ * Returns the computed hive size, the file size
+ * less the base block rounded down to whole blocks,
+ * or 0 if it could not be determined.
  */
 ULONG
 CMAPI
 HvpQueryHiveSize(
     _In_ PHHIVE Hive)
 {
-#if !defined(CMLIB_HOST) && !defined(_BLDR_)
-    NTSTATUS Status;
-    FILE_STANDARD_INFORMATION FileStandard;
-    IO_STATUS_BLOCK IoStatusBlock;
-#endif
-    ULONG HiveSize = 0;
+    LARGE_INTEGER FileSize;
 
-    /*
-     * Query the file size of the physical hive
-     * file. We need that information in order
-     * to ensure how big the hive actually is.
-     */
-#if !defined(CMLIB_HOST) && !defined(_BLDR_)
-    Status = ZwQueryInformationFile(((PCMHIVE)Hive)->FileHandles[HFILE_TYPE_PRIMARY],
-                                    &IoStatusBlock,
-                                    &FileStandard,
-                                    sizeof(FILE_STANDARD_INFORMATION),
-                                    FileStandardInformation);
-    if (!NT_SUCCESS(Status))
+    if (!HvpQueryFileSize(Hive, HFILE_TYPE_PRIMARY, &FileSize) ||
+        FileSize.QuadPart < HBLOCK_SIZE ||
+        FileSize.QuadPart > MAXULONG)
     {
-        DPRINT1("ZwQueryInformationFile returned 0x%lx\n", Status);
-        return HiveSize;
+        return 0;
     }
 
-    /* Now compute the hive size */
-    HiveSize = FileStandard.EndOfFile.u.LowPart - HBLOCK_SIZE;
-#endif
-    return HiveSize;
+    return ROUND_DOWN(FileSize.u.LowPart - HBLOCK_SIZE, HBLOCK_SIZE);
 }
 
 /**
  * @brief
- * Recovers the base block header by obtaining
- * it from a log file associated with the hive.
+ * Recovers a dirty hive from its log, if the log
+ * belongs to the write of the hive that was interrupted.
  *
  * @param[in] Hive
  * A pointer to a hive descriptor associated
- * with the log file where the hive header is
- * to be read from.
+ * with the log file where the hive data is to
+ * be read from.
  *
- * @param[in] TimeStamp
- * A pointer to a time-stamp used to check
- * if the provided time matches with that
- * of the hive.
+ * @param[in] PrimaryBaseBlock
+ * A pointer to the base block of the primary hive
+ * as read from the hive file. The base block failed
+ * the header check.
  *
- * @param[in,out] BaseBlock
- * A pointer returned by the caller that contains
- * the base block header that was read from the log.
- * This base block could be also made manually by hand.
- * See Remarks for further information.
+ * @param[out] RecoveredBaseBlock
+ * A pointer returned by the function that receives
+ * the base block of the recovered hive when the function
+ * returns HiveSuccess. The caller frees it.
  *
  * @return
- * Returns HiveSuccess if the header was obtained
- * normally from the log. NoMemory is returned if
- * the base block header could not be allocated.
- * Fail is returned if self-healing mode is disabled
- * and the log couldn't be read or a write attempt
- * to the primary hive has failed. SelfHeal is returned
- * to indicate that self-heal mode goes further.
+ * Returns HiveSuccess if the hive was recovered from the log.
+ * LogRefused is returned if the log does not belong to the
+ * interrupted write: it is shorter than its base block, its base
+ * block is not valid, its time stamp differs, or its sequence is
+ * older. LogUnusable is returned if the log may belong to the
+ * interrupted write but cannot recover the hive: the file sizes
+ * cannot be queried, the base block cannot be read, the length or
+ * root cell it describes is not valid, its dirty vector is missing
+ * or damaged, it does not hold every dirty block, or the hive file
+ * does not hold every block the log does not. Nothing has been
+ * written to the hive in these two cases. NoMemory is returned if
+ * memory could not be allocated. Fail is returned if reading or
+ * writing failed once the recovery had started writing the hive;
+ * some dirty blocks may have been written then, but the base block
+ * is written last, so unless only its final flush failed the hive
+ * is still dirty and the recovery is repeated on the next load.
  *
  * @remarks
- * When SelfHeal is returned this indicates that
- * even the log we have gotten at hand is corrupt
- * but since we do have at least a log our only hope
- * is to reconstruct the pieces of the base header
- * by hand.
+ * HvpWriteLog writes the log as the base block (sequence S+1,
+ * with the time stamp of the write), the dirty vector (a signature
+ * and one byte per block, 0xFF for a dirty block, rounded up as
+ * HvpWriteLog does it), then the dirty blocks, and flushes it. Only
+ * then HvpWriteHive writes the hive, with the same time stamp and the
+ * sequences S+2/S+1 until it ends. The log belongs to the interrupted
+ * write if:
+ *
+ * - its base block is valid, with equal sequence numbers;
+ * - its time stamp equals the time stamp of the hive;
+ * - if the base block of the hive has a valid checksum, its sequence
+ *   number is not older than the secondary sequence number of the hive
+ *   (the last write that completed). A damaged base block is matched
+ *   by its time stamp alone.
+ *
+ * It is applied only if, in addition, the length it describes is a whole
+ * number of blocks and holds its root cell, every byte of the dirty vector
+ * is 0 or 0xFF after its signature, the log file holds every dirty block,
+ * and the hive file holds every block the log does not. A hive that grew
+ * in the interrupted write is recovered, as its new blocks are all dirty.
+ *
+ * All of this is checked before the first write to the hive. The dirty
+ * blocks are written and flushed before the base block, so that a crash
+ * during the recovery leaves a dirty hive that is recovered again.
  */
 RESULT
 CMAPI
-HvpRecoverHeaderFromLog(
+HvpRecoverHiveFromLog(
     _In_ PHHIVE Hive,
-    _In_ PLARGE_INTEGER TimeStamp,
-    _Inout_ PHBASE_BLOCK *BaseBlock)
+    _In_ PHBASE_BLOCK PrimaryBaseBlock,
+    _Out_ PHBASE_BLOCK *RecoveredBaseBlock)
 {
     BOOLEAN Success;
     PHBASE_BLOCK LogHeader;
+    PUCHAR DirtyVector = NULL;
+    PUCHAR Buffer = NULL;
     ULONG FileOffset;
-    ULONG HiveSize;
-    BOOLEAN HeaderResuscitated;
+    ULONG StorageLength;
+    ULONG VectorSize;
+    ULONG BlockIndex;
+    ULONG LogIndex;
+    ULONG DirtyCount;
+    ULONG LastCleanBlock;
+    LARGE_INTEGER LogFileSize;
+    LARGE_INTEGER PrimaryFileSize;
+    UCHAR DirtyFlag;
+    RESULT Result;
 
     /*
      * The cluster must not be greater than what the
@@ -759,8 +836,7 @@ HvpRecoverHeaderFromLog(
      */
     ASSERT(sizeof(HBASE_BLOCK) >= (HSECTOR_SIZE * Hive->Cluster));
 
-    /* Assume we haven't resuscitated the header */
-    HeaderResuscitated = FALSE;
+    *RecoveredBaseBlock = NULL;
 
     /* Allocate an aligned buffer for the log header */
     LogHeader = HvpAllocBaseBlockAligned(Hive, TRUE, TAG_CM);
@@ -770,215 +846,164 @@ HvpRecoverHeaderFromLog(
         return NoMemory;
     }
 
-    /* Zero out our header buffer */
-    RtlZeroMemory(LogHeader, HSECTOR_SIZE);
+    /*
+     * The file sizes bound every read below: a file system may return
+     * the rest of the last sector of a file as data. Until the log is
+     * known not to belong to the hive, an error fails the load.
+     */
+    Result = LogUnusable;
+    if (!HvpQueryFileSize(Hive, HFILE_TYPE_LOG, &LogFileSize) ||
+        !HvpQueryFileSize(Hive, HFILE_TYPE_PRIMARY, &PrimaryFileSize))
+    {
+        DPRINT1("The sizes of the hive files are not known\n");
+        goto Quit;
+    }
 
-    /* Get the base header from the log */
+    /* A log too short for its base block holds nothing to recover */
+    if ((ULONGLONG)LogFileSize.QuadPart < Hive->Cluster * HSECTOR_SIZE)
+    {
+        DPRINT1("The hive log is empty or shorter than its base block\n");
+        Result = LogRefused;
+        goto Quit;
+    }
+
+    /* Read the base block of the log */
+    RtlZeroMemory(LogHeader, sizeof(HBASE_BLOCK));
     FileOffset = 0;
     Success = Hive->FileRead(Hive,
                              HFILE_TYPE_LOG,
                              &FileOffset,
                              LogHeader,
                              Hive->Cluster * HSECTOR_SIZE);
-    if (!Success ||
-        !HvpVerifyHiveHeader(LogHeader, HFILE_TYPE_LOG) ||
-        TimeStamp->HighPart != LogHeader->TimeStamp.HighPart ||
-        TimeStamp->LowPart != LogHeader->TimeStamp.LowPart)
-    {
-        /*
-         * We failed to read the base block header from
-         * the log, or the header itself or timestamp is
-         * invalid. Check if self healing is enabled.
-         */
-        if (!CmIsSelfHealEnabled(FALSE))
-        {
-            DPRINT1("The log couldn't be read and self-healing mode is disabled\n");
-            Hive->Free(LogHeader, Hive->BaseBlockAlloc);
-            return Fail;
-        }
-
-        /*
-         * Determine the size of this hive so that
-         * we can estabilish the length of the base
-         * block we are trying to resuscitate.
-         */
-        HiveSize = HvpQueryHiveSize(Hive);
-        if (HiveSize == 0)
-        {
-            DPRINT1("Failed to query the hive size\n");
-            Hive->Free(LogHeader, Hive->BaseBlockAlloc);
-            return Fail;
-        }
-
-        /*
-         * We can still resuscitate the base header if we
-         * could not grab one from the log by reconstructing
-         * the header internals by hand (this assumes the
-         * root cell is not NIL nor damaged). CmCheckRegistry
-         * does the ultimate judgement whether the root cell
-         * is fatally kaput or not after the hive has been
-         * initialized and loaded.
-         *
-         * For more information about base block header
-         * resuscitation, see https://github.com/msuhanov/regf/blob/master/Windows%20registry%20file%20format%20specification.md#notes-4.
-         */
-        LogHeader->Signature = HV_HBLOCK_SIGNATURE;
-        LogHeader->Sequence1 = 1;
-        LogHeader->Sequence2 = 1;
-        LogHeader->Cluster = 1;
-        LogHeader->Length = HiveSize;
-        LogHeader->CheckSum = HvpHiveHeaderChecksum(LogHeader);
-
-        /*
-         * Acknowledge that we have resuscitated
-         * the header.
-         */
-        HeaderResuscitated = TRUE;
-        DPRINT1("Header has been resuscitated, triggering self-heal mode\n");
-    }
-
-    /*
-     * Tag this log header as a primary hive before
-     * writing it to the hive.
-     */
-    LogHeader->Type = HFILE_TYPE_PRIMARY;
-
-    /*
-     * If we have not made attempts of recovering
-     * the header due to log corruption then we
-     * have to compute the checksum. This is
-     * already done when the header has been resuscitated
-     * so don't try to do it twice.
-     */
-    if (!HeaderResuscitated)
-    {
-        LogHeader->CheckSum = HvpHiveHeaderChecksum(LogHeader);
-    }
-
-    /* Write the header back to hive now */
-    Success = Hive->FileWrite(Hive,
-                              HFILE_TYPE_PRIMARY,
-                              &FileOffset,
-                              LogHeader,
-                              Hive->Cluster * HSECTOR_SIZE);
     if (!Success)
     {
-        DPRINT1("Couldn't write the base header to primary hive\n");
-        Hive->Free(LogHeader, Hive->BaseBlockAlloc);
-        return Fail;
+        DPRINT1("The hive log base block could not be read\n");
+        goto Quit;
     }
 
-    *BaseBlock = LogHeader;
-    return HeaderResuscitated ? SelfHeal : HiveSuccess;
-}
+    if (!HvpVerifyHiveHeader(LogHeader, HFILE_TYPE_LOG))
+    {
+        DPRINT1("The hive log base block is not valid\n");
+        Result = LogRefused;
+        goto Quit;
+    }
 
-/**
- * @brief
- * Recovers the registry data by obtaining it
- * from a log that is associated with the hive.
- *
- * @param[in] Hive
- * A pointer to a hive descriptor associated
- * with the log file where the hive data is to
- * be read from.
- *
- * @param[in] BaseBlock
- * A pointer to a base block header.
- *
- * @return
- * Returns HiveSuccess if the data was obtained
- * normally from the log. Fail is returned if
- * self-healing is disabled and we couldn't be
- * able to read the data from the log or the
- * dirty vector signature is garbage or we
- * failed to write the data block to the primary
- * hive. SelfHeal is returned to indicate that
- * the log is corrupt and the system will continue
- * to be recovered at the expense of data loss.
- */
-RESULT
-CMAPI
-HvpRecoverDataFromLog(
-    _In_ PHHIVE Hive,
-    _In_ PHBASE_BLOCK BaseBlock)
-{
-    BOOLEAN Success;
-    ULONG FileOffset;
-    ULONG BlockIndex;
-    ULONG LogIndex;
-    ULONG StorageLength;
-    ULONG VectorSize;
-    PUCHAR DirtyVector;
-    UCHAR Buffer[HBLOCK_SIZE];
-    RESULT Result = HiveSuccess;
+    /* A larger cluster read the start of the dirty vector too */
+    RtlZeroMemory((PUCHAR)LogHeader + HV_LOG_HEADER_SIZE,
+                  sizeof(HBASE_BLOCK) - HV_LOG_HEADER_SIZE);
 
-    /*
-     * The log holds the dirty vector (one byte per block, rounded up as
-     * HvpWriteLog does it) after the header, then the dirty blocks.
-     */
-    StorageLength = BaseBlock->Length / HBLOCK_SIZE;
+    /* The log must belong to the interrupted write of this hive */
+    if (LogHeader->TimeStamp.QuadPart != PrimaryBaseBlock->TimeStamp.QuadPart ||
+        (HvpHiveHeaderChecksum(PrimaryBaseBlock) == PrimaryBaseBlock->CheckSum &&
+         LogHeader->Sequence1 < PrimaryBaseBlock->Sequence2))
+    {
+        DPRINT1("The hive log does not match the hive (log sequence 0x%x, hive sequences 0x%x/0x%x)\n",
+                LogHeader->Sequence1, PrimaryBaseBlock->Sequence1, PrimaryBaseBlock->Sequence2);
+        Result = LogRefused;
+        goto Quit;
+    }
+
+    /* From here on the log belongs to the hive: a log that cannot recover it fails the load */
+    if (LogHeader->Length == 0 ||
+        (LogHeader->Length % HBLOCK_SIZE) != 0 ||
+        LogHeader->Length > MAXULONG - HBLOCK_SIZE ||
+        LogHeader->RootCell >= LogHeader->Length)
+    {
+        DPRINT1("The hive log describes a bad length 0x%x (root cell 0x%x)\n",
+                LogHeader->Length, LogHeader->RootCell);
+        goto Quit;
+    }
+
+    /* Read the dirty vector, sized from the hive length as HvpWriteLog does it */
+    StorageLength = LogHeader->Length / HBLOCK_SIZE;
     VectorSize = ROUND_UP(sizeof(HV_LOG_DIRTY_SIGNATURE) + ROUND_UP(StorageLength, sizeof(ULONG) * 8), HSECTOR_SIZE);
-    DirtyVector = Hive->Allocate(VectorSize, FALSE, TAG_CM);
-    if (!DirtyVector)
-        return Fail;
+    if ((ULONGLONG)HV_LOG_HEADER_SIZE + VectorSize > (ULONGLONG)LogFileSize.QuadPart)
+    {
+        DPRINT1("The hive log ends before its dirty vector\n");
+        goto Quit;
+    }
 
-    /* Read the dirty data from the log */
+    DirtyVector = Hive->Allocate(VectorSize, TRUE, TAG_CM);
+    Buffer = Hive->Allocate(HBLOCK_SIZE, TRUE, TAG_CM);
+    if (!DirtyVector || !Buffer)
+    {
+        Result = NoMemory;
+        goto Quit;
+    }
+
     FileOffset = HV_LOG_HEADER_SIZE;
     Success = Hive->FileRead(Hive,
                              HFILE_TYPE_LOG,
                              &FileOffset,
                              DirtyVector,
                              VectorSize);
-    if (!Success)
+    if (!Success || *((PULONG)DirtyVector) != HV_LOG_DIRTY_SIGNATURE)
     {
-        Hive->Free(DirtyVector, VectorSize);
-        if (!CmIsSelfHealEnabled(FALSE))
-        {
-            DPRINT1("The log couldn't be read and self-healing mode is disabled\n");
-            return Fail;
-        }
-
-        /*
-         * There's nothing we can do on a situation
-         * where dirty data could not be read from
-         * the log. It does not make much sense to
-         * behead the system on such scenario so
-         * trigger a self-heal and go on. The worst
-         * thing that can happen? Data loss, that's it.
-         */
-        DPRINT1("Triggering self-heal mode, DATA LOSS IS IMMINENT\n");
-        return SelfHeal;
+        DPRINT1("The hive log dirty vector could not be read or has no signature\n");
+        goto Quit;
     }
 
-    /* Check the dirty vector */
-    if (*((PULONG)DirtyVector) != HV_LOG_DIRTY_SIGNATURE)
+    /* HvpWriteLog writes 0xFF for a dirty block and 0 for any other */
+    DirtyCount = 0;
+    LastCleanBlock = MAXULONG;
+    for (BlockIndex = 0; BlockIndex < StorageLength; BlockIndex++)
     {
-        Hive->Free(DirtyVector, VectorSize);
-        if (!CmIsSelfHealEnabled(FALSE))
+        DirtyFlag = DirtyVector[BlockIndex + sizeof(HV_LOG_DIRTY_SIGNATURE)];
+        if (DirtyFlag == HV_LOG_DIRTY_BLOCK)
         {
-            DPRINT1("The log's dirty vector signature is not valid\n");
-            return Fail;
+            DirtyCount++;
         }
-
-        /*
-         * Trigger a self-heal like above. If the
-         * vector signature is garbage then logically
-         * whatever comes after the signature is also
-         * garbage.
-         */
-        DPRINT1("Triggering self-heal mode, DATA LOSS IS IMMINENT\n");
-        return SelfHeal;
+        else if (DirtyFlag == 0)
+        {
+            LastCleanBlock = BlockIndex;
+        }
+        else
+        {
+            DPRINT1("The hive log dirty vector is damaged (block %u)\n", BlockIndex);
+            goto Quit;
+        }
     }
 
-    /* Now read each data individually and write it back to hive */
+    /* The log must hold every dirty block, at offsets that fit in a ULONG */
+    if ((ULONGLONG)HV_LOG_HEADER_SIZE + VectorSize + (ULONGLONG)DirtyCount * HBLOCK_SIZE > (ULONGLONG)LogFileSize.QuadPart ||
+        (ULONGLONG)HV_LOG_HEADER_SIZE + VectorSize + (ULONGLONG)DirtyCount * HBLOCK_SIZE > MAXULONG)
+    {
+        DPRINT1("The hive log ends before its %u dirty blocks\n", DirtyCount);
+        goto Quit;
+    }
+
+    /* The hive file must hold every block the log does not */
+    if (LastCleanBlock != MAXULONG &&
+        (ULONGLONG)(LastCleanBlock + 2) * HBLOCK_SIZE > (ULONGLONG)PrimaryFileSize.QuadPart)
+    {
+        DPRINT1("The hive file does not hold block %u, which the log does not hold either\n", LastCleanBlock);
+        goto Quit;
+    }
+
+    /* Read every dirty block once before the first write */
+    for (LogIndex = 0; LogIndex < DirtyCount; LogIndex++)
+    {
+        FileOffset = HV_LOG_HEADER_SIZE + VectorSize + LogIndex * HBLOCK_SIZE;
+        Success = Hive->FileRead(Hive,
+                                 HFILE_TYPE_LOG,
+                                 &FileOffset,
+                                 Buffer,
+                                 HBLOCK_SIZE);
+        if (!Success)
+        {
+            DPRINT1("Failed to read the dirty block %u of %u from the hive log\n", LogIndex, DirtyCount);
+            goto Quit;
+        }
+    }
+
+    /* Everything is checked: write the dirty blocks to the hive */
+    DPRINT1("Recovering the hive from its log (%u dirty blocks)\n", DirtyCount);
+    Result = Fail;
     LogIndex = 0;
     for (BlockIndex = 0; BlockIndex < StorageLength; BlockIndex++)
     {
-        /* Skip this block if it's not dirty and go to the next one */
         if (DirtyVector[BlockIndex + sizeof(HV_LOG_DIRTY_SIGNATURE)] != HV_LOG_DIRTY_BLOCK)
-        {
             continue;
-        }
 
         FileOffset = HV_LOG_HEADER_SIZE + VectorSize + LogIndex * HBLOCK_SIZE;
         Success = Hive->FileRead(Hive,
@@ -989,8 +1014,7 @@ HvpRecoverDataFromLog(
         if (!Success)
         {
             DPRINT1("Failed to read the dirty block (index %u)\n", BlockIndex);
-            Result = Fail;
-            break;
+            goto Quit;
         }
 
         FileOffset = HBLOCK_SIZE + BlockIndex * HBLOCK_SIZE;
@@ -1002,16 +1026,115 @@ HvpRecoverDataFromLog(
         if (!Success)
         {
             DPRINT1("Failed to write dirty block to hive (index %u)\n", BlockIndex);
-            Result = Fail;
-            break;
+            goto Quit;
         }
 
-        /* Increment the index in log as we continue further */
         LogIndex++;
     }
 
-    Hive->Free(DirtyVector, VectorSize);
+    /* The blocks must be on the medium before the base block marks the hive clean */
+    if (!Hive->FileFlush(Hive, HFILE_TYPE_PRIMARY, NULL, 0))
+    {
+        DPRINT1("Failed to flush the recovered blocks\n");
+        goto Quit;
+    }
+
+    /* Write the base block of the log to the hive, as a primary one */
+    LogHeader->Type = HFILE_TYPE_PRIMARY;
+    LogHeader->CheckSum = HvpHiveHeaderChecksum(LogHeader);
+    FileOffset = 0;
+    Success = Hive->FileWrite(Hive,
+                              HFILE_TYPE_PRIMARY,
+                              &FileOffset,
+                              LogHeader,
+                              Hive->Cluster * HSECTOR_SIZE);
+    if (!Success || !Hive->FileFlush(Hive, HFILE_TYPE_PRIMARY, NULL, 0))
+    {
+        DPRINT1("Couldn't write the base header to primary hive\n");
+        goto Quit;
+    }
+
+    *RecoveredBaseBlock = LogHeader;
+    LogHeader = NULL;
+    Result = HiveSuccess;
+
+Quit:
+    if (Buffer)
+        Hive->Free(Buffer, HBLOCK_SIZE);
+    if (DirtyVector)
+        Hive->Free(DirtyVector, VectorSize);
+    if (LogHeader)
+        Hive->Free(LogHeader, Hive->BaseBlockAlloc);
     return Result;
+}
+
+/**
+ * @brief
+ * Makes the base block of a dirty hive that no log
+ * can recover usable again, for a self-healing load
+ * of the hive as it is on disk.
+ *
+ * @param[in] Hive
+ * A pointer to a hive descriptor.
+ *
+ * @param[in,out] BaseBlock
+ * A pointer to the base block of the primary hive
+ * as read from the hive file. It is changed in memory
+ * only.
+ *
+ * @return
+ * Returns HiveSuccess if the base block can be used,
+ * Fail otherwise.
+ *
+ * @remarks
+ * A base block that is intact but for its sequence numbers
+ * is kept with its own length. A damaged one is rebuilt
+ * from its own fields, with the length of the hive file
+ * (see https://github.com/msuhanov/regf/blob/master/Windows%20registry%20file%20format%20specification.md#notes-4).
+ * Nothing from a log that does not belong to the hive is
+ * used. CmCheckRegistry judges the hive afterwards.
+ */
+RESULT
+CMAPI
+HvpHealBaseBlock(
+    _In_ PHHIVE Hive,
+    _Inout_ PHBASE_BLOCK BaseBlock)
+{
+    ULONG HiveSize;
+
+    if (BaseBlock->Signature != HV_HBLOCK_SIGNATURE)
+    {
+        DPRINT1("The hive base block has no signature, it cannot be healed\n");
+        return Fail;
+    }
+
+    if (HvpHiveHeaderChecksum(BaseBlock) != BaseBlock->CheckSum ||
+        BaseBlock->Major != HSYS_MAJOR ||
+        BaseBlock->Minor < HSYS_MINOR ||
+        BaseBlock->Type != HFILE_TYPE_PRIMARY ||
+        BaseBlock->Format != HBASE_FORMAT_MEMORY ||
+        BaseBlock->Cluster != 1 ||
+        BaseBlock->Length == 0 ||
+        (BaseBlock->Length % HBLOCK_SIZE) != 0 ||
+        BaseBlock->Length > MAXULONG - HBLOCK_SIZE)
+    {
+        /* The base block is damaged: rebuild it */
+        HiveSize = HvpQueryHiveSize(Hive);
+        if (HiveSize == 0)
+        {
+            DPRINT1("Failed to query the hive size\n");
+            return Fail;
+        }
+
+        BaseBlock->Type = HFILE_TYPE_PRIMARY;
+        BaseBlock->Cluster = 1;
+        BaseBlock->Length = HiveSize;
+        DPRINT1("The hive base block has been rebuilt (length 0x%x)\n", HiveSize);
+    }
+
+    BaseBlock->Sequence2 = BaseBlock->Sequence1;
+    BaseBlock->CheckSum = HvpHiveHeaderChecksum(BaseBlock);
+    return HiveSuccess;
 }
 #endif
 
@@ -1039,9 +1162,25 @@ HvpRecoverDataFromLog(
  * if the hive is not actually a hive file. STATUS_REGISTRY_CORRUPT
  * is returned if the hive has subdued previous damage and
  * the hive could not be recovered because there's no
- * log present or self healing is disabled. STATUS_REGISTRY_RECOVERED
- * is returned if the hive has been recovered. An eventual flush
- * of the registry is needed after the hive's been fully loaded.
+ * log present or self healing is disabled, or if its log belongs to
+ * it but cannot recover it. STATUS_REGISTRY_IO_FAILED is returned if
+ * the recovery from the log failed while writing the hive.
+ * STATUS_REGISTRY_RECOVERED is returned if the hive has been
+ * recovered from its log. An eventual flush of the registry is needed
+ * after the hive's been fully loaded.
+ *
+ * @remarks
+ * A dirty hive (its base block fails the header check) is recovered
+ * from its log only if the log belongs to the interrupted write, see
+ * HvpRecoverHiveFromLog. A log that may belong to it but is found
+ * unable to recover it before the first write fails the load, and
+ * nothing is written. If the log does not
+ * belong to the hive, with self-healing enabled, the hive is loaded
+ * as it is on disk, with its own base block made
+ * consistent in memory and every block marked dirty, so that the
+ * next flush writes the whole hive through the log. Nothing is
+ * written during the load in that case. A hive whose base block
+ * cannot be read is not loaded.
  */
 NTSTATUS
 CMAPI
@@ -1057,11 +1196,13 @@ HvLoadHive(
     ULONG Result;
 #else
     ULONG Result, Result2;
+    PHBASE_BLOCK RecoveredBaseBlock;
 #endif
     LARGE_INTEGER TimeStamp;
     ULONG Offset = 0;
     PVOID HiveData;
     ULONG FileSize;
+    LARGE_INTEGER HiveFileSize;
     BOOLEAN HiveSelfHeal = FALSE;
 
     /* Get the hive header */
@@ -1106,6 +1247,8 @@ HvLoadHive(
 /* FIXME: See the comment above (near HvpQueryHiveSize) */
 #if defined(_M_AMD64) && defined(_BLDR_)
         {
+            if (BaseBlock)
+                Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
             return STATUS_REGISTRY_CORRUPT;
         }
 #else
@@ -1115,46 +1258,67 @@ HvLoadHive(
             if (!Hive->Log)
             {
                 DPRINT1("The hive has no log for header recovery\n");
+                if (BaseBlock)
+                    Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
                 return STATUS_REGISTRY_CORRUPT;
             }
             #endif
 
-            /* The header needs to be recovered so do it */
-            DPRINT1("Attempting to heal the header...\n");
-            Result2 = HvpRecoverHeaderFromLog(Hive, &TimeStamp, &BaseBlock);
+            /* Without its base block there is nothing to match a log with, or to keep */
+            if (!BaseBlock)
+            {
+                DPRINT1("The hive base block could not be read\n");
+                return STATUS_REGISTRY_CORRUPT;
+            }
+
+            /* Recover the hive from its log, if the log belongs to it */
+            DPRINT1("Attempting to recover the hive from its log...\n");
+            Result2 = HvpRecoverHiveFromLog(Hive, BaseBlock, &RecoveredBaseBlock);
+            if (Result2 == HiveSuccess)
+            {
+                Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
+                BaseBlock = RecoveredBaseBlock;
+                break;
+            }
+
             if (Result2 == NoMemory)
             {
-                DPRINT1("There's no enough memory to recover header from log\n");
+                DPRINT1("There's no enough memory to recover the hive from its log\n");
+                Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
-            /* Did we fail? */
             if (Result2 == Fail)
             {
-                DPRINT1("Failed to recover the hive header\n");
+                DPRINT1("Failed to write the hive recovered from its log\n");
+                Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
+                return STATUS_REGISTRY_IO_FAILED;
+            }
+
+            if (Result2 == LogUnusable)
+            {
+                DPRINT1("The hive log belongs to the hive but cannot recover it\n");
+                Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
                 return STATUS_REGISTRY_CORRUPT;
             }
 
-            /* Did we trigger the self-heal mode? */
-            if (Result2 == SelfHeal)
+            /* The log does not belong to the hive: keep the hive as it is on disk */
+            ASSERT(Result2 == LogRefused);
+            if (!CmIsSelfHealEnabled(FALSE))
             {
-                HiveSelfHeal = TRUE;
-            }
-
-            /* Now recover the data */
-            Result2 = HvpRecoverDataFromLog(Hive, BaseBlock);
-            if (Result2 == Fail)
-            {
-                DPRINT1("Failed to recover the hive data\n");
+                DPRINT1("The hive log cannot be used and self-healing mode is disabled\n");
+                Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
                 return STATUS_REGISTRY_CORRUPT;
             }
 
-            /* Tag the boot as self heal if we haven't done it before */
-            if ((Result2 == SelfHeal) && (!HiveSelfHeal))
+            if (HvpHealBaseBlock(Hive, BaseBlock) != HiveSuccess)
             {
-                HiveSelfHeal = TRUE;
+                Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
+                return STATUS_REGISTRY_CORRUPT;
             }
 
+            DPRINT1("The hive log cannot be used, triggering self-heal mode on the hive as it is\n");
+            HiveSelfHeal = TRUE;
             break;
         }
 #endif
@@ -1163,12 +1327,29 @@ HvLoadHive(
     /* Set the boot type */
     BaseBlock->BootType = HiveSelfHeal ? HBOOT_TYPE_SELF_HEAL : HBOOT_TYPE_REGULAR;
 
+    /* The hive data must be whole blocks, within the hive file */
+    if (BaseBlock->Length == 0 ||
+        (BaseBlock->Length % HBLOCK_SIZE) != 0 ||
+        BaseBlock->Length > MAXULONG - HBLOCK_SIZE)
+    {
+        DPRINT1("The hive describes a bad length 0x%x\n", BaseBlock->Length);
+        Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
+        return STATUS_REGISTRY_CORRUPT;
+    }
+
+    FileSize = HBLOCK_SIZE + BaseBlock->Length; // == sizeof(HBASE_BLOCK) + BaseBlock->Length;
+    if (!HvpQueryFileSize(Hive, HFILE_TYPE_PRIMARY, &HiveFileSize) || HiveFileSize.QuadPart < FileSize)
+    {
+        DPRINT1("The hive file is shorter than the 0x%x bytes the hive describes, or its size is not known\n", FileSize);
+        Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
+        return STATUS_NOT_REGISTRY_FILE;
+    }
+
     /* Setup hive data */
     Hive->BaseBlock = BaseBlock;
     Hive->Version = BaseBlock->Minor;
 
     /* Allocate a buffer large enough to hold the hive */
-    FileSize = HBLOCK_SIZE + BaseBlock->Length; // == sizeof(HBASE_BLOCK) + BaseBlock->Length;
     HiveData = Hive->Allocate(FileSize, TRUE, TAG_CM);
     if (!HiveData)
     {
@@ -1189,6 +1370,13 @@ HvLoadHive(
         Hive->Free(HiveData, FileSize);
         Hive->Free(BaseBlock, Hive->BaseBlockAlloc);
         return STATUS_NOT_REGISTRY_FILE;
+    }
+
+    /* A hive kept by self-healing has its base block fixed in memory only */
+    if (HiveSelfHeal)
+    {
+        RtlCopyMemory(HiveData, BaseBlock, HV_LOG_HEADER_SIZE);
+        ((PHBASE_BLOCK)HiveData)->BootType = HBOOT_TYPE_SELF_HEAL;
     }
 
     /*
@@ -1214,6 +1402,17 @@ HvLoadHive(
         DPRINT1("Failed to initialize hive from memory\n");
         Hive->Free(HiveData, FileSize);
         return Status;
+    }
+
+    /*
+     * The hive was kept as it is on disk: the next flush writes
+     * all of it, through the log, with its base block made consistent.
+     */
+    if (HiveSelfHeal)
+    {
+        RtlSetAllBits(&Hive->DirtyVector);
+        Hive->DirtyCount = Hive->DirtyVector.SizeOfBitMap;
+        return STATUS_SUCCESS;
     }
 
     /*
