@@ -141,8 +141,9 @@ START_TEST(NtfsOpenById)
 {
     WCHAR Path[MAX_PATH], Moved[MAX_PATH];
     ULONGLONG Id, Got;
-    HANDLE Dir, H;
+    HANDLE Dir, H, F;
     NTSTATUS Status;
+    DWORD Done;
 
     if (!NtInit("NtfsOpenById"))
         return;
@@ -170,6 +171,24 @@ START_TEST(NtfsOpenById)
     /* A stale sequence number names nothing. */
     Status = NtOpenById(Dir, Id + (1ULL << 48), FILE_READ_ATTRIBUTES, FILE_OPEN, NULL);
     ok(!NT_SUCCESS(Status), "Open with a wrong sequence number: 0x%08lx\n", Status);
+    /* A file created just now and still open: its record has not been written back yet. */
+    NtPath(Path, L"fresh.txt");
+    F = CreateFileW(Path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(F != INVALID_HANDLE_VALUE, "CreateFile failed %lu\n", GetLastError());
+    if (F != INVALID_HANDLE_VALUE)
+    {
+        ok(WriteFile(F, "fresh", 5, &Done, NULL) && Done == 5, "WriteFile failed %lu\n", GetLastError());
+        Id = NtFileId(F);
+        Status = NtOpenById(Dir, Id, FILE_READ_DATA, FILE_OPEN, &H);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            Got = NtFileId(H);
+            ok(Got == Id, "Opened ID %I64x for %I64x\n", Got, Id);
+            NtClose(H);
+        }
+        CloseHandle(F);
+    }
     NtClose(Dir);
     NtCleanup();
 }
