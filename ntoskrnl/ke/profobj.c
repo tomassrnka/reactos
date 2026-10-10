@@ -47,6 +47,43 @@ KeInitializeProfile(PKPROFILE Profile,
     Profile->Affinity = Affinity;
 }
 
+static
+ULONG_PTR
+NTAPI
+KiStartProfileInterrupt(IN ULONG_PTR Context)
+{
+    HalStartProfileInterrupt((KPROFILE_SOURCE)Context);
+    return 0;
+}
+
+static
+ULONG_PTR
+NTAPI
+KiStopProfileInterrupt(IN ULONG_PTR Context)
+{
+    HalStopProfileInterrupt((KPROFILE_SOURCE)Context);
+    return 0;
+}
+
+static
+VOID
+KiCallProfileInterruptWorker(IN PKIPI_BROADCAST_WORKER Worker,
+                             IN KPROFILE_SOURCE Source)
+{
+    KIRQL OldIrql;
+
+    /* The broadcast is needed only with more than one processor */
+    if (KeNumberProcessors > 1)
+    {
+        KeIpiGenericCall(Worker, (ULONG_PTR)Source);
+        return;
+    }
+
+    KeRaiseIrql(KiProfileIrql, &OldIrql);
+    Worker((ULONG_PTR)Source);
+    KeLowerIrql(OldIrql);
+}
+
 BOOLEAN
 NTAPI
 KeStartProfile(IN PKPROFILE Profile,
@@ -135,11 +172,11 @@ KeStartProfile(IN PKPROFILE Profile,
     /* Release the profile lock */
     KeReleaseSpinLockFromDpcLevel(&KiProfileLock);
 
-    /* Tell HAL to start the profile interrupt */
-    HalStartProfileInterrupt(Profile->Source);
-
     /* Lower back to original IRQL */
     KeLowerIrql(OldIrql);
+
+    /* Tell HAL to start the profile interrupt on every processor */
+    KiCallProfileInterruptWorker(KiStartProfileInterrupt, Profile->Source);
 
     /* Free the pool */
     if (FreeBuffer) ExFreePoolWithTag(SourceBuffer, 'forP');
@@ -201,11 +238,11 @@ KeStopProfile(IN PKPROFILE Profile)
     /* Release the profile lock */
     KeReleaseSpinLockFromDpcLevel(&KiProfileLock);
 
-    /* Stop the profile interrupt */
-    HalStopProfileInterrupt(Profile->Source);
-
     /* Lower back to original IRQL */
     KeLowerIrql(OldIrql);
+
+    /* Stop it on every processor; also a barrier: none is left inside the profile interrupt */
+    KiCallProfileInterruptWorker(KiStopProfileInterrupt, Profile->Source);
 
     /* Free the Source Object */
     if (SourceFound) ExFreePool(CurrentSource);
@@ -321,8 +358,9 @@ KiParseProfileList(IN PKTRAP_FRAME TrapFrame,
         /* Get the entry */
         Profile = CONTAINING_RECORD(NextEntry, KPROFILE, ProfileListEntry);
 
-        /* Check if the source is good, and if it's within the range */
+        /* Check the source, the processor, and the range */
         if ((Profile->Source != Source) ||
+            !(Profile->Affinity & KeGetCurrentPrcb()->SetMember) ||
             (ProgramCounter < (ULONG_PTR)Profile->RangeBase) ||
             (ProgramCounter > (ULONG_PTR)Profile->RangeLimit))
         {
@@ -334,8 +372,8 @@ KiParseProfileList(IN PKTRAP_FRAME TrapFrame,
                                (((ProgramCounter - (ULONG_PTR)Profile->RangeBase)
                                 >> Profile->BucketShift) &~ 0x3));
 
-        /* Increment the value */
-        (*BucketValue)++;
+        /* Increment the value; other processors may sample the same bucket */
+        InterlockedIncrement((PLONG)BucketValue);
     }
 }
 
