@@ -22,6 +22,7 @@ list(APPEND SOURCE
     send.c
     udpbindretry.c
     udprecv.c
+    timewait.c
     WSAAsync.c
     WSAIoctl.c
     WSARecv.c

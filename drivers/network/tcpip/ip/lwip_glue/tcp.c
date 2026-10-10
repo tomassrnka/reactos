@@ -5,6 +5,8 @@
 
 /* tcp_process_refused_data hands over data held while a connection waited to be accepted */
 #include <lwip/priv/tcp_priv.h>
+#include <lwip/inet_chksum.h>
+#include <lwip_hooks.h>
 
 static const char * const tcp_state_str[] = {
   "CLOSED",
@@ -271,6 +273,288 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
     return ERR_OK;
 }
 
+/* A SYN whose sequence number is above everything the previous connection on its 4-tuple received may
+ * reopen that connection from TIME-WAIT (the sequence-number rule of RFC 6191), when the new initial
+ * sequence number is above everything the old connection sent (RFC 1122 4.2.2.13). lwIP answers such a
+ * SYN with an ACK (or a reset, inside the old receive window) for the whole of TIME-WAIT
+ * (2 * TCP_MSL), so a client that reuses its port within that time cannot connect. The timestamp rule
+ * of RFC 6191 is not used: lwIP does not reject old segments by their timestamps (PAWS), so only the
+ * sequence numbers keep the two connections apart */
+
+/* What an ended TIME-WAIT still protects until the new connection is accepted or the time it had left
+   has passed: no SYN at or below the old receive sequence gets through, and no open of the 4-tuple
+   starts below the old send sequence, even after an attempt to open the new connection fails */
+typedef struct _TIME_WAIT_REOPEN
+{
+    LIST_ENTRY ListEntry;
+    ip4_addr_t LocalIp;
+    ip4_addr_t RemoteIp;
+    u16_t LocalPort;
+    u16_t RemotePort;
+    u32_t RcvNxt;
+    u32_t IssFloor;
+    /* Interrupt time: tcp_ticks stops when lwIP has no active or TIME-WAIT PCB, and the system time
+       can be set */
+    ULONGLONG Expires;
+} TIME_WAIT_REOPEN, *PTIME_WAIT_REOPEN;
+
+/* Beyond this, a SYN finds the TIME-WAIT as before */
+#define MAX_TIME_WAIT_REOPENS 4096
+
+static LIST_ENTRY TimeWaitReopens = { &TimeWaitReopens, &TimeWaitReopens };
+static ULONG TimeWaitReopenCount;
+
+static
+VOID
+LibTCPFreeReopen(PTIME_WAIT_REOPEN Reopen)
+{
+    RemoveEntryList(&Reopen->ListEntry);
+    TimeWaitReopenCount--;
+    ExFreePoolWithTag(Reopen, LWIP_REOPEN_TAG);
+}
+
+/* The record of a 4-tuple; frees the records whose time has passed */
+static
+PTIME_WAIT_REOPEN
+LibTCPFindReopen(const ip4_addr_t *LocalIp, u16_t LocalPort, const ip4_addr_t *RemoteIp, u16_t RemotePort)
+{
+    PLIST_ENTRY Entry, Next;
+    PTIME_WAIT_REOPEN Reopen, Found = NULL;
+    ULONGLONG Now = KeQueryInterruptTime();
+
+    for (Entry = TimeWaitReopens.Flink; Entry != &TimeWaitReopens; Entry = Next)
+    {
+        Next = Entry->Flink;
+        Reopen = CONTAINING_RECORD(Entry, TIME_WAIT_REOPEN, ListEntry);
+        if (Now >= Reopen->Expires)
+        {
+            LibTCPFreeReopen(Reopen);
+            continue;
+        }
+        if (!Found && Reopen->LocalPort == LocalPort && Reopen->RemotePort == RemotePort &&
+            ip4_addr_eq(&Reopen->LocalIp, LocalIp) && ip4_addr_eq(&Reopen->RemoteIp, RemoteIp))
+        {
+            Found = Reopen;
+        }
+    }
+    return Found;
+}
+
+/* Called by LibIPShutdown once lwIP has stopped */
+VOID
+LibTCPFreeTimeWaitReopens(VOID)
+{
+    while (!IsListEmpty(&TimeWaitReopens))
+        LibTCPFreeReopen(CONTAINING_RECORD(TimeWaitReopens.Flink, TIME_WAIT_REOPEN, ListEntry));
+}
+
+static
+u16_t
+LibTCPSegmentChecksum(const ip4_addr_t *Src, const ip4_addr_t *Dest, const void *Segment, u16_t Length)
+{
+    /* inet_chksum returns the complement of the sum */
+    u32_t Sum = (u16_t)~inet_chksum(Segment, Length);
+
+    Sum += (ip4_addr_get_u32(Src) & 0xFFFF) + (ip4_addr_get_u32(Src) >> 16);
+    Sum += (ip4_addr_get_u32(Dest) & 0xFFFF) + (ip4_addr_get_u32(Dest) >> 16);
+    Sum += lwip_htons(IP_PROTO_TCP) + lwip_htons(Length);
+    Sum = FOLD_U32T(Sum);
+    Sum = FOLD_U32T(Sum);
+    return (u16_t)~Sum;
+}
+
+/* Whether the listener that tcp_input would choose can take a new connection */
+static
+BOOLEAN
+LibTCPListenerHasRoom(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
+{
+    struct tcp_pcb_listen *lpcb, *Any = NULL;
+
+    for (lpcb = tcp_listen_pcbs.listen_pcbs; lpcb != NULL; lpcb = lpcb->next)
+    {
+        if ((lpcb->netif_idx != NETIF_NO_INDEX && lpcb->netif_idx != netif_get_index(inp)) ||
+            lpcb->local_port != Port)
+        {
+            continue;
+        }
+        if (ip_addr_isany(&lpcb->local_ip))
+            Any = lpcb;
+        else if (IP_IS_V4_VAL(lpcb->local_ip) && ip4_addr_eq(ip_2_ip4(&lpcb->local_ip), Dest))
+            break;
+    }
+    if (!lpcb)
+        lpcb = Any;
+    if (!lpcb)
+        return FALSE;
+#if TCP_LISTEN_BACKLOG
+    return lpcb->accepts_pending < lpcb->backlog;
+#else
+    return TRUE;
+#endif
+}
+
+/* LWIP_HOOK_IP4_INPUT: runs under the core lock before lwIP looks at the packet; consumes only a SYN
+   that an ended TIME-WAIT still refuses */
+int
+LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
+{
+    const struct ip_hdr *IpHeader = p->payload;
+    const struct tcp_hdr *TcpHeader;
+    struct tcp_pcb *pcb;
+    PTIME_WAIT_REOPEN Reopen;
+    ip4_addr_t Src, Dest;
+    u16_t IpHeaderLength, IpLength, TcpHeaderLength, SrcPort, DestPort;
+    u32_t SeqNo, Age;
+    ULONGLONG Expires;
+    u8_t Flags;
+
+    /* Only an unfragmented SYN that the first buffer holds whole */
+    if (p->len < IP_HLEN || IPH_V(IpHeader) != 4 || IPH_PROTO(IpHeader) != IP_PROTO_TCP ||
+        (IPH_OFFSET(IpHeader) & PP_HTONS(IP_OFFMASK | IP_MF)) != 0)
+    {
+        return 0;
+    }
+    IpHeaderLength = IPH_HL_BYTES(IpHeader);
+    IpLength = lwip_ntohs(IPH_LEN(IpHeader));
+    if (IpHeaderLength < IP_HLEN || IpLength > p->len || IpLength < IpHeaderLength + TCP_HLEN)
+        return 0;
+    TcpHeader = (const struct tcp_hdr *)((const u8_t *)IpHeader + IpHeaderLength);
+    TcpHeaderLength = TCPH_HDRLEN_BYTES(TcpHeader);
+    Flags = TCPH_FLAGS(TcpHeader);
+    /* Every segment that tcp_listen_input takes for a SYN */
+    if (!(Flags & TCP_SYN) || (Flags & (TCP_RST | TCP_ACK)) ||
+        TcpHeaderLength < TCP_HLEN || TcpHeaderLength > IpLength - IpHeaderLength)
+    {
+        return 0;
+    }
+
+    ip4_addr_copy(Src, IpHeader->src);
+    ip4_addr_copy(Dest, IpHeader->dest);
+    SrcPort = lwip_ntohs(TcpHeader->src);
+    DestPort = lwip_ntohs(TcpHeader->dest);
+    SeqNo = lwip_ntohl(TcpHeader->seqno);
+    Reopen = LibTCPFindReopen(&Dest, DestPort, &Src, SrcPort);
+
+    /* The same match as tcp_input's */
+    for (pcb = tcp_tw_pcbs; pcb != NULL; pcb = pcb->next)
+    {
+        if (pcb->netif_idx != NETIF_NO_INDEX && pcb->netif_idx != netif_get_index(inp))
+            continue;
+        if (pcb->remote_port == SrcPort && pcb->local_port == DestPort &&
+            IP_IS_V4_VAL(pcb->remote_ip) && ip4_addr_eq(ip_2_ip4(&pcb->remote_ip), &Src) &&
+            ip4_addr_eq(ip_2_ip4(&pcb->local_ip), &Dest))
+        {
+            break;
+        }
+    }
+    if (!pcb)
+    {
+        /* RFC 6191 drops a SYN that may not reopen the connection */
+        if (Reopen && !TCP_SEQ_GT(SeqNo, Reopen->RcvNxt))
+        {
+            pbuf_free(p);
+            return 1;
+        }
+        return 0;
+    }
+
+    /* Only a plain SYN that ip4_input delivers on this interface (to its address, from a unicast
+       source), above the old receive sequences (this TIME-WAIT's and an older record's), ends a
+       TIME-WAIT */
+    if (Flags != TCP_SYN || !netif_is_up(inp) || !ip4_addr_eq(&Dest, netif_ip4_addr(inp)) ||
+        ip4_addr_isbroadcast(&Src, inp) || ip4_addr_ismulticast(&Src) ||
+        !TCP_SEQ_GT(SeqNo, pcb->rcv_nxt) || (Reopen && !TCP_SEQ_GT(SeqNo, Reopen->RcvNxt)))
+    {
+        return 0;
+    }
+
+    /* Only a segment lwIP would accept may end the TIME-WAIT */
+#if CHECKSUM_CHECK_IP
+    IF__NETIF_CHECKSUM_ENABLED(inp, NETIF_CHECKSUM_CHECK_IP)
+    {
+        if (inet_chksum(IpHeader, IpHeaderLength) != 0)
+            return 0;
+    }
+#endif
+#if CHECKSUM_CHECK_TCP
+    IF__NETIF_CHECKSUM_ENABLED(inp, NETIF_CHECKSUM_CHECK_TCP)
+    {
+        if (LibTCPSegmentChecksum(&Src, &Dest, TcpHeader, IpLength - IpHeaderLength) != 0)
+            return 0;
+    }
+#endif
+
+    /* Without a listener that takes the SYN, the TIME-WAIT stays and answers it as before */
+    if (!LibTCPListenerHasRoom(&Dest, DestPort, inp))
+        return 0;
+
+    /* The time the TIME-WAIT has left, rounded up: tcp_slowtmr ends it once its age in ticks is above
+       2 * TCP_MSL / TCP_SLOW_INTERVAL; interrupt time counts 100 ns units */
+    Age = (u32_t)(tcp_ticks - pcb->tmr);
+    if (Age > 2 * TCP_MSL / TCP_SLOW_INTERVAL)
+        Age = 2 * TCP_MSL / TCP_SLOW_INTERVAL;
+    Expires = KeQueryInterruptTime() +
+              (ULONGLONG)(2 * TCP_MSL / TCP_SLOW_INTERVAL + 1 - Age) * TCP_SLOW_INTERVAL * 10000;
+    if (!Reopen)
+    {
+        if (TimeWaitReopenCount >= MAX_TIME_WAIT_REOPENS)
+            return 0;
+        Reopen = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Reopen), LWIP_REOPEN_TAG);
+        if (!Reopen)
+            return 0;
+        Reopen->LocalIp = Dest;
+        Reopen->RemoteIp = Src;
+        Reopen->LocalPort = DestPort;
+        Reopen->RemotePort = SrcPort;
+        Reopen->RcvNxt = pcb->rcv_nxt;
+        Reopen->IssFloor = pcb->snd_nxt;
+        Reopen->Expires = Expires;
+        InsertTailList(&TimeWaitReopens, &Reopen->ListEntry);
+        TimeWaitReopenCount++;
+    }
+    else
+    {
+        /* An older record keeps whichever limits are higher */
+        if (TCP_SEQ_GT(pcb->rcv_nxt, Reopen->RcvNxt))
+            Reopen->RcvNxt = pcb->rcv_nxt;
+        if (TCP_SEQ_GT(pcb->snd_nxt, Reopen->IssFloor))
+            Reopen->IssFloor = pcb->snd_nxt;
+        if (Expires > Reopen->Expires)
+            Reopen->Expires = Expires;
+    }
+
+    /* What lwIP does when the TIME-WAIT ends; the glue let go of the PCB when it entered TIME-WAIT.
+       tcp_input then finds no PCB for the 4-tuple and gives the SYN to the listener; the record keeps
+       the rest */
+    tcp_pcb_remove(&tcp_tw_pcbs, pcb);
+    tcp_free(pcb);
+    return 0;
+}
+
+/* LWIP_HOOK_TCP_ISN: lwIP's own generator, raised for an open of a reopened 4-tuple */
+u32_t
+LibTCPNextIss(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *RemoteIp, u16_t RemotePort)
+{
+    static u32_t Iss = 6510;
+    PTIME_WAIT_REOPEN Reopen;
+    u32_t Next, Floor;
+
+    Iss += tcp_ticks;
+    Next = Iss;
+    if (IP_IS_V4(LocalIp) && IP_IS_V4(RemoteIp))
+    {
+        Reopen = LibTCPFindReopen(ip_2_ip4(LocalIp), LocalPort, ip_2_ip4(RemoteIp), RemotePort);
+        if (Reopen)
+        {
+            /* tcp_connect, which never runs while a packet is processed, sends its SYN at ISS - 1 */
+            Floor = Reopen->IssFloor + (ip_current_input_netif() == NULL ? 1 : 0);
+            if (TCP_SEQ_LT(Next, Floor))
+                Next = Floor;
+        }
+    }
+    return Next;
+}
+
 /* An established connection that no listen request has taken yet */
 typedef struct _PENDING_ACCEPT
 {
@@ -371,7 +655,7 @@ LibTCPQueuePendingAccept(PCONNECTION_ENDPOINT Listener, PTCP_PCB pcb)
  * is not accepted to avoid leaking the new PCB */
 static
 err_t
-InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
+InternalAcceptConnection(void *arg, PTCP_PCB newpcb, const err_t err)
 {
     /* Make sure the socket didn't get closed */
     if (!arg)
@@ -404,6 +688,35 @@ InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
         return ERR_OK;
 
     return ERR_CLSD;
+}
+
+/* Once a reopened connection is accepted, its ended TIME-WAIT has nothing left to protect */
+static
+err_t
+InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
+{
+    PTIME_WAIT_REOPEN Reopen;
+    ip4_addr_t LocalIp, RemoteIp;
+    u16_t LocalPort = 0, RemotePort = 0;
+    err_t Result;
+
+    if (newpcb && err == ERR_OK)
+    {
+        ip4_addr_copy(LocalIp, *ip_2_ip4(&newpcb->local_ip));
+        ip4_addr_copy(RemoteIp, *ip_2_ip4(&newpcb->remote_ip));
+        LocalPort = newpcb->local_port;
+        RemotePort = newpcb->remote_port;
+    }
+
+    Result = InternalAcceptConnection(arg, newpcb, err);
+
+    if (Result == ERR_OK && LocalPort)
+    {
+        Reopen = LibTCPFindReopen(&LocalIp, LocalPort, &RemoteIp, RemotePort);
+        if (Reopen)
+            LibTCPFreeReopen(Reopen);
+    }
+    return Result;
 }
 
 static
