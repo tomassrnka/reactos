@@ -21,6 +21,30 @@ NTSTATUS
 KiConvertToGuiThread(
     VOID);
 
+/*
+ * Tells whether the vector of an unexpected interrupt is in service at the
+ * local APIC. Only an interrupt the APIC delivered is; a software INT, a
+ * processor exception and a spurious interrupt set no in-service bit, and an
+ * EOI for them would end another interrupt that is in service.
+ */
+BOOLEAN
+NTAPI
+KiIsUnexpectedInterruptInService(
+    _In_ PKTRAP_FRAME TrapFrame)
+{
+    /* The stub pushed the vector minus 128, see UnexpectedVectorStub */
+    ULONG Vector = (UCHAR)(TrapFrame->ErrorCode + 128);
+    ULONG InService;
+
+    /* Each in-service register holds 32 vectors */
+    if (KiX2ApicMode)
+        InService = (ULONG)__readmsr(X2APIC_MSR_ISR + Vector / 32);
+    else
+        InService = *((volatile ULONG*)(APIC_ISR_REGISTER + (Vector / 32) * 0x10));
+
+    return (InService >> (Vector % 32)) & 1;
+}
+
 _Requires_lock_not_held_(Prcb->PrcbLock)
 VOID
 NTAPI
