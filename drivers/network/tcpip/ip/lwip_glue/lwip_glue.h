@@ -11,6 +11,7 @@
     #define LWIP_MESSAGE_TAG 'sMwl'
     #define LWIP_QUEUE_TAG   'uQwl'
     #define LWIP_ACCEPT_TAG  'cAwl'
+    #define LWIP_REOPEN_TAG  'oRwl'
 #endif
 
 typedef struct tcp_pcb* PTCP_PCB;

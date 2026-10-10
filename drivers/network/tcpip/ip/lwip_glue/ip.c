@@ -6,6 +6,9 @@ typedef struct netif* PNETIF;
 void
 sys_shutdown(void);
 
+VOID
+LibTCPFreeTimeWaitReopens(VOID);
+
 void
 LibIPInsertPacket(void *ifarg,
                   const void *const data,
@@ -41,4 +44,6 @@ LibIPShutdown(void)
 {
     /* This is synchronous */
     sys_shutdown();
+
+    LibTCPFreeTimeWaitReopens();
 }
