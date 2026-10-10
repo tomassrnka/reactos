@@ -27,6 +27,7 @@ EXTERN MmDeleteKernelStack:PROC
 EXTERN KdSetOwedBreakpoints:PROC
 EXTERN KeAcquireSpinLockAtDpcLevel:PROC
 EXTERN KeReleaseSpinLockFromDpcLevel:PROC
+EXTERN KiIsUnexpectedInterruptInService:PROC
 
 
 /* Helper Macros *************************************************************/
@@ -723,8 +724,17 @@ FUNC KiUnexpectedInterrupt
     call KeBugCheckWithTf
     jmp $
 #endif
-    /* Return; a device interrupt without a handler is in service until the EOI */
-    ExitTrap (TF_SAVE_ALL or TF_SEND_EOI)
+    /* A device interrupt without a handler is in service until the EOI, but a
+       software INT or an exception is not, and its EOI would end another one */
+    mov rcx, rbp
+    call KiIsUnexpectedInterruptInService
+    test al, al
+    jz KiUnexpectedInterruptReturn
+    SendApicEoi
+
+KiUnexpectedInterruptReturn:
+    /* Return */
+    ExitTrap TF_SAVE_ALL
 ENDFUNC
 
 PUBLIC KiInterruptDispatch
