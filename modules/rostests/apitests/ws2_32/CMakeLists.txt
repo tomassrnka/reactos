@@ -3,6 +3,7 @@ list(APPEND SOURCE
     bind.c
     broadcast.c
     close.c
+    closerace.c
     getaddrinfo.c
     gethostname.c
     getnameinfo.c
