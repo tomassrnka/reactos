@@ -55,12 +55,14 @@ static void DeleteHiveFiles(PCWSTR File)
     }
 }
 
-/* Saves a small key as a hive file and returns its contents */
-static PBYTE SaveTestHive(PCWSTR File, PDWORD Size)
+/* Saves a small key plus ExtraValues values of 2000 bytes as a hive file, returns its contents */
+static PBYTE SaveTestHive(PCWSTR File, PDWORD Size, DWORD ExtraValues)
 {
     HKEY Key;
     LONG Error;
-    DWORD Data = 0x12345678, Read;
+    DWORD Data = 0x12345678, Read, i;
+    static BYTE Extra[2000];
+    WCHAR Name[16];
     HANDLE Handle;
     PBYTE Buffer;
 
@@ -73,6 +75,12 @@ static PBYTE SaveTestHive(PCWSTR File, PDWORD Size)
         return NULL;
     Error = RegSetValueExW(Key, L"Value", 0, REG_DWORD, (PBYTE)&Data, sizeof(Data));
     ok(Error == ERROR_SUCCESS, "RegSetValueExW failed: %ld\n", Error);
+    for (i = 0; i < ExtraValues; i++)
+    {
+        StringCchPrintfW(Name, _countof(Name), L"Extra%lu", i);
+        Error = RegSetValueExW(Key, Name, 0, REG_BINARY, Extra, sizeof(Extra));
+        ok(Error == ERROR_SUCCESS, "RegSetValueExW(%ls) failed: %ld\n", Name, Error);
+    }
     Error = RegSaveKeyW(Key, File, NULL);
     ok(Error == ERROR_SUCCESS, "RegSaveKeyW failed: %ld\n", Error);
     RegCloseKey(Key);
@@ -141,7 +149,7 @@ static PLONG FindFreeCell(PBYTE Buffer, DWORD Size)
  * is reported as a failure. The process may still not exit while that
  * thread is stuck in the kernel.
  */
-static void LoadDamagedHive(PCWSTR SubKey, PCWSTR File)
+static void LoadDamagedHive(PCWSTR SubKey, PCWSTR File, BOOL ExpectBadDb)
 {
     PLOAD_CONTEXT Context;
     HANDLE Thread;
@@ -170,10 +178,19 @@ static void LoadDamagedHive(PCWSTR SubKey, PCWSTR File)
     if (Wait != WAIT_OBJECT_0)
         return;
 
-    /* A damaged hive is either repaired and loaded, or rejected as corrupt */
     trace("RegLoadKeyW returned %ld\n", Context->Result);
-    ok(Context->Result == ERROR_SUCCESS || Context->Result == ERROR_BADDB,
-       "RegLoadKeyW returned %ld\n", Context->Result);
+    if (ExpectBadDb)
+    {
+        /* A bin whose size is unusable must be refused, not healed */
+        ok(Context->Result == ERROR_BADDB,
+           "RegLoadKeyW returned %ld, expected ERROR_BADDB\n", Context->Result);
+    }
+    else
+    {
+        /* A damaged hive is either repaired and loaded, or rejected as corrupt */
+        ok(Context->Result == ERROR_SUCCESS || Context->Result == ERROR_BADDB,
+           "RegLoadKeyW returned %ld\n", Context->Result);
+    }
     if (Context->Result == ERROR_SUCCESS)
     {
         /* The cells before the damage still read back */
@@ -222,7 +239,7 @@ START_TEST(RegLoadKeyZeroCell)
         skip("GetTempPathW failed\n");
         return;
     }
-    Buffer = SaveTestHive(File, &Size);
+    Buffer = SaveTestHive(File, &Size, 0);
     if (!Buffer)
         return;
 
@@ -233,7 +250,7 @@ START_TEST(RegLoadKeyZeroCell)
     {
         *Cell = 0;
         ok(WriteTestHive(File, Buffer, Size), "Writing the damaged hive failed\n");
-        LoadDamagedHive(L"ReactOSTestZeroCell", File);
+        LoadDamagedHive(L"ReactOSTestZeroCell", File, FALSE);
     }
     HeapFree(GetProcessHeap(), 0, Buffer);
 }
@@ -254,7 +271,7 @@ START_TEST(RegLoadKeyZeroBin)
         skip("GetTempPathW failed\n");
         return;
     }
-    Buffer = SaveTestHive(File, &Size);
+    Buffer = SaveTestHive(File, &Size, 0);
     if (!Buffer)
         return;
 
@@ -265,7 +282,82 @@ START_TEST(RegLoadKeyZeroBin)
     {
         *(PDWORD)(Buffer + BIN_OFFSET + 8) = 0;
         ok(WriteTestHive(File, Buffer, Size), "Writing the damaged hive failed\n");
-        LoadDamagedHive(L"ReactOSTestZeroBin", File);
+        LoadDamagedHive(L"ReactOSTestZeroBin", File, FALSE);
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
+/*
+ * A bin whose size is damaged must be refused, not self-healed: shrinking
+ * it to one block can leave a referenced cell that no free-cell walk
+ * reaches, with a size past its new bin. Windows returns ERROR_BADDB too.
+ */
+START_TEST(RegLoadKeyBadBinSize)
+{
+    WCHAR File[MAX_PATH];
+    PBYTE Buffer;
+    DWORD Size;
+
+    if (!EnablePrivilege(L"SeBackupPrivilege") || !EnablePrivilege(L"SeRestorePrivilege"))
+    {
+        skip("Cannot enable the backup and restore privileges\n");
+        return;
+    }
+    if (!PrepareFile(File, L"badbinsize.hiv"))
+    {
+        skip("GetTempPathW failed\n");
+        return;
+    }
+    Buffer = SaveTestHive(File, &Size, 0);
+    if (!Buffer)
+        return;
+
+    /* Set the first bin's size to 0 */
+    ok(Size >= BIN_OFFSET + 0x1000 && memcmp(Buffer + BIN_OFFSET, "hbin", 4) == 0,
+       "No bin after the base block of the saved hive\n");
+    if (Size >= BIN_OFFSET + 0x1000 && memcmp(Buffer + BIN_OFFSET, "hbin", 4) == 0)
+    {
+        *(PDWORD)(Buffer + BIN_OFFSET + 8) = 0;
+        ok(WriteTestHive(File, Buffer, Size), "Writing the damaged hive failed\n");
+        LoadDamagedHive(L"ReactOSTestBadBinSize", File, TRUE);
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
+/* A damaged bin after a valid one: the load must fail and free the bins it already copied */
+START_TEST(RegLoadKeyBadSecondBin)
+{
+    WCHAR File[MAX_PATH];
+    PBYTE Buffer;
+    DWORD Size, FirstSize, Second;
+
+    if (!EnablePrivilege(L"SeBackupPrivilege") || !EnablePrivilege(L"SeRestorePrivilege"))
+    {
+        skip("Cannot enable the backup and restore privileges\n");
+        return;
+    }
+    if (!PrepareFile(File, L"badsecondbin.hiv"))
+    {
+        skip("GetTempPathW failed\n");
+        return;
+    }
+    Buffer = SaveTestHive(File, &Size, 6);
+    if (!Buffer)
+        return;
+
+    FirstSize = (Size >= BIN_OFFSET + 0x1000 && memcmp(Buffer + BIN_OFFSET, "hbin", 4) == 0) ?
+                *(PDWORD)(Buffer + BIN_OFFSET + 8) : 0;
+    Second = BIN_OFFSET + FirstSize;
+    if (FirstSize == 0 || FirstSize > Size - BIN_OFFSET || Size - Second < 0x1000 ||
+        memcmp(Buffer + Second, "hbin", 4) != 0)
+    {
+        skip("The saved hive has no second bin (size 0x%lx, first bin 0x%lx)\n", Size, FirstSize);
+    }
+    else
+    {
+        *(PDWORD)(Buffer + Second + 8) = 0;
+        ok(WriteTestHive(File, Buffer, Size), "Writing the damaged hive failed\n");
+        LoadDamagedHive(L"ReactOSTestBadSecondBin", File, TRUE);
     }
     HeapFree(GetProcessHeap(), 0, Buffer);
 }
