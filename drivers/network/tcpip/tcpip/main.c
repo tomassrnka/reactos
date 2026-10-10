@@ -874,7 +874,12 @@ DriverEntry(
         return Status;
     }
 
-    ChewInit( IPDeviceObject );
+    Status = ChewInit( IPDeviceObject );
+    if (!NT_SUCCESS(Status)) {
+        TI_DbgPrint(MIN_TRACE, ("Failed to initialize the work queue. Status (0x%X).\n", Status));
+        TiUnload(DriverObject);
+        return Status;
+    }
 
     /* Create RawIP device object */
     Status = IoCreateDevice(DriverObject, 0, &strRawDeviceName,

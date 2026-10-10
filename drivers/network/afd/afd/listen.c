@@ -183,7 +183,8 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
         if (Status == STATUS_PENDING)
             Status = STATUS_SUCCESS;
-        ObDereferenceObject(NewFileObject);
+        /* See the end of this function */
+        ObDereferenceObjectDeferDelete(NewFileObject);
         return Status;
     }
     else
@@ -220,7 +221,12 @@ end:
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
-    ObDereferenceObject(NewFileObject);
+
+    /* This runs on a delayed worker or in a transport completion. If the
+     * application closed the accepted socket, this is its last reference, and
+     * its close waits for transport completions that may need this very
+     * worker; the object manager's reaper runs that close instead */
+    ObDereferenceObjectDeferDelete(NewFileObject);
 
     return STATUS_SUCCESS;
 }

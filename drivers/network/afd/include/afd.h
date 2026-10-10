@@ -184,6 +184,7 @@ typedef struct _AFD_FCB {
     PIRP AcceptIrp;
     AFD_DATA_WINDOW Send, Recv;
     KMUTEX Mutex;
+    KEVENT InFlightIdle;
     PKEVENT EventSelect;
     DWORD EventSelectTriggers;
     DWORD EventSelectDisabled;
@@ -304,6 +305,14 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 VOID FreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt);
 
+#if (NTDDI_VERSION < NTDDI_VISTA)
+NTKERNELAPI
+VOID
+NTAPI
+ObDereferenceObjectDeferDelete(
+    _In_ PVOID Object);
+#endif
+
 /* lock.c */
 
 PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
@@ -316,6 +325,7 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
 ( PAFD_FCB FCB, NTSTATUS Status, PIRP Irp,
   UINT Information );
 VOID SocketStateUnlock( PAFD_FCB FCB );
+BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB );
 VOID AfdClearCancelRoutine( PIRP Irp );
 NTSTATUS LostSocket( PIRP Irp );
 PAFD_HANDLE LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );

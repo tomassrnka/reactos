@@ -228,8 +228,9 @@ IopCleanupIrp(IN PIRP Irp,
     /* Check if we have a file object and this isn't a create operation */
     if ((FileObject) && !(Irp->Flags & IRP_CREATE_OPERATION))
     {
-        /* Dereference the file object */
-        ObDereferenceObject(FileObject);
+        /* Runs in the completing driver's context; a close there could wait on
+         * that driver, so a last reference is deleted later, as in IopCompleteRequest */
+        ObDereferenceObjectDeferDelete(FileObject);
     }
 
     /* Free the IRP */
