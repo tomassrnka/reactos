@@ -33,18 +33,19 @@ EXTERN KiIsUnexpectedInterruptInService:PROC
 
 /* Helper Macros *************************************************************/
 
-MACRO(DispatchExceptionWithFlags, Status, Flags, Number, P1, P2, P3)
+MACRO(DispatchExceptionEx, Status, Flags, FirstChance, Number, P1, P2, P3)
     mov eax, Status
     mov r8d, Flags
     mov edx, Number
     mov r9, P1
     mov r10, P2
     mov r11, P3
+    mov ecx, FirstChance
     call InternalDispatchException
 ENDM
 
 MACRO(DispatchException, Status, Number, P1, P2, P3)
-    DispatchExceptionWithFlags Status, 0, Number, P1, P2, P3
+    DispatchExceptionEx Status, 0, 1, Number, P1, P2, P3
 ENDM
 
 MACRO(Fatal, BugcheckCode)
@@ -100,7 +101,8 @@ KiInterruptDispatchTemplate:
     call qword ptr KiInterruptDispatchTemplate[rip - KINTERRUPT_DispatchCode + KINTERRUPT_DispatchAddress]
 
 
-// rbp = TrapFrame, eax = ExceptionCode, r8d = ExceptionFlags, edx = NumParams, r9,r10,r11 = params
+// rbp = TrapFrame, eax = ExceptionCode, r8d = ExceptionFlags, edx = NumParams, r9,r10,r11 = params,
+// cl = FirstChance
 FUNC InternalDispatchException
 
     /* Allocate stack space for EXCEPTION_RECORD and KEXCEPTION_FRAME */
@@ -108,12 +110,31 @@ FUNC InternalDispatchException
     .allocstack (EXCEPTION_RECORD_LENGTH + KEXCEPTION_FRAME_LENGTH)
     .endprolog
 
+    /* Save FirstChance before rcx is reused */
+    mov byte ptr [rsp + KEXCEPTION_FRAME_P5], cl
+
     /* Set up EXCEPTION_RECORD */
     lea rcx, [rsp + KEXCEPTION_FRAME_LENGTH]
     mov [rcx + EXCEPTION_RECORD_ExceptionCode], eax
     mov [rcx + EXCEPTION_RECORD_ExceptionFlags], r8d
     xor rax, rax
     mov [rcx + EXCEPTION_RECORD_ExceptionRecord], rax
+
+    /* Zero the padding and the unused parameters, the record goes to user mode debuggers */
+    mov dword ptr [rcx + EXCEPTION_RECORD_NumberParameters + 4], eax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(18)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(20)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(28)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(30)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(38)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(40)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(48)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(50)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(58)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(60)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(68)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(70)], rax
+
     mov rax, [rbp + KTRAP_FRAME_Rip]
     mov [rcx + EXCEPTION_RECORD_ExceptionAddress], rax
     mov [rcx + EXCEPTION_RECORD_NumberParameters], edx
@@ -148,7 +169,6 @@ FUNC InternalDispatchException
     mov rdx, rsp                                // ExceptionFrame
     mov r8, rbp                                 // TrapFrame
     mov r9b, [r8 + KTRAP_FRAME_PreviousMode]    // PreviousMode
-    mov byte ptr [rsp + KEXCEPTION_FRAME_P5], 1 // FirstChance
     call KiDispatchException
 
     /* Restore registers */
@@ -522,6 +542,7 @@ InPageException:
     mov eax, STATUS_IN_PAGE_ERROR // ExceptionCode
     mov edx, 3    // ParamCount
     xor r8d, r8d  // ExceptionFlags
+    mov ecx, 1    // FirstChance
     call InternalDispatchException
     jmp PageFaultReturn
 
@@ -533,6 +554,7 @@ SpecialCode:
     /* Setup a normal page fault exception */
     mov edx, 2   // ParamCount
     xor r8d, r8d // ExceptionFlags
+    mov ecx, 1   // FirstChance
     call InternalDispatchException
 
 PageFaultReturn:
@@ -648,8 +670,9 @@ FUNC KiRaiseSecurityCheckFailure
     /* Enable interrupts for user-mode */
     sti
 
-    /* Dispatch a non-continuable exception, the fast fail code is in rcx */
-    DispatchExceptionWithFlags STATUS_STACK_BUFFER_OVERRUN, EXCEPTION_NONCONTINUABLE, 1, [rbp+KTRAP_FRAME_Rcx], 0, 0
+    /* Dispatch a non-continuable second chance exception, so no handler of the
+       process runs; the fast fail code is in rcx */
+    DispatchExceptionEx STATUS_STACK_BUFFER_OVERRUN, EXCEPTION_NONCONTINUABLE, 0, 1, [rbp+KTRAP_FRAME_Rcx], 0, 0
 
     /* Return */
     ExitTrap TF_SAVE_ALL
