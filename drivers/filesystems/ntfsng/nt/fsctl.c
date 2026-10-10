@@ -473,7 +473,8 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     }
     ExReleaseFastMutex(&Vcb->FcbListLock);
 
-    /* A volume that cannot be flushed stays mounted (and locked), as NgLockVolume does. */
+    /* A volume that cannot be flushed (a write or cache flush fails, or no memory to list its streams)
+     * stays mounted (and locked), as NgLockVolume does. */
     Discard = Vcb->RawWritten;
     if (!Discard && !Vcb->ReadOnly && NgFlushVolume(Vcb))
     {

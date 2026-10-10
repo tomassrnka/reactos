@@ -34,9 +34,11 @@ struct kj_hdr {
 	u64 hwm;		/* highest slot count ever used */
 	/*
 	 * Update sequence number of $MFT record 3 ($Volume) on disk before and after the in-place pass
-	 * of this transaction (equal for ACTIVE).  Every driver writes that record when it marks the
-	 * volume dirty, and every write changes the number: a different number means another driver
-	 * changed the volume since this header was written, and the header must not be acted on.
+	 * of this transaction.  Equal in a session's ACTIVE header; the ACTIVE header that recovery
+	 * writes before it clears the dirty flag names the number before and after that rewrite.
+	 * Every driver writes that record when it marks the volume dirty, and every write changes the
+	 * number: a different number means another driver changed the volume since this header was
+	 * written, and the header must not be acted on.
 	 */
 	u16 vol_usn_old, vol_usn_new;
 	u32 flags;

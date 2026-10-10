@@ -1344,8 +1344,11 @@ int ngc_is_rw(ngc_vol *v)
 
 /*
  * Writeback did not complete, so committing now would publish part of an operation (an MFT record
- * without its bitmap change).  Nothing is committed: the overlay and the dirty pages stay, the
- * volume on disk keeps the last committed state, and the caller's operation fails.  Out of memory
+ * without its bitmap change).  Nothing is committed: the overlay and the dirty pages stay, and the
+ * caller's operation fails.  With the journal holding every metadata write the disk then keeps the
+ * last committed state; after the journal degraded (UNJOURNALED: metadata goes in place) the pages
+ * written before the failure stay on disk, and the header already sends the next mount to repair
+ * rather than back to a committed state.  Out of memory
  * (or writeback still finding work after every pass) is retried at the next consistency point.
  * A device error marks the volume as needing repair and stops further changes.
  */
