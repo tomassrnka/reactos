@@ -79,6 +79,10 @@ Test_AbortiveClose(void)
     struct linger Linger = { 1, 0 };
     char Buffer[16];
     int Result, Error;
+    WSABUF WsaBuf;
+    LPWSAOVERLAPPED Overlapped;
+    DWORD Sent;
+    BOOL Pending;
 
     if (!MakePair(&Client, &Server))
         return;
@@ -107,7 +111,46 @@ Test_AbortiveClose(void)
     ok(Result == SOCKET_ERROR, "send after the reset returned %d\n", Result);
     ok(Error == WSAECONNRESET, "send error %d, expected WSAECONNRESET\n", Error);
 
+    /* A failed WSASend leaves the byte count unchanged */
+    WsaBuf.buf = "x";
+    WsaBuf.len = 1;
+    Sent = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
+    Result = WSASend(Client, &WsaBuf, 1, &Sent, 0, NULL, NULL);
+    Error = WSAGetLastError();
+    ok(Result == SOCKET_ERROR, "WSASend after the reset returned %d\n", Result);
+    ok(Error == WSAECONNRESET, "WSASend error %d, expected WSAECONNRESET\n", Error);
+    ok(Sent == 0xdeadbeef, "WSASend set the byte count to %lu\n", Sent);
+
+    Overlapped = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Overlapped));
+    if (Overlapped)
+        Overlapped->hEvent = WSACreateEvent();
+    if (!Overlapped || Overlapped->hEvent == WSA_INVALID_EVENT)
+    {
+        skip("No OVERLAPPED or event for the overlapped WSASend\n");
+        if (Overlapped)
+            HeapFree(GetProcessHeap(), 0, Overlapped);
+        closesocket(Client);
+        return;
+    }
+    Sent = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
+    Result = WSASend(Client, &WsaBuf, 1, &Sent, 0, Overlapped, NULL);
+    Error = WSAGetLastError();
+    Pending = (Result == SOCKET_ERROR && Error == WSA_IO_PENDING);
+    ok(Result == SOCKET_ERROR, "overlapped WSASend after the reset returned %d\n", Result);
+    ok(Error == WSAECONNRESET, "overlapped WSASend error %d, expected WSAECONNRESET\n", Error);
+    ok(Sent == 0xdeadbeef, "overlapped WSASend set the byte count to %lu\n", Sent);
+
     closesocket(Client);
+    /* A pending send can complete after the close: keep its OVERLAPPED until it has */
+    if (Pending && WaitForSingleObject(Overlapped->hEvent, 5000) != WAIT_OBJECT_0)
+    {
+        ok(0, "The pending WSASend did not complete after the close\n");
+        return;
+    }
+    WSACloseEvent(Overlapped->hEvent);
+    HeapFree(GetProcessHeap(), 0, Overlapped);
 }
 
 static
