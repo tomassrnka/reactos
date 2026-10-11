@@ -267,6 +267,17 @@ ShowTimeZoneList(HWND hwnd)
                 dwIndex = dwCount;
                 bFound = TRUE;
             }
+            /* A zone set with DST turned off (see SetLocalTimeZone) has no dates left to compare */
+            else if (!*TimeZoneInfo.StandardName && !*Entry->StandardName &&
+                     HasDaylightSaving(Entry) &&
+                     (TimeZoneInfo.StandardDate.wMonth == 0) &&
+                     (TimeZoneInfo.Bias == Entry->TimezoneInfo.Bias + Entry->TimezoneInfo.StandardBias) &&
+                     (TimeZoneInfo.StandardBias == 0) &&
+                     (TimeZoneInfo.DaylightBias == 0))
+            {
+                dwIndex = dwCount;
+                bFound = TRUE;
+            }
         }
     }
 
@@ -278,7 +289,7 @@ ShowTimeZoneList(HWND hwnd)
 
 
 static VOID
-SetLocalTimeZone(HWND hwnd)
+SetLocalTimeZone(HWND hwnd, BOOL bAutoDaylight)
 {
     TIME_ZONE_INFORMATION TimeZoneInformation;
     PTIMEZONE_ENTRY Entry;
@@ -286,6 +297,10 @@ SetLocalTimeZone(HWND hwnd)
     Entry = GetSelectedTimeZoneEntry(hwnd);
     if (Entry == NULL)
         return;
+
+    /* Only a zone with DST can have its automatic adjustment turned off */
+    if (!HasDaylightSaving(Entry))
+        bAutoDaylight = TRUE;
 
     wcscpy(TimeZoneInformation.StandardName,
            Entry->StandardName);
@@ -303,8 +318,23 @@ SetLocalTimeZone(HWND hwnd)
            &Entry->TimezoneInfo.DaylightDate,
            sizeof(SYSTEMTIME));
 
+    /* Without automatic adjustment the zone stays on standard time all year */
+    if (!bAutoDaylight)
+    {
+        wcscpy(TimeZoneInformation.DaylightName,
+               TimeZoneInformation.StandardName);
+        TimeZoneInformation.Bias += TimeZoneInformation.StandardBias;
+        TimeZoneInformation.StandardBias = 0;
+        TimeZoneInformation.DaylightBias = 0;
+        ZeroMemory(&TimeZoneInformation.StandardDate, sizeof(SYSTEMTIME));
+        ZeroMemory(&TimeZoneInformation.DaylightDate, sizeof(SYSTEMTIME));
+    }
+
     /* Set time zone information */
     SetTimeZoneInformation(&TimeZoneInformation);
+
+    /* The key exists once SetTimeZoneInformation has written it */
+    SetAutoDaylight(bAutoDaylight);
 }
 
 
@@ -387,9 +417,9 @@ TimeZonePageProc(HWND hwndDlg,
             {
                 case PSN_APPLY:
                 {
-                    SetAutoDaylight(SendDlgItemMessage(hwndDlg, IDC_AUTODAYLIGHT,
-                                                       BM_GETCHECK, 0, 0) != BST_UNCHECKED);
-                    SetLocalTimeZone(GetDlgItem(hwndDlg, IDC_TIMEZONELIST));
+                    SetLocalTimeZone(GetDlgItem(hwndDlg, IDC_TIMEZONELIST),
+                                     SendDlgItemMessage(hwndDlg, IDC_AUTODAYLIGHT,
+                                                        BM_GETCHECK, 0, 0) != BST_UNCHECKED);
                     SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, PSNRET_NOERROR);
                     return TRUE;
                 }

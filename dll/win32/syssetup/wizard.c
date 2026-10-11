@@ -1863,7 +1863,7 @@ ShowTimeZoneList(HWND hwnd, PSETUPDATA SetupData, DWORD dwEntryIndex)
 
 
 static VOID
-SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData)
+SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData, BOOL bAutoDaylight)
 {
     TIME_ZONE_INFORMATION TimeZoneInformation;
     PTIMEZONE_ENTRY Entry;
@@ -1886,6 +1886,13 @@ SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData)
         Entry = Entry->Next;
     }
 
+    if (Entry == NULL)
+        return;
+
+    /* Only a zone with DST can have its automatic adjustment turned off */
+    if (!HasDaylightSavingTime(Entry))
+        bAutoDaylight = TRUE;
+
     wcscpy(TimeZoneInformation.StandardName,
            Entry->StandardName);
     wcscpy(TimeZoneInformation.DaylightName,
@@ -1902,8 +1909,23 @@ SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData)
            &Entry->TimezoneInfo.DaylightDate,
            sizeof(SYSTEMTIME));
 
+    /* Without automatic adjustment the zone stays on standard time all year */
+    if (!bAutoDaylight)
+    {
+        wcscpy(TimeZoneInformation.DaylightName,
+               TimeZoneInformation.StandardName);
+        TimeZoneInformation.Bias += TimeZoneInformation.StandardBias;
+        TimeZoneInformation.StandardBias = 0;
+        TimeZoneInformation.DaylightBias = 0;
+        ZeroMemory(&TimeZoneInformation.StandardDate, sizeof(SYSTEMTIME));
+        ZeroMemory(&TimeZoneInformation.DaylightDate, sizeof(SYSTEMTIME));
+    }
+
     /* Set time zone information */
     SetTimeZoneInformation(&TimeZoneInformation);
+
+    /* The key exists once SetTimeZoneInformation has written it */
+    SetAutoDaylight(bAutoDaylight);
 }
 
 
@@ -1967,10 +1989,10 @@ WriteDateTimeSettings(HWND hwndDlg, PSETUPDATA SetupData)
 
     GetLocalSystemTime(hwndDlg, SetupData);
     SetLocalTimeZone(GetDlgItem(hwndDlg, IDC_TIMEZONELIST),
-                     SetupData);
+                     SetupData,
+                     SendDlgItemMessage(hwndDlg, IDC_AUTODAYLIGHT,
+                                        BM_GETCHECK, 0, 0) != BST_UNCHECKED);
 
-    SetAutoDaylight(SendDlgItemMessage(hwndDlg, IDC_AUTODAYLIGHT,
-                                       BM_GETCHECK, 0, 0) != BST_UNCHECKED);
     if (!SetSystemLocalTime(hwndDlg, SetupData))
     {
         if (0 == LoadStringW(hDllInstance, IDS_REACTOS_SETUP, Title, ARRAYSIZE(Title)))
