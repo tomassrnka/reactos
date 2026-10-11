@@ -14,6 +14,7 @@ class CNetConnectionManager:
 {
     public:
         CNetConnectionManager();
+        ~CNetConnectionManager();
         HRESULT Initialize();
         HRESULT EnumerateINetConnections();
 
