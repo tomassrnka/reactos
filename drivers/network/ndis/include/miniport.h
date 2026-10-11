@@ -104,6 +104,8 @@ typedef struct _LOGICAL_ADAPTER
     BOOLEAN                    WorkerScheduled;        /* A work item worker is queued and has not started */
     BOOLEAN                    WorkerTurn;             /* The interrupt DPC left queued sends to the send thread, which runs the miniport next */
     volatile BOOLEAN           SendThreadStop;
+    BOOLEAN                    Stopping;               /* A serialized miniport is being halted, see MiniStopSends */
+    BOOLEAN                    BusyByDpc;              /* MiniportBusy is held by the interrupt DPC */
     PKTHREAD                   SendThread;             /* A serialized miniport's send thread, see MiniLeaveSerialized */
     KEVENT                     SendTurnEvent;
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;

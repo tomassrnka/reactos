@@ -331,6 +331,10 @@ ProRequest(
 
   MacBlock->Binding = &AdapterBinding->NdisOpenBlock;
 
+  /* A serialized miniport that is being halted takes no request, see MiniStopSends */
+  if (!(Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE) && Adapter->Stopping)
+      return NDIS_STATUS_FAILURE;
+
 #if WORKER_TEST
   MiniQueueWorkItem(Adapter, NdisWorkItemRequest, NdisRequest, FALSE);
   return NDIS_STATUS_PENDING;

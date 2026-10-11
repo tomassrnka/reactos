@@ -1063,7 +1063,12 @@ MiniEnterSerialized(
     NDIS_STATUS Status = NDIS_STATUS_SUCCESS;
 
     KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
-    if (Adapter->MiniportBusy || Adapter->WorkerTurn ||
+    if (Adapter->Stopping)
+    {
+        /* The caller completes the packet: the miniport is being halted */
+        Status = NDIS_STATUS_FAILURE;
+    }
+    else if (Adapter->MiniportBusy || Adapter->WorkerTurn ||
         (QueuePacket && (Adapter->NdisMiniportBlock.FirstPendingPacket ||
                          MiniGetFirstWorkItem(Adapter, NdisWorkItemSend))))
     {
@@ -1097,7 +1102,8 @@ MiniLeaveSerialized(
     PNDIS_MINIPORT_INTERRUPT RunDpc;
     NDIS_WORK_ITEM_TYPE WorkItemType;
     PVOID WorkItemContext;
-    ULONG Budget = ((Caller == MiniLeaveInterruptDpc) && Adapter->SendThread) ? 0 : 64;
+    ULONG Budget = ((Adapter->Stopping && (Caller != MiniLeaveWorkerTurn)) ||
+                    ((Caller == MiniLeaveInterruptDpc) && Adapter->SendThread)) ? 0 : 64;
 
     /* Send what was queued meanwhile, unless the interrupt DPC waits (except in
        a worker turn) or the miniport is out of send resources; leave the rest to
@@ -1120,11 +1126,12 @@ MiniLeaveSerialized(
     }
 
     Adapter->MiniportBusy = FALSE;
+    Adapter->BusyByDpc = FALSE;
     /* A packet waiting for send resources is retried when a send completes; other
        work items are started when the work before them completes, as before */
     SendsWait = !Adapter->NdisMiniportBlock.FirstPendingPacket && Adapter->WorkQueueHead &&
                 (Adapter->WorkQueueHead->WorkItemType == NdisWorkItemSend);
-    Turn = (Caller == MiniLeaveInterruptDpc) && SendsWait && Adapter->SendThread;
+    Turn = (Caller == MiniLeaveInterruptDpc) && SendsWait && Adapter->SendThread && !Adapter->Stopping;
     if (Turn)
     {
         /* A deferred worker stays deferred until the send thread lets go */
@@ -1133,7 +1140,7 @@ MiniLeaveSerialized(
     }
     else
     {
-        RunWorker = Adapter->WorkerDeferred || SendsWait;
+        RunWorker = (Adapter->WorkerDeferred || SendsWait) && !Adapter->Stopping;
         Adapter->WorkerDeferred = FALSE;
     }
     /* An interrupt DPC deferred meanwhile waits for the worker turn */
@@ -1183,7 +1190,7 @@ MiniSendThread(
             Adapter->MiniportBusy = TRUE;
             Adapter->WorkerTurn = FALSE;
         }
-        /* A pending turn runs before the stop request; none starts once SendThread is cleared */
+        /* A pending turn runs before the stop request; none starts once Stopping is set */
         Stop = !Take && Adapter->SendThreadStop;
         KeReleaseSpinLockFromDpcLevel(&Adapter->NdisMiniportBlock.Lock);
         if (Take)
@@ -1196,16 +1203,26 @@ MiniSendThread(
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
+/* Declared in ntifs.h, which NDIS does not include */
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwWaitForSingleObject(
+    _In_ HANDLE Handle,
+    _In_ BOOLEAN Alertable,
+    _In_opt_ PLARGE_INTEGER Timeout);
+
 /* Called at PASSIVE_LEVEL once the adapter is initialized */
 static
 VOID
-MiniStartSendThread(
+MiniStartSends(
     PLOGICAL_ADAPTER Adapter)
 {
     HANDLE ThreadHandle;
     PKTHREAD Thread;
     KIRQL OldIrql;
     NTSTATUS Status;
+    BOOLEAN RunWorker;
 
     if (Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE)
         return;
@@ -1213,43 +1230,201 @@ MiniStartSendThread(
     KeInitializeEvent(&Adapter->SendTurnEvent, SynchronizationEvent, FALSE);
     Adapter->SendThreadStop = FALSE;
     Status = PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL, MiniSendThread, Adapter);
-    if (!NT_SUCCESS(Status))
-        return;
-
-    Status = ObReferenceObjectByHandle(ThreadHandle, THREAD_ALL_ACCESS, *PsThreadType, KernelMode, (PVOID *)&Thread, NULL);
-    ZwClose(ThreadHandle);
-    if (!NT_SUCCESS(Status))
+    Thread = NULL;
+    if (NT_SUCCESS(Status))
     {
-        Adapter->SendThreadStop = TRUE;
-        KeSetEvent(&Adapter->SendTurnEvent, IO_NO_INCREMENT, FALSE);
-        return;
+        Status = ObReferenceObjectByHandle(ThreadHandle, THREAD_ALL_ACCESS, *PsThreadType, KernelMode, (PVOID *)&Thread, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            Thread = NULL;
+            Adapter->SendThreadStop = TRUE;
+            KeSetEvent(&Adapter->SendTurnEvent, IO_NO_INCREMENT, FALSE);
+            ZwWaitForSingleObject(ThreadHandle, FALSE, NULL);
+        }
+        ZwClose(ThreadHandle);
     }
 
+    /* Requests queued while the adapter was stopped run now */
     KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
     Adapter->SendThread = Thread;
+    Adapter->Stopping = FALSE;
+    RunWorker = (Adapter->WorkQueueHead != NULL);
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+    if (RunWorker)
+        MiniScheduleWorker(Adapter);
 }
 
-/* Called at PASSIVE_LEVEL before MiniportHalt, so the thread no longer runs the miniport then */
+/*
+ * Called at PASSIVE_LEVEL before MiniportHalt. From here on senders and requests
+ * fail, the worker waits for the next start and the interrupt DPC sends nothing;
+ * the send thread runs a pending turn and exits, then this waits until no sender
+ * or worker runs the miniport. Only the interrupt DPC can still take it, and the
+ * miniport's interrupt deregistration in halt runs that down.
+ */
 static
 VOID
-MiniStopSendThread(
+MiniStopSends(
     PLOGICAL_ADAPTER Adapter)
 {
     PKTHREAD Thread;
     KIRQL OldIrql;
+    BOOLEAN Busy;
+    LARGE_INTEGER Delay;
 
-    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
-    Thread = Adapter->SendThread;
-    Adapter->SendThread = NULL;
-    Adapter->SendThreadStop = TRUE;
-    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
-    if (!Thread)
+    if (Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE)
         return;
 
-    KeSetEvent(&Adapter->SendTurnEvent, IO_NO_INCREMENT, FALSE);
-    KeWaitForSingleObject(Thread, Executive, KernelMode, FALSE, NULL);
-    ObDereferenceObject(Thread);
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    Adapter->Stopping = TRUE;
+    Adapter->SendThreadStop = TRUE;
+    Thread = Adapter->SendThread;
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    if (Thread)
+    {
+        KeSetEvent(&Adapter->SendTurnEvent, IO_NO_INCREMENT, FALSE);
+        KeWaitForSingleObject(Thread, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(Thread);
+        KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+        Adapter->SendThread = NULL;
+        KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+    }
+
+    Delay.QuadPart = -10000;
+    for (;;)
+    {
+        KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+        Busy = Adapter->MiniportBusy && !Adapter->BusyByDpc;
+        KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+        if (!Busy)
+            break;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+}
+
+/*
+ * Called at PASSIVE_LEVEL after MiniportHalt: completes with NDIS_STATUS_FAILURE
+ * the sends that never reached the miniport and, when the adapter is removed,
+ * also the requests and resets kept for a restart. Each is completed from the
+ * captured item, never through PendingRequest or ResetStatus, which a request
+ * or reset running outside the miniport lock may still use.
+ */
+/* Completes a request that never reached the miniport, as MiniRequestComplete does */
+static
+VOID
+MiniFailRequest(
+    PNDIS_REQUEST Request)
+{
+    PNDIS_REQUEST_MAC_BLOCK MacBlock = (PNDIS_REQUEST_MAC_BLOCK)Request->MacReserved;
+    KIRQL OldIrql;
+
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    if (MacBlock->Binding != NULL)
+    {
+        if (MacBlock->Binding->RequestCompleteHandler != NULL)
+        {
+            (*MacBlock->Binding->RequestCompleteHandler)(
+                MacBlock->Binding->ProtocolBindingContext,
+                Request,
+                NDIS_STATUS_FAILURE);
+        }
+    }
+    else
+    {
+        MacBlock->Unknown3 = UlongToPtr(NDIS_STATUS_FAILURE);
+        KeSetEvent(MacBlock->Unknown1, IO_NO_INCREMENT, FALSE);
+    }
+    KeLowerIrql(OldIrql);
+}
+
+/* Tells the protocols that a reset which never reached the miniport failed, as MiniResetComplete does */
+static
+VOID
+MiniFailReset(
+    PLOGICAL_ADAPTER Adapter)
+{
+    PLIST_ENTRY CurrentEntry;
+    PADAPTER_BINDING AdapterBinding;
+    KIRQL OldIrql;
+
+    NdisMIndicateStatus(Adapter, NDIS_STATUS_RESET_END, NULL, 0);
+    NdisMIndicateStatusComplete(Adapter);
+
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    for (CurrentEntry = Adapter->ProtocolListHead.Flink;
+         CurrentEntry != &Adapter->ProtocolListHead;
+         CurrentEntry = CurrentEntry->Flink)
+    {
+        AdapterBinding = CONTAINING_RECORD(CurrentEntry, ADAPTER_BINDING, AdapterListEntry);
+        if (AdapterBinding->ProtocolBinding->Chars.ResetCompleteHandler)
+            (*AdapterBinding->ProtocolBinding->Chars.ResetCompleteHandler)(
+                AdapterBinding->NdisOpenBlock.ProtocolBindingContext,
+                NDIS_STATUS_FAILURE);
+    }
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+}
+
+static
+VOID
+MiniFailQueuedWork(
+    PLOGICAL_ADAPTER Adapter,
+    BOOLEAN          Removing)
+{
+    PNDIS_MINIPORT_WORK_ITEM Item, Prev;
+    NDIS_WORK_ITEM_TYPE Type;
+    PVOID Context;
+    KIRQL OldIrql;
+    BOOLEAN Found;
+
+    if (Adapter->NdisMiniportBlock.Flags & NDIS_ATTRIBUTE_DESERIALIZE)
+        return;
+
+    for (;;)
+    {
+        Found = TRUE;
+        KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+        if (Adapter->NdisMiniportBlock.FirstPendingPacket)
+        {
+            Type = NdisWorkItemSend;
+            Context = Adapter->NdisMiniportBlock.FirstPendingPacket;
+            Adapter->NdisMiniportBlock.FirstPendingPacket = NULL;
+        }
+        else
+        {
+            Prev = NULL;
+            for (Item = Adapter->WorkQueueHead; Item; Item = (PNDIS_MINIPORT_WORK_ITEM)Item->Link.Next)
+            {
+                if ((Item->WorkItemType == NdisWorkItemSend) ||
+                    (Removing && ((Item->WorkItemType == NdisWorkItemRequest) ||
+                                  (Item->WorkItemType == NdisWorkItemResetRequested))))
+                    break;
+                Prev = Item;
+            }
+            Found = (Item != NULL);
+            if (Found)
+            {
+                if (Prev)
+                    Prev->Link.Next = Item->Link.Next;
+                else
+                    Adapter->WorkQueueHead = (PNDIS_MINIPORT_WORK_ITEM)Item->Link.Next;
+                if (Adapter->WorkQueueTail == Item)
+                    Adapter->WorkQueueTail = Prev;
+                Type = Item->WorkItemType;
+                Context = Item->WorkItemContext;
+                ExFreePool(Item);
+            }
+        }
+        KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+        if (!Found)
+            break;
+
+        if (Type == NdisWorkItemSend)
+            MiniSendComplete(Adapter, (PNDIS_PACKET)Context, NDIS_STATUS_FAILURE);
+        else if (Type == NdisWorkItemRequest)
+            MiniFailRequest((PNDIS_REQUEST)Context);
+        else
+            MiniFailReset(Adapter);
+    }
 }
 
 VOID
@@ -1550,6 +1725,14 @@ MiniportWorker(IN PDEVICE_OBJECT DeviceObject, IN PVOID Context)
       (!Adapter->WorkQueueHead ||
        ((Adapter->WorkQueueHead->WorkItemType == NdisWorkItemRequest) &&
         Adapter->NdisMiniportBlock.PendingRequest)))
+  {
+      KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+      KeLowerIrql(SerialOldIrql);
+      return;
+  }
+
+  /* MiniStartSends schedules this again */
+  if (Serialized && Adapter->Stopping)
   {
       KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
       KeLowerIrql(SerialOldIrql);
@@ -2532,7 +2715,7 @@ NdisIPnPStartDevice(
                Adapter->NdisMiniportBlock.CheckForHangSeconds * 1000,
                &Adapter->NdisMiniportBlock.WakeUpDpcTimer.Dpc);
 
-  MiniStartSendThread(Adapter);
+  MiniStartSends(Adapter);
 
   /* Put adapter in adapter list for this miniport */
   ExInterlockedInsertTailList(&Adapter->NdisMiniportBlock.DriverHandle->DeviceList, &Adapter->MiniportListEntry, &Adapter->NdisMiniportBlock.DriverHandle->Lock);
@@ -2574,15 +2757,16 @@ NdisIPnPStopDevice(
   ExInterlockedRemoveEntryList(&Adapter->ListEntry, &AdapterListLock);
 
   KeCancelTimer(&Adapter->NdisMiniportBlock.WakeUpDpcTimer.Timer);
+  MiniStopSends(Adapter);
 
   /* Set this here so MiniportISR will be forced to run for interrupts generated in MiniportHalt */
   Adapter->NdisMiniportBlock.OldPnPDeviceState = Adapter->NdisMiniportBlock.PnPDeviceState;
   Adapter->NdisMiniportBlock.PnPDeviceState = NdisPnPDeviceStopped;
 
-  MiniStopSendThread(Adapter);
   (*Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler)(Adapter);
 
   IoSetDeviceInterfaceState(&Adapter->NdisMiniportBlock.SymbolicLinkName, FALSE);
+  MiniFailQueuedWork(Adapter, FALSE);
 
   if (Adapter->NdisMiniportBlock.AllocatedResources)
     {
@@ -2719,12 +2903,13 @@ NdisIPnPRemoveDevice(
 
         /* Remove adapter from global adapter list */
         ExInterlockedRemoveEntryList(&Adapter->ListEntry, &AdapterListLock);
+        MiniStopSends(Adapter);
 
         KeCancelTimer(&Adapter->NdisMiniportBlock.WakeUpDpcTimer.Timer);
 
-        MiniStopSendThread(Adapter);
         Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.HaltHandler(Adapter);
     }
+    MiniFailQueuedWork(Adapter, TRUE);
 
     if (Adapter->NdisMiniportBlock.EthDB)
     {

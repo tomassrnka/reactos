@@ -45,6 +45,7 @@ VOID NTAPI HandleDeferredProcessing(
           return;
       }
       Adapter->MiniportBusy = TRUE;
+      Adapter->BusyByDpc = TRUE;
       KeReleaseSpinLockFromDpcLevel(&Adapter->NdisMiniportBlock.Lock);
   }
 
