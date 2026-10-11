@@ -23,31 +23,13 @@ static const char HexCharacters[] = "0123456789ABCDEF";
 string
 EscapeString(const char* Input)
 {
-    string ReturnedString;
-
-    do
-    {
-        if(strchr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~", *Input))
-        {
-            /* It's a character we don't need to escape, just add it to the output string */
-            ReturnedString += *Input;
-        }
-        else
-        {
-            /* We need to escape this character */
-            ReturnedString += '%';
-            ReturnedString += HexCharacters[((UCHAR)*Input >> 4) % 16];
-            ReturnedString += HexCharacters[(UCHAR)*Input % 16];
-        }
-    }
-    while(*++Input);
-
-    return ReturnedString;
+    return EscapeString(string(Input));
 }
 
 /**
  * Escapes a string according to RFC 1738.
  * Required for passing parameters to the web service.
+ * Embedded NUL characters are escaped as %00.
  *
  * @param Input
  * Pointer to a std::string, which contains the input buffer to escape.
@@ -58,7 +40,27 @@ EscapeString(const char* Input)
 string
 EscapeString(const string& Input)
 {
-    return EscapeString(Input.c_str());
+    string ReturnedString;
+
+    for(size_t i = 0; i < Input.size(); i++)
+    {
+        const char c = Input[i];
+
+        if(c && strchr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~", c))
+        {
+            /* It's a character we don't need to escape, just add it to the output string */
+            ReturnedString += c;
+        }
+        else
+        {
+            /* We need to escape this character */
+            ReturnedString += '%';
+            ReturnedString += HexCharacters[((UCHAR)c >> 4) % 16];
+            ReturnedString += HexCharacters[(UCHAR)c % 16];
+        }
+    }
+
+    return ReturnedString;
 }
 
 /**
@@ -85,6 +87,19 @@ IsNumber(const char* Input)
     return true;
 }
 
+static void
+DbgPrintChunk(const char* Data, size_t Size)
+{
+    char DbgString[DBGPRINT_BUFSIZE + 1];
+
+    /* DbgPrint stops at the first NUL, so show embedded NULs as '?' to keep the rest of the chunk */
+    for(size_t i = 0; i < Size; i++)
+        DbgString[i] = Data[i] ? Data[i] : '?';
+
+    DbgString[Size] = 0;
+    DbgPrint("%s", DbgString);
+}
+
 /**
  * Outputs a string through the standard output and the debug output.
  * The string may have LF or CRLF line endings.
@@ -95,7 +110,6 @@ IsNumber(const char* Input)
 string
 StringOut(const string& String, bool forcePrint)
 {
-    char DbgString[DBGPRINT_BUFSIZE + 1];
     size_t i, start = 0, last_newline = 0, size = 0, curr_pos = 0;
     string NewString;
 
@@ -125,18 +139,15 @@ StringOut(const string& String, bool forcePrint)
                 if(last_newline <= start || ((curr_pos - start == DBGPRINT_BUFSIZE) && NewString[curr_pos - 1] == '\n'))
                 {
                     size = curr_pos - start;
-                    memcpy(DbgString, NewString.c_str() + start, size);
+                    DbgPrintChunk(NewString.c_str() + start, size);
                     start = curr_pos;
                 }
                 else
                 {
                     size = last_newline - start;
-                    memcpy(DbgString, NewString.c_str() + start, size);
+                    DbgPrintChunk(NewString.c_str() + start, size);
                     start = last_newline;
                 }
-
-                DbgString[size] = 0;
-                DbgPrint("%s", DbgString);
             }
 
             last_newline = curr_pos;
@@ -152,9 +163,7 @@ StringOut(const string& String, bool forcePrint)
         if(Configuration.DoPrint())
             cout << NewString << flush;
 
-        memcpy(DbgString, NewString.c_str() + start, size);
-        DbgString[size] = 0;
-        DbgPrint("%s", DbgString);
+        DbgPrintChunk(NewString.c_str() + start, size);
 
         NewString.clear();
         return NewString;
