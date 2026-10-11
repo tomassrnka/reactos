@@ -293,6 +293,8 @@ CShellLink::CShellLink()
     m_bDirty = FALSE;
     m_pDBList = NULL;
     m_bInInit = FALSE;
+    m_bTargetChanged = FALSE;
+    m_bCommentChanged = FALSE;
     m_hIcon = NULL;
 
     m_sLinkPath = NULL;
@@ -1495,17 +1497,6 @@ HRESULT STDMETHODCALLTYPE CShellLink::Resolve(HWND hwnd, DWORD fFlags)
         {
             hr = S_OK;    /* don't report an error occurred while just caching information */
         }
-    }
-
-    // FIXME: Strange to do that here...
-    if (!m_sIcoPath && m_sPath)
-    {
-        m_sIcoPath = strdupW(m_sPath);
-        if (!m_sIcoPath)
-            return E_OUTOFMEMORY;
-
-        m_Header.nIconIndex = 0;
-        m_bDirty = TRUE;
     }
 
     return hr;
@@ -2778,6 +2769,8 @@ BOOL CShellLink::OnInitDialog(HWND hwndDlg, HWND hwndFocus, LPARAM lParam)
           m_sIcoPath, m_sPath, m_sPathRel, sProduct, m_sWorkDir);
 
     m_bInInit = TRUE;
+    m_bTargetChanged = FALSE;
+    m_bCommentChanged = FALSE;
     UINT darwin = m_Header.dwFlags & (SLDF_HAS_DARWINID);
 
     /* Get file information */
@@ -3010,7 +3003,13 @@ void CShellLink::OnCommand(HWND hwndDlg, int id, HWND hwndCtl, UINT codeNotify)
     if (codeNotify == EN_CHANGE || codeNotify == CBN_SELCHANGE)
     {
         if (!m_bInInit)
+        {
+            if (id == IDC_SHORTCUT_TARGET_TEXT)
+                m_bTargetChanged = TRUE;
+            else if (id == IDC_SHORTCUT_COMMENT_EDIT)
+                m_bCommentChanged = TRUE;
             PropSheet_Changed(GetParent(hwndDlg), hwndDlg);
+        }
     }
 }
 
@@ -3028,8 +3027,9 @@ LRESULT CShellLink::OnNotify(HWND hwndDlg, int idFrom, LPNMHDR pnmhdr)
         /* set link destination */
         HWND hWndTarget = GetDlgItem(hwndDlg, IDC_SHORTCUT_TARGET_TEXT);
         GetWindowTextW(hWndTarget, wszBuf, _countof(wszBuf));
-        // Only set the path and arguments for filesystem targets (we can't verify other targets)
-        if (IsWindowEnabled(hWndTarget))
+        // Only set the path and arguments for filesystem targets (we can't verify other targets).
+        // An unchanged target is not set again: that would drop its environment variables.
+        if (IsWindowEnabled(hWndTarget) && m_bTargetChanged)
         {
             LPWSTR lpszArgs = NULL;
             LPWSTR unquoted = wszBuf;
@@ -3066,6 +3066,26 @@ LRESULT CShellLink::OnNotify(HWND hwndDlg, int idFrom, LPNMHDR pnmhdr)
             SetArguments(lpszArgs ? lpszArgs : L"\0");
         }
 
+        if (m_bCommentChanged)
+        {
+            HWND hWndComment = GetDlgItem(hwndDlg, IDC_SHORTCUT_COMMENT_EDIT);
+            INT cchComment = GetWindowTextLengthW(hWndComment) + 1;
+            CComHeapPtr<WCHAR> pszComment;
+            BOOL bStored = pszComment.Allocate(cchComment);
+            if (bStored)
+            {
+                pszComment[0] = UNICODE_NULL;
+                GetWindowTextW(hWndComment, pszComment, cchComment);
+                bStored = SUCCEEDED(SetDescription(pszComment));
+            }
+            if (!bStored)
+            {
+                /* Keep the edit pending instead of saving without it */
+                SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, PSNRET_INVALID_NOCHANGEPAGE);
+                return TRUE;
+            }
+        }
+
         m_Header.wHotKey = (WORD)SendDlgItemMessageW(hwndDlg, IDC_SHORTCUT_KEY_HOTKEY, HKM_GETHOTKEY, 0, 0);
 
         int index = (int)SendDlgItemMessageW(hwndDlg, IDC_SHORTCUT_RUN_COMBO, CB_GETCURSEL, 0, 0);
@@ -3077,6 +3097,7 @@ LRESULT CShellLink::OnNotify(HWND hwndDlg, int idFrom, LPNMHDR pnmhdr)
         TRACE("This %p m_sLinkPath %S\n", this, m_sLinkPath);
         Save(m_sLinkPath, TRUE);
         SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, m_sLinkPath, NULL);
+        m_bTargetChanged = m_bCommentChanged = FALSE;
         SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, PSNRET_NOERROR);
         return TRUE;
     }
