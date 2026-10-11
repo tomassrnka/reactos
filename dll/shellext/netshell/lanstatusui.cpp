@@ -11,6 +11,8 @@
 
 #define NETTIMERID 0xFABC
 #define NETTIMERINTERVAL 1000
+#define NETRETRYINTERVAL 3000
+#define NETRETRYMAX 100
 #define WPARAM_MAGIC MAKELONG(MAKEWORD('L', 'S'), MAKEWORD('T', 'I')) // "LanStatusTrayIcon" (Arbitrary)
 
 static void
@@ -28,9 +30,13 @@ EnumNotificationIconWindows(
     }
 }
 
+static CLanStatus *g_pRetryLanStatus;
+
 CLanStatus::CLanStatus() :
     m_lpNetMan(NULL),
-    m_pHead(NULL)
+    m_pHead(NULL),
+    m_RetryTimer(0),
+    m_RetryCount(0)
 {
 }
 
@@ -1210,6 +1216,9 @@ CLanStatus::InitializeNetTaskbarNotifications()
         if (!hwndDlg)
         {
             ERR("CreateDialogParamW failed\n");
+            pItem->pNet->Release();
+            CoTaskMemFree(pItem);
+            CoTaskMemFree(pContext);
             continue;
         }
 
@@ -1259,7 +1268,10 @@ CLanStatus::InitializeNetTaskbarNotifications()
         else
         {
             ERR("Shell_NotifyIconW failed\n");
+            DestroyWindow(hwndDlg);
+            pItem->pNet->Release();
             CoTaskMemFree(pItem);
+            CoTaskMemFree(pContext);
         }
 
         if (nid.uFlags & NIF_ICON)
@@ -1267,7 +1279,53 @@ CLanStatus::InitializeNetTaskbarNotifications()
     }
 
     m_lpNetMan = pNetConMan;
+    UpdateRetryTimer();
     return S_OK;
+}
+
+VOID
+CALLBACK
+CLanStatus::RetryTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
+{
+    CLanStatus *pThis = g_pRetryLanStatus;
+
+    if (!pThis || idEvent != pThis->m_RetryTimer)
+    {
+        KillTimer(NULL, idEvent);
+        return;
+    }
+    pThis->InitializeNetTaskbarNotifications();
+}
+
+void
+CLanStatus::StopRetryTimer()
+{
+    if (m_RetryTimer)
+    {
+        KillTimer(NULL, m_RetryTimer);
+        m_RetryTimer = 0;
+        g_pRetryLanStatus = NULL;
+    }
+}
+
+void
+CLanStatus::UpdateRetryTimer()
+{
+    /* At logon the IP helper may not list the adapters yet; enumerate again
+     * until a connection shows up, so that it gets its icon and status dialog */
+    if (m_pHead || m_RetryCount >= NETRETRYMAX)
+    {
+        StopRetryTimer();
+        return;
+    }
+
+    if (!m_RetryTimer)
+    {
+        m_RetryTimer = SetTimer(NULL, 0, NETRETRYINTERVAL, RetryTimerProc);
+        if (m_RetryTimer)
+            g_pRetryLanStatus = this;
+    }
+    m_RetryCount++;
 }
 
 HRESULT
@@ -1315,6 +1373,11 @@ CLanStatus::Exec(
     {
         if (IsEqualGUID(*pguidCmdGroup, CGID_ShellServiceObject))
         {
+            if (nCmdID == OLECMDID_SAVE)
+            {
+                StopRetryTimer();
+                return S_OK;
+            }
             return InitializeNetTaskbarNotifications();
         }
         else
