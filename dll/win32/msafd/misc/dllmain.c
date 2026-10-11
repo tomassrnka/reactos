@@ -3077,14 +3077,17 @@ WSPIoctl(IN  SOCKET Handle,
              * WSAEINVAL on other socket types) so applications such as the Go
              * runtime, which disables connection reset on every UDP socket, can
              * create datagram sockets. */
+            /* A rejected request fails at once; the overlapped tail would report success */
             if (Socket->SharedData->SocketType != SOCK_DGRAM)
             {
                 Errno = WSAEINVAL;
+                NeedsCompletion = FALSE;
                 break;
             }
             if (IS_INTRESOURCE(lpvInBuffer) || cbInBuffer < sizeof(BOOL))
             {
                 Errno = WSAEFAULT;
+                NeedsCompletion = FALSE;
                 break;
             }
             cbRet = 0;
