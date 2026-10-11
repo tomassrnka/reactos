@@ -765,17 +765,16 @@ static DWORD CALLBACK RecycleBinItemPropThread(LPVOID pParam)
     return 0;
 }
 
-static HRESULT ShowRecycleBinItemProperties(LPCITEMIDLIST pidl)
+static HRESULT ShowRecycleBinItemProperties(LPCITEMIDLIST pidl, BOOL bSync)
 {
     if (!ValidateItem(pidl))
         return E_INVALIDARG;
     LPITEMIDLIST pidlCopy = ILClone(pidl);
     if (!pidlCopy)
         return E_OUTOFMEMORY;
-    if (SHCreateThread(RecycleBinItemPropThread, pidlCopy, CTF_COINIT | CTF_PROCESS_REF | CTF_INSIST, NULL))
-        return S_OK;
-    ILFree(pidlCopy);
-    return E_FAIL;
+    if (bSync || !SHCreateThread(RecycleBinItemPropThread, pidlCopy, CTF_COINIT | CTF_PROCESS_REF, NULL))
+        RecycleBinItemPropThread(pidlCopy);
+    return S_OK;
 }
 
 HRESULT WINAPI CRecycleBinItemContextMenu::InvokeCommand(LPCMINVOKECOMMANDINFO lpcmi)
@@ -838,8 +837,9 @@ HRESULT WINAPI CRecycleBinItemContextMenu::InvokeCommand(LPCMINVOKECOMMANDINFO l
     else if (CmdId == IDC_BB_PROPERTIES)
     {
         HRESULT hr = S_OK;
+        BOOL bSync = (lpcmi->fMask & CMIC_MASK_NOASYNC) != 0;
         for (UINT i = 0; i < m_cidl && SUCCEEDED(hr); ++i)
-            hr = ShowRecycleBinItemProperties(m_apidl[i]);
+            hr = ShowRecycleBinItemProperties(m_apidl[i], bSync);
         return hr;
     }
     return E_UNEXPECTED;
