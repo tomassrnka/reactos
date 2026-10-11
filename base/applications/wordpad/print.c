@@ -534,9 +534,46 @@ void get_default_printer_opts(void)
     devNames = pd.hDevNames;
 }
 
+#ifdef __REACTOS__
+/* riched20 does not implement EM_FORMATRANGE yet: it renders nothing and returns 0,
+ * so printing would produce blank pages and the preview blank pages without end */
+BOOL print_supported(HWND hMainWnd)
+{
+    HWND hEditorWnd = GetDlgItem(hMainWnd, IDC_EDITOR);
+    GETTEXTLENGTHEX gt = {GTL_DEFAULT, 1200};
+    FORMATRANGE fr;
+    LRESULT next;
+    WCHAR wszText[MAX_STRING_LEN], wszTitle[MAX_STRING_LEN];
+
+    if (!SendMessageW(hEditorWnd, EM_GETTEXTLENGTHEX, (WPARAM)&gt, 0))
+        return TRUE;
+
+    fr.hdc = fr.hdcTarget = CreateCompatibleDC(NULL);
+    SetRect(&fr.rcPage, 0, 0, centmm_to_twips(18500), centmm_to_twips(27000));
+    fr.rc = fr.rcPage;
+    fr.chrg.cpMin = 0;
+    fr.chrg.cpMax = -1;
+    next = SendMessageW(hEditorWnd, EM_FORMATRANGE, FALSE, (LPARAM)&fr);
+    SendMessageW(hEditorWnd, EM_FORMATRANGE, FALSE, 0);
+    DeleteDC(fr.hdc);
+    if (next > 0)
+        return TRUE;
+
+    LoadStringW(GetModuleHandleW(NULL), STRING_PRINTING_NOT_IMPLEMENTED, wszText, MAX_STRING_LEN);
+    GetWindowTextW(hMainWnd, wszTitle, MAX_STRING_LEN);
+    MessageBoxW(hMainWnd, wszText, wszTitle, MB_OK | MB_ICONINFORMATION);
+    return FALSE;
+}
+#endif
+
 void print_quick(HWND hMainWnd, LPWSTR wszFileName)
 {
     PRINTDLGW pd;
+
+#ifdef __REACTOS__
+    if (!print_supported(hMainWnd))
+        return;
+#endif
 
     ZeroMemory(&pd, sizeof(pd));
     pd.hwndOwner = hMainWnd;
@@ -552,6 +589,11 @@ void dialog_print(HWND hMainWnd, LPWSTR wszFileName)
     HWND hEditorWnd = GetDlgItem(hMainWnd, IDC_EDITOR);
     int from = 0;
     int to = 0;
+
+#ifdef __REACTOS__
+    if (!print_supported(hMainWnd))
+        return;
+#endif
 
     ZeroMemory(&pd, sizeof(pd));
     pd.lStructSize = sizeof(pd);
