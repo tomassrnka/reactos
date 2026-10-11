@@ -31,8 +31,11 @@ GeneralPageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_INITDIALOG:
         hGeneralDialog = hDlg;
         SetWindowPos(hDlg, NULL, 10, 32, 0, 0, SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSIZE | SWP_NOZORDER);
-        /* FIXME */
+        /* FIXME: Implement saving; until then the selection cannot be changed */
         SendDlgItemMessage(hDlg, IDC_CBX_NORMAL_START, BM_SETCHECK, BST_CHECKED, 0);
+        EnableWindow(GetDlgItem(hDlg, IDC_CBX_NORMAL_START), FALSE);
+        EnableWindow(GetDlgItem(hDlg, IDC_CBX_DIAGNOSTIC_START), FALSE);
+        EnableWindow(GetDlgItem(hDlg, IDC_CBX_SELECTIVE_STARTUP), FALSE);
         EnableCheckboxControls(hDlg, FALSE);
         return TRUE;
     case WM_COMMAND:
