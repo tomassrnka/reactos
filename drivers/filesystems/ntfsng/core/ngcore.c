@@ -61,6 +61,9 @@ struct ngc_vol {
 	int damaged;                    /* the mount-time check found damage: read-only */
 	char why[160];
 	int failed;                     /* a consistency point was abandoned for good: every later one fails */
+	int label_read;                 /* label holds $VOLUME_NAME as on disk */
+	unsigned int label_len;         /* in UTF-16 units */
+	unsigned short label[NGC_LABEL_MAX];
 };
 
 /* Mount-time consistency check: 0 never, 1 after an unclean shutdown or when $MFT is at most 64 MB, 2 always. */
@@ -495,6 +498,48 @@ void ngc_umount(ngc_vol *v, int discard)
 	kfree(v);
 }
 
+/*
+ * A $VOLUME_NAME the label code reads and resizes: resident, unnamed, no flags, and its value after
+ * the resident header (the core's own check bounds the value by the record only; a value at offset 0
+ * would make a resize move the next attribute over the header it writes).
+ */
+static bool ngc_label_attr_ok(const struct attr_record *a)
+{
+	return !a->non_resident && !a->flags && !a->name_length &&
+	       le16_to_cpu(a->data.resident.value_offset) >=
+	       offsetof(struct attr_record, data.resident.reserved) + sizeof(a->data.resident.reserved);
+}
+
+/*
+ * Reads $Volume's $VOLUME_NAME as stored (raw UTF-16, so any label Windows writes, unpaired
+ * surrogates and NULs included, reads back the same).  A label longer than NGC_LABEL_MAX units,
+ * which Windows does not write, is cut there.  The result is kept, unless memory ran out, in
+ * which case the next call reads again.
+ */
+static void ngc_load_label(struct ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct ntfs_inode *ni = NTFS_I(vol->vol_ino);
+	struct ntfs_attr_search_ctx *ctx;
+	int err;
+
+	if (v->label_read)
+		return;
+	mutex_lock(&ni->mrec_lock);
+	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	err = ctx ? ntfs_attr_lookup(AT_VOLUME_NAME, NULL, 0, 0, 0, NULL, 0, ctx) : -ENOMEM;
+	v->label_len = 0;
+	if (!err && ngc_label_attr_ok(ctx->attr)) {
+		u32 n = min_t(u32, le32_to_cpu(ctx->attr->data.resident.value_length) / sizeof(__le16), NGC_LABEL_MAX);
+		memcpy(v->label, (u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset), n * sizeof(__le16));
+		v->label_len = n;
+	}
+	v->label_read = err != -ENOMEM;
+	if (ctx)
+		ntfs_attr_put_search_ctx(ctx);
+	mutex_unlock(&ni->mrec_lock);
+}
+
 void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi)
 {
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
@@ -510,13 +555,9 @@ void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi)
 	vi->read_only = sb_rdonly(v->sb) ? 1 : 0;
 	vi->dirty = (vol->vol_flags & VOLUME_IS_DIRTY) ? 1 : 0;
 	vi->damaged = v->damaged ? 1 : 0;
-	mutex_lock(&vol->volume_label_lock);
-	if (vol->volume_label) {
-		int n = utf8s_to_utf16s(vol->volume_label, strlen((char *)vol->volume_label),
-				UTF16_LITTLE_ENDIAN, vi->label, 64);
-		vi->label_len = n > 0 ? n : 0;
-	}
-	mutex_unlock(&vol->volume_label_lock);
+	ngc_load_label(v);
+	memcpy(vi->label, v->label, v->label_len * sizeof(v->label[0]));
+	vi->label_len = v->label_len;
 }
 
 ngc_node *ngc_root(ngc_vol *v)
@@ -1980,6 +2021,72 @@ static int ngc_set_security_impl(ngc_vol *v, ngc_node *n, const void *sd, unsign
 	if (!err)
 		mark_inode_dirty(VFS_I(ni));
 	return err;
+}
+
+/* ------------------------------------------------------------- volume label */
+
+/*
+ * Sets the volume label: the value of $Volume's $VOLUME_NAME, resized and rewritten in place (added
+ * when the volume has none), so the change is one MFT record write that the journal commits with
+ * the rest of the transaction.  An empty label stays an empty attribute, as format leaves it.  The
+ * caller validated @len (at most NGC_LABEL_MAX units); the characters are stored as given.
+ */
+int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct ntfs_inode *ni = NTFS_I(vol->vol_ino);
+	struct ntfs_attr_search_ctx *ctx;
+	unsigned char *nls = NULL, *old;
+	u32 bytes = len * sizeof(__le16);
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (len > NGC_LABEL_MAX)
+		return -EINVAL;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	mutex_lock(&ni->mrec_lock);
+	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	if (!ctx) {
+		mutex_unlock(&ni->mrec_lock);
+		return -ENOMEM;
+	}
+	err = ntfs_attr_lookup(AT_VOLUME_NAME, NULL, 0, 0, 0, NULL, 0, ctx);
+	if (!err) {
+		if (!ngc_label_attr_ok(ctx->attr))
+			err = -EUCLEAN;
+		else
+			err = ntfs_resident_attr_value_resize(ctx->mrec, ctx->attr, bytes);
+		if (!err) {
+			memcpy((u8 *)ctx->attr + le16_to_cpu(ctx->attr->data.resident.value_offset), label, bytes);
+			mark_mft_record_dirty(ctx->ntfs_ino);
+		}
+		ntfs_attr_put_search_ctx(ctx);
+	} else {
+		ntfs_attr_put_search_ctx(ctx);
+		if (err == -ENOENT) {
+			err = ntfs_resident_attr_record_add(ni, AT_VOLUME_NAME, AT_UNNAMED, 0, (u8 *)label, bytes, 0);
+			if (err > 0)
+				err = 0;
+		}
+	}
+	mutex_unlock(&ni->mrec_lock);
+	if (err)
+		return err;
+	memcpy(v->label, label, bytes);
+	v->label_len = len;
+	v->label_read = 1;
+	/* The core's own UTF-8 copy; a label that does not convert leaves it empty. */
+	if (len && ntfs_ucstonls(vol, (const __le16 *)label, len, &nls, 0) < 0)
+		nls = NULL;
+	mutex_lock(&vol->volume_label_lock);
+	old = vol->volume_label;
+	vol->volume_label = nls;
+	mutex_unlock(&vol->volume_label_lock);
+	kfree(old);
+	return 0;
 }
 
 /* ------------------------------------------------------------- reparse points */

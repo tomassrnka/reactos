@@ -884,14 +884,19 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         {
             PFILE_FS_VOLUME_INFORMATION V = Buffer;
             ULONG Fixed = FIELD_OFFSET(FILE_FS_VOLUME_INFORMATION, VolumeLabel), Copy;
+            WCHAR Label[MAXIMUM_VOLUME_LABEL_LENGTH / sizeof(WCHAR)];
+            KIRQL Irql;
             if (Length < Fixed)
                 return STATUS_BUFFER_TOO_SMALL;
             V->VolumeCreationTime.QuadPart = 0;
             V->VolumeSerialNumber = Vcb->Vpb->SerialNumber;
             V->SupportsObjects = FALSE;
+            IoAcquireVpbSpinLock(&Irql);
+            RtlCopyMemory(Label, Vcb->Vpb->VolumeLabel, Vcb->Vpb->VolumeLabelLength);
             V->VolumeLabelLength = Vcb->Vpb->VolumeLabelLength;
+            IoReleaseVpbSpinLock(Irql);
             Copy = min(V->VolumeLabelLength, Length - Fixed);
-            RtlCopyMemory(V->VolumeLabel, Vcb->Vpb->VolumeLabel, Copy);
+            RtlCopyMemory(V->VolumeLabel, Label, Copy);
             Used = Fixed + Copy;
             if (Copy < V->VolumeLabelLength)
                 Status = STATUS_BUFFER_OVERFLOW;
@@ -956,4 +961,58 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     Irp->IoStatus.Information = Used;
     return Status;
+}
+
+/*
+ * IRP_MJ_SET_VOLUME_INFORMATION.  Only the label can be set, and only through a volume handle (the
+ * I/O manager has checked for write access).  As on Windows, the label is up to 32 characters of any
+ * kind, stored as given; an odd byte count is refused, as Windows 10 does.  The change is a journaled
+ * metadata update like any other.  A locked volume refuses it (the lock leaves the volume flushed and
+ * quiet for its holder, who may write the disk directly).
+ */
+NTSTATUS NgSetVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    PNG_FCB Fcb = Stack->FileObject ? Stack->FileObject->FsContext : NULL;
+    ULONG Length = Stack->Parameters.SetVolume.Length;
+    PFILE_FS_LABEL_INFORMATION Info = Irp->AssociatedIrp.SystemBuffer;
+    ULONG Fixed = FIELD_OFFSET(FILE_FS_LABEL_INFORMATION, VolumeLabel);
+    KIRQL Irql;
+    int Err;
+
+    if (DeviceObject == NgGlobal.ControlDevice)
+        return STATUS_INVALID_DEVICE_REQUEST;
+    if (Stack->Parameters.SetVolume.FsInformationClass != FileFsLabelInformation)
+        return Vcb->ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_INVALID_DEVICE_REQUEST;
+    if (!Fcb || !Fcb->IsVolume)
+        return STATUS_ACCESS_DENIED;
+    if (Length < Fixed || Info->VolumeLabelLength > Length - Fixed)
+        return STATUS_INVALID_PARAMETER;
+    if ((Info->VolumeLabelLength & 1) || Info->VolumeLabelLength > NGC_LABEL_MAX * sizeof(WCHAR))
+        return STATUS_INVALID_VOLUME_LABEL;
+    if (Vcb->ReadOnly || Vcb->Damaged)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    NgAcquireCore(Vcb);
+    /*
+     * Not while the volume is locked, nor after its lock holder wrote the disk directly: the holder owns
+     * the disk then, and nothing of the mounted state may be written over what it wrote.
+     */
+    if (Vcb->LockedBy || Vcb->RawWritten)
+    {
+        NgReleaseCore(Vcb);
+        return STATUS_ACCESS_DENIED;
+    }
+    Err = ngc_set_label(Vcb->Core, (const unsigned short *)Info->VolumeLabel, Info->VolumeLabelLength / sizeof(WCHAR));
+    if (!Err)
+    {
+        IoAcquireVpbSpinLock(&Irql);
+        RtlCopyMemory(Vcb->Vpb->VolumeLabel, Info->VolumeLabel, Info->VolumeLabelLength);
+        Vcb->Vpb->VolumeLabelLength = (USHORT)Info->VolumeLabelLength;
+        IoReleaseVpbSpinLock(Irql);
+        NgAfterChange(Vcb);
+    }
+    NgReleaseCore(Vcb);
+    return NgErrnoToStatus(Err);
 }

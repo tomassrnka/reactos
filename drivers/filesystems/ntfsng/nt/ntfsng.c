@@ -374,7 +374,7 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
     ExFreePoolWithTag(Fcb, TAG_NTFSNG);
 }
 
-/* EA, volume label and security writes are not implemented. */
+/* EA writes are not implemented. */
 static NTSTATUS NgRefuseWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
@@ -769,7 +769,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgHandlers[IRP_MJ_QUERY_INFORMATION] = NgQueryInformation;
     NgHandlers[IRP_MJ_SET_INFORMATION] = NgSetInformation;
     NgHandlers[IRP_MJ_SET_EA] = NgRefuseWrite;
-    NgHandlers[IRP_MJ_SET_VOLUME_INFORMATION] = NgRefuseWrite;
+    NgHandlers[IRP_MJ_SET_VOLUME_INFORMATION] = NgSetVolumeInformation;
     NgHandlers[IRP_MJ_SET_SECURITY] = NgSetSecurity;
     NgHandlers[IRP_MJ_QUERY_SECURITY] = NgQuerySecurity;
     NgHandlers[IRP_MJ_FLUSH_BUFFERS] = NgFlushBuffers;

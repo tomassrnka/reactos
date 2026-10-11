@@ -457,10 +457,16 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
     }
     if (Raw || Vcb->ReadOnly)
     {
-        if (!Vcb->RawWritten && !Vcb->Dismounted)
-            DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): the mounted state is dropped at dismount\n",
-                    Offset, Length);
-        Vcb->RawWritten = TRUE;
+        if (!Vcb->RawWritten)
+        {
+            if (!Vcb->Dismounted)
+                DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): the mounted state is dropped at dismount\n",
+                        Offset, Length);
+            /* Under CoreLock: a core change (a label set, the flusher) either ends before or sees the flag. */
+            NgAcquireCore(Vcb);
+            Vcb->RawWritten = TRUE;
+            NgReleaseCore(Vcb);
+        }
         Status = NgWriteDevice(Vcb, Offset, Buffer, Length);
         if (NT_SUCCESS(Status))
             Irp->IoStatus.Information = Length;
@@ -844,7 +850,7 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
         if (KeWaitForSingleObject(&Vcb->FlusherStop, Executive, KernelMode, FALSE, &Period) == STATUS_SUCCESS)
             break;
         NgAcquireCore(Vcb);
-        if (!Vcb->WrongMedia && ngc_dirty(Vcb->Core))
+        if (!Vcb->WrongMedia && !Vcb->RawWritten && ngc_dirty(Vcb->Core))
         {
             /* Busy: commit and keep VOLUME_IS_DIRTY.  Quiet for a whole period: also clear the flag. */
             int Err = ngc_changed(Vcb->Core) ? ngc_commit_now(Vcb->Core) : ngc_sync(Vcb->Core);

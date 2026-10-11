@@ -31,6 +31,8 @@ typedef struct ngc_node ngc_node;    /* a referenced fs/ntfs VFS inode */
 #define NGC_ENODATA 61
 #define NGC_EBUSY 16
 
+#define NGC_LABEL_MAX 32         /* volume label, UTF-16 units (Windows' limit) */
+
 #define NGC_ATTR_COMPRESSED 1
 #define NGC_ATTR_SPARSE 2
 #define NGC_ATTR_ENCRYPTED 4
@@ -55,7 +57,7 @@ struct ngc_volinfo {
 	unsigned int cluster_size;
 	unsigned int sector_size;
 	unsigned int label_len;          /* in UTF-16 units */
-	unsigned short label[64];
+	unsigned short label[NGC_LABEL_MAX];
 	unsigned char major, minor;
 	unsigned char read_only;         /* mounted read-only (policy or request) */
 	unsigned char dirty;             /* VOLUME_IS_DIRTY currently set */
@@ -125,6 +127,8 @@ int ngc_links(ngc_node *n);
 int ngc_parent_name(ngc_node *n, unsigned long long *parent, unsigned short *out, unsigned int *len);
 int ngc_get_security(ngc_vol *v, ngc_node *n, void **out, unsigned int *len);
 int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len);
+/* Sets the volume label (@len UTF-16 units, at most NGC_LABEL_MAX; 0 clears it). */
+int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len);
 void ngc_free(void *p);
 int ngc_create_stream(ngc_vol *v, ngc_node *base, const unsigned short *sname, unsigned int len, ngc_node **out);
 int ngc_delete_stream(ngc_vol *v, ngc_node *n);

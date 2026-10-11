@@ -321,4 +321,5 @@ NTSTATUS NgLockControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+NTSTATUS NgSetVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 ULONG NgFileAttributes(PNG_FCB Fcb, const struct ngc_stat *St);
