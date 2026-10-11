@@ -42,8 +42,9 @@ typedef struct _TIMEZONE_ENTRY
     struct _TIMEZONE_ENTRY *Prev;
     struct _TIMEZONE_ENTRY *Next;
     WCHAR Description[128]; /* 'Display' */
-    WCHAR StandardName[32]; /* 'Std' */
-    WCHAR DaylightName[32]; /* 'Dlt' */
+    WCHAR StandardName[33]; /* 'Std' */
+    WCHAR DaylightName[33]; /* 'Dlt' */
+    WCHAR KeyName[128]; /* Key name under 'Time Zones' */
     REG_TZI_FORMAT TimezoneInfo; /* 'TZI' */
     ULONG Index;
 } TIMEZONE_ENTRY, *PTIMEZONE_ENTRY;
@@ -1679,6 +1680,7 @@ GetLargerTimeZoneEntry(PSETUPDATA SetupData, DWORD Index)
 static LONG
 RetrieveTimeZone(
     IN HKEY hZoneKey,
+    IN PCWSTR ZoneKeyName,
     IN PVOID Context)
 {
     LONG lError;
@@ -1713,6 +1715,10 @@ RetrieveTimeZone(
         HeapFree(GetProcessHeap(), 0, Entry);
         return lError;
     }
+
+    /* A name too long for TimeZoneKeyName stays empty and is never matched */
+    if (wcslen(ZoneKeyName) < _countof(Entry->KeyName))
+        StringCchCopyW(Entry->KeyName, _countof(Entry->KeyName), ZoneKeyName);
 
     if (SetupData->TimeZoneListHead == NULL &&
         SetupData->TimeZoneListTail == NULL)
@@ -1893,10 +1899,13 @@ SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData, BOOL bAutoDaylight)
     if (!HasDaylightSavingTime(Entry))
         bAutoDaylight = TRUE;
 
-    wcscpy(TimeZoneInformation.StandardName,
-           Entry->StandardName);
-    wcscpy(TimeZoneInformation.DaylightName,
-           Entry->DaylightName);
+    /* Both fields hold 31 characters and the terminator */
+    StringCchCopyW(TimeZoneInformation.StandardName,
+                   _countof(TimeZoneInformation.StandardName),
+                   Entry->StandardName);
+    StringCchCopyW(TimeZoneInformation.DaylightName,
+                   _countof(TimeZoneInformation.DaylightName),
+                   Entry->DaylightName);
 
     TimeZoneInformation.Bias = Entry->TimezoneInfo.Bias;
     TimeZoneInformation.StandardBias = Entry->TimezoneInfo.StandardBias;
@@ -1922,10 +1931,12 @@ SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData, BOOL bAutoDaylight)
     }
 
     /* Set time zone information */
-    SetTimeZoneInformation(&TimeZoneInformation);
+    if (!SetTimeZoneInformation(&TimeZoneInformation))
+        return;
 
     /* The key exists once SetTimeZoneInformation has written it */
     SetAutoDaylight(bAutoDaylight);
+    SetTimeZoneKeyName(Entry->KeyName);
 }
 
 

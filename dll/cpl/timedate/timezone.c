@@ -19,6 +19,7 @@ typedef struct _TIMEZONE_ENTRY
     WCHAR Description[128]; /* 'Display' */
     WCHAR StandardName[33]; /* 'Std' */
     WCHAR DaylightName[33]; /* 'Dlt' */
+    WCHAR KeyName[128]; /* Key name under 'Time Zones' */
     REG_TZI_FORMAT TimezoneInfo; /* 'TZI' */
 } TIMEZONE_ENTRY, *PTIMEZONE_ENTRY;
 
@@ -113,6 +114,7 @@ GetLargerTimeZoneEntry(
 static LONG
 RetrieveTimeZone(
     IN HKEY hZoneKey,
+    IN PCWSTR ZoneKeyName,
     IN PVOID Context)
 {
     LONG lError;
@@ -146,6 +148,10 @@ RetrieveTimeZone(
         HeapFree(GetProcessHeap(), 0, Entry);
         return lError;
     }
+
+    /* A name too long for TimeZoneKeyName stays empty and is never matched */
+    if (wcslen(ZoneKeyName) < ARRAYSIZE(Entry->KeyName))
+        StringCchCopyW(Entry->KeyName, ARRAYSIZE(Entry->KeyName), ZoneKeyName);
 
     if (TimeZoneListHead == NULL &&
         TimeZoneListTail == NULL)
@@ -218,6 +224,28 @@ DestroyTimeZoneList(VOID)
 }
 
 
+/* Whether the current zone information was set from this entry, with or without DST */
+static BOOL
+IsTimeZoneSetFrom(PTIMEZONE_ENTRY Entry, LPTIME_ZONE_INFORMATION TimeZoneInfo)
+{
+    if ((Entry->TimezoneInfo.Bias == TimeZoneInfo->Bias) &&
+        (Entry->TimezoneInfo.StandardBias == TimeZoneInfo->StandardBias) &&
+        (Entry->TimezoneInfo.DaylightBias == TimeZoneInfo->DaylightBias) &&
+        (memcmp(&Entry->TimezoneInfo.StandardDate, &TimeZoneInfo->StandardDate, sizeof(SYSTEMTIME)) == 0) &&
+        (memcmp(&Entry->TimezoneInfo.DaylightDate, &TimeZoneInfo->DaylightDate, sizeof(SYSTEMTIME)) == 0))
+    {
+        return TRUE;
+    }
+
+    /* See SetLocalTimeZone for the form a zone takes with DST turned off */
+    return (HasDaylightSaving(Entry) &&
+            (TimeZoneInfo->StandardDate.wMonth == 0) &&
+            (TimeZoneInfo->DaylightDate.wMonth == 0) &&
+            (TimeZoneInfo->Bias == Entry->TimezoneInfo.Bias + Entry->TimezoneInfo.StandardBias) &&
+            (TimeZoneInfo->StandardBias == 0) &&
+            (TimeZoneInfo->DaylightBias == 0));
+}
+
 static VOID
 ShowTimeZoneList(HWND hwnd)
 {
@@ -225,13 +253,20 @@ ShowTimeZoneList(HWND hwnd)
     PTIMEZONE_ENTRY Entry;
     DWORD dwCount;
     DWORD dwIndex = 0;
+    DWORD dwKeyIndex = 0;
     BOOL bFound = FALSE;
+    BOOL bKeyFound = FALSE;
+    BOOL bHaveKeyName;
+    WCHAR szKeyName[128];
 
     if (GetTimeZoneInformation(&TimeZoneInfo) == TIME_ZONE_ID_INVALID)
     {
         /* Failed to retrieve current time-zone info, reset it */
         ZeroMemory(&TimeZoneInfo, sizeof(TimeZoneInfo));
     }
+
+    /* The zone's key name wins over the names, unless it no longer fits the zone */
+    bHaveKeyName = GetTimeZoneKeyName(szKeyName, ARRAYSIZE(szKeyName));
 
     for (Entry = TimeZoneListHead; Entry != NULL; Entry = Entry->Next)
     {
@@ -242,14 +277,23 @@ ShowTimeZoneList(HWND hwnd)
         if (dwCount == CB_ERR || dwCount == CB_ERRSPACE)
             continue;
 
+        if (bHaveKeyName && !bKeyFound &&
+            (_wcsicmp(Entry->KeyName, szKeyName) == 0) &&
+            IsTimeZoneSetFrom(Entry, &TimeZoneInfo))
+        {
+            dwKeyIndex = dwCount;
+            bKeyFound = TRUE;
+        }
+
         /* If the time-zone was found in the list, skip the tests */
         if (bFound)
             continue;
 
         if (*TimeZoneInfo.StandardName && *Entry->StandardName)
         {
-            /* Compare by name */
-            if (wcscmp(Entry->StandardName, TimeZoneInfo.StandardName) == 0)
+            /* Compare by name; a 32-character name was cut to fit TIME_ZONE_INFORMATION */
+            if (wcsncmp(Entry->StandardName, TimeZoneInfo.StandardName,
+                        ARRAYSIZE(TimeZoneInfo.StandardName) - 1) == 0)
             {
                 dwIndex = dwCount;
                 bFound = TRUE;
@@ -267,23 +311,12 @@ ShowTimeZoneList(HWND hwnd)
                 dwIndex = dwCount;
                 bFound = TRUE;
             }
-            /* A zone set with DST turned off (see SetLocalTimeZone) has no dates left to compare */
-            else if (!*TimeZoneInfo.StandardName && !*Entry->StandardName &&
-                     HasDaylightSaving(Entry) &&
-                     (TimeZoneInfo.StandardDate.wMonth == 0) &&
-                     (TimeZoneInfo.Bias == Entry->TimezoneInfo.Bias + Entry->TimezoneInfo.StandardBias) &&
-                     (TimeZoneInfo.StandardBias == 0) &&
-                     (TimeZoneInfo.DaylightBias == 0))
-            {
-                dwIndex = dwCount;
-                bFound = TRUE;
-            }
         }
     }
 
     SendMessageW(hwnd,
                  CB_SETCURSEL,
-                 (WPARAM)dwIndex,
+                 (WPARAM)(bKeyFound ? dwKeyIndex : dwIndex),
                  0);
 }
 
@@ -302,10 +335,13 @@ SetLocalTimeZone(HWND hwnd, BOOL bAutoDaylight)
     if (!HasDaylightSaving(Entry))
         bAutoDaylight = TRUE;
 
-    wcscpy(TimeZoneInformation.StandardName,
-           Entry->StandardName);
-    wcscpy(TimeZoneInformation.DaylightName,
-           Entry->DaylightName);
+    /* Both fields hold 31 characters and the terminator */
+    StringCchCopyW(TimeZoneInformation.StandardName,
+                   ARRAYSIZE(TimeZoneInformation.StandardName),
+                   Entry->StandardName);
+    StringCchCopyW(TimeZoneInformation.DaylightName,
+                   ARRAYSIZE(TimeZoneInformation.DaylightName),
+                   Entry->DaylightName);
 
     TimeZoneInformation.Bias = Entry->TimezoneInfo.Bias;
     TimeZoneInformation.StandardBias = Entry->TimezoneInfo.StandardBias;
@@ -331,10 +367,12 @@ SetLocalTimeZone(HWND hwnd, BOOL bAutoDaylight)
     }
 
     /* Set time zone information */
-    SetTimeZoneInformation(&TimeZoneInformation);
+    if (!SetTimeZoneInformation(&TimeZoneInformation))
+        return;
 
     /* The key exists once SetTimeZoneInformation has written it */
     SetAutoDaylight(bAutoDaylight);
+    SetTimeZoneKeyName(Entry->KeyName);
 }
 
 

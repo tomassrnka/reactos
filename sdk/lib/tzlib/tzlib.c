@@ -268,7 +268,7 @@ EnumerateTimeZoneList(
         }
 
         /* Call the user-provided callback */
-        lError = Callback(hZoneKey, Context);
+        lError = Callback(hZoneKey, szKeyName, Context);
         // lError = QueryTimeZoneData(hZoneKey, Context);
 
         RegCloseKey(hZoneKey);
@@ -351,6 +351,78 @@ SetAutoDaylight(
         /* Auto-Daylight enabled: just delete the value */
         RegDeleteValueW(hKey, L"DisableAutoDaylightTimeSet");
     }
+
+    RegCloseKey(hKey);
+}
+
+/*
+ * The name of the zone's key under "Time Zones", stored as REG_SZ
+ * "TimeZoneKeyName" like Vista+ does. It identifies the zone when its
+ * names cannot be read and its transition dates were cleared.
+ */
+BOOL
+GetTimeZoneKeyName(
+    OUT PWCHAR KeyName,
+    IN ULONG KeyNameLength)
+{
+    LONG lError;
+    HKEY hKey;
+    DWORD dwType;
+    DWORD dwValueSize;
+
+    if (KeyNameLength == 0)
+        return FALSE;
+    *KeyName = UNICODE_NULL;
+
+    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                           L"SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation",
+                           0,
+                           KEY_QUERY_VALUE,
+                           &hKey);
+    if (lError != ERROR_SUCCESS)
+        return FALSE;
+
+    dwValueSize = (KeyNameLength - 1) * sizeof(WCHAR);
+    lError = RegQueryValueExW(hKey,
+                              L"TimeZoneKeyName",
+                              NULL,
+                              &dwType,
+                              (LPBYTE)KeyName,
+                              &dwValueSize);
+
+    RegCloseKey(hKey);
+
+    if ((lError != ERROR_SUCCESS) || (dwType != REG_SZ))
+    {
+        *KeyName = UNICODE_NULL;
+        return FALSE;
+    }
+
+    KeyName[dwValueSize / sizeof(WCHAR)] = UNICODE_NULL;
+    return (*KeyName != UNICODE_NULL);
+}
+
+VOID
+SetTimeZoneKeyName(
+    IN PCWSTR KeyName)
+{
+    LONG lError;
+    HKEY hKey;
+
+    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                           L"SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation",
+                           0,
+                           KEY_SET_VALUE,
+                           &hKey);
+    if (lError != ERROR_SUCCESS)
+        return;
+
+    RegSetValueExW(hKey,
+                   L"TimeZoneKeyName",
+                   0,
+                   REG_SZ,
+                   (LPBYTE)KeyName,
+                   (lstrlenW(KeyName) + 1) * sizeof(WCHAR));
 
     RegCloseKey(hKey);
 }
