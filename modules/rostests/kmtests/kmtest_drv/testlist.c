@@ -43,6 +43,7 @@ KMT_TESTFUNC Test_KdSystemDebugControl;
 KMT_TESTFUNC Test_KeApc;
 KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
+KMT_TESTFUNC Test_KeDpcBound;
 KMT_TESTFUNC Test_KeEvent;
 KMT_TESTFUNC Test_KeFloatPointState;
 KMT_TESTFUNC Test_KeGenericCallDpc;
@@ -132,6 +133,7 @@ const KMT_TEST TestList[] =
     { "KeApc",                              Test_KeApc },
     { "KeDeviceQueue",                      Test_KeDeviceQueue },
     { "KeDpc",                              Test_KeDpc },
+    { "KeDpcBound",                         Test_KeDpcBound },
     { "KeEvent",                            Test_KeEvent },
     { "KeFloatPointState",                  Test_KeFloatPointState },
     { "KeGenericCallDpc",                   Test_KeGenericCallDpc },

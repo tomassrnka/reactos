@@ -86,6 +86,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeApc.c
     ntos_ke/KeDevQueue.c
     ntos_ke/KeDpc.c
+    ntos_ke/KeDpcBound.c
     ntos_ke/KeEvent.c
     ntos_ke/KeFloatPointState.c
     ntos_ke/KeGenericCallDpc.c
