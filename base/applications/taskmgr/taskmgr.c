@@ -199,8 +199,11 @@ TaskManagerWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         return OnCreate(hDlg);
 
     case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-            EndDialog(hDlg, LOWORD(wParam));
+        /* Enter arrives as IDOK; Windows Task Manager closes on Esc but not on Enter */
+        if (LOWORD(wParam) == IDOK)
+            return TRUE;
+        if (LOWORD(wParam) == IDCANCEL) {
+            EndDialog(hDlg, IDCANCEL);
             return TRUE;
         }
         /* Process menu commands */
