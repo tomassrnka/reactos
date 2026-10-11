@@ -4,4 +4,5 @@ STRINGTABLE
 BEGIN
     IDS_CPLSYSTEMNAME "Teléfono y módem"
     IDS_CPLSYSTEMDESCRIPTION "Establece las reglas de marcado de su teléfono y la configuración del módem."
+    IDS_CPLNOTAVAILABLE "Phone and Modem Options cannot be opened. Telephony (TAPI) configuration, dialing rules and modem settings are not implemented yet."
 END
