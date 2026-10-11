@@ -17,6 +17,7 @@ STRINGTABLE
     37 "修復" //FIXME: add accel
     38 "アンインストール" //FIXME: add accel
     39 "&Apply"
+    40 "This installer uses the 32-bit custom action [1] from [2]. This 64-bit version of ReactOS cannot run 32-bit code, so the action was skipped. The setup may show misleading errors or the installation may be incomplete."
 #endif
     100 "New Folder"
 }

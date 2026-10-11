@@ -43,6 +43,7 @@
 #undef WIN32_NO_STATUS
 #include <psdk/ntstatus.h>
 #include <ndk/mmfuncs.h>
+#include "resource.h"
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(msi);
@@ -858,6 +859,57 @@ static custom_action_info *do_msidbCustomActionTypeDll(
     return info;
 }
 
+#if defined(__REACTOS__) && defined(_M_AMD64)
+struct disabled_windows
+{
+    HWND hwnd[16];
+    UINT count;
+};
+
+static BOOL CALLBACK disable_thread_window( HWND hwnd, LPARAM lparam )
+{
+    struct disabled_windows *list = (struct disabled_windows *)lparam;
+
+    if (list->count < ARRAY_SIZE(list->hwnd) && IsWindowVisible( hwnd ) && IsWindowEnabled( hwnd ))
+    {
+        EnableWindow( hwnd, FALSE );
+        list->hwnd[list->count++] = hwnd;
+    }
+    return TRUE;
+}
+
+/* There is no WOW64, so a 32-bit DLL custom action is skipped: log each one, warn once per package */
+static void warn_skipped_32bit_custom_action( MSIPACKAGE *package, const WCHAR *action, const WCHAR *source )
+{
+    struct disabled_windows disabled = { { 0 }, 0 };
+    WCHAR template[512];
+    MSIRECORD *record;
+    UINT i;
+
+    ERR("%s is a 32 bit custom action. Returning as ERROR_SUCCESS\n", debugstr_w(source));
+
+    if (!LoadStringW( msi_hInstance, IDS_WOW64_CUSTOM_ACTION, template, ARRAY_SIZE(template) )) return;
+    if (!(record = MSI_CreateRecord( 2 ))) return;
+    MSI_RecordSetStringW( record, 0, template );
+    MSI_RecordSetStringW( record, 1, action );
+    MSI_RecordSetStringW( record, 2, source );
+    MSI_ProcessMessage( package, INSTALLMESSAGE_INFO, record );
+
+    if (!package->warned_32bit_custom_action)
+    {
+        package->warned_32bit_custom_action = 1;
+        /* The message box has no owner and MB_TASKMODAL is not implemented, so keep the
+         * installer dialogs from handling another event while the warning is shown */
+        EnumThreadWindows( GetCurrentThreadId(), disable_thread_window, (LPARAM)&disabled );
+        MSI_RecordSetStringW( record, 0, template );
+        MSI_ProcessMessage( package, INSTALLMESSAGE_WARNING, record );
+        for (i = 0; i < disabled.count; i++)
+            EnableWindow( disabled.hwnd[i], TRUE );
+    }
+    msiobj_release( &record->hdr );
+}
+#endif
+
 static UINT HANDLE_CustomType1( MSIPACKAGE *package, const WCHAR *source, const WCHAR *target,
                                 INT type, const WCHAR *action )
 {
@@ -869,10 +921,10 @@ static UINT HANDLE_CustomType1( MSIPACKAGE *package, const WCHAR *source, const 
 
 #if defined(__REACTOS__) && defined(_M_AMD64)
     {
-        DWORD arch;
+        DWORD arch = SCS_64BIT_BINARY;
         get_binary_type(binary->tmpfile, &arch);
         if (arch == SCS_32BIT_BINARY) {
-            ERR("%s is a 32 bit custom action. Returning as ERROR_SUCCESS\n", debugstr_w(source));
+            warn_skipped_32bit_custom_action(package, action, source);
             return ERROR_SUCCESS; // HACK: NO WOW64! return as executed though it's not true
         }
     }
@@ -988,10 +1040,10 @@ static UINT HANDLE_CustomType17( MSIPACKAGE *package, const WCHAR *source, const
 
 #if defined(__REACTOS__) && defined(_M_AMD64)
     {
-        DWORD arch;
+        DWORD arch = SCS_64BIT_BINARY;
         get_binary_type(file->TargetPath, &arch);
         if (arch == SCS_32BIT_BINARY) {
-            ERR("%s is a 32 bit custom action. Returning as ERROR_SUCCESS\n", debugstr_w(source));
+            warn_skipped_32bit_custom_action(package, action, source);
             return ERROR_SUCCESS; // HACK: NO WOW64! return as executed though it's not true
         }
     }

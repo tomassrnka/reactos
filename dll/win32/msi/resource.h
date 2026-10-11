@@ -26,6 +26,9 @@
 #define MSIERR_INFO_ACTIONENDED     15
 
 #define IDS_NEWFOLDER               100
+#ifdef __REACTOS__
+#define IDS_WOW64_CUSTOM_ACTION     40
+#endif
 
 #define MSIERR_INSERTDISK           1302
 #define MSIERR_CABNOTFOUND          1311
