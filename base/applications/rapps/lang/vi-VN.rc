@@ -268,6 +268,7 @@ STRINGTABLE
 BEGIN
     IDS_INSTGEN_CONFIRMUNINST "Bạn có chắc chắn muốn gỡ cài đặt %s không?"
     IDS_INSTGEN_CONFIRMINSTRUNAPP "Cài đặt hoàn tất, chạy %s ngay bây giờ?"
+    IDS_DL_STANDALONE_PROGRAM "%s may be a stand-alone program that does not need to be installed. It was saved to:\n\n%s\n\nRun it now?"
 END
 
 

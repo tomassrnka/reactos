@@ -241,6 +241,7 @@
 /* Generated installer */
 #define IDS_INSTGEN_CONFIRMUNINST               1000
 #define IDS_INSTGEN_CONFIRMINSTRUNAPP           1001
+#define IDS_DL_STANDALONE_PROGRAM               1002
 
 /* Accelerators */
 #define HOTKEYS                  715
