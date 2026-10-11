@@ -655,6 +655,9 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::RemoveBand(DWORD dwBandID)
     else
         ERR("Could not map band id to index!\n");
 
+    /* The band destroys its window: the rebar only hides it */
+    Band->DeskBand->CloseDW(0);
+
     _FreeBand(Band);
     return S_OK;
 }
