@@ -371,11 +371,10 @@ CWineTest::RunTest(CTestInfo* TestInfo)
             if (dwReadResult == ERROR_SUCCESS)
             {
                 /* Output text through StringOut, even while the test is still running */
-                Buffer[BytesAvailable] = 0;
-                tailString = StringOut(tailString.append(string(Buffer)), false);
+                tailString = StringOut(tailString.append(Buffer, BytesAvailable), false);
 
                 if (Configuration.DoSubmit())
-                    TestInfo->Log += Buffer;
+                    TestInfo->Log.append(Buffer, BytesAvailable);
             }
             else if (dwReadResult == ERROR_BROKEN_PIPE)
             {
