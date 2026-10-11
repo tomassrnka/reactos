@@ -12,7 +12,7 @@
 
 #include <debug.h>
 
-VOID AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
+NTSTATUS AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
 {
     KIRQL OldIrql;
     ULONG i, Instance = 0;
@@ -30,8 +30,7 @@ VOID AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
         if (!NewList)
         {
             TcpipReleaseSpinLock(&EntityListLock, OldIrql);
-            DbgPrint("TCPIP: No memory to grow the entity list, entity %lu not added\n", EntityType);
-            return;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         RtlCopyMemory(NewList, EntityList, sizeof(TDIEntityInfo) * EntityCount);
@@ -61,6 +60,8 @@ VOID AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
     EntityCount++;
 
     TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+
+    return STATUS_SUCCESS;
 }
 
 VOID RemoveEntityByContext(PVOID Context)

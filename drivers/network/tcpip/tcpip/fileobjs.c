@@ -405,6 +405,7 @@ NTSTATUS FileOpenAddress(
 {
   PADDRESS_FILE AddrFile;
   UINT AllocatedPort;
+  NTSTATUS Status;
 
   TI_DbgPrint(MID_TRACE, ("Called (Proto %d).\n", Protocol));
 
@@ -505,7 +506,15 @@ NTSTATUS FileOpenAddress(
           AddrFile->Port = 0;
       }
 
-      AddEntity(CO_TL_ENTITY, AddrFile, CO_TL_TCP);
+      /* Without an entity, socket options would reach another address file */
+      Status = AddEntity(CO_TL_ENTITY, AddrFile, CO_TL_TCP);
+      if (!NT_SUCCESS(Status))
+      {
+          if (AddrFile->Port)
+              TCPFreePort(AddrFile->Port);
+          ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+          return Status;
+      }
 
       AddrFile->Send = NULL; /* TCPSendData */
       break;
@@ -527,7 +536,13 @@ NTSTATUS FileOpenAddress(
                              AddrFile->Port,
                              Address->Address[0].Address[0].sin_port));
 
-      AddEntity(CL_TL_ENTITY, AddrFile, CL_TL_UDP);
+      Status = AddEntity(CL_TL_ENTITY, AddrFile, CL_TL_UDP);
+      if (!NT_SUCCESS(Status))
+      {
+          UDPFreePort(AddrFile->Port);
+          ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+          return Status;
+      }
 
       AddrFile->Send = UDPSendDatagram;
       break;
@@ -537,7 +552,12 @@ NTSTATUS FileOpenAddress(
     AddrFile->Send = ICMPSendDatagram;
 
     /* FIXME: Verify this */
-    AddEntity(ER_ENTITY, AddrFile, ER_ICMP);
+    Status = AddEntity(ER_ENTITY, AddrFile, ER_ICMP);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+        return Status;
+    }
     break;
 
   default:
@@ -546,7 +566,12 @@ NTSTATUS FileOpenAddress(
     AddrFile->Send = RawIPSendDatagram;
 
     /* FIXME: Verify this */
-    AddEntity(CL_TL_ENTITY, AddrFile, 0);
+    Status = AddEntity(CL_TL_ENTITY, AddrFile, 0);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+        return Status;
+    }
     break;
   }
 
