@@ -4654,6 +4654,8 @@ BOOL WINAPI SetupDiCallClassInstaller(
             }
 
             ret = (rc == NO_ERROR);
+            if (!ret)
+                SetLastError(rc);
         }
     }
 
