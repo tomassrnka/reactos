@@ -296,7 +296,6 @@ KiIdleTakeReadyThread(
 );
 
 extern volatile KAFFINITY KiDpcBoundSummary;
-#define KI_DPC_BOUND_TAKE_TICKS 4
 
 VOID
 FASTCALL

@@ -131,20 +131,43 @@ KiFindIdealProcessor(
 }
 
 static
+KAFFINITY
+KiImmediateProcessors(
+    _In_ PKTHREAD Thread,
+    _In_ KAFFINITY Set);
+
+static
 ULONG
 KiSelectNextProcessor(
     _In_ PKTHREAD Thread,
-    _Out_ PBOOLEAN Idle)
+    _In_ BOOLEAN AllowDivert,
+    _Out_ PBOOLEAN Idle,
+    _Out_ PBOOLEAN Diverted)
 {
     PKPRCB Prcb = KeGetCurrentPrcb();
-    KAFFINITY PreferredSet, IdleSet, UsableSet;
+    KAFFINITY PreferredSet, IdleSet, DivertSet, BoundSet;
     ULONG Processor;
 
-    /* Start with the active processors of the affinity that are not busy
-       with DPCs since an earlier clock tick, unless there are none */
+    /* Start with the affinity */
     PreferredSet = Thread->Affinity;
-    UsableSet = PreferredSet & KeActiveProcessors & ~KiDpcBoundSummary;
-    if (UsableSet) PreferredSet = UsableSet;
+
+    /*
+     * A thread given to a processor busy with DPCs since an earlier clock
+     * tick waits until its DPC queue runs empty. Go to another processor
+     * instead, but only to one that runs the thread at once; otherwise the
+     * thread goes where it would have gone anyway.
+     */
+    *Diverted = FALSE;
+    BoundSet = KiDpcBoundSummary;
+    if (AllowDivert && (PreferredSet & BoundSet))
+    {
+        DivertSet = KiImmediateProcessors(Thread, PreferredSet & KeActiveProcessors & ~BoundSet);
+        if (DivertSet)
+        {
+            PreferredSet = DivertSet;
+            *Diverted = TRUE;
+        }
+    }
 
     /* If we have matching idle processors, use them */
     IdleSet = PreferredSet & KiIdleSummary;
@@ -250,6 +273,55 @@ KiTryAcquirePrcbLock(
            !InterlockedExchange((PLONG)&Prcb->PrcbLock, 1);
 }
 
+/*
+ * Called with the PRCB lock of RemotePrcb held. TRUE when a thread of
+ * Priority given to that processor runs at once: it is not busy with DPCs
+ * (not in its DPC loop, not marked), and it is idle or its next or current
+ * thread has a lower priority (the rules of KiDeferredReadyThread).
+ */
+static
+BOOLEAN
+KiRunsAtOnce(
+    _In_ PKPRCB RemotePrcb,
+    _In_ KPRIORITY Priority)
+{
+    PKTHREAD Other;
+
+    if (RemotePrcb->DpcRoutineActive || (KiDpcBoundSummary & RemotePrcb->SetMember))
+        return FALSE;
+    if (KiIsProcessorIdle(RemotePrcb))
+        return TRUE;
+    Other = RemotePrcb->NextThread ? RemotePrcb->NextThread : RemotePrcb->CurrentThread;
+    return (Priority > Other->Priority);
+}
+
+/*
+ * Called with the lock of Thread held. The processors of Set that would run
+ * Thread at once (KiRunsAtOnce); a processor whose PRCB lock is busy is
+ * passed over. KiDeferredReadyThread looks again under the chosen lock.
+ */
+static
+KAFFINITY
+KiImmediateProcessors(
+    _In_ PKTHREAD Thread,
+    _In_ KAFFINITY Set)
+{
+    KAFFINITY Result = 0, Remaining;
+    PKPRCB RemotePrcb;
+    ULONG Number;
+
+    for (Remaining = Set; Remaining; Remaining &= Remaining - 1)
+    {
+        BitScanForwardAffinity(&Number, Remaining);
+        RemotePrcb = KiProcessorBlock[Number];
+        if (!RemotePrcb || !KiTryAcquirePrcbLock(RemotePrcb)) continue;
+        if (KiRunsAtOnce(RemotePrcb, Thread->Priority)) Result |= AFFINITY_MASK(Number);
+        KiReleasePrcbLock(RemotePrcb);
+    }
+
+    return Result;
+}
+
 FORCEINLINE
 BOOLEAN
 KiTryAcquireThreadLock(
@@ -284,14 +356,10 @@ KiTakeRemoteReadyThread(
     PKPRCB RemotePrcb;
     PKTHREAD Thread;
     PLIST_ENTRY ListHead, ListEntry;
-    ULONG Count, Number, Summary, Mask, Index, MinWait;
+    ULONG Count, Number, Summary, Mask, Index;
 
     if (Priority > HIGH_PRIORITY) return NULL;
     ASSERT(Priority >= 0);
-
-    /* A processor busy with DPCs would stop the thread it takes: it takes
-       only a thread that has waited a few ticks for any other processor */
-    MinWait = (KiDpcBoundSummary & Prcb->SetMember) ? KI_DPC_BOUND_TAKE_TICKS : 0;
 
     /* The ready summary bits of Priority and above */
     Mask = ~(PRIORITY_MASK(Priority) - 1);
@@ -330,7 +398,6 @@ KiTakeRemoteReadyThread(
                 {
                     Thread = CONTAINING_RECORD(ListEntry, KTHREAD, WaitListEntry);
                     if ((Thread->Affinity & Prcb->SetMember) &&
-                        (KeTickCount.LowPart - Thread->WaitTime >= MinWait) &&
                         KiTryAcquireThreadLock(Thread))
                     {
                         break;
@@ -370,29 +437,87 @@ KiTakeRemoteReadyThread(
  * Called at SYNCH_LEVEL by a processor that has retired DPCs since an
  * earlier clock tick (KiRetireDpcList). The thread it was given waits until
  * its DPC queue runs empty, and no other processor takes a standby thread:
- * make it ready again; KiSelectNextProcessor passes over this processor
- * while it stays busy. FALSE when the thread may run on no processor that
- * is not busy with DPCs.
+ * move it, as the standby thread, to a processor that runs it at once. The
+ * move happens under this PRCB lock, the thread lock and the other PRCB
+ * lock, the last two only tried; when one is busy or no processor runs it
+ * at once, the thread stays. FALSE when it stays.
  */
 BOOLEAN
 FASTCALL
 KiRedirectStandbyThread(
     _In_ PKPRCB Prcb)
 {
-    PKTHREAD Thread, Current, NewThread;
+    PKTHREAD Thread, Current, NewThread, Other, Displaced = NULL;
+    PKPRCB Target = NULL;
+    KAFFINITY Remaining;
     KPRIORITY Priority;
+    ULONG Number, Ipi = 0;
 
     ASSERT(Prcb == KeGetCurrentPrcb());
     KiAcquirePrcbLock(Prcb);
 
+    /* The thread lock: KiUpdateEffectiveAffinityThread follows NextProcessor under it */
     Thread = Prcb->NextThread;
-    if (!Thread || (Thread == Prcb->IdleThread) ||
-        !(Thread->Affinity & KeActiveProcessors & ~KiDpcBoundSummary & ~Prcb->SetMember))
+    if (!Thread || (Thread == Prcb->IdleThread) || !KiTryAcquireThreadLock(Thread))
     {
         KiReleasePrcbLock(Prcb);
         return FALSE;
     }
     ASSERT(Thread->State == Standby);
+
+    for (Remaining = Thread->Affinity & KeActiveProcessors & ~KiDpcBoundSummary & ~Prcb->SetMember;
+         Remaining;
+         Remaining &= Remaining - 1)
+    {
+        BitScanForwardAffinity(&Number, Remaining);
+        Target = KiProcessorBlock[Number];
+        if (Target && KiTryAcquirePrcbLock(Target))
+        {
+            if (KiRunsAtOnce(Target, Thread->Priority)) break;
+            KiReleasePrcbLock(Target);
+        }
+        Target = NULL;
+    }
+    if (!Target)
+    {
+        KiReleaseThreadLock(Thread);
+        KiReleasePrcbLock(Prcb);
+        return FALSE;
+    }
+
+    /* Give it to the other processor, by the rules of KiDeferredReadyThread */
+    Other = Target->NextThread;
+    if (Other && (Other != Target->IdleThread))
+    {
+        /* Its standby thread has a lower priority: make that one ready again */
+        Other->Preempted = TRUE;
+        Other->State = DeferredReady;
+        Other->DeferredProcessor = Prcb->Number;
+        Displaced = Other;
+    }
+    else if (!Other && (Target->CurrentThread != Target->IdleThread))
+    {
+        /* Preempt its current thread */
+        if (Target->CurrentThread->State == Running) Target->CurrentThread->Preempted = TRUE;
+        Ipi = IPI_DPC;
+    }
+    else
+    {
+        /* It is idle: an idle thread waiting as standby, or running */
+        Ipi = Other ? IPI_DPC : 0xFFFFFFFF;
+    }
+    Target->NextThread = Thread;
+    Thread->NextProcessor = Target->Number;
+    if (KiIdleSummary & Target->SetMember)
+    {
+#ifdef _WIN64
+        InterlockedAnd64((PLONG64)&KiIdleSummary, ~(LONG64)Target->SetMember);
+#else
+        InterlockedAnd((PLONG)&KiIdleSummary, ~(LONG)Target->SetMember);
+#endif
+    }
+    KiReleasePrcbLock(Target);
+    KiReleaseThreadLock(Thread);
 
     /*
      * Put in its place what the processor runs without it: a thread of its
@@ -423,9 +548,23 @@ KiRedirectStandbyThread(
         InterlockedOrSetMember(&KiIdleSummary, Prcb->SetMember);
     }
 
-    KiInsertDeferredReadyList(Thread);
+    if (Displaced)
+    {
+        PushEntryList(&Prcb->DeferredReadyListHead, &Displaced->SwapListEntry);
+    }
     KiReleasePrcbLock(Prcb);
-    KiProcessDeferredReadyList(Prcb);
+
+    /* Wake the other processor (see KiDeferredReadyThread) */
+    if (Ipi == IPI_DPC)
+    {
+        KiIpiSend(AFFINITY_MASK(Number), IPI_DPC);
+    }
+    else if (Ipi)
+    {
+        KeMemoryBarrier();
+        if (!KiIsProcessorPolling(Number)) KiIpiSend(AFFINITY_MASK(Number), 0);
+    }
+    if (Displaced) KiProcessDeferredReadyList(Prcb);
     return TRUE;
 }
 
@@ -507,8 +646,10 @@ KiIdleTakeReadyThread(
     return KiIdleHasWork(Prcb);
 }
 #else
-#define KiSelectNextProcessor(Thread, Idle) (*(Idle) = FALSE, 0)
+#define KiSelectNextProcessor(Thread, AllowDivert, Idle, Diverted) \
+    ((VOID)(AllowDivert), *(Diverted) = FALSE, *(Idle) = FALSE, 0)
 #define KiIsProcessorIdle(Prcb) TRUE
+#define KiRunsAtOnce(Prcb, Priority) TRUE
 #endif
 
 VOID
@@ -518,6 +659,7 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
     PKPRCB Prcb;
     BOOLEAN Preempted, Idle;
     ULONG Processor, Attempt;
+    BOOLEAN AllowDivert, Diverted;
     KPRIORITY OldPriority;
     PKTHREAD NextThread;
 
@@ -675,18 +817,28 @@ Restart:
     OldPriority = Thread->Priority;
     Thread->Preempted = FALSE;
 
+    AllowDivert = TRUE;
     for (Attempt = 0; ; Attempt++)
     {
         /* Select a processor to run on */
-        Processor = KiSelectNextProcessor(Thread, &Idle);
+        Processor = KiSelectNextProcessor(Thread, AllowDivert, &Idle, &Diverted);
 
         /* Get the PRCB and lock it */
         Prcb = KiProcessorBlock[Processor];
         KiAcquirePrcbLock(Prcb);
 
+        /* Moved off a processor busy with DPCs, the thread must run at once
+           where it went; else it goes where it would have gone */
+        if (Diverted && !KiRunsAtOnce(Prcb, OldPriority))
+        {
+            KiReleasePrcbLock(Prcb);
+            AllowDivert = FALSE;
+            continue;
+        }
+
         /* Another processor may have given the idle processor a thread
            since the selection; pick again while others are idle */
-        if (!Idle || KiIsProcessorIdle(Prcb) || (Attempt == 2)) break;
+        if (!Idle || KiIsProcessorIdle(Prcb) || (Attempt >= 2)) break;
         KiReleasePrcbLock(Prcb);
     }
     Thread->NextProcessor = Processor;
