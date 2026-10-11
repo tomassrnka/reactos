@@ -296,6 +296,7 @@ CDeviceNode::EnableDevice(
     bool Disabled = true;
     DWORD Error = ERROR_SUCCESS;
 
+    NeedsReboot = false;
     SetFlags(DI_NODI_DEFAULTACTION, 0);
 
     SP_PROPCHANGE_PARAMS pcp;
