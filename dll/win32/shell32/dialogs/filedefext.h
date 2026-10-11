@@ -65,7 +65,6 @@ private:
     VOID InitOpensWithField(HWND hwndDlg);
     BOOL InitFileType(HWND hwndDlg);
     BOOL InitFilePath(HWND hwndDlg);
-    static BOOL GetFileTimeString(LPFILETIME lpFileTime, LPWSTR pwszResult, UINT cchResult);
     BOOL InitFileAttr(HWND hwndDlg);
     BOOL InitGeneralPage(HWND hwndDlg);
     BOOL SetVersionLabel(HWND hwndDlg, DWORD idCtrl, LPCWSTR pwszName);
@@ -113,6 +112,8 @@ private:
 public:
 	CFileDefExt();
 	~CFileDefExt();
+
+    static BOOL GetFileTimeString(LPFILETIME lpFileTime, LPWSTR pwszResult, UINT cchResult);
 
     // FolderCustomize
     BOOL OnFolderCustApply(HWND hwndDlg);
