@@ -8,7 +8,10 @@
 #include "ws2_32.h"
 #include <iphlpapi.h>
 
-#define SOCKET_COUNT 5000  /* above MAX_TDI_ENTITIES (4096) so the entity list must grow */
+/* Above MAX_TDI_ENTITIES (4096), so the entity list must grow where resources allow */
+#define SOCKET_COUNT 5000
+/* Past the old overflow point on both x86 (2048 entries) and x64 (1365 entries) */
+#define MIN_BOUND 2100
 
 static SOCKET Sockets[SOCKET_COUNT];
 
@@ -41,8 +44,11 @@ VOID
 TestManySockets(ULONG Round)
 {
     struct sockaddr_in Addr;
-    ULONG i, Opened = 0, Failed = 0, Listed;
+    ULONG i, Opened = 0, Listed;
     INT Error = 0;
+
+    for (i = 0; i < SOCKET_COUNT; i++)
+        Sockets[i] = INVALID_SOCKET;
 
     for (i = 0; i < SOCKET_COUNT; i++)
     {
@@ -50,8 +56,7 @@ TestManySockets(ULONG Round)
         if (Sockets[i] == INVALID_SOCKET)
         {
             Error = WSAGetLastError();
-            Failed++;
-            continue;
+            break;
         }
         ZeroMemory(&Addr, sizeof(Addr));
         Addr.sin_family = AF_INET;
@@ -61,17 +66,18 @@ TestManySockets(ULONG Round)
             Error = WSAGetLastError();
             closesocket(Sockets[i]);
             Sockets[i] = INVALID_SOCKET;
-            Failed++;
-            continue;
+            break;
         }
         Opened++;
     }
-    ok(Failed == 0, "Round %lu: %lu of %u sockets failed to bind, last error %d\n", Round, Failed, SOCKET_COUNT, Error);
+    /* Running out of resources ends the round; any other error is a failure */
+    ok(Opened == SOCKET_COUNT || Error == WSAENOBUFS,
+       "Round %lu: stopped after %lu sockets with error %d\n", Round, Opened, Error);
+    ok(Opened >= MIN_BOUND, "Round %lu: only %lu sockets bound, error %d\n", Round, Opened, Error);
+    if (Opened < SOCKET_COUNT)
+        trace("Round %lu: out of resources after %lu sockets\n", Round, Opened);
 
-    /* Binding more entities than the old entity list could hold is the point of the test; the
-     * kernel must not fault or corrupt pool. The UDP table listing is informational only
-     * (GetUdpTable does not enumerate every bound socket on ReactOS). Run with special pool on
-     * tag 'EidT' to turn the old overflow into a deterministic guard-page bugcheck. */
+    /* The UDP table listing is informational: GetUdpTable does not list every bound socket */
     Listed = CountBoundUdpPorts();
     trace("Round %lu: %lu loopback UDP endpoints listed, %lu bound\n", Round, Listed, Opened);
 
