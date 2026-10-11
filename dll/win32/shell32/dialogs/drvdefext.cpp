@@ -403,6 +403,7 @@ CDrvDefExt::InitGeneralPage(HWND hwndDlg)
     {
         /* Set volume label and filesystem */
         SetDlgItemTextW(hwndDlg, 14000, wszVolumeName);
+        StringCchCopyW(m_wszLabel, _countof(m_wszLabel), wszVolumeName);
         SetDlgItemTextW(hwndDlg, 14002, wszFileSystem);
         bHasFS = *wszFileSystem != UNICODE_NULL;
     }
@@ -587,7 +588,15 @@ CDrvDefExt::GeneralPageProc(
                     WCHAR wszBuf[256];
                     *wszBuf = UNICODE_NULL;
                     if (GetWindowTextW(hLabel, wszBuf, _countof(wszBuf)) || GetWindowTextLengthW(hLabel) == 0)
-                        hr = CDrivesFolder::SetDriveLabel(hwndDlg, pDrvDefExt->m_wszDrive, wszBuf);
+                    {
+                        /* Like Windows, write the label only when it changed: OK alone does not touch the volume */
+                        if (wcscmp(wszBuf, pDrvDefExt->m_wszLabel) == 0)
+                            hr = S_OK;
+                        else
+                            hr = CDrivesFolder::SetDriveLabel(hwndDlg, pDrvDefExt->m_wszDrive, wszBuf);
+                        if (SUCCEEDED(hr))
+                            StringCchCopyW(pDrvDefExt->m_wszLabel, _countof(pDrvDefExt->m_wszLabel), wszBuf);
+                    }
 
                     SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, FAILED(hr) ? PSNRET_INVALID : PSNRET_NOERROR);
                     return TRUE;
@@ -694,6 +703,7 @@ CDrvDefExt::HardwarePageProc(
 CDrvDefExt::CDrvDefExt()
 {
     m_wszDrive[0] = L'\0';
+    m_wszLabel[0] = UNICODE_NULL;
 }
 
 CDrvDefExt::~CDrvDefExt()
