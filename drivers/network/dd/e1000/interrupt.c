@@ -154,43 +154,50 @@ NextReceiveDescriptor:
     if (InterruptPending & (E1000_IMS_TXD_LOW | E1000_IMS_TXDW | E1000_IMS_TXQE))
     {
         PNDIS_PACKET AckPackets[40] = {0};
-        ULONG NumPackets = 0, i;
+        ULONG NumPackets, i;
 
         /* Clear out these interrupts */
         InterruptPending &= ~(E1000_IMS_TXD_LOW | E1000_IMS_TXDW | E1000_IMS_TXQE);
 
-        while ((Adapter->TxFull || Adapter->LastTxDesc != Adapter->CurrentTxDesc) && NumPackets < ARRAYSIZE(AckPackets))
+        /* Reclaim every finished descriptor, in batches: no interrupt comes back
+           for the ones a batch leaves behind once the adapter goes idle */
+        do
         {
-            TransmitDescriptor = Adapter->TransmitDescriptors + Adapter->LastTxDesc;
+            NumPackets = 0;
 
-            if (TransmitDescriptor->Status & E1000_TDESC_STATUS_DD)
+            while ((Adapter->TxFull || Adapter->LastTxDesc != Adapter->CurrentTxDesc) && NumPackets < ARRAYSIZE(AckPackets))
             {
-                if (Adapter->TransmitPackets[Adapter->LastTxDesc])
+                TransmitDescriptor = Adapter->TransmitDescriptors + Adapter->LastTxDesc;
+
+                if (TransmitDescriptor->Status & E1000_TDESC_STATUS_DD)
                 {
-                    AckPackets[NumPackets++] = Adapter->TransmitPackets[Adapter->LastTxDesc];
-                    Adapter->TransmitPackets[Adapter->LastTxDesc] = NULL;
-                    TransmitDescriptor->Status = 0;
+                    if (Adapter->TransmitPackets[Adapter->LastTxDesc])
+                    {
+                        AckPackets[NumPackets++] = Adapter->TransmitPackets[Adapter->LastTxDesc];
+                        Adapter->TransmitPackets[Adapter->LastTxDesc] = NULL;
+                        TransmitDescriptor->Status = 0;
+                    }
+
+                    Adapter->LastTxDesc = (Adapter->LastTxDesc + 1) % NUM_TRANSMIT_DESCRIPTORS;
+                    Adapter->TxFull = FALSE;
                 }
-
-                Adapter->LastTxDesc = (Adapter->LastTxDesc + 1) % NUM_TRANSMIT_DESCRIPTORS;
-                Adapter->TxFull = FALSE;
+                else
+                {
+                    break;
+                }
             }
-            else
+
+            if (NumPackets)
             {
-                break;
-            }
-        }
+                NDIS_DbgPrint(MAX_TRACE, ("Tx: (TDH: %u, TDT: %u)\n", Adapter->CurrentTxDesc, Adapter->LastTxDesc));
+                NDIS_DbgPrint(MAX_TRACE, ("Tx Done: %u packets to ack\n", NumPackets));
 
-        if (NumPackets)
-        {
-            NDIS_DbgPrint(MAX_TRACE, ("Tx: (TDH: %u, TDT: %u)\n", Adapter->CurrentTxDesc, Adapter->LastTxDesc));
-            NDIS_DbgPrint(MAX_TRACE, ("Tx Done: %u packets to ack\n", NumPackets));
-
-            for (i = 0; i < NumPackets; ++i)
-            {
-                NdisMSendComplete(Adapter->AdapterHandle, AckPackets[i], NDIS_STATUS_SUCCESS);
+                for (i = 0; i < NumPackets; ++i)
+                {
+                    NdisMSendComplete(Adapter->AdapterHandle, AckPackets[i], NDIS_STATUS_SUCCESS);
+                }
             }
-        }
+        } while (NumPackets == ARRAYSIZE(AckPackets));
     }
 
     ASSERT(InterruptPending == 0);
