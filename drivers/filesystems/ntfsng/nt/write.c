@@ -457,16 +457,29 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
     }
     if (Raw || Vcb->ReadOnly)
     {
-        if (!Vcb->RawWritten)
+        /*
+         * Authorized and published under CoreLock, before the write is issued: the lock is checked again
+         * (an unlock may have run since the request started), then RawWritten and ReadOnly are set and
+         * stay set until the remount.  A label set checks both under CoreLock, so it either ran before
+         * the lock (whose flush wrote it) or is refused; from here on write opens, flushes and the
+         * flusher see a read-only volume, and the core refuses every device write of its own.
+         */
+        NgAcquireCore(Vcb);
+        if (!Vcb->Dismounted && Vcb->LockedBy != FileObject)
         {
-            if (!Vcb->Dismounted)
-                DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): the mounted state is dropped at dismount\n",
-                        Offset, Length);
-            /* Under CoreLock: a core change (a label set, the flusher) either ends before or sees the flag. */
-            NgAcquireCore(Vcb);
-            Vcb->RawWritten = TRUE;
             NgReleaseCore(Vcb);
+            Status = STATUS_ACCESS_DENIED;
+            goto out;
         }
+        if (!Vcb->RawWritten && !Vcb->Dismounted)
+            DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): read-only until the remount\n",
+                    Offset, Length);
+        /* Also in the core: a request already past its ReadOnly check (a paging write) cannot write either. */
+        if (!Vcb->RawWritten && !Vcb->Dismounted)
+            ngc_stop_writes(Vcb->Core);
+        Vcb->RawWritten = TRUE;
+        Vcb->ReadOnly = TRUE;
+        NgReleaseCore(Vcb);
         Status = NgWriteDevice(Vcb, Offset, Buffer, Length);
         if (NT_SUCCESS(Status))
             Irp->IoStatus.Information = Length;
@@ -761,6 +774,9 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     IO_STATUS_BLOCK Iosb;
     int Err;
 
+    /* After the lock holder's direct writes only the disk's cache is flushed, never the mounted state. */
+    if (Fcb && Fcb->IsVolume && Vcb->RawWritten)
+        return NgDevFlushDurable(Vcb->StorageDevice) ? STATUS_UNEXPECTED_IO_ERROR : STATUS_SUCCESS;
     if (!Fcb || Vcb->ReadOnly)
         return STATUS_SUCCESS;
     if (Fcb->IsVolume)

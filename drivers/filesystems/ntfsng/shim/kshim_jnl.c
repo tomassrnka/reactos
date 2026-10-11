@@ -74,7 +74,7 @@ static int kj_dev_read(struct block_device *b, u64 off, void *buf, unsigned int 
 }
 static int kj_dev_write(struct block_device *b, u64 off, void *buf, unsigned int len)
 {
-	return b->kshim_gone || ngos_dev_write(b->osdev, off, buf, len);
+	return b->kshim_gone || b->kshim_frozen || ngos_dev_write(b->osdev, off, buf, len);
 }
 static int kj_dev_flush(struct block_device *b)
 {

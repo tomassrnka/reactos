@@ -319,6 +319,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vpb->VolumeLabelLength = (USHORT)(min(Vcb->Info.label_len, MAXIMUM_VOLUME_LABEL_LENGTH / sizeof(WCHAR)) * sizeof(WCHAR));
     for (i = 0; i < Vpb->VolumeLabelLength / sizeof(WCHAR); i++)
         Vpb->VolumeLabel[i] = Vcb->Info.label[i];
+    Vcb->LabelStale = !Vcb->Info.label_valid;
     Vcb->ReadOnly = Vcb->Info.read_only ? TRUE : FALSE;
     /*
      * Read-only for good on a disk that cannot flush, or whose sectors the journal cannot use: the

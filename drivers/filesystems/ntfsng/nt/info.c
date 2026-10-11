@@ -888,6 +888,24 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             KIRQL Irql;
             if (Length < Fixed)
                 return STATUS_BUFFER_TOO_SMALL;
+            if (Vcb->LabelStale)
+            {
+                /* Reading the label at mount ran out of memory: read it again, read-only volumes included. */
+                NgAcquireCore(Vcb);
+                if (Vcb->LabelStale)
+                {
+                    ngc_volinfo(Vcb->Core, &Vcb->Info);
+                    if (Vcb->Info.label_valid)
+                    {
+                        IoAcquireVpbSpinLock(&Irql);
+                        Vcb->Vpb->VolumeLabelLength = (USHORT)(Vcb->Info.label_len * sizeof(WCHAR));
+                        RtlCopyMemory(Vcb->Vpb->VolumeLabel, Vcb->Info.label, Vcb->Vpb->VolumeLabelLength);
+                        IoReleaseVpbSpinLock(Irql);
+                        Vcb->LabelStale = FALSE;
+                    }
+                }
+                NgReleaseCore(Vcb);
+            }
             V->VolumeCreationTime.QuadPart = 0;
             V->VolumeSerialNumber = Vcb->Vpb->SerialNumber;
             V->SupportsObjects = FALSE;
@@ -1011,6 +1029,7 @@ NTSTATUS NgSetVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         RtlCopyMemory(Vcb->Vpb->VolumeLabel, Info->VolumeLabel, Info->VolumeLabelLength);
         Vcb->Vpb->VolumeLabelLength = (USHORT)Info->VolumeLabelLength;
         IoReleaseVpbSpinLock(Irql);
+        Vcb->LabelStale = FALSE;
         NgAfterChange(Vcb);
     }
     NgReleaseCore(Vcb);

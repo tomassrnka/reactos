@@ -606,6 +606,10 @@ static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf
 {
 	if (b->kshim_gone)
 		return -EIO;
+	if (write && b->kshim_frozen) {
+		kshim_counter_refused_writes++;
+		return -EROFS;
+	}
 	if (write) {
 		struct super_block *sb = b->bd_super;
 		if (!sb || (sb_rdonly(sb) && !b->kshim_remounting)) {

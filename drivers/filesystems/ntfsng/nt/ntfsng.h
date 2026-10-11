@@ -93,7 +93,8 @@ typedef struct _NG_VCB
     TUNNEL Tunnel;                  /* creation times of names that just went away (FsRtl tunnel cache) */
     PFILE_OBJECT LockedBy;          /* FSCTL_LOCK_VOLUME holder: no other open while set */
     ERESOURCE CreateGate;           /* creates and cleanups shared; volume lock and dismount exclusive */
-    BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: never write the mounted state back */
+    BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: read-only, the mounted state never written back */
+    BOOLEAN LabelStale;             /* the VPB label is empty because reading it at mount ran out of memory */
     BOOLEAN Dismounted;             /* FSCTL_DISMOUNT_VOLUME done: no core, the storage device has a new VPB */
     LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;

@@ -558,6 +558,7 @@ void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi)
 	ngc_load_label(v);
 	memcpy(vi->label, v->label, v->label_len * sizeof(v->label[0]));
 	vi->label_len = v->label_len;
+	vi->label_valid = v->label_read ? 1 : 0;
 }
 
 ngc_node *ngc_root(ngc_vol *v)
@@ -1388,6 +1389,16 @@ void ngc_icache_trim(ngc_vol *v)
 void ngc_medium_gone(ngc_vol *v)
 {
 	v->bdev->kshim_gone = 1;
+	v->sb->s_flags |= SB_RDONLY;
+}
+
+/*
+ * The disk was written under the mount (the lock holder's direct writes): from now on neither the core
+ * nor the journal writes the device (writeback, commits, the journal's error header); reads go on.
+ */
+void ngc_stop_writes(ngc_vol *v)
+{
+	v->bdev->kshim_frozen = 1;
 	v->sb->s_flags |= SB_RDONLY;
 }
 
