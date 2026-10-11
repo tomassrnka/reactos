@@ -348,6 +348,85 @@ public:
         return S_FALSE;
     }
 
+    /* The Quick Launch toolbar is the folder band of the Quick Launch folder, created as the
+     * Toolbars menu (browseui's CBandSiteMenu) creates it */
+    static HRESULT
+    GetQuickLaunchPidl(OUT PIDLIST_ABSOLUTE *ppidl)
+    {
+        WCHAR szPath[MAX_PATH];
+
+        *ppidl = NULL;
+        HRESULT hr = SHGetFolderPathAndSubDirW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT,
+                                               L"Microsoft\\Internet Explorer\\Quick Launch", szPath);
+        if (FAILED(hr))
+            return hr;
+        *ppidl = ILCreateFromPathW(szPath);
+        return *ppidl ? S_OK : E_OUTOFMEMORY;
+    }
+
+    DWORD
+    FindQuickLaunchBand(IN PCIDLIST_ABSOLUTE pidlQuickLaunch)
+    {
+        DWORD dwBandID;
+
+        for (UINT uBand = 0; SUCCEEDED(m_BandSite->EnumBands(uBand, &dwBandID)); uBand++)
+        {
+            CComPtr<IShellFolderBand> pBand;
+            if (FAILED(m_BandSite->GetBandObject(dwBandID, IID_PPV_ARG(IShellFolderBand, &pBand))))
+                continue;
+
+            BANDINFOSFB bi = { ISFB_MASK_IDLIST };
+            if (FAILED(pBand->GetBandInfoSFB(&bi)) || bi.pidl == NULL)
+                continue;
+
+            BOOL bMatch = ILIsEqual(bi.pidl, pidlQuickLaunch);
+            ILFree(bi.pidl);
+            if (bMatch)
+                return dwBandID;
+        }
+
+        return (DWORD)-1;
+    }
+
+    STDMETHODIMP
+    IsQuickLaunchShown() override
+    {
+        CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidl;
+        if (FAILED(GetQuickLaunchPidl(&pidl)))
+            return S_FALSE;
+
+        return (FindQuickLaunchBand(pidl) != (DWORD)-1) ? S_OK : S_FALSE;
+    }
+
+    STDMETHODIMP
+    ShowQuickLaunch(IN BOOL bShow) override
+    {
+        CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidl;
+        HRESULT hr = GetQuickLaunchPidl(&pidl);
+        if (FAILED(hr))
+            return hr;
+
+        DWORD dwBandID = FindQuickLaunchBand(pidl);
+        if (!bShow)
+            return (dwBandID != (DWORD)-1) ? RemoveBand(dwBandID) : S_OK;
+        if (dwBandID != (DWORD)-1)
+            return S_OK;
+
+        CComPtr<IShellFolderBand> pBand;
+        hr = CoCreateInstance(CLSID_ISFBand, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IShellFolderBand, &pBand));
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+
+        hr = pBand->InitializeSFB(NULL, pidl);
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+
+        BANDINFOSFB bi = { ISFB_MASK_STATE, ISFB_STATE_QLINKSMODE, ISFB_STATE_QLINKSMODE };
+        pBand->SetBandInfoSFB(&bi);
+
+        return AddBand(pBand);
+    }
+
     /*******************************************************************/
 
     STDMETHODIMP

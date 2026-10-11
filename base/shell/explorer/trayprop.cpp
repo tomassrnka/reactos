@@ -44,6 +44,19 @@ static void SetBitmap(HWND hwnd, HBITMAP* hbmp, UINT uImageId)
 
 }
 
+static void ShowQuickLaunchError(HWND hwndOwner, HRESULT hr)
+{
+    WCHAR szMessage[256];
+    DWORD dwError = (HRESULT_FACILITY(hr) == FACILITY_WIN32) ? HRESULT_CODE(hr) : (DWORD)hr;
+
+    if (!FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, dwError,
+                        0, szMessage, _countof(szMessage), NULL))
+    {
+        StringCchPrintfW(szMessage, _countof(szMessage), L"0x%08lX", hr);
+    }
+    MessageBoxW(hwndOwner, szMessage, NULL, MB_OK | MB_ICONERROR);
+}
+
 class CTaskBarSettingsPage : public CPropertyPageImpl<CTaskBarSettingsPage>
 {
 private:
@@ -109,7 +122,7 @@ public:
         CheckDlgButton(IDC_TASKBARPROP_HIDE, g_TaskbarSettings.sr.AutoHide ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(IDC_TASKBARPROP_ONTOP, g_TaskbarSettings.sr.AlwaysOnTop ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(IDC_TASKBARPROP_GROUP, g_TaskbarSettings.bGroupButtons ? BST_CHECKED : BST_UNCHECKED);
-        //CheckDlgButton(IDC_TASKBARPROP_SHOWQL, g_TaskbarSettings.bShowQuickLaunch ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(IDC_TASKBARPROP_SHOWQL, g_TaskbarSettings.bShowQuickLaunch ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(IDC_TASKBARPROP_SMALLICONS, g_TaskbarSettings.bSmallIcons ? BST_CHECKED : BST_UNCHECKED);
 
         _UpdateDialog();
@@ -131,10 +144,21 @@ public:
         newSettings.sr.AutoHide = IsDlgButtonChecked(IDC_TASKBARPROP_HIDE);
         newSettings.sr.AlwaysOnTop = IsDlgButtonChecked(IDC_TASKBARPROP_ONTOP);
         newSettings.bGroupButtons = IsDlgButtonChecked(IDC_TASKBARPROP_GROUP);
-        //newSettings.bShowQuickLaunch = IsDlgButtonChecked(IDC_TASKBARPROP_SHOWQL);
+        newSettings.bShowQuickLaunch = IsDlgButtonChecked(IDC_TASKBARPROP_SHOWQL);
         newSettings.bSmallIcons = IsDlgButtonChecked(IDC_TASKBARPROP_SMALLICONS);
 
-        SendMessage(m_hwndTaskbar, TWM_SETTINGSCHANGED, 0, (LPARAM)&newSettings);
+        HRESULT hr = (HRESULT)SendMessage(m_hwndTaskbar, TWM_SETTINGSCHANGED, 0, (LPARAM)&newSettings);
+
+        /* Show whether the toolbar is really there (it may not have been created) */
+        CheckDlgButton(IDC_TASKBARPROP_SHOWQL, g_TaskbarSettings.bShowQuickLaunch ? BST_CHECKED : BST_UNCHECKED);
+        _UpdateDialog();
+
+        if (FAILED(hr))
+        {
+            /* Keep the dialog open: only the Quick Launch change failed */
+            ShowQuickLaunchError(m_hWnd, hr);
+            return PSNRET_INVALID_NOCHANGEPAGE;
+        }
 
         return PSNRET_NOERROR;
     }
