@@ -29,6 +29,10 @@ static const ADDON_INSTALL_DATA Addons[] = {
 #ifdef _M_IX86
     {L"Wine Gecko", L"%SystemRoot%\\wine_gecko-2.40-x86.msi", L"msiexec.exe /i \"%s\" /qn /norestart", L"gecko"},
     {L"WineVDM", L"%SystemRoot%\\winevdm_setup.exe", L"\"%s\" /VERYSILENT", L"winevdm"},
+#elif defined(_M_AMD64)
+    /* No RappsId: the Applications Manager package is the x86 build. Without the
+     * local file, the Internet Browser offers the download on first use. */
+    {L"Wine Gecko", L"%SystemRoot%\\wine_gecko-2.40-x86_64.msi", L"msiexec.exe /i \"%s\" /qn /norestart", NULL},
 #endif
     {NULL, NULL, NULL}
 };
@@ -83,7 +87,14 @@ InstallAddon(
 
     /* Attempt to install addon from local installer. */
     if (!DoesFileExist(ExpandedAddonPath))
+    {
+        if (pInstallData->RappsId == NULL)
+        {
+            hr = S_OK;
+            goto done;
+        }
         goto rapps_install;
+    }
 
     hr = StringCchPrintfW(Command, ARRAYSIZE(Command),
                           pInstallData->CreateProcessFormatString, ExpandedAddonPath);
@@ -97,6 +108,9 @@ InstallAddon(
         DeleteFileW(ExpandedAddonPath);
         goto done;
     }
+
+    if (pInstallData->RappsId == NULL)
+        goto done;
 
 rapps_install:
     /* Local installer doesn't exist or failed. Try installing through Rapps. */
@@ -150,8 +164,7 @@ InstallOptionalComponents(
     for (DWORD i = 0; i < ARRAYSIZE(Addons); i++)
     {
         if (Addons[i].AddonPath == NULL
-            || Addons[i].CreateProcessFormatString == NULL
-            || Addons[i].RappsId == NULL)
+            || Addons[i].CreateProcessFormatString == NULL)
             continue;
 
         hr = InstallAddon(&Addons[i], &Consent, pItemsData, &Notify);
