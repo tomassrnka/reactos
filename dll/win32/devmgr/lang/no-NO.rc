@@ -15,6 +15,8 @@ BEGIN
     IDS_DEVCODE2 " (Kode %2!u!)"
     IDS_ENABLEDEVICE "Bruk denne enheten (aktiver)"
     IDS_DISABLEDEVICE "Ikke bruk denne enheten (deaktiver)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Ukjent enhet"
     IDS_NODRIVERLOADED "Ingen drivere er installert for denne enheten."
     IDS_DEVONPARENT "på %1"

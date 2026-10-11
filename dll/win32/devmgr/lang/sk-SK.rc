@@ -18,6 +18,8 @@ BEGIN
     IDS_DEVCODE2 " (Kód %2!u!)"
     IDS_ENABLEDEVICE "Používať toto zariadenie (povolené)"
     IDS_DISABLEDEVICE "Nepoužívať toto zariadenie (zakázané)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Neznáme zariadenie"
     IDS_NODRIVERLOADED "Pre toto zariadenie nie sú nainštalované žiadne ovládače."
     IDS_DEVONPARENT "na %1"

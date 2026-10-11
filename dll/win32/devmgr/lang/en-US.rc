@@ -13,6 +13,8 @@ BEGIN
     IDS_DEVCODE2 " (Code %2!u!)"
     IDS_ENABLEDEVICE "Use this device (enable)"
     IDS_DISABLEDEVICE "Do not use this device (disable)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Unknown device"
     IDS_NODRIVERLOADED "No drivers are installed for this device."
     IDS_DEVONPARENT "on %1"

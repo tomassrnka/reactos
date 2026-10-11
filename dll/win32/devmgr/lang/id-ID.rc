@@ -15,6 +15,8 @@ BEGIN
     IDS_DEVCODE2 " (Kode %2!u!)"
     IDS_ENABLEDEVICE "Gunakan perangkat ini (hidupkan)"
     IDS_DISABLEDEVICE "Jangan gunakan perangkat ini (matikan)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Perangkat tidak dikenal"
     IDS_NODRIVERLOADED "Driver untuk perangkat ini belum dipasang."
     IDS_DEVONPARENT "pada %1"

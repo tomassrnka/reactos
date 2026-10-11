@@ -293,6 +293,8 @@ CDeviceNode::EnableDevice(
     )
 {
     bool Canceled = false;
+    bool Disabled = true;
+    DWORD Error = ERROR_SUCCESS;
 
     SetFlags(DI_NODI_DEFAULTACTION, 0);
 
@@ -328,12 +330,14 @@ CDeviceNode::EnableDevice(
     if (Canceled == false)
     {
         pcp.Scope = DICS_FLAG_CONFIGSPECIFIC;
-        if (SetupDiSetClassInstallParamsW(m_hDevInfo,
-                                          &m_DevinfoData,
-                                          &pcp.ClassInstallHeader,
-                                          sizeof(SP_PROPCHANGE_PARAMS)))
+        if (!SetupDiSetClassInstallParamsW(m_hDevInfo,
+                                           &m_DevinfoData,
+                                           &pcp.ClassInstallHeader,
+                                           sizeof(SP_PROPCHANGE_PARAMS)) ||
+            !SetupDiChangeState(m_hDevInfo, &m_DevinfoData))
         {
-            SetupDiChangeState(m_hDevInfo, &m_DevinfoData);
+            Disabled = false;
+            Error = GetLastError();
         }
 
 
@@ -357,6 +361,12 @@ CDeviceNode::EnableDevice(
     }
 
     RemoveFlags(DI_NODI_DEFAULTACTION, 0);
+
+    if (!Enable && !Canceled && !Disabled)
+    {
+        SetLastError(Error);
+        return false;
+    }
 
     return true;
 }

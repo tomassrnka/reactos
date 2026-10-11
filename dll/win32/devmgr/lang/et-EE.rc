@@ -20,6 +20,8 @@ BEGIN
     IDS_DEVCODE2 " (Kood %2!u!)"
     IDS_ENABLEDEVICE "Kasuta seda seadet (luba)"
     IDS_DISABLEDEVICE "Ära kasuta seda seadet (keela)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Tundmatu seade"
     IDS_NODRIVERLOADED "Ühtegi draiverit pole selle seadme jaoks installitud."
     IDS_DEVONPARENT "on %1"
