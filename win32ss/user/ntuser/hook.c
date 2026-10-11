@@ -39,8 +39,16 @@ IntLoadHookModule(int iHookID, HHOOK hHook, BOOL Unload)
     /* Check if this is the api hook */
     if(iHookID == WH_APIHOOK)
     {
+        /* An unload callback of this process is running: no load or second unload until it returns */
+        if (ppi->W32PF_flags & W32PF_APIHOOKUNLOADING)
+            return Unload;
+
         if(!Unload && !(ppi->W32PF_flags & W32PF_APIHOOKLOADED))
         {
+            /* A load message sent at registration can arrive after the hook was unregistered */
+            if (!(gpsi->dwSRVIFlags & SRVINFO_APIHOOK))
+                return FALSE;
+
             /* A callback in user mode can trigger UserLoadApiHook to be called and
                as a result IntLoadHookModule will be called recursively.
                To solve this we set the flag that means that the application has
@@ -59,11 +67,18 @@ IntLoadHookModule(int iHookID, HHOOK hHook, BOOL Unload)
         }
         else if(Unload && (ppi->W32PF_flags & W32PF_APIHOOKLOADED))
         {
+            /* Every thread of the process gets its own unload message, and the callback
+               leaves the user lock: clear the flag first, so that only one thread unloads */
+            ppi->W32PF_flags &= ~W32PF_APIHOOKLOADED;
+            ppi->W32PF_flags |= W32PF_APIHOOKUNLOADING;
+
             /* Call ClientLoadLibrary in user32 */
             bResult = co_IntClientLoadLibrary(NULL, NULL, Unload, TRUE);
-            if (bResult)
+            ppi->W32PF_flags &= ~W32PF_APIHOOKUNLOADING;
+            if (!bResult)
             {
-                ppi->W32PF_flags &= ~W32PF_APIHOOKLOADED;
+                /* The module was not unloaded: keep the process marked as loaded */
+                ppi->W32PF_flags |= W32PF_APIHOOKLOADED;
             }
             return bResult;
         }
