@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     CreateService.c
     DuplicateTokenEx.c
+    EncryptFile.c
     eventlog.c
     Hash.c
     HKEY_CLASSES_ROOT.c
