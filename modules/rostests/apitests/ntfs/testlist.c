@@ -22,6 +22,8 @@ extern void func_NtfsRename(void);
 extern void func_NtfsSharing(void);
 extern void func_NtfsSystemFiles(void);
 extern void func_NtfsTraverse(void);
+extern void func_NtfsVolumeLabel(void);
+extern void func_NtfsVolumeLabelReboot(void);
 
 const struct test winetest_testlist[] =
 {
@@ -39,5 +41,7 @@ const struct test winetest_testlist[] =
     { "NtfsSharing", func_NtfsSharing },
     { "NtfsSystemFiles", func_NtfsSystemFiles },
     { "NtfsTraverse", func_NtfsTraverse },
+    { "NtfsVolumeLabel", func_NtfsVolumeLabel },
+    { "NtfsVolumeLabelReboot", func_NtfsVolumeLabelReboot },
     { 0, 0 }
 };
