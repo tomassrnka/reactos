@@ -444,7 +444,7 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
                 MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, TRUE);
                 NdisStatus = NDIS_STATUS_PENDING;
             }
-            MiniLeaveSerialized(Adapter);
+            MiniLeaveSerialized(Adapter, MiniLeaveSender);
             KeLowerIrql(SerialOldIrql);
         }
 
@@ -473,7 +473,7 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet)
                 MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, TRUE);
                 NdisStatus = NDIS_STATUS_PENDING;
             }
-            MiniLeaveSerialized(Adapter);
+            MiniLeaveSerialized(Adapter, MiniLeaveSender);
             KeLowerIrql(SerialOldIrql);
         }
 

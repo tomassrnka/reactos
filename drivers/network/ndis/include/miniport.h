@@ -102,6 +102,10 @@ typedef struct _LOGICAL_ADAPTER
     BOOLEAN                    DpcDeferred;            /* Its interrupt DPC waits for MiniportBusy to clear */
     BOOLEAN                    WorkerDeferred;         /* So does a work item worker */
     BOOLEAN                    WorkerScheduled;        /* A work item worker is queued and has not started */
+    BOOLEAN                    WorkerTurn;             /* The interrupt DPC left queued sends to the send thread, which runs the miniport next */
+    volatile BOOLEAN           SendThreadStop;
+    PKTHREAD                   SendThread;             /* A serialized miniport's send thread, see MiniLeaveSerialized */
+    KEVENT                     SendTurnEvent;
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)
@@ -216,8 +220,16 @@ MiniEnterSerialized(
     PLOGICAL_ADAPTER Adapter,
     PNDIS_PACKET     QueuePacket);
 
+typedef enum _MINI_LEAVE_CALLER
+{
+    MiniLeaveSender,
+    MiniLeaveWorkerTurn,
+    MiniLeaveInterruptDpc
+} MINI_LEAVE_CALLER;
+
 VOID
 MiniLeaveSerialized(
-    PLOGICAL_ADAPTER Adapter);
+    PLOGICAL_ADAPTER  Adapter,
+    MINI_LEAVE_CALLER Caller);
 
 /* EOF */
