@@ -37,6 +37,7 @@ private:
     static INT_PTR CALLBACK HardwarePageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
     WCHAR m_wszDrive[MAX_PATH];
+    WCHAR m_wszLabel[MAX_PATH + 1]; /* the label as the page shows it, until it is changed */
     UINT m_FreeSpacePerc;
     CComPtr<IDataObject> m_Multiple;
 
