@@ -369,6 +369,7 @@ GetTimeZoneKeyName(
     HKEY hKey;
     DWORD dwType;
     DWORD dwValueSize;
+    ULONG Length;
 
     if (KeyNameLength == 0)
         return FALSE;
@@ -382,7 +383,7 @@ GetTimeZoneKeyName(
     if (lError != ERROR_SUCCESS)
         return FALSE;
 
-    dwValueSize = (KeyNameLength - 1) * sizeof(WCHAR);
+    dwValueSize = KeyNameLength * sizeof(WCHAR);
     lError = RegQueryValueExW(hKey,
                               L"TimeZoneKeyName",
                               NULL,
@@ -398,7 +399,21 @@ GetTimeZoneKeyName(
         return FALSE;
     }
 
-    KeyName[dwValueSize / sizeof(WCHAR)] = UNICODE_NULL;
+    /* The data need not be terminated; it must fit with its terminator */
+    Length = dwValueSize / sizeof(WCHAR);
+    if (Length == KeyNameLength)
+    {
+        if (KeyName[Length - 1] != UNICODE_NULL)
+        {
+            *KeyName = UNICODE_NULL;
+            return FALSE;
+        }
+    }
+    else
+    {
+        KeyName[Length] = UNICODE_NULL;
+    }
+
     return (*KeyName != UNICODE_NULL);
 }
 

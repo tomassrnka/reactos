@@ -277,9 +277,13 @@ ShowTimeZoneList(HWND hwnd)
         if (dwCount == CB_ERR || dwCount == CB_ERRSPACE)
             continue;
 
+        /* A readable name of another zone means the key name is stale */
         if (bHaveKeyName && !bKeyFound &&
             (_wcsicmp(Entry->KeyName, szKeyName) == 0) &&
-            IsTimeZoneSetFrom(Entry, &TimeZoneInfo))
+            IsTimeZoneSetFrom(Entry, &TimeZoneInfo) &&
+            (!*TimeZoneInfo.StandardName || !*Entry->StandardName ||
+             wcsncmp(Entry->StandardName, TimeZoneInfo.StandardName,
+                     ARRAYSIZE(TimeZoneInfo.StandardName) - 1) == 0))
         {
             dwKeyIndex = dwCount;
             bKeyFound = TRUE;
