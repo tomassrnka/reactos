@@ -15,6 +15,7 @@ START_TEST(udpconnreset)
     BOOL Flag;
     DWORD Returned;
     INT Result, Error;
+    WSAOVERLAPPED Overlapped;
 
     ok(WSAStartup(MAKEWORD(2, 2), &WsaData) == 0, "WSAStartup failed\n");
 
@@ -39,6 +40,22 @@ START_TEST(udpconnreset)
     Returned = 0xdeadbeef;
     Result = WSAIoctl(Socket, SIO_UDP_CONNRESET, &Flag, sizeof(Flag), NULL, 0, &Returned, NULL, NULL);
     ok(Result == 0, "SIO_UDP_CONNRESET(TRUE) returned %d, error %d\n", Result, WSAGetLastError());
+    ok(Returned == 0, "SIO_UDP_CONNRESET(TRUE) returned %lu bytes\n", Returned);
+
+    /* A missing or short input buffer is rejected, also for an overlapped request */
+    Result = WSAIoctl(Socket, SIO_UDP_CONNRESET, NULL, 0, NULL, 0, &Returned, NULL, NULL);
+    Error = WSAGetLastError();
+    ok(Result == SOCKET_ERROR && Error == WSAEFAULT, "NULL input returned %d, error %d\n", Result, Error);
+    Result = WSAIoctl(Socket, SIO_UDP_NETRESET, &Flag, 1, NULL, 0, &Returned, NULL, NULL);
+    Error = WSAGetLastError();
+    ok(Result == SOCKET_ERROR && Error == WSAEFAULT, "short input returned %d, error %d\n", Result, Error);
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = WSACreateEvent();
+    ok(Overlapped.hEvent != WSA_INVALID_EVENT, "WSACreateEvent failed %d\n", WSAGetLastError());
+    Result = WSAIoctl(Socket, SIO_UDP_CONNRESET, NULL, 0, NULL, 0, &Returned, &Overlapped, NULL);
+    Error = WSAGetLastError();
+    ok(Result == SOCKET_ERROR && Error == WSAEFAULT, "overlapped NULL input returned %d, error %d\n", Result, Error);
+    WSACloseEvent(Overlapped.hEvent);
 
     closesocket(Socket);
 
