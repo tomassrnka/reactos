@@ -5366,7 +5366,8 @@ SetupDiChangeState(
     PSP_PROPCHANGE_PARAMS PropChange;
     HKEY hRootKey = INVALID_HANDLE_VALUE, hKey = INVALID_HANDLE_VALUE;
     LPCWSTR RegistryValueName;
-    DWORD dwConfigFlags, dwLength, dwRegType;
+    DWORD dwConfigFlags, dwOldConfigFlags, dwLength, dwRegType, dwError;
+    BOOL bHadConfigFlags;
     LONG rc;
     BOOL ret = FALSE;
 
@@ -5414,6 +5415,7 @@ SetupDiChangeState(
                 NULL,
                 &dwRegType,
                 (LPBYTE)&dwConfigFlags, &dwLength);
+            bHadConfigFlags = (rc != ERROR_FILE_NOT_FOUND);
             if (rc == ERROR_FILE_NOT_FOUND)
                 dwConfigFlags = 0;
             else if (rc != ERROR_SUCCESS)
@@ -5426,6 +5428,7 @@ SetupDiChangeState(
                 SetLastError(ERROR_GEN_FAILURE);
                 goto cleanup;
             }
+            dwOldConfigFlags = dwConfigFlags;
             if (PropChange->StateChange == DICS_ENABLE)
                 dwConfigFlags &= ~(PropChange->Scope == DICS_FLAG_GLOBAL ? CONFIGFLAG_DISABLED : CSCONFIGFLAG_DISABLED);
             else
@@ -5451,6 +5454,19 @@ SetupDiChangeState(
                     ret = ResetDevice(DeviceInfoSet, DeviceInfoData);
                 else
                     ret = StopDevice(DeviceInfoSet, DeviceInfoData);
+
+                /* The flag is not applied at boot and the device could not be stopped, so it keeps
+                 * running: do not leave it marked disabled. (Windows keeps the flag and asks for a
+                 * restart, which works there because the flag takes effect at the next boot.) */
+                if (!ret && PropChange->StateChange == DICS_DISABLE)
+                {
+                    dwError = GetLastError();
+                    if (bHadConfigFlags)
+                        RegSetValueExW(hKey, RegistryValueName, 0, REG_DWORD, (LPBYTE)&dwOldConfigFlags, sizeof(DWORD));
+                    else
+                        RegDeleteValueW(hKey, RegistryValueName);
+                    SetLastError(dwError);
+                }
             }
             else
                 ret = TRUE;
