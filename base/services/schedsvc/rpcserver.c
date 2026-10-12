@@ -87,9 +87,18 @@ NetrJobAdd(
     LPDWORD pJobId)
 {
     PJOB pJob;
+    DWORD dwJobId;
 
     TRACE("NetrJobAdd(%S %p %p)\n",
           ServerName, pAtInfo, pJobId);
+
+    /* A time of day below 24 hours, days of the month 1 to 31, days of the week Monday to Sunday */
+    if (pAtInfo->JobTime >= 24 * 3600000 ||
+        (pAtInfo->DaysOfMonth & 0x80000000) ||
+        (pAtInfo->DaysOfWeek & 0x80))
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
 
     /* Allocate a new job object */
     pJob = HeapAlloc(GetProcessHeap(),
@@ -108,8 +117,9 @@ NetrJobAdd(
     /* Acquire the job list lock exclusively */
     RtlAcquireResourceExclusive(&JobListLock, TRUE);
 
-    /* Assign a new job ID */
+    /* Assign a new job ID; the job may be gone once the lock is released */
     pJob->JobId = dwNextJobId++;
+    dwJobId = pJob->JobId;
     dwJobCount++;
 
     /* Append the new job to the job list */
@@ -133,7 +143,7 @@ NetrJobAdd(
         SetEvent(Events[1]);
 
     /* Return the new job ID */
-    *pJobId = pJob->JobId;
+    *pJobId = dwJobId;
 
     return ERROR_SUCCESS;
 }
