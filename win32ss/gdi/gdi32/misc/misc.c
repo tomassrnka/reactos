@@ -349,8 +349,9 @@ static inline int UXTHEME_SourceRow(int d, int s, int n)
     return (int)(((2LL * d + 1) * s - 1) / (2LL * n));
 }
 
-/* The colour key as a pixel of the source's format reads once expanded to 32 bpp */
-static COLORREF UXTHEME_ExpandedKey(HDC hdcSrc, COLORREF transcolor)
+/* The colour key as a pixel of the source's format reads once expanded to 32 bpp; a monochrome source
+   takes the text and background colours of hdcColors, as the image itself does */
+static COLORREF UXTHEME_ExpandedKey(HDC hdcSrc, HDC hdcColors, COLORREF transcolor)
 {
     BITMAPINFO bmi;
     HDC hdcKey = CreateCompatibleDC(hdcSrc), hdc32 = CreateCompatibleDC(hdcSrc);
@@ -371,6 +372,8 @@ static COLORREF UXTHEME_ExpandedKey(HDC hdcSrc, COLORREF transcolor)
     {
         hbmOldKey = SelectObject(hdcKey, hbmKey);
         hbmOld32 = SelectObject(hdc32, hbm32);
+        SetTextColor(hdc32, GetTextColor(hdcColors));
+        SetBkColor(hdc32, GetBkColor(hdcColors));
         SetPixelV(hdcKey, 0, 0, transcolor);
         if (BitBlt(hdc32, 0, 0, 1, 1, hdcKey, 0, 0, SRCCOPY))
         {
@@ -387,13 +390,55 @@ static COLORREF UXTHEME_ExpandedKey(HDC hdcSrc, COLORREF transcolor)
     return ret;
 }
 
+/* The device rectangle of a destination; FALSE when it is not drawn in device pixels: rotated, mirrored or
+   right-to-left DCs, and extents that do not fit an int */
+static BOOL UXTHEME_DeviceRect(HDC hdc, int x, int y, int cx, int cy, RECT *prcDev)
+{
+    XFORM xf;
+    POINT pt[2];
+
+    if ((LONGLONG)x + cx > MAXLONG || (LONGLONG)y + cy > MAXLONG)
+        return FALSE;
+    if (GetLayout(hdc) & LAYOUT_RTL)
+        return FALSE;
+    if (GetGraphicsMode(hdc) == GM_ADVANCED && (!GetWorldTransform(hdc, &xf) || xf.eM12 != 0.0f || xf.eM21 != 0.0f))
+        return FALSE;
+    pt[0].x = x;
+    pt[0].y = y;
+    pt[1].x = x + cx;
+    pt[1].y = y + cy;
+    if (!LPtoDP(hdc, pt, 2) || pt[1].x <= pt[0].x || pt[1].y <= pt[0].y ||
+        (LONGLONG)pt[1].x - pt[0].x > MAXLONG || (LONGLONG)pt[1].y - pt[0].y > MAXLONG)
+    {
+        return FALSE;
+    }
+    SetRect(prcDev, pt[0].x, pt[0].y, pt[1].x, pt[1].y);
+    return TRUE;
+}
+
+/* Maps the DC one to one onto device pixels; returns the SaveDC level to restore, 0 on failure */
+static int UXTHEME_SetDeviceMapping(HDC hdc)
+{
+    int iSaved = SaveDC(hdc);
+
+    if (!iSaved)
+        return 0;
+    if (GetGraphicsMode(hdc) == GM_ADVANCED)
+    {
+        ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
+        SetGraphicsMode(hdc, GM_COMPATIBLE);
+    }
+    SetMapMode(hdc, MM_TEXT);
+    SetViewportOrgEx(hdc, 0, 0, NULL);
+    SetWindowOrgEx(hdc, 0, 0, NULL);
+    return iSaved;
+}
+
 static BOOL UXTHEME_ResizeBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, int nWidthDst, int nHeightDst,
                               HDC hdcSrc, int nXOriginSrc, int nYOriginSrc, int nWidthSrc, int nHeightSrc,
                               INT transparent, COLORREF transcolor)
 {
     BITMAPINFO bmi;
-    XFORM xf;
-    POINT ptDev[2];
     RECT rcDev, rcClip, rcVis;
     HDC hdcIn = NULL, hdcOut = NULL;
     HBITMAP hbmIn = NULL, hbmOut = NULL;
@@ -403,34 +448,15 @@ static BOOL UXTHEME_ResizeBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, int 
     BOOL ret = FALSE;
     int x, y, cxDev, cyDev, cxVis, cyVis, xIn, yIn, cxIn, cyIn, iSaved;
 
-    /* Windows resizes to device pixels; rotated, mirrored or right-to-left DCs are left to GDI's stretch */
-    if ((LONGLONG)nXOriginDst + nWidthDst > MAXLONG || (LONGLONG)nYOriginDst + nHeightDst > MAXLONG)
+    /* Windows resizes to device pixels; other DCs are left to GDI's stretch */
+    if (!UXTHEME_DeviceRect(hdcDst, nXOriginDst, nYOriginDst, nWidthDst, nHeightDst, &rcDev))
         goto stretch;
-    if (GetLayout(hdcDst) & LAYOUT_RTL)
-        goto stretch;
-    if (GetGraphicsMode(hdcDst) == GM_ADVANCED && (!GetWorldTransform(hdcDst, &xf) || xf.eM12 != 0.0f || xf.eM21 != 0.0f))
-        goto stretch;
-    ptDev[0].x = nXOriginDst;
-    ptDev[0].y = nYOriginDst;
-    ptDev[1].x = nXOriginDst + nWidthDst;
-    ptDev[1].y = nYOriginDst + nHeightDst;
-    if (!LPtoDP(hdcDst, ptDev, 2) || ptDev[1].x <= ptDev[0].x || ptDev[1].y <= ptDev[0].y)
-        goto stretch;
-    SetRect(&rcDev, ptDev[0].x, ptDev[0].y, ptDev[1].x, ptDev[1].y);
     cxDev = rcDev.right - rcDev.left;
     cyDev = rcDev.bottom - rcDev.top;
 
-    iSaved = SaveDC(hdcDst);
+    iSaved = UXTHEME_SetDeviceMapping(hdcDst);
     if (!iSaved)
         goto stretch;
-    if (GetGraphicsMode(hdcDst) == GM_ADVANCED)
-    {
-        ModifyWorldTransform(hdcDst, NULL, MWT_IDENTITY);
-        SetGraphicsMode(hdcDst, GM_COMPATIBLE);
-    }
-    SetMapMode(hdcDst, MM_TEXT);
-    SetViewportOrgEx(hdcDst, 0, 0, NULL);
-    SetWindowOrgEx(hdcDst, 0, 0, NULL);
 
     /* Only the visible part is resized; the pixel rule keeps the full destination */
     rcVis = rcDev;
@@ -503,7 +529,7 @@ static BOOL UXTHEME_ResizeBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, int 
     }
 
     if (transparent == ALPHABLEND_BINARY)
-        transcolor = UXTHEME_ExpandedKey(hdcSrc, transcolor);
+        transcolor = UXTHEME_ExpandedKey(hdcSrc, hdcIn, transcolor);
     ret = UXTHEME_DoBlt(hdcDst, rcVis.left, rcVis.top, cxVis, cyVis,
                         hdcOut, 0, 0, cxVis, cyVis, transparent, transcolor);
 
@@ -687,7 +713,7 @@ static BOOL UXTHEME_ResizeTileBlt(HDC hdcDst, int nXOriginDst, int nYOriginDst, 
                               nWidthSrc, nHeightSrc, ALPHABLEND_NONE, 0))
         {
             if (transparent == ALPHABLEND_BINARY)
-                transcolor = UXTHEME_ExpandedKey(hdcSrc, transcolor);
+                transcolor = UXTHEME_ExpandedKey(hdcSrc, hdcTmp, transcolor);
             ret = UXTHEME_SizedBlt(hdcDst, nXOriginDst, nYOriginDst, nWidthDst, nHeightDst,
                                    hdcTmp, 0, 0, cxTmp, cyTmp, ST_TILE, transparent, transcolor);
         }
@@ -784,12 +810,24 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
     }
     else {
         HDC hdcDst = NULL;
-        POINT org;
-        int srcX[4], srcY[4], dstX[4], dstY[4], i, j;
+        POINT org, ptOrigin = { rcDst.left, rcDst.top };
+        RECT rcDev;
+        int srcX[4], srcY[4], dstX[4], dstY[4], i, j, iSaved = 0;
         BOOL bOk;
 
         dstSize.x = abs(dstSize.x);
         dstSize.y = abs(dstSize.y);
+
+        /* Windows lays the parts out in device pixels: on a scaled DC the margins stay device pixels and no
+           part is scaled again. Rotated, mirrored and right-to-left DCs keep the logical layout */
+        if (UXTHEME_DeviceRect(hdc, rcDst.left, rcDst.top, dstSize.x, dstSize.y, &rcDev) &&
+            (iSaved = UXTHEME_SetDeviceMapping(hdc)) != 0)
+        {
+            ptOrigin.x = rcDev.left;
+            ptOrigin.y = rcDev.top;
+            dstSize.x = rcDev.right - rcDev.left;
+            dstSize.y = rcDev.bottom - rcDev.top;
+        }
 
         /* Margins outside the image are cut to it */
         sm.cxLeftWidth = max(0, min(sm.cxLeftWidth, srcSize.x));
@@ -830,7 +868,7 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
         }
 
         hdcDst = hdc;
-        OffsetViewportOrgEx(hdcDst, rcDst.left, rcDst.top, &org);
+        OffsetViewportOrgEx(hdcDst, ptOrigin.x, ptOrigin.y, &org);
 
         /* Corners are resized, edges and the centre stretched or tiled; edges across a compressed margin are resized along it */
         for (j = 0; j < 3; j++)
@@ -863,6 +901,8 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
 
 draw_error:
         SetViewportOrgEx (hdcDst, org.x, org.y, NULL);
+        if (iSaved)
+            RestoreDC(hdc, iSaved);
     }
     SelectObject(hdcSrc, oldSrc);
     DeleteDC(hdcSrc);
