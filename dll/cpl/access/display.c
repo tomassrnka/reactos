@@ -41,19 +41,35 @@ UpdateCaretBlinkTimeReg(
 #define HIGHCONTRAST_KEY L"Control Panel\\Accessibility\\HighContrast"
 #define HIGHCONTRAST_SCHEME_VALUE L"High Contrast Scheme"
 
+/* A REG_SZ or REG_EXPAND_SZ value (setup writes the scheme names as REG_EXPAND_SZ) that fits cchOut with its terminator */
+static BOOL
+ReadSchemeName(HKEY hKey, LPCWSTR pszValue, LPWSTR pszOut, DWORD cchOut)
+{
+    WCHAR szBuffer[MAX_SCHEME_NAME + 1];
+    DWORD dwType, cbData = sizeof(szBuffer) - sizeof(WCHAR);
+
+    ZeroMemory(szBuffer, sizeof(szBuffer));
+    if (RegQueryValueExW(hKey, pszValue, NULL, &dwType, (LPBYTE)szBuffer, &cbData) != ERROR_SUCCESS ||
+        (dwType != REG_SZ && dwType != REG_EXPAND_SZ) ||
+        wcslen(szBuffer) >= cchOut)
+    {
+        return FALSE;
+    }
+    wcscpy(pszOut, szBuffer);
+    return TRUE;
+}
+
 /* Win32k keeps neither the scheme name nor a usable pointer to it, so the name lives in the registry */
 VOID
 LoadHighContrastScheme(PGLOBAL_DATA pGlobalData)
 {
     HKEY hKey;
-    DWORD dwType, cbData = sizeof(pGlobalData->szHighContrastScheme) - sizeof(WCHAR);
 
-    ZeroMemory(pGlobalData->szHighContrastScheme, sizeof(pGlobalData->szHighContrastScheme));
+    pGlobalData->szHighContrastScheme[0] = UNICODE_NULL;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, HIGHCONTRAST_KEY, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
     {
-        if (RegQueryValueExW(hKey, HIGHCONTRAST_SCHEME_VALUE, NULL, &dwType,
-                             (LPBYTE)pGlobalData->szHighContrastScheme, &cbData) != ERROR_SUCCESS ||
-            (dwType != REG_SZ && dwType != REG_EXPAND_SZ))
+        if (!ReadSchemeName(hKey, HIGHCONTRAST_SCHEME_VALUE, pGlobalData->szHighContrastScheme,
+                            ARRAYSIZE(pGlobalData->szHighContrastScheme)))
         {
             pGlobalData->szHighContrastScheme[0] = UNICODE_NULL;
         }
@@ -80,37 +96,23 @@ SaveHighContrastScheme(PGLOBAL_DATA pGlobalData)
 static BOOL
 GetSchemeLegacyName(HKEY hScheme, LPWSTR pszName, DWORD cchName)
 {
-    static const LPCWSTR SubKeys[] = { NULL, L"Sizes\\0" };
-    DWORD dwType, cbData;
-    HKEY hKey;
-    LONG lError;
-    UINT i;
+    HKEY hSize;
+    BOOL bFound;
 
-    for (i = 0; i < ARRAYSIZE(SubKeys); i++)
-    {
-        if (SubKeys[i] == NULL)
-            hKey = hScheme;
-        else if (RegOpenKeyExW(hScheme, SubKeys[i], 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
-            continue;
-
-        ZeroMemory(pszName, cchName * sizeof(WCHAR));
-        cbData = (cchName - 1) * sizeof(WCHAR);
-        lError = RegQueryValueExW(hKey, L"LegacyName", NULL, &dwType, (LPBYTE)pszName, &cbData);
-        if (hKey != hScheme)
-            RegCloseKey(hKey);
-
-        /* setup writes these names as REG_EXPAND_SZ */
-        if (lError == ERROR_SUCCESS && (dwType == REG_SZ || dwType == REG_EXPAND_SZ) && pszName[0] != UNICODE_NULL)
-            return TRUE;
-    }
-    return FALSE;
+    if (ReadSchemeName(hScheme, L"LegacyName", pszName, cchName) && pszName[0] != UNICODE_NULL)
+        return TRUE;
+    if (RegOpenKeyExW(hScheme, L"Sizes\\0", 0, KEY_QUERY_VALUE, &hSize) != ERROR_SUCCESS)
+        return FALSE;
+    bFound = ReadSchemeName(hSize, L"LegacyName", pszName, cchName) && pszName[0] != UNICODE_NULL;
+    RegCloseKey(hSize);
+    return bFound;
 }
 
 /* The color schemes are the ones Display Properties offers, under "New Schemes" */
 static VOID
 FillColorSchemeComboBox(HWND hwnd, LPCWSTR pszCurrent)
 {
-    WCHAR szKey[16], szName[MAX_SCHEME_NAME];
+    WCHAR szKey[256], szName[MAX_SCHEME_NAME];
     HKEY hSchemes, hScheme;
     DWORD dwIndex, cchKey;
     INT iItem;
@@ -124,7 +126,7 @@ FillColorSchemeComboBox(HWND hwnd, LPCWSTR pszCurrent)
     for (dwIndex = 0; ; dwIndex++)
     {
         cchKey = ARRAYSIZE(szKey);
-        if (RegEnumKeyExW(hSchemes, dwIndex, szKey, &cchKey, NULL, NULL, NULL, NULL) == ERROR_NO_MORE_ITEMS)
+        if (RegEnumKeyExW(hSchemes, dwIndex, szKey, &cchKey, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
             break;
         if (RegOpenKeyExW(hSchemes, szKey, 0, KEY_QUERY_VALUE, &hScheme) != ERROR_SUCCESS)
             continue;
