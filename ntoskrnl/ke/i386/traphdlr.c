@@ -549,6 +549,19 @@ KiTrap02Handler(VOID)
          */
         OldIrql = KeGetPcr()->Irql;
         KeGetPcr()->Irql = HIGH_LEVEL;
+
+        /* An NMI can reach all processors at once. One of them reports it,
+           the others wait here, so that the HAL runs only once. */
+        {
+            static LONG ReportOwner;
+
+            if (InterlockedCompareExchange(&ReportOwner, 1, 0) != 0)
+            {
+                while (TRUE)
+                    YieldProcessor();
+            }
+        }
+
         HalHandleNMI(NULL);
         KeGetPcr()->Irql = OldIrql;
     }
