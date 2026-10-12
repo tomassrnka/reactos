@@ -91,12 +91,14 @@ TIME_DayLightCompareDate(const SYSTEMTIME *date, const SYSTEMTIME *compareDate)
 
     /* convert to seconds */
     limit_day = ((limit_day * 24  + compareDate->wHour) * 60 +
-            compareDate->wMinute ) * 60;
+            compareDate->wMinute ) * 60 + compareDate->wSecond;
     dayinsecs = ((date->wDay * 24  + date->wHour) * 60 +
             date->wMinute ) * 60 + date->wSecond;
-    /* and compare */
-    return dayinsecs < limit_day ? -1 :
-           dayinsecs > limit_day ? 1 :
+    /* and compare, down to the millisecond */
+    if (dayinsecs != limit_day)
+        return dayinsecs < limit_day ? -1 : 1;
+    return date->wMilliseconds < compareDate->wMilliseconds ? -1 :
+           date->wMilliseconds > compareDate->wMilliseconds ? 1 :
            0;   /* date is equal to the date limit. */
 }
 
