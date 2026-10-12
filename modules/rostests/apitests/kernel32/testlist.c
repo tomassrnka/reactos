@@ -20,6 +20,7 @@ extern void func_GetDriveType(void);
 extern void func_GetEnvironmentVariable(void);
 extern void func_GetFinalPathNameByHandle(void);
 extern void func_GetLocaleInfo(void);
+extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetVolumeInformation(void);
 extern void func_InitOnce(void);
@@ -67,6 +68,7 @@ const struct test winetest_testlist[] =
     { "GetEnvironmentVariable",      func_GetEnvironmentVariable },
     { "GetFinalPathNameByHandle",    func_GetFinalPathNameByHandle },
     { "GetLocaleInfo",               func_GetLocaleInfo },
+    { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "InitOnce",                    func_InitOnce },

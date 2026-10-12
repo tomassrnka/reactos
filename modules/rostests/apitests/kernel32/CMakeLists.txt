@@ -21,6 +21,7 @@ list(APPEND SOURCE
     GetEnvironmentVariable.c
     GetFinalPathNameByHandle.c
     GetLocaleInfo.c
+    GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
     GetVolumeInformation.c
     InitOnce.c
