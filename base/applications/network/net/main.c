@@ -141,11 +141,35 @@ PrintErrorMessage(
     DWORD dwError)
 {
     WCHAR szErrorBuffer[16];
-    PWSTR pBuffer;
+    PWSTR pBuffer = NULL;
     PWSTR pErrorInserts[2] = {NULL, NULL};
+
+    /* Callers use ERROR_SUCCESS to print the plain success text */
+    if (dwError == ERROR_SUCCESS)
+    {
+        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                       FORMAT_MESSAGE_IGNORE_INSERTS,
+                       NULL,
+                       dwError,
+                       LANG_USER_DEFAULT,
+                       (LPWSTR)&pBuffer,
+                       0,
+                       NULL);
+        if (pBuffer)
+        {
+            ConPrintf(StdErr, L"%s\n", pBuffer);
+            LocalFree(pBuffer);
+        }
+        return;
+    }
+
+    /* Format insert for the 3502 and 3514 messages */
+    _swprintf(szErrorBuffer, L"%lu", dwError);
+    pErrorInserts[0] = szErrorBuffer;
 
     if (dwError >= MIN_LANMAN_MESSAGE_ID && dwError <= MAX_LANMAN_MESSAGE_ID)
     {
+        /* Network message, then the help hint */
         FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_HMODULE |
                        FORMAT_MESSAGE_IGNORE_INSERTS,
                        hModuleNetMsg,
@@ -160,32 +184,7 @@ PrintErrorMessage(
             LocalFree(pBuffer);
             pBuffer = NULL;
         }
-    }
-    else
-    {
-        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                       FORMAT_MESSAGE_IGNORE_INSERTS,
-                       NULL,
-                       dwError,
-                       LANG_USER_DEFAULT,
-                       (LPWSTR)&pBuffer,
-                       0,
-                       NULL);
-        if (pBuffer)
-        {
-            ConPrintf(StdErr, L"%s\n", pBuffer);
-            LocalFree(pBuffer);
-            pBuffer = NULL;
-        }
-    }
 
-    if (dwError != ERROR_SUCCESS)
-    {
-        /* Format insert for the 3514 message */
-        _swprintf(szErrorBuffer, L"%lu", dwError);
-        pErrorInserts[0] = szErrorBuffer;
-
-        /* Format and print the 3514 message */
         FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_HMODULE |
                        FORMAT_MESSAGE_ARGUMENT_ARRAY,
                        hModuleNetMsg,
@@ -201,6 +200,56 @@ PrintErrorMessage(
             pBuffer = NULL;
         }
     }
+    else
+    {
+        /* "System error N has occurred.", then the system message */
+        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_HMODULE |
+                       FORMAT_MESSAGE_ARGUMENT_ARRAY,
+                       hModuleNetMsg,
+                       3502,
+                       LANG_USER_DEFAULT,
+                       (LPWSTR)&pBuffer,
+                       0,
+                       (va_list *)pErrorInserts);
+        if (pBuffer)
+        {
+            ConPrintf(StdErr, L"%s\n", pBuffer);
+            LocalFree(pBuffer);
+            pBuffer = NULL;
+        }
+
+        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                       FORMAT_MESSAGE_IGNORE_INSERTS,
+                       NULL,
+                       dwError,
+                       LANG_USER_DEFAULT,
+                       (LPWSTR)&pBuffer,
+                       0,
+                       NULL);
+        if (pBuffer)
+        {
+            ConPrintf(StdErr, L"%s\n", pBuffer);
+            LocalFree(pBuffer);
+            pBuffer = NULL;
+        }
+    }
+}
+
+
+/* Success message or error report; returns the exit code (2 on error) */
+INT
+PrintStatusResult(
+    NET_API_STATUS Status)
+{
+    if (Status == NERR_Success)
+    {
+        PrintMessageString(3500);
+        ConPuts(StdOut, L"\n");
+        return 0;
+    }
+
+    PrintErrorMessage(Status);
+    return 2;
 }
 
 

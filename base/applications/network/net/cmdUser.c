@@ -53,10 +53,9 @@ static COUNTRY_TABLE CountryTable[] =
 
 static
 int
-CompareInfo(const void *a, const void *b)
+CompareNames(const void *a, const void *b)
 {
-    return _wcsicmp(((PUSER_INFO_0)a)->usri0_name,
-                    ((PUSER_INFO_0)b)->usri0_name);
+    return _wcsicmp(*(PCWSTR*)a, *(PCWSTR*)b);
 }
 
 
@@ -66,7 +65,8 @@ EnumerateUsers(VOID)
 {
     PUSER_INFO_0 pBuffer = NULL;
     PSERVER_INFO_100 pServer = NULL;
-    DWORD dwRead = 0, dwTotal = 0;
+    PWSTR *pNames = NULL, *pNewNames;
+    DWORD dwRead = 0, dwTotal = 0, dwCount = 0;
     DWORD i;
     DWORD ResumeHandle = 0;
     NET_API_STATUS Status;
@@ -85,6 +85,7 @@ EnumerateUsers(VOID)
 
     NetApiBufferFree(pServer);
 
+    /* NetUserEnum may hand out the list in parts: collect all, then sort */
     do
     {
         Status = NetUserEnum(NULL,
@@ -96,17 +97,44 @@ EnumerateUsers(VOID)
                              &dwTotal,
                              &ResumeHandle);
         if ((Status != NERR_Success) && (Status != ERROR_MORE_DATA))
-            return Status;
+            break;
 
-        qsort(pBuffer,
-              dwRead,
-              sizeof(PUSER_INFO_0),
-              CompareInfo);
-
-        for (i = 0; i < dwRead; i++)
+        if (dwRead > 0)
         {
-            if (pBuffer[i].usri0_name)
-                ConPrintf(StdOut, L"%s\n", pBuffer[i].usri0_name);
+            pNewNames = RtlAllocateHeap(RtlGetProcessHeap(),
+                                        HEAP_ZERO_MEMORY,
+                                        (dwCount + dwRead) * sizeof(PWSTR));
+            if (pNewNames == NULL)
+            {
+                NetApiBufferFree(pBuffer);
+                Status = ERROR_OUTOFMEMORY;
+                break;
+            }
+
+            if (pNames != NULL)
+            {
+                RtlCopyMemory(pNewNames, pNames, dwCount * sizeof(PWSTR));
+                RtlFreeHeap(RtlGetProcessHeap(), 0, pNames);
+            }
+            pNames = pNewNames;
+
+            for (i = 0; i < dwRead; i++)
+            {
+                if (pBuffer[i].usri0_name == NULL)
+                    continue;
+
+                pNames[dwCount] = RtlAllocateHeap(RtlGetProcessHeap(),
+                                                  0,
+                                                  (wcslen(pBuffer[i].usri0_name) + 1) * sizeof(WCHAR));
+                if (pNames[dwCount] == NULL)
+                {
+                    Status = ERROR_OUTOFMEMORY;
+                    break;
+                }
+
+                wcscpy(pNames[dwCount], pBuffer[i].usri0_name);
+                dwCount++;
+            }
         }
 
         NetApiBufferFree(pBuffer);
@@ -114,7 +142,26 @@ EnumerateUsers(VOID)
     }
     while (Status == ERROR_MORE_DATA);
 
-    return NERR_Success;
+    if (Status == NERR_Success)
+    {
+        qsort(pNames, dwCount, sizeof(PWSTR), CompareNames);
+
+        /* Three names per line, as in the Windows list */
+        for (i = 0; i < dwCount; i++)
+        {
+            ConPrintf(StdOut, L"%-25s", pNames[i]);
+            if ((i % 3) == 2 || i == dwCount - 1)
+                ConPuts(StdOut, L"\n");
+        }
+    }
+
+    for (i = 0; i < dwCount; i++)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pNames[i]);
+
+    if (pNames != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pNames);
+
+    return Status;
 }
 
 
@@ -1218,8 +1265,7 @@ cmdUser(
     if (lpUserName == NULL && lpPassword == NULL)
     {
         Status = EnumerateUsers();
-        PrintMessageString(TranslateAppMessage(Status));
-        return 0;
+        return PrintStatusResult(Status);
     }
     else if (lpUserName != NULL && lpPassword == NULL && argc == 3)
     {

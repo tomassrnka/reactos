@@ -12,11 +12,10 @@
 
 static
 int
-CompareInfo(const void *a,
-            const void *b)
+CompareNames(const void *a,
+             const void *b)
 {
-    return _wcsicmp(((PLOCALGROUP_INFO_0)a)->lgrpi0_name,
-                    ((PLOCALGROUP_INFO_0)b)->lgrpi0_name);
+    return _wcsicmp(*(PCWSTR*)a, *(PCWSTR*)b);
 }
 
 
@@ -26,7 +25,8 @@ EnumerateLocalGroups(VOID)
 {
     PLOCALGROUP_INFO_0 pBuffer = NULL;
     PSERVER_INFO_100 pServer = NULL;
-    DWORD dwRead = 0, dwTotal = 0;
+    PWSTR *pNames = NULL, *pNewNames;
+    DWORD dwRead = 0, dwTotal = 0, dwCount = 0;
     DWORD i;
     DWORD_PTR ResumeHandle = 0;
     NET_API_STATUS Status;
@@ -46,30 +46,77 @@ EnumerateLocalGroups(VOID)
 
     NetApiBufferFree(pServer);
 
-    Status = NetLocalGroupEnum(NULL,
-                               0,
-                               (LPBYTE*)&pBuffer,
-                               MAX_PREFERRED_LENGTH,
-                               &dwRead,
-                               &dwTotal,
-                               &ResumeHandle);
-    if (Status != NERR_Success)
-        return Status;
-
-    qsort(pBuffer,
-          dwRead,
-          sizeof(PLOCALGROUP_INFO_0),
-          CompareInfo);
-
-    for (i = 0; i < dwRead; i++)
+    /* NetLocalGroupEnum may hand out the list in parts: collect all, then sort */
+    do
     {
-        if (pBuffer[i].lgrpi0_name)
-            ConPrintf(StdOut, L"*%s\n", pBuffer[i].lgrpi0_name);
+        Status = NetLocalGroupEnum(NULL,
+                                   0,
+                                   (LPBYTE*)&pBuffer,
+                                   MAX_PREFERRED_LENGTH,
+                                   &dwRead,
+                                   &dwTotal,
+                                   &ResumeHandle);
+        if ((Status != NERR_Success) && (Status != ERROR_MORE_DATA))
+            break;
+
+        if (dwRead > 0)
+        {
+            pNewNames = RtlAllocateHeap(RtlGetProcessHeap(),
+                                        HEAP_ZERO_MEMORY,
+                                        (dwCount + dwRead) * sizeof(PWSTR));
+            if (pNewNames == NULL)
+            {
+                NetApiBufferFree(pBuffer);
+                Status = ERROR_OUTOFMEMORY;
+                break;
+            }
+
+            if (pNames != NULL)
+            {
+                RtlCopyMemory(pNewNames, pNames, dwCount * sizeof(PWSTR));
+                RtlFreeHeap(RtlGetProcessHeap(), 0, pNames);
+            }
+            pNames = pNewNames;
+
+            for (i = 0; i < dwRead; i++)
+            {
+                if (pBuffer[i].lgrpi0_name == NULL)
+                    continue;
+
+                pNames[dwCount] = RtlAllocateHeap(RtlGetProcessHeap(),
+                                                  0,
+                                                  (wcslen(pBuffer[i].lgrpi0_name) + 1) * sizeof(WCHAR));
+                if (pNames[dwCount] == NULL)
+                {
+                    Status = ERROR_OUTOFMEMORY;
+                    break;
+                }
+
+                wcscpy(pNames[dwCount], pBuffer[i].lgrpi0_name);
+                dwCount++;
+            }
+        }
+
+        NetApiBufferFree(pBuffer);
+        pBuffer = NULL;
+    }
+    while (Status == ERROR_MORE_DATA);
+
+    if (Status == NERR_Success)
+    {
+        qsort(pNames, dwCount, sizeof(PWSTR), CompareNames);
+
+        for (i = 0; i < dwCount; i++)
+            ConPrintf(StdOut, L"*%s\n", pNames[i]);
     }
 
-    NetApiBufferFree(pBuffer);
+    for (i = 0; i < dwCount; i++)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pNames[i]);
 
-    return NERR_Success;
+    if (pNames != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pNames);
+
+    return Status;
 }
 
 
@@ -86,7 +133,7 @@ DisplayLocalGroup(LPWSTR lpGroupName)
     DWORD_PTR ResumeHandle = 0;
     DWORD i;
     size_t len;
-    const DWORD nPaddedLength = 18;
+    const DWORD nPaddedLength = 15;
     NET_API_STATUS Status;
 
     Status = NetLocalGroupGetInfo(NULL,
@@ -192,14 +239,12 @@ cmdLocalGroup(
     if (argc == 2)
     {
         Status = EnumerateLocalGroups();
-        ConPrintf(StdOut, L"Status: %lu\n", Status);
-        return 0;
+        return PrintStatusResult(Status);
     }
     else if (argc == 3)
     {
         Status = DisplayLocalGroup(argv[2]);
-        ConPrintf(StdOut, L"Status: %lu\n", Status);
-        return 0;
+        return PrintStatusResult(Status);
     }
 
     i = 2;
@@ -216,8 +261,6 @@ cmdLocalGroup(
 
         dwMemberCount++;
     }
-
-    ConPrintf(StdOut, L"Member count: %lu\n", dwMemberCount);
 
     if (dwMemberCount > 0)
     {
@@ -314,7 +357,7 @@ cmdLocalGroup(
                                           1002,
                                           (LPBYTE)&Info1002,
                                           NULL);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else if (bAdd && !bDelete)
         {
@@ -333,14 +376,14 @@ cmdLocalGroup(
                                       (lpComment == NULL) ? 0 : 1,
                                       (lpComment == NULL) ? (LPBYTE)&Info0 : (LPBYTE)&Info1,
                                       NULL);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else if (!bAdd && bDelete && lpComment == NULL)
         {
             /* Delete the group */
             Status = NetLocalGroupDel(NULL,
                                       lpGroupName);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else
         {
@@ -357,7 +400,7 @@ cmdLocalGroup(
                                              3,
                                              (LPBYTE)lpMembers,
                                              dwMemberCount);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else if (!bAdd && bDelete && lpComment == NULL)
         {
@@ -367,7 +410,7 @@ cmdLocalGroup(
                                              3,
                                              (LPBYTE)lpMembers,
                                              dwMemberCount);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else
         {
@@ -379,7 +422,8 @@ done:
     if (lpMembers != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, lpMembers);
 
-    if (result != 0)
+    /* The syntax goes with usage errors, not with failed calls */
+    if (result == 1)
     {
         PrintMessageString(4381);
         ConPuts(StdOut, L"\n");

@@ -61,6 +61,10 @@ VOID
 PrintErrorMessage(
     DWORD dwError);
 
+INT
+PrintStatusResult(
+    NET_API_STATUS Status);
+
 VOID
 PrintNetMessage(
     DWORD dwMessage);

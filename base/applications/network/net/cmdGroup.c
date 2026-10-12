@@ -150,6 +150,20 @@ done:
 }
 
 
+static
+BOOL
+IsDomainController(VOID)
+{
+    OSVERSIONINFOEXW VersionInfo;
+
+    VersionInfo.dwOSVersionInfoSize = sizeof(VersionInfo);
+    if (!GetVersionExW((LPOSVERSIONINFOW)&VersionInfo))
+        return FALSE;
+
+    return (VersionInfo.wProductType == VER_NT_DOMAIN_CONTROLLER);
+}
+
+
 INT
 cmdGroup(
     INT argc,
@@ -171,17 +185,19 @@ cmdGroup(
     GROUP_INFO_1002 Info1002;
     NET_API_STATUS Status;
 
-    if (argc == 2)
+    if (argc == 2 || (argc == 3 && argv[2][0] != L'/'))
     {
-        Status = EnumerateGroups();
-        ConPrintf(StdOut, L"Status: %lu\n", Status);
-        return 0;
-    }
-    else if (argc == 3)
-    {
-        Status = DisplayGroup(argv[2]);
-        ConPrintf(StdOut, L"Status: %lu\n", Status);
-        return 0;
+        if (!IsDomainController())
+        {
+            PrintErrorMessage(3515);
+            return 2;
+        }
+
+        if (argc == 2)
+            Status = EnumerateGroups();
+        else
+            Status = DisplayGroup(argv[2]);
+        return PrintStatusResult(Status);
     }
 
     i = 2;
@@ -267,6 +283,14 @@ cmdGroup(
         goto done;
     }
 
+    /* Global groups exist only on a domain controller; usage errors come first */
+    if (!IsDomainController())
+    {
+        PrintErrorMessage(3515);
+        result = 2;
+        goto done;
+    }
+
     if (pUsers == NULL)
     {
         if (!bAdd && !bDelete && pComment != NULL)
@@ -278,7 +302,7 @@ cmdGroup(
                                      1002,
                                      (LPBYTE)&Info1002,
                                      NULL);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else if (bAdd && !bDelete)
         {
@@ -297,14 +321,14 @@ cmdGroup(
                                  (pComment == NULL) ? 0 : 1,
                                  (pComment == NULL) ? (LPBYTE)&Info0 : (LPBYTE)&Info1,
                                  NULL);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else if (!bAdd && bDelete && pComment == NULL)
         {
             /* Delete the group */
             Status = NetGroupDel(NULL,
                                  pGroupName);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else
         {
@@ -324,7 +348,7 @@ cmdGroup(
                 if (Status != NERR_Success)
                     break;
             }
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else if (!bAdd && bDelete && pComment == NULL)
         {
@@ -337,7 +361,7 @@ cmdGroup(
                 if (Status != NERR_Success)
                     break;
             }
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            result = PrintStatusResult(Status);
         }
         else
         {
@@ -349,7 +373,8 @@ done:
     if (pUsers != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, pUsers);
 
-    if (result != 0)
+    /* The syntax goes with usage errors, not with failed calls */
+    if (result == 1)
     {
         PrintMessageString(4381);
         ConPuts(StdOut, L"\n");
