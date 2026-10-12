@@ -78,8 +78,10 @@ static void WINAPI serv_main(DWORD argc, LPWSTR *argv)
     WINE_TRACE( "starting service\n" );
 
     stop_event = CreateEventW( NULL, TRUE, FALSE, NULL );
-    stop_requested = 0;
     reset_telnetd();
+    /* Cleared last: a stop of the previous run that arrives before this is still
+     * ignored, one that arrives after it stops this run */
+    stop_requested = 0;
 
     service_handle = RegisterServiceCtrlHandlerExW( telnetdW, service_handler, NULL );
     if (!service_handle)
