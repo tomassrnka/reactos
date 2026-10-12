@@ -594,6 +594,9 @@ HRESULT
 GetKnownPath(REFKNOWNFOLDERID kfid, CStringW &Path, DWORD Flags)
 {
     PWSTR p;
+    // An NT6 shell32 export can be a stub that raises when called on a system reporting NT5
+    if (LOBYTE(GetVersion()) < 6)
+        return HRESULT_FROM_WIN32(ERROR_OLD_WIN_VERSION);
     FARPROC f = GetProcAddress(LoadLibraryW(L"SHELL32"), "SHGetKnownFolderPath");
     if (!f)
         return HRESULT_FROM_WIN32(ERROR_OLD_WIN_VERSION);
