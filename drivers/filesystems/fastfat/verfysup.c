@@ -1157,16 +1157,35 @@ Routine Description:
     may.  The volume may have been marked permanently dirty since, by a path
     that holds none of the caller's locks (FSCTL_MARK_VOLUME_DIRTY): every
     such path sets VCB_STATE_FLAG_MOUNTED_DIRTY before it writes the dirty
-    marks, so if the flag is set now, write the dirty marks again.
+    marks, so if the flag is set now, write the dirty marks again.  The clean
+    call can raise after it wrote the boot sector, so the dirty marks are
+    written in that case too and the original status is raised again.
 
 --*/
 
 {
-    FatMarkVolume( IrpContext, Vcb, VolumeClean );
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN Raised = FALSE;
+
+    _SEH2_TRY {
+
+        FatMarkVolume( IrpContext, Vcb, VolumeClean );
+
+    } _SEH2_EXCEPT( FsRtlIsNtstatusExpected( Status = _SEH2_GetExceptionCode() ) ?
+                    EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH ) {
+
+        Raised = TRUE;
+        FatResetExceptionState( IrpContext );
+    } _SEH2_END;
 
     if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
 
         FatMarkVolume( IrpContext, Vcb, VolumeDirty );
+    }
+
+    if (Raised) {
+
+        FatRaiseStatus( IrpContext, Status );
     }
 }
 #endif
