@@ -476,6 +476,11 @@ Execute(LPTSTR Full, LPTSTR First, LPTSTR Rest, PARSED_COMMAND *Cmd)
                                       szFullName, rest, NULL, SW_SHOWNORMAL);
             execerror = hProcess ? ERROR_SUCCESS : GetLastError();
         }
+        else if (GetLastError() == ERROR_EXE_MACHINE_TYPE_MISMATCH)
+        {
+            /* A program this system cannot run, such as a DOS program on a 64-bit system */
+            execerror = ERROR_EXE_MACHINE_TYPE_MISMATCH;
+        }
 
         *FirstEnd = _T('\0');
 
@@ -499,11 +504,21 @@ Execute(LPTSTR Full, LPTSTR First, LPTSTR Rest, PARSED_COMMAND *Cmd)
         else if (execerror)
         {
             TRACE ("[ShellExecute failed!: %s]\n", debugstr_aw(Full));
-            if (execerror == ERROR_NO_ASSOCIATION)
-                error_cant_exec_program();
-            else
-                error_bad_command(first);
             dwExitCode = 1;
+            if (execerror == ERROR_NO_ASSOCIATION)
+            {
+                error_cant_exec_program();
+            }
+            else if (execerror == ERROR_EXE_MACHINE_TYPE_MISMATCH)
+            {
+                /* Keep 216 through CALL, || and cmd /c as well */
+                error_image_not_supported(szFullName);
+                dwExitCode = ERROR_EXE_MACHINE_TYPE_MISMATCH;
+            }
+            else
+            {
+                error_bad_command(first);
+            }
         }
 
         /* Restore the default console mode */

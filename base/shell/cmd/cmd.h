@@ -217,6 +217,7 @@ VOID error_invalid_switch(TCHAR ch);
 VOID error_invalid_parameter_format(PCTSTR s);
 VOID error_out_of_memory(VOID);
 VOID error_cant_exec_program(VOID);
+VOID error_image_not_supported(PCTSTR pszPath);
 VOID error_syntax(PCTSTR s);
 
 VOID msg_pause(VOID);
