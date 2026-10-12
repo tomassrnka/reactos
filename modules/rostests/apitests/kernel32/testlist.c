@@ -30,6 +30,7 @@ extern void func_JobObject(void);
 extern void func_LCMapString(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LocaleNameToLCID(void);
+extern void func_LocalTimeZone(void);
 extern void func_lstrcpynW(void);
 extern void func_lstrlen(void);
 extern void func_MailslotRead(void);
@@ -77,6 +78,7 @@ const struct test winetest_testlist[] =
     { "LCMapString",                 func_LCMapString },
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
+    { "LocalTimeZone",               func_LocalTimeZone },
     { "lstrcpynW",                   func_lstrcpynW },
     { "lstrlen",                     func_lstrlen },
     { "MailslotRead",                func_MailslotRead },

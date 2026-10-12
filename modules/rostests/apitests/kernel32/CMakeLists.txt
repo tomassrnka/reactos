@@ -31,6 +31,7 @@ list(APPEND SOURCE
     LCMapString.c
     LoadLibraryExW.c
     LocaleNameToLCID.c
+    LocalTimeZone.c
     lstrcpynW.c
     lstrlen.c
     Mailslot.c
