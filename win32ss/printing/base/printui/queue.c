@@ -475,9 +475,9 @@ static DWORD show_properties(HWND hwndOwner, LPCWSTR pszPrinter, HANDLE hPrinter
         return dwError ? dwError : ERROR_NOT_ENOUGH_MEMORY;
     }
     /* comctl32 returns 0, as for Cancel, when the modal sheet could not be created, and its cleanup
-     * then overwrites the last error (DestroyWindow(NULL)), so a page never shown reports the usual cause */
+     * then overwrites the last error (DestroyWindow(NULL)), so the cause of a page never shown is unknown */
     if (!page.bShown)
-        return ERROR_NOT_ENOUGH_MEMORY;
+        return ERROR_CAN_NOT_COMPLETE;
     return ERROR_SUCCESS;
 }
 
