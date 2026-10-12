@@ -2470,7 +2470,11 @@ Return Value:
             (VOID)KeRemoveQueueDpc( &Vcb->CleanVolumeDpc );
 #endif
 
+#ifdef __REACTOS__
+            FatMarkVolumeClean( IrpContext, Vcb );
+#else
             FatMarkVolume( IrpContext, Vcb, VolumeClean );
+#endif
             ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
 
             //

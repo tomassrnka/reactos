@@ -1141,6 +1141,36 @@ Return Value:
     return;
 }
 
+#ifdef __REACTOS__
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+FatMarkVolumeClean (
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb
+    )
+
+/*++
+
+Routine Description:
+
+    This routine marks the volume clean, for a caller that checked that it
+    may.  The volume may have been marked permanently dirty since, by a path
+    that holds none of the caller's locks (FSCTL_MARK_VOLUME_DIRTY): every
+    such path sets VCB_STATE_FLAG_MOUNTED_DIRTY before it writes the dirty
+    marks, so if the flag is set now, write the dirty marks again.
+
+--*/
+
+{
+    FatMarkVolume( IrpContext, Vcb, VolumeClean );
+
+    if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+
+        FatMarkVolume( IrpContext, Vcb, VolumeDirty );
+    }
+}
+#endif
+
 
 VOID
 NTAPI

@@ -431,11 +431,13 @@ Return Value:
 
                 if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY) &&
                     FatPrepareCleanVolume( Vcb, FALSE )) {
+
+                    FatMarkVolumeClean( IrpContext, Vcb );
 #else
                 if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
-#endif
 
                     FatMarkVolume( IrpContext, Vcb, VolumeClean );
+#endif
                     ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
                 }
 

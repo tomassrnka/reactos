@@ -3606,7 +3606,11 @@ Return Value:
 #endif
         !CcIsThereDirtyData(Vcb->Vpb)) {
 
+#ifdef __REACTOS__
+        FatMarkVolumeClean( IrpContext, Vcb );
+#else
         FatMarkVolume( IrpContext, Vcb, VolumeClean );
+#endif
         ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
     }
 
@@ -7667,15 +7671,15 @@ Return Value:
 #ifdef __REACTOS__
             if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY) &&
                 FatPrepareCleanVolume( Vcb, FALSE )) {
+
+                FatMarkVolumeClean( IrpContext, Vcb );
+                MarkedClean = TRUE;
 #else
             if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
-#endif
 
                 FatMarkVolume( IrpContext, Vcb, VolumeClean );
-                ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
-#ifdef __REACTOS__
-                MarkedClean = TRUE;
 #endif
+                ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
             }
 
             //

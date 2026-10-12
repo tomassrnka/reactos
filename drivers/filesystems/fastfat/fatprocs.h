@@ -2051,6 +2051,15 @@ FatMarkVolume (
     IN FAT_VOLUME_STATE VolumeState
     );
 
+#ifdef __REACTOS__
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+FatMarkVolumeClean (
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb
+    );
+#endif
+
 WORKER_THREAD_ROUTINE FatFspMarkVolumeDirtyWithRecover;
 
 VOID

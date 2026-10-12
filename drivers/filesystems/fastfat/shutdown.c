@@ -222,10 +222,11 @@ Return Value:
 
                 //
                 //  A fat sector still dirty after the flush did not reach
-                //  the disk: the purge would drop it, so keep the cache.  A
-                //  deferred clean that checked the fat before a write of it
-                //  failed may have marked the volume clean, and none runs
-                //  after shutdown: write the dirty marks.
+                //  the disk.  A deferred clean that checked the fat before a
+                //  write of it failed may have marked the volume clean, and
+                //  none runs after shutdown: write the dirty marks.  The
+                //  purge below still drops the sector: Mm would otherwise
+                //  write the page again at shutdown for as long as it fails.
                 //
 
                 if (FatIsFatDirty( Vcb )) {
@@ -245,19 +246,21 @@ Return Value:
                 //  clean incase there is a stale Bpb in the cache.
                 //
 
-#ifdef __REACTOS__
-                if (NT_SUCCESS( FlushStatus ) &&
-                    !FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
-#else
                 if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
-#endif
 
                     CcPurgeCacheSection( &Vcb->SectionObjectPointers,
                                          NULL,
                                          0,
                                          FALSE );
 
+#ifdef __REACTOS__
+                    if (NT_SUCCESS( FlushStatus )) {
+
+                        FatMarkVolumeClean( IrpContext, Vcb );
+                    }
+#else
                     FatMarkVolume( IrpContext, Vcb, VolumeClean );
+#endif
                 }
 
             } _SEH2_EXCEPT( EXCEPTION_EXECUTE_HANDLER ) {
