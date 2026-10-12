@@ -1519,6 +1519,51 @@ AppHelpCheckPackage(LPCWSTR szPackage)
 }
 #endif
 
+#ifdef __REACTOS__
+/* The package log is not open yet when a package is refused; record why, and which package */
+static void log_refused_package( const WCHAR *path, UINT error )
+{
+    WCHAR *text = NULL;
+    char *msg;
+    HANDLE file;
+    DWORD len, written;
+    LARGE_INTEGER zero = {{ 0 }};
+    int size;
+
+    /* Windows logs this as an information message */
+    if (!gszLogFile || !(gdwLogMode & INSTALLLOGMODE_INFO)) return;
+    if (!FormatMessageW( FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                         NULL, error, 0, (WCHAR *)&text, 0, NULL ))
+        return;
+    len = lstrlenW( text );
+    while (len && (text[len - 1] == '\r' || text[len - 1] == '\n')) text[--len] = 0;
+
+    file = CreateFileW( gszLogFile, GENERIC_WRITE, FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        SetFilePointerEx( file, zero, NULL, FILE_END );
+        size = WideCharToMultiByte( CP_ACP, 0, text, -1, NULL, 0, NULL, NULL );
+        if (size > 0 && (msg = malloc( size )))
+        {
+            WideCharToMultiByte( CP_ACP, 0, text, -1, msg, size, NULL, NULL );
+            WriteFile( file, msg, size - 1, &written, NULL );
+            WriteFile( file, "\n", 1, &written, NULL );
+            free( msg );
+        }
+        size = WideCharToMultiByte( CP_ACP, 0, path, -1, NULL, 0, NULL, NULL );
+        if (size > 0 && (msg = malloc( size )))
+        {
+            WideCharToMultiByte( CP_ACP, 0, path, -1, msg, size, NULL, NULL );
+            WriteFile( file, msg, size - 1, &written, NULL );
+            WriteFile( file, "\n", 1, &written, NULL );
+            free( msg );
+        }
+        CloseHandle( file );
+    }
+    LocalFree( text );
+}
+#endif
+
 UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
 {
     MSIDATABASE *db;
@@ -1657,12 +1702,18 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
     if (r != ERROR_SUCCESS)
     {
         WARN("failed to parse summary info %u\n", r);
+#ifdef __REACTOS__
+        log_refused_package( szPackage[0] == '#' ? package->db->path : szPackage, r );
+#endif
         msiobj_release( &package->hdr );
         return r;
     }
     r = validate_package( package );
     if (r != ERROR_SUCCESS)
     {
+#ifdef __REACTOS__
+        log_refused_package( szPackage[0] == '#' ? package->db->path : szPackage, r );
+#endif
         msiobj_release( &package->hdr );
         return r;
     }
@@ -2039,6 +2090,11 @@ INT MSI_ProcessMessageVerbatim(MSIPACKAGE *package, INSTALLMESSAGE eMessageType,
         (eMessageType & 0xff000000) != INSTALLMESSAGE_PROGRESS)
     {
         DWORD written;
+#ifdef __REACTOS__
+        LARGE_INTEGER zero = {{ 0 }};
+        /* Write at the end, so that no handle overwrites what another one wrote */
+        SetFilePointerEx( package->log_file, zero, NULL, FILE_END );
+#endif
         WriteFile( package->log_file, msg, len - 1, &written, NULL );
         WriteFile( package->log_file, "\n", 1, &written, NULL );
     }

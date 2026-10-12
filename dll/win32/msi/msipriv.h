@@ -1030,6 +1030,9 @@ extern DWORD gUIFilterRecord;
 extern LPVOID gUIContext;
 extern LPVOID gUIContextRecord;
 extern WCHAR *gszLogFile;
+#ifdef __REACTOS__
+extern DWORD gdwLogMode;
+#endif
 extern HINSTANCE msi_hInstance;
 
 /* action related functions */
