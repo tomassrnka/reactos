@@ -222,6 +222,8 @@ InitializeGlobalJobList(void)
             goto Cleanup;
         }
 
+        InterlockedIncrement(&pJob->pPrinter->lJobCount);
+
         // Add it to the Printer's Job List.
         if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
         {
@@ -377,6 +379,7 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
         goto Cleanup;
     }
 
+    InterlockedIncrement(&pJob->pPrinter->lJobCount);
     LeaveCriticalSection(&PrinterDeletionSection);
 
     // We were successful!
@@ -1491,6 +1494,7 @@ FreeJob(PLOCAL_JOB pJob)
     // Remove the Job from both Job Lists.
     DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
     DeleteElementSkiplist(&GlobalJobList, pJob);
+    InterlockedDecrement(&pJob->pPrinter->lJobCount);
 
     // Try to delete the corresponding .SHD file.
     pwszSHDFile = DllAllocSplMem(GetJobFilePath(L"SHD", 0, NULL));

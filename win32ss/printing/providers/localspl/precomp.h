@@ -128,6 +128,7 @@ struct _LOCAL_PRINTER
     PLOCAL_PRINT_PROCESSOR pPrintProcessor;
     PLOCAL_PORT pPort;
     SKIPLIST JobList;
+    LONG lJobCount;                             /** Jobs of this printer in the GlobalJobList, also those missing from JobList after a failed reinsertion. */
 };
 
 /**

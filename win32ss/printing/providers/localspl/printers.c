@@ -918,9 +918,10 @@ LocalDeletePrinter(HANDLE hPrinter)
         // It has been deleted through another handle already.
         dwErrorCode = ERROR_PRINTER_DELETED;
     }
-    else if (pPrinter->JobList.NodeCount)
+    else if (pPrinter->lJobCount)
     {
-        // A printer is only deleted with an empty queue: nothing would delete it once its jobs are done.
+        // A printer is only deleted without jobs: nothing would delete it once its jobs are done.
+        // The count also covers a job that a failed priority change left out of the JobList.
         dwErrorCode = ERROR_PRINTER_HAS_JOBS_QUEUED;
     }
     else
