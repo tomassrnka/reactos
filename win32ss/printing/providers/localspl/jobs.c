@@ -122,26 +122,18 @@ _PrinterJobListCompareRoutine(PVOID FirstStruct, PVOID SecondStruct)
 
     // First compare the priorities to determine the order.
     // The job with a higher priority shall come first.
-    iComparison = A->dwPriority - B->dwPriority;
+    // Compared, not subtracted: a priority read from a shadow file is not range checked.
+    iComparison = (A->dwPriority > B->dwPriority) - (A->dwPriority < B->dwPriority);
     if (iComparison != 0)
         return iComparison;
 
-    // Both have the same priority, so go by creation time.
-    if (!SystemTimeToFileTime(&A->stSubmitted, &ftSubmittedA))
+    // Both have the same priority, so go by creation time when both times are valid.
+    if (SystemTimeToFileTime(&A->stSubmitted, &ftSubmittedA) && SystemTimeToFileTime(&B->stSubmitted, &ftSubmittedB))
     {
-        ERR("SystemTimeToFileTime failed for A with error %lu!\n", GetLastError());
-        return 0;
+        iComparison = CompareFileTime(&ftSubmittedA, &ftSubmittedB);
+        if (iComparison != 0)
+            return iComparison;
     }
-
-    if (!SystemTimeToFileTime(&B->stSubmitted, &ftSubmittedB))
-    {
-        ERR("SystemTimeToFileTime failed for B with error %lu!\n", GetLastError());
-        return 0;
-    }
-
-    iComparison = CompareFileTime(&ftSubmittedA, &ftSubmittedB);
-    if (iComparison != 0)
-        return iComparison;
 
     // Jobs submitted at the same time are told apart by their ID, so that removing one never finds another.
     return (A->dwJobID > B->dwJobID) - (A->dwJobID < B->dwJobID);
@@ -1494,8 +1486,9 @@ FreeJob(PLOCAL_JOB pJob)
 
     // Remove the Job from both Job Lists.
     DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
-    DeleteElementSkiplist(&GlobalJobList, pJob);
-    InterlockedDecrement(&pJob->pPrinter->lJobCount);
+    // Only a job that was still in the GlobalJobList was counted.
+    if (DeleteElementSkiplist(&GlobalJobList, pJob))
+        InterlockedDecrement(&pJob->pPrinter->lJobCount);
 
     // Try to delete the corresponding .SHD file.
     pwszSHDFile = DllAllocSplMem(GetJobFilePath(L"SHD", 0, NULL));
