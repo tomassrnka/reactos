@@ -14,6 +14,7 @@ static BOOL (WINAPI *pGetLogicalProcessorInformationEx)(LOGICAL_PROCESSOR_RELATI
                                                         PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
                                                         PDWORD);
 static SYSTEM_LOGICAL_PROCESSOR_INFORMATION Info[MAX_ENTRIES];
+static BOOL Used[MAX_ENTRIES];
 static ULONG InfoCount;
 static BYTE Buffer[MAX_ENTRIES * sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)];
 
@@ -138,11 +139,11 @@ TestRelationship(
         return;
 
     /*
-     * The entries come in the order of GetLogicalProcessorInformation, then
-     * the group. Newer versions add relationships the old function does not
-     * have; those are not compared.
+     * Every entry matches one of GetLogicalProcessorInformation. The order
+     * differs between Windows versions and is not compared, nor are the
+     * relationships that only newer versions have.
      */
-    Index = 0;
+    memset(Used, 0, sizeof(Used));
     Groups = 0;
     for (Offset = 0; Offset < Length; Offset += Entry->Size)
     {
@@ -158,7 +159,6 @@ TestRelationship(
             continue;
         ok(Entry->Size == ExpectedSize(Entry->Relationship), "%d: entry at %lu: relationship %d, size %lu\n",
            Relationship, Offset, Entry->Relationship, Entry->Size);
-        ok(Groups == 0, "%d: relationship %d after the group entry\n", Relationship, Entry->Relationship);
 
         if (Entry->Relationship == RelationGroup)
         {
@@ -179,14 +179,35 @@ TestRelationship(
             continue;
         }
 
-        /* Find the next entry of GetLogicalProcessorInformation that matches */
-        while (Index < InfoCount && Relationship != RelationAll && Info[Index].Relationship != Relationship)
-            Index++;
-        ok(Index < InfoCount, "%d: more entries than GetLogicalProcessorInformation has\n", Relationship);
+        /* Find an unused entry of GetLogicalProcessorInformation with the same processors */
+        for (Index = 0; Index < InfoCount; Index++)
+        {
+            if (Used[Index] || Info[Index].Relationship != Entry->Relationship)
+                continue;
+            if (Entry->Relationship == RelationCache)
+            {
+                if (Entry->Cache.GroupMask.Mask == Info[Index].ProcessorMask &&
+                    Entry->Cache.Level == Info[Index].Cache.Level &&
+                    Entry->Cache.Type == Info[Index].Cache.Type)
+                {
+                    break;
+                }
+            }
+            else if (Entry->Relationship == RelationNumaNode)
+            {
+                if (Entry->NumaNode.GroupMask.Mask == Info[Index].ProcessorMask)
+                    break;
+            }
+            else if (Entry->Processor.GroupMask[0].Mask == Info[Index].ProcessorMask)
+            {
+                break;
+            }
+        }
+        ok(Index < InfoCount, "%d: entry at %lu, relationship %d: no match in GetLogicalProcessorInformation\n",
+           Relationship, Offset, Entry->Relationship);
         if (Index >= InfoCount)
-            break;
-        ok(Entry->Relationship == Info[Index].Relationship, "%d: entry %lu: relationship %d, expected %d\n",
-           Relationship, Index, Entry->Relationship, Info[Index].Relationship);
+            continue;
+        Used[Index] = TRUE;
 
         switch (Entry->Relationship)
         {
@@ -194,8 +215,6 @@ TestRelationship(
             case RelationProcessorPackage:
                 ok(Entry->Processor.GroupCount == 1, "GroupCount = %u\n", Entry->Processor.GroupCount);
                 ok(Entry->Processor.GroupMask[0].Group == 0, "Group = %u\n", Entry->Processor.GroupMask[0].Group);
-                ok(Entry->Processor.GroupMask[0].Mask == Info[Index].ProcessorMask, "Mask = 0x%Ix, expected 0x%Ix\n",
-                   Entry->Processor.GroupMask[0].Mask, Info[Index].ProcessorMask);
                 if (Entry->Relationship == RelationProcessorCore)
                     ok(Entry->Processor.Flags == Info[Index].ProcessorCore.Flags, "Flags = %u, expected %u\n",
                        Entry->Processor.Flags, Info[Index].ProcessorCore.Flags);
@@ -205,33 +224,29 @@ TestRelationship(
                 ok(Entry->NumaNode.NodeNumber == Info[Index].NumaNode.NodeNumber, "NodeNumber = %lu, expected %lu\n",
                    Entry->NumaNode.NodeNumber, Info[Index].NumaNode.NodeNumber);
                 ok(Entry->NumaNode.GroupMask.Group == 0, "Group = %u\n", Entry->NumaNode.GroupMask.Group);
-                ok(Entry->NumaNode.GroupMask.Mask == Info[Index].ProcessorMask, "Mask = 0x%Ix, expected 0x%Ix\n",
-                   Entry->NumaNode.GroupMask.Mask, Info[Index].ProcessorMask);
                 break;
 
             case RelationCache:
-                ok(Entry->Cache.Level == Info[Index].Cache.Level, "Level = %u\n", Entry->Cache.Level);
                 ok(Entry->Cache.Associativity == Info[Index].Cache.Associativity, "Associativity = %u\n",
                    Entry->Cache.Associativity);
                 ok(Entry->Cache.LineSize == Info[Index].Cache.LineSize, "LineSize = %u\n", Entry->Cache.LineSize);
                 ok(Entry->Cache.CacheSize == Info[Index].Cache.Size, "CacheSize = %lu\n", Entry->Cache.CacheSize);
-                ok(Entry->Cache.Type == Info[Index].Cache.Type, "Type = %d\n", Entry->Cache.Type);
-                ok(Entry->Cache.GroupMask.Mask == Info[Index].ProcessorMask, "Mask = 0x%Ix, expected 0x%Ix\n",
-                   Entry->Cache.GroupMask.Mask, Info[Index].ProcessorMask);
+                ok(Entry->Cache.GroupMask.Group == 0, "Group = %u\n", Entry->Cache.GroupMask.Group);
                 break;
 
             default:
-                ok(0, "%d: unexpected relationship %d\n", Relationship, Entry->Relationship);
                 break;
         }
-        Index++;
     }
     ok(Offset == Length, "%d: entries end at %lu, length %lu\n", Relationship, Offset, Length);
 
     /* Every entry of GetLogicalProcessorInformation was returned */
-    while (Index < InfoCount && Relationship != RelationAll && Info[Index].Relationship != Relationship)
-        Index++;
-    ok(Index == InfoCount, "%d: %lu of %lu entries returned\n", Relationship, Index, InfoCount);
+    for (Index = 0; Index < InfoCount; Index++)
+    {
+        if (Relationship == RelationAll || Info[Index].Relationship == Relationship)
+            ok(Used[Index], "%d: entry %lu (relationship %d, mask 0x%Ix) not returned\n",
+               Relationship, Index, Info[Index].Relationship, Info[Index].ProcessorMask);
+    }
 
     if (Relationship == RelationAll || Relationship == RelationGroup)
         ok(Groups == 1, "%d: %lu group entries\n", Relationship, Groups);
