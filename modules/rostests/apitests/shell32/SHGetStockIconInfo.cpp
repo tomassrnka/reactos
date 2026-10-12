@@ -266,19 +266,43 @@ static int ShellSizeChild(INT cxShell)
 static void TestShellIconSize(void)
 {
     static const WCHAR s_szKey[] = L"Control Panel\\Desktop\\WindowMetrics";
-    WCHAR szOld[64], szNew[16], szExe[MAX_PATH], szCmd[MAX_PATH + 64];
-    DWORD cbOld = sizeof(szOld), dwType = 0, dwExit = 0xDEADBEEF;
+    WCHAR szNew[16], szExe[MAX_PATH], szCmd[MAX_PATH + 64];
+    DWORD cbOld = 0, dwType = 0, dwExit = 0xDEADBEEF;
     INT cxShell = GetSystemMetrics(SM_CXICON) + 16;
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
-    BOOL bHadOld;
+    BYTE *pOld = NULL;
+    HKEY hKey;
+    LONG lError;
 
-    bHadOld = (SHGetValueW(HKEY_CURRENT_USER, s_szKey, L"Shell Icon Size", &dwType, szOld, &cbOld) == ERROR_SUCCESS);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, s_szKey, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+    {
+        skip("Cannot open the window metrics key\n");
+        return;
+    }
+
+    /* Back up the raw value to restore it exactly; only an absent value is deleted afterwards */
+    lError = RegQueryValueExW(hKey, L"Shell Icon Size", NULL, &dwType, NULL, &cbOld);
+    if (lError == ERROR_SUCCESS)
+    {
+        pOld = (BYTE *)HeapAlloc(GetProcessHeap(), 0, cbOld ? cbOld : 1);
+        lError = pOld ? RegQueryValueExW(hKey, L"Shell Icon Size", NULL, &dwType, pOld, &cbOld) : ERROR_OUTOFMEMORY;
+    }
+    if (lError != ERROR_SUCCESS && lError != ERROR_FILE_NOT_FOUND)
+    {
+        skip("Cannot back up the shell icon size, error %ld\n", lError);
+        HeapFree(GetProcessHeap(), 0, pOld);
+        RegCloseKey(hKey);
+        return;
+    }
+
     wsprintfW(szNew, L"%d", cxShell);
-    if (SHSetValueW(HKEY_CURRENT_USER, s_szKey, L"Shell Icon Size", REG_SZ, szNew,
-                    (lstrlenW(szNew) + 1) * sizeof(WCHAR)) != ERROR_SUCCESS)
+    if (RegSetValueExW(hKey, L"Shell Icon Size", 0, REG_SZ, (const BYTE *)szNew,
+                       (lstrlenW(szNew) + 1) * sizeof(WCHAR)) != ERROR_SUCCESS)
     {
         skip("Cannot set the shell icon size\n");
+        HeapFree(GetProcessHeap(), 0, pOld);
+        RegCloseKey(hKey);
         return;
     }
 
@@ -292,10 +316,12 @@ static void TestShellIconSize(void)
         CloseHandle(pi.hProcess);
     }
 
-    if (bHadOld)
-        SHSetValueW(HKEY_CURRENT_USER, s_szKey, L"Shell Icon Size", dwType, szOld, cbOld);
+    if (lError == ERROR_SUCCESS)
+        RegSetValueExW(hKey, L"Shell Icon Size", 0, dwType, pOld, cbOld);
     else
-        SHDeleteValueW(HKEY_CURRENT_USER, s_szKey, L"Shell Icon Size");
+        RegDeleteValueW(hKey, L"Shell Icon Size");
+    HeapFree(GetProcessHeap(), 0, pOld);
+    RegCloseKey(hKey);
 
     if (dwExit == SHELLSIZE_NOT_USED)
         skip("The shell does not use the registry icon size\n");
