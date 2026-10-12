@@ -469,12 +469,15 @@ static DWORD show_properties(HWND hwndOwner, LPCWSTR pszPrinter, HANDLE hPrinter
     psh.nPages = 1;
     psh.phpage = &hPage;
     SetLastError(ERROR_SUCCESS);
-    /* comctl32 may return 0 (as for Cancel) when the sheet could not be created, so check that the page was shown */
-    if (PropertySheetW(&psh) < 0 || !page.bShown)
+    if (PropertySheetW(&psh) < 0)
     {
         dwError = GetLastError();
         return dwError ? dwError : ERROR_NOT_ENOUGH_MEMORY;
     }
+    /* comctl32 returns 0, as for Cancel, when the modal sheet could not be created, and its cleanup
+     * then overwrites the last error (DestroyWindow(NULL)), so a page never shown reports the usual cause */
+    if (!page.bShown)
+        return ERROR_NOT_ENOUGH_MEMORY;
     return ERROR_SUCCESS;
 }
 
