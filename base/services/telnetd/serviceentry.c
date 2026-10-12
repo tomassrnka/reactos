@@ -32,6 +32,8 @@ static WCHAR telnetdW[] = {'t','e','l','n','e','t','d',0};
 
 static SERVICE_STATUS_HANDLE service_handle;
 static HANDLE stop_event;
+/* Set by the first stop of a run; the dispatcher calls the handler one control at a time */
+static volatile LONG stop_requested;
 
 static DWORD WINAPI service_handler( DWORD ctrl, DWORD event_type, LPVOID event_data, LPVOID context )
 {
@@ -44,11 +46,17 @@ static DWORD WINAPI service_handler( DWORD ctrl, DWORD event_type, LPVOID event_
     status.dwCheckPoint              = 0;
     status.dwWaitHint                = 0;
 
+    /* A control the service controller approved before the stop can still arrive
+     * while serv_main() closes the event and reports SERVICE_STOPPED */
+    if (stop_requested)
+        return NO_ERROR;
+
     switch(ctrl)
     {
     case SERVICE_CONTROL_STOP:
     case SERVICE_CONTROL_SHUTDOWN:
         WINE_TRACE( "shutting down\n" );
+        stop_requested = 1;
         status.dwCurrentState     = SERVICE_STOP_PENDING;
         status.dwControlsAccepted = 0;
         SetServiceStatus( service_handle, &status );
@@ -70,6 +78,7 @@ static void WINAPI serv_main(DWORD argc, LPWSTR *argv)
     WINE_TRACE( "starting service\n" );
 
     stop_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    stop_requested = 0;
     reset_telnetd();
 
     service_handle = RegisterServiceCtrlHandlerExW( telnetdW, service_handler, NULL );
