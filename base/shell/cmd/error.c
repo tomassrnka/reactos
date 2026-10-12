@@ -148,6 +148,27 @@ VOID error_cant_exec_program(VOID)
     nErrorLevel = 1;
 }
 
+VOID error_image_not_supported(PCTSTR pszPath)
+{
+    PTSTR pszMsg = NULL;
+    DWORD_PTR Args[1] = { (DWORD_PTR)pszPath };
+
+    /* The message names the program: "This version of %1 is not compatible..." */
+    if (FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                      FORMAT_MESSAGE_ARGUMENT_ARRAY,
+                      NULL, ERROR_EXE_MACHINE_TYPE_MISMATCH, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                      (PTSTR)&pszMsg, 0, (va_list*)Args))
+    {
+        ConErrPrintf(_T("%s"), pszMsg);
+        LocalFree(pszMsg);
+    }
+    else
+    {
+        ErrorMessage(ERROR_EXE_MACHINE_TYPE_MISMATCH, NULL);
+    }
+    nErrorLevel = ERROR_EXE_MACHINE_TYPE_MISMATCH;
+}
+
 
 VOID error_invalid_parameter_format(PCWSTR s)
 {
