@@ -662,7 +662,7 @@ MmCreatePeb(IN PEPROCESS Process,
         // Heap and Debug Data
         //
         Peb->NumberOfProcessors = KeNumberProcessors;
-        Peb->ImageProcessAffinityMask = KeActiveProcessors;
+        /* ImageProcessAffinityMask stays 0 unless set below: ntdll applies it over the inherited affinity */
         Peb->BeingDebugged = (BOOLEAN)(Process->DebugPort != NULL);
         Peb->NtGlobalFlag = NtGlobalFlag;
         Peb->HeapSegmentReserve = MmHeapSegmentReserve;
