@@ -23,6 +23,8 @@
 #include <wine/debug.h>
 
 int kickoff_telnetd(void);
+void reset_telnetd(void);
+void stop_telnetd(void);
 
 WINE_DEFAULT_DEBUG_CHANNEL(telnetd);
 
@@ -51,6 +53,7 @@ static DWORD WINAPI service_handler( DWORD ctrl, DWORD event_type, LPVOID event_
         status.dwControlsAccepted = 0;
         SetServiceStatus( service_handle, &status );
         SetEvent( stop_event );
+        stop_telnetd();
         return NO_ERROR;
     default:
         WINE_FIXME( "got service ctrl %x\n", ctrl );
@@ -67,6 +70,7 @@ static void WINAPI serv_main(DWORD argc, LPWSTR *argv)
     WINE_TRACE( "starting service\n" );
 
     stop_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    reset_telnetd();
 
     service_handle = RegisterServiceCtrlHandlerExW( telnetdW, service_handler, NULL );
     if (!service_handle)
