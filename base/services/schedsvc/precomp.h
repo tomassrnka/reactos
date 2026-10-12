@@ -39,6 +39,7 @@ typedef struct _JOB
     DWORD DaysOfMonth;
     UCHAR DaysOfWeek;
     UCHAR Flags;
+    BOOL bMissed;
     WCHAR Command[1];
 } JOB, *PJOB;
 

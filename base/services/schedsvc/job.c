@@ -54,12 +54,43 @@ IsValidSchedule(
 }
 
 
+/* Converts a local start time to UTC with the time zone rules of its date. A local time in the hour skipped when
+ * daylight saving time begins does not exist: it is converted with the daylight bias, an hour early, as Windows'
+ * Task Scheduler does, and the function returns FALSE. */
+static
+BOOL
+GetJobDueTime(
+    _In_ const FILETIME *pLocalTime,
+    _Out_ FILETIME *pDueTime)
+{
+    SYSTEMTIME LocalTime, UniversalTime, CheckTime;
+    FILETIME CheckFileTime;
+
+    if (!FileTimeToSystemTime(pLocalTime, &LocalTime) ||
+        !TzSpecificLocalTimeToSystemTime(NULL, &LocalTime, &UniversalTime) ||
+        !SystemTimeToFileTime(&UniversalTime, pDueTime))
+    {
+        LocalFileTimeToFileTime(pLocalTime, pDueTime);
+        return TRUE;
+    }
+
+    /* Converted back, a time that does not exist comes out as another local time */
+    if (SystemTimeToTzSpecificLocalTime(NULL, &UniversalTime, &CheckTime) &&
+        SystemTimeToFileTime(&CheckTime, &CheckFileTime) &&
+        CompareFileTime(&CheckFileTime, pLocalTime) != 0)
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+
 VOID
 GetNextJobTimeout(HANDLE hTimer)
 {
     PLIST_ENTRY CurrentEntry;
-    FILETIME DueTime;
-    SYSTEMTIME LocalTime, UniversalTime;
+    FILETIME DueTime, JobDueTime;
     PJOB CurrentJob;
 
     bValidNextJobStartTime = FALSE;
@@ -74,15 +105,13 @@ GetNextJobTimeout(HANDLE hTimer)
             continue;
         }
 
-        if (bValidNextJobStartTime == FALSE)
+        /* The earliest job in UTC: a start time in the skipped hour is due before a later existing time */
+        GetJobDueTime(&CurrentJob->StartTime, &JobDueTime);
+        if (bValidNextJobStartTime == FALSE || CompareFileTime(&DueTime, &JobDueTime) > 0)
         {
             CopyMemory(&NextJobStartTime, &CurrentJob->StartTime, sizeof(FILETIME));
+            DueTime = JobDueTime;
             bValidNextJobStartTime = TRUE;
-        }
-        else
-        {
-            if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) > 0)
-                CopyMemory(&NextJobStartTime, &CurrentJob->StartTime, sizeof(FILETIME));
         }
 
         CurrentEntry = CurrentEntry->Flink;
@@ -93,14 +122,6 @@ GetNextJobTimeout(HANDLE hTimer)
         TRACE("No valid job!\n");
         CancelWaitableTimer(hTimer);
         return;
-    }
-
-    /* Convert with the time zone rules of the start date, not with today's bias */
-    if (!FileTimeToSystemTime(&NextJobStartTime, &LocalTime) ||
-        !TzSpecificLocalTimeToSystemTime(NULL, &LocalTime, &UniversalTime) ||
-        !SystemTimeToFileTime(&UniversalTime, &DueTime))
-    {
-        LocalFileTimeToFileTime(&NextJobStartTime, &DueTime);
     }
 
     SetWaitableTimer(hTimer,
@@ -167,7 +188,13 @@ RunCurrentJobs(VOID)
         CurrentJob = CONTAINING_RECORD(CurrentEntry, JOB, JobEntry);
         NextEntry = CurrentEntry->Flink;
 
-        if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) == 0)
+        if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) == 0 && CurrentJob->bMissed)
+        {
+            /* Its start time was in the skipped hour and had passed when it was scheduled: Windows does not run it */
+            TRACE("Skip job %ld: %S\n", CurrentJob->JobId, CurrentJob->Command);
+            ReScheduleJob(CurrentJob);
+        }
+        else if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) == 0)
         {
             TRACE("Run job %ld: %S\n", CurrentJob->JobId, CurrentJob->Command);
 
@@ -509,12 +536,14 @@ CalculateNextStartTime(
     _In_ PJOB pJob)
 {
     SYSTEMTIME Now, Day;
-    FILETIME FileTime;
+    FILETIME FileTime, DueTime, UtcNow;
     ULARGE_INTEGER Midnight, Candidate;
     DWORD_PTR NowMs;
     UINT i;
 
     TRACE("CalculateNextStartTime(%p)\n", pJob);
+
+    pJob->bMissed = FALSE;
     TRACE("JobTime: %lu\n", pJob->JobTime);
     TRACE("DaysOfWeek: 0x%x\n", pJob->DaysOfWeek);
     TRACE("DaysOfMonth: 0x%x\n", pJob->DaysOfMonth);
@@ -571,6 +600,13 @@ CalculateNextStartTime(
 
     pJob->StartTime.dwLowDateTime = Candidate.LowPart;
     pJob->StartTime.dwHighDateTime = Candidate.HighPart;
+
+    /* A start time in the skipped hour is due an hour early; when that has passed already, the start is missed */
+    if (!GetJobDueTime(&pJob->StartTime, &DueTime))
+    {
+        GetSystemTimeAsFileTime(&UtcNow);
+        pJob->bMissed = (CompareFileTime(&DueTime, &UtcNow) <= 0);
+    }
 }
 
 #if 0
