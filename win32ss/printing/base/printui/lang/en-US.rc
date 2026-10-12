@@ -1,0 +1,84 @@
+/*
+ * PROJECT:     ReactOS Printer User Interface
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     English (United States) resource file
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+IDM_QUEUE MENU
+BEGIN
+    POPUP "&Printer"
+    BEGIN
+        MENUITEM "Set As De&fault Printer", IDM_SETDEFAULT
+        MENUITEM SEPARATOR
+        MENUITEM "P&roperties", IDM_PROPERTIES
+        MENUITEM SEPARATOR
+        MENUITEM "&Close", IDM_CLOSE
+    END
+    POPUP "&Document"
+    BEGIN
+        MENUITEM "&Cancel", IDM_CANCELDOC
+    END
+    POPUP "&View"
+    BEGIN
+        MENUITEM "&Refresh\tF5", IDM_REFRESH
+    END
+END
+
+IDA_QUEUE ACCELERATORS
+BEGIN
+    VK_F5, IDM_REFRESH, VIRTKEY
+    VK_DELETE, IDM_CANCELDOC, VIRTKEY
+END
+
+IDD_GENERAL DIALOGEX 0, 0, 252, 218
+STYLE DS_SHELLFONT | WS_CHILD | WS_CAPTION
+CAPTION "General"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "&Name:", -1, 7, 12, 60, 8
+    EDITTEXT IDC_NAME, 70, 10, 175, 12, ES_AUTOHSCROLL | ES_READONLY
+    LTEXT "&Location:", -1, 7, 32, 60, 8
+    EDITTEXT IDC_LOCATION, 70, 30, 175, 12, ES_AUTOHSCROLL | ES_READONLY
+    LTEXT "&Comment:", -1, 7, 52, 60, 8
+    EDITTEXT IDC_COMMENT, 70, 50, 175, 12, ES_AUTOHSCROLL | ES_READONLY
+    LTEXT "Model:", -1, 7, 76, 60, 8
+    LTEXT "", IDC_MODEL, 70, 76, 175, 8, SS_NOPREFIX
+    LTEXT "Port:", -1, 7, 92, 60, 8
+    LTEXT "", IDC_PORT, 70, 92, 175, 8, SS_NOPREFIX
+    LTEXT "Status:", -1, 7, 108, 60, 8
+    LTEXT "", IDC_STATUS, 70, 108, 175, 8, SS_NOPREFIX
+    LTEXT "Documents:", -1, 7, 124, 60, 8
+    LTEXT "", IDC_DOCUMENTS, 70, 124, 175, 8, SS_NOPREFIX
+    LTEXT "These printer settings can be viewed here but not changed.", -1, 7, 150, 238, 16
+END
+
+STRINGTABLE
+BEGIN
+    IDS_CAPTION "Printers"
+    IDS_PROPERTIES_TITLE "%s Properties"
+    IDS_COL_DOCUMENT "Document Name"
+    IDS_COL_STATUS "Status"
+    IDS_COL_OWNER "Owner"
+    IDS_COL_PAGES "Pages"
+    IDS_COL_SIZE "Size"
+    IDS_COL_SUBMITTED "Submitted"
+    IDS_DOCUMENTS_COUNT "%lu document(s) in queue"
+    IDS_STATUS_READY "Ready"
+    IDS_STATUS_PAUSED "Paused"
+    IDS_STATUS_ERROR "Error"
+    IDS_STATUS_DELETING "Deleting"
+    IDS_STATUS_OFFLINE "Offline"
+    IDS_STATUS_PRINTING "Printing"
+    IDS_STATUS_SPOOLING "Spooling"
+    IDS_FAILED "Operation could not be completed.\n\n%s"
+    IDS_BAD_ARGUMENTS "The arguments are invalid."
+    IDS_NOT_SUPPORTED "This printer operation is not supported."
+    IDS_PAGES_OF "%lu of %lu"
+    IDS_QUEUE_UNAVAILABLE "The queue cannot be read: %s"
+    IDS_INFO_UNAVAILABLE "Not available"
+    IDS_STATUS_BUSY "Busy"
+    IDS_STATUS_ATTENTION "Needs attention"
+END
