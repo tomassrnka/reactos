@@ -2116,10 +2116,19 @@ QSI_DEF(SystemCurrentTimeZoneInformation)
 
 SSI_DEF(SystemCurrentTimeZoneInformation)
 {
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+
     /* Check user buffer's size */
     if (Size < sizeof(RTL_TIME_ZONE_INFORMATION))
     {
         return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    /* Changing the time zone needs SeTimeZonePrivilege (NT 6); SeSystemtimePrivilege is not enough */
+    if (PreviousMode != KernelMode &&
+        !SeSinglePrivilegeCheck(SeTimeZonePrivilege, PreviousMode))
+    {
+        return STATUS_PRIVILEGE_NOT_HELD;
     }
 
     return ExpSetTimeZoneInformation((PRTL_TIME_ZONE_INFORMATION)Buffer);

@@ -12,6 +12,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <k32.h>
+#include <ndk/sefuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -308,6 +309,32 @@ GetTimeZoneInformation(LPTIME_ZONE_INFORMATION lpTimeZoneInformation)
 }
 
 
+/* SeTimeZonePrivilege must be enabled in the effective token; STATUS_SUCCESS when it cannot be determined */
+static NTSTATUS
+BasepCheckTimeZonePrivilege(VOID)
+{
+    PRIVILEGE_SET PrivilegeSet;
+    HANDLE hToken;
+    BOOLEAN Held = FALSE;
+    NTSTATUS Status;
+
+    Status = NtOpenThreadToken(NtCurrentThread(), TOKEN_QUERY, FALSE, &hToken);
+    if (Status == STATUS_NO_TOKEN)
+        Status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &hToken);
+    if (!NT_SUCCESS(Status))
+        return STATUS_SUCCESS;
+
+    PrivilegeSet.PrivilegeCount = 1;
+    PrivilegeSet.Control = PRIVILEGE_SET_ALL_NECESSARY;
+    PrivilegeSet.Privilege[0].Luid.LowPart = SE_TIME_ZONE_PRIVILEGE;
+    PrivilegeSet.Privilege[0].Luid.HighPart = 0;
+    PrivilegeSet.Privilege[0].Attributes = 0;
+    Status = NtPrivilegeCheck(hToken, &PrivilegeSet, &Held);
+    NtClose(hToken);
+
+    return (NT_SUCCESS(Status) && !Held) ? STATUS_PRIVILEGE_NOT_HELD : STATUS_SUCCESS;
+}
+
 /*
  * @implemented
  */
@@ -315,7 +342,8 @@ BOOL
 WINAPI
 SetTimeZoneInformation(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation)
 {
-    RTL_TIME_ZONE_INFORMATION TimeZoneInformation;
+    RTL_TIME_ZONE_INFORMATION TimeZoneInformation, OldTimeZoneInformation;
+    BOOLEAN HaveOldZone;
     NTSTATUS Status;
 
     DPRINT("SetTimeZoneInformation()\n");
@@ -348,6 +376,18 @@ SetTimeZoneInformation(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation)
     TimeZoneInformation.DaylightDate.Weekday = lpTimeZoneInformation->DaylightDate.wDayOfWeek;
     TimeZoneInformation.DaylightBias = lpTimeZoneInformation->DaylightBias;
 
+    /* Refuse before the registry is written; the kernel's own check stays authoritative */
+    Status = BasepCheckTimeZonePrivilege();
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    /* Values missing from the registry stay zero */
+    RtlZeroMemory(&OldTimeZoneInformation, sizeof(OldTimeZoneInformation));
+    HaveOldZone = NT_SUCCESS(RtlQueryTimeZoneInformation(&OldTimeZoneInformation));
+
     Status = RtlSetTimeZoneInformation(&TimeZoneInformation);
     if (!NT_SUCCESS(Status))
     {
@@ -362,6 +402,8 @@ SetTimeZoneInformation(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation)
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("NtSetSystemInformation() failed (Status %lx)\n", Status);
+        if (HaveOldZone)
+            RtlSetTimeZoneInformation(&OldTimeZoneInformation);
         BaseSetLastNTError(Status);
         return FALSE;
     }

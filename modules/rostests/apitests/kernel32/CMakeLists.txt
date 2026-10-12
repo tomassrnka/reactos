@@ -47,6 +47,7 @@ list(APPEND SOURCE
     SystemFirmware.c
     TerminateProcess.c
     TunnelCache.c
+    TzSetPrivilege.c
     UEFIFirmware.c
     WideCharToMultiByte.c
     WriteFile.c
