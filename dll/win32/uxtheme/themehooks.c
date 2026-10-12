@@ -615,7 +615,10 @@ ThemeInitApiHook(UAPIHK State, PUSERAPIHOOK puah)
     if (!puah || State != uahLoadInit)
     {
         UXTHEME_LoadTheme(FALSE);
-        ThemeCleanupWndContext(NULL, 0);
+        /* On uahShutdown hooked calls of this process may still run and use the window
+           contexts: free them on uahStop, which user32 sends once the last one returned */
+        if (State != uahShutdown)
+            ThemeCleanupWndContext(NULL, 0);
         g_bThemeHooksActive = FALSE;
         return TRUE;
     }
