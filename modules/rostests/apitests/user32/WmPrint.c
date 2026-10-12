@@ -663,6 +663,234 @@ static void check_content(int w, int x, int y, BOOL offscreen, const char *what)
     }
 }
 
+/*
+ * A window whose thread ends inside WM_ERASEBKGND while it is being printed. The print in progress
+ * must not leave GDI objects behind in the process.
+ */
+static volatile LONG g_exitArmed;
+static HWND g_hwndExit;
+static HDC g_hdcExit;
+static HBITMAP g_hbmExit;
+
+static LRESULT CALLBACK ExitProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_ERASEBKGND && InterlockedExchange(&g_exitArmed, 0))
+        ExitThread(2);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/* arg: an event to signal and a message loop (PrintWindow from the main thread), or NULL (WM_PRINT here) */
+static DWORD WINAPI exit_thread_proc(LPVOID arg)
+{
+    MSG msg;
+    HWND hwnd;
+
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, L"WmPrintExit", NULL, WS_OVERLAPPEDWINDOW | (arg ? WS_VISIBLE : 0),
+                           300, 200, 160, 120, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    if (!arg)
+    {
+        g_hdcExit = CreateCompatibleDC(NULL);
+        g_hbmExit = CreateCompatibleBitmap(g_hdcExit, 160, 120);
+        SelectObject(g_hdcExit, g_hbmExit);
+        InterlockedExchange(&g_exitArmed, 1);
+        SendMessageW(hwnd, WM_PRINT, (WPARAM)g_hdcExit, PRF_NONCLIENT | PRF_CLIENT | PRF_ERASEBKGND);
+        return 1;
+    }
+    g_hwndExit = hwnd;
+    SetEvent((HANDLE)arg);
+    while (GetMessageW(&msg, NULL, 0, 0))
+        DispatchMessageW(&msg);
+    return 0;
+}
+
+/* One window thread that ends while printed; bPrintWindow: through PrintWindow from this thread, else WM_PRINT in its own */
+static void exit_while_printing(BOOL bPrintWindow)
+{
+    HANDLE hEvent = NULL, hThread;
+    DWORD tid, wait, code = 0;
+
+    g_hwndExit = NULL;
+    g_hdcExit = NULL;
+    g_hbmExit = NULL;
+    InterlockedExchange(&g_exitArmed, 0);
+    if (bPrintWindow)
+        hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    hThread = CreateThread(NULL, 0, exit_thread_proc, hEvent, 0, &tid);
+    if (bPrintWindow)
+    {
+        WaitForSingleObject(hEvent, 5000);
+        /* let the window paint first */
+        Sleep(300);
+        if (g_hwndExit)
+        {
+            InterlockedExchange(&g_exitArmed, 1);
+            clear_target();
+            PrintWindow(g_hwndExit, g_hdc, 0);
+        }
+        CloseHandle(hEvent);
+    }
+    wait = WaitForSingleObject(hThread, 5000);
+    ok(wait == WAIT_OBJECT_0, "%s: the window thread did not end\n", bPrintWindow ? "PrintWindow" : "WM_PRINT");
+    if (wait != WAIT_OBJECT_0)
+    {
+        if (g_hwndExit)
+            PostThreadMessageW(tid, WM_QUIT, 0, 0);
+        WaitForSingleObject(hThread, 5000);
+    }
+    GetExitCodeThread(hThread, &code);
+    ok(code == 2, "%s: the window thread did not end in WM_ERASEBKGND (%lu)\n",
+       bPrintWindow ? "PrintWindow" : "WM_PRINT", code);
+    CloseHandle(hThread);
+    if (g_hdcExit)
+        DeleteDC(g_hdcExit);
+    if (g_hbmExit)
+        DeleteObject(g_hbmExit);
+}
+
+static void test_thread_exit(void)
+{
+    WNDCLASSW wc = { 0 };
+    DWORD before, after;
+    int pass, i;
+    static const int count = 10;
+
+    wc.lpfnWndProc = ExitProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"WmPrintExit";
+    RegisterClassW(&wc);
+
+    for (pass = 0; pass < 2; pass++)
+    {
+        /* the first round allocates what a process keeps anyway */
+        exit_while_printing(pass == 0);
+        before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        for (i = 0; i < count; i++)
+            exit_while_printing(pass == 0);
+        after = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        ok(after < before + count / 2, "%s: GDI objects %lu -> %lu after %d thread exits\n",
+           pass == 0 ? "PrintWindow" : "WM_PRINT", before, after, count);
+    }
+    UnregisterClassW(L"WmPrintExit", GetModuleHandleW(NULL));
+}
+
+/*
+ * Child process for the saved-DC case: when its window is printed into a memory DC, it moves the bitmap
+ * of that DC into a DC of its own, saves that DC's state (which keeps a reference to the bitmap), and
+ * puts the bitmap back. The saved states live until the child ends; the printing process must not be
+ * left with anything of them.
+ */
+static HDC g_hdcSaved[32];
+static int g_nSaved;
+
+static LRESULT CALLBACK SaveProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    HDC hdc = (HDC)wParam, hdc2;
+    HBITMAP hbm, hbmTmp, hbmOld2;
+
+    if (msg == WM_DESTROY)
+        PostQuitMessage(0);
+    if (msg == WM_ERASEBKGND && GetObjectType(hdc) == OBJ_MEMDC && g_nSaved < ARRAYSIZE(g_hdcSaved))
+    {
+        hbmTmp = CreateBitmap(1, 1, 1, 1, NULL);
+        hbm = SelectObject(hdc, hbmTmp);
+        if (hbm)
+        {
+            hdc2 = CreateCompatibleDC(hdc);
+            hbmOld2 = SelectObject(hdc2, hbm);
+            if (hbmOld2 && SaveDC(hdc2))
+            {
+                SelectObject(hdc2, hbmOld2);
+                g_hdcSaved[g_nSaved++] = hdc2;
+            }
+            else
+            {
+                if (hbmOld2)
+                    SelectObject(hdc2, hbmOld2);
+                DeleteDC(hdc2);
+            }
+            SelectObject(hdc, hbm);
+        }
+        DeleteObject(hbmTmp);
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void savedc_child(void)
+{
+    WNDCLASSW wc = { 0 };
+    MSG msg;
+    int i;
+
+    wc.lpfnWndProc = SaveProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"WmPrintSave";
+    RegisterClassW(&wc);
+    CreateWindowExW(WS_EX_TOPMOST, L"WmPrintSave", NULL, WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    300, 200, 160, 120, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    while (GetMessageW(&msg, NULL, 0, 0))
+        DispatchMessageW(&msg);
+    for (i = 0; i < g_nSaved; i++)
+        DeleteDC(g_hdcSaved[i]);
+    /* no test summary from the child */
+    ExitProcess(0x100 | g_nSaved);
+}
+
+static void test_savedc_child(void)
+{
+    char **argv;
+    char cmd[MAX_PATH + 32];
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    HWND hwnd = NULL;
+    DWORD before, after, code = 0, wait;
+    BOOL ret;
+    int i;
+    static const int count = 10;
+
+    winetest_get_mainargs(&argv);
+    sprintf(cmd, "\"%s\" PrintWindow savedc", argv[0]);
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        skip("CreateProcess failed: %lu\n", GetLastError());
+        return;
+    }
+    for (i = 0; i < 50 && !hwnd; i++)
+    {
+        Sleep(100);
+        hwnd = FindWindowW(L"WmPrintSave", NULL);
+    }
+    ok(hwnd != NULL, "child window not found\n");
+    if (hwnd)
+    {
+        /* let the window paint first */
+        Sleep(300);
+        before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        for (i = 0; i < count; i++)
+        {
+            ret = PrintWindow(hwnd, g_hdc, 0);
+            ok(ret == TRUE, "saved DC child: PrintWindow failed: %lu\n", GetLastError());
+        }
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
+    wait = WaitForSingleObject(pi.hProcess, 10000);
+    ok(wait == WAIT_OBJECT_0, "saved DC child did not end\n");
+    if (wait != WAIT_OBJECT_0)
+        TerminateProcess(pi.hProcess, 1);
+    GetExitCodeProcess(pi.hProcess, &code);
+    ok((code & ~0xff) == 0x100, "saved DC child: exit code %#lx\n", code);
+    trace("saved DC child: %lu saved states\n", code & 0xff);
+    if (hwnd)
+    {
+        after = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        ok(after < before + count / 2, "saved DC child: GDI objects %lu -> %lu after %d prints\n", before, after, count);
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+}
+
 START_TEST(PrintWindow)
 {
     RECT rcWindow, rcClient;
@@ -673,6 +901,13 @@ START_TEST(PrintWindow)
     DWORD tid;
     int off, i, ww, wh;
     static const UINT badflags[] = { 4, 8, 0x10, 0x80000000 };
+    char **argv;
+
+    if (winetest_get_mainargs(&argv) >= 3 && !strcmp(argv[2], "savedc"))
+    {
+        savedc_child();
+        return;
+    }
 
     register_class();
     create(W_P, L"WmPrintTest", WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 100, 100, 240, 180, NULL);
@@ -792,6 +1027,9 @@ START_TEST(PrintWindow)
     CloseHandle(hThread);
     CloseHandle(hEvent);
     g_hwnd[W_R] = NULL;
+
+    test_thread_exit();
+    test_savedc_child();
 
     DeleteDC(g_hdc);
     DeleteObject(g_hbm);
