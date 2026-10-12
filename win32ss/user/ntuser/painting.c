@@ -1281,6 +1281,8 @@ IntPopPrintTemps(
     RemoveEntryList(&pTemps->ListEntry);
     if (pTemps->hdc)
         IntGdiDeleteDC(pTemps->hdc, FALSE);
+    if (pTemps->pobjDc)
+        GDIOBJ_vDereferenceObject(pTemps->pobjDc);
     if (pTemps->hbm)
         GreDeleteObject(pTemps->hbm);
     if (pTemps->psurf)
@@ -1289,14 +1291,24 @@ IntPopPrintTemps(
         GreDeleteObject(pTemps->hrgn);
 }
 
-/* The pixels of a rendered window, in the format of the screen */
+/* The pixels of a rendered window, in the format of the screen, with the palette that gives their colours */
 typedef struct _PRINTWINDOW_IMAGE
 {
     SIZEL sizl;
     ULONG iFormat;
     ULONG cjRow;
+    PPALETTE ppal;
     BYTE ajBits[ANYSIZE_ARRAY];
 } PRINTWINDOW_IMAGE, *PPRINTWINDOW_IMAGE;
+
+static
+VOID
+IntFreePrintWindowImage(
+    PPRINTWINDOW_IMAGE pImage)
+{
+    PALETTE_ShareUnlockPalette(pImage->ppal);
+    ExFreePoolWithTag(pImage, USERTAG_REDIRECT);
+}
 
 static
 PPRINTWINDOW_IMAGE
@@ -1309,8 +1321,10 @@ IntCopySurfaceImage(
     PBYTE pjSrc;
     LONG y;
 
+    /* The device palette is public, so the image can carry a reference to it across processes */
     if (pso->iType != STYPE_BITMAP || !pso->pvScan0 ||
-        pso->sizlBitmap.cx <= 0 || pso->sizlBitmap.cy <= 0)
+        pso->sizlBitmap.cx <= 0 || pso->sizlBitmap.cy <= 0 ||
+        !psurf->ppal || GreGetObjectOwner(psurf->ppal->BaseObject.hHmgr) != GDI_OBJ_HMGR_PUBLIC)
     {
         return NULL;
     }
@@ -1329,6 +1343,8 @@ IntCopySurfaceImage(
     pImage->sizl = pso->sizlBitmap;
     pImage->iFormat = pso->iBitmapFormat;
     pImage->cjRow = cjRow;
+    pImage->ppal = psurf->ppal;
+    GDIOBJ_vReferenceObjectByPointer(&pImage->ppal->BaseObject);
     pjSrc = pso->pvScan0;
     for (y = 0; y < pso->sizlBitmap.cy; y++, pjSrc += pso->lDelta)
         RtlCopyMemory(&pImage->ajBits[y * cjRow], pjSrc, cjRow);
@@ -1372,11 +1388,18 @@ IntPrintWindowRender(
     Temps.hbm = NtGdiCreateCompatibleBitmap(ScreenDeviceContext, cx, cy);
     if (!Temps.hbm)
         return NULL;
-    /* Keeps the surface, and its handle, ours to read and free across the callbacks */
+    /* The references keep the surface ours to read, and both handles ours to free, across the callbacks */
     Temps.psurf = SURFACE_ShareLockSurface(Temps.hbm);
     Temps.hdc = NtGdiCreateCompatibleDC(ScreenDeviceContext);
+    pdc = Temps.hdc ? DC_LockDc(Temps.hdc) : NULL;
+    if (pdc)
+    {
+        GDIOBJ_vReferenceObjectByPointer(&pdc->BaseObject);
+        Temps.pobjDc = &pdc->BaseObject;
+        DC_UnlockDc(pdc);
+    }
     IntPushPrintTemps(&Temps);
-    if (!Temps.psurf || !Temps.hdc || !NtGdiSelectBitmap(Temps.hdc, Temps.hbm))
+    if (!Temps.psurf || !Temps.pobjDc || !NtGdiSelectBitmap(Temps.hdc, Temps.hbm))
     {
         IntPopPrintTemps(&Temps);
         return NULL;
@@ -1494,7 +1517,7 @@ IntCleanupThreadPrint(
             continue;
         RemoveEntryList(&Request->ListEntry);
         if (Request->pImage)
-            ExFreePoolWithTag(Request->pImage, USERTAG_REDIRECT);
+            IntFreePrintWindowImage(Request->pImage);
         ExFreePoolWithTag(Request, USERTAG_REDIRECT);
     }
 }
@@ -1521,7 +1544,7 @@ IntHandlePrintWindowRequest(
     if (Request && !Request->pImage)
         Request->pImage = pImage;
     else if (pImage)
-        ExFreePoolWithTag(pImage, USERTAG_REDIRECT);
+        IntFreePrintWindowImage(pImage);
     return 0;
 }
 
@@ -1545,7 +1568,7 @@ IntPrintWindowBlt(
     if (!hbm)
         return FALSE;
 
-    /* The display mode may have changed since the rendering */
+    /* The display mode may have changed since the rendering; the image's palette keeps its colours */
     psurf = SURFACE_ShareLockSurface(hbm);
     if (psurf)
     {
@@ -1557,6 +1580,7 @@ IntPrintWindowBlt(
             pjDst = pso->pvScan0;
             for (y = 0; y < pImage->sizl.cy; y++, pjDst += pso->lDelta)
                 RtlCopyMemory(pjDst, &pImage->ajBits[y * pImage->cjRow], pImage->cjRow);
+            SURFACE_vSetPalette(psurf, pImage->ppal);
             Ret = TRUE;
         }
         SURFACE_ShareUnlockSurface(psurf);
@@ -1628,7 +1652,7 @@ IntPrintWindow(
     if (hdcBlt)
         Ret = IntPrintWindowBlt(hdcBlt, pImage);
 
-    ExFreePoolWithTag(pImage, USERTAG_REDIRECT);
+    IntFreePrintWindowImage(pImage);
     return Ret;
 }
 

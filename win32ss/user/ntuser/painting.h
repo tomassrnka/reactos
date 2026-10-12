@@ -45,6 +45,7 @@ typedef struct _PRINT_TEMPS
     LIST_ENTRY ListEntry;
     PTHREADINFO pti;
     HDC hdc;
+    POBJ pobjDc;
     HBITMAP hbm;
     PSURFACE psurf;
     HRGN hrgn;
