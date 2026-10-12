@@ -3988,6 +3988,14 @@ static void dialog_end_dialog( msi_dialog *dialog )
     PostMessageW(dialog->hwnd, WM_NULL, 0, 0);
 }
 
+#ifdef __REACTOS__
+/* The thread that owns the dialogs, 0 before the first dialog */
+DWORD msi_dialog_get_ui_thread( void )
+{
+    return uiThreadId;
+}
+
+#endif
 void msi_dialog_check_messages( HANDLE handle )
 {
     DWORD r;
