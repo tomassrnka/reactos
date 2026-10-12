@@ -783,6 +783,45 @@ DeleteJob(
 }
 
 
+/* Joins the arguments of the command with single spaces and quotes the ones that contain blanks, as Windows does */
+static
+PWSTR
+BuildCommand(
+    INT argc,
+    WCHAR **argv)
+{
+    SIZE_T cchCommand = 1;
+    PWSTR pszCommand, p;
+    BOOL bQuote;
+    INT i;
+
+    for (i = 0; i < argc; i++)
+        cchCommand += wcslen(argv[i]) + 3;
+
+    pszCommand = HeapAlloc(GetProcessHeap(), 0, cchCommand * sizeof(WCHAR));
+    if (pszCommand == NULL)
+        return NULL;
+
+    p = pszCommand;
+    for (i = 0; i < argc; i++)
+    {
+        bQuote = (wcspbrk(argv[i], L" \t") != NULL);
+
+        if (i > 0)
+            *p++ = L' ';
+        if (bQuote)
+            *p++ = L'"';
+        wcscpy(p, argv[i]);
+        p += wcslen(argv[i]);
+        if (bQuote)
+            *p++ = L'"';
+    }
+    *p = UNICODE_NULL;
+
+    return pszCommand;
+}
+
+
 int wmain(int argc, WCHAR **argv)
 {
     PWSTR pszComputerName = NULL;
@@ -791,12 +830,12 @@ int wmain(int argc, WCHAR **argv)
     ULONG ulJobHour = (ULONG)-1;
     ULONG ulJobMinute = (ULONG)-1;
     BOOL bDeleteJob = FALSE, bForceDelete = FALSE;
-    BOOL bInteractiveJob = FALSE, bPeriodicJob = FALSE;
+    BOOL bInteractiveJob = FALSE, bPeriodicJob = FALSE, bDateOption = FALSE;
     BOOL bPrintUsage = FALSE;
     ULONG ulDaysOfMonth = 0;
     UCHAR ucDaysOfWeek = 0;
     INT nResult = 0;
-    INT i, minIdx;
+    INT i;
 
     /* Initialize the Console Standard Streams */
     ConInitStdStreams();
@@ -806,14 +845,12 @@ int wmain(int argc, WCHAR **argv)
 
     /* Parse the computer name */
     i = 1;
-    minIdx = 1;
     if (i < argc &&
         argv[i][0] == L'\\' &&
         argv[i][1] == L'\\')
     {
         pszComputerName = argv[i];
         i++;
-        minIdx++;
     }
 
     /* Parse the time or job id */
@@ -822,12 +859,10 @@ int wmain(int argc, WCHAR **argv)
         if (ParseTime(argv[i], &ulJobHour, &ulJobMinute))
         {
             i++;
-            minIdx++;
         }
         else if (ParseId(argv[i], &ulJobId))
         {
             i++;
-            minIdx++;
         }
     }
 
@@ -851,11 +886,19 @@ int wmain(int argc, WCHAR **argv)
             }
             else if (_wcsicmp(argv[i], L"/interactive") == 0)
             {
+                /* As on Windows, /interactive must come before /every and /next */
+                if (bDateOption)
+                {
+                    bPrintUsage = TRUE;
+                    nResult = 1;
+                    goto done;
+                }
                 bInteractiveJob = TRUE;
             }
             else if (_wcsnicmp(argv[i], L"/every:", 7) == 0)
             {
                 bPeriodicJob = TRUE;
+                bDateOption = TRUE;
                 if (argv[i][7] == UNICODE_NULL)
                 {
                     /* No date: the current day of the month */
@@ -872,6 +915,7 @@ int wmain(int argc, WCHAR **argv)
             else if (_wcsnicmp(argv[i], L"/next:", 6) == 0)
             {
                 bPeriodicJob = FALSE;
+                bDateOption = TRUE;
                 if (argv[i][6] == UNICODE_NULL)
                 {
                     /* No date: the current day of the month */
@@ -892,12 +936,23 @@ int wmain(int argc, WCHAR **argv)
                 goto done;
             }
         }
+        else
+        {
+            /* The command is the rest of the line, options included */
+            break;
+        }
     }
 
     /* Parse the command */
-    if (argc > minIdx && argv[argc - 1][0] != L'/')
+    if (i < argc)
     {
-        pszCommand = argv[argc - 1];
+        pszCommand = BuildCommand(argc - i, &argv[i]);
+        if (pszCommand == NULL)
+        {
+            PrintErrorMessage(ERROR_NOT_ENOUGH_MEMORY);
+            nResult = 1;
+            goto done;
+        }
     }
 
     if (bDeleteJob == TRUE)
@@ -969,6 +1024,9 @@ int wmain(int argc, WCHAR **argv)
 
 done:
     FreeDaysOfWeekArray();
+
+    if (pszCommand != NULL)
+        HeapFree(GetProcessHeap(), 0, pszCommand);
 
     if (bPrintUsage == TRUE)
     {
