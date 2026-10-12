@@ -44,10 +44,8 @@ public:
     }
 
     virtual ~BtrfsVolPropSheet() {
-        if (stgm_set) {
-            GlobalUnlock(stgm.hGlobal);
+        if (stgm_set)
             ReleaseStgMedium(&stgm);
-        }
 
         if (devices)
             free(devices);
@@ -77,12 +75,12 @@ public:
 
     // IShellExtInit
 
-    virtual HRESULT __stdcall Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDataObject* pdtobj, HKEY hkeyProgID);
+    virtual HRESULT __stdcall Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDataObject* pdtobj, HKEY hkeyProgID) override;
 
     // IShellPropSheetExt
 
-    virtual HRESULT __stdcall AddPages(LPFNADDPROPSHEETPAGE pfnAddPage, LPARAM lParam);
-    virtual HRESULT __stdcall ReplacePage(UINT uPageID, LPFNADDPROPSHEETPAGE pfnReplacePage, LPARAM lParam);
+    virtual HRESULT __stdcall AddPages(LPFNADDPROPSHEETPAGE pfnAddPage, LPARAM lParam) override;
+    virtual HRESULT __stdcall ReplacePage(UINT uPageID, LPFNADDPROPSHEETPAGE pfnReplacePage, LPARAM lParam) override;
 
     void FormatUsage(HWND hwndDlg, wstring& s, btrfs_usage* usage);
     void RefreshUsage(HWND hwndDlg);
@@ -100,7 +98,7 @@ public:
     btrfs_device* devices;
     bool readonly;
     BtrfsBalance* balance;
-    BTRFS_UUID uuid;
+    uint8_t uuid[BTRFS_UUID_SIZE];
     bool uuid_set;
 
 private:
@@ -114,7 +112,7 @@ private:
 
 class BtrfsChangeDriveLetter {
 public:
-    BtrfsChangeDriveLetter(HWND hwnd, const wstring_view& fn) : hwnd(hwnd), fn(fn) {
+    BtrfsChangeDriveLetter(HWND hwnd, wstring_view fn) : hwnd(hwnd), fn(fn) {
     }
 
     void show();
