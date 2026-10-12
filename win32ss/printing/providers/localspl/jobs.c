@@ -812,15 +812,13 @@ _LocalSetJobLevel1(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
     // Check if the priority has changed.
     if (pJob->dwPriority != pJobInfo->Priority && IS_VALID_PRIORITY(pJobInfo->Priority))
     {
-        // Set the new priority.
-        pJob->dwPriority = pJobInfo->Priority;
-
-        // Remove and reinsert the job in the Printer's Job List.
-        // The Compare function will be used to find the right position now considering the new priority.
-        // A deletion of the printer must not see the queue empty in between.
+        // Remove the job from the Printer's Job List while the Compare function still finds it by its old priority,
+        // then reinsert it at the position for the new priority. CreateJob changes this list under the same lock.
         EnterCriticalSection(&PrinterDeletionSection);
         DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
-        InsertElementSkiplist(&pJob->pPrinter->JobList, pJob);
+        pJob->dwPriority = pJobInfo->Priority;
+        if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
+            ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
         LeaveCriticalSection(&PrinterDeletionSection);
     }
 
@@ -946,15 +944,13 @@ _LocalSetJobLevel2(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
     // Check if the priority has changed.
     if (pJob->dwPriority != pJobInfo->Priority && IS_VALID_PRIORITY(pJobInfo->Priority))
     {
-        // Set the new priority.
-        pJob->dwPriority = pJobInfo->Priority;
-
-        // Remove and reinsert the job in the Printer's Job List.
-        // The Compare function will be used to find the right position now considering the new priority.
-        // A deletion of the printer must not see the queue empty in between.
+        // Remove the job from the Printer's Job List while the Compare function still finds it by its old priority,
+        // then reinsert it at the position for the new priority. CreateJob changes this list under the same lock.
         EnterCriticalSection(&PrinterDeletionSection);
         DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
-        InsertElementSkiplist(&pJob->pPrinter->JobList, pJob);
+        pJob->dwPriority = pJobInfo->Priority;
+        if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
+            ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
         LeaveCriticalSection(&PrinterDeletionSection);
     }
 
