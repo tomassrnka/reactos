@@ -783,6 +783,7 @@ static void test_thread_exit(void)
  */
 static HDC g_hdcSaved[32];
 static int g_nSaved;
+static BOOL g_saveFailed;
 
 static LRESULT CALLBACK SaveProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -791,27 +792,26 @@ static LRESULT CALLBACK SaveProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
     if (msg == WM_DESTROY)
         PostQuitMessage(0);
-    if (msg == WM_ERASEBKGND && GetObjectType(hdc) == OBJ_MEMDC && g_nSaved < ARRAYSIZE(g_hdcSaved))
+    if (msg == WM_ERASEBKGND && GetObjectType(hdc) == OBJ_MEMDC)
     {
         hbmTmp = CreateBitmap(1, 1, 1, 1, NULL);
         hbm = SelectObject(hdc, hbmTmp);
-        if (hbm)
+        hdc2 = CreateCompatibleDC(hdc);
+        hbmOld2 = hbm ? SelectObject(hdc2, hbm) : NULL;
+        if (hbmOld2 && SaveDC(hdc2) && g_nSaved < ARRAYSIZE(g_hdcSaved))
         {
-            hdc2 = CreateCompatibleDC(hdc);
-            hbmOld2 = SelectObject(hdc2, hbm);
-            if (hbmOld2 && SaveDC(hdc2))
-            {
-                SelectObject(hdc2, hbmOld2);
-                g_hdcSaved[g_nSaved++] = hdc2;
-            }
-            else
-            {
-                if (hbmOld2)
-                    SelectObject(hdc2, hbmOld2);
-                DeleteDC(hdc2);
-            }
-            SelectObject(hdc, hbm);
+            SelectObject(hdc2, hbmOld2);
+            g_hdcSaved[g_nSaved++] = hdc2;
         }
+        else
+        {
+            g_saveFailed = TRUE;
+            if (hbmOld2)
+                SelectObject(hdc2, hbmOld2);
+            DeleteDC(hdc2);
+        }
+        if (hbm)
+            SelectObject(hdc, hbm);
         DeleteObject(hbmTmp);
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -835,7 +835,7 @@ static void savedc_child(void)
     for (i = 0; i < g_nSaved; i++)
         DeleteDC(g_hdcSaved[i]);
     /* no test summary from the child */
-    ExitProcess(0x100 | g_nSaved);
+    ExitProcess(0x100 | (g_saveFailed ? 0x200 : 0) | g_nSaved);
 }
 
 static void test_savedc_child(void)
@@ -881,9 +881,14 @@ static void test_savedc_child(void)
         TerminateProcess(pi.hProcess, 1);
     GetExitCodeProcess(pi.hProcess, &code);
     ok((code & ~0xff) == 0x100, "saved DC child: exit code %#lx\n", code);
-    trace("saved DC child: %lu saved states\n", code & 0xff);
-    if (hwnd)
+    if (hwnd && (code & 0xff) == 0)
     {
+        /* Windows paints into its redirection surface, not into a memory DC */
+        skip("saved DC child: the window was never printed into a memory DC\n");
+    }
+    else if (hwnd)
+    {
+        ok((code & 0xff) == count, "saved DC child: %lu saved states, expected %d\n", code & 0xff, count);
         after = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
         ok(after < before + count / 2, "saved DC child: GDI objects %lu -> %lu after %d prints\n", before, after, count);
     }
