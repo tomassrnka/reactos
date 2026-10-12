@@ -74,7 +74,11 @@ static void WINAPI serv_main(DWORD argc, LPWSTR *argv)
 
     service_handle = RegisterServiceCtrlHandlerExW( telnetdW, service_handler, NULL );
     if (!service_handle)
+    {
+        CloseHandle( stop_event );
+        stop_event = NULL;
         return;
+    }
 
     status.dwServiceType             = SERVICE_WIN32;
     status.dwCurrentState            = SERVICE_RUNNING;
@@ -89,6 +93,9 @@ static void WINAPI serv_main(DWORD argc, LPWSTR *argv)
     kickoff_telnetd();
 
     WaitForSingleObject( stop_event, INFINITE );
+    /* The process can be given a new start, which creates a new event */
+    CloseHandle( stop_event );
+    stop_event = NULL;
 
     status.dwCurrentState     = SERVICE_STOPPED;
     status.dwControlsAccepted = 0;
