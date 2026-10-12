@@ -865,6 +865,9 @@ INT_PTR CALLBACK OptionsProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPar
     {
         case WM_INITDIALOG:
         {
+            /* There is no help file yet */
+            EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_HELP), FALSE);
+
             /* Add the zoom items */
             SendDlgItemMessage(hDlg, IDC_ZOOM, CB_ADDSTRING, 0, (LPARAM)("1"));
             SendDlgItemMessage(hDlg, IDC_ZOOM, CB_ADDSTRING, 0, (LPARAM)("2"));
@@ -911,11 +914,6 @@ INT_PTR CALLBACK OptionsProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPar
             case IDCANCEL:
                 ShowWindow(hDlg, SW_HIDE);
                 return (INT_PTR)TRUE;
-
-            case IDC_BUTTON_HELP:
-                /* Unimplemented */
-                MessageBox(hDlg, TEXT("Magnifier help not available yet!"), TEXT("Help"), MB_OK);
-                break;
 
             case IDC_ZOOM:
                 if (HIWORD(wParam) == CBN_SELCHANGE)

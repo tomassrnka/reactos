@@ -3370,6 +3370,8 @@ WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         case WM_CREATE:
             hMainMenu = GetMenu(hWnd);
+            /* There is no help file yet */
+            EnableMenuItem(hMainMenu, IDM_HELP, MF_BYCOMMAND | MF_GRAYED);
             break;
 
         case WM_DESTROY:
@@ -3675,13 +3677,6 @@ WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                                 LoadIconW(hInst, MAKEINTRESOURCEW(IDI_EVENTVWR)));
                     break;
                 }
-
-                case IDM_HELP:
-                    MessageBoxW(hWnd,
-                                L"Help not implemented yet!",
-                                szTitle,
-                                MB_OK | MB_ICONINFORMATION);
-                    break;
 
                 case IDM_EXIT:
                     DestroyWindow(hWnd);
@@ -4258,13 +4253,6 @@ EventLogPropProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     return (INT_PTR)TRUE;
                 }
 
-                case IDHELP:
-                    MessageBoxW(hDlg,
-                                L"Help not implemented yet!",
-                                szTitle,
-                                MB_OK | MB_ICONINFORMATION);
-                    return (INT_PTR)TRUE;
-
                 default:
                     break;
             }
@@ -4310,7 +4298,7 @@ EventLogProperties(HINSTANCE hInstance, HWND hWndParent, PEVENTLOGFILTER EventLo
 
     /* Log properties page */
     psp[0].dwSize      = sizeof(psp[0]);
-    psp[0].dwFlags     = PSP_HASHELP;
+    psp[0].dwFlags     = 0; // No PSP_HASHELP: there is no help file yet
     psp[0].hInstance   = hInstance;
     psp[0].pszTemplate = MAKEINTRESOURCEW(IDD_LOGPROPERTIES_GENERAL);
     psp[0].pfnDlgProc  = EventLogPropProc;
@@ -4357,6 +4345,9 @@ EventDetails(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 EndDialog(hDlg, 0);
                 return (INT_PTR)TRUE;
             }
+
+            /* There is no help file yet */
+            EnableDlgItem(hDlg, IDHELP, FALSE);
 
             /* Create a size grip if the dialog has a sizing border */
             GetClientRect(hDlg, &rcWnd);
@@ -4446,13 +4437,6 @@ EventDetails(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 case IDOK:
                 case IDCANCEL:
                     EndDialog(hDlg, LOWORD(wParam));
-                    return (INT_PTR)TRUE;
-
-                case IDHELP:
-                    MessageBoxW(hDlg,
-                                L"Help not implemented yet!",
-                                szTitle,
-                                MB_OK | MB_ICONINFORMATION);
                     return (INT_PTR)TRUE;
 
                 default:
