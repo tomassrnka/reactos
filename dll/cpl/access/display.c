@@ -112,9 +112,10 @@ GetSchemeLegacyName(HKEY hScheme, LPWSTR pszName, DWORD cchName)
 static VOID
 FillColorSchemeComboBox(HWND hwnd, LPCWSTR pszCurrent)
 {
-    WCHAR szKey[256], szName[MAX_SCHEME_NAME];
+    WCHAR szKey[257], szName[MAX_SCHEME_NAME];
     HKEY hSchemes, hScheme;
     DWORD dwIndex, cchKey;
+    LONG lError;
     INT iItem;
 
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\Appearance\\New Schemes", 0,
@@ -125,8 +126,12 @@ FillColorSchemeComboBox(HWND hwnd, LPCWSTR pszCurrent)
 
     for (dwIndex = 0; ; dwIndex++)
     {
+        /* key names have up to 256 characters */
         cchKey = ARRAYSIZE(szKey);
-        if (RegEnumKeyExW(hSchemes, dwIndex, szKey, &cchKey, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+        lError = RegEnumKeyExW(hSchemes, dwIndex, szKey, &cchKey, NULL, NULL, NULL, NULL);
+        if (lError == ERROR_MORE_DATA)
+            continue;
+        if (lError != ERROR_SUCCESS)
             break;
         if (RegOpenKeyExW(hSchemes, szKey, 0, KEY_QUERY_VALUE, &hScheme) != ERROR_SUCCESS)
             continue;
