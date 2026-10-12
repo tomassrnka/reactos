@@ -13,14 +13,14 @@ extern "C" {
 #define JOB_OUTPUT_FLAGS (JOB_RUN_PERIODICALLY|JOB_EXEC_ERROR|JOB_RUNS_TODAY|JOB_NONINTERACTIVE)
 typedef struct _AT_ENUM {
 	DWORD JobId;
-	DWORD JobTime;
+	DWORD_PTR JobTime;
 	DWORD DaysOfMonth;
 	UCHAR DaysOfWeek;
 	UCHAR Flags;
 	LPWSTR Command;
 } AT_ENUM,*PAT_ENUM,*LPAT_ENUM;
 typedef struct _AT_INFO {
-	DWORD JobTime;
+	DWORD_PTR JobTime;
 	DWORD DaysOfMonth;
 	UCHAR DaysOfWeek;
 	UCHAR Flags;
