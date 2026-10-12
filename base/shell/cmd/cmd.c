@@ -476,6 +476,11 @@ Execute(LPTSTR Full, LPTSTR First, LPTSTR Rest, PARSED_COMMAND *Cmd)
                                       szFullName, rest, NULL, SW_SHOWNORMAL);
             execerror = hProcess ? ERROR_SUCCESS : GetLastError();
         }
+        else if (GetLastError() == ERROR_EXE_MACHINE_TYPE_MISMATCH)
+        {
+            /* A program for a machine this system cannot run, such as a 64-bit program on a 32-bit system */
+            execerror = ERROR_EXE_MACHINE_TYPE_MISMATCH;
+        }
 
         *FirstEnd = _T('\0');
 
@@ -499,11 +504,28 @@ Execute(LPTSTR Full, LPTSTR First, LPTSTR Rest, PARSED_COMMAND *Cmd)
         else if (execerror)
         {
             TRACE ("[ShellExecute failed!: %s]\n", debugstr_aw(Full));
-            if (execerror == ERROR_NO_ASSOCIATION)
-                error_cant_exec_program();
-            else
-                error_bad_command(first);
             dwExitCode = 1;
+            if (execerror == ERROR_NO_ASSOCIATION)
+            {
+                error_cant_exec_program();
+            }
+            else if (execerror == ERROR_EXE_MACHINE_TYPE_MISMATCH)
+            {
+                /* Keep 216 through CALL, || and cmd /c as well */
+                error_image_not_supported(szFullName);
+                dwExitCode = ERROR_EXE_MACHINE_TYPE_MISMATCH;
+            }
+            else if (execerror == ERROR_BAD_EXE_FORMAT)
+            {
+                /* Not a runnable image: the shell has shown why, then Windows cmd reports access denied */
+                ErrorMessage(ERROR_ACCESS_DENIED, NULL);
+                nErrorLevel = ERROR_ACCESS_DENIED;
+                dwExitCode = ERROR_ACCESS_DENIED;
+            }
+            else
+            {
+                error_bad_command(first);
+            }
         }
 
         /* Restore the default console mode */
