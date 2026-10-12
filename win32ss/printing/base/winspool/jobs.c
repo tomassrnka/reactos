@@ -536,9 +536,10 @@ SetJobW(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Command
     JobContainer.JobInfo.Level1 = (WINSPOOL_JOB_INFO_1*)pJobInfo;
 
     // Do the RPC call
+    // Level 0 (only a command) has no container: the container union has no case for it.
     RpcTryExcept
     {
-        dwErrorCode = _RpcSetJob(pHandle->hPrinter, JobId, &JobContainer, Command);
+        dwErrorCode = _RpcSetJob(pHandle->hPrinter, JobId, Level ? &JobContainer : NULL, Command);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
