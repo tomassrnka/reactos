@@ -172,6 +172,50 @@ ExpectPath(const KNOWNFOLDERID *id, DWORD dwFlags, HANDLE hToken, HRESULT hrExpe
     }
 }
 
+/* Whether this machine redirects a folder of the table, through its User Shell Folders value, or the
+ * folder its path is built on: the baseline below expects the default layout */
+static BOOL
+IsDefFolderRedirected(SIZE_T i, PCWSTR pszExpected)
+{
+    static const HKEY Roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR szName[39], szValue[MAX_PATH + 1], szExpanded[MAX_PATH], szCurrent[MAX_PATH], szDefault[MAX_PATH];
+    DWORD cbValue, dwType, cch;
+    BOOL bRedirected = FALSE;
+    INT csidl = -1;
+    HKEY hKey;
+    SIZE_T r;
+
+    StringFromGUID2(*s_DefFolders[i].id, szName, _countof(szName));
+    for (r = 0; r < _countof(Roots) && !bRedirected; r++)
+    {
+        if (RegOpenKeyExW(Roots[r], s_szUserShellFolders, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+            continue;
+        cbValue = sizeof(szValue) - sizeof(WCHAR);
+        if (RegQueryValueExW(hKey, szName, NULL, &dwType, (LPBYTE)szValue, &cbValue) == ERROR_SUCCESS &&
+            (dwType == REG_SZ || dwType == REG_EXPAND_SZ))
+        {
+            szValue[cbValue / sizeof(WCHAR)] = UNICODE_NULL;
+            cch = ExpandEnvironmentStringsW(szValue, szExpanded, _countof(szExpanded));
+            bRedirected = (!cch || cch > _countof(szExpanded) || lstrcmpiW(szExpanded, pszExpected) != 0);
+        }
+        RegCloseKey(hKey);
+    }
+
+    switch (s_DefFolders[i].base)
+    {
+        case BASE_LOCALAPPDATA: csidl = CSIDL_LOCAL_APPDATA; break;
+        case BASE_APPDATA: csidl = CSIDL_APPDATA; break;
+        case BASE_COMMONAPPDATA: csidl = CSIDL_COMMON_APPDATA; break;
+    }
+    if (!bRedirected && csidl >= 0 &&
+        SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_CURRENT, szCurrent) == S_OK &&
+        SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_DEFAULT, szDefault) == S_OK)
+    {
+        bRedirected = (lstrcmpiW(szCurrent, szDefault) != 0);
+    }
+    return bRedirected;
+}
+
 static void
 TestDefFolder(SIZE_T i)
 {
@@ -190,6 +234,11 @@ TestDefFolder(SIZE_T i)
         hr = pSHGetKnownFolderIDList(*id, KF_FLAG_DEFAULT, NULL, &pidl);
         ok_hex(hr, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND));
         ok(pidl == NULL, "pidl %p, expected NULL\n", pidl);
+        return;
+    }
+    if (IsDefFolderRedirected(i, szExpected))
+    {
+        skip("the folder or the folder it is built on is redirected on this machine\n");
         return;
     }
 
@@ -260,12 +309,12 @@ typedef struct
 } SAVED_VALUE;
 
 static BOOL
-SaveUserShellFolder(PCWSTR pszName, SAVED_VALUE *pSaved)
+SaveRegValue(HKEY hRoot, PCWSTR pszKey, PCWSTR pszName, SAVED_VALUE *pSaved)
 {
     HKEY hKey;
 
     pSaved->cbData = sizeof(pSaved->Data);
-    pSaved->lStatus = RegOpenKeyExW(HKEY_CURRENT_USER, s_szUserShellFolders, 0, KEY_QUERY_VALUE, &hKey);
+    pSaved->lStatus = RegOpenKeyExW(hRoot, pszKey, 0, KEY_QUERY_VALUE, &hKey);
     if (pSaved->lStatus == ERROR_SUCCESS)
     {
         pSaved->lStatus = RegQueryValueExW(hKey, pszName, NULL, &pSaved->dwType, pSaved->Data, &pSaved->cbData);
@@ -277,12 +326,12 @@ SaveUserShellFolder(PCWSTR pszName, SAVED_VALUE *pSaved)
 }
 
 static void
-RestoreUserShellFolder(PCWSTR pszName, const SAVED_VALUE *pSaved)
+RestoreRegValue(HKEY hRoot, PCWSTR pszKey, PCWSTR pszName, const SAVED_VALUE *pSaved)
 {
     HKEY hKey;
     LONG ret;
 
-    ret = RegOpenKeyExW(HKEY_CURRENT_USER, s_szUserShellFolders, 0, KEY_SET_VALUE, &hKey);
+    ret = RegOpenKeyExW(hRoot, pszKey, 0, KEY_SET_VALUE, &hKey);
     ok_long(ret, ERROR_SUCCESS);
     if (ret != ERROR_SUCCESS)
         return;
@@ -513,6 +562,8 @@ RunChildStep(PCSTR pszStep)
         ChildRedirect2(szRedirected);
     else if (!strcmp(pszStep, "redirect3"))
         ExpectPath(&FOLDERID_Downloads, KF_FLAG_DONT_VERIFY, NULL, S_OK, szRedirected);
+    else if (!strcmp(pszStep, "default1"))
+        ExpectPath(&FOLDERID_Downloads, KF_FLAG_DONT_VERIFY, (HANDLE)-1, S_OK, szRedirected);
     else if (!strcmp(pszStep, "parent"))
         ChildParentRedirected(szRedirected);
     else if (!strcmp(pszStep, "programs1"))
@@ -543,7 +594,7 @@ TestDownloadsRedirected(void)
     }
     SetEnvironmentVariableW(L"KFP_REDIRECTED", szRedirected);
 
-    if (!SaveUserShellFolder(s_szDownloadsValue, &Saved))
+    if (!SaveRegValue(HKEY_CURRENT_USER, s_szUserShellFolders, s_szDownloadsValue, &Saved))
         return;
     if (RegSetStringEx(HKEY_CURRENT_USER, s_szUserShellFolders, s_szDownloadsValue, szValue, REG_EXPAND_SZ) != ERROR_SUCCESS)
     {
@@ -582,7 +633,34 @@ TestDownloadsRedirected(void)
         RunChild("redirect3");
     }
 
-    RestoreUserShellFolder(s_szDownloadsValue, &Saved);
+    RestoreRegValue(HKEY_CURRENT_USER, s_szUserShellFolders, s_szDownloadsValue, &Saved);
+}
+
+/* The default user's Downloads redirected through a value that starts with a variable other than the
+ * profile variables: it is expanded without the default user's pseudo-token */
+static void
+TestDefaultUserRedirected(void)
+{
+    static const WCHAR szDefaultKey[] = L".Default\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders";
+    WCHAR szValue[MAX_PATH], szExpected[MAX_PATH];
+    SAVED_VALUE Saved;
+    DWORD cch;
+
+    StringCchPrintfW(szValue, _countof(szValue), L"%%SystemRoot%%\\kfp-default-%lu", GetCurrentProcessId());
+    cch = ExpandEnvironmentStringsW(szValue, szExpected, _countof(szExpected));
+    ok(cch && cch <= _countof(szExpected), "ExpandEnvironmentStringsW failed with %lu\n", GetLastError());
+    if (!cch || cch > _countof(szExpected))
+        return;
+    if (!SaveRegValue(HKEY_USERS, szDefaultKey, s_szDownloadsValue, &Saved))
+        return;
+    if (RegSetStringEx(HKEY_USERS, szDefaultKey, s_szDownloadsValue, szValue, REG_EXPAND_SZ) != ERROR_SUCCESS)
+    {
+        skip("cannot write the default user's User Shell Folders value\n");
+        return;
+    }
+    SetEnvironmentVariableW(L"KFP_REDIRECTED", szExpected);
+    RunChild("default1");
+    RestoreRegValue(HKEY_USERS, szDefaultKey, s_szDownloadsValue, &Saved);
 }
 
 /* With the parent redirected, the default path follows the parent's current path,
@@ -618,11 +696,11 @@ TestParentRedirected(void)
     StringCchPrintfW(szValue, _countof(szValue), L"%%USERPROFILE%%\\%s", szName);
     SetEnvironmentVariableW(L"KFP_REDIRECTED", szRedirected);
 
-    if (!SaveUserShellFolder(szLocalAppData, &Saved))
+    if (!SaveRegValue(HKEY_CURRENT_USER, s_szUserShellFolders, szLocalAppData, &Saved))
         return;
     ok_int(RegSetStringEx(HKEY_CURRENT_USER, s_szUserShellFolders, szLocalAppData, szValue, REG_EXPAND_SZ), ERROR_SUCCESS);
     RunChild("parent");
-    RestoreUserShellFolder(szLocalAppData, &Saved);
+    RestoreRegValue(HKEY_CURRENT_USER, s_szUserShellFolders, szLocalAppData, &Saved);
     /* ReactOS copies the value to Shell Folders when it reads it; read it back */
     SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_CURRENT, szValue);
 }
@@ -1058,6 +1136,7 @@ START_TEST(SHGetKnownFolderPath)
     TestCreateItem();
     TestUserProgramFilesCreate();
     TestDownloadsRedirected();
+    TestDefaultUserRedirected();
     TestParentRedirected();
 
     CoUninitialize();
