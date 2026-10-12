@@ -2155,8 +2155,11 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     ULONG NoWindow, StackSize, ErrorCode, Flags;
     SIZE_T RegionSize;
     USHORT ImageMachine;
-    ULONG ParameterFlags, PrivilegeValue, HardErrorMode, ErrorResponse;
+    ULONG ParameterFlags, PrivilegeValue, HardErrorMode;
+#ifndef _WIN64
+    ULONG ErrorResponse;
     ULONG_PTR ErrorParameters[2];
+#endif
     BOOLEAN InJob, SaferNeeded, UseLargePages, HavePrivilege;
     BOOLEAN QuerySection, SkipSaferAndAppCompat;
     CONTEXT Context;
@@ -3044,6 +3047,21 @@ StartScan:
         }
     }
 
+#ifdef _WIN64
+    /* There is no NTVDM on 64-bit systems: DOS and 16-bit images cannot run */
+    if ((Status == STATUS_INVALID_IMAGE_WIN_16) ||
+        (Status == STATUS_INVALID_IMAGE_NE_FORMAT) ||
+        (Status == STATUS_INVALID_IMAGE_PROTECT) ||
+        ((Status == STATUS_INVALID_IMAGE_NOT_MZ) &&
+         (BaseIsDosApplication(&PathName, Status))))
+    {
+        DPRINT1("'%wZ': DOS or 16-bit image (status %lx), not supported\n", &PathName, Status);
+        SetLastError(ERROR_EXE_MACHINE_TYPE_MISMATCH);
+        Result = FALSE;
+        goto Quickie;
+    }
+#endif
+
     /* The last step is to figure out why the section object was not created */
     switch (Status)
     {
@@ -3524,6 +3542,13 @@ StartScan:
     if ((ImageInformation.Machine < SharedUserData->ImageNumberLow) ||
         (ImageInformation.Machine > SharedUserData->ImageNumberHigh))
     {
+#ifdef _WIN64
+        /* There is no WoW64: a 32-bit or foreign image is simply not runnable here */
+        DPRINT1("'%wZ': image machine %x cannot run here\n", &PathName, ImageInformation.Machine);
+        SetLastError(ERROR_BAD_EXE_FORMAT);
+        Result = FALSE;
+        goto Quickie;
+#else
         /* It was not -- raise a hard error */
         ErrorResponse = ResponseOk;
         ErrorParameters[0] = (ULONG_PTR)&PathName;
@@ -3548,6 +3573,7 @@ StartScan:
         DPRINT1("Invalid image architecture: %lx\n", ImageInformation.Machine);
         Result = FALSE;
         goto Quickie;
+#endif
     }
 
     /* Check if this isn't a Windows image */
