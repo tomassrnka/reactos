@@ -103,10 +103,12 @@ static const struct
 static const WCHAR s_szUserShellFolders[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders";
 static const WCHAR s_szDownloadsValue[] = L"{374DE290-123F-4565-9164-39C4925E467B}";
 
-/* FALSE: the folder does not exist for this process (the x64 folders in 32-bit code, also under WOW64) */
+/* FALSE: the folder does not exist for this process (the x64 folders in 32-bit code, also under WOW64).
+ * bCheck: report a failed lookup of the base folder */
 static BOOL
-GetDefExpectedPath(SIZE_T i, HANDLE hToken, PWSTR pszPath)
+GetDefExpectedPath(SIZE_T i, HANDLE hToken, PWSTR pszPath, BOOL bCheck = TRUE)
 {
+    HRESULT hr;
     WCHAR szBuf[MAX_PATH];
     INT csidl = CSIDL_PROFILE;
 
@@ -128,14 +130,17 @@ GetDefExpectedPath(SIZE_T i, HANDLE hToken, PWSTR pszPath)
             {
                 szBuf[0] = UNICODE_NULL;
             }
-            ok(szBuf[0] != UNICODE_NULL, "no public folder in the environment\n");
+            if (bCheck)
+                ok(szBuf[0] != UNICODE_NULL, "no public folder in the environment\n");
             StringCchCopyW(pszPath, MAX_PATH, szBuf);
             csidl = -1;
             break;
     }
     if (csidl >= 0)
     {
-        ok_hex(SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, hToken, SHGFP_TYPE_CURRENT, pszPath), S_OK);
+        hr = SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, hToken, SHGFP_TYPE_CURRENT, pszPath);
+        if (bCheck)
+            ok_hex(hr, S_OK);
     }
     if (s_DefFolders[i].base == BASE_PROFILES)
         PathRemoveFileSpecW(pszPath);
@@ -182,6 +187,9 @@ HasRedirectingValue(SIZE_T i, PCWSTR pszDefault)
     BOOL bRedirected = FALSE;
     HKEY hRoot, hKey;
 
+    /* The shell reads no value for FOLDERID_Public: it is neither KFD_PERUSER nor KFD_COMMON */
+    if (IsEqualGUID(*s_DefFolders[i].id, FOLDERID_Public))
+        return FALSE;
     switch (s_DefFolders[i].base)
     {
         case BASE_PROFILE: case BASE_LOCALAPPDATA: case BASE_APPDATA: hRoot = HKEY_CURRENT_USER; break;
@@ -223,7 +231,7 @@ IsDefFolderRedirected(SIZE_T i, PCWSTR pszExpected)
         return TRUE;
     for (j = 0; j < _countof(s_DefFolders); j++)
     {
-        if (j == i || !GetDefExpectedPath(j, NULL, szOther))
+        if (j == i || !GetDefExpectedPath(j, NULL, szOther, FALSE))
             continue;
         cch = wcslen(szOther);
         if (cch && !_wcsnicmp(pszExpected, szOther, cch) && pszExpected[cch] == L'\\' &&
