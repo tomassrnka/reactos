@@ -21,6 +21,8 @@ BEGIN
     IDS_DEVCODE2 " (Kod %2!u!)"
     IDS_ENABLEDEVICE "Bu Aygıtı Kullan (Etkinleştir)"
     IDS_DISABLEDEVICE "Bu Aygıtı Kullanma (Devre Dışı Bırak)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Bilinmeyen Aygıt"
     IDS_NODRIVERLOADED "Bu aygıt için kurulmuş sürücü yok."
     IDS_DEVONPARENT "%1 üzerinde."

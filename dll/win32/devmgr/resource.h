@@ -130,6 +130,8 @@
 #define IDS_RESOURCE_DMA          0x11B
 #define IDS_RESOURCE_PORT         0x11C
 #define IDS_COPY                  0x11D
+#define IDS_DISABLEDEVICE_FAILED  0x11E
+#define IDS_ENABLEDEVICE_FAILED   0x11F
 
 #define IDS_DEV_NO_PROBLEM                 0x200
 #define IDS_DEV_NOT_CONFIGURED             0x201
