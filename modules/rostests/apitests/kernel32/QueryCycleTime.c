@@ -286,7 +286,9 @@ TestProcessThreadCycleTime(VOID)
 
     Success = pQueryProcessCycleTime(GetCurrentProcess(), &ProcessAfter);
     ok(Success, "Success = %d, error %lu\n", Success, GetLastError());
-    ok(ProcessAfter >= ProcessBefore && ProcessAfter - ProcessBefore >= Cycles,
+    /* Windows Server 2008 R2 sometimes counts a little less for the process than
+     * for the thread (0.1 %); a process that dropped the thread would lose it all */
+    ok(ProcessAfter >= ProcessBefore && ProcessAfter - ProcessBefore >= Cycles - Cycles / 8,
        "The process went from %I64u to %I64u, the thread used %I64u\n",
        ProcessBefore, ProcessAfter, Cycles);
 }
