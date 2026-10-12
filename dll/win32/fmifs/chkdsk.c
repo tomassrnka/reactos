@@ -71,13 +71,14 @@ Chkdsk(
 
     DPRINT("Chkdsk() - %S\n", Format);
     Status = STATUS_SUCCESS;
+    /* Unused2 carries the caller's CHKDSK_EXTENSION, if any, to the provider (fslib/ntfsck.h). */
     Success = Provider->Chkdsk(&usDriveRoot,
                                Callback,
                                CorrectErrors,
                                Verbose,
                                CheckOnlyIfDirty,
                                ScanDrive,
-                               NULL,
+                               Unused2,
                                NULL,
                                NULL,
                                NULL,
