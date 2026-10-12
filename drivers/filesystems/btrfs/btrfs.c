@@ -55,7 +55,7 @@
                             BTRFS_INCOMPAT_FLAGS_EXTENDED_IREF | BTRFS_INCOMPAT_FLAGS_SKINNY_METADATA | BTRFS_INCOMPAT_FLAGS_NO_HOLES | \
                             BTRFS_INCOMPAT_FLAGS_COMPRESS_ZSTD | BTRFS_INCOMPAT_FLAGS_METADATA_UUID | BTRFS_INCOMPAT_FLAGS_RAID1C34)
 #define COMPAT_RO_SUPPORTED (BTRFS_COMPAT_RO_FLAGS_FREE_SPACE_CACHE | BTRFS_COMPAT_RO_FLAGS_FREE_SPACE_CACHE_VALID | \
-                             BTRFS_COMPAT_RO_FLAGS_VERITY)
+                             BTRFS_COMPAT_RO_FLAGS_VERITY | BTRFS_COMPAT_RO_FLAGS_BLOCK_GROUP_TREE)
 
 static const WCHAR device_name[] = {'\\','B','t','r','f','s',0};
 static const WCHAR dosdevice_name[] = {'\\','D','o','s','D','e','v','i','c','e','s','\\','B','t','r','f','s',0};
@@ -3075,6 +3075,11 @@ static NTSTATUS add_root(_Inout_ device_extension* Vcb, _In_ uint64_t id, _In_ u
         case BTRFS_ROOT_DATA_RELOC:
             Vcb->data_reloc_root = r;
             break;
+
+        case BTRFS_ROOT_BLOCK_GROUP:
+            if (Vcb->superblock.compat_ro_flags & BTRFS_COMPAT_RO_FLAGS_BLOCK_GROUP_TREE)
+                Vcb->block_group_root = r;
+            break;
     }
 
     return STATUS_SUCCESS;
@@ -3880,6 +3885,17 @@ NTSTATUS find_chunk_usage(_In_ _Requires_lock_held_(_Curr_->tree_lock) device_ex
     traverse_ptr tp;
     BLOCK_GROUP_ITEM* bgi;
     NTSTATUS Status;
+    root* r;
+
+    if (Vcb->superblock.compat_ro_flags & BTRFS_COMPAT_RO_FLAGS_BLOCK_GROUP_TREE) {
+        r = Vcb->block_group_root;
+
+        if (!r) {
+            ERR("block_group_tree compat_ro flag set but no block group root found\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+    } else
+        r = Vcb->extent_root;
 
     searchkey.obj_type = TYPE_BLOCK_GROUP_ITEM;
 
@@ -3891,7 +3907,7 @@ NTSTATUS find_chunk_usage(_In_ _Requires_lock_held_(_Curr_->tree_lock) device_ex
         searchkey.obj_id = c->offset;
         searchkey.offset = c->chunk_item->size;
 
-        Status = find_item(Vcb, Vcb->extent_root, &tp, &searchkey, false, Irp);
+        Status = find_item(Vcb, r, &tp, &searchkey, false, Irp);
         if (!NT_SUCCESS(Status)) {
             ERR("error - find_item returned %08lx\n", Status);
             return Status;
@@ -3908,7 +3924,7 @@ NTSTATUS find_chunk_usage(_In_ _Requires_lock_held_(_Curr_->tree_lock) device_ex
                 Vcb->superblock.bytes_used += bgi->used;
             } else {
                 ERR("(%I64x;%I64x,%x,%I64x) is %u bytes, expected %Iu\n",
-                    Vcb->extent_root->id, tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, tp.item->size, sizeof(BLOCK_GROUP_ITEM));
+                    r->id, tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, tp.item->size, sizeof(BLOCK_GROUP_ITEM));
             }
         }
 
