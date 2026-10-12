@@ -852,6 +852,12 @@ BEGIN
     /* Warning format system drive dialog strings */
     IDS_NO_FORMAT_TITLE "ボリュームをフォーマットできません"
     IDS_NO_FORMAT "このボリュームをフォーマットできません! ReactOS を実行するための重要なシステム ファイルが含まれています。"
+    IDS_CHKDSK_COMPLETE "Disk Check Complete."
+    IDS_CHKDSK_NOT_SUPPORTED "The disk check could not be performed because checking the %1 file system is not supported."
+    IDS_CHKDSK_VOLUME_IN_USE "The disk check could not be performed because the disk check utility needs exclusive access to the drive, and the drive is in use."
+    IDS_CHKDSK_FAILED "The disk check could not be completed."
+    IDS_DEFRAG_UNAVAILABLE "Disk Defragmenter is not installed on this computer, or it could not be started."
+    IDS_BACKUP_UNAVAILABLE "The backup utility is not installed on this computer, or it could not be started."
 
     /* Run File dialog */
     IDS_RUNDLG_ERROR "「ファイルの実行」ダイアログを表示できませんでした (内部エラー)"
