@@ -613,7 +613,7 @@ DWORD WINAPI CFindFolder::SearchThreadProc(LPVOID lpParameter)
     CStringW status;
     status.Format(IDS_SEARCH_FILES_FOUND, uTotalFound);
     PostUpdate(WM_SEARCH_UPDATE_STATUS, status.GetBuffer(), *data);
-    ::SendMessageW(data->hwnd, WM_SEARCH_STOP, 0, 0);
+    ::SendMessageW(data->hwnd, WM_SEARCH_FINISHED, data->SearchId, 0);
 
     CloseHandle(data->hStopEvent);
     delete data;
@@ -740,23 +740,39 @@ LRESULT CFindFolder::StartSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
     return 0;
 }
 
+void CFindFolder::DiscardQueuedSearchMessages()
+{
+    // A NULL window would make the loop take this thread's messages for every window
+    if (!m_hWnd)
+        return;
+
+    // Wait for all in-flight messages with data we need to free
+    PostMessageW(WM_SEARCH_STOPPED, 0, 0);
+    for (MSG msg; PeekMessageW(&msg, m_hWnd, WM_SEARCH_START, WM_SEARCH_STOPPED, PM_REMOVE);)
+    {
+        if (msg.message == WM_SEARCH_STOPPED)
+            break;
+        if (msg.message == WM_SEARCH_ADD_RESULT || msg.message == WM_SEARCH_UPDATE_STATUS)
+            SHFree((void*)msg.lParam);
+    }
+}
+
 LRESULT CFindFolder::StopSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
 {
     if (m_hStopEvent)
     {
         SetEvent(m_hStopEvent);
         m_hStopEvent = NULL;
-
-        // Wait for all in-flight messages with data we need to free
-        PostMessageW(WM_SEARCH_STOPPED, 0, 0);
-        for (MSG msg; PeekMessageW(&msg, m_hWnd, WM_SEARCH_START, WM_SEARCH_STOPPED, PM_REMOVE);)
-        {
-            if (msg.message == WM_SEARCH_STOPPED)
-                break;
-            if (msg.message == WM_SEARCH_ADD_RESULT || msg.message == WM_SEARCH_UPDATE_STATUS)
-                SHFree((void*)msg.lParam);
-        }
+        DiscardQueuedSearchMessages();
     }
+    return 0;
+}
+
+LRESULT CFindFolder::SearchFinished(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
+{
+    // The thread closes the event when this returns; its queued results and final status stay queued
+    if (wParam == m_SearchId)
+        m_hStopEvent = NULL;
     return 0;
 }
 
@@ -1224,6 +1240,8 @@ STDMETHODIMP CFindFolder::MessageSFVCB(UINT uMsg, WPARAM wParam, LPARAM lParam)
         case SFVM_WINDOWCLOSING:
         {
             SendMessage(WM_SEARCH_STOP, 0, 0);
+            // A finished search can still have queued messages; nobody frees them once unsubclassed
+            DiscardQueuedSearchMessages();
 
             // [CORE-20504] LVN_ITEMACTIVATE in the DefView ListView can trigger a navigation that destroys this IShellFolder,
             // unsubclass now so we don't get a message after our "this" is dead.
