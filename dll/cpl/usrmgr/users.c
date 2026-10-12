@@ -16,6 +16,7 @@
 
 #include "usrmgr.h"
 #include <winreg.h>
+#include <strsafe.h>
 
 typedef struct _USER_DATA
 {
@@ -568,6 +569,60 @@ OnEndLabelEdit(LPNMLVDISPINFO pnmv)
 }
 
 
+/* TRUE when the local account is the one this process runs as, or when that cannot be told */
+static BOOL
+IsCurrentAccount(LPCTSTR pszUserName)
+{
+    TCHAR szAccount[MAX_COMPUTERNAME_LENGTH + UNLEN + 2];
+    TCHAR szDomain[DNLEN + 1];
+    BYTE SidBuffer[SECURITY_MAX_SID_SIZE];
+    BYTE TokenBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    DWORD cbSid = sizeof(SidBuffer), cchDomain = ARRAYSIZE(szDomain), cbToken, cch;
+    SID_NAME_USE Use;
+    HANDLE hToken;
+    BOOL bCurrent = TRUE;
+
+    /* The list holds local accounts; qualify the name so a domain account cannot match */
+    cch = MAX_COMPUTERNAME_LENGTH + 1;
+    if (!GetComputerName(szAccount, &cch))
+        return TRUE;
+    StringCchCat(szAccount, ARRAYSIZE(szAccount), TEXT("\\"));
+    StringCchCat(szAccount, ARRAYSIZE(szAccount), pszUserName);
+    if (!LookupAccountName(NULL, szAccount, SidBuffer, &cbSid, szDomain, &cchDomain, &Use))
+        return TRUE;
+
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        if (GetTokenInformation(hToken, TokenUser, TokenBuffer, sizeof(TokenBuffer), &cbToken))
+            bCurrent = EqualSid(((PTOKEN_USER)TokenBuffer)->User.Sid, SidBuffer);
+        CloseHandle(hToken);
+    }
+
+    return bCurrent;
+}
+
+
+/* Like Windows, reset the password of another account; one's own is changed with Ctrl+Alt+Del */
+static VOID
+UpdateResetPassword(HWND hwndDlg)
+{
+    TCHAR szUserName[UNLEN + 1];
+    HWND hwndLV;
+    INT nItem;
+    BOOL bEnable = FALSE;
+
+    hwndLV = GetDlgItem(hwndDlg, IDC_USERS_LIST);
+    nItem = ListView_GetNextItem(hwndLV, -1, LVNI_SELECTED);
+    if (nItem != -1)
+    {
+        ListView_GetItemText(hwndLV, nItem, 0, szUserName, ARRAYSIZE(szUserName));
+        bEnable = !IsCurrentAccount(szUserName);
+    }
+
+    EnableWindow(GetDlgItem(hwndDlg, IDC_USERS_RESET), bEnable);
+}
+
+
 static BOOL
 OnNotify(HWND hwndDlg, PUSER_DATA pUserData, NMHDR *phdr)
 {
@@ -598,6 +653,14 @@ OnNotify(HWND hwndDlg, PUSER_DATA pUserData, NMHDR *phdr)
                     ClientToScreen(GetDlgItem(hwndDlg, IDC_USERS_LIST), &lpnmlv->ptAction);
                     TrackPopupMenu(GetSubMenu(pUserData->hPopupMenu, (lpnmlv->iItem == -1) ? 0 : 1),
                                    TPM_LEFTALIGN, lpnmlv->ptAction.x, lpnmlv->ptAction.y, 0, hwndDlg, NULL);
+                    break;
+
+                case LVN_ITEMCHANGED:
+                    if ((lpnmlv->uChanged & LVIF_STATE) &&
+                        ((lpnmlv->uNewState ^ lpnmlv->uOldState) & LVIS_SELECTED))
+                    {
+                        UpdateResetPassword(hwndDlg);
+                    }
                     break;
 
                 case LVN_BEGINLABELEDIT:
@@ -719,6 +782,7 @@ UsersPageProc(HWND hwndDlg,
             pUserData->hPopupMenu = LoadMenu(hApplet, MAKEINTRESOURCE(IDM_POPUP_USER));
 
             OnInitDialog(hwndDlg);
+            UpdateResetPassword(hwndDlg);
             lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                                     L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
                                     0, KEY_READ, &hKey);
@@ -754,6 +818,7 @@ UsersPageProc(HWND hwndDlg,
             switch (LOWORD(wParam))
             {
                 case IDM_USER_CHANGE_PASSWORD:
+                case IDC_USERS_RESET:
                     UserChangePassword(hwndDlg);
                     break;
 
