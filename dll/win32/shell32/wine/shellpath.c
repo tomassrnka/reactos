@@ -3397,3 +3397,189 @@ HRESULT WINAPI SHGetSpecialFolderLocation(
     hr = SHGetFolderLocation(hwndOwner, nFolder, NULL, 0, ppidl);
     return hr;
 }
+
+/* Known folders (Vista+): each id that has a CSIDL above is resolved through it */
+static int csidl_from_id(const KNOWNFOLDERID *id)
+{
+    int i;
+
+    if (!id || IsEqualGUID(id, &GUID_NULL))
+        return -1;
+    for (i = 0; i < ARRAY_SIZE(CSIDL_Data); i++)
+    {
+        if (IsEqualGUID(CSIDL_Data[i].id, id))
+            return i;
+    }
+    return -1;
+}
+
+/* Shell namespace folders without a file system path */
+static BOOL is_virtual_folder(int csidl)
+{
+    return CSIDL_Data[csidl].type == CSIDL_Type_Disallowed ||
+           csidl == CSIDL_CONTROLS || csidl == CSIDL_PRINTERS;
+}
+
+C_ASSERT(KF_FLAG_CREATE == CSIDL_FLAG_CREATE && KF_FLAG_DONT_VERIFY == CSIDL_FLAG_DONT_VERIFY);
+
+static HRESULT check_known_folder_flags(DWORD dwFlags)
+{
+    if (dwFlags & KF_FLAG_ALIAS_ONLY)
+        return E_INVALIDARG;
+    if ((dwFlags & (KF_FLAG_DEFAULT_PATH | KF_FLAG_NOT_PARENT_RELATIVE)) == KF_FLAG_NOT_PARENT_RELATIVE)
+        return E_INVALIDARG;
+    return S_OK;
+}
+
+/*************************************************************************
+ * SHGetKnownFolderPath           [SHELL32.@]
+ */
+HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PWSTR *ppszPath)
+{
+    WCHAR szPath[MAX_PATH];
+    HRESULT hr;
+    int csidl;
+
+    TRACE("%s, 0x%08x, %p, %p\n", debugstr_guid(rfid), dwFlags, hToken, ppszPath);
+
+    if (!ppszPath)
+        return E_INVALIDARG;
+    *ppszPath = NULL;
+
+    hr = check_known_folder_flags(dwFlags);
+    if (FAILED(hr))
+        return hr;
+
+    csidl = csidl_from_id(rfid);
+    if (csidl < 0)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    if (is_virtual_folder(csidl))
+        return E_FAIL;
+
+    hr = SHGetFolderPathW(NULL, csidl | (dwFlags & (KF_FLAG_CREATE | KF_FLAG_DONT_VERIFY)), hToken,
+                          (dwFlags & KF_FLAG_DEFAULT_PATH) ? SHGFP_TYPE_DEFAULT : SHGFP_TYPE_CURRENT, szPath);
+    if (FAILED(hr))
+        return hr;
+    /* S_FALSE: the folder has no location on this system */
+    if (hr != S_OK || !szPath[0])
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    *ppszPath = CoTaskMemAlloc((lstrlenW(szPath) + 1) * sizeof(WCHAR));
+    if (!*ppszPath)
+        return E_OUTOFMEMORY;
+    strcpyW(*ppszPath, szPath);
+    return S_OK;
+}
+
+/*************************************************************************
+ * SHGetFolderPathEx              [SHELL32.@]
+ */
+HRESULT WINAPI SHGetFolderPathEx(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, LPWSTR pszPath, UINT cchPath)
+{
+    PWSTR pszKnown;
+    HRESULT hr;
+
+    TRACE("%s, 0x%08x, %p, %p, %u\n", debugstr_guid(rfid), dwFlags, hToken, pszPath, cchPath);
+
+    if (!pszPath || !cchPath)
+        return E_INVALIDARG;
+
+    hr = SHGetKnownFolderPath(rfid, dwFlags, hToken, &pszKnown);
+    if (FAILED(hr))
+        return hr;
+
+    if (FAILED(StringCchCopyW(pszPath, cchPath, pszKnown)))
+        hr = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    CoTaskMemFree(pszKnown);
+    return hr;
+}
+
+/*************************************************************************
+ * SHGetKnownFolderIDList         [SHELL32.@]
+ */
+HRESULT WINAPI SHGetKnownFolderIDList(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PIDLIST_ABSOLUTE *ppidl)
+{
+    PWSTR pszPath;
+    DWORD attributes = 0;
+    HRESULT hr;
+    int csidl;
+
+    TRACE("%s, 0x%08x, %p, %p\n", debugstr_guid(rfid), dwFlags, hToken, ppidl);
+
+    if (!ppidl)
+        return E_INVALIDARG;
+    *ppidl = NULL;
+
+    hr = check_known_folder_flags(dwFlags);
+    if (FAILED(hr))
+        return hr;
+
+    csidl = csidl_from_id(rfid);
+    if (csidl < 0)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    /* The desktop and My Documents are shell items unless the caller asks for the file system path */
+    if (is_virtual_folder(csidl) ||
+        (!(dwFlags & KF_FLAG_NO_ALIAS) && (csidl == CSIDL_DESKTOP || csidl == CSIDL_PERSONAL)))
+    {
+        return SHGetFolderLocation(NULL, csidl, hToken, 0, ppidl);
+    }
+
+    hr = SHGetKnownFolderPath(rfid, dwFlags, hToken, &pszPath);
+    if (FAILED(hr))
+        return hr;
+
+    /* A simple ID list is built without touching the folder, so it also works for a missing one */
+    if (dwFlags & KF_FLAG_SIMPLE_IDLIST)
+    {
+        *ppidl = SHELL32_CreateSimpleIDListFromPath(pszPath, FILE_ATTRIBUTE_DIRECTORY);
+        hr = *ppidl ? S_OK : E_FAIL;
+    }
+    else
+    {
+        hr = SHILCreateFromPathW(pszPath, ppidl, &attributes);
+        if (FAILED(hr) && !PathFileExistsW(pszPath))
+            hr = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
+    CoTaskMemFree(pszPath);
+    return hr;
+}
+
+/*************************************************************************
+ * SHGetKnownFolderItem           [SHELL32.@]
+ */
+HRESULT WINAPI SHGetKnownFolderItem(REFKNOWNFOLDERID rfid, KNOWN_FOLDER_FLAG flags, HANDLE hToken, REFIID riid, void **ppv)
+{
+    PIDLIST_ABSOLUTE pidl;
+    HRESULT hr;
+
+    TRACE("%s, 0x%08x, %p, %s, %p\n", debugstr_guid(rfid), flags, hToken, debugstr_guid(riid), ppv);
+
+    if (!ppv)
+        return E_POINTER;
+    *ppv = NULL;
+
+    hr = SHGetKnownFolderIDList(rfid, flags, hToken, &pidl);
+    if (FAILED(hr))
+        return hr;
+
+    hr = SHCreateItemFromIDList(pidl, riid, ppv);
+    ILFree(pidl);
+    return hr;
+}
+
+/*************************************************************************
+ * SHSetKnownFolderPath           [SHELL32.@]
+ */
+HRESULT WINAPI SHSetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PCWSTR pszPath)
+{
+    int csidl;
+
+    TRACE("%s, 0x%08x, %p, %s\n", debugstr_guid(rfid), dwFlags, hToken, debugstr_w(pszPath));
+
+    csidl = csidl_from_id(rfid);
+    if (csidl < 0)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    return SHSetFolderPathW(csidl, hToken, 0, pszPath);
+}
