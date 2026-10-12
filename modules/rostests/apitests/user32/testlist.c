@@ -39,6 +39,7 @@ extern void func_MenuUI(void);
 extern void func_MessageStateAnalyzer(void);
 extern void func_NcPaintRgn(void);
 extern void func_NextDlgItem(void);
+extern void func_PrintWindow(void);
 extern void func_PrivateExtractIcons(void);
 extern void func_RealGetWindowClass(void);
 extern void func_RedrawWindow(void);
@@ -65,6 +66,7 @@ extern void func_TrackMouseEvent(void);
 extern void func_TrackPopupMenuEx(void);
 extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
+extern void func_WmPrint(void);
 extern void func_WndProc(void);
 extern void func_wsprintfApi(void);
 
@@ -107,6 +109,7 @@ const struct test winetest_testlist[] =
     { "MessageStateAnalyzer", func_MessageStateAnalyzer },
     { "NcPaintRgn", func_NcPaintRgn },
     { "NextDlgItem", func_NextDlgItem },
+    { "PrintWindow", func_PrintWindow },
     { "PrivateExtractIcons", func_PrivateExtractIcons },
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedrawWindow", func_RedrawWindow },
@@ -133,6 +136,7 @@ const struct test winetest_testlist[] =
     { "TrackPopupMenuEx", func_TrackPopupMenuEx },
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
     { "VirtualKey", func_VirtualKey },
+    { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
     { "wsprintfApi", func_wsprintfApi },
     { 0, 0 }
