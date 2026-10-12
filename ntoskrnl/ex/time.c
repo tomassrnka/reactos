@@ -143,8 +143,9 @@ ExpIsValidCutover(
     TIME_FIELDS Fields;
     LARGE_INTEGER Time;
 
+    /* Far enough from the end of the time range for any bias */
     if (Cutover->Year != 0)
-        return RtlTimeFieldsToTime(Cutover, &Time);
+        return Cutover->Year <= 30000 && RtlTimeFieldsToTime(Cutover, &Time);
 
     if (Cutover->Day < 1 || Cutover->Day > 5 ||
         Cutover->Weekday < 0 || Cutover->Weekday > 6)
@@ -186,7 +187,7 @@ static
 BOOLEAN
 ExpGetCutoverTime(
     _In_ PTIME_FIELDS Cutover,
-    _In_ CSHORT Year,
+    _In_ LONG Year,
     _In_ LONG Bias,
     _Out_ PLARGE_INTEGER UtcTime)
 {
@@ -201,7 +202,7 @@ ExpGetCutoverTime(
     else
     {
         RtlZeroMemory(&YearStartFields, sizeof(YearStartFields));
-        YearStartFields.Year = Year;
+        YearStartFields.Year = (CSHORT)Year;
         YearStartFields.Month = 1;
         YearStartFields.Day = 1;
         if (!RtlTimeFieldsToTime(&YearStartFields, &YearStart))
@@ -235,7 +236,7 @@ ExpComputeTimeZoneState(
     ULONG Id, Rule;
     PTIME_FIELDS Date;
     TIME_FIELDS Fields;
-    CSHORT Year, FirstYear, LastYear;
+    LONG Year, FirstYear, LastYear;
     LONG DateBias;
 
     *TimeZoneId = TIME_ZONE_ID_UNKNOWN;
@@ -322,23 +323,12 @@ ExpComputeTimeZoneState(
         *NextCutover = Next;
 }
 
-/* Reads the current bias without tearing, at any IRQL */
+/* Reads the current bias in one access, so that it cannot tear */
 static
 LONGLONG
 ExpReadTimeZoneBias(VOID)
 {
-    LARGE_INTEGER Bias;
-
-    for (;;)
-    {
-        Bias.HighPart = SharedUserData->TimeZoneBias.High1Time;
-        Bias.LowPart = SharedUserData->TimeZoneBias.LowPart;
-        if (Bias.HighPart == SharedUserData->TimeZoneBias.High2Time)
-            break;
-        YieldProcessor();
-    }
-
-    return Bias.QuadPart;
+    return InterlockedCompareExchange64(&ExpTimeZoneBias.QuadPart, 0, 0);
 }
 
 static
@@ -369,6 +359,7 @@ ExpUpdateTimeZoneBias(VOID)
     TIME_FIELDS TimeFields;
     BOOLEAN Changed;
     ULONG NewTimeZoneId;
+    KIRQL OldIrql;
 
     KeQuerySystemTime(&CurrentTime);
     ExpComputeTimeZoneState(&ExpTimeZoneInfo,
@@ -379,10 +370,14 @@ ExpUpdateTimeZoneBias(VOID)
 
     Changed = (NewTimeZoneBias.QuadPart != ExpTimeZoneBias.QuadPart);
 
-    ExpTimeZoneBias = NewTimeZoneBias;
+    InterlockedExchange64(&ExpTimeZoneBias.QuadPart, NewTimeZoneBias.QuadPart);
     ExpTimeZoneId = NewTimeZoneId;
-    KiWriteSystemTime(&SharedUserData->TimeZoneBias, ExpTimeZoneBias);
-    SharedUserData->TimeZoneId = ExpTimeZoneId;
+
+    /* Not preemptible, so that user-mode readers never wait on a half-written bias */
+    KeRaiseIrql(HIGH_LEVEL, &OldIrql);
+    KiWriteSystemTime(&SharedUserData->TimeZoneBias, NewTimeZoneBias);
+    SharedUserData->TimeZoneId = NewTimeZoneId;
+    KeLowerIrql(OldIrql);
 
     DPRINT("Time zone id %lu, bias %I64d minutes\n",
            ExpTimeZoneId, ExpTimeZoneBias.QuadPart / TICKSPERMINUTE);
