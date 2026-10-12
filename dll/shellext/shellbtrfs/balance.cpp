@@ -42,9 +42,9 @@
 #include <shlwapi.h>
 #include <uxtheme.h>
 
-static uint64_t convtypes2[] = { BLOCK_FLAG_SINGLE, BLOCK_FLAG_DUPLICATE, BLOCK_FLAG_RAID0, BLOCK_FLAG_RAID1,
-                                 BLOCK_FLAG_RAID5, BLOCK_FLAG_RAID1C3, BLOCK_FLAG_RAID6, BLOCK_FLAG_RAID10,
-                                 BLOCK_FLAG_RAID1C4 };
+static uint64_t convtypes2[] = { BTRFS_AVAIL_ALLOC_BIT_SINGLE, BTRFS_BLOCK_GROUP_DUP, BTRFS_BLOCK_GROUP_RAID0, BTRFS_BLOCK_GROUP_RAID1,
+                                 BTRFS_BLOCK_GROUP_RAID5, BTRFS_BLOCK_GROUP_RAID1C3, BTRFS_BLOCK_GROUP_RAID6, BTRFS_BLOCK_GROUP_RAID10,
+                                 BTRFS_BLOCK_GROUP_RAID1C4 };
 
 static WCHAR hex_digit(uint8_t u) {
     if (u >= 0xa && u <= 0xf)
@@ -378,15 +378,15 @@ void BtrfsBalance::SaveBalanceOpts(HWND hwndDlg) {
     if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES) == BST_CHECKED) {
         opts->flags |= BTRFS_BALANCE_OPTS_PROFILES;
 
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_SINGLE) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_SINGLE;
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_DUP) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_DUPLICATE;
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID0) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_RAID0;
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID1) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_RAID1;
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID10) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_RAID10;
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID5) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_RAID5;
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID6) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_RAID6;
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID1C3) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_RAID1C3;
-        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID1C4) == BST_CHECKED) opts->profiles |= BLOCK_FLAG_RAID1C4;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_SINGLE) == BST_CHECKED) opts->profiles |= BTRFS_AVAIL_ALLOC_BIT_SINGLE;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_DUP) == BST_CHECKED) opts->profiles |= BTRFS_BLOCK_GROUP_DUP;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID0) == BST_CHECKED) opts->profiles |= BTRFS_BLOCK_GROUP_RAID0;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID1) == BST_CHECKED) opts->profiles |= BTRFS_BLOCK_GROUP_RAID1;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID10) == BST_CHECKED) opts->profiles |= BTRFS_BLOCK_GROUP_RAID10;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID5) == BST_CHECKED) opts->profiles |= BTRFS_BLOCK_GROUP_RAID5;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID6) == BST_CHECKED) opts->profiles |= BTRFS_BLOCK_GROUP_RAID6;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID1C3) == BST_CHECKED) opts->profiles |= BTRFS_BLOCK_GROUP_RAID1C3;
+        if (IsDlgButtonChecked(hwndDlg, IDC_PROFILES_RAID1C4) == BST_CHECKED) opts->profiles |= BTRFS_BLOCK_GROUP_RAID1C4;
     }
 
     if (IsDlgButtonChecked(hwndDlg, IDC_DEVID) == BST_CHECKED) {
@@ -511,7 +511,7 @@ void BtrfsBalance::SaveBalanceOpts(HWND hwndDlg) {
     EndDialog(hwndDlg, 0);
 }
 
-INT_PTR CALLBACK BtrfsBalance::BalanceOptsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+INT_PTR CALLBACK BtrfsBalance::BalanceOptsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM) {
     try {
         switch (uMsg) {
             case WM_INITDIALOG:
@@ -612,15 +612,15 @@ INT_PTR CALLBACK BtrfsBalance::BalanceOptsDlgProc(HWND hwndDlg, UINT uMsg, WPARA
                 // profiles
 
                 CheckDlgButton(hwndDlg, IDC_PROFILES, opts->flags & BTRFS_BALANCE_OPTS_PROFILES ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_SINGLE, opts->profiles & BLOCK_FLAG_SINGLE ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_DUP, opts->profiles & BLOCK_FLAG_DUPLICATE ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID0, opts->profiles & BLOCK_FLAG_RAID0 ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID1, opts->profiles & BLOCK_FLAG_RAID1 ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID10, opts->profiles & BLOCK_FLAG_RAID10 ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID5, opts->profiles & BLOCK_FLAG_RAID5 ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID6, opts->profiles & BLOCK_FLAG_RAID6 ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID1C3, opts->profiles & BLOCK_FLAG_RAID1C3 ? BST_CHECKED : BST_UNCHECKED);
-                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID1C4, opts->profiles & BLOCK_FLAG_RAID1C4 ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_SINGLE, opts->profiles & BTRFS_AVAIL_ALLOC_BIT_SINGLE ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_DUP, opts->profiles & BTRFS_BLOCK_GROUP_DUP ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID0, opts->profiles & BTRFS_BLOCK_GROUP_RAID0 ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID1, opts->profiles & BTRFS_BLOCK_GROUP_RAID1 ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID10, opts->profiles & BTRFS_BLOCK_GROUP_RAID10 ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID5, opts->profiles & BTRFS_BLOCK_GROUP_RAID5 ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID6, opts->profiles & BTRFS_BLOCK_GROUP_RAID6 ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID1C3, opts->profiles & BTRFS_BLOCK_GROUP_RAID1C3 ? BST_CHECKED : BST_UNCHECKED);
+                CheckDlgButton(hwndDlg, IDC_PROFILES_RAID1C4, opts->profiles & BTRFS_BLOCK_GROUP_RAID1C4 ? BST_CHECKED : BST_UNCHECKED);
 
                 EnableWindow(GetDlgItem(hwndDlg, IDC_PROFILES_SINGLE), !balance_started && opts->flags & BTRFS_BALANCE_OPTS_PROFILES ? true : false);
                 EnableWindow(GetDlgItem(hwndDlg, IDC_PROFILES_DUP), !balance_started && opts->flags & BTRFS_BALANCE_OPTS_PROFILES ? true : false);
@@ -858,7 +858,7 @@ void BtrfsBalance::ShowBalanceOptions(HWND hwndDlg, uint8_t type) {
     DialogBoxParamW(module, MAKEINTRESOURCEW(IDD_BALANCE_OPTIONS), hwndDlg, stub_BalanceOptsDlgProc, (LPARAM)this);
 }
 
-INT_PTR CALLBACK BtrfsBalance::BalanceDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+INT_PTR CALLBACK BtrfsBalance::BalanceDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM) {
     try {
         switch (uMsg) {
             case WM_INITDIALOG:
@@ -1063,7 +1063,7 @@ static void unserialize(void* data, ULONG len, WCHAR* s) {
     }
 }
 
-extern "C" void CALLBACK StartBalanceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK StartBalanceW(HWND hwnd, HINSTANCE, LPWSTR lpszCmdLine, int) {
     try {
         WCHAR *s, *vol, *block;
         win_handle h, token;
@@ -1124,7 +1124,7 @@ extern "C" void CALLBACK StartBalanceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCm
     }
 }
 
-extern "C" void CALLBACK PauseBalanceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK PauseBalanceW(HWND hwnd, HINSTANCE, LPWSTR lpszCmdLine, int) {
     try {
         win_handle h, token;
         TOKEN_PRIVILEGES tp;
@@ -1171,7 +1171,7 @@ extern "C" void CALLBACK PauseBalanceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCm
     }
 }
 
-extern "C" void CALLBACK StopBalanceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK StopBalanceW(HWND hwnd, HINSTANCE, LPWSTR lpszCmdLine, int) {
     try {
         win_handle h, token;
         TOKEN_PRIVILEGES tp;

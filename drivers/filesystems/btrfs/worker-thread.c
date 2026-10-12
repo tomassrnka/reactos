@@ -39,11 +39,21 @@ NTSTATUS do_read_job(PIRP Irp) {
         acquired_fcb_lock = true;
     }
 
+#ifdef __REACTOS__
     _SEH2_TRY {
+#else
+    try {
+#endif
         Status = do_read(Irp, true, &bytes_read);
+#ifdef __REACTOS__
     } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
         Status = _SEH2_GetExceptionCode();
     } _SEH2_END;
+#else
+    } except (EXCEPTION_EXECUTE_HANDLER) {
+        Status = GetExceptionCode();
+    }
+#endif
 
     if (acquired_fcb_lock)
         ExReleaseResourceLite(fcb->Header.Resource);
@@ -69,11 +79,21 @@ NTSTATUS do_write_job(device_extension* Vcb, PIRP Irp) {
     bool top_level = is_top_level(Irp);
     NTSTATUS Status;
 
+#ifdef __REACTOS__
     _SEH2_TRY {
+#else
+    try {
+#endif
         Status = write_file(Vcb, Irp, true, true);
+#ifdef __REACTOS__
     } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
         Status = _SEH2_GetExceptionCode();
     } _SEH2_END;
+#else
+    } except (EXCEPTION_EXECUTE_HANDLER) {
+        Status = GetExceptionCode();
+    }
+#endif
 
     if (!NT_SUCCESS(Status))
         ERR("write_file returned %08lx\n", Status);
@@ -144,17 +164,31 @@ bool add_thread_job(device_extension* Vcb, PIRP Irp) {
             return false;
         }
 
+#ifdef __REACTOS__
         _SEH2_TRY {
+#else
+        try {
+#endif
             MmProbeAndLockPages(Mdl, Irp->RequestorMode, op);
+#ifdef __REACTOS__
         } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
             ERR("MmProbeAndLockPages raised status %08lx\n", _SEH2_GetExceptionCode());
+#else
+        } except(EXCEPTION_EXECUTE_HANDLER) {
+            ERR("MmProbeAndLockPages raised status %08lx\n", GetExceptionCode());
+#endif
 
             IoFreeMdl(Mdl);
             Irp->MdlAddress = NULL;
             ExFreePool(ji);
 
+#ifdef __REACTOS__
             _SEH2_YIELD(return FALSE);
         } _SEH2_END;
+#else
+            return false;
+        }
+#endif
     }
 
     ExInitializeWorkItem(&ji->item, do_job, ji);

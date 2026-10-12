@@ -16,7 +16,11 @@
  * along with WinBtrfs.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "btrfs_drv.h"
+#ifdef __REACTOS__
 #include "zstd/zstd.h"
+#else
+#include "zstd/lib/zstd.h"
+#endif
 
 extern UNICODE_STRING log_device, log_file, registry_path;
 extern LIST_ENTRY uid_map_list, gid_map_list;
@@ -29,12 +33,13 @@ extern PFILE_OBJECT comfo;
 extern PDEVICE_OBJECT comdo;
 #endif
 
-WORK_QUEUE_ITEM wqi;
+static WORK_QUEUE_ITEM wqi;
+static IO_STATUS_BLOCK reg_iosb;
 
 static const WCHAR option_mounted[] = L"Mounted";
 
 NTSTATUS registry_load_volume_options(device_extension* Vcb) {
-    BTRFS_UUID* uuid = &Vcb->superblock.uuid;
+    uint8_t* uuid = Vcb->superblock.fsid;
     mount_options* options = &Vcb->options;
     UNICODE_STRING path, ignoreus, compressus, compressforceus, compresstypeus, readonlyus, zliblevelus, flushintervalus,
                    maxinlineus, subvolidus, skipbalanceus, nobarrierus, notrimus, clearcacheus, allowdegradedus, zstdlevelus,
@@ -47,12 +52,12 @@ NTSTATUS registry_load_volume_options(device_extension* Vcb) {
 
     options->compress = mount_compress;
     options->compress_force = mount_compress_force;
-    options->compress_type = mount_compress_type > BTRFS_COMPRESSION_ZSTD ? 0 : mount_compress_type;
+    options->compress_type = mount_compress_type > BTRFS_COMPRESS_ZSTD ? 0 : mount_compress_type;
     options->readonly = mount_readonly;
     options->zlib_level = mount_zlib_level;
     options->zstd_level = mount_zstd_level;
     options->flush_interval = mount_flush_interval;
-    options->max_inline = min(mount_max_inline, Vcb->superblock.node_size - sizeof(tree_header) - sizeof(leaf_node) - sizeof(EXTENT_DATA) + 1);
+    options->max_inline = min(mount_max_inline, Vcb->superblock.nodesize - sizeof(struct btrfs_header) - sizeof(struct btrfs_item) - offsetof(struct btrfs_file_extent_item, disk_bytenr));
     options->skip_balance = mount_skip_balance;
     options->no_barrier = mount_no_barrier;
     options->no_trim = mount_no_trim;
@@ -77,8 +82,8 @@ NTSTATUS registry_load_volume_options(device_extension* Vcb) {
     i++;
 
     for (j = 0; j < 16; j++) {
-        path.Buffer[i] = hex_digit((uuid->uuid[j] & 0xF0) >> 4);
-        path.Buffer[i+1] = hex_digit(uuid->uuid[j] & 0xF);
+        path.Buffer[i] = hex_digit((uuid[j] & 0xF0) >> 4);
+        path.Buffer[i+1] = hex_digit(uuid[j] & 0xF);
 
         i += 2;
 
@@ -153,7 +158,7 @@ NTSTATUS registry_load_volume_options(device_extension* Vcb) {
             } else if (FsRtlAreNamesEqual(&compresstypeus, &us, true, NULL) && kvfi->DataOffset > 0 && kvfi->DataLength > 0 && kvfi->Type == REG_DWORD) {
                 DWORD* val = (DWORD*)((uint8_t*)kvfi + kvfi->DataOffset);
 
-                options->compress_type = (uint8_t)(*val > BTRFS_COMPRESSION_ZSTD ? 0 : *val);
+                options->compress_type = (uint8_t)(*val > BTRFS_COMPRESS_ZSTD ? 0 : *val);
             } else if (FsRtlAreNamesEqual(&readonlyus, &us, true, NULL) && kvfi->DataOffset > 0 && kvfi->DataLength > 0 && kvfi->Type == REG_DWORD) {
                 DWORD* val = (DWORD*)((uint8_t*)kvfi + kvfi->DataOffset);
 
@@ -169,7 +174,7 @@ NTSTATUS registry_load_volume_options(device_extension* Vcb) {
             } else if (FsRtlAreNamesEqual(&maxinlineus, &us, true, NULL) && kvfi->DataOffset > 0 && kvfi->DataLength > 0 && kvfi->Type == REG_DWORD) {
                 DWORD* val = (DWORD*)((uint8_t*)kvfi + kvfi->DataOffset);
 
-                options->max_inline = min(*val, Vcb->superblock.node_size - sizeof(tree_header) - sizeof(leaf_node) - sizeof(EXTENT_DATA) + 1);
+                options->max_inline = min(*val, Vcb->superblock.nodesize - sizeof(struct btrfs_header) - sizeof(struct btrfs_item) - offsetof(struct btrfs_file_extent_item, disk_bytenr));
             } else if (FsRtlAreNamesEqual(&subvolidus, &us, true, NULL) && kvfi->DataOffset > 0 && kvfi->DataLength > 0 && kvfi->Type == REG_QWORD) {
                 uint64_t* val = (uint64_t*)((uint8_t*)kvfi + kvfi->DataOffset);
 
@@ -239,7 +244,7 @@ end:
     return Status;
 }
 
-NTSTATUS registry_mark_volume_mounted(BTRFS_UUID* uuid) {
+NTSTATUS registry_mark_volume_mounted(uint8_t* uuid) {
     UNICODE_STRING path, mountedus;
     ULONG i, j;
     NTSTATUS Status;
@@ -262,8 +267,8 @@ NTSTATUS registry_mark_volume_mounted(BTRFS_UUID* uuid) {
     i++;
 
     for (j = 0; j < 16; j++) {
-        path.Buffer[i] = hex_digit((uuid->uuid[j] & 0xF0) >> 4);
-        path.Buffer[i+1] = hex_digit(uuid->uuid[j] & 0xF);
+        path.Buffer[i] = hex_digit((uuid[j] & 0xF0) >> 4);
+        path.Buffer[i+1] = hex_digit(uuid[j] & 0xF);
 
         i += 2;
 
@@ -382,7 +387,7 @@ end:
     return Status;
 }
 
-NTSTATUS registry_mark_volume_unmounted(BTRFS_UUID* uuid) {
+NTSTATUS registry_mark_volume_unmounted(uint8_t* uuid) {
     UNICODE_STRING path;
     NTSTATUS Status;
     ULONG i, j;
@@ -402,8 +407,8 @@ NTSTATUS registry_mark_volume_unmounted(BTRFS_UUID* uuid) {
     i++;
 
     for (j = 0; j < 16; j++) {
-        path.Buffer[i] = hex_digit((uuid->uuid[j] & 0xF0) >> 4);
-        path.Buffer[i+1] = hex_digit(uuid->uuid[j] & 0xF);
+        path.Buffer[i] = hex_digit((uuid[j] & 0xF0) >> 4);
+        path.Buffer[i+1] = hex_digit(uuid[j] & 0xF);
 
         i += 2;
 
@@ -1022,24 +1027,26 @@ _Function_class_(WORKER_THREAD_ROUTINE)
 static void __stdcall registry_work_item(PVOID Parameter) {
     NTSTATUS Status;
     HANDLE regh = (HANDLE)Parameter;
-    IO_STATUS_BLOCK iosb;
 
     TRACE("registry changed\n");
 
     read_registry(&registry_path, true);
 
-    Status = ZwNotifyChangeKey(regh, NULL, (PVOID)&wqi, (PVOID)DelayedWorkQueue, &iosb, REG_NOTIFY_CHANGE_LAST_SET, true, NULL, 0, true);
+    Status = ZwNotifyChangeKey(regh, NULL, (PVOID)&wqi, (PVOID)DelayedWorkQueue,
+                               &reg_iosb, REG_NOTIFY_CHANGE_LAST_SET, true,
+                               NULL, 0, true);
     if (!NT_SUCCESS(Status))
         ERR("ZwNotifyChangeKey returned %08lx\n", Status);
 }
 
 void watch_registry(HANDLE regh) {
     NTSTATUS Status;
-    IO_STATUS_BLOCK iosb;
 
     ExInitializeWorkItem(&wqi, registry_work_item, regh);
 
-    Status = ZwNotifyChangeKey(regh, NULL, (PVOID)&wqi, (PVOID)DelayedWorkQueue, &iosb, REG_NOTIFY_CHANGE_LAST_SET, true, NULL, 0, true);
+    Status = ZwNotifyChangeKey(regh, NULL, (PVOID)&wqi, (PVOID)DelayedWorkQueue,
+                               &reg_iosb, REG_NOTIFY_CHANGE_LAST_SET, true,
+                               NULL, 0, true);
     if (!NT_SUCCESS(Status))
         ERR("ZwNotifyChangeKey returned %08lx\n", Status);
 }

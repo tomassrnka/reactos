@@ -42,6 +42,43 @@
 #include <shlwapi.h>
 #include <uxtheme.h>
 
+static wstring format_duration(uint64_t dur, const wchar_t* fmt) {
+#ifndef __REACTOS__
+    int len = GetDurationFormatEx(LOCALE_NAME_USER_DEFAULT, 0, nullptr, dur,
+                                  fmt, nullptr, 0);
+    if (len == 0)
+        throw last_error(GetLastError());
+
+    wstring s;
+
+    s.resize(len);
+
+    if (GetDurationFormatEx(LOCALE_NAME_USER_DEFAULT, 0, nullptr, dur,
+                            fmt, s.data(), s.size()) == 0)
+        throw last_error(GetLastError());
+
+    return s;
+#else
+    wchar_t buffer[64];
+
+    ULONGLONG seconds = dur % 60;
+    ULONGLONG totalMinutes = dur / 60;
+    ULONGLONG minutes = totalMinutes % 60;
+    ULONGLONG totalHours = totalMinutes / 60;
+    ULONGLONG hours = totalHours % 24;
+    ULONGLONG days = totalHours / 24;
+
+    if (days > 0) {
+        _snwprintf(buffer, _countof(buffer), L"%I64ud %02I64u:%02I64u:%02I64u", days, hours, minutes, seconds);
+    } else {
+        _snwprintf(buffer, _countof(buffer), L"%02I64u:%02I64u:%02I64u", hours, minutes, seconds);
+    }
+
+    wstring s(buffer);
+    return s;
+#endif
+}
+
 void BtrfsScrub::UpdateTextBox(HWND hwndDlg, btrfs_query_scrub* bqs) {
     btrfs_query_scrub* bqs2 = nullptr;
     bool alloc_bqs2 = false;
@@ -138,7 +175,7 @@ void BtrfsScrub::UpdateTextBox(HWND hwndDlg, btrfs_query_scrub* bqs) {
 
                     if (bse->recovered)
                         message = IDS_SCRUB_MSG_RECOVERABLE_METADATA;
-                    else if (bse->metadata.firstitem.obj_id == 0 && bse->metadata.firstitem.obj_type == 0 && bse->metadata.firstitem.offset == 0)
+                    else if (bse->metadata.firstitem.objectid == 0 && bse->metadata.firstitem.type == 0 && bse->metadata.firstitem.offset == 0)
                         message = IDS_SCRUB_MSG_UNRECOVERABLE_METADATA;
                     else
                         message = IDS_SCRUB_MSG_UNRECOVERABLE_METADATA_FIRSTITEM;
@@ -148,11 +185,11 @@ void BtrfsScrub::UpdateTextBox(HWND hwndDlg, btrfs_query_scrub* bqs) {
 
                     if (bse->recovered)
                         wstring_sprintf(u, t, bse->address, bse->device);
-                    else if (bse->metadata.firstitem.obj_id == 0 && bse->metadata.firstitem.obj_type == 0 && bse->metadata.firstitem.offset == 0)
+                    else if (bse->metadata.firstitem.objectid == 0 && bse->metadata.firstitem.type == 0 && bse->metadata.firstitem.offset == 0)
                         wstring_sprintf(u, t, bse->address, bse->device, bse->metadata.root, bse->metadata.level);
                     else
-                        wstring_sprintf(u, t, bse->address, bse->device, bse->metadata.root, bse->metadata.level, bse->metadata.firstitem.obj_id,
-                                        bse->metadata.firstitem.obj_type, bse->metadata.firstitem.offset);
+                        wstring_sprintf(u, t, bse->address, bse->device, bse->metadata.root, bse->metadata.level, bse->metadata.firstitem.objectid,
+                                        bse->metadata.firstitem.type, bse->metadata.firstitem.offset);
                 } else {
                     int message;
 
@@ -226,7 +263,14 @@ void BtrfsScrub::UpdateTextBox(HWND hwndDlg, btrfs_query_scrub* bqs) {
 
             format_size((uint64_t)speed, d2, false);
 
-            wstring_sprintf(u, t, d1.c_str(), bqs2->duration / 10000000, d2.c_str());
+            wstring dur;
+
+            if (bqs2->duration >= 36000000000)
+                dur = format_duration(bqs2->duration, L"h:mm:ss");
+            else
+                dur = format_duration(bqs2->duration, L"m:ss");
+
+            wstring_sprintf(u, t, d1.c_str(), dur.c_str(), d2.c_str());
 
             s += u;
             s += L"\r\n";
@@ -381,7 +425,7 @@ void BtrfsScrub::StartScrub(HWND hwndDlg) {
         throw last_error(GetLastError());
 }
 
-void BtrfsScrub::PauseScrub(HWND hwndDlg) {
+void BtrfsScrub::PauseScrub(HWND) {
     btrfs_query_scrub bqs;
 
     win_handle h = CreateFileW(fn.c_str(), FILE_TRAVERSE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
@@ -407,7 +451,7 @@ void BtrfsScrub::PauseScrub(HWND hwndDlg) {
         throw last_error(GetLastError());
 }
 
-void BtrfsScrub::StopScrub(HWND hwndDlg) {
+void BtrfsScrub::StopScrub(HWND) {
     win_handle h = CreateFileW(fn.c_str(), FILE_TRAVERSE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
 
@@ -423,7 +467,7 @@ void BtrfsScrub::StopScrub(HWND hwndDlg) {
         throw last_error(GetLastError());
 }
 
-INT_PTR CALLBACK BtrfsScrub::ScrubDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+INT_PTR CALLBACK BtrfsScrub::ScrubDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM) {
     try {
         switch (uMsg) {
             case WM_INITDIALOG:
@@ -471,10 +515,10 @@ static INT_PTR CALLBACK stub_ScrubDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam
     BtrfsScrub* bs;
 
     if (uMsg == WM_INITDIALOG) {
-        SetWindowLongPtr(hwndDlg, GWLP_USERDATA, (LONG_PTR)lParam);
+        SetWindowLongPtrW(hwndDlg, GWLP_USERDATA, (LONG_PTR)lParam);
         bs = (BtrfsScrub*)lParam;
     } else {
-        bs = (BtrfsScrub*)GetWindowLongPtr(hwndDlg, GWLP_USERDATA);
+        bs = (BtrfsScrub*)GetWindowLongPtrW(hwndDlg, GWLP_USERDATA);
     }
 
     if (bs)
@@ -483,7 +527,7 @@ static INT_PTR CALLBACK stub_ScrubDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam
         return false;
 }
 
-extern "C" void CALLBACK ShowScrubW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK ShowScrubW(HWND hwnd, HINSTANCE, LPWSTR lpszCmdLine, int) {
     try {
         win_handle token;
         TOKEN_PRIVILEGES tp;
@@ -512,7 +556,7 @@ extern "C" void CALLBACK ShowScrubW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLi
     }
 }
 
-extern "C" void CALLBACK StartScrubW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK StartScrubW(HWND, HINSTANCE, LPWSTR lpszCmdLine, int) {
     vector<wstring> args;
 
     command_line_to_args(lpszCmdLine, args);
@@ -548,7 +592,7 @@ extern "C" void CALLBACK StartScrubW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdL
     }
 }
 
-extern "C" void CALLBACK StopScrubW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK StopScrubW(HWND, HINSTANCE, LPWSTR lpszCmdLine, int) {
     vector<wstring> args;
 
     command_line_to_args(lpszCmdLine, args);

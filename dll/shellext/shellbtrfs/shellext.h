@@ -72,23 +72,23 @@ using namespace std;
 #define STATUS_NOT_FOUND                (NTSTATUS)0xc0000225
 #endif
 
-#define BLOCK_FLAG_DATA         0x001
-#define BLOCK_FLAG_SYSTEM       0x002
-#define BLOCK_FLAG_METADATA     0x004
-#define BLOCK_FLAG_RAID0        0x008
-#define BLOCK_FLAG_RAID1        0x010
-#define BLOCK_FLAG_DUPLICATE    0x020
-#define BLOCK_FLAG_RAID10       0x040
-#define BLOCK_FLAG_RAID5        0x080
-#define BLOCK_FLAG_RAID6        0x100
+#define BTRFS_BLOCK_GROUP_DATA         0x001
+#define BTRFS_BLOCK_GROUP_SYSTEM       0x002
+#define BTRFS_BLOCK_GROUP_METADATA     0x004
+#define BTRFS_BLOCK_GROUP_RAID0        0x008
+#define BTRFS_BLOCK_GROUP_RAID1        0x010
+#define BTRFS_BLOCK_GROUP_DUP          0x020
+#define BTRFS_BLOCK_GROUP_RAID10       0x040
+#define BTRFS_BLOCK_GROUP_RAID5        0x080
+#define BTRFS_BLOCK_GROUP_RAID6        0x100
 
-#define BTRFS_TYPE_FILE      1
-#define BTRFS_TYPE_DIRECTORY 2
-#define BTRFS_TYPE_CHARDEV   3
-#define BTRFS_TYPE_BLOCKDEV  4
-#define BTRFS_TYPE_FIFO      5
-#define BTRFS_TYPE_SOCKET    6
-#define BTRFS_TYPE_SYMLINK   7
+#define BTRFS_FT_REG_FILE      1
+#define BTRFS_FT_DIR           2
+#define BTRFS_FT_CHRDEV        3
+#define BTRFS_FT_BLKDEV        4
+#define BTRFS_FT_FIFO          5
+#define BTRFS_FT_SOCK          6
+#define BTRFS_FT_SYMLINK       7
 
 #ifdef _MSC_VER
 #define funcname __FUNCTION__
@@ -115,7 +115,6 @@ NTSTATUS WINAPI NtSetSecurityObject(HANDLE Handle, SECURITY_INFORMATION Security
 NTSYSCALLAPI NTSTATUS NTAPI NtFsControlFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
                                             PIO_STATUS_BLOCK IoStatusBlock, ULONG FsControlCode, PVOID InputBuffer, ULONG InputBufferLength,
                                             PVOID OutputBuffer, ULONG OutputBufferLength);
-
 NTSTATUS NTAPI NtQueryInformationFile(HANDLE hFile, PIO_STATUS_BLOCK io, PVOID ptr, ULONG len, FILE_INFORMATION_CLASS FileInformationClass);
 
 NTSTATUS NTAPI NtSetInformationFile(HANDLE hFile, PIO_STATUS_BLOCK io, PVOID ptr, ULONG len, FILE_INFORMATION_CLASS FileInformationClass);
@@ -193,16 +192,8 @@ typedef struct _REPARSE_DATA_BUFFER {
 #define SYMLINK_FLAG_RELATIVE 1
 #endif
 
-#ifndef FILE_SUPPORTS_BLOCK_REFCOUNTING
-
-typedef struct _DUPLICATE_EXTENTS_DATA {
-    HANDLE FileHandle;
-    LARGE_INTEGER SourceFileOffset;
-    LARGE_INTEGER TargetFileOffset;
-    LARGE_INTEGER ByteCount;
-} DUPLICATE_EXTENTS_DATA, *PDUPLICATE_EXTENTS_DATA;
-
-#define FSCTL_DUPLICATE_EXTENTS_TO_FILE CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 209, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+#ifndef __REACTOS__
+#ifndef _MSC_VER
 
 typedef struct _FSCTL_GET_INTEGRITY_INFORMATION_BUFFER {
     WORD ChecksumAlgorithm;
@@ -218,10 +209,8 @@ typedef struct _FSCTL_SET_INTEGRITY_INFORMATION_BUFFER {
     DWORD Flags;
 } FSCTL_SET_INTEGRITY_INFORMATION_BUFFER, *PFSCTL_SET_INTEGRITY_INFORMATION_BUFFER;
 
-#define FSCTL_GET_INTEGRITY_INFORMATION CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 159, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define FSCTL_SET_INTEGRITY_INFORMATION CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 160, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
-
 #endif
+#endif /* __REACTOS__ */
 
 class win_handle {
 public:
@@ -388,8 +377,25 @@ private:
     string msg;
 };
 
+class global_lock {
+public:
+    global_lock(HGLOBAL mem) : mem(mem) {
+        ptr = GlobalLock(mem);
+    }
+
+    ~global_lock() {
+        if (ptr)
+            GlobalUnlock(mem);
+    }
+
+    void* ptr;
+
+private:
+    HGLOBAL mem;
+};
+
 #ifdef __REACTOS__
-inline wstring to_wstring(uint8_t a) { WCHAR buffer[16]; swprintf(buffer, L"%d", a); return wstring(buffer); } 
+inline wstring to_wstring(uint8_t a) { WCHAR buffer[16]; swprintf(buffer, L"%d", a); return wstring(buffer); }
 inline wstring to_wstring(uint16_t a) { WCHAR buffer[16]; swprintf(buffer, L"%d", a); return wstring(buffer); }
 inline wstring to_wstring(uint32_t a) { WCHAR buffer[32]; swprintf(buffer, L"%ld", a); return wstring(buffer); }
 inline wstring to_wstring(uint64_t a) { WCHAR buffer[64]; swprintf(buffer, L"%I64d", a); return wstring(buffer); }
@@ -403,5 +409,5 @@ wstring format_ntstatus(NTSTATUS Status);
 bool load_string(HMODULE module, UINT id, wstring& s);
 void wstring_sprintf(wstring& s, wstring fmt, ...);
 void command_line_to_args(LPWSTR cmdline, vector<wstring>& args);
-wstring utf8_to_utf16(const string_view& utf8);
+wstring utf8_to_utf16(string_view utf8);
 void error_message(HWND hwnd, const char* msg);
