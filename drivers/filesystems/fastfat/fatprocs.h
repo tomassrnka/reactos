@@ -154,6 +154,37 @@ FatLookupMcbEntry (
     OUT PULONG Index OPTIONAL
     );
 
+#ifdef __REACTOS__
+BOOLEAN
+FatFindDirtyFat (
+    IN PVCB Vcb,
+    IN VBO StartingVbo,
+    IN ULONG ByteCount,
+    OUT PVBO FirstDirtyVbo,
+    OUT PULONG DirtyByteCount
+    );
+
+VOID
+FatMarkFatDirty (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG ByteCount
+    );
+
+VOID
+FatWaitForDirtyFatWrites (
+    IN PVCB Vcb
+    );
+
+VOID
+FatSetDirtyFatBits (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG ByteCount,
+    IN BOOLEAN Dirty
+    );
+#endif
+
 BOOLEAN
 FatLookupLastMcbEntry (
     IN PVCB Vcb,

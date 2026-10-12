@@ -521,20 +521,23 @@ Return Value:
 
     if (TypeOfOpen == VirtualVolumeFile) {
 
+        VBO StartingDirtyVbo;
+
+        ULONG WriteLength;
+
+#ifndef __REACTOS__
         LBO DirtyLbo;
         LBO CleanLbo;
 
         VBO DirtyVbo;
-        VBO StartingDirtyVbo;
 
         ULONG DirtyByteCount;
         ULONG CleanByteCount;
 
-        ULONG WriteLength;
-
         BOOLEAN MoreDirtyRuns = TRUE;
 
         IO_STATUS_BLOCK RaiseIosb;
+#endif
 
         DebugTrace(0, Dbg, "Type of write is Virtual Volume File\n", 0);
 
@@ -570,6 +573,107 @@ Return Value:
 
         NT_ASSERT( (FsRtlNumberOfRunsInLargeMcb( &Vcb->DirtyFatMcb ) & 1) == 0);
 
+#ifdef __REACTOS__
+        //
+        //  ReactOS Cc writes a pinned page while fat entries in it change.
+        //  The dirty sectors are marked clean before the disk reads them (a
+        //  change made after that marks them dirty again, see
+        //  FatMarkFatDirty), and one request transfers at a time, so a later
+        //  one carries newer data.  Nothing taken while DirtyFatWriteResource
+        //  is held needs memory, so the threads that free memory may wait
+        //  for it.
+        //
+
+        {
+            BOOLEAN Found = FALSE;
+            ULONG Fat;
+            ULONG BytesPerFat;
+            IO_RUN StackIoRuns[2];
+            PIO_RUN IoRuns = StackIoRuns;
+
+            ExAcquireSharedStarveExclusive( &Vcb->DirtyFatWriteActive, TRUE );
+
+            _SEH2_TRY {
+
+                Found = FatFindDirtyFat( Vcb, StartingVbo, ByteCount, &StartingDirtyVbo, &WriteLength );
+
+                if (Found) {
+
+                    BytesPerFat = FatBytesPerFat( &Vcb->Bpb );
+
+                    if ((ULONG)Vcb->Bpb.Fats > 2) {
+
+                        IoRuns = FsRtlAllocatePoolWithTag( PagedPool,
+                                                           (ULONG)(Vcb->Bpb.Fats*sizeof(IO_RUN)),
+                                                           TAG_IO_RUNS );
+                    }
+
+                    for (Fat = 0; Fat < (ULONG)Vcb->Bpb.Fats; Fat++) {
+
+                        IoRuns[Fat].Vbo = StartingDirtyVbo;
+                        IoRuns[Fat].Lbo = Fat * BytesPerFat + StartingDirtyVbo;
+                        IoRuns[Fat].Offset = StartingDirtyVbo - StartingVbo;
+                        IoRuns[Fat].ByteCount = WriteLength;
+                    }
+
+                    Vcb->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors].Common.MetaDataDiskWrites += Vcb->Bpb.Fats;
+
+                    FatSetDirtyFatBits( Vcb, StartingDirtyVbo, WriteLength, FALSE );
+
+                    ExAcquireResourceExclusiveLite( &Vcb->DirtyFatWriteResource, TRUE );
+
+                    _SEH2_TRY {
+
+                        FatMultipleAsync( IrpContext,
+                                          Vcb,
+                                          Irp,
+                                          (ULONG)Vcb->Bpb.Fats,
+                                          IoRuns );
+
+                        FatWaitSync( IrpContext );
+
+                    } _SEH2_FINALLY {
+
+                        ExReleaseResourceLite( &Vcb->DirtyFatWriteResource );
+
+                        if (_SEH2_AbnormalTermination() ||
+                            !NT_SUCCESS( Irp->IoStatus.Status )) {
+
+                            FatMarkFatDirty( Vcb, StartingDirtyVbo, WriteLength );
+                        }
+                    } _SEH2_END;
+                }
+
+            } _SEH2_FINALLY {
+
+                if (IoRuns != StackIoRuns) {
+
+                    ExFreePool( IoRuns );
+                }
+
+                ExReleaseResourceLite( &Vcb->DirtyFatWriteActive );
+            } _SEH2_END;
+
+            if (Found && !NT_SUCCESS( Irp->IoStatus.Status )) {
+
+                DebugTrace( 0,
+                            Dbg,
+                            "Error %X while writing volume file.\n",
+                            Irp->IoStatus.Status );
+
+                Status = Irp->IoStatus.Status;
+                FatNormalizeAndRaiseStatus( IrpContext, Status );
+            }
+        }
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = ByteCount;
+
+        DebugTrace(-1, Dbg, "CommonWrite -> %08lx\n", STATUS_SUCCESS );
+
+        FatCompleteRequest( IrpContext, Irp, STATUS_SUCCESS );
+        return STATUS_SUCCESS;
+#else
         //
         //  We need to skip over any clean sectors at the start of the write.
         //
@@ -875,6 +979,7 @@ Return Value:
 
         FatCompleteRequest( IrpContext, Irp, Status );
         return Status;
+#endif
     }
 
     //

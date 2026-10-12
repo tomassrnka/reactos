@@ -215,7 +215,31 @@ Return Value:
 
             _SEH2_TRY {
 
+#ifdef __REACTOS__
+                NTSTATUS FlushStatus;
+                VBO DirtyVbo;
+                ULONG DirtyByteCount;
+
+                FlushStatus = FatFlushVolume( IrpContext, Vcb, Flush );
+
+                //
+                //  A fat sector still dirty after the flush did not reach
+                //  the disk: the purge would drop it, so keep the cache and
+                //  leave the volume marked dirty.
+                //
+
+                if (NT_SUCCESS( FlushStatus ) &&
+                    FatFindDirtyFat( Vcb,
+                                     FatReservedBytes( &Vcb->Bpb ),
+                                     FatBytesPerFat( &Vcb->Bpb ),
+                                     &DirtyVbo,
+                                     &DirtyByteCount )) {
+
+                    FlushStatus = STATUS_UNSUCCESSFUL;
+                }
+#else
                 (VOID)FatFlushVolume( IrpContext, Vcb, Flush );
+#endif
 
                 //
                 //  The volume is now clean, note it.  We purge the
@@ -223,7 +247,12 @@ Return Value:
                 //  clean incase there is a stale Bpb in the cache.
                 //
 
+#ifdef __REACTOS__
+                if (NT_SUCCESS( FlushStatus ) &&
+                    !FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+#else
                 if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+#endif
 
                     CcPurgeCacheSection( &Vcb->SectionObjectPointers,
                                          NULL,

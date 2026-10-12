@@ -272,6 +272,10 @@ Return Value:
     PLIST_ENTRY UnwindEntryList = NULL;
     PERESOURCE UnwindResource = NULL;
     PERESOURCE UnwindResource2 = NULL;
+#ifdef __REACTOS__
+    PERESOURCE UnwindResource3 = NULL;
+    PERESOURCE UnwindResource4 = NULL;
+#endif
     PFILE_OBJECT UnwindFileObject = NULL;
     PFILE_OBJECT UnwindCacheMap = NULL;
     BOOLEAN UnwindWeAllocatedMcb = FALSE;
@@ -458,6 +462,12 @@ Return Value:
 
         ExInitializeResourceLite( &Vcb->ChangeBitMapResource );
         UnwindResource2 = &Vcb->ChangeBitMapResource;
+#ifdef __REACTOS__
+        ExInitializeResourceLite( &Vcb->DirtyFatWriteResource );
+        UnwindResource3 = &Vcb->DirtyFatWriteResource;
+        ExInitializeResourceLite( &Vcb->DirtyFatWriteActive );
+        UnwindResource4 = &Vcb->DirtyFatWriteActive;
+#endif
 
         //
         //  Initialize the free cluster bitmap mutex.
@@ -629,6 +639,10 @@ Return Value:
             if (UnwindFileObject != NULL) { ObDereferenceObject( UnwindFileObject ); }
             if (UnwindResource != NULL) { FatDeleteResource( UnwindResource ); }
             if (UnwindResource2 != NULL) { FatDeleteResource( UnwindResource2 ); }
+#ifdef __REACTOS__
+            if (UnwindResource3 != NULL) { FatDeleteResource( UnwindResource3 ); }
+            if (UnwindResource4 != NULL) { FatDeleteResource( UnwindResource4 ); }
+#endif
             if (UnwindWeAllocatedMcb) { FsRtlUninitializeLargeMcb( &Vcb->DirtyFatMcb ); }
             if (UnwindWeAllocatedBadBlockMap) { FsRtlUninitializeLargeMcb(&Vcb->BadBlockMcb ); }
             if (UnwindEntryList != NULL) {
@@ -907,6 +921,10 @@ Return Value:
 
     FatDeleteResource( &Vcb->Resource );
     FatDeleteResource( &Vcb->ChangeBitMapResource );
+#ifdef __REACTOS__
+    FatDeleteResource( &Vcb->DirtyFatWriteResource );
+    FatDeleteResource( &Vcb->DirtyFatWriteActive );
+#endif
 
     //
     //  If allocation support has been setup, free it.
@@ -922,6 +940,17 @@ Return Value:
     //
 
     FsRtlUninitializeLargeMcb( &Vcb->DirtyFatMcb );
+#ifdef __REACTOS__
+    if (Vcb->DirtyFatBits != NULL) {
+
+        ExFreePool( Vcb->DirtyFatBits );
+    }
+
+    if (Vcb->DirtyFatRetired != NULL) {
+
+        ExFreePool( Vcb->DirtyFatRetired );
+    }
+#endif
 
     //
     //  Uninitialize the Mcb structure that kept track of bad sectors.

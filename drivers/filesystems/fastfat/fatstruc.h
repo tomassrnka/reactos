@@ -410,6 +410,35 @@ typedef struct _VCB {
 
     ERESOURCE ChangeBitMapResource;
 
+#ifdef __REACTOS__
+    //
+    //  ReactOS keeps the dirty sectors of the first fat in a bitmap instead
+    //  of the DirtyFatMcb: an Mcb update can need memory, and the ReactOS
+    //  Mcb package then silently drops entries.  One bit per sector, from
+    //  FatReservedBytes; set and cleared with interlocked operations.
+    //  DirtyFatRetired keeps a replaced bitmap until the Vcb is deleted.
+    //
+
+    PULONG DirtyFatBits;
+    ULONG DirtyFatBitCount;
+    PULONG DirtyFatRetired;
+
+    //
+    //  Serializes the disk transfers of volume file writes, so that two
+    //  writes of the same fat sectors never overlap on the disk.
+    //
+
+    ERESOURCE DirtyFatWriteResource;
+
+    //
+    //  Held shared by a volume file write from finding its dirty sectors
+    //  until they are on the disk or dirty again; FatFlushFat acquires it
+    //  exclusively to wait for such writes.
+    //
+
+    ERESOURCE DirtyFatWriteActive;
+#endif
+
 
     //
     //  The following field points to the file object used to do I/O to

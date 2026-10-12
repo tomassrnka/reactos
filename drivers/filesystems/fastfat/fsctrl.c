@@ -378,6 +378,14 @@ FatAddMcbEntry (
 
     PAGED_CODE();
 
+#ifdef __REACTOS__
+    if (Mcb == &Vcb->DirtyFatMcb) {
+
+        FatSetDirtyFatBits( Vcb, Vbo, SectorCount, TRUE );
+        return TRUE;
+    }
+#endif
+
     if (SectorCount) {
 
         //
@@ -604,6 +612,14 @@ FatRemoveMcbEntry (
     )
 {
     PAGED_CODE();
+
+#ifdef __REACTOS__
+    if (Mcb == &Vcb->DirtyFatMcb) {
+
+        FatSetDirtyFatBits( Vcb, Vbo, SectorCount, FALSE );
+        return;
+    }
+#endif
 
     if ((SectorCount) && (SectorCount != 0xFFFFFFFF)) {
 
