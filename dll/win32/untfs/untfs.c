@@ -6,7 +6,13 @@
  * PROGRAMMERS:     Pierre Schweitzer
  */
 
+#define WIN32_NO_STATUS
 #include <windef.h>
+#include <winbase.h>
+#define NTOS_MODE_USER
+#include <ndk/rtlfuncs.h>
+
+extern RTL_CRITICAL_SECTION UntfsChkdskLock;
 
 INT WINAPI
 DllMain(
@@ -15,8 +21,11 @@ DllMain(
     IN LPVOID    lpvReserved)
 {
     UNREFERENCED_PARAMETER(hinstDLL);
-    UNREFERENCED_PARAMETER(dwReason);
     UNREFERENCED_PARAMETER(lpvReserved);
 
+    if (dwReason == DLL_PROCESS_ATTACH)
+        RtlInitializeCriticalSection(&UntfsChkdskLock);
+    else if (dwReason == DLL_PROCESS_DETACH)
+        RtlDeleteCriticalSection(&UntfsChkdskLock);
     return TRUE;
 }
