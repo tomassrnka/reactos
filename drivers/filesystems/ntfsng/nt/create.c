@@ -1320,6 +1320,7 @@ walked:
         if (NT_SUCCESS(Status) && Paging && !Fcb->IsPagingFile)
         {
             Fcb->IsPagingFile = TRUE;
+            Vcb->PagingFiles++;
             SetPaging = TRUE;   /* roll back if the paging open fails below */
         }
     }
@@ -1412,7 +1413,10 @@ out:
         IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
         Fcb->OpenHandles--;
         if (SetPaging && Fcb->OpenHandles == 0)
+        {
             Fcb->IsPagingFile = FALSE;   /* this open promoted it, then failed, and holds the only ref */
+            Vcb->PagingFiles--;
+        }
         ExReleaseFastMutex(&Vcb->FcbListLock);
     }
     if (Node || Parent)

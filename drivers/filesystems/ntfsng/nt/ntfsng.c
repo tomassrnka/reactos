@@ -342,6 +342,8 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
     Free = (InterlockedDecrement(&Fcb->RefCount) == 0);
     if (Free && Fcb->VcbLinks.Flink)
         RemoveEntryList(&Fcb->VcbLinks);
+    if (Free && Fcb->IsPagingFile)
+        Vcb->PagingFiles--;
     if (Free && Vcb->VolumeFcb == Fcb)
         Vcb->VolumeFcb = NULL;
     ExReleaseFastMutex(&Vcb->FcbListLock);
@@ -488,6 +490,8 @@ static NTSTATUS NgDismountedRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case IRP_MJ_READ:
             return Volume ? NgRead(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
         case IRP_MJ_WRITE:
+            if (!Volume && Fcb && !Fcb->IsPagingFile && (Irp->Flags & IRP_PAGING_IO))
+                return NgDropPagingWrite(Vcb, Fcb, Irp, Stack->Parameters.Write.Length);
             return Volume ? NgWrite(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
         case IRP_MJ_FLUSH_BUFFERS:
             return Volume ? STATUS_SUCCESS : STATUS_VOLUME_DISMOUNTED;
@@ -619,6 +623,11 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
              !(Major == IRP_MJ_DEVICE_CONTROL && NgIsVolumeOpen(Irp)))
     {
         Status = NgDismountedRequest(DeviceObject, Irp);
+    }
+    else if (DeviceObject != NgGlobal.ControlDevice && Major == IRP_MJ_WRITE &&
+             NgDropIfDiscardable((PNG_VCB)DeviceObject->DeviceExtension, Irp, &Status))
+    {
+        /* Before the medium checks: a refused page write is retried forever (see NgDropPagingWrite). */
     }
     else if (DeviceObject != NgGlobal.ControlDevice &&
              !NT_SUCCESS(Status = NgMediumGone((PNG_VCB)DeviceObject->DeviceExtension, Irp, Stack)))

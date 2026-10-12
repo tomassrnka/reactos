@@ -219,7 +219,7 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
                                         Major == IRP_MJ_FLUSH_BUFFERS ? 0 : len,
                                         Major == IRP_MJ_FLUSH_BUFFERS ? NULL : &Offset, &Iosb);
     if (!Irp)
-        return -1;
+        return NG_DEV_NOT_SENT;
     /* No SL_WRITE_THROUGH: durability comes from the flushes at each commit (and FUA is not honoured everywhere). */
     IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
     if (Flags & NG_IO_WRITE_THROUGH)
