@@ -28,7 +28,9 @@ typedef enum _USERPREFMASKS
     UPM_TOOLTIPANIMATION = 0x800,
     UPM_TOOLTIPFADE = 0x1000,
     UPM_CURSORSHADOW = 0x2000,
+    UPM_MOUSESONAR = 0x4000,
     UPM_CLICKLOCK = 0x8000,
+    UPM_MOUSEVANISH = 0x10000,
     UPM_FLATMENU = 0x20000,
     UPM_DROPSHADOW = 0x40000,
     // room for more
@@ -77,8 +79,6 @@ typedef struct _SPIVALUES
     BOOL bMouseClickLock;
     BOOL bMouseCursorShadow;
     DWORD dwMouseClickLockTime;
-    BOOL bMouseSonar;
-    BOOL bMouseVanish;
     BOOL bMouseBtnSwap;
     BOOL bSmoothScrolling;
     INT iMouseSpeed;
