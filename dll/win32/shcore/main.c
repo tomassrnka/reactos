@@ -1856,7 +1856,12 @@ BOOL WINAPI SHCreateThread(LPTHREAD_START_ROUTINE thread_proc, void *data, DWORD
 
     if (!called)
     {
+#ifdef __REACTOS__
+        /* The synchronous fallback has no thread handle to return, so SHCreateThreadWithHandle fails instead */
+        if (!thread_data.callback && flags & CTF_INSIST && !handle)
+#else
         if (!thread_data.callback && flags & CTF_INSIST)
+#endif
         {
             /* Couldn't call, call synchronously */
             thread_data.thread_proc(data);
