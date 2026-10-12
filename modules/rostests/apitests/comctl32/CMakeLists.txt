@@ -3,6 +3,7 @@ list(APPEND SOURCE
     ../include/msgtrace.c
     button.c
     imagelist.c
+    listview.c
     propsheet.c
     testlist.c
     toolbar.c
