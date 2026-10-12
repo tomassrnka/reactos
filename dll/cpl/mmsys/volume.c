@@ -295,7 +295,8 @@ GetSystrayVolumeIconState(VOID)
         return FALSE;
     }
 
-    return (BOOL)SendMessageW(hwndTaskBar, WM_USER + 221, 4, 0);
+    /* The tray returns the service flag, not TRUE */
+    return (SendMessageW(hwndTaskBar, WM_USER + 221, 4, 0) != 0);
 }
 
 VOID
@@ -310,6 +311,11 @@ InitVolumeControls(HWND hwndDlg, PGLOBAL_DATA pGlobalData)
     SendDlgItemMessageW(hwndDlg, IDC_VOLUME_TRACKBAR, TBM_SETRANGE, (WPARAM)TRUE, (LPARAM)MAKELONG(VOLUME_MIN, VOLUME_MAX));
     SendDlgItemMessageW(hwndDlg, IDC_VOLUME_TRACKBAR, TBM_SETTICFREQ, VOLUME_TICFREQ, 0);
     SendDlgItemMessageW(hwndDlg, IDC_VOLUME_TRACKBAR, TBM_SETPAGESIZE, 0, VOLUME_PAGESIZE);
+
+    /* Show the real tray icon state, also when the checkbox is disabled */
+    CheckDlgButton(hwndDlg,
+                   IDC_ICON_IN_TASKBAR,
+                   GetSystrayVolumeIconState() ? BST_CHECKED : BST_UNCHECKED);
 
     NumMixers = mixerGetNumDevs();
     if (!NumMixers)
@@ -340,10 +346,6 @@ InitVolumeControls(HWND hwndDlg, PGLOBAL_DATA pGlobalData)
         return;
     }
 
-    CheckDlgButton(hwndDlg,
-                   IDC_ICON_IN_TASKBAR,
-                   GetSystrayVolumeIconState() ? BST_CHECKED : BST_UNCHECKED);
-
     GetMuteControl(pGlobalData);
     GetMuteState(pGlobalData);
     if (pGlobalData->muteVal)
@@ -371,7 +373,8 @@ SaveData(HWND hwndDlg)
 
     bShowIcon = (IsDlgButtonChecked(hwndDlg, IDC_ICON_IN_TASKBAR) == BST_CHECKED);
 
-    SetSystrayVolumeIconState(bShowIcon);
+    if (bShowIcon != GetSystrayVolumeIconState())
+        SetSystrayVolumeIconState(bShowIcon);
 }
 
 VOID
