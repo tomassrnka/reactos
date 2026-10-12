@@ -2,22 +2,32 @@ LANGUAGE LANG_RUSSIAN, SUBLANG_DEFAULT
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE "\n\
-Использование: %s [ДИСК:] [-F] [-V] [-R] [-C]\n\n\
-[ДИСК:]     Указывает букву диска для проверки.\n\
--F          Исправляет ошибки на диске.\n\
--V          Отображает полный путь к каждому файлу на диске.\n\
--R          Находит плохие сектора и восстанавливает доступную информацию.\n\
--C          Проверяет диск только в случае, если работа с ним была\n\
-            завершена некорректно.\n\
-\n"
+    IDS_USAGE "Checks a disk and shows a report of what it found.\n\n\
+CHKDSK [volume[[path]filename]]] [/F] [/V] [/R] [/X] [/I] [/C] [/L[:size]] [/B]\n\n\
+  volume          The drive letter (followed by a colon) of the volume to check.\n\
+  filename        FAT/FAT32 only: files to check for fragmentation (not supported).\n\
+  /F              Fixes errors on the disk.\n\
+  /V              FAT/FAT32: shows the full path and name of every file on the disk.\n\
+                  NTFS: shows cleanup messages, if any.\n\
+  /R              Finds bad sectors and recovers what is readable (implies /F).\n\
+  /L:size         NTFS only: sets the log file size, in kilobytes. Without a size,\n\
+                  shows the current size.\n\
+  /X              Dismounts the volume first if necessary, which makes every open\n\
+                  handle to it invalid (implies /F).\n\
+  /I              NTFS only: a less thorough check of index entries.\n\
+  /C              NTFS only: no check of cycles in the folder tree.\n\
+  /B              NTFS only: checks the bad clusters of the volume again\n\
+                  (implies /R).\n\n\
+/I and /C shorten a check by leaving parts of it out.\n"
 
     IDS_PERCENT_COMPL "%d процентов завершено.\r"
-    IDS_FILE_SYSTEM "Тип файловой системы %s for volume %s.\n"
-    IDS_ABOUT "\n\
-Chkdskx v1.0.1 от Марка Руссиновича\n\
-Systems Internals - http://www.sysinternals.com\n\
-Адаптация для ReactOS от Эмануэля Алиберти в 1999 году\n\n"
+    IDS_FILE_SYSTEM "The type of the file system is %s.\n"
+    IDS_VOLUME_LABEL "Volume label is %s.\n"
+    IDS_READ_ONLY "\nWARNING!  F parameter not specified.\nRunning CHKDSK in read-only mode.\n\n"
+    IDS_RAW_DRIVE "CHKDSK is not available for RAW drives.\n"
+    IDS_NTFS_ONLY "The %s switch only functions on NTFS volumes.\n"
+    IDS_NOT_SUPPORTED "The /%s switch is not supported by this version of CHKDSK.\n"
+    IDS_DISMOUNTED "Volume dismounted.  All opened handles to this volume are now invalid.\n"
 END
 
 STRINGTABLE
@@ -25,7 +35,7 @@ BEGIN
     IDS_VOLUME_IN_USE "Этот том используется в данный момент и не может быть заблокирован\n"
     IDS_CHKDSK_FAIL "Chkdsk завершил работу с ошибками. Error: 0x%08X.\n"
     IDS_NO_ENTRY_POINT "Не удалось найти точки входа FMIFS.\n\n"
-    IDS_BAD_ARGUMENT "Неизвестный аргумент: %s\n"
+    IDS_BAD_ARGUMENT "Invalid parameter - %s\n"
     IDS_NO_CURRENT_DIR "Не удалось получить текущую директорию. Код ошибки: "
     IDS_NO_QUERY_VOL "Не удалось запросить том. Код ошибки: "
     IDS_VOLUME_IN_USE_PROC "Chkdsk не может быть запущен, так как том занят другим процессом.\n\n"

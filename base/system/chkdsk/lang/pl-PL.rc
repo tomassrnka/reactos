@@ -2,21 +2,32 @@ LANGUAGE LANG_POLISH, SUBLANG_DEFAULT
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE "\n\
-Sposób użycia: %s [dysk:] [-F] [-V] [-R] [-C]\n\n\
-[dysk:]     Określa dysk do sprawdzenia.\n\
--F          Naprawia błędy na dysku.\n\
--V          Wyświetla pełne ścieżki wszystkich plików na dysku.\n\
--R          Lokalizuje uszkodzone sektory i odzyskuje czytelne informacje.\n\
--C          Sprawdza dysk tylko w razie potrzeby.\n\
-\n"
+    IDS_USAGE "Checks a disk and shows a report of what it found.\n\n\
+CHKDSK [volume[[path]filename]]] [/F] [/V] [/R] [/X] [/I] [/C] [/L[:size]] [/B]\n\n\
+  volume          The drive letter (followed by a colon) of the volume to check.\n\
+  filename        FAT/FAT32 only: files to check for fragmentation (not supported).\n\
+  /F              Fixes errors on the disk.\n\
+  /V              FAT/FAT32: shows the full path and name of every file on the disk.\n\
+                  NTFS: shows cleanup messages, if any.\n\
+  /R              Finds bad sectors and recovers what is readable (implies /F).\n\
+  /L:size         NTFS only: sets the log file size, in kilobytes. Without a size,\n\
+                  shows the current size.\n\
+  /X              Dismounts the volume first if necessary, which makes every open\n\
+                  handle to it invalid (implies /F).\n\
+  /I              NTFS only: a less thorough check of index entries.\n\
+  /C              NTFS only: no check of cycles in the folder tree.\n\
+  /B              NTFS only: checks the bad clusters of the volume again\n\
+                  (implies /R).\n\n\
+/I and /C shorten a check by leaving parts of it out.\n"
 
     IDS_PERCENT_COMPL "Wykonano %d procent.\r"
-    IDS_FILE_SYSTEM "Typ systemu plików to %s for volume %s.\n"
-    IDS_ABOUT "\n\
-Chkdskx v1.0.1 by Mark Russinovich\n\
-Systems Internals - http://www.sysinternals.com\n\
-ReactOS adaptation 1999 by Emanuele Aliberti\n\n"
+    IDS_FILE_SYSTEM "The type of the file system is %s.\n"
+    IDS_VOLUME_LABEL "Volume label is %s.\n"
+    IDS_READ_ONLY "\nWARNING!  F parameter not specified.\nRunning CHKDSK in read-only mode.\n\n"
+    IDS_RAW_DRIVE "CHKDSK is not available for RAW drives.\n"
+    IDS_NTFS_ONLY "The %s switch only functions on NTFS volumes.\n"
+    IDS_NOT_SUPPORTED "The /%s switch is not supported by this version of CHKDSK.\n"
+    IDS_DISMOUNTED "Volume dismounted.  All opened handles to this volume are now invalid.\n"
 END
 
 STRINGTABLE
@@ -24,7 +35,7 @@ BEGIN
     IDS_VOLUME_IN_USE "Wolumin jest w użyciu i nie może być zablokowany.\n"
     IDS_CHKDSK_FAIL "Program Chkdsk nie mógł zakończyć się pomyślnie. Error: 0x%08X.\n"
     IDS_NO_ENTRY_POINT "Nie znaleziono punktów wejścia FMIFS.\n\n"
-    IDS_BAD_ARGUMENT "Nieznany argument: %s\n"
+    IDS_BAD_ARGUMENT "Invalid parameter - %s\n"
     IDS_NO_CURRENT_DIR "Aktualna ścieżka jest nieosiągalna. Kod błedu: "
     IDS_NO_QUERY_VOL "Nie można wysłać kwerendy do woluminu. Kod błedu: "
     IDS_VOLUME_IN_USE_PROC "Program Chkdsk nie może działać, ponieważ wolumin jest używany przez inny proces.\n\n"

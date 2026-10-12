@@ -10,21 +10,32 @@ LANGUAGE LANG_ROMANIAN, SUBLANG_NEUTRAL
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE "\n\
-Uz: %s [disc:] [-F] [-V] [-R] [-C]\n\n\
-[disc:]     Specifică unitatea de stocare pentru control.\n\
--F          Rezolvă erorile discului.\n\
--V          Vizualizează calea tuturor fișierelor de pe disc.\n\
--R          Găsește sectoarele defecte și recuperează informațiile care pot fi citite.\n\
--C          Controlează unitatea de stocare doar dacă este necesar.\n\
-\n"
+    IDS_USAGE "Checks a disk and shows a report of what it found.\n\n\
+CHKDSK [volume[[path]filename]]] [/F] [/V] [/R] [/X] [/I] [/C] [/L[:size]] [/B]\n\n\
+  volume          The drive letter (followed by a colon) of the volume to check.\n\
+  filename        FAT/FAT32 only: files to check for fragmentation (not supported).\n\
+  /F              Fixes errors on the disk.\n\
+  /V              FAT/FAT32: shows the full path and name of every file on the disk.\n\
+                  NTFS: shows cleanup messages, if any.\n\
+  /R              Finds bad sectors and recovers what is readable (implies /F).\n\
+  /L:size         NTFS only: sets the log file size, in kilobytes. Without a size,\n\
+                  shows the current size.\n\
+  /X              Dismounts the volume first if necessary, which makes every open\n\
+                  handle to it invalid (implies /F).\n\
+  /I              NTFS only: a less thorough check of index entries.\n\
+  /C              NTFS only: no check of cycles in the folder tree.\n\
+  /B              NTFS only: checks the bad clusters of the volume again\n\
+                  (implies /R).\n\n\
+/I and /C shorten a check by leaving parts of it out.\n"
 
     IDS_PERCENT_COMPL "%d completat.\r"
-    IDS_FILE_SYSTEM "Tipul sistemului de fișier este %s for volume %s.\n"
-    IDS_ABOUT "\n\
-Chkdskx v1.0.1 de către Mark Russinovich\n\
-Systems Internals - http://www.sysinternals.com\n\
-Adaptarea pentru ReactOS din 1999 de către Emanuele Aliberti\n\n"
+    IDS_FILE_SYSTEM "The type of the file system is %s.\n"
+    IDS_VOLUME_LABEL "Volume label is %s.\n"
+    IDS_READ_ONLY "\nWARNING!  F parameter not specified.\nRunning CHKDSK in read-only mode.\n\n"
+    IDS_RAW_DRIVE "CHKDSK is not available for RAW drives.\n"
+    IDS_NTFS_ONLY "The %s switch only functions on NTFS volumes.\n"
+    IDS_NOT_SUPPORTED "The /%s switch is not supported by this version of CHKDSK.\n"
+    IDS_DISMOUNTED "Volume dismounted.  All opened handles to this volume are now invalid.\n"
 END
 
 STRINGTABLE
@@ -32,7 +43,7 @@ BEGIN
     IDS_VOLUME_IN_USE "Volumul este în uz și nu poate fi blocat\n"
     IDS_CHKDSK_FAIL "Operația programului Chkdsk a eșuat. Error: 0x%08X.\n"
     IDS_NO_ENTRY_POINT "Nu s-au putut găsi punctele de intrare FMIFS.\n\n"
-    IDS_BAD_ARGUMENT "Argument necunoscut: %s\n"
+    IDS_BAD_ARGUMENT "Invalid parameter - %s\n"
     IDS_NO_CURRENT_DIR "Nu s-a putut găsi directorul respectiv. Cod de eroare: "
     IDS_NO_QUERY_VOL "Nu s-a putut interoga volumul. Cod de eroare: "
     IDS_VOLUME_IN_USE_PROC "Execuția Chkdsk a eșuat pentru că volumul este folosit de către un alt proces.\n\n"

@@ -2,21 +2,32 @@
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE "\n\
-Utilisation : %s [lecteur:] [-F] [-V] [-R] [-C]\n\n\
-[lecteur:]    Spécifie le lecteur à vérifier.\n\
--F            Corrige les erreurs sur le disque.\n\
--V            Affiche le chemin complet de chaque fichier sur le disque.\n\
--R            Localise les secteurs défectueux et récupère les informations lisibles.\n\
--C            Vérifie le lecteur seulement si nécessaire.\n\
-\n"
+    IDS_USAGE "Checks a disk and shows a report of what it found.\n\n\
+CHKDSK [volume[[path]filename]]] [/F] [/V] [/R] [/X] [/I] [/C] [/L[:size]] [/B]\n\n\
+  volume          The drive letter (followed by a colon) of the volume to check.\n\
+  filename        FAT/FAT32 only: files to check for fragmentation (not supported).\n\
+  /F              Fixes errors on the disk.\n\
+  /V              FAT/FAT32: shows the full path and name of every file on the disk.\n\
+                  NTFS: shows cleanup messages, if any.\n\
+  /R              Finds bad sectors and recovers what is readable (implies /F).\n\
+  /L:size         NTFS only: sets the log file size, in kilobytes. Without a size,\n\
+                  shows the current size.\n\
+  /X              Dismounts the volume first if necessary, which makes every open\n\
+                  handle to it invalid (implies /F).\n\
+  /I              NTFS only: a less thorough check of index entries.\n\
+  /C              NTFS only: no check of cycles in the folder tree.\n\
+  /B              NTFS only: checks the bad clusters of the volume again\n\
+                  (implies /R).\n\n\
+/I and /C shorten a check by leaving parts of it out.\n"
 
     IDS_PERCENT_COMPL "%d pourcent(s) complété(s).\r"
-    IDS_FILE_SYSTEM "Le type du système de fichier est %s pour le volume %s.\n"
-    IDS_ABOUT "\n\
-Chkdskx v1.0.1 par Mark Russinovich\n\
-Systems Internals - http://www.sysinternals.com\n\
-Adaptation pour ReactOS en 1999 par Emanuele Aliberti\n\n"
+    IDS_FILE_SYSTEM "The type of the file system is %s.\n"
+    IDS_VOLUME_LABEL "Volume label is %s.\n"
+    IDS_READ_ONLY "\nWARNING!  F parameter not specified.\nRunning CHKDSK in read-only mode.\n\n"
+    IDS_RAW_DRIVE "CHKDSK is not available for RAW drives.\n"
+    IDS_NTFS_ONLY "The %s switch only functions on NTFS volumes.\n"
+    IDS_NOT_SUPPORTED "The /%s switch is not supported by this version of CHKDSK.\n"
+    IDS_DISMOUNTED "Volume dismounted.  All opened handles to this volume are now invalid.\n"
 END
 
 STRINGTABLE
@@ -24,7 +35,7 @@ BEGIN
     IDS_VOLUME_IN_USE "Le volume est en cours d'utilisation et ne peut pas être verrouillé\n"
     IDS_CHKDSK_FAIL "Chkdsk n'a pas pu terminer avec succès. Error: 0x%08X.\n"
     IDS_NO_ENTRY_POINT "Impossible de trouver les points d'entrée FMIFS.\n\n"
-    IDS_BAD_ARGUMENT "Argument inconnu : %s\n"
+    IDS_BAD_ARGUMENT "Invalid parameter - %s\n"
     IDS_NO_CURRENT_DIR "Impossible de récupérer le répertoire courant. Code d'erreur : "
     IDS_NO_QUERY_VOL "Impossible de requête le volume. Code d'erreur : "
     IDS_VOLUME_IN_USE_PROC "Chkdsk ne peut pas s'exécuter car le volume est en cours d'utilisation par un autre processus.\n\n"

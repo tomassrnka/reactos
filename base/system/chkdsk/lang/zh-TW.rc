@@ -10,21 +10,32 @@ LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE "\n\
-Usage: %s [磁碟機:] [-F] [-V] [-R] [-C]\n\n\
-[磁碟機:]    指定需要檢查的磁碟機。\n\
--F          修復磁碟機上的錯誤。\n\
--V          顯示每一個檔案的完整路徑。\n\
--R          找出損壞的磁區並復原可讀取的資訊。\n\
--C          僅在磁碟機被標記為出錯時檢查磁碟機。\n\
-\n"
+    IDS_USAGE "Checks a disk and shows a report of what it found.\n\n\
+CHKDSK [volume[[path]filename]]] [/F] [/V] [/R] [/X] [/I] [/C] [/L[:size]] [/B]\n\n\
+  volume          The drive letter (followed by a colon) of the volume to check.\n\
+  filename        FAT/FAT32 only: files to check for fragmentation (not supported).\n\
+  /F              Fixes errors on the disk.\n\
+  /V              FAT/FAT32: shows the full path and name of every file on the disk.\n\
+                  NTFS: shows cleanup messages, if any.\n\
+  /R              Finds bad sectors and recovers what is readable (implies /F).\n\
+  /L:size         NTFS only: sets the log file size, in kilobytes. Without a size,\n\
+                  shows the current size.\n\
+  /X              Dismounts the volume first if necessary, which makes every open\n\
+                  handle to it invalid (implies /F).\n\
+  /I              NTFS only: a less thorough check of index entries.\n\
+  /C              NTFS only: no check of cycles in the folder tree.\n\
+  /B              NTFS only: checks the bad clusters of the volume again\n\
+                  (implies /R).\n\n\
+/I and /C shorten a check by leaving parts of it out.\n"
 
     IDS_PERCENT_COMPL "已完成百分之 %d。\r"
-    IDS_FILE_SYSTEM "檔案系統類型為 %s for volume %s。\n"
-    IDS_ABOUT "\n\
-Chkdskx v1.0.1 by Mark Russinovich\n\
-Systems Internals - http://www.sysinternals.com\n\
-ReactOS 於 1999 年由 Emanuele Aliberti 編寫"
+    IDS_FILE_SYSTEM "The type of the file system is %s.\n"
+    IDS_VOLUME_LABEL "Volume label is %s.\n"
+    IDS_READ_ONLY "\nWARNING!  F parameter not specified.\nRunning CHKDSK in read-only mode.\n\n"
+    IDS_RAW_DRIVE "CHKDSK is not available for RAW drives.\n"
+    IDS_NTFS_ONLY "The %s switch only functions on NTFS volumes.\n"
+    IDS_NOT_SUPPORTED "The /%s switch is not supported by this version of CHKDSK.\n"
+    IDS_DISMOUNTED "Volume dismounted.  All opened handles to this volume are now invalid.\n"
 END
 
 STRINGTABLE
@@ -32,7 +43,7 @@ BEGIN
     IDS_VOLUME_IN_USE "磁碟區正被使用，無法鎖定。\n"
     IDS_CHKDSK_FAIL "Chkdsk 沒有成功完成。 Error: 0x%08X.\n"
     IDS_NO_ENTRY_POINT "無法找到 FMIFS 進入點。\n\n"
-    IDS_BAD_ARGUMENT "未知參數: %s\n"
+    IDS_BAD_ARGUMENT "Invalid parameter - %s\n"
     IDS_NO_CURRENT_DIR "無法獲得目前的目錄。錯誤碼: "
     IDS_NO_QUERY_VOL "無法查詢磁碟區。錯誤碼: "
     IDS_VOLUME_IN_USE_PROC "Chkdsk 無法執行，因為該磁碟區正被另一個處理程序所使用。\n\n"

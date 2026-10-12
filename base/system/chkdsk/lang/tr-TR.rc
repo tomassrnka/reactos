@@ -4,21 +4,32 @@ LANGUAGE LANG_TURKISH, SUBLANG_DEFAULT
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE "\n\
-Kullanım: %s [sürücü:] [-F] [-V] [-R] [-C]\n\n\
-[sürücü:]   Kontrol edilecek sürücüyü belirtir.\n\
--F          Disk üzerindeki hataları onarır.\n\
--V          Disk üzerindeki bütün dosyaların tam yollarını görüntüler.\n\
--R          Bozuk sektörlerin yerlerini saptar ve okunabilir bilgiyi kurtarır.\n\
--C          Yalnızca bozuksa diski denetler.\n\
-\n"
+    IDS_USAGE "Checks a disk and shows a report of what it found.\n\n\
+CHKDSK [volume[[path]filename]]] [/F] [/V] [/R] [/X] [/I] [/C] [/L[:size]] [/B]\n\n\
+  volume          The drive letter (followed by a colon) of the volume to check.\n\
+  filename        FAT/FAT32 only: files to check for fragmentation (not supported).\n\
+  /F              Fixes errors on the disk.\n\
+  /V              FAT/FAT32: shows the full path and name of every file on the disk.\n\
+                  NTFS: shows cleanup messages, if any.\n\
+  /R              Finds bad sectors and recovers what is readable (implies /F).\n\
+  /L:size         NTFS only: sets the log file size, in kilobytes. Without a size,\n\
+                  shows the current size.\n\
+  /X              Dismounts the volume first if necessary, which makes every open\n\
+                  handle to it invalid (implies /F).\n\
+  /I              NTFS only: a less thorough check of index entries.\n\
+  /C              NTFS only: no check of cycles in the folder tree.\n\
+  /B              NTFS only: checks the bad clusters of the volume again\n\
+                  (implies /R).\n\n\
+/I and /C shorten a check by leaving parts of it out.\n"
 
     IDS_PERCENT_COMPL "Yüzde %d tamamlandı.\r"
-    IDS_FILE_SYSTEM "Dosya sistemin türü %s'tır for volume %s.\n"
-    IDS_ABOUT "\n\
-Chkdskx v1.0.1 Mark Russinovich tarafından yazılmıştır\n\
-Systems Internals - http://www.sysinternals.com\n\
-ReactOS'a uyarlaması 1999 Emanuele Aliberti tarafından yapıldı\n\n"
+    IDS_FILE_SYSTEM "The type of the file system is %s.\n"
+    IDS_VOLUME_LABEL "Volume label is %s.\n"
+    IDS_READ_ONLY "\nWARNING!  F parameter not specified.\nRunning CHKDSK in read-only mode.\n\n"
+    IDS_RAW_DRIVE "CHKDSK is not available for RAW drives.\n"
+    IDS_NTFS_ONLY "The %s switch only functions on NTFS volumes.\n"
+    IDS_NOT_SUPPORTED "The /%s switch is not supported by this version of CHKDSK.\n"
+    IDS_DISMOUNTED "Volume dismounted.  All opened handles to this volume are now invalid.\n"
 END
 
 STRINGTABLE
@@ -26,7 +37,7 @@ BEGIN
     IDS_VOLUME_IN_USE "Bölüm kullanımda ve kilitlenmiyor.\n"
     IDS_CHKDSK_FAIL "Chkdsk, başarıyla tamamlanamadı. Error: 0x%08X.\n"
     IDS_NO_ENTRY_POINT "FMIFS giriş noktaların yerleri saptanamıyor.\n\n"
-    IDS_BAD_ARGUMENT "Bilinmeyen argüman: %s\n"
+    IDS_BAD_ARGUMENT "Invalid parameter - %s\n"
     IDS_NO_CURRENT_DIR "Gerçerli dizin alınamıyor. Hata kodu: "
     IDS_NO_QUERY_VOL "Bölüm sorgulanamıyor. Hata kodu: "
     IDS_VOLUME_IN_USE_PROC "Chkdsk çalıştırılamıyor; çünkü, bölüm, bir başka işlem tarafından kullanılıyor.\n\n"
