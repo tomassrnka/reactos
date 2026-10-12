@@ -770,6 +770,7 @@ typedef struct _device_extension {
     unsigned int sector_shift;
     unsigned int csum_size;
     bool readonly;
+    NTSTATUS commit_error; // why a failed commit made the volume read-only
     bool removing;
     bool locked;
     bool lock_paused_balance;
