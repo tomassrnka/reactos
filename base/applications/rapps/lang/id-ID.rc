@@ -214,6 +214,7 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "Perbarui daftar program yang bisa diakses saat mulai"
     IDS_CFG_LOG_ENABLED "Log pemasangan dan pembongkaran program"
     IDS_CFG_SMALL_ICONS "Ikon Kecil"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
 END
 
 STRINGTABLE

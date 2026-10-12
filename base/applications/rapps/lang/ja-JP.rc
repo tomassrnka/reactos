@@ -216,6 +216,7 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "起動時に利用できるプログラムのリストを更新する"
     IDS_CFG_LOG_ENABLED "プログラムのインストールと削除を記録する"
     IDS_CFG_SMALL_ICONS "小さいアイコン"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
 END
 
 STRINGTABLE

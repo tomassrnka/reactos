@@ -449,7 +449,7 @@ MessageBox_LoadString(HWND hOwnerWnd, INT StringID)
 }
 
 static BOOL
-ShowLastError(HWND hWndOwner, BOOL bInetError, DWORD dwLastError)
+ShowLastError(HWND hWndOwner, BOOL bInetError, DWORD dwLastError, LPCWSTR pszInsert = NULL)
 {
     CLocalPtr<WCHAR> lpMsg;
 
@@ -463,11 +463,49 @@ ShowLastError(HWND hWndOwner, BOOL bInetError, DWORD dwLastError)
         return FALSE;
     }
 
+    CStringW szMsg(static_cast<LPWSTR>(lpMsg));
+    if (pszInsert)
+        szMsg.Replace(L"%1", pszInsert);
+
     if (hWndOwner && !IsWindowVisible(hWndOwner))
         hWndOwner = NULL;
-    MessageBoxW(hWndOwner, lpMsg, NULL, MB_OK | MB_ICONERROR);
+    MessageBoxW(hWndOwner, szMsg, NULL, MB_OK | MB_ICONERROR);
     return TRUE;
 }
+
+#ifdef _WIN64
+static BOOL
+IsUnrunnable32BitProgram(LPCWSTR Path)
+{
+    // Without a WoW64 layer GetSystemWow64DirectoryW fails and the loader refuses i386 images
+    WCHAR szWow64Dir[MAX_PATH];
+    if (GetSystemWow64DirectoryW(szWow64Dir, _countof(szWow64Dir)))
+        return FALSE;
+
+    HANDLE hFile = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    BOOL bResult = FALSE;
+    IMAGE_DOS_HEADER DosHeader;
+    struct
+    {
+        DWORD Signature;
+        IMAGE_FILE_HEADER FileHeader;
+    } NtHeader;
+    DWORD cbRead;
+    if (ReadFile(hFile, &DosHeader, sizeof(DosHeader), &cbRead, NULL) && cbRead == sizeof(DosHeader) &&
+        DosHeader.e_magic == IMAGE_DOS_SIGNATURE && DosHeader.e_lfanew > 0 &&
+        SetFilePointer(hFile, DosHeader.e_lfanew, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER &&
+        ReadFile(hFile, &NtHeader, sizeof(NtHeader), &cbRead, NULL) && cbRead == sizeof(NtHeader) &&
+        NtHeader.Signature == IMAGE_NT_SIGNATURE)
+    {
+        bResult = (NtHeader.FileHeader.Machine == IMAGE_FILE_MACHINE_I386);
+    }
+    CloseHandle(hFile);
+    return bResult;
+}
+#endif
 
 // Download dialog (loaddlg.cpp)
 HWND g_hDownloadWnd = NULL;
@@ -1118,7 +1156,7 @@ run:
     {
         BOOL bSilentInstall = Info.Flags & DAF_SILENT;
         CStringW app, params, tempdir;
-        SHELLEXECUTEINFOW shExInfo = { sizeof(shExInfo), SEE_MASK_NOCLOSEPROCESS, hDlg };
+        SHELLEXECUTEINFOW shExInfo = { sizeof(shExInfo), SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI, hDlg };
         shExInfo.lpVerb = L"open";
         shExInfo.lpFile = Path;
         shExInfo.lpParameters = L"";
@@ -1143,6 +1181,18 @@ run:
             }
             shExInfo.lpFile = app;
         }
+
+#ifdef _WIN64
+        if (Info.IType != INSTALLER_GENERATE && IsUnrunnable32BitProgram(shExInfo.lpFile))
+        {
+            CStringW szMsgText;
+            szMsgText.Format(IDS_UNABLE_TO_RUN_32BIT, Info.szName.GetString());
+            MessageBoxW(hDlg, szMsgText, NULL, MB_OK | MB_ICONERROR);
+            if (!tempdir.IsEmpty())
+                DeleteDirectoryTree(tempdir, hDlg);
+            goto end;
+        }
+#endif
 
         if (bSilentInstall)
         {
@@ -1171,7 +1221,16 @@ run:
         /* FIXME: Do we want to log installer status? */
         WriteLogMessage(EVENTLOG_SUCCESS, MSG_SUCCESS_INSTALL, Info.szName);
 
-        if (ShellExecuteExW(&shExInfo))
+        BOOL bLaunched = ShellExecuteExW(&shExInfo), bShellReported = FALSE;
+        if (!bLaunched && !bSilentInstall && shExInfo.hInstApp == (HINSTANCE)SE_ERR_NOASSOC)
+        {
+            // Let the shell offer Open With; it reports its own errors
+            shExInfo.fMask &= ~SEE_MASK_FLAG_NO_UI;
+            bLaunched = ShellExecuteExW(&shExInfo);
+            bShellReported = TRUE;
+        }
+
+        if (bLaunched)
         {
             // reflect installation progress in the titlebar
             // TODO: make a separate string with a placeholder to include app name?
@@ -1188,9 +1247,11 @@ run:
                 SendMessageW(hMainWnd, WM_NOTIFY_INSTALLERFINISHED, 0, (LPARAM)(PCWSTR)Info.szPackageName);
             }
         }
-        else
+        else if (!bShellReported)
         {
-            ShowLastError(hMainWnd, FALSE, GetLastError());
+            // shell32 does not always set the last error for a missing association
+            DWORD dwError = (shExInfo.hInstApp == (HINSTANCE)SE_ERR_NOASSOC) ? ERROR_NO_ASSOCIATION : GetLastError();
+            ShowLastError(hMainWnd, FALSE, dwError, shExInfo.lpFile);
         }
 
         if (!tempdir.IsEmpty())
