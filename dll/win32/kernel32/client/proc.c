@@ -475,6 +475,9 @@ BaseProcessStartup(
         }
     }
     _SEH2_END;
+
+    /* Both paths end the thread */
+    UNREACHABLE;
 }
 
 BOOLEAN
