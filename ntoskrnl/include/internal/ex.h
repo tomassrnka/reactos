@@ -1479,6 +1479,11 @@ ExpSetTimeZoneInformation(
     IN PRTL_TIME_ZONE_INFORMATION TimeZoneInformation
 );
 
+VOID
+ExpQueryTimeZoneInformation(
+    OUT PRTL_TIME_ZONE_INFORMATION TimeZoneInformation
+);
+
 BOOLEAN
 NTAPI
 ExAcquireTimeRefreshLock(

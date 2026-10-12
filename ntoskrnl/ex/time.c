@@ -132,6 +132,53 @@ ExpGetTimeZoneId(
 }
 
 /*++
+ * Checks that a transition date is either a fixed date or a valid
+ * "day of week in month" rule.
+ *--*/
+static
+BOOLEAN
+ExpIsValidCutover(
+    _In_ PTIME_FIELDS Cutover)
+{
+    TIME_FIELDS Fields;
+    LARGE_INTEGER Time;
+
+    if (Cutover->Year != 0)
+        return RtlTimeFieldsToTime(Cutover, &Time);
+
+    if (Cutover->Day < 1 || Cutover->Day > 5 ||
+        Cutover->Weekday < 0 || Cutover->Weekday > 6)
+    {
+        return FALSE;
+    }
+
+    /* Check the month and the time of day */
+    Fields = *Cutover;
+    Fields.Year = 2001;
+    Fields.Day = 1;
+    return RtlTimeFieldsToTime(&Fields, &Time);
+}
+
+/*++
+ * A zone without daylight saving time has no transition dates; otherwise
+ * both dates must be valid.
+ *--*/
+static
+BOOLEAN
+ExpIsValidTimeZone(
+    _In_ PRTL_TIME_ZONE_INFORMATION TimeZoneInfo)
+{
+    if (TimeZoneInfo->StandardDate.Month == 0 ||
+        TimeZoneInfo->DaylightDate.Month == 0)
+    {
+        return TRUE;
+    }
+
+    return ExpIsValidCutover(&TimeZoneInfo->StandardDate) &&
+           ExpIsValidCutover(&TimeZoneInfo->DaylightDate);
+}
+
+/*++
  * Computes the UTC instant of a transition in the given year. The
  * transition is given in local time, Bias minutes behind UTC.
  *--*/
@@ -148,10 +195,6 @@ ExpGetCutoverTime(
 
     if (Cutover->Year != 0)
     {
-        /* A fixed date applies to its own year only */
-        if (Cutover->Year != Year)
-            return FALSE;
-
         if (!RtlTimeFieldsToTime(Cutover, &LocalTime))
             return FALSE;
     }
@@ -190,15 +233,18 @@ ExpComputeTimeZoneState(
     LARGE_INTEGER LocalTime, Cutover, Last, Next;
     ULONG LastId = TIME_ZONE_ID_UNKNOWN, NextId = TIME_ZONE_ID_UNKNOWN;
     ULONG Id, Rule;
+    PTIME_FIELDS Date;
     TIME_FIELDS Fields;
-    CSHORT Year;
+    CSHORT Year, FirstYear, LastYear;
+    LONG DateBias;
 
     *TimeZoneId = TIME_ZONE_ID_UNKNOWN;
     TimeZoneBias->QuadPart = (LONGLONG)TimeZoneInfo->Bias * TICKSPERMINUTE;
     NextCutover->QuadPart = 0;
 
     if (TimeZoneInfo->StandardDate.Month == 0 ||
-        TimeZoneInfo->DaylightDate.Month == 0)
+        TimeZoneInfo->DaylightDate.Month == 0 ||
+        !ExpIsValidTimeZone(TimeZoneInfo))
     {
         return;
     }
@@ -209,23 +255,37 @@ ExpComputeTimeZoneState(
     /* Find the last transition up to now and the first one after it */
     Last.QuadPart = 0;
     Next.QuadPart = 0;
-    for (Year = Fields.Year - 1; Year <= Fields.Year + 1; Year++)
+    for (Rule = 0; Rule < 2; Rule++)
     {
-        for (Rule = 0; Rule < 2; Rule++)
+        /* The daylight date is in standard time, the standard date in daylight time */
+        if (Rule == 0)
         {
-            /* The daylight date is in standard time, the standard date in daylight time */
-            if (Rule == 0)
-            {
-                Id = TIME_ZONE_ID_DAYLIGHT;
-                if (!ExpGetCutoverTime(&TimeZoneInfo->DaylightDate, Year, StandardBias, &Cutover))
-                    continue;
-            }
-            else
-            {
-                Id = TIME_ZONE_ID_STANDARD;
-                if (!ExpGetCutoverTime(&TimeZoneInfo->StandardDate, Year, DaylightBias, &Cutover))
-                    continue;
-            }
+            Id = TIME_ZONE_ID_DAYLIGHT;
+            Date = &TimeZoneInfo->DaylightDate;
+            DateBias = StandardBias;
+        }
+        else
+        {
+            Id = TIME_ZONE_ID_STANDARD;
+            Date = &TimeZoneInfo->StandardDate;
+            DateBias = DaylightBias;
+        }
+
+        /* A fixed date occurs once; a recurring one around the current year */
+        if (Date->Year != 0)
+        {
+            FirstYear = LastYear = Date->Year;
+        }
+        else
+        {
+            FirstYear = Fields.Year - 1;
+            LastYear = Fields.Year + 1;
+        }
+
+        for (Year = FirstYear; Year <= LastYear; Year++)
+        {
+            if (!ExpGetCutoverTime(Date, Year, DateBias, &Cutover))
+                continue;
 
             if (Cutover.QuadPart <= UtcTime->QuadPart)
             {
@@ -243,6 +303,7 @@ ExpComputeTimeZoneState(
         }
     }
 
+    /* Before the first transition the opposite state applies */
     if (LastId != TIME_ZONE_ID_UNKNOWN)
         *TimeZoneId = LastId;
     else if (NextId == TIME_ZONE_ID_DAYLIGHT)
@@ -259,6 +320,25 @@ ExpComputeTimeZoneState(
 
     if (NextId != TIME_ZONE_ID_UNKNOWN)
         *NextCutover = Next;
+}
+
+/* Reads the current bias without tearing, at any IRQL */
+static
+LONGLONG
+ExpReadTimeZoneBias(VOID)
+{
+    LARGE_INTEGER Bias;
+
+    for (;;)
+    {
+        Bias.HighPart = SharedUserData->TimeZoneBias.High1Time;
+        Bias.LowPart = SharedUserData->TimeZoneBias.LowPart;
+        if (Bias.HighPart == SharedUserData->TimeZoneBias.High2Time)
+            break;
+        YieldProcessor();
+    }
+
+    return Bias.QuadPart;
 }
 
 static
@@ -611,6 +691,12 @@ ExpSetTimeZoneInformation(PRTL_TIME_ZONE_INFORMATION TimeZoneInformation)
                   TimeZoneInformation,
                   sizeof(RTL_TIME_ZONE_INFORMATION));
 
+    if (!ExpIsValidTimeZone(&NewTimeZoneInfo))
+    {
+        DPRINT1("Invalid time zone transition dates\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
     /* UTC stays as it is; local time follows the new zone */
     ExAcquireTimeRefreshLock(TRUE);
     RtlCopyMemory(&ExpTimeZoneInfo,
@@ -623,6 +709,17 @@ ExpSetTimeZoneInformation(PRTL_TIME_ZONE_INFORMATION TimeZoneInformation)
 
     DPRINT("ExpSetTimeZoneInformation done\n");
     return STATUS_SUCCESS;
+}
+
+VOID
+ExpQueryTimeZoneInformation(PRTL_TIME_ZONE_INFORMATION TimeZoneInformation)
+{
+    /* A consistent copy; the caller copies it on to its buffer */
+    ExAcquireTimeRefreshLock(TRUE);
+    RtlCopyMemory(TimeZoneInformation,
+                  &ExpTimeZoneInfo,
+                  sizeof(RTL_TIME_ZONE_INFORMATION));
+    ExReleaseTimeRefreshLock();
 }
 
 /*
@@ -686,16 +783,15 @@ NtSetSystemTime(IN PLARGE_INTEGER SystemTime,
         return STATUS_PRIVILEGE_NOT_HELD;
     }
 
+    ExAcquireTimeRefreshLock(TRUE);
+
     /* Pick up a time zone that was changed in the registry only */
     ZoneStatus = RtlQueryTimeZoneInformation(&TimeZoneInformation);
     if (!NT_SUCCESS(ZoneStatus))
     {
         DPRINT1("RtlQueryTimeZoneInformation failed (Status 0x%08lx)\n", ZoneStatus);
     }
-
-    ExAcquireTimeRefreshLock(TRUE);
-
-    if (NT_SUCCESS(ZoneStatus))
+    else if (ExpIsValidTimeZone(&TimeZoneInformation))
     {
         RtlCopyMemory(&ExpTimeZoneInfo,
                       &TimeZoneInformation,
@@ -784,7 +880,7 @@ NTAPI
 ExLocalTimeToSystemTime(PLARGE_INTEGER LocalTime,
                         PLARGE_INTEGER SystemTime)
 {
-    SystemTime->QuadPart = LocalTime->QuadPart + ExpTimeZoneBias.QuadPart;
+    SystemTime->QuadPart = LocalTime->QuadPart + ExpReadTimeZoneBias();
 }
 
 /*
@@ -795,7 +891,7 @@ NTAPI
 ExSystemTimeToLocalTime(PLARGE_INTEGER SystemTime,
                         PLARGE_INTEGER LocalTime)
 {
-    LocalTime->QuadPart = SystemTime->QuadPart - ExpTimeZoneBias.QuadPart;
+    LocalTime->QuadPart = SystemTime->QuadPart - ExpReadTimeZoneBias();
 }
 
 /*
