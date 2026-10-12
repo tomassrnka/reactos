@@ -19,6 +19,13 @@ AbortPrinter(HANDLE hPrinter)
         return FALSE;
     }
 
+    // Not every Print Provider implements it.
+    if (!pHandle->pPrintProvider->PrintProvider.fpAbortPrinter)
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return FALSE;
+    }
+
     return pHandle->pPrintProvider->PrintProvider.fpAbortPrinter(pHandle->hPrinter);
 }
 
