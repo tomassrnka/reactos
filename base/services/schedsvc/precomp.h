@@ -60,6 +60,12 @@ extern HANDLE Events[3];
 
 /* job.c */
 
+BOOL
+IsValidSchedule(
+    DWORD_PTR JobTime,
+    DWORD DaysOfMonth,
+    UCHAR DaysOfWeek);
+
 VOID
 GetNextJobTimeout(
     HANDLE hTimer);

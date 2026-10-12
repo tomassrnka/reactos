@@ -37,13 +37,29 @@ BOOL bValidNextJobStartTime = FALSE;
 
 
 
+/* Start time of a job whose schedule never comes */
+#define NEVER_HIGH 0x7FFFFFFF
+#define NEVER_LOW  0xFFFFFFFF
+
 /* FUNCTIONS *****************************************************************/
+
+/* A time of day below 24 hours, days of the month 1 to 31, days of the week Monday to Sunday */
+BOOL
+IsValidSchedule(
+    DWORD_PTR JobTime,
+    DWORD DaysOfMonth,
+    UCHAR DaysOfWeek)
+{
+    return JobTime < 24 * 3600000 && !(DaysOfMonth & 0x80000000) && !(DaysOfWeek & 0x80);
+}
+
 
 VOID
 GetNextJobTimeout(HANDLE hTimer)
 {
     PLIST_ENTRY CurrentEntry;
     FILETIME DueTime;
+    SYSTEMTIME LocalTime, UniversalTime;
     PJOB CurrentJob;
 
     bValidNextJobStartTime = FALSE;
@@ -51,6 +67,12 @@ GetNextJobTimeout(HANDLE hTimer)
     while (CurrentEntry != &JobListHead)
     {
         CurrentJob = CONTAINING_RECORD(CurrentEntry, JOB, JobEntry);
+
+        if (CurrentJob->StartTime.dwHighDateTime == NEVER_HIGH)
+        {
+            CurrentEntry = CurrentEntry->Flink;
+            continue;
+        }
 
         if (bValidNextJobStartTime == FALSE)
         {
@@ -73,7 +95,13 @@ GetNextJobTimeout(HANDLE hTimer)
         return;
     }
 
-    LocalFileTimeToFileTime(&NextJobStartTime, &DueTime);
+    /* Convert with the time zone rules of the start date, not with today's bias */
+    if (!FileTimeToSystemTime(&NextJobStartTime, &LocalTime) ||
+        !TzSpecificLocalTimeToSystemTime(NULL, &LocalTime, &UniversalTime) ||
+        !SystemTimeToFileTime(&UniversalTime, &DueTime))
+    {
+        LocalFileTimeToFileTime(&NextJobStartTime, &DueTime);
+    }
 
     SetWaitableTimer(hTimer,
                      (PLARGE_INTEGER)&DueTime,
@@ -419,6 +447,17 @@ LoadJobs(VOID)
                 pJob->DaysOfWeek = Schedule.DaysOfWeek;
                 pJob->Flags = Schedule.Flags;
 
+                /* A stored schedule that a new job could not have is ignored */
+                if (!IsValidSchedule(pJob->JobTime, pJob->DaysOfMonth, pJob->DaysOfWeek))
+                {
+                    ERR("Ignoring job %S: invalid schedule\n", szNameBuffer);
+                    HeapFree(GetProcessHeap(), 0, pJob);
+                    pJob = NULL;
+                    RegCloseKey(hJobKey);
+                    hJobKey = NULL;
+                    continue;
+                }
+
                 /* Acquire the job list lock exclusively */
                 RtlAcquireResourceExclusive(&JobListLock, TRUE);
 
@@ -482,7 +521,8 @@ CalculateNextStartTime(
 
     GetLocalTime(&Now);
 
-    if (pJob->StartTime.dwLowDateTime != 0 || pJob->StartTime.dwHighDateTime != 0)
+    if ((pJob->StartTime.dwLowDateTime != 0 || pJob->StartTime.dwHighDateTime != 0) &&
+        pJob->StartTime.dwHighDateTime != NEVER_HIGH)
     {
         SystemTimeToFileTime(&Now, &FileTime);
         if (CompareFileTime(&FileTime, &pJob->StartTime) < 0)
@@ -517,6 +557,14 @@ CalculateNextStartTime(
         {
             break;
         }
+    }
+
+    if (i == 366)
+    {
+        /* No requested day exists: the job never runs */
+        pJob->StartTime.dwLowDateTime = NEVER_LOW;
+        pJob->StartTime.dwHighDateTime = NEVER_HIGH;
+        return;
     }
 
     Candidate.QuadPart += (ULONGLONG)pJob->JobTime * 10000;

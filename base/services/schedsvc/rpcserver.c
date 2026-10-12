@@ -92,13 +92,8 @@ NetrJobAdd(
     TRACE("NetrJobAdd(%S %p %p)\n",
           ServerName, pAtInfo, pJobId);
 
-    /* A time of day below 24 hours, days of the month 1 to 31, days of the week Monday to Sunday */
-    if (pAtInfo->JobTime >= 24 * 3600000 ||
-        (pAtInfo->DaysOfMonth & 0x80000000) ||
-        (pAtInfo->DaysOfWeek & 0x80))
-    {
+    if (!IsValidSchedule(pAtInfo->JobTime, pAtInfo->DaysOfMonth, pAtInfo->DaysOfWeek))
         return ERROR_INVALID_PARAMETER;
-    }
 
     /* Allocate a new job object */
     pJob = HeapAlloc(GetProcessHeap(),
