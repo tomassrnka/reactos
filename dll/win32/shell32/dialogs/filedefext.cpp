@@ -996,6 +996,10 @@ CFileDefExt::InitMultifilePageThread()
     SetMultifileDlgFileAttr(FILE_ATTRIBUTE_HIDDEN, 14022);
     SetMultifileDlgFileAttr(FILE_ATTRIBUTE_ARCHIVE, 14023);
     #undef SetMultifileDlgFileAttr
+
+    // The page applies attributes to the selected files only, so it offers them only for a selection of files
+    if (!m_cFolders)
+        PostMessageW(m_hWndDirStatsDlg, WM_ENABLEATTRIBS, 0, 0);
 }
 
 DWORD CALLBACK
@@ -1068,8 +1072,109 @@ CFileDefExt::MultifilePageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lP
         case WM_UPDATEDIRSTATS:
             pFileDefExt->UpdateDirStatsResults();
             break;
+        case WM_ENABLEATTRIBS:
+            pFileDefExt->EnableMultifileAttributes(hwndDlg);
+            break;
+        case WM_COMMAND:
+            if ((LOWORD(wParam) == 14021 || LOWORD(wParam) == 14022 || LOWORD(wParam) == 14023) &&
+                HIWORD(wParam) == BN_CLICKED)
+            {
+                PropSheet_Changed(GetParent(hwndDlg), hwndDlg);
+            }
+            break;
+        case WM_NOTIFY:
+            if (((LPNMHDR)lParam)->code == PSN_APPLY)
+            {
+                BOOL bApplied = pFileDefExt->ApplyMultifileAttributes(hwndDlg);
+                SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, bApplied ? PSNRET_NOERROR : PSNRET_INVALID_NOCHANGEPAGE);
+                return TRUE;
+            }
+            break;
     }
     return FALSE;
+}
+
+static const WORD g_MultifileAttrIds[] = { 14021, 14022, 14023 };
+static const DWORD g_MultifileAttrs[] = { FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_ARCHIVE };
+
+void
+CFileDefExt::EnableMultifileAttributes(HWND hwndDlg)
+{
+    m_MultifileAttrFailed = 0;
+    for (SIZE_T i = 0; i < _countof(g_MultifileAttrIds); ++i)
+    {
+        HWND hCtrl = GetDlgItem(hwndDlg, g_MultifileAttrIds[i]);
+        m_MultifileAttrState[i] = (BYTE)SendMessageW(hCtrl, BM_GETCHECK, 0, 0);
+        // Like Windows: three states only when the files differ
+        if (m_MultifileAttrState[i] != BST_INDETERMINATE)
+            SendMessageW(hCtrl, BM_SETSTYLE, BS_AUTOCHECKBOX, TRUE);
+        EnableWindow(hCtrl, TRUE);
+    }
+}
+
+BOOL
+CFileDefExt::ApplyMultifileAttributes(HWND hwndDlg)
+{
+    DWORD dwSet = 0, dwClear = 0;
+    BYTE NewState[_countof(g_MultifileAttrIds)];
+    for (SIZE_T i = 0; i < _countof(g_MultifileAttrIds); ++i)
+    {
+        HWND hCtrl = GetDlgItem(hwndDlg, g_MultifileAttrIds[i]);
+        if (!IsWindowEnabled(hCtrl))
+            return TRUE;
+        // Only the boxes the user changed, as Windows lists only the changed attributes,
+        // plus those of a failed attempt, which may have changed some of the files
+        NewState[i] = (BYTE)SendMessageW(hCtrl, BM_GETCHECK, 0, 0);
+        if (NewState[i] == m_MultifileAttrState[i] && !(m_MultifileAttrFailed & g_MultifileAttrs[i]))
+            continue;
+        if (NewState[i] == BST_CHECKED)
+            dwSet |= g_MultifileAttrs[i];
+        else if (NewState[i] == BST_UNCHECKED)
+            dwClear |= g_MultifileAttrs[i];
+    }
+
+    DWORD dwError = ERROR_SUCCESS;
+    for (UINT i = 0; i < m_cidl && (dwSet || dwClear); ++i)
+    {
+        PIDLIST_ABSOLUTE pidl = ILCombine(m_pidlFolder, m_pidls[i]);
+        PWSTR pszPath;
+        HRESULT hr = pidl ? SHELL_DisplayNameOf(NULL, pidl, SHGDN_FORPARSING, &pszPath) : E_OUTOFMEMORY;
+        ILFree(pidl);
+        if (FAILED(hr))
+        {
+            dwError = hr;
+            continue;
+        }
+
+        DWORD dwOld = GetFileAttributesW(pszPath);
+        if (dwOld == INVALID_FILE_ATTRIBUTES)
+        {
+            dwError = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+        }
+        else if (!(dwOld & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            DWORD dwNew = (dwOld & ~dwClear) | dwSet;
+            if (dwNew != dwOld)
+            {
+                if (SetFileAttributesW(pszPath, dwNew ? dwNew : FILE_ATTRIBUTE_NORMAL))
+                    SHChangeNotify(SHCNE_ATTRIBUTES, SHCNF_PATHW, pszPath, NULL);
+                else
+                    dwError = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+            }
+        }
+        SHFree(pszPath);
+    }
+
+    if (dwError != ERROR_SUCCESS)
+    {
+        // Keep the changes pending so that Apply can try again
+        m_MultifileAttrFailed |= dwSet | dwClear;
+        SHELL_ErrorBox(hwndDlg, dwError);
+        return FALSE;
+    }
+    m_MultifileAttrFailed = 0;
+    memcpy(m_MultifileAttrState, NewState, sizeof(NewState));
+    return TRUE;
 }
 
 /*************************************************************************
