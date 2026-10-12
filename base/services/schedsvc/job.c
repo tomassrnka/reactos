@@ -25,7 +25,7 @@ typedef struct _SCHEDULE
     WORD Reserved;
 } SCHEDULE, PSCHEDULE;
 
-DWORD dwNextJobId = 0;
+DWORD dwNextJobId = 1;
 DWORD dwJobCount = 0;
 LIST_ENTRY JobListHead;
 RTL_RESOURCE JobListLock;
@@ -71,10 +71,11 @@ GetNextJobTimeout(HANDLE hTimer)
     if (bValidNextJobStartTime == FALSE)
     {
         TRACE("No valid job!\n");
+        CancelWaitableTimer(hTimer);
         return;
     }
 
-    LocalFileTimeToFileTime(&DueTime, &NextJobStartTime);
+    LocalFileTimeToFileTime(&NextJobStartTime, &DueTime);
 
     SetWaitableTimer(hTimer,
                      (PLARGE_INTEGER)&DueTime,
@@ -84,47 +85,53 @@ GetNextJobTimeout(HANDLE hTimer)
                      TRUE);
 }
 
-#if 0
+/* Called after a job was started: a periodic job gets its next start time, a one-time job
+ * loses the day it ran for and is removed when no day is left */
 static
 VOID
 ReScheduleJob(
     PJOB pJob)
 {
-    /* Remove the job from the start list */
-    RemoveEntryList(&pJob->StartEntry);
+    SYSTEMTIME StartTime;
+    BOOL bRemove = FALSE;
 
-    /* Non-periodical job, remove it */
     if ((pJob->Flags & JOB_RUN_PERIODICALLY) == 0)
     {
-        /* Remove the job from the registry */
-        DeleteJob(pJob);
+        if (pJob->DaysOfWeek == 0 && pJob->DaysOfMonth == 0)
+        {
+            bRemove = TRUE;
+        }
+        else
+        {
+            FileTimeToSystemTime(&pJob->StartTime, &StartTime);
+            /* Bit 0 of DaysOfWeek is Monday, wDayOfWeek 0 is Sunday */
+            pJob->DaysOfWeek &= ~(1 << ((StartTime.wDayOfWeek + 6) % 7));
+            pJob->DaysOfMonth &= ~(1UL << (StartTime.wDay - 1));
+            bRemove = (pJob->DaysOfWeek == 0 && pJob->DaysOfMonth == 0);
+            if (!bRemove)
+                SaveJob(pJob);
+        }
+    }
 
-        /* Remove the job from the job list */
+    if (bRemove)
+    {
+        DeleteJob(pJob);
         RemoveEntryList(&pJob->JobEntry);
         dwJobCount--;
-
-        /* Free the job object */
         HeapFree(GetProcessHeap(), 0, pJob);
         return;
     }
 
-    /* Calculate the next start time */
     CalculateNextStartTime(pJob);
-
-    /* Insert the job into the start list again */
-    InsertJobIntoStartList(&StartListHead, pJob);
-#if 0
-    DumpStartList(&StartListHead);
-#endif
 }
-#endif
+
 
 VOID
 RunCurrentJobs(VOID)
 {
     PROCESS_INFORMATION ProcessInformation;
     STARTUPINFOW StartupInfo;
-    PLIST_ENTRY CurrentEntry;
+    PLIST_ENTRY CurrentEntry, NextEntry;
     PJOB CurrentJob;
     BOOL bRet;
 
@@ -132,6 +139,7 @@ RunCurrentJobs(VOID)
     while (CurrentEntry != &JobListHead)
     {
         CurrentJob = CONTAINING_RECORD(CurrentEntry, JOB, JobEntry);
+        NextEntry = CurrentEntry->Flink;
 
         if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) == 0)
         {
@@ -168,9 +176,12 @@ RunCurrentJobs(VOID)
                 CloseHandle(ProcessInformation.hThread);
                 CloseHandle(ProcessInformation.hProcess);
             }
+
+            /* Without this the job would be due again at once */
+            ReScheduleJob(CurrentJob);
         }
 
-        CurrentEntry = CurrentEntry->Flink;
+        CurrentEntry = NextEntry;
     }
 }
 
@@ -233,7 +244,8 @@ SaveJob(
     if (lError != ERROR_SUCCESS)
         goto done;
 
-    GetJobName(hJobsKey, pJob->Name);
+    if (pJob->Name[0] == UNICODE_NULL)
+        GetJobName(hJobsKey, pJob->Name);
 
     lError = RegCreateKeyExW(hJobsKey,
                              pJob->Name,
@@ -482,6 +494,14 @@ CalculateNextStartTime(
 
     GetLocalTime(&CurrentSystemTime);
 
+    /* A timer that fired early must not yield the start time of the run that just happened */
+    if (pJob->StartTime.dwLowDateTime != 0 || pJob->StartTime.dwHighDateTime != 0)
+    {
+        SystemTimeToFileTime(&CurrentSystemTime, &StartFileTime);
+        if (CompareFileTime(&StartFileTime, &pJob->StartTime) < 0)
+            FileTimeToSystemTime(&pJob->StartTime, &CurrentSystemTime);
+    }
+
     CurrentTimeMs = (DWORD_PTR)CurrentSystemTime.wHour * 3600000 +
                     (DWORD_PTR)CurrentSystemTime.wMinute * 60000;
 
@@ -595,7 +615,7 @@ CalculateNextStartTime(
     LocalStartTime.u.HighPart = StartFileTime.dwHighDateTime;
     if (bDaysOffsetValid && wDaysOffset != 0)
     {
-        LocalStartTime.QuadPart += ((ULONGLONG)wDaysOffset * 24 * 60 * 60 * 10000);
+        LocalStartTime.QuadPart += ((ULONGLONG)wDaysOffset * 24 * 60 * 60 * 10000000);
     }
 
     pJob->StartTime.dwLowDateTime = LocalStartTime.u.LowPart;

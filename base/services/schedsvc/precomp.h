@@ -43,6 +43,9 @@ typedef struct _JOB
 } JOB, *PJOB;
 
 
+/* [MS-TSCH] status for an AT job ID that does not exist (message text in netmsg.dll) */
+#define APE_AT_ID_NOT_FOUND 3806
+
 extern DWORD dwNextJobId;
 extern DWORD dwJobCount;
 
