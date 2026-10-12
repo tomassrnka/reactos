@@ -235,21 +235,43 @@ static BOOL IsNtvdmPresent(void)
 #define CHILD_WAIT_FAILED       3
 #define CHILD_CREATE_FAILED     0x10000
 
-/* Child mode "vdmcase": start the image from this process's own new console, so that no
- * existing VDM can take the task, then end the new NTVDM through its process id
- * (for an NTVDM start, hProcess is a tagged VDM wait handle). */
-static DWORD VdmCaseChild(PCSTR Path)
+/* The image path of a child mode: the last quoted argument, as RunChild wrote it
+ * (argv is ANSI and loses the characters of a TEMP path outside the code page) */
+static BOOL GetChildPath(PWSTR Path, SIZE_T Size)
 {
-    CHAR CmdLine[MAX_PATH + 2];
-    STARTUPINFOA si = { sizeof(si) };
+    PCWSTR CmdLine = GetCommandLineW(), Start, End;
+
+    End = wcsrchr(CmdLine, L'"');
+    if (!End || End == CmdLine)
+        return FALSE;
+    for (Start = End - 1; Start > CmdLine && *Start != L'"'; Start--)
+        ;
+    if (*Start != L'"')
+        return FALSE;
+    Start++;
+    return SUCCEEDED(StringCchCopyNW(Path, Size, Start, End - Start));
+}
+
+/* Child modes "vdmcase" and "wowcase": start the image from this process's own new console,
+ * so that no existing VDM can take the task, then end the new NTVDM through its process id
+ * (for an NTVDM start, hProcess is a tagged VDM wait handle). A 16-bit Windows image also
+ * asks for a separate WOW VDM: 32-bit Windows shares one WOW VDM across consoles. */
+static DWORD VdmCaseChild(PCWSTR Path, BOOL Wow)
+{
+    WCHAR CmdLine[MAX_PATH + 2];
+    STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     HANDLE Process;
     DWORD Result = CHILD_OK;
 
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-    StringCchPrintfA(CmdLine, ARRAYSIZE(CmdLine), "\"%s\"", Path);
-    if (!CreateProcessA(Path, CmdLine, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi))
+    StringCchPrintfW(CmdLine, ARRAYSIZE(CmdLine), L"\"%s\"", Path);
+    if (!CreateProcessW(Path, CmdLine, NULL, NULL, FALSE,
+                        CREATE_SUSPENDED | (Wow ? CREATE_SEPARATE_WOW_VDM : 0),
+                        NULL, NULL, &si, &pi))
+    {
         return CHILD_CREATE_FAILED + (GetLastError() & 0xFFFF);
+    }
 
     Process = pi.hProcess;
     if ((ULONG_PTR)pi.hProcess & 3)
@@ -270,15 +292,15 @@ static DWORD VdmCaseChild(PCSTR Path)
 }
 
 /* Child mode "hardcase": CreateProcess with the default error mode, so a hard error would block it */
-static DWORD HardErrorCaseChild(PCSTR Path)
+static DWORD HardErrorCaseChild(PCWSTR Path)
 {
-    CHAR CmdLine[MAX_PATH + 2];
-    STARTUPINFOA si = { sizeof(si) };
+    WCHAR CmdLine[MAX_PATH + 2];
+    STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
 
     SetErrorMode(0);
-    StringCchPrintfA(CmdLine, ARRAYSIZE(CmdLine), "\"%s\"", Path);
-    if (!CreateProcessA(Path, CmdLine, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi))
+    StringCchPrintfW(CmdLine, ARRAYSIZE(CmdLine), L"\"%s\"", Path);
+    if (!CreateProcessW(Path, CmdLine, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi))
         return CHILD_CREATE_FAILED + (GetLastError() & 0xFFFF);
     TerminateProcess(pi.hProcess, 0);
     CloseHandle(pi.hThread);
@@ -353,7 +375,7 @@ static void TestCase(const IMAGE_CASE *Case, PCWSTR Dir, BOOL Os64, BOOL Wow64, 
 
     if (Expect == EXPECT_NTVDM)
     {
-        Ret = RunChild("vdmcase", Path, 60000, &ExitCode);
+        Ret = RunChild((Case->Kind == KIND_NE) ? "wowcase" : "vdmcase", Path, 60000, &ExitCode);
         ok(Ret, "%S: the NTVDM start did not finish\n", Case->Name);
         ok(ExitCode == CHILD_OK, "%S: NTVDM start result %#lx, expected a new NTVDM process ended by its id\n",
            Case->Name, ExitCode);
@@ -440,10 +462,19 @@ START_TEST(CreateProcess)
     int argc;
 
     argc = winetest_get_mainargs(&argv);
-    if (argc >= 4 && !strcmp(argv[2], "vdmcase"))
-        ExitProcess(VdmCaseChild(argv[3]));
-    if (argc >= 4 && !strcmp(argv[2], "hardcase"))
-        ExitProcess(HardErrorCaseChild(argv[3]));
+    if (argc >= 4)
+    {
+        WCHAR ChildPath[MAX_PATH];
+
+        if (!strcmp(argv[2], "vdmcase") || !strcmp(argv[2], "wowcase") || !strcmp(argv[2], "hardcase"))
+        {
+            if (!GetChildPath(ChildPath, ARRAYSIZE(ChildPath)))
+                ExitProcess(CHILD_CREATE_FAILED + ERROR_INVALID_PARAMETER);
+            if (!strcmp(argv[2], "hardcase"))
+                ExitProcess(HardErrorCaseChild(ChildPath));
+            ExitProcess(VdmCaseChild(ChildPath, !strcmp(argv[2], "wowcase")));
+        }
+    }
 
     StaticString = &NtCurrentTeb()->StaticUnicodeString;
     RtlInitUnicodeString(&CompareString, L"--sentinel--");
