@@ -1507,3 +1507,40 @@ KeQueryTotalCycleTimeThread(
     /* Return the total cycle time */
     return TotalCycleTime;
 }
+
+_IRQL_requires_max_(APC_LEVEL)
+_IRQL_requires_min_(PASSIVE_LEVEL)
+_IRQL_requires_same_
+ULONG64
+NTAPI
+KeQueryTotalCycleTimeProcess(
+    _Inout_ PKPROCESS Process,
+    _Out_ PULONG64 CycleTimeStamp)
+{
+    ULONG64 CurrentCycleTime, ProcessCycles, ElapsedCycles = 0;
+
+    /* Disable interrupts to prevent preemption */
+    NT_VERIFY(KeDisableInterrupts());
+
+    /* Get the current cycle counter value */
+    CurrentCycleTime = KxQueryProcessorCycleTime();
+
+    /* The cycles of the current thread since it was scheduled are not added yet.
+       Threads running on other processors are counted up to their last preemption. */
+    if (KeGetCurrentThread()->ApcState.Process == Process)
+    {
+        ElapsedCycles = CurrentCycleTime - KeGetCurrentPrcb()->StartCycles;
+    }
+
+    /* Get the cycles of the process' threads from their last preemption */
+    ProcessCycles = InterlockedCompareExchange64((PLONG64)&((PEPROCESS)Process)->CycleTime, 0, 0);
+
+    /* Enable interrupts */
+    KeRestoreInterrupts(TRUE);
+
+    /* Return the current cycle counter value as the time stamp */
+    *CycleTimeStamp = CurrentCycleTime;
+
+    /* Return the total cycle time */
+    return ProcessCycles + ElapsedCycles;
+}
