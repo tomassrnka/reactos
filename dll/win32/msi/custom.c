@@ -887,8 +887,8 @@ static BOOL CALLBACK disable_thread_window( HWND hwnd, LPARAM lparam )
         list->hwnd = grown;
         list->size = list->size ? list->size * 2 : 16;
     }
-    EnableWindow( hwnd, FALSE );
     list->hwnd[list->count++] = hwnd;
+    EnableWindow( hwnd, FALSE );
     return TRUE;
 }
 
@@ -921,8 +921,12 @@ static void warn_skipped_32bit_custom_action( MSIPACKAGE *package, const WCHAR *
         threads[1] = msi_dialog_get_ui_thread();
         for (i = 0; i < ARRAY_SIZE(threads) && !disabled.failed; i++)
         {
-            if (threads[i] && (i == 0 || threads[i] != threads[0]))
-                EnumThreadWindows( threads[i], disable_thread_window, (LPARAM)&disabled );
+            /* A thread without windows gives TRUE here, so FALSE is a failure */
+            if (threads[i] && (i == 0 || threads[i] != threads[0]) &&
+                !EnumThreadWindows( threads[i], disable_thread_window, (LPARAM)&disabled ))
+            {
+                disabled.failed = TRUE;
+            }
         }
         /* Without a complete list the warning could not keep the dialogs inactive: the log has it */
         if (!disabled.failed)
