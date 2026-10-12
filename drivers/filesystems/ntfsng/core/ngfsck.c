@@ -77,7 +77,16 @@ static void ngf_leak(struct ngf *f, const char *fmt, ...)
 static inline int tbit(const u8 *m, u64 i) { return (m[i >> 3] >> (i & 7)) & 1; }
 static inline void sbit(u8 *m, u64 i) { m[i >> 3] |= (u8)(1u << (i & 7)); }
 
-/* Reads [off, off+len) of the stream described by @rl (cluster runs) into @buf; holes read as zero. */
+/* Finding text for a failed stream read: the device refused it (-EIO) or the runs do not cover it. */
+static const char *ngf_rerr(int err)
+{
+	return err == -EIO ? "unreadable (device read failed)" : "unreadable";
+}
+
+/*
+ * Reads [off, off+len) of the stream described by @rl (cluster runs) into @buf; holes read as zero.
+ * -EINVAL when the runs do not cover the range, else the device read's error.
+ */
 static int ngf_read_rl(struct ngf *f, struct runlist_element *rl, u64 off, u8 *buf, u32 len)
 {
 	struct ntfs_volume *vol = f->vol;
@@ -88,13 +97,13 @@ static int ngf_read_rl(struct ngf *f, struct runlist_element *rl, u64 off, u8 *b
 		while (rl && rl->length && rl->vcn + rl->length <= vcn)
 			rl++;
 		if (!rl || !rl->length || rl->vcn > vcn)
-			return -EIO;
+			return -EINVAL;
 		run_end = (u64)(rl->vcn + rl->length) << vol->cluster_size_bits;
 		n = min_t(u64, run_end, end) - pos;
 		if (rl->lcn == LCN_HOLE) {
 			memset(buf + (pos - off), 0, n);
 		} else if (rl->lcn < 0) {
-			return -EIO;
+			return -EINVAL;
 		} else {
 			int err = kshim_dev_rw(f->b, 0, ((u64)rl->lcn << vol->cluster_size_bits) +
 					       (pos - ((u64)rl->vcn << vol->cluster_size_bits)), buf + (pos - off), (size_t)n);
@@ -253,6 +262,7 @@ static void ngf_dir(struct ngf *f, u64 dir, struct mft_record *m)
 	struct ntfs_volume *vol = f->vol;
 	u32 used = le32_to_cpu(m->bytes_in_use), ofs = le16_to_cpu(m->attrs_offset);
 	u32 ibs = 0, blen = 0;
+	int rerr;
 	struct attr_record *alloc = NULL, *bmp = NULL;
 	u8 *bits = NULL;
 	bool alist = false;
@@ -319,10 +329,15 @@ static void ngf_dir(struct ngf *f, u64 dir, struct mft_record *m)
 			if (IS_ERR(brl))
 				return;
 			bits = kmalloc(65536, GFP_KERNEL);
-			if (!bits || ngf_read_rl(f, brl, 0, bits, (u32)bsz)) {
+			rerr = bits ? ngf_read_rl(f, brl, 0, bits, (u32)bsz) : -ENOMEM;
+			if (rerr) {
 				kvfree(brl);
 				kfree(bits);
-				ngf_fatal(f, "directory %llu: index $BITMAP unreadable", dir);
+				/* No memory: the directory is not checked, as when the whole check cannot run. */
+				if (rerr == -ENOMEM)
+					f->r->dirs_skipped++;
+				else
+					ngf_fatal(f, "directory %llu: index $BITMAP %s", dir, ngf_rerr(rerr));
 				return;
 			}
 			kvfree(brl);
@@ -348,8 +363,9 @@ static void ngf_dir(struct ngf *f, u64 dir, struct mft_record *m)
 			u64 bn = pos / ibs;
 			if (!tbit(bits, bn))
 				continue;
-			if (ngf_read_rl(f, rl, pos, f->ib, ibs)) {
-				ngf_fatal(f, "directory %llu: index block at %llu unreadable", dir, pos);
+			rerr = ngf_read_rl(f, rl, pos, f->ib, ibs);
+			if (rerr) {
+				ngf_fatal(f, "directory %llu: index block at %llu %s", dir, pos, ngf_rerr(rerr));
 				break;
 			}
 			if (!ntfs_is_indx_record(ib->magic)) {
@@ -451,7 +467,7 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 			up_read(&mni->runlist.lock);
 			if (err) {
 				/* Damage, not a check that could not run (a chunk may be reported by more than one pass). */
-				ngf_fatal(&f, "$MFT unreadable at record %llu (pass %d)", i, pass);
+				ngf_fatal(&f, "$MFT %s at record %llu (pass %d)", ngf_rerr(err), i, pass);
 				err = 0;
 				continue;
 			}
