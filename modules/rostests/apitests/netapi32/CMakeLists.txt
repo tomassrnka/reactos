@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     DsRoleGetPrimaryDomainInformation.c
+    NetServerGetInfo.c
     testlist.c)
 
 add_executable(netapi32_apitest ${SOURCE})
