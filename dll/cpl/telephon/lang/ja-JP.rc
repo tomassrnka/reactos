@@ -4,4 +4,5 @@ STRINGTABLE
 BEGIN
     IDS_CPLSYSTEMNAME "電話とモデムのオプション"
     IDS_CPLSYSTEMDESCRIPTION "電話のダイヤル情報とモデムのプロパティを構成します。"
+    IDS_CPLNOTAVAILABLE "Phone and Modem Options cannot be opened. Telephony (TAPI) configuration, dialing rules and modem settings are not implemented yet."
 END
