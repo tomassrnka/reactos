@@ -2,12 +2,49 @@ LANGUAGE LANG_JAPANESE, SUBLANG_DEFAULT
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE "FINDSTR: 文字列を含むファイルのすべての行を出力します。\n\n\
-  FIND [ /C ] [ /I ] [ /N ] [ /V ] ""文字列"" [ ファイル... ]\n\
-    /C  文字列を含む行の個数を数えます\n\
-    /I  大文字小文字を無視します\n\
-    /N  表示される行に1から番号を付けます\n\
-    /V  文字列を含まない行を出力します"
-    IDS_NO_SUCH_FILE "FINDSTR: %s: そのようなファイルはありません\n"
+    IDS_USAGE "Searches files for strings or simple regular expressions.\n\n\
+FINDSTR [/B] [/E] [/L] [/R] [/S] [/I] [/X] [/V] [/N] [/M] [/O] [/P] [/F:file]\n\
+        [/C:string] [/G:file] [/D:dir list] [/A:color] [/OFF[LINE]]\n\
+        strings [[drive:][path]filename[ ...]]\n\n\
+  /B         Matches the pattern only at the beginning of a line.\n\
+  /E         Matches the pattern only at the end of a line.\n\
+  /L         Treats the search strings as literal text.\n\
+  /R         Treats the search strings as regular expressions.\n\
+  /S         Also searches the subdirectories.\n\
+  /I         Ignores case.\n\
+  /X         Prints lines that match the whole search string.\n\
+  /V         Prints the lines that do not match.\n\
+  /N         Prints the line number before each line.\n\
+  /M         Prints only the names of the files that match.\n\
+  /O         Prints the offset of each line in the file.\n\
+  /P         Skips files that contain non-printable characters.\n\
+  /OFF[LINE] Also searches files that have the offline attribute.\n\
+  /A:color   Color of the file names and numbers (two hexadecimal digits).\n\
+  /F:file    Reads the list of files from a file (/ for the console).\n\
+  /C:string  Uses the string, spaces included, as one search string.\n\
+  /G:file    Reads the search strings from a file (/ for the console).\n\
+  /D:dirs    Searches in a semicolon-separated list of directories.\n\
+  strings    The search strings, separated by spaces.\n\
+  filename   The files to search; wildcards are allowed.\n\n\
+Without /C: the strings argument holds several search strings separated by\n\
+spaces. Without /L or /R, the strings are regular expressions if the first one\n\
+contains a regular expression character, else literal text.\n\n\
+Regular expressions:\n\
+  .        Any character.\n\
+  *        Zero or more of the previous character or class.\n\
+  ^        Beginning of the line.\n\
+  $        End of the line.\n\
+  [class]  Any one character of the set; [^class] any character not in it.\n\
+  [x-y]    Any character in the range x to y.\n\
+  \\x       The character x itself, for x a special character.\n\
+  \\<xyz    Beginning of a word.\n\
+  xyz\\>    End of a word.\n"
     IDS_CANNOT_OPEN "FINDSTR: %s: ファイルが開けません\n"
+    IDS_BAD_COMMAND_LINE "FINDSTR: Bad command line\n"
+    IDS_NO_SEARCH_STRINGS "FINDSTR: No search strings\n"
+    IDS_SWITCH_IGNORED "FINDSTR: /%c ignored\n"
+    IDS_CANNOT_READ_STRINGS "FINDSTR: Cannot read strings from %s\n"
+    IDS_CANNOT_READ_FILES "FINDSTR: Cannot read file list from %s\n"
+    IDS_OUT_OF_MEMORY "FINDSTR: Out of memory\n"
+    IDS_ARGUMENT_MISSING "FINDSTR: Argument missing after /%c\n"
 END
