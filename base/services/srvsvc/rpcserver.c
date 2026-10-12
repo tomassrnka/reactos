@@ -351,8 +351,9 @@ NetrServerGetInfo(
     LPSERVER_INFO *InfoStruct)
 {
     WCHAR szComputerName[MAX_COMPUTERNAME_LENGTH + 1];
-    DWORD dwComputerNameLength, dwSize;
+    DWORD dwComputerNameLength;
     PSERVER_INFO pServerInfo = NULL;
+    LPWSTR pszName;
     OSVERSIONINFOW VersionInfo;
 
     TRACE("NetrServerGetInfo(%p %lu %p)\n",
@@ -365,32 +366,36 @@ NetrServerGetInfo(
     VersionInfo.dwOSVersionInfoSize = sizeof(VersionInfo);
     GetVersionExW(&VersionInfo);
 
+    if (Level != 100 && Level != 101 && Level != 102)
+    {
+        FIXME("level %d unimplemented\n", Level);
+        return ERROR_INVALID_LEVEL;
+    }
+
+    /* The stub frees every embedded pointer on its own: the name needs its own block */
+    pServerInfo = midl_user_allocate(sizeof(SERVER_INFO));
+    pszName = midl_user_allocate(dwComputerNameLength * sizeof(WCHAR));
+    if (pServerInfo == NULL || pszName == NULL)
+    {
+        midl_user_free(pServerInfo);
+        midl_user_free(pszName);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+
+    wcscpy(pszName, szComputerName);
+
     switch (Level)
     {
         case 100:
-            dwSize = sizeof(SERVER_INFO_100) +
-                     dwComputerNameLength * sizeof(WCHAR);
-            pServerInfo = midl_user_allocate(dwSize);
-            if (pServerInfo == NULL)
-                return ERROR_NOT_ENOUGH_MEMORY;
-
             pServerInfo->ServerInfo100.sv100_platform_id = PLATFORM_ID_NT;
-            pServerInfo->ServerInfo100.sv100_name = (LPWSTR)((ULONG_PTR)pServerInfo + sizeof(SERVER_INFO_100));
-            wcscpy(pServerInfo->ServerInfo100.sv100_name, szComputerName);
+            pServerInfo->ServerInfo100.sv100_name = pszName;
 
             *InfoStruct = pServerInfo;
             break;
 
         case 101:
-            dwSize = sizeof(SERVER_INFO_101) +
-                     dwComputerNameLength * sizeof(WCHAR);
-            pServerInfo = midl_user_allocate(dwSize);
-            if (pServerInfo == NULL)
-                return ERROR_NOT_ENOUGH_MEMORY;
-
             pServerInfo->ServerInfo101.sv101_platform_id = PLATFORM_ID_NT;
-            pServerInfo->ServerInfo101.sv101_name = (LPWSTR)((ULONG_PTR)pServerInfo + sizeof(SERVER_INFO_101));
-            wcscpy(pServerInfo->ServerInfo101.sv101_name, szComputerName);
+            pServerInfo->ServerInfo101.sv101_name = pszName;
 
             pServerInfo->ServerInfo101.sv101_version_major = VersionInfo.dwMajorVersion;
             pServerInfo->ServerInfo101.sv101_version_minor = VersionInfo.dwMinorVersion;
@@ -401,15 +406,8 @@ NetrServerGetInfo(
             break;
 
         case 102:
-            dwSize = sizeof(SERVER_INFO_102) +
-                     dwComputerNameLength * sizeof(WCHAR);
-            pServerInfo = midl_user_allocate(dwSize);
-            if (pServerInfo == NULL)
-                return ERROR_NOT_ENOUGH_MEMORY;
-
             pServerInfo->ServerInfo102.sv102_platform_id = PLATFORM_ID_NT;
-            pServerInfo->ServerInfo102.sv102_name = (LPWSTR)((ULONG_PTR)pServerInfo + sizeof(SERVER_INFO_102));
-            wcscpy(pServerInfo->ServerInfo102.sv102_name, szComputerName);
+            pServerInfo->ServerInfo102.sv102_name = pszName;
 
             pServerInfo->ServerInfo102.sv102_version_major = VersionInfo.dwMajorVersion;
             pServerInfo->ServerInfo102.sv102_version_minor = VersionInfo.dwMinorVersion;
@@ -426,10 +424,6 @@ NetrServerGetInfo(
 
             *InfoStruct = pServerInfo;
             break;
-
-        default:
-            FIXME("level %d unimplemented\n", Level);
-            return ERROR_INVALID_LEVEL;
     }
 
     return NERR_Success;
