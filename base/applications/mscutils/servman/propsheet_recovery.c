@@ -244,6 +244,20 @@ IsRunnableProgram(
     return (dwAttributes != INVALID_FILE_ATTRIBUTES && !(dwAttributes & FILE_ATTRIBUTE_DIRECTORY));
 }
 
+/* The edit control reports a failed allocation only with EN_ERRSPACE, and its
+ * WM_SETTEXT still returns TRUE: compare the length it holds instead */
+static
+BOOL
+SetEditText(
+    HWND hwndDlg,
+    INT id,
+    PCWSTR pszText)
+{
+    SendDlgItemMessageW(hwndDlg, id, WM_SETTEXT, 0, (LPARAM)pszText);
+    return (SIZE_T)GetWindowTextLengthW(GetDlgItem(hwndDlg, id)) == wcslen(pszText);
+}
+
+
 /* FALSE when the command could not be shown for lack of memory */
 static
 BOOL
@@ -369,11 +383,11 @@ ShowFailureActions(
         }
     }
 
-    SendDlgItemMessageW(hwndDlg,
-                        IDC_PROGRAM,
-                        WM_SETTEXT,
-                        0,
-                        (LPARAM)startPtr);
+    if (!SetEditText(hwndDlg, IDC_PROGRAM, startPtr))
+    {
+        HeapFree(GetProcessHeap(), 0, pszCommand);
+        return FALSE;
+    }
 
     /* The split above is only for display: the service controller resolves an unquoted
      * program in its own environment, so it is not quoted on save unless it was edited */
@@ -413,11 +427,11 @@ ShowFailureActions(
             *failPtr = UNICODE_NULL;
         }
 
-        SendDlgItemMessageW(hwndDlg,
-                            IDC_PARAMETERS,
-                            WM_SETTEXT,
-                            0,
-                            (LPARAM)endPtr);
+        if (!SetEditText(hwndDlg, IDC_PARAMETERS, endPtr))
+        {
+            HeapFree(GetProcessHeap(), 0, pszCommand);
+            return FALSE;
+        }
     }
 
     HeapFree(GetProcessHeap(), 0, pszCommand);
@@ -630,6 +644,29 @@ AreActionsAsStored(
     return TRUE;
 }
 
+/* Property sheets run on their own threads and share the process token: one
+ * enable, service call and restore of the shutdown privilege at a time */
+static
+HANDLE
+GetPrivilegeLock(VOID)
+{
+    static HANDLE hLock = NULL;
+    HANDLE hNew;
+
+    if (hLock != NULL)
+        return hLock;
+
+    hNew = CreateMutexW(NULL, FALSE, NULL);
+    if (hNew == NULL)
+        return NULL;
+
+    if (InterlockedCompareExchangePointer(&hLock, hNew, NULL) != NULL)
+        CloseHandle(hNew);
+
+    return hLock;
+}
+
+
 static
 BOOL
 SetFailureActions(
@@ -644,8 +681,9 @@ SetFailureActions(
     SC_HANDLE hManager = NULL;
     SC_HANDLE hService = NULL;
     HANDLE hToken = NULL;
+    HANDLE hLock = NULL;
     TOKEN_PRIVILEGES Privileges, OldPrivileges;
-    DWORD dwSize;
+    DWORD dwSize, dwError;
     BOOL bPrivilegeAdjusted = FALSE;
     BOOL bActionsChanged;
     BOOL bRebootComputer = FALSE;
@@ -808,16 +846,23 @@ SetFailureActions(
     }
 
     /* A reboot action needs the shutdown privilege of the caller, for this call only */
-    if (bRebootComputer &&
-        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+    if (bRebootComputer)
     {
-        Privileges.PrivilegeCount = 1;
-        Privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        if (LookupPrivilegeValueW(NULL, SE_SHUTDOWN_NAME, &Privileges.Privileges[0].Luid) &&
-            AdjustTokenPrivileges(hToken, FALSE, &Privileges, sizeof(OldPrivileges), &OldPrivileges, &dwSize) &&
-            GetLastError() == ERROR_SUCCESS)
+        hLock = GetPrivilegeLock();
+        if (hLock == NULL)
+            goto done;
+        WaitForSingleObject(hLock, INFINITE);
+
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
         {
-            bPrivilegeAdjusted = TRUE;
+            Privileges.PrivilegeCount = 1;
+            Privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            if (LookupPrivilegeValueW(NULL, SE_SHUTDOWN_NAME, &Privileges.Privileges[0].Luid) &&
+                AdjustTokenPrivileges(hToken, FALSE, &Privileges, sizeof(OldPrivileges), &OldPrivileges, &dwSize) &&
+                GetLastError() == ERROR_SUCCESS)
+            {
+                bPrivilegeAdjusted = TRUE;
+            }
         }
     }
 
@@ -845,8 +890,7 @@ SetFailureActions(
                                     &FailureActions);
 
 done:
-    if (!bResult)
-        GetError();
+    dwError = GetLastError();
 
     if (hService)
         CloseServiceHandle(hService);
@@ -860,11 +904,21 @@ done:
     if (hToken)
         CloseHandle(hToken);
 
+    if (hLock)
+        ReleaseMutex(hLock);
+
     if (lpCommand)
         HeapFree(GetProcessHeap(), 0, lpCommand);
 
     if (pKeptActions)
         HeapFree(GetProcessHeap(), 0, pKeptActions);
+
+    /* The message box comes after the privilege and the lock are given back */
+    if (!bResult)
+    {
+        SetLastError(dwError);
+        GetError();
+    }
 
     return bResult;
 }
