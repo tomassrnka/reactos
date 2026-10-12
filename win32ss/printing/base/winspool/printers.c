@@ -1347,6 +1347,7 @@ EndDocPrinter(HANDLE hPrinter)
 
         // Close the spool file handle.
         CloseHandle(pHandle->hSPLFile);
+        pHandle->hSPLFile = INVALID_HANDLE_VALUE;
     }
     else
     {

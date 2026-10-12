@@ -15,10 +15,14 @@ PrintingThreadProc(PLOCAL_JOB pJob)
     const DWORD cchJobAppendix = _countof(wszJobAppendix) - 1;
     const WCHAR wszPortAppendix[] = L", Port";
 
+    BOOL bPortLocked = FALSE;
     DWORD cchPortName;
     DWORD cchPrinterName;
     DWORD dwErrorCode;
+    DWORD dwJobID = pJob->dwJobID;
     HANDLE hPrintProcessor = NULL;
+    PLOCAL_JOB pFailedJob;
+    PLOCAL_PORT pPort = pJob->pPrinter->pPort;
     PLOCAL_PRINT_PROCESSOR pPrintProcessor = pJob->pPrintProcessor;
     PRINTPROCESSOROPENDATA OpenData;
     PWSTR pwszPrinterAndJob = NULL;
@@ -27,9 +31,21 @@ PrintingThreadProc(PLOCAL_JOB pJob)
 
     TRACE("PrintingThreadProc(%p)\n", pJob);
 
+    // A job with an output file is printed to the FILE: port, which writes it into that file.
+    if (pJob->pwszOutputFile)
+    {
+        pPort = FindPort(L"FILE:");
+        if (!pPort)
+        {
+            dwErrorCode = ERROR_UNKNOWN_PORT;
+            ERR("No FILE: port for the output file of job %lu!\n", dwJobID);
+            goto Cleanup;
+        }
+    }
+
     // Prepare the pPrinterName parameter.
     // This is the string for LocalOpenPrinter to open a port (e.g. "LPT1:, Port").
-    cchPortName = wcslen(pJob->pPrinter->pPort->pwszName);
+    cchPortName = wcslen(pPort->pwszName);
     pwszPrinterPort = DllAllocSplMem(cchPortName * sizeof(WCHAR) + sizeof(wszPortAppendix));
     if (!pwszPrinterPort)
     {
@@ -38,7 +54,7 @@ PrintingThreadProc(PLOCAL_JOB pJob)
         goto Cleanup;
     }
 
-    CopyMemory(pwszPrinterPort, pJob->pPrinter->pPort->pwszName, cchPortName * sizeof(WCHAR));
+    CopyMemory(pwszPrinterPort, pPort->pwszName, cchPortName * sizeof(WCHAR));
     CopyMemory(&pwszPrinterPort[cchPortName], wszPortAppendix, sizeof(wszPortAppendix));
 
     // Prepare the pPrintProcessorOpenData parameter.
@@ -46,14 +62,19 @@ PrintingThreadProc(PLOCAL_JOB pJob)
     OpenData.pDatatype = pJob->pwszDatatype;
     OpenData.pDevMode = pJob->pDevMode;
     OpenData.pDocumentName = pJob->pwszDocumentName;
-    OpenData.pOutputFile = NULL;
+    OpenData.pOutputFile = pJob->pwszOutputFile;
     OpenData.pParameters = pJob->pwszPrintProcessorParameters;
     OpenData.pPrinterName = pJob->pPrinter->pwszPrinterName;
 
     // Associate our job to the port. The next port handle created through LocalOpenPrinter will pick this up.
     // LocalStartDocPrinter needs this information to call StartDocPort of the Print Monitor, but as the parameters
     // for LocalOpenPrinter and LocalStartDocPrinter are fixed, we can only pass over the information this way.
-    pJob->pPrinter->pPort->pNextJobToProcess = pJob;
+    // The port prints one job at a time, so that no other job takes over this association.
+    // Only this thread, which runs the Print Processor, may claim the job.
+    EnterCriticalSection(&pPort->PrintingSection);
+    bPortLocked = TRUE;
+    pPort->dwPrintingThreadId = GetCurrentThreadId();
+    pPort->pNextJobToProcess = pJob;
 
     // Open a handle to the Print Processor.
     hPrintProcessor = pPrintProcessor->pfnOpenPrintProcessor(pwszPrinterPort, &OpenData);
@@ -115,6 +136,31 @@ PrintingThreadProc(PLOCAL_JOB pJob)
 Cleanup:
     if (hPrintProcessor)
         pPrintProcessor->pfnClosePrintProcessor(hPrintProcessor);
+
+    if (bPortLocked)
+    {
+        pPort->pNextJobToProcess = NULL;
+        pPort->dwPrintingThreadId = 0;
+        LeaveCriticalSection(&pPort->PrintingSection);
+    }
+
+    // A job that could not be printed is discarded with its spool file, so that it does not stay in the queue forever.
+    // The job is still in the job list unless the Print Monitor reported it as sent to the printer.
+    if (dwErrorCode != ERROR_SUCCESS)
+    {
+        WCHAR wszFullPath[MAX_PATH];
+
+        ERR("Discarding job %lu, which could not be printed!\n", dwJobID);
+        GetJobFilePath(L"SPL", dwJobID, wszFullPath);
+        DeleteFileW(wszFullPath);
+
+        pFailedJob = LookupElementSkiplist(&GlobalJobList, &dwJobID, NULL);
+        if (pFailedJob)
+        {
+            pFailedJob->hPrintProcessor = NULL;
+            FreeJob(pFailedJob);
+        }
+    }
 
     if (pwszPrinterPort)
         DllFreeSplMem(pwszPrinterPort);
