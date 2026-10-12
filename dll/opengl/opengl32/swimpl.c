@@ -958,7 +958,7 @@ static void write_color_span_frontbuffer_##__bpp(struct sw_framebuffer* fb,     
         {                                                                       \
             if (mask[n])                                                        \
             {                                                                   \
-                SetPixel(fb->Hdc, x + n, fb->height - y,                        \
+                SetPixel(fb->Hdc, x + n, fb->height - 1 - y,                    \
                         PACK_COLORREF_##__bpp(red[n], green[n], blue[n]));      \
             }                                                                   \
         }                                                                       \
@@ -967,7 +967,7 @@ static void write_color_span_frontbuffer_##__bpp(struct sw_framebuffer* fb,     
     {                                                                           \
         while (n--)                                                             \
         {                                                                       \
-            SetPixel(fb->Hdc, x + n, fb->height - y,                            \
+            SetPixel(fb->Hdc, x + n, fb->height - 1 - y,                        \
                     PACK_COLORREF_##__bpp(red[n], green[n], blue[n]));          \
         }                                                                       \
     }                                                                           \
@@ -1035,7 +1035,7 @@ static void write_monocolor_span_frontbuffer(struct sw_framebuffer* fb, GLuint n
         while (n--)
         {
             if (mask[n])
-                SetPixel(fb->Hdc, x + n, y, Color);
+                SetPixel(fb->Hdc, x + n, fb->height - 1 - y, Color);
         }
     }
     else
@@ -1043,7 +1043,7 @@ static void write_monocolor_span_frontbuffer(struct sw_framebuffer* fb, GLuint n
         HBRUSH Brush = CreateSolidBrush(Color);
         Brush = SelectObject(fb->Hdc, Brush);
 
-        PatBlt(fb->Hdc, x, fb->height - y, n, 1, PATCOPY);
+        PatBlt(fb->Hdc, x, fb->height - 1 - y, n, 1, PATCOPY);
 
         Brush = SelectObject(fb->Hdc, Brush);
         DeleteObject(Brush);
@@ -1110,9 +1110,9 @@ static void write_color_pixels_##__bpp(GLcontext* ctx,                          
         {                                                                                           \
             if (mask[n])                                                                            \
             {                                                                                       \
-                TRACE("Setting pixel %u, %u to 0x%08x.\n", x[n], fb->height - y[n],                 \
+                TRACE("Setting pixel %u, %u to 0x%08x.\n", x[n], fb->height - 1 - y[n],             \
                         PACK_COLORREF_##__bpp(r[n], g[n], b[n]));                                   \
-                SetPixel(fb->Hdc, x[n], fb->height - y[n],                                          \
+                SetPixel(fb->Hdc, x[n], fb->height - 1 - y[n],                                      \
                         PACK_COLORREF_##__bpp(r[n], g[n], b[n]));                                   \
             }                                                                                       \
         }                                                                                           \
@@ -1147,7 +1147,7 @@ static void write_monocolor_pixels_frontbuffer(
     {
         if (mask[n])
         {
-            SetPixel(fb->Hdc, x[n], fb->height - y[n], Color);
+            SetPixel(fb->Hdc, x[n], fb->height - 1 - y[n], Color);
         }
     }
 }
@@ -1227,7 +1227,7 @@ static void read_color_span_##__bpp(GLcontext* ctx,                             
         COLORREF Color;                                                         \
         while (n--)                                                             \
         {                                                                       \
-            Color = GetPixel(fb->Hdc, x + n, fb->height - y);                   \
+            Color = GetPixel(fb->Hdc, x + n, fb->height - 1 - y);               \
             UNPACK_COLORREF_##__bpp(Color, &red[n], &green[n], &blue[n]);       \
             alpha[n] = 0;                                                       \
         }                                                                       \
@@ -1278,7 +1278,7 @@ static void read_color_pixels_##__bpp(GLcontext* ctx,                           
         {                                                                                   \
             if (mask[n])                                                                    \
             {                                                                               \
-                Color = GetPixel(fb->Hdc, x[n], fb->height - y[n]);                         \
+                Color = GetPixel(fb->Hdc, x[n], fb->height - 1 - y[n]);                     \
                 UNPACK_COLORREF_##__bpp(Color, &red[n], &green[n], &blue[n]);               \
                 alpha[n] = 0;                                                               \
             }                                                                               \
