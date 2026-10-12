@@ -217,8 +217,6 @@ Return Value:
 
 #ifdef __REACTOS__
                 NTSTATUS FlushStatus;
-                VBO DirtyVbo;
-                ULONG DirtyByteCount;
 
                 FlushStatus = FatFlushVolume( IrpContext, Vcb, Flush );
 
@@ -228,12 +226,7 @@ Return Value:
                 //  leave the volume marked dirty.
                 //
 
-                if (NT_SUCCESS( FlushStatus ) &&
-                    FatFindDirtyFat( Vcb,
-                                     FatReservedBytes( &Vcb->Bpb ),
-                                     FatBytesPerFat( &Vcb->Bpb ),
-                                     &DirtyVbo,
-                                     &DirtyByteCount )) {
+                if (NT_SUCCESS( FlushStatus ) && FatIsFatDirty( Vcb )) {
 
                     FlushStatus = STATUS_UNSUCCESSFUL;
                 }

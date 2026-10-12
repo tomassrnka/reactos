@@ -3601,6 +3601,9 @@ Return Value:
     if (NT_SUCCESS( Status ) &&
         FlagOn( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY ) &&
         !FlagOn( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY ) &&
+#ifdef __REACTOS__
+        !FatIsFatDirty( Vcb ) &&
+#endif
         !CcIsThereDirtyData(Vcb->Vpb)) {
 
         FatMarkVolume( IrpContext, Vcb, VolumeClean );
@@ -7657,7 +7660,12 @@ Return Value:
             //  The volume is now clean, note it.
             //
 
+#ifdef __REACTOS__
+            if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY) &&
+                !FatIsFatDirty( Vcb )) {
+#else
             if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+#endif
 
                 FatMarkVolume( IrpContext, Vcb, VolumeClean );
                 ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );

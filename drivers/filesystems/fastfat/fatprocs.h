@@ -171,8 +171,24 @@ FatMarkFatDirty (
     IN ULONG ByteCount
     );
 
+LONG
+FatBeginDirtyFatWrite (
+    IN PVCB Vcb
+    );
+
+VOID
+FatEndDirtyFatWrite (
+    IN PVCB Vcb,
+    IN LONG Generation
+    );
+
 VOID
 FatWaitForDirtyFatWrites (
+    IN PVCB Vcb
+    );
+
+BOOLEAN
+FatIsFatDirty (
     IN PVCB Vcb
     );
 

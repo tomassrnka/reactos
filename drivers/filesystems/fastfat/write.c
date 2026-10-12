@@ -579,9 +579,10 @@ Return Value:
         //  The dirty sectors are marked clean before the disk reads them (a
         //  change made after that marks them dirty again, see
         //  FatMarkFatDirty), and one request transfers at a time, so a later
-        //  one carries newer data.  Nothing taken while DirtyFatWriteResource
-        //  is held needs memory, so the threads that free memory may wait
-        //  for it.
+        //  one carries newer data.  DirtyFatWriteResource is held only around
+        //  the transfer, which takes no lock and does not wait for memory to
+        //  be freed (its Irp and Mdl allocations fail instead), so the
+        //  threads that free memory may wait for it.
         //
 
         {
@@ -590,8 +591,21 @@ Return Value:
             ULONG BytesPerFat;
             IO_RUN StackIoRuns[2];
             PIO_RUN IoRuns = StackIoRuns;
+            LONG Generation;
 
-            ExAcquireSharedStarveExclusive( &Vcb->DirtyFatWriteActive, TRUE );
+            //
+            //  Allocate before the write is counted, so that a drain does
+            //  not also wait for this allocation.
+            //
+
+            if ((ULONG)Vcb->Bpb.Fats > 2) {
+
+                IoRuns = FsRtlAllocatePoolWithTag( PagedPool,
+                                                   (ULONG)(Vcb->Bpb.Fats*sizeof(IO_RUN)),
+                                                   TAG_IO_RUNS );
+            }
+
+            Generation = FatBeginDirtyFatWrite( Vcb );
 
             _SEH2_TRY {
 
@@ -600,13 +614,6 @@ Return Value:
                 if (Found) {
 
                     BytesPerFat = FatBytesPerFat( &Vcb->Bpb );
-
-                    if ((ULONG)Vcb->Bpb.Fats > 2) {
-
-                        IoRuns = FsRtlAllocatePoolWithTag( PagedPool,
-                                                           (ULONG)(Vcb->Bpb.Fats*sizeof(IO_RUN)),
-                                                           TAG_IO_RUNS );
-                    }
 
                     for (Fat = 0; Fat < (ULONG)Vcb->Bpb.Fats; Fat++) {
 
@@ -640,6 +647,7 @@ Return Value:
                             !NT_SUCCESS( Irp->IoStatus.Status )) {
 
                             FatMarkFatDirty( Vcb, StartingDirtyVbo, WriteLength );
+                            InterlockedIncrement( &Vcb->DirtyFatWriteFailures );
                         }
                     } _SEH2_END;
                 }
@@ -651,7 +659,7 @@ Return Value:
                     ExFreePool( IoRuns );
                 }
 
-                ExReleaseResourceLite( &Vcb->DirtyFatWriteActive );
+                FatEndDirtyFatWrite( Vcb, Generation );
             } _SEH2_END;
 
             if (Found && !NT_SUCCESS( Irp->IoStatus.Status )) {

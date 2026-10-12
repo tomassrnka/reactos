@@ -3929,6 +3929,68 @@ Return Value:
 }
 
 
+LONG
+FatBeginDirtyFatWrite (
+    IN PVCB Vcb
+    )
+
+/*++
+
+Routine Description:
+
+    This routine counts a volume file write in the current generation,
+    before it finds its dirty sectors.  If a drain starts a new generation
+    meanwhile, the write counts itself in the new one instead, so that a
+    drain never misses a write that marks sectors clean after it started.
+
+Return Value:
+
+    LONG - The generation to pass to FatEndDirtyFatWrite.
+
+--*/
+
+{
+    LONG Generation;
+
+    for (;;) {
+
+        Generation = Vcb->DirtyFatWriteGeneration & 1;
+
+        InterlockedIncrement( &Vcb->DirtyFatWriteCount[Generation] );
+
+        if ((InterlockedCompareExchange( &Vcb->DirtyFatWriteGeneration, 0, 0 ) & 1) == Generation) {
+
+            return Generation;
+        }
+
+        FatEndDirtyFatWrite( Vcb, Generation );
+    }
+}
+
+
+VOID
+FatEndDirtyFatWrite (
+    IN PVCB Vcb,
+    IN LONG Generation
+    )
+
+/*++
+
+Routine Description:
+
+    This routine ends a write counted by FatBeginDirtyFatWrite, after its
+    sectors are on the disk or dirty again.
+
+--*/
+
+{
+    if (InterlockedDecrement( &Vcb->DirtyFatWriteCount[Generation] ) == 0) {
+
+        KeSetEvent( &Vcb->DirtyFatWriteDrained, 0, FALSE );
+    }
+}
+
+
 VOID
 FatWaitForDirtyFatWrites (
     IN PVCB Vcb
@@ -3940,16 +4002,99 @@ Routine Description:
 
     This routine waits until every volume file write that has already found
     its dirty sectors has put them on the disk or marked them dirty again.
+    Writes that start while it waits are not waited for.
 
 --*/
 
 {
+    LONG Generation;
+
     PAGED_CODE();
 
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite( &Vcb->DirtyFatWriteActive, TRUE );
-    ExReleaseResourceLite( &Vcb->DirtyFatWriteActive );
+    ExAcquireResourceExclusiveLite( &Vcb->DirtyFatDrainResource, TRUE );
+
+    Generation = (InterlockedIncrement( &Vcb->DirtyFatWriteGeneration ) & 1) ^ 1;
+
+    for (;;) {
+
+        //
+        //  The interlocked read orders the clear before it, so a write that
+        //  ends after the read sets the event again.
+        //
+
+        KeClearEvent( &Vcb->DirtyFatWriteDrained );
+
+        if (InterlockedCompareExchange( &Vcb->DirtyFatWriteCount[Generation], 0, 0 ) == 0) {
+
+            break;
+        }
+
+        KeWaitForSingleObject( &Vcb->DirtyFatWriteDrained, Executive, KernelMode, FALSE, NULL );
+    }
+
+    ExReleaseResourceLite( &Vcb->DirtyFatDrainResource );
     KeLeaveCriticalRegion();
+}
+
+
+BOOLEAN
+FatIsFatDirty (
+    IN PVCB Vcb
+    )
+
+/*++
+
+Routine Description:
+
+    This routine waits for the volume file writes in progress and then
+    tells whether a sector of the first fat may still not be on the disk.
+    The volume must not be marked clean while one may be.  A write that
+    starts after the wait can take sectors the scan then sees clean and
+    fail later, so the fat is clean only if both write counts read zero
+    after the scan and the failure count did not change since before the
+    wait (a failure count that wraps all the way around during one check
+    is not detected); if writes keep running, the answer is dirty, which
+    is always safe.
+
+Return Value:
+
+    BOOLEAN - TRUE if a fat sector may be dirty.
+
+--*/
+
+{
+    VBO DirtyVbo;
+    ULONG DirtyByteCount;
+    LONG Failures;
+    ULONG Attempt;
+
+    PAGED_CODE();
+
+    for (Attempt = 0; Attempt < 3; Attempt++) {
+
+        Failures = InterlockedCompareExchange( &Vcb->DirtyFatWriteFailures, 0, 0 );
+
+        FatWaitForDirtyFatWrites( Vcb );
+
+        if (FatFindDirtyFat( Vcb,
+                             FatReservedBytes( &Vcb->Bpb ),
+                             FatBytesPerFat( &Vcb->Bpb ),
+                             &DirtyVbo,
+                             &DirtyByteCount )) {
+
+            return TRUE;
+        }
+
+        if ((InterlockedCompareExchange( &Vcb->DirtyFatWriteCount[0], 0, 0 ) == 0) &&
+            (InterlockedCompareExchange( &Vcb->DirtyFatWriteCount[1], 0, 0 ) == 0) &&
+            (InterlockedCompareExchange( &Vcb->DirtyFatWriteFailures, 0, 0 ) == Failures)) {
+
+            return FALSE;
+        }
+    }
+
+    return TRUE;
 }
 
 

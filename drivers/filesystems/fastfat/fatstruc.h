@@ -431,12 +431,19 @@ typedef struct _VCB {
     ERESOURCE DirtyFatWriteResource;
 
     //
-    //  Held shared by a volume file write from finding its dirty sectors
-    //  until they are on the disk or dirty again; FatFlushFat acquires it
-    //  exclusively to wait for such writes.
+    //  Volume file writes between finding their dirty sectors and having
+    //  them on the disk or dirty again, counted per generation.  A drain
+    //  starts a new generation and waits until the old one's count is zero;
+    //  later writes count in the new generation and cannot postpone it.
+    //  DirtyFatDrainResource serializes drains.  DirtyFatWriteFailures
+    //  counts writes that failed and marked their sectors dirty again.
     //
 
-    ERESOURCE DirtyFatWriteActive;
+    LONG DirtyFatWriteGeneration;
+    LONG DirtyFatWriteCount[2];
+    LONG DirtyFatWriteFailures;
+    KEVENT DirtyFatWriteDrained;
+    ERESOURCE DirtyFatDrainResource;
 #endif
 
 

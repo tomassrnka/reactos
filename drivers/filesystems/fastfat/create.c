@@ -2457,6 +2457,9 @@ Return Value:
         if (CleanedVolume &&
             FlagOn( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY ) &&
             !FlagOn( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY ) &&
+#ifdef __REACTOS__
+            !FatIsFatDirty( Vcb ) &&
+#endif
             !CcIsThereDirtyData(Vcb->Vpb)) {
 
             //

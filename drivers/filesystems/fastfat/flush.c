@@ -422,7 +422,28 @@ Return Value:
                 //  The volume is now clean, note it.
                 //
 
+#ifdef __REACTOS__
+                //
+                //  A fat sector may not be on the disk (a write of it failed
+                //  or is still running): keep the volume marked dirty and
+                //  let the deferred clean check again.
+                //
+
+                if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY) &&
+                    FatIsFatDirty( Vcb )) {
+
+                    LARGE_INTEGER TwoSecondsFromNow;
+
+                    TwoSecondsFromNow.QuadPart = (LONG)-2*1000*1000*10;
+
+                    KeSetTimer( &Vcb->CleanVolumeTimer,
+                                TwoSecondsFromNow,
+                                &Vcb->CleanVolumeDpc );
+
+                } else if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+#else
                 if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+#endif
 
                     FatMarkVolume( IrpContext, Vcb, VolumeClean );
                     ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );

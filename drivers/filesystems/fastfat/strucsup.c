@@ -465,8 +465,9 @@ Return Value:
 #ifdef __REACTOS__
         ExInitializeResourceLite( &Vcb->DirtyFatWriteResource );
         UnwindResource3 = &Vcb->DirtyFatWriteResource;
-        ExInitializeResourceLite( &Vcb->DirtyFatWriteActive );
-        UnwindResource4 = &Vcb->DirtyFatWriteActive;
+        ExInitializeResourceLite( &Vcb->DirtyFatDrainResource );
+        UnwindResource4 = &Vcb->DirtyFatDrainResource;
+        KeInitializeEvent( &Vcb->DirtyFatWriteDrained, NotificationEvent, FALSE );
 #endif
 
         //
@@ -923,7 +924,7 @@ Return Value:
     FatDeleteResource( &Vcb->ChangeBitMapResource );
 #ifdef __REACTOS__
     FatDeleteResource( &Vcb->DirtyFatWriteResource );
-    FatDeleteResource( &Vcb->DirtyFatWriteActive );
+    FatDeleteResource( &Vcb->DirtyFatDrainResource );
 #endif
 
     //
