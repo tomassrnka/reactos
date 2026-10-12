@@ -1208,6 +1208,13 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
 
     pPrinterHandle = (PLOCAL_PRINTER_HANDLE)pHandle->pSpecificHandle;
 
+    // A Printer Job handle (a job but no started document) cannot schedule a job, as on Windows.
+    if (pPrinterHandle->pJob && !pPrinterHandle->bStartedDoc)
+    {
+        dwErrorCode = ERROR_INVALID_HANDLE;
+        goto Cleanup;
+    }
+
     // Check if the Job ID is valid.
     pJob = LookupElementSkiplist(&GlobalJobList, &dwJobID, NULL);
     if (!pJob || pJob->pPrinter != pPrinterHandle->pPrinter)
@@ -1220,6 +1227,14 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
     if (!pJob->bAddedJob)
     {
         dwErrorCode = ERROR_SPL_NO_ADDJOB;
+        goto Cleanup;
+    }
+
+    // Only the handle that added the job may schedule it, as on Windows.
+    // That handle owns the job until it is scheduled; another handle would leave it pointing to a job freed after printing.
+    if (pPrinterHandle->pJob != pJob)
+    {
+        dwErrorCode = ERROR_ACCESS_DENIED;
         goto Cleanup;
     }
 
@@ -1239,7 +1254,7 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
 
     // The document of this handle is finished; the job now belongs to the printing thread.
     // If printing could not be started, the handle keeps the job, so that closing it discards the job.
-    if (dwErrorCode == ERROR_SUCCESS && pPrinterHandle->pJob == pJob)
+    if (dwErrorCode == ERROR_SUCCESS)
     {
         pPrinterHandle->bStartedDoc = FALSE;
         pPrinterHandle->pJob = NULL;
