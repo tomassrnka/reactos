@@ -269,6 +269,10 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
 
     TRACE("CreateJob(%p)\n", pPrinterHandle);
 
+    // A deleted printer accepts no jobs. This is checked again below together with adding the job.
+    if (pPrinterHandle->pPrinter->dwStatus & PRINTER_STATUS_PENDING_DELETION)
+        return ERROR_PRINTER_DELETED;
+
     // Create a new job.
     pJob = DllAllocSplMem(sizeof(LOCAL_JOB));
     if (!pJob)
@@ -335,9 +339,22 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     CopyMemory(pJob->pwszMachineName, wszDoubleBackslash, cchDoubleBackslash * sizeof(WCHAR));
     CopyMemory(&pJob->pwszMachineName[cchDoubleBackslash], pwszMachineName, (cchMachineName + 1) * sizeof(WCHAR));
 
+    // A deleted printer accepts no jobs. Check it together with adding the job, so that a deletion cannot come in between.
+    EnterCriticalSection(&PrinterDeletionSection);
+
+    if (pJob->pPrinter->dwStatus & PRINTER_STATUS_PENDING_DELETION)
+    {
+        LeaveCriticalSection(&PrinterDeletionSection);
+        dwErrorCode = ERROR_PRINTER_DELETED;
+        FreeJob(pJob);
+        pJob = NULL;
+        goto Cleanup;
+    }
+
     // Add the job to the Global Job List.
     if (!InsertElementSkiplist(&GlobalJobList, pJob))
     {
+        LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
         ERR("InsertElementSkiplist failed for job %lu for the GlobalJobList!\n", pJob->dwJobID);
         goto Cleanup;
@@ -347,10 +364,14 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     // As all new jobs are created with default priority, we can be sure that it would always be inserted at the end.
     if (!InsertTailElementSkiplist(&pJob->pPrinter->JobList, pJob))
     {
+        DeleteElementSkiplist(&GlobalJobList, pJob);
+        LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
         ERR("InsertTailElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
         goto Cleanup;
     }
+
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     // We were successful!
     pPrinterHandle->bStartedDoc = TRUE;
@@ -787,8 +808,11 @@ _LocalSetJobLevel1(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
 
         // Remove and reinsert the job in the Printer's Job List.
         // The Compare function will be used to find the right position now considering the new priority.
+        // A deletion of the printer must not see the queue empty in between.
+        EnterCriticalSection(&PrinterDeletionSection);
         DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
         InsertElementSkiplist(&pJob->pPrinter->JobList, pJob);
+        LeaveCriticalSection(&PrinterDeletionSection);
     }
 
     // Check if the status flags have changed.
@@ -918,8 +942,11 @@ _LocalSetJobLevel2(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
 
         // Remove and reinsert the job in the Printer's Job List.
         // The Compare function will be used to find the right position now considering the new priority.
+        // A deletion of the printer must not see the queue empty in between.
+        EnterCriticalSection(&PrinterDeletionSection);
         DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
         InsertElementSkiplist(&pJob->pPrinter->JobList, pJob);
+        LeaveCriticalSection(&PrinterDeletionSection);
     }
 
     // Check if the status flags have changed.

@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     ClosePrinter.c
+    DeletePrinter.c
     EnumPrinters.c
     EnumPrintProcessorDatatypes.c
     GetDefaultPrinter.c

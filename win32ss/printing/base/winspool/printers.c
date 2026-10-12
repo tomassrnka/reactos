@@ -448,10 +448,51 @@ Cleanup:
     return (dwErrorCode == ERROR_SUCCESS);
 }
 
+/*
+ * Removes a deleted printer from the printer lists of the current user.
+ * If it was the default printer, the user has no default printer afterwards (as on Windows).
+ */
+static VOID
+_RemovePrinterFromUserProfile(PCWSTR pwszPrinter)
+{
+    static const PCWSTR pwszUserKeys[] =
+    {
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Devices",
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\PrinterPorts",
+    };
+    DWORD cchDefault, i;
+    HKEY hKey;
+    WCHAR wszDefault[MAX_PRINTER_NAME + 1];
+    BOOL bWasDefault;
+
+    cchDefault = _countof(wszDefault);
+    bWasDefault = GetDefaultPrinterW(wszDefault, &cchDefault) && !_wcsicmp(wszDefault, pwszPrinter);
+
+    for (i = 0; i < _countof(pwszUserKeys); i++)
+    {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, pwszUserKeys[i], 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+        {
+            RegDeleteValueW(hKey, pwszPrinter);
+            RegCloseKey(hKey);
+        }
+    }
+
+    if (bWasDefault)
+    {
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, wszWindowsKey, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+        {
+            RegDeleteValueW(hKey, wszDeviceValue);
+            RegCloseKey(hKey);
+        }
+    }
+}
+
 BOOL WINAPI
 DeletePrinter(HANDLE hPrinter)
 {
+    DWORD cbNeeded = 0;
     DWORD dwErrorCode;
+    PPRINTER_INFO_4W pInfo4 = NULL;
     PSPOOLER_HANDLE pHandle = (PSPOOLER_HANDLE)hPrinter;
 
     TRACE("DeletePrinter(%p)\n", hPrinter);
@@ -463,10 +504,22 @@ DeletePrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
+    // Remember the name of the printer for cleaning up the user profile.
+    GetPrinterW(hPrinter, 4, NULL, 0, &cbNeeded);
+    if (cbNeeded)
+    {
+        pInfo4 = HeapAlloc(hProcessHeap, 0, cbNeeded);
+        if (pInfo4 && !GetPrinterW(hPrinter, 4, (PBYTE)pInfo4, cbNeeded, &cbNeeded))
+        {
+            HeapFree(hProcessHeap, 0, pInfo4);
+            pInfo4 = NULL;
+        }
+    }
+
     // Do the RPC call.
     RpcTryExcept
     {
-        dwErrorCode = _RpcDeletePrinter(&pHandle->hPrinter);
+        dwErrorCode = _RpcDeletePrinter(pHandle->hPrinter);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -475,7 +528,13 @@ DeletePrinter(HANDLE hPrinter)
     }
     RpcEndExcept;
 
+    if (dwErrorCode == ERROR_SUCCESS && pInfo4 && pInfo4->pPrinterName)
+        _RemovePrinterFromUserProfile(pInfo4->pPrinterName);
+
 Cleanup:
+    if (pInfo4)
+        HeapFree(hProcessHeap, 0, pInfo4);
+
     SetLastError(dwErrorCode);
     return (dwErrorCode == ERROR_SUCCESS);
 }

@@ -10,6 +10,9 @@
 // Global Variables
 SKIPLIST PrinterList;
 
+// Serializes deleting a printer with creating jobs for it.
+CRITICAL_SECTION PrinterDeletionSection;
+
 // Forward Declarations
 static void _LocalGetPrinterLevel0(PLOCAL_PRINTER pPrinter, PPRINTER_INFO_STRESS* ppPrinterInfo, PBYTE* ppPrinterInfoEnd, PDWORD pcbNeeded, DWORD cchComputerName, PCWSTR wszComputerName);
 static void _LocalGetPrinterLevel1(PLOCAL_PRINTER pPrinter, PPRINTER_INFO_1W* ppPrinterInfo, PBYTE* ppPrinterInfoEnd, PDWORD pcbNeeded, DWORD cchComputerName, PCWSTR wszComputerName);
@@ -123,6 +126,7 @@ InitializePrinterList(VOID)
 
     // Initialize an empty list for our printers.
     InitializeSkiplist(&PrinterList, DllAllocSplMem, _PrinterListCompareRoutine, (PSKIPLIST_FREE_ROUTINE)DllFreeSplMem);
+    InitializeCriticalSection(&PrinterDeletionSection);
 
     // Get the number of subkeys of the printers registry key. Each subkey is a local printer there.
     dwErrorCode = (DWORD)RegQueryInfoKeyW(hPrintersKey, NULL, NULL, NULL, &dwSubKeys, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
@@ -881,6 +885,68 @@ _LocalGetPrinterLevel9(PLOCAL_PRINTER pPrinter, PPRINTER_INFO_9W* ppPrinterInfo,
 }
 
 BOOL WINAPI
+LocalDeletePrinter(HANDLE hPrinter)
+{
+    DWORD dwErrorCode;
+    PLOCAL_HANDLE pHandle = (PLOCAL_HANDLE)hPrinter;
+    PLOCAL_PRINTER pPrinter;
+    PLOCAL_PRINTER_HANDLE pPrinterHandle;
+
+    TRACE("LocalDeletePrinter(%p)\n", hPrinter);
+
+    // Sanity checks.
+    if (!pHandle || pHandle->HandleType != HandleType_Printer)
+    {
+        dwErrorCode = ERROR_INVALID_HANDLE;
+        goto Cleanup;
+    }
+
+    pPrinterHandle = (PLOCAL_PRINTER_HANDLE)pHandle->pSpecificHandle;
+    pPrinter = pPrinterHandle->pPrinter;
+
+    // Deleting a printer needs a handle opened for administering it.
+    if (!(pPrinterHandle->DesiredAccess & (DELETE | PRINTER_ACCESS_ADMINISTER | GENERIC_ALL)))
+    {
+        dwErrorCode = ERROR_ACCESS_DENIED;
+        goto Cleanup;
+    }
+
+    EnterCriticalSection(&PrinterDeletionSection);
+
+    if (pPrinter->dwStatus & PRINTER_STATUS_PENDING_DELETION)
+    {
+        // It has been deleted through another handle already.
+        dwErrorCode = ERROR_PRINTER_DELETED;
+    }
+    else if (pPrinter->JobList.NodeCount)
+    {
+        // A printer is only deleted with an empty queue: nothing would delete it once its jobs are done.
+        dwErrorCode = ERROR_PRINTER_HAS_JOBS_QUEUED;
+    }
+    else
+    {
+        // Remove the printer from the registry, so that it is gone after a restart.
+        dwErrorCode = (DWORD)RegDeleteTreeW(hPrintersKey, pPrinter->pwszPrinterName);
+        if (dwErrorCode == ERROR_SUCCESS)
+        {
+            // From now on, the printer is neither enumerated nor opened, and accepts no jobs.
+            // It stays in the printer list until the spooler restarts, because open handles still refer to it.
+            pPrinter->dwStatus |= PRINTER_STATUS_PENDING_DELETION;
+        }
+        else
+        {
+            ERR("Deleting the registry key of printer \"%S\" failed with status %lu!\n", pPrinter->pwszPrinterName, dwErrorCode);
+        }
+    }
+
+    LeaveCriticalSection(&PrinterDeletionSection);
+
+Cleanup:
+    SetLastError(dwErrorCode);
+    return (dwErrorCode == ERROR_SUCCESS);
+}
+
+BOOL WINAPI
 LocalEnumPrinters(DWORD Flags, LPWSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned)
 {
     DWORD cchComputerName = 0;
@@ -942,6 +1008,10 @@ LocalEnumPrinters(DWORD Flags, LPWSTR Name, DWORD Level, LPBYTE pPrinterEnum, DW
     {
         pPrinter = (PLOCAL_PRINTER)pNode->Element;
 
+        // A deleted printer is not listed anymore.
+        if (pPrinter->dwStatus & PRINTER_STATUS_PENDING_DELETION)
+            continue;
+
         // TODO: If PRINTER_ENUM_SHARED is given, add this Printer if it's shared instead of just ignoring it.
         if (Flags & PRINTER_ENUM_SHARED)
         {
@@ -965,6 +1035,10 @@ LocalEnumPrinters(DWORD Flags, LPWSTR Name, DWORD Level, LPBYTE pPrinterEnum, DW
     for (pNode = PrinterList.Head.Next[0]; pNode; pNode = pNode->Next[0])
     {
         pPrinter = (PLOCAL_PRINTER)pNode->Element;
+
+        // The printer may have been deleted since it was counted.
+        if (pPrinter->dwStatus & PRINTER_STATUS_PENDING_DELETION)
+            continue;
 
         // TODO: If PRINTER_ENUM_SHARED is given, add this Printer if it's shared instead of just ignoring it.
         if (Flags & PRINTER_ENUM_SHARED)
@@ -1124,9 +1198,9 @@ _LocalOpenPrinterHandle(PWSTR pwszPrinterName, PWSTR pwszJobParameter, PHANDLE p
     PLOCAL_PRINTER_HANDLE pPrinterHandle = NULL;
     WCHAR wszFullPath[MAX_PATH];
 
-    // Retrieve the printer from the list.
+    // Retrieve the printer from the list. A deleted printer cannot be opened anymore.
     pPrinter = LookupElementSkiplist(&PrinterList, &pwszPrinterName, NULL);
-    if (!pPrinter)
+    if (!pPrinter || (pPrinter->dwStatus & PRINTER_STATUS_PENDING_DELETION))
     {
         // The printer does not exist.
         dwErrorCode = ERROR_INVALID_NAME;
@@ -1177,6 +1251,9 @@ _LocalOpenPrinterHandle(PWSTR pwszPrinterName, PWSTR pwszJobParameter, PHANDLE p
         pPrinterHandle->pDevMode = DuplicateDevMode(pDefault->pDevMode);
     else
         pPrinterHandle->pDevMode = DuplicateDevMode(pPrinter->pDefaultDevMode);
+
+    // Remember the requested access for operations that need more than printing.
+    pPrinterHandle->DesiredAccess = pDefault ? pDefault->DesiredAccess : 0;
 
     // Check if the caller wants a handle to an existing Print Job.
     if (pwszJobParameter)
