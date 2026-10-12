@@ -17,6 +17,7 @@ list(APPEND SOURCE
     DragDrop.cpp
     ExtractIconEx.cpp
     FindExecutable.cpp
+    FormerStubs.cpp
     GetDisplayNameOf.cpp
     GUIDFromString.cpp
     LockServer.cpp
@@ -33,6 +34,7 @@ list(APPEND SOURCE
     PathResolve.cpp
     RealShellExecuteEx.cpp
     SHAppBarMessage.cpp
+    SHBindToFolderIDListParent.cpp
     SHChangeNotify.cpp
     SHCreateDataObject.cpp
     SHCreateFileDataObject.cpp
@@ -40,6 +42,8 @@ list(APPEND SOURCE
     SHEvaluateSystemCommandTemplate.cpp
     SHGetComputerDisplayNameW.cpp
     SHGetKnownFolderPath.cpp
+    SHGetPathFromIDListEx.cpp
+    SHGetStockIconInfo.cpp
     SHGetUnreadMailCountW.cpp
     SHIsBadInterfacePtr.cpp
     SHParseDisplayName.cpp
