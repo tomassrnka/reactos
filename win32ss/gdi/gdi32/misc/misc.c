@@ -401,7 +401,8 @@ static BOOL UXTHEME_DeviceRect(HDC hdc, int x, int y, int cx, int cy, RECT *prcD
         return FALSE;
     if (GetLayout(hdc) & LAYOUT_RTL)
         return FALSE;
-    if (GetGraphicsMode(hdc) == GM_ADVANCED && (!GetWorldTransform(hdc, &xf) || xf.eM12 != 0.0f || xf.eM21 != 0.0f))
+    /* GM_COMPATIBLE keeps a world transform that was set before, and LPtoDP applies it */
+    if (!GetWorldTransform(hdc, &xf) || xf.eM12 != 0.0f || xf.eM21 != 0.0f)
         return FALSE;
     pt[0].x = x;
     pt[0].y = y;
@@ -423,11 +424,10 @@ static int UXTHEME_SetDeviceMapping(HDC hdc)
 
     if (!iSaved)
         return 0;
-    if (GetGraphicsMode(hdc) == GM_ADVANCED)
-    {
-        ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
-        SetGraphicsMode(hdc, GM_COMPATIBLE);
-    }
+    /* The world transform can only be reset in GM_ADVANCED, and GM_COMPATIBLE may still carry one */
+    SetGraphicsMode(hdc, GM_ADVANCED);
+    ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
+    SetGraphicsMode(hdc, GM_COMPATIBLE);
     SetMapMode(hdc, MM_TEXT);
     SetViewportOrgEx(hdc, 0, 0, NULL);
     SetWindowOrgEx(hdc, 0, 0, NULL);
@@ -626,9 +626,25 @@ static inline BOOL UXTHEME_SizedBlt (HDC hdcDst, int nXOriginDst, int nYOriginDs
             int growSize;
 
             /* Calculate temp dimensions of integer multiples of source dimensions */
+#ifdef __REACTOS__
+            /* Neither the temporary size may overflow nor the default bitmap be drawn when creation fails */
+            if (((LONGLONG)nWidthDst + nWidthSrc - 1) / nWidthSrc * nWidthSrc > MAXLONG ||
+                ((LONGLONG)nHeightDst + nHeightSrc - 1) / nHeightSrc * nHeightSrc > MAXLONG)
+            {
+                DeleteDC(hdcTemp);
+                return FALSE;
+            }
+#endif
             nWidthTemp = ((nWidthDst + nWidthSrc - 1) / nWidthSrc) * nWidthSrc;
             nHeightTemp = ((nHeightDst + nHeightSrc - 1) / nHeightSrc) * nHeightSrc;
             bitmapTemp = CreateCompatibleBitmap(hdcSrc, nWidthTemp, nHeightTemp);
+#ifdef __REACTOS__
+            if (!bitmapTemp)
+            {
+                DeleteDC(hdcTemp);
+                return FALSE;
+            }
+#endif
             bitmapOrig = SelectObject(hdcTemp, bitmapTemp);
 
             /* Initial copy of bitmap */
@@ -819,8 +835,10 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
         dstSize.y = abs(dstSize.y);
 
         /* Windows lays the parts out in device pixels: on a scaled DC the margins stay device pixels and no
-           part is scaled again. Rotated, mirrored and right-to-left DCs keep the logical layout */
+           part is scaled again. Rotated, mirrored and right-to-left DCs, and destinations over 16384 device
+           pixels, keep the logical layout */
         if (UXTHEME_DeviceRect(hdc, rcDst.left, rcDst.top, dstSize.x, dstSize.y, &rcDev) &&
+            rcDev.right - rcDev.left <= 0x4000 && rcDev.bottom - rcDev.top <= 0x4000 &&
             (iSaved = UXTHEME_SetDeviceMapping(hdc)) != 0)
         {
             ptOrigin.x = rcDev.left;
