@@ -2264,6 +2264,10 @@ static BOOL PRINTDLG_CreateDCA(LPPRINTDLGA lppd)
     }
     GlobalUnlock(lppd->hDevNames);
     GlobalUnlock(lppd->hDevMode);
+#ifdef __REACTOS__
+    if (!lppd->hDC)
+        COMDLG32_SetCommDlgExtendedError(PDERR_CREATEICFAILURE);
+#endif
     return lppd->hDC != NULL;
 }
 
@@ -2285,6 +2289,10 @@ static BOOL PRINTDLG_CreateDCW(LPPRINTDLGW lppd)
     }
     GlobalUnlock(lppd->hDevNames);
     GlobalUnlock(lppd->hDevMode);
+#ifdef __REACTOS__
+    if (!lppd->hDC)
+        COMDLG32_SetCommDlgExtendedError(PDERR_CREATEICFAILURE);
+#endif
     return lppd->hDC != NULL;
 }
 
@@ -2318,6 +2326,11 @@ BOOL WINAPI PrintDlgA(LPPRINTDLGA lppd)
         COMDLG32_SetCommDlgExtendedError(CDERR_INITIALIZATION);
         return FALSE;
     }
+
+#ifdef __REACTOS__
+    /* A cancelled dialog reports no extended error */
+    COMDLG32_SetCommDlgExtendedError(0);
+#endif
 
     if(TRACE_ON(commdlg)) {
         char flagstr[1000] = "";
@@ -2468,6 +2481,11 @@ BOOL WINAPI PrintDlgW(LPPRINTDLGW lppd)
         COMDLG32_SetCommDlgExtendedError(CDERR_INITIALIZATION);
         return FALSE;
     }
+
+#ifdef __REACTOS__
+    /* A cancelled dialog reports no extended error */
+    COMDLG32_SetCommDlgExtendedError(0);
+#endif
 
     if(TRACE_ON(commdlg)) {
         char flagstr[1000] = "";
