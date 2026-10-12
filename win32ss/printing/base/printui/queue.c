@@ -399,6 +399,7 @@ typedef struct _GENERAL_PAGE
 {
     LPCWSTR pszPrinter;
     HANDLE hPrinter;
+    BOOL bShown;
 } GENERAL_PAGE, *PGENERAL_PAGE;
 
 static void general_page_init(HWND hwndDlg, PGENERAL_PAGE pPage)
@@ -429,7 +430,9 @@ static INT_PTR CALLBACK general_page_proc(HWND hwndDlg, UINT uMsg, WPARAM wParam
 {
     if (uMsg == WM_INITDIALOG)
     {
-        general_page_init(hwndDlg, (PGENERAL_PAGE)((LPPROPSHEETPAGEW)lParam)->lParam);
+        PGENERAL_PAGE pPage = (PGENERAL_PAGE)((LPPROPSHEETPAGEW)lParam)->lParam;
+        pPage->bShown = TRUE;
+        general_page_init(hwndDlg, pPage);
         return TRUE;
     }
     return FALSE;
@@ -441,7 +444,7 @@ static DWORD show_properties(HWND hwndOwner, LPCWSTR pszPrinter, HANDLE hPrinter
     PROPSHEETHEADERW psh = { sizeof(psh) };
     PROPSHEETPAGEW psp = { sizeof(psp) };
     HPROPSHEETPAGE hPage;
-    GENERAL_PAGE page = { pszPrinter, hPrinter };
+    GENERAL_PAGE page = { pszPrinter, hPrinter, FALSE };
     WCHAR szFormat[64], szTitle[MAX_PATH + 64];
     DWORD dwError;
 
@@ -466,7 +469,8 @@ static DWORD show_properties(HWND hwndOwner, LPCWSTR pszPrinter, HANDLE hPrinter
     psh.nPages = 1;
     psh.phpage = &hPage;
     SetLastError(ERROR_SUCCESS);
-    if (PropertySheetW(&psh) < 0)
+    /* comctl32 may return 0 (as for Cancel) when the sheet could not be created, so check that the page was shown */
+    if (PropertySheetW(&psh) < 0 || !page.bShown)
     {
         dwError = GetLastError();
         return dwError ? dwError : ERROR_NOT_ENOUGH_MEMORY;
