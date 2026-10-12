@@ -11,6 +11,7 @@
 
 #include "notepad.h"
 
+#include <limits.h>
 #include <shlobj.h>
 #include <strsafe.h>
 
@@ -219,14 +220,105 @@ BOOL NOTEPAD_FindNext(FINDREPLACE *pFindReplace, BOOL bReplace, BOOL bShowAlert)
  */
 static VOID NOTEPAD_ReplaceAll(FINDREPLACE *pFindReplace)
 {
-    BOOL bShowAlert = TRUE;
+    LPCTSTR pszReplace = pFindReplace->lpstrReplaceWith;
+    INT iTextLength, iTargetLength, iReplaceLength, iNewLength;
+    INT iPosition, iMatches = 0;
+    LPTSTR pszText = NULL, pszNew = NULL, pchDest;
+    LPCTSTR pchCopy;
+    TCHAR szResource[256], szText[256];
 
-    SendMessage(Globals.hEdit, EM_SETSEL, 0, 0);
+    iTargetLength = (INT)_tcslen(pFindReplace->lpstrFindWhat);
+    iReplaceLength = (INT)_tcslen(pszReplace);
+    if (iTargetLength <= 0)
+        return;
 
-    while (NOTEPAD_FindNext(pFindReplace, TRUE, bShowAlert))
+    iTextLength = GetWindowTextLength(Globals.hEdit);
+    if (iTextLength > 0)
     {
-        bShowAlert = FALSE;
+        pszText = HeapAlloc(GetProcessHeap(), 0, (iTextLength + 1) * sizeof(TCHAR));
+        if (!pszText)
+            goto OutOfMemory;
+        iTextLength = GetWindowText(Globals.hEdit, pszText, iTextLength + 1);
     }
+
+    /* Count the matches the same way repeated Replace commands would find them:
+     * left to right over the original text, without overlapping */
+    for (iPosition = 0; iPosition + iTargetLength <= iTextLength; )
+    {
+        if (NOTEPAD_FindTextAt(pFindReplace, pszText, iTextLength, iPosition))
+        {
+            ++iMatches;
+            iPosition += iTargetLength;
+        }
+        else
+        {
+            ++iPosition;
+        }
+    }
+
+    if (iMatches == 0)
+    {
+        if (pszText)
+            HeapFree(GetProcessHeap(), 0, pszText);
+        LoadString(Globals.hInstance, STRING_CANNOTFIND, szResource, _countof(szResource));
+        StringCchPrintf(szText, _countof(szText), szResource, pFindReplace->lpstrFindWhat);
+        LoadString(Globals.hInstance, STRING_NOTEPAD, szResource, _countof(szResource));
+        MessageBox(Globals.hFindReplaceDlg, szText, szResource, MB_OK);
+        return;
+    }
+
+    if (iReplaceLength > iTargetLength &&
+        iMatches > (INT_MAX / (INT)sizeof(TCHAR) - 1 - iTextLength) / (iReplaceLength - iTargetLength))
+    {
+        goto OutOfMemory;
+    }
+    iNewLength = iTextLength + iMatches * (iReplaceLength - iTargetLength);
+
+    pszNew = HeapAlloc(GetProcessHeap(), 0, (iNewLength + 1) * sizeof(TCHAR));
+    if (!pszNew)
+        goto OutOfMemory;
+
+    pchDest = pszNew;
+    pchCopy = pszText;
+    for (iPosition = 0; iPosition + iTargetLength <= iTextLength; )
+    {
+        if (NOTEPAD_FindTextAt(pFindReplace, pszText, iTextLength, iPosition))
+        {
+            size_t cchKeep = &pszText[iPosition] - pchCopy;
+            CopyMemory(pchDest, pchCopy, cchKeep * sizeof(TCHAR));
+            pchDest += cchKeep;
+            CopyMemory(pchDest, pszReplace, iReplaceLength * sizeof(TCHAR));
+            pchDest += iReplaceLength;
+            iPosition += iTargetLength;
+            pchCopy = &pszText[iPosition];
+        }
+        else
+        {
+            ++iPosition;
+        }
+    }
+    CopyMemory(pchDest, pchCopy, (&pszText[iTextLength] - pchCopy) * sizeof(TCHAR));
+    pszNew[iNewLength] = 0;
+    HeapFree(GetProcessHeap(), 0, pszText);
+
+    /* One replacement of the whole text: linear, and a single undo step.
+     * The caret goes to the start first: the edit control lays the new text
+     * out about 20 times slower while it is scrolled to the end. */
+    SendMessage(Globals.hEdit, EM_SETSEL, iTextLength, 0);
+    SendMessage(Globals.hEdit, EM_REPLACESEL, TRUE, (LPARAM)pszNew);
+    HeapFree(GetProcessHeap(), 0, pszNew);
+
+    /* Windows puts the caret at the start of the text */
+    SendMessage(Globals.hEdit, EM_SETSEL, 0, 0);
+    SendMessage(Globals.hEdit, EM_SCROLLCARET, 0, 0);
+    return;
+
+OutOfMemory:
+    if (pszText)
+        HeapFree(GetProcessHeap(), 0, pszText);
+    LoadString(Globals.hInstance, STRING_OUT_OF_MEMORY, szText, _countof(szText));
+    LoadString(Globals.hInstance, STRING_NOTEPAD, szResource, _countof(szResource));
+    MessageBox(Globals.hFindReplaceDlg, szText, szResource, MB_OK | MB_ICONERROR);
 }
 
 /***********************************************************************
