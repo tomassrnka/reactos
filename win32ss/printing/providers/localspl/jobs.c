@@ -127,13 +127,16 @@ _PrinterJobListCompareRoutine(PVOID FirstStruct, PVOID SecondStruct)
     if (iComparison != 0)
         return iComparison;
 
-    // Both have the same priority, so go by creation time when both times are valid.
-    if (SystemTimeToFileTime(&A->stSubmitted, &ftSubmittedA) && SystemTimeToFileTime(&B->stSubmitted, &ftSubmittedB))
-    {
-        iComparison = CompareFileTime(&ftSubmittedA, &ftSubmittedB);
-        if (iComparison != 0)
-            return iComparison;
-    }
+    // Both have the same priority, so go by creation time.
+    // A time that cannot be converted counts as the earliest, so that the order stays transitive.
+    if (!SystemTimeToFileTime(&A->stSubmitted, &ftSubmittedA))
+        ftSubmittedA.dwLowDateTime = ftSubmittedA.dwHighDateTime = 0;
+    if (!SystemTimeToFileTime(&B->stSubmitted, &ftSubmittedB))
+        ftSubmittedB.dwLowDateTime = ftSubmittedB.dwHighDateTime = 0;
+
+    iComparison = CompareFileTime(&ftSubmittedA, &ftSubmittedB);
+    if (iComparison != 0)
+        return iComparison;
 
     // Jobs submitted at the same time are told apart by their ID, so that removing one never finds another.
     return (A->dwJobID > B->dwJobID) - (A->dwJobID < B->dwJobID);
