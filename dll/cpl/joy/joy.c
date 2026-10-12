@@ -243,6 +243,8 @@ MainPageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         case WM_INITDIALOG:
             AddColumns(GetDlgItem(hwndDlg, IDC_CONTROLLER_LIST));
+            /* There is no game controller troubleshooter to start */
+            EnableWindow(GetDlgItem(hwndDlg, IDC_TROUBLESHOOT_BUTTON), FALSE);
             s_hIcon = LoadIconW(hApplet, MAKEINTRESOURCEW(IDI_CPLSYSTEM));
             s_hIconSm = (HICON)LoadImageW(hApplet, MAKEINTRESOURCEW(IDI_CPLSYSTEM),
                                           IMAGE_ICON,
