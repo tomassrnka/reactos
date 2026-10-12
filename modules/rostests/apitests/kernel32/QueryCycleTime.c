@@ -121,8 +121,12 @@ TestIdleProcessorCycleTime(VOID)
         ok(Times[i] >= First[i], "Times[%lu] = %I64u < %I64u\n", i, Times[i], First[i]);
 }
 
-/* Work that takes at least one cycle per iteration */
+/*
+ * Fixed work instead of a time: the counters are in time stamp counter
+ * ticks, which can be fewer than core cycles, so expect a tenth of it
+ */
 #define SPIN_ITERATIONS 50000000
+#define SPIN_MIN_CYCLES (SPIN_ITERATIONS / 10)
 
 static
 VOID
@@ -178,15 +182,15 @@ TestCycleTimeClasses(VOID)
     ok(Info.CurrentCycleCount >= Before && Info.CurrentCycleCount <= After,
        "CurrentCycleCount %I64u not in [%I64u, %I64u]\n", Info.CurrentCycleCount, Before, After);
 
-    /* A wrong length; WOW64 returns the right one, native Windows nothing */
+    /* A wrong length: native Windows leaves the length alone, WOW64 writes 16 (NT 6.1) or 0 (NT 10) */
     Length = 0xdeadbeef;
     Status = NtQueryInformationProcess(GetCurrentProcess(), ProcessCycleTime, &Info, 8, &Length);
     ok(Status == STATUS_INFO_LENGTH_MISMATCH, "Status = 0x%lx\n", Status);
-    ok(Length == (IsWow64 ? 16 : 0xdeadbeef), "Length = %lu\n", Length);
+    ok(IsWow64 ? (Length == 16 || Length == 0) : (Length == 0xdeadbeef), "Length = %lu\n", Length);
     Length = 0xdeadbeef;
     Status = NtQueryInformationProcess(GetCurrentProcess(), ProcessCycleTime, &Info, 24, &Length);
     ok(Status == STATUS_INFO_LENGTH_MISMATCH, "Status = 0x%lx\n", Status);
-    ok(Length == (IsWow64 ? 16 : 0xdeadbeef), "Length = %lu\n", Length);
+    ok(IsWow64 ? (Length == 16 || Length == 0) : (Length == 0xdeadbeef), "Length = %lu\n", Length);
 
     Length = 0xdeadbeef;
     Before = __rdtsc();
@@ -201,11 +205,11 @@ TestCycleTimeClasses(VOID)
     Length = 0xdeadbeef;
     Status = NtQueryInformationThread(GetCurrentThread(), ThreadCycleTime, &Info, 8, &Length);
     ok(Status == STATUS_INFO_LENGTH_MISMATCH, "Status = 0x%lx\n", Status);
-    ok(Length == (IsWow64 ? 16 : 0xdeadbeef), "Length = %lu\n", Length);
+    ok(IsWow64 ? (Length == 16 || Length == 0) : (Length == 0xdeadbeef), "Length = %lu\n", Length);
     Length = 0xdeadbeef;
     Status = NtQueryInformationThread(GetCurrentThread(), ThreadCycleTime, &Info, 24, &Length);
     ok(Status == STATUS_INFO_LENGTH_MISMATCH, "Status = 0x%lx\n", Status);
-    ok(Length == (IsWow64 ? 16 : 0xdeadbeef), "Length = %lu\n", Length);
+    ok(IsWow64 ? (Length == 16 || Length == 0) : (Length == 0xdeadbeef), "Length = %lu\n", Length);
 
     if (OldMask)
         SetThreadAffinityMask(GetCurrentThread(), OldMask);
@@ -255,7 +259,7 @@ TestProcessThreadCycleTime(VOID)
     Success = pQueryThreadCycleTime(GetCurrentThread(), &Cycles2) && Success;
     ok(Success && Cycles2 >= Cycles, "Cycles went from %I64u to %I64u\n", Cycles, Cycles2);
     SpinGrowth = (Cycles2 >= Cycles) ? Cycles2 - Cycles : 0;
-    ok(SpinGrowth >= SPIN_ITERATIONS, "Spinning added %I64u cycles\n", SpinGrowth);
+    ok(SpinGrowth >= SPIN_MIN_CYCLES, "Spinning added %I64u cycles\n", SpinGrowth);
 
     Success = pQueryThreadCycleTime(GetCurrentThread(), &Cycles);
     Sleep(200);
@@ -277,7 +281,7 @@ TestProcessThreadCycleTime(VOID)
     Cycles = 0;
     Success = pQueryThreadCycleTime(hThread, &Cycles);
     ok(Success, "Success = %d, error %lu\n", Success, GetLastError());
-    ok(Cycles >= SPIN_ITERATIONS, "The exited thread used %I64u cycles\n", Cycles);
+    ok(Cycles >= SPIN_MIN_CYCLES, "The exited thread used %I64u cycles\n", Cycles);
     CloseHandle(hThread);
 
     Success = pQueryProcessCycleTime(GetCurrentProcess(), &ProcessAfter);
