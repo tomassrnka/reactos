@@ -197,8 +197,178 @@ VOID TestSSEExceptions(VOID)
     ok(p == ExceptionFilterSSEException, "Unexpected old filter : 0x%p", p);
 }
 
+#define CUSTOM_CODE 0xE0012345
+#define NONCONTINUABLE_CODE 0xE0054321
+#define FILTER_EXIT_CODE 0x12345678
+
+static
+DWORD
+WINAPI
+CrashThread(
+    _In_ PVOID Parameter)
+{
+    *(volatile LONG *)Parameter = 1;
+    return 0;
+}
+
+static
+LONG
+WINAPI
+ExecuteHandlerFilter(
+    _In_ PEXCEPTION_POINTERS ExceptionInfo)
+{
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static
+LONG
+WINAPI
+ExitProcessFilter(
+    _In_ PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode == CUSTOM_CODE)
+        ExitProcess(FILTER_EXIT_CODE);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* Child process: die of an unhandled exception */
+static
+VOID
+RunCrashChild(
+    _In_ PCSTR Mode)
+{
+    HANDLE hThread;
+
+    /* No error box: the default filter lets the startup handler end the process */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+
+    if (!strcmp(Mode, "av"))
+    {
+        *(volatile LONG *)NULL = 1;
+    }
+    else if (!strcmp(Mode, "raise"))
+    {
+        RaiseException(CUSTOM_CODE, 0, 0, NULL);
+    }
+    else if (!strcmp(Mode, "noncontinuable"))
+    {
+        RaiseException(NONCONTINUABLE_CODE, EXCEPTION_NONCONTINUABLE, 0, NULL);
+    }
+    else if (!strcmp(Mode, "thread"))
+    {
+        hThread = CreateThread(NULL, 0, CrashThread, NULL, 0, NULL);
+        if (hThread)
+            WaitForSingleObject(hThread, 30000);
+    }
+    else if (!strcmp(Mode, "filter"))
+    {
+        SetUnhandledExceptionFilter(ExecuteHandlerFilter);
+        RaiseException(CUSTOM_CODE, 0, 0, NULL);
+    }
+    else if (!strcmp(Mode, "filterexit"))
+    {
+        SetUnhandledExceptionFilter(ExitProcessFilter);
+        RaiseException(CUSTOM_CODE, 0, 0, NULL);
+    }
+#if defined(__GNUC__) || defined(__clang__)
+    else if (!strcmp(Mode, "badstack"))
+    {
+        /* No usable stack: the exception cannot be dispatched in user mode */
+#ifdef _M_AMD64
+        __asm__ __volatile__("movq $0x8000, %%rsp\n\tpushq %%rax" : : : "memory");
+#else
+        __asm__ __volatile__("movl $0x8000, %%esp\n\tpushl %%eax" : : : "memory");
+#endif
+    }
+#endif
+    ExitProcess(1);
+}
+
+static
+VOID
+TestCrashExitCode(
+    _In_ PCWSTR Mode,
+    _In_ DWORD ExpectedCode)
+{
+    BOOL Success;
+    WCHAR FileName[MAX_PATH];
+    WCHAR CommandLine[MAX_PATH + 64];
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInfo;
+    DWORD Wait, ExitCode;
+
+    GetModuleFileNameW(NULL, FileName, _countof(FileName));
+    StringCbPrintfW(CommandLine,
+                    sizeof(CommandLine),
+                    L"\"%ls\" SetUnhandledExceptionFilter %ls",
+                    FileName,
+                    Mode);
+
+    RtlZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    Success = CreateProcessW(FileName,
+                             CommandLine,
+                             NULL,
+                             NULL,
+                             FALSE,
+                             0,
+                             NULL,
+                             NULL,
+                             &StartupInfo,
+                             &ProcessInfo);
+    ok(Success, "%ls: CreateProcess failed with %lu\n", Mode, GetLastError());
+    if (!Success)
+        return;
+    CloseHandle(ProcessInfo.hThread);
+
+    Wait = WaitForSingleObject(ProcessInfo.hProcess, 60000);
+    ok(Wait == WAIT_OBJECT_0, "%ls: wait returned %lu\n", Mode, Wait);
+    if (Wait != WAIT_OBJECT_0)
+        TerminateProcess(ProcessInfo.hProcess, 0xDEAD);
+
+    ExitCode = 0x55555555;
+    Success = GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+    ok(Success, "%ls: GetExitCodeProcess failed with %lu\n", Mode, GetLastError());
+    ok(ExitCode == ExpectedCode, "%ls: exit code 0x%08lx, expected 0x%08lx\n",
+       Mode, ExitCode, ExpectedCode);
+    CloseHandle(ProcessInfo.hProcess);
+}
+
+/*
+ * A process killed by an unhandled exception exits with the exception code,
+ * also when the exception is raised in another thread, when a filter set with
+ * SetUnhandledExceptionFilter returns EXCEPTION_EXECUTE_HANDLER, and when the
+ * exception cannot be dispatched to user mode at all. A filter that ends the
+ * process itself decides the exit code: it runs before anything else.
+ */
+static
+VOID
+TestCrashExitCodes(VOID)
+{
+    TestCrashExitCode(L"av", STATUS_ACCESS_VIOLATION);
+    TestCrashExitCode(L"raise", CUSTOM_CODE);
+    TestCrashExitCode(L"noncontinuable", NONCONTINUABLE_CODE);
+    TestCrashExitCode(L"thread", STATUS_ACCESS_VIOLATION);
+    TestCrashExitCode(L"filter", CUSTOM_CODE);
+    TestCrashExitCode(L"filterexit", FILTER_EXIT_CODE);
+#if defined(__GNUC__) || defined(__clang__)
+    TestCrashExitCode(L"badstack", STATUS_ACCESS_VIOLATION);
+#endif
+}
+
 START_TEST(SetUnhandledExceptionFilter)
 {
+    int argc;
+    char **argv;
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3)
+    {
+        RunCrashChild(argv[2]);
+        return;
+    }
+
     TestSetUnhandledExceptionFilter();
+    TestCrashExitCodes();
     TestSSEExceptions();
 }
