@@ -3832,9 +3832,12 @@ LRESULT CShellBrowser::OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
     // TODO: rip down everything
     {
         m_Destroyed = true; // Ignore browse requests from Explorer band TreeView during destruction
-        fCurrentShellView->UIActivate(SVUIA_DEACTIVATE);
+        // there is no view when the first browse was refused
+        if (fCurrentShellView)
+            fCurrentShellView->UIActivate(SVUIA_DEACTIVATE);
         fToolbarProxy.Destroy();
-        fCurrentShellView->DestroyViewWindow();
+        if (fCurrentShellView)
+            fCurrentShellView->DestroyViewWindow();
 
         for (int i = 0; i < 3; i++)
         {
@@ -4049,7 +4052,7 @@ LRESULT CShellBrowser::OnBackspace(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOO
     HRESULT hResult;
     if (LOBYTE(GetVersion()) < 6)
         hResult = NavigateToParent();
-    else if (FAILED(hResult = GoBack()))
+    else if (FAILED(hResult = GoBack()) && hResult != HRESULT_FROM_WIN32(ERROR_CANCELLED))
         hResult = GoForward();
 
     if (FAILED(hResult))

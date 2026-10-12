@@ -358,6 +358,7 @@ HRESULT STDMETHODCALLTYPE CAddressEditBox::Execute(long paramC)
     /* The user cancelled the browse (an empty drive's disk prompt), so do not open it another way */
     if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
     {
+        m_pidlLastParsed.Free();
         RefreshAddress();
         return hr;
     }

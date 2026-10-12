@@ -233,7 +233,8 @@ CExplorerBand::_NavigateToPIDL(
 
     *phItem = NULL;
 
-    HTREEITEM hItem = TreeView_GetFirstVisible(m_hwndTreeView);
+    // the search climbs no higher than where it starts, so it starts at the root
+    HTREEITEM hItem = TreeView_GetRoot(m_hwndTreeView);
     HTREEITEM hParent = NULL, tmp;
     while (TRUE)
     {
