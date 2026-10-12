@@ -108,7 +108,12 @@ PVOID MmPagedPoolEnd;
 //
 // And this is its default size
 //
+#ifdef _M_AMD64
+/* 0 = computed in MiBuildPagedPool unless the registry sets a size */
+SIZE_T MmSizeOfPagedPoolInBytes = 0;
+#else
 SIZE_T MmSizeOfPagedPoolInBytes = MI_MIN_INIT_PAGED_POOLSIZE;
+#endif
 PFN_NUMBER MmSizeOfPagedPoolInPages = MI_MIN_INIT_PAGED_POOLSIZE / PAGE_SIZE;
 
 //
@@ -1800,6 +1805,19 @@ MiBuildPagedPool(VOID)
                                    (ULONG_PTR)MmPagedPoolStart;
     }
 #endif // _M_IX86
+
+#ifdef _M_AMD64
+    //
+    // Without a PagedPoolSize registry value (0 here), size paged pool as x86
+    // does: twice the maximum nonpaged pool. The page directories spanning it,
+    // its first page table and the two bitmaps are allocated below; further
+    // page tables and the pages are added when the pool grows.
+    //
+    if (MmSizeOfPagedPoolInBytes == 0)
+        MmSizeOfPagedPoolInBytes = 2 * MmMaximumNonPagedPoolInBytes;
+    if (MmSizeOfPagedPoolInBytes > MI_MAX_PAGED_POOL_SIZE)
+        MmSizeOfPagedPoolInBytes = MI_MAX_PAGED_POOL_SIZE;
+#endif // _M_AMD64
 
     //
     // Get the size in pages and make sure paged pool is at least 32MB.
