@@ -3047,6 +3047,17 @@ int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
                 if(flags & OFN_PATHMUSTEXIST)
                 {
                     FILEDLG95_OnOpenMessage(hwnd, 0, IDS_PATHNOTEXISTING);
+#ifdef __REACTOS__
+                    /* Like Windows, stay in the current folder and keep the name selected */
+                    if (fodInfos)
+                    {
+                        HWND hwndEdit = fodInfos->DlgInfos.hwndFileName;
+                        if (!filename_is_edit(fodInfos))
+                            hwndEdit = (HWND)SendMessageW(hwndEdit, CBEM_GETEDITCONTROL, 0, 0);
+                        SendMessageW(hwndEdit, EM_SETSEL, 0, -1);
+                        nOpenAction = 0;
+                    }
+#endif
                     break;
                 }
             }
