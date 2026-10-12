@@ -38,6 +38,7 @@ typedef struct _TOKEN
     UCHAR Kind;
     UCHAR Star;
     UCHAR Char;
+    UCHAR LiteralStar;      /* A star at the beginning of the expression, taken literally */
     UCHAR Class[32];
 } TOKEN, *PTOKEN;
 
@@ -49,6 +50,7 @@ typedef struct _PATTERN
     BOOL Regex;
     PTOKEN Tokens;
     SIZE_T TokenCount;
+    PUCHAR States, NextStates;  /* Matcher state sets, TokenCount + 1 entries each */
 } PATTERN, *PPATTERN;
 
 typedef struct _NAME
@@ -250,6 +252,11 @@ CompileRegex(PPATTERN Pattern)
     SIZE_T Length = Pattern->Length, i = 0, n = 0;
     PTOKEN t;
 
+    if (Length >= ((SIZE_T)-1) / sizeof(TOKEN) - 1)
+    {
+        Message(IDS_OUT_OF_MEMORY);
+        ExitProcess(Finish(2));
+    }
     Pattern->Tokens = Alloc((Length + 1) * sizeof(TOKEN));
 
     while (i < Length)
@@ -257,10 +264,11 @@ CompileRegex(PPATTERN Pattern)
         UCHAR c = s[i];
         t = &Pattern->Tokens[n];
 
-        /* A star at the very beginning is an ordinary character */
+        /* A star at the very beginning is an ordinary character; two stars in a row are invalid */
         if (c == '*' && n > 0)
         {
-            if (Pattern->Tokens[n - 1].Star || Pattern->Tokens[n - 1].Kind == TK_BOL ||
+            if (Pattern->Tokens[n - 1].Star || Pattern->Tokens[n - 1].LiteralStar ||
+                Pattern->Tokens[n - 1].Kind == TK_BOL ||
                 Pattern->Tokens[n - 1].Kind == TK_WBEG || Pattern->Tokens[n - 1].Kind == TK_WEND)
             {
                 return FALSE;
@@ -365,6 +373,7 @@ CompileRegex(PPATTERN Pattern)
         {
             t->Kind = TK_CHAR;
             t->Char = c;
+            t->LiteralStar = (c == '*');
             i++;
         }
 
@@ -374,6 +383,8 @@ CompileRegex(PPATTERN Pattern)
     }
 
     Pattern->TokenCount = n;
+    Pattern->States = Alloc(n + 1);
+    Pattern->NextStates = Alloc(n + 1);
     return TRUE;
 }
 
@@ -407,82 +418,85 @@ EndAt(const LINE *Line, SIZE_T Pos)
     return Pos < Line->Length && Line->Text[Pos] == '\r';
 }
 
-static BOOL
-MatchHere(const TOKEN *t, SIZE_T Count, const LINE *Line, SIZE_T Pos, BOOL AnchorEnd)
-{
-    while (Count)
-    {
-        switch (t->Kind)
-        {
-            case TK_BOL:
-                if (Pos != 0)
-                    return FALSE;
-                break;
-
-            case TK_EOL:
-                if (!EndAt(Line, Pos))
-                    return FALSE;
-                break;
-
-            case TK_WBEG:
-                /* A word does not begin right after a carriage return (it can end before one) */
-                if (Pos >= Line->Length || !IsWordChar(Line->Text[Pos]) ||
-                    (Pos > 0 && (IsWordChar(Line->Text[Pos - 1]) || Line->Text[Pos - 1] == '\r')))
-                {
-                    return FALSE;
-                }
-                break;
-
-            case TK_WEND:
-                if (Pos == 0 || !IsWordChar(Line->Text[Pos - 1]) ||
-                    (Pos < Line->Length && IsWordChar(Line->Text[Pos])))
-                {
-                    return FALSE;
-                }
-                break;
-
-            default:
-                if (t->Star)
-                {
-                    SIZE_T End = Pos;
-                    while (End < Line->Length && TokenMatchesChar(t, Line->Text[End]))
-                        End++;
-                    for (;;)
-                    {
-                        if (MatchHere(t + 1, Count - 1, Line, End, AnchorEnd))
-                            return TRUE;
-                        if (End == Pos)
-                            return FALSE;
-                        End--;
-                    }
-                }
-                if (Pos >= Line->Length || !TokenMatchesChar(t, Line->Text[Pos]))
-                    return FALSE;
-                Pos++;
-                break;
-        }
-        t++;
-        Count--;
-    }
-
-    return !AnchorEnd || EndAt(Line, Pos);
-}
-
+/* Runs the expression over the line as a set of token positions (no backtracking): time is
+ * linear in the line length times the number of tokens, and no recursion is involved. */
 static BOOL
 MatchRegex(const PATTERN *Pattern, const LINE *Line)
 {
-    SIZE_T Start;
+    const TOKEN *t = Pattern->Tokens;
+    SIZE_T Count = Pattern->TokenCount, Pos, k;
+    PUCHAR States = Pattern->States, Next = Pattern->NextStates, Swap;
+    BOOL AnchorBegin = Opt.Begin || Opt.Exact;
+    BOOL AnchorEnd = Opt.End || Opt.Exact;
+    BOOL Any;
 
-    for (Start = 0; Start <= Line->Length; Start++)
+    ZeroMemory(States, Count + 1);
+    for (Pos = 0; ; Pos++)
     {
-        if (MatchHere(Pattern->Tokens, Pattern->TokenCount, Line, Start, Opt.End || Opt.Exact))
+        if (Pos == 0 || !AnchorBegin)
+            States[0] = 1;
+
+        /* Zero-width tokens and starred tokens can be passed without consuming a character */
+        for (k = 0; k < Count; k++)
+        {
+            if (!States[k])
+                continue;
+            switch (t[k].Kind)
+            {
+                case TK_BOL:
+                    if (Pos == 0)
+                        States[k + 1] = 1;
+                    break;
+                case TK_EOL:
+                    if (EndAt(Line, Pos))
+                        States[k + 1] = 1;
+                    break;
+                case TK_WBEG:
+                    /* A word does not begin right after a carriage return (it can end before one) */
+                    if (Pos < Line->Length && IsWordChar(Line->Text[Pos]) &&
+                        (Pos == 0 || (!IsWordChar(Line->Text[Pos - 1]) && Line->Text[Pos - 1] != '\r')))
+                    {
+                        States[k + 1] = 1;
+                    }
+                    break;
+                case TK_WEND:
+                    if (Pos > 0 && IsWordChar(Line->Text[Pos - 1]) &&
+                        (Pos == Line->Length || !IsWordChar(Line->Text[Pos])))
+                    {
+                        States[k + 1] = 1;
+                    }
+                    break;
+                default:
+                    if (t[k].Star)
+                        States[k + 1] = 1;
+                    break;
+            }
+        }
+
+        if (States[Count] && (!AnchorEnd || EndAt(Line, Pos)))
             return TRUE;
-        if (Opt.Begin || Opt.Exact)
-            break;
-        if (Pattern->TokenCount && Pattern->Tokens[0].Kind == TK_BOL)
-            break;
+        if (Pos == Line->Length)
+            return FALSE;
+
+        /* Consume the character at Pos */
+        ZeroMemory(Next, Count + 1);
+        Any = FALSE;
+        for (k = 0; k < Count; k++)
+        {
+            if (!States[k] || t[k].Kind > TK_CLASS)
+                continue;
+            if (TokenMatchesChar(&t[k], Line->Text[Pos]))
+            {
+                Next[t[k].Star ? k : k + 1] = 1;
+                Any = TRUE;
+            }
+        }
+        Swap = States;
+        States = Next;
+        Next = Swap;
+        if (!Any && AnchorBegin)
+            return FALSE;
     }
-    return FALSE;
 }
 
 /* Literal strings **********************************************************/
@@ -554,58 +568,101 @@ HasNonPrintable(const UCHAR *Data, SIZE_T Length)
     return FALSE;
 }
 
-/* Searches one buffer; Name is NULL for standard input */
-static VOID
-SearchBuffer(const UCHAR *Data, SIZE_T Size, PCWSTR Name)
+/* Search state of one input */
+typedef struct _SEARCH_INPUT
 {
-    SIZE_T Start = 0, LineNumber = 0;
+    PCWSTR Name;            /* NULL for standard input */
+    ULONGLONG LineNumber;
+    ULONGLONG Offset;       /* Offset of the next line in the input */
+    BOOL Done;              /* /M printed the name: stop reading */
+} SEARCH_INPUT, *PSEARCH_INPUT;
+
+/* Searches the complete lines in Data (and, if Final, the last line without a line end).
+ * Returns the number of bytes used. */
+static SIZE_T
+SearchLines(PSEARCH_INPUT Input, const UCHAR *Data, SIZE_T Size, BOOL Final)
+{
+    SIZE_T Start = 0;
     LINE Line;
 
-    if (Opt.SkipNonPrintable && Name && HasNonPrintable(Data, Size))
-        return;
-
-    while (Start < Size)
+    while (Start < Size && !Input->Done)
     {
-        SIZE_T End = Start, Next;
+        const UCHAR *Lf = memchr(Data + Start, '\n', Size - Start);
+        SIZE_T End = Lf ? (SIZE_T)(Lf - Data) : Size;
+        SIZE_T Next = Lf ? End + 1 : End;
 
-        while (End < Size && Data[End] != '\n')
-            End++;
-        Next = (End < Size) ? End + 1 : End;
+        if (!Lf && !Final)
+            break;
+
         Line.Text = Data + Start;
         Line.Length = End - Start;
-        LineNumber++;
+        Input->LineNumber++;
 
         if (LineMatches(&Line) != Opt.Invert)
         {
             AnyMatch = TRUE;
-            if (Opt.FileNamesOnly && Name)
+            if (Opt.FileNamesOnly && Input->Name)
             {
-                WriteName(Name);
+                WriteName(Input->Name);
                 WriteBytes("\r\n", 2);
-                return;
+                Input->Done = TRUE;
+                return Next;
             }
-            if (ShowNames && Name)
+            if (ShowNames && Input->Name)
             {
-                WriteName(Name);
+                WriteName(Input->Name);
                 WriteBytes(":", 1);
             }
             if (Opt.LineNumbers)
             {
-                WriteNumber(LineNumber);
+                WriteNumber(Input->LineNumber);
                 WriteBytes(":", 1);
             }
             if (Opt.Offsets)
             {
-                WriteNumber(Start);
+                WriteNumber(Input->Offset);
                 WriteBytes(":", 1);
             }
             WriteBytes(Data + Start, Next - Start);
         }
+        Input->Offset += Next - Start;
         Start = Next;
     }
+
+    return Start;
 }
 
-static VOID
+/* Reads more of hFile into a growing buffer; returns FALSE on a read error. *Read is 0 at the end. */
+static BOOL
+ReadMore(HANDLE hFile, PUCHAR *Buffer, SIZE_T *Capacity, SIZE_T Used, DWORD *Read)
+{
+    if (*Capacity - Used < 0x8000)
+    {
+        PUCHAR New;
+        if (*Capacity > ((SIZE_T)-1) / 2)
+            New = NULL;
+        else
+            New = HeapReAlloc(GetProcessHeap(), 0, *Buffer, *Capacity * 2);
+        if (!New)
+        {
+            Message(IDS_OUT_OF_MEMORY);
+            ExitProcess(Finish(2));
+        }
+        *Buffer = New;
+        *Capacity *= 2;
+    }
+
+    if (!ReadFile(hFile, *Buffer + Used, (DWORD)min(*Capacity - Used, 0x10000), Read, NULL))
+    {
+        *Read = 0;
+        /* The writer of a pipe went away: that is the end of the input */
+        return GetLastError() == ERROR_BROKEN_PIPE;
+    }
+    return TRUE;
+}
+
+/* Reads a whole input; returns FALSE on a read error */
+static BOOL
 ReadAll(HANDLE hFile, PUCHAR *Data, SIZE_T *Size)
 {
     SIZE_T Capacity = 0x10000, Used = 0;
@@ -614,66 +671,88 @@ ReadAll(HANDLE hFile, PUCHAR *Data, SIZE_T *Size)
 
     for (;;)
     {
-        if (Capacity - Used < 0x8000)
+        if (!ReadMore(hFile, &Buffer, &Capacity, Used, &Read))
         {
-            PUCHAR New = HeapReAlloc(GetProcessHeap(), 0, Buffer, Capacity * 2);
-            if (!New)
-            {
-                Message(IDS_OUT_OF_MEMORY);
-                ExitProcess(Finish(2));
-            }
-            Buffer = New;
-            Capacity *= 2;
+            HeapFree(GetProcessHeap(), 0, Buffer);
+            return FALSE;
         }
-        if (!ReadFile(hFile, Buffer + Used, (DWORD)(Capacity - Used), &Read, NULL) || Read == 0)
+        if (Read == 0)
             break;
         Used += Read;
     }
 
     *Data = Buffer;
     *Size = Used;
+    return TRUE;
 }
 
-/* Opens and searches one file; returns FALSE if it cannot be opened */
+/* Searches an input line by line as it is read, so a pipe gives results before it ends.
+ * Returns FALSE on a read error. */
+static BOOL
+SearchHandle(HANDLE hFile, PCWSTR Name)
+{
+    SEARCH_INPUT Input = {Name, 0, 0, FALSE};
+    SIZE_T Capacity = 0x10000, Used = 0, Consumed;
+    PUCHAR Buffer;
+    DWORD Read;
+    BOOL Result = TRUE;
+
+    /* /P has to see the whole file before printing anything from it */
+    if (Opt.SkipNonPrintable && Name)
+    {
+        if (!ReadAll(hFile, &Buffer, &Used))
+            return FALSE;
+        if (!HasNonPrintable(Buffer, Used))
+            SearchLines(&Input, Buffer, Used, TRUE);
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        return TRUE;
+    }
+
+    Buffer = Alloc(Capacity);
+    while (!Input.Done)
+    {
+        if (!ReadMore(hFile, &Buffer, &Capacity, Used, &Read))
+        {
+            Result = FALSE;
+            break;
+        }
+        if (Read == 0)
+        {
+            /* Unlike a file, standard input gets a line end after its last line */
+            /* ReadMore left at least 0x8000 bytes free */
+            if (!Name && Used && Buffer[Used - 1] != '\n')
+            {
+                Buffer[Used++] = '\r';
+                Buffer[Used++] = '\n';
+            }
+            SearchLines(&Input, Buffer, Used, TRUE);
+            break;
+        }
+        Used += Read;
+        Consumed = SearchLines(&Input, Buffer, Used, FALSE);
+        memmove(Buffer, Buffer + Consumed, Used - Consumed);
+        Used -= Consumed;
+    }
+
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return Result;
+}
+
+/* Opens and searches one file; returns FALSE if it cannot be opened or read */
 static BOOL
 SearchFile(PCWSTR Path, PCWSTR DisplayName)
 {
     HANDLE hFile;
-    PUCHAR Data;
-    SIZE_T Size;
+    BOOL Result;
 
     hFile = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                         OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (hFile == INVALID_HANDLE_VALUE)
         return FALSE;
 
-    ReadAll(hFile, &Data, &Size);
+    Result = SearchHandle(hFile, DisplayName);
     CloseHandle(hFile);
-    SearchBuffer(Data, Size, DisplayName);
-    HeapFree(GetProcessHeap(), 0, Data);
-    return TRUE;
-}
-
-static VOID
-SearchStdIn(VOID)
-{
-    PUCHAR Data;
-    SIZE_T Size;
-
-    ReadAll(GetStdHandle(STD_INPUT_HANDLE), &Data, &Size);
-    /* Unlike a file, standard input gets a line end after its last line */
-    if (Size && Data[Size - 1] != '\n')
-    {
-        PUCHAR New = HeapReAlloc(GetProcessHeap(), 0, Data, Size + 2);
-        if (New)
-        {
-            Data = New;
-            Data[Size++] = '\r';
-            Data[Size++] = '\n';
-        }
-    }
-    SearchBuffer(Data, Size, NULL);
-    HeapFree(GetProcessHeap(), 0, Data);
+    return Result;
 }
 
 static BOOL
@@ -734,7 +813,8 @@ SearchMask(PCWSTR Base, PCWSTR Dir, PCWSTR Mask)
             {
                 Shown = JoinPath(Dir, Data.cFileName);
                 Path = JoinPath(Base, Shown);
-                SearchFile(Path, Shown);
+                if (!SearchFile(Path, Shown))
+                    Message(IDS_CANNOT_OPEN, Shown);
                 HeapFree(GetProcessHeap(), 0, Path);
                 HeapFree(GetProcessHeap(), 0, Shown);
                 continue;
@@ -785,7 +865,8 @@ SearchMask(PCWSTR Base, PCWSTR Dir, PCWSTR Mask)
                 {
                     Shown = JoinPath(Dir, Data.cFileName);
                     Path = JoinPath(Base, Shown);
-                    SearchFile(Path, Shown);
+                    if (!SearchFile(Path, Shown))
+                        Message(IDS_CANNOT_OPEN, Shown);
                     HeapFree(GetProcessHeap(), 0, Path);
                     HeapFree(GetProcessHeap(), 0, Shown);
                     free(Matches[k]);
@@ -816,8 +897,10 @@ SearchSpec(PCWSTR Base, PCWSTR Spec)
         DWORD Attributes;
         Path = JoinPath(Base, Spec);
         Attributes = GetFileAttributesW(Path);
-        /* A directory is skipped without a message */
-        if (Attributes != INVALID_FILE_ATTRIBUTES && (Attributes & FILE_ATTRIBUTE_DIRECTORY))
+        /* A directory, or an offline file without /OFFLINE, is skipped without a message */
+        if (Attributes != INVALID_FILE_ATTRIBUTES &&
+            ((Attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+             ((Attributes & FILE_ATTRIBUTE_OFFLINE) && !Opt.Offline)))
             ;
         else if (!SearchFile(Path, Spec))
             Message(IDS_CANNOT_OPEN, Spec);
@@ -910,19 +993,18 @@ ReadListFile(PCWSTR Name, PUCHAR *Data, SIZE_T *Size)
 {
     HANDLE hFile;
 
+    BOOL Result;
+
     if (!wcscmp(Name, L"/"))
-    {
-        ReadAll(GetStdHandle(STD_INPUT_HANDLE), Data, Size);
-        return TRUE;
-    }
+        return ReadAll(GetStdHandle(STD_INPUT_HANDLE), Data, Size);
 
     hFile = CreateFileW(Name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                         OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (hFile == INVALID_HANDLE_VALUE)
         return FALSE;
-    ReadAll(hFile, Data, Size);
+    Result = ReadAll(hFile, Data, Size);
     CloseHandle(hFile);
-    return TRUE;
+    return Result;
 }
 
 /* Calls Callback for every non-empty line of a list file (/F: and /G:) */
@@ -1191,7 +1273,7 @@ int wmain(int argc, WCHAR *argv[])
 
     if (!Files)
     {
-        SearchStdIn();
+        SearchHandle(GetStdHandle(STD_INPUT_HANDLE), NULL);
         return Finish(AnyMatch ? 0 : 1);
     }
 
