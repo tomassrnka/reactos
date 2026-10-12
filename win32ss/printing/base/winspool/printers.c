@@ -166,23 +166,26 @@ AbortPrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
-    pHandle->bTrayIcon = pHandle->bStartedDoc = FALSE;
-
-    if ( pHandle->hSPLFile != INVALID_HANDLE_VALUE && pHandle->bJob )
+    if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
     {
-        // Close any open file handle.
-        CloseHandle( pHandle->hSPLFile );
+        // A spooled document was started with AddJob: delete its job, and end the document so that the spooler discards it.
+        CloseHandle(pHandle->hSPLFile);
         pHandle->hSPLFile = INVALID_HANDLE_VALUE;
 
-        SetJobW( hPrinter, pHandle->dwJobID, 0, NULL, JOB_CONTROL_DELETE );
+        if (SetJobW(hPrinter, pHandle->dwJobID, 0, NULL, JOB_CONTROL_DELETE) && ScheduleJob(hPrinter, pHandle->dwJobID))
+            dwErrorCode = ERROR_SUCCESS;
+        else
+            dwErrorCode = GetLastError();
 
-        return ScheduleJob( hPrinter, pHandle->dwJobID );
+        // The document ends here either way; if the spooler kept the job, ClosePrinter discards it.
+        pHandle->bTrayIcon = pHandle->bJob = pHandle->bStartedDoc = FALSE;
+        goto Cleanup;
     }
 
     // Do the RPC call.
     RpcTryExcept
     {
-        dwErrorCode = _RpcAbortPrinter(&pHandle->hPrinter);
+        dwErrorCode = _RpcAbortPrinter(pHandle->hPrinter);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -190,6 +193,10 @@ AbortPrinter(HANDLE hPrinter)
         ERR("_RpcAbortPrinter failed with exception code %lu!\n", dwErrorCode);
     }
     RpcEndExcept;
+
+    // A new document can now be started again.
+    if (dwErrorCode == ERROR_SUCCESS)
+        pHandle->bTrayIcon = pHandle->bJob = pHandle->bStartedDoc = FALSE;
 
 Cleanup:
     SetLastError(dwErrorCode);
