@@ -757,20 +757,26 @@ CsrDestroyProcess(IN PCLIENT_ID Cid,
     /* Set the terminated flag */
     CsrProcess->Flags |= CsrProcessTerminating;
 
-    /* Get the List Pointers */
+    /* Keep the process alive while the lock may be dropped below */
+    CsrLockedReferenceProcess(CsrProcess);
+
+    /*
+     * The last dereference of a thread releases the Process Lock for a moment,
+     * and other threads of this list can be freed meanwhile. So rescan from
+     * the head after each dereference; the threads already handled have the
+     * Terminated flag and are skipped.
+     */
     NextEntry = CsrProcess->ThreadList.Flink;
     while (NextEntry != &CsrProcess->ThreadList)
     {
         /* Get the current thread entry */
         CsrThread = CONTAINING_RECORD(NextEntry, CSR_THREAD, Link);
 
-        /* Move to the next entry */
-        NextEntry = NextEntry->Flink;
-
         /* Make sure the thread isn't already dead */
         if (CsrThread->Flags & CsrThreadTerminated)
         {
             /* Go the the next thread */
+            NextEntry = NextEntry->Flink;
             continue;
         }
 
@@ -797,7 +803,13 @@ CsrDestroyProcess(IN PCLIENT_ID Cid,
 
         /* Dereference the thread */
         CsrLockedDereferenceThread(CsrThread);
+
+        /* Rescan, the list may have changed */
+        NextEntry = CsrProcess->ThreadList.Flink;
     }
+
+    /* Remove our extra reference */
+    CsrLockedDereferenceProcess(CsrProcess);
 
     /* Release the Process Lock and return success */
     CsrReleaseProcessLock();
