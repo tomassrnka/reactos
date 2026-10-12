@@ -2029,6 +2029,53 @@ Cleanup:
     return (dwErrorCode == ERROR_SUCCESS);
 }
 
+BOOL WINAPI
+LocalAbortPrinter(HANDLE hPrinter)
+{
+    DWORD dwErrorCode;
+    PLOCAL_HANDLE pHandle = (PLOCAL_HANDLE)hPrinter;
+    PLOCAL_PRINTER_HANDLE pPrinterHandle;
+    WCHAR wszFullPath[MAX_PATH];
+
+    TRACE("LocalAbortPrinter(%p)\n", hPrinter);
+
+    // Only a document of a Printer handle can be aborted.
+    if (!pHandle || pHandle->HandleType != HandleType_Printer)
+    {
+        dwErrorCode = ERROR_INVALID_HANDLE;
+        goto Cleanup;
+    }
+
+    pPrinterHandle = (PLOCAL_PRINTER_HANDLE)pHandle->pSpecificHandle;
+
+    // The document must have been started on this handle through StartDocPrinter and not been ended.
+    // A job added through AddJob is no started document here, as on Windows: SetJob deletes it.
+    if (!pPrinterHandle->bStartedDoc || !pPrinterHandle->pJob || pPrinterHandle->pJob->bAddedJob)
+    {
+        dwErrorCode = ERROR_SPL_NO_STARTDOC;
+        goto Cleanup;
+    }
+
+    if (pPrinterHandle->hSPLWriteFile != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(pPrinterHandle->hSPLWriteFile);
+        pPrinterHandle->hSPLWriteFile = INVALID_HANDLE_VALUE;
+    }
+
+    // Discard the job with its spool file.
+    GetJobFilePath(L"SPL", pPrinterHandle->pJob->dwJobID, wszFullPath);
+    DeleteFileW(wszFullPath);
+    FreeJob(pPrinterHandle->pJob);
+
+    pPrinterHandle->pJob = NULL;
+    pPrinterHandle->bStartedDoc = FALSE;
+    dwErrorCode = ERROR_SUCCESS;
+
+Cleanup:
+    SetLastError(dwErrorCode);
+    return (dwErrorCode == ERROR_SUCCESS);
+}
+
 static void
 _LocalClosePortHandle(PLOCAL_PORT_HANDLE pPortHandle)
 {
