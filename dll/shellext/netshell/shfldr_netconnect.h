@@ -130,3 +130,4 @@ class CNetConUiObject:
 };
 
 HRESULT ShowNetConnectionProperties(INetConnection * pNetConnect, HWND hwnd);
+HRESULT RepairConnection(INetConnection *pNet, HWND hwndOwner);

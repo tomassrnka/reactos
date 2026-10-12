@@ -384,6 +384,19 @@ CNetConnectionManager::CNetConnectionManager() :
 {
 }
 
+CNetConnectionManager::~CNetConnectionManager()
+{
+    PINetConnectionItem pItem, pNext;
+
+    for (pItem = m_pHead; pItem; pItem = pNext)
+    {
+        pNext = pItem->Next;
+        CoTaskMemFree(pItem->Props.pszwName);
+        CoTaskMemFree(pItem->Props.pszwDeviceName);
+        CoTaskMemFree(pItem);
+    }
+}
+
 HRESULT
 WINAPI
 CNetConnectionManager::EnumConnections(
