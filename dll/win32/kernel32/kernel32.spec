@@ -910,14 +910,14 @@
 @ stdcall QueryDosDeviceW(wstr ptr long)
 @ stdcall -version=0x600+ QueryFullProcessImageNameA(ptr long ptr ptr)
 @ stdcall -version=0x600+ QueryFullProcessImageNameW(ptr long ptr ptr)
-@ stub -version=0x600+ QueryIdleProcessorCycleTime
+@ stdcall -version=0x600+ QueryIdleProcessorCycleTime(ptr ptr)
 @ stdcall QueryInformationJobObject(long long ptr long ptr)
 @ stdcall QueryMemoryResourceNotification(ptr ptr)
 @ stdcall QueryPerformanceCounter(ptr)
 @ stdcall QueryPerformanceFrequency(ptr)
 @ stub -version=0x600+ QueryProcessAffinityUpdateMode
-@ stub -version=0x600+ QueryProcessCycleTime
-@ stub -version=0x600+ QueryThreadCycleTime
+@ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
+@ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
 @ stdcall QueueUserAPC(ptr long long)
 @ stdcall QueueUserWorkItem(ptr ptr long)
 @ stdcall -norelay RaiseException(long long long ptr)

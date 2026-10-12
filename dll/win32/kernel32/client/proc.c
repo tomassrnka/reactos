@@ -1183,6 +1183,33 @@ GetProcessTimes(IN HANDLE hProcess,
 /*
  * @implemented
  */
+BOOL
+WINAPI
+QueryProcessCycleTime(
+    _In_ HANDLE ProcessHandle,
+    _Out_ PULONG64 CycleTime)
+{
+    PROCESS_CYCLE_TIME_INFORMATION CycleTimeInfo;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessCycleTime,
+                                       &CycleTimeInfo,
+                                       sizeof(CycleTimeInfo),
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    *CycleTime = CycleTimeInfo.AccumulatedCycles;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
 HANDLE
 WINAPI
 GetCurrentProcess(VOID)

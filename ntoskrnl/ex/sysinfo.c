@@ -2923,23 +2923,22 @@ QSI_DEF(SystemProcessorIdleCycleTimeInformation)
 {
     PSYSTEM_PROCESSOR_IDLE_CYCLE_TIME_INFORMATION Info =
             (PSYSTEM_PROCESSOR_IDLE_CYCLE_TIME_INFORMATION)Buffer;
-    ULONG ProcessorIndex;
+    ULONG ProcessorIndex, Count;
     PKPRCB Prcb;
 
     *ReqSize = KeNumberProcessors * sizeof(*Info);
-    if (Size < *ReqSize)
-    {
-        DPRINT1("Buffer too small for SystemProcessorIdleCycleTimeInformation\n");
+    if (Size < sizeof(*Info))
         return STATUS_BUFFER_TOO_SMALL;
-    }
 
-    for (ProcessorIndex = 0; ProcessorIndex < KeNumberProcessors; ++ProcessorIndex)
+    /* A short buffer gets the processors that fit */
+    Count = min(Size / sizeof(*Info), (ULONG)KeNumberProcessors);
+    for (ProcessorIndex = 0; ProcessorIndex < Count; ++ProcessorIndex)
     {
         Prcb = KiProcessorBlock[ProcessorIndex];
         Info[ProcessorIndex].CycleTime = KeQueryTotalCycleTimeThread(Prcb->IdleThread, NULL);
     }
 
-    return STATUS_SUCCESS;
+    return (Count < (ULONG)KeNumberProcessors) ? STATUS_INFO_LENGTH_MISMATCH : STATUS_SUCCESS;
 }
 
 /* Class 105 - Processor Brand String */

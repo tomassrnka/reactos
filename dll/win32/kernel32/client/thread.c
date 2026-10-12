@@ -502,6 +502,33 @@ GetThreadTimes(IN HANDLE hThread,
  */
 BOOL
 WINAPI
+QueryThreadCycleTime(
+    _In_ HANDLE ThreadHandle,
+    _Out_ PULONG64 CycleTime)
+{
+    THREAD_CYCLE_TIME_INFORMATION CycleTimeInfo;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationThread(ThreadHandle,
+                                      ThreadCycleTime,
+                                      &CycleTimeInfo,
+                                      sizeof(CycleTimeInfo),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    *CycleTime = CycleTimeInfo.AccumulatedCycles;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 GetThreadContext(IN HANDLE hThread,
                  OUT LPCONTEXT lpContext)
 {
