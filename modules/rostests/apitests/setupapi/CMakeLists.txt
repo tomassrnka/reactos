@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    CM_Is_Dock_Station_Present.c
     devclass.c
     SetupDiInstallClassExA.c
     SetupDiGetActualModelsSection.c
