@@ -1165,6 +1165,10 @@ DlgProc(HWND hDlg,
     {
         case WM_INITDIALOG:
             OnMainCreate(hDlg, (PRDPSETTINGS)lParam);
+            /* The hidden Display page is created last and its slider took the focus */
+            pInfo = (PINFO)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+            if (pInfo && pInfo->hGeneralPage)
+                SetFocus(GetDlgItem(pInfo->hGeneralPage, IDC_SERVERCOMBO));
         break;
 
         case WM_COMMAND:
