@@ -628,15 +628,22 @@ static inline BOOL UXTHEME_SizedBlt (HDC hdcDst, int nXOriginDst, int nYOriginDs
             /* Calculate temp dimensions of integer multiples of source dimensions */
 #ifdef __REACTOS__
             /* Neither the temporary size may overflow nor the default bitmap be drawn when creation fails */
-            if (((LONGLONG)nWidthDst + nWidthSrc - 1) / nWidthSrc * nWidthSrc > MAXLONG ||
-                ((LONGLONG)nHeightDst + nHeightSrc - 1) / nHeightSrc * nHeightSrc > MAXLONG)
             {
-                DeleteDC(hdcTemp);
-                return FALSE;
+                LONGLONG llWidthTemp = ((LONGLONG)nWidthDst + nWidthSrc - 1) / nWidthSrc * nWidthSrc;
+                LONGLONG llHeightTemp = ((LONGLONG)nHeightDst + nHeightSrc - 1) / nHeightSrc * nHeightSrc;
+
+                if (llWidthTemp > MAXLONG || llHeightTemp > MAXLONG)
+                {
+                    DeleteDC(hdcTemp);
+                    return FALSE;
+                }
+                nWidthTemp = (int)llWidthTemp;
+                nHeightTemp = (int)llHeightTemp;
             }
-#endif
+#else
             nWidthTemp = ((nWidthDst + nWidthSrc - 1) / nWidthSrc) * nWidthSrc;
             nHeightTemp = ((nHeightDst + nHeightSrc - 1) / nHeightSrc) * nHeightSrc;
+#endif
             bitmapTemp = CreateCompatibleBitmap(hdcSrc, nWidthTemp, nHeightTemp);
 #ifdef __REACTOS__
             if (!bitmapTemp)
