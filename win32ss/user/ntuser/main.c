@@ -779,6 +779,8 @@ ExitThreadCallback(PETHREAD Thread)
         }
     }
 
+    IntCleanupPrintWindowRequests(ptiCurrent);
+
     ptiCurrent->TIF_flags |= TIF_DONTATTACHQUEUE;
     ptiCurrent->pClientInfo->dwTIFlags = ptiCurrent->TIF_flags;
 
