@@ -597,6 +597,124 @@ Test_Scaled(HDC hdc, PDWORD pdwDst)
     SetMapMode(hdc, MM_TEXT);
 }
 
+/* Sizing margins in a DC scaled four times: the parts are laid out in device pixels, so the margins are
+   device pixels (measured on Windows 10, x64 and WOW64) */
+typedef struct _SCALED_CASE
+{
+    DWORD dwOption;
+    INT Left, Right, Top, Bottom;
+    INT cx, cy;
+    const char *pszGrid;
+} SCALED_CASE;
+
+static const SCALED_CASE s_ScaledCases[] =
+{
+    { TEST_DS_TILE, 3, 3, 2, 2, 2, 5,
+      "001020304090a0b0"
+      "011121314191a1b1"
+      "021222324292a2b2"
+      "031323334393a3b3"
+      "021222324292a2b2"
+      "031323334393a3b3"
+      "021222324292a2b2"
+      "031323334393a3b3"
+      "021222324292a2b2"
+      "031323334393a3b3"
+      "021222324292a2b2"
+      "031323334393a3b3"
+      "021222324292a2b2"
+      "031323334393a3b3"
+      "021222324292a2b2"
+      "031323334393a3b3"
+      "021222324292a2b2"
+      "031323334393a3b3"
+      "041424344494a4b4"
+      "051525354595a5b5" },
+    { TEST_DS_TILE, 3, 3, 2, 2, 5, 2,
+      "001020304050607080304050607080304090a0b0"
+      "011121314151617181314151617181314191a1b1"
+      "021222324252627282324252627282324292a2b2"
+      "031323334353637383334353637383334393a3b3"
+      "021222324252627282324252627282324292a2b2"
+      "031323334353637383334353637383334393a3b3"
+      "041424344454647484344454647484344494a4b4"
+      "051525354555657585354555657585354595a5b5" },
+    { TEST_DS_TILE, 3, 3, 2, 2, 1, 5,
+      "002090b0"
+      "012191b1"
+      "022292b2"
+      "032393b3"
+      "022292b2"
+      "032393b3"
+      "022292b2"
+      "032393b3"
+      "022292b2"
+      "032393b3"
+      "022292b2"
+      "032393b3"
+      "022292b2"
+      "032393b3"
+      "022292b2"
+      "032393b3"
+      "022292b2"
+      "032393b3"
+      "042494b4"
+      "052595b5" },
+    { 0, 3, 3, 2, 2, 5, 3,
+      "001020303040404050506060707070808090a0b0"
+      "011121313141414151516161717171818191a1b1"
+      "021222323242424252526262727272828292a2b2"
+      "021222323242424252526262727272828292a2b2"
+      "021222323242424252526262727272828292a2b2"
+      "021222323242424252526262727272828292a2b2"
+      "031323333343434353536363737373838393a3b3"
+      "031323333343434353536363737373838393a3b3"
+      "031323333343434353536363737373838393a3b3"
+      "031323333343434353536363737373838393a3b3"
+      "041424343444444454546464747474848494a4b4"
+      "051525353545454555556565757575858595a5b5" },
+};
+
+static void
+Test_ScaledMargins(HDC hdc, PDWORD pdwDst)
+{
+    TEST_DRAW_STREAM ds;
+    char szGrid[2 * DST_CX * DST_CY + 1];
+    UINT i;
+
+    SetMapMode(hdc, MM_ANISOTROPIC);
+    SetWindowExtEx(hdc, 1, 1, NULL);
+    SetViewportExtEx(hdc, 4, 4, NULL);
+    for (i = 0; i < _countof(s_ScaledCases); ++i)
+    {
+        const SCALED_CASE *pCase = &s_ScaledCases[i];
+
+        ZeroMemory(&ds, sizeof(ds));
+        ds.signature = 0x44727753;
+        ds.unknown1 = 1;
+        ds.unknown2 = 9;
+        ds.hDC = hdc;
+        ds.hImage = s_hbmSrc;
+        SetRect(&ds.rcDest, 0, 0, pCase->cx, pCase->cy);
+        ds.rcClip = ds.rcDest;
+        SetRect(&ds.rcSrc, 0, 0, SRC_CX, SRC_CY);
+        ds.drawOption = pCase->dwOption;
+        ds.leftSizingMargin = pCase->Left;
+        ds.rightSizingMargin = pCase->Right;
+        ds.topSizingMargin = pCase->Top;
+        ds.bottomSizingMargin = pCase->Bottom;
+
+        FillMemory(pdwDst, DST_CX * DST_CY * sizeof(DWORD), 0xFF);
+        CallDrawStream(hdc, &ds);
+        GdiFlush();
+        ScaledGrid(pdwDst, 4 * pCase->cx, 4 * pCase->cy, szGrid);
+        ok(!strcmp(szGrid, pCase->pszGrid), "scaled option 0x%lx margins %d,%d,%d,%d size %dx%d: %s, expected %s\n",
+           pCase->dwOption, pCase->Left, pCase->Right, pCase->Top, pCase->Bottom, pCase->cx, pCase->cy,
+           szGrid, pCase->pszGrid);
+    }
+    SetMapMode(hdc, MM_TEXT);
+}
+
 START_TEST(GdiDrawStream)
 {
     PDWORD pdwSrc, pdwDst;
@@ -663,6 +781,7 @@ START_TEST(GdiDrawStream)
     Test_Tile(hdc, pdwDst);
 
     Test_Scaled(hdc, pdwDst);
+    Test_ScaledMargins(hdc, pdwDst);
 
     SelectObject(hdc, hbmOld);
     DeleteDC(hdc);
