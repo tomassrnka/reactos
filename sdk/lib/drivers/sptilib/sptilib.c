@@ -45,7 +45,9 @@ SptiFreeIrpContext(
     {
         if (Irp->MdlAddress)
         {
-            MmUnlockPages(Irp->MdlAddress);
+            /* A failed probe leaves the pages unlocked */
+            if (Irp->MdlAddress->MdlFlags & MDL_PAGES_LOCKED)
+                MmUnlockPages(Irp->MdlAddress);
             IoFreeMdl(Irp->MdlAddress);
         }
         Irp->MdlAddress = NULL;
@@ -210,9 +212,10 @@ SptiSrbAppendSenseBuffer(
         return STATUS_SUCCESS;
     }
 
-    Srb->SenseInfoBuffer = ExAllocatePoolUninitialized(NonPagedPoolCacheAligned,
-                                                       BufferSize,
-                                                       TAG_SPTI);
+    /* Zeroed: drivers may fill less than the buffer and it is copied back whole */
+    Srb->SenseInfoBuffer = ExAllocatePoolZero(NonPagedPoolCacheAligned,
+                                              BufferSize,
+                                              TAG_SPTI);
     if (!Srb->SenseInfoBuffer)
         return STATUS_INSUFFICIENT_RESOURCES;
 
@@ -412,10 +415,13 @@ SptiInitializeApt(
         IsNativeStructSize = TRUE;
     }
 
-    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < StructSize)
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < StructSize ||
+        IoStack->Parameters.DeviceIoControl.OutputBufferLength < StructSize)
     {
-        DPRINT1("Buffer too small %lu/%lu\n",
-                IoStack->Parameters.DeviceIoControl.InputBufferLength, StructSize);
+        DPRINT1("Buffer too small %lu,%lu/%lu\n",
+                IoStack->Parameters.DeviceIoControl.InputBufferLength,
+                IoStack->Parameters.DeviceIoControl.OutputBufferLength,
+                StructSize);
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -431,18 +437,13 @@ SptiInitializeApt(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (BYTES_TO_PAGES(Apt->DataTransferLength) > MaximumPhysicalPages)
-    {
-        DPRINT1("Too large transfer %lu/%lu pages\n",
-                BYTES_TO_PAGES(Apt->DataTransferLength), MaximumPhysicalPages);
-        return STATUS_INVALID_PARAMETER;
-    }
-
     /* Retrieve the data buffer or the data buffer offset */
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     AptData->Buffer = NULL;
     RtlCopyMemory(AptData,
-                  (PVOID)((ULONG_PTR)Apt + FIELD_OFFSET(ATA_PASS_THROUGH_EX, DataBufferOffset)),
+                  (PVOID)((ULONG_PTR)Apt + (IsNativeStructSize ?
+                                            FIELD_OFFSET(ATA_PASS_THROUGH_EX, DataBufferOffset) :
+                                            FIELD_OFFSET(ATA_PASS_THROUGH_EX32, DataBufferOffset))),
                   IsNativeStructSize ? sizeof(PVOID) : sizeof(ULONG32));
 #else
     DBG_UNREFERENCED_LOCAL_VARIABLE(IsNativeStructSize);
@@ -456,6 +457,20 @@ SptiInitializeApt(
             *DataBuffer = AptData->Buffer;
         else
             *DataBuffer = (PVOID)((ULONG_PTR)Apt + AptData->BufferOffset);
+
+        if (*DataBuffer == NULL)
+        {
+            DPRINT1("No data buffer for %lu bytes\n", Apt->DataTransferLength);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (ADDRESS_AND_SIZE_TO_SPAN_PAGES(*DataBuffer, Apt->DataTransferLength) > MaximumPhysicalPages)
+        {
+            DPRINT1("Too large transfer %lu/%lu pages\n",
+                    ADDRESS_AND_SIZE_TO_SPAN_PAGES(*DataBuffer, Apt->DataTransferLength),
+                    MaximumPhysicalPages);
+            return STATUS_INVALID_PARAMETER;
+        }
     }
     else
     {
@@ -613,10 +628,13 @@ SptiInitializeSpt(
         IsNativeStructSize = TRUE;
     }
 
-    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < StructSize)
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < StructSize ||
+        IoStack->Parameters.DeviceIoControl.OutputBufferLength < StructSize)
     {
-        DPRINT1("Buffer too small %lu/%lu\n",
-                IoStack->Parameters.DeviceIoControl.InputBufferLength, StructSize);
+        DPRINT1("Buffer too small %lu,%lu/%lu\n",
+                IoStack->Parameters.DeviceIoControl.InputBufferLength,
+                IoStack->Parameters.DeviceIoControl.OutputBufferLength,
+                StructSize);
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -632,18 +650,13 @@ SptiInitializeSpt(
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (BYTES_TO_PAGES(Spt->DataTransferLength) > MaximumPhysicalPages)
-    {
-        DPRINT1("Too large transfer %lu/%lu pages\n",
-                BYTES_TO_PAGES(Spt->DataTransferLength), MaximumPhysicalPages);
-        return STATUS_INVALID_PARAMETER;
-    }
-
     /* Retrieve the data buffer or the data buffer offset */
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     SptData->Buffer = NULL;
     RtlCopyMemory(SptData,
-                  (PVOID)((ULONG_PTR)Spt + FIELD_OFFSET(SCSI_PASS_THROUGH, DataBufferOffset)),
+                  (PVOID)((ULONG_PTR)Spt + (IsNativeStructSize ?
+                                            FIELD_OFFSET(SCSI_PASS_THROUGH, DataBufferOffset) :
+                                            FIELD_OFFSET(SCSI_PASS_THROUGH32, DataBufferOffset))),
                   IsNativeStructSize ? sizeof(PVOID) : sizeof(ULONG32));
 #else
     DBG_UNREFERENCED_LOCAL_VARIABLE(IsNativeStructSize);
@@ -658,6 +671,20 @@ SptiInitializeSpt(
             *DataBuffer = SptData->Buffer;
         else
             *DataBuffer = (PVOID)((ULONG_PTR)Spt + SptData->BufferOffset);
+
+        if (*DataBuffer == NULL)
+        {
+            DPRINT1("No data buffer for %lu bytes\n", Spt->DataTransferLength);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (ADDRESS_AND_SIZE_TO_SPAN_PAGES(*DataBuffer, Spt->DataTransferLength) > MaximumPhysicalPages)
+        {
+            DPRINT1("Too large transfer %lu/%lu pages\n",
+                    ADDRESS_AND_SIZE_TO_SPAN_PAGES(*DataBuffer, Spt->DataTransferLength),
+                    MaximumPhysicalPages);
+            return STATUS_INVALID_PARAMETER;
+        }
     }
     else
     {
@@ -717,17 +744,18 @@ SptiInitializeSpt(
             return STATUS_INVALID_PARAMETER;
         }
 
+        /* The sense data is copied back into the system buffer for both variants */
+        if (SenseBufferEnd > IoStack->Parameters.DeviceIoControl.OutputBufferLength)
+        {
+            DPRINT1("Sense buffer outside of available space\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+
         if (!IsDirectMemoryAccess)
         {
             if ((SenseBufferEnd > SptData->BufferOffset) && (Spt->DataTransferLength != 0))
             {
                 DPRINT1("Sense buffer overlaps data buffer\n");
-                return STATUS_INVALID_PARAMETER;
-            }
-
-            if (SenseBufferEnd > IoStack->Parameters.DeviceIoControl.OutputBufferLength)
-            {
-                DPRINT1("Sense buffer outside of available space\n");
                 return STATUS_INVALID_PARAMETER;
             }
         }
