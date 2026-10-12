@@ -524,6 +524,9 @@ Return Value:
     PVCB Vcb;
     IRP_CONTEXT IrpContext;
     BOOLEAN VcbExists = FALSE;
+#ifdef __REACTOS__
+    BOOLEAN MarkDirty = FALSE;
+#endif
 
     PAGED_CODE();
 
@@ -594,10 +597,10 @@ Return Value:
                 //  A fat sector may not be on the disk (a write of it failed
                 //  or is still running): do not mark the volume clean, and
                 //  check again later, as the Dpc does for dirty cache data.
-                //  Setting the dirty flag makes the check below write the
-                //  dirty marks: another worker that found the fat clean
-                //  earlier may have written the clean marks meanwhile.  A
-                //  fat flush or shutdown writes failed sectors again.
+                //  Write the dirty marks below: another worker that found
+                //  the fat clean earlier may have written the clean marks
+                //  meanwhile.  A fat flush or shutdown writes failed sectors
+                //  again.
                 //
 
                 if (FatIsFatDirty( Vcb )) {
@@ -605,6 +608,7 @@ Return Value:
                     LARGE_INTEGER TwoSecondsFromNow;
 
                     SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+                    MarkDirty = TRUE;
 
                     TwoSecondsFromNow.QuadPart = (LONG)-2*1000*1000*10;
 
@@ -624,7 +628,7 @@ Return Value:
 
                     if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
 
-                        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+                        MarkDirty = TRUE;
                     }
                 }
 #else
@@ -636,7 +640,12 @@ Return Value:
             //  Check for a pathological race condition, and fix it.
             //
 
+#ifdef __REACTOS__
+            //  MarkDirty: the Dpc may clear the dirty flag again meanwhile.
+            if (MarkDirty || FlagOn(Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY)) {
+#else
             if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY)) {
+#endif
 
                 FatMarkVolume( &IrpContext, Vcb, VolumeDirty );
 
