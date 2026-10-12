@@ -4098,6 +4098,59 @@ Return Value:
 }
 
 
+BOOLEAN
+FatPrepareCleanVolume (
+    IN PVCB Vcb,
+    IN BOOLEAN CheckCache
+    )
+
+/*++
+
+Routine Description:
+
+    This routine is called by a volume flush or open, with the Vcb held
+    exclusive, before it marks the volume clean.  It cancels the clean
+    timer before it checks the fat, and lets the next change arm the timer
+    again at once instead of after the one-second wait of FatSetDirtyBcb:
+    so a change made after the check always leaves a deferred clean that
+    checks the fat again.  If the fat (or, with CheckCache, the cache) is
+    dirty, it arms the timer again.
+
+Return Value:
+
+    BOOLEAN - TRUE if the volume can be marked clean.
+
+--*/
+
+{
+    KIRQL SavedIrql;
+    LARGE_INTEGER TwoSecondsFromNow;
+
+    PAGED_CODE();
+
+    (VOID)KeCancelTimer( &Vcb->CleanVolumeTimer );
+    (VOID)KeRemoveQueueDpc( &Vcb->CleanVolumeDpc );
+
+    KeAcquireSpinLock( &FatData.GeneralSpinLock, &SavedIrql );
+    Vcb->LastFatMarkVolumeDirtyCall.QuadPart = 0;
+    KeReleaseSpinLock( &FatData.GeneralSpinLock, SavedIrql );
+
+    if (!FatIsFatDirty( Vcb ) &&
+        !(CheckCache && CcIsThereDirtyData( Vcb->Vpb ))) {
+
+        return TRUE;
+    }
+
+    TwoSecondsFromNow.QuadPart = (LONG)-2*1000*1000*10;
+
+    KeSetTimer( &Vcb->CleanVolumeTimer,
+                TwoSecondsFromNow,
+                &Vcb->CleanVolumeDpc );
+
+    return FALSE;
+}
+
+
 VOID
 FatMarkFatDirty (
     IN PVCB Vcb,

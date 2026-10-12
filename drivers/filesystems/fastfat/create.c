@@ -2458,8 +2458,8 @@ Return Value:
             FlagOn( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY ) &&
             !FlagOn( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY ) &&
 #ifdef __REACTOS__
-            !FatIsFatDirty( Vcb ) &&
-#endif
+            FatPrepareCleanVolume( Vcb, TRUE )) {
+#else
             !CcIsThereDirtyData(Vcb->Vpb)) {
 
             //
@@ -2468,6 +2468,7 @@ Return Value:
 
             (VOID)KeCancelTimer( &Vcb->CleanVolumeTimer );
             (VOID)KeRemoveQueueDpc( &Vcb->CleanVolumeDpc );
+#endif
 
             FatMarkVolume( IrpContext, Vcb, VolumeClean );
             ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );

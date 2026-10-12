@@ -7594,6 +7594,10 @@ Return Value:
 
 --*/
 {
+#ifdef __REACTOS__
+    BOOLEAN MarkedClean = FALSE;
+#endif
+
     PAGED_CODE();
 
     //
@@ -7662,13 +7666,16 @@ Return Value:
 
 #ifdef __REACTOS__
             if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY) &&
-                !FatIsFatDirty( Vcb )) {
+                FatPrepareCleanVolume( Vcb, FALSE )) {
 #else
             if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
 #endif
 
                 FatMarkVolume( IrpContext, Vcb, VolumeClean );
                 ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+#ifdef __REACTOS__
+                MarkedClean = TRUE;
+#endif
             }
 
             //
@@ -7683,6 +7690,19 @@ Return Value:
         }
     }
 
+#ifdef __REACTOS__
+    //
+    //  A fat sector still dirty did not reach the disk.  A deferred clean
+    //  that checked the fat before a write of it failed may have marked the
+    //  volume clean, and none may run after this: write the dirty marks.
+    //
+
+    if ((FlushType != NoFlush) && !MarkedClean && FatIsFatDirty( Vcb )) {
+
+        FatMarkVolume( IrpContext, Vcb, VolumeDirty );
+        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+    }
+#endif
 }
 
 #if (NTDDI_VERSION >= NTDDI_WIN8)

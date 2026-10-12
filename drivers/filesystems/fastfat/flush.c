@@ -430,17 +430,7 @@ Return Value:
                 //
 
                 if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY) &&
-                    FatIsFatDirty( Vcb )) {
-
-                    LARGE_INTEGER TwoSecondsFromNow;
-
-                    TwoSecondsFromNow.QuadPart = (LONG)-2*1000*1000*10;
-
-                    KeSetTimer( &Vcb->CleanVolumeTimer,
-                                TwoSecondsFromNow,
-                                &Vcb->CleanVolumeDpc );
-
-                } else if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+                    FatPrepareCleanVolume( Vcb, FALSE )) {
 #else
                 if (!FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
 #endif

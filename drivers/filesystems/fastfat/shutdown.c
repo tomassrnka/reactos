@@ -222,13 +222,18 @@ Return Value:
 
                 //
                 //  A fat sector still dirty after the flush did not reach
-                //  the disk: the purge would drop it, so keep the cache and
-                //  leave the volume marked dirty.
+                //  the disk: the purge would drop it, so keep the cache.  A
+                //  deferred clean that checked the fat before a write of it
+                //  failed may have marked the volume clean, and none runs
+                //  after shutdown: write the dirty marks.
                 //
 
-                if (NT_SUCCESS( FlushStatus ) && FatIsFatDirty( Vcb )) {
+                if (FatIsFatDirty( Vcb )) {
 
                     FlushStatus = STATUS_UNSUCCESSFUL;
+
+                    FatMarkVolume( IrpContext, Vcb, VolumeDirty );
+                    (VOID)FatFlushFat( IrpContext, Vcb );
                 }
 #else
                 (VOID)FatFlushVolume( IrpContext, Vcb, Flush );

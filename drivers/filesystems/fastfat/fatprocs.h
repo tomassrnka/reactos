@@ -192,6 +192,12 @@ FatIsFatDirty (
     IN PVCB Vcb
     );
 
+BOOLEAN
+FatPrepareCleanVolume (
+    IN PVCB Vcb,
+    IN BOOLEAN CheckCache
+    );
+
 VOID
 FatSetDirtyFatBits (
     IN PVCB Vcb,

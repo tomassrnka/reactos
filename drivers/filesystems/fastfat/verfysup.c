@@ -612,9 +612,24 @@ Return Value:
                                 TwoSecondsFromNow,
                                 &Vcb->CleanVolumeDpc );
 
-                } else
-#endif
+                } else {
+
+                    FatMarkVolume( &IrpContext, Vcb, VolumeClean );
+
+                    //
+                    //  The volume may have been marked permanently dirty
+                    //  since the checks above, and no later worker checks
+                    //  the fat then: write the dirty marks again below.
+                    //
+
+                    if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
+
+                        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+                    }
+                }
+#else
                 FatMarkVolume( &IrpContext, Vcb, VolumeClean );
+#endif
             }
 
             //
