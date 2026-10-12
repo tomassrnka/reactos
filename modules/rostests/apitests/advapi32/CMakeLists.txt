@@ -41,6 +41,7 @@ list(APPEND SOURCE
     SetEntriesInAclOld.c
     SetNamedSecurityInfoInherit.c
     SddlRights.c
+    ServiceProcess.c
     svchlp.c)
 
 list(APPEND PCH_SKIP_SOURCE

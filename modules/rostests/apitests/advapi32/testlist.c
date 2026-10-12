@@ -55,6 +55,7 @@ extern void func_RegWow64SharedLongName(void);
 extern void func_RegWow64Volatile(void);
 extern void func_RegWow64SharedCreate(void);
 extern void func_RegWow64Aliases(void);
+extern void func_ServiceProcess(void);
 
 const struct test winetest_testlist[] =
 {
@@ -110,6 +111,7 @@ const struct test winetest_testlist[] =
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { "SddlRights", func_SddlRights },
+    { "ServiceProcess", func_ServiceProcess },
     { 0, 0 }
 };
 
