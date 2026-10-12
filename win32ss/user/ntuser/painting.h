@@ -37,4 +37,18 @@ VOID FASTCALL UserSyncAndPaintWindows(PWND pWnd, ULONG Flags);
 VOID FASTCALL IntPaintWindow(PWND);
 VOID FASTCALL IntSendNCPaint(PWND,HRGN);
 LRESULT FASTCALL IntHandlePrintWindowRequest(PWND,ULONG);
-VOID FASTCALL IntCleanupPrintWindowRequests(PTHREADINFO);
+VOID FASTCALL IntCleanupThreadPrint(PTHREADINFO);
+
+/* GDI temporaries of a WM_PRINT or PrintWindow in progress; freed at thread exit if a callback ends the thread */
+typedef struct _PRINT_TEMPS
+{
+    LIST_ENTRY ListEntry;
+    PTHREADINFO pti;
+    HDC hdc;
+    HBITMAP hbm;
+    PSURFACE psurf;
+    HRGN hrgn;
+} PRINT_TEMPS, *PPRINT_TEMPS;
+
+VOID FASTCALL IntPushPrintTemps(PPRINT_TEMPS);
+VOID FASTCALL IntPopPrintTemps(PPRINT_TEMPS);

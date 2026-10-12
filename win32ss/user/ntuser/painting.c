@@ -1257,23 +1257,105 @@ IntGetPaintMessage(
 }
 
 /*
- * Render the window (or its client area) into a new bitmap. Runs in the thread of pwnd, so that the
- * window procedures can draw into a DC of their own process.
+ * GDI temporaries of a WM_PRINT or PrintWindow in progress, in the thread that runs it. A callback that
+ * ends the thread never returns to free them; thread rundown does (entries live on the kernel stack,
+ * which stays valid until then, as for the thread's object references).
+ */
+static LIST_ENTRY gPrintTemps = { &gPrintTemps, &gPrintTemps };
+
+VOID
+FASTCALL
+IntPushPrintTemps(
+    PPRINT_TEMPS pTemps)
+{
+    pTemps->pti = PsGetCurrentThreadWin32Thread();
+    InsertTailList(&gPrintTemps, &pTemps->ListEntry);
+}
+
+/* Unregister and free; all objects belong to the current process */
+VOID
+FASTCALL
+IntPopPrintTemps(
+    PPRINT_TEMPS pTemps)
+{
+    RemoveEntryList(&pTemps->ListEntry);
+    if (pTemps->hdc)
+        IntGdiDeleteDC(pTemps->hdc, FALSE);
+    if (pTemps->hbm)
+        GreDeleteObject(pTemps->hbm);
+    if (pTemps->psurf)
+        SURFACE_ShareUnlockSurface(pTemps->psurf);
+    if (pTemps->hrgn)
+        GreDeleteObject(pTemps->hrgn);
+}
+
+/* The pixels of a rendered window, in the format of the screen */
+typedef struct _PRINTWINDOW_IMAGE
+{
+    SIZEL sizl;
+    ULONG iFormat;
+    ULONG cjRow;
+    BYTE ajBits[ANYSIZE_ARRAY];
+} PRINTWINDOW_IMAGE, *PPRINTWINDOW_IMAGE;
+
+static
+PPRINTWINDOW_IMAGE
+IntCopySurfaceImage(
+    PSURFACE psurf)
+{
+    SURFOBJ *pso = &psurf->SurfObj;
+    PPRINTWINDOW_IMAGE pImage;
+    ULONG cjRow, cjSize;
+    PBYTE pjSrc;
+    LONG y;
+
+    if (pso->iType != STYPE_BITMAP || !pso->pvScan0 ||
+        pso->sizlBitmap.cx <= 0 || pso->sizlBitmap.cy <= 0)
+    {
+        return NULL;
+    }
+
+    cjRow = (ULONG)abs(pso->lDelta);
+    if (!NT_SUCCESS(RtlULongMult(cjRow, pso->sizlBitmap.cy, &cjSize)) ||
+        !NT_SUCCESS(RtlULongAdd(cjSize, FIELD_OFFSET(PRINTWINDOW_IMAGE, ajBits), &cjSize)))
+    {
+        return NULL;
+    }
+
+    pImage = ExAllocatePoolWithTag(PagedPool, cjSize, USERTAG_REDIRECT);
+    if (!pImage)
+        return NULL;
+
+    pImage->sizl = pso->sizlBitmap;
+    pImage->iFormat = pso->iBitmapFormat;
+    pImage->cjRow = cjRow;
+    pjSrc = pso->pvScan0;
+    for (y = 0; y < pso->sizlBitmap.cy; y++, pjSrc += pso->lDelta)
+        RtlCopyMemory(&pImage->ajBits[y * cjRow], pjSrc, cjRow);
+
+    return pImage;
+}
+
+/*
+ * Render the window (or its client area) and return a copy of the pixels. Runs in the thread of pwnd,
+ * so that the window procedures can draw into a DC of their own process.
  * Windows renders through a redirection surface and the normal paint messages. ReactOS has no
  * redirection, so the image is the window's WM_PRINT output, overlaid with the screen contents of the
  * part of the window that is visible, which is what the paint messages draw. A hidden window gives a
  * black image, as on Windows.
- * Returns a public bitmap, which the caller takes over, or NULL.
+ * The DC and the bitmap the window procedures saw stay in this process and are freed here, whatever
+ * the callbacks did with them; only the pixels leave, in pool memory.
  */
 static
-HBITMAP
+PPRINTWINDOW_IMAGE
 FASTCALL
 IntPrintWindowRender(
     PWND pwnd,
     UINT nFlags)
 {
+    PRINT_TEMPS Temps = { 0 };
+    PPRINTWINDOW_IMAGE pImage = NULL;
     HDC hdcMem, hdcWnd;
-    HBITMAP hbm, hbmOld;
     RECTL rc;
     INT cx, cy;
     PREGION prgnVis;
@@ -1287,17 +1369,19 @@ IntPrintWindowRender(
     if (cx <= 0 || cy <= 0 || !ScreenDeviceContext)
         return NULL;
 
-    hbm = NtGdiCreateCompatibleBitmap(ScreenDeviceContext, cx, cy);
-    if (!hbm)
+    Temps.hbm = NtGdiCreateCompatibleBitmap(ScreenDeviceContext, cx, cy);
+    if (!Temps.hbm)
         return NULL;
-
-    hdcMem = NtGdiCreateCompatibleDC(ScreenDeviceContext);
-    if (!hdcMem)
+    /* Keeps the surface, and its handle, ours to read and free across the callbacks */
+    Temps.psurf = SURFACE_ShareLockSurface(Temps.hbm);
+    Temps.hdc = NtGdiCreateCompatibleDC(ScreenDeviceContext);
+    IntPushPrintTemps(&Temps);
+    if (!Temps.psurf || !Temps.hdc || !NtGdiSelectBitmap(Temps.hdc, Temps.hbm))
     {
-        GreDeleteObject(hbm);
+        IntPopPrintTemps(&Temps);
         return NULL;
     }
-    hbmOld = NtGdiSelectBitmap(hdcMem, hbm);
+    hdcMem = Temps.hdc;
     NtGdiPatBlt(hdcMem, 0, 0, cx, cy, BLACKNESS);
 
     UserRefObjectCo(pwnd, &Ref);
@@ -1348,29 +1432,15 @@ IntPrintWindowRender(
 
     UserDerefObjectCo(pwnd);
 
-    /*
-     * The window procedures had the DC. Hand the bitmap over only if it is still the one selected
-     * there, so that it is selected nowhere else; otherwise leave it to its process.
-     */
-    if (NtGdiSelectBitmap(hdcMem, hbmOld) != hbm)
-    {
-        IntGdiDeleteDC(hdcMem, FALSE);
-        return NULL;
-    }
-    IntGdiDeleteDC(hdcMem, FALSE);
-
-    if (!GreSetBitmapOwner(hbm, GDI_OBJ_HMGR_PUBLIC))
-    {
-        GreDeleteObject(hbm);
-        return NULL;
-    }
-    return hbm;
+    pImage = IntCopySurfaceImage(Temps.psurf);
+    IntPopPrintTemps(&Temps);
+    return pImage;
 }
 
 /*
  * A PrintWindow request rendered in another thread. The rendering thread finds it by its id, both
  * before and after rendering, so a forged message does nothing and a caller that stopped waiting
- * (ReplyMessage from a paint callback, thread exit) leaves no bitmap behind.
+ * (ReplyMessage from a paint callback, thread exit) leaves nothing behind.
  */
 typedef struct _PRINTWINDOW_REQUEST
 {
@@ -1380,7 +1450,7 @@ typedef struct _PRINTWINDOW_REQUEST
     HWND hwnd;
     UINT nFlags;
     BOOL bTaken;
-    HBITMAP hbm;
+    PPRINTWINDOW_IMAGE pImage;
 } PRINTWINDOW_REQUEST, *PPRINTWINDOW_REQUEST;
 
 static LIST_ENTRY gPrintWindowRequests = { &gPrintWindowRequests, &gPrintWindowRequests };
@@ -1400,20 +1470,21 @@ IntFindPrintWindowRequest(ULONG Id)
     return NULL;
 }
 
-static VOID
-IntDeletePrintWindowBitmap(HBITMAP hbm)
-{
-    if (GreSetObjectOwner(hbm, GDI_OBJ_HMGR_POWNED))
-        GreDeleteObject(hbm);
-}
-
-/* Thread rundown: a caller terminated while waiting does not return to remove its requests */
+/* Thread rundown: free the print temporaries of a callback that ended the thread, and the requests of a caller that never returned */
 VOID
 FASTCALL
-IntCleanupPrintWindowRequests(
+IntCleanupThreadPrint(
     PTHREADINFO pti)
 {
     PLIST_ENTRY Entry, Next;
+
+    for (Entry = gPrintTemps.Blink; Entry != &gPrintTemps; Entry = Next)
+    {
+        PPRINT_TEMPS pTemps = CONTAINING_RECORD(Entry, PRINT_TEMPS, ListEntry);
+        Next = Entry->Blink;
+        if (pTemps->pti == pti)
+            IntPopPrintTemps(pTemps);
+    }
 
     for (Entry = gPrintWindowRequests.Flink; Entry != &gPrintWindowRequests; Entry = Next)
     {
@@ -1422,8 +1493,8 @@ IntCleanupPrintWindowRequests(
         if (Request->pti != pti)
             continue;
         RemoveEntryList(&Request->ListEntry);
-        if (Request->hbm)
-            IntDeletePrintWindowBitmap(Request->hbm);
+        if (Request->pImage)
+            ExFreePoolWithTag(Request->pImage, USERTAG_REDIRECT);
         ExFreePoolWithTag(Request, USERTAG_REDIRECT);
     }
 }
@@ -1436,22 +1507,80 @@ IntHandlePrintWindowRequest(
     ULONG Id)
 {
     PPRINTWINDOW_REQUEST Request;
-    HBITMAP hbm;
+    PPRINTWINDOW_IMAGE pImage;
 
     Request = IntFindPrintWindowRequest(Id);
     if (!Request || Request->bTaken || Request->hwnd != UserHMGetHandle(pwnd))
         return 0;
     Request->bTaken = TRUE;
 
-    hbm = IntPrintWindowRender(pwnd, Request->nFlags);
+    pImage = IntPrintWindowRender(pwnd, Request->nFlags);
 
     /* The request may be gone after the callbacks */
     Request = IntFindPrintWindowRequest(Id);
-    if (Request && !Request->hbm)
-        Request->hbm = hbm;
-    else if (hbm)
-        IntDeletePrintWindowBitmap(hbm);
+    if (Request && !Request->pImage)
+        Request->pImage = pImage;
+    else if (pImage)
+        ExFreePoolWithTag(pImage, USERTAG_REDIRECT);
     return 0;
+}
+
+/* Draw the image at the DC's logical origin, through a bitmap of the calling process */
+static
+BOOL
+FASTCALL
+IntPrintWindowBlt(
+    HDC hdcBlt,
+    PPRINTWINDOW_IMAGE pImage)
+{
+    HBITMAP hbm, hbmOld;
+    HDC hdcMem;
+    PSURFACE psurf;
+    SURFOBJ *pso;
+    PBYTE pjDst;
+    LONG y;
+    BOOL Ret = FALSE;
+
+    hbm = NtGdiCreateCompatibleBitmap(ScreenDeviceContext, pImage->sizl.cx, pImage->sizl.cy);
+    if (!hbm)
+        return FALSE;
+
+    /* The display mode may have changed since the rendering */
+    psurf = SURFACE_ShareLockSurface(hbm);
+    if (psurf)
+    {
+        pso = &psurf->SurfObj;
+        if (pso->iType == STYPE_BITMAP && pso->pvScan0 &&
+            pso->sizlBitmap.cx == pImage->sizl.cx && pso->sizlBitmap.cy == pImage->sizl.cy &&
+            pso->iBitmapFormat == pImage->iFormat && (ULONG)abs(pso->lDelta) == pImage->cjRow)
+        {
+            pjDst = pso->pvScan0;
+            for (y = 0; y < pImage->sizl.cy; y++, pjDst += pso->lDelta)
+                RtlCopyMemory(pjDst, &pImage->ajBits[y * pImage->cjRow], pImage->cjRow);
+            Ret = TRUE;
+        }
+        SURFACE_ShareUnlockSurface(psurf);
+    }
+
+    if (Ret)
+    {
+        Ret = FALSE;
+        hdcMem = NtGdiCreateCompatibleDC(ScreenDeviceContext);
+        if (hdcMem)
+        {
+            hbmOld = NtGdiSelectBitmap(hdcMem, hbm);
+            if (hbmOld)
+            {
+                NtGdiBitBlt(hdcBlt, 0, 0, pImage->sizl.cx, pImage->sizl.cy, hdcMem, 0, 0, SRCCOPY, CLR_INVALID, 0);
+                NtGdiSelectBitmap(hdcMem, hbmOld);
+                Ret = TRUE;
+            }
+            IntGdiDeleteDC(hdcMem, FALSE);
+        }
+    }
+
+    GreDeleteObject(hbm);
+    return Ret;
 }
 
 static
@@ -1462,15 +1591,13 @@ IntPrintWindow(
     HDC hdcBlt,
     UINT nFlags)
 {
-    HBITMAP hbm, hbmOld;
-    HDC hdcMem;
-    BITMAP bm;
+    PPRINTWINDOW_IMAGE pImage;
     PPRINTWINDOW_REQUEST Request;
     BOOL Ret = TRUE;
 
     if (pwnd->head.pti == PsGetCurrentThreadWin32Thread())
     {
-        hbm = IntPrintWindowRender(pwnd, nFlags);
+        pImage = IntPrintWindowRender(pwnd, nFlags);
     }
     else
     {
@@ -1484,47 +1611,24 @@ IntPrintWindow(
         Request->hwnd = UserHMGetHandle(pwnd);
         Request->nFlags = nFlags;
         Request->bTaken = FALSE;
-        Request->hbm = NULL;
+        Request->pImage = NULL;
         InsertTailList(&gPrintWindowRequests, &Request->ListEntry);
 
         co_IntSendMessage(UserHMGetHandle(pwnd), WM_ASYNC_PRINTWINDOW, Request->Id, 0);
 
         RemoveEntryList(&Request->ListEntry);
-        hbm = Request->hbm;
+        pImage = Request->pImage;
         ExFreePoolWithTag(Request, USERTAG_REDIRECT);
     }
 
-    if (!hbm)
+    if (!pImage)
         return FALSE;
-
-    if (!GreSetObjectOwner(hbm, GDI_OBJ_HMGR_POWNED))
-        return FALSE;
-
-    if (!GreGetObject(hbm, sizeof(bm), &bm))
-    {
-        GreDeleteObject(hbm);
-        return FALSE;
-    }
 
     /* Windows succeeds without a DC to draw into */
     if (hdcBlt)
-    {
-        Ret = FALSE;
-        hdcMem = NtGdiCreateCompatibleDC(ScreenDeviceContext);
-        if (hdcMem)
-        {
-            hbmOld = NtGdiSelectBitmap(hdcMem, hbm);
-            if (hbmOld)
-            {
-                NtGdiBitBlt(hdcBlt, 0, 0, bm.bmWidth, bm.bmHeight, hdcMem, 0, 0, SRCCOPY, CLR_INVALID, 0);
-                NtGdiSelectBitmap(hdcMem, hbmOld);
-                Ret = TRUE;
-            }
-            IntGdiDeleteDC(hdcMem, FALSE);
-        }
-    }
+        Ret = IntPrintWindowBlt(hdcBlt, pImage);
 
-    GreDeleteObject(hbm);
+    ExFreePoolWithTag(pImage, USERTAG_REDIRECT);
     return Ret;
 }
 

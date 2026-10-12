@@ -426,6 +426,7 @@ DefWndPrint(PWND pwnd, HDC hdc, ULONG uFlags)
     HWND *phwnd;
     PWND pwndDesktop, pwndOwned;
     PRINTSTATE State;
+    PRINT_TEMPS Temps = { 0 };
     BOOL bState;
 
     if ((uFlags & PRF_CHECKVISIBLE) && !IntIsWindowVisible(pwnd))
@@ -433,6 +434,11 @@ DefWndPrint(PWND pwnd, HDC hdc, ULONG uFlags)
 
     /* Not a DC we can transform: the window still draws, without placing or clipping */
     bState = DefWndPrintSaveState(hdc, &State);
+    if (bState)
+    {
+        Temps.hrgn = State.hrgnClip;
+        IntPushPrintTemps(&Temps);
+    }
 
     /*
      * The frame is drawn at the window origin, also for a hidden window (see the WM_NCUAHDRAWFRAME
@@ -506,7 +512,7 @@ DefWndPrint(PWND pwnd, HDC hdc, ULONG uFlags)
     }
 
     if (bState)
-        GreDeleteObject(State.hrgnClip);
+        IntPopPrintTemps(&Temps);
     return 1;
 }
 
