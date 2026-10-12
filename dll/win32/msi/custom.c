@@ -862,26 +862,41 @@ static custom_action_info *do_msidbCustomActionTypeDll(
 #if defined(__REACTOS__) && defined(_M_AMD64)
 struct disabled_windows
 {
-    HWND hwnd[16];
+    HWND *hwnd;
     UINT count;
+    UINT size;
+    BOOL failed;
 };
 
 static BOOL CALLBACK disable_thread_window( HWND hwnd, LPARAM lparam )
 {
     struct disabled_windows *list = (struct disabled_windows *)lparam;
+    HWND *grown;
 
-    if (list->count < ARRAY_SIZE(list->hwnd) && IsWindowVisible( hwnd ) && IsWindowEnabled( hwnd ))
+    if (!IsWindowVisible( hwnd ) || !IsWindowEnabled( hwnd ))
+        return TRUE;
+
+    /* A window is disabled only once it is recorded, so it is enabled again */
+    if (list->count == list->size)
     {
-        EnableWindow( hwnd, FALSE );
-        list->hwnd[list->count++] = hwnd;
+        if (!(grown = realloc( list->hwnd, (list->size ? list->size * 2 : 16) * sizeof(*grown) )))
+        {
+            list->failed = TRUE;
+            return FALSE;
+        }
+        list->hwnd = grown;
+        list->size = list->size ? list->size * 2 : 16;
     }
+    EnableWindow( hwnd, FALSE );
+    list->hwnd[list->count++] = hwnd;
     return TRUE;
 }
 
 /* There is no WOW64, so a 32-bit DLL custom action is skipped: log each one, warn once per package */
 static void warn_skipped_32bit_custom_action( MSIPACKAGE *package, const WCHAR *action, const WCHAR *source )
 {
-    struct disabled_windows disabled = { { 0 }, 0 };
+    struct disabled_windows disabled = { NULL, 0, 0, FALSE };
+    DWORD threads[2];
     WCHAR template[512];
     MSIRECORD *record;
     UINT i;
@@ -899,12 +914,25 @@ static void warn_skipped_32bit_custom_action( MSIPACKAGE *package, const WCHAR *
     {
         package->warned_32bit_custom_action = 1;
         /* The message box has no owner and MB_TASKMODAL is not implemented, so keep the
-         * installer dialogs from handling another event while the warning is shown */
-        EnumThreadWindows( GetCurrentThreadId(), disable_thread_window, (LPARAM)&disabled );
-        MSI_RecordSetStringW( record, 0, template );
-        MSI_ProcessMessage( package, INSTALLMESSAGE_WARNING, record );
+         * installer dialogs from handling another event while the warning is shown. They
+         * belong to the dialog thread, which pumps messages while an action runs, also when
+         * a custom action's MsiDoAction gets here on another thread. */
+        threads[0] = GetCurrentThreadId();
+        threads[1] = msi_dialog_get_ui_thread();
+        for (i = 0; i < ARRAY_SIZE(threads) && !disabled.failed; i++)
+        {
+            if (threads[i] && (i == 0 || threads[i] != threads[0]))
+                EnumThreadWindows( threads[i], disable_thread_window, (LPARAM)&disabled );
+        }
+        /* Without a complete list the warning could not keep the dialogs inactive: the log has it */
+        if (!disabled.failed)
+        {
+            MSI_RecordSetStringW( record, 0, template );
+            MSI_ProcessMessage( package, INSTALLMESSAGE_WARNING, record );
+        }
         for (i = 0; i < disabled.count; i++)
             EnableWindow( disabled.hwnd[i], TRUE );
+        free( disabled.hwnd );
     }
     msiobj_release( &record->hdr );
 }

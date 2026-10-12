@@ -987,6 +987,9 @@ extern LONG msi_reg_set_subkey_val( HKEY hkey, LPCWSTR path, LPCWSTR name, LPCWS
 extern void msi_dialog_check_messages( HANDLE );
 extern void msi_dialog_destroy( msi_dialog* );
 extern void msi_dialog_unregister_class( void );
+#ifdef __REACTOS__
+extern DWORD msi_dialog_get_ui_thread( void );
+#endif
 
 /* summary information */
 extern UINT msi_get_suminfo( IStorage *stg, UINT uiUpdateCount, MSISUMMARYINFO **si );
