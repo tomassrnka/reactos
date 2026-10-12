@@ -1294,7 +1294,7 @@ _LocalOpenPrinterHandle(PWSTR pwszPrinterName, PWSTR pwszJobParameter, PHANDLE p
 
         // Try to open its SPL file.
         GetJobFilePath(L"SPL", dwJobID, wszFullPath);
-        pPrinterHandle->hSPLFile = CreateFileW(wszFullPath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        pPrinterHandle->hSPLFile = CreateFileW(wszFullPath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
         if (pPrinterHandle->hSPLFile == INVALID_HANDLE_VALUE)
         {
             dwErrorCode = GetLastError();
@@ -2078,13 +2078,18 @@ LocalEndDocPrinter(HANDLE hPrinter)
     // A spooled job started through StartDocPrinter is complete now: print it.
     if (pPrinterHandle->hSPLWriteFile != INVALID_HANDLE_VALUE)
     {
+        // A job deleted while it was spooled is discarded instead of printed.
+        BOOL bDeleted = !!(pPrinterHandle->pJob->dwStatus & JOB_STATUS_DELETING);
+
         CloseHandle(pPrinterHandle->hSPLWriteFile);
         pPrinterHandle->hSPLWriteFile = INVALID_HANDLE_VALUE;
 
-        dwErrorCode = StartJobPrinting(pPrinterHandle->pJob);
-        if (dwErrorCode != ERROR_SUCCESS)
+        if (!bDeleted)
+            dwErrorCode = StartJobPrinting(pPrinterHandle->pJob);
+
+        if (bDeleted || dwErrorCode != ERROR_SUCCESS)
         {
-            // The job cannot be printed: discard it.
+            // The job is not printed: discard it.
             WCHAR wszFullPath[MAX_PATH];
 
             GetJobFilePath(L"SPL", pPrinterHandle->pJob->dwJobID, wszFullPath);

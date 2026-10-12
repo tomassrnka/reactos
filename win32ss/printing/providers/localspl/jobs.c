@@ -1052,7 +1052,8 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
     }
 
     // Refuse a command that cannot be carried out before any change is applied.
-    if (Command && Command != JOB_CONTROL_SENT_TO_PRINTER)
+    if (Command && Command != JOB_CONTROL_SENT_TO_PRINTER &&
+        !((Command == JOB_CONTROL_DELETE || Command == JOB_CONTROL_CANCEL) && (pJob->dwStatus & JOB_STATUS_SPOOLING)))
     {
         ERR("Unimplemented SetJob Command: %lu!\n", Command);
         dwErrorCode = ERROR_NOT_SUPPORTED;
@@ -1090,6 +1091,12 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
 
         // TODO: All open handles associated with the job need to be invalidated.
         // This certainly needs handle tracking...
+    }
+    else if (Command)
+    {
+        // A job that is still being spooled belongs to the handle spooling it.
+        // It is discarded when its document ends, as on Windows: by ScheduleJob, EndDocPrinter or ClosePrinter.
+        pJob->dwStatus |= JOB_STATUS_DELETING;
     }
 
 Cleanup:
@@ -1240,6 +1247,17 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
 
     // Construct the full path to the spool file.
     GetJobFilePath(L"SPL", dwJobID, wszFullPath);
+
+    // A job deleted while it was spooled is discarded instead of printed, as on Windows.
+    if (pJob->dwStatus & JOB_STATUS_DELETING)
+    {
+        DeleteFileW(wszFullPath);
+        FreeJob(pJob);
+        pPrinterHandle->bStartedDoc = FALSE;
+        pPrinterHandle->pJob = NULL;
+        dwErrorCode = ERROR_SUCCESS;
+        goto Cleanup;
+    }
 
     // Check if it exists.
     dwAttributes = GetFileAttributesW(wszFullPath);
