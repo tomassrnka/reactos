@@ -3431,6 +3431,209 @@ static HRESULT check_known_folder_flags(DWORD dwFlags)
     return S_OK;
 }
 
+/* Known folders without a CSIDL: a path relative to a parent known folder */
+#define KFD_PERUSER   0x01 /* redirected by a value in the user's User Shell Folders key */
+#define KFD_COMMON    0x02 /* redirected by a value in the machine's User Shell Folders key */
+#define KFD_READONLY  0x04 /* created with the read-only attribute, as Windows creates it */
+#define KFD_HIDDEN    0x08 /* created with the hidden attribute */
+#define KFD_ALLUSERS  0x10 /* the All Users profile directory */
+#define KFD_PROFILES  0x20 /* the profiles directory */
+#define KFD_NATIVE64  0x40 /* 64-bit code only; Windows does not give it to 32-bit code, also not under WOW64 */
+
+typedef struct
+{
+    const KNOWNFOLDERID *id;
+    const KNOWNFOLDERID *parent;
+    LPCWSTR pszRelativePath;
+    DWORD dwFlags;
+} KNOWN_FOLDER_DEF;
+
+static const KNOWN_FOLDER_DEF KnownFolderDefs[] =
+{
+    { &FOLDERID_Downloads, &FOLDERID_Profile, L"Downloads", KFD_PERUSER | KFD_READONLY },
+    { &FOLDERID_Links, &FOLDERID_Profile, L"Links", KFD_PERUSER | KFD_READONLY },
+    { &FOLDERID_SavedGames, &FOLDERID_Profile, L"Saved Games", KFD_PERUSER | KFD_READONLY },
+    { &FOLDERID_Contacts, &FOLDERID_Profile, L"Contacts", KFD_PERUSER | KFD_READONLY },
+    { &FOLDERID_SavedSearches, &FOLDERID_Profile, L"Searches", KFD_PERUSER | KFD_READONLY },
+    { &FOLDERID_LocalAppDataLow, &FOLDERID_Profile, L"AppData\\LocalLow", KFD_PERUSER },
+    { &FOLDERID_UserProgramFiles, &FOLDERID_LocalAppData, L"Programs", KFD_PERUSER },
+    { &FOLDERID_UserProgramFilesCommon, &FOLDERID_UserProgramFiles, L"Common", KFD_PERUSER },
+    { &FOLDERID_QuickLaunch, &FOLDERID_RoamingAppData, L"Microsoft\\Internet Explorer\\Quick Launch", KFD_PERUSER },
+    { &FOLDERID_Public, NULL, NULL, KFD_ALLUSERS | KFD_READONLY },
+    { &FOLDERID_PublicDownloads, &FOLDERID_Public, L"Downloads", KFD_COMMON | KFD_READONLY },
+    { &FOLDERID_PublicLibraries, &FOLDERID_Public, L"Libraries", KFD_COMMON | KFD_READONLY | KFD_HIDDEN },
+    { &FOLDERID_PublicGameTasks, &FOLDERID_ProgramData, L"Microsoft\\Windows\\GameExplorer", KFD_COMMON },
+    { &FOLDERID_PublicRingtones, &FOLDERID_ProgramData, L"Microsoft\\Windows\\Ringtones", KFD_COMMON },
+    { &FOLDERID_UserProfiles, NULL, NULL, KFD_PROFILES | KFD_READONLY },
+    { &FOLDERID_ProgramFilesX64, &FOLDERID_ProgramFiles, NULL, KFD_NATIVE64 },
+    { &FOLDERID_ProgramFilesCommonX64, &FOLDERID_ProgramFilesCommon, NULL, KFD_NATIVE64 },
+};
+
+static const KNOWN_FOLDER_DEF *kf_find_def(const KNOWNFOLDERID *id)
+{
+    UINT i;
+
+    if (!id)
+        return NULL;
+    for (i = 0; i < ARRAY_SIZE(KnownFolderDefs); i++)
+    {
+        if (IsEqualGUID(KnownFolderDefs[i].id, id))
+            return &KnownFolderDefs[i];
+    }
+    return NULL;
+}
+
+/* Reads the folder's User Shell Folders value (the key of the user for KFD_PERUSER, HKLM for KFD_COMMON);
+ * like Windows, the Shell Folders key is neither read nor written */
+static HRESULT kf_get_redirected_path(const KNOWN_FOLDER_DEF *def, HANDLE hToken, LPWSTR pszPath)
+{
+    WCHAR szValueName[39], szKey[MAX_PATH], szValue[MAX_PATH + 1], szExpanded[MAX_PATH];
+    HKEY hRootKey = HKEY_LOCAL_MACHINE, hKey;
+    DWORD dwType, cbValue = sizeof(szValue) - sizeof(WCHAR), cch;
+    LPWSTR pszSid;
+    HRESULT hr;
+    LONG ret;
+
+    szKey[0] = UNICODE_NULL;
+    if (def->dwFlags & KFD_PERUSER)
+    {
+        if (hToken == NULL)
+        {
+            hRootKey = HKEY_CURRENT_USER;
+        }
+        else
+        {
+            hRootKey = HKEY_USERS;
+            if (hToken == (HANDLE)-1)
+            {
+                StringCchCopyW(szKey, _countof(szKey), L".Default\\");
+            }
+            else
+            {
+                pszSid = _GetUserSidStringFromToken(hToken);
+                if (!pszSid)
+                    return E_FAIL;
+                StringCchPrintfW(szKey, _countof(szKey), L"%s\\", pszSid);
+                LocalFree(pszSid);
+            }
+        }
+    }
+    StringCchCatW(szKey, _countof(szKey), szSHUserFolders);
+    StringFromGUID2(def->id, szValueName, _countof(szValueName));
+
+    if (RegOpenKeyExW(hRootKey, szKey, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return E_FAIL;
+    ret = RegQueryValueExW(hKey, szValueName, NULL, &dwType, (LPBYTE)szValue, &cbValue);
+    RegCloseKey(hKey);
+    if (ret != ERROR_SUCCESS || (dwType != REG_SZ && dwType != REG_EXPAND_SZ))
+        return E_FAIL;
+    szValue[cbValue / sizeof(WCHAR)] = UNICODE_NULL;
+    if (!szValue[0] || lstrlenW(szValue) >= MAX_PATH)
+        return E_FAIL;
+
+    if (dwType == REG_SZ)
+        return StringCchCopyW(pszPath, MAX_PATH, szValue);
+
+    if (hToken == NULL)
+    {
+        /* The current user: the environment of this process */
+        cch = ExpandEnvironmentStringsW(szValue, pszPath, MAX_PATH);
+    }
+    else
+    {
+        /* The profile variables of the token's user (or the default user) first, then the others */
+        hr = _SHExpandEnvironmentStrings(hToken, szValue, szExpanded, _countof(szExpanded));
+        if (FAILED(hr))
+            return hr;
+        if (!StrChrW(szExpanded, L'%'))
+            return szExpanded[0] ? StringCchCopyW(pszPath, MAX_PATH, szExpanded) : E_FAIL;
+        cch = SHExpandEnvironmentStringsForUserW(hToken == (HANDLE)-1 ? NULL : hToken, szExpanded, pszPath, MAX_PATH);
+    }
+    if (!cch || cch > MAX_PATH || !pszPath[0])
+    {
+        pszPath[0] = UNICODE_NULL;
+        return E_FAIL;
+    }
+    return S_OK;
+}
+
+/* Gets the path of a known folder, without verifying it, into the MAX_PATH buffer pszPath.
+ * Only KF_FLAG_DEFAULT_PATH and KF_FLAG_NOT_PARENT_RELATIVE of dwFlags are used. */
+static HRESULT kf_get_path(const KNOWNFOLDERID *id, DWORD dwFlags, HANDLE hToken, LPWSTR pszPath)
+{
+    const KNOWN_FOLDER_DEF *def;
+    DWORD cchPath = MAX_PATH;
+    HRESULT hr;
+    int csidl;
+
+    pszPath[0] = UNICODE_NULL;
+    csidl = csidl_from_id(id);
+    if (csidl >= 0)
+    {
+        if (is_virtual_folder(csidl))
+            return E_FAIL;
+        hr = SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, hToken,
+                              (dwFlags & KF_FLAG_DEFAULT_PATH) ? SHGFP_TYPE_DEFAULT : SHGFP_TYPE_CURRENT, pszPath);
+        if (FAILED(hr))
+            return hr;
+        return (hr == S_OK && pszPath[0]) ? S_OK : HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
+
+    def = kf_find_def(id);
+    if (!def || ((def->dwFlags & KFD_NATIVE64) && !is_win64))
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    if ((def->dwFlags & (KFD_PERUSER | KFD_COMMON)) && !(dwFlags & KF_FLAG_DEFAULT_PATH) &&
+        SUCCEEDED(kf_get_redirected_path(def, hToken, pszPath)))
+    {
+        return S_OK;
+    }
+
+    if (def->dwFlags & KFD_ALLUSERS)
+        return GetAllUsersProfileDirectoryW(pszPath, &cchPath) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+    if (def->dwFlags & KFD_PROFILES)
+        return GetProfilesDirectoryW(pszPath, &cchPath) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+
+    /* The default path is relative to the current path of the parent, unless the caller asks for the parent's default path */
+    hr = kf_get_path(def->parent, (dwFlags & KF_FLAG_NOT_PARENT_RELATIVE) ? dwFlags : (dwFlags & ~KF_FLAG_DEFAULT_PATH),
+                     hToken, pszPath);
+    if (FAILED(hr))
+        return hr;
+    if (def->pszRelativePath && !PathAppendW(pszPath, def->pszRelativePath))
+        return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
+    return S_OK;
+}
+
+/* Verifies or creates the folder as dwFlags ask; KF_FLAG_CREATE also applies with KF_FLAG_DONT_VERIFY */
+static HRESULT kf_verify_path(const KNOWN_FOLDER_DEF *def, DWORD dwFlags, LPCWSTR pszPath)
+{
+    DWORD dwError, dwAttributes = 0;
+    int ret;
+
+    /* Without KF_FLAG_CREATE, KF_FLAG_DONT_VERIFY does not touch the file system */
+    if ((dwFlags & (KF_FLAG_DONT_VERIFY | KF_FLAG_CREATE)) == KF_FLAG_DONT_VERIFY)
+        return S_OK;
+    if (GetFileAttributesW(pszPath) != INVALID_FILE_ATTRIBUTES)
+        return S_OK;
+    dwError = GetLastError();
+
+    if (dwFlags & KF_FLAG_CREATE)
+    {
+        ret = SHCreateDirectoryExW(NULL, pszPath, NULL);
+        if (ret != ERROR_SUCCESS && ret != ERROR_ALREADY_EXISTS)
+            return HRESULT_FROM_WIN32(ret);
+        if (def->dwFlags & KFD_READONLY)
+            dwAttributes |= FILE_ATTRIBUTE_READONLY;
+        if (def->dwFlags & KFD_HIDDEN)
+            dwAttributes |= FILE_ATTRIBUTE_HIDDEN;
+        if (ret == ERROR_SUCCESS && dwAttributes)
+            SetFileAttributesW(pszPath, dwAttributes);
+        return S_OK;
+    }
+    /* ERROR_PATH_NOT_FOUND when the parent folder is missing too, as on Windows */
+    return HRESULT_FROM_WIN32(dwError ? dwError : ERROR_FILE_NOT_FOUND);
+}
+
 /*************************************************************************
  * SHGetKnownFolderPath           [SHELL32.@]
  */
@@ -3452,17 +3655,30 @@ HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE
 
     csidl = csidl_from_id(rfid);
     if (csidl < 0)
-        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
-    if (is_virtual_folder(csidl))
-        return E_FAIL;
+    {
+        const KNOWN_FOLDER_DEF *def = kf_find_def(rfid);
 
-    hr = SHGetFolderPathW(NULL, csidl | (dwFlags & (KF_FLAG_CREATE | KF_FLAG_DONT_VERIFY)), hToken,
-                          (dwFlags & KF_FLAG_DEFAULT_PATH) ? SHGFP_TYPE_DEFAULT : SHGFP_TYPE_CURRENT, szPath);
-    if (FAILED(hr))
-        return hr;
-    /* S_FALSE: the folder has no location on this system */
-    if (hr != S_OK || !szPath[0])
-        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        if (!def)
+            return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        hr = kf_get_path(rfid, dwFlags, hToken, szPath);
+        if (SUCCEEDED(hr))
+            hr = kf_verify_path(def, dwFlags, szPath);
+        if (FAILED(hr))
+            return hr;
+    }
+    else
+    {
+        if (is_virtual_folder(csidl))
+            return E_FAIL;
+
+        hr = SHGetFolderPathW(NULL, csidl | (dwFlags & (KF_FLAG_CREATE | KF_FLAG_DONT_VERIFY)), hToken,
+                              (dwFlags & KF_FLAG_DEFAULT_PATH) ? SHGFP_TYPE_DEFAULT : SHGFP_TYPE_CURRENT, szPath);
+        if (FAILED(hr))
+            return hr;
+        /* S_FALSE: the folder has no location on this system */
+        if (hr != S_OK || !szPath[0])
+            return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
 
     *ppszPath = CoTaskMemAlloc((lstrlenW(szPath) + 1) * sizeof(WCHAR));
     if (!*ppszPath)
@@ -3515,12 +3731,13 @@ HRESULT WINAPI SHGetKnownFolderIDList(REFKNOWNFOLDERID rfid, DWORD dwFlags, HAND
         return hr;
 
     csidl = csidl_from_id(rfid);
-    if (csidl < 0)
+    if (csidl < 0 && !kf_find_def(rfid))
         return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
 
     /* The desktop and My Documents are shell items unless the caller asks for the file system path */
-    if (is_virtual_folder(csidl) ||
-        (!(dwFlags & KF_FLAG_NO_ALIAS) && (csidl == CSIDL_DESKTOP || csidl == CSIDL_PERSONAL)))
+    if (csidl >= 0 &&
+        (is_virtual_folder(csidl) ||
+         (!(dwFlags & KF_FLAG_NO_ALIAS) && (csidl == CSIDL_DESKTOP || csidl == CSIDL_PERSONAL))))
     {
         return SHGetFolderLocation(NULL, csidl, hToken, 0, ppidl);
     }
@@ -3579,7 +3796,10 @@ HRESULT WINAPI SHSetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE
 
     csidl = csidl_from_id(rfid);
     if (csidl < 0)
-        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    {
+        /* Folder redirection is not implemented, as in SHSetFolderPathW */
+        return kf_find_def(rfid) ? E_FAIL : HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
 
     return SHSetFolderPathW(csidl, hToken, 0, pszPath);
 }
