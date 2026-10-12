@@ -29,6 +29,7 @@ list(APPEND SOURCE
     GetWindowPlacement.c
     GW_ENABLEDPOPUP.c
     InitializeLpkHooks.c
+    IsDialogMessage.c
     IsServerSideWindow.c
     KbdLayout.c
     keybd_event.c
