@@ -2970,7 +2970,7 @@ RegEnumValueA(
             /* Do the data conversion */
             RtlUnicodeToMultiByteN(DataStr, DataLength, 0, DataBuffer, DataBufferSize);
             /* NULL-terminate if there is enough room */
-            if ((DataLength > *lpcbData) && (DataStr[*lpcbData - 1] != '\0'))
+            if ((DataLength > *lpcbData) && (*lpcbData > 0) && (DataStr[*lpcbData - 1] != '\0'))
                 DataStr[*lpcbData] = '\0';
         }
 
