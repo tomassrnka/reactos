@@ -1333,6 +1333,10 @@ enum wined3d_memory_segment_group
 #define WINED3D_LEGACY_CUBEMAP_FILTERING                        0x00001000
 #define WINED3D_NORMALIZED_DEPTH_BIAS                           0x00002000
 #define WINED3D_NO_DRAW_INDIRECT                                0x00004000
+#ifdef __REACTOS__
+/* The caller retries with WINED3D_NO3D, so the missing-OpenGL notice is not shown. */
+#define WINED3D_REACTOS_NO3D_FALLBACK                           0x80000000
+#endif
 
 #define WINED3D_RESZ_CODE                                       0x7fa05000
 
