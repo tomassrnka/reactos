@@ -319,6 +319,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     Vpb->VolumeLabelLength = (USHORT)(min(Vcb->Info.label_len, MAXIMUM_VOLUME_LABEL_LENGTH / sizeof(WCHAR)) * sizeof(WCHAR));
     for (i = 0; i < Vpb->VolumeLabelLength / sizeof(WCHAR); i++)
         Vpb->VolumeLabel[i] = Vcb->Info.label[i];
+    Vcb->LabelStale = !Vcb->Info.label_valid;
     Vcb->ReadOnly = Vcb->Info.read_only ? TRUE : FALSE;
     /*
      * Read-only for good on a disk that cannot flush, or whose sectors the journal cannot use: the
@@ -345,9 +346,87 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 }
 
 /*
+ * Before a volume lock: STATUS_ACCESS_DENIED while a file of the volume is a paging file (Mm keeps its
+ * file object, and writes it past the core, after shutdown closed the handle, which also deletes and
+ * unlists it: Vcb->PagingFiles counts paging-file FCBs until they are freed) or has a section object
+ * (a mapping that outlived its file handle; a mapped image together with data pages also counts, as
+ * MmCanFileBeTruncated cannot tell them apart).  Nothing is purged: ReactOS keeps a file's data pages
+ * after its last close, and the flush before the lock wrote them.  Writers this check cannot see (a
+ * mapped file deleted before the lock and so unlisted, a section whose creation was past its file
+ * object reference) write through the core until the holder writes the disk directly, and their page
+ * writes are dropped from then on (NgDropIfDiscardable).  A new paging file needs an open, which the
+ * lock refuses.
+ */
+static NTSTATUS NgLockCheckSections(PNG_VCB Vcb, PNG_FCB VolumeFcb)
+{
+    PNG_FCB *List = NULL;
+    ULONG Count = 0, Cap = 0, i;
+    PLIST_ENTRY Entry;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    if (Vcb->PagingFiles)
+    {
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        return STATUS_ACCESS_DENIED;
+    }
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        if (F == VolumeFcb)
+            continue;
+        if (F->OpenHandles || F->IsPagingFile)
+        {
+            ExReleaseFastMutex(&Vcb->FcbListLock);
+            return STATUS_ACCESS_DENIED;
+        }
+        if (F->SectionObjectPointers.DataSectionObject)
+            Cap++;
+    }
+    List = Cap ? ExAllocatePoolWithTag(NonPagedPool, Cap * sizeof(PNG_FCB), TAG_NTFSNG) : NULL;
+    if (Cap && !List)
+    {
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < Cap; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        if (F != VolumeFcb && F->SectionObjectPointers.DataSectionObject)
+        {
+            InterlockedIncrement(&F->RefCount);
+            List[Count++] = F;
+        }
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+
+    for (i = 0; i < Count; i++)
+    {
+        PNG_FCB F = List[i];
+        if (NT_SUCCESS(Status))
+        {
+            ExAcquireResourceExclusiveLite(F->Header.Resource, TRUE);
+            if (F->SectionObjectPointers.ImageSectionObject)
+                MmFlushImageSection(&F->SectionObjectPointers, MmFlushForWrite);
+            if (!MmCanFileBeTruncated(&F->SectionObjectPointers, NULL))
+            {
+                Status = STATUS_ACCESS_DENIED;
+                DPRINT1("ntfsng: volume lock refused: file %I64x is mapped\n", F->MftNo);
+            }
+            ExReleaseResourceLite(F->Header.Resource);
+        }
+        NgDereferenceFcb(F);
+    }
+    if (List)
+        ExFreePoolWithTag(List, TAG_NTFSNG);
+    return Status;
+}
+
+/*
  * FSCTL_LOCK_VOLUME through a volume handle: after a flush, granted only while that handle is the
- * only open one on the volume; then every other open is refused until FSCTL_UNLOCK_VOLUME or the
- * holder's cleanup.  Cached files without handles do not count.
+ * only open one on the volume and no file has a section object or is a paging file
+ * (NgLockCheckSections); then every other open is refused until FSCTL_UNLOCK_VOLUME or the holder's
+ * cleanup.
  */
 static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
 {
@@ -371,15 +450,21 @@ static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         ExReleaseResourceLite(&Vcb->CreateGate);
         return STATUS_UNEXPECTED_IO_ERROR;
     }
+    Status = NgLockCheckSections(Vcb, Fcb);
+    if (!NT_SUCCESS(Status))
+    {
+        ExReleaseResourceLite(&Vcb->CreateGate);
+        return Status;
+    }
     ExAcquireFastMutex(&Vcb->FcbListLock);
     /* Checked again after the flush, in the hold that publishes the lock: also refused for a handle
      * whose cleanup ran meanwhile (nothing would ever unlock it). */
-    if (Vcb->Dismounted || Vcb->LockedBy || ((PNG_CCB)FileObject->FsContext2)->CleanedUp)
+    if (Vcb->Dismounted || Vcb->LockedBy || ((PNG_CCB)FileObject->FsContext2)->CleanedUp || Vcb->PagingFiles)
         Status = STATUS_ACCESS_DENIED;
     for (Entry = Vcb->FcbList.Flink; NT_SUCCESS(Status) && Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
-        if (F != Fcb && F->OpenHandles)
+        if (F != Fcb && (F->OpenHandles || F->IsPagingFile))
         {
             Status = STATUS_ACCESS_DENIED;
             break;
@@ -460,6 +545,12 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     if (!NewVpb)
         return STATUS_INSUFFICIENT_RESOURCES;
     ExAcquireFastMutex(&Vcb->FcbListLock);
+    if (Vcb->PagingFiles)
+    {
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
+        return STATUS_ACCESS_DENIED;
+    }
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);

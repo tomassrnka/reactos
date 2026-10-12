@@ -4,7 +4,8 @@ list(APPEND SOURCE
     delete.c
     inherit.c
     special.c
-    util.c)
+    util.c
+    volume.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
