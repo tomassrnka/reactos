@@ -346,8 +346,14 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     {
         LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_PRINTER_DELETED;
-        FreeJob(pJob);
-        pJob = NULL;
+
+        // The job is in no list and has no files yet: free only its own memory (FreeJob would remove a job with the same ID).
+        DllFreeSplMem(pJob->pDevMode);
+        DllFreeSplStr(pJob->pwszDatatype);
+        DllFreeSplStr(pJob->pwszDocumentName);
+        DllFreeSplStr(pJob->pwszMachineName);
+        DllFreeSplStr(pJob->pwszNotifyName);
+        DllFreeSplStr(pJob->pwszUserName);
         goto Cleanup;
     }
 
