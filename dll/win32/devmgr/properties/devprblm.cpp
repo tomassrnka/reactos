@@ -282,7 +282,7 @@ DeviceProblemWizardW(IN HWND hWndParent  OPTIONAL,
     SP_DEVINFO_DATA DevInfoData;
     HINSTANCE hComCtl32;
     CONFIGRET cr;
-    HMACHINE hMachine;
+    HMACHINE hMachine = NULL;
     BOOL Ret = FALSE;
 
     if (lpDeviceID == NULL)
@@ -301,8 +301,10 @@ DeviceProblemWizardW(IN HWND hWndParent  OPTIONAL,
                                                  NULL);
         if (hDevInfo != INVALID_HANDLE_VALUE)
         {
-            cr = CM_Connect_Machine(lpMachineName,
-                                    &hMachine);
+            /* as in the property sheet, the local machine is a NULL handle */
+            cr = CR_SUCCESS;
+            if (lpMachineName != NULL && lpMachineName[0] != UNICODE_NULL)
+                cr = CM_Connect_Machine(lpMachineName, &hMachine);
             if (cr == CR_SUCCESS)
             {
                 DevInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
@@ -318,7 +320,8 @@ DeviceProblemWizardW(IN HWND hWndParent  OPTIONAL,
                                                   hMachine);
                 }
 
-                CM_Disconnect_Machine(hMachine);
+                if (hMachine != NULL)
+                    CM_Disconnect_Machine(hMachine);
             }
 
             SetupDiDestroyDeviceInfoList(hDevInfo);

@@ -2427,8 +2427,15 @@ GetParentNode:
     {
         /* As on Windows, a device without a problem has no problem button */
         bDevActionAvailable = FALSE;
-        ShowWindow(hDevProbBtn, SW_HIDE);
     }
+
+    if (!(dap->IsAdmin && bDevActionAvailable) && GetFocus() == hDevProbBtn)
+    {
+        /* do not leave the focus on a control that is about to be hidden or disabled */
+        SendMessage(hPropSheetDlg, WM_NEXTDLGCTL, 0, FALSE);
+    }
+    if (!(cr == CR_SUCCESS && (Status & DN_HAS_PROBLEM)))
+        ShowWindow(hDevProbBtn, SW_HIDE);
 
     if (LoadString(hDllInstance,
                    TroubleShootStrId,
@@ -2735,11 +2742,14 @@ AdvPropGeneralDlgProc(IN HWND hwndDlg,
 
                     case IDC_DEVPROBLEM:
                     {
+                        /* the driver wizard reports success also when it was cancelled, so a pending
+                           Device usage change is kept rather than refreshed away */
                         if (dap->IsAdmin &&
                             ShowDeviceProblemWizard(hwndDlg,
                                                     dap->DeviceInfoSet,
                                                     &dap->DeviceInfoData,
-                                                    dap->hMachine))
+                                                    dap->hMachine) &&
+                            !dap->DeviceUsageChanged)
                         {
                             UpdateDevInfo(hwndDlg,
                                           dap,
