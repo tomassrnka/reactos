@@ -1340,6 +1340,10 @@ EndDocPrinter(HANDLE hPrinter)
 
     if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
     {
+        // Close the spool file handle first: the spooler prints the file, or deletes it with a deleted job.
+        CloseHandle(pHandle->hSPLFile);
+        pHandle->hSPLFile = INVALID_HANDLE_VALUE;
+
         // For spooled jobs, the document is finished by calling _RpcScheduleJob.
         RpcTryExcept
         {
@@ -1351,10 +1355,6 @@ EndDocPrinter(HANDLE hPrinter)
             ERR("_RpcScheduleJob failed with exception code %lu!\n", dwErrorCode);
         }
         RpcEndExcept;
-
-        // Close the spool file handle.
-        CloseHandle(pHandle->hSPLFile);
-        pHandle->hSPLFile = INVALID_HANDLE_VALUE;
     }
     else
     {
