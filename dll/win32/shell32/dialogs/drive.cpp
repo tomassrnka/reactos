@@ -217,14 +217,8 @@ GetDefaultClusterSize(LPWSTR szFs, PDWORD pClusterSize, PULARGE_INTEGER TotalNum
     }
     else if (!_wcsicmp(szFs, L"NTFS"))
     {
-        if (TotalNumberOfBytes->QuadPart <= (512 * 1024 * 1024))
-            ClusterSize = 512;
-        else if (TotalNumberOfBytes->QuadPart <= (1024 * 1024 * 1024))
-            ClusterSize = 1024;
-        else if (TotalNumberOfBytes->QuadPart <= (2048LL * 1024LL * 1024LL))
-            ClusterSize = 2048;
-        else
-            ClusterSize = 2048;
+        // the formatter's default (4 KB up to 16 TB), as setup uses it
+        ClusterSize = 0;
     }
     else if (!_wcsicmp(szFs, L"EXT2"))
     {
