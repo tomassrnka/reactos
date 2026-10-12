@@ -58,6 +58,7 @@ list(APPEND SOURCE
     SetScrollRange.c
     SetWindowPlacement.c
     ShowWindow.c
+    SwitchDesktop.c
     SwitchToThisWindow.c
     SystemMenu.c
     SystemParametersInfo.c
