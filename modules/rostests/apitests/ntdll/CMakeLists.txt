@@ -40,6 +40,7 @@ list(APPEND SOURCE
     LdrEnumResources.c
     LdrFindResource_U.c
     LdrLoadDll.c
+    LdrShutdownThread.c
     load_notifications.c
     locale.c
     NtAcceptConnectPort.c
