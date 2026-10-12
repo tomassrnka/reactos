@@ -119,6 +119,7 @@ _PrinterJobListCompareRoutine(PVOID FirstStruct, PVOID SecondStruct)
     int iComparison;
     FILETIME ftSubmittedA;
     FILETIME ftSubmittedB;
+    ULONGLONG tA, tB;
 
     // First compare the priorities to determine the order.
     // The job with a higher priority shall come first.
@@ -134,7 +135,10 @@ _PrinterJobListCompareRoutine(PVOID FirstStruct, PVOID SecondStruct)
     if (!SystemTimeToFileTime(&B->stSubmitted, &ftSubmittedB))
         ftSubmittedB.dwLowDateTime = ftSubmittedB.dwHighDateTime = 0;
 
-    iComparison = CompareFileTime(&ftSubmittedA, &ftSubmittedB);
+    // Compared as unsigned 64-bit values: CompareFileTime subtracts, which overflows for a far restored date.
+    tA = ((ULONGLONG)ftSubmittedA.dwHighDateTime << 32) | ftSubmittedA.dwLowDateTime;
+    tB = ((ULONGLONG)ftSubmittedB.dwHighDateTime << 32) | ftSubmittedB.dwLowDateTime;
+    iComparison = (tA > tB) - (tA < tB);
     if (iComparison != 0)
         return iComparison;
 
@@ -1487,11 +1491,14 @@ FreeJob(PLOCAL_JOB pJob)
 
     TRACE("FreeJob(%p)\n", pJob);
 
-    // Remove the Job from both Job Lists.
+    // Remove the Job from both Job Lists, under the lock that job admission, priority moves and printer deletion take,
+    // so that two removals of one job cannot both find it.
+    EnterCriticalSection(&PrinterDeletionSection);
     DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
     // Only a job that was still in the GlobalJobList was counted.
     if (DeleteElementSkiplist(&GlobalJobList, pJob))
         InterlockedDecrement(&pJob->pPrinter->lJobCount);
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     // Try to delete the corresponding .SHD file.
     pwszSHDFile = DllAllocSplMem(GetJobFilePath(L"SHD", 0, NULL));
