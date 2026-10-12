@@ -216,44 +216,93 @@ BOOL NOTEPAD_FindNext(FINDREPLACE *pFindReplace, BOOL bReplace, BOOL bShowAlert)
 }
 
 /***********************************************************************
+ *           NOTEPAD_ReplaceAllScan
+ *
+ *  Finds the matches the way repeated Replace commands do: left to right
+ *  over the original text without overlapping, and with Whole Word the
+ *  left edge checked again against the text already replaced. Counts the
+ *  replacements and, when pszDest is not NULL, writes the new text there.
+ */
+static INT
+NOTEPAD_ReplaceAllScan(FINDREPLACE *pFindReplace, LPCTSTR pszText, INT iTextLength, LPTSTR pszDest)
+{
+    LPCTSTR pszReplace = pFindReplace->lpstrReplaceWith;
+    INT iTargetLength = (INT)_tcslen(pFindReplace->lpstrFindWhat);
+    INT iReplaceLength = (INT)_tcslen(pszReplace);
+    INT iPosition = 0, iCopy = 0, iMatches = 0;
+    TCHAR chLast = 0; /* last character of the new text before iCopy */
+
+    while (iPosition <= iTextLength - iTargetLength)
+    {
+        if (!NOTEPAD_FindTextAt(pFindReplace, pszText, iTextLength, iPosition))
+        {
+            ++iPosition;
+            continue;
+        }
+
+        if ((pFindReplace->Flags & FR_WHOLEWORD) && iMatches > 0 && iPosition == iCopy &&
+            (_istalnum(chLast) || chLast == _T('_')))
+        {
+            iPosition += iTargetLength;
+            continue;
+        }
+
+        if (iPosition > iCopy)
+        {
+            if (pszDest)
+            {
+                CopyMemory(pszDest, &pszText[iCopy], (iPosition - iCopy) * sizeof(TCHAR));
+                pszDest += iPosition - iCopy;
+            }
+            chLast = pszText[iPosition - 1];
+        }
+        if (iReplaceLength > 0)
+        {
+            if (pszDest)
+            {
+                CopyMemory(pszDest, pszReplace, iReplaceLength * sizeof(TCHAR));
+                pszDest += iReplaceLength;
+            }
+            chLast = pszReplace[iReplaceLength - 1];
+        }
+
+        ++iMatches;
+        iPosition += iTargetLength;
+        iCopy = iPosition;
+    }
+
+    if (pszDest)
+    {
+        CopyMemory(pszDest, &pszText[iCopy], (iTextLength - iCopy) * sizeof(TCHAR));
+        pszDest[iTextLength - iCopy] = 0;
+    }
+    return iMatches;
+}
+
+/***********************************************************************
  *           NOTEPAD_ReplaceAll
  */
 static VOID NOTEPAD_ReplaceAll(FINDREPLACE *pFindReplace)
 {
-    LPCTSTR pszReplace = pFindReplace->lpstrReplaceWith;
-    INT iTextLength, iTargetLength, iReplaceLength, iNewLength;
-    INT iPosition, iMatches = 0;
-    LPTSTR pszText = NULL, pszNew = NULL, pchDest;
-    LPCTSTR pchCopy;
+    INT iTextLength, iTargetLength, iReplaceLength, iNewLength, iMatches = 0;
+    LPTSTR pszText = NULL, pszNew;
     TCHAR szResource[256], szText[256];
 
     iTargetLength = (INT)_tcslen(pFindReplace->lpstrFindWhat);
-    iReplaceLength = (INT)_tcslen(pszReplace);
+    iReplaceLength = (INT)_tcslen(pFindReplace->lpstrReplaceWith);
     if (iTargetLength <= 0)
         return;
 
     iTextLength = GetWindowTextLength(Globals.hEdit);
+    if (iTextLength >= INT_MAX / (INT)sizeof(TCHAR))
+        goto OutOfMemory;
     if (iTextLength > 0)
     {
         pszText = HeapAlloc(GetProcessHeap(), 0, (iTextLength + 1) * sizeof(TCHAR));
         if (!pszText)
             goto OutOfMemory;
         iTextLength = GetWindowText(Globals.hEdit, pszText, iTextLength + 1);
-    }
-
-    /* Count the matches the same way repeated Replace commands would find them:
-     * left to right over the original text, without overlapping */
-    for (iPosition = 0; iPosition + iTargetLength <= iTextLength; )
-    {
-        if (NOTEPAD_FindTextAt(pFindReplace, pszText, iTextLength, iPosition))
-        {
-            ++iMatches;
-            iPosition += iTargetLength;
-        }
-        else
-        {
-            ++iPosition;
-        }
+        iMatches = NOTEPAD_ReplaceAllScan(pFindReplace, pszText, iTextLength, NULL);
     }
 
     if (iMatches == 0)
@@ -277,33 +326,14 @@ static VOID NOTEPAD_ReplaceAll(FINDREPLACE *pFindReplace)
     pszNew = HeapAlloc(GetProcessHeap(), 0, (iNewLength + 1) * sizeof(TCHAR));
     if (!pszNew)
         goto OutOfMemory;
-
-    pchDest = pszNew;
-    pchCopy = pszText;
-    for (iPosition = 0; iPosition + iTargetLength <= iTextLength; )
-    {
-        if (NOTEPAD_FindTextAt(pFindReplace, pszText, iTextLength, iPosition))
-        {
-            size_t cchKeep = &pszText[iPosition] - pchCopy;
-            CopyMemory(pchDest, pchCopy, cchKeep * sizeof(TCHAR));
-            pchDest += cchKeep;
-            CopyMemory(pchDest, pszReplace, iReplaceLength * sizeof(TCHAR));
-            pchDest += iReplaceLength;
-            iPosition += iTargetLength;
-            pchCopy = &pszText[iPosition];
-        }
-        else
-        {
-            ++iPosition;
-        }
-    }
-    CopyMemory(pchDest, pchCopy, (&pszText[iTextLength] - pchCopy) * sizeof(TCHAR));
-    pszNew[iNewLength] = 0;
+    NOTEPAD_ReplaceAllScan(pFindReplace, pszText, iTextLength, pszNew);
     HeapFree(GetProcessHeap(), 0, pszText);
 
-    /* One replacement of the whole text: linear, and a single undo step.
-     * The caret goes to the start first: the edit control lays the new text
-     * out about 20 times slower while it is scrolled to the end. */
+    /* One replacement of the whole text: linear, and one undo step that
+     * restores exactly this text. The caret goes to the start first: the
+     * edit control lays the new text out about 20 times slower while it
+     * is scrolled to the end. */
+    SendMessage(Globals.hEdit, EM_EMPTYUNDOBUFFER, 0, 0);
     SendMessage(Globals.hEdit, EM_SETSEL, iTextLength, 0);
     SendMessage(Globals.hEdit, EM_REPLACESEL, TRUE, (LPARAM)pszNew);
     HeapFree(GetProcessHeap(), 0, pszNew);
@@ -311,6 +341,7 @@ static VOID NOTEPAD_ReplaceAll(FINDREPLACE *pFindReplace)
     /* Windows puts the caret at the start of the text */
     SendMessage(Globals.hEdit, EM_SETSEL, 0, 0);
     SendMessage(Globals.hEdit, EM_SCROLLCARET, 0, 0);
+    DIALOG_StatusBarUpdateCaretPos();
     return;
 
 OutOfMemory:
