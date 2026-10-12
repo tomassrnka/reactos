@@ -360,8 +360,11 @@ public:
                                                L"Microsoft\\Internet Explorer\\Quick Launch", szPath);
         if (FAILED(hr))
             return hr;
-        *ppidl = ILCreateFromPathW(szPath);
-        return *ppidl ? S_OK : E_OUTOFMEMORY;
+        /* ILCreateFromPathW without dropping the reason of a failure */
+        hr = SHILCreateFromPath(szPath, ppidl, NULL);
+        if (FAILED(hr))
+            *ppidl = NULL;
+        return hr;
     }
 
     DWORD
