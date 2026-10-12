@@ -139,7 +139,12 @@ _PrinterJobListCompareRoutine(PVOID FirstStruct, PVOID SecondStruct)
         return 0;
     }
 
-    return CompareFileTime(&ftSubmittedA, &ftSubmittedB);
+    iComparison = CompareFileTime(&ftSubmittedA, &ftSubmittedB);
+    if (iComparison != 0)
+        return iComparison;
+
+    // Jobs submitted at the same time are told apart by their ID, so that removing one never finds another.
+    return (A->dwJobID > B->dwJobID) - (A->dwJobID < B->dwJobID);
 }
 
 DWORD
@@ -368,14 +373,14 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
         goto Cleanup;
     }
 
-    // Add the job at the end of the Printer's Job List.
-    // As all new jobs are created with default priority, we can be sure that it would always be inserted at the end.
-    if (!InsertTailElementSkiplist(&pJob->pPrinter->JobList, pJob))
+    // Add the job to the Printer's Job List at its sorted position.
+    // It is not always the end: a job given another priority can sort after a new job of default priority.
+    if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
     {
         DeleteElementSkiplist(&GlobalJobList, pJob);
         LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
-        ERR("InsertTailElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
+        ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
         goto Cleanup;
     }
 
