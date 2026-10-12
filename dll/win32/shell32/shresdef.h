@@ -832,6 +832,8 @@
 #define IDI_SHELL_DELETE3 16717
 #define IDI_SHELL_DELETE4 16718
 #define IDI_SHELL_DELETE5 16721
+/* The blank document again for SHGetStockIconInfo: id 1 would be reported as icon -1, which reads as no icon */
+#define IDI_SHELL_STOCK_DOCUMENT 16800
 
 /*
  * AVI resources

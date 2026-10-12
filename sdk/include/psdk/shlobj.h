@@ -108,6 +108,12 @@ typedef enum
     KF_FLAG_ALIAS_ONLY                  = 0x80000000
 } KNOWN_FOLDER_FLAG;
 
+enum tagGPFIDL_FLAGS
+{
+    GPFIDL_DEFAULT = 0x0000,
+    GPFIDL_ALTNAME = 0x0001,
+    GPFIDL_UNCPRINTER = 0x0002
+};
 typedef int GPFIDL_FLAGS;
 
 typedef struct _SFVM_PROPPAGE_DATA

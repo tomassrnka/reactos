@@ -638,4 +638,136 @@ SHGetPropertyStoreFromParsingName(
     return hr;
 }
 
+/***********************************************************************
+ *   SHGetPropertyStoreFromIDList [SHELL32.@]
+ */
+EXTERN_C HRESULT WINAPI
+SHGetPropertyStoreFromIDList(
+    _In_ PCIDLIST_ABSOLUTE pidl,
+    _In_ GETPROPERTYSTOREFLAGS flags,
+    _In_ REFIID riid,
+    _Out_ void **ppv)
+{
+    CComPtr<IShellItem2> item;
+    HRESULT hr;
+
+    TRACE("(%p,%#x,%s,%p)\n", pidl, flags, debugstr_guid(&riid), ppv);
+
+    if (!ppv)
+        return E_POINTER;
+    *ppv = NULL;
+
+    hr = SHCreateItemFromIDList(pidl, IID_PPV_ARG(IShellItem2, &item));
+    if (SUCCEEDED(hr))
+        hr = item->GetPropertyStore(flags, riid, ppv);
+
+    return hr;
+}
+
+/***********************************************************************
+ *   SHCreateItemWithParent [SHELL32.@]
+ */
+EXTERN_C HRESULT WINAPI
+SHCreateItemWithParent(
+    _In_opt_ PCIDLIST_ABSOLUTE pidlParent,
+    _In_opt_ IShellFolder *psfParent,
+    _In_ PCUITEMID_CHILD pidl,
+    _In_ REFIID riid,
+    _Out_ void **ppvItem)
+{
+    CComHeapPtr<ITEMIDLIST> pidlFolder, pidlFull;
+    HRESULT hr;
+
+    TRACE("(%p,%p,%p,%s,%p)\n", pidlParent, psfParent, pidl, debugstr_guid(&riid), ppvItem);
+
+    if (!ppvItem)
+        return E_POINTER;
+    *ppvItem = NULL;
+
+    /* Windows wants a parent */
+    if (!pidl || (!pidlParent && !psfParent))
+        return E_INVALIDARG;
+
+    if (!pidlParent)
+    {
+        hr = SHGetIDListFromObject(psfParent, &pidlFolder);
+        if (FAILED(hr))
+            return hr;
+        pidlParent = pidlFolder;
+    }
+
+    pidlFull.Attach(ILCombine(pidlParent, pidl));
+    if (!pidlFull)
+        return E_OUTOFMEMORY;
+    return SHCreateItemFromIDList(pidlFull, riid, ppvItem);
+}
+
+/***********************************************************************
+ *   SHBindToFolderIDListParentEx [SHELL32.@]
+ */
+EXTERN_C HRESULT WINAPI
+SHBindToFolderIDListParentEx(
+    _In_opt_ IShellFolder *psfRoot,
+    _In_ PCUIDLIST_RELATIVE pidl,
+    _In_opt_ IBindCtx *pbc,
+    _In_ REFIID riid,
+    _Out_ void **ppv,
+    _Out_opt_ PCUITEMID_CHILD *ppidlLast)
+{
+    CComPtr<IShellFolder> psfDesktop;
+    CComHeapPtr<ITEMIDLIST> pidlParent;
+    HRESULT hr;
+
+    TRACE("(%p,%p,%p,%s,%p,%p)\n", psfRoot, pidl, pbc, debugstr_guid(&riid), ppv, ppidlLast);
+
+    if (!ppv)
+        return E_POINTER;
+    *ppv = NULL;
+    if (ppidlLast)
+        *ppidlLast = NULL;
+
+    if (!pidl)
+        return E_INVALIDARG;
+
+    if (!psfRoot)
+    {
+        hr = SHGetDesktopFolder(&psfDesktop);
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+        psfRoot = psfDesktop;
+    }
+
+    if (_ILIsPidlSimple(pidl))
+    {
+        /* The parent is the root itself */
+        hr = psfRoot->QueryInterface(riid, ppv);
+    }
+    else
+    {
+        pidlParent.Attach(ILClone(pidl));
+        if (!pidlParent)
+            return E_OUTOFMEMORY;
+        ILRemoveLastID(pidlParent);
+        hr = psfRoot->BindToObject(pidlParent, pbc, riid, ppv);
+    }
+
+    if (SUCCEEDED(hr) && ppidlLast)
+        *ppidlLast = ILFindLastID(pidl);
+    return hr;
+}
+
+/***********************************************************************
+ *   SHBindToFolderIDListParent [SHELL32.@]
+ */
+EXTERN_C HRESULT WINAPI
+SHBindToFolderIDListParent(
+    _In_opt_ IShellFolder *psfRoot,
+    _In_ PCUIDLIST_RELATIVE pidl,
+    _In_ REFIID riid,
+    _Out_ void **ppv,
+    _Out_opt_ PCUITEMID_CHILD *ppidlLast)
+{
+    return SHBindToFolderIDListParentEx(psfRoot, pidl, NULL, riid, ppv, ppidlLast);
+}
+
 #endif /* DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA */
