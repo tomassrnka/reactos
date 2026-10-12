@@ -172,33 +172,65 @@ ExpectPath(const KNOWNFOLDERID *id, DWORD dwFlags, HANDLE hToken, HRESULT hrExpe
     }
 }
 
-/* Whether this machine redirects a folder of the table, through its User Shell Folders value, or the
- * folder its path is built on: the baseline below expects the default layout */
+/* Whether the User Shell Folders value of a folder of the table, in the hive the shell reads
+ * for it, names another path than its default one */
+static BOOL
+HasRedirectingValue(SIZE_T i, PCWSTR pszDefault)
+{
+    WCHAR szName[39], szValue[MAX_PATH + 1], szExpanded[MAX_PATH];
+    DWORD cbValue, dwType, cch;
+    BOOL bRedirected = FALSE;
+    HKEY hRoot, hKey;
+
+    switch (s_DefFolders[i].base)
+    {
+        case BASE_PROFILE: case BASE_LOCALAPPDATA: case BASE_APPDATA: hRoot = HKEY_CURRENT_USER; break;
+        case BASE_PUBLIC: case BASE_COMMONAPPDATA: hRoot = HKEY_LOCAL_MACHINE; break;
+        default: return FALSE;
+    }
+    StringFromGUID2(*s_DefFolders[i].id, szName, _countof(szName));
+    if (RegOpenKeyExW(hRoot, s_szUserShellFolders, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    cbValue = sizeof(szValue) - sizeof(WCHAR);
+    if (RegQueryValueExW(hKey, szName, NULL, &dwType, (LPBYTE)szValue, &cbValue) == ERROR_SUCCESS &&
+        (dwType == REG_SZ || dwType == REG_EXPAND_SZ))
+    {
+        szValue[cbValue / sizeof(WCHAR)] = UNICODE_NULL;
+        if (dwType == REG_SZ)
+        {
+            bRedirected = (lstrcmpiW(szValue, pszDefault) != 0);
+        }
+        else
+        {
+            cch = ExpandEnvironmentStringsW(szValue, szExpanded, _countof(szExpanded));
+            bRedirected = (!cch || cch > _countof(szExpanded) || lstrcmpiW(szExpanded, pszDefault) != 0);
+        }
+    }
+    RegCloseKey(hKey);
+    return bRedirected;
+}
+
+/* Whether this machine redirects a folder of the table, a folder of the table it lies in, or the
+ * CSIDL folder its path is built on: the baseline below expects the default layout */
 static BOOL
 IsDefFolderRedirected(SIZE_T i, PCWSTR pszExpected)
 {
-    static const HKEY Roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
-    WCHAR szName[39], szValue[MAX_PATH + 1], szExpanded[MAX_PATH], szCurrent[MAX_PATH], szDefault[MAX_PATH];
-    DWORD cbValue, dwType, cch;
-    BOOL bRedirected = FALSE;
+    WCHAR szOther[MAX_PATH], szCurrent[MAX_PATH], szDefault[MAX_PATH];
+    SIZE_T j, cch;
     INT csidl = -1;
-    HKEY hKey;
-    SIZE_T r;
 
-    StringFromGUID2(*s_DefFolders[i].id, szName, _countof(szName));
-    for (r = 0; r < _countof(Roots) && !bRedirected; r++)
+    if (HasRedirectingValue(i, pszExpected))
+        return TRUE;
+    for (j = 0; j < _countof(s_DefFolders); j++)
     {
-        if (RegOpenKeyExW(Roots[r], s_szUserShellFolders, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        if (j == i || !GetDefExpectedPath(j, NULL, szOther))
             continue;
-        cbValue = sizeof(szValue) - sizeof(WCHAR);
-        if (RegQueryValueExW(hKey, szName, NULL, &dwType, (LPBYTE)szValue, &cbValue) == ERROR_SUCCESS &&
-            (dwType == REG_SZ || dwType == REG_EXPAND_SZ))
+        cch = wcslen(szOther);
+        if (cch && !_wcsnicmp(pszExpected, szOther, cch) && pszExpected[cch] == L'\\' &&
+            HasRedirectingValue(j, szOther))
         {
-            szValue[cbValue / sizeof(WCHAR)] = UNICODE_NULL;
-            cch = ExpandEnvironmentStringsW(szValue, szExpanded, _countof(szExpanded));
-            bRedirected = (!cch || cch > _countof(szExpanded) || lstrcmpiW(szExpanded, pszExpected) != 0);
+            return TRUE;
         }
-        RegCloseKey(hKey);
     }
 
     switch (s_DefFolders[i].base)
@@ -207,13 +239,10 @@ IsDefFolderRedirected(SIZE_T i, PCWSTR pszExpected)
         case BASE_APPDATA: csidl = CSIDL_APPDATA; break;
         case BASE_COMMONAPPDATA: csidl = CSIDL_COMMON_APPDATA; break;
     }
-    if (!bRedirected && csidl >= 0 &&
-        SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_CURRENT, szCurrent) == S_OK &&
-        SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_DEFAULT, szDefault) == S_OK)
-    {
-        bRedirected = (lstrcmpiW(szCurrent, szDefault) != 0);
-    }
-    return bRedirected;
+    return csidl >= 0 &&
+           SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_CURRENT, szCurrent) == S_OK &&
+           SHGetFolderPathW(NULL, csidl | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_DEFAULT, szDefault) == S_OK &&
+           lstrcmpiW(szCurrent, szDefault) != 0;
 }
 
 static void
@@ -302,6 +331,7 @@ TestDefFolder(SIZE_T i)
 /* The exact type and bytes of a User Shell Folders value, to put it back after a test */
 typedef struct
 {
+    BOOL bKeyExisted;
     LONG lStatus;
     DWORD dwType;
     DWORD cbData;
@@ -315,6 +345,7 @@ SaveRegValue(HKEY hRoot, PCWSTR pszKey, PCWSTR pszName, SAVED_VALUE *pSaved)
 
     pSaved->cbData = sizeof(pSaved->Data);
     pSaved->lStatus = RegOpenKeyExW(hRoot, pszKey, 0, KEY_QUERY_VALUE, &hKey);
+    pSaved->bKeyExisted = (pSaved->lStatus == ERROR_SUCCESS);
     if (pSaved->lStatus == ERROR_SUCCESS)
     {
         pSaved->lStatus = RegQueryValueExW(hKey, pszName, NULL, &pSaved->dwType, pSaved->Data, &pSaved->cbData);
@@ -341,6 +372,12 @@ RestoreRegValue(HKEY hRoot, PCWSTR pszKey, PCWSTR pszName, const SAVED_VALUE *pS
         ret = RegDeleteValueW(hKey, pszName);
     ok(ret == ERROR_SUCCESS, "cannot restore %s: %ld\n", wine_dbgstr_w(pszName), ret);
     RegCloseKey(hKey);
+    /* Writing the value created the key */
+    if (!pSaved->bKeyExisted)
+    {
+        ret = RegDeleteKeyW(hRoot, pszKey);
+        ok(ret == ERROR_SUCCESS, "cannot delete %s: %ld\n", wine_dbgstr_w(pszKey), ret);
+    }
 }
 
 static void
