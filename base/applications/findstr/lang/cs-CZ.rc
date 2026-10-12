@@ -53,4 +53,5 @@ Regular expressions:\n\
     IDS_CANNOT_READ_FILES "FINDSTR: Cannot read file list from %s\n"
     IDS_OUT_OF_MEMORY "FINDSTR: Out of memory\n"
     IDS_ARGUMENT_MISSING "FINDSTR: Argument missing after /%c\n"
+    IDS_CANNOT_READ_INPUT "FINDSTR: Cannot read standard input\n"
 END

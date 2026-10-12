@@ -692,7 +692,7 @@ static BOOL
 SearchHandle(HANDLE hFile, PCWSTR Name)
 {
     SEARCH_INPUT Input = {Name, 0, 0, FALSE};
-    SIZE_T Capacity = 0x10000, Used = 0, Consumed;
+    SIZE_T Capacity = 0x10000, Used = 0, Scanned = 0, Consumed;
     PUCHAR Buffer;
     DWORD Read;
     BOOL Result = TRUE;
@@ -729,9 +729,17 @@ SearchHandle(HANDLE hFile, PCWSTR Name)
             break;
         }
         Used += Read;
+
+        /* The bytes before Scanned hold no line feed: look only at the new ones */
+        if (!memchr(Buffer + Scanned, '\n', Used - Scanned))
+        {
+            Scanned = Used;
+            continue;
+        }
         Consumed = SearchLines(&Input, Buffer, Used, FALSE);
         memmove(Buffer, Buffer + Consumed, Used - Consumed);
         Used -= Consumed;
+        Scanned = Used;
     }
 
     HeapFree(GetProcessHeap(), 0, Buffer);
@@ -1273,7 +1281,11 @@ int wmain(int argc, WCHAR *argv[])
 
     if (!Files)
     {
-        SearchHandle(GetStdHandle(STD_INPUT_HANDLE), NULL);
+        if (!SearchHandle(GetStdHandle(STD_INPUT_HANDLE), NULL))
+        {
+            Message(IDS_CANNOT_READ_INPUT);
+            return Finish(2);
+        }
         return Finish(AnyMatch ? 0 : 1);
     }
 
