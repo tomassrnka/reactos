@@ -37,6 +37,7 @@ extern void func_LoadImageGCC(void);
 extern void func_LookupIconIdFromDirectoryEx(void);
 extern void func_MenuUI(void);
 extern void func_MessageStateAnalyzer(void);
+extern void func_NCRButtonDown(void);
 extern void func_NcPaintRgn(void);
 extern void func_NextDlgItem(void);
 extern void func_PrivateExtractIcons(void);
@@ -105,6 +106,7 @@ const struct test winetest_testlist[] =
     { "LookupIconIdFromDirectoryEx", func_LookupIconIdFromDirectoryEx },
     { "MenuUI", func_MenuUI },
     { "MessageStateAnalyzer", func_MessageStateAnalyzer },
+    { "NCRButtonDown", func_NCRButtonDown },
     { "NcPaintRgn", func_NcPaintRgn },
     { "NextDlgItem", func_NextDlgItem },
     { "PrivateExtractIcons", func_PrivateExtractIcons },
