@@ -97,6 +97,7 @@ extern void func_RtlDosPathNameToNtPathName_U(void);
 extern void func_RtlDosSearchPath_U(void);
 extern void func_RtlDosSearchPath_Ustr(void);
 extern void func_RtlFirstFreeAce(void);
+extern void func_RtlFindMessage(void);
 extern void func_RtlGenerate8dot3Name(void);
 extern void func_RtlGetFullPathName_U(void);
 extern void func_RtlGetFullPathName_Ustr(void);
@@ -237,6 +238,7 @@ const struct test winetest_testlist[] =
     { "RtlDosSearchPath_U",             func_RtlDosSearchPath_U },
     { "RtlDosSearchPath_Ustr",          func_RtlDosSearchPath_Ustr },
     { "RtlFirstFreeAce",                func_RtlFirstFreeAce },
+    { "RtlFindMessage",                 func_RtlFindMessage },
     { "RtlGenerate8dot3Name",           func_RtlGenerate8dot3Name },
     { "RtlGetFullPathName_U",           func_RtlGetFullPathName_U },
     { "RtlGetFullPathName_Ustr",        func_RtlGetFullPathName_Ustr },
