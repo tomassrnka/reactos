@@ -35,6 +35,7 @@ list(APPEND SOURCE
     LoadImage.c
     LoadImageGCC.c
     LookupIconIdFromDirectoryEx.c
+    MenuItemData.c
     MenuUI.c
     MessageStateAnalyzer.c
     NcPaintRgn.c
