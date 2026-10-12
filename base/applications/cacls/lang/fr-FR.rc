@@ -71,4 +71,6 @@ Abréviations:\n\
     IDS_READ_CONTROL "READ_CONTROL"
     IDS_DELETE "DELETE"
     IDS_STANDARD_RIGHTS_ALL "STANDARD_RIGHTS_ALL"
+    IDS_NOT_NTFS "The Cacls command can be run only on disk drives that use the NTFS file system."
+    IDS_EDIT_NOT_SUPPORTED "Changing access control lists is not supported by this version of Cacls.\n"
 END
