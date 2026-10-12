@@ -347,4 +347,6 @@ STRINGTABLE
 BEGIN
     IDS_PARSE_ADDR_ERR_TITLE "Проводник ReactOS"
     IDS_PARSE_ADDR_ERR_TEXT "Проводник ReactOS не может найти '%1'. Проверьте правильность написания и попробуйте снова."
+    IDS_INSERTDISK_TITLE "Insert disk"
+    IDS_INSERTDISK_TEXT "Please insert a disk into %s."
 END

@@ -385,7 +385,12 @@ static HRESULT ExplorerMessageLoop(IEThreadParamBlock * parameters)
 
     hResult = psb->BrowseObject(parameters->directoryPIDL, wFlags);
     if (FAILED_UNEXPECTEDLY(hResult))
+    {
+        ILFree(pidlSelect);
+        if (parameters->pExplorerInstance)
+            parameters->pExplorerInstance->Release();
         return hResult;
+    }
 
     if (pidlSelect != NULL)
     {

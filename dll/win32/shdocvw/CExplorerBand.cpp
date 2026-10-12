@@ -79,7 +79,9 @@ STDMETHODIMP CExplorerBand::Invoke(_In_ PCIDLIST_ABSOLUTE pidl)
     if (m_mtxBlockNavigate)
         return S_OK;
 
-    _UpdateBrowser(pidl);
+    /* The user cancelled the browse (an empty drive's disk prompt): select the folder still shown */
+    if (_UpdateBrowser(pidl) == HRESULT_FROM_WIN32(ERROR_CANCELLED))
+        _NavigateToCurrentFolder();
     m_hwndTreeView.SetFocus();
     return S_OK;
 }

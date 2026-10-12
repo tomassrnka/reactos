@@ -355,6 +355,13 @@ HRESULT STDMETHODCALLTYPE CAddressEditBox::Execute(long paramC)
     if (SUCCEEDED(hr))
         return hr;
 
+    /* The user cancelled the browse (an empty drive's disk prompt), so do not open it another way */
+    if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
+    {
+        RefreshAddress();
+        return hr;
+    }
+
     /*
      * Browsing to the pidl failed so it's not a folder. So invoke its default command.
      */
