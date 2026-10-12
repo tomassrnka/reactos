@@ -109,6 +109,9 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     if (!BufferPtr)
         goto end;
 
+    /* The initial data goes first, then the local and the remote address */
+    PCHAR ReceiveData = (PCHAR)BufferPtr;
+
     /* Query TCPIP to find the local address of the socket */
     LONG RequestSize = (FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) + FCB->LocalAddress->Address[0].AddressLength);
     PTRANSPORT_ADDRESS RemoteAddress = (PTRANSPORT_ADDRESS)Qelt->ConnInfo->RemoteAddress;
@@ -145,19 +148,27 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     if (!NT_SUCCESS(Status))
         goto end;
 
-    /* Write the local address */
-    LONG LocalAddressLength = min(AcceptInfo->LocalAddressLength, Buffer->Address.Address->AddressLength);
+    /* Each address area holds a sockaddr (the address type and the address) and
+     * ends in a USHORT with its length; an area too small for that gets nothing */
     BufferPtr += AcceptInfo->ReceiveDataLength;
-    RtlCopyMemory(BufferPtr, &Buffer->Address.Address->AddressType, LocalAddressLength);
-    *(USHORT *)(BufferPtr + AcceptInfo->LocalAddressLength - sizeof(USHORT)) = LocalAddressLength;
+    if (AcceptInfo->LocalAddressLength >= sizeof(USHORT))
+    {
+        LONG LocalAddressLength = min(AcceptInfo->LocalAddressLength - sizeof(USHORT),
+                                      sizeof(USHORT) + min(Buffer->Address.Address->AddressLength,
+                                                           FCB->LocalAddress->Address[0].AddressLength));
+        RtlCopyMemory(BufferPtr, &Buffer->Address.Address->AddressType, LocalAddressLength);
+        *(USHORT *)(BufferPtr + AcceptInfo->LocalAddressLength - sizeof(USHORT)) = LocalAddressLength;
+    }
     ExFreePool(Buffer);
 
-    /* Write the remote address*/
-    LONG RemoteAddressLength = min(AcceptInfo->RemoteAddressLength, RemoteAddress->Address[0].AddressLength);
     BufferPtr += AcceptInfo->LocalAddressLength;
-    RtlCopyMemory(BufferPtr, &RemoteAddress->Address[0].AddressType, RemoteAddressLength);
-
-    *(USHORT *)(BufferPtr + AcceptInfo->RemoteAddressLength - sizeof(USHORT)) = RemoteAddressLength;
+    if (AcceptInfo->RemoteAddressLength >= sizeof(USHORT))
+    {
+        LONG RemoteAddressLength = min(AcceptInfo->RemoteAddressLength - sizeof(USHORT),
+                                       sizeof(USHORT) + RemoteAddress->Address[0].AddressLength);
+        RtlCopyMemory(BufferPtr, &RemoteAddress->Address[0].AddressType, RemoteAddressLength);
+        *(USHORT *)(BufferPtr + AcceptInfo->RemoteAddressLength - sizeof(USHORT)) = RemoteAddressLength;
+    }
 
     if (AcceptInfo->ReceiveDataLength)
     {
@@ -166,10 +177,17 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
 
         Status = TdiReceive(&FCB2->ReceiveIrp.InFlightRequest,
                             FCB2->Connection.Object, TDI_RECEIVE_NORMAL,
-                            (PCHAR)BufferPtr,
+                            ReceiveData,
                             AcceptInfo->ReceiveDataLength,
                             AcceptExReceiveComplete,
                             FCB2);
+
+        /* The completion routine never runs for a receive that was not sent */
+        if (Status != STATUS_PENDING)
+        {
+            FCB2->AcceptIrp = NULL;
+            goto end;
+        }
 
         if (Status == STATUS_PENDING)
             Status = STATUS_SUCCESS;
@@ -199,7 +217,9 @@ end:
     }
     else
     {
-        FCB2->SharedData.State = SOCKET_STATE_CREATED;
+        /* A socket made into a connection (windows allocated) keeps it and cannot accept again */
+        if (FCB2->SharedData.State != SOCKET_STATE_CONNECTED)
+            FCB2->SharedData.State = SOCKET_STATE_CREATED;
     }
     
     MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
@@ -544,6 +564,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB Fcb = FileObject->FsContext;
     PAFD_SUPER_ACCEPT_INFO AcceptRequest;
+    ULONG OutputLength;
 
     PFILE_OBJECT NewFileObject = NULL;
 
@@ -557,8 +578,20 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     Fcb->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
 
+    /* The output buffer holds the initial data, the local and the remote address area */
+    OutputLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    if (AcceptRequest->ReceiveDataLength > OutputLength ||
+        AcceptRequest->LocalAddressLength > OutputLength - AcceptRequest->ReceiveDataLength ||
+        AcceptRequest->RemoteAddressLength > OutputLength - AcceptRequest->ReceiveDataLength -
+                                             AcceptRequest->LocalAddressLength)
+    {
+        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_PARAMETER, Irp, 0);
+    }
+
     /* Allow the IRP to access UserBuffer later */
-    Irp->Tail.Overlay.DriverContext[3] = IoAllocateMdl(Irp->UserBuffer, IrpSp->Parameters.DeviceIoControl.OutputBufferLength, FALSE, FALSE, NULL);
+    Irp->Tail.Overlay.DriverContext[3] = IoAllocateMdl(Irp->UserBuffer, OutputLength, FALSE, FALSE, NULL);
+    if (!Irp->Tail.Overlay.DriverContext[3])
+        return UnlockAndMaybeComplete(Fcb, STATUS_INSUFFICIENT_RESOURCES, Irp, 0);
     _SEH2_TRY
     {
         MmProbeAndLockPages((PMDL)Irp->Tail.Overlay.DriverContext[3], Irp->RequestorMode, IoWriteAccess);
