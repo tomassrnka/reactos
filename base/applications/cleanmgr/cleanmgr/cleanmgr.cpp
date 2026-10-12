@@ -34,6 +34,18 @@ struct CCleanMgrProperties :
 
     int OnApply()
     {
+        bool AnySelected = false;
+        m_HandlerList->ForEach(
+            [&](CCleanupHandler *current)
+            {
+                if (current->StateFlags & HANDLER_STATE_SELECTED)
+                    AnySelected = true;
+            });
+
+        // Like Windows: with nothing ticked, OK closes without asking
+        if (!AnySelected)
+            return PSNRET_NOERROR;
+
         CStringW Title(MAKEINTRESOURCE(IDS_DISK_CLEANUP));
         CStringW Text(MAKEINTRESOURCE(IDS_CONFIRM_DELETE));
 
