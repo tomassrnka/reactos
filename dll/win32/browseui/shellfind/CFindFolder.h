@@ -74,9 +74,14 @@ private:
     CComPtr<IShellBrowser> m_shellBrowser;
     HANDLE m_hStopEvent;
     UINT m_SearchId = 0;
+    CComPtr<IShellFolder2> m_pCompareFolder;
+    CStringW m_CompareFolderPath;
 
     HRESULT GetFSFolderAndChild(LPCITEMIDLIST pidl, IShellFolder **ppSF, PCUITEMID_CHILD *ppidlLast = NULL);
     HRESULT GetFSFolder2AndChild(LPCITEMIDLIST pidl, IShellFolder2 **ppSF, PCUITEMID_CHILD *ppidlLast = NULL);
+    BOOL MapColumnToFolder(UINT FSColumn, IShellFolder2 *pFolder, UINT *pItemColumn);
+    BOOL IsFSItem(PCUIDLIST_RELATIVE pidl);
+    HRESULT CompareForeignItems(LPARAM lParam, PCUIDLIST_RELATIVE pidl1, PCUIDLIST_RELATIVE pidl2, HRESULT hrFS);
     void FreePidlArray(HDPA hDpa);
     HDPA CreateAbsolutePidlArray(UINT cidl, PCUITEMID_CHILD_ARRAY apidl);
     static int CALLBACK SortItemsForDataObject(void *p1, void *p2, LPARAM lparam);
