@@ -400,24 +400,60 @@ gethostname(OUT char FAR * name,
     PCHAR Name = NULL;
     CHAR ResultsBuffer[RNR_BUFFER_SIZE];
     PCHAR Results = ResultsBuffer;
+    INT ErrorCode;
+    SIZE_T cchName;
+    PWSPROCESS Process;
+    PWSTHREAD Thread;
     DPRINT("gethostname: %p\n", name);
+
+    /* Enter prolog */
+    if ((ErrorCode = WsApiProlog(&Process, &Thread)) != ERROR_SUCCESS)
+    {
+        /* Leave now */
+        SetLastError(ErrorCode);
+        return SOCKET_ERROR;
+    }
 
     if (!name || namelen < 1)
     {
         SetLastError(WSAEFAULT);
         return SOCKET_ERROR;
     }
+
     /* Get the Hostname in a String */
     /* getxyDataEnt does not return blob for HostnameGuid */
+    SetLastError(ERROR_SUCCESS);
     getxyDataEnt(&Results, RNR_BUFFER_SIZE, NULL, &HostnameGuid, &Name);
-    if (Name)
+    if (!Name)
     {
-        /* Copy it */
-        strncpy(name, Name, namelen-1);
+        /* The lookup failed and has set its error; never report success or SOCKET_ERROR as the error */
+        ErrorCode = GetLastError();
+        if (ErrorCode == ERROR_SUCCESS || ErrorCode == (DWORD)SOCKET_ERROR)
+            ErrorCode = WSAENETDOWN;
+    }
+    else
+    {
+        /* The whole name and its terminator must fit */
+        cchName = strlen(Name);
+        if (cchName >= (SIZE_T)namelen)
+        {
+            ErrorCode = WSAEFAULT;
+        }
+        else
+        {
+            RtlCopyMemory(name, Name, cchName + 1);
+            ErrorCode = ERROR_SUCCESS;
+        }
     }
 
     /* Check if we received a newly allocated buffer; free it. */
     if (Results != ResultsBuffer) HeapFree(WsSockHeap, 0, Results);
+
+    if (ErrorCode != ERROR_SUCCESS)
+    {
+        SetLastError(ErrorCode);
+        return SOCKET_ERROR;
+    }
 
     /* Return success */
     return ERROR_SUCCESS;
