@@ -3483,6 +3483,22 @@ static const KNOWN_FOLDER_DEF *kf_find_def(const KNOWNFOLDERID *id)
     return NULL;
 }
 
+/* Whether _SHExpandEnvironmentStrings expands the start of a value without its userenv fallback */
+static BOOL kf_starts_with_profile_variable(LPCWSTR pszValue)
+{
+    static const LPCWSTR Variables[] = { L"%ALLUSERSPROFILE%", L"%USERPROFILE%", L"%SystemDrive%" };
+    SIZE_T i;
+
+    if (pszValue[0] != L'%')
+        return TRUE;
+    for (i = 0; i < _countof(Variables); i++)
+    {
+        if (!StrCmpNIW(pszValue, Variables[i], lstrlenW(Variables[i])))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* Reads the folder's User Shell Folders value (the key of the user for KFD_PERUSER, HKLM for KFD_COMMON);
  * like Windows, the Shell Folders key is neither read nor written */
 static HRESULT kf_get_redirected_path(const KNOWN_FOLDER_DEF *def, HANDLE hToken, LPWSTR pszPath)
@@ -3541,8 +3557,13 @@ static HRESULT kf_get_redirected_path(const KNOWN_FOLDER_DEF *def, HANDLE hToken
     }
     else
     {
-        /* The profile variables of the token's user (or the default user) first, then the others */
-        hr = _SHExpandEnvironmentStrings(hToken, szValue, szExpanded, _countof(szExpanded));
+        /* The profile variables of the token's user (or the default user) first, then the others.
+         * userenv takes no token for the default user, so its value is not given to the userenv
+         * fallback: a value that starts with another variable is expanded below without a token. */
+        if (hToken == (HANDLE)-1 && !kf_starts_with_profile_variable(szValue))
+            hr = StringCchCopyW(szExpanded, _countof(szExpanded), szValue);
+        else
+            hr = _SHExpandEnvironmentStrings(hToken, szValue, szExpanded, _countof(szExpanded));
         if (FAILED(hr))
             return hr;
         if (!StrChrW(szExpanded, L'%'))
