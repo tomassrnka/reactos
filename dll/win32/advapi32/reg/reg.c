@@ -3126,12 +3126,15 @@ RegEnumValueW(
                 goto overflow;
             }
             memcpy( data, buf_ptr + info->DataOffset, info->DataLength );
-            if (is_string(info->Type) && info->DataLength <= *count - sizeof(WCHAR))
+            if (is_string(info->Type) &&
+                info->DataLength >= sizeof(WCHAR) &&
+                *count >= sizeof(WCHAR) &&
+                info->DataLength <= *count - sizeof(WCHAR))
             {
                 /* if the type is REG_SZ and data is not 0-terminated
                  * and there is enough space in the buffer NT appends a \0 */
                 WCHAR *ptr = (WCHAR *)(data + info->DataLength);
-                if (ptr > (WCHAR *)data && ptr[-1]) *ptr = 0;
+                if (ptr[-1]) *ptr = 0;
             }
         }
     }
