@@ -162,7 +162,8 @@ ScmGetServiceImageByImagePath(LPWSTR lpImagePath)
         CurrentImage = CONTAINING_RECORD(ImageEntry,
                                          SERVICE_IMAGE,
                                          ImageListEntry);
-        if (_wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
+        if (CurrentImage->bSharedProcess &&
+            _wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
         {
             DPRINT("Found image: '%S'\n", CurrentImage->pszImagePath);
             return CurrentImage;
@@ -496,7 +497,9 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
     DPRINT("ImagePath: '%wZ'\n", &ImagePath);
     DPRINT("ObjectName: '%wZ'\n", &ObjectName);
 
-    pServiceImage = ScmGetServiceImageByImagePath(ImagePath.Buffer);
+    /* An own-process service always gets a process of its own */
+    if (pService->Status.dwServiceType & SERVICE_WIN32_SHARE_PROCESS)
+        pServiceImage = ScmGetServiceImageByImagePath(ImagePath.Buffer);
     if (pServiceImage == NULL)
     {
         dwRecordSize = sizeof(SERVICE_IMAGE) +
@@ -514,6 +517,7 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
         }
 
         pServiceImage->dwImageRunCount = 1;
+        pServiceImage->bSharedProcess = (pService->Status.dwServiceType & SERVICE_WIN32_SHARE_PROCESS) != 0;
         pServiceImage->hControlPipe = INVALID_HANDLE_VALUE;
         pServiceImage->hProcess = INVALID_HANDLE_VALUE;
 
@@ -587,8 +591,6 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
     }
     else
     {
-//        if ((lpService->Status.dwServiceType & SERVICE_WIN32_SHARE_PROCESS) == 0)
-
         /* Fail if services in an image use different accounts */
         if (!ScmIsSameServiceAccount(pServiceImage->pszAccountName, ObjectName.Buffer))
         {
@@ -2006,10 +2008,8 @@ ScmLoadService(PSERVICE Service,
             {
                 Service->lpImage->dwImageRunCount--;
                 if (Service->lpImage->dwImageRunCount == 0)
-                {
                     ScmRemoveServiceImage(Service->lpImage);
-                    Service->lpImage = NULL;
-                }
+                Service->lpImage = NULL;
             }
         }
     }

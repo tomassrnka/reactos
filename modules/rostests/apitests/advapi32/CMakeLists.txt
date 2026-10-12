@@ -19,6 +19,7 @@ list(APPEND SOURCE
     ServiceArgs.c
     ServiceEnv.c
     ServiceNetwork.c
+    ServiceProcess.c
     svchlp.c)
 
 list(APPEND PCH_SKIP_SOURCE
