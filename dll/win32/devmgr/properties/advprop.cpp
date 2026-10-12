@@ -2183,7 +2183,7 @@ UpdateDevInfo(IN HWND hwndDlg,
     ULONG Status, ProblemNumber;
     SP_DEVINSTALL_PARAMS_W InstallParams;
     UINT TroubleShootStrId = IDS_TROUBLESHOOTDEV;
-    BOOL bFlag, bDevActionAvailable = TRUE;
+    BOOL bFlag, bDevActionAvailable = TRUE, bProbBtnFocus;
     BOOL bDrvInstalled = FALSE;
     DWORD iPage;
     HDEVINFO DeviceInfoSet = NULL;
@@ -2429,11 +2429,7 @@ GetParentNode:
         bDevActionAvailable = FALSE;
     }
 
-    if (!(dap->IsAdmin && bDevActionAvailable) && GetFocus() == hDevProbBtn)
-    {
-        /* do not leave the focus on a control that is about to be hidden or disabled */
-        SendMessage(hPropSheetDlg, WM_NEXTDLGCTL, 0, FALSE);
-    }
+    bProbBtnFocus = (GetFocus() == hDevProbBtn);
     if (!(cr == CR_SUCCESS && (Status & DN_HAS_PROBLEM)))
         ShowWindow(hDevProbBtn, SW_HIDE);
 
@@ -2475,6 +2471,15 @@ GetParentNode:
                  dap->CanDisable && dap->IsAdmin);
     EnableWindow(hDevUsage,
                  dap->CanDisable && dap->IsAdmin);
+
+    /* the problem button had the focus and is now hidden or disabled: give it to a control that stays */
+    if (bProbBtnFocus && !(IsWindowVisible(hDevProbBtn) && IsWindowEnabled(hDevProbBtn)))
+    {
+        SendMessage(hPropSheetDlg,
+                    WM_NEXTDLGCTL,
+                    (WPARAM)GetDlgItem(hPropSheetDlg, IDOK),
+                    TRUE);
+    }
 
     /* clear the combobox */
     SendMessage(hDevUsage,
