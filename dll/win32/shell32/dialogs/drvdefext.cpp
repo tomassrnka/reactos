@@ -683,7 +683,7 @@ ReadToolString(HKEY hKey, LPCWSTR pszSubKey, LPCWSTR pszValue, CStringW &str)
     if (pszSubKey && RegOpenKeyExW(hKey, pszSubKey, 0, KEY_QUERY_VALUE, &hSubKey) != ERROR_SUCCESS)
         return FALSE;
     if (RegQueryValueExW(hSubKey, pszValue, NULL, &dwType, NULL, &cb) == ERROR_SUCCESS &&
-        (dwType == REG_SZ || dwType == REG_EXPAND_SZ) && cb <= 0x8000)
+        (dwType == REG_SZ || dwType == REG_EXPAND_SZ) && cb <= 0x10000)
     {
         cch = cb / sizeof(WCHAR);
         psz = strRaw.GetBuffer(cch + 1);
@@ -701,8 +701,10 @@ ReadToolString(HKEY hKey, LPCWSTR pszSubKey, LPCWSTR pszValue, CStringW &str)
         str = strRaw;
         return TRUE;
     }
-    /* ExpandEnvironmentStringsW takes and gives at most 32765 characters and does not
-     * terminate a longer result; the 0x8000-byte cap above keeps the source below that */
+    /* ExpandEnvironmentStringsW reads at most 32766 characters of its source, and writes at most
+     * 32765 including the terminator, leaving a longer result unterminated */
+    if (strRaw.GetLength() > 32766)
+        return FALSE;
     cch = ExpandEnvironmentStringsW(strRaw, NULL, 0);
     if (!cch || cch > 32765)
         return FALSE;
