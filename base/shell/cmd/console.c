@@ -222,11 +222,19 @@ SHORT GetCursorY(VOID)
 VOID SetCursorType(BOOL bInsert, BOOL bVisible)
 {
     CONSOLE_CURSOR_INFO cci;
+    HANDLE hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
 
-    cci.dwSize = bInsert ? 10 : 99;
+    /*
+     * Keep the console's cursor size in both modes: cmd cannot show a temporary
+     * size for overwrite mode without the console taking it as its own setting
+     */
+    UNREFERENCED_PARAMETER(bInsert);
+
+    if (!GetConsoleCursorInfo(hOutput, &cci))
+        return;
+
     cci.bVisible = bVisible;
-
-    SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &cci);
+    SetConsoleCursorInfo(hOutput, &cci);
 }
 
 VOID GetScreenSize(PSHORT maxx, PSHORT maxy)
