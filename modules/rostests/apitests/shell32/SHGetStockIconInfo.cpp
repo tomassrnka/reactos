@@ -288,6 +288,12 @@ static void TestShellIconSize(void)
         pOld = (BYTE *)HeapAlloc(GetProcessHeap(), 0, cbOld ? cbOld : 1);
         lError = pOld ? RegQueryValueExW(hKey, L"Shell Icon Size", NULL, &dwType, pOld, &cbOld) : ERROR_OUTOFMEMORY;
     }
+    /* RegSetValueExW can store one more character than given for an unterminated string */
+    if (lError == ERROR_SUCCESS && (dwType == REG_SZ || dwType == REG_EXPAND_SZ || dwType == REG_MULTI_SZ) &&
+        (cbOld % sizeof(WCHAR) || (cbOld && ((PWCHAR)pOld)[cbOld / sizeof(WCHAR) - 1] != UNICODE_NULL)))
+    {
+        lError = ERROR_INVALID_DATA;
+    }
     if (lError != ERROR_SUCCESS && lError != ERROR_FILE_NOT_FOUND)
     {
         skip("Cannot back up the shell icon size, error %ld\n", lError);
