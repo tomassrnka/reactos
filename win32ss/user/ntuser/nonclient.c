@@ -1735,12 +1735,17 @@ LRESULT NC_HandleNCRButtonDown(PWND pwnd, WPARAM wParam, LPARAM lParam)
 {
   MSG msg;
   INT hittest = wParam;
+  POINT pt;
 
   switch (hittest)
   {
   case HTCAPTION:
   case HTSYSMENU:
-      if (!IntGetSystemMenu( pwnd, FALSE )) break;
+      /* Like Windows, track only a press on the frame's own caption; other windows get the button-up */
+      pt.x = GET_X_LPARAM(lParam);
+      pt.y = GET_Y_LPARAM(lParam);
+      hittest = GetNCHitEx(pwnd, pt);
+      if (hittest != HTCAPTION && hittest != HTSYSMENU) break;
 
       co_UserSetCapture( UserHMGetHandle(pwnd) );
       for (;;)
