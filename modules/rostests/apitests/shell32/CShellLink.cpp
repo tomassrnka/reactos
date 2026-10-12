@@ -471,6 +471,153 @@ TestIconLocation(void)
 }
 
 
+/* Drop the ID list of a saved link, keeping its LinkInfo (the target path) */
+static BOOL
+RemoveLinkIdList(PCWSTR pszLink)
+{
+    BYTE Buffer[4096];
+    DWORD cb, cbWritten, dwFlags;
+    WORD cbIdList;
+    BOOL bRet = FALSE;
+    HANDLE hFile;
+
+    hFile = CreateFileW(pszLink, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    if (ReadFile(hFile, Buffer, sizeof(Buffer), &cb, NULL) && cb >= 0x4E && cb < sizeof(Buffer))
+    {
+        memcpy(&dwFlags, &Buffer[0x14], sizeof(dwFlags));
+        memcpy(&cbIdList, &Buffer[0x4C], sizeof(cbIdList));
+        if ((dwFlags & SLDF_HAS_ID_LIST) && (dwFlags & SLDF_HAS_LINK_INFO) && 0x4E + (DWORD)cbIdList <= cb)
+        {
+            dwFlags &= ~SLDF_HAS_ID_LIST;
+            memcpy(&Buffer[0x14], &dwFlags, sizeof(dwFlags));
+            memmove(&Buffer[0x4C], &Buffer[0x4E + cbIdList], cb - (0x4E + cbIdList));
+            cb -= 2 + cbIdList;
+            bRet = SetFilePointer(hFile, 0, NULL, FILE_BEGIN) == 0 &&
+                   WriteFile(hFile, Buffer, cb, &cbWritten, NULL) && cbWritten == cb &&
+                   SetEndOfFile(hFile);
+        }
+    }
+
+    CloseHandle(hFile);
+    return bRet;
+}
+
+/* Resolve must not give a link without an icon location one (its target): saved,
+ * a link to a document would then take its icon from the document itself */
+static
+VOID
+TestResolveIconLocation(void)
+{
+    HRESULT hr;
+    WCHAR szTemp[MAX_PATH], szTarget[MAX_PATH], szLink[MAX_PATH + 4], szIcon[MAX_PATH];
+    INT iIcon;
+    UINT wFlags;
+    DWORD dwFlags;
+    CComPtr<IShellLinkW> psl, psl2, psl3;
+    CComPtr<IPersistFile> ppf, ppf2, ppf3;
+    CComPtr<IShellLinkDataList> pdl;
+    CComPtr<IExtractIconW> pei;
+
+    /* A unique, existing document; the link is created next to it */
+    GetTempPathW(_countof(szTemp), szTemp);
+    if (!GetTempFileNameW(szTemp, L"lnk", 0, szTarget))
+    {
+        skip("GetTempFileNameW failed with error %lu\n", GetLastError());
+        return;
+    }
+    lstrcpynW(szLink, szTarget, MAX_PATH);
+    lstrcatW(szLink, L".lnk");
+
+    hr = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IShellLinkW, &psl));
+    ok_hr(hr, S_OK);
+    if (FAILED(hr))
+        goto Cleanup;
+    hr = psl->SetPath(szTarget);
+    ok_hr(hr, S_OK);
+    hr = psl->Resolve(NULL, SLR_NO_UI | SLR_NOUPDATE | SLR_NOSEARCH | SLR_NOTRACK);
+    ok_hr(hr, S_OK);
+
+    szIcon[0] = L'?';
+    iIcon = -1;
+    hr = psl->GetIconLocation(szIcon, _countof(szIcon), &iIcon);
+    ok_hr(hr, S_OK);
+    ok(szIcon[0] == UNICODE_NULL, "Icon location after Resolve is '%S'\n", szIcon);
+    ok_int(iIcon, 0);
+
+    hr = psl->QueryInterface(IID_PPV_ARG(IPersistFile, &ppf));
+    ok_hr(hr, S_OK);
+    if (FAILED(hr))
+        goto Cleanup;
+    hr = ppf->Save(szLink, TRUE);
+    ok_hr(hr, S_OK);
+
+    hr = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IShellLinkW, &psl2));
+    ok_hr(hr, S_OK);
+    if (FAILED(hr))
+        goto Cleanup;
+    hr = psl2->QueryInterface(IID_PPV_ARG(IPersistFile, &ppf2));
+    ok_hr(hr, S_OK);
+    if (FAILED(hr))
+        goto Cleanup;
+    hr = ppf2->Load(szLink, STGM_READ);
+    ok_hr(hr, S_OK);
+
+    hr = psl2->QueryInterface(IID_PPV_ARG(IShellLinkDataList, &pdl));
+    ok_hr(hr, S_OK);
+    if (SUCCEEDED(hr))
+    {
+        dwFlags = 0;
+        hr = pdl->GetFlags(&dwFlags);
+        ok_hr(hr, S_OK);
+        ok(!(dwFlags & SLDF_HAS_ICONLOCATION), "Saved link has an icon location (flags 0x%lx)\n", dwFlags);
+    }
+
+    szIcon[0] = L'?';
+    hr = psl2->GetIconLocation(szIcon, _countof(szIcon), &iIcon);
+    ok_hr(hr, S_OK);
+    ok(szIcon[0] == UNICODE_NULL, "Icon location of the saved link is '%S'\n", szIcon);
+
+    /* Without an ID list there is no icon location either: Windows does not use the target path */
+    ok(RemoveLinkIdList(szLink), "Could not remove the ID list of the link\n");
+    hr = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IShellLinkW, &psl3));
+    ok_hr(hr, S_OK);
+    if (FAILED(hr))
+        goto Cleanup;
+    hr = psl3->QueryInterface(IID_PPV_ARG(IPersistFile, &ppf3));
+    ok_hr(hr, S_OK);
+    if (FAILED(hr))
+        goto Cleanup;
+    hr = ppf3->Load(szLink, STGM_READ);
+    ok_hr(hr, S_OK);
+    hr = psl3->QueryInterface(IID_PPV_ARG(IExtractIconW, &pei));
+    ok_hr(hr, S_OK);
+    if (SUCCEEDED(hr))
+    {
+        szIcon[0] = UNICODE_NULL;
+        wFlags = 0;
+        hr = pei->GetIconLocation(GIL_FORSHELL, szIcon, _countof(szIcon), &iIcon, &wFlags);
+        ok(FAILED(hr), "Icon location '%S' (hr 0x%lx) for a link without an ID list\n", szIcon, hr);
+
+        /* Resolve does not change that */
+        hr = psl3->Resolve(NULL, SLR_NO_UI | SLR_NOUPDATE | SLR_NOSEARCH | SLR_NOTRACK);
+        ok_hr(hr, S_OK);
+        szIcon[0] = L'?';
+        hr = psl3->GetIconLocation(szIcon, _countof(szIcon), &iIcon);
+        ok_hr(hr, S_OK);
+        ok(szIcon[0] == UNICODE_NULL, "Icon location after Resolve is '%S'\n", szIcon);
+        szIcon[0] = UNICODE_NULL;
+        hr = pei->GetIconLocation(GIL_FORSHELL, szIcon, _countof(szIcon), &iIcon, &wFlags);
+        ok(FAILED(hr), "Icon location '%S' (hr 0x%lx) after Resolve\n", szIcon, hr);
+    }
+
+Cleanup:
+    DeleteFileW(szLink);
+    DeleteFileW(szTarget);
+}
+
 START_TEST(CShellLink)
 {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
@@ -478,6 +625,7 @@ START_TEST(CShellLink)
     TestShellLink();
     TestDescription();
     TestIconLocation();
+    TestResolveIconLocation();
 
     CoUninitialize();
 }
