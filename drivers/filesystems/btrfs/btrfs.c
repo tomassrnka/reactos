@@ -4639,6 +4639,14 @@ static NTSTATUS mount_vol(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
         goto exit;
     }
 
+    // btrfstune sets this while it moves block group items between trees;
+    // an interrupted conversion leaves items in both trees, so refuse the volume
+    if (Vcb->superblock.flags & BTRFS_SUPERBLOCK_FLAGS_CHANGING_BG_TREE) {
+        WARN("cannot mount because a block group tree conversion is incomplete\n");
+        Status = STATUS_UNRECOGNIZED_VOLUME;
+        goto exit;
+    }
+
     if (!(Vcb->superblock.incompat_flags & BTRFS_INCOMPAT_FLAGS_METADATA_UUID))
         Vcb->superblock.metadata_uuid = Vcb->superblock.uuid;
 
