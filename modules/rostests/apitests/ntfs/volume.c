@@ -348,3 +348,183 @@ START_TEST(NtfsVolumeLabelReboot)
     else
         ok(FALSE, "The old label is not back; %ls is kept for another run\n", Marker);
 }
+
+static NTSTATUS VolumeFsctl(HANDLE Handle, ULONG Code)
+{
+    IO_STATUS_BLOCK Iosb;
+    return NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, Code, NULL, 0, NULL, 0);
+}
+
+/*
+ * FSCTL_LOCK_VOLUME through a new volume handle; a granted lock is released and the handle closed
+ * (Windows dismounts the volume under a handle that locked and unlocked it).
+ */
+static NTSTATUS TryLock(VOID)
+{
+    HANDLE Handle;
+    NTSTATUS Status = OpenVolume(FILE_READ_DATA | FILE_WRITE_DATA, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = VolumeFsctl(Handle, FSCTL_LOCK_VOLUME);
+    if (NT_SUCCESS(Status) && VolumeFsctl(Handle, FSCTL_UNLOCK_VOLUME) != STATUS_SUCCESS)
+        Status = STATUS_UNSUCCESSFUL;
+    NtClose(Handle);
+    return Status;
+}
+#define LockExpect(Expect, What) do { NTSTATUS St_ = TryLock(); ok(St_ == (Expect), "%s: lock 0x%08lx, expected 0x%08lx\n", What, St_, (NTSTATUS)(Expect)); } while (0)
+/* ReactOS refuses the lock while a section survives; Windows 10 grants it, Server 2008 R2 grants it unless a view is mapped. */
+#define LockRefusedOnReactOS(What) do { NTSTATUS St_ = TryLock(); ok(St_ == STATUS_ACCESS_DENIED || (!is_reactos() && St_ == STATUS_SUCCESS), "%s: lock 0x%08lx\n", What, St_); } while (0)
+
+/* A file of Size bytes of Fill in the test directory, its handle closed; the mapping and view of Protect stay. */
+static BOOLEAN MapClosedFile(PCWSTR Name, DWORD Protect, BYTE Fill, HANDLE *Section, PBYTE *View)
+{
+    BYTE Data[4096];
+    WCHAR Path[MAX_PATH];
+    HANDLE File;
+    DWORD Done, i;
+    BOOL Ok = TRUE;
+
+    *Section = NULL;
+    *View = NULL;
+    NtPath(Path, Name);
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Creating %ls failed %lu\n", Path, GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+    memset(Data, Fill, sizeof(Data));
+    for (i = 0; Ok && i < 16; i++)
+        Ok = WriteFile(File, Data, sizeof(Data), &Done, NULL) && Done == sizeof(Data);
+    ok(Ok, "Writing %ls failed %lu\n", Path, GetLastError());
+    if (Ok)
+        *Section = CreateFileMappingW(File, NULL, Protect, 0, 0, NULL);
+    ok(*Section != NULL, "CreateFileMappingW(%ls) failed %lu\n", Path, GetLastError());
+    if (*Section)
+        *View = MapViewOfFile(*Section, Protect == PAGE_READWRITE ? FILE_MAP_WRITE : FILE_MAP_READ, 0, 0, 0);
+    ok(*View != NULL, "MapViewOfFile(%ls) failed %lu\n", Path, GetLastError());
+    CloseHandle(File);
+    if (!*View && *Section)
+    {
+        CloseHandle(*Section);
+        *Section = NULL;
+    }
+    return *View != NULL;
+}
+
+/*
+ * The volume lock and mapped files: on ReactOS no lock while a section of a file survives its handle
+ * (once the holder writes the disk directly, the section's page writes could not be honoured); after
+ * a view goes, what it wrote is in the file and the lock is granted.  A locked volume takes no label,
+ * neither through the holder's handle nor through another open; with files open and mapped the label
+ * changes.  Needs a volume nothing else uses (set NTFS_APITEST_DIR to a directory on it): it skips if
+ * the volume cannot be locked at all, as the system volume cannot.
+ */
+START_TEST(NtfsVolumeLock)
+{
+    WCHAR Original[MAX_PATH], Got[MAX_PATH], Path[MAX_PATH], Before[MAX_PATH];
+    HANDLE Lock, Section, File;
+    PBYTE View;
+    NTSTATUS Status;
+    ULONG OriginalBytes, i;
+    DWORD Done;
+    BYTE Byte;
+    BOOL Ret;
+
+    if (!LabelInit("NtfsVolumeLock"))
+        return;
+    if (!NtQueryLabel(Original, &OriginalBytes))
+    {
+        skip("Cannot read the label of %ls\n", LabelRoot);
+        NtCleanup();
+        return;
+    }
+    Status = OpenVolume(FILE_READ_DATA | FILE_WRITE_DATA, &Lock);
+    ok(Status == STATUS_SUCCESS, "Volume open: 0x%08lx\n", Status);
+    if (!NT_SUCCESS(Status))
+    {
+        NtCleanup();
+        return;
+    }
+    /* Another program may hold the volume for a moment (an indexer, a virus scanner on Windows). */
+    for (i = 0; i < 20 && (Status = VolumeFsctl(Lock, FSCTL_LOCK_VOLUME)) == STATUS_ACCESS_DENIED; i++)
+        Sleep(500);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("%ls cannot be locked (0x%08lx): it is in use\n", LabelRoot, Status);
+        NtClose(Lock);
+        NtCleanup();
+        return;
+    }
+    VolumeFsctl(Lock, FSCTL_UNLOCK_VOLUME);
+    NtClose(Lock);
+
+    /* A writable view whose file handle is closed. */
+    if (MapClosedFile(L"rw.bin", PAGE_READWRITE, 'A', &Section, &View))
+    {
+        View[0] = 'B';
+        LockRefusedOnReactOS("Writable section and view, file handle closed");
+        CloseHandle(Section);
+        LockRefusedOnReactOS("Writable view only, section handle closed");
+        UnmapViewOfFile(View);
+        LockExpect(STATUS_SUCCESS, "View unmapped");
+        /* What the view wrote reached the file. */
+        NtPath(Path, L"rw.bin");
+        File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        Byte = 0;
+        ok(File != INVALID_HANDLE_VALUE && ReadFile(File, &Byte, 1, &Done, NULL) && Done == 1 && Byte == 'B',
+           "The byte written through the view is 0x%02x\n", Byte);
+        if (File != INVALID_HANDLE_VALUE)
+            CloseHandle(File);
+    }
+    /* A read-only view, and a section without a view. */
+    if (MapClosedFile(L"ro.bin", PAGE_READONLY, 'C', &Section, &View))
+    {
+        LockRefusedOnReactOS("Read-only section and view, file handle closed");
+        UnmapViewOfFile(View);
+        LockRefusedOnReactOS("Section without a view, file handle closed");
+        CloseHandle(Section);
+        LockExpect(STATUS_SUCCESS, "Section closed");
+    }
+
+    /* With a file open for writing and another mapped and written, the label changes. */
+    NtPath(Path, L"open.bin");
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Creating %ls failed %lu\n", Path, GetLastError());
+    if (File != INVALID_HANDLE_VALUE && MapClosedFile(L"rw2.bin", PAGE_READWRITE, 'D', &Section, &View))
+    {
+        ok(WriteFile(File, "open", 4, &Done, NULL) && Done == 4, "WriteFile failed %lu\n", GetLastError());
+        View[1] = 'E';
+        SetAndCheck(L"OpenFiles", TRUE, 0, L"OpenFiles");
+        LockExpect(STATUS_ACCESS_DENIED, "Open and mapped files");
+        ok(View[0] == 'D' && View[1] == 'E', "The view reads 0x%02x 0x%02x\n", View[0], View[1]);
+        UnmapViewOfFile(View);
+        CloseHandle(Section);
+    }
+    if (File != INVALID_HANDLE_VALUE)
+        CloseHandle(File);
+
+    /* Locked: a label set through the holder's handle or another open is refused, and the label stays.
+     */
+    GetLabel(Before);
+    Lock = NULL;
+    Status = OpenVolume(FILE_READ_DATA | FILE_WRITE_DATA, &Lock);
+    ok(Status == STATUS_SUCCESS, "Volume open: 0x%08lx\n", Status);
+    if (NT_SUCCESS(Status))
+        Status = VolumeFsctl(Lock, FSCTL_LOCK_VOLUME);
+    ok(Status == STATUS_SUCCESS, "Lock: 0x%08lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtSetLabel(Lock, L"HolderLabel", 22, sizeof(FILE_FS_LABEL_INFORMATION) + 22);
+        /* Windows 10 reports the volume dismounted, Server 2008 R2 STATUS_FILE_INVALID. */
+        ok(Status == STATUS_ACCESS_DENIED || (!is_reactos() && !NT_SUCCESS(Status)),
+           "Label through the lock holder's handle: 0x%08lx\n", Status);
+        SetLastError(0xdeadbeef);
+        Ret = SetVolumeLabelW(LabelRoot, L"LockedLabel");
+        ok(!Ret && GetLastError() == ERROR_ACCESS_DENIED, "SetVolumeLabelW on the locked volume: %d, error %lu\n", Ret, GetLastError());
+        VolumeFsctl(Lock, FSCTL_UNLOCK_VOLUME);
+    }
+    if (Lock)
+        NtClose(Lock);
+    ok(GetLabel(Got) && !wcscmp(Got, Before), "Label after the refused sets is \"%ls\", expected \"%ls\"\n", Got, Before);
+    ok(RestoreLabel(Original, OriginalBytes), "The label of %ls was not restored\n", LabelRoot);
+    NtCleanup();
+}
