@@ -2001,10 +2001,17 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
       if (!handledPath && (win2000plus || win98plus)) {
           fodInfos->initdir = heap_alloc(MAX_PATH * sizeof(WCHAR));
 
+#ifdef __REACTOS__
+          if (SHGetFolderPathW(hwnd, CSIDL_PERSONAL, 0, 0, fodInfos->initdir) != S_OK)
+          {
+              if (SHGetFolderPathW(hwnd, CSIDL_DESKTOPDIRECTORY|CSIDL_FLAG_CREATE, 0, 0, fodInfos->initdir) != S_OK)
+              {
+#else
           if (SHGetFolderPathW(hwnd, CSIDL_PERSONAL, 0, 0, fodInfos->initdir) == S_OK)
           {
               if (SHGetFolderPathW(hwnd, CSIDL_DESKTOPDIRECTORY|CSIDL_FLAG_CREATE, 0, 0, fodInfos->initdir) == S_OK)
               {
+#endif
                   /* last fallback */
                   GetCurrentDirectoryW(MAX_PATH, fodInfos->initdir);
                   TRACE("No personal or desktop dir, using cwd as failsafe: %s\n", debugstr_w(fodInfos->initdir));
