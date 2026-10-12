@@ -73,14 +73,7 @@ SetServiceStatusText(PSERVICEPROPSHEET dlgInfo,
     LPWSTR lpStatus;
     UINT id;
 
-    if (dlgInfo->pService->ServiceStatusProcess.dwCurrentState == SERVICE_RUNNING)
-    {
-        id = IDS_SERVICES_STARTED;
-    }
-    else
-    {
-        id = IDS_SERVICES_STOPPED;
-    }
+    id = GetServiceStateStringId(dlgInfo->pService->ServiceStatusProcess.dwCurrentState);
 
     if (AllocAndLoadString(&lpStatus,
                            hInstance,

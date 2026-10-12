@@ -208,6 +208,7 @@ BOOL StatusBarLoadString(IN HWND hStatusBar,
 INT GetTextFromEdit(OUT LPWSTR lpString,
                     IN HWND hDlg,
                     IN UINT Res);
+UINT GetServiceStateStringId(IN DWORD dwCurrentState);
 VOID GetError(VOID);
 VOID DisplayString(PWCHAR);
 HIMAGELIST InitImageList(UINT StartResource,

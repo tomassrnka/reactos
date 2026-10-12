@@ -30,6 +30,33 @@ static const COLUMN_LIST Columns[] =
     { LVLOGONAS, 100, IDS_FITHCOLUMN   },
 };
 
+/* Width that fits the longest localized state text of the status column */
+static INT
+GetStatusColumnWidth(HWND hListView)
+{
+    static const UINT StateIds[] =
+    {
+        IDS_SERVICES_STARTED, IDS_SERVICES_STARTING, IDS_SERVICES_STOPPING,
+        IDS_SERVICES_PAUSING, IDS_SERVICES_PAUSED, IDS_SERVICES_RESUMING
+    };
+    WCHAR szText[64];
+    INT Width = 0, TextWidth;
+    UINT i;
+
+    for (i = 0; i < _countof(StateIds); i++)
+    {
+        if (LoadStringW(hInstance, StateIds[i], szText, _countof(szText)))
+        {
+            TextWidth = ListView_GetStringWidth(hListView, szText);
+            if (TextWidth > Width)
+                Width = TextWidth;
+        }
+    }
+
+    /* Leave room for the cell margins */
+    return Width + 16;
+}
+
 VOID
 SetListViewStyle(HWND hListView,
                  DWORD View)
@@ -163,15 +190,15 @@ ChangeListViewText(PMAIN_WND_INFO Info,
             case LVSTATUS:
             {
                 WCHAR szStatus[64];
+                UINT StringId;
 
-                if (pService->ServiceStatusProcess.dwCurrentState == SERVICE_RUNNING)
-                {
-                    LoadStringW(hInstance,
-                                IDS_SERVICES_STARTED,
-                                szStatus,
-                                sizeof(szStatus) / sizeof(WCHAR));
-                }
-                else
+                /* A stopped service has an empty status, as on Windows */
+                StringId = GetServiceStateStringId(pService->ServiceStatusProcess.dwCurrentState);
+                if (StringId == IDS_SERVICES_STOPPED ||
+                    !LoadStringW(hInstance,
+                                 StringId,
+                                 szStatus,
+                                 sizeof(szStatus) / sizeof(WCHAR)))
                 {
                     szStatus[0] = 0;
                 }
@@ -392,6 +419,8 @@ CreateListView(PMAIN_WND_INFO Info)
     {
         lvc.iSubItem = Columns[n].iSubItem;
         lvc.cx = Columns[n].cx;
+        if (lvc.iSubItem == LVSTATUS)
+            lvc.cx = max(lvc.cx, GetStatusColumnWidth(Info->hListView));
 
         LoadStringW(hInstance,
                     Columns[n].idsText,

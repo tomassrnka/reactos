@@ -189,6 +189,21 @@ GetTextFromEdit(OUT LPWSTR lpString,
     return len;
 }
 
+UINT
+GetServiceStateStringId(IN DWORD dwCurrentState)
+{
+    switch (dwCurrentState)
+    {
+        case SERVICE_RUNNING:          return IDS_SERVICES_STARTED;
+        case SERVICE_START_PENDING:    return IDS_SERVICES_STARTING;
+        case SERVICE_STOP_PENDING:     return IDS_SERVICES_STOPPING;
+        case SERVICE_PAUSE_PENDING:    return IDS_SERVICES_PAUSING;
+        case SERVICE_PAUSED:           return IDS_SERVICES_PAUSED;
+        case SERVICE_CONTINUE_PENDING: return IDS_SERVICES_RESUMING;
+        default:                       return IDS_SERVICES_STOPPED;
+    }
+}
+
 VOID GetError(VOID)
 {
     LPWSTR lpMsgBuf = NULL;
