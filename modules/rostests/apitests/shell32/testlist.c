@@ -15,6 +15,7 @@ extern void func_CShellDispatch(void);
 extern void func_CShellLink(void);
 extern void func_CUserNotification(void);
 extern void func_DragDrop(void);
+extern void func_DriveTools(void);
 extern void func_ExtractIconEx(void);
 extern void func_FindExecutable(void);
 extern void func_GetDisplayNameOf(void);
@@ -79,6 +80,7 @@ const struct test winetest_testlist[] =
     { "CShellLink", func_CShellLink },
     //{ "CUserNotification", func_CUserNotification }, // Test is broken on Win 2003
     { "DragDrop", func_DragDrop },
+    { "DriveTools", func_DriveTools },
     { "ExtractIconEx", func_ExtractIconEx },
     { "FindExecutable", func_FindExecutable },
     { "GetDisplayNameOf", func_GetDisplayNameOf },

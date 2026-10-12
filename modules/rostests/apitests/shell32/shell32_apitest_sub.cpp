@@ -339,6 +339,23 @@ wWinMain(
     LPWSTR    lpCmdLine,
     INT       nCmdShow)
 {
+    WCHAR szMarker[MAX_PATH];
+    if (GetEnvironmentVariableW(DRIVETOOLS_MARKER_VARIABLE, szMarker, _countof(szMarker)))
+    {
+        WCHAR szModule[MAX_PATH], szLine[MAX_PATH * 3];
+        DWORD cbWritten;
+        GetModuleFileNameW(NULL, szModule, _countof(szModule));
+        StringCchPrintfW(szLine, _countof(szLine), L"%s|%s\n", PathFindFileNameW(szModule), lpCmdLine);
+        HANDLE hFile = CreateFileW(szMarker, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   OPEN_ALWAYS, 0, NULL);
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            WriteFile(hFile, szLine, lstrlenW(szLine) * sizeof(WCHAR), &cbWritten, NULL);
+            CloseHandle(hFile);
+        }
+        return 0;
+    }
+
     if (lstrcmpiW(lpCmdLine, L"") == 0 || lstrcmpiW(lpCmdLine, L"TEST") == 0)
         return 0;
 
