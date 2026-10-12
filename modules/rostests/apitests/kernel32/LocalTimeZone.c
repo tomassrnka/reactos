@@ -154,7 +154,7 @@ TestZoneChange(LONG Bias)
 }
 
 /*
- * Set a zone whose next transition is LEAD_SECONDS ahead, then check that
+ * Set a zone whose next transition is 12 to 42 seconds ahead, then check that
  * local time switches at the transition while UTC keeps running.
  */
 static
@@ -175,9 +175,15 @@ TestTransition(BOOL ToDaylight)
     StringCchCopyW(Tzi.StandardName, _countof(Tzi.StandardName), L"Test Standard Time");
     StringCchCopyW(Tzi.DaylightName, _countof(Tzi.DaylightName), L"Test Daylight Time");
 
-    /* Whole seconds, so that the cutover fields hold the instant exactly */
+    /*
+     * Whole seconds, so that the cutover fields hold the instant exactly, and
+     * at least half a minute into the minute, so that a check that ignores
+     * the seconds of the cutover sees the transition too early.
+     */
     Now = GetUtcNow();
     Cutover = (Now / TICKS_PER_SECOND + LEAD_SECONDS) * TICKS_PER_SECOND;
+    if ((Cutover / TICKS_PER_SECOND) % 60 < 30)
+        Cutover += (30 - (Cutover / TICKS_PER_SECOND) % 60) * TICKS_PER_SECOND;
 
     if (ToDaylight)
     {
@@ -214,12 +220,31 @@ TestTransition(BOOL ToDaylight)
 
     Id = GetTimeZoneInformation(&Current);
     Bias = GetLocalBias();
-    ok(Id == IdBefore, "%s: id %lu before the transition\n", Name, Id);
-    ok(Bias == BiasBefore, "%s: local time bias %ld before the transition, expected %ld\n", Name, Bias, BiasBefore);
+    ok(Id == IdBefore, "%s: id %lu after setting the zone\n", Name, Id);
+    ok(Bias == BiasBefore, "%s: local time bias %ld after setting the zone, expected %ld\n", Name, Bias, BiasBefore);
+
+    /* Shortly before the transition, in the same minute */
+    while (GetUtcNow() < Cutover - 2 * TICKS_PER_SECOND &&
+           GetTickCount() - Tick0 < (LEAD_SECONDS + 60) * 1000)
+    {
+        Sleep(100);
+    }
+
+    if (GetUtcNow() < Cutover - TICKS_PER_SECOND)
+    {
+        Id = GetTimeZoneInformation(&Current);
+        Bias = GetLocalBias();
+        ok(Id == IdBefore, "%s: id %lu just before the transition\n", Name, Id);
+        ok(Bias == BiasBefore, "%s: local time bias %ld just before the transition, expected %ld\n", Name, Bias, BiasBefore);
+    }
+    else
+    {
+        skip("%s: woke up too late for the check just before the transition\n", Name);
+    }
 
     /* Wait until shortly after the transition */
     while (GetUtcNow() < Cutover + 1500 * 10000 &&
-           GetTickCount() - Tick0 < (LEAD_SECONDS + 30) * 1000)
+           GetTickCount() - Tick0 < (LEAD_SECONDS + 60) * 1000)
     {
         Sleep(100);
     }
@@ -237,10 +262,64 @@ TestTransition(BOOL ToDaylight)
     ok(Bias == BiasAfter, "%s: local time bias %ld after the transition, expected %ld\n", Name, Bias, BiasAfter);
 }
 
+static
+VOID
+CheckLocal(PTIME_ZONE_INFORMATION Tzi, WORD Month, WORD Day, WORD Hour, WORD Minute, WORD Second, WORD Milliseconds,
+           WORD LocalHour, WORD LocalMinute, WORD LocalSecond, WORD LocalMilliseconds)
+{
+    SYSTEMTIME Utc = { 2026, Month, 0, Day, Hour, Minute, Second, Milliseconds };
+    SYSTEMTIME Local;
+    BOOL Ret;
+
+    ZeroMemory(&Local, sizeof(Local));
+    Ret = SystemTimeToTzSpecificLocalTime(Tzi, &Utc, &Local);
+    ok(Ret, "SystemTimeToTzSpecificLocalTime failed, error %lu\n", GetLastError());
+    ok(Local.wHour == LocalHour && Local.wMinute == LocalMinute &&
+       Local.wSecond == LocalSecond && Local.wMilliseconds == LocalMilliseconds,
+       "UTC %02u-%02u %02u:%02u:%02u.%03u: local %02u:%02u:%02u.%03u, expected %02u:%02u:%02u.%03u\n",
+       Month, Day, Hour, Minute, Second, Milliseconds,
+       Local.wHour, Local.wMinute, Local.wSecond, Local.wMilliseconds,
+       LocalHour, LocalMinute, LocalSecond, LocalMilliseconds);
+}
+
+/* Transitions take effect at their second and millisecond */
+static
+VOID
+TestCutoverPrecision(VOID)
+{
+    TIME_ZONE_INFORMATION Tzi;
+
+    ZeroMemory(&Tzi, sizeof(Tzi));
+    Tzi.Bias = 300;
+    Tzi.DaylightBias = -60;
+    /* Second Sunday of March (2026-03-08) 02:00:30.500 standard time = 07:00:30.500 UTC */
+    Tzi.DaylightDate.wMonth = 3;
+    Tzi.DaylightDate.wDay = 2;
+    Tzi.DaylightDate.wHour = 2;
+    Tzi.DaylightDate.wSecond = 30;
+    Tzi.DaylightDate.wMilliseconds = 500;
+    /* First Sunday of November (2026-11-01) 01:59:59.999 daylight time = 05:59:59.999 UTC */
+    Tzi.StandardDate.wMonth = 11;
+    Tzi.StandardDate.wDay = 1;
+    Tzi.StandardDate.wHour = 1;
+    Tzi.StandardDate.wMinute = 59;
+    Tzi.StandardDate.wSecond = 59;
+    Tzi.StandardDate.wMilliseconds = 999;
+
+    CheckLocal(&Tzi, 3, 8, 7, 0, 0, 0, 2, 0, 0, 0);
+    CheckLocal(&Tzi, 3, 8, 7, 0, 30, 499, 2, 0, 30, 499);
+    CheckLocal(&Tzi, 3, 8, 7, 0, 30, 500, 3, 0, 30, 500);
+    CheckLocal(&Tzi, 11, 1, 5, 59, 0, 0, 1, 59, 0, 0);
+    CheckLocal(&Tzi, 11, 1, 5, 59, 59, 998, 1, 59, 59, 998);
+    CheckLocal(&Tzi, 11, 1, 5, 59, 59, 999, 0, 59, 59, 999);
+}
+
 START_TEST(LocalTimeZone)
 {
     TIME_ZONE_INFORMATION Saved, Probe;
     LONGLONG UtcJump;
+
+    TestCutoverPrecision();
 
     EnablePrivilege(L"SeTimeZonePrivilege");
     EnablePrivilege(L"SeSystemtimePrivilege");
