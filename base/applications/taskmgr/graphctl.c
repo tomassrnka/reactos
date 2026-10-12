@@ -13,6 +13,10 @@
 
 WNDPROC OldGraphCtrlWndProc;
 
+/* The refresh thread draws new points while the UI thread paints and resizes */
+static CRITICAL_SECTION GraphCtrlLock;
+static BOOL bGraphCtrlLockInitialized = FALSE;
+
 BOOL
 GraphCtrl_Create(PTM_GRAPH_CONTROL inst, HWND hWnd, HWND hParentWnd, PTM_FORMAT fmt)
 {
@@ -22,11 +26,17 @@ GraphCtrl_Create(PTM_GRAPH_CONTROL inst, HWND hWnd, HWND hParentWnd, PTM_FORMAT 
     INT     p;
     RECT    rc;
 
+    if (!bGraphCtrlLockInitialized)
+    {
+        InitializeCriticalSection(&GraphCtrlLock);
+        bGraphCtrlLockInitialized = TRUE;
+    }
+
     inst->hParentWnd = hParentWnd;
     inst->hWnd = hWnd;
 
+    /* The history covers the screen width; the bitmap only the window */
     Size = GetSystemMetrics(SM_CXSCREEN);
-    inst->BitmapWidth = Size;
     Size /= PLOT_SHIFT;
     inst->PointBuffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size * NUM_PLOTS);
     if (!inst->PointBuffer)
@@ -63,7 +73,8 @@ GraphCtrl_Create(PTM_GRAPH_CONTROL inst, HWND hWnd, HWND hParentWnd, PTM_FORMAT 
     inst->DrawSecondaryPlot = fmt->DrawSecondaryPlot;
 
     GetClientRect(hWnd, &rc);
-    inst->BitmapHeight = rc.bottom;
+    inst->BitmapWidth = max(rc.right, 1);
+    inst->BitmapHeight = max(rc.bottom, 1);
     inst->ftPixelsPerPercent = (FLOAT)(inst->BitmapHeight) / 100.00f;
 
     hdc = GetDC(hParentWnd);
@@ -81,6 +92,7 @@ GraphCtrl_Create(PTM_GRAPH_CONTROL inst, HWND hWnd, HWND hParentWnd, PTM_FORMAT 
 
     SetBkColor(hdcg, fmt->clrBack);
     rc.right = inst->BitmapWidth;
+    rc.bottom = inst->BitmapHeight;
     FillRect(hdcg, &rc, inst->hBrushBack);
 
     inst->CurrShift = 0;
@@ -101,6 +113,7 @@ GraphCtrl_Create(PTM_GRAPH_CONTROL inst, HWND hWnd, HWND hParentWnd, PTM_FORMAT 
     }
     SelectObject(hdcg, inst->hPen0);
 
+    SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)inst);
     return TRUE;
 
 fail:
@@ -111,6 +124,9 @@ fail:
 void
 GraphCtrl_Dispose(PTM_GRAPH_CONTROL inst)
 {
+    if (inst->hWnd && (PTM_GRAPH_CONTROL)GetWindowLongPtrW(inst->hWnd, GWLP_USERDATA) == inst)
+        SetWindowLongPtrW(inst->hWnd, GWLP_USERDATA, 0);
+
     if (inst->PointBuffer)
         HeapFree(GetProcessHeap(), 0, inst->PointBuffer);
 
@@ -140,9 +156,10 @@ GraphCtrl_AddPoint(PTM_GRAPH_CONTROL inst, BYTE val0, BYTE val1)
     PBYTE  t;
     RECT   rcDirt;
 
-    UINT   Prev0, Prev1, RetainingWidth;
+    INT    Prev0, Prev1, RetainingWidth;
     INT    PrevY, CurrY, p, v;
 
+    EnterCriticalSection(&GraphCtrlLock);
     hdcg = inst->hdcGraph;
     RetainingWidth = inst->BitmapWidth - PLOT_SHIFT;
     t = inst->PointBuffer;
@@ -158,6 +175,12 @@ GraphCtrl_AddPoint(PTM_GRAPH_CONTROL inst, BYTE val0, BYTE val1)
     }
     *(t + inst->CurrIndex) = val0;
     *(t + inst->CurrIndex + inst->NumberOfPoints) = val1;
+
+    if (RetainingWidth < 1)
+    {
+        LeaveCriticalSection(&GraphCtrlLock);
+        return;
+    }
 
     /* Drawing points, first shifting the plot left */
     BitBlt(hdcg, 0, 0, RetainingWidth, inst->BitmapHeight, hdcg, PLOT_SHIFT, 0, SRCCOPY);
@@ -201,9 +224,10 @@ GraphCtrl_AddPoint(PTM_GRAPH_CONTROL inst, BYTE val0, BYTE val1)
     MoveToEx(inst->hdcGraph, RetainingWidth - 1, PrevY, NULL);
     CurrY = inst->BitmapHeight - val0 * inst->ftPixelsPerPercent;
     LineTo(inst->hdcGraph, inst->BitmapWidth - 1, CurrY);
+    LeaveCriticalSection(&GraphCtrlLock);
 }
 
-inline void
+void
 GraphCtrl_RedrawBitmap(PTM_GRAPH_CONTROL inst, INT h)
 {
     HDC    hdcg;
@@ -212,6 +236,7 @@ GraphCtrl_RedrawBitmap(PTM_GRAPH_CONTROL inst, INT h)
     INT    i, j, y, x, p;
     FLOAT  coef;
 
+    EnterCriticalSection(&GraphCtrlLock);
     hdcg = inst->hdcGraph;
     rc.left = 0; rc.top = 0;
     rc.right = inst->BitmapWidth; rc.bottom = h;
@@ -268,31 +293,34 @@ GraphCtrl_RedrawBitmap(PTM_GRAPH_CONTROL inst, INT h)
         x -= PLOT_SHIFT;
         LineTo(hdcg, x, y);
     }
+    LeaveCriticalSection(&GraphCtrlLock);
 }
 
-inline void
-GraphCtrl_RedrawOnHeightChange(PTM_GRAPH_CONTROL inst, INT nh)
+void
+GraphCtrl_Resize(PTM_GRAPH_CONTROL inst, INT nw, INT nh)
 {
     HDC     hdc;
-    HBITMAP hbmOld;
+    HBITMAP hbmNew;
 
-    inst->BitmapHeight = nh;
-    inst->ftPixelsPerPercent = (FLOAT)nh / 100.00f;
+    nw = max(nw, 1);
+    nh = max(nh, 1);
 
+    EnterCriticalSection(&GraphCtrlLock);
     hdc = GetDC(inst->hParentWnd);
-    hbmOld = inst->hbmGraph;
-    inst->hbmGraph = CreateCompatibleBitmap(hdc, inst->BitmapWidth, nh);
-    SelectObject(inst->hdcGraph, inst->hbmGraph);
-    DeleteObject(hbmOld);
+    hbmNew = CreateCompatibleBitmap(hdc, nw, nh);
     ReleaseDC(inst->hParentWnd, hdc);
-
-    GraphCtrl_RedrawBitmap(inst, nh);
+    if (hbmNew)
+    {
+        SelectObject(inst->hdcGraph, hbmNew);
+        DeleteObject(inst->hbmGraph);
+        inst->hbmGraph = hbmNew;
+        inst->BitmapWidth = nw;
+        inst->BitmapHeight = nh;
+        inst->ftPixelsPerPercent = (FLOAT)nh / 100.00f;
+        GraphCtrl_RedrawBitmap(inst, nh);
+    }
+    LeaveCriticalSection(&GraphCtrlLock);
 }
-
-extern TM_GRAPH_CONTROL PerformancePageCpuUsageHistoryGraph;
-extern TM_GRAPH_CONTROL PerformancePageMemUsageHistoryGraph;
-extern HWND hPerformancePageCpuUsageHistoryGraph;
-extern HWND hPerformancePageMemUsageHistoryGraph;
 
 INT_PTR CALLBACK
 GraphCtrl_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -319,7 +347,6 @@ GraphCtrl_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case WM_MOUSELEAVE:
         case WM_MOUSEMOVE:
         // case WM_MOUSEWHEEL:
-        case WM_NCHITTEST:
         case WM_NCLBUTTONDBLCLK:
         case WM_NCLBUTTONDOWN:
         case WM_NCLBUTTONUP:
@@ -357,21 +384,19 @@ GraphCtrl_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case WM_SYSKEYUP:
             return 0;
 
-        case WM_NCCALCSIZE:
-            return 0;
+        /* Clicks go to the page, which handles them (compact mode, CPU history switch) */
+        case WM_NCHITTEST:
+            return HTTRANSPARENT;
 
         case WM_SIZE:
         {
-            if (hWnd == hPerformancePageCpuUsageHistoryGraph)
-                graph = &PerformancePageCpuUsageHistoryGraph;
-            else if (hWnd == hPerformancePageMemUsageHistoryGraph)
-                graph = &PerformancePageMemUsageHistoryGraph;
-            else
+            graph = (PTM_GRAPH_CONTROL)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+            if (!graph)
                 return 0;
 
-            if (HIWORD(lParam) != graph->BitmapHeight)
+            if (LOWORD(lParam) != graph->BitmapWidth || HIWORD(lParam) != graph->BitmapHeight)
             {
-                GraphCtrl_RedrawOnHeightChange(graph, HIWORD(lParam));
+                GraphCtrl_Resize(graph, LOWORD(lParam), HIWORD(lParam));
             }
             InvalidateRect(hWnd, NULL, FALSE);
 
@@ -384,15 +409,13 @@ GraphCtrl_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             HDC         hdc;
             PAINTSTRUCT ps;
 
-            if (hWnd == hPerformancePageCpuUsageHistoryGraph)
-                graph = &PerformancePageCpuUsageHistoryGraph;
-            else if (hWnd == hPerformancePageMemUsageHistoryGraph)
-                graph = &PerformancePageMemUsageHistoryGraph;
-            else
-                return 0;
+            graph = (PTM_GRAPH_CONTROL)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+            if (!graph)
+                break;
 
             hdc = BeginPaint(hWnd, &ps);
             GetClientRect(hWnd, &rcClient);
+            EnterCriticalSection(&GraphCtrlLock);
             BitBlt(hdc, 0, 0,
                    rcClient.right,
                    rcClient.bottom,
@@ -400,6 +423,7 @@ GraphCtrl_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                    graph->BitmapWidth - rcClient.right,
                    0,
                    SRCCOPY);
+            LeaveCriticalSection(&GraphCtrlLock);
             EndPaint(hWnd, &ps);
             return 0;
         }
