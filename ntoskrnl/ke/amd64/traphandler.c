@@ -112,8 +112,33 @@ KiNmiInterruptHandler(
         goto Exit;
     }
 
-    /* Handle the NMI */
-    KiHandleNmi();
+    /* Call the registered NMI handlers and see if one of them handled it */
+    if (!KiHandleNmi())
+    {
+        static LONG ReportOwner;
+        KIRQL OldIrql;
+
+        /* None did, let the HAL handle it at HIGH_LEVEL, as on x86 */
+        KeRaiseIrql(HIGH_LEVEL, &OldIrql);
+
+        /* An NMI can reach all processors at once. One of them reports it,
+           the others stay here and still answer the freeze requests that
+           the kernel debugger sends, since no further NMI reaches them. */
+        if (InterlockedCompareExchange(&ReportOwner, 1, 0) == 0)
+        {
+            HalHandleNMI(NULL);
+        }
+        else
+        {
+            while (TRUE)
+            {
+                KiProcessorFreezeHandler(TrapFrame, ExceptionFrame);
+                YieldProcessor();
+            }
+        }
+
+        KeLowerIrql(OldIrql);
+    }
 
 Exit:
     /* Check if we need to swap GS back */
