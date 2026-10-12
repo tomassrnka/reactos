@@ -272,4 +272,5 @@ STRINGTABLE
 BEGIN
     IDS_INSTGEN_CONFIRMUNINST "Êtes-vous sûr de vouloir désinstaller %s ?"
     IDS_INSTGEN_CONFIRMINSTRUNAPP "Installation complete, run %s now?"
+    IDS_DL_STANDALONE_PROGRAM "%s may be a stand-alone program that does not need to be installed. It was saved to:\n\n%s\n\nRun it now?"
 END

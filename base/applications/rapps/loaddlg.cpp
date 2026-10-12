@@ -152,8 +152,10 @@ struct DownloadInfo
         CConfigParser *cfg = static_cast<const CAvailableApplicationInfo&>(AppInfo).GetConfigParser();
         if (cfg)
         {
+            CStringW szArgs;
             cfg->GetString(DB_SAVEAS, szFileName);
             cfg->GetString(DB_DEPENDENCIES, szDependencies);
+            bHasInstallerArgs = cfg->GetString(DB_SILENTARGS, szArgs) && !szArgs.IsEmpty();
         }
     }
 
@@ -165,6 +167,7 @@ struct DownloadInfo
     DownloadType DLType;
     InstallerType IType;
     InstallerType IExecType = INSTALLER_UNKNOWN;
+    BOOL bHasInstallerArgs = FALSE;
     UINT Flags = 0;
     CStringW szUrl;
     CStringW szName;
@@ -820,7 +823,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     ULONG dwContentLen, dwBytesWritten, dwBytesRead, dwStatus, dwStatusLen;
     ULONG dwCurrentBytesRead = 0;
-    BOOL bTempfile = FALSE, bCancelled = FALSE;
+    BOOL bTempfile = FALSE, bCancelled = FALSE, bKeepFile = FALSE;
 
     HINTERNET hOpen = NULL;
     HINTERNET hFile = NULL;
@@ -1162,6 +1165,17 @@ run:
         shExInfo.lpParameters = L"";
         shExInfo.nShow = SW_SHOW;
 
+        if (!bSilentInstall && Info.IType == INSTALLER_UNKNOWN && !Info.bHasInstallerArgs &&
+            IsConsoleProgram(Path))
+        {
+            // A console program is usually the application itself, and running it only flashes a console
+            CStringW szMsgText;
+            bKeepFile = TRUE;
+            szMsgText.Format(IDS_DL_STANDALONE_PROGRAM, Info.szName.GetString(), (PCWSTR)Path);
+            if (MessageBoxW(hDlg, szMsgText, Info.szName, MB_YESNO | MB_ICONQUESTION) != IDYES)
+                goto end;
+        }
+
         if (Info.IType == INSTALLER_GENERATE)
         {
             params = L"/" CMD_KEY_GENINST + CStringW(bSilentInstall ? L" /S" : L"") +
@@ -1270,7 +1284,7 @@ end:
 
     if (bTempfile)
     {
-        if (bCancelled || (SettingsInfo.bDelInstaller && Info.DLType == DLTYPE_APPLICATION))
+        if (bCancelled || (SettingsInfo.bDelInstaller && Info.DLType == DLTYPE_APPLICATION && !bKeepFile))
         {
             // Don't delete .zip/.cab files so the user can extract from them
             if (bCancelled || Info.IType == INSTALLER_GENERATE || Info.IType == INSTALLER_EXEINZIP ||
