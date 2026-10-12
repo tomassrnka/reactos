@@ -215,6 +215,7 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "啟動時更新可獲得的程式列表"
     IDS_CFG_LOG_ENABLED "將程式的安裝和解除安裝記錄到記錄檔"
     IDS_CFG_SMALL_ICONS "小圖示"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
 END
 
 STRINGTABLE

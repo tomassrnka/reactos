@@ -214,6 +214,7 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "Cập nhật danh sách các chương trình có sẵn khi khởi động"
     IDS_CFG_LOG_ENABLED "Ghi nhật ký cài đặt và gỡ bỏ chương trình"
     IDS_CFG_SMALL_ICONS "Biểu tượng nhỏ"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
 END
 
 STRINGTABLE
