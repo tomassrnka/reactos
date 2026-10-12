@@ -174,8 +174,6 @@ SptiCallDriver(
 
     PAGED_CODE();
 
-    SptiInitializeOutputBuffer(Irp);
-
     // TODO: Send the IRP in an asynchronous way (do not block the user app thread)
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
 
@@ -843,6 +841,8 @@ SptiHandleAtaPassthru(
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
+    SptiInitializeOutputBuffer(Irp);
+
     Status = SptiCallDriver(DeviceObject, IrpContext);
 
     Srb = &IrpContext->Srb;
@@ -944,6 +944,8 @@ SptiHandleScsiPassthru(
     Status = SptiTranslateSptToSrb(&IrpContext->Srb, Spt, Cdb);
     if (!NT_SUCCESS(Status))
         goto Cleanup;
+
+    SptiInitializeOutputBuffer(Irp);
 
     Status = SptiCallDriver(DeviceObject, IrpContext);
 
