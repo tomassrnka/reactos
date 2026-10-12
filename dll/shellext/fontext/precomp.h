@@ -14,6 +14,7 @@
 #include <winbase.h>
 #include <winreg.h>
 #include <shlobj.h>
+#include <ntquery.h> // For PID_STG_*
 #include <shlwapi.h>
 #include <tchar.h>
 #include <strsafe.h>

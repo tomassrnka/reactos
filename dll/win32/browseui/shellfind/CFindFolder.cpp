@@ -147,9 +147,45 @@ CFindFolder::CFindFolder() :
 {
 }
 
+/* A shell extension folder (e.g. Fonts) may not parse its file names relative
+ * to itself; ask it for the item whose parsing name is the full path. */
+static LPITEMIDLIST _ILCreateFromParentFolder(LPCWSTR lpszPath)
+{
+    WCHAR szDir[MAX_PATH];
+    if (FAILED(StringCchCopyW(szDir, _countof(szDir), lpszPath)) || !PathRemoveFileSpecW(szDir))
+        return NULL;
+
+    CComHeapPtr<ITEMIDLIST> pidlDir(ILCreateFromPathW(szDir));
+    if (!pidlDir)
+        return NULL;
+
+    CComPtr<IShellFolder> pDesktop, pFolder;
+    if (FAILED(SHGetDesktopFolder(&pDesktop)) ||
+        FAILED(pDesktop->BindToObject(pidlDir, NULL, IID_PPV_ARG(IShellFolder, &pFolder))))
+    {
+        return NULL;
+    }
+
+    CComHeapPtr<ITEMIDLIST> pidlChild;
+    HRESULT hr = pFolder->ParseDisplayName(NULL, NULL, const_cast<LPWSTR>(lpszPath), NULL, &pidlChild, NULL);
+    if (FAILED(hr) || !pidlChild || !pidlChild->mkid.cb || !ILIsSingle(pidlChild))
+        return NULL;
+
+    WCHAR szParsing[MAX_PATH];
+    if (FAILED(DisplayNameOfW(pFolder, pidlChild, SHGDN_FORPARSING, szParsing, _countof(szParsing))) ||
+        lstrcmpiW(szParsing, lpszPath) != 0)
+    {
+        return NULL;
+    }
+
+    return ILCombine(pidlDir, pidlChild);
+}
+
 static LPITEMIDLIST _ILCreate(LPCWSTR lpszPath)
 {
     CComHeapPtr<ITEMIDLIST> lpFSPidl(ILCreateFromPathW(lpszPath));
+    if (!lpFSPidl)
+        lpFSPidl.Attach(_ILCreateFromParentFolder(lpszPath));
     if (!lpFSPidl)
     {
         ERR("Failed to create pidl from path\n");
@@ -654,6 +690,7 @@ LRESULT CFindFolder::StartSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
     // Clear all previous search results
     UINT uItemIndex;
     m_shellFolderView->RemoveObject(NULL, &uItemIndex);
+    m_pCompareFolder.Release();
 
     _SearchData* pSearchData = new _SearchData(++m_SearchId);
     pSearchData->pFindFolder = this;
@@ -829,6 +866,40 @@ STDMETHODIMP CFindFolder::GetDetailsEx(PCUITEMID_CHILD pidl, const SHCOLUMNID *p
     return E_FAIL;
 }
 
+/* The item's own folder may order its columns differently (e.g. Fonts); match
+ * them by SCID. A folder that maps none of its columns keeps the same index. */
+BOOL CFindFolder::MapColumnToFolder(UINT FSColumn, IShellFolder2 *pFolder, UINT *pItemColumn)
+{
+    *pItemColumn = FSColumn;
+    SHCOLUMNID scid, scidItem;
+    if (FAILED(m_pisfInner->MapColumnToSCID(FSColumn, &scid)))
+        return TRUE;
+
+    BOOL bAnyMapped = FALSE;
+    if (SUCCEEDED(pFolder->MapColumnToSCID(FSColumn, &scidItem)))
+    {
+        if (IsEqualGUID(scid.fmtid, scidItem.fmtid) && scid.pid == scidItem.pid)
+            return TRUE;
+        bAnyMapped = TRUE;
+    }
+
+    SHELLDETAILS sd;
+    for (UINT i = 0; i < 0x100 && SUCCEEDED(pFolder->GetDetailsOf(NULL, i, &sd)); ++i)
+    {
+        if (sd.str.uType == STRRET_WSTR)
+            CoTaskMemFree(sd.str.pOleStr);
+        if (FAILED(pFolder->MapColumnToSCID(i, &scidItem)))
+            continue;
+        bAnyMapped = TRUE;
+        if (IsEqualGUID(scid.fmtid, scidItem.fmtid) && scid.pid == scidItem.pid)
+        {
+            *pItemColumn = i;
+            return TRUE;
+        }
+    }
+    return !bAnyMapped;
+}
+
 STDMETHODIMP CFindFolder::GetDetailsOf(PCUITEMID_CHILD pidl, UINT iColumn, SHELLDETAILS *pDetails)
 {
     if (iColumn >= _countof(g_ColumnDefs))
@@ -839,7 +910,12 @@ STDMETHODIMP CFindFolder::GetDetailsOf(PCUITEMID_CHILD pidl, UINT iColumn, SHELL
             CComPtr<IShellFolder2> pFolder;
             PCUITEMID_CHILD pChild;
             if (SUCCEEDED(GetFSFolder2AndChild(pidl, &pFolder, &pChild)))
-                return pFolder->GetDetailsOf(pChild, FSColumn, pDetails);
+            {
+                UINT ItemColumn;
+                if (!MapColumnToFolder(FSColumn, pFolder, &ItemColumn))
+                    return SHSetStrRetEmpty(&pDetails->str);
+                return pFolder->GetDetailsOf(pChild, ItemColumn, pDetails);
+            }
         }
         return m_pisfInner->GetDetailsOf(pidl, FSColumn, pDetails); // Column header info
     }
@@ -911,6 +987,8 @@ STDMETHODIMP CFindFolder::CompareIDs(LPARAM lParam, PCUIDLIST_RELATIVE pidl1, PC
         // We can have more than one item with the same filename, in this case, look at the path as well.
         // When DefView wants to identify a specific item, it will use the SHCIDS_CANONICALONLY flag.
         hr = m_pisfInner->CompareIDs(MAKELONG(0, HIWORD(lParam)), _ILGetFSPidl(pidl1), _ILGetFSPidl(pidl2));
+        if (FAILED(hr))
+            hr = CompareForeignItems(MAKELONG(0, HIWORD(lParam)), pidl1, pidl2, hr);
         if (hr == S_EQUAL && (lParam & (SHCIDS_CANONICALONLY | SHCIDS_ALLFIELDS)))
             hr = CompareIDs(COL_LOCATION_INDEX, pidl1, pidl2);
         return hr;
@@ -922,7 +1000,80 @@ STDMETHODIMP CFindFolder::CompareIDs(LPARAM lParam, PCUIDLIST_RELATIVE pidl1, PC
         wColumn -= _countof(g_ColumnDefs) - 1;
         break;
     }
-    return m_pisfInner->CompareIDs(MAKELONG(wColumn, HIWORD(lParam)), _ILGetFSPidl(pidl1), _ILGetFSPidl(pidl2));
+    hr = m_pisfInner->CompareIDs(MAKELONG(wColumn, HIWORD(lParam)), _ILGetFSPidl(pidl1), _ILGetFSPidl(pidl2));
+    if (FAILED(hr))
+        hr = CompareForeignItems(MAKELONG(wColumn, HIWORD(lParam)), pidl1, pidl2, hr);
+    return hr;
+}
+
+BOOL CFindFolder::IsFSItem(PCUIDLIST_RELATIVE pidl)
+{
+    PCUITEMID_CHILD pidlFS = _ILGetFSPidl(pidl);
+    return SUCCEEDED(m_pisfInner->CompareIDs(0, pidlFS, pidlFS));
+}
+
+/* Items from a shell extension folder (e.g. Fonts) are not file system items:
+ * they sort after the file system items, by folder, then by their own folder's
+ * comparison of the matching column. lParam holds the file system column. */
+HRESULT CFindFolder::CompareForeignItems(LPARAM lParam, PCUIDLIST_RELATIVE pidl1, PCUIDLIST_RELATIVE pidl2,
+                                         HRESULT hrFS)
+{
+    BOOL bFS1 = IsFSItem(pidl1), bFS2 = IsFSItem(pidl2);
+    if (bFS1 && bFS2)
+        return hrFS;
+    if (bFS1 != bFS2)
+        return MAKE_COMPARE_HRESULT(bFS1 ? -1 : 1);
+
+    int iResult = StrCmpIW(_ILGetPath(pidl1), _ILGetPath(pidl2));
+    if (iResult)
+        return MAKE_COMPARE_HRESULT(iResult);
+
+    // Sorting compares the same few folders many times; keep the last one
+    PCUITEMID_CHILD pChild1 = _ILGetFSPidl(pidl1), pChild2 = _ILGetFSPidl(pidl2);
+    CComPtr<IShellFolder2> pFolder;
+    if (m_pCompareFolder && m_CompareFolderPath.CompareNoCase(_ILGetPath(pidl1)) == 0)
+    {
+        pFolder = m_pCompareFolder;
+    }
+    else
+    {
+        if (FAILED(GetFSFolder2AndChild(pidl1, &pFolder)))
+            return hrFS;
+        m_pCompareFolder = pFolder;
+        m_CompareFolderPath = _ILGetPath(pidl1);
+    }
+
+    // Items the folder can no longer compare by column (e.g. a font removed
+    // since the search) sort after the others, so that the order stays consistent
+    BOOL bLive1 = SUCCEEDED(pFolder->CompareIDs(0, pChild1, pChild1));
+    BOOL bLive2 = SUCCEEDED(pFolder->CompareIDs(0, pChild2, pChild2));
+    if (bLive1 != bLive2)
+        return MAKE_COMPARE_HRESULT(bLive1 ? -1 : 1);
+
+    HRESULT hr = E_FAIL;
+    if (bLive1)
+    {
+        UINT ItemColumn;
+        if (!MapColumnToFolder(LOWORD(lParam), pFolder, &ItemColumn))
+            ItemColumn = 0;
+        hr = pFolder->CompareIDs(MAKELONG(ItemColumn, HIWORD(lParam)), pChild1, pChild2);
+        if (FAILED(hr) && ItemColumn != 0)
+            hr = pFolder->CompareIDs(MAKELONG(0, HIWORD(lParam)), pChild1, pChild2);
+    }
+    if (FAILED(hr))
+        hr = pFolder->CompareIDs(SHCIDS_ALLFIELDS, pChild1, pChild2);
+    if (FAILED(hr))
+    {
+        WCHAR szName1[MAX_PATH], szName2[MAX_PATH];
+        if (FAILED(DisplayNameOfW(pFolder, pChild1, SHGDN_FORPARSING | SHGDN_INFOLDER, szName1, _countof(szName1))))
+            szName1[0] = UNICODE_NULL;
+        if (FAILED(DisplayNameOfW(pFolder, pChild2, SHGDN_FORPARSING | SHGDN_INFOLDER, szName2, _countof(szName2))))
+            szName2[0] = UNICODE_NULL;
+        if (!szName1[0] || !szName2[0])
+            return hrFS;
+        hr = MAKE_COMPARE_HRESULT(StrCmpIW(szName1, szName2));
+    }
+    return hr;
 }
 
 STDMETHODIMP CFindFolder::CreateViewObject(HWND hwndOwner, REFIID riid, LPVOID *ppvOut)
