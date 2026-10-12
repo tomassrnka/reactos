@@ -62,7 +62,7 @@ typedef struct {
 static LIST_ENTRY fve_data_list = { &fve_data_list, &fve_data_list };
 KSPIN_LOCK fve_data_lock;
 
-static bool fs_ignored(BTRFS_UUID* uuid) {
+static bool fs_ignored(uint8_t* uuid) {
     UNICODE_STRING path, ignoreus;
     NTSTATUS Status;
     OBJECT_ATTRIBUTES oa;
@@ -87,8 +87,8 @@ static bool fs_ignored(BTRFS_UUID* uuid) {
     i++;
 
     for (j = 0; j < 16; j++) {
-        path.Buffer[i] = hex_digit((uuid->uuid[j] & 0xF0) >> 4);
-        path.Buffer[i+1] = hex_digit(uuid->uuid[j] & 0xF);
+        path.Buffer[i] = hex_digit((uuid[j] & 0xF0) >> 4);
+        path.Buffer[i+1] = hex_digit(uuid[j] & 0xF);
 
         i += 2;
 
@@ -347,7 +347,7 @@ static bool test_vol(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
         }
     }
 
-    toread = (ULONG)sector_align(sizeof(superblock), sector_size);
+    toread = (ULONG)sector_align(sizeof(struct btrfs_super_block), sector_size);
     data = ExAllocatePoolWithTag(NonPagedPool, toread, ALLOC_TAG);
     if (!data) {
         ERR("out of memory\n");
@@ -356,8 +356,8 @@ static bool test_vol(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
 
     Status = sync_read_phys(DeviceObject, FileObject, superblock_addrs[0], toread, data, true);
 
-    if (NT_SUCCESS(Status) && ((superblock*)data)->magic == BTRFS_MAGIC) {
-        superblock* sb = (superblock*)data;
+    if (NT_SUCCESS(Status) && ((struct btrfs_super_block*)data)->magic == BTRFS_MAGIC) {
+        struct btrfs_super_block* sb = (struct btrfs_super_block*)data;
 
         if (check_superblock_checksum(sb)) {
             TRACE("volume found\n");
@@ -365,7 +365,7 @@ static bool test_vol(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
             if (length >= superblock_addrs[1] + toread) {
                 ULONG i = 1;
 
-                superblock* sb2 = ExAllocatePoolWithTag(NonPagedPool, toread, ALLOC_TAG);
+                struct btrfs_super_block* sb2 = ExAllocatePoolWithTag(NonPagedPool, toread, ALLOC_TAG);
                 if (!sb2) {
                     ERR("out of memory\n");
                     goto deref;
@@ -385,7 +385,7 @@ static bool test_vol(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
                 ExFreePool(sb2);
             }
 
-            if (!fs_ignored(&sb->uuid)) {
+            if (!fs_ignored(sb->fsid)) {
                 DeviceObject->Flags &= ~DO_VERIFY_VOLUME;
                 add_volume_device(sb, devpath, length, disk_num, part_num);
             }
@@ -690,6 +690,25 @@ void remove_volume_child(_Inout_ _Requires_exclusive_lock_held_(_Curr_->child_lo
         ExReleaseResourceLite(&pdode->child_lock);
 }
 
+bool should_ignore_volume_arrival(_In_ PDEVICE_OBJECT devobj) {
+    NTSTATUS Status;
+    STORAGE_HOTPLUG_INFO shi;
+    IO_STATUS_BLOCK iosb;
+
+    Status = dev_ioctl(devobj, IOCTL_STORAGE_GET_HOTPLUG_INFO, NULL, 0, &shi,
+                       sizeof(STORAGE_HOTPLUG_INFO), true, &iosb);
+    if (!NT_SUCCESS(Status)) {
+        ERR("dev_ioctl returned %08lx\n", Status);
+        return false;
+    } else if (iosb.Information < sizeof(STORAGE_HOTPLUG_INFO)) {
+        ERR("IOCTL_STORAGE_GET_HOTPLUG_INFO returned %Iu bytes, expected %Iu\n",
+            iosb.Information, sizeof(STORAGE_HOTPLUG_INFO));
+        return false;
+    }
+
+    return shi.MediaRemovable || shi.DeviceHotplug;
+}
+
 bool volume_arrival(PUNICODE_STRING devpath, bool fve_callback) {
     STORAGE_DEVICE_NUMBER sdn;
     PFILE_OBJECT fileobj;
@@ -721,6 +740,11 @@ bool volume_arrival(PUNICODE_STRING devpath, bool fve_callback) {
     Status = dev_ioctl(devobj, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &gli, sizeof(gli), true, NULL);
     if (!NT_SUCCESS(Status)) {
         ERR("IOCTL_DISK_GET_LENGTH_INFO returned %08lx\n", Status);
+        goto end;
+    }
+
+    if (should_ignore_volume_arrival(devobj)) {
+        TRACE("ignoring removable device\n");
         goto end;
     }
 

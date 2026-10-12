@@ -82,7 +82,7 @@ HRESULT __stdcall BtrfsContextMenu::QueryInterface(REFIID riid, void **ppObj) {
     return E_NOINTERFACE;
 }
 
-HRESULT __stdcall BtrfsContextMenu::Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDataObject* pdtobj, HKEY hkeyProgID) {
+HRESULT __stdcall BtrfsContextMenu::Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDataObject* pdtobj, HKEY) {
     IO_STATUS_BLOCK iosb;
     btrfs_get_file_ids bgfi;
     NTSTATUS Status;
@@ -103,7 +103,9 @@ HRESULT __stdcall BtrfsContextMenu::Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDa
 
         stgm_set = true;
 
-        hdrop = (HDROP)GlobalLock(stgm.hGlobal);
+        global_lock gl(stgm.hGlobal);
+
+        hdrop = (HDROP)gl.ptr;
 
         if (!hdrop) {
             ReleaseStgMedium(&stgm);
@@ -111,10 +113,10 @@ HRESULT __stdcall BtrfsContextMenu::Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDa
             return E_INVALIDARG;
         }
 
-        num_files = DragQueryFileW((HDROP)stgm.hGlobal, 0xFFFFFFFF, nullptr, 0);
+        num_files = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
 
         for (i = 0; i < num_files; i++) {
-            if (DragQueryFileW((HDROP)stgm.hGlobal, i, fn, sizeof(fn) / sizeof(WCHAR))) {
+            if (DragQueryFileW(hdrop, i, fn, sizeof(fn) / sizeof(WCHAR))) {
                 win_handle h = CreateFileW(fn, FILE_TRAVERSE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
 
                 if (h != INVALID_HANDLE_VALUE) {
@@ -139,14 +141,11 @@ HRESULT __stdcall BtrfsContextMenu::Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDa
                         ignore = false;
                         bg = false;
 
-                        GlobalUnlock(hdrop);
                         return S_OK;
                     }
                 }
             }
         }
-
-        GlobalUnlock(hdrop);
 
         return S_OK;
     }
@@ -224,7 +223,9 @@ static bool show_reflink_paste(const wstring& path) {
         return false;
     }
 
-    lh = GlobalLock(hdrop);
+    global_lock gl(hdrop);
+
+    lh = gl.ptr;
 
     if (!lh) {
         CloseClipboard();
@@ -234,24 +235,19 @@ static bool show_reflink_paste(const wstring& path) {
     num_files = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
 
     if (num_files == 0) {
-        GlobalUnlock(lh);
         CloseClipboard();
         return false;
     }
 
     if (!DragQueryFileW(hdrop, 0, fn, sizeof(fn) / sizeof(WCHAR))) {
-        GlobalUnlock(lh);
         CloseClipboard();
         return false;
     }
 
     if (!get_volume_path_parent(fn, volpath2, sizeof(volpath2) / sizeof(WCHAR))) {
-        GlobalUnlock(lh);
         CloseClipboard();
         return false;
     }
-
-    GlobalUnlock(lh);
 
     CloseClipboard();
 
@@ -448,7 +444,7 @@ static void path_strip_path(wstring& path) {
     path = path.substr(bs + 1);
 }
 
-static void create_snapshot(HWND hwnd, const wstring& fn) {
+static void create_snapshot(HWND, const wstring& fn) {
     win_handle h;
     NTSTATUS Status;
     IO_STATUS_BLOCK iosb;
@@ -579,7 +575,7 @@ void BtrfsContextMenu::reflink_copy(HWND hwnd, const WCHAR* fn, const WCHAR* dir
         throw ntstatus_error(Status);
 
     // if subvol, do snapshot instead
-    if (bii.inode == SUBVOL_ROOT_INODE) {
+    if (bii.inode == BTRFS_FIRST_FREE_OBJECTID) {
         btrfs_create_snapshot* bcs;
         win_handle dirh;
         wstring destname, search;
@@ -633,7 +629,7 @@ void BtrfsContextMenu::reflink_copy(HWND hwnd, const WCHAR* fn, const WCHAR* dir
     if (!NT_SUCCESS(Status))
         throw ntstatus_error(Status);
 
-    if (bii.type == BTRFS_TYPE_CHARDEV || bii.type == BTRFS_TYPE_BLOCKDEV || bii.type == BTRFS_TYPE_FIFO || bii.type == BTRFS_TYPE_SOCKET) {
+    if (bii.type == BTRFS_FT_CHRDEV || bii.type == BTRFS_FT_BLKDEV || bii.type == BTRFS_FT_FIFO || bii.type == BTRFS_FT_SOCK) {
         win_handle dirh;
         btrfs_mknod* bmn;
 
@@ -646,7 +642,7 @@ void BtrfsContextMenu::reflink_copy(HWND hwnd, const WCHAR* fn, const WCHAR* dir
 
         bmn->inode = 0;
         bmn->type = bii.type;
-        bmn->st_rdev = bii.st_rdev;
+        bmn->rdev = bii.rdev;
         bmn->namelen = (uint16_t)(wcslen(name) * sizeof(WCHAR));
         memcpy(bmn->name, name, bmn->namelen);
 
@@ -1125,28 +1121,19 @@ HRESULT __stdcall BtrfsContextMenu::InvokeCommand(LPCMINVOKECOMMANDINFO picia) {
                     hdrop = (HDROP)GetClipboardData(CF_HDROP);
 
                     if (hdrop) {
-                        HANDLE lh;
+                        global_lock gl(hdrop);
 
-                        lh = GlobalLock(hdrop);
+                        if (gl.ptr) {
+                            ULONG num_files, i;
+                            WCHAR fn[MAX_PATH];
 
-                        if (lh) {
-                            try {
-                                ULONG num_files, i;
-                                WCHAR fn[MAX_PATH];
+                            num_files = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
 
-                                num_files = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
-
-                                for (i = 0; i < num_files; i++) {
-                                    if (DragQueryFileW(hdrop, i, fn, sizeof(fn) / sizeof(WCHAR))) {
-                                        reflink_copy(pici->hwnd, fn, pici->lpDirectoryW);
-                                    }
+                            for (i = 0; i < num_files; i++) {
+                                if (DragQueryFileW(hdrop, i, fn, sizeof(fn) / sizeof(WCHAR))) {
+                                    reflink_copy(pici->hwnd, fn, pici->lpDirectoryW);
                                 }
-                            } catch (...) {
-                                GlobalUnlock(lh);
-                                throw;
                             }
-
-                            GlobalUnlock(lh);
                         }
                     }
                 } catch (...) {
@@ -1166,7 +1153,7 @@ HRESULT __stdcall BtrfsContextMenu::InvokeCommand(LPCMINVOKECOMMANDINFO picia) {
     return E_FAIL;
 }
 
-HRESULT __stdcall BtrfsContextMenu::GetCommandString(UINT_PTR idCmd, UINT uFlags, UINT* pwReserved, LPSTR pszName, UINT cchMax) {
+HRESULT __stdcall BtrfsContextMenu::GetCommandString(UINT_PTR idCmd, UINT uFlags, UINT*, LPSTR pszName, UINT cchMax) {
     if (ignore)
         return E_INVALIDARG;
 
@@ -1337,7 +1324,7 @@ static void reflink_copy2(const wstring& srcfn, const wstring& destdir, const ws
         throw ntstatus_error(Status);
 
     // if subvol, do snapshot instead
-    if (bii.inode == SUBVOL_ROOT_INODE) {
+    if (bii.inode == BTRFS_FIRST_FREE_OBJECTID) {
         btrfs_create_snapshot* bcs;
         win_handle dirh;
 
@@ -1366,7 +1353,7 @@ static void reflink_copy2(const wstring& srcfn, const wstring& destdir, const ws
     if (!NT_SUCCESS(Status))
         throw ntstatus_error(Status);
 
-    if (bii.type == BTRFS_TYPE_CHARDEV || bii.type == BTRFS_TYPE_BLOCKDEV || bii.type == BTRFS_TYPE_FIFO || bii.type == BTRFS_TYPE_SOCKET) {
+    if (bii.type == BTRFS_FT_CHRDEV || bii.type == BTRFS_FT_BLKDEV || bii.type == BTRFS_FT_FIFO || bii.type == BTRFS_FT_SOCK) {
         win_handle dirh;
         btrfs_mknod* bmn;
 
@@ -1379,7 +1366,7 @@ static void reflink_copy2(const wstring& srcfn, const wstring& destdir, const ws
 
         bmn->inode = 0;
         bmn->type = bii.type;
-        bmn->st_rdev = bii.st_rdev;
+        bmn->rdev = bii.rdev;
         bmn->namelen = (uint16_t)(destname.length() * sizeof(WCHAR));
         memcpy(bmn->name, destname.c_str(), bmn->namelen);
 
@@ -1643,7 +1630,7 @@ static void reflink_copy2(const wstring& srcfn, const wstring& destdir, const ws
     }
 }
 
-extern "C" void CALLBACK ReflinkCopyW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK ReflinkCopyW(HWND, HINSTANCE, LPWSTR lpszCmdLine, int) {
     vector<wstring> args;
 
     command_line_to_args(lpszCmdLine, args);
@@ -1677,7 +1664,7 @@ extern "C" void CALLBACK ReflinkCopyW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmd
                 destdir = L"";
                 destname = dest;
             } else {
-                destdir = dest.substr(0, found);
+                destdir = dest.substr(0, found + 1);
                 destname = dest.substr(found + 1);
             }
         }

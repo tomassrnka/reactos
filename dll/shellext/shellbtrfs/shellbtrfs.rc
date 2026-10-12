@@ -7,7 +7,11 @@
 //
 // Generated from the TEXTINCLUDE 2 resource.
 //
-#include "winres.h"
+#include <winresrc.h>
+
+#ifndef IDC_STATIC
+#define IDC_STATIC (-1)
+#endif
 
 /////////////////////////////////////////////////////////////////////////////
 #undef APSTUDIO_READONLY_SYMBOLS
@@ -52,7 +56,7 @@ END
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
-IDI_ICON1               ICON                    "subvol.ico"
+IDI_ICON1               ICON                    "/home/amin/sources/winbtrfs/src/shellext/subvol.ico"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -61,8 +65,8 @@ IDI_ICON1               ICON                    "subvol.ico"
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,8,1,0
- PRODUCTVERSION 1,8,1,0
+ FILEVERSION 1,10,0,0
+ PRODUCTVERSION 1,10,0,0
  FILEFLAGSMASK 0x17L
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -78,12 +82,12 @@ BEGIN
         BLOCK "080904b0"
         BEGIN
             VALUE "FileDescription", "WinBtrfs shell extension"
-            VALUE "FileVersion", "1.8.1"
+            VALUE "FileVersion", "1.10.0"
             VALUE "InternalName", "btrfs"
-            VALUE "LegalCopyright", "Copyright (c) Mark Harmstone 2016-22"
+            VALUE "LegalCopyright", "Copyright (c) Mark Harmstone 2016-26"
             VALUE "OriginalFilename", "shellbtrfs.dll"
             VALUE "ProductName", "WinBtrfs"
-            VALUE "ProductVersion", "1.8.1"
+            VALUE "ProductVersion", "1.10.0"
         END
     END
     BLOCK "VarFileInfo"
@@ -380,6 +384,15 @@ BEGIN
     LTEXT           "Drive letter:",IDC_STATIC,15,19,45,8
 END
 
+IDD_MAPPINGS DIALOGEX 0, 0, 200, 163
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Mappings"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    DEFPUSHBUTTON   "OK",IDOK,75,145,50,14
+    CONTROL         "",IDC_MAPPINGS_TAB,"SysTabControl32",0x0,0,0,200,142
+    CONTROL         "",IDC_MAPPINGS_LIST,"SysListView32",LVS_REPORT | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP,3,15,193,123
+END
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -509,7 +522,7 @@ END
 // RT_MANIFEST
 //
 
-2                       RT_MANIFEST             "shellbtrfs.manifest"
+2                       RT_MANIFEST             "/home/amin/sources/winbtrfs/src/shellext/shellbtrfs.manifest"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -680,7 +693,7 @@ BEGIN
     IDS_SCRUB_MSG_UNRECOVERABLE_METADATA_FIRSTITEM
                             "Unrecoverable metadata checksum error at %llx on device %llx (root %llx, level %x, first item %llx,%x,%llx)"
     IDS_SCRUB_MSG_FINISHED  "Scrub finished at %s %s."
-    IDS_SCRUB_MSG_SUMMARY   "Scrubbed %s in %llu seconds (%s/s)."
+    IDS_SCRUB_MSG_SUMMARY   "Scrubbed %s in %s (%s/s)."
     IDS_BALANCE_SCRUB_RUNNING "Cannot start balance while scrub running."
     IDS_SCRUB_BALANCE_RUNNING "Cannot start scrub while balance running."
     IDS_SCRUB_MSG_SUMMARY_ERRORS_RECOVERABLE "Recovered from %llu error(s)."
@@ -818,6 +831,11 @@ BEGIN
     IDS_CANT_OPEN_MOUNTMGR  "Could not get a handle to mount manager."
     IDS_TVM_INSERTITEM_FAILED "TVM_INSERTITEM failed."
     IDS_RECV_PATH_TOO_LONG  "%S: path was too long."
+    IDS_MAPPINGS_UID_MAPPINGS  "UID mappings"
+    IDS_MAPPINGS_GID_MAPPINGS  "GID mappings"
+    IDS_MAPPINGS_PRINCIPAL  "Principal"
+    IDS_MAPPINGS_UID  "UID"
+    IDS_MAPPINGS_GID  "GID"
 END
 
 #endif    // English (United Kingdom) resources
@@ -834,4 +852,3 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
-

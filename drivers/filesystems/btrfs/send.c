@@ -22,9 +22,9 @@ typedef struct send_dir {
     LIST_ENTRY list_entry;
     uint64_t inode;
     bool dummy;
-    BTRFS_TIME atime;
-    BTRFS_TIME mtime;
-    BTRFS_TIME ctime;
+    struct btrfs_timespec atime;
+    struct btrfs_timespec mtime;
+    struct btrfs_timespec ctime;
     struct send_dir* parent;
     uint16_t namelen;
     char* name;
@@ -62,7 +62,7 @@ typedef struct {
     uint64_t offset;
     LIST_ENTRY list_entry;
     ULONG datalen;
-    EXTENT_DATA data;
+    struct btrfs_file_extent_item data;
 } send_ext;
 
 typedef struct {
@@ -93,9 +93,9 @@ typedef struct {
         uint64_t oldmode;
         uint64_t size;
         uint64_t flags;
-        BTRFS_TIME atime;
-        BTRFS_TIME mtime;
-        BTRFS_TIME ctime;
+        struct btrfs_timespec atime;
+        struct btrfs_timespec mtime;
+        struct btrfs_timespec ctime;
         bool file;
         char* path;
         orphan* o;
@@ -114,31 +114,31 @@ static NTSTATUS find_send_dir(send_context* context, uint64_t dir, uint64_t gene
 static NTSTATUS wait_for_flush(send_context* context, traverse_ptr* tp1, traverse_ptr* tp2);
 
 static void send_command(send_context* context, uint16_t cmd) {
-    btrfs_send_command* bsc = (btrfs_send_command*)&context->data[context->datalen];
+    struct btrfs_cmd_header* bsc = (struct btrfs_cmd_header*)&context->data[context->datalen];
 
     bsc->cmd = cmd;
-    bsc->csum = 0;
+    bsc->crc = 0;
 
-    context->datalen += sizeof(btrfs_send_command);
+    context->datalen += sizeof(struct btrfs_cmd_header);
 }
 
 static void send_command_finish(send_context* context, ULONG pos) {
-    btrfs_send_command* bsc = (btrfs_send_command*)&context->data[pos];
+    struct btrfs_cmd_header* bsc = (struct btrfs_cmd_header*)&context->data[pos];
 
-    bsc->length = context->datalen - pos - sizeof(btrfs_send_command);
-    bsc->csum = calc_crc32c(0, (uint8_t*)bsc, context->datalen - pos);
+    bsc->len = context->datalen - pos - sizeof(struct btrfs_cmd_header);
+    bsc->crc = calc_crc32c(0, (uint8_t*)bsc, context->datalen - pos);
 }
 
 static void send_add_tlv(send_context* context, uint16_t type, void* data, uint16_t length) {
-    btrfs_send_tlv* tlv = (btrfs_send_tlv*)&context->data[context->datalen];
+    struct btrfs_tlv_header* tlv = (struct btrfs_tlv_header*)&context->data[context->datalen];
 
-    tlv->type = type;
-    tlv->length = length;
+    tlv->tlv_type = type;
+    tlv->tlv_len = length;
 
     if (length > 0 && data)
         RtlCopyMemory(&tlv[1], data, length);
 
-    context->datalen += sizeof(btrfs_send_tlv) + length;
+    context->datalen += sizeof(struct btrfs_tlv_header) + length;
 }
 
 static char* uint64_to_char(uint64_t num, char* buf) {
@@ -164,7 +164,7 @@ static char* uint64_to_char(uint64_t num, char* buf) {
 static NTSTATUS get_orphan_name(send_context* context, uint64_t inode, uint64_t generation, char* name) {
     char *ptr, *ptr2;
     uint64_t index = 0;
-    KEY searchkey;
+    struct btrfs_key searchkey;
 
     name[0] = 'o';
 
@@ -174,8 +174,8 @@ static NTSTATUS get_orphan_name(send_context* context, uint64_t inode, uint64_t 
     *ptr = '-'; ptr++;
     ptr2 = ptr;
 
-    searchkey.obj_id = SUBVOL_ROOT_INODE;
-    searchkey.obj_type = TYPE_DIR_ITEM;
+    searchkey.objectid = BTRFS_FIRST_FREE_OBJECTID;
+    searchkey.type = BTRFS_DIR_ITEM_KEY;
 
     do {
         NTSTATUS Status;
@@ -234,12 +234,12 @@ static void add_orphan(send_context* context, orphan* o) {
 
 static NTSTATUS send_read_symlink(send_context* context, uint64_t inode, char** link, uint16_t* linklen) {
     NTSTATUS Status;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
-    EXTENT_DATA* ed;
+    struct btrfs_file_extent_item* ed;
 
-    searchkey.obj_id = inode;
-    searchkey.obj_type = TYPE_EXTENT_DATA;
+    searchkey.objectid = inode;
+    searchkey.type = BTRFS_EXTENT_DATA_KEY;
     searchkey.offset = 0;
 
     Status = find_item(context->Vcb, context->root, &tp, &searchkey, false, NULL);
@@ -249,54 +249,54 @@ static NTSTATUS send_read_symlink(send_context* context, uint64_t inode, char** 
     }
 
     if (keycmp(tp.item->key, searchkey)) {
-        ERR("could not find (%I64x,%x,%I64x)\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset);
+        ERR("could not find (%I64x,%x,%I64x)\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
         return STATUS_INTERNAL_ERROR;
     }
 
-    if (tp.item->size < sizeof(EXTENT_DATA)) {
-        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset,
-            tp.item->size, sizeof(EXTENT_DATA));
+    if (tp.item->size < offsetof(struct btrfs_file_extent_item, disk_bytenr)) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset,
+            tp.item->size, offsetof(struct btrfs_file_extent_item, disk_bytenr));
         return STATUS_INTERNAL_ERROR;
     }
 
-    ed = (EXTENT_DATA*)tp.item->data;
+    ed = (struct btrfs_file_extent_item*)tp.item->data;
 
-    if (ed->type != EXTENT_TYPE_INLINE) {
+    if (ed->type != BTRFS_FILE_EXTENT_INLINE) {
         WARN("symlink data was not inline, returning blank string\n");
         *link = NULL;
         *linklen = 0;
         return STATUS_SUCCESS;
     }
 
-    if (tp.item->size < offsetof(EXTENT_DATA, data[0]) + ed->decoded_size) {
-        ERR("(%I64x,%x,%I64x) was %u bytes, expected %I64u\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset,
-            tp.item->size, offsetof(EXTENT_DATA, data[0]) + ed->decoded_size);
+    if (tp.item->size < offsetof(struct btrfs_file_extent_item, disk_bytenr) + ed->ram_bytes) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected %I64u\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset,
+            tp.item->size, offsetof(struct btrfs_file_extent_item, disk_bytenr) + ed->ram_bytes);
         return STATUS_INTERNAL_ERROR;
     }
 
-    *link = (char*)ed->data;
-    *linklen = (uint16_t)ed->decoded_size;
+    *link = (char*)&ed->disk_bytenr;
+    *linklen = (uint16_t)ed->ram_bytes;
 
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS send_inode(send_context* context, traverse_ptr* tp, traverse_ptr* tp2) {
     NTSTATUS Status;
-    INODE_ITEM* ii;
+    struct btrfs_inode_item* ii;
 
     if (tp2 && !tp) {
-        INODE_ITEM* ii2 = (INODE_ITEM*)tp2->item->data;
+        struct btrfs_inode_item* ii2 = (struct btrfs_inode_item*)tp2->item->data;
 
-        if (tp2->item->size < sizeof(INODE_ITEM)) {
-            ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp2->item->key.obj_id, tp2->item->key.obj_type, tp2->item->key.offset,
-                tp2->item->size, sizeof(INODE_ITEM));
+        if (tp2->item->size < sizeof(struct btrfs_inode_item)) {
+            ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp2->item->key.objectid, tp2->item->key.type, tp2->item->key.offset,
+                tp2->item->size, sizeof(struct btrfs_inode_item));
             return STATUS_INTERNAL_ERROR;
         }
 
-        context->lastinode.inode = tp2->item->key.obj_id;
+        context->lastinode.inode = tp2->item->key.objectid;
         context->lastinode.deleting = true;
         context->lastinode.gen = ii2->generation;
-        context->lastinode.mode = ii2->st_mode;
+        context->lastinode.mode = ii2->mode;
         context->lastinode.flags = ii2->flags;
         context->lastinode.o = NULL;
         context->lastinode.sd = NULL;
@@ -304,24 +304,24 @@ static NTSTATUS send_inode(send_context* context, traverse_ptr* tp, traverse_ptr
         return STATUS_SUCCESS;
     }
 
-    ii = (INODE_ITEM*)tp->item->data;
+    ii = (struct btrfs_inode_item*)tp->item->data;
 
-    if (tp->item->size < sizeof(INODE_ITEM)) {
-        ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset,
-            tp->item->size, sizeof(INODE_ITEM));
+    if (tp->item->size < sizeof(struct btrfs_inode_item)) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset,
+            tp->item->size, sizeof(struct btrfs_inode_item));
         return STATUS_INTERNAL_ERROR;
     }
 
-    context->lastinode.inode = tp->item->key.obj_id;
+    context->lastinode.inode = tp->item->key.objectid;
     context->lastinode.deleting = false;
     context->lastinode.gen = ii->generation;
-    context->lastinode.uid = ii->st_uid;
-    context->lastinode.gid = ii->st_gid;
-    context->lastinode.mode = ii->st_mode;
-    context->lastinode.size = ii->st_size;
-    context->lastinode.atime = ii->st_atime;
-    context->lastinode.mtime = ii->st_mtime;
-    context->lastinode.ctime = ii->st_ctime;
+    context->lastinode.uid = ii->uid;
+    context->lastinode.gid = ii->gid;
+    context->lastinode.mode = ii->mode;
+    context->lastinode.size = ii->size;
+    context->lastinode.atime = ii->atime;
+    context->lastinode.mtime = ii->mtime;
+    context->lastinode.ctime = ii->ctime;
     context->lastinode.flags = ii->flags;
     context->lastinode.file = false;
     context->lastinode.o = NULL;
@@ -333,20 +333,20 @@ static NTSTATUS send_inode(send_context* context, traverse_ptr* tp, traverse_ptr
     }
 
     if (tp2) {
-        INODE_ITEM* ii2 = (INODE_ITEM*)tp2->item->data;
+        struct btrfs_inode_item* ii2 = (struct btrfs_inode_item*)tp2->item->data;
         LIST_ENTRY* le;
 
-        if (tp2->item->size < sizeof(INODE_ITEM)) {
-            ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp2->item->key.obj_id, tp2->item->key.obj_type, tp2->item->key.offset,
-                tp2->item->size, sizeof(INODE_ITEM));
+        if (tp2->item->size < sizeof(struct btrfs_inode_item)) {
+            ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp2->item->key.objectid, tp2->item->key.type, tp2->item->key.offset,
+                tp2->item->size, sizeof(struct btrfs_inode_item));
             return STATUS_INTERNAL_ERROR;
         }
 
-        context->lastinode.oldmode = ii2->st_mode;
-        context->lastinode.olduid = ii2->st_uid;
-        context->lastinode.oldgid = ii2->st_gid;
+        context->lastinode.oldmode = ii2->mode;
+        context->lastinode.olduid = ii2->uid;
+        context->lastinode.oldgid = ii2->gid;
 
-        if ((ii2->st_mode & __S_IFREG) == __S_IFREG && (ii2->st_mode & __S_IFLNK) != __S_IFLNK && (ii2->st_mode & __S_IFSOCK) != __S_IFSOCK)
+        if ((ii2->mode & __S_IFREG) == __S_IFREG && (ii2->mode & __S_IFLNK) != __S_IFLNK && (ii2->mode & __S_IFSOCK) != __S_IFSOCK)
             context->lastinode.file = true;
 
         context->lastinode.new = false;
@@ -355,10 +355,10 @@ static NTSTATUS send_inode(send_context* context, traverse_ptr* tp, traverse_ptr
         while (le != &context->orphans) {
             orphan* o2 = CONTAINING_RECORD(le, orphan, list_entry);
 
-            if (o2->inode == tp->item->key.obj_id) {
+            if (o2->inode == tp->item->key.objectid) {
                 context->lastinode.o = o2;
                 break;
-            } else if (o2->inode > tp->item->key.obj_id)
+            } else if (o2->inode > tp->item->key.objectid)
                 break;
 
             le = le->Flink;
@@ -366,18 +366,18 @@ static NTSTATUS send_inode(send_context* context, traverse_ptr* tp, traverse_ptr
     } else
         context->lastinode.new = true;
 
-    if (tp->item->key.obj_id == SUBVOL_ROOT_INODE) {
+    if (tp->item->key.objectid == BTRFS_FIRST_FREE_OBJECTID) {
         send_dir* sd;
 
-        Status = find_send_dir(context, tp->item->key.obj_id, ii->generation, &sd, NULL);
+        Status = find_send_dir(context, tp->item->key.objectid, ii->generation, &sd, NULL);
         if (!NT_SUCCESS(Status)) {
             ERR("find_send_dir returned %08lx\n", Status);
             return Status;
         }
 
-        sd->atime = ii->st_atime;
-        sd->mtime = ii->st_mtime;
-        sd->ctime = ii->st_ctime;
+        sd->atime = ii->atime;
+        sd->mtime = ii->mtime;
+        sd->ctime = ii->ctime;
         context->root_dir = sd;
     } else if (!tp2) {
         ULONG pos = context->datalen;
@@ -388,75 +388,75 @@ static NTSTATUS send_inode(send_context* context, traverse_ptr* tp, traverse_ptr
         orphan* o;
 
         // skip creating orphan directory if we've already done so
-        if (ii->st_mode & __S_IFDIR) {
+        if (ii->mode & __S_IFDIR) {
             LIST_ENTRY* le;
 
             le = context->orphans.Flink;
             while (le != &context->orphans) {
                 orphan* o2 = CONTAINING_RECORD(le, orphan, list_entry);
 
-                if (o2->inode == tp->item->key.obj_id) {
+                if (o2->inode == tp->item->key.objectid) {
                     context->lastinode.o = o2;
-                    o2->sd->atime = ii->st_atime;
-                    o2->sd->mtime = ii->st_mtime;
-                    o2->sd->ctime = ii->st_ctime;
+                    o2->sd->atime = ii->atime;
+                    o2->sd->mtime = ii->mtime;
+                    o2->sd->ctime = ii->ctime;
                     o2->sd->dummy = false;
                     return STATUS_SUCCESS;
-                } else if (o2->inode > tp->item->key.obj_id)
+                } else if (o2->inode > tp->item->key.objectid)
                     break;
 
                 le = le->Flink;
             }
         }
 
-        if ((ii->st_mode & __S_IFSOCK) == __S_IFSOCK)
-            cmd = BTRFS_SEND_CMD_MKSOCK;
-        else if ((ii->st_mode & __S_IFLNK) == __S_IFLNK)
-            cmd = BTRFS_SEND_CMD_SYMLINK;
-        else if ((ii->st_mode & __S_IFCHR) == __S_IFCHR || (ii->st_mode & __S_IFBLK) == __S_IFBLK)
-            cmd = BTRFS_SEND_CMD_MKNOD;
-        else if ((ii->st_mode & __S_IFDIR) == __S_IFDIR)
-            cmd = BTRFS_SEND_CMD_MKDIR;
-        else if ((ii->st_mode & __S_IFIFO) == __S_IFIFO)
-            cmd = BTRFS_SEND_CMD_MKFIFO;
+        if ((ii->mode & __S_IFSOCK) == __S_IFSOCK)
+            cmd = BTRFS_SEND_C_MKSOCK;
+        else if ((ii->mode & __S_IFLNK) == __S_IFLNK)
+            cmd = BTRFS_SEND_C_SYMLINK;
+        else if ((ii->mode & __S_IFCHR) == __S_IFCHR || (ii->mode & __S_IFBLK) == __S_IFBLK)
+            cmd = BTRFS_SEND_C_MKNOD;
+        else if ((ii->mode & __S_IFDIR) == __S_IFDIR)
+            cmd = BTRFS_SEND_C_MKDIR;
+        else if ((ii->mode & __S_IFIFO) == __S_IFIFO)
+            cmd = BTRFS_SEND_C_MKFIFO;
         else {
-            cmd = BTRFS_SEND_CMD_MKFILE;
+            cmd = BTRFS_SEND_C_MKFILE;
             context->lastinode.file = true;
         }
 
         send_command(context, cmd);
 
-        Status = get_orphan_name(context, tp->item->key.obj_id, ii->generation, name);
+        Status = get_orphan_name(context, tp->item->key.objectid, ii->generation, name);
         if (!NT_SUCCESS(Status)) {
             ERR("get_orphan_name returned %08lx\n", Status);
             return Status;
         }
 
-        send_add_tlv(context, BTRFS_SEND_TLV_PATH, name, (uint16_t)strlen(name));
-        send_add_tlv(context, BTRFS_SEND_TLV_INODE, &tp->item->key.obj_id, sizeof(uint64_t));
+        send_add_tlv(context, BTRFS_SEND_A_PATH, name, (uint16_t)strlen(name));
+        send_add_tlv(context, BTRFS_SEND_A_INO, &tp->item->key.objectid, sizeof(uint64_t));
 
-        if (cmd == BTRFS_SEND_CMD_MKNOD || cmd == BTRFS_SEND_CMD_MKFIFO || cmd == BTRFS_SEND_CMD_MKSOCK) {
-            uint64_t rdev = makedev((ii->st_rdev & 0xFFFFFFFFFFF) >> 20, ii->st_rdev & 0xFFFFF), mode = ii->st_mode;
+        if (cmd == BTRFS_SEND_C_MKNOD || cmd == BTRFS_SEND_C_MKFIFO || cmd == BTRFS_SEND_C_MKSOCK) {
+            uint64_t rdev = makedev((ii->rdev & 0xFFFFFFFFFFF) >> 20, ii->rdev & 0xFFFFF), mode = ii->mode;
 
-            send_add_tlv(context, BTRFS_SEND_TLV_RDEV, &rdev, sizeof(uint64_t));
-            send_add_tlv(context, BTRFS_SEND_TLV_MODE, &mode, sizeof(uint64_t));
-        } else if (cmd == BTRFS_SEND_CMD_SYMLINK && ii->st_size > 0) {
+            send_add_tlv(context, BTRFS_SEND_A_RDEV, &rdev, sizeof(uint64_t));
+            send_add_tlv(context, BTRFS_SEND_A_MODE, &mode, sizeof(uint64_t));
+        } else if (cmd == BTRFS_SEND_C_SYMLINK && ii->size > 0) {
             char* link;
             uint16_t linklen;
 
-            Status = send_read_symlink(context, tp->item->key.obj_id, &link, &linklen);
+            Status = send_read_symlink(context, tp->item->key.objectid, &link, &linklen);
             if (!NT_SUCCESS(Status)) {
                 ERR("send_read_symlink returned %08lx\n", Status);
                 return Status;
             }
 
-            send_add_tlv(context, BTRFS_SEND_TLV_PATH_LINK, link, linklen);
+            send_add_tlv(context, BTRFS_SEND_A_PATH_LINK, link, linklen);
         }
 
         send_command_finish(context, pos);
 
-        if (ii->st_mode & __S_IFDIR) {
-            Status = find_send_dir(context, tp->item->key.obj_id, ii->generation, &sd, NULL);
+        if (ii->mode & __S_IFDIR) {
+            Status = find_send_dir(context, tp->item->key.objectid, ii->generation, &sd, NULL);
             if (!NT_SUCCESS(Status)) {
                 ERR("find_send_dir returned %08lx\n", Status);
                 return Status;
@@ -474,8 +474,8 @@ static NTSTATUS send_inode(send_context* context, traverse_ptr* tp, traverse_ptr
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        o->inode = tp->item->key.obj_id;
-        o->dir = (ii->st_mode & __S_IFDIR && ii->st_size > 0) ? true : false;
+        o->inode = tp->item->key.objectid;
+        o->dir = (ii->mode & __S_IFDIR && ii->size > 0) ? true : false;
         strcpy(o->tmpname, name);
         o->sd = sd;
         add_orphan(context, o);
@@ -596,19 +596,19 @@ static NTSTATUS found_path(send_context* context, send_dir* parent, char* name, 
     ULONG pos = context->datalen;
 
     if (context->lastinode.o) {
-        send_command(context, BTRFS_SEND_CMD_RENAME);
+        send_command(context, BTRFS_SEND_C_RENAME);
 
-        send_add_tlv_path(context, BTRFS_SEND_TLV_PATH, context->root_dir, context->lastinode.o->tmpname, (uint16_t)strlen(context->lastinode.o->tmpname));
+        send_add_tlv_path(context, BTRFS_SEND_A_PATH, context->root_dir, context->lastinode.o->tmpname, (uint16_t)strlen(context->lastinode.o->tmpname));
 
-        send_add_tlv_path(context, BTRFS_SEND_TLV_PATH_TO, parent, name, namelen);
+        send_add_tlv_path(context, BTRFS_SEND_A_PATH_TO, parent, name, namelen);
 
         send_command_finish(context, pos);
     } else {
-        send_command(context, BTRFS_SEND_CMD_LINK);
+        send_command(context, BTRFS_SEND_C_LINK);
 
-        send_add_tlv_path(context, BTRFS_SEND_TLV_PATH, parent, name, namelen);
+        send_add_tlv_path(context, BTRFS_SEND_A_PATH, parent, name, namelen);
 
-        send_add_tlv(context, BTRFS_SEND_TLV_PATH_LINK, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+        send_add_tlv(context, BTRFS_SEND_A_PATH_LINK, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
 
         send_command_finish(context, pos);
     }
@@ -653,16 +653,16 @@ static NTSTATUS found_path(send_context* context, send_dir* parent, char* name, 
     return STATUS_SUCCESS;
 }
 
-static void send_utimes_command_dir(send_context* context, send_dir* sd, BTRFS_TIME* atime, BTRFS_TIME* mtime, BTRFS_TIME* ctime) {
+static void send_utimes_command_dir(send_context* context, send_dir* sd, struct btrfs_timespec* atime, struct btrfs_timespec* mtime, struct btrfs_timespec* ctime) {
     ULONG pos = context->datalen;
 
-    send_command(context, BTRFS_SEND_CMD_UTIMES);
+    send_command(context, BTRFS_SEND_C_UTIMES);
 
-    send_add_tlv_path(context, BTRFS_SEND_TLV_PATH, sd->parent, sd->name, sd->namelen);
+    send_add_tlv_path(context, BTRFS_SEND_A_PATH, sd->parent, sd->name, sd->namelen);
 
-    send_add_tlv(context, BTRFS_SEND_TLV_ATIME, atime, sizeof(BTRFS_TIME));
-    send_add_tlv(context, BTRFS_SEND_TLV_MTIME, mtime, sizeof(BTRFS_TIME));
-    send_add_tlv(context, BTRFS_SEND_TLV_CTIME, ctime, sizeof(BTRFS_TIME));
+    send_add_tlv(context, BTRFS_SEND_A_ATIME, atime, sizeof(struct btrfs_timespec));
+    send_add_tlv(context, BTRFS_SEND_A_MTIME, mtime, sizeof(struct btrfs_timespec));
+    send_add_tlv(context, BTRFS_SEND_A_CTIME, ctime, sizeof(struct btrfs_timespec));
 
     send_command_finish(context, pos);
 }
@@ -690,7 +690,7 @@ static NTSTATUS find_send_dir(send_context* context, uint64_t dir, uint64_t gene
         le = le->Flink;
     }
 
-    if (dir == SUBVOL_ROOT_INODE) {
+    if (dir == BTRFS_FIRST_FREE_OBJECTID) {
         Status = send_add_dir(context, dir, NULL, NULL, 0, false, le, psd);
         if (!NT_SUCCESS(Status)) {
             ERR("send_add_dir returned %08lx\n", Status);
@@ -704,11 +704,11 @@ static NTSTATUS find_send_dir(send_context* context, uint64_t dir, uint64_t gene
     }
 
     if (context->parent) {
-        KEY searchkey;
+        struct btrfs_key searchkey;
         traverse_ptr tp;
 
-        searchkey.obj_id = dir;
-        searchkey.obj_type = TYPE_INODE_REF; // directories should never have an extiref
+        searchkey.objectid = dir;
+        searchkey.type = BTRFS_INODE_REF_KEY; // directories should never have an extiref
         searchkey.offset = 0xffffffffffffffff;
 
         Status = find_item(context->Vcb, context->parent, &tp, &searchkey, false, NULL);
@@ -717,16 +717,16 @@ static NTSTATUS find_send_dir(send_context* context, uint64_t dir, uint64_t gene
             return Status;
         }
 
-        if (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type == searchkey.obj_type) {
-            INODE_REF* ir = (INODE_REF*)tp.item->data;
+        if (tp.item->key.objectid == searchkey.objectid && tp.item->key.type == searchkey.type) {
+            struct btrfs_inode_ref* ir = (struct btrfs_inode_ref*)tp.item->data;
             send_dir* parent;
 
-            if (tp.item->size < sizeof(INODE_REF) || tp.item->size < offsetof(INODE_REF, name[0]) + ir->n) {
-                ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset);
+            if (tp.item->size < sizeof(struct btrfs_inode_ref) || tp.item->size < sizeof(struct btrfs_inode_ref) + ir->name_len) {
+                ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
                 return STATUS_INTERNAL_ERROR;
             }
 
-            if (tp.item->key.offset == SUBVOL_ROOT_INODE)
+            if (tp.item->key.offset == BTRFS_FIRST_FREE_OBJECTID)
                 parent = context->root_dir;
             else {
                 Status = find_send_dir(context, tp.item->key.offset, generation, &parent, NULL);
@@ -736,7 +736,7 @@ static NTSTATUS find_send_dir(send_context* context, uint64_t dir, uint64_t gene
                 }
             }
 
-            Status = send_add_dir(context, dir, parent, ir->name, ir->n, true, NULL, psd);
+            Status = send_add_dir(context, dir, parent, (char*)&ir[1], ir->name_len, true, NULL, psd);
             if (!NT_SUCCESS(Status)) {
                 ERR("send_add_dir returned %08lx\n", Status);
                 return Status;
@@ -769,9 +769,9 @@ static NTSTATUS find_send_dir(send_context* context, uint64_t dir, uint64_t gene
 
 static NTSTATUS send_inode_ref(send_context* context, traverse_ptr* tp, bool tree2) {
     NTSTATUS Status;
-    uint64_t inode = tp ? tp->item->key.obj_id : 0, dir = tp ? tp->item->key.offset : 0;
+    uint64_t inode = tp ? tp->item->key.objectid : 0, dir = tp ? tp->item->key.offset : 0;
     LIST_ENTRY* le;
-    INODE_REF* ir;
+    struct btrfs_inode_ref* ir;
     uint16_t len;
     send_dir* sd = NULL;
     orphan* o2 = NULL;
@@ -779,13 +779,13 @@ static NTSTATUS send_inode_ref(send_context* context, traverse_ptr* tp, bool tre
     if (inode == dir) // root
         return STATUS_SUCCESS;
 
-    if (tp->item->size < sizeof(INODE_REF)) {
-        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset,
-            tp->item->size, sizeof(INODE_REF));
+    if (tp->item->size < sizeof(struct btrfs_inode_ref)) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset,
+            tp->item->size, sizeof(struct btrfs_inode_ref));
         return STATUS_INTERNAL_ERROR;
     }
 
-    if (dir != SUBVOL_ROOT_INODE) {
+    if (dir != BTRFS_FIRST_FREE_OBJECTID) {
         bool added_dummy;
 
         Status = find_send_dir(context, dir, context->root->root_item.ctransid, &sd, &added_dummy);
@@ -814,11 +814,11 @@ static NTSTATUS send_inode_ref(send_context* context, traverse_ptr* tp, bool tre
             if (!found) {
                 ULONG pos = context->datalen;
 
-                send_command(context, BTRFS_SEND_CMD_MKDIR);
+                send_command(context, BTRFS_SEND_C_MKDIR);
 
-                send_add_tlv_path(context, BTRFS_SEND_TLV_PATH, NULL, sd->name, sd->namelen);
+                send_add_tlv_path(context, BTRFS_SEND_A_PATH, NULL, sd->name, sd->namelen);
 
-                send_add_tlv(context, BTRFS_SEND_TLV_INODE, &dir, sizeof(uint64_t));
+                send_add_tlv(context, BTRFS_SEND_A_INO, &dir, sizeof(uint64_t));
 
                 send_command_finish(context, pos);
 
@@ -840,47 +840,47 @@ static NTSTATUS send_inode_ref(send_context* context, traverse_ptr* tp, bool tre
         sd = context->root_dir;
 
     len = tp->item->size;
-    ir = (INODE_REF*)tp->item->data;
+    ir = (struct btrfs_inode_ref*)tp->item->data;
 
     while (len > 0) {
         ref* r;
 
-        if (len < sizeof(INODE_REF) || len < offsetof(INODE_REF, name[0]) + ir->n) {
-            ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset);
+        if (len < sizeof(struct btrfs_inode_ref) || len < sizeof(struct btrfs_inode_ref) + ir->name_len) {
+            ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset);
             return STATUS_INTERNAL_ERROR;
         }
 
-        r = ExAllocatePoolWithTag(PagedPool, offsetof(ref, name[0]) + ir->n, ALLOC_TAG);
+        r = ExAllocatePoolWithTag(PagedPool, offsetof(ref, name[0]) + ir->name_len, ALLOC_TAG);
         if (!r) {
             ERR("out of memory\n");
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         r->sd = sd;
-        r->namelen = ir->n;
-        RtlCopyMemory(r->name, ir->name, ir->n);
+        r->namelen = ir->name_len;
+        RtlCopyMemory(r->name, &ir[1], ir->name_len);
 
         InsertTailList(tree2 ? &context->lastinode.oldrefs : &context->lastinode.refs, &r->list_entry);
 
-        len -= (uint16_t)offsetof(INODE_REF, name[0]) + ir->n;
-        ir = (INODE_REF*)&ir->name[ir->n];
+        len -= (uint16_t)sizeof(struct btrfs_inode_ref) + ir->name_len;
+        ir = (struct btrfs_inode_ref*)((uint8_t*)&ir[1] + ir->name_len);
     }
 
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS send_inode_extref(send_context* context, traverse_ptr* tp, bool tree2) {
-    INODE_EXTREF* ier;
+    struct btrfs_inode_extref* ier;
     uint16_t len;
 
-    if (tp->item->size < sizeof(INODE_EXTREF)) {
-        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset,
-            tp->item->size, sizeof(INODE_EXTREF));
+    if (tp->item->size < offsetof(struct btrfs_inode_extref, name)) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset,
+            tp->item->size, offsetof(struct btrfs_inode_extref, name));
         return STATUS_INTERNAL_ERROR;
     }
 
     len = tp->item->size;
-    ier = (INODE_EXTREF*)tp->item->data;
+    ier = (struct btrfs_inode_extref*)tp->item->data;
 
     while (len > 0) {
         NTSTATUS Status;
@@ -888,16 +888,16 @@ static NTSTATUS send_inode_extref(send_context* context, traverse_ptr* tp, bool 
         orphan* o2 = NULL;
         ref* r;
 
-        if (len < sizeof(INODE_EXTREF) || len < offsetof(INODE_EXTREF, name[0]) + ier->n) {
-            ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset);
+        if (len < offsetof(struct btrfs_inode_extref, name) || len < offsetof(struct btrfs_inode_extref, name) + ier->name_len) {
+            ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset);
             return STATUS_INTERNAL_ERROR;
         }
 
-        if (ier->dir != SUBVOL_ROOT_INODE) {
+        if (ier->parent_objectid != BTRFS_FIRST_FREE_OBJECTID) {
             LIST_ENTRY* le;
             bool added_dummy;
 
-            Status = find_send_dir(context, ier->dir, context->root->root_item.ctransid, &sd, &added_dummy);
+            Status = find_send_dir(context, ier->parent_objectid, context->root->root_item.ctransid, &sd, &added_dummy);
             if (!NT_SUCCESS(Status)) {
                 ERR("find_send_dir returned %08lx\n", Status);
                 return Status;
@@ -911,10 +911,10 @@ static NTSTATUS send_inode_extref(send_context* context, traverse_ptr* tp, bool 
                 while (le != &context->orphans) {
                     o2 = CONTAINING_RECORD(le, orphan, list_entry);
 
-                    if (o2->inode == ier->dir) {
+                    if (o2->inode == ier->parent_objectid) {
                         found = true;
                         break;
-                    } else if (o2->inode > ier->dir)
+                    } else if (o2->inode > ier->parent_objectid)
                         break;
 
                     le = le->Flink;
@@ -923,10 +923,10 @@ static NTSTATUS send_inode_extref(send_context* context, traverse_ptr* tp, bool 
                 if (!found) {
                     ULONG pos = context->datalen;
 
-                    send_command(context, BTRFS_SEND_CMD_MKDIR);
+                    send_command(context, BTRFS_SEND_C_MKDIR);
 
-                    send_add_tlv_path(context, BTRFS_SEND_TLV_PATH, NULL, sd->name, sd->namelen);
-                    send_add_tlv(context, BTRFS_SEND_TLV_INODE, &ier->dir, sizeof(uint64_t));
+                    send_add_tlv_path(context, BTRFS_SEND_A_PATH, NULL, sd->name, sd->namelen);
+                    send_add_tlv(context, BTRFS_SEND_A_INO, &ier->parent_objectid, sizeof(uint64_t));
 
                     send_command_finish(context, pos);
 
@@ -936,7 +936,7 @@ static NTSTATUS send_inode_extref(send_context* context, traverse_ptr* tp, bool 
                         return STATUS_INSUFFICIENT_RESOURCES;
                     }
 
-                    o2->inode = ier->dir;
+                    o2->inode = ier->parent_objectid;
                     o2->dir = true;
                     memcpy(o2->tmpname, sd->name, sd->namelen);
                     o2->tmpname[sd->namelen] = 0;
@@ -947,20 +947,20 @@ static NTSTATUS send_inode_extref(send_context* context, traverse_ptr* tp, bool 
         } else
             sd = context->root_dir;
 
-        r = ExAllocatePoolWithTag(PagedPool, offsetof(ref, name[0]) + ier->n, ALLOC_TAG);
+        r = ExAllocatePoolWithTag(PagedPool, offsetof(ref, name[0]) + ier->name_len, ALLOC_TAG);
         if (!r) {
             ERR("out of memory\n");
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         r->sd = sd;
-        r->namelen = ier->n;
-        RtlCopyMemory(r->name, ier->name, ier->n);
+        r->namelen = ier->name_len;
+        RtlCopyMemory(r->name, ier->name, ier->name_len);
 
         InsertTailList(tree2 ? &context->lastinode.oldrefs : &context->lastinode.refs, &r->list_entry);
 
-        len -= (uint16_t)offsetof(INODE_EXTREF, name[0]) + ier->n;
-        ier = (INODE_EXTREF*)&ier->name[ier->n];
+        len -= (uint16_t)offsetof(struct btrfs_inode_extref, name) + ier->name_len;
+        ier = (struct btrfs_inode_extref*)&ier->name[ier->name_len];
     }
 
     return STATUS_SUCCESS;
@@ -969,17 +969,17 @@ static NTSTATUS send_inode_extref(send_context* context, traverse_ptr* tp, bool 
 static void send_subvol_header(send_context* context, root* r, file_ref* fr) {
     ULONG pos = context->datalen;
 
-    send_command(context, context->parent ? BTRFS_SEND_CMD_SNAPSHOT : BTRFS_SEND_CMD_SUBVOL);
+    send_command(context, context->parent ? BTRFS_SEND_C_SNAPSHOT : BTRFS_SEND_C_SUBVOL);
 
-    send_add_tlv(context, BTRFS_SEND_TLV_PATH, fr->dc->utf8.Buffer, fr->dc->utf8.Length);
+    send_add_tlv(context, BTRFS_SEND_A_PATH, fr->dc->utf8.Buffer, fr->dc->utf8.Length);
 
-    send_add_tlv(context, BTRFS_SEND_TLV_UUID, r->root_item.rtransid == 0 ? &r->root_item.uuid : &r->root_item.received_uuid, sizeof(BTRFS_UUID));
-    send_add_tlv(context, BTRFS_SEND_TLV_TRANSID, &r->root_item.ctransid, sizeof(uint64_t));
+    send_add_tlv(context, BTRFS_SEND_A_UUID, r->root_item.rtransid == 0 ? &r->root_item.uuid : &r->root_item.received_uuid, BTRFS_UUID_SIZE);
+    send_add_tlv(context, BTRFS_SEND_A_CTRANSID, &r->root_item.ctransid, sizeof(uint64_t));
 
     if (context->parent) {
-        send_add_tlv(context, BTRFS_SEND_TLV_CLONE_UUID,
-                     context->parent->root_item.rtransid == 0 ? &context->parent->root_item.uuid : &context->parent->root_item.received_uuid, sizeof(BTRFS_UUID));
-        send_add_tlv(context, BTRFS_SEND_TLV_CLONE_CTRANSID, &context->parent->root_item.ctransid, sizeof(uint64_t));
+        send_add_tlv(context, BTRFS_SEND_A_CLONE_UUID,
+                     context->parent->root_item.rtransid == 0 ? &context->parent->root_item.uuid : &context->parent->root_item.received_uuid, BTRFS_UUID_SIZE);
+        send_add_tlv(context, BTRFS_SEND_A_CLONE_CTRANSID, &context->parent->root_item.ctransid, sizeof(uint64_t));
     }
 
     send_command_finish(context, pos);
@@ -988,11 +988,11 @@ static void send_subvol_header(send_context* context, root* r, file_ref* fr) {
 static void send_chown_command(send_context* context, char* path, uint64_t uid, uint64_t gid) {
     ULONG pos = context->datalen;
 
-    send_command(context, BTRFS_SEND_CMD_CHOWN);
+    send_command(context, BTRFS_SEND_C_CHOWN);
 
-    send_add_tlv(context, BTRFS_SEND_TLV_PATH, path, path ? (uint16_t)strlen(path) : 0);
-    send_add_tlv(context, BTRFS_SEND_TLV_UID, &uid, sizeof(uint64_t));
-    send_add_tlv(context, BTRFS_SEND_TLV_GID, &gid, sizeof(uint64_t));
+    send_add_tlv(context, BTRFS_SEND_A_PATH, path, path ? (uint16_t)strlen(path) : 0);
+    send_add_tlv(context, BTRFS_SEND_A_UID, &uid, sizeof(uint64_t));
+    send_add_tlv(context, BTRFS_SEND_A_GID, &gid, sizeof(uint64_t));
 
     send_command_finish(context, pos);
 }
@@ -1000,25 +1000,25 @@ static void send_chown_command(send_context* context, char* path, uint64_t uid, 
 static void send_chmod_command(send_context* context, char* path, uint64_t mode) {
     ULONG pos = context->datalen;
 
-    send_command(context, BTRFS_SEND_CMD_CHMOD);
+    send_command(context, BTRFS_SEND_C_CHMOD);
 
     mode &= 07777;
 
-    send_add_tlv(context, BTRFS_SEND_TLV_PATH, path, path ? (uint16_t)strlen(path) : 0);
-    send_add_tlv(context, BTRFS_SEND_TLV_MODE, &mode, sizeof(uint64_t));
+    send_add_tlv(context, BTRFS_SEND_A_PATH, path, path ? (uint16_t)strlen(path) : 0);
+    send_add_tlv(context, BTRFS_SEND_A_MODE, &mode, sizeof(uint64_t));
 
     send_command_finish(context, pos);
 }
 
-static void send_utimes_command(send_context* context, char* path, BTRFS_TIME* atime, BTRFS_TIME* mtime, BTRFS_TIME* ctime) {
+static void send_utimes_command(send_context* context, char* path, struct btrfs_timespec* atime, struct btrfs_timespec* mtime, struct btrfs_timespec* ctime) {
     ULONG pos = context->datalen;
 
-    send_command(context, BTRFS_SEND_CMD_UTIMES);
+    send_command(context, BTRFS_SEND_C_UTIMES);
 
-    send_add_tlv(context, BTRFS_SEND_TLV_PATH, path, path ? (uint16_t)strlen(path) : 0);
-    send_add_tlv(context, BTRFS_SEND_TLV_ATIME, atime, sizeof(BTRFS_TIME));
-    send_add_tlv(context, BTRFS_SEND_TLV_MTIME, mtime, sizeof(BTRFS_TIME));
-    send_add_tlv(context, BTRFS_SEND_TLV_CTIME, ctime, sizeof(BTRFS_TIME));
+    send_add_tlv(context, BTRFS_SEND_A_PATH, path, path ? (uint16_t)strlen(path) : 0);
+    send_add_tlv(context, BTRFS_SEND_A_ATIME, atime, sizeof(struct btrfs_timespec));
+    send_add_tlv(context, BTRFS_SEND_A_MTIME, mtime, sizeof(struct btrfs_timespec));
+    send_add_tlv(context, BTRFS_SEND_A_CTIME, ctime, sizeof(struct btrfs_timespec));
 
     send_command_finish(context, pos);
 }
@@ -1026,10 +1026,10 @@ static void send_utimes_command(send_context* context, char* path, BTRFS_TIME* a
 static void send_truncate_command(send_context* context, char* path, uint64_t size) {
     ULONG pos = context->datalen;
 
-    send_command(context, BTRFS_SEND_CMD_TRUNCATE);
+    send_command(context, BTRFS_SEND_C_TRUNCATE);
 
-    send_add_tlv(context, BTRFS_SEND_TLV_PATH, path, path ? (uint16_t)strlen(path) : 0);
-    send_add_tlv(context, BTRFS_SEND_TLV_SIZE, &size, sizeof(uint64_t));
+    send_add_tlv(context, BTRFS_SEND_A_PATH, path, path ? (uint16_t)strlen(path) : 0);
+    send_add_tlv(context, BTRFS_SEND_A_SIZE, &size, sizeof(uint64_t));
 
     send_command_finish(context, pos);
 }
@@ -1038,10 +1038,10 @@ static NTSTATUS send_unlink_command(send_context* context, send_dir* parent, uin
     ULONG pos = context->datalen;
     uint16_t pathlen;
 
-    send_command(context, BTRFS_SEND_CMD_UNLINK);
+    send_command(context, BTRFS_SEND_C_UNLINK);
 
     pathlen = find_path_len(parent, namelen);
-    send_add_tlv(context, BTRFS_SEND_TLV_PATH, NULL, pathlen);
+    send_add_tlv(context, BTRFS_SEND_A_PATH, NULL, pathlen);
 
     find_path((char*)&context->data[context->datalen - pathlen], parent, name, namelen);
 
@@ -1053,20 +1053,20 @@ static NTSTATUS send_unlink_command(send_context* context, send_dir* parent, uin
 static void send_rmdir_command(send_context* context, uint16_t pathlen, char* path) {
     ULONG pos = context->datalen;
 
-    send_command(context, BTRFS_SEND_CMD_RMDIR);
-    send_add_tlv(context, BTRFS_SEND_TLV_PATH, path, pathlen);
+    send_command(context, BTRFS_SEND_C_RMDIR);
+    send_add_tlv(context, BTRFS_SEND_A_PATH, path, pathlen);
     send_command_finish(context, pos);
 }
 
 static NTSTATUS get_dir_last_child(send_context* context, uint64_t* last_inode) {
     NTSTATUS Status;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
 
     *last_inode = 0;
 
-    searchkey.obj_id = context->lastinode.inode;
-    searchkey.obj_type = TYPE_DIR_INDEX;
+    searchkey.objectid = context->lastinode.inode;
+    searchkey.type = BTRFS_DIR_INDEX_KEY;
     searchkey.offset = 2;
 
     Status = find_item(context->Vcb, context->parent, &tp, &searchkey, false, NULL);
@@ -1078,16 +1078,16 @@ static NTSTATUS get_dir_last_child(send_context* context, uint64_t* last_inode) 
     do {
         traverse_ptr next_tp;
 
-        if (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type == searchkey.obj_type) {
-            DIR_ITEM* di = (DIR_ITEM*)tp.item->data;
+        if (tp.item->key.objectid == searchkey.objectid && tp.item->key.type == searchkey.type) {
+            struct btrfs_dir_item* di = (struct btrfs_dir_item*)tp.item->data;
 
-            if (tp.item->size < sizeof(DIR_ITEM) || tp.item->size < offsetof(DIR_ITEM, name[0]) + di->m + di->n) {
-                ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset);
+            if (tp.item->size < sizeof(struct btrfs_dir_item) || tp.item->size < sizeof(struct btrfs_dir_item) + di->data_len + di->name_len) {
+                ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
                 return STATUS_INTERNAL_ERROR;
             }
 
-            if (di->key.obj_type == TYPE_INODE_ITEM)
-                *last_inode = max(*last_inode, di->key.obj_id);
+            if (di->location.type == BTRFS_INODE_ITEM_KEY)
+                *last_inode = max(*last_inode, di->location.objectid);
         } else
             break;
 
@@ -1132,13 +1132,13 @@ static NTSTATUS add_pending_rmdir(send_context* context, uint64_t last_inode) {
 
 static NTSTATUS look_for_collision(send_context* context, send_dir* sd, char* name, ULONG namelen, uint64_t* inode, bool* dir) {
     NTSTATUS Status;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
-    DIR_ITEM* di;
+    struct btrfs_dir_item* di;
     uint16_t len;
 
-    searchkey.obj_id = sd->inode;
-    searchkey.obj_type = TYPE_DIR_ITEM;
+    searchkey.objectid = sd->inode;
+    searchkey.type = BTRFS_DIR_ITEM_KEY;
     searchkey.offset = calc_crc32c(0xfffffffe, (uint8_t*)name, namelen);
 
     Status = find_item(context->Vcb, context->parent, &tp, &searchkey, false, NULL);
@@ -1150,23 +1150,23 @@ static NTSTATUS look_for_collision(send_context* context, send_dir* sd, char* na
     if (keycmp(tp.item->key, searchkey))
         return STATUS_SUCCESS;
 
-    di = (DIR_ITEM*)tp.item->data;
+    di = (struct btrfs_dir_item*)tp.item->data;
     len = tp.item->size;
 
     do {
-        if (len < sizeof(DIR_ITEM) || len < offsetof(DIR_ITEM, name[0]) + di->m + di->n) {
-            ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset);
+        if (len < sizeof(struct btrfs_dir_item) || len < sizeof(struct btrfs_dir_item) + di->data_len + di->name_len) {
+            ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
             return STATUS_INTERNAL_ERROR;
         }
 
-        if (di->n == namelen && RtlCompareMemory(di->name, name, namelen) == namelen) {
-            *inode = di->key.obj_type == TYPE_INODE_ITEM ? di->key.obj_id : 0;
-            *dir = di->type == BTRFS_TYPE_DIRECTORY ? true: false;
+        if (di->name_len == namelen && RtlCompareMemory(&di[1], name, namelen) == namelen) {
+            *inode = di->location.type == BTRFS_INODE_ITEM_KEY ? di->location.objectid : 0;
+            *dir = di->type == BTRFS_FT_DIR ? true: false;
             return STATUS_OBJECT_NAME_COLLISION;
         }
 
-        di = (DIR_ITEM*)&di->name[di->m + di->n];
-        len -= (uint16_t)offsetof(DIR_ITEM, name[0]) + di->m + di->n;
+        di = (struct btrfs_dir_item*)((uint8_t*)&di[1] + di->data_len + di->name_len);
+        len -= (uint16_t)sizeof(struct btrfs_dir_item) + di->data_len + di->name_len;
     } while (len > 0);
 
     return STATUS_SUCCESS;
@@ -1199,9 +1199,9 @@ static NTSTATUS make_file_orphan(send_context* context, uint64_t inode, bool dir
         orphan* o2 = CONTAINING_RECORD(le, orphan, list_entry);
 
         if (o2->inode == inode) {
-            send_command(context, BTRFS_SEND_CMD_UNLINK);
+            send_command(context, BTRFS_SEND_C_UNLINK);
 
-            send_add_tlv_path(context, BTRFS_SEND_TLV_PATH, r->sd, r->name, r->namelen);
+            send_add_tlv_path(context, BTRFS_SEND_A_PATH, r->sd, r->name, r->namelen);
 
             send_command_finish(context, pos);
 
@@ -1227,10 +1227,10 @@ static NTSTATUS make_file_orphan(send_context* context, uint64_t inode, bool dir
 
         sd->dummy = true;
 
-        send_command(context, BTRFS_SEND_CMD_RENAME);
+        send_command(context, BTRFS_SEND_C_RENAME);
 
-        send_add_tlv_path(context, BTRFS_SEND_TLV_PATH, r->sd, r->name, r->namelen);
-        send_add_tlv_path(context, BTRFS_SEND_TLV_PATH_TO, context->root_dir, name, (uint16_t)strlen(name));
+        send_add_tlv_path(context, BTRFS_SEND_A_PATH, r->sd, r->name, r->namelen);
+        send_add_tlv_path(context, BTRFS_SEND_A_PATH_TO, context->root_dir, name, (uint16_t)strlen(name));
 
         send_command_finish(context, pos);
 
@@ -1247,11 +1247,11 @@ static NTSTATUS make_file_orphan(send_context* context, uint64_t inode, bool dir
         RtlCopyMemory(sd->name, name, sd->namelen);
         sd->parent = context->root_dir;
     } else {
-        send_command(context, BTRFS_SEND_CMD_RENAME);
+        send_command(context, BTRFS_SEND_C_RENAME);
 
-        send_add_tlv_path(context, BTRFS_SEND_TLV_PATH, r->sd, r->name, r->namelen);
+        send_add_tlv_path(context, BTRFS_SEND_A_PATH, r->sd, r->name, r->namelen);
 
-        send_add_tlv_path(context, BTRFS_SEND_TLV_PATH_TO, context->root_dir, name, (uint16_t)strlen(name));
+        send_add_tlv_path(context, BTRFS_SEND_A_PATH_TO, context->root_dir, name, (uint16_t)strlen(name));
 
         send_command_finish(context, pos);
     }
@@ -1331,11 +1331,11 @@ static NTSTATUS flush_refs(send_context* context, traverse_ptr* tp1, traverse_pt
             } else if (r->sd != or->sd || r->namelen != or->namelen || RtlCompareMemory(r->name, or->name, r->namelen) != r->namelen) { // moved or renamed
                 ULONG pos = context->datalen, len;
 
-                send_command(context, BTRFS_SEND_CMD_RENAME);
+                send_command(context, BTRFS_SEND_C_RENAME);
 
-                send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, (uint16_t)strlen(context->lastinode.path));
+                send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, (uint16_t)strlen(context->lastinode.path));
 
-                send_add_tlv_path(context, BTRFS_SEND_TLV_PATH_TO, r->sd, r->name, r->namelen);
+                send_add_tlv_path(context, BTRFS_SEND_A_PATH_TO, r->sd, r->name, r->namelen);
 
                 send_command_finish(context, pos);
 
@@ -1400,9 +1400,9 @@ static NTSTATUS flush_refs(send_context* context, traverse_ptr* tp1, traverse_pt
                     return Status;
                 }
 
-                send_command(context, BTRFS_SEND_CMD_RENAME);
-                send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, (uint16_t)strlen(context->lastinode.path));
-                send_add_tlv(context, BTRFS_SEND_TLV_PATH_TO, name, (uint16_t)strlen(name));
+                send_command(context, BTRFS_SEND_C_RENAME);
+                send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, (uint16_t)strlen(context->lastinode.path));
+                send_add_tlv(context, BTRFS_SEND_A_PATH_TO, name, (uint16_t)strlen(name));
                 send_command_finish(context, pos);
 
                 if (context->lastinode.sd->name)
@@ -1601,7 +1601,7 @@ static NTSTATUS flush_refs(send_context* context, traverse_ptr* tp1, traverse_pt
 
 static NTSTATUS wait_for_flush(send_context* context, traverse_ptr* tp1, traverse_ptr* tp2) {
     NTSTATUS Status;
-    KEY key1, key2;
+    struct btrfs_key key1, key2;
 
     if (tp1)
         key1 = tp1->item->key;
@@ -1658,51 +1658,43 @@ static NTSTATUS add_ext_holes(device_extension* Vcb, LIST_ENTRY* exts, uint64_t 
         send_ext* ext = CONTAINING_RECORD(le, send_ext, list_entry);
 
         if (ext->offset > lastoff) {
-            send_ext* ext2 = ExAllocatePoolWithTag(PagedPool, offsetof(send_ext, data.data) + sizeof(EXTENT_DATA2), ALLOC_TAG);
-            EXTENT_DATA2* ed2;
+            send_ext* ext2 = ExAllocatePoolWithTag(PagedPool, sizeof(send_ext), ALLOC_TAG);
 
             if (!ext2) {
                 ERR("out of memory\n");
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
-            ed2 = (EXTENT_DATA2*)ext2->data.data;
-
             ext2->offset = lastoff;
-            ext2->datalen = offsetof(EXTENT_DATA, data) + sizeof(EXTENT_DATA2);
-            ext2->data.decoded_size = ed2->num_bytes = ext->offset - lastoff;
-            ext2->data.type = EXTENT_TYPE_REGULAR;
-            ed2->address = ed2->size = ed2->offset = 0;
+            ext2->datalen = sizeof(struct btrfs_file_extent_item);
+            ext2->data.ram_bytes = ext2->data.num_bytes = ext->offset - lastoff;
+            ext2->data.type = BTRFS_FILE_EXTENT_REG;
+            ext2->data.disk_bytenr = ext2->data.disk_num_bytes = ext2->data.offset = 0;
 
             InsertHeadList(le->Blink, &ext2->list_entry);
         }
 
-        if (ext->data.type == EXTENT_TYPE_INLINE)
-            lastoff = ext->offset + ext->data.decoded_size;
-        else {
-            EXTENT_DATA2* ed2 = (EXTENT_DATA2*)ext->data.data;
-            lastoff = ext->offset + ed2->num_bytes;
-        }
+        if (ext->data.type == BTRFS_FILE_EXTENT_INLINE)
+            lastoff = ext->offset + ext->data.ram_bytes;
+        else
+            lastoff = ext->offset + ext->data.num_bytes;
 
         le = le->Flink;
     }
 
     if (size > lastoff) {
-        send_ext* ext2 = ExAllocatePoolWithTag(PagedPool, offsetof(send_ext, data.data) + sizeof(EXTENT_DATA2), ALLOC_TAG);
-        EXTENT_DATA2* ed2;
+        send_ext* ext2 = ExAllocatePoolWithTag(PagedPool, sizeof(send_ext), ALLOC_TAG);
 
         if (!ext2) {
             ERR("out of memory\n");
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        ed2 = (EXTENT_DATA2*)ext2->data.data;
-
         ext2->offset = lastoff;
-        ext2->datalen = offsetof(EXTENT_DATA, data) + sizeof(EXTENT_DATA2);
-        ext2->data.decoded_size = ed2->num_bytes = sector_align(size - lastoff, Vcb->superblock.sector_size);
-        ext2->data.type = EXTENT_TYPE_REGULAR;
-        ed2->address = ed2->size = ed2->offset = 0;
+        ext2->datalen = sizeof(struct btrfs_file_extent_item);
+        ext2->data.ram_bytes = ext2->data.num_bytes = sector_align(size - lastoff, Vcb->superblock.sectorsize);
+        ext2->data.type = BTRFS_FILE_EXTENT_REG;
+        ext2->data.disk_bytenr = ext2->data.disk_num_bytes = ext2->data.offset = 0;
 
         InsertTailList(exts, &ext2->list_entry);
     }
@@ -1712,11 +1704,10 @@ static NTSTATUS add_ext_holes(device_extension* Vcb, LIST_ENTRY* exts, uint64_t 
 
 static NTSTATUS divide_ext(send_ext* ext, uint64_t len, bool trunc) {
     send_ext* ext2;
-    EXTENT_DATA2 *ed2a, *ed2b;
 
-    if (ext->data.type == EXTENT_TYPE_INLINE) {
+    if (ext->data.type == BTRFS_FILE_EXTENT_INLINE) {
         if (!trunc) {
-            ext2 = ExAllocatePoolWithTag(PagedPool, (ULONG)(offsetof(send_ext, data.data) + ext->data.decoded_size - len), ALLOC_TAG);
+            ext2 = ExAllocatePoolWithTag(PagedPool, (ULONG)(offsetof(send_ext, data.disk_bytenr) + ext->data.ram_bytes - len), ALLOC_TAG);
 
             if (!ext2) {
                 ERR("out of memory\n");
@@ -1724,60 +1715,56 @@ static NTSTATUS divide_ext(send_ext* ext, uint64_t len, bool trunc) {
             }
 
             ext2->offset = ext->offset + len;
-            ext2->datalen = (ULONG)(ext->data.decoded_size - len);
-            ext2->data.decoded_size = ext->data.decoded_size - len;
+            ext2->datalen = (ULONG)(ext->data.ram_bytes - len);
+            ext2->data.ram_bytes = ext->data.ram_bytes - len;
             ext2->data.compression = ext->data.compression;
             ext2->data.encryption = ext->data.encryption;
-            ext2->data.encoding = ext->data.encoding;
+            ext2->data.other_encoding = ext->data.other_encoding;
             ext2->data.type = ext->data.type;
-            RtlCopyMemory(ext2->data.data, ext->data.data + len, (ULONG)(ext->data.decoded_size - len));
+            RtlCopyMemory(&ext2->data.disk_bytenr, (uint8_t*)&ext->data.disk_bytenr + len, (ULONG)(ext->data.ram_bytes - len));
 
             InsertHeadList(&ext->list_entry, &ext2->list_entry);
         }
 
-        ext->data.decoded_size = len;
+        ext->data.ram_bytes = len;
 
         return STATUS_SUCCESS;
     }
 
-    ed2a = (EXTENT_DATA2*)ext->data.data;
-
     if (!trunc) {
-        ext2 = ExAllocatePoolWithTag(PagedPool, offsetof(send_ext, data.data) + sizeof(EXTENT_DATA2), ALLOC_TAG);
+        ext2 = ExAllocatePoolWithTag(PagedPool, sizeof(send_ext), ALLOC_TAG);
 
         if (!ext2) {
             ERR("out of memory\n");
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        ed2b = (EXTENT_DATA2*)ext2->data.data;
-
         ext2->offset = ext->offset + len;
-        ext2->datalen = offsetof(EXTENT_DATA, data) + sizeof(EXTENT_DATA2);
+        ext2->datalen = sizeof(struct btrfs_file_extent_item);
 
         ext2->data.compression = ext->data.compression;
         ext2->data.encryption = ext->data.encryption;
-        ext2->data.encoding = ext->data.encoding;
+        ext2->data.other_encoding = ext->data.other_encoding;
         ext2->data.type = ext->data.type;
-        ed2b->num_bytes = ed2a->num_bytes - len;
+        ext2->data.num_bytes = ext->data.num_bytes - len;
 
-        if (ed2a->size == 0) {
-            ext2->data.decoded_size = ed2b->num_bytes;
-            ext->data.decoded_size = len;
+        if (ext->data.disk_num_bytes == 0) {
+            ext2->data.ram_bytes = ext2->data.num_bytes;
+            ext->data.ram_bytes = len;
 
-            ed2b->address = ed2b->size = ed2b->offset = 0;
+            ext2->data.disk_bytenr = ext2->data.disk_num_bytes = ext2->data.offset = 0;
         } else {
-            ext2->data.decoded_size = ext->data.decoded_size;
+            ext2->data.ram_bytes = ext->data.ram_bytes;
 
-            ed2b->address = ed2a->address;
-            ed2b->size = ed2a->size;
-            ed2b->offset = ed2a->offset + len;
+            ext2->data.disk_bytenr = ext->data.disk_bytenr;
+            ext2->data.disk_num_bytes = ext->data.disk_num_bytes;
+            ext2->data.offset = ext->data.offset + len;
         }
 
         InsertHeadList(&ext->list_entry, &ext2->list_entry);
     }
 
-    ed2a->num_bytes = len;
+    ext->data.num_bytes = len;
 
     return STATUS_SUCCESS;
 }
@@ -1791,13 +1778,9 @@ static NTSTATUS sync_ext_cutoff_points(send_context* context) {
 
     do {
         uint64_t len1, len2;
-        EXTENT_DATA2 *ed2a, *ed2b;
 
-        ed2a = ext1->data.type == EXTENT_TYPE_INLINE ? NULL : (EXTENT_DATA2*)ext1->data.data;
-        ed2b = ext2->data.type == EXTENT_TYPE_INLINE ? NULL : (EXTENT_DATA2*)ext2->data.data;
-
-        len1 = ed2a ? ed2a->num_bytes : ext1->data.decoded_size;
-        len2 = ed2b ? ed2b->num_bytes : ext2->data.decoded_size;
+        len1 = ext1->data.type == BTRFS_FILE_EXTENT_INLINE ? ext1->data.ram_bytes : ext1->data.num_bytes;
+        len2 = ext2->data.type == BTRFS_FILE_EXTENT_INLINE ? ext2->data.ram_bytes : ext2->data.num_bytes;
 
         if (len1 < len2) {
             Status = divide_ext(ext2, len1, false);
@@ -1840,7 +1823,7 @@ static NTSTATUS sync_ext_cutoff_points(send_context* context) {
 
 static bool send_add_tlv_clone_path(send_context* context, root* r, uint64_t inode) {
     NTSTATUS Status;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
     uint16_t len = 0;
     uint64_t num;
@@ -1848,9 +1831,9 @@ static bool send_add_tlv_clone_path(send_context* context, root* r, uint64_t ino
 
     num = inode;
 
-    while (num != SUBVOL_ROOT_INODE) {
-        searchkey.obj_id = num;
-        searchkey.obj_type = TYPE_INODE_EXTREF;
+    while (num != BTRFS_FIRST_FREE_OBJECTID) {
+        searchkey.objectid = num;
+        searchkey.type = BTRFS_INODE_EXTREF_KEY;
         searchkey.offset = 0xffffffffffffffff;
 
         Status = find_item(context->Vcb, r, &tp, &searchkey, false, NULL);
@@ -1859,45 +1842,45 @@ static bool send_add_tlv_clone_path(send_context* context, root* r, uint64_t ino
             return false;
         }
 
-        if (tp.item->key.obj_id != searchkey.obj_id || (tp.item->key.obj_type != TYPE_INODE_REF && tp.item->key.obj_type != TYPE_INODE_EXTREF)) {
-            ERR("could not find INODE_REF for inode %I64x\n", searchkey.obj_id);
+        if (tp.item->key.objectid != searchkey.objectid || (tp.item->key.type != BTRFS_INODE_REF_KEY && tp.item->key.type != BTRFS_INODE_EXTREF_KEY)) {
+            ERR("could not find INODE_REF for inode %I64x\n", searchkey.objectid);
             return false;
         }
 
         if (len > 0)
             len++;
 
-        if (tp.item->key.obj_type == TYPE_INODE_REF) {
-            INODE_REF* ir = (INODE_REF*)tp.item->data;
+        if (tp.item->key.type == BTRFS_INODE_REF_KEY) {
+            struct btrfs_inode_ref* ir = (struct btrfs_inode_ref*)tp.item->data;
 
-            if (tp.item->size < sizeof(INODE_REF) || tp.item->size < offsetof(INODE_REF, name[0]) + ir->n) {
-                ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset);
+            if (tp.item->size < sizeof(struct btrfs_inode_ref) || tp.item->size < sizeof(struct btrfs_inode_ref) + ir->name_len) {
+                ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
                 return false;
             }
 
-            len += ir->n;
+            len += ir->name_len;
             num = tp.item->key.offset;
         } else {
-            INODE_EXTREF* ier = (INODE_EXTREF*)tp.item->data;
+            struct btrfs_inode_extref* ier = (struct btrfs_inode_extref*)tp.item->data;
 
-            if (tp.item->size < sizeof(INODE_EXTREF) || tp.item->size < offsetof(INODE_EXTREF, name[0]) + ier->n) {
-                ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset);
+            if (tp.item->size < offsetof(struct btrfs_inode_extref, name) || tp.item->size < offsetof(struct btrfs_inode_extref, name) + ier->name_len) {
+                ERR("(%I64x,%x,%I64x) was truncated\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
                 return false;
             }
 
-            len += ier->n;
-            num = ier->dir;
+            len += ier->name_len;
+            num = ier->parent_objectid;
         }
     }
 
-    send_add_tlv(context, BTRFS_SEND_TLV_CLONE_PATH, NULL, len);
+    send_add_tlv(context, BTRFS_SEND_A_CLONE_PATH, NULL, len);
     ptr = &context->data[context->datalen];
 
     num = inode;
 
-    while (num != SUBVOL_ROOT_INODE) {
-        searchkey.obj_id = num;
-        searchkey.obj_type = TYPE_INODE_EXTREF;
+    while (num != BTRFS_FIRST_FREE_OBJECTID) {
+        searchkey.objectid = num;
+        searchkey.type = BTRFS_INODE_EXTREF_KEY;
         searchkey.offset = 0xffffffffffffffff;
 
         Status = find_item(context->Vcb, r, &tp, &searchkey, false, NULL);
@@ -1906,8 +1889,8 @@ static bool send_add_tlv_clone_path(send_context* context, root* r, uint64_t ino
             return false;
         }
 
-        if (tp.item->key.obj_id != searchkey.obj_id || (tp.item->key.obj_type != TYPE_INODE_REF && tp.item->key.obj_type != TYPE_INODE_EXTREF)) {
-            ERR("could not find INODE_REF for inode %I64x\n", searchkey.obj_id);
+        if (tp.item->key.objectid != searchkey.objectid || (tp.item->key.type != BTRFS_INODE_REF_KEY && tp.item->key.type != BTRFS_INODE_EXTREF_KEY)) {
+            ERR("could not find INODE_REF for inode %I64x\n", searchkey.objectid);
             return false;
         }
 
@@ -1916,30 +1899,29 @@ static bool send_add_tlv_clone_path(send_context* context, root* r, uint64_t ino
             *ptr = '/';
         }
 
-        if (tp.item->key.obj_type == TYPE_INODE_REF) {
-            INODE_REF* ir = (INODE_REF*)tp.item->data;
+        if (tp.item->key.type == BTRFS_INODE_REF_KEY) {
+            struct btrfs_inode_ref* ir = (struct btrfs_inode_ref*)tp.item->data;
 
-            RtlCopyMemory(ptr - ir->n, ir->name, ir->n);
-            ptr -= ir->n;
+            RtlCopyMemory(ptr - ir->name_len, &ir[1], ir->name_len);
+            ptr -= ir->name_len;
             num = tp.item->key.offset;
         } else {
-            INODE_EXTREF* ier = (INODE_EXTREF*)tp.item->data;
+            struct btrfs_inode_extref* ier = (struct btrfs_inode_extref*)tp.item->data;
 
-            RtlCopyMemory(ptr - ier->n, ier->name, ier->n);
-            ptr -= ier->n;
-            num = ier->dir;
+            RtlCopyMemory(ptr - ier->name_len, ier->name, ier->name_len);
+            ptr -= ier->name_len;
+            num = ier->parent_objectid;
         }
     }
 
     return true;
 }
 
-static bool try_clone_edr(send_context* context, send_ext* se, EXTENT_DATA_REF* edr) {
+static bool try_clone_edr(send_context* context, send_ext* se, struct btrfs_extent_data_ref* edr) {
     NTSTATUS Status;
     root* r = NULL;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
-    EXTENT_DATA2* seed2 = (EXTENT_DATA2*)se->data.data;
 
     if (context->parent && edr->root == context->parent->id)
         r = context->parent;
@@ -1958,8 +1940,8 @@ static bool try_clone_edr(send_context* context, send_ext* se, EXTENT_DATA_REF* 
     if (!r)
         return false;
 
-    searchkey.obj_id = edr->objid;
-    searchkey.obj_type = TYPE_EXTENT_DATA;
+    searchkey.objectid = edr->objectid;
+    searchkey.type = BTRFS_EXTENT_DATA_KEY;
     searchkey.offset = 0;
 
     Status = find_item(context->Vcb, r, &tp, &searchkey, false, NULL);
@@ -1971,38 +1953,36 @@ static bool try_clone_edr(send_context* context, send_ext* se, EXTENT_DATA_REF* 
     while (true) {
         traverse_ptr next_tp;
 
-        if (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type == searchkey.obj_type) {
-            if (tp.item->size < sizeof(EXTENT_DATA))
-                ERR("(%I64x,%x,%I64x) has size %u, not at least %Iu as expected\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, tp.item->size, sizeof(EXTENT_DATA));
+        if (tp.item->key.objectid == searchkey.objectid && tp.item->key.type == searchkey.type) {
+            if (tp.item->size < offsetof(struct btrfs_file_extent_item, disk_bytenr))
+                ERR("(%I64x,%x,%I64x) has size %u, not at least %Iu as expected\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, offsetof(struct btrfs_file_extent_item, disk_bytenr));
             else {
-                EXTENT_DATA* ed = (EXTENT_DATA*)tp.item->data;
+                struct btrfs_file_extent_item* ed = (struct btrfs_file_extent_item*)tp.item->data;
 
-                if (ed->type == EXTENT_TYPE_REGULAR) {
-                    if (tp.item->size < offsetof(EXTENT_DATA, data[0]) + sizeof(EXTENT_DATA2))
-                        ERR("(%I64x,%x,%I64x) has size %u, not %Iu as expected\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset,
-                            tp.item->size, offsetof(EXTENT_DATA, data[0]) + sizeof(EXTENT_DATA2));
+                if (ed->type == BTRFS_FILE_EXTENT_REG) {
+                    if (tp.item->size < sizeof(struct btrfs_file_extent_item))
+                        ERR("(%I64x,%x,%I64x) has size %u, not %Iu as expected\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset,
+                            tp.item->size, sizeof(struct btrfs_file_extent_item));
                     else {
-                        EXTENT_DATA2* ed2 = (EXTENT_DATA2*)ed->data;
+                        if (ed->disk_bytenr == se->data.disk_bytenr && ed->disk_num_bytes == se->data.disk_num_bytes && se->data.offset <= ed->offset && se->data.offset + se->data.num_bytes >= ed->offset + ed->num_bytes) {
+                            uint64_t clone_offset = tp.item->key.offset + ed->offset - se->data.offset;
+                            uint64_t clone_len = min(context->lastinode.size - se->offset, ed->num_bytes);
 
-                        if (ed2->address == seed2->address && ed2->size == seed2->size && seed2->offset <= ed2->offset && seed2->offset + seed2->num_bytes >= ed2->offset + ed2->num_bytes) {
-                            uint64_t clone_offset = tp.item->key.offset + ed2->offset - seed2->offset;
-                            uint64_t clone_len = min(context->lastinode.size - se->offset, ed2->num_bytes);
-
-                            if ((clone_offset & (context->Vcb->superblock.sector_size - 1)) == 0 && (clone_len & (context->Vcb->superblock.sector_size - 1)) == 0) {
+                            if ((clone_offset & (context->Vcb->superblock.sectorsize - 1)) == 0 && (clone_len & (context->Vcb->superblock.sectorsize - 1)) == 0) {
                                 ULONG pos = context->datalen;
 
-                                send_command(context, BTRFS_SEND_CMD_CLONE);
+                                send_command(context, BTRFS_SEND_C_CLONE);
 
-                                send_add_tlv(context, BTRFS_SEND_TLV_OFFSET, &se->offset, sizeof(uint64_t));
-                                send_add_tlv(context, BTRFS_SEND_TLV_CLONE_LENGTH, &clone_len, sizeof(uint64_t));
-                                send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
-                                send_add_tlv(context, BTRFS_SEND_TLV_CLONE_UUID, r->root_item.rtransid == 0 ? &r->root_item.uuid : &r->root_item.received_uuid, sizeof(BTRFS_UUID));
-                                send_add_tlv(context, BTRFS_SEND_TLV_CLONE_CTRANSID, &r->root_item.ctransid, sizeof(uint64_t));
+                                send_add_tlv(context, BTRFS_SEND_A_FILE_OFFSET, &se->offset, sizeof(uint64_t));
+                                send_add_tlv(context, BTRFS_SEND_A_CLONE_LEN, &clone_len, sizeof(uint64_t));
+                                send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+                                send_add_tlv(context, BTRFS_SEND_A_CLONE_UUID, r->root_item.rtransid == 0 ? &r->root_item.uuid : &r->root_item.received_uuid, BTRFS_UUID_SIZE);
+                                send_add_tlv(context, BTRFS_SEND_A_CLONE_CTRANSID, &r->root_item.ctransid, sizeof(uint64_t));
 
-                                if (!send_add_tlv_clone_path(context, r, tp.item->key.obj_id))
+                                if (!send_add_tlv_clone_path(context, r, tp.item->key.objectid))
                                     context->datalen = pos;
                                 else {
-                                    send_add_tlv(context, BTRFS_SEND_TLV_CLONE_OFFSET, &clone_offset, sizeof(uint64_t));
+                                    send_add_tlv(context, BTRFS_SEND_A_CLONE_OFFSET, &clone_offset, sizeof(uint64_t));
 
                                     send_command_finish(context, pos);
 
@@ -2013,7 +1993,7 @@ static bool try_clone_edr(send_context* context, send_ext* se, EXTENT_DATA_REF* 
                     }
                 }
             }
-        } else if (tp.item->key.obj_id > searchkey.obj_id || (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type > searchkey.obj_type))
+        } else if (tp.item->key.objectid > searchkey.objectid || (tp.item->key.objectid == searchkey.objectid && tp.item->key.type > searchkey.type))
             break;
 
         if (find_next_item(context->Vcb, &tp, &next_tp, false, NULL))
@@ -2027,15 +2007,14 @@ static bool try_clone_edr(send_context* context, send_ext* se, EXTENT_DATA_REF* 
 
 static bool try_clone(send_context* context, send_ext* se) {
     NTSTATUS Status;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp;
-    EXTENT_DATA2* ed2 = (EXTENT_DATA2*)se->data.data;
-    EXTENT_ITEM* ei;
+    struct btrfs_extent_item* ei;
     uint64_t rc = 0;
 
-    searchkey.obj_id = ed2->address;
-    searchkey.obj_type = TYPE_EXTENT_ITEM;
-    searchkey.offset = ed2->size;
+    searchkey.objectid = se->data.disk_bytenr;
+    searchkey.type = BTRFS_EXTENT_ITEM_KEY;
+    searchkey.offset = se->data.disk_num_bytes;
 
     Status = find_item(context->Vcb, context->Vcb->extent_root, &tp, &searchkey, false, NULL);
     if (!NT_SUCCESS(Status)) {
@@ -2044,56 +2023,88 @@ static bool try_clone(send_context* context, send_ext* se) {
     }
 
     if (keycmp(tp.item->key, searchkey)) {
-        ERR("(%I64x,%x,%I64x) not found\n", searchkey.obj_id, searchkey.obj_type, searchkey.offset);
+        ERR("(%I64x,%x,%I64x) not found\n", searchkey.objectid, searchkey.type, searchkey.offset);
         return false;
     }
 
-    if (tp.item->size < sizeof(EXTENT_ITEM)) {
-        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, tp.item->size, sizeof(EXTENT_ITEM));
+    if (tp.item->size < sizeof(struct btrfs_extent_item)) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, sizeof(struct btrfs_extent_item));
         return false;
     }
 
-    ei = (EXTENT_ITEM*)tp.item->data;
+    ei = (struct btrfs_extent_item*)tp.item->data;
 
-    if (tp.item->size > sizeof(EXTENT_ITEM)) {
-        uint32_t len = tp.item->size - sizeof(EXTENT_ITEM);
+    if (tp.item->size > sizeof(struct btrfs_extent_item)) {
+        uint32_t len = tp.item->size - sizeof(struct btrfs_extent_item);
         uint8_t* ptr = (uint8_t*)&ei[1];
 
         while (len > 0) {
-            uint8_t secttype = *ptr;
-            ULONG sectlen = get_extent_data_len(secttype);
-            uint64_t sectcount = get_extent_data_refcount(secttype, ptr + sizeof(uint8_t));
+            struct btrfs_extent_inline_ref* eir = (struct btrfs_extent_inline_ref*)ptr;
 
-            len--;
+            if (len < sizeof(struct btrfs_extent_inline_ref)) {
+                ERR("%I64x,%x,%I64x was truncated\n", tp.item->key.objectid,
+                    tp.item->key.type, tp.item->key.offset);
 
-            if (sectlen > len) {
-                ERR("(%I64x,%x,%I64x): %x bytes left, expecting at least %lx\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, len, sectlen);
                 return false;
             }
 
-            if (sectlen == 0) {
-                ERR("(%I64x,%x,%I64x): unrecognized extent type %x\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, secttype);
-                return false;
+            ptr += sizeof(struct btrfs_extent_inline_ref);
+            len -= sizeof(struct btrfs_extent_inline_ref);
+
+            switch (eir->type) {
+                case BTRFS_EXTENT_DATA_REF_KEY: {
+                    struct btrfs_extent_data_ref* edr = (struct btrfs_extent_data_ref*)(ptr - sizeof(uint64_t));
+
+                    if (len < sizeof(struct btrfs_extent_data_ref) - sizeof(uint64_t)) {
+                        ERR("%I64x,%x,%I64x was truncated\n", tp.item->key.objectid,
+                            tp.item->key.type, tp.item->key.offset);
+
+                        return false;
+                    }
+
+                    ptr += sizeof(struct btrfs_extent_data_ref) - sizeof(uint64_t);
+                    len -= sizeof(struct btrfs_extent_data_ref) - sizeof(uint64_t);
+
+                    rc += edr->count;
+
+                    if (try_clone_edr(context, se, edr))
+                        return true;
+
+                    break;
+                }
+
+                case BTRFS_SHARED_DATA_REF_KEY: {
+                    struct btrfs_shared_data_ref* sdr = (struct btrfs_shared_data_ref*)ptr;
+
+                    if (len < sizeof(struct btrfs_shared_data_ref)) {
+                        ERR("%I64x,%x,%I64x was truncated\n", tp.item->key.objectid,
+                            tp.item->key.type, tp.item->key.offset);
+
+                        return false;
+                    }
+
+                    ptr += sizeof(struct btrfs_shared_data_ref);
+                    len -= sizeof(struct btrfs_shared_data_ref);
+
+                    rc += sdr->count;
+
+                    break;
+                }
+
+                default:
+                    ERR("%I64x,%x,%I64x: unexpected type %x\n",
+                        tp.item->key.objectid, tp.item->key.type,
+                        tp.item->key.offset, eir->type);
+
+                    return false;
             }
-
-            rc += sectcount;
-
-            if (secttype == TYPE_EXTENT_DATA_REF) {
-                EXTENT_DATA_REF* sectedr = (EXTENT_DATA_REF*)(ptr + sizeof(uint8_t));
-
-                if (try_clone_edr(context, se, sectedr))
-                    return true;
-            }
-
-            len -= sectlen;
-            ptr += sizeof(uint8_t) + sectlen;
         }
     }
 
-    if (rc >= ei->refcount)
+    if (rc >= ei->refs)
         return false;
 
-    searchkey.obj_type = TYPE_EXTENT_DATA_REF;
+    searchkey.type = BTRFS_EXTENT_DATA_REF_KEY;
     searchkey.offset = 0;
 
     Status = find_item(context->Vcb, context->Vcb->extent_root, &tp, &searchkey, false, NULL);
@@ -2105,14 +2116,14 @@ static bool try_clone(send_context* context, send_ext* se) {
     while (true) {
         traverse_ptr next_tp;
 
-        if (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type == searchkey.obj_type) {
-            if (tp.item->size < sizeof(EXTENT_DATA_REF))
-                ERR("(%I64x,%x,%I64x) has size %u, not %Iu as expected\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset, tp.item->size, sizeof(EXTENT_DATA_REF));
+        if (tp.item->key.objectid == searchkey.objectid && tp.item->key.type == searchkey.type) {
+            if (tp.item->size < sizeof(struct btrfs_extent_data_ref))
+                ERR("(%I64x,%x,%I64x) has size %u, not %Iu as expected\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset, tp.item->size, sizeof(struct btrfs_extent_data_ref));
             else {
-                if (try_clone_edr(context, se, (EXTENT_DATA_REF*)tp.item->data))
+                if (try_clone_edr(context, se, (struct btrfs_extent_data_ref*)tp.item->data))
                     return true;
             }
-        } else if (tp.item->key.obj_id > searchkey.obj_id || (tp.item->key.obj_id == searchkey.obj_id && tp.item->key.obj_type > searchkey.obj_type))
+        } else if (tp.item->key.objectid > searchkey.objectid || (tp.item->key.objectid == searchkey.objectid && tp.item->key.type > searchkey.type))
             break;
 
         if (find_next_item(context->Vcb, &tp, &next_tp, false, NULL))
@@ -2154,23 +2165,17 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
         send_ext* se = CONTAINING_RECORD(RemoveHeadList(&context->lastinode.exts), send_ext, list_entry);
         send_ext* se2 = context->parent ? CONTAINING_RECORD(RemoveHeadList(&context->lastinode.oldexts), send_ext, list_entry) : NULL;
         ULONG pos;
-        EXTENT_DATA2* ed2;
 
         if (se2) {
-            if (se->data.type == EXTENT_TYPE_INLINE && se2->data.type == EXTENT_TYPE_INLINE &&
-                RtlCompareMemory(se->data.data, se2->data.data, (ULONG)se->data.decoded_size) == (ULONG)se->data.decoded_size) {
+            if (se->data.type == BTRFS_FILE_EXTENT_INLINE && se2->data.type == BTRFS_FILE_EXTENT_INLINE &&
+                RtlCompareMemory(&se->data.disk_bytenr, &se2->data.disk_bytenr, (ULONG)se->data.ram_bytes) == (ULONG)se->data.ram_bytes) {
                 ExFreePool(se);
                 ExFreePool(se2);
                 continue;
             }
 
-            if (se->data.type == EXTENT_TYPE_REGULAR && se2->data.type == EXTENT_TYPE_REGULAR) {
-                EXTENT_DATA2 *ed2a, *ed2b;
-
-                ed2a = (EXTENT_DATA2*)se->data.data;
-                ed2b = (EXTENT_DATA2*)se2->data.data;
-
-                if (RtlCompareMemory(ed2a, ed2b, sizeof(EXTENT_DATA2)) == sizeof(EXTENT_DATA2)) {
+            if (se->data.type == BTRFS_FILE_EXTENT_REG && se2->data.type == BTRFS_FILE_EXTENT_REG) {
+                if (RtlCompareMemory(&se->data.disk_bytenr, &se2->data.disk_bytenr, sizeof(struct btrfs_file_extent_item) - offsetof(struct btrfs_file_extent_item, disk_bytenr)) == sizeof(struct btrfs_file_extent_item) - offsetof(struct btrfs_file_extent_item, disk_bytenr)) {
                     ExFreePool(se);
                     ExFreePool(se2);
                     continue;
@@ -2178,31 +2183,31 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
             }
         }
 
-        if (se->data.type == EXTENT_TYPE_INLINE) {
+        if (se->data.type == BTRFS_FILE_EXTENT_INLINE) {
             pos = context->datalen;
 
-            send_command(context, BTRFS_SEND_CMD_WRITE);
+            send_command(context, BTRFS_SEND_C_WRITE);
 
-            send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
-            send_add_tlv(context, BTRFS_SEND_TLV_OFFSET, &se->offset, sizeof(uint64_t));
+            send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+            send_add_tlv(context, BTRFS_SEND_A_FILE_OFFSET, &se->offset, sizeof(uint64_t));
 
-            if (se->data.compression == BTRFS_COMPRESSION_NONE)
-                send_add_tlv(context, BTRFS_SEND_TLV_DATA, se->data.data, (uint16_t)se->data.decoded_size);
-            else if (se->data.compression == BTRFS_COMPRESSION_ZLIB || se->data.compression == BTRFS_COMPRESSION_LZO || se->data.compression == BTRFS_COMPRESSION_ZSTD) {
-                ULONG inlen = se->datalen - (ULONG)offsetof(EXTENT_DATA, data[0]);
+            if (se->data.compression == BTRFS_COMPRESS_NONE)
+                send_add_tlv(context, BTRFS_SEND_A_DATA, (uint8_t*)&se->data.disk_bytenr, (uint16_t)se->data.ram_bytes);
+            else if (se->data.compression == BTRFS_COMPRESS_ZLIB || se->data.compression == BTRFS_COMPRESS_LZO || se->data.compression == BTRFS_COMPRESS_ZSTD) {
+                ULONG inlen = se->datalen - (ULONG)offsetof(struct btrfs_file_extent_item, disk_bytenr);
 
-                send_add_tlv(context, BTRFS_SEND_TLV_DATA, NULL, (uint16_t)se->data.decoded_size);
-                RtlZeroMemory(&context->data[context->datalen - se->data.decoded_size], (ULONG)se->data.decoded_size);
+                send_add_tlv(context, BTRFS_SEND_A_DATA, NULL, (uint16_t)se->data.ram_bytes);
+                RtlZeroMemory(&context->data[context->datalen - se->data.ram_bytes], (ULONG)se->data.ram_bytes);
 
-                if (se->data.compression == BTRFS_COMPRESSION_ZLIB) {
-                    Status = zlib_decompress(se->data.data, inlen, &context->data[context->datalen - se->data.decoded_size], (uint32_t)se->data.decoded_size);
+                if (se->data.compression == BTRFS_COMPRESS_ZLIB) {
+                    Status = zlib_decompress((uint8_t*)&se->data.disk_bytenr, inlen, &context->data[context->datalen - se->data.ram_bytes], (uint32_t)se->data.ram_bytes);
                     if (!NT_SUCCESS(Status)) {
                         ERR("zlib_decompress returned %08lx\n", Status);
                         ExFreePool(se);
                         if (se2) ExFreePool(se2);
                         return Status;
                     }
-                } else if (se->data.compression == BTRFS_COMPRESSION_LZO) {
+                } else if (se->data.compression == BTRFS_COMPRESS_LZO) {
                     if (inlen < sizeof(uint32_t)) {
                         ERR("extent data was truncated\n");
                         ExFreePool(se);
@@ -2211,15 +2216,15 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                     } else
                         inlen -= sizeof(uint32_t);
 
-                    Status = lzo_decompress(se->data.data + sizeof(uint32_t), inlen, &context->data[context->datalen - se->data.decoded_size], (uint32_t)se->data.decoded_size, sizeof(uint32_t));
+                    Status = lzo_decompress((uint8_t*)&se->data.disk_bytenr + sizeof(uint32_t), inlen, &context->data[context->datalen - se->data.ram_bytes], (uint32_t)se->data.ram_bytes, sizeof(uint32_t));
                     if (!NT_SUCCESS(Status)) {
                         ERR("lzo_decompress returned %08lx\n", Status);
                         ExFreePool(se);
                         if (se2) ExFreePool(se2);
                         return Status;
                     }
-                } else if (se->data.compression == BTRFS_COMPRESSION_ZSTD) {
-                    Status = zstd_decompress(se->data.data, inlen, &context->data[context->datalen - se->data.decoded_size], (uint32_t)se->data.decoded_size);
+                } else if (se->data.compression == BTRFS_COMPRESS_ZSTD) {
+                    Status = zstd_decompress((uint8_t*)&se->data.disk_bytenr, inlen, &context->data[context->datalen - se->data.ram_bytes], (uint32_t)se->data.ram_bytes);
                     if (!NT_SUCCESS(Status)) {
                         ERR("zlib_decompress returned %08lx\n", Status);
                         ExFreePool(se);
@@ -2241,9 +2246,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
             continue;
         }
 
-        ed2 = (EXTENT_DATA2*)se->data.data;
-
-        if (ed2->size != 0 && (context->parent || context->num_clones > 0)) {
+        if (se->data.disk_num_bytes != 0 && (context->parent || context->num_clones > 0)) {
             if (try_clone(context, se)) {
                 ExFreePool(se);
                 if (se2) ExFreePool(se2);
@@ -2251,11 +2254,11 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
             }
         }
 
-        if (ed2->size == 0) { // write sparse
+        if (se->data.disk_num_bytes == 0) { // write sparse
             uint64_t off, offset;
 
-            for (off = ed2->offset; off < ed2->offset + ed2->num_bytes; off += MAX_SEND_WRITE) {
-                uint16_t length = (uint16_t)min(min(ed2->offset + ed2->num_bytes - off, MAX_SEND_WRITE), context->lastinode.size - se->offset - off);
+            for (off = se->data.offset; off < se->data.offset + se->data.num_bytes; off += MAX_SEND_WRITE) {
+                uint16_t length = (uint16_t)min(min(se->data.offset + se->data.num_bytes - off, MAX_SEND_WRITE), context->lastinode.size - se->offset - off);
 
                 if (context->datalen > SEND_BUFFER_LENGTH) {
                     Status = wait_for_flush(context, tp1, tp2);
@@ -2275,23 +2278,23 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
 
                 pos = context->datalen;
 
-                send_command(context, BTRFS_SEND_CMD_WRITE);
+                send_command(context, BTRFS_SEND_C_WRITE);
 
-                send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+                send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
 
                 offset = se->offset + off;
-                send_add_tlv(context, BTRFS_SEND_TLV_OFFSET, &offset, sizeof(uint64_t));
+                send_add_tlv(context, BTRFS_SEND_A_FILE_OFFSET, &offset, sizeof(uint64_t));
 
-                send_add_tlv(context, BTRFS_SEND_TLV_DATA, NULL, length);
+                send_add_tlv(context, BTRFS_SEND_A_DATA, NULL, length);
                 RtlZeroMemory(&context->data[context->datalen - length], length);
 
                 send_command_finish(context, pos);
             }
-        } else if (se->data.compression == BTRFS_COMPRESSION_NONE) {
+        } else if (se->data.compression == BTRFS_COMPRESS_NONE) {
             uint64_t off, offset;
             uint8_t* buf;
 
-            buf = ExAllocatePoolWithTag(NonPagedPool, MAX_SEND_WRITE + (2 * context->Vcb->superblock.sector_size), ALLOC_TAG);
+            buf = ExAllocatePoolWithTag(NonPagedPool, MAX_SEND_WRITE + (2 * context->Vcb->superblock.sectorsize), ALLOC_TAG);
             if (!buf) {
                 ERR("out of memory\n");
                 ExFreePool(se);
@@ -2299,10 +2302,10 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
-            for (off = ed2->offset; off < ed2->offset + ed2->num_bytes; off += MAX_SEND_WRITE) {
-                uint16_t length = (uint16_t)min(ed2->offset + ed2->num_bytes - off, MAX_SEND_WRITE);
+            for (off = se->data.offset; off < se->data.offset + se->data.num_bytes; off += MAX_SEND_WRITE) {
+                uint16_t length = (uint16_t)min(se->data.offset + se->data.num_bytes - off, MAX_SEND_WRITE);
                 ULONG skip_start;
-                uint64_t addr = ed2->address + off;
+                uint64_t addr = se->data.disk_bytenr + off;
                 void* csum;
 
                 if (context->datalen > SEND_BUFFER_LENGTH) {
@@ -2323,7 +2326,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                     }
                 }
 
-                skip_start = addr & (context->Vcb->superblock.sector_size - 1);
+                skip_start = addr & (context->Vcb->superblock.sectorsize - 1);
                 addr -= skip_start;
 
                 if (context->lastinode.flags & BTRFS_INODE_NODATASUM)
@@ -2331,7 +2334,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                 else {
                     uint32_t len;
 
-                    len = (uint32_t)sector_align(length + skip_start, context->Vcb->superblock.sector_size) >> context->Vcb->sector_shift;
+                    len = (uint32_t)sector_align(length + skip_start, context->Vcb->superblock.sectorsize) >> context->Vcb->sector_shift;
 
                     csum = ExAllocatePoolWithTag(PagedPool, len * context->Vcb->csum_size, ALLOC_TAG);
                     if (!csum) {
@@ -2353,7 +2356,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                     }
                 }
 
-                Status = read_data(context->Vcb, addr, (uint32_t)sector_align(length + skip_start, context->Vcb->superblock.sector_size),
+                Status = read_data(context->Vcb, addr, (uint32_t)sector_align(length + skip_start, context->Vcb->superblock.sectorsize),
                                    csum, false, buf, NULL, NULL, NULL, 0, false, NormalPagePriority);
                 if (!NT_SUCCESS(Status)) {
                     ERR("read_data returned %08lx\n", Status);
@@ -2369,15 +2372,15 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
 
                 pos = context->datalen;
 
-                send_command(context, BTRFS_SEND_CMD_WRITE);
+                send_command(context, BTRFS_SEND_C_WRITE);
 
-                send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+                send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
 
                 offset = se->offset + off;
-                send_add_tlv(context, BTRFS_SEND_TLV_OFFSET, &offset, sizeof(uint64_t));
+                send_add_tlv(context, BTRFS_SEND_A_FILE_OFFSET, &offset, sizeof(uint64_t));
 
                 length = (uint16_t)min(context->lastinode.size - se->offset - off, length);
-                send_add_tlv(context, BTRFS_SEND_TLV_DATA, buf + skip_start, length);
+                send_add_tlv(context, BTRFS_SEND_A_DATA, buf + skip_start, length);
 
                 send_command_finish(context, pos);
             }
@@ -2388,7 +2391,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
             uint64_t off;
             void* csum;
 
-            buf = ExAllocatePoolWithTag(PagedPool, (ULONG)se->data.decoded_size, ALLOC_TAG);
+            buf = ExAllocatePoolWithTag(PagedPool, (ULONG)se->data.ram_bytes, ALLOC_TAG);
             if (!buf) {
                 ERR("out of memory\n");
                 ExFreePool(se);
@@ -2396,7 +2399,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
-            compbuf = ExAllocatePoolWithTag(PagedPool, (ULONG)ed2->size, ALLOC_TAG);
+            compbuf = ExAllocatePoolWithTag(PagedPool, (ULONG)se->data.disk_num_bytes, ALLOC_TAG);
             if (!compbuf) {
                 ERR("out of memory\n");
                 ExFreePool(buf);
@@ -2410,7 +2413,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
             else {
                 uint32_t len;
 
-                len = (uint32_t)(ed2->size >> context->Vcb->sector_shift);
+                len = (uint32_t)(se->data.disk_num_bytes >> context->Vcb->sector_shift);
 
                 csum = ExAllocatePoolWithTag(PagedPool, len * context->Vcb->csum_size, ALLOC_TAG);
                 if (!csum) {
@@ -2422,7 +2425,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                     return STATUS_INSUFFICIENT_RESOURCES;
                 }
 
-                Status = load_csum(context->Vcb, csum, ed2->address, len, NULL);
+                Status = load_csum(context->Vcb, csum, se->data.disk_bytenr, len, NULL);
                 if (!NT_SUCCESS(Status)) {
                     ERR("load_csum returned %08lx\n", Status);
                     ExFreePool(csum);
@@ -2434,7 +2437,7 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                 }
             }
 
-            Status = read_data(context->Vcb, ed2->address, (uint32_t)ed2->size, csum, false, compbuf, NULL, NULL, NULL, 0, false, NormalPagePriority);
+            Status = read_data(context->Vcb, se->data.disk_bytenr, (uint32_t)se->data.disk_num_bytes, csum, false, compbuf, NULL, NULL, NULL, 0, false, NormalPagePriority);
             if (!NT_SUCCESS(Status)) {
                 ERR("read_data returned %08lx\n", Status);
                 ExFreePool(compbuf);
@@ -2448,8 +2451,8 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
             if (csum)
                 ExFreePool(csum);
 
-            if (se->data.compression == BTRFS_COMPRESSION_ZLIB) {
-                Status = zlib_decompress(compbuf, (uint32_t)ed2->size, buf, (uint32_t)se->data.decoded_size);
+            if (se->data.compression == BTRFS_COMPRESS_ZLIB) {
+                Status = zlib_decompress(compbuf, (uint32_t)se->data.disk_num_bytes, buf, (uint32_t)se->data.ram_bytes);
                 if (!NT_SUCCESS(Status)) {
                     ERR("zlib_decompress returned %08lx\n", Status);
                     ExFreePool(compbuf);
@@ -2458,8 +2461,8 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                     if (se2) ExFreePool(se2);
                     return Status;
                 }
-            } else if (se->data.compression == BTRFS_COMPRESSION_LZO) {
-                Status = lzo_decompress(&compbuf[sizeof(uint32_t)], (uint32_t)ed2->size, buf, (uint32_t)se->data.decoded_size, sizeof(uint32_t));
+            } else if (se->data.compression == BTRFS_COMPRESS_LZO) {
+                Status = lzo_decompress(&compbuf[sizeof(uint32_t)], (uint32_t)se->data.disk_num_bytes, buf, (uint32_t)se->data.ram_bytes, sizeof(uint32_t));
                 if (!NT_SUCCESS(Status)) {
                     ERR("lzo_decompress returned %08lx\n", Status);
                     ExFreePool(compbuf);
@@ -2468,8 +2471,8 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
                     if (se2) ExFreePool(se2);
                     return Status;
                 }
-            } else if (se->data.compression == BTRFS_COMPRESSION_ZSTD) {
-                Status = zstd_decompress(compbuf, (uint32_t)ed2->size, buf, (uint32_t)se->data.decoded_size);
+            } else if (se->data.compression == BTRFS_COMPRESS_ZSTD) {
+                Status = zstd_decompress(compbuf, (uint32_t)se->data.disk_num_bytes, buf, (uint32_t)se->data.ram_bytes);
                 if (!NT_SUCCESS(Status)) {
                     ERR("zstd_decompress returned %08lx\n", Status);
                     ExFreePool(compbuf);
@@ -2482,8 +2485,8 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
 
             ExFreePool(compbuf);
 
-            for (off = ed2->offset; off < ed2->offset + ed2->num_bytes; off += MAX_SEND_WRITE) {
-                uint16_t length = (uint16_t)min(ed2->offset + ed2->num_bytes - off, MAX_SEND_WRITE);
+            for (off = se->data.offset; off < se->data.offset + se->data.num_bytes; off += MAX_SEND_WRITE) {
+                uint16_t length = (uint16_t)min(se->data.offset + se->data.num_bytes - off, MAX_SEND_WRITE);
                 uint64_t offset;
 
                 if (context->datalen > SEND_BUFFER_LENGTH) {
@@ -2506,15 +2509,15 @@ static NTSTATUS flush_extents(send_context* context, traverse_ptr* tp1, traverse
 
                 pos = context->datalen;
 
-                send_command(context, BTRFS_SEND_CMD_WRITE);
+                send_command(context, BTRFS_SEND_C_WRITE);
 
-                send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+                send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
 
                 offset = se->offset + off;
-                send_add_tlv(context, BTRFS_SEND_TLV_OFFSET, &offset, sizeof(uint64_t));
+                send_add_tlv(context, BTRFS_SEND_A_FILE_OFFSET, &offset, sizeof(uint64_t));
 
                 length = (uint16_t)min(context->lastinode.size - se->offset - off, length);
-                send_add_tlv(context, BTRFS_SEND_TLV_DATA, &buf[off], length);
+                send_add_tlv(context, BTRFS_SEND_A_DATA, &buf[off], length);
 
                 send_command_finish(context, pos);
             }
@@ -2637,50 +2640,47 @@ static NTSTATUS send_extent_data(send_context* context, traverse_ptr* tp, traver
         return STATUS_SUCCESS;
 
     if (tp) {
-        EXTENT_DATA* ed;
-        EXTENT_DATA2* ed2 = NULL;
+        struct btrfs_file_extent_item* ed;
 
-        if (tp->item->size < sizeof(EXTENT_DATA)) {
-            ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset,
-                tp->item->size, sizeof(EXTENT_DATA));
+        if (tp->item->size < offsetof(struct btrfs_file_extent_item, disk_bytenr)) {
+            ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset,
+                tp->item->size, offsetof(struct btrfs_file_extent_item, disk_bytenr));
             return STATUS_INTERNAL_ERROR;
         }
 
-        ed = (EXTENT_DATA*)tp->item->data;
+        ed = (struct btrfs_file_extent_item*)tp->item->data;
 
-        if (ed->encryption != BTRFS_ENCRYPTION_NONE) {
+        if (ed->encryption != 0) {
             ERR("unknown encryption type %u\n", ed->encryption);
             return STATUS_INTERNAL_ERROR;
         }
 
-        if (ed->encoding != BTRFS_ENCODING_NONE) {
-            ERR("unknown encoding type %u\n", ed->encoding);
+        if (ed->other_encoding != 0) {
+            ERR("unknown encoding type %u\n", ed->other_encoding);
             return STATUS_INTERNAL_ERROR;
         }
 
-        if (ed->compression != BTRFS_COMPRESSION_NONE && ed->compression != BTRFS_COMPRESSION_ZLIB &&
-            ed->compression != BTRFS_COMPRESSION_LZO && ed->compression != BTRFS_COMPRESSION_ZSTD) {
+        if (ed->compression != BTRFS_COMPRESS_NONE && ed->compression != BTRFS_COMPRESS_ZLIB &&
+            ed->compression != BTRFS_COMPRESS_LZO && ed->compression != BTRFS_COMPRESS_ZSTD) {
             ERR("unknown compression type %u\n", ed->compression);
             return STATUS_INTERNAL_ERROR;
         }
 
-        if (ed->type == EXTENT_TYPE_REGULAR) {
-            if (tp->item->size < offsetof(EXTENT_DATA, data[0]) + sizeof(EXTENT_DATA2)) {
-                ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset,
-                    tp->item->size, offsetof(EXTENT_DATA, data[0]) + sizeof(EXTENT_DATA2));
+        if (ed->type == BTRFS_FILE_EXTENT_REG) {
+            if (tp->item->size < sizeof(struct btrfs_file_extent_item)) {
+                ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset,
+                    tp->item->size, sizeof(struct btrfs_file_extent_item));
                 return STATUS_INTERNAL_ERROR;
             }
-
-            ed2 = (EXTENT_DATA2*)ed->data;
-        } else if (ed->type == EXTENT_TYPE_INLINE) {
-            if (tp->item->size < offsetof(EXTENT_DATA, data[0]) + ed->decoded_size && ed->compression == BTRFS_COMPRESSION_NONE) {
-                ERR("(%I64x,%x,%I64x) was %u bytes, expected %I64u\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset,
-                    tp->item->size, offsetof(EXTENT_DATA, data[0]) + ed->decoded_size);
+        } else if (ed->type == BTRFS_FILE_EXTENT_INLINE) {
+            if (tp->item->size < offsetof(struct btrfs_file_extent_item, disk_bytenr) + ed->ram_bytes && ed->compression == BTRFS_COMPRESS_NONE) {
+                ERR("(%I64x,%x,%I64x) was %u bytes, expected %I64u\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset,
+                    tp->item->size, offsetof(struct btrfs_file_extent_item, disk_bytenr) + ed->ram_bytes);
                 return STATUS_INTERNAL_ERROR;
             }
         }
 
-        if ((ed->type == EXTENT_TYPE_INLINE || (ed->type == EXTENT_TYPE_REGULAR && ed2->size != 0)) && ed->decoded_size != 0) {
+        if ((ed->type == BTRFS_FILE_EXTENT_INLINE || (ed->type == BTRFS_FILE_EXTENT_REG && ed->disk_num_bytes != 0)) && ed->ram_bytes != 0) {
             send_ext* se = ExAllocatePoolWithTag(PagedPool, offsetof(send_ext, data) + tp->item->size, ALLOC_TAG);
 
             if (!se) {
@@ -2696,50 +2696,47 @@ static NTSTATUS send_extent_data(send_context* context, traverse_ptr* tp, traver
     }
 
     if (tp2) {
-        EXTENT_DATA* ed;
-        EXTENT_DATA2* ed2 = NULL;
+        struct btrfs_file_extent_item* ed;
 
-        if (tp2->item->size < sizeof(EXTENT_DATA)) {
-            ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp2->item->key.obj_id, tp2->item->key.obj_type, tp2->item->key.offset,
-                tp2->item->size, sizeof(EXTENT_DATA));
+        if (tp2->item->size < offsetof(struct btrfs_file_extent_item, disk_bytenr)) {
+            ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp2->item->key.objectid, tp2->item->key.type, tp2->item->key.offset,
+                tp2->item->size, offsetof(struct btrfs_file_extent_item, disk_bytenr));
             return STATUS_INTERNAL_ERROR;
         }
 
-        ed = (EXTENT_DATA*)tp2->item->data;
+        ed = (struct btrfs_file_extent_item*)tp2->item->data;
 
-        if (ed->encryption != BTRFS_ENCRYPTION_NONE) {
+        if (ed->encryption != 0) {
             ERR("unknown encryption type %u\n", ed->encryption);
             return STATUS_INTERNAL_ERROR;
         }
 
-        if (ed->encoding != BTRFS_ENCODING_NONE) {
-            ERR("unknown encoding type %u\n", ed->encoding);
+        if (ed->other_encoding != 0) {
+            ERR("unknown encoding type %u\n", ed->other_encoding);
             return STATUS_INTERNAL_ERROR;
         }
 
-        if (ed->compression != BTRFS_COMPRESSION_NONE && ed->compression != BTRFS_COMPRESSION_ZLIB &&
-            ed->compression != BTRFS_COMPRESSION_LZO && ed->compression != BTRFS_COMPRESSION_ZSTD) {
+        if (ed->compression != BTRFS_COMPRESS_NONE && ed->compression != BTRFS_COMPRESS_ZLIB &&
+            ed->compression != BTRFS_COMPRESS_LZO && ed->compression != BTRFS_COMPRESS_ZSTD) {
             ERR("unknown compression type %u\n", ed->compression);
             return STATUS_INTERNAL_ERROR;
         }
 
-        if (ed->type == EXTENT_TYPE_REGULAR) {
-            if (tp2->item->size < offsetof(EXTENT_DATA, data[0]) + sizeof(EXTENT_DATA2)) {
-                ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp2->item->key.obj_id, tp2->item->key.obj_type, tp2->item->key.offset,
-                    tp2->item->size, offsetof(EXTENT_DATA, data[0]) + sizeof(EXTENT_DATA2));
+        if (ed->type == BTRFS_FILE_EXTENT_REG) {
+            if (tp2->item->size < sizeof(struct btrfs_file_extent_item)) {
+                ERR("(%I64x,%x,%I64x) was %u bytes, expected %Iu\n", tp2->item->key.objectid, tp2->item->key.type, tp2->item->key.offset,
+                    tp2->item->size, sizeof(struct btrfs_file_extent_item));
                 return STATUS_INTERNAL_ERROR;
             }
-
-            ed2 = (EXTENT_DATA2*)ed->data;
-        } else if (ed->type == EXTENT_TYPE_INLINE) {
-            if (tp2->item->size < offsetof(EXTENT_DATA, data[0]) + ed->decoded_size) {
-                ERR("(%I64x,%x,%I64x) was %u bytes, expected %I64u\n", tp2->item->key.obj_id, tp2->item->key.obj_type, tp2->item->key.offset,
-                    tp2->item->size, offsetof(EXTENT_DATA, data[0]) + ed->decoded_size);
+        } else if (ed->type == BTRFS_FILE_EXTENT_INLINE) {
+            if (tp2->item->size < offsetof(struct btrfs_file_extent_item, disk_bytenr) + ed->ram_bytes) {
+                ERR("(%I64x,%x,%I64x) was %u bytes, expected %I64u\n", tp2->item->key.objectid, tp2->item->key.type, tp2->item->key.offset,
+                    tp2->item->size, offsetof(struct btrfs_file_extent_item, disk_bytenr) + ed->ram_bytes);
                 return STATUS_INTERNAL_ERROR;
             }
         }
 
-        if ((ed->type == EXTENT_TYPE_INLINE || (ed->type == EXTENT_TYPE_REGULAR && ed2->size != 0)) && ed->decoded_size != 0) {
+        if ((ed->type == BTRFS_FILE_EXTENT_INLINE || (ed->type == BTRFS_FILE_EXTENT_REG && ed->disk_num_bytes != 0)) && ed->ram_bytes != 0) {
             send_ext* se = ExAllocatePoolWithTag(PagedPool, offsetof(send_ext, data) + tp2->item->size, ALLOC_TAG);
 
             if (!se) {
@@ -2782,82 +2779,82 @@ static NTSTATUS send_xattr(send_context* context, traverse_ptr* tp, traverse_ptr
             return STATUS_SUCCESS;
     }
 
-    if (tp && tp->item->size < sizeof(DIR_ITEM)) {
-        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset,
-            tp->item->size, sizeof(DIR_ITEM));
+    if (tp && tp->item->size < sizeof(struct btrfs_dir_item)) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset,
+            tp->item->size, sizeof(struct btrfs_dir_item));
         return STATUS_INTERNAL_ERROR;
     }
 
-    if (tp2 && tp2->item->size < sizeof(DIR_ITEM)) {
-        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp2->item->key.obj_id, tp2->item->key.obj_type, tp2->item->key.offset,
-            tp2->item->size, sizeof(DIR_ITEM));
+    if (tp2 && tp2->item->size < sizeof(struct btrfs_dir_item)) {
+        ERR("(%I64x,%x,%I64x) was %u bytes, expected at least %Iu\n", tp2->item->key.objectid, tp2->item->key.type, tp2->item->key.offset,
+            tp2->item->size, sizeof(struct btrfs_dir_item));
         return STATUS_INTERNAL_ERROR;
     }
 
     if (tp && !tp2) {
         ULONG len;
-        DIR_ITEM* di;
+        struct btrfs_dir_item* di;
 
         len = tp->item->size;
-        di = (DIR_ITEM*)tp->item->data;
+        di = (struct btrfs_dir_item*)tp->item->data;
 
         do {
             ULONG pos;
 
-            if (len < sizeof(DIR_ITEM) || len < offsetof(DIR_ITEM, name[0]) + di->m + di->n) {
-                ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset);
+            if (len < sizeof(struct btrfs_dir_item) || len < sizeof(struct btrfs_dir_item) + di->data_len + di->name_len) {
+                ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset);
                 return STATUS_INTERNAL_ERROR;
             }
 
             pos = context->datalen;
-            send_command(context, BTRFS_SEND_CMD_SET_XATTR);
-            send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
-            send_add_tlv(context, BTRFS_SEND_TLV_XATTR_NAME, di->name, di->n);
-            send_add_tlv(context, BTRFS_SEND_TLV_XATTR_DATA, &di->name[di->n], di->m);
+            send_command(context, BTRFS_SEND_C_SET_XATTR);
+            send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+            send_add_tlv(context, BTRFS_SEND_A_XATTR_NAME, &di[1], di->name_len);
+            send_add_tlv(context, BTRFS_SEND_A_XATTR_DATA, (uint8_t*)&di[1] + di->name_len, di->data_len);
             send_command_finish(context, pos);
 
-            len -= (ULONG)offsetof(DIR_ITEM, name[0]) + di->m + di->n;
-            di = (DIR_ITEM*)&di->name[di->m + di->n];
+            len -= (ULONG)sizeof(struct btrfs_dir_item) + di->data_len + di->name_len;
+            di = (struct btrfs_dir_item*)((uint8_t*)&di[1] + di->data_len + di->name_len);
         } while (len > 0);
     } else if (!tp && tp2) {
         ULONG len;
-        DIR_ITEM* di;
+        struct btrfs_dir_item* di;
 
         len = tp2->item->size;
-        di = (DIR_ITEM*)tp2->item->data;
+        di = (struct btrfs_dir_item*)tp2->item->data;
 
         do {
             ULONG pos;
 
-            if (len < sizeof(DIR_ITEM) || len < offsetof(DIR_ITEM, name[0]) + di->m + di->n) {
-                ERR("(%I64x,%x,%I64x) was truncated\n", tp2->item->key.obj_id, tp2->item->key.obj_type, tp2->item->key.offset);
+            if (len < sizeof(struct btrfs_dir_item) || len < sizeof(struct btrfs_dir_item) + di->data_len + di->name_len) {
+                ERR("(%I64x,%x,%I64x) was truncated\n", tp2->item->key.objectid, tp2->item->key.type, tp2->item->key.offset);
                 return STATUS_INTERNAL_ERROR;
             }
 
             pos = context->datalen;
-            send_command(context, BTRFS_SEND_CMD_REMOVE_XATTR);
-            send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
-            send_add_tlv(context, BTRFS_SEND_TLV_XATTR_NAME, di->name, di->n);
+            send_command(context, BTRFS_SEND_C_REMOVE_XATTR);
+            send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+            send_add_tlv(context, BTRFS_SEND_A_XATTR_NAME, &di[1], di->name_len);
             send_command_finish(context, pos);
 
-            len -= (ULONG)offsetof(DIR_ITEM, name[0]) + di->m + di->n;
-            di = (DIR_ITEM*)&di->name[di->m + di->n];
+            len -= (ULONG)sizeof(struct btrfs_dir_item) + di->data_len + di->name_len;
+            di = (struct btrfs_dir_item*)((uint8_t*)&di[1] + di->data_len + di->name_len);
         } while (len > 0);
     } else {
         ULONG len;
-        DIR_ITEM* di;
+        struct btrfs_dir_item* di;
         LIST_ENTRY xattrs;
 
         InitializeListHead(&xattrs);
 
         len = tp->item->size;
-        di = (DIR_ITEM*)tp->item->data;
+        di = (struct btrfs_dir_item*)tp->item->data;
 
         do {
             xattr_cmp* xa;
 
-            if (len < sizeof(DIR_ITEM) || len < offsetof(DIR_ITEM, name[0]) + di->m + di->n) {
-                ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.obj_id, tp->item->key.obj_type, tp->item->key.offset);
+            if (len < sizeof(struct btrfs_dir_item) || len < sizeof(struct btrfs_dir_item) + di->data_len + di->name_len) {
+                ERR("(%I64x,%x,%I64x) was truncated\n", tp->item->key.objectid, tp->item->key.type, tp->item->key.offset);
                 return STATUS_INTERNAL_ERROR;
             }
 
@@ -2872,29 +2869,29 @@ static NTSTATUS send_xattr(send_context* context, traverse_ptr* tp, traverse_ptr
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
-            xa->namelen = di->n;
-            xa->name = di->name;
-            xa->value1len = di->m;
-            xa->value1 = di->name + di->n;
+            xa->namelen = di->name_len;
+            xa->name = (char*)&di[1];
+            xa->value1len = di->data_len;
+            xa->value1 = (char*)&di[1] + di->name_len;
             xa->value2len = 0;
             xa->value2 = NULL;
 
             InsertTailList(&xattrs, &xa->list_entry);
 
-            len -= (ULONG)offsetof(DIR_ITEM, name[0]) + di->m + di->n;
-            di = (DIR_ITEM*)&di->name[di->m + di->n];
+            len -= (ULONG)sizeof(struct btrfs_dir_item) + di->data_len + di->name_len;
+            di = (struct btrfs_dir_item*)((uint8_t*)&di[1] + di->data_len + di->name_len);
         } while (len > 0);
 
         len = tp2->item->size;
-        di = (DIR_ITEM*)tp2->item->data;
+        di = (struct btrfs_dir_item*)tp2->item->data;
 
         do {
             xattr_cmp* xa;
             LIST_ENTRY* le;
             bool found = false;
 
-            if (len < sizeof(DIR_ITEM) || len < offsetof(DIR_ITEM, name[0]) + di->m + di->n) {
-                ERR("(%I64x,%x,%I64x) was truncated\n", tp2->item->key.obj_id, tp2->item->key.obj_type, tp2->item->key.offset);
+            if (len < sizeof(struct btrfs_dir_item) || len < sizeof(struct btrfs_dir_item) + di->data_len + di->name_len) {
+                ERR("(%I64x,%x,%I64x) was truncated\n", tp2->item->key.objectid, tp2->item->key.type, tp2->item->key.offset);
                 return STATUS_INTERNAL_ERROR;
             }
 
@@ -2902,9 +2899,9 @@ static NTSTATUS send_xattr(send_context* context, traverse_ptr* tp, traverse_ptr
             while (le != &xattrs) {
                 xa = CONTAINING_RECORD(le, xattr_cmp, list_entry);
 
-                if (xa->namelen == di->n && RtlCompareMemory(xa->name, di->name, di->n) == di->n) {
-                    xa->value2len = di->m;
-                    xa->value2 = di->name + di->n;
+                if (xa->namelen == di->name_len && RtlCompareMemory(xa->name, &di[1], di->name_len) == di->name_len) {
+                    xa->value2len = di->data_len;
+                    xa->value2 = (char*)&di[1] + di->name_len;
                     found = true;
                     break;
                 }
@@ -2924,18 +2921,18 @@ static NTSTATUS send_xattr(send_context* context, traverse_ptr* tp, traverse_ptr
                     return STATUS_INSUFFICIENT_RESOURCES;
                 }
 
-                xa->namelen = di->n;
-                xa->name = di->name;
+                xa->namelen = di->name_len;
+                xa->name = (char*)&di[1];
                 xa->value1len = 0;
                 xa->value1 = NULL;
-                xa->value2len = di->m;
-                xa->value2 = di->name + di->n;
+                xa->value2len = di->data_len;
+                xa->value2 = (char*)&di[1] + di->name_len;
 
                 InsertTailList(&xattrs, &xa->list_entry);
             }
 
-            len -= (ULONG)offsetof(DIR_ITEM, name[0]) + di->m + di->n;
-            di = (DIR_ITEM*)&di->name[di->m + di->n];
+            len -= (ULONG)sizeof(struct btrfs_dir_item) + di->data_len + di->name_len;
+            di = (struct btrfs_dir_item*)((uint8_t*)&di[1] + di->data_len + di->name_len);
         } while (len > 0);
 
         while (!IsListEmpty(&xattrs)) {
@@ -2946,16 +2943,16 @@ static NTSTATUS send_xattr(send_context* context, traverse_ptr* tp, traverse_ptr
 
                 if (!xa->value1) {
                     pos = context->datalen;
-                    send_command(context, BTRFS_SEND_CMD_REMOVE_XATTR);
-                    send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
-                    send_add_tlv(context, BTRFS_SEND_TLV_XATTR_NAME, xa->name, xa->namelen);
+                    send_command(context, BTRFS_SEND_C_REMOVE_XATTR);
+                    send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+                    send_add_tlv(context, BTRFS_SEND_A_XATTR_NAME, xa->name, xa->namelen);
                     send_command_finish(context, pos);
                 } else {
                     pos = context->datalen;
-                    send_command(context, BTRFS_SEND_CMD_SET_XATTR);
-                    send_add_tlv(context, BTRFS_SEND_TLV_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
-                    send_add_tlv(context, BTRFS_SEND_TLV_XATTR_NAME, xa->name, xa->namelen);
-                    send_add_tlv(context, BTRFS_SEND_TLV_XATTR_DATA, xa->value1, xa->value1len);
+                    send_command(context, BTRFS_SEND_C_SET_XATTR);
+                    send_add_tlv(context, BTRFS_SEND_A_PATH, context->lastinode.path, context->lastinode.path ? (uint16_t)strlen(context->lastinode.path) : 0);
+                    send_add_tlv(context, BTRFS_SEND_A_XATTR_NAME, xa->name, xa->namelen);
+                    send_add_tlv(context, BTRFS_SEND_A_XATTR_DATA, xa->value1, xa->value1len);
                     send_command_finish(context, pos);
                 }
             }
@@ -2971,7 +2968,7 @@ _Function_class_(KSTART_ROUTINE)
 static void __stdcall send_thread(void* ctx) {
     send_context* context = (send_context*)ctx;
     NTSTATUS Status;
-    KEY searchkey;
+    struct btrfs_key searchkey;
     traverse_ptr tp, tp2;
 
     InterlockedIncrement(&context->root->send_ops);
@@ -3009,8 +3006,8 @@ static void __stdcall send_thread(void* ctx) {
 
     ExConvertExclusiveToSharedLite(&context->Vcb->tree_lock);
 
-    searchkey.obj_id = searchkey.offset = 0;
-    searchkey.obj_type = 0;
+    searchkey.objectid = searchkey.offset = 0;
+    searchkey.type = 0;
 
     Status = find_item(context->Vcb, context->root, &tp, &searchkey, false, NULL);
     if (!NT_SUCCESS(Status)) {
@@ -3032,7 +3029,7 @@ static void __stdcall send_thread(void* ctx) {
             traverse_ptr next_tp;
 
             if (context->datalen > SEND_BUFFER_LENGTH) {
-                KEY key1 = tp.item->key, key2 = tp2.item->key;
+                struct btrfs_key key1 = tp.item->key, key2 = tp2.item->key;
 
                 ExReleaseResourceLite(&context->Vcb->tree_lock);
 
@@ -3078,7 +3075,7 @@ static void __stdcall send_thread(void* ctx) {
                 }
             }
 
-            while (!ended1 && !ended2 && tp.tree->header.address == tp2.tree->header.address) {
+            while (!ended1 && !ended2 && tp.tree->header.bytenr == tp2.tree->header.bytenr) {
                 Status = skip_to_difference(context->Vcb, &tp, &tp2, &ended1, &ended2);
                 if (!NT_SUCCESS(Status)) {
                     ERR("skip_to_difference returned %08lx\n", Status);
@@ -3090,9 +3087,9 @@ static void __stdcall send_thread(void* ctx) {
             if (!ended1 && !ended2 && !keycmp(tp.item->key, tp2.item->key)) {
                 bool no_next = false, no_next2 = false;
 
-                TRACE("~ %I64x,%x,%I64x\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset);
+                TRACE("~ %I64x,%x,%I64x\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
 
-                if (context->lastinode.inode != 0 && tp.item->key.obj_id > context->lastinode.inode) {
+                if (context->lastinode.inode != 0 && tp.item->key.objectid > context->lastinode.inode) {
                     Status = finish_inode(context, ended1 ? NULL : &tp, ended2 ? NULL : &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("finish_inode returned %08lx\n", Status);
@@ -3106,9 +3103,9 @@ static void __stdcall send_thread(void* ctx) {
                     }
                 }
 
-                if (tp.item->key.obj_type == TYPE_INODE_ITEM) {
+                if (tp.item->key.type == BTRFS_INODE_ITEM_KEY) {
                     if (tp.item->size == tp2.item->size && tp.item->size > 0 && RtlCompareMemory(tp.item->data, tp2.item->data, tp.item->size) == tp.item->size) {
-                        uint64_t inode = tp.item->key.obj_id;
+                        uint64_t inode = tp.item->key.objectid;
 
                         while (true) {
                             if (!find_next_item(context->Vcb, &tp, &next_tp, false, NULL)) {
@@ -3118,7 +3115,7 @@ static void __stdcall send_thread(void* ctx) {
 
                             tp = next_tp;
 
-                            if (tp.item->key.obj_id != inode)
+                            if (tp.item->key.objectid != inode)
                                 break;
                         }
 
@@ -3130,13 +3127,13 @@ static void __stdcall send_thread(void* ctx) {
 
                             tp2 = next_tp;
 
-                            if (tp2.item->key.obj_id != inode)
+                            if (tp2.item->key.objectid != inode)
                                 break;
                         }
 
                         no_next = true;
                     } else if (tp.item->size > sizeof(uint64_t) && tp2.item->size > sizeof(uint64_t) && *(uint64_t*)tp.item->data != *(uint64_t*)tp2.item->data) {
-                        uint64_t inode = tp.item->key.obj_id;
+                        uint64_t inode = tp.item->key.objectid;
 
                         Status = send_inode(context, NULL, &tp2);
                         if (!NT_SUCCESS(Status)) {
@@ -3153,17 +3150,17 @@ static void __stdcall send_thread(void* ctx) {
 
                             tp2 = next_tp;
 
-                            if (tp2.item->key.obj_id != inode)
+                            if (tp2.item->key.objectid != inode)
                                 break;
 
-                            if (tp2.item->key.obj_type == TYPE_INODE_REF) {
+                            if (tp2.item->key.type == BTRFS_INODE_REF_KEY) {
                                 Status = send_inode_ref(context, &tp2, true);
                                 if (!NT_SUCCESS(Status)) {
                                     ERR("send_inode_ref returned %08lx\n", Status);
                                     ExReleaseResourceLite(&context->Vcb->tree_lock);
                                     goto end;
                                 }
-                            } else if (tp2.item->key.obj_type == TYPE_INODE_EXTREF) {
+                            } else if (tp2.item->key.type == BTRFS_INODE_EXTREF_KEY) {
                                 Status = send_inode_extref(context, &tp2, true);
                                 if (!NT_SUCCESS(Status)) {
                                     ERR("send_inode_extref returned %08lx\n", Status);
@@ -3201,7 +3198,7 @@ static void __stdcall send_thread(void* ctx) {
                             goto end;
                         }
                     }
-                } else if (tp.item->key.obj_type == TYPE_INODE_REF) {
+                } else if (tp.item->key.type == BTRFS_INODE_REF_KEY) {
                     Status = send_inode_ref(context, &tp, false);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_inode_ref returned %08lx\n", Status);
@@ -3215,7 +3212,7 @@ static void __stdcall send_thread(void* ctx) {
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp.item->key.obj_type == TYPE_INODE_EXTREF) {
+                } else if (tp.item->key.type == BTRFS_INODE_EXTREF_KEY) {
                     Status = send_inode_extref(context, &tp, false);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_inode_extref returned %08lx\n", Status);
@@ -3229,7 +3226,7 @@ static void __stdcall send_thread(void* ctx) {
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp.item->key.obj_type == TYPE_EXTENT_DATA) {
+                } else if (tp.item->key.type == BTRFS_EXTENT_DATA_KEY) {
                     Status = send_extent_data(context, &tp, &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_extent_data returned %08lx\n", Status);
@@ -3241,7 +3238,7 @@ static void __stdcall send_thread(void* ctx) {
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp.item->key.obj_type == TYPE_XATTR_ITEM) {
+                } else if (tp.item->key.type == BTRFS_XATTR_ITEM_KEY) {
                     Status = send_xattr(context, &tp, &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_xattr returned %08lx\n", Status);
@@ -3269,9 +3266,9 @@ static void __stdcall send_thread(void* ctx) {
                     }
                 }
             } else if (ended2 || (!ended1 && !ended2 && keycmp(tp.item->key, tp2.item->key) == -1)) {
-                TRACE("A %I64x,%x,%I64x\n", tp.item->key.obj_id, tp.item->key.obj_type, tp.item->key.offset);
+                TRACE("A %I64x,%x,%I64x\n", tp.item->key.objectid, tp.item->key.type, tp.item->key.offset);
 
-                if (context->lastinode.inode != 0 && tp.item->key.obj_id > context->lastinode.inode) {
+                if (context->lastinode.inode != 0 && tp.item->key.objectid > context->lastinode.inode) {
                     Status = finish_inode(context, ended1 ? NULL : &tp, ended2 ? NULL : &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("finish_inode returned %08lx\n", Status);
@@ -3285,28 +3282,28 @@ static void __stdcall send_thread(void* ctx) {
                     }
                 }
 
-                if (tp.item->key.obj_type == TYPE_INODE_ITEM) {
+                if (tp.item->key.type == BTRFS_INODE_ITEM_KEY) {
                     Status = send_inode(context, &tp, NULL);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_inode returned %08lx\n", Status);
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp.item->key.obj_type == TYPE_INODE_REF) {
+                } else if (tp.item->key.type == BTRFS_INODE_REF_KEY) {
                     Status = send_inode_ref(context, &tp, false);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_inode_ref returned %08lx\n", Status);
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp.item->key.obj_type == TYPE_INODE_EXTREF) {
+                } else if (tp.item->key.type == BTRFS_INODE_EXTREF_KEY) {
                     Status = send_inode_extref(context, &tp, false);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_inode_extref returned %08lx\n", Status);
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp.item->key.obj_type == TYPE_EXTENT_DATA) {
+                } else if (tp.item->key.type == BTRFS_EXTENT_DATA_KEY) {
                     Status = send_extent_data(context, &tp, NULL);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_extent_data returned %08lx\n", Status);
@@ -3318,7 +3315,7 @@ static void __stdcall send_thread(void* ctx) {
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp.item->key.obj_type == TYPE_XATTR_ITEM) {
+                } else if (tp.item->key.type == BTRFS_XATTR_ITEM_KEY) {
                     Status = send_xattr(context, &tp, NULL);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_xattr returned %08lx\n", Status);
@@ -3337,9 +3334,9 @@ static void __stdcall send_thread(void* ctx) {
                 else
                     ended1 = true;
             } else if (ended1 || (!ended1 && !ended2 && keycmp(tp.item->key, tp2.item->key) == 1)) {
-                TRACE("B %I64x,%x,%I64x\n", tp2.item->key.obj_id, tp2.item->key.obj_type, tp2.item->key.offset);
+                TRACE("B %I64x,%x,%I64x\n", tp2.item->key.objectid, tp2.item->key.type, tp2.item->key.offset);
 
-                if (context->lastinode.inode != 0 && tp2.item->key.obj_id > context->lastinode.inode) {
+                if (context->lastinode.inode != 0 && tp2.item->key.objectid > context->lastinode.inode) {
                     Status = finish_inode(context, ended1 ? NULL : &tp, ended2 ? NULL : &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("finish_inode returned %08lx\n", Status);
@@ -3353,28 +3350,28 @@ static void __stdcall send_thread(void* ctx) {
                     }
                 }
 
-                if (tp2.item->key.obj_type == TYPE_INODE_ITEM) {
+                if (tp2.item->key.type == BTRFS_INODE_ITEM_KEY) {
                     Status = send_inode(context, NULL, &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_inode returned %08lx\n", Status);
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp2.item->key.obj_type == TYPE_INODE_REF) {
+                } else if (tp2.item->key.type == BTRFS_INODE_REF_KEY) {
                     Status = send_inode_ref(context, &tp2, true);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_inode_ref returned %08lx\n", Status);
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp2.item->key.obj_type == TYPE_INODE_EXTREF) {
+                } else if (tp2.item->key.type == BTRFS_INODE_EXTREF_KEY) {
                     Status = send_inode_extref(context, &tp2, true);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_inode_extref returned %08lx\n", Status);
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp2.item->key.obj_type == TYPE_EXTENT_DATA && !context->lastinode.deleting) {
+                } else if (tp2.item->key.type == BTRFS_EXTENT_DATA_KEY && !context->lastinode.deleting) {
                     Status = send_extent_data(context, NULL, &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_extent_data returned %08lx\n", Status);
@@ -3386,7 +3383,7 @@ static void __stdcall send_thread(void* ctx) {
                         ExReleaseResourceLite(&context->Vcb->tree_lock);
                         goto end;
                     }
-                } else if (tp2.item->key.obj_type == TYPE_XATTR_ITEM && !context->lastinode.deleting) {
+                } else if (tp2.item->key.type == BTRFS_XATTR_ITEM_KEY && !context->lastinode.deleting) {
                     Status = send_xattr(context, NULL, &tp2);
                     if (!NT_SUCCESS(Status)) {
                         ERR("send_xattr returned %08lx\n", Status);
@@ -3411,7 +3408,7 @@ static void __stdcall send_thread(void* ctx) {
             traverse_ptr next_tp;
 
             if (context->datalen > SEND_BUFFER_LENGTH) {
-                KEY key = tp.item->key;
+                struct btrfs_key key = tp.item->key;
 
                 ExReleaseResourceLite(&context->Vcb->tree_lock);
 
@@ -3439,7 +3436,7 @@ static void __stdcall send_thread(void* ctx) {
                 }
             }
 
-            if (context->lastinode.inode != 0 && tp.item->key.obj_id > context->lastinode.inode) {
+            if (context->lastinode.inode != 0 && tp.item->key.objectid > context->lastinode.inode) {
                 Status = finish_inode(context, &tp, NULL);
                 if (!NT_SUCCESS(Status)) {
                     ERR("finish_inode returned %08lx\n", Status);
@@ -3453,28 +3450,28 @@ static void __stdcall send_thread(void* ctx) {
                 }
             }
 
-            if (tp.item->key.obj_type == TYPE_INODE_ITEM) {
+            if (tp.item->key.type == BTRFS_INODE_ITEM_KEY) {
                 Status = send_inode(context, &tp, NULL);
                 if (!NT_SUCCESS(Status)) {
                     ERR("send_inode returned %08lx\n", Status);
                     ExReleaseResourceLite(&context->Vcb->tree_lock);
                     goto end;
                 }
-            } else if (tp.item->key.obj_type == TYPE_INODE_REF) {
+            } else if (tp.item->key.type == BTRFS_INODE_REF_KEY) {
                 Status = send_inode_ref(context, &tp, false);
                 if (!NT_SUCCESS(Status)) {
                     ERR("send_inode_ref returned %08lx\n", Status);
                     ExReleaseResourceLite(&context->Vcb->tree_lock);
                     goto end;
                 }
-            } else if (tp.item->key.obj_type == TYPE_INODE_EXTREF) {
+            } else if (tp.item->key.type == BTRFS_INODE_EXTREF_KEY) {
                 Status = send_inode_extref(context, &tp, false);
                 if (!NT_SUCCESS(Status)) {
                     ERR("send_inode_extref returned %08lx\n", Status);
                     ExReleaseResourceLite(&context->Vcb->tree_lock);
                     goto end;
                 }
-            } else if (tp.item->key.obj_type == TYPE_EXTENT_DATA) {
+            } else if (tp.item->key.type == BTRFS_EXTENT_DATA_KEY) {
                 Status = send_extent_data(context, &tp, NULL);
                 if (!NT_SUCCESS(Status)) {
                     ERR("send_extent_data returned %08lx\n", Status);
@@ -3486,7 +3483,7 @@ static void __stdcall send_thread(void* ctx) {
                     ExReleaseResourceLite(&context->Vcb->tree_lock);
                     goto end;
                 }
-            } else if (tp.item->key.obj_type == TYPE_XATTR_ITEM) {
+            } else if (tp.item->key.type == BTRFS_XATTR_ITEM_KEY) {
                 Status = send_xattr(context, &tp, NULL);
                 if (!NT_SUCCESS(Status)) {
                     ERR("send_xattr returned %08lx\n", Status);
@@ -3610,10 +3607,10 @@ NTSTATUS send_subvol(device_extension* Vcb, void* data, ULONG datalen, PFILE_OBJ
     fcb = FileObject->FsContext;
     ccb = FileObject->FsContext2;
 
-    if (fcb->inode != SUBVOL_ROOT_INODE || fcb == Vcb->root_fileref->fcb)
+    if (fcb->inode != BTRFS_FIRST_FREE_OBJECTID || fcb == Vcb->root_fileref->fcb)
         return STATUS_INVALID_PARAMETER;
 
-    if (!Vcb->readonly && !(fcb->subvol->root_item.flags & BTRFS_SUBVOL_READONLY))
+    if (!Vcb->readonly && !(fcb->subvol->root_item.flags & BTRFS_ROOT_SUBVOL_RDONLY))
         return STATUS_INVALID_PARAMETER;
 
     if (data) {
@@ -3667,7 +3664,7 @@ NTSTATUS send_subvol(device_extension* Vcb, void* data, ULONG datalen, PFILE_OBJ
 
             parfcb = fileobj->FsContext;
 
-            if (!parfcb || parfcb == Vcb->root_fileref->fcb || parfcb == Vcb->volume_fcb || parfcb->inode != SUBVOL_ROOT_INODE) {
+            if (!parfcb || parfcb == Vcb->root_fileref->fcb || parfcb == Vcb->volume_fcb || parfcb->inode != BTRFS_FIRST_FREE_OBJECTID) {
                 ObDereferenceObject(fileobj);
                 return STATUS_INVALID_PARAMETER;
             }
@@ -3675,7 +3672,7 @@ NTSTATUS send_subvol(device_extension* Vcb, void* data, ULONG datalen, PFILE_OBJ
             parsubvol = parfcb->subvol;
             ObDereferenceObject(fileobj);
 
-            if (!Vcb->readonly && !(parsubvol->root_item.flags & BTRFS_SUBVOL_READONLY))
+            if (!Vcb->readonly && !(parsubvol->root_item.flags & BTRFS_ROOT_SUBVOL_RDONLY))
                 return STATUS_INVALID_PARAMETER;
 
             if (parsubvol == fcb->subvol)
@@ -3720,7 +3717,7 @@ NTSTATUS send_subvol(device_extension* Vcb, void* data, ULONG datalen, PFILE_OBJ
 
                 clonefcb = fileobj->FsContext;
 
-                if (!clonefcb || clonefcb == Vcb->root_fileref->fcb || clonefcb == Vcb->volume_fcb || clonefcb->inode != SUBVOL_ROOT_INODE) {
+                if (!clonefcb || clonefcb == Vcb->root_fileref->fcb || clonefcb == Vcb->volume_fcb || clonefcb->inode != BTRFS_FIRST_FREE_OBJECTID) {
                     ObDereferenceObject(fileobj);
                     ExFreePool(clones);
                     return STATUS_INVALID_PARAMETER;
@@ -3729,7 +3726,7 @@ NTSTATUS send_subvol(device_extension* Vcb, void* data, ULONG datalen, PFILE_OBJ
                 clones[i] = clonefcb->subvol;
                 ObDereferenceObject(fileobj);
 
-                if (!Vcb->readonly && !(clones[i]->root_item.flags & BTRFS_SUBVOL_READONLY)) {
+                if (!Vcb->readonly && !(clones[i]->root_item.flags & BTRFS_ROOT_SUBVOL_RDONLY)) {
                     ExFreePool(clones);
                     return STATUS_INVALID_PARAMETER;
                 }
