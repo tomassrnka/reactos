@@ -14,10 +14,24 @@ struct OBJECT_PROPERTIES
 {
     IUnknown *punkProcess;
     UINT cRows;
-    WCHAR szName[MAX_PATH];
-    WCHAR szLabel[MAX_PROPERTY_ROWS][64];
-    WCHAR szValue[MAX_PROPERTY_ROWS][MAX_PATH];
+    LPWSTR pszName;
+    LPWSTR pszLabel[MAX_PROPERTY_ROWS];
+    LPWSTR pszValue[MAX_PROPERTY_ROWS];
 };
+
+static VOID
+FreeObjectProperties(OBJECT_PROPERTIES *pProps)
+{
+    for (UINT i = 0; i < MAX_PROPERTY_ROWS; i++)
+    {
+        CoTaskMemFree(pProps->pszLabel[i]);
+        CoTaskMemFree(pProps->pszValue[i]);
+    }
+    CoTaskMemFree(pProps->pszName);
+    if (pProps->punkProcess)
+        pProps->punkProcess->Release();
+    LocalFree(pProps);
+}
 
 static INT_PTR CALLBACK
 ObjectPropertiesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -41,10 +55,10 @@ ObjectPropertiesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         LVITEMW item = { LVIF_TEXT };
         item.iItem = i;
-        item.pszText = pProps->szLabel[i];
+        item.pszText = pProps->pszLabel[i];
         INT iItem = ListView_InsertItem(hList, &item);
         if (iItem >= 0)
-            ListView_SetItemText(hList, iItem, 1, pProps->szValue[i]);
+            ListView_SetItemText(hList, iItem, 1, pProps->pszValue[i]);
     }
 
     /* a long name or link target widens its column and scrolls instead of being cut */
@@ -69,14 +83,12 @@ ObjectPropertiesThread(LPVOID lpParameter)
     PROPSHEETHEADERW psh = { sizeof(psh) };
     psh.dwFlags = PSH_PROPSHEETPAGE | PSH_PROPTITLE | PSH_NOAPPLYNOW | PSH_NOCONTEXTHELP;
     psh.hInstance = g_hInstance;
-    psh.pszCaption = pProps->szName;
+    psh.pszCaption = pProps->pszName ? pProps->pszName : L"";
     psh.nPages = 1;
     psh.ppsp = &psp;
 
     PropertySheetW(&psh);
-    if (pProps->punkProcess)
-        pProps->punkProcess->Release();
-    LocalFree(pProps);
+    FreeObjectProperties(pProps);
     FreeLibraryAndExitThread(g_hInstance, 0);
     return 0;
 }
@@ -117,24 +129,27 @@ ShowObjectProperties(IShellFolder *psf, HWND /*hwndOwner*/, IDataObject *pdtobj)
     for (UINT iColumn = 0; pProps->cRows < MAX_PROPERTY_ROWS; iColumn++)
     {
         SHELLDETAILS header = { 0 }, value = { 0 };
-        UINT iRow = pProps->cRows;
+        LPWSTR pszLabel = NULL, pszValue = NULL;
 
         if (FAILED(psf2->GetDetailsOf(NULL, iColumn, &header)))
             break;
-        if (FAILED(StrRetToBufW(&header.str, NULL, pProps->szLabel[iRow], _countof(pProps->szLabel[0]))) ||
-            FAILED(psf2->GetDetailsOf(pidl, iColumn, &value)) ||
-            FAILED(StrRetToBufW(&value.str, pidl, pProps->szValue[iRow], _countof(pProps->szValue[0]))))
+        if (SUCCEEDED(StrRetToStrW(&header.str, NULL, &pszLabel)) &&
+            SUCCEEDED(psf2->GetDetailsOf(pidl, iColumn, &value)) &&
+            SUCCEEDED(StrRetToStrW(&value.str, pidl, &pszValue)) &&
+            pszValue[0] != UNICODE_NULL)
         {
-            pProps->szValue[iRow][0] = UNICODE_NULL;
+            pProps->pszLabel[pProps->cRows] = pszLabel;
+            pProps->pszValue[pProps->cRows] = pszValue;
+            pProps->cRows++;
             continue;
         }
-        if (pProps->szValue[iRow][0] != UNICODE_NULL)
-            pProps->cRows++;
+        CoTaskMemFree(pszLabel);
+        CoTaskMemFree(pszValue);
     }
 
     hr = psf->GetDisplayNameOf(pidl, SHGDN_INFOLDER, &str);
-    if (FAILED(hr) || FAILED(StrRetToBufW(&str, pidl, pProps->szName, _countof(pProps->szName))))
-        pProps->szName[0] = UNICODE_NULL;
+    if (FAILED(hr) || FAILED(StrRetToStrW(&str, pidl, &pProps->pszName)))
+        pProps->pszName = NULL;
 
     /* Like the shell's own property sheets, the sheet runs in its own thread, keeps the shell process
        (SHGetInstanceExplorer, as CTF_PROCESS_REF does) and this module loaded */
@@ -151,9 +166,7 @@ ShowObjectProperties(IShellFolder *psf, HWND /*hwndOwner*/, IDataObject *pdtobj)
         hr = HRESULT_FROM_WIN32(GetLastError());
         if (hModule)
             FreeLibrary(hModule);
-        if (pProps->punkProcess)
-            pProps->punkProcess->Release();
-        LocalFree(pProps);
+        FreeObjectProperties(pProps);
         return FAILED(hr) ? hr : E_FAIL;
     }
     CloseHandle(hThread);
