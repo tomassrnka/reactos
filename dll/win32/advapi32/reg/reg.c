@@ -4184,10 +4184,13 @@ RegQueryValueExW(
             memcpy( data, buf_ptr + info_size, total_size - info_size );
             /* if the type is REG_SZ and data is not 0-terminated
              * and there is enough space in the buffer NT appends a \0 */
-            if (is_string(info->Type) && total_size - info_size <= *count-sizeof(WCHAR))
+            if (is_string(info->Type) &&
+                total_size - info_size >= sizeof(WCHAR) &&
+                *count >= sizeof(WCHAR) &&
+                total_size - info_size <= *count - sizeof(WCHAR))
             {
                 WCHAR *ptr = (WCHAR *)(data + total_size - info_size);
-                if (ptr > (WCHAR *)data && ptr[-1]) *ptr = 0;
+                if (ptr[-1]) *ptr = 0;
             }
         }
         else if (status != STATUS_BUFFER_OVERFLOW) goto done;
