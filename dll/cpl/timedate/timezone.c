@@ -224,28 +224,6 @@ DestroyTimeZoneList(VOID)
 }
 
 
-/* Whether the current zone information was set from this entry, with or without DST */
-static BOOL
-IsTimeZoneSetFrom(PTIMEZONE_ENTRY Entry, LPTIME_ZONE_INFORMATION TimeZoneInfo)
-{
-    if ((Entry->TimezoneInfo.Bias == TimeZoneInfo->Bias) &&
-        (Entry->TimezoneInfo.StandardBias == TimeZoneInfo->StandardBias) &&
-        (Entry->TimezoneInfo.DaylightBias == TimeZoneInfo->DaylightBias) &&
-        (memcmp(&Entry->TimezoneInfo.StandardDate, &TimeZoneInfo->StandardDate, sizeof(SYSTEMTIME)) == 0) &&
-        (memcmp(&Entry->TimezoneInfo.DaylightDate, &TimeZoneInfo->DaylightDate, sizeof(SYSTEMTIME)) == 0))
-    {
-        return TRUE;
-    }
-
-    /* See SetLocalTimeZone for the form a zone takes with DST turned off */
-    return (HasDaylightSaving(Entry) &&
-            (TimeZoneInfo->StandardDate.wMonth == 0) &&
-            (TimeZoneInfo->DaylightDate.wMonth == 0) &&
-            (TimeZoneInfo->Bias == Entry->TimezoneInfo.Bias + Entry->TimezoneInfo.StandardBias) &&
-            (TimeZoneInfo->StandardBias == 0) &&
-            (TimeZoneInfo->DaylightBias == 0));
-}
-
 static VOID
 ShowTimeZoneList(HWND hwnd)
 {
@@ -265,7 +243,7 @@ ShowTimeZoneList(HWND hwnd)
         ZeroMemory(&TimeZoneInfo, sizeof(TimeZoneInfo));
     }
 
-    /* The zone's key name wins over the names, unless it no longer fits the zone */
+    /* The zone's key name wins over the names; SetTimeZoneInformation clears it */
     bHaveKeyName = GetTimeZoneKeyName(szKeyName, ARRAYSIZE(szKeyName));
 
     for (Entry = TimeZoneListHead; Entry != NULL; Entry = Entry->Next)
@@ -277,13 +255,8 @@ ShowTimeZoneList(HWND hwnd)
         if (dwCount == CB_ERR || dwCount == CB_ERRSPACE)
             continue;
 
-        /* A readable name of another zone means the key name is stale */
         if (bHaveKeyName && !bKeyFound &&
-            (_wcsicmp(Entry->KeyName, szKeyName) == 0) &&
-            IsTimeZoneSetFrom(Entry, &TimeZoneInfo) &&
-            (!*TimeZoneInfo.StandardName || !*Entry->StandardName ||
-             wcsncmp(Entry->StandardName, TimeZoneInfo.StandardName,
-                     ARRAYSIZE(TimeZoneInfo.StandardName) - 1) == 0))
+            (_wcsicmp(Entry->KeyName, szKeyName) == 0))
         {
             dwKeyIndex = dwCount;
             bKeyFound = TRUE;

@@ -384,8 +384,8 @@ SetAutoDaylight(
 
 /*
  * The name of the zone's key under "Time Zones", stored as REG_SZ
- * "TimeZoneKeyName" like Vista+ does. It identifies the zone when its
- * names cannot be read and its transition dates were cleared.
+ * "TimeZoneKeyName" like Vista+ does. It identifies the zone, whatever
+ * its names and rules; RtlSetTimeZoneInformation empties it.
  */
 BOOL
 GetTimeZoneKeyName(
