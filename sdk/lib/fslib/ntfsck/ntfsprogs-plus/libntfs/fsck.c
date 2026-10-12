@@ -218,9 +218,9 @@ static void ntfs_fsck_scratch_free(ntfs_volume *vol)
 #ifdef NTFSCK_HAVE_SCRATCH
 	if (vol->fsck_lcn_arena)
 		munmap(vol->fsck_lcn_arena, vol->fsck_lcn_arena_size);
-#endif
 	if (vol->fsck_lcn_arena_fd >= 0)
 		close(vol->fsck_lcn_arena_fd);
+#endif
 	vol->fsck_lcn_arena = NULL;
 	vol->fsck_lcn_arena_size = 0;
 	vol->fsck_lcn_arena_fd = -1;
@@ -883,6 +883,25 @@ ntfs_volume *ntfs_fsck_mount(const char *path __attribute__((unused)),
 
 	/* Read-only all-ones payload shared by every FB_ONES sentinel block. */
 	memset(ones_bm, 0xff, NTFS_BUF_SIZE);
+
+	/*
+	 * The array sizes below come from the volume: on a 32-bit build a damaged
+	 * $MFT allocated size (or cluster count) would wrap the allocation size
+	 * and leave a short array behind. Refuse sizes that do not fit, and an
+	 * $MFT larger than the volume.
+	 */
+	if (vol->nr_clusters <= 0 || vol->mft_na->allocated_size < 0 ||
+	    (vol->mft_na->allocated_size >> vol->cluster_size_bits) > vol->nr_clusters ||
+	    (u64)(FB_ROUND_DOWN((vol->nr_clusters - 1) >> NTFSCK_BYTE_TO_BITS) + 1) >
+			SIZE_MAX / sizeof(u8 *) ||
+	    (u64)(FB_ROUND_DOWN((vol->mft_na->allocated_size >>
+			vol->mft_record_size_bits) >> NTFSCK_BYTE_TO_BITS) + 1) >
+			SIZE_MAX / sizeof(u8 *)) {
+		ntfs_log_error("Volume or $MFT size out of range.\n");
+		ntfs_umount(vol, FALSE);
+		errno = EOVERFLOW;
+		return NULL;
+	}
 
 	/* Initialize fsck lcn bitmap buffer array */
 	vol->max_flb_cnt = FB_ROUND_DOWN((vol->nr_clusters - 1) >>

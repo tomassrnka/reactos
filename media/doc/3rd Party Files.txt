@@ -230,6 +230,12 @@ Used Version: 2.10.0
 License: FTL (https://spdx.org/licenses/FTL.html)
 URL: https://freetype.org/
 
+Title: ntfsprogs-plus (ntfsck and libntfs)
+Path: sdk/lib/fslib/ntfsck/ntfsprogs-plus
+Used Version: git commit 3fe8904
+License: GPL-2.0-only (https://spdx.org/licenses/GPL-2.0-only.html) for src/ntfsck.c, libntfs/fsck.c, libntfs/problem.c, include/fsck.h, include/problem.h; no licence header (project licence GPLv2, COPYING) for libntfs/lib_utils.c, include/lib_utils.h, libntfs/realpath.c, include/realpath.h; GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later.html) for the other files. ntfsck.dll as a whole: GPL-2.0-only
+URL: https://github.com/ntfsprogs-plus/ntfsprogs-plus
+
 Title: dosfstools
 Path: sdk/lib/fslib/vfatlib/check
 Used Version: 4.1

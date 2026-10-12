@@ -33,7 +33,11 @@
 #include <misc.h>
 #include <mst.h>
 #include <unistr.h>
+#ifndef NTFSCK_LIBRARY
 #include <getopt.h>
+#else
+#include "ntfsck_lib.h"
+#endif
 
 #include "cluster.h"
 #include "utils.h"
@@ -182,6 +186,18 @@ static BOOL fn_size_repair_approved;
 static BOOL fn_size_repair_apply_pass;
 static u64 fn_allocated_size_mismatches;
 static u64 fn_data_size_mismatches;
+#ifdef NTFSCK_LIBRARY
+/*
+ * Windows keeps no index entry's FILE_NAME data size up to date and its chkdsk accepts
+ * stale ones; with the Windows tolerance they are counted here, not as errors.
+ */
+static BOOL opt_fn_data_size_info;
+static BOOL opt_info_only;
+static u64 fn_data_size_stale;
+/* Counters of the running check: the caller's result while ntfsck_lib_run() runs */
+static struct ntfsck_lib_result lib_result_none, *lib_result_ptr = &lib_result_none;
+#define lib_result (*lib_result_ptr)
+#endif
 static u64 fn_size_repairs_applied;
 /* One response controls all $FILE_NAME parent sequence repairs. */
 static BOOL fn_parent_seqno_repair_decided;
@@ -411,6 +427,7 @@ u64 checked_cnt;
 u64 orphan_cnt;
 
 #define NTFS_PROGS	"ntfsck"
+#ifndef NTFSCK_LIBRARY
 /**
  * usage
  */
@@ -464,6 +481,7 @@ static const struct option opts[] = {
 	{"version",		no_argument,		NULL,	'V' },
 	{NULL,			0,			NULL,	 0  }
 };
+#endif /* !NTFSCK_LIBRARY */
 
 static FILE_NAME_ATTR *ntfsck_find_file_name_attr(ntfs_inode *ni,
 		FILE_NAME_ATTR *ie_fn, ntfs_attr_search_ctx *actx);
@@ -3712,6 +3730,13 @@ static int ntfsck_check_file_name_attr(ntfs_inode *ni, FILE_NAME_ATTR *ie_fn,
 	 * It looks like that Windows does not check MFT/$FN's data size.
 	 */
 	if (ni->data_size != sle64_to_cpu(ie_fn->data_size)) {
+#ifdef NTFSCK_LIBRARY
+		if (opt_fn_data_size_info) {
+			if (!fn_size_repair_apply_pass)
+				fn_data_size_stale++;
+			goto out;
+		}
+#endif
 		if (!fn_size_repair_apply_pass) {
 			fsck_err_found();
 			fn_data_size_mismatches++;
@@ -9653,7 +9678,7 @@ static int ntfsck_validate_system_file(ntfs_inode *ni)
 		if (ni->mft_no == FILE_MFTMirr)
 			ntfsck_check_mftmirr(vol);
 		break;
-	case FILE_Bitmap:
+	case FILE_Bitmap: ;	/* a label must label a statement before C23 */
 		s64 max_lcnbmp_size;
 
 		if (ntfs_attr_map_whole_runlist(vol->lcnbmp_na)) {
@@ -10231,12 +10256,19 @@ static int ntfsck_check_orphaned_mft(ntfs_volume *vol)
 
 	if (ntfsck_count_bitmap_mismatches(vol, vol->lcnbmp_na,
 			ntfs_fsck_find_lcnbmp_block, &bitmap_mismatches) ||
+#ifdef NTFSCK_LIBRARY
+		/* the report names the cluster bitmap and the MFT bitmap apart */
+		((lib_result.lcn_bitmap_blocks = bitmap_mismatches), 0) ||
+#endif
 		ntfsck_count_bitmap_mismatches(vol, vol->mftbmp_na,
 			ntfs_fsck_find_mftbmp_block, &bitmap_mismatches)) {
 		fsck_end_step();
 		return STATUS_ERROR;
 	}
 	fsck_end_step();
+#ifdef NTFSCK_LIBRARY
+	lib_result.mft_bitmap_blocks = bitmap_mismatches - lib_result.lcn_bitmap_blocks;
+#endif
 	if (bitmap_mismatches) {
 		ntfs_log_error("  * Found %"PRIu64" inconsistent bitmap block(s).\n",
 				bitmap_mismatches);
@@ -11534,17 +11566,13 @@ out:
  *
  * For more details on arguments and results, check the man page.
  */
+static int ntfsck_check(const char *path, BOOL check_dirty_only);
+
+#ifndef NTFSCK_LIBRARY
 int main(int argc, char **argv)
 {
-	ntfs_volume *vol = NULL;
 	const char *path = NULL;
-	int c, errors = 0, ret;
-	/*
-	 * fsck_errors/fsck_fixes are reset between repair rounds, so they only
-	 * ever describe the final round. Accumulate every round into these to
-	 * report what the whole run did.
-	 */
-	int total_errors = 0, total_fixes = 0;
+	int c;
 	unsigned long mnt_flags;
 	BOOL check_dirty_only = FALSE;
 
@@ -11708,6 +11736,26 @@ conflict_option:
 		ntfs_log_perror("Failed to determine whether %s is mounted",
 				path);
 
+	return ntfsck_check(path, check_dirty_only);
+}
+#endif /* !NTFSCK_LIBRARY */
+
+/*
+ * ntfsck_check - check the volume at @path with the mode in option.flags, and repair it
+ * in a repair mode: everything the program does after parsing its options. Returns one
+ * of the RETURN_ codes; the volume is unmounted on every path.
+ */
+static int ntfsck_check(const char *path, BOOL check_dirty_only)
+{
+	ntfs_volume *vol = NULL;
+	int errors = 0, ret;
+	/*
+	 * fsck_errors/fsck_fixes are reset between repair rounds, so they only
+	 * ever describe the final round. Accumulate every round into these to
+	 * report what the whole run did.
+	 */
+	int total_errors = 0, total_fixes = 0;
+
 	vol = ntfs_fsck_mount(path, option.flags);
 	if (!vol) {
 		/*
@@ -11717,12 +11765,18 @@ conflict_option:
 		 */
 		if (errno == EOPNOTSUPP) {
 			ntfs_log_error("The superblock does not describe a valid NTFS.\n");
-			exit(RETURN_OPERATIONAL_ERROR);
+#ifdef NTFSCK_LIBRARY
+			lib_result.not_ntfs = 1;
+#endif
+			return RETURN_OPERATIONAL_ERROR;
 		}
+#ifdef NTFSCK_LIBRARY
+		lib_result.mount_errno = errno ? errno : EIO;
+#endif
 
 		if (check_dirty_only == TRUE) {
 			ntfs_log_info("Check volume: Volume mount failed, Consider volume is dirty.\n");
-			exit(RETURN_FS_ERRORS_LEFT_UNCORRECTED);
+			return RETURN_FS_ERRORS_LEFT_UNCORRECTED;
 		} else {
 			ntfs_log_error("ntfsck mount failed, errno : %d\n", errno);
 			fsck_err_found();
@@ -11735,11 +11789,18 @@ conflict_option:
 	if (check_dirty_only == TRUE) {
 		if (vol->flags & VOLUME_IS_DIRTY) {
 			ntfs_log_info("Check volume: Volume is dirty.\n");
-			exit(RETURN_FS_ERRORS_LEFT_UNCORRECTED);
+			ret = RETURN_FS_ERRORS_LEFT_UNCORRECTED;
 		} else {
 			ntfs_log_warning("Check volume: Volume is clean.\n");
-			exit(RETURN_FS_NO_ERRORS);
+			ret = RETURN_FS_NO_ERRORS;
 		}
+#ifdef NTFSCK_LIBRARY
+		lib_result.volume_dirty = (vol->flags & VOLUME_IS_DIRTY) ? 1 : 0;
+		if (opt_info_only)
+			ntfsck_lib_collect_log(vol, &lib_result);
+#endif
+		ntfs_fsck_umount(vol);
+		return ret;
 	}
 
 	/*
@@ -11773,6 +11834,11 @@ conflict_option:
 					"reflects the state of a suspended "
 					"system.\n");
 	}
+
+#ifdef NTFSCK_LIBRARY
+	/* The figures of the volume as the check finds it, before any pass reports. */
+	ntfsck_lib_collect(vol, &lib_result);
+#endif
 
 	/*
 	 * Run the check/repair sequence until the volume stops changing. A single
@@ -11820,8 +11886,13 @@ conflict_option:
 			/* Open a crash-safe repair transaction before any write. */
 			ntfsck_begin_repair(vol);
 
-			if (ntfsck_run_repair_passes(vol, &orphan_changed))
+			if (ntfsck_run_repair_passes(vol, &orphan_changed)) {
+#ifdef NTFSCK_LIBRARY
+				/* the passes stopped part way: not a result to report as clean */
+				lib_result.aborted = 1;
+#endif
 				goto err_out;
+			}
 			if (orphan_changed) {
 				if (have_prev_orphan_candidates &&
 						orphan_cnt >= prev_orphan_candidates) {
@@ -11932,11 +12003,62 @@ err_out:
 			ret = RETURN_FS_NO_ERRORS;
 	}
 
-	if (!errors && vol)
+	/* A read-only check leaves the dirty flag as it found it. */
+	if (!errors && vol && ntfsck_repair_enabled())
 		ntfsck_reset_dirty(vol);
 
+#ifdef NTFSCK_LIBRARY
+	lib_result.errors_found = total_errors;
+	lib_result.errors_fixed = total_fixes;
+	lib_result.errors_left = errors;
+	lib_result.fn_data_size_stale = fn_data_size_stale;
+	lib_result.orphans = orphan_cnt;
+	lib_result.logfile_reset = logfile_was_reset;
+	/* Repairs change the figures: count again for the summary. */
+	if (vol && total_fixes)
+		ntfsck_lib_collect(vol, &lib_result);
+	if (vol)
+		lib_result.ng_seq_end = ntfsck_lib_journal_seq(vol);
+#endif
 	if (vol)
 		ntfs_fsck_umount(vol);
 
 	return ret;
 }
+
+#ifdef NTFSCK_LIBRARY
+/*
+ * ntfsck_lib_run - the library entry of the ReactOS port: one check of the volume at
+ * @path with the options of @o, its counters in @r (filled as the check goes on, so that
+ * the caller can report a stage when it ends). Runs once per load of the
+ * image that contains it (the static state of the checker is not reset).
+ */
+int ntfsck_lib_run(const char *path, const struct ntfsck_lib_opts *o,
+		struct ntfsck_lib_result *r)
+{
+	int ret;
+
+	memset(r, 0, sizeof(*r));
+	lib_result_ptr = r;
+	ntfs_log_set_handler(ntfs_log_handler_outerr);
+	ntfs_log_set_levels(NTFS_LOG_LEVEL_INFO);
+	ntfs_log_clear_levels(NTFS_LOG_LEVEL_TRACE|NTFS_LOG_LEVEL_ENTER|NTFS_LOG_LEVEL_LEAVE);
+	pb_flags = 0;
+	option.verbose = o->verbose ? 1 : 0;
+	if (o->verbose)
+		ntfs_log_set_levels(NTFS_LOG_LEVEL_VERBOSE);
+	opt_fn_data_size_info = o->windows_tolerance ? TRUE : FALSE;
+	opt_info_only = o->info_only ? TRUE : FALSE;
+	if (o->dirty_only)
+		option.flags = NTFS_MNT_FS_NO_REPAIR | NTFS_MNT_RDONLY | NTFS_MNT_IGNORE_HIBERFILE;
+	else if (o->repair)
+		option.flags = NTFS_MNT_FSCK | NTFS_MNT_IGNORE_HIBERFILE | NTFS_MNT_FS_YES_REPAIR;
+	else
+		option.flags = NTFS_MNT_FSCK | NTFS_MNT_IGNORE_HIBERFILE |
+			NTFS_MNT_FS_NO_REPAIR | NTFS_MNT_RDONLY;
+	ret = ntfsck_check(path, o->dirty_only ? TRUE : FALSE);
+	r->ret = ret;
+	lib_result_ptr = &lib_result_none;
+	return ret;
+}
+#endif /* NTFSCK_LIBRARY */
