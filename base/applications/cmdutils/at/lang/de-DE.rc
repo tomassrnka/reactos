@@ -32,6 +32,9 @@ Zeit               Gibt die Zeit an, zu der ein Befehl ausgeführt werden soll.\
     IDS_NEW_JOB "Neuer Auftrag hinzugefügt. Kennung = %lu\n"
     IDS_JOBS_LIST "Statuskenn. Tag                     Zeit          Befehlszeile\n"
     IDS_NO_ENTRIES "Es sind keine Einträge in der Liste.\n"
+    IDS_ERROR_CODE "System error %lu has occurred.\n"
+    IDS_DAY_CODES "M,T,W,Th,F,S,Su"
+    IDS_INVALID_COMMAND "Invalid command.\n\n"
 
     IDS_CONFIRM_QUESTION "Möchten Sie diesen Vorgang fortsetzen? (J/N) [N]: "
     IDS_CONFIRM_INVALID  "\nDies ist eine ungültige Antwort.\n"

@@ -35,6 +35,9 @@ id                 Порядковый номер запланированно�
     IDS_NEW_JOB "Добавлено новое задание с ID = %lu\n"
     IDS_JOBS_LIST "Статус ID   День                     Время          Команда\n"
     IDS_NO_ENTRIES "В списке нет запланированных задач.\n"
+    IDS_ERROR_CODE "System error %lu has occurred.\n"
+    IDS_DAY_CODES "M,T,W,Th,F,S,Su"
+    IDS_INVALID_COMMAND "Invalid command.\n\n"
 
     IDS_TODAY "Сегодня"
     IDS_TOMORROW "Завтра"

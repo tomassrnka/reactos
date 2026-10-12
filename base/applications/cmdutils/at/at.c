@@ -22,6 +22,10 @@
 
 PWSTR pszDaysOfWeekArray[7] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
 
+/* Day codes used on the command line and in the job list (M,T,W,Th,F,S,Su in English) */
+WCHAR szDayCodes[64];
+PWSTR pszDayCodesArray[7] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+
 
 static
 VOID
@@ -41,6 +45,7 @@ static
 BOOL
 InitDaysOfWeekArray(VOID)
 {
+    PWSTR pszCode;
     WORD i;
 
     for (i = 0; i < 7; i++)
@@ -64,6 +69,19 @@ InitDaysOfWeekArray(VOID)
                       LOCALE_SABBREVDAYNAME1 + i,
                       pszDaysOfWeekArray[i],
                       nLength);
+    }
+
+    /* Split the comma separated day codes; a missing code falls back to the locale name */
+    LoadStringW(NULL, IDS_DAY_CODES, szDayCodes, _countof(szDayCodes));
+    for (i = 0, pszCode = szDayCodes; i < 7; i++)
+    {
+        pszDayCodesArray[i] = pszDaysOfWeekArray[i];
+        if (pszCode == NULL || *pszCode == UNICODE_NULL)
+            continue;
+        pszDayCodesArray[i] = pszCode;
+        pszCode = wcschr(pszCode, L',');
+        if (pszCode != NULL)
+            *pszCode++ = UNICODE_NULL;
     }
 
     return TRUE;
@@ -287,13 +305,19 @@ ParseDaysOfWeek(
 
         for (i = 0; i < 7; i++)
         {
-            if (nLength == wcslen(pszDaysOfWeekArray[i]) &&
-                _wcsnicmp(startPtr, pszDaysOfWeekArray[i], nLength) == 0)
+            if ((nLength == wcslen(pszDayCodesArray[i]) &&
+                 _wcsnicmp(startPtr, pszDayCodesArray[i], nLength) == 0) ||
+                (nLength == wcslen(pszDaysOfWeekArray[i]) &&
+                 _wcsnicmp(startPtr, pszDaysOfWeekArray[i], nLength) == 0))
             {
                 *pucDaysOfWeek |= (1 << i);
                 break;
             }
         }
+
+        /* An unknown day is an error, not an empty schedule */
+        if (i == 7)
+            return FALSE;
 
         if (endPtr == NULL)
             return TRUE;
@@ -311,7 +335,27 @@ VOID
 PrintErrorMessage(
     DWORD dwError)
 {
-    ConMsgPuts(StdErr, FORMAT_MESSAGE_FROM_SYSTEM, NULL, dwError, 0);
+    HMODULE hNetMsg;
+    INT Length = 0;
+
+    /* Network status codes have their text in netmsg.dll, not in the system table */
+    if (dwError >= MIN_LANMAN_MESSAGE_ID && dwError <= MAX_LANMAN_MESSAGE_ID)
+    {
+        hNetMsg = LoadLibraryExW(L"netmsg.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
+        if (hNetMsg != NULL)
+        {
+            Length = ConMsgPuts(StdErr, FORMAT_MESSAGE_FROM_HMODULE, hNetMsg, dwError, 0);
+            FreeLibrary(hNetMsg);
+        }
+    }
+    else
+    {
+        Length = ConMsgPuts(StdErr, FORMAT_MESSAGE_FROM_SYSTEM, NULL, dwError, 0);
+    }
+
+    /* Never fail silently */
+    if (Length <= 0)
+        ConResPrintf(StdErr, IDS_ERROR_CODE, dwError);
 }
 
 
@@ -474,7 +518,7 @@ PrintJobDetails(
             {
                 _swprintf(szDateBuffer, L" %d", i + 1);
                 nDateLength = wcslen(szDateBuffer);
-                if (nScheduleLength + nDateLength <= 55)
+                if (nScheduleLength + nDateLength + 3 < _countof(szScheduleBuffer))
                 {
                     wcscat(szScheduleBuffer, szDateBuffer);
                     nScheduleLength += nDateLength;
@@ -499,9 +543,10 @@ PrintJobDetails(
         {
             if (pBuffer->DaysOfWeek & (1 << i))
             {
-                _swprintf(szDateBuffer, L" %s", pszDaysOfWeekArray[i]);
+                _snwprintf(szDateBuffer, _countof(szDateBuffer), L" %s", pszDayCodesArray[i]);
+                szDateBuffer[_countof(szDateBuffer) - 1] = UNICODE_NULL;
                 nDateLength = wcslen(szDateBuffer);
-                if (nScheduleLength + nDateLength <= 55)
+                if (nScheduleLength + nDateLength + 3 < _countof(szScheduleBuffer))
                 {
                     wcscat(szScheduleBuffer, szDateBuffer);
                     nScheduleLength += nDateLength;
@@ -533,12 +578,14 @@ PrintJobDetails(
     else
         LoadStringW(NULL, IDS_YES, szInteractiveBuffer, _countof(szInteractiveBuffer));
 
+    ConPuts(StdOut, L"\n");
     ConResPrintf(StdOut, IDS_TASKID, ulJobId);
     ConResPrintf(StdOut, IDS_STATUS, szStatusBuffer);
     ConResPrintf(StdOut, IDS_SCHEDULE, szScheduleBuffer);
     ConResPrintf(StdOut, IDS_TIME, szTimeBuffer);
     ConResPrintf(StdOut, IDS_INTERACTIVE, szInteractiveBuffer);
     ConResPrintf(StdOut, IDS_COMMAND, pBuffer->Command);
+    ConPuts(StdOut, L"\n\n");
 
     NetApiBufferFree(pBuffer);
 
@@ -624,9 +671,10 @@ PrintAllJobs(
             {
                 if (pBuffer[i].DaysOfWeek & (1 << j))
                 {
-                    _swprintf(szDateBuffer, L" %s", pszDaysOfWeekArray[j]);
+                    _snwprintf(szDateBuffer, _countof(szDateBuffer), L" %s", pszDayCodesArray[j]);
+                    szDateBuffer[_countof(szDateBuffer) - 1] = UNICODE_NULL;
                     nDateLength = wcslen(szDateBuffer);
-                    if (nScheduleLength + nDateLength <= 55)
+                    if (nScheduleLength + nDateLength + 3 < _countof(szScheduleBuffer))
                     {
                         wcscat(szScheduleBuffer, szDateBuffer);
                         nScheduleLength += nDateLength;
@@ -808,23 +856,33 @@ int wmain(int argc, WCHAR **argv)
             else if (_wcsnicmp(argv[i], L"/every:", 7) == 0)
             {
                 bPeriodicJob = TRUE;
-                if (ParseDaysOfMonth(&(argv[i][7]), &ulDaysOfMonth) == FALSE)
+                if (argv[i][7] == UNICODE_NULL)
                 {
-                    if (ParseDaysOfWeek(&(argv[i][7]), &ucDaysOfWeek) == FALSE)
-                    {
-                        ulDaysOfMonth = GetCurrentDayOfMonth();
-                    }
+                    /* No date: the current day of the month */
+                    ulDaysOfMonth = GetCurrentDayOfMonth();
+                }
+                else if (ParseDaysOfMonth(&(argv[i][7]), &ulDaysOfMonth) == FALSE &&
+                         ParseDaysOfWeek(&(argv[i][7]), &ucDaysOfWeek) == FALSE)
+                {
+                    bPrintUsage = TRUE;
+                    nResult = 1;
+                    goto done;
                 }
             }
             else if (_wcsnicmp(argv[i], L"/next:", 6) == 0)
             {
                 bPeriodicJob = FALSE;
-                if (ParseDaysOfMonth(&(argv[i][6]), &ulDaysOfMonth) == FALSE)
+                if (argv[i][6] == UNICODE_NULL)
                 {
-                    if (ParseDaysOfWeek(&(argv[i][6]), &ucDaysOfWeek) == FALSE)
-                    {
-                        ulDaysOfMonth = GetCurrentDayOfMonth();
-                    }
+                    /* No date: the current day of the month */
+                    ulDaysOfMonth = GetCurrentDayOfMonth();
+                }
+                else if (ParseDaysOfMonth(&(argv[i][6]), &ulDaysOfMonth) == FALSE &&
+                         ParseDaysOfWeek(&(argv[i][6]), &ucDaysOfWeek) == FALSE)
+                {
+                    bPrintUsage = TRUE;
+                    nResult = 1;
+                    goto done;
                 }
             }
             else
@@ -913,7 +971,11 @@ done:
     FreeDaysOfWeekArray();
 
     if (bPrintUsage == TRUE)
+    {
+        if (nResult != 0)
+            ConResPuts(StdOut, IDS_INVALID_COMMAND);
         ConResPuts(StdOut, IDS_USAGE);
+    }
 
     return nResult;
 }

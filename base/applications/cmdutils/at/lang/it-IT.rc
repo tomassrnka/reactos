@@ -37,6 +37,9 @@ tempo              Specifica il tempo per l'esecuzione del comando.\n\
     IDS_NEW_JOB "È stata pianificata una nuova attività con l'ID = %lu\n"
     IDS_JOBS_LIST "Stato ID   Giorno                     Tempo          Riga di comando\n"
     IDS_NO_ENTRIES "Non ci sono comandi programmati nella lista.\n"
+    IDS_ERROR_CODE "System error %lu has occurred.\n"
+    IDS_DAY_CODES "M,T,W,Th,F,S,Su"
+    IDS_INVALID_COMMAND "Invalid command.\n\n"
 
     IDS_CONFIRM_QUESTION "Sei sicuro di voler continuare questa operazione? (S/N) [N]: "
     IDS_CONFIRM_INVALID  "\nQuesta risposta non è valida.\n"

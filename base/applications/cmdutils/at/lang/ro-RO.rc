@@ -38,6 +38,9 @@ timp               Specifică timpul de lansare a comenzii.\n\
     IDS_NEW_JOB "A fost planificată o nouă activitate cu ID = %lu\n"
     IDS_JOBS_LIST "ID stare    Zi                      Oră           Comanda\n"
     IDS_NO_ENTRIES "Nu există comenzi planificate.\n"
+    IDS_ERROR_CODE "System error %lu has occurred.\n"
+    IDS_DAY_CODES "M,T,W,Th,F,S,Su"
+    IDS_INVALID_COMMAND "Invalid command.\n\n"
 
     IDS_CONFIRM_QUESTION "Sigur doriți continuarea acestei operații? (D/N) [N]: "
     IDS_CONFIRM_INVALID "\nAcesta nu este un răspuns valid.\n"
