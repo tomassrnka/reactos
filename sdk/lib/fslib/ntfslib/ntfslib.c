@@ -19,6 +19,10 @@
 // The single, shared instance of the format state (declared extern in the header).
 NTFS_FORMAT_DATA NtfsFormatData;
 
+// Serializes formats: the state above is process-wide, and Explorer runs
+// each format dialog on its own thread.
+static LONG NtfsFormatBusy = 0;
+
 
 /* FUNCTIONS *****************************************************************/
 
@@ -99,7 +103,8 @@ ComputeLayout(IN ULONG ClusterSize)
     ULONG     C;
     ULONGLONG Lcn;
 
-    if (Bps == 0)
+    // The records and their update sequence arrays are built for 512-byte sectors
+    if (Bps != 512)
         return STATUS_INVALID_PARAMETER;
 
     VolumeBytes   = DISK_LEN->Length.QuadPart;
@@ -113,17 +118,20 @@ ComputeLayout(IN ULONG ClusterSize)
     if (VolumeBytes >= (1ULL << 44))
         return STATUS_INVALID_PARAMETER;
 
-    // Sectors per cluster
+    // Sectors per cluster: a power of two, and a cluster of at most 64 KB,
+    // which is all the one-byte boot sector field encodes here
     if (ClusterSize != 0)
     {
+        if (ClusterSize < Bps || ClusterSize % Bps != 0 || ClusterSize > 65536)
+            return STATUS_INVALID_PARAMETER;
         Spc = ClusterSize / Bps;
-        if (Spc == 0)
-            Spc = 1;
     }
     else
     {
         Spc = GetSectorsPerCluster();
     }
+    if (Spc == 0 || Spc > 255 || (Spc & (Spc - 1)) != 0)
+        return STATUS_INVALID_PARAMETER;
 
     LAYOUT.SectorsPerCluster = Spc;
     LAYOUT.BytesPerCluster   = Spc * Bps;
@@ -139,6 +147,8 @@ ComputeLayout(IN ULONG ClusterSize)
 
     LAYOUT.ClustersPerMftRecord   = EncodeRecordSize(MFT_RECORD_SIZE, C);
     LAYOUT.ClustersPerIndexRecord = EncodeRecordSize(INDEX_RECORD_SIZE, C);
+    // $INDEX_ROOT counts an index record smaller than a cluster in 512-byte blocks
+    LAYOUT.IndexRootBlocksPerIndexRecord = (BYTE)((INDEX_RECORD_SIZE >= C) ? INDEX_RECORD_SIZE / C : INDEX_RECORD_SIZE / 512);
 
     //
     // Metadata sizes (in clusters)
@@ -158,15 +168,19 @@ ComputeLayout(IN ULONG ClusterSize)
     LAYOUT.MftAllocRecords = (ULONG)(MftBytes / MFT_RECORD_SIZE);
     LAYOUT.MftClusters = (ULONG)CEIL_DIV((ULONGLONG)LAYOUT.MftAllocRecords * MFT_RECORD_SIZE, (ULONGLONG)C);
 
-    // $MFTMirr: the first four system records.
-    LAYOUT.MftMirrClusters = (ULONG)CEIL_DIV((ULONGLONG)MFT_MIRR_COUNT * MFT_RECORD_SIZE, (ULONGLONG)C);
+    // $MFTMirr: the first four system records, or one cluster's worth of
+    // records when a cluster holds more than four (what NTFS drivers expect).
+    LAYOUT.MftMirrRecords = max(MFT_MIRR_COUNT, C / MFT_RECORD_SIZE);
+    LAYOUT.MftMirrClusters = (ULONG)CEIL_DIV((ULONGLONG)LAYOUT.MftMirrRecords * MFT_RECORD_SIZE, (ULONGLONG)C);
 
-    // $LogFile: ~0.78% of the volume, clamped to [256 KB, 64 MB].
+    // $LogFile: ~0.78% of the volume, clamped to [2 MB, 64 MB]. Windows makes
+    // no log under 2 MB; it does not mount a volume with a 256 KB log, and its
+    // chkdsk reports such a volume as damaged.
     {
         ULONGLONG LogBytes = VolumeBytes / 128;
 
-        if (LogBytes < (256ULL * 1024))
-            LogBytes = 256ULL * 1024;
+        if (LogBytes < (2ULL * 1024 * 1024))
+            LogBytes = 2ULL * 1024 * 1024;
         if (LogBytes > (64ULL * 1024 * 1024))
             LogBytes = 64ULL * 1024 * 1024;
 
@@ -242,9 +256,9 @@ ComputeLayout(IN ULONG ClusterSize)
         return STATUS_DISK_FULL;
     }
 
-    // Volume serial number
+    // Volume serial number (the format time keeps two formats in a session apart)
     {
-        ULONG Seed = NtGetTickCount();
+        ULONG Seed = NtGetTickCount() ^ (ULONG)NtfsFormatData.FormatTime ^ (ULONG)(NtfsFormatData.FormatTime >> 32);
         ULONG Hi   = RtlRandom(&Seed);
         ULONG Lo   = RtlRandom(&Seed);
         LAYOUT.SerialNumber = ((ULONGLONG)Hi << 32) | (ULONGLONG)Lo;
@@ -253,10 +267,32 @@ ComputeLayout(IN ULONG ClusterSize)
     return STATUS_SUCCESS;
 }
 
+// Writes Length bytes at Offset of the volume. A write that completes with
+// fewer bytes (a file system can clip volume writes to its own size) fails.
+NTSTATUS
+WriteDisk(IN LONGLONG Offset,
+          IN PVOID    Buffer,
+          IN ULONG    Length)
+{
+    IO_STATUS_BLOCK IoStatusBlock;
+    LARGE_INTEGER   ByteOffset;
+    NTSTATUS        Status;
+
+    ByteOffset.QuadPart = Offset;
+    Status = NtWriteFile(DISK_HANDLE, NULL, NULL, NULL, &IoStatusBlock,
+                         Buffer, Length, &ByteOffset, NULL);
+    if (NT_SUCCESS(Status) && IoStatusBlock.Information != Length)
+    {
+        DPRINT1("Short write at %I64d: %Iu of %lu bytes\n", Offset, IoStatusBlock.Information, Length);
+        Status = STATUS_UNEXPECTED_IO_ERROR;
+    }
+    return Status;
+}
+
 //
 // Zeroes the primary and backup boot sectors (the latter one sector past the
-// addressable area). Called first, right after lock/dismount: from that moment
-// the volume reads as RAW, so an interrupted format cannot leave a partially
+// addressable area). Called first, right after the lock: once the volume is
+// dismounted it reads as RAW, so an interrupted format cannot leave a partially
 // recognizable mix of stale and new metadata. The new boot sector is written
 // last, once all metadata is complete.
 //
@@ -265,8 +301,6 @@ NTSTATUS
 InvalidateStaleBootSectors(VOID)
 {
     NTSTATUS        Status;
-    IO_STATUS_BLOCK IoStatusBlock;
-    LARGE_INTEGER   Offset;
     PBYTE           Sector;
     ULONG           Bps = BYTES_PER_SECTOR;
 
@@ -277,34 +311,58 @@ InvalidateStaleBootSectors(VOID)
     RtlZeroMemory(Sector, Bps);
 
     // Primary boot sector
-    Offset.QuadPart = 0LL;
-    Status = NtWriteFile(DISK_HANDLE,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &IoStatusBlock,
-                         Sector,
-                         Bps,
-                         &Offset,
-                         NULL);
+    Status = WriteDisk(0LL, Sector, Bps);
 
     // Backup boot sector
     if (NT_SUCCESS(Status))
-    {
-        Offset.QuadPart = (LONGLONG)TOTAL_SECTORS * Bps;
-        Status = NtWriteFile(DISK_HANDLE,
-                             NULL,
-                             NULL,
-                             NULL,
-                             &IoStatusBlock,
-                             Sector,
-                             Bps,
-                             &Offset,
-                             NULL);
-    }
+        Status = WriteDisk((LONGLONG)TOTAL_SECTORS * Bps, Sector, Bps);
 
     FREE(Sector);
 
+    return Status;
+}
+
+//
+// Full format: zeroes the volume between the two (already zeroed) boot
+// sectors, as a full format of current Windows versions does, and reports
+// progress up to 99 percent.
+//
+static
+NTSTATUS
+ZeroVolume(IN PFMIFSCALLBACK Callback)
+{
+    NTSTATUS        Status = STATUS_SUCCESS;
+    LARGE_INTEGER   Offset;
+    ULONGLONG       End;
+    ULONG           ChunkBytes = 1024 * 1024;
+    ULONG           Percent, LastPercent = 0;
+    PBYTE           Buffer;
+
+    Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, ChunkBytes);
+    if (!Buffer)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Offset.QuadPart = BYTES_PER_SECTOR;
+    End = (ULONGLONG)TOTAL_SECTORS * BYTES_PER_SECTOR;
+    while ((ULONGLONG)Offset.QuadPart < End)
+    {
+        ULONG Length = (ULONG)min((ULONGLONG)ChunkBytes, End - Offset.QuadPart);
+
+        Status = WriteDisk(Offset.QuadPart, Buffer, Length);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        Offset.QuadPart += Length;
+
+        Percent = (ULONG)((ULONGLONG)Offset.QuadPart * 99 / End);
+        if (Callback && Percent != LastPercent)
+        {
+            LastPercent = Percent;
+            Callback(PROGRESS, 0, (PVOID)&Percent);
+        }
+    }
+
+    FREE(Buffer);
     return Status;
 }
 
@@ -326,12 +384,10 @@ NtfsFormat(
     DISK_GEOMETRY          DiskGeometry;
     NTSTATUS               Status;
     BOOLEAN                Result = FALSE;
+    BOOLEAN                Locked = FALSE;
 
     DPRINT1("NtfsFormat(DriveRoot '%wZ')\n", DriveRoot);
 
-    // We always perform a quick format (metadata only); the volume body is
-    // not zeroed.
-    UNREFERENCED_PARAMETER(QuickFormat);
     UNREFERENCED_PARAMETER(BackwardCompatible);
     UNREFERENCED_PARAMETER(MediaType);
 
@@ -393,6 +449,13 @@ NtfsFormat(
         Callback(PROGRESS, 0, (PVOID)&pc);
     }
 
+    while (InterlockedCompareExchange(&NtfsFormatBusy, 1, 0) != 0)
+    {
+        LARGE_INTEGER Delay;
+        Delay.QuadPart = -100 * 10000LL;
+        NtDelayExecution(FALSE, &Delay);
+    }
+
     // Setup global data
     DISK_HANDLE = DiskHandle;
     DISK_GEO    = &DiskGeometry;
@@ -433,16 +496,41 @@ NtfsFormat(
         goto end;
     }
 
-    NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
-    NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
+    // Nothing is written unless the volume is ours alone. The file system
+    // stays mounted and locked while the volume is written, so no other open
+    // can mount it in between; it is dismounted only at the end, as the other
+    // ULIB formatters do. Dismounting first would publish an unlocked volume
+    // that the next open mounts again, under the format.
+    Status = NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("FSCTL_LOCK_VOLUME failed with status 0x%.08x\n", Status);
+        goto end;
+    }
+    Locked = TRUE;
 
-    // Kill any stale boot sectors FIRST: the volume reads as RAW from here on,
-    // so no partially-formatted state is ever recognizable as a filesystem.
+    // The whole partition is written, also past the end of the file system
+    // being replaced (fastfat clips volume writes to that size otherwise).
+    // A file system that does not limit them may not know the request.
+    NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb, FSCTL_ALLOW_EXTENDED_DASD_IO, NULL, 0, NULL, 0);
+
+    // Kill any stale boot sectors FIRST: once the volume is dismounted, no
+    // partially-formatted state is ever recognizable as a filesystem.
     Status = InvalidateStaleBootSectors();
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("InvalidateStaleBootSectors() failed with status 0x%.08x\n", Status);
         goto end;
+    }
+
+    if (!QuickFormat)
+    {
+        Status = ZeroVolume(Callback);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("ZeroVolume() failed with status 0x%.08x\n", Status);
+            goto end;
+        }
     }
 
     // Create metafiles
@@ -462,14 +550,52 @@ NtfsFormat(
         goto end;
     }
 
+    // An MBR partition of a FAT type now holds NTFS: give it the IFS type, as
+    // setup does after formatting. Other types (already IFS, hidden, OEM or
+    // vendor partitions) and GPT partitions are left as they are, and so is a
+    // superfloppy, whose partition (at offset 0) has no table entry.
+    if (NT_SUCCESS(PartStatus) &&
+        PartitionInfo.PartitionStyle == PARTITION_STYLE_MBR &&
+        PartitionInfo.PartitionNumber != 0 &&
+        PartitionInfo.StartingOffset.QuadPart > 0 &&
+        (PartitionInfo.Mbr.PartitionType == PARTITION_FAT_12 ||
+         PartitionInfo.Mbr.PartitionType == PARTITION_FAT_16 ||
+         PartitionInfo.Mbr.PartitionType == PARTITION_HUGE ||
+         PartitionInfo.Mbr.PartitionType == PARTITION_FAT32 ||
+         PartitionInfo.Mbr.PartitionType == PARTITION_FAT32_XINT13 ||
+         PartitionInfo.Mbr.PartitionType == PARTITION_XINT13))
+    {
+        SET_PARTITION_INFORMATION SetPartitionInfo;
+
+        SetPartitionInfo.PartitionType = PARTITION_IFS;
+        Status = NtDeviceIoControlFile(DiskHandle, NULL, NULL, NULL, &Iosb,
+                                       IOCTL_DISK_SET_PARTITION_INFO,
+                                       &SetPartitionInfo, sizeof(SetPartitionInfo),
+                                       NULL, 0);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("IOCTL_DISK_SET_PARTITION_INFO failed with status 0x%.08x\n", Status);
+            goto end;
+        }
+    }
+
     Result = TRUE;
     DPRINT1("NtfsFormat() completed successfully\n");
 
 end:
 
-    // Dismount and unlock volume
-    NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
-    NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0);
+    // Dismount and unlock volume. A file system that stays mounted keeps
+    // describing the old volume, so that is a failure.
+    if (Locked)
+    {
+        Status = NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("FSCTL_DISMOUNT_VOLUME failed with status 0x%.08x\n", Status);
+            Result = FALSE;
+        }
+        NtFsControlFile(DiskHandle, NULL, NULL, NULL, &Iosb, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0);
+    }
 
     // Close the volume handle
     NtClose(DiskHandle);
@@ -479,12 +605,14 @@ end:
     DISK_GEO    = NULL;
     DISK_LEN    = NULL;
     LABEL       = NULL;
+    InterlockedExchange(&NtfsFormatBusy, 0);
 
-    // Update progress bar
-    if (Callback)
+    // The caller (fmifs FormatEx) reports DONE; a second DONE made the
+    // Explorer format dialog report completion twice.
+    if (Callback && Result)
     {
-        BOOL success = Result;
-        Callback(DONE, 0, (PVOID)&success);
+        ULONG pc = 100;
+        Callback(PROGRESS, 0, (PVOID)&pc);
     }
 
     return Result;
@@ -505,18 +633,26 @@ NtfsChkdsk(
     IN PVOID pUnknown4,
     IN PULONG ExitStatus)
 {
-    // STUB
+    // There is no NTFS checker yet. The dirty-only queries of autochk at
+    // boot and of setup after formatting report a clean volume; an explicit
+    // check says that nothing was checked and fails, instead of reporting
+    // success.
+    if (CheckOnlyIfDirty)
+    {
+        *ExitStatus = (ULONG)STATUS_SUCCESS;
+        return TRUE;
+    }
 
     if (Callback)
     {
         TEXTOUTPUT TextOut;
 
         TextOut.Lines = 1;
-        TextOut.Output = "stub, not implemented";
+        TextOut.Output = "The NTFS volume was not checked: this version has no NTFS checker.\n";
 
         Callback(OUTPUT, 0, &TextOut);
     }
-    
-    *ExitStatus = (ULONG)STATUS_SUCCESS;
-    return TRUE;
+
+    *ExitStatus = (ULONG)STATUS_NOT_IMPLEMENTED;
+    return FALSE;
 }

@@ -461,7 +461,7 @@ MkEmptyI30Root(OUT PBYTE Out)
     WR32(Out, 0x00, AttributeFileName);
     WR32(Out, 0x04, COLLATION_FILE_NAME);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = LAYOUT.IndexRootBlocksPerIndexRecord;
     WR32(Out, 0x10, 0x10);              /* entries offset */
     WR32(Out, 0x14, 0x10 + 0x10);       /* index length */
     WR32(Out, 0x18, 0x10 + 0x10);       /* allocated */
@@ -481,7 +481,7 @@ MkLargeI30Root(OUT PBYTE Out)
     WR32(Out, 0x00, AttributeFileName);
     WR32(Out, 0x04, COLLATION_FILE_NAME);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = LAYOUT.IndexRootBlocksPerIndexRecord;
     WR32(Out, 0x10, 0x10);
     WR32(Out, 0x14, 0x10 + 0x18);
     WR32(Out, 0x18, 0x10 + 0x18);
@@ -509,7 +509,7 @@ MkI30RootWithEntries(OUT PBYTE        Out,
     WR32(Out, 0x00, AttributeFileName);
     WR32(Out, 0x04, COLLATION_FILE_NAME);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = LAYOUT.IndexRootBlocksPerIndexRecord;
     WR32(Out, 0x10, 0x10);              /* entries offset */
     Out[0x1C] = 0;                      /* small index */
 
@@ -552,7 +552,7 @@ MkEmptyViewRoot(OUT PBYTE Out,
     WR32(Out, 0x00, 0);                 /* view index (indexed attr type 0) */
     WR32(Out, 0x04, CollationRule);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = LAYOUT.IndexRootBlocksPerIndexRecord;
     WR32(Out, 0x10, 0x10);
     WR32(Out, 0x14, 0x10 + 0x10);
     WR32(Out, 0x18, 0x10 + 0x10);
@@ -572,7 +572,7 @@ MkLargeViewRoot(OUT PBYTE Out,
     WR32(Out, 0x00, 0);
     WR32(Out, 0x04, CollationRule);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = LAYOUT.IndexRootBlocksPerIndexRecord;
     WR32(Out, 0x10, 0x10);
     WR32(Out, 0x14, 0x10 + 0x18);
     WR32(Out, 0x18, 0x10 + 0x18);
@@ -601,7 +601,7 @@ MkViewRootN(OUT PBYTE                Out,
     WR32(Out, 0x00, 0);
     WR32(Out, 0x04, CollationRule);
     WR32(Out, 0x08, INDEX_RECORD_SIZE);
-    Out[0x0C] = (BYTE)LAYOUT.ClustersPerIndexRecord;
+    Out[0x0C] = LAYOUT.IndexRootBlocksPerIndexRecord;
     WR32(Out, 0x10, 0x10);
     Out[0x1C] = 0;
 
@@ -775,12 +775,7 @@ WriteAt(IN ULONGLONG Lcn,
         IN PVOID     Buffer,
         IN ULONG     Length)
 {
-    LARGE_INTEGER   Offset;
-    IO_STATUS_BLOCK IoStatusBlock;
-
-    Offset.QuadPart = (LONGLONG)Lcn * BYTES_PER_CLUSTER;
-    return NtWriteFile(DISK_HANDLE, NULL, NULL, NULL, &IoStatusBlock,
-                       Buffer, Length, &Offset, NULL);
+    return WriteDisk((LONGLONG)Lcn * BYTES_PER_CLUSTER, Buffer, Length);
 }
 
 /* Fills a contiguous run of clusters with a byte pattern in bounded chunks. */
@@ -975,14 +970,14 @@ WriteMetafiles(VOID)
         MkStdInfo(Val, FA_HIDDEN | FA_SYSTEM, Now, NTFS_SECURITY_ID);
         MkAddResident(&Rec, AttributeStandardInformation, NULL, 0, 0, Val, 72);
         Len = MkFileName(Val, MFT_REFERENCE(MREC_ROOT), FA_HIDDEN | FA_SYSTEM,
-                         (ULONGLONG)LAYOUT.MftMirrClusters * C, (ULONGLONG)MFT_MIRR_COUNT * MFT_RECORD_SIZE,
+                         (ULONGLONG)LAYOUT.MftMirrClusters * C, (ULONGLONG)LAYOUT.MftMirrRecords * MFT_RECORD_SIZE,
                          Now, L"$MFTMirr", FILE_NAME_WIN32_AND_DOS);
         MkAddResident(&Rec, AttributeFileName, NULL, 0, RA_INDEXED, Val, Len);
         Runs[0].Lcn = LAYOUT.MftMirrLcn; Runs[0].Len = LAYOUT.MftMirrClusters;
         MkAddNonResident(&Rec, AttributeData, NULL, 0, 0, Runs, 1, LAYOUT.MftMirrClusters - 1,
                          (ULONGLONG)LAYOUT.MftMirrClusters * C,
-                         (ULONGLONG)MFT_MIRR_COUNT * MFT_RECORD_SIZE,
-                         (ULONGLONG)MFT_MIRR_COUNT * MFT_RECORD_SIZE);
+                         (ULONGLONG)LAYOUT.MftMirrRecords * MFT_RECORD_SIZE,
+                         (ULONGLONG)LAYOUT.MftMirrRecords * MFT_RECORD_SIZE);
         MkFinalize(&Rec);
 
         /* Record 2: $LogFile. */
@@ -1413,8 +1408,9 @@ WriteMetafiles(VOID)
     Status = WriteAt(LAYOUT.MftLcn, Mft, MREC_COUNT * MFT_RECORD_SIZE);
     if (!NT_SUCCESS(Status)) { DPRINT1("ERROR: write $MFT (Status %lx)\n", Status); goto done; }
 
-    /* $MFTMirr = the first four records. */
-    Status = WriteRegion(LAYOUT.MftMirrLcn, LAYOUT.MftMirrClusters, Mft, MFT_MIRR_COUNT * MFT_RECORD_SIZE);
+    /* $MFTMirr = the first MftMirrRecords records; those past the built ones are zero, as in $MFT. */
+    Status = WriteRegion(LAYOUT.MftMirrLcn, LAYOUT.MftMirrClusters, Mft,
+                         min(LAYOUT.MftMirrRecords, MREC_COUNT) * MFT_RECORD_SIZE);
     if (!NT_SUCCESS(Status)) { DPRINT1("ERROR: write $MFTMirr (Status %lx)\n", Status); goto done; }
 
     /* $LogFile: fill 0xFF (a driver treats an all-0xFF log as uninitialized). */
