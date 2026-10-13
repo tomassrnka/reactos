@@ -19,7 +19,7 @@ Severity=Informational
 Facility=System
 SymbolicName=WINDOWS_NT_BANNER
 Language=English
-ReactOS Version %s
+AjarOS %s
 Build %s
 Reporting NT %s (Build %u%s)
 .

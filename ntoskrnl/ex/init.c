@@ -1487,11 +1487,11 @@ Phase1InitializationDiscard(IN PVOID Context)
     if (NT_SUCCESS(MsgStatus))
     {
         /* Create the banner message */
-        /* ReactOS specific: Report ReactOS version, NtBuildLab information and reported NT kernel version */
+        /* ReactOS specific: Report the product version, NtBuildLab information and reported NT kernel version */
         Status = RtlStringCbPrintfA(EndBuffer,
                                     Remaining,
                                     (PCHAR)MsgEntry->Text,
-                                    KERNEL_VERSION_STR,
+                                    BRAND_VERSION_STR,
                                     NtBuildLab,
                                     StringBuffer,
                                     NtBuildNumber & 0xFFFF,
@@ -1505,7 +1505,7 @@ Phase1InitializationDiscard(IN PVOID Context)
     else
     {
         /* Use hard-coded banner message */
-        Status = RtlStringCbCopyA(EndBuffer, Remaining, "REACTOS (R)\r\n");
+        Status = RtlStringCbCopyA(EndBuffer, Remaining, "AJAROS\r\n");
         if (!NT_SUCCESS(Status))
         {
             /* Bugcheck */
