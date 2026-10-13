@@ -24,6 +24,7 @@ extern void func_strtoul(void);
 extern void func_wcstoul(void);
 extern void func_wcstombs(void);
 
+extern void func_CommitCharge(void);
 extern void func_DllLoadNotification(void);
 extern void func_EmptyPxeFree(void);
 extern void func_EmptyPxeProtect(void);
@@ -181,6 +182,7 @@ const struct test winetest_testlist[] =
     { "wcstoul", func_wcstoul },
     { "wcstombs", func_wcstombs },
 
+    { "CommitCharge",                   func_CommitCharge },
     { "DllLoadNotification",            func_DllLoadNotification },
     { "EmptyPxeFree",                   func_EmptyPxeFree },
     { "EmptyPxeProtect",                func_EmptyPxeProtect },
