@@ -23,6 +23,8 @@ typedef struct _APPLET
 } APPLET, *PAPPLET;
 
 
+#define MAX_SCHEME_NAME 128
+
 typedef struct _GLOBAL_DATA
 {
     /* Keyboard page */
@@ -40,6 +42,7 @@ typedef struct _GLOBAL_DATA
 
     /* Display page */
     HIGHCONTRAST highContrast;
+    WCHAR szHighContrastScheme[MAX_SCHEME_NAME];
     UINT uCaretBlinkTime;
     UINT uCaretWidth;
     BOOL fShowCaret;
@@ -64,6 +67,7 @@ extern HINSTANCE hApplet;
 
 void ShowLastWin32Error(HWND hWndOwner);
 
+VOID LoadHighContrastScheme(PGLOBAL_DATA pGlobalData);
 INT_PTR CALLBACK DisplayPageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK GeneralPageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK KeyboardPageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);

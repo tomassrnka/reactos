@@ -38,45 +38,116 @@ UpdateCaretBlinkTimeReg(
     RegCloseKey(hKey);
 }
 
-static VOID
-FillColorSchemeComboBox(HWND hwnd)
+#define HIGHCONTRAST_KEY L"Control Panel\\Accessibility\\HighContrast"
+#define HIGHCONTRAST_SCHEME_VALUE L"High Contrast Scheme"
+
+/* A REG_SZ or REG_EXPAND_SZ value (setup writes the scheme names as REG_EXPAND_SZ) that fits cchOut with its terminator */
+static BOOL
+ReadSchemeName(HKEY hKey, LPCWSTR pszValue, LPWSTR pszOut, DWORD cchOut)
 {
-    TCHAR szValue[128];
-    DWORD dwDisposition;
-    DWORD dwLength;
-    HKEY hKey;
-    LONG lError;
-    INT i;
+    WCHAR szBuffer[MAX_SCHEME_NAME + 1];
+    DWORD dwType, cbData = sizeof(szBuffer) - sizeof(WCHAR);
 
-    lError = RegCreateKeyEx(HKEY_CURRENT_USER,
-                            _T("Control Panel\\Appearance\\Schemes"),
-                            0,
-                            NULL,
-                            REG_OPTION_NON_VOLATILE,
-                            KEY_ENUMERATE_SUB_KEYS | KEY_EXECUTE | KEY_QUERY_VALUE,
-                            NULL,
-                            &hKey,
-                            &dwDisposition);
-    if (lError != ERROR_SUCCESS)
-        return;
-
-    for (i = 0; ; i++)
+    ZeroMemory(szBuffer, sizeof(szBuffer));
+    if (RegQueryValueExW(hKey, pszValue, NULL, &dwType, (LPBYTE)szBuffer, &cbData) != ERROR_SUCCESS ||
+        (dwType != REG_SZ && dwType != REG_EXPAND_SZ) ||
+        wcslen(szBuffer) >= cchOut)
     {
-        dwLength = 128;
-        lError = RegEnumValue(hKey,
-                              i,
-                              szValue,
-                              &dwLength, NULL, NULL, NULL, NULL);
-        if (lError == ERROR_NO_MORE_ITEMS)
-            break;
+        return FALSE;
+    }
+    wcscpy(pszOut, szBuffer);
+    return TRUE;
+}
 
-        SendMessage(hwnd,
-                    CB_ADDSTRING,
-                    0,
-                    (LPARAM)szValue);
+/* Win32k keeps neither the scheme name nor a usable pointer to it, so the name lives in the registry */
+VOID
+LoadHighContrastScheme(PGLOBAL_DATA pGlobalData)
+{
+    HKEY hKey;
+
+    pGlobalData->szHighContrastScheme[0] = UNICODE_NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, HIGHCONTRAST_KEY, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        if (!ReadSchemeName(hKey, HIGHCONTRAST_SCHEME_VALUE, pGlobalData->szHighContrastScheme,
+                            ARRAYSIZE(pGlobalData->szHighContrastScheme)))
+        {
+            pGlobalData->szHighContrastScheme[0] = UNICODE_NULL;
+        }
+        RegCloseKey(hKey);
+    }
+    pGlobalData->highContrast.lpszDefaultScheme = pGlobalData->szHighContrastScheme;
+}
+
+static VOID
+SaveHighContrastScheme(PGLOBAL_DATA pGlobalData)
+{
+    HKEY hKey;
+
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, HIGHCONTRAST_KEY, 0, NULL, REG_OPTION_NON_VOLATILE,
+                        KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS)
+    {
+        RegSetValueExW(hKey, HIGHCONTRAST_SCHEME_VALUE, 0, REG_SZ,
+                       (const BYTE *)pGlobalData->szHighContrastScheme,
+                       (DWORD)(wcslen(pGlobalData->szHighContrastScheme) + 1) * sizeof(WCHAR));
+        RegCloseKey(hKey);
+    }
+}
+
+static BOOL
+GetSchemeLegacyName(HKEY hScheme, LPWSTR pszName, DWORD cchName)
+{
+    HKEY hSize;
+    BOOL bFound;
+
+    if (ReadSchemeName(hScheme, L"LegacyName", pszName, cchName) && pszName[0] != UNICODE_NULL)
+        return TRUE;
+    if (RegOpenKeyExW(hScheme, L"Sizes\\0", 0, KEY_QUERY_VALUE, &hSize) != ERROR_SUCCESS)
+        return FALSE;
+    bFound = ReadSchemeName(hSize, L"LegacyName", pszName, cchName) && pszName[0] != UNICODE_NULL;
+    RegCloseKey(hSize);
+    return bFound;
+}
+
+/* The color schemes are the ones Display Properties offers, under "New Schemes" */
+static VOID
+FillColorSchemeComboBox(HWND hwnd, LPCWSTR pszCurrent)
+{
+    WCHAR szKey[257], szName[MAX_SCHEME_NAME];
+    HKEY hSchemes, hScheme;
+    DWORD dwIndex, cchKey;
+    LONG lError;
+    INT iItem;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\Appearance\\New Schemes", 0,
+                      KEY_ENUMERATE_SUB_KEYS, &hSchemes) != ERROR_SUCCESS)
+    {
+        return;
     }
 
-    RegCloseKey(hKey);
+    for (dwIndex = 0; ; dwIndex++)
+    {
+        /* key names have up to 256 characters */
+        cchKey = ARRAYSIZE(szKey);
+        lError = RegEnumKeyExW(hSchemes, dwIndex, szKey, &cchKey, NULL, NULL, NULL, NULL);
+        if (lError == ERROR_MORE_DATA)
+            continue;
+        if (lError != ERROR_SUCCESS)
+            break;
+        if (RegOpenKeyExW(hSchemes, szKey, 0, KEY_QUERY_VALUE, &hScheme) != ERROR_SUCCESS)
+            continue;
+
+        if (GetSchemeLegacyName(hScheme, szName, ARRAYSIZE(szName)) &&
+            SendMessageW(hwnd, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)szName) == CB_ERR)
+        {
+            SendMessageW(hwnd, CB_ADDSTRING, 0, (LPARAM)szName);
+        }
+        RegCloseKey(hScheme);
+    }
+    RegCloseKey(hSchemes);
+
+    iItem = (INT)SendMessageW(hwnd, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)pszCurrent);
+    if (pszCurrent[0] != UNICODE_NULL && iItem != CB_ERR)
+        SendMessageW(hwnd, CB_SETCURSEL, iItem, 0);
 }
 
 
@@ -100,38 +171,33 @@ HighContrastDlgProc(HWND hwndDlg,
                            IDC_CONTRAST_ACTIVATE_CHECK,
                            pGlobalData->highContrast.dwFlags & HCF_HOTKEYACTIVE ? BST_CHECKED : BST_UNCHECKED);
 
-            FillColorSchemeComboBox(GetDlgItem(hwndDlg, IDC_CONTRAST_COMBO));
-
-            SendDlgItemMessage(hwndDlg,
-                               IDC_CONTRAST_COMBO,
-                               CB_SELECTSTRING,
-                               (WPARAM)-1,
-                               (LPARAM)pGlobalData->highContrast.lpszDefaultScheme);
+            FillColorSchemeComboBox(GetDlgItem(hwndDlg, IDC_CONTRAST_COMBO),
+                                    pGlobalData->szHighContrastScheme);
             break;
 
         case WM_COMMAND:
             switch (LOWORD(wParam))
             {
-                case IDC_CONTRAST_ACTIVATE_CHECK:
-                    pGlobalData->highContrast.dwFlags ^= HCF_HOTKEYACTIVE;
-                    break;
-
-                case IDC_CONTRAST_COMBO:
-                    if (HIWORD(wParam) == CBN_SELCHANGE)
-                    {
-                        INT nSel;
-
-                        nSel = SendDlgItemMessage(hwndDlg, IDC_CONTRAST_COMBO,
-                                                  CB_GETCURSEL, 0, 0);
-                        SendDlgItemMessage(hwndDlg, IDC_CONTRAST_COMBO,
-                                           CB_GETLBTEXT, nSel,
-                                           (LPARAM)pGlobalData->highContrast.lpszDefaultScheme);
-                    }
-                    break;
-
                 case IDOK:
+                {
+                    INT nSel = (INT)SendDlgItemMessage(hwndDlg, IDC_CONTRAST_COMBO, CB_GETCURSEL, 0, 0);
+
+                    if (nSel != CB_ERR &&
+                        SendDlgItemMessage(hwndDlg, IDC_CONTRAST_COMBO, CB_GETLBTEXTLEN, nSel, 0) <
+                        (LRESULT)ARRAYSIZE(pGlobalData->szHighContrastScheme))
+                    {
+                        SendDlgItemMessage(hwndDlg, IDC_CONTRAST_COMBO, CB_GETLBTEXT, nSel,
+                                           (LPARAM)pGlobalData->szHighContrastScheme);
+                    }
+
+                    if (IsDlgButtonChecked(hwndDlg, IDC_CONTRAST_ACTIVATE_CHECK) == BST_CHECKED)
+                        pGlobalData->highContrast.dwFlags |= HCF_HOTKEYACTIVE;
+                    else
+                        pGlobalData->highContrast.dwFlags &= ~HCF_HOTKEYACTIVE;
+
                     EndDialog(hwndDlg, TRUE);
                     break;
+                }
 
                 case IDCANCEL:
                     EndDialog(hwndDlg, FALSE);
@@ -298,6 +364,7 @@ DisplayPageProc(HWND hwndDlg,
                                      sizeof(HIGHCONTRAST),
                                      &pGlobalData->highContrast,
                                      SPIF_UPDATEINIFILE | SPIF_SENDCHANGE /*0*/);
+                SaveHighContrastScheme(pGlobalData);
                 return TRUE;
             }
             break;
