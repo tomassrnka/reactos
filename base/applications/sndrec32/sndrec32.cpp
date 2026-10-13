@@ -43,6 +43,7 @@ HBITMAP butbmps_dis[5];
 WNDPROC buttons_std_proc;
 
 BOOL butdisabled[5];
+BOOL can_record = TRUE;
 BOOL stopped_flag;
 BOOL isnew;
 BOOL display_dur;
@@ -501,8 +502,39 @@ WndProc(HWND hWnd,
                         (LPARAM)MAKELONG(slider_min, slider_max));
 
             UpdateWindow(slider);
-            enable_but(BUTREC_ID);
+            /* Without a recording device Record stays disabled */
+            can_record = (waveInGetNumDevs() > 0);
+            if (can_record)
+            {
+                enable_but(BUTREC_ID);
+            }
+            else
+            {
+                disable_but(BUTREC_ID);
+                PostMessage(hWnd, WM_APP_NODEVICE, 0, 0);
+            }
             EnableWindow(slider, FALSE);
+            break;
+
+        case WM_APP_NODEVICE:
+            LoadString(hInst, IDS_ERR_NODEVICE, str_tmp, MAX_LOADSTRING);
+            MessageBox(hWnd, str_tmp, szTitle, MB_OK);
+            break;
+
+        case WM_APP_PLAYDONE:
+            /* Playback ended; a notice that arrives after a new Play is stale */
+            if (AUD_OUT->current_status() == snd::WAVEOUT_PLAYING ||
+                AUD_OUT->current_status() == snd::WAVEOUT_FLUSHING)
+                break;
+
+            stopped_flag = TRUE;
+
+            enable_but(BUTSTART_ID);
+            enable_but(BUTEND_ID);
+            enable_but(BUTREC_ID);
+            enable_but(BUTPLAY_ID);
+
+            InvalidateRect(wave_win, 0, TRUE);
             break;
 
         /* Implements slider logic */
@@ -719,7 +751,16 @@ WndProc(HWND hWnd,
 
                     samples_max = AUD_BUF->total_samples();
 
-                    AUD_IN->start_recording();
+                    if (!AUD_IN->start_recording())
+                    {
+                        /* One message for the whole failure; the device stays unusable */
+                        s_recording = FALSE;
+                        can_record = FALSE;
+                        disable_but(BUTREC_ID);
+                        LoadString(hInst, IDS_ERR_RECORD, str_tmp, MAX_LOADSTRING);
+                        MessageBox(hWnd, str_tmp, szTitle, MB_OK | MB_ICONERROR);
+                        break;
+                    }
 
                     enable_but(BUTSTOP_ID);
 
@@ -889,14 +930,8 @@ WndProc(HWND hWnd,
 
 void l_play_finished(void)
 {
-    stopped_flag = true;
-
-    enable_but(BUTSTART_ID);
-    enable_but(BUTEND_ID);
-    enable_but(BUTREC_ID);
-    enable_but(BUTPLAY_ID);
-
-    InvalidateRect(wave_win, 0, TRUE);
+    /* Called on the playback thread: the buttons are updated on the UI thread */
+    PostMessage(main_win, WM_APP_PLAYDONE, 0, 0);
 }
 
 void l_audio_arrival(unsigned int samples_arrival)
@@ -910,6 +945,9 @@ void l_buffer_resized(unsigned int new_size)
 
 VOID enable_but(DWORD id)
 {
+    if (id == BUTREC_ID && !can_record)
+        return;
+
     butdisabled[id] = FALSE;
     SendMessage(buttons[id], BM_SETIMAGE, (WPARAM)IMAGE_BITMAP, (LPARAM)butbmps[id]);
 }

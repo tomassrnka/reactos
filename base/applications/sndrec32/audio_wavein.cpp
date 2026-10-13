@@ -85,27 +85,28 @@ audio_wavein::init_headers_(void)
     }
 }
 
-void
+bool
 audio_wavein::prep_headers_(void)
 {
     MMRESULT err;
-    bool error = false;
 
     /* If there is no memory for memory or headers, throw error */
     if ((!wave_headers) || (!main_buffer) || (!wavein_handle))
-    {
-        /* TODO: throw error! */
-    }
+        return false;
 
     for (unsigned int i = 0; i < buffers; ++i)
     {
         err = waveInPrepareHeader(wavein_handle, &wave_headers[i], sizeof(WAVEHDR));
         if (err != MMSYSERR_NOERROR)
-            error = true;
+        {
+            /* Undo the headers prepared so far */
+            while (i--)
+                waveInUnprepareHeader(wavein_handle, &wave_headers[i], sizeof(WAVEHDR));
+            return false;
+        }
     }
 
-    if (error)
-        MessageBox(0, TEXT("waveInPrepareHeader Error."), 0, 0);
+    return true;
 }
 
 void
@@ -131,27 +132,42 @@ audio_wavein::unprep_headers_(void)
         MessageBox(0, TEXT("waveInUnPrepareHeader Error."), 0, 0);
 }
 
-void
+bool
 audio_wavein::add_buffers_to_driver_(void)
 {
     MMRESULT err;
-    bool error = false;
 
     /* If there is no memory for memory or headers, throw error */
     if ((!wave_headers) || (!main_buffer) || (!wavein_handle))
-    {
-        /* TODO: throw error! */
-    }
+        return false;
 
     for (unsigned int i = 0; i < buffers; ++i)
     {
         err = waveInAddBuffer(wavein_handle, &wave_headers[i], sizeof(WAVEHDR));
         if (err != MMSYSERR_NOERROR)
-            error = true;
+            return false;
     }
 
-    if (error)
-        MessageBox(0, TEXT("waveInAddBuffer Error."), 0, 0);
+    return true;
+}
+
+void
+audio_wavein::abort_start_(void)
+{
+    /* Return the buffers already queued, then release them, without any message */
+    status = WAVEIN_ERR;
+
+    for (unsigned int i = 0; i < buffers; ++i)
+    {
+        /* The recording thread may still re-add a buffer it was handling: reset again */
+        for (unsigned int tries = 0; tries < 100; ++tries)
+        {
+            waveInReset(wavein_handle);
+            if (waveInUnprepareHeader(wavein_handle, &wave_headers[i], sizeof(WAVEHDR)) != WAVERR_STILLPLAYING)
+                break;
+            Sleep(10);
+        }
+    }
 }
 
 void
@@ -176,8 +192,23 @@ audio_wavein::close(void)
     /* Closing wavein stream (no handle if waveInOpen failed) */
     if (wavein_handle)
     {
-        while (waveInClose(wavein_handle) == WAVERR_STILLPLAYING)
-            Sleep(1);
+        unsigned int tries;
+
+        /* Bounded, so a driver that keeps the buffers cannot hang the exit */
+        for (tries = 0; tries < 200; ++tries)
+        {
+            if (waveInClose(wavein_handle) != WAVERR_STILLPLAYING)
+                break;
+            waveInReset(wavein_handle);
+            Sleep(10);
+        }
+
+        if (tries == 200)
+        {
+            /* The driver may still use the buffers: leave them allocated */
+            main_buffer = 0;
+            wave_headers = 0;
+        }
     }
 
     /* Release buffers memory */
@@ -258,10 +289,7 @@ audio_wavein::open(void)
         status = WAVEIN_ERR;
         wavein_handle = 0;
 
-        if (err == WAVERR_BADFORMAT)
-            MessageBox(0, TEXT("waveInOpen Error"), 0, 0);
-
-        /* TODO: throw error */
+        /* The caller reports the failure once */
         return;
     }
 
@@ -271,27 +299,34 @@ audio_wavein::open(void)
     /* Now `audio_wavein' object is ready for audio recording! */
 }
 
-void
+bool
 audio_wavein::start_recording(void)
 {
     MMRESULT err;
     BOOL ev;
 
-    if ((status != WAVEIN_READY) && (status != WAVEIN_STOP))
+    /* Nothing to record from when the device did not open */
+    if (((status != WAVEIN_READY) && (status != WAVEIN_STOP)) || (!wavein_handle))
+        return false;
+
+    /* Let's prepare header of type WAVEHDR that we will pass to the driver
+       with our audio informations, and buffer informations */
+    if (!prep_headers_())
     {
-        /* TODO: throw error */
+        status = WAVEIN_ERR;
+        return false;
+    }
+
+    /* The waveInAddBuffer function sends an input buffer to the given waveform-audio
+       input device. When the buffer is filled, the application is notified. */
+    if (!add_buffers_to_driver_())
+    {
+        abort_start_();
+        return false;
     }
 
     /* Updating to the recording status */
     status = WAVEIN_RECORDING;
-
-    /* Let's prepare header of type WAVEHDR that we will pass to the driver
-       with our audio informations, and buffer informations */
-    prep_headers_();
-
-    /* The waveInAddBuffer function sends an input buffer to the given waveform-audio
-       input device. When the buffer is filled, the application is notified. */
-    add_buffers_to_driver_();
 
     /* Signaling event for waking up the recorder thread */
     ev = SetEvent(wakeup_recthread);
@@ -302,11 +337,11 @@ audio_wavein::start_recording(void)
     err = waveInStart(wavein_handle);
     if (err != MMSYSERR_NOERROR)
     {
-        /* Updating status */
-        status = WAVEIN_ERR;
-        MessageBox(0, TEXT("waveInStart Error."), 0, 0);
-        /* TODO: throw error */
+        abort_start_();
+        return false;
     }
+
+    return true;
 }
 
 void
@@ -390,11 +425,11 @@ audio_wavein::recording_procedure(LPVOID arg)
                     /* If status is not flushing data, then we can re-add the buffer
                        for reusing it. Otherwise, if we are flushing pending data,
                        we cannot re-add buffer because we don't need it anymore */
-                    if (_this->status != WAVEIN_FLUSHING)
+                    if (_this->status == WAVEIN_RECORDING)
                     {
                         /* Let the audio driver reuse the buffer */
                         waveInAddBuffer(_this->wavein_handle, phdr, sizeof(WAVEHDR));
-                    } else {
+                    } else if (_this->status == WAVEIN_FLUSHING) {
                         /* If we are flushing pending data, we have to prepare
                            to stop recording. Set WAVEHDR flag to 0, and fires
                            the event `data_flushed_event', that will wake up
