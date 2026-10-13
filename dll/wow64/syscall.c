@@ -173,12 +173,12 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(2); PROBE(6);
         if (a[5]) ProbeOutput(a[5], sizeof(LARGE_INTEGER));
         Base = PTR32(U(2)); Size = U(6);
+        Cleanup->Process = H(1);
+        Cleanup->Mapped = TRUE;
         Status = NtMapViewOfSection(H(0), H(1), &Base, a[3] ? a[3] : 0xFFFFFFFF,
                                     a[4], P(5), &Size, a[7], a[8], a[9]);
         if (NT_SUCCESS(Status))
         {
-            Cleanup->Process = H(1);
-            Cleanup->Mapped = TRUE;
             Cleanup->Base = Base;
             U(2) = PtrToUlong(Base); U(6) = Size;
             Cleanup->Base = NULL;

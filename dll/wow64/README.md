@@ -15,6 +15,14 @@ bitness, suspended startup, exact redirected output, actual console-screen
 contents, repeated process creation, exit status, pointer marshalling and
 error paths. It uses the same PE32 executable for the native i386 control.
 
+`kernel32_apitest Wow64ReviewFixes` uses `wow64_native.exe` from native
+`system32`, and the i386 `wow64_errors.exe`, `wow64_localhello.exe` and
+`wow64_local.dll` from `SysWOW64` (all from `system32` on native i386).
+It tests native thread startup after discarding the main PE signature,
+faulting handle and memory outputs without leaked objects or mappings,
+and a PE32 executable with an adjacent static-import DLL. The latter pair
+is copied to a temporary application directory before launch.
+
 ## Entry and lifetime
 
 The kernel's process-owned WoW64 object identifies an i386 PE32 main image
@@ -42,6 +50,11 @@ and SIZE_T outputs, handles, strings, object attributes, section information,
 virtual-memory information and synchronous I/O status blocks are converted
 explicitly. Unsupported services and information classes return errors.
 Pointer captures run under native user-mode exception handling.
+Translated output destinations are checked before native side effects.
+New handles, reservations and mapped views are released if their translated
+outputs cannot be copied back. Existing caller-owned reservations remain
+owned by the caller; changes to existing memory and file contents are not
+transactional against concurrent changes to output memory.
 
 CSR uses a separate private user-mode operation on the same gate. The i386
 CSR library retains local capture buffers; the native bridge constructs
@@ -70,7 +83,8 @@ This is the phase-1 runtime, not general WoW64 compatibility:
   implemented in `csr.c`. The Base static-data copy is a startup snapshot;
   live updates and INI mapping are not implemented. Console control falls
   back to termination; property and IME callbacks are unsupported.
-* DLL discovery selects `SysWOW64` and `KnownDlls32` for the i386 loader.
+* DLL discovery selects `SysWOW64` and `KnownDlls32` for the i386 loader,
+  retaining application and other search directories in their original order.
   General filesystem/registry redirection, environment rewriting, arbitrary
   native/guest process creation, services and installers are not implemented.
 * i386 ntdll must map at its preferred base. Guest image relocation remains

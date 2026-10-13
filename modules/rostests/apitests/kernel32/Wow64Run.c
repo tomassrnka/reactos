@@ -120,7 +120,7 @@ static VOID RunReviewChild(const WCHAR *Image, const WCHAR *Arguments)
     DWORD Wait, ExitCode = 0;
     BOOL Result;
 
-    swprintf(Command, L"\"%ls\" %ls", Image, Arguments);
+    _snwprintf(Command, RTL_NUMBER_OF(Command), L"\"%ls\" %ls", Image, Arguments);
     Result = CreateProcessW(Image, Command, NULL, NULL, FALSE, 0,
                             NULL, NULL, &Startup, &Process);
     ok(Result, "CreateProcess %ls failed: %lu\n", Command, GetLastError());
@@ -163,14 +163,14 @@ START_TEST(Wow64ReviewFixes)
     /* The PE32 image and its static import live outside every system search
      * directory. The parent current directory is deliberately unchanged. */
     GetTempPathW(RTL_NUMBER_OF(Temp), Temp);
-    swprintf(Local, L"%lswow64-local-%lu", Temp, GetCurrentProcessId());
+    _snwprintf(Local, RTL_NUMBER_OF(Local), L"%lswow64-local-%lu", Temp, GetCurrentProcessId());
     ok(CreateDirectoryW(Local, NULL), "CreateDirectory failed: %lu\n", GetLastError());
-    swprintf(Image, L"%ls\\wow64_localhello.exe", Local);
+    _snwprintf(Image, RTL_NUMBER_OF(Image), L"%ls\\wow64_localhello.exe", Local);
     wcscpy(Temp, Source);
     wcscat(Temp, L"wow64_localhello.exe");
     Copied = CopyFileW(Temp, Image, FALSE);
     ok(Copied, "Copy PE32 executable failed: %lu\n", GetLastError());
-    swprintf(Dll, L"%ls\\wow64_local.dll", Local);
+    _snwprintf(Dll, RTL_NUMBER_OF(Dll), L"%ls\\wow64_local.dll", Local);
     wcscpy(Temp, Source);
     wcscat(Temp, L"wow64_local.dll");
     Copied = CopyFileW(Temp, Dll, FALSE) && Copied;
