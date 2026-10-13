@@ -138,8 +138,9 @@ KiInitializePcr(
     /* Set DPC Stack */
     Pcr->Prcb.DpcStack = DpcStack;
 
-    /* Setup the processor set */
+    /* Setup the processor set. Each processor is the master of its own set */
     Pcr->Prcb.MultiThreadProcessorSet = Pcr->Prcb.SetMember;
+    Pcr->Prcb.MultiThreadSetMaster = &Pcr->Prcb;
 
     /* Clear DR6/7 to cleanup bootloader debugging */
     Pcr->Prcb.ProcessorState.SpecialRegisters.KernelDr6 = 0;
