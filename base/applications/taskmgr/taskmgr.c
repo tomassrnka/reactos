@@ -190,6 +190,13 @@ TaskManagerWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     LPRECT           pRC;
     LPNMHDR          pnmh;
     WINDOWPLACEMENT  wp;
+    LRESULT          lResult;
+
+    if (PerformancePage_OnMainWindowMessage(hDlg, message, wParam, lParam, &lResult))
+    {
+        SetWindowLongPtrW(hDlg, DWLP_MSGRESULT, lResult);
+        return TRUE;
+    }
 
     switch (message) {
     case WM_INITDIALOG:
@@ -662,6 +669,7 @@ BOOL OnCreate(HWND hWnd)
     TabCtrl_SetCurFocus/*Sel*/(hTabWnd, 1);
     TabCtrl_SetCurFocus/*Sel*/(hTabWnd, 2);
     TabCtrl_SetCurFocus/*Sel*/(hTabWnd, nActivePage);
+    PerformancePage_RestoreCompactMode();
 
     /* Set the username in the "Log Off %s" item of the Shutdown menu */
 
@@ -827,6 +835,7 @@ void LoadSettings(void)
     /* Performance page settings */
     TaskManagerSettings.CPUHistory_OneGraphPerCPU = TRUE;
     TaskManagerSettings.ShowKernelTimes = FALSE;
+    TaskManagerSettings.CompactMode = FALSE;
 
     /* Open the key */
     if (RegOpenKeyExW(HKEY_CURRENT_USER, szSubKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS)

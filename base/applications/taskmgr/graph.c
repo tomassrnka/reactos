@@ -43,7 +43,6 @@ Graph_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_MOUSELEAVE:
     case WM_MOUSEMOVE:
     /* case WM_MOUSEWHEEL: */
-    case WM_NCHITTEST:
     case WM_NCLBUTTONDBLCLK:
     case WM_NCLBUTTONDOWN:
     case WM_NCLBUTTONUP:
@@ -79,9 +78,11 @@ Graph_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_SYSDEADCHAR:
     case WM_SYSKEYDOWN:
     case WM_SYSKEYUP:
-
-    case WM_NCCALCSIZE:
         return 0;
+
+    /* Clicks go to the page (double click: compact mode) */
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
 
     case WM_PAINT:
         hdc = BeginPaint(hWnd, &ps);
