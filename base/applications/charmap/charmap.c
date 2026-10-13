@@ -312,6 +312,15 @@ UpdateStatusBar(WCHAR wch)
     WCHAR buff[MAX_PATH];
     WCHAR szDesc[MAX_PATH];
 
+    /* No character: the search found nothing */
+    if (wch == 0)
+    {
+        buff[0] = UNICODE_NULL;
+        LoadStringW(hInstance, IDS_NOCHAR, buff, SIZEOF(buff));
+        SendMessageW(hStatusWnd, SB_SETTEXT, 0, (LPARAM)buff);
+        return;
+    }
+
     GetUName(wch, szDesc);
     wsprintfW(buff, L"U+%04X: %s", wch, szDesc);
     SendMessageW(hStatusWnd, SB_SETTEXT, 0, (LPARAM)buff);
@@ -474,6 +483,51 @@ CharMapDlgProc(HWND hDlg,
     return FALSE;
 }
 #ifndef REMOVE_ADVANCED
+static BOOL bSearchActive;
+static WCHAR szSearchLabel[64];
+
+/* Search is enabled for typed text; Go to Unicode only for Unicode without a search */
+static
+VOID
+UpdateSearchControls(HWND hDlg)
+{
+    BOOL bHasText = (GetWindowTextLengthW(GetDlgItem(hDlg, IDC_EDIT_SEARCH)) > 0);
+    INT idx = (INT)SendDlgItemMessageW(hDlg, IDC_COMBO_CHARSET, CB_GETCURSEL, 0, 0);
+
+    EnableWindow(GetDlgItem(hDlg, IDC_BUTTON_SEARCH), bSearchActive || bHasText);
+    EnableWindow(GetDlgItem(hDlg, IDC_EDIT_UNICODE), idx == 0 && !bSearchActive && !bHasText);
+}
+
+static
+VOID
+OnSearchButton(HWND hDlg)
+{
+    HWND hMap = GetDlgItem(hCharmapDlg, IDC_FONTMAP);
+    WCHAR szText[MAX_FILTER];
+    WCHAR szReset[64];
+
+    if (bSearchActive)
+    {
+        /* Reset: show every character again and clear the search text */
+        bSearchActive = FALSE;
+        SendMessageW(hMap, FM_SETFILTER, 0, 0);
+        SetDlgItemTextW(hDlg, IDC_BUTTON_SEARCH, szSearchLabel);
+        SetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, L"");
+    }
+    else
+    {
+        if (!GetDlgItemTextW(hDlg, IDC_EDIT_SEARCH, szText, SIZEOF(szText)))
+            return;
+
+        bSearchActive = TRUE;
+        SendMessageW(hMap, FM_SETFILTER, 0, (LPARAM)szText);
+        if (LoadStringW(hInstance, IDS_RESET, szReset, SIZEOF(szReset)))
+            SetDlgItemTextW(hDlg, IDC_BUTTON_SEARCH, szReset);
+    }
+
+    UpdateSearchControls(hDlg);
+}
+
 static
 INT_PTR
 CALLBACK
@@ -485,6 +539,8 @@ AdvancedDlgProc(HWND hDlg,
     switch(Message)
     {
         case WM_INITDIALOG:
+            GetDlgItemTextW(hDlg, IDC_BUTTON_SEARCH, szSearchLabel, SIZEOF(szSearchLabel));
+            SendDlgItemMessageW(hDlg, IDC_EDIT_SEARCH, EM_LIMITTEXT, MAX_FILTER - 1, 0);
             return TRUE;
 
         case WM_COMMAND:
@@ -501,8 +557,18 @@ AdvancedDlgProc(HWND hDlg,
                                      FM_SETCHARMAP,
                                      idx, 0);
 
-                        EnableWindow(GetDlgItem(hAdvancedDlg, IDC_EDIT_UNICODE), idx == 0);
+                        UpdateSearchControls(hDlg);
                     }
+                    break;
+
+                case IDC_EDIT_SEARCH:
+                    if (HIWORD(wParam) == EN_CHANGE)
+                        UpdateSearchControls(hDlg);
+                    break;
+
+                case IDC_BUTTON_SEARCH:
+                    if (HIWORD(wParam) == BN_CLICKED)
+                        OnSearchButton(hDlg);
                     break;
             }
         }
@@ -539,7 +605,7 @@ PanelOnCreate(HWND hWnd, WPARAM wParam, LPARAM lParam)
 
     FillGroupByComboList(GetDlgItem(hAdvancedDlg, IDC_COMBO_GROUPBY));
     EnableWindow(GetDlgItem(hAdvancedDlg, IDC_COMBO_GROUPBY), FALSE);   // FIXME: Implement
-    EnableWindow(GetDlgItem(hAdvancedDlg, IDC_BUTTON_SEARCH), FALSE);   // FIXME: Implement
+    UpdateSearchControls(hAdvancedDlg);
 #endif
     hStatusWnd = CreateWindow(STATUSCLASSNAME,
                               NULL,

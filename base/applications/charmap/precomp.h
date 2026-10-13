@@ -24,6 +24,9 @@
 #define FM_SETCHAR    (WM_USER + 3)
 #define FM_GETHFONT   (WM_USER + 4)
 #define FM_SETCHARMAP (WM_USER + 5)
+#define FM_SETFILTER  (WM_USER + 6)
+
+#define MAX_FILTER 64
 
 // the code pages to display in the advanced 'character set' combobox
 static const UINT codePages[] = {
@@ -58,6 +61,7 @@ typedef struct _MAP
 
     USHORT ValidGlyphs[MAX_GLYPHS];
     USHORT NumValidGlyphs;
+    WCHAR Filter[MAX_FILTER]; /* upper case; empty: no filter */
 } MAP, *PMAP;
 
 typedef struct {

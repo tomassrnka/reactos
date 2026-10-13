@@ -60,4 +60,6 @@ BEGIN
     IDS_TITLE "Character Map"
     IDS_UNICODE "Unicode"
     IDS_ALL "All"
+    IDS_RESET "&Reset"
+    IDS_NOCHAR "No Character Available"
 END
