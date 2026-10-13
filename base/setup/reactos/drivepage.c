@@ -416,7 +416,8 @@ FormatDlgProcWorker(
 
             if (SetupData.bUnattend)
             {
-                /* In unattended mode, preselect the file system */
+                /* In unattended mode, preselect the file system
+                 * (the FsType values are the same as in text-mode setup) */
                 switch (SetupData.USetupData.FsType)
                 {
                     /* 1 is for BtrFS */
@@ -424,7 +425,12 @@ FormatDlgProcWorker(
                         DefaultFs = L"BTRFS";
                         break;
 
-                    /* If we don't understand input, default to FAT */
+                    /* 2 is for NTFS */
+                    case 2:
+                        DefaultFs = L"NTFS";
+                        break;
+
+                    /* 0 is for FAT; if we don't understand input, default to FAT */
                     default:
                         DefaultFs = L"FAT";
                         break;
@@ -432,8 +438,8 @@ FormatDlgProcWorker(
             }
             else
             {
-                /* By default select the "FAT" file system */
-                DefaultFs = L"FAT";
+                /* By default select the "NTFS" file system */
+                DefaultFs = L"NTFS";
             }
 
             /* Retrieve the selected volume and create information */
@@ -451,6 +457,9 @@ FormatDlgProcWorker(
                 FileSystem = DefaultFs;
 
             iItem = SendDlgItemMessageW(hDlg, IDC_FSTYPE, CB_FINDSTRINGEXACT, 0, (LPARAM)FileSystem);
+            /* An unformatted volume ("RAW") or a file system setup cannot format gets the default */
+            if (iItem == CB_ERR)
+                iItem = SendDlgItemMessageW(hDlg, IDC_FSTYPE, CB_FINDSTRINGEXACT, 0, (LPARAM)DefaultFs);
             if (iItem == CB_ERR)
                 iItem = 0;
             SendDlgItemMessageW(hDlg, IDC_FSTYPE, CB_SETCURSEL, (WPARAM)iItem, 0);
