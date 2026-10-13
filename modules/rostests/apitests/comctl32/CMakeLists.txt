@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     ../include/msgtrace.c
     button.c
+    exports.c
     imagelist.c
     propsheet.c
     testlist.c
