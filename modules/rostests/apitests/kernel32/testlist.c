@@ -42,6 +42,7 @@ extern void func_SetConsoleWindowInfo(void);
 extern void func_SetCurrentDirectory(void);
 extern void func_SetUnhandledExceptionFilter(void);
 extern void func_SystemFirmware(void);
+extern void func_Toolhelp32(void);
 extern void func_TerminateProcess(void);
 extern void func_TunnelCache(void);
 extern void func_UEFIFirmware(void);
@@ -89,6 +90,7 @@ const struct test winetest_testlist[] =
     { "SetCurrentDirectory",         func_SetCurrentDirectory },
     { "SetUnhandledExceptionFilter", func_SetUnhandledExceptionFilter },
     { "SystemFirmware",              func_SystemFirmware },
+    { "Toolhelp32",                  func_Toolhelp32 },
     { "TerminateProcess",            func_TerminateProcess },
     { "TunnelCache",                 func_TunnelCache },
     { "UEFIFirmware",                func_UEFIFirmware },

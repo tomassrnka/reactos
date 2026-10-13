@@ -45,6 +45,7 @@ list(APPEND SOURCE
     SetSearchPathMode.c
     SetUnhandledExceptionFilter.c
     SystemFirmware.c
+    Toolhelp32.c
     TerminateProcess.c
     TunnelCache.c
     UEFIFirmware.c
