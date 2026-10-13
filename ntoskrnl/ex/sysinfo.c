@@ -1490,6 +1490,7 @@ QSI_DEF(SystemPageFileInformation)
     Spfi->TotalInUse = MiUsedSwapPages;
     Spfi->PeakUsage = MiUsedSwapPages; /* FIXME */
     Spfi->PageFileName = FileName;
+    *ReqSize = sizeof(SYSTEM_PAGEFILE_INFORMATION);
     return STATUS_SUCCESS;
 }
 
