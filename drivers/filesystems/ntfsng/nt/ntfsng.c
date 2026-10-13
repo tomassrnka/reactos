@@ -342,6 +342,8 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
     Free = (InterlockedDecrement(&Fcb->RefCount) == 0);
     if (Free && Fcb->VcbLinks.Flink)
         RemoveEntryList(&Fcb->VcbLinks);
+    if (Free && Fcb->IsPagingFile)
+        Vcb->PagingFiles--;
     if (Free && Vcb->VolumeFcb == Fcb)
         Vcb->VolumeFcb = NULL;
     ExReleaseFastMutex(&Vcb->FcbListLock);
@@ -374,7 +376,7 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
     ExFreePoolWithTag(Fcb, TAG_NTFSNG);
 }
 
-/* EA, volume label and security writes are not implemented. */
+/* EA writes are not implemented. */
 static NTSTATUS NgRefuseWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
@@ -401,8 +403,8 @@ static BOOLEAN NgIsVolumeOpen(PIRP Irp)
  * Requests on a volume handle that may reach the core run under the create gate (shared), as creates
  * and cleanups do: a dismount, which takes it exclusive, then either runs before them (they see the
  * volume dismounted) or after them, never while they use the core it frees.  The lock holder can send
- * them on other threads of an asynchronous handle while its own dismount runs.  Lock and dismount take
- * the gate themselves; unlock only changes the lock owner and the VPB, without the core.
+ * them on other threads of an asynchronous handle while its own dismount runs.  Lock, unlock and
+ * dismount take the gate themselves, exclusive (an unlock may dismount, NgEndLock).
  */
 static BOOLEAN NgVolumeRequestGated(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
@@ -442,7 +444,7 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return IoCallDriver(Vcb->StorageDevice, Irp);
 }
 
-/* IRP_MJ_CLEANUP on a dismounted volume: only the handle's own state, the core is gone. */
+/* IRP_MJ_CLEANUP on a dismounted volume (from NgCleanup, which gave up the volume lock): only the handle's own state, the core is gone. */
 NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
 {
     PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
@@ -451,8 +453,6 @@ NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
 
     if (!Fcb)
         return STATUS_SUCCESS;
-    if (Fcb->IsVolume)
-        NgUnlockVolume(Vcb, FileObject, TRUE);
     if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
         FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
     if (!Fcb->IsDirectory && !Fcb->IsVolume)
@@ -469,8 +469,10 @@ NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
 }
 
 /*
- * Requests on a dismounted volume: closes and cleanups go on, the volume handle reads, writes and
- * controls the disk directly and may unlock; everything else fails with STATUS_VOLUME_DISMOUNTED.
+ * Requests on a dismounted volume: closes and cleanups go on, the volume handle reads and writes the
+ * disk directly while it still holds the lock and may unlock, device controls pass to the storage
+ * device; everything else fails with STATUS_VOLUME_DISMOUNTED, also the handle's reads and writes
+ * after the unlock, as on Windows (the volume may be mounted again under it by then).
  */
 static NTSTATUS NgDismountedRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -484,11 +486,13 @@ static NTSTATUS NgDismountedRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case IRP_MJ_CLOSE:
             return NgClose(DeviceObject, Irp);
         case IRP_MJ_CLEANUP:
-            return NgCleanupDismounted(Vcb, Irp);
+            return NgCleanup(DeviceObject, Irp);
         case IRP_MJ_READ:
-            return Volume ? NgRead(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
+            return Volume && Vcb->LockedBy == Stack->FileObject ? NgRead(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
         case IRP_MJ_WRITE:
-            return Volume ? NgWrite(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
+            if (!Volume && Fcb && !Fcb->IsPagingFile && (Irp->Flags & IRP_PAGING_IO))
+                return NgDropPagingWrite(Vcb, Fcb, Irp, Stack->Parameters.Write.Length);
+            return Volume && Vcb->LockedBy == Stack->FileObject ? NgWrite(DeviceObject, Irp) : STATUS_VOLUME_DISMOUNTED;
         case IRP_MJ_FLUSH_BUFFERS:
             return Volume ? STATUS_SUCCESS : STATUS_VOLUME_DISMOUNTED;
         case IRP_MJ_FILE_SYSTEM_CONTROL:
@@ -619,6 +623,11 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
              !(Major == IRP_MJ_DEVICE_CONTROL && NgIsVolumeOpen(Irp)))
     {
         Status = NgDismountedRequest(DeviceObject, Irp);
+    }
+    else if (DeviceObject != NgGlobal.ControlDevice && Major == IRP_MJ_WRITE &&
+             NgDropIfDiscardable((PNG_VCB)DeviceObject->DeviceExtension, Irp, &Status))
+    {
+        /* Before the medium checks: a refused page write is retried forever (see NgDropPagingWrite). */
     }
     else if (DeviceObject != NgGlobal.ControlDevice &&
              !NT_SUCCESS(Status = NgMediumGone((PNG_VCB)DeviceObject->DeviceExtension, Irp, Stack)))
@@ -769,7 +778,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgHandlers[IRP_MJ_QUERY_INFORMATION] = NgQueryInformation;
     NgHandlers[IRP_MJ_SET_INFORMATION] = NgSetInformation;
     NgHandlers[IRP_MJ_SET_EA] = NgRefuseWrite;
-    NgHandlers[IRP_MJ_SET_VOLUME_INFORMATION] = NgRefuseWrite;
+    NgHandlers[IRP_MJ_SET_VOLUME_INFORMATION] = NgSetVolumeInformation;
     NgHandlers[IRP_MJ_SET_SECURITY] = NgSetSecurity;
     NgHandlers[IRP_MJ_QUERY_SECURITY] = NgQuerySecurity;
     NgHandlers[IRP_MJ_FLUSH_BUFFERS] = NgFlushBuffers;

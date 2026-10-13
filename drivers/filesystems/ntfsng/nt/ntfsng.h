@@ -93,7 +93,11 @@ typedef struct _NG_VCB
     TUNNEL Tunnel;                  /* creation times of names that just went away (FsRtl tunnel cache) */
     PFILE_OBJECT LockedBy;          /* FSCTL_LOCK_VOLUME holder: no other open while set */
     ERESOURCE CreateGate;           /* creates and cleanups shared; volume lock and dismount exclusive */
-    BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: never write the mounted state back */
+    BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: no core device I/O, dismounted when the lock ends */
+    BOOLEAN LockEnding;             /* the holder's unlock or cleanup runs: its direct writes not yet started are refused (CoreLock) */
+    LONG DroppedPagingWrites;       /* page writes of files not written: after RawWritten, or dismounted */
+    LONG PagingFiles;               /* FCBs that are paging files, listed or not, until freed (FcbListLock) */
+    BOOLEAN LabelStale;             /* the VPB label is empty because reading it at mount ran out of memory */
     BOOLEAN Dismounted;             /* FSCTL_DISMOUNT_VOLUME done: no core, the storage device has a new VPB */
     LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;
@@ -270,6 +274,8 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
 int NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
+NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length);
+BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
 
 /* create.c */
@@ -278,7 +284,7 @@ VOID NgTunnelAdd(PNG_VCB Vcb, ULONGLONG DirMftNo, PCWSTR Name, USHORT NameChars,
 VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name);
 
 /* fsctl.c */
-BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup);
+BOOLEAN NgEndLock(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup);
 
 /* security.c */
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
@@ -301,6 +307,7 @@ NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGL
 VOID NgAfterChange(PNG_VCB Vcb);
 NTSTATUS NgCheckMedium(PNG_VCB Vcb);
 VOID NgSetFlushOptional(PDEVICE_OBJECT Device);
+#define NG_DEV_NOT_SENT (-2)          /* NgDevWriteDurable: no request reached the device */
 int NgDevWriteDurable(PDEVICE_OBJECT Device, unsigned long long off, void *buf, unsigned int len);
 int NgDevFlushDurable(PDEVICE_OBJECT Device);
 VOID NgApplyModified(PNG_FCB Fcb);
@@ -321,4 +328,5 @@ NTSTATUS NgLockControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+NTSTATUS NgSetVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 ULONG NgFileAttributes(PNG_FCB Fcb, const struct ngc_stat *St);
