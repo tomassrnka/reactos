@@ -1477,17 +1477,67 @@ AccpGetPathRootLength(IN PCWSTR Path)
 }
 
 /*
+ * Resolves a name to an absolute path once, so that every later query and the final open use the
+ * same object even if the current directory changes. An extended path is used as it is:
+ * GetFullPathNameW would normalise its components. The result is freed with LocalFree.
+ */
+static DWORD
+AccpResolvePath(IN PCWSTR Name,
+                OUT PWSTR *Path)
+{
+    PWSTR Buffer;
+    DWORD Length, Capacity = MAX_PATH;
+
+    *Path = NULL;
+
+    if (Name[0] == L'\\' && Name[1] == L'\\' && Name[2] == L'?' && Name[3] == L'\\')
+    {
+        Length = (DWORD)wcslen(Name);
+        Buffer = (PWSTR)LocalAlloc(LMEM_FIXED, (Length + 1) * sizeof(WCHAR));
+        if (Buffer == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        RtlCopyMemory(Buffer, Name, (Length + 1) * sizeof(WCHAR));
+        *Path = Buffer;
+        return ERROR_SUCCESS;
+    }
+
+    /* the current directory can change between the calls, so retry while the result does not fit */
+    for (;;)
+    {
+        Buffer = (PWSTR)LocalAlloc(LMEM_FIXED, Capacity * sizeof(WCHAR));
+        if (Buffer == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        Length = GetFullPathNameW(Name, Capacity, Buffer, NULL);
+        if (Length == 0)
+        {
+            DWORD Ret = GetLastError();
+
+            LocalFree(Buffer);
+            return Ret;
+        }
+        if (Length < Capacity)
+            break;
+        LocalFree(Buffer);
+        Capacity = Length + 1;
+    }
+
+    *Path = Buffer;
+    return ERROR_SUCCESS;
+}
+
+/*
+ * Path is an absolute path from AccpResolvePath.
  * Returns ERROR_SUCCESS with *NewDacl NULL if the object has no parent to inherit from
  * (a volume root, or a parent without DACL); any other failure is an error.
  */
 static DWORD
-AccpBuildInheritedDacl(IN LPWSTR pObjectName,
+AccpBuildInheritedDacl(IN PCWSTR Path,
                        IN PACL ExplicitDacl OPTIONAL,
                        IN PSID Owner OPTIONAL,
                        IN PSID Group OPTIONAL,
                        OUT PACL *NewDacl)
 {
-    PWSTR FullPath = NULL;
+    PWSTR ParentPath = NULL;
     PWCHAR Last;
     DWORD Length, Attributes, Ret;
     SIZE_T RootLength;
@@ -1501,40 +1551,26 @@ AccpBuildInheritedDacl(IN LPWSTR pObjectName,
 
     *NewDacl = NULL;
 
-    if (pObjectName[0] == L'\\' && pObjectName[1] == L'\\' && pObjectName[2] == L'?' && pObjectName[3] == L'\\')
-    {
-        /* an extended path is used as it is: GetFullPathNameW would normalise its components */
-        Length = (DWORD)wcslen(pObjectName);
-        FullPath = (PWSTR)LocalAlloc(LMEM_FIXED, (Length + 1) * sizeof(WCHAR));
-        if (FullPath == NULL)
-            return ERROR_NOT_ENOUGH_MEMORY;
-        RtlCopyMemory(FullPath, pObjectName, (Length + 1) * sizeof(WCHAR));
-    }
-    else
-    {
-        DWORD Capacity = MAX_PATH;
+    RootLength = AccpGetPathRootLength(Path);
+    if (RootLength == 0)
+        return ERROR_NOT_SUPPORTED;
 
-        /* the current directory can change between the calls, so retry while the result does not fit */
-        for (;;)
-        {
-            FullPath = (PWSTR)LocalAlloc(LMEM_FIXED, Capacity * sizeof(WCHAR));
-            if (FullPath == NULL)
-                return ERROR_NOT_ENOUGH_MEMORY;
-            Length = GetFullPathNameW(pObjectName, Capacity, FullPath, NULL);
-            if (Length == 0)
-            {
-                Ret = GetLastError();
-                goto Cleanup;
-            }
-            if (Length < Capacity)
-                break;
-            LocalFree(FullPath);
-            FullPath = NULL;
-            Capacity = Length + 1;
-        }
+    Length = (DWORD)wcslen(Path);
+    ParentPath = (PWSTR)LocalAlloc(LMEM_FIXED, (Length + 1) * sizeof(WCHAR));
+    if (ParentPath == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    RtlCopyMemory(ParentPath, Path, (Length + 1) * sizeof(WCHAR));
+
+    while (Length > RootLength && ParentPath[Length - 1] == L'\\')
+        ParentPath[--Length] = UNICODE_NULL;
+    if (Length <= RootLength)
+    {
+        /* a volume root or a share has no parent: nothing to ask the file system about */
+        Ret = ERROR_SUCCESS;
+        goto Cleanup;
     }
 
-    Attributes = GetFileAttributesW(FullPath);
+    Attributes = GetFileAttributesW(ParentPath);
     if (Attributes == INVALID_FILE_ATTRIBUTES)
     {
         Ret = GetLastError();
@@ -1542,27 +1578,13 @@ AccpBuildInheritedDacl(IN LPWSTR pObjectName,
     }
     IsDirectory = (Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-    RootLength = AccpGetPathRootLength(FullPath);
-    if (RootLength == 0)
-    {
-        Ret = ERROR_NOT_SUPPORTED;
-        goto Cleanup;
-    }
-    while (Length > RootLength && FullPath[Length - 1] == L'\\')
-        FullPath[--Length] = UNICODE_NULL;
-    if (Length <= RootLength)
-    {
-        /* a volume root has no parent */
-        Ret = ERROR_SUCCESS;
-        goto Cleanup;
-    }
-    Last = wcsrchr(FullPath, L'\\');
-    if ((SIZE_T)(Last - FullPath) < RootLength)
-        FullPath[RootLength] = UNICODE_NULL;
+    Last = wcsrchr(ParentPath, L'\\');
+    if ((SIZE_T)(Last - ParentPath) < RootLength)
+        ParentPath[RootLength] = UNICODE_NULL;
     else
         *Last = UNICODE_NULL;
 
-    Ret = AccRewriteGetNamedRights(FullPath, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+    Ret = AccRewriteGetNamedRights(ParentPath, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
                                    NULL, NULL, &ParentDacl, NULL, &ParentSd);
     if (Ret != ERROR_SUCCESS)
         goto Cleanup;
@@ -1659,8 +1681,8 @@ Cleanup:
         LocalFree(Acl);
     if (ParentSd != NULL)
         LocalFree(ParentSd);
-    if (FullPath != NULL)
-        LocalFree(FullPath);
+    if (ParentPath != NULL)
+        LocalFree(ParentPath);
     return Ret;
 }
 
@@ -1690,6 +1712,9 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
         !(SecurityInfo & PROTECTED_DACL_SECURITY_INFORMATION))
     {
         SECURITY_DESCRIPTOR InheritedSd;
+        SECURITY_DESCRIPTOR_CONTROL Control;
+        DWORD Revision;
+        PWSTR pFullPath = NULL;
         PSECURITY_DESCRIPTOR pOwnSd = NULL;
         PACL pExplicit = NULL, pInherited = NULL;
         PSID pOwner = NULL, pGroup = NULL;
@@ -1700,6 +1725,14 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
         /* a missing or NULL DACL is set as given */
         if (Present && pExplicit != NULL)
         {
+            /* the name is resolved once: every query and the final open use this path */
+            Ret = AccpResolvePath(pObjectName, &pFullPath);
+            if (Ret != ERROR_SUCCESS)
+            {
+                SetLastError(LastErr);
+                return Ret;
+            }
+
             RtlGetOwnerSecurityDescriptor(pSecurityDescriptor, &pOwner, &Defaulted);
             RtlGetGroupSecurityDescriptor(pSecurityDescriptor, &pGroup, &Defaulted);
 
@@ -1708,7 +1741,7 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
                 PSID pCurOwner = NULL, pCurGroup = NULL;
 
                 /* the owner and group are only needed for CREATOR OWNER and CREATOR GROUP ACEs */
-                if (AccRewriteGetNamedRights(pObjectName, ObjectType, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
+                if (AccRewriteGetNamedRights(pFullPath, ObjectType, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
                                              &pCurOwner, &pCurGroup, NULL, NULL, &pOwnSd) == ERROR_SUCCESS)
                 {
                     if (pOwner == NULL)
@@ -1718,11 +1751,12 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
                 }
             }
 
-            Ret = AccpBuildInheritedDacl(pObjectName, pExplicit, pOwner, pGroup, &pInherited);
+            Ret = AccpBuildInheritedDacl(pFullPath, pExplicit, pOwner, pGroup, &pInherited);
             if (Ret != ERROR_SUCCESS)
             {
                 if (pOwnSd != NULL)
                     LocalFree(pOwnSd);
+                LocalFree(pFullPath);
                 SetLastError(LastErr);
                 return Ret;
             }
@@ -1756,11 +1790,21 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
                     RtlGetSaclSecurityDescriptor(pSecurityDescriptor, &Present, &pSdSacl, &Defaulted);
                     if (!SetSecurityDescriptorSacl(&InheritedSd, Present, pSdSacl, FALSE))
                         Ret = GetLastError();
+
+                    /* the SACL keeps the control bits of the caller's descriptor */
+                    if (Ret == ERROR_SUCCESS &&
+                        GetSecurityDescriptorControl(pSecurityDescriptor, &Control, &Revision) &&
+                        !SetSecurityDescriptorControl(&InheritedSd,
+                                                      SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED,
+                                                      Control & (SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED)))
+                    {
+                        Ret = GetLastError();
+                    }
                 }
 
                 if (Ret == ERROR_SUCCESS)
                 {
-                    Ret = AccpOpenNamedObject(pObjectName, ObjectType, SecurityInfo, &Handle, &Handle2, TRUE);
+                    Ret = AccpOpenNamedObject(pFullPath, ObjectType, SecurityInfo, &Handle, &Handle2, TRUE);
                     if (Ret == ERROR_SUCCESS)
                     {
                         Ret = AccRewriteSetHandleRights(Handle, ObjectType, SecurityInfo, &InheritedSd);
@@ -1771,12 +1815,23 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
                 LocalFree(pInherited);
                 if (pOwnSd != NULL)
                     LocalFree(pOwnSd);
+                LocalFree(pFullPath);
                 SetLastError(LastErr);
                 return Ret;
             }
 
+            /* nothing to inherit (a root or a parent without DACL): set as given, on the resolved path */
             if (pOwnSd != NULL)
                 LocalFree(pOwnSd);
+            Ret = AccpOpenNamedObject(pFullPath, ObjectType, SecurityInfo, &Handle, &Handle2, TRUE);
+            if (Ret == ERROR_SUCCESS)
+            {
+                Ret = AccRewriteSetHandleRights(Handle, ObjectType, SecurityInfo, pSecurityDescriptor);
+                AccpCloseObjectHandle(ObjectType, Handle, Handle2);
+            }
+            LocalFree(pFullPath);
+            SetLastError(LastErr);
+            return Ret;
         }
     }
 

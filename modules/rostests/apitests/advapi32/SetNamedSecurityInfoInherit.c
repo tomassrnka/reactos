@@ -65,13 +65,44 @@ static BOOL HasInheritedEffectiveAce(PACL Acl, PSID Sid, ACCESS_MASK Mask)
         if (GetAce(Acl, i, (PVOID *)&Ace) &&
             Ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
             (Ace->Header.AceFlags & (INHERITED_ACE | INHERIT_ONLY_ACE)) == INHERITED_ACE &&
-            (Ace->Mask & Mask) == Mask &&
+            Ace->Mask == Mask &&
             EqualSid((PSID)&Ace->SidStart, Sid))
         {
             return TRUE;
         }
     }
     return FALSE;
+}
+
+static BOOL IsReactOS(void)
+{
+    HKEY Key;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\ReactOS", 0, KEY_READ, &Key) != ERROR_SUCCESS)
+        return FALSE;
+    RegCloseKey(Key);
+    return TRUE;
+}
+
+/* ReactOS does not keep the control bits of a descriptor (known); anywhere else a missing bit is a failure */
+static void CheckControl(PSECURITY_DESCRIPTOR Sd, WORD Bits, BOOL Expected, PCSTR What)
+{
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    DWORD Revision;
+    BOOL Got;
+
+    if (!Sd || !GetSecurityDescriptorControl(Sd, &Control, &Revision))
+    {
+        ok(FALSE, "%s: no descriptor control\n", What);
+        return;
+    }
+    Got = (Control & Bits) == Bits;
+    if (Got == Expected)
+        ok(TRUE, "%s\n", What);
+    else if (IsReactOS())
+        skip("%s: control 0x%04x, the ReactOS kernel does not keep it (known)\n", What, Control);
+    else
+        ok(FALSE, "%s: control 0x%04x, bits 0x%04x expected %d\n", What, Control, Bits, Expected);
 }
 
 static BOOL DaclSupported(PCWSTR Dir)
@@ -157,6 +188,7 @@ static void TestInheritance(PCWSTR Base, PSID Admins, PSID System, PSID Users)
         ok(FindAce(Dacl, Admins, INHERIT_BOTH, FILE_ALL_ACCESS) != NULL, "Administrators ACE lost its inheritance flags\n");
         ok(FindAce(Dacl, System, INHERIT_BOTH, FILE_ALL_ACCESS) != NULL, "SYSTEM ACE lost its inheritance flags\n");
     }
+    CheckControl(Sd, SE_DACL_PROTECTED, TRUE, "the parent DACL is protected");
     if (Sd)
         LocalFree(Sd);
 
@@ -184,6 +216,8 @@ static void TestInheritance(PCWSTR Base, PSID Admins, PSID System, PSID Users)
            FindAce(Dacl, Users, INHERIT_BOTH | INHERITED_ACE, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE) != NULL,
            "ACE of Users was not inherited by the directory\n");
     }
+    CheckControl(Sd, SE_DACL_PROTECTED, FALSE, "the reset directory DACL is not protected");
+    CheckControl(Sd, SE_DACL_AUTO_INHERITED, TRUE, "the reset directory DACL is auto-inherited");
     if (Sd)
         LocalFree(Sd);
 
@@ -347,9 +381,54 @@ static void TestInheritance(PCWSTR Base, PSID Admins, PSID System, PSID Users)
     ok_dec(Err, ERROR_SUCCESS);
     ok(Dacl != NULL, "the protected directory has no DACL\n");
     if (Err == ERROR_SUCCESS && Dacl)
+    {
         ok_dec((int)Dacl->AceCount, 1);
+        ok(FindAce(Dacl, Users, 0, FILE_GENERIC_READ) != NULL, "the protected DACL lost its only ACE\n");
+    }
+    CheckControl(Sd, SE_DACL_PROTECTED, TRUE, "the protected directory DACL is protected");
     if (Sd)
         LocalFree(Sd);
+
+    /* a SACL given with the unprotected DACL keeps its own protection bit */
+    {
+        HANDLE Token;
+        TOKEN_PRIVILEGES Priv;
+        ACL Sacl;
+        PACL OutSacl = NULL;
+        BOOL HavePrivilege = FALSE;
+
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &Token))
+        {
+            Priv.PrivilegeCount = 1;
+            Priv.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            if (LookupPrivilegeValueW(NULL, L"SeSecurityPrivilege", &Priv.Privileges[0].Luid))
+            {
+                AdjustTokenPrivileges(Token, FALSE, &Priv, 0, NULL, NULL);
+                HavePrivilege = GetLastError() == ERROR_SUCCESS;
+            }
+            CloseHandle(Token);
+        }
+
+        if (!HavePrivilege)
+        {
+            skip("no SeSecurityPrivilege\n");
+        }
+        else
+        {
+            InitializeAcl(&Sacl, sizeof(Sacl), ACL_REVISION);
+            Err = SetNamedSecurityInfoW(Child2, SE_FILE_OBJECT,
+                                        DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION |
+                                        SACL_SECURITY_INFORMATION | PROTECTED_SACL_SECURITY_INFORMATION,
+                                        NULL, NULL, &EmptyAcl, &Sacl);
+            ok_dec(Err, ERROR_SUCCESS);
+            Sd = NULL;
+            Err = GetNamedSecurityInfoW(Child2, SE_FILE_OBJECT, SACL_SECURITY_INFORMATION, NULL, NULL, NULL, &OutSacl, &Sd);
+            ok_dec(Err, ERROR_SUCCESS);
+            CheckControl(Sd, SE_SACL_PROTECTED, TRUE, "the SACL is protected");
+            if (Sd)
+                LocalFree(Sd);
+        }
+    }
 
     /* clean up: the parent DACL grants Administrators full control */
     DeleteFileW(File);
@@ -394,7 +473,7 @@ static void TestVolumeRootChild(PCWSTR Base, PSID Admins)
         return;
     }
 
-    StringCchPrintfW(Child, _countof(Child), L"%lssni-root-%lu", Root, GetCurrentProcessId());
+    StringCchPrintfW(Child, _countof(Child), L"%lssni-root-%lu-%lu", Root, GetCurrentProcessId(), GetTickCount());
     if (!CreateDirectoryW(Child, NULL))
     {
         skip("cannot create %ls: %lu\n", Child, GetLastError());
@@ -448,7 +527,7 @@ START_TEST(SetNamedSecurityInfoInherit)
     TestSetEntries(Admins, Users);
 
     GetTempPathW(_countof(Temp), Temp);
-    StringCchPrintfW(Base, _countof(Base), L"%lssni-%lu", Temp, GetCurrentProcessId());
+    StringCchPrintfW(Base, _countof(Base), L"%lssni-%lu-%lu", Temp, GetCurrentProcessId(), GetTickCount());
     if (!CreateDirectoryW(Base, NULL))
     {
         skip("cannot create %ls: %lu\n", Base, GetLastError());
