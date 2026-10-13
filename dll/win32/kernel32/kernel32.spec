@@ -1178,7 +1178,7 @@
 @ stdcall UnlockFile(long long long long long)
 @ stdcall UnlockFileEx(long long long long ptr)
 @ stdcall UnmapViewOfFile(ptr)
-@ stub -version=0x600+ UnregisterApplicationRecoveryCallback
+@ stdcall -version=0x600+ UnregisterApplicationRecoveryCallback()
 @ stdcall -version=0x600+ UnregisterApplicationRestart()
 @ stdcall UnregisterConsoleIME()
 @ stdcall UnregisterWait(long)
