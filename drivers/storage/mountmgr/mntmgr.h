@@ -489,6 +489,12 @@ RedirectSavedLink(
 );
 
 VOID
+ForgetSavedLink(
+    IN PSAVED_LINK_INFORMATION SavedLinkInformation,
+    IN PUNICODE_STRING DosName
+);
+
+VOID
 SendLinkCreated(
     IN PUNICODE_STRING SymbolicName
 );

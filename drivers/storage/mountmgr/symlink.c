@@ -314,7 +314,8 @@ SymbolicLinkNamesFromUniqueIdCount(IN PWSTR ValueName,
     UNICODE_STRING ValueNameString;
     PMOUNTDEV_UNIQUE_ID UniqueId = Context;
 
-    if (ValueName[0] != L'#' || ValueType != REG_BINARY ||
+    /* Names starting with # are no-drive-letter entries, not links */
+    if (ValueName[0] == L'#' || ValueType != REG_BINARY ||
         (UniqueId->UniqueIdLength != ValueLength))
     {
         return STATUS_SUCCESS;
@@ -338,6 +339,14 @@ SymbolicLinkNamesFromUniqueIdCount(IN PWSTR ValueName,
 /*
  * @implemented
  */
+/* Where SymbolicLinkNamesFromUniqueIdQuery stores the names it finds */
+typedef struct _SYMLINK_NAMES_QUERY
+{
+    PUNICODE_STRING Names;
+    ULONG Size;
+    ULONG Count;
+} SYMLINK_NAMES_QUERY, *PSYMLINK_NAMES_QUERY;
+
 NTSTATUS
 NTAPI
 SymbolicLinkNamesFromUniqueIdQuery(IN PWSTR ValueName,
@@ -349,10 +358,10 @@ SymbolicLinkNamesFromUniqueIdQuery(IN PWSTR ValueName,
 {
     UNICODE_STRING ValueNameString;
     PMOUNTDEV_UNIQUE_ID UniqueId = Context;
-    /* Unicode strings table */
-    PUNICODE_STRING ReturnString = EntryContext;
+    PSYMLINK_NAMES_QUERY Query = EntryContext;
 
-    if (ValueName[0] != L'#' || ValueType != REG_BINARY ||
+    /* Names starting with # are no-drive-letter entries, not links */
+    if (ValueName[0] == L'#' || ValueType != REG_BINARY ||
         (UniqueId->UniqueIdLength != ValueLength))
     {
         return STATUS_SUCCESS;
@@ -363,9 +372,9 @@ SymbolicLinkNamesFromUniqueIdQuery(IN PWSTR ValueName,
         return STATUS_SUCCESS;
     }
 
-    /* Unique ID matches, let's put the symlink */
+    /* Unique ID matches, let's put the symlink, if it was counted */
     RtlInitUnicodeString(&ValueNameString, ValueName);
-    if (!ValueNameString.Length)
+    if (!ValueNameString.Length || Query->Count >= Query->Size)
     {
         return STATUS_SUCCESS;
     }
@@ -381,13 +390,8 @@ SymbolicLinkNamesFromUniqueIdQuery(IN PWSTR ValueName,
     RtlCopyMemory(ValueNameString.Buffer, ValueName, ValueNameString.Length);
     ValueNameString.Buffer[ValueNameString.Length / sizeof(WCHAR)] = UNICODE_NULL;
 
-    while (ReturnString->Length)
-    {
-        ReturnString++;
-    }
-
     /* And return that string */
-    *ReturnString = ValueNameString;
+    Query->Names[Query->Count++] = ValueNameString;
 
     return STATUS_SUCCESS;
 }
@@ -460,8 +464,11 @@ QuerySymbolicLinkNamesFromStorage(IN PDEVICE_EXTENSION DeviceExtension,
     NTSTATUS Status;
     BOOLEAN WriteNew;
     RTL_QUERY_REGISTRY_TABLE QueryTable[2];
+    SYMLINK_NAMES_QUERY Query;
 
     UNREFERENCED_PARAMETER(DeviceExtension);
+
+    *SymLinks = NULL;
 
     /* First of all, count links */
     RtlZeroMemory(QueryTable, sizeof(QueryTable));
@@ -490,12 +497,6 @@ QuerySymbolicLinkNamesFromStorage(IN PDEVICE_EXTENSION DeviceExtension,
         WriteNew = FALSE;
     }
 
-    /* If has GUID, it makes one more link */
-    if (HasGuid)
-    {
-        (*SymLinkCount)++;
-    }
-
     if (WriteNew)
     {
         /* Write link */
@@ -519,8 +520,15 @@ QuerySymbolicLinkNamesFromStorage(IN PDEVICE_EXTENSION DeviceExtension,
                                         NULL);
         if (!NT_SUCCESS(Status))
         {
+            *SymLinkCount = 0;
             return STATUS_NOT_FOUND;
         }
+    }
+
+    /* If has GUID, it makes one more link (after the recount above) */
+    if (HasGuid)
+    {
+        (*SymLinkCount)++;
     }
 
     /* Not links found? */
@@ -533,6 +541,7 @@ QuerySymbolicLinkNamesFromStorage(IN PDEVICE_EXTENSION DeviceExtension,
     *SymLinks = AllocatePool(*SymLinkCount * sizeof(UNICODE_STRING));
     if (!*SymLinks)
     {
+        *SymLinkCount = 0;
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -540,32 +549,41 @@ QuerySymbolicLinkNamesFromStorage(IN PDEVICE_EXTENSION DeviceExtension,
     RtlZeroMemory(*SymLinks, *SymLinkCount * sizeof(UNICODE_STRING));
     RtlZeroMemory(QueryTable, sizeof(QueryTable));
     QueryTable[0].QueryRoutine = SymbolicLinkNamesFromUniqueIdQuery;
+    QueryTable[0].EntryContext = &Query;
+    Query.Names = *SymLinks;
+    Query.Size = *SymLinkCount;
+    Query.Count = 0;
 
-    /* No GUID? Keep it that way */
-    if (!HasGuid)
-    {
-        QueryTable[0].EntryContext = *SymLinks;
-    }
-    /* Otherwise, first create volume name */
-    else
+    /* With a GUID, first create volume name */
+    if (HasGuid)
     {
         Status = CreateNewVolumeName(SymLinks[0], Guid);
         if (!NT_SUCCESS(Status))
         {
             FreePool(*SymLinks);
+            *SymLinks = NULL;
+            *SymLinkCount = 0;
             return Status;
         }
 
         /* Skip first link (ours) */
-        QueryTable[0].EntryContext = *SymLinks + 1;
+        Query.Count = 1;
     }
 
-    /* Now, query */
+    /* Now, query; only the names actually stored are returned */
     RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
                            DatabasePath,
                            QueryTable,
                            DeviceInformation->UniqueId,
                            NULL);
+    *SymLinkCount = Query.Count;
+
+    if (!*SymLinkCount)
+    {
+        FreePool(*SymLinks);
+        *SymLinks = NULL;
+        return STATUS_NOT_FOUND;
+    }
 
     return STATUS_SUCCESS;
 }
@@ -728,23 +746,52 @@ RedirectSavedLink(IN PSAVED_LINK_INFORMATION SavedLinkInformation,
     {
         SymlinkInformation = CONTAINING_RECORD(NextEntry, SYMLINK_INFORMATION, SymbolicLinksListEntry);
 
-        if (!RtlEqualUnicodeString(DosName, &(SymlinkInformation->Name), TRUE))
+        if (RtlEqualUnicodeString(DosName, &(SymlinkInformation->Name), TRUE))
         {
+            NTSTATUS Status;
+
             /* Delete old link */
             GlobalDeleteSymbolicLink(DosName);
             /* Set its new location */
-            GlobalCreateSymbolicLink(DosName, NewLink);
+            Status = GlobalCreateSymbolicLink(DosName, NewLink);
 
             /* And remove it from the list (not valid any more) */
             RemoveEntryList(&(SymlinkInformation->SymbolicLinksListEntry));
             FreePool(SymlinkInformation->Name.Buffer);
             FreePool(SymlinkInformation);
 
-            return TRUE;
+            return NT_SUCCESS(Status);
         }
     }
 
     return FALSE;
+}
+
+/*
+ * Drops the saved link of that name, if any, without touching the link
+ * itself: it was recreated for the arriving device.
+ */
+VOID
+ForgetSavedLink(IN PSAVED_LINK_INFORMATION SavedLinkInformation,
+                IN PUNICODE_STRING DosName)
+{
+    PLIST_ENTRY NextEntry;
+    PSYMLINK_INFORMATION SymlinkInformation;
+
+    for (NextEntry = SavedLinkInformation->SymbolicLinksListHead.Flink;
+         NextEntry != &(SavedLinkInformation->SymbolicLinksListHead);
+         NextEntry = NextEntry->Flink)
+    {
+        SymlinkInformation = CONTAINING_RECORD(NextEntry, SYMLINK_INFORMATION, SymbolicLinksListEntry);
+
+        if (RtlEqualUnicodeString(DosName, &(SymlinkInformation->Name), TRUE))
+        {
+            RemoveEntryList(&(SymlinkInformation->SymbolicLinksListEntry));
+            FreePool(SymlinkInformation->Name.Buffer);
+            FreePool(SymlinkInformation);
+            return;
+        }
+    }
 }
 
 /*
