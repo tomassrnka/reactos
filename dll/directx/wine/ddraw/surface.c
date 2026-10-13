@@ -6219,6 +6219,17 @@ static void wined3d_resource_desc_from_ddraw(struct ddraw *ddraw,
     else if (caps & DDSCAPS_3DDEVICE)
         wined3d_desc->bind_flags |= WINED3D_BIND_RENDER_TARGET;
 
+#ifdef __REACTOS__
+    /* GetCaps reports video memory without 3D support too, and Windows creates video memory
+     * surfaces whenever the driver reports video memory: keep these in system memory. */
+    if ((caps & DDSCAPS_VIDEOMEMORY) && (ddraw->flags & DDRAW_NO3D)
+            && !(caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)))
+    {
+        wined3d_desc->access = WINED3D_RESOURCE_ACCESS_CPU
+                | WINED3D_RESOURCE_ACCESS_MAP_R | WINED3D_RESOURCE_ACCESS_MAP_W;
+    }
+    else
+#endif
     if ((caps & DDSCAPS_SYSTEMMEMORY) && !(caps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)))
     {
         wined3d_desc->access = WINED3D_RESOURCE_ACCESS_CPU
@@ -6943,7 +6954,13 @@ HRESULT ddraw_surface_create(struct ddraw *ddraw, const DDSURFACEDESC2 *surface_
         return DDERR_NOCOLORKEYHW;
     }
 
+#ifdef __REACTOS__
+    /* No-3D video memory surfaces are kept in system memory; overlays would not be shown. */
+    if ((ddraw->flags & DDRAW_NO3D) && (desc->ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY)
+            && (desc->ddsCaps.dwCaps & DDSCAPS_OVERLAY))
+#else
     if ((ddraw->flags & DDRAW_NO3D) && (desc->ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY))
+#endif
     {
         WARN("Video memory surfaces not supported without 3D support.\n");
         free(texture);
@@ -6956,6 +6973,11 @@ HRESULT ddraw_surface_create(struct ddraw *ddraw, const DDSURFACEDESC2 *surface_
     reserve_memory = !(desc->dwFlags & DDSD_LPSURFACE)
             && desc->ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY
             && wined3d_display_mode_format.dwRGBBitCount <= 16;
+#ifdef __REACTOS__
+    /* Like the other system memory surfaces of the no-3D mode. */
+    if (ddraw->flags & DDRAW_NO3D)
+        reserve_memory = false;
+#endif
 
     if (FAILED(hr = ddraw_texture_init(texture, ddraw, layers, levels, sysmem_fallback, reserve_memory)))
     {
