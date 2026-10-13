@@ -1277,6 +1277,393 @@ AccRewriteGetNamedRights(LPWSTR pObjectName,
 }
 
 
+
+/*
+ * Inheritance from the parent container for SetNamedSecurityInfo with
+ * UNPROTECTED_DACL_SECURITY_INFORMATION: the new DACL holds the caller's explicit
+ * ACEs followed by the parent's inheritable ACEs, marked INHERITED_ACE. The rules follow
+ * the ones the kernel applies to a new object.
+ */
+static BOOLEAN
+AccpShouldInheritAce(IN UCHAR AceFlags,
+                     OUT PUCHAR NewAceFlags,
+                     IN BOOLEAN IsDirectory)
+{
+    if (!IsDirectory)
+    {
+        if (!(AceFlags & OBJECT_INHERIT_ACE))
+            return FALSE;
+
+        *NewAceFlags = AceFlags & ~VALID_INHERIT_FLAGS;
+        return TRUE;
+    }
+
+    if (AceFlags & NO_PROPAGATE_INHERIT_ACE)
+    {
+        if (!(AceFlags & CONTAINER_INHERIT_ACE))
+            return FALSE;
+
+        *NewAceFlags = AceFlags & ~VALID_INHERIT_FLAGS;
+        return TRUE;
+    }
+
+    if (AceFlags & CONTAINER_INHERIT_ACE)
+    {
+        *NewAceFlags = CONTAINER_INHERIT_ACE | (AceFlags & OBJECT_INHERIT_ACE) | (AceFlags & ~VALID_INHERIT_FLAGS);
+        return TRUE;
+    }
+
+    if (AceFlags & OBJECT_INHERIT_ACE)
+    {
+        *NewAceFlags = AceFlags | INHERIT_ONLY_ACE;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static DWORD
+AccpAddInheritedAce(IN OUT PACL Acl,
+                    IN UCHAR AclRevision,
+                    IN PACE_HEADER Ace,
+                    IN BOOLEAN IsDirectory,
+                    IN PSID Owner OPTIONAL,
+                    IN PSID Group OPTIONAL)
+{
+    static GENERIC_MAPPING FileMapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+    static SID_IDENTIFIER_AUTHORITY CreatorAuthority = { SECURITY_CREATOR_SID_AUTHORITY };
+    BYTE CreatorOwner[SECURITY_MAX_SID_SIZE], CreatorGroup[SECURITY_MAX_SID_SIZE];
+    BYTE Buffer[FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + SECURITY_MAX_SID_SIZE];
+    PACCESS_ALLOWED_ACE Out = (PACCESS_ALLOWED_ACE)Buffer;
+    PACCESS_ALLOWED_ACE Source = (PACCESS_ALLOWED_ACE)Ace;
+    UCHAR AceFlags;
+    ACCESS_MASK Mask, SourceMask;
+    PSID Sid, SourceSid;
+    ULONG Size;
+    BOOLEAN WriteTwo = FALSE;
+
+    if (!AccpShouldInheritAce(Ace->AceFlags, &AceFlags, IsDirectory))
+        return ERROR_SUCCESS;
+
+    if (Ace->AceType > ACCESS_MAX_MS_V2_ACE_TYPE)
+    {
+        /* object and compound ACEs are copied with their flags changed only */
+        PACE_HEADER Copy = (PACE_HEADER)LocalAlloc(LMEM_FIXED, Ace->AceSize);
+        DWORD Ret = ERROR_SUCCESS;
+
+        if (Copy == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        RtlCopyMemory(Copy, Ace, Ace->AceSize);
+        Copy->AceFlags = AceFlags | INHERITED_ACE;
+        if (!AddAce(Acl, AclRevision, MAXDWORD, Copy, Ace->AceSize))
+            Ret = GetLastError();
+        LocalFree(Copy);
+        return Ret;
+    }
+
+    SourceMask = Source->Mask;
+    SourceSid = (PSID)&Source->SidStart;
+    if (Ace->AceSize < FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + sizeof(SID) - sizeof(DWORD) ||
+        !RtlValidSid(SourceSid) ||
+        FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(SourceSid) > Ace->AceSize)
+    {
+        return ERROR_INVALID_ACL;
+    }
+
+    Mask = SourceMask;
+    Sid = SourceSid;
+
+    if (!(AceFlags & INHERIT_ONLY_ACE))
+    {
+        RtlMapGenericMask(&Mask, &FileMapping);
+        Mask &= FileMapping.GenericAll;
+
+        RtlInitializeSid((PSID)CreatorOwner, &CreatorAuthority, 1);
+        *RtlSubAuthoritySid((PSID)CreatorOwner, 0) = SECURITY_CREATOR_OWNER_RID;
+        RtlInitializeSid((PSID)CreatorGroup, &CreatorAuthority, 1);
+        *RtlSubAuthoritySid((PSID)CreatorGroup, 0) = SECURITY_CREATOR_GROUP_RID;
+
+        if (RtlEqualSid(Sid, (PSID)CreatorOwner))
+        {
+            if (Owner == NULL)
+                return ERROR_INVALID_OWNER;
+            Sid = Owner;
+        }
+        else if (RtlEqualSid(Sid, (PSID)CreatorGroup))
+        {
+            if (Group == NULL)
+                return ERROR_INVALID_PRIMARY_GROUP;
+            Sid = Group;
+        }
+
+        /* an inheritable ACE with generic rights or a creator SID becomes an effective ACE and an inherit-only ACE */
+        if (IsDirectory && (AceFlags & CONTAINER_INHERIT_ACE) &&
+            (Mask != SourceMask || Sid != SourceSid))
+        {
+            WriteTwo = TRUE;
+        }
+    }
+
+    for (;;)
+    {
+        if (!RtlValidSid(Sid))
+            return ERROR_INVALID_SID;
+        Size = FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + RtlLengthSid(Sid);
+
+        Out->Header.AceType = Ace->AceType;
+        Out->Header.AceFlags = (WriteTwo ? (AceFlags & ~VALID_INHERIT_FLAGS) : AceFlags) | INHERITED_ACE;
+        Out->Header.AceSize = (USHORT)Size;
+        Out->Mask = Mask;
+        if (!NT_SUCCESS(RtlCopySid(Size - FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart), (PSID)&Out->SidStart, Sid)))
+            return ERROR_INVALID_SID;
+        if (!AddAce(Acl, AclRevision, MAXDWORD, Out, Size))
+            return GetLastError();
+
+        if (!WriteTwo)
+            break;
+
+        WriteTwo = FALSE;
+        Mask = SourceMask;
+        Sid = SourceSid;
+        AceFlags |= INHERIT_ONLY_ACE;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+/*
+ * The length of the root part of a local or UNC path, including its trailing backslash when there is one:
+ * "C:\", "\\server\share\", and the same behind "\\?\" (and "\\?\UNC\"). 0 for other paths.
+ */
+static SIZE_T
+AccpGetPathRootLength(IN PCWSTR Path)
+{
+    PCWSTR p = Path, q;
+    BOOLEAN Unc = FALSE;
+
+    if (p[0] == L'\\' && p[1] == L'\\' && p[2] == L'?' && p[3] == L'\\')
+    {
+        p += 4;
+        if (_wcsnicmp(p, L"UNC\\", 4) == 0)
+        {
+            p += 4;
+            Unc = TRUE;
+        }
+    }
+    else if (p[0] == L'\\' && p[1] == L'\\' && p[2] != L'.' && p[2] != L'?')
+    {
+        p += 2;
+        Unc = TRUE;
+    }
+
+    if (!Unc)
+    {
+        if (((p[0] >= L'A' && p[0] <= L'Z') || (p[0] >= L'a' && p[0] <= L'z')) && p[1] == L':' && p[2] == L'\\')
+            return (p + 3) - Path;
+        return 0;
+    }
+
+    q = p;
+    while (*q != UNICODE_NULL && *q != L'\\')
+        q++;
+    if (*q == UNICODE_NULL)
+        return 0;
+    q++;
+    while (*q != UNICODE_NULL && *q != L'\\')
+        q++;
+    if (*q == L'\\')
+        q++;
+    return q - Path;
+}
+
+/*
+ * Returns ERROR_SUCCESS with *NewDacl NULL if the object has no parent to inherit from
+ * (a volume root, or a parent without DACL); any other failure is an error.
+ */
+static DWORD
+AccpBuildInheritedDacl(IN LPWSTR pObjectName,
+                       IN PACL ExplicitDacl OPTIONAL,
+                       IN PSID Owner OPTIONAL,
+                       IN PSID Group OPTIONAL,
+                       OUT PACL *NewDacl)
+{
+    PWSTR FullPath = NULL;
+    PWCHAR Last;
+    DWORD Length, Attributes, Ret;
+    SIZE_T RootLength;
+    PACL ParentDacl = NULL, Acl = NULL;
+    PSECURITY_DESCRIPTOR ParentSd = NULL;
+    ACL_SIZE_INFORMATION ParentInfo, ExplicitInfo, NewInfo;
+    BOOLEAN IsDirectory;
+    ULONG i, AclSize;
+    UCHAR Revision;
+    PACE_HEADER Ace;
+
+    *NewDacl = NULL;
+
+    if (pObjectName[0] == L'\\' && pObjectName[1] == L'\\' && pObjectName[2] == L'?' && pObjectName[3] == L'\\')
+    {
+        /* an extended path is used as it is: GetFullPathNameW would normalise its components */
+        Length = (DWORD)wcslen(pObjectName);
+        FullPath = (PWSTR)LocalAlloc(LMEM_FIXED, (Length + 1) * sizeof(WCHAR));
+        if (FullPath == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        RtlCopyMemory(FullPath, pObjectName, (Length + 1) * sizeof(WCHAR));
+    }
+    else
+    {
+        DWORD Capacity = MAX_PATH;
+
+        /* the current directory can change between the calls, so retry while the result does not fit */
+        for (;;)
+        {
+            FullPath = (PWSTR)LocalAlloc(LMEM_FIXED, Capacity * sizeof(WCHAR));
+            if (FullPath == NULL)
+                return ERROR_NOT_ENOUGH_MEMORY;
+            Length = GetFullPathNameW(pObjectName, Capacity, FullPath, NULL);
+            if (Length == 0)
+            {
+                Ret = GetLastError();
+                goto Cleanup;
+            }
+            if (Length < Capacity)
+                break;
+            LocalFree(FullPath);
+            FullPath = NULL;
+            Capacity = Length + 1;
+        }
+    }
+
+    Attributes = GetFileAttributesW(FullPath);
+    if (Attributes == INVALID_FILE_ATTRIBUTES)
+    {
+        Ret = GetLastError();
+        goto Cleanup;
+    }
+    IsDirectory = (Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+    RootLength = AccpGetPathRootLength(FullPath);
+    if (RootLength == 0)
+    {
+        Ret = ERROR_NOT_SUPPORTED;
+        goto Cleanup;
+    }
+    while (Length > RootLength && FullPath[Length - 1] == L'\\')
+        FullPath[--Length] = UNICODE_NULL;
+    if (Length <= RootLength)
+    {
+        /* a volume root has no parent */
+        Ret = ERROR_SUCCESS;
+        goto Cleanup;
+    }
+    Last = wcsrchr(FullPath, L'\\');
+    if ((SIZE_T)(Last - FullPath) < RootLength)
+        FullPath[RootLength] = UNICODE_NULL;
+    else
+        *Last = UNICODE_NULL;
+
+    Ret = AccRewriteGetNamedRights(FullPath, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                   NULL, NULL, &ParentDacl, NULL, &ParentSd);
+    if (Ret != ERROR_SUCCESS)
+        goto Cleanup;
+    if (ParentDacl == NULL)
+    {
+        /* a parent without DACL has nothing to inherit */
+        Ret = ERROR_SUCCESS;
+        goto Cleanup;
+    }
+
+    if (!GetAclInformation(ParentDacl, &ParentInfo, sizeof(ParentInfo), AclSizeInformation))
+    {
+        Ret = GetLastError();
+        goto Cleanup;
+    }
+
+    ExplicitInfo.AceCount = 0;
+    ExplicitInfo.AclBytesInUse = 0;
+    Revision = ParentDacl->AclRevision;
+    if (ExplicitDacl != NULL)
+    {
+        if (!GetAclInformation(ExplicitDacl, &ExplicitInfo, sizeof(ExplicitInfo), AclSizeInformation))
+        {
+            Ret = GetLastError();
+            goto Cleanup;
+        }
+        if (ExplicitDacl->AclRevision > Revision)
+            Revision = ExplicitDacl->AclRevision;
+    }
+    if (Revision < ACL_REVISION)
+        Revision = ACL_REVISION;
+
+    /* an inherited ACE can double (effective plus inherit-only) and a creator SID can be replaced by a longer one;
+       the ACL is trimmed to the bytes in use afterwards, and AddAce fails if the result does not fit */
+    AclSize = sizeof(ACL) + ExplicitInfo.AclBytesInUse + 2 * ParentInfo.AclBytesInUse +
+              ParentInfo.AceCount * 2 * SECURITY_MAX_SID_SIZE;
+    if (AclSize > 0xFFFC)
+        AclSize = 0xFFFC;
+    Acl = (PACL)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, AclSize);
+    if (Acl == NULL)
+    {
+        Ret = ERROR_NOT_ENOUGH_MEMORY;
+        goto Cleanup;
+    }
+    if (!InitializeAcl(Acl, AclSize, Revision))
+    {
+        Ret = GetLastError();
+        goto Cleanup;
+    }
+
+    /* the caller's ACEs that are marked inherited are replaced by the freshly computed ones */
+    for (i = 0; i < ExplicitInfo.AceCount; i++)
+    {
+        if (!GetAce(ExplicitDacl, i, (PVOID *)&Ace))
+        {
+            Ret = GetLastError();
+            goto Cleanup;
+        }
+        if (Ace->AceFlags & INHERITED_ACE)
+            continue;
+        if (!AddAce(Acl, Revision, MAXDWORD, Ace, Ace->AceSize))
+        {
+            Ret = GetLastError();
+            goto Cleanup;
+        }
+    }
+
+    for (i = 0; i < ParentInfo.AceCount; i++)
+    {
+        if (!GetAce(ParentDacl, i, (PVOID *)&Ace))
+        {
+            Ret = GetLastError();
+            goto Cleanup;
+        }
+        Ret = AccpAddInheritedAce(Acl, Revision, Ace, IsDirectory, Owner, Group);
+        if (Ret != ERROR_SUCCESS)
+            goto Cleanup;
+    }
+
+    /* do not store the unused tail of the buffer in the descriptor */
+    if (!GetAclInformation(Acl, &NewInfo, sizeof(NewInfo), AclSizeInformation))
+    {
+        Ret = GetLastError();
+        goto Cleanup;
+    }
+    Acl->AclSize = (WORD)NewInfo.AclBytesInUse;
+
+    *NewDacl = Acl;
+    Acl = NULL;
+    Ret = ERROR_SUCCESS;
+
+Cleanup:
+    if (Acl != NULL)
+        LocalFree(Acl);
+    if (ParentSd != NULL)
+        LocalFree(ParentSd);
+    if (FullPath != NULL)
+        LocalFree(FullPath);
+    return Ret;
+}
+
 /**********************************************************************
  * AccRewriteSetNamedRights				EXPORTED
  *
@@ -1295,6 +1682,103 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
 
     /* save the last error code */
     LastErr = GetLastError();
+
+    /* an unprotected DACL inherits the parent's inheritable ACEs */
+    if (ObjectType == SE_FILE_OBJECT &&
+        (SecurityInfo & DACL_SECURITY_INFORMATION) &&
+        (SecurityInfo & UNPROTECTED_DACL_SECURITY_INFORMATION) &&
+        !(SecurityInfo & PROTECTED_DACL_SECURITY_INFORMATION))
+    {
+        SECURITY_DESCRIPTOR InheritedSd;
+        PSECURITY_DESCRIPTOR pOwnSd = NULL;
+        PACL pExplicit = NULL, pInherited = NULL;
+        PSID pOwner = NULL, pGroup = NULL;
+        BOOLEAN Present = FALSE, Defaulted;
+
+        RtlGetDaclSecurityDescriptor(pSecurityDescriptor, &Present, &pExplicit, &Defaulted);
+
+        /* a missing or NULL DACL is set as given */
+        if (Present && pExplicit != NULL)
+        {
+            RtlGetOwnerSecurityDescriptor(pSecurityDescriptor, &pOwner, &Defaulted);
+            RtlGetGroupSecurityDescriptor(pSecurityDescriptor, &pGroup, &Defaulted);
+
+            if (pOwner == NULL || pGroup == NULL)
+            {
+                PSID pCurOwner = NULL, pCurGroup = NULL;
+
+                /* the owner and group are only needed for CREATOR OWNER and CREATOR GROUP ACEs */
+                if (AccRewriteGetNamedRights(pObjectName, ObjectType, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
+                                             &pCurOwner, &pCurGroup, NULL, NULL, &pOwnSd) == ERROR_SUCCESS)
+                {
+                    if (pOwner == NULL)
+                        pOwner = pCurOwner;
+                    if (pGroup == NULL)
+                        pGroup = pCurGroup;
+                }
+            }
+
+            Ret = AccpBuildInheritedDacl(pObjectName, pExplicit, pOwner, pGroup, &pInherited);
+            if (Ret != ERROR_SUCCESS)
+            {
+                if (pOwnSd != NULL)
+                    LocalFree(pOwnSd);
+                SetLastError(LastErr);
+                return Ret;
+            }
+
+            if (pInherited != NULL)
+            {
+                PSID pSdOwner = NULL, pSdGroup = NULL;
+                PACL pSdSacl = NULL;
+
+                Ret = ERROR_SUCCESS;
+                if (!InitializeSecurityDescriptor(&InheritedSd, SECURITY_DESCRIPTOR_REVISION) ||
+                    !SetSecurityDescriptorDacl(&InheritedSd, TRUE, pInherited, FALSE))
+                {
+                    Ret = GetLastError();
+                }
+
+                if (Ret == ERROR_SUCCESS && (SecurityInfo & OWNER_SECURITY_INFORMATION))
+                {
+                    RtlGetOwnerSecurityDescriptor(pSecurityDescriptor, &pSdOwner, &Defaulted);
+                    if (!SetSecurityDescriptorOwner(&InheritedSd, pSdOwner, FALSE))
+                        Ret = GetLastError();
+                }
+                if (Ret == ERROR_SUCCESS && (SecurityInfo & GROUP_SECURITY_INFORMATION))
+                {
+                    RtlGetGroupSecurityDescriptor(pSecurityDescriptor, &pSdGroup, &Defaulted);
+                    if (!SetSecurityDescriptorGroup(&InheritedSd, pSdGroup, FALSE))
+                        Ret = GetLastError();
+                }
+                if (Ret == ERROR_SUCCESS && (SecurityInfo & SACL_SECURITY_INFORMATION))
+                {
+                    RtlGetSaclSecurityDescriptor(pSecurityDescriptor, &Present, &pSdSacl, &Defaulted);
+                    if (!SetSecurityDescriptorSacl(&InheritedSd, Present, pSdSacl, FALSE))
+                        Ret = GetLastError();
+                }
+
+                if (Ret == ERROR_SUCCESS)
+                {
+                    Ret = AccpOpenNamedObject(pObjectName, ObjectType, SecurityInfo, &Handle, &Handle2, TRUE);
+                    if (Ret == ERROR_SUCCESS)
+                    {
+                        Ret = AccRewriteSetHandleRights(Handle, ObjectType, SecurityInfo, &InheritedSd);
+                        AccpCloseObjectHandle(ObjectType, Handle, Handle2);
+                    }
+                }
+
+                LocalFree(pInherited);
+                if (pOwnSd != NULL)
+                    LocalFree(pOwnSd);
+                SetLastError(LastErr);
+                return Ret;
+            }
+
+            if (pOwnSd != NULL)
+                LocalFree(pOwnSd);
+        }
+    }
 
     /* create the handle */
     Ret = AccpOpenNamedObject(pObjectName,
@@ -1475,7 +1959,6 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
     {
         if (pListOfExplicitEntries[i].grfAccessMode == DENY_ACCESS)
         {
-            /* FIXME: take care of pListOfExplicitEntries[i].grfInheritance */
             Ret = AccpGetTrusteeSid(&pListOfExplicitEntries[i].Trustee,
                                     &PolicyHandle,
                                     &pSid1,
@@ -1489,8 +1972,11 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
 
             if (ObjectsPresent == 0)
             {
-                /* FIXME: Call AddAccessDeniedAceEx instead! */
-                bRet = AddAccessDeniedAce(pNew, ACL_REVISION, pListOfExplicitEntries[i].grfAccessPermissions, pSid1);
+                bRet = AddAccessDeniedAceEx(pNew,
+                                            ACL_REVISION,
+                                            pListOfExplicitEntries[i].grfInheritance & VALID_INHERIT_FLAGS,
+                                            pListOfExplicitEntries[i].grfAccessPermissions,
+                                            pSid1);
             }
             else
             {
@@ -1518,7 +2004,6 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
         if (pListOfExplicitEntries[i].grfAccessMode == SET_ACCESS ||
             pListOfExplicitEntries[i].grfAccessMode == GRANT_ACCESS)
         {
-            /* FIXME: take care of pListOfExplicitEntries[i].grfInheritance */
             Ret = AccpGetTrusteeSid(&pListOfExplicitEntries[i].Trustee,
                                     &PolicyHandle,
                                     &pSid1,
@@ -1532,8 +2017,11 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
 
             if (ObjectsPresent == 0)
             {
-                /* FIXME: Call AddAccessAllowedAceEx instead! */
-                bRet = AddAccessAllowedAce(pNew, ACL_REVISION, pListOfExplicitEntries[i].grfAccessPermissions, pSid1);
+                bRet = AddAccessAllowedAceEx(pNew,
+                                             ACL_REVISION,
+                                             pListOfExplicitEntries[i].grfInheritance & VALID_INHERIT_FLAGS,
+                                             pListOfExplicitEntries[i].grfAccessPermissions,
+                                             pSid1);
             }
             else
             {

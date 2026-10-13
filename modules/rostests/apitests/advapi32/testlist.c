@@ -21,6 +21,7 @@ extern void func_SaferIdentifyLevel(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceNetwork(void);
+extern void func_SetNamedSecurityInfoInherit(void);
 
 const struct test winetest_testlist[] =
 {
@@ -43,6 +44,7 @@ const struct test winetest_testlist[] =
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceNetwork", func_ServiceNetwork },
+    { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { 0, 0 }
 };
 
