@@ -59,28 +59,28 @@ static std::wstring GetFileName(const std::wstring& Path)
     return (pos != std::wstring::npos) ? Path.substr(pos + 1) : Path;
 }
 
-/*
- * Event 1000 of the source "Application Error" in the Application log, with
- * the 13 insertion strings Windows 7 writes: program name, version and time
- * stamp; faulting module name, version and time stamp; exception code; fault
- * offset; process id; process start time; program path; module path; report id.
- */
-void WriteApplicationErrorEvent(DumpData& data)
+/* The fields Windows names the problem signature, shared by the event and the crash dialog */
+void GetProblemSignature(DumpData& data, ProblemSignature& Signature)
 {
-    WCHAR AppVersion[32], AppTimeStamp[16], ModuleVersion[32], ModuleTimeStamp[16];
-    WCHAR Code[16], Offset[24], ProcessId[16], StartTime[24], ReportId[40];
-    std::wstring ModulePath = L"unknown", ModuleName = L"unknown";
     ULONG_PTR Address = (ULONG_PTR)data.ExceptionInfo.ExceptionRecord.ExceptionAddress;
     ULONG_PTR ModuleOffset = Address;
     DWORD ModuleStamp = 0;
     HMODULE MainModule = NULL;
     DWORD Needed;
 
-    GetFileVersionString(data.ProcessPath, AppVersion, _countof(AppVersion));
+    Signature.ModulePath = L"unknown";
+    Signature.ModuleName = L"unknown";
+
+    GetFileVersionString(data.ProcessPath, Signature.AppVersion, _countof(Signature.AppVersion));
     if (EnumProcessModules(data.ProcessHandle, &MainModule, sizeof(MainModule), &Needed) && Needed)
-        StringCchPrintfW(AppTimeStamp, _countof(AppTimeStamp), L"%08lx", GetImageTimeStamp(data.ProcessHandle, MainModule));
+    {
+        StringCchPrintfW(Signature.AppTimeStamp, _countof(Signature.AppTimeStamp), L"%08lx",
+                         GetImageTimeStamp(data.ProcessHandle, MainModule));
+    }
     else
-        StringCchCopyW(AppTimeStamp, _countof(AppTimeStamp), L"00000000");
+    {
+        StringCchCopyW(Signature.AppTimeStamp, _countof(Signature.AppTimeStamp), L"00000000");
+    }
 
     /* Outside any image Windows names the module "unknown" and gives the address itself */
     MEMORY_BASIC_INFORMATION mbi;
@@ -94,24 +94,36 @@ void WriteApplicationErrorEvent(DumpData& data)
     /* A full buffer may hold a cut path */
     if (Length && Length < Path.size() - 1)
     {
-        ModulePath.assign(&Path[0], Length);
-        ModuleName = GetFileName(ModulePath);
+        Signature.ModulePath.assign(&Path[0], Length);
+        Signature.ModuleName = GetFileName(Signature.ModulePath);
         ModuleOffset = Address - (ULONG_PTR)mbi.AllocationBase;
         ModuleStamp = GetImageTimeStamp(data.ProcessHandle, mbi.AllocationBase);
-        GetFileVersionString(ModulePath, ModuleVersion, _countof(ModuleVersion));
+        GetFileVersionString(Signature.ModulePath, Signature.ModuleVersion, _countof(Signature.ModuleVersion));
     }
     else
     {
-        StringCchCopyW(ModuleVersion, _countof(ModuleVersion), L"0.0.0.0");
+        StringCchCopyW(Signature.ModuleVersion, _countof(Signature.ModuleVersion), L"0.0.0.0");
     }
-    StringCchPrintfW(ModuleTimeStamp, _countof(ModuleTimeStamp), L"%08lx", ModuleStamp);
+    StringCchPrintfW(Signature.ModuleTimeStamp, _countof(Signature.ModuleTimeStamp), L"%08lx", ModuleStamp);
 
-    StringCchPrintfW(Code, _countof(Code), L"%08lx", data.ExceptionInfo.ExceptionRecord.ExceptionCode);
+    StringCchPrintfW(Signature.Code, _countof(Signature.Code), L"%08lx", data.ExceptionInfo.ExceptionRecord.ExceptionCode);
 #ifdef _WIN64
-    StringCchPrintfW(Offset, _countof(Offset), L"%016I64x", (ULONG64)ModuleOffset);
+    StringCchPrintfW(Signature.Offset, _countof(Signature.Offset), L"%016I64x", (ULONG64)ModuleOffset);
 #else
-    StringCchPrintfW(Offset, _countof(Offset), L"%08lx", (ULONG)ModuleOffset);
+    StringCchPrintfW(Signature.Offset, _countof(Signature.Offset), L"%08lx", (ULONG)ModuleOffset);
 #endif
+}
+
+/*
+ * Event 1000 of the source "Application Error" in the Application log, with
+ * the 13 insertion strings Windows 7 writes: program name, version and time
+ * stamp; faulting module name, version and time stamp; exception code; fault
+ * offset; process id; process start time; program path; module path; report id.
+ */
+void WriteApplicationErrorEvent(DumpData& data, const ProblemSignature& Signature)
+{
+    WCHAR ProcessId[16], StartTime[24], ReportId[40];
+
     StringCchPrintfW(ProcessId, _countof(ProcessId), L"%lx", data.ProcessID);
 
     FILETIME Creation, Exit, Kernel, User;
@@ -129,10 +141,10 @@ void WriteApplicationErrorEvent(DumpData& data)
 
     LPCWSTR Strings[13] =
     {
-        data.ProcessName.c_str(), AppVersion, AppTimeStamp,
-        ModuleName.c_str(), ModuleVersion, ModuleTimeStamp,
-        Code, Offset, ProcessId, StartTime,
-        data.ProcessPath.c_str(), ModulePath.c_str(), ReportId
+        data.ProcessName.c_str(), Signature.AppVersion, Signature.AppTimeStamp,
+        Signature.ModuleName.c_str(), Signature.ModuleVersion, Signature.ModuleTimeStamp,
+        Signature.Code, Signature.Offset, ProcessId, StartTime,
+        data.ProcessPath.c_str(), Signature.ModulePath.c_str(), ReportId
     };
 
     HANDLE hEventLog = RegisterEventSourceW(NULL, L"Application Error");

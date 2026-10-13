@@ -1,0 +1,41 @@
+/*
+ * PROJECT:     Dr. Watson crash reporter
+ * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
+ * PURPOSE:     English resources of the crash dialog, in every build
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+/*
+ * Included whatever languages the build has, so that the dialog falls back to
+ * English. A translation adds IDD_CRASH and the IDS_CRASH_* strings to its
+ * lang/xx-XX.rc file.
+ */
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+IDD_CRASH DIALOGEX 0, 0, 240, 96
+STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+EXSTYLE WS_EX_APPWINDOW
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "", IDC_CRASH_INSTRUCTION, 7, 7, 226, 10, SS_NOPREFIX
+    LTEXT "", IDC_CRASH_CONTENT, 7, 22, 226, 20, SS_NOPREFIX
+    PUSHBUTTON "&Debug", IDC_CRASH_DEBUG, 116, 50, 50, 14
+    PUSHBUTTON "&Close program", IDC_CRASH_CLOSE, 170, 50, 63, 14
+    CONTROL "", IDC_CRASH_EXPANDER, "Button", BS_OWNERDRAW | WS_TABSTOP, 7, 51, 12, 12
+    LTEXT "View problem details", IDC_CRASH_EXPANDER_LABEL, 22, 53, 90, 8, SS_NOTIFY
+    EDITTEXT IDC_CRASH_DETAILS, 7, 70, 226, 20, ES_MULTILINE | ES_READONLY | ES_AUTOHSCROLL | ES_AUTOVSCROLL | WS_VSCROLL | WS_HSCROLL | NOT WS_VISIBLE
+END
+
+/* The crash dialog. %1 is the name of the program */
+STRINGTABLE
+BEGIN
+    IDS_CRASH_INSTRUCTION "%1 has stopped working"
+    IDS_CRASH_CONTENT "A problem caused the program to stop working correctly. Please close the program."
+    IDS_CRASH_SHOW_DETAILS "View problem details"
+    IDS_CRASH_HIDE_DETAILS "Hide problem details"
+    /* %1 program, %2 its version, %3 its time stamp, %4 faulting module, %5 its version, %6 its time stamp,
+       %7 exception code, %8 offset in the module, %9 system version, %10 locale id */
+    IDS_CRASH_SIGNATURE "Problem signature:\r\n  Problem Event Name:\tAPPCRASH\r\n  Application Name:\t%1\r\n  Application Version:\t%2\r\n  Application Timestamp:\t%3\r\n  Fault Module Name:\t%4\r\n  Fault Module Version:\t%5\r\n  Fault Module Timestamp:\t%6\r\n  Exception Code:\t%7\r\n  Exception Offset:\t%8\r\n  OS Version:\t%9\r\n  Locale ID:\t%10"
+    IDS_CRASH_FILES "Files that help describe the problem:"
+END

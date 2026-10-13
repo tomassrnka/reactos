@@ -57,11 +57,33 @@ public:
 void xfprintf(FILE* stream, const char *fmt, ...);
 void PrintBugreport(FILE* output, DumpData& data);
 
+/* The problem signature of a crash, as Windows shows it */
+struct ProblemSignature
+{
+    WCHAR AppVersion[32];
+    WCHAR AppTimeStamp[16];
+    std::wstring ModuleName;
+    std::wstring ModulePath;
+    WCHAR ModuleVersion[32];
+    WCHAR ModuleTimeStamp[16];
+    WCHAR Code[16];
+    WCHAR Offset[24];
+};
+
+/* Exit codes of "drwtsn32 -u -ui" for kernel32's UnhandledExceptionFilter */
+#define CRASH_REPORTER_CLOSE    0x00C105ED
+#define CRASH_REPORTER_DEBUG    0x00DEB06D
+
 /* wer.cpp */
 int WerReportMain(int argc, WCHAR** argv);
 
 /* eventlog.cpp */
-void WriteApplicationErrorEvent(DumpData& data);
+void GetProblemSignature(DumpData& data, ProblemSignature& Signature);
+void WriteApplicationErrorEvent(DumpData& data, const ProblemSignature& Signature);
+
+/* crashdlg.cpp */
+int ShowCrashDialog(DumpData& data, const ProblemSignature& Signature, LPCWSTR DumpPath, LPCWSTR ReportPath,
+                    bool OfferDebug);
 
 /* drwtsn32.cpp */
 bool UpdateFromEvent(DEBUG_EVENT& evt, DumpData& data);
