@@ -4,6 +4,7 @@ include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
 # Down-level static PathCch library, to be used for
 # programs that need to run on Windows 7 and below.
 add_library(pathcch_static STATIC ${REACTOS_SOURCE_DIR}/dll/win32/kernelbase/wine/path.c StrRChrW.c)
+target_link_libraries(pathcch_static ${PSEH_LIB})
 add_dependencies(pathcch_static xdk)
 target_compile_definitions(pathcch_static PRIVATE wcsnicmp=_wcsnicmp PATHCCH_NO_DEPRECATE WINSHLWAPI=)
 target_compile_definitions(pathcch_static PUBLIC STATIC_PATHCCH)
