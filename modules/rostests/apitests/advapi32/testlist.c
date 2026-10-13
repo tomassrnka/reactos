@@ -21,6 +21,7 @@ extern void func_SaferIdentifyLevel(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceNetwork(void);
+extern void func_SddlRights(void);
 
 const struct test winetest_testlist[] =
 {
@@ -43,6 +44,7 @@ const struct test winetest_testlist[] =
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceNetwork", func_ServiceNetwork },
+    { "SddlRights", func_SddlRights },
     { 0, 0 }
 };
 

@@ -2713,40 +2713,67 @@ static DWORD ParseAceStringRights(LPCWSTR* StringAcl)
     while (*szAcl == ' ')
         szAcl++;
 
-    if ((*szAcl == '0') && (*(szAcl + 1) == 'x'))
+    while (*szAcl != ';')
     {
-        LPCWSTR p = szAcl;
+        const ACEFLAG *lpaf = AceRights;
 
-	while (*p && *p != ';')
-            p++;
-
-	if (p - szAcl <= 10 /* 8 hex digits + "0x" */ )
-	{
-	    rights = strtoulW(szAcl, NULL, 16);
-	    szAcl = p;
-	}
-	else
-            WARN("Invalid rights string format: %s\n", debugstr_wn(szAcl, p - szAcl));
-    }
-    else
-    {
-        while (*szAcl != ';')
+        if (*szAcl >= '0' && *szAcl <= '9')
         {
-            const ACEFLAG *lpaf = AceRights;
+            /*
+             * A number as strtoul reads it with base 0: hexadecimal after 0x, octal after a leading zero,
+             * otherwise decimal; it ends at the first character that is not a digit of its base, and a
+             * value above 32 bits is 0xffffffff. What follows is read as the next name or number.
+             */
+            LPCWSTR digit = szAcl;
+            ULONGLONG number = 0;
+            UINT base = 10, value;
 
-            while (lpaf->wstr &&
+            if (digit[0] == '0' && (digit[1] == 'x' || digit[1] == 'X') &&
+                ((digit[2] >= '0' && digit[2] <= '9') || (digit[2] >= 'a' && digit[2] <= 'f') ||
+                 (digit[2] >= 'A' && digit[2] <= 'F')))
+            {
+                base = 16;
+                digit += 2;
+            }
+            else if (digit[0] == '0')
+                base = 8;
+
+            while (TRUE)
+            {
+                if (*digit >= '0' && *digit <= '9')
+                    value = *digit - '0';
+                else if (base == 16 && *digit >= 'a' && *digit <= 'f')
+                    value = *digit - 'a' + 10;
+                else if (base == 16 && *digit >= 'A' && *digit <= 'F')
+                    value = *digit - 'A' + 10;
+                else
+                    break;
+
+                if (value >= base)
+                    break;
+
+                if (number <= 0xffffffff)
+                    number = number * base + value;
+                digit++;
+            }
+
+            rights |= (number > 0xffffffff) ? 0xffffffff : (DWORD)number;
+            szAcl = digit;
+            continue;
+        }
+
+        while (lpaf->wstr &&
                (len = strlenW(lpaf->wstr)) &&
                strncmpW(lpaf->wstr, szAcl, len))
-	    {
-               lpaf++;
-	    }
-
-            if (!lpaf->wstr)
-                return 0;
-
-	    rights |= lpaf->value;
-            szAcl += len;
+        {
+            lpaf++;
         }
+
+        if (!lpaf->wstr)
+            return 0;
+
+        rights |= lpaf->value;
+        szAcl += len;
     }
 
     *StringAcl = szAcl;
