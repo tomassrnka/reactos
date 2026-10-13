@@ -1036,6 +1036,8 @@ CreatePrimaryPartition(
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("CreateDisk() failed!\n");
+            CurrentPartition = NULL;
+            CurrentVolume = NULL;
             return EXIT_SUCCESS;
         }
 
