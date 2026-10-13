@@ -46,13 +46,13 @@ static EVENT_LABEL_ITEM EventLabels[] =
 {
     {
         L"WindowsLogon",
-        L"AjarOS Logon",
+        L"ReactOS Logon",
         IDS_REACTOS_LOGON,
         L"ReactOS_Logon.wav"
     },
     {
         L"WindowsLogoff",
-        L"AjarOS Logoff",
+        L"ReactOS Logoff",
         IDS_REACTOS_LOGOFF,
         L"ReactOS_Logoff.wav"
     },
@@ -68,7 +68,7 @@ static SYSTEM_SCHEME_ITEM SystemSchemes[] =
 {
     {
         L".Default",
-        L"AjarOS Standard",
+        L"ReactOS Standard",
         IDS_REACTOS_DEFAULT_SCHEME
     },
     {

@@ -17,14 +17,14 @@ static MUI_ENTRY ltLTSetupInitPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         0,
         20,
-        "Please wait while the AjarOS Setup initializes itself",
+        "Please wait while the ReactOS Setup initializes itself",
         TEXT_STYLE_NORMAL | TEXT_ALIGN_CENTER,
         TEXT_ID_STATIC
     },
@@ -55,7 +55,7 @@ static MUI_ENTRY ltLTLanguagePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -107,21 +107,21 @@ static MUI_ENTRY ltLTWelcomePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Jus sveikina AjarOS diegimo programa",
+        "Jus sveikina ReactOS diegimo programa",
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
     {
         6,
         11,
-        "\276i diegimo dalis nukopijuos AjarOS operacin\323s sistemos bylas \324 j\327s\326",
+        "\276i diegimo dalis nukopijuos ReactOS operacin\323s sistemos bylas \324 j\327s\326",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -135,28 +135,28 @@ static MUI_ENTRY ltLTWelcomePageEntries[] =
     {
         8,
         15,
-        "\x07  Press ENTER to install or upgrade AjarOS.",
+        "\x07  Press ENTER to install or upgrade ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         17,
-        "\x07  Spauskite R, jei norite taisyti AjarOS.",
+        "\x07  Spauskite R, jei norite taisyti ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         19,
-        "\x07  Spauskite L, jei norite pamatyti AjarOS licencijos s\320lygas.",
+        "\x07  Spauskite L, jei norite pamatyti ReactOS licencijos s\320lygas.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         21,
-        "\x07  Spauskite F3, jei norite u\330daryti AjarOS diegimo program\320.",
+        "\x07  Spauskite F3, jei norite u\330daryti ReactOS diegimo program\320.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -194,21 +194,21 @@ static MUI_ENTRY ltLTIntroPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "AjarOS Version Status",
+        "ReactOS Version Status",
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
     {
         6,
         11,
-        "AjarOS is in Alpha stage, meaning it is not feature-complete",
+        "ReactOS is in Alpha stage, meaning it is not feature-complete",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -236,21 +236,21 @@ static MUI_ENTRY ltLTIntroPageEntries[] =
     {
         6,
         16,
-        "to run AjarOS on real hardware.",
+        "to run ReactOS on real hardware.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         19,
-        "\x07  Press ENTER to continue AjarOS Setup.",
+        "\x07  Press ENTER to continue ReactOS Setup.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         21,
-        "\x07  Press F3 to quit without installing AjarOS.",
+        "\x07  Press F3 to quit without installing ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -274,7 +274,7 @@ static MUI_ENTRY ltLTLicensePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -417,7 +417,7 @@ static MUI_ENTRY ltLTDevicePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -524,14 +524,14 @@ static MUI_ENTRY ltLTRepairPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "AjarOS Setup is in an early development phase. It does not yet",
+        "ReactOS Setup is in an early development phase. It does not yet",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -597,21 +597,21 @@ static MUI_ENTRY ltLTUpgradePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "The AjarOS Setup can upgrade one of the available AjarOS installations",
+        "The ReactOS Setup can upgrade one of the available ReactOS installations",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         9,
-        "listed below, or, if a AjarOS installation is damaged, the Setup program",
+        "listed below, or, if a ReactOS installation is damaged, the Setup program",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -653,7 +653,7 @@ static MUI_ENTRY ltLTUpgradePageEntries[] =
     {
         8,
         21,
-        "\x07  Press F3 to quit without installing AjarOS.",
+        "\x07  Press F3 to quit without installing ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -677,7 +677,7 @@ static MUI_ENTRY ltLTComputerPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -736,7 +736,7 @@ static MUI_ENTRY ltLTFlushPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -781,14 +781,14 @@ static MUI_ENTRY ltLTQuitPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         10,
         6,
-        "AjarOS is not completely installed.",
+        "ReactOS is not completely installed.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -833,7 +833,7 @@ static MUI_ENTRY ltLTDisplayPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -892,14 +892,14 @@ static MUI_ENTRY ltLTSuccessPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         10,
         6,
-        "The basic components of AjarOS have been installed successfully.",
+        "The basic components of ReactOS have been installed successfully.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -944,7 +944,7 @@ static MUI_ENTRY ltLTSelectPartitionEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -972,7 +972,7 @@ static MUI_ENTRY ltLTSelectPartitionEntries[] =
     {
         8,
         13,
-        "\x07  Press ENTER to install AjarOS onto the selected partition.",
+        "\x07  Press ENTER to install ReactOS onto the selected partition.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1017,7 +1017,7 @@ static MUI_ENTRY ltLTChangeSystemPartition[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " Setup ",
+        " ReactOS " KERNEL_VERSION_STR " Setup ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1038,14 +1038,14 @@ static MUI_ENTRY ltLTChangeSystemPartition[] =
     {
         6,
         16,
-        "uses a format not supported by AjarOS.",
+        "uses a format not supported by ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         18,
-        "In order to successfully install AjarOS, the Setup program must change",
+        "In order to successfully install ReactOS, the Setup program must change",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1115,7 +1115,7 @@ static MUI_ENTRY ltLTChangeSystemPartition[] =
     {
         6,
         35,
-        "to the original one after finishing the installation of AjarOS.",
+        "to the original one after finishing the installation of ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1139,7 +1139,7 @@ static MUI_ENTRY ltLTConfirmDeleteSystemPartitionEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1160,7 +1160,7 @@ static MUI_ENTRY ltLTConfirmDeleteSystemPartitionEntries[] =
     {
         6,
         11,
-        "programs, programs to start an operating system (like AjarOS) or other",
+        "programs, programs to start an operating system (like ReactOS) or other",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1195,7 +1195,7 @@ static MUI_ENTRY ltLTConfirmDeleteSystemPartitionEntries[] =
     {
         6,
         17,
-        "computer from the harddisk until you finished the AjarOS Setup.",
+        "computer from the harddisk until you finished the ReactOS Setup.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1247,7 +1247,7 @@ static MUI_ENTRY ltLTFormatPartitionEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1285,7 +1285,7 @@ static MUI_ENTRY ltLTCheckFSEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1316,21 +1316,21 @@ static MUI_ENTRY ltLTInstallDirectoryEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Setup installs AjarOS files onto the selected partition. Choose a",
+        "Setup installs ReactOS files onto the selected partition. Choose a",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         9,
-        "directory where you want AjarOS to be installed:",
+        "directory where you want ReactOS to be installed:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1344,7 +1344,7 @@ static MUI_ENTRY ltLTInstallDirectoryEntries[] =
     {
         6,
         15,
-        "characters and then type the directory where you want AjarOS to",
+        "characters and then type the directory where you want ReactOS to",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1375,14 +1375,14 @@ static MUI_ENTRY ltLTFileCopyEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         0,
         12,
-        "Please wait while AjarOS Setup copies files to your AjarOS",
+        "Please wait while ReactOS Setup copies files to your ReactOS",
         TEXT_STYLE_NORMAL | TEXT_ALIGN_CENTER,
         TEXT_ID_STATIC
     },
@@ -1420,7 +1420,7 @@ static MUI_ENTRY ltLTBootLoaderSelectPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1479,7 +1479,7 @@ static MUI_ENTRY ltLTBootLoaderInstallPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " Setup ",
+        " ReactOS " KERNEL_VERSION_STR " Setup ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1510,7 +1510,7 @@ static MUI_ENTRY ltLTBootLoaderRemovableDiskPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1556,7 +1556,7 @@ static MUI_ENTRY ltLTKeyboardSettingsEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1615,7 +1615,7 @@ static MUI_ENTRY ltLTLayoutSettingsEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1675,14 +1675,14 @@ static MUI_ENTRY ltLTPrepareCopyEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Setup prepares your computer for copying the AjarOS files.",
+        "Setup prepares your computer for copying the ReactOS files.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1707,7 +1707,7 @@ static MUI_ENTRY ltLTSelectFSEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1755,7 +1755,7 @@ static MUI_ENTRY ltLTDeletePartitionEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1807,7 +1807,7 @@ static MUI_ENTRY ltLTRegistryEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " diegimo programa ",
+        " ReactOS " KERNEL_VERSION_STR " diegimo programa ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1842,9 +1842,9 @@ MUI_ERROR ltLTErrorEntries[] =
     },
     {
         // ERROR_NOT_INSTALLED
-        "AjarOS is not completely installed on your\n"
+        "ReactOS is not completely installed on your\n"
         "computer. If you quit Setup now, you will need to\n"
-        "run Setup again to install AjarOS.\n"
+        "run Setup again to install ReactOS.\n"
         "\n"
         "  \x07  Press ENTER to continue Setup.\n"
         "  \x07  Press F3 to quit Setup.",
@@ -1852,7 +1852,7 @@ MUI_ERROR ltLTErrorEntries[] =
     },
     {
         // ERROR_NO_BUILD_PATH
-        "Failed to build the installation paths for the AjarOS installation directory!\n"
+        "Failed to build the installation paths for the ReactOS installation directory!\n"
         "ENTER = Reboot computer"
     },
     {
@@ -1862,7 +1862,7 @@ MUI_ERROR ltLTErrorEntries[] =
     },
     {
         // ERROR_SOURCE_DIR
-        "You cannot install AjarOS within the installation source directory!\n"
+        "You cannot install ReactOS within the installation source directory!\n"
         "ENTER = Reboot computer"
     },
     {
@@ -2054,7 +2054,7 @@ MUI_ERROR ltLTErrorEntries[] =
     },
     {
         // ERROR_INSUFFICIENT_PARTITION_SIZE,
-        "The selected partition is not large enough to install AjarOS.\n"
+        "The selected partition is not large enough to install ReactOS.\n"
         "The install partition must have a size of at least %lu MB.\n"
         "\n"
         "  * Press any key to continue.",
@@ -2239,13 +2239,13 @@ MUI_STRING ltLTStrings[] =
     {STRING_PARTFORMAT,
     "This Partition will be formatted next."},
     {STRING_NONFORMATTEDPART,
-    "You chose to install AjarOS on a new or unformatted Partition."},
+    "You chose to install ReactOS on a new or unformatted Partition."},
     {STRING_NONFORMATTEDSYSTEMPART,
     "The system partition is not formatted yet."},
     {STRING_NONFORMATTEDOTHERPART,
     "The new partition is not formatted yet."},
     {STRING_INSTALLONPART,
-    "Setup installs AjarOS onto Partition"},
+    "Setup installs ReactOS onto Partition"},
     {STRING_CONTINUE,
     "ENTER = Continue"},
     {STRING_QUITCONTINUE,

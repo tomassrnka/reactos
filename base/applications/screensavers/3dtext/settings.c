@@ -22,7 +22,7 @@
 
 #include <winreg.h>
 
-TCHAR g_Text[MAX_TEXT_LENGTH + 1] = _T("AjarOS Rocks!");
+TCHAR g_Text[MAX_TEXT_LENGTH + 1] = _T("ReactOS Rocks!");
 
 VOID LoadSettings(VOID)
 {

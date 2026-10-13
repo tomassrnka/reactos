@@ -1,5 +1,4 @@
 
-add_subdirectory(branding)
 add_subdirectory(fonts)
 add_subdirectory(inf)
 add_subdirectory(nls)

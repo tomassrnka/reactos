@@ -516,7 +516,7 @@ NetworkDomainPageDlgProc(
                     {
                         if (0 == LoadStringW(netshell_hInstance, IDS_REACTOS_SETUP, Title, sizeof(Title) / sizeof(Title[0])))
                         {
-                            wcscpy(Title, L"AjarOS Setup");
+                            wcscpy(Title, L"ReactOS Setup");
                         }
                         if (0 == LoadStringW(netshell_hInstance, IDS_WZD_DOMAIN_NAME, ErrorName, sizeof(ErrorName) / sizeof(ErrorName[0])))
                         {

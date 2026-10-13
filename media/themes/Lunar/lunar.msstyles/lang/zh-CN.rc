@@ -9,12 +9,12 @@ LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
 
 STRINGTABLE
 {
-1000, "AjarOS"
+1000, "ReactOS"
 }
 
 STRINGTABLE
 {
-2000, "Lunar AjarOS"
+2000, "Lunar ReactOS"
 }
 
 STRINGTABLE
@@ -40,5 +40,5 @@ STRINGTABLE
 5004, "以 GNU/GPL 2.0 在 2019 年发行"
 5005, "https://reactos.org/"
 5006, "版本 1.1"
-5007, "AjarOS 视觉样式"
+5007, "ReactOS 视觉样式"
 }

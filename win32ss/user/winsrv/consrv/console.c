@@ -710,7 +710,7 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
         }
         else
         {
-            ConsoleCreateUnicodeString(&Console->Title, L"AjarOS Console");
+            ConsoleCreateUnicodeString(&Console->Title, L"ReactOS Console");
         }
     }
     else

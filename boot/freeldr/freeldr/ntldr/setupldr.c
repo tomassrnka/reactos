@@ -444,7 +444,7 @@ LoadReactOSSetup(
     /* Let the user know we started loading */
     UiDrawBackdrop(UiGetScreenHeight());
     UiDrawStatusText("Setup is loading...");
-    UiDrawProgressBarCenter("Loading AjarOS Setup...");
+    UiDrawProgressBarCenter("Loading ReactOS Setup...");
 
     /* Retrieve the system path */
     *BootPath = ANSI_NULL;

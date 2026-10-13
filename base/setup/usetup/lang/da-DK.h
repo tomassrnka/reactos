@@ -8,14 +8,14 @@ static MUI_ENTRY daDKSetupInitPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         0,
         20,
-        "Please wait while the AjarOS Setup initializes itself",
+        "Please wait while the ReactOS Setup initializes itself",
         TEXT_STYLE_NORMAL | TEXT_ALIGN_CENTER,
         TEXT_ID_STATIC
     },
@@ -46,7 +46,7 @@ static MUI_ENTRY daDKLanguagePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -98,21 +98,21 @@ static MUI_ENTRY daDKWelcomePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Velkommen til AjarOS installationen",
+        "Velkommen til ReactOS installationen",
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
     {
         6,
         11,
-        "Denne del af installationen vil kopiere AjarOS opreativsystemet",
+        "Denne del af installationen vil kopiere ReactOS opreativsystemet",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -126,28 +126,28 @@ static MUI_ENTRY daDKWelcomePageEntries[] =
     {
         8,
         15,
-        "\x07  Press ENTER to install or upgrade AjarOS.",
+        "\x07  Press ENTER to install or upgrade ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         17,
-        "\x07  Tryk p\206 R reparere AjarOS.",
+        "\x07  Tryk p\206 R reparere ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         19,
-        "\x07  Tryk p\206 L for at f\206 vist AjarOS licensbetingelser og vilk\206r.",
+        "\x07  Tryk p\206 L for at f\206 vist ReactOS licensbetingelser og vilk\206r.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         21,
-        "\x07  Tryk p\206 F3 for at afslutte uden at installere AjarOS.",
+        "\x07  Tryk p\206 F3 for at afslutte uden at installere ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -185,21 +185,21 @@ static MUI_ENTRY daDKIntroPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "AjarOS Version Status",
+        "ReactOS Version Status",
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
     {
         6,
         11,
-        "AjarOS is in Alpha stage, meaning it is not feature-complete",
+        "ReactOS is in Alpha stage, meaning it is not feature-complete",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -227,21 +227,21 @@ static MUI_ENTRY daDKIntroPageEntries[] =
     {
         6,
         16,
-        "to run AjarOS on real hardware.",
+        "to run ReactOS on real hardware.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         19,
-        "\x07  Press ENTER to continue AjarOS Setup.",
+        "\x07  Press ENTER to continue ReactOS Setup.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         8,
         21,
-        "\x07  Press F3 to quit without installing AjarOS.",
+        "\x07  Press F3 to quit without installing ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -265,7 +265,7 @@ static MUI_ENTRY daDKLicensePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -408,7 +408,7 @@ static MUI_ENTRY daDKDevicePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -515,14 +515,14 @@ static MUI_ENTRY daDKRepairPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "AjarOS installationen er i en tilelig udviklingsfase. Derfor",
+        "ReactOS installationen er i en tilelig udviklingsfase. Derfor",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -595,21 +595,21 @@ static MUI_ENTRY daDKUpgradePageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "The AjarOS Setup can upgrade one of the available AjarOS installations",
+        "The ReactOS Setup can upgrade one of the available ReactOS installations",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         9,
-        "listed below, or, if a AjarOS installation is damaged, the Setup program",
+        "listed below, or, if a ReactOS installation is damaged, the Setup program",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -651,7 +651,7 @@ static MUI_ENTRY daDKUpgradePageEntries[] =
     {
         8,
         21,
-        "\x07  Press F3 to quit without installing AjarOS.",
+        "\x07  Press F3 to quit without installing ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -675,7 +675,7 @@ static MUI_ENTRY daDKComputerPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -734,7 +734,7 @@ static MUI_ENTRY daDKFlushPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -779,14 +779,14 @@ static MUI_ENTRY daDKQuitPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         10,
         6,
-        "AjarOS er ikke blevet helt installeret.",
+        "ReactOS er ikke blevet helt installeret.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -831,7 +831,7 @@ static MUI_ENTRY daDKDisplayPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -890,14 +890,14 @@ static MUI_ENTRY daDKSuccessPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         10,
         6,
-        "De grundl\221ggende komponenter i AjarOS blev installeret med success.",
+        "De grundl\221ggende komponenter i ReactOS blev installeret med success.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -942,7 +942,7 @@ static MUI_ENTRY daDKSelectPartitionEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -970,7 +970,7 @@ static MUI_ENTRY daDKSelectPartitionEntries[] =
     {
         8,
         13,
-        "\x07  Tryk p\206 ENTER for at installere AjarOS til den valgte patition.",
+        "\x07  Tryk p\206 ENTER for at installere ReactOS til den valgte patition.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1015,7 +1015,7 @@ static MUI_ENTRY daDKChangeSystemPartition[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " Setup ",
+        " ReactOS " KERNEL_VERSION_STR " Setup ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1036,14 +1036,14 @@ static MUI_ENTRY daDKChangeSystemPartition[] =
     {
         6,
         16,
-        "uses a format not supported by AjarOS.",
+        "uses a format not supported by ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         18,
-        "In order to successfully install AjarOS, the Setup program must change",
+        "In order to successfully install ReactOS, the Setup program must change",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1113,7 +1113,7 @@ static MUI_ENTRY daDKChangeSystemPartition[] =
     {
         6,
         35,
-        "to the original one after finishing the installation of AjarOS.",
+        "to the original one after finishing the installation of ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1137,7 +1137,7 @@ static MUI_ENTRY daDKConfirmDeleteSystemPartitionEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1158,7 +1158,7 @@ static MUI_ENTRY daDKConfirmDeleteSystemPartitionEntries[] =
     {
         6,
         11,
-        "oprativsystem (s\206 som AjarOS) eller styreprogrammer til hardware.",
+        "oprativsystem (s\206 som ReactOS) eller styreprogrammer til hardware.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1186,7 +1186,7 @@ static MUI_ENTRY daDKConfirmDeleteSystemPartitionEntries[] =
     {
         6,
         17,
-        "fra din harddisk f\233r at du har gennemf\233rt installatonen af AjarOS.",
+        "fra din harddisk f\233r at du har gennemf\233rt installatonen af ReactOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1238,7 +1238,7 @@ static MUI_ENTRY daDKFormatPartitionEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1276,7 +1276,7 @@ static MUI_ENTRY daDKCheckFSEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1307,7 +1307,7 @@ static MUI_ENTRY daDKInstallDirectoryEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1321,7 +1321,7 @@ static MUI_ENTRY daDKInstallDirectoryEntries[] =
     {
         6,
         9,
-        "V\221lg den mappe hvor du \233nsker AjarOS skal installeres:",
+        "V\221lg den mappe hvor du \233nsker ReactOS skal installeres:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1342,7 +1342,7 @@ static MUI_ENTRY daDKInstallDirectoryEntries[] =
     {
         6,
         16,
-        "AjarOS skal installeres til.",
+        "ReactOS skal installeres til.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1366,21 +1366,21 @@ static MUI_ENTRY daDKFileCopyEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         0,
         12,
-        "Vent mens AjarOS installationen kopiere filer til din",
+        "Vent mens ReactOS installationen kopiere filer til din",
         TEXT_STYLE_NORMAL | TEXT_ALIGN_CENTER,
         TEXT_ID_STATIC
     },
     {
         0,
         13,
-        "AjarOS-installationsmappe.",
+        "ReactOS-installationsmappe.",
         TEXT_STYLE_NORMAL | TEXT_ALIGN_CENTER,
         TEXT_ID_STATIC
     },
@@ -1411,7 +1411,7 @@ static MUI_ENTRY daDKBootLoaderSelectPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1470,7 +1470,7 @@ static MUI_ENTRY daDKBootLoaderInstallPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " Setup ",
+        " ReactOS " KERNEL_VERSION_STR " Setup ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1501,7 +1501,7 @@ static MUI_ENTRY daDKBootLoaderRemovableDiskPageEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1547,7 +1547,7 @@ static MUI_ENTRY daDKKeyboardSettingsEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1606,7 +1606,7 @@ static MUI_ENTRY daDKLayoutSettingsEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1666,14 +1666,14 @@ static MUI_ENTRY daDKPrepareCopyEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Installationen g\233r din computer klar til at kopiere AjarOS filerne.",
+        "Installationen g\233r din computer klar til at kopiere ReactOS filerne.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1698,7 +1698,7 @@ static MUI_ENTRY daDKSelectFSEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1746,7 +1746,7 @@ static MUI_ENTRY daDKDeletePartitionEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1798,7 +1798,7 @@ static MUI_ENTRY daDKRegistryEntries[] =
     {
         4,
         3,
-        " AjarOS " BRAND_VERSION_STR " installationen ",
+        " ReactOS " KERNEL_VERSION_STR " installationen ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1833,9 +1833,9 @@ MUI_ERROR daDKErrorEntries[] =
     },
     {
         // ERROR_NOT_INSTALLED
-        "AjarOS er endnu ikke f\221rdiginstalleret p\206\n"
+        "ReactOS er endnu ikke f\221rdiginstalleret p\206\n"
         "din computer. Hvis du afslutter installationen nu skal\n"
-        "du k\233rer installationen igen for at installere AjarOS.\n"
+        "du k\233rer installationen igen for at installere ReactOS.\n"
         "\n"
         "  \x07  Tryk p\206 ENTER for at forts\221tte installationen.\n"
         "  \x07  Tryk p\206 F3 afslutte installationen.",
@@ -1843,7 +1843,7 @@ MUI_ERROR daDKErrorEntries[] =
     },
     {
         // ERROR_NO_BUILD_PATH
-        "Failed to build the installation paths for the AjarOS installation directory!\n"
+        "Failed to build the installation paths for the ReactOS installation directory!\n"
         "ENTER = Reboot computer"
     },
     {
@@ -1853,7 +1853,7 @@ MUI_ERROR daDKErrorEntries[] =
     },
     {
         // ERROR_SOURCE_DIR
-        "You cannot install AjarOS within the installation source directory!\n"
+        "You cannot install ReactOS within the installation source directory!\n"
         "ENTER = Reboot computer"
     },
     {
@@ -2045,7 +2045,7 @@ MUI_ERROR daDKErrorEntries[] =
     },
     {
         // ERROR_INSUFFICIENT_PARTITION_SIZE,
-        "Den valgte partition er ikke stor nok til at installere AjarOS.\n"
+        "Den valgte partition er ikke stor nok til at installere ReactOS.\n"
         "The install partition must have a size of at least %lu MB.\n"
         "installationspartitionen skal mindst have %lu MB ledig.\n"
         "\n"
@@ -2231,13 +2231,13 @@ MUI_STRING daDKStrings[] =
     {STRING_PARTFORMAT,
     "Denne partition vil blive formateret som det n\221ste."},
     {STRING_NONFORMATTEDPART,
-    "Du har valgt at installere AjarOS til en ny eller uformateret partition."},
+    "Du har valgt at installere ReactOS til en ny eller uformateret partition."},
     {STRING_NONFORMATTEDSYSTEMPART,
     "Systempartitionen er endnu ikke blevet formateret."},
     {STRING_NONFORMATTEDOTHERPART,
     "Den nye partition er endnu ikke blevet formateret."},
     {STRING_INSTALLONPART,
-    "Installationen installere AjarOS p\206 partitionen"},
+    "Installationen installere ReactOS p\206 partitionen"},
     {STRING_CONTINUE,
     "ENTER = Forts\221t"},
     {STRING_QUITCONTINUE,

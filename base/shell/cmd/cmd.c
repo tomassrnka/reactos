@@ -2343,8 +2343,8 @@ Initialize(VOID)
             ConOutChar('\n');
 
         ConOutResPrintf(STRING_REACTOS_VERSION,
-                        _T(BRAND_VERSION_MAIN_STR),
-                        _T("(") _T(BRAND_VERSION_DETAIL_STR) _T(")"));
+                        _T(KERNEL_VERSION_STR),
+                        _T(KERNEL_VERSION_BUILD_STR));
         ConOutResPrintf(STRING_CMD_COPYRIGHT, _T(COPYRIGHT_YEAR));
     }
 

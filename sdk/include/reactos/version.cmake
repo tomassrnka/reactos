@@ -54,63 +54,8 @@ if((EXISTS "${REACTOS_SOURCE_DIR}/.git") AND (NOT NO_REACTOS_BUILDNO))
         if(GIT_CALL_RESULT EQUAL 0)
             set(REVISION "${GIT_DESCRIBE_REVISION}")
         endif()
-
-        # AjarOS build number: commits not in upstream's 0.4.17-dev tag (pinned by sha)
-        execute_process(
-            COMMAND "${GIT_EXECUTABLE}" rev-list --count HEAD ^129ef359f0fab07c788e4921d7236c0be5cf3c57
-            WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
-            OUTPUT_VARIABLE GIT_BRAND_BUILD
-            RESULT_VARIABLE GIT_CALL_RESULT
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
-        )
-        if(GIT_CALL_RESULT EQUAL 0 AND GIT_BRAND_BUILD MATCHES "^[0-9]+$")
-            set(BRAND_BUILD "${GIT_BRAND_BUILD}")
-        endif()
-
-        # A cut is a date tag <YYYY>.<MM>.<DD>-<build> on exactly this commit
-        execute_process(
-            COMMAND "${GIT_EXECUTABLE}" tag --points-at HEAD
-            WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
-            OUTPUT_VARIABLE GIT_BRAND_TAGS
-            RESULT_VARIABLE GIT_CALL_RESULT
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
-        )
-        if(GIT_CALL_RESULT EQUAL 0 AND NOT GIT_BRAND_TAGS STREQUAL "")
-            string(REPLACE "\n" ";" GIT_BRAND_TAGS "${GIT_BRAND_TAGS}")
-            foreach(GIT_BRAND_TAG ${GIT_BRAND_TAGS})
-                if(GIT_BRAND_TAG MATCHES "^([0-9][0-9][0-9][0-9]\\.[0-9][0-9]\\.[0-9][0-9])-([0-9]+)$")
-                    if(NOT DEFINED BRAND_DATE OR CMAKE_MATCH_2 STREQUAL "${GIT_BRAND_BUILD}")
-                        set(BRAND_DATE "${CMAKE_MATCH_1}")
-                        set(BRAND_TAG_BUILD "${CMAKE_MATCH_2}")
-                    endif()
-                endif()
-            endforeach()
-            if(DEFINED BRAND_TAG_BUILD)
-                set(BRAND_BUILD "${BRAND_TAG_BUILD}")
-            endif()
-        endif()
     endif()
 endif()
-
-# Product version shown to users. REVISION, BuildLab and the NT version numbers that programs read are unchanged.
-string(SUBSTRING "${COMMIT_HASH}" 0 7 BRAND_COMMIT_SHORT)
-if(NOT DEFINED BRAND_BUILD OR BRAND_BUILD STREQUAL "")
-    set(BRAND_BUILD "unknown")
-    message(WARNING "AjarOS build number unavailable (no git, NO_REACTOS_BUILDNO, or a shallow clone without commit 129ef359f0); the version reads 'build unknown'")
-endif()
-if(DEFINED BRAND_DATE)
-    set(BRAND_VERSION_MAIN "${BRAND_DATE}")
-    set(BRAND_VERSION_DETAIL "build ${BRAND_BUILD}")
-elseif(COMMIT_HASH STREQUAL "unknown-hash")
-    set(BRAND_VERSION_MAIN "build ${BRAND_BUILD}")
-    set(BRAND_VERSION_DETAIL "dev")
-else()
-    set(BRAND_VERSION_MAIN "build ${BRAND_BUILD}")
-    set(BRAND_VERSION_DETAIL "dev, g${BRAND_COMMIT_SHORT}")
-endif()
-set(BRAND_VERSION "${BRAND_VERSION_MAIN} (${BRAND_VERSION_DETAIL})")
 
 configure_file(sdk/include/reactos/version.h.cmake ${REACTOS_BINARY_DIR}/sdk/include/reactos/version.h)
 configure_file(sdk/include/reactos/buildno.h.cmake ${REACTOS_BINARY_DIR}/sdk/include/reactos/buildno.h)

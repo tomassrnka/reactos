@@ -2189,7 +2189,7 @@ cleanup:
     {
         // TODO: Use a localized *.mc resource message* error.
         ReportError(lpProfileInfo->dwFlags,
-                    L"AjarOS could not load the locally stored user profile. "
+                    L"ReactOS could not load the locally stored user profile. "
                     L"Possible causes of this error include insufficient security rights or a corrupt local profile.\n"
                     L"\nError: %lu\n",
                     dwError);
