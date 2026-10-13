@@ -2028,6 +2028,206 @@ done:
 
 
 static
+PIP_ADAPTER_INFO
+GetAdapterInfoList(VOID)
+{
+    PIP_ADAPTER_INFO pList = NULL;
+    ULONG ulSize = 0;
+    DWORD dwError;
+    INT i;
+
+    /* An adapter can appear between the calls: retry a few times */
+    for (i = 0; i < 3; i++)
+    {
+        dwError = GetAdaptersInfo(pList, &ulSize);
+        if (dwError != ERROR_BUFFER_OVERFLOW)
+            break;
+
+        if (pList)
+            HeapFree(GetProcessHeap(), 0, pList);
+        pList = HeapAlloc(GetProcessHeap(), 0, ulSize);
+        if (pList == NULL)
+            return NULL;
+    }
+
+    if (dwError != ERROR_SUCCESS)
+    {
+        if (pList)
+            HeapFree(GetProcessHeap(), 0, pList);
+        return NULL;
+    }
+
+    return pList;
+}
+
+
+static
+PIP_ADAPTER_INFO
+FindAdapterInfo(
+    _In_opt_ PIP_ADAPTER_INFO pList,
+    _In_ DWORD dwIndex)
+{
+    for (; pList != NULL; pList = pList->Next)
+    {
+        if (pList->Index == dwIndex)
+            return pList;
+    }
+
+    return NULL;
+}
+
+
+static
+BOOL
+IsUsableAddress(
+    _In_ PCSTR pszAddress)
+{
+    return (pszAddress[0] != ANSI_NULL) && (strcmp(pszAddress, "0.0.0.0") != 0);
+}
+
+
+static
+VOID
+PrintAnsiMessage(
+    _In_ DWORD dwMessageId,
+    _In_ PCSTR pszAddress)
+{
+    WCHAR szAddress[16];
+
+    MultiByteToWideChar(CP_ACP, 0, pszAddress, -1, szAddress, _countof(szAddress));
+    szAddress[_countof(szAddress) - 1] = UNICODE_NULL;
+    PrintMessageFromModule(hDllInstance, dwMessageId, szAddress);
+}
+
+
+/* A DHCP adapter has no stored address: show the lease */
+static
+VOID
+PrintDhcpAddresses(
+    _In_opt_ PIP_ADAPTER_INFO pAdapter,
+    _In_ PTCPIP_PROPERTIES pProperties)
+{
+    PIP_ADDR_STRING pAddress;
+    BOOL bAddress = FALSE, bGateway = FALSE;
+    PWSTR pBuffer;
+
+    if (pAdapter != NULL)
+    {
+        for (pAddress = &pAdapter->IpAddressList; pAddress != NULL; pAddress = pAddress->Next)
+        {
+            if (!IsUsableAddress(pAddress->IpAddress.String))
+                continue;
+
+            PrintAnsiMessage(IDS_IPADDRESS, pAddress->IpAddress.String);
+            PrintAnsiMessage(IDS_SUBNETMASK, pAddress->IpMask.String);
+            bAddress = TRUE;
+        }
+    }
+
+    if (!bAddress)
+    {
+        PrintMessageFromModule(hDllInstance, IDS_NOIPADDRESS);
+        PrintMessageFromModule(hDllInstance, IDS_NOSUBNETMASK);
+        return;
+    }
+
+    for (pAddress = &pAdapter->GatewayList; pAddress != NULL; pAddress = pAddress->Next)
+    {
+        if (!IsUsableAddress(pAddress->IpAddress.String))
+            continue;
+
+        PrintAnsiMessage(IDS_DEFAULTGATEWAY, pAddress->IpAddress.String);
+        bGateway = TRUE;
+    }
+
+    if (bGateway)
+    {
+        /* Without a stored metric the gateway metric is automatic, shown as 0 */
+        pBuffer = ExtractParameterValue(pProperties->pszParameters, L"GwMetric");
+        PrintMessageFromModule(hDllInstance, IDS_GATEWAYMETRIC, (pBuffer) ? pBuffer : L"0");
+        if (pBuffer)
+            HeapFree(GetProcessHeap(), 0, pBuffer);
+    }
+}
+
+
+/* Print a comma-separated server list, one server per line */
+static
+VOID
+PrintStaticNameServers(
+    _In_ PWSTR pszServers)
+{
+    PWSTR pStart, pEnd;
+    DWORD dwMessageId = IDS_STATICNAMESERVER;
+
+    for (pStart = pszServers; pStart != NULL; pStart = pEnd)
+    {
+        pEnd = wcschr(pStart, L',');
+        if (pEnd != NULL)
+            *pEnd++ = UNICODE_NULL;
+
+        if (*pStart == UNICODE_NULL)
+            continue;
+
+        PrintMessageFromModule(hDllInstance, dwMessageId, pStart);
+        dwMessageId = IDS_EMPTYLINE;
+    }
+
+    if (dwMessageId == IDS_STATICNAMESERVER)
+        PrintMessageFromModule(hDllInstance, IDS_NOSTATICNAMESERVER);
+}
+
+
+static
+VOID
+PrintDhcpNameServers(
+    _In_ DWORD dwIndex)
+{
+    PIP_PER_ADAPTER_INFO pInfo = NULL;
+    PIP_ADDR_STRING pAddress;
+    ULONG ulSize = 0;
+    DWORD dwMessageId = IDS_DHCPNAMESERVER;
+    DWORD dwError;
+    INT i;
+
+    /* The server list can grow between the calls: retry once */
+    dwError = GetPerAdapterInfo(dwIndex, NULL, &ulSize);
+    for (i = 0; i < 2 && dwError == ERROR_BUFFER_OVERFLOW; i++)
+    {
+        if (pInfo)
+            HeapFree(GetProcessHeap(), 0, pInfo);
+        pInfo = HeapAlloc(GetProcessHeap(), 0, ulSize);
+        if (pInfo == NULL)
+            break;
+        dwError = GetPerAdapterInfo(dwIndex, pInfo, &ulSize);
+    }
+
+    if (pInfo != NULL && dwError != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, pInfo);
+        pInfo = NULL;
+    }
+
+    if (pInfo != NULL)
+    {
+        for (pAddress = &pInfo->DnsServerList; pAddress != NULL; pAddress = pAddress->Next)
+        {
+            if (!IsUsableAddress(pAddress->IpAddress.String))
+                continue;
+
+            PrintAnsiMessage(dwMessageId, pAddress->IpAddress.String);
+            dwMessageId = IDS_EMPTYLINE;
+        }
+
+        HeapFree(GetProcessHeap(), 0, pInfo);
+    }
+
+    if (dwMessageId == IDS_DHCPNAMESERVER)
+        PrintMessageFromModule(hDllInstance, IDS_NODHCPNAMESERVER);
+}
+
+
+static
 DWORD
 IpShowAdapters(
     _In_ DWORD DisplayFlags,
@@ -2039,7 +2239,8 @@ IpShowAdapters(
     WCHAR szFriendlyName[80];
     DWORD dwFriendlyNameSize;
     PTCPIP_PROPERTIES pProperties = NULL;
-    PWSTR pBuffer, pStart, pEnd;
+    PIP_ADAPTER_INFO pAdapterList = NULL;
+    PWSTR pBuffer;
 
     dwError = NhpAllocateAndGetInterfaceInfoFromStack(&pTable,
                                                       &dwCount,
@@ -2053,6 +2254,8 @@ IpShowAdapters(
     }
 
     DPRINT("\nEntries: %lu\n", dwCount);
+
+    pAdapterList = GetAdapterInfoList();
 
     for (i = 0; i < dwCount; i++)
     {
@@ -2122,6 +2325,10 @@ IpShowAdapters(
                             HeapFree(GetProcessHeap(), 0, pBuffer);
                         }
                     }
+                    else
+                    {
+                        PrintDhcpAddresses(FindAdapterInfo(pAdapterList, pTable[i].Index), pProperties);
+                    }
 
                     pBuffer = ExtractParameterValue(pProperties->pszParameters, L"IfMetric");
                     if (pBuffer)
@@ -2133,33 +2340,19 @@ IpShowAdapters(
 
                 if (DisplayFlags & DISPLAY_DNS)
                 {
-                    if (pProperties->dwDhcp == 0)
+                    pBuffer = ExtractParameterValue(pProperties->pszParameters, L"DNS");
+                    if (pBuffer)
                     {
-                        pBuffer = ExtractParameterValue(pProperties->pszParameters, L"DNS");
-                        if (pBuffer)
-                        {
-                            pEnd = wcschr(pBuffer, L',');
-                            if (pEnd == NULL)
-                            {
-                                PrintMessageFromModule(hDllInstance, IDS_STATICNAMESERVER, pBuffer);
-                            }
-                            else
-                            {
-                                pStart = pBuffer;
-                                *pEnd = UNICODE_NULL;
-                                PrintMessageFromModule(hDllInstance, IDS_STATICNAMESERVER, pBuffer);
-                                for (;;)
-                                {
-                                    pStart = pEnd + 1;
-                                    pEnd = wcschr(pStart, L',');
-                                    if (pEnd == NULL)
-                                        break;
-                                    *pEnd = UNICODE_NULL;
-                                    PrintMessageFromModule(hDllInstance, IDS_EMPTYLINE, pBuffer);
-                                }
-                            }
-                            HeapFree(GetProcessHeap(), 0, pBuffer);
-                        }
+                        PrintStaticNameServers(pBuffer);
+                        HeapFree(GetProcessHeap(), 0, pBuffer);
+                    }
+                    else if (pProperties->dwDhcp)
+                    {
+                        PrintDhcpNameServers(pTable[i].Index);
+                    }
+                    else
+                    {
+                        PrintMessageFromModule(hDllInstance, IDS_NOSTATICNAMESERVER);
                     }
                 }
 
@@ -2168,6 +2361,9 @@ IpShowAdapters(
             }
         }
     }
+
+    if (pAdapterList)
+        HeapFree(GetProcessHeap(), 0, pAdapterList);
 
     if (pTable)
         HeapFree(GetProcessHeap(), 0, pTable);
