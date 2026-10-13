@@ -155,6 +155,7 @@ list(APPEND SOURCE
     RtlReAllocateHeap.c
     RtlRemovePrivileges.c
     RtlSRWLock.c
+    RtlSRWLockWait.c
     RtlUnhandledExceptionFilter.c
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
