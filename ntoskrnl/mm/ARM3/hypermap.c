@@ -107,6 +107,34 @@ MiUnmapPageInHyperSpace(IN PEPROCESS Process,
     KeReleaseSpinLock(&Process->HyperSpaceLock, OldIrql);
 }
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+#if defined(__GNUC__)
+#define MiClflush(Address) __asm__ __volatile__("clflush %0" : "+m" (*(volatile UCHAR *)(Address)))
+#else
+#define MiClflush(Address) _mm_clflush((PVOID)(Address))
+#endif
+
+/* CLFLUSH line size, 0 without CLFLUSH, MAXULONG until the zero page thread reads it */
+static ULONG MiZeroFlushLine = MAXULONG;
+
+static
+VOID
+MiReadZeroFlushLine(VOID)
+{
+    INT Registers[4];
+
+    /* CPUID 1: EDX bit 19 is CLFLUSH, EBX bits 8-15 its line size in 8-byte
+       units; EDX bit 26 (SSE2) is needed for MFENCE */
+    __cpuid(Registers, 1);
+    if (!(Registers[3] & (1 << 19)) || !(Registers[3] & (1 << 26)))
+        MiZeroFlushLine = 0;
+    else if (((Registers[1] >> 8) & 0xFF) != 0)
+        MiZeroFlushLine = ((Registers[1] >> 8) & 0xFF) * 8;
+    else
+        MiZeroFlushLine = 32;
+}
+#endif
+
 PVOID
 NTAPI
 MiMapPagesInZeroSpace(IN PMMPFN Pfn1,
@@ -152,9 +180,18 @@ MiMapPagesInZeroSpace(IN PMMPFN Pfn1,
     PointerPte += (Offset + 1);
     TempPte = ValidKernelPte;
 
-    /* Disable cache. Write through */
-    MI_PAGE_DISABLE_CACHE(&TempPte);
-    MI_PAGE_WRITE_THROUGH(&TempPte);
+    /* Pages on the zeroed list may next be mapped uncached, so they must leave
+       the zero page thread with no cached copy: through a cached mapping that
+       takes CLFLUSH after the zeroing (MiUnmapPagesInZeroSpace), else the
+       mapping is uncached */
+#if defined(_M_IX86) || defined(_M_AMD64)
+    if (MiZeroFlushLine == MAXULONG) MiReadZeroFlushLine();
+    if (!MiZeroFlushLine)
+#endif
+    {
+        MI_PAGE_DISABLE_CACHE(&TempPte);
+        MI_PAGE_WRITE_THROUGH(&TempPte);
+    }
 
     /* Make sure the list isn't empty and loop it */
     ASSERT(Pfn1 != (PVOID)LIST_HEAD);
@@ -204,10 +241,41 @@ MiUnmapPagesInZeroSpace(IN PVOID VirtualAddress,
     //
     PointerPte = MiAddressToPte(VirtualAddress);
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* Write the zeros back and drop them from every cache. The window turns
+       uncached first, so that no line is refilled speculatively through it
+       between its flush and the unmapping */
+    if (MiZeroFlushLine)
+    {
+        PUCHAR Line, End = (PUCHAR)VirtualAddress + NumberOfPages * PAGE_SIZE;
+        MMPTE TempPte;
+        PFN_NUMBER i;
+
+        for (i = 0; i < NumberOfPages; i++)
+        {
+            TempPte = PointerPte[i];
+            MI_PAGE_DISABLE_CACHE(&TempPte);
+            MI_PAGE_WRITE_THROUGH(&TempPte);
+            MI_UPDATE_VALID_PTE(&PointerPte[i], TempPte);
+        }
+        KxFlushRangeCurrentTb(VirtualAddress, (ULONG)NumberOfPages);
+
+        for (Line = VirtualAddress; Line < End; Line += MiZeroFlushLine)
+            MiClflush(Line);
+        _mm_mfence();
+    }
+#endif
+
     //
     // Blow away the mapped zero PTEs.
-    // Note: TLB flush happens in MiMapPagesInZeroSpace, when a new range is started
+    // Note: the flush on all processors happens in MiMapPagesInZeroSpace, when a new range is started
     //
     RtlZeroMemory(PointerPte, NumberOfPages * sizeof(MMPTE));
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* The zero page thread runs on one processor: drop its translations of the
+       zeroed pages now, not at the next wrap */
+    KxFlushRangeCurrentTb(VirtualAddress, (ULONG)NumberOfPages);
+#endif
 }
 
