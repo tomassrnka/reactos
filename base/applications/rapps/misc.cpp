@@ -636,6 +636,30 @@ ReadAt(HANDLE Handle, UINT Offset, LPVOID Buffer, UINT Size)
     return ReadFile(Handle, Buffer, Size, &cb, &ol) && cb == Size;
 }
 
+BOOL
+IsConsoleProgram(LPCWSTR Path)
+{
+    BOOL bConsole = FALSE;
+    HANDLE hFile = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    IMAGE_DOS_HEADER dos;
+    DWORD sig;
+    WORD subsystem;
+    const UINT SubsystemOffset = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) +
+                                 FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, Subsystem);
+    C_ASSERT(FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, Subsystem) == FIELD_OFFSET(IMAGE_OPTIONAL_HEADER64, Subsystem));
+    if (ReadAt(hFile, 0, &dos, sizeof(dos)) && dos.e_magic == IMAGE_DOS_SIGNATURE &&
+        ReadAt(hFile, dos.e_lfanew, &sig, sizeof(sig)) && sig == IMAGE_NT_SIGNATURE &&
+        ReadAt(hFile, dos.e_lfanew + SubsystemOffset, &subsystem, sizeof(subsystem)))
+    {
+        bConsole = subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI;
+    }
+    CloseHandle(hFile);
+    return bConsole;
+}
+
 InstallerType
 GuessInstallerType(LPCWSTR Installer, UINT &ExtraInfo)
 {

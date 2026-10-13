@@ -174,6 +174,9 @@ struct CScopedMutex
     bool Acquired() const { return m_hMutex != NULL; }
 };
 
+BOOL
+IsConsoleProgram(LPCWSTR Path);
+
 InstallerType
 GuessInstallerType(LPCWSTR Installer, UINT &ExtraInfo);
 
