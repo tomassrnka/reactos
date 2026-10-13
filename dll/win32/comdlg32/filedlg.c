@@ -2001,10 +2001,17 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
       if (!handledPath && (win2000plus || win98plus)) {
           fodInfos->initdir = heap_alloc(MAX_PATH * sizeof(WCHAR));
 
+#ifdef __REACTOS__
+          if (SHGetFolderPathW(hwnd, CSIDL_PERSONAL, 0, 0, fodInfos->initdir) != S_OK)
+          {
+              if (SHGetFolderPathW(hwnd, CSIDL_DESKTOPDIRECTORY|CSIDL_FLAG_CREATE, 0, 0, fodInfos->initdir) != S_OK)
+              {
+#else
           if (SHGetFolderPathW(hwnd, CSIDL_PERSONAL, 0, 0, fodInfos->initdir) == S_OK)
           {
               if (SHGetFolderPathW(hwnd, CSIDL_DESKTOPDIRECTORY|CSIDL_FLAG_CREATE, 0, 0, fodInfos->initdir) == S_OK)
               {
+#endif
                   /* last fallback */
                   GetCurrentDirectoryW(MAX_PATH, fodInfos->initdir);
                   TRACE("No personal or desktop dir, using cwd as failsafe: %s\n", debugstr_w(fodInfos->initdir));
@@ -3047,6 +3054,17 @@ int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
                 if(flags & OFN_PATHMUSTEXIST)
                 {
                     FILEDLG95_OnOpenMessage(hwnd, 0, IDS_PATHNOTEXISTING);
+#ifdef __REACTOS__
+                    /* Like Windows, stay in the current folder and keep the name selected */
+                    if (fodInfos)
+                    {
+                        HWND hwndEdit = fodInfos->DlgInfos.hwndFileName;
+                        if (!filename_is_edit(fodInfos))
+                            hwndEdit = (HWND)SendMessageW(hwndEdit, CBEM_GETEDITCONTROL, 0, 0);
+                        SendMessageW(hwndEdit, EM_SETSEL, 0, -1);
+                        nOpenAction = 0;
+                    }
+#endif
                     break;
                 }
             }
