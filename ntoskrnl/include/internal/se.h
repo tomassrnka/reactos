@@ -386,6 +386,47 @@ SepTokenIsOwner(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
     _In_ BOOLEAN TokenLocked);
 
+/* Mandatory label of tokens */
+#define SEP_MANDATORY_LABEL_SID_LENGTH ((ULONG)FIELD_OFFSET(SID, SubAuthority[1]))
+
+BOOLEAN
+NTAPI
+SepIsMandatoryLabelSid(
+    _In_ PSID Sid,
+    _Out_opt_ PULONG Rid);
+
+VOID
+NTAPI
+SepInitializeMandatoryLabelSid(
+    _Out_writes_bytes_(SEP_MANDATORY_LABEL_SID_LENGTH) PSID Sid,
+    _In_ ULONG Rid);
+
+ULONG
+NTAPI
+SepComputeIntegrityLevel(
+    _In_ PTOKEN Token);
+
+NTSTATUS
+NTAPI
+SepGetDescriptorLabel(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _Out_ PBOOLEAN HasLabel,
+    _Out_opt_ PULONG LabelLevel,
+    _Out_opt_ PACCESS_MASK LabelPolicy);
+
+NTSTATUS
+NTAPI
+SeCheckLabelChange(
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_ KPROCESSOR_MODE AccessMode);
+
+NTSTATUS
+NTAPI
+SeAssignTokenObjectLabel(
+    _In_ PVOID Object,
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping);
+
 NTSTATUS
 SepCreateTokenLock(
     _Inout_ PTOKEN Token);
