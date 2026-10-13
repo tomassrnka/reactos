@@ -10,6 +10,7 @@
 
 #include "notepad.h"
 
+#include <cderr.h>
 #include <strsafe.h>
 #include <assert.h>
 
@@ -598,7 +599,10 @@ VOID DIALOG_FilePrint(VOID)
     if (!ret)
     {
         LocalFree(printData);
-        return; /* The user canceled printing */
+        /* The user canceled printing, or no device context could be created for the printer */
+        if (CommDlgExtendedError() == PDERR_CREATEICFAILURE)
+            AlertPrintError();
+        return;
     }
     assert(printer->hDC != NULL);
 
