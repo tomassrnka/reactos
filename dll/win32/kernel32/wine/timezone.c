@@ -624,7 +624,7 @@ TIME_FindTimeZoneKeyName(
     /* Unique only if every entry was seen */
     if (Matches != 1 || Status != STATUS_NO_MORE_ENTRIES)
     {
-        KeyName[0] = UNICODE_NULL;
+        RtlZeroMemory(KeyName, KeyNameLength * sizeof(WCHAR));
         return FALSE;
     }
     return TRUE;

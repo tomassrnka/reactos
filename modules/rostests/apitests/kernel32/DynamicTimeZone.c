@@ -34,6 +34,8 @@ START_TEST(DynamicTimeZone)
     RtlFillMemory(&Dynamic, sizeof(Dynamic), 0xCC);
     Result = pGetDynamicTimeZoneInformation(&Dynamic);
     ok(Result != TIME_ZONE_ID_INVALID, "Failed: %lu\n", GetLastError());
+    if (Result == TIME_ZONE_ID_INVALID)
+        return;
 
     /* The part GetTimeZoneInformation returns is the same */
     ok(Dynamic.Bias == Static.Bias, "Bias %ld, expected %ld\n", Dynamic.Bias, Static.Bias);
@@ -53,8 +55,10 @@ START_TEST(DynamicTimeZone)
         ok(Result == StaticResult, "Result %lu, GetTimeZoneInformation gave %lu\n", Result, StaticResult);
 
     /* The key name is terminated and names a Time Zones entry (its TZI is the zone's default, not this year's rule) */
-    ok(wcsnlen(Dynamic.TimeZoneKeyName, ARRAYSIZE(Dynamic.TimeZoneKeyName)) < ARRAYSIZE(Dynamic.TimeZoneKeyName),
-       "TimeZoneKeyName is not terminated\n");
+    Size = (DWORD)wcsnlen(Dynamic.TimeZoneKeyName, ARRAYSIZE(Dynamic.TimeZoneKeyName));
+    ok(Size < ARRAYSIZE(Dynamic.TimeZoneKeyName), "TimeZoneKeyName is not terminated\n");
+    if (Size >= ARRAYSIZE(Dynamic.TimeZoneKeyName))
+        return;
     ok(Dynamic.TimeZoneKeyName[0] != UNICODE_NULL, "No TimeZoneKeyName\n");
     if (Dynamic.TimeZoneKeyName[0])
     {

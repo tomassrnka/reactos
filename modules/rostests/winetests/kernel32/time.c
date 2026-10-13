@@ -790,8 +790,8 @@ static void test_GetDynamicTimeZoneInformation(void)
     /* Automatic daylight saving adjustment disabled: no daylight saving time is in use */
     if (dyninfo.DynamicDaylightTimeDisabled)
         ok(ret == TIME_ZONE_ID_UNKNOWN, "got %ld with daylight saving disabled\n", ret);
-    /* FIXME: GetTimeZoneInformation does not look at DynamicDaylightTimeDisabled yet */
-    todo_ros_if(dyninfo.DynamicDaylightTimeDisabled)
+    /* FIXME: GetTimeZoneInformation does not look at DynamicDaylightTimeDisabled yet (it matters with transitions) */
+    todo_ros_if(dyninfo.DynamicDaylightTimeDisabled && tzinfo.DaylightDate.wMonth != 0)
 #endif
     ok(ret == ret2, "got %ld, %ld\n", ret, ret2);
 
