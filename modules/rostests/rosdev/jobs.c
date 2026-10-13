@@ -38,7 +38,9 @@ static void BufStr(BUF *b, const char *s) { BufAppend(b, s, strlen(s)); }
 static void BufWide(BUF *b, const WCHAR *w)
 {
     char *u = WideToUtf8(w);
-    if (u) { BufStr(b, u); HeapFree(GetProcessHeap(), 0, u); }
+    if (!u) { b->failed = TRUE; return; }   /* conversion or allocation failed: the text must not come back short */
+    BufStr(b, u);
+    HeapFree(GetProcessHeap(), 0, u);
 }
 
 static void BufPrintf(BUF *b, const char *fmt, ...)
