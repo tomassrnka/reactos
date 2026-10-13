@@ -171,9 +171,9 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_APPTITLE "Gestionnaire d'applications ReactOS"
+    IDS_APPTITLE "Gestionnaire d'applications AjarOS"
     IDS_APP_AUTHORS "Copyright 2009 Dmitry Chapyshev"
-    IDS_WELCOME_TITLE "Bienvenue dans ReactOS Applications Manager !"
+    IDS_WELCOME_TITLE "Bienvenue dans AjarOS Applications Manager !"
     IDS_WELCOME_TEXT "Choisissez une catégorie à gauche, ensuite choisissez une application à installer ou désinstaller.\nSite internet de ReactOS : "
     IDS_WELCOME_URL "https://reactos.org"
 
