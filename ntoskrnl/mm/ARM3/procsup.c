@@ -257,7 +257,7 @@ MmDeleteKernelStack(IN PVOID StackBase,
 {
     PMMPTE PointerPte;
     PFN_NUMBER PageFrameNumber, PageTableFrameNumber;
-    PFN_COUNT StackPages;
+    PFN_COUNT StackPages, FreedPages;
     PMMPFN Pfn1, Pfn2;
     ULONG i;
     KIRQL OldIrql;
@@ -287,6 +287,7 @@ MmDeleteKernelStack(IN PVOID StackBase,
     //
     StackPages = BYTES_TO_PAGES(GuiStack ?
                                 MmLargeStackSize : KERNEL_STACK_SIZE);
+    FreedPages = 0;
 
     /* Acquire the PFN lock */
     OldIrql = MiAcquirePfnLock();
@@ -317,6 +318,7 @@ MmDeleteKernelStack(IN PVOID StackBase,
 
             /* And now delete the actual stack page */
             MiDecrementShareCount(Pfn1, PageFrameNumber);
+            FreedPages++;
         }
 
         //
@@ -332,6 +334,9 @@ MmDeleteKernelStack(IN PVOID StackBase,
 
     /* Release the PFN lock */
     MiReleasePfnLock(OldIrql);
+
+    /* The stack pages that existed were charged when they were created */
+    MiReturnCommit(FreedPages);
 
     //
     // Release the PTEs
@@ -388,10 +393,20 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     }
 
     //
+    // A new stack is committed memory (a stack taken from the dead stack
+    // list above kept its charge)
+    //
+    if (!MiChargeCommit(StackPages, MiCommitUser)) return NULL;
+
+    //
     // Reserve stack pages, plus a guard page
     //
     StackPte = MiReserveSystemPtes(StackPtes + 1, SystemPteSpace);
-    if (!StackPte) return NULL;
+    if (!StackPte)
+    {
+        MiReturnCommit(StackPages);
+        return NULL;
+    }
 
     //
     // Get the stack address
@@ -422,6 +437,7 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     {
         MiReleasePfnLock(OldIrql);
         MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
+        MiReturnCommit(StackPages);
         return NULL;
     }
 
@@ -470,6 +486,7 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     KIRQL OldIrql;
     MMPTE TempPte, InvalidPte;
     PFN_NUMBER PageFrameIndex;
+    PFN_COUNT NewPages;
 
     //
     // Make sure the stack did not overflow
@@ -506,6 +523,10 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     // Calculate the number of new pages
     //
     LimitPte--;
+    NewPages = (LimitPte >= NewLimitPte) ? (PFN_COUNT)(LimitPte - NewLimitPte + 1) : 0;
+
+    /* The new pages are committed memory; growth may use the kernel reserve */
+    if (!MiChargeCommit(NewPages, MiCommitKernel)) return STATUS_NO_MEMORY;
 
     /* Setup the temporary invalid PTE */
     MI_MAKE_SOFTWARE_PTE(&InvalidPte, MM_NOACCESS);
@@ -516,11 +537,10 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the growth instead of using page 0 when no page is free */
-    if ((LimitPte >= NewLimitPte) &&
-        (MiGetFreeOrZeroedPageCount() <
-         (PFN_NUMBER)(LimitPte - NewLimitPte + 1)))
+    if (MiGetFreeOrZeroedPageCount() < NewPages)
     {
         MiReleasePfnLock(OldIrql);
+        MiReturnCommit(NewPages);
         return STATUS_NO_MEMORY;
     }
 
