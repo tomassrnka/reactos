@@ -225,6 +225,13 @@
 @ stdcall EqualDomainSid(ptr ptr ptr)
 @ stdcall EqualPrefixSid(ptr ptr)
 @ stdcall EqualSid(ptr ptr)
+@ stdcall -version=0x600+ EventEnabled(int64 ptr) ntdll.EtwEventEnabled
+@ stdcall -version=0x600+ EventProviderEnabled(int64 long int64) ntdll.EtwEventProviderEnabled
+@ stdcall -version=0x600+ EventRegister(ptr ptr ptr ptr) ntdll.EtwEventRegister
+@ stdcall -version=0x600+ EventUnregister(int64) ntdll.EtwEventUnregister
+@ stdcall -version=0x600+ EventWrite(int64 ptr long ptr) ntdll.EtwEventWrite
+@ stdcall -version=0x600+ EventWriteString(int64 long int64 wstr) ntdll.EtwEventWriteString
+@ stdcall -version=0x600+ EventWriteTransfer(int64 ptr ptr ptr long ptr) ntdll.EtwEventWriteTransfer
 @ stdcall FileEncryptionStatusA(str ptr)
 @ stdcall FileEncryptionStatusW(wstr ptr)
 @ stdcall FindFirstFreeAce(ptr ptr)

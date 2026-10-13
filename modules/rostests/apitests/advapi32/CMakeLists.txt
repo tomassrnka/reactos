@@ -5,6 +5,7 @@ list(APPEND SOURCE
     DuplicateTokenEx.c
     EncryptFile.c
     eventlog.c
+    EventRegister.c
     Hash.c
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c
