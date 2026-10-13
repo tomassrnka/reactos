@@ -1134,24 +1134,34 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
             }
         }
 
-        /* A device has one drive letter at most. Further stored volume names are
-         * left in the database but get no link: earlier versions could not read
-         * them back and wrote a new one at every boot, so a volume would be listed
-         * once per name. */
-        if (Duplicate || (IsLetter && IsDrvLetter) || (IsVolName && IsVolumeName))
+        /* A device has one drive letter at most. Every stored volume name gets
+         * its link, as a directory mount point may refer to any of them; volume
+         * enumeration lists each device once. */
+        if (Duplicate || (IsLetter && IsDrvLetter))
         {
             if (IsLetter && !Duplicate)
             {
-                /* Remove a live link of that letter to this device too */
+                BOOLEAN Release = FALSE;
+
+                /* Remove a live link of that letter to this device too. Keep the
+                 * stored letter while such a link may still exist, so that it is
+                 * not left without an owner */
                 Status = QueryDeviceInformation(&(SymLinks[i]), &DeviceName, NULL, NULL, NULL, NULL, NULL, NULL);
                 if (NT_SUCCESS(Status))
                 {
-                    if (RtlEqualUnicodeString(&TargetDeviceName, &DeviceName, TRUE))
-                        GlobalDeleteSymbolicLink(&(SymLinks[i]));
+                    if (!RtlEqualUnicodeString(&TargetDeviceName, &DeviceName, TRUE))
+                        Release = TRUE;
+                    else if (NT_SUCCESS(GlobalDeleteSymbolicLink(&(SymLinks[i]))))
+                        Release = TRUE;
                     FreePool(DeviceName.Buffer);
                 }
+                else if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND)
+                {
+                    Release = TRUE;
+                }
 
-                DeleteFromLocalDatabase(&(SymLinks[i]), UniqueId);
+                if (Release)
+                    DeleteFromLocalDatabase(&(SymLinks[i]), UniqueId);
             }
 
             FreePool(SymLinks[i].Buffer);
