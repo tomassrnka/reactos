@@ -786,6 +786,13 @@ static void test_GetDynamicTimeZoneInformation(void)
 
     ret = pGetDynamicTimeZoneInformation(&dyninfo);
     ret2 = GetTimeZoneInformation(&tzinfo);
+#ifdef __REACTOS__
+    /* Automatic daylight saving adjustment disabled: no daylight saving time is in use */
+    if (dyninfo.DynamicDaylightTimeDisabled)
+        ok(ret == TIME_ZONE_ID_UNKNOWN, "got %ld with daylight saving disabled\n", ret);
+    /* FIXME: GetTimeZoneInformation does not look at DynamicDaylightTimeDisabled yet */
+    todo_ros_if(dyninfo.DynamicDaylightTimeDisabled)
+#endif
     ok(ret == ret2, "got %ld, %ld\n", ret, ret2);
 
     ok(dyninfo.Bias == tzinfo.Bias, "got %ld, %ld\n", dyninfo.Bias, tzinfo.Bias);

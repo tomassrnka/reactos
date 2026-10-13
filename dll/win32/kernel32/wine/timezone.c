@@ -448,46 +448,158 @@ TzSpecificLocalTimeToSystemTime(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformati
     return FileTimeToSystemTime(&ft, lpUniversalTime);
 }
 
-/* Registry written before TimeZoneKeyName existed: find the time zone whose
- * standard name matches the current one */
+/* REG_TZI_FORMAT: the TZI value of a Time Zones entry */
+typedef struct _TIME_TZI_FORMAT
+{
+    LONG Bias;
+    LONG StandardBias;
+    LONG DaylightBias;
+    SYSTEMTIME StandardDate;
+    SYSTEMTIME DaylightDate;
+} TIME_TZI_FORMAT;
+
+/* Reads a REG_SZ value into a buffer of BufferLength characters, terminated; FALSE if absent, of another type or too long */
+static
+BOOL
+TIME_QueryStringValue(
+    _In_ HANDLE Key,
+    _In_ PCWSTR ValueName,
+    _Out_writes_(BufferLength) PWSTR Buffer,
+    _In_ ULONG BufferLength)
+{
+    UNICODE_STRING Name;
+    ULONG Length, DataLength;
+    NTSTATUS Status;
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Partial;
+        UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + 128 * sizeof(WCHAR)];
+    } Info;
+
+    RtlInitUnicodeString(&Name, ValueName);
+    Status = NtQueryValueKey(Key, &Name, KeyValuePartialInformation, &Info, sizeof(Info), &Length);
+    if (!NT_SUCCESS(Status) || Info.Partial.Type != REG_SZ || (Info.Partial.DataLength % sizeof(WCHAR)))
+        return FALSE;
+
+    /* Drop the terminator(s) stored with the string */
+    DataLength = Info.Partial.DataLength;
+    while (DataLength >= sizeof(WCHAR) && !((PWCHAR)Info.Partial.Data)[DataLength / sizeof(WCHAR) - 1])
+        DataLength -= sizeof(WCHAR);
+    if (DataLength / sizeof(WCHAR) >= BufferLength)
+        return FALSE;
+
+    RtlCopyMemory(Buffer, Info.Partial.Data, DataLength);
+    Buffer[DataLength / sizeof(WCHAR)] = UNICODE_NULL;
+    return TRUE;
+}
+
+/* Reads a REG_DWORD value; FALSE if absent or not a four-byte REG_DWORD */
+static
+BOOL
+TIME_QueryDwordValue(
+    _In_ HANDLE Key,
+    _In_ PCWSTR ValueName,
+    _Out_ PULONG Value)
+{
+    UNICODE_STRING Name;
+    ULONG Length;
+    NTSTATUS Status;
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Partial;
+        UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    } Info;
+
+    RtlInitUnicodeString(&Name, ValueName);
+    Status = NtQueryValueKey(Key, &Name, KeyValuePartialInformation, &Info, sizeof(Info), &Length);
+    if (!NT_SUCCESS(Status) || Info.Partial.Type != REG_DWORD || Info.Partial.DataLength != sizeof(ULONG))
+        return FALSE;
+
+    *Value = *(PULONG)Info.Partial.Data;
+    return TRUE;
+}
+
+/* Whether a Time Zones entry describes the zone in effect: same standard name, biases and transitions */
+static
+BOOL
+TIME_ZoneKeyMatches(
+    _In_ HANDLE ZoneKey,
+    _In_ const TIME_ZONE_INFORMATION *TimeZoneInformation)
+{
+    UNICODE_STRING TziName = RTL_CONSTANT_STRING(L"TZI");
+    WCHAR Std[ARRAYSIZE(TimeZoneInformation->StandardName)];
+    TIME_TZI_FORMAT *Tzi;
+    ULONG Length;
+    NTSTATUS Status;
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Partial;
+        UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(TIME_TZI_FORMAT)];
+    } Info;
+
+    if (!TIME_QueryStringValue(ZoneKey, L"Std", Std, ARRAYSIZE(Std)) ||
+        _wcsicmp(Std, TimeZoneInformation->StandardName))
+    {
+        return FALSE;
+    }
+
+    Status = NtQueryValueKey(ZoneKey, &TziName, KeyValuePartialInformation, &Info, sizeof(Info), &Length);
+    if (!NT_SUCCESS(Status) || Info.Partial.Type != REG_BINARY || Info.Partial.DataLength != sizeof(TIME_TZI_FORMAT))
+        return FALSE;
+
+    Tzi = (TIME_TZI_FORMAT *)Info.Partial.Data;
+    return Tzi->Bias == TimeZoneInformation->Bias &&
+           Tzi->StandardBias == TimeZoneInformation->StandardBias &&
+           Tzi->DaylightBias == TimeZoneInformation->DaylightBias &&
+           !memcmp(&Tzi->StandardDate, &TimeZoneInformation->StandardDate, sizeof(SYSTEMTIME)) &&
+           !memcmp(&Tzi->DaylightDate, &TimeZoneInformation->DaylightDate, sizeof(SYSTEMTIME));
+}
+
+/*
+ * Registry written before TimeZoneKeyName existed (the current setup does not
+ * write it): the Time Zones entry that describes the zone in effect. Names
+ * alone are ambiguous (two zones can share a localized standard name), so the
+ * biases and transitions must match as well, and nothing is returned unless
+ * exactly one entry matches.
+ */
 static
 BOOL
 TIME_FindTimeZoneKeyName(
-    _In_ PCWSTR StandardName,
+    _In_ const TIME_ZONE_INFORMATION *TimeZoneInformation,
     _Out_writes_(KeyNameLength) PWSTR KeyName,
     _In_ ULONG KeyNameLength)
 {
     UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones");
-    UNICODE_STRING StdValue = RTL_CONSTANT_STRING(L"Std");
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE ZonesKey, ZoneKey;
-    ULONG Index, Length;
+    ULONG Index, Length, Matches = 0;
     NTSTATUS Status;
-    BOOL Found = FALSE;
     union
     {
         KEY_BASIC_INFORMATION Basic;
         UCHAR Buffer[sizeof(KEY_BASIC_INFORMATION) + 128 * sizeof(WCHAR)];
     } KeyInfo;
-    union
-    {
-        KEY_VALUE_PARTIAL_INFORMATION Partial;
-        UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + 33 * sizeof(WCHAR)];
-    } ValueInfo;
 
     InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
     if (!NT_SUCCESS(NtOpenKey(&ZonesKey, KEY_ENUMERATE_SUB_KEYS, &ObjectAttributes)))
         return FALSE;
 
-    for (Index = 0; !Found; Index++)
+    for (Index = 0; ; Index++)
     {
         UNICODE_STRING SubKey;
 
-        Status = NtEnumerateKey(ZonesKey, Index, KeyBasicInformation,
-                                &KeyInfo, sizeof(KeyInfo), &Length);
-        if (Status == STATUS_NO_MORE_ENTRIES)
+        Status = NtEnumerateKey(ZonesKey, Index, KeyBasicInformation, &KeyInfo, sizeof(KeyInfo), &Length);
+        if (Status == STATUS_BUFFER_OVERFLOW || Status == STATUS_BUFFER_TOO_SMALL)
+        {
+            /* A name too long for a time zone key name: not a candidate */
+            continue;
+        }
+        if (!NT_SUCCESS(Status))
+        {
+            /* STATUS_NO_MORE_ENTRIES, or the key is gone (then the search is incomplete): stop */
             break;
-        if (!NT_SUCCESS(Status) || KeyInfo.Basic.NameLength >= KeyNameLength * sizeof(WCHAR))
+        }
+        if (KeyInfo.Basic.NameLength >= KeyNameLength * sizeof(WCHAR))
             continue;
 
         SubKey.Buffer = KeyInfo.Basic.Name;
@@ -496,24 +608,26 @@ TIME_FindTimeZoneKeyName(
         if (!NT_SUCCESS(NtOpenKey(&ZoneKey, KEY_QUERY_VALUE, &ObjectAttributes)))
             continue;
 
-        Status = NtQueryValueKey(ZoneKey, &StdValue, KeyValuePartialInformation,
-                                 &ValueInfo, sizeof(ValueInfo) - sizeof(WCHAR), &Length);
-        if (NT_SUCCESS(Status) && ValueInfo.Partial.Type == REG_SZ)
+        if (TIME_ZoneKeyMatches(ZoneKey, TimeZoneInformation))
         {
-            PWCHAR Std = (PWCHAR)ValueInfo.Partial.Data;
-            Std[ValueInfo.Partial.DataLength / sizeof(WCHAR)] = UNICODE_NULL;
-            if (!_wcsicmp(Std, StandardName))
+            if (++Matches == 1)
             {
                 RtlCopyMemory(KeyName, KeyInfo.Basic.Name, KeyInfo.Basic.NameLength);
                 KeyName[KeyInfo.Basic.NameLength / sizeof(WCHAR)] = UNICODE_NULL;
-                Found = TRUE;
             }
         }
         NtClose(ZoneKey);
     }
 
     NtClose(ZonesKey);
-    return Found;
+
+    /* Unique only if every entry was seen */
+    if (Matches != 1 || Status != STATUS_NO_MORE_ENTRIES)
+    {
+        KeyName[0] = UNICODE_NULL;
+        return FALSE;
+    }
+    return TRUE;
 }
 
 /*
@@ -523,46 +637,42 @@ DWORD
 WINAPI
 GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION pTimeZoneInformation)
 {
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\TimeZoneInformation");
     TIME_ZONE_INFORMATION TimeZoneInformation;
-    RTL_QUERY_REGISTRY_TABLE QueryTable[4];
-    UNICODE_STRING KeyName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    WCHAR KeyName[ARRAYSIZE(pTimeZoneInformation->TimeZoneKeyName)];
     ULONG DynamicDisabled = 0, AutoDisabled = 0;
+    HANDLE Key;
     DWORD Result;
 
     Result = GetTimeZoneInformation(&TimeZoneInformation);
     if (Result == TIME_ZONE_ID_INVALID)
         return TIME_ZONE_ID_INVALID;
 
-    RtlZeroMemory(pTimeZoneInformation, sizeof(*pTimeZoneInformation));
-    RtlCopyMemory(pTimeZoneInformation, &TimeZoneInformation, sizeof(TimeZoneInformation));
-
-    KeyName.Length = 0;
-    KeyName.MaximumLength = sizeof(pTimeZoneInformation->TimeZoneKeyName) - sizeof(WCHAR);
-    KeyName.Buffer = pTimeZoneInformation->TimeZoneKeyName;
-
-    RtlZeroMemory(QueryTable, sizeof(QueryTable));
-    QueryTable[0].Name = L"TimeZoneKeyName";
-    QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-    QueryTable[0].EntryContext = &KeyName;
-    QueryTable[1].Name = L"DynamicDaylightTimeDisabled";
-    QueryTable[1].Flags = RTL_QUERY_REGISTRY_DIRECT;
-    QueryTable[1].EntryContext = &DynamicDisabled;
-    QueryTable[2].Name = L"DisableAutoDaylightTimeSet";
-    QueryTable[2].Flags = RTL_QUERY_REGISTRY_DIRECT;
-    QueryTable[2].EntryContext = &AutoDisabled;
-
-    /* Missing values leave their defaults */
-    RtlQueryRegistryValues(RTL_REGISTRY_CONTROL, L"TimeZoneInformation", QueryTable, NULL, NULL);
-
-    pTimeZoneInformation->TimeZoneKeyName[KeyName.Length / sizeof(WCHAR)] = UNICODE_NULL;
-    if (!pTimeZoneInformation->TimeZoneKeyName[0])
+    RtlZeroMemory(KeyName, sizeof(KeyName));
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (NT_SUCCESS(NtOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
     {
-        TIME_FindTimeZoneKeyName(TimeZoneInformation.StandardName,
-                                 pTimeZoneInformation->TimeZoneKeyName,
-                                 ARRAYSIZE(pTimeZoneInformation->TimeZoneKeyName));
+        /* Values that are missing or malformed leave their defaults */
+        if (!TIME_QueryStringValue(Key, L"TimeZoneKeyName", KeyName, ARRAYSIZE(KeyName)))
+            KeyName[0] = UNICODE_NULL;
+        TIME_QueryDwordValue(Key, L"DynamicDaylightTimeDisabled", &DynamicDisabled);
+        TIME_QueryDwordValue(Key, L"DisableAutoDaylightTimeSet", &AutoDisabled);
+        NtClose(Key);
     }
 
+    if (!KeyName[0])
+        TIME_FindTimeZoneKeyName(&TimeZoneInformation, KeyName, ARRAYSIZE(KeyName));
+
+    RtlZeroMemory(pTimeZoneInformation, sizeof(*pTimeZoneInformation));
+    RtlCopyMemory(pTimeZoneInformation, &TimeZoneInformation, sizeof(TimeZoneInformation));
+    RtlCopyMemory(pTimeZoneInformation->TimeZoneKeyName, KeyName, sizeof(KeyName));
     pTimeZoneInformation->DynamicDaylightTimeDisabled = (DynamicDisabled || AutoDisabled);
+
+    /* With automatic daylight saving adjustment disabled no daylight saving time is in use */
+    if (pTimeZoneInformation->DynamicDaylightTimeDisabled)
+        return TIME_ZONE_ID_UNKNOWN;
+
     return Result;
 }
 
