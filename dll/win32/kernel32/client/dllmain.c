@@ -198,7 +198,6 @@ DllMain(HANDLE hDll,
 
             /* Initialize the DLL critical section */
             RtlInitializeCriticalSection(&BaseDllDirectoryLock);
-            RtlInitializeCriticalSection(&BasepInheritanceLock);
 
             /* Initialize the National Language Support routines */
             if (!NlsInit())

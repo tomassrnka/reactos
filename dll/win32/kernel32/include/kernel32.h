@@ -136,7 +136,6 @@ extern BOOL bIsFileApiAnsi;
 extern HMODULE hCurrentModule;
 
 extern RTL_CRITICAL_SECTION BaseDllDirectoryLock;
-extern RTL_CRITICAL_SECTION BasepInheritanceLock;
 
 extern UNICODE_STRING BaseDllDirectory;
 extern UNICODE_STRING BaseDefaultPath;
