@@ -4283,6 +4283,13 @@ MmMapViewOfSection(
 
     MmLockAddressSpace(AddressSpace);
 
+    /* Address space cleanup has run: nothing may be mapped any more */
+    if (Process->VmDeleted)
+    {
+        Status = STATUS_PROCESS_IS_TERMINATING;
+        goto Exit;
+    }
+
     if (Section->u.Flags.Image)
     {
         ULONG i;
