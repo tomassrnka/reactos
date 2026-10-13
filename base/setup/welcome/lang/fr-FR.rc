@@ -32,7 +32,7 @@ END
 /* Topic descriptions */
 STRINGTABLE
 BEGIN
-    IDS_TOPIC_DESC0 "Crée une nouvelle installation de AjarOS sur votre ordinateur ou met à jour votre installation actuelle."
+    IDS_TOPIC_DESC0 "Crée une nouvelle installation d'AjarOS sur votre ordinateur ou met à jour votre installation actuelle."
     IDS_TOPIC_DESC1 "Explore le CD."
     IDS_TOPIC_DESC2 "Cliquez pour quitter l'installation."
 END

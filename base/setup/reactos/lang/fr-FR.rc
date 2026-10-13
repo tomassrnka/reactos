@@ -6,7 +6,7 @@ IDD_STARTPAGE DIALOGEX 0, 0, 317, 193
 STYLE DS_SHELLFONT | WS_CHILD
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT "Bienvenue dans l'Assistant Installation de AjarOS", IDC_STARTTITLE, 115, 8, 195, 24
+    LTEXT "Bienvenue dans l'Assistant Installation d'AjarOS", IDC_STARTTITLE, 115, 8, 195, 24
     LTEXT "Cet assistant installe ou met à niveau AjarOS sur votre ordinateur, \
 et prépare la seconde étape d'installation.", IDC_STATIC, 115, 40, 195, 27
 ////
@@ -27,15 +27,15 @@ FONT 8, "MS Shell Dlg"
 BEGIN
     AUTORADIOBUTTON "&Installer AjarOS", IDC_INSTALL, 7, 20, 277, 10, WS_GROUP
     AUTORADIOBUTTON "&Mettre à niveau ou réparer AjarOS", IDC_UPDATE, 7, 80, 277, 10
-    LTEXT "Installe une nouvelle copie de AjarOS. Cette option ne conservera pas vos données, paramètres et programmes. Vous pouvez effectuer des modifications sur les disques et les partitions.", IDC_INSTALLTEXT, 19, 36, 279, 27
-    LTEXT "Met à niveau ou répare une copie existante de AjarOS. Cette option conserve vos données, paramètres et programmes. Cette option est seulement disponible si AjarOS est déjà installé sur cet ordinateur.", IDC_UPDATETEXT, 19, 96, 279, 27
+    LTEXT "Installe une nouvelle copie d'AjarOS. Cette option ne conservera pas vos données, paramètres et programmes. Vous pouvez effectuer des modifications sur les disques et les partitions.", IDC_INSTALLTEXT, 19, 36, 279, 27
+    LTEXT "Met à niveau ou répare une copie existante d'AjarOS. Cette option conserve vos données, paramètres et programmes. Cette option est seulement disponible si AjarOS est déjà installé sur cet ordinateur.", IDC_UPDATETEXT, 19, 96, 279, 27
 END
 
 IDD_UPDATEREPAIRPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | WS_CHILD
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT       "L'installateur peut mettre à niveau les installations disponibles de AjarOS listées ci-dessous, ou, si une installation de AjarOS est endommagée, l'installateur peut essayer de la réparer.", IDC_STATIC, 6, 4, 303, 26
+    LTEXT       "L'installateur peut mettre à niveau les installations disponibles d'AjarOS listées ci-dessous, ou, si une installation d'AjarOS est endommagée, l'installateur peut essayer de la réparer.", IDC_STATIC, 6, 4, 303, 26
     CONTROL     "", IDC_NTOSLIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP, 6, 30, 303, 90
     PUSHBUTTON  "&Ne pas mettre à jour", IDC_SKIPUPGRADE, 230, 128, 80, 14
     LTEXT       "Appuyer sur Suivant pour mettre à niveau l'installation sélectionnée, ou sur 'Ne pas mettre à jour' pour effectuer une nouvelle installation.", IDC_STATIC, 7, 124, 222, 16
@@ -132,7 +132,7 @@ BEGIN
     EDITTEXT IDC_DESTDRIVE, 95, 77, 210, 12, ES_READONLY | ES_AUTOHSCROLL | NOT WS_BORDER | NOT WS_TABSTOP
     LTEXT "Dossier de destination :", IDC_STATIC, 18, 89, 74, 11
     EDITTEXT IDC_PATH, 95, 89, 210, 12, ES_READONLY | ES_AUTOHSCROLL | NOT WS_BORDER | NOT WS_TABSTOP
-    AUTOCHECKBOX "Je confirme que tous les paramètres sont corrects. Je reconnais aussi que AjarOS est un logiciel de qualité Alpha et peut endommager mon ordinateur ou corrompre mes données.",
+    AUTOCHECKBOX "Je confirme que tous les paramètres sont corrects. Je reconnais aussi qu'AjarOS est un logiciel de qualité Alpha et peut endommager mon ordinateur ou corrompre mes données.",
         IDC_CONFIRM_INSTALL, 7, 100, 309, 24, BS_MULTILINE | WS_GROUP | WS_TABSTOP
     LTEXT "Veuillez confirmer que tous les paramètres d'installation sont corrects,\npuis appuyer sur Installer pour démarrer le processus d'installation.", IDC_STATIC, 7, 124, 303, 18
 END
@@ -151,7 +151,7 @@ STYLE DS_SHELLFONT | WS_CHILD
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT "Redémarrage de votre ordinateur", IDC_FINISHTITLE, 115, 8, 195, 24
-    LTEXT "La première étape d'installation de AjarOS a été complétée avec succès.", IDC_STATIC, 115, 40, 195, 24
+    LTEXT "La première étape d'installation d'AjarOS a été complétée avec succès.", IDC_STATIC, 115, 40, 195, 24
     // The following text can be replaced by IDS_FINISH_NO_REBOOT at runtime;
     // please ensure it can hold in the text control!
     LTEXT "Le programme d'installation va maintenant redémarrer votre ordinateur pour continuer avec la seconde étape d'installation.\n\nVotre ordinateur va redémarrer automatiquement dans 15 secondes ou si vous cliquez sur Redémarrer.", IDC_FINISHTEXT, 115, 70, 195, 64
@@ -162,8 +162,8 @@ IDD_ABORTPAGE DIALOGEX 0, 0, 317, 193
 STYLE DS_SHELLFONT | WS_CHILD
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT "L'Assistant Installation de AjarOS s'est terminé prématurément", IDC_FINISHTITLE, 115, 8, 195, 24
-    LTEXT "La première étape d'installation de AjarOS s'est terminée prématurément à cause d'une erreur ou parce que vous l'avez annulée.\n\nVous pourrez exécuter le programme d'installation ultérieurement pour installer ou mettre à jour AjarOS.", IDC_STATIC, 115, 40, 195, 56
+    LTEXT "L'Assistant Installation d'AjarOS s'est terminé prématurément", IDC_FINISHTITLE, 115, 8, 195, 24
+    LTEXT "La première étape d'installation d'AjarOS s'est terminée prématurément à cause d'une erreur ou parce que vous l'avez annulée.\n\nVous pourrez exécuter le programme d'installation ultérieurement pour installer ou mettre à jour AjarOS.", IDC_STATIC, 115, 40, 195, 56
     // The following text can be replaced by IDS_ABORT_NO_REBOOT at runtime;
     // please ensure it can hold in the text control!
     LTEXT "Votre ordinateur va redémarrer automatiquement dans 15 secondes ou si vous cliquez sur Redémarrer.", IDC_FINISHTEXT, 115, 102, 195, 32
@@ -174,11 +174,11 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_CAPTION "Installation de AjarOS"
+    IDS_CAPTION "Installation d'AjarOS"
     IDS_TYPETITLE "Type d'installation"
-    IDS_TYPESUBTITLE "Vous pouvez configurer une nouvelle installation de AjarOS, ou bien mettre à niveau ou réparer une installation existante."
+    IDS_TYPESUBTITLE "Vous pouvez configurer une nouvelle installation d'AjarOS, ou bien mettre à niveau ou réparer une installation existante."
     IDS_UPDATETITLE "Mettre à niveau ou réparer AjarOS"
-    IDS_UPDATESUBTITLE "Choisissez quelle installation existante de AjarOS vous souhaitez mettre à niveau ou réparer."
+    IDS_UPDATESUBTITLE "Choisissez quelle installation existante d'AjarOS vous souhaitez mettre à niveau ou réparer."
     IDS_DEVICETITLE "Configurer les périphériques de base"
     IDS_DEVICESUBTITLE "Configurez l'affichage et le clavier."
     IDS_DRIVETITLE "Configurer la partition d'installation et le dossier système"
@@ -273,7 +273,7 @@ alphanumériques (a-z, A-Z, 0-9), et\n . \\ - _\n\
 Les caractères d'espacement ne sont pas autorisés."
 
     IDS_ERROR_DIRECTORY_NAME_TITLE "Chemin d'installation invalide"
-    IDS_ERROR_DIRECTORY_NAME "Le chemin d'installation de AjarOS doit être au format DOS de noms 8.3, \
+    IDS_ERROR_DIRECTORY_NAME "Le chemin d'installation d'AjarOS doit être au format DOS de noms 8.3, \
 et contenir seulement des lettres, chiffres, tirets et points. Les caractères d'espacement ne sont pas autorisés."
 
     IDS_ERROR_CREATE_PARTITION_TITLE "Créer une partition"
@@ -285,7 +285,7 @@ et contenir seulement des lettres, chiffres, tirets et points. Les caractères d
 
     IDS_ERROR_WRITE_PTABLE "Le programme d'installation a échoué à écrire les tables de partition."
 
-    IDS_ERROR_SYSTEM_PARTITION "Le programme d'installation de AjarOS ne peut pas trouver une partition système supportée\n\
+    IDS_ERROR_SYSTEM_PARTITION "Le programme d'installation d'AjarOS ne peut pas trouver une partition système supportée\n\
 sur votre système, ou ne peut pas en créer une nouvelle. Sans une telle partition,\n\
 le programme d'installation ne peut pas installer AjarOS.\
 \nCliquez sur OK pour revenir à la liste de sélection des partitions."

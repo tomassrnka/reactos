@@ -90,7 +90,7 @@ BEGIN
     END
     POPUP "&Aide", FCIDM_MENU_HELP
     BEGIN
-        MENUITEM "À &propos de AjarOS", IDM_HELP_ABOUT
+        MENUITEM "À &propos d'AjarOS", IDM_HELP_ABOUT
     END
 END
 

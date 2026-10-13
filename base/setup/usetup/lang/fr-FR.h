@@ -8,14 +8,14 @@ static MUI_ENTRY frFRSetupInitPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         0,
         20,
-        "Veuillez patienter pendant que le programme d'installation de AjarOS",
+        "Veuillez patienter pendant que le programme d'installation d'AjarOS",
         TEXT_STYLE_NORMAL | TEXT_ALIGN_CENTER,
         TEXT_ID_STATIC
     },
@@ -46,7 +46,7 @@ static MUI_ENTRY frFRLanguagePageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -98,14 +98,14 @@ static MUI_ENTRY frFRWelcomePageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Bienvenue dans l'installation de AjarOS",
+        "Bienvenue dans l'installation d'AjarOS",
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
@@ -185,14 +185,14 @@ static MUI_ENTRY frFRIntroPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Statut de version de AjarOS",
+        "Statut de version d'AjarOS",
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
@@ -234,7 +234,7 @@ static MUI_ENTRY frFRIntroPageEntries[] =
     {
         8,
         19,
-        "\x07  Appuyez sur ENTR\220E pour continuer l'installation de AjarOS.",
+        "\x07  Appuyez sur ENTR\220E pour continuer l'installation d'AjarOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -265,7 +265,7 @@ static MUI_ENTRY frFRLicensePageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -422,7 +422,7 @@ static MUI_ENTRY frFRDevicePageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -529,14 +529,14 @@ static MUI_ENTRY frFRRepairPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "L'installation de AjarOS est en phase de d\202veloppement.",
+        "L'installation d'AjarOS est en phase de d\202veloppement.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -609,21 +609,21 @@ static MUI_ENTRY frFRUpgradePageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Le programme d'installation de AjarOS peut mettre \205 jour l'une des",
+        "Le programme d'installation d'AjarOS peut mettre \205 jour l'une des",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         9,
-        "installations de AjarOS list\202es ci-dessous, ou bien, si l'une d'elles",
+        "installations d'AjarOS list\202es ci-dessous, ou bien, si l'une d'elles",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -689,7 +689,7 @@ static MUI_ENTRY frFRComputerPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -748,7 +748,7 @@ static MUI_ENTRY frFRFlushPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -793,7 +793,7 @@ static MUI_ENTRY frFRQuitPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -845,7 +845,7 @@ static MUI_ENTRY frFRDisplayPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -904,14 +904,14 @@ static MUI_ENTRY frFRSuccessPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         10,
         6,
-        "Les composants standards de AjarOS ont \202t\202 install\202s avec succ\212s.",
+        "Les composants standards d'AjarOS ont \202t\202 install\202s avec succ\212s.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -956,7 +956,7 @@ static MUI_ENTRY frFRSelectPartitionEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1029,7 +1029,7 @@ static MUI_ENTRY frFRChangeSystemPartition[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1127,7 +1127,7 @@ static MUI_ENTRY frFRChangeSystemPartition[] =
     {
         6,
         35,
-        "d'origine apr\212s la fin de l'installation de AjarOS.",
+        "d'origine apr\212s la fin de l'installation d'AjarOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1151,7 +1151,7 @@ static MUI_ENTRY frFRConfirmDeleteSystemPartitionEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1221,7 +1221,7 @@ static MUI_ENTRY frFRConfirmDeleteSystemPartitionEntries[] =
     {
         6,
         19,
-        "finissiez l'installation de AjarOS.",
+        "finissiez l'installation d'AjarOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1273,7 +1273,7 @@ static MUI_ENTRY frFRFormatPartitionEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1311,7 +1311,7 @@ static MUI_ENTRY frFRCheckFSEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1342,21 +1342,21 @@ static MUI_ENTRY frFRInstallDirectoryEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Setup installe les fichiers de AjarOS sur la partition s\202lectionn\202e.",
+        "Setup installe les fichiers d'AjarOS sur la partition s\202lectionn\202e.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         9,
-        "Choisissez un r\202pertoire o\227 vous voulez que AjarOS soit install\202 :",
+        "Choisissez un r\202pertoire o\227 vous voulez qu'AjarOS soit install\202 :",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1401,21 +1401,21 @@ static MUI_ENTRY frFRFileCopyEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         11,
         12,
-        "Patientez pendant que AjarOS Setup copie les fichiers",
+        "Patientez pendant qu'AjarOS Setup copie les fichiers",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         15,
         13,
-        "dans le r\202pertoire d'installation de AjarOS.",
+        "dans le r\202pertoire d'installation d'AjarOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1446,7 +1446,7 @@ static MUI_ENTRY frFRBootLoaderSelectPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1536,7 +1536,7 @@ static MUI_ENTRY frFRBootLoaderRemovableDiskPageEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1582,7 +1582,7 @@ static MUI_ENTRY frFRKeyboardSettingsEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1641,7 +1641,7 @@ static MUI_ENTRY frFRLayoutSettingsEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1701,14 +1701,14 @@ static MUI_ENTRY frFRPrepareCopyEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
     {
         6,
         8,
-        "Setup pr\202pare votre ordinateur pour copier les fichiers de AjarOS.",
+        "Setup pr\202pare votre ordinateur pour copier les fichiers d'AjarOS.",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
@@ -1733,7 +1733,7 @@ static MUI_ENTRY frFRSelectFSEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1781,7 +1781,7 @@ static MUI_ENTRY frFRDeletePartitionEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },
@@ -1833,7 +1833,7 @@ static MUI_ENTRY frFRRegistryEntries[] =
     {
         4,
         3,
-        " Installation de AjarOS " BRAND_VERSION_STR " ",
+        " Installation d'AjarOS " BRAND_VERSION_STR " ",
         TEXT_STYLE_UNDERLINE,
         TEXT_ID_STATIC
     },

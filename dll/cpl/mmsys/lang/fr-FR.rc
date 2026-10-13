@@ -27,7 +27,7 @@ STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
 CAPTION "Sons"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT "Un schéma sons est un ensemble de sons appliqués aux événements de AjarOS et aux programmes. Vous pouvez sélectionner un schéma existant ou en enregistrer un que vous avez modifié.", -1, 8, 7, 230, 40
+    LTEXT "Un schéma sons est un ensemble de sons appliqués aux événements d'AjarOS et aux programmes. Vous pouvez sélectionner un schéma existant ou en enregistrer un que vous avez modifié.", -1, 8, 7, 230, 40
     LTEXT "S&chéma sons :", -1, 8, 42, 150, 17
     COMBOBOX IDC_SOUND_SCHEME, 8, 53, 230, 46, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     PUSHBUTTON "&Enregistrer sous...", IDC_SAVEAS_BTN, 120, 70, 65, 15
