@@ -10,8 +10,10 @@
 /*
  * The system charge is shared with every other process, so system checks
  * accept other activity: [expected - 1 MB, expected + max(1 MB, |expected| / 8)],
- * measured up to three times. Process checks allow for page tables and
- * process overhead: expected +- (|expected| / 512 + 8 pages).
+ * measured up to three times. They are strict only on ReactOS, where the
+ * test system is quiet; on Windows a miss is printed. Process checks allow
+ * for page tables and process overhead, expected +- (|expected| / 512 + 8
+ * pages), and are strict everywhere.
  */
 
 static SIZE_T PageSize = 4096;
@@ -109,8 +111,11 @@ CheckSystemDelta_(
             break;
         Sleep(200);
     }
-    ok_(__FILE__, Line)(SystemDeltaFits(Delta, Expected),
-                        "%s: system commit moved by %Id pages, expected %Id\n", Text, Delta, Expected);
+    if (is_reactos())
+        ok_(__FILE__, Line)(SystemDeltaFits(Delta, Expected),
+                            "%s: system commit moved by %Id pages, expected %Id\n", Text, Delta, Expected);
+    else if (!SystemDeltaFits(Delta, Expected))
+        trace_(__FILE__, Line)("%s: system commit moved by %Id pages, expected %Id\n", Text, Delta, Expected);
 }
 
 #define CheckProcessDelta(Process, Before, Expected, Text) CheckProcessDelta_(__LINE__, Process, Before, Expected, Text)
@@ -436,10 +441,7 @@ TestHugeCommit(VOID)
     }
 
     Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (is_reactos())
-        ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
-    else
-        trace("1 TB commit: 0x%lx\n", Status);
+    ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
     if (NT_SUCCESS(Status))
     {
         Size = 0;
@@ -455,6 +457,7 @@ TestReporting(VOID)
     MEMORYSTATUSEX MemoryStatus = { sizeof(MemoryStatus) };
     ULONG_PTR CommitLimit, LimitAfter, Committed, PagingFile;
     QUOTA_LIMITS QuotaLimits;
+    BOOL InJob = FALSE;
     NTSTATUS Status;
 
     Committed = QuerySystemCommit(&CommitLimit);
@@ -472,8 +475,10 @@ TestReporting(VOID)
     QuerySystemCommit(&LimitAfter);
     Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessQuotaLimits, &QuotaLimits, sizeof(QuotaLimits), NULL);
     ok_ntstatus(Status, STATUS_SUCCESS);
-    if (!NT_SUCCESS(Status) || (QuotaLimits.PagefileLimit != (SIZE_T)-1) || (LimitAfter != CommitLimit))
-        skip("process commit quota or a paging file growth in between\n");
+    if (!IsProcessInJob(GetCurrentProcess(), NULL, &InJob))
+        InJob = TRUE;
+    if (!NT_SUCCESS(Status) || (QuotaLimits.PagefileLimit != (SIZE_T)-1) || InJob || (LimitAfter != CommitLimit))
+        skip("process commit quota, a job, or a paging file growth in between\n");
     else
         ok(MemoryStatus.ullTotalPageFile == (ULONGLONG)CommitLimit * PageSize,
            "ullTotalPageFile %I64u, commit limit %Iu pages\n", MemoryStatus.ullTotalPageFile, CommitLimit);
@@ -584,7 +589,7 @@ TestGrowthAndExhaustion(VOID)
 START_TEST(CommitCharge)
 {
     SYSTEM_BASIC_INFORMATION BasicInfo;
-    ULONG_PTR Baseline, Committed;
+    ULONG_PTR Baseline, Committed, PagingFile;
     NTSTATUS Status;
     ULONG Round;
 
@@ -619,15 +624,20 @@ START_TEST(CommitCharge)
         ok((LONG_PTR)(Committed - Baseline) < MB_PAGES(2), "system commit grew by %Id pages over three rounds\n",
            (LONG_PTR)(Committed - Baseline));
 
-    TestHugeCommit();
-
     if (is_reactos())
     {
+        TestHugeCommit();
         TestOverCommitFails();
 
-        /* The fixture's paging file starts at RAM size; once grown (an earlier run) it cannot show growth */
-        if (QueryPagingFilePages() > PhysicalPages + MB_PAGES(16))
-            skip("paging files grew already: %Iu pages\n", QueryPagingFilePages());
+        /*
+         * The growth part needs the test system's fixture: a system-managed
+         * paging file that starts at RAM size (RAM of 1 GB or more) and has not
+         * grown yet. Anything else (no paging file, a fixed or grown one) skips.
+         */
+        PagingFile = QueryPagingFilePages();
+        if ((PagingFile + MB_PAGES(16) < PhysicalPages) || (PagingFile > PhysicalPages + MB_PAGES(16)) ||
+            (PhysicalPages < MB_PAGES(1024)))
+            skip("not the growth fixture: paging files %Iu pages, physical %lu pages\n", PagingFile, PhysicalPages);
         else
             TestGrowthAndExhaustion();
     }
