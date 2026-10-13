@@ -721,6 +721,7 @@ static NTSTATUS create_snapshot(device_extension* Vcb, PFILE_OBJECT FileObject, 
         ERR("do_create_snapshot returned %08lx, dropping into readonly mode\n",
             Status);
         Vcb->readonly = true;
+        latch_commit_error(Vcb, Status);
         FsRtlNotifyVolumeEvent(Vcb->root_file, FSRTL_VOLUME_FORCED_CLOSED);
     }
 
@@ -1142,6 +1143,7 @@ end:
         ERR("create_subvo returned %08lx, dropping into readonly mode\n",
             Status);
         Vcb->readonly = true;
+        latch_commit_error(Vcb, Status);
         FsRtlNotifyVolumeEvent(Vcb->root_file, FSRTL_VOLUME_FORCED_CLOSED);
     }
 

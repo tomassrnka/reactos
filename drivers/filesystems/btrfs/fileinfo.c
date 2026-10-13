@@ -1495,6 +1495,7 @@ end:
             Status);
 
         fileref->fcb->Vcb->readonly = true;
+        latch_commit_error(fileref->fcb->Vcb, Status);
         FsRtlNotifyVolumeEvent(fileref->fcb->Vcb->root_file,
                                FSRTL_VOLUME_FORCED_CLOSED);
     }

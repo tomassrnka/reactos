@@ -7164,6 +7164,8 @@ static NTSTATUS flush_disk_caches(device_extension* Vcb) {
                         IoFreeIrp(context.stripes[i].Irp);
                 }
 
+                ExFreePool(context.stripes);
+
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
@@ -8104,6 +8106,7 @@ NTSTATUS do_write(device_extension* Vcb, PIRP Irp) {
     if (!NT_SUCCESS(Status)) {
         ERR("do_write2 returned %08lx, dropping into readonly mode\n", Status);
         Vcb->readonly = true;
+        latch_commit_error(Vcb, Status);
         FsRtlNotifyVolumeEvent(Vcb->root_file, FSRTL_VOLUME_FORCED_CLOSED);
     }
 
