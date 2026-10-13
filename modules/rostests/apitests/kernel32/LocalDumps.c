@@ -15,12 +15,26 @@
 #define WER_KEY        L"SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting"
 #define WINDOWS_KEY    L"SYSTEM\\CurrentControlSet\\Control\\Windows"
 
+#ifndef STATUS_FAIL_FAST_EXCEPTION
+#define STATUS_FAIL_FAST_EXCEPTION ((NTSTATUS)0xC0000602L)
+#endif
+#ifndef FAIL_FAST_GENERATE_EXCEPTION_ADDRESS
+#define FAIL_FAST_GENERATE_EXCEPTION_ADDRESS 0x1
+#endif
+#ifndef FAIL_FAST_NO_HARD_ERROR_DLG
+#define FAIL_FAST_NO_HARD_ERROR_DLG 0x2
+#endif
+
+#define FAIL_FAST_CODE 0xE0F0F001
+
 /* What Windows 7 writes for DumpType 1 (and when DumpType is absent) */
 #define MINI_DUMP_FLAGS (MiniDumpWithDataSegs | MiniDumpWithUnloadedModules | MiniDumpWithProcessThreadData)
 
 typedef BOOL (WINAPI *PFN_MINIDUMPREADDUMPSTREAM)(PVOID, ULONG, PMINIDUMP_DIRECTORY *, PVOID *, ULONG *);
+typedef VOID (WINAPI *PFN_RAISEFAILFASTEXCEPTION)(PEXCEPTION_RECORD, PCONTEXT, DWORD);
 
 static PFN_MINIDUMPREADDUMPSTREAM pMiniDumpReadDumpStream;
+static PFN_RAISEFAILFASTEXCEPTION pRaiseFailFastException;
 static WCHAR DumpFolder[MAX_PATH];
 static BOOL IsReactOS;
 static volatile LONG *NullPointer;
@@ -64,8 +78,56 @@ static DWORD WINAPI CrashThread(PVOID Parameter)
     return 0;
 }
 
+static DWORD WINAPI IdleThread(PVOID Parameter)
+{
+    Sleep(INFINITE);
+    return 0;
+}
+
+/* Raised from the program, so the address of the call is in it */
+static DECLSPEC_NOINLINE VOID RaiseFailFast(PCSTR Mode)
+{
+    EXCEPTION_RECORD Record;
+    CONTEXT Context;
+    HANDLE Thread;
+
+    if (!strcmp(Mode, "context"))
+    {
+        /* The context of a thread that never runs, pointing at IdleThread */
+        Thread = CreateThread(NULL, 0, IdleThread, NULL, CREATE_SUSPENDED, NULL);
+        RtlZeroMemory(&Context, sizeof(Context));
+        Context.ContextFlags = CONTEXT_FULL;
+        if (!Thread || !GetThreadContext(Thread, &Context))
+            ExitProcess(0x5F0);
+#if defined(_M_AMD64)
+        Context.Rip = (ULONG_PTR)IdleThread;
+#elif defined(_M_IX86)
+        Context.Eip = (ULONG_PTR)IdleThread;
+#endif
+        pRaiseFailFastException(NULL, &Context, 0);
+        return;
+    }
+    if (strcmp(Mode, "record"))
+    {
+        pRaiseFailFastException(NULL, NULL, strcmp(Mode, "nodlg") ? 0 : FAIL_FAST_NO_HARD_ERROR_DLG);
+        return;
+    }
+    RtlZeroMemory(&Record, sizeof(Record));
+    Record.ExceptionCode = FAIL_FAST_CODE;
+    Record.NumberParameters = 2;
+    Record.ExceptionInformation[0] = 0x11;
+    Record.ExceptionInformation[1] = 0x22;
+    pRaiseFailFastException(&Record, NULL, FAIL_FAST_GENERATE_EXCEPTION_ADDRESS);
+}
+
 static VOID RunChild(PCSTR Mode)
 {
+    /* "ff" + a mode: the same setup, then a fail fast exception instead of the fault */
+    BOOL FailFast = !strncmp(Mode, "ff", 2);
+
+    if (FailFast)
+        Mode += 2;
+
     /* The test framework turns off the fault error box, which also turns off the report */
     SetErrorMode(0);
 
@@ -82,6 +144,11 @@ static VOID RunChild(PCSTR Mode)
     else if (!strcmp(Mode, "filtfault"))
         SetUnhandledExceptionFilter(FilterFault);
 
+    if (FailFast)
+    {
+        RaiseFailFast(Mode);
+        ExitProcess(0x5EF);
+    }
     if (!strcmp(Mode, "so"))
         ExitProcess(Recurse(0));
     if (!strcmp(Mode, "raise"))
@@ -249,7 +316,37 @@ typedef struct _EXPECTED_DUMP
     ULONG_PTR Parameter1;
     ULONG MinThreads;
     BOOL FaultInProgram;
+    BOOL CheckFlags;
+    DWORD Flags;
+    BOOL SuppliedContext;
 } EXPECTED_DUMP;
+
+static BOOL IsInModule(PMINIDUMP_MODULE_LIST Modules, ULONG First, ULONG Count, ULONG64 Address)
+{
+    ULONG i;
+
+    for (i = First; i < Modules->NumberOfModules && i < First + Count; i++)
+    {
+        if (Address >= Modules->Modules[i].BaseOfImage &&
+            Address - Modules->Modules[i].BaseOfImage < Modules->Modules[i].SizeOfImage)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static ULONG FindModule(PMINIDUMP_MODULE_LIST Modules, ULONG64 Address)
+{
+    ULONG i;
+
+    for (i = 0; i < Modules->NumberOfModules; i++)
+    {
+        if (IsInModule(Modules, i, 1, Address))
+            return i;
+    }
+    return MAXULONG;
+}
 
 static VOID CheckDump(PCWSTR Path, const EXPECTED_DUMP *Expected, int Line)
 {
@@ -290,6 +387,11 @@ static VOID CheckDump(PCWSTR Path, const EXPECTED_DUMP *Expected, int Line)
     {
         ok_(__FILE__, Line)(Exception->ExceptionRecord.ExceptionCode == Expected->Code,
                             "Exception code 0x%lx\n", Exception->ExceptionRecord.ExceptionCode);
+        if (Expected->CheckFlags)
+        {
+            ok_(__FILE__, Line)(Exception->ExceptionRecord.ExceptionFlags == Expected->Flags,
+                                "Exception flags 0x%lx\n", Exception->ExceptionRecord.ExceptionFlags);
+        }
         if (Expected->CheckParameter)
         {
             ok_(__FILE__, Line)(Exception->ExceptionRecord.NumberParameters >= 2 &&
@@ -322,6 +424,60 @@ static VOID CheckDump(PCWSTR Path, const EXPECTED_DUMP *Expected, int Line)
                             "First module %ls\n", Name ? Name->Buffer : L"(none)");
     }
 
+    if (Modules && Exception && Expected->CheckFlags)
+    {
+        PCONTEXT Context = (PCONTEXT)(Base + Exception->ThreadContext.Rva);
+        ULONG64 Address = Exception->ExceptionRecord.ExceptionAddress;
+        /* The same in the child: no system DLL moves between processes */
+        ULONG Raiser = FindModule(Modules, (ULONG_PTR)pRaiseFailFastException);
+        BOOL ControlOnly = FALSE;
+
+#if defined(_M_IX86)
+        /* An OrielOS kernel32 built with MSVC does not know the caller's EBP and registers */
+        ControlOnly = IsReactOS && !Expected->SuppliedContext &&
+                      (Context->ContextFlags & CONTEXT_FULL) == CONTEXT_CONTROL && !Context->Ebp;
+#endif
+
+        /* The first module is the program */
+        if (Expected->FaultInProgram)
+        {
+            ok_(__FILE__, Line)(IsInModule(Modules, 0, 1, Address),
+                                "Exception address 0x%I64x not in the program\n", Address);
+        }
+        else
+        {
+            ok_(__FILE__, Line)(Raiser != MAXULONG && IsInModule(Modules, Raiser, 1, Address),
+                                "Exception address 0x%I64x not in the module of RaiseFailFastException\n", Address);
+        }
+        ok_(__FILE__, Line)((Context->ContextFlags & CONTEXT_FULL) == CONTEXT_FULL || ControlOnly,
+                            "Context flags 0x%lx\n", Context->ContextFlags);
+#if defined(_M_AMD64)
+        if (Expected->SuppliedContext)
+        {
+            /* The program is mapped at the same address in the child */
+            ok_(__FILE__, Line)(Context->Rip == (ULONG_PTR)IdleThread, "Context rip 0x%I64x\n", Context->Rip);
+        }
+        else
+        {
+            /* Captured inside RaiseFailFastException */
+            ok_(__FILE__, Line)(Raiser != MAXULONG && IsInModule(Modules, Raiser, 1, Context->Rip) && Context->Rsp,
+                                "Context rip 0x%I64x, rsp 0x%I64x\n", Context->Rip, Context->Rsp);
+        }
+#elif defined(_M_IX86)
+        if (Expected->SuppliedContext)
+        {
+            /* The program is mapped at the same address in the child */
+            ok_(__FILE__, Line)(Context->Eip == (ULONG_PTR)IdleThread, "Context eip 0x%lx\n", Context->Eip);
+        }
+        else
+        {
+            /* The caller's frame, as if RaiseFailFastException had returned */
+            ok_(__FILE__, Line)(Context->Eip == Address && Context->Esp && (Context->Ebp || ControlOnly),
+                                "Context eip 0x%lx, esp 0x%lx, ebp 0x%lx\n", Context->Eip, Context->Esp, Context->Ebp);
+        }
+#endif
+    }
+
     UnmapViewOfFile(Base);
 Close:
     if (hMapping)
@@ -330,9 +486,9 @@ Close:
 }
 
 /* OrielOS also writes a text report next to the dump */
-static VOID CheckReport(PCWSTR Path, DWORD Code, int Line)
+static VOID CheckReport(PCWSTR Path, const EXPECTED_DUMP *Expected, int Line)
 {
-    CHAR Buffer[4096], Expected[64];
+    CHAR Buffer[4096], Text[64];
     DWORD Read = 0;
     HANDLE hFile;
 
@@ -344,8 +500,13 @@ static VOID CheckReport(PCWSTR Path, DWORD Code, int Line)
     CloseHandle(hFile);
     Buffer[Read] = ANSI_NULL;
 
-    StringCbPrintfA(Expected, sizeof(Expected), "Exception number: 0x%08lx", Code);
-    ok_(__FILE__, Line)(strstr(Buffer, Expected) != NULL, "'%s' not in the report\n", Expected);
+    StringCbPrintfA(Text, sizeof(Text), "Exception number: 0x%08lx", Expected->Code);
+    ok_(__FILE__, Line)(strstr(Buffer, Text) != NULL, "'%s' not in the report\n", Text);
+    if (Expected->CheckFlags)
+    {
+        StringCbPrintfA(Text, sizeof(Text), "Exception flags: 0x%08lx", Expected->Flags);
+        ok_(__FILE__, Line)(strstr(Buffer, Text) != NULL, "'%s' not in the report\n", Text);
+    }
     ok_(__FILE__, Line)(strstr(Buffer, "kernel32_apitest.exe") != NULL, "Program name not in the report\n");
     ok_(__FILE__, Line)(strstr(Buffer, "Exception module: ") != NULL, "No faulting module in the report\n");
 }
@@ -533,7 +694,7 @@ static VOID TestCrash_(PCSTR Mode, DWORD ExitCode, const EXPECTED_DUMP *Expected
     if (FileExists(DumpPath))
         CheckDump(DumpPath, Expected, Line);
     if (IsReactOS)
-        CheckReport(ReportPath, Expected->Code, Line);
+        CheckReport(ReportPath, Expected, Line);
 
     /* Elsewhere remove only what this child left */
     if (Folder != DumpFolder)
@@ -550,6 +711,11 @@ static const EXPECTED_DUMP ThreadAccessViolation = { STATUS_ACCESS_VIOLATION, TR
 static const EXPECTED_DUMP StackOverflow = { STATUS_STACK_OVERFLOW, FALSE, 0, 1, TRUE };
 /* Raised in kernel32 (KernelBase on Windows 7) */
 static const EXPECTED_DUMP Raised = { 0xE0000001, FALSE, 0, 1, FALSE };
+/* At the address of the call, never continuable */
+static EXPECTED_DUMP FailFast = { STATUS_FAIL_FAST_EXCEPTION, FALSE, 0, 1, TRUE, TRUE, EXCEPTION_NONCONTINUABLE };
+static EXPECTED_DUMP FailFastRecord = { FAIL_FAST_CODE, TRUE, 0x22, 1, TRUE, TRUE, EXCEPTION_NONCONTINUABLE };
+/* The context passed in is the one reported */
+static const EXPECTED_DUMP FailFastContext = { STATUS_FAIL_FAST_EXCEPTION, FALSE, 0, 2, TRUE, TRUE, EXCEPTION_NONCONTINUABLE, TRUE };
 
 /* With a write time DaysAgo days back, which FAT stores as exactly as NTFS */
 static VOID CreateDumpFile(PCWSTR Name, ULONG DaysAgo)
@@ -650,10 +816,12 @@ START_TEST(LocalDumps)
     HKEY hKey;
     LONG Error;
     DWORD OldErrorMode = 0, OldDontShowUI = 0;
-    BOOL HadErrorMode, HadDontShowUI, HadLocalDumps, IsWow64;
+    BOOL HadErrorMode, HadDontShowUI, HadLocalDumps, IsWow64 = FALSE;
     DWORD Disposition;
     HMODULE hDbgHelp;
 
+    pRaiseFailFastException = (PFN_RAISEFAILFASTEXCEPTION)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),
+                                                                         "RaiseFailFastException");
     Argc = winetest_get_mainargs(&Argv);
     if (Argc >= 3)
     {
@@ -734,6 +902,35 @@ START_TEST(LocalDumps)
     /* No report when the program asked for no fault error box */
     TestCrash("nogp", STATUS_ACCESS_VIOLATION, NULL);
     TestCrash("nogpthread", STATUS_ACCESS_VIOLATION, NULL);
+
+    /* A fail fast exception is reported the same way, but no filter runs */
+    if (pRaiseFailFastException)
+    {
+#if defined(_M_AMD64)
+        /* 64-bit Windows 8 and later report it inside RaiseFailFastException, unless given a context */
+        RTL_OSVERSIONINFOW Version = { sizeof(Version) };
+        if (!IsReactOS && NT_SUCCESS(RtlGetVersion(&Version)) &&
+            (Version.dwMajorVersion > 6 || (Version.dwMajorVersion == 6 && Version.dwMinorVersion >= 2)))
+        {
+            FailFast.FaultInProgram = FALSE;
+            FailFastRecord.FaultInProgram = FALSE;
+        }
+#endif
+        TestCrash("ff", STATUS_FAIL_FAST_EXCEPTION, &FailFast);
+        TestCrash("ffnodlg", STATUS_FAIL_FAST_EXCEPTION, &FailFast);
+        TestCrash("ffrecord", FAIL_FAST_CODE, &FailFastRecord);
+        TestCrash("ffcontext", STATUS_FAIL_FAST_EXCEPTION, &FailFastContext);
+        TestCrash("fffiltexec", STATUS_FAIL_FAST_EXCEPTION, &FailFast);
+        TestCrash("fffiltterm", STATUS_FAIL_FAST_EXCEPTION, &FailFast);
+        TestCrash("ffnogp", STATUS_FAIL_FAST_EXCEPTION, NULL);
+        /* Under WOW64, Windows reports it anyway */
+        if (!IsWow64)
+            TestCrash("ffnogpthread", STATUS_FAIL_FAST_EXCEPTION, NULL);
+    }
+    else
+    {
+        skip("RaiseFailFastException is not available\n");
+    }
 
     TestDumpCount();
     TestDefaultFolder();
