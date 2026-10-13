@@ -12,7 +12,6 @@
 #define NTOS_MODE_USER
 #include <ndk/pstypes.h> /* For SharedUserData */
 
-static TCHAR BugLink[] = _T("http://jira.reactos.org/");
 static TCHAR ReportAsWorkstationKey[] = _T("SYSTEM\\CurrentControlSet\\Control\\ReactOS\\Settings\\Version");
 
 
@@ -126,6 +125,8 @@ AdvancedPageProc(HWND hwndDlg,
     switch (uMsg)
     {
         case WM_INITDIALOG:
+            /* There is no error reporting service; the button only opened the upstream bug tracker */
+            EnableWindow(GetDlgItem(hwndDlg, IDC_ERRORREPORT), FALSE);
             break;
 
         case WM_COMMAND:
@@ -162,15 +163,6 @@ AdvancedPageProc(HWND hwndDlg,
                               MAKEINTRESOURCE(IDD_ENVIRONMENT_VARIABLES),
                               hwndDlg,
                               EnvironmentDlgProc);
-                    break;
-
-                case IDC_ERRORREPORT:
-                    ShellExecute(NULL,
-                                 _T("open"),
-                                 BugLink,
-                                 NULL,
-                                 NULL,
-                                 SW_SHOWNORMAL);
                     break;
             }
         }
