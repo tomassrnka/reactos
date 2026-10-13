@@ -137,6 +137,7 @@ extern void func_RtlQueryEnvironmentVariable(void);
 extern void func_RtlQueryEnvironmentVariable_U(void);
 extern void func_RtlQueryRegistryValues(void);
 extern void func_RtlQueryTimeZoneInformation(void);
+extern void func_RtlSetTimeZoneInformation(void);
 extern void func_RtlReAllocateHeap(void);
 extern void func_RtlRemovePrivileges(void);
 extern void func_RtlSRWLock(void);
@@ -292,6 +293,7 @@ const struct test winetest_testlist[] =
     { "RtlQueryEnvironmentVariable_U",  func_RtlQueryEnvironmentVariable_U },
     { "RtlQueryRegistryValues",         func_RtlQueryRegistryValues },
     { "RtlQueryTimeZoneInformation",    func_RtlQueryTimeZoneInformation },
+    { "RtlSetTimeZoneInformation",      func_RtlSetTimeZoneInformation },
     { "RtlReAllocateHeap",              func_RtlReAllocateHeap },
     { "RtlRemovePrivileges",            func_RtlRemovePrivileges },
     { "RtlSRWLock",                     func_RtlSRWLock },

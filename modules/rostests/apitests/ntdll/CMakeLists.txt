@@ -149,6 +149,7 @@ list(APPEND SOURCE
     RtlQueryEnvironmentVariable_U.c
     RtlQueryRegistryValues.c
     RtlQueryTimeZoneInfo.c
+    RtlSetTimeZoneInformation.c
     RtlReAllocateHeap.c
     RtlRemovePrivileges.c
     RtlSRWLock.c

@@ -42,8 +42,9 @@ typedef struct _TIMEZONE_ENTRY
     struct _TIMEZONE_ENTRY *Prev;
     struct _TIMEZONE_ENTRY *Next;
     WCHAR Description[128]; /* 'Display' */
-    WCHAR StandardName[32]; /* 'Std' */
-    WCHAR DaylightName[32]; /* 'Dlt' */
+    WCHAR StandardName[33]; /* 'Std' */
+    WCHAR DaylightName[33]; /* 'Dlt' */
+    WCHAR KeyName[128]; /* Key name under 'Time Zones' */
     REG_TZI_FORMAT TimezoneInfo; /* 'TZI' */
     ULONG Index;
 } TIMEZONE_ENTRY, *PTIMEZONE_ENTRY;
@@ -1679,6 +1680,7 @@ GetLargerTimeZoneEntry(PSETUPDATA SetupData, DWORD Index)
 static LONG
 RetrieveTimeZone(
     IN HKEY hZoneKey,
+    IN PCWSTR ZoneKeyName,
     IN PVOID Context)
 {
     LONG lError;
@@ -1713,6 +1715,10 @@ RetrieveTimeZone(
         HeapFree(GetProcessHeap(), 0, Entry);
         return lError;
     }
+
+    /* A name too long for TimeZoneKeyName stays empty and is never matched */
+    if (wcslen(ZoneKeyName) < _countof(Entry->KeyName))
+        StringCchCopyW(Entry->KeyName, _countof(Entry->KeyName), ZoneKeyName);
 
     if (SetupData->TimeZoneListHead == NULL &&
         SetupData->TimeZoneListTail == NULL)
@@ -1863,7 +1869,7 @@ ShowTimeZoneList(HWND hwnd, PSETUPDATA SetupData, DWORD dwEntryIndex)
 
 
 static VOID
-SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData)
+SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData, BOOL bAutoDaylight)
 {
     TIME_ZONE_INFORMATION TimeZoneInformation;
     PTIMEZONE_ENTRY Entry;
@@ -1886,10 +1892,20 @@ SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData)
         Entry = Entry->Next;
     }
 
-    wcscpy(TimeZoneInformation.StandardName,
-           Entry->StandardName);
-    wcscpy(TimeZoneInformation.DaylightName,
-           Entry->DaylightName);
+    if (Entry == NULL)
+        return;
+
+    /* Only a zone with DST can have its automatic adjustment turned off */
+    if (!HasDaylightSavingTime(Entry))
+        bAutoDaylight = TRUE;
+
+    /* Both fields hold 31 characters and the terminator */
+    StringCchCopyW(TimeZoneInformation.StandardName,
+                   _countof(TimeZoneInformation.StandardName),
+                   Entry->StandardName);
+    StringCchCopyW(TimeZoneInformation.DaylightName,
+                   _countof(TimeZoneInformation.DaylightName),
+                   Entry->DaylightName);
 
     TimeZoneInformation.Bias = Entry->TimezoneInfo.Bias;
     TimeZoneInformation.StandardBias = Entry->TimezoneInfo.StandardBias;
@@ -1902,8 +1918,25 @@ SetLocalTimeZone(HWND hwnd, PSETUPDATA SetupData)
            &Entry->TimezoneInfo.DaylightDate,
            sizeof(SYSTEMTIME));
 
+    /* Without automatic adjustment the zone stays on standard time all year */
+    if (!bAutoDaylight)
+    {
+        wcscpy(TimeZoneInformation.DaylightName,
+               TimeZoneInformation.StandardName);
+        TimeZoneInformation.Bias += TimeZoneInformation.StandardBias;
+        TimeZoneInformation.StandardBias = 0;
+        TimeZoneInformation.DaylightBias = 0;
+        ZeroMemory(&TimeZoneInformation.StandardDate, sizeof(SYSTEMTIME));
+        ZeroMemory(&TimeZoneInformation.DaylightDate, sizeof(SYSTEMTIME));
+    }
+
     /* Set time zone information */
-    SetTimeZoneInformation(&TimeZoneInformation);
+    if (!SetTimeZoneInformation(&TimeZoneInformation))
+        return;
+
+    /* The key exists once SetTimeZoneInformation has written it */
+    SetAutoDaylight(bAutoDaylight);
+    SetTimeZoneKeyName(Entry->KeyName);
 }
 
 
@@ -1967,10 +2000,10 @@ WriteDateTimeSettings(HWND hwndDlg, PSETUPDATA SetupData)
 
     GetLocalSystemTime(hwndDlg, SetupData);
     SetLocalTimeZone(GetDlgItem(hwndDlg, IDC_TIMEZONELIST),
-                     SetupData);
+                     SetupData,
+                     SendDlgItemMessage(hwndDlg, IDC_AUTODAYLIGHT,
+                                        BM_GETCHECK, 0, 0) != BST_UNCHECKED);
 
-    SetAutoDaylight(SendDlgItemMessage(hwndDlg, IDC_AUTODAYLIGHT,
-                                       BM_GETCHECK, 0, 0) != BST_UNCHECKED);
     if (!SetSystemLocalTime(hwndDlg, SetupData))
     {
         if (0 == LoadStringW(hDllInstance, IDS_REACTOS_SETUP, Title, ARRAYSIZE(Title)))
