@@ -548,7 +548,12 @@ uint32_t update_free(DOS_FS * fs)
     if (verbose)
 	printf("Checking free cluster summary.\n");
     if (fs->free_clusters != 0xFFFFFFFF) {
+#ifndef __REACTOS__
 	if (free != fs->free_clusters) {
+#else
+	/* The free count is a hint the mounted driver updates lazily */
+	if (free != fs->free_clusters && (rw || interactive)) {
+#endif
 	    printf("Free cluster summary wrong (%ld vs. really %ld)\n",
 		   (long)fs->free_clusters, (long)free);
 	    if (interactive)

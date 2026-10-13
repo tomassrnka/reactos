@@ -154,9 +154,8 @@ ParseCommandLine(int argc, WCHAR *argv[])
 
                 switch (argv[i][1])
                 {
-                    // case L'?':
-                        // Usage(argv[0]);
-                        // return i;
+                    case L'?':
+                        return -1;
 
                     case L'F': case L'f':
                     {
@@ -388,6 +387,12 @@ wmain(int argc, WCHAR *argv[])
     // Parse command line
     //
     badArg = ParseCommandLine(argc, argv);
+    if (badArg == -1)
+    {
+        /* Windows chkdsk also exits with 3 after the help text */
+        Usage(argv[0]);
+        return 3;
+    }
     if (badArg)
     {
         ConResPrintf(StdOut, IDS_BAD_ARGUMENT, argv[badArg]);
