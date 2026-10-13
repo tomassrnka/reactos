@@ -248,9 +248,9 @@
 @ stub -version=0x600+ PnpIsFilePnpDriver
 @ stub -version=0x600+ PnpRepairWindowsProtectedDriver
 @ stdcall SetupAddInstallSectionToDiskSpaceListA(long long long str ptr long)
-@ stub SetupAddInstallSectionToDiskSpaceListW
-@ stdcall -stub SetupAddSectionToDiskSpaceListA(long long long str long ptr long)
-@ stub SetupAddSectionToDiskSpaceListW
+@ stdcall SetupAddInstallSectionToDiskSpaceListW(long long long wstr ptr long)
+@ stdcall SetupAddSectionToDiskSpaceListA(long long long str long ptr long)
+@ stdcall SetupAddSectionToDiskSpaceListW(long long long wstr long ptr long)
 @ stdcall SetupAddToDiskSpaceListA(long str int64 long ptr long)
 @ stdcall SetupAddToDiskSpaceListW(long wstr int64 long ptr long)
 @ stdcall SetupAddToSourceListA(long str)
@@ -526,8 +526,8 @@
 @ stdcall SetupPromptForDiskA(ptr str str str str str long ptr long ptr)
 @ stdcall SetupPromptForDiskW(ptr wstr wstr wstr wstr wstr long ptr long ptr)
 @ stdcall SetupPromptReboot(ptr ptr long)
-@ stdcall -stub SetupQueryDrivesInDiskSpaceListA(ptr ptr long ptr)
-@ stub SetupQueryDrivesInDiskSpaceListW
+@ stdcall SetupQueryDrivesInDiskSpaceListA(ptr ptr long ptr)
+@ stdcall SetupQueryDrivesInDiskSpaceListW(ptr ptr long ptr)
 @ stub SetupQueryFileLogA
 @ stub SetupQueryFileLogW
 @ stdcall SetupQueryInfFileInformationA(ptr long str long ptr)
