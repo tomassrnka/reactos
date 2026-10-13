@@ -27,7 +27,7 @@ BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD fdwReason, LPVOID lpv)
     TRACE("%p 0x%x %p: stub\n", hInstDLL, fdwReason, lpv);
     switch(fdwReason) {
         case DLL_PROCESS_ATTACH:
-            DisableThreadLibraryCalls(hInstDLL);
+            /* No DisableThreadLibraryCalls: DLL_THREAD_DETACH frees the parse error info */
             UXTHEME_InitSystem(hInstDLL);
             break;
         case DLL_PROCESS_DETACH:
