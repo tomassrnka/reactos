@@ -314,7 +314,8 @@ SymbolicLinkNamesFromUniqueIdCount(IN PWSTR ValueName,
     UNICODE_STRING ValueNameString;
     PMOUNTDEV_UNIQUE_ID UniqueId = Context;
 
-    if (ValueName[0] != L'#' || ValueType != REG_BINARY ||
+    /* Names starting with # are no-drive-letter entries, not links */
+    if (ValueName[0] == L'#' || ValueType != REG_BINARY ||
         (UniqueId->UniqueIdLength != ValueLength))
     {
         return STATUS_SUCCESS;
@@ -352,7 +353,8 @@ SymbolicLinkNamesFromUniqueIdQuery(IN PWSTR ValueName,
     /* Unicode strings table */
     PUNICODE_STRING ReturnString = EntryContext;
 
-    if (ValueName[0] != L'#' || ValueType != REG_BINARY ||
+    /* Names starting with # are no-drive-letter entries, not links */
+    if (ValueName[0] == L'#' || ValueType != REG_BINARY ||
         (UniqueId->UniqueIdLength != ValueLength))
     {
         return STATUS_SUCCESS;

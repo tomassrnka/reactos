@@ -1112,6 +1112,15 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
         /* Check if our device is a volume */
         if (MOUNTMGR_IS_VOLUME_NAME(&(SymLinks[i])))
         {
+            /* Keep one volume name: the database could not be read back before,
+             * so a new name was written at every boot */
+            if (IsVolumeName)
+            {
+                RtlDeleteRegistryValue(RTL_REGISTRY_ABSOLUTE, DatabasePath, SymLinks[i].Buffer);
+                FreePool(SymLinks[i].Buffer);
+                continue;
+            }
+
             IsVolumeName = TRUE;
         }
         /* If it has a drive letter */
