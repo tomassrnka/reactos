@@ -99,7 +99,7 @@ static void CheckControl(PSECURITY_DESCRIPTOR Sd, WORD Bits, BOOL Expected, PCST
     Got = (Control & Bits) == Bits;
     if (Got == Expected)
         ok(TRUE, "%s\n", What);
-    else if (IsReactOS())
+    else if (IsReactOS() && Expected && !Got)
         skip("%s: control 0x%04x, the ReactOS kernel does not keep it (known)\n", What, Control);
     else
         ok(FALSE, "%s: control 0x%04x, bits 0x%04x expected %d\n", What, Control, Bits, Expected);
@@ -308,6 +308,85 @@ static void TestInheritance(PCWSTR Base, PSID Admins, PSID System, PSID Users)
             ok(0, "CreateDirectory(kid) failed with %lu\n", GetLastError());
         RemoveDirectoryW(Dir2);
         RemoveDirectoryW(Dir1);
+    }
+
+    /* a relative name is resolved once: it works from the current directory */
+    {
+        WCHAR OldDir[MAX_PATH], Kid[MAX_PATH];
+
+        StringCchPrintfW(Kid, _countof(Kid), L"%ls\\relkid", Parent);
+        ok(CreateDirectoryW(Kid, NULL), "CreateDirectory failed with %lu\n", GetLastError());
+        if (GetCurrentDirectoryW(_countof(OldDir), OldDir) && SetCurrentDirectoryW(Parent))
+        {
+            Err = SetNamedSecurityInfoW(L"relkid", SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                        NULL, NULL, &EmptyAcl, NULL);
+            ok_dec(Err, ERROR_SUCCESS);
+            SetCurrentDirectoryW(OldDir);
+            Dacl = NULL;
+            Sd = NULL;
+            Err = GetNamedSecurityInfoW(Kid, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
+            ok_dec(Err, ERROR_SUCCESS);
+            ok(Dacl != NULL && FindAce(Dacl, Admins, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) != NULL,
+               "the directory named relative to the current directory did not inherit\n");
+            if (Sd)
+                LocalFree(Sd);
+        }
+        RemoveDirectoryW(Kid);
+    }
+
+    /* "p" and "p." are different directories as extended paths. Whatever a DOS name with dots resolves to, the
+       DACL must be written to the directory whose parent was read, never to another one */
+    {
+        WCHAR Dir1[MAX_PATH + 8], Dir2[MAX_PATH + 8], Kid1[MAX_PATH + 8], Kid2[MAX_PATH + 8], Dos[MAX_PATH];
+        EXPLICIT_ACCESSW One;
+        PACL OneAcl = NULL;
+        PACL D1 = NULL, D2 = NULL;
+        PSECURITY_DESCRIPTOR S1 = NULL, S2 = NULL;
+
+        StringCchPrintfW(Dir1, _countof(Dir1), L"\\\\?\\%ls\\q", Parent);
+        StringCchPrintfW(Dir2, _countof(Dir2), L"\\\\?\\%ls\\q.", Parent);
+        StringCchPrintfW(Kid1, _countof(Kid1), L"%ls\\k", Dir1);
+        StringCchPrintfW(Kid2, _countof(Kid2), L"%ls\\k", Dir2);
+        StringCchPrintfW(Dos, _countof(Dos), L"%ls\\q..\\k", Parent);
+        if (CreateDirectoryW(Dir1, NULL) && CreateDirectoryW(Dir2, NULL) && CreateDirectoryW(Kid1, NULL) && CreateDirectoryW(Kid2, NULL))
+        {
+            MakeEntry(&One, System, FILE_ALL_ACCESS, GRANT_ACCESS, SUB_CONTAINERS_AND_OBJECTS_INHERIT);
+            SetEntriesInAclW(1, &One, NULL, &OneAcl);
+            SetNamedSecurityInfoW(Dir1, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, OneAcl, NULL);
+            LocalFree(OneAcl);
+            OneAcl = NULL;
+            MakeEntry(&One, Admins, FILE_ALL_ACCESS, GRANT_ACCESS, SUB_CONTAINERS_AND_OBJECTS_INHERIT);
+            SetEntriesInAclW(1, &One, NULL, &OneAcl);
+            SetNamedSecurityInfoW(Dir2, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, OneAcl, NULL);
+            LocalFree(OneAcl);
+
+            SetNamedSecurityInfoW(Dos, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                  NULL, NULL, &EmptyAcl, NULL);
+
+            GetNamedSecurityInfoW(Kid1, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &D1, NULL, &S1);
+            GetNamedSecurityInfoW(Kid2, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &D2, NULL, &S2);
+            /* the directory under "q" may only have inherited what "q" grants, and the one under "q." what "q." grants */
+            if (D1)
+            {
+                ok(FindAce(D1, Admins, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) == NULL,
+                   "q\\k got an ACE that only q. grants\n");
+            }
+            if (D2)
+            {
+                ok(FindAce(D2, System, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) == NULL,
+                   "q.\\k got an ACE that only q grants\n");
+            }
+            if (S1)
+                LocalFree(S1);
+            if (S2)
+                LocalFree(S2);
+        }
+        else
+            skip("cannot create the q and q. directories: %lu\n", GetLastError());
+        RemoveDirectoryW(Kid1);
+        RemoveDirectoryW(Kid2);
+        RemoveDirectoryW(Dir1);
+        RemoveDirectoryW(Dir2);
     }
 
     /* an explicit ACE with UNPROTECTED comes first and the parent's ACEs follow */

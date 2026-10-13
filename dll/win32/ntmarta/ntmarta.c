@@ -1479,7 +1479,8 @@ AccpGetPathRootLength(IN PCWSTR Path)
 /*
  * Resolves a name to an absolute path once, so that every later query and the final open use the
  * same object even if the current directory changes. An extended path is used as it is:
- * GetFullPathNameW would normalise its components. The result is freed with LocalFree.
+ * GetFullPathNameW would normalise its components. The result is always an extended path.
+ * It is freed with LocalFree.
  */
 static DWORD
 AccpResolvePath(IN PCWSTR Name,
@@ -1519,6 +1520,41 @@ AccpResolvePath(IN PCWSTR Name,
             break;
         LocalFree(Buffer);
         Capacity = Length + 1;
+    }
+
+    /*
+     * Write the result as an extended path, so that the later queries and the open take it as it is:
+     * normalising a normalised path again can change it (trailing dots and spaces of components).
+     */
+    if (Buffer[0] == L'\\' && Buffer[1] == L'\\' && Buffer[2] != L'?' && Buffer[2] != L'.')
+    {
+        /* \\server\share\... becomes \\?\UNC\server\share\... */
+        PWSTR Extended = (PWSTR)LocalAlloc(LMEM_FIXED, (Length + 8 + 1) * sizeof(WCHAR));
+
+        if (Extended == NULL)
+        {
+            LocalFree(Buffer);
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        RtlCopyMemory(Extended, L"\\\\?\\UNC\\", 8 * sizeof(WCHAR));
+        RtlCopyMemory(Extended + 8, Buffer + 2, (Length - 2 + 1) * sizeof(WCHAR));
+        LocalFree(Buffer);
+        Buffer = Extended;
+    }
+    else if (((Buffer[0] >= L'A' && Buffer[0] <= L'Z') || (Buffer[0] >= L'a' && Buffer[0] <= L'z')) &&
+             Buffer[1] == L':' && Buffer[2] == L'\\')
+    {
+        PWSTR Extended = (PWSTR)LocalAlloc(LMEM_FIXED, (Length + 4 + 1) * sizeof(WCHAR));
+
+        if (Extended == NULL)
+        {
+            LocalFree(Buffer);
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        RtlCopyMemory(Extended, L"\\\\?\\", 4 * sizeof(WCHAR));
+        RtlCopyMemory(Extended + 4, Buffer, (Length + 1) * sizeof(WCHAR));
+        LocalFree(Buffer);
+        Buffer = Extended;
     }
 
     *Path = Buffer;
