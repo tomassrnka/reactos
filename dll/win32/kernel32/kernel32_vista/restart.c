@@ -13,7 +13,9 @@
 
 /*
  * There is no error reporting service here: nothing restarts or recovers a
- * process, so a registration is only kept for the Get functions.
+ * process, so a registration is only kept for the Get functions. With NT 6
+ * exports kernel32_vista.dll forwards these functions to kernel32, so that
+ * a process has one registration.
  * NT 6 keeps it in the process environment block (WerRegistrationData),
  * where other processes read it; that slot is the start of the process heap
  * list in ReactOS's PEB, so only the calling process's own registration can
@@ -77,14 +79,19 @@ RegisterApplicationRestart(
     _In_opt_ PCWSTR pwzCommandline,
     _In_ DWORD dwFlags)
 {
+    WCHAR CommandLine[RESTART_MAX_CMD_LINE];
     SIZE_T Length = 0;
 
+    /* Captured before the lock is taken: the caller's buffer may fault */
     if (pwzCommandline)
     {
         _SEH2_TRY
         {
             while (Length < RESTART_MAX_CMD_LINE && pwzCommandline[Length])
+            {
+                CommandLine[Length] = pwzCommandline[Length];
                 Length++;
+            }
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -95,11 +102,10 @@ RegisterApplicationRestart(
         if (Length >= RESTART_MAX_CMD_LINE)
             return E_INVALIDARG;
     }
+    CommandLine[Length] = UNICODE_NULL;
 
     RtlAcquirePebLock();
-    if (Length)
-        RtlCopyMemory(BaseRestartCommandLine, pwzCommandline, Length * sizeof(WCHAR));
-    BaseRestartCommandLine[Length] = UNICODE_NULL;
+    RtlCopyMemory(BaseRestartCommandLine, CommandLine, (Length + 1) * sizeof(WCHAR));
     BaseRestartFlags = dwFlags;
     BaseRestartRegistered = TRUE;
     RtlReleasePebLock();

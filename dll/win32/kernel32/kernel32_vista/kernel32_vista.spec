@@ -28,13 +28,17 @@
 @ stdcall SetFirmwareEnvironmentVariableExA(str str ptr long long)
 @ stdcall SetFirmwareEnvironmentVariableExW(str str ptr long long)
 
-@ stdcall ApplicationRecoveryFinished(long)
-@ stdcall ApplicationRecoveryInProgress(ptr)
+@ stdcall -version=0x400-0x5FF ApplicationRecoveryFinished(long)
+@ stdcall -version=0x600+ ApplicationRecoveryFinished(long) kernel32.ApplicationRecoveryFinished
+@ stdcall -version=0x400-0x5FF ApplicationRecoveryInProgress(ptr)
+@ stdcall -version=0x600+ ApplicationRecoveryInProgress(ptr) kernel32.ApplicationRecoveryInProgress
 @ stdcall CreateSymbolicLinkA(str str long)
 @ stdcall CreateSymbolicLinkW(wstr wstr long)
 @ stdcall EnumSystemLocalesEx(ptr long long ptr)
-@ stdcall GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr)
-@ stdcall GetApplicationRestartSettings(ptr ptr ptr ptr)
+@ stdcall -version=0x400-0x5FF GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr)
+@ stdcall -version=0x600+ GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr) kernel32.GetApplicationRecoveryCallback
+@ stdcall -version=0x400-0x5FF GetApplicationRestartSettings(ptr ptr ptr ptr)
+@ stdcall -version=0x600+ GetApplicationRestartSettings(ptr ptr ptr ptr) kernel32.GetApplicationRestartSettings
 @ stdcall GetFileBandwidthReservation(ptr ptr ptr ptr ptr ptr)
 @ stdcall GetFileMUIInfo(long wstr ptr ptr)
 @ stdcall GetFileMUIPath(long wstr wstr ptr wstr ptr ptr)
@@ -54,10 +58,14 @@
 @ stdcall OpenFileById(ptr ptr long long ptr long)
 @ stdcall QueryFullProcessImageNameA(ptr long ptr ptr)
 @ stdcall QueryFullProcessImageNameW(ptr long ptr ptr)
-@ stdcall RegisterApplicationRecoveryCallback(ptr ptr long long)
-@ stdcall RegisterApplicationRestart(wstr long)
-@ stdcall UnregisterApplicationRecoveryCallback()
-@ stdcall UnregisterApplicationRestart()
+@ stdcall -version=0x400-0x5FF RegisterApplicationRecoveryCallback(ptr ptr long long)
+@ stdcall -version=0x600+ RegisterApplicationRecoveryCallback(ptr ptr long long) kernel32.RegisterApplicationRecoveryCallback
+@ stdcall -version=0x400-0x5FF RegisterApplicationRestart(wstr long)
+@ stdcall -version=0x600+ RegisterApplicationRestart(wstr long) kernel32.RegisterApplicationRestart
+@ stdcall -version=0x400-0x5FF UnregisterApplicationRecoveryCallback()
+@ stdcall -version=0x600+ UnregisterApplicationRecoveryCallback() kernel32.UnregisterApplicationRecoveryCallback
+@ stdcall -version=0x400-0x5FF UnregisterApplicationRestart()
+@ stdcall -version=0x600+ UnregisterApplicationRestart() kernel32.UnregisterApplicationRestart
 @ stdcall SetFileBandwidthReservation(ptr long long long ptr ptr)
 @ stdcall SetThreadPreferredUILanguages(long wstr ptr)
 @ stdcall CompareStringOrdinal(ptr long ptr long long)

@@ -177,7 +177,11 @@ static void TestRestart(void)
     ok(hr == HR_INSUFFICIENT_BUFFER, "Zero size with buffer: hr 0x%lx\n", hr);
     ok(Size == 5, "Zero size with buffer: Size %lu\n", Size);
     /* Windows writes a terminator even into this zero-sized buffer; ReactOS writes nothing */
-    trace("Zero size with buffer: Buffer[0] 0x%x\n", Buffer[0]);
+    if (is_reactos())
+        ok(Buffer[0] == L'?', "Zero size with buffer: Buffer[0] 0x%x\n", Buffer[0]);
+    else
+        ok(Buffer[0] == UNICODE_NULL, "Zero size with buffer: Buffer[0] 0x%x\n", Buffer[0]);
+    ok(Buffer[1] == L'?', "Zero size with buffer: Buffer[1] 0x%x\n", Buffer[1]);
 
     Size = 100;
     hr = pGetApplicationRestartSettings(GetCurrentProcess(), NULL, &Size, NULL);
@@ -418,6 +422,44 @@ static void TestRecovery(void)
     ok(Cancelled == FALSE, "ApplicationRecoveryInProgress, not registered: Cancelled %d\n", Cancelled);
 }
 
+/* ReactOS's kernel32_vista.dll exports the functions too: a process has one registration */
+static void TestKernel32Vista(void)
+{
+    FN_GetApplicationRestartSettings pVistaGet;
+    FN_UnregisterApplicationRestart pVistaUnregister;
+    FN_RegisterApplicationRestart pVistaRegister;
+    WCHAR Buffer[64];
+    HMODULE hVista;
+    DWORD Size;
+    HRESULT hr;
+
+    hVista = LoadLibraryW(L"kernel32_vista.dll");
+    if (!hVista)
+    {
+        skip("No kernel32_vista.dll\n");
+        return;
+    }
+    pVistaRegister = (FN_RegisterApplicationRestart)GetProcAddress(hVista, "RegisterApplicationRestart");
+    pVistaUnregister = (FN_UnregisterApplicationRestart)GetProcAddress(hVista, "UnregisterApplicationRestart");
+    pVistaGet = (FN_GetApplicationRestartSettings)GetProcAddress(hVista, "GetApplicationRestartSettings");
+    ok(pVistaRegister && pVistaUnregister && pVistaGet, "kernel32_vista.dll exports missing\n");
+    if (pVistaRegister && pVistaUnregister && pVistaGet)
+    {
+        hr = pRegisterApplicationRestart(L"through kernel32", 0);
+        ok(hr == S_OK, "hr 0x%lx\n", hr);
+        Size = ARRAYSIZE(Buffer);
+        hr = pVistaGet(GetCurrentProcess(), Buffer, &Size, NULL);
+        ok(hr == S_OK, "kernel32_vista.dll does not see the registration: hr 0x%lx\n", hr);
+        ok(hr == S_OK && !wcscmp(Buffer, L"through kernel32"), "Buffer '%S'\n", Buffer);
+        hr = pVistaUnregister();
+        ok(hr == S_OK, "hr 0x%lx\n", hr);
+        Size = ARRAYSIZE(Buffer);
+        hr = pGetApplicationRestartSettings(GetCurrentProcess(), Buffer, &Size, NULL);
+        ok(hr == HR_NOT_FOUND, "kernel32 still has the registration: hr 0x%lx\n", hr);
+    }
+    FreeLibrary(hVista);
+}
+
 static void Child(char **argv)
 {
     HANDLE hReady = (HANDLE)(ULONG_PTR)_strtoui64(argv[3], NULL, 10);
@@ -468,4 +510,5 @@ START_TEST(ApplicationRestart)
     TestRestartHandles();
     TestRestartOtherProcess(argv[0]);
     TestRecovery();
+    TestKernel32Vista();
 }
