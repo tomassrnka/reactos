@@ -124,8 +124,36 @@ RtlDestroyEnvironment(_In_ PWSTR Environment)
 }
 
 
+static
+PCWSTR
+RtlpFindEnvironmentValue(
+    _In_ PCWSTR Environment,
+    _In_reads_(NameLength) PCWSTR Name,
+    _In_ SIZE_T NameLength)
+{
+    PCWSTR Entry, Equals;
+
+    for (Entry = Environment; *Entry; Entry += wcslen(Entry) + 1)
+    {
+        /* A leading '=' belongs to the name */
+        Equals = wcschr(Entry + 1, L'=');
+        if (Equals != NULL &&
+            (SIZE_T)(Equals - Entry) == NameLength &&
+            _wcsnicmp(Entry, Name, NameLength) == 0)
+        {
+            return Equals + 1;
+        }
+    }
+
+    return NULL;
+}
+
 /*
  * @implemented
+ *
+ * Buffer handling follows Wine's ntdll (LGPL): a variable value is copied
+ * whole or not at all, and a buffer that is too small gets the terminator
+ * where the value would have started.
  */
 NTSTATUS
 NTAPI
@@ -137,126 +165,117 @@ RtlExpandEnvironmentStrings(
     _In_ SIZE_T DestMax,
     _Out_opt_ PSIZE_T Length)
 {
-    UNICODE_STRING Variable;
-    UNICODE_STRING Value;
-    NTSTATUS ReturnStatus = STATUS_SUCCESS;
-    NTSTATUS Status;
-    PWSTR DestBuffer;
+    PCWSTR Env = Environment;
+    PCWSTR Value;
     PCWSTR CopyBuffer;
-    PCWSTR VariableEnd;
-    SIZE_T CopyLength;
-    SIZE_T Tail;
+    SIZE_T Count, CopyLength, SegmentLength;
     SIZE_T TotalLength = 1; /* for terminating NULL */
+    BOOLEAN LockedPeb = FALSE;
 
     DPRINT("RtlExpandEnvironmentStrings(%p, %S, %Iu, %p, %Iu, %p)\n",
            Environment, SourceBuffer, SourceLength, Destination, DestMax, Length);
 
-    DestBuffer = Destination;
+    if (Env == NULL)
+    {
+        PPEB Peb = RtlGetCurrentPeb();
+        if (Peb)
+        {
+            RtlAcquirePebLock();
+            LockedPeb = TRUE;
+            Env = Peb->ProcessParameters->Environment;
+        }
+    }
 
     while (SourceLength)
     {
         if (*SourceBuffer != L'%')
         {
-            CopyBuffer = SourceBuffer;
-            CopyLength = 0;
-            while (SourceLength != 0 && *SourceBuffer != L'%')
+            /* Literal text up to the next variable */
+            for (SegmentLength = 0; SegmentLength < SourceLength; SegmentLength++)
             {
-                SourceBuffer++;
-                CopyLength++;
-                SourceLength--;
+                if (SourceBuffer[SegmentLength] == L'%')
+                    break;
             }
+            CopyBuffer = SourceBuffer;
+            SourceBuffer += SegmentLength;
+            SourceLength -= SegmentLength;
+            CopyLength = SegmentLength;
         }
         else
         {
-           /* Process environment variable. */
-
-            VariableEnd = SourceBuffer + 1;
-            Tail = SourceLength - 1;
-            while (*VariableEnd != L'%' && Tail != 0)
+            for (SegmentLength = 1; SegmentLength < SourceLength; SegmentLength++)
             {
-                VariableEnd++;
-                Tail--;
+                if (SourceBuffer[SegmentLength] == L'%')
+                    break;
             }
 
-            if (Tail != 0)
+            if (SegmentLength < SourceLength)
             {
-                Variable.MaximumLength =
-                    Variable.Length = (USHORT)(VariableEnd - (SourceBuffer + 1)) * sizeof(WCHAR);
-                Variable.Buffer = (PWSTR)SourceBuffer + 1;
-
-                Value.Length = 0;
-                Value.MaximumLength = (USHORT)DestMax * sizeof(WCHAR);
-                Value.Buffer = DestBuffer;
-
-                Status = RtlQueryEnvironmentVariable_U(Environment, &Variable,
-                                                       &Value);
-                if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_TOO_SMALL)
+                Value = (Env != NULL) ?
+                    RtlpFindEnvironmentValue(Env, SourceBuffer + 1, SegmentLength - 1) : NULL;
+                if (Value != NULL)
                 {
-                    SourceBuffer = VariableEnd + 1;
-                    SourceLength = Tail - 1;
-                    TotalLength += Value.Length / sizeof(WCHAR);
-                    if (Status != STATUS_BUFFER_TOO_SMALL)
-                    {
-                        DestBuffer += Value.Length / sizeof(WCHAR);
-                        DestMax -= Value.Length / sizeof(WCHAR);
-                    }
-                    else
-                    {
-                        DestMax = 0;
-                        ReturnStatus = STATUS_BUFFER_TOO_SMALL;
-                    }
-                    continue;
+                    SourceBuffer += SegmentLength + 1;
+                    SourceLength -= SegmentLength + 1;
+                    CopyBuffer = Value;
+                    SegmentLength = wcslen(Value);
+                    CopyLength = SegmentLength;
+
+                    /* Either the whole value or nothing is copied */
+                    if (DestMax <= CopyLength)
+                        CopyLength = 0;
+
+                    /* The terminator follows the value, or sits where it would have started */
+                    if (DestMax && Destination)
+                        Destination[CopyLength] = UNICODE_NULL;
                 }
                 else
                 {
-                   /* Variable not found. */
+                    /* Variable not found: keep the original text */
                     CopyBuffer = SourceBuffer;
-                    CopyLength = SourceLength - Tail + 1;
-                    SourceLength -= CopyLength;
-                    SourceBuffer += CopyLength;
+                    SegmentLength++;
+                    SourceBuffer += SegmentLength;
+                    SourceLength -= SegmentLength;
+                    CopyLength = SegmentLength;
                 }
             }
             else
             {
-               /* Unfinished variable name. */
+                /* Unfinished variable name: keep the original text */
                 CopyBuffer = SourceBuffer;
-                CopyLength = SourceLength;
+                SourceBuffer += SegmentLength;
                 SourceLength = 0;
+                CopyLength = SegmentLength;
             }
         }
 
-        TotalLength += CopyLength;
-        if (DestMax)
+        TotalLength += SegmentLength;
+        if (DestMax && Destination)
         {
-            if (DestMax < CopyLength)
-            {
-                CopyLength = DestMax;
-                ReturnStatus = STATUS_BUFFER_TOO_SMALL;
-            }
-            RtlCopyMemory(DestBuffer, CopyBuffer, CopyLength * sizeof(WCHAR));
-            DestMax -= CopyLength;
-            DestBuffer += CopyLength;
+            Count = SegmentLength;
+            if (DestMax < Count)
+                Count = DestMax;
+
+            /* A buffer that is too small gets one character less */
+            if (DestMax <= CopyLength)
+                CopyLength = DestMax - 1;
+
+            RtlCopyMemory(Destination, CopyBuffer, CopyLength * sizeof(WCHAR));
+            DestMax -= Count;
+            Destination += CopyLength;
         }
     }
 
-    /* NULL-terminate the buffer. */
-    if (DestMax)
-        *DestBuffer = 0;
-    else
-        ReturnStatus = STATUS_BUFFER_TOO_SMALL;
+    if (LockedPeb)
+        RtlReleasePebLock();
 
-    if (NT_SUCCESS(ReturnStatus))
-    {
-        ASSERT(TotalLength == (DestBuffer - Destination) + 1);
-        //ASSERT(Destination[TotalLength - 1] == UNICODE_NULL);
-    }
+    if (DestMax && Destination)
+        *Destination = UNICODE_NULL;
 
     if (Length != NULL)
         *Length = TotalLength;
 
-    DPRINT("Destination %wZ\n", Destination);
-
-    return ReturnStatus;
+    return DestMax ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL;
 }
 
 NTSTATUS
