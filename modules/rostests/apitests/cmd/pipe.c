@@ -40,8 +40,8 @@ static const PIPE_ENTRY s_Entries[] =
     { __LINE__, L"\"%1\" | echo x", PROBE1, PROBE1, 0, NULL, NULL, L"", NULL },
 };
 
-/* Runs a command line hidden, in a job object when it can be assigned so that a timeout stops
- * the whole tree. Returns FALSE if cmd could not start. */
+/* Runs a command line hidden, in a job object so that a timeout stops the whole tree.
+ * Returns FALSE if cmd could not start or could not be put into the job. */
 static BOOL RunHidden(PWSTR pszCmdLine, PCWSTR pszDir, PVOID pEnv, DWORD *pdwExit, DWORD *pdwPid)
 {
     STARTUPINFOW si = { sizeof(si) };
@@ -62,6 +62,19 @@ static BOOL RunHidden(PWSTR pszCmdLine, PCWSTR pszDir, PVOID pEnv, DWORD *pdwExi
     }
     if (hJob)
         bInJob = AssignProcessToJobObject(hJob, pi.hProcess);
+    if (!bInJob)
+    {
+        /* A timeout could not stop the programs that cmd starts, so cmd must not run */
+        skip("The test cannot put cmd into a job object: %lu\n",
+             hJob ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY);
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (hJob)
+            CloseHandle(hJob);
+        return FALSE;
+    }
     if (ResumeThread(pi.hThread) == (DWORD)-1)
     {
         skip("ResumeThread failed: %lu\n", GetLastError());
@@ -76,8 +89,7 @@ static BOOL RunHidden(PWSTR pszCmdLine, PCWSTR pszDir, PVOID pEnv, DWORD *pdwExi
     if (WaitForSingleObject(pi.hProcess, 30000) != WAIT_OBJECT_0)
     {
         ok(FALSE, "cmd did not finish\n");
-        /* Without a job only cmd is stopped, the programs it started may stay */
-        if (!bInJob || !TerminateJobObject(hJob, 1))
+        if (!TerminateJobObject(hJob, 1))
             TerminateProcess(pi.hProcess, 1);
         ok(WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0, "cmd was not stopped\n");
     }
