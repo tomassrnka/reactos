@@ -20,6 +20,7 @@ list(APPEND SOURCE
     RegOpenKeyExW.c
     RegQueryInfoKey.c
     RegQueryValueExW.c
+    RegGetValue.c
     RtlEncryptMemory.c
     SaferIdentifyLevel.c
     ServiceArgs.c
