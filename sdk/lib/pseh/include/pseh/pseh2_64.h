@@ -17,52 +17,28 @@ struct _SEH$$_EXCEPTION_POINTERS
     struct _CONTEXT *ContextRecord;
 };
 
-/* Declare our global trampoline function for filter and unwinder */
-__asm__(
-    ".p2align 4, 0x90\n"
-    ".seh_proc __seh2_global_filter_func\n"
-    "__seh2_global_filter_func:\n"
-    /* r8 is rbp - frame-offset. Calculate the negative frame-offset */
-    "\tsub %rbp, %rax\n"
-    /* Save all callee-saved registers that the funclet may clobber */
-    "\tpush %rbp\n"
-    "\t.seh_pushreg %rbp\n"
-    "\tpush %rbx\n"
-    "\t.seh_pushreg %rbx\n"
-    "\tpush %rdi\n"
-    "\t.seh_pushreg %rdi\n"
-    "\tpush %rsi\n"
-    "\t.seh_pushreg %rsi\n"
-    "\tpush %r12\n"
-    "\t.seh_pushreg %r12\n"
-    "\tpush %r13\n"
-    "\t.seh_pushreg %r13\n"
-    "\tpush %r14\n"
-    "\t.seh_pushreg %r14\n"
-    "\tpush %r15\n"
-    "\t.seh_pushreg %r15\n"
-    "\tsub $40, %rsp\n"
-    "\t.seh_stackalloc 40\n"
-    "\t.seh_endprologue\n"
-    /* rdx is the original stack pointer, fix it up to be the frame pointer */
-    "\tsub %rax, %rdx\n"
-    /* Restore frame pointer. */
-    "\tmov %rdx, %rbp\n"
-    /* Actually execute the filter funclet */
-    "\tjmp *%r8\n"
-    "__seh2_global_filter_func_exit:\n"
-    "\t.p2align 4\n"
-    "\tadd $40, %rsp\n"
-    "\tpop %r15\n"
-    "\tpop %r14\n"
-    "\tpop %r13\n"
-    "\tpop %r12\n"
-    "\tpop %rsi\n"
-    "\tpop %rdi\n"
-    "\tpop %rbx\n"
-    "\tpop %rbp\n"
-    "\tret\n"
-    "\t.seh_endproc");
+/* The compiler plugin emits the funclet trampoline after it knows the largest
+ * outgoing argument area used by the functions in this translation unit. */
+typedef void (*__seh2_finally_function)(int, void*);
+
+struct __seh2_scope
+{
+    __seh2_finally_function Handler;
+    void* Frame;
+    void* Stack;
+};
+
+/* GCC invokes this when a return, goto or break leaves a try/finally scope. */
+static __inline__ __attribute__((always_inline))
+void __seh2_scope_exit(volatile struct __seh2_scope* Scope)
+{
+    __seh2_finally_function Handler = Scope->Handler;
+    if (Handler)
+    {
+        Scope->Handler = 0;
+        Handler(1, Scope->Frame);
+    }
+}
 
 #define STRINGIFY(a) #a
 #define EMIT_PRAGMA_(params) \
@@ -98,6 +74,11 @@ __asm__(
     __label__ __seh2$$begin_except__;                                               \
     __label__ __seh2$$begin_try__;                                                  \
     __label__ __seh2$$end_try__;                                                    \
+    __label__ __seh2$$setup__;                                                      \
+    volatile struct __seh2_scope __seh2$$scope__                                    \
+        __attribute__((cleanup(__seh2_scope_exit))) = {0, __builtin_frame_address(0), 0}; \
+    __asm__ __volatile__("mov %%rsp, %0" : "=m"(__seh2$$scope__.Stack));              \
+    goto __seh2$$setup__;                                                          \
     /*                                                                              \
      * We close the current SEH block for this function and install our own.        \
      * At this point GCC emitted its prologue, and if it saves more                 \
@@ -117,6 +98,10 @@ __seh2$$begin_try__:                                                            
 __seh2$$leave_scope__: __MINGW_ATTRIB_UNUSED;                                                   \
     }                                                                                           \
 __seh2$$end_try__:(void)0;                                                                      \
+    if (0)                                                                                      \
+    {                                                                                           \
+        __seh2$$setup__: goto __seh2$$begin_try__;                                               \
+    }                                                                                           \
     /* Call our home-made pragma */                                                             \
     _SEH3$_EMIT_DEFS_AND_PRAGMA(__seh$$except);                                                 \
     if (0)                                                                                      \
@@ -160,13 +145,23 @@ __seh2$$end_try__:(void)0;                                                      
         {                                                                                       \
             __seh2$$abnormal_termination__ = 0                                                  \
         };                                                                                      \
-        __seh2$$begin_except__:
+        __seh2$$begin_except__:                                                                 \
+        /* A fault in a finally funclet can select an except in the parent. */                  \
+        /* Restore that scope's stack instead of continuing on the funclet's stack. */          \
+        __asm__ __volatile__("mov %0, %%rsp"                                                     \
+            : : "m"(__seh2$$scope__.Stack) : "memory");
 
 #define _SEH2_FINALLY                                                                       \
 __seh2$$leave_scope__: __MINGW_ATTRIB_UNUSED;                                               \
     }                                                                                       \
 __seh2$$end_try__:                                                                          \
 __seh2$$begin_except__: __MINGW_ATTRIB_UNUSED;                                              \
+    if (0)                                                                                  \
+    {                                                                                       \
+        __seh2$$setup__:                                                                    \
+        __seh2$$scope__.Handler = (__seh2_finally_function)&&__seh2$$filter__;                \
+        goto __seh2$$begin_try__;                                                           \
+    }                                                                                       \
     /* Call our home-made pragma */                                                         \
     _SEH3$_EMIT_DEFS_AND_PRAGMA(__seh$$finally);                                            \
     if (1)                                                                                  \
@@ -201,7 +196,8 @@ __seh2$$begin_except__: __MINGW_ATTRIB_UNUSED;                                  
         /* Actually declare our finally funclet */                                          \
         __seh2$$begin_finally__:                                                            \
         __asm__ __volatile__(""                                                             \
-            : "=c" (__seh2$$abnormal_termination__));
+            : "=c" (__seh2$$abnormal_termination__));                                       \
+        __seh2$$scope__.Handler = 0;
 
 #define _SEH2_END                                                                   \
         __seh2$$leave_scope__: __MINGW_ATTRIB_UNUSED;                               \
