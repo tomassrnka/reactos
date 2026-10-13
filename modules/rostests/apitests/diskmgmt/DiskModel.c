@@ -604,6 +604,8 @@ CheckFit(ULONG Count, const ULONGLONG *Lengths, ULONG Bar, ULONG Min, PCSTR What
             Smallest = Widths[i];
     }
     ok(Sum == Bar, "%s: the widths add up to %lu, expected %lu\n", What, Sum, Bar);
+    if (Count > 0 && Min > Bar / Count)
+        Min = Bar / Count;
     ok(Smallest >= Min, "%s: a block is %lu wide, the minimum is %lu\n", What, Smallest, Min);
 }
 
@@ -640,6 +642,13 @@ Test_Fit(VOID)
     for (i = 0; i < 128; i++)
         Lengths[i] = 100 * MiB;
     CheckFit(128, Lengths, 300, 2, "128 equal blocks");
+
+    /* more blocks than pixels: 128 partitions and 127 gaps in 200 pixels, no overflow */
+    for (i = 0; i < 255; i++)
+        Lengths[i] = (i & 1) ? 100 * MiB : 2 * MiB;
+    CheckFit(255, Lengths, 200, 1, "255 blocks in 200 pixels");
+    CheckFit(255, Lengths, 255, 1, "255 blocks in 255 pixels");
+    CheckFit(255, Lengths, 0, 1, "255 blocks in no pixel");
 
     /* twenty huge blocks and a tiny one: the sum of the minimum raises the total, the excess comes off the wide blocks */
     for (i = 0; i < 20; i++)

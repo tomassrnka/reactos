@@ -721,12 +721,16 @@ DmBlockWeight(ULONGLONG Bytes)
     return log((double)MB);
 }
 
-/* Widths in proportion to the weights, none below MinWidth, adding up to BarWidth when Count * MinWidth fits. */
+/* Widths in proportion to the weights, none below MinWidth, always adding up to BarWidth (MinWidth is lowered when Count * MinWidth does not fit). */
 VOID
 DmFitBlockWidths(const ULONGLONG *Lengths, ULONG Count, ULONG BarWidth, ULONG MinWidth, ULONG *Widths)
 {
     double Sum = 0.0;
     ULONG i, Total = 0;
+
+    /* more blocks than pixels: the minimum falls to what fits (blocks may get no pixel) */
+    if (Count > 0 && MinWidth > BarWidth / Count)
+        MinWidth = BarWidth / Count;
 
     for (i = 0; i < Count; i++)
         Sum += DmBlockWeight(Lengths[i]);

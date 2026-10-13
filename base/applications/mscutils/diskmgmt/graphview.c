@@ -164,7 +164,7 @@ GraphLayout(HWND hWnd, GRAPH *G)
         else
             BarWidth = (int)(Avail * DmBlockWeight(Disk->CapacityMB * DM_MIB) / MaxLn);
         /* many blocks shrink the minimum width so that the bar still fits */
-        MinWidth = Disk->RegionCount ? max(1, min(MIN_REGION_W, Avail / (int)Disk->RegionCount)) : MIN_REGION_W;
+        MinWidth = Disk->RegionCount ? min(MIN_REGION_W, Avail / (int)Disk->RegionCount) : MIN_REGION_W;
         BarWidth = max(BarWidth, (int)Disk->RegionCount * MinWidth);
         if (BarWidth > Avail)
             BarWidth = Avail;
@@ -522,6 +522,8 @@ GraphPaint(HWND hWnd, GRAPH *G, HDC hTarget, const RECT *Update)
 
             if (Item->rc.bottom < G->ScrollY || Item->rc.top > G->ScrollY + Visible)
                 continue;
+            if (Item->rc.right <= Item->rc.left)
+                continue;
             if (Item->Region == -1)
                 DrawLabel(hDC, G, Item, i == Selected);
             else if (!Disk->Regions[Item->Region].InExtended)
@@ -538,7 +540,7 @@ GraphPaint(HWND hWnd, GRAPH *G, HDC hTarget, const RECT *Update)
             const GITEM *Item = &G->Items[i];
             PDM_DISK Disk = G->Model->Disks[Item->Disk];
 
-            if (Item->Region >= 0 && Disk->Regions[Item->Region].InExtended &&
+            if (Item->Region >= 0 && Disk->Regions[Item->Region].InExtended && Item->rc.right > Item->rc.left &&
                 Item->rc.bottom >= G->ScrollY && Item->rc.top <= G->ScrollY + Visible)
             {
                 DrawRegion(hDC, G, Item, i == Selected);
