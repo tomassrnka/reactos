@@ -482,14 +482,17 @@ static
 VOID
 MiStartPagingFileGrowthThread(VOID)
 {
+    OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE ThreadHandle;
 
     if (InterlockedCompareExchange(&MiPagingFileGrowthThreadState, 1, 0) != 0)
         return;
 
+    /* A retry can run in any process: the handle must not land in its handle table */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
     if (((MiPagingFileCertifyPage != 0) ||
          NT_SUCCESS(MmRequestPageMemoryConsumer(MC_SYSTEM, TRUE, &MiPagingFileCertifyPage))) &&
-        NT_SUCCESS(PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL,
+        NT_SUCCESS(PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, &ObjectAttributes, NULL, NULL,
                                         MiPagingFileGrowthThread, NULL)))
     {
         ZwClose(ThreadHandle);
