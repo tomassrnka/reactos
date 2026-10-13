@@ -16,8 +16,9 @@
 
 /*
  * kernel32's UnhandledExceptionFilter starts "drwtsn32 -u -p PID -t TID -x PTR"
- * and waits for it. PTR is the address of the EXCEPTION_POINTERS in the
- * crashed process. The settings follow the documented LocalDumps key.
+ * (see WerReportMain for the other options) and waits for it. PTR is the
+ * address of the EXCEPTION_POINTERS in the crashed process. The settings
+ * follow the documented LocalDumps key.
  */
 
 #define LOCALDUMPS_KEY L"SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps"
@@ -209,7 +210,8 @@ static bool OpenCrashedProcess(DumpData& data, DWORD pid, DWORD tid, ULONG_PTR R
 
     data.ProcessID = pid;
     data.ThreadID = tid;
-    data.ProcessHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE, FALSE, pid);
+    data.ProcessHandle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE | SYNCHRONIZE,
+                                     FALSE, pid);
     if (!data.ProcessHandle)
         return false;
 
@@ -328,34 +330,10 @@ static LONG WINAPI ReporterFaultFilter(PEXCEPTION_POINTERS)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
-int WerReportMain(int argc, WCHAR** argv)
+/* LocalDumps: the dump and the text report; the paths of what was written are returned */
+static int WriteLocalDumps(DumpData& data, ULONG_PTR RemotePointers, const EXCEPTION_POINTERS& Pointers,
+                           std::wstring& WrittenDump, std::wstring& WrittenReport)
 {
-    DWORD pid = 0, tid = 0;
-    ULONG_PTR RemotePointers = 0;
-    DumpData data;
-
-    SetUnhandledExceptionFilter(ReporterFaultFilter);
-    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
-
-    for (int n = 0; n + 1 < argc; ++n)
-    {
-        if (!wcscmp(argv[n], L"-p"))
-            pid = wcstoul(argv[++n], NULL, 10);
-        else if (!wcscmp(argv[n], L"-t"))
-            tid = wcstoul(argv[++n], NULL, 10);
-        else if (!wcscmp(argv[n], L"-x"))
-            RemotePointers = (ULONG_PTR)_wcstoui64(argv[++n], NULL, 16);
-    }
-    if (!pid || !tid || !RemotePointers)
-        return 1;
-
-    EXCEPTION_POINTERS Pointers;
-    if (!OpenCrashedProcess(data, pid, tid, RemotePointers, Pointers))
-        return 2;
-
-    /* Windows logs every reported crash, with or without local dumps */
-    WriteApplicationErrorEvent(data);
-
     LocalDumpSettings Settings;
     if (!ReadLocalDumpSettings(data.ProcessName, Settings) || Settings.Count == 0)
         return 0;
@@ -370,9 +348,9 @@ int WerReportMain(int argc, WCHAR** argv)
     /* Check the full names before anything is deleted */
     WCHAR DumpPath[MAX_PATH], ReportPath[MAX_PATH];
     if (FAILED(StringCchPrintfW(DumpPath, _countof(DumpPath), L"%s\\%s.%lu.dmp",
-                                Folder.c_str(), data.ProcessName.c_str(), pid)) ||
+                                Folder.c_str(), data.ProcessName.c_str(), data.ProcessID)) ||
         FAILED(StringCchPrintfW(ReportPath, _countof(ReportPath), L"%s\\%s.%lu.txt",
-                                Folder.c_str(), data.ProcessName.c_str(), pid)))
+                                Folder.c_str(), data.ProcessName.c_str(), data.ProcessID)))
     {
         return 3;
     }
@@ -405,5 +383,87 @@ int WerReportMain(int argc, WCHAR** argv)
     }
     ResumeOtherThreads();
 
+    if (DumpWritten)
+        WrittenDump = DumpPath;
+    if (ReportWritten)
+        WrittenReport = ReportPath;
     return (DumpWritten && ReportWritten) ? 0 : 4;
+}
+
+/*
+ * Tell the crashed process that the report is written; it then waits for the
+ * dialog without a time limit. Only a handle that is an event can be set.
+ */
+static bool SignalReported(HANDLE hProcess, ULONG_PTR RemoteEvent)
+{
+    HANDLE hEvent;
+    BOOL Set;
+
+    if (!RemoteEvent ||
+        !DuplicateHandle(hProcess, (HANDLE)RemoteEvent, GetCurrentProcess(), &hEvent, EVENT_MODIFY_STATE, FALSE, 0))
+    {
+        return false;
+    }
+    Set = SetEvent(hEvent);
+    CloseHandle(hEvent);
+    return Set != FALSE;
+}
+
+/*
+ * Options after -u: -p PID -t TID -x POINTERS (required); -ui asks the user
+ * after the report, -d offers to debug, -r EVENT is a handle in the crashed
+ * process to set once the report is written. With -ui the exit code is
+ * CRASH_REPORTER_CLOSE or CRASH_REPORTER_DEBUG; any other code makes kernel32
+ * show the classic hard error box instead.
+ */
+int WerReportMain(int argc, WCHAR** argv)
+{
+    DWORD pid = 0, tid = 0;
+    ULONG_PTR RemotePointers = 0, RemoteEvent = 0;
+    bool ShowUi = false, OfferDebug = false;
+    DumpData data;
+
+    SetUnhandledExceptionFilter(ReporterFaultFilter);
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+
+    for (int n = 0; n < argc; ++n)
+    {
+        if (!wcscmp(argv[n], L"-ui"))
+            ShowUi = true;
+        else if (!wcscmp(argv[n], L"-d"))
+            OfferDebug = true;
+        else if (n + 1 >= argc)
+            break;
+        else if (!wcscmp(argv[n], L"-p"))
+            pid = wcstoul(argv[++n], NULL, 10);
+        else if (!wcscmp(argv[n], L"-t"))
+            tid = wcstoul(argv[++n], NULL, 10);
+        else if (!wcscmp(argv[n], L"-x"))
+            RemotePointers = (ULONG_PTR)_wcstoui64(argv[++n], NULL, 16);
+        else if (!wcscmp(argv[n], L"-r"))
+            RemoteEvent = (ULONG_PTR)_wcstoui64(argv[++n], NULL, 16);
+    }
+    if (!pid || !tid || !RemotePointers)
+        return 1;
+
+    EXCEPTION_POINTERS Pointers;
+    if (!OpenCrashedProcess(data, pid, tid, RemotePointers, Pointers))
+        return 2;
+
+    /* Windows logs every reported crash, with or without local dumps */
+    ProblemSignature Signature;
+    GetProblemSignature(data, Signature);
+    WriteApplicationErrorEvent(data, Signature);
+
+    std::wstring DumpPath, ReportPath;
+    int Result = WriteLocalDumps(data, RemotePointers, Pointers, DumpPath, ReportPath);
+
+    if (!ShowUi)
+        return Result;
+
+    /* Without the signal kernel32 keeps its time limit, which could end the program during the dialog */
+    if (!SignalReported(data.ProcessHandle, RemoteEvent))
+        return 6;
+
+    return ShowCrashDialog(data, Signature, DumpPath.c_str(), ReportPath.c_str(), OfferDebug);
 }

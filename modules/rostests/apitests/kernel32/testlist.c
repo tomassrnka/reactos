@@ -45,6 +45,7 @@ extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LoadLibraryMachine(void);
 extern void func_LocalDumps(void);
+extern void func_CrashDialog(void);
 extern void func_LocaleNameToLCID(void);
 extern void func_LocalTimeZone(void);
 extern void func_lstrcpynW(void);
@@ -121,6 +122,7 @@ const struct test winetest_testlist[] =
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
     { "LocalDumps",                  func_LocalDumps },
+    { "CrashDialog",                 func_CrashDialog },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
     { "LocalTimeZone",               func_LocalTimeZone },
     { "lstrcpynW",                   func_lstrcpynW },
