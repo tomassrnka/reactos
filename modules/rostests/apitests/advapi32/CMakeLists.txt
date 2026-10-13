@@ -19,6 +19,7 @@ list(APPEND SOURCE
     ServiceArgs.c
     ServiceEnv.c
     ServiceNetwork.c
+    SetEntriesInAclOld.c
     SetNamedSecurityInfoInherit.c
     svchlp.c)
 
