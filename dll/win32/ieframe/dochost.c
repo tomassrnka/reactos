@@ -441,7 +441,8 @@ static void update_travellog(DocHost *This)
             return;
 
         This->travellog.size = 4;
-    }else if(This->travellog.size < This->travellog.position+1) {
+    }else if(This->travellog.size < This->travellog.position+2) {
+        /* Room for the new entry and the cleared one after it */
         travellog_entry_t *new_travellog;
 
         new_travellog = realloc(This->travellog.log, This->travellog.size * 2 * sizeof(*This->travellog.log));
