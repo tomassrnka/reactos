@@ -2864,9 +2864,12 @@ void FILEDLG95_OnOpenMessage(HWND hwnd, int idCaption, int idText)
 
 #ifdef __REACTOS__
 /* The return value needs LocalFree */
-static LPWSTR FILEDLG95_GetFallbackExtension(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile)
+static LPWSTR FILEDLG95_GetFallbackExtension(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile,
+                                             BOOL *pbFromFilter)
 {
     LPWSTR lpstrFilter, the_ext = NULL, pchDot = NULL;
+
+    *pbFromFilter = FALSE;
 
     /* Without lpstrDefExt, append no extension */
     if (!fodInfos->defext)
@@ -2885,7 +2888,10 @@ static LPWSTR FILEDLG95_GetFallbackExtension(FileOpenDlgInfos *fodInfos, LPWSTR 
         pchDot = wcschr(lpstrFilter, L'.');
 
         if (pchDot && pchDot[1] && !wcschr(pchDot, L'*') && !wcschr(pchDot, L'?'))
+        {
             the_ext = StrDupW(pchDot + 1);
+            *pbFromFilter = TRUE;
+        }
 
         if (pchSemicolon)
             *pchSemicolon = L';';
@@ -2906,10 +2912,13 @@ FILEDLG95_AddDotExtIfNeeded(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile)
     BOOL ret = FALSE;
     LPWSTR ext = PathFindExtensionW(lpstrPathAndFile);
     int PathLength = lstrlenW(lpstrPathAndFile);
-    LPWSTR the_ext = FILEDLG95_GetFallbackExtension(fodInfos, lpstrPathAndFile);
+    BOOL bFromFilter;
+    LPWSTR the_ext = FILEDLG95_GetFallbackExtension(fodInfos, lpstrPathAndFile, &bFromFilter);
 
+    /* The default extension is only for a name that has none;
+     * the selected filter decides otherwise */
     if (the_ext && *the_ext &&
-        (*ext == UNICODE_NULL || lstrcmpiW(ext + 1, the_ext) != 0))
+        (*ext == UNICODE_NULL || (bFromFilter && lstrcmpiW(ext + 1, the_ext) != 0)))
     {
         if (strlenW(lpstrPathAndFile) + 1 + strlenW(the_ext) + 1 <=
             fodInfos->ofnInfos->nMaxFile)
