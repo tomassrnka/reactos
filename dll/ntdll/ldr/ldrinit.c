@@ -1384,13 +1384,28 @@ LdrpGetTlsDirectory(
     _Out_ PIMAGE_TLS_DIRECTORY *TlsDirectory)
 {
     PIMAGE_NT_HEADERS NtHeaders;
-    ULONG Rva;
+    ULONG Rva = 0, Count = 0;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     *TlsDirectory = NULL;
     NtHeaders = RtlImageNtHeader(LdrEntry->DllBase);
-    if (!NtHeaders || NtHeaders->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_TLS)
-        return STATUS_SUCCESS;
-    Rva = NtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress;
+    if (!NtHeaders)
+        return STATUS_INVALID_IMAGE_FORMAT;
+
+    /* The optional header can be in a page that faults */
+    _SEH2_TRY
+    {
+        Count = NtHeaders->OptionalHeader.NumberOfRvaAndSizes;
+        if (Count > IMAGE_DIRECTORY_ENTRY_TLS)
+            Rva = NtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        return Status;
     if (!Rva)
         return STATUS_SUCCESS;
 
@@ -3385,7 +3400,12 @@ LdrpInit(PCONTEXT Context,
             /* This is a new thread initializing; one that cannot get its TLS ends here */
             Status = LdrpInitializeThread(Context);
             if (!NT_SUCCESS(Status))
+            {
+                /* No DLL saw it attach, so none is told it detaches; free what the thread has, its stack included */
+                RtlFreeThreadActivationContextStack();
+                NtCurrentTeb()->FreeStackOnTermination = TRUE;
                 NtTerminateThread(NtCurrentThread(), Status);
+            }
         }
     }
 

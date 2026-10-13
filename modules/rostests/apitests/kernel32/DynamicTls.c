@@ -139,8 +139,10 @@ static VOID ProtectedTemplateChild(VOID)
     hThread = CreateThread(NULL, 0, CheckBlockThread, NULL, 0, NULL);
     if (!hThread)
         ExitProcess(0xD4);
-    WaitForSingleObject(hThread, 10000);
-    GetExitCodeThread(hThread, &Code);
+    if (WaitForSingleObject(hThread, 10000) != WAIT_OBJECT_0)
+        ExitProcess(0xD5);
+    if (!GetExitCodeThread(hThread, &Code))
+        ExitProcess(0xD6);
     ExitProcess(Code);
 }
 
@@ -159,15 +161,22 @@ static VOID TestProtectedTemplate(PCSTR Self)
     }
     if (WaitForSingleObject(ProcessInfo.hProcess, 30000) != WAIT_OBJECT_0)
     {
-        trace("The child did not exit\n");
+        ok(0, "The child did not exit\n");
         TerminateProcess(ProcessInfo.hProcess, 0xDEAD);
         WaitForSingleObject(ProcessInfo.hProcess, 10000);
     }
-    GetExitCodeProcess(ProcessInfo.hProcess, &Code);
+    ok(GetExitCodeProcess(ProcessInfo.hProcess, &Code), "GetExitCodeProcess failed: %lu\n", GetLastError());
     trace("Unreadable template, new thread: child exit code 0x%lx\n", Code);
-    ok(Code < 0xD1 || Code > 0xD4, "The child failed to set up: 0x%lx\n", Code);
-    /* The thread may fail to start, or the process may end: it must not run without its block */
-    ok(Code != THREAD_HAD_NO_BLOCK, "A thread ran without its TLS block\n");
+    ok(Code < 0xD1 || Code > 0xD6, "The child failed to set up or to wait: 0x%lx\n", Code);
+    /*
+     * The thread must not run without its block. Allowed: it ends before it
+     * runs (ReactOS: with the status, here STATUS_NO_MEMORY), or the process
+     * ends (Windows: 0xC0000005).
+     */
+    ok(Code != THREAD_HAD_NO_BLOCK && Code != THREAD_HAD_BLOCK && Code != 0xDEAD && Code != STILL_ACTIVE,
+       "Child exit code 0x%lx\n", Code);
+    if (is_reactos())
+        ok(Code == 0xC0000017 /* STATUS_NO_MEMORY */, "Child exit code 0x%lx, expected the thread's status\n", Code);
     CloseHandle(ProcessInfo.hProcess);
     CloseHandle(ProcessInfo.hThread);
 }
