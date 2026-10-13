@@ -632,9 +632,187 @@ GetProcessPreferredUILanguages(
 }
 #endif
 
+#define MAX_UI_LANGUAGES 8
+
+/* Distinct UI languages in order of preference: the identifier (0 for a parent
+ * without one) and the locale name (empty for a language without a name) */
+typedef struct _UI_LANGUAGE_LIST
+{
+    ULONG Count;
+    LANGID Ids[MAX_UI_LANGUAGES];
+    BOOLEAN IsParent[MAX_UI_LANGUAGES];
+    WCHAR Names[MAX_UI_LANGUAGES][LOCALE_NAME_MAX_LENGTH];
+} UI_LANGUAGE_LIST, *PUI_LANGUAGE_LIST;
+
+static
+VOID
+AddUILanguageEntry(
+    _Inout_ PUI_LANGUAGE_LIST List,
+    _In_ LANGID Id,
+    _In_ PCWSTR Name,
+    _In_ BOOLEAN IsParent)
+{
+    ULONG i;
+
+    if (List->Count >= MAX_UI_LANGUAGES)
+        return;
+
+    for (i = 0; i < List->Count; i++)
+    {
+        if ((Id && List->Ids[i] == Id) ||
+            (Name[0] && _wcsicmp(List->Names[i], Name) == 0))
+        {
+            return;
+        }
+    }
+
+    List->Ids[List->Count] = Id;
+    List->IsParent[List->Count] = IsParent;
+    lstrcpynW(List->Names[List->Count], Name, LOCALE_NAME_MAX_LENGTH);
+    List->Count++;
+}
+
+/* Adds a language and, if asked, its chain of parent languages: the parent its
+ * locale data names, then each name without its last part (zh-TW, zh-Hant, zh) */
+static
+VOID
+AddUILanguage(
+    _Inout_ PUI_LANGUAGE_LIST List,
+    _In_ LANGID Language,
+    _In_ BOOLEAN WithParents)
+{
+    WCHAR Name[LOCALE_NAME_MAX_LENGTH], Parent[LOCALE_NAME_MAX_LENGTH];
+    LCID Lcid = MAKELCID(Language, SORT_DEFAULT);
+    PWSTR Dash;
+    ULONG Depth;
+
+    if (Language == 0)
+        return;
+
+    /* Locales missing from the RTL table still have a name in their NLS data */
+    if (LCIDToLocaleName(Lcid, Name, _countof(Name), LOCALE_ALLOW_NEUTRAL_NAMES) <= 1 &&
+        GetLocaleInfoW(Lcid, LOCALE_SNAME, Name, _countof(Name)) <= 1)
+    {
+        Name[0] = UNICODE_NULL;
+    }
+
+    AddUILanguageEntry(List, Language, Name, FALSE);
+    if (!WithParents || !Name[0])
+        return;
+
+    if (GetLocaleInfoW(Lcid, LOCALE_SPARENT, Parent, _countof(Parent)) <= 1 ||
+        _wcsicmp(Parent, Name) == 0)
+    {
+        lstrcpynW(Parent, Name, _countof(Parent));
+        Dash = wcsrchr(Parent, L'-');
+        if (!Dash)
+            return;
+        *Dash = UNICODE_NULL;
+    }
+
+    for (Depth = 0; Depth < 3 && Parent[0]; Depth++)
+    {
+        LCID ParentLcid = LocaleNameToLCID(Parent, LOCALE_ALLOW_NEUTRAL_NAMES);
+
+        AddUILanguageEntry(List, ParentLcid ? LANGIDFROMLCID(ParentLcid) : 0, Parent, TRUE);
+
+        Dash = wcsrchr(Parent, L'-');
+        if (!Dash)
+            break;
+        *Dash = UNICODE_NULL;
+    }
+}
+
+/* Writes a language list as a double null-terminated multi-string of
+ * hexadecimal language identifiers or of locale names */
+static
+BOOL
+FormatUILanguages(
+    _In_ PUI_LANGUAGE_LIST List,
+    _In_ DWORD dwFlags,
+    _Out_ PULONG pulNumLanguages,
+    _Out_writes_opt_(*pcchLanguagesBuffer) PZZWSTR pwszLanguagesBuffer,
+    _Inout_ PULONG pcchLanguagesBuffer)
+{
+    WCHAR Ids[MAX_UI_LANGUAGES][5];
+    PCWSTR Strings[MAX_UI_LANGUAGES];
+    ULONG Lengths[MAX_UI_LANGUAGES];
+    ULONG i, Written = 0, Needed = 1;
+    PWSTR Out;
+
+    if (*pcchLanguagesBuffer && !pwszLanguagesBuffer)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    for (i = 0; i < List->Count; i++)
+    {
+        if (dwFlags & MUI_LANGUAGE_ID)
+        {
+            static const WCHAR Hex[] = L"0123456789ABCDEF";
+            LANGID Id = List->Ids[i];
+
+            /* A parent without an identifier is only an extra fallback */
+            if (!Id)
+                continue;
+
+            Ids[Written][0] = Hex[(Id >> 12) & 0xF];
+            Ids[Written][1] = Hex[(Id >> 8) & 0xF];
+            Ids[Written][2] = Hex[(Id >> 4) & 0xF];
+            Ids[Written][3] = Hex[Id & 0xF];
+            Ids[Written][4] = UNICODE_NULL;
+            Strings[Written] = Ids[Written];
+            Lengths[Written] = 4;
+        }
+        else
+        {
+            if (!List->Names[i][0])
+            {
+                if (List->IsParent[i])
+                    continue;
+                SetLastError(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            }
+            Strings[Written] = List->Names[i];
+            Lengths[Written] = (ULONG)wcslen(List->Names[i]);
+        }
+        Needed += Lengths[Written] + 1;
+        Written++;
+    }
+
+    /* An empty list is still a terminated multi-string */
+    if (Written == 0)
+        Needed = 2;
+
+    if (pwszLanguagesBuffer)
+    {
+        if (*pcchLanguagesBuffer < Needed)
+        {
+            *pcchLanguagesBuffer = Needed;
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+
+        Out = pwszLanguagesBuffer;
+        for (i = 0; i < Written; i++)
+        {
+            RtlCopyMemory(Out, Strings[i], (Lengths[i] + 1) * sizeof(WCHAR));
+            Out += Lengths[i] + 1;
+        }
+        *Out = UNICODE_NULL;
+        if (Written == 0)
+            Out[1] = UNICODE_NULL;
+    }
+
+    *pulNumLanguages = Written;
+    *pcchLanguagesBuffer = Needed;
+    return TRUE;
+}
+
 /*
-* @unimplemented
-*/
+ * @implemented
+ */
 BOOL
 WINAPI
 GetSystemPreferredUILanguages(
@@ -643,13 +821,23 @@ GetSystemPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UI_LANGUAGE_LIST List;
+
+    List.Count = 0;
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_MACHINE_LANGUAGE_SETTINGS)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    AddUILanguage(&List, GetSystemDefaultUILanguage(), FALSE);
+    return FormatUILanguages(&List, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -659,9 +847,45 @@ GetThreadPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UI_LANGUAGE_LIST List;
+
+    List.Count = 0;
+    if ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* No thread or process preferred languages can be set yet, so the list
+     * is the user language followed by the system language as fallbacks,
+     * the fallbacks with their parent languages */
+    switch (dwFlags & (MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK | MUI_THREAD_LANGUAGES))
+    {
+        case 0:
+        case MUI_MERGE_USER_FALLBACK:
+            AddUILanguage(&List, GetUserDefaultUILanguage(), FALSE);
+            AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
+            break;
+
+        case MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK:
+            AddUILanguage(&List, GetUserDefaultUILanguage(), TRUE);
+            AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
+            break;
+
+        case MUI_MERGE_SYSTEM_FALLBACK:
+            AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
+            break;
+
+        case MUI_THREAD_LANGUAGES:
+            break;
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+    }
+
+    return FormatUILanguages(&List, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
@@ -695,7 +919,7 @@ GetUILanguageInfo(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -705,9 +929,19 @@ GetUserPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UI_LANGUAGE_LIST List;
+
+    List.Count = 0;
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    AddUILanguage(&List, GetUserDefaultUILanguage(), FALSE);
+    return FormatUILanguages(&List, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
