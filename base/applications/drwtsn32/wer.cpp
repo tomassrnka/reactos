@@ -1,7 +1,7 @@
 /*
  * PROJECT:     Dr. Watson crash reporter
  * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
- * PURPOSE:     Report an unhandled exception without a debugger (LocalDumps)
+ * PURPOSE:     Report an unhandled exception without a debugger (event log, LocalDumps)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -352,6 +352,9 @@ int WerReportMain(int argc, WCHAR** argv)
     EXCEPTION_POINTERS Pointers;
     if (!OpenCrashedProcess(data, pid, tid, RemotePointers, Pointers))
         return 2;
+
+    /* Windows logs every reported crash, with or without local dumps */
+    WriteApplicationErrorEvent(data);
 
     LocalDumpSettings Settings;
     if (!ReadLocalDumpSettings(data.ProcessName, Settings) || Settings.Count == 0)

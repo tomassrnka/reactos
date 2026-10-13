@@ -16,6 +16,9 @@
 
 #include <reactos/manifest_exe.rc>
 
+/* Messages of the Application Error event source */
+#include <drwtsnmsg.rc>
+
 /* UTF-8 */
 #pragma code_page(65001)
 
