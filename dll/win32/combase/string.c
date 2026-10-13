@@ -384,6 +384,11 @@ HRESULT WINAPI WindowsConcatString(HSTRING str1, HSTRING str2, HSTRING *out)
         *out = NULL;
         return S_OK;
     }
+#ifdef __REACTOS__
+    /* The sum of the lengths must not wrap */
+    if (priv2->header.length > 0xFFFFFFFF - priv1->header.length)
+        return E_OUTOFMEMORY;
+#endif
     if (!alloc_string(priv1->header.length + priv2->header.length, out))
         return E_OUTOFMEMORY;
     priv = impl_from_HSTRING(*out);

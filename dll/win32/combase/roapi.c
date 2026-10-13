@@ -425,8 +425,13 @@ HRESULT WINAPI RoGetApartmentIdentifier(UINT64 *identifier)
     if (!identifier)
         return E_INVALIDARG;
 
+#ifdef __REACTOS__
+    /* There is no apartment identifier to give: do not hand out the same made-up one for every apartment */
+    return E_NOTIMPL;
+#else
     *identifier = 0xdeadbeef;
     return S_OK;
+#endif
 }
 
 /***********************************************************************
@@ -461,9 +466,18 @@ HRESULT WINAPI RoGetServerActivatableClasses(HSTRING name, HSTRING **classes, DW
 {
     FIXME("(%p, %p, %p): stub\n", name, classes, count);
 
+#ifdef __REACTOS__
+    /* No enumeration: give back empty outputs and say so */
+    if (classes)
+        *classes = NULL;
+    if (count)
+        *count = 0;
+    return E_NOTIMPL;
+#else
     if (count)
         *count = 0;
     return S_OK;
+#endif
 }
 
 /***********************************************************************
@@ -533,7 +547,12 @@ BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
 HRESULT WINAPI RoSetErrorReportingFlags(UINT32 flags)
 {
     FIXME("(%08x): stub\n", flags);
+#ifdef __REACTOS__
+    /* The flags would not be honoured */
+    return E_NOTIMPL;
+#else
     return S_OK;
+#endif
 }
 
 /***********************************************************************
