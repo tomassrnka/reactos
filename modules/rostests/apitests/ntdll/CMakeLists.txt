@@ -60,6 +60,7 @@ list(APPEND SOURCE
     NtCreateFile.c
     NtCreateKey.c
     NtCreateProfile.c
+    NtCreateSectionImage.c
     NtCreateThread.c
     NtDeleteKey.c
     NtDuplicateObject.c

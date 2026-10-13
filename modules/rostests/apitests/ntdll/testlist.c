@@ -48,6 +48,7 @@ extern void func_NtCreateDirectoryObject(void);
 extern void func_NtCreateFile(void);
 extern void func_NtCreateKey(void);
 extern void func_NtCreateProfile(void);
+extern void func_NtCreateSectionImage(void);
 extern void func_NtCreateThread(void);
 extern void func_NtDeleteKey(void);
 extern void func_NtDuplicateObject(void);
@@ -206,6 +207,7 @@ const struct test winetest_testlist[] =
     { "NtCreateFile",                   func_NtCreateFile },
     { "NtCreateKey",                    func_NtCreateKey },
     { "NtCreateProfile",                func_NtCreateProfile },
+    { "NtCreateSectionImage",           func_NtCreateSectionImage },
     { "NtCreateThread",                 func_NtCreateThread },
     { "NtDeleteKey",                    func_NtDeleteKey },
     { "NtDuplicateObject",              func_NtDuplicateObject },
