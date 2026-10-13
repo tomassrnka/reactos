@@ -81,6 +81,7 @@ struct seh_function
 };
 
 static std::unordered_map<struct function*, struct seh_function*> func_seh_map = {};
+static bool have_seh_functions = false;
 
 static
 struct seh_function*
@@ -264,8 +265,10 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
     if (search == func_seh_map.end())
         return;
 
-    /* Keep the details until final code generation provides the outgoing area. */
+    /* Template instantiations inherit the completed assembler statement. */
     seh_function* seh_fun = search->second;
+    func_seh_map.erase(search);
+    have_seh_functions = true;
 
     make_seh_function_locals_volatile(fndef);
 
@@ -304,25 +307,22 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
             TREE_STRING_LENGTH(seh_fun->asm_header_text));
 
     trace(stderr, "ASM: %s\n", asm_str.str().c_str());
+    delete seh_fun;
 }
 
 /* A funclet uses its parent's RBP for locals but the trampoline's RSP for
- * calls. Reserve the largest outgoing argument area used by any SEH function
- * in this translation unit, including arguments beyond the four registers. */
+ * calls. Reserve the largest outgoing argument area in this translation unit.
+ * Measuring every emitted function also covers template instantiations and
+ * compiler clones, which have different function objects from the parser. */
 static HOST_WIDE_INT seh_outgoing_size = 32;
-static bool have_seh_functions = false;
 
 static
 void
-finish_seh_codegen(void* event_data, void* UNUSED user_data)
+record_outgoing_arguments(void* event_data, void* UNUSED user_data)
 {
     /* final releases the RTL state; read it while constructing the prologue. */
     opt_pass* pass = (opt_pass*)event_data;
-    if (strcmp(pass->name, "pro_and_epilogue") != 0)
-        return;
-
-    auto search = func_seh_map.find(cfun);
-    if (search == func_seh_map.end())
+    if (!pass->name || strcmp(pass->name, "pro_and_epilogue") != 0)
         return;
 
 #if GCCPLUGIN_VERSION_MAJOR >= 8
@@ -332,9 +332,6 @@ finish_seh_codegen(void* event_data, void* UNUSED user_data)
 #endif
     if (size > seh_outgoing_size)
         seh_outgoing_size = size;
-    have_seh_functions = true;
-    delete search->second;
-    func_seh_map.erase(search);
 }
 
 static
@@ -346,7 +343,8 @@ emit_seh_trampoline(void* UNUSED event_data, void* UNUSED user_data)
 
     /* Eight pushes preserve alignment; include the return address when
      * aligning the outgoing area to the Windows x64 calling convention. */
-    HOST_WIDE_INT allocation = ((seh_outgoing_size + 15) & ~15) + 8;
+    HOST_WIDE_INT xmm_offset = (seh_outgoing_size + 15) & ~15;
+    HOST_WIDE_INT allocation = xmm_offset + 10 * 16 + 8;
     fprintf(asm_out_file,
         "\n\t.text\n\t.p2align 4, 0x90\n"
         "\t.seh_proc __seh2_global_filter_func\n"
@@ -371,14 +369,27 @@ emit_seh_trampoline(void* UNUSED event_data, void* UNUSED user_data)
     }
     fprintf(asm_out_file,
         "\tsub $" HOST_WIDE_INT_PRINT_DEC ", %%rsp\n"
-        "\t.seh_stackalloc " HOST_WIDE_INT_PRINT_DEC "\n"
+        "\t.seh_stackalloc " HOST_WIDE_INT_PRINT_DEC "\n",
+        allocation, allocation);
+    /* Cleanup calls have the same nonvolatile-register contract as any C call. */
+    for (unsigned int reg = 6; reg <= 15; ++reg)
+    {
+        HOST_WIDE_INT offset = xmm_offset + (reg - 6) * 16;
+        fprintf(asm_out_file,
+            "\tmovaps %%xmm%u, " HOST_WIDE_INT_PRINT_DEC "(%%rsp)\n"
+            "\t.seh_savexmm %%xmm%u, " HOST_WIDE_INT_PRINT_DEC "\n",
+            reg, offset, reg, offset);
+    }
+    fprintf(asm_out_file,
         "\t.seh_endprologue\n"
         "\tsub %%rax, %%rdx\n"
         "\tmov %%rdx, %%rbp\n"
         "\tjmp *%%r8\n"
-        "__seh2_global_filter_func_exit:\n"
-        "\tadd $" HOST_WIDE_INT_PRINT_DEC ", %%rsp\n",
-        allocation, allocation, allocation);
+        "__seh2_global_filter_func_exit:\n");
+    for (unsigned int reg = 6; reg <= 15; ++reg)
+        fprintf(asm_out_file, "\tmovaps " HOST_WIDE_INT_PRINT_DEC "(%%rsp), %%xmm%u\n",
+                xmm_offset + (reg - 6) * 16, reg);
+    fprintf(asm_out_file, "\tadd $" HOST_WIDE_INT_PRINT_DEC ", %%rsp\n", allocation);
     for (int i = 7; i >= 0; --i)
         fprintf(asm_out_file, "\tpop %%%s\n", saved[i]);
     fprintf(asm_out_file, "\tret\n\t.seh_endproc\n");
@@ -406,7 +417,7 @@ int plugin_init(struct plugin_name_args   *info,  /* Argument infor */
     register_callback(info->base_name, PLUGIN_PRAGMAS, register_seh_pragmas, NULL);
     register_callback(info->base_name, PLUGIN_FINISH_PARSE_FUNCTION, finish_seh_function, NULL);
 
-    register_callback(info->base_name, PLUGIN_PASS_EXECUTION, finish_seh_codegen, NULL);
+    register_callback(info->base_name, PLUGIN_PASS_EXECUTION, record_outgoing_arguments, NULL);
     register_callback(info->base_name, PLUGIN_FINISH_UNIT, emit_seh_trampoline, NULL);
 
     return 0;

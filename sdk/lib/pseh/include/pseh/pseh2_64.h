@@ -18,7 +18,8 @@ struct _SEH$$_EXCEPTION_POINTERS
 };
 
 /* The compiler plugin emits the funclet trampoline after it knows the largest
- * outgoing argument area used by the functions in this translation unit. */
+ * outgoing argument area in this translation unit. The trampoline preserves
+ * both integer and XMM nonvolatile registers when calling a funclet. */
 typedef void (*__seh2_finally_function)(int, void*);
 
 struct __seh2_scope
