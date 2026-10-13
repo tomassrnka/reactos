@@ -7,6 +7,7 @@ list(APPEND SOURCE
     BindIoCompletionCallback.c
     CancelIoEx.c
     ConsoleCP.c
+    CreateEventMutexEx.c
     CreateProcess.c
     CreateWaitableTimerEx.c
     DebugTrapInterrupts.c

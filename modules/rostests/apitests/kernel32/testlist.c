@@ -6,6 +6,7 @@ extern void func_ActCtxWithXmlNamespaces(void);
 extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
 extern void func_ConsoleCP(void);
+extern void func_CreateEventMutexEx(void);
 extern void func_CreateProcess(void);
 extern void func_CreateWaitableTimerEx(void);
 extern void func_DebugTrapInterrupts(void);
@@ -71,6 +72,7 @@ const struct test winetest_testlist[] =
     { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
     { "CancelIoEx",                  func_CancelIoEx },
     { "ConsoleCP",                   func_ConsoleCP },
+    { "CreateEventMutexEx",          func_CreateEventMutexEx },
     { "CreateProcess",               func_CreateProcess },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
