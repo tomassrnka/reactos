@@ -3168,6 +3168,14 @@ RtlSetEnvironmentVariable(
     _In_ PUNICODE_STRING Value
 );
 
+NTSYSAPI
+VOID
+NTAPI
+RtlSetCurrentEnvironment(
+    _In_ PWSTR NewEnvironment,
+    _Out_opt_ PWSTR *OldEnvironment
+);
+
 //
 // Critical Section/Resource Functions
 //
