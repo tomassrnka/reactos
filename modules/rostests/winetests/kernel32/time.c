@@ -778,12 +778,7 @@ static void test_GetDynamicTimeZoneInformation(void)
     TIME_ZONE_INFORMATION tzinfo;
     DWORD ret, ret2;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: GetDynamicTimeZoneInformation is a STUB on ReactOS */
-    if (is_reactos() || !pGetDynamicTimeZoneInformation)
-#else
     if (!pGetDynamicTimeZoneInformation)
-#endif
     {
         win_skip("GetDynamicTimeZoneInformation() is not supported.\n");
         return;
@@ -791,6 +786,13 @@ static void test_GetDynamicTimeZoneInformation(void)
 
     ret = pGetDynamicTimeZoneInformation(&dyninfo);
     ret2 = GetTimeZoneInformation(&tzinfo);
+#ifdef __REACTOS__
+    /* Automatic daylight saving adjustment disabled: no daylight saving time is in use */
+    if (dyninfo.DynamicDaylightTimeDisabled)
+        ok(ret == TIME_ZONE_ID_UNKNOWN, "got %ld with daylight saving disabled\n", ret);
+    /* FIXME: GetTimeZoneInformation does not look at DynamicDaylightTimeDisabled yet (it matters with transitions) */
+    todo_ros_if(dyninfo.DynamicDaylightTimeDisabled && tzinfo.DaylightDate.wMonth != 0)
+#endif
     ok(ret == ret2, "got %ld, %ld\n", ret, ret2);
 
     ok(dyninfo.Bias == tzinfo.Bias, "got %ld, %ld\n", dyninfo.Bias, tzinfo.Bias);
