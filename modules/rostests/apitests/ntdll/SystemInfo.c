@@ -415,20 +415,24 @@ QueryIdleTimes(
 /* Run once on each processor. An idle thread that was running there switches out,
    which adds its current run to the idle process on systems that count it at a context switch. */
 static
-void
+DWORD_PTR
 VisitProcessors(
     _In_ DWORD_PTR ProcessMask)
 {
-    DWORD_PTR Mask;
+    DWORD_PTR Mask, Visited = 0;
 
     for (Mask = 1; Mask != 0; Mask <<= 1)
     {
         if (!(ProcessMask & Mask))
             continue;
         if (SetThreadAffinityMask(GetCurrentThread(), Mask))
+        {
             Sleep(1);
+            Visited |= Mask;
+        }
     }
     SetThreadAffinityMask(GetCurrentThread(), ProcessMask);
+    return Visited;
 }
 
 static
@@ -440,7 +444,7 @@ Test_ProcessCycleTime(void)
     LONGLONG Time1, Time2, Idle1[MAX_PROCESSORS], Idle2[MAX_PROCESSORS];
     LARGE_INTEGER Qpc1, Qpc2, Frequency;
     SYSTEM_INFO SystemInfo;
-    DWORD_PTR ProcessMask, SystemMask;
+    DWORD_PTR ProcessMask, SystemMask, Visited;
     DWORD Start;
     ULONG Try, i;
 
@@ -453,10 +457,18 @@ Test_ProcessCycleTime(void)
 
     GetSystemInfo(&SystemInfo);
     QueryPerformanceFrequency(&Frequency);
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask) || !ProcessMask ||
+        SystemInfo.dwNumberOfProcessors > MAX_PROCESSORS)
+    {
+        skip("Cannot get the processors of the process\n");
+        return;
+    }
 
     /* A spinning process is charged about the time stamp counter ticks of the time it ran.
+       The spin stays on one processor, so that both counter reads come from the same counter.
        The waits let the thread's current run reach the process total on systems that add it
        at a context switch. */
+    SetThreadAffinityMask(GetCurrentThread(), ProcessMask & (~ProcessMask + 1));
     Sleep(10);
     if (!QueryProcessCycles(Self, &Cycles1, &Time1))
         return;
@@ -468,6 +480,7 @@ Test_ProcessCycleTime(void)
     Tsc2 = __rdtsc();
     QueryPerformanceCounter(&Qpc2);
     Sleep(10);
+    SetThreadAffinityMask(GetCurrentThread(), ProcessMask);
     if (!QueryProcessCycles(Self, &Cycles2, &Time2))
         return;
 
@@ -487,27 +500,23 @@ Test_ProcessCycleTime(void)
     /* Idle processors are charged to the idle process. The idle time is sampled inside the
        cycle sample, and every processor is visited before each cycle sample. Try again while
        no processor was idle. */
-    if (!GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask) ||
-        SystemInfo.dwNumberOfProcessors > MAX_PROCESSORS)
-    {
-        skip("Cannot visit the processors\n");
-        return;
-    }
     for (Try = 0; Try < 10; Try++)
     {
-        VisitProcessors(ProcessMask);
+        Visited = VisitProcessors(ProcessMask);
         if (!QueryProcessCycles(NULL, &Cycles1, &Time1) ||
             !QueryIdleTimes(SystemInfo.dwNumberOfProcessors, Idle1))
             return;
         Sleep(500);
         if (!QueryIdleTimes(SystemInfo.dwNumberOfProcessors, Idle2))
             return;
-        VisitProcessors(ProcessMask);
+        Visited &= VisitProcessors(ProcessMask);
         if (!QueryProcessCycles(NULL, &Cycles2, &Time2))
             return;
+
+        /* Only a processor visited both times has published its idle cycles */
         for (i = 0; i < SystemInfo.dwNumberOfProcessors; i++)
         {
-            if (Idle2[i] - Idle1[i] >= 100 * 10000)
+            if ((Visited & ((DWORD_PTR)1 << i)) && Idle2[i] - Idle1[i] >= 100 * 10000)
                 break;
         }
         if (i < SystemInfo.dwNumberOfProcessors)
