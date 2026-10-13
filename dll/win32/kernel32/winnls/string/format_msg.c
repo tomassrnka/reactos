@@ -55,9 +55,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(resource);
 
 struct format_args
 {
-    ULONG_PTR    *args;
-    __ms_va_list *list;
+    ULONG_PTR    *args;     /* args array, FORMAT_MESSAGE_ARGUMENT_ARRAY */
+    __ms_va_list *list;     /* args va_list */
     int           last;
+    UINT64       *arglist;  /* arguments fetched from the va_list */
 };
 
 /* Messages used by FormatMessage
@@ -146,14 +147,16 @@ static LPWSTR search_message( DWORD flags, HMODULE module, UINT id, WORD lang )
 /**********************************************************************
  *	get_arg    (internal)
  */
-static ULONG_PTR get_arg( int nr, DWORD flags, struct format_args *args )
+static UINT64 get_arg( int nr, DWORD flags, struct format_args *args, BOOL is64 )
 {
     if (nr == -1) nr = args->last + 1;
     if (args->list)
     {
-        if (!args->args) args->args = HeapAlloc( GetProcessHeap(), 0, 99 * sizeof(ULONG_PTR) );
+        if (!args->arglist) args->arglist = HeapAlloc( GetProcessHeap(), 0, 99 * sizeof(UINT64) );
         while (nr > args->last)
-            args->args[args->last++] = va_arg( *args->list, ULONG_PTR );
+            args->arglist[args->last++] = is64 ? va_arg( *args->list, UINT64 )
+                                               : va_arg( *args->list, ULONG_PTR );
+        return args->arglist[nr - 1];
     }
     if (nr > args->last) args->last = nr;
     return args->args[nr - 1];
@@ -168,16 +171,17 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
 {
     static const WCHAR fmt_u[] = {'%','u',0};
     WCHAR *wstring = NULL, *p, fmt[256];
-    ULONG_PTR arg;
+    UINT64 arg;
+    BOOL is64;
     int size;
 
     if (*format != '!')  /* simple string */
     {
-        arg = get_arg( insert, flags, args );
-        if (unicode_caller || !arg)
+        arg = get_arg( insert, flags, args, FALSE );
+        if (unicode_caller || !(ULONG_PTR)arg)
         {
             static const WCHAR nullW[] = {'(','n','u','l','l',')',0};
-            const WCHAR *str = (const WCHAR *)arg;
+            const WCHAR *str = (const WCHAR *)(ULONG_PTR)arg;
 
             if (!str) str = nullW;
             *result = HeapAlloc( GetProcessHeap(), 0, (strlenW(str) + 1) * sizeof(WCHAR) );
@@ -185,7 +189,7 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
         }
         else
         {
-            const char *str = (const char *)arg;
+            const char *str = (const char *)(ULONG_PTR)arg;
             DWORD length = MultiByteToWideChar( CP_ACP, 0, str, -1, NULL, 0 );
             *result = HeapAlloc( GetProcessHeap(), 0, length * sizeof(WCHAR) );
             MultiByteToWideChar( CP_ACP, 0, str, -1, *result, length );
@@ -197,6 +201,20 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
     p = fmt;
     *p++ = '%';
 
+    /* An I64 argument takes two slots of a va_list on a 32-bit system, also for the ones
+     * before it that are skipped */
+    {
+        LPCWSTR q = format;
+
+        while (*q == '0' || *q == '+' || *q == '-' || *q == ' ' || *q == '*' || *q == '#' ||
+               *q == '.' || isdigitW(*q))
+        {
+            q++;
+        }
+        is64 = sizeof(void *) == sizeof(int) && q[0] == 'I' && q[1] == '6' && q[2] == '4';
+    }
+    if (args->list && insert > 1) get_arg( insert - 1, flags, args, is64 );
+
     while (*format == '0' ||
            *format == '+' ||
            *format == '-' ||
@@ -206,7 +224,7 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
     {
         if (*format == '*')
         {
-            p += sprintfW( p, fmt_u, get_arg( insert, flags, args ));
+            p += sprintfW( p, fmt_u, (ULONG_PTR)get_arg( insert, flags, args, FALSE ));
             insert = -1;
             format++;
         }
@@ -219,7 +237,7 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
         *p++ = *format++;
         if (*format == '*')
         {
-            p += sprintfW( p, fmt_u, get_arg( insert, flags, args ));
+            p += sprintfW( p, fmt_u, (ULONG_PTR)get_arg( insert, flags, args, FALSE ));
             insert = -1;
             format++;
         }
@@ -229,7 +247,7 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
 
     /* replicate MS bug: drop an argument when using va_list with width/precision */
     if (insert == -1 && args->list) args->last--;
-    arg = get_arg( insert, flags, args );
+    arg = get_arg( insert, flags, args, is64 );
 
     /* check for ascii string format */
     if ((format[0] == 'h' && format[1] == 's') ||
@@ -237,9 +255,9 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
         (unicode_caller && format[0] == 'S') ||
         (!unicode_caller && format[0] == 's'))
     {
-        DWORD len = MultiByteToWideChar( CP_ACP, 0, (char *)arg, -1, NULL, 0 );
+        DWORD len = MultiByteToWideChar( CP_ACP, 0, (char *)(ULONG_PTR)arg, -1, NULL, 0 );
         wstring = HeapAlloc( GetProcessHeap(), 0, len * sizeof(WCHAR) );
-        MultiByteToWideChar( CP_ACP, 0, (char *)arg, -1, wstring, len );
+        MultiByteToWideChar( CP_ACP, 0, (char *)(ULONG_PTR)arg, -1, wstring, len );
         arg = (ULONG_PTR)wstring;
         *p++ = 's';
     }
@@ -272,7 +290,6 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
     {
         *p++ = 'c';
     }
-    /* FIXME: handle I64 etc. */
     else while (*format && *format != '!') *p++ = *format++;
 
     *p = 0;
@@ -280,7 +297,10 @@ static LPCWSTR format_insert( BOOL unicode_caller, int insert, LPCWSTR format,
     for (;;)
     {
         WCHAR *ret = HeapAlloc( GetProcessHeap(), 0, size * sizeof(WCHAR) );
-        int needed = snprintfW( ret, size, fmt, arg );
+        int needed;
+
+        if (is64) needed = snprintfW( ret, size, fmt, arg );
+        else needed = snprintfW( ret, size, fmt, (ULONG_PTR)arg );
         if (needed == -1 || needed >= size)
         {
             HeapFree( GetProcessHeap(), 0, ret );
@@ -512,12 +532,14 @@ DWORD WINAPI FormatMessageA(
     if (dwFlags & FORMAT_MESSAGE_ARGUMENT_ARRAY)
     {
         format_args.args = (ULONG_PTR *)args;
+        format_args.arglist = NULL;
         format_args.list = NULL;
         format_args.last = 0;
     }
     else
     {
         format_args.args = NULL;
+        format_args.arglist = NULL;
         format_args.list = args;
         format_args.last = 0;
     }
@@ -572,7 +594,7 @@ DWORD WINAPI FormatMessageA(
 failure:
     HeapFree(GetProcessHeap(),0,target);
     HeapFree(GetProcessHeap(),0,from);
-    if (!(dwFlags & FORMAT_MESSAGE_ARGUMENT_ARRAY)) HeapFree( GetProcessHeap(), 0, format_args.args );
+    HeapFree( GetProcessHeap(), 0, format_args.arglist );
     TRACE("-- returning %u\n", ret);
     return ret;
 }
@@ -610,12 +632,14 @@ DWORD WINAPI FormatMessageW(
     if (dwFlags & FORMAT_MESSAGE_ARGUMENT_ARRAY)
     {
         format_args.args = (ULONG_PTR *)args;
+        format_args.arglist = NULL;
         format_args.list = NULL;
         format_args.last = 0;
     }
     else
     {
         format_args.args = NULL;
+        format_args.arglist = NULL;
         format_args.list = args;
         format_args.last = 0;
     }
@@ -670,7 +694,7 @@ DWORD WINAPI FormatMessageW(
 failure:
     HeapFree(GetProcessHeap(),0,target);
     HeapFree(GetProcessHeap(),0,from);
-    if (!(dwFlags & FORMAT_MESSAGE_ARGUMENT_ARRAY)) HeapFree( GetProcessHeap(), 0, format_args.args );
+    HeapFree( GetProcessHeap(), 0, format_args.arglist );
     TRACE("-- returning %u\n", ret);
     return ret;
 }
