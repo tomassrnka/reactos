@@ -1732,6 +1732,7 @@ static HRESULT shellex_run_context_menu_default(IShellExtInit *obj,
     ici.lpVerb = MAKEINTRESOURCEA(def);
     ici.hwnd = sei->hwnd;
     ici.lpParametersW = sei->lpParameters;
+    ici.lpDirectoryW = sei->lpDirectory;
 
     r = cm->InvokeCommand((LPCMINVOKECOMMANDINFO)&ici);
 
