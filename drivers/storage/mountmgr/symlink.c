@@ -520,6 +520,7 @@ QuerySymbolicLinkNamesFromStorage(IN PDEVICE_EXTENSION DeviceExtension,
                                         NULL);
         if (!NT_SUCCESS(Status))
         {
+            *SymLinkCount = 0;
             return STATUS_NOT_FOUND;
         }
     }
@@ -764,6 +765,33 @@ RedirectSavedLink(IN PSAVED_LINK_INFORMATION SavedLinkInformation,
     }
 
     return FALSE;
+}
+
+/*
+ * Drops the saved link of that name, if any, without touching the link
+ * itself: it was recreated for the arriving device.
+ */
+VOID
+ForgetSavedLink(IN PSAVED_LINK_INFORMATION SavedLinkInformation,
+                IN PUNICODE_STRING DosName)
+{
+    PLIST_ENTRY NextEntry;
+    PSYMLINK_INFORMATION SymlinkInformation;
+
+    for (NextEntry = SavedLinkInformation->SymbolicLinksListHead.Flink;
+         NextEntry != &(SavedLinkInformation->SymbolicLinksListHead);
+         NextEntry = NextEntry->Flink)
+    {
+        SymlinkInformation = CONTAINING_RECORD(NextEntry, SYMLINK_INFORMATION, SymbolicLinksListEntry);
+
+        if (RtlEqualUnicodeString(DosName, &(SymlinkInformation->Name), TRUE))
+        {
+            RemoveEntryList(&(SymlinkInformation->SymbolicLinksListEntry));
+            FreePool(SymlinkInformation->Name.Buffer);
+            FreePool(SymlinkInformation);
+            return;
+        }
+    }
 }
 
 /*

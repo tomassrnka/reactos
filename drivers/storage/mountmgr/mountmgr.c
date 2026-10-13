@@ -1023,7 +1023,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
     /* If our device is a CD-ROM */
     if (RtlPrefixUnicodeString(&DeviceCdRom, &TargetDeviceName, TRUE))
     {
-        /* Not Status: it still holds the result of the storage query, checked below */
+        /* Not Status: the loop below reads the storage query's links */
         NTSTATUS LinkStatus;
 
         LinkTarget.Length = 0;
@@ -1115,6 +1115,12 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
         BOOLEAN IsVolName, IsLetter, Duplicate = FALSE;
         ULONG j;
 
+        /* An offline setting applies whichever of its names carries it */
+        if (IsOffline(&(SymLinks[i])))
+        {
+            IsOff = TRUE;
+        }
+
         IsVolName = MOUNTMGR_IS_VOLUME_NAME(&(SymLinks[i]));
         IsLetter = !IsVolName && IsDriveLetter(&(SymLinks[i]));
 
@@ -1128,11 +1134,26 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
             }
         }
 
-        /* A device has one drive letter at most */
-        if (Duplicate || (IsLetter && IsDrvLetter))
+        /* A device has one drive letter at most. Further stored volume names are
+         * left in the database but get no link: earlier versions could not read
+         * them back and wrote a new one at every boot, so a volume would be listed
+         * once per name. */
+        if (Duplicate || (IsLetter && IsDrvLetter) || (IsVolName && IsVolumeName))
         {
-            if (!Duplicate)
+            if (IsLetter && !Duplicate)
+            {
+                /* Remove a live link of that letter to this device too */
+                Status = QueryDeviceInformation(&(SymLinks[i]), &DeviceName, NULL, NULL, NULL, NULL, NULL, NULL);
+                if (NT_SUCCESS(Status))
+                {
+                    if (RtlEqualUnicodeString(&TargetDeviceName, &DeviceName, TRUE))
+                        GlobalDeleteSymbolicLink(&(SymLinks[i]));
+                    FreePool(DeviceName.Buffer);
+                }
+
                 DeleteFromLocalDatabase(&(SymLinks[i]), UniqueId);
+            }
+
             FreePool(SymLinks[i].Buffer);
             SymLinks[i].Buffer = NULL;
             continue;
@@ -1140,7 +1161,13 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
 
         /* And recreate the symlink to our device */
         Status = GlobalCreateSymbolicLink(&(SymLinks[i]), &TargetDeviceName);
-        if (!NT_SUCCESS(Status))
+        if (NT_SUCCESS(Status))
+        {
+            /* A saved link of that name would delete it when freed below */
+            if (SavedLinkInformation)
+                ForgetSavedLink(SavedLinkInformation, &(SymLinks[i]));
+        }
+        else
         {
             BOOLEAN Adopted = FALSE, OtherDevice = FALSE;
 
@@ -1180,12 +1207,6 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
             FreePool(SymLinks[i].Buffer);
             SymLinks[i].Buffer = NULL;
             continue;
-        }
-
-        /* Check if was offline */
-        if (IsOffline(&(SymLinks[i])))
-        {
-            IsOff = TRUE;
         }
 
         /* Only links that are in place count */
@@ -1294,6 +1315,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                 SymlinkInformation->Online = TRUE;
                 InsertTailList(&(DeviceInformation->SymbolicLinksListHead),
                                &(SymlinkInformation->SymbolicLinksListEntry));
+                IsDrvLetter = TRUE;
 
                 SendLinkCreated(&DriveLetter);
             }

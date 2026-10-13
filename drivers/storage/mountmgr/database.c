@@ -2074,8 +2074,7 @@ DeleteNoDriveLetterEntryRoutine(IN PWSTR ValueName,
                                 IN PVOID EntryContext)
 {
     PMOUNTDEV_UNIQUE_ID UniqueId = Context;
-
-    UNREFERENCED_PARAMETER(EntryContext);
+    PULONG Deleted = EntryContext;
 
     /* Ensure we have correct input */
     if (ValueName[0] != L'#' || ValueType != REG_BINARY ||
@@ -2087,9 +2086,12 @@ DeleteNoDriveLetterEntryRoutine(IN PWSTR ValueName,
     /* And then, if unique ID matching, delete entry */
     if (RtlCompareMemory(UniqueId->UniqueId, ValueData, ValueLength) == ValueLength)
     {
-        RtlDeleteRegistryValue(RTL_REGISTRY_ABSOLUTE,
-                               DatabasePath,
-                               ValueName);
+        if (NT_SUCCESS(RtlDeleteRegistryValue(RTL_REGISTRY_ABSOLUTE,
+                                              DatabasePath,
+                                              ValueName)))
+        {
+            (*Deleted)++;
+        }
     }
 
     return STATUS_SUCCESS;
@@ -2102,18 +2104,21 @@ VOID
 DeleteNoDriveLetterEntry(IN PMOUNTDEV_UNIQUE_ID UniqueId)
 {
     RTL_QUERY_REGISTRY_TABLE QueryTable[2];
-    ULONG Pass;
+    ULONG Deleted;
 
     RtlZeroMemory(QueryTable, sizeof(QueryTable));
     QueryTable[0].QueryRoutine = DeleteNoDriveLetterEntryRoutine;
+    QueryTable[0].EntryContext = &Deleted;
 
-    /* A deletion during the enumeration can skip the next value, so repeat */
-    for (Pass = 0; Pass < 8 && HasNoDriveLetterEntry(UniqueId); Pass++)
+    /* A deletion during the enumeration can skip the next value: repeat the
+     * pass while it deletes something (each pass shrinks a finite set) */
+    do
     {
+        Deleted = 0;
         RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
                                DatabasePath,
                                QueryTable,
                                UniqueId,
                                NULL);
-    }
+    } while (Deleted != 0);
 }
