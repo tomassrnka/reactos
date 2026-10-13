@@ -3530,6 +3530,91 @@ BOOL WINAPI ConvertSecurityDescriptorToStringSecurityDescriptorA(PSECURITY_DESCR
     }
 }
 
+/* Reads a number the way ConvertStringSidToSid does: decimal, or hexadecimal
+ * after 0x or 0X. A value that does not fit in 64 bits is the largest one. */
+static BOOL ParseSidNumber(LPCWSTR *pStr, ULONGLONG *pValue)
+{
+    LPCWSTR str = *pStr;
+    ULONGLONG value = 0;
+    DWORD base = 10;
+    BOOL bAny = FALSE, bOverflow = FALSE;
+
+    if (str[0] == '0' && (str[1] == 'x' || str[1] == 'X'))
+    {
+        base = 16;
+        str += 2;
+    }
+
+    for (;; str++)
+    {
+        DWORD digit;
+
+        if (*str >= '0' && *str <= '9')
+            digit = *str - '0';
+        else if (base == 16 && *str >= 'a' && *str <= 'f')
+            digit = *str - 'a' + 10;
+        else if (base == 16 && *str >= 'A' && *str <= 'F')
+            digit = *str - 'A' + 10;
+        else
+            break;
+
+        bAny = TRUE;
+        if (value > (~(ULONGLONG)0 - digit) / base)
+            bOverflow = TRUE;
+        else
+            value = value * base + digit;
+    }
+
+    if (!bAny)
+        return FALSE;
+
+    *pValue = bOverflow ? ~(ULONGLONG)0 : value;
+    *pStr = str;
+    return TRUE;
+}
+
+/* Converts the S-R-I-S... form of a SID. The whole string must be the SID.
+ * Returns ERROR_SUCCESS, ERROR_INVALID_SID or ERROR_NOT_ENOUGH_MEMORY. */
+static DWORD ParseNumericStringSid(LPCWSTR str, PSID *pSid)
+{
+    ULONGLONG revision, authority, value;
+    DWORD subAuthority[SID_MAX_SUB_AUTHORITIES], count = 0, i;
+    SID *sid;
+
+    if ((str[0] != 'S' && str[0] != 's') || str[1] != '-')
+        return ERROR_INVALID_SID;
+    str += 2;
+
+    if (!ParseSidNumber(&str, &revision) || revision > 0xff || *str++ != '-')
+        return ERROR_INVALID_SID;
+    if (!ParseSidNumber(&str, &authority) || authority > 0xffffffffffffULL)
+        return ERROR_INVALID_SID;
+
+    while (*str == '-')
+    {
+        str++;
+        if (count == SID_MAX_SUB_AUTHORITIES || !ParseSidNumber(&str, &value))
+            return ERROR_INVALID_SID;
+        subAuthority[count++] = value > 0xffffffffULL ? 0xffffffff : (DWORD)value;
+    }
+    if (*str || !count)
+        return ERROR_INVALID_SID;
+
+    sid = LocalAlloc(0, GetSidLengthRequired(count));
+    if (!sid)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    sid->Revision = (BYTE)revision;
+    sid->SubAuthorityCount = (BYTE)count;
+    for (i = 0; i < 6; i++)
+        sid->IdentifierAuthority.Value[i] = (BYTE)(authority >> (8 * (5 - i)));
+    for (i = 0; i < count; i++)
+        sid->SubAuthority[i] = subAuthority[i];
+
+    *pSid = sid;
+    return ERROR_SUCCESS;
+}
+
 /******************************************************************************
  * ConvertStringSidToSidW [ADVAPI32.@]
  */
@@ -3543,13 +3628,36 @@ BOOL WINAPI ConvertStringSidToSidW(LPCWSTR StringSid, PSID* Sid)
         SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     else if (!StringSid || !Sid)
         SetLastError(ERROR_INVALID_PARAMETER);
-    else if (ParseStringSidToSid(StringSid, NULL, &cBytes))
+    else if ((StringSid[0] == 'S' || StringSid[0] == 's') && StringSid[1] == '-')
     {
-        PSID pSid = *Sid = LocalAlloc(0, cBytes);
+        DWORD dwError = ParseNumericStringSid(StringSid, Sid);
 
-        bret = ParseStringSidToSid(StringSid, pSid, &cBytes);
+        bret = dwError == ERROR_SUCCESS;
         if (!bret)
-            LocalFree(*Sid);
+            SetLastError(dwError);
+    }
+    else
+    {
+        WCHAR constant[3];
+
+        /* A two-letter constant, in any case, and nothing else */
+        if (StringSid[0] && StringSid[1] && !StringSid[2])
+        {
+            constant[0] = toupperW(StringSid[0]);
+            constant[1] = toupperW(StringSid[1]);
+            constant[2] = 0;
+            if (ParseStringSidToSid(constant, NULL, &cBytes))
+            {
+                PSID pSid = *Sid = LocalAlloc(0, cBytes);
+
+                if (!pSid)
+                    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                else if (!(bret = ParseStringSidToSid(constant, pSid, &cBytes)))
+                    LocalFree(pSid);
+                return bret;
+            }
+        }
+        SetLastError(ERROR_INVALID_SID);
     }
     return bret;
 }
