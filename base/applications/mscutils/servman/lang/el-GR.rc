@@ -242,6 +242,11 @@ STRINGTABLE
 BEGIN
     IDS_SERVICES_STARTED "Ξεκίνησε"
     IDS_SERVICES_STOPPED "Σταμάτησε"
+    IDS_SERVICES_STARTING "Starting"
+    IDS_SERVICES_STOPPING "Stopping"
+    IDS_SERVICES_PAUSING "Pausing"
+    IDS_SERVICES_PAUSED "Paused"
+    IDS_SERVICES_RESUMING "Resuming"
     IDS_SERVICES_AUTO "Αυτόματη"
     IDS_SERVICES_MAN "Χειροκίνητη"
     IDS_SERVICES_DIS "Απενεργοποιημένο"

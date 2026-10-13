@@ -247,6 +247,11 @@ STRINGTABLE
 BEGIN
     IDS_SERVICES_STARTED "Spustená"
     IDS_SERVICES_STOPPED "Zastavená"
+    IDS_SERVICES_STARTING "Spúšťa sa"
+    IDS_SERVICES_STOPPING "Zastavuje sa"
+    IDS_SERVICES_PAUSING "Pozastavuje sa"
+    IDS_SERVICES_PAUSED "Pozastavená"
+    IDS_SERVICES_RESUMING "Obnovuje sa"
     IDS_SERVICES_AUTO "Automaticky"
     IDS_SERVICES_MAN "Ručne"
     IDS_SERVICES_DIS "Zablokovaná" //Disabled
