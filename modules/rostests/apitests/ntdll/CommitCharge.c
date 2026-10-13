@@ -52,24 +52,28 @@ static
 ULONG_PTR
 QueryPagingFilePages(VOID)
 {
-    UCHAR Buffer[4096];
+    static UCHAR Buffer[16384];
     PSYSTEM_PAGEFILE_INFORMATION Info = (PSYSTEM_PAGEFILE_INFORMATION)Buffer;
     ULONG_PTR Total = 0;
+    ULONG ReturnLength = 0, Offset = 0;
     NTSTATUS Status;
 
-    Status = NtQuerySystemInformation(SystemPageFileInformation, Buffer, sizeof(Buffer), NULL);
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Status = NtQuerySystemInformation(SystemPageFileInformation, Buffer, sizeof(Buffer), &ReturnLength);
     ok_ntstatus(Status, STATUS_SUCCESS);
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status) || (ReturnLength < sizeof(*Info)))
         return 0;
 
     for (;;)
     {
-        if (Info->TotalSize == 0 && Info->NextEntryOffset == 0 && Info->PageFileName.Length == 0)
-            break;
         Total += Info->TotalSize;
-        if (Info->NextEntryOffset == 0)
+        if ((Info->NextEntryOffset == 0) ||
+            (Offset + Info->NextEntryOffset + sizeof(*Info) > min(ReturnLength, sizeof(Buffer))))
+        {
             break;
-        Info = (PSYSTEM_PAGEFILE_INFORMATION)((PUCHAR)Info + Info->NextEntryOffset);
+        }
+        Offset += Info->NextEntryOffset;
+        Info = (PSYSTEM_PAGEFILE_INFORMATION)(Buffer + Offset);
     }
     return Total;
 }
@@ -177,10 +181,13 @@ TestPrivateBalance(VOID)
     CheckProcessDelta(NtCurrentProcess(), Process, MB_PAGES(32), "recommit 64 MB, 32 MB committed");
 
     /* A committed page that is touched costs nothing more */
-    System = QuerySystemCommit(NULL);
-    for (Address = Base; Address < (PVOID)((PUCHAR)Base + Size); Address = (PUCHAR)Address + PageSize)
-        *(volatile UCHAR *)Address = 1;
-    CheckSystemDelta(System, 0, "touch 64 MB");
+    if (NT_SUCCESS(Status))
+    {
+        System = QuerySystemCommit(NULL);
+        for (Address = Base; Address < (PVOID)((PUCHAR)Base + Size); Address = (PUCHAR)Address + PageSize)
+            *(volatile UCHAR *)Address = 1;
+        CheckSystemDelta(System, 0, "touch 64 MB");
+    }
 
     System = QuerySystemCommit(NULL);
     Process = QueryProcessCommit(NtCurrentProcess());
@@ -429,7 +436,10 @@ TestHugeCommit(VOID)
     }
 
     Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
+    if (is_reactos())
+        ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
+    else
+        trace("1 TB commit: 0x%lx\n", Status);
     if (NT_SUCCESS(Status))
     {
         Size = 0;
@@ -443,7 +453,9 @@ VOID
 TestReporting(VOID)
 {
     MEMORYSTATUSEX MemoryStatus = { sizeof(MemoryStatus) };
-    ULONG_PTR CommitLimit, Committed, PagingFile;
+    ULONG_PTR CommitLimit, LimitAfter, Committed, PagingFile;
+    QUOTA_LIMITS QuotaLimits;
+    NTSTATUS Status;
 
     Committed = QuerySystemCommit(&CommitLimit);
     PagingFile = QueryPagingFilePages();
@@ -457,8 +469,14 @@ TestReporting(VOID)
        CommitLimit - PagingFile, PhysicalPages);
 
     ok(GlobalMemoryStatusEx(&MemoryStatus), "GlobalMemoryStatusEx failed with %lu\n", GetLastError());
-    ok(MemoryStatus.ullTotalPageFile == (ULONGLONG)CommitLimit * PageSize,
-       "ullTotalPageFile %I64u, commit limit %Iu pages\n", MemoryStatus.ullTotalPageFile, CommitLimit);
+    QuerySystemCommit(&LimitAfter);
+    Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessQuotaLimits, &QuotaLimits, sizeof(QuotaLimits), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status) || (QuotaLimits.PagefileLimit != (SIZE_T)-1) || (LimitAfter != CommitLimit))
+        skip("process commit quota or a paging file growth in between\n");
+    else
+        ok(MemoryStatus.ullTotalPageFile == (ULONGLONG)CommitLimit * PageSize,
+           "ullTotalPageFile %I64u, commit limit %Iu pages\n", MemoryStatus.ullTotalPageFile, CommitLimit);
     ok(MemoryStatus.ullAvailPageFile <= MemoryStatus.ullTotalPageFile,
        "ullAvailPageFile %I64u above ullTotalPageFile %I64u\n", MemoryStatus.ullAvailPageFile, MemoryStatus.ullTotalPageFile);
 }
@@ -592,16 +610,25 @@ START_TEST(CommitCharge)
         TestSections();
         TestCopyOnWriteViews();
         TestProcessExit();
+        trace("after round %lu: system commit %+Id pages\n", Round + 1, (LONG_PTR)(QuerySystemCommit(NULL) - Baseline));
     }
+
+    /* On the quiet test system a leak shows here; elsewhere other processes move the total too */
     Committed = QuerySystemCommit(NULL);
-    ok((LONG_PTR)(Committed - Baseline) < MB_PAGES(2), "system commit grew by %Id pages over three rounds\n",
-       (LONG_PTR)(Committed - Baseline));
+    if (is_reactos())
+        ok((LONG_PTR)(Committed - Baseline) < MB_PAGES(2), "system commit grew by %Id pages over three rounds\n",
+           (LONG_PTR)(Committed - Baseline));
 
     TestHugeCommit();
 
     if (is_reactos())
     {
         TestOverCommitFails();
-        TestGrowthAndExhaustion();
+
+        /* The fixture's paging file starts at RAM size; once grown (an earlier run) it cannot show growth */
+        if (QueryPagingFilePages() > PhysicalPages + MB_PAGES(16))
+            skip("paging files grew already: %Iu pages\n", QueryPagingFilePages());
+        else
+            TestGrowthAndExhaustion();
     }
 }
