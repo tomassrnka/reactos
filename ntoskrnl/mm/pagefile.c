@@ -272,7 +272,10 @@ static KEVENT MiPagingFileGrowthDoneEvent;
 static volatile SIZE_T MiPagingFileGrowthShortfall;
 static volatile LONG MiPagingFileGrowthGeneration;
 static volatile LONG MiPagingFileGrowthActive;
-static BOOLEAN MiPagingFileGrowthThreadStarted;
+/* 0: no thread, 1: being created, 2: running */
+static volatile LONG MiPagingFileGrowthThreadState;
+/* Page the growth thread certifies new paging file space with, taken when it starts */
+static PFN_NUMBER MiPagingFileCertifyPage;
 
 /* At least this much is added at a time */
 #define MI_PAGING_FILE_GROWTH_MINIMUM ((64 * 1024 * 1024) >> PAGE_SHIFT)
@@ -350,13 +353,9 @@ MiCertifyPagingFilePage(
     PMDL Mdl = (PMDL)MdlBase;
     LARGE_INTEGER FileOffset;
     IO_STATUS_BLOCK Iosb;
-    PFN_NUMBER Page;
+    PFN_NUMBER Page = MiPagingFileCertifyPage;
     KEVENT Event;
     NTSTATUS Status;
-
-    Status = MmRequestPageMemoryConsumer(MC_SYSTEM, TRUE, &Page);
-    if (!NT_SUCCESS(Status))
-        return Status;
 
     FileOffset.QuadPart = (LONGLONG)FilePage * PAGE_SIZE;
 
@@ -389,7 +388,6 @@ MiCertifyPagingFilePage(
             MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
     }
 
-    MmReleasePageMemoryConsumer(MC_SYSTEM, Page);
     return Status;
 }
 
@@ -432,9 +430,11 @@ MiGrowPagingFiles(
 
         if (!NT_SUCCESS(Status))
         {
+            /* A shortage (an IRP, pool) may pass; anything else is the file system's answer */
             DPRINT1("Paging file %wZ cannot grow from %Iu to %Iu pages: 0x%lx\n",
                     &PagingFile->PageFileName, OldSize, OldSize + Growth, Status);
-            PagingFile->CannotGrow = TRUE;
+            if ((Status != STATUS_INSUFFICIENT_RESOURCES) && (Status != STATUS_NO_MEMORY))
+                PagingFile->CannotGrow = TRUE;
             continue;
         }
 
@@ -497,7 +497,7 @@ MiWaitForPagingFileGrowth(
      * A thread inside a critical or guarded region may hold a resource that
      * the file system needs to grow the file: it does not wait.
      */
-    if (!MiPagingFileGrowthThreadStarted ||
+    if ((MiPagingFileGrowthThreadState != 2) ||
         (KeGetCurrentIrql() != PASSIVE_LEVEL) ||
         (KeGetCurrentThread()->CombinedApcDisable != 0))
     {
@@ -1038,16 +1038,23 @@ EarlyQuit:
 
     MmSwapSpaceMessage = FALSE;
 
-    /* The thread that grows paging files toward their maximum */
-    if (!MiPagingFileGrowthThreadStarted)
+    /* The thread that grows paging files toward their maximum: one, ever */
+    if (InterlockedCompareExchange(&MiPagingFileGrowthThreadState, 1, 0) == 0)
     {
         HANDLE ThreadHandle;
 
-        if (NT_SUCCESS(PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL,
+        if ((MiPagingFileCertifyPage != 0 ||
+             NT_SUCCESS(MmRequestPageMemoryConsumer(MC_SYSTEM, TRUE, &MiPagingFileCertifyPage))) &&
+            NT_SUCCESS(PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL,
                                             MiPagingFileGrowthThread, NULL)))
         {
             ZwClose(ThreadHandle);
-            MiPagingFileGrowthThreadStarted = TRUE;
+            InterlockedExchange(&MiPagingFileGrowthThreadState, 2);
+        }
+        else
+        {
+            /* The next paging file creation tries again */
+            InterlockedExchange(&MiPagingFileGrowthThreadState, 0);
         }
     }
 

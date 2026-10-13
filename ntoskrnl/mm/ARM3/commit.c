@@ -154,17 +154,21 @@ MiChargeCommitWithGrowth(
 {
     ULONG Round;
 
+    if (MiChargeCommit(Pages, MiCommitUser))
+        return TRUE;
+
+    /*
+     * Growth means waiting for file I/O in another thread. A caller that
+     * holds a guarded or fast mutex may hold a lock that I/O needs. Every
+     * successful growth is followed by another attempt.
+     */
     for (Round = 0; Round < 4; Round++)
     {
-        if (MiChargeCommit(Pages, MiCommitUser))
-            return TRUE;
-
-        /*
-         * Growth means waiting for file I/O in another thread. A caller that
-         * holds a guarded or fast mutex may hold a lock that I/O needs.
-         */
         if (KeAreAllApcsDisabled() || !MiWaitForCommitGrowth(Pages))
             break;
+
+        if (MiChargeCommit(Pages, MiCommitUser))
+            return TRUE;
     }
 
     return FALSE;
