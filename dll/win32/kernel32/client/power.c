@@ -230,3 +230,97 @@ SetThreadExecutionState(EXECUTION_STATE esFlags)
 
     return esFlags;
 }
+
+static
+BOOL
+BasepValidateReasonContext(
+    _In_ PREASON_CONTEXT Context)
+{
+    if (!Context || Context->Version != POWER_REQUEST_CONTEXT_VERSION)
+        return FALSE;
+
+    switch (Context->Flags)
+    {
+        case POWER_REQUEST_CONTEXT_SIMPLE_STRING:
+        case POWER_REQUEST_CONTEXT_DETAILED_STRING:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
+static
+BOOL
+BasepPowerRequestAction(
+    _In_ HANDLE PowerRequest,
+    _In_ POWER_REQUEST_TYPE RequestType,
+    _In_ BOOLEAN SetAction)
+{
+    POWER_REQUEST_ACTION Action;
+    NTSTATUS Status;
+
+    Action.PowerRequestHandle = PowerRequest;
+    Action.RequestType = RequestType;
+    Action.SetAction = SetAction;
+
+    Status = NtPowerInformation(PowerRequestAction, &Action, sizeof(Action), NULL, 0);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+PowerCreateRequest(
+    _In_ PREASON_CONTEXT Context)
+{
+    HANDLE PowerRequest;
+    NTSTATUS Status;
+
+    if (!BasepValidateReasonContext(Context))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    Status = NtPowerInformation(PowerRequestCreate, NULL, 0, &PowerRequest, sizeof(PowerRequest));
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    return PowerRequest;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+PowerSetRequest(
+    _In_ HANDLE PowerRequest,
+    _In_ POWER_REQUEST_TYPE RequestType)
+{
+    return BasepPowerRequestAction(PowerRequest, RequestType, TRUE);
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+PowerClearRequest(
+    _In_ HANDLE PowerRequest,
+    _In_ POWER_REQUEST_TYPE RequestType)
+{
+    return BasepPowerRequestAction(PowerRequest, RequestType, FALSE);
+}

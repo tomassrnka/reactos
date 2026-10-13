@@ -36,6 +36,7 @@ list(APPEND SOURCE
     Mailslot.c
     MultiByteToWideChar.c
     Pipes.c
+    PowerRequest.c
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
     ReadFile.c
