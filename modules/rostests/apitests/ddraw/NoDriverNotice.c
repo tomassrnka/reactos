@@ -172,24 +172,32 @@ static void TestChild(void)
                            0, 0, 320, 240, NULL, NULL, NULL, NULL);
     ok(hwnd != NULL, "CreateWindowExA failed: %lu\n", GetLastError());
 
-    /* What a browser's graphics probe does, twice: each round loads and unloads the DLLs */
+    /*
+     * What a browser's graphics probe does, twice: each round loads and
+     * unloads the DLLs. The process starts without them (no static imports).
+     */
     for (Round = 1; Round <= 2; Round++)
     {
-        ProbeDirectDraw7(hwnd);
-        Dialogs = DialogsAfterWait();
-        ok(Dialogs == 0, "Round %d: DirectDraw showed %d message boxes\n", Round, Dialogs);
-        CloseDialogs();
-
         ProbeDirect3D9(hwnd);
+        /* The Firefox crash: a message box drawing text from the unloaded d3dwine.dll */
+        if (is_reactos())
+            ok(GetModuleHandleW(L"d3dwine.dll") == NULL, "Round %d: d3dwine.dll stays loaded after d3d9.dll\n", Round);
         Dialogs = DialogsAfterWait();
         ok(Dialogs == 0, "Round %d: Direct3D 9 showed %d message boxes\n", Round, Dialogs);
         CloseDialogs();
 
         ProbeDirect3D11();
+        trace("Round %d: d3dwine.dll %s after d3d11.dll\n", Round, GetModuleHandleW(L"d3dwine.dll") ? "loaded" : "unloaded");
         Dialogs = DialogsAfterWait();
         ok(Dialogs == 0, "Round %d: Direct3D 11 showed %d message boxes\n", Round, Dialogs);
         CloseDialogs();
     }
+
+    /* Last: ddraw.dll keeps itself loaded, and with it d3dwine.dll */
+    ProbeDirectDraw7(hwnd);
+    Dialogs = DialogsAfterWait();
+    ok(Dialogs == 0, "DirectDraw showed %d message boxes\n", Dialogs);
+    CloseDialogs();
 
     if (hwnd)
         DestroyWindow(hwnd);

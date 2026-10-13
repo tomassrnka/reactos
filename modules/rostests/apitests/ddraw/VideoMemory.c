@@ -13,6 +13,8 @@
 #include <ddraw.h>
 #include <wchar.h>
 
+typedef HRESULT (WINAPI *PFN_DIRECTDRAWCREATE)(GUID *, IDirectDraw **, IUnknown *);
+
 static HWND create_window(void)
 {
     HWND hwnd = CreateWindowExA(0, "static", "ddraw_apitest", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -216,11 +218,19 @@ static void test_offscreen(IDirectDraw *ddraw, HWND hwnd, BOOL video_memory)
 START_TEST(VideoMemory)
 {
     IDirectDraw *ddraw;
+    PFN_DIRECTDRAWCREATE pDirectDrawCreate;
+    HMODULE hDDraw;
     BOOL video_memory;
     HRESULT hr;
     HWND hwnd;
 
-    hr = DirectDrawCreate(NULL, &ddraw, NULL);
+    /* Loaded here, so that the NoDriverNotice child starts without the DirectX DLLs */
+    hDDraw = LoadLibraryW(L"ddraw.dll");
+    pDirectDrawCreate = hDDraw ? (PFN_DIRECTDRAWCREATE)GetProcAddress(hDDraw, "DirectDrawCreate") : NULL;
+    ok(pDirectDrawCreate != NULL, "No DirectDrawCreate: %lu\n", GetLastError());
+    if (!pDirectDrawCreate)
+        return;
+    hr = pDirectDrawCreate(NULL, &ddraw, NULL);
     ok(hr == DD_OK, "DirectDrawCreate returned 0x%lx\n", hr);
     if (FAILED(hr))
         return;
