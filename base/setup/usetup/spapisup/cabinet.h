@@ -194,7 +194,8 @@ CabinetFindNextFileSequential(
 ULONG
 CabinetExtractFile(
     IN PCABINET_CONTEXT CabinetContext,
-    IN PCAB_SEARCH Search);
+    IN PCAB_SEARCH Search,
+    IN PCWSTR TargetFileName OPTIONAL);
 
 /* Select codec engine to use */
 VOID
