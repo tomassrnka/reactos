@@ -29,6 +29,7 @@ list(APPEND SOURCE
     GetFileType.c
     GetFinalPathNameByHandle.c
     GetLocaleInfo.c
+    GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
