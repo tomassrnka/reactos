@@ -14,6 +14,53 @@
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
+/* A V1 or later header has its push lock right after FilterContexts; this NTDDI_VERSION does not declare it */
+#define FsRtlpAdvancedHeaderPushLock(AdvFcbHeader) ((PEX_PUSH_LOCK)(&(AdvFcbHeader)->FilterContexts + 1))
+#ifdef _WIN64
+C_ASSERT(FIELD_OFFSET(FSRTL_ADVANCED_FCB_HEADER, FilterContexts) + sizeof(LIST_ENTRY) == 0x48);
+#else
+C_ASSERT(FIELD_OFFSET(FSRTL_ADVANCED_FCB_HEADER, FilterContexts) + sizeof(LIST_ENTRY) == 0x34);
+#endif
+
+/* A V1 or later header guards its filter contexts with its own push lock, a V0 header with its fast mutex */
+static
+VOID
+FsRtlpAcquireFilterContexts(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader,
+                            IN BOOLEAN Shared)
+{
+    if (AdvFcbHeader->Version >= FSRTL_FCB_HEADER_V1)
+    {
+        KeEnterCriticalRegion();
+        if (Shared)
+            ExAcquirePushLockShared(FsRtlpAdvancedHeaderPushLock(AdvFcbHeader));
+        else
+            ExAcquirePushLockExclusive(FsRtlpAdvancedHeaderPushLock(AdvFcbHeader));
+    }
+    else
+    {
+        ExAcquireFastMutex(AdvFcbHeader->FastMutex);
+    }
+}
+
+static
+VOID
+FsRtlpReleaseFilterContexts(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader,
+                            IN BOOLEAN Shared)
+{
+    if (AdvFcbHeader->Version >= FSRTL_FCB_HEADER_V1)
+    {
+        if (Shared)
+            ExReleasePushLockShared(FsRtlpAdvancedHeaderPushLock(AdvFcbHeader));
+        else
+            ExReleasePushLockExclusive(FsRtlpAdvancedHeaderPushLock(AdvFcbHeader));
+        KeLeaveCriticalRegion();
+    }
+    else
+    {
+        ExReleaseFastMutex(AdvFcbHeader->FastMutex);
+    }
+}
+
 typedef struct _FILE_OBJECT_FILTER_CONTEXTS
 {
     FAST_MUTEX FilterContextsMutex;
@@ -133,7 +180,7 @@ FsRtlLookupPerStreamContextInternal(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader,
     ASSERT(AdvFcbHeader);
     ASSERT(FlagOn(AdvFcbHeader->Flags2, FSRTL_FLAG2_SUPPORTS_FILTER_CONTEXTS));
 
-    ExAcquireFastMutex(AdvFcbHeader->FastMutex);
+    FsRtlpAcquireFilterContexts(AdvFcbHeader, TRUE);
 
     /* If list is empty, no need to browse it */
     if (!IsListEmpty(&(AdvFcbHeader->FilterContexts)))
@@ -162,7 +209,7 @@ FsRtlLookupPerStreamContextInternal(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader,
         }
     }
 
-    ExReleaseFastMutex(AdvFcbHeader->FastMutex);
+    FsRtlpReleaseFilterContexts(AdvFcbHeader, TRUE);
 
     return PerStreamContext;
 }
@@ -242,9 +289,9 @@ FsRtlInsertPerStreamContext(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader,
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    ExAcquireFastMutex(AdvFcbHeader->FastMutex);
+    FsRtlpAcquireFilterContexts(AdvFcbHeader, FALSE);
     InsertHeadList(&(AdvFcbHeader->FilterContexts), &(PerStreamContext->Links));
-    ExReleaseFastMutex(AdvFcbHeader->FastMutex);
+    FsRtlpReleaseFilterContexts(AdvFcbHeader, FALSE);
     return STATUS_SUCCESS;
 }
 
@@ -323,7 +370,7 @@ FsRtlRemovePerStreamContext(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader,
         return NULL;
     }
 
-    ExAcquireFastMutex(AdvFcbHeader->FastMutex);
+    FsRtlpAcquireFilterContexts(AdvFcbHeader, FALSE);
     /* If list is empty, no need to browse it */
     if (!IsListEmpty(&(AdvFcbHeader->FilterContexts)))
     {
@@ -356,7 +403,7 @@ FsRtlRemovePerStreamContext(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader,
             RemoveEntryList(&(PerStreamContext->Links));
         }
     }
-    ExReleaseFastMutex(AdvFcbHeader->FastMutex);
+    FsRtlpReleaseFilterContexts(AdvFcbHeader, FALSE);
 
     return PerStreamContext;
 
@@ -370,14 +417,20 @@ NTAPI
 FsRtlTeardownPerStreamContexts(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader)
 {
     PLIST_ENTRY NextEntry;
-    volatile BOOLEAN IsMutexLocked = FALSE;
+    volatile BOOLEAN IsListLocked = FALSE;
     PFSRTL_PER_STREAM_CONTEXT PerStreamContext;
+
+    /* Like Windows 10, do not touch the lock when there is nothing to tear down */
+    if (IsListEmpty(&(AdvFcbHeader->FilterContexts)))
+    {
+        return;
+    }
 
     _SEH2_TRY
     {
-        /* Acquire mutex to deal with the list */
-        ExAcquireFastMutex(AdvFcbHeader->FastMutex);
-        IsMutexLocked = TRUE;
+        /* Lock the list */
+        FsRtlpAcquireFilterContexts(AdvFcbHeader, FALSE);
+        IsListLocked = TRUE;
 
         /* While there are items... */
         while (!IsListEmpty(&(AdvFcbHeader->FilterContexts)))
@@ -386,25 +439,25 @@ FsRtlTeardownPerStreamContexts(IN PFSRTL_ADVANCED_FCB_HEADER AdvFcbHeader)
             NextEntry = RemoveHeadList(&(AdvFcbHeader->FilterContexts));
             PerStreamContext = CONTAINING_RECORD(NextEntry, FSRTL_PER_STREAM_CONTEXT, Links);
 
-            /* Release mutex before calling callback */
-            ExReleaseFastMutex(AdvFcbHeader->FastMutex);
-            IsMutexLocked = FALSE;
+            /* Unlock the list before calling the callback */
+            FsRtlpReleaseFilterContexts(AdvFcbHeader, FALSE);
+            IsListLocked = FALSE;
 
             /* Call the callback */
             ASSERT(PerStreamContext->FreeCallback);
             (*PerStreamContext->FreeCallback)(PerStreamContext);
 
             /* Relock the list to continue */
-            ExAcquireFastMutex(AdvFcbHeader->FastMutex);
-            IsMutexLocked = TRUE;
+            FsRtlpAcquireFilterContexts(AdvFcbHeader, FALSE);
+            IsListLocked = TRUE;
         }
     }
     _SEH2_FINALLY
     {
-        /* If mutex was locked, release */
-        if (IsMutexLocked)
+        /* If the list is still locked, unlock it */
+        if (IsListLocked)
         {
-            ExReleaseFastMutex(AdvFcbHeader->FastMutex);
+            FsRtlpReleaseFilterContexts(AdvFcbHeader, FALSE);
         }
     }
     _SEH2_END;
