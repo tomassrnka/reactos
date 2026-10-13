@@ -74,10 +74,11 @@ MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
     ret StackBytes
 ENDM
 #elif defined(_M_AMD64)
+/* Windows layout (mov r10, rcx encoded 4C 8B D1; mov eax, id; syscall; ret), one stub per 16 bytes */
 MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
     .ENDPROLOG
+    .byte HEX(4C), HEX(8B), HEX(0D1)
     mov eax, SyscallId
-    mov r10, rcx
     syscall
     ret
 ENDM
@@ -137,6 +138,9 @@ ENDM
 #endif
 
 MACRO(STUB_U, Name, ArgCount)
+#ifdef _M_AMD64
+    align 16
+#endif
     MAKE_LABEL Zw&Name, %ArgCount * 4
     START_PROC Nt&Name, %ArgCount * 4
     STUBCODE_U Name, SyscallId, %ArgCount

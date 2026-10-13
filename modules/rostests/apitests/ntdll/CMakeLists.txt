@@ -164,6 +164,7 @@ list(APPEND SOURCE
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c
+    SystemCallStubs.c
     SystemDllTls.c
     SystemInfo.c
     UserModeException.c
