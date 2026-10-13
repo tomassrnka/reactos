@@ -1344,9 +1344,9 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
         return FALSE;
 
 #ifdef __REACTOS__
-    /* Output the version OS kernel strings */
+    /* Output the product version */
     LoadStringW(shell32_hInstance, IDS_ABOUT_VERSION_STRING, szFormat, _countof(szFormat));
-    StringCchPrintfW(szVersionString, _countof(szVersionString), szFormat, KERNEL_VERSION_STR, KERNEL_VERSION_BUILD_STR);
+    StringCchPrintfW(szVersionString, _countof(szVersionString), szFormat, BRAND_VERSION_MAIN_STR, BRAND_VERSION_DETAIL_STR);
 #endif
 
     info.szApp        = szApp;

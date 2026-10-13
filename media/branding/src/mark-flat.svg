@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/css" href="palette.css"?>
+<!-- AjarOS mark, flat variant for 16-colour targets (boot screen): the master's shapes with one palette colour
+     per area and no gradients, so nothing is dithered. Edges fall on the pixel grid at 64 and 128 px. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect x="33" y="12" width="19" height="40" class="f-lamp"/>
+  <rect x="33" y="12" width="3.5" height="40" class="f-glow"/>
+  <rect x="12" y="12" width="19" height="40" class="f-sky"/>
+  <path d="M12 30 L30.5 17.5 V23.5 L12 36 Z" class="f-mist"/>
+  <path class="f-deep" fill-rule="evenodd"
+        d="M12 7 H52 A5 5 0 0 1 57 12 V52 A5 5 0 0 1 52 57 H12 A5 5 0 0 1 7 52 V12 A5 5 0 0 1 12 7 Z
+           M12 12 V52 H30.5 V12 Z M33.5 12 V52 H52 V12 Z"/>
+  <path d="M41 5 L52 12 V52 L41 59 Z" class="f-deep"/>
+  <path d="M43.5 9.5 L50 13.5 V50.5 L43.5 54.5 Z" class="f-harbor"/>
+  <path d="M43.5 29 L50 22 V27.5 L43.5 34.5 Z" class="f-sky"/>
+  <path d="M39.5 6 L41 5 V59 L39.5 58 Z" class="f-ink"/>
+</svg>

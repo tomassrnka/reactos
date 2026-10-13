@@ -310,7 +310,7 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls","Console",0x00020000,"%SystemRoot%\system32\console.dll"
 
 ; Cursors Schemes
-HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cursors\Schemes","ReactOS Default",0x00020000,""",,,,,,,,,,,,,"""
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cursors\Schemes","AjarOS Default",0x00020000,""",,,,,,,,,,,,,"""
 
 ; Advanced
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced",,0x00000012
