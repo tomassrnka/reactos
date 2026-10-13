@@ -80,7 +80,7 @@ static BOOL Handshake(CONN *c, const char *token)
 {
     RMSG m;
     BYTE sn[16], gn[16], mac[32], theirs[32];
-    char snh[40], gnh[40], mach[70], info[300];
+    char gnh[40], mach[70], info[300];
     REPLY r;
     const char *v;
     WCHAR comp[64] = L"";
@@ -94,7 +94,6 @@ static BOOL Handshake(CONN *c, const char *token)
     Mac(token, 'G', sn, gn, mac);
     HexEncode(gn, 16, gnh);
     HexEncode(mac, 32, mach);
-    (void)snh;
     ZeroMemory(&vi, sizeof(vi));
     vi.dwOSVersionInfoSize = sizeof(vi);
     GetVersionExW(&vi);
@@ -138,6 +137,8 @@ static BOOL ConnectHost(CONN *c, USHORT port)
     ZeroMemory(c, sizeof(*c));
     c->s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (c->s == INVALID_SOCKET) return FALSE;
+    /* jobs start child processes with inherited handles; they must not inherit the host connection */
+    SetHandleInformation((HANDLE)c->s, HANDLE_FLAG_INHERIT, 0);
     ZeroMemory(&a, sizeof(a));
     a.sin_family = AF_INET;
     a.sin_port = htons(port);

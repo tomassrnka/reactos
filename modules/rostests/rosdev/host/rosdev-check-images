@@ -1,0 +1,12 @@
+#!/bin/bash
+# rosdev-check-images BUILD_DIR : fail if rosdev is listed in any image file list of that build.
+# The positive control (rosautotest, which is installed) proves the lists were really searched.
+set -u
+b=${1:?usage: rosdev-check-images BUILD_DIR}
+lists=$(ls "$b"/boot/*.lst "$b"/boot/bootdata/packages/reactos.dff* 2>/dev/null)
+[ -n "$lists" ] || { echo "no image lists under $b/boot (not a configured ReactOS build dir?)" >&2; exit 2; }
+if ! grep -qi rosautotest $lists; then
+  echo "control failed: rosautotest is in no list (ENABLE_ROSTESTS off?), so the check proves nothing" >&2; exit 2
+fi
+if grep -il rosdev $lists; then echo "FAIL: rosdev is in an image list" >&2; exit 1; fi
+echo "ok: rosdev is in none of $(echo "$lists" | wc -l) image lists of $b (control rosautotest found)"

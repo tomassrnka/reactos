@@ -129,14 +129,17 @@ class VmServer:
             f.flush()
             verb, kv = parse_line(f.readline(20000))
             if verb != "HELLO":
+                s.close()
                 return
             gn = bytes.fromhex(kv.get("gnonce", ""))
             if len(gn) != 16 or not hmac.compare_digest(bytes.fromhex(kv.get("mac", "00")), mac(self.token, b"G", sn, gn)):
                 self.log("rejected an agent: bad token")
+                s.close()
                 return
             f.write(b"WELCOME mac=" + mac(self.token, b"H", sn, gn).hex().encode() + b"\n")
             f.flush()
         except (OSError, ValueError):
+            s.close()
             return
         with self.lock:
             old = self.conn
@@ -282,7 +285,16 @@ class VmServer:
                 return {"status": "err", "msg": "no agent connected (VM down, still booting, or the agent is not injected)"}
             return self.submit(job, wait)
         if op == "shutdown":
-            threading.Thread(target=lambda: (time.sleep(0.2), os._exit(0)), daemon=True).start()
+            sock = os.path.join(vmdir(self.vm), "ctl.sock")
+
+            def bye():
+                time.sleep(0.2)
+                try:
+                    os.unlink(sock)
+                except OSError:
+                    pass
+                os._exit(0)
+            threading.Thread(target=bye, daemon=True).start()
             return {"status": "ok"}
         return {"status": "err", "msg": "unknown control op"}
 
@@ -630,6 +642,11 @@ def cmd_up(a):
 
 def cmd_stop_server(a):
     ctl(a.vm, {"op": "shutdown"})
+    sock = os.path.join(vmdir(a.vm), "ctl.sock")
+    for _ in range(50):
+        if not os.path.exists(sock):
+            break
+        time.sleep(0.1)
     print("server for %s stopped; the VM keeps running and the agent reconnects to the next `rosdev serve`" % a.vm)
 
 
