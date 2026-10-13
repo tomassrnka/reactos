@@ -588,10 +588,11 @@ TestGrowthAndExhaustion(VOID)
     CheckSystemDelta(System, -MB_PAGES(16), "everything released");
 }
 
-/* The test system's paging file: system managed ("C:\pagefile.sys 0 0" or no sizes) */
+/* The test system's paging file: system managed ("C:\pagefile.sys 0 0" or no sizes) on a named drive */
 static
 BOOLEAN
-IsSystemManagedPagingFile(VOID)
+IsSystemManagedPagingFile(
+    _Out_ PWCHAR Drive)
 {
     UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management");
     UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"PagingFiles");
@@ -619,6 +620,10 @@ IsSystemManagedPagingFile(VOID)
     if ((Value[0] == UNICODE_NULL) || (Value[wcslen(Value) + 1] != UNICODE_NULL))
         return FALSE;
 
+    /* "?:" lets smss pick any volume: the drive to check is unknown */
+    if (Value[0] == L'?')
+        return FALSE;
+    *Drive = Value[0];
     Space = wcschr(Value, L' ');
     return (Space == NULL) || (wcscmp(Space, L" 0 0") == 0);
 }
@@ -627,6 +632,8 @@ START_TEST(CommitCharge)
 {
     SYSTEM_BASIC_INFORMATION BasicInfo;
     ULONG_PTR Baseline, Committed, PagingFile;
+    ULARGE_INTEGER FreeBytes;
+    WCHAR Drive[] = L"C:\\";
     NTSTATUS Status;
     ULONG Round;
 
@@ -670,19 +677,28 @@ START_TEST(CommitCharge)
     if (is_reactos())
     {
         TestHugeCommit();
-        TestOverCommitFails();
 
         /*
-         * The growth part needs the test system's fixture: one system-managed
-         * paging file (registry), which starts at RAM size (RAM of 1 GB or
-         * more) and has not grown yet. Anything else skips.
+         * Over-commit and growth need the test system's fixture: one
+         * system-managed paging file (registry; its maximum is at most 3x
+         * RAM), which starts at RAM size (RAM of 1 GB or more) and has not
+         * grown yet, on a drive with room to grow: smss caps the maximum at
+         * the file plus the free space it found at boot minus 256 MB, and the
+         * growth test needs 64 MB plus the kernel reserve (at most 32 MB).
+         * Anything else skips.
          */
         PagingFile = QueryPagingFilePages();
-        if (!IsSystemManagedPagingFile() ||
+        if (!IsSystemManagedPagingFile(&Drive[0]) ||
             (PagingFile + MB_PAGES(16) < PhysicalPages) || (PagingFile > PhysicalPages + MB_PAGES(16)) ||
-            (PhysicalPages < MB_PAGES(1024)))
-            skip("not the growth fixture: paging files %Iu pages, physical %lu pages\n", PagingFile, PhysicalPages);
+            (PhysicalPages < MB_PAGES(1024)) ||
+            !GetDiskFreeSpaceExW(Drive, &FreeBytes, NULL, NULL) ||
+            (FreeBytes.QuadPart < 512LL * 1024 * 1024))
+            skip("not the growth fixture: paging files %Iu pages, physical %lu pages, drive %lc\n",
+                 PagingFile, PhysicalPages, Drive[0]);
         else
+        {
+            TestOverCommitFails();
             TestGrowthAndExhaustion();
+        }
     }
 }
