@@ -27,6 +27,10 @@ typedef struct _LDRP_TLS_DATA
 {
     LIST_ENTRY TlsLinks;
     IMAGE_TLS_DIRECTORY TlsDirectory;
+    PLDR_DATA_TABLE_ENTRY Module;
+    ULONG Index;        /* In every thread's TLS vector */
+    SIZE_T Size;        /* Template plus zero fill */
+    ULONG Alignment;    /* Of the blocks, when above the heap's own */
 } LDRP_TLS_DATA, *PLDRP_TLS_DATA;
 
 typedef
@@ -73,6 +77,9 @@ VOID NTAPI LdrpInitializeThread(IN PCONTEXT Context);
 NTSTATUS NTAPI LdrpInitializeTls(VOID);
 NTSTATUS NTAPI LdrpAllocateTls(VOID);
 VOID NTAPI LdrpFreeTls(VOID);
+NTSTATUS NTAPI LdrpAddDynamicTls(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry, _In_ PIMAGE_TLS_DIRECTORY TlsDirectory);
+VOID NTAPI LdrpRemoveDynamicTls(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry);
+VOID NTAPI LdrpFreeRetiredTlsVectors(_In_ HANDLE ThreadId);
 VOID NTAPI LdrpCallTlsInitializers(IN PLDR_DATA_TABLE_ENTRY LdrEntry, IN ULONG Reason);
 BOOLEAN NTAPI LdrpCallInitRoutine(IN PDLL_INIT_ROUTINE EntryPoint, IN PVOID BaseAddress, IN ULONG Reason, IN PVOID Context);
 NTSTATUS NTAPI LdrpInitializeProcess(IN PCONTEXT Context, IN PVOID SystemArgument1);

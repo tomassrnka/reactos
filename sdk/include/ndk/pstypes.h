@@ -973,6 +973,34 @@ typedef enum _APPCOMPAT_USERFLAGS_HIGHPART
 
 #endif
 
+//
+// NtSetInformationProcess(ProcessTlsInformation): the TLS of the threads of
+// the current process, changed by the loader for modules loaded after process
+// start (ReactOS's contract between ntdll and the kernel). Every TLS vector
+// has its number of entries in the ULONG_PTR before it.
+//
+#define PROCESS_TLS_REPLACE_VECTOR  0  // Copy TlsIndex entries of each thread's vector into NewTlsData and install it
+#define PROCESS_TLS_REPLACE_INDEX   1  // Swap entry TlsIndex of each thread's vector with NewTlsData
+
+#define THREAD_TLS_INFORMATION_ASSIGNED 0x2
+
+typedef struct _THREAD_TLS_INFORMATION
+{
+    ULONG Flags;        // Out: THREAD_TLS_INFORMATION_ASSIGNED when the entry was used
+    PVOID NewTlsData;   // In: new vector or new entry
+    PVOID OldTlsData;   // Out: the vector or entry it replaced
+    HANDLE ThreadId;    // Out: the thread whose TLS it is
+} THREAD_TLS_INFORMATION, *PTHREAD_TLS_INFORMATION;
+
+typedef struct _PROCESS_TLS_INFORMATION
+{
+    ULONG Flags;            // Must be 0
+    ULONG OperationType;    // PROCESS_TLS_REPLACE_*
+    ULONG ThreadDataCount;  // In: entries in ThreadData; out: entries used, or needed with STATUS_INFO_LENGTH_MISMATCH
+    ULONG TlsIndex;
+    THREAD_TLS_INFORMATION ThreadData[ANYSIZE_ARRAY];
+} PROCESS_TLS_INFORMATION, *PPROCESS_TLS_INFORMATION;
+
 #ifdef NTOS_MODE_USER
 
 //

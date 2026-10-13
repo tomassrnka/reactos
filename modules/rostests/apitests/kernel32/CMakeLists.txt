@@ -1,5 +1,6 @@
 
 add_subdirectory(redirptest)
+add_subdirectory(tlsdyn)
 
 add_message_headers(ANSI FormatMessage.mc)
 
@@ -9,6 +10,7 @@ list(APPEND SOURCE
     DefaultActCtx.c
     DeviceIoControl.c
     dosdev.c
+    DynamicTls.c
     EnumSystemCodePages.c
     FindActCtxSectionStringW.c
     FindFiles.c
