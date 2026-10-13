@@ -36,6 +36,7 @@ extern void func_MailslotRead(void);
 extern void func_MultiByteToWideChar(void);
 extern void func_Pipes(void);
 extern void func_PrivMoveFileIdentityW(void);
+extern void func_QueryUnbiasedInterruptTime(void);
 extern void func_QueueUserAPC(void);
 extern void func_SetComputerNameExW(void);
 extern void func_SetConsoleWindowInfo(void);
@@ -83,6 +84,7 @@ const struct test winetest_testlist[] =
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
     { "Pipes",                       func_Pipes },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
+    { "QueryUnbiasedInterruptTime",  func_QueryUnbiasedInterruptTime },
     { "QueueUserAPC",                func_QueueUserAPC },
     { "SetComputerNameExW",          func_SetComputerNameExW },
     { "SetConsoleWindowInfo",        func_SetConsoleWindowInfo },
