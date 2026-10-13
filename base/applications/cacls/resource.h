@@ -12,6 +12,8 @@
 #define IDS_ALLOW          110
 #define IDS_DENY           111
 #define IDS_SPECIAL_ACCESS 112
+#define IDS_NOT_NTFS       140
+#define IDS_EDIT_NOT_SUPPORTED 141
 
 #define IDS_GENERIC_READ             113
 #define IDS_GENERIC_WRITE            114

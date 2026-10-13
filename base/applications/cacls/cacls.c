@@ -398,6 +398,60 @@ GetPathOfFile(LPTSTR FilePath, LPCTSTR pszFiles)
     return TRUE;
 }
 
+/* FAT and other volumes without stored ACLs have nothing to show or change */
+static BOOL
+VolumeHasAcls(LPCTSTR pszFiles)
+{
+    TCHAR FullPath[MAX_PATH], Root[MAX_PATH], FsName[MAX_PATH];
+    DWORD Flags = 0, Length;
+    LPTSTR pch;
+    INT Slashes;
+
+    Length = GetFullPathName(pszFiles, MAX_PATH, FullPath, NULL);
+    if (Length == 0 || Length >= MAX_PATH)
+        return TRUE;
+
+    if (!GetVolumePathName(FullPath, Root, MAX_PATH))
+    {
+        /* Derive the root from the path: "X:\" or "\\server\share\" */
+        _tcsncpy(Root, FullPath, MAX_PATH);
+        Root[MAX_PATH - 1] = _T('\0');
+        if (Root[0] != _T('\0') && Root[1] == _T(':'))
+        {
+            Root[2] = _T('\\');
+            Root[3] = _T('\0');
+        }
+        else if (Root[0] == _T('\\') && Root[1] == _T('\\'))
+        {
+            for (pch = Root + 2, Slashes = 0; *pch; pch++)
+            {
+                if (*pch == _T('\\') && ++Slashes == 2)
+                {
+                    pch[1] = _T('\0');
+                    break;
+                }
+            }
+            if (Slashes < 2)
+            {
+                if (_tcslen(Root) + 2 > MAX_PATH)
+                    return TRUE;
+                AddBackslash(Root);
+            }
+        }
+        else
+        {
+            return TRUE;
+        }
+    }
+
+    /* An unknown volume is left to the later steps, which report the error */
+    if (!GetVolumeInformation(Root, NULL, 0, NULL, NULL, &Flags, FsName, MAX_PATH))
+        return TRUE;
+
+    /* NTFS keeps ACLs even where its driver does not report the flag */
+    return (Flags & FILE_PERSISTENT_ACLS) || _tcsicmp(FsName, _T("NTFS")) == 0;
+}
+
 static BOOL
 PrintDaclsOfFiles(LPCTSTR pszFiles)
 {
@@ -417,7 +471,11 @@ PrintDaclsOfFiles(LPCTSTR pszFiles)
      */
     hFind = FindFirstFile(pszFiles, &FindData);
     if (hFind == INVALID_HANDLE_VALUE)
+    {
+        PrintError(GetLastError());
+        ConPuts(StdErr, L"\n");
         return FALSE;
+    }
     do
     {
         if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
@@ -457,281 +515,6 @@ PrintDaclsOfFiles(LPCTSTR pszFiles)
     return TRUE;
 }
 
-static BOOL
-GrantUserAccessRights(LPCTSTR FilePath, LPCTSTR File, LPCTSTR User, TCHAR Perm)
-{
-    /* TODO & FIXME */
-    switch(Perm)
-    {
-        case _T('R'): // Read
-            break;
-        case _T('W'): // Write
-            break;
-        case _T('C'): // Change (write)
-            break;
-        case _T('F'): // Full control
-            break;
-        default:
-            break;
-    }
-    return FALSE;
-}
-
-static BOOL
-ReplaceUserAccessRights(
-    LPCTSTR FilePath,
-    LPCTSTR File,
-    LPCTSTR User,
-    TCHAR Perm)
-{
-    /* TODO & FIXME */
-    switch(Perm)
-    {
-        case _T('N'): // None
-            break;
-        case _T('R'): // Read
-            break;
-        case _T('W'): // Write
-            break;
-        case _T('C'): // Change (write)
-            break;
-        case _T('F'): // Full control
-            break;
-        default:
-            break;
-    }
-    return FALSE;
-}
-
-static BOOL
-EditUserAccessRights(
-    LPCTSTR FilePath,
-    LPCTSTR File,
-    LPCTSTR User,
-    TCHAR Perm)
-{
-    /* TODO & FIXME */
-    switch(Perm)
-    {
-        case _T('N'): // None
-            break;
-        case _T('R'): // Read
-            break;
-        case _T('W'): // Write
-            break;
-        case _T('C'): // Change (write)
-            break;
-        case _T('F'): // Full control
-            break;
-        default:
-            break;
-    }
-    return FALSE;
-}
-
-static BOOL
-DenyUserAccess(LPCTSTR FilePath, LPCTSTR File, LPCTSTR User)
-{
-    /* TODO & FIXME */
-    return FALSE;
-}
-
-static BOOL
-RevokeUserAccessRights(LPCTSTR FilePath, LPCTSTR File, LPCTSTR User)
-{
-    /* TODO & FIXME */
-    return FALSE;
-}
-
-static BOOL
-ChangeFileACL(LPCTSTR FilePath, LPCTSTR File)
-{
-    if (OptionG)
-    {
-        /* Grant specified user access rights. */
-        GrantUserAccessRights(FilePath, File, GUser, *GPerm);
-    }
-
-    if (OptionP)
-    {
-        if (!OptionE)
-        {
-            /* Replace specified user's access rights. */
-            ReplaceUserAccessRights(FilePath, File, PUser, *PPerm);
-        }
-        else
-        {
-            /* Edit ACL instead of replacing it. */
-            EditUserAccessRights(FilePath, File, PUser, *PPerm);
-        }
-    }
-
-    if (OptionD)
-    {
-        /* Deny specified user access. */
-        DenyUserAccess(FilePath, File, DUser);
-    }
-
-    if (OptionR)
-    {
-        /* Revoke specified user's access rights. */
-        RevokeUserAccessRights(FilePath, File, RUser);
-    }
-
-    return TRUE;
-}
-
-static BOOL
-ChangeACLsOfFiles(LPCTSTR pszFiles)
-{
-    TCHAR FilePath[MAX_PATH];
-    HANDLE hFind;
-    WIN32_FIND_DATA FindData;
-    DWORD LastError;
-
-    /*
-     * get the file path
-     */
-    if (!GetPathOfFile(FilePath, pszFiles))
-        return FALSE;
-
-    /*
-     * search for files in current directory
-     */
-    hFind = FindFirstFile(pszFiles, &FindData);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return FALSE;
-    do
-    {
-        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            continue;
-
-        if (!ChangeFileACL(FilePath, FindData.cFileName))
-        {
-            LastError = GetLastError();
-            if (LastError == ERROR_ACCESS_DENIED)
-            {
-                PrintError(LastError);
-                if (!OptionC)
-                {
-                    FindClose(hFind);
-                    return FALSE;
-                }
-            }
-            else
-                break;
-        }
-    } while (FindNextFile(hFind, &FindData));
-    LastError = GetLastError();
-    FindClose(hFind);
-
-    if (LastError != ERROR_NO_MORE_FILES)
-    {
-        PrintError(LastError);
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
-static BOOL
-ChangeACLsOfFilesInCurDir(LPCTSTR pszFiles)
-{
-    HANDLE hFind;
-    WIN32_FIND_DATA FindData;
-    TCHAR szCurDir[MAX_PATH];
-    DWORD LastError;
-
-    /*
-     * get the file path (current directory)
-     */
-    GetCurrentDirectory(MAX_PATH, szCurDir);
-    AddBackslash(szCurDir);
-
-    /*
-     * search for files in current directory
-     */
-    hFind = FindFirstFile(pszFiles, &FindData);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return FALSE;
-    do
-    {
-        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            continue;
-
-        if (!ChangeFileACL(szCurDir, FindData.cFileName))
-        {
-            LastError = GetLastError();
-            if (LastError == ERROR_ACCESS_DENIED)
-            {
-                PrintError(LastError);
-                if (!OptionC)
-                {
-                    FindClose(hFind);
-                    return FALSE;
-                }
-            }
-            else
-                break;
-        }
-    } while (FindNextFile(hFind, &FindData));
-    LastError = GetLastError();
-    FindClose(hFind);
-
-    if (LastError != ERROR_NO_MORE_FILES)
-    {
-        PrintError(LastError);
-        return FALSE;
-    }
-
-    /*
-     * search for subdirectory in current directory
-     */
-    hFind = FindFirstFile(_T("*"), &FindData);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return FALSE;
-    do
-    {
-        if (_tcscmp(FindData.cFileName, _T(".")) == 0 ||
-            _tcscmp(FindData.cFileName, _T("..")) == 0)
-            continue;
-
-        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-        {
-            GetCurrentDirectory(MAX_PATH, szCurDir);
-            if (SetCurrentDirectory(FindData.cFileName))
-            {
-                ChangeACLsOfFilesInCurDir(pszFiles);
-                SetCurrentDirectory(szCurDir);
-            }
-            else
-            {
-                LastError = GetLastError();
-                if (LastError == ERROR_ACCESS_DENIED)
-                {
-                    PrintError(LastError);
-                    if (!OptionC)
-                    {
-                        FindClose(hFind);
-                        return FALSE;
-                    }
-                }
-                else
-                    break;
-            }
-        }
-    } while (FindNextFile(hFind, &FindData));
-    LastError = GetLastError();
-    FindClose(hFind);
-
-    if (LastError != ERROR_NO_MORE_FILES)
-    {
-        PrintError(LastError);
-        return FALSE;
-    }
-    return TRUE;
-}
-
 int _tmain(int argc, const TCHAR *argv[])
 {
     INT i;
@@ -741,10 +524,10 @@ int _tmain(int argc, const TCHAR *argv[])
     /* Initialize the Console Standard Streams */
     ConInitStdStreams();
 
-    if (argc <= 1)
+    if (argc <= 1 || argv[1][0] == _T('/'))
     {
         ConResPuts(StdOut, IDS_HELP);
-        return 0;
+        return (argc > 1 && _tcscmp(argv[1], _T("/?")) == 0) ? 0 : ERROR_BAD_ARGUMENTS;
     }
 
     // FIXME: Convert to proper parsing, with support for /?
@@ -842,16 +625,21 @@ int _tmain(int argc, const TCHAR *argv[])
         OptionR = FALSE;
     }
 
-    PrintDaclsOfFiles(argv[1]);
+    if (!VolumeHasAcls(argv[1]))
+    {
+        ConResPuts(StdErr, IDS_NOT_NTFS);
+        return 1;
+    }
 
-    if (OptionT)
+    /* Changing ACLs is not implemented: say so instead of pretending */
+    if (OptionG || OptionR || OptionP || OptionD)
     {
-        ChangeACLsOfFilesInCurDir(argv[1]);
+        ConResPuts(StdErr, IDS_EDIT_NOT_SUPPORTED);
+        return 1;
     }
-    else
-    {
-        ChangeACLsOfFiles(argv[1]);
-    }
+
+    if (!PrintDaclsOfFiles(argv[1]))
+        return 2;
 
     return 0;
 }
