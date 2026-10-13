@@ -39,6 +39,7 @@ extern void func_IsDBCSLeadByteEx(void);
 extern void func_JapaneseCalendar(void);
 extern void func_JobObject(void);
 extern void func_LCMapString(void);
+extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LocaleNameToLCID(void);
 extern void func_LocalTimeZone(void);
@@ -107,6 +108,7 @@ const struct test winetest_testlist[] =
     { "JapaneseCalendar",            func_JapaneseCalendar },
     { "JobObject",                   func_JobObject },
     { "LCMapString",                 func_LCMapString },
+    { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
     { "LocalTimeZone",               func_LocalTimeZone },
