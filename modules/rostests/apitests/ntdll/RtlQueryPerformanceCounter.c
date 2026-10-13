@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Test for RtlQueryPerformanceCounter, RtlQueryPerformanceFrequency and RtlQueryUnbiasedInterruptTime
+ * PURPOSE:     Test for RtlQueryPerformanceCounter, RtlQueryPerformanceFrequency and RtlQueryUnbiasedInterruptTime (Windows 8+)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -29,7 +29,6 @@ START_TEST(RtlQueryPerformanceCounter)
     }
     ok(pRtlQueryPerformanceCounter != NULL, "RtlQueryPerformanceCounter is not exported\n");
     ok(pRtlQueryPerformanceFrequency != NULL, "RtlQueryPerformanceFrequency is not exported\n");
-    ok(pRtlQueryUnbiasedInterruptTime != NULL, "RtlQueryUnbiasedInterruptTime is not exported\n");
 
     if (pRtlQueryPerformanceCounter)
     {
@@ -51,7 +50,12 @@ START_TEST(RtlQueryPerformanceCounter)
         ok(Frequency.QuadPart == Expected.QuadPart, "Frequency %I64d, expected %I64d\n", Frequency.QuadPart, Expected.QuadPart);
     }
 
-    if (pRtlQueryUnbiasedInterruptTime)
+    /* ntdll exports it from Windows 8 on (Windows 7 implements QueryUnbiasedInterruptTime in kernel32) */
+    if (!pRtlQueryUnbiasedInterruptTime)
+    {
+        skip("RtlQueryUnbiasedInterruptTime is not exported\n");
+    }
+    else
     {
         Time = 0;
         Ret = pRtlQueryUnbiasedInterruptTime(&Time);
