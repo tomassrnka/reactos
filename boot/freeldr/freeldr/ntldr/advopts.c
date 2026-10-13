@@ -73,7 +73,7 @@ static ADVBOOT_OPTIONS AdvBootOptions[] = // OptionsMenuList
 #ifdef HAS_OPTION_MENU_EDIT_CMDLINE
     {ActionEditBootCmdLine,     "Edit Boot Command Line (F10)"},
 #endif
-    {ActionStartNormally,       "Start ReactOS normally"},
+    {ActionStartNormally,       "Start AjarOS normally"},
     {ActionReboot,              "Reboot"},
     {ActionBackToPrevMenu,      "Return to OS Choices menu"},
 };
