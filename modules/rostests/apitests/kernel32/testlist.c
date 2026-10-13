@@ -73,6 +73,7 @@ extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
 extern void func_WerFlags(void);
 extern void func_WideCharToMultiByte(void);
+extern void func_SetFileInformationByHandle(void);
 
 const struct test winetest_testlist[] =
 {
@@ -147,5 +148,6 @@ const struct test winetest_testlist[] =
     { "UEFIFirmware",                func_UEFIFirmware },
     { "WerFlags",                    func_WerFlags },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
+    { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
     { 0, 0 }
 };
