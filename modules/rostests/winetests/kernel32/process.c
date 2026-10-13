@@ -4765,7 +4765,7 @@ static void test_handle_list_attribute(BOOL child, HANDLE handle1, HANDLE handle
     }
 
 #ifdef __REACTOS__
-    if (GetNTVersion() < _WIN32_WINNT_VISTA) {
+    if (!pInitializeProcThreadAttributeList) {
         skip("test_handle_list_attribute() crashes on WS03.\n");
         return;
     }

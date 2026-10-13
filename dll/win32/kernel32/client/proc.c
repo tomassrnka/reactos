@@ -2155,6 +2155,354 @@ ProcessIdToSessionId(IN DWORD dwProcessId,
 #define RemoveFromHandle(x,y)  ((x) = (HANDLE)((ULONG_PTR)(x) & ~(y)))
 C_ASSERT(PROCESS_PRIORITY_CLASS_REALTIME == (PROCESS_PRIORITY_CLASS_HIGH + 1));
 
+/* Process and thread attribute lists. The layout matches the one Windows uses
+ * (count, slots, then one entry per attribute pointing at the caller's value). */
+typedef struct _PROC_THREAD_ATTRIBUTE_ENTRY
+{
+    DWORD_PTR Attribute;
+    SIZE_T Size;
+    PVOID Value;
+} PROC_THREAD_ATTRIBUTE_ENTRY, *PPROC_THREAD_ATTRIBUTE_ENTRY;
+
+typedef struct _PROC_THREAD_ATTRIBUTE_LIST
+{
+    DWORD PresentFlags;
+    DWORD AttributeCount;
+    DWORD LastAttribute;
+    DWORD SpareUlong0;
+    PPROC_THREAD_ATTRIBUTE_ENTRY ExtendedFlagsAttribute;
+    PROC_THREAD_ATTRIBUTE_ENTRY Attributes[ANYSIZE_ARRAY];
+} PROC_THREAD_ATTRIBUTE_LIST;
+
+#ifndef EXTENDED_STARTUPINFO_PRESENT
+#define EXTENDED_STARTUPINFO_PRESENT 0x00080000
+#endif
+
+#define PROC_THREAD_ATTRIBUTE_LIST_SIZE(Count) \
+    FIELD_OFFSET(PROC_THREAD_ATTRIBUTE_LIST, Attributes[Count])
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+InitializeProcThreadAttributeList(
+    _Out_writes_bytes_to_opt_(*lpSize, *lpSize) LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _In_ DWORD dwAttributeCount,
+    _Reserved_ DWORD dwFlags,
+    _When_(lpAttributeList == NULL, _Out_) _When_(lpAttributeList != NULL, _Inout_) PSIZE_T lpSize)
+{
+    SIZE_T Needed;
+
+    if (dwFlags != 0 || dwAttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Needed = PROC_THREAD_ATTRIBUTE_LIST_SIZE(dwAttributeCount);
+
+    if (!lpAttributeList || *lpSize < Needed)
+    {
+        *lpSize = Needed;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    lpAttributeList->PresentFlags = 0;
+    lpAttributeList->AttributeCount = dwAttributeCount;
+    lpAttributeList->LastAttribute = 0;
+    lpAttributeList->ExtendedFlagsAttribute = NULL;
+    *lpSize = Needed;
+    return TRUE;
+}
+
+static
+DWORD
+BasepCheckProcThreadAttribute(
+    _In_ DWORD_PTR Attribute,
+    _In_ SIZE_T Size)
+{
+    switch (Attribute)
+    {
+        case PROC_THREAD_ATTRIBUTE_HANDLE_LIST:
+            return (Size % sizeof(HANDLE)) ? ERROR_BAD_LENGTH : ERROR_SUCCESS;
+
+        case PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR:
+            return (Size == sizeof(PROCESSOR_NUMBER)) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
+        default:
+            /* Attributes CreateProcess cannot honour are refused here,
+             * not silently dropped when the process is created */
+            return ERROR_NOT_SUPPORTED;
+    }
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+UpdateProcThreadAttribute(
+    _Inout_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _In_ DWORD dwFlags,
+    _In_ DWORD_PTR Attribute,
+    _In_reads_bytes_opt_(cbSize) PVOID lpValue,
+    _In_ SIZE_T cbSize,
+    _Out_writes_bytes_opt_(cbSize) PVOID lpPreviousValue,
+    _In_opt_ PSIZE_T lpReturnSize)
+{
+    PPROC_THREAD_ATTRIBUTE_ENTRY Entry;
+    DWORD Error, Bit;
+
+    if (dwFlags != 0 || lpPreviousValue || lpReturnSize)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (lpAttributeList->LastAttribute >= lpAttributeList->AttributeCount)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    Error = BasepCheckProcThreadAttribute(Attribute, cbSize);
+    if (Error != ERROR_SUCCESS)
+    {
+        SetLastError(Error);
+        return FALSE;
+    }
+
+    Bit = 1UL << (Attribute & PROC_THREAD_ATTRIBUTE_NUMBER);
+    if (lpAttributeList->PresentFlags & Bit)
+    {
+        SetLastError(ERROR_OBJECT_NAME_EXISTS);
+        return FALSE;
+    }
+
+    Entry = &lpAttributeList->Attributes[lpAttributeList->LastAttribute];
+    Entry->Attribute = Attribute;
+    Entry->Size = cbSize;
+    Entry->Value = lpValue;
+    lpAttributeList->PresentFlags |= Bit;
+    lpAttributeList->LastAttribute++;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+DeleteProcThreadAttributeList(
+    _Inout_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList)
+{
+    /* The list owns no resources: the values stay with the caller */
+    UNREFERENCED_PARAMETER(lpAttributeList);
+}
+
+/* There is one processor group: a valid number names an active processor */
+static
+BOOLEAN
+BasepIsValidIdealProcessor(
+    _In_ const PROCESSOR_NUMBER *IdealProcessor)
+{
+    return IdealProcessor->Group == 0 &&
+           IdealProcessor->Reserved == 0 &&
+           IdealProcessor->Number < BaseStaticServerData->SysInfo.NumberOfProcessors;
+}
+
+static
+NTSTATUS
+BasepReadProcThreadAttributes(
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _In_ BOOL InheritHandles,
+    _Out_ const HANDLE **HandleList,
+    _Out_ PSIZE_T HandleCount)
+{
+    PPROC_THREAD_ATTRIBUTE_ENTRY Entry;
+    DWORD i;
+
+    *HandleList = NULL;
+    *HandleCount = 0;
+
+    for (i = 0; i < AttributeList->LastAttribute; i++)
+    {
+        Entry = &AttributeList->Attributes[i];
+        switch (Entry->Attribute)
+        {
+            case PROC_THREAD_ATTRIBUTE_HANDLE_LIST:
+                /* The list only narrows inheritance, so it needs bInheritHandles */
+                if (!InheritHandles)
+                    return STATUS_INVALID_PARAMETER;
+                *HandleList = Entry->Value;
+                *HandleCount = Entry->Size / sizeof(HANDLE);
+                break;
+
+            default:
+                /* An ideal processor cannot be applied to the thread of
+                 * another process, see BasepSetIdealProcessor */
+                return STATUS_NOT_SUPPORTED;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* Serialises the window in which unlisted handles are not inheritable */
+RTL_CRITICAL_SECTION BasepInheritanceLock;
+
+static
+BOOLEAN
+BasepIsListedHandle(
+    _In_ HANDLE Handle,
+    _In_reads_(Count) const HANDLE *List,
+    _In_ SIZE_T Count)
+{
+    SIZE_T i;
+
+    for (i = 0; i < Count; i++)
+    {
+        if (List[i] == Handle)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Makes every inheritable handle that is not in the list non-inheritable and
+ * returns the changed handles. Process creation can only inherit all
+ * inheritable handles, so a handle list is applied around it this way; a
+ * handle another thread creates or changes meanwhile is not covered. */
+static
+NTSTATUS
+BasepNarrowInheritance(
+    _In_reads_(ListCount) const HANDLE *List,
+    _In_ SIZE_T ListCount,
+    _Out_ PHANDLE *Changed,
+    _Out_ PULONG ChangedCount)
+{
+    OBJECT_HANDLE_FLAG_INFORMATION Flags;
+    ULONG HandleCount, Found = 0, Count = 0, Max;
+    ULONG_PTR Value, Limit;
+    PHANDLE Array, NewArray;
+    NTSTATUS Status;
+
+    *Changed = NULL;
+    *ChangedCount = 0;
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessHandleCount,
+                                       &HandleCount, sizeof(HandleCount), NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Max = 64;
+    Array = RtlAllocateHeap(RtlGetProcessHeap(), 0, Max * sizeof(HANDLE));
+    if (!Array)
+        return STATUS_NO_MEMORY;
+
+    /* Handle values are handed out from the lowest free slot, so the open
+     * handles sit well below this bound */
+    Limit = ((ULONG_PTR)HandleCount + 4096) * 16;
+
+    for (Value = 4; Found < HandleCount && Value < Limit; Value += 4)
+    {
+        if (!NT_SUCCESS(NtQueryObject((HANDLE)Value, ObjectHandleFlagInformation,
+                                      &Flags, sizeof(Flags), NULL)))
+        {
+            continue;
+        }
+
+        Found++;
+        if (!Flags.Inherit || BasepIsListedHandle((HANDLE)Value, List, ListCount))
+            continue;
+
+        if (Count == Max)
+        {
+            NewArray = RtlReAllocateHeap(RtlGetProcessHeap(), 0, Array, 2 * Max * sizeof(HANDLE));
+            if (!NewArray)
+            {
+                Status = STATUS_NO_MEMORY;
+                break;
+            }
+            Array = NewArray;
+            Max *= 2;
+        }
+
+        Flags.Inherit = FALSE;
+        Status = NtSetInformationObject((HANDLE)Value, ObjectHandleFlagInformation,
+                                        &Flags, sizeof(Flags));
+        if (NT_SUCCESS(Status))
+            Array[Count++] = (HANDLE)Value;
+        Status = STATUS_SUCCESS;
+    }
+
+    *Changed = Array;
+    *ChangedCount = Count;
+    return Status;
+}
+
+static
+VOID
+BasepRestoreInheritance(
+    _In_reads_(Count) PHANDLE Changed,
+    _In_ ULONG Count)
+{
+    OBJECT_HANDLE_FLAG_INFORMATION Flags;
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+    {
+        if (NT_SUCCESS(NtQueryObject(Changed[i], ObjectHandleFlagInformation,
+                                     &Flags, sizeof(Flags), NULL)))
+        {
+            Flags.Inherit = TRUE;
+            NtSetInformationObject(Changed[i], ObjectHandleFlagInformation,
+                                   &Flags, sizeof(Flags));
+        }
+    }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Changed);
+}
+
+/* Reads the attributes CreateRemoteThreadEx supports */
+NTSTATUS
+WINAPI
+BasepReadThreadAttributes(
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _Out_ PPROCESSOR_NUMBER *IdealProcessor)
+{
+    DWORD i;
+
+    *IdealProcessor = NULL;
+
+    for (i = 0; i < AttributeList->LastAttribute; i++)
+    {
+        if (AttributeList->Attributes[i].Attribute != PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR)
+            return STATUS_NOT_SUPPORTED;
+        if (!BasepIsValidIdealProcessor(AttributeList->Attributes[i].Value))
+            return STATUS_INVALID_PARAMETER;
+        *IdealProcessor = AttributeList->Attributes[i].Value;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* Sets the ideal processor of a thread of the current process. The kernel's
+ * ThreadIdealProcessor setter writes the TEB without attaching to the thread's
+ * process, so callers do not use it for threads of other processes. */
+NTSTATUS
+WINAPI
+BasepSetIdealProcessor(
+    _In_ HANDLE ThreadHandle,
+    _In_ const PROCESSOR_NUMBER *IdealProcessor)
+{
+    ULONG_PTR Number = IdealProcessor->Number;
+
+    return NtSetInformationThread(ThreadHandle, ThreadIdealProcessor, &Number, sizeof(Number));
+}
+
 /*
  * @implemented
  */
@@ -2208,6 +2556,10 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     PVOID TibValue;
     PIMAGE_NT_HEADERS NtHeaders;
     STARTUPINFOW StartupInfo;
+    const HANDLE *InheritList;
+    SIZE_T InheritListCount;
+    PHANDLE NarrowedHandles;
+    ULONG NarrowedCount;
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
     UNICODE_STRING DebuggerString;
     BOOL Result;
@@ -2271,6 +2623,33 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     UNICODE_STRING VdmString, VdmUnicodeEnv;
     BOOLEAN IsWowApp;
     PBASE_CHECK_VDM CheckVdmMsg;
+
+    /* Read the attribute list of an extended startup info before anything
+     * is allocated, so that a refused list needs no cleanup */
+    InheritList = NULL;
+    InheritListCount = 0;
+    if (dwCreationFlags & EXTENDED_STARTUPINFO_PRESENT)
+    {
+        if (lpStartupInfo->cb < sizeof(STARTUPINFOEXW))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
+        if (((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList)
+        {
+            Status = BasepReadProcThreadAttributes(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList,
+                                                   bInheritHandles,
+                                                   &InheritList,
+                                                   &InheritListCount);
+            if (!NT_SUCCESS(Status))
+            {
+                BaseSetLastNTError(Status);
+                return FALSE;
+            }
+        }
+        dwCreationFlags &= ~EXTENDED_STARTUPINFO_PRESENT;
+    }
 
     /* Zero out the initial core variables and handles */
     QuerySection = FALSE;
@@ -3800,16 +4179,32 @@ StartScan:
     /* Save the current TIB value since kernel overwrites it to store PEB */
     TibValue = Teb->NtTib.ArbitraryUserPointer;
 
+    /* Inheriting creations take the lock, so none of them runs while a handle
+     * list has made other handles non-inheritable */
+    NarrowedHandles = NULL;
+    NarrowedCount = 0;
+    if (bInheritHandles) RtlEnterCriticalSection(&BasepInheritanceLock);
+    Status = STATUS_SUCCESS;
+    if (InheritList)
+        Status = BasepNarrowInheritance(InheritList, InheritListCount,
+                                        &NarrowedHandles, &NarrowedCount);
+
     /* Tell the kernel to create the process */
-    Status = NtCreateProcessEx(&ProcessHandle,
-                               PROCESS_ALL_ACCESS,
-                               ObjectAttributes,
-                               NtCurrentProcess(),
-                               Flags,
-                               SectionHandle,
-                               DebugHandle,
-                               NULL,
-                               InJob);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtCreateProcessEx(&ProcessHandle,
+                                   PROCESS_ALL_ACCESS,
+                                   ObjectAttributes,
+                                   NtCurrentProcess(),
+                                   Flags,
+                                   SectionHandle,
+                                   DebugHandle,
+                                   NULL,
+                                   InJob);
+    }
+
+    if (NarrowedHandles) BasepRestoreInheritance(NarrowedHandles, NarrowedCount);
+    if (bInheritHandles) RtlLeaveCriticalSection(&BasepInheritanceLock);
 
     /* Load the PEB address from the hacky location where the kernel stores it */
     RemotePeb = Teb->NtTib.ArbitraryUserPointer;
@@ -4157,6 +4552,7 @@ StartScan:
         Result = FALSE;
         goto Quickie;
     }
+
 
     /* Begin filling out the CSRSS message, first with our IDs and handles */
     CreateProcessMsg->ProcessHandle = ProcessHandle;
