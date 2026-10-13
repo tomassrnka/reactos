@@ -5006,7 +5006,7 @@ static float wined3d_adapter_find_fill_offset(struct wined3d_caps_gl_ctx *ctx)
 static DWORD WINAPI wined3d_no_3d_warning_proc(void *param)
 {
     MessageBoxW(NULL,
-            L"ReactOS DirectX Needs at least OpenGL 2.0 or better\n\n"
+            L"AjarOS DirectX Needs at least OpenGL 2.0 or better\n\n"
             L"Install a display driver that provides an OpenGL ICD to enable 3D "
             L"acceleration. Or install Mesa3D from RAPPS",
             L"ReactOS - no 3D acceleration",
