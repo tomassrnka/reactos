@@ -624,10 +624,38 @@ TIME_FindTimeZoneKeyName(
     /* Unique only if every entry was seen */
     if (Matches != 1 || Status != STATUS_NO_MORE_ENTRIES)
     {
-        KeyName[0] = UNICODE_NULL;
+        RtlZeroMemory(KeyName, KeyNameLength * sizeof(WCHAR));
         return FALSE;
     }
     return TRUE;
+}
+
+/* Whether the Time Zones entry of a stored key name still describes the zone in effect */
+static
+BOOL
+TIME_KeyNameMatches(
+    _In_ PCWSTR KeyName,
+    _In_ const TIME_ZONE_INFORMATION *TimeZoneInformation)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones");
+    UNICODE_STRING SubKey;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ZonesKey, ZoneKey;
+    BOOL Matches = FALSE;
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&ZonesKey, KEY_ENUMERATE_SUB_KEYS, &ObjectAttributes)))
+        return FALSE;
+
+    RtlInitUnicodeString(&SubKey, KeyName);
+    InitializeObjectAttributes(&ObjectAttributes, &SubKey, OBJ_CASE_INSENSITIVE, ZonesKey, NULL);
+    if (NT_SUCCESS(NtOpenKey(&ZoneKey, KEY_QUERY_VALUE, &ObjectAttributes)))
+    {
+        Matches = TIME_ZoneKeyMatches(ZoneKey, TimeZoneInformation);
+        NtClose(ZoneKey);
+    }
+    NtClose(ZonesKey);
+    return Matches;
 }
 
 /*
@@ -661,6 +689,9 @@ GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION pTimeZoneInformatio
         NtClose(Key);
     }
 
+    /* SetTimeZoneInformation does not update the stored name: trust it only if its entry describes the zone in effect */
+    if (KeyName[0] && !TIME_KeyNameMatches(KeyName, &TimeZoneInformation))
+        RtlZeroMemory(KeyName, sizeof(KeyName));
     if (!KeyName[0])
         TIME_FindTimeZoneKeyName(&TimeZoneInformation, KeyName, ARRAYSIZE(KeyName));
 
