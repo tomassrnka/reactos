@@ -62,4 +62,6 @@ BEGIN
     IDS_TITLE "Tablica znaków"
     IDS_UNICODE "Unicode"
     IDS_ALL "Wszystko"
+    IDS_RESET "&Reset"
+    IDS_NOCHAR "No Character Available"
 END

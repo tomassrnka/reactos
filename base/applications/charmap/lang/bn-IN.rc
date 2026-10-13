@@ -53,4 +53,6 @@ BEGIN
     IDS_TITLE "ক্যারেক্টার ম্যাপ"
     IDS_UNICODE "ইউনিকোড"
     IDS_ALL "সমস্ত"
+    IDS_RESET "&Reset"
+    IDS_NOCHAR "No Character Available"
 END

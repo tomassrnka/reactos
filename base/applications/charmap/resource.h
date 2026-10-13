@@ -30,3 +30,5 @@
 #define IDS_TITLE   1012
 #define IDS_UNICODE 1013
 #define IDS_ALL     1014
+#define IDS_RESET   1015
+#define IDS_NOCHAR  1016
