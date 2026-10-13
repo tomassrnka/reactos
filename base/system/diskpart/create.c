@@ -826,6 +826,10 @@ CreatePrimaryMbrPartition(
         PartitionType = PARTITION_HUGE;
     }
 
+    /* Only the partition created here and its volume get the focus */
+    CurrentPartition = NULL;
+    CurrentVolume = NULL;
+
     if (GetPrimaryPartitionCount(CurrentDisk) >= 4)
     {
         ConPuts(StdOut, L"No space left for another primary partition!\n");
@@ -838,10 +842,6 @@ CreatePrimaryMbrPartition(
         ullSectorCount = 0;
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
-
-    /* Only the partition created here and its volume get the focus */
-    CurrentPartition = NULL;
-    CurrentVolume = NULL;
 
     for (ListEntry = CurrentDisk->PrimaryPartListHead.Flink;
          ListEntry != &CurrentDisk->PrimaryPartListHead;
