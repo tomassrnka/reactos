@@ -5,6 +5,7 @@ add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
     ConsoleCP.c
+    CreateRemoteThreadEx.c
     CreateProcess.c
     DefaultActCtx.c
     DeviceIoControl.c
