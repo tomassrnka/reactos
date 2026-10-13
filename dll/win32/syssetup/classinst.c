@@ -57,6 +57,10 @@ CriticalDeviceCoInstaller(
     if (InstallFunction != DIF_INSTALLDEVICE)
         return ERROR_SUCCESS;
 
+    /* Do not register a device whose installation failed, and keep the failure */
+    if (Context->PostProcessing && Context->InstallResult != NO_ERROR)
+        return Context->InstallResult;
+
     /* Get the MatchingDeviceId property */
     hDriverKey = SetupDiOpenDevRegKey(DeviceInfoSet,
                                       DeviceInfoData,
@@ -405,16 +409,22 @@ StorageCoInstaller(
             pszDeviceDescription = (PWSTR)Context->PrivateData;
 
             /* Store the device description as the friendly name */
-            SetupDiSetDeviceRegistryPropertyW(DeviceInfoSet,
-                                              DeviceInfoData,
-                                              SPDRP_FRIENDLYNAME,
-                                              (PBYTE)pszDeviceDescription,
-                                              (wcslen(pszDeviceDescription) + 1) * sizeof(WCHAR));
+            if (Context->InstallResult == NO_ERROR)
+            {
+                SetupDiSetDeviceRegistryPropertyW(DeviceInfoSet,
+                                                  DeviceInfoData,
+                                                  SPDRP_FRIENDLYNAME,
+                                                  (PBYTE)pszDeviceDescription,
+                                                  (wcslen(pszDeviceDescription) + 1) * sizeof(WCHAR));
+            }
 
             /* Free the device description */
             HeapFree(GetProcessHeap(), 0, Context->PrivateData);
             Context->PrivateData = NULL;
         }
+
+        /* Keep the result of the installation */
+        return Context->InstallResult;
     }
     else
     {
@@ -427,6 +437,21 @@ StorageCoInstaller(
 
         if (ulStatus & DN_ROOT_ENUMERATED)
             return ERROR_SUCCESS;
+
+        /* A reinstallation keeps the friendly name: by now the device description
+         * is the one of the installed driver, not the name the device reported */
+        if (SetupDiGetDeviceRegistryPropertyW(DeviceInfoSet,
+                                              DeviceInfoData,
+                                              SPDRP_FRIENDLYNAME,
+                                              NULL,
+                                              NULL,
+                                              0,
+                                              &dwBufferSize) ||
+            GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+        {
+            return ERROR_SUCCESS;
+        }
+        dwBufferSize = 0;
 
         /* Get the device description size */
         SetupDiGetDeviceRegistryPropertyW(DeviceInfoSet,

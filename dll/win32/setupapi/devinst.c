@@ -5958,7 +5958,25 @@ SetupDiInstallDevice(
 
     /* Start the device */
     if (!RebootRequired && !(InstallParams.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT | DI_DONOTCALLCONFIGMG)))
-        ret = ResetDevice(DeviceInfoSet, DeviceInfoData);
+    {
+        ULONG ulStatus, ulProblem;
+
+        /* A running device cannot be started again; it is not restarted here either, so the
+         * new driver settings take effect at the next boot */
+        if (CM_Get_DevNode_Status_Ex(&ulStatus, &ulProblem, deviceInfo->dnDevInst, 0, set->hMachine) == CR_SUCCESS &&
+            (ulStatus & DN_STARTED))
+        {
+            InstallParams.cbSize = sizeof(SP_DEVINSTALL_PARAMS_W);
+            ret = SetupDiGetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
+            if (ret)
+            {
+                InstallParams.Flags |= DI_NEEDRESTART;
+                ret = SetupDiSetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
+            }
+        }
+        else
+            ret = ResetDevice(DeviceInfoSet, DeviceInfoData);
+    }
     else
         ret = TRUE;
 
