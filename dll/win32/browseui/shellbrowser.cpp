@@ -1022,6 +1022,62 @@ void CShellBrowser::SaveViewState()
         fCurrentShellView->SaveViewState();
 }
 
+/* Icons of shell32.dll for the disk prompt */
+#define SHELL32_ICON_FLOPPY     7
+#define SHELL32_ICON_REMOVABLE  8
+#define SHELL32_ICON_CDROM      12
+
+/* An empty removable or CD drive asks for a disk before its view is created; FALSE when the user cancels */
+static BOOL PromptForDisk(HWND hwndOwner, LPCITEMIDLIST pidl)
+{
+    WCHAR szPath[MAX_PATH], szRoot[4], szName[MAX_PATH], szFormat[128], szText[MAX_PATH + 128], szTitle[64];
+    HINSTANCE hInstance = _AtlBaseModule.GetResourceInstance();
+
+    if (!SHGetPathFromIDListW(pidl, szPath))
+        return TRUE;
+    int iDrive = PathGetDriveNumberW(szPath);
+    if (iDrive < 0)
+        return TRUE;
+    PathBuildRootW(szRoot, iDrive);
+    UINT uDriveType = GetDriveTypeW(szRoot);
+    if (uDriveType != DRIVE_REMOVABLE && uDriveType != DRIVE_CDROM)
+        return TRUE;
+
+    for (;;)
+    {
+        // GetVolumeInformationW opens the volume without the system's own hard error box
+        if (GetVolumeInformationW(szRoot, NULL, 0, NULL, NULL, NULL, NULL, 0))
+            return TRUE;
+        DWORD dwError = GetLastError();
+        if (dwError != ERROR_NOT_READY && dwError != ERROR_NO_MEDIA_IN_DRIVE)
+            return TRUE;
+
+        SHFILEINFOW sfi;
+        if (!SHGetFileInfoW(szRoot, 0, &sfi, sizeof(sfi), SHGFI_DISPLAYNAME) || !sfi.szDisplayName[0] ||
+            FAILED(StringCchCopyW(szName, _countof(szName), sfi.szDisplayName)))
+        {
+            StringCchCopyW(szName, _countof(szName), szRoot);
+        }
+        if (!LoadStringW(hInstance, IDS_INSERTDISK_TEXT, szFormat, _countof(szFormat)) ||
+            !LoadStringW(hInstance, IDS_INSERTDISK_TITLE, szTitle, _countof(szTitle)))
+        {
+            return FALSE;
+        }
+        StringCchPrintfW(szText, _countof(szText), szFormat, szName);
+
+        MSGBOXPARAMSW mbp = { sizeof(mbp) };
+        mbp.hwndOwner = hwndOwner;
+        mbp.lpszText = szText;
+        mbp.lpszCaption = szTitle;
+        mbp.hInstance = GetModuleHandleW(L"shell32.dll");
+        mbp.dwStyle = MB_RETRYCANCEL | (mbp.hInstance ? MB_USERICON : MB_ICONINFORMATION);
+        mbp.lpszIcon = MAKEINTRESOURCEW(uDriveType == DRIVE_CDROM ? SHELL32_ICON_CDROM :
+                                        iDrive < 2 ? SHELL32_ICON_FLOPPY : SHELL32_ICON_REMOVABLE);
+        if (MessageBoxIndirectW(&mbp) != IDRETRY)
+            return FALSE;
+    }
+}
+
 HRESULT CShellBrowser::BrowseToPath(IShellFolder *newShellFolder,
     LPCITEMIDLIST absolutePIDL, FOLDERSETTINGS *folderSettings, long flags)
 {
@@ -1061,16 +1117,20 @@ HRESULT CShellBrowser::BrowseToPath(IShellFolder *newShellFolder,
         // what to do with error? Do we want to halt browse because state save failed?
     }
 
-    if (fCurrentShellView)
-    {
-        SaveViewState();
-        fCurrentShellView->UIActivate(SVUIA_DEACTIVATE);
-    }
+    // the current view stays as it is when the user cancels the disk prompt or the view cannot be created
+    if (!PromptForDisk(m_hWnd, absolutePIDL))
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
 
     // create view object
     hResult = newShellFolder->CreateViewObject(m_hWnd, IID_PPV_ARG(IShellView, &newShellView));
     if (FAILED_UNEXPECTEDLY(hResult))
         return hResult;
+
+    if (fCurrentShellView)
+    {
+        SaveViewState();
+        fCurrentShellView->UIActivate(SVUIA_DEACTIVATE);
+    }
     previousView = fCurrentShellViewWindow;
 
     // enter updating section
@@ -3772,9 +3832,12 @@ LRESULT CShellBrowser::OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
     // TODO: rip down everything
     {
         m_Destroyed = true; // Ignore browse requests from Explorer band TreeView during destruction
-        fCurrentShellView->UIActivate(SVUIA_DEACTIVATE);
+        // there is no view when the first browse was refused
+        if (fCurrentShellView)
+            fCurrentShellView->UIActivate(SVUIA_DEACTIVATE);
         fToolbarProxy.Destroy();
-        fCurrentShellView->DestroyViewWindow();
+        if (fCurrentShellView)
+            fCurrentShellView->DestroyViewWindow();
 
         for (int i = 0; i < 3; i++)
         {
@@ -3989,7 +4052,7 @@ LRESULT CShellBrowser::OnBackspace(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOO
     HRESULT hResult;
     if (LOBYTE(GetVersion()) < 6)
         hResult = NavigateToParent();
-    else if (FAILED(hResult = GoBack()))
+    else if (FAILED(hResult = GoBack()) && hResult != HRESULT_FROM_WIN32(ERROR_CANCELLED))
         hResult = GoForward();
 
     if (FAILED(hResult))

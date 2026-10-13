@@ -385,7 +385,16 @@ static HRESULT ExplorerMessageLoop(IEThreadParamBlock * parameters)
 
     hResult = psb->BrowseObject(parameters->directoryPIDL, wFlags);
     if (FAILED_UNEXPECTEDLY(hResult))
+    {
+        /* The window is destroyed the normal way, so the browser releases its bars and toolbar */
+        HWND hwndBrowser;
+        if (SUCCEEDED(IUnknown_GetWindow(psb, &hwndBrowser)) && hwndBrowser)
+            ::DestroyWindow(hwndBrowser);
+        ILFree(pidlSelect);
+        if (parameters->pExplorerInstance)
+            parameters->pExplorerInstance->Release();
         return hResult;
+    }
 
     if (pidlSelect != NULL)
     {
