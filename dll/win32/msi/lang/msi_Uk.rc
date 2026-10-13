@@ -40,6 +40,7 @@ STRINGTABLE
     37 "Re&pair"
     38 "&Uninstall"
     39 "&Apply"
+    40 "This installer uses the 32-bit custom action [1] from [2]. This 64-bit version of ReactOS cannot run 32-bit code, so the action was skipped. The setup may show misleading errors or the installation may be incomplete."
 #endif
     100 "New Folder"
 }
