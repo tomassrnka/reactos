@@ -1468,6 +1468,10 @@ LdrUnloadDll(
             /* Call the entrypoint */
             _SEH2_TRY
             {
+                /* TLS callbacks first, as at process exit */
+                if (LdrEntry->TlsIndex)
+                    LdrpCallTlsInitializers(LdrEntry, DLL_PROCESS_DETACH);
+
                 LdrpCallInitRoutine(LdrEntry->EntryPoint,
                                     LdrEntry->DllBase,
                                     DLL_PROCESS_DETACH,
@@ -1483,6 +1487,10 @@ LdrUnloadDll(
             /* Release the context */
             RtlDeactivateActivationContextUnsafeFast(&ActCtx);
         }
+
+        /* A module with TLS that was loaded after process start gives its TLS back (modules present at start stay loaded) */
+        if (LdrEntry->TlsIndex)
+            LdrpRemoveDynamicTls(LdrEntry);
 
         /* Remove it from the list */
         RemoveEntryList(&CurrentEntry->InLoadOrderLinks);
