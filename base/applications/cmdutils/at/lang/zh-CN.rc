@@ -33,6 +33,9 @@ time               指定命令运行的时间。\n\
     IDS_NEW_JOB "添加任务 ID 为 %lu 的新任务\n"
     IDS_JOBS_LIST "状态 ID   日                     时间          命令行\n"
     IDS_NO_ENTRIES "列表中没有项目。\n"
+    IDS_ERROR_CODE "System error %lu has occurred.\n"
+    IDS_DAY_CODES "M,T,W,Th,F,S,Su"
+    IDS_INVALID_COMMAND "Invalid command.\n\n"
 
     IDS_CONFIRM_QUESTION "您想继续操作吗？(Y/N) [N]："
     IDS_CONFIRM_INVALID  "\n这是一个无效的回应。\n"

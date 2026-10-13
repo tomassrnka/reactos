@@ -225,7 +225,10 @@ SchedServiceMain(DWORD argc, LPTSTR *argv)
 
     UpdateServiceStatus(SERVICE_RUNNING);
 
+    /* The RPC server already runs: read the job list under its lock */
+    RtlAcquireResourceShared(&JobListLock, TRUE);
     GetNextJobTimeout(Events[2]);
+    RtlReleaseResource(&JobListLock);
 
     for (;;)
     {

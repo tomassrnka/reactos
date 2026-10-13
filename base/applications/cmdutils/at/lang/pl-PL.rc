@@ -31,6 +31,9 @@ time               Określa godzinę wykonania polecenia.\n\
     IDS_NEW_JOB "Dodano nowe zadanie o identyfikatorze = %lu\n"
     IDS_JOBS_LIST "ID stanu    Dzień                   Godzina      Wiersz polecenia\n"
     IDS_NO_ENTRIES "Na liście nie ma żadnych wpisów.\n"
+    IDS_ERROR_CODE "System error %lu has occurred.\n"
+    IDS_DAY_CODES "M,T,W,Th,F,S,Su"
+    IDS_INVALID_COMMAND "Invalid command.\n\n"
 
     IDS_CONFIRM_QUESTION "Czy chcesz kontynuować wykonwyanie tej operacji? (T/N) [N]: "
     IDS_CONFIRM_INVALID  "\nNieprawidłowe polecenie.\n"

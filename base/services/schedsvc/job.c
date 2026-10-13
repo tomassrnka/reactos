@@ -25,7 +25,7 @@ typedef struct _SCHEDULE
     WORD Reserved;
 } SCHEDULE, PSCHEDULE;
 
-DWORD dwNextJobId = 0;
+DWORD dwNextJobId = 1;
 DWORD dwJobCount = 0;
 LIST_ENTRY JobListHead;
 RTL_RESOURCE JobListLock;
@@ -36,16 +36,61 @@ FILETIME NextJobStartTime;
 BOOL bValidNextJobStartTime = FALSE;
 
 
-static WORD wDaysArray[13] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
+/* Start time of a job whose schedule never comes */
+#define NEVER_HIGH 0x7FFFFFFF
+#define NEVER_LOW  0xFFFFFFFF
 
 /* FUNCTIONS *****************************************************************/
+
+/* A time of day below 24 hours, days of the month 1 to 31, days of the week Monday to Sunday */
+BOOL
+IsValidSchedule(
+    DWORD_PTR JobTime,
+    DWORD DaysOfMonth,
+    UCHAR DaysOfWeek)
+{
+    return JobTime < 24 * 3600000 && !(DaysOfMonth & 0x80000000) && !(DaysOfWeek & 0x80);
+}
+
+
+/* Converts a local start time to UTC with the time zone rules of its date. A local time in the hour skipped when
+ * daylight saving time begins does not exist: it is converted with the daylight bias, an hour early, as Windows'
+ * Task Scheduler does, and the function returns FALSE. */
+static
+BOOL
+GetJobDueTime(
+    _In_ const FILETIME *pLocalTime,
+    _Out_ FILETIME *pDueTime)
+{
+    SYSTEMTIME LocalTime, UniversalTime, CheckTime;
+    FILETIME CheckFileTime;
+
+    if (!FileTimeToSystemTime(pLocalTime, &LocalTime) ||
+        !TzSpecificLocalTimeToSystemTime(NULL, &LocalTime, &UniversalTime) ||
+        !SystemTimeToFileTime(&UniversalTime, pDueTime))
+    {
+        LocalFileTimeToFileTime(pLocalTime, pDueTime);
+        return TRUE;
+    }
+
+    /* Converted back, a time that does not exist comes out as another local time */
+    if (SystemTimeToTzSpecificLocalTime(NULL, &UniversalTime, &CheckTime) &&
+        SystemTimeToFileTime(&CheckTime, &CheckFileTime) &&
+        CompareFileTime(&CheckFileTime, pLocalTime) != 0)
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 
 VOID
 GetNextJobTimeout(HANDLE hTimer)
 {
     PLIST_ENTRY CurrentEntry;
-    FILETIME DueTime;
+    FILETIME DueTime, JobDueTime;
     PJOB CurrentJob;
 
     bValidNextJobStartTime = FALSE;
@@ -54,15 +99,19 @@ GetNextJobTimeout(HANDLE hTimer)
     {
         CurrentJob = CONTAINING_RECORD(CurrentEntry, JOB, JobEntry);
 
-        if (bValidNextJobStartTime == FALSE)
+        if (CurrentJob->StartTime.dwHighDateTime == NEVER_HIGH)
+        {
+            CurrentEntry = CurrentEntry->Flink;
+            continue;
+        }
+
+        /* The earliest job in UTC: a start time in the skipped hour is due before a later existing time */
+        GetJobDueTime(&CurrentJob->StartTime, &JobDueTime);
+        if (bValidNextJobStartTime == FALSE || CompareFileTime(&DueTime, &JobDueTime) > 0)
         {
             CopyMemory(&NextJobStartTime, &CurrentJob->StartTime, sizeof(FILETIME));
+            DueTime = JobDueTime;
             bValidNextJobStartTime = TRUE;
-        }
-        else
-        {
-            if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) > 0)
-                CopyMemory(&NextJobStartTime, &CurrentJob->StartTime, sizeof(FILETIME));
         }
 
         CurrentEntry = CurrentEntry->Flink;
@@ -71,10 +120,9 @@ GetNextJobTimeout(HANDLE hTimer)
     if (bValidNextJobStartTime == FALSE)
     {
         TRACE("No valid job!\n");
+        CancelWaitableTimer(hTimer);
         return;
     }
-
-    LocalFileTimeToFileTime(&DueTime, &NextJobStartTime);
 
     SetWaitableTimer(hTimer,
                      (PLARGE_INTEGER)&DueTime,
@@ -84,47 +132,53 @@ GetNextJobTimeout(HANDLE hTimer)
                      TRUE);
 }
 
-#if 0
+/* Called after a job was started: a periodic job gets its next start time, a one-time job
+ * loses the day it ran for and is removed when no day is left */
 static
 VOID
 ReScheduleJob(
     PJOB pJob)
 {
-    /* Remove the job from the start list */
-    RemoveEntryList(&pJob->StartEntry);
+    SYSTEMTIME StartTime;
+    BOOL bRemove = FALSE;
 
-    /* Non-periodical job, remove it */
     if ((pJob->Flags & JOB_RUN_PERIODICALLY) == 0)
     {
-        /* Remove the job from the registry */
-        DeleteJob(pJob);
+        if (pJob->DaysOfWeek == 0 && pJob->DaysOfMonth == 0)
+        {
+            bRemove = TRUE;
+        }
+        else
+        {
+            FileTimeToSystemTime(&pJob->StartTime, &StartTime);
+            /* Bit 0 of DaysOfWeek is Monday, wDayOfWeek 0 is Sunday */
+            pJob->DaysOfWeek &= ~(1 << ((StartTime.wDayOfWeek + 6) % 7));
+            pJob->DaysOfMonth &= ~(1UL << (StartTime.wDay - 1));
+            bRemove = (pJob->DaysOfWeek == 0 && pJob->DaysOfMonth == 0);
+            if (!bRemove)
+                SaveJob(pJob);
+        }
+    }
 
-        /* Remove the job from the job list */
+    if (bRemove)
+    {
+        DeleteJob(pJob);
         RemoveEntryList(&pJob->JobEntry);
         dwJobCount--;
-
-        /* Free the job object */
         HeapFree(GetProcessHeap(), 0, pJob);
         return;
     }
 
-    /* Calculate the next start time */
     CalculateNextStartTime(pJob);
-
-    /* Insert the job into the start list again */
-    InsertJobIntoStartList(&StartListHead, pJob);
-#if 0
-    DumpStartList(&StartListHead);
-#endif
 }
-#endif
+
 
 VOID
 RunCurrentJobs(VOID)
 {
     PROCESS_INFORMATION ProcessInformation;
     STARTUPINFOW StartupInfo;
-    PLIST_ENTRY CurrentEntry;
+    PLIST_ENTRY CurrentEntry, NextEntry;
     PJOB CurrentJob;
     BOOL bRet;
 
@@ -132,8 +186,15 @@ RunCurrentJobs(VOID)
     while (CurrentEntry != &JobListHead)
     {
         CurrentJob = CONTAINING_RECORD(CurrentEntry, JOB, JobEntry);
+        NextEntry = CurrentEntry->Flink;
 
-        if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) == 0)
+        if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) == 0 && CurrentJob->bMissed)
+        {
+            /* Its start time was in the skipped hour and had passed when it was scheduled: Windows does not run it */
+            TRACE("Skip job %ld: %S\n", CurrentJob->JobId, CurrentJob->Command);
+            ReScheduleJob(CurrentJob);
+        }
+        else if (CompareFileTime(&NextJobStartTime, &CurrentJob->StartTime) == 0)
         {
             TRACE("Run job %ld: %S\n", CurrentJob->JobId, CurrentJob->Command);
 
@@ -168,9 +229,12 @@ RunCurrentJobs(VOID)
                 CloseHandle(ProcessInformation.hThread);
                 CloseHandle(ProcessInformation.hProcess);
             }
+
+            /* Without this the job would be due again at once */
+            ReScheduleJob(CurrentJob);
         }
 
-        CurrentEntry = CurrentEntry->Flink;
+        CurrentEntry = NextEntry;
     }
 }
 
@@ -233,7 +297,8 @@ SaveJob(
     if (lError != ERROR_SUCCESS)
         goto done;
 
-    GetJobName(hJobsKey, pJob->Name);
+    if (pJob->Name[0] == UNICODE_NULL)
+        GetJobName(hJobsKey, pJob->Name);
 
     lError = RegCreateKeyExW(hJobsKey,
                              pJob->Name,
@@ -409,6 +474,17 @@ LoadJobs(VOID)
                 pJob->DaysOfWeek = Schedule.DaysOfWeek;
                 pJob->Flags = Schedule.Flags;
 
+                /* A stored schedule that a new job could not have is ignored */
+                if (!IsValidSchedule(pJob->JobTime, pJob->DaysOfMonth, pJob->DaysOfWeek))
+                {
+                    ERR("Ignoring job %S: invalid schedule\n", szNameBuffer);
+                    HeapFree(GetProcessHeap(), 0, pJob);
+                    pJob = NULL;
+                    RegCloseKey(hJobKey);
+                    hJobKey = NULL;
+                    continue;
+                }
+
                 /* Acquire the job list lock exclusively */
                 RtlAcquireResourceExclusive(&JobListLock, TRUE);
 
@@ -451,155 +527,86 @@ done:
 }
 
 
-static
-WORD
-DaysOfMonth(
-    WORD wMonth,
-    WORD wYear)
-{
-    if (wMonth == 2 && wYear % 4 == 0 && wYear % 400 != 0)
-        return 29;
-
-    return wDaysArray[wMonth];
-}
-
-
+/* The next start time (local time) of a job: the first day, from today on, that is one of the
+ * requested days of the week or month (any day if none is requested) and where the job time of
+ * day has not passed yet. Times of day are compared to the millisecond, and a start time that just
+ * passed (the timer may fire early) is never chosen again. */
 VOID
 CalculateNextStartTime(
     _In_ PJOB pJob)
 {
-    SYSTEMTIME CurrentSystemTime, StartSystemTime;
-    FILETIME StartFileTime;
-    WORD wDaysOffset, wTempOffset, i, wJobDayOfWeek, wJobDayOfMonth;
-    DWORD_PTR CurrentTimeMs;
-    BOOL bDaysOffsetValid;
-    ULARGE_INTEGER LocalStartTime;
+    SYSTEMTIME Now, Day;
+    FILETIME FileTime, DueTime, UtcNow;
+    ULARGE_INTEGER Midnight, Candidate;
+    DWORD_PTR NowMs;
+    UINT i;
 
     TRACE("CalculateNextStartTime(%p)\n", pJob);
+
+    pJob->bMissed = FALSE;
     TRACE("JobTime: %lu\n", pJob->JobTime);
     TRACE("DaysOfWeek: 0x%x\n", pJob->DaysOfWeek);
     TRACE("DaysOfMonth: 0x%x\n", pJob->DaysOfMonth);
 
-    GetLocalTime(&CurrentSystemTime);
+    GetLocalTime(&Now);
 
-    CurrentTimeMs = (DWORD_PTR)CurrentSystemTime.wHour * 3600000 +
-                    (DWORD_PTR)CurrentSystemTime.wMinute * 60000;
-
-    bDaysOffsetValid = FALSE;
-    wDaysOffset = 0;
-    if ((pJob->DaysOfWeek == 0) && (pJob->DaysOfMonth == 0))
+    if ((pJob->StartTime.dwLowDateTime != 0 || pJob->StartTime.dwHighDateTime != 0) &&
+        pJob->StartTime.dwHighDateTime != NEVER_HIGH)
     {
-        if (CurrentTimeMs >= pJob->JobTime)
-        {
-            TRACE("Tomorrow!\n");
-            wDaysOffset = 1;
-        }
-
-        bDaysOffsetValid = TRUE;
+        SystemTimeToFileTime(&Now, &FileTime);
+        if (CompareFileTime(&FileTime, &pJob->StartTime) < 0)
+            FileTimeToSystemTime(&pJob->StartTime, &Now);
     }
-    else
+
+    NowMs = (DWORD_PTR)Now.wHour * 3600000 + (DWORD_PTR)Now.wMinute * 60000 +
+            (DWORD_PTR)Now.wSecond * 1000 + Now.wMilliseconds;
+
+    Day = Now;
+    Day.wHour = Day.wMinute = Day.wSecond = Day.wMilliseconds = 0;
+    SystemTimeToFileTime(&Day, &FileTime);
+    Midnight.LowPart = FileTime.dwLowDateTime;
+    Midnight.HighPart = FileTime.dwHighDateTime;
+
+    /* Every requested day of the month or week comes within a year */
+    for (i = 0; i < 366; i++)
     {
-        if (pJob->DaysOfWeek != 0)
+        Candidate.QuadPart = Midnight.QuadPart + (ULONGLONG)i * 24 * 60 * 60 * 10000000;
+
+        if (i == 0 && NowMs >= pJob->JobTime)
+            continue;
+
+        FileTime.dwLowDateTime = Candidate.LowPart;
+        FileTime.dwHighDateTime = Candidate.HighPart;
+        FileTimeToSystemTime(&FileTime, &Day);
+
+        /* Bit 0 of DaysOfWeek is Monday, wDayOfWeek 0 is Sunday */
+        if ((pJob->DaysOfWeek == 0 && pJob->DaysOfMonth == 0) ||
+            (pJob->DaysOfMonth & (1UL << (Day.wDay - 1))) ||
+            (pJob->DaysOfWeek & (1 << ((Day.wDayOfWeek + 6) % 7))))
         {
-            TRACE("DaysOfWeek!\n");
-            for (i = 0; i < 7; i++)
-            {
-                if (pJob->DaysOfWeek & (1 << i))
-                {
-                    /* Adjust the range */
-                    wJobDayOfWeek = (i + 1) % 7;
-                    TRACE("wJobDayOfWeek: %hu\n", wJobDayOfWeek);
-                    TRACE("CurrentSystemTime.wDayOfWeek: %hu\n", CurrentSystemTime.wDayOfWeek);
-
-                    /* Calculate the days offset */
-                    if ((CurrentSystemTime.wDayOfWeek > wJobDayOfWeek ) ||
-                        ((CurrentSystemTime.wDayOfWeek == wJobDayOfWeek) && (CurrentTimeMs >= pJob->JobTime)))
-                    {
-                        wTempOffset = 7 - CurrentSystemTime.wDayOfWeek + wJobDayOfWeek;
-                        TRACE("wTempOffset: %hu\n", wTempOffset);
-                    }
-                    else
-                    {
-                        wTempOffset = wJobDayOfWeek - CurrentSystemTime.wDayOfWeek;
-                        TRACE("wTempOffset: %hu\n", wTempOffset);
-                    }
-
-                    /* Use the smallest offset */
-                    if (bDaysOffsetValid == FALSE)
-                    {
-                        wDaysOffset = wTempOffset;
-                        bDaysOffsetValid = TRUE;
-                    }
-                    else
-                    {
-                        if (wTempOffset < wDaysOffset)
-                            wDaysOffset = wTempOffset;
-                    }
-                }
-            }
-        }
-
-        if (pJob->DaysOfMonth != 0)
-        {
-            FIXME("Support DaysOfMonth!\n");
-            for (i = 0; i < 31; i++)
-            {
-                if (pJob->DaysOfMonth & (1 << i))
-                {
-                    /* Adjust the range */
-                    wJobDayOfMonth = i + 1;
-                    FIXME("wJobDayOfMonth: %hu\n", wJobDayOfMonth);
-                    FIXME("CurrentSystemTime.wDay: %hu\n", CurrentSystemTime.wDay);
-
-                    if ((CurrentSystemTime.wDay > wJobDayOfMonth) ||
-                        ((CurrentSystemTime.wDay == wJobDayOfMonth) && (CurrentTimeMs >= pJob->JobTime)))
-                    {
-                        wTempOffset = DaysOfMonth(CurrentSystemTime.wMonth, CurrentSystemTime.wYear) -
-                                      CurrentSystemTime.wDay + wJobDayOfMonth;
-                        FIXME("wTempOffset: %hu\n", wTempOffset);
-                    }
-                    else
-                    {
-                        wTempOffset = wJobDayOfMonth - CurrentSystemTime.wDay;
-                        FIXME("wTempOffset: %hu\n", wTempOffset);
-                    }
-
-                    /* Use the smallest offset */
-                    if (bDaysOffsetValid == FALSE)
-                    {
-                        wDaysOffset = wTempOffset;
-                        bDaysOffsetValid = TRUE;
-                    }
-                    else
-                    {
-                        if (wTempOffset < wDaysOffset)
-                            wDaysOffset = wTempOffset;
-                    }
-                }
-            }
+            break;
         }
     }
 
-    TRACE("wDaysOffset: %hu\n", wDaysOffset);
-
-    CopyMemory(&StartSystemTime, &CurrentSystemTime, sizeof(SYSTEMTIME));
-
-    StartSystemTime.wMilliseconds = 0;
-    StartSystemTime.wSecond = 0;
-    StartSystemTime.wHour = (WORD)(pJob->JobTime / 3600000);
-    StartSystemTime.wMinute = (WORD)((pJob->JobTime % 3600000) / 60000);
-
-    SystemTimeToFileTime(&StartSystemTime, &StartFileTime);
-
-    LocalStartTime.u.LowPart = StartFileTime.dwLowDateTime;
-    LocalStartTime.u.HighPart = StartFileTime.dwHighDateTime;
-    if (bDaysOffsetValid && wDaysOffset != 0)
+    if (i == 366)
     {
-        LocalStartTime.QuadPart += ((ULONGLONG)wDaysOffset * 24 * 60 * 60 * 10000);
+        /* No requested day exists: the job never runs */
+        pJob->StartTime.dwLowDateTime = NEVER_LOW;
+        pJob->StartTime.dwHighDateTime = NEVER_HIGH;
+        return;
     }
 
-    pJob->StartTime.dwLowDateTime = LocalStartTime.u.LowPart;
-    pJob->StartTime.dwHighDateTime = LocalStartTime.u.HighPart;
+    Candidate.QuadPart += (ULONGLONG)pJob->JobTime * 10000;
+
+    pJob->StartTime.dwLowDateTime = Candidate.LowPart;
+    pJob->StartTime.dwHighDateTime = Candidate.HighPart;
+
+    /* A start time in the skipped hour is due an hour early; when that has passed already, the start is missed */
+    if (!GetJobDueTime(&pJob->StartTime, &DueTime))
+    {
+        GetSystemTimeAsFileTime(&UtcNow);
+        pJob->bMissed = (CompareFileTime(&DueTime, &UtcNow) <= 0);
+    }
 }
 
 #if 0

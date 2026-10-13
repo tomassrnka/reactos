@@ -87,9 +87,13 @@ NetrJobAdd(
     LPDWORD pJobId)
 {
     PJOB pJob;
+    DWORD dwJobId;
 
     TRACE("NetrJobAdd(%S %p %p)\n",
           ServerName, pAtInfo, pJobId);
+
+    if (!IsValidSchedule(pAtInfo->JobTime, pAtInfo->DaysOfMonth, pAtInfo->DaysOfWeek))
+        return ERROR_INVALID_PARAMETER;
 
     /* Allocate a new job object */
     pJob = HeapAlloc(GetProcessHeap(),
@@ -108,8 +112,9 @@ NetrJobAdd(
     /* Acquire the job list lock exclusively */
     RtlAcquireResourceExclusive(&JobListLock, TRUE);
 
-    /* Assign a new job ID */
+    /* Assign a new job ID; the job may be gone once the lock is released */
     pJob->JobId = dwNextJobId++;
+    dwJobId = pJob->JobId;
     dwJobCount++;
 
     /* Append the new job to the job list */
@@ -133,7 +138,7 @@ NetrJobAdd(
         SetEvent(Events[1]);
 
     /* Return the new job ID */
-    *pJobId = pJob->JobId;
+    *pJobId = dwJobId;
 
     return ERROR_SUCCESS;
 }
@@ -149,6 +154,7 @@ NetrJobDel(
 {
     PLIST_ENTRY JobEntry, NextEntry;
     PJOB CurrentJob;
+    BOOL bFound = FALSE;
 
     TRACE("NetrJobDel(%S %lu %lu)\n",
           ServerName, MinJobId, MaxJobId);
@@ -174,14 +180,15 @@ NetrJobDel(
             /* Remove the job from the registry */
             DeleteJob(CurrentJob);
 
+            bFound = TRUE;
+
+            /* RemoveEntryList returns whether the list is empty, not whether it succeeded */
             NextEntry = JobEntry->Flink;
-            if (RemoveEntryList(JobEntry))
-            {
-                dwJobCount--;
-                HeapFree(GetProcessHeap(), 0, CurrentJob);
-                JobEntry = NextEntry;
-                continue;
-            }
+            RemoveEntryList(JobEntry);
+            dwJobCount--;
+            HeapFree(GetProcessHeap(), 0, CurrentJob);
+            JobEntry = NextEntry;
+            continue;
         }
 
         JobEntry = JobEntry->Flink;
@@ -193,6 +200,10 @@ NetrJobDel(
     /* Set the update event */
     if (Events[1] != NULL)
         SetEvent(Events[1]);
+
+    /* Deleting one job that does not exist is an error, an empty range is not */
+    if (!bFound && MinJobId == MaxJobId)
+        return APE_AT_ID_NOT_FOUND;
 
     return ERROR_SUCCESS;
 }
@@ -210,11 +221,10 @@ NetrJobEnum(
 {
     PLIST_ENTRY JobEntry;
     PJOB CurrentJob;
-    PAT_ENUM pEnum;
+    PAT_ENUM pEnum = NULL;
     DWORD dwStartIndex, dwIndex;
     DWORD dwEntriesToRead, dwEntriesRead;
     DWORD dwRequiredSize, dwEntrySize;
-    PWSTR pString;
     DWORD dwError = ERROR_SUCCESS;
 
     TRACE("NetrJobEnum(%S %p %lu %p %p)\n",
@@ -226,18 +236,20 @@ NetrJobEnum(
         return ERROR_INVALID_PARAMETER;
     }
 
-    if (*pResumeHandle >= dwJobCount)
-    {
-        *pTotalEntries = 0;
-        return ERROR_SUCCESS;
-    }
-
-    dwStartIndex = *pResumeHandle;
+    /* The resume handle is optional */
+    dwStartIndex = (pResumeHandle != NULL) ? *pResumeHandle : 0;
     TRACE("dwStartIndex: %lu\n", dwStartIndex);
 
-    /* Acquire the job list lock exclusively */
+    /* Acquire the job list lock shared */
     RtlAcquireResourceShared(&JobListLock, TRUE);
 
+    if (dwStartIndex >= dwJobCount)
+    {
+        *pTotalEntries = 0;
+        goto done;
+    }
+
+    /* Count the entries that fit; at least one is always returned */
     dwEntriesToRead = 0;
     dwRequiredSize = 0;
     dwIndex = 0;
@@ -248,12 +260,11 @@ NetrJobEnum(
 
         if (dwIndex >= dwStartIndex)
         {
-            TRACE("dwIndex: %lu\n", dwIndex);
             dwEntrySize = sizeof(AT_ENUM) +
                           (wcslen(CurrentJob->Command) + 1) * sizeof(WCHAR);
-            TRACE("dwEntrySize: %lu\n", dwEntrySize);
 
             if ((PreferedMaximumLength != ULONG_MAX) &&
+                (dwEntriesToRead > 0) &&
                 (dwRequiredSize + dwEntrySize > PreferedMaximumLength))
                 break;
 
@@ -265,45 +276,46 @@ NetrJobEnum(
         dwIndex++;
     }
     TRACE("dwEntriesToRead: %lu\n", dwEntriesToRead);
-    TRACE("dwRequiredSize: %lu\n", dwRequiredSize);
 
-    if (PreferedMaximumLength != ULONG_MAX)
-        dwRequiredSize = PreferedMaximumLength;
-
-    TRACE("Allocating dwRequiredSize: %lu\n", dwRequiredSize);
-    pEnum = midl_user_allocate(dwRequiredSize);
+    /* The array and every command string are separate allocations: the RPC stub frees each
+     * embedded pointer on its own after marshalling the reply */
+    pEnum = midl_user_allocate(dwEntriesToRead * sizeof(AT_ENUM));
     if (pEnum == NULL)
     {
         dwError = ERROR_OUTOFMEMORY;
         goto done;
     }
-
-    pString = (PWSTR)((ULONG_PTR)pEnum + dwEntriesToRead * sizeof(AT_ENUM));
+    ZeroMemory(pEnum, dwEntriesToRead * sizeof(AT_ENUM));
 
     dwEntriesRead = 0;
     dwIndex = 0;
     JobEntry = JobListHead.Flink;
-    while (JobEntry != &JobListHead)
+    while (JobEntry != &JobListHead && dwEntriesRead < dwEntriesToRead)
     {
         CurrentJob = CONTAINING_RECORD(JobEntry, JOB, JobEntry);
 
         if (dwIndex >= dwStartIndex)
         {
-            pEnum[dwIndex].JobId = CurrentJob->JobId;
-            pEnum[dwIndex].JobTime = CurrentJob->JobTime;
-            pEnum[dwIndex].DaysOfMonth = CurrentJob->DaysOfMonth;
-            pEnum[dwIndex].DaysOfWeek = CurrentJob->DaysOfWeek;
-            pEnum[dwIndex].Flags = CurrentJob->Flags;
-            pEnum[dwIndex].Command = pString;
-            wcscpy(pString, CurrentJob->Command);
+            pEnum[dwEntriesRead].Command = midl_user_allocate((wcslen(CurrentJob->Command) + 1) * sizeof(WCHAR));
+            if (pEnum[dwEntriesRead].Command == NULL)
+            {
+                while (dwEntriesRead > 0)
+                    midl_user_free(pEnum[--dwEntriesRead].Command);
+                midl_user_free(pEnum);
+                pEnum = NULL;
+                dwError = ERROR_OUTOFMEMORY;
+                goto done;
+            }
 
-            pString = (PWSTR)((ULONG_PTR)pString + (wcslen(CurrentJob->Command) + 1) * sizeof(WCHAR));
+            pEnum[dwEntriesRead].JobId = CurrentJob->JobId;
+            pEnum[dwEntriesRead].JobTime = CurrentJob->JobTime;
+            pEnum[dwEntriesRead].DaysOfMonth = CurrentJob->DaysOfMonth;
+            pEnum[dwEntriesRead].DaysOfWeek = CurrentJob->DaysOfWeek;
+            pEnum[dwEntriesRead].Flags = CurrentJob->Flags;
+            wcscpy(pEnum[dwEntriesRead].Command, CurrentJob->Command);
 
             dwEntriesRead++;
         }
-
-        if (dwEntriesRead == dwEntriesToRead)
-            break;
 
         /* Next job */
         JobEntry = JobEntry->Flink;
@@ -314,9 +326,10 @@ NetrJobEnum(
     pEnumContainer->Buffer = pEnum;
 
     *pTotalEntries = dwJobCount;
-    *pResumeHandle = dwIndex;
+    if (pResumeHandle != NULL)
+        *pResumeHandle = dwStartIndex + dwEntriesRead;
 
-    if (dwEntriesRead + dwStartIndex < dwJobCount)
+    if (dwStartIndex + dwEntriesRead < dwJobCount)
         dwError = ERROR_MORE_DATA;
     else
         dwError = ERROR_SUCCESS;
@@ -340,7 +353,7 @@ NetrJobGetInfo(
     PLIST_ENTRY JobEntry;
     PJOB CurrentJob;
     PAT_INFO pInfo;
-    DWORD dwError = ERROR_FILE_NOT_FOUND;
+    DWORD dwError = APE_AT_ID_NOT_FOUND;
 
     TRACE("NetrJobGetInfo(%S %lu %p)\n",
           ServerName, JobId, ppAtInfo);

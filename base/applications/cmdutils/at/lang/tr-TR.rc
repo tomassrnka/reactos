@@ -31,6 +31,9 @@ saat               Komutun çalıştırılma saatini belirtir.\n\
     IDS_NEW_JOB "%lu iş kimliğiyle yeni bir iş eklendi.\n"
     IDS_JOBS_LIST "Durum  Km.  Gün                     Saat          Komut Yatacı\n"
     IDS_NO_ENTRIES "Tabloda bir giriş yok.\n"
+    IDS_ERROR_CODE "System error %lu has occurred.\n"
+    IDS_DAY_CODES "M,T,W,Th,F,S,Su"
+    IDS_INVALID_COMMAND "Invalid command.\n\n"
 
     IDS_CONFIRM_QUESTION "Devam etmek ister misiniz? (E/H) [H]: "
     IDS_CONFIRM_INVALID  "\nBu geçersiz bir yanıttır.\n"

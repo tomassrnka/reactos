@@ -31,6 +31,9 @@ time               Specifies the time when command is to run.\n\
     IDS_NEW_JOB "Added a new job with job ID = %lu\n"
     IDS_JOBS_LIST "Status ID   Day                     Time          Command Line\n"
     IDS_NO_ENTRIES "There are no entries in the list.\n"
+    IDS_ERROR_CODE "System error %lu has occurred.\n"
+    IDS_DAY_CODES "M,T,W,Th,F,S,Su"
+    IDS_INVALID_COMMAND "Invalid command.\n\n"
 
     IDS_CONFIRM_QUESTION "Do you want to continue this operation? (Y/N) [N]: "
     IDS_CONFIRM_INVALID  "\nThis is an invalid response.\n"
@@ -39,7 +42,7 @@ time               Specifies the time when command is to run.\n\
 
     IDS_TODAY "Today"
     IDS_TOMORROW "Tomorrow"
-    IDS_EVERY "Every"
+    IDS_EVERY "Each"
     IDS_NEXT "Next"
 
     IDS_YES "Yes"

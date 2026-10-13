@@ -91,7 +91,7 @@ NetScheduleJobAdd(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = RpcExceptionCode();
     }
     RpcEndExcept;
 
@@ -119,7 +119,7 @@ NetScheduleJobDel(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = RpcExceptionCode();
     }
     RpcEndExcept;
 
@@ -161,7 +161,7 @@ NetScheduleJobEnum(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = RpcExceptionCode();
     }
     RpcEndExcept;
 
@@ -189,7 +189,7 @@ NetScheduleJobGetInfo(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = RpcExceptionCode();
     }
     RpcEndExcept;
 
