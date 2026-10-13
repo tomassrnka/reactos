@@ -4361,13 +4361,11 @@ MmMapViewOfSection(
             MmUnlockSectionSegment(&SectionSegments[i]);
             if (!NT_SUCCESS(Status))
             {
-                /* roll-back */
+                /* roll-back: MmUnmapViewOfSegment takes the segment lock itself */
                 while (i--)
                 {
                     SBaseAddress =  ((char*)ImageBase + (ULONG_PTR)SectionSegments[i].Image.VirtualAddress);
-                    MmLockSectionSegment(&SectionSegments[i]);
                     MmUnmapViewOfSegment(AddressSpace, SBaseAddress);
-                    MmUnlockSectionSegment(&SectionSegments[i]);
                 }
 
                 goto Exit;
