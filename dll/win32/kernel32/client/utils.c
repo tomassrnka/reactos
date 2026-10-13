@@ -376,6 +376,13 @@ BaseCreateStack(
     Headers = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
     if (!Headers) return STATUS_INVALID_IMAGE_FORMAT;
 
+    /* The sizes are SIZE_T; keep the rounding below from wrapping */
+    if ((StackCommit > MAXULONG_PTR - 2 * 1024 * 1024) ||
+        (StackReserve > MAXULONG_PTR - 2 * 1024 * 1024))
+    {
+        return STATUS_NO_MEMORY;
+    }
+
     if (StackReserve == 0)
         StackReserve = Headers->OptionalHeader.SizeOfStackReserve;
 
@@ -387,12 +394,12 @@ BaseCreateStack(
     else if (StackCommit >= StackReserve)
     {
         /* Grow the reserve beyond the commit, up to 1MB alignment */
-        StackReserve = ROUND_UP(StackCommit, 1024 * 1024);
+        StackReserve = ALIGN_UP_BY(StackCommit, 1024 * 1024);
     }
 
     /* Align everything to Page Size */
-    StackCommit = ROUND_UP(StackCommit, PageSize);
-    StackReserve = ROUND_UP(StackReserve, AllocationGranularity);
+    StackCommit = ALIGN_UP_BY(StackCommit, PageSize);
+    StackReserve = ALIGN_UP_BY(StackReserve, AllocationGranularity);
 
     MinimumStackCommit = NtCurrentPeb()->MinimumStackCommit;
     if ((MinimumStackCommit != 0) && (StackCommit < MinimumStackCommit))
@@ -404,12 +411,12 @@ BaseCreateStack(
     if (StackCommit >= StackReserve)
     {
         /* Grow the reserve beyond the commit, up to 1MB alignment */
-        StackReserve = ROUND_UP(StackCommit, 1024 * 1024);
+        StackReserve = ALIGN_UP_BY(StackCommit, 1024 * 1024);
     }
 
     /* Align everything to Page Size */
-    StackCommit = ROUND_UP(StackCommit, PageSize);
-    StackReserve = ROUND_UP(StackReserve, AllocationGranularity);
+    StackCommit = ALIGN_UP_BY(StackCommit, PageSize);
+    StackReserve = ALIGN_UP_BY(StackReserve, AllocationGranularity);
 
     /* Reserve memory for the stack */
     Stack = 0;
