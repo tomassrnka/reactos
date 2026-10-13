@@ -87,8 +87,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
 #define OA(i) (a[i] ? &Attributes : NULL)
 #define PROBE(i) ProbeOutput(a[i], sizeof(ULONG))
 #define RETURN_HANDLE_AT(i) do { \
-    if (NT_SUCCESS(Status)) { U(i) = HandleToUlong(Cleanup->Handle); Cleanup->Handle = NULL; } \
-    return Status; } while (0)
+    if (NT_SUCCESS(Status)) U(i) = HandleToUlong(Cleanup->Handle); \
+    Cleanup->Handle = NULL; return Status; } while (0)
 #define RETURN_HANDLE() RETURN_HANDLE_AT(0)
     if (Number == 0x10000) return Wow64CsrDispatch(a[0], P(1));
     switch (Number)
@@ -279,11 +279,15 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
         ATTR(2);
         Status = NtOpenFile(&Cleanup->Handle, a[1], OA(2), &Io, a[4], a[5]);
+        /* Failed native calls do not transfer handle ownership. In particular,
+         * an undefined failure output must not be closed if StoreIo faults. */
+        if (!NT_SUCCESS(Status)) Cleanup->Handle = NULL;
         StoreIo(a[3], &Io); RETURN_HANDLE();
     case W64_NtCreateFile:
         PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
         ATTR(2);
         Status = NtCreateFile(&Cleanup->Handle, a[1], OA(2), &Io, P(4), a[5], a[6], a[7], a[8], P(9), a[10]);
+        if (!NT_SUCCESS(Status)) Cleanup->Handle = NULL;
         StoreIo(a[3], &Io); RETURN_HANDLE();
     case W64_NtQueryAttributesFile:
         ATTR(0); return NtQueryAttributesFile(OA(0), P(1));
