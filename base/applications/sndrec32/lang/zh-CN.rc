@@ -67,4 +67,6 @@ BEGIN
     IDS_STRMONO "单声道"
     IDS_STRSTEREO "立体声"
     IDS_STRCHAN "%s"
+    IDS_ERR_RECORD "Sound Recorder cannot record. No recording device is available, or the device could not be opened."
+    IDS_ERR_NODEVICE "An audio recording device cannot be found."
 END

@@ -36,6 +36,8 @@
 #define IDS_STRSTEREO 405
 #define IDS_STRING406 406
 #define IDS_STRCHAN   406
+#define IDS_ERR_RECORD 407
+#define IDS_ERR_NODEVICE 408
 
 #define ID_FILE_NEW          32771
 #define ID_FILE_OPEN         32772
