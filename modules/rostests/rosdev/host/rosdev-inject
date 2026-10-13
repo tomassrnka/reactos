@@ -68,6 +68,23 @@ def edit_hive(path, port, token, exe):
     h.commit(None)
 
 
+def inside(mnt, path):
+    real, base = os.path.realpath(path), os.path.realpath(mnt)
+    return real == base or real.startswith(base + os.sep)
+
+
+def check_path(mnt, path):
+    """Exit unless every component of path below mnt is a real file or directory (no symlink) inside mnt."""
+    rel = os.path.relpath(path, mnt)
+    cur = mnt
+    for part in rel.split(os.sep):
+        cur = os.path.join(cur, part)
+        if os.path.lexists(cur) and os.path.islink(cur):
+            sys.exit("rosdev-inject: %s is a symbolic link on the guest disk; refusing" % cur)
+    if not inside(mnt, path):
+        sys.exit("rosdev-inject: %s resolves outside the mounted disk" % path)
+
+
 def find(mnt, *parts):
     cur = mnt
     for p in parts:
@@ -123,12 +140,19 @@ def main():
         sysroot = find(mnt, "ReactOS") or find(mnt, "Windows")
         if not sysroot:
             sys.exit("rosdev-inject: no ReactOS directory on partition 1")
+        check_path(mnt, sysroot)
         hive = find(sysroot, "system32", "config", "SOFTWARE")
         if not hive:
             sys.exit("rosdev-inject: no SOFTWARE hive")
+        check_path(mnt, hive)
         ddir = os.path.join(mnt, a.dest)
+        check_path(mnt, ddir)
         os.makedirs(ddir, exist_ok=True)
-        shutil.copyfile(a.agent, os.path.join(ddir, "rosdev.exe"))
+        dst = os.path.join(ddir, "rosdev.exe")
+        check_path(mnt, dst)
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o755)
+        with os.fdopen(fd, "wb") as out, open(a.agent, "rb") as src:
+            shutil.copyfileobj(src, out)
         edit_hive(hive, a.port, a.token, "C:\\%s\\rosdev.exe" % a.dest.replace("/", "\\"))
         print("injected %s into %s (port %d)" % (a.agent, a.overlay, a.port))
     finally:

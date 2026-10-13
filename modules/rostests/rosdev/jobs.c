@@ -10,10 +10,11 @@
 
 BOOL g_Quit;
 BOOL g_PowerPending;
+WCHAR g_Args[512];
 static UINT KillTree(DWORD pid, UINT *failed, int depth);
 static WCHAR g_LogPath[MAX_PATH];
 
-typedef struct { char *p; SIZE_T len, cap; } BUF;
+typedef struct { char *p; SIZE_T len, cap; BOOL failed; } BUF;
 
 static void BufAppend(BUF *b, const void *data, SIZE_T n)
 {
@@ -23,7 +24,7 @@ static void BufAppend(BUF *b, const void *data, SIZE_T n)
         char *np;
         while (cap < b->len + n + 1) cap *= 2;
         np = b->p ? HeapReAlloc(GetProcessHeap(), 0, b->p, cap) : HeapAlloc(GetProcessHeap(), 0, cap);
-        if (!np) return;
+        if (!np) { b->failed = TRUE; return; }
         b->p = np;
         b->cap = cap;
     }
@@ -109,14 +110,20 @@ static void ResultOk(REPLY *r, UINT64 id)
     ReplyStr(r, "status", "ok");
 }
 
-/* Sends the header (len=body size), the body, then waits for the host's ACK. */
-static BOOL Finish(CONN *c, REPLY *r, const void *body, UINT64 bodyLen)
+/* Sends the header (len=total body size), the body in up to two parts, then waits for the host's ACK. */
+static BOOL Finish2(CONN *c, REPLY *r, const void *body1, UINT64 len1, const void *body2, UINT64 len2)
 {
     RMSG ack;
-    if (bodyLen) ReplyU64(r, "len", bodyLen);
+    if (len1 + len2) ReplyU64(r, "len", len1 + len2);
     if (!ReplySend(c, r)) return FALSE;
-    if (bodyLen && !ConnWrite(c, body, (int)bodyLen)) return FALSE;
+    if (len1 && !ConnWrite(c, body1, (int)len1)) return FALSE;
+    if (len2 && !ConnWrite(c, body2, (int)len2)) return FALSE;
     return RecvMsg(c, &ack, IO_WAIT) && !strcmp(ack.verb, "ACK");
+}
+
+static BOOL Finish(CONN *c, REPLY *r, const void *body, UINT64 bodyLen)
+{
+    return Finish2(c, r, body, bodyLen, NULL, 0);
 }
 
 static BOOL FinishErr(CONN *c, UINT64 id, DWORD code, const char *what)
@@ -382,8 +389,9 @@ static BOOL DrainPipes(HANDLE pipes[2], BUF *dst[2], BOOL *trunc, DWORD maxBytes
             if (!ReadFile(pipes[i], tmp, budget < sizeof(tmp) ? budget : sizeof(tmp), &got, NULL) || !got) break;
             did = TRUE;
             budget -= got;
-            if (dst[i]->len + got <= MAX_CAPTURE) BufAppend(dst[i], tmp, got);
+            if (dst[i]->len + got <= MAX_CAPTURE && !dst[i]->failed) BufAppend(dst[i], tmp, got);
             else *trunc = TRUE;
+            if (dst[i]->failed) *trunc = TRUE;
         }
     }
     return did;
@@ -485,19 +493,13 @@ static BOOL DoRun(CONN *c, const RMSG *j, UINT64 id)
     ReplyU64(&r, "pid", pi.dwProcessId);
     ReplyU64(&r, "exit", exitCode);
     ReplyU64(&r, "timedout", timedOut);
-    ReplyU64(&r, "truncated", trunc);
+    ReplyU64(&r, "truncated", trunc || out.failed || err.failed);
     ReplyU64(&r, "ms", GetTickCount() - start);
     ReplyU64(&r, "outlen", out.len);
     ReplyU64(&r, "errlen", err.len);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    {
-        BUF all = { 0 };
-        if (out.len) BufAppend(&all, out.p, out.len);
-        if (err.len) BufAppend(&all, err.p, err.len);
-        ok = Finish(c, &r, all.p, all.len);
-        BufFree(&all);
-    }
+    ok = Finish2(c, &r, out.p, out.len, err.p, err.len);
     goto done;
 fail:
     ok = FinishErr(c, id, code, "CreateProcess or pipe setup failed");
@@ -660,14 +662,15 @@ static BOOL DoModules(CONN *c, const RMSG *j, UINT64 id)
 /* Starts a new copy of this executable (it waits for our mutex), then ends this one. */
 static BOOL DoRestart(CONN *c, UINT64 id)
 {
-    WCHAR exe[MAX_PATH], line[MAX_PATH + 32];
+    WCHAR exe[MAX_PATH], line[MAX_PATH + 600];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     REPLY r;
 
     if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return FinishErr(c, id, GetLastError(), "no module name");
-    _snwprintf(line, MAX_PATH + 31, L"\"%s\" /testvm /wait", exe);
-    line[MAX_PATH + 31] = 0;
+    /* same arguments as this start (port and token overrides included), plus /wait */
+    _snwprintf(line, MAX_PATH + 599, L"\"%s\" %s /wait", exe, g_Args);
+    line[MAX_PATH + 599] = 0;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     if (!CreateProcessW(NULL, line, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
@@ -897,6 +900,15 @@ static void ListDir(BUF *b, const WCHAR *dir)
     FindClose(f);
 }
 
+/* Expands %VAR% into out[MAX_PATH]; FALSE when it does not fit or fails. */
+static BOOL ExpandPath(const WCHAR *in, WCHAR *out)
+{
+    DWORD n = ExpandEnvironmentStringsW(in, out, MAX_PATH);
+    if (!n || n > MAX_PATH) return FALSE;
+    out[MAX_PATH - 1] = 0;
+    return TRUE;
+}
+
 static BOOL DoDumps(CONN *c, const RMSG *j, UINT64 id)
 {
     const char *dir = MsgGet(j, "dir");
@@ -920,14 +932,13 @@ static BOOL DoDumps(CONN *c, const RMSG *j, UINT64 id)
             if (RegQueryValueExW(k, L"DumpFolder", NULL, &type, (BYTE *)tmp, &cb) == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ))
             {
                 tmp[MAX_PATH - 1] = 0;
-                ExpandEnvironmentStringsW(tmp, path, MAX_PATH);
-                ListDir(&b, path);
+                if (ExpandPath(tmp, path)) ListDir(&b, path);
             }
             RegCloseKey(k);
         }
-        if (ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\CrashDumps", path, MAX_PATH) && !wcschr(path, L'%')) ListDir(&b, path);
-        if (ExpandEnvironmentStringsW(L"%SystemRoot%\\Minidump", path, MAX_PATH)) ListDir(&b, path);
-        if (ExpandEnvironmentStringsW(L"%SystemRoot%", path, MAX_PATH)) ListDir(&b, path);
+        if (ExpandPath(L"%LOCALAPPDATA%\\CrashDumps", path) && !wcschr(path, L'%')) ListDir(&b, path);
+        if (ExpandPath(L"%SystemRoot%\\Minidump", path)) ListDir(&b, path);
+        if (ExpandPath(L"%SystemRoot%", path)) ListDir(&b, path);
     }
     ResultOk(&r, id);
     ok = Finish(c, &r, b.p, b.len);

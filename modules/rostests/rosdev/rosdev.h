@@ -62,6 +62,7 @@ WCHAR *Utf8ToWide(const char *s);                                  /* HeapAlloc'
 
 /* ---- jobs.c ---- */
 extern BOOL g_Quit;
+extern WCHAR g_Args[512];                       /* the command line this agent was started with */
 extern BOOL g_PowerPending;                     /* shutdown under way: stop polling */
 BOOL RunJob(CONN *c, RMSG *job);                 /* FALSE: drop the connection */
 void LocalInfo(char *out, int cap);

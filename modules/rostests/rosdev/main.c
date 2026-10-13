@@ -181,7 +181,7 @@ static BOOL HasArg(const WCHAR *cmd, const WCHAR *arg, WCHAR *value, int cch)
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 {
-    WCHAR marker[64] = L"", wtoken[128] = L"", wport[16] = L"";
+    WCHAR marker[64] = L"", wtoken[136] = L"", wport[16] = L"";
     char token[4 * 128 + 1];
     DWORD port;
     WSADATA wsa;
@@ -189,6 +189,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
     HANDLE mutex;
     int tries;
 
+    wcsncpy(g_Args, cmd, 511);
+    g_Args[511] = 0;
     if (!HasArg(cmd, L"/testvm", NULL, 0) || !ReadRegString(L"RosDevTestVm", marker, 64) || wcscmp(marker, ROSDEV_MARKER))
     {
         LogLine("refusing to run: needs /testvm and the TestVm marker (test VMs only)");
@@ -206,8 +208,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 
     port = ReadRegDword(L"RosDevPort", ROSDEV_DEFAULT_PORT);
     if (HasArg(cmd, L"/port:", wport, 16)) port = (DWORD)_wtoi(wport);
-    if (!ReadRegString(L"RosDevToken", wtoken, 128)) wtoken[0] = 0;
-    HasArg(cmd, L"/token:", wtoken, 128);
+    if (!ReadRegString(L"RosDevToken", wtoken, 136)) wtoken[0] = 0;
+    HasArg(cmd, L"/token:", wtoken, 136);
     if (!wtoken[0] || port == 0 || port > 65535)
     {
         LogLine("refusing to run: no token or bad port");

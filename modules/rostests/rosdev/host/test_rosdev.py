@@ -151,6 +151,23 @@ class T(unittest.TestCase):
         t.join()
         self.assertEqual(res["status"], "ok")
 
+    def test_unreadable_upload_fails_the_job_and_answers_the_poll(self):
+        a = FakeAgent(self.port)
+        job = rd.Job("put", {"path": "C:\\x"}, put_src="/nonexistent/file", timeout=5)
+        res = {}
+        t = threading.Thread(target=lambda: res.update(self.vs.submit(job, 20)))
+        t.start()
+        self.assertEqual(a.poll()[0], "NOP")        # the outstanding poll is answered
+        t.join()
+        self.assertEqual(res["status"], "err")
+        job2 = rd.Job("run", {"cmd": "x"}, timeout=5)
+        t2 = threading.Thread(target=lambda: self.vs.submit(job2, 20))
+        t2.start()
+        verb, kv = a.poll()                          # the session still works
+        self.assertEqual(verb, "JOB")
+        a.result(int(kv["id"]), exit=0, outlen=0, errlen=0)
+        t2.join()
+
     def test_png_encoder(self):
         import struct
         w, h = 3, 2

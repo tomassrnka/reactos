@@ -25,6 +25,7 @@ import os
 import queue
 import re
 import secrets
+import select
 import shlex
 import signal
 import socket
@@ -95,6 +96,7 @@ class Job:
         self.done = threading.Event()
         self.result = None
         self.cancelled = False
+        self.started = False        # the JOB header write has begun: the job can no longer be handed to another session
         self.id = 0
 
 
@@ -172,19 +174,25 @@ class VmServer:
                 if self.conn is s:
                     self.ready.set()
                 job = self.take_job(s)
-                if job is None:
-                    if self.conn is not s:
-                        break           # superseded by a newer connection
-                    f.write(b"NOP\n")
-                    f.flush()
+                if job is not None and self.run_job(f, s, job):
+                    job = None
                     continue
-                self.run_job(f, s, job)
+                # no job, or one that was not sent (failed before sending, or handed back): answer the poll
                 job = None
+                if self.conn is not s:
+                    break               # superseded by a newer connection
+                f.write(b"NOP\n")
+                f.flush()
         except (OSError, ValueError) as e:
             self.log("session error: %s" % e)
         finally:
             if job is not None and not job.done.is_set():
-                if job.op == "power":
+                if not job.started:
+                    if self.conn is not s:
+                        self.jobs.put(job)      # never sent: the replacement session takes it
+                    else:
+                        self.finish(job, {"status": "err", "msg": "agent disconnected before the job was sent", "disconnected": True})
+                elif job.op == "power":
                     self.finish(job, {"status": "ok", "note": "connection dropped after the power request"})
                 else:
                     self.finish(job, {"status": "err", "msg": "agent disconnected during the job", "disconnected": True})
@@ -218,6 +226,8 @@ class VmServer:
         return None
 
     def run_job(self, f, s, job):
+        """Send one job and relay its result. True when the job was sent; False when it was not
+        (it then finished with an error, or went back to the queue because s was superseded)."""
         args = dict(job.args)
         src = None
         if job.op == "put":
@@ -238,12 +248,18 @@ class VmServer:
                 if src:
                     src.close()
                 self.finish(job, {"status": "err", "msg": "cannot read %s: %s" % (job.put_src, e)})
-                return
+                return False
             args["sha256"] = h.hexdigest()
             args["len"] = size
         with self.lock:
+            if self.conn is not s:
+                if src:
+                    src.close()
+                self.jobs.put(job)
+                return False
             job.id = self.next_id
             self.next_id += 1
+            job.started = True
         line = "JOB id=%d op=%s %s\n" % (job.id, job.op, " ".join("%s=%s" % (k, enc(v)) for k, v in args.items()))
         s.settimeout(120)
         f.write(line.encode())
@@ -296,6 +312,7 @@ class VmServer:
         if job.op == "power" and res.get("status") == "ok":
             self.ready.clear()      # the next POLL (if the power request failed) sets it again
         self.finish(job, res)
+        return True
 
     def finish(self, job, res):
         job.result = res
@@ -416,35 +433,49 @@ def cmd_serve(a):
     except OSError as e:
         die("cannot listen on 127.0.0.1:%d: %s" % (cfg["port"], e))
     ls.listen(4)
-    pid = 0
+    rp = wp = None
     if a.daemon:
+        rp, wp = os.pipe()
         pid = os.fork()
         if pid:
-            for _ in range(100):
-                if os.path.exists(sock):
-                    print("serving %s on 127.0.0.1:%d (guest 10.0.2.2:%d)" % (a.vm, cfg["port"], cfg["port"]))
-                    return
-                if os.waitpid(pid, os.WNOHANG)[0]:
-                    die("server did not start; see %s/serve.log" % d)
-                time.sleep(0.1)
-            die("server did not start in time; see %s/serve.log" % d)
+            os.close(wp)
+            r, _, _ = select.select([rp], [], [], 15)
+            msg = os.read(rp, 4096) if r else b""
+            if msg.startswith(b"ok"):
+                print("serving %s on 127.0.0.1:%d (guest 10.0.2.2:%d)" % (a.vm, cfg["port"], cfg["port"]))
+                return
+            die("server did not start: %s (see %s/serve.log)" % (msg.decode("utf-8", "replace").strip() or "no answer", d))
+        os.close(rp)
         os.setsid()
         log = open(os.path.join(d, "serve.log"), "a", buffering=1)
         os.dup2(log.fileno(), 1)
         os.dup2(log.fileno(), 2)
         os.close(0)
-    old_umask = os.umask(0o077)
     try:
-        ctl = CtlServer(sock, CtlHandler)
-    finally:
-        os.umask(old_umask)
-    save_cfg(a.vm, cfg)
-    with open(os.path.join(d, "serve.pid"), "w") as f:
-        f.write(str(os.getpid()))
+        old_umask = os.umask(0o077)
+        try:
+            ctl = CtlServer(sock, CtlHandler)
+        finally:
+            os.umask(old_umask)
+        save_cfg(a.vm, cfg)
+        with open(os.path.join(d, "serve.pid"), "w") as f:
+            f.write(str(os.getpid()))
+    except Exception as e:  # noqa: BLE001 - reported to the parent
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+        if wp is not None:
+            os.write(wp, ("error: %r\n" % (e,)).encode())
+            os._exit(1)
+        die("cannot start the server: %r" % (e,))
     vs = VmServer(a.vm, cfg["port"], cfg["token"])
     threading.Thread(target=vs.serve_agents, args=(ls,), daemon=True).start()
     ctl.vmserver = vs
     vs.log("serving %s on 127.0.0.1:%d" % (a.vm, cfg["port"]))
+    if wp is not None:
+        os.write(wp, b"ok\n")
+        os.close(wp)
     try:
         ctl.serve_forever()
     finally:
@@ -648,11 +679,16 @@ def proc_args(pid):
         return None
 
 
-def kill_pid(pid, matches):
-    """SIGTERM then SIGKILL pid, but only while its command line still holds every argument in matches."""
+def kill_pid(pid, seq, exe_suffix):
+    """SIGTERM then SIGKILL pid, but only while its command line still holds the argument sequence seq
+    (adjacent, in order) and one of its first three arguments ends in exe_suffix."""
+    want = [x.encode() for x in seq]
+
     def mine():
         args = proc_args(pid)
-        return args is not None and all(m.encode() in args for m in matches)
+        if args is None or not any(a.endswith(exe_suffix.encode()) for a in args[:3]):
+            return False
+        return any(args[i:i + len(want)] == want for i in range(len(args)))
     if pid <= 0 or not mine():
         return
     os.kill(pid, signal.SIGTERM)
@@ -720,8 +756,8 @@ def cmd_down(a):
     if not os.path.isdir(d):
         die("no such VM: %s" % a.vm)
     # exact pids from this VM's own files; the command line must still be this VM's qemu or server
-    kill_pid(pid_of(os.path.join(d, "qemu.pid")), ["-name", a.vm])
-    kill_pid(pid_of(os.path.join(d, "serve.pid")), ["serve", a.vm])
+    kill_pid(pid_of(os.path.join(d, "qemu.pid")), ["-name", a.vm], "qemu-system-x86_64" if load_cfg(a.vm) and load_cfg(a.vm).get("arch") != "i386" else "qemu-system-i386")
+    kill_pid(pid_of(os.path.join(d, "serve.pid")), ["serve", a.vm], "rosdev")
     for n in ("qemu.pid", "serve.pid"):
         try:
             os.unlink(os.path.join(d, n))
