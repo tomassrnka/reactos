@@ -1,0 +1,5 @@
+@ stdcall TlsDynGetValue()
+@ stdcall TlsDynSetValue(long)
+@ stdcall TlsDynGetIndex()
+@ stdcall TlsDynGetEvents()
+@ stdcall TlsDynSetLog(ptr ptr)
