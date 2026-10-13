@@ -97,7 +97,7 @@ cmake_dependent_option(ISAPNP_ENABLE "Whether to enable the ISA PnP support." ON
                        "ARCH STREQUAL i386 AND NOT SARCH STREQUAL xbox" OFF)
 
 cmake_dependent_option(BUILD_WOW64_ENABLED
-    "Build the experimental amd64 WoW64 kernel skeleton (no 32-bit loader yet)."
+    "Build the experimental amd64 WoW64 runtime."
     OFF "ARCH STREQUAL amd64" OFF)
 
 set(GENERATE_DEPENDENCY_GRAPH FALSE CACHE BOOL
@@ -120,3 +120,12 @@ set(USE_DUMMY_PSEH FALSE CACHE BOOL
 
 set(DLL_EXPORT_VERSION "0x502" CACHE STRING
 "The NT version the user mode DLLs target.")
+
+if(BUILD_WOW64_ENABLED AND NOT MSVC)
+    set(_syswow64_default ON)
+else()
+    set(_syswow64_default OFF)
+endif()
+cmake_dependent_option(SYSWOW64 "Whether to build the i386 user-mode files into SysWOW64 (nested i386 build)." ${_syswow64_default}
+                       "ARCH STREQUAL amd64" OFF)
+unset(_syswow64_default)

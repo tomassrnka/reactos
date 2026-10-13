@@ -7,7 +7,7 @@ macro(require_program varname execname)
 endmacro()
 
 # pass variables necessary for the toolchain (needed for try_compile)
-set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES ARCH)
+set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES ARCH MINGW_TOOLCHAIN_PREFIX MINGW_TOOLCHAIN_SUFFIX)
 
 # Choose the right MinGW toolchain prefix
 if(NOT DEFINED MINGW_TOOLCHAIN_PREFIX)
