@@ -169,14 +169,11 @@ static VOID TestProtectedTemplate(PCSTR Self)
     trace("Unreadable template, new thread: child exit code 0x%lx\n", Code);
     ok(Code < 0xD1 || Code > 0xD6, "The child failed to set up or to wait: 0x%lx\n", Code);
     /*
-     * The thread must not run without its block. Allowed: it ends before it
-     * runs (ReactOS: with the status, here STATUS_NO_MEMORY), or the process
-     * ends (Windows: 0xC0000005).
+     * The thread must not run without its block: on ReactOS it ends before it
+     * runs, with its status; on Windows the template fault ends the process.
      */
-    ok(Code != THREAD_HAD_NO_BLOCK && Code != THREAD_HAD_BLOCK && Code != 0xDEAD && Code != STILL_ACTIVE,
+    ok(Code == (is_reactos() ? 0xC0000017 /* STATUS_NO_MEMORY */ : 0xC0000005 /* STATUS_ACCESS_VIOLATION */),
        "Child exit code 0x%lx\n", Code);
-    if (is_reactos())
-        ok(Code == 0xC0000017 /* STATUS_NO_MEMORY */, "Child exit code 0x%lx, expected the thread's status\n", Code);
     CloseHandle(ProcessInfo.hProcess);
     CloseHandle(ProcessInfo.hThread);
 }
