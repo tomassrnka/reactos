@@ -1347,8 +1347,16 @@ void add_volume_device(struct btrfs_super_block* sb, PUNICODE_STRING devpath, ui
 
 #ifndef __REACTOS__
     if (process_drive_letters)
-        drive_letter_callback(pdode);
+#else
+    // ReactOS mounts btrfs directly on the partition (check_mount_device) and
+    // normally never starts the volume PDO, so the partition keeps its drive
+    // letter unless a volume device exists or is created below (NoPNP or the
+    // boot volume). The handoff stays before the new device is announced, so
+    // that the mount manager can give it the freed letter.
+    if (process_drive_letters && (pdode->vde || (new_pdo && (no_pnp ||
+        RtlCompareMemory(&sb->fsid, &boot_uuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE))))
 #endif
+        drive_letter_callback(pdode);
 
     if (new_pdo) {
         if (RtlCompareMemory(&sb->fsid, &boot_uuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE)
@@ -1360,15 +1368,6 @@ void add_volume_device(struct btrfs_super_block* sb, PUNICODE_STRING devpath, ui
             IoInvalidateDeviceRelations(bde->buspdo, BusRelations);
         }
     }
-
-#ifdef __REACTOS__
-    // ReactOS mounts btrfs directly on the partition (check_mount_device), and
-    // the PDO is normally never started, so no volume device would take the
-    // partition's drive letter over. Hand it over only once the volume device
-    // exists (NoPNP or boot volume).
-    if (process_drive_letters && pdode->vde)
-        drive_letter_callback(pdode);
-#endif
 
     return;
 
