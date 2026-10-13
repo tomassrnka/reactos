@@ -2280,7 +2280,11 @@ co_WinPosSetWindowPos(
             //ERR("WPSWP : set active window\n");
             if (!(Window->state & WNDS_BEINGACTIVATED)) // Inside SAW?
             {
-               co_IntSetForegroundWindow(Window); // Fixes SW_HIDE issues. Wine win test_SetActiveWindow & test_SetForegroundWindow.
+               // A window on a desktop that is not the input desktop is only activated in its own queue.
+               if (IntGetActiveDesktop() && Window->head.rpdesk != IntGetActiveDesktop())
+                  co_IntSetActiveWindow(Window, FALSE, TRUE, FALSE);
+               else
+                  co_IntSetForegroundWindow(Window); // Fixes SW_HIDE issues. Wine win test_SetActiveWindow & test_SetForegroundWindow.
             }
          }
       }

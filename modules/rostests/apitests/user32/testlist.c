@@ -63,6 +63,7 @@ extern void func_SetScrollInfo(void);
 extern void func_SetScrollRange(void);
 extern void func_SetWindowPlacement(void);
 extern void func_ShowWindow(void);
+extern void func_SwitchDesktop(void);
 extern void func_SwitchToThisWindow(void);
 extern void func_SystemParametersInfo(void);
 extern void func_SystemMenu(void);
@@ -137,6 +138,7 @@ const struct test winetest_testlist[] =
     { "SetScrollRange", func_SetScrollRange },
     { "SetWindowPlacement", func_SetWindowPlacement },
     { "ShowWindow", func_ShowWindow },
+    { "SwitchDesktop", func_SwitchDesktop },
     { "SwitchToThisWindow", func_SwitchToThisWindow },
     { "SystemMenu", func_SystemMenu },
     { "SystemParametersInfo", func_SystemParametersInfo },
