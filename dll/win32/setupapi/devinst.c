@@ -5665,15 +5665,14 @@ InfIsFromOEMLocation(
     return TRUE;
 }
 
-/* The filters that load on a device: device UpperFilters and LowerFilters, then the same
- * values of its class key */
+/* The filters that would load on a device: device UpperFilters and LowerFilters, then
+ * the same values of its class key */
 #define RUNNING_FILTER_VALUES 4
 
 struct RunningDriverSnapshot
 {
     BOOL Installed; /* installed before (Class value), or not known */
     BOOL HasService;
-    DWORD Type[RUNNING_FILTER_VALUES];
     DWORD Size[RUNNING_FILTER_VALUES];
     LPWSTR Data[RUNNING_FILTER_VALUES];
 };
@@ -5689,7 +5688,6 @@ FreeRunningDriverSnapshot(
         HeapFree(GetProcessHeap(), 0, Snapshot->Data[i]);
         Snapshot->Data[i] = NULL;
         Snapshot->Size[i] = 0;
-        Snapshot->Type[i] = REG_NONE;
     }
 }
 
@@ -5737,7 +5735,6 @@ ReadRunningFilter(
     if (dwType != REG_MULTI_SZ || dwRead != dwSize)
         return ERROR_INVALID_DATA;
 
-    Snapshot->Type[Index] = dwType;
     Snapshot->Size[Index] = dwSize;
     return ERROR_SUCCESS;
 }
@@ -5819,22 +5816,18 @@ TakeRunningDriverSnapshot(
     return TRUE;
 }
 
+/* An empty REG_MULTI_SZ list counts as no filter */
 static BOOL
-SameRunningFilters(
-        IN const struct RunningDriverSnapshot *Before,
-        IN const struct RunningDriverSnapshot *After)
+NoRunningFilters(
+        IN const struct RunningDriverSnapshot *Snapshot)
 {
     DWORD i, j;
 
     for (i = 0; i < RUNNING_FILTER_VALUES; i++)
     {
-        if (Before->Type[i] != After->Type[i] || Before->Size[i] != After->Size[i])
-            return FALSE;
-
-        /* Service names are not case sensitive */
-        for (j = 0; j < Before->Size[i] / sizeof(WCHAR); j++)
+        for (j = 0; j < Snapshot->Size[i] / sizeof(WCHAR); j++)
         {
-            if (tolowerW(Before->Data[i][j]) != tolowerW(After->Data[i][j]))
+            if (Snapshot->Data[i][j] != UNICODE_NULL)
                 return FALSE;
         }
     }
@@ -6153,11 +6146,13 @@ SetupDiInstallDevice(
             BOOL RawUnchanged;
 
             /* A raw device (a new volume) that the system started before its first install,
-             * and that stays raw with the same filters: nothing that runs changes */
+             * with no service and no device or class filter before and after it: no driver
+             * runs on it that the install could change. Co-installers that change drivers
+             * in post-processing must ask for the restart themselves. */
             RawUnchanged = TakeRunningDriverSnapshot(set, deviceInfo, &RunningAfter) &&
                            !RunningBefore.Installed &&
                            !RunningBefore.HasService && !RunningAfter.HasService &&
-                           SameRunningFilters(&RunningBefore, &RunningAfter);
+                           NoRunningFilters(&RunningBefore) && NoRunningFilters(&RunningAfter);
             FreeRunningDriverSnapshot(&RunningAfter);
             if (RawUnchanged)
                 ret = TRUE;
