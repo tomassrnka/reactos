@@ -667,7 +667,6 @@ HRESULT WINAPI CNetConUiObject::InvokeCommand(LPCMINVOKECOMMANDINFO lpcmi)
             // TODO: Windows does not display this with an owner window
             return ShowNetConnectionStatus(m_lpOleCmd, m_pidl, lpcmi->hwnd);
         }
-        case IDS_NET_REPAIR:
         case IDS_NET_CREATELINK:
         case IDS_NET_DELETE:
             FIXME("Command %u is not implemented\n", CmdId);
@@ -687,6 +686,8 @@ HRESULT WINAPI CNetConUiObject::InvokeCommand(LPCMINVOKECOMMANDINFO lpcmi)
             return pCon->Connect();
         case IDS_NET_DEACTIVATE:
             return pCon->Disconnect();
+        case IDS_NET_REPAIR:
+            return RepairConnection(pCon, lpcmi->hwnd);
         case IDS_NET_PROPERTIES:
             return ShowNetConnectionProperties(pCon, lpcmi->hwnd);
     }

@@ -47,9 +47,14 @@ class CLanStatus:
     private:
         HRESULT InitializeNetTaskbarNotifications();
         HRESULT ShowStatusDialogByCLSID(const GUID *pguidCmdGroup);
+        void UpdateRetryTimer();
+        void StopRetryTimer();
+        static VOID CALLBACK RetryTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
 
         CComPtr<INetConnectionManager> m_lpNetMan;
         NOTIFICATION_ITEM *m_pHead;
+        UINT_PTR m_RetryTimer;
+        UINT m_RetryCount;
 
     public:
         DECLARE_NO_REGISTRY()
