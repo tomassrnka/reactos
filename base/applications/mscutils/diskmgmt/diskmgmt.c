@@ -271,7 +271,9 @@ PopulateDiskList(VOID)
         SetCell(g_hDiskList, (int)i, 3, Unallocated);
         SetCell(g_hDiskList, (int)i, 4, Disk->StatusText);
         SetCell(g_hDiskList, (int)i, 5, Disk->BusText);
-        LoadStringBuffer(Disk->Style == DM_STYLE_GPT ? IDS_STYLE_GPT_SHORT : Disk->Style == DM_STYLE_MBR ? IDS_STYLE_MBR_SHORT : IDS_NOT_AVAILABLE,
+        /* Windows lists an optical drive as MBR */
+        LoadStringBuffer(Disk->Style == DM_STYLE_GPT ? IDS_STYLE_GPT_SHORT :
+                         (Disk->Style == DM_STYLE_MBR || Disk->Device == DM_DEV_CDROM) ? IDS_STYLE_MBR_SHORT : IDS_NOT_AVAILABLE,
                          Style, ARRAYSIZE(Style));
         SetCell(g_hDiskList, (int)i, 6, Style);
     }

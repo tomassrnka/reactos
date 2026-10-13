@@ -105,7 +105,7 @@ DmBusText(ULONG BusType)
         case BusTypeUsb:        return L"USB";
         case BusTypeRAID:       return L"RAID";
         case BusTypeiScsi:      return L"iSCSI";
-        case BusTypeSas:        return L"SAS";
+        case BusTypeSas:        return L"UNKNOWN";   /* Disk Management has no name for it */
         case BusTypeSata:       return L"SATA";
         case BusTypeSd:         return L"SD";
         case BusTypeMmc:        return L"MMC";

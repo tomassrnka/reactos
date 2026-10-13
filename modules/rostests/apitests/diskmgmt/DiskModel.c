@@ -608,6 +608,16 @@ CheckFit(ULONG Count, const ULONGLONG *Lengths, ULONG Bar, ULONG Min, PCSTR What
 }
 
 static VOID
+Test_BusText(VOID)
+{
+    CheckText(DmBusText(BusTypeScsi), L"SCSI", "SCSI");
+    CheckText(DmBusText(BusTypeAta), L"IDE", "ATA");
+    CheckText(DmBusText(BusTypeAtapi), L"IDE", "ATAPI");
+    CheckText(DmBusText(BusTypeUsb), L"USB", "USB");
+    CheckText(DmBusText(BusTypeSas), L"UNKNOWN", "SAS is UNKNOWN in the disk list of Windows Server 2008 R2");
+}
+
+static VOID
 Test_Fit(VOID)
 {
     ULONGLONG Lengths[256];
@@ -647,6 +657,7 @@ Test_Fit(VOID)
 START_TEST(DiskModel)
 {
     Test_Format();
+    Test_BusText();
     Test_Fit();
     Test_MbrLayout();
     Test_GptLayout();
