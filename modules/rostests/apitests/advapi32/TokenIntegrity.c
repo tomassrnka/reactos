@@ -238,7 +238,7 @@ static void TestDuplicateHandle(HANDLE hToken)
     FreeSid(World);
 }
 
-/* The SACL shows the same label, when this process may read SACLs */
+/* The SACL view and the label view, when this process may read SACLs */
 static void TestSaclView(void)
 {
     BYTE Buffer[1024];
@@ -266,6 +266,7 @@ static void TestSaclView(void)
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | READ_CONTROL | ACCESS_SYSTEM_SECURITY, &hToken))
     {
         ok(GetObjectLabel(hToken, &LabelRid, &Mask, &AceCount), "No label\n");
+        /* SACL_SECURITY_INFORMATION shows the other entries only (Windows 7 and 10 alike) */
         ok(GetKernelObjectSecurity(hToken, SACL_SECURITY_INFORMATION, Sd, sizeof(Buffer), &Length),
            "GetKernelObjectSecurity(SACL) failed: %lu\n", GetLastError());
         if (GetSecurityDescriptorSacl(Sd, &Present, &Sacl, &Defaulted) && Present && Sacl)
@@ -273,14 +274,30 @@ static void TestSaclView(void)
             for (i = 0; i < Sacl->AceCount; i++)
             {
                 if (GetAce(Sacl, i, (PVOID *)&Ace) && Ace->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                    Found = TRUE;
+            }
+        }
+        ok(!Found, "The SACL view shows the label\n");
+
+        /* Both together show the whole SACL, label included */
+        Found = FALSE;
+        Present = FALSE;
+        Sacl = NULL;
+        ok(GetKernelObjectSecurity(hToken, SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, Sd, sizeof(Buffer), &Length),
+           "GetKernelObjectSecurity(SACL | LABEL) failed: %lu\n", GetLastError());
+        if (GetSecurityDescriptorSacl(Sd, &Present, &Sacl, &Defaulted) && Present && Sacl)
+        {
+            for (i = 0; i < Sacl->AceCount; i++)
+            {
+                if (GetAce(Sacl, i, (PVOID *)&Ace) && Ace->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
                 {
                     Found = TRUE;
-                    ok(*GetSidSubAuthority((PSID)&Ace->SidStart, 0) == LabelRid, "SACL label differs from the LABEL view\n");
-                    ok(Ace->Mask == Mask, "SACL label policy 0x%lx, LABEL view 0x%lx\n", Ace->Mask, Mask);
+                    ok(*GetSidSubAuthority((PSID)&Ace->SidStart, 0) == LabelRid, "Label differs from the LABEL view\n");
+                    ok(Ace->Mask == Mask, "Label policy 0x%lx, LABEL view 0x%lx\n", Ace->Mask, Mask);
                 }
             }
         }
-        ok(Found, "The SACL has no label\n");
+        ok(Found, "The SACL | LABEL view has no label\n");
         CloseHandle(hToken);
     }
     else

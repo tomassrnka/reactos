@@ -1787,7 +1787,7 @@ SepGetDescriptorLabel(
 /*
  * A caller may set a mandatory label up to its own level; above that it
  * needs SeRelabelPrivilege, as on NT 6. Checked for the label in a
- * descriptor that is about to be set (LABEL_ or SACL_SECURITY_INFORMATION).
+ * descriptor that is about to be set with LABEL_SECURITY_INFORMATION.
  */
 NTSTATUS
 NTAPI

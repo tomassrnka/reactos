@@ -975,7 +975,7 @@ NtSetSecurityObject(IN HANDLE Handle,
         {
             /* A mandatory label above the caller's own level needs SeRelabelPrivilege */
             Status = STATUS_SUCCESS;
-            if (SecurityInformation & (LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION))
+            if (SecurityInformation & LABEL_SECURITY_INFORMATION)
                 Status = SeCheckLabelChange(CapturedDescriptor, PreviousMode);
 
             /* Set security */

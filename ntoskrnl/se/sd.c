@@ -352,8 +352,9 @@ DetermineACLSize(
 
 /*
  * Mandatory labels live in the SACL as SYSTEM_MANDATORY_LABEL_ACE entries.
- * LABEL_SECURITY_INFORMATION shows and changes those entries only;
- * SACL_SECURITY_INFORMATION the whole SACL, labels included.
+ * As on NT 6, LABEL_SECURITY_INFORMATION shows and changes those entries
+ * only, and SACL_SECURITY_INFORMATION the other (audit) entries only; both
+ * together the whole SACL.
  */
 
 /* Bytes and number of the label ACEs (Labels) or of the other ACEs of a stored ACL */
@@ -702,6 +703,7 @@ SeQuerySecurityDescriptorInfo(
     ULONG DaclLength = 0;
     ULONG SaclLength = 0;
     ULONG LabelCount = 0;
+    BOOLEAN LabelsOnly = FALSE;
     SECURITY_DESCRIPTOR_CONTROL Control = 0;
     ULONG_PTR Current;
     ULONG SdLength;
@@ -761,6 +763,7 @@ SeQuerySecurityDescriptorInfo(
     }
 
     if ((*SecurityInformation & SACL_SECURITY_INFORMATION) &&
+        (*SecurityInformation & LABEL_SECURITY_INFORMATION) &&
         (ObjectSd->Control & SE_SACL_PRESENT))
     {
         Sacl = SepGetSaclFromDescriptor(ObjectSd);
@@ -771,18 +774,21 @@ SeQuerySecurityDescriptorInfo(
 
         Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
     }
-    else if ((*SecurityInformation & LABEL_SECURITY_INFORMATION) &&
+    else if ((*SecurityInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
              (ObjectSd->Control & SE_SACL_PRESENT))
     {
-        /* A SACL of the label ACEs only, when there are any */
+        /* The label ACEs only (a SACL only when there are any), or the other ACEs only */
+        LabelsOnly = (*SecurityInformation & LABEL_SECURITY_INFORMATION) != 0;
         LabelSource = SepGetSaclFromDescriptor(ObjectSd);
         if (LabelSource != NULL)
         {
-            SaclLength = SepAceBytes(LabelSource, TRUE, &LabelCount);
-            SaclLength = LabelCount ? ROUND_UP(sizeof(ACL) + SaclLength, 4) : 0;
+            SaclLength = SepAceBytes(LabelSource, LabelsOnly, &LabelCount);
+            SaclLength = (LabelCount || !LabelsOnly) ? ROUND_UP(sizeof(ACL) + SaclLength, 4) : 0;
         }
         if (SaclLength != 0)
             Control |= SE_SACL_PRESENT;
+        if (!LabelsOnly)
+            Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
     }
 
     SdLength = OwnerLength + GroupLength + DaclLength +
@@ -835,7 +841,7 @@ SeQuerySecurityDescriptorInfo(
         RtlZeroMemory(LabelAcl, SaclLength);
         LabelAcl->AclRevision = LabelSource->AclRevision;
         LabelAcl->AclSize = (USHORT)SaclLength;
-        SepAppendAces(LabelAcl, &Used, LabelSource, TRUE);
+        SepAppendAces(LabelAcl, &Used, LabelSource, LabelsOnly);
         RelSD->Sacl = (ULONG)(Current - (ULONG_PTR)SecurityDescriptor);
         Current += SaclLength;
     }
@@ -1066,54 +1072,70 @@ SeSetSecurityDescriptorInfoEx(
     DaclLength = Dacl ? ROUND_UP((ULONG)Dacl->AclSize, 4) : 0;
 
     /* Get SACL and SACL size */
-    if (SecurityInformation & SACL_SECURITY_INFORMATION)
+    if (SecurityInformation & LABEL_SECURITY_INFORMATION)
+    {
+        /* At most one well-formed label */
+        Status = SepGetDescriptorLabel(SecurityDescriptor, &HasLabel, NULL, NULL);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    if ((SecurityInformation & SACL_SECURITY_INFORMATION) &&
+        (SecurityInformation & LABEL_SECURITY_INFORMATION))
     {
         Sacl = SepGetSaclFromDescriptor(SecurityDescriptor);
         Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
     }
-    else
+    else if (!(SecurityInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)))
     {
         Sacl = SepGetSaclFromDescriptor(ObjectSd);
         Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
-
-        if (SecurityInformation & LABEL_SECURITY_INFORMATION)
-        {
-            /* The object's other SACL entries stay; its label ACEs are replaced by the new descriptor's */
-            Status = SepGetDescriptorLabel(SecurityDescriptor, &HasLabel, NULL, NULL);
-            if (!NT_SUCCESS(Status))
-                return Status;
-
-            OldSacl = Sacl;
-            NewLabels = (SecurityDescriptor->Control & SE_SACL_PRESENT) ? SepGetSaclFromDescriptor(SecurityDescriptor) : NULL;
-            if (OldSacl)
-                KeepBytes = SepAceBytes(OldSacl, FALSE, &KeepCount);
-            if (NewLabels)
-                LabelBytes = SepAceBytes(NewLabels, TRUE, &LabelCount);
-
-            if (OldSacl || LabelCount)
-            {
-                SaclLength = ROUND_UP(sizeof(ACL) + KeepBytes + LabelBytes, 4);
-                if (SaclLength > MAXUSHORT)
-                    return STATUS_INVALID_ACL;
-
-                MergedSacl = ExAllocatePoolWithTag(PagedPool, SaclLength, TAG_ACL);
-                if (MergedSacl == NULL)
-                    return STATUS_INSUFFICIENT_RESOURCES;
-                RtlZeroMemory(MergedSacl, SaclLength);
-                MergedSacl->AclRevision = max(OldSacl ? OldSacl->AclRevision : ACL_REVISION,
-                                              LabelCount ? NewLabels->AclRevision : ACL_REVISION);
-                MergedSacl->AclSize = (USHORT)SaclLength;
-                Used = sizeof(ACL);
-                if (OldSacl)
-                    SepAppendAces(MergedSacl, &Used, OldSacl, FALSE);
-                if (LabelCount)
-                    SepAppendAces(MergedSacl, &Used, NewLabels, TRUE);
-
-                Sacl = MergedSacl;
-                Control |= SE_SACL_PRESENT;
-            }
-        }
     }
+    else
+    {
+        /*
+         * One kind of entry is replaced by the new descriptor's (labels for
+         * LABEL_SECURITY_INFORMATION, the others for SACL_SECURITY_INFORMATION);
+         * the object's entries of the other kind stay.
+         */
+        BOOLEAN TakeLabels = (SecurityInformation & LABEL_SECURITY_INFORMATION) != 0;
+
+        OldSacl = (ObjectSd->Control & SE_SACL_PRESENT) ? SepGetSaclFromDescriptor(ObjectSd) : NULL;
+        NewLabels = (SecurityDescriptor->Control & SE_SACL_PRESENT) ? SepGetSaclFromDescriptor(SecurityDescriptor) : NULL;
+        if (OldSacl)
+            KeepBytes = SepAceBytes(OldSacl, !TakeLabels, &KeepCount);
+        if (NewLabels)
+            LabelBytes = SepAceBytes(NewLabels, TakeLabels, &LabelCount);
+
+        Sacl = NULL;
+        if (TakeLabels)
+            Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        else
+            Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+
+        if (OldSacl || LabelCount || (!TakeLabels && NewLabels))
+        {
+            SaclLength = ROUND_UP(sizeof(ACL) + KeepBytes + LabelBytes, 4);
+            if (SaclLength > MAXUSHORT)
+                return STATUS_INVALID_ACL;
+
+            MergedSacl = ExAllocatePoolWithTag(PagedPool, SaclLength, TAG_ACL);
+            if (MergedSacl == NULL)
+                return STATUS_INSUFFICIENT_RESOURCES;
+            RtlZeroMemory(MergedSacl, SaclLength);
+            MergedSacl->AclRevision = max(OldSacl ? OldSacl->AclRevision : ACL_REVISION,
+                                          NewLabels ? NewLabels->AclRevision : ACL_REVISION);
+            MergedSacl->AclSize = (USHORT)SaclLength;
+            Used = sizeof(ACL);
+            if (OldSacl)
+                SepAppendAces(MergedSacl, &Used, OldSacl, !TakeLabels);
+            if (NewLabels)
+                SepAppendAces(MergedSacl, &Used, NewLabels, TakeLabels);
+
+            Sacl = MergedSacl;
+            Control |= SE_SACL_PRESENT;
+        }
+}
     SaclLength = Sacl ? ROUND_UP((ULONG)Sacl->AclSize, 4) : 0;
 
     NewSd = ExAllocatePoolWithTag(PoolType,
