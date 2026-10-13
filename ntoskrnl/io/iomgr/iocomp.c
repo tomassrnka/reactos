@@ -95,6 +95,63 @@ IopFreeMiniPacket(PIOP_MINI_COMPLETION_PACKET Packet)
     InterlockedPushEntrySList(&List->L.ListHead, (PSLIST_ENTRY)Packet);
 }
 
+/* Copies a dequeued completion out and frees the packet or IRP that carried it */
+static
+VOID
+IopUnpackCompletionEntry(IN PLIST_ENTRY ListEntry,
+                         OUT PFILE_IO_COMPLETION_INFORMATION Entry)
+{
+    PIOP_MINI_COMPLETION_PACKET Packet;
+    PIRP Irp;
+
+    /* Get the Packet Data */
+    Packet = CONTAINING_RECORD(ListEntry,
+                               IOP_MINI_COMPLETION_PACKET,
+                               ListEntry);
+
+    /* Check if this is piggybacked on an IRP */
+    if (Packet->PacketType == IopCompletionPacketIrp)
+    {
+        /* Get the IRP */
+        Irp = CONTAINING_RECORD(ListEntry,
+                                IRP,
+                                Tail.Overlay.ListEntry);
+
+        /* Save values */
+        Entry->KeyContext = Irp->Tail.CompletionKey;
+        Entry->ApcContext = Irp->Overlay.AsynchronousParameters.UserApcContext;
+        Entry->IoStatusBlock = Irp->IoStatus;
+
+        /* Free the IRP */
+        IoFreeIrp(Irp);
+    }
+    else
+    {
+        /* Save values */
+        Entry->KeyContext = Packet->KeyContext;
+        Entry->ApcContext = Packet->ApcContext;
+        /* Status fills only part of the union on 64-bit */
+        Entry->IoStatusBlock.Pointer = NULL;
+        Entry->IoStatusBlock.Status = Packet->IoStatus;
+        Entry->IoStatusBlock.Information = Packet->IoStatusInformation;
+
+        /* Free the packet */
+        IopFreeMiniPacket(Packet);
+    }
+}
+
+/* Tells a dequeued entry from the wait status KeRemoveQueue(Ex) stores in its place */
+static
+BOOLEAN
+IopIsQueueWaitStatus(IN PLIST_ENTRY ListEntry)
+{
+    NTSTATUS Status = (NTSTATUS)(ULONG_PTR)ListEntry;
+
+    return ((Status == STATUS_TIMEOUT) ||
+            (Status == STATUS_USER_APC) ||
+            (Status == STATUS_ALERTED));
+}
+
 VOID
 NTAPI
 IopDeleteIoCompletion(PVOID ObjectBody)
@@ -450,13 +507,10 @@ NtRemoveIoCompletion(IN HANDLE IoCompletionHandle,
 {
     LARGE_INTEGER SafeTimeout;
     PKQUEUE Queue;
-    PIOP_MINI_COMPLETION_PACKET Packet;
     PLIST_ENTRY ListEntry;
+    FILE_IO_COMPLETION_INFORMATION Entry;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
-    PIRP Irp;
-    PVOID Apc, Key;
-    IO_STATUS_BLOCK IoStatus;
     PAGED_CODE();
 
     /* Check if the call was from user mode */
@@ -499,54 +553,23 @@ NtRemoveIoCompletion(IN HANDLE IoCompletionHandle,
         ListEntry = KeRemoveQueue(Queue, PreviousMode, Timeout);
 
         /* If we got a timeout or user_apc back, return the status */
-        if (((NTSTATUS)(ULONG_PTR)ListEntry == STATUS_TIMEOUT) ||
-            ((NTSTATUS)(ULONG_PTR)ListEntry == STATUS_USER_APC))
+        if (IopIsQueueWaitStatus(ListEntry))
         {
             /* Set this as the status */
             Status = (NTSTATUS)(ULONG_PTR)ListEntry;
         }
         else
         {
-            /* Get the Packet Data */
-            Packet = CONTAINING_RECORD(ListEntry,
-                                       IOP_MINI_COMPLETION_PACKET,
-                                       ListEntry);
-
-            /* Check if this is piggybacked on an IRP */
-            if (Packet->PacketType == IopCompletionPacketIrp)
-            {
-                /* Get the IRP */
-                Irp = CONTAINING_RECORD(ListEntry,
-                                        IRP,
-                                        Tail.Overlay.ListEntry);
-
-                /* Save values */
-                Key = Irp->Tail.CompletionKey;
-                Apc = Irp->Overlay.AsynchronousParameters.UserApcContext;
-                IoStatus = Irp->IoStatus;
-
-                /* Free the IRP */
-                IoFreeIrp(Irp);
-            }
-            else
-            {
-                /* Save values */
-                Key = Packet->KeyContext;
-                Apc = Packet->ApcContext;
-                IoStatus.Status = Packet->IoStatus;
-                IoStatus.Information = Packet->IoStatusInformation;
-
-                /* Free the packet */
-                IopFreeMiniPacket(Packet);
-            }
+            /* Get the completion and free its packet */
+            IopUnpackCompletionEntry(ListEntry, &Entry);
 
             /* Enter SEH to write back the values */
             _SEH2_TRY
             {
                 /* Write the values to caller */
-                *ApcContext = Apc;
-                *KeyContext = Key;
-                *IoStatusBlock = IoStatus;
+                *ApcContext = Entry.ApcContext;
+                *KeyContext = Entry.KeyContext;
+                *IoStatusBlock = Entry.IoStatusBlock;
             }
             _SEH2_EXCEPT(ExSystemExceptionFilter())
             {
@@ -559,6 +582,116 @@ NtRemoveIoCompletion(IN HANDLE IoCompletionHandle,
         /* Dereference the Object */
         ObDereferenceObject(Queue);
     }
+
+    /* Return status */
+    return Status;
+}
+
+/* Upper bound on completions taken per call, so the batch lives on the kernel stack */
+#define IOP_MAX_COMPLETION_BATCH 16
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+NtRemoveIoCompletionEx(IN HANDLE IoCompletionHandle,
+                       OUT PFILE_IO_COMPLETION_INFORMATION IoCompletionInformation,
+                       IN ULONG Count,
+                       OUT PULONG NumEntriesRemoved,
+                       IN PLARGE_INTEGER Timeout OPTIONAL,
+                       IN BOOLEAN Alertable)
+{
+    LARGE_INTEGER SafeTimeout;
+    PKQUEUE Queue;
+    PLIST_ENTRY ListEntries[IOP_MAX_COMPLETION_BATCH];
+    FILE_IO_COMPLETION_INFORMATION Entries[IOP_MAX_COMPLETION_BATCH];
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    NTSTATUS Status;
+    ULONG Removed, i;
+    PAGED_CODE();
+
+    /* There must be room for at least one completion */
+    if (Count == 0) return STATUS_INVALID_PARAMETER;
+
+    /* The call returns up to Count completions, take at most one batch */
+    Count = min(Count, IOP_MAX_COMPLETION_BATCH);
+
+    /* Check if the call was from user mode */
+    if (PreviousMode != KernelMode)
+    {
+        /* Protect probes in SEH */
+        _SEH2_TRY
+        {
+            /* Probe the part of the output array that can be written */
+            ProbeForWrite(IoCompletionInformation,
+                          Count * sizeof(FILE_IO_COMPLETION_INFORMATION),
+                          TYPE_ALIGNMENT(FILE_IO_COMPLETION_INFORMATION));
+            ProbeForWriteUlong(NumEntriesRemoved);
+            if (Timeout)
+            {
+                /* Probe and capture the timeout */
+                SafeTimeout = ProbeForReadLargeInteger(Timeout);
+                Timeout = &SafeTimeout;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* Return the exception code */
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    /* Open the Object */
+    Status = ObReferenceObjectByHandle(IoCompletionHandle,
+                                       IO_COMPLETION_MODIFY_STATE,
+                                       IoCompletionType,
+                                       PreviousMode,
+                                       (PVOID*)&Queue,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* Wait for the first completion and take whatever else is queued */
+    Removed = KeRemoveQueueEx(Queue,
+                              PreviousMode,
+                              Alertable,
+                              Timeout,
+                              ListEntries,
+                              Count);
+    if ((Removed == 1) && IopIsQueueWaitStatus(ListEntries[0]))
+    {
+        /* The wait ended without a completion */
+        Status = (NTSTATUS)(ULONG_PTR)ListEntries[0];
+        Removed = 0;
+    }
+    else
+    {
+        /* Get the completions and free their packets */
+        for (i = 0; i < Removed; i++)
+        {
+            IopUnpackCompletionEntry(ListEntries[i], &Entries[i]);
+        }
+        Status = STATUS_SUCCESS;
+    }
+
+    /* Dereference the Object */
+    ObDereferenceObject(Queue);
+
+    /* Enter SEH to write back the values */
+    _SEH2_TRY
+    {
+        RtlCopyMemory(IoCompletionInformation,
+                      Entries,
+                      Removed * sizeof(FILE_IO_COMPLETION_INFORMATION));
+        *NumEntriesRemoved = Removed;
+    }
+    _SEH2_EXCEPT(ExSystemExceptionFilter())
+    {
+        /* Get the exception code */
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
 
     /* Return status */
     return Status;

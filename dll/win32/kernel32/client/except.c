@@ -13,6 +13,9 @@
 
 #include <k32.h>
 #include <strsafe.h>
+#ifdef _M_IX86
+#include "i386/ketypes.h"
+#endif
 
 #define NDEBUG
 #include <debug.h>
@@ -923,6 +926,129 @@ Quit:
      */
 
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+/* kernel32 is built for an older _WIN32_WINNT */
+#ifndef FAIL_FAST_GENERATE_EXCEPTION_ADDRESS
+#define FAIL_FAST_GENERATE_EXCEPTION_ADDRESS 0x1
+#endif
+
+static NTSTATUS BasepFailFastCode;
+
+/* A debugger that continues a fail fast exception resumes the thread here */
+static
+DECLSPEC_NORETURN
+VOID
+NTAPI
+BasepFailFastExit(VOID)
+{
+    NtTerminateProcess(NtCurrentProcess(), BasepFailFastCode);
+    for (;;);
+}
+
+/* Show the exception to the debugger. A debugger that continues it resumes
+   the thread in BasepFailFastExit on this stack, also when the caller
+   supplied the context */
+static
+DECLSPEC_NOINLINE
+VOID
+BasepFailFastRaise(
+    _In_ PEXCEPTION_RECORD ExceptionRecord,
+    _In_opt_ PCONTEXT ContextRecord)
+{
+    CONTEXT Context;
+#if defined(_M_IX86)
+    /* No capture here: the x86 one needs a frame pointer, which /Oy omits */
+    if (ContextRecord)
+    {
+        Context = *ContextRecord;
+    }
+    else
+    {
+        RtlZeroMemory(&Context, sizeof(Context));
+#if defined(__GNUC__) || defined(__clang__)
+        /* Lets the debugger walk the frames of the caller */
+        Context.Ebp = (ULONG_PTR)__builtin_frame_address(0);
+#endif
+    }
+    Context.ContextFlags |= CONTEXT_CONTROL | CONTEXT_SEGMENTS;
+    Context.Eip = (ULONG_PTR)BasepFailFastExit;
+    /* As if the caller of this function had called it */
+    Context.Esp = (ULONG_PTR)_AddressOfReturnAddress();
+    Context.EFlags = __readeflags();
+    Context.SegCs = KGDT_R3_CODE;
+    Context.SegSs = KGDT_R3_DATA;
+    Context.SegDs = KGDT_R3_DATA;
+    Context.SegEs = KGDT_R3_DATA;
+    Context.SegFs = KGDT_R3_TEB;
+    Context.SegGs = 0;
+#elif defined(_M_AMD64)
+    CONTEXT ResumeContext;
+
+    RtlCaptureContext(&ResumeContext);
+    if (ContextRecord)
+    {
+        Context = *ContextRecord;
+        Context.ContextFlags |= CONTEXT_CONTROL;
+    }
+    else
+    {
+        Context = ResumeContext;
+    }
+    Context.ContextFlags |= CONTEXT_SEGMENTS;
+    Context.Rip = (ULONG_PTR)BasepFailFastExit;
+    Context.Rsp = (ResumeContext.Rsp & ~(ULONG64)15) - 8;
+    Context.EFlags = ResumeContext.EFlags;
+    Context.SegCs = ResumeContext.SegCs;
+    Context.SegSs = ResumeContext.SegSs;
+    Context.SegDs = ResumeContext.SegDs;
+    Context.SegEs = ResumeContext.SegEs;
+    Context.SegFs = ResumeContext.SegFs;
+    Context.SegGs = ResumeContext.SegGs;
+#else
+    /* The resume point is not redirected here: do not report it */
+    UNREFERENCED_PARAMETER(ExceptionRecord);
+    UNREFERENCED_PARAMETER(ContextRecord);
+    return;
+#endif
+    NtRaiseException(ExceptionRecord, &Context, FALSE);
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+RaiseFailFastException(
+    _In_opt_ PEXCEPTION_RECORD pExceptionRecord,
+    _In_opt_ PCONTEXT pContextRecord,
+    _In_ DWORD dwFlags)
+{
+    EXCEPTION_RECORD ExceptionRecord;
+
+    if (pExceptionRecord)
+    {
+        ExceptionRecord = *pExceptionRecord;
+        if (dwFlags & FAIL_FAST_GENERATE_EXCEPTION_ADDRESS)
+            ExceptionRecord.ExceptionAddress = _ReturnAddress();
+    }
+    else
+    {
+        RtlZeroMemory(&ExceptionRecord, sizeof(ExceptionRecord));
+        ExceptionRecord.ExceptionCode = STATUS_FAIL_FAST_EXCEPTION;
+        ExceptionRecord.ExceptionAddress = _ReturnAddress();
+    }
+    ExceptionRecord.ExceptionFlags |= EXCEPTION_NONCONTINUABLE;
+
+    DPRINT1("Fail fast exception 0x%lx at %p\n",
+            ExceptionRecord.ExceptionCode, ExceptionRecord.ExceptionAddress);
+
+    /* Bypass every handler and only show a debugger the second chance. Without
+       one, the exception port could continue the thread instead of ending it */
+    BasepFailFastCode = ExceptionRecord.ExceptionCode;
+    if (NtCurrentPeb()->BeingDebugged)
+        BasepFailFastRaise(&ExceptionRecord, pContextRecord);
+    NtTerminateProcess(NtCurrentProcess(), ExceptionRecord.ExceptionCode);
 }
 
 /*
