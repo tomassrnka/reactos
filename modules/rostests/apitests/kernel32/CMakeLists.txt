@@ -16,6 +16,7 @@ list(APPEND SOURCE
     DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
+    DynamicTimeZone.c
     EnumSystemCodePages.c
     ExitThread.c
     FindActCtxSectionStringW.c
