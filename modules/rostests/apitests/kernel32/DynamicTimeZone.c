@@ -6,6 +6,8 @@
  */
 
 #include "precomp.h"
+#include <ndk/cmfuncs.h>
+#include <ndk/obfuncs.h>
 
 typedef DWORD (WINAPI *FN_GetDynamicTimeZoneInformation)(PDYNAMIC_TIME_ZONE_INFORMATION);
 
@@ -99,9 +101,26 @@ static BOOL SaveValue(PCWSTR Name, SAVED_VALUE *Saved)
     return Saved->Present;
 }
 
+/* Puts back exactly the saved type and bytes (RegSetValueExW would add a terminator to an unterminated string) */
 static BOOL RestoreValue(PCWSTR Name, const SAVED_VALUE *Saved)
 {
-    return SetStoredValue(Name, Saved->Type, Saved->Present ? Saved->Data : NULL, Saved->Size);
+    UNICODE_STRING KeyPath = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation");
+    UNICODE_STRING ValueName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE hKey;
+    NTSTATUS Status;
+
+    if (!Saved->Present)
+        return SetStoredValue(Name, REG_NONE, NULL, 0);
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenKey(&hKey, KEY_SET_VALUE, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    RtlInitUnicodeString(&ValueName, Name);
+    Status = NtSetValueKey(hKey, &ValueName, 0, Saved->Type, (PVOID)Saved->Data, Saved->Size);
+    NtClose(hKey);
+    return NT_SUCCESS(Status);
 }
 
 /*
