@@ -1,12 +1,23 @@
 #!/bin/bash
-# rosdev-check-images BUILD_DIR : fail if rosdev is listed in any image file list of that build.
-# The positive control (rosautotest, which is installed) proves the lists were really searched.
+# rosdev-check-images BUILD_DIR : fail if rosdev is listed in an image file list of that build.
+# Needs the bootcd and livecd lists and reactos.dff; the positive control (rosautotest, which is
+# installed) proves the lists were really searched. Only grep status 1 counts as "not found".
 set -u
 b=${1:?usage: rosdev-check-images BUILD_DIR}
-lists=$(ls "$b"/boot/*.lst "$b"/boot/bootdata/packages/reactos.dff* 2>/dev/null)
-[ -n "$lists" ] || { echo "no image lists under $b/boot (not a configured ReactOS build dir?)" >&2; exit 2; }
-if ! grep -qi rosautotest $lists; then
-  echo "control failed: rosautotest is in no list (ENABLE_ROSTESTS off?), so the check proves nothing" >&2; exit 2
+shopt -s nullglob
+bootcd=("$b"/boot/bootcd.*.lst); livecd=("$b"/boot/livecd.*.lst); dff=("$b"/boot/bootdata/packages/reactos.dff)
+regtest=("$b"/boot/bootcdregtest.*.lst); extra=("$b"/boot/bootdata/packages/reactos.dff.*)
+if [ ${#bootcd[@]} = 0 ] || [ ${#livecd[@]} = 0 ] || [ ${#dff[@]} = 0 ]; then
+  echo "missing bootcd/livecd lists or reactos.dff under $b/boot (not a configured ReactOS build dir?)" >&2; exit 2
 fi
-if grep -il rosdev $lists; then echo "FAIL: rosdev is in an image list" >&2; exit 1; fi
-echo "ok: rosdev is in none of $(echo "$lists" | wc -l) image lists of $b (control rosautotest found)"
+lists=("${bootcd[@]}" "${livecd[@]}" "${regtest[@]}" "${dff[@]}" "${extra[@]}")
+grep -qi rosautotest "${livecd[@]}" "${dff[@]}"; rc=$?
+if [ $rc != 0 ]; then
+  echo "control failed (grep status $rc): rosautotest is not in the livecd list or reactos.dff, so the check proves nothing" >&2; exit 2
+fi
+grep -il rosdev "${lists[@]}"; rc=$?
+case $rc in
+  1) echo "ok: rosdev is in none of ${#lists[@]} image lists of $b (control rosautotest found)";;
+  0) echo "FAIL: rosdev is in an image list" >&2; exit 1;;
+  *) echo "grep failed (status $rc) while reading the lists" >&2; exit 2;;
+esac

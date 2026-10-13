@@ -23,6 +23,7 @@ import hmac
 import json
 import os
 import queue
+import re
 import secrets
 import shlex
 import signal
@@ -42,9 +43,13 @@ POLL_HOLD = 15.0        # seconds the server holds a POLL before answering NOP
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
+
+
 def vmdir(vm):
-    if not vm or "/" in vm or vm.startswith("."):
-        die("bad VM name: %r" % vm)
+    if not NAME_RE.match(vm or ""):
+        die("bad VM name %r (letters, digits, . _ - ; at most 64)" % vm)
     return os.path.join(HOME, vm)
 
 
@@ -111,11 +116,7 @@ class VmServer:
         with self.log_lock:
             print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), msg, flush=True)
 
-    def serve_agents(self):
-        ls = socket.socket()
-        ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        ls.bind(("127.0.0.1", self.port))
-        ls.listen(4)
+    def serve_agents(self, ls):
         while True:
             s, _ = ls.accept()
             threading.Thread(target=self.session, args=(s,), daemon=True).start()
@@ -148,6 +149,10 @@ class VmServer:
             self.agent["since"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if old:
             try:
+                old.shutdown(socket.SHUT_RDWR)      # wakes the old session's thread, which then ends
+            except OSError:
+                pass
+            try:
                 old.close()
             except OSError:
                 pass
@@ -166,8 +171,10 @@ class VmServer:
                 self.last_poll = time.time()
                 if self.conn is s:
                     self.ready.set()
-                job = self.take_job()
+                job = self.take_job(s)
                 if job is None:
+                    if self.conn is not s:
+                        break           # superseded by a newer connection
                     f.write(b"NOP\n")
                     f.flush()
                     continue
@@ -191,33 +198,65 @@ class VmServer:
                 pass
             self.log("agent disconnected")
 
-    def take_job(self):
+    def take_job(self, s):
+        """Next live job for session s, or None after POLL_HOLD or when s has been superseded."""
         end = time.time() + POLL_HOLD
         while time.time() < end:
-            try:
-                j = self.jobs.get(timeout=max(0.05, end - time.time()))
-            except queue.Empty:
+            if self.conn is not s:
                 return None
-            if not j.cancelled:
-                return j
+            try:
+                j = self.jobs.get(timeout=min(0.5, max(0.05, end - time.time())))
+            except queue.Empty:
+                continue
+            if j.cancelled:
+                continue
+            with self.lock:
+                if self.conn is not s:
+                    self.jobs.put(j)        # a newer session owns the queue now: give the job back
+                    return None
+            return j
         return None
 
     def run_job(self, f, s, job):
         args = dict(job.args)
-        body = None
+        src = None
         if job.op == "put":
-            args["sha256"] = sha256_file(job.put_src)
-            args["len"] = os.path.getsize(job.put_src)
+            # one open file: size, hash and body all come from the same bytes, or the job fails
+            try:
+                src = open(job.put_src, "rb")
+                size = os.fstat(src.fileno()).st_size
+                h = hashlib.sha256()
+                left = size
+                while left:
+                    blk = src.read(min(1 << 20, left))
+                    if not blk:
+                        raise OSError("changed while it was being read")
+                    h.update(blk)
+                    left -= len(blk)
+                src.seek(0)
+            except OSError as e:
+                if src:
+                    src.close()
+                self.finish(job, {"status": "err", "msg": "cannot read %s: %s" % (job.put_src, e)})
+                return
+            args["sha256"] = h.hexdigest()
+            args["len"] = size
         with self.lock:
             job.id = self.next_id
             self.next_id += 1
         line = "JOB id=%d op=%s %s\n" % (job.id, job.op, " ".join("%s=%s" % (k, enc(v)) for k, v in args.items()))
         s.settimeout(120)
         f.write(line.encode())
-        if job.op == "put":
-            with open(job.put_src, "rb") as src:
-                for blk in iter(lambda: src.read(1 << 20), b""):
+        if src is not None:
+            with src:
+                left = size
+                while left:
+                    blk = src.read(min(1 << 20, left))
+                    if not blk:
+                        self.finish(job, {"status": "err", "msg": "%s shrank while it was being sent; connection dropped" % job.put_src})
+                        raise OSError("source shrank during the upload")
                     f.write(blk)
+                    left -= len(blk)
         f.flush()
         s.settimeout(job.timeout + 120)
         line = f.readline(20000)
@@ -357,8 +396,10 @@ def cmd_serve(a):
         cfg["token"] = a.token
     if not cfg.get("token"):
         cfg["token"] = secrets.token_hex(16)
-    save_cfg(a.vm, cfg)
+    if not TOKEN_RE.match(cfg["token"]):
+        die("the token must be 8-128 characters of letters, digits, . _ -")
     d = vmdir(a.vm)
+    os.makedirs(d, exist_ok=True)
     sock = os.path.join(d, "ctl.sock")
     if os.path.exists(sock):
         try:
@@ -367,25 +408,41 @@ def cmd_serve(a):
             die("a server for %s is already running" % a.vm)
         except OSError:
             os.unlink(sock)
+    # both listeners exist before anything is announced, and the settings are saved only after that
+    ls = socket.socket()
+    ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        ls.bind(("127.0.0.1", cfg["port"]))
+    except OSError as e:
+        die("cannot listen on 127.0.0.1:%d: %s" % (cfg["port"], e))
+    ls.listen(4)
+    pid = 0
     if a.daemon:
-        if os.fork():
-            for _ in range(50):
+        pid = os.fork()
+        if pid:
+            for _ in range(100):
                 if os.path.exists(sock):
                     print("serving %s on 127.0.0.1:%d (guest 10.0.2.2:%d)" % (a.vm, cfg["port"], cfg["port"]))
                     return
+                if os.waitpid(pid, os.WNOHANG)[0]:
+                    die("server did not start; see %s/serve.log" % d)
                 time.sleep(0.1)
-            die("server did not start; see %s/serve.log" % d)
+            die("server did not start in time; see %s/serve.log" % d)
         os.setsid()
         log = open(os.path.join(d, "serve.log"), "a", buffering=1)
         os.dup2(log.fileno(), 1)
         os.dup2(log.fileno(), 2)
         os.close(0)
+    old_umask = os.umask(0o077)
+    try:
+        ctl = CtlServer(sock, CtlHandler)
+    finally:
+        os.umask(old_umask)
+    save_cfg(a.vm, cfg)
     with open(os.path.join(d, "serve.pid"), "w") as f:
         f.write(str(os.getpid()))
     vs = VmServer(a.vm, cfg["port"], cfg["token"])
-    threading.Thread(target=vs.serve_agents, daemon=True).start()
-    ctl = CtlServer(sock, CtlHandler)
-    os.chmod(sock, 0o600)
+    threading.Thread(target=vs.serve_agents, args=(ls,), daemon=True).start()
     ctl.vmserver = vs
     vs.log("serving %s on 127.0.0.1:%d" % (a.vm, cfg["port"]))
     try:
@@ -583,29 +640,36 @@ def pid_of(path):
         return 0
 
 
-def kill_pid(pid, name):
-    # exact pid only; check it is still the process we started
-    if pid <= 0:
-        return
+def proc_args(pid):
     try:
         with open("/proc/%d/cmdline" % pid, "rb") as f:
-            cmdline = f.read()
+            return f.read().split(b"\0")
     except OSError:
-        return
-    if name.encode() not in cmdline:
+        return None
+
+
+def kill_pid(pid, matches):
+    """SIGTERM then SIGKILL pid, but only while its command line still holds every argument in matches."""
+    def mine():
+        args = proc_args(pid)
+        return args is not None and all(m.encode() in args for m in matches)
+    if pid <= 0 or not mine():
         return
     os.kill(pid, signal.SIGTERM)
     for _ in range(50):
         if not os.path.exists("/proc/%d" % pid):
             return
         time.sleep(0.2)
-    os.kill(pid, signal.SIGKILL)
+    if mine():
+        os.kill(pid, signal.SIGKILL)
 
 
 def cmd_up(a):
     d = vmdir(a.vm)
     arch = a.arch
     owner = a.owner or a.vm.split("-")[0]
+    if not NAME_RE.match(owner):
+        die("bad owner %r" % owner)
     if os.path.exists(os.path.join(d, "vm.json")) and not a.reuse:
         die("%s already exists (use --reuse to boot its overlay again, or `rosdev down %s --purge`)" % (d, a.vm))
     os.makedirs(d, exist_ok=True)
@@ -625,14 +689,15 @@ def cmd_up(a):
     save_cfg(a.vm, cfg)
     q = "qemu-system-i386" if arch == "i386" else "qemu-system-x86_64"
     start = os.path.join(d, "start.sh")
+    qs = shlex.quote
     with open(start, "w") as f:
-        f.write("#!/bin/bash\nexport VMSLOT=1 VMSLOT_OWNER=%s\n" % shlex.quote(owner))
-        f.write('eval "$(/usr/local/bin/vmslot acquire %d %s %s --no-ip --pid $$)"\n' % (a.smp, shlex.quote(owner), shlex.quote(a.vm)))
-        f.write("exec %s -name %s -machine pc,accel=kvm -cpu host -smp %d -m %d -rtc base=utc \\\n" % (q, shlex.quote(a.vm), a.smp, a.mem))
-        f.write(" -drive file=%s,format=qcow2,if=ide,index=0 -netdev user,id=n0 -device e1000,netdev=n0 \\\n" % shlex.quote(overlay))
+        f.write("#!/bin/bash\nexport VMSLOT=1 VMSLOT_OWNER=%s\n" % qs(owner))
+        f.write('eval "$(/usr/local/bin/vmslot acquire %d %s %s --no-ip --pid $$)"\n' % (a.smp, qs(owner), qs(a.vm)))
+        f.write("exec %s -name %s -machine pc,accel=kvm -cpu host -smp %d -m %d -rtc base=utc \\\n" % (q, qs(a.vm), a.smp, a.mem))
+        f.write(" -drive file=%s,format=qcow2,if=ide,index=0 -netdev user,id=n0 -device e1000,netdev=n0 \\\n" % qs(overlay))
         f.write(" -vga std -display none -usb -device usb-tablet \\\n")
-        f.write(" -qmp unix:%s,server,nowait -monitor unix:%s,server,nowait \\\n" % (os.path.join(d, "qmp.sock"), os.path.join(d, "mon.sock")))
-        f.write(" -serial file:%s -pidfile %s\n" % (os.path.join(d, "serial.log"), os.path.join(d, "qemu.pid")))
+        f.write(" -qmp unix:%s,server,nowait -monitor unix:%s,server,nowait \\\n" % (qs(os.path.join(d, "qmp.sock")), qs(os.path.join(d, "mon.sock"))))
+        f.write(" -serial file:%s -pidfile %s\n" % (qs(os.path.join(d, "serial.log")), qs(os.path.join(d, "qemu.pid"))))
     os.chmod(start, 0o755)
     subprocess.run([sys.executable, os.path.abspath(__file__), "serve", a.vm, "--daemon"], check=True)
     out = open(os.path.join(d, "start.out"), "w")
@@ -654,8 +719,14 @@ def cmd_down(a):
     d = vmdir(a.vm)
     if not os.path.isdir(d):
         die("no such VM: %s" % a.vm)
-    kill_pid(pid_of(os.path.join(d, "qemu.pid")), "qemu-system")
-    kill_pid(pid_of(os.path.join(d, "serve.pid")), "rosdev")
+    # exact pids from this VM's own files; the command line must still be this VM's qemu or server
+    kill_pid(pid_of(os.path.join(d, "qemu.pid")), ["-name", a.vm])
+    kill_pid(pid_of(os.path.join(d, "serve.pid")), ["serve", a.vm])
+    for n in ("qemu.pid", "serve.pid"):
+        try:
+            os.unlink(os.path.join(d, n))
+        except OSError:
+            pass
     if a.purge:
         import shutil
         shutil.rmtree(d)

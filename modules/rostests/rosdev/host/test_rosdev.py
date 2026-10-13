@@ -62,13 +62,11 @@ class T(unittest.TestCase):
         rd.POLL_HOLD = 1.0
         self.port = free_port()
         self.vs = rd.VmServer("t", self.port, TOKEN)
-        threading.Thread(target=self.vs.serve_agents, daemon=True).start()
-        for _ in range(50):
-            try:
-                socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
-                break
-            except OSError:
-                pass
+        ls = socket.socket()
+        ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        ls.bind(("127.0.0.1", self.port))
+        ls.listen(4)
+        threading.Thread(target=self.vs.serve_agents, args=(ls,), daemon=True).start()
 
     def test_bad_token_is_rejected(self):
         a = FakeAgent(self.port, token="wrong")
@@ -131,6 +129,27 @@ class T(unittest.TestCase):
         a.s.close()
         t.join()
         self.assertEqual(res["status"], "err")
+
+    def test_names_and_tokens(self):
+        for bad in ("a b", "x$(id)", "../x", "", ".hid", "a" * 65):
+            self.assertIsNone(rd.NAME_RE.match(bad), bad)
+        self.assertIsNotNone(rd.NAME_RE.match("devagent-a.1"))
+        self.assertIsNone(rd.TOKEN_RE.match("short"))
+        self.assertIsNone(rd.TOKEN_RE.match("caf\u00e9" * 4))
+
+    def test_superseded_session_does_not_take_jobs(self):
+        a1 = FakeAgent(self.port)
+        self.assertEqual(a1.poll()[0], "NOP")
+        a2 = FakeAgent(self.port)
+        job = rd.Job("run", {"cmd": "x"}, timeout=5)
+        res = {}
+        t = threading.Thread(target=lambda: res.update(self.vs.submit(job, 20)))
+        t.start()
+        verb, kv = a2.poll()
+        self.assertEqual(verb, "JOB")
+        a2.result(int(kv["id"]), exit=0, outlen=0, errlen=0)
+        t.join()
+        self.assertEqual(res["status"], "ok")
 
     def test_png_encoder(self):
         import struct

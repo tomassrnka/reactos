@@ -51,6 +51,7 @@ BOOL  ConnWrite(CONN *c, const void *p, int n);
 BOOL  RecvMsg(CONN *c, RMSG *m, DWORD waitMs);
 const char *MsgGet(const RMSG *m, const char *key);
 UINT64 MsgGetU64(const RMSG *m, const char *key, UINT64 def);
+BOOL  MsgGetU64Ex(const RMSG *m, const char *key, UINT64 *out);
 void  ReplyInit(REPLY *r, const char *verb);
 void  ReplyStr(REPLY *r, const char *key, const char *val);
 void  ReplyU64(REPLY *r, const char *key, UINT64 v);

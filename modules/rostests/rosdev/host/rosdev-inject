@@ -11,6 +11,7 @@ Other registry values are left alone (node_set_value changes one value; hivexsh 
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -85,6 +86,12 @@ def main():
     ap.add_argument("--token", required=True)
     ap.add_argument("--dest", default="rosdev", help="directory on C: (default rosdev)")
     a = ap.parse_args()
+    if not re.match(r"^[A-Za-z0-9._-]+$", a.dest) or a.dest in (".", ".."):
+        sys.exit("rosdev-inject: --dest must be one plain directory name")
+    if not re.match(r"^[A-Za-z0-9._-]{8,128}$", a.token):
+        sys.exit("rosdev-inject: the token must be 8-128 characters of letters, digits, . _ -")
+    if not 0 < a.port < 65536:
+        sys.exit("rosdev-inject: bad port")
     if os.geteuid() != 0:
         sys.exit("rosdev-inject: run as root")
     info = json.loads(run("qemu-img", "info", "--output=json", a.overlay))

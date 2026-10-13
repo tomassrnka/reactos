@@ -182,7 +182,7 @@ static BOOL HasArg(const WCHAR *cmd, const WCHAR *arg, WCHAR *value, int cch)
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
 {
     WCHAR marker[64] = L"", wtoken[128] = L"", wport[16] = L"";
-    char token[160];
+    char token[4 * 128 + 1];
     DWORD port;
     WSADATA wsa;
     CONN c;
@@ -213,9 +213,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
         LogLine("refusing to run: no token or bad port");
         return 4;
     }
-    WideCharToMultiByte(CP_UTF8, 0, wtoken, -1, token, sizeof(token), NULL, NULL);
-    token[sizeof(token) - 1] = 0;
-
+    if (!WideCharToMultiByte(CP_UTF8, 0, wtoken, -1, token, sizeof(token), NULL, NULL))
+    {
+        LogLine("refusing to run: token does not convert");
+        return 4;
+    }
     if (WSAStartup(MAKEWORD(2, 2), &wsa)) return 5;
     LogLine("rosdev %s started, host %s:%lu", ROSDEV_VERSION, ROSDEV_HOST_ADDR, port);
 

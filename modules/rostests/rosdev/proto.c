@@ -128,17 +128,28 @@ const char *MsgGet(const RMSG *m, const char *key)
     return NULL;
 }
 
-UINT64 MsgGetU64(const RMSG *m, const char *key, UINT64 def)
+/* Strict decimal parse: FALSE when the key is missing, empty, not a number or does not fit in 64 bits. */
+BOOL MsgGetU64Ex(const RMSG *m, const char *key, UINT64 *out)
 {
     const char *v = MsgGet(m, key);
     UINT64 r = 0;
-    if (!v || !*v) return def;
+    if (!v || !*v) return FALSE;
     for (; *v; v++)
     {
-        if (*v < '0' || *v > '9') return def;
-        r = r * 10 + (UINT64)(*v - '0');
+        UINT d;
+        if (*v < '0' || *v > '9') return FALSE;
+        d = (UINT)(*v - '0');
+        if (r > (~(UINT64)0 - d) / 10) return FALSE;
+        r = r * 10 + d;
     }
-    return r;
+    *out = r;
+    return TRUE;
+}
+
+UINT64 MsgGetU64(const RMSG *m, const char *key, UINT64 def)
+{
+    UINT64 r;
+    return MsgGetU64Ex(m, key, &r) ? r : def;
 }
 
 static void Put(REPLY *r, const char *s)

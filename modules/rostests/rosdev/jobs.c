@@ -131,6 +131,7 @@ static void ToHex(const BYTE *d, char *out) { HexEncode(d, 32, out); }
 static void MakeDirs(WCHAR *path)
 {
     WCHAR *p;
+    if (!path[0]) return;
     for (p = path + 1; *p; p++)
     {
         if (*p != L'\\' && *p != L'/') continue;
@@ -146,9 +147,9 @@ static void MakeDirs(WCHAR *path)
 static BOOL DoPut(CONN *c, const RMSG *j, UINT64 id)
 {
     const char *path = MsgGet(j, "path"), *want = MsgGet(j, "sha256"), *mode = MsgGet(j, "mode");
-    UINT64 len = MsgGetU64(j, "len", 0), left = len, total = 0;
+    UINT64 len = 0, left, total = 0;
     BOOL stage = mode && !strcmp(mode, "stage");
-    WCHAR *wpath = path ? Utf8ToWide(path) : NULL, *tmp = NULL;
+    WCHAR *wpath, *tmp = NULL;
     HANDLE h = INVALID_HANDLE_VALUE;
     DWORD err = 0;
     const char *what = NULL;
@@ -160,14 +161,25 @@ static BOOL DoPut(CONN *c, const RMSG *j, UINT64 id)
     const char *how = "replaced";
     BOOL ok = TRUE;
 
+    /* without a valid length the body size is unknown, so the connection cannot be kept in step */
+    if (!MsgGetU64Ex(j, "len", &len) || !blk)
+    {
+        if (blk) HeapFree(GetProcessHeap(), 0, blk);
+        return FALSE;
+    }
+    left = len;
+    wpath = path && *path ? Utf8ToWide(path) : NULL;
     Sha256Init(&sha);
-    if (!wpath || !blk || !want || wcslen(wpath) > MAX_PATH - 20)
+    if (!wpath || !wpath[0] || !want || wcslen(wpath) > MAX_PATH - 20)
     {
         err = ERROR_INVALID_PARAMETER; what = "bad path or sha256";
     }
+    else if (!(tmp = HeapAlloc(GetProcessHeap(), 0, (wcslen(wpath) + 16) * sizeof(WCHAR))))
+    {
+        err = ERROR_OUTOFMEMORY; what = "out of memory";
+    }
     else
     {
-        tmp = HeapAlloc(GetProcessHeap(), 0, (wcslen(wpath) + 16) * sizeof(WCHAR));
         wcscpy(tmp, wpath);
         wcscat(tmp, L".rosdev-tmp");
         MakeDirs(wpath);
@@ -218,6 +230,9 @@ static BOOL DoPut(CONN *c, const RMSG *j, UINT64 id)
         if (stage)
         {
             WCHAR *staged = HeapAlloc(GetProcessHeap(), 0, (wcslen(wpath) + 16) * sizeof(WCHAR));
+            if (!staged) { err = ERROR_OUTOFMEMORY; what = "out of memory"; }
+            else
+            {
             wcscpy(staged, wpath);
             wcscat(staged, L".rosdev-new");
             if (!MoveFileExW(tmp, staged, MOVEFILE_REPLACE_EXISTING)) { err = GetLastError(); what = "cannot name the staged file"; }
@@ -225,6 +240,7 @@ static BOOL DoPut(CONN *c, const RMSG *j, UINT64 id)
             { err = GetLastError(); what = "cannot queue the replacement for reboot"; }
             else how = "staged-for-reboot";
             HeapFree(GetProcessHeap(), 0, staged);
+            }
         }
         else if (!MoveFileExW(tmp, wpath, MOVEFILE_REPLACE_EXISTING))
         {
@@ -235,7 +251,7 @@ static BOOL DoPut(CONN *c, const RMSG *j, UINT64 id)
                 WCHAR *aside = HeapAlloc(GetProcessHeap(), 0, (wcslen(wpath) + 24) * sizeof(WCHAR));
                 int n;
                 BOOL moved = FALSE;
-                for (n = 0; n < 20 && !moved; n++)
+                for (n = 0; aside && n < 20 && !moved; n++)
                 {
                     wcscpy(aside, wpath);
                     wcscat(aside, L".rosdev-old");
@@ -252,7 +268,7 @@ static BOOL DoPut(CONN *c, const RMSG *j, UINT64 id)
                     if (!DeleteFileW(aside)) MoveFileExW(aside, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
                 }
                 else { err = e1; what = "target is in use and cannot be renamed (try --stage)"; }
-                HeapFree(GetProcessHeap(), 0, aside);
+                if (aside) HeapFree(GetProcessHeap(), 0, aside);
             }
             else { err = e1; what = "cannot move the file into place"; }
         }
@@ -306,10 +322,28 @@ static BOOL DoGet(CONN *c, const RMSG *j, UINT64 id)
     /* pass 1: hash and verified size; pass 2: stream exactly that many bytes */
     Sha256Init(&sha);
     left = 0;
-    while (ReadFile(h, blk, XFER_BLOCK, &got, NULL) && got) { Sha256Update(&sha, blk, got); left += got; }
+    for (;;)
+    {
+        if (!ReadFile(h, blk, XFER_BLOCK, &got, NULL))
+        {
+            DWORD e = GetLastError();
+            CloseHandle(h);
+            HeapFree(GetProcessHeap(), 0, blk);
+            return FinishErr(c, id, e, "read error while hashing");
+        }
+        if (!got) break;
+        Sha256Update(&sha, blk, got);
+        left += got;
+    }
     Sha256Final(&sha, digest);
     ToHex(digest, hex);
-    SetFilePointer(h, 0, NULL, FILE_BEGIN);
+    if (SetFilePointer(h, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
+    {
+        DWORD e = GetLastError();
+        CloseHandle(h);
+        HeapFree(GetProcessHeap(), 0, blk);
+        return FinishErr(c, id, e, "cannot rewind the file");
+    }
     ResultOk(&r, id);
     ReplyStr(&r, "sha256", hex);
     ReplyU64(&r, "size", left);
@@ -332,6 +366,30 @@ static BOOL DoGet(CONN *c, const RMSG *j, UINT64 id)
 
 /* ---- run ---- */
 
+/* Reads at most maxBytes from each pipe without blocking; TRUE if anything was read. */
+static BOOL DrainPipes(HANDLE pipes[2], BUF *dst[2], BOOL *trunc, DWORD maxBytes)
+{
+    BOOL did = FALSE;
+    int i;
+
+    for (i = 0; i < 2; i++)
+    {
+        DWORD budget = maxBytes, avail;
+        while (budget && PeekNamedPipe(pipes[i], NULL, 0, NULL, &avail, NULL) && avail)
+        {
+            char tmp[4096];
+            DWORD got;
+            if (!ReadFile(pipes[i], tmp, budget < sizeof(tmp) ? budget : sizeof(tmp), &got, NULL) || !got) break;
+            did = TRUE;
+            budget -= got;
+            if (dst[i]->len + got <= MAX_CAPTURE) BufAppend(dst[i], tmp, got);
+            else *trunc = TRUE;
+        }
+    }
+    return did;
+}
+
+
 static BOOL DoRun(CONN *c, const RMSG *j, UINT64 id)
 {
     const char *cmd = MsgGet(j, "cmd"), *cwd = MsgGet(j, "cwd");
@@ -351,6 +409,12 @@ static BOOL DoRun(CONN *c, const RMSG *j, UINT64 id)
     if (!wcmd) { if (wcwd) HeapFree(GetProcessHeap(), 0, wcwd); return FinishErr(c, id, ERROR_INVALID_PARAMETER, "no command"); }
     n = wcslen(wcmd) + 32;
     line = HeapAlloc(GetProcessHeap(), 0, n * sizeof(WCHAR));
+    if (!line)
+    {
+        HeapFree(GetProcessHeap(), 0, wcmd);
+        if (wcwd) HeapFree(GetProcessHeap(), 0, wcwd);
+        return FinishErr(c, id, ERROR_OUTOFMEMORY, "out of memory");
+    }
     if (shell) { wcscpy(line, L"cmd.exe /c "); wcscat(line, wcmd); }
     else wcscpy(line, wcmd);
 
@@ -388,56 +452,33 @@ static BOOL DoRun(CONN *c, const RMSG *j, UINT64 id)
         goto done;
     }
 
-    /* poll both pipes without threads: a grandchild that keeps a pipe open cannot hang the job */
+    /* poll both pipes without threads: a grandchild that keeps a pipe open cannot hang the job,
+       and a chatty child cannot starve the timeout check (each pass reads a bounded amount) */
     for (;;)
     {
-        DWORD wait, avail;
-        BOOL did = FALSE;
         HANDLE pipes[2] = { outR, errR };
         BUF *dst[2] = { &out, &err };
-        int i;
+        BOOL did = DrainPipes(pipes, dst, &trunc, 65536);
+        DWORD wait;
 
-        for (i = 0; i < 2; i++)
-        {
-            while (PeekNamedPipe(pipes[i], NULL, 0, NULL, &avail, NULL) && avail)
-            {
-                char tmp[4096];
-                DWORD got;
-                if (!ReadFile(pipes[i], tmp, sizeof(tmp), &got, NULL) || !got) break;
-                did = TRUE;
-                if (dst[i]->len + got <= MAX_CAPTURE) BufAppend(dst[i], tmp, got);
-                else trunc = TRUE;
-            }
-        }
-        wait = WaitForSingleObject(pi.hProcess, did ? 0 : 20);
-        if (wait == WAIT_OBJECT_0) break;
         if (timeoutS && GetTickCount() - start > timeoutS * 1000)
         {
-            {
-                UINT failedKills = 0;
-                KillTree(pi.dwProcessId, &failedKills, 0);
-            }
+            UINT failedKills = 0;
+            KillTree(pi.dwProcessId, &failedKills, 0);
             timedOut = TRUE;
             WaitForSingleObject(pi.hProcess, 5000);
             break;
         }
+        wait = WaitForSingleObject(pi.hProcess, did ? 0 : 20);
+        if (wait == WAIT_OBJECT_0) break;
     }
     {
-        /* drain what the process wrote before it exited */
+        /* what the process wrote before it ended, at most 1 MiB more */
         HANDLE pipes[2] = { outR, errR };
         BUF *dst[2] = { &out, &err };
-        DWORD avail, got;
-        int i;
-        for (i = 0; i < 2; i++)
-        {
-            while (PeekNamedPipe(pipes[i], NULL, 0, NULL, &avail, NULL) && avail)
-            {
-                char tmp[4096];
-                if (!ReadFile(pipes[i], tmp, sizeof(tmp), &got, NULL) || !got) break;
-                if (dst[i]->len + got <= MAX_CAPTURE) BufAppend(dst[i], tmp, got);
-                else trunc = TRUE;
-            }
-        }
+        int pass;
+        for (pass = 0; pass < 16; pass++)
+            if (!DrainPipes(pipes, dst, &trunc, 65536)) break;
     }
     GetExitCodeProcess(pi.hProcess, &exitCode);
     ResultOk(&r, id);
@@ -479,12 +520,12 @@ done:
 /* Terminates pid and its descendants (children first); pids are re-read from a fresh snapshot. */
 static UINT KillTree(DWORD pid, UINT *failed, int depth)
 {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    HANDLE snap = depth < 16 ? CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) : INVALID_HANDLE_VALUE;
     PROCESSENTRY32W pe;
     UINT killed = 0;
     HANDLE p;
 
-    if (snap != INVALID_HANDLE_VALUE && depth < 16)
+    if (snap != INVALID_HANDLE_VALUE)
     {
         pe.dwSize = sizeof(pe);
         if (Process32FirstW(snap, &pe))
@@ -754,7 +795,8 @@ static BOOL DoEvents(CONN *c, const RMSG *j, UINT64 id)
     UINT64 want = MsgGetU64(j, "count", 20), have = 0;
     WCHAR *wlog = Utf8ToWide(log && *log ? log : "Application"), *wsrc = src && *src ? Utf8ToWide(src) : NULL;
     HANDLE h = OpenEventLogW(NULL, wlog);
-    BYTE *rb = HeapAlloc(GetProcessHeap(), 0, 65536);
+    DWORD rbSize = 65536;
+    BYTE *rb = HeapAlloc(GetProcessHeap(), 0, rbSize);
     BUF b = { 0 };
     REPLY r;
     BOOL ok, more = TRUE;
@@ -765,9 +807,15 @@ static BOOL DoEvents(CONN *c, const RMSG *j, UINT64 id)
     {
         DWORD read = 0, need = 0;
         BYTE *p;
-        if (!ReadEventLogW(h, EVENTLOG_SEQUENTIAL_READ | EVENTLOG_BACKWARDS_READ, 0, rb, 65536, &read, &need))
+        if (!ReadEventLogW(h, EVENTLOG_SEQUENTIAL_READ | EVENTLOG_BACKWARDS_READ, 0, rb, rbSize, &read, &need))
         {
             err = GetLastError();
+            if (err == ERROR_INSUFFICIENT_BUFFER && need > rbSize && need <= 16 * 1024 * 1024)
+            {
+                BYTE *nb = HeapReAlloc(GetProcessHeap(), 0, rb, need);
+                if (nb) { rb = nb; rbSize = need; err = 0; continue; }
+                err = ERROR_OUTOFMEMORY;
+            }
             if (err == ERROR_HANDLE_EOF) err = 0;
             break;
         }
