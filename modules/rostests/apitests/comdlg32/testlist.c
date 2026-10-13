@@ -9,11 +9,13 @@
 #include <apitest.h>
 
 extern void func_PrintDlg(void);
+extern void func_SaveDialogDefExt(void);
 extern void func_SaveDialogFolder(void);
 
 const struct test winetest_testlist[] =
 {
     { "PrintDlg", func_PrintDlg },
+    { "SaveDialogDefExt", func_SaveDialogDefExt },
     { "SaveDialogFolder", func_SaveDialogFolder },
     { 0, 0 }
 };

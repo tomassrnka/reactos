@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     PrintDlg.c
+    SaveDialogDefExt.c
     SaveDialogFolder.c
     testlist.c)
 
