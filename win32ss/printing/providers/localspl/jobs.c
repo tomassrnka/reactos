@@ -119,27 +119,31 @@ _PrinterJobListCompareRoutine(PVOID FirstStruct, PVOID SecondStruct)
     int iComparison;
     FILETIME ftSubmittedA;
     FILETIME ftSubmittedB;
+    ULONGLONG tA, tB;
 
     // First compare the priorities to determine the order.
     // The job with a higher priority shall come first.
-    iComparison = A->dwPriority - B->dwPriority;
+    // Compared, not subtracted: a priority read from a shadow file is not range checked.
+    iComparison = (A->dwPriority > B->dwPriority) - (A->dwPriority < B->dwPriority);
     if (iComparison != 0)
         return iComparison;
 
     // Both have the same priority, so go by creation time.
+    // A time that cannot be converted counts as the earliest, so that the order stays transitive.
     if (!SystemTimeToFileTime(&A->stSubmitted, &ftSubmittedA))
-    {
-        ERR("SystemTimeToFileTime failed for A with error %lu!\n", GetLastError());
-        return 0;
-    }
-
+        ftSubmittedA.dwLowDateTime = ftSubmittedA.dwHighDateTime = 0;
     if (!SystemTimeToFileTime(&B->stSubmitted, &ftSubmittedB))
-    {
-        ERR("SystemTimeToFileTime failed for B with error %lu!\n", GetLastError());
-        return 0;
-    }
+        ftSubmittedB.dwLowDateTime = ftSubmittedB.dwHighDateTime = 0;
 
-    return CompareFileTime(&ftSubmittedA, &ftSubmittedB);
+    // Compared as unsigned 64-bit values: CompareFileTime subtracts, which overflows for a far restored date.
+    tA = ((ULONGLONG)ftSubmittedA.dwHighDateTime << 32) | ftSubmittedA.dwLowDateTime;
+    tB = ((ULONGLONG)ftSubmittedB.dwHighDateTime << 32) | ftSubmittedB.dwLowDateTime;
+    iComparison = (tA > tB) - (tA < tB);
+    if (iComparison != 0)
+        return iComparison;
+
+    // Jobs submitted at the same time are told apart by their ID, so that removing one never finds another.
+    return (A->dwJobID > B->dwJobID) - (A->dwJobID < B->dwJobID);
 }
 
 DWORD
@@ -222,6 +226,8 @@ InitializeGlobalJobList(void)
             goto Cleanup;
         }
 
+        InterlockedIncrement(&pJob->pPrinter->lJobCount);
+
         // Add it to the Printer's Job List.
         if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
         {
@@ -268,6 +274,10 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     RPC_WSTR pwszMachineName = NULL;
 
     TRACE("CreateJob(%p)\n", pPrinterHandle);
+
+    // A deleted printer accepts no jobs. This is checked again below together with adding the job.
+    if (pPrinterHandle->pPrinter->dwStatus & PRINTER_STATUS_PENDING_DELETION)
+        return ERROR_PRINTER_DELETED;
 
     // Create a new job.
     pJob = DllAllocSplMem(sizeof(LOCAL_JOB));
@@ -335,22 +345,46 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     CopyMemory(pJob->pwszMachineName, wszDoubleBackslash, cchDoubleBackslash * sizeof(WCHAR));
     CopyMemory(&pJob->pwszMachineName[cchDoubleBackslash], pwszMachineName, (cchMachineName + 1) * sizeof(WCHAR));
 
+    // A deleted printer accepts no jobs. Check it together with adding the job, so that a deletion cannot come in between.
+    EnterCriticalSection(&PrinterDeletionSection);
+
+    if (pJob->pPrinter->dwStatus & PRINTER_STATUS_PENDING_DELETION)
+    {
+        LeaveCriticalSection(&PrinterDeletionSection);
+        dwErrorCode = ERROR_PRINTER_DELETED;
+
+        // The job is in no list and has no files yet: free only its own memory (FreeJob would remove a job with the same ID).
+        DllFreeSplMem(pJob->pDevMode);
+        DllFreeSplStr(pJob->pwszDatatype);
+        DllFreeSplStr(pJob->pwszDocumentName);
+        DllFreeSplStr(pJob->pwszMachineName);
+        DllFreeSplStr(pJob->pwszNotifyName);
+        DllFreeSplStr(pJob->pwszUserName);
+        goto Cleanup;
+    }
+
     // Add the job to the Global Job List.
     if (!InsertElementSkiplist(&GlobalJobList, pJob))
     {
+        LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
         ERR("InsertElementSkiplist failed for job %lu for the GlobalJobList!\n", pJob->dwJobID);
         goto Cleanup;
     }
 
-    // Add the job at the end of the Printer's Job List.
-    // As all new jobs are created with default priority, we can be sure that it would always be inserted at the end.
-    if (!InsertTailElementSkiplist(&pJob->pPrinter->JobList, pJob))
+    // Add the job to the Printer's Job List at its sorted position.
+    // It is not always the end: a job given another priority can sort after a new job of default priority.
+    if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
     {
+        DeleteElementSkiplist(&GlobalJobList, pJob);
+        LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
-        ERR("InsertTailElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
+        ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
         goto Cleanup;
     }
+
+    InterlockedIncrement(&pJob->pPrinter->lJobCount);
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     // We were successful!
     pPrinterHandle->bStartedDoc = TRUE;
@@ -782,13 +816,14 @@ _LocalSetJobLevel1(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
     // Check if the priority has changed.
     if (pJob->dwPriority != pJobInfo->Priority && IS_VALID_PRIORITY(pJobInfo->Priority))
     {
-        // Set the new priority.
-        pJob->dwPriority = pJobInfo->Priority;
-
-        // Remove and reinsert the job in the Printer's Job List.
-        // The Compare function will be used to find the right position now considering the new priority.
+        // Remove the job from the Printer's Job List while the Compare function still finds it by its old priority,
+        // then reinsert it at the position for the new priority. CreateJob changes this list under the same lock.
+        EnterCriticalSection(&PrinterDeletionSection);
         DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
-        InsertElementSkiplist(&pJob->pPrinter->JobList, pJob);
+        pJob->dwPriority = pJobInfo->Priority;
+        if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
+            ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
+        LeaveCriticalSection(&PrinterDeletionSection);
     }
 
     // Check if the status flags have changed.
@@ -913,13 +948,14 @@ _LocalSetJobLevel2(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
     // Check if the priority has changed.
     if (pJob->dwPriority != pJobInfo->Priority && IS_VALID_PRIORITY(pJobInfo->Priority))
     {
-        // Set the new priority.
-        pJob->dwPriority = pJobInfo->Priority;
-
-        // Remove and reinsert the job in the Printer's Job List.
-        // The Compare function will be used to find the right position now considering the new priority.
+        // Remove the job from the Printer's Job List while the Compare function still finds it by its old priority,
+        // then reinsert it at the position for the new priority. CreateJob changes this list under the same lock.
+        EnterCriticalSection(&PrinterDeletionSection);
         DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
-        InsertElementSkiplist(&pJob->pPrinter->JobList, pJob);
+        pJob->dwPriority = pJobInfo->Priority;
+        if (!InsertElementSkiplist(&pJob->pPrinter->JobList, pJob))
+            ERR("InsertElementSkiplist failed for job %lu for the Printer's Job List!\n", pJob->dwJobID);
+        LeaveCriticalSection(&PrinterDeletionSection);
     }
 
     // Check if the status flags have changed.
@@ -1455,9 +1491,14 @@ FreeJob(PLOCAL_JOB pJob)
 
     TRACE("FreeJob(%p)\n", pJob);
 
-    // Remove the Job from both Job Lists.
+    // Remove the Job from both Job Lists, under the lock that job admission, priority moves and printer deletion take,
+    // so that two removals of one job cannot both find it.
+    EnterCriticalSection(&PrinterDeletionSection);
     DeleteElementSkiplist(&pJob->pPrinter->JobList, pJob);
-    DeleteElementSkiplist(&GlobalJobList, pJob);
+    // Only a job that was still in the GlobalJobList was counted.
+    if (DeleteElementSkiplist(&GlobalJobList, pJob))
+        InterlockedDecrement(&pJob->pPrinter->lJobCount);
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     // Try to delete the corresponding .SHD file.
     pwszSHDFile = DllAllocSplMem(GetJobFilePath(L"SHD", 0, NULL));

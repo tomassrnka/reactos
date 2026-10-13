@@ -128,6 +128,7 @@ struct _LOCAL_PRINTER
     PLOCAL_PRINT_PROCESSOR pPrintProcessor;
     PLOCAL_PORT pPort;
     SKIPLIST JobList;
+    LONG lJobCount;                             /** Jobs of this printer in the GlobalJobList, also those missing from JobList after a failed reinsertion. */
 };
 
 /**
@@ -172,6 +173,7 @@ struct _LOCAL_PRINTER_HANDLE
     PLOCAL_JOB pJob;                            /** Print Job associated with this handle. This can be the specified Job if this is a Print Job handle or the started job through LocalStartDocPrinter. */
     PWSTR pwszDatatype;                         /** Datatype used for newly started jobs. */
     PDEVMODEW pDevMode;                         /** DevMode used for newly started jobs. */
+    ACCESS_MASK DesiredAccess;                  /** Access requested in OpenPrinter. */
 };
 
 /**
@@ -331,6 +333,8 @@ PPRINTENV_T validate_envW(LPCWSTR env);
 // printers.c
 extern SKIPLIST PrinterList;
 BOOL InitializePrinterList(void);
+extern CRITICAL_SECTION PrinterDeletionSection;
+BOOL WINAPI LocalDeletePrinter(HANDLE hPrinter);
 BOOL WINAPI LocalEnumPrinters(DWORD Flags, LPWSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned);
 BOOL WINAPI LocalGetPrinter(HANDLE hPrinter, DWORD Level, LPBYTE pPrinter, DWORD cbBuf, LPDWORD pcbNeeded);
 BOOL WINAPI LocalOpenPrinter(PWSTR lpPrinterName, HANDLE* phPrinter, PPRINTER_DEFAULTSW pDefault);

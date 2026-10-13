@@ -9,6 +9,7 @@
 #include <apitest.h>
 
 extern void func_ClosePrinter(void);
+extern void func_DeletePrinter(void);
 extern void func_EnumPrinters(void);
 extern void func_EnumPrintProcessorDatatypes(void);
 extern void func_GetDefaultPrinterA(void);
@@ -25,6 +26,7 @@ extern void func_StartDocPrinter(void);
 const struct test winetest_testlist[] =
 {
     { "ClosePrinter", func_ClosePrinter },
+    { "DeletePrinter", func_DeletePrinter },
     { "EnumPrinters", func_EnumPrinters },
     { "EnumPrintProcessorDatatypes", func_EnumPrintProcessorDatatypes },
     { "GetDefaultPrinterA", func_GetDefaultPrinterA },
