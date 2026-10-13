@@ -253,6 +253,9 @@ void dialog_printsetup(HWND);
 void dialog_print(HWND, LPWSTR);
 void target_device(HWND, DWORD);
 void print_quick(HWND, LPWSTR);
+#ifdef __REACTOS__
+BOOL print_supported(HWND);
+#endif
 LRESULT preview_command(HWND, WPARAM);
 void init_preview(HWND, LPWSTR);
 void close_preview(HWND);

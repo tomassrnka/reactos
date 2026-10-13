@@ -2169,6 +2169,10 @@ static LRESULT OnCommand( HWND hWnd, WPARAM wParam, LPARAM lParam)
         {
             int index = reg_formatindex(fileFormat);
             DWORD tmp = barState[index];
+#ifdef __REACTOS__
+            if (!print_supported(hWnd))
+                break;
+#endif
             barState[index] = 1 << BANDID_STATUSBAR;
             set_bar_states();
             barState[index] = tmp;
