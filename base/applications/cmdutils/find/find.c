@@ -44,8 +44,8 @@ static BOOL bDoNotSkipOfflineFiles = FALSE;
  *
  * @return
  *     Returns a pointer to the first occurrence of pszSearch in pszStr,
- *     or NULL if pszSearch does not appear in pszStr. If pszSearch points
- *     to a string of zero length, the function returns pszStr.
+ *     or NULL if pszSearch does not appear in pszStr. A string of zero
+ *     length is never found, as in Windows' FIND.
  */
 static PWSTR
 StrStrCase(
@@ -53,19 +53,22 @@ StrStrCase(
     IN PCWSTR pszSearch,
     IN BOOL bIgnoreCase)
 {
+    if (*pszSearch == UNICODE_NULL)
+        return NULL;
+
     if (bIgnoreCase)
     {
         LCID LocaleId;
         UINT cch1, cch2;
-        INT i;
+        UINT i;
 
         LocaleId = GetThreadLocale();
 
         cch1 = (UINT)wcslen(pszStr);
         cch2 = (UINT)wcslen(pszSearch);
 
-        if (cch2 == 0)
-            return (PWSTR)pszStr;
+        if (cch2 > cch1)
+            return NULL;
 
         for (i = 0; i <= cch1 - cch2; ++i)
         {
