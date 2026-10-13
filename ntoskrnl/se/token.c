@@ -1731,9 +1731,10 @@ SepComputeIntegrityLevel(
     ((USHORT)(FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + SEP_MANDATORY_LABEL_SID_LENGTH))
 
 /*
- * The label of a descriptor: whether its SACL holds a mandatory label ACE,
- * and that ACE's level and policy. A descriptor whose SACL holds more than
- * one, or a malformed one, is invalid.
+ * The labels of a descriptor: whether its SACL holds mandatory label ACEs,
+ * and the highest level and its policy among them. A SACL may hold several
+ * (Windows keeps them all); one that is malformed makes the descriptor
+ * invalid.
  */
 NTSTATUS
 NTAPI
@@ -1743,11 +1744,12 @@ SepGetDescriptorLabel(
     _Out_opt_ PULONG LabelLevel,
     _Out_opt_ PACCESS_MASK LabelPolicy)
 {
-    PSYSTEM_MANDATORY_LABEL_ACE Ace = NULL;
+    PSYSTEM_MANDATORY_LABEL_ACE Ace;
     BOOLEAN Present, Defaulted;
     PACE_HEADER Entry;
     PACL Sacl = NULL;
-    ULONG Rid, i;
+    ULONG Rid, MaxRid = 0, i;
+    ACCESS_MASK Policy = 0;
 
     *HasLabel = FALSE;
     if (!NT_SUCCESS(RtlGetSaclSecurityDescriptor(SecurityDescriptor, &Present, &Sacl, &Defaulted)) ||
@@ -1762,32 +1764,37 @@ SepGetDescriptorLabel(
             return STATUS_INVALID_ACL;
         if (Entry->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
             continue;
-        if (Ace)
-            return STATUS_INVALID_ACL;
+
         Ace = (PSYSTEM_MANDATORY_LABEL_ACE)Entry;
+        if (Ace->Header.AceSize < SEP_LABEL_ACE_SIZE ||
+            !SepIsMandatoryLabelSid((PSID)&Ace->SidStart, &Rid) ||
+            (Ace->Mask & ~SYSTEM_MANDATORY_LABEL_VALID_MASK))
+        {
+            return STATUS_INVALID_ACL;
+        }
+        if (!*HasLabel || Rid > MaxRid)
+        {
+            MaxRid = Rid;
+            Policy = Ace->Mask;
+        }
+        *HasLabel = TRUE;
     }
-    if (!Ace)
-        return STATUS_SUCCESS;
 
-    if (Ace->Header.AceSize < SEP_LABEL_ACE_SIZE ||
-        !SepIsMandatoryLabelSid((PSID)&Ace->SidStart, &Rid) ||
-        (Ace->Mask & ~SYSTEM_MANDATORY_LABEL_VALID_MASK))
+    if (*HasLabel)
     {
-        return STATUS_INVALID_ACL;
+        if (LabelLevel)
+            *LabelLevel = MaxRid;
+        if (LabelPolicy)
+            *LabelPolicy = Policy;
     }
-
-    *HasLabel = TRUE;
-    if (LabelLevel)
-        *LabelLevel = Rid;
-    if (LabelPolicy)
-        *LabelPolicy = Ace->Mask;
     return STATUS_SUCCESS;
 }
 
 /*
  * A caller may set a mandatory label up to its own level; above that it
- * needs SeRelabelPrivilege, as on NT 6. Checked for the label in a
- * descriptor that is about to be set with LABEL_SECURITY_INFORMATION.
+ * needs SeRelabelPrivilege, as on NT 6. Checked for every label in a
+ * descriptor that is about to be set with LABEL_SECURITY_INFORMATION (the
+ * highest one decides).
  */
 NTSTATUS
 NTAPI

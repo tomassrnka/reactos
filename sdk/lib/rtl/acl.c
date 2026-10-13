@@ -903,10 +903,10 @@ RtlValidAcl(IN PACL Acl)
                     _SEH2_YIELD(return FALSE);
                 }
 
-                /* The ACE size should at least have enough for the header */
-                if (Ace->AceSize < sizeof(ACE_HEADER))
+                /* The ACE size should at least have enough for the header, the mask and the SID header, read next */
+                if (Ace->AceSize < FIELD_OFFSET(KNOWN_ACE, SidStart) + FIELD_OFFSET(SID, SubAuthority))
                 {
-                    DPRINT1("Invalid ACE size: %lx %lx\n", Ace->AceSize, sizeof(ACE_HEADER));
+                    DPRINT1("Invalid ACE size: %lx\n", Ace->AceSize);
                     _SEH2_YIELD(return FALSE);
                 }
 
@@ -969,6 +969,13 @@ RtlValidAcl(IN PACL Acl)
                 if (*Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT)
                 {
                     GuidSize += sizeof(GUID);
+                }
+
+                /* The ACE must hold the GUIDs and the SID header, read next */
+                if (Ace->AceSize < FIELD_OFFSET(KNOWN_OBJECT_ACE, SidStart) + GuidSize + FIELD_OFFSET(SID, SubAuthority))
+                {
+                    DPRINT1("Too small Object ACE size for its GUIDs and SID: %lx\n", Ace->AceSize);
+                    _SEH2_YIELD(return FALSE);
                 }
 
                 /* Check if the SID revision is valid */

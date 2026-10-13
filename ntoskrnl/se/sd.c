@@ -350,6 +350,10 @@ DetermineACLSize(
     return Size;
 }
 
+/* Protection and inheritance state of an ACL, which goes with it when it is kept or replaced */
+#define SEP_DACL_INHERIT_BITS (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED)
+#define SEP_SACL_INHERIT_BITS (SE_SACL_PROTECTED | SE_SACL_AUTO_INHERITED)
+
 /*
  * Mandatory labels live in the SACL as SYSTEM_MANDATORY_LABEL_ACE entries.
  * As on NT 6, LABEL_SECURITY_INFORMATION shows and changes those entries
@@ -515,6 +519,16 @@ SeCaptureSecurityDescriptor(
         DescriptorCopy.Sacl = SepGetSaclFromDescriptor(OriginalDescriptor);
         DescriptorCopy.Dacl = SepGetDaclFromDescriptor(OriginalDescriptor);
         DescriptorSize = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
+
+        /*
+         * The helpers read the caller's control bits again, which may have
+         * changed: an ACL counts only if the bits captured above say it is
+         * present, so that sizing and copying below agree.
+         */
+        if (!(DescriptorCopy.Control & SE_SACL_PRESENT))
+            DescriptorCopy.Sacl = NULL;
+        if (!(DescriptorCopy.Control & SE_DACL_PRESENT))
+            DescriptorCopy.Dacl = NULL;
 
         /* Determine owner and group sizes */
         OwnerSize = DetermineSIDSize(DescriptorCopy.Owner, &OwnerSAC, CurrentMode);
@@ -702,7 +716,7 @@ SeQuerySecurityDescriptorInfo(
     ULONG GroupLength = 0;
     ULONG DaclLength = 0;
     ULONG SaclLength = 0;
-    ULONG LabelCount = 0;
+    ULONG LabelCount = 0, LabelAclSize = 0;
     BOOLEAN LabelsOnly = FALSE;
     SECURITY_DESCRIPTOR_CONTROL Control = 0;
     ULONG_PTR Current;
@@ -759,7 +773,7 @@ SeQuerySecurityDescriptorInfo(
             DaclLength = ROUND_UP((ULONG)Dacl->AclSize, 4);
         }
 
-        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT | SEP_DACL_INHERIT_BITS));
     }
 
     if ((*SecurityInformation & SACL_SECURITY_INFORMATION) &&
@@ -772,23 +786,26 @@ SeQuerySecurityDescriptorInfo(
             SaclLength = ROUND_UP(Sacl->AclSize, 4);
         }
 
-        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
     }
     else if ((*SecurityInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
              (ObjectSd->Control & SE_SACL_PRESENT))
     {
-        /* The label ACEs only (a SACL only when there are any), or the other ACEs only */
+        /*
+         * The label ACEs only, or the other ACEs only, of a present SACL:
+         * possibly none, which is an empty ACL (as after the last label was
+         * removed), not an absent one.
+         */
         LabelsOnly = (*SecurityInformation & LABEL_SECURITY_INFORMATION) != 0;
         LabelSource = SepGetSaclFromDescriptor(ObjectSd);
         if (LabelSource != NULL)
         {
-            SaclLength = SepAceBytes(LabelSource, LabelsOnly, &LabelCount);
-            SaclLength = (LabelCount || !LabelsOnly) ? ROUND_UP(sizeof(ACL) + SaclLength, 4) : 0;
+            /* The ACL's own size, and the DWORD-rounded room it takes in the descriptor */
+            LabelAclSize = sizeof(ACL) + SepAceBytes(LabelSource, LabelsOnly, &LabelCount);
+            ASSERT(LabelAclSize <= LabelSource->AclSize);
+            SaclLength = ROUND_UP(LabelAclSize, 4);
         }
-        if (SaclLength != 0)
-            Control |= SE_SACL_PRESENT;
-        if (!LabelsOnly)
-            Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
     }
 
     SdLength = OwnerLength + GroupLength + DaclLength +
@@ -840,7 +857,7 @@ SeQuerySecurityDescriptorInfo(
 
         RtlZeroMemory(LabelAcl, SaclLength);
         LabelAcl->AclRevision = LabelSource->AclRevision;
-        LabelAcl->AclSize = (USHORT)SaclLength;
+        LabelAcl->AclSize = (USHORT)LabelAclSize;
         SepAppendAces(LabelAcl, &Used, LabelSource, LabelsOnly);
         RelSD->Sacl = (ULONG)(Current - (ULONG_PTR)SecurityDescriptor);
         Current += SaclLength;
@@ -1062,19 +1079,19 @@ SeSetSecurityDescriptorInfoEx(
     if (SecurityInformation & DACL_SECURITY_INFORMATION)
     {
         Dacl = SepGetDaclFromDescriptor(SecurityDescriptor);
-        Control |= (SecurityDescriptor->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (SecurityDescriptor->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT | SEP_DACL_INHERIT_BITS));
     }
     else
     {
         Dacl = SepGetDaclFromDescriptor(ObjectSd);
-        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT | SEP_DACL_INHERIT_BITS));
     }
     DaclLength = Dacl ? ROUND_UP((ULONG)Dacl->AclSize, 4) : 0;
 
     /* Get SACL and SACL size */
     if (SecurityInformation & LABEL_SECURITY_INFORMATION)
     {
-        /* At most one well-formed label */
+        /* Only well-formed labels */
         Status = SepGetDescriptorLabel(SecurityDescriptor, &HasLabel, NULL, NULL);
         if (!NT_SUCCESS(Status))
             return Status;
@@ -1084,12 +1101,12 @@ SeSetSecurityDescriptorInfoEx(
         (SecurityInformation & LABEL_SECURITY_INFORMATION))
     {
         Sacl = SepGetSaclFromDescriptor(SecurityDescriptor);
-        Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
     }
     else if (!(SecurityInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)))
     {
         Sacl = SepGetSaclFromDescriptor(ObjectSd);
-        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
     }
     else
     {
@@ -1108,10 +1125,11 @@ SeSetSecurityDescriptorInfoEx(
             LabelBytes = SepAceBytes(NewLabels, TakeLabels, &LabelCount);
 
         Sacl = NULL;
+        /* A label change keeps the SACL's protection and inheritance state; an audit change sets it */
         if (TakeLabels)
-            Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+            Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
         else
-            Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+            Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
 
         if (OldSacl || LabelCount || (!TakeLabels && NewLabels))
         {
@@ -1135,8 +1153,18 @@ SeSetSecurityDescriptorInfoEx(
             Sacl = MergedSacl;
             Control |= SE_SACL_PRESENT;
         }
-}
+    }
     SaclLength = Sacl ? ROUND_UP((ULONG)Sacl->AclSize, 4) : 0;
+
+    /* Explicit protection requests */
+    if (SecurityInformation & PROTECTED_DACL_SECURITY_INFORMATION)
+        Control |= SE_DACL_PROTECTED;
+    else if (SecurityInformation & UNPROTECTED_DACL_SECURITY_INFORMATION)
+        Control &= ~SE_DACL_PROTECTED;
+    if (SecurityInformation & PROTECTED_SACL_SECURITY_INFORMATION)
+        Control |= SE_SACL_PROTECTED;
+    else if (SecurityInformation & UNPROTECTED_SACL_SECURITY_INFORMATION)
+        Control &= ~SE_SACL_PROTECTED;
 
     NewSd = ExAllocatePoolWithTag(PoolType,
                                   sizeof(SECURITY_DESCRIPTOR_RELATIVE) +

@@ -7,6 +7,8 @@
 
 #include "precomp.h"
 #include <aclapi.h>
+#include <ndk/obfuncs.h>
+#include <ndk/exfuncs.h>
 
 static SID_IDENTIFIER_AUTHORITY MandatoryLabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
 
@@ -310,6 +312,184 @@ static void TestSaclView(void)
     CloseHandle(hProcessToken);
 }
 
+/* Appends a label ACE to an ACL that has room for it */
+static void AddLabelAce(PACL Acl, DWORD Rid, DWORD Mask, BYTE AceFlags)
+{
+    BYTE SidBuffer[SECURITY_MAX_SID_SIZE];
+    PSID Sid = (PSID)SidBuffer;
+    PSYSTEM_MANDATORY_LABEL_ACE Ace;
+    PACE_HEADER Entry = (PACE_HEADER)(Acl + 1);
+    DWORD i;
+
+    for (i = 0; i < Acl->AceCount; i++)
+        Entry = (PACE_HEADER)((PBYTE)Entry + Entry->AceSize);
+    InitializeSid(Sid, &MandatoryLabelAuthority, 1);
+    *GetSidSubAuthority(Sid, 0) = Rid;
+    Ace = (PSYSTEM_MANDATORY_LABEL_ACE)Entry;
+    Ace->Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    Ace->Header.AceFlags = AceFlags;
+    Ace->Header.AceSize = (WORD)(FIELD_OFFSET(SYSTEM_MANDATORY_LABEL_ACE, SidStart) + GetLengthSid(Sid));
+    Ace->Mask = Mask;
+    CopySid(GetLengthSid(Sid), (PSID)&Ace->SidStart, Sid);
+    Acl->AceCount++;
+}
+
+static BOOL EnablePrivilege(PCWSTR Name, BOOL Enable)
+{
+    TOKEN_PRIVILEGES Privileges;
+    HANDLE hToken;
+    BOOL Ret;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken))
+        return FALSE;
+    Privileges.PrivilegeCount = 1;
+    Privileges.Privileges[0].Attributes = Enable ? SE_PRIVILEGE_ENABLED : 0;
+    Ret = LookupPrivilegeValueW(NULL, Name, &Privileges.Privileges[0].Luid) &&
+          AdjustTokenPrivileges(hToken, FALSE, &Privileges, 0, NULL, NULL) &&
+          GetLastError() == ERROR_SUCCESS;
+    CloseHandle(hToken);
+    return Ret;
+}
+
+/* Several labels, removing them, and the DACL's protection across a label change */
+static void TestLabelSet(void)
+{
+    BYTE AclBuffer[128], SdBuffer[512];
+    PACL Acl = (PACL)AclBuffer, Sacl;
+    PSECURITY_DESCRIPTOR Got = (PSECURITY_DESCRIPTOR)SdBuffer;
+    SECURITY_DESCRIPTOR Sd;
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    PSYSTEM_MANDATORY_LABEL_ACE Ace;
+    BOOL Present, Defaulted;
+    DWORD Length, Revision, Rid, Mask, AceCount;
+    WCHAR Name[64];
+    HANDLE hEvent;
+
+    StringCchPrintfW(Name, _countof(Name), L"TokenIntegritySet%lu", GetCurrentProcessId());
+    hEvent = CreateEventW(NULL, FALSE, FALSE, Name);
+    ok(hEvent != NULL, "CreateEventW failed: %lu\n", GetLastError());
+    if (!hEvent)
+        return;
+
+    /* Two labels are kept as they are, in order */
+    InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+    AddLabelAce(Acl, SECURITY_MANDATORY_LOW_RID, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, 0);
+    AddLabelAce(Acl, SECURITY_MANDATORY_MEDIUM_RID, SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, 0);
+    InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorSacl(&Sd, TRUE, Acl, FALSE);
+    ok(SetKernelObjectSecurity(hEvent, LABEL_SECURITY_INFORMATION, &Sd), "Setting two labels failed: %lu\n", GetLastError());
+    Present = FALSE;
+    Sacl = NULL;
+    ok(GetKernelObjectSecurity(hEvent, LABEL_SECURITY_INFORMATION, Got, sizeof(SdBuffer), &Length), "Query failed: %lu\n", GetLastError());
+    ok(GetSecurityDescriptorSacl(Got, &Present, &Sacl, &Defaulted) && Present && Sacl, "No SACL\n");
+    if (Present && Sacl)
+    {
+        ok(Sacl->AceCount == 2, "%u ACEs\n", Sacl->AceCount);
+        if (Sacl->AceCount == 2 && GetAce(Sacl, 0, (PVOID *)&Ace))
+            ok(*GetSidSubAuthority((PSID)&Ace->SidStart, 0) == SECURITY_MANDATORY_LOW_RID &&
+               Ace->Mask == SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, "First label 0x%lx, 0x%lx\n",
+               *GetSidSubAuthority((PSID)&Ace->SidStart, 0), Ace->Mask);
+        if (Sacl->AceCount == 2 && GetAce(Sacl, 1, (PVOID *)&Ace))
+            ok(*GetSidSubAuthority((PSID)&Ace->SidStart, 0) == SECURITY_MANDATORY_MEDIUM_RID &&
+               Ace->Mask == SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP, "Second label 0x%lx, 0x%lx\n",
+               *GetSidSubAuthority((PSID)&Ace->SidStart, 0), Ace->Mask);
+    }
+
+    /* Removing the labels leaves an empty SACL, not an absent one */
+    InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    ok(SetKernelObjectSecurity(hEvent, LABEL_SECURITY_INFORMATION, &Sd), "Removing the labels failed: %lu\n", GetLastError());
+    Present = FALSE;
+    Sacl = NULL;
+    ok(GetKernelObjectSecurity(hEvent, LABEL_SECURITY_INFORMATION, Got, sizeof(SdBuffer), &Length), "Query failed: %lu\n", GetLastError());
+    ok(GetSecurityDescriptorSacl(Got, &Present, &Sacl, &Defaulted), "GetSecurityDescriptorSacl failed\n");
+    ok(Present, "No SACL after removing the labels\n");
+    ok(Sacl && Sacl->AceCount == 0, "SACL %p with %u ACEs after removing the labels\n", Sacl, Sacl ? Sacl->AceCount : 0);
+
+    /* A protected DACL stays protected when the label changes */
+    InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+    {
+        BYTE SidBuffer[SECURITY_MAX_SID_SIZE];
+        SID_IDENTIFIER_AUTHORITY World = {SECURITY_WORLD_SID_AUTHORITY};
+        PSID Everyone = (PSID)SidBuffer;
+
+        InitializeSid(Everyone, &World, 1);
+        *GetSidSubAuthority(Everyone, 0) = SECURITY_WORLD_RID;
+        AddAccessAllowedAce(Acl, ACL_REVISION, EVENT_ALL_ACCESS, Everyone);
+    }
+    InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&Sd, TRUE, Acl, FALSE);
+    SetSecurityDescriptorControl(&Sd, SE_DACL_PROTECTED, SE_DACL_PROTECTED);
+    ok(SetKernelObjectSecurity(hEvent, DACL_SECURITY_INFORMATION, &Sd), "Setting a protected DACL failed: %lu\n", GetLastError());
+    ok(GetKernelObjectSecurity(hEvent, DACL_SECURITY_INFORMATION, Got, sizeof(SdBuffer), &Length), "Query failed: %lu\n", GetLastError());
+    Control = 0;
+    ok(GetSecurityDescriptorControl(Got, &Control, &Revision) && (Control & SE_DACL_PROTECTED),
+       "DACL control 0x%x after setting a protected DACL\n", Control);
+    ok(SetObjectLabel(hEvent, SECURITY_MANDATORY_LOW_RID, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP), "Setting a label failed: %lu\n", GetLastError());
+    ok(GetObjectLabel(hEvent, &Rid, &Mask, &AceCount) && Rid == SECURITY_MANDATORY_LOW_RID, "Label 0x%lx\n", Rid);
+    ok(GetKernelObjectSecurity(hEvent, DACL_SECURITY_INFORMATION, Got, sizeof(SdBuffer), &Length), "Query failed: %lu\n", GetLastError());
+    Control = 0;
+    ok(GetSecurityDescriptorControl(Got, &Control, &Revision) && (Control & SE_DACL_PROTECTED),
+       "DACL control 0x%x after a label change\n", Control);
+
+    CloseHandle(hEvent);
+}
+
+/* A label in a directory's SACL reaches the objects created in it as its inheritance flags say */
+static void TestLabelInheritance(void)
+{
+    static const struct { BYTE AceFlags; BOOL Inherited; } Cases[] =
+    {
+        { 0, FALSE },
+        { OBJECT_INHERIT_ACE, TRUE },
+        { CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE, FALSE },
+    };
+    BYTE AclBuffer[64];
+    PACL Acl = (PACL)AclBuffer;
+    SECURITY_DESCRIPTOR Sd;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING Name;
+    WCHAR NameBuffer[96];
+    HANDLE hDir, hEvent;
+    DWORD Rid, Mask, AceCount, i;
+    NTSTATUS Status;
+    BOOL Found;
+
+    EnablePrivilege(L"SeSecurityPrivilege", TRUE);
+    for (i = 0; i < ARRAYSIZE(Cases); i++)
+    {
+        InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+        AddLabelAce(Acl, SECURITY_MANDATORY_LOW_RID, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, Cases[i].AceFlags);
+        InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+        SetSecurityDescriptorDacl(&Sd, TRUE, NULL, FALSE);
+        SetSecurityDescriptorSacl(&Sd, TRUE, Acl, FALSE);
+
+        StringCchPrintfW(NameBuffer, _countof(NameBuffer), L"\\BaseNamedObjects\\TokenIntegrityDir%lu_%lu", GetCurrentProcessId(), i);
+        RtlInitUnicodeString(&Name, NameBuffer);
+        InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, &Sd);
+        Status = NtCreateDirectoryObject(&hDir, DIRECTORY_ALL_ACCESS, &ObjectAttributes);
+        ok(NT_SUCCESS(Status), "Case %lu: NtCreateDirectoryObject failed: 0x%lx\n", i, Status);
+        if (!NT_SUCCESS(Status))
+            continue;
+
+        RtlInitUnicodeString(&Name, L"Child");
+        InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, hDir, NULL);
+        Status = NtCreateEvent(&hEvent, EVENT_ALL_ACCESS, &ObjectAttributes, NotificationEvent, FALSE);
+        ok(NT_SUCCESS(Status), "Case %lu: NtCreateEvent failed: 0x%lx\n", i, Status);
+        if (NT_SUCCESS(Status))
+        {
+            Rid = 0;
+            Found = GetObjectLabel(hEvent, &Rid, &Mask, &AceCount) && Rid == SECURITY_MANDATORY_LOW_RID;
+            if (Cases[i].Inherited)
+                ok(Found, "Case %lu (flags 0x%x): the child did not inherit the label (0x%lx)\n", i, Cases[i].AceFlags, Rid);
+            else
+                ok(!Found, "Case %lu (flags 0x%x): the child got a label that is not inherited\n", i, Cases[i].AceFlags);
+            NtClose(hEvent);
+        }
+        NtClose(hDir);
+    }
+    EnablePrivilege(L"SeSecurityPrivilege", FALSE);
+}
+
 START_TEST(TokenIntegrity)
 {
     HANDLE hToken = NULL, hDup = NULL;
@@ -386,6 +566,8 @@ START_TEST(TokenIntegrity)
     TestDuplicateHandle(hToken);
     TestEventLabel();
     TestSaclView();
+    TestLabelSet();
+    TestLabelInheritance();
 
     CloseHandle(hDup);
     CloseHandle(hToken);
