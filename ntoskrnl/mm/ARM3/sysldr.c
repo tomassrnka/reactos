@@ -1526,6 +1526,9 @@ MiFreeInitializationCode(IN PVOID InitStart,
                                           PagesFreed,
                                           0,
                                           NULL);
+
+    /* Boot image pages were charged as boot-time memory */
+    MiReturnBootCommit(PagesFreed);
 }
 
 CODE_SEG("INIT")

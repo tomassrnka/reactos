@@ -477,6 +477,30 @@ MiPagingFileGrowthThread(
     }
 }
 
+/* Start the one thread that grows paging files; a failed start is retried by the next caller */
+static
+VOID
+MiStartPagingFileGrowthThread(VOID)
+{
+    HANDLE ThreadHandle;
+
+    if (InterlockedCompareExchange(&MiPagingFileGrowthThreadState, 1, 0) != 0)
+        return;
+
+    if (((MiPagingFileCertifyPage != 0) ||
+         NT_SUCCESS(MmRequestPageMemoryConsumer(MC_SYSTEM, TRUE, &MiPagingFileCertifyPage))) &&
+        NT_SUCCESS(PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL,
+                                        MiPagingFileGrowthThread, NULL)))
+    {
+        ZwClose(ThreadHandle);
+        InterlockedExchange(&MiPagingFileGrowthThreadState, 2);
+    }
+    else
+    {
+        InterlockedExchange(&MiPagingFileGrowthThreadState, 0);
+    }
+}
+
 /*
  * Ask the growth thread to grow paging files by Shortfall pages and wait
  * for it. Returns TRUE when the commit limit grew. Takes no commitment:
@@ -497,11 +521,19 @@ MiWaitForPagingFileGrowth(
      * A thread inside a critical or guarded region may hold a resource that
      * the file system needs to grow the file: it does not wait.
      */
-    if ((MiPagingFileGrowthThreadState != 2) ||
+    if ((MmNumberOfPagingFiles == 0) ||
         (KeGetCurrentIrql() != PASSIVE_LEVEL) ||
         (KeGetCurrentThread()->CombinedApcDisable != 0))
     {
         return FALSE;
+    }
+
+    /* Its start may have failed when the paging file was created */
+    if (MiPagingFileGrowthThreadState != 2)
+    {
+        MiStartPagingFileGrowthThread();
+        if (MiPagingFileGrowthThreadState != 2)
+            return FALSE;
     }
 
     /* A request that cannot fit even at the maximum fails at once and changes nothing */
@@ -1038,25 +1070,8 @@ EarlyQuit:
 
     MmSwapSpaceMessage = FALSE;
 
-    /* The thread that grows paging files toward their maximum: one, ever */
-    if (InterlockedCompareExchange(&MiPagingFileGrowthThreadState, 1, 0) == 0)
-    {
-        HANDLE ThreadHandle;
-
-        if ((MiPagingFileCertifyPage != 0 ||
-             NT_SUCCESS(MmRequestPageMemoryConsumer(MC_SYSTEM, TRUE, &MiPagingFileCertifyPage))) &&
-            NT_SUCCESS(PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL,
-                                            MiPagingFileGrowthThread, NULL)))
-        {
-            ZwClose(ThreadHandle);
-            InterlockedExchange(&MiPagingFileGrowthThreadState, 2);
-        }
-        else
-        {
-            /* The next paging file creation tries again */
-            InterlockedExchange(&MiPagingFileGrowthThreadState, 0);
-        }
-    }
+    /* The thread that grows paging files toward their maximum */
+    MiStartPagingFileGrowthThread();
 
     if (!MmSystemPageFileLocated && BooleanFlagOn(FileObject->DeviceObject->Flags, DO_SYSTEM_BOOT_PARTITION))
     {

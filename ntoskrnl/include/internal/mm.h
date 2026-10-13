@@ -903,6 +903,11 @@ MiChargeCommit(
 
 VOID
 NTAPI
+MiReturnBootCommit(
+    _In_ SIZE_T Pages);
+
+VOID
+NTAPI
 MiReturnCommit(
     _In_ SIZE_T Pages);
 

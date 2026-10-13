@@ -1303,6 +1303,9 @@ MmFreeLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     MiReleasePfnLock(OldIrql);
     KeFlushEntireTb(TRUE, TRUE);
 
+    /* They were charged as boot-time memory */
+    MiReturnBootCommit(LoaderPages);
+
     /* Free our run structure */
     ExFreePoolWithTag(Buffer, 'lMmM');
 }

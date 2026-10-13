@@ -22,6 +22,9 @@
  */
 SIZE_T MiCommitReserve;
 
+/* Boot-time memory charged at initialisation that may still be freed (loader data, INIT code) */
+static volatile SIZE_T MiBootCommitCharge;
+
 /* PRIVATE FUNCTIONS **********************************************************/
 
 static
@@ -45,7 +48,7 @@ VOID
 NTAPI
 MiInitializeCommitLimit(VOID)
 {
-    SIZE_T Available, BootResident;
+    SIZE_T Available, BootResident, RamPart;
 
     /*
      * The RAM part of the limit is all of physical memory, as Windows reports
@@ -62,15 +65,37 @@ MiInitializeCommitLimit(VOID)
 
     MmTotalCommitLimit = MmNumberOfPhysicalPages;
     MmTotalCommitLimitMaximum = MmNumberOfPhysicalPages;
+    MiBootCommitCharge = BootResident;
     InterlockedExchangeAddSizeT(&MmTotalCommittedPages, BootResident);
     MiUpdatePeakCommitment(MmTotalCommittedPages);
 
-    MiCommitReserve = MmNumberOfPhysicalPages / 64;
+    /* The reserve is a share of the memory commitments can actually have */
+    RamPart = Available + MmTotalCommittedPages - BootResident;
+    MiCommitReserve = RamPart / 64;
     if (MiCommitReserve < 1024) MiCommitReserve = 1024;
     if (MiCommitReserve > 8192) MiCommitReserve = 8192;
 
     DPRINT1("Commit limit %Iu pages (RAM), %Iu charged for boot-time memory, reserve %Iu pages\n",
             MmTotalCommitLimit, BootResident, MiCommitReserve);
+}
+
+VOID
+NTAPI
+MiReturnBootCommit(
+    _In_ SIZE_T Pages)
+{
+    SIZE_T Charged, Returned;
+
+    /* Freed boot-time pages give back their part of the initial charge, never more */
+    do
+    {
+        Charged = MiBootCommitCharge;
+        Returned = min(Pages, Charged);
+        if (Returned == 0)
+            return;
+    } while (InterlockedCompareExchangeSizeT(&MiBootCommitCharge, Charged - Returned, Charged) != Charged);
+
+    MiReturnCommit(Returned);
 }
 
 BOOLEAN
