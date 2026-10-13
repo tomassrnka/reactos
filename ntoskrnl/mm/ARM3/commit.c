@@ -45,26 +45,32 @@ VOID
 NTAPI
 MiInitializeCommitLimit(VOID)
 {
-    SIZE_T RamPages;
+    SIZE_T Available, BootResident;
 
     /*
-     * The RAM part of the limit is what Mm can still hand out now, less a
-     * small margin, plus whatever was charged already: those pages came out
-     * of the same RAM.
+     * The RAM part of the limit is all of physical memory, as Windows reports
+     * it. What Mm cannot hand out any more at this point (the loader, the
+     * kernel, the PFN database, initial nonpaged pool, a margin of 1024
+     * pages) and was not charged already is resident for good: charge it now,
+     * so that only the rest is left for commitments.
      */
-    RamPages = MmAvailablePages;
-    if (RamPages > 1024) RamPages -= 1024;
-    RamPages += MmTotalCommittedPages;
+    Available = MmAvailablePages;
+    if (Available > 1024) Available -= 1024;
+    BootResident = 0;
+    if (MmNumberOfPhysicalPages > Available + MmTotalCommittedPages)
+        BootResident = MmNumberOfPhysicalPages - Available - MmTotalCommittedPages;
 
-    MmTotalCommitLimit = RamPages;
-    MmTotalCommitLimitMaximum = RamPages;
+    MmTotalCommitLimit = MmNumberOfPhysicalPages;
+    MmTotalCommitLimitMaximum = MmNumberOfPhysicalPages;
+    InterlockedExchangeAddSizeT(&MmTotalCommittedPages, BootResident);
+    MiUpdatePeakCommitment(MmTotalCommittedPages);
 
-    MiCommitReserve = RamPages / 64;
+    MiCommitReserve = MmNumberOfPhysicalPages / 64;
     if (MiCommitReserve < 1024) MiCommitReserve = 1024;
     if (MiCommitReserve > 8192) MiCommitReserve = 8192;
 
-    DPRINT1("Commit limit %Iu pages (RAM part), reserve %Iu pages\n",
-            MmTotalCommitLimit, MiCommitReserve);
+    DPRINT1("Commit limit %Iu pages (RAM), %Iu charged for boot-time memory, reserve %Iu pages\n",
+            MmTotalCommitLimit, BootResident, MiCommitReserve);
 }
 
 BOOLEAN
