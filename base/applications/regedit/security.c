@@ -720,11 +720,11 @@ CRegKeySecurity_fnConstructor(LPWSTR lpRegKey,
                               BOOL *Btn)
 {
     PCRegKeySecurity obj;
+    SIZE_T cbRegKey = (wcslen(lpRegKey) + 1) * sizeof(WCHAR);
 
     obj = (PCRegKeySecurity)HeapAlloc(GetProcessHeap(),
                                       HEAP_ZERO_MEMORY,
-                                      FIELD_OFFSET(CRegKeySecurity,
-                                                   szRegKey[wcslen(lpRegKey) + 1]));
+                                      FIELD_OFFSET(CRegKeySecurity, szRegKey) + cbRegKey);
     if (obj != NULL)
     {
         obj->ref = 1;
@@ -737,7 +737,7 @@ CRegKeySecurity_fnConstructor(LPWSTR lpRegKey,
         obj->ObjectInfo = *ObjectInfo;
         obj->Btn = Btn;
         obj->hRootKey = hRootKey;
-        StringCbCopyW(obj->szRegKey, sizeof(obj->szRegKey), lpRegKey);
+        StringCbCopyW(obj->szRegKey, cbRegKey, lpRegKey);
     }
     else
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);

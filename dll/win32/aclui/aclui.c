@@ -620,13 +620,107 @@ ClearOwner:
     }
 }
 
+/* The page cannot apply changes (nothing calls ISecurityInformation::SetSecurity),
+ * so it shows the permissions of the selected principal read-only */
+static VOID
+ShowPrincipalPermissions(IN PSECURITY_PAGE sp,
+                         IN PPRINCIPAL_LISTITEM Principal)
+{
+    ACCESS_MASK AllowMask = 0, DenyMask = 0, AllowCovered = 0, DenyCovered = 0, SpecialMask = 0;
+    BOOL SpecialAllow = FALSE, SpecialDeny = FALSE;
+    PSI_ACCESS AccessList;
+    ULONG nAccessList, DefaultAccessIndex, i;
+    DWORD dwFlags = SI_ACCESS_GENERAL |
+                    ((sp->ObjectInfo.dwFlags & SI_CONTAINER) ? SI_ACCESS_CONTAINER : 0);
+    PACE_ENTRY AceEntry;
+
+    for (AceEntry = Principal->ACEs; AceEntry != NULL; AceEntry = AceEntry->Next)
+    {
+        PACE_HEADER AceHeader = (PACE_HEADER)(AceEntry + 1);
+        UCHAR AceFlags = AceHeader->AceFlags;
+        ACCESS_MASK Mask;
+
+        if (AceHeader->AceType != ACCESS_ALLOWED_ACE_TYPE &&
+            AceHeader->AceType != ACCESS_DENIED_ACE_TYPE)
+        {
+            continue;
+        }
+
+        Mask = ((PACCESS_ALLOWED_ACE)AceHeader)->Mask;
+        sp->psi->lpVtbl->MapGeneric(sp->psi, NULL, &AceFlags, &Mask);
+
+        /* an ACE that only applies to child objects counts as special */
+        if (AceHeader->AceFlags & INHERIT_ONLY_ACE)
+        {
+            if (AceHeader->AceType == ACCESS_ALLOWED_ACE_TYPE)
+                SpecialAllow = TRUE;
+            else
+                SpecialDeny = TRUE;
+            continue;
+        }
+
+        if (AceHeader->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            AllowMask |= Mask;
+        else
+            DenyMask |= Mask;
+    }
+
+    if (FAILED(sp->psi->lpVtbl->GetAccessRights(sp->psi, NULL, dwFlags, &AccessList,
+                                                 &nAccessList, &DefaultAccessIndex)))
+    {
+        return;
+    }
+
+    for (i = 0; i < nAccessList; i++)
+    {
+        ACCESS_MASK Mask = AccessList[i].mask;
+        DWORD State = CIS_ALLOWDISABLED | CIS_DENYDISABLED;
+        INT Index;
+
+        if (!(AccessList[i].dwFlags & dwFlags))
+        {
+            if (AccessList[i].dwFlags & SI_ACCESS_SPECIFIC)
+                SpecialMask |= Mask;
+            continue;
+        }
+
+        if ((DenyMask & Mask) == Mask)
+        {
+            State |= CIS_DENY;
+            DenyCovered |= Mask;
+        }
+        if ((AllowMask & Mask) == Mask)
+        {
+            State |= CIS_ALLOW;
+            AllowCovered |= Mask;
+        }
+
+        Index = (INT)SendMessage(sp->hAceCheckList, CLM_FINDITEMBYACCESSMASK, (WPARAM)Mask, 0);
+        if (Index != -1 && Index != sp->SpecialPermCheckIndex)
+            SendMessage(sp->hAceCheckList, CLM_SETITEMSTATE, (WPARAM)Index, State);
+    }
+
+    if (sp->SpecialPermCheckIndex != -1)
+    {
+        DWORD State = CIS_ALLOWDISABLED | CIS_DENYDISABLED;
+
+        if (SpecialDeny || (DenyMask & SpecialMask & ~DenyCovered))
+            State |= CIS_DENY;
+        if (SpecialAllow || (AllowMask & SpecialMask & ~AllowCovered))
+            State |= CIS_ALLOW;
+
+        SendMessage(sp->hAceCheckList, CLM_SETITEMSTATE, (WPARAM)sp->SpecialPermCheckIndex, State);
+    }
+}
+
 static VOID
 UpdateControlStates(IN PSECURITY_PAGE sp)
 {
     PPRINCIPAL_LISTITEM Selected = (PPRINCIPAL_LISTITEM)ListViewGetSelectedItemData(sp->hWndPrincipalsList);
 
+    /* Removing a principal cannot be applied either */
     EnableWindow(sp->hBtnRemove,
-                 Selected != NULL);
+                 FALSE);
     EnableWindow(sp->hAceCheckList,
                  Selected != NULL);
 
@@ -649,7 +743,7 @@ UpdateControlStates(IN PSECURITY_PAGE sp)
 
         LocalFree((HLOCAL)szDisplayString);
 
-        /* FIXME - update the checkboxes */
+        ShowPrincipalPermissions(sp, Selected);
     }
     else
     {
@@ -1457,6 +1551,12 @@ SecurityPageProc(IN HWND hwndDlg,
                         ShowWindow(GetDlgItem(hwndDlg, IDC_LABEL_ADVANCED),
                                    SW_HIDE);
                     }
+
+                    /* There is no object picker and no advanced dialog yet */
+                    EnableWindow(sp->hBtnAdd,
+                                 FALSE);
+                    EnableWindow(sp->hBtnAdvanced,
+                                 FALSE);
 
                     /* enable quicksearch for the permissions checklist control */
                     SendMessage(sp->hAceCheckList,
