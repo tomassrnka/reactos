@@ -105,6 +105,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeProcessor.c
     ntos_ke/KeQpc.c
     ntos_ke/KeSpinLock.c
+    ntos_ke/KeSystemCall32.c
     ntos_ke/KeTimer.c
     ntos_mm/MmMdl.c
     ntos_mm/MmReservedMapping.c
@@ -192,6 +193,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoDeviceObject_user.c
     ntos_io/IoReadWrite_user.c
     ntos_kd/NtSystemDebugControl.c
+    ntos_ke/KeSystemCall32_user.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/NtCreateSection_user.c
     ntos_po/PoIrp_user.c
@@ -199,6 +201,11 @@ list(APPEND KMTEST_SOURCE
     ${COMMON_SOURCE}
 
     kmtest/kmtest.rc)
+
+if(ARCH STREQUAL "amd64")
+    add_asm_files(kmtest_cstar_asm ntos_ke/KeSystemCall32_amd64.S)
+    list(APPEND KMTEST_SOURCE ${kmtest_cstar_asm})
+endif()
 
 add_executable(kmtest ${KMTEST_SOURCE})
 set_module_type(kmtest win32cui)
