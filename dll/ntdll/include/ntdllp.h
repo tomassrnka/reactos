@@ -73,7 +73,7 @@ extern PVOID g_pfnSE_ProcessDying;
 
 /* ldrinit.c */
 NTSTATUS NTAPI LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL);
-VOID NTAPI LdrpInitializeThread(IN PCONTEXT Context);
+NTSTATUS NTAPI LdrpInitializeThread(IN PCONTEXT Context);
 NTSTATUS NTAPI LdrpInitializeTls(VOID);
 NTSTATUS NTAPI LdrpAllocateTls(VOID);
 VOID NTAPI LdrpFreeTls(VOID);

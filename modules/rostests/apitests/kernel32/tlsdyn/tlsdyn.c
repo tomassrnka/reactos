@@ -77,6 +77,12 @@ ULONG WINAPI TlsDynGetIndex(VOID)
     return _tls_index;
 }
 
+/* Where the template is in the image */
+PVOID WINAPI TlsDynGetTemplate(VOID)
+{
+    return &TlsValue;
+}
+
 PCSTR WINAPI TlsDynGetEvents(VOID)
 {
     return Events;

@@ -107,6 +107,8 @@ extern ULONG NTAPI RtlGetCurrentDirectory_U_RtlpMsysDecoy(ULONG MaximumLength, P
 
 /* FUNCTIONS *****************************************************************/
 
+static NTSTATUS LdrpGetTlsDirectory(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry, _Out_ PIMAGE_TLS_DIRECTORY *TlsDirectory);
+
 /*
  * @implemented
  */
@@ -504,10 +506,11 @@ LdrpInitSecurityCookie(PLDR_DATA_TABLE_ENTRY LdrEntry)
     return Cookie;
 }
 
-VOID
+NTSTATUS
 NTAPI
 LdrpInitializeThread(IN PCONTEXT Context)
 {
+    NTSTATUS TlsStatus = STATUS_SUCCESS;
     PPEB Peb = NtCurrentPeb();
     PLDR_DATA_TABLE_ENTRY LdrEntry;
     PLIST_ENTRY NextEntry, ListHead;
@@ -534,8 +537,14 @@ LdrpInitializeThread(IN PCONTEXT Context)
     /* Make sure we are not shutting down */
     if (LdrpShutdownInProgress) goto Exit;
 
-    /* Allocate TLS */
-    LdrpAllocateTls();
+    /* Allocate TLS: a thread must not run with part of it */
+    TlsStatus = LdrpAllocateTls();
+    if (!NT_SUCCESS(TlsStatus))
+    {
+        DPRINT1("LDR: No TLS for thread %p: 0x%08lx\n", NtCurrentTeb()->RealClientId.UniqueThread, TlsStatus);
+        LdrpFreeTls();
+        goto Exit;
+    }
 
     /* Start at the beginning */
     ListHead = &Peb->Ldr->InMemoryOrderModuleList;
@@ -645,6 +654,7 @@ Exit:
     RtlLeaveCriticalSection(&LdrpLoaderLock);
 
     DPRINT("LdrpInitializeThread() done\n");
+    return TlsStatus;
 }
 
 NTSTATUS
@@ -721,22 +731,16 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
             !Context && !LdrEntry->TlsIndex)
         {
             PIMAGE_TLS_DIRECTORY TlsDirectory;
-            ULONG TlsSize;
 
-            TlsDirectory = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
-                                                        TRUE,
-                                                        IMAGE_DIRECTORY_ENTRY_TLS,
-                                                        &TlsSize);
-            if (TlsDirectory)
-            {
+            Status = LdrpGetTlsDirectory(LdrEntry, &TlsDirectory);
+            if (NT_SUCCESS(Status) && TlsDirectory)
                 Status = LdrpAddDynamicTls(LdrEntry, TlsDirectory);
-                if (!NT_SUCCESS(Status))
-                {
-                    DPRINT1("LDR: No TLS for %wZ: 0x%08lx\n", &LdrEntry->BaseDllName, Status);
-                    if (LdrRootEntry && LdrRootEntry != LocalArray)
-                        RtlFreeHeap(LdrpHeap, 0, LdrRootEntry);
-                    return Status;
-                }
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("LDR: No TLS for %wZ: 0x%08lx\n", &LdrEntry->BaseDllName, Status);
+                if (LdrRootEntry && LdrRootEntry != LocalArray)
+                    RtlFreeHeap(LdrpHeap, 0, LdrRootEntry);
+                return Status;
             }
         }
 
@@ -1332,6 +1336,74 @@ typedef struct _LDRP_RETIRED_TLS_VECTOR
 
 static LIST_ENTRY LdrpRetiredTlsVectors = { &LdrpRetiredTlsVectors, &LdrpRetiredTlsVectors };
 
+/*
+ * Whether Length bytes at Address lie in the module's image. SizeOfImage
+ * comes from the header and is checked without wrapping; the mapping is what
+ * counts, so both ends must be in the module's own view.
+ */
+static
+BOOLEAN
+LdrpIsInImage(
+    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry,
+    _In_ ULONG_PTR Address,
+    _In_ SIZE_T Length)
+{
+    ULONG_PTR Base = (ULONG_PTR)LdrEntry->DllBase;
+    MEMORY_BASIC_INFORMATION Info;
+    ULONG_PTR Last;
+
+    if (!Length || Address < Base || Address - Base >= LdrEntry->SizeOfImage ||
+        Length > LdrEntry->SizeOfImage - (Address - Base))
+    {
+        return FALSE;
+    }
+    Last = Address + Length - 1;
+    if (Last < Address)
+        return FALSE;
+
+    if (!NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), (PVOID)Address, MemoryBasicInformation,
+                                         &Info, sizeof(Info), NULL)) ||
+        Info.AllocationBase != LdrEntry->DllBase)
+    {
+        return FALSE;
+    }
+    if (!NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), (PVOID)Last, MemoryBasicInformation,
+                                         &Info, sizeof(Info), NULL)) ||
+        Info.AllocationBase != LdrEntry->DllBase)
+    {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* The TLS directory of a module: NULL when it has none; one outside the image makes the image invalid */
+static
+NTSTATUS
+LdrpGetTlsDirectory(
+    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry,
+    _Out_ PIMAGE_TLS_DIRECTORY *TlsDirectory)
+{
+    PIMAGE_NT_HEADERS NtHeaders;
+    ULONG Rva;
+
+    *TlsDirectory = NULL;
+    NtHeaders = RtlImageNtHeader(LdrEntry->DllBase);
+    if (!NtHeaders || NtHeaders->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_TLS)
+        return STATUS_SUCCESS;
+    Rva = NtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress;
+    if (!Rva)
+        return STATUS_SUCCESS;
+
+    /* The offset is checked before it is added to the base, which could wrap */
+    if (Rva >= LdrEntry->SizeOfImage || LdrEntry->SizeOfImage - Rva < sizeof(IMAGE_TLS_DIRECTORY) ||
+        !LdrpIsInImage(LdrEntry, (ULONG_PTR)LdrEntry->DllBase + Rva, sizeof(IMAGE_TLS_DIRECTORY)))
+    {
+        return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    *TlsDirectory = (PIMAGE_TLS_DIRECTORY)((ULONG_PTR)LdrEntry->DllBase + Rva);
+    return STATUS_SUCCESS;
+}
+
 /* Checks a TLS directory and fills in the block size and alignment of a module */
 static
 NTSTATUS
@@ -1340,8 +1412,6 @@ LdrpCaptureTlsDirectory(
     _In_ PIMAGE_TLS_DIRECTORY TlsDirectory,
     _Out_ PLDRP_TLS_DATA TlsData)
 {
-    ULONG_PTR ImageStart = (ULONG_PTR)LdrEntry->DllBase;
-    ULONG_PTR ImageEnd = ImageStart + LdrEntry->SizeOfImage;
     IMAGE_TLS_DIRECTORY Directory;
     ULONG_PTR Page;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -1349,7 +1419,7 @@ LdrpCaptureTlsDirectory(
     ULONG AlignShift;
 
     /* The directory must lie in the image */
-    if ((ULONG_PTR)TlsDirectory < ImageStart || (ULONG_PTR)TlsDirectory > ImageEnd - sizeof(IMAGE_TLS_DIRECTORY))
+    if (!LdrpIsInImage(LdrEntry, (ULONG_PTR)TlsDirectory, sizeof(IMAGE_TLS_DIRECTORY)))
         return STATUS_INVALID_IMAGE_FORMAT;
 
     _SEH2_TRY
@@ -1364,12 +1434,12 @@ LdrpCaptureTlsDirectory(
     if (!NT_SUCCESS(Status))
         return Status;
 
-    /* The template must lie in the image, and template plus zero fill must not wrap */
+    /* The template and the index must lie in the image, and template plus zero fill must not wrap */
     if (Directory.EndAddressOfRawData < Directory.StartAddressOfRawData ||
         (Directory.StartAddressOfRawData != Directory.EndAddressOfRawData &&
-         (Directory.StartAddressOfRawData < ImageStart || Directory.EndAddressOfRawData > ImageEnd)) ||
-        Directory.AddressOfIndex < ImageStart ||
-        Directory.AddressOfIndex > ImageEnd - sizeof(ULONG))
+         !LdrpIsInImage(LdrEntry, Directory.StartAddressOfRawData,
+                        Directory.EndAddressOfRawData - Directory.StartAddressOfRawData)) ||
+        !LdrpIsInImage(LdrEntry, Directory.AddressOfIndex, sizeof(ULONG)))
     {
         return STATUS_INVALID_IMAGE_FORMAT;
     }
@@ -1522,7 +1592,6 @@ LdrpInitializeTls(VOID)
     PLDR_DATA_TABLE_ENTRY LdrEntry;
     PIMAGE_TLS_DIRECTORY TlsDirectory;
     PLDRP_TLS_DATA TlsData;
-    ULONG Size;
     NTSTATUS Status;
 
     /* Initialize the TLS List */
@@ -1538,10 +1607,12 @@ LdrpInitializeTls(VOID)
         NextEntry = NextEntry->Flink;
 
         /* Get the TLS directory */
-        TlsDirectory = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
-                                                    TRUE,
-                                                    IMAGE_DIRECTORY_ENTRY_TLS,
-                                                    &Size);
+        Status = LdrpGetTlsDirectory(LdrEntry, &TlsDirectory);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("LDR: Invalid TLS directory in %wZ\n", &LdrEntry->BaseDllName);
+            return Status;
+        }
 
         /* Check if we have a directory */
         if (!TlsDirectory) continue;
@@ -3311,8 +3382,10 @@ LdrpInit(PCONTEXT Context,
         }
         else
         {
-            /* This is a new thread initializing */
-            LdrpInitializeThread(Context);
+            /* This is a new thread initializing; one that cannot get its TLS ends here */
+            Status = LdrpInitializeThread(Context);
+            if (!NT_SUCCESS(Status))
+                NtTerminateThread(NtCurrentThread(), Status);
         }
     }
 
