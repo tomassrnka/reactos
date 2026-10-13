@@ -5665,6 +5665,96 @@ InfIsFromOEMLocation(
     return TRUE;
 }
 
+/* Values of the device key that decide which drivers run on the device */
+#define RUNNING_DRIVER_VALUES 3
+static const WCHAR *const RunningDriverValues[RUNNING_DRIVER_VALUES] = { REGSTR_VAL_SERVICE, REGSTR_VAL_UPPERFILTERS, REGSTR_VAL_LOWERFILTERS };
+
+struct RunningDriverSnapshot
+{
+    BOOL Installed; /* installed before, or not known */
+    LPWSTR Data[RUNNING_DRIVER_VALUES];
+    DWORD Size[RUNNING_DRIVER_VALUES];
+};
+
+static VOID
+FreeRunningDriverSnapshot(
+        IN OUT struct RunningDriverSnapshot *Snapshot)
+{
+    DWORD i;
+
+    for (i = 0; i < RUNNING_DRIVER_VALUES; i++)
+    {
+        HeapFree(GetProcessHeap(), 0, Snapshot->Data[i]);
+        Snapshot->Data[i] = NULL;
+        Snapshot->Size[i] = 0;
+    }
+}
+
+/* FALSE if the values could not be read; the snapshot then counts as installed */
+static BOOL
+TakeRunningDriverSnapshot(
+        IN struct DeviceInfoSet *set,
+        IN struct DeviceInfo *deviceInfo,
+        OUT struct RunningDriverSnapshot *Snapshot)
+{
+    HKEY hKey;
+    DWORD i, dwSize;
+
+    ZeroMemory(Snapshot, sizeof(*Snapshot));
+    Snapshot->Installed = TRUE;
+
+    hKey = SETUPDI_OpenDevKey(set->HKLM, deviceInfo, KEY_QUERY_VALUE);
+    if (hKey == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    /* Only SetupDiInstallDevice writes the Class value of a device */
+    Snapshot->Installed = (RegQueryValueExW(hKey, REGSTR_VAL_CLASS, NULL, NULL, NULL, NULL) == ERROR_SUCCESS);
+
+    for (i = 0; i < RUNNING_DRIVER_VALUES; i++)
+    {
+        dwSize = 0;
+        if (RegQueryValueExW(hKey, RunningDriverValues[i], NULL, NULL, NULL, &dwSize) != ERROR_SUCCESS || dwSize == 0)
+            continue;
+
+        Snapshot->Data[i] = HeapAlloc(GetProcessHeap(), 0, dwSize);
+        if (!Snapshot->Data[i] ||
+            RegQueryValueExW(hKey, RunningDriverValues[i], NULL, NULL, (LPBYTE)Snapshot->Data[i], &dwSize) != ERROR_SUCCESS)
+        {
+            FreeRunningDriverSnapshot(Snapshot);
+            Snapshot->Installed = TRUE;
+            RegCloseKey(hKey);
+            return FALSE;
+        }
+        Snapshot->Size[i] = dwSize;
+    }
+
+    RegCloseKey(hKey);
+    return TRUE;
+}
+
+static BOOL
+SameRunningDrivers(
+        IN const struct RunningDriverSnapshot *Before,
+        IN const struct RunningDriverSnapshot *After)
+{
+    DWORD i, j;
+
+    for (i = 0; i < RUNNING_DRIVER_VALUES; i++)
+    {
+        if (Before->Size[i] != After->Size[i])
+            return FALSE;
+
+        /* Service names are not case sensitive */
+        for (j = 0; j < Before->Size[i] / sizeof(WCHAR); j++)
+        {
+            if (tolowerW(Before->Data[i][j]) != tolowerW(After->Data[i][j]))
+                return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
 /***********************************************************************
  *		SetupDiInstallDevice (SETUPAPI.@)
  */
@@ -5694,9 +5784,12 @@ SetupDiInstallDevice(
     LARGE_INTEGER fullVersion;
     LONG rc;
     PVOID Context = NULL;
+    struct RunningDriverSnapshot RunningBefore;
     BOOL ret = FALSE; /* Return value */
 
     TRACE("%s(%p %p)\n", __FUNCTION__, DeviceInfoSet, DeviceInfoData);
+
+    ZeroMemory(&RunningBefore, sizeof(RunningBefore));
 
     if (!DeviceInfoSet)
         SetLastError(ERROR_INVALID_PARAMETER);
@@ -5819,6 +5912,9 @@ SetupDiInstallDevice(
     }
 
     deviceInfo = (struct DeviceInfo *)DeviceInfoData->Reserved;
+
+    /* What the device runs now, before this install changes it */
+    TakeRunningDriverSnapshot(set, deviceInfo, &RunningBefore);
 
     /* Open/Create driver key information */
 #if _WIN32_WINNT >= 0x502
@@ -5966,12 +6062,25 @@ SetupDiInstallDevice(
         if (CM_Get_DevNode_Status_Ex(&ulStatus, &ulProblem, deviceInfo->dnDevInst, 0, set->hMachine) == CR_SUCCESS &&
             (ulStatus & DN_STARTED))
         {
-            InstallParams.cbSize = sizeof(SP_DEVINSTALL_PARAMS_W);
-            ret = SetupDiGetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
-            if (ret)
+            struct RunningDriverSnapshot RunningAfter;
+            BOOL SameDrivers;
+
+            /* The first install of a device the system started by itself (critical device
+             * database, raw device) changes nothing that runs if it keeps the same drivers */
+            SameDrivers = TakeRunningDriverSnapshot(set, deviceInfo, &RunningAfter) &&
+                          SameRunningDrivers(&RunningBefore, &RunningAfter);
+            FreeRunningDriverSnapshot(&RunningAfter);
+            if (!RunningBefore.Installed && SameDrivers)
+                ret = TRUE;
+            else
             {
-                InstallParams.Flags |= DI_NEEDRESTART;
-                ret = SetupDiSetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
+                InstallParams.cbSize = sizeof(SP_DEVINSTALL_PARAMS_W);
+                ret = SetupDiGetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
+                if (ret)
+                {
+                    InstallParams.Flags |= DI_NEEDRESTART;
+                    ret = SetupDiSetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
+                }
             }
         }
         else
@@ -5989,6 +6098,7 @@ cleanup:
     HeapFree(GetProcessHeap(), 0, lpFullGuidString);
     if (Context)
         SetupTermDefaultQueueCallback(Context);
+    FreeRunningDriverSnapshot(&RunningBefore);
     TRACE("Returning %d\n", ret);
     return ret;
 }
