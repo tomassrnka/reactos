@@ -375,6 +375,247 @@ static NTSTATUS TryLock(VOID)
 /* ReactOS refuses the lock while a section survives; Windows 10 grants it, Server 2008 R2 grants it unless a view is mapped. */
 #define LockRefusedOnReactOS(What) do { NTSTATUS St_ = TryLock(); ok(St_ == STATUS_ACCESS_DENIED || (!is_reactos() && St_ == STATUS_SUCCESS), "%s: lock 0x%08lx\n", What, St_); } while (0)
 
+/* A lock through a new handle that may be refused for a moment (a process's image is released at its last reference). */
+static NTSTATUS TryLockSoon(VOID)
+{
+    NTSTATUS Status;
+    ULONG i;
+    for (i = 0; (Status = TryLock()) == STATUS_ACCESS_DENIED && i < 20; i++)
+        Sleep(250);
+    return Status;
+}
+
+/* Locks and dismounts the volume through a new handle: the next open mounts it again, with nothing cached. */
+static BOOLEAN Remount(VOID)
+{
+    HANDLE Handle;
+    NTSTATUS Status = OpenVolume(FILE_READ_DATA | FILE_WRITE_DATA, &Handle);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    Status = VolumeFsctl(Handle, FSCTL_LOCK_VOLUME);
+    if (NT_SUCCESS(Status))
+        Status = VolumeFsctl(Handle, FSCTL_DISMOUNT_VOLUME);
+    NtClose(Handle);
+    return NT_SUCCESS(Status);
+}
+
+/* The test program copied to Name in the test directory, the volume then mounted again: the copy has no data section. */
+static BOOLEAN CopyImage(PCWSTR Name, PWSTR Path)
+{
+    WCHAR Self[MAX_PATH];
+
+    NtPath(Path, Name);
+    if (!GetModuleFileNameW(NULL, Self, MAX_PATH) || !CopyFileW(Self, Path, FALSE))
+    {
+        ok(FALSE, "Copying the test program to %ls failed %lu\n", Path, GetLastError());
+        return FALSE;
+    }
+    if (!Remount())
+    {
+        ok(FALSE, "Mounting %ls again failed\n", LabelRoot);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* An image section of Path, its file handle closed. */
+static NTSTATUS ImageSection(PCWSTR Path, PHANDLE Section)
+{
+    HANDLE File;
+    NTSTATUS Status = NtOpen(Path, FILE_READ_DATA | FILE_EXECUTE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_OPEN,
+                             FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, &File);
+    *Section = NULL;
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = NtCreateSection(Section, SECTION_ALL_ACCESS, NULL, NULL, PAGE_EXECUTE, SEC_IMAGE, File);
+    NtClose(File);
+    return Status;
+}
+
+/*
+ * The volume lock and executables of the volume: a mapped image, an image section without a view and a
+ * started program all keep the volume from being locked, as on Windows (Windows 10 and Server 2008 R2
+ * refuse all three).  The copy is mounted again first, so that it has only the image section: a data
+ * section alone already made the lock fail.
+ */
+static VOID LockAndImages(VOID)
+{
+    WCHAR Path[MAX_PATH];
+    STARTUPINFOW Si = { sizeof(Si) };
+    PROCESS_INFORMATION Pi;
+    HANDLE Section;
+    PVOID Base = NULL;
+    SIZE_T Size = 0;
+    NTSTATUS Status, MapStatus;
+
+    if (!CopyImage(L"img.exe", Path))
+        return;
+    Status = ImageSection(Path, &Section);
+    ok(Status == STATUS_SUCCESS, "Image section of %ls: 0x%08lx\n", Path, Status);
+    if (NT_SUCCESS(Status))
+    {
+        MapStatus = NtMapViewOfSection(Section, NtCurrentProcess(), &Base, 0, 0, NULL, &Size, ViewUnmap, 0, PAGE_EXECUTE_READ);
+        ok(NT_SUCCESS(MapStatus), "Image view: 0x%08lx\n", MapStatus);
+        LockExpect(STATUS_ACCESS_DENIED, "Image section and view, file handle closed");
+        NtClose(Section);
+        if (NT_SUCCESS(MapStatus))
+        {
+            LockExpect(STATUS_ACCESS_DENIED, "Image view only, section handle closed");
+            NtUnmapViewOfSection(NtCurrentProcess(), Base);
+        }
+        LockExpect(STATUS_SUCCESS, "Image view unmapped");
+    }
+    Status = ImageSection(Path, &Section);
+    ok(Status == STATUS_SUCCESS, "Image section of %ls: 0x%08lx\n", Path, Status);
+    if (NT_SUCCESS(Status))
+    {
+        LockExpect(STATUS_ACCESS_DENIED, "Image section without a view");
+        NtClose(Section);
+        LockExpect(STATUS_SUCCESS, "Image section closed");
+    }
+    if (!Remount())
+        ok(FALSE, "Mounting %ls again failed\n", LabelRoot);
+    /* Suspended: its image is mapped, and it runs nothing. */
+    if (CreateProcessW(Path, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &Si, &Pi))
+    {
+        LockExpect(STATUS_ACCESS_DENIED, "Program started from the volume");
+        TerminateProcess(Pi.hProcess, 0);
+        WaitForSingleObject(Pi.hProcess, 10000);
+        CloseHandle(Pi.hThread);
+        CloseHandle(Pi.hProcess);
+        Status = TryLockSoon();
+        ok(Status == STATUS_SUCCESS, "Program ended: lock 0x%08lx\n", Status);
+    }
+    else
+    {
+        ok(FALSE, "Starting %ls failed %lu\n", Path, GetLastError());
+    }
+}
+
+/* Reads or writes Length bytes at Offset through a volume handle; a short transfer is STATUS_UNSUCCESSFUL. */
+static NTSTATUS VolumeIo(HANDLE Handle, BOOLEAN Write, LONGLONG Offset, PVOID Buffer, ULONG Length)
+{
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER Li;
+    NTSTATUS Status;
+    Li.QuadPart = Offset;
+    Iosb.Information = 0;
+    Status = Write ? NtWriteFile(Handle, NULL, NULL, NULL, &Iosb, Buffer, Length, &Li, NULL)
+                   : NtReadFile(Handle, NULL, NULL, NULL, &Iosb, Buffer, Length, &Li, NULL);
+    if (NT_SUCCESS(Status) && Iosb.Information != Length)
+        Status = STATUS_UNSUCCESSFUL;
+    return Status;
+}
+
+/*
+ * The holder writes the disk directly (4 KiB past the boot code, with the bytes already there), then
+ * unlocks it or closes its handle: the volume is dismounted under that handle, which then reads and
+ * writes nothing (STATUS_VOLUME_DISMOUNTED, as on Windows 10), and the next open mounts the volume again,
+ * writable, with its label.
+ */
+static VOID LockDirectWrite(BOOLEAN Unlock)
+{
+    WCHAR Got[MAX_PATH], Before[MAX_PATH], Path[MAX_PATH];
+    PCSTR What = Unlock ? "unlock" : "close";
+    HANDLE Lock = NULL, File;
+    NTSTATUS Status;
+    DWORD Flags = 0, Done;
+    PVOID Sector = VirtualAlloc(NULL, 4096, MEM_COMMIT, PAGE_READWRITE);
+
+    if (!Sector)
+        return;
+    GetLabel(Before);
+    Status = OpenVolume(FILE_READ_DATA | FILE_WRITE_DATA, &Lock);
+    if (NT_SUCCESS(Status))
+        Status = VolumeFsctl(Lock, FSCTL_LOCK_VOLUME);
+    ok(Status == STATUS_SUCCESS, "Lock before the direct write (%s): 0x%08lx\n", What, Status);
+    if (NT_SUCCESS(Status))
+    {
+        Status = VolumeIo(Lock, FALSE, 65536, Sector, 4096);
+        ok(Status == STATUS_SUCCESS, "Read through the holder's handle: 0x%08lx\n", Status);
+        if (NT_SUCCESS(Status))
+        {
+            Status = VolumeIo(Lock, TRUE, 65536, Sector, 4096);
+            ok(Status == STATUS_SUCCESS, "Direct write of the lock holder: 0x%08lx\n", Status);
+        }
+        if (Unlock)
+        {
+            Status = VolumeFsctl(Lock, FSCTL_UNLOCK_VOLUME);
+            ok(Status == STATUS_SUCCESS, "Unlock after the direct write: 0x%08lx\n", Status);
+            Status = VolumeIo(Lock, FALSE, 65536, Sector, 4096);
+            ok(Status == STATUS_VOLUME_DISMOUNTED, "Read through the old holder's handle: 0x%08lx\n", Status);
+            Status = VolumeIo(Lock, TRUE, 65536, Sector, 4096);
+            ok(Status == STATUS_VOLUME_DISMOUNTED, "Write through the old holder's handle: 0x%08lx\n", Status);
+            Status = VolumeFsctl(Lock, FSCTL_LOCK_VOLUME);
+            ok(Status == STATUS_VOLUME_DISMOUNTED, "Lock through the old holder's handle: 0x%08lx\n", Status);
+        }
+    }
+    if (Lock)
+        NtClose(Lock);
+    /* Mounted again: writable, the label as before. */
+    Got[0] = UNICODE_NULL;
+    if (GetVolumeInformationW(LabelRoot, Got, MAX_PATH, NULL, NULL, &Flags, NULL, 0))
+    {
+        ok(!(Flags & FILE_READ_ONLY_VOLUME), "Read-only after the direct write and the %s (flags 0x%lx)\n", What, Flags);
+        ok(!wcscmp(Got, Before), "Label after the %s is \"%ls\", expected \"%ls\"\n", What, Got, Before);
+    }
+    else
+    {
+        ok(FALSE, "GetVolumeInformationW after the %s failed %lu\n", What, GetLastError());
+    }
+    NtPath(Path, L"after.bin");
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Creating %ls after the %s failed %lu\n", Path, What, GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        ok(WriteFile(File, "after", 5, &Done, NULL) && Done == 5, "WriteFile after the %s failed %lu\n", What, GetLastError());
+        CloseHandle(File);
+    }
+    VirtualFree(Sector, 0, MEM_RELEASE);
+}
+
+/*
+ * FSCTL_DISMOUNT_VOLUME by the holder: its handle reads and writes the disk directly until it unlocks,
+ * and afterwards nothing (STATUS_VOLUME_DISMOUNTED, as on Windows 10); the next open mounts the volume.
+ */
+static VOID LockDismountUnlock(VOID)
+{
+    HANDLE Lock = NULL;
+    NTSTATUS Status;
+    DWORD Flags = 0;
+    PVOID Sector = VirtualAlloc(NULL, 4096, MEM_COMMIT, PAGE_READWRITE);
+
+    if (!Sector)
+        return;
+    Status = OpenVolume(FILE_READ_DATA | FILE_WRITE_DATA, &Lock);
+    if (NT_SUCCESS(Status))
+        Status = VolumeFsctl(Lock, FSCTL_LOCK_VOLUME);
+    ok(Status == STATUS_SUCCESS, "Lock before the dismount: 0x%08lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        Status = VolumeFsctl(Lock, FSCTL_DISMOUNT_VOLUME);
+        ok(Status == STATUS_SUCCESS, "Dismount: 0x%08lx\n", Status);
+        Status = VolumeIo(Lock, FALSE, 65536, Sector, 4096);
+        ok(Status == STATUS_SUCCESS, "Read through the dismounted, locked handle: 0x%08lx\n", Status);
+        if (NT_SUCCESS(Status))
+        {
+            Status = VolumeIo(Lock, TRUE, 65536, Sector, 4096);
+            ok(Status == STATUS_SUCCESS, "Write through the dismounted, locked handle: 0x%08lx\n", Status);
+        }
+        Status = VolumeFsctl(Lock, FSCTL_UNLOCK_VOLUME);
+        ok(Status == STATUS_SUCCESS, "Unlock after the dismount: 0x%08lx\n", Status);
+        Status = VolumeIo(Lock, FALSE, 65536, Sector, 4096);
+        ok(Status == STATUS_VOLUME_DISMOUNTED, "Read through the dismounted handle after the unlock: 0x%08lx\n", Status);
+        Status = VolumeIo(Lock, TRUE, 65536, Sector, 4096);
+        ok(Status == STATUS_VOLUME_DISMOUNTED, "Write through the dismounted handle after the unlock: 0x%08lx\n", Status);
+    }
+    if (Lock)
+        NtClose(Lock);
+    ok(GetVolumeInformationW(LabelRoot, NULL, 0, NULL, NULL, &Flags, NULL, 0) && !(Flags & FILE_READ_ONLY_VOLUME),
+       "After the dismount: error %lu, flags 0x%lx\n", GetLastError(), Flags);
+    VirtualFree(Sector, 0, MEM_RELEASE);
+}
+
 /* A file of Size bytes of Fill in the test directory, its handle closed; the mapping and view of Protect stay. */
 static BOOLEAN MapClosedFile(PCWSTR Name, DWORD Protect, BYTE Fill, HANDLE *Section, PBYTE *View)
 {
@@ -413,7 +654,9 @@ static BOOLEAN MapClosedFile(PCWSTR Name, DWORD Protect, BYTE Fill, HANDLE *Sect
 /*
  * The volume lock and mapped files: on ReactOS no lock while a section of a file survives its handle
  * (once the holder writes the disk directly, the section's page writes could not be honoured); after
- * a view goes, what it wrote is in the file and the lock is granted.  A locked volume takes no label,
+ * a view goes, what it wrote is in the file and the lock is granted.  No lock while an executable of
+ * the volume is mapped as an image or runs.  After a direct write of the holder the end of the lock
+ * dismounts the volume, and the next open mounts it again.  A locked volume takes no label,
  * neither through the holder's handle nor through another open; with files open and mapped the label
  * changes.  Needs a volume nothing else uses (set NTFS_APITEST_DIR to a directory on it): it skips if
  * the volume cannot be locked at all, as the system volume cannot.
@@ -501,6 +744,11 @@ START_TEST(NtfsVolumeLock)
     }
     if (File != INVALID_HANDLE_VALUE)
         CloseHandle(File);
+
+    LockAndImages();
+    LockDirectWrite(TRUE);
+    LockDirectWrite(FALSE);
+    LockDismountUnlock();
 
     /* Locked: a label set through the holder's handle or another open is refused, and the label stays.
      */
