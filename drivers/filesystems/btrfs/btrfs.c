@@ -557,6 +557,101 @@ end:
     return Status;
 }
 
+// Commits the running transaction for FlushFileBuffers. The trees are freed
+// only after a commit, so a flush with nothing to write keeps them cached.
+// On a volume being removed, a volume handle gets success only if nothing is
+// left to commit and no commit failed.
+static NTSTATUS commit_for_flush(device_extension* Vcb, PIRP Irp, bool volume_handle) {
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
+
+    if (Vcb->removing) {
+        if (!volume_handle)
+            Status = STATUS_VOLUME_DISMOUNTED;
+        else if (!NT_SUCCESS(Vcb->commit_error))
+            Status = Vcb->commit_error;
+        else if (Vcb->need_write)
+            Status = STATUS_VOLUME_DISMOUNTED;
+    } else if (Vcb->readonly)
+        Status = Vcb->commit_error; // success unless changes were lost
+    else if (Vcb->need_write) {
+        Status = do_write(Vcb, Irp);
+        if (!NT_SUCCESS(Status))
+            ERR("do_write returned %08lx\n", Status);
+
+        free_trees(Vcb);
+    }
+
+    ExReleaseResourceLite(&Vcb->tree_lock);
+
+    return Status;
+}
+
+// Writes the cached data of every file and stream. The fcbs are referenced with
+// tree_lock held exclusively (some paths change all_fcbs under tree_lock alone)
+// and flushed with no lock held: Cc's flush holds the file's flush
+// lock while its paging writes take tree_lock, so flushing under tree_lock
+// could deadlock with a concurrent flush of the same file.
+static NTSTATUS flush_all_caches(device_extension* Vcb) {
+    NTSTATUS Status = STATUS_SUCCESS;
+    LIST_ENTRY* le;
+    fcb** fcbs;
+    ULONG count = 0, num = 0;
+
+    ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
+    acquire_fcb_lock_shared(Vcb);
+
+    le = Vcb->all_fcbs.Flink;
+    while (le != &Vcb->all_fcbs) {
+        count++;
+        le = le->Flink;
+    }
+
+    fcbs = count ? ExAllocatePoolWithTag(PagedPool, sizeof(fcb*) * count, ALLOC_TAG) : NULL;
+    if (count && !fcbs) {
+        release_fcb_lock(Vcb);
+        ExReleaseResourceLite(&Vcb->tree_lock);
+        ERR("out of memory\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    le = Vcb->all_fcbs.Flink;
+    while (le != &Vcb->all_fcbs) {
+        struct _fcb* f = CONTAINING_RECORD(le, struct _fcb, list_entry_all);
+
+        if ((f->ads || f->type != BTRFS_FT_DIR) && !f->deleted && f != Vcb->volume_fcb) {
+            InterlockedIncrement(&f->refcount);
+            fcbs[num++] = f;
+        }
+
+        le = le->Flink;
+    }
+
+    release_fcb_lock(Vcb);
+    ExReleaseResourceLite(&Vcb->tree_lock);
+
+    for (ULONG i = 0; i < num; i++) {
+        IO_STATUS_BLOCK iosb;
+
+        iosb.Status = STATUS_SUCCESS;
+
+        CcFlushCache(&fcbs[i]->nonpaged->segment_object, NULL, 0, &iosb);
+
+        if (!NT_SUCCESS(iosb.Status) && NT_SUCCESS(Status)) {
+            ERR("CcFlushCache returned %08lx\n", iosb.Status);
+            Status = iosb.Status;
+        }
+
+        free_fcb(fcbs[i]);
+    }
+
+    if (fcbs)
+        ExFreePool(fcbs);
+
+    return Status;
+}
+
 _Dispatch_type_(IRP_MJ_FLUSH_BUFFERS)
 _Function_class_(DRIVER_DISPATCH)
 static NTSTATUS __stdcall drv_flush_buffers(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
@@ -588,7 +683,11 @@ static NTSTATUS __stdcall drv_flush_buffers(_In_ PDEVICE_OBJECT DeviceObject, _I
     }
 
     if (fcb == Vcb->volume_fcb) {
-        Status = STATUS_SUCCESS;
+        Status = Vcb->removing ? STATUS_SUCCESS : flush_all_caches(Vcb);
+
+        if (NT_SUCCESS(Status))
+            Status = commit_for_flush(Vcb, Irp, true);
+
         goto end;
     }
 
@@ -601,7 +700,7 @@ static NTSTATUS __stdcall drv_flush_buffers(_In_ PDEVICE_OBJECT DeviceObject, _I
     Status = STATUS_SUCCESS;
     Irp->IoStatus.Status = Status;
 
-    if (fcb->type != BTRFS_FT_DIR) {
+    if (fcb->ads || fcb->type != BTRFS_FT_DIR) {
         CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &Irp->IoStatus);
 
         if (fcb->Header.PagingIoResource) {
@@ -612,7 +711,14 @@ static NTSTATUS __stdcall drv_flush_buffers(_In_ PDEVICE_OBJECT DeviceObject, _I
         Status = Irp->IoStatus.Status;
     }
 
+    // The data written above is reachable only once the trees that point to
+    // it are committed; without this, new data is lost by a power cut until
+    // the next periodic commit.
+    if (NT_SUCCESS(Status))
+        Status = commit_for_flush(Vcb, Irp, false);
+
 end:
+    Irp->IoStatus.Status = Status;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
     TRACE("returning %08lx\n", Status);
@@ -5696,6 +5802,7 @@ static void __stdcall check_after_wakeup(PDEVICE_OBJECT DeviceObject, PVOID con)
                     ERR("out of memory in check_after_wakeup, going readonly rather than unmounting\n");
 
                     Vcb->readonly = true;
+                    latch_commit_error(Vcb, STATUS_INSUFFICIENT_RESOURCES);
                     FsRtlNotifyVolumeEvent(Vcb->root_file, FSRTL_VOLUME_FORCED_CLOSED);
 
                     ExReleaseResourceLite(&Vcb->tree_lock);

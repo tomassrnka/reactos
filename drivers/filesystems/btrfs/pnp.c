@@ -87,6 +87,9 @@ NTSTATUS pnp_surprise_removal(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         if (Vcb->vde)
             Vcb->vde->mounted_device = NULL;
 
+        // data still in the cache or not yet committed is lost with the device
+        latch_commit_error(Vcb, STATUS_NO_SUCH_DEVICE);
+
         Vcb->removing = true;
 
         ExReleaseResourceLite(&Vcb->tree_lock);

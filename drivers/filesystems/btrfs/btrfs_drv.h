@@ -782,6 +782,7 @@ typedef struct _device_extension {
     unsigned int sector_shift;
     unsigned int csum_size;
     bool readonly;
+    NTSTATUS commit_error; // why the volume was forced read-only
     bool removing;
     bool locked;
     bool lock_paused_balance;
@@ -969,6 +970,13 @@ typedef struct {
     UNICODE_STRING us;
     LIST_ENTRY list_entry;
 } name_bit;
+
+// Remembers the first error that forced the volume read-only, so that
+// FlushFileBuffers reports the lost changes instead of success.
+static __inline void latch_commit_error(device_extension* Vcb, NTSTATUS Status) {
+    if (NT_SUCCESS(Vcb->commit_error))
+        Vcb->commit_error = NT_SUCCESS(Status) ? STATUS_UNEXPECTED_IO_ERROR : Status;
+}
 
 _Requires_lock_not_held_(Vcb->fcb_lock)
 _Acquires_shared_lock_(Vcb->fcb_lock)

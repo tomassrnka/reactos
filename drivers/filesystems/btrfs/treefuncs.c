@@ -1255,6 +1255,7 @@ fail:
     }
 
     Vcb->readonly = true;
+    latch_commit_error(Vcb, Status);
     FsRtlNotifyVolumeEvent(Vcb->root_file, FSRTL_VOLUME_FORCED_CLOSED);
 }
 
