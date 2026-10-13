@@ -127,11 +127,18 @@ MiReturnCommit(
 BOOLEAN
 NTAPI
 MiWaitForCommitGrowth(
-    _In_ SIZE_T Shortfall)
+    _In_ SIZE_T Pages)
 {
-    /* Paging files cannot grow yet */
-    UNREFERENCED_PARAMETER(Shortfall);
-    return FALSE;
+    SIZE_T Ceiling, Committed;
+
+    /* Grow by what a user charge of this size lacks now, not by its size */
+    Ceiling = MmTotalCommitLimit;
+    Ceiling = (Ceiling > MiCommitReserve) ? (Ceiling - MiCommitReserve) : 0;
+    Committed = MmTotalCommittedPages;
+    if (Committed + Pages <= Ceiling)
+        return TRUE;
+
+    return MiWaitForPagingFileGrowth(Committed + Pages - Ceiling);
 }
 
 BOOLEAN

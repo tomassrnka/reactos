@@ -530,10 +530,17 @@ typedef struct _MMPAGING_FILE
     UNICODE_STRING PageFileName;
     PRTL_BITMAP Bitmap;
     HANDLE FileHandle;
+    /* Growing it failed once: it keeps its size until the next boot */
+    BOOLEAN CannotGrow;
 }
 MMPAGING_FILE, *PMMPAGING_FILE;
 
 extern PMMPAGING_FILE MmPagingFile[MAX_PAGING_FILES];
+
+BOOLEAN
+NTAPI
+MiWaitForPagingFileGrowth(
+    _In_ SIZE_T Shortfall);
 
 typedef VOID
 (*PMM_ALTER_REGION_FUNC)(
@@ -902,7 +909,7 @@ MiReturnCommit(
 BOOLEAN
 NTAPI
 MiWaitForCommitGrowth(
-    _In_ SIZE_T Shortfall);
+    _In_ SIZE_T Pages);
 
 BOOLEAN
 NTAPI
