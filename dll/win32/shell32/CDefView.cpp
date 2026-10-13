@@ -310,6 +310,7 @@ public:
     HRESULT IncludeObject(PCUITEMID_CHILD pidl);
     HRESULT OnDefaultCommand();
     HRESULT OnStateChange(UINT uFlags);
+    HRESULT GetItemSize(PCUITEMID_CHILD pidl, UINT64 &cb);
     void UpdateStatusbar();
     void UpdateStatusbarLocation();
     void CheckToolbar();
@@ -737,6 +738,25 @@ void CDefView::CheckToolbar()
     }
 }
 
+HRESULT CDefView::GetItemSize(PCUITEMID_CHILD pidl, UINT64 &cb)
+{
+    SHCOLUMNID scid;
+    MakeSCID(scid, FMTID_Storage, PID_STG_SIZE);
+    VARIANT v;
+    VariantInit(&v);
+    HRESULT hr = m_pSF2Parent->GetDetailsEx(pidl, &scid, &v);
+    if (SUCCEEDED(hr))
+    {
+        hr = VariantChangeType(&v, &v, 0, VT_I8);
+        if (SUCCEEDED(hr) && V_I8(&v) < 0)
+            hr = E_FAIL;
+        if (SUCCEEDED(hr))
+            cb = V_I8(&v);
+    }
+    VariantClear(&v);
+    return hr;
+}
+
 void CDefView::UpdateStatusbar()
 {
     WCHAR szFormat[MAX_PATH];
@@ -768,6 +788,7 @@ void CDefView::UpdateStatusbar()
         WORD uFileFlags = LVNI_ALL;
         INT nItem = -1;
         bool bIsOnlyFoldersSelected = true;
+        bool bAskSize = true;
 
         // If we have something selected then only count selected file sizes
         if (cSelectedItems)
@@ -778,13 +799,37 @@ void CDefView::UpdateStatusbar()
         while ((nItem = m_ListView.GetNextItem(nItem, uFileFlags)) >= 0)
         {
             PCUITEMID_CHILD pidl = _PidlByItem(nItem);
+            UINT64 cb = 0;
 
-            uTotalFileSize += _ILGetFileSize(pidl, NULL, 0);
-
-            if (!_ILIsFolder(pidl))
+            if (_ILGetFSType(pidl) || !m_pSF2Parent)
             {
-                bIsOnlyFoldersSelected = false;
+                cb = _ILGetFileSize(pidl, NULL, 0);
+
+                if (!_ILIsFolder(pidl))
+                {
+                    bIsOnlyFoldersSelected = false;
+                }
             }
+            else
+            {
+                // Not a file system item (a zip folder entry, for example): ask the folder
+                SFGAOF att = SFGAO_FOLDER;
+                if (FAILED(m_pSFParent->GetAttributesOf(1, &pidl, &att)) || !(att & SFGAO_FOLDER))
+                {
+                    bIsOnlyFoldersSelected = false;
+                    HRESULT hr = bAskSize ? GetItemSize(pidl, cb) : E_NOTIMPL;
+                    if (hr == E_NOTIMPL)
+                        bAskSize = false; // The folder has no sizes; do not ask again for every item
+                    if (FAILED(hr))
+                        cb = 0;
+                }
+            }
+
+            // Saturate rather than wrap around
+            if (cb > (UINT64)MAXLONGLONG - uTotalFileSize)
+                uTotalFileSize = (UINT64)MAXLONGLONG;
+            else
+                uTotalFileSize += cb;
         }
 
         // Don't show the file size text if there is 0 bytes in the folder
