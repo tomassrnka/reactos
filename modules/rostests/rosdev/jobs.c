@@ -912,7 +912,7 @@ static void ListDir(BUF *b, const WCHAR *dir)
     {
         DWORD e = GetLastError();
         /* a missing directory is an ordinary answer and is listed as such; running out of memory is not */
-        if (e == ERROR_NOT_ENOUGH_MEMORY || e == ERROR_OUTOFMEMORY) BufFail(b, e);
+        if (e == ERROR_NOT_ENOUGH_MEMORY || e == ERROR_OUTOFMEMORY || e == ERROR_NO_SYSTEM_RESOURCES) BufFail(b, e);
         else BufPrintf(b, "# error %lu\n", e);
         return;
     }
