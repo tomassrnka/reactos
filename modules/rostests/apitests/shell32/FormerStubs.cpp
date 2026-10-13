@@ -297,7 +297,6 @@ static void Call_SHGetTemporaryPropertyForItem(void)
     FN fn = (FN)GetExport(s_hShell32, "SHGetTemporaryPropertyForItem");
     CComPtr<IShellItem> psi;
     PROPVARIANT pv;
-    HRESULT hr;
 
     psi.Attach(CreateTempFileItem());
     if (!psi)
@@ -307,7 +306,7 @@ static void Call_SHGetTemporaryPropertyForItem(void)
     }
     pv.vt = VT_I4;
     pv.lVal = 0x5555;
-    hr = fn(psi, s_KeyName, &pv);
+    fn(psi, s_KeyName, &pv);
     /* No temporary property was set */
     CHECK_OUT(pv.vt == VT_EMPTY);
     PropVariantClear(&pv);
