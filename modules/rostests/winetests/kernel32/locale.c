@@ -6995,6 +6995,9 @@ static void test_GetThreadPreferredUILanguages(void)
     BOOL ret;
     NTSTATUS status;
     ULONG count, size, size_id;
+#ifdef __REACTOS__
+    ULONG size_k32;
+#endif
     WCHAR *buf;
 
     if (!pGetThreadPreferredUILanguages)
@@ -7014,6 +7017,15 @@ static void test_GetThreadPreferredUILanguages(void)
     ret = pGetThreadPreferredUILanguages(MUI_LANGUAGE_ID|MUI_UI_FALLBACK, &count, buf, &size);
     ok(ret, "got %lu\n", GetLastError());
     ok(count, "expected count > 0\n");
+#ifdef __REACTOS__
+    /* An English UI falls back from en-US to its neutral parent en */
+    if (ret && GetUserDefaultUILanguage() == 0x409 && GetSystemDefaultUILanguage() == 0x409)
+    {
+        ok(count == 2, "expected 2 languages, got %lu\n", count);
+        ok(size == 11 && !memcmp(buf, L"0409\0" L"0009\0", 11 * sizeof(WCHAR)),
+           "got size %lu, list %s\n", size, wine_dbgstr_wn(buf, size));
+    }
+#endif
 
     size_id = count = 0;
     ret = pGetThreadPreferredUILanguages(MUI_LANGUAGE_ID, &count, NULL, &size_id);
@@ -7023,6 +7035,10 @@ static void test_GetThreadPreferredUILanguages(void)
     ok(size_id <= size, "expected size > 0\n");
 
     /* ntdll function is the same */
+#ifdef __REACTOS__
+    /* Keep kernel32's size: ntdll's function may still be a stub */
+    size_k32 = size_id;
+#endif
     size_id = count = 0;
     status = pRtlGetThreadPreferredUILanguages(MUI_LANGUAGE_ID, &count, NULL, &size_id);
     ok(!status, "got %lx\n", status);
@@ -7030,6 +7046,9 @@ static void test_GetThreadPreferredUILanguages(void)
     ok(size_id, "expected size > 0\n");
     ok(size_id <= size, "expected size > 0\n");
 
+#ifdef __REACTOS__
+    size_id = size_k32;
+#endif
     size = 0;
     SetLastError(0xdeadbeef);
     ret = pGetThreadPreferredUILanguages(MUI_LANGUAGE_ID, &count, buf, &size);
@@ -7071,6 +7090,9 @@ static void test_GetUserPreferredUILanguages(void)
     BOOL ret;
     NTSTATUS status;
     ULONG count, size, size_id, size_name, size_buffer;
+#ifdef __REACTOS__
+    ULONG size_k32;
+#endif
     WCHAR *buffer;
 
     if (!pGetUserPreferredUILanguages)
@@ -7130,6 +7152,10 @@ static void test_GetUserPreferredUILanguages(void)
         return;
     }
 
+#ifdef __REACTOS__
+    /* Keep kernel32's size: ntdll's function may still be a stub */
+    size_k32 = size_id;
+#endif
     /* ntdll version is the same, but apparently takes an extra second parameter */
     count = 0;
     size_id = 0;
@@ -7138,6 +7164,9 @@ static void test_GetUserPreferredUILanguages(void)
     ok(!status, "got %lx\n", status);
     ok(count, "Expected count > 0\n");
     ok(size_id  % 5 == 1, "Expected size (%ld) %% 5 == 1\n", size_id);
+#ifdef __REACTOS__
+    size_id = size_k32;
+#endif
 
     buffer = HeapAlloc(GetProcessHeap(), 0, size_buffer * sizeof(WCHAR));
 

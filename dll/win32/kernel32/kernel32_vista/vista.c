@@ -632,9 +632,134 @@ GetProcessPreferredUILanguages(
 }
 #endif
 
+#define MAX_UI_LANGUAGES 6
+
+/* Collects distinct UI languages in order of preference */
+static
+VOID
+AddUILanguage(
+    _Inout_updates_(MAX_UI_LANGUAGES) LANGID *Languages,
+    _Inout_ PULONG Count,
+    _In_ LANGID Language)
+{
+    ULONG i;
+
+    if (Language == 0 || *Count >= MAX_UI_LANGUAGES)
+        return;
+
+    for (i = 0; i < *Count; i++)
+    {
+        if (Languages[i] == Language)
+            return;
+    }
+
+    Languages[(*Count)++] = Language;
+}
+
+/* Adds a language and then its neutral parent (en-US, then en) */
+static
+VOID
+AddUILanguageWithNeutral(
+    _Inout_updates_(MAX_UI_LANGUAGES) LANGID *Languages,
+    _Inout_ PULONG Count,
+    _In_ LANGID Language)
+{
+    AddUILanguage(Languages, Count, Language);
+    if (SUBLANGID(Language) != SUBLANG_NEUTRAL)
+        AddUILanguage(Languages, Count, MAKELANGID(PRIMARYLANGID(Language), SUBLANG_NEUTRAL));
+}
+
+/* Writes a language list as a double null-terminated multi-string of
+ * hexadecimal language identifiers or of locale names */
+static
+BOOL
+FormatUILanguages(
+    _In_reads_(Count) const LANGID *Languages,
+    _In_ ULONG Count,
+    _In_ DWORD dwFlags,
+    _Out_ PULONG pulNumLanguages,
+    _Out_writes_opt_(*pcchLanguagesBuffer) PZZWSTR pwszLanguagesBuffer,
+    _Inout_ PULONG pcchLanguagesBuffer)
+{
+    WCHAR Names[MAX_UI_LANGUAGES][LOCALE_NAME_MAX_LENGTH];
+    ULONG Lengths[MAX_UI_LANGUAGES];
+    ULONG i, Written = 0, Needed = 1;
+    PWSTR Out;
+
+    if (*pcchLanguagesBuffer && !pwszLanguagesBuffer)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    for (i = 0; i < Count; i++)
+    {
+        if (dwFlags & MUI_LANGUAGE_ID)
+        {
+            static const WCHAR Hex[] = L"0123456789ABCDEF";
+
+            Names[Written][0] = Hex[(Languages[i] >> 12) & 0xF];
+            Names[Written][1] = Hex[(Languages[i] >> 8) & 0xF];
+            Names[Written][2] = Hex[(Languages[i] >> 4) & 0xF];
+            Names[Written][3] = Hex[Languages[i] & 0xF];
+            Names[Written][4] = UNICODE_NULL;
+            Lengths[Written] = 4;
+        }
+        else
+        {
+            LCID Lcid = MAKELCID(Languages[i], SORT_DEFAULT);
+            int Length = LCIDToLocaleName(Lcid, Names[Written], LOCALE_NAME_MAX_LENGTH,
+                                          LOCALE_ALLOW_NEUTRAL_NAMES);
+
+            /* Locales missing from the RTL table still have a name in their NLS data */
+            if (Length <= 1)
+                Length = GetLocaleInfoW(Lcid, LOCALE_SNAME, Names[Written], LOCALE_NAME_MAX_LENGTH);
+            if (Length <= 1)
+            {
+                /* A neutral parent without a name is only an extra fallback */
+                if (SUBLANGID(Languages[i]) == SUBLANG_NEUTRAL)
+                    continue;
+                SetLastError(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            }
+            Lengths[Written] = Length - 1;
+        }
+        Needed += Lengths[Written] + 1;
+        Written++;
+    }
+
+    /* An empty list is still a terminated multi-string */
+    if (Written == 0)
+        Needed = 2;
+
+    if (pwszLanguagesBuffer)
+    {
+        if (*pcchLanguagesBuffer < Needed)
+        {
+            *pcchLanguagesBuffer = Needed;
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+
+        Out = pwszLanguagesBuffer;
+        for (i = 0; i < Written; i++)
+        {
+            RtlCopyMemory(Out, Names[i], (Lengths[i] + 1) * sizeof(WCHAR));
+            Out += Lengths[i] + 1;
+        }
+        *Out = UNICODE_NULL;
+        if (Written == 0)
+            Out[1] = UNICODE_NULL;
+    }
+
+    *pulNumLanguages = Written;
+    *pcchLanguagesBuffer = Needed;
+    return TRUE;
+}
+
 /*
-* @unimplemented
-*/
+ * @implemented
+ */
 BOOL
 WINAPI
 GetSystemPreferredUILanguages(
@@ -643,13 +768,23 @@ GetSystemPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    LANGID Languages[MAX_UI_LANGUAGES];
+    ULONG Count = 0;
+
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_MACHINE_LANGUAGE_SETTINGS)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    AddUILanguage(Languages, &Count, GetSystemDefaultUILanguage());
+    return FormatUILanguages(Languages, Count, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -659,9 +794,45 @@ GetThreadPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    LANGID Languages[MAX_UI_LANGUAGES];
+    ULONG Count = 0;
+
+    if ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* No thread or process preferred languages can be set yet, so the list
+     * is the user language followed by the system language as fallbacks,
+     * the fallbacks with their neutral parents */
+    switch (dwFlags & (MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK | MUI_THREAD_LANGUAGES))
+    {
+        case 0:
+        case MUI_MERGE_USER_FALLBACK:
+            AddUILanguage(Languages, &Count, GetUserDefaultUILanguage());
+            AddUILanguageWithNeutral(Languages, &Count, GetSystemDefaultUILanguage());
+            break;
+
+        case MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK:
+            AddUILanguageWithNeutral(Languages, &Count, GetUserDefaultUILanguage());
+            AddUILanguageWithNeutral(Languages, &Count, GetSystemDefaultUILanguage());
+            break;
+
+        case MUI_MERGE_SYSTEM_FALLBACK:
+            AddUILanguageWithNeutral(Languages, &Count, GetSystemDefaultUILanguage());
+            break;
+
+        case MUI_THREAD_LANGUAGES:
+            break;
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+    }
+
+    return FormatUILanguages(Languages, Count, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
@@ -695,7 +866,7 @@ GetUILanguageInfo(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -705,9 +876,19 @@ GetUserPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    LANGID Languages[MAX_UI_LANGUAGES];
+    ULONG Count = 0;
+
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    AddUILanguage(Languages, &Count, GetUserDefaultUILanguage());
+    return FormatUILanguages(Languages, Count, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
