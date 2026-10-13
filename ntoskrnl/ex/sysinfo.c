@@ -831,7 +831,7 @@ QSI_DEF(SystemPerformanceInformation)
 QSI_DEF(SystemTimeOfDayInformation)
 {
     SYSTEM_TIMEOFDAY_INFORMATION Sti;
-    LARGE_INTEGER CurrentTime;
+    LARGE_INTEGER CurrentTime, LocalTime;
 
     /* Set amount of written information to 0 */
     *ReqSize = 0;
@@ -851,7 +851,9 @@ QSI_DEF(SystemTimeOfDayInformation)
     /* Fill local time structure */
     Sti.BootTime= KeBootTime;
     Sti.CurrentTime = CurrentTime;
-    Sti.TimeZoneBias.QuadPart = ExpTimeZoneBias.QuadPart;
+    /* One read of the bias, so that it cannot tear */
+    ExSystemTimeToLocalTime(&CurrentTime, &LocalTime);
+    Sti.TimeZoneBias.QuadPart = CurrentTime.QuadPart - LocalTime.QuadPart;
     Sti.TimeZoneId = ExpTimeZoneId;
     Sti.Reserved = 0;
 
@@ -2099,6 +2101,8 @@ QSI_DEF(SystemLegacyDriverInformation)
 /* Class 44 - Current Time Zone Information */
 QSI_DEF(SystemCurrentTimeZoneInformation)
 {
+    RTL_TIME_ZONE_INFORMATION TimeZoneInformation;
+
     *ReqSize = sizeof(RTL_TIME_ZONE_INFORMATION);
 
     if (sizeof(RTL_TIME_ZONE_INFORMATION) != Size)
@@ -2107,8 +2111,9 @@ QSI_DEF(SystemCurrentTimeZoneInformation)
     }
 
     /* Copy the time zone information struct */
+    ExpQueryTimeZoneInformation(&TimeZoneInformation);
     memcpy(Buffer,
-           &ExpTimeZoneInfo,
+           &TimeZoneInformation,
            sizeof(RTL_TIME_ZONE_INFORMATION));
 
     return STATUS_SUCCESS;
