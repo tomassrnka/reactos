@@ -66,7 +66,14 @@ static inline struct hstring_private *impl_from_HSTRING_BUFFER(HSTRING_BUFFER bu
 static BOOL alloc_string(UINT32 len, HSTRING *out)
 {
     struct hstring_private *priv;
+#ifdef __REACTOS__
+    /* The header, len characters and the terminator must fit in a SIZE_T, and len + 1 in a UINT32 */
+    if (len >= (SIZE_MAX - offsetof(struct hstring_private, buffer)) / sizeof(WCHAR) - 1)
+        return FALSE;
+    priv = malloc(offsetof(struct hstring_private, buffer) + ((SIZE_T)len + 1) * sizeof(WCHAR));
+#else
     priv = malloc(offsetof(struct hstring_private, buffer[len+1]));
+#endif
     if (!priv)
         return FALSE;
 

@@ -439,6 +439,11 @@ HRESULT WINAPI RoRegisterForApartmentShutdown(IApartmentShutdown *callback,
 
     FIXME("(%p, %p, %p): stub\n", callback, identifier, cookie);
 
+#ifdef __REACTOS__
+    /* The callback is never called on apartment shutdown: do not pretend it was registered */
+    (void)hr;
+    return E_NOTIMPL;
+#else
     hr = RoGetApartmentIdentifier(identifier);
     if (FAILED(hr))
         return hr;
@@ -446,6 +451,7 @@ HRESULT WINAPI RoRegisterForApartmentShutdown(IApartmentShutdown *callback,
     if (cookie)
         *cookie = (void *)0xcafecafe;
     return S_OK;
+#endif
 }
 
 /***********************************************************************
@@ -468,7 +474,12 @@ HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONF
 {
     FIXME("(%p, %p, %d, %p): stub\n", classes, callbacks, count, cookie);
 
+#ifdef __REACTOS__
+    /* Nothing would find the factories: do not pretend they were registered */
+    return E_NOTIMPL;
+#else
     return S_OK;
+#endif
 }
 
 /***********************************************************************

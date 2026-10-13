@@ -14,6 +14,9 @@ typedef HRESULT (WINAPI *FN_WindowsCreateString)(LPCWSTR, UINT32, HSTRING *);
 typedef LPCWSTR (WINAPI *FN_WindowsGetStringRawBuffer)(HSTRING, UINT32 *);
 typedef HRESULT (WINAPI *FN_WindowsDeleteString)(HSTRING);
 typedef HRESULT (WINAPI *FN_RoGetActivationFactory)(HSTRING, REFIID, void **);
+typedef struct HSTRING_BUFFER__ *HSTRING_BUFFER;
+typedef HRESULT (WINAPI *FN_WindowsPreallocateStringBuffer)(UINT32, WCHAR **, HSTRING_BUFFER *);
+typedef HRESULT (WINAPI *FN_WindowsDeleteStringBuffer)(HSTRING_BUFFER);
 
 START_TEST(winrt)
 {
@@ -22,6 +25,8 @@ START_TEST(winrt)
     FN_WindowsGetStringRawBuffer pWindowsGetStringRawBuffer;
     FN_WindowsDeleteString pWindowsDeleteString;
     FN_RoGetActivationFactory pRoGetActivationFactory;
+    FN_WindowsPreallocateStringBuffer pWindowsPreallocateStringBuffer;
+    FN_WindowsDeleteStringBuffer pWindowsDeleteStringBuffer;
     HMODULE hString, hWinrt;
     HSTRING String = NULL;
     LPCWSTR Buffer;
@@ -57,6 +62,21 @@ START_TEST(winrt)
         ok(Buffer && !wcscmp(Buffer, Text), "Buffer = '%S'\n", Buffer);
         hr = pWindowsDeleteString(String);
         ok(hr == S_OK, "WindowsDeleteString returned 0x%lx\n", hr);
+    }
+
+    /* A buffer whose size does not fit the address space is refused, not truncated */
+    pWindowsPreallocateStringBuffer = (FN_WindowsPreallocateStringBuffer)GetProcAddress(hString, "WindowsPreallocateStringBuffer");
+    pWindowsDeleteStringBuffer = (FN_WindowsDeleteStringBuffer)GetProcAddress(hString, "WindowsDeleteStringBuffer");
+    ok(pWindowsPreallocateStringBuffer && pWindowsDeleteStringBuffer, "The WinRT string apiset lacks the buffer functions\n");
+    if (pWindowsPreallocateStringBuffer && pWindowsDeleteStringBuffer)
+    {
+        WCHAR *Chars = (WCHAR *)(ULONG_PTR)0xdeadbeef;
+        HSTRING_BUFFER StringBuffer = NULL;
+
+        hr = pWindowsPreallocateStringBuffer(sizeof(void *) == 4 ? 0x80000000 : 0xFFFFFFFF, &Chars, &StringBuffer);
+        ok(hr == E_OUTOFMEMORY, "Oversized WindowsPreallocateStringBuffer returned 0x%lx\n", hr);
+        if (SUCCEEDED(hr))
+            pWindowsDeleteStringBuffer(StringBuffer);
     }
 
     FreeLibrary(hWinrt);
