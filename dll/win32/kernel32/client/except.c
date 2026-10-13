@@ -242,29 +242,6 @@ BasepIsGpFaultErrorBoxDisabled(VOID)
            (RtlGetThreadErrorMode() & RTL_SEM_NOGPFAULTERRORBOX);
 }
 
-static
-BOOLEAN
-BasepAreLocalDumpsEnabled(VOID)
-{
-    static UNICODE_STRING LocalDumpsKey = RTL_CONSTANT_STRING(
-        L"\\Registry\\Machine\\Software\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps");
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    HANDLE KeyHandle;
-    NTSTATUS Status;
-
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &LocalDumpsKey,
-                               OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
-    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes);
-    if (!NT_SUCCESS(Status))
-        return FALSE;
-
-    NtClose(KeyHandle);
-    return TRUE;
-}
-
 typedef struct _BASEP_CRASH_REPORT
 {
     PEXCEPTION_POINTERS ExceptionInfo;
@@ -400,11 +377,11 @@ BasepStartCrashReporterOnThread(
 }
 
 /*
- * Let drwtsn32 write the LocalDumps crash report of this process. The
- * collection runs out of process; this thread only waits, so the exception
- * record and context stay valid. Returns FALSE when this thread faulted
- * while reporting or the reporter could not be stopped; then the caller
- * ends the process.
+ * Let drwtsn32 log the crash of this process and write its LocalDumps
+ * report. The collection runs out of process; this thread only waits, so
+ * the exception record and context stay valid. Returns FALSE when this
+ * thread faulted while reporting or the reporter could not be stopped;
+ * then the caller ends the process.
  */
 static
 BOOLEAN
@@ -433,15 +410,13 @@ BasepReportUnhandledException(
         NtDelayExecution(FALSE, &Delay);
     }
 
-    if (BasepAreLocalDumpsEnabled())
-    {
-        Report.ExceptionInfo = ExceptionInfo;
-        Report.ThreadId = ThreadId;
-        if (ExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW)
-            Stopped = BasepStartCrashReporterOnThread(&Report);
-        else
-            Stopped = BasepStartCrashReporter(&Report);
-    }
+    /* The reporter always logs the crash; it writes a dump when LocalDumps asks for one */
+    Report.ExceptionInfo = ExceptionInfo;
+    Report.ThreadId = ThreadId;
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW)
+        Stopped = BasepStartCrashReporterOnThread(&Report);
+    else
+        Stopped = BasepStartCrashReporter(&Report);
 
     /* Keep the claim when a reporter may still run: the caller ends the process */
     if (!Stopped)

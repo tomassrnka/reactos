@@ -60,6 +60,9 @@ void PrintBugreport(FILE* output, DumpData& data);
 /* wer.cpp */
 int WerReportMain(int argc, WCHAR** argv);
 
+/* eventlog.cpp */
+void WriteApplicationErrorEvent(DumpData& data);
+
 /* drwtsn32.cpp */
 bool UpdateFromEvent(DEBUG_EVENT& evt, DumpData& data);
 

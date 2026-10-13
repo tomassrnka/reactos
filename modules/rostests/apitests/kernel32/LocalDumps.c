@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS api tests
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     Test for the LocalDumps crash dumps of unhandled exceptions
+ * PURPOSE:     Test for the crash dumps and the Application Error event of unhandled exceptions
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -248,6 +248,7 @@ typedef struct _EXPECTED_DUMP
     BOOL CheckParameter;
     ULONG_PTR Parameter1;
     ULONG MinThreads;
+    BOOL FaultInProgram;
 } EXPECTED_DUMP;
 
 static VOID CheckDump(PCWSTR Path, const EXPECTED_DUMP *Expected, int Line)
@@ -349,15 +350,157 @@ static VOID CheckReport(PCWSTR Path, DWORD Code, int Line)
     ok_(__FILE__, Line)(strstr(Buffer, "Exception module: ") != NULL, "No faulting module in the report\n");
 }
 
-static VOID TestCrash_(PCSTR Mode, DWORD ExitCode, const EXPECTED_DUMP *Expected, PCWSTR Folder, int Line)
+static DWORD GetLastEventRecord(VOID)
+{
+    HANDLE hLog = OpenEventLogW(NULL, L"Application");
+    DWORD Oldest = 0, Count = 0;
+
+    if (!hLog)
+        return 0;
+    if (!GetOldestEventLogRecord(hLog, &Oldest) || !GetNumberOfEventLogRecords(hLog, &Count))
+        Count = 0;
+    CloseEventLog(hLog);
+    return Count ? Oldest + Count - 1 : 0;
+}
+
+static BOOL IsHex(PCWSTR String, SIZE_T Length)
+{
+    if (wcslen(String) != Length)
+        return FALSE;
+    return wcsspn(String, L"0123456789abcdef") == Length;
+}
+
+static BOOL EndsWith(PCWSTR String, PCWSTR End)
+{
+    SIZE_T Length = wcslen(String), EndLength = wcslen(End);
+    return Length >= EndLength && !_wcsicmp(String + Length - EndLength, End);
+}
+
+/*
+ * Look for the event of the process with id ProcessId started at StartTime
+ * among the records after After; check it if found
+ */
+static BOOL CheckApplicationErrorRecord(DWORD After, DWORD ProcessId, PCWSTR StartTime, DWORD Code,
+                                        BOOL FaultInProgram, int Line)
+{
+    PBYTE Buffer;
+    DWORD Size = 0x10000;
+    WCHAR Pid[16], Expected[16];
+    PCWSTR Strings[13];
+    DWORD Read, Needed;
+    HANDLE hLog;
+    BOOL Found = FALSE, Done = FALSE;
+
+    StringCchPrintfW(Pid, _countof(Pid), L"%lx", ProcessId);
+    hLog = OpenEventLogW(NULL, L"Application");
+    ok_(__FILE__, Line)(hLog != NULL, "OpenEventLog failed: %lu\n", GetLastError());
+    if (!hLog)
+        return FALSE;
+    Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+
+    while (Buffer && !Found && !Done)
+    {
+        PBYTE Current = Buffer;
+
+        if (!ReadEventLogW(hLog, EVENTLOG_BACKWARDS_READ | EVENTLOG_SEQUENTIAL_READ, 0, Buffer, Size, &Read, &Needed))
+        {
+            /* A record larger than the buffer: grow it and read that record again */
+            if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && Needed > Size)
+            {
+                PBYTE Larger = HeapReAlloc(GetProcessHeap(), 0, Buffer, Needed);
+                if (Larger)
+                {
+                    Buffer = Larger;
+                    Size = Needed;
+                    continue;
+                }
+            }
+            ok_(__FILE__, Line)(GetLastError() == ERROR_HANDLE_EOF, "ReadEventLog failed: %lu\n", GetLastError());
+            break;
+        }
+
+        while (!Found && Current < Buffer + Read)
+        {
+            PEVENTLOGRECORD Record = (PEVENTLOGRECORD)Current;
+            PCWSTR String = (PCWSTR)(Current + Record->StringOffset);
+            WORD i;
+
+            Current += Record->Length;
+            if (Record->RecordNumber <= After)
+            {
+                Done = TRUE;
+                break;
+            }
+            if (_wcsicmp((PCWSTR)(Record + 1), L"Application Error") ||
+                (Record->EventID & 0xFFFF) != 1000 || Record->NumStrings < 13)
+            {
+                continue;
+            }
+            for (i = 0; i < 13; i++)
+            {
+                Strings[i] = String;
+                String += wcslen(String) + 1;
+            }
+            /* Process ids are reused: the start time tells the processes apart */
+            if (wcscmp(Strings[8], Pid) || wcscmp(Strings[9], StartTime))
+                continue;
+
+            Found = TRUE;
+            ok_(__FILE__, Line)(Record->EventType == EVENTLOG_ERROR_TYPE, "Event type %u\n", Record->EventType);
+            ok_(__FILE__, Line)(Record->EventCategory == 100, "Event category %u\n", Record->EventCategory);
+            ok_(__FILE__, Line)(!_wcsicmp(Strings[0], L"kernel32_apitest.exe"), "Program %ls\n", Strings[0]);
+            ok_(__FILE__, Line)(wcschr(Strings[1], L'.') != NULL, "Program version %ls\n", Strings[1]);
+            ok_(__FILE__, Line)(IsHex(Strings[2], 8), "Program time stamp %ls\n", Strings[2]);
+            ok_(__FILE__, Line)(IsHex(Strings[5], 8), "Module time stamp %ls\n", Strings[5]);
+            StringCchPrintfW(Expected, _countof(Expected), L"%08lx", Code);
+            ok_(__FILE__, Line)(!wcscmp(Strings[6], Expected), "Exception code %ls\n", Strings[6]);
+            ok_(__FILE__, Line)(IsHex(Strings[7], 2 * sizeof(PVOID)), "Fault offset %ls\n", Strings[7]);
+            ok_(__FILE__, Line)(IsHex(Strings[9], 16), "Start time %ls\n", Strings[9]);
+            ok_(__FILE__, Line)(EndsWith(Strings[10], L"\\kernel32_apitest.exe"), "Program path %ls\n", Strings[10]);
+            ok_(__FILE__, Line)(wcslen(Strings[12]) == 36 && Strings[12][8] == L'-', "Report id %ls\n", Strings[12]);
+            if (FaultInProgram)
+            {
+                ok_(__FILE__, Line)(!_wcsicmp(Strings[3], L"kernel32_apitest.exe"), "Module %ls\n", Strings[3]);
+                ok_(__FILE__, Line)(EndsWith(Strings[11], L"\\kernel32_apitest.exe"), "Module path %ls\n", Strings[11]);
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    CloseEventLog(hLog);
+    return Found;
+}
+
+static VOID CheckApplicationError(DWORD After, HANDLE hProcess, DWORD ProcessId, DWORD Code, BOOL Logged,
+                                  BOOL FaultInProgram, int Line)
+{
+    FILETIME Creation, Exit, Kernel, User;
+    WCHAR StartTime[24];
+    BOOL Found = FALSE;
+    int Try;
+
+    ok_(__FILE__, Line)(GetProcessTimes(hProcess, &Creation, &Exit, &Kernel, &User), "GetProcessTimes failed\n");
+    StringCchPrintfW(StartTime, _countof(StartTime), L"%08lx%08lx", Creation.dwHighDateTime, Creation.dwLowDateTime);
+
+    /* Allow Windows a moment; OrielOS logs before the process ends */
+    for (Try = 0; Try < (Logged ? 20 : 4) && !Found; Try++)
+    {
+        Found = CheckApplicationErrorRecord(After, ProcessId, StartTime, Code, FaultInProgram, Line);
+        if (!Found)
+            Sleep(250);
+    }
+    ok_(__FILE__, Line)(Found == Logged, "Application Error event %s\n", Found ? "logged" : "missing");
+}
+
+static VOID TestCrash_(PCSTR Mode, DWORD ExitCode, const EXPECTED_DUMP *Expected, BOOL Reported, PCWSTR Folder, int Line)
 {
     WCHAR DumpPath[MAX_PATH], ReportPath[MAX_PATH];
-    DWORD ProcessId, Wait, Code = 0;
+    DWORD ProcessId, Wait, Code = 0, LastRecord;
     HANDLE hProcess;
 
     /* Process ids are reused, and so are the file names */
     if (Folder == DumpFolder)
         EmptyFolder(Folder);
+    LastRecord = GetLastEventRecord();
 
     hProcess = StartChild(Mode, &ProcessId);
     if (!hProcess)
@@ -370,8 +513,12 @@ static VOID TestCrash_(PCSTR Mode, DWORD ExitCode, const EXPECTED_DUMP *Expected
         WaitForSingleObject(hProcess, 5000);
     }
     GetExitCodeProcess(hProcess, &Code);
-    CloseHandle(hProcess);
     ok_(__FILE__, Line)(Code == ExitCode, "%s: exit code 0x%lx, expected 0x%lx\n", Mode, Code, ExitCode);
+
+    /* Every reported crash is logged, with or without a dump; the handle keeps the process id */
+    CheckApplicationError(LastRecord, hProcess, ProcessId, ExitCode, Reported,
+                          Expected ? Expected->FaultInProgram : FALSE, Line);
+    CloseHandle(hProcess);
 
     BuildPath(DumpPath, Folder, ProcessId, L".dmp");
     BuildPath(ReportPath, Folder, ProcessId, L".txt");
@@ -395,13 +542,14 @@ static VOID TestCrash_(PCSTR Mode, DWORD ExitCode, const EXPECTED_DUMP *Expected
         DeleteFileW(ReportPath);
     }
 }
-#define TestCrash(Mode, ExitCode, Expected) TestCrash_(Mode, ExitCode, Expected, DumpFolder, __LINE__)
+#define TestCrash(Mode, ExitCode, Expected) TestCrash_(Mode, ExitCode, Expected, (Expected) != NULL, DumpFolder, __LINE__)
 
-static const EXPECTED_DUMP AccessViolation = { STATUS_ACCESS_VIOLATION, TRUE, 0, 1 };
-static const EXPECTED_DUMP FilterAccessViolation = { STATUS_ACCESS_VIOLATION, TRUE, 4 * sizeof(LONG), 1 };
-static const EXPECTED_DUMP ThreadAccessViolation = { STATUS_ACCESS_VIOLATION, TRUE, 0, 2 };
-static const EXPECTED_DUMP StackOverflow = { STATUS_STACK_OVERFLOW, FALSE, 0, 1 };
-static const EXPECTED_DUMP Raised = { 0xE0000001, FALSE, 0, 1 };
+static const EXPECTED_DUMP AccessViolation = { STATUS_ACCESS_VIOLATION, TRUE, 0, 1, TRUE };
+static const EXPECTED_DUMP FilterAccessViolation = { STATUS_ACCESS_VIOLATION, TRUE, 4 * sizeof(LONG), 1, TRUE };
+static const EXPECTED_DUMP ThreadAccessViolation = { STATUS_ACCESS_VIOLATION, TRUE, 0, 2, TRUE };
+static const EXPECTED_DUMP StackOverflow = { STATUS_STACK_OVERFLOW, FALSE, 0, 1, TRUE };
+/* Raised in kernel32 (KernelBase on Windows 7) */
+static const EXPECTED_DUMP Raised = { 0xE0000001, FALSE, 0, 1, FALSE };
 
 /* With a write time DaysAgo days back, which FAT stores as exactly as NTFS */
 static VOID CreateDumpFile(PCWSTR Name, ULONG DaysAgo)
@@ -455,9 +603,9 @@ static VOID TestDumpCount(VOID)
     DeleteDumpFile(L"older.dmp");
     DeleteDumpFile(L"newer.dmp");
 
-    /* No dump at all with a count of 0 */
+    /* No dump at all with a count of 0, but the crash is logged */
     SetDword(HKEY_LOCAL_MACHINE, APP_KEY, L"DumpCount", 0);
-    TestCrash("av", STATUS_ACCESS_VIOLATION, NULL);
+    TestCrash_("av", STATUS_ACCESS_VIOLATION, NULL, TRUE, DumpFolder, __LINE__);
     SetDword(HKEY_LOCAL_MACHINE, APP_KEY, L"DumpCount", 50);
 }
 
@@ -492,7 +640,7 @@ static VOID TestDefaultFolder(VOID)
 
     /* Without DumpFolder the dump goes to %LOCALAPPDATA%\CrashDumps */
     DeleteValue(HKEY_LOCAL_MACHINE, APP_KEY, L"DumpFolder");
-    TestCrash_("av", STATUS_ACCESS_VIOLATION, &AccessViolation, Folder, __LINE__);
+    TestCrash_("av", STATUS_ACCESS_VIOLATION, &AccessViolation, TRUE, Folder, __LINE__);
 }
 
 START_TEST(LocalDumps)
