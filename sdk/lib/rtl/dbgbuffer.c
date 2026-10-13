@@ -283,6 +283,128 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
     return (STATUS_SUCCESS);
 }
 
+
+/* The list of heaps is the one the process keeps in its PEB. The blocks of each heap are not reported yet. */
+static NTSTATUS
+RtlpQueryProcessHeapList(_In_opt_ HANDLE ProcessHandle,
+                         _Inout_ PRTL_DEBUG_INFORMATION Buf)
+{
+    PPEB Peb, RemotePeb = NULL;
+    PVOID ProcessHeap, *RemoteList;
+    PHANDLE Handles;
+    PRTL_PROCESS_HEAPS Heaps;
+    NTSTATUS Status;
+    LARGE_INTEGER RetryDelay;
+    ULONG Count = 0, Read, Retry, i;
+
+    RetryDelay.QuadPart = -10000; /* 1 ms */
+
+    if (ProcessHandle == NULL)
+    {
+        Peb = RtlGetCurrentPeb();
+        ProcessHeap = Peb->ProcessHeap;
+    }
+    else
+    {
+        PROCESS_BASIC_INFORMATION Info;
+
+        Status = NtQueryInformationProcess(ProcessHandle, ProcessBasicInformation, &Info, sizeof(Info), NULL);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        /* The system process has no PEB */
+        RemotePeb = Info.PebBaseAddress;
+        if (RemotePeb == NULL)
+            return STATUS_ACCESS_DENIED;
+
+        Status = NtReadVirtualMemory(ProcessHandle, &RemotePeb->ProcessHeap, &ProcessHeap, sizeof(ProcessHeap), NULL);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    /* The list can change while it is read: ask for the count, read the handles, and read the count again */
+    for (Retry = 0; ; Retry++)
+    {
+        if (Retry == 8)
+            return STATUS_UNSUCCESSFUL;
+
+        if (ProcessHandle == NULL)
+        {
+            Count = RtlGetProcessHeaps(0, NULL);
+        }
+        else
+        {
+            Status = NtReadVirtualMemory(ProcessHandle, &RemotePeb->NumberOfHeaps, &Count, sizeof(Count), NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+        }
+
+        /* A sanity limit, so that a damaged PEB cannot ask for gigabytes */
+        if (Count > 0x10000)
+            return STATUS_UNSUCCESSFUL;
+
+        Handles = RtlpDebugBufferCommit(Buf, (SIZE_T)Count * sizeof(HANDLE));
+        if (Handles == NULL)
+            return STATUS_NO_MEMORY;
+
+        if (ProcessHandle == NULL)
+        {
+            Read = RtlGetProcessHeaps(Count, Handles);
+            if (Read <= Count)
+            {
+                Count = Read;
+                break;
+            }
+        }
+        else
+        {
+            Status = NtReadVirtualMemory(ProcessHandle, &RemotePeb->ProcessHeaps, &RemoteList, sizeof(RemoteList), NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            if (Count != 0)
+            {
+                Status = NtReadVirtualMemory(ProcessHandle, RemoteList, Handles, (SIZE_T)Count * sizeof(HANDLE), NULL);
+                if (!NT_SUCCESS(Status))
+                    return Status;
+            }
+
+            Status = NtReadVirtualMemory(ProcessHandle, &RemotePeb->NumberOfHeaps, &Read, sizeof(Read), NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            /* The target moves the entries before it lowers the count, which leaves a heap twice in a row, and clears the freed entry */
+            if (Read == Count)
+            {
+                for (i = 0; i < Count; i++)
+                {
+                    if (Handles[i] == NULL || (i != 0 && Handles[i] == Handles[i - 1]))
+                        break;
+                }
+
+                if (i >= Count)
+                    break;
+            }
+        }
+
+        /* Give the target a moment to finish the change */
+        NtDelayExecution(FALSE, &RetryDelay);
+    }
+
+    Heaps = RtlpDebugBufferCommit(Buf, FIELD_OFFSET(RTL_PROCESS_HEAPS, Heaps) + (SIZE_T)Count * sizeof(RTL_HEAP_INFORMATION));
+    if (Heaps == NULL)
+        return STATUS_NO_MEMORY;
+
+    RtlZeroMemory(Heaps, FIELD_OFFSET(RTL_PROCESS_HEAPS, Heaps) + (SIZE_T)Count * sizeof(RTL_HEAP_INFORMATION));
+    Heaps->NumberOfHeaps = Count;
+    for (i = 0; i < Count; i++)
+        Heaps->Heaps[i].BaseAddress = Handles[i];
+
+    Buf->Heaps = Heaps;
+    Buf->ProcessHeap = ProcessHeap;
+    return STATUS_SUCCESS;
+}
+
 /*
  * @unimplemented
  */
@@ -305,7 +427,11 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
     check for boundaries inside kernel space that are page protected
     from every one but the kernel. aka page 0 - 2
     */
-    if (ProcessId <= 1)
+    if (ProcessId == 0)
+    {
+        Status = STATUS_INVALID_HANDLE;
+    }
+    else if (ProcessId == 1)
     {
         Status = STATUS_ACCESS_VIOLATION;
     }
@@ -341,22 +467,11 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
 
             if (DebugInfoMask & RTL_DEBUG_QUERY_HEAPS)
             {
-                PRTL_PROCESS_HEAPS Hp;
-                ULONG HSize;
-
-                Hp = (PRTL_PROCESS_HEAPS)((PUCHAR)Buf + Buf->OffsetFree);
-                HSize = sizeof(RTL_PROCESS_HEAPS);
-                if (DebugInfoMask & RTL_DEBUG_QUERY_HEAP_TAGS)
+                Status = RtlpQueryProcessHeapList(NULL, Buf);
+                if (!NT_SUCCESS(Status))
                 {
-                    // TODO
+                    return Status;
                 }
-                if (DebugInfoMask & RTL_DEBUG_QUERY_HEAP_BLOCKS)
-                {
-                    // TODO
-                }
-                Buf->Heaps = Hp;
-                Buf->OffsetFree = Buf->OffsetFree + HSize;
-
             }
 
             if (DebugInfoMask & RTL_DEBUG_QUERY_LOCKS)
@@ -420,6 +535,7 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
                                                        &ReturnSize);
                 if (!NT_SUCCESS(Status))
                 {
+                    NtClose(hProcess);
                     return Status;
                 }
 
@@ -428,22 +544,12 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
 
             if (DebugInfoMask & RTL_DEBUG_QUERY_HEAPS)
             {
-                PRTL_PROCESS_HEAPS Hp;
-                ULONG HSize;
-
-                Hp = (PRTL_PROCESS_HEAPS)((PUCHAR)Buf + Buf->OffsetFree);
-                HSize = sizeof(RTL_PROCESS_HEAPS);
-                if (DebugInfoMask & RTL_DEBUG_QUERY_HEAP_TAGS)
+                Status = RtlpQueryProcessHeapList(hProcess, Buf);
+                if (!NT_SUCCESS(Status))
                 {
-                    // TODO
+                    NtClose(hProcess);
+                    return Status;
                 }
-                if (DebugInfoMask & RTL_DEBUG_QUERY_HEAP_BLOCKS)
-                {
-                    // TODO
-                }
-                Buf->Heaps = Hp;
-                Buf->OffsetFree = Buf->OffsetFree + HSize;
-
             }
 
             if (DebugInfoMask & RTL_DEBUG_QUERY_LOCKS)
@@ -456,6 +562,8 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
                 Buf->Locks = Lp;
                 Buf->OffsetFree = Buf->OffsetFree + LSize;
             }
+
+            NtClose(hProcess);
 
             DPRINT("QueryProcessDebugInformation end\n");
             DPRINT("QueryDebugInfo : 0x%lx\n", Buf->OffsetFree);
