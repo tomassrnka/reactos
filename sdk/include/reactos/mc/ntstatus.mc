@@ -1136,7 +1136,7 @@ Severity=Error
 Facility=System
 SymbolicName=STATUS_ACCESS_VIOLATION
 Language=English
-The instruction at "0x%08lx" referenced memory at "0x%08lx". The memory could not be "%s".
+The instruction at 0x%p referenced memory at 0x%p. The memory could not be %s.
 .
 
 MessageId=0x6
@@ -1144,7 +1144,7 @@ Severity=Error
 Facility=System
 SymbolicName=STATUS_IN_PAGE_ERROR
 Language=English
-The instruction at "0x%08lx" referenced memory at "0x%08lx". The required data was not placed into memory because of an I/O error status of "0x%08lx".
+The instruction at 0x%p referenced memory at 0x%p. The required data was not placed into memory because of an I/O error status of 0x%x.
 .
 
 MessageId=0x7
@@ -2722,7 +2722,7 @@ Facility=System
 SymbolicName=STATUS_UNHANDLED_EXCEPTION
 Language=English
 {Application Error}
-The exception %s (0x%08lx) occurred in the application at location 0x%08lx.
+The exception %s (0x%08lx) occurred in the application at location 0x%p.
 .
 
 MessageId=0x145

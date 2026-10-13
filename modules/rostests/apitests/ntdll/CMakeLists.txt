@@ -118,6 +118,7 @@ list(APPEND SOURCE
     RtlDosSearchPath_Ustr.c
     RtlFailFast.c
     RtlFirstFreeAce.c
+    RtlFindMessage.c
     RtlGenerate8dot3Name.c
     RtlGenericTable.c
     RtlGetFullPathName_U.c
