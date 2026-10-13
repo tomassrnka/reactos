@@ -37,24 +37,34 @@ typedef struct
 typedef BOOL (WINAPI *FN_SetFileInformationByHandle)(HANDLE, INT, LPVOID, DWORD);
 static FN_SetFileInformationByHandle pSetFileInformationByHandle;
 
-static WCHAR TestDir[MAX_PATH];
+static WCHAR TestDir[MAX_PATH], FileDir[MAX_PATH], CwdDir[MAX_PATH];
+
+static BOOL ExistsIn(PCWSTR Dir, PCWSTR Name)
+{
+    WCHAR Path[MAX_PATH];
+    StringCchPrintfW(Path, _countof(Path), L"%s\\%s", Dir, Name);
+    return GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES;
+}
 
 static BOOL FileExists(PCWSTR Name)
 {
+    return ExistsIn(TestDir, Name);
+}
+
+static HANDLE OpenFileIn(PCWSTR Dir, PCWSTR Name, DWORD Disposition)
+{
     WCHAR Path[MAX_PATH];
-    StringCchPrintfW(Path, _countof(Path), L"%s\\%s", TestDir, Name);
-    return GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES;
+    StringCchPrintfW(Path, _countof(Path), L"%s\\%s", Dir, Name);
+    return CreateFileW(Path, GENERIC_READ | GENERIC_WRITE | DELETE, 0, NULL, Disposition, 0, NULL);
 }
 
 static HANDLE OpenTestFile(PCWSTR Name, DWORD Disposition)
 {
-    WCHAR Path[MAX_PATH];
-    StringCchPrintfW(Path, _countof(Path), L"%s\\%s", TestDir, Name);
-    return CreateFileW(Path, GENERIC_READ | GENERIC_WRITE | DELETE, 0, NULL, Disposition, 0, NULL);
+    return OpenFileIn(TestDir, Name, Disposition);
 }
 
 /* Renames the open file to Name, with the name length in bytes adjusted by Delta */
-static BOOL RenameTo(HANDLE File, PCWSTR Name, BOOL Replace, INT Delta)
+static BOOL RenameToEx(HANDLE File, HANDLE Root, PCWSTR Name, BOOL Replace, INT Delta)
 {
     struct
     {
@@ -65,60 +75,184 @@ static BOOL RenameTo(HANDLE File, PCWSTR Name, BOOL Replace, INT Delta)
 
     ZeroMemory(&Rename, sizeof(Rename));
     Rename.Info.ReplaceIfExists = Replace;
-    Rename.Info.RootDirectory = NULL;
+    Rename.Info.RootDirectory = Root;
     Rename.Info.FileNameLength = Length + Delta;
     CopyMemory(Rename.Info.FileName, Name, Length);
     return pSetFileInformationByHandle(File, TestFileRenameInfo, &Rename, sizeof(Rename));
 }
 
-static void Test_Rename(void)
+static BOOL RenameTo(HANDLE File, PCWSTR Name, BOOL Replace, INT Delta)
 {
-    WCHAR FullName[MAX_PATH];
+    return RenameToEx(File, NULL, Name, Replace, Delta);
+}
+
+/* Creates Dir\Name holding Data */
+static BOOL WriteFileIn(PCWSTR Dir, PCWSTR Name, const char *Data)
+{
+    HANDLE File = OpenFileIn(Dir, Name, CREATE_ALWAYS);
+    DWORD Written = 0;
+    BOOL Ret;
+
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+    Ret = WriteFile(File, Data, (DWORD)strlen(Data), &Written, NULL) && Written == strlen(Data);
+    CloseHandle(File);
+    return Ret;
+}
+
+/* Whether Dir\Name holds exactly Data */
+static BOOL FileHolds(PCWSTR Dir, PCWSTR Name, const char *Data)
+{
+    WCHAR Path[MAX_PATH];
+    char Buffer[16];
+    DWORD Read = 0;
     HANDLE File;
     BOOL Ret;
 
-    File = OpenTestFile(L"a.txt", CREATE_ALWAYS);
+    StringCchPrintfW(Path, _countof(Path), L"%s\\%s", Dir, Name);
+    File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+    Ret = ReadFile(File, Buffer, sizeof(Buffer), &Read, NULL) &&
+          Read == strlen(Data) && !memcmp(Buffer, Data, Read);
+    CloseHandle(File);
+    return Ret;
+}
+
+/* The file is in FileDir and the current directory is CwdDir; both have a sub directory */
+static void Test_Rename(void)
+{
+    WCHAR FullName[MAX_PATH], FileSub[MAX_PATH], CwdSub[MAX_PATH];
+    HANDLE File, Root;
+    BOOL Ret;
+
+    StringCchPrintfW(FileSub, _countof(FileSub), L"%s\\sub", FileDir);
+    StringCchPrintfW(CwdSub, _countof(CwdSub), L"%s\\sub", CwdDir);
+
+    if (!WriteFileIn(FileDir, L"a.txt", "SRC"))
+    {
+        ok(0, "Creating the source file failed: %lu\n", GetLastError());
+        return;
+    }
+    File = OpenFileIn(FileDir, L"a.txt", OPEN_EXISTING);
     ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed: %lu\n", GetLastError());
     if (File == INVALID_HANDLE_VALUE)
         return;
 
-    /* A plain name renames within the directory */
+    /* A plain name is relative to the current directory, not to the file's directory */
     Ret = RenameTo(File, L"b.txt", FALSE, 0);
     ok(Ret, "Rename to a plain name failed: %lu\n", GetLastError());
-    ok(!FileExists(L"a.txt") && FileExists(L"b.txt"), "Plain-name rename did not happen\n");
+    ok(!ExistsIn(FileDir, L"a.txt") && !ExistsIn(FileDir, L"b.txt") && ExistsIn(CwdDir, L"b.txt"),
+       "Plain-name rename: a %d, b in the file's directory %d, b in the current directory %d\n",
+       ExistsIn(FileDir, L"a.txt"), ExistsIn(FileDir, L"b.txt"), ExistsIn(CwdDir, L"b.txt"));
+
+    /* So is a relative path with a directory part */
+    Ret = RenameTo(File, L"sub\\j.txt", FALSE, 0);
+    ok(Ret, "Rename to a relative path failed: %lu\n", GetLastError());
+    ok(!ExistsIn(CwdDir, L"b.txt") && ExistsIn(CwdSub, L"j.txt") && !ExistsIn(FileSub, L"j.txt"),
+       "Relative-path rename: j in the current directory's sub %d, in the file directory's sub %d\n",
+       ExistsIn(CwdSub, L"j.txt"), ExistsIn(FileSub, L"j.txt"));
 
     /* A full DOS path */
-    StringCchPrintfW(FullName, _countof(FullName), L"%s\\c.txt", TestDir);
+    StringCchPrintfW(FullName, _countof(FullName), L"%s\\c.txt", FileDir);
     Ret = RenameTo(File, FullName, FALSE, 0);
     ok(Ret, "Rename to a full path failed: %lu\n", GetLastError());
-    ok(!FileExists(L"b.txt") && FileExists(L"c.txt"), "Full-path rename did not happen\n");
+    ok(!ExistsIn(CwdSub, L"j.txt") && ExistsIn(FileDir, L"c.txt"), "Full-path rename did not happen\n");
 
-    /* An odd byte count is invalid and must not rename to a shortened name */
-    StringCchPrintfW(FullName, _countof(FullName), L"%s\\d.txtx", TestDir);
-    SetLastError(0xdeadbeef);
+    /* An NT path */
+    StringCchPrintfW(FullName, _countof(FullName), L"\\??\\%s\\h.txt", FileDir);
+    Ret = RenameTo(File, FullName, FALSE, 0);
+    ok(Ret, "Rename to an NT path failed: %lu\n", GetLastError());
+    ok(!ExistsIn(FileDir, L"c.txt") && ExistsIn(FileDir, L"h.txt"), "NT-path rename did not happen\n");
+
+    /* The name ends at its NUL: FileNameLength does not shorten it, odd or even */
+    StringCchPrintfW(FullName, _countof(FullName), L"%s\\d.txtx", FileDir);
     Ret = RenameTo(File, FullName, FALSE, -1);
-    ok(!Ret && GetLastError() == ERROR_INVALID_PARAMETER,
-       "Odd full-path length: got %d, error %lu\n", Ret, GetLastError());
-    ok(FileExists(L"c.txt") && !FileExists(L"d.txt") && !FileExists(L"d.txtx"),
-       "Odd full-path length changed the file name\n");
+    ok(Ret, "Odd full-path length failed: %lu\n", GetLastError());
+    ok(!ExistsIn(FileDir, L"h.txt") && ExistsIn(FileDir, L"d.txtx") && !ExistsIn(FileDir, L"d.txt"),
+       "Odd full-path length: h %d, d.txtx %d, d.txt %d\n",
+       ExistsIn(FileDir, L"h.txt"), ExistsIn(FileDir, L"d.txtx"), ExistsIn(FileDir, L"d.txt"));
 
+    Ret = RenameTo(File, L"e.txtx", FALSE, -2);
+    ok(Ret, "Short plain-name length failed: %lu\n", GetLastError());
+    ok(!ExistsIn(FileDir, L"d.txtx") && ExistsIn(CwdDir, L"e.txtx") && !ExistsIn(CwdDir, L"e.txt"),
+       "Short plain-name length: d %d, e.txtx %d, e.txt %d\n",
+       ExistsIn(FileDir, L"d.txtx"), ExistsIn(CwdDir, L"e.txtx"), ExistsIn(CwdDir, L"e.txt"));
+
+    Ret = RenameTo(File, L"e.txt", FALSE, -1);
+    ok(Ret, "Odd plain-name length failed: %lu\n", GetLastError());
+    ok(!ExistsIn(CwdDir, L"e.txtx") && ExistsIn(CwdDir, L"e.txt"),
+       "Odd plain-name length: e.txtx %d, e.txt %d\n", ExistsIn(CwdDir, L"e.txtx"), ExistsIn(CwdDir, L"e.txt"));
+
+    /* An empty name */
     SetLastError(0xdeadbeef);
-    Ret = RenameTo(File, L"e.txtx", FALSE, -1);
-    ok(!Ret && GetLastError() == ERROR_INVALID_PARAMETER,
-       "Odd plain-name length: got %d, error %lu\n", Ret, GetLastError());
-    ok(FileExists(L"c.txt") && !FileExists(L"e.txt") && !FileExists(L"e.txtx"),
-       "Odd plain-name length changed the file name\n");
+    Ret = RenameTo(File, L"", FALSE, 0);
+    ok(!Ret && GetLastError() == ERROR_INVALID_NAME, "Empty name: got %d, error %lu\n", Ret, GetLastError());
 
-    /* An existing target needs ReplaceIfExists */
-    CloseHandle(OpenTestFile(L"f.txt", CREATE_ALWAYS));
+    /* A root directory is refused, even with a plain name */
+    Root = CreateFileW(CwdDir, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(Root != INVALID_HANDLE_VALUE, "Opening the directory failed: %lu\n", GetLastError());
+    if (Root != INVALID_HANDLE_VALUE)
+    {
+        SetLastError(0xdeadbeef);
+        Ret = RenameToEx(File, Root, L"i.txt", FALSE, 0);
+        ok(!Ret && GetLastError() == ERROR_INVALID_PARAMETER,
+           "Root directory: got %d, error %lu\n", Ret, GetLastError());
+        ok(ExistsIn(CwdDir, L"e.txt") && !ExistsIn(CwdDir, L"i.txt"), "Root-directory rename changed the file name\n");
+        CloseHandle(Root);
+    }
+
+    /* An existing target needs ReplaceIfExists; the one in the current directory is replaced */
+    ok(WriteFileIn(FileDir, L"f.txt", "AAA"), "Creating a target failed: %lu\n", GetLastError());
+    ok(WriteFileIn(CwdDir, L"f.txt", "BBB"), "Creating a target failed: %lu\n", GetLastError());
     SetLastError(0xdeadbeef);
     Ret = RenameTo(File, L"f.txt", FALSE, 0);
     ok(!Ret && GetLastError() == ERROR_ALREADY_EXISTS, "Got %d, error %lu\n", Ret, GetLastError());
+    ok(ExistsIn(CwdDir, L"e.txt") && FileHolds(FileDir, L"f.txt", "AAA") && FileHolds(CwdDir, L"f.txt", "BBB"),
+       "A refused rename changed a file\n");
     Ret = RenameTo(File, L"f.txt", TRUE, 0);
     ok(Ret, "Replacing rename failed: %lu\n", GetLastError());
-    ok(!FileExists(L"c.txt") && FileExists(L"f.txt"), "Replacing rename did not happen\n");
-
     CloseHandle(File);
+    ok(!ExistsIn(CwdDir, L"e.txt"), "The source name is still there\n");
+    ok(FileHolds(CwdDir, L"f.txt", "SRC"), "The target in the current directory was not replaced\n");
+    ok(FileHolds(FileDir, L"f.txt", "AAA"), "The target in the file's directory changed\n");
+}
+
+/* A name starting with a colon renames a stream of the file */
+static void Test_RenameStream(void)
+{
+    WCHAR Path[MAX_PATH], Volume[MAX_PATH];
+    DWORD FsFlags = 0;
+    HANDLE File;
+    BOOL Ret;
+
+    if (!GetVolumePathNameW(FileDir, Volume, _countof(Volume)) ||
+        !GetVolumeInformationW(Volume, NULL, 0, NULL, NULL, &FsFlags, NULL, 0))
+    {
+        ok(0, "Querying the volume of %S failed: %lu\n", FileDir, GetLastError());
+        return;
+    }
+    if (!(FsFlags & FILE_NAMED_STREAMS))
+    {
+        skip("No named streams on %S\n", Volume);
+        return;
+    }
+
+    ok(WriteFileIn(FileDir, L"s.txt", "S"), "Creating the file failed: %lu\n", GetLastError());
+    File = OpenFileIn(FileDir, L"s.txt:one", CREATE_ALWAYS);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+
+    Ret = RenameTo(File, L":two", FALSE, 0);
+    ok(Ret, "Stream rename failed: %lu\n", GetLastError());
+    CloseHandle(File);
+    ok(ExistsIn(FileDir, L"s.txt:two") && !ExistsIn(FileDir, L"s.txt:one") && !ExistsIn(CwdDir, L"two"),
+       "Stream rename did not happen\n");
+
+    StringCchPrintfW(Path, _countof(Path), L"%s\\s.txt", FileDir);
+    DeleteFileW(Path);
 }
 
 static void Test_DispositionAndEndOfFile(void)
@@ -152,10 +286,13 @@ static void Test_DispositionAndEndOfFile(void)
 
 START_TEST(SetFileInformationByHandle)
 {
-    WCHAR TempPath[MAX_PATH], Path[MAX_PATH];
-    static const PCWSTR Names[] = { L"a.txt", L"b.txt", L"c.txt", L"d.txt", L"d.txtx",
-                                    L"e.txt", L"e.txtx", L"f.txt", L"g.txt" };
-    ULONG i;
+    WCHAR TempPath[MAX_PATH], Path[MAX_PATH], OldCwd[MAX_PATH];
+    static const PCWSTR Names[] = { L"a.txt", L"b.txt", L"c.txt", L"d.txt", L"d.txtx", L"e.txt", L"e.txtx",
+                                    L"f.txt", L"g.txt", L"h.txt", L"i.txt", L"s.txt", L"two",
+                                    L"sub\\j.txt" };
+    WCHAR Dirs[3][MAX_PATH];
+    DWORD Length;
+    ULONG i, j;
 
     pSetFileInformationByHandle = (FN_SetFileInformationByHandle)
         GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetFileInformationByHandle");
@@ -167,15 +304,48 @@ START_TEST(SetFileInformationByHandle)
 
     GetTempPathW(_countof(TempPath), TempPath);
     StringCchPrintfW(TestDir, _countof(TestDir), L"%sSetFileInfoByHandle%lu", TempPath, GetCurrentProcessId());
-    ok(CreateDirectoryW(TestDir, NULL), "CreateDirectoryW failed: %lu\n", GetLastError());
+    StringCchPrintfW(FileDir, _countof(FileDir), L"%s\\file", TestDir);
+    StringCchPrintfW(CwdDir, _countof(CwdDir), L"%s\\cwd", TestDir);
+    StringCchCopyW(Dirs[0], MAX_PATH, FileDir);
+    StringCchCopyW(Dirs[1], MAX_PATH, CwdDir);
+    StringCchCopyW(Dirs[2], MAX_PATH, TestDir);
 
-    Test_Rename();
+    ok(CreateDirectoryW(TestDir, NULL), "CreateDirectoryW failed: %lu\n", GetLastError());
+    for (j = 0; j < 2; j++)
+    {
+        ok(CreateDirectoryW(Dirs[j], NULL), "CreateDirectoryW failed: %lu\n", GetLastError());
+        StringCchPrintfW(Path, _countof(Path), L"%s\\sub", Dirs[j]);
+        ok(CreateDirectoryW(Path, NULL), "CreateDirectoryW failed: %lu\n", GetLastError());
+    }
+
+    /* Plain names land in the current directory, so the rename tests only run inside the test's own */
+    Length = GetCurrentDirectoryW(_countof(OldCwd), OldCwd);
+    if (!Length || Length >= _countof(OldCwd))
+        skip("Cannot save the current directory (%lu)\n", Length);
+    else if (!SetCurrentDirectoryW(CwdDir))
+        ok(0, "SetCurrentDirectoryW failed: %lu\n", GetLastError());
+    else
+    {
+        Test_Rename();
+        Test_RenameStream();
+        ok(SetCurrentDirectoryW(OldCwd), "Restoring the current directory failed: %lu\n", GetLastError());
+    }
+
     Test_DispositionAndEndOfFile();
 
-    for (i = 0; i < _countof(Names); i++)
+    for (j = 0; j < _countof(Dirs); j++)
     {
-        StringCchPrintfW(Path, _countof(Path), L"%s\\%s", TestDir, Names[i]);
-        DeleteFileW(Path);
+        for (i = 0; i < _countof(Names); i++)
+        {
+            StringCchPrintfW(Path, _countof(Path), L"%s\\%s", Dirs[j], Names[i]);
+            DeleteFileW(Path);
+        }
+        if (j < 2)
+        {
+            StringCchPrintfW(Path, _countof(Path), L"%s\\sub", Dirs[j]);
+            RemoveDirectoryW(Path);
+            RemoveDirectoryW(Dirs[j]);
+        }
     }
-    RemoveDirectoryW(TestDir);
+    ok(RemoveDirectoryW(TestDir), "Removing the test directory failed: %lu\n", GetLastError());
 }

@@ -14,28 +14,6 @@
 #define NDEBUG
 #include <debug.h>
 
-/* A name without a directory or drive part: a new name in the same
- * directory, or a stream name starting with a colon */
-static
-BOOL
-IsSimpleFileName(
-    _In_reads_(Length) PCWSTR Name,
-    _In_ ULONG Length)
-{
-    ULONG i;
-
-    if (Length >= 2 && Name[0] != L':' && Name[1] == L':')
-        return FALSE;
-
-    for (i = 0; i < Length; i++)
-    {
-        if (Name[i] == L'\\' || Name[i] == L'/')
-            return FALSE;
-    }
-
-    return TRUE;
-}
-
 static
 NTSTATUS
 SetFileRenameInfo(
@@ -46,8 +24,8 @@ SetFileRenameInfo(
     PFILE_RENAME_INFORMATION RenameInfo;
     IO_STATUS_BLOCK IoStatusBlock;
     UNICODE_STRING NtName;
-    PWSTR DosName;
-    ULONG NameChars, InfoSize;
+    BOOLEAN Converted;
+    ULONG NameChars, MaxChars, InfoSize;
     NTSTATUS Status;
 
     if (Size < FIELD_OFFSET(FILE_RENAME_INFO, FileName) ||
@@ -56,47 +34,54 @@ SetFileRenameInfo(
         return STATUS_INFO_LENGTH_MISMATCH;
     }
 
-    /* The name is UTF-16: an odd byte count is invalid, as for NtSetInformationFile */
-    if (Info->FileNameLength & 1)
+    /* Windows Server 2008 R2 and 10 refuse a root directory, take the name up to
+     * its terminating NUL whatever FileNameLength says, and resolve every name but
+     * a stream name (":name") or an NT path as a DOS path: a plain name is relative
+     * to the current directory, not to the file's directory */
+    if (Info->RootDirectory)
         return STATUS_INVALID_PARAMETER;
 
-    NameChars = Info->FileNameLength / sizeof(WCHAR);
+    /* A name without a NUL inside the buffer is refused rather than read past it */
+    MaxChars = (Size - FIELD_OFFSET(FILE_RENAME_INFO, FileName)) / sizeof(WCHAR);
+    for (NameChars = 0; NameChars < MaxChars && Info->FileName[NameChars]; NameChars++);
+    if (NameChars == 0 || NameChars == MaxChars || NameChars > MAXUSHORT / sizeof(WCHAR))
+        return STATUS_OBJECT_NAME_INVALID;
 
-    /* A plain name renames within the directory and a name relative to RootDirectory
-     * is passed as is; any other path is a DOS path that needs an NT path */
-    if (Info->RootDirectory || IsSimpleFileName(Info->FileName, NameChars))
+    /* RtlDosPathNameToNtPathName_U takes "\??\" for a rooted DOS path */
+    Converted = !(Info->FileName[0] == L':' ||
+                  (NameChars >= 4 && Info->FileName[0] == L'\\' && Info->FileName[1] == L'?' &&
+                   Info->FileName[2] == L'?' && Info->FileName[3] == L'\\'));
+    if (Converted)
     {
-        return NtSetInformationFile(hFile, &IoStatusBlock, Info, Size, FileRenameInformation);
+        Status = RtlDosPathNameToNtPathName_U_WithStatus(Info->FileName, &NtName, NULL, NULL);
+        if (!NT_SUCCESS(Status))
+            return Status;
     }
-
-    DosName = RtlAllocateHeap(RtlGetProcessHeap(), 0, (NameChars + 1) * sizeof(WCHAR));
-    if (!DosName)
-        return STATUS_NO_MEMORY;
-    RtlCopyMemory(DosName, Info->FileName, NameChars * sizeof(WCHAR));
-    DosName[NameChars] = UNICODE_NULL;
-
-    Status = RtlDosPathNameToNtPathName_U_WithStatus(DosName, &NtName, NULL, NULL);
-    RtlFreeHeap(RtlGetProcessHeap(), 0, DosName);
-    if (!NT_SUCCESS(Status))
-        return Status;
+    else
+    {
+        NtName.Buffer = Info->FileName;
+        NtName.Length = (USHORT)(NameChars * sizeof(WCHAR));
+    }
 
     InfoSize = FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) + NtName.Length;
     RenameInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, InfoSize);
-    if (!RenameInfo)
+    if (RenameInfo)
     {
-        RtlFreeUnicodeString(&NtName);
-        return STATUS_NO_MEMORY;
+        RenameInfo->ReplaceIfExists = Info->ReplaceIfExists;
+        RenameInfo->RootDirectory = NULL;
+        RenameInfo->FileNameLength = NtName.Length;
+        RtlCopyMemory(RenameInfo->FileName, NtName.Buffer, NtName.Length);
+
+        Status = NtSetInformationFile(hFile, &IoStatusBlock, RenameInfo, InfoSize, FileRenameInformation);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, RenameInfo);
+    }
+    else
+    {
+        Status = STATUS_NO_MEMORY;
     }
 
-    RenameInfo->ReplaceIfExists = Info->ReplaceIfExists;
-    RenameInfo->RootDirectory = NULL;
-    RenameInfo->FileNameLength = NtName.Length;
-    RtlCopyMemory(RenameInfo->FileName, NtName.Buffer, NtName.Length);
-
-    Status = NtSetInformationFile(hFile, &IoStatusBlock, RenameInfo, InfoSize, FileRenameInformation);
-
-    RtlFreeHeap(RtlGetProcessHeap(), 0, RenameInfo);
-    RtlFreeUnicodeString(&NtName);
+    if (Converted)
+        RtlFreeUnicodeString(&NtName);
     return Status;
 }
 
