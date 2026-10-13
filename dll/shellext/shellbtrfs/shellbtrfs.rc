@@ -56,7 +56,7 @@ END
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
-IDI_ICON1               ICON                    "/home/amin/sources/winbtrfs/src/shellext/subvol.ico"
+IDI_ICON1               ICON                    "subvol.ico"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -522,7 +522,7 @@ END
 // RT_MANIFEST
 //
 
-2                       RT_MANIFEST             "/home/amin/sources/winbtrfs/src/shellext/shellbtrfs.manifest"
+2                       RT_MANIFEST             "shellbtrfs.manifest"
 
 
 /////////////////////////////////////////////////////////////////////////////
