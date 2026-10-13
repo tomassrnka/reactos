@@ -109,6 +109,10 @@ ComputeLayout(IN ULONG ClusterSize)
     if (VolumeSectors < 2)
         return STATUS_INVALID_PARAMETER;
 
+    // ntfsng does not mount a volume of 16 TiB or more (32-bit page index)
+    if (VolumeBytes >= (1ULL << 44))
+        return STATUS_INVALID_PARAMETER;
+
     // Sectors per cluster
     if (ClusterSize != 0)
     {
@@ -128,7 +132,9 @@ ComputeLayout(IN ULONG ClusterSize)
     // The last sector holds the backup boot sector and is not addressable.
     LAYOUT.TotalSectors = VolumeSectors - 1;
     LAYOUT.ClusterCount = LAYOUT.TotalSectors / Spc;
-    if (LAYOUT.ClusterCount == 0)
+    // NTFS drivers mount at most 2^32 - 1 clusters; that also keeps $Bitmap
+    // below 4 GB
+    if (LAYOUT.ClusterCount == 0 || LAYOUT.ClusterCount > 0xFFFFFFFFULL)
         return STATUS_INVALID_PARAMETER;
 
     LAYOUT.ClustersPerMftRecord   = EncodeRecordSize(MFT_RECORD_SIZE, C);

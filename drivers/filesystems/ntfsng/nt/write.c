@@ -453,7 +453,9 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, PFILE_OBJECT Holder, LONGLONG Offset,
 /*
  * Writes through a volume handle.  The handle that holds the volume lock writes anywhere, as on
  * Windows (formatters lock the volume and write it); from then on the mounted state no longer
- * describes the disk, so nothing of it is written back when the volume is dismounted.  Without
+ * describes the disk, so the mount does no device I/O of its own any more (no flusher pass, lazy
+ * write or close lands in what the holder writes), every later write of the holder goes straight
+ * to the disk, and nothing is written back when the volume is dismounted.  Without
  * the lock only the boot code ($Boot, the first 8 KiB) may change under the mounted volume: setup
  * installs the boot sector that way, through the core's device path so the journal overlay and
  * the cached boot sector see it.
@@ -463,7 +465,7 @@ static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Leng
 {
     PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
     BOOLEAN Holder = Vcb->LockedBy == FileObject || Vcb->Dismounted;
-    BOOLEAN Raw = Vcb->Dismounted;
+    BOOLEAN Raw = Vcb->Dismounted || (Holder && Vcb->RawWritten);
     PMDL Mdl = NULL;
     PVOID Buffer;
     NTSTATUS Status = STATUS_SUCCESS;
