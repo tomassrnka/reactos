@@ -120,6 +120,58 @@ TestInvalidAndTiny(HANDLE Section, BOOLEAN MasksSupported)
     }
 }
 
+static VOID
+TestBasedSection(BOOLEAN MasksSupported)
+{
+    HANDLE Section;
+    LARGE_INTEGER MaximumSize, Offset;
+    PVOID Base;
+    SIZE_T Size;
+    NTSTATUS Status;
+    ULONG i;
+    ULONG_PTR Limits[] = {10, MAXULONG};
+
+    MaximumSize.QuadPart = 0x20000;
+    Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaximumSize,
+                             PAGE_READWRITE, SEC_COMMIT | SEC_BASED, NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+
+    for (i = 0; i < RTL_NUMBER_OF(Limits); ++i)
+    {
+        /* Include a nonzero offset in the selected based range. */
+        Base = NULL;
+        Size = PAGE_SIZE;
+        Offset.QuadPart = i * 0x10000;
+        Status = NtMapViewOfSection(Section, NtCurrentProcess(), &Base, Limits[i],
+                                   0, &Offset, &Size, ViewUnmap, 0, PAGE_READWRITE);
+        if (i == 0 || MasksSupported)
+            ok_ntstatus(Status, STATUS_NO_MEMORY);
+        else
+            ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
+        if (NT_SUCCESS(Status)) NtUnmapViewOfSection(NtCurrentProcess(), Base);
+    }
+
+    /* A failed constrained map must leave the section usable without a limit. */
+    Base = NULL;
+    Size = PAGE_SIZE;
+    Offset.QuadPart = 0;
+    Status = NtMapViewOfSection(Section, NtCurrentProcess(), &Base, 0,
+                               0, &Offset, &Size, ViewUnmap, 0, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok((ULONG_PTR)Base > 0x3fffff, "Unexpected based address %p\n", Base);
+#ifdef _WIN64
+        ok((ULONG_PTR)Base > MAXULONG, "Expected a native based address: %p\n", Base);
+#endif
+        *(volatile ULONG *)Base = 0x12345678;
+        Status = NtUnmapViewOfSection(NtCurrentProcess(), Base);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+    NtClose(Section);
+}
+
 START_TEST(ZeroBits)
 {
     HANDLE Section, File;
@@ -134,6 +186,7 @@ START_TEST(ZeroBits)
     IsWow64Process(GetCurrentProcess(), &Wow64);
     MasksSupported = sizeof(void *) == 8 || Wow64;
     TestPlacement(NULL, MasksSupported);
+    TestBasedSection(MasksSupported);
 
     MaximumSize.QuadPart = 0x10000;
     Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaximumSize,

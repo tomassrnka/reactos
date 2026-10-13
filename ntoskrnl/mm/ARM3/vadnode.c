@@ -325,6 +325,17 @@ MiInsertVadEx(
     {
         /* Calculate the starting and ending address */
         StartingAddress = ALIGN_DOWN_BY(*BaseAddress, Alignment);
+
+        /* A section can supply a fixed SEC_BASED address even when its caller
+         * requested automatic placement. Enforce the final range here too,
+         * before checking conflicts or inserting the VAD. */
+        HighestAddress = min(HighestAddress, (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS);
+        if (StartingAddress > HighestAddress ||
+            ViewSize - 1 > HighestAddress - StartingAddress)
+        {
+            KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
+            return STATUS_NO_MEMORY;
+        }
         EndingAddress = StartingAddress + ViewSize - 1;
 
         /* Make sure it doesn't conflict with an existing allocation */
