@@ -31,6 +31,7 @@ add_dependencies(etwtrace psdk)
 
 list(APPEND SOURCE
     dbg/dbgui.c
+    etw/event.c
     ldr/ldrapi.c
     ldr/ldrinit.c
     ldr/ldrpe.c
