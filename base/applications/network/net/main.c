@@ -163,6 +163,28 @@ PrintErrorMessage(
     }
     else
     {
+        /* A system error is introduced by the 3502 message and has no HELPMSG hint */
+        if (dwError != ERROR_SUCCESS)
+        {
+            _swprintf(szErrorBuffer, L"%lu", dwError);
+            pErrorInserts[0] = szErrorBuffer;
+
+            FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_HMODULE |
+                           FORMAT_MESSAGE_ARGUMENT_ARRAY,
+                           hModuleNetMsg,
+                           3502,
+                           LANG_USER_DEFAULT,
+                           (LPWSTR)&pBuffer,
+                           0,
+                           (va_list *)pErrorInserts);
+            if (pBuffer)
+            {
+                ConPrintf(StdErr, L"%s\n", pBuffer);
+                LocalFree(pBuffer);
+                pBuffer = NULL;
+            }
+        }
+
         FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
                        FORMAT_MESSAGE_IGNORE_INSERTS,
                        NULL,
@@ -177,6 +199,7 @@ PrintErrorMessage(
             LocalFree(pBuffer);
             pBuffer = NULL;
         }
+        return;
     }
 
     if (dwError != ERROR_SUCCESS)
