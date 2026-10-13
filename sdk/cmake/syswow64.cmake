@@ -33,6 +33,7 @@ function(syswow64_guest_begin)
     if(NOT ARCH STREQUAL "i386")
         message(FATAL_ERROR "SYSWOW64_GUEST requires ARCH=i386")
     endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SYSWOW64_LIST}")
     file(STRINGS ${SYSWOW64_LIST} _lines REGEX "^[^#]")
     set(_wanted "")
     foreach(_line ${_lines})
@@ -112,6 +113,14 @@ endfunction()
 
 function(setup_syswow64)
     include(ExternalProject)
+
+    add_custom_target(syswow64_incremental_test
+        COMMAND ${CMAKE_COMMAND}
+            -DMODULE=${REACTOS_SOURCE_DIR}/sdk/cmake/syswow64.cmake
+            -DSTAGE=${REACTOS_SOURCE_DIR}/sdk/cmake/syswow64_stage.cmake
+            -DWORK=${REACTOS_BINARY_DIR}/syswow64-incremental-test
+            -P ${REACTOS_SOURCE_DIR}/sdk/cmake/tests/syswow64_incremental.cmake
+        VERBATIM)
 
     if(NOT CMAKE_C_COMPILER_ID STREQUAL "GNU")
         message(FATAL_ERROR "SYSWOW64 is only supported with the GCC toolchain; configure with -DSYSWOW64=OFF")
