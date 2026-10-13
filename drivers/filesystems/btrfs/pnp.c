@@ -87,6 +87,9 @@ NTSTATUS pnp_surprise_removal(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         if (Vcb->vde)
             Vcb->vde->mounted_device = NULL;
 
+        // data still in the cache or not yet committed is lost with the device
+        latch_commit_error(Vcb, STATUS_NO_SUCH_DEVICE);
+
         Vcb->removing = true;
 
         ExReleaseResourceLite(&Vcb->tree_lock);
@@ -246,8 +249,8 @@ static NTSTATUS pdo_query_device_id(pdo_device_extension* pdode, PIRP Irp) {
 
     noff = &name[(sizeof(pref) / sizeof(WCHAR)) - 1];
     for (i = 0; i < 16; i++) {
-        *noff = hex_digit(pdode->uuid.uuid[i] >> 4); noff++;
-        *noff = hex_digit(pdode->uuid.uuid[i] & 0xf); noff++;
+        *noff = hex_digit(pdode->uuid[i] >> 4); noff++;
+        *noff = hex_digit(pdode->uuid[i] & 0xf); noff++;
 
         if (i == 3 || i == 5 || i == 7 || i == 9) {
             *noff = '-';

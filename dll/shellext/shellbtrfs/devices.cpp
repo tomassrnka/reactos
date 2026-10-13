@@ -27,8 +27,8 @@
 #include <setupapi.h>
 #include <strsafe.h>
 #include <mountmgr.h>
-#ifndef __REACTOS__
 #include <algorithm>
+#ifndef __REACTOS__
 #include "../btrfs.h"
 #include "mountmgr.h"
 #else
@@ -70,7 +70,7 @@ static wstring get_mountdev_name(const nt_handle& h ) {
     return name;
 }
 
-static void find_devices(HWND hwnd, const GUID* guid, const mountmgr& mm, vector<device>& device_list) {
+static void find_devices(HWND, const GUID* guid, const mountmgr& mm, vector<device>& device_list) {
     HDEVINFO h;
 
     static const wstring dosdevices = L"\\DosDevices\\";
@@ -279,10 +279,10 @@ static void find_devices(HWND hwnd, const GUID* guid, const mountmgr& mm, vector
                                 dev.fstype = fs_ident[i].name;
 
                                 if (dev.fstype == L"Btrfs") {
-                                    superblock* bsb = (superblock*)sb;
+                                    struct btrfs_super_block* bsb = (struct btrfs_super_block*)sb;
 
-                                    RtlCopyMemory(&dev.fs_uuid, &bsb->uuid, sizeof(BTRFS_UUID));
-                                    RtlCopyMemory(&dev.dev_uuid, &bsb->dev_item.device_uuid, sizeof(BTRFS_UUID));
+                                    RtlCopyMemory(&dev.fs_uuid, &bsb->fsid, BTRFS_UUID_SIZE);
+                                    RtlCopyMemory(&dev.dev_uuid, &bsb->dev_item.uuid, BTRFS_UUID_SIZE);
                                 }
 
                                 break;
@@ -316,7 +316,6 @@ static void find_devices(HWND hwnd, const GUID* guid, const mountmgr& mm, vector
         throw last_error(GetLastError());
 }
 
-#ifndef __REACTOS__ // Disabled because building with our <algorithm> seems complex right now...
 static bool sort_devices(device i, device j) {
     if (i.disk_num < j.disk_num)
         return true;
@@ -326,13 +325,12 @@ static bool sort_devices(device i, device j) {
 
     return false;
 }
-#endif
 
 void BtrfsDeviceAdd::populate_device_tree(HWND tree) {
     HWND hwnd = GetParent(tree);
     unsigned int i;
     ULONG last_disk_num = 0xffffffff;
-    HTREEITEM diskitem;
+    HTREEITEM diskitem = nullptr;
     NTSTATUS Status;
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING us;
@@ -385,9 +383,7 @@ void BtrfsDeviceAdd::populate_device_tree(HWND tree) {
         find_devices(hwnd, &GUID_DEVINTERFACE_HIDDEN_VOLUME, mm, device_list);
     }
 
-#ifndef __REACTOS__ // Disabled because building with our <algorithm> seems complex right now...
     sort(device_list.begin(), device_list.end(), sort_devices);
-#endif
 
     for (i = 0; i < device_list.size(); i++) {
         if (!device_list[i].ignore) {
@@ -420,7 +416,7 @@ void BtrfsDeviceAdd::populate_device_tree(HWND tree) {
                 btrfs_filesystem* bfs2 = bfs;
 
                 while (true) {
-                    if (RtlCompareMemory(&bfs2->uuid, &device_list[i].fs_uuid, sizeof(BTRFS_UUID)) == sizeof(BTRFS_UUID)) {
+                    if (RtlCompareMemory(&bfs2->uuid, &device_list[i].fs_uuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE) {
                         ULONG j, k;
                         btrfs_filesystem_device* dev;
 
@@ -430,10 +426,10 @@ void BtrfsDeviceAdd::populate_device_tree(HWND tree) {
                             else
                                 dev = (btrfs_filesystem_device*)((uint8_t*)dev + offsetof(btrfs_filesystem_device, name[0]) + dev->name_length);
 
-                            if (RtlCompareMemory(&device_list[i].dev_uuid, &device_list[i].dev_uuid, sizeof(BTRFS_UUID)) == sizeof(BTRFS_UUID)) {
+                            if (RtlCompareMemory(dev->uuid, device_list[i].dev_uuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE) {
                                 for (k = 0; k < device_list.size(); k++) {
                                     if (k != i && device_list[k].fstype == L"Btrfs" && device_list[k].drive != L"" &&
-                                        RtlCompareMemory(&device_list[k].fs_uuid, &device_list[i].fs_uuid, sizeof(BTRFS_UUID)) == sizeof(BTRFS_UUID)) {
+                                        RtlCompareMemory(&device_list[k].fs_uuid, &device_list[i].fs_uuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE) {
                                         device_list[i].drive = device_list[k].drive;
                                         break;
                                     }
@@ -694,7 +690,7 @@ void BtrfsDeviceResize::do_resize(HWND hwndDlg) {
     }
 }
 
-INT_PTR CALLBACK BtrfsDeviceResize::DeviceResizeDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+INT_PTR CALLBACK BtrfsDeviceResize::DeviceResizeDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM) {
     try {
         switch (uMsg) {
             case WM_INITDIALOG:
@@ -846,7 +842,7 @@ void BtrfsDeviceResize::ShowDialog(HWND hwnd, const wstring& fn, uint64_t dev_id
 extern "C" {
 #endif
 
-void CALLBACK AddDeviceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+void CALLBACK AddDeviceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int) {
     try {
         win_handle token;
         TOKEN_PRIVILEGES tp;
@@ -874,7 +870,7 @@ void CALLBACK AddDeviceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCm
     }
 }
 
-void CALLBACK RemoveDeviceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+void CALLBACK RemoveDeviceW(HWND hwnd, HINSTANCE, LPWSTR lpszCmdLine, int) {
     try {
         WCHAR *s, *vol, *dev;
         uint64_t devid;
@@ -935,7 +931,7 @@ void CALLBACK RemoveDeviceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int 
     }
 }
 
-void CALLBACK ResizeDeviceW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+void CALLBACK ResizeDeviceW(HWND hwnd, HINSTANCE, LPWSTR lpszCmdLine, int) {
     try {
         WCHAR *s, *vol, *dev;
         uint64_t devid;

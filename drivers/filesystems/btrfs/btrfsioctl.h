@@ -61,20 +61,20 @@ typedef struct {
     WCHAR name[1];
 } btrfs_create_snapshot32;
 
-#define BTRFS_COMPRESSION_ANY   0
-#define BTRFS_COMPRESSION_ZLIB  1
-#define BTRFS_COMPRESSION_LZO   2
-#define BTRFS_COMPRESSION_ZSTD  3
+#define BTRFS_COMPRESS_ANY   0
+#define BTRFS_COMPRESS_ZLIB  1
+#define BTRFS_COMPRESS_LZO   2
+#define BTRFS_COMPRESS_ZSTD  3
 
 typedef struct {
     uint64_t subvol;
     uint64_t inode;
     BOOL top;
     uint8_t type;
-    uint32_t st_uid;
-    uint32_t st_gid;
-    uint32_t st_mode;
-    uint64_t st_rdev;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t mode;
+    uint64_t rdev;
     uint64_t flags;
     uint32_t inline_length;
     uint64_t disk_size_uncompressed;
@@ -89,11 +89,11 @@ typedef struct {
 typedef struct {
     uint64_t flags;
     BOOL flags_changed;
-    uint32_t st_uid;
+    uint32_t uid;
     BOOL uid_changed;
-    uint32_t st_gid;
+    uint32_t gid;
     BOOL gid_changed;
-    uint32_t st_mode;
+    uint32_t mode;
     BOOL mode_changed;
     uint8_t compression_type;
     BOOL compression_type_changed;
@@ -138,7 +138,7 @@ typedef struct {
 #define BTRFS_BALANCE_OPTS_CONVERT      0x100
 #define BTRFS_BALANCE_OPTS_SOFT         0x200
 
-#define BLOCK_FLAG_SINGLE 0x1000000000000 // only used in balance
+#define BTRFS_AVAIL_ALLOC_BIT_SINGLE 0x1000000000000 // only used in balance
 
 typedef struct {
     uint64_t flags;
@@ -215,7 +215,7 @@ typedef struct {
         struct {
             uint64_t root;
             uint8_t level;
-            KEY firstitem;
+            struct btrfs_key firstitem;
         } metadata;
     };
 } btrfs_scrub_error;
@@ -236,14 +236,14 @@ typedef struct {
 typedef struct {
     uint64_t inode;
     uint8_t type;
-    uint64_t st_rdev;
+    uint64_t rdev;
     uint16_t namelen;
     WCHAR name[1];
 } btrfs_mknod;
 
 typedef struct {
     uint64_t generation;
-    BTRFS_UUID uuid;
+    uint8_t uuid[BTRFS_UUID_SIZE];
 } btrfs_received_subvol;
 
 typedef struct {
@@ -260,7 +260,7 @@ typedef struct {
 } btrfs_create_subvol;
 
 typedef struct {
-    BTRFS_UUID uuid;
+    uint8_t uuid[BTRFS_UUID_SIZE];
     uint64_t ctransid;
 } btrfs_find_subvol;
 

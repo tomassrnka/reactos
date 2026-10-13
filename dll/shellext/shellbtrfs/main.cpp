@@ -54,7 +54,7 @@ void set_dpi_aware() {
     if (!shcore)
         return;
 
-    SetProcessDpiAwareness = (_SetProcessDpiAwareness)GetProcAddress(shcore, "SetProcessDpiAwareness");
+    SetProcessDpiAwareness = (_SetProcessDpiAwareness)(void*)GetProcAddress(shcore, "SetProcessDpiAwareness");
 
     if (!SetProcessDpiAwareness)
         return;
@@ -189,7 +189,7 @@ wstring format_ntstatus(NTSTATUS Status) {
     if (!ntdll)
         return L"(error loading ntdll.dll)";
 
-    RtlNtStatusToDosError = (_RtlNtStatusToDosError)GetProcAddress(ntdll, "RtlNtStatusToDosError");
+    RtlNtStatusToDosError = (_RtlNtStatusToDosError)(void*)GetProcAddress(ntdll, "RtlNtStatusToDosError");
 
     if (!RtlNtStatusToDosError) {
         FreeLibrary(ntdll);
@@ -541,14 +541,14 @@ STDAPI DllUnregisterServer(void) {
     return S_OK;
 }
 
-STDAPI DllInstall(BOOL bInstall, LPCWSTR pszCmdLine) {
+STDAPI DllInstall(BOOL bInstall, LPCWSTR) {
     if (bInstall)
         return DllRegisterServer();
     else
         return DllUnregisterServer();
 }
 
-extern "C" BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, void* lpReserved) {
+extern "C" BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, void*) {
     if (dwReason == DLL_PROCESS_ATTACH)
         module = (HMODULE)hModule;
 
@@ -587,7 +587,7 @@ static void create_subvol(const wstring& fn) {
     NtFsControlFile(h, nullptr, nullptr, nullptr, &iosb, FSCTL_BTRFS_CREATE_SUBVOL, bcs, (ULONG)bcslen, nullptr, 0);
 }
 
-extern "C" void CALLBACK CreateSubvolW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK CreateSubvolW(HWND, HINSTANCE, LPWSTR lpszCmdLine, int) {
     vector<wstring> args;
 
     command_line_to_args(lpszCmdLine, args);
@@ -633,7 +633,7 @@ static void create_snapshot2(const wstring& source, const wstring& fn) {
     NtFsControlFile(h, nullptr, nullptr, nullptr, &iosb, FSCTL_BTRFS_CREATE_SNAPSHOT, bcs, (ULONG)bcslen, nullptr, 0);
 }
 
-extern "C" void CALLBACK CreateSnapshotW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+extern "C" void CALLBACK CreateSnapshotW(HWND, HINSTANCE, LPWSTR lpszCmdLine, int) {
     vector<wstring> args;
 
     command_line_to_args(lpszCmdLine, args);
@@ -667,7 +667,7 @@ void command_line_to_args(LPWSTR cmdline, vector<wstring>& args) {
     LocalFree(l);
 }
 
-static string utf16_to_utf8(const wstring_view& utf16) {
+static string utf16_to_utf8(wstring_view utf16) {
     string utf8;
     char* buf;
 
@@ -731,7 +731,7 @@ string_error::string_error(int resno, ...) {
 #pragma warning(pop)
 #endif
 
-wstring utf8_to_utf16(const string_view& utf8) {
+wstring utf8_to_utf16(string_view utf8) {
     wstring ret;
     WCHAR* buf;
 
@@ -799,7 +799,7 @@ ntstatus_error::ntstatus_error(NTSTATUS Status) : Status(Status) {
         throw runtime_error("Error loading ntdll.dll.");
 
     try {
-        RtlNtStatusToDosError = (_RtlNtStatusToDosError)GetProcAddress(ntdll, "RtlNtStatusToDosError");
+        RtlNtStatusToDosError = (_RtlNtStatusToDosError)(void*)GetProcAddress(ntdll, "RtlNtStatusToDosError");
 
         if (!RtlNtStatusToDosError)
             throw runtime_error("Error loading RtlNtStatusToDosError in ntdll.dll.");

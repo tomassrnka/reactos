@@ -63,10 +63,9 @@ HRESULT __stdcall BtrfsVolPropSheet::QueryInterface(REFIID riid, void **ppObj) {
     return E_NOINTERFACE;
 }
 
-HRESULT __stdcall BtrfsVolPropSheet::Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDataObject* pdtobj, HKEY hkeyProgID) {
+HRESULT __stdcall BtrfsVolPropSheet::Initialize(PCIDLIST_ABSOLUTE pidlFolder, IDataObject* pdtobj, HKEY) {
     ULONG num_files;
     FORMATETC format = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
-    HDROP hdrop;
     WCHAR fnbuf[MAX_PATH];
 
     if (pidlFolder)
@@ -82,9 +81,9 @@ HRESULT __stdcall BtrfsVolPropSheet::Initialize(PCIDLIST_ABSOLUTE pidlFolder, ID
 
     stgm_set = true;
 
-    hdrop = (HDROP)GlobalLock(stgm.hGlobal);
+    global_lock gl(stgm.hGlobal);
 
-    if (!hdrop) {
+    if (!gl.ptr) {
         ReleaseStgMedium(&stgm);
         stgm_set = false;
         return E_INVALIDARG;
@@ -92,10 +91,8 @@ HRESULT __stdcall BtrfsVolPropSheet::Initialize(PCIDLIST_ABSOLUTE pidlFolder, ID
 
     num_files = DragQueryFileW((HDROP)stgm.hGlobal, 0xFFFFFFFF, nullptr, 0);
 
-    if (num_files > 1) {
-        GlobalUnlock(hdrop);
+    if (num_files > 1)
         return E_FAIL;
-    }
 
     if (DragQueryFileW((HDROP)stgm.hGlobal, 0, fnbuf, sizeof(fnbuf) / sizeof(WCHAR))) {
         fn = fnbuf;
@@ -123,34 +120,24 @@ HRESULT __stdcall BtrfsVolPropSheet::Initialize(PCIDLIST_ABSOLUTE pidlFolder, ID
                         devices = (btrfs_device*)malloc(devsize);
 
                         i++;
-                    } else {
-                        GlobalUnlock(hdrop);
+                    } else
                         return E_FAIL;
-                    }
                 } else
                     break;
             }
 
-            if (!NT_SUCCESS(Status)) {
-                GlobalUnlock(hdrop);
+            if (!NT_SUCCESS(Status))
                 return E_FAIL;
-            }
 
-            Status = NtFsControlFile(h, nullptr, nullptr, nullptr, &iosb, FSCTL_BTRFS_GET_UUID, nullptr, 0, &uuid, sizeof(BTRFS_UUID));
+            Status = NtFsControlFile(h, nullptr, nullptr, nullptr, &iosb, FSCTL_BTRFS_GET_UUID, nullptr, 0, &uuid, BTRFS_UUID_SIZE);
             uuid_set = NT_SUCCESS(Status);
 
             ignore = false;
             balance = new BtrfsBalance(fn);
-        } else {
-            GlobalUnlock(hdrop);
+        } else
             return E_FAIL;
-        }
-    } else {
-        GlobalUnlock(hdrop);
+    } else
         return E_FAIL;
-    }
-
-    GlobalUnlock(hdrop);
 
     return S_OK;
 }
@@ -162,7 +149,7 @@ typedef struct {
     uint64_t size;
 } dev;
 
-void BtrfsVolPropSheet::FormatUsage(HWND hwndDlg, wstring& s, btrfs_usage* usage) {
+void BtrfsVolPropSheet::FormatUsage(HWND, wstring& s, btrfs_usage* usage) {
     uint8_t i, j;
     uint64_t num_devs, dev_size, dev_alloc, data_size, data_alloc, metadata_size, metadata_alloc;
     btrfs_device* bd;
@@ -170,14 +157,14 @@ void BtrfsVolPropSheet::FormatUsage(HWND hwndDlg, wstring& s, btrfs_usage* usage
     btrfs_usage* bue;
     wstring t, u, v;
 
-    static const uint64_t types[] = { BLOCK_FLAG_DATA, BLOCK_FLAG_DATA | BLOCK_FLAG_METADATA, BLOCK_FLAG_METADATA, BLOCK_FLAG_SYSTEM };
+    static const uint64_t types[] = { BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA, BTRFS_BLOCK_GROUP_METADATA, BTRFS_BLOCK_GROUP_SYSTEM };
     static const ULONG typestrings[] = { IDS_USAGE_DATA, IDS_USAGE_MIXED, IDS_USAGE_METADATA, IDS_USAGE_SYSTEM };
-    static const uint64_t duptypes[] = { 0, BLOCK_FLAG_DUPLICATE, BLOCK_FLAG_RAID0, BLOCK_FLAG_RAID1, BLOCK_FLAG_RAID10, BLOCK_FLAG_RAID5,
-                                         BLOCK_FLAG_RAID6, BLOCK_FLAG_RAID1C3, BLOCK_FLAG_RAID1C4 };
+    static const uint64_t duptypes[] = { 0, BTRFS_BLOCK_GROUP_DUP, BTRFS_BLOCK_GROUP_RAID0, BTRFS_BLOCK_GROUP_RAID1, BTRFS_BLOCK_GROUP_RAID10, BTRFS_BLOCK_GROUP_RAID5,
+                                         BTRFS_BLOCK_GROUP_RAID6, BTRFS_BLOCK_GROUP_RAID1C3, BTRFS_BLOCK_GROUP_RAID1C4 };
     static const ULONG dupstrings[] = { IDS_SINGLE, IDS_DUP, IDS_RAID0, IDS_RAID1, IDS_RAID10, IDS_RAID5, IDS_RAID6, IDS_RAID1C3, IDS_RAID1C4 };
 
-    static const uint64_t raid_types = BLOCK_FLAG_DUPLICATE | BLOCK_FLAG_RAID0 | BLOCK_FLAG_RAID1 | BLOCK_FLAG_RAID10 | BLOCK_FLAG_RAID5 |
-                                       BLOCK_FLAG_RAID6 | BLOCK_FLAG_RAID1C3 | BLOCK_FLAG_RAID1C4;
+    static const uint64_t raid_types = BTRFS_BLOCK_GROUP_DUP | BTRFS_BLOCK_GROUP_RAID0 | BTRFS_BLOCK_GROUP_RAID1 | BTRFS_BLOCK_GROUP_RAID10 | BTRFS_BLOCK_GROUP_RAID5 |
+                                       BTRFS_BLOCK_GROUP_RAID6 | BTRFS_BLOCK_GROUP_RAID1C3 | BTRFS_BLOCK_GROUP_RAID1C4;
 
     s = L"";
 
@@ -240,19 +227,19 @@ void BtrfsVolPropSheet::FormatUsage(HWND hwndDlg, wstring& s, btrfs_usage* usage
         for (uint64_t k = 0; k < bue->num_devices; k++) {
             dev_alloc += bue->devices[k].alloc;
 
-            if (bue->type & BLOCK_FLAG_DATA) {
+            if (bue->type & BTRFS_BLOCK_GROUP_DATA) {
                 data_alloc += bue->devices[k].alloc;
             }
 
-            if (bue->type & BLOCK_FLAG_METADATA) {
+            if (bue->type & BTRFS_BLOCK_GROUP_METADATA) {
                 metadata_alloc += bue->devices[k].alloc;
             }
         }
 
-        if (bue->type & BLOCK_FLAG_DATA)
+        if (bue->type & BTRFS_BLOCK_GROUP_DATA)
             data_size += bue->size;
 
-        if (bue->type & BLOCK_FLAG_METADATA)
+        if (bue->type & BTRFS_BLOCK_GROUP_METADATA)
             metadata_size += bue->size;
 
         if (bue->next_entry > 0)
@@ -334,7 +321,7 @@ void BtrfsVolPropSheet::FormatUsage(HWND hwndDlg, wstring& s, btrfs_usage* usage
                 if ((bue->type & types[i]) == types[i] && ((duptypes[j] == 0 && (bue->type & raid_types) == 0) || bue->type & duptypes[j])) {
                     wstring sizestring, usedstring, typestring, dupstring;
 
-                    if (bue->type & BLOCK_FLAG_DATA && bue->type & BLOCK_FLAG_METADATA && (types[i] == BLOCK_FLAG_DATA || types[i] == BLOCK_FLAG_METADATA))
+                    if (bue->type & BTRFS_BLOCK_GROUP_DATA && bue->type & BTRFS_BLOCK_GROUP_METADATA && (types[i] == BTRFS_BLOCK_GROUP_DATA || types[i] == BTRFS_BLOCK_GROUP_METADATA))
                         break;
 
                     if (!load_string(module, typestrings[i], typestring))
@@ -484,7 +471,7 @@ void BtrfsVolPropSheet::RefreshUsage(HWND hwndDlg) {
     free(usage);
 }
 
-INT_PTR CALLBACK BtrfsVolPropSheet::UsageDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+INT_PTR CALLBACK BtrfsVolPropSheet::UsageDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM) {
     try {
         switch (uMsg) {
             case WM_INITDIALOG:
@@ -596,7 +583,7 @@ static void add_lv_column(HWND list, int string, int cx) {
     SendMessageW(list, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvc);
 }
 
-static int CALLBACK lv_sort(LPARAM lParam1, LPARAM lParam2, LPARAM lParamSort) {
+static int CALLBACK lv_sort(LPARAM lParam1, LPARAM lParam2, LPARAM) {
     if (lParam1 < lParam2)
         return -1;
     else if (lParam1 > lParam2)
@@ -864,7 +851,7 @@ void BtrfsVolPropSheet::ResetStats(HWND hwndDlg) {
     EndDialog(hwndDlg, 0);
 }
 
-INT_PTR CALLBACK BtrfsVolPropSheet::StatsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+INT_PTR CALLBACK BtrfsVolPropSheet::StatsDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM) {
     try {
         switch (uMsg) {
             case WM_INITDIALOG:
@@ -973,6 +960,8 @@ INT_PTR CALLBACK BtrfsVolPropSheet::DeviceDlgProc(HWND hwndDlg, UINT uMsg, WPARA
                 EnableThemeDialogTexture(hwndDlg, ETDT_ENABLETAB);
 
                 devlist = GetDlgItem(hwndDlg, IDC_DEVLIST);
+
+                ListView_SetExtendedListViewStyleEx(devlist, ListView_GetExtendedListViewStyle(devlist), LVS_EX_FULLROWSELECT);
 
                 GetClientRect(devlist, &rect);
                 w = rect.right - rect.left;
@@ -1360,9 +1349,9 @@ static INT_PTR CALLBACK PropSheetDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam,
 
                     GetDlgItemTextW(hwndDlg, IDC_UUID, s, sizeof(s) / sizeof(WCHAR));
 
-                    wstring_sprintf(t, s, bps->uuid.uuid[0], bps->uuid.uuid[1], bps->uuid.uuid[2], bps->uuid.uuid[3], bps->uuid.uuid[4], bps->uuid.uuid[5],
-                                    bps->uuid.uuid[6], bps->uuid.uuid[7], bps->uuid.uuid[8], bps->uuid.uuid[9], bps->uuid.uuid[10], bps->uuid.uuid[11],
-                                    bps->uuid.uuid[12], bps->uuid.uuid[13], bps->uuid.uuid[14], bps->uuid.uuid[15]);
+                    wstring_sprintf(t, s, bps->uuid[0], bps->uuid[1], bps->uuid[2], bps->uuid[3], bps->uuid[4], bps->uuid[5],
+                                    bps->uuid[6], bps->uuid[7], bps->uuid[8], bps->uuid[9], bps->uuid[10], bps->uuid[11],
+                                    bps->uuid[12], bps->uuid[13], bps->uuid[14], bps->uuid[15]);
 
                     SetDlgItemTextW(hwndDlg, IDC_UUID, t.c_str());
                 } else
@@ -1469,7 +1458,7 @@ HRESULT __stdcall BtrfsVolPropSheet::AddPages(LPFNADDPROPSHEETPAGE pfnAddPage, L
     return E_FAIL;
 }
 
-HRESULT __stdcall BtrfsVolPropSheet::ReplacePage(UINT uPageID, LPFNADDPROPSHEETPAGE pfnReplacePage, LPARAM lParam) {
+HRESULT __stdcall BtrfsVolPropSheet::ReplacePage(UINT, LPFNADDPROPSHEETPAGE, LPARAM) {
     return S_OK;
 }
 
@@ -1487,7 +1476,7 @@ void BtrfsChangeDriveLetter::do_change(HWND hwndDlg) {
 #ifndef __REACTOS__
             throw runtime_error("Volume path was not root of drive.");
 #else
-            error_message(nullptr, "Volume path was not root of drive.");
+            { error_message(nullptr, "Volume path was not root of drive."); return; }
 #endif
 
         mountmgr mm;
@@ -1500,7 +1489,7 @@ void BtrfsChangeDriveLetter::do_change(HWND hwndDlg) {
 #ifndef __REACTOS__
                 throw runtime_error("Error finding device name.");
 #else
-                error_message(nullptr, "Error finding device name.");
+                { error_message(nullptr, "Error finding device name."); return; }
 #endif
 
             dev_name = v[0].device_name;
@@ -1523,7 +1512,7 @@ void BtrfsChangeDriveLetter::do_change(HWND hwndDlg) {
     EndDialog(hwndDlg, 1);
 }
 
-INT_PTR BtrfsChangeDriveLetter::DlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+INT_PTR BtrfsChangeDriveLetter::DlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM) {
     try {
         switch (uMsg) {
             case WM_INITDIALOG:
@@ -1610,7 +1599,7 @@ void BtrfsChangeDriveLetter::show() {
 extern "C" {
 #endif
 
-void CALLBACK ResetStatsW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+void CALLBACK ResetStatsW(HWND hwnd, HINSTANCE, LPWSTR lpszCmdLine, int) {
     try {
         win_handle token;
         NTSTATUS Status;
@@ -1664,7 +1653,7 @@ void CALLBACK ResetStatsW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nC
     }
 }
 
-void CALLBACK ShowChangeDriveLetterW(HWND hwnd, HINSTANCE hinst, LPWSTR lpszCmdLine, int nCmdShow) {
+void CALLBACK ShowChangeDriveLetterW(HWND hwnd, HINSTANCE, LPWSTR lpszCmdLine, int) {
     BtrfsChangeDriveLetter bcdl(hwnd, lpszCmdLine);
 
     bcdl.show();
