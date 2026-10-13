@@ -216,6 +216,7 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "Actualizare la pornire a listei programelor disponibile"
     IDS_CFG_LOG_ENABLED "Menținere a jurnalului de instalare/dezinstalare a programelor"
     IDS_CFG_SMALL_ICONS "Pictograme mici"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
 END
 
 STRINGTABLE

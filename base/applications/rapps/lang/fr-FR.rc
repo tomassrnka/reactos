@@ -217,6 +217,7 @@ BEGIN
     IDS_CFG_UPDATE_AVLIST "Mettre à jour la liste des programmes accessibles au démarrage"
     IDS_CFG_LOG_ENABLED "Journal de l'installation et de la suppression des programmes"
     IDS_CFG_SMALL_ICONS "Petites icônes"
+    IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
 END
 
 STRINGTABLE

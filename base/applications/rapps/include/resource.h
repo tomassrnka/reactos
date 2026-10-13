@@ -132,6 +132,7 @@
 #define IDS_CFG_UPDATE_AVLIST    140
 #define IDS_CFG_LOG_ENABLED      141
 #define IDS_CFG_SMALL_ICONS      142
+#define IDS_UNABLE_TO_RUN_32BIT  143
 
 /* Tooltips */
 #define IDS_TOOLTIP_INSTALL      200
