@@ -3033,10 +3033,75 @@ GetVolumeFromPartition(
 
 
 /*
+ * Reads the volume list again. Volumes that were already listed keep their
+ * numbers, so that a later "select volume N" still means the same volume;
+ * new volumes get numbers after the highest one.
+ */
+static
+VOID
+RefreshVolumeListKeepNumbers(VOID)
+{
+    PLIST_ENTRY Entry, OldEntry;
+    PVOLENTRY VolumeEntry;
+    PWSTR pszOldNames = NULL;
+    PULONG pulOldNumbers = NULL;
+    ULONG ulOldCount = 0, ulNextNumber = 0, i;
+
+    for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink)
+        ulOldCount++;
+
+    if (ulOldCount != 0)
+    {
+        pszOldNames = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulOldCount * MAX_PATH * sizeof(WCHAR));
+        pulOldNumbers = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulOldCount * sizeof(ULONG));
+        if ((pszOldNames == NULL) || (pulOldNumbers == NULL))
+            ulOldCount = 0;
+    }
+
+    i = 0;
+    for (OldEntry = VolumeListHead.Flink; (OldEntry != &VolumeListHead) && (i < ulOldCount); OldEntry = OldEntry->Flink, i++)
+    {
+        VolumeEntry = CONTAINING_RECORD(OldEntry, VOLENTRY, ListEntry);
+        StringCchCopyW(&pszOldNames[i * MAX_PATH], MAX_PATH, VolumeEntry->VolumeName);
+        pulOldNumbers[i] = VolumeEntry->VolumeNumber;
+        if (VolumeEntry->VolumeNumber >= ulNextNumber)
+            ulNextNumber = VolumeEntry->VolumeNumber + 1;
+    }
+
+    DestroyVolumeList();
+    CreateVolumeList();
+
+    if (ulOldCount != 0)
+    {
+        for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink)
+        {
+            VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+
+            for (i = 0; i < ulOldCount; i++)
+            {
+                if (_wcsicmp(&pszOldNames[i * MAX_PATH], VolumeEntry->VolumeName) == 0)
+                    break;
+            }
+
+            if (i < ulOldCount)
+                VolumeEntry->VolumeNumber = pulOldNumbers[i];
+            else
+                VolumeEntry->VolumeNumber = ulNextNumber++;
+        }
+    }
+
+    if (pszOldNames)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pszOldNames);
+    if (pulOldNumbers)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pulOldNumbers);
+}
+
+
+/*
  * Gives the focus to the volume of a partition that was just written, as
  * the partition already has it. The volume list is read again because the
  * system adds the new volume after the layout is written, asynchronously,
- * so wait a few seconds for it to arrive.
+ * so it is read up to 20 times, 500 ms apart.
  */
 VOID
 SelectVolumeOfNewPartition(
@@ -3049,8 +3114,7 @@ SelectVolumeOfNewPartition(
         if (ulTry != 0)
             Sleep(500);
 
-        DestroyVolumeList();
-        CreateVolumeList();
+        RefreshVolumeListKeepNumbers();
 
         CurrentVolume = GetVolumeFromPartition(PartEntry);
         if (CurrentVolume != NULL)

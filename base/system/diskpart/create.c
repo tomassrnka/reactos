@@ -567,6 +567,9 @@ CreateLogicalPartition(
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
+    /* Only the partition created here gets the focus */
+    CurrentPartition = NULL;
+
     for (ListEntry = CurrentDisk->LogicalPartListHead.Flink;
          ListEntry != &CurrentDisk->LogicalPartListHead;
          ListEntry = ListEntry->Flink)
@@ -632,6 +635,13 @@ CreateLogicalPartition(
                 break;
             }
         }
+    }
+
+    if (CurrentPartition == NULL)
+    {
+        /* No free space was large enough */
+        ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
+        return EXIT_SUCCESS;
     }
 
     UpdateMbrDiskLayout(CurrentDisk);
@@ -828,6 +838,9 @@ CreatePrimaryMbrPartition(
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
+    /* Only the partition created here gets the focus */
+    CurrentPartition = NULL;
+
     for (ListEntry = CurrentDisk->PrimaryPartListHead.Flink;
          ListEntry != &CurrentDisk->PrimaryPartListHead;
          ListEntry = ListEntry->Flink)
@@ -893,6 +906,13 @@ CreatePrimaryMbrPartition(
                 break;
             }
         }
+    }
+
+    if (CurrentPartition == NULL)
+    {
+        /* No free space was large enough */
+        ConResPuts(StdOut, IDS_CREATE_PARTITION_FAIL);
+        return;
     }
 
     UpdateMbrDiskLayout(CurrentDisk);
