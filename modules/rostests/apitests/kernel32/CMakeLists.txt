@@ -37,6 +37,7 @@ list(APPEND SOURCE
     MultiByteToWideChar.c
     Pipes.c
     PrivMoveFileIdentityW.c
+    ProcessToken.c
     QueueUserAPC.c
     ReadFile.c
     SetComputerNameExW.c
