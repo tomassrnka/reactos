@@ -146,24 +146,24 @@ static void Test_Rename(void)
        "Plain-name rename: a %d, b in the file's directory %d, b in the current directory %d\n",
        ExistsIn(FileDir, L"a.txt"), ExistsIn(FileDir, L"b.txt"), ExistsIn(CwdDir, L"b.txt"));
 
-    /* So is a relative path with a directory part */
-    Ret = RenameTo(File, L"sub\\j.txt", FALSE, 0);
-    ok(Ret, "Rename to a relative path failed: %lu\n", GetLastError());
-    ok(!ExistsIn(CwdDir, L"b.txt") && ExistsIn(CwdSub, L"j.txt") && !ExistsIn(FileSub, L"j.txt"),
-       "Relative-path rename: j in the current directory's sub %d, in the file directory's sub %d\n",
-       ExistsIn(CwdSub, L"j.txt"), ExistsIn(FileSub, L"j.txt"));
-
-    /* A full DOS path */
+    /* A full DOS path brings the file back to its directory */
     StringCchPrintfW(FullName, _countof(FullName), L"%s\\c.txt", FileDir);
     Ret = RenameTo(File, FullName, FALSE, 0);
     ok(Ret, "Rename to a full path failed: %lu\n", GetLastError());
-    ok(!ExistsIn(CwdSub, L"j.txt") && ExistsIn(FileDir, L"c.txt"), "Full-path rename did not happen\n");
+    ok(!ExistsIn(CwdDir, L"b.txt") && ExistsIn(FileDir, L"c.txt"), "Full-path rename did not happen\n");
+
+    /* A relative path with a directory part is relative to the current directory too */
+    Ret = RenameTo(File, L"sub\\j.txt", FALSE, 0);
+    ok(Ret, "Rename to a relative path failed: %lu\n", GetLastError());
+    ok(!ExistsIn(FileDir, L"c.txt") && ExistsIn(CwdSub, L"j.txt") && !ExistsIn(FileSub, L"j.txt"),
+       "Relative-path rename: j in the current directory's sub %d, in the file directory's sub %d\n",
+       ExistsIn(CwdSub, L"j.txt"), ExistsIn(FileSub, L"j.txt"));
 
     /* An NT path */
     StringCchPrintfW(FullName, _countof(FullName), L"\\??\\%s\\h.txt", FileDir);
     Ret = RenameTo(File, FullName, FALSE, 0);
     ok(Ret, "Rename to an NT path failed: %lu\n", GetLastError());
-    ok(!ExistsIn(FileDir, L"c.txt") && ExistsIn(FileDir, L"h.txt"), "NT-path rename did not happen\n");
+    ok(!ExistsIn(CwdSub, L"j.txt") && ExistsIn(FileDir, L"h.txt"), "NT-path rename did not happen\n");
 
     /* The name ends at its NUL: FileNameLength does not shorten it, odd or even */
     StringCchPrintfW(FullName, _countof(FullName), L"%s\\d.txtx", FileDir);
@@ -184,6 +184,12 @@ static void Test_Rename(void)
     ok(!ExistsIn(CwdDir, L"e.txtx") && ExistsIn(CwdDir, L"e.txt"),
        "Odd plain-name length: e.txtx %d, e.txt %d\n", ExistsIn(CwdDir, L"e.txtx"), ExistsIn(CwdDir, L"e.txt"));
 
+    /* Back to the file's directory, so that the cases below can tell it from the current one */
+    StringCchPrintfW(FullName, _countof(FullName), L"%s\\h.txt", FileDir);
+    Ret = RenameTo(File, FullName, FALSE, 0);
+    ok(Ret, "Rename back to the file's directory failed: %lu\n", GetLastError());
+    ok(!ExistsIn(CwdDir, L"e.txt") && ExistsIn(FileDir, L"h.txt"), "Rename back did not happen\n");
+
     /* An empty name */
     SetLastError(0xdeadbeef);
     Ret = RenameTo(File, L"", FALSE, 0);
@@ -199,7 +205,8 @@ static void Test_Rename(void)
         Ret = RenameToEx(File, Root, L"i.txt", FALSE, 0);
         ok(!Ret && GetLastError() == ERROR_INVALID_PARAMETER,
            "Root directory: got %d, error %lu\n", Ret, GetLastError());
-        ok(ExistsIn(CwdDir, L"e.txt") && !ExistsIn(CwdDir, L"i.txt"), "Root-directory rename changed the file name\n");
+        ok(ExistsIn(FileDir, L"h.txt") && !ExistsIn(CwdDir, L"i.txt") && !ExistsIn(FileDir, L"i.txt"),
+           "Root-directory rename changed the file name\n");
         CloseHandle(Root);
     }
 
@@ -209,12 +216,12 @@ static void Test_Rename(void)
     SetLastError(0xdeadbeef);
     Ret = RenameTo(File, L"f.txt", FALSE, 0);
     ok(!Ret && GetLastError() == ERROR_ALREADY_EXISTS, "Got %d, error %lu\n", Ret, GetLastError());
-    ok(ExistsIn(CwdDir, L"e.txt") && FileHolds(FileDir, L"f.txt", "AAA") && FileHolds(CwdDir, L"f.txt", "BBB"),
+    ok(ExistsIn(FileDir, L"h.txt") && FileHolds(FileDir, L"f.txt", "AAA") && FileHolds(CwdDir, L"f.txt", "BBB"),
        "A refused rename changed a file\n");
     Ret = RenameTo(File, L"f.txt", TRUE, 0);
     ok(Ret, "Replacing rename failed: %lu\n", GetLastError());
     CloseHandle(File);
-    ok(!ExistsIn(CwdDir, L"e.txt"), "The source name is still there\n");
+    ok(!ExistsIn(FileDir, L"h.txt"), "The source name is still there\n");
     ok(FileHolds(CwdDir, L"f.txt", "SRC"), "The target in the current directory was not replaced\n");
     ok(FileHolds(FileDir, L"f.txt", "AAA"), "The target in the file's directory changed\n");
 }
@@ -271,7 +278,9 @@ static void Test_DispositionAndEndOfFile(void)
     EndOfFile.EndOfFile.QuadPart = 12345;
     Ret = pSetFileInformationByHandle(File, TestFileEndOfFileInfo, &EndOfFile, sizeof(EndOfFile));
     ok(Ret, "FileEndOfFileInfo failed: %lu\n", GetLastError());
-    ok(GetFileSizeEx(File, &Size) && Size.QuadPart == 12345, "Size is %I64d\n", Size.QuadPart);
+    Size.QuadPart = 0;
+    Ret = GetFileSizeEx(File, &Size);
+    ok(Ret && Size.QuadPart == 12345, "GetFileSizeEx returned %d, size %I64d\n", Ret, Size.QuadPart);
 
     Disposition.Delete = TRUE;
     Ret = pSetFileInformationByHandle(File, TestFileDispositionInfo, &Disposition, sizeof(Disposition));
@@ -288,7 +297,7 @@ START_TEST(SetFileInformationByHandle)
 {
     WCHAR TempPath[MAX_PATH], Path[MAX_PATH], OldCwd[MAX_PATH];
     static const PCWSTR Names[] = { L"a.txt", L"b.txt", L"c.txt", L"d.txt", L"d.txtx", L"e.txt", L"e.txtx",
-                                    L"f.txt", L"g.txt", L"h.txt", L"i.txt", L"s.txt", L"two",
+                                    L"e.tx", L"f.txt", L"g.txt", L"h.txt", L"i.txt", L"s.txt", L"two",
                                     L"sub\\j.txt" };
     WCHAR Dirs[3][MAX_PATH];
     DWORD Length;

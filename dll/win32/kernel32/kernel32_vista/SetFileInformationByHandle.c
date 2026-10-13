@@ -63,8 +63,9 @@ SetFileRenameInfo(
         NtName.Length = (USHORT)(NameChars * sizeof(WCHAR));
     }
 
-    InfoSize = FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) + NtName.Length;
-    RenameInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, InfoSize);
+    /* The I/O manager wants at least the whole structure, also for the 1-character ":" */
+    InfoSize = max(sizeof(FILE_RENAME_INFORMATION), FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) + NtName.Length);
+    RenameInfo = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, InfoSize);
     if (RenameInfo)
     {
         RenameInfo->ReplaceIfExists = Info->ReplaceIfExists;
