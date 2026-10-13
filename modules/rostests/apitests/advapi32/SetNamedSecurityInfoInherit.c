@@ -313,15 +313,19 @@ static void TestInheritance(PCWSTR Base, PSID Admins, PSID System, PSID Users)
     /* a relative name is resolved once: it works from the current directory */
     {
         WCHAR OldDir[MAX_PATH], Kid[MAX_PATH];
+        DWORD OldLength;
 
         StringCchPrintfW(Kid, _countof(Kid), L"%ls\\relkid", Parent);
         ok(CreateDirectoryW(Kid, NULL), "CreateDirectory failed with %lu\n", GetLastError());
-        if (GetCurrentDirectoryW(_countof(OldDir), OldDir) && SetCurrentDirectoryW(Parent))
+        OldLength = GetCurrentDirectoryW(_countof(OldDir), OldDir);
+        if (OldLength == 0 || OldLength >= _countof(OldDir))
+            skip("cannot save the current directory\n");
+        else if (SetCurrentDirectoryW(Parent))
         {
             Err = SetNamedSecurityInfoW(L"relkid", SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
                                         NULL, NULL, &EmptyAcl, NULL);
             ok_dec(Err, ERROR_SUCCESS);
-            SetCurrentDirectoryW(OldDir);
+            ok(SetCurrentDirectoryW(OldDir), "cannot restore the current directory: %lu\n", GetLastError());
             Dacl = NULL;
             Sd = NULL;
             Err = GetNamedSecurityInfoW(Kid, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
@@ -350,31 +354,57 @@ static void TestInheritance(PCWSTR Base, PSID Admins, PSID System, PSID Users)
         StringCchPrintfW(Dos, _countof(Dos), L"%ls\\q..\\k", Parent);
         if (CreateDirectoryW(Dir1, NULL) && CreateDirectoryW(Dir2, NULL) && CreateDirectoryW(Kid1, NULL) && CreateDirectoryW(Kid2, NULL))
         {
+            EXPLICIT_ACCESSW KidEntry;
+            PACL KidAcl = NULL;
+            int Changed = 0;
+            DWORD DosErr;
+
+            /* "q" grants SYSTEM, "q." grants Administrators; both children start with one distinct ACE of their own */
             MakeEntry(&One, System, FILE_ALL_ACCESS, GRANT_ACCESS, SUB_CONTAINERS_AND_OBJECTS_INHERIT);
-            SetEntriesInAclW(1, &One, NULL, &OneAcl);
-            SetNamedSecurityInfoW(Dir1, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, OneAcl, NULL);
+            ok_dec(SetEntriesInAclW(1, &One, NULL, &OneAcl), ERROR_SUCCESS);
+            ok_dec(SetNamedSecurityInfoW(Dir1, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                         NULL, NULL, OneAcl, NULL), ERROR_SUCCESS);
             LocalFree(OneAcl);
             OneAcl = NULL;
             MakeEntry(&One, Admins, FILE_ALL_ACCESS, GRANT_ACCESS, SUB_CONTAINERS_AND_OBJECTS_INHERIT);
-            SetEntriesInAclW(1, &One, NULL, &OneAcl);
-            SetNamedSecurityInfoW(Dir2, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, OneAcl, NULL);
+            ok_dec(SetEntriesInAclW(1, &One, NULL, &OneAcl), ERROR_SUCCESS);
+            ok_dec(SetNamedSecurityInfoW(Dir2, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                         NULL, NULL, OneAcl, NULL), ERROR_SUCCESS);
             LocalFree(OneAcl);
 
-            SetNamedSecurityInfoW(Dos, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
-                                  NULL, NULL, &EmptyAcl, NULL);
+            MakeEntry(&KidEntry, Users, FILE_GENERIC_READ, GRANT_ACCESS, NO_INHERITANCE);
+            ok_dec(SetEntriesInAclW(1, &KidEntry, NULL, &KidAcl), ERROR_SUCCESS);
+            ok_dec(SetNamedSecurityInfoW(Kid1, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                         NULL, NULL, KidAcl, NULL), ERROR_SUCCESS);
+            ok_dec(SetNamedSecurityInfoW(Kid2, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                         NULL, NULL, KidAcl, NULL), ERROR_SUCCESS);
+            LocalFree(KidAcl);
 
-            GetNamedSecurityInfoW(Kid1, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &D1, NULL, &S1);
-            GetNamedSecurityInfoW(Kid2, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &D2, NULL, &S2);
-            /* the directory under "q" may only have inherited what "q" grants, and the one under "q." what "q." grants */
-            if (D1)
+            /* Windows finds no such path; either the name fails and nothing changes, or exactly one child changes */
+            DosErr = SetNamedSecurityInfoW(Dos, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                           NULL, NULL, &EmptyAcl, NULL);
+
+            ok_dec(GetNamedSecurityInfoW(Kid1, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &D1, NULL, &S1), ERROR_SUCCESS);
+            ok_dec(GetNamedSecurityInfoW(Kid2, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &D2, NULL, &S2), ERROR_SUCCESS);
+            ok(D1 != NULL && D2 != NULL, "a child has no DACL\n");
+            if (D1 && D2)
             {
-                ok(FindAce(D1, Admins, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) == NULL,
-                   "q\\k got an ACE that only q. grants\n");
-            }
-            if (D2)
-            {
-                ok(FindAce(D2, System, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) == NULL,
-                   "q.\\k got an ACE that only q grants\n");
+                BOOL Kid1Changed = D1->AceCount != 1 || FindAce(D1, Users, 0, FILE_GENERIC_READ) == NULL;
+                BOOL Kid2Changed = D2->AceCount != 1 || FindAce(D2, Users, 0, FILE_GENERIC_READ) == NULL;
+
+                Changed = Kid1Changed + Kid2Changed;
+                ok(Changed == (DosErr == ERROR_SUCCESS ? 1 : 0), "the name returned %lu and %d children changed\n", DosErr, Changed);
+                /* the one that changed took its own parent's ACE and only that one */
+                if (Kid1Changed)
+                {
+                    ok(FindAce(D1, System, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) != NULL, "q\\k did not inherit from q\n");
+                    ok(FindAce(D1, Admins, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) == NULL, "q\\k got an ACE that only q. grants\n");
+                }
+                if (Kid2Changed)
+                {
+                    ok(FindAce(D2, Admins, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) != NULL, "q.\\k did not inherit from q.\n");
+                    ok(FindAce(D2, System, INHERIT_BOTH | INHERITED_ACE, FILE_ALL_ACCESS) == NULL, "q.\\k got an ACE that only q grants\n");
+                }
             }
             if (S1)
                 LocalFree(S1);
