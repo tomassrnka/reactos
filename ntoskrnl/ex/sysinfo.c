@@ -909,6 +909,7 @@ ExpQuerySystemProcessInformation(
     _SEH2_VOLATILE PUNICODE_STRING ProcessImageName = NULL;
     PWCHAR szSrc;
     BOOLEAN Overflow = FALSE;
+    SIZE_T CommitCharge;
 
     _SEH2_TRY
     {
@@ -1057,9 +1058,11 @@ ExpQuerySystemProcessInformation(
                 SpiCurrent->QuotaPagedPoolUsage = Process->QuotaUsage[PsPagedPool];
                 SpiCurrent->QuotaPeakNonPagedPoolUsage = Process->QuotaPeak[PsNonPagedPool];
                 SpiCurrent->QuotaNonPagedPoolUsage = Process->QuotaUsage[PsNonPagedPool];
-                SpiCurrent->PagefileUsage = Process->QuotaUsage[PsPageFile];
-                SpiCurrent->PeakPagefileUsage = Process->QuotaPeak[PsPageFile];
-                SpiCurrent->PrivatePageCount = Process->CommitCharge;
+                /* The private commit charge, in bytes despite the field names */
+                CommitCharge = Process->CommitCharge;
+                SpiCurrent->PagefileUsage = CommitCharge << PAGE_SHIFT;
+                SpiCurrent->PeakPagefileUsage = Process->CommitChargePeak << PAGE_SHIFT;
+                SpiCurrent->PrivatePageCount = CommitCharge << PAGE_SHIFT;
 
                 /* Now do the threads */
                 ThreadInfo = (PSYSTEM_THREAD_INFORMATION)(SpiCurrent + 1);
