@@ -69,6 +69,7 @@ list(APPEND SOURCE
     TrackPopupMenuEx.c
     UserHandleGrantAccess.c
     VirtualKey.c
+    WmPrint.c
     WndProc.c
     wsprintf.c)
 

@@ -1111,8 +1111,11 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
    RECT WindowRect, CurrentRect, TempRect;
    BOOL Active = FALSE;
 
-   if (!IntIsWindowVisible(pWnd) ||
-       (pWnd->state & WNDS_NONCPAINT && !(pWnd->state & WNDS_FORCEMENUDRAW)) ||
+   /* DC_NOVISIBLE: print the frame of a hidden window too (WM_PRINT) */
+   if ((Flags == -1 || !(Flags & DC_NOVISIBLE)) && !IntIsWindowVisible(pWnd))
+      return 0;
+
+   if ((pWnd->state & WNDS_NONCPAINT && !(pWnd->state & WNDS_FORCEMENUDRAW)) ||
         IntEqualRect(&pWnd->rcWindow, &pWnd->rcClient) )
       return 0;
 

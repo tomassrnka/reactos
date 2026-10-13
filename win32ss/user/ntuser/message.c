@@ -854,7 +854,11 @@ static LRESULT handle_internal_message( PWND pWnd, UINT msg, WPARAM wparam, LPAR
              return co_UserFreeWindow(pWnd, PsGetCurrentProcessWin32Process(), PsGetCurrentThreadWin32Thread(), TRUE);
           else
              co_UserDestroyWindow(pWnd);
+          break;
        }
+       case WM_ASYNC_PRINTWINDOW:
+          /* Sent by PrintWindow; wParam is the request id */
+          return IntHandlePrintWindowRequest(pWnd, (ULONG)wparam);
     }
     return 0;
 }

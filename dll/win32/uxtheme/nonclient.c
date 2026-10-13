@@ -154,10 +154,9 @@ HRESULT WINAPI ThemeDrawCaptionText(PDRAW_CONTEXT pcontext, RECT* pRect, int iPa
     return S_OK;
 }
 
-void
-ThemeInitDrawContext(PDRAW_CONTEXT pcontext,
-                     HWND hWnd,
-                     HRGN hRgn)
+static void
+ThemeInitDrawContextData(PDRAW_CONTEXT pcontext,
+                         HWND hWnd)
 {
     pcontext->wi.cbSize = sizeof(pcontext->wi);
     GetWindowInfo(hWnd, &pcontext->wi);
@@ -168,6 +167,14 @@ ThemeInitDrawContext(PDRAW_CONTEXT pcontext,
 
     pcontext->CaptionHeight = pcontext->wi.cyWindowBorders;
     pcontext->CaptionHeight += GetSystemMetrics(pcontext->wi.dwExStyle & WS_EX_TOOLWINDOW ? SM_CYSMCAPTION : SM_CYCAPTION );
+}
+
+void
+ThemeInitDrawContext(PDRAW_CONTEXT pcontext,
+                     HWND hWnd,
+                     HRGN hRgn)
+{
+    ThemeInitDrawContextData(pcontext, hWnd);
 
     if (hRgn <= (HRGN)1)
     {
@@ -629,6 +636,26 @@ ThemeHandleNCPaint(HWND hWnd, HRGN hRgn)
     return 0;
 }
 
+/* WM_NCUAHDRAWFRAME: draw the frame into the given DC at its window origin (WM_PRINT) */
+static LRESULT
+ThemeHandleNCPrint(HWND hWnd, HDC hDC, LPARAM lParam)
+{
+    DRAW_CONTEXT context;
+    RECT rcCurrent;
+
+    ThemeInitDrawContextData(&context, hWnd);
+    context.Active = (lParam & DC_ACTIVE) != 0;
+    context.hRgn = NULL;
+    context.hDC = hDC;
+    context.wi.dwStyle |= WS_VISIBLE;
+
+    rcCurrent = context.wi.rcWindow;
+    OffsetRect(&rcCurrent, -context.wi.rcWindow.left, -context.wi.rcWindow.top);
+
+    ThemePaintWindow(&context, &rcCurrent, TRUE);
+    return 0;
+}
+
 static LRESULT
 ThemeHandleNcMouseMove(HWND hWnd, DWORD ht, POINT* pt)
 {
@@ -1022,10 +1049,6 @@ ThemeWndProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, WNDPROC DefWndPr
     // WM_NCUAHDRAWCAPTION : wParam are DC_* flags.
     //
     case WM_NCUAHDRAWCAPTION:
-    //
-    // WM_NCUAHDRAWFRAME : wParam is HDC, lParam are DC_ACTIVE and or DC_REDRAWHUNGWND.
-    //
-    case WM_NCUAHDRAWFRAME:
     case WM_NCACTIVATE:
 
         if ((GetWindowLongW(hWnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION)
@@ -1033,6 +1056,11 @@ ThemeWndProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, WNDPROC DefWndPr
 
         ThemeHandleNCPaint(hWnd, (HRGN)1);
         return TRUE;
+    //
+    // WM_NCUAHDRAWFRAME : wParam is HDC, lParam are DC_ACTIVE and or DC_REDRAWHUNGWND.
+    //
+    case WM_NCUAHDRAWFRAME:
+        return ThemeHandleNCPrint(hWnd, (HDC)wParam, lParam);
     case WM_NCMOUSEMOVE:
     {
         POINT Point;
