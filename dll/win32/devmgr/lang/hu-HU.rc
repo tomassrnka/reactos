@@ -15,6 +15,8 @@ BEGIN
     IDS_DEVCODE2 " (Code %2!u!)"
     IDS_ENABLEDEVICE "Eszköz használata (engedélyezve)"
     IDS_DISABLEDEVICE "Ne használja ezt az eszközt (letiltva)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Ismeretlen eszköz"
     IDS_NODRIVERLOADED "Nincsenek illesztőprogramok telepítve ehhez az eszközhöz."
     IDS_DEVONPARENT "a %1-en"

@@ -18,6 +18,8 @@ BEGIN
     IDS_DEVCODE2 " (Kód %2!u!)"
     IDS_ENABLEDEVICE "Používat toto zařízení (zapnout)"
     IDS_DISABLEDEVICE "Nepoužívat toto zařízení (vypnout)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Neznámé zařízení"
     IDS_NODRIVERLOADED "Pro toto zařízení nejsou nainstalovány žádné ovladače."
     IDS_DEVONPARENT "na %1"

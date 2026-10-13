@@ -17,6 +17,8 @@ BEGIN
     IDS_DEVCODE2 " (Kode %2!u!)"
     IDS_ENABLEDEVICE "Përdor këtët pjesë (mundëso)"
     IDS_DISABLEDEVICE "Mos përdor këtë pjesë (gjymto)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Pjesë panjohur"
     IDS_NODRIVERLOADED "Komanduesit e kësaj pajisje nuk kane instaluar."
     IDS_DEVONPARENT "ndeyur %1"
