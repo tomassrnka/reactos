@@ -60,3 +60,40 @@ WerGetFlags(
     *pdwFlags = BaseWerFlags;
     return S_OK;
 }
+
+/*
+ * @unimplemented
+ *
+ * A runtime exception module is loaded by the error reporting service when the process crashes. The
+ * crash reporter here (drwtsn32) does not load such modules, so a registration could not have any
+ * effect: say so instead of accepting it.
+ */
+HRESULT
+WINAPI
+WerRegisterRuntimeExceptionModule(
+    _In_ PCWSTR pwszOutOfProcessCallbackDll,
+    _In_opt_ PVOID pContext)
+{
+    if (!pwszOutOfProcessCallbackDll || !*pwszOutOfProcessCallbackDll)
+        return E_INVALIDARG;
+
+    DPRINT1("WerRegisterRuntimeExceptionModule(%S): the crash reporter does not load runtime exception modules\n",
+            pwszOutOfProcessCallbackDll);
+    return E_NOTIMPL;
+}
+
+/*
+ * @unimplemented
+ */
+HRESULT
+WINAPI
+WerUnregisterRuntimeExceptionModule(
+    _In_ PCWSTR pwszOutOfProcessCallbackDll,
+    _In_opt_ PVOID pContext)
+{
+    if (!pwszOutOfProcessCallbackDll || !*pwszOutOfProcessCallbackDll)
+        return E_INVALIDARG;
+
+    /* Nothing can have been registered */
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}

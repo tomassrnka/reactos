@@ -75,6 +75,7 @@ list(APPEND SOURCE
     TzSetPrivilege.c
     UEFIFirmware.c
     WerFlags.c
+    WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
     WriteFile.c
 )
