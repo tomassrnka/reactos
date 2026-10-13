@@ -449,6 +449,35 @@ RtlAddAuditAccessAce(IN PACL Acl,
  */
 NTSTATUS
 NTAPI
+RtlAddMandatoryAce(IN OUT PACL Acl,
+                   IN ULONG Revision,
+                   IN ULONG Flags,
+                   IN PSID LabelSid,
+                   IN UCHAR AceType,
+                   IN ULONG MandatoryFlags)
+{
+    PAGED_CODE_RTL();
+
+    /* Only integrity labels can be added, and only with known policy bits */
+    if (AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+        return STATUS_INVALID_PARAMETER;
+    if (MandatoryFlags & ~SYSTEM_MANDATORY_LABEL_VALID_MASK)
+        return STATUS_INVALID_PARAMETER;
+
+    /* The layout of the ACE is the one of an access ACE, with the policy as mask */
+    return RtlpAddKnownAce(Acl,
+                           Revision,
+                           Flags,
+                           MandatoryFlags,
+                           LabelSid,
+                           SYSTEM_MANDATORY_LABEL_ACE_TYPE);
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
 RtlAddAuditAccessAceEx(IN PACL Acl,
                        IN ULONG Revision,
                        IN ULONG Flags,

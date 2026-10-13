@@ -1056,6 +1056,35 @@ AddAccessAllowedAce(PACL pAcl,
     return TRUE;
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+/*
+ * @implemented
+ */
+BOOL WINAPI
+AddMandatoryAce(PACL pAcl,
+                DWORD dwAceRevision,
+                DWORD dwAceFlags,
+                DWORD dwMandatoryPolicy,
+                PSID pLabelSid)
+{
+    NTSTATUS Status;
+
+    Status = RtlAddMandatoryAce(pAcl,
+                                dwAceRevision,
+                                dwAceFlags,
+                                pLabelSid,
+                                SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                                dwMandatoryPolicy);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+
+    return TRUE;
+}
+#endif
+
 /*
  * @implemented
  */
