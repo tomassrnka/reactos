@@ -2966,6 +2966,7 @@ void Test_collided_unwind(void)
         _SEH2_END;
     }
 
+    ok(ret == 1, "setjmp returned %d instead of the longjmp value\n", ret);
     ok(Flags == (1 | 2 | 8), "Flags = %x\n", Flags);
     ok(Count == 2, "Count = %d\n", Count);
 #ifdef _M_IX86
