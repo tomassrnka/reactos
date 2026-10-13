@@ -526,6 +526,8 @@ SeCaptureSecurityDescriptor(
         {
             /* Get the size and probe if user mode */
             SaclSize = DetermineACLSize(DescriptorCopy.Sacl, CurrentMode);
+            if (DescriptorCopy.Sacl && SaclSize < sizeof(ACL))
+                _SEH2_YIELD(return STATUS_INVALID_ACL);
             DescriptorSize += ROUND_UP(SaclSize, sizeof(ULONG));
         }
 
@@ -533,6 +535,8 @@ SeCaptureSecurityDescriptor(
         {
             /* Get the size and probe if user mode */
             DaclSize = DetermineACLSize(DescriptorCopy.Dacl, CurrentMode);
+            if (DescriptorCopy.Dacl && DaclSize < sizeof(ACL))
+                _SEH2_YIELD(return STATUS_INVALID_ACL);
             DescriptorSize += ROUND_UP(DaclSize, sizeof(ULONG));
         }
     }

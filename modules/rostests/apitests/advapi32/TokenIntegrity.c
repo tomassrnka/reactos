@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <aclapi.h>
 
 static SID_IDENTIFIER_AUTHORITY MandatoryLabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
 
@@ -123,6 +124,56 @@ static void TestEventLabel(void)
     ok(Rid == SECURITY_MANDATORY_LOW_RID, "Event label level 0x%lx\n", Rid);
     ok(Mask == SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, "Event label policy 0x%lx\n", Mask);
     ok(AceCount == 1, "%lu ACEs\n", AceCount);
+
+    /* The same through GetSecurityInfo and SetSecurityInfo, as Chromium's sandbox uses them */
+    {
+        PSECURITY_DESCRIPTOR Sd = NULL;
+        PACL Sacl = NULL;
+        PSYSTEM_MANDATORY_LABEL_ACE Ace;
+        DWORD Error;
+
+        Error = GetSecurityInfo(hEvent, SE_KERNEL_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, &Sacl, &Sd);
+        ok(Error == ERROR_SUCCESS, "GetSecurityInfo(LABEL) failed: %lu\n", Error);
+        ok(Sacl != NULL, "GetSecurityInfo(LABEL) gave no SACL\n");
+        if (Error == ERROR_SUCCESS && Sacl && Sacl->AceCount == 1 && GetAce(Sacl, 0, (PVOID *)&Ace))
+        {
+            ok(Ace->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE, "ACE type %u\n", Ace->Header.AceType);
+            ok(*GetSidSubAuthority((PSID)&Ace->SidStart, 0) == SECURITY_MANDATORY_LOW_RID, "Label level 0x%lx\n",
+               *GetSidSubAuthority((PSID)&Ace->SidStart, 0));
+            Ace->Mask |= SYSTEM_MANDATORY_LABEL_NO_READ_UP;
+            Error = SetSecurityInfo(hEvent, SE_KERNEL_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, Sacl);
+            ok(Error == ERROR_SUCCESS, "SetSecurityInfo(LABEL) failed: %lu\n", Error);
+            ok(GetObjectLabel(hEvent, &Rid, &Mask, &AceCount), "No label after SetSecurityInfo\n");
+            ok(Rid == SECURITY_MANDATORY_LOW_RID, "Label level 0x%lx after SetSecurityInfo\n", Rid);
+            ok(Mask == (SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP),
+               "Label policy 0x%lx after SetSecurityInfo\n", Mask);
+        }
+        if (Sd)
+            LocalFree(Sd);
+    }
+
+    /* A label above the caller's own level needs SeRelabelPrivilege, which is not enabled here */
+    {
+        HANDLE hToken;
+        DWORD Level = 0, Attributes;
+
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+        {
+            if (GetIntegrityLevel(hToken, &Level, &Attributes) && Level < SECURITY_MANDATORY_SYSTEM_RID)
+            {
+                SetLastError(0xdeadbeef);
+                ok(!SetObjectLabel(hEvent, SECURITY_MANDATORY_SYSTEM_RID, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP),
+                   "Setting a label above the caller's level succeeded\n");
+                ok(GetLastError() == ERROR_INVALID_LABEL, "Error %lu\n", GetLastError());
+            }
+            else
+            {
+                skip("Running at system level\n");
+            }
+            CloseHandle(hToken);
+        }
+    }
+
     CloseHandle(hEvent);
 }
 

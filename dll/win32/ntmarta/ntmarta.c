@@ -41,7 +41,8 @@ SetSecurityAccessMask(IN SECURITY_INFORMATION SecurityInformation,
 {
     *DesiredAccess = 0;
 
-    if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
+    if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                               LABEL_SECURITY_INFORMATION))
         *DesiredAccess |= WRITE_OWNER;
 
     if (SecurityInformation & DACL_SECURITY_INFORMATION)
@@ -60,7 +61,8 @@ QuerySecurityAccessMask(IN SECURITY_INFORMATION SecurityInformation,
     *DesiredAccess = 0;
 
     if (SecurityInformation & (OWNER_SECURITY_INFORMATION |
-                               GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION))
+                               GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                               LABEL_SECURITY_INFORMATION))
     {
         *DesiredAccess |= READ_CONTROL;
     }
@@ -803,7 +805,8 @@ AccRewriteGetHandleRights(HANDLE handle,
             }
         }
 
-        if (SecurityInfo & SACL_SECURITY_INFORMATION && ppSacl != NULL)
+        /* A label comes in the SACL */
+        if ((SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) && ppSacl != NULL)
         {
             *ppSacl = NULL;
             if (!GetSecurityDescriptorSacl(pSD,

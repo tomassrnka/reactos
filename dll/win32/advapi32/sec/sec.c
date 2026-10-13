@@ -380,7 +380,8 @@ QuerySecurityAccessMask(IN SECURITY_INFORMATION SecurityInformation,
     *DesiredAccess = 0;
 
     if (SecurityInformation & (OWNER_SECURITY_INFORMATION |
-                               GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION))
+                               GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                               LABEL_SECURITY_INFORMATION))
     {
         *DesiredAccess |= READ_CONTROL;
     }
@@ -400,7 +401,8 @@ SetSecurityAccessMask(IN SECURITY_INFORMATION SecurityInformation,
 {
     *DesiredAccess = 0;
 
-    if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
+    if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                               LABEL_SECURITY_INFORMATION))
         *DesiredAccess |= WRITE_OWNER;
 
     if (SecurityInformation & DACL_SECURITY_INFORMATION)
