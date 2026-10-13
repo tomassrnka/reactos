@@ -62,6 +62,7 @@ add_custom_target(advapi32_rpc_headers DEPENDS
 add_library(win32_registry STATIC
     reg/hkcr.c
     reg/reg.c
+    reg/regtrans.c
 )
 
 add_dependencies(win32_registry advapi32_rpc_headers)

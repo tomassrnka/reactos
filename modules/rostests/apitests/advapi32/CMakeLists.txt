@@ -9,6 +9,7 @@ list(APPEND SOURCE
     LockServiceDatabase.c
     QueryServiceConfig2.c
     RegCreateKeyEx.c
+    RegCreateKeyTransacted.c
     RegEnumKey.c
     RegEnumValueW.c
     RegOpenKeyExW.c
