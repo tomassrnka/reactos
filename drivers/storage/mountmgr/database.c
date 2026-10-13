@@ -2102,13 +2102,18 @@ VOID
 DeleteNoDriveLetterEntry(IN PMOUNTDEV_UNIQUE_ID UniqueId)
 {
     RTL_QUERY_REGISTRY_TABLE QueryTable[2];
+    ULONG Pass;
 
     RtlZeroMemory(QueryTable, sizeof(QueryTable));
     QueryTable[0].QueryRoutine = DeleteNoDriveLetterEntryRoutine;
 
-    RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
-                           DatabasePath,
-                           QueryTable,
-                           UniqueId,
-                           NULL);
+    /* A deletion during the enumeration can skip the next value, so repeat */
+    for (Pass = 0; Pass < 8 && HasNoDriveLetterEntry(UniqueId); Pass++)
+    {
+        RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
+                               DatabasePath,
+                               QueryTable,
+                               UniqueId,
+                               NULL);
+    }
 }

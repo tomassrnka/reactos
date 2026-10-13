@@ -1013,6 +1013,13 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                                                HasGuid,
                                                &StableGuid);
 
+    /* If if failed, ensure we don't take symlinks into account */
+    if (!NT_SUCCESS(Status))
+    {
+        SymLinks = NULL;
+        SymLinkCount = 0;
+    }
+
     /* If our device is a CD-ROM */
     if (RtlPrefixUnicodeString(&DeviceCdRom, &TargetDeviceName, TRUE))
     {
@@ -1096,13 +1103,6 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
         FreePool(SuggestedLinkName.Buffer);
     }
 
-    /* If if failed, ensure we don't take symlinks into account */
-    if (!NT_SUCCESS(Status))
-    {
-        SymLinks = NULL;
-        SymLinkCount = 0;
-    }
-
     /* Now we queried them, remove the symlinks */
     SavedLinkInformation = RemoveSavedLinks(DeviceExtension, UniqueId);
 
@@ -1112,68 +1112,64 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
     /* For all the symlinks */
     for (i = 0; i < SymLinkCount; i++)
     {
-        /* Check if our device is a volume */
-        if (MOUNTMGR_IS_VOLUME_NAME(&(SymLinks[i])))
-        {
-            /* Keep one volume name: the database could not be read back before,
-             * so a new name was written at every boot */
-            if (IsVolumeName)
-            {
-                RtlDeleteRegistryValue(RTL_REGISTRY_ABSOLUTE, DatabasePath, SymLinks[i].Buffer);
-                FreePool(SymLinks[i].Buffer);
-                continue;
-            }
+        BOOLEAN IsVolName, IsLetter, Duplicate = FALSE;
+        ULONG j;
 
-            IsVolumeName = TRUE;
-        }
-        /* If it has a drive letter */
-        else if (IsDriveLetter(&(SymLinks[i])))
+        IsVolName = MOUNTMGR_IS_VOLUME_NAME(&(SymLinks[i]));
+        IsLetter = !IsVolName && IsDriveLetter(&(SymLinks[i]));
+
+        /* The stable GUID name can also be stored in the database */
+        for (j = 0; j < i; j++)
         {
-            if (IsDrvLetter)
+            if (SymLinks[j].Buffer && RtlEqualUnicodeString(&(SymLinks[j]), &(SymLinks[i]), TRUE))
             {
+                Duplicate = TRUE;
+                break;
+            }
+        }
+
+        /* A device has one drive letter at most */
+        if (Duplicate || (IsLetter && IsDrvLetter))
+        {
+            if (!Duplicate)
                 DeleteFromLocalDatabase(&(SymLinks[i]), UniqueId);
-                continue;
-            }
-            else
-            {
-                IsDrvLetter = TRUE;
-            }
+            FreePool(SymLinks[i].Buffer);
+            SymLinks[i].Buffer = NULL;
+            continue;
         }
 
         /* And recreate the symlink to our device */
         Status = GlobalCreateSymbolicLink(&(SymLinks[i]), &TargetDeviceName);
         if (!NT_SUCCESS(Status))
         {
-            BOOLEAN LinkError = TRUE;
+            BOOLEAN Adopted = FALSE, OtherDevice = FALSE;
 
-            if ((SavedLinkInformation && !RedirectSavedLink(SavedLinkInformation, &(SymLinks[i]), &TargetDeviceName)) ||
-                !SavedLinkInformation)
+            if (SavedLinkInformation && RedirectSavedLink(SavedLinkInformation, &(SymLinks[i]), &TargetDeviceName))
             {
+                Adopted = TRUE;
+            }
+            else
+            {
+                /* The name exists: keep it only if it already leads to this device */
                 Status = QueryDeviceInformation(&(SymLinks[i]), &DeviceName, NULL, NULL, NULL, NULL, NULL, NULL);
                 if (NT_SUCCESS(Status))
                 {
-                    LinkError = RtlEqualUnicodeString(&TargetDeviceName, &DeviceName, TRUE);
+                    Adopted = RtlEqualUnicodeString(&TargetDeviceName, &DeviceName, TRUE);
+                    OtherDevice = !Adopted;
                     FreePool(DeviceName.Buffer);
                 }
-
-                if (!LinkError)
-                {
-                    if (IsDriveLetter(&(SymLinks[i])))
-                    {
-                        IsDrvLetter = FALSE;
-                        DeleteFromLocalDatabase(&(SymLinks[i]), UniqueId);
-                    }
-
-                    FreePool(SymLinks[i].Buffer);
-                    continue;
-                }
             }
-        }
 
-        /* Check if was offline */
-        if (IsOffline(&(SymLinks[i])))
-        {
-            IsOff = TRUE;
+            if (!Adopted)
+            {
+                /* Another device has this letter now */
+                if (IsLetter && OtherDevice)
+                    DeleteFromLocalDatabase(&(SymLinks[i]), UniqueId);
+
+                FreePool(SymLinks[i].Buffer);
+                SymLinks[i].Buffer = NULL;
+                continue;
+            }
         }
 
         /* Finally, associate this symlink with the device */
@@ -1182,8 +1178,21 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
         {
             GlobalDeleteSymbolicLink(&(SymLinks[i]));
             FreePool(SymLinks[i].Buffer);
+            SymLinks[i].Buffer = NULL;
             continue;
         }
+
+        /* Check if was offline */
+        if (IsOffline(&(SymLinks[i])))
+        {
+            IsOff = TRUE;
+        }
+
+        /* Only links that are in place count */
+        if (IsVolName)
+            IsVolumeName = TRUE;
+        else if (IsLetter)
+            IsDrvLetter = TRUE;
 
         SymlinkInformation->Name = SymLinks[i];
         SymlinkInformation->Online = TRUE;
