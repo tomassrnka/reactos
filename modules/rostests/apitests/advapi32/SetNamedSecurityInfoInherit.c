@@ -310,6 +310,12 @@ static void TestInheritance(PCWSTR Base, PSID Admins, PSID System, PSID Users)
         RemoveDirectoryW(Dir1);
     }
 
+    /* an empty name is an error, with the last error cleared before the call too */
+    SetLastError(ERROR_SUCCESS);
+    Err = SetNamedSecurityInfoW(L"", SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                NULL, NULL, &EmptyAcl, NULL);
+    ok(Err != ERROR_SUCCESS, "an empty name succeeded\n");
+
     /* a relative name is resolved once: it works from the current directory */
     {
         WCHAR OldDir[MAX_PATH], Kid[MAX_PATH];

@@ -1511,10 +1511,11 @@ AccpResolvePath(IN PCWSTR Name,
         Length = GetFullPathNameW(Name, Capacity, Buffer, NULL);
         if (Length == 0)
         {
+            /* GetFullPathNameW can fail (an empty name) without setting an error */
             DWORD Ret = GetLastError();
 
             LocalFree(Buffer);
-            return Ret;
+            return Ret != ERROR_SUCCESS ? Ret : ERROR_INVALID_NAME;
         }
         if (Length < Capacity)
             break;
