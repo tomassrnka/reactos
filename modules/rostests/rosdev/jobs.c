@@ -14,7 +14,7 @@ WCHAR g_Args[512];
 static UINT KillTree(DWORD pid, UINT *failed, int depth);
 static WCHAR g_LogPath[MAX_PATH];
 
-typedef struct { char *p; SIZE_T len, cap; BOOL failed; } BUF;
+typedef struct { char *p; SIZE_T len, cap; BOOL failed; DWORD err; } BUF;
 
 static void BufAppend(BUF *b, const void *data, SIZE_T n)
 {
@@ -52,6 +52,13 @@ static void BufPrintf(BUF *b, const char *fmt, ...)
     va_end(ap);
     tmp[sizeof(tmp) - 1] = 0;
     BufStr(b, tmp);
+}
+
+/* The listing cannot be complete: the job ends in an error result instead of returning a prefix. */
+static void BufFail(BUF *b, DWORD e)
+{
+    b->failed = TRUE;
+    if (!b->err) b->err = e ? e : ERROR_GEN_FAILURE;
 }
 
 static void BufFree(BUF *b)
@@ -133,7 +140,7 @@ static BOOL FinishErr(CONN *c, UINT64 id, DWORD code, const char *what);
 /* A text result: an allocation failure while building it is an error, never a silently short text. */
 static BOOL FinishText(CONN *c, UINT64 id, REPLY *r, const BUF *b)
 {
-    if (b->failed) return FinishErr(c, id, ERROR_OUTOFMEMORY, "out of memory while building the output");
+    if (b->failed) return FinishErr(c, id, b->err ? b->err : ERROR_OUTOFMEMORY, "the output could not be built completely (out of memory or enumeration error)");
     return Finish(c, r, b->p, b->len);
 }
 
@@ -616,7 +623,9 @@ static BOOL DoPs(CONN *c, UINT64 id)
             BufWide(&b, pe.szExeFile);
             BufStr(&b, "\n");
         } while (Process32NextW(snap, &pe));
+        if (GetLastError() != ERROR_NO_MORE_FILES) BufFail(&b, GetLastError());
     }
+    else BufFail(&b, GetLastError());
     CloseHandle(snap);
     ResultOk(&r, id);
     ok = FinishText(c, id, &r, &b);
@@ -661,7 +670,9 @@ static BOOL DoModules(CONN *c, const RMSG *j, UINT64 id)
             BufWide(&b, me.szExePath);
             BufStr(&b, "\n");
         } while (Module32NextW(snap, &me));
+        if (GetLastError() != ERROR_NO_MORE_FILES) BufFail(&b, GetLastError());
     }
+    else BufFail(&b, GetLastError());
     CloseHandle(snap);
     ResultOk(&r, id);
     ok = FinishText(c, id, &r, &b);
@@ -808,7 +819,7 @@ static BOOL DoEvents(CONN *c, const RMSG *j, UINT64 id)
     const char *log = MsgGet(j, "log"), *src = MsgGet(j, "source");
     UINT64 want = MsgGetU64(j, "count", 20), have = 0;
     WCHAR *wlog = Utf8ToWide(log && *log ? log : "Application"), *wsrc = src && *src ? Utf8ToWide(src) : NULL;
-    HANDLE h = OpenEventLogW(NULL, wlog);
+    HANDLE h = NULL;
     DWORD rbSize = 65536;
     BYTE *rb = HeapAlloc(GetProcessHeap(), 0, rbSize);
     BUF b = { 0 };
@@ -816,7 +827,10 @@ static BOOL DoEvents(CONN *c, const RMSG *j, UINT64 id)
     BOOL ok, more = TRUE;
     DWORD err = 0;
 
-    if (h == NULL || !rb) { err = GetLastError(); goto fail; }
+    /* a dropped source filter would return unrelated records as success */
+    if (!wlog || (src && *src && !wsrc) || !rb) { err = ERROR_OUTOFMEMORY; goto fail; }
+    h = OpenEventLogW(NULL, wlog);
+    if (h == NULL) { err = GetLastError(); goto fail; }
     while (more && have < want)
     {
         DWORD read = 0, need = 0;
@@ -874,7 +888,7 @@ fail:
 done:
     if (h) CloseEventLog(h);
     if (rb) HeapFree(GetProcessHeap(), 0, rb);
-    HeapFree(GetProcessHeap(), 0, wlog);
+    if (wlog) HeapFree(GetProcessHeap(), 0, wlog);
     if (wsrc) HeapFree(GetProcessHeap(), 0, wsrc);
     BufFree(&b);
     return ok;
@@ -894,7 +908,14 @@ static void ListDir(BUF *b, const WCHAR *dir)
     _snwprintf(pat, MAX_PATH, L"%s\\*", dir);
     pat[MAX_PATH - 1] = 0;
     f = FindFirstFileW(pat, &fd);
-    if (f == INVALID_HANDLE_VALUE) { BufPrintf(b, "# error %lu\n", GetLastError()); return; }
+    if (f == INVALID_HANDLE_VALUE)
+    {
+        DWORD e = GetLastError();
+        /* a missing directory is an ordinary answer and is listed as such; running out of memory is not */
+        if (e == ERROR_NOT_ENOUGH_MEMORY || e == ERROR_OUTOFMEMORY) BufFail(b, e);
+        else BufPrintf(b, "# error %lu\n", e);
+        return;
+    }
     do
     {
         FILETIME ft = fd.ftLastWriteTime;
@@ -908,6 +929,7 @@ static void ListDir(BUF *b, const WCHAR *dir)
         BufWide(b, fd.cFileName);
         BufStr(b, "\n");
     } while (FindNextFileW(f, &fd));
+    if (GetLastError() != ERROR_NO_MORE_FILES) BufFail(b, GetLastError());
     FindClose(f);
 }
 
@@ -931,7 +953,9 @@ static BOOL DoDumps(CONN *c, const RMSG *j, UINT64 id)
     if (dir && *dir)
     {
         WCHAR *w = Utf8ToWide(dir);
-        if (w) { ListDir(&b, w); HeapFree(GetProcessHeap(), 0, w); }
+        if (!w) return FinishErr(c, id, ERROR_OUTOFMEMORY, "cannot convert the directory name");
+        ListDir(&b, w);
+        HeapFree(GetProcessHeap(), 0, w);
     }
     else
     {

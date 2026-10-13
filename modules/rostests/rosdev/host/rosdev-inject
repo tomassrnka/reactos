@@ -129,7 +129,13 @@ def main():
             time.sleep(0.2)
         else:
             sys.exit("rosdev-inject: %s did not appear" % part)
-        fs = run("blkid", "-o", "value", "-s", "TYPE", part).strip()
+        fs = ""
+        for _ in range(50):             # the node can exist before the partition is readable
+            r = subprocess.run(["blkid", "-o", "value", "-s", "TYPE", part], capture_output=True, text=True)
+            if r.returncode == 0:
+                fs = r.stdout.strip()
+                break
+            time.sleep(0.2)
         if fs == "ntfs":
             run("lowntfs-3g", "-o", "ignore_case", part, mnt)
         elif fs == "vfat":
