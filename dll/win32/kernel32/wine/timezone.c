@@ -556,8 +556,8 @@ TIME_ZoneKeyMatches(
 }
 
 /*
- * Registry written before TimeZoneKeyName existed (the current setup does not
- * write it): the Time Zones entry that describes the zone in effect. Names
+ * A registry written before TimeZoneKeyName existed (no value at all): the
+ * Time Zones entry that describes the zone in effect. Names
  * alone are ambiguous (two zones can share a localized standard name), so the
  * biases and transitions must match as well, and nothing is returned unless
  * exactly one entry matches.
@@ -642,6 +642,7 @@ GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION pTimeZoneInformatio
     OBJECT_ATTRIBUTES ObjectAttributes;
     WCHAR KeyName[ARRAYSIZE(pTimeZoneInformation->TimeZoneKeyName)];
     ULONG DynamicDisabled = 0, AutoDisabled = 0;
+    BOOL HaveKeyName = FALSE;
     HANDLE Key;
     DWORD Result;
 
@@ -653,15 +654,20 @@ GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION pTimeZoneInformatio
     InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
     if (NT_SUCCESS(NtOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
     {
-        /* Values that are missing or malformed leave their defaults */
-        if (!TIME_QueryStringValue(Key, L"TimeZoneKeyName", KeyName, ARRAYSIZE(KeyName)))
+        /*
+         * Values that are missing or malformed leave their defaults. An empty
+         * key name is a zone without one (on Windows SetTimeZoneInformation
+         * stores that); a missing one is a registry from before it existed.
+         */
+        HaveKeyName = TIME_QueryStringValue(Key, L"TimeZoneKeyName", KeyName, ARRAYSIZE(KeyName));
+        if (!HaveKeyName)
             KeyName[0] = UNICODE_NULL;
         TIME_QueryDwordValue(Key, L"DynamicDaylightTimeDisabled", &DynamicDisabled);
         TIME_QueryDwordValue(Key, L"DisableAutoDaylightTimeSet", &AutoDisabled);
         NtClose(Key);
     }
 
-    if (!KeyName[0])
+    if (!HaveKeyName)
         TIME_FindTimeZoneKeyName(&TimeZoneInformation, KeyName, ARRAYSIZE(KeyName));
 
     RtlZeroMemory(pTimeZoneInformation, sizeof(*pTimeZoneInformation));
@@ -669,10 +675,11 @@ GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION pTimeZoneInformatio
     RtlCopyMemory(pTimeZoneInformation->TimeZoneKeyName, KeyName, sizeof(KeyName));
     pTimeZoneInformation->DynamicDaylightTimeDisabled = (DynamicDisabled || AutoDisabled);
 
-    /* With automatic daylight saving adjustment disabled no daylight saving time is in use */
-    if (pTimeZoneInformation->DynamicDaylightTimeDisabled)
-        return TIME_ZONE_ID_UNKNOWN;
-
+    /*
+     * The flag says only that the transition dates are fixed, not that there
+     * is no daylight saving time: as on Windows, the zone in effect is the one
+     * GetTimeZoneInformation reports.
+     */
     return Result;
 }
 
