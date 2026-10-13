@@ -8,6 +8,7 @@ list(APPEND SOURCE
     CancelIoEx.c
     ConsoleCP.c
     CreateEventMutexEx.c
+    CreateRemoteThreadEx.c
     CreateProcess.c
     CreateWaitableTimerEx.c
     DebugTrapInterrupts.c

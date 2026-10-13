@@ -164,6 +164,31 @@ CreateRemoteThread(IN HANDLE hProcess,
                    IN DWORD dwCreationFlags,
                    OUT LPDWORD lpThreadId)
 {
+    return CreateRemoteThreadEx(hProcess,
+                                lpThreadAttributes,
+                                dwStackSize,
+                                lpStartAddress,
+                                lpParameter,
+                                dwCreationFlags,
+                                NULL,
+                                lpThreadId);
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+CreateRemoteThreadEx(
+    _In_ HANDLE hProcess,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    _In_ SIZE_T dwStackSize,
+    _In_ LPTHREAD_START_ROUTINE lpStartAddress,
+    _In_opt_ LPVOID lpParameter,
+    _In_ DWORD dwCreationFlags,
+    _In_opt_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _Out_opt_ LPDWORD lpThreadId)
+{
     NTSTATUS Status;
     INITIAL_TEB InitialTeb;
     CONTEXT Context;
@@ -180,9 +205,17 @@ CreateRemoteThread(IN HANDLE hProcess,
     ULONG ReturnLength;
     SIZE_T ReturnSize;
 
-    DPRINT("CreateRemoteThread: hProcess: %p dwStackSize: %lu lpStartAddress"
+    DPRINT("CreateRemoteThreadEx: hProcess: %p dwStackSize: %Iu lpStartAddress"
            ": %p lpParameter: %p, dwCreationFlags: %lx\n", hProcess,
            dwStackSize, lpStartAddress, lpParameter, dwCreationFlags);
+
+    /* InitializeProcThreadAttributeList is not implemented, so no caller
+     * can hold a list this function could read */
+    if (lpAttributeList)
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return NULL;
+    }
 
     /* Clear the Context */
     RtlZeroMemory(&Context, sizeof(Context));
