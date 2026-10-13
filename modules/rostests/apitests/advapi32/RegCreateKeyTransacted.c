@@ -26,6 +26,12 @@ START_TEST(RegCreateKeyTransacted)
     LSTATUS Error;
 
     pRegCreateKeyTransactedW = (FN_RegCreateKeyTransactedW)GetProcAddress(hAdvapi32, "RegCreateKeyTransactedW");
+    if (!pRegCreateKeyTransactedW && is_reactos() && !GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetTickCount64"))
+    {
+        /* Built without NT 6 exports (DLL_EXPORT_VERSION below 0x600): neither the function nor ktmw32 exist */
+        skip("No NT 6 exports\n");
+        return;
+    }
     ok(pRegCreateKeyTransactedW != NULL, "RegCreateKeyTransactedW is not exported\n");
 
     hKtm = LoadLibraryW(L"ktmw32.dll");
