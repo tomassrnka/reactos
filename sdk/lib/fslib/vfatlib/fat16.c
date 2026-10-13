@@ -164,6 +164,7 @@ done:
 static NTSTATUS
 Fat16WriteRootDirectory(IN HANDLE FileHandle,
                         IN PFAT16_BOOT_SECTOR BootSector,
+                        IN BOOLEAN HasLabel,
                         IN OUT PFORMAT_CONTEXT Context)
 {
     IO_STATUS_BLOCK IoStatusBlock;
@@ -209,6 +210,12 @@ Fat16WriteRootDirectory(IN HANDLE FileHandle,
             Sectors = RootDirSectors - i;
         }
 
+        /* The volume label is the first entry of the root directory */
+        if (i == 0 && HasLabel)
+            FatInitLabelEntry(Buffer, BootSector->VolumeLabel);
+        else
+            RtlZeroMemory(Buffer, 32);
+
         Status = NtWriteFile(FileHandle,
                              NULL,
                              NULL,
@@ -244,41 +251,81 @@ Fat16Format(IN HANDLE FileHandle,
             IN OUT PFORMAT_CONTEXT Context)
 {
     FAT16_BOOT_SECTOR BootSector;
-    OEM_STRING VolumeLabel;
     ULONG SectorCount;
     ULONG RootDirSectors;
-    ULONG TmpVal1;
-    ULONG TmpVal2;
-    ULONG TmpVal3;
+    ULONG FatSectors;
+    ULONG DataClusters;
+    BOOLEAN AutoClusterSize;
+    BOOLEAN HasLabel;
     NTSTATUS Status;
-
-    /* Calculate cluster size */
-    if (ClusterSize == 0)
-    {
-        if (PartitionInfo->PartitionLength.QuadPart < 16LL * 1024LL * 1024LL)
-        {
-            /* Partition < 16MB ==> 1KB Cluster */
-            ClusterSize = 1024;
-        }
-        else if (PartitionInfo->PartitionLength.QuadPart < 128LL * 1024LL * 1024LL)
-        {
-            /* Partition < 128MB ==> 2KB Cluster */
-            ClusterSize = 2048;
-        }
-        else if (PartitionInfo->PartitionLength.QuadPart < 256LL * 1024LL * 1024LL)
-        {
-            /* Partition < 256MB ==> 4KB Cluster */
-            ClusterSize = 4096;
-        }
-        else
-        {
-            /* Partition >= 256MB (< 512MB) ==> 8KB Cluster */
-            ClusterSize = 8192;
-        }
-    }
 
     SectorCount = PartitionInfo->PartitionLength.QuadPart >>
         GetShiftCount(DiskGeometry->BytesPerSector); /* Use shifting to avoid 64-bit division */
+
+    /* The 512 root directory entries */
+    RootDirSectors = ((512 * 32) + (DiskGeometry->BytesPerSector - 1)) / DiskGeometry->BytesPerSector;
+
+    /* Calculate cluster size, as the Windows table does */
+    AutoClusterSize = (ClusterSize == 0);
+    if (AutoClusterSize)
+    {
+        if (PartitionInfo->PartitionLength.QuadPart <= 16LL * 1024LL * 1024LL)
+            ClusterSize = 2048;
+        else if (PartitionInfo->PartitionLength.QuadPart <= 32LL * 1024LL * 1024LL)
+            ClusterSize = 512;
+        else if (PartitionInfo->PartitionLength.QuadPart <= 64LL * 1024LL * 1024LL)
+            ClusterSize = 1024;
+        else if (PartitionInfo->PartitionLength.QuadPart <= 128LL * 1024LL * 1024LL)
+            ClusterSize = 2048;
+        else if (PartitionInfo->PartitionLength.QuadPart <= 256LL * 1024LL * 1024LL)
+            ClusterSize = 4096;
+        else if (PartitionInfo->PartitionLength.QuadPart <= 512LL * 1024LL * 1024LL)
+            ClusterSize = 8192;
+        else if (PartitionInfo->PartitionLength.QuadPart <= 1024LL * 1024LL * 1024LL)
+            ClusterSize = 16384;
+        else if (PartitionInfo->PartitionLength.QuadPart <= 2048LL * 1024LL * 1024LL)
+            ClusterSize = 32768;
+        else
+            ClusterSize = 65536;
+
+        if (ClusterSize < DiskGeometry->BytesPerSector)
+            ClusterSize = DiskGeometry->BytesPerSector;
+    }
+
+    /*
+     * FAT16 keeps 4087 to 65518 clusters: with fewer the driver takes it for
+     * FAT12, with more the last cluster numbers would collide with the
+     * reserved values 0xFFF0 and up, or wrap. A default size moves towards
+     * the range.
+     */
+    for (;;)
+    {
+        if (!FatIsValidClusterSize(ClusterSize, DiskGeometry->BytesPerSector))
+        {
+            DPRINT1("Invalid cluster size %lu\n", ClusterSize);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        DataClusters = FatComputeLayout(SectorCount,
+                                        1 + RootDirSectors,
+                                        2,
+                                        ClusterSize / DiskGeometry->BytesPerSector,
+                                        DiskGeometry->BytesPerSector,
+                                        16,
+                                        &FatSectors);
+        if (DataClusters >= 4087 && DataClusters <= 65518 && FatSectors <= 0xffff)
+            break;
+
+        if (AutoClusterSize && DataClusters < 4087 && ClusterSize > DiskGeometry->BytesPerSector)
+            ClusterSize /= 2;
+        else if (AutoClusterSize && DataClusters > 65518 && ClusterSize < 65536)
+            ClusterSize *= 2;
+        else
+        {
+            DPRINT1("Cluster count %lu is invalid for FAT16\n", DataClusters);
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
 
     RtlZeroMemory(&BootSector, sizeof(FAT16_BOOT_SECTOR));
     memcpy(&BootSector.OEMName[0], "MSWIN4.1", 8);
@@ -293,7 +340,7 @@ Fat16Format(IN HANDLE FileHandle,
     BootSector.RootEntries = 512;
     BootSector.Sectors = (SectorCount < 0x10000) ? (unsigned short)SectorCount : 0;
     BootSector.Media = 0xf8;
-    BootSector.FATSectors = 0;  /* Set later. See below. */
+    BootSector.FATSectors = (unsigned short)FatSectors;
     BootSector.SectorsPerTrack = DiskGeometry->SectorsPerTrack;
     BootSector.Heads = DiskGeometry->TracksPerCylinder;
     BootSector.HiddenSectors = (PartitionInfo->PartitionStyle == PARTITION_STYLE_MBR) ? PartitionInfo->Mbr.HiddenSectors : 0;
@@ -301,32 +348,13 @@ Fat16Format(IN HANDLE FileHandle,
     BootSector.Drive = (DiskGeometry->MediaType == FixedMedia) ? 0x80 : 0x00;
     BootSector.ExtBootSignature = 0x29;
     BootSector.VolumeID = CalcVolumeSerialNumber();
-    if ((Label == NULL) || (Label->Buffer == NULL))
-    {
-        memcpy(&BootSector.VolumeLabel[0], "NO NAME    ", 11);
-    }
-    else
-    {
-        RtlUnicodeStringToOemString(&VolumeLabel, Label, TRUE);
-        RtlFillMemory(&BootSector.VolumeLabel[0], 11, ' ');
-        memcpy(&BootSector.VolumeLabel[0], VolumeLabel.Buffer,
-               VolumeLabel.Length < 11 ? VolumeLabel.Length : 11);
-        RtlFreeOemString(&VolumeLabel);
-    }
+    Status = FatInitVolumeLabel(Label, BootSector.VolumeLabel, &HasLabel);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     memcpy(&BootSector.SysType[0], "FAT16   ", 8);
 
     DPRINT("BootSector.SectorsHuge = %lx\n", BootSector.SectorsHuge);
-
-    RootDirSectors = ((BootSector.RootEntries * 32) +
-        (BootSector.BytesPerSector - 1)) / BootSector.BytesPerSector;
-
-    /* Calculate number of FAT sectors */
-    /* (BootSector.BytesPerSector / 2) FAT entries (16bit) fit into one sector */
-    TmpVal1 = SectorCount - (BootSector.ReservedSectors + RootDirSectors);
-    TmpVal2 = ((BootSector.BytesPerSector / 2) * BootSector.SectorsPerCluster) + BootSector.FATCount;
-    TmpVal3 = (TmpVal1 + (TmpVal2 - 1)) / TmpVal2;
-    BootSector.FATSectors = (unsigned short)(TmpVal3 & 0xffff);
     DPRINT("BootSector.FATSectors = %hu\n", BootSector.FATSectors);
 
     /* Init context data */
@@ -382,6 +410,7 @@ Fat16Format(IN HANDLE FileHandle,
 
     Status = Fat16WriteRootDirectory(FileHandle,
                                      &BootSector,
+                                     HasLabel,
                                      Context);
     if (!NT_SUCCESS(Status))
     {
