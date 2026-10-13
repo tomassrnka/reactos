@@ -5665,15 +5665,17 @@ InfIsFromOEMLocation(
     return TRUE;
 }
 
-/* Values of the device key that decide which drivers run on the device */
-#define RUNNING_DRIVER_VALUES 3
-static const WCHAR *const RunningDriverValues[RUNNING_DRIVER_VALUES] = { REGSTR_VAL_SERVICE, REGSTR_VAL_UPPERFILTERS, REGSTR_VAL_LOWERFILTERS };
+/* The filters that load on a device: device UpperFilters and LowerFilters, then the same
+ * values of its class key */
+#define RUNNING_FILTER_VALUES 4
 
 struct RunningDriverSnapshot
 {
-    BOOL Installed; /* installed before, or not known */
-    LPWSTR Data[RUNNING_DRIVER_VALUES];
-    DWORD Size[RUNNING_DRIVER_VALUES];
+    BOOL Installed; /* installed before (Class value), or not known */
+    BOOL HasService;
+    DWORD Type[RUNNING_FILTER_VALUES];
+    DWORD Size[RUNNING_FILTER_VALUES];
+    LPWSTR Data[RUNNING_FILTER_VALUES];
 };
 
 static VOID
@@ -5682,66 +5684,151 @@ FreeRunningDriverSnapshot(
 {
     DWORD i;
 
-    for (i = 0; i < RUNNING_DRIVER_VALUES; i++)
+    for (i = 0; i < RUNNING_FILTER_VALUES; i++)
     {
         HeapFree(GetProcessHeap(), 0, Snapshot->Data[i]);
         Snapshot->Data[i] = NULL;
         Snapshot->Size[i] = 0;
+        Snapshot->Type[i] = REG_NONE;
     }
 }
 
-/* FALSE if the values could not be read; the snapshot then counts as installed */
+/* TRUE if the value exists, FALSE if it does not; any other failure is returned in *Error */
+static BOOL
+RunningValueExists(
+        IN HKEY hKey,
+        IN LPCWSTR ValueName,
+        OUT LONG *Error)
+{
+    LONG rc = RegQueryValueExW(hKey, ValueName, NULL, NULL, NULL, NULL);
+
+    *Error = (rc == ERROR_FILE_NOT_FOUND) ? ERROR_SUCCESS : rc;
+    return (rc == ERROR_SUCCESS);
+}
+
+static LONG
+ReadRunningFilter(
+        IN HKEY hKey,
+        IN LPCWSTR ValueName,
+        IN OUT struct RunningDriverSnapshot *Snapshot,
+        IN DWORD Index)
+{
+    DWORD dwType, dwSize = 0, dwRead;
+    LONG rc;
+
+    rc = RegQueryValueExW(hKey, ValueName, NULL, &dwType, NULL, &dwSize);
+    if (rc == ERROR_FILE_NOT_FOUND)
+        return ERROR_SUCCESS;
+    if (rc != ERROR_SUCCESS)
+        return rc;
+    if (dwType != REG_MULTI_SZ || (dwSize % sizeof(WCHAR)) != 0)
+        return ERROR_INVALID_DATA;
+    if (dwSize == 0)
+        return ERROR_SUCCESS;
+
+    Snapshot->Data[Index] = HeapAlloc(GetProcessHeap(), 0, dwSize);
+    if (!Snapshot->Data[Index])
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    dwRead = dwSize;
+    rc = RegQueryValueExW(hKey, ValueName, NULL, &dwType, (LPBYTE)Snapshot->Data[Index], &dwRead);
+    if (rc != ERROR_SUCCESS)
+        return rc;
+    if (dwType != REG_MULTI_SZ || dwRead != dwSize)
+        return ERROR_INVALID_DATA;
+
+    Snapshot->Type[Index] = dwType;
+    Snapshot->Size[Index] = dwSize;
+    return ERROR_SUCCESS;
+}
+
+/* FALSE if the device could not be read; the snapshot then counts as installed */
 static BOOL
 TakeRunningDriverSnapshot(
         IN struct DeviceInfoSet *set,
         IN struct DeviceInfo *deviceInfo,
         OUT struct RunningDriverSnapshot *Snapshot)
 {
-    HKEY hKey;
-    DWORD i, dwSize;
+    WCHAR ClassKeyName[MAX_PATH];
+    WCHAR ClassGuid[MAX_GUID_STRING_LEN];
+    DWORD dwType, dwSize;
+    HKEY hKey, hClassKey;
+    LONG rc, rc2;
 
     ZeroMemory(Snapshot, sizeof(*Snapshot));
-    Snapshot->Installed = TRUE;
 
     hKey = SETUPDI_OpenDevKey(set->HKLM, deviceInfo, KEY_QUERY_VALUE);
     if (hKey == INVALID_HANDLE_VALUE)
-        return FALSE;
-
-    /* Only SetupDiInstallDevice writes the Class value of a device */
-    Snapshot->Installed = (RegQueryValueExW(hKey, REGSTR_VAL_CLASS, NULL, NULL, NULL, NULL) == ERROR_SUCCESS);
-
-    for (i = 0; i < RUNNING_DRIVER_VALUES; i++)
     {
-        dwSize = 0;
-        if (RegQueryValueExW(hKey, RunningDriverValues[i], NULL, NULL, NULL, &dwSize) != ERROR_SUCCESS || dwSize == 0)
-            continue;
+        Snapshot->Installed = TRUE;
+        return FALSE;
+    }
 
-        Snapshot->Data[i] = HeapAlloc(GetProcessHeap(), 0, dwSize);
-        if (!Snapshot->Data[i] ||
-            RegQueryValueExW(hKey, RunningDriverValues[i], NULL, NULL, (LPBYTE)Snapshot->Data[i], &dwSize) != ERROR_SUCCESS)
+    /* SetupDiInstallDevice writes Class; newdev and the kernel write it for failed
+     * or legacy devices, which keep asking for a restart */
+    Snapshot->Installed = RunningValueExists(hKey, REGSTR_VAL_CLASS, &rc);
+    if (rc == ERROR_SUCCESS)
+        Snapshot->HasService = RunningValueExists(hKey, REGSTR_VAL_SERVICE, &rc);
+    if (rc == ERROR_SUCCESS)
+        rc = ReadRunningFilter(hKey, REGSTR_VAL_UPPERFILTERS, Snapshot, 0);
+    if (rc == ERROR_SUCCESS)
+        rc = ReadRunningFilter(hKey, REGSTR_VAL_LOWERFILTERS, Snapshot, 1);
+
+    /* The class filters of the class the device belongs to */
+    if (rc == ERROR_SUCCESS)
+    {
+        dwSize = sizeof(ClassGuid);
+        rc = RegQueryValueExW(hKey, REGSTR_VAL_CLASSGUID, NULL, &dwType, (LPBYTE)ClassGuid, &dwSize);
+        if (rc == ERROR_FILE_NOT_FOUND)
         {
-            FreeRunningDriverSnapshot(Snapshot);
-            Snapshot->Installed = TRUE;
-            RegCloseKey(hKey);
-            return FALSE;
+            rc = ERROR_SUCCESS;
         }
-        Snapshot->Size[i] = dwSize;
+        else if (rc == ERROR_SUCCESS)
+        {
+            if (dwType != REG_SZ || dwSize < sizeof(WCHAR) || (dwSize % sizeof(WCHAR)) != 0)
+                rc = ERROR_INVALID_DATA;
+            else
+            {
+                ClassGuid[dwSize / sizeof(WCHAR) - 1] = UNICODE_NULL;
+                lstrcpyW(ClassKeyName, REGSTR_PATH_CLASS_NT);
+                lstrcatW(ClassKeyName, BackSlash);
+                lstrcatW(ClassKeyName, ClassGuid);
+                rc2 = RegOpenKeyExW(set->HKLM, ClassKeyName, 0, KEY_QUERY_VALUE, &hClassKey);
+                if (rc2 == ERROR_SUCCESS)
+                {
+                    rc = ReadRunningFilter(hClassKey, REGSTR_VAL_UPPERFILTERS, Snapshot, 2);
+                    if (rc == ERROR_SUCCESS)
+                        rc = ReadRunningFilter(hClassKey, REGSTR_VAL_LOWERFILTERS, Snapshot, 3);
+                    RegCloseKey(hClassKey);
+                }
+                else if (rc2 != ERROR_FILE_NOT_FOUND)
+                    rc = rc2;
+            }
+        }
     }
 
     RegCloseKey(hKey);
+
+    if (rc != ERROR_SUCCESS)
+    {
+        FreeRunningDriverSnapshot(Snapshot);
+        Snapshot->Installed = TRUE;
+        return FALSE;
+    }
+
     return TRUE;
 }
 
 static BOOL
-SameRunningDrivers(
+SameRunningFilters(
         IN const struct RunningDriverSnapshot *Before,
         IN const struct RunningDriverSnapshot *After)
 {
     DWORD i, j;
 
-    for (i = 0; i < RUNNING_DRIVER_VALUES; i++)
+    for (i = 0; i < RUNNING_FILTER_VALUES; i++)
     {
-        if (Before->Size[i] != After->Size[i])
+        if (Before->Type[i] != After->Type[i] || Before->Size[i] != After->Size[i])
             return FALSE;
 
         /* Service names are not case sensitive */
@@ -6063,14 +6150,16 @@ SetupDiInstallDevice(
             (ulStatus & DN_STARTED))
         {
             struct RunningDriverSnapshot RunningAfter;
-            BOOL SameDrivers;
+            BOOL RawUnchanged;
 
-            /* The first install of a device the system started by itself (critical device
-             * database, raw device) changes nothing that runs if it keeps the same drivers */
-            SameDrivers = TakeRunningDriverSnapshot(set, deviceInfo, &RunningAfter) &&
-                          SameRunningDrivers(&RunningBefore, &RunningAfter);
+            /* A raw device (a new volume) that the system started before its first install,
+             * and that stays raw with the same filters: nothing that runs changes */
+            RawUnchanged = TakeRunningDriverSnapshot(set, deviceInfo, &RunningAfter) &&
+                           !RunningBefore.Installed &&
+                           !RunningBefore.HasService && !RunningAfter.HasService &&
+                           SameRunningFilters(&RunningBefore, &RunningAfter);
             FreeRunningDriverSnapshot(&RunningAfter);
-            if (!RunningBefore.Installed && SameDrivers)
+            if (RawUnchanged)
                 ret = TRUE;
             else
             {
