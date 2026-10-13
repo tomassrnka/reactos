@@ -36,6 +36,7 @@ typedef struct _IFS_PROVIDER
     PWSTR Name;
     PWSTR DllFile;
 
+    ULONG RefCount; /* Format and Chkdsk calls running in hModule */
     HMODULE hModule;
     PULIB_CHKDSK Chkdsk;
     PVOID ChkdskEx;

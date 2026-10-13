@@ -75,8 +75,6 @@ NTSTATUS
 WriteBackupBootSector(IN PBOOT_SECTOR BootSector)
 {
     NTSTATUS        Status;
-    IO_STATUS_BLOCK IoStatusBlock;
-    LARGE_INTEGER   Offset;
     PBYTE           Sector;
     ULONG           Bps = BYTES_PER_SECTOR;
 
@@ -87,17 +85,7 @@ WriteBackupBootSector(IN PBOOT_SECTOR BootSector)
     RtlZeroMemory(Sector, Bps);
     RtlCopyMemory(Sector, BootSector, (Bps < sizeof(BOOT_SECTOR)) ? Bps : sizeof(BOOT_SECTOR));
 
-    Offset.QuadPart = (LONGLONG)TOTAL_SECTORS * Bps;
-
-    Status = NtWriteFile(DISK_HANDLE,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &IoStatusBlock,
-                         Sector,
-                         Bps,
-                         &Offset,
-                         NULL);
+    Status = WriteDisk((LONGLONG)TOTAL_SECTORS * Bps, Sector, Bps);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Backup boot sector write failed (Status %lx)\n", Status);
@@ -112,10 +100,8 @@ NTSTATUS
 WriteBootSector(VOID)
 {
     NTSTATUS        Status;
-    IO_STATUS_BLOCK IoStatusBlock;
     PBOOT_SECTOR    BootSector;
     PBYTE           BootRegion;
-    LARGE_INTEGER   Offset;
     ULONG           RegionSize;
 
     // The whole $Boot region (8192 bytes rounded up to clusters). Only the
@@ -141,19 +127,10 @@ WriteBootSector(VOID)
     BootSector->EndSector = BOOT_SECTOR_END;
 
     // Write the $Boot region at LCN 0.
-    Offset.QuadPart = 0LL;
-    Status = NtWriteFile(DISK_HANDLE,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &IoStatusBlock,
-                         BootRegion,
-                         RegionSize,
-                         &Offset,
-                         NULL);
+    Status = WriteDisk(0LL, BootRegion, RegionSize);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("BootSector write failed. NtWriteFile() failed (Status %lx)\n", Status);
+        DPRINT1("BootSector write failed (Status %lx)\n", Status);
         FREE(BootRegion);
         return Status;
     }

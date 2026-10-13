@@ -567,6 +567,47 @@ PartitionHandlePnp(
     return status;
 }
 
+/* The cached drive layout must show what IOCTL_DISK_SET_PARTITION_INFO(_EX) wrote:
+ * IOCTL_DISK_GET_DRIVE_LAYOUT(_EX) returns it, and a layout set from it would bring the
+ * old values back. Requires the layout lock. */
+static
+CODE_SEG("PAGE")
+VOID
+PartitionUpdateCachedLayout(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PPARTITION_EXTENSION PartExt)
+{
+    PDRIVE_LAYOUT_INFORMATION_EX layout = FdoExtension->LayoutCache;
+
+    PAGED_CODE();
+
+    if (!FdoExtension->LayoutValid || !layout)
+        return;
+
+    for (UINT32 i = 0; i < layout->PartitionCount; i++)
+    {
+        PPARTITION_INFORMATION_EX entry = &layout->PartitionEntry[i];
+
+        if ((UINT64)entry->StartingOffset.QuadPart != PartExt->StartingOffset ||
+            (UINT64)entry->PartitionLength.QuadPart != PartExt->PartitionLength)
+        {
+            continue;
+        }
+
+        if (layout->PartitionStyle == PARTITION_STYLE_MBR)
+        {
+            entry->Mbr.PartitionType = PartExt->Mbr.PartitionType;
+        }
+        else
+        {
+            entry->Gpt.PartitionType = PartExt->Gpt.PartitionType;
+            entry->Gpt.PartitionId = PartExt->Gpt.PartitionId;
+            entry->Gpt.Attributes = PartExt->Gpt.Attributes;
+            RtlCopyMemory(entry->Gpt.Name, PartExt->Gpt.Name, sizeof(entry->Gpt.Name));
+        }
+    }
+}
+
 NTSTATUS
 PartitionHandleDeviceControl(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -694,6 +735,7 @@ PartitionHandleDeviceControl(
             if (NT_SUCCESS(status))
             {
                 partExt->Mbr.PartitionType = inputBuffer->PartitionType;
+                PartitionUpdateCachedLayout(fdoExtension, partExt);
             }
 
             PartMgrReleaseLayoutLock(fdoExtension);
@@ -733,6 +775,7 @@ PartitionHandleDeviceControl(
                                   inputBuffer->Gpt.Name,
                                   sizeof(partExt->Gpt.Name));
                 }
+                PartitionUpdateCachedLayout(fdoExtension, partExt);
             }
 
             PartMgrReleaseLayoutLock(fdoExtension);
