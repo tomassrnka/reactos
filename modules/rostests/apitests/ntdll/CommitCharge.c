@@ -586,6 +586,41 @@ TestGrowthAndExhaustion(VOID)
     CheckSystemDelta(System, -MB_PAGES(16), "everything released");
 }
 
+/* The test system's paging file: system managed ("C:\pagefile.sys 0 0" or no sizes) */
+static
+BOOLEAN
+IsSystemManagedPagingFile(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"PagingFiles");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    static UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + 1024];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    PWSTR Value, Space;
+    HANDLE Key;
+    ULONG Length;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Status = NtQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer) - 2 * sizeof(WCHAR), &Length);
+    NtClose(Key);
+    if (!NT_SUCCESS(Status) || (Info->Type != 7 /* REG_MULTI_SZ */))
+        return FALSE;
+
+    /* Exactly one entry */
+    Value = (PWSTR)Info->Data;
+    if ((Value[0] == UNICODE_NULL) || (Value[wcslen(Value) + 1] != UNICODE_NULL))
+        return FALSE;
+
+    Space = wcschr(Value, L' ');
+    return (Space == NULL) || (wcscmp(Space, L" 0 0") == 0);
+}
+
 START_TEST(CommitCharge)
 {
     SYSTEM_BASIC_INFORMATION BasicInfo;
@@ -630,12 +665,13 @@ START_TEST(CommitCharge)
         TestOverCommitFails();
 
         /*
-         * The growth part needs the test system's fixture: a system-managed
-         * paging file that starts at RAM size (RAM of 1 GB or more) and has not
-         * grown yet. Anything else (no paging file, a fixed or grown one) skips.
+         * The growth part needs the test system's fixture: one system-managed
+         * paging file (registry), which starts at RAM size (RAM of 1 GB or
+         * more) and has not grown yet. Anything else skips.
          */
         PagingFile = QueryPagingFilePages();
-        if ((PagingFile + MB_PAGES(16) < PhysicalPages) || (PagingFile > PhysicalPages + MB_PAGES(16)) ||
+        if (!IsSystemManagedPagingFile() ||
+            (PagingFile + MB_PAGES(16) < PhysicalPages) || (PagingFile > PhysicalPages + MB_PAGES(16)) ||
             (PhysicalPages < MB_PAGES(1024)))
             skip("not the growth fixture: paging files %Iu pages, physical %lu pages\n", PagingFile, PhysicalPages);
         else
