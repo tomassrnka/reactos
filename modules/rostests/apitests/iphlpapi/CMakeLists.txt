@@ -7,6 +7,7 @@ list(APPEND SOURCE
     GetOwnerModuleFromTcpEntry.c
     GetOwnerModuleFromUdpEntry.c
     icmp.c
+    IpTables2.c
     SendARP.c
     testlist.c)
 
