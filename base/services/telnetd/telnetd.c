@@ -33,7 +33,10 @@ static inline int telnetd_printf(const char *format, ...);
 
 /* Local data */
 
-static BOOLEAN bShutdown = 0;
+static volatile BOOLEAN bShutdown = 0;
+/* No authentication exists yet (see the TODO in UserLoginThread), and a session is a
+ * shell running as the service account: refuse logins until that is implemented */
+static const BOOLEAN bAllowUnauthenticatedLogin = 0;
 static BOOLEAN bSocketInterfaceInitialised = 0;
 static int sock;
 
@@ -57,12 +60,31 @@ int kickoff_telnetd(void)
 
   CreateSocket();
 
+  if (listen(sock, 1) < 0)
+     ErrorExit("Cannot listen on socket");
+
   while(!bShutdown) {
     WaitForConnect();
   }
 
+  closesocket(sock);
   WSACleanup();
   return 0;
+}
+
+/* Called by the service main before it accepts a stop request: the process
+ * can be given a new start after an earlier stop */
+void reset_telnetd(void)
+{
+  bShutdown = 0;
+}
+
+/* Called by the service control handler; WaitForConnect() returns at least
+ * twice a second unless a refusal's send() waits in the network stack, so the
+ * loop above ends and the service can stop */
+void stop_telnetd(void)
+{
+  bShutdown = 1;
 }
 
 /* Cleanup */
@@ -120,17 +142,30 @@ static void CreateSocket(void)
 static void WaitForConnect(void)
 {
   struct sockaddr_in sa;
+  int sa_len = sizeof(sa);
   int new_sock;
+  int ready;
+  fd_set set;
+  struct timeval timeout = { 0, 500000 };
 
-  if (listen(sock, 1) < 0)
-     ErrorExit("Cannot listen on socket");
+  /* accept() alone would block the stop request */
+  FD_ZERO(&set);
+  FD_SET(sock, &set);
+  ready = select(0, &set, NULL, NULL, &timeout);
+  if (ready < 0)
+     ErrorExit("Cannot wait for a connection");
+  if (ready == 0)
+     return;
 
-  if ((new_sock = accept(sock, (struct sockaddr*) &sa, NULL)) < 0) {
+  if ((new_sock = accept(sock, (struct sockaddr*) &sa, &sa_len)) < 0) {
     fprintf(stderr, "Failed to accept incoming call\n");
   } else {
     telnetd_printf("user connected on socket %d, port %d, address %lx\n", new_sock,
                                        htons(sa.sin_port), sa.sin_addr.s_addr);
-    UserLogin(new_sock);
+    if (bAllowUnauthenticatedLogin)
+      UserLogin(new_sock);
+    else
+      RefuseLogin(new_sock);
   }
 }
 
@@ -145,10 +180,21 @@ static void UserLogin(int client_socket)
 
   client->socket = client_socket;
   threadHandle = CreateThread(NULL, 0, UserLoginThread, client, 0, NULL);
-  if (threadHandle == NULL)
+  if (threadHandle == NULL) {
+    closesocket(client_socket);
     free(client);
-  else
+  } else
     CloseHandle(threadHandle);
+}
+
+/* Function: RefuseLogin; on the service thread, so no thread outlives WSACleanup() */
+static void RefuseLogin(int client_socket)
+{
+  const char *refused = "\r\nThis telnet server does not accept logins yet: "
+                        "user authentication is not implemented.\r\n";
+
+  send(client_socket, refused, strlen(refused), 0);
+  closesocket(client_socket);
 }
 
 /* Function: UserLoginThread */
