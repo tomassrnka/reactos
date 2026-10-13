@@ -37,6 +37,7 @@ list(APPEND SOURCE
     MultiByteToWideChar.c
     Pipes.c
     PrivMoveFileIdentityW.c
+    ProcessorGroups.c
     QueueUserAPC.c
     ReadFile.c
     SetComputerNameExW.c
@@ -44,6 +45,7 @@ list(APPEND SOURCE
     SetCurrentDirectory.c
     SetSearchPathMode.c
     SetUnhandledExceptionFilter.c
+    SetWaitableTimerEx.c
     SystemFirmware.c
     TerminateProcess.c
     TunnelCache.c
