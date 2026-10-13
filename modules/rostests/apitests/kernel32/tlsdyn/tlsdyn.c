@@ -11,7 +11,7 @@
 #define NTOS_MODE_USER
 #include <ndk/pstypes.h>
 
-/* The CRT startup gives every DLL a TLS directory: its template starts at _tls_start */
+/* Referencing _tls_index links the CRT TLS directory into this DLL: its template starts at _tls_start */
 extern ULONG _tls_index;
 extern char _tls_start;
 
