@@ -1457,7 +1457,8 @@ PspSetProcessTlsInformation(
     {
         /* Entries are written back */
         ProbeForWrite(TlsInformation, Length, sizeof(ULONG));
-        Header = *TlsInformation;
+        /* The header only: a request may have no entries */
+        RtlCopyMemory(&Header, TlsInformation, FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData));
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {

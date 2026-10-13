@@ -1342,35 +1342,72 @@ LdrpCaptureTlsDirectory(
 {
     ULONG_PTR ImageStart = (ULONG_PTR)LdrEntry->DllBase;
     ULONG_PTR ImageEnd = ImageStart + LdrEntry->SizeOfImage;
+    IMAGE_TLS_DIRECTORY Directory;
+    ULONG_PTR Page;
+    NTSTATUS Status = STATUS_SUCCESS;
     SIZE_T RawSize;
     ULONG AlignShift;
 
+    /* The directory must lie in the image */
+    if ((ULONG_PTR)TlsDirectory < ImageStart || (ULONG_PTR)TlsDirectory > ImageEnd - sizeof(IMAGE_TLS_DIRECTORY))
+        return STATUS_INVALID_IMAGE_FORMAT;
+
+    _SEH2_TRY
+    {
+        Directory = *TlsDirectory;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
     /* The template must lie in the image, and template plus zero fill must not wrap */
-    if (TlsDirectory->EndAddressOfRawData < TlsDirectory->StartAddressOfRawData ||
-        (TlsDirectory->StartAddressOfRawData != TlsDirectory->EndAddressOfRawData &&
-         (TlsDirectory->StartAddressOfRawData < ImageStart || TlsDirectory->EndAddressOfRawData > ImageEnd)) ||
-        TlsDirectory->AddressOfIndex < ImageStart ||
-        TlsDirectory->AddressOfIndex > ImageEnd - sizeof(ULONG))
+    if (Directory.EndAddressOfRawData < Directory.StartAddressOfRawData ||
+        (Directory.StartAddressOfRawData != Directory.EndAddressOfRawData &&
+         (Directory.StartAddressOfRawData < ImageStart || Directory.EndAddressOfRawData > ImageEnd)) ||
+        Directory.AddressOfIndex < ImageStart ||
+        Directory.AddressOfIndex > ImageEnd - sizeof(ULONG))
     {
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    RawSize = TlsDirectory->EndAddressOfRawData - TlsDirectory->StartAddressOfRawData;
-    if (RawSize + TlsDirectory->SizeOfZeroFill < RawSize || RawSize + TlsDirectory->SizeOfZeroFill > MAXLONG)
+    RawSize = Directory.EndAddressOfRawData - Directory.StartAddressOfRawData;
+    if (RawSize + Directory.SizeOfZeroFill < RawSize || RawSize + Directory.SizeOfZeroFill > MAXLONG)
         return STATUS_INVALID_IMAGE_FORMAT;
 
-    TlsData->TlsDirectory = *TlsDirectory;
+    /* The template must be readable (a section can be PAGE_NOACCESS) */
+    _SEH2_TRY
+    {
+        for (Page = Directory.StartAddressOfRawData; Page < Directory.EndAddressOfRawData; Page = ALIGN_DOWN_BY(Page, PAGE_SIZE) + PAGE_SIZE)
+            (VOID)*(volatile UCHAR *)Page;
+        if (RawSize)
+            (VOID)*(volatile UCHAR *)(Directory.EndAddressOfRawData - 1);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    TlsData->TlsDirectory = Directory;
     TlsData->Module = LdrEntry;
-    TlsData->Size = RawSize + TlsDirectory->SizeOfZeroFill;
+    TlsData->Size = RawSize + Directory.SizeOfZeroFill;
 
     /* IMAGE_SCN_ALIGN_* in the characteristics: 2^(n-1) bytes */
-    AlignShift = (TlsDirectory->Characteristics & IMAGE_SCN_ALIGN_MASK) >> 20;
+    AlignShift = (Directory.Characteristics & IMAGE_SCN_ALIGN_MASK) >> 20;
     TlsData->Alignment = AlignShift ? (1 << (AlignShift - 1)) : 0;
     if (TlsData->Alignment <= MEMORY_ALLOCATION_ALIGNMENT)
         TlsData->Alignment = 0;
 
     return STATUS_SUCCESS;
 }
+
+static VOID LdrpFreeTlsBlock(_In_ PLDRP_TLS_DATA TlsData, _In_opt_ PVOID Block);
 
 /* A new TLS block of a module for one thread: the template, then zeros, aligned as the module asks */
 static
@@ -1397,7 +1434,17 @@ LdrpAllocateTlsBlock(
         ((PVOID *)Block)[-1] = Allocation;
     }
 
-    RtlCopyMemory(Block, (PVOID)TlsData->TlsDirectory.StartAddressOfRawData, RawSize);
+    /* Checked readable when the module was loaded; a module changing that later gets no block */
+    _SEH2_TRY
+    {
+        RtlCopyMemory(Block, (PVOID)TlsData->TlsDirectory.StartAddressOfRawData, RawSize);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        LdrpFreeTlsBlock(TlsData, Block);
+        _SEH2_YIELD(return NULL);
+    }
+    _SEH2_END;
     RtlZeroMemory((PUCHAR)Block + RawSize, TlsData->TlsDirectory.SizeOfZeroFill);
     return Block;
 }
