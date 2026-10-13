@@ -13,7 +13,6 @@ BEGIN
     LTEXT "Víta Vás sprievodca pridaním hardvéru", IDC_FINISHTITLE, 114, 8, 203, 24
     LTEXT "Tento sprievodca Vám pomôže:", -1, 114, 40, 182, 8
     LTEXT "1) Nainštalovať softvér pre podporu hardvéru, ktorý ste pridali k Vášmu počítaču.", -1, 121, 56, 184, 16
-    LTEXT "2) Vyriešiť problémy, ktoré môžete mať s Vaším hardvérom.", -1, 121, 78, 185, 16
     ICON IDI_WARNINGICON, IDC_WARNINGICON, 124, 109, 20, 20
     LTEXT "Ak bolo spolu s Vaším hardvérom dodané aj inštalačné CD, odporúča sa, aby ste klikli na tlačidlo Zrušiť pre zatvorenie tohto sprievodcu a použili CD od výrobcu pre nainštalovanie tohto hardvéru.", 503, 150, 106, 155, 50
     LTEXT "Pre pokračovanie kliknite na tlačidlo Ďalej.", -1, 114, 166, 193, 8 // Pokračujte stlačením tlačidla Ďalej.
@@ -149,4 +148,11 @@ BEGIN
     IDS_ADDNEWDEVICE "Pridať nové hardvérové zariadenie"
     IDS_SELECTWAYTITLE "The wizard can help you install other hardware"
     IDS_HDTYPESTITLE "From the list below, select the type of hardware you are installing"
+    IDS_NOTFOUNDTITLE "The wizard did not find any new hardware on your computer"
+    IDS_NOTFOUNDTEXT "If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_FOUNDTITLE "The wizard found new hardware on your computer"
+    IDS_FOUNDTEXT "The wizard found the following new hardware. ReactOS installs it the same way as hardware that is plugged in."
+    IDS_SEARCHFAILEDTITLE "The wizard could not search for new hardware"
+    IDS_SEARCHFAILEDTEXT "The list of devices could not be scanned. If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_HWTYPESNOTAVAIL "Installing hardware selected from this list is not available yet. Click Back, or click Cancel to close this wizard."
 END

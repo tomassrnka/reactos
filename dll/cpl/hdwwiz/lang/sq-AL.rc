@@ -12,7 +12,6 @@ BEGIN
     LTEXT "Mire se erdhet te Shto Hardware Magjistari", IDC_FINISHTITLE, 114, 8, 203, 24
     LTEXT "Ky magjistar ju ndihmon ju:", -1, 114, 40, 182, 8
     LTEXT "1) Instalo software për suportin e hardware tuaj ne kompjuter.", -1, 121, 56, 184, 16
-    LTEXT "2) Zgjidh probleme qe mund te keni me hardwarin tuaj.", -1, 121, 78, 185, 16
     ICON IDI_WARNINGICON, IDC_WARNINGICON, 124, 109, 20, 20
     LTEXT "Nëse hardware juaj erdhi me CD-ne e instalimit, është e rekomanduar që ju të klikoni Anulo për të mbyllur këtë magjistar dhe të përdorni CD-ne e prodhuesit të instaloni këtë hardware.", 503, 150, 106, 155, 50
     LTEXT "Për Të vazhduar, kliko Next.", -1, 114, 166, 193, 8
@@ -148,4 +147,11 @@ BEGIN
     IDS_ADDNEWDEVICE "Shto një pajisje të re hardware"
     IDS_SELECTWAYTITLE "Magjistar mund të ju ndihmojë të instaloni pajisje të tjera"
     IDS_HDTYPESTITLE "Nga lista e meposhtme, zgjidhni llojin e pajisjeve qe jeni duke instaluar"
+    IDS_NOTFOUNDTITLE "The wizard did not find any new hardware on your computer"
+    IDS_NOTFOUNDTEXT "If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_FOUNDTITLE "The wizard found new hardware on your computer"
+    IDS_FOUNDTEXT "The wizard found the following new hardware. ReactOS installs it the same way as hardware that is plugged in."
+    IDS_SEARCHFAILEDTITLE "The wizard could not search for new hardware"
+    IDS_SEARCHFAILEDTEXT "The list of devices could not be scanned. If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_HWTYPESNOTAVAIL "Installing hardware selected from this list is not available yet. Click Back, or click Cancel to close this wizard."
 END
