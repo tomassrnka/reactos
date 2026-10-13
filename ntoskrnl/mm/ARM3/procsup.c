@@ -135,6 +135,14 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 #endif
     }
 
+    /* The structure is committed memory: charge it before the VAD is published */
+    if (!MiChargeCommit(BYTES_TO_PAGES(Size), MiCommitUser))
+    {
+        ExFreePoolWithTag(Vad, 'ldaV');
+        Status = STATUS_COMMITMENT_LIMIT;
+        goto FailPath;
+    }
+
     *BaseAddress = 0;
     Status = MiInsertVadEx((PMMVAD)Vad,
                            BaseAddress,
@@ -144,6 +152,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
                            MEM_TOP_DOWN);
     if (!NT_SUCCESS(Status))
     {
+        MiReturnCommit(BYTES_TO_PAGES(Size));
         ExFreePoolWithTag(Vad, 'ldaV');
         Status = STATUS_NO_MEMORY;
         goto FailPath;
@@ -223,6 +232,9 @@ MmDeleteTeb(IN PEPROCESS Process,
 
         /* Release the working set */
         MiUnlockProcessWorkingSetUnsafe(Process, Thread);
+
+        /* Give back what the TEB was charged */
+        MiReturnProcessCommit(Process, Vad->u.VadFlags.CommitCharge);
 
         /* Remove the VAD */
         ExFreePool(Vad);
@@ -1324,6 +1336,27 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     return TRUE;
 }
 
+static
+VOID
+MiCheckProcessCommitReturned(
+    _Inout_ PEPROCESS Process)
+{
+    SIZE_T Residue = Process->CommitCharge;
+
+    /*
+     * Every charge of the process belongs to a VAD or a memory area and is
+     * returned when that goes. Anything left is an accounting defect with no
+     * memory behind it: report it, and give it back so that one defect does
+     * not make the system-wide charge grow with every process.
+     */
+    if (Residue != 0)
+    {
+        DPRINT1("MM: process %p (%.16s) still charged %Iu pages after address space cleanup\n",
+                Process, Process->ImageFileName, Residue);
+        MiReturnProcessCommit(Process, Residue);
+    }
+}
+
 VOID
 NTAPI
 MmCleanProcessAddressSpace(IN PEPROCESS Process)
@@ -1340,6 +1373,7 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
     {
         DPRINT1("Incomplete address space for Process %p. Might leak resources.\n",
                 Process);
+        MiCheckProcessCommitReturned(Process);
         return;
     }
 
@@ -1395,6 +1429,9 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
 
             /* Release the working set */
             MiUnlockProcessWorkingSetUnsafe(Process, Thread);
+
+            /* Give back what the VAD was charged */
+            MiReturnProcessCommit(Process, Vad->u.VadFlags.CommitCharge);
         }
 
         /* Free the VAD memory */
@@ -1414,6 +1451,9 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
 
     /* Release the working set */
     MiUnlockProcessWorkingSetUnsafe(Process, Thread);
+
+    /* Nothing of the address space is charged any more */
+    MiCheckProcessCommitReturned(Process);
 
     /* Release the address space */
     MmUnlockAddressSpace(&Process->Vm);

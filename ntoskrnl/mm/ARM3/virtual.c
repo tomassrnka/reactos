@@ -4547,7 +4547,8 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     PETHREAD CurrentThread = PsGetCurrentThread();
     KAPC_STATE ApcState;
-    ULONG ProtectionMask, QuotaCharge = 0, QuotaFree = 0;
+    ULONG ProtectionMask, QuotaCharge = 0, QuotaFree = 0, GrowthRounds = 0;
+    SIZE_T CommitPages = 0;
     BOOLEAN Attached = FALSE, ChangeProtection = FALSE, QuotaCharged = FALSE;
     MMPTE TempPte;
     PMMPTE PointerPte, LastPte;
@@ -4836,6 +4837,22 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         Vad->ControlArea = NULL; // For Memory-Area hack
 
         //
+        // A committed reservation is charged in full before the VAD is
+        // published; inserting it moves the charge to the process
+        //
+        if (AllocationType & MEM_COMMIT)
+        {
+            CommitPages = BYTES_TO_PAGES(PRegionSize);
+            if (!MiChargeCommitWithGrowth(CommitPages))
+            {
+                DPRINT1("Commit limit reached for %Iu pages\n", CommitPages);
+                ExFreePoolWithTag(Vad, 'SdaV');
+                Status = STATUS_COMMITMENT_LIMIT;
+                goto FailPathNoLock;
+            }
+        }
+
+        //
         // Insert the VAD
         //
         Status = MiInsertVadEx(Vad,
@@ -4847,6 +4864,7 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("Failed to insert the VAD!\n");
+            MiReturnCommit(CommitPages);
             ExFreePoolWithTag(Vad, 'SdaV');
             goto FailPathNoLock;
         }
@@ -4892,8 +4910,14 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     PRegionSize = EndingAddress - StartingAddress + 1;
 
     //
-    // Lock the address space and make sure the process isn't already dead
+    // Lock the address space and make sure the process isn't already dead.
+    // After waiting for the commit limit to grow, everything is looked up and
+    // counted again.
     //
+RetryCommit:
+    QuotaCharge = 0;
+    QuotaFree = 0;
+    ChangeProtection = FALSE;
     AddressSpace = MmGetCurrentAddressSpace();
     MmLockAddressSpace(AddressSpace);
     if (Process->VmDeleted)
@@ -5036,6 +5060,28 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         KeAcquireGuardedMutexUnsafe(&MmSectionCommitMutex);
 
         //
+        // Charge exactly the prototype PTEs that are not committed yet. If the
+        // limit is reached, wait for a paging file to grow without any lock
+        // held, then look everything up again.
+        //
+        CommitPages = 0;
+        for (PMMPTE ProtoPte = PointerPte; ProtoPte <= LastPte; ProtoPte++)
+        {
+            if (ProtoPte->u.Long == 0) CommitPages++;
+        }
+        if (!MiChargeCommit(CommitPages, MiCommitUser))
+        {
+            KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
+            MmUnlockAddressSpace(AddressSpace);
+            if ((GrowthRounds++ < 4) && !KeAreAllApcsDisabled() && MiWaitForCommitGrowth(CommitPages))
+                goto RetryCommit;
+
+            DPRINT1("Commit limit reached for %Iu section pages\n", CommitPages);
+            Status = STATUS_COMMITMENT_LIMIT;
+            goto FailPathNoLock;
+        }
+
+        //
         // Get the segment template PTE and start looping each page
         //
         TempPte = FoundVad->ControlArea->Segment->SegmentPteTemplate;
@@ -5061,7 +5107,9 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         //
         ASSERT(QuotaCharge >= QuotaFree);
         QuotaCharge -= QuotaFree;
+        ASSERT(QuotaCharge == CommitPages);
         FoundVad->ControlArea->Segment->NumberOfCommittedPages += QuotaCharge;
+        InterlockedExchangeAddSizeT(&MmSharedCommit, QuotaCharge);
         KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
 
         //
@@ -5109,6 +5157,25 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     // Lock the working set while we play with user pages and page tables
     //
     MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
+
+    //
+    // Charge exactly the pages this call commits, before changing anything:
+    // the range less what is committed already, decided PTE by PTE as the
+    // loop below does
+    //
+    CommitPages = BYTES_TO_PAGES(PRegionSize) -
+                  MiCalculatePageCommitment(StartingAddress, EndingAddress, FoundVad, Process);
+    if (!MiChargeCommit(CommitPages, MiCommitUser))
+    {
+        MiUnlockProcessWorkingSetUnsafe(Process, CurrentThread);
+        MmUnlockAddressSpace(AddressSpace);
+        if ((GrowthRounds++ < 4) && !KeAreAllApcsDisabled() && MiWaitForCommitGrowth(CommitPages))
+            goto RetryCommit;
+
+        DPRINT1("Commit limit reached for %Iu pages\n", CommitPages);
+        Status = STATUS_COMMITMENT_LIMIT;
+        goto FailPathNoLock;
+    }
 
     //
     // Make the current page table valid, and then loop each page within it
@@ -5189,14 +5256,13 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     //
     // Charge only the pages this call committed. A page that was already
     // committed stays charged once, so the VAD charge matches what a later
-    // decommit takes back. Update the peak if the charge is now higher.
+    // decommit takes back. The count above can only be higher than what the
+    // loop committed; give the difference back.
     //
+    ASSERT(QuotaCharge <= CommitPages);
+    MiReturnCommit(CommitPages - QuotaCharge);
     FoundVad->u.VadFlags.CommitCharge += QuotaCharge;
-    Process->CommitCharge += QuotaCharge;
-    if (Process->CommitCharge > Process->CommitChargePeak)
-    {
-        Process->CommitChargePeak = Process->CommitCharge;
-    }
+    MiAddProcessCommit(Process, QuotaCharge);
 
     //
     // Release the working set lock, unlock the address space, and detach from
@@ -5666,7 +5732,7 @@ FinalPath:
         // Update the process counters
         //
         PRegionSize = EndingAddress - StartingAddress + 1;
-        Process->CommitCharge -= CommitReduction;
+        MiReturnProcessCommit(Process, CommitReduction);
         if (FreeType & MEM_RELEASE) Process->VirtualSize -= PRegionSize;
 
         //

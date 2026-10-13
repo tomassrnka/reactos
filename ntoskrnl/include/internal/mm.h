@@ -902,6 +902,11 @@ NTAPI
 MiWaitForCommitGrowth(
     _In_ SIZE_T Shortfall);
 
+BOOLEAN
+NTAPI
+MiChargeCommitWithGrowth(
+    _In_ SIZE_T Pages);
+
 VOID
 NTAPI
 MiAddProcessCommit(
