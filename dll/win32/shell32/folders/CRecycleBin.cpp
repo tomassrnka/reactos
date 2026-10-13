@@ -27,6 +27,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(CRecycleBin);
 
+LPWSTR SH_FormatFileSizeWithBytes(const PULARGE_INTEGER lpQwSize, LPWSTR pwszResult, UINT cchResultMax);
+
 typedef struct
 {
     int column_name_id;
@@ -543,6 +545,238 @@ static HRESULT CALLBACK FileOpCallback(FILEOPCALLBACKEVENT Event, LPCWSTR Src, L
     return S_OK;
 }
 
+struct RBITEMSIZEJOB
+{
+    LONG cRef;
+    LONG volatile Cancel;
+    HWND hwndPage;
+    WCHAR szPath[MAX_PATH];
+};
+
+#define WM_RBITEM_SIZE (WM_APP + 1)
+
+static void ReleaseSizeJob(RBITEMSIZEJOB *pJob)
+{
+    if (!InterlockedDecrement(&pJob->cRef))
+        LocalFree(pJob);
+}
+
+static ULONGLONG GetFolderContentSize(LPCWSTR pszFolder, const RBITEMSIZEJOB &Job)
+{
+    WCHAR szPath[MAX_PATH];
+    WIN32_FIND_DATAW wfd;
+    ULONGLONG Size = 0;
+    if (!PathCombineW(szPath, pszFolder, L"*"))
+        return 0;
+    HANDLE hFind = FindFirstFileW(szPath, &wfd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return 0;
+    do
+    {
+        if (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            if (!PathIsDotOrDotDotW(wfd.cFileName) && !(wfd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                PathCombineW(szPath, pszFolder, wfd.cFileName))
+            {
+                Size += GetFolderContentSize(szPath, Job);
+            }
+        }
+        else
+        {
+            Size += ((ULONGLONG)wfd.nFileSizeHigh << 32) | wfd.nFileSizeLow;
+        }
+    } while (!Job.Cancel && FindNextFileW(hFind, &wfd));
+    FindClose(hFind);
+    return Size;
+}
+
+static DWORD CALLBACK RecycleBinItemSizeThread(LPVOID pParam)
+{
+    RBITEMSIZEJOB *pJob = (RBITEMSIZEJOB*)pParam;
+    ULARGE_INTEGER Size;
+    Size.QuadPart = GetFolderContentSize(pJob->szPath, *pJob);
+    if (!pJob->Cancel)
+        PostMessageW(pJob->hwndPage, WM_RBITEM_SIZE, Size.LowPart, Size.HighPart);
+    ReleaseSizeJob(pJob);
+    return 0;
+}
+
+static void SetItemPropSize(HWND hwndDlg, ULONGLONG Bytes)
+{
+    WCHAR szBuf[MAX_PATH];
+    ULARGE_INTEGER Size;
+    Size.QuadPart = Bytes;
+    if (SH_FormatFileSizeWithBytes(&Size, szBuf, _countof(szBuf)))
+        SetDlgItemTextW(hwndDlg, IDC_RBITEM_SIZE, szBuf);
+}
+
+static void SetItemPropTime(HWND hwndDlg, UINT idCtrl, FILETIME ft)
+{
+    WCHAR szBuf[100];
+    if ((ft.dwLowDateTime || ft.dwHighDateTime) && CFileDefExt::GetFileTimeString(&ft, szBuf, _countof(szBuf)))
+        SetDlgItemTextW(hwndDlg, idCtrl, szBuf);
+}
+
+static void InitRecycleBinItemPropPage(HWND hwndDlg, LPCITEMIDLIST pidl)
+{
+    const BBITEMDATA &Data = *ValidateItem(pidl);
+    LPCWSTR pszRecycled = GetItemRecycledFullPath(Data);
+    WCHAR szBuf[MAX_PATH];
+    SHFILEINFOW shfi;
+
+    BOOL bIcon = FALSE;
+    if (LPITEMIDLIST pidlFolder = SHCloneSpecialIDList(NULL, CSIDL_BITBUCKET, FALSE))
+    {
+        if (LPITEMIDLIST pidlFull = ILCombine(pidlFolder, pidl))
+        {
+            bIcon = SHGetFileInfoW((LPCWSTR)pidlFull, 0, &shfi, sizeof(shfi), SHGFI_PIDL | SHGFI_ICON | SHGFI_LARGEICON) != 0;
+            ILFree(pidlFull);
+        }
+        ILFree(pidlFolder);
+    }
+    if (!bIcon)
+    {
+        UINT Attribs = IsFolder(pidl) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+        bIcon = SHGetFileInfoW(pszRecycled, Attribs, &shfi, sizeof(shfi), SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES) != 0;
+    }
+    if (bIcon)
+    {
+        HICON hOld = (HICON)SendDlgItemMessageW(hwndDlg, IDC_RBITEM_ICON, STM_SETICON, (WPARAM)shfi.hIcon, 0);
+        if (hOld)
+            DestroyIcon(hOld);
+    }
+
+    StringCchCopyW(szBuf, _countof(szBuf), GetItemOriginalFileName(Data));
+    if (!IsFolder(pidl))
+        SHELL_FS_ProcessDisplayFilename(szBuf, SHGDN_INFOLDER);
+    SetDlgItemTextW(hwndDlg, IDC_RBITEM_NAME, szBuf);
+
+    LPWSTR pszOrigin;
+    if (SUCCEEDED(GetItemOriginalFolder(Data, pszOrigin)))
+    {
+        SetDlgItemTextW(hwndDlg, IDC_RBITEM_ORIGIN, pszOrigin);
+        SHFree(pszOrigin);
+    }
+
+    if (SUCCEEDED(GetItemTypeName(ILFindLastID(pidl), Data, shfi)))
+        SetDlgItemTextW(hwndDlg, IDC_RBITEM_TYPE, shfi.szTypeName);
+
+    SetItemPropTime(hwndDlg, IDC_RBITEM_DELETED, Data.DeletionTime);
+
+    /* The fields stay empty when the recycled file cannot be read */
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    BOOL bHaveData = GetFileAttributesExW(pszRecycled, GetFileExInfoStandard, &fad);
+    if (!bHaveData)
+    {
+        WIN32_FIND_DATAW wfd;
+        HANDLE hFind = FindFirstFileW(pszRecycled, &wfd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            fad.dwFileAttributes = wfd.dwFileAttributes;
+            fad.ftCreationTime = wfd.ftCreationTime;
+            fad.ftLastAccessTime = wfd.ftLastAccessTime;
+            fad.ftLastWriteTime = wfd.ftLastWriteTime;
+            fad.nFileSizeHigh = wfd.nFileSizeHigh;
+            fad.nFileSizeLow = wfd.nFileSizeLow;
+            FindClose(hFind);
+            bHaveData = TRUE;
+        }
+    }
+    if (!bHaveData)
+        return;
+
+    if (!IsFolder(pidl))
+    {
+        SetItemPropSize(hwndDlg, ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow);
+    }
+    else if (RBITEMSIZEJOB *pJob = (RBITEMSIZEJOB*)LocalAlloc(LPTR, sizeof(*pJob)))
+    {
+        pJob->cRef = 2;
+        pJob->hwndPage = hwndDlg;
+        StringCchCopyW(pJob->szPath, _countof(pJob->szPath), pszRecycled);
+        SetWindowLongPtrW(hwndDlg, DWLP_USER, (LONG_PTR)pJob);
+        if (!SHCreateThread(RecycleBinItemSizeThread, pJob, CTF_PROCESS_REF, NULL))
+            ReleaseSizeJob(pJob);
+    }
+
+    SetItemPropTime(hwndDlg, IDC_RBITEM_CREATED, fad.ftCreationTime);
+    SetItemPropTime(hwndDlg, IDC_RBITEM_MODIFIED, fad.ftLastWriteTime);
+
+    CheckDlgButton(hwndDlg, IDC_RBITEM_READONLY, (fad.dwFileAttributes & FILE_ATTRIBUTE_READONLY) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwndDlg, IDC_RBITEM_HIDDEN, (fad.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hwndDlg, IDC_RBITEM_ARCHIVE, (fad.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE) ? BST_CHECKED : BST_UNCHECKED);
+}
+
+static INT_PTR CALLBACK RecycleBinItemPropPageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    switch (uMsg)
+    {
+        case WM_INITDIALOG:
+            InitRecycleBinItemPropPage(hwndDlg, (LPCITEMIDLIST)((LPPROPSHEETPAGEW)lParam)->lParam);
+            return TRUE;
+        case WM_RBITEM_SIZE:
+        {
+            ULARGE_INTEGER Size;
+            Size.LowPart = (DWORD)wParam;
+            Size.HighPart = (DWORD)lParam;
+            SetItemPropSize(hwndDlg, Size.QuadPart);
+            break;
+        }
+        case WM_DESTROY:
+        {
+            HICON hIcon = (HICON)SendDlgItemMessageW(hwndDlg, IDC_RBITEM_ICON, STM_SETICON, 0, 0);
+            if (hIcon)
+                DestroyIcon(hIcon);
+            if (RBITEMSIZEJOB *pJob = (RBITEMSIZEJOB*)GetWindowLongPtrW(hwndDlg, DWLP_USER))
+            {
+                InterlockedExchange(&pJob->Cancel, TRUE);
+                ReleaseSizeJob(pJob);
+            }
+            break;
+        }
+    }
+    return FALSE;
+}
+
+static DWORD CALLBACK RecycleBinItemPropThread(LPVOID pParam)
+{
+    LPITEMIDLIST pidl = (LPITEMIDLIST)pParam;
+    PROPSHEETPAGEW psp = { sizeof(psp) };
+    psp.hInstance = shell32_hInstance;
+    psp.pszTemplate = MAKEINTRESOURCEW(IDD_RECYCLE_ITEM_PROPERTIES);
+    psp.pfnDlgProc = RecycleBinItemPropPageProc;
+    psp.lParam = (LPARAM)pidl;
+    HPROPSHEETPAGE hPage = CreatePropertySheetPageW(&psp);
+    if (hPage)
+    {
+        PROPSHEETHEADERW psh = { sizeof(psh) };
+        psh.dwFlags = PSH_PROPTITLE | PSH_NOAPPLYNOW;
+        psh.hInstance = shell32_hInstance;
+        WCHAR szCaption[MAX_PATH];
+        StringCchCopyW(szCaption, _countof(szCaption), GetItemOriginalFileName(*ValidateItem(pidl)));
+        if (!IsFolder(pidl))
+            SHELL_FS_ProcessDisplayFilename(szCaption, SHGDN_INFOLDER);
+        psh.pszCaption = szCaption;
+        psh.nPages = 1;
+        psh.phpage = &hPage;
+        PropertySheetW(&psh);
+    }
+    ILFree(pidl);
+    return 0;
+}
+
+static HRESULT ShowRecycleBinItemProperties(LPCITEMIDLIST pidl, BOOL bSync)
+{
+    if (!ValidateItem(pidl))
+        return E_INVALIDARG;
+    LPITEMIDLIST pidlCopy = ILClone(pidl);
+    if (!pidlCopy)
+        return E_OUTOFMEMORY;
+    if (bSync || !SHCreateThread(RecycleBinItemPropThread, pidlCopy, CTF_COINIT | CTF_PROCESS_REF, NULL))
+        RecycleBinItemPropThread(pidlCopy);
+    return S_OK;
+}
+
 HRESULT WINAPI CRecycleBinItemContextMenu::InvokeCommand(LPCMINVOKECOMMANDINFO lpcmi)
 {
     TRACE("(%p)->(invcom=%p verb=%p wnd=%p)\n", this, lpcmi, lpcmi->lpVerb, lpcmi->hwnd);
@@ -602,9 +836,11 @@ HRESULT WINAPI CRecycleBinItemContextMenu::InvokeCommand(LPCMINVOKECOMMANDINFO l
     }
     else if (CmdId == IDC_BB_PROPERTIES)
     {
-        FIXME("implement properties\n");
-        SHELL_ErrorBox(*lpcmi, ERROR_NOT_SUPPORTED);
-        return E_NOTIMPL;
+        HRESULT hr = S_OK;
+        BOOL bSync = (lpcmi->fMask & CMIC_MASK_NOASYNC) != 0;
+        for (UINT i = 0; i < m_cidl && SUCCEEDED(hr); ++i)
+            hr = ShowRecycleBinItemProperties(m_apidl[i], bSync);
+        return hr;
     }
     return E_UNEXPECTED;
 }
