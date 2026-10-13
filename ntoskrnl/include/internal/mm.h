@@ -640,6 +640,15 @@ MmIsAddressRangeFree(
 
 PVOID
 NTAPI
+MmFindGapInRange(
+    PMMSUPPORT AddressSpace,
+    ULONG_PTR Length,
+    ULONG_PTR Granularity,
+    BOOLEAN TopDown,
+    ULONG_PTR HighestAddress);
+
+PVOID
+NTAPI
 MmFindGap(
     PMMSUPPORT AddressSpace,
     SIZE_T Length,

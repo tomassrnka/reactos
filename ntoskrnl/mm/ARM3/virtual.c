@@ -4556,7 +4556,8 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     PAGED_CODE();
 
     /* Check for valid Zero bits */
-    if (ZeroBits > MI_MAX_ZERO_BITS)
+    if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress) ||
+        (ZeroBits > 32 && ZeroBits < MM_VIRTMEM_GRANULARITY - 1))
     {
         DPRINT1("Too many zero bits\n");
         return STATUS_INVALID_PARAMETER_3;
@@ -4780,21 +4781,6 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
             EndingAddress = 0;
             StartingAddress = 0;
 
-            //
-            // Check if ZeroBits were specified
-            //
-            if (ZeroBits != 0)
-            {
-                //
-                // Calculate the highest address and check if it's valid
-                //
-                HighestAddress = MAXULONG_PTR >> ZeroBits;
-                if (HighestAddress > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS)
-                {
-                    Status = STATUS_INVALID_PARAMETER_3;
-                    goto FailPathNoLock;
-                }
-            }
         }
         else
         {
@@ -4806,6 +4792,9 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
             EndingAddress = ((ULONG_PTR)PBaseAddress + PRegionSize - 1) | (PAGE_SIZE - 1);
             PRegionSize = EndingAddress + 1 - ROUND_DOWN((ULONG_PTR)PBaseAddress, _64K);
             StartingAddress = (ULONG_PTR)PBaseAddress;
+
+            /* ZeroBits only limits automatic placement for allocations. */
+            HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
         }
 
         // Charge quotas for the VAD
