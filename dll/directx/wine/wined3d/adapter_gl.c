@@ -5081,7 +5081,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     if (!wined3d_caps_gl_ctx_create(adapter_gl, &caps_gl_ctx))
     {
         ERR("Failed to get a GL context for adapter %p.\n", adapter_gl);
-        return FALSE;
+        goto fail;
     }
 
     for (i = 0; i < ARRAY_SIZE(supported_gl_versions); ++i)
@@ -5111,7 +5111,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     {
         ERR("Failed to initialize GL caps for adapter %p.\n", adapter_gl);
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-        return FALSE;
+        goto fail;
     }
 
     for (unsigned int i = 0; i < ARRAY_SIZE(required_extensions); ++i)
@@ -5123,7 +5123,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
             wined3d_warn_no_3d();
 #endif
             wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-            return FALSE;
+            goto fail;
         }
     }
 
@@ -5134,7 +5134,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         wined3d_warn_no_3d();
 #endif
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-        return FALSE;
+        goto fail;
     }
 
     if (gl_info->glsl_version < MAKEDWORD_VERSION(1, 20))
@@ -5145,7 +5145,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         wined3d_warn_no_3d();
 #endif
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-        return FALSE;
+        goto fail;
     }
 
     gl_info->filling_convention_offset = wined3d_adapter_find_fill_offset(&caps_gl_ctx);
@@ -5156,7 +5156,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
             caps_gl_ctx.vram_bytes, 0))
     {
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
-        return FALSE;
+        goto fail;
     }
     TRACE("Reporting (fake) driver version 0x%08x-0x%08x.\n",
             driver_info->version_high, driver_info->version_low);
@@ -5169,7 +5169,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         WARN("No suitable pixel formats found.\n");
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
         free(adapter_gl->pixel_formats);
-        return FALSE;
+        goto fail;
     }
 
     if (!wined3d_adapter_gl_init_format_info(&adapter_gl->a, &caps_gl_ctx))
@@ -5177,7 +5177,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         ERR("Failed to initialize GL format info.\n");
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
         free(adapter_gl->pixel_formats);
-        return FALSE;
+        goto fail;
     }
 
     wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
@@ -5185,6 +5185,10 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     wined3d_adapter_init_ffp_attrib_ops(adapter_gl);
 
     return TRUE;
+
+fail:
+    wined3d_adapter_cleanup(&adapter_gl->a);
+    return FALSE;
 }
 
 struct wined3d_adapter *wined3d_adapter_gl_create(unsigned int ordinal, unsigned int wined3d_creation_flags)
