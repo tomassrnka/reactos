@@ -1693,10 +1693,10 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiSetUserPref(UPM_UIEFFECTS, pvParam, fl);
 
         case SPI_GETMOUSESONAR:
-            return SpiGetInt(pvParam, &gspv.bMouseSonar, fl);
+            return SpiGetUserPref(UPM_MOUSESONAR, pvParam, fl);
 
         case SPI_SETMOUSESONAR:
-            return SpiSetBool(&gspv.bMouseSonar, uiParam, KEY_MOUSE, L"", fl);
+            return SpiSetUserPref(UPM_MOUSESONAR, pvParam, fl);
 
         case SPI_GETMOUSECLICKLOCK:
             return SpiGetUserPref(UPM_CLICKLOCK, pvParam, fl);
@@ -1706,10 +1706,10 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiSetUserPref(UPM_CLICKLOCK, pvParam, fl);
 
         case SPI_GETMOUSEVANISH:
-            return SpiGetInt(pvParam, &gspv.bMouseVanish, fl);
+            return SpiGetUserPref(UPM_MOUSEVANISH, pvParam, fl);
 
         case SPI_SETMOUSEVANISH:
-            return SpiSetBool(&gspv.bMouseVanish, uiParam, KEY_MOUSE, L"", fl);
+            return SpiSetUserPref(UPM_MOUSEVANISH, pvParam, fl);
 
         case SPI_GETFLATMENU:
             return SpiGetUserPref(UPM_FLATMENU, pvParam, fl);
