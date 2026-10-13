@@ -976,9 +976,9 @@ NTSTATUS write_compressed(fcb* fcb, uint64_t start_data, uint64_t end_data, void
             parts[i].outlen = parts[i].inlen - parts[i].cj->space_left;
 
             if (type == BTRFS_COMPRESS_LZO)
-                fcb->Vcb->superblock.incompat_flags |= BTRFS_FEATURE_INCOMPAT_COMPRESS_LZO;
+                set_incompat_flag(fcb->Vcb, BTRFS_FEATURE_INCOMPAT_COMPRESS_LZO);
             else if (type == BTRFS_COMPRESS_ZSTD)
-                fcb->Vcb->superblock.incompat_flags |= BTRFS_FEATURE_INCOMPAT_COMPRESS_ZSTD;
+                set_incompat_flag(fcb->Vcb, BTRFS_FEATURE_INCOMPAT_COMPRESS_ZSTD);
 
             if ((parts[i].outlen & (fcb->Vcb->superblock.sectorsize - 1)) != 0) {
                 unsigned int newlen = (unsigned int)sector_align(parts[i].outlen, fcb->Vcb->superblock.sectorsize);

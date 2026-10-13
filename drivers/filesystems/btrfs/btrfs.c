@@ -4707,6 +4707,7 @@ static NTSTATUS mount_vol(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp) {
     Vcb->vde = vde;
 
     ExInitializeResourceLite(&Vcb->tree_lock);
+    KeInitializeSpinLock(&Vcb->incompat_flags_lock);
     Vcb->need_write = false;
 
     ExInitializeResourceLite(&Vcb->fcb_lock);
