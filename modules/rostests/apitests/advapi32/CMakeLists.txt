@@ -14,6 +14,7 @@ list(APPEND SOURCE
     QueryServiceConfig2.c
     RegConcurrentWrite.c
     RegCreateKeyEx.c
+    RegCreateKeyTransacted.c
     RegEnumKey.c
     RegEnumKeyClass.c
     RegEnumValueW.c

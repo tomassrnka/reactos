@@ -16,6 +16,7 @@ extern void func_LogonUser(void);
 extern void func_QueryServiceConfig2(void);
 extern void func_RegConcurrentWrite(void);
 extern void func_RegCreateKeyEx(void);
+extern void func_RegCreateKeyTransacted(void);
 extern void func_RegEnumKey(void);
 extern void func_RegEnumKeyClass(void);
 extern void func_RegEnumValueW(void);
@@ -50,6 +51,7 @@ const struct test winetest_testlist[] =
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
     { "RegConcurrentWrite", func_RegConcurrentWrite },
     { "RegCreateKeyEx", func_RegCreateKeyEx },
+    { "RegCreateKeyTransacted", func_RegCreateKeyTransacted },
     { "RegEnumKey", func_RegEnumKey },
     { "RegEnumKeyClass", func_RegEnumKeyClass },
     { "RegEnumValueW", func_RegEnumValueW },
