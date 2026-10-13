@@ -242,6 +242,10 @@ INT InputWait(BOOL bNoBreak, INT timerValue)
             if (InputRecords[i].EventType != KEY_EVENT)
                 continue;
 
+            /* Only a key press ends the wait, not the release of the key that started the command */
+            if (!InputRecords[i].Event.KeyEvent.bKeyDown)
+                continue;
+
             /* Ignore any system key event */
             if ((InputRecords[i].Event.KeyEvent.wVirtualKeyCode == VK_CONTROL) ||
              // (InputRecords[i].Event.KeyEvent.dwControlKeyState & (LEFT_ALT_PRESSED  | RIGHT_ALT_PRESSED )) ||
