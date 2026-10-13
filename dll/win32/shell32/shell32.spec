@@ -662,3 +662,4 @@
 
 @ stdcall -version=0x601+ GetCurrentProcessExplicitAppUserModelID(wstr)
 @ stdcall -version=0x601+ SetCurrentProcessExplicitAppUserModelID(wstr)
+@ stdcall -version=0x601+ SHGetPropertyStoreForWindow(ptr ptr ptr)
