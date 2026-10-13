@@ -49,6 +49,7 @@ list(APPEND SOURCE
     Pipes.c
     PipeSqos.c
     PrivMoveFileIdentityW.c
+    QueryCycleTime.c
     QueueUserAPC.c
     RaiseFailFastException.c
     ReadFile.c

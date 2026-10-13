@@ -48,6 +48,7 @@ extern void func_MultiByteToWideChar(void);
 extern void func_Pipes(void);
 extern void func_PipeSqos(void);
 extern void func_PrivMoveFileIdentityW(void);
+extern void func_QueryCycleTime(void);
 extern void func_QueueUserAPC(void);
 extern void func_RaiseFailFastException(void);
 extern void func_RegisterWait(void);
@@ -114,6 +115,7 @@ const struct test winetest_testlist[] =
     { "Pipes",                       func_Pipes },
     { "PipeSqos",                    func_PipeSqos },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
+    { "QueryCycleTime",              func_QueryCycleTime },
     { "QueueUserAPC",                func_QueueUserAPC },
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "RegisterWait",                func_RegisterWait },

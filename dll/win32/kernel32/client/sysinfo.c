@@ -262,6 +262,43 @@ GetLogicalProcessorInformation(OUT PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Buffer,
  */
 BOOL
 WINAPI
+QueryIdleProcessorCycleTime(
+    _Inout_ PULONG BufferLength,
+    _Out_writes_bytes_opt_(*BufferLength) PULONG64 ProcessorIdleCycleTime)
+{
+    NTSTATUS Status;
+
+    /* Without a buffer, return the size it needs */
+    if (!ProcessorIdleCycleTime)
+    {
+        Status = NtQuerySystemInformation(SystemProcessorIdleCycleTimeInformation,
+                                          NULL,
+                                          0,
+                                          BufferLength);
+        if (Status == STATUS_BUFFER_TOO_SMALL)
+            Status = STATUS_SUCCESS;
+    }
+    else
+    {
+        Status = NtQuerySystemInformation(SystemProcessorIdleCycleTimeInformation,
+                                          ProcessorIdleCycleTime,
+                                          *BufferLength,
+                                          BufferLength);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 GetNumaHighestNodeNumber(OUT PULONG HighestNodeNumber)
 {
     NTSTATUS Status;
