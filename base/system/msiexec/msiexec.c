@@ -635,6 +635,33 @@ static WCHAR *get_path_with_extension(const WCHAR *package_name)
     return path;
 }
 
+#ifdef __REACTOS__
+/* A package that cannot be opened is reported as 1619 or 1620, in a box unless the UI is none or progress only */
+static UINT report_package_error( UINT error, const WCHAR *package, INSTALLUILEVEL level )
+{
+    WCHAR *text = NULL;
+    DWORD len;
+
+    if ((error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) &&
+        GetFileAttributesW( package ) == INVALID_FILE_ATTRIBUTES)
+        error = ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+    if (error != ERROR_INSTALL_PACKAGE_OPEN_FAILED && error != ERROR_INSTALL_PACKAGE_INVALID)
+        return error;
+    if ((level & 0x0f) == INSTALLUILEVEL_NONE || (level & INSTALLUILEVEL_PROGRESSONLY))
+        return error;
+
+    len = FormatMessageW( FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+                          NULL, error, 0, (WCHAR *)&text, 0, NULL );
+    if (!len)
+        return error;
+    while (len && (text[len - 1] == '\r' || text[len - 1] == '\n' || text[len - 1] == ' '))
+        text[--len] = 0;
+    MessageBoxW( NULL, text, L"Windows Installer", MB_OK | MB_ICONERROR );
+    LocalFree( text );
+    return error;
+}
+#endif
+
 static WCHAR *remove_quotes( const WCHAR *filename )
 {
     const WCHAR *ptr = filename;
@@ -1115,6 +1142,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				ReturnCode = MsiInstallProductW(path, Properties);
 				free(path);
 			}
+#ifdef __REACTOS__
+			ReturnCode = report_package_error(ReturnCode, package_unquoted, InstallUILevel);
+#endif
 		}
 	}
 	else if(FunctionRepair)
