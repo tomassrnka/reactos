@@ -384,6 +384,28 @@ SetWaitableTimer(IN HANDLE hTimer,
  */
 BOOL
 WINAPI
+SetWaitableTimerEx(IN HANDLE hTimer,
+                   IN const LARGE_INTEGER *pDueTime,
+                   IN LONG lPeriod,
+                   IN PTIMERAPCROUTINE pfnCompletionRoutine OPTIONAL,
+                   IN OPTIONAL LPVOID lpArgToCompletionRoutine,
+                   IN PREASON_CONTEXT WakeContext OPTIONAL,
+                   IN ULONG TolerableDelay)
+{
+    /* Timer coalescing and wake contexts are not supported, so they are ignored */
+    return SetWaitableTimer(hTimer,
+                            pDueTime,
+                            lPeriod,
+                            pfnCompletionRoutine,
+                            lpArgToCompletionRoutine,
+                            FALSE);
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 CancelWaitableTimer(IN HANDLE hTimer)
 {
     NTSTATUS Status;

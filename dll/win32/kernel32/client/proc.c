@@ -922,6 +922,72 @@ GetActiveProcessorGroupCount(VOID)
     return 1; // TODO: SharedUserData->ActiveGroupCount?
 }
 
+/*
+ * @implemented
+ */
+WORD
+WINAPI
+GetMaximumProcessorGroupCount(VOID)
+{
+    // FIXME: Real group support
+    return 1;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetProcessGroupAffinity(IN HANDLE hProcess,
+                        IN OUT PUSHORT GroupCount,
+                        OUT PUSHORT GroupArray)
+{
+    PROCESS_BASIC_INFORMATION ProcessInfo;
+    NTSTATUS Status;
+    BOOL Ret = TRUE;
+
+    // FIXME: Real group support, every process lives in the one group
+    Status = NtQueryInformationProcess(hProcess,
+                                       ProcessBasicInformation,
+                                       &ProcessInfo,
+                                       sizeof(ProcessInfo),
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        if (*GroupCount < 1)
+        {
+            *GroupCount = 1;
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            Ret = FALSE;
+        }
+        else if ((ULONG_PTR)GroupArray & (sizeof(ULONG) - 1))
+        {
+            /* Windows needs the array aligned to 4 bytes */
+            SetLastError(ERROR_NOACCESS);
+            Ret = FALSE;
+        }
+        else
+        {
+            GroupArray[0] = THEONLYGROUP;
+            *GroupCount = 1;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastError(ERROR_NOACCESS);
+        Ret = FALSE;
+    }
+    _SEH2_END;
+
+    return Ret;
+}
+
 static DWORD
 GetProcessorCountInfo(IN WORD GroupNumber, IN BOOL Maximum)
 {
