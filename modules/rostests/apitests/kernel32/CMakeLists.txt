@@ -22,6 +22,7 @@ list(APPEND SOURCE
     FindFiles.c
     FLS.c
     FormatMessage.c
+    FormatMessageInsert.c
     GetComputerNameEx.c
     GetCPInfo.c
     GetCurrentDirectory.c
