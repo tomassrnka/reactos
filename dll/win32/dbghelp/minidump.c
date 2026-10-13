@@ -151,8 +151,15 @@ static BOOL fetch_thread_info(struct dump_context* dc, int thd_idx,
         mdThd->Teb = (ULONG_PTR)tbi.TebBaseAddress;
         if (tbi.ExitStatus == STILL_ACTIVE)
         {
+#ifdef __REACTOS__
+            /* Out of process, the faulting thread waits for the dump: use its exception context */
+            if (tid != GetCurrentThreadId() &&
+                !(except && except->ClientPointers && tid == except->ThreadId) &&
+                (mdThd->SuspendCount = SuspendThread(hThread)) != (DWORD)-1)
+#else
             if (tid != GetCurrentThreadId() &&
                 (mdThd->SuspendCount = SuspendThread(hThread)) != (DWORD)-1)
+#endif
             {
                 ctx->ContextFlags = CONTEXT_FULL;
                 if (!GetThreadContext(hThread, ctx))
@@ -161,7 +168,12 @@ static BOOL fetch_thread_info(struct dump_context* dc, int thd_idx,
                 fetch_thread_stack(dc, tbi.TebBaseAddress, ctx, &mdThd->Stack);
                 ResumeThread(hThread);
             }
+#ifdef __REACTOS__
+            else if (except && (tid == GetCurrentThreadId() ||
+                                (except->ClientPointers && tid == except->ThreadId)))
+#else
             else if (tid == GetCurrentThreadId() && except)
+#endif
             {
                 CONTEXT lctx, *pctx;
                 mdThd->SuspendCount = 1;
