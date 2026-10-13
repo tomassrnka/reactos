@@ -1362,6 +1362,27 @@ UINT msi_set_original_database_property( MSIDATABASE *db, const WCHAR *package )
 }
 
 #ifdef __REACTOS__
+/* Tells a package that cannot be reached or read from a file that is no package */
+static UINT get_package_open_error( const WCHAR *file )
+{
+    DWORD attrs = GetFileAttributesW( file );
+    HANDLE handle;
+
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+        return GetLastError() == ERROR_PATH_NOT_FOUND ? ERROR_PATH_NOT_FOUND : ERROR_FILE_NOT_FOUND;
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY)
+        return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+
+    /* same access and sharing as the read-only storage open */
+    handle = CreateFileW( file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    if (handle == INVALID_HANDLE_VALUE)
+        return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+    CloseHandle( handle );
+    return ERROR_INSTALL_PACKAGE_INVALID;
+}
+#endif
+
+#ifdef __REACTOS__
 BOOL WINAPI ApphelpCheckRunAppEx(HANDLE FileHandle, PVOID Unk1, PVOID Unk2, PCWSTR ApplicationName, PVOID Environment, USHORT ExeType, PULONG Reason, PVOID *SdbQueryAppCompatData, PULONG SdbQueryAppCompatDataSize,
     PVOID *SxsData, PULONG SxsDataSize, PULONG FusionFlags, PULONG64 SomeFlag1, PULONG SomeFlag2);
 BOOL WINAPI SE_DynamicShim(LPCWSTR ProcessImage, PVOID hsdb, PVOID pQueryResult, LPCSTR Module, LPDWORD lpdwDynamicToken);
@@ -1458,9 +1479,13 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
         r = MSI_OpenDatabaseW( file, MSIDBOPEN_READONLY, &db );
         if (r != ERROR_SUCCESS)
         {
+#ifdef __REACTOS__
+            return get_package_open_error( file );
+#else
             if (GetFileAttributesW( file ) == INVALID_FILE_ATTRIBUTES)
                 return ERROR_FILE_NOT_FOUND;
             return r;
+#endif
         }
         r = get_local_package( db, localfile );
         if (r != ERROR_SUCCESS || GetFileAttributesW( localfile ) == INVALID_FILE_ATTRIBUTES)
