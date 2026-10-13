@@ -183,7 +183,7 @@ GraphLayout(HWND hWnd, GRAPH *G)
             SetRect(&Item->rc, X, Top + REGION_DY, X + Width, Top + REGION_DY + REGION_H);
             X += Width;
 
-            if (Disk->Regions[r].InExtended)
+            if (Disk->Regions[r].InExtended && Width > 0)
             {
                 RECT *Frame = &G->Ext[d].Frame;
 
