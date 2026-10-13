@@ -77,6 +77,7 @@ list(APPEND SOURCE
     WerFlags.c
     WideCharToMultiByte.c
     WriteFile.c
+    SetFileInformationByHandle.c
 )
 
 list(APPEND PCH_SKIP_SOURCE
