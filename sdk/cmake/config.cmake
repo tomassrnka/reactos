@@ -96,6 +96,10 @@ endif()
 cmake_dependent_option(ISAPNP_ENABLE "Whether to enable the ISA PnP support." ON
                        "ARCH STREQUAL i386 AND NOT SARCH STREQUAL xbox" OFF)
 
+cmake_dependent_option(BUILD_WOW64_ENABLED
+    "Build the experimental amd64 WoW64 kernel skeleton (no 32-bit loader yet)."
+    OFF "ARCH STREQUAL amd64" OFF)
+
 set(GENERATE_DEPENDENCY_GRAPH FALSE CACHE BOOL
 "Whether to create a GraphML dependency graph of DLLs.")
 

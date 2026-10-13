@@ -13,7 +13,8 @@ extern "C"
 
 typedef struct _WOW64_PROCESS
 {
-  PVOID Wow64;
+    /* User address of the PEB32; immutable once published on the process. */
+    PVOID Peb;
 } WOW64_PROCESS, *PWOW64_PROCESS;
 
 typedef struct _KPROFILE_SOURCE_OBJECT
