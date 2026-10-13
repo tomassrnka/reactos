@@ -1018,6 +1018,8 @@ IsSameVolume(IN PMOUNTMGR_MOUNT_POINTS Points,
              IN PMOUNTMGR_MOUNT_POINT A,
              IN PMOUNTMGR_MOUNT_POINT B)
 {
+    ULONG i;
+
     if (A->UniqueIdLength && B->UniqueIdLength)
     {
         return A->UniqueIdLength == B->UniqueIdLength &&
@@ -1025,10 +1027,20 @@ IsSameVolume(IN PMOUNTMGR_MOUNT_POINTS Points,
                         A->UniqueIdLength );
     }
 
-    return A->DeviceNameLength && A->DeviceNameLength == B->DeviceNameLength &&
-           !_wcsnicmp( (WCHAR *)((char *)Points + A->DeviceNameOffset),
-                       (WCHAR *)((char *)Points + B->DeviceNameOffset),
-                       A->DeviceNameLength / sizeof(WCHAR) );
+    if (!A->DeviceNameLength || A->DeviceNameLength != B->DeviceNameLength)
+        return FALSE;
+
+    /* Counted names, possibly at odd offsets after an odd-length unique ID */
+    for (i = 0; i < A->DeviceNameLength / sizeof(WCHAR); i++)
+    {
+        WCHAR a, b;
+
+        memcpy( &a, (char *)Points + A->DeviceNameOffset + i * sizeof(WCHAR), sizeof(WCHAR) );
+        memcpy( &b, (char *)Points + B->DeviceNameOffset + i * sizeof(WCHAR), sizeof(WCHAR) );
+        if (RtlUpcaseUnicodeChar( a ) != RtlUpcaseUnicodeChar( b )) return FALSE;
+    }
+
+    return TRUE;
 }
 
 /* Whether an earlier volume name in the list belongs to the same volume */
