@@ -122,7 +122,7 @@ EtwEventUnregister(
     RtlReleaseSRWLockExclusive(&EtwpRegistrationLock);
 
     if (!Registration)
-        return ERROR_INVALID_PARAMETER;
+        return ERROR_INVALID_HANDLE;
 
     RtlFreeHeap(RtlGetProcessHeap(), 0, Registration);
     return ERROR_SUCCESS;

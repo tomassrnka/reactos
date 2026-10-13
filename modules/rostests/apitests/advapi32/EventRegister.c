@@ -14,6 +14,7 @@ typedef BOOLEAN (WINAPI *FN_EventEnabled)(REGHANDLE, PCEVENT_DESCRIPTOR);
 typedef BOOLEAN (WINAPI *FN_EventProviderEnabled)(REGHANDLE, UCHAR, ULONGLONG);
 typedef ULONG (WINAPI *FN_EventWrite)(REGHANDLE, PCEVENT_DESCRIPTOR, ULONG, PEVENT_DATA_DESCRIPTOR);
 typedef ULONG (WINAPI *FN_EventWriteString)(REGHANDLE, UCHAR, ULONGLONG, PCWSTR);
+typedef ULONG (WINAPI *FN_EventWriteTransfer)(REGHANDLE, PCEVENT_DESCRIPTOR, LPCGUID, LPCGUID, ULONG, PEVENT_DATA_DESCRIPTOR);
 
 /* A provider no session knows: {6a3c1b5e-8f20-4d7a-9c41-0b7e2f9d3a18} */
 static const GUID TestProvider = { 0x6a3c1b5e, 0x8f20, 0x4d7a, { 0x9c, 0x41, 0x0b, 0x7e, 0x2f, 0x9d, 0x3a, 0x18 } };
@@ -35,6 +36,9 @@ START_TEST(EventRegister)
     FN_EventProviderEnabled pEventProviderEnabled;
     FN_EventWrite pEventWrite;
     FN_EventWriteString pEventWriteString;
+    FN_EventWriteTransfer pEventWriteTransfer;
+    GUID Activity = { 0x11111111, 0x2222, 0x3333, { 4, 4, 5, 5, 5, 5, 5, 5 } };
+    GUID Related = { 0x66666666, 0x7777, 0x8888, { 9, 9, 9, 9, 9, 9, 9, 9 } };
     EVENT_DESCRIPTOR Descriptor = { 1, 0, 0, 4, 0, 0, 0 };
     EVENT_DATA_DESCRIPTOR Data;
     REGHANDLE Handle, Handle2;
@@ -46,9 +50,16 @@ START_TEST(EventRegister)
     pEventProviderEnabled = (FN_EventProviderEnabled)GetProcAddress(hAdvapi32, "EventProviderEnabled");
     pEventWrite = (FN_EventWrite)GetProcAddress(hAdvapi32, "EventWrite");
     pEventWriteString = (FN_EventWriteString)GetProcAddress(hAdvapi32, "EventWriteString");
-    ok(pEventRegister && pEventUnregister && pEventEnabled && pEventProviderEnabled && pEventWrite && pEventWriteString,
-       "Event provider functions are not exported\n");
-    if (!pEventRegister || !pEventUnregister || !pEventEnabled || !pEventProviderEnabled || !pEventWrite || !pEventWriteString)
+    pEventWriteTransfer = (FN_EventWriteTransfer)GetProcAddress(hAdvapi32, "EventWriteTransfer");
+    if (!pEventRegister && is_reactos() && !GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetTickCount64"))
+    {
+        skip("No NT 6 exports\n");
+        return;
+    }
+    ok(pEventRegister && pEventUnregister && pEventEnabled && pEventProviderEnabled && pEventWrite && pEventWriteString &&
+       pEventWriteTransfer, "Event provider functions are not exported\n");
+    if (!pEventRegister || !pEventUnregister || !pEventEnabled || !pEventProviderEnabled || !pEventWrite ||
+        !pEventWriteString || !pEventWriteTransfer)
         return;
 
     Error = pEventRegister(&TestProvider, NULL, NULL, NULL);
@@ -80,6 +91,16 @@ START_TEST(EventRegister)
     ok(Error == ERROR_SUCCESS, "EventWrite without data returned %lu\n", Error);
     Error = pEventWriteString(Handle, 4, 0, L"advapi32_apitest");
     ok(Error == ERROR_SUCCESS, "EventWriteString returned %lu\n", Error);
+    Error = pEventWriteTransfer(Handle, &Descriptor, &Activity, &Related, 1, &Data);
+    ok(Error == ERROR_SUCCESS, "EventWriteTransfer returned %lu\n", Error);
+
+    /* Bad arguments */
+    Error = pEventWriteString(0, 0, 0, L"");
+    ok(Error == ERROR_INVALID_HANDLE, "EventWriteString without a handle returned %lu\n", Error);
+    Error = pEventWriteString(Handle, 0, 0, NULL);
+    ok(Error == ERROR_INVALID_PARAMETER, "EventWriteString without a string returned %lu\n", Error);
+    Error = pEventUnregister(0);
+    ok(Error == ERROR_INVALID_HANDLE, "EventUnregister(0) returned %lu\n", Error);
 
     Error = pEventUnregister(Handle2);
     ok(Error == ERROR_SUCCESS, "EventUnregister returned %lu\n", Error);
