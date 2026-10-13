@@ -3014,6 +3014,16 @@ RtlDosPathNameToNtPathName_U(
     _Out_opt_ PRTL_RELATIVE_NAME_U DirectoryInfo
 );
 
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlDosPathNameToNtPathName_U_WithStatus(
+    _In_z_ PCWSTR DosPathName,
+    _Out_ PUNICODE_STRING NtPathName,
+    _Out_opt_ PCWSTR *NtFileNamePart,
+    _Out_opt_ PRTL_RELATIVE_NAME_U DirectoryInfo
+);
+
 
 #define RTL_UNCHANGED_UNK_PATH  1
 #define RTL_CONVERTED_UNC_PATH  2
