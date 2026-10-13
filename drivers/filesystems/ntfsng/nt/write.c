@@ -396,8 +396,11 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, PFILE_OBJECT Holder, LONGLONG Offset,
         int Err;
         RtlCopyMemory(Bounce, Buffer + Done, n);
         NgAcquireCoreShared(Vcb, &Hold);
-        /* The lock again: an unlock may have run since the request started. */
-        if (Done == 0 && !Vcb->Dismounted && Vcb->LockedBy != Holder)
+        /*
+         * The lock again: an unlock may have run, or be running (LockEnding), since the request started.
+         * A dismounted volume's handle writes only while it still holds the lock, as on Windows.
+         */
+        if (Done == 0 && (Vcb->LockedBy != Holder || Vcb->LockEnding))
         {
             NgReleaseCoreShared(Vcb, &Hold);
             Status = STATUS_ACCESS_DENIED;
@@ -411,19 +414,21 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, PFILE_OBJECT Holder, LONGLONG Offset,
         }
         Err = NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n);
         /*
-         * The hand-over, in the hold of the first chunk's device write: no core write lands between the
-         * two, and a write that never reached the device hands nothing over.  From here on write opens,
-         * flushes and the flusher see a read-only volume, a label set is refused (it checks RawWritten
-         * under CoreLock), the core refuses every device write of its own, and page writes of files are
-         * dropped (NgDropIfDiscardable); all of it until the remount.
+         * The hand-over, in the hold of the first chunk's device write: no core I/O lands between the
+         * two, and a write that never reached the device hands nothing over.  From here on the core does
+         * no device I/O at all (a read would find what the holder wrote through a stale map), write
+         * opens, flushes and the flusher see a read-only volume, a label set is refused (it checks
+         * RawWritten under CoreLock), and page writes of files are dropped (NgDropIfDiscardable).  The
+         * end of the lock dismounts the volume (NgEndLock), so the next open mounts what is on the disk.
          */
         if (Done == 0 && Err != NG_DEV_NOT_SENT)
         {
             if (!Vcb->RawWritten && !Vcb->Dismounted)
             {
-                DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): read-only until the remount\n",
+                DPRINT1("ntfsng: the lock holder writes the volume directly (at %I64d len %lu): no I/O of the mount until the lock ends, then a dismount\n",
                         Offset, Length);
                 ngc_stop_writes(Vcb->Core);
+                ngc_medium_gone(Vcb->Core);
             }
             Vcb->RawWritten = TRUE;
             Vcb->ReadOnly = TRUE;
@@ -452,13 +457,13 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, PFILE_OBJECT Holder, LONGLONG Offset,
 
 /*
  * Writes through a volume handle.  The handle that holds the volume lock writes anywhere, as on
- * Windows (formatters lock the volume and write it); from then on the mounted state no longer
- * describes the disk, so the mount does no device I/O of its own any more (no flusher pass, lazy
- * write or close lands in what the holder writes), every later write of the holder goes straight
- * to the disk, and nothing is written back when the volume is dismounted.  Without
- * the lock only the boot code ($Boot, the first 8 KiB) may change under the mounted volume: setup
- * installs the boot sector that way, through the core's device path so the journal overlay and
- * the cached boot sector see it.
+ * Windows (formatters lock the volume and write it).  Once its first direct write was sent to the
+ * device, the mounted state no longer describes the disk: the core does no device I/O any more (no
+ * flusher pass, lazy write, close or read touches what the holder writes), every later write of the
+ * holder goes straight to the disk, the boot code area included, nothing is written back at the
+ * dismount, and the end of the lock dismounts the volume.  Without the lock only the boot code
+ * ($Boot, the first 8 KiB) may change under the mounted volume: setup installs the boot sector that
+ * way, through the core's device path so the journal overlay and the cached boot sector see it.
  */
 #define NG_BOOT_REGION 8192
 static NTSTATUS NgWriteVolume(PNG_VCB Vcb, PIRP Irp, LONGLONG Offset, ULONG Length)

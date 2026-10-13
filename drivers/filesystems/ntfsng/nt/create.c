@@ -1444,9 +1444,10 @@ out:
 static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
 /*
- * IRP_MJ_CLEANUP.  A volume handle is marked cleaned up and gives up the volume lock first; the rest
- * runs with the create gate shared, so the metadata changes of a last cleanup (a delete, timestamps)
- * never land after a volume lock's flush or during a dismount.
+ * IRP_MJ_CLEANUP.  A volume handle is marked cleaned up and gives up the volume lock first (a holder
+ * that wrote the disk directly dismounts the volume then, NgEndLock); the rest runs with the create
+ * gate shared, so the metadata changes of a last cleanup (a delete, timestamps) never land after a
+ * volume lock's flush or during a dismount.
  */
 NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -1458,7 +1459,7 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (!Fcb)
         return STATUS_SUCCESS;
     if (Fcb->IsVolume)
-        NgUnlockVolume(Vcb, FileObject, TRUE);
+        NgEndLock(Vcb, FileObject, TRUE);
     ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
     /* A dismount that ran while this cleanup waited for the gate left no core behind. */
     Status = Vcb->Dismounted ? NgCleanupDismounted(Vcb, Irp) : NgCleanupGated(DeviceObject, Irp);

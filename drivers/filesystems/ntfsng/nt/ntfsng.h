@@ -93,7 +93,8 @@ typedef struct _NG_VCB
     TUNNEL Tunnel;                  /* creation times of names that just went away (FsRtl tunnel cache) */
     PFILE_OBJECT LockedBy;          /* FSCTL_LOCK_VOLUME holder: no other open while set */
     ERESOURCE CreateGate;           /* creates and cleanups shared; volume lock and dismount exclusive */
-    BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: read-only, the mounted state never written back */
+    BOOLEAN RawWritten;             /* the lock holder wrote the disk directly: no core device I/O, dismounted when the lock ends */
+    BOOLEAN LockEnding;             /* the holder's unlock or cleanup runs: its direct writes not yet started are refused (CoreLock) */
     LONG DroppedPagingWrites;       /* page writes of files not written: after RawWritten, or dismounted */
     LONG PagingFiles;               /* FCBs that are paging files, listed or not, until freed (FcbListLock) */
     BOOLEAN LabelStale;             /* the VPB label is empty because reading it at mount ran out of memory */
@@ -283,7 +284,7 @@ VOID NgTunnelAdd(PNG_VCB Vcb, ULONGLONG DirMftNo, PCWSTR Name, USHORT NameChars,
 VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRING Name);
 
 /* fsctl.c */
-BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup);
+BOOLEAN NgEndLock(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup);
 
 /* security.c */
 NTSTATUS NgQuerySecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp);
