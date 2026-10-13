@@ -12,6 +12,7 @@ extern void func_EnumSystemCodePages(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
 extern void func_FLS(void);
+extern void func_ForcedRelocation(void);
 extern void func_FormatMessage(void);
 extern void func_GetComputerNameEx(void);
 extern void func_GetCPInfo(void);
@@ -59,6 +60,7 @@ const struct test winetest_testlist[] =
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
     { "FLS",                         func_FLS },
+    { "ForcedRelocation",            func_ForcedRelocation },
     { "FormatMessage",               func_FormatMessage },
     { "GetComputerNameEx",           func_GetComputerNameEx },
     { "GetCPInfo",                   func_GetCPInfo },

@@ -13,6 +13,7 @@ list(APPEND SOURCE
     FindActCtxSectionStringW.c
     FindFiles.c
     FLS.c
+    ForcedRelocation.c
     FormatMessage.c
     GetComputerNameEx.c
     GetCPInfo.c
