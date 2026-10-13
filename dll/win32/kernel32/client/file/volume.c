@@ -1010,6 +1010,48 @@ FindNextVolumeA(IN HANDLE handle,
     return ret;
 }
 
+/* Whether two points belong to the same volume: by unique ID, or by device
+ * name when one has no unique ID (an entry deleted from the database only) */
+static
+BOOL
+IsSameVolume(IN PMOUNTMGR_MOUNT_POINTS Points,
+             IN PMOUNTMGR_MOUNT_POINT A,
+             IN PMOUNTMGR_MOUNT_POINT B)
+{
+    if (A->UniqueIdLength && B->UniqueIdLength)
+    {
+        return A->UniqueIdLength == B->UniqueIdLength &&
+               !memcmp( (char *)Points + A->UniqueIdOffset, (char *)Points + B->UniqueIdOffset,
+                        A->UniqueIdLength );
+    }
+
+    return A->DeviceNameLength && A->DeviceNameLength == B->DeviceNameLength &&
+           !_wcsnicmp( (WCHAR *)((char *)Points + A->DeviceNameOffset),
+                       (WCHAR *)((char *)Points + B->DeviceNameOffset),
+                       A->DeviceNameLength / sizeof(WCHAR) );
+}
+
+/* Whether an earlier volume name in the list belongs to the same volume */
+static
+BOOL
+IsLaterVolumeName(IN PMOUNTMGR_MOUNT_POINTS Points,
+                  IN ULONG Index)
+{
+    static const WCHAR volumeW[] = {'\\','?','?','\\','V','o','l','u','m','e','{',};
+    ULONG i;
+
+    for (i = 0; i < Index; i++)
+    {
+        PMOUNTMGR_MOUNT_POINT Other = &Points->MountPoints[i];
+        WCHAR *link = (WCHAR *)((char *)Points + Other->SymbolicLinkNameOffset);
+
+        if (Other->SymbolicLinkNameLength < sizeof(volumeW) || memcmp( link, volumeW, sizeof(volumeW) )) continue;
+        if (IsSameVolume( Points, Other, &Points->MountPoints[Index] )) return TRUE;
+    }
+
+    return FALSE;
+}
+
 /*
  * @implemented
  */
@@ -1029,6 +1071,8 @@ FindNextVolumeW(IN HANDLE handle,
         data->Size++;
         /* skip non-volumes */
         if (size < sizeof(volumeW) || memcmp( link, volumeW, sizeof(volumeW) )) continue;
+        /* a volume with several names is listed once, by its first name */
+        if (IsLaterVolumeName( data, data->Size - 1 )) continue;
         if (size + sizeof(WCHAR) >= len * sizeof(WCHAR))
         {
             SetLastError( ERROR_FILENAME_EXCED_RANGE );
