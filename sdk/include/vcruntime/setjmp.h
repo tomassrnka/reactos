@@ -192,8 +192,8 @@ typedef struct __JUMP_BUFFER {
 #ifdef USE_MINGW_SETJMP_TWO_ARGS
 #ifndef _INC_SETJMPEX
 #if defined(__x86_64)
-# define mingw_getsp() \
-  ({ void* value; __asm__ __volatile__("movq %%rsp, %[value]" : [value] "=r" (value)); value; })
+/* RtlUnwind needs the establisher frame, which need not be the current RSP. */
+# define mingw_getsp() __builtin_frame_address(0)
 #elif defined(_X86_)
 # define mingw_getsp() \
   ({ void* value; __asm__ __volatile__("movl %%esp, %[value]" : [value] "=r" (value)); value; })
