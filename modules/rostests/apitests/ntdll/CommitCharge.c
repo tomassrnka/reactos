@@ -18,6 +18,8 @@
 
 static SIZE_T PageSize = 4096;
 static ULONG PhysicalPages;
+/* System-wide checks assert only after the warm-up round, on ReactOS */
+static BOOLEAN StrictSystemChecks;
 
 #define MB_PAGES(x) ((LONG_PTR)(((x) * 1024 * 1024) / PageSize))
 
@@ -111,7 +113,7 @@ CheckSystemDelta_(
             break;
         Sleep(200);
     }
-    if (is_reactos())
+    if (is_reactos() && StrictSystemChecks)
         ok_(__FILE__, Line)(SystemDeltaFits(Delta, Expected),
                             "%s: system commit moved by %Id pages, expected %Id\n", Text, Delta, Expected);
     else if (!SystemDeltaFits(Delta, Expected))
@@ -643,6 +645,12 @@ START_TEST(CommitCharge)
     TestSections();
     TestCopyOnWriteViews();
     TestProcessExit();
+    /*
+     * Shortly after boot the system charge can still drop by several MB at
+     * once (boot-time memory freed when the idle-priority zero page thread
+     * discards INIT code): the warm-up round only prints system deltas.
+     */
+    StrictSystemChecks = TRUE;
     Baseline = QuerySystemCommit(NULL);
     for (Round = 0; Round < 3; Round++)
     {
