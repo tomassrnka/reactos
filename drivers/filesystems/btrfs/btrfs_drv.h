@@ -905,6 +905,10 @@ typedef struct pdo_device_extension {
     PDEVICE_OBJECT pdo;
     bool removable;
     bool dont_report;
+#ifdef __REACTOS__
+    uint8_t drive_letters_state;
+    KEVENT drive_letters_event;
+#endif
 
     uint64_t num_children;
     uint64_t children_loaded;
@@ -1627,6 +1631,15 @@ NTSTATUS vol_write(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
 NTSTATUS vol_device_control(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp);
 void add_volume_device(struct btrfs_super_block* sb, PUNICODE_STRING devpath, uint64_t length, ULONG disk_num, ULONG part_num);
 NTSTATUS mountmgr_add_drive_letter(PDEVICE_OBJECT mountmgr, PUNICODE_STRING devpath);
+#ifdef __REACTOS__
+// pdo_device_extension.drive_letters_state, under child_lock
+#define DRIVE_LETTERS_NONE          0
+#define DRIVE_LETTERS_PENDING       1 // set complete, no volume device: AddDevice hands over
+#define DRIVE_LETTERS_BUSY          2 // an AddDevice is handing over; others wait for drive_letters_event
+#define DRIVE_LETTERS_BUSY_AGAIN    3 // and the set completed again meanwhile: hand over once more
+
+void hand_over_drive_letters(pdo_device_extension* pdode);
+#endif
 
 _Function_class_(DRIVER_NOTIFICATION_CALLBACK_ROUTINE)
 NTSTATUS __stdcall pnp_removal(PVOID NotificationStructure, PVOID Context);

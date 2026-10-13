@@ -6352,6 +6352,10 @@ NTSTATUS __stdcall AddDevice(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT Physica
 
     UNUSED(DriverObject);
 
+#ifdef __REACTOS__
+again:
+    pdode = NULL;
+#endif
     ExAcquireResourceSharedLite(&pdo_list_lock, true);
 
     le = pdo_list.Flink;
@@ -6378,6 +6382,46 @@ NTSTATUS __stdcall AddDevice(PDRIVER_OBJECT DriverObject, PDEVICE_OBJECT Physica
         Status = STATUS_SUCCESS;
         goto end2;
     }
+
+#ifdef __REACTOS__
+    // add_volume_device left the drive letter handoff to the creation of the
+    // volume device. Do it before the device exists and is announced, outside
+    // the locks, then start over. A concurrent AddDevice waits instead of
+    // creating the device meanwhile, so no volume device exists during the
+    // handoff, nothing removes the children or frees pdode, and it stays valid.
+    if (pdode->drive_letters_state != DRIVE_LETTERS_NONE) {
+        bool owner = pdode->drive_letters_state == DRIVE_LETTERS_PENDING;
+
+        if (owner) {
+            pdode->drive_letters_state = DRIVE_LETTERS_BUSY;
+            KeClearEvent(&pdode->drive_letters_event);
+        } else {
+            // the owner may finish and create the volume device, which can then
+            // be removed and the PDO deleted, before this thread waits: keep the
+            // PDO, and with it the event in its extension (pdode is the PDO's
+            // extension; only NoPNP, which registry.c ignores, allocates it apart)
+            ObReferenceObject(PhysicalDeviceObject);
+        }
+
+        ExReleaseResourceLite(&pdode->child_lock);
+        ExReleaseResourceLite(&pdo_list_lock);
+
+        if (owner) {
+            hand_over_drive_letters(pdode);
+
+            ExAcquireResourceExclusiveLite(&pdode->child_lock, true);
+            pdode->drive_letters_state = pdode->drive_letters_state == DRIVE_LETTERS_BUSY_AGAIN ?
+                                         DRIVE_LETTERS_PENDING : DRIVE_LETTERS_NONE;
+            KeSetEvent(&pdode->drive_letters_event, IO_NO_INCREMENT, false);
+            ExReleaseResourceLite(&pdode->child_lock);
+        } else {
+            KeWaitForSingleObject(&pdode->drive_letters_event, Executive, KernelMode, false, NULL);
+            ObDereferenceObject(PhysicalDeviceObject);
+        }
+
+        goto again;
+    }
+#endif
 
     volname.Length = volname.MaximumLength = (sizeof(BTRFS_VOLUME_PREFIX) - sizeof(WCHAR)) + ((36 + 1) * sizeof(WCHAR));
     volname.Buffer = ExAllocatePoolWithTag(PagedPool, volname.MaximumLength, ALLOC_TAG); // FIXME - when do we free this?
