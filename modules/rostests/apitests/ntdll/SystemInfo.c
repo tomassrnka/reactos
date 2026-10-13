@@ -8,6 +8,7 @@
 
 #include "precomp.h"
 #include <versionhelpers.h>
+#include <intrin.h>
 
 #define ntv6(x) (LOBYTE(LOWORD(GetVersion())) >= 6 ? (x) : 0)
 
@@ -323,6 +324,258 @@ Test_KernelDebugger(void)
     ok(Status == STATUS_INVALID_INFO_CLASS, "NtSetSystemInformation returned %lx\n", Status);
 }
 
+#define MAX_PROCESSORS (sizeof(DWORD_PTR) * 8)
+
+/* The process list, in a heap buffer that grows as needed */
+static
+PSYSTEM_PROCESS_INFORMATION
+QueryProcessList(VOID)
+{
+    PVOID Buffer;
+    ULONG Size = 0x40000, Length, Try;
+    NTSTATUS Status;
+
+    for (Try = 0; Try < 8; Try++)
+    {
+        Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Buffer)
+            break;
+        Length = 0;
+        Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, Size, &Length);
+        if (NT_SUCCESS(Status))
+            return Buffer;
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        if (Status != STATUS_INFO_LENGTH_MISMATCH)
+        {
+            ok_hex(Status, STATUS_SUCCESS);
+            return NULL;
+        }
+        Size = max(Size * 2, Length + 0x10000);
+    }
+    ok(FALSE, "Cannot query the process list\n");
+    return NULL;
+}
+
+/* CycleTime and user plus kernel time of a process from SystemProcessInformation */
+static
+BOOLEAN
+QueryProcessCycles(
+    _In_ HANDLE ProcessId,
+    _Out_ PULONG64 CycleTime,
+    _Out_ PLONGLONG Time)
+{
+    PSYSTEM_PROCESS_INFORMATION List, ProcessInfo;
+
+    List = QueryProcessList();
+    if (!List)
+        return FALSE;
+
+    for (ProcessInfo = List; ; ProcessInfo = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)ProcessInfo + ProcessInfo->NextEntryOffset))
+    {
+        if (ProcessInfo->UniqueProcessId == ProcessId)
+        {
+            *CycleTime = ProcessInfo->CycleTime;
+            *Time = ProcessInfo->UserTime.QuadPart + ProcessInfo->KernelTime.QuadPart;
+            HeapFree(GetProcessHeap(), 0, List);
+            return TRUE;
+        }
+        if (ProcessInfo->NextEntryOffset == 0)
+            break;
+    }
+    HeapFree(GetProcessHeap(), 0, List);
+    ok(FALSE, "Process %p is not in the process list\n", ProcessId);
+    return FALSE;
+}
+
+/* The idle time of each processor, in 100 ns units */
+static
+BOOLEAN
+QueryIdleTimes(
+    _In_ ULONG Processors,
+    _Out_writes_(Processors) PLONGLONG IdleTimes)
+{
+    PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION Info;
+    NTSTATUS Status;
+    ULONG i;
+
+    Info = HeapAlloc(GetProcessHeap(), 0, Processors * sizeof(*Info));
+    if (!Info)
+        return FALSE;
+    Status = NtQuerySystemInformation(SystemProcessorPerformanceInformation, Info, Processors * sizeof(*Info), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        for (i = 0; i < Processors; i++)
+            IdleTimes[i] = Info[i].IdleTime.QuadPart;
+    }
+    HeapFree(GetProcessHeap(), 0, Info);
+    return NT_SUCCESS(Status);
+}
+
+/* Run once on each processor. An idle thread that was running there switches out,
+   which adds its current run to the idle process on systems that count it at a context switch. */
+static
+void
+VisitProcessors(
+    _In_ DWORD_PTR ProcessMask)
+{
+    DWORD_PTR Mask;
+
+    for (Mask = 1; Mask != 0; Mask <<= 1)
+    {
+        if (!(ProcessMask & Mask))
+            continue;
+        if (SetThreadAffinityMask(GetCurrentThread(), Mask))
+            Sleep(1);
+    }
+    SetThreadAffinityMask(GetCurrentThread(), ProcessMask);
+}
+
+static
+void
+Test_ProcessCycleTime(void)
+{
+    HANDLE Self = NtCurrentTeb()->ClientId.UniqueProcess;
+    ULONG64 Cycles1, Cycles2, Tsc1, Tsc2, TscPerSecond, Expected;
+    LONGLONG Time1, Time2, Idle1[MAX_PROCESSORS], Idle2[MAX_PROCESSORS];
+    LARGE_INTEGER Qpc1, Qpc2, Frequency;
+    SYSTEM_INFO SystemInfo;
+    DWORD_PTR ProcessMask, SystemMask;
+    DWORD Start;
+    ULONG Try, i;
+
+    /* The field was added in Windows 7 */
+    if (!is_reactos() && GetNTVersion() < _WIN32_WINNT_WIN7)
+    {
+        skip("SystemProcessInformation has no CycleTime before Windows 7\n");
+        return;
+    }
+
+    GetSystemInfo(&SystemInfo);
+    QueryPerformanceFrequency(&Frequency);
+
+    /* A spinning process is charged about the time stamp counter ticks of the time it ran.
+       The waits let the thread's current run reach the process total on systems that add it
+       at a context switch. */
+    Sleep(10);
+    if (!QueryProcessCycles(Self, &Cycles1, &Time1))
+        return;
+    QueryPerformanceCounter(&Qpc1);
+    Tsc1 = __rdtsc();
+    Start = GetTickCount();
+    while (GetTickCount() - Start < 300)
+        ;
+    Tsc2 = __rdtsc();
+    QueryPerformanceCounter(&Qpc2);
+    Sleep(10);
+    if (!QueryProcessCycles(Self, &Cycles2, &Time2))
+        return;
+
+    if (Time2 - Time1 < 100 * 10000 || Qpc2.QuadPart <= Qpc1.QuadPart || Tsc2 <= Tsc1)
+    {
+        skip("The process ran %I64d ms in a 300 ms spin\n", (Time2 - Time1) / 10000);
+    }
+    else
+    {
+        TscPerSecond = (Tsc2 - Tsc1) * Frequency.QuadPart / (Qpc2.QuadPart - Qpc1.QuadPart);
+        Expected = (ULONG64)(Time2 - Time1) * (TscPerSecond / 10000) / 1000;
+        ok(Cycles2 >= Cycles1 && Cycles2 - Cycles1 >= Expected / 2,
+           "CycleTime grew by %I64d while the process ran %I64d ms (%I64u ticks expected)\n",
+           (LONG64)(Cycles2 - Cycles1), (Time2 - Time1) / 10000, Expected);
+    }
+
+    /* Idle processors are charged to the idle process. The idle time is sampled inside the
+       cycle sample, and every processor is visited before each cycle sample. Try again while
+       no processor was idle. */
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask) ||
+        SystemInfo.dwNumberOfProcessors > MAX_PROCESSORS)
+    {
+        skip("Cannot visit the processors\n");
+        return;
+    }
+    for (Try = 0; Try < 10; Try++)
+    {
+        VisitProcessors(ProcessMask);
+        if (!QueryProcessCycles(NULL, &Cycles1, &Time1) ||
+            !QueryIdleTimes(SystemInfo.dwNumberOfProcessors, Idle1))
+            return;
+        Sleep(500);
+        if (!QueryIdleTimes(SystemInfo.dwNumberOfProcessors, Idle2))
+            return;
+        VisitProcessors(ProcessMask);
+        if (!QueryProcessCycles(NULL, &Cycles2, &Time2))
+            return;
+        for (i = 0; i < SystemInfo.dwNumberOfProcessors; i++)
+        {
+            if (Idle2[i] - Idle1[i] >= 100 * 10000)
+                break;
+        }
+        if (i < SystemInfo.dwNumberOfProcessors)
+            break;
+    }
+    if (Try == 10)
+        skip("No processor was idle for 100 ms in 500 ms, ten times\n");
+    else
+        ok(Cycles2 > Cycles1, "The idle process' CycleTime did not grow while processor %lu was idle %I64d ms (%I64u)\n",
+           i, (Idle2[i] - Idle1[i]) / 10000, Cycles1);
+}
+
+/* The processor cores must cover every active processor once */
+static
+void
+Test_LogicalProcessorInformation(void)
+{
+    NTSTATUS Status;
+    SYSTEM_BASIC_INFORMATION BasicInfo;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Info = NULL;
+    ULONG Length = 0, Count, i;
+    KAFFINITY Cores = 0;
+    BOOL IsWow64 = FALSE;
+
+    if (IsWow64Process(GetCurrentProcess(), &IsWow64) && IsWow64)
+    {
+        skip("WOW64 does not pass SystemLogicalProcessorInformation on\n");
+        return;
+    }
+
+    Status = NtQuerySystemInformation(SystemBasicInformation, &BasicInfo, sizeof(BasicInfo), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = NtQuerySystemInformation(SystemLogicalProcessorInformation, NULL, 0, &Length);
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok(Length != 0 && (Length % sizeof(*Info)) == 0, "Length %lu\n", Length);
+    if (Length == 0)
+        return;
+
+    Info = HeapAlloc(GetProcessHeap(), 0, Length);
+    if (!Info)
+    {
+        skip("Out of memory\n");
+        return;
+    }
+    Status = NtQuerySystemInformation(SystemLogicalProcessorInformation, Info, Length, &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Count = Length / sizeof(*Info);
+        for (i = 0; i < Count; i++)
+        {
+            if (Info[i].Relationship != RelationProcessorCore)
+                continue;
+            ok((Cores & Info[i].ProcessorMask) == 0, "Core %lu (mask %Ix) overlaps an earlier core (%Ix)\n",
+               i, Info[i].ProcessorMask, Cores);
+            Cores |= Info[i].ProcessorMask;
+        }
+        ok(Cores == BasicInfo.ActiveProcessorsAffinityMask,
+           "The processor cores cover %Ix, the active processors are %Ix (%u processors)\n",
+           Cores, BasicInfo.ActiveProcessorsAffinityMask, BasicInfo.NumberOfProcessors);
+    }
+
+    HeapFree(GetProcessHeap(), 0, Info);
+}
+
 START_TEST(NtSystemInformation)
 {
     NTSTATUS Status;
@@ -364,4 +617,6 @@ START_TEST(NtSystemInformation)
     Test_Flags();
     Test_TimeAdjustment();
     Test_KernelDebugger();
+    Test_ProcessCycleTime();
+    Test_LogicalProcessorInformation();
 }
