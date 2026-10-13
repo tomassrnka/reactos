@@ -5017,10 +5017,16 @@ static DWORD WINAPI wined3d_no_3d_warning_proc(void *param)
 static void wined3d_warn_no_3d(void)
 {
     static LONG warned;
+    HMODULE module;
     HANDLE thread;
 
     /* Only warn once per process */
     if (InterlockedCompareExchange(&warned, 1, 0))
+        return;
+
+    /* The thread runs this module's code and strings, and the flag must outlive d3d9 unloads. */
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            (const WCHAR *)wined3d_no_3d_warning_proc, &module))
         return;
 
     if ((thread = CreateThread(NULL, 0, wined3d_no_3d_warning_proc, NULL, 0, NULL)))
