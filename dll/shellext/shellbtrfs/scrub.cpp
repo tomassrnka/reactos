@@ -61,6 +61,8 @@ static wstring format_duration(uint64_t dur, const wchar_t* fmt) {
 #else
     wchar_t buffer[64];
 
+    dur /= 10000000; // 100-nanosecond units, as GetDurationFormatEx takes them
+
     ULONGLONG seconds = dur % 60;
     ULONGLONG totalMinutes = dur / 60;
     ULONGLONG minutes = totalMinutes % 60;
