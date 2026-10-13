@@ -555,6 +555,7 @@ static VOID TestNoDialog_(PCSTR Mode, DWORD ExpectedCode, BOOL Reported, int Lin
         PostMessageW(hDlg, WM_CLOSE, 0, 0);
 
     Code = WaitForExit(hProcess, 20000);
+    CloseHardErrorBoxes();
     ok_(__FILE__, Line)(Code == ExpectedCode, "%s: exit code 0x%lx, expected 0x%lx\n", Mode, Code, ExpectedCode);
     ok_(__FILE__, Line)(FileExists(MarkerPath) == (ExpectedCode == DEBUGGER_EXIT_CODE),
                         "%s: debugger %s\n", Mode, FileExists(MarkerPath) ? "started" : "not started");
