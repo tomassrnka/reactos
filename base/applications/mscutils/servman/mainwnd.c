@@ -352,6 +352,10 @@ InitMainWnd(PMAIN_WND_INFO Info)
     Info->hShortcutMenu = LoadMenu(hInstance,
                                    MAKEINTRESOURCE(IDR_POPUP));
 
+    /* There is no help file yet */
+    EnableMenuItem(GetMenu(Info->hMainWnd), ID_HELP, MF_BYCOMMAND | MF_GRAYED);
+    EnableMenuItem(Info->hShortcutMenu, ID_HELP, MF_BYCOMMAND | MF_GRAYED);
+
     Info->bIsUserAnAdmin = TRUE;// IsUserAnAdmin();
     if (Info->bIsUserAnAdmin)
     {
@@ -529,14 +533,6 @@ MainWndCommand(PMAIN_WND_INFO Info,
             UpdateServiceStatus(Info->pCurrentService);
             ChangeListViewText(Info, Info->pCurrentService, LVSTATUS);
             SetMenuAndButtonStates(Info);
-            SetFocus(Info->hListView);
-        break;
-
-        case ID_HELP:
-            MessageBoxW(NULL,
-                        L"Help is not yet implemented\n",
-                        L"Note!",
-                        MB_OK | MB_ICONINFORMATION);
             SetFocus(Info->hListView);
         break;
 

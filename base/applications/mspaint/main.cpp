@@ -699,6 +699,16 @@ BOOL CMainWindow::CanPaste() const
             ::IsClipboardFormatAvailable(CF_BITMAP));
 }
 
+static BOOL IsHelpFileAvailable()
+{
+    WCHAR szPath[MAX_PATH];
+    DWORD cch = ExpandEnvironmentStringsW(L"%SystemRoot%\\Help\\mspaint.chm", szPath, _countof(szPath));
+    if (cch == 0 || cch > _countof(szPath))
+        return FALSE;
+    DWORD dwAttributes = GetFileAttributesW(szPath);
+    return dwAttributes != INVALID_FILE_ATTRIBUTES && !(dwAttributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 LRESULT CMainWindow::OnInitMenuPopup(UINT nMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
 {
     HMENU menu = (HMENU)wParam;
@@ -763,6 +773,11 @@ LRESULT CMainWindow::OnInitMenuPopup(UINT nMsg, WPARAM wParam, LPARAM lParam, BO
     CheckMenuItem(menu, IDM_COLORSOLDPALETTE,    CHECKED_IF(paletteModel.SelectedPalette() == PAL_OLDTYPE));
     CheckMenuItem(menu, IDM_COLORSGRAYSCALE,     CHECKED_IF(paletteModel.SelectedPalette() == PAL_GRAYSCALE));
     CheckMenuItem(menu, IDM_COLORSMONOCHROME,    CHECKED_IF(paletteModel.SelectedPalette() == PAL_MONOCHROME));
+
+    //
+    // Help menu
+    //
+    EnableMenuItem(menu, IDM_HELPHELPTOPICS, ENABLED_IF(IsHelpFileAvailable()));
     return 0;
 }
 
