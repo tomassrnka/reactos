@@ -266,6 +266,8 @@ typedef struct _MEMORY_AREA
         LONGLONG ViewOffset;
         PMM_SECTION_SEGMENT Segment;
         LIST_ENTRY RegionListHead;
+        /* Pages of commit charge this view owns (copy-on-write views) */
+        SIZE_T CommitCharge;
     } SectionData;
 } MEMORY_AREA, *PMEMORY_AREA;
 
