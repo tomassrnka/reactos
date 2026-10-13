@@ -259,10 +259,22 @@ class VmServer:
                 return False
             job.id = self.next_id
             self.next_id += 1
-            job.started = True
-        line = "JOB id=%d op=%s %s\n" % (job.id, job.op, " ".join("%s=%s" % (k, enc(v)) for k, v in args.items()))
-        s.settimeout(120)
-        f.write(line.encode())
+            line = "JOB id=%d op=%s %s\n" % (job.id, job.op, " ".join("%s=%s" % (k, enc(v)) for k, v in args.items()))
+            s.settimeout(120)
+            # the header goes out under the lock, so a replacement session cannot interleave; if the write
+            # fails on a connection that has been superseded, no complete JOB line reached the agent
+            try:
+                job.started = True
+                f.write(line.encode())
+                f.flush()
+            except OSError:
+                if self.conn is not s:
+                    job.started = False
+                    if src:
+                        src.close()
+                    self.jobs.put(job)
+                    return False
+                raise
         if src is not None:
             with src:
                 left = size
@@ -618,13 +630,20 @@ def cmd_qshot(a):
     except OSError:
         die("no QMP socket for %s (VM not started by `rosdev up`?)" % a.vm, 3)
     f = c.makefile("rwb")
-    f.readline()
-    f.write(b'{"execute":"qmp_capabilities"}\n')
-    f.flush()
-    f.readline()
-    f.write((json.dumps({"execute": "screendump", "arguments": {"filename": out, "format": "png"}}) + "\n").encode())
-    f.flush()
-    r = json.loads(f.readline())
+    json.loads(f.readline())            # greeting
+
+    def qmp(cmd):
+        f.write((json.dumps(cmd) + "\n").encode())
+        f.flush()
+        while True:                     # asynchronous events can arrive before the reply
+            line = f.readline()
+            if not line:
+                die("QMP closed the connection")
+            r = json.loads(line)
+            if "return" in r or "error" in r:
+                return r
+    qmp({"execute": "qmp_capabilities"})
+    r = qmp({"execute": "screendump", "arguments": {"filename": out, "format": "png"}})
     if "error" in r:
         die("screendump failed: %s" % r["error"].get("desc"))
     print("screenshot -> %s" % a.out)
@@ -737,7 +756,9 @@ def cmd_up(a):
     os.chmod(start, 0o755)
     subprocess.run([sys.executable, os.path.abspath(__file__), "serve", a.vm, "--daemon"], check=True)
     out = open(os.path.join(d, "start.out"), "w")
-    subprocess.Popen([start], stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
+    starter = subprocess.Popen([start], stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
+    with open(os.path.join(d, "starter.pid"), "w") as f:
+        f.write(str(starter.pid))
     print("VM %s starting (vmslot may queue it); next: rosdev wait-ready %s --timeout 900" % (a.vm, a.vm))
 
 
@@ -756,9 +777,11 @@ def cmd_down(a):
     if not os.path.isdir(d):
         die("no such VM: %s" % a.vm)
     # exact pids from this VM's own files; the command line must still be this VM's qemu or server
+    # a start still waiting in the slot broker: ending the script ends its vmslot request (--pid $$)
+    kill_pid(pid_of(os.path.join(d, "starter.pid")), [os.path.join(d, "start.sh")], "bash")
     kill_pid(pid_of(os.path.join(d, "qemu.pid")), ["-name", a.vm], "qemu-system-x86_64" if load_cfg(a.vm) and load_cfg(a.vm).get("arch") != "i386" else "qemu-system-i386")
     kill_pid(pid_of(os.path.join(d, "serve.pid")), ["serve", a.vm], "rosdev")
-    for n in ("qemu.pid", "serve.pid"):
+    for n in ("qemu.pid", "serve.pid", "starter.pid"):
         try:
             os.unlink(os.path.join(d, n))
         except OSError:

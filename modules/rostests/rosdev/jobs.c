@@ -126,6 +126,15 @@ static BOOL Finish(CONN *c, REPLY *r, const void *body, UINT64 bodyLen)
     return Finish2(c, r, body, bodyLen, NULL, 0);
 }
 
+static BOOL FinishErr(CONN *c, UINT64 id, DWORD code, const char *what);
+
+/* A text result: an allocation failure while building it is an error, never a silently short text. */
+static BOOL FinishText(CONN *c, UINT64 id, REPLY *r, const BUF *b)
+{
+    if (b->failed) return FinishErr(c, id, ERROR_OUTOFMEMORY, "out of memory while building the output");
+    return Finish(c, r, b->p, b->len);
+}
+
 static BOOL FinishErr(CONN *c, UINT64 id, DWORD code, const char *what)
 {
     REPLY r;
@@ -608,7 +617,7 @@ static BOOL DoPs(CONN *c, UINT64 id)
     }
     CloseHandle(snap);
     ResultOk(&r, id);
-    ok = Finish(c, &r, b.p, b.len);
+    ok = FinishText(c, id, &r, &b);
     BufFree(&b);
     return ok;
 }
@@ -653,7 +662,7 @@ static BOOL DoModules(CONN *c, const RMSG *j, UINT64 id)
     }
     CloseHandle(snap);
     ResultOk(&r, id);
-    ok = Finish(c, &r, b.p, b.len);
+    ok = FinishText(c, id, &r, &b);
     BufFree(&b);
     return ok;
 }
@@ -856,7 +865,7 @@ static BOOL DoEvents(CONN *c, const RMSG *j, UINT64 id)
     if (err) goto fail;
     ResultOk(&r, id);
     ReplyU64(&r, "records", have);
-    ok = Finish(c, &r, b.p, b.len);
+    ok = FinishText(c, id, &r, &b);
     goto done;
 fail:
     ok = FinishErr(c, id, err, "event log read failed");
@@ -941,7 +950,7 @@ static BOOL DoDumps(CONN *c, const RMSG *j, UINT64 id)
         if (ExpandPath(L"%SystemRoot%", path)) ListDir(&b, path);
     }
     ResultOk(&r, id);
-    ok = Finish(c, &r, b.p, b.len);
+    ok = FinishText(c, id, &r, &b);
     BufFree(&b);
     return ok;
 }
