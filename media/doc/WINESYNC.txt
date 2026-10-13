@@ -342,6 +342,7 @@ check Wine current sources first as it may already be fixed.
 sdk/lib/3rdparty/strmbase           # Synced to WineStaging-3.3
 
 sdk/lib/rtl/actctx.c                # Synced to Wine-10.0
+sdk/lib/rtl/message.c               # RtlFormatMessageEx partially based on Wine ntdll/rtlstr.c (Wine version not recorded)
 sdk/lib/rtl/threadpool.c            # Synced to Wine-9.7
 
 advapi32 -
@@ -367,7 +368,7 @@ kernel32 -
   dll/win32/kernel32/winnls/string/collation.c   # Synced to WineStaging-3.3
   dll/win32/kernel32/winnls/string/digitmap.c    # Synced to WineStaging-3.3
   dll/win32/kernel32/winnls/string/fold.c        # Synced to WineStaging-3.3
-  dll/win32/kernel32/winnls/string/format_msg.c  # Synced to WineStaging-3.3
+  dll/win32/kernel32/winnls/string/format_msg.c  # FormatMessageA/W wrappers over RtlFormatMessageEx, as Wine kernelbase/locale.c
   dll/win32/kernel32/winnls/string/locale.c      # Synced in wine-3.3
   dll/win32/kernel32/winnls/string/lcformat.c    # Synced to WineStaging-3.21
   dll/win32/kernel32/winnls/string/sortkey.c     # Synced to WineStaging-3.3
