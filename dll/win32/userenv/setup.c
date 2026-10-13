@@ -22,6 +22,7 @@ typedef struct _FOLDERDATA
     BOOL bHidden;
     BOOL bShellFolder;
     BOOL bUserShellFolder;
+    DWORD dwAttributes;
 } FOLDERDATA, *PFOLDERDATA;
 
 
@@ -46,6 +47,8 @@ UserShellFolders[] =
     {L"Cache", L"Local Settings\\Temporary Internet Files", IDS_CACHE, FALSE, TRUE, TRUE},
     {L"History", L"Local Settings\\History", IDS_HISTORY, FALSE, TRUE, TRUE},
     {L"Cookies", L"Cookies", IDS_COOKIES, FALSE, TRUE, TRUE},
+    /* Known folders since NT 6 have a GUID value name and a name that is not translated */
+    {L"{374DE290-123F-4565-9164-39C4925E467B}", L"Downloads", 0, FALSE, TRUE, TRUE, FILE_ATTRIBUTE_READONLY},
     {NULL, NULL, -1, FALSE, FALSE, FALSE}
 };
 
@@ -61,6 +64,7 @@ CommonShellFolders[] =
     {L"Common Start Menu", L"Start Menu", IDS_STARTMENU, FALSE, TRUE, TRUE},
     {L"Common Programs", L"Start Menu\\Programs", IDS_PROGRAMS, FALSE, TRUE, TRUE},
     {L"Common Startup", L"Start Menu\\Programs\\Startup", IDS_STARTUP, FALSE, TRUE, TRUE},
+    {L"{3D644C9B-1FB8-4f30-9B45-F670235F79C0}", L"Downloads", 0, FALSE, FALSE, TRUE, FILE_ATTRIBUTE_READONLY},
     {NULL, NULL, -1, FALSE, FALSE, FALSE}
 };
 
@@ -192,7 +196,8 @@ CreateStandardProfile(IN LPCWSTR pszProfilesPath,
 
         /* Append the folder name */
         dwLength = wcslen(szBuffer);
-        if (!LoadStringW(hInstance,
+        if (lpFolderData->uId == 0 ||
+            !LoadStringW(hInstance,
                          lpFolderData->uId,
                          &szBuffer[dwLength],
                          ARRAYSIZE(szBuffer) - dwLength))
@@ -211,8 +216,8 @@ CreateStandardProfile(IN LPCWSTR pszProfilesPath,
             }
         }
 
-        if (lpFolderData->bHidden)
-            SetFileAttributesW(szBuffer, FILE_ATTRIBUTE_HIDDEN);
+        if (lpFolderData->bHidden || lpFolderData->dwAttributes)
+            SetFileAttributesW(szBuffer, (lpFolderData->bHidden ? FILE_ATTRIBUTE_HIDDEN : 0) | lpFolderData->dwAttributes);
 
         lpFolderData++;
     }
@@ -243,7 +248,8 @@ CreateStandardProfile(IN LPCWSTR pszProfilesPath,
 
             /* Append the folder name */
             dwLength = wcslen(szBuffer);
-            if (!LoadStringW(hInstance,
+            if (lpFolderData->uId == 0 ||
+                !LoadStringW(hInstance,
                              lpFolderData->uId,
                              &szBuffer[dwLength],
                              ARRAYSIZE(szBuffer) - dwLength))
@@ -296,7 +302,8 @@ CreateStandardProfile(IN LPCWSTR pszProfilesPath,
 
             /* Append the folder name */
             dwLength = wcslen(szBuffer);
-            if (!LoadStringW(hInstance,
+            if (lpFolderData->uId == 0 ||
+                !LoadStringW(hInstance,
                              lpFolderData->uId,
                              &szBuffer[dwLength],
                              ARRAYSIZE(szBuffer) - dwLength))
@@ -466,7 +473,8 @@ UpdateUsersShellFolderSettings(LPCWSTR lpUserProfilePath,
 
             /* Append the folder name */
             dwLength = wcslen(szBuffer);
-            if (!LoadStringW(hInstance,
+            if (lpFolderData->uId == 0 ||
+                !LoadStringW(hInstance,
                              lpFolderData->uId,
                              &szBuffer[dwLength],
                              ARRAYSIZE(szBuffer) - dwLength))
