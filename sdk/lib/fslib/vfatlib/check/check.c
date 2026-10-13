@@ -562,6 +562,9 @@ static int check_file(DOS_FS * fs, DOS_FILE * file)
     DOS_FILE *owner;
     int restart;
     uint32_t expect, curr, this, clusters, prev, walk, clusters2;
+#ifdef __REACTOS__
+    int past_size = 0;
+#endif
 
     if (file->dir_ent.attr & ATTR_DIR) {
 	if (le32toh(file->dir_ent.size)) {
@@ -684,7 +687,11 @@ static int check_file(DOS_FS * fs, DOS_FILE * file)
 	    break;
 	}
 	if (!(file->dir_ent.attr & ATTR_DIR) && le32toh(file->dir_ent.size) <=
-	    (uint64_t)clusters * fs->cluster_size) {
+	    (uint64_t)clusters * fs->cluster_size
+#ifdef __REACTOS__
+	    && !past_size
+#endif
+	    ) {
 #ifdef __REACTOS__
 	    if (rw) {
 #endif
@@ -696,15 +703,14 @@ static int check_file(DOS_FS * fs, DOS_FILE * file)
 		 le32toh(file->dir_ent.size));
 	    truncate_file(fs, file, clusters);
 #ifdef __REACTOS__
-	    } else {
-	    printf
-		("%s\n  File size is %u bytes, cluster chain length is > %llu "
-		 "bytes.\n", path_name(file),
-		 le32toh(file->dir_ent.size),
-		 (unsigned long long)clusters * fs->cluster_size);
-	    }
-#endif
 	    break;
+	    }
+	    /* Read-only: allocation past the end of a file is cleanup, not damage,
+	     * but keep walking so cross-links and cycles in it are still found */
+	    past_size = 1;
+#else
+	    break;
+#endif
 	}
 	if ((owner = get_owner(fs, curr))) {
 	    int do_trunc = 0;

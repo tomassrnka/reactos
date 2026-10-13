@@ -42,6 +42,7 @@ NTSTATUS fs_open(PUNICODE_STRING DriveRoot, int read_write);
 
 #ifdef __REACTOS__
 BOOLEAN fs_isdirty(void);
+NTSTATUS fs_query_dirty(PBOOLEAN Dirty);
 
 /* Checks if filesystem is dirty */
 #endif
