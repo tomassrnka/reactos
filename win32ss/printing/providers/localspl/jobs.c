@@ -1020,7 +1020,8 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
         goto Cleanup;
 
     // If we do spooled printing, the job information is written down into a shadow file.
-    if (!(pPrinterHandle->pPrinter->dwAttributes & PRINTER_ATTRIBUTE_DIRECT))
+    // A shadow file cannot hold an output file, so such a job is not resumed after a restart.
+    if (!(pPrinterHandle->pPrinter->dwAttributes & PRINTER_ATTRIBUTE_DIRECT) && !pJob->pwszOutputFile)
     {
         // Write the job data into the shadow file.
         GetJobFilePath(L"SHD", JobId, wszFullPath);
@@ -1149,7 +1150,6 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
 {
     DWORD dwAttributes;
     DWORD dwErrorCode;
-    HANDLE hThread;
     PLOCAL_JOB pJob;
     PLOCAL_HANDLE pHandle = (PLOCAL_HANDLE)hPrinter;
     PLOCAL_PRINTER_HANDLE pPrinterHandle;
@@ -1192,12 +1192,44 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
         goto Cleanup;
     }
 
+    // ScheduleJob has done its job. The rest happens inside the printing thread.
+    dwErrorCode = StartJobPrinting(pJob);
+
+    // The document of this handle is finished; the job now belongs to the printing thread.
+    // If printing could not be started, the handle keeps the job, so that closing it discards the job.
+    if (dwErrorCode == ERROR_SUCCESS && pPrinterHandle->pJob == pJob)
+    {
+        pPrinterHandle->bStartedDoc = FALSE;
+        pPrinterHandle->pJob = NULL;
+    }
+
+Cleanup:
+    SetLastError(dwErrorCode);
+    return (dwErrorCode == ERROR_SUCCESS);
+}
+
+/**
+ * @name StartJobPrinting
+ *
+ * Ends spooling of a job whose SPL file is complete and starts the thread that prints it.
+ */
+DWORD
+StartJobPrinting(PLOCAL_JOB pJob)
+{
+    DWORD dwErrorCode;
+    HANDLE hThread;
+    WCHAR wszFullPath[MAX_PATH];
+
     // Spooling is finished at this point.
     pJob->dwStatus &= ~JOB_STATUS_SPOOLING;
 
     // Write the job data into the shadow file.
-    wcscpy(wcsrchr(wszFullPath, L'.'), L".SHD");
-    WriteJobShadowFile(wszFullPath, pJob);
+    // A shadow file cannot hold an output file, so such a job is not resumed after a restart.
+    if (!pJob->pwszOutputFile)
+    {
+        GetJobFilePath(L"SHD", pJob->dwJobID, wszFullPath);
+        WriteJobShadowFile(wszFullPath, pJob);
+    }
 
     // Create the thread for performing the printing process.
     hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)PrintingThreadProc, pJob, 0, NULL);
@@ -1205,18 +1237,12 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
     {
         dwErrorCode = GetLastError();
         ERR("CreateThread failed with error %lu!\n", dwErrorCode);
-        goto Cleanup;
+        return dwErrorCode;
     }
 
     // We don't need the thread handle. Keeping it open blocks the thread from terminating.
     CloseHandle(hThread);
-
-    // ScheduleJob has done its job. The rest happens inside the thread.
-    dwErrorCode = ERROR_SUCCESS;
-
-Cleanup:
-    SetLastError(dwErrorCode);
-    return (dwErrorCode == ERROR_SUCCESS);
+    return ERROR_SUCCESS;
 }
 
 PLOCAL_JOB
@@ -1516,6 +1542,9 @@ FreeJob(PLOCAL_JOB pJob)
     // Free memory for the optional fields if they are present.
     if (pJob->pwszOutputFile)
         DllFreeSplStr(pJob->pwszOutputFile);
+
+    if (pJob->hToken)
+        CloseHandle(pJob->hToken);
 
     if (pJob->pwszPrintProcessorParameters)
         DllFreeSplStr(pJob->pwszPrintProcessorParameters);

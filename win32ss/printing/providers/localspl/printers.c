@@ -1227,6 +1227,7 @@ _LocalOpenPrinterHandle(PWSTR pwszPrinterName, PWSTR pwszJobParameter, PHANDLE p
     }
 
     pPrinterHandle->hSPLFile = INVALID_HANDLE_VALUE;
+    pPrinterHandle->hSPLWriteFile = INVALID_HANDLE_VALUE;
     pPrinterHandle->pPrinter = pPrinter;
 
     // Check if a datatype was given.
@@ -1692,6 +1693,7 @@ LocalStartDocPrinter(HANDLE hPrinter, DWORD Level, PBYTE pDocInfo)
     PLOCAL_HANDLE pHandle = (PLOCAL_HANDLE)hPrinter;
     PLOCAL_PORT_HANDLE pPortHandle;
     PLOCAL_PRINTER_HANDLE pPrinterHandle;
+    WCHAR wszFullPath[MAX_PATH];
 
     TRACE("LocalStartDocPrinter(%p, %lu, %p)\n", hPrinter, Level, pDocInfo);
 
@@ -1708,10 +1710,24 @@ LocalStartDocPrinter(HANDLE hPrinter, DWORD Level, PBYTE pDocInfo)
         pPortHandle = (PLOCAL_PORT_HANDLE)pHandle->pSpecificHandle;
 
         // This call should come from a Print Processor and the job this port is going to print was assigned to us before opening the Print Processor.
-        // Claim it exclusively for this port handle.
+        // Only the printing thread, which runs the Print Processor, may claim it, exclusively for this port handle.
+        if (pPortHandle->pPort->dwPrintingThreadId != GetCurrentThreadId() || !pPortHandle->pPort->pNextJobToProcess)
+        {
+            dwErrorCode = ERROR_ACCESS_DENIED;
+            ERR("No job was handed over to port %S for this thread!\n", pPortHandle->pPort->pwszName);
+            goto Cleanup;
+        }
+
         pJob = pPortHandle->pPort->pNextJobToProcess;
         pPortHandle->pPort->pNextJobToProcess = NULL;
-        ASSERT(pJob);
+
+        // The output file of a job is opened with the identity of the user who submitted the job.
+        if (pJob->hToken && !SetThreadToken(NULL, pJob->hToken))
+        {
+            dwErrorCode = GetLastError();
+            ERR("SetThreadToken failed with error %lu!\n", dwErrorCode);
+            goto Cleanup;
+        }
 
         // Call the monitor's StartDocPort function.
         if (pPortHandle->pPort->pPrintMonitor->bIsLevel2)
@@ -1719,16 +1735,15 @@ LocalStartDocPrinter(HANDLE hPrinter, DWORD Level, PBYTE pDocInfo)
         else
             bReturnValue = ((LPMONITOREX)pPortHandle->pPort->pPrintMonitor->pMonitor)->Monitor.pfnStartDocPort(pPortHandle->hPort, pJob->pPrinter->pwszPrinterName, pJob->dwJobID, Level, pDocInfo);
 
-        if (!bReturnValue)
-        {
-            // The StartDocPort function failed. Return its last error.
-            dwErrorCode = GetLastError();
-            goto Cleanup;
-        }
+        // The StartDocPort function may have failed. Keep its last error.
+        dwErrorCode = bReturnValue ? ERROR_SUCCESS : GetLastError();
 
-        // We were successful!
-        dwErrorCode = ERROR_SUCCESS;
-        dwReturnValue = pJob->dwJobID;
+        if (pJob->hToken)
+            SetThreadToken(NULL, NULL);
+
+        if (dwErrorCode == ERROR_SUCCESS)
+            dwReturnValue = pJob->dwJobID;
+
         goto Cleanup;
     }
 
@@ -1755,7 +1770,7 @@ LocalStartDocPrinter(HANDLE hPrinter, DWORD Level, PBYTE pDocInfo)
     }
 
     // Check the validity of the datatype if we got one.
-    if (pDocInfo1->pDatatype && !FindDatatype(pPrinterHandle->pJob->pPrintProcessor, pDocInfo1->pDatatype))
+    if (pDocInfo1->pDatatype && !FindDatatype(pPrinterHandle->pPrinter->pPrintProcessor, pDocInfo1->pDatatype))
     {
         dwErrorCode = ERROR_INVALID_DATATYPE;
         goto Cleanup;
@@ -1768,30 +1783,86 @@ LocalStartDocPrinter(HANDLE hPrinter, DWORD Level, PBYTE pDocInfo)
         goto Cleanup;
     }
 
+    // Direct printing is not implemented: WritePrinter could not pass the document to the port.
+    if (pPrinterHandle->pPrinter->dwAttributes & PRINTER_ATTRIBUTE_DIRECT)
+    {
+        dwErrorCode = ERROR_NOT_SUPPORTED;
+        FIXME("Direct printing is not implemented!\n");
+        goto Cleanup;
+    }
+
     // All requirements are met - create a new job.
     dwErrorCode = CreateJob(pPrinterHandle);
     if (dwErrorCode != ERROR_SUCCESS)
         goto Cleanup;
 
-    // Use any given datatype.
-    if (pDocInfo1->pDatatype && !ReallocSplStr(&pPrinterHandle->pJob->pwszDatatype, pDocInfo1->pDatatype))
+    pJob = pPrinterHandle->pJob;
+
+    // Use any given datatype, document name and output file.
+    if (pDocInfo1->pDatatype)
     {
-        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
-        ERR("ReallocSplStr failed, last error is %lu!\n", GetLastError());
-        goto Cleanup;
+        ReallocSplStr(&pJob->pwszDatatype, pDocInfo1->pDatatype);
+        if (!pJob->pwszDatatype)
+        {
+            dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+            goto JobFailure;
+        }
     }
 
-    // Use any given document name.
-    if (pDocInfo1->pDocName && !ReallocSplStr(&pPrinterHandle->pJob->pwszDocumentName, pDocInfo1->pDocName))
+    if (pDocInfo1->pDocName)
     {
-        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
-        ERR("ReallocSplStr failed, last error is %lu!\n", GetLastError());
-        goto Cleanup;
+        ReallocSplStr(&pJob->pwszDocumentName, pDocInfo1->pDocName);
+        if (!pJob->pwszDocumentName)
+        {
+            dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+            goto JobFailure;
+        }
+    }
+
+    if (pDocInfo1->pOutputFile && *pDocInfo1->pOutputFile)
+    {
+        ReallocSplStr(&pJob->pwszOutputFile, pDocInfo1->pOutputFile);
+        if (!pJob->pwszOutputFile)
+        {
+            dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+            goto JobFailure;
+        }
+
+        // Keep the identity of the caller for opening the output file.
+        // There is no token when the caller is not impersonated, so the file is opened with our own identity.
+        if (!OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE | TOKEN_QUERY, TRUE, &pJob->hToken))
+        {
+            pJob->hToken = NULL;
+            dwErrorCode = GetLastError();
+            if (dwErrorCode != ERROR_NO_TOKEN)
+            {
+                ERR("OpenThreadToken failed with error %lu!\n", dwErrorCode);
+                goto JobFailure;
+            }
+        }
+    }
+
+    // WritePrinter writes the document into the job's spool file.
+    GetJobFilePath(L"SPL", pJob->dwJobID, wszFullPath);
+    pPrinterHandle->hSPLWriteFile = CreateFileW(wszFullPath, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+    if (pPrinterHandle->hSPLWriteFile == INVALID_HANDLE_VALUE)
+    {
+        dwErrorCode = GetLastError();
+        ERR("CreateFileW failed with error %lu for \"%S\"!\n", dwErrorCode, wszFullPath);
+        goto JobFailure;
     }
 
     // We were successful!
     dwErrorCode = ERROR_SUCCESS;
-    dwReturnValue = pPrinterHandle->pJob->dwJobID;
+    dwReturnValue = pJob->dwJobID;
+    goto Cleanup;
+
+JobFailure:
+    // Undo the job creation.
+    ERR("Starting job %lu failed with error %lu!\n", pJob->dwJobID, dwErrorCode);
+    FreeJob(pJob);
+    pPrinterHandle->pJob = NULL;
+    pPrinterHandle->bStartedDoc = FALSE;
 
 Cleanup:
     SetLastError(dwErrorCode);
@@ -1886,6 +1957,20 @@ LocalWritePrinter(HANDLE hPrinter, PVOID pBuf, DWORD cbBuf, PDWORD pcWritten)
     if (!pPrinterHandle->bStartedDoc)
     {
         dwErrorCode = ERROR_SPL_NO_STARTDOC;
+        goto Cleanup;
+    }
+
+    // A spooled job started through StartDocPrinter is written into its spool file.
+    if (pPrinterHandle->hSPLWriteFile != INVALID_HANDLE_VALUE)
+    {
+        if (!WriteFile(pPrinterHandle->hSPLWriteFile, pBuf, cbBuf, pcWritten, NULL))
+        {
+            dwErrorCode = GetLastError();
+            ERR("WriteFile failed with error %lu!\n", dwErrorCode);
+            goto Cleanup;
+        }
+
+        dwErrorCode = ERROR_SUCCESS;
         goto Cleanup;
     }
 
@@ -1988,12 +2073,29 @@ LocalEndDocPrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
-    // TODO: Something like ScheduleJob
+    dwErrorCode = ERROR_SUCCESS;
+
+    // A spooled job started through StartDocPrinter is complete now: print it.
+    if (pPrinterHandle->hSPLWriteFile != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(pPrinterHandle->hSPLWriteFile);
+        pPrinterHandle->hSPLWriteFile = INVALID_HANDLE_VALUE;
+
+        dwErrorCode = StartJobPrinting(pPrinterHandle->pJob);
+        if (dwErrorCode != ERROR_SUCCESS)
+        {
+            // The job cannot be printed: discard it.
+            WCHAR wszFullPath[MAX_PATH];
+
+            GetJobFilePath(L"SPL", pPrinterHandle->pJob->dwJobID, wszFullPath);
+            DeleteFileW(wszFullPath);
+            FreeJob(pPrinterHandle->pJob);
+        }
+    }
 
     // Finish the job.
     pPrinterHandle->bStartedDoc = FALSE;
     pPrinterHandle->pJob = NULL;
-    dwErrorCode = ERROR_SUCCESS;
 
 Cleanup:
     SetLastError(dwErrorCode);
@@ -2015,8 +2117,27 @@ static void
 _LocalClosePrinterHandle(PLOCAL_PRINTER_HANDLE pPrinterHandle)
 {
     FIXME("LocalClosePrinterHandle\n");
-    // Terminate any started job.
-    if (pPrinterHandle->pJob)
+
+    // Close the spool file of a Printer Job handle.
+    if (pPrinterHandle->hSPLFile != INVALID_HANDLE_VALUE)
+        CloseHandle(pPrinterHandle->hSPLFile);
+
+    // A document started through StartDocPrinter was not finished: discard its spool file.
+    if (pPrinterHandle->hSPLWriteFile != INVALID_HANDLE_VALUE)
+    {
+        WCHAR wszFullPath[MAX_PATH];
+
+        CloseHandle(pPrinterHandle->hSPLWriteFile);
+        if (pPrinterHandle->pJob)
+        {
+            GetJobFilePath(L"SPL", pPrinterHandle->pJob->dwJobID, wszFullPath);
+            DeleteFileW(wszFullPath);
+        }
+    }
+
+    // Terminate a job started on this handle and not ended.
+    // A Printer Job handle does not own its job: the job is freed when it has been sent to the printer.
+    if (pPrinterHandle->pJob && pPrinterHandle->bStartedDoc)
         FreeJob(pPrinterHandle->pJob);
 
     // Free memory for the fields.

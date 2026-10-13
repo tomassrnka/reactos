@@ -49,6 +49,7 @@ CreatePortEntry( PCWSTR pwszName, PLOCAL_PRINT_MONITOR pPrintMonitor )
 
     pPort->pPrintMonitor = pPrintMonitor;
     pPort->pwszName = wcscpy( (PWSTR)(pPort+1), pwszName );
+    InitializeCriticalSection(&pPort->PrintingSection);
 
     // Insert it into the list and advance to the next port.
     InsertTailList(&_PortList, &pPort->Entry);
@@ -142,6 +143,7 @@ InitializePortList(void)
             pPort->pPrintMonitor = pPrintMonitor;
             pPort->pwszName = (PWSTR)((PBYTE)pPort + sizeof(LOCAL_PORT));
             CopyMemory(pPort->pwszName, p->pName, cbPortName);
+            InitializeCriticalSection(&pPort->PrintingSection);
 
             // Insert it into the list and advance to the next port.
             InsertTailList(&_PortList, &pPort->Entry);
@@ -451,6 +453,7 @@ LocalDeletePort(PWSTR pName, HWND hWnd, PWSTR pPortName)
 
     RemoveEntryList(&pPrintPort->Entry);
 
+    DeleteCriticalSection(&pPrintPort->PrintingSection);
     DllFreeSplMem(pPrintPort);
 
     return res;

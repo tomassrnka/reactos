@@ -10,6 +10,7 @@ list(APPEND SOURCE
     GetPrintProcessorDirectory.c
     IsValidDevmode.c
     OpenPrinter.c
+    PrintToFile.c
     StartDocPrinter.c
     testlist.c)
 
