@@ -24,6 +24,7 @@ struct ThreadData
 {
     HANDLE Handle;
     CONTEXT Context;
+    bool HaveContext;
 
     ThreadData(HANDLE handle = NULL);
 
@@ -54,6 +55,10 @@ public:
 
 /* main.cpp */
 void xfprintf(FILE* stream, const char *fmt, ...);
+void PrintBugreport(FILE* output, DumpData& data);
+
+/* wer.cpp */
+int WerReportMain(int argc, WCHAR** argv);
 
 /* drwtsn32.cpp */
 bool UpdateFromEvent(DEBUG_EVENT& evt, DumpData& data);

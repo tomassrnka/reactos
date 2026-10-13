@@ -8,6 +8,7 @@
 #include "precomp.h"
 #include <udmihelp.h>
 #include <winreg.h>
+#include <psapi.h>
 #include <reactos/buildno.h>
 #include <reactos/stubs.h>
 
@@ -69,6 +70,19 @@ void PrintSystemInfo(FILE* output, DumpData& data)
     xfprintf(output, "    Exception number: 0x%08x (%s)" NEWLINE, Record.ExceptionCode, Exception2Str(Record.ExceptionCode));
     xfprintf(output, "    Exception flags: 0x%08x" NEWLINE, Record.ExceptionFlags);
     xfprintf(output, "    Exception address: %p" NEWLINE, Record.ExceptionAddress);
+
+    MEMORY_BASIC_INFORMATION mbi;
+    char ModulePath[MAX_PATH];
+    if (VirtualQueryEx(data.ProcessHandle, Record.ExceptionAddress, &mbi, sizeof(mbi)) == sizeof(mbi) &&
+        mbi.Type == MEM_IMAGE &&
+        GetModuleFileNameExA(data.ProcessHandle, (HMODULE)mbi.AllocationBase, ModulePath, sizeof(ModulePath)))
+    {
+        const char* ModuleName = strrchr(ModulePath, '\\');
+        xfprintf(output, "    Exception module: %s+0x%Ix (%s)" NEWLINE,
+                 ModuleName ? ModuleName + 1 : ModulePath,
+                 (ULONG_PTR)Record.ExceptionAddress - (ULONG_PTR)mbi.AllocationBase,
+                 ModulePath);
+    }
     if (Record.NumberParameters)
     {
         xfprintf(output, "    Exception parameters: %u" NEWLINE, Record.NumberParameters);
