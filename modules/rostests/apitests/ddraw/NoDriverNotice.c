@@ -73,8 +73,10 @@ static int DialogsAfterWait(void)
     return Count;
 }
 
-static void ProbeDirect3D9(HWND hwnd)
+/* TRUE when Direct3D 9 found no adapter it can use (Direct3DCreate9 returned NULL) */
+static BOOL ProbeDirect3D9(HWND hwnd)
 {
+    BOOL NoAdapter = FALSE;
     PFN_DIRECT3DCREATE9 pDirect3DCreate9;
     D3DPRESENT_PARAMETERS Params;
     IDirect3DDevice9 *Device = NULL;
@@ -85,7 +87,7 @@ static void ProbeDirect3D9(HWND hwnd)
     hD3D9 = LoadLibraryW(L"d3d9.dll");
     ok(hD3D9 != NULL, "d3d9.dll not loaded: %lu\n", GetLastError());
     if (!hD3D9)
-        return;
+        return FALSE;
     pDirect3DCreate9 = (PFN_DIRECT3DCREATE9)GetProcAddress(hD3D9, "Direct3DCreate9");
     ok(pDirect3DCreate9 != NULL, "No Direct3DCreate9\n");
     if (pDirect3DCreate9 && (D3D9 = pDirect3DCreate9(D3D_SDK_VERSION)))
@@ -105,8 +107,10 @@ static void ProbeDirect3D9(HWND hwnd)
     else
     {
         trace("Direct3D 9: Direct3DCreate9 returned NULL\n");
+        NoAdapter = (pDirect3DCreate9 != NULL);
     }
     FreeLibrary(hD3D9);
+    return NoAdapter;
 }
 
 static void ProbeDirect3D11(void)
@@ -167,6 +171,7 @@ static void TestChild(void)
 {
     HWND hwnd;
     int Round, Dialogs;
+    BOOL NoAdapter;
 
     hwnd = CreateWindowExA(0, "static", "ddraw_apitest", WS_OVERLAPPEDWINDOW,
                            0, 0, 320, 240, NULL, NULL, NULL, NULL);
@@ -178,9 +183,13 @@ static void TestChild(void)
      */
     for (Round = 1; Round <= 2; Round++)
     {
-        ProbeDirect3D9(hwnd);
-        /* The Firefox crash: a message box drawing text from the unloaded d3dwine.dll */
-        if (is_reactos())
+        NoAdapter = ProbeDirect3D9(hwnd);
+        /*
+         * The Firefox crash: a message box drawing text from the unloaded
+         * d3dwine.dll. With a working adapter, a command thread may still
+         * hold d3dwine.dll for a moment, so this is checked without one.
+         */
+        if (is_reactos() && NoAdapter)
             ok(GetModuleHandleW(L"d3dwine.dll") == NULL, "Round %d: d3dwine.dll stays loaded after d3d9.dll\n", Round);
         Dialogs = DialogsAfterWait();
         ok(Dialogs == 0, "Round %d: Direct3D 9 showed %d message boxes\n", Round, Dialogs);
