@@ -1025,6 +1025,8 @@ RaiseFailFastException(
     _In_ DWORD dwFlags)
 {
     EXCEPTION_RECORD ExceptionRecord;
+    EXCEPTION_POINTERS ExceptionInfo;
+    CONTEXT Context;
 
     if (pExceptionRecord)
     {
@@ -1047,7 +1049,39 @@ RaiseFailFastException(
        one, the exception port could continue the thread instead of ending it */
     BasepFailFastCode = ExceptionRecord.ExceptionCode;
     if (NtCurrentPeb()->BeingDebugged)
+    {
         BasepFailFastRaise(&ExceptionRecord, pContextRecord);
+    }
+    else if (!BasepIsGpFaultErrorBoxDisabled())
+    {
+        /* Reported like an unhandled exception; no filter runs, as on Windows.
+           The record comes from the caller, and the reporter copies its parameters */
+        if (ExceptionRecord.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS)
+            ExceptionRecord.NumberParameters = EXCEPTION_MAXIMUM_PARAMETERS;
+        if (!pContextRecord)
+        {
+            RtlZeroMemory(&Context, sizeof(Context));
+#if defined(_M_IX86) && !defined(__GNUC__)
+            /* The x86 capture reads the frame pointer, which /Oy omits; the caller's EBP stays unknown */
+            Context.ContextFlags = CONTEXT_CONTROL;
+            Context.Eip = (ULONG_PTR)_ReturnAddress();
+            Context.Esp = (ULONG_PTR)_AddressOfReturnAddress() + sizeof(PVOID);
+            Context.EFlags = __readeflags();
+            Context.SegCs = KGDT_R3_CODE | RPL_MASK;
+            Context.SegSs = KGDT_R3_DATA | RPL_MASK;
+#else
+            RtlCaptureContext(&Context);
+#if defined(_M_IX86)
+            /* The x86 capture leaves the flags to the caller */
+            Context.ContextFlags = CONTEXT_FULL;
+#endif
+#endif
+            pContextRecord = &Context;
+        }
+        ExceptionInfo.ExceptionRecord = &ExceptionRecord;
+        ExceptionInfo.ContextRecord = pContextRecord;
+        BasepReportUnhandledException(&ExceptionInfo);
+    }
     NtTerminateProcess(NtCurrentProcess(), ExceptionRecord.ExceptionCode);
 }
 
