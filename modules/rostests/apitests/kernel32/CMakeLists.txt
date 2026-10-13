@@ -4,6 +4,7 @@ add_subdirectory(redirptest)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    ApplicationRestart.c
     ConsoleCP.c
     CreateProcess.c
     DefaultActCtx.c
