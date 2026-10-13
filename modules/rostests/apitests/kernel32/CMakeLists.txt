@@ -39,6 +39,7 @@ list(APPEND SOURCE
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
     ReadFile.c
+    ResolveLocaleName.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c
     SetCurrentDirectory.c
