@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""rosdev-inject: put the rosdev agent into a TEST VM overlay, offline, and start it at logon.
+
+Needs root, qemu-nbd, ntfs-3g (or vfat for a FAT install) and python3-hivex. Works only on a qcow2
+OVERLAY with a backing file, never on a base disk or a raw image, and writes only:
+  C:\\rosdev\\rosdev.exe
+  HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\RosDev   = C:\\rosdev\\rosdev.exe /testvm
+  HKLM\\SOFTWARE\\ReactOS\\ReactOS   RosDevTestVm (marker), RosDevPort, RosDevToken
+Other registry values are left alone (node_set_value changes one value; hivexsh setval would not).
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+MARKER = "disposable-test-vm"
+
+
+def run(*cmd, **kw):
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw).stdout
+
+
+def free_nbd():
+    run("modprobe", "nbd", "max_part=8")
+    for n in range(16):
+        if not os.path.exists("/sys/block/nbd%d/pid" % n):
+            return "/dev/nbd%d" % n
+    sys.exit("rosdev-inject: no free /dev/nbdN")
+
+
+def utf16(s):
+    return s.encode("utf-16le") + b"\x00\x00"
+
+
+def child(h, node, name):
+    c = h.node_get_child(node, name)
+    if c is None:
+        sys.exit("rosdev-inject: key %r missing and hivex cannot add keys to a ReactOS hive" % name)
+    return c
+
+
+def set_sz(h, node, name, value):
+    h.node_set_value(node, {"key": name, "t": 1, "value": utf16(value)})
+
+
+def set_dword(h, node, name, value):
+    h.node_set_value(node, {"key": name, "t": 4, "value": value.to_bytes(4, "little")})
+
+
+def edit_hive(path, port, token, exe):
+    import hivex
+    h = hivex.Hivex(path, write=True)
+    root = h.root()
+    run_key = root
+    for part in ("Microsoft", "Windows", "CurrentVersion", "Run"):
+        run_key = child(h, run_key, part)
+    set_sz(h, run_key, "RosDev", exe + " /testvm")
+    # hivex cannot add keys here (ReactOS hives carry no security descriptors), so the settings are
+    # values of the existing, otherwise empty HKLM\SOFTWARE\ReactOS\ReactOS key
+    k = child(h, child(h, root, "ReactOS"), "ReactOS")
+    set_sz(h, k, "RosDevTestVm", MARKER)
+    set_dword(h, k, "RosDevPort", port)
+    set_sz(h, k, "RosDevToken", token)
+    h.commit(None)
+
+
+def find(mnt, *parts):
+    cur = mnt
+    for p in parts:
+        hit = [e for e in os.listdir(cur) if e.lower() == p.lower()]
+        if not hit:
+            return None
+        cur = os.path.join(cur, hit[0])
+    return cur
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("overlay")
+    ap.add_argument("--agent", required=True)
+    ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--token", required=True)
+    ap.add_argument("--dest", default="rosdev", help="directory on C: (default rosdev)")
+    a = ap.parse_args()
+    if os.geteuid() != 0:
+        sys.exit("rosdev-inject: run as root")
+    info = json.loads(run("qemu-img", "info", "--output=json", a.overlay))
+    if info.get("format") != "qcow2" or not info.get("backing-filename"):
+        sys.exit("rosdev-inject: %s is not a qcow2 overlay with a backing file; refusing (never write a base disk)" % a.overlay)
+    if not os.path.isfile(a.agent):
+        sys.exit("rosdev-inject: no such agent: %s" % a.agent)
+    nbd = free_nbd()
+    mnt = os.path.join(os.path.dirname(os.path.abspath(a.overlay)), "mnt")
+    os.makedirs(mnt, exist_ok=True)
+    mounted = False
+    run("qemu-nbd", "-c", nbd, a.overlay)
+    try:
+        part = nbd + "p1"
+        for _ in range(50):
+            if os.path.exists(part):
+                break
+            time.sleep(0.2)
+        else:
+            sys.exit("rosdev-inject: %s did not appear" % part)
+        fs = run("blkid", "-o", "value", "-s", "TYPE", part).strip()
+        if fs == "ntfs":
+            run("lowntfs-3g", "-o", "ignore_case", part, mnt)
+        elif fs == "vfat":
+            run("mount", "-t", "vfat", part, mnt)
+        else:
+            sys.exit("rosdev-inject: unsupported file system %r on partition 1" % fs)
+        mounted = True
+        sysroot = find(mnt, "ReactOS") or find(mnt, "Windows")
+        if not sysroot:
+            sys.exit("rosdev-inject: no ReactOS directory on partition 1")
+        hive = find(sysroot, "system32", "config", "SOFTWARE")
+        if not hive:
+            sys.exit("rosdev-inject: no SOFTWARE hive")
+        ddir = os.path.join(mnt, a.dest)
+        os.makedirs(ddir, exist_ok=True)
+        shutil.copyfile(a.agent, os.path.join(ddir, "rosdev.exe"))
+        edit_hive(hive, a.port, a.token, "C:\\%s\\rosdev.exe" % a.dest.replace("/", "\\"))
+        print("injected %s into %s (port %d)" % (a.agent, a.overlay, a.port))
+    finally:
+        if mounted:
+            run("sync")
+            run("umount", mnt)
+        run("qemu-nbd", "-d", nbd)
+
+
+if __name__ == "__main__":
+    main()
