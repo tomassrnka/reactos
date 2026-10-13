@@ -540,18 +540,12 @@ l_ReadHeaderFromFile:
                     piohOptHeader->AddressOfEntryPoint);
         }
 
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfCode))
-            ImageSectionObject->ImageInformation.ImageContainsCode = piohOptHeader->SizeOfCode != 0;
+        /* As in Windows: code size or an entry point */
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, AddressOfEntryPoint))
+            ImageSectionObject->ImageInformation.ImageContainsCode = (piohOptHeader->SizeOfCode != 0) ||
+                                                                     (piohOptHeader->AddressOfEntryPoint != 0);
         else
             ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
-
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, AddressOfEntryPoint))
-        {
-            if (piohOptHeader->AddressOfEntryPoint == 0)
-            {
-                ImageSectionObject->ImageInformation.ImageContainsCode = FALSE;
-            }
-        }
 
         if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, LoaderFlags))
             ImageSectionObject->ImageInformation.LoaderFlags = piohOptHeader->LoaderFlags;
@@ -633,18 +627,12 @@ l_ReadHeaderFromFile:
                     pioh64OptHeader->AddressOfEntryPoint);
         }
 
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, SizeOfCode))
-            ImageSectionObject->ImageInformation.ImageContainsCode = pioh64OptHeader->SizeOfCode != 0;
+        /* As in Windows: code size or an entry point */
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, AddressOfEntryPoint))
+            ImageSectionObject->ImageInformation.ImageContainsCode = (pioh64OptHeader->SizeOfCode != 0) ||
+                                                                     (pioh64OptHeader->AddressOfEntryPoint != 0);
         else
             ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
-
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, AddressOfEntryPoint))
-        {
-            if (pioh64OptHeader->AddressOfEntryPoint == 0)
-            {
-                ImageSectionObject->ImageInformation.ImageContainsCode = FALSE;
-            }
-        }
 
         if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, LoaderFlags))
             ImageSectionObject->ImageInformation.LoaderFlags = pioh64OptHeader->LoaderFlags;
@@ -4248,6 +4236,7 @@ MmMapViewOfSection(
     PMMSUPPORT AddressSpace;
     NTSTATUS Status = STATUS_SUCCESS;
     BOOLEAN NotAtBase = FALSE;
+    BOOLEAN MachineMismatch = FALSE;
     BOOLEAN IsAttached = FALSE;
     KAPC_STATE ApcState;
 
@@ -4392,6 +4381,18 @@ MmMapViewOfSection(
 
         /* One more map */
         InterlockedIncrement(&ImageSectionObject->MapCount);
+
+        /* The view stays mapped, but the caller learns that the image with
+         * code is not for this machine (the loader then unmaps it and fails) */
+        MachineMismatch = (ImageSectionObject->ImageInformation.Machine != IMAGE_FILE_MACHINE_NATIVE) &&
+                          ImageSectionObject->ImageInformation.ImageContainsCode;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        if ((ImageSectionObject->ImageInformation.Machine == IMAGE_FILE_MACHINE_I386) &&
+            (Process->Wow64Process != NULL))
+        {
+            MachineMismatch = FALSE;
+        }
+#endif
     }
     else
     {
@@ -4491,7 +4492,9 @@ MmMapViewOfSection(
         }
     }
 
-    if (NotAtBase)
+    if (MachineMismatch)
+        Status = STATUS_IMAGE_MACHINE_TYPE_MISMATCH;
+    else if (NotAtBase)
         Status = STATUS_IMAGE_NOT_AT_BASE;
     else
         Status = STATUS_SUCCESS;

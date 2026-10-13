@@ -43,6 +43,7 @@ list(APPEND SOURCE
     LCMapString.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
+    LoadLibraryMachine.c
     LocaleNameToLCID.c
     LocalTimeZone.c
     lstrcpynW.c
