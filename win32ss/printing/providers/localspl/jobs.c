@@ -1047,6 +1047,7 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
         else
         {
             ERR("Unimplemented SetJob Command: %lu!\n", Command);
+            dwErrorCode = ERROR_NOT_SUPPORTED;
         }
     }
 

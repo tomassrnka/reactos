@@ -826,6 +826,9 @@ BEGIN
     IDS_COPYERRORSUBFOLDER "Impossivel copiar '%s': A pasta de destino é uma subpasta da pasta de origem."
     IDS_MOVEERROR "Impossivel mover '%s': %s"
     IDS_COPYERROR "Impossivel copiar '%s': %s"
+    IDS_PRINTER_SETDEFAULT "Set as De&fault Printer"
+    IDS_PRINTER_DELETE_TEXT "Are you sure you want to delete the printer '%s'?"
+    IDS_PRINTER_OP_FAILED "Operation could not be completed.\n\n%s"
 
     IDS_CREATEFILE_DENIED "Não foi possível criar o ficheiro %1"
     IDS_CREATEFILE_CAPTION "Erro ao criar o ficheiro"

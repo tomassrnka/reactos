@@ -817,6 +817,9 @@ BEGIN
     IDS_COPYERRORSUBFOLDER "'%s' kann nicht kopiert werden: Der Zielorder ist ein Unterordner des Quellordners."
     IDS_MOVEERROR "'%s' kann nicht verschoben werden: %s"
     IDS_COPYERROR "'%s' kann nicht kopiert werden: %s"
+    IDS_PRINTER_SETDEFAULT "Set as De&fault Printer"
+    IDS_PRINTER_DELETE_TEXT "Are you sure you want to delete the printer '%s'?"
+    IDS_PRINTER_OP_FAILED "Operation could not be completed.\n\n%s"
 
     IDS_CREATEFILE_DENIED "Could not create file %1"
     IDS_CREATEFILE_CAPTION "Error creating file"

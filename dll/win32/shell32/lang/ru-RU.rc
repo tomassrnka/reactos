@@ -825,6 +825,9 @@ BEGIN
     IDS_COPYERRORSUBFOLDER "Не удаётся скопировать '%s': Папка назначения является подпапкой исходной папки."
     IDS_MOVEERROR "Не удаётся переместить '%s': %s"
     IDS_COPYERROR "Не удаётся скопировать '%s': %s"
+    IDS_PRINTER_SETDEFAULT "Set as De&fault Printer"
+    IDS_PRINTER_DELETE_TEXT "Are you sure you want to delete the printer '%s'?"
+    IDS_PRINTER_OP_FAILED "Operation could not be completed.\n\n%s"
 
     IDS_CREATEFILE_DENIED "Невозможно создать файл '%1'"
     IDS_CREATEFILE_CAPTION "Невозможно создать файл"
