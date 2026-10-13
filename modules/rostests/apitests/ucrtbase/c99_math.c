@@ -445,6 +445,104 @@ static void test_modff(void)
     ok(f == 0.0f && i == INFINITY, "modff(inf) = %g, %g\n", f, i);
 }
 
+/* The status flags are read right after the call, before a comparison can raise anything */
+#define NO_SPURIOUS(sw) (!((sw) & (_SW_OVERFLOW | _SW_INEXACT)))
+
+static void test_exception_flags(void)
+{
+    unsigned int sw;
+    double d;
+    float f;
+    long l;
+    __int64 i64;
+    int q;
+    union { double d; unsigned __int64 i; } snan = { 0 };
+    union { float f; unsigned int i; } snanf = { 0 };
+    union { double d; unsigned __int64 i; } snan_back = { 0 };
+    union { float f; unsigned int i; } snanf_back = { 0 };
+
+    snan.i = 0x7ff0000000000001ULL;
+    snanf.i = 0x7f800001;
+    (void)snan.d;
+    (void)snanf.f;
+    (void)snan_back.d;
+    (void)snanf_back.f;
+
+    /* a result that does not fit is an invalid conversion */
+    p_clearfp(); l = p_lround(1e20); sw = p_statusfp();
+    ok(l == 0 && (sw & _SW_INVALID), "lround(1e20) = %ld, flags 0x%x\n", l, sw);
+    p_clearfp(); l = p_lroundf(1e20f); sw = p_statusfp();
+    ok(l == 0 && (sw & _SW_INVALID), "lroundf(1e20) = %ld, flags 0x%x\n", l, sw);
+    p_clearfp(); i64 = p_llround(1e30); sw = p_statusfp();
+    ok(i64 == 0 && (sw & _SW_INVALID), "llround(1e30) = %I64d, flags 0x%x\n", i64, sw);
+    p_clearfp(); i64 = p_llroundf(1e30f); sw = p_statusfp();
+    ok(i64 == 0 && (sw & _SW_INVALID), "llroundf(1e30) = %I64d, flags 0x%x\n", i64, sw);
+    p_clearfp(); i64 = p_llrint(1e30); sw = p_statusfp();
+    ok(i64 == 0 && (sw & _SW_INVALID), "llrint(1e30) = %I64d, flags 0x%x\n", i64, sw);
+    p_clearfp(); i64 = p_llrintf(1e30f); sw = p_statusfp();
+    ok(i64 == 0 && (sw & _SW_INVALID), "llrintf(1e30) = %I64d, flags 0x%x\n", i64, sw);
+    p_clearfp(); i64 = p_llround(NAN); sw = p_statusfp();
+    ok(i64 == 0 && (sw & _SW_INVALID), "llround(nan) = %I64d, flags 0x%x\n", i64, sw);
+
+    /* on i386 a signaling NaN raises invalid and comes back quiet (frndint); the arguments are passed as integers
+       so that loading them cannot raise the flag first */
+#ifdef _M_IX86
+    {
+        double (__cdecl *rint_bits)(unsigned int, unsigned int);
+        float (__cdecl *rintf_bits)(unsigned int);
+        double (__cdecl *nearbyint_bits)(unsigned int, unsigned int);
+        float (__cdecl *nearbyintf_bits)(unsigned int);
+
+        *(void **)&rint_bits = (void *)p_rint;
+        *(void **)&rintf_bits = (void *)p_rintf;
+        *(void **)&nearbyint_bits = (void *)p_nearbyint;
+        *(void **)&nearbyintf_bits = (void *)p_nearbyintf;
+        p_clearfp(); d = rint_bits(1, 0x7ff00000); sw = p_statusfp();
+        ok(is_nan(d) && (sw & _SW_INVALID), "rint(snan) = %g, flags 0x%x\n", d, sw);
+        p_clearfp(); f = rintf_bits(0x7f800001); sw = p_statusfp();
+        ok(is_nan(f) && (sw & _SW_INVALID), "rintf(snan) = %g, flags 0x%x\n", (double)f, sw);
+        p_clearfp(); d = nearbyint_bits(1, 0x7ff00000); sw = p_statusfp();
+        ok(is_nan(d) && (sw & _SW_INVALID), "nearbyint(snan) = %g, flags 0x%x\n", d, sw);
+        p_clearfp(); f = nearbyintf_bits(0x7f800001); sw = p_statusfp();
+        ok(is_nan(f) && (sw & _SW_INVALID), "nearbyintf(snan) = %g, flags 0x%x\n", (double)f, sw);
+    }
+#else
+    /* the SSE routines of Windows pass a signaling NaN through unchanged and raise nothing */
+    p_clearfp(); d = p_rint(snan.d); sw = p_statusfp(); snan_back.d = d;
+    ok(snan_back.i == snan.i && !(sw & _SW_INVALID), "rint(snan) = 0x%I64x, flags 0x%x\n", snan_back.i, sw);
+    p_clearfp(); f = p_rintf(snanf.f); sw = p_statusfp(); snanf_back.f = f;
+    ok(snanf_back.i == snanf.i && !(sw & _SW_INVALID), "rintf(snan) = 0x%x, flags 0x%x\n", snanf_back.i, sw);
+    p_clearfp(); d = p_nearbyint(snan.d); sw = p_statusfp(); snan_back.d = d;
+    ok(snan_back.i == snan.i && !(sw & _SW_INVALID), "nearbyint(snan) = 0x%I64x, flags 0x%x\n", snan_back.i, sw);
+    p_clearfp(); f = p_nearbyintf(snanf.f); sw = p_statusfp(); snanf_back.f = f;
+    ok(snanf_back.i == snanf.i && !(sw & _SW_INVALID), "nearbyintf(snan) = 0x%x, flags 0x%x\n", snanf_back.i, sw);
+#endif
+
+    /* an erfc that underflows to zero */
+    p_clearfp(); errno = SENTINEL; f = p_erfcf(30.0f); sw = p_statusfp();
+    ok(f == 0.0f && errno == ERANGE && (sw & _SW_UNDERFLOW), "erfcf(30) = %g, errno %d, flags 0x%x\n", (double)f, errno, sw);
+    /* the result is rounded to its type before it is returned, also where the x87 stack would hold more */
+    p_clearfp(); d = p_erfcf(30.0f); sw = p_statusfp();
+    ok(d == 0.0 && (sw & _SW_UNDERFLOW), "(double)erfcf(30) = %g, flags 0x%x\n", d, sw);
+    p_clearfp(); errno = SENTINEL; d = p_erfc(30.0); sw = p_statusfp();
+    ok(d == 0.0 && errno == ERANGE && (sw & _SW_UNDERFLOW), "erfc(30) = %g, errno %d, flags 0x%x\n", d, errno, sw);
+
+    /* an infinite divisor leaves the dividend alone; Windows raises overflow and inexact in remquo (not tested),
+       remquof and remainder raise nothing */
+    q = 0x1234;
+    p_clearfp(); d = p_remquo(DBL_MAX, INFINITY, &q); sw = p_statusfp();
+    ok(d == DBL_MAX && q == 0, "remquo(max, inf) = %g, q = %d, flags 0x%x\n", d, q, sw);
+    q = 0x1234;
+    p_clearfp(); f = p_remquof(FLT_MAX, INFINITY, &q); sw = p_statusfp();
+    ok(f == FLT_MAX && q == 0 && NO_SPURIOUS(sw), "remquof(max, inf) = %g, q = %d, flags 0x%x\n", (double)f, q, sw);
+    p_clearfp(); d = p_remainder(DBL_MAX, INFINITY); sw = p_statusfp();
+    ok(d == DBL_MAX && NO_SPURIOUS(sw), "remainder(max, inf) = %g, flags 0x%x\n", d, sw);
+    p_clearfp(); f = p_remainderf(FLT_MAX, INFINITY); sw = p_statusfp();
+    ok(f == FLT_MAX && NO_SPURIOUS(sw), "remainderf(max, inf) = %g, flags 0x%x\n", (double)f, sw);
+    p_clearfp(); d = p_remainder(-DBL_MAX, -INFINITY); sw = p_statusfp();
+    ok(d == -DBL_MAX && NO_SPURIOUS(sw), "remainder(-max, -inf) = %g, flags 0x%x\n", d, sw);
+}
+
 static void test_nan(void)
 {
     ok(is_nan(p_nan("")), "nan() is not a NaN\n");
@@ -488,5 +586,6 @@ START_TEST(c99_math)
     test_rounding_modes();
     test_nearbyint_flags();
     test_modff();
+    test_exception_flags();
     test_nan();
 }
