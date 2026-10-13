@@ -7018,8 +7018,9 @@ static void test_GetThreadPreferredUILanguages(void)
     ok(ret, "got %lu\n", GetLastError());
     ok(count, "expected count > 0\n");
 #ifdef __REACTOS__
-    /* An English UI falls back from en-US to its neutral parent en */
-    if (ret && GetUserDefaultUILanguage() == 0x409 && GetSystemDefaultUILanguage() == 0x409)
+    /* An English UI falls back from en-US to its parent en (also on Windows
+     * Server 2008 R2 and 10 without preferred languages set) */
+    if (ret && is_reactos() && GetUserDefaultUILanguage() == 0x409 && GetSystemDefaultUILanguage() == 0x409)
     {
         ok(count == 2, "expected 2 languages, got %lu\n", count);
         ok(size == 11 && !memcmp(buf, L"0409\0" L"0009\0", 11 * sizeof(WCHAR)),
