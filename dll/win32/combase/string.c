@@ -204,6 +204,11 @@ HRESULT WINAPI WindowsPreallocateStringBuffer(UINT32 len, WCHAR **outptr,
         *out = NULL;
         return S_OK;
     }
+#ifdef __REACTOS__
+    /* Windows refuses a buffer whose size does not fit 32 bits (0xFFFFFFFF characters, or 0x80000000 on x86) */
+    if (offsetof(struct hstring_private, buffer) + ((ULONGLONG)len + 1) * sizeof(WCHAR) > 0xFFFFFFFF)
+        return MEM_E_INVALID_SIZE;
+#endif
 
     if (!alloc_string(len, &str))
         return E_OUTOFMEMORY;

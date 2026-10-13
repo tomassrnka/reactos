@@ -64,7 +64,7 @@ START_TEST(winrt)
         ok(hr == S_OK, "WindowsDeleteString returned 0x%lx\n", hr);
     }
 
-    /* A buffer whose size does not fit the address space is refused, not truncated */
+    /* A buffer whose size does not fit 32 bits is refused, not truncated (as on Windows 10) */
     pWindowsPreallocateStringBuffer = (FN_WindowsPreallocateStringBuffer)GetProcAddress(hString, "WindowsPreallocateStringBuffer");
     pWindowsDeleteStringBuffer = (FN_WindowsDeleteStringBuffer)GetProcAddress(hString, "WindowsDeleteStringBuffer");
     ok(pWindowsPreallocateStringBuffer && pWindowsDeleteStringBuffer, "The WinRT string apiset lacks the buffer functions\n");
@@ -74,7 +74,7 @@ START_TEST(winrt)
         HSTRING_BUFFER StringBuffer = NULL;
 
         hr = pWindowsPreallocateStringBuffer(sizeof(void *) == 4 ? 0x80000000 : 0xFFFFFFFF, &Chars, &StringBuffer);
-        ok(hr == E_OUTOFMEMORY, "Oversized WindowsPreallocateStringBuffer returned 0x%lx\n", hr);
+        ok(hr == MEM_E_INVALID_SIZE, "Oversized WindowsPreallocateStringBuffer returned 0x%lx\n", hr);
         if (SUCCEEDED(hr))
             pWindowsDeleteStringBuffer(StringBuffer);
     }
