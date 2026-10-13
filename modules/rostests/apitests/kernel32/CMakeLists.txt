@@ -69,6 +69,7 @@ list(APPEND SOURCE
     ThreadContextNpx.c
     ThreadContextObjects.c
     TunnelCache.c
+    TzSetPrivilege.c
     UEFIFirmware.c
     WerFlags.c
     WideCharToMultiByte.c
