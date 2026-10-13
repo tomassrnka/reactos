@@ -431,6 +431,34 @@ static void TestLabelSet(void)
     ok(GetSecurityDescriptorControl(Got, &Control, &Revision) && (Control & SE_DACL_PROTECTED),
        "DACL control 0x%x after a label change\n", Control);
 
+    /* A protection request alone, through a handle without WRITE_DAC, changes nothing */
+    {
+        SECURITY_DESCRIPTOR Unprotected;
+        HANDLE hReduced;
+
+        InitializeSecurityDescriptor(&Unprotected, SECURITY_DESCRIPTOR_REVISION);
+        SetSecurityDescriptorDacl(&Unprotected, TRUE, Acl, FALSE);
+        ok(SetKernelObjectSecurity(hEvent, DACL_SECURITY_INFORMATION, &Unprotected),
+           "Unprotecting the DACL failed: %lu\n", GetLastError());
+        ok(GetKernelObjectSecurity(hEvent, DACL_SECURITY_INFORMATION, Got, sizeof(SdBuffer), &Length), "Query failed: %lu\n", GetLastError());
+        Control = SE_DACL_PROTECTED;
+        ok(GetSecurityDescriptorControl(Got, &Control, &Revision) && !(Control & SE_DACL_PROTECTED),
+           "DACL control 0x%x after unprotecting\n", Control);
+
+        hReduced = OpenEventW(READ_CONTROL | SYNCHRONIZE, FALSE, Name);
+        ok(hReduced != NULL, "OpenEventW failed: %lu\n", GetLastError());
+        if (hReduced)
+        {
+            InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+            SetKernelObjectSecurity(hReduced, PROTECTED_DACL_SECURITY_INFORMATION, &Sd);
+            CloseHandle(hReduced);
+        }
+        ok(GetKernelObjectSecurity(hEvent, DACL_SECURITY_INFORMATION, Got, sizeof(SdBuffer), &Length), "Query failed: %lu\n", GetLastError());
+        Control = SE_DACL_PROTECTED;
+        ok(GetSecurityDescriptorControl(Got, &Control, &Revision) && !(Control & SE_DACL_PROTECTED),
+           "DACL control 0x%x after a protection request without WRITE_DAC\n", Control);
+    }
+
     CloseHandle(hEvent);
 }
 

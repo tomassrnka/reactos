@@ -1156,15 +1156,25 @@ SeSetSecurityDescriptorInfoEx(
     }
     SaclLength = Sacl ? ROUND_UP((ULONG)Sacl->AclSize, 4) : 0;
 
-    /* Explicit protection requests */
-    if (SecurityInformation & PROTECTED_DACL_SECURITY_INFORMATION)
-        Control |= SE_DACL_PROTECTED;
-    else if (SecurityInformation & UNPROTECTED_DACL_SECURITY_INFORMATION)
-        Control &= ~SE_DACL_PROTECTED;
-    if (SecurityInformation & PROTECTED_SACL_SECURITY_INFORMATION)
-        Control |= SE_SACL_PROTECTED;
-    else if (SecurityInformation & UNPROTECTED_SACL_SECURITY_INFORMATION)
-        Control &= ~SE_SACL_PROTECTED;
+    /*
+     * Explicit protection requests count only with the ACL they qualify:
+     * setting that ACL is what the caller was checked for (WRITE_DAC,
+     * ACCESS_SYSTEM_SECURITY).
+     */
+    if (SecurityInformation & DACL_SECURITY_INFORMATION)
+    {
+        if (SecurityInformation & PROTECTED_DACL_SECURITY_INFORMATION)
+            Control |= SE_DACL_PROTECTED;
+        else if (SecurityInformation & UNPROTECTED_DACL_SECURITY_INFORMATION)
+            Control &= ~SE_DACL_PROTECTED;
+    }
+    if (SecurityInformation & SACL_SECURITY_INFORMATION)
+    {
+        if (SecurityInformation & PROTECTED_SACL_SECURITY_INFORMATION)
+            Control |= SE_SACL_PROTECTED;
+        else if (SecurityInformation & UNPROTECTED_SACL_SECURITY_INFORMATION)
+            Control &= ~SE_SACL_PROTECTED;
+    }
 
     NewSd = ExAllocatePoolWithTag(PoolType,
                                   sizeof(SECURITY_DESCRIPTOR_RELATIVE) +
