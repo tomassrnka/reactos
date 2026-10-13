@@ -127,6 +127,67 @@ VOID RunExtractIconTest(EXTRACTICONTEST *Test)
     ok(nExtractedIcons == Test->nIcons, "ExtractIconExW(L\"%S\"): Expects %u icons, got %u\n", Test->pszFilePath, Test->nIcons, nExtractedIcons);
 }
 
+static VOID RunExtractAllIconsTest(PCWSTR pszFilePath)
+{
+    WCHAR szPath[MAX_PATH];
+    UINT nIcons, nGot, i, nBadLarge = 0, nBadSmall = 0;
+    HICON *phLarge, *phSmall;
+    INT cxIcon = GetSystemMetrics(SM_CXICON), cxSmIcon = GetSystemMetrics(SM_CXSMICON);
+
+    ExpandEnvironmentStringsW(pszFilePath, szPath, _countof(szPath));
+    nIcons = ExtractIconExW(szPath, -1, NULL, NULL, 0);
+    ok(nIcons > 1 && nIcons < 0x10000, "ExtractIconExW(L\"%S\"): got %u icons\n", szPath, nIcons);
+    if (nIcons <= 1 || nIcons >= 0x10000)
+        return;
+
+    phLarge = new HICON[nIcons]();
+    phSmall = new HICON[nIcons]();
+
+    /* All large icons in one call */
+    nGot = ExtractIconExW(szPath, 0, phLarge, NULL, nIcons);
+    ok(nGot == nIcons, "ExtractIconExW(L\"%S\", large): expected %u, got %u\n", szPath, nIcons, nGot);
+    for (i = 0; i < nIcons; i++)
+    {
+        if (GetIcoSize(phLarge[i]) != (UINT)cxIcon)
+            nBadLarge++;
+        SafeDestroyIcon(phLarge[i]);
+        phLarge[i] = NULL;
+    }
+    ok(nBadLarge == 0, "ExtractIconExW(L\"%S\", large): %u of %u handles invalid or of the wrong size\n", szPath, nBadLarge, nIcons);
+
+    /* All small icons in one call */
+    nGot = ExtractIconExW(szPath, 0, NULL, phSmall, nIcons);
+    ok(nGot == nIcons, "ExtractIconExW(L\"%S\", small): expected %u, got %u\n", szPath, nIcons, nGot);
+    for (i = 0; i < nIcons; i++)
+    {
+        if (GetIcoSize(phSmall[i]) != (UINT)cxSmIcon)
+            nBadSmall++;
+        SafeDestroyIcon(phSmall[i]);
+        phSmall[i] = NULL;
+    }
+    ok(nBadSmall == 0, "ExtractIconExW(L\"%S\", small): %u of %u handles invalid or of the wrong size\n", szPath, nBadSmall, nIcons);
+
+    /* Both sizes in one call, starting at the second icon */
+    nBadLarge = nBadSmall = 0;
+    nGot = ExtractIconExW(szPath, 1, phLarge, phSmall, nIcons - 1);
+    ok(nGot == nIcons - 1, "ExtractIconExW(L\"%S\", both): expected %u, got %u\n", szPath, nIcons - 1, nGot);
+    for (i = 0; i < nIcons - 1; i++)
+    {
+        if (GetIcoSize(phLarge[i]) != (UINT)cxIcon)
+            nBadLarge++;
+        if (GetIcoSize(phSmall[i]) != (UINT)cxSmIcon)
+            nBadSmall++;
+        SafeDestroyIcon(phLarge[i]);
+        SafeDestroyIcon(phSmall[i]);
+    }
+    ok(nBadLarge == 0 && nBadSmall == 0, "ExtractIconExW(L\"%S\", both): %u large and %u small handles invalid or of the wrong size\n",
+       szPath, nBadLarge, nBadSmall);
+    ok(phLarge[nIcons - 1] == NULL && phSmall[nIcons - 1] == NULL, "ExtractIconExW(L\"%S\", both): wrote past the requested count\n", szPath);
+
+    delete[] phLarge;
+    delete[] phSmall;
+}
+
 START_TEST(ExtractIconEx)
 {
     UINT i;
@@ -167,6 +228,10 @@ START_TEST(ExtractIconEx)
         RunExtractIconTest(&explorer_exe);
     else
         skip("Unknown NT Version: 0x%lX\n", GetNTVersion());
+
+    /* Every icon of a module with many icons, in one call */
+    RunExtractAllIconsTest(L"%SystemRoot%\\System32\\shell32.dll");
+    RunExtractAllIconsTest(L"%SystemRoot%\\explorer.exe");
 
     DeleteFileA(FileName[0]);
     DeleteFileA(FileName[1]);
