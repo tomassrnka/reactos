@@ -77,6 +77,7 @@ list(APPEND SOURCE
     WerFlags.c
     WideCharToMultiByte.c
     Wow64Process.c
+    Wow64Run.c
     WriteFile.c
 )
 
@@ -95,6 +96,13 @@ add_importlibs(kernel32_apitest netapi32 msvcrt kernel32 ntdll)
 add_dependencies(kernel32_apitest FormatMessage)
 add_pch(kernel32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET kernel32_apitest)
+
+if(ARCH STREQUAL "i386")
+    add_executable(wow64_hello wow64_hello.c)
+    set_module_type(wow64_hello win32cui ENTRYPOINT mainCRTStartup)
+    add_importlibs(wow64_hello kernel32 ntdll)
+    add_rostests_file(TARGET wow64_hello)
+endif()
 
 list(APPEND MANIFEST_FILES
     classtest.manifest

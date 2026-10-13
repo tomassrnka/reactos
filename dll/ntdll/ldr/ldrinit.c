@@ -1806,6 +1806,10 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     HANDLE OptionsKey;
     ULONG HeapFlags;
     PIMAGE_NT_HEADERS NtHeader;
+#ifdef BUILD_WOW64_ENABLED
+    IMAGE_NT_HEADERS NativeHeader;
+    BOOLEAN IsWow64 = FALSE;
+#endif
     LPWSTR NtDllName = NULL;
     NTSTATUS Status, ImportStatus;
     NLSTABLEINFO NlsTable;
@@ -1841,6 +1845,21 @@ LdrpInitializeProcess(IN PCONTEXT Context,
 
     /* Get the NT Headers */
     NtHeader = RtlImageNtHeader(Peb->ImageBaseAddress);
+
+#ifdef BUILD_WOW64_ENABLED
+    IsWow64 = NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    if (IsWow64)
+    {
+        /* The native runtime owns its own heap and loader. Never interpret
+         * PE32 pointer-sized optional-header fields as PE32+. */
+        PIMAGE_NT_HEADERS32 Header32 = (PIMAGE_NT_HEADERS32)NtHeader;
+        NativeHeader = *(PIMAGE_NT_HEADERS)RtlImageNtHeader(SystemArgument1);
+        NativeHeader.OptionalHeader.SizeOfHeapReserve = Header32->OptionalHeader.SizeOfHeapReserve;
+        NativeHeader.OptionalHeader.SizeOfHeapCommit = Header32->OptionalHeader.SizeOfHeapCommit;
+        NativeHeader.OptionalHeader.Subsystem = IMAGE_SUBSYSTEM_NATIVE;
+        NtHeader = &NativeHeader;
+    }
+#endif
 
     /* Get the execution options */
     Status = LdrpInitializeExecutionOptions(&ImagePathName, Peb, &OptionsKey);
@@ -1904,6 +1923,10 @@ LdrpInitializeProcess(IN PCONTEXT Context,
                                               TRUE,
                                               IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG,
                                               &ConfigSize);
+
+#ifdef BUILD_WOW64_ENABLED
+    if (IsWow64) LoadConfig = NULL;
+#endif
 
     /* Setup the Heap Parameters */
     RtlZeroMemory(&HeapParameters, sizeof(HeapParameters));
@@ -1995,6 +2018,9 @@ LdrpInitializeProcess(IN PCONTEXT Context,
                         Peb->TlsBitmapBits,
                         TLS_MINIMUM_AVAILABLE);
     RtlSetBit(&TlsBitMap, 0);
+#ifdef BUILD_WOW64_ENABLED
+    if (IsWow64) RtlSetBit(&TlsBitMap, 1); /* WOW64_TLS_CPU */
+#endif
     RtlInitializeBitMap(&TlsExpansionBitMap,
                         Peb->TlsExpansionBitmapBits,
                         TLS_EXPANSION_SLOTS);
@@ -2100,9 +2126,19 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     FullPath.MaximumLength = sizeof(StringBuffer);
     RtlInitUnicodeString(&NtSystemRoot, SharedUserData->NtSystemRoot);
     RtlAppendUnicodeStringToString(&FullPath, &NtSystemRoot);
+#ifdef _M_IX86
+    if (NtCurrentTeb()->WOW32Reserved)
+        RtlAppendUnicodeToString(&FullPath, L"\\SysWOW64\\");
+    else
+#endif
     RtlAppendUnicodeToString(&FullPath, L"\\System32\\");
 
     /* Open the Known DLLs directory */
+#ifdef _M_IX86
+    if (NtCurrentTeb()->WOW32Reserved)
+        RtlInitUnicodeString(&KnownDllString, L"\\KnownDlls32");
+    else
+#endif
     RtlInitUnicodeString(&KnownDllString, L"\\KnownDlls");
     InitializeObjectAttributes(&ObjectAttributes,
                                &KnownDllString,
@@ -2385,10 +2421,18 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     }
 
     /* Walk the IAT and load all the DLLs */
+#ifdef BUILD_WOW64_ENABLED
+    if (IsWow64) ImportStatus = STATUS_SUCCESS;
+    else
+#endif
     ImportStatus = LdrpWalkImportDescriptor(LdrpDefaultPath.Buffer, LdrpImageEntry);
 
     /* Check if relocation is needed */
-    if (Peb->ImageBaseAddress != (PVOID)NtHeader->OptionalHeader.ImageBase)
+    if (
+#ifdef BUILD_WOW64_ENABLED
+        !IsWow64 &&
+#endif
+        Peb->ImageBaseAddress != (PVOID)NtHeader->OptionalHeader.ImageBase)
     {
         DPRINT1("LDR: Performing EXE relocation\n");
 
@@ -2445,6 +2489,10 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     RtlpInitializeThreadPooling();
 
     /* Initialize TLS */
+#ifdef BUILD_WOW64_ENABLED
+    if (IsWow64) Status = STATUS_SUCCESS;
+    else
+#endif
     Status = LdrpInitializeTls();
     if (!NT_SUCCESS(Status))
     {
@@ -2708,6 +2756,25 @@ LdrpInit(PCONTEXT Context,
         }
     }
 
+#ifdef BUILD_WOW64_ENABLED
+    if (NT_SUCCESS(LoaderStatus) &&
+        RtlImageNtHeader(Peb->ImageBaseAddress)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+    {
+        UNICODE_STRING Name = RTL_CONSTANT_STRING(L"wow64.dll");
+        ANSI_STRING Entry = RTL_CONSTANT_STRING("Wow64LdrpInitialize");
+        PVOID Module, Procedure;
+        extern PVOID Wow64PrepareForException;
+        ANSI_STRING ExceptionEntry = RTL_CONSTANT_STRING("Wow64PrepareForException");
+        LoaderStatus = LdrLoadDll(NULL, NULL, &Name, &Module);
+        if (NT_SUCCESS(LoaderStatus))
+            LoaderStatus = LdrGetProcedureAddress(Module, &Entry, 0, &Procedure);
+        if (NT_SUCCESS(LoaderStatus))
+            LoaderStatus = LdrGetProcedureAddress(Module, &ExceptionEntry, 0, &Wow64PrepareForException);
+        if (NT_SUCCESS(LoaderStatus))
+            ((VOID (NTAPI *)(PCONTEXT))Procedure)(Context);
+    }
+#endif
+
     /* All done, test alert the thread */
     NtTestAlert();
 
@@ -2721,3 +2788,18 @@ LdrpInit(PCONTEXT Context,
 }
 
 /* EOF */
+
+#ifdef _M_IX86
+/* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32. */
+VOID NTAPI LdrInitializeWow64(PVOID NtdllBase)
+{
+    PIMAGE_NT_HEADERS Header;
+    CONTEXT Context;
+    RtlCaptureContext(&Context);
+    LdrpInit(&Context, NtdllBase, NULL);
+    Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+    ((VOID (NTAPI *)(VOID))((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
+                            Header->OptionalHeader.AddressOfEntryPoint))();
+    NtTerminateProcess(NtCurrentProcess(), STATUS_SUCCESS);
+}
+#endif

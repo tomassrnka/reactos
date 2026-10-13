@@ -23,6 +23,12 @@ EXTERN _ZwRaiseException@12:PROC
 /* FUNCTIONS ****************************************************************/
 .code
 
+PUBLIC _CsrWow64Call@8
+_CsrWow64Call@8:
+    mov eax, HEX(10000)
+    call dword ptr fs:[HEX(c0)]
+    ret 8
+
 PUBLIC _LdrInitializeThunk@16
 _LdrInitializeThunk@16:
 
