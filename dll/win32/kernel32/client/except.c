@@ -228,6 +228,240 @@ BasepCheckForReadOnlyResource(IN PVOID Ptr)
     return Ret;
 }
 
+/* Thread that is reporting an unhandled exception, 0 if none */
+static LONG BasepReportingThread;
+
+/* Declared by winbase.h for newer targets only */
+UINT WINAPI GetErrorMode(VOID);
+
+static
+BOOLEAN
+BasepIsGpFaultErrorBoxDisabled(VOID)
+{
+    return (GetErrorMode() & SEM_NOGPFAULTERRORBOX) ||
+           (RtlGetThreadErrorMode() & RTL_SEM_NOGPFAULTERRORBOX);
+}
+
+static
+BOOLEAN
+BasepAreLocalDumpsEnabled(VOID)
+{
+    static UNICODE_STRING LocalDumpsKey = RTL_CONSTANT_STRING(
+        L"\\Registry\\Machine\\Software\\Microsoft\\Windows\\Windows Error Reporting\\LocalDumps");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &LocalDumpsKey,
+                               OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    NtClose(KeyHandle);
+    return TRUE;
+}
+
+typedef struct _BASEP_CRASH_REPORT
+{
+    PEXCEPTION_POINTERS ExceptionInfo;
+    ULONG ThreadId;
+} BASEP_CRASH_REPORT, *PBASEP_CRASH_REPORT;
+
+/*
+ * Start drwtsn32, which writes the crash report out of process, and wait for
+ * it. Returns FALSE when it did not finish by itself, so it may still read
+ * this process or have left threads suspended.
+ */
+static
+BOOLEAN
+BasepStartCrashReporter(
+    _In_ PBASEP_CRASH_REPORT Report)
+{
+    LARGE_INTEGER Timeout;
+    WCHAR ReporterPath[MAX_PATH];
+    WCHAR CommandLine[MAX_PATH + 80];
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInfo;
+    BOOL Started = FALSE;
+    BOOLEAN Faulted = FALSE;
+    NTSTATUS Status;
+
+    if (FAILED(StringCchPrintfW(ReporterPath,
+                                ARRAYSIZE(ReporterPath),
+                                L"%s\\System32\\drwtsn32.exe",
+                                SharedUserData->NtSystemRoot)) ||
+        FAILED(StringCchPrintfW(CommandLine,
+                                ARRAYSIZE(CommandLine),
+                                L"\"%s\" -u -p %lu -t %lu -x %Ix",
+                                ReporterPath,
+                                HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess),
+                                Report->ThreadId,
+                                (ULONG_PTR)Report->ExceptionInfo)))
+    {
+        return TRUE;
+    }
+
+    /* A damaged process may fault here, possibly after the reporter started */
+    _SEH2_TRY
+    {
+        RtlZeroMemory(&StartupInfo, sizeof(StartupInfo));
+        StartupInfo.cb = sizeof(StartupInfo);
+        Started = CreateProcessW(ReporterPath,
+                                 CommandLine,
+                                 NULL, NULL,
+                                 FALSE,
+                                 CREATE_DEFAULT_ERROR_MODE,
+                                 NULL, NULL,
+                                 &StartupInfo, &ProcessInfo);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Faulted = TRUE;
+    }
+    _SEH2_END;
+    if (Faulted)
+        return FALSE;
+    if (!Started)
+    {
+        DPRINT1("Cannot start the crash reporter: %lu\n", GetLastError());
+        return TRUE;
+    }
+
+    /* A full dump of a large process takes a while; never wait forever */
+    Timeout.QuadPart = -10 * 60 * 10000000LL;
+    Status = NtWaitForSingleObject(ProcessInfo.hProcess, FALSE, &Timeout);
+    if (Status != STATUS_WAIT_0)
+    {
+        /* Stop it before the exception data goes away; the threads it suspended stay so */
+        NtTerminateProcess(ProcessInfo.hProcess, STATUS_TIMEOUT);
+        Timeout.QuadPart = -10 * 10000000LL;
+        NtWaitForSingleObject(ProcessInfo.hProcess, FALSE, &Timeout);
+    }
+
+    NtClose(ProcessInfo.hThread);
+    NtClose(ProcessInfo.hProcess);
+    return (Status == STATUS_WAIT_0);
+}
+
+static
+DWORD
+WINAPI
+BasepCrashReporterThread(
+    _In_ PVOID Parameter)
+{
+    BOOLEAN Stopped = FALSE;
+
+    /* A fault here ends this thread only; the crashed thread waits for it */
+    _SEH2_TRY
+    {
+        Stopped = BasepStartCrashReporter(Parameter);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Stopped = FALSE;
+    }
+    _SEH2_END;
+    return Stopped;
+}
+
+/*
+ * After a stack overflow too little stack is left to start a process: use a
+ * new thread. Returns FALSE when that thread did not finish.
+ */
+static
+BOOLEAN
+BasepStartCrashReporterOnThread(
+    _In_ PBASEP_CRASH_REPORT Report)
+{
+    PRTL_CRITICAL_SECTION LoaderLock = NtCurrentPeb()->LoaderLock;
+    LARGE_INTEGER Timeout;
+    HANDLE Thread;
+    DWORD Stopped = FALSE;
+    NTSTATUS Status;
+
+    /* A new thread takes the loader lock before it runs */
+    if (LoaderLock && LoaderLock->OwningThread == NtCurrentTeb()->ClientId.UniqueThread)
+        return TRUE;
+
+    Thread = CreateThread(NULL, 0, BasepCrashReporterThread, Report, 0, NULL);
+    if (!Thread)
+        return TRUE;
+
+    Timeout.QuadPart = -11 * 60 * 10000000LL;
+    Status = NtWaitForSingleObject(Thread, FALSE, &Timeout);
+    if (Status == STATUS_WAIT_0)
+        GetExitCodeThread(Thread, &Stopped);
+    NtClose(Thread);
+    return (Status == STATUS_WAIT_0) && Stopped;
+}
+
+/*
+ * Let drwtsn32 write the LocalDumps crash report of this process. The
+ * collection runs out of process; this thread only waits, so the exception
+ * record and context stay valid. Returns FALSE when this thread faulted
+ * while reporting or the reporter could not be stopped; then the caller
+ * ends the process.
+ */
+static
+BOOLEAN
+BasepReportUnhandledException(
+    _In_ PEXCEPTION_POINTERS ExceptionInfo)
+{
+    LONG ThreadId = HandleToUlong(NtCurrentTeb()->ClientId.UniqueThread);
+    LONG Owner;
+    LARGE_INTEGER Delay;
+    BASEP_CRASH_REPORT Report;
+    BOOLEAN Stopped = TRUE;
+
+    /* A CSR server must not start processes */
+    if (BaseRunningInServerProcess)
+        return TRUE;
+
+    /* One report at a time; another crashing thread waits for its turn */
+    Delay.QuadPart = -50 * 10000LL;
+    for (;;)
+    {
+        Owner = InterlockedCompareExchange(&BasepReportingThread, ThreadId, 0);
+        if (Owner == 0)
+            break;
+        if (Owner == ThreadId)
+            return FALSE;
+        NtDelayExecution(FALSE, &Delay);
+    }
+
+    if (BasepAreLocalDumpsEnabled())
+    {
+        Report.ExceptionInfo = ExceptionInfo;
+        Report.ThreadId = ThreadId;
+        if (ExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW)
+            Stopped = BasepStartCrashReporterOnThread(&Report);
+        else
+            Stopped = BasepStartCrashReporter(&Report);
+    }
+
+    /* Keep the claim when a reporter may still run: the caller ends the process */
+    if (!Stopped)
+        return FALSE;
+
+    /* A debugger may continue this process; its next crash is reported again */
+    InterlockedExchange(&BasepReportingThread, 0);
+    return TRUE;
+}
+
+static
+LONG
+BasepFilterFaulted(
+    _In_ PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (!BasepIsGpFaultErrorBoxDisabled())
+        BasepReportUnhandledException(ExceptionInfo);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 UINT
 WINAPI
 GetErrorMode(VOID)
@@ -365,9 +599,15 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
     STARTUPINFOW StartupInfo;
     PROCESS_INFORMATION ProcessInfo;
 
-    /* In case this is a nested exception, just kill the process */
+    /*
+     * A nested exception (for example a fault in an exception filter) is
+     * reported like any other, without calling the filters again, and then
+     * ends the process.
+     */
     if (ExceptionRecord->ExceptionFlags & EXCEPTION_NESTED_CALL)
     {
+        if (!BasepIsGpFaultErrorBoxDisabled())
+            BasepReportUnhandledException(ExceptionInfo);
         NtTerminateProcess(NtCurrentProcess(), ExceptionRecord->ExceptionCode);
         return EXCEPTION_EXECUTE_HANDLER;
     }
@@ -413,7 +653,18 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
     RealFilter = RtlDecodePointer(GlobalTopLevelExceptionFilter);
     if (RealFilter)
     {
-        RetValue = RealFilter(ExceptionInfo);
+        /* A fault in the filter is reported, as Windows does, and ends the process */
+        _SEH2_TRY
+        {
+            RetValue = RealFilter(ExceptionInfo);
+        }
+        _SEH2_EXCEPT(BasepFilterFaulted(_SEH2_GetExceptionInformation()))
+        {
+            NtTerminateProcess(NtCurrentProcess(), _SEH2_GetExceptionCode());
+            RetValue = EXCEPTION_EXECUTE_HANDLER;
+        }
+        _SEH2_END;
+
         if (RetValue != EXCEPTION_CONTINUE_SEARCH)
             return RetValue;
     }
@@ -423,12 +674,19 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
 
     /*
      * Now pop up an error if needed. Check both the process-wide (Win32)
-     * and per-thread error-mode flags (NT).
+     * and per-thread error-mode flags (NT). Like Windows, such a process
+     * is not reported either.
      */
-    if ((GetErrorMode() & SEM_NOGPFAULTERRORBOX) ||
-        (RtlGetThreadErrorMode() & RTL_SEM_NOGPFAULTERRORBOX))
+    if (BasepIsGpFaultErrorBoxDisabled())
     {
         /* Do not display the pop-up error box, just transfer control to the exception handler */
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
+    /* Write the crash report before anything is shown */
+    if (!BasepReportUnhandledException(ExceptionInfo))
+    {
+        NtTerminateProcess(NtCurrentProcess(), ExceptionRecord->ExceptionCode);
         return EXCEPTION_EXECUTE_HANDLER;
     }
 

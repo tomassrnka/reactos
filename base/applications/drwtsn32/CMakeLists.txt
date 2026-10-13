@@ -6,6 +6,7 @@ list(APPEND CPP_SOURCE
     main.cpp
     stacktrace.cpp
     sysinfo.cpp
+    wer.cpp
     drwtsn32.h
     precomp.h)
 

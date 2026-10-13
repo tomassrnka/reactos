@@ -44,6 +44,7 @@ list(APPEND SOURCE
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
     LoadLibraryMachine.c
+    LocalDumps.c
     LocaleNameToLCID.c
     LocalTimeZone.c
     lstrcpynW.c
