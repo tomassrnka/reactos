@@ -3011,9 +3011,11 @@ GetVolumeFromPartition(
     while (Entry != &VolumeListHead)
     {
         VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+        Entry = Entry->Flink;
 
+        /* Volumes that are not on a disk (CD-ROM) have no extents */
         if (VolumeEntry->pExtents == NULL)
-            return NULL;
+            continue;
 
         for (i = 0; i < VolumeEntry->pExtents->NumberOfDiskExtents; i++)
         {
@@ -3024,11 +3026,36 @@ GetVolumeFromPartition(
                     return VolumeEntry;
             }
         }
-
-        Entry = Entry->Flink;
     }
 
     return NULL;
+}
+
+
+/*
+ * Gives the focus to the volume of a partition that was just written, as
+ * the partition already has it. The volume list is read again because the
+ * system adds the new volume after the layout is written, asynchronously,
+ * so wait a few seconds for it to arrive.
+ */
+VOID
+SelectVolumeOfNewPartition(
+    _In_ PPARTENTRY PartEntry)
+{
+    ULONG ulTry;
+
+    for (ulTry = 0; ulTry < 20; ulTry++)
+    {
+        if (ulTry != 0)
+            Sleep(500);
+
+        DestroyVolumeList();
+        CreateVolumeList();
+
+        CurrentVolume = GetVolumeFromPartition(PartEntry);
+        if (CurrentVolume != NULL)
+            return;
+    }
 }
 
 

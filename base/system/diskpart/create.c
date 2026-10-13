@@ -645,6 +645,8 @@ CreateLogicalPartition(
 
     ConResPuts(StdOut, IDS_CREATE_PARTITION_SUCCESS);
 
+    SelectVolumeOfNewPartition(CurrentPartition);
+
     return EXIT_SUCCESS;
 }
 
@@ -903,6 +905,8 @@ CreatePrimaryMbrPartition(
     }
 
     ConResPuts(StdOut, IDS_CREATE_PARTITION_SUCCESS);
+
+    SelectVolumeOfNewPartition(CurrentPartition);
 }
 
 
@@ -970,6 +974,8 @@ CreatePrimaryGptPartition(
     }
 
     ConResPuts(StdOut, IDS_CREATE_PARTITION_SUCCESS);
+
+    SelectVolumeOfNewPartition(CurrentPartition);
 }
 
 
