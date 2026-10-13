@@ -168,8 +168,11 @@ HalpClockInterruptHandler(IN PKTRAP_FRAME TrapFrame)
         return;
     }
 
-    /* Read register C, so that the next interrupt can happen */
+    /* Read register C, so that the next interrupt can happen; under the lock,
+       or another processor can select a register between the index write and the read */
+    HalpAcquireCmosSpinLock();
     HalpReadCmos(RTC_REGISTER_C);
+    HalpReleaseCmosSpinLock();
 
     /* Save increment */
     LastIncrement = HalpCurrentTimeIncrement;
