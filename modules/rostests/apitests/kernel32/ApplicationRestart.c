@@ -478,6 +478,14 @@ START_TEST(ApplicationRestart)
     char **argv;
     int argc;
 
+    /* Below export version 0x600 ReactOS's kernel32_vista.dll provides them (kept loaded until the end) */
+    if (!GetProcAddress(hKernel32, "RegisterApplicationRestart") && is_reactos())
+    {
+        HMODULE hVista = LoadLibraryW(L"kernel32_vista.dll");
+        if (hVista)
+            hKernel32 = hVista;
+    }
+
     pRegisterApplicationRestart = (FN_RegisterApplicationRestart)GetProcAddress(hKernel32, "RegisterApplicationRestart");
     pUnregisterApplicationRestart = (FN_UnregisterApplicationRestart)GetProcAddress(hKernel32, "UnregisterApplicationRestart");
     pGetApplicationRestartSettings = (FN_GetApplicationRestartSettings)GetProcAddress(hKernel32, "GetApplicationRestartSettings");
@@ -486,9 +494,9 @@ START_TEST(ApplicationRestart)
     pGetApplicationRecoveryCallback = (FN_GetApplicationRecoveryCallback)GetProcAddress(hKernel32, "GetApplicationRecoveryCallback");
     pApplicationRecoveryInProgress = (FN_ApplicationRecoveryInProgress)GetProcAddress(hKernel32, "ApplicationRecoveryInProgress");
 
-    if (!pRegisterApplicationRestart && is_reactos() && !GetProcAddress(hKernel32, "GetTickCount64"))
+    if (!pRegisterApplicationRestart && is_reactos())
     {
-        skip("No NT 6 exports\n");
+        skip("Neither kernel32 nor kernel32_vista.dll exports the functions\n");
         return;
     }
     if (!pRegisterApplicationRestart || !pUnregisterApplicationRestart || !pGetApplicationRestartSettings ||
