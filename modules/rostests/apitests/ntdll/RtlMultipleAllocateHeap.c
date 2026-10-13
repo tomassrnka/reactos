@@ -154,13 +154,19 @@ MultiHeapAllocTest()
     ok(Array[1] != NULL, "Array[1] is expected as non-NULL\n");
     ok(Array[2] != NULL, "Array[2] is expected as non-NULL\n");
 
-    // Array is non-NULL and too large to allocate
+    // Array is non-NULL and too large to allocate. A 64-bit system with
+    // enough commit can allocate them: free what was allocated, or the
+    // process keeps 4.5 GB committed and the following tests run out
     set_array(Array, NULL, NULL, NULL);
+    ret = 0;
     TEST_ALLOC_NO_RET(ERROR_NOT_ENOUGH_MEMORY, 0, HeapHandle, 0, 0x5FFFFFFF, 3, Array);
     ok(ret != 3, "excepted not allocated");
+    if (ret > 0 && ret <= 3) g_free(HeapHandle, 0, ret, Array);
     set_array(Array, NULL, NULL, NULL);
+    ret = 0;
     TEST_ALLOC_NO_RET(ERROR_NOT_ENOUGH_MEMORY, 0xC0000017, HeapHandle, HEAP_GENERATE_EXCEPTIONS, 0x5FFFFFFF, 3, Array);
     ok(ret != 3, "excepted not allocated");
+    if (ret > 0 && ret <= 3) g_free(HeapHandle, 0, ret, Array);
 }
 
 static void
