@@ -22,6 +22,11 @@ START_TEST(RtlQueryPerformanceCounter)
     pRtlQueryPerformanceCounter = (FN_RtlQueryPerformance)GetProcAddress(hNtdll, "RtlQueryPerformanceCounter");
     pRtlQueryPerformanceFrequency = (FN_RtlQueryPerformance)GetProcAddress(hNtdll, "RtlQueryPerformanceFrequency");
     pRtlQueryUnbiasedInterruptTime = (FN_RtlQueryUnbiasedInterruptTime)GetProcAddress(hNtdll, "RtlQueryUnbiasedInterruptTime");
+    if (!pRtlQueryPerformanceCounter && is_reactos() && !GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32EnumProcesses"))
+    {
+        skip("No NT 6.1 exports\n");
+        return;
+    }
     ok(pRtlQueryPerformanceCounter != NULL, "RtlQueryPerformanceCounter is not exported\n");
     ok(pRtlQueryPerformanceFrequency != NULL, "RtlQueryPerformanceFrequency is not exported\n");
     ok(pRtlQueryUnbiasedInterruptTime != NULL, "RtlQueryUnbiasedInterruptTime is not exported\n");

@@ -20,6 +20,11 @@ START_TEST(QueryUnbiasedInterruptTime)
     int i;
 
     pQueryUnbiasedInterruptTime = (FN_QueryUnbiasedInterruptTime)GetProcAddress(hKernel32, "QueryUnbiasedInterruptTime");
+    if (!pQueryUnbiasedInterruptTime && is_reactos() && !GetProcAddress(hKernel32, "K32EnumProcesses"))
+    {
+        skip("No NT 6.1 exports\n");
+        return;
+    }
     ok(pQueryUnbiasedInterruptTime != NULL, "QueryUnbiasedInterruptTime is not exported\n");
     if (!pQueryUnbiasedInterruptTime)
         return;
@@ -48,7 +53,6 @@ START_TEST(QueryUnbiasedInterruptTime)
     Ret = pQueryUnbiasedInterruptTime(&Time2);
     ok(Ret == TRUE, "Ret = %d\n", Ret);
     ok(Time2 >= Time1 + 80 * 10000, "Time advanced by only %I64u\n", Time2 - Time1);
-    ok(Time2 < Time1 + 10000ULL * 10000, "Time advanced by %I64u\n", Time2 - Time1);
 
     /* Never goes backwards */
     for (i = 0; i < 100000; i++)

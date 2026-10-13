@@ -36,11 +36,16 @@ NTAPI
 RtlQueryPerformanceFrequency(
     _Out_ PLARGE_INTEGER PerformanceFrequency)
 {
-    LARGE_INTEGER Counter;
+    LARGE_INTEGER Counter, Frequency;
     NTSTATUS Status;
 
-    Status = NtQueryPerformanceCounter(&Counter, PerformanceFrequency);
-    return NT_SUCCESS(Status);
+    /* The frequency is optional for the system call, not here */
+    Status = NtQueryPerformanceCounter(&Counter, &Frequency);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    *PerformanceFrequency = Frequency;
+    return TRUE;
 }
 
 /*
