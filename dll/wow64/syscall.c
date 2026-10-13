@@ -51,10 +51,27 @@ static VOID StoreIo(ULONG Address, const IO_STATUS_BLOCK *Io)
     }
 }
 
-static NTSTATUS Dispatch(ULONG Number, ULONG *a)
+/* Resources remain owned here until every translated output was copied.
+ * Native calls only see native temporaries, so their own output probes cannot
+ * validate the guest destinations. */
+typedef struct
+{
+    HANDLE Handle;
+    HANDLE Process;
+    PVOID Base;
+    BOOLEAN Mapped;
+} WOW64_CLEANUP;
+
+static VOID ProbeOutput(ULONG Address, ULONG Size)
+{
+    volatile UCHAR *Bytes = PTR32(Address);
+    ULONG i;
+    for (i = 0; i < Size; ++i) Bytes[i] = Bytes[i];
+}
+
+static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
 {
     NTSTATUS Status;
-    HANDLE Handle = NULL;
     OBJECT_ATTRIBUTES Attributes;
     UNICODE_STRING Name;
     IO_STATUS_BLOCK Io = {{0}};
@@ -68,7 +85,11 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
 #define ATTR(i) do { Status = Attributes32(&Attributes, &Name, a[i]); \
     if (!NT_SUCCESS(Status)) return Status; } while (0)
 #define OA(i) (a[i] ? &Attributes : NULL)
-#define RETURN_HANDLE() do { if (NT_SUCCESS(Status)) U(0) = HandleToUlong(Handle); return Status; } while (0)
+#define PROBE(i) ProbeOutput(a[i], sizeof(ULONG))
+#define RETURN_HANDLE_AT(i) do { \
+    if (NT_SUCCESS(Status)) { U(i) = HandleToUlong(Cleanup->Handle); Cleanup->Handle = NULL; } \
+    return Status; } while (0)
+#define RETURN_HANDLE() RETURN_HANDLE_AT(0)
     if (Number == 0x10000) return Wow64CsrDispatch(a[0], P(1));
     switch (Number)
     {
@@ -100,17 +121,30 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
         return NtWaitForMultipleObjects(a[0], Handles, a[2], a[3], P(4));
     }
     case W64_NtAllocateVirtualMemory:
+        PROBE(1); PROBE(3);
         Base = PTR32(U(1)); Size = U(3);
+        /* MEM_COMMIT with a null base also creates a new reservation. Existing
+         * reservations stay owned by the caller and must never be released. */
+        Cleanup->Process = H(0);
+        Cleanup->Mapped = FALSE;
+        Length = !Base || (a[4] & MEM_RESERVE);
         Status = NtAllocateVirtualMemory(H(0), &Base, a[2] ? a[2] : 0xFFFFFFFF,
                                          &Size, a[4], a[5]);
-        if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(3) = Size; }
+        if (NT_SUCCESS(Status))
+        {
+            if (Length) Cleanup->Base = Base;
+            U(1) = PtrToUlong(Base); U(3) = Size;
+            Cleanup->Base = NULL;
+        }
         return Status;
     case W64_NtFreeVirtualMemory:
+        PROBE(1); PROBE(2);
         Base = PTR32(U(1)); Size = U(2);
         Status = NtFreeVirtualMemory(H(0), &Base, &Size, a[3]);
         if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
         return Status;
     case W64_NtProtectVirtualMemory:
+        PROBE(1); PROBE(2); PROBE(4);
         Base = PTR32(U(1)); Size = U(2);
         Status = NtProtectVirtualMemory(H(0), &Base, &Size, a[3], P(4));
         if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
@@ -136,14 +170,24 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
     case W64_NtFlushInstructionCache: return NtFlushInstructionCache(H(0), P(1), a[2]);
     case W64_NtUnmapViewOfSection: return NtUnmapViewOfSection(H(0), P(1));
     case W64_NtMapViewOfSection:
+        PROBE(2); PROBE(6);
+        if (a[5]) ProbeOutput(a[5], sizeof(LARGE_INTEGER));
         Base = PTR32(U(2)); Size = U(6);
         Status = NtMapViewOfSection(H(0), H(1), &Base, a[3] ? a[3] : 0xFFFFFFFF,
                                     a[4], P(5), &Size, a[7], a[8], a[9]);
-        if (NT_SUCCESS(Status)) { U(2) = PtrToUlong(Base); U(6) = Size; }
+        if (NT_SUCCESS(Status))
+        {
+            Cleanup->Process = H(1);
+            Cleanup->Mapped = TRUE;
+            Cleanup->Base = Base;
+            U(2) = PtrToUlong(Base); U(6) = Size;
+            Cleanup->Base = NULL;
+        }
         return Status;
     case W64_NtCreateSection:
+        PROBE(0);
         ATTR(2);
-        Status = NtCreateSection(&Handle, a[1], OA(2), P(3), a[4], a[5], H(6));
+        Status = NtCreateSection(&Cleanup->Handle, a[1], OA(2), P(3), a[4], a[5], H(6));
         RETURN_HANDLE();
     case W64_NtQuerySection:
         if (a[1] == SectionImageInformation)
@@ -179,23 +223,28 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
         }
         return STATUS_NOT_SUPPORTED;
     case W64_NtOpenSection:
-        ATTR(2); Status = NtOpenSection(&Handle, a[1], OA(2)); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtOpenSection(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtOpenDirectoryObject:
-        ATTR(2); Status = NtOpenDirectoryObject(&Handle, a[1], OA(2)); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtOpenDirectoryObject(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtOpenSymbolicLinkObject:
-        ATTR(2); Status = NtOpenSymbolicLinkObject(&Handle, a[1], OA(2)); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtOpenSymbolicLinkObject(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtQuerySymbolicLinkObject:
         String32(&Name, P(1));
         Status = NtQuerySymbolicLinkObject(H(0), &Name, P(2));
         ((WOW64_STRING *)P(1))->Length = Name.Length;
         return Status;
     case W64_NtOpenKey:
-        ATTR(2); Status = NtOpenKey(&Handle, a[1], OA(2)); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtOpenKey(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtCreateKey:
     {
         UNICODE_STRING Class;
+        PROBE(0);
         ATTR(2);
-        Status = NtCreateKey(&Handle, a[1], OA(2), a[3], String32(&Class, P(4)), a[5], P(6));
+        Status = NtCreateKey(&Cleanup->Handle, a[1], OA(2), a[3], String32(&Class, P(4)), a[5], P(6));
         RETURN_HANDLE();
     }
     case W64_NtQueryValueKey:
@@ -206,28 +255,35 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
     case W64_NtSetValueKey:
         return NtSetValueKey(H(0), String32(&Name, P(1)), a[2], a[3], P(4), a[5]);
     case W64_NtCreateEvent:
-        ATTR(2); Status = NtCreateEvent(&Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtCreateEvent(&Cleanup->Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
     case W64_NtOpenEvent:
-        ATTR(2); Status = NtOpenEvent(&Handle, a[1], OA(2)); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtOpenEvent(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtSetEvent: return NtSetEvent(H(0), P(1));
     case W64_NtResetEvent: return NtResetEvent(H(0), P(1));
     case W64_NtCreateSemaphore:
-        ATTR(2); Status = NtCreateSemaphore(&Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtCreateSemaphore(&Cleanup->Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
     case W64_NtReleaseSemaphore: return NtReleaseSemaphore(H(0), a[1], P(2));
     case W64_NtCreateMutant:
-        ATTR(2); Status = NtCreateMutant(&Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtCreateMutant(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
     case W64_NtReleaseMutant: return NtReleaseMutant(H(0), P(1));
     case W64_NtCreateKeyedEvent:
-        ATTR(2); Status = NtCreateKeyedEvent(&Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
+        PROBE(0);
+        ATTR(2); Status = NtCreateKeyedEvent(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
     case W64_NtWaitForKeyedEvent: return NtWaitForKeyedEvent(H(0), P(1), a[2], P(3));
     case W64_NtReleaseKeyedEvent: return NtReleaseKeyedEvent(H(0), P(1), a[2], P(3));
     case W64_NtOpenFile:
+        PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
         ATTR(2);
-        Status = NtOpenFile(&Handle, a[1], OA(2), &Io, a[4], a[5]);
+        Status = NtOpenFile(&Cleanup->Handle, a[1], OA(2), &Io, a[4], a[5]);
         StoreIo(a[3], &Io); RETURN_HANDLE();
     case W64_NtCreateFile:
+        PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
         ATTR(2);
-        Status = NtCreateFile(&Handle, a[1], OA(2), &Io, P(4), a[5], a[6], a[7], a[8], P(9), a[10]);
+        Status = NtCreateFile(&Cleanup->Handle, a[1], OA(2), &Io, P(4), a[5], a[6], a[7], a[8], P(9), a[10]);
         StoreIo(a[3], &Io); RETURN_HANDLE();
     case W64_NtQueryAttributesFile:
         ATTR(0); return NtQueryAttributesFile(OA(0), P(1));
@@ -240,6 +296,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
         case FileBasicInformation: case FileStandardInformation: case FilePositionInformation:
         case FileNameInformation: case FileModeInformation: case FileInternalInformation:
         case FileAlignmentInformation: case FileNetworkOpenInformation:
+            ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
         default: return STATUS_NOT_SUPPORTED;
@@ -257,6 +314,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
         case FileDirectoryInformation: case FileFullDirectoryInformation:
         case FileBothDirectoryInformation: case FileNamesInformation:
         case FileIdBothDirectoryInformation: case FileIdFullDirectoryInformation:
+            ProbeOutput(a[4], sizeof(WOW64_IOSB));
             Status = NtQueryDirectoryFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], a[7],
                                            a[8], String32(&Name, P(9)), a[10]);
             StoreIo(a[4], &Io); return Status;
@@ -268,6 +326,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
         {
         case FileFsDeviceInformation: case FileFsVolumeInformation: case FileFsSizeInformation:
         case FileFsAttributeInformation:
+            ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryVolumeInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
         default: return STATUS_NOT_SUPPORTED;
@@ -281,6 +340,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
         if (!NT_SUCCESS(Status)) return Status;
         if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
             return STATUS_NOT_SUPPORTED;
+        ProbeOutput(a[4], sizeof(WOW64_IOSB));
         if (Number == W64_NtReadFile)
             Status = NtReadFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], P(7), P(8));
         else
@@ -288,13 +348,13 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
         StoreIo(a[4], &Io); return Status;
     }
     case W64_NtOpenProcessToken:
-        Status = NtOpenProcessToken(H(0), a[1], &Handle);
-        if (NT_SUCCESS(Status)) U(2) = HandleToUlong(Handle);
-        return Status;
+        PROBE(2);
+        Status = NtOpenProcessToken(H(0), a[1], &Cleanup->Handle);
+        RETURN_HANDLE_AT(2);
     case W64_NtOpenThreadToken:
-        Status = NtOpenThreadToken(H(0), a[1], a[2], &Handle);
-        if (NT_SUCCESS(Status)) U(3) = HandleToUlong(Handle);
-        return Status;
+        PROBE(3);
+        Status = NtOpenThreadToken(H(0), a[1], a[2], &Cleanup->Handle);
+        RETURN_HANDLE_AT(3);
     case W64_NtQueryInformationProcess:
         if (a[1] == ProcessWow64Information)
         {
@@ -361,17 +421,29 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a)
 NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
 {
     NTSTATUS Status;
+    WOW64_CLEANUP Cleanup = {0};
     /* All pointer expansion occurs in user mode. Faulting captures become
      * NT errors; no untyped 32-bit argument list is sent to the kernel. */
     _SEH2_TRY
     {
-        Status = Dispatch(Number, Arguments);
+        Status = Dispatch(Number, Arguments, &Cleanup);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
+    if (Cleanup.Handle) NtClose(Cleanup.Handle);
+    if (Cleanup.Base)
+    {
+        if (Cleanup.Mapped)
+            NtUnmapViewOfSection(Cleanup.Process, Cleanup.Base);
+        else
+        {
+            SIZE_T Size = 0;
+            NtFreeVirtualMemory(Cleanup.Process, &Cleanup.Base, &Size, MEM_RELEASE);
+        }
+    }
     if (!NT_SUCCESS(Status)) DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
     return Status;
 }

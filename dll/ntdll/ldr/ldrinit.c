@@ -50,6 +50,9 @@ RTL_BITMAP TlsBitMap;
 RTL_BITMAP TlsExpansionBitMap;
 RTL_BITMAP FlsBitMap;
 BOOLEAN LdrpImageHasTls;
+#ifdef BUILD_WOW64_ENABLED
+static BOOLEAN LdrpIsWow64;
+#endif
 LIST_ENTRY LdrpTlsList;
 ULONG LdrpNumberOfTlsEntries;
 ULONG LdrpNumberOfProcessors;
@@ -1848,6 +1851,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
 
 #ifdef BUILD_WOW64_ENABLED
     IsWow64 = NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    LdrpIsWow64 = IsWow64;
     if (IsWow64)
     {
         /* The native runtime owns its own heap and loader. Never interpret
@@ -2757,8 +2761,9 @@ LdrpInit(PCONTEXT Context,
     }
 
 #ifdef BUILD_WOW64_ENABLED
-    if (NT_SUCCESS(LoaderStatus) &&
-        RtlImageNtHeader(Peb->ImageBaseAddress)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+    /* Bitness is established during process initialization. Applications may
+     * discard their image headers before starting subsequent native threads. */
+    if (NT_SUCCESS(LoaderStatus) && LdrpIsWow64)
     {
         UNICODE_STRING Name = RTL_CONSTANT_STRING(L"wow64.dll");
         ANSI_STRING Entry = RTL_CONSTANT_STRING("Wow64LdrpInitialize");

@@ -111,3 +111,72 @@ START_TEST(Wow64Run)
         CloseHandle(Console);
     }
 }
+
+static VOID RunReviewChild(const WCHAR *Image, const WCHAR *Arguments)
+{
+    WCHAR Command[2 * MAX_PATH];
+    STARTUPINFOW Startup = {sizeof(Startup)};
+    PROCESS_INFORMATION Process;
+    DWORD Wait, ExitCode = 0;
+    BOOL Result;
+
+    swprintf(Command, L"\"%ls\" %ls", Image, Arguments);
+    Result = CreateProcessW(Image, Command, NULL, NULL, FALSE, 0,
+                            NULL, NULL, &Startup, &Process);
+    ok(Result, "CreateProcess %ls failed: %lu\n", Command, GetLastError());
+    if (!Result) return;
+    Wait = WaitForSingleObject(Process.hProcess, 20000);
+    ok(Wait == WAIT_OBJECT_0, "Child %ls wait: %lu\n", Command, Wait);
+    if (Wait != WAIT_OBJECT_0)
+    {
+        TerminateProcess(Process.hProcess, 0xdead);
+        WaitForSingleObject(Process.hProcess, 5000);
+    }
+    ok(GetExitCodeProcess(Process.hProcess, &ExitCode), "GetExitCodeProcess failed\n");
+    ok(ExitCode == 0, "Child %ls exit: %lx\n", Command, ExitCode);
+    CloseHandle(Process.hThread);
+    CloseHandle(Process.hProcess);
+}
+
+START_TEST(Wow64ReviewFixes)
+{
+    WCHAR Source[MAX_PATH], Image[MAX_PATH], Local[MAX_PATH], Dll[MAX_PATH];
+    WCHAR Temp[MAX_PATH];
+    BOOL Copied;
+
+    GetSystemDirectoryW(Image, RTL_NUMBER_OF(Image));
+    wcscat(Image, L"\\wow64_native.exe");
+    RunReviewChild(Image, L"");
+
+    GetWindowsDirectoryW(Source, RTL_NUMBER_OF(Source));
+#ifdef _WIN64
+    wcscat(Source, L"\\SysWOW64\\");
+#else
+    wcscat(Source, L"\\system32\\");
+#endif
+    wcscpy(Image, Source);
+    wcscat(Image, L"wow64_errors.exe");
+    RunReviewChild(Image, L"h");
+    RunReviewChild(Image, L"a");
+    RunReviewChild(Image, L"m");
+
+    /* The PE32 image and its static import live outside every system search
+     * directory. The parent current directory is deliberately unchanged. */
+    GetTempPathW(RTL_NUMBER_OF(Temp), Temp);
+    swprintf(Local, L"%lswow64-local-%lu", Temp, GetCurrentProcessId());
+    ok(CreateDirectoryW(Local, NULL), "CreateDirectory failed: %lu\n", GetLastError());
+    swprintf(Image, L"%ls\\wow64_localhello.exe", Local);
+    wcscpy(Temp, Source);
+    wcscat(Temp, L"wow64_localhello.exe");
+    Copied = CopyFileW(Temp, Image, FALSE);
+    ok(Copied, "Copy PE32 executable failed: %lu\n", GetLastError());
+    swprintf(Dll, L"%ls\\wow64_local.dll", Local);
+    wcscpy(Temp, Source);
+    wcscat(Temp, L"wow64_local.dll");
+    Copied = CopyFileW(Temp, Dll, FALSE) && Copied;
+    ok(Copied, "Copy adjacent DLL failed: %lu\n", GetLastError());
+    if (Copied) RunReviewChild(Image, L"");
+    DeleteFileW(Image);
+    DeleteFileW(Dll);
+    RemoveDirectoryW(Local);
+}

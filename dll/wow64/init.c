@@ -22,13 +22,45 @@ NTSTATUS Wow64CopyString(WOW64_STRING *To, const UNICODE_STRING *From)
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS CopyDllPath(WOW64_STRING *To, const UNICODE_STRING *From)
+{
+    WCHAR SystemBuffer[MAX_PATH];
+    UNICODE_STRING SystemPath, Component;
+    ULONG Start, End, Count = From->Length / sizeof(WCHAR);
+    NTSTATUS Status;
+    PWSTR Buffer;
+
+    /* System32 and SysWOW64 have equal lengths. Preserve every other search
+     * component (including application, current and PATH directories) and
+     * their order; do not redirect similarly named application directories. */
+    RtlInitEmptyUnicodeString(&SystemPath, SystemBuffer, sizeof(SystemBuffer));
+    Status = RtlAppendUnicodeToString(&SystemPath, SharedUserData->NtSystemRoot);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = RtlAppendUnicodeToString(&SystemPath, L"\\System32");
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = Wow64CopyString(To, From);
+    if (!NT_SUCCESS(Status)) return Status;
+    Buffer = PTR32(To->Buffer);
+    for (Start = 0; Start < Count; Start = End + 1)
+    {
+        for (End = Start; End < Count && Buffer[End] != L';'; ++End) { }
+        Component.Buffer = Buffer + Start;
+        Component.Length = (End - Start) * sizeof(WCHAR);
+        if (Component.Length && Component.Buffer[Component.Length / sizeof(WCHAR) - 1] == L'\\')
+            Component.Length -= sizeof(WCHAR);
+        Component.MaximumLength = Component.Length;
+        if (RtlEqualUnicodeString(&Component, &SystemPath, TRUE))
+            RtlCopyMemory(Component.Buffer + Component.Length / sizeof(WCHAR) - 8,
+                          L"SysWOW64", 8 * sizeof(WCHAR));
+    }
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS InitializeParameters(PEB32 *Peb32)
 {
     PRTL_USER_PROCESS_PARAMETERS From = RtlNormalizeProcessParams(NtCurrentPeb()->ProcessParameters);
     WOW64_PARAMETERS *To;
     NTSTATUS Status;
-    WCHAR PathBuffer[MAX_PATH];
-    UNICODE_STRING Path;
     PVOID Environment;
     SIZE_T Size;
     ULONG i;
@@ -65,12 +97,7 @@ static NTSTATUS InitializeParameters(PEB32 *Peb32)
         COPY_STRING(CurrentDirectories[i].DosPath);
     }
 #undef COPY_STRING
-    /* Phase 1's system DLL search path. Application-local imports continue
-     * to be resolved by the ordinary i386 loader. */
-    RtlInitEmptyUnicodeString(&Path, PathBuffer, sizeof(PathBuffer));
-    RtlAppendUnicodeToString(&Path, SharedUserData->NtSystemRoot);
-    RtlAppendUnicodeToString(&Path, L"\\SysWOW64");
-    Status = Wow64CopyString(&To->DllPath, &Path);
+    Status = CopyDllPath(&To->DllPath, &From->DllPath);
     if (!NT_SUCCESS(Status)) return Status;
     if (From->Environment)
     {
