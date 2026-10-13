@@ -2865,7 +2865,7 @@ LRESULT CDefView::OnNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandl
                 return FALSE;
             }
             PITEMID_CHILD pidlNew = NULL;
-            HRESULT hr = m_pSFParent->SetNameOf(0, pidlOld, lpdi->item.pszText, SHGDN_INFOLDER, &pidlNew);
+            HRESULT hr = m_pSFParent->SetNameOf(m_hWnd, pidlOld, lpdi->item.pszText, SHGDN_INFOLDER, &pidlNew);
             if (SUCCEEDED(hr) && pidlNew)
             {
                 int iNew = LV_FindItemByPidl(pidlNew);
@@ -2877,7 +2877,10 @@ LRESULT CDefView::OnNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandl
             }
             else
             {
-                ::PostMessageW(m_ListView, LVM_EDITLABEL, lpdi->item.iItem, 0); // Renaming failed, let the user try again
+                // Renaming failed, let the user try again (the error box may have let the item move)
+                int iItem = LV_FindItemByPidl(pidlOld);
+                if (iItem >= 0)
+                    ::PostMessageW(m_ListView, LVM_EDITLABEL, iItem, 0);
             }
             return FALSE;
         }
