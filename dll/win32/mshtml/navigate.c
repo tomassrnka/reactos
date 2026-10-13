@@ -734,8 +734,10 @@ static void query_http_info(nsChannelBSC *This, IWinInetHttpInfo *wininet_info)
 {
     const WCHAR *ptr;
     DWORD len = 0;
-    WCHAR *buf;
+    WCHAR *wbuf;
+    char *buf;
 
+    /* IWinInetHttpInfo::QueryInfo returns the raw headers as ANSI text */
     IWinInetHttpInfo_QueryInfo(wininet_info, HTTP_QUERY_RAW_HEADERS_CRLF, NULL, &len, NULL, NULL);
     if(!len)
         return;
@@ -750,13 +752,18 @@ static void query_http_info(nsChannelBSC *This, IWinInetHttpInfo *wininet_info)
         return;
     }
 
-    ptr = strchrW(buf, '\r');
+    wbuf = heap_strdupAtoW(buf);
+    heap_free(buf);
+    if(!wbuf)
+        return;
+
+    ptr = strchrW(wbuf, '\r');
     if(ptr && ptr[1] == '\n') {
         ptr += 2;
         process_response_headers(This, ptr);
     }
 
-    heap_free(buf);
+    heap_free(wbuf);
 }
 
 HRESULT start_binding(HTMLInnerWindow *inner_window, BSCallback *bscallback, IBindCtx *bctx)
