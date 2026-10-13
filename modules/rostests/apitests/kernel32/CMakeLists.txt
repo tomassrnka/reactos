@@ -30,6 +30,7 @@ list(APPEND SOURCE
     JobObject.c
     LCMapString.c
     LoadLibraryExW.c
+    LocalDumps.c
     LocaleNameToLCID.c
     lstrcpynW.c
     lstrlen.c
