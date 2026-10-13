@@ -117,6 +117,64 @@ QueryTokenGroupsTests(
     RtlFreeHeap(RtlGetProcessHeap(), 0, Groups);
 }
 
+#ifndef SE_DELEGATE_SESSION_USER_IMPERSONATE_PRIVILEGE
+#define SE_DELEGATE_SESSION_USER_IMPERSONATE_PRIVILEGE 36
+#endif
+
+/* The privileges an administrator's token holds (Administrators, Users and Everyone in defltwk.inf) */
+static const ULONG AdminPrivileges[] =
+{
+    SE_INCREASE_QUOTA_PRIVILEGE,
+    SE_SECURITY_PRIVILEGE,
+    SE_TAKE_OWNERSHIP_PRIVILEGE,
+    SE_LOAD_DRIVER_PRIVILEGE,
+    SE_SYSTEM_PROFILE_PRIVILEGE,
+    SE_SYSTEMTIME_PRIVILEGE,
+    SE_PROF_SINGLE_PROCESS_PRIVILEGE,
+    SE_INC_BASE_PRIORITY_PRIVILEGE,
+    SE_CREATE_PAGEFILE_PRIVILEGE,
+    SE_BACKUP_PRIVILEGE,
+    SE_RESTORE_PRIVILEGE,
+    SE_SHUTDOWN_PRIVILEGE,
+    SE_DEBUG_PRIVILEGE,
+    SE_SYSTEM_ENVIRONMENT_PRIVILEGE,
+    SE_CHANGE_NOTIFY_PRIVILEGE,
+    SE_REMOTE_SHUTDOWN_PRIVILEGE,
+    SE_UNDOCK_PRIVILEGE,
+    SE_MANAGE_VOLUME_PRIVILEGE,
+    SE_IMPERSONATE_PRIVILEGE,
+    SE_CREATE_GLOBAL_PRIVILEGE,
+    SE_TIME_ZONE_PRIVILEGE,
+};
+
+/* Granted to administrators by Windows' default policy only */
+static const ULONG WindowsOnlyAdminPrivileges[] =
+{
+    SE_INC_WORKING_SET_PRIVILEGE,
+    SE_CREATE_SYMBOLIC_LINK_PRIVILEGE,
+    SE_DELEGATE_SESSION_USER_IMPERSONATE_PRIVILEGE,
+};
+
+static
+PLUID_AND_ATTRIBUTES
+FindPrivilege(
+    _In_ PTOKEN_PRIVILEGES Privileges,
+    _In_ ULONG Privilege)
+{
+    ULONG i;
+
+    for (i = 0; i < Privileges->PrivilegeCount; i++)
+    {
+        if (Privileges->Privileges[i].Luid.HighPart == 0 &&
+            Privileges->Privileges[i].Luid.LowPart == Privilege)
+        {
+            return &Privileges->Privileges[i];
+        }
+    }
+
+    return NULL;
+}
+
 static
 VOID
 QueryTokenPrivilegesTests(
@@ -124,7 +182,9 @@ QueryTokenPrivilegesTests(
 {
     NTSTATUS Status;
     PTOKEN_PRIVILEGES Privileges;
+    PLUID_AND_ATTRIBUTES Entry;
     ULONG BufferLength;
+    ULONG i, Known;
 
     /*
      * Query the exact buffer length to hold
@@ -148,7 +208,7 @@ QueryTokenPrivilegesTests(
 
     /*
      * Now do the actual query and validate the
-     * number of privileges.
+     * privileges an administrator holds.
      */
     Status = NtQueryInformationToken(Token,
                                      TokenPrivileges,
@@ -156,7 +216,36 @@ QueryTokenPrivilegesTests(
                                      BufferLength,
                                      &BufferLength);
     ok_ntstatus(Status, STATUS_SUCCESS);
-    ok(Privileges->PrivilegeCount == 20, "The number of privileges must be 20 (current number %lu)!\n", Privileges->PrivilegeCount);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Privileges);
+        return;
+    }
+
+    for (i = 0; i < _countof(AdminPrivileges); i++)
+    {
+        ok(FindPrivilege(Privileges, AdminPrivileges[i]) != NULL,
+           "Privilege %lu is missing from the token\n", AdminPrivileges[i]);
+    }
+
+    Known = _countof(AdminPrivileges);
+    for (i = 0; i < _countof(WindowsOnlyAdminPrivileges); i++)
+    {
+        if (FindPrivilege(Privileges, WindowsOnlyAdminPrivileges[i]))
+            Known++;
+    }
+
+    /* Each privilege appears once, so a larger count means a privilege the tables do not list */
+    ok(Privileges->PrivilegeCount == Known,
+       "The token holds %lu privileges, expected %lu\n", Privileges->PrivilegeCount, Known);
+
+    /* Held but disabled, as on Windows; changing the time zone enables it first */
+    Entry = FindPrivilege(Privileges, SE_TIME_ZONE_PRIVILEGE);
+    if (Entry)
+    {
+        ok((Entry->Attributes & SE_PRIVILEGE_ENABLED) == 0,
+           "SeTimeZonePrivilege is enabled (attributes 0x%lx)\n", Entry->Attributes);
+    }
 
     RtlFreeHeap(RtlGetProcessHeap(), 0, Privileges);
 }
