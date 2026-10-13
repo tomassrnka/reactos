@@ -343,7 +343,7 @@ ShowSelection(HWND hSource)
     {
         int Item = -1;
 
-        if (ResolveSelection(&Disk, &Region) && g_Model)
+        if (ResolveSelection(&Disk, &Region) && g_Model && Region == NULL)
         {
             ULONG i;
 
@@ -541,11 +541,19 @@ static VOID
 ShowAbout(VOID)
 {
     WCHAR Title[64], Text[160];
-    HICON Icon = LoadIconW(g_hInst, MAKEINTRESOURCEW(IDI_DISKMGMT));
+    MSGBOXPARAMSW Params;
 
     LoadStringBuffer(IDS_APPTITLE, Title, ARRAYSIZE(Title));
     LoadStringBuffer(IDS_ABOUT_TEXT, Text, ARRAYSIZE(Text));
-    ShellAboutW(g_hMain, Title, Text, Icon);
+    ZeroMemory(&Params, sizeof(Params));
+    Params.cbSize = sizeof(Params);
+    Params.hwndOwner = g_hMain;
+    Params.hInstance = g_hInst;
+    Params.lpszText = Text;
+    Params.lpszCaption = Title;
+    Params.dwStyle = MB_OK | MB_USERICON;
+    Params.lpszIcon = MAKEINTRESOURCEW(IDI_DISKMGMT);
+    MessageBoxIndirectW(&Params);
 }
 
 /* ---------------------------------------------------------------- creation */
@@ -730,7 +738,6 @@ OnListNotify(NMHDR *Header)
             }
             break;
 
-        case NM_DBLCLK:
         case LVN_ITEMACTIVATE:
             ShowProperties();
             break;
@@ -904,7 +911,7 @@ DumpTo(PCWSTR Path)
 
     if (Model == NULL)
         return 2;
-    File = CreateFileW(Path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    File = CreateFileW(Path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
     if (File == INVALID_HANDLE_VALUE)
     {
         DmFreeModel(Model);

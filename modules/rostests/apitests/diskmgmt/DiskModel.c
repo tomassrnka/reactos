@@ -459,6 +459,7 @@ Test_OtherDisks(VOID)
     MakeVolume(&Volume, 5, 0, L"E:", L"STICK", L"FAT32", 1000 * MiB, 900 * MiB);
     ok(DmAttachVolume(Model, &Volume), "attach the volume of a medium without partitions\n");
     DmFinishModel(Model, NULL);
+    ok(Disk->UnallocatedMB == 0, "a medium that is one volume has %I64u MB unallocated\n", Disk->UnallocatedMB);
     DmLabelText(Disk, &Label);
     CheckText(Label.Line2, L"Removable (E:)", "removable type with letter");
     if (Disk->RegionCount == 1)
@@ -469,6 +470,30 @@ Test_OtherDisks(VOID)
     }
     DmFreeModel(Model);
     HeapFree(GetProcessHeap(), 0, Layout);
+
+    /* a dynamic disk: the container partition is no volume */
+    {
+        static const MBR_PART Dynamic[] = { { 1 * MiB, 2000 * MiB, 0x42, FALSE, 1 } };
+        ULONG Count;
+        PDM_ROW Rows;
+
+        Layout = MakeMbrLayout(Dynamic, 1, 3);
+        Disk = BuildDisk(DM_DEV_DISK, 6, 2048 * MiB, Layout, FALSE, TRUE, 0);
+        ok(Disk != NULL && Disk->Dynamic, "the 0x42 partition does not make a dynamic disk\n");
+        if (Disk)
+        {
+            DmLabelText(Disk, &Label);
+            CheckText(Label.Line2, L"Dynamic", "dynamic disk type");
+            Model = ModelOf(Disk);
+            DmFinishModel(Model, NULL);
+            Rows = DmBuildVolumeRows(Model, &Count);
+            ok(Count == 0, "%lu volume rows for a dynamic container\n", Count);
+            if (Rows)
+                HeapFree(GetProcessHeap(), 0, Rows);
+            DmFreeModel(Model);
+        }
+        HeapFree(GetProcessHeap(), 0, Layout);
+    }
 
     /* an optical drive with a disc, and one without */
     Model = DmCreateModel();

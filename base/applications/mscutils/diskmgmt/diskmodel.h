@@ -198,6 +198,7 @@ PCWSTR DmBusText(ULONG BusType);
 PDM_MODEL DmCreateModel(VOID);
 VOID DmFreeModel(PDM_MODEL Model);
 BOOL DmBuildDisk(const DM_DISK_INPUT *Input, PDM_DISK *Disk);
+VOID DmFreeDisk(PDM_DISK Disk);
 BOOL DmAddDisk(PDM_MODEL Model, PDM_DISK Disk);
 BOOL DmAttachVolume(PDM_MODEL Model, const DM_VOLUME_INFO *Volume);
 VOID DmFinishModel(PDM_MODEL Model, const DM_SYSINFO *Info);

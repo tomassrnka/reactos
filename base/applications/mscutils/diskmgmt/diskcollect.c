@@ -22,8 +22,7 @@
 
 #include "diskmodel.h"
 
-#define DM_MAX_PHYSICAL_DRIVES 64
-#define DM_MAX_CONSECUTIVE_MISSES 8
+#define DM_MAX_PHYSICAL_DRIVES 128
 
 static HANDLE
 DmOpenDevice(PCWSTR Path, DWORD Access)
@@ -40,15 +39,23 @@ DmIoctl(HANDLE Device, DWORD Code, PVOID In, DWORD InSize, PVOID Out, DWORD OutS
 }
 
 static VOID
-DmTrimCopy(PWSTR Dest, SIZE_T Count, const CHAR *Src)
+DmTrimCopy(PWSTR Dest, SIZE_T Count, const BYTE *Base, DWORD Size, ULONG Offset)
 {
+    CHAR Narrow[128];
     WCHAR Wide[128];
-    SIZE_T Len, Start = 0;
+    SIZE_T Len, Start = 0, n = 0;
 
     Dest[0] = 0;
-    if (Src == NULL)
+    if (Offset == 0 || Offset >= Size)
         return;
-    MultiByteToWideChar(CP_ACP, 0, Src, -1, Wide, ARRAYSIZE(Wide));
+    while (Offset + n < Size && n < sizeof(Narrow) - 1 && Base[Offset + n] != 0)
+    {
+        Narrow[n] = (CHAR)Base[Offset + n];
+        n++;
+    }
+    Narrow[n] = 0;
+    if (MultiByteToWideChar(CP_ACP, 0, Narrow, -1, Wide, ARRAYSIZE(Wide)) == 0)
+        return;
     Wide[ARRAYSIZE(Wide) - 1] = 0;
     Len = wcslen(Wide);
     while (Len > 0 && Wide[Len - 1] == L' ')
@@ -75,15 +82,12 @@ DmQueryStorage(HANDLE Device, PDM_DISK_INPUT Input, BOOL *Removable)
         Size >= sizeof(STORAGE_DEVICE_DESCRIPTOR))
     {
         WCHAR Vendor[64], Product[64];
-        const CHAR *Base = (const CHAR *)Buffer.Raw;
 
         Input->BusType = Buffer.Desc.BusType;
         if (Buffer.Desc.RemovableMedia)
             *Removable = TRUE;
-        DmTrimCopy(Vendor, ARRAYSIZE(Vendor),
-                   Buffer.Desc.VendorIdOffset && Buffer.Desc.VendorIdOffset < sizeof(Buffer) ? Base + Buffer.Desc.VendorIdOffset : NULL);
-        DmTrimCopy(Product, ARRAYSIZE(Product),
-                   Buffer.Desc.ProductIdOffset && Buffer.Desc.ProductIdOffset < sizeof(Buffer) ? Base + Buffer.Desc.ProductIdOffset : NULL);
+        DmTrimCopy(Vendor, ARRAYSIZE(Vendor), Buffer.Raw, min(Size, (DWORD)sizeof(Buffer)), Buffer.Desc.VendorIdOffset);
+        DmTrimCopy(Product, ARRAYSIZE(Product), Buffer.Raw, min(Size, (DWORD)sizeof(Buffer)), Buffer.Desc.ProductIdOffset);
 
         if (Input->BusType == BusTypeAta || Input->BusType == BusTypeAtapi || Input->BusType == BusTypeSata)
             StringCchPrintfW(Input->DeviceName, ARRAYSIZE(Input->DeviceName), L"%s ATA Device", Product[0] ? Product : Vendor);
@@ -142,9 +146,9 @@ DmReadLayout(HANDLE Device, PULONG Error)
 static VOID
 DmCollectDisks(PDM_MODEL Model)
 {
-    ULONG Number, Misses = 0;
+    ULONG Number;
 
-    for (Number = 0; Number < DM_MAX_PHYSICAL_DRIVES && Misses < DM_MAX_CONSECUTIVE_MISSES; Number++)
+    for (Number = 0; Number < DM_MAX_PHYSICAL_DRIVES; Number++)
     {
         WCHAR Path[64];
         HANDLE Device;
@@ -161,11 +165,7 @@ DmCollectDisks(PDM_MODEL Model)
         {
             Error = GetLastError();
             if (Error == ERROR_FILE_NOT_FOUND || Error == ERROR_PATH_NOT_FOUND)
-            {
-                Misses++;
                 continue;
-            }
-            Misses = 0;
             ZeroMemory(&Input, sizeof(Input));
             Input.Device = DM_DEV_DISK;
             Input.Number = Number;
@@ -173,12 +173,10 @@ DmCollectDisks(PDM_MODEL Model)
             Input.LayoutError = Error;
             Input.BusType = 0xFF;
             Input.ScsiPath = Input.ScsiTarget = Input.ScsiLun = -1;
-            if (DmBuildDisk(&Input, &Disk))
-                DmAddDisk(Model, Disk);
+            if (DmBuildDisk(&Input, &Disk) && !DmAddDisk(Model, Disk))
+                DmFreeDisk(Disk);
             continue;
         }
-        Misses = 0;
-
         ZeroMemory(&Input, sizeof(Input));
         Input.Number = Number;
         Input.HasMedia = TRUE;
@@ -218,8 +216,8 @@ DmCollectDisks(PDM_MODEL Model)
         Input.Removable = Removable;
         Input.Device = Removable ? DM_DEV_REMOVABLE : DM_DEV_DISK;
 
-        if (DmBuildDisk(&Input, &Disk))
-            DmAddDisk(Model, Disk);
+        if (DmBuildDisk(&Input, &Disk) && !DmAddDisk(Model, Disk))
+            DmFreeDisk(Disk);
         if (Layout)
             HeapFree(GetProcessHeap(), 0, Layout);
         CloseHandle(Device);
@@ -303,7 +301,8 @@ DmFillVolumeInfo(PDM_VOLUME_INFO Info, PCWSTR RootPath, PCWSTR DevicePath)
     {
         Info->HasSpace = TRUE;
         Info->Total = Total.QuadPart;
-        Info->Free = TotalFree.QuadPart;
+        /* the total honours quotas, the free space does not */
+        Info->Free = min(TotalFree.QuadPart, Total.QuadPart);
     }
     Info->HasMedia = Info->HasFsInfo || Info->HasSpace;
 }
@@ -335,7 +334,8 @@ DmCollectVolumes(PDM_MODEL Model)
         do
         {
             PDM_VOLUME_INFO Info = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DM_VOLUME_INFO));
-            WCHAR Device[MAX_PATH], Paths[512];
+            WCHAR Device[MAX_PATH];
+            PWSTR Paths = NULL;
             DWORD Length = 0;
             SIZE_T Len;
 
@@ -347,8 +347,12 @@ DmCollectVolumes(PDM_MODEL Model)
             if (Len > 0 && Device[Len - 1] == L'\\')
                 Device[Len - 1] = 0;
 
-            if (GetVolumePathNamesForVolumeNameW(Guid, Paths, ARRAYSIZE(Paths), &Length))
+            GetVolumePathNamesForVolumeNameW(Guid, NULL, 0, &Length);
+            if (Length > 1)
+                Paths = HeapAlloc(GetProcessHeap(), 0, (Length + 1) * sizeof(WCHAR));
+            if (Paths && GetVolumePathNamesForVolumeNameW(Guid, Paths, Length, &Length))
             {
+                Paths[Length] = 0;
                 PCWSTR Path;
                 SIZE_T Used = 0;
 
@@ -370,6 +374,8 @@ DmCollectVolumes(PDM_MODEL Model)
                     }
                 }
             }
+            if (Paths)
+                HeapFree(GetProcessHeap(), 0, Paths);
             DmFillVolumeInfo(Info, Guid, Device);
             if (Info->DriveType == DRIVE_CDROM)
             {

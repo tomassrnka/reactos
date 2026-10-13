@@ -153,7 +153,7 @@ GraphLayout(HWND hWnd, GRAPH *G)
         PDM_DISK Disk = G->Model->Disks[d];
         int Top = ROW_TOP + d * ROW_PITCH;
         double Sum = 0.0;
-        int BarWidth, X = REGION_X;
+        int BarWidth, MinWidth, X = REGION_X;
         GITEM *Item = &G->Items[G->ItemCount++];
 
         Item->Disk = d;
@@ -167,16 +167,18 @@ GraphLayout(HWND hWnd, GRAPH *G)
             BarWidth = max(Avail * 40 / 100, 220);
         else
             BarWidth = (int)(Avail * Weight(Disk->CapacityMB * DM_MIB) / MaxLn);
-        BarWidth = max(BarWidth, (int)Disk->RegionCount * MIN_REGION_W);
-        if (BarWidth > Avail && (int)Disk->RegionCount * MIN_REGION_W <= Avail)
+        /* many blocks shrink the minimum width so that the bar still fits */
+        MinWidth = Disk->RegionCount ? max(3, min(MIN_REGION_W, Avail / (int)Disk->RegionCount)) : MIN_REGION_W;
+        BarWidth = max(BarWidth, (int)Disk->RegionCount * MinWidth);
+        if (BarWidth > Avail)
             BarWidth = Avail;
 
         for (r = 0; r < (int)Disk->RegionCount; r++)
         {
             int Width = Sum > 0 ? (int)(BarWidth * Weight(Disk->Regions[r].Length) / Sum) : BarWidth;
 
-            if (Width < MIN_REGION_W)
-                Width = MIN_REGION_W;
+            if (Width < MinWidth)
+                Width = MinWidth;
             if (r == (int)Disk->RegionCount - 1 && X + Width < REGION_X + BarWidth)
                 Width = REGION_X + BarWidth - X;
 
@@ -491,12 +493,18 @@ GraphPaint(HWND hWnd, GRAPH *G, HDC hTarget, const RECT *Update)
     RECT Client;
     HDC hDC;
     HBITMAP Bitmap, OldBitmap;
-    int i, d, Visible, Selected = FindItem(G, &G->Sel);
+    int i, d, Visible, Selected;
     HFONT OldFont;
 
     GetClientRect(hWnd, &Client);
     if (Client.right <= 0 || Client.bottom <= 0)
         return;
+    if (G->Model == NULL || G->Items == NULL || G->Ext == NULL)
+    {
+        FillColor(hTarget, &Client, GetSysColor(COLOR_BTNFACE));
+        return;
+    }
+    Selected = FindItem(G, &G->Sel);
     hDC = CreateCompatibleDC(hTarget);
     Bitmap = CreateCompatibleBitmap(hTarget, Client.right, Client.bottom);
     OldBitmap = SelectObject(hDC, Bitmap);

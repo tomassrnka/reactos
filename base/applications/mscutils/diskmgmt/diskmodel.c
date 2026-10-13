@@ -120,7 +120,7 @@ DmCreateModel(VOID)
     return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DM_MODEL));
 }
 
-static VOID
+VOID
 DmFreeDisk(PDM_DISK Disk)
 {
     if (Disk == NULL)
@@ -615,6 +615,8 @@ DmAttachVolume(PDM_MODEL Model, const DM_VOLUME_INFO *Volume)
         Disk->Regions[0].PartitionNumber = 1;
         DmCopyVolume(&Disk->Regions[0], Volume);
         Disk->Style = DM_STYLE_MBR;
+        Disk->CapacityMB = Disk->Length / DM_MIB;
+        Disk->UnallocatedMB = 0;
         DmSetStatusText(Disk, L"Online");
         return TRUE;
     }
@@ -809,7 +811,8 @@ DmBuildVolumeRows(const DM_MODEL *Model, PULONG Count)
     *Count = 0;
     for (d = 0; d < Model->DiskCount; d++)
         for (r = 0; r < Model->Disks[d]->RegionCount; r++)
-            if (Model->Disks[d]->Regions[r].Kind == DM_KIND_PRIMARY || Model->Disks[d]->Regions[r].Kind == DM_KIND_LOGICAL)
+            if ((Model->Disks[d]->Regions[r].Kind == DM_KIND_PRIMARY || Model->Disks[d]->Regions[r].Kind == DM_KIND_LOGICAL) &&
+                !(Model->Disks[d]->Regions[r].IsDynamic && !Model->Disks[d]->Regions[r].HasVolume))
                 Total++;
     if (Total == 0)
         return NULL;
@@ -836,6 +839,9 @@ DmBuildVolumeRows(const DM_MODEL *Model, PULONG Count)
             ULONGLONG Capacity, Free;
 
             if (Region->Kind != DM_KIND_PRIMARY && Region->Kind != DM_KIND_LOGICAL)
+                continue;
+            /* the volumes of a dynamic disk live inside its container partition, which is not a volume */
+            if (Region->IsDynamic && !Region->HasVolume)
                 continue;
             n++;
 
