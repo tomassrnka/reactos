@@ -25,6 +25,7 @@ KMT_TESTFUNC Test_FsRtlDissect;
 KMT_TESTFUNC Test_FsRtlExpression;
 KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
+KMT_TESTFUNC Test_FsRtlPerStreamContext;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
 #if defined(_M_IX86) || defined(_M_AMD64)
@@ -113,6 +114,7 @@ const KMT_TEST TestList[] =
     { "FsRtlExpression",                    Test_FsRtlExpression },
     { "FsRtlLegal",                         Test_FsRtlLegal },
     { "FsRtlMcb",                           Test_FsRtlMcb },
+    { "FsRtlPerStreamContext",              Test_FsRtlPerStreamContext },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
 #if defined(_M_IX86) || defined(_M_AMD64)
