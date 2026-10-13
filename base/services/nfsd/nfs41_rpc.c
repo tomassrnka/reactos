@@ -191,6 +191,7 @@ int nfs41_rpc_clnt_create(
     rpc->sec_flavor = sec_flavor;
     if (sec_flavor == RPCSEC_AUTH_SYS) {
         if (gethostname(machname, sizeof(machname)) == -1) {
+            status = WSAGetLastError();
             eprintf("nfs41_rpc_clnt_create: gethostname failed\n");
             goto out_err_client;
         }

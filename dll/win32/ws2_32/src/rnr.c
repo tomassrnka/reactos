@@ -300,8 +300,8 @@ WSALookupServiceBeginA(IN LPWSAQUERYSETA lpqsRestrictions,
         }
     }
 
-    /* Set the error in case of failure */
-    if (ErrorCode != ERROR_SUCCESS)
+    /* Set the error in case of failure; WSALookupServiceBeginW has set its own */
+    if (ErrorCode != ERROR_SUCCESS && ErrorCode != SOCKET_ERROR)
         SetLastError(ErrorCode);
 
     /* Return to caller */
