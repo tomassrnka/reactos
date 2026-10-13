@@ -100,7 +100,7 @@ inline bool DoLineModeSpecial(char keychar, TConsole &Console, TNetwork &Network
 inline void DoLineMode(const char *p, int p_len, TConsole &Console,
 					   TNetwork &Network) {
 	if(Network.get_line_mode()) {
-		if(bufptr < sizeof(buffer) + p_len - 1) {
+		if(p_len >= 0 && (unsigned int)p_len <= sizeof(buffer) - bufptr) {
 			memcpy(buffer + bufptr, p, p_len);
 			bufptr += p_len;
 		} else {
@@ -249,16 +249,26 @@ int telProcessConsole(NetParams *pParams, KeyTranslator &KeyTrans,
 						keydef.szKeyDef = FindClosestKey(keyCode,
 							keyState, KeyTrans);
 
-						if(keydef.szKeyDef) {
-							if(!keydef.op->sendstr)
-								if((opval = do_op(keydef.op->the_op, Network,
-									Clipboard)) != 0)
-									return opval;
-						}
-
+						// In line mode Enter and Backspace edit the local line before any mapped operation
 						if(Network.get_line_mode()) {
 							if(DoLineModeSpecial(KEYEVENT_CHAR, Console, Network, pParams))
 								continue;
+						}
+
+						if(keydef.szKeyDef) {
+							if(!keydef.op->sendstr) {
+								tn_ops op = keydef.op->the_op;
+								// In line mode these bytes go through the line buffer, so they keep their order
+								if(Network.get_line_mode() &&
+									(op == TN_NULL || op == TN_CR || op == TN_CRLF)) {
+									if(op == TN_NULL) DoLineMode("", 1, Console, Network);
+									else if(op == TN_CR) DoLineMode("\r", 2, Console, Network);
+									else DoLineMode("\r\n", 2, Console, Network);
+									continue;
+								}
+								if((opval = do_op(op, Network, Clipboard)) != 0)
+									return opval;
+							}
 						}
 
 						p = keydef.szKeyDef;
