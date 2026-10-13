@@ -39,6 +39,7 @@ INT cmd_start (LPTSTR Rest)
     TCHAR szFullName[CMDLINE_LENGTH];
     TCHAR szUnquotedName[CMDLINE_LENGTH];
     TCHAR *param = NULL;
+    TCHAR chSep = _T(' ');
     TCHAR *dot;
     INT size;
     LPTSTR comspec;
@@ -224,6 +225,7 @@ INT cmd_start (LPTSTR Rest)
             if (_istspace(Rest[i]) && !bInside)
             {
                 param = &Rest[i+1];
+                chSep = Rest[i];
                 Rest[i] = _T('\0');
                 break;
             }
@@ -248,14 +250,18 @@ INT cmd_start (LPTSTR Rest)
         else
         {
             TRACE ("[EXEC: %s %s]\n", debugstr_aw(szFullName), debugstr_aw(Rest));
-            _tcscpy(szFullCmdLine, szFullName);
+            /* As in Windows: the program name as typed, quotes included,
+             * then a space and the rest of the line unchanged */
+            _tcscpy(szFullCmdLine, Rest);
+            _tcsncat(szFullCmdLine, _T(" "), CMDLINE_LENGTH - _tcslen(szFullCmdLine) - 1);
         }
 
         /* build command line for CreateProcess() */
         if (param != NULL)
         {
-            _tcsncat(szFullCmdLine, _T(" "), CMDLINE_LENGTH - _tcslen(szFullCmdLine));
-            _tcsncat(szFullCmdLine, param, CMDLINE_LENGTH - _tcslen(szFullCmdLine));
+            TCHAR szSep[2] = { bBat ? _T(' ') : chSep, _T('\0') };
+            _tcsncat(szFullCmdLine, szSep, CMDLINE_LENGTH - _tcslen(szFullCmdLine) - 1);
+            _tcsncat(szFullCmdLine, param, CMDLINE_LENGTH - _tcslen(szFullCmdLine) - 1);
         }
 
         /* fill startup info */
