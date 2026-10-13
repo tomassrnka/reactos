@@ -611,6 +611,7 @@ NtQueryInformationProcess(
         case ProcessVmCounters:
         {
             PVM_COUNTERS VmCounters = (PVM_COUNTERS)ProcessInformation;
+            SIZE_T CommitCharge;
 
             /* Validate the input length */
             if ((ProcessInformationLength != sizeof(VM_COUNTERS)) &&
@@ -642,10 +643,14 @@ NtQueryInformationProcess(
                 VmCounters->QuotaPagedPoolUsage = Process->QuotaUsage[PsPagedPool];
                 VmCounters->QuotaPeakNonPagedPoolUsage = Process->QuotaPeak[PsNonPagedPool];
                 VmCounters->QuotaNonPagedPoolUsage = Process->QuotaUsage[PsNonPagedPool];
-                VmCounters->PagefileUsage = Process->QuotaUsage[PsPageFile] << PAGE_SHIFT;
-                VmCounters->PeakPagefileUsage = Process->QuotaPeak[PsPageFile] << PAGE_SHIFT;
-                //VmCounters->PrivateUsage = Process->CommitCharge << PAGE_SHIFT;
-                //
+                /* The private commit charge, also returned as PrivateUsage in VM_COUNTERS_EX */
+                CommitCharge = Process->CommitCharge;
+                VmCounters->PagefileUsage = CommitCharge << PAGE_SHIFT;
+                VmCounters->PeakPagefileUsage = Process->CommitChargePeak << PAGE_SHIFT;
+                if (ProcessInformationLength == sizeof(VM_COUNTERS_EX))
+                {
+                    ((PVM_COUNTERS_EX)VmCounters)->PrivateUsage = CommitCharge << PAGE_SHIFT;
+                }
 
                 /* Set the return length */
                 Length = ProcessInformationLength;
