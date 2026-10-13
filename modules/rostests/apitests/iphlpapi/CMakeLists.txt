@@ -8,6 +8,7 @@ list(APPEND SOURCE
     GetOwnerModuleFromUdpEntry.c
     icmp.c
     SendARP.c
+    TcpUdpTableRows.c
     testlist.c)
 
 add_executable(iphlpapi_apitest ${SOURCE})
