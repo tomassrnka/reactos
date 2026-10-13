@@ -82,6 +82,7 @@ private:
     static int CALLBACK SortItemsForDataObject(void *p1, void *p2, LPARAM lparam);
     void NotifyConnections(DISPID id);
     static DWORD WINAPI SearchThreadProc(LPVOID lpParameter);
+    void DiscardQueuedSearchMessages();
 
     //// *** IPersistFolder2 methods ***
     STDMETHODIMP GetCurFolder(PIDLIST_ABSOLUTE *pidl);
@@ -98,6 +99,8 @@ private:
     LRESULT StartSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
 
     LRESULT StopSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
+
+    LRESULT SearchFinished(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
 
     LRESULT AddResult(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
 
@@ -119,6 +122,7 @@ public:
     BEGIN_MSG_MAP(CFindFolder)
         MESSAGE_HANDLER(WM_SEARCH_START, StartSearch)
         MESSAGE_HANDLER(WM_SEARCH_STOP, StopSearch)
+        MESSAGE_HANDLER(WM_SEARCH_FINISHED, SearchFinished)
         MESSAGE_HANDLER(WM_SEARCH_ADD_RESULT, AddResult)
         MESSAGE_HANDLER(WM_SEARCH_UPDATE_STATUS, UpdateStatus)
     END_MSG_MAP()
