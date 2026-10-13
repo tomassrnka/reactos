@@ -889,6 +889,7 @@ typedef enum _MI_COMMIT_TIER
 } MI_COMMIT_TIER;
 
 extern SIZE_T MiCommitReserve;
+extern PKTHREAD MiKernelTierStackCreator;
 
 CODE_SEG("INIT")
 VOID

@@ -20,6 +20,8 @@
 ULONG MmProcessColorSeed = 0x12345678;
 ULONG MmMaximumDeadKernelStacks = 5;
 SLIST_HEADER MmDeadStackSListHead;
+/* The thread whose new kernel stacks may use the kernel reserve (it starts the paging file growth thread) */
+PKTHREAD MiKernelTierStackCreator;
 ULONG MmRotatingUniprocessorNumber = 0;
 
 /* PRIVATE FUNCTIONS **********************************************************/
@@ -396,7 +398,12 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     // A new stack is committed memory (a stack taken from the dead stack
     // list above kept its charge)
     //
-    if (!MiChargeCommit(StackPages, MiCommitUser)) return NULL;
+    if (!MiChargeCommit(StackPages,
+                        (MiKernelTierStackCreator == KeGetCurrentThread()) ?
+                        MiCommitKernel : MiCommitUser))
+    {
+        return NULL;
+    }
 
     //
     // Reserve stack pages, plus a guard page
