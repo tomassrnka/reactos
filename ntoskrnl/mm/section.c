@@ -3563,6 +3563,15 @@ MmMapViewOfSegment(
         return Status;
     }
 
+    /* Nothing is mapped and nothing refers to the area yet: free it if this fails */
+    Status = MmInitializeRegion(&MArea->SectionData.RegionListHead,
+                                ViewSize, 0, Protect);
+    if (!NT_SUCCESS(Status))
+    {
+        MmFreeMemoryArea(AddressSpace, MArea, NULL, NULL);
+        return Status;
+    }
+
     InterlockedIncrement64(Segment->ReferenceCount);
 
     /* A file truncation must not cut through a view of a process, even once the section is closed */
@@ -3575,9 +3584,6 @@ MmMapViewOfSegment(
     {
         MArea->VadNode.u.VadFlags.VadType = VadImageMap;
     }
-
-    MmInitializeRegion(&MArea->SectionData.RegionListHead,
-                       ViewSize, 0, Protect);
 
     return STATUS_SUCCESS;
 }

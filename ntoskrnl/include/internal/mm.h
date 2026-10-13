@@ -1396,7 +1396,7 @@ MmAlterRegion(
     PMM_ALTER_REGION_FUNC AlterFunc
 );
 
-VOID
+NTSTATUS
 NTAPI
 MmInitializeRegion(
     PLIST_ENTRY RegionListHead,
