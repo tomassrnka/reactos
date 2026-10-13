@@ -30,22 +30,6 @@ static BOOL EnableTimeZonePrivilege(void)
     return Ret;
 }
 
-/* Stored key name: TRUE and the value, or FALSE when there is none */
-static BOOL QueryStoredKeyName(PWSTR Name, DWORD Count)
-{
-    DWORD Size = Count * sizeof(WCHAR), Type;
-    HKEY hKey;
-    LONG Error;
-
-    Name[0] = UNICODE_NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TZ_KEY, 0, KEY_QUERY_VALUE, &hKey))
-        return FALSE;
-    Error = RegQueryValueExW(hKey, L"TimeZoneKeyName", NULL, &Type, (PBYTE)Name, &Size);
-    RegCloseKey(hKey);
-    Name[Count - 1] = UNICODE_NULL;
-    return Error == ERROR_SUCCESS;
-}
-
 static BOOL ReadZone(PCWSTR KeyName, TIME_ZONE_INFORMATION *Info)
 {
     struct { LONG Bias, StandardBias, DaylightBias; SYSTEMTIME StandardDate, DaylightDate; } Tzi;
@@ -88,17 +72,36 @@ static BOOL SetStoredValue(PCWSTR Name, DWORD Type, const void *Data, DWORD Size
     return Error == ERROR_SUCCESS || (!Data && Error == ERROR_FILE_NOT_FOUND);
 }
 
-static BOOL QueryStoredDword(PCWSTR Name, PDWORD Value)
+/* A stored value as it was: present or not, and if present its type and bytes */
+typedef struct _SAVED_VALUE
 {
-    DWORD Size = sizeof(*Value), Type;
+    BOOL Present;
+    DWORD Type;
+    DWORD Size;
+    BYTE Data[1024];
+} SAVED_VALUE;
+
+/* FALSE when the value cannot be saved completely (then nothing must be changed) */
+static BOOL SaveValue(PCWSTR Name, SAVED_VALUE *Saved)
+{
     HKEY hKey;
     LONG Error;
 
+    ZeroMemory(Saved, sizeof(*Saved));
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TZ_KEY, 0, KEY_QUERY_VALUE, &hKey))
         return FALSE;
-    Error = RegQueryValueExW(hKey, Name, NULL, &Type, (PBYTE)Value, &Size);
+    Saved->Size = sizeof(Saved->Data);
+    Error = RegQueryValueExW(hKey, Name, NULL, &Saved->Type, Saved->Data, &Saved->Size);
     RegCloseKey(hKey);
-    return Error == ERROR_SUCCESS && Type == REG_DWORD && Size == sizeof(*Value);
+    if (Error == ERROR_FILE_NOT_FOUND)
+        return TRUE;
+    Saved->Present = (Error == ERROR_SUCCESS);
+    return Saved->Present;
+}
+
+static BOOL RestoreValue(PCWSTR Name, const SAVED_VALUE *Saved)
+{
+    return SetStoredValue(Name, Saved->Type, Saved->Present ? Saved->Data : NULL, Saved->Size);
 }
 
 /*
@@ -114,17 +117,20 @@ static void TestStoredValues(FN_GetDynamicTimeZoneInformation pGet)
     FN_SetDynamicTimeZoneInformation pSetDynamic;
     DYNAMIC_TIME_ZONE_INFORMATION Original, Dynamic;
     TIME_ZONE_INFORMATION Target, Static;
-    WCHAR Stored[128];
-    DWORD Disabled = 1, OldDisabled = 0, Result, StaticResult, i;
-    BOOL HaveStored, HaveOldDisabled, Ret;
+    SAVED_VALUE SavedKeyName, SavedDisabled;
+    DWORD Disabled = 1, Result, StaticResult, i;
+    BOOL Ret;
 
     if (!EnableTimeZonePrivilege())
     {
         skip("No SeTimeZonePrivilege\n");
         return;
     }
-    HaveStored = QueryStoredKeyName(Stored, ARRAYSIZE(Stored));
-    HaveOldDisabled = QueryStoredDword(L"DynamicDaylightTimeDisabled", &OldDisabled);
+    if (!SaveValue(L"TimeZoneKeyName", &SavedKeyName) || !SaveValue(L"DynamicDaylightTimeDisabled", &SavedDisabled))
+    {
+        skip("Cannot save the stored values\n");
+        return;
+    }
     ZeroMemory(&Original, sizeof(Original));
     if (pGet(&Original) == TIME_ZONE_ID_INVALID)
         return;
@@ -180,10 +186,8 @@ static void TestStoredValues(FN_GetDynamicTimeZoneInformation pGet)
         Ret = SetTimeZoneInformation((TIME_ZONE_INFORMATION *)&Original);
         ok(Ret, "SetTimeZoneInformation failed: %lu\n", GetLastError());
     }
-    ok(SetStoredValue(L"TimeZoneKeyName", REG_SZ, HaveStored ? Stored : NULL, (DWORD)(wcslen(Stored) + 1) * sizeof(WCHAR)),
-       "Cannot restore the stored key name\n");
-    ok(SetStoredValue(L"DynamicDaylightTimeDisabled", REG_DWORD, HaveOldDisabled ? &OldDisabled : NULL, sizeof(OldDisabled)),
-       "Cannot restore DynamicDaylightTimeDisabled\n");
+    ok(RestoreValue(L"TimeZoneKeyName", &SavedKeyName), "Cannot restore the stored key name\n");
+    ok(RestoreValue(L"DynamicDaylightTimeDisabled", &SavedDisabled), "Cannot restore DynamicDaylightTimeDisabled\n");
     RtlFillMemory(&Dynamic, sizeof(Dynamic), 0xCC);
     ok(pGet(&Dynamic) != TIME_ZONE_ID_INVALID, "Failed: %lu\n", GetLastError());
     Dynamic.TimeZoneKeyName[ARRAYSIZE(Dynamic.TimeZoneKeyName) - 1] = UNICODE_NULL;
@@ -234,12 +238,12 @@ START_TEST(DynamicTimeZone)
        "DynamicDaylightTimeDisabled %u\n", Dynamic.DynamicDaylightTimeDisabled);
     ok(Result == StaticResult, "Result %lu, GetTimeZoneInformation gave %lu\n", Result, StaticResult);
 
-    /* The key name is terminated and names a Time Zones entry (its TZI is the zone's default, not this year's rule) */
+    /* The key name is terminated and, if there is one, names a Time Zones entry (its TZI is the zone's default, not this year's rule) */
     Size = (DWORD)wcsnlen(Dynamic.TimeZoneKeyName, ARRAYSIZE(Dynamic.TimeZoneKeyName));
     ok(Size < ARRAYSIZE(Dynamic.TimeZoneKeyName), "TimeZoneKeyName is not terminated\n");
     if (Size >= ARRAYSIZE(Dynamic.TimeZoneKeyName))
         return;
-    ok(Dynamic.TimeZoneKeyName[0] != UNICODE_NULL, "No TimeZoneKeyName\n");
+    /* Empty when the zone was set with SetTimeZoneInformation */
     if (Dynamic.TimeZoneKeyName[0])
     {
         StringCchPrintfW(KeyPath, ARRAYSIZE(KeyPath), L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones\\%s",
