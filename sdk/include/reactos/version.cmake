@@ -48,6 +48,7 @@ if((EXISTS "${REACTOS_SOURCE_DIR}/.git") AND (NOT NO_REACTOS_BUILDNO))
         execute_process(
             COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=7 --long
                     --match "[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-[0-9]*"
+                    --exclude "????.??.??-*[!0-9]*"
             WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
             OUTPUT_VARIABLE GIT_DESCRIBE_REVISION
             RESULT_VARIABLE GIT_CALL_RESULT
