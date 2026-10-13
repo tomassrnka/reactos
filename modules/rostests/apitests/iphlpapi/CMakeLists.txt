@@ -8,6 +8,7 @@ list(APPEND SOURCE
     GetOwnerModuleFromUdpEntry.c
     icmp.c
     NotifyIpInterfaceChange.c
+    NotifyRouteChange2.c
     SendARP.c
     testlist.c)
 
