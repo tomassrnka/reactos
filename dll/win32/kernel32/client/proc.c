@@ -2155,6 +2155,211 @@ ProcessIdToSessionId(IN DWORD dwProcessId,
 #define RemoveFromHandle(x,y)  ((x) = (HANDLE)((ULONG_PTR)(x) & ~(y)))
 C_ASSERT(PROCESS_PRIORITY_CLASS_REALTIME == (PROCESS_PRIORITY_CLASS_HIGH + 1));
 
+/* Process and thread attribute lists. The layout matches the one Windows uses
+ * (count, slots, then one entry per attribute pointing at the caller's value). */
+typedef struct _PROC_THREAD_ATTRIBUTE_ENTRY
+{
+    DWORD_PTR Attribute;
+    SIZE_T Size;
+    PVOID Value;
+} PROC_THREAD_ATTRIBUTE_ENTRY, *PPROC_THREAD_ATTRIBUTE_ENTRY;
+
+typedef struct _PROC_THREAD_ATTRIBUTE_LIST
+{
+    DWORD PresentFlags;
+    DWORD AttributeCount;
+    DWORD LastAttribute;
+    DWORD SpareUlong0;
+    PPROC_THREAD_ATTRIBUTE_ENTRY ExtendedFlagsAttribute;
+    PROC_THREAD_ATTRIBUTE_ENTRY Attributes[ANYSIZE_ARRAY];
+} PROC_THREAD_ATTRIBUTE_LIST;
+
+#ifndef EXTENDED_STARTUPINFO_PRESENT
+#define EXTENDED_STARTUPINFO_PRESENT 0x00080000
+#endif
+
+#define PROC_THREAD_ATTRIBUTE_LIST_SIZE(Count) \
+    FIELD_OFFSET(PROC_THREAD_ATTRIBUTE_LIST, Attributes[Count])
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+InitializeProcThreadAttributeList(
+    _Out_writes_bytes_to_opt_(*lpSize, *lpSize) LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _In_ DWORD dwAttributeCount,
+    _Reserved_ DWORD dwFlags,
+    _When_(lpAttributeList == NULL, _Out_) _When_(lpAttributeList != NULL, _Inout_) PSIZE_T lpSize)
+{
+    SIZE_T Needed;
+
+    if (dwFlags != 0 || dwAttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Needed = PROC_THREAD_ATTRIBUTE_LIST_SIZE(dwAttributeCount);
+
+    if (!lpAttributeList || *lpSize < Needed)
+    {
+        *lpSize = Needed;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    lpAttributeList->PresentFlags = 0;
+    lpAttributeList->AttributeCount = dwAttributeCount;
+    lpAttributeList->LastAttribute = 0;
+    lpAttributeList->ExtendedFlagsAttribute = NULL;
+    *lpSize = Needed;
+    return TRUE;
+}
+
+static
+DWORD
+BasepCheckProcThreadAttribute(
+    _In_ DWORD_PTR Attribute,
+    _In_ SIZE_T Size)
+{
+    switch (Attribute)
+    {
+        case PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR:
+            return (Size == sizeof(PROCESSOR_NUMBER)) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
+        default:
+            /* Attributes that cannot be honoured are refused here, not silently
+             * dropped when the process is created. A handle list would need
+             * process creation to duplicate only the listed handles (and
+             * consrv's console handles); without that, inheriting every
+             * inheritable handle would leak the others */
+            return ERROR_NOT_SUPPORTED;
+    }
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+UpdateProcThreadAttribute(
+    _Inout_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+    _In_ DWORD dwFlags,
+    _In_ DWORD_PTR Attribute,
+    _In_reads_bytes_opt_(cbSize) PVOID lpValue,
+    _In_ SIZE_T cbSize,
+    _Out_writes_bytes_opt_(cbSize) PVOID lpPreviousValue,
+    _In_opt_ PSIZE_T lpReturnSize)
+{
+    PPROC_THREAD_ATTRIBUTE_ENTRY Entry;
+    DWORD Error, Bit;
+
+    if (dwFlags != 0 || lpPreviousValue || lpReturnSize)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (lpAttributeList->LastAttribute >= lpAttributeList->AttributeCount)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    Error = BasepCheckProcThreadAttribute(Attribute, cbSize);
+    if (Error != ERROR_SUCCESS)
+    {
+        SetLastError(Error);
+        return FALSE;
+    }
+
+    Bit = 1UL << (Attribute & PROC_THREAD_ATTRIBUTE_NUMBER);
+    if (lpAttributeList->PresentFlags & Bit)
+    {
+        SetLastError(ERROR_OBJECT_NAME_EXISTS);
+        return FALSE;
+    }
+
+    Entry = &lpAttributeList->Attributes[lpAttributeList->LastAttribute];
+    Entry->Attribute = Attribute;
+    Entry->Size = cbSize;
+    Entry->Value = lpValue;
+    lpAttributeList->PresentFlags |= Bit;
+    lpAttributeList->LastAttribute++;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+DeleteProcThreadAttributeList(
+    _Inout_ LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList)
+{
+    /* The list owns no resources: the values stay with the caller */
+    UNREFERENCED_PARAMETER(lpAttributeList);
+}
+
+/* There is one processor group: a valid number names an active processor */
+static
+BOOLEAN
+BasepIsValidIdealProcessor(
+    _In_ const PROCESSOR_NUMBER *IdealProcessor)
+{
+    return IdealProcessor->Group == 0 &&
+           IdealProcessor->Reserved == 0 &&
+           IdealProcessor->Number < BaseStaticServerData->SysInfo.NumberOfProcessors;
+}
+
+static
+NTSTATUS
+BasepReadProcThreadAttributes(
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList)
+{
+    /* UpdateProcThreadAttribute only accepts an ideal processor, which cannot be
+     * applied to the thread of another process, see BasepSetIdealProcessor */
+    return AttributeList->LastAttribute ? STATUS_NOT_SUPPORTED : STATUS_SUCCESS;
+}
+
+/* Reads the attributes CreateRemoteThreadEx supports */
+NTSTATUS
+WINAPI
+BasepReadThreadAttributes(
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _Out_ PPROCESSOR_NUMBER *IdealProcessor)
+{
+    DWORD i;
+
+    *IdealProcessor = NULL;
+
+    for (i = 0; i < AttributeList->LastAttribute; i++)
+    {
+        if (AttributeList->Attributes[i].Attribute != PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR)
+            return STATUS_NOT_SUPPORTED;
+        if (!BasepIsValidIdealProcessor(AttributeList->Attributes[i].Value))
+            return STATUS_INVALID_PARAMETER;
+        *IdealProcessor = AttributeList->Attributes[i].Value;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* Sets the ideal processor of a thread of the current process. The kernel's
+ * ThreadIdealProcessor setter writes the TEB without attaching to the thread's
+ * process, so callers do not use it for threads of other processes. */
+NTSTATUS
+WINAPI
+BasepSetIdealProcessor(
+    _In_ HANDLE ThreadHandle,
+    _In_ const PROCESSOR_NUMBER *IdealProcessor)
+{
+    ULONG_PTR Number = IdealProcessor->Number;
+
+    return NtSetInformationThread(ThreadHandle, ThreadIdealProcessor, &Number, sizeof(Number));
+}
+
 /*
  * @implemented
  */
@@ -2271,6 +2476,28 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     UNICODE_STRING VdmString, VdmUnicodeEnv;
     BOOLEAN IsWowApp;
     PBASE_CHECK_VDM CheckVdmMsg;
+
+    /* Read the attribute list of an extended startup info before anything
+     * is allocated, so that a refused list needs no cleanup */
+    if (dwCreationFlags & EXTENDED_STARTUPINFO_PRESENT)
+    {
+        if (lpStartupInfo->cb < sizeof(STARTUPINFOEXW))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
+        if (((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList)
+        {
+            Status = BasepReadProcThreadAttributes(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList);
+            if (!NT_SUCCESS(Status))
+            {
+                BaseSetLastNTError(Status);
+                return FALSE;
+            }
+        }
+        dwCreationFlags &= ~EXTENDED_STARTUPINFO_PRESENT;
+    }
 
     /* Zero out the initial core variables and handles */
     QuerySection = FALSE;
@@ -4157,6 +4384,7 @@ StartScan:
         Result = FALSE;
         goto Quickie;
     }
+
 
     /* Begin filling out the CSRSS message, first with our IDs and handles */
     CreateProcessMsg->ProcessHandle = ProcessHandle;
