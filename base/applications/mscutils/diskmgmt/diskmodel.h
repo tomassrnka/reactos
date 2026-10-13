@@ -207,6 +207,10 @@ BOOL DmAddDisk(PDM_MODEL Model, PDM_DISK Disk);
 BOOL DmAttachVolume(PDM_MODEL Model, const DM_VOLUME_INFO *Volume);
 VOID DmFinishModel(PDM_MODEL Model, const DM_SYSINFO *Info);
 
+/* ---- layout of the disk map (pure arithmetic, shared by the window and the apitest) ---- */
+double DmBlockWeight(ULONGLONG Bytes);
+VOID DmFitBlockWidths(const ULONGLONG *Lengths, ULONG Count, ULONG BarWidth, ULONG MinWidth, ULONG *Widths);
+
 /* ---- texts ---- */
 VOID DmBlockText(const DM_DISK *Disk, const DM_REGION *Region, PDM_BLOCK_TEXT Text);
 VOID DmLabelText(const DM_DISK *Disk, PDM_LABEL_TEXT Text);

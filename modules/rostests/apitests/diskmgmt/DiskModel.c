@@ -591,9 +591,63 @@ Test_Live(VOID)
     DmFreeModel(Model);
 }
 
+static VOID
+CheckFit(ULONG Count, const ULONGLONG *Lengths, ULONG Bar, ULONG Min, PCSTR What)
+{
+    ULONG Widths[256], i, Sum = 0, Smallest = 0xFFFFFFFF;
+
+    DmFitBlockWidths(Lengths, Count, Bar, Min, Widths);
+    for (i = 0; i < Count; i++)
+    {
+        Sum += Widths[i];
+        if (Widths[i] < Smallest)
+            Smallest = Widths[i];
+    }
+    ok(Sum == Bar, "%s: the widths add up to %lu, expected %lu\n", What, Sum, Bar);
+    ok(Smallest >= Min, "%s: a block is %lu wide, the minimum is %lu\n", What, Smallest, Min);
+}
+
+static VOID
+Test_Fit(VOID)
+{
+    ULONGLONG Lengths[256];
+    ULONG i, Widths[3];
+
+    /* the disk of the lane: 100 MiB, 1 GiB, 1 GiB and 2.89 GiB give 155, 237, 237 and 275 pixels on Windows,
+     * which is the log of the size in proportion; the widths here follow the same rule */
+    Lengths[0] = 100 * MiB; Lengths[1] = 1024 * MiB; Lengths[2] = 1024 * MiB; Lengths[3] = 2955 * MiB;
+    CheckFit(4, Lengths, 905, 24, "four blocks");
+    {
+        ULONG W[4];
+
+        DmFitBlockWidths(Lengths, 4, 905, 24, W);
+        ok(W[0] > 150 && W[0] < 170, "100 MiB block is %lu wide, Windows draws it 155\n", W[0]);
+        ok(W[1] > 230 && W[1] < 245 && W[2] == W[1], "1 GiB blocks are %lu and %lu wide, Windows draws them 237\n", W[1], W[2]);
+        ok(W[3] > 265 && W[3] < 290, "2.89 GiB block is %lu wide, Windows draws it 275\n", W[3]);
+    }
+
+    /* many equal blocks: 128 GPT partitions in 300 pixels */
+    for (i = 0; i < 128; i++)
+        Lengths[i] = 100 * MiB;
+    CheckFit(128, Lengths, 300, 2, "128 equal blocks");
+
+    /* twenty huge blocks and a tiny one: the sum of the minimum raises the total, the excess comes off the wide blocks */
+    for (i = 0; i < 20; i++)
+        Lengths[i] = 100 * 1024 * MiB;
+    Lengths[20] = 1 * MiB;
+    CheckFit(21, Lengths, 751, 24, "twenty huge blocks and a tiny one");
+
+    /* one block, and the blocks of an empty disk */
+    Lengths[0] = 5 * MiB;
+    DmFitBlockWidths(Lengths, 1, 400, 24, Widths);
+    ok(Widths[0] == 400, "a single block is %lu wide, expected 400\n", Widths[0]);
+    DmFitBlockWidths(Lengths, 0, 400, 24, Widths);
+}
+
 START_TEST(DiskModel)
 {
     Test_Format();
+    Test_Fit();
     Test_MbrLayout();
     Test_GptLayout();
     Test_VolumeList();

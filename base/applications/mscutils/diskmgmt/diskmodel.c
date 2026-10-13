@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <windef.h>
 #include <winbase.h>
@@ -705,6 +706,57 @@ DmFinishModel(PDM_MODEL Model, const DM_SYSINFO *Info)
             StringCchPrintfW(Region->Status, ARRAYSIZE(Region->Status), L"Healthy (%s)", Text);
         }
     }
+}
+
+/* ------------------------------------------------------------ map layout */
+
+/* Blocks are drawn with a width that grows with the logarithm of the size, as Disk Management does. */
+double
+DmBlockWeight(ULONGLONG Bytes)
+{
+    ULONGLONG MB = Bytes / DM_MIB;
+
+    if (MB < 3)
+        return 1.0;
+    return log((double)MB);
+}
+
+/* Widths in proportion to the weights, none below MinWidth, adding up to BarWidth when Count * MinWidth fits. */
+VOID
+DmFitBlockWidths(const ULONGLONG *Lengths, ULONG Count, ULONG BarWidth, ULONG MinWidth, ULONG *Widths)
+{
+    double Sum = 0.0;
+    ULONG i, Total = 0;
+
+    for (i = 0; i < Count; i++)
+        Sum += DmBlockWeight(Lengths[i]);
+    for (i = 0; i < Count; i++)
+    {
+        Widths[i] = Sum > 0.0 ? (ULONG)(BarWidth * DmBlockWeight(Lengths[i]) / Sum) : BarWidth;
+        if (Widths[i] < MinWidth)
+            Widths[i] = MinWidth;
+        Total += Widths[i];
+    }
+
+    /* take the excess from the blocks above their minimum, one pixel per block and round */
+    while (Total > BarWidth)
+    {
+        BOOL Changed = FALSE;
+
+        for (i = 0; i < Count && Total > BarWidth; i++)
+        {
+            if (Widths[i] > MinWidth)
+            {
+                Widths[i]--;
+                Total--;
+                Changed = TRUE;
+            }
+        }
+        if (!Changed)
+            break;
+    }
+    if (Total < BarWidth && Count > 0)
+        Widths[Count - 1] += BarWidth - Total;
 }
 
 /* -------------------------------------------------------------------- texts */

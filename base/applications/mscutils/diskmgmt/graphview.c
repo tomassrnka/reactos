@@ -74,16 +74,6 @@ GraphFreeLayout(GRAPH *G)
     G->ItemCount = 0;
 }
 
-static double
-Weight(ULONGLONG Bytes)
-{
-    ULONGLONG MB = Bytes / DM_MIB;
-
-    if (MB < 3)
-        return 1.0;
-    return log((double)MB);
-}
-
 static int
 VisibleHeight(HWND hWnd)
 {
@@ -137,8 +127,8 @@ GraphLayout(HWND hWnd, GRAPH *G)
         PDM_DISK Disk = G->Model->Disks[d];
 
         n += 1 + (int)Disk->RegionCount;
-        if (Disk->Device != DM_DEV_CDROM && Weight(Disk->CapacityMB * DM_MIB) > MaxLn)
-            MaxLn = Weight(Disk->CapacityMB * DM_MIB);
+        if (Disk->Device != DM_DEV_CDROM && DmBlockWeight(Disk->CapacityMB * DM_MIB) > MaxLn)
+            MaxLn = DmBlockWeight(Disk->CapacityMB * DM_MIB);
     }
     G->Items = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n * sizeof(GITEM));
     G->Ext = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, G->Model->DiskCount * sizeof(GEXT));
@@ -152,63 +142,40 @@ GraphLayout(HWND hWnd, GRAPH *G)
     {
         PDM_DISK Disk = G->Model->Disks[d];
         int Top = ROW_TOP + d * ROW_PITCH;
-        double Sum = 0.0;
         int BarWidth, MinWidth, X = REGION_X;
-        int *Widths;
+        ULONGLONG *Lengths;
+        ULONG *Widths;
         GITEM *Item = &G->Items[G->ItemCount++];
 
         Item->Disk = d;
         Item->Region = -1;
         SetRect(&Item->rc, LABEL_X, Top, LABEL_X + LABEL_W, Top + ROW_H);
 
-        for (r = 0; r < (int)Disk->RegionCount; r++)
-            Sum += Weight(Disk->Regions[r].Length);
-        Widths = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (Disk->RegionCount + 1) * sizeof(int));
-        if (Widths == NULL)
+        Lengths = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (Disk->RegionCount + 1) * (sizeof(ULONG) + sizeof(ULONGLONG)));
+        if (Lengths == NULL)
         {
             GraphFreeLayout(G);
             return;
         }
+        Widths = (ULONG *)(Lengths + Disk->RegionCount + 1);
 
         if (Disk->Device == DM_DEV_CDROM)
             BarWidth = max(Avail * 40 / 100, 220);
         else
-            BarWidth = (int)(Avail * Weight(Disk->CapacityMB * DM_MIB) / MaxLn);
+            BarWidth = (int)(Avail * DmBlockWeight(Disk->CapacityMB * DM_MIB) / MaxLn);
         /* many blocks shrink the minimum width so that the bar still fits */
-        MinWidth = Disk->RegionCount ? max(3, min(MIN_REGION_W, Avail / (int)Disk->RegionCount)) : MIN_REGION_W;
+        MinWidth = Disk->RegionCount ? max(1, min(MIN_REGION_W, Avail / (int)Disk->RegionCount)) : MIN_REGION_W;
         BarWidth = max(BarWidth, (int)Disk->RegionCount * MinWidth);
         if (BarWidth > Avail)
             BarWidth = Avail;
 
-        /* widths in proportion to the log of the size, then every block at least MinWidth, and the bar fitted */
-        {
-            int Total = 0;
-
-            for (r = 0; r < (int)Disk->RegionCount; r++)
-            {
-                Widths[r] = Sum > 0 ? (int)(BarWidth * Weight(Disk->Regions[r].Length) / Sum) : BarWidth;
-                if (Widths[r] < MinWidth)
-                    Widths[r] = MinWidth;
-                Total += Widths[r];
-            }
-            if (Total > BarWidth)
-            {
-                int Spare = 0, Excess = Total - BarWidth;
-
-                for (r = 0; r < (int)Disk->RegionCount; r++)
-                    Spare += Widths[r] - MinWidth;
-                for (r = 0; r < (int)Disk->RegionCount && Spare > 0; r++)
-                    Widths[r] -= (int)((long long)(Widths[r] - MinWidth) * (Excess < Spare ? Excess : Spare) / Spare);
-            }
-            else if (Disk->RegionCount > 0)
-            {
-                Widths[Disk->RegionCount - 1] += BarWidth - Total;
-            }
-        }
+        for (r = 0; r < (int)Disk->RegionCount; r++)
+            Lengths[r] = Disk->Regions[r].Length;
+        DmFitBlockWidths(Lengths, Disk->RegionCount, (ULONG)BarWidth, (ULONG)MinWidth, Widths);
 
         for (r = 0; r < (int)Disk->RegionCount; r++)
         {
-            int Width = Widths[r];
+            int Width = (int)Widths[r];
 
             Item = &G->Items[G->ItemCount++];
             Item->Disk = d;
@@ -231,7 +198,7 @@ GraphLayout(HWND hWnd, GRAPH *G)
                 }
             }
         }
-        HeapFree(GetProcessHeap(), 0, Widths);
+        HeapFree(GetProcessHeap(), 0, Lengths);
         if (G->Ext[d].Has)
             InflateRect(&G->Ext[d].Frame, 3, 3);
     }
