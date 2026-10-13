@@ -2973,7 +2973,7 @@ RegEnumValueA(
             /* Do the data conversion */
             RtlUnicodeToMultiByteN(DataStr, DataLength, 0, DataBuffer, DataBufferSize);
             /* NULL-terminate if there is enough room */
-            if ((DataLength > *lpcbData) && (DataStr[*lpcbData - 1] != '\0'))
+            if ((DataLength > *lpcbData) && (*lpcbData > 0) && (DataStr[*lpcbData - 1] != '\0'))
                 DataStr[*lpcbData] = '\0';
         }
 
@@ -3129,12 +3129,15 @@ RegEnumValueW(
                 goto overflow;
             }
             memcpy( data, buf_ptr + info->DataOffset, info->DataLength );
-            if (is_string(info->Type) && info->DataLength <= *count - sizeof(WCHAR))
+            if (is_string(info->Type) &&
+                info->DataLength >= sizeof(WCHAR) &&
+                *count >= sizeof(WCHAR) &&
+                info->DataLength <= *count - sizeof(WCHAR))
             {
                 /* if the type is REG_SZ and data is not 0-terminated
                  * and there is enough space in the buffer NT appends a \0 */
                 WCHAR *ptr = (WCHAR *)(data + info->DataLength);
-                if (ptr > (WCHAR *)data && ptr[-1]) *ptr = 0;
+                if (ptr[-1]) *ptr = 0;
             }
         }
     }
