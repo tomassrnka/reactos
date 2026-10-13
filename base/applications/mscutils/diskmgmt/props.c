@@ -493,6 +493,8 @@ DiskVolumesProc(HWND hDlg, UINT Message, WPARAM wParam, LPARAM lParam)
 
                 if (Region->Kind != DM_KIND_PRIMARY && Region->Kind != DM_KIND_LOGICAL)
                     continue;
+                if (Region->IsDynamic && !Region->HasVolume)
+                    continue;
                 DmBlockText(Disk, Region, &Block);
                 StringCchCopyW(Name, ARRAYSIZE(Name), Block.Line1);
                 LoadStringBuffer(IDS_MB_FMT, Format, ARRAYSIZE(Format));

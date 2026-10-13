@@ -301,8 +301,8 @@ DmFillVolumeInfo(PDM_VOLUME_INFO Info, PCWSTR RootPath, PCWSTR DevicePath)
     {
         Info->HasSpace = TRUE;
         Info->Total = Total.QuadPart;
-        /* the total honours quotas, the free space does not */
-        Info->Free = min(TotalFree.QuadPart, Total.QuadPart);
+        /* both numbers are what the caller may use, so a quota limits them together */
+        Info->Free = min(FreeToCaller.QuadPart, Total.QuadPart);
     }
     Info->HasMedia = Info->HasFsInfo || Info->HasSpace;
 }

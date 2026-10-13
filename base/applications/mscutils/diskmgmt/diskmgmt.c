@@ -742,13 +742,6 @@ OnListNotify(NMHDR *Header)
             ShowProperties();
             break;
 
-        case NM_RCLICK:
-        {
-            DWORD Pos = GetMessagePos();
-
-            ShowContextMenu((short)LOWORD(Pos), (short)HIWORD(Pos));
-            break;
-        }
     }
 }
 

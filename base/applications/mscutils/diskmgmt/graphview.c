@@ -154,6 +154,7 @@ GraphLayout(HWND hWnd, GRAPH *G)
         int Top = ROW_TOP + d * ROW_PITCH;
         double Sum = 0.0;
         int BarWidth, MinWidth, X = REGION_X;
+        int *Widths;
         GITEM *Item = &G->Items[G->ItemCount++];
 
         Item->Disk = d;
@@ -162,6 +163,12 @@ GraphLayout(HWND hWnd, GRAPH *G)
 
         for (r = 0; r < (int)Disk->RegionCount; r++)
             Sum += Weight(Disk->Regions[r].Length);
+        Widths = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (Disk->RegionCount + 1) * sizeof(int));
+        if (Widths == NULL)
+        {
+            GraphFreeLayout(G);
+            return;
+        }
 
         if (Disk->Device == DM_DEV_CDROM)
             BarWidth = max(Avail * 40 / 100, 220);
@@ -173,14 +180,35 @@ GraphLayout(HWND hWnd, GRAPH *G)
         if (BarWidth > Avail)
             BarWidth = Avail;
 
+        /* widths in proportion to the log of the size, then every block at least MinWidth, and the bar fitted */
+        {
+            int Total = 0;
+
+            for (r = 0; r < (int)Disk->RegionCount; r++)
+            {
+                Widths[r] = Sum > 0 ? (int)(BarWidth * Weight(Disk->Regions[r].Length) / Sum) : BarWidth;
+                if (Widths[r] < MinWidth)
+                    Widths[r] = MinWidth;
+                Total += Widths[r];
+            }
+            if (Total > BarWidth)
+            {
+                int Spare = 0, Excess = Total - BarWidth;
+
+                for (r = 0; r < (int)Disk->RegionCount; r++)
+                    Spare += Widths[r] - MinWidth;
+                for (r = 0; r < (int)Disk->RegionCount && Spare > 0; r++)
+                    Widths[r] -= (int)((long long)(Widths[r] - MinWidth) * (Excess < Spare ? Excess : Spare) / Spare);
+            }
+            else if (Disk->RegionCount > 0)
+            {
+                Widths[Disk->RegionCount - 1] += BarWidth - Total;
+            }
+        }
+
         for (r = 0; r < (int)Disk->RegionCount; r++)
         {
-            int Width = Sum > 0 ? (int)(BarWidth * Weight(Disk->Regions[r].Length) / Sum) : BarWidth;
-
-            if (Width < MinWidth)
-                Width = MinWidth;
-            if (r == (int)Disk->RegionCount - 1 && X + Width < REGION_X + BarWidth)
-                Width = REGION_X + BarWidth - X;
+            int Width = Widths[r];
 
             Item = &G->Items[G->ItemCount++];
             Item->Disk = d;
@@ -203,6 +231,7 @@ GraphLayout(HWND hWnd, GRAPH *G)
                 }
             }
         }
+        HeapFree(GetProcessHeap(), 0, Widths);
         if (G->Ext[d].Has)
             InflateRect(&G->Ext[d].Frame, 3, 3);
     }

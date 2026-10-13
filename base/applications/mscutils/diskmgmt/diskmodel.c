@@ -500,7 +500,8 @@ DmBuildDisk(const DM_DISK_INPUT *Input, PDM_DISK *Result)
                     StringCchCopyNW(Region->GptName, ARRAYSIZE(Region->GptName), Gpt->Name, 36);
                     Region->IsEfi = (memcmp(&Gpt->PartitionType, &DmGuidEfi, sizeof(GUID)) == 0);
                     Region->IsRecovery = (memcmp(&Gpt->PartitionType, &DmGuidRecovery, sizeof(GUID)) == 0);
-                    Region->IsDynamic = (memcmp(&Gpt->PartitionType, &DmGuidLdmData, sizeof(GUID)) == 0);
+                    Region->IsDynamic = (memcmp(&Gpt->PartitionType, &DmGuidLdmData, sizeof(GUID)) == 0) ||
+                                        (memcmp(&Gpt->PartitionType, &DmGuidLdmMeta, sizeof(GUID)) == 0);
                     break;
                 }
             }
