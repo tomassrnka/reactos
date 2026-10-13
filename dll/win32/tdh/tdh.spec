@@ -1,34 +1,16 @@
-@ stub TdhAggregatePayloadFilters
-@ stub TdhApplyPayloadFilter
-@ stub TdhCleanupPayloadEventFilterDescriptor
-@ stub TdhCloseDecodingHandle
-@ stub TdhCreatePayloadFilter
-@ stub TdhDeletePayloadFilter
-@ stub TdhEnumerateManifestProviderEvents
-@ stub TdhEnumerateProviderFieldInformation
-@ stub TdhEnumerateProviderFilters
+@ stdcall TdhEnumerateProviderFieldInformation(ptr long ptr ptr)
+@ stdcall -version=0x601+ TdhEnumerateProviderFilters(ptr long ptr ptr ptr ptr)
 @ stdcall TdhEnumerateProviders(ptr ptr)
 @ stub TdhEnumerateRemoteWBEMProviderFieldInformation
 @ stub TdhEnumerateRemoteWBEMProviders
-@ stub TdhFormatProperty
+@ stdcall TdhFormatProperty(ptr ptr long long long long long ptr ptr ptr ptr)
 @ stub TdhGetAllEventsInformation
-@ stub TdhGetDecodingParameter
-@ stub TdhGetEventInformation
-@ stub TdhGetEventMapInformation
-@ stub TdhGetManifestEventInformation
-@ stub TdhGetProperty
+@ stdcall TdhGetEventInformation(ptr long ptr ptr ptr)
+@ stdcall TdhGetEventMapInformation(ptr wstr ptr ptr)
+@ stdcall TdhGetProperty(ptr long ptr long ptr long ptr)
 @ stub TdhGetPropertyOffsetAndSize
-@ stub TdhGetPropertySize
-@ stub TdhGetWppMessage
-@ stub TdhGetWppProperty
+@ stdcall TdhGetPropertySize(ptr long ptr long ptr ptr)
 @ stdcall TdhLoadManifest(wstr)
-@ stdcall TdhLoadManifestFromBinary(wstr)
-@ stub TdhOpenDecodingHandle
-@ stub TdhQueryProviderFieldInformation
+@ stdcall TdhQueryProviderFieldInformation(ptr int64 long ptr ptr)
 @ stub TdhQueryRemoteWBEMProviderFieldInformation
-@ stub TdhSetDecodingParameter
-@ stub TdhUnloadManifest
-@ stub TdhValidatePayloadFilter
-@ stub TdhpFindMatchClassFromWBEM
-@ stub TdhpGetBestTraceEventInfoWBEM
-@ stub TdhpGetEventMapInfoWBEM
+@ stdcall TdhUnloadManifest(wstr)
