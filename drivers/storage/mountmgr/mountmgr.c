@@ -1016,6 +1016,9 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
     /* If our device is a CD-ROM */
     if (RtlPrefixUnicodeString(&DeviceCdRom, &TargetDeviceName, TRUE))
     {
+        /* Not Status: it still holds the result of the storage query, checked below */
+        NTSTATUS LinkStatus;
+
         LinkTarget.Length = 0;
         LinkTarget.MaximumLength = sizeof(LinkTargetBuffer);
         LinkTarget.Buffer = LinkTargetBuffer;
@@ -1035,17 +1038,17 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                                        NULL);
 
             /* Try to open the associated symlink */
-            Status = ZwOpenSymbolicLinkObject(&LinkHandle, SYMBOLIC_LINK_QUERY, &ObjectAttributes);
-            if (!NT_SUCCESS(Status))
+            LinkStatus = ZwOpenSymbolicLinkObject(&LinkHandle, SYMBOLIC_LINK_QUERY, &ObjectAttributes);
+            if (!NT_SUCCESS(LinkStatus))
             {
                 continue;
             }
 
             /* And query its target */
-            Status = ZwQuerySymbolicLinkObject(LinkHandle, &LinkTarget, NULL);
+            LinkStatus = ZwQuerySymbolicLinkObject(LinkHandle, &LinkTarget, NULL);
             ZwClose(LinkHandle);
 
-            if (!NT_SUCCESS(Status))
+            if (!NT_SUCCESS(LinkStatus))
             {
                 continue;
             }
