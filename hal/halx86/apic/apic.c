@@ -237,16 +237,27 @@ FORCEINLINE
 VOID
 ApicLowerIrql(KIRQL Irql)
 {
+    ULONG_PTR EFlags;
+
     __writefsbyte(FIELD_OFFSET(KPCR, Irql), Irql);
 
     /* Is the new Irql lower than set in the TPR? */
-    if (Irql < KeGetPcr()->IRR)
+    if (Irql < __readfsdword(FIELD_OFFSET(KPCR, IRR)))
     {
-        /* Save the new hard IRQL in the IRR field */
-        KeGetPcr()->IRR = Irql;
+        /* A thread moved to another processor in here would leave this one's TPR above its saved hard IRQL for good */
+        EFlags = __readeflags();
+        _disable();
 
-        /* Need to lower it back */
-        ApicWrite(APIC_TPR, IrqlToTpr(Irql));
+        if (Irql < __readfsdword(FIELD_OFFSET(KPCR, IRR)))
+        {
+            /* Save the new hard IRQL in the IRR field */
+            __writefsdword(FIELD_OFFSET(KPCR, IRR), Irql);
+
+            /* Need to lower it back */
+            ApicWrite(APIC_TPR, IrqlToTpr(Irql));
+        }
+
+        __writeeflags(EFlags);
     }
 }
 #else
