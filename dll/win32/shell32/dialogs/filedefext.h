@@ -74,6 +74,8 @@ private:
     BOOL InitFolderCustomizePage(HWND hwndDlg);
     void InitMultifilePage(HWND hwndDlg);
     void InitMultifilePageThread();
+    void EnableMultifileAttributes(HWND hwndDlg);
+    BOOL ApplyMultifileAttributes(HWND hwndDlg);
     void CountFolderAndFiles();
     static INT_PTR CALLBACK GeneralPageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 	static INT_PTR CALLBACK VersionPageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -92,8 +94,10 @@ private:
     DWORD m_cFolders;
     ULARGE_INTEGER m_DirSize;
     ULARGE_INTEGER m_DirSizeOnDisc;
-    enum { WM_UPDATEDIRSTATS = WM_APP };
+    enum { WM_UPDATEDIRSTATS = WM_APP, WM_ENABLEATTRIBS };
     HWND m_hWndDirStatsDlg;
+    BYTE m_MultifileAttrState[3];
+    DWORD m_MultifileAttrFailed;
     void InitDirStats(struct DIRTREESTATS *pStats);
     BOOL WalkDirTree(PCWSTR pszPath, struct DIRTREESTATS *pStats, WIN32_FIND_DATAW *pWFD);
     void UpdateDirStatsResults();
