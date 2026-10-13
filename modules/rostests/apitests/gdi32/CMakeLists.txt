@@ -36,6 +36,7 @@ list(APPEND SOURCE
     GdiConvertPalette.c
     GdiConvertRegion.c
     GdiDeleteLocalDC.c
+    GdiDrawStream.c
     GdiGetCharDimensions.c
     GdiGetLocalBrush.c
     GdiGetLocalDC.c

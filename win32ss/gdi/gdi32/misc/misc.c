@@ -449,6 +449,36 @@ static inline BOOL UXTHEME_SizedBlt (HDC hdcDst, int nXOriginDst, int nYOriginDs
     }
 }
 
+/* Copy of an image that is selected into a DC GdiDrawStream does not own */
+static HBITMAP UXTHEME_CopyImage(HDC hdc, HBITMAP hbm)
+{
+    BITMAP bm;
+    BITMAPINFO bmi;
+    PVOID pvBits;
+    HBITMAP hbmCopy;
+
+    if (!GetObjectW(hbm, sizeof(bm), &bm))
+        return NULL;
+
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = bm.bmWidth;
+    bmi.bmiHeader.biHeight = bm.bmHeight;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    hbmCopy = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
+    if (!hbmCopy)
+        return NULL;
+
+    if (GetDIBits(hdc, hbm, 0, bm.bmHeight, pvBits, &bmi, DIB_RGB_COLORS) != bm.bmHeight)
+    {
+        DeleteObject(hbmCopy);
+        return NULL;
+    }
+    return hbmCopy;
+}
+
 /***********************************************************************
  *      UXTHEME_DrawImageBackground
  *
@@ -459,6 +489,7 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
 {
     HRESULT hr = S_OK;
     HBITMAP bmpSrcResized = NULL;
+    HBITMAP bmpCopy = NULL;
     HGDIOBJ oldSrc;
     HDC hdcSrc, hdcOrigSrc = NULL;
     RECT rcDst;
@@ -477,6 +508,20 @@ static HRESULT UXTHEME_DrawImageBackground(HDC hdc, HBITMAP bmpSrc, RECT *prcSrc
         return hr;
     }
     oldSrc = SelectObject(hdcSrc, bmpSrc);
+    if (!oldSrc)
+    {
+        /* A bitmap is selected into one DC at a time; the caller holds this one */
+        bmpCopy = UXTHEME_CopyImage(hdcSrc, bmpSrc);
+        if (bmpCopy)
+            oldSrc = SelectObject(hdcSrc, bmpCopy);
+        if (!oldSrc)
+        {
+            if (bmpCopy)
+                DeleteObject(bmpCopy);
+            DeleteDC(hdcSrc);
+            return E_FAIL;
+        }
+    }
 
     dstSize.x = rcDst.right-rcDst.left;
     dstSize.y = rcDst.bottom-rcDst.top;
@@ -632,6 +677,7 @@ draw_error:
     DeleteDC(hdcSrc);
     if (bmpSrcResized) DeleteObject(bmpSrcResized);
     if (hdcOrigSrc) DeleteDC(hdcOrigSrc);
+    if (bmpCopy) DeleteObject(bmpCopy);
     *pRect = rcDst;
     return hr;
 }
@@ -690,6 +736,8 @@ GdiDrawStream(HDC dc, ULONG l, PGDI_DRAW_STREAM pDS)
             sm.cyTopHeight = sm.cyBottomHeight = 0;
         }
 
+        /* Threads drawing the same theme image take turns selecting it */
+        EnterCriticalSection(&gcsDrawStream);
         UXTHEME_DrawImageBackground(pDS->hDC,
                                     pDS->hImage,
                                     &pDS->rcSrc,
@@ -699,6 +747,7 @@ GdiDrawStream(HDC dc, ULONG l, PGDI_DRAW_STREAM pDS)
                                     sizingtype,
                                     &sm,
                                     &pDS->rcDest);
+        LeaveCriticalSection(&gcsDrawStream);
     }
     return 0;
 }

@@ -19,6 +19,7 @@ extern PDEVCAPS GdiDevCaps;
 extern BOOL gbLpk;          // Global bool LanguagePack
 extern HANDLE ghSpooler;
 extern RTL_CRITICAL_SECTION semLocal;
+extern CRITICAL_SECTION gcsDrawStream;
 
 typedef INT
 (CALLBACK* EMFPLAYPROC)(
