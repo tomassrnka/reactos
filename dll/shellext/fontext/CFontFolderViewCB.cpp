@@ -28,19 +28,26 @@ BOOL CFontFolderViewCB::FilterEvent(PIDLIST_ABSOLUTE* apidls, LONG lEvent) const
     switch (lEvent)
     {
         case SHCNE_CREATE:
-        case SHCNE_RENAMEITEM:
-        case SHCNE_UPDATEDIR:
-            // Refresh font cache and notify the system about the font change
-            if (g_FontCache)
-                g_FontCache->Read();
-            break;
         case SHCNE_DELETE:
+        case SHCNE_RENAMEITEM:
+        case SHCNE_UPDATEITEM:
+        case SHCNE_UPDATEDIR:
             break;
         default:
             return TRUE; // We don't want this event
     }
 
-    return FALSE;
+    // Our own delete notification carries a font item; the view removes it
+    if (lEvent == SHCNE_DELETE && apidls && apidls[0] && _FontFromIL(ILFindLastID(apidls[0])))
+        return FALSE;
+
+    // File system items (directory watcher, font installation) are not items
+    // of this folder: re-read the fonts and enumerate again
+    if (g_FontCache)
+        g_FontCache->Read();
+    if (m_hwndView)
+        ::PostMessageW(m_hwndView, WM_COMMAND, MAKEWPARAM(FCIDM_SHVIEW_REFRESH, 0), 0);
+    return TRUE;
 }
 
 STDMETHODIMP
@@ -50,11 +57,15 @@ CFontFolderViewCB::MessageSFVCB(UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         case SFVM_QUERYFSNOTIFY: // Registering change notification
         {
-            if (!m_pShellView || !m_pFontExt)
+            if (!m_pShellView || !m_pFontExt || !m_pidlParent)
                 return E_FAIL;
             // Now, we can get the view window
             m_pShellView->GetWindow(&m_hwndView);
             m_pFontExt->SetViewWindow(m_hwndView);
+            // Watch the fonts directory only
+            SHChangeNotifyEntry* pEntry = (SHChangeNotifyEntry*)lParam;
+            pEntry->pidl = m_pidlParent;
+            pEntry->fRecursive = FALSE;
             return S_OK;
         }
         case SFVM_FSNOTIFY: // Change notification

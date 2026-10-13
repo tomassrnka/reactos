@@ -6,6 +6,7 @@ extern void func_AddCommas(void);
 extern void func_AssocCreateElement(void);
 extern void func_Control_RunDLLW(void);
 extern void func_CFSFolder(void);
+extern void func_CFontsFolder(void);
 extern void func_CheckEscapes(void);
 extern void func_CIDLData(void);
 extern void func_CMyComputer(void);
@@ -71,6 +72,7 @@ const struct test winetest_testlist[] =
     { "AssocCreateElement", func_AssocCreateElement },
     { "Control_RunDLLW", func_Control_RunDLLW },
     { "CFSFolder", func_CFSFolder },
+    { "CFontsFolder", func_CFontsFolder },
     { "CheckEscapes", func_CheckEscapes },
     { "CIDLData", func_CIDLData },
     { "CMyComputer", func_CMyComputer },

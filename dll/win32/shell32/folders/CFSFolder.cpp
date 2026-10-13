@@ -12,8 +12,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL (shell);
 
-static HRESULT SHELL32_GetCLSIDForDirectory(LPCWSTR pwszDir, LPCWSTR KeyName, CLSID* pclsidFolder);
-
 static BOOL ItemIsFolder(PCUITEMID_CHILD pidl)
 {
     const BYTE mask = PT_FS | PT_FS_FOLDER_FLAG | PT_FS_FILE_FLAG;
@@ -621,7 +619,7 @@ HRESULT CFSFolder::GetDefaultFSColumnState(UINT iColumn, SHCOLSTATEF &csFlags)
     return S_OK;
 }
 
-static HRESULT SHELL32_GetCLSIDForDirectory(LPCWSTR pwszDir, LPCWSTR KeyName, CLSID* pclsidFolder)
+HRESULT SHELL32_GetCLSIDForDirectory(LPCWSTR pwszDir, LPCWSTR KeyName, CLSID* pclsidFolder)
 {
     WCHAR wszCLSIDValue[CHARS_IN_GUID];
     WCHAR wszDesktopIni[MAX_PATH];
