@@ -17,6 +17,7 @@ list(APPEND SOURCE
     send.c
     WSAAsync.c
     WSAIoctl.c
+    WSALookupService.c
     WSARecv.c
     WSAStartup.c)
 
