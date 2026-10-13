@@ -196,23 +196,32 @@ static BOOL FileExists(PCWSTR Path)
     return GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES;
 }
 
-static ULONG CountDumps(PCWSTR Folder)
+static ULONG CountFiles(PCWSTR Folder, PCWSTR Mask)
 {
     WCHAR Pattern[MAX_PATH];
     WIN32_FIND_DATAW FindData;
     HANDLE hFind;
-    ULONG Count = 0;
+    ULONG Count = 0, Error;
 
-    StringCchPrintfW(Pattern, _countof(Pattern), L"%s\\*.dmp", Folder);
+    StringCchPrintfW(Pattern, _countof(Pattern), L"%s\\%s", Folder, Mask);
     hFind = FindFirstFileW(Pattern, &FindData);
     if (hFind == INVALID_HANDLE_VALUE)
-        return 0;
+    {
+        /* A folder that cannot be listed may still hold files: report it as not empty */
+        Error = GetLastError();
+        return (Error == ERROR_FILE_NOT_FOUND || Error == ERROR_PATH_NOT_FOUND) ? 0 : MAXULONG;
+    }
     do
     {
         Count++;
     } while (FindNextFileW(hFind, &FindData));
     FindClose(hFind);
     return Count;
+}
+
+static ULONG CountDumps(PCWSTR Folder)
+{
+    return CountFiles(Folder, L"*.dmp");
 }
 
 static VOID EmptyFolder(PCWSTR Folder)
@@ -475,9 +484,9 @@ static VOID TestDefaultFolder(VOID)
         skip("LocalDumps has a DumpFolder\n");
         return;
     }
-    if (CountDumps(Folder))
+    if (CountDumps(Folder) || CountFiles(Folder, L"kernel32_apitest.exe.*"))
     {
-        skip("%ls has dumps already\n", Folder);
+        skip("%ls has dumps or reports already\n", Folder);
         return;
     }
 
