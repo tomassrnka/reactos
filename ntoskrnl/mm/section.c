@@ -282,6 +282,25 @@ MiWritePage(PMM_SECTION_SEGMENT Segment,
 }
 
 
+/* Windows creates image sections only for the machines that go with each
+ * header format; an image of another machine fails at creation. Windows 7
+ * still takes IA64 for PE32+ (Windows 10 does not) */
+static
+BOOLEAN
+PeFmtIsMachineForMagic(USHORT Magic, USHORT Machine)
+{
+#if defined(_M_IX86) || defined(_M_AMD64)
+    if (Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        return (Machine == IMAGE_FILE_MACHINE_I386);
+    return (Machine == IMAGE_FILE_MACHINE_AMD64) || (Machine == IMAGE_FILE_MACHINE_IA64);
+#else
+    /* Not measured on other architectures */
+    UNREFERENCED_PARAMETER(Magic);
+    UNREFERENCED_PARAMETER(Machine);
+    return TRUE;
+#endif
+}
+
 /*
  References:
   [1] Microsoft Corporation, "Microsoft Portable Executable and Common Object
@@ -316,6 +335,9 @@ NTSTATUS NTAPI PeFmtCreateSection(IN CONST VOID * FileHeader,
     ULONG nFileSizeOfHeaders = 0;
     ULONG i;
     ULONG AlignedLength;
+    ULONG nSizeOfImage = MAXULONG;
+    ULONGLONG AlignedSizeOfImage;
+    LARGE_INTEGER FileSize;
 
     ASSERT(FileHeader);
     ASSERT(FileHeaderSize > 0);
@@ -478,6 +500,9 @@ l_ReadHeaderFromFile:
             DIE(("Unrecognized optional header, Magic is %X\n", piohOptHeader->Magic));
     }
 
+    if (!PeFmtIsMachineForMagic(piohOptHeader->Magic, pinhNtHeader->FileHeader.Machine))
+        DIE(("Machine %X does not match optional header %X\n", pinhNtHeader->FileHeader.Machine, piohOptHeader->Magic));
+
     if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SectionAlignment) &&
             RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, FileAlignment))
     {
@@ -487,8 +512,15 @@ l_ReadHeaderFromFile:
             if(piohOptHeader->FileAlignment != piohOptHeader->SectionAlignment)
                 DIE(("Sections aren't page-aligned and the file alignment isn't the same\n"));
         }
-        else if(piohOptHeader->SectionAlignment < piohOptHeader->FileAlignment)
-            DIE(("The section alignment is smaller than the file alignment\n"));
+        else
+        {
+            if(piohOptHeader->SectionAlignment < piohOptHeader->FileAlignment)
+                DIE(("The section alignment is smaller than the file alignment\n"));
+
+            /* Windows refuses a file alignment below 512 in a page-aligned image */
+            if(piohOptHeader->FileAlignment < 0x200)
+                DIE(("The file alignment (%u) is below 512\n", piohOptHeader->FileAlignment));
+        }
 
         nSectionAlignment = piohOptHeader->SectionAlignment;
         nFileAlignment = piohOptHeader->FileAlignment;
@@ -514,7 +546,10 @@ l_ReadHeaderFromFile:
             ImageBase = piohOptHeader->ImageBase;
 
         if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfImage))
+        {
             ImageSectionObject->ImageInformation.ImageFileSize = piohOptHeader->SizeOfImage;
+            nSizeOfImage = piohOptHeader->SizeOfImage;
+        }
 
         if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfStackReserve))
             ImageSectionObject->ImageInformation.MaximumStackSize = piohOptHeader->SizeOfStackReserve;
@@ -591,6 +626,7 @@ l_ReadHeaderFromFile:
                 DIE(("SizeOfImage exceeds the address space\n"));
 
             ImageSectionObject->ImageInformation.ImageFileSize = pioh64OptHeader->SizeOfImage;
+            nSizeOfImage = pioh64OptHeader->SizeOfImage;
         }
 
         if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, SizeOfStackReserve))
@@ -823,6 +859,22 @@ l_ReadHeaderFromFile:
             if(!Intsafe_CanAddULong32(pishSectionHeaders[i].PointerToRawData, pishSectionHeaders[i].SizeOfRawData))
                 DIE(("SizeOfRawData[%u] too large\n", i));
 
+            /* Windows refuses a file that does not hold the raw data of the
+             * last section header; it does not check the other sections */
+            if (i == ImageSectionObject->NrSegments - 2)
+            {
+                nStatus = FsRtlGetFileSize((PFILE_OBJECT)File, &FileSize);
+                if (!NT_SUCCESS(nStatus))
+                    DIE(("FsRtlGetFileSize failed with status %08X\n", nStatus));
+
+                nStatus = STATUS_INVALID_IMAGE_FORMAT;
+                if ((ULONGLONG)pishSectionHeaders[i].PointerToRawData + pishSectionHeaders[i].SizeOfRawData >
+                    (ULONGLONG)FileSize.QuadPart)
+                {
+                    DIE(("Raw data of the last section is beyond the end of the file\n"));
+                }
+            }
+
             /* conversion */
             pssSegments[i].Image.FileOffset = pishSectionHeaders[i].PointerToRawData;
             pssSegments[i].RawLength.QuadPart = pishSectionHeaders[i].SizeOfRawData;
@@ -877,6 +929,16 @@ l_ReadHeaderFromFile:
         if (nPrevVirtualEndOfSegment < pssSegments[i].Image.VirtualAddress)
             DIE(("The image is too large\n"));
     }
+
+    /* Windows refuses a SizeOfImage that does not cover every section, and
+     * an image without sections that ends with its headers */
+    if (nSizeOfImage == 0)
+        DIE(("SizeOfImage is null\n"));
+    AlignedSizeOfImage = ((ULONGLONG)nSizeOfImage + nSectionAlignment - 1) & ~((ULONGLONG)nSectionAlignment - 1);
+    if (AlignedSizeOfImage < nPrevVirtualEndOfSegment)
+        DIE(("SizeOfImage %lx does not cover the sections, which end at %Ix\n", nSizeOfImage, nPrevVirtualEndOfSegment));
+    if ((ImageSectionObject->NrSegments == 1) && (AlignedSizeOfImage <= nPrevVirtualEndOfSegment))
+        DIE(("The image has no sections and SizeOfImage %lx ends with the headers\n", nSizeOfImage));
 
     if(nSectionAlignment >= PAGE_SIZE)
         *Flags |= EXEFMT_LOAD_ASSUME_SEGMENTS_PAGE_ALIGNED;
