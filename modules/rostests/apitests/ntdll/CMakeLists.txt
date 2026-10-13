@@ -139,6 +139,7 @@ list(APPEND SOURCE
     RtlQueryTimeZoneInfo.c
     RtlReAllocateHeap.c
     RtlRemovePrivileges.c
+    RtlSRWLockWait.c
     RtlUnhandledExceptionFilter.c
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
