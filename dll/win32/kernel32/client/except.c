@@ -239,10 +239,20 @@ BasepIsGpFaultErrorBoxDisabled(VOID)
            (RtlGetThreadErrorMode() & RTL_SEM_NOGPFAULTERRORBOX);
 }
 
+/* Exit codes of "drwtsn32 -u -ui"; any other code keeps the classic hard error box */
+#define CRASH_REPORTER_CLOSE    0x00C105ED
+#define CRASH_REPORTER_DEBUG    0x00DEB06D
+
 typedef struct _BASEP_CRASH_REPORT
 {
     PEXCEPTION_POINTERS ExceptionInfo;
     ULONG ThreadId;
+    BOOLEAN ShowUi;
+    BOOLEAN OfferDebug;
+    /* Set by the reporter once the report is written, before it shows its dialog */
+    HANDLE ReportedEvent;
+    /* Exit code of the reporter, MAXULONG when it did not finish */
+    ULONG Result;
 } BASEP_CRASH_REPORT, *PBASEP_CRASH_REPORT;
 
 /*
@@ -257,9 +267,11 @@ BasepStartCrashReporter(
 {
     LARGE_INTEGER Timeout;
     WCHAR ReporterPath[MAX_PATH];
-    WCHAR CommandLine[MAX_PATH + 80];
+    WCHAR CommandLine[MAX_PATH + 128];
     STARTUPINFOW StartupInfo;
     PROCESS_INFORMATION ProcessInfo;
+    HANDLE WaitHandles[2];
+    ULONG ExitCode;
     BOOL Started = FALSE;
     BOOLEAN Faulted = FALSE;
     NTSTATUS Status;
@@ -270,11 +282,14 @@ BasepStartCrashReporter(
                                 SharedUserData->NtSystemRoot)) ||
         FAILED(StringCchPrintfW(CommandLine,
                                 ARRAYSIZE(CommandLine),
-                                L"\"%s\" -u -p %lu -t %lu -x %Ix",
+                                L"\"%s\" -u -p %lu -t %lu -x %Ix%s%s -r %Ix",
                                 ReporterPath,
                                 HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess),
                                 Report->ThreadId,
-                                (ULONG_PTR)Report->ExceptionInfo)))
+                                (ULONG_PTR)Report->ExceptionInfo,
+                                Report->ShowUi ? L" -ui" : L"",
+                                Report->OfferDebug ? L" -d" : L"",
+                                (ULONG_PTR)Report->ReportedEvent)))
     {
         return TRUE;
     }
@@ -305,9 +320,18 @@ BasepStartCrashReporter(
         return TRUE;
     }
 
-    /* A full dump of a large process takes a while; never wait forever */
+    /* A full dump of a large process takes a while; never wait forever for it */
     Timeout.QuadPart = -10 * 60 * 10000000LL;
-    Status = NtWaitForSingleObject(ProcessInfo.hProcess, FALSE, &Timeout);
+    WaitHandles[0] = ProcessInfo.hProcess;
+    WaitHandles[1] = Report->ReportedEvent;
+    Status = NtWaitForMultipleObjects(Report->ReportedEvent ? 2 : 1, WaitHandles, WaitAny, FALSE, &Timeout);
+    if (Status == STATUS_WAIT_1)
+    {
+        /* The report is written; the user takes as long as needed to answer the dialog */
+        Status = NtWaitForSingleObject(ProcessInfo.hProcess, FALSE, NULL);
+    }
+    if (Status == STATUS_WAIT_0 && GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode))
+        Report->Result = ExitCode;
     if (Status != STATUS_WAIT_0)
     {
         /* Stop it before the exception data goes away; the threads it suspended stay so */
@@ -353,6 +377,7 @@ BasepStartCrashReporterOnThread(
 {
     PRTL_CRITICAL_SECTION LoaderLock = NtCurrentPeb()->LoaderLock;
     LARGE_INTEGER Timeout;
+    HANDLE WaitHandles[2];
     HANDLE Thread;
     DWORD Stopped = FALSE;
     NTSTATUS Status;
@@ -366,7 +391,11 @@ BasepStartCrashReporterOnThread(
         return TRUE;
 
     Timeout.QuadPart = -11 * 60 * 10000000LL;
-    Status = NtWaitForSingleObject(Thread, FALSE, &Timeout);
+    WaitHandles[0] = Thread;
+    WaitHandles[1] = Report->ReportedEvent;
+    Status = NtWaitForMultipleObjects(Report->ReportedEvent ? 2 : 1, WaitHandles, WaitAny, FALSE, &Timeout);
+    if (Status == STATUS_WAIT_1)
+        Status = NtWaitForSingleObject(Thread, FALSE, NULL);
     if (Status == STATUS_WAIT_0)
         GetExitCodeThread(Thread, &Stopped);
     NtClose(Thread);
@@ -375,21 +404,29 @@ BasepStartCrashReporterOnThread(
 
 /*
  * Let drwtsn32 log the crash of this process and write its LocalDumps
- * report. The collection runs out of process; this thread only waits, so
- * the exception record and context stay valid. Returns FALSE when this
- * thread faulted while reporting or the reporter could not be stopped;
- * then the caller ends the process.
+ * report, then, with ShowUi, ask the user in its "has stopped working"
+ * dialog. The collection runs out of process; this thread only waits, so
+ * the exception record and context stay valid. Result receives the exit
+ * code of the reporter, MAXULONG when it did not run. Returns FALSE when
+ * this thread faulted while reporting or the reporter could not be
+ * stopped; then the caller ends the process.
  */
 static
 BOOLEAN
 BasepReportUnhandledException(
-    _In_ PEXCEPTION_POINTERS ExceptionInfo)
+    _In_ PEXCEPTION_POINTERS ExceptionInfo,
+    _In_ BOOLEAN ShowUi,
+    _In_ BOOLEAN OfferDebug,
+    _Out_opt_ PULONG Result)
 {
     LONG ThreadId = HandleToUlong(NtCurrentTeb()->ClientId.UniqueThread);
     LONG Owner;
     LARGE_INTEGER Delay;
     BASEP_CRASH_REPORT Report;
     BOOLEAN Stopped = TRUE;
+
+    if (Result)
+        *Result = MAXULONG;
 
     /* A CSR server must not start processes */
     if (BaseRunningInServerProcess)
@@ -410,10 +447,26 @@ BasepReportUnhandledException(
     /* The reporter always logs the crash; it writes a dump when LocalDumps asks for one */
     Report.ExceptionInfo = ExceptionInfo;
     Report.ThreadId = ThreadId;
+    Report.ShowUi = ShowUi;
+    Report.OfferDebug = OfferDebug;
+    Report.ReportedEvent = NULL;
+    Report.Result = MAXULONG;
+    /* Without the event the time limit would stay on during the dialog: report only, the caller falls back */
+    if (ShowUi &&
+        !NT_SUCCESS(NtCreateEvent(&Report.ReportedEvent, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE)))
+    {
+        Report.ReportedEvent = NULL;
+        Report.ShowUi = FALSE;
+        Report.OfferDebug = FALSE;
+    }
     if (ExceptionInfo->ExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW)
         Stopped = BasepStartCrashReporterOnThread(&Report);
     else
         Stopped = BasepStartCrashReporter(&Report);
+    if (Report.ReportedEvent)
+        NtClose(Report.ReportedEvent);
+    if (Result)
+        *Result = Report.ShowUi ? Report.Result : MAXULONG;
 
     /* Keep the claim when a reporter may still run: the caller ends the process */
     if (!Stopped)
@@ -424,13 +477,43 @@ BasepReportUnhandledException(
     return TRUE;
 }
 
+/*
+ * For an exception after which the process ends: the reporter's dialog
+ * without Debug, else the hard error box with only OK.
+ */
+static
+VOID
+BasepReportFatalException(
+    _In_ PEXCEPTION_POINTERS ExceptionInfo)
+{
+    PEXCEPTION_RECORD ExceptionRecord = ExceptionInfo->ExceptionRecord;
+    ULONG_PTR ErrorParameters[4];
+    ULONG Result, ErrorResponse;
+
+    if (BasepIsGpFaultErrorBoxDisabled())
+        return;
+    if (!BasepReportUnhandledException(ExceptionInfo, TRUE, FALSE, &Result) ||
+        Result == CRASH_REPORTER_CLOSE ||
+        BaseRunningInServerProcess)
+    {
+        return;
+    }
+
+    ErrorParameters[0] = (ULONG_PTR)ExceptionRecord->ExceptionCode;
+    ErrorParameters[1] = (ULONG_PTR)ExceptionRecord->ExceptionAddress;
+    ErrorParameters[2] = (ExceptionRecord->ExceptionCode == STATUS_IN_PAGE_ERROR) ?
+                         ExceptionRecord->ExceptionInformation[2] : ExceptionRecord->ExceptionInformation[0];
+    ErrorParameters[3] = ExceptionRecord->ExceptionInformation[1];
+    NtRaiseHardError(STATUS_UNHANDLED_EXCEPTION | HARDERROR_OVERRIDE_ERRORMODE,
+                     4, 0, ErrorParameters, OptionOk, &ErrorResponse);
+}
+
 static
 LONG
 BasepFilterFaulted(
     _In_ PEXCEPTION_POINTERS ExceptionInfo)
 {
-    if (!BasepIsGpFaultErrorBoxDisabled())
-        BasepReportUnhandledException(ExceptionInfo);
+    BasepReportFatalException(ExceptionInfo);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -504,6 +587,10 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
     PWCHAR AeDebugPath = NULL;
     WCHAR AeDebugCmdLine[MAX_PATH];
 
+    /* Crash reporter */
+    BOOLEAN ShowUi;
+    ULONG ReporterResult;
+
     /* Debugger process data */
     BOOL Success;
     HRESULT hr;
@@ -520,8 +607,7 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
      */
     if (ExceptionRecord->ExceptionFlags & EXCEPTION_NESTED_CALL)
     {
-        if (!BasepIsGpFaultErrorBoxDisabled())
-            BasepReportUnhandledException(ExceptionInfo);
+        BasepReportFatalException(ExceptionInfo);
         NtTerminateProcess(NtCurrentProcess(), ExceptionRecord->ExceptionCode);
         return EXCEPTION_EXECUTE_HANDLER;
     }
@@ -594,13 +680,6 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
     if (BasepIsGpFaultErrorBoxDisabled())
     {
         /* Do not display the pop-up error box, just transfer control to the exception handler */
-        return EXCEPTION_EXECUTE_HANDLER;
-    }
-
-    /* Write the crash report before anything is shown */
-    if (!BasepReportUnhandledException(ExceptionInfo))
-    {
-        NtTerminateProcess(NtCurrentProcess(), ExceptionRecord->ExceptionCode);
         return EXCEPTION_EXECUTE_HANDLER;
     }
 
@@ -712,25 +791,34 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
         NtClose(KeyHandle);
     }
 
-    // TODO: Start a ReactOS Fault Reporter (unimplemented!)
-    //
-    // For now we are doing the "old way" (aka Win2k), that is also the fallback
-    // case for Windows XP/2003 in case it does not find faultrep.dll to display
-    // the nice "Application Error" dialog box: We use a hard error to communicate
-    // the problem and prompt the user to continue debugging the application or
-    // to terminate it.
-    //
-    // Since Windows XP/2003, we have the ReportFault API available.
-    // See http://www.clausbrod.de/twiki/pub/Blog/DefinePrivatePublic20070616/reportfault.cpp
-    // and https://learn.microsoft.com/en-us/windows/win32/wer/using-wer
-    // and the legacy ReportFault API: https://learn.microsoft.com/en-us/windows/win32/api/errorrep/nf-errorrep-reportfault
-    //
-    // NOTE: Starting Vista+, the fault API is constituted of the WerXXX functions.
-    //
-    // Also see Vostokov's book "Memory Dump Analysis Anthology Collector's Edition, Volume 1"
-    // at: https://books.google.fr/books?id=9w2x6NHljg4C&pg=PA115&lpg=PA115
+    /*
+     * drwtsn32 logs the crash and writes its report, then asks the user in
+     * its "has stopped working" dialog, unless the debugger starts by itself.
+     * The classic hard error box (the Windows 2000 way) stays the fallback
+     * when the reporter cannot run or cannot show its dialog.
+     */
+    ShowUi = !(AeDebugPath && AeDebugAuto);
+    if (!BasepReportUnhandledException(ExceptionInfo,
+                                       ShowUi,
+                                       (AeDebugPath != NULL) && !IsSecondChance,
+                                       &ReporterResult))
+    {
+        NtTerminateProcess(NtCurrentProcess(), ExceptionRecord->ExceptionCode);
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
 
-    if (!(AeDebugPath && AeDebugAuto))
+    if (ShowUi && (ReporterResult == CRASH_REPORTER_CLOSE))
+    {
+        /* Like OK in the hard error box */
+        Status = STATUS_SUCCESS;
+        ErrorResponse = ResponseOk;
+    }
+    else if (ShowUi && (ReporterResult == CRASH_REPORTER_DEBUG) && AeDebugPath && !IsSecondChance)
+    {
+        Status = STATUS_SUCCESS;
+        ErrorResponse = ResponseCancel;
+    }
+    else if (ShowUi)
     {
         /*
          * Either there is no debugger specified, or the debugger should
