@@ -1,6 +1,10 @@
 
 101 10 "load_notifications.dll"
 102 10 "empty_dll.dll"
+103 10 "crtkeydtor.dll"
+104 10 "crtkeydtor_static.exe"
+105 10 "crtkeydtor_tls.dll"
+106 10 "crtkeydtor_tls_static.exe"
 
 NORMAL_FRAMECAPTIONMIN BITMAP "bmp1.bmp"
 NORMAL_FRAMECAPTIONMIN_BMP BITMAP "bmp1.bmp"
