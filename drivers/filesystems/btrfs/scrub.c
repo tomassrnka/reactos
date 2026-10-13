@@ -1523,11 +1523,21 @@ static NTSTATUS scrub_extent(device_extension* Vcb, chunk* c, ULONG type, uint64
 
                 Status = STATUS_SUCCESS;
 
+#ifdef __REACTOS__
+                _SEH2_TRY {
+#else
                 try {
+#endif
                     MmProbeAndLockPages(context.stripes[i].Irp->MdlAddress, KernelMode, IoWriteAccess);
+#ifdef __REACTOS__
+                } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
+                    Status = _SEH2_GetExceptionCode();
+                } _SEH2_END;
+#else
                 } except (EXCEPTION_EXECUTE_HANDLER) {
                     Status = GetExceptionCode();
                 }
+#endif
 
                 if (!NT_SUCCESS(Status)) {
                     ERR("MmProbeAndLockPages threw exception %08lx\n", Status);
@@ -2705,11 +2715,21 @@ static NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, u
 
                     Status = STATUS_SUCCESS;
 
+#ifdef __REACTOS__
+                    _SEH2_TRY {
+#else
                     try {
+#endif
                         MmProbeAndLockPages(context.stripes[i].Irp->MdlAddress, KernelMode, IoWriteAccess);
+#ifdef __REACTOS__
+                    } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
+                        Status = _SEH2_GetExceptionCode();
+                    } _SEH2_END;
+#else
                     } except (EXCEPTION_EXECUTE_HANDLER) {
                         Status = GetExceptionCode();
                     }
+#endif
 
                     if (!NT_SUCCESS(Status)) {
                         ERR("MmProbeAndLockPages threw exception %08lx\n", Status);

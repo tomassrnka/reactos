@@ -1654,11 +1654,21 @@ NTSTATUS read_data(_In_ device_extension* Vcb, _In_ uint64_t addr, _In_ uint32_t
 
         Status = STATUS_SUCCESS;
 
+#ifdef __REACTOS__
+        _SEH2_TRY {
+#else
         try {
+#endif
             MmProbeAndLockPages(master_mdl, KernelMode, IoWriteAccess);
+#ifdef __REACTOS__
+        } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
+            Status = _SEH2_GetExceptionCode();
+        } _SEH2_END;
+#else
         } except (EXCEPTION_EXECUTE_HANDLER) {
             Status = GetExceptionCode();
         }
+#endif
 
         if (!NT_SUCCESS(Status)) {
             ERR("MmProbeAndLockPages threw exception %08lx\n", Status);
