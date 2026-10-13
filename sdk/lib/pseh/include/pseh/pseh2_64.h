@@ -109,7 +109,9 @@ __seh2$$begin_try__:                                                            
     /* A call to a noreturn function right before returns here: keep it out */      \
     __asm__ __volatile__("nop");                                                    \
     {                                                                               \
-        __label__ __seh2$$leave_scope__;
+        __label__ __seh2$$leave_scope__;                                            \
+        /* Keep the handler if the block never ends, as with a noreturn call */     \
+        __asm__ __volatile__ goto("" : : : : __seh2$$end_try__);
 
 #define _SEH2_EXCEPT(...)                                                                       \
 __seh2$$leave_scope__: __MINGW_ATTRIB_UNUSED;                                                   \
