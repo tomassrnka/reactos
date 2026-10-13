@@ -91,8 +91,9 @@ DestroyIconList(HWND hDlgCtrl, PPICK_ICON_CONTEXT pIconContext)
     int index;
 
     count = SendMessageW(hDlgCtrl, LB_GETCOUNT, 0, 0);
-    if (count == LB_ERR)
+    if (count == LB_ERR || !pIconContext->phIcons)
         return;
+    count = min(count, pIconContext->nIcons);
 
     for(index = 0; index < count; index++)
     {
@@ -125,7 +126,7 @@ DoLoadIcons(HWND hwndDlg, PPICK_ICON_CONTEXT pIconContext, LPCWSTR pszFile)
     {
         // Load the icons from the module
         pIconContext->nIcons = ExtractIconExW(szExpandedPath, -1, NULL, NULL, 0);
-        pIconContext->phIcons = new HICON[pIconContext->nIcons];
+        pIconContext->phIcons = new HICON[pIconContext->nIcons]();
 
         if (ExtractIconExW(szExpandedPath, 0, pIconContext->phIcons, NULL, pIconContext->nIcons))
         {
@@ -140,7 +141,7 @@ DoLoadIcons(HWND hwndDlg, PPICK_ICON_CONTEXT pIconContext, LPCWSTR pszFile)
     {
         // .ico file
         pIconContext->nIcons = 1;
-        pIconContext->phIcons = new HICON[1];
+        pIconContext->phIcons = new HICON[1]();
 
         if (ExtractIconExW(szExpandedPath, 0, pIconContext->phIcons, NULL, pIconContext->nIcons))
         {
@@ -327,7 +328,9 @@ INT_PTR CALLBACK PickIconProc(
                 case ODA_DRAWENTIRE:
                 {
                     index = SendMessageW(pIconContext->hDlgCtrl, LB_GETCURSEL, 0, 0);
-                    hIcon = pIconContext->phIcons[lpdis->itemID];
+                    hIcon = NULL;
+                    if (pIconContext->phIcons && lpdis->itemID < (UINT)pIconContext->nIcons)
+                        hIcon = pIconContext->phIcons[lpdis->itemID];
 
                     if (lpdis->itemID == (UINT)index)
                         FillRect(lpdis->hDC, &lpdis->rcItem, (HBRUSH)(COLOR_HIGHLIGHT + 1));
