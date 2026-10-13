@@ -2616,6 +2616,8 @@ static NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, u
         goto end;
     }
 
+    RtlZeroMemory(context.stripes, sizeof(scrub_context_raid56_stripe) * c->chunk_item->num_stripes);
+
     max_read = (uint32_t)min(1048576 / c->chunk_item->stripe_len, stripe_end - stripe_start + 1); // only process 1 MB of data at a time
 
     for (i = 0; i < c->chunk_item->num_stripes; i++) {
@@ -2734,6 +2736,7 @@ static NTSTATUS scrub_chunk_raid56_stripe_run(device_extension* Vcb, chunk* c, u
                     if (!NT_SUCCESS(Status)) {
                         ERR("MmProbeAndLockPages threw exception %08lx\n", Status);
                         IoFreeMdl(context.stripes[i].Irp->MdlAddress);
+                        context.stripes[i].Irp->MdlAddress = NULL;
                         goto end4;
                     }
                 } else
