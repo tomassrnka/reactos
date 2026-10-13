@@ -1,9 +1,11 @@
 
 add_subdirectory(load_notifications)
 add_subdirectory(empty_dll)
+add_subdirectory(crtkeydtor)
 
 include_directories($<TARGET_FILE_DIR:load_notifications>)
 include_directories($<TARGET_FILE_DIR:empty_dll>)
+include_directories($<TARGET_FILE_DIR:crtkeydtor>)
 spec2def(ntdll_apitest.exe ntdll_apitest.spec)
 
 list(APPEND SOURCE_CRT_TESTS
@@ -148,6 +150,7 @@ list(APPEND SOURCE
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c
+    SystemDllTls.c
     SystemInfo.c
     UserModeException.c
     Timer.c
@@ -170,8 +173,14 @@ endif()
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
 
-add_rc_deps(testdata.rc ${CMAKE_CURRENT_BINARY_DIR}/load_notifications/load_notifications.dll)
-add_rc_deps(testdata.rc ${CMAKE_CURRENT_BINARY_DIR}/empty_dll/empty_dll.dll)
+# One call: add_rc_deps replaces the list
+add_rc_deps(testdata.rc
+    ${CMAKE_CURRENT_BINARY_DIR}/load_notifications/load_notifications.dll
+    ${CMAKE_CURRENT_BINARY_DIR}/empty_dll/empty_dll.dll
+    ${CMAKE_CURRENT_BINARY_DIR}/crtkeydtor/crtkeydtor.dll
+    ${CMAKE_CURRENT_BINARY_DIR}/crtkeydtor/crtkeydtor_static.exe
+    ${CMAKE_CURRENT_BINARY_DIR}/crtkeydtor/crtkeydtor_tls.dll
+    ${CMAKE_CURRENT_BINARY_DIR}/crtkeydtor/crtkeydtor_tls_static.exe)
 
 add_executable(ntdll_apitest
     ${SOURCE}
@@ -198,7 +207,7 @@ set_target_properties(ntdll_apitest
 target_link_libraries(ntdll_apitest ntdll_crt_test_lib rtl_test_lib wine uuid ${PSEH_LIB})
 set_module_type(ntdll_apitest win32cui)
 add_importlibs(ntdll_apitest msvcrt advapi32 kernel32 ntdll)
-add_dependencies(ntdll_apitest load_notifications empty_dll)
+add_dependencies(ntdll_apitest load_notifications empty_dll crtkeydtor crtkeydtor_static crtkeydtor_tls crtkeydtor_tls_static)
 
 add_rostests_file(TARGET ntdll_apitest)
 add_rostests_file(TARGET ntdll_apitest SUBDIR testdata)
