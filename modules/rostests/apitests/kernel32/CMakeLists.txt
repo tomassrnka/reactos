@@ -55,6 +55,7 @@ list(APPEND SOURCE
     MultiByteToWideChar.c
     Pipes.c
     PipeSqos.c
+    PowerRequest.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
     QueryCycleTime.c

@@ -4094,12 +4094,23 @@ typedef struct _JOBOBJECT_JOBSET_INFORMATION {
 #define ES_SYSTEM_REQUIRED                0x00000001
 #define ES_DISPLAY_REQUIRED               0x00000002
 #define ES_USER_PRESENT                   0x00000004
+#define ES_AWAYMODE_REQUIRED              0x00000040
 #define ES_CONTINUOUS                     0x80000000
 
 typedef enum _LATENCY_TIME {
   LT_DONT_CARE,
   LT_LOWEST_LATENCY
 } LATENCY_TIME, *PLATENCY_TIME;
+
+typedef enum _POWER_REQUEST_TYPE {
+  PowerRequestDisplayRequired,
+  PowerRequestSystemRequired,
+  PowerRequestAwayModeRequired
+} POWER_REQUEST_TYPE, *PPOWER_REQUEST_TYPE;
+
+#define POWER_REQUEST_CONTEXT_VERSION          0
+#define POWER_REQUEST_CONTEXT_SIMPLE_STRING    0x00000001
+#define POWER_REQUEST_CONTEXT_DETAILED_STRING  0x00000002
 
 typedef enum _SYSTEM_POWER_STATE {
   PowerSystemUnspecified = 0,
