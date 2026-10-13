@@ -44,15 +44,30 @@ if((EXISTS "${REACTOS_SOURCE_DIR}/.git") AND (NOT NO_REACTOS_BUILDNO))
             set(COMMIT_HASH "${GIT_COMMIT_HASH}")
         endif()
 
+        # Only build tags (<YYYY>.<MM>.<DD>-<build>) name a revision; other tags never show up in it
         execute_process(
-            COMMAND "${GIT_EXECUTABLE}" describe --abbrev=7 --long --always
+            COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=7 --long
+                    --match "[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-[0-9]*"
+                    --exclude "????.??.??-*[!0-9]*"
             WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
             OUTPUT_VARIABLE GIT_DESCRIBE_REVISION
             RESULT_VARIABLE GIT_CALL_RESULT
             OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
         )
         if(GIT_CALL_RESULT EQUAL 0)
             set(REVISION "${GIT_DESCRIBE_REVISION}")
+        else()
+            execute_process(
+                COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
+                WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
+                OUTPUT_VARIABLE GIT_SHORT_HASH
+                RESULT_VARIABLE GIT_CALL_RESULT
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            if(GIT_CALL_RESULT EQUAL 0)
+                set(REVISION "g${GIT_SHORT_HASH}")
+            endif()
         endif()
     endif()
 endif()
