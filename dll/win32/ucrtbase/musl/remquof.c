@@ -23,6 +23,8 @@ float __cdecl remquof(float x, float y, int *quo)
 		return (x*y)/(x*y);
 	if (ux.i<<1 == 0)
 		return x;
+	if (ey == 0xff)  /* ReactOS: an infinite divisor leaves x as it is, without 2*x overflowing */
+		return x;
 
 	/* normalize x and y */
 	if (!ex) {

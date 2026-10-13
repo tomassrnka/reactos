@@ -23,6 +23,8 @@ double __cdecl remquo(double x, double y, int *quo)
 		return (x*y)/(x*y);
 	if (ux.i<<1 == 0)
 		return x;
+	if (ey == 0x7ff)  /* ReactOS: an infinite divisor leaves x as it is, without 2*x overflowing */
+		return x;
 
 	/* normalize x and y */
 	if (!ex) {

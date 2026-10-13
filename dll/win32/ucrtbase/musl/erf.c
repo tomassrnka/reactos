@@ -281,5 +281,5 @@ double __cdecl erfc(double x)
 	if (sign)
 		return 2 - DBL_MIN;
 	errno = ERANGE;
-	return fp_barrier(DBL_MIN) * DBL_MIN;
+	return eval_as_double(fp_barrier(DBL_MIN) * DBL_MIN);  /* ReactOS: not left with the x87 range */
 }

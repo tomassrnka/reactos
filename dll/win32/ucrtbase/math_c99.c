@@ -85,11 +85,21 @@ static float round_float(float x)
     return t;
 }
 
+/* The out of range results are an invalid conversion: the flag is raised as well as errno set */
+static void raise_invalid(void)
+{
+    volatile double zero = 0.0, r;
+
+    r = zero / zero;
+    (void)r;
+}
+
 long __cdecl lround(double x)
 {
     double d = round_double(x);
     if (!(d >= -2147483648.0 && d <= 2147483647.0))
     {
+        raise_invalid();
         errno = EDOM;
         return 0;
     }
@@ -101,6 +111,7 @@ long __cdecl lroundf(float x)
     float f = round_float(x);
     if (!(f >= -2147483648.0f && f < 2147483648.0f))
     {
+        raise_invalid();
         errno = EDOM;
         return 0;
     }
@@ -112,6 +123,7 @@ __int64 __cdecl llround(double x)
     double d = round_double(x);
     if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0))
     {
+        raise_invalid();
         errno = EDOM;
         return 0;
     }
@@ -123,6 +135,7 @@ __int64 __cdecl llroundf(float x)
     float f = round_float(x);
     if (!(f >= -9223372036854775808.0f && f < 9223372036854775808.0f))
     {
+        raise_invalid();
         errno = EDOM;
         return 0;
     }
@@ -169,6 +182,7 @@ __int64 __cdecl llrint(double x)
     double d = rint(x);
     if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0))
     {
+        raise_invalid();
         errno = EDOM;
         return 0;
     }
@@ -180,6 +194,7 @@ __int64 __cdecl llrintf(float x)
     float f = rintf(x);
     if (!(f >= -9223372036854775808.0f && f < 9223372036854775808.0f))
     {
+        raise_invalid();
         errno = EDOM;
         return 0;
     }

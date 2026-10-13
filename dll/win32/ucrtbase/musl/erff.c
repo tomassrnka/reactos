@@ -191,5 +191,5 @@ float __cdecl erfcf(float x)
 	if (sign)
 		return 2 - FLT_MIN;
 	errno = ERANGE;
-	return FLT_MIN * FLT_MIN;
+	return eval_as_float(fp_barrierf(FLT_MIN) * FLT_MIN);  /* ReactOS: neither folded nor left with the x87 range */
 }
