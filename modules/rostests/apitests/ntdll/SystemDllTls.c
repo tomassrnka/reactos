@@ -132,15 +132,72 @@ static void TestCoreDlls(PCWSTR SystemDir)
     }
 }
 
-/* On ReactOS a system image may have TLS callbacks only together with thread-local data */
+typedef DWORD (WINAPI *FN_GetFileVersionInfoSizeW)(LPCWSTR, LPDWORD);
+typedef BOOL (WINAPI *FN_GetFileVersionInfoW)(LPCWSTR, DWORD, DWORD, LPVOID);
+typedef BOOL (WINAPI *FN_VerQueryValueW)(LPCVOID, LPCWSTR, LPVOID *, PUINT);
+
+static FN_GetFileVersionInfoSizeW g_pGetFileVersionInfoSizeW;
+static FN_GetFileVersionInfoW g_pGetFileVersionInfoW;
+static FN_VerQueryValueW g_pVerQueryValueW;
+
+/* The CompanyName of the file's version resource; FALSE if it has none */
+static BOOL GetCompanyName(PCWSTR Path, PWSTR Company, SIZE_T cchCompany)
+{
+    DWORD Size, Handle;
+    PVOID Data;
+    WORD *Translation;
+    PWSTR Value;
+    UINT Length;
+    WCHAR Query[64];
+    BOOL Ret = FALSE;
+
+    if (!g_pGetFileVersionInfoSizeW || !g_pGetFileVersionInfoW || !g_pVerQueryValueW)
+        return FALSE;
+    Size = g_pGetFileVersionInfoSizeW(Path, &Handle);
+    if (!Size)
+        return FALSE;
+    Data = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Data)
+        return FALSE;
+    if (g_pGetFileVersionInfoW(Path, 0, Size, Data) &&
+        g_pVerQueryValueW(Data, L"\\VarFileInfo\\Translation", (PVOID *)&Translation, &Length) &&
+        Length >= 2 * sizeof(WORD))
+    {
+        StringCchPrintfW(Query, _countof(Query), L"\\StringFileInfo\\%04x%04x\\CompanyName",
+                         Translation[0], Translation[1]);
+        if (g_pVerQueryValueW(Data, Query, (PVOID *)&Value, &Length) && Length)
+            Ret = SUCCEEDED(StringCchCopyW(Company, cchCompany, Value));
+    }
+    HeapFree(GetProcessHeap(), 0, Data);
+    return Ret;
+}
+
+/* On ReactOS a system image may have TLS callbacks only together with thread-local data.
+   Only images whose CompanyName names the system's vendor (the first word of ntdll.dll's,
+   "ReactOS" also in the Wine-derived modules) are asserted: an empty template cannot be
+   told apart from a small zero-initialised variable in another vendor's image. */
 static void TestAllSystemDlls(PCWSTR SystemDir)
 {
-    WCHAR Path[MAX_PATH];
+    WCHAR Path[MAX_PATH], Vendor[128], Company[128];
     WIN32_FIND_DATAW Find;
     HANDLE hFind;
-    ULONG i, Scanned = 0, CallbacksOnly = 0, Other = 0;
+    HMODULE hVersion;
+    ULONG i, Scanned = 0, CallbacksOnly = 0, Other = 0, Asserted = 0;
     BOOL Reactos = is_reactos();
     TLS_KIND Kind;
+
+    hVersion = LoadLibraryW(L"version.dll");
+    if (hVersion)
+    {
+        g_pGetFileVersionInfoSizeW = (FN_GetFileVersionInfoSizeW)GetProcAddress(hVersion, "GetFileVersionInfoSizeW");
+        g_pGetFileVersionInfoW = (FN_GetFileVersionInfoW)GetProcAddress(hVersion, "GetFileVersionInfoW");
+        g_pVerQueryValueW = (FN_VerQueryValueW)GetProcAddress(hVersion, "VerQueryValueW");
+    }
+    StringCchPrintfW(Path, _countof(Path), L"%s\\ntdll.dll", SystemDir);
+    Vendor[0] = L'\0';
+    if (GetCompanyName(Path, Vendor, _countof(Vendor)))
+        Vendor[wcscspn(Vendor, L" /,")] = L'\0';
+    ok(Vendor[0] != L'\0', "ntdll.dll has no CompanyName\n");
 
     for (i = 0; i < _countof(g_Patterns); i++)
     {
@@ -165,17 +222,25 @@ static void TestAllSystemDlls(PCWSTR SystemDir)
             else if (Kind == TlsCallbacksOnly)
             {
                 CallbacksOnly++;
-                if (Reactos)
+                if (Reactos && Vendor[0] && GetCompanyName(Path, Company, _countof(Company)) &&
+                    wcsstr(Company, Vendor))
+                {
+                    Asserted++;
                     ok(IsTlsAllowed(Find.cFileName), "%ls has TLS callbacks without thread-local data\n", Find.cFileName);
+                }
                 else
-                    trace("%ls has TLS callbacks without thread-local data\n", Find.cFileName);
+                {
+                    trace("%ls has TLS callbacks without thread-local data (not asserted)\n", Find.cFileName);
+                }
             }
         } while (FindNextFileW(hFind, &Find));
         FindClose(hFind);
     }
+    if (hVersion)
+        FreeLibrary(hVersion);
     ok(Scanned > 50, "Only %lu system images found\n", Scanned);
-    trace("%lu system images: %lu with TLS callbacks only, %lu with another TLS directory\n",
-          Scanned, CallbacksOnly, Other);
+    trace("%lu system images: %lu with TLS callbacks only (%lu of the system's vendor), %lu with another TLS directory\n",
+          Scanned, CallbacksOnly, Asserted, Other);
 }
 
 static BOOL ExtractResource(PCWSTR Path, UINT Id)
