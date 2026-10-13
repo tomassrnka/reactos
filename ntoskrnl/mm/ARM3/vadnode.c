@@ -250,7 +250,7 @@ MiInsertVadEx(
     _In_ ULONG_PTR Alignment,
     _In_ ULONG AllocationType)
 {
-    ULONG_PTR StartingAddress, EndingAddress;
+    ULONG_PTR StartingAddress = 0, EndingAddress;
     PEPROCESS CurrentProcess;
     PETHREAD CurrentThread;
     TABLE_SEARCH_RESULT Result;
@@ -276,6 +276,14 @@ MiInsertVadEx(
     {
         /* Make sure HighestAddress is not too large */
         HighestAddress = min(HighestAddress, (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS);
+
+        /* A very restrictive ZeroBits mask must not underflow the search. */
+        if (HighestAddress < (ULONG_PTR)MI_LOWEST_VAD_ADDRESS ||
+            ViewSize - 1 > HighestAddress - (ULONG_PTR)MI_LOWEST_VAD_ADDRESS)
+        {
+            KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
+            return STATUS_NO_MEMORY;
+        }
 
         /* Which way should we search? */
         if ((AllocationType & MEM_TOP_DOWN) || CurrentProcess->VmTopDown)
@@ -886,4 +894,3 @@ MiCheckSecuredVad(IN PMMVAD Vad,
 }
 
 /* EOF */
-

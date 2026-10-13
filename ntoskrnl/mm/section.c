@@ -4239,6 +4239,10 @@ MmMapViewOfSection(
     BOOLEAN MachineMismatch = FALSE;
     BOOLEAN IsAttached = FALSE;
     KAPC_STATE ApcState;
+    ULONG_PTR HighestAddress;
+
+    if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
+        return STATUS_INVALID_PARAMETER_4;
 
     if (MiIsRosSectionObject(SectionObject) == FALSE)
     {
@@ -4309,12 +4313,25 @@ MmMapViewOfSection(
 
         ImageSectionObject->ImageInformation.ImageFileSize = (ULONG)ImageSize;
 
+        if (!ImageSize || ImageSize - 1 > HighestAddress ||
+            HighestAddress - (ImageSize - 1) < (ULONG_PTR)MM_LOWEST_USER_ADDRESS)
+        {
+            Status = STATUS_NO_MEMORY;
+            goto Exit;
+        }
+        if (*BaseAddress &&
+            ImageBase > HighestAddress - (ImageSize - 1))
+        {
+            Status = STATUS_INVALID_PARAMETER_4;
+            goto Exit;
+        }
+
         /* Check for an illegal base address */
-        if (((ImageBase + ImageSize) > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS) ||
+        if ((ImageBase > HighestAddress - (ImageSize - 1)) ||
                 ((ImageBase + ImageSize) < ImageSize))
         {
             ASSERT(*BaseAddress == NULL);
-            ImageBase = ALIGN_DOWN_BY((ULONG_PTR)MM_HIGHEST_VAD_ADDRESS - ImageSize,
+            ImageBase = ALIGN_DOWN_BY(HighestAddress + 1 - ImageSize,
                                       MM_VIRTMEM_GRANULARITY);
             NotAtBase = TRUE;
         }
@@ -4335,7 +4352,11 @@ MmMapViewOfSection(
                 goto Exit;
             }
             /* Otherwise find a gap to map the image. */
-            ImageBase = (ULONG_PTR)MmFindGap(AddressSpace, PAGE_ROUND_UP(ImageSize), MM_VIRTMEM_GRANULARITY, FALSE);
+            ImageBase = (ULONG_PTR)MmFindGapInRange(AddressSpace,
+                                                  PAGE_ROUND_UP(ImageSize),
+                                                  MM_VIRTMEM_GRANULARITY,
+                                                  FALSE,
+                                                  HighestAddress);
             if (ImageBase == 0)
             {
                 Status = STATUS_CONFLICTING_ADDRESSES;
@@ -4475,6 +4496,31 @@ MmMapViewOfSection(
         }
 
         *ViewSize = PAGE_ROUND_UP(*ViewSize);
+
+        if (ZeroBits)
+        {
+            if (*BaseAddress)
+            {
+                if ((ULONG_PTR)*BaseAddress > HighestAddress ||
+                    *ViewSize - 1 > HighestAddress - (ULONG_PTR)*BaseAddress)
+                {
+                    Status = STATUS_INVALID_PARAMETER_4;
+                    goto Exit;
+                }
+            }
+            else
+            {
+                *BaseAddress = MmFindGapInRange(AddressSpace, *ViewSize,
+                                               MM_VIRTMEM_GRANULARITY,
+                                               BooleanFlagOn(AllocationType, MEM_TOP_DOWN),
+                                               HighestAddress);
+                if (!*BaseAddress)
+                {
+                    Status = STATUS_NO_MEMORY;
+                    goto Exit;
+                }
+            }
+        }
 
         MmLockSectionSegment(Segment);
         Status = MmMapViewOfSegment(AddressSpace,
