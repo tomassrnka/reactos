@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    ConvertStringSidToSid.c
     CreateService.c
     DuplicateTokenEx.c
     EncryptFile.c

@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_DuplicateTokenEx(void);
 extern void func_EncryptFile(void);
@@ -34,6 +35,7 @@ extern void func_ServiceNetwork(void);
 
 const struct test winetest_testlist[] =
 {
+    { "ConvertStringSidToSid", func_ConvertStringSidToSid },
     { "CreateService", func_CreateService },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
     { "EncryptFile", func_EncryptFile },
