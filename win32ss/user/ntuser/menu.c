@@ -9,6 +9,13 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserMenu);
 
+/* Callers' MENUITEMINFOW structures are copied into ROSMENUITEMINFO */
+C_ASSERT(FIELD_OFFSET(ROSMENUITEMINFO, dwItemData) == FIELD_OFFSET(MENUITEMINFOW, dwItemData));
+C_ASSERT(RTL_FIELD_SIZE(ROSMENUITEMINFO, dwItemData) == RTL_FIELD_SIZE(MENUITEMINFOW, dwItemData));
+C_ASSERT(FIELD_OFFSET(ROSMENUITEMINFO, dwTypeData) == FIELD_OFFSET(MENUITEMINFOW, dwTypeData));
+C_ASSERT(FIELD_OFFSET(ROSMENUITEMINFO, hbmpItem) == FIELD_OFFSET(MENUITEMINFOW, hbmpItem));
+C_ASSERT(FIELD_OFFSET(ROSMENUITEMINFO, Rect) >= sizeof(MENUITEMINFOW));
+
 /* INTERNAL ******************************************************************/
 
 BOOL FASTCALL UITOOLS95_DrawFrameMenu(HDC dc, LPRECT r, UINT uFlags); /* draw.c */
@@ -2278,7 +2285,7 @@ static void FASTCALL MENU_DrawMenuItem(PWND Wnd, PMENU Menu, PWND WndOwner, HDC 
         dis.CtlType   = ODT_MENU;
         dis.CtlID     = 0;
         dis.itemID    = lpitem->wID;
-        dis.itemData  = (DWORD)lpitem->dwItemData;
+        dis.itemData  = lpitem->dwItemData;
         dis.itemState = 0;
         if (lpitem->fState & MF_CHECKED)  dis.itemState |= ODS_CHECKED;
         if (lpitem->fState & MF_DEFAULT)  dis.itemState |= ODS_DEFAULT;

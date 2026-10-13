@@ -108,7 +108,7 @@ typedef struct tagROSMENUITEMINFO
     HMENU hSubMenu;
     HBITMAP hbmpChecked;
     HBITMAP hbmpUnchecked;
-    DWORD dwItemData;
+    ULONG_PTR dwItemData;
     LPWSTR dwTypeData;
     UINT cch;
     HBITMAP hbmpItem;
