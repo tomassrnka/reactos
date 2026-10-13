@@ -403,6 +403,9 @@ DmBuildDisk(const DM_DISK_INPUT *Input, PDM_DISK *Result)
     if (UsableEnd > Disk->Length)
         UsableEnd = Disk->Length - (Disk->Length % DM_MIB);
 
+    Disk->HasExtended = HaveExt;
+    Disk->ExtOffset = ExtOffset;
+    Disk->ExtLength = ExtLength;
     Disk->ReservedMB = Reserved / DM_MIB;
     Disk->CapacityMB = (UsableEnd > Reserved ? UsableEnd - Reserved : 0) / DM_MIB;
     Disk->UnallocatedMB = (UsableEnd > Reserved + Used ? UsableEnd - Reserved - Used : 0) / DM_MIB;
@@ -953,6 +956,8 @@ DmDumpModel(const DM_MODEL *Model, HANDLE File)
               Disk->Dynamic ? L"Dynamic" : Disk->Style == DM_STYLE_RAW ? L"Unknown" : L"Basic",
               Disk->Length, Disk->BytesPerSector, Disk->CapacityMB, Disk->UnallocatedMB, Disk->ReservedMB,
               Disk->StatusText, Disk->BusText, Disk->DeviceName, Disk->ScsiPath, Disk->ScsiTarget, Disk->ScsiLun);
+        if (Disk->HasExtended)
+            DmPut(File, L"  EXTENDED offset=%I64u length=%I64u\r\n", Disk->ExtOffset, Disk->ExtLength);
         DmPut(File, L"  LABEL \"%s\" | \"%s\" | \"%s\" | \"%s\"\r\n", Label.Line1, Label.Line2, Label.Line3, Label.Line4);
         for (r = 0; r < Disk->RegionCount; r++)
         {

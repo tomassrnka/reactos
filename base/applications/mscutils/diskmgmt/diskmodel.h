@@ -94,6 +94,10 @@ typedef struct _DM_DISK
     WCHAR MediaKind[16];        /* "CD-ROM" or "DVD" for optical drives */
     WCHAR DriveLetter[4];       /* first drive letter of a volume on the disk, for the label box */
 
+    BOOL HasExtended;
+    ULONGLONG ExtOffset;        /* the extended partition, which has no block of its own */
+    ULONGLONG ExtLength;
+
     ULONG RegionCount;
     PDM_REGION Regions;         /* in disk order, hidden partitions left out */
 } DM_DISK, *PDM_DISK;

@@ -983,8 +983,19 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCm
         return 1;
 
     LoadStringBuffer(IDS_APPTITLE, Title, ARRAYSIZE(Title));
-    g_hMain = CreateWindowExW(0, MAIN_CLASS, Title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 900, 620, NULL, NULL, hInstance, NULL);
+    {
+        RECT Work;
+        int Width = 900, Height = 620;
+
+        if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &Work, 0))
+            SetRect(&Work, 0, 0, 1024, 768);
+        Width = min(Width, Work.right - Work.left - 24);
+        Height = min(Height, Work.bottom - Work.top - 24);
+        g_hMain = CreateWindowExW(0, MAIN_CLASS, Title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                                  Work.left + (Work.right - Work.left - Width) / 2,
+                                  Work.top + (Work.bottom - Work.top - Height) / 2,
+                                  Width, Height, NULL, NULL, hInstance, NULL);
+    }
     if (g_hMain == NULL)
         return 1;
 
