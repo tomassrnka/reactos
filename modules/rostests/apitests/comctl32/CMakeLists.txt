@@ -4,6 +4,7 @@ list(APPEND SOURCE
     button.c
     imagelist.c
     propsheet.c
+    propsheet_title.c
     testlist.c
     toolbar.c
     tooltip.c)
