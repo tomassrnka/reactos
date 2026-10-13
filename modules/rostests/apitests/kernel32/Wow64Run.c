@@ -120,6 +120,11 @@ static VOID RunReviewChild(const WCHAR *Image, const WCHAR *Arguments)
     DWORD Wait, ExitCode = 0;
     BOOL Result;
 
+    if (GetFileAttributesW(Image) == INVALID_FILE_ATTRIBUTES)
+    {
+        skip("Install the %ls fixture to run this test\n", Image);
+        return;
+    }
     _snwprintf(Command, RTL_NUMBER_OF(Command), L"\"%ls\" %ls", Image, Arguments);
     Result = CreateProcessW(Image, Command, NULL, NULL, FALSE, 0,
                             NULL, NULL, &Startup, &Process);
@@ -162,6 +167,16 @@ START_TEST(Wow64ReviewFixes)
 
     /* The PE32 image and its static import live outside every system search
      * directory. The parent current directory is deliberately unchanged. */
+    wcscpy(Temp, Source);
+    wcscat(Temp, L"wow64_localhello.exe");
+    wcscpy(Dll, Source);
+    wcscat(Dll, L"wow64_local.dll");
+    if (GetFileAttributesW(Temp) == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesW(Dll) == INVALID_FILE_ATTRIBUTES)
+    {
+        skip("Install the i386 wow64_localhello.exe and wow64_local.dll fixtures\n");
+        return;
+    }
     GetTempPathW(RTL_NUMBER_OF(Temp), Temp);
     _snwprintf(Local, RTL_NUMBER_OF(Local), L"%lswow64-local-%lu", Temp, GetCurrentProcessId());
     ok(CreateDirectoryW(Local, NULL), "CreateDirectory failed: %lu\n", GetLastError());
