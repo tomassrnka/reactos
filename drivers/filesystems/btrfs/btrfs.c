@@ -559,21 +559,14 @@ end:
 
 // Commits the running transaction for FlushFileBuffers. The trees are freed
 // only after a commit, so a flush with nothing to write keeps them cached.
-// On a volume being removed, a volume handle gets success only if nothing is
-// left to commit and no commit failed.
-static NTSTATUS commit_for_flush(device_extension* Vcb, PIRP Irp, bool volume_handle) {
+static NTSTATUS commit_for_flush(device_extension* Vcb, PIRP Irp) {
     NTSTATUS Status = STATUS_SUCCESS;
 
     ExAcquireResourceExclusiveLite(&Vcb->tree_lock, true);
 
-    if (Vcb->removing) {
-        if (!volume_handle)
-            Status = STATUS_VOLUME_DISMOUNTED;
-        else if (!NT_SUCCESS(Vcb->commit_error))
-            Status = Vcb->commit_error;
-        else if (Vcb->need_write)
-            Status = STATUS_VOLUME_DISMOUNTED;
-    } else if (Vcb->readonly)
+    if (Vcb->removing) // nothing written now can reach the disk
+        Status = NT_SUCCESS(Vcb->commit_error) ? STATUS_VOLUME_DISMOUNTED : Vcb->commit_error;
+    else if (Vcb->readonly)
         Status = Vcb->commit_error; // success unless changes were lost
     else if (Vcb->need_write) {
         Status = do_write(Vcb, Irp);
@@ -686,7 +679,7 @@ static NTSTATUS __stdcall drv_flush_buffers(_In_ PDEVICE_OBJECT DeviceObject, _I
         Status = Vcb->removing ? STATUS_SUCCESS : flush_all_caches(Vcb);
 
         if (NT_SUCCESS(Status))
-            Status = commit_for_flush(Vcb, Irp, true);
+            Status = commit_for_flush(Vcb, Irp);
 
         goto end;
     }
@@ -715,7 +708,7 @@ static NTSTATUS __stdcall drv_flush_buffers(_In_ PDEVICE_OBJECT DeviceObject, _I
     // it are committed; without this, new data is lost by a power cut until
     // the next periodic commit.
     if (NT_SUCCESS(Status))
-        Status = commit_for_flush(Vcb, Irp, false);
+        Status = commit_for_flush(Vcb, Irp);
 
 end:
     Irp->IoStatus.Status = Status;
