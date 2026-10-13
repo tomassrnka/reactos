@@ -567,8 +567,9 @@ CreateLogicalPartition(
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
-    /* Only the partition created here gets the focus */
+    /* Only the partition created here and its volume get the focus */
     CurrentPartition = NULL;
+    CurrentVolume = NULL;
 
     for (ListEntry = CurrentDisk->LogicalPartListHead.Flink;
          ListEntry != &CurrentDisk->LogicalPartListHead;
@@ -838,8 +839,9 @@ CreatePrimaryMbrPartition(
 
     DPRINT1("SectorCount: %I64u\n", ullSectorCount);
 
-    /* Only the partition created here gets the focus */
+    /* Only the partition created here and its volume get the focus */
     CurrentPartition = NULL;
+    CurrentVolume = NULL;
 
     for (ListEntry = CurrentDisk->PrimaryPartListHead.Flink;
          ListEntry != &CurrentDisk->PrimaryPartListHead;
@@ -966,6 +968,9 @@ CreatePrimaryGptPartition(
 #ifdef DUMP_PARTITION_LIST
     DumpPartitionList(CurrentDisk);
 #endif
+
+    /* Only the partition created here and its volume get the focus */
+    CurrentVolume = NULL;
 
     PartEntry = InsertGptPartition(CurrentDisk,
                                    ullSectorCount,
