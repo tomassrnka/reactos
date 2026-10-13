@@ -27,6 +27,7 @@ list(APPEND SOURCE
     timewait.c
     WSAAsync.c
     WSAIoctl.c
+    WSALookupService.c
     WSARecv.c
     WSARecvFrom.c
     WSAStartup.c)
