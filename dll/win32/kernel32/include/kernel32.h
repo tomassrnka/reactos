@@ -192,6 +192,18 @@ BaseFreeThreadStack(
     _In_ HANDLE hProcess,
     _In_ PINITIAL_TEB InitialTeb);
 
+NTSTATUS
+WINAPI
+BasepReadThreadAttributes(
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _Out_ PPROCESSOR_NUMBER *IdealProcessor);
+
+NTSTATUS
+WINAPI
+BasepSetIdealProcessor(
+    _In_ HANDLE ThreadHandle,
+    _In_ const PROCESSOR_NUMBER *IdealProcessor);
+
 VOID
 WINAPI
 BaseInitializeContext(IN PCONTEXT Context,

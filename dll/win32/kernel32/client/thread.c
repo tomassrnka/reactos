@@ -207,17 +207,34 @@ CreateRemoteThreadEx(
     ULONG_PTR Cookie;
     ULONG ReturnLength;
     SIZE_T ReturnSize;
+    PPROCESSOR_NUMBER IdealProcessor;
 
     DPRINT("CreateRemoteThreadEx: hProcess: %p dwStackSize: %Iu lpStartAddress"
            ": %p lpParameter: %p, dwCreationFlags: %lx\n", hProcess,
            dwStackSize, lpStartAddress, lpParameter, dwCreationFlags);
 
-    /* InitializeProcThreadAttributeList is not implemented, so no caller
-     * can hold a list this function could read */
+    IdealProcessor = NULL;
     if (lpAttributeList)
     {
-        SetLastError(ERROR_NOT_SUPPORTED);
-        return NULL;
+        Status = BasepReadThreadAttributes(lpAttributeList, &IdealProcessor);
+        if (NT_SUCCESS(Status) && IdealProcessor)
+        {
+            PROCESS_BASIC_INFORMATION ProcessInfo;
+
+            /* See BasepSetIdealProcessor */
+            Status = NtQueryInformationProcess(hProcess, ProcessBasicInformation,
+                                               &ProcessInfo, sizeof(ProcessInfo), NULL);
+            if (NT_SUCCESS(Status) &&
+                ProcessInfo.UniqueProcessId != (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess)
+            {
+                Status = STATUS_NOT_SUPPORTED;
+            }
+        }
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            return NULL;
+        }
     }
 
     /* Clear the Context */
@@ -266,6 +283,13 @@ CreateRemoteThreadEx(
         BaseFreeThreadStack(hProcess, &InitialTeb);
         BaseSetLastNTError(Status);
         return NULL;
+    }
+
+    if (IdealProcessor)
+    {
+        Status = BasepSetIdealProcessor(hThread, IdealProcessor);
+        if (!NT_SUCCESS(Status))
+            goto Quit;
     }
 
     /* Are we in the same process? */
