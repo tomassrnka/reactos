@@ -8,7 +8,6 @@ BEGIN
     LTEXT "Καλώς ήλθατε στον Οδηγό Προσθήκης Υλικού", IDC_FINISHTITLE, 114, 8, 203, 24
     LTEXT "Αυτός ο οδηγός σας βοηθά να:", -1, 114, 40, 182, 8
     LTEXT "1) Εγκαταστήσετε λογισμικό που θα υποστηρίξει το υλικό που προσθέτετε στον υπολογιστή σας.", -1, 121, 56, 184, 16
-    LTEXT "2) Αντιμετωπίσετε προβλήματα που ενδέχδεται να έχετε με το υλικό σας.", -1, 121, 78, 185, 16
     ICON IDI_WARNINGICON, IDC_WARNINGICON, 124, 109, 20, 20
     LTEXT "Αν το υλικό σας ήρθε με CD εγκατάστασης, προτείνεται να πατήσετε 'Άκυρο' για να κλείσετε αυτόν τον οδηγό και να χρησιμοποιήσετε το CD του κατασκευαστή για να εγκαταστήσετε αυτό το υλικό.", 503, 150, 106, 155, 50
     LTEXT "Για να συνεχίσετε, πατήστε 'Επόμενο'.", -1, 114, 166, 193, 8
@@ -144,4 +143,11 @@ BEGIN
     IDS_ADDNEWDEVICE "Προσθήκη μιας νέας συσκευής"
     IDS_SELECTWAYTITLE "Ο οδηγός μπορεί να σας βοηθήσει να εγκαταστήσετε άλλες συσκευές"
     IDS_HDTYPESTITLE "Από την παρακάτω λίστα, επιλέξτε τον τύπο του υλικού που θα εγκαταστήσετε"
+    IDS_NOTFOUNDTITLE "The wizard did not find any new hardware on your computer"
+    IDS_NOTFOUNDTEXT "If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_FOUNDTITLE "The wizard found new hardware on your computer"
+    IDS_FOUNDTEXT "The wizard found the following new hardware. ReactOS installs it the same way as hardware that is plugged in."
+    IDS_SEARCHFAILEDTITLE "The wizard could not search for new hardware"
+    IDS_SEARCHFAILEDTEXT "The list of devices could not be scanned. If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_HWTYPESNOTAVAIL "Installing hardware selected from this list is not available yet. Click Back, or click Cancel to close this wizard."
 END

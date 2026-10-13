@@ -10,7 +10,6 @@ BEGIN
     LTEXT "Donanım Ekleme Sihirbazı'na Hoşgeldiniz", IDC_FINISHTITLE, 114, 8, 203, 24
     LTEXT "Bu sihirbaz, size donanım eklemek için şu yolları sunar:", -1, 114, 40, 182, 8
     LTEXT "1. Bilgisayarınıza eklediğiniz donanımı desteklemek için aygıt yazılım kurmak.", -1, 121, 56, 184, 16
-    LTEXT "2. Aygıt yazılımızının sorunlarınızı çözmek.", -1, 121, 78, 185, 16
     ICON IDI_WARNINGICON, IDC_WARNINGICON, 124, 109, 20, 20
     LTEXT "Eğer donanımınız bir kurulum CD'siyle geldiyse bu sihirbazı kapatmak için ""İptal""e tıklamanız ve bu donanımı kurmak için üreticinin CD'sini kullanmanız önerilir.", 503, 150, 106, 155, 50
     LTEXT "Devam etmek için İleri'ye tıklayınız.", -1, 114, 166, 193, 8
@@ -146,4 +145,11 @@ BEGIN
     IDS_ADDNEWDEVICE "Yeni Bir Donanım Aygıtı Ekle"
     IDS_SELECTWAYTITLE "Bu sihirbaz başka donanımları kurmanıza yardımcı olabilir."
     IDS_HDTYPESTITLE "Aşağıdaki listeden kuruyor olduğunuz donanımın türünü seçiniz."
+    IDS_NOTFOUNDTITLE "The wizard did not find any new hardware on your computer"
+    IDS_NOTFOUNDTEXT "If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_FOUNDTITLE "The wizard found new hardware on your computer"
+    IDS_FOUNDTEXT "The wizard found the following new hardware. ReactOS installs it the same way as hardware that is plugged in."
+    IDS_SEARCHFAILEDTITLE "The wizard could not search for new hardware"
+    IDS_SEARCHFAILEDTEXT "The list of devices could not be scanned. If you know the specific hardware model you want to install, click Next to select it from a list."
+    IDS_HWTYPESNOTAVAIL "Installing hardware selected from this list is not available yet. Click Back, or click Cancel to close this wizard."
 END
