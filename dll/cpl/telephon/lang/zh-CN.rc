@@ -6,4 +6,5 @@ STRINGTABLE
 BEGIN
     IDS_CPLSYSTEMNAME "电话和调制解调器选项"
     IDS_CPLSYSTEMDESCRIPTION "配置您的电话拨号规则和调制解调器设置。"
+    IDS_CPLNOTAVAILABLE "Phone and Modem Options cannot be opened. Telephony (TAPI) configuration, dialing rules and modem settings are not implemented yet."
 END

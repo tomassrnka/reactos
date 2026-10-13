@@ -10,21 +10,22 @@
 
 #define WIN32_NO_STATUS
 #include <stdarg.h>
+#include <stdlib.h>
 #include <windef.h>
 #include <winbase.h>
+#include <winuser.h>
 #include <cpl.h>
 
 #include "resource.h"
 
-typedef LONG (CALLBACK* LPINTERNALCONFIG)(HWND, UINT, LPARAM, LPARAM);
+static HINSTANCE hApplet;
 
 /* Control Panel Callback */
 LONG CALLBACK
 CPlApplet(HWND hwndCPl, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
 {
-    LPINTERNALCONFIG lpInternalConfig;
-    HINSTANCE hTapi32;
     CPLINFO *CPlInfo;
+    WCHAR szTitle[128], szText[512];
 
     switch (uMsg)
     {
@@ -44,19 +45,14 @@ CPlApplet(HWND hwndCPl, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
 
         case CPL_DBLCLK:
         {
-            hTapi32 = LoadLibraryW(L"tapi32.dll");
-            if (!hTapi32) return FALSE;
-
-            lpInternalConfig = (LPINTERNALCONFIG) GetProcAddress(hTapi32, "internalConfig");
-            if (!lpInternalConfig)
+            /* The dialog lives in tapi32's internalConfig, which is still a stub */
+            if (!LoadStringW(hApplet, IDS_CPLSYSTEMNAME, szTitle, _countof(szTitle)) ||
+                !LoadStringW(hApplet, IDS_CPLNOTAVAILABLE, szText, _countof(szText)))
             {
-                FreeLibrary(hTapi32);
-                return FALSE;
+                return 1;
             }
-
-            lpInternalConfig(hwndCPl, 0, 0, 0);
-            FreeLibrary(hTapi32);
-            return TRUE;
+            MessageBoxW(hwndCPl, szText, szTitle, MB_OK | MB_ICONINFORMATION);
+            return 0;
         }
     }
 
@@ -66,5 +62,7 @@ CPlApplet(HWND hwndCPl, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
 BOOL WINAPI
 DllMain(HINSTANCE hinstDLL, DWORD dwReason, LPVOID lpvReserved)
 {
+    if (dwReason == DLL_PROCESS_ATTACH)
+        hApplet = hinstDLL;
     return TRUE;
 }

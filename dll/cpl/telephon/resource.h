@@ -6,3 +6,4 @@
 /* Strings */
 #define IDS_CPLSYSTEMNAME        1001
 #define IDS_CPLSYSTEMDESCRIPTION 2001
+#define IDS_CPLNOTAVAILABLE      3001
