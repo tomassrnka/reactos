@@ -152,10 +152,13 @@ static WINBOOL __DllMainCRTStartup (HANDLE, DWORD, LPVOID);
 
 WINBOOL WINAPI DllMainCRTStartup (HANDLE, DWORD, LPVOID);
 int __mingw_init_ehandler (void);
+WINBOOL __mingw_TLScallback_dllentry (HANDLE, DWORD, LPVOID);
 
 WINBOOL WINAPI
 DllMainCRTStartup (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)
 {
+    WINBOOL retcode;
+
     mingw_app_type = 0;
     if (dwReason == DLL_PROCESS_ATTACH)
     {
@@ -164,7 +167,12 @@ DllMainCRTStartup (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)
         __mingw_init_ehandler ();
 #endif
     }
-    return __DllMainCRTStartup (hDllHandle, dwReason, lpreserved);
+    /* Thread key destructors; called first, as the loader calls TLS callbacks first */
+    __mingw_TLScallback_dllentry (hDllHandle, dwReason, lpreserved);
+    retcode = __DllMainCRTStartup (hDllHandle, dwReason, lpreserved);
+    if (dwReason == DLL_PROCESS_ATTACH && !retcode)
+        __mingw_TLScallback_dllentry (hDllHandle, DLL_PROCESS_DETACH, lpreserved);
+    return retcode;
 }
 
 __declspec(noinline) WINBOOL
