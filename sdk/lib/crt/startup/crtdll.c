@@ -152,6 +152,7 @@ static WINBOOL __DllMainCRTStartup (HANDLE, DWORD, LPVOID);
 
 WINBOOL WINAPI DllMainCRTStartup (HANDLE, DWORD, LPVOID);
 int __mingw_init_ehandler (void);
+WINBOOL __mingw_TLScallback_dllentry (HANDLE, DWORD, LPVOID);
 
 WINBOOL WINAPI
 DllMainCRTStartup (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)
@@ -164,6 +165,8 @@ DllMainCRTStartup (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)
         __mingw_init_ehandler ();
 #endif
     }
+    /* Thread key destructors; called first, as the loader calls TLS callbacks first */
+    __mingw_TLScallback_dllentry (hDllHandle, dwReason, lpreserved);
     return __DllMainCRTStartup (hDllHandle, dwReason, lpreserved);
 }
 
@@ -183,12 +186,19 @@ __DllMainCRTStartup (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)
     {
         retcode = _CRT_INIT (hDllHandle, dwReason, lpreserved);
         if (!retcode)
+        {
+            if (dwReason == DLL_PROCESS_ATTACH)
+                __mingw_TLScallback_dllentry (hDllHandle, DLL_PROCESS_DETACH, lpreserved);
             goto i__leave;
+        }
         retcode = DllEntryPoint (hDllHandle, dwReason, lpreserved);
         if (! retcode)
         {
             if (dwReason == DLL_PROCESS_ATTACH)
+            {
+                __mingw_TLScallback_dllentry (hDllHandle, DLL_PROCESS_DETACH, lpreserved);
                 _CRT_INIT (hDllHandle, DLL_PROCESS_DETACH, lpreserved);
+            }
             goto i__leave;
         }
     }
@@ -197,6 +207,7 @@ __DllMainCRTStartup (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)
     retcode = DllMain(hDllHandle,dwReason,lpreserved);
     if (dwReason == DLL_PROCESS_ATTACH && ! retcode)
     {
+        __mingw_TLScallback_dllentry (hDllHandle, DLL_PROCESS_DETACH, lpreserved);
         DllMain (hDllHandle, DLL_PROCESS_DETACH, lpreserved);
         DllEntryPoint (hDllHandle, DLL_PROCESS_DETACH, lpreserved);
         _CRT_INIT (hDllHandle, DLL_PROCESS_DETACH, lpreserved);

@@ -8,6 +8,7 @@ list(APPEND CRT_STARTUP_SOURCE
     startup/_newmode.c
     startup/wildcard.c
     startup/tlssup.c
+    startup/tlsdyn.c
     startup/mingw_helpers.c
     startup/natstart.c
     startup/charmax.c
