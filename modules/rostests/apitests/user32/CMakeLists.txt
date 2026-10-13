@@ -38,6 +38,7 @@ list(APPEND SOURCE
     LookupIconIdFromDirectoryEx.c
     MenuUI.c
     MessageStateAnalyzer.c
+    NCRButtonDown.c
     NcPaintRgn.c
     NextDlgItem.c
     PrivateExtractIcons.c
