@@ -778,12 +778,7 @@ static void test_GetDynamicTimeZoneInformation(void)
     TIME_ZONE_INFORMATION tzinfo;
     DWORD ret, ret2;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: GetDynamicTimeZoneInformation is a STUB on ReactOS */
-    if (is_reactos() || !pGetDynamicTimeZoneInformation)
-#else
     if (!pGetDynamicTimeZoneInformation)
-#endif
     {
         win_skip("GetDynamicTimeZoneInformation() is not supported.\n");
         return;
