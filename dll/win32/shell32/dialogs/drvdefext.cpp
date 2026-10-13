@@ -78,8 +78,13 @@ InitializeChkDskDialog(HWND hwndDlg, LPCWSTR pwszDrive)
     SetWindowText(hwndDlg, wszText);
 }
 
+/* Chkdsk() has no context parameter: one check at a time per process uses this state */
+static CComAutoCriticalSection ChkdskLock;
 static HWND hChkdskDrvDialog = NULL;
+static BOOLEAN bChkdskCorrectErrors = FALSE;
 static BOOLEAN bChkdskSuccess = FALSE;
+static BOOLEAN bChkdskNotSupported = FALSE;
+static BOOLEAN bChkdskVolumeInUse = FALSE;
 
 static BOOLEAN NTAPI
 ChkdskCallback(
@@ -100,13 +105,14 @@ ChkdskCallback(
             bChkdskSuccess = (*pSuccess);
             break;
 
-        case VOLUMEINUSE:
-        case INSUFFICIENTRIGHTS:
         case FSNOTSUPPORTED:
-        case CLUSTERSIZETOOSMALL:
-            bChkdskSuccess = FALSE;
-            FIXME("\n");
+            bChkdskNotSupported = TRUE;
             break;
+
+        case VOLUMEINUSE:
+            /* Without exclusive access only a read-only check may go on */
+            bChkdskVolumeInUse = TRUE;
+            return !bChkdskCorrectErrors;
 
         default:
             break;
@@ -115,24 +121,21 @@ ChkdskCallback(
     return TRUE;
 }
 
-static VOID
+static BOOL
 ChkDskNow(HWND hwndDlg, LPCWSTR pwszDrive)
 {
     //DWORD ClusterSize = 0;
-    WCHAR wszFs[30];
+    WCHAR wszFs[30], wszTitle[100];
     ULARGE_INTEGER TotalNumberOfFreeBytes, FreeBytesAvailableUser;
     BOOLEAN bCorrectErrors = FALSE, bScanDrive = FALSE;
+    BOOLEAN bSuccess, bNotSupported, bVolumeInUse;
+    UINT idMessage;
 
-    if(!GetVolumeInformationW(pwszDrive, NULL, 0, NULL, NULL, NULL, wszFs, _countof(wszFs)))
+    if(!GetVolumeInformationW(pwszDrive, NULL, 0, NULL, NULL, NULL, wszFs, _countof(wszFs)) ||
+       !GetDiskFreeSpaceExW(pwszDrive, &FreeBytesAvailableUser, &TotalNumberOfFreeBytes, NULL))
     {
-        FIXME("failed to get drive fs type\n");
-        return;
-    }
-
-    if (!GetDiskFreeSpaceExW(pwszDrive, &FreeBytesAvailableUser, &TotalNumberOfFreeBytes, NULL))
-    {
-        FIXME("failed to get drive space type\n");
-        return;
+        SHELL_ErrorBox(hwndDlg, GetLastError());
+        return FALSE;
     }
 
     /*if (!GetDefaultClusterSize(wszFs, &ClusterSize, &TotalNumberOfFreeBytes))
@@ -147,13 +150,35 @@ ChkDskNow(HWND hwndDlg, LPCWSTR pwszDrive)
     if (SendDlgItemMessageW(hwndDlg, 14001, BM_GETCHECK, 0, 0) == BST_CHECKED)
         bScanDrive = TRUE;
 
-    hChkdskDrvDialog = hwndDlg;
-    bChkdskSuccess = FALSE;
     SendDlgItemMessageW(hwndDlg, 14002, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-    Chkdsk((LPWSTR)pwszDrive, (LPWSTR)wszFs, bCorrectErrors, TRUE, FALSE, bScanDrive, NULL, NULL, ChkdskCallback); // FIXME: casts
 
-    hChkdskDrvDialog = NULL;
+    ChkdskLock.Lock();
+    hChkdskDrvDialog = hwndDlg;
+    bChkdskCorrectErrors = bCorrectErrors;
     bChkdskSuccess = FALSE;
+    bChkdskNotSupported = FALSE;
+    bChkdskVolumeInUse = FALSE;
+    Chkdsk((LPWSTR)pwszDrive, (LPWSTR)wszFs, bCorrectErrors, TRUE, FALSE, bScanDrive, NULL, NULL, ChkdskCallback); // FIXME: casts
+    bSuccess = bChkdskSuccess;
+    bNotSupported = bChkdskNotSupported;
+    bVolumeInUse = bChkdskVolumeInUse;
+    hChkdskDrvDialog = NULL;
+    ChkdskLock.Unlock();
+
+    if (bSuccess)
+        idMessage = IDS_CHKDSK_COMPLETE;
+    else if (bNotSupported)
+        idMessage = IDS_CHKDSK_NOT_SUPPORTED;
+    else if (bVolumeInUse)
+        idMessage = IDS_CHKDSK_VOLUME_IN_USE;
+    else
+        idMessage = IDS_CHKDSK_FAILED;
+
+    GetWindowTextW(hwndDlg, wszTitle, _countof(wszTitle));
+    ShellMessageBoxW(shell32_hInstance, hwndDlg, MAKEINTRESOURCEW(idMessage), wszTitle,
+                     MB_OK | (bSuccess ? MB_ICONINFORMATION : MB_ICONERROR), wszFs);
+
+    return bSuccess;
 }
 
 static INT_PTR CALLBACK
@@ -178,7 +203,8 @@ ChkDskDlg(
                 case IDOK:
                 {
                     LPCWSTR pwszDrive = (LPCWSTR)GetWindowLongPtr(hwndDlg, DWLP_USER);
-                    ChkDskNow(hwndDlg, pwszDrive);
+                    if (ChkDskNow(hwndDlg, pwszDrive))
+                        EndDialog(hwndDlg, IDOK);
                     break;
                 }
             }
@@ -611,6 +637,324 @@ CDrvDefExt::GeneralPageProc(
     return FALSE;
 }
 
+/* The file that CreateProcess would take for this name, in its search order (".exe" added without an extension) */
+static BOOL
+FindToolProgram(LPCWSTR pszName, LPWSTR pszFile, DWORD cchFile)
+{
+    WCHAR szDir[MAX_PATH];
+    CStringW strPath;
+    DWORD cch, dwAttr;
+
+    if (!*pszName || StrChrW(pszName, L'"'))
+        return FALSE;
+
+    GetModuleFileNameW(NULL, szDir, _countof(szDir));
+    PathRemoveFileSpecW(szDir);
+    strPath = szDir;
+    if (NeedCurrentDirectoryForExePathW(pszName))
+        strPath += L";.";
+    if (GetSystemDirectoryW(szDir, _countof(szDir)))
+        strPath += CStringW(L";") + szDir;
+    if (GetWindowsDirectoryW(szDir, _countof(szDir)))
+        strPath += CStringW(L";") + szDir + L"\\system;" + szDir;
+    cch = GetEnvironmentVariableW(L"PATH", NULL, 0);
+    if (cch)
+    {
+        CStringW strEnv;
+        if (GetEnvironmentVariableW(L"PATH", strEnv.GetBuffer(cch), cch) < cch)
+        {
+            strEnv.ReleaseBuffer();
+            strPath += L";" + strEnv;
+        }
+        else
+        {
+            strEnv.ReleaseBuffer(0);
+        }
+    }
+
+    cch = SearchPathW(strPath, pszName, L".exe", cchFile, pszFile, NULL);
+    if (!cch || cch >= cchFile)
+        return FALSE;
+    dwAttr = GetFileAttributesW(pszFile);
+    return dwAttr != INVALID_FILE_ATTRIBUTES && !(dwAttr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* A REG_SZ or REG_EXPAND_SZ value, terminated and expanded here (RegGetValueW does neither safely) */
+static BOOL
+ReadToolString(HKEY hKey, LPCWSTR pszSubKey, LPCWSTR pszValue, CStringW &str)
+{
+    CStringW strRaw;
+    HKEY hSubKey = hKey;
+    DWORD dwType, cb = 0, cch;
+    LPWSTR psz;
+    BOOL bRead = FALSE;
+
+    if (pszSubKey && RegOpenKeyExW(hKey, pszSubKey, 0, KEY_QUERY_VALUE, &hSubKey) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExW(hSubKey, pszValue, NULL, &dwType, NULL, &cb) == ERROR_SUCCESS &&
+        (dwType == REG_SZ || dwType == REG_EXPAND_SZ) && cb <= 0x10000)
+    {
+        cch = cb / sizeof(WCHAR);
+        psz = strRaw.GetBuffer(cch + 1);
+        bRead = (RegQueryValueExW(hSubKey, pszValue, NULL, &dwType, (LPBYTE)psz, &cb) == ERROR_SUCCESS &&
+                 (dwType == REG_SZ || dwType == REG_EXPAND_SZ) && cb <= cch * sizeof(WCHAR));
+        psz[bRead ? cb / sizeof(WCHAR) : 0] = UNICODE_NULL;
+        strRaw.ReleaseBuffer();
+    }
+    if (pszSubKey)
+        RegCloseKey(hSubKey);
+    if (!bRead)
+        return FALSE;
+    if (dwType == REG_SZ)
+    {
+        str = strRaw;
+        return TRUE;
+    }
+    /* ExpandEnvironmentStringsW reads at most 32766 characters of its source, and writes at most
+     * 32765 including the terminator, leaving a longer result unterminated */
+    if (strRaw.GetLength() > 32766)
+        return FALSE;
+    cch = ExpandEnvironmentStringsW(strRaw, NULL, 0);
+    if (!cch || cch > 32765)
+        return FALSE;
+    psz = str.GetBuffer(cch);
+    bRead = (ExpandEnvironmentStringsW(strRaw, psz, cch) - 1 < cch);
+    str.ReleaseBuffer(bRead ? -1 : 0);
+    return bRead;
+}
+
+/* The App Paths entry of a bare program name ("name" or "name.exe"): its target and its Path value */
+static BOOL
+FindToolAppPath(LPCWSTR pszName, LPWSTR pszTarget, DWORD cchTarget, CStringW &strAppPath)
+{
+    WCHAR szKey[MAX_PATH + 64];
+    CStringW strTarget;
+    HKEY hKey;
+    BOOL bFound;
+
+    if (!*pszName || !PathIsFileSpecW(pszName) || StrChrW(pszName, L'"') ||
+        FAILED(StringCchPrintfW(szKey, _countof(szKey),
+                                L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\%s", pszName)))
+    {
+        return FALSE;
+    }
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS &&
+        (!PathAddExtensionW(szKey, L".exe") ||
+         RegOpenKeyExW(HKEY_LOCAL_MACHINE, szKey, 0, KEY_READ, &hKey) != ERROR_SUCCESS))
+    {
+        return FALSE;
+    }
+    bFound = ReadToolString(hKey, NULL, NULL, strTarget) &&
+             SUCCEEDED(StringCchCopyW(pszTarget, cchTarget, strTarget));
+    if (bFound)
+    {
+        PathUnquoteSpacesW(pszTarget);
+        bFound = (*pszTarget != UNICODE_NULL);
+    }
+    if (bFound && !ReadToolString(hKey, NULL, L"Path", strAppPath))
+        strAppPath.Empty();
+    RegCloseKey(hKey);
+    return bFound;
+}
+
+/* This process's environment with pszAppPath put in front of PATH, as ShellExecuteEx does for App Paths */
+static LPWSTR
+BuildToolEnvironment(LPCWSTR pszAppPath)
+{
+    LPWCH pEnv = GetEnvironmentStringsW();
+    LPCWSTR pszVar;
+    SIZE_T cchEnv = 0, cchNew;
+    LPWSTR pNew, pszOut;
+    BOOL bPath = FALSE;
+
+    if (!pEnv)
+        return NULL;
+    for (pszVar = pEnv; *pszVar; pszVar += wcslen(pszVar) + 1)
+        ;
+    cchEnv = pszVar - pEnv;
+    cchNew = cchEnv + wcslen(pszAppPath) + 8;
+    pNew = (LPWSTR)LocalAlloc(LMEM_FIXED, cchNew * sizeof(WCHAR));
+    if (pNew)
+    {
+        pszOut = pNew;
+        for (pszVar = pEnv; *pszVar; pszVar += wcslen(pszVar) + 1)
+        {
+            if (!bPath && !_wcsnicmp(pszVar, L"PATH=", 5))
+            {
+                bPath = TRUE;
+                StringCchPrintfW(pszOut, cchNew - (pszOut - pNew), L"PATH=%s;%s", pszAppPath, pszVar + 5);
+            }
+            else
+            {
+                StringCchCopyW(pszOut, cchNew - (pszOut - pNew), pszVar);
+            }
+            pszOut += wcslen(pszOut) + 1;
+        }
+        if (!bPath)
+        {
+            StringCchPrintfW(pszOut, cchNew - (pszOut - pNew), L"PATH=%s", pszAppPath);
+            pszOut += wcslen(pszOut) + 1;
+        }
+        *pszOut = UNICODE_NULL;
+    }
+    FreeEnvironmentStringsW(pEnv);
+    return pNew;
+}
+
+/* A found program starts through CreateProcess, so the shell cannot fall back to another target;
+ * anything else (a document, or a name only the shell resolves) goes through ShellExecuteEx */
+static DWORD
+StartDriveTool(HWND hwndDlg, LPCWSTR pszFile, LPCWSTR pszArgs, BOOL bFound, LPCWSTR pszAppPath)
+{
+    LPCWSTR pszExt = PathFindExtensionW(pszFile);
+    DWORD dwError = ERROR_SUCCESS;
+
+    if (bFound && (!_wcsicmp(pszExt, L".exe") || !_wcsicmp(pszExt, L".com")))
+    {
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi;
+        CStringW strCmd;
+        LPWSTR pEnv = (pszAppPath && *pszAppPath) ? BuildToolEnvironment(pszAppPath) : NULL;
+
+        strCmd.Format(L"\"%s\"", pszFile);
+        if (pszArgs && *pszArgs)
+            strCmd += CStringW(L" ") + pszArgs;
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_SHOWNORMAL;
+        if (CreateProcessW(pszFile, strCmd.GetBuffer(), NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT,
+                           pEnv, NULL, &si, &pi))
+        {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        else
+        {
+            dwError = GetLastError();
+        }
+        if (pEnv)
+            LocalFree(pEnv);
+        return dwError;
+    }
+
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS;
+    sei.hwnd = hwndDlg;
+    sei.lpFile = pszFile;
+    sei.lpParameters = (pszArgs && *pszArgs) ? pszArgs : NULL;
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei))
+        dwError = GetLastError();
+    if (sei.hProcess)
+        CloseHandle(sei.hProcess);
+    return dwError;
+}
+
+static VOID
+ShowDriveToolError(HWND hwndDlg, UINT idUnavailable, DWORD dwError, LPCWSTR pszProgram)
+{
+    WCHAR wszText[512], wszReason[256], wszTitle[MAX_PATH];
+    DWORD_PTR Args[3] = { (DWORD_PTR)pszProgram, 0, 0 };
+
+    if (!LoadStringW(shell32_hInstance, idUnavailable, wszText, _countof(wszText)))
+        return;
+    /* A missing program needs no reason; any other launch error is shown as it is */
+    if (dwError != ERROR_FILE_NOT_FOUND && dwError != ERROR_PATH_NOT_FOUND &&
+        dwError != ERROR_INVALID_NAME && dwError != ERROR_BAD_PATHNAME &&
+        FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ARGUMENT_ARRAY, NULL, dwError, 0,
+                       wszReason, _countof(wszReason), (va_list*)Args))
+    {
+        StringCchCatW(wszText, _countof(wszText), L"\n\n");
+        StringCchCatW(wszText, _countof(wszText), wszReason);
+    }
+    GetWindowTextW(GetParent(hwndDlg), wszTitle, _countof(wszTitle));
+    MessageBoxW(hwndDlg, wszText, wszTitle, MB_OK | MB_ICONWARNING);
+}
+
+static VOID
+RunDriveTool(HWND hwndDlg, LPCWSTR pwszValueName, WCHAR wchDrive, UINT idUnavailable)
+{
+    WCHAR wszKey[MAX_PATH], wszCmd[MAX_PATH] = L"", wszProgram[MAX_PATH] = L"";
+    WCHAR wszName[MAX_PATH], wszFile[MAX_PATH];
+    DWORD dwError = ERROR_FILE_NOT_FOUND;
+    BOOL bQuoted = FALSE, bFound = FALSE;
+    LPWSTR psz, pszArgs;
+    CStringW strValue, strAppPath;
+
+    StringCchPrintfW(wszKey, _countof(wszKey),
+                     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\%s", pwszValueName);
+    if (ReadToolString(HKEY_LOCAL_MACHINE, wszKey, NULL, strValue) &&
+        SUCCEEDED(StringCchCopyW(wszCmd, _countof(wszCmd), strValue)))
+    {
+        /* The command line may name the drive as %c */
+        if ((psz = StrStrW(wszCmd, L"%c")) != NULL)
+        {
+            psz[0] = wchDrive;
+            MoveMemory(&psz[1], &psz[2], (wcslen(&psz[2]) + 1) * sizeof(WCHAR));
+        }
+
+        /* A tab outside quotes separates like a space */
+        for (psz = wszCmd; *psz; ++psz)
+        {
+            if (*psz == L'"')
+                bQuoted = !bQuoted;
+            else if (*psz == L'\t' && !bQuoted)
+                *psz = L' ';
+        }
+        StrTrimW(wszCmd, L" ");
+        if (!wszCmd[0])
+            goto Fail;
+
+        /*
+         * Decide what the value names before anything starts, as Windows does: the program is the quoted
+         * name or the first word, through its App Paths entry when it is a bare name that has one; else,
+         * as in CreateProcess, the quoted name or the shortest part up to a space that names an existing
+         * file. When nothing is found, the name (the first word when unquoted) is given to the shell.
+         */
+        if (wszCmd[0] == L'"')
+        {
+            pszArgs = PathGetArgsW(wszCmd);
+            StringCchCopyW(wszProgram, _countof(wszProgram), wszCmd);
+            PathRemoveArgsW(wszProgram);
+            PathUnquoteSpacesW(wszProgram);
+            bFound = FindToolAppPath(wszProgram, wszFile, _countof(wszFile), strAppPath) ||
+                     FindToolProgram(wszProgram, wszFile, _countof(wszFile));
+            if (bFound)
+                StringCchCopyW(wszProgram, _countof(wszProgram), wszFile);
+        }
+        else
+        {
+            if (!(pszArgs = StrChrW(wszCmd, L' ')))
+                pszArgs = wszCmd + wcslen(wszCmd);
+            StringCchCopyNW(wszProgram, _countof(wszProgram), wszCmd, pszArgs - wszCmd);
+            bFound = FindToolAppPath(wszProgram, wszFile, _countof(wszFile), strAppPath);
+            for (psz = wszCmd; !bFound; ++psz)
+            {
+                if (!(psz = StrChrW(psz, L' ')))
+                    psz = wszCmd + wcslen(wszCmd);
+                StringCchCopyNW(wszName, _countof(wszName), wszCmd, psz - wszCmd);
+                bFound = FindToolProgram(wszName, wszFile, _countof(wszFile));
+                if (bFound)
+                    pszArgs = psz;
+                else if (!*psz)
+                    break;
+            }
+            if (bFound)
+                StringCchCopyW(wszProgram, _countof(wszProgram), wszFile);
+        }
+        while (*pszArgs == L' ')
+            ++pszArgs;
+
+        /* Started once: a failure of the program it names is reported, never retried as another program */
+        dwError = StartDriveTool(hwndDlg, wszProgram, pszArgs, bFound, strAppPath);
+        if (dwError == ERROR_SUCCESS)
+            return;
+        ERR("Failed to start %ls (error %lu)\n", wszProgram, dwError);
+    }
+
+Fail:
+    ShowDriveToolError(hwndDlg, idUnavailable, dwError, wszProgram);
+}
+
 INT_PTR CALLBACK
 CDrvDefExt::ExtraPageProc(
     HWND hwndDlg,
@@ -628,8 +972,6 @@ CDrvDefExt::ExtraPageProc(
         }
         case WM_COMMAND:
         {
-            WCHAR wszBuf[MAX_PATH];
-            DWORD cbBuf = sizeof(wszBuf);
             CDrvDefExt *pDrvDefExt = reinterpret_cast<CDrvDefExt *>(GetWindowLongPtr(hwndDlg, DWLP_USER));
 
             switch(LOWORD(wParam))
@@ -638,34 +980,11 @@ CDrvDefExt::ExtraPageProc(
                     DialogBoxParamW(shell32_hInstance, MAKEINTRESOURCEW(IDD_CHECK_DISK), hwndDlg, ChkDskDlg, (LPARAM)pDrvDefExt->m_wszDrive);
                     break;
                 case 14001:
-                    if (RegGetValueW(HKEY_LOCAL_MACHINE,
-                                     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\DefragPath",
-                                     NULL,
-                                     RRF_RT_REG_SZ,
-                                     NULL,
-                                     (PVOID)wszBuf,
-                                     &cbBuf) == ERROR_SUCCESS)
-                    {
-                        WCHAR wszCmd[MAX_PATH];
-
-                        StringCbPrintfW(wszCmd, sizeof(wszCmd), wszBuf, pDrvDefExt->m_wszDrive[0]);
-
-                        if (ShellExecuteW(hwndDlg, NULL, wszCmd, NULL, NULL, SW_SHOW) <= (HINSTANCE)32)
-                            ERR("Failed to create defrag process %ls\n", wszCmd);
-                    }
+                    RunDriveTool(hwndDlg, L"DefragPath", pDrvDefExt->m_wszDrive[0], IDS_DEFRAG_UNAVAILABLE);
                     break;
                 case 14002:
-                    if (RegGetValueW(HKEY_LOCAL_MACHINE,
-                                     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MyComputer\\BackupPath",
-                                     NULL,
-                                     RRF_RT_REG_SZ,
-                                     NULL,
-                                     (PVOID)wszBuf,
-                                     &cbBuf) == ERROR_SUCCESS)
-                    {
-                        if (ShellExecuteW(hwndDlg, NULL, wszBuf, NULL, NULL, SW_SHOW) <= (HINSTANCE)32)
-                            ERR("Failed to create backup process %ls\n", wszBuf);
-                    }
+                    RunDriveTool(hwndDlg, L"BackupPath", pDrvDefExt->m_wszDrive[0], IDS_BACKUP_UNAVAILABLE);
+                    break;
             }
             break;
         }

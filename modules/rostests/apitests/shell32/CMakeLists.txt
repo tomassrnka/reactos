@@ -15,6 +15,7 @@ list(APPEND SOURCE
     #CUserNotification.cpp # Test is broken on Win 2003
     Control_RunDLLW.cpp
     DragDrop.cpp
+    DriveTools.cpp
     ExtractIconEx.cpp
     FindExecutable.cpp
     GetDisplayNameOf.cpp

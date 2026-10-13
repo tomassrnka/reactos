@@ -264,6 +264,17 @@ BtrfsChkdsk(
 #endif
     // STUB
 
+#ifdef __REACTOS__
+    if (!CheckOnlyIfDirty)
+    {
+        /* There is no checker: fail a requested check instead of reporting a clean volume */
+        if (Callback)
+            Callback(FSNOTSUPPORTED, 0, NULL);
+        *ExitStatus = (ULONG)STATUS_NOT_SUPPORTED;
+        return FALSE;
+    }
+#endif
+
     if (Callback) {
         TEXTOUTPUT TextOut;
 

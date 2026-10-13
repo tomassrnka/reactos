@@ -10,6 +10,9 @@
 
 #define WM_SHELL_NOTIFY     (WM_USER + 100)
 
+/* DriveTools: when set, the program appends "name|arguments" to this file and exits */
+#define DRIVETOOLS_MARKER_VARIABLE L"SHELL32_APITEST_DRIVETOOLS_MARKER"
+
 #define NUM_STAGE 10
 
 static inline BOOL FindSubProgram(LPWSTR pszSubProgram, DWORD cchSubProgram)

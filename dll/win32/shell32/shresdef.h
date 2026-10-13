@@ -204,6 +204,14 @@
 #define IDS_NO_FORMAT_TITLE       188
 #define IDS_NO_FORMAT             189
 
+/* Drive tools messages */
+#define IDS_CHKDSK_COMPLETE         60100
+#define IDS_CHKDSK_NOT_SUPPORTED    60101
+#define IDS_CHKDSK_VOLUME_IN_USE    60102
+#define IDS_CHKDSK_FAILED           60103
+#define IDS_DEFRAG_UNAVAILABLE      60104
+#define IDS_BACKUP_UNAVAILABLE      60105
+
 #define IDS_UNKNOWN_APP     190
 #define IDS_EXE_DESCRIPTION 191
 
