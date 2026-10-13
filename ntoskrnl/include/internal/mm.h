@@ -38,6 +38,7 @@ extern PVOID KernelVerifier;
 extern MM_DRIVER_VERIFIER_DATA MmVerifierData;
 
 extern SIZE_T MmTotalCommitLimit;
+extern SIZE_T MmTotalCommitLimitMaximum;
 extern SIZE_T MmTotalCommittedPages;
 extern SIZE_T MmSharedCommit;
 extern SIZE_T MmDriverCommit;
@@ -868,30 +869,56 @@ MmDeleteKernelStack(PVOID Stack,
 
 /* balance.c / pagefile.c******************************************************/
 
-FORCEINLINE VOID UpdateTotalCommittedPages(LONG Delta)
+/* commit.c ******************************************************************/
+
+typedef enum _MI_COMMIT_TIER
 {
-    /*
-     * Add up all the used "Committed" memory + pagefile.
-     * Not sure this is right. 8^\
-     * MmTotalCommittedPages should be adjusted consistently with
-     * other counters at different places.
-     *
-       MmTotalCommittedPages = MiMemoryConsumers[MC_SYSTEM].PagesUsed +
-                               MiMemoryConsumers[MC_USER].PagesUsed +
-                               MiUsedSwapPages;
-     */
+    /* Fails above the commit limit minus the kernel reserve */
+    MiCommitUser,
+    /* Fails above the commit limit only (pool, kernel stack growth) */
+    MiCommitKernel
+} MI_COMMIT_TIER;
 
-    /* Update Commitment */
-    SIZE_T TotalCommittedPages = InterlockedExchangeAddSizeT(&MmTotalCommittedPages, Delta) + Delta;
+extern SIZE_T MiCommitReserve;
 
-    /* Update Peak = max(Peak, Total) in a lockless way */
-    SIZE_T PeakCommitment = MmPeakCommitment;
-    while (TotalCommittedPages > PeakCommitment &&
-           InterlockedCompareExchangeSizeT(&MmPeakCommitment, TotalCommittedPages, PeakCommitment) != PeakCommitment)
-    {
-        PeakCommitment = MmPeakCommitment;
-    }
-}
+CODE_SEG("INIT")
+VOID
+NTAPI
+MiInitializeCommitLimit(VOID);
+
+BOOLEAN
+NTAPI
+MiChargeCommit(
+    _In_ SIZE_T Pages,
+    _In_ MI_COMMIT_TIER Tier);
+
+VOID
+NTAPI
+MiReturnCommit(
+    _In_ SIZE_T Pages);
+
+BOOLEAN
+NTAPI
+MiWaitForCommitGrowth(
+    _In_ SIZE_T Shortfall);
+
+VOID
+NTAPI
+MiAddProcessCommit(
+    _Inout_ PEPROCESS Process,
+    _In_ SIZE_T Pages);
+
+VOID
+NTAPI
+MiSubtractProcessCommit(
+    _Inout_ PEPROCESS Process,
+    _In_ SIZE_T Pages);
+
+VOID
+NTAPI
+MiReturnProcessCommit(
+    _Inout_ PEPROCESS Process,
+    _In_ SIZE_T Pages);
 
 /* balance.c *****************************************************************/
 

@@ -322,7 +322,6 @@ MmFreeSwapPage(SWAPENTRY Entry)
 
     MiFreeSwapPages++;
     MiUsedSwapPages--;
-    UpdateTotalCommittedPages(-1);
 
     KeReleaseGuardedMutex(&MmPageFileCreationLock);
 }
@@ -359,7 +358,6 @@ MmAllocSwapPage(VOID)
             MmPagingFile[i]->CurrentUsage++;
             MiUsedSwapPages++;
             MiFreeSwapPages--;
-            UpdateTotalCommittedPages(1);
 
             KeReleaseGuardedMutex(&MmPageFileCreationLock);
 
@@ -811,6 +809,10 @@ EarlyQuit:
     MmPagingFile[MmNumberOfPagingFiles] = PagingFile;
     MmNumberOfPagingFiles++;
     MiFreeSwapPages = MiFreeSwapPages + PagingFile->FreeSpace;
+
+    /* Its slots back committed memory from now on */
+    InterlockedExchangeAddSizeT(&MmTotalCommitLimit, PagingFile->FreeSpace);
+    InterlockedExchangeAddSizeT(&MmTotalCommitLimitMaximum, PagingFile->MaximumSize - 1);
     KeReleaseGuardedMutex(&MmPageFileCreationLock);
 
     MmSwapSpaceMessage = FALSE;
