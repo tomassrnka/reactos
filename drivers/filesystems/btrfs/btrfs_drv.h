@@ -799,6 +799,7 @@ typedef struct _device_extension {
     ERESOURCE fileref_lock;
     ERESOURCE load_lock;
     _Has_lock_level_(tree_lock) ERESOURCE tree_lock;
+    KSPIN_LOCK incompat_flags_lock; // serializes changes to superblock.incompat_flags by writers under shared tree_lock
     PNOTIFY_SYNC NotifySync;
     LIST_ENTRY DirNotifyList;
     bool need_write;
@@ -853,6 +854,17 @@ typedef struct _device_extension {
     NPAGED_LOOKASIDE_LIST fcb_np_lookaside;
     LIST_ENTRY list_entry;
 } device_extension;
+
+static __inline void set_incompat_flag(device_extension* Vcb, uint64_t flag) {
+    KIRQL irql;
+
+    if (Vcb->superblock.incompat_flags & flag)
+        return;
+
+    KeAcquireSpinLock(&Vcb->incompat_flags_lock, &irql);
+    Vcb->superblock.incompat_flags |= flag;
+    KeReleaseSpinLock(&Vcb->incompat_flags_lock, irql);
+}
 
 typedef struct {
     uint32_t type;
