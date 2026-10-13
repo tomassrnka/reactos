@@ -19,6 +19,7 @@ extern void func_DragDrop(void);
 extern void func_DriveTools(void);
 extern void func_ExtractIconEx(void);
 extern void func_FindExecutable(void);
+extern void func_FormerStubs(void);
 extern void func_GetDisplayNameOf(void);
 extern void func_GUIDFromString(void);
 extern void func_ILCreateFromPath(void);
@@ -55,7 +56,10 @@ extern void func_ShellState(void);
 extern void func_SHGetAttributesFromDataObject(void);
 extern void func_SHGetComputerDisplayNameW(void);
 extern void func_SHGetFileInfo(void);
+extern void func_SHBindToFolderIDListParent(void);
 extern void func_SHGetKnownFolderPath(void);
+extern void func_SHGetPathFromIDListEx(void);
+extern void func_SHGetStockIconInfo(void);
 extern void func_SHGetUnreadMailCountW(void);
 extern void func_SHGetUserDisplayName(void);
 extern void func_SHIsBadInterfacePtr(void);
@@ -86,6 +90,7 @@ const struct test winetest_testlist[] =
     { "DriveTools", func_DriveTools },
     { "ExtractIconEx", func_ExtractIconEx },
     { "FindExecutable", func_FindExecutable },
+    { "FormerStubs", func_FormerStubs },
     { "GetDisplayNameOf", func_GetDisplayNameOf },
     { "GUIDFromString", func_GUIDFromString },
     { "ILCreateFromPath", func_ILCreateFromPath },
@@ -122,7 +127,10 @@ const struct test winetest_testlist[] =
     { "SHGetAttributesFromDataObject", func_SHGetAttributesFromDataObject },
     { "SHGetComputerDisplayNameW", func_SHGetComputerDisplayNameW },
     { "SHGetFileInfo", func_SHGetFileInfo },
+    { "SHBindToFolderIDListParent", func_SHBindToFolderIDListParent },
     { "SHGetKnownFolderPath", func_SHGetKnownFolderPath },
+    { "SHGetPathFromIDListEx", func_SHGetPathFromIDListEx },
+    { "SHGetStockIconInfo", func_SHGetStockIconInfo },
     { "SHGetUnreadMailCountW", func_SHGetUnreadMailCountW },
     { "SHGetUserDisplayName", func_SHGetUserDisplayName },
     { "SHIsBadInterfacePtr", func_SHIsBadInterfacePtr },

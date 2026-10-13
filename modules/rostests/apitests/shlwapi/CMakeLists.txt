@@ -29,6 +29,7 @@ list(APPEND SOURCE
     SHLoadIndirectString.c
     SHLoadRegUIString.c
     SHPropertyBag.cpp
+    StrChrNIW.c
     StrDup.c
     StrFormatByteSizeW.c
     StrToInt.c
