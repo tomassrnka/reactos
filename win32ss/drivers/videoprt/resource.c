@@ -415,6 +415,16 @@ IntVideoPortMapMemory(
    {
       NTSTATUS NtStatus;
       ULONG Protect;
+#ifdef _M_AMD64
+      /* User PAGE_WRITECOMBINE is UC- on amd64 while kernel P6CACHE mappings are WC: refuse the alias */
+      if (InIoSpace & VIDEO_MEMORY_SPACE_P6CACHE)
+      {
+         WARN_(VIDEOPRT, "Write-combined user mappings are not supported\n");
+         if (Status)
+            *Status = ERROR_INVALID_PARAMETER;
+         return NULL;
+      }
+#endif
       if (InIoSpace & VIDEO_MEMORY_SPACE_P6CACHE)
           Protect = PAGE_READWRITE | PAGE_WRITECOMBINE;
       else
@@ -439,7 +449,7 @@ IntVideoPortMapMemory(
       MappedAddress = MmMapIoSpace(
          TranslatedAddress,
          NumberOfUchars,
-         MmNonCached);
+         (InIoSpace & VIDEO_MEMORY_SPACE_P6CACHE) ? MmWriteCombined : MmNonCached);
    }
 
    if (MappedAddress != NULL)
