@@ -249,7 +249,7 @@ SelectVolume(
 
     if (argc == 2)
     {
-        if (CurrentDisk == NULL)
+        if (CurrentVolume == NULL)
             ConResPuts(StdOut, IDS_SELECT_NO_VOLUME);
         else
             ConResPrintf(StdOut, IDS_SELECT_VOLUME, CurrentVolume->VolumeNumber);
@@ -280,7 +280,7 @@ SelectVolume(
         {
             CurrentVolume = VolumeEntry;
             ConResPrintf(StdOut, IDS_SELECT_VOLUME, CurrentVolume->VolumeNumber);
-            return TRUE;
+            return EXIT_SUCCESS;
         }
 
         Entry = Entry->Flink;

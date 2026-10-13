@@ -708,6 +708,10 @@ GetVolumeFromPartition(
     _In_ PPARTENTRY PartEntry);
 
 VOID
+SelectVolumeOfNewPartition(
+    _In_ PPARTENTRY PartEntry);
+
+VOID
 RemoveVolume(
     _In_ PVOLENTRY VolumeEntry);
 
