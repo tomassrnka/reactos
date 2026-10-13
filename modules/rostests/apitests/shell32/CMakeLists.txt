@@ -41,6 +41,7 @@ list(APPEND SOURCE
     SHCreateFileExtractIconW.cpp
     SHEvaluateSystemCommandTemplate.cpp
     SHGetComputerDisplayNameW.cpp
+    SHGetKnownFolderPath.cpp
     SHGetUnreadMailCountW.cpp
     SHIsBadInterfacePtr.cpp
     SHParseDisplayName.cpp
