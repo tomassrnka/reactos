@@ -827,8 +827,14 @@ void read_registry(PUNICODE_STRING regpath, bool refresh) {
     get_registry_value(h, L"NoRootDir", REG_DWORD, &mount_no_root_dir, sizeof(mount_no_root_dir));
     get_registry_value(h, L"NoDataCOW", REG_DWORD, &mount_nodatacow, sizeof(mount_nodatacow));
 
+#ifndef __REACTOS__
     if (!refresh)
         get_registry_value(h, L"NoPNP", REG_DWORD, &no_pnp, sizeof(no_pnp));
+#else
+    // NoPNP is ignored: ReactOS mounts btrfs directly on the partition, and the
+    // volume device that NoPNP reports never reaches the mount manager, so the
+    // drive letters handed over to it would be lost.
+#endif
 
     if (mount_flush_interval == 0)
         mount_flush_interval = 1;
