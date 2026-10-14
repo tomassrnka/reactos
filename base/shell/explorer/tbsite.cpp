@@ -26,6 +26,32 @@
  ** ITrayBandSite ************************************************************
  *****************************************************************************/
 
+/* OleLoadFromStream leaves its result pointer behind when the class does not support
+ * IPersistStream, so the owner of the object would release it twice */
+static HRESULT
+LoadObjectFromStream(IN IStream *pStm, IN REFIID riid, OUT PVOID *pvObj)
+{
+    CLSID clsid;
+    CComPtr<IUnknown> punk;
+    CComPtr<IPersistStream> pPersist;
+
+    *pvObj = NULL;
+
+    HRESULT hr = ReadClassStm(pStm, &clsid);
+    if (FAILED(hr))
+        return hr;
+    hr = CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IUnknown, &punk));
+    if (FAILED(hr))
+        return hr;
+    hr = punk->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
+    if (FAILED(hr))
+        return hr;
+    hr = pPersist->Load(pStm);
+    if (FAILED(hr))
+        return hr;
+    return punk->QueryInterface(riid, pvObj);
+}
+
 // WARNING: Can't use ATL for this class due to our ATL not fully supporting the AGGREGATION functions needed for this class to be an "outer" class
 // it works just fine this way.
 class CTrayBandSite :
@@ -46,6 +72,8 @@ class CTrayBandSite :
 
     HWND m_Rebar;
     BOOL m_bNoSave;
+    BOOL m_bSaving;
+    BOOL m_bTaskBandLoaded;
 
     union
     {
@@ -113,7 +141,9 @@ public:
     CTrayBandSite() :
         m_RefCount(0),
         m_Rebar(NULL),
-        m_bNoSave(TRUE)
+        m_bNoSave(TRUE),
+        m_bSaving(FALSE),
+        m_bTaskBandLoaded(FALSE)
     {
     }
 
@@ -155,6 +185,11 @@ public:
                 if (IsEqualGUID(clsid, CLSID_ITaskBand))
                 {
                     ASSERT(m_TaskBand != NULL);
+
+                    /* There is one task band, a second entry of the stream is refused */
+                    if (m_bTaskBandLoaded)
+                        return E_FAIL;
+                    m_bTaskBandLoaded = TRUE;
                     /* We're trying to load the task band! Let's create it... */
 
                     hRet = m_TaskBand->QueryInterface(
@@ -179,9 +214,7 @@ public:
         if (SUCCEEDED(hRet))
         {
             /* Let the shell handle everything else for us :) */
-            hRet = OleLoadFromStream(pStm,
-                riid,
-                pvObj);
+            hRet = LoadObjectFromStream(pStm, riid, pvObj);
         }
 
         if (!SUCCEEDED(hRet))
@@ -455,14 +488,26 @@ public:
     HRESULT
     SaveBands()
     {
+        HRESULT hRet;
+
+        /* A band that notifies the site while it is saved must not start a second save */
+        if (m_bNoSave || m_bSaving || m_BandSite == NULL || SHRestricted(REST_NOSAVESET))
+            return S_FALSE;
+
+        m_bSaving = TRUE;
+        hRet = SaveBandsToRegistry();
+        m_bSaving = FALSE;
+        return hRet;
+    }
+
+    HRESULT
+    SaveBandsToRegistry()
+    {
         CComPtr<IPersistStream> pPersist;
         CComPtr<IStream> pMem;
         STATSTG stat;
         HGLOBAL hGlobal;
         HRESULT hRet;
-
-        if (m_bNoSave || m_BandSite == NULL)
-            return S_FALSE;
 
         hRet = m_BandSite->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
         if (FAILED(hRet))
@@ -631,7 +676,6 @@ public:
 
     virtual BOOL HasTaskBand()
     {
-        CComPtr<IPersist> pBand;
         CLSID BandCLSID;
         DWORD dwBandID;
         UINT uBand = 0;
@@ -639,7 +683,8 @@ public:
         /* Enumerate all bands */
         while (SUCCEEDED(m_BandSite->EnumBands(uBand, &dwBandID)))
         {
-            if (dwBandID && SUCCEEDED(m_BandSite->GetBandObject(dwBandID, IID_PPV_ARG(IPersist, &pBand))))
+            CComPtr<IPersist> pBand;
+            if (SUCCEEDED(m_BandSite->GetBandObject(dwBandID, IID_PPV_ARG(IPersist, &pBand))))
             {
                 if (SUCCEEDED(pBand->GetClassID(&BandCLSID)))
                 {
