@@ -76,6 +76,7 @@ list(APPEND SOURCE
     lstrlen.c
     Mailslot.c
     MultiByteToWideChar.c
+    PerformanceCounter.c
     Pipes.c
     PipeSqos.c
     PreferredUILanguages.c

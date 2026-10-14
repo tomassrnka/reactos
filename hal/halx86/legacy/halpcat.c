@@ -38,6 +38,16 @@ HalpSetupAcpiPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     return STATUS_SUCCESS;
 }
 
+ULONG
+NTAPI
+HalpGetAcpiTimerPort(
+    _Out_ PULONG Mask)
+{
+    /* No ACPI */
+    *Mask = 0;
+    return 0;
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI

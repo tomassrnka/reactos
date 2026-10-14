@@ -69,6 +69,7 @@ KMT_TESTFUNC Test_KeProcessor;
 KMT_TESTFUNC Test_KeQpc;
 KMT_TESTFUNC Test_KeSpinLock;
 KMT_TESTFUNC Test_KeTimer;
+KMT_TESTFUNC Test_KeClockTime;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmSection;
@@ -175,6 +176,7 @@ const KMT_TEST TestList[] =
     { "MmMapViewAligned",            Test_MmMapViewAligned },
     { "KeSystemCall32",              Test_KeSystemCall32 },
     { "KeTimer",                            Test_KeTimer },
+    { "KeClockTime",                        Test_KeClockTime },
     { "-KernelType",                        Test_KernelType },
     { "MmMdl",                              Test_MmMdl },
     { "MmSection",                          Test_MmSection },
