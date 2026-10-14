@@ -39,7 +39,12 @@ RETARGET_HOSTS = {
         'api-ms-win-security-base-l1-1',
     ),
     'shcore.dll': (
+        'api-ms-win-shcore-comhelpers-l1-1',
+        'api-ms-win-shcore-obsolete-l1-1',
         'api-ms-win-shcore-scaling-l1-1',
+        'api-ms-win-shcore-stream-winrt-l1-1',
+        'api-ms-win-shcore-sysinfo-l1-1',
+        'api-ms-win-shcore-thread-l1-1',
     ),
     'shell32.dll': (
         'api-ms-win-shell-namespace-l1-1',
