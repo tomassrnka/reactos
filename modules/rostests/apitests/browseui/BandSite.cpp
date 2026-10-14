@@ -18,6 +18,8 @@ ULONG DbgPrint(PCH Format,...);
 #include <stdio.h>
 #include <shellutils.h>
 #include <shlwapi.h>
+#include <strsafe.h>
+#include <versionhelpers.h>
 #include <reactos/shlguid_undoc.h>
 
 /* The window the band site puts its rebar into */
@@ -28,6 +30,7 @@ class CTestSite : public IOleWindow
 
 public:
     CTestSite(HWND hwnd) : m_hwnd(hwnd) { }
+    virtual ~CTestSite() { }
 
     STDMETHODIMP QueryInterface(REFIID riid, void **ppv) override
     {
@@ -59,6 +62,18 @@ struct BandSite
     CComPtr<IPersistStream> persist;
     CComPtr<IDeskBarClient> client;
     CComPtr<IOleWindow> owner;
+    HWND hwndRebar = NULL;
+
+    /* The bands and the site hold each other, so the bands go before the site does */
+    ~BandSite()
+    {
+        DWORD id;
+        while (site && SUCCEEDED(site->EnumBands(0, &id)))
+        {
+            if (FAILED(site->RemoveBand(id)))
+                break;
+        }
+    }
 };
 
 static bool CreateBandSite(HWND hwnd, BandSite &bs)
@@ -80,7 +95,12 @@ static bool CreateBandSite(HWND hwnd, BandSite &bs)
     bs.owner.Attach(new CTestSite(hwnd));
     hr = bs.client->SetDeskBarSite(bs.owner);
     ok_hex(hr, S_OK);
-    return SUCCEEDED(hr);
+    if (FAILED(hr))
+        return false;
+
+    hr = bs.client->GetWindow(&bs.hwndRebar);
+    ok_hex(hr, S_OK);
+    return bs.hwndRebar != NULL;
 }
 
 static HRESULT AddFolderBand(BandSite &bs, PCIDLIST_ABSOLUTE pidl, BOOL bQuickLaunch)
@@ -113,28 +133,24 @@ static UINT CountBands(IBandSite *site)
     return count;
 }
 
-static void ExpectFolder(IBandSite *site, UINT index, PCIDLIST_ABSOLUTE pidl, const char *what)
+/* The folder of the band at an index of the rebar, from the left or the top */
+static bool GetFolderAt(BandSite &bs, UINT index, CComHeapPtr<ITEMIDLIST_ABSOLUTE> &pidl, BOOL *pBreak = NULL)
 {
-    DWORD id;
-    HRESULT hr = site->EnumBands(index, &id);
-    ok(hr == S_OK, "%s: EnumBands(%u) returned 0x%08lx\n", what, index, hr);
-    if (hr != S_OK)
-        return;
+    REBARBANDINFOW rbi = { sizeof(rbi), RBBIM_ID | RBBIM_STYLE };
+    if (!SendMessageW(bs.hwndRebar, RB_GETBANDINFOW, index, (LPARAM)&rbi))
+        return false;
+    if (pBreak)
+        *pBreak = !!(rbi.fStyle & RBBS_BREAK);
 
     CComPtr<IShellFolderBand> band;
-    hr = site->GetBandObject(id, IID_PPV_ARG(IShellFolderBand, &band));
-    ok(hr == S_OK, "%s: GetBandObject returned 0x%08lx\n", what, hr);
-    if (hr != S_OK)
-        return;
+    if (FAILED(bs.site->GetBandObject(rbi.wID, IID_PPV_ARG(IShellFolderBand, &band))))
+        return false;
 
     BANDINFOSFB info = { ISFB_MASK_IDLIST };
-    hr = band->GetBandInfoSFB(&info);
-    ok(hr == S_OK, "%s: GetBandInfoSFB returned 0x%08lx\n", what, hr);
-    if (hr == S_OK)
-    {
-        ok(info.pidl && ILIsEqual(info.pidl, pidl), "%s: the band shows another folder\n", what);
-        ILFree(info.pidl);
-    }
+    if (FAILED(band->GetBandInfoSFB(&info)))
+        return false;
+    pidl.Attach(info.pidl);
+    return info.pidl != NULL;
 }
 
 static HRESULT SaveSite(BandSite &bs, CComPtr<IStream> &stream)
@@ -152,6 +168,49 @@ static void Rewind(IStream *stream)
     stream->Seek(zero, STREAM_SEEK_SET, NULL);
 }
 
+static bool SameBytes(IStream *a, IStream *b)
+{
+    HGLOBAL ha, hb;
+    STATSTG sa = {}, sb = {};
+    a->Stat(&sa, STATFLAG_NONAME);
+    b->Stat(&sb, STATFLAG_NONAME);
+    if (sa.cbSize.QuadPart != sb.cbSize.QuadPart ||
+        FAILED(GetHGlobalFromStream(a, &ha)) || FAILED(GetHGlobalFromStream(b, &hb)))
+    {
+        return false;
+    }
+    bool same = !memcmp(GlobalLock(ha), GlobalLock(hb), (size_t)sa.cbSize.QuadPart);
+    GlobalUnlock(ha);
+    GlobalUnlock(hb);
+    return same;
+}
+
+static CComPtr<IStream> MakeStream(const void *data, ULONG cb)
+{
+    CComPtr<IStream> stream;
+    CreateStreamOnHGlobal(NULL, TRUE, &stream);
+    ULONG written;
+    stream->Write(data, cb, &written);
+    Rewind(stream);
+    return stream;
+}
+
+/* The stream of this implementation: header, then entries of length, flags, width and the band */
+#pragma pack(push, 1)
+struct TEST_HEADER { DWORD magic, version, count; };
+struct TEST_ENTRY { DWORD length, flags, cx; CLSID clsid; };
+#pragma pack(pop)
+
+static void TestRefusedStream(HWND hwnd, const char *what, IStream *stream)
+{
+    BandSite bs;
+    if (!CreateBandSite(hwnd, bs))
+        return;
+    HRESULT hr = bs.persist->Load(stream);
+    ok(FAILED(hr), "%s: Load returned 0x%08lx\n", what, hr);
+    ok(CountBands(bs.site) == 0, "%s: %u bands were added\n", what, CountBands(bs.site));
+}
+
 START_TEST(BandSite)
 {
     CCoInit init;
@@ -167,23 +226,37 @@ START_TEST(BandSite)
     if (!hwnd)
         return;
 
-    WCHAR szWindows[MAX_PATH], szTemp[MAX_PATH];
-    GetWindowsDirectoryW(szWindows, _countof(szWindows));
-    GetTempPathW(_countof(szTemp), szTemp);
-    PathRemoveBackslashW(szTemp);
+    /* Folders that are empty, so that the toolbars have nothing to enumerate */
+    WCHAR szBase[MAX_PATH], szDirs[3][MAX_PATH];
+    GetTempPathW(_countof(szBase), szBase);
+    for (UINT i = 0; i < 3; i++)
+    {
+        StringCchPrintfW(szDirs[i], _countof(szDirs[i]), L"%sbandsite_apitest_%lu_%u", szBase, GetCurrentProcessId(), i);
+        CreateDirectoryW(szDirs[i], NULL);
+    }
 
-    CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidlWindows, pidlTemp;
-    pidlWindows.Attach(ILCreateFromPathW(szWindows));
-    pidlTemp.Attach(ILCreateFromPathW(szTemp));
-    ok(pidlWindows && pidlTemp, "ILCreateFromPath failed\n");
+    CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidlWindows, pidlTemp, pidlSystem;
+    pidlWindows.Attach(ILCreateFromPathW(szDirs[0]));
+    pidlTemp.Attach(ILCreateFromPathW(szDirs[1]));
+    pidlSystem.Attach(ILCreateFromPathW(szDirs[2]));
+    ok(pidlWindows && pidlTemp && pidlSystem, "ILCreateFromPath failed\n");
 
     BandSite one;
-    if (pidlWindows && pidlTemp && CreateBandSite(hwnd, one))
+    if (pidlWindows && pidlTemp && pidlSystem && CreateBandSite(hwnd, one))
     {
         ok_int(CountBands(one.site), 0);
         AddFolderBand(one, pidlWindows, FALSE);
         AddFolderBand(one, pidlTemp, TRUE);
-        ok_int(CountBands(one.site), 2);
+        AddFolderBand(one, pidlSystem, FALSE);
+        ok_int(CountBands(one.site), 3);
+
+        /* Put the last band between the other two and start a new row with the first band */
+        ok_int((int)SendMessageW(one.hwndRebar, RB_GETBANDCOUNT, 0, 0), 3);
+        SendMessageW(one.hwndRebar, RB_MOVEBAND, 2, 1);
+        REBARBANDINFOW rbi = { sizeof(rbi), RBBIM_STYLE };
+        SendMessageW(one.hwndRebar, RB_GETBANDINFOW, 2, (LPARAM)&rbi);
+        rbi.fStyle |= RBBS_BREAK;
+        SendMessageW(one.hwndRebar, RB_SETBANDINFOW, 2, (LPARAM)&rbi);
 
         CComPtr<IStream> stream;
         HRESULT hr = SaveSite(one, stream);
@@ -191,94 +264,95 @@ START_TEST(BandSite)
 
         if (hr == S_OK)
         {
-            /* The band site reads back what it saved */
+            /* The band site reads back what it saved: the bands, their order and the break */
             BandSite two;
             if (CreateBandSite(hwnd, two))
             {
                 Rewind(stream);
                 hr = two.persist->Load(stream);
                 ok_hex(hr, S_OK);
-                ok_int(CountBands(two.site), 2);
+                ok_int(CountBands(two.site), 3);
 
-                /* The band that asks to be added to the front comes first, as in the first band site */
-                UINT first = 0, second = 1;
-                DWORD id;
-                CComPtr<IShellFolderBand> band;
-                if (one.site->EnumBands(0, &id) == S_OK &&
-                    SUCCEEDED(one.site->GetBandObject(id, IID_PPV_ARG(IShellFolderBand, &band))))
+                for (UINT i = 0; i < 3; i++)
                 {
-                    BANDINFOSFB info = { ISFB_MASK_IDLIST };
-                    if (SUCCEEDED(band->GetBandInfoSFB(&info)) && info.pidl)
-                    {
-                        if (!ILIsEqual(info.pidl, pidlTemp))
-                        {
-                            first = 1;
-                            second = 0;
-                        }
-                        ILFree(info.pidl);
-                    }
+                    CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidl1, pidl2;
+                    BOOL break1 = FALSE, break2 = FALSE;
+                    ok(GetFolderAt(one, i, pidl1, &break1), "no band at index %u of the first site\n", i);
+                    ok(GetFolderAt(two, i, pidl2, &break2), "no band at index %u of the loaded site\n", i);
+                    ok(pidl1 && pidl2 && ILIsEqual(pidl1, pidl2), "the band at index %u shows another folder\n", i);
+                    ok(break1 == break2, "the band at index %u has break %d, expected %d\n", i, break2, break1);
                 }
-                PCIDLIST_ABSOLUTE pidls[2] = { pidlWindows, pidlTemp };
-                ExpectFolder(two.site, 0, pidls[first], "first band");
-                ExpectFolder(two.site, 1, pidls[second], "second band");
 
                 /* A second save of the loaded site gives the same bytes */
                 CComPtr<IStream> stream2;
                 hr = SaveSite(two, stream2);
                 ok_hex(hr, S_OK);
                 if (hr == S_OK)
-                {
-                    STATSTG stat1 = {}, stat2 = {};
-                    stream->Stat(&stat1, STATFLAG_NONAME);
-                    stream2->Stat(&stat2, STATFLAG_NONAME);
-                    ok_int(stat1.cbSize.LowPart == stat2.cbSize.LowPart, TRUE);
-                }
+                    ok(SameBytes(stream, stream2), "the second save differs from the first\n");
             }
 
-            /* Data that is not a band site stream is refused and adds no band */
-            BandSite three;
-            if (CreateBandSite(hwnd, three))
-            {
-                static const BYTE junk[] = "this is not a band site stream at all, not even close";
-                CComPtr<IStream> bad;
-                CreateStreamOnHGlobal(NULL, TRUE, &bad);
-                ULONG written;
-                bad->Write(junk, sizeof(junk), &written);
-                Rewind(bad);
-                hr = three.persist->Load(bad);
-                ok(FAILED(hr), "Load of junk returned 0x%08lx\n", hr);
-                ok_int(CountBands(three.site), 0);
+            /* Data that is not a band site stream, an empty stream and one cut inside the first band are refused */
+            static const BYTE junk[] = "this is not a band site stream at all, not even close";
+            TestRefusedStream(hwnd, "junk", MakeStream(junk, sizeof(junk)));
+            TestRefusedStream(hwnd, "empty", MakeStream(NULL, 0));
 
-                /* An empty stream as well */
-                CComPtr<IStream> empty;
-                CreateStreamOnHGlobal(NULL, TRUE, &empty);
-                hr = three.persist->Load(empty);
-                ok(FAILED(hr), "Load of an empty stream returned 0x%08lx\n", hr);
-                ok_int(CountBands(three.site), 0);
-            }
-
-            /* A stream cut inside the first band adds no band */
-            BandSite four;
-            if (CreateBandSite(hwnd, four))
+            HGLOBAL hglobal;
+            if (SUCCEEDED(GetHGlobalFromStream(stream, &hglobal)))
             {
-                HGLOBAL hglobal;
-                if (SUCCEEDED(GetHGlobalFromStream(stream, &hglobal)))
-                {
-                    CComPtr<IStream> cut;
-                    CreateStreamOnHGlobal(NULL, TRUE, &cut);
-                    PVOID data = GlobalLock(hglobal);
-                    ULONG written;
-                    cut->Write(data, 12 + 20, &written);
-                    GlobalUnlock(hglobal);
-                    Rewind(cut);
-                    hr = four.persist->Load(cut);
-                    ok(FAILED(hr), "Load of a cut stream returned 0x%08lx\n", hr);
-                    ok_int(CountBands(four.site), 0);
-                }
+                PVOID data = GlobalLock(hglobal);
+                TestRefusedStream(hwnd, "cut", MakeStream(data, sizeof(TEST_HEADER) + 20));
+                GlobalUnlock(hglobal);
             }
         }
     }
 
-    one = BandSite();
+    /* Malformed streams in the form of this implementation */
+    if (IsReactOS())
+    {
+        TEST_HEADER header = { 0x53425242, 1, 1 };
+        struct { TEST_HEADER header; TEST_ENTRY entry; BYTE tail[16]; } stream = {};
+        memset(&stream.tail, 0xFF, sizeof(stream.tail));
+
+        /* A length that wraps the position of the next entry back into the stream */
+        stream.header = header;
+        stream.entry.length = 0xFFFFFFFC;
+        stream.entry.clsid = CLSID_ISFBand;
+        TestRefusedStream(hwnd, "wrapping length", MakeStream(&stream, sizeof(stream)));
+
+        /* A length beyond the end of the stream */
+        stream.entry.length = 0x1000;
+        TestRefusedStream(hwnd, "length beyond the end", MakeStream(&stream, sizeof(stream)));
+
+        /* A length too short for the class */
+        stream.entry.length = 8;
+        TestRefusedStream(hwnd, "length too short", MakeStream(&stream, sizeof(stream)));
+
+        /* A class that cannot load itself from a stream */
+        stream.entry.length = sizeof(stream.entry) - sizeof(DWORD) + sizeof(stream.tail);
+        stream.entry.clsid = CLSID_ACLHistory;
+        TestRefusedStream(hwnd, "class without IPersistStream", MakeStream(&stream, sizeof(stream)));
+
+        /* A folder band whose item list claims more bytes than the stream has */
+        stream.entry.clsid = CLSID_ISFBand;
+        struct { TEST_HEADER header; TEST_ENTRY entry; DWORD version, options; WORD cb; BYTE items[8]; } pidl = {};
+        pidl.header = header;
+        pidl.entry = stream.entry;
+        pidl.entry.length = sizeof(pidl.entry) - sizeof(DWORD) + sizeof(pidl.version) + sizeof(pidl.options) + sizeof(pidl.cb) + sizeof(pidl.items);
+        pidl.version = 1;
+        pidl.cb = 0xFFFF;
+        memset(pidl.items, 0xFF, sizeof(pidl.items));
+        TestRefusedStream(hwnd, "item list longer than the stream", MakeStream(&pidl, sizeof(pidl)));
+
+        /* An item that is longer than the list it is in */
+        pidl.cb = sizeof(pidl.items);
+        TestRefusedStream(hwnd, "item longer than the list", MakeStream(&pidl, sizeof(pidl)));
+    }
+    else
+    {
+        skip("The form of the stream is that of ReactOS\n");
+    }
+
+    for (UINT i = 0; i < 3; i++)
+        RemoveDirectoryW(szDirs[i]);
     DestroyWindow(hwnd);
 }

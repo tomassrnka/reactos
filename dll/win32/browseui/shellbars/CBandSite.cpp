@@ -1038,6 +1038,31 @@ static HRESULT _StreamSeek(IStream *pStm, ULONGLONG ullPos)
     return pStm->Seek(li, STREAM_SEEK_SET, NULL);
 }
 
+/* OleLoadFromStream leaves its result pointer behind when the class does not support
+ * IPersistStream, so the owner of the object would release it twice */
+static HRESULT _LoadObjectFromStream(IStream *pStm, REFIID riid, void **ppv)
+{
+    CLSID clsid;
+    CComPtr<IUnknown> punk;
+    CComPtr<IPersistStream> pPersist;
+
+    *ppv = NULL;
+
+    HRESULT hr = ReadClassStm(pStm, &clsid);
+    if (FAILED(hr))
+        return hr;
+    hr = CoCreateInstance(clsid, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IUnknown, &punk));
+    if (FAILED(hr))
+        return hr;
+    hr = punk->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
+    if (FAILED(hr))
+        return hr;
+    hr = pPersist->Load(pStm);
+    if (FAILED(hr))
+        return hr;
+    return punk->QueryInterface(riid, ppv);
+}
+
 HRESULT STDMETHODCALLTYPE CBandSiteBase::GetClassID(CLSID *pClassID)
 {
     if (pClassID == NULL)
@@ -1060,6 +1085,7 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Load(IStream *pStm)
     DWORD ids[BANDSITE_STREAM_MAXBANDS];
     DWORD cLoaded = 0;
     ULONG cbRead;
+    STATSTG stat;
     HRESULT hr;
 
     if (pStm == NULL || m_hwndRebar == NULL)
@@ -1072,6 +1098,10 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Load(IStream *pStm)
     {
         return E_FAIL;
     }
+
+    hr = pStm->Stat(&stat, STATFLAG_NONAME);
+    if (FAILED(hr))
+        return hr;
 
     /* Use QueryInterface so that we get the outer object in case we have one */
     hr = this->QueryInterface(IID_PPV_ARG(IBandSite, &pSite));
@@ -1090,10 +1120,19 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Load(IStream *pStm)
         if (FAILED(_StreamTell(pStm, &uliStart)))
             break;
         hr = pStm->Read(&entry, sizeof(entry), &cbRead);
-        if (FAILED(hr) || cbRead != sizeof(entry) || entry.cbEntry < sizeof(entry) - sizeof(entry.cbEntry))
+        if (FAILED(hr) || cbRead != sizeof(entry))
             break;
 
+        /* An entry holds its fixed part and the class of the band and stays inside the stream */
+        if (entry.cbEntry < sizeof(entry) - sizeof(entry.cbEntry) + sizeof(CLSID) ||
+            entry.cbEntry > stat.cbSize.QuadPart - uliStart.QuadPart - sizeof(entry.cbEntry))
+        {
+            break;
+        }
+
         hr = pHelper->LoadFromStreamBS(pStm, IID_IUnknown, (void **)&punk);
+        if (FAILED(hr))
+            punk.Detach();
 
         /* The next entry follows this one whatever the band consumed or whether it loaded */
         if (FAILED(_StreamSeek(pStm, uliStart.QuadPart + sizeof(entry.cbEntry) + entry.cbEntry)))
@@ -1170,7 +1209,7 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Save(IStream *pStm, BOOL fClearDirty)
             continue;
 
         if (SendMessageW(m_hwndRebar, RB_GETRECT, i, (LPARAM)&rcBand))
-            entry.cx = (_GetViewMode() == DBIF_VIEWMODE_VERTICAL) ? (rcBand.bottom - rcBand.top) : (rcBand.right - rcBand.left);
+            entry.cx = rcBand.right - rcBand.left; /* the rectangle of a vertical rebar is transposed */
 
         if (Band->bHiddenTitle)
             entry.dwFlags |= BSE_HIDDENTITLE;
@@ -1250,7 +1289,7 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Drop(IDataObject *pDataObj, DWORD grfKe
 
 HRESULT STDMETHODCALLTYPE CBandSiteBase::LoadFromStreamBS(IStream *pStm, const GUID &riid, void **ppv)
 {
-    return OleLoadFromStream(pStm, riid, ppv);
+    return _LoadObjectFromStream(pStm, riid, ppv);
 }
 
 HRESULT STDMETHODCALLTYPE CBandSiteBase::SaveToStreamBS(IUnknown *punk, IStream *pStm)

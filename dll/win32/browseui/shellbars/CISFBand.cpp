@@ -384,6 +384,50 @@ STDMETHODIMP CISFBand::IsDirty()
 #define ISFBAND_SHOWTEXT        0x2
 #define ISFBAND_SMALLICON       0x4
 
+/* ILLoadFromStream trusts the sizes in the stream, which can be changed by anyone who can write the registry */
+static HRESULT _LoadPidlFromStream(IStream *pStm, CComHeapPtr<ITEMIDLIST_ABSOLUTE> &pidl)
+{
+    WORD cb;
+    ULONG cbRead;
+    STATSTG stat;
+    ULARGE_INTEGER pos;
+    LARGE_INTEGER zero;
+
+    zero.QuadPart = 0;
+    HRESULT hr = pStm->Read(&cb, sizeof(cb), &cbRead);
+    if (FAILED(hr) || cbRead != sizeof(cb) || cb < sizeof(WORD))
+        return E_FAIL;
+    hr = pStm->Seek(zero, STREAM_SEEK_CUR, &pos);
+    if (FAILED(hr))
+        return hr;
+    hr = pStm->Stat(&stat, STATFLAG_NONAME);
+    if (FAILED(hr))
+        return hr;
+    if (pos.QuadPart + cb > stat.cbSize.QuadPart)
+        return E_FAIL;
+
+    if (!pidl.AllocateBytes(cb))
+        return E_OUTOFMEMORY;
+    hr = pStm->Read(pidl, cb, &cbRead);
+    if (FAILED(hr) || cbRead != cb)
+        return E_FAIL;
+
+    /* The items end with the terminator inside the bytes that were read */
+    const BYTE *pb = (const BYTE *)pidl.m_pData;
+    UINT off = 0;
+    for (;;)
+    {
+        if (off + sizeof(WORD) > cb)
+            return E_FAIL;
+        WORD item = *(const WORD *)(pb + off);
+        if (item == 0)
+            return S_OK;
+        if (item < sizeof(WORD))
+            return E_FAIL;
+        off += item;
+    }
+}
+
 STDMETHODIMP CISFBand::Load(IN IStream *pStm)
 {
     DWORD header[2];
@@ -396,11 +440,9 @@ STDMETHODIMP CISFBand::Load(IN IStream *pStm)
     if (cbRead != sizeof(header) || header[0] != ISFBAND_STREAM_VERSION)
         return E_FAIL;
 
-    hr = ILLoadFromStream(pStm, (PIDLIST_RELATIVE *)&pidl);
+    hr = _LoadPidlFromStream(pStm, pidl);
     if (FAILED(hr))
         return hr;
-    if (!pidl)
-        return E_FAIL;
 
     hr = InitializeSFB(NULL, pidl);
     if (FAILED(hr))
