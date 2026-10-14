@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     CreateService.c
+    CloseTrace.c
     DuplicateTokenEx.c
     eventlog.c
     Hash.c

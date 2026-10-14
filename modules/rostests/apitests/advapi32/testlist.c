@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_CreateService(void);
+extern void func_CloseTrace(void);
 extern void func_DuplicateTokenEx(void);
 extern void func_eventlog_supp(void);
 extern void func_Hash(void);
@@ -25,6 +26,7 @@ extern void func_ServiceNetwork(void);
 const struct test winetest_testlist[] =
 {
     { "CreateService", func_CreateService },
+    { "CloseTrace", func_CloseTrace },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
     { "eventlog_supp", func_eventlog_supp },
     { "Hash", func_Hash },
