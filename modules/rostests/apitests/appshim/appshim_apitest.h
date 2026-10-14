@@ -23,6 +23,9 @@ void expect_shim_imp(PHOOKAPI hook, PCSTR library, PCSTR function, PCSTR shim, i
 #define expect_shim  (winetest_set_location(__FILE__, __LINE__), 0) ? (void)0 : expect_shim_imp
 
 
+/* verifyversion.c */
+void test_verify_version_cases(PVOID verify, DWORD major, DWORD minor, DWORD build, WORD sp_major, WORD sp_minor, PCSTR shim);
+
 BOOL LoadShimDLL(PCWSTR ShimDll, HMODULE* module, tGETHOOKAPIS* ppGetHookAPIs);
 tGETHOOKAPIS LoadShimDLL2(PCWSTR ShimDll);
 
