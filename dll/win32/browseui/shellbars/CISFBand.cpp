@@ -212,6 +212,15 @@ STDMETHODIMP CISFBand::SetSite(IUnknown *pUnkSite)
 
     TRACE("CISFBand::SetSite(0x%p)\n", pUnkSite);
 
+    /* Letting go of the site takes the window down, or it would outlive the object that handles its messages */
+    if (pUnkSite == NULL)
+    {
+        if (m_hWnd)
+            DestroyWindow();
+        m_Site = NULL;
+        return S_OK;
+    }
+
     hr = IUnknown_GetWindow(pUnkSite, &hwndParent);
     if (FAILED(hr))
     {
