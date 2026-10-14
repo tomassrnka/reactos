@@ -15,6 +15,7 @@ list(APPEND SOURCE
     ../crt/ceil.c
     ../crt/cos.c
     ../crt/exp.c
+    ../crt/fmod.c
     ../crt/log.c
     ../crt/log10.c
     ../crt/round.c
