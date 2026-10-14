@@ -41,14 +41,26 @@ add_library(ucrtbase SHARED
     musl/fminf.c
     musl/ilogb.c
     musl/ilogbf.c
+    musl/lgamma.c
+    musl/lgamma_r.c
+    musl/lgammaf.c
+    musl/lgammaf_r.c
     musl/log1p.c
     musl/log1pf.c
+    musl/logb.c
+    musl/logbf.c
     musl/nan.c
     musl/nanf.c
     musl/remainder.c
     musl/remainderf.c
     musl/remquo.c
     musl/remquof.c
+    musl/tgamma.c
+    musl/tgammaf.c
+    musl/__cos.c
+    musl/__cosdf.c
+    musl/__sin.c
+    musl/__sindf.c
 )
 
 if(NOT ARCH STREQUAL "i386")

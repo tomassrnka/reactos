@@ -20,6 +20,14 @@
 /* Reports a math error the way the Windows CRT does: set errno, return the value */
 double math_error(int type, const char *name, double arg1, double arg2, double retval);
 
+/* Kernels and reentrant functions shared between the musl files */
+double __sin(double x, double y, int iy);
+double __cos(double x, double y);
+float __sindf(double x);
+float __cosdf(double x);
+double __lgamma_r(double x, int *signgamp);
+float __lgammaf_r(float x, int *signgamp);
+
 /* Evaluate an expression as the specified type, dropping excess precision */
 static inline float eval_as_float(float x)
 {

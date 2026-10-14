@@ -625,8 +625,8 @@
 @ cdecl _lock_file(ptr)
 @ cdecl _lock_locales()
 @ cdecl _locking(long long long)
-@ cdecl _logb(double) # logb
-@ cdecl -arch=!i386 _logbf(float) logbf
+@ cdecl _logb(double)
+@ cdecl -arch=!i386 _logbf(float)
 @ cdecl -stub -arch=i386 _longjmpex(ptr long)
 @ cdecl _lrotl(long long)
 @ cdecl _lrotr(long long)
@@ -2454,8 +2454,8 @@
 @ cdecl labs(long)
 @ cdecl ldexp(double long)
 @ cdecl -ret64 ldiv(long long)
-@ cdecl -stub lgamma(double)
-@ cdecl -stub lgammaf(float)
+@ cdecl lgamma(double)
+@ cdecl lgammaf(float)
 @ cdecl lgammal(double) lgamma
 @ cdecl -ret64 llabs(int64)
 @ cdecl -norelay lldiv(int64 int64)
@@ -2475,8 +2475,8 @@
 @ cdecl log2(double)
 @ cdecl log2f(float)
 @ cdecl log2l(double) log2
-@ cdecl -stub logb(double)
-@ cdecl -stub logbf(float)
+@ cdecl logb(double)
+@ cdecl logbf(float)
 @ cdecl logbl(double) logb
 @ cdecl -arch=!i386 logf(float)
 @ cdecl longjmp(ptr long)
@@ -2611,8 +2611,8 @@
 @ cdecl tanh(double)
 @ cdecl -arch=!i386 tanhf(float)
 @ cdecl terminate()
-@ cdecl -stub tgamma(double)
-@ cdecl -stub tgammaf(float)
+@ cdecl tgamma(double)
+@ cdecl tgammaf(float)
 @ cdecl tgammal(double) tgamma
 @ cdecl tmpfile()
 @ cdecl tmpfile_s(ptr)
