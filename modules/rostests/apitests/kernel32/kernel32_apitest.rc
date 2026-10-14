@@ -4,3 +4,15 @@
 #include <reactos/version.rc>
 
 #include <FormatMessage.rc>
+
+STRINGTABLE
+BEGIN
+    1, "first"
+    2, "second string"
+    3, ""
+    15, "last of block 1"
+    16, "block two first"
+    17, "ab"
+    4660, "high id string"
+    65535, "id ffff"
+END
