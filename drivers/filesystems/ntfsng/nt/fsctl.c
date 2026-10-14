@@ -901,6 +901,15 @@ static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, 
     return Status;
 }
 
+/* Test only: the "ResizeFault" DWORD of the service key arms a failure inside the next resize. */
+static VOID NgArmResizeFault(VOID)
+{
+    UNICODE_STRING Key = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Ntfs");
+    ngc_resize_fault = (int)NgReadDword(&Key, L"ResizeFault");
+    if (ngc_resize_fault)
+        DPRINT1("ntfsng: ResizeFault %d armed\n", ngc_resize_fault);
+}
+
 /* Errors of the resize requests: a size the volume cannot take is an invalid parameter there. */
 static NTSTATUS NgResizeStatus(int Err)
 {
@@ -945,6 +954,7 @@ static NTSTATUS NgExtendVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
     Status = NgDeviceIoctl(Vcb->StorageDevice, IOCTL_DISK_GET_LENGTH_INFO, &Length, sizeof(Length));
     if (!NT_SUCCESS(Status))
         return Status;
+    NgArmResizeFault();
     NgAcquireCore(Vcb);
     if (!Vcb->Core || Vcb->RawWritten)
         Err = -NGC_EROFS;
@@ -985,6 +995,8 @@ static NTSTATUS NgShrinkVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
         return Status;
     if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(*Info) || !Info)
         return STATUS_INVALID_PARAMETER;
+    if (Info->ShrinkRequestType == ShrinkCommit)
+        NgArmResizeFault();
     NgAcquireCore(Vcb);
     if (!Vcb->Core || Vcb->RawWritten)
     {

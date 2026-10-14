@@ -145,6 +145,10 @@ int ngc_extend(ngc_vol *v, unsigned long long sectors, unsigned long long dev_si
 int ngc_shrink_valid(ngc_vol *v, unsigned long long sectors);
 /* Shrinks to @sectors when every cluster past them is free (-ENOSPC otherwise; no data moves). */
 int ngc_shrink(ngc_vol *v, unsigned long long sectors);
+/* Test only (the "ResizeFault" DWORD of the Ntfs service key): the next resize fails at that stage
+ * (1: extend after the $Bitmap changes, before any commit; 2: extend after the $Bitmap commit;
+ * 3: shrink after the padding-bit commit), as a failing device write or allocation would. */
+extern int ngc_resize_fault;
 /* Sets the volume label (@len UTF-16 units, at most NGC_LABEL_MAX; 0 clears it). */
 int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len);
 void ngc_free(void *p);

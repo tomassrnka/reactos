@@ -224,6 +224,7 @@ typedef struct _NG_GLOBAL
 extern NG_GLOBAL NgGlobal;
 
 /* ntfsng.c */
+ULONG NgReadDword(PUNICODE_STRING KeyPath, PCWSTR Name);
 NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp);
 NTSTATUS NgErrnoToStatus(int Err);
 VOID NgAcquireCore(PNG_VCB Vcb);

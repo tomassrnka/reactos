@@ -2103,6 +2103,8 @@ int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len)
 
 /* ------------------------------------------------------------- volume size */
 
+int ngc_resize_fault;
+
 /* $Bitmap bytes for @nr clusters: whole 8-byte units, as format writes it. */
 static s64 ngc_bmp_bytes(s64 nr)
 {
@@ -2282,12 +2284,18 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 			goto failed;
 		ngc_recount_free(vol);
 	}
+	if (ngc_resize_fault == 1) {
+		err = -EIO;
+		goto failed;
+	}
 	/*
 	 * $Bitmap first, the boot sector after it: an interruption between the two commits leaves
 	 * the old size with a $Bitmap larger than it needs, which every reader accepts.  Once the
 	 * clusters are in use in memory, a failed write leaves the volume read-only.
 	 */
 	err = ngc_commit(v);
+	if (!err && ngc_resize_fault == 2)
+		err = -EIO;
 	if (!err)
 		err = ngc_write_boot(v, sectors, boot);
 	if (!err)
@@ -2408,6 +2416,8 @@ static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
 	 */
 	ngc_recount_free(vol);
 	err = ngc_commit(v);
+	if (!err && ngc_resize_fault == 3)
+		err = -EIO;
 	if (!err)
 		err = ngc_write_boot(v, sectors, boot);
 	if (!err)
