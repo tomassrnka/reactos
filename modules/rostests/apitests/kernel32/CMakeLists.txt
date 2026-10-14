@@ -40,6 +40,7 @@ list(APPEND SOURCE
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
+    GetNumaProcessorNodeEx.c
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
     IdleProcessor.c
@@ -92,6 +93,7 @@ list(APPEND SOURCE
     TunnelCache.c
     TzSetPrivilege.c
     UEFIFirmware.c
+    UnmapViewOfFileEx.c
     WerFlags.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c

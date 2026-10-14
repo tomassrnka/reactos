@@ -42,6 +42,7 @@ extern void func_GetUserDefaultGeoName(void);
 extern void func_GetLocaleInfo(void);
 extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
+extern void func_GetNumaProcessorNodeEx(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetVolumeInformation(void);
 extern void func_IdleProcessor(void);
@@ -92,6 +93,7 @@ extern void func_ThreadContextObjects(void);
 extern void func_TunnelCache(void);
 extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
+extern void func_UnmapViewOfFileEx(void);
 extern void func_WerFlags(void);
 extern void func_WerRuntimeExceptionModule(void);
 extern void func_WideCharToMultiByte(void);
@@ -138,6 +140,7 @@ const struct test winetest_testlist[] =
     { "GetLocaleInfo",               func_GetLocaleInfo },
     { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
+    { "GetNumaProcessorNodeEx",      func_GetNumaProcessorNodeEx },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "IdleProcessor",               func_IdleProcessor },
@@ -188,6 +191,7 @@ const struct test winetest_testlist[] =
     { "TunnelCache",                 func_TunnelCache },
     { "TzSetPrivilege",              func_TzSetPrivilege },
     { "UEFIFirmware",                func_UEFIFirmware },
+    { "UnmapViewOfFileEx",           func_UnmapViewOfFileEx },
     { "WerFlags",                    func_WerFlags },
     { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
