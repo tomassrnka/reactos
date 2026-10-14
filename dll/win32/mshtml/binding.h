@@ -103,6 +103,12 @@ struct nsChannelBSC {
     BOOL is_js;
     BOOL is_doc_channel;
     BOOL response_processed;
+#ifdef __REACTOS__
+    BOOL is_attachment;         /* Content-Disposition: attachment */
+    BOOL extern_handled;        /* handed to the browser: the document reads no more of this binding */
+    BOOL headers_recorded;
+    WCHAR *sent_headers;        /* the request headers the first request carried */
+#endif
 
     nsProtocolStream *nsstream;
 };
