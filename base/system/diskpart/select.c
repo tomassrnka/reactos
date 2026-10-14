@@ -48,6 +48,7 @@ SelectDisk(
 
         CurrentDisk = DiskEntry;
         CurrentPartition = NULL;
+        CurrentVolume = NULL;
         ConResPrintf(StdOut, IDS_SELECT_DISK, CurrentDisk->DiskNumber);
         return EXIT_SUCCESS;
     }
@@ -56,6 +57,7 @@ SelectDisk(
         if (CurrentDisk == NULL)
         {
             CurrentPartition = NULL;
+            CurrentVolume = NULL;
             ConResPuts(StdErr, IDS_SELECT_DISK_ENUM_NO_START);
             return EXIT_SUCCESS;
         }
@@ -64,6 +66,7 @@ SelectDisk(
         {
             CurrentDisk = NULL;
             CurrentPartition = NULL;
+            CurrentVolume = NULL;
             ConResPuts(StdErr, IDS_SELECT_DISK_ENUM_FINISHED);
             return EXIT_SUCCESS;
         }
@@ -74,6 +77,7 @@ SelectDisk(
 
         CurrentDisk = DiskEntry;
         CurrentPartition = NULL;
+        CurrentVolume = NULL;
         ConResPrintf(StdOut, IDS_SELECT_DISK, CurrentDisk->DiskNumber);
         return EXIT_SUCCESS;
     }
@@ -86,7 +90,10 @@ SelectDisk(
             return EXIT_SUCCESS;
         }
 
+        /* The partition and volume of the disk selected before lose the focus too. */
         CurrentDisk = NULL;
+        CurrentPartition = NULL;
+        CurrentVolume = NULL;
 
         Entry = DiskListHead.Flink;
         while (Entry != &DiskListHead)
@@ -97,6 +104,7 @@ SelectDisk(
             {
                 CurrentDisk = DiskEntry;
                 CurrentPartition = NULL;
+                CurrentVolume = NULL;
                 ConResPrintf(StdOut, IDS_SELECT_DISK, CurrentDisk->DiskNumber);
                 return EXIT_SUCCESS;
             }
@@ -285,7 +293,10 @@ SelectVolume(
         if (VolumeEntry->VolumeNumber == ulValue)
         {
             CurrentVolume = VolumeEntry;
-            /* The partition of a basic volume, and its disk, get the focus too. */
+            /*
+             * The partition of a basic volume, and its disk, get the focus too;
+             * a volume without one leaves no partition selected.
+             */
             CurrentPartition = GetPartitionForVolume(VolumeEntry);
             if (CurrentPartition != NULL)
                 CurrentDisk = CurrentPartition->DiskEntry;

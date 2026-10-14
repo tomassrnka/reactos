@@ -3130,6 +3130,39 @@ RefreshVolumeList(
  * listed before are kept across all the reads; if they cannot be saved,
  * the list is not read again and no volume gets the focus.
  */
+/*
+ * The selected volume, if the selected disk and partition agree with it:
+ * NULL when a partition is selected that is not the volume's, or the volume
+ * lies on disks other than the selected one. Commands that act on a volume
+ * take it from here, so that none acts on a volume of another disk.
+ */
+PVOLENTRY
+GetFocusVolume(VOID)
+{
+    ULONG i;
+
+    if (CurrentVolume == NULL)
+        return NULL;
+
+    if (CurrentPartition != NULL &&
+        GetPartitionForVolume(CurrentVolume) != CurrentPartition)
+        return NULL;
+
+    /* Volumes that are not on a disk (CD-ROM) have no extents */
+    if (CurrentDisk != NULL && CurrentVolume->pExtents != NULL)
+    {
+        for (i = 0; i < CurrentVolume->pExtents->NumberOfDiskExtents; i++)
+        {
+            if (CurrentVolume->pExtents->Extents[i].DiskNumber == CurrentDisk->DiskNumber)
+                return CurrentVolume;
+        }
+        return NULL;
+    }
+
+    return CurrentVolume;
+}
+
+
 VOID
 SelectVolumeOfNewPartition(
     _In_ PPARTENTRY PartEntry)

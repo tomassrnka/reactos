@@ -339,15 +339,18 @@ CanLockVolume(
 /*
  * The partition with the focus: the selected partition (selecting a volume
  * selects its partition, selecting a partition its volume), else the
- * partition of the selected volume.
+ * partition of the selected volume when it agrees with the selected disk.
  */
 PPARTENTRY
 GetFocusPartition(VOID)
 {
+    PVOLENTRY VolumeEntry;
+
     if (CurrentPartition != NULL)
         return CurrentPartition;
-    if (CurrentVolume != NULL)
-        return GetPartitionForVolume(CurrentVolume);
+    VolumeEntry = GetFocusVolume();
+    if (VolumeEntry != NULL)
+        return GetPartitionForVolume(VolumeEntry);
     return NULL;
 }
 
@@ -558,7 +561,7 @@ extend_main(
         }
     }
 
-    bVolumeFocus = (CurrentVolume != NULL);
+    bVolumeFocus = (GetFocusVolume() != NULL);
     PartEntry = GetFocusPartition();
     if (PartEntry == NULL || !PartEntry->IsPartitioned)
     {

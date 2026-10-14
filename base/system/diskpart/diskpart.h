@@ -737,6 +737,9 @@ PVOLENTRY
 GetVolumeFromPartition(
     _In_ PPARTENTRY PartEntry);
 
+PVOLENTRY
+GetFocusVolume(VOID);
+
 VOID
 SelectVolumeOfNewPartition(
     _In_ PPARTENTRY PartEntry);

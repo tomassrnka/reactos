@@ -109,7 +109,7 @@ format_main(
     BOOLEAN Success = FALSE;
 
 
-    if (CurrentVolume == NULL)
+    if (GetFocusVolume() == NULL)
     {
         ConResPuts(StdOut, IDS_SELECT_NO_VOLUME);
         return EXIT_SUCCESS;
