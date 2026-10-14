@@ -2299,7 +2299,7 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 	struct inode *bvi = vol->lcnbmp_ino;
 	struct ntfs_inode *bni = NTFS_I(bvi);
 	u32 ss = vol->sector_size;
-	s64 old_nr = vol->nr_clusters, nr, old_bytes, bytes;
+	s64 old_nr = vol->nr_clusters, nr, old_bytes, bytes, pad_end, blk_end;
 	u64 old_sectors;
 	u8 *boot;
 	int err;
@@ -2372,19 +2372,24 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		err = ngc_grow_lcn_hints(vol, old_nr, nr);
 		if (err)
 			goto failed;
-		/* The bits that were padding before become free clusters; the grown bytes are zero already. */
-		err = ngc_clear_bits_stepped(v, old_nr, min_t(s64, nr, (s64)old_bytes << 3));
+		/*
+		 * Until the last commit the volume has its old size, so the bits past its last cluster are
+		 * padding: set to the end of the 8 KiB $Bitmap block that holds the last cluster (as ntfsck
+		 * expects them; the grown bytes there are zero now), zero after it.  Bits past that block
+		 * (an oversized $Bitmap that an interrupted extend left) become free clusters now.
+		 */
+		pad_end = min_t(s64, nr, round_up(old_nr, 64));
+		blk_end = round_up(((old_nr - 1) >> 3) + 1, 8192) << 3;
+		if (bytes > old_bytes && min_t(s64, bytes << 3, blk_end) > (old_bytes << 3)) {
+			down_write(&vol->lcnbmp_lock);
+			err = ntfs_bitmap_set_bits_in_run(bvi, old_bytes << 3, min_t(s64, bytes << 3, blk_end) - (old_bytes << 3), 1);
+			up_write(&vol->lcnbmp_lock);
+			if (err)
+				goto failed;
+		}
+		err = ngc_clear_bits_stepped(v, max_t(s64, pad_end, blk_end), min_t(s64, nr, (s64)old_bytes << 3));
 		if (err)
 			goto failed;
-		down_write(&vol->lcnbmp_lock);
-		if (nr & 63)
-			err = ntfs_bitmap_set_bits_in_run(bvi, nr, 64 - (nr & 63), 1);
-		if (!err)
-			vol->nr_clusters = nr;
-		up_write(&vol->lcnbmp_lock);
-		if (err)
-			goto failed;
-		ngc_recount_free(vol);
 	}
 	if (ngc_resize_fault == 1) {
 		err = -EIO;
@@ -2393,14 +2398,27 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 	if (ngc_resize_fault == 4)
 		kshim_jnl_arm_fault(v->bdev, KJ_FAULT_APPLY);
 	/*
-	 * $Bitmap first, the boot sector after it: an interruption between the two commits leaves
-	 * the old size with a $Bitmap larger than it needs, which every reader mounts (a checker
-	 * reports the free bits past the old end and sets them).  Once the clusters are in use in
+	 * $Bitmap first: an interruption after this commit leaves the old size, its padding intact,
+	 * with a $Bitmap larger than it needs, which every reader and checker accepts.  The old
+	 * padding (at most one 8 KiB block) then becomes free clusters, the new padding word is set
+	 * and the boot sector follows, all in the last commit.  Once the clusters are in use in
 	 * memory, a failed write leaves the volume read-only.
 	 */
 	err = ngc_commit(v);
 	if (!err && ngc_resize_fault == 2)
 		err = -EIO;
+	if (!err) {
+		down_write(&vol->lcnbmp_lock);
+		if (min_t(s64, nr, max_t(s64, pad_end, blk_end)) > old_nr)
+			err = ntfs_bitmap_clear_run(bvi, old_nr, min_t(s64, nr, max_t(s64, pad_end, blk_end)) - old_nr);
+		if (!err && (nr & 63))
+			err = ntfs_bitmap_set_bits_in_run(bvi, nr, 64 - (nr & 63), 1);
+		if (!err)
+			vol->nr_clusters = nr;
+		up_write(&vol->lcnbmp_lock);
+		if (!err)
+			ngc_recount_free(vol);
+	}
 	if (!err)
 		err = ngc_write_boot(v, sectors, boot);
 	if (!err && ngc_resize_fault == 7)
