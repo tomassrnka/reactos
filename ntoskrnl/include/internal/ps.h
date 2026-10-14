@@ -206,7 +206,9 @@ PspCreateProcess(
     IN HANDLE SectionHandle OPTIONAL,
     IN HANDLE DebugPort OPTIONAL,
     IN HANDLE ExceptionPort OPTIONAL,
-    IN BOOLEAN InJob
+    IN BOOLEAN InJob,
+    IN PHANDLE HandleList OPTIONAL,
+    IN SIZE_T HandleCount
 );
 
 //

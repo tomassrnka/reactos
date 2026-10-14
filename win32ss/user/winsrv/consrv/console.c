@@ -1117,6 +1117,19 @@ ConSrvInheritConsole(
     /* Inherit the console */
     ProcessData->ConsoleHandle = ConsoleHandle;
 
+    /* A filtered table may omit all of the parent's standard console handles.
+     * Open fresh defaults for an ordinary console child, keeping the selected
+     * slots intact. STARTF_USESTDHANDLES retains the caller's explicit values. */
+    if (!CreateNewHandleTable && ProcessData->Process->HandleListPresent &&
+        !(ConsoleStartInfo->dwStartupFlags & STARTF_USESTDHANDLES))
+    {
+        Status = ConSrvInitProcessHandles(ProcessData, Console,
+                                          &ConsoleStartInfo->InputHandle,
+                                          &ConsoleStartInfo->OutputHandle,
+                                          &ConsoleStartInfo->ErrorHandle);
+        if (!NT_SUCCESS(Status)) goto Quit;
+    }
+
     if (CreateNewHandleTable)
     {
         /*

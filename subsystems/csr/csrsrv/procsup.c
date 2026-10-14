@@ -426,6 +426,22 @@ CsrCreateProcess(IN HANDLE hProcess,
                  IN ULONG Flags,
                  IN PCLIENT_ID DebugCid)
 {
+    return CsrCreateProcessWithHandleList(hProcess, hThread, ClientId, NtSession,
+                                         Flags, DebugCid, FALSE, NULL, 0);
+}
+
+NTSTATUS
+NTAPI
+CsrCreateProcessWithHandleList(IN HANDLE hProcess,
+                              IN HANDLE hThread,
+                              IN PCLIENT_ID ClientId,
+                              IN PCSR_NT_SESSION NtSession,
+                              IN ULONG Flags,
+                              IN PCLIENT_ID DebugCid,
+                              IN BOOLEAN HandleListPresent,
+                              IN PHANDLE HandleList,
+                              IN ULONG HandleCount)
+{
     PCSR_THREAD CurrentThread = CsrGetClientThread();
     CLIENT_ID CurrentCid;
     PCSR_PROCESS CurrentProcess;
@@ -615,11 +631,20 @@ CsrCreateProcess(IN HANDLE hProcess,
     /* Set the priority to Background */
     CsrSetBackgroundPriority(CsrProcess);
 
-    /* Insert the Process */
+    /* The capture buffer belongs to this request, never to the parent process.
+     * Concurrent process creations therefore cannot replace each other's list. */
+    CsrProcess->HandleListPresent = HandleListPresent;
+    CsrProcess->InheritHandleList = HandleList;
+    CsrProcess->InheritHandleCount = HandleCount;
+    CsrProcess->InheritStatus = STATUS_SUCCESS;
     CsrInsertProcess(CurrentProcess, CsrProcess);
+    Status = CsrProcess->InheritStatus;
+    CsrProcess->InheritHandleList = NULL;
+    CsrProcess->InheritHandleCount = 0;
 
     /* Release lock and return */
     CsrReleaseProcessLock();
+    if (!NT_SUCCESS(Status)) CsrDestroyProcess(ClientId, Status);
     return Status;
 }
 

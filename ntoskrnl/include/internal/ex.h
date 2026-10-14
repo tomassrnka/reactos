@@ -509,7 +509,9 @@ ExDupHandleTable(
     IN PEPROCESS Process,
     IN PHANDLE_TABLE HandleTable,
     IN PEX_DUPLICATE_HANDLE_CALLBACK DupHandleProcedure,
-    IN ULONG_PTR Mask
+    IN ULONG_PTR Mask,
+    IN PHANDLE HandleList OPTIONAL,
+    IN SIZE_T HandleCount
 );
 
 BOOLEAN

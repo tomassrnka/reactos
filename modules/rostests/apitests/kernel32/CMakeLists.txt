@@ -39,6 +39,7 @@ list(APPEND SOURCE
     GetModuleFileName.c
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
+    HandleList.c
     IdleProcessor.c
     InitOnce.c
     interlck.c

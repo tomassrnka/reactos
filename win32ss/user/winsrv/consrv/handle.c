@@ -122,6 +122,7 @@ ConSrvInheritHandlesTable(IN PCONSOLE_PROCESS_DATA SourceProcessData,
 {
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG i, j;
+    PCSR_PROCESS TargetProcess = TargetProcessData->Process;
 
     RtlEnterCriticalSection(&SourceProcessData->HandleTableLock);
 
@@ -130,6 +131,33 @@ ConSrvInheritHandlesTable(IN PCONSOLE_PROCESS_DATA SourceProcessData,
     {
         Status = STATUS_UNSUCCESSFUL;
         goto Quit;
+    }
+
+    if (TargetProcess->HandleListPresent)
+    {
+        /* Validate every requested console slot under the same lock used for
+         * copying. Never toggle the parent's inheritance bits. */
+        for (i = 0; i < TargetProcess->InheritHandleCount; ++i)
+        {
+            ULONG k;
+            ULONG_PTR Index = (ULONG_PTR)TargetProcess->InheritHandleList[i] >> 2;
+            for (k = 0; k < i; ++k)
+            {
+                if (TargetProcess->InheritHandleList[k] == TargetProcess->InheritHandleList[i])
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    goto Quit;
+                }
+            }
+            if (!IsConsoleHandle(TargetProcess->InheritHandleList[i]) ||
+                Index >= SourceProcessData->HandleTableSize ||
+                !SourceProcessData->HandleTable[Index].Object ||
+                !SourceProcessData->HandleTable[Index].Inheritable)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                goto Quit;
+            }
+        }
     }
 
     /* Allocate a new handle table for the child process */
@@ -143,6 +171,18 @@ ConSrvInheritHandlesTable(IN PCONSOLE_PROCESS_DATA SourceProcessData,
     }
 
     TargetProcessData->HandleTableSize = SourceProcessData->HandleTableSize;
+
+    if (TargetProcess->HandleListPresent)
+    {
+        for (i = 0; i < TargetProcess->InheritHandleCount; ++i)
+        {
+            ULONG_PTR Index = (ULONG_PTR)TargetProcess->InheritHandleList[i] >> 2;
+            if (TargetProcessData->HandleTable[Index].Object) continue; /* Validated above */
+            TargetProcessData->HandleTable[Index] = SourceProcessData->HandleTable[Index];
+            AdjustHandleCounts(&TargetProcessData->HandleTable[Index], +1);
+        }
+        goto Quit;
+    }
 
     /*
      * Parse the parent process' handles table and, for each handle,
