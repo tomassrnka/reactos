@@ -74,6 +74,25 @@ static void CheckInterruptTime(void)
     CHECK(Storage[0] == 0x12345678 && Storage[3] == 0xabcdef01);
 }
 
+static void CheckRuntimeReporting(void)
+{
+    typedef HRESULT (WINAPI *MODULE)(PCWSTR, PVOID);
+    HMODULE Kernel = GetModuleHandleW(L"kernel32.dll");
+    MODULE Register = (MODULE)GetProcAddress(Kernel, "WerRegisterRuntimeExceptionModule");
+    MODULE Unregister = (MODULE)GetProcAddress(Kernel, "WerUnregisterRuntimeExceptionModule");
+    const WCHAR Name[] = L"w643c-nonexistent-reporting-handler.dll";
+    HRESULT Status;
+    CHECK(Register && Unregister);
+    if (!Register || !Unregister) return;
+    Status = Register(Name, (PVOID)0x12345678);
+    /* Windows records the external handler without loading it here. ReactOS
+     * reports the unavailable service through an ordinary HRESULT. */
+    CHECK(Status == S_OK || Status == E_NOTIMPL);
+    CHECK(GetModuleHandleW(Name) == NULL);
+    CHECK(Unregister(Name, (PVOID)0x12345678) == Status);
+    if (Status == E_NOTIMPL) puts("RUNTIME REPORTING external service unavailable");
+}
+
 static void CheckVolumeByHandle(void)
 {
     typedef BOOL (WINAPI *VOLUME)(HANDLE, PWSTR, DWORD, PDWORD, PDWORD, PDWORD, PWSTR, DWORD);
@@ -585,6 +604,7 @@ int wmain(int argc, WCHAR **argv)
     CheckAsyncPipe();
     CheckVolumeByHandle();
     CheckInterruptTime();
+    CheckRuntimeReporting();
     CheckPrivileges();
     CheckObjectSecurity();
     CheckCurrentDirectory();

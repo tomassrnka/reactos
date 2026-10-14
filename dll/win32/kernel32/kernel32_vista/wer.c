@@ -13,6 +13,26 @@
 /* There is no error reporting service to consult them, they are only kept for WerGetFlags */
 static DWORD BaseWerFlags;
 
+/* External runtime exception handlers require an error-reporting service.
+ * Expose a recoverable capability failure until that service is available. */
+HRESULT
+WINAPI
+WerRegisterRuntimeExceptionModule(PCWSTR Module, PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Module);
+    UNREFERENCED_PARAMETER(Context);
+    return E_NOTIMPL;
+}
+
+HRESULT
+WINAPI
+WerUnregisterRuntimeExceptionModule(PCWSTR Module, PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Module);
+    UNREFERENCED_PARAMETER(Context);
+    return E_NOTIMPL;
+}
+
 /*
  * @implemented
  */
