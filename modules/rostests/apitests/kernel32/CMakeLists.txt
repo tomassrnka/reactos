@@ -31,6 +31,7 @@ list(APPEND SOURCE
     ForcedRelocation.c
     FormatMessage.c
     FormatMessageInsert.c
+    GetBinaryType.c
     GetComputerNameEx.c
     GetCPInfo.c
     GetCurrentDirectory.c
