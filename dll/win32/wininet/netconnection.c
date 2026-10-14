@@ -697,6 +697,31 @@ DWORD NETCON_send(netconn_t *connection, const void *msg, size_t len, int flags,
     }
 }
 
+#ifdef __REACTOS__
+/* The socket layer ignores SO_RCVTIMEO, so a receive that waits for data waits here for the receive timeout */
+static DWORD wait_for_data(netconn_t *conn)
+{
+    FD_SET set;
+    TIMEVAL timeout;
+    int res;
+
+    if (!conn->recv_timeout)
+        return ERROR_SUCCESS;
+
+    timeout.tv_sec = conn->recv_timeout / 1000;
+    timeout.tv_usec = (conn->recv_timeout % 1000) * 1000;
+    FD_ZERO(&set);
+    FD_SET(conn->socket, &set);
+    res = select(conn->socket + 1, &set, NULL, NULL, &timeout);
+    if (!res)
+    {
+        WARN("receive timed out\n");
+        return ERROR_INTERNET_TIMEOUT;
+    }
+    return ERROR_SUCCESS;
+}
+#endif
+
 static BOOL read_ssl_chunk(netconn_t *conn, void *buf, SIZE_T buf_size, BOOL blocking, SIZE_T *ret_size, BOOL *eof)
 {
     const SIZE_T ssl_buf_size = conn->ssl_sizes.cbHeader+conn->ssl_sizes.cbMaximumMessage+conn->ssl_sizes.cbTrailer;
@@ -717,6 +742,13 @@ static BOOL read_ssl_chunk(netconn_t *conn, void *buf, SIZE_T buf_size, BOOL blo
     }
 
     set_socket_blocking(conn, blocking && !buf_len);
+#ifdef __REACTOS__
+    if(blocking && !buf_len) {
+        DWORD wait_res = wait_for_data(conn);
+        if(wait_res != ERROR_SUCCESS)
+            return wait_res;
+    }
+#endif
     size = sock_recv(conn->socket, conn->ssl_buf+buf_len, ssl_buf_size-buf_len, 0);
     if(size < 0) {
         if(!buf_len) {
@@ -758,6 +790,13 @@ static BOOL read_ssl_chunk(netconn_t *conn, void *buf, SIZE_T buf_size, BOOL blo
             assert(buf_len < ssl_buf_size);
 
             set_socket_blocking(conn, blocking);
+#ifdef __REACTOS__
+            if(blocking) {
+                DWORD wait_res = wait_for_data(conn);
+                if(wait_res != ERROR_SUCCESS)
+                    return wait_res;
+            }
+#endif
             size = sock_recv(conn->socket, conn->ssl_buf+buf_len, ssl_buf_size-buf_len, 0);
             if(size < 1) {
                 if(size < 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
@@ -829,6 +868,14 @@ DWORD NETCON_recv(netconn_t *connection, void *buf, size_t len, BOOL blocking, i
     if (!connection->secure)
     {
         set_socket_blocking(connection, blocking);
+#ifdef __REACTOS__
+        if (blocking)
+        {
+            DWORD wait_res = wait_for_data(connection);
+            if (wait_res != ERROR_SUCCESS)
+                return wait_res;
+        }
+#endif
         *recvd = sock_recv(connection->socket, buf, len, 0);
         return *recvd == -1 ? WSAGetLastError() :  ERROR_SUCCESS;
     }
@@ -909,6 +956,11 @@ int NETCON_GetCipherStrength(netconn_t *connection)
 DWORD NETCON_set_timeout(netconn_t *connection, BOOL send, DWORD value)
 {
     int result;
+
+#ifdef __REACTOS__
+    if (!send)
+        connection->recv_timeout = value;
+#endif
 
     result = setsockopt(connection->socket, SOL_SOCKET,
                         send ? SO_SNDTIMEO : SO_RCVTIMEO, (void*)&value,
