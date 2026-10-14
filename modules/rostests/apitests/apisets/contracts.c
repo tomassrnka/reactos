@@ -9,6 +9,7 @@
 #include <windef.h>
 #include <winbase.h>
 #include <string.h>
+#include <wchar.h>
 
 /*
  * Every contract below is hosted in kernelbase.dll, sechost.dll or a similar module on Windows, and its functions
@@ -396,8 +397,8 @@ test_contract(const CONTRACT_DATA *Data)
 /*
  * Windows 10 hosts every contract of the shcore family in shcore.dll (measured with LoadLibrary and GetModuleFileName on
  * Windows 10 22H2, x64 and WOW64). The contracts below have functions in ReactOS shcore, so they go there too. The
- * families path and taskpool are not listed: no ReactOS module exports their functions by the names Windows 10 shcore
- * uses (shlwapi has the path functions, shcore has only ordinal stubs).
+ * families path and taskpool are not listed. Path: shcore has no named export for its functions (PathBuildRootA/W and
+ * PathIsNetworkPathA/W are ordinal stubs there; shlwapi has them by name). Taskpool: no ReactOS module implements it.
  */
 static const char *const g_ShcoreHosted[] =
 {
@@ -455,6 +456,50 @@ test_shcore_hosts(void)
     FreeLibrary(Shcore);
 }
 
+/* shell32 answered this through the sysinfo contract with a made-up name; a failure is the honest answer without one */
+static void
+test_sysinfo_name(void)
+{
+    typedef HRESULT (WINAPI *FN_GetName)(PWSTR *);
+    typedef void (WINAPI *FN_CoTaskMemFree)(void *);
+    HMODULE Api = LoadLibraryA("api-ms-win-shcore-sysinfo-l1-1-0.dll");
+    HMODULE Ole32 = LoadLibraryA("ole32.dll");
+    FN_GetName pGetName = NULL;
+    FN_CoTaskMemFree pCoTaskMemFree = NULL;
+    PWSTR Name = NULL;
+    HRESULT hr;
+
+    if (Api)
+        pGetName = (FN_GetName)GetProcAddress(Api, "GetCurrentProcessExplicitAppUserModelID");
+    if (Ole32)
+        pCoTaskMemFree = (FN_CoTaskMemFree)GetProcAddress(Ole32, "CoTaskMemFree");
+
+    if (!Api || !pCoTaskMemFree)
+    {
+        skip("api-ms-win-shcore-sysinfo-l1-1-0.dll or ole32.dll is not usable\n");
+    }
+    else if (!pGetName)
+    {
+        ok(!is_reactos(), "GetCurrentProcessExplicitAppUserModelID is missing\n");
+    }
+    else
+    {
+        hr = pGetName(&Name);
+        if (SUCCEEDED(hr))
+        {
+            ok(Name != NULL, "hr %08lx but no name\n", hr);
+            ok(!Name || wcscmp(Name, L"ROS FixMe") != 0, "A made-up name came back: %ls\n", Name);
+            if (Name)
+                pCoTaskMemFree(Name);
+        }
+    }
+
+    if (Ole32)
+        FreeLibrary(Ole32);
+    if (Api)
+        FreeLibrary(Api);
+}
+
 START_TEST(contracts)
 {
     size_t n;
@@ -463,6 +508,7 @@ START_TEST(contracts)
         test_contract(&g_Data[n]);
 
     test_shcore_hosts();
+    test_sysinfo_name();
 
     trace("Checked %u functions\n", g_Checked);
 }

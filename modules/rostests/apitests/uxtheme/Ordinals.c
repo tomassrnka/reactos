@@ -136,6 +136,13 @@ START_TEST(Ordinals)
     if (!Module)
         return;
 
+    /* A ReactOS built for the default export level 0x502 has the numbering of Windows XP */
+    if (is_reactos() && !GetProcAddress(Module, "OpenThemeDataForDpi"))
+    {
+        skip("This uxtheme has the export level of Windows 2003\n");
+        return;
+    }
+
     for (n = 0; n < ARRAYSIZE(g_Exports); ++n)
     {
         FARPROC ByName = GetProcAddress(Module, g_Exports[n].Name);
