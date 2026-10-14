@@ -388,6 +388,21 @@ StreamSocketConnectSendComplete(
     return STATUS_SUCCESS;
 }
 
+/* A queued ConnectEx was cancelled while its transport connect completed */
+static BOOLEAN AfdConnectExCancelled(PAFD_FCB FCB)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = FCB->PendingIrpList[FUNCTION_CONNECTEX].Flink;
+         Entry != &FCB->PendingIrpList[FUNCTION_CONNECTEX];
+         Entry = Entry->Flink)
+    {
+        if (CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry)->Cancel)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* The ConnectEx initial-send buffer, on paths where no send owns it */
 static VOID FreeConnectSendBuffer(PAFD_FCB FCB)
 {
@@ -507,6 +522,13 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         if( Status == STATUS_PENDING )
             Status = STATUS_SUCCESS;
+
+        if (FCB->OnConnectSendBuffer && AfdConnectExCancelled(FCB))
+        {
+            /* Its cancel routine is spent, so a stalled initial send could never be cancelled */
+            Status = STATUS_CANCELLED;
+            goto end;
+        }
 
         if (FCB->OnConnectSendBuffer)
         {
