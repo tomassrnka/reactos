@@ -33,6 +33,7 @@ list(APPEND SOURCE
     ServiceNetwork.c
     SetEntriesInAclOld.c
     SetNamedSecurityInfoInherit.c
+    SddlRights.c
     svchlp.c)
 
 list(APPEND PCH_SKIP_SOURCE

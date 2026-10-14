@@ -38,6 +38,7 @@ extern void func_ServiceEnv(void);
 extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
 extern void func_SetNamedSecurityInfoInherit(void);
+extern void func_SddlRights(void);
 
 const struct test winetest_testlist[] =
 {
@@ -77,6 +78,7 @@ const struct test winetest_testlist[] =
     { "ServiceNetwork", func_ServiceNetwork },
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
+    { "SddlRights", func_SddlRights },
     { 0, 0 }
 };
 
