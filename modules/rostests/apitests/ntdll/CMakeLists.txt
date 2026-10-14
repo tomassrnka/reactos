@@ -42,6 +42,7 @@ list(APPEND SOURCE
     LdrLoadDll.c
     load_notifications.c
     locale.c
+    LpcCallbackRequest.c
     NtAcceptConnectPort.c
     NtAccessCheck.c
     NtAccessCheckByType.c

@@ -29,6 +29,7 @@ extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
 extern void func_LdrLoadDll(void);
 extern void func_load_notifications(void);
+extern void func_LpcCallbackRequest(void);
 extern void func_NtAcceptConnectPort(void);
 extern void func_NtAccessCheck(void);
 extern void func_NtAccessCheckByType(void);
@@ -171,6 +172,7 @@ const struct test winetest_testlist[] =
     { "LdrFindResource_U",              func_LdrFindResource_U },
     { "LdrLoadDll",                     func_LdrLoadDll },
     { "load_notifications",             func_load_notifications },
+    { "LpcCallbackRequest",             func_LpcCallbackRequest },
     { "NtAcceptConnectPort",            func_NtAcceptConnectPort },
     { "NtAccessCheck",                  func_NtAccessCheck },
     { "NtAccessCheckByType",            func_NtAccessCheckByType },
