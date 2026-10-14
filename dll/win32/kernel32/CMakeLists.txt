@@ -30,6 +30,7 @@ list(APPEND SOURCE
     client/heapmem.c
     client/job.c
     client/loader.c
+    client/mitigation.c
     client/path.c
     client/pathansi.c
     client/perfcnt.c
