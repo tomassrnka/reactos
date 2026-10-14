@@ -394,6 +394,244 @@ Cleanup:
     Drain(200);
 }
 
+/* An overlapped ConnectEx that reports through its event; the socket has no
+ * completion port, so plain connect() calls on it work as for any socket */
+typedef struct _EV_REQUEST
+{
+    OVERLAPPED Overlapped;
+    BOOL Done;
+    DWORD Error;
+} EV_REQUEST, *PEV_REQUEST;
+
+static
+SOCKET
+EventSocket(ULONG Address)
+{
+    SOCKET Socket;
+    struct sockaddr_in Addr;
+
+    Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (Socket == INVALID_SOCKET)
+        return INVALID_SOCKET;
+    ZeroMemory(&Addr, sizeof(Addr));
+    Addr.sin_family = AF_INET;
+    Addr.sin_addr.s_addr = Address;
+    if (bind(Socket, (struct sockaddr *)&Addr, sizeof(Addr)) == SOCKET_ERROR || !GetConnectEx(Socket))
+    {
+        closesocket(Socket);
+        return INVALID_SOCKET;
+    }
+    return Socket;
+}
+
+static
+int
+StartConnectExEvent(SOCKET Socket, const struct sockaddr_in *Addr, PEV_REQUEST Request)
+{
+    DWORD Sent = 0;
+    HANDLE Event = Request->Overlapped.hEvent;
+
+    if (!Event)
+        Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    else
+        ResetEvent(Event);
+    ZeroMemory(Request, sizeof(*Request));
+    Request->Overlapped.hEvent = Event;
+    if (pConnectEx(Socket, (const struct sockaddr *)Addr, sizeof(*Addr), NULL, 0, &Sent, &Request->Overlapped))
+        return 0;
+    return WSAGetLastError() == ERROR_IO_PENDING ? 0 : WSAGetLastError();
+}
+
+/* Wait for the request's event, then for its result */
+static
+BOOL
+WaitEventRequest(SOCKET Socket, PEV_REQUEST Request, DWORD Milliseconds)
+{
+    DWORD Bytes, Flags;
+
+    if (WaitForSingleObject(Request->Overlapped.hEvent, Milliseconds) != WAIT_OBJECT_0)
+        return FALSE;
+    Request->Done = TRUE;
+    Request->Error = WSAGetOverlappedResult(Socket, &Request->Overlapped, &Bytes, FALSE, &Flags) ? 0 : WSAGetLastError();
+    return TRUE;
+}
+
+/* Wait for a nonblocking connect: 1 connected, 0 failed, -1 nothing happened */
+static
+int
+WaitConnect(SOCKET Socket, DWORD Milliseconds)
+{
+    fd_set WriteSet, ExceptSet;
+    struct timeval Timeout;
+
+    Timeout.tv_sec = Milliseconds / 1000;
+    Timeout.tv_usec = (Milliseconds % 1000) * 1000;
+    FD_ZERO(&WriteSet);
+    FD_ZERO(&ExceptSet);
+    FD_SET(Socket, &WriteSet);
+    FD_SET(Socket, &ExceptSet);
+    if (select(0, NULL, &WriteSet, &ExceptSet, &Timeout) != 1)
+        return -1;
+    return FD_ISSET(Socket, &WriteSet) ? 1 : 0;
+}
+
+/* A ConnectEx cancelled while it connects completes with
+ * ERROR_OPERATION_ABORTED, and the socket can connect again with ConnectEx or
+ * connect() (Windows Server 2008 R2 and Windows 10). ReactOS left the socket
+ * connecting, so both failed with WSAEINVAL or waited */
+static
+void
+TestCancelThenConnect(BOOL WithConnectEx)
+{
+    static EV_REQUEST First[2], Second[2];
+    PEV_REQUEST pFirst = &First[WithConnectEx], pSecond = &Second[WithConnectEx];
+    SOCKET Client, Server = INVALID_SOCKET, Accepted = INVALID_SOCKET;
+    struct sockaddr_in Silent, Addr;
+    u_long NonBlocking = 1;
+    int Error, i;
+
+    for (i = 0; i < 60 && !SilentAddress(&Silent); i++)
+        Sleep(500);
+    if (i == 60)
+    {
+        skip("No local IPv4 subnet to connect into\n");
+        return;
+    }
+    Client = EventSocket(htonl(INADDR_ANY));
+    Server = Listener(&Addr);
+    if (Client == INVALID_SOCKET || Server == INVALID_SOCKET)
+    {
+        skip("Setup failed: %d\n", WSAGetLastError());
+        goto Cleanup;
+    }
+    Error = StartConnectExEvent(Client, &Silent, pFirst);
+    if (Error || WaitEventRequest(Client, pFirst, 300))
+    {
+        skip("The connect to the silent address did not stay pending (error %d, %lu)\n", Error, pFirst->Error);
+        goto Cleanup;
+    }
+    ok(CancelIo((HANDLE)Client), "CancelIo failed: %lu\n", GetLastError());
+    ok(WaitEventRequest(Client, pFirst, 3000), "The cancelled ConnectEx did not complete\n");
+    ok(pFirst->Error == ERROR_OPERATION_ABORTED, "The cancelled ConnectEx: error %lu\n", pFirst->Error);
+
+    if (WithConnectEx)
+    {
+        Error = StartConnectExEvent(Client, &Addr, pSecond);
+        ok(Error == 0, "ConnectEx after a cancelled one: error %d\n", Error);
+        if (Error)
+            goto Cleanup;
+        Accepted = AcceptWithin(Server, 5000);
+        ok(Accepted != INVALID_SOCKET, "The listener accepted nothing\n");
+        ok(WaitEventRequest(Client, pSecond, 5000), "ConnectEx after a cancelled one did not complete\n");
+        ok(pSecond->Error == 0, "ConnectEx after a cancelled one: error %lu\n", pSecond->Error);
+    }
+    else
+    {
+        ok(!ioctlsocket(Client, FIONBIO, &NonBlocking), "FIONBIO failed: %d\n", WSAGetLastError());
+        Error = connect(Client, (struct sockaddr *)&Addr, sizeof(Addr)) ? WSAGetLastError() : 0;
+        ok(Error == 0 || Error == WSAEWOULDBLOCK, "connect after a cancelled ConnectEx: error %d\n", Error);
+        if (Error != 0 && Error != WSAEWOULDBLOCK)
+            goto Cleanup;
+        ok(WaitConnect(Client, 5000) == 1, "connect after a cancelled ConnectEx did not connect\n");
+        Accepted = AcceptWithin(Server, 1000);
+        ok(Accepted != INVALID_SOCKET, "The listener accepted nothing\n");
+    }
+    /* The earlier failure is not reported for the new connection */
+    ok(WaitConnect(Client, 0) == 1, "The connected socket reports an error\n");
+
+Cleanup:
+    if (Accepted != INVALID_SOCKET)
+        closesocket(Accepted);
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Server != INVALID_SOCKET)
+        closesocket(Server);
+    if (pFirst->Overlapped.hEvent)
+        WaitForSingleObject(pFirst->Overlapped.hEvent, 3000);
+}
+
+typedef struct _CONNECT_CALL
+{
+    SOCKET Socket;
+    struct sockaddr_in Addr;
+    int Result;
+    int Error;
+} CONNECT_CALL, *PCONNECT_CALL;
+
+static
+DWORD
+WINAPI
+ConnectThread(LPVOID Parameter)
+{
+    PCONNECT_CALL Call = Parameter;
+
+    Call->Result = connect(Call->Socket, (struct sockaddr *)&Call->Addr, sizeof(Call->Addr));
+    Call->Error = Call->Result ? WSAGetLastError() : 0;
+    return 0;
+}
+
+/* connect() on a socket whose ConnectEx still connects fails at once with
+ * WSAEINVAL, blocking or not (Windows Server 2008 R2 and Windows 10). ReactOS
+ * queued it behind the ConnectEx. The call runs on a thread so that a queued
+ * blocking connect cannot hold the test */
+static
+void
+TestConnectWhileConnecting(BOOL Blocking)
+{
+    static EV_REQUEST First[2];
+    static CONNECT_CALL Call[2];
+    PEV_REQUEST pFirst = &First[Blocking];
+    PCONNECT_CALL pCall = &Call[Blocking];
+    SOCKET Client;
+    struct sockaddr_in Silent;
+    u_long NonBlocking = !Blocking;
+    HANDLE Thread;
+    DWORD Wait = WAIT_TIMEOUT;
+    int Error, i;
+
+    for (i = 0; i < 60 && !SilentAddress(&Silent); i++)
+        Sleep(500);
+    if (i == 60)
+    {
+        skip("No local IPv4 subnet to connect into\n");
+        return;
+    }
+    Client = EventSocket(htonl(INADDR_ANY));
+    if (Client == INVALID_SOCKET)
+    {
+        skip("Setup failed: %d\n", WSAGetLastError());
+        return;
+    }
+    Error = StartConnectExEvent(Client, &Silent, pFirst);
+    if (Error || WaitEventRequest(Client, pFirst, 300))
+    {
+        skip("The connect to the silent address did not stay pending (error %d, %lu)\n", Error, pFirst->Error);
+        closesocket(Client);
+        return;
+    }
+    ok(!ioctlsocket(Client, FIONBIO, &NonBlocking), "FIONBIO failed: %d\n", WSAGetLastError());
+    pCall->Socket = Client;
+    pCall->Addr = Silent;
+    pCall->Result = 1;
+    pCall->Error = -1;
+    Thread = CreateThread(NULL, 0, ConnectThread, pCall, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (Thread)
+        Wait = WaitForSingleObject(Thread, 3000);
+    ok(Wait == WAIT_OBJECT_0, "connect (%s) while a ConnectEx connects did not return\n", Blocking ? "blocking" : "nonblocking");
+    ok(pCall->Result == SOCKET_ERROR && pCall->Error == WSAEINVAL, "connect (%s) while a ConnectEx connects: %d, error %d\n",
+       Blocking ? "blocking" : "nonblocking", pCall->Result, pCall->Error);
+    ok(!WaitEventRequest(Client, pFirst, 0), "The ConnectEx ended: error %lu\n", pFirst->Error);
+
+    closesocket(Client);
+    if (Thread)
+    {
+        WaitForSingleObject(Thread, 5000);
+        CloseHandle(Thread);
+    }
+    WaitForSingleObject(pFirst->Overlapped.hEvent, 3000);
+}
+
 START_TEST(connectex)
 {
     WSADATA WsaData;
@@ -406,6 +644,10 @@ START_TEST(connectex)
         TestSecondAfterConnected();
         TestSecondWhileConnecting();
         TestFailedThenAgain();
+        TestCancelThenConnect(FALSE);
+        TestCancelThenConnect(TRUE);
+        TestConnectWhileConnecting(FALSE);
+        TestConnectWhileConnecting(TRUE);
         CloseHandle(Port);
     }
     WSACleanup();
