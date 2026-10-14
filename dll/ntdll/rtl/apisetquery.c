@@ -26,7 +26,7 @@
 #define MAX_CONTRACT_CHARS 160
 #define MAX_MINOR_VERSION 15
 
-DWORD LdrpApisetVersion(VOID);
+DWORD LdrpGetApisetVersions(VOID);
 
 static
 BOOLEAN
@@ -35,7 +35,7 @@ IsKnownContract(
 {
     UNICODE_STRING Host;
     BOOLEAN Resolved = FALSE;
-    DWORD Versions = LdrpApisetVersion();
+    DWORD Versions = LdrpGetApisetVersions();
 
     if (!Versions)
         return FALSE;

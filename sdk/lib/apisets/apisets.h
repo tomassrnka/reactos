@@ -23,6 +23,10 @@ extern "C"
 NTSTATUS
 ApiSetResolveToHost(_In_ DWORD ApisetVersion, _In_ PCUNICODE_STRING ApiToResolve, _Out_ PBOOLEAN Resolved, _Out_ PUNICODE_STRING Output);
 
+// ExactName: match the whole name only, as Windows 7 does (otherwise every minor version of a contract matches, as on Windows 10)
+NTSTATUS
+ApiSetResolveToHostEx(_In_ DWORD ApisetVersion, _In_ BOOLEAN ExactName, _In_ PCUNICODE_STRING ApiToResolve, _Out_ PBOOLEAN Resolved, _Out_ PUNICODE_STRING Output);
+
 #ifdef __cplusplus
 }
 #endif
