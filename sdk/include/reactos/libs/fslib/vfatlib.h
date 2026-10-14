@@ -36,4 +36,10 @@ VfatFormat(
     _In_ PUNICODE_STRING Label,
     _In_ ULONG ClusterSize);
 
+NTSTATUS
+NTAPI
+VfatExtend(
+    _In_ PUNICODE_STRING DriveRoot,
+    _In_ ULONGLONG NewSectors);
+
 #endif /* __VFATLIB_H */

@@ -81,12 +81,16 @@ typedef struct _NG_VCB
     struct ngc_volinfo Info;
     ULONG SectorSize;
     BOOLEAN ReadOnly;               /* mounted read-only: policy, registry or request */
+    BOOLEAN WritesLost;             /* a resize failed half way: changes made before it never reach the disk,
+                                       so a flush fails (ReadOnly is set too) */
     BOOLEAN Damaged;                /* read-only because the mount-time check found damage: write opens are
                                        granted and every modification refused, so a damaged system volume boots */
     BOOLEAN WriteThrough;           /* after IRP_MJ_SHUTDOWN: every change ends with a full sync */
     BOOLEAN Removable;              /* removable media: mounted read-only */
     BOOLEAN WrongMedia;             /* a verify found another medium: every request but close fails */
     ULONGLONG BootSectors;          /* boot sector's sector count, compared again at verify */
+    PFILE_OBJECT ShrinkOwner;       /* FSCTL_SHRINK_VOLUME: the handle with a prepared request (CoreLock), or NULL */
+    ULONGLONG ShrinkSectors;        /* the volume size that request asked for, in sectors without the boot copy */
     LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
     PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
     PNOTIFY_SYNC NotifySync;        /* directory change notification (FsRtl) */
@@ -222,6 +226,7 @@ typedef struct _NG_GLOBAL
 extern NG_GLOBAL NgGlobal;
 
 /* ntfsng.c */
+ULONG NgReadDword(PUNICODE_STRING KeyPath, PCWSTR Name);
 NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp);
 NTSTATUS NgErrnoToStatus(int Err);
 VOID NgAcquireCore(PNG_VCB Vcb);

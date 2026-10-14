@@ -114,7 +114,11 @@ void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads
 /* Drops the clean, unreferenced shim page-cache pages of a node. */
 void ngc_trim(ngc_node *n);
 /* Write side (all under the caller's volume lock). */
+/* ntfsng mounts no device of this size or more: its page index is 32 bits (2^32 pages of 4 KiB). */
+#define NGC_MAX_DEVICE_BYTES (1ULL << 44)
 int ngc_is_rw(ngc_vol *v);
+/* True when the core stopped writing for good: changes not committed yet are lost. */
+int ngc_failed(ngc_vol *v);
 int ngc_mark_dirty(ngc_vol *v);
 int ngc_sync(ngc_vol *v);
 int ngc_commit_now(ngc_vol *v);
@@ -130,6 +134,28 @@ int ngc_links(ngc_node *n);
 int ngc_parent_name(ngc_node *n, unsigned long long *parent, unsigned short *out, unsigned int *len);
 int ngc_get_security(ngc_vol *v, ngc_node *n, void **out, unsigned int *len);
 int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len);
+/* Volume size (under the caller's volume lock).  Sectors are of the volume's sector size. */
+struct ngc_ntfsdata {
+	unsigned long long serial, sectors, total_clusters, free_clusters;
+	unsigned long long mft_valid_data, mft_lcn, mft2_lcn, mft_zone_start, mft_zone_end;
+	unsigned int bytes_per_sector, bytes_per_cluster, bytes_per_record;
+	unsigned char major, minor;
+};
+void ngc_ntfs_data(ngc_vol *v, struct ngc_ntfsdata *d);
+int ngc_read_bitmap(ngc_vol *v, unsigned long long off, unsigned int len, void *buf);
+/* Grows the volume to @sectors on a device of @dev_size bytes (the sector after the volume holds the boot copy). */
+int ngc_extend(ngc_vol *v, unsigned long long sectors, unsigned long long dev_size);
+/* 0 when @sectors leaves fewer clusters (at least one), else -EINVAL. */
+int ngc_shrink_valid(ngc_vol *v, unsigned long long sectors);
+/* Shrinks to @sectors when every cluster past them is free (-ENOSPC otherwise; no data moves). */
+int ngc_shrink(ngc_vol *v, unsigned long long sectors);
+/* Test only (the "ResizeFault" DWORD of the Ntfs service key): the next resize fails at that stage
+ * (1: extend after the $Bitmap changes, before any commit; 2: extend after the $Bitmap commit;
+ * 3: shrink after the padding-bit commit; 4: the in-place pass of the extend's first commit fails
+ * half way; 5: the journal is degraded when the extend starts; 6: no overlay page can be allocated
+ * during the extend; 7: the in-place pass of the extend's boot-sector commit fails half way), as a
+ * failing device write or allocation would. */
+extern int ngc_resize_fault;
 /* Sets the volume label (@len UTF-16 units, at most NGC_LABEL_MAX; 0 clears it). */
 int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len);
 void ngc_free(void *p);

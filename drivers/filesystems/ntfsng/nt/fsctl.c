@@ -9,6 +9,23 @@
 #include "../shim/include/ngos.h"
 #include <ntstrsafe.h>
 
+#ifndef FSCTL_SHRINK_VOLUME
+/* Vista and later; the kernel-mode headers expose them only for NTDDI_VISTA builds. */
+#define FSCTL_SHRINK_VOLUME CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 108, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+typedef enum _SHRINK_VOLUME_REQUEST_TYPES
+{
+    ShrinkPrepare = 1,
+    ShrinkCommit,
+    ShrinkAbort
+} SHRINK_VOLUME_REQUEST_TYPES, *PSHRINK_VOLUME_REQUEST_TYPES;
+typedef struct _SHRINK_VOLUME_INFORMATION
+{
+    SHRINK_VOLUME_REQUEST_TYPES ShrinkRequestType;
+    ULONGLONG Flags;
+    LONGLONG NewNumberOfSectors;
+} SHRINK_VOLUME_INFORMATION, *PSHRINK_VOLUME_INFORMATION;
+#endif
+
 static NTSTATUS NgDeviceIoctlEx(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength, BOOLEAN Override);
 
 static NTSTATUS NgDeviceIoctl(PDEVICE_OBJECT Device, ULONG Code, PVOID Out, ULONG OutLength)
@@ -265,7 +282,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     /* The page index is 32 bits, so a byte offset at or above 16 TiB (2^32 pages of 4 KiB) wraps.
      * Refuse such a volume rather than alias its block-device and file I/O onto low offsets. */
-    if (Size >= (1ULL << 44))
+    if (Size >= NGC_MAX_DEVICE_BYTES)
     {
         DPRINT1("ntfsng: volume of %I64u bytes is 16 TiB or larger, not mounting (32-bit page index)\n", Size);
         return STATUS_UNRECOGNIZED_VOLUME;
@@ -884,6 +901,316 @@ static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, 
     return Status;
 }
 
+/* Test only: the "ResizeFault" DWORD of the service key arms a failure inside the next resize. */
+static VOID NgArmResizeFault(VOID)
+{
+    UNICODE_STRING Key = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Ntfs");
+    ngc_resize_fault = (int)NgReadDword(&Key, L"ResizeFault");
+    if (ngc_resize_fault)
+        DPRINT1("ntfsng: ResizeFault %d armed\n", ngc_resize_fault);
+}
+
+/* Errors of the resize requests: a size the volume cannot take is an invalid parameter there. */
+static NTSTATUS NgResizeStatus(int Err)
+{
+    if (Err == -NGC_EINVAL)
+        return STATUS_INVALID_PARAMETER;
+    return NgErrnoToStatus(Err);
+}
+
+/*
+ * After a resize (CoreLock held): the volume information again, and a core that a failed resize left
+ * read-only (nothing more may be written) makes the whole mount read-only, so that no write, cached
+ * or paging, is accepted that could never reach the disk.  A core that stopped writing for good also
+ * makes flushes fail (WritesLost): what was written before can no longer reach the disk either.
+ */
+static VOID NgResizeEnded(PNG_VCB Vcb)
+{
+    ngc_volinfo(Vcb->Core, &Vcb->Info);
+    if (ngc_failed(Vcb->Core))
+        Vcb->WritesLost = TRUE;
+    if (!ngc_is_rw(Vcb->Core) && !Vcb->ReadOnly)
+    {
+        DPRINT1("ntfsng: volume %08lx: a resize failed half way, the volume is read-only now\n", Vcb->Vpb->SerialNumber);
+        Vcb->ReadOnly = TRUE;
+    }
+}
+
+/* A volume handle that may change the volume (as FSCTL_LOCK_VOLUME), on a volume the core may write. */
+static NTSTATUS NgResizeAllowed(PNG_VCB Vcb, PNG_FCB Fcb, PFILE_OBJECT FileObject)
+{
+    if (!Fcb || !Fcb->IsVolume)
+        return STATUS_INVALID_PARAMETER;
+    if (!((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+        return STATUS_ACCESS_DENIED;
+    if (Vcb->ReadOnly || Vcb->Damaged)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * FSCTL_EXTEND_VOLUME: after the partition under it grew (IOCTL_DISK_GROW_PARTITION), the volume
+ * takes the given number of sectors, its last one holding the boot sector copy (as on Windows
+ * Server 2008 R2: the boot sector then counts one sector less).  A size with fewer clusters than
+ * the volume has is invalid; one with the same number succeeds and changes nothing.
+ */
+static NTSTATUS NgExtendVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    GET_LENGTH_INFORMATION Length;
+    LONGLONG Sectors;
+    NTSTATUS Status;
+    int Err;
+
+    Status = NgResizeAllowed(Vcb, Fcb, Stack->FileObject);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(LONGLONG) || !Irp->AssociatedIrp.SystemBuffer)
+        return STATUS_INVALID_PARAMETER;
+    Sectors = *(PLONGLONG)Irp->AssociatedIrp.SystemBuffer;
+    if (Sectors <= 0)
+        return STATUS_INVALID_PARAMETER;
+    Status = NgDeviceIoctl(Vcb->StorageDevice, IOCTL_DISK_GET_LENGTH_INFO, &Length, sizeof(Length));
+    if (!NT_SUCCESS(Status))
+        return Status;
+    NgArmResizeFault();
+    NgAcquireCore(Vcb);
+    if (!Vcb->Core || Vcb->RawWritten)
+        Err = -NGC_EROFS;
+    else
+        Err = ngc_extend(Vcb->Core, (unsigned long long)Sectors - 1, (unsigned long long)Length.Length.QuadPart);
+    if (Vcb->Core)
+    {
+        struct ngc_ntfsdata d;
+        NgResizeEnded(Vcb);
+        ngc_ntfs_data(Vcb->Core, &d);
+        if (d.sectors)
+            Vcb->BootSectors = d.sectors;
+    }
+    NgReleaseCore(Vcb);
+    DPRINT1("ntfsng: volume %08lx: extend to %I64d sectors (device %I64d bytes): %d, %I64u clusters\n",
+            Vcb->Vpb->SerialNumber, Sectors, Length.Length.QuadPart, Err, Vcb->Info.total_clusters);
+    return NgResizeStatus(Err);
+}
+
+/*
+ * FSCTL_SHRINK_VOLUME, as on Windows Server 2008 R2: the size counts the boot sector copy (the boot
+ * sector then says one sector less) and must leave fewer clusters.  ShrinkPrepare records the size
+ * for the handle (another handle's pending request makes it STATUS_DEVICE_BUSY; the same handle may
+ * prepare again); ShrinkCommit shrinks, STATUS_ACCESS_DENIED while a cluster past the new end is in
+ * use (this driver moves no data); ShrinkAbort forgets it; commit and abort without a prepare on the
+ * handle are invalid.  The handle's cleanup forgets its request.  Nothing is reserved meanwhile: an
+ * allocation past the new end makes the commit fail.
+ */
+static NTSTATUS NgShrinkVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    PSHRINK_VOLUME_INFORMATION Info = Irp->AssociatedIrp.SystemBuffer;
+    PFILE_OBJECT FileObject = Stack->FileObject;
+    NTSTATUS Status;
+    int Err;
+
+    Status = NgResizeAllowed(Vcb, Fcb, FileObject);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(*Info) || !Info)
+        return STATUS_INVALID_PARAMETER;
+    if (Info->ShrinkRequestType == ShrinkCommit)
+        NgArmResizeFault();
+    NgAcquireCore(Vcb);
+    if (!Vcb->Core || Vcb->RawWritten)
+    {
+        NgReleaseCore(Vcb);
+        return STATUS_MEDIA_WRITE_PROTECTED;
+    }
+    switch (Info->ShrinkRequestType)
+    {
+        case ShrinkPrepare:
+            /* A handle whose cleanup ran (it forgot the handle's request) may not prepare again. */
+            if (((PNG_CCB)FileObject->FsContext2)->CleanedUp)
+            {
+                Status = STATUS_INVALID_HANDLE;
+                break;
+            }
+            if (Vcb->ShrinkOwner && Vcb->ShrinkOwner != FileObject)
+            {
+                Status = STATUS_DEVICE_BUSY;
+                break;
+            }
+            if (Info->NewNumberOfSectors <= 1 ||
+                ngc_shrink_valid(Vcb->Core, (unsigned long long)Info->NewNumberOfSectors - 1))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            Vcb->ShrinkOwner = FileObject;
+            Vcb->ShrinkSectors = (ULONGLONG)Info->NewNumberOfSectors - 1;
+            Status = STATUS_SUCCESS;
+            break;
+        case ShrinkCommit:
+            if (Vcb->ShrinkOwner != FileObject)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            Err = ngc_shrink(Vcb->Core, Vcb->ShrinkSectors);
+            NgResizeEnded(Vcb);
+            if (Err == -NGC_ENOSPC)
+            {
+                /* Data past the new end: the request stays prepared, as on Windows. */
+                Status = STATUS_ACCESS_DENIED;
+                break;
+            }
+            {
+                struct ngc_ntfsdata d;
+                ngc_ntfs_data(Vcb->Core, &d);
+                if (d.sectors)
+                    Vcb->BootSectors = d.sectors;
+            }
+            Vcb->ShrinkOwner = NULL;
+            Vcb->ShrinkSectors = 0;
+            Status = NgResizeStatus(Err);
+            break;
+        case ShrinkAbort:
+            if (Vcb->ShrinkOwner != FileObject)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            Vcb->ShrinkOwner = NULL;
+            Vcb->ShrinkSectors = 0;
+            Status = STATUS_SUCCESS;
+            break;
+        default:
+            Status = STATUS_INVALID_PARAMETER;
+            break;
+    }
+    NgReleaseCore(Vcb);
+    DPRINT1("ntfsng: volume %08lx: shrink request %d to %I64d sectors: 0x%08lx\n", Vcb->Vpb->SerialNumber,
+            Info->ShrinkRequestType, Info->NewNumberOfSectors, Status);
+    return Status;
+}
+
+static NTSTATUS NgGetNtfsVolumeData(PNG_VCB Vcb, PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    PNTFS_VOLUME_DATA_BUFFER Out = Irp->AssociatedIrp.SystemBuffer;
+    struct ngc_ntfsdata d;
+
+    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(*Out) || !Out)
+        return STATUS_BUFFER_TOO_SMALL;
+    NgAcquireCore(Vcb);
+    if (!Vcb->Core)
+    {
+        NgReleaseCore(Vcb);
+        return STATUS_VOLUME_DISMOUNTED;
+    }
+    ngc_ntfs_data(Vcb->Core, &d);
+    NgReleaseCore(Vcb);
+    RtlZeroMemory(Out, sizeof(*Out));
+    Out->VolumeSerialNumber.QuadPart = (LONGLONG)d.serial;
+    Out->NumberSectors.QuadPart = (LONGLONG)d.sectors;
+    Out->TotalClusters.QuadPart = (LONGLONG)d.total_clusters;
+    Out->FreeClusters.QuadPart = (LONGLONG)d.free_clusters;
+    Out->BytesPerSector = d.bytes_per_sector;
+    Out->BytesPerCluster = d.bytes_per_cluster;
+    Out->BytesPerFileRecordSegment = d.bytes_per_record;
+    Out->ClustersPerFileRecordSegment = d.bytes_per_cluster ? d.bytes_per_record / d.bytes_per_cluster : 0;
+    Out->MftValidDataLength.QuadPart = (LONGLONG)d.mft_valid_data;
+    Out->MftStartLcn.QuadPart = (LONGLONG)d.mft_lcn;
+    Out->Mft2StartLcn.QuadPart = (LONGLONG)d.mft2_lcn;
+    Out->MftZoneStart.QuadPart = (LONGLONG)d.mft_zone_start;
+    Out->MftZoneEnd.QuadPart = (LONGLONG)d.mft_zone_end;
+    Irp->IoStatus.Information = sizeof(*Out);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * FSCTL_GET_VOLUME_BITMAP (METHOD_NEITHER): the cluster bitmap from StartingLcn (rounded down to a
+ * multiple of 8); STATUS_BUFFER_OVERFLOW when the caller's buffer holds only part of it.
+ */
+static NTSTATUS NgGetVolumeBitmap(PNG_VCB Vcb, PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    PSTARTING_LCN_INPUT_BUFFER In = Stack->Parameters.FileSystemControl.Type3InputBuffer;
+    PVOLUME_BITMAP_BUFFER Out = Irp->UserBuffer;
+    ULONG InLen = Stack->Parameters.FileSystemControl.InputBufferLength;
+    ULONG OutLen = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    ULONG Header = FIELD_OFFSET(VOLUME_BITMAP_BUFFER, Buffer), Bytes, Room;
+    LONGLONG Start, Total, Count;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PUCHAR Bits;
+    int Err;
+
+    if (!In || InLen < sizeof(*In))
+        return STATUS_INVALID_PARAMETER;
+    if (!Out || OutLen < Header)
+        return STATUS_BUFFER_TOO_SMALL;
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode)
+        {
+            ProbeForRead(In, sizeof(*In), sizeof(UCHAR));
+            ProbeForWrite(Out, OutLen, sizeof(UCHAR));
+        }
+        Start = In->StartingLcn.QuadPart;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+    NgAcquireCore(Vcb);
+    if (!Vcb->Core)
+    {
+        NgReleaseCore(Vcb);
+        return STATUS_VOLUME_DISMOUNTED;
+    }
+    ngc_volinfo(Vcb->Core, &Vcb->Info);
+    Total = (LONGLONG)Vcb->Info.total_clusters;
+    if (Start < 0 || Start >= Total)
+    {
+        NgReleaseCore(Vcb);
+        return STATUS_INVALID_PARAMETER;
+    }
+    Start &= ~7LL;
+    Count = Total - Start;
+    Bytes = (ULONG)min((Count + 7) / 8, (LONGLONG)MAXULONG - Header);
+    Room = OutLen - Header;
+    if (Room < Bytes)
+    {
+        Bytes = Room;
+        Status = STATUS_BUFFER_OVERFLOW;
+    }
+    Bits = Bytes ? ExAllocatePoolWithTag(PagedPool, Bytes, TAG_NTFSNG) : NULL;
+    if (Bytes && !Bits)
+    {
+        NgReleaseCore(Vcb);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    Err = Bytes ? ngc_read_bitmap(Vcb->Core, (unsigned long long)Start / 8, Bytes, Bits) : 0;
+    NgReleaseCore(Vcb);
+    if (Err)
+    {
+        if (Bits)
+            ExFreePoolWithTag(Bits, TAG_NTFSNG);
+        return NgErrnoToStatus(Err);
+    }
+    _SEH2_TRY
+    {
+        Out->StartingLcn.QuadPart = Start;
+        Out->BitmapSize.QuadPart = Count;
+        if (Bytes)
+            RtlCopyMemory(Out->Buffer, Bits, Bytes);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (Bits)
+        ExFreePoolWithTag(Bits, TAG_NTFSNG);
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+        Irp->IoStatus.Information = Header + Bytes;
+    return Status;
+}
+
 static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -984,6 +1311,19 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                                   Stack->Parameters.FileSystemControl.FsControlCode);
         case FSCTL_DISMOUNT_VOLUME:
             return NgDismountVolume(Vcb, FileObject);
+        case FSCTL_EXTEND_VOLUME:
+            return NgExtendVolume(Vcb, Fcb, Irp, Stack);
+        case FSCTL_SHRINK_VOLUME:
+            return NgShrinkVolume(Vcb, Fcb, Irp, Stack);
+        case FSCTL_GET_NTFS_VOLUME_DATA:
+            if (!Fcb || !Fcb->IsVolume)
+                return STATUS_INVALID_PARAMETER;
+            return NgGetNtfsVolumeData(Vcb, Irp, Stack);
+        case FSCTL_GET_VOLUME_BITMAP:
+            /* As FastFAT: a volume handle that may manage the volume. */
+            if (!Fcb || !Fcb->IsVolume || !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+                return STATUS_INVALID_PARAMETER;
+            return NgGetVolumeBitmap(Vcb, Irp, Stack);
         default:
             return STATUS_INVALID_DEVICE_REQUEST;
     }

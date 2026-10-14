@@ -1459,7 +1459,17 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (!Fcb)
         return STATUS_SUCCESS;
     if (Fcb->IsVolume)
+    {
         NgEndLock(Vcb, FileObject, TRUE);
+        /* A shrink this handle prepared and did not commit is forgotten (FSCTL_SHRINK_VOLUME). */
+        NgAcquireCore(Vcb);
+        if (Vcb->ShrinkOwner == FileObject)
+        {
+            Vcb->ShrinkOwner = NULL;
+            Vcb->ShrinkSectors = 0;
+        }
+        NgReleaseCore(Vcb);
+    }
     ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
     /* A dismount that ran while this cleanup waited for the gate left no core behind. */
     Status = Vcb->Dismounted ? NgCleanupDismounted(Vcb, Irp) : NgCleanupGated(DeviceObject, Irp);

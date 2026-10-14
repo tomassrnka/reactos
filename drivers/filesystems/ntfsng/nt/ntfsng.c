@@ -674,7 +674,7 @@ out:
 }
 
 /* Reads a REG_DWORD from the service key; 0 if it is absent. */
-static ULONG NgReadDword(PUNICODE_STRING KeyPath, PCWSTR Name)
+ULONG NgReadDword(PUNICODE_STRING KeyPath, PCWSTR Name)
 {
     OBJECT_ATTRIBUTES Oa;
     UNICODE_STRING ValueName;

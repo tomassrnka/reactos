@@ -102,6 +102,15 @@ FatIsVolumeDirty (
     IN PIRP Irp
     );
 
+#ifdef __REACTOS__
+_Requires_lock_held_(_Global_critical_region_)
+NTSTATUS
+FatExtendVolume (
+    IN PIRP_CONTEXT IrpContext,
+    IN PIRP Irp
+    );
+#endif
+
 NTSTATUS
 FatIsVolumeMounted (
     IN PIRP_CONTEXT IrpContext,
@@ -279,6 +288,9 @@ FatVerifyLookupFatEntry (
 #pragma alloc_text(PAGE, FatComputeMoveFileParameter)
 #pragma alloc_text(PAGE, FatComputeMoveFileSplicePoints)
 #pragma alloc_text(PAGE, FatDirtyVolume)
+#ifdef __REACTOS__
+#pragma alloc_text(PAGE, FatExtendVolume)
+#endif
 #pragma alloc_text(PAGE, FatFsdFileSystemControl)
 #pragma alloc_text(PAGE, FatGetRetrievalPointerBase)
 #pragma alloc_text(PAGE, FatGetBootAreaInfo)
@@ -2873,6 +2885,13 @@ Return Value:
         Status = FatIsVolumeDirty( IrpContext, Irp );
         break;
 
+#ifdef __REACTOS__
+    case FSCTL_EXTEND_VOLUME:
+
+        Status = FatExtendVolume( IrpContext, Irp );
+        break;
+#endif
+
     case FSCTL_IS_VOLUME_MOUNTED:
 
         Status = FatIsVolumeMounted( IrpContext, Irp );
@@ -3979,6 +3998,579 @@ Return Value:
     return STATUS_SUCCESS;
 }
 
+
+#ifdef __REACTOS__
+//
+//  Local Support Routine
+//
+
+static
+NTSTATUS
+FatExtendWriteSector (
+    IN PVCB Vcb,
+    IN LBO Lbo,
+    IN PVOID Data,
+    IN PVOID Copy,
+    IN ULONG Length
+    )
+
+/*++
+
+Routine Description:
+
+    Writes Length bytes (Data, pinned and changed by the caller, who keeps the
+    pin until this returns) straight to the device at Lbo, write-through,
+    through Copy, a nonpaged buffer of Length bytes.
+
+--*/
+
+{
+    LARGE_INTEGER Offset;
+    IO_STATUS_BLOCK Iosb;
+    KEVENT Event;
+    PIRP Irp;
+    NTSTATUS Status;
+
+    Offset.QuadPart = Lbo;
+    RtlCopyMemory( Copy, Data, Length );
+
+    KeInitializeEvent( &Event, NotificationEvent, FALSE );
+    Irp = IoBuildSynchronousFsdRequest( IRP_MJ_WRITE, Vcb->TargetDeviceObject, Copy, Length, &Offset, &Event, &Iosb );
+
+    if (Irp == NULL) {
+
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    SetFlag( IoGetNextIrpStackLocation( Irp )->Flags, SL_WRITE_THROUGH | SL_OVERRIDE_VERIFY_VOLUME );
+
+    Status = IoCallDriver( Vcb->TargetDeviceObject, Irp );
+
+    if (Status == STATUS_PENDING) {
+
+        KeWaitForSingleObject( &Event, Executive, KernelMode, FALSE, NULL );
+        Status = Iosb.Status;
+    }
+
+    return Status;
+}
+
+
+//
+//  Local Support Routine
+//
+
+static
+BOOLEAN
+FatExtendFaultBegin (
+    IN PVCB Vcb,
+    OUT PVBO Vbo,
+    OUT PULONG Length
+    )
+
+/*++
+
+Routine Description:
+
+    Test only: with the ExtendFault DWORD of the service key set, the first
+    dirty range of the FAT is marked clean, as a volume file write does when
+    it starts its transfer (write.c), so that the flush that follows skips
+    it.  FatExtendFaultEnd then marks it dirty again, as that write does when
+    it fails.  Together they are a FAT write running at the same time as the
+    flush and failing.
+
+--*/
+
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING( L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\fastfat" );
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING( L"ExtendFault" );
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    HANDLE Key;
+    ULONG Returned;
+    BOOLEAN Armed = FALSE;
+
+    InitializeObjectAttributes( &ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL );
+
+    if (NT_SUCCESS( ZwOpenKey( &Key, KEY_READ, &ObjectAttributes ))) {
+
+        if (NT_SUCCESS( ZwQueryValueKey( Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Returned )) &&
+            Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG) && *(PULONG)Info->Data != 0) {
+
+            Armed = TRUE;
+        }
+
+        ZwClose( Key );
+    }
+
+    if (!Armed ||
+        !FatFindDirtyFat( Vcb, FatReservedBytes( &Vcb->Bpb ), FatBytesPerFat( &Vcb->Bpb ), Vbo, Length )) {
+
+        return FALSE;
+    }
+
+    DbgPrint( "FatExtendVolume: ExtendFault: FAT bytes %lu+%lu are written at the same time as the flush and fail\n", *Vbo, *Length );
+    FatSetDirtyFatBits( Vcb, *Vbo, *Length, FALSE );
+    return TRUE;
+}
+
+static
+VOID
+FatExtendFaultEnd (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG Length
+    )
+{
+    FatMarkFatDirty( Vcb, Vbo, Length );
+    InterlockedIncrement( &Vcb->DirtyFatWriteFailures );
+}
+
+
+//
+//  Local Support Routine
+//
+
+_Requires_lock_held_(_Global_critical_region_)
+NTSTATUS
+FatExtendVolume (
+    IN PIRP_CONTEXT IrpContext,
+    IN PIRP Irp
+    )
+
+/*++
+
+Routine Description:
+
+    FSCTL_EXTEND_VOLUME: grows the volume to the number of sectors in the
+    input buffer, after the partition under it grew.  The FAT tables keep
+    their size, so the volume grows as far as they can describe clusters
+    and the FAT type stays what it is (at most 4078 FAT12, 65518 FAT16 and
+    0x0FFFFFEE FAT32 clusters, as the formatter writes them); beyond that
+    the request fails with STATUS_DISK_FULL and
+    the FAT has to grow offline first.  The boot sector (and on FAT32 its
+    backup and the FsInfo sector) is rewritten write-through, then the
+    allocation package is set up again for the new cluster count.  The
+    current size succeeds without a change, a smaller one is invalid.
+
+--*/
+
+{
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( Irp );
+    NTSTATUS Status = STATUS_SUCCESS;
+    PVCB Vcb;
+    PFCB Fcb;
+    PCCB Ccb;
+
+    BIOS_PARAMETER_BLOCK NewBpb;
+    GET_LENGTH_INFORMATION LengthInfo;
+    LONGLONG NewSectors;
+    ULONG OldSectors;
+    ULONG OldClusters;
+    ULONG NewClusters;
+    ULONG Describable;
+    ULONG MaxClusters;
+    ULONG Index;
+    ULONG NonZero = 0;
+    UCHAR Bits;
+    BOOLEAN VcbAcquired = FALSE;
+    PBCB Bcb = NULL;
+    PUCHAR Sector;
+    PVOID Copy = NULL;
+    UCHAR Saved[6];
+    BOOLEAN BackupWritten = FALSE;
+    LARGE_INTEGER Offset;
+    BOOLEAN Hidden;
+    VBO HiddenVbo;
+    ULONG HiddenLength;
+
+    PAGED_CODE();
+
+    DebugTrace(+1, Dbg, "FatExtendVolume...\n", 0);
+
+    if (FatDecodeFileObject( IrpSp->FileObject, &Vcb, &Fcb, &Ccb ) != UserVolumeOpen) {
+
+        FatCompleteRequest( IrpContext, Irp, STATUS_INVALID_PARAMETER );
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if ((Ccb == NULL) || !FlagOn( Ccb->Flags, CCB_FLAG_MANAGE_VOLUME_ACCESS )) {
+
+        FatCompleteRequest( IrpContext, Irp, STATUS_ACCESS_DENIED );
+        return STATUS_ACCESS_DENIED;
+    }
+
+    if (IrpSp->Parameters.FileSystemControl.InputBufferLength < sizeof(LONGLONG) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL) {
+
+        FatCompleteRequest( IrpContext, Irp, STATUS_INVALID_PARAMETER );
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NewSectors = *(PLONGLONG)Irp->AssociatedIrp.SystemBuffer;
+
+    SetFlag( IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT | IRP_CONTEXT_FLAG_DISABLE_POPUPS );
+
+    _SEH2_TRY {
+
+        //
+        //  The Vcb and every Fcb: writes through open files allocate under their Fcb, and the
+        //  allocation package is replaced below.
+        //
+
+        FatAcquireExclusiveVolume( IrpContext, Vcb );
+        VcbAcquired = TRUE;
+
+        FatVerifyVcb( IrpContext, Vcb );
+
+        if (FlagOn( Vcb->VcbState, VCB_STATE_FLAG_WRITE_PROTECTED )) {
+
+            try_return( Status = STATUS_MEDIA_WRITE_PROTECTED );
+        }
+
+        Status = FatPerformDevIoCtrl( IrpContext,
+                                      IOCTL_DISK_GET_LENGTH_INFO,
+                                      Vcb->TargetDeviceObject,
+                                      NULL,
+                                      0,
+                                      &LengthInfo,
+                                      sizeof(LengthInfo),
+                                      FALSE,
+                                      TRUE,
+                                      NULL );
+
+        if (!NT_SUCCESS( Status )) {
+
+            try_leave( NOTHING );
+        }
+
+        OldSectors = Vcb->Bpb.Sectors ? Vcb->Bpb.Sectors : Vcb->Bpb.LargeSectors;
+
+        if (NewSectors < (LONGLONG)OldSectors ||
+            NewSectors > MAXULONG ||
+            NewSectors * Vcb->Bpb.BytesPerSector > LengthInfo.Length.QuadPart) {
+
+            try_return( Status = STATUS_INVALID_PARAMETER );
+        }
+
+        //
+        //  The current size: nothing to do (as NTFS answers).
+        //
+
+        if (NewSectors == (LONGLONG)OldSectors) {
+
+            try_return( Status = STATUS_SUCCESS );
+        }
+
+        //
+        //  The new boot parameters: the 16-bit count when it fits (never on FAT32).
+        //
+
+        NewBpb = Vcb->Bpb;
+
+        if (NewSectors <= MAXUSHORT && !FatIsFat32( Vcb )) {
+
+            NewBpb.Sectors = (USHORT)NewSectors;
+            NewBpb.LargeSectors = 0;
+
+        } else {
+
+            NewBpb.Sectors = 0;
+            NewBpb.LargeSectors = (ULONG)NewSectors;
+        }
+
+        Bits = Vcb->AllocationSupport.FatIndexBitSize;
+        OldClusters = Vcb->AllocationSupport.NumberOfClusters;
+        NewClusters = FatNumberOfClusters( &NewBpb );
+        Describable = ((FatBytesPerFat( &Vcb->Bpb ) * 8) / Bits) - 2;
+        //
+        //  As the formatter: no cluster number reaches the reserved values (0xFF0, 0xFFF0, 0x0FFFFFF0).
+        //
+
+        MaxClusters = Bits == 12 ? 4078 : (Bits == 16 ? 65518 : 0x0FFFFFEE);
+
+        if (FatIndexBitSize( &NewBpb ) != Bits ||
+            NewClusters > Describable ||
+            NewClusters > MaxClusters) {
+
+            try_return( Status = STATUS_DISK_FULL );
+        }
+
+        //
+        //  Format leaves the FAT entries past the last cluster zero.  Any that are not
+        //  would turn up as allocated clusters nobody owns: the volume needs a check first.
+        //
+
+        for (Index = OldClusters + 2; Index < NewClusters + 2; ) {
+
+            ULONG First = Bits == 12 ? (Index * 3) / 2 : Index * (Bits / 8);
+            ULONG Chunk = min( NewClusters + 2 - Index, 0x4000 );
+            ULONG Last;
+            PUCHAR Fat;
+            ULONG i;
+
+            Offset.QuadPart = FatReservedBytes( &Vcb->Bpb ) + First;
+
+            //
+            //  A pin stays inside one cache view.  FAT12 (at most 6 KB) never crosses
+            //  one; FAT16/32 entries are aligned, so a view boundary falls between two.
+            //
+
+            if (Bits != 12) {
+
+                ULONG ToBoundary = VACB_MAPPING_GRANULARITY - (ULONG)(Offset.QuadPart % VACB_MAPPING_GRANULARITY);
+
+                Chunk = min( Chunk, ToBoundary / (Bits / 8) );
+            }
+
+            Last = Bits == 12 ? ((Index + Chunk - 1) * 3) / 2 + 1 : (Index + Chunk) * (Bits / 8) - 1;
+
+            if (!CcPinRead( Vcb->VirtualVolumeFile, &Offset, Last - First + 1, PIN_WAIT, &Bcb, (PVOID *)&Fat )) {
+
+                try_return( Status = STATUS_UNSUCCESSFUL );
+            }
+
+            for (i = Index; i < Index + Chunk; i++) {
+
+                ULONG Entry;
+
+                if (Bits == 12) {
+
+                    PUCHAR p = Fat + ((i * 3) / 2 - First);
+                    Entry = (i & 1) ? ((p[0] >> 4) | ((ULONG)p[1] << 4)) : (p[0] | (((ULONG)p[1] & 0x0F) << 8));
+
+                } else if (Bits == 16) {
+
+                    Entry = *(USHORT UNALIGNED *)(Fat + (i * 2 - First));
+
+                } else {
+
+                    Entry = *(ULONG UNALIGNED *)(Fat + (i * 4 - First)) & FAT32_ENTRY_MASK;
+                }
+
+                if (Entry != FAT_CLUSTER_AVAILABLE) {
+
+                    NonZero += 1;
+                }
+            }
+
+            CcUnpinData( Bcb );
+            Bcb = NULL;
+            Index += Chunk;
+        }
+
+        if (NonZero != 0) {
+
+            try_return( Status = STATUS_FILE_CORRUPT_ERROR );
+        }
+
+        //
+        //  Every FAT change still in the cache reaches the disk first: tearing the allocation
+        //  package down below forgets which FAT sectors are dirty, and those would never be written.
+        //
+
+        Hidden = FatExtendFaultBegin( Vcb, &HiddenVbo, &HiddenLength );
+
+        Status = FatFlushFat( IrpContext, Vcb );
+
+        if (Hidden) {
+
+            FatExtendFaultEnd( Vcb, HiddenVbo, HiddenLength );
+        }
+
+        //
+        //  A volume file write that was under way during the flush and failed marks its sectors
+        //  dirty again (write.c), after the flush passed them.  FatIsFatDirty waits for the
+        //  writes in progress; the flush runs again while sectors are dirty, and the extension
+        //  fails if they stay dirty.
+        //
+
+        for (Index = 0; NT_SUCCESS( Status ) && FatIsFatDirty( Vcb ); Index++) {
+
+            if (Index == 3) {
+
+                Status = STATUS_UNEXPECTED_IO_ERROR;
+                break;
+            }
+
+            Status = FatFlushFat( IrpContext, Vcb );
+        }
+
+        if (!NT_SUCCESS( Status )) {
+
+            try_leave( NOTHING );
+        }
+
+        //
+        //  The boot sector, and on FAT32 its backup copy first.  Each is written from its pinned
+        //  cache page, still pinned; a failed write puts the old size back in the page.
+        //
+
+        Copy = FsRtlAllocatePoolWithTag( NonPagedPoolNx, Vcb->Bpb.BytesPerSector, TAG_IO_BUFFER );
+
+        for (Index = 0; Index < 2; Index++) {
+
+            ULONG SectorNumber = Index == 1 ? 0 : Vcb->Bpb.BackupBootSector;
+
+            if (Index == 0 && (!FatIsFat32( Vcb ) || SectorNumber == 0 || SectorNumber >= Vcb->Bpb.ReservedSectors)) {
+
+                continue;
+            }
+
+            Offset.QuadPart = (LONGLONG)SectorNumber * Vcb->Bpb.BytesPerSector;
+
+            if (!CcPinRead( Vcb->VirtualVolumeFile, &Offset, Vcb->Bpb.BytesPerSector, PIN_WAIT, &Bcb, (PVOID *)&Sector )) {
+
+                try_return( Status = STATUS_UNSUCCESSFUL );
+            }
+
+            if (!FatIsBootSectorFat( (PPACKED_BOOT_SECTOR)Sector )) {
+
+                CcUnpinData( Bcb );
+                Bcb = NULL;
+
+                if (Index == 1) {
+
+                    try_return( Status = STATUS_FILE_CORRUPT_ERROR );
+                }
+
+                continue;
+            }
+
+            RtlCopyMemory( &Saved[0], ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.Sectors, 2 );
+            RtlCopyMemory( &Saved[2], ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.LargeSectors, 4 );
+            CopyUchar2( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.Sectors, &NewBpb.Sectors );
+            CopyUchar4( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.LargeSectors, &NewBpb.LargeSectors );
+
+            Status = FatExtendWriteSector( Vcb, Offset.QuadPart, Sector, Copy, Vcb->Bpb.BytesPerSector );
+
+            if (!NT_SUCCESS( Status )) {
+
+                RtlCopyMemory( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.Sectors, &Saved[0], 2 );
+                RtlCopyMemory( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.LargeSectors, &Saved[2], 4 );
+            }
+
+            CcUnpinData( Bcb );
+            Bcb = NULL;
+
+            if (!NT_SUCCESS( Status )) {
+
+                //
+                //  The boot sector keeps the old size: so does its backup, best effort.
+                //
+
+                if (Index == 1 && BackupWritten) {
+
+                    Offset.QuadPart = (LONGLONG)Vcb->Bpb.BackupBootSector * Vcb->Bpb.BytesPerSector;
+
+                    if (CcPinRead( Vcb->VirtualVolumeFile, &Offset, Vcb->Bpb.BytesPerSector, PIN_WAIT, &Bcb, (PVOID *)&Sector )) {
+
+                        RtlCopyMemory( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.Sectors, &Saved[0], 2 );
+                        RtlCopyMemory( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.LargeSectors, &Saved[2], 4 );
+                        (VOID)FatExtendWriteSector( Vcb, Offset.QuadPart, Sector, Copy, Vcb->Bpb.BytesPerSector );
+                        CcUnpinData( Bcb );
+                        Bcb = NULL;
+                    }
+                }
+
+                try_leave( NOTHING );
+            }
+
+            if (Index == 0) {
+
+                BackupWritten = TRUE;
+            }
+        }
+
+        Vcb->Bpb.Sectors = NewBpb.Sectors;
+        Vcb->Bpb.LargeSectors = NewBpb.LargeSectors;
+
+        if (Vcb->First0x24BytesOfBootSector != NULL) {
+
+            CopyUchar2( &Vcb->First0x24BytesOfBootSector[0x13], &NewBpb.Sectors );
+            CopyUchar4( &Vcb->First0x24BytesOfBootSector[0x20], &NewBpb.LargeSectors );
+        }
+
+        //
+        //  The allocation package for the new cluster count.
+        //
+
+        //
+        //  The disk already holds the new size.  Should the allocation package not come back (no
+        //  memory, a read error), the mount is unusable: it fails every request until remounted.
+        //
+
+        FatTearDownAllocationSupport( IrpContext, Vcb );
+
+        _SEH2_TRY {
+
+            FatSetupAllocationSupport( IrpContext, Vcb );
+
+        } _SEH2_EXCEPT( EXCEPTION_EXECUTE_HANDLER ) {
+
+            FatSetVcbCondition( Vcb, VcbBad );
+            Status = _SEH2_GetExceptionCode();
+            IrpContext->ExceptionStatus = STATUS_SUCCESS;
+        } _SEH2_END;
+
+        if (!NT_SUCCESS( Status )) {
+
+            try_leave( NOTHING );
+        }
+
+        //
+        //  The FsInfo free count, which other systems read.
+        //
+
+        if (FatIsFat32( Vcb ) && Vcb->Bpb.FsInfoSector != 0) {
+
+            PFSINFO_SECTOR FsInfo;
+
+            Offset.QuadPart = (LONGLONG)Vcb->Bpb.FsInfoSector * Vcb->Bpb.BytesPerSector;
+
+            if (CcPinRead( Vcb->VirtualVolumeFile, &Offset, Vcb->Bpb.BytesPerSector, PIN_WAIT, &Bcb, (PVOID *)&FsInfo )) {
+
+                if (FsInfo->SectorBeginSignature == FSINFO_SECTOR_BEGIN_SIGNATURE &&
+                    FsInfo->FsInfoSignature == FSINFO_SIGNATURE) {
+
+                    FsInfo->FreeClusterCount = Vcb->AllocationSupport.NumberOfFreeClusters;
+                    (VOID)FatExtendWriteSector( Vcb, Offset.QuadPart, FsInfo, Copy, Vcb->Bpb.BytesPerSector );
+                }
+
+                CcUnpinData( Bcb );
+                Bcb = NULL;
+            }
+        }
+
+        DbgPrint( "FASTFAT: volume extended from %lu to %I64d sectors, %lu to %lu clusters\n",
+                  OldSectors, NewSectors, OldClusters, Vcb->AllocationSupport.NumberOfClusters );
+
+    try_exit: NOTHING;
+    } _SEH2_FINALLY {
+
+        if (Bcb != NULL) {
+
+            CcUnpinData( Bcb );
+        }
+
+        if (Copy != NULL) {
+
+            ExFreePool( Copy );
+        }
+
+        if (VcbAcquired) {
+
+            FatReleaseVolume( IrpContext, Vcb );
+        }
+
+        DebugTrace(-1, Dbg, "FatExtendVolume -> %08lx\n", Status);
+    } _SEH2_END;
+
+    FatCompleteRequest( IrpContext, Irp, Status );
+    return Status;
+}
+#endif
 
 //
 //  Local Support Routine
