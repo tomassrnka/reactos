@@ -78,5 +78,7 @@ START_TEST(ExSequencedList)
 
     KeLowerIrql(Irql);
     ExFreePoolWithTag(Buffer, 'TLqS');
+#else
+    skip(FALSE, "The checks read the 32 bit SLIST_HEADER fields; the x64 header layout is not ported\n");
 #endif
 }
