@@ -231,6 +231,24 @@ NTSTATUS NTAPI NtSplice(LONG x);
 #endif
 ]=])
 file(APPEND "${TEST_DIR}/protos.h" "#define ${macro_name} 1\n#ifdef ${macro_name}B\nNTSTATUS NTAPI NtLongMacro(LONG x);\n#else\nNTSTATUS NTAPI NtLongMacro(POINT p);\n#endif\n")
+file(APPEND "${TEST_DIR}/protos.h" [=[
+NTSTATUS NTAPI NtOpening
+#ifdef _WIN64
+(LONG x);
+#else
+(POINT p);
+#endif
+NTSTATUS NTAPI NtOpeningFalse
+#ifdef NEVER_DEFINED
+(POINT p);
+#else
+(LONG x);
+#endif
+#ifdef _WIN64
+NTSTATUS NTAPI NtNameOnly
+#endif
+(LONG x);
+]=])
 file(WRITE "${TEST_DIR}/proto-calls.txt" [=[
 NtUserDrag
 NtUserRect
@@ -265,6 +283,9 @@ NtTernary
 NtSplitComment
 NtSplice
 NtLongMacro
+NtOpening
+NtOpeningFalse
+NtNameOnly
 NtAbsent
 NtCommented
 ]=])
@@ -325,6 +346,10 @@ expect_in("${protos}" "P,NtSplitComment,protos.h:101,1,1,-\n")
 expect_in("${protos}" "A,NtSplitComment,0,x,LONG,int,4,4,1,1,-\n")
 expect_in("${protos}" "A,NtSplice,0,x,LONG,int,4,4,1,1,-\n")
 expect_in("${protos}" "A,NtLongMacro,0,p,POINT,struct,8,8,2,1,reg\n")
+expect_in("${protos}" "P,NtOpening,protos.h:116,1,2,-\n")
+expect_in("${protos}" "P,NtOpeningFalse,protos.h:122,1,1,-\n")
+expect_in("${protos}" "A,NtOpeningFalse,0,x,LONG,int,4,4,1,1,-\n")
+expect_in("${protos}" "P,NtNameOnly,protos.h:129,1,1,defined(_WIN64)\n")
 expect_in("${protos}" "M,NtAbsent,no prototype\n")
 expect_in("${protos}" "M,NtCommented,no prototype\n")
 file(SHA256 "${protos}" first_hash)

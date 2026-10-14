@@ -1472,15 +1472,19 @@ CollectPrototypes(void)
             else if (!strcmp(Tok->Text, "}") && Tok->Kind == TK_PUNCT && BraceDepth)
                 BraceDepth--;
         }
-        if (Tok->Kind == TK_IDENT && (Tok->State == ST_FALSE || !BraceDepth) &&
-            i + 1 < g_TokenCount && !strcmp(g_Tokens[i + 1].Text, "(") && IsWanted(Tok->Text))
+        if (Tok->Kind == TK_IDENT && (Tok->State == ST_FALSE || !BraceDepth) && IsWanted(Tok->Text))
         {
-            size_t j, Next;
+            size_t j, Next, Open = i + 1;
             int Level = 0;
             PROTOTYPE *Proto;
             const char *Slash = strrchr(File, '/');
 
-            for (j = i + 1; j < g_TokenCount; j++)
+            /* The opening parenthesis is the next token the preprocessor keeps */
+            while (Open < g_TokenCount && g_Tokens[Open].State == ST_FALSE && Tok->State != ST_FALSE)
+                Open++;
+            if (Open >= g_TokenCount || strcmp(g_Tokens[Open].Text, "("))
+                continue;
+            for (j = Open; j < g_TokenCount; j++)
             {
                 if (g_Tokens[j].State == ST_FALSE && Tok->State != ST_FALSE)
                     continue;
@@ -1506,7 +1510,10 @@ CollectPrototypes(void)
             Proto->State = Tok->State;
             Proto->Cond = Tok->Cond;
             g_Quiet = Tok->State == ST_FALSE;
-            ParseArguments(Proto, &g_Tokens[i + 1], &g_Tokens[j]);
+            ParseArguments(Proto, &g_Tokens[Open], &g_Tokens[j]);
+            /* a parenthesis under a condition the tool cannot decide may belong to another declaration of the name */
+            if (g_Tokens[Open].State == ST_UNKNOWN && g_Tokens[Open].Region != Tok->Region)
+                Proto->ParamCond = 1;
             g_Quiet = 0;
             i = j;
         }
