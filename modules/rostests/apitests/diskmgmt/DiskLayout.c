@@ -466,6 +466,10 @@ Test_Legacy(VOID)
         ok(Driver->PartitionEntry[0].StartingOffset.QuadPart == 63 * 512, "legacy start kept\n");
         HeapFree(GetProcessHeap(), 0, Driver);
     }
+    /* a partition that does not end on a mebibyte can be shrunk by whole mebibytes, to a length that is not one */
+    ok_int(DlResize(Layout, 63 * 512, 50 * MiB + 77 * 512), DL_OK);
+    ok(Layout->Entry[0].Length == 50 * MiB + 77 * 512, "legacy length after shrinking\n");
+    ok_int(DlResize(Layout, 63 * 512, 50 * MiB + 77 * 512 + 1), DL_E_BAD_ARGUMENT);
     HeapFree(GetProcessHeap(), 0, Layout);
 }
 
@@ -559,6 +563,51 @@ Test_LinuxExtended(VOID)
     HeapFree(GetProcessHeap(), 0, Layout);
 }
 
+static VOID
+Test_Resize(VOID)
+{
+    PDL_LAYOUT Layout = NewLayout(DM_STYLE_MBR, 4096);
+    PDL_ENTRY Entry;
+
+    /* the room behind a partition is what the New Simple Volume wizard offers for that gap: Windows measured 4093 MB on
+     * the 4094 usable MB of a blank disk, so a 100 MB partition at 1 MB may grow by 3993 MB */
+    ok_int(Make(Layout, DL_NEW_PRIMARY, 1, 100), DL_OK);
+    ok(DlMaxGrow(Layout, 1 * MiB) == 3993 * MiB, "grow room %I64u\n", DlMaxGrow(Layout, 1 * MiB) / MiB);
+    ok_int(DlResize(Layout, 1 * MiB, 200 * MiB), DL_OK);
+    Entry = DlFindEntry(Layout, 1 * MiB);
+    ok(Entry && Entry->Length == 200 * MiB, "grown length\n");
+    ok_int(DlResize(Layout, 1 * MiB, 4094 * MiB), DL_E_NO_SPACE);
+    ok_int(DlResize(Layout, 1 * MiB, 4093 * MiB), DL_OK);
+    ok(DlMaxGrow(Layout, 1 * MiB) == 0, "no room left\n");
+    ok_int(DlResize(Layout, 1 * MiB, 50 * MiB), DL_OK);
+    ok(DlMaxGrow(Layout, 1 * MiB) == 4043 * MiB, "room after shrinking %I64u\n", DlMaxGrow(Layout, 1 * MiB) / MiB);
+
+    /* a neighbour limits the growth, and a shrink never needs room */
+    ok_int(Make(Layout, DL_NEW_PRIMARY, 301, 100), DL_OK);
+    ok(DlMaxGrow(Layout, 1 * MiB) == 249 * MiB, "room before the neighbour %I64u\n", DlMaxGrow(Layout, 1 * MiB) / MiB);
+    ok_int(DlResize(Layout, 1 * MiB, 300 * MiB), DL_E_NO_SPACE);
+    ok_int(DlResize(Layout, 1 * MiB, 299 * MiB), DL_OK);
+    ok_int(DlResize(Layout, 301 * MiB, 10 * MiB), DL_OK);
+
+    /* bad requests */
+    ok_int(DlResize(Layout, 77 * MiB, 10 * MiB), DL_E_NOT_FOUND);
+    ok_int(DlResize(Layout, 1 * MiB, 0), DL_E_BAD_ARGUMENT);
+    ok_int(DlResize(Layout, 1 * MiB, 10 * MiB + 1), DL_E_BAD_ARGUMENT);        /* not a whole number of sectors */
+    ok(DlMaxGrow(Layout, 77 * MiB) == 0, "room of nothing\n");
+    HeapFree(GetProcessHeap(), 0, Layout);
+
+    /* a logical drive grows inside its extended partition only; the extended partition itself does not grow here */
+    Layout = NewLayout(DM_STYLE_MBR, 4096);
+    ok_int(Make(Layout, DL_NEW_EXTENDED, 1, 1000), DL_OK);
+    ok_int(Make(Layout, DL_NEW_LOGICAL, 2, 100), DL_OK);
+    ok(DlMaxGrow(Layout, 1 * MiB) == 0, "the extended partition grew\n");
+    ok(DlMaxGrow(Layout, 2 * MiB) == 898 * MiB, "room in the extended partition %I64u\n", DlMaxGrow(Layout, 2 * MiB) / MiB);
+    ok_int(DlResize(Layout, 2 * MiB, 999 * MiB), DL_E_NO_SPACE);
+    ok_int(DlResize(Layout, 2 * MiB, 998 * MiB), DL_OK);
+    ok_int(DlResize(Layout, 1 * MiB, 2000 * MiB), DL_E_BAD_ARGUMENT);
+    HeapFree(GetProcessHeap(), 0, Layout);
+}
+
 START_TEST(DiskLayout)
 {
     Test_Empty();
@@ -574,4 +623,5 @@ START_TEST(DiskLayout)
     Test_Legacy();
     Test_Limits();
     Test_LinuxExtended();
+    Test_Resize();
 }

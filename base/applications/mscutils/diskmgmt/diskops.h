@@ -25,6 +25,8 @@
 #define DM_ERR_UNREADABLE       (DM_ERR_BASE + 10)  /* the table of the disk cannot be represented here */
 #define DM_ERR_TYPE_NOT_UPDATED (DM_ERR_BASE + 11)  /* the format worked, the partition type could not be adjusted to it */
 #define DM_ERR_VERIFY_FAILED    (DM_ERR_BASE + 12)  /* the disk does not hold the table that was written */
+#define DM_ERR_SHRINK_PARTIAL   (DM_ERR_BASE + 15)  /* the file system shrank, the partition did not follow */
+#define DM_ERR_EXTEND_PARTIAL   (DM_ERR_BASE + 14)  /* the partition grew, the file system did not follow */
 #define DM_ERR_RESTORE_FAILED   (DM_ERR_BASE + 13)  /* a write failed and the table that was there could not be put back */
 #define DM_ERR_PATHS_NOT_RESTORED (DM_ERR_BASE + 16) /* an operation failed and the drive letters or paths it had taken away could not all be put back */
 
@@ -111,6 +113,17 @@ DWORD DmDeletePartition(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR V
 BOOL DmIsBootPartition(ULONG Disk, ULONGLONG Offset);   /* the system partition the kernel recorded at start up */
 DWORD DmMarkActive(ULONG Disk, ULONGLONG Offset, const DM_DISK_ID *Id);
 DWORD DmFixPartitionType(ULONG Disk, ULONGLONG Offset, PCWSTR VolumeGuid);
+
+/* ---- growing and shrinking ----
+ * The requests are the documented ones (IOCTL_DISK_GROW_PARTITION on the disk, FSCTL_EXTEND_VOLUME and
+ * FSCTL_SHRINK_VOLUME on the volume). Each Probe answers DM_ERR_NOT_SUPPORTED while the driver below does not
+ * implement the request, so that the menu can say so; the other calls work as soon as it does. */
+DWORD DmProbeExtend(ULONG Disk, PCWSTR VolumeGuid);
+DWORD DmProbeShrink(PCWSTR VolumeGuid);
+DWORD DmQueryExtend(ULONG Disk, ULONGLONG Offset, PULONGLONG MaxBytes);
+DWORD DmExtendVolume(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid, ULONGLONG AddBytes, const DM_DISK_ID *Id);
+DWORD DmQueryShrink(ULONG Disk, ULONGLONG Offset, PCWSTR VolumeGuid, PULONGLONG TotalBytes, PULONGLONG MaxBytes);
+DWORD DmShrinkVolume(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid, ULONGLONG ShrinkBytes, const DM_DISK_ID *Id);
 
 /* ---- volumes ---- */
 DWORD DmFindVolume(ULONG Disk, ULONGLONG Offset, ULONG TimeoutMs, PWSTR VolumeGuid, SIZE_T Count);

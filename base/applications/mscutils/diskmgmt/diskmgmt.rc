@@ -19,6 +19,8 @@ IDI_DISKMGMT ICON "res/diskmgmt.ico"
 /* toolbar images */
 IDB_PROP BITMAP "res/properties.bmp"
 IDB_REFRESH BITMAP "res/refresh.bmp"
+IDB_WIZ_WATERMARK BITMAP "res/wizard-watermark.bmp"
+IDB_WIZ_HEADER BITMAP "res/wizard-header.bmp"
 
 IDR_ACCEL ACCELERATORS
 BEGIN
