@@ -17,6 +17,7 @@ list(APPEND SOURCE
     client/actctx.c
     client/appcache.c
     client/atom.c
+    client/appmodel.c
     client/atomansi.c
     client/compname.c
     client/debugger.c
