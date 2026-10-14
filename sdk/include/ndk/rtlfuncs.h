@@ -4622,6 +4622,18 @@ RtlIpv6StringToAddressExW(
 // Time Functions
 //
 NTSYSAPI
+LOGICAL
+NTAPI
+RtlQueryPerformanceCounter(
+    _Out_ PLARGE_INTEGER Counter);
+
+NTSYSAPI
+LOGICAL
+NTAPI
+RtlQueryPerformanceFrequency(
+    _Out_ PLARGE_INTEGER Frequency);
+
+NTSYSAPI
 BOOLEAN
 NTAPI
 RtlCutoverTimeToSystemTime(

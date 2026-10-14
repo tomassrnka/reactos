@@ -74,6 +74,42 @@ static void CheckInterruptTime(void)
     CHECK(Storage[0] == 0x12345678 && Storage[3] == 0xabcdef01);
 }
 
+static void CheckPerformanceTime(void)
+{
+    typedef BOOL (WINAPI *QUERY)(PLARGE_INTEGER);
+    HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
+    QUERY Counter = (QUERY)GetProcAddress(Ntdll, "RtlQueryPerformanceCounter");
+    QUERY Frequency = (QUERY)GetProcAddress(Ntdll, "RtlQueryPerformanceFrequency");
+    DECLSPEC_ALIGN(8) ULONG Storage[4] = {0x12345678, 0, 0, 0xabcdef01};
+    PLARGE_INTEGER Value = (PLARGE_INTEGER)&Storage[1];
+    LARGE_INTEGER Rate, Before, After;
+    LONGLONG Start, Previous;
+    DWORD Tick, i;
+
+    CHECK(Counter && Frequency);
+    if (!Counter || !Frequency) return;
+    CHECK(QueryPerformanceFrequency(&Rate) && Rate.QuadPart > 0);
+    SetLastError(0x1234);
+    CHECK(Frequency(Value) && Value->QuadPart == Rate.QuadPart);
+    CHECK(GetLastError() == 0x1234);
+    CHECK(QueryPerformanceCounter(&Before));
+    CHECK(Counter(Value));
+    CHECK(QueryPerformanceCounter(&After));
+    CHECK(Value->QuadPart >= Before.QuadPart && Value->QuadPart <= After.QuadPart);
+    Start = Previous = Value->QuadPart;
+    Tick = GetTickCount();
+    Sleep(100);
+    CHECK(Counter(Value) && Value->QuadPart > Start);
+    CHECK((Value->QuadPart - Start) * 1000 / Rate.QuadPart >= 50);
+    CHECK((Value->QuadPart - Start) * 1000 / Rate.QuadPart <= (DWORD)(GetTickCount() - Tick) + 1000);
+    for (i = 0; i < 64; ++i)
+    {
+        CHECK(Counter(Value) && Value->QuadPart >= Previous);
+        Previous = Value->QuadPart;
+    }
+    CHECK(Storage[0] == 0x12345678 && Storage[3] == 0xabcdef01);
+}
+
 static void CheckRuntimeReporting(void)
 {
     typedef HRESULT (WINAPI *MODULE)(PCWSTR, PVOID);
@@ -604,6 +640,7 @@ int wmain(int argc, WCHAR **argv)
     CheckAsyncPipe();
     CheckVolumeByHandle();
     CheckInterruptTime();
+    CheckPerformanceTime();
     CheckRuntimeReporting();
     CheckPrivileges();
     CheckObjectSecurity();

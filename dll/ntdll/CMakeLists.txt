@@ -14,6 +14,8 @@ if(SYSWOW64_GUEST)
         "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec")
 endif()
 if(BUILD_WOW64_ENABLED)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/def/ntdll.spec")
     file(READ "${CMAKE_CURRENT_SOURCE_DIR}/def/ntdll.spec" wow64_native_spec)
     string(REPLACE "-stub -version=0x600+ -arch=x86_64 RtlWow64GetThreadContext" "-version=0x600+ -arch=x86_64 RtlWow64GetThreadContext" wow64_native_spec "${wow64_native_spec}")
     string(REPLACE "-stub -version=0x600+ -arch=x86_64 RtlWow64SetThreadContext(long long)" "-version=0x600+ -arch=x86_64 RtlWow64SetThreadContext(ptr ptr)" wow64_native_spec "${wow64_native_spec}")

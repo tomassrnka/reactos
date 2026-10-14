@@ -1091,6 +1091,8 @@
 @ stdcall RtlQueryInformationActiveActivationContext(long ptr long ptr)
 @ stdcall RtlQueryInterfaceMemoryStream(ptr ptr ptr)
 @ stdcall -stub -version=0x600+ RtlQueryModuleInformation(ptr long ptr)
+@ stdcall -version=0x600+ RtlQueryPerformanceCounter(ptr)
+@ stdcall -version=0x600+ RtlQueryPerformanceFrequency(ptr)
 @ stdcall -stub RtlQueryProcessBackTraceInformation(ptr)
 @ stdcall RtlQueryProcessDebugInformation(long long ptr)
 @ stdcall RtlQueryProcessHeapInformation(ptr)

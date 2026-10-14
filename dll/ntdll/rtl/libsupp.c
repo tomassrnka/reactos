@@ -1384,6 +1384,22 @@ RtlpSafeCopyMemory(
     return STATUS_SUCCESS;
 }
 
+LOGICAL
+NTAPI
+RtlQueryPerformanceCounter(PLARGE_INTEGER Counter)
+{
+    return NT_SUCCESS(NtQueryPerformanceCounter(Counter, NULL));
+}
+
+LOGICAL
+NTAPI
+RtlQueryPerformanceFrequency(PLARGE_INTEGER Frequency)
+{
+    LARGE_INTEGER Counter;
+
+    return NT_SUCCESS(NtQueryPerformanceCounter(&Counter, Frequency));
+}
+
 /* FIXME: code duplication with kernel32/client/time.c */
 ULONG
 NTAPI
