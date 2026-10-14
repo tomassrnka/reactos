@@ -69,6 +69,15 @@ static SOCKET ConnectTo(PCSTR Address)
     Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (Socket == INVALID_SOCKET)
         return INVALID_SOCKET;
+
+    /* No I/O blocks for ever, so that the workers of the parallel test always end */
+    {
+        DWORD Timeout = 30000;
+
+        setsockopt(Socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&Timeout, sizeof(Timeout));
+        setsockopt(Socket, SOL_SOCKET, SO_SNDTIMEO, (const char *)&Timeout, sizeof(Timeout));
+    }
+
     if (connect(Socket, (struct sockaddr *)&Peer, sizeof(Peer)))
     {
         closesocket(Socket);
@@ -144,6 +153,9 @@ static SECURITY_STATUS Handshake(CONNECTION *Conn, PCSTR Target, DWORD Protocols
                                                 0, NULL, &OutDesc, &Attr, &Expiry);
         }
 
+        if (First && (Status == SEC_I_CONTINUE_NEEDED || Status == SEC_E_OK))
+            Conn->HaveContext = TRUE;
+
         if (OutBuffer.cbBuffer && OutBuffer.pvBuffer)
         {
             BOOL Sent = SendAll(Conn->Socket, OutBuffer.pvBuffer, OutBuffer.cbBuffer);
@@ -166,8 +178,6 @@ static SECURITY_STATUS Handshake(CONNECTION *Conn, PCSTR Target, DWORD Protocols
                 Conn->Used = 0;
             }
         }
-        if (First && (Status == SEC_I_CONTINUE_NEEDED || Status == SEC_E_OK))
-            Conn->HaveContext = TRUE;
         First = FALSE;
 
         if (Status == SEC_E_OK)
@@ -388,7 +398,8 @@ static void TestParallel(PCSTR Tls12, PCSTR Tls13)
     {
         if (!Threads[i])
             continue;
-        WaitForSingleObject(Threads[i], 120000);
+        /* every worker's I/O is bounded, so the wait ends */
+        ok(WaitForSingleObject(Threads[i], INFINITE) == WAIT_OBJECT_0, "worker %lu did not end\n", i);
         CloseHandle(Threads[i]);
         Failures += Workers[i].Failures;
     }
