@@ -243,11 +243,15 @@ static void CheckHeapListAgainst(const ULONG_PTR *Expected, DWORD ExpectedCount,
         ok(Ids[0] == (ULONG_PTR)ProcessHeap, "The first heap is %p, the process heap is %p\n", (PVOID)Ids[0], ProcessHeap);
 }
 
-/* Walks the blocks of one heap through Heap32First and Heap32Next. Returns FALSE when the system lists no blocks. */
-static BOOL CheckHeapBlocks(DWORD Pid, ULONG_PTR HeapId, BOOL IsProcessHeap)
+/*
+ * Walks the blocks of one heap through Heap32First and Heap32Next. Windows does not give the real
+ * address of a block (its first block has the address of the heap plus the size of an entry, and the
+ * addresses that follow add the sizes up), ReactOS does: a block that is known to be allocated is looked up.
+ */
+static void CheckHeapBlocks(DWORD Pid, ULONG_PTR HeapId, BOOL IsProcessHeap, PVOID Known)
 {
     SDK_HEAPENTRY32 Entry;
-    DWORD Count = 0, Fixed = 0;
+    DWORD Count = 0, Fixed = 0, Found = 0;
     BOOL Ret;
 
     /* Windows leaves dwFlags alone for a block that is neither allocated nor an uncommitted range */
@@ -256,9 +260,6 @@ static BOOL CheckHeapBlocks(DWORD Pid, ULONG_PTR HeapId, BOOL IsProcessHeap)
     Entry.dwFlags = 0;
     SetLastError(0xdeadbeef);
     Ret = Heap32First((HEAPENTRY32 *)&Entry, Pid, HeapId);
-    if (!Ret && GetLastError() == ERROR_NO_MORE_FILES && IsReactOS())
-        return FALSE;
-
     ok(Ret, "Heap32First(%p) failed with %lu\n", (PVOID)HeapId, GetLastError());
     if (Ret)
         ok(Entry.hHandle == (HANDLE)HeapId, "hHandle is %p, expected %p\n", Entry.hHandle, (PVOID)HeapId);
@@ -272,6 +273,15 @@ static BOOL CheckHeapBlocks(DWORD Pid, ULONG_PTR HeapId, BOOL IsProcessHeap)
            "Block %lu has flags %lx\n", Count, Entry.dwFlags);
         if (Entry.dwFlags == LF32_FIXED)
             Fixed++;
+        if (IsReactOS())
+        {
+            ok(Entry.dwBlockSize != 0, "Block %lu has no size\n", Count);
+            if (Known != NULL && Entry.dwFlags == LF32_FIXED &&
+                (ULONG_PTR)Known >= Entry.dwAddress && (ULONG_PTR)Known < Entry.dwAddress + Entry.dwBlockSize)
+            {
+                Found++;
+            }
+        }
         Count++;
         SetLastError(0xdeadbeef);
         Ret = Heap32Next((HEAPENTRY32 *)&Entry);
@@ -279,9 +289,10 @@ static BOOL CheckHeapBlocks(DWORD Pid, ULONG_PTR HeapId, BOOL IsProcessHeap)
     ok(Count != 0, "Heap %p has no blocks\n", (PVOID)HeapId);
     ok(!Ret, "Heap %p has more than %lu blocks\n", (PVOID)HeapId, Count);
     ok_err(ERROR_NO_MORE_FILES);
-    if (IsProcessHeap)
-        ok(Fixed != 0, "The process heap has no allocated block\n");
-    return TRUE;
+    if (IsProcessHeap || Known != NULL)
+        ok(Fixed != 0, "Heap %p has no allocated block\n", (PVOID)HeapId);
+    if (IsReactOS() && Known != NULL)
+        ok(Found == 1, "The block at %p is in %lu blocks of the heap\n", Known, Found);
 }
 
 static void test_heap_list_own(void)
@@ -512,7 +523,6 @@ static void test_heap_blocks_own(void)
     HANDLE ProcessHeap = GetProcessHeap();
     DWORD Pid = GetCurrentProcessId();
     DWORD Count, i;
-    BOOL Walked;
     void *Block;
 
     Private = HeapCreate(0, 0, 0);
@@ -524,16 +534,9 @@ static void test_heap_blocks_own(void)
     Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPHEAPLIST, Pid);
     ok(Snapshot != INVALID_HANDLE_VALUE, "CreateToolhelp32Snapshot failed with %lu\n", GetLastError());
 
-    Walked = CheckHeapBlocks(Pid, (ULONG_PTR)ProcessHeap, TRUE);
-    if (!Walked)
-    {
-        skip("The blocks of a heap are not listed\n");
-    }
-    else
-    {
-        for (i = 1; i < Count; i++)
-            CheckHeapBlocks(Pid, (ULONG_PTR)Heaps[i], FALSE);
-    }
+    CheckHeapBlocks(Pid, (ULONG_PTR)ProcessHeap, TRUE, NULL);
+    for (i = 1; i < Count; i++)
+        CheckHeapBlocks(Pid, (ULONG_PTR)Heaps[i], FALSE, Heaps[i] == Private ? Block : NULL);
 
     if (Snapshot != INVALID_HANDLE_VALUE)
         CloseHandle(Snapshot);
@@ -547,7 +550,7 @@ static void HeapChildObjectName(WCHAR *Name, const WCHAR *Kind, DWORD ParentPid)
     StringCchPrintfW(Name, 64, L"kernel32_apitest_Toolhelp32_%ls_%lu", Kind, ParentPid);
 }
 
-static void StartHeapChild(HANDLE *Process, DWORD *Pid, HANDLE *Ready, HANDLE *Done)
+static void StartHeapChild(HANDLE *Process, DWORD *Pid, HANDLE *Ready, HANDLE *Done, BOOL Busy)
 {
     WCHAR Command[MAX_PATH + 50];
     WCHAR Name[64];
@@ -565,7 +568,8 @@ static void StartHeapChild(HANDLE *Process, DWORD *Pid, HANDLE *Ready, HANDLE *D
 
     Command[0] = L'"';
     GetModuleFileNameW(NULL, Command + 1, MAX_PATH);
-    StringCchPrintfW(Command + wcslen(Command), ARRAYSIZE(Command) - wcslen(Command), L"\" Toolhelp32 child %lu", GetCurrentProcessId());
+    StringCchPrintfW(Command + wcslen(Command), ARRAYSIZE(Command) - wcslen(Command), L"\" Toolhelp32 child %lu%ls",
+                     GetCurrentProcessId(), Busy ? L" busy" : L"");
     Ret = CreateProcessW(NULL, Command, NULL, NULL, FALSE, 0, NULL, NULL, &Startup, &Info);
     ok(Ret, "CreateProcess failed with %lu\n", GetLastError());
     if (Ret)
@@ -585,7 +589,7 @@ static void test_heap_child(void)
     WCHAR Name[64];
     DWORD Pid = 0, Wait, ExitCode, i;
 
-    StartHeapChild(&Process, &Pid, &Ready, &Done);
+    StartHeapChild(&Process, &Pid, &Ready, &Done, FALSE);
     if (!Process)
     {
         skip("Could not start the child process\n");
@@ -618,15 +622,9 @@ static void test_heap_child(void)
             CheckHeapListAgainst(Heaps, min(Report->Count, MAX_HEAPS), (HANDLE)Heaps[0], Pid, Snapshot);
             CloseHandle(Snapshot);
 
-            if (CheckHeapBlocks(Pid, Heaps[0], TRUE))
-            {
-                for (i = 1; i < min(Report->Count, MAX_HEAPS); i++)
-                    CheckHeapBlocks(Pid, Heaps[i], FALSE);
-            }
-            else
-            {
-                skip("The blocks of a heap are not listed\n");
-            }
+            CheckHeapBlocks(Pid, Heaps[0], TRUE, NULL);
+            for (i = 1; i < min(Report->Count, MAX_HEAPS); i++)
+                CheckHeapBlocks(Pid, Heaps[i], FALSE, NULL);
         }
         UnmapViewOfFile(Report);
     }
@@ -657,11 +655,49 @@ Cleanup:
         CloseHandle(Done);
 }
 
-static void heap_child_main(DWORD ParentPid)
+typedef struct
+{
+    HANDLE Heaps[3];
+    HANDLE Done;
+    DWORD Seed;
+} CHURN;
+
+/* Blocks of all sizes come and go in the heaps, a little slower than they could, as a program does that works */
+static DWORD WINAPI ChurnThread(PVOID Parameter)
+{
+    CHURN *Churn = Parameter;
+    PVOID Block[3][32] = { { 0 } };
+    DWORD Seed = Churn->Seed, Heap, Index, Round = 0;
+
+    while (WaitForSingleObject(Churn->Done, 0) != WAIT_OBJECT_0)
+    {
+        Seed = Seed * 1103515245 + 12345;
+        Heap = (Seed >> 20) % 3;
+        Index = (Seed >> 16) % 32;
+        if (Block[Heap][Index] != NULL)
+        {
+            HeapFree(Churn->Heaps[Heap], 0, Block[Heap][Index]);
+            Block[Heap][Index] = NULL;
+        }
+        else
+        {
+            Block[Heap][Index] = HeapAlloc(Churn->Heaps[Heap], 0, 16 + ((Seed >> 4) % 3000));
+        }
+
+        if ((++Round % 16) == 0)
+            Sleep(1);
+    }
+
+    return 0;
+}
+
+static void heap_child_main(DWORD ParentPid, BOOL Busy)
 {
     HEAP_REPORT *Report;
     HANDLE Heaps[MAX_HEAPS];
     HANDLE Mapping, Ready, Done, Private;
+    HANDLE Threads[2] = { NULL, NULL };
+    CHURN Churn[2];
     WCHAR Name[64];
     DWORD Count, i;
     int n;
@@ -681,6 +717,7 @@ static void heap_child_main(DWORD ParentPid)
         Private = HeapCreate(0, 0, 0);
         ok(Private != NULL, "HeapCreate failed with %lu\n", GetLastError());
         ok(HeapAlloc(Private, 0, 100 + n) != NULL, "HeapAlloc failed\n");
+        Churn[0].Heaps[n] = Churn[1].Heaps[n] = Private;
     }
 
     Report = MapViewOfFile(Mapping, FILE_MAP_WRITE, 0, 0, sizeof(*Report));
@@ -694,9 +731,198 @@ static void heap_child_main(DWORD ParentPid)
         UnmapViewOfFile(Report);
     }
 
+    if (Busy)
+    {
+        for (i = 0; i < ARRAYSIZE(Threads); i++)
+        {
+            Churn[i].Done = Done;
+            Churn[i].Seed = 17 + i * 6700417;
+            Threads[i] = CreateThread(NULL, 0, ChurnThread, &Churn[i], 0, NULL);
+            ok(Threads[i] != NULL, "CreateThread failed with %lu\n", GetLastError());
+        }
+    }
+
     SetEvent(Ready);
     WaitForSingleObject(Done, 60000);
+
+    for (i = 0; i < ARRAYSIZE(Threads); i++)
+    {
+        if (Threads[i])
+        {
+            WaitForSingleObject(Threads[i], 20000);
+            CloseHandle(Threads[i]);
+        }
+    }
+
     CloseHandle(Mapping);
+}
+
+/* The heaps of a process that is working are read while it changes them: the answers need not be complete, but nobody may fault */
+static void test_heap_child_busy(void)
+{
+    HEAP_REPORT *Report;
+    HANDLE Mapping, Ready, Done, Process = NULL;
+    SDK_HEAPENTRY32 Entry;
+    ULONG_PTR Heaps[MAX_HEAPS];
+    WCHAR Name[64];
+    DWORD Pid = 0, Wait, ExitCode, Count, Walks = 0, Tick, i;
+    BOOL Ret;
+
+    StartHeapChild(&Process, &Pid, &Ready, &Done, TRUE);
+    if (!Process)
+    {
+        skip("Could not start the child process\n");
+        goto Cleanup;
+    }
+
+    Wait = WaitForSingleObject(Ready, 20000);
+    ok_int(Wait, WAIT_OBJECT_0);
+    if (Wait != WAIT_OBJECT_0)
+        goto Terminate;
+
+    HeapChildObjectName(Name, L"heaps", GetCurrentProcessId());
+    Mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, Name);
+    ok(Mapping != NULL, "OpenFileMapping failed with %lu\n", GetLastError());
+    if (!Mapping)
+        goto Terminate;
+
+    Report = MapViewOfFile(Mapping, FILE_MAP_READ, 0, 0, sizeof(*Report));
+    ok(Report != NULL, "MapViewOfFile failed with %lu\n", GetLastError());
+    if (Report)
+    {
+        Count = min(Report->Count, MAX_HEAPS);
+        for (i = 0; i < Count; i++)
+            Heaps[i] = Report->Heaps[i];
+        UnmapViewOfFile(Report);
+
+        Tick = GetTickCount();
+        while (GetTickCount() - Tick < 2000)
+        {
+            for (i = 0; i < Count; i++)
+            {
+                DWORD Blocks = 0;
+
+                memset(&Entry, 0, sizeof(Entry));
+                Entry.dwSize = sizeof(Entry);
+                for (Ret = Heap32First((HEAPENTRY32 *)&Entry, Pid, Heaps[i]); Ret && Blocks < 100000; Ret = Heap32Next((HEAPENTRY32 *)&Entry))
+                    Blocks++;
+            }
+            Walks++;
+        }
+        ok(Walks != 0, "The heaps were not read\n");
+    }
+    CloseHandle(Mapping);
+
+Terminate:
+    SetEvent(Done);
+    Wait = WaitForSingleObject(Process, 20000);
+    ok_int(Wait, WAIT_OBJECT_0);
+    if (Wait != WAIT_OBJECT_0)
+        TerminateProcess(Process, 0);
+    ExitCode = 0xdeadbeef;
+    ok(GetExitCodeProcess(Process, &ExitCode), "GetExitCodeProcess failed with %lu\n", GetLastError());
+    ok_int(ExitCode, 0);
+    CloseHandle(Process);
+
+Cleanup:
+    if (Ready)
+        CloseHandle(Ready);
+    if (Done)
+        CloseHandle(Done);
+}
+
+static volatile LONG g_ChurnStop;
+static volatile LONG g_ChurnCorrupt;
+static volatile LONG g_ChurnHeaps;
+
+/* Creates heaps, fills their blocks with a pattern, checks it and destroys them again, as fast as it can */
+static DWORD WINAPI DestroyerThread(PVOID Parameter)
+{
+    enum { BLOCKS = 24, SIZE = 120 };
+    void *Block[BLOCKS];
+    HANDLE Heap;
+    unsigned i, j;
+
+    while (!g_ChurnStop)
+    {
+        Heap = HeapCreate(0, 0, 0);
+        if (!Heap)
+            continue;
+        for (i = 0; i < BLOCKS; i++)
+        {
+            Block[i] = HeapAlloc(Heap, 0, SIZE);
+            if (Block[i])
+                memset(Block[i], 0xA5 + i, SIZE);
+        }
+        SwitchToThread();
+        for (i = 0; i < BLOCKS; i++)
+        {
+            if (!Block[i])
+                continue;
+            for (j = 0; j < SIZE; j++)
+            {
+                if (((BYTE *)Block[i])[j] != (BYTE)(0xA5 + i))
+                {
+                    InterlockedIncrement(&g_ChurnCorrupt);
+                    break;
+                }
+            }
+        }
+        HeapDestroy(Heap);
+        InterlockedIncrement(&g_ChurnHeaps);
+    }
+    return 0;
+}
+
+/*
+ * Heaps that another thread creates and destroys while the blocks of the heaps are read: the reader must not
+ * touch a heap that is gone (it would write to memory that has a new owner) or hold the heap list up for good.
+ */
+static void test_heap_blocks_while_destroying(void)
+{
+    HANDLE Heaps[MAX_HEAPS];
+    HANDLE Thread[2];
+    SDK_HEAPENTRY32 Entry;
+    DWORD Pid = GetCurrentProcessId(), Start, Count, Reads = 0, i, k;
+    BOOL Ret;
+
+    g_ChurnStop = 0;
+    g_ChurnCorrupt = 0;
+    g_ChurnHeaps = 0;
+    for (k = 0; k < ARRAYSIZE(Thread); k++)
+    {
+        Thread[k] = CreateThread(NULL, 0, DestroyerThread, NULL, 0, NULL);
+        ok(Thread[k] != NULL, "CreateThread failed with %lu\n", GetLastError());
+    }
+
+    Start = GetTickCount();
+    while (GetTickCount() - Start < 3000)
+    {
+        Count = GetProcessHeaps(MAX_HEAPS, Heaps);
+        for (i = 0; i < min(Count, MAX_HEAPS); i++)
+        {
+            memset(&Entry, 0, sizeof(Entry));
+            Entry.dwSize = sizeof(Entry);
+            Ret = Heap32First((HEAPENTRY32 *)&Entry, Pid, (ULONG_PTR)Heaps[i]);
+            if (Ret)
+                Reads++;
+            if (i == 1 || i >= 3)
+                break;
+        }
+    }
+
+    InterlockedExchange(&g_ChurnStop, 1);
+    for (k = 0; k < ARRAYSIZE(Thread); k++)
+    {
+        if (Thread[k])
+        {
+            ok(WaitForSingleObject(Thread[k], 30000) == WAIT_OBJECT_0, "A thread that destroys heaps does not stop\n");
+            CloseHandle(Thread[k]);
+        }
+    }
+    ok(g_ChurnCorrupt == 0, "%ld blocks of other heaps were overwritten while the heaps were read\n", g_ChurnCorrupt);
+    ok(Reads != 0, "No heap could be read\n");
+    trace("%lu reads, %ld heaps created and destroyed\n", Reads, g_ChurnHeaps);
 }
 
 static void test_heaps(void)
@@ -704,7 +930,9 @@ static void test_heaps(void)
     test_heap_list_own();
     test_heap_errors();
     test_heap_blocks_own();
+    test_heap_blocks_while_destroying();
     test_heap_child();
+    test_heap_child_busy();
 }
 
 START_TEST(Toolhelp32)
@@ -714,7 +942,7 @@ START_TEST(Toolhelp32)
 
     if (argc >= 4 && !strcmp(argv[2], "child"))
     {
-        heap_child_main(strtoul(argv[3], NULL, 10));
+        heap_child_main(strtoul(argv[3], NULL, 10), argc >= 5 && !strcmp(argv[4], "busy"));
         return;
     }
 

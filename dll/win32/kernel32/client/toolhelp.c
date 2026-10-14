@@ -478,6 +478,9 @@ TH32CreateSnapshotSectionInitialize(DWORD dwFlags,
   return Status;
 }
 
+/* The blocks of every heap of a process are listed in one buffer, of which only the part in use is committed */
+#define HEAP_BLOCKS_BUFFER_SIZE 0x4000000
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /*
@@ -496,7 +499,7 @@ Heap32First(LPHEAPENTRY32 lphe, DWORD th32ProcessID, ULONG_PTR th32HeapID)
 
   CHECK_HEAP_PARAM_SIZE(lphe, sizeof(HEAPENTRY32));
 
-  DebugInfo = RtlCreateQueryDebugBuffer(0,
+  DebugInfo = RtlCreateQueryDebugBuffer(HEAP_BLOCKS_BUFFER_SIZE,
                                         FALSE);
   if (DebugInfo == NULL)
   {
@@ -590,7 +593,7 @@ Heap32Next(LPHEAPENTRY32 lphe)
 
   CHECK_HEAP_PARAM_SIZE(lphe, sizeof(HEAPENTRY32));
 
-  DebugInfo = RtlCreateQueryDebugBuffer(0,
+  DebugInfo = RtlCreateQueryDebugBuffer(HEAP_BLOCKS_BUFFER_SIZE,
                                         FALSE);
   if (DebugInfo == NULL)
   {

@@ -321,6 +321,22 @@ typedef struct _HEAP_VIRTUAL_ALLOC_ENTRY
     HEAP_ENTRY BusyBlock;
 } HEAP_VIRTUAL_ALLOC_ENTRY, *PHEAP_VIRTUAL_ALLOC_ENTRY;
 
+/* Heap walking: the structures of a heap are read through a routine, which makes the walker serve this process and another one */
+typedef
+NTSTATUS
+(NTAPI *PRTLP_HEAP_READ_ROUTINE)(
+    _In_opt_ PVOID Context,
+    _In_ PVOID Address,
+    _Out_writes_bytes_(Size) PVOID Buffer,
+    _In_ SIZE_T Size);
+
+/* Returns FALSE to end the walk */
+typedef
+BOOLEAN
+(NTAPI *PRTLP_HEAP_WALK_CALLBACK)(
+    _In_opt_ PVOID Context,
+    _In_ PRTL_HEAP_WALK_ENTRY Entry);
+
 /* Global variables */
 extern RTL_CRITICAL_SECTION RtlpProcessHeapsListLock;
 extern BOOLEAN RtlpPageHeapEnabled;
@@ -345,6 +361,19 @@ RtlpValidateHeapEntry(PHEAP Heap, PHEAP_ENTRY HeapEntry);
 
 BOOLEAN NTAPI
 RtlpValidateHeapHeaders(PHEAP Heap, BOOLEAN Recalculate);
+
+/*
+ * Reports every entry of the heap at HeapAddress. Without a read routine the heap is in this process
+ * and is locked for the walk. With one it is read as it is, and the caller has to watch out for changes:
+ * a chain of blocks that does not add up ends the walk with STATUS_INVALID_PARAMETER.
+ */
+NTSTATUS NTAPI
+RtlpEnumerateHeap(_In_opt_ PRTLP_HEAP_READ_ROUTINE Read,
+                  _In_opt_ PVOID ReadContext,
+                  _In_ PVOID HeapAddress,
+                  _In_ PRTLP_HEAP_WALK_CALLBACK Callback,
+                  _In_opt_ PVOID CallbackContext,
+                  _Out_opt_ PULONG HeapFlags);
 
 /* heapdbg.c */
 NTSYSAPI
