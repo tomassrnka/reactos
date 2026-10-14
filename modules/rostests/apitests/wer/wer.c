@@ -484,6 +484,13 @@ static void test_submit(void)
     ok(hr == E_INVALIDARG, "got 0x%lx\n", hr);
 }
 
+/* the flags of the Windows 8 header are in the header, with their values */
+static void test_flag_names(void)
+{
+    ok(WER_SUBMIT_BYPASS_POWER_THROTTLING == 0x4000, "got 0x%x\n", WER_SUBMIT_BYPASS_POWER_THROTTLING);
+    ok(WER_SUBMIT_BYPASS_NETWORK_COST_THROTTLING == 0x8000, "got 0x%x\n", WER_SUBMIT_BYPASS_NETWORK_COST_THROTTLING);
+}
+
 START_TEST(wer)
 {
     hWer = LoadLibraryW(L"wer.dll");
@@ -495,6 +502,7 @@ START_TEST(wer)
     }
 
     test_exports();
+    test_flag_names();
 
     pWerAddExcludedApplication = (PVOID)GetProcAddress(hWer, "WerAddExcludedApplication");
     pWerRemoveExcludedApplication = (PVOID)GetProcAddress(hWer, "WerRemoveExcludedApplication");
