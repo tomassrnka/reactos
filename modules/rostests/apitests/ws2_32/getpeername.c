@@ -278,7 +278,7 @@ static void Test_NonBlockingConnect(BOOL UseEvents, DWORD PreDelay, const char *
                 ok(WSAEnumNetworkEvents(Client, Event, &Events) == 0, "%s: WSAEnumNetworkEvents failed: %d\n", What, WSAGetLastError());
                 ok(Events.lNetworkEvents & FD_CONNECT, "%s: no FD_CONNECT, events 0x%lx\n", What, Events.lNetworkEvents);
                 ok(Events.iErrorCode[FD_CONNECT_BIT] == 0, "%s: FD_CONNECT error %d\n", What, Events.iErrorCode[FD_CONNECT_BIT]);
-                Ready = (Events.lNetworkEvents & FD_CONNECT) != 0;
+                Ready = (Events.lNetworkEvents & FD_CONNECT) && Events.iErrorCode[FD_CONNECT_BIT] == 0;
             }
             WSAEventSelect(Client, NULL, 0);
             WSACloseEvent(Event);
@@ -317,10 +317,24 @@ static void Test_NonBlockingConnect(BOOL UseEvents, DWORD PreDelay, const char *
             ok(Result == 1, "%s %d: send returned %d, error %d\n", What, Iteration, Result, WSAGetLastError());
         }
 
-        Accepted = accept(Server, NULL, NULL);
-        ok(Accepted != INVALID_SOCKET, "%s: accept failed: %d\n", What, WSAGetLastError());
-        if (Accepted != INVALID_SOCKET)
-            closesocket(Accepted);
+        if (Ready)
+        {
+            fd_set Read;
+            struct timeval Timeout = { 10, 0 };
+
+            /* Only a connection that was reported finished is queued for sure */
+            FD_ZERO(&Read);
+            FD_SET(Server, &Read);
+            Result = select(0, &Read, NULL, NULL, &Timeout);
+            ok(Result == 1, "%s: no connection to accept, select returned %d\n", What, Result);
+            if (Result == 1)
+            {
+                Accepted = accept(Server, NULL, NULL);
+                ok(Accepted != INVALID_SOCKET, "%s: accept failed: %d\n", What, WSAGetLastError());
+                if (Accepted != INVALID_SOCKET)
+                    closesocket(Accepted);
+            }
+        }
         closesocket(Client);
     }
     closesocket(Server);

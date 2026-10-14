@@ -61,6 +61,8 @@ typedef struct _SOCKET_INFORMATION {
 	BOOL TrySAN;
 	WSAPROTOCOL_INFOW ProtocolInfo;
 	struct _SOCKET_INFORMATION *NextSocket;
+	/* A nonblocking connect was issued and MsafdConnectAPC has not run yet */
+	volatile LONG ConnectPending;
 } SOCKET_INFORMATION, *PSOCKET_INFORMATION;
 
 
