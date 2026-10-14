@@ -129,7 +129,7 @@ const struct builtin_class_descr LISTBOX_builtin_class =
     CS_DBLCLKS /*| CS_PARENTDC*/,  /* style */
     ListBoxWndProcA,      /* procA */
     ListBoxWndProcW,      /* procW */
-    sizeof(LB_DESCR *),   /* extra */
+    sizeof(KCOPYOF(LB_DESCR *)),   /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };
@@ -145,7 +145,7 @@ const struct builtin_class_descr COMBOLBOX_builtin_class =
     CS_DBLCLKS | CS_SAVEBITS,  /* style */
     ListBoxWndProcA,      /* procA */
     ListBoxWndProcW,      /* procW */
-    sizeof(LB_DESCR *),   /* extra */
+    sizeof(KCOPYOF(LB_DESCR *)),   /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };
@@ -3323,7 +3323,6 @@ LRESULT WINAPI ListBoxWndProcW( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 /* NtUserGetListBoxInfo reads page_size through win32k's own copy of this structure, which has the amd64 layout */
 #if defined(_WIN64) || defined(W32K_WIDE_ACTIVE)
-_Static_assert(offsetof(LB_DESCR, self) == 0 && offsetof(LB_DESCR, owner) == 8 &&
-               offsetof(LB_DESCR, items) == 32 && offsetof(LB_DESCR, page_size) == 64,
-               "LB_DESCR differs from win32k's copy");
+C_ASSERT(offsetof(LB_DESCR, self) == 0 && offsetof(LB_DESCR, owner) == 8 &&
+         offsetof(LB_DESCR, items) == 32 && offsetof(LB_DESCR, page_size) == 64);
 #endif

@@ -65,6 +65,10 @@
 #define KASSIGN(d, s) ((void)sizeof(char[sizeof(d) == sizeof(s) ? 1 : -1]), (void)RtlCopyMemory(&(d), &(s), sizeof(d)))
 #define KPUT(p, n, v) ((p)->n##_K64 = (v))
 #define KCOPYOF(T) ULONG64
+/* user32 builds the 12-byte LARGE_STRING argument and passes it as a PLARGE_UNICODE_STRING: write it as that */
+#define KLSTR(p) ((PLARGE_STRING)(p))
+/* PolyPatBlt: the batch record is 24 bytes, so check the count in 64 bits before it reaches a USHORT size */
+#define KBATCH_COUNT_FITS(n) ((ULONG64)(n) * sizeof(KPATRECT) <= GDIBATCHBUFSIZE)
 
 #define W32K_NATIVE_ASSERT(x) 1
 
@@ -125,6 +129,8 @@ typedef ULONG64 KULONG_PTR;
 #define KGET(p, n) ((p)->n)
 #define KPUT(p, n, v) ((p)->n = (v))
 #define KCOPYOF(T) T
+#define KLSTR(p) (p)
+#define KBATCH_COUNT_FITS(n) TRUE
 
 #define W32K_NATIVE_ASSERT(x) (x)
 

@@ -652,7 +652,7 @@ PolyPatBlt(
             USHORT cjSize = 0;
             if (nCount > 1) cjSize = (nCount-1) * sizeof(KPATRECT);
 
-            if ((pTeb->GdiTebBatch.Offset + cjSize) <= GDIBATCHBUFSIZE)
+            if (KBATCH_COUNT_FITS(nCount) && (pTeb->GdiTebBatch.Offset + cjSize) <= GDIBATCHBUFSIZE)
             {
                 pdcattr->ulDirty_ |= DC_MODE_DIRTY;
                 pgO->Count = nCount;

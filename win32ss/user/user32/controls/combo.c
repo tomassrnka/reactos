@@ -74,7 +74,7 @@ const struct builtin_class_descr COMBO_builtin_class =
 #else
     WINPROC_COMBO,        /* proc */
 #endif
-    sizeof(HEADCOMBO *),  /* extra */
+    sizeof(KCOPYOF(HEADCOMBO *)),  /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };
@@ -2319,8 +2319,8 @@ BOOL WINAPI GetComboBoxInfo(
 
 /* NtUserGetComboBoxInfo reads these through win32k's own copy of this structure, which has the amd64 layout */
 #if defined(_WIN64) || defined(W32K_WIDE_ACTIVE)
-_Static_assert(offsetof(HEADCOMBO, self) == 0 && offsetof(HEADCOMBO, owner) == 8 &&
-               offsetof(HEADCOMBO, hWndEdit) == 24 && offsetof(HEADCOMBO, hWndLBox) == 32 &&
-               offsetof(HEADCOMBO, wState) == 40 && offsetof(HEADCOMBO, textRect) == 56 &&
-               offsetof(HEADCOMBO, buttonRect) == 72, "HEADCOMBO differs from win32k's copy");
+C_ASSERT(offsetof(HEADCOMBO, self) == 0 && offsetof(HEADCOMBO, owner) == 8 &&
+         offsetof(HEADCOMBO, hWndEdit) == 24 && offsetof(HEADCOMBO, hWndLBox) == 32 &&
+         offsetof(HEADCOMBO, wState) == 40 && offsetof(HEADCOMBO, textRect) == 56 &&
+         offsetof(HEADCOMBO, buttonRect) == 72);
 #endif
