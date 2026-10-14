@@ -620,12 +620,10 @@ SepPropagateAcl(
     PSID Sid;
     BOOLEAN WriteTwoAces;
 
+    /* RtlValidAcl lets a caller's ACL size and reserved fields through, as Windows does */
     ASSERT(AclSource != NULL);
     ASSERT(!ExplicitAcl || RtlValidAcl(ExplicitAcl));
     ASSERT(!ParentAcl || RtlValidAcl(ParentAcl));
-    ASSERT(AclSource->AclSize % sizeof(ULONG) == 0);
-    ASSERT(AclSource->Sbz1 == 0);
-    ASSERT(AclSource->Sbz2 == 0);
 
     Written = 0;
     if (*AclLength >= Written + sizeof(ACL))
@@ -633,6 +631,8 @@ SepPropagateAcl(
         RtlCopyMemory(AclDest,
                       AclSource,
                       sizeof(ACL));
+        AclDest->Sbz1 = 0;
+        AclDest->Sbz2 = 0;
         if (ExplicitAcl && ParentAcl)
             AclDest->AclRevision = max(ExplicitAcl->AclRevision, ParentAcl->AclRevision);
     }
