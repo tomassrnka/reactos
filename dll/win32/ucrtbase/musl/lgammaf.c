@@ -12,8 +12,13 @@ float __cdecl lgammaf(float x)
 
 	/* ReactOS: the pole is answered here, the log of 0 would call the handler of math errors that Windows does not call */
 	if (x == 0) {
+		volatile float zero = 0.0f, divided;
+
 		errno = ERANGE;
-		return asfloat(0x7f800000);  /* not INFINITY: its arithmetic clamps in the round-down mode */
+		/* the divide-by-zero flag, as on Windows; the result is the bits of the infinity (INFINITY is made by an overflow, which round-down clamps) */
+		divided = 1.0f / zero;
+		(void)divided;
+		return asfloat(0x7f800000);
 	}
 	/* ReactOS: Wine keeps the sign in a global that Windows does not have */
 	r = eval_as_float(__lgammaf_r(x, &sign));

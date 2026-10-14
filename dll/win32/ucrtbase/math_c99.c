@@ -333,3 +333,48 @@ float __cdecl _logbf(float x)
     return ilogbf(x);
 }
 #endif
+
+/*
+ * The _o_ variants: the same results, but they never set errno and never call the handler of math errors
+ * (measured on Windows 10). The functions below call the plain ones and put errno back, except for the
+ * legacy logb, whose results differ and which would call the handler.
+ */
+#define O_WRAPPER(Type, Name, Function) \
+    Type __cdecl Name(Type x) \
+    { \
+        int saved = errno; \
+        Type r = Function(x); \
+        errno = saved; \
+        return r; \
+    }
+
+O_WRAPPER(double, _o_lgamma, lgamma)
+O_WRAPPER(float, _o_lgammaf, lgammaf)
+O_WRAPPER(double, _o_lgammal, lgamma)
+O_WRAPPER(double, _o_tgamma, tgamma)
+O_WRAPPER(float, _o_tgammaf, tgammaf)
+O_WRAPPER(double, _o_tgammal, tgamma)
+O_WRAPPER(double, _o_logb, logb)
+O_WRAPPER(float, _o_logbf, logbf)
+O_WRAPPER(double, _o_logbl, logb)
+
+/* The legacy logb keeps the sign of an infinity */
+double __cdecl _o__logb(double x)
+{
+    if (!isfinite(x))
+        return x;
+    if (x == 0)
+        return -1 / (x * x);
+    return ilogb(x);
+}
+
+#ifndef _M_IX86
+float __cdecl _o__logbf(float x)
+{
+    if (!isfinite(x))
+        return x;
+    if (x == 0)
+        return -1 / (x * x);
+    return ilogbf(x);
+}
+#endif

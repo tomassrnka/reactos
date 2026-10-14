@@ -1202,8 +1202,8 @@
 @ cdecl _o__localtime64_s(ptr ptr) _localtime64_s
 @ cdecl _o__lock_file(ptr) _lock_file
 @ cdecl _o__locking(long long long) _locking
-@ cdecl _o__logb(double) logb
-@ cdecl -arch=!i386 _o__logbf(float) logbf
+@ cdecl _o__logb(double)
+@ cdecl -arch=!i386 _o__logbf(float)
 @ cdecl _o__lsearch(ptr ptr ptr long ptr) _lsearch
 @ cdecl _o__lsearch_s() _lsearch_s # FIXME: params
 @ cdecl _o__lseek(long long long) _lseek
@@ -1740,9 +1740,9 @@
 @ cdecl _o_iswxdigit(long) iswxdigit
 @ cdecl _o_isxdigit(long) isxdigit
 @ cdecl _o_ldexp(double long) ldexp
-@ cdecl _o_lgamma(double) lgamma
-@ cdecl _o_lgammaf(float) lgammaf
-@ cdecl _o_lgammal(double) lgamma
+@ cdecl _o_lgamma(double)
+@ cdecl _o_lgammaf(float)
+@ cdecl _o_lgammal(double)
 @ cdecl -ret64 _o_llrint(double) llrint
 @ cdecl -ret64 _o_llrintf(float) llrintf
 @ cdecl -ret64 _o_llrintl(double) llrint
@@ -1759,9 +1759,9 @@
 @ cdecl _o_log2(double) log2
 @ cdecl _o_log2f(float) log2f
 @ cdecl _o_log2l(double) log2
-@ cdecl _o_logb(double) logb
-@ cdecl _o_logbf(float) logbf
-@ cdecl _o_logbl(double) logb
+@ cdecl _o_logb(double)
+@ cdecl _o_logbf(float)
+@ cdecl _o_logbl(double)
 @ cdecl -arch=!i386 _o_logf(float) logf
 @ cdecl _o_lrint(double) lrint
 @ cdecl _o_lrintf(float) lrintf
@@ -1864,9 +1864,9 @@
 @ cdecl _o_tanh(double) tanh
 @ cdecl -arch=!i386 _o_tanhf(float) tanhf
 @ cdecl _o_terminate() terminate
-@ cdecl _o_tgamma(double) tgamma
-@ cdecl _o_tgammaf(float) tgammaf
-@ cdecl _o_tgammal(double) tgamma
+@ cdecl _o_tgamma(double)
+@ cdecl _o_tgammaf(float)
+@ cdecl _o_tgammal(double)
 @ cdecl _o_tmpfile_s(ptr) tmpfile_s
 @ cdecl _o_tmpnam_s(ptr long) tmpnam_s
 @ cdecl _o_tolower(long) tolower
