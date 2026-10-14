@@ -183,7 +183,7 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_HANDLE LockedHandles;
     KIRQL OldIrql;
     UINT i, Signalled = 0;
-    BOOLEAN Exclusive;
+    BOOLEAN Exclusive, NoPoll = FALSE;
 
     SET_AFD_HANDLES(Irp, NULL);
 
@@ -275,12 +275,21 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
           if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL))
               SignalSocket( Poll, NULL, PollReq, STATUS_CANCELLED );
        } else {
-          AFD_DbgPrint(MAX_TRACE, ("FIXME: do something with the IRP!\n"));
           Status = STATUS_NO_MEMORY;
+          NoPoll = TRUE;
        }
     }
 
     KeReleaseSpinLock( &DeviceExt->Lock, OldIrql );
+
+    /* No poll could be queued: release the references and complete the request */
+    if( NoPoll ) {
+        UnlockHandles( LockedHandles, PollReq->HandleCount );
+        SET_AFD_HANDLES(Irp, NULL);
+        Irp->IoStatus.Status = STATUS_NO_MEMORY;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
+    }
 
     AFD_DbgPrint(MID_TRACE,("Returning %x\n", Status));
 
