@@ -44,19 +44,11 @@ FPIND		EQU	0ffc00000h		; indefinite
 FPSNAN		EQU	07fbfffffh		; SNAN
 FPQNAN		EQU	07fffffffh		; QNAN
 
-X87SW		RECORD	X87SW_B: 1,
-			X87SW_C3: 1,
-			X87SW_TOP: 3,
-			X87SW_C: 3,
-			X87SW_ES: 1,
-			X87SW_SF: 1,
-			X87SW_PE: 1,
-			X87SW_E: 5
-
-X87XAM		EQU	MASK X87SW_C3 OR MASK X87SW_C AND NOT (1 SHL (X87SW_C + 1))
-X87XAM_INF	EQU	5 SHL X87SW_C
-X87XAM_NAN	EQU	1 SHL X87SW_C
-X87XAM_BAD	EQU	MASK X87SW_E AND NOT 2
+; Literal masks: the converted RECORD gave wrong bit positions, so fmod returned a NaN for every input
+X87XAM		EQU	4500h
+X87XAM_INF	EQU	0500h
+X87XAM_NAN	EQU	0100h
+X87XAM_BAD	EQU	1dh
 
 		EXTRN	_handle_errorf: PROC	; float _handle_error (char *fname, int opcode, unsigned long  value, int type, int flags, int error, float arg1, float arg2, int nargs)
 
