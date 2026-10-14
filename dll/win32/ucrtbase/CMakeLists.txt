@@ -14,6 +14,7 @@ add_compile_definitions(
 )
 
 add_library(ucrtbase SHARED
+    fenv.c
     math_c99.c
     printf.c
     stubs.c
