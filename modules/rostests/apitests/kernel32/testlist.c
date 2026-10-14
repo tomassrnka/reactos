@@ -82,6 +82,7 @@ extern void func_TunnelCache(void);
 extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
 extern void func_WerFlags(void);
+extern void func_WerRuntimeExceptionModule(void);
 extern void func_WideCharToMultiByte(void);
 extern void func_SetFileInformationByHandle(void);
 
@@ -167,6 +168,7 @@ const struct test winetest_testlist[] =
     { "TzSetPrivilege",              func_TzSetPrivilege },
     { "UEFIFirmware",                func_UEFIFirmware },
     { "WerFlags",                    func_WerFlags },
+    { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
     { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
     { 0, 0 }
