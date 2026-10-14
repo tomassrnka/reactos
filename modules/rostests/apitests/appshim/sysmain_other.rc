@@ -1,0 +1,31 @@
+#include <windef.h>
+#include <winuser.h>
+#include <winver.h>
+
+/* Same, with another product name: it must not match the DebugView entry */
+1 VERSIONINFO
+FILEVERSION 5,2,0,0
+PRODUCTVERSION 5,2,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Sysinternals"
+            VALUE "FileDescription", "DebugView"
+            VALUE "FileVersion", "5.02"
+            VALUE "InternalName", "Sysinternals Debug Output Viewer"
+            VALUE "OriginalFilename", "Dbgview.exe"
+            VALUE "ProductName", "Not Sysinternals Debugview"
+            VALUE "ProductVersion", "5.02"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+1 24 "sysmain_probe.manifest"

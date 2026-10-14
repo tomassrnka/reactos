@@ -1,0 +1,6 @@
+#define PROBE_BUILD         17763
+#define PROBE_GETVERSIONEX  1
+#define PROBE_RTLGETVERSION 2
+#define PROBE_VERIFYVERSION 4
+#define PROBE_REGISTRY      8
+#define PROBE_ALL           15
