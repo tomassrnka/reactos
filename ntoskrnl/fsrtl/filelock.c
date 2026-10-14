@@ -44,6 +44,8 @@ typedef struct _LOCK_INFORMATION
     KSPIN_LOCK RangeLock;
     PKTHREAD RangeLockOwner;
     PLIST_ENTRY DeferredIrps;
+    /* Nonpaged copy for the cancel routine, which may run at DISPATCH_LEVEL; FILE_LOCK may be paged */
+    PCOMPLETE_LOCK_IRP_ROUTINE CompleteLockIrpRoutine;
 }
     LOCK_INFORMATION, *PLOCK_INFORMATION;
 
@@ -220,7 +222,7 @@ LockCompleteCanceledIrp(PIO_CSQ Csq, PIRP Irp)
         return;
     }
     FsRtlCompleteLockIrpReal
-        (LockInfo->BelongsTo->CompleteLockIrpRoutine,
+        (LockInfo->CompleteLockIrpRoutine,
          NULL,
          Irp,
          STATUS_CANCELLED,
@@ -290,6 +292,7 @@ FsRtlpCreateLockInformation(IN PFILE_LOCK FileLock)
 
     RtlZeroMemory(LockInfo, sizeof(*LockInfo));
     LockInfo->BelongsTo = FileLock;
+    LockInfo->CompleteLockIrpRoutine = FileLock->CompleteLockIrpRoutine;
     InitializeListHead(&LockInfo->SharedLocks);
     RtlInitializeGenericTable(&LockInfo->RangeTable,
                               LockCompare,
@@ -806,6 +809,9 @@ FsRtlpGrantWaitersLocked(IN PLOCK_INFORMATION LockInfo,
     }
 }
 
+/* FILE_LOCK.LastReturnedLock after the last range was returned */
+static UCHAR FsRtlpEnumerationEnd;
+
 /*
  * Restart enumerates from the start. Otherwise the enumeration continues after
  * the range returned last, which other callers may have splayed away or deleted
@@ -850,23 +856,37 @@ FsRtlGetNextFileLock(IN PFILE_LOCK FileLock,
 {
     PLOCK_INFORMATION LockInfo = FsRtlpGetLockInformation(FileLock);
     PCOMBINED_LOCK_ELEMENT Entry;
+    FILE_LOCK_INFO Previous, Found;
+    PVOID Cursor;
     KIRQL OldIrql;
 
     if (!LockInfo) return NULL;
 
+    /* The enumeration state lives in FILE_LOCK, which may be paged: touch it only outside RangeLock.
+       Callers serialize enumeration of one FILE_LOCK, as documented. */
+    Cursor = Restart ? NULL : FileLock->LastReturnedLock;
+    if (Cursor == &FsRtlpEnumerationEnd) return NULL;
+    if (Cursor) Previous = FileLock->LastReturnedLockInfo;
+
     FsRtlpAcquireRangeLock(LockInfo, NULL, &OldIrql);
-    if (Restart || !FileLock->LastReturnedLock)
+    if (!Cursor)
         Entry = RtlEnumerateGenericTable(&LockInfo->RangeTable, TRUE);
     else
-        Entry = FsRtlpNextLockLocked(LockInfo, &FileLock->LastReturnedLockInfo);
-
+        Entry = FsRtlpNextLockLocked(LockInfo, &Previous);
     /* Return a copy: the element may be freed as soon as RangeLock is released */
-    if (Entry)
-        FileLock->LastReturnedLockInfo = Entry->Exclusive.FileLock;
-    FileLock->LastReturnedLock = Entry;
+    if (Entry) Found = Entry->Exclusive.FileLock;
     FsRtlpReleaseRangeLock(LockInfo, OldIrql);
 
-    return Entry ? &FileLock->LastReturnedLockInfo : NULL;
+    if (!Entry)
+    {
+        /* Stay at the end until the caller restarts */
+        FileLock->LastReturnedLock = &FsRtlpEnumerationEnd;
+        return NULL;
+    }
+    FileLock->LastReturnedLockInfo = Found;
+    /* Only a marker that an enumeration is in progress; never dereferenced */
+    FileLock->LastReturnedLock = Entry;
+    return &FileLock->LastReturnedLockInfo;
 }
 
 /*
@@ -1105,6 +1125,7 @@ FsRtlFastUnlockSingle(IN PFILE_LOCK FileLock,
     PLOCK_INFORMATION LockInfo = FsRtlpGetLockInformation(FileLock);
     COMBINED_LOCK_ELEMENT Unlocked;
     LIST_ENTRY DeferredIrps;
+    LONGLONG Start, Size;
     NTSTATUS Status;
     KIRQL OldIrql;
     DPRINT("FsRtlFastUnlockSingle(%wZ, Offset %08x%08x (%d), Length %08x%08x (%d), Key %x)\n",
@@ -1123,12 +1144,15 @@ FsRtlFastUnlockSingle(IN PFILE_LOCK FileLock,
         return STATUS_RANGE_NOT_LOCKED;
     }
 
+    /* The caller's offset and length may be pageable: read them before raising IRQL */
+    Start = FileOffset->QuadPart;
+    Size = Length->QuadPart;
     InitializeListHead(&DeferredIrps);
     FsRtlpAcquireRangeLock(LockInfo, &DeferredIrps, &OldIrql);
     Status = FsRtlpUnlockRangeLocked(LockInfo,
                                      FileObject,
-                                     FileOffset->QuadPart,
-                                     Length->QuadPart,
+                                     Start,
+                                     Size,
                                      Process,
                                      Key,
                                      &Unlocked);
