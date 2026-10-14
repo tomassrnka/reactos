@@ -16,6 +16,7 @@ add_compile_definitions(
 add_library(ucrtbase SHARED
     fenv.c
     math_c99.c
+    math_errno.c
     printf.c
     stubs.c
     ucrtbase_stubs.c
@@ -61,6 +62,8 @@ if(NOT MSVC)
     target_compile_options(ucrtbase PRIVATE -Wno-builtin-declaration-mismatch)
     # GCC would replace the calls of rint by code that only rounds to nearest
     set_source_files_properties(math_c99.c PROPERTIES COMPILE_OPTIONS "-fno-builtin-rint;-fno-builtin-rintf")
+    # The wrappers call the library functions of the same names
+    set_source_files_properties(math_errno.c PROPERTIES COMPILE_OPTIONS "-fno-builtin")
 endif()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
