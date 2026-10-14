@@ -215,6 +215,25 @@ VOID
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID);
 
+/* Out of pages: let the balancer run. A thread that holds its process's
+   AddressCreationLock must not wait for it (CORE-20761) */
+static
+VOID
+MiWaitForFreePages(VOID)
+{
+    static LARGE_INTEGER TinyTime = {{-1L, -1L}};
+
+    if (PsGetCurrentProcess()->AddressCreationLock.Owner == KeGetCurrentThread())
+    {
+        MmRebalanceMemoryConsumers();
+        KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+    }
+    else
+    {
+        MmRebalanceMemoryConsumersAndWait();
+    }
+}
+
 NTSTATUS
 NTAPI
 MmAccessFault(IN ULONG FaultCode,
@@ -311,7 +330,7 @@ Again:
 
     if (Status == STATUS_NO_MEMORY)
     {
-        MmRebalanceMemoryConsumersAndWait();
+        MiWaitForFreePages();
         goto Again;
     }
 
@@ -324,7 +343,7 @@ Arm3Done:
      */
     if (Status == STATUS_NO_MEMORY)
     {
-        MmRebalanceMemoryConsumersAndWait();
+        MiWaitForFreePages();
         goto Again;
     }
 
