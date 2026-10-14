@@ -229,6 +229,7 @@ add_rostests_file(TARGET kmtest)
 add_custom_target(kmtest_drivers)
 add_dependencies(kmtest_drivers
     kmtest_drv
+    ketrapframe_drv
     example_drv
     hidp_drv
     iocreatefile_drv
