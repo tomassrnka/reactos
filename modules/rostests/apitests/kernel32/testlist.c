@@ -18,6 +18,7 @@ extern void func_CreateProcess(void);
 extern void func_CreateWaitableTimerEx(void);
 extern void func_DebugTrapInterrupts(void);
 extern void func_DefaultActCtx(void);
+extern void func_DiscardVirtualMemory(void);
 extern void func_DeleteTimerQueueEx(void);
 extern void func_DeviceIoControl(void);
 extern void func_dosdev(void);
@@ -27,6 +28,7 @@ extern void func_EnumSystemCodePages(void);
 extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
+extern void func_FindStringOrdinal(void);
 extern void func_FLS(void);
 extern void func_ForcedRelocation(void);
 extern void func_FormatMessage(void);
@@ -37,6 +39,7 @@ extern void func_GetDriveType(void);
 extern void func_GetEnvironmentVariable(void);
 extern void func_GetFileType(void);
 extern void func_GetFinalPathNameByHandle(void);
+extern void func_GetUserDefaultGeoName(void);
 extern void func_GetLocaleInfo(void);
 extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
@@ -50,6 +53,7 @@ extern void func_IsDBCSLeadByteEx(void);
 extern void func_JapaneseCalendar(void);
 extern void func_JobObject(void);
 extern void func_LCMapString(void);
+extern void func_LoadString(void);
 extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LoadLibraryMachine(void);
@@ -63,6 +67,7 @@ extern void func_MailslotRead(void);
 extern void func_MultiByteToWideChar(void);
 extern void func_Pipes(void);
 extern void func_PipeSqos(void);
+extern void func_PreferredUILanguages(void);
 extern void func_PowerRequest(void);
 extern void func_PrefetchVirtualMemory(void);
 extern void func_PrivMoveFileIdentityW(void);
@@ -114,6 +119,7 @@ const struct test winetest_testlist[] =
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
     { "DefaultActCtx",               func_DefaultActCtx },
+    { "DiscardVirtualMemory", func_DiscardVirtualMemory },
     { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
     { "DeviceIoControl",             func_DeviceIoControl },
     { "dosdev",                      func_dosdev },
@@ -123,6 +129,7 @@ const struct test winetest_testlist[] =
     { "ExitThread",                  func_ExitThread },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
+    { "FindStringOrdinal",           func_FindStringOrdinal },
     { "FLS",                         func_FLS },
     { "ForcedRelocation",            func_ForcedRelocation },
     { "FormatMessage",               func_FormatMessage },
@@ -133,6 +140,7 @@ const struct test winetest_testlist[] =
     { "GetEnvironmentVariable",      func_GetEnvironmentVariable },
     { "GetFileType",                 func_GetFileType },
     { "GetFinalPathNameByHandle",    func_GetFinalPathNameByHandle },
+    { "GetUserDefaultGeoName", func_GetUserDefaultGeoName },
     { "GetLocaleInfo",               func_GetLocaleInfo },
     { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
@@ -146,6 +154,7 @@ const struct test winetest_testlist[] =
     { "JapaneseCalendar",            func_JapaneseCalendar },
     { "JobObject",                   func_JobObject },
     { "LCMapString",                 func_LCMapString },
+    { "LoadString", func_LoadString },
     { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
@@ -159,6 +168,7 @@ const struct test winetest_testlist[] =
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
     { "Pipes",                       func_Pipes },
     { "PipeSqos",                    func_PipeSqos },
+    { "PreferredUILanguages",        func_PreferredUILanguages },
     { "PowerRequest",                func_PowerRequest },
     { "PrefetchVirtualMemory",       func_PrefetchVirtualMemory },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },

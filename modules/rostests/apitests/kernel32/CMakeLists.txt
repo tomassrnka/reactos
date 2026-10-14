@@ -16,6 +16,7 @@ list(APPEND SOURCE
     CreateWaitableTimerEx.c
     DebugTrapInterrupts.c
     DefaultActCtx.c
+    DiscardVirtualMemory.c
     DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
@@ -25,6 +26,7 @@ list(APPEND SOURCE
     ExitThread.c
     FindActCtxSectionStringW.c
     FindFiles.c
+    FindStringOrdinal.c
     FLS.c
     ForcedRelocation.c
     FormatMessage.c
@@ -35,6 +37,7 @@ list(APPEND SOURCE
     GetEnvironmentVariable.c
     GetFileType.c
     GetFinalPathNameByHandle.c
+    GetUserDefaultGeoName.c
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
@@ -48,6 +51,7 @@ list(APPEND SOURCE
     JapaneseCalendar.c
     JobObject.c
     LCMapString.c
+    LoadString.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
     LoadLibraryMachine.c
@@ -61,6 +65,7 @@ list(APPEND SOURCE
     MultiByteToWideChar.c
     Pipes.c
     PipeSqos.c
+    PreferredUILanguages.c
     PowerRequest.c
     PrefetchVirtualMemory.c
     PrivMoveFileIdentityW.c
