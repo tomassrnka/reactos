@@ -41,7 +41,7 @@ Del(ULONGLONG Offset, PCWSTR Guid, BOOL Force)
     ULONGLONG Length = Entry ? Entry->Length : 0;
 
     HeapFree(GetProcessHeap(), 0, Layout);
-    return DmDeletePartition(g_Disk, Offset, Length, Guid, Force);
+    return DmDeletePartition(g_Disk, Offset, Length, Guid, Force, NULL);
 }
 
 static ULONG
@@ -176,7 +176,257 @@ VolumeInfo(PCWSTR Guid, PWSTR Label, PWSTR Fs)
 static DWORD
 Create(ULONGLONG Offset, BOOL InExtended, ULONGLONG LengthMiB, DM_CREATED *Created)
 {
-    return DmCreatePartition(g_Disk, Offset, InExtended, LengthMiB * MiB, Created);
+    return DmCreatePartition(g_Disk, Offset, InExtended, LengthMiB * MiB, NULL, NULL, Created);
+}
+
+/* ---- the safety of the writer: the disk the user saw, the table the plan was made on, a write that did not work ---- */
+
+static VOID
+GetId(PDM_DISK_ID Id)
+{
+    DWORD Error;
+    PDL_LAYOUT Layout = ReadLayout(&Error);
+
+    ZeroMemory(Id, sizeof(*Id));
+    ok_int(Error, ERROR_SUCCESS);
+    if (Error == ERROR_SUCCESS)
+    {
+        Id->Style = Layout->Style;
+        Id->Length = Layout->DiskLength;
+        Id->SectorSize = Layout->SectorSize;
+        Id->Signature = Layout->Signature;
+        Id->DiskId = Layout->DiskId;
+    }
+    HeapFree(GetProcessHeap(), 0, Layout);
+}
+
+#define RAW_HEAD_BYTES (34 * 512)
+
+/* the first sectors of the disk as they are on it, not as the cache has them */
+static BOOL
+ReadRawHead(PBYTE Buffer)
+{
+    WCHAR Path[64];
+    HANDLE Device;
+    DWORD Done = 0;
+    BOOL Ok;
+
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\\\.\\PhysicalDrive%lu", g_Disk);
+    Device = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
+    if (Device == INVALID_HANDLE_VALUE)
+        return FALSE;
+    Ok = ReadFile(Device, Buffer, RAW_HEAD_BYTES, &Done, NULL) && Done == RAW_HEAD_BYTES;
+    CloseHandle(Device);
+    return Ok;
+}
+
+static LONG g_Writes;
+static BOOL g_SkipRestore;
+
+/* the first write puts down a table that is not the one asked for; the write back is made or not as the test says */
+static BOOL
+CorruptingHook(ULONG Point, ULONG Disk, PVOID Data)
+{
+    if (Point != DM_FAULT_LAYOUT_WRITE)
+        return FALSE;
+    if (InterlockedIncrement(&g_Writes) == 1)
+    {
+        PDL_LAYOUT Layout = Data;
+
+        if (Layout->Count)
+            Layout->Entry[0].Length -= MiB;
+        return FALSE;
+    }
+    return g_SkipRestore;
+}
+
+static BOOL
+TrashingHook(ULONG Point, ULONG Disk, PVOID Data)
+{
+    if (Point == DM_FAULT_DISK_CREATE)
+    {
+        WCHAR Path[64];
+        HANDLE Device;
+        PBYTE Sector = VirtualAlloc(NULL, 512, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        DWORD Done;
+
+        StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\\\.\\PhysicalDrive%lu", Disk);
+        Device = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                             FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
+        if (Sector && Device != INVALID_HANDLE_VALUE)
+        {
+            memset(Sector, 0xA5, 512);
+            WriteFile(Device, Sector, 512, &Done, NULL);
+            SetFilePointer(Device, 512, NULL, FILE_BEGIN);
+            WriteFile(Device, Sector, 512, &Done, NULL);
+        }
+        if (Device != INVALID_HANDLE_VALUE)
+            CloseHandle(Device);
+        if (Sector)
+            VirtualFree(Sector, 0, MEM_RELEASE);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The disk is an empty MBR disk of the test geometry; it is one again when this returns. */
+static VOID
+Test_Safety(VOID)
+{
+    DM_DISK_ID Right, Wrong;
+    DM_CREATED P, Junk;
+    DL_FREE Free;
+    BOOL NeedsExtended;
+    PDL_LAYOUT Stale = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    PDL_LAYOUT Empty, WithP, Now;
+    PBYTE Head1 = VirtualAlloc(NULL, RAW_HEAD_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    PBYTE Head2 = VirtualAlloc(NULL, RAW_HEAD_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    WCHAR Free1, Root[8];
+    DWORD Error;
+
+    GetId(&Right);
+    Wrong = Right;
+    Wrong.Signature ^= 0x5A5A5A5A;
+    ok_int(DmVerifyDiskId(g_Disk, &Right), ERROR_SUCCESS);
+    ok_int(DmVerifyDiskId(g_Disk, NULL), ERROR_SUCCESS);
+    ok_int(DmVerifyDiskId(g_Disk, &Wrong), DM_ERR_CHANGED);
+    Wrong = Right;
+    Wrong.Length += 512;
+    ok_int(DmVerifyDiskId(g_Disk, &Wrong), DM_ERR_CHANGED);
+    Wrong = Right;
+    Wrong.Style = DM_STYLE_GPT;
+    ok_int(DmVerifyDiskId(g_Disk, &Wrong), DM_ERR_CHANGED);
+
+    /* another disk behind the number: nothing is written, whatever the operation */
+    Wrong = Right;
+    Wrong.Signature ^= 0x5A5A5A5A;
+    ok_int(DmCreatePartition(g_Disk, 1 * MiB, FALSE, 50 * MiB, NULL, &Wrong, &Junk), DM_ERR_CHANGED);
+    ok_int(DmMarkActive(g_Disk, 1 * MiB, &Wrong), DM_ERR_CHANGED);
+    ok_int(DmDeletePartition(g_Disk, 1 * MiB, 50 * MiB, NULL, FALSE, &Wrong), DM_ERR_CHANGED);
+    ok_int(DmInitializeDisk(g_Disk, DM_STYLE_GPT, &Wrong), DM_ERR_CHANGED);
+    ok_int(DmConvertDisk(g_Disk, DM_STYLE_GPT, &Wrong), DM_ERR_CHANGED);
+    {
+        DM_STYLE Style;
+
+        ok_int(CountEntries(&Style), 0);
+        ok_int(Style, DM_STYLE_MBR);
+    }
+    GetId(&Wrong);
+    ok(memcmp(&Wrong, &Right, sizeof(Right)) == 0, "the disk is not the same disk after the refused operations\n");
+
+    /* the table that a plan was made on is the one that is written to: a table that changed in between is refused */
+    Empty = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    ok_int(DmPlanPartition(g_Disk, 1 * MiB, FALSE, &Free, &NeedsExtended, Stale), ERROR_SUCCESS);
+    ok_int(DmReadDiskLayout(g_Disk, Empty), ERROR_SUCCESS);
+    ok_int(DmCreatePartition(g_Disk, 1 * MiB, FALSE, 50 * MiB, Stale, &Right, &P), ERROR_SUCCESS);
+    ok_int(CountEntries(NULL), 1);
+    ok_int(DmCreatePartition(g_Disk, 200 * MiB, FALSE, 50 * MiB, Stale, &Right, &Junk), DM_ERR_CHANGED);
+    ok_int(CountEntries(NULL), 1);
+    WithP = ReadLayout(&Error);
+    ok_int(Error, ERROR_SUCCESS);
+
+    /* a layout made on the old table is not written over the new one (the disk is not touched) */
+    ok_int(DmWriteDiskLayout(g_Disk, Empty, Empty), DM_ERR_CHANGED);
+    ok_int(CountEntries(NULL), 1);
+    ok_int(DmWriteDiskLayout(g_Disk, WithP, WithP), ERROR_SUCCESS);
+
+    /* a write that does not give the disk the table: the old table is written back and the disk is read to see it */
+    g_Writes = 0;
+    g_SkipRestore = FALSE;
+    DmSetFaultHook(CorruptingHook);
+    ok_int(DmWriteDiskLayout(g_Disk, WithP, WithP), DM_ERR_VERIFY_FAILED);
+    DmSetFaultHook(NULL);
+    Now = ReadLayout(&Error);
+    ok_int(Error, ERROR_SUCCESS);
+    ok(Error == ERROR_SUCCESS && Now->Count == 1 && Now->Entry[0].Length == WithP->Entry[0].Length, "the old table is not back\n");
+    HeapFree(GetProcessHeap(), 0, Now);
+
+    /* the write back that the driver accepts and does not do is found out, not believed */
+    g_Writes = 0;
+    g_SkipRestore = TRUE;
+    DmSetFaultHook(CorruptingHook);
+    ok_int(DmWriteDiskLayout(g_Disk, WithP, WithP), DM_ERR_RESTORE_FAILED);
+    DmSetFaultHook(NULL);
+    Now = ReadLayout(&Error);
+    ok(Error == ERROR_SUCCESS && Now->Count == 1 && Now->Entry[0].Length == WithP->Entry[0].Length - MiB,
+       "the test did not leave the wrong table on the disk\n");
+    HeapFree(GetProcessHeap(), 0, Now);
+    ok_int(DmWriteDiskLayout(g_Disk, NULL, WithP), ERROR_SUCCESS);
+    ok_int(CountEntries(NULL), 1);
+    /* the rewrites took the volume away and brought one back: it is looked up again */
+    ok_int(DmFindVolume(g_Disk, P.Offset, 15000, P.VolumeGuid, ARRAYSIZE(P.VolumeGuid)), ERROR_SUCCESS);
+
+    /* a drive letter or a path is taken away only from the volume it leads to; one that cannot be resolved is left alone */
+    Free1 = FreeLetter();
+    if (Free1 && P.VolumeGuid[0])
+    {
+        StringCchPrintfW(Root, ARRAYSIZE(Root), L"%c:\\", Free1);
+        ok_int(DmRemoveMountPathOf(P.VolumeGuid, Root), DM_ERR_CHANGED);
+        /* a format of a root that names no volume is refused before anything is written */
+        {
+            DM_FORMAT Fmt;
+
+            ZeroMemory(&Fmt, sizeof(Fmt));
+            StringCchCopyW(Fmt.Root, ARRAYSIZE(Fmt.Root), Root);
+            StringCchCopyW(Fmt.FileSystem, ARRAYSIZE(Fmt.FileSystem), L"FAT32");
+            ok_int(DmFormatVolume(&Fmt), ERROR_PATH_NOT_FOUND);
+        }
+        /* a volume that another handle has locked is refused unless the user said it may be dismounted */
+        {
+            WCHAR Device[MAX_PATH];
+            HANDLE Held;
+            DM_FORMAT Fmt;
+            DWORD Returned;
+
+            StringCchCopyW(Device, ARRAYSIZE(Device), P.VolumeGuid);
+            Device[wcslen(Device) - 1] = 0;
+            Held = CreateFileW(Device, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+            ok(Held != INVALID_HANDLE_VALUE, "the volume cannot be opened: %lu\n", GetLastError());
+            if (Held != INVALID_HANDLE_VALUE)
+            {
+                ok(DeviceIoControl(Held, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &Returned, NULL), "the volume cannot be locked: %lu\n", GetLastError());
+                ZeroMemory(&Fmt, sizeof(Fmt));
+                StringCchCopyW(Fmt.Root, ARRAYSIZE(Fmt.Root), P.VolumeGuid);
+                StringCchCopyW(Fmt.FileSystem, ARRAYSIZE(Fmt.FileSystem), L"FAT32");
+                /* ReactOS refuses the open of a volume that is locked, Windows opens it and the lock fails */
+                Returned = DmFormatVolume(&Fmt);
+                ok(Returned == DM_ERR_VOLUME_IN_USE || Returned == ERROR_ACCESS_DENIED || Returned == ERROR_SHARING_VIOLATION,
+                   "a locked volume was formatted or the refusal is unknown: 0x%lx\n", Returned);
+                DeviceIoControl(Held, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0, &Returned, NULL);
+                CloseHandle(Held);
+            }
+        }
+    }
+
+    /* a table that is made and does not come out right: the sectors that were there are put back */
+    ok_int(DmDeletePartition(g_Disk, P.Offset, P.Length, P.VolumeGuid[0] ? P.VolumeGuid : NULL, FALSE, &Right), ERROR_SUCCESS);
+    ok_int(CountEntries(NULL), 0);
+    if (Head1 && Head2 && ReadRawHead(Head1))
+    {
+        DM_STYLE Style;
+
+        DmSetFaultHook(TrashingHook);
+        ok(DmInitializeDisk(g_Disk, DM_STYLE_GPT, &Right) == ERROR_WRITE_FAULT, "the failed creation of a table is not reported\n");
+        ok(DmConvertDisk(g_Disk, DM_STYLE_GPT, &Right) == ERROR_WRITE_FAULT, "the failed conversion is not reported\n");
+        DmSetFaultHook(NULL);
+        ok(ReadRawHead(Head2) && memcmp(Head1, Head2, RAW_HEAD_BYTES) == 0, "the first sectors of the disk are not as they were\n");
+        ok_int(CountEntries(&Style), 0);
+        ok_int(Style, DM_STYLE_MBR);
+        GetId(&Wrong);
+        ok(memcmp(&Wrong, &Right, sizeof(Right)) == 0, "the disk is not the same disk after the failed creation\n");
+    }
+    else
+    {
+        skip("the first sectors of the disk cannot be read\n");
+    }
+
+    HeapFree(GetProcessHeap(), 0, Stale);
+    HeapFree(GetProcessHeap(), 0, Empty);
+    HeapFree(GetProcessHeap(), 0, WithP);
+    if (Head1)
+        VirtualFree(Head1, 0, MEM_RELEASE);
+    if (Head2)
+        VirtualFree(Head2, 0, MEM_RELEASE);
 }
 
 static VOID
@@ -196,9 +446,10 @@ Test_Mbr(VOID)
     PDL_LAYOUT Layout;
     ULONG i;
 
-    ok_int(DmInitializeDisk(g_Disk, DM_STYLE_MBR), ERROR_SUCCESS);
+    ok_int(DmInitializeDisk(g_Disk, DM_STYLE_MBR, NULL), ERROR_SUCCESS);
     ok_int(CountEntries(&Style), 0);
     ok_int(Style, DM_STYLE_MBR);
+    Test_Safety();
 
     /* the program sees the disk as an initialized MBR disk with all of it free */
     Region = ModelRegion(&Model, 1 * MiB);
@@ -274,7 +525,7 @@ Test_Mbr(VOID)
     DmFreeModel(Model);
 
     /* active */
-    ok_int(DmMarkActive(g_Disk, 1 * MiB), ERROR_SUCCESS);
+    ok_int(DmMarkActive(g_Disk, 1 * MiB, NULL), ERROR_SUCCESS);
     Layout = ReadLayout(&Error);
     ok(Layout->Count == 1 && Layout->Entry[0].Active, "partition not active\n");
     HeapFree(GetProcessHeap(), 0, Layout);
@@ -372,12 +623,12 @@ Test_Mbr(VOID)
 
     /* a delete that is not about the partition the user confirmed changes nothing */
     PathsOf(P1.VolumeGuid, Paths, ARRAYSIZE(Paths));
-    ok_int(DmDeletePartition(g_Disk, P1.Offset, P1.Length + MiB, P1.VolumeGuid, FALSE), DM_ERR_CHANGED);
-    ok_int(DmDeletePartition(g_Disk, P1.Offset, P1.Length, L"\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\", FALSE),
+    ok_int(DmDeletePartition(g_Disk, P1.Offset, P1.Length + MiB, P1.VolumeGuid, FALSE, NULL), DM_ERR_CHANGED);
+    ok_int(DmDeletePartition(g_Disk, P1.Offset, P1.Length, L"\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\", FALSE, NULL),
            DM_ERR_CHANGED);
-    ok_int(DmDeletePartition(g_Disk, P1.Offset, P1.Length, NULL, FALSE), DM_ERR_CHANGED);
+    ok_int(DmDeletePartition(g_Disk, P1.Offset, P1.Length, NULL, FALSE, NULL), DM_ERR_CHANGED);
     ok_int(CountEntries(NULL), 6);
-    ok_int(DmDeletePartition(g_Disk, 777 * MiB, P1.Length, NULL, FALSE), DM_ERR_LAYOUT_BASE + DL_E_NOT_FOUND);
+    ok_int(DmDeletePartition(g_Disk, 777 * MiB, P1.Length, NULL, FALSE, NULL), DM_ERR_LAYOUT_BASE + DL_E_NOT_FOUND);
     ok_int(CountEntries(NULL), 6);
 
     /* delete everything again: logical drives, extended, primaries; the paths go with them */
@@ -420,13 +671,13 @@ Test_Gpt(VOID)
 
     /* convert the empty disk to GPT, or initialize it when the run has not made it MBR first */
     if (g_Keep)
-        ok_int(DmInitializeDisk(g_Disk, DM_STYLE_GPT), ERROR_SUCCESS);
+        ok_int(DmInitializeDisk(g_Disk, DM_STYLE_GPT, NULL), ERROR_SUCCESS);
     else
-        ok_int(DmConvertDisk(g_Disk, DM_STYLE_GPT), ERROR_SUCCESS);
+        ok_int(DmConvertDisk(g_Disk, DM_STYLE_GPT, NULL), ERROR_SUCCESS);
     ok_int(CountEntries(&Style), 0);
     ok_int(Style, DM_STYLE_GPT);
     /* a second conversion to the same style is refused */
-    ok(DmConvertDisk(g_Disk, DM_STYLE_GPT) != ERROR_SUCCESS, "converted to the style it has\n");
+    ok(DmConvertDisk(g_Disk, DM_STYLE_GPT, NULL) != ERROR_SUCCESS, "converted to the style it has\n");
 
     Error = DmPlanPartition(g_Disk, 1 * MiB, FALSE, &Free, &NeedsExtended, Plan);
     ok_int(Error, ERROR_SUCCESS);
@@ -460,7 +711,7 @@ Test_Gpt(VOID)
     }
 
     /* a disk with partitions cannot be converted */
-    ok_int(DmConvertDisk(g_Disk, DM_STYLE_MBR), DM_ERR_NOT_EMPTY);
+    ok_int(DmConvertDisk(g_Disk, DM_STYLE_MBR, NULL), DM_ERR_NOT_EMPTY);
 
     if (P1.VolumeGuid[0])
     {
@@ -487,7 +738,7 @@ Test_Gpt(VOID)
     PathsOf(P1.VolumeGuid, Paths, ARRAYSIZE(Paths));
     ok_int(Del(P1.Offset, P1.VolumeGuid, FALSE), ERROR_SUCCESS);
     ok_int(CountEntries(NULL), 1);
-    ok_int(DmConvertDisk(g_Disk, DM_STYLE_MBR), ERROR_SUCCESS);
+    ok_int(DmConvertDisk(g_Disk, DM_STYLE_MBR, NULL), ERROR_SUCCESS);
     ok_int(CountEntries(&Style), 0);
     ok_int(Style, DM_STYLE_MBR);
     HeapFree(GetProcessHeap(), 0, Plan);

@@ -27,6 +27,7 @@ typedef struct _WORK
 typedef struct _TARGET
 {
     ULONG Disk;
+    DM_DISK_ID Id;              /* which disk the user looked at */
     DM_DEVICE Device;
     DM_STYLE Style;
     ULONGLONG Offset;
@@ -96,10 +97,22 @@ DiskNeedsInit(const DM_DISK *Disk)
 }
 
 static VOID
+DiskIdOf(const DM_DISK *Disk, PDM_DISK_ID Id)
+{
+    ZeroMemory(Id, sizeof(*Id));
+    Id->Style = Disk->Style;
+    Id->Length = Disk->Length;
+    Id->SectorSize = Disk->BytesPerSector;
+    Id->Signature = Disk->Signature;
+    Id->DiskId = Disk->DiskId;
+}
+
+static VOID
 FillTarget(PTARGET Target, const DM_DISK *Disk, const DM_REGION *Region)
 {
     ZeroMemory(Target, sizeof(*Target));
     Target->Disk = Disk->Number;
+    DiskIdOf(Disk, &Target->Id);
     Target->Device = Disk->Device;
     Target->Style = Disk->Style;
     Target->Removable = (Disk->Device == DM_DEV_REMOVABLE);
@@ -258,6 +271,7 @@ ShowError(HWND hOwner, DWORD Error, PCWSTR Extra)
         case DM_ERR_TYPE_NOT_UPDATED: Id = IDS_ERR_TYPE_NOT_UPDATED; break;
         case DM_ERR_VERIFY_FAILED:  Id = IDS_ERR_VERIFY_FAILED; break;
         case DM_ERR_RESTORE_FAILED: Id = IDS_ERR_RESTORE_FAILED; break;
+        case DM_ERR_PATHS_NOT_RESTORED: Id = IDS_ERR_PATHS_NOT_RESTORED; break;
         case DM_ERR_FORMAT_FAILED:  break;
         default:
             if (Error >= DM_ERR_LAYOUT_BASE && Error < DM_ERR_LAYOUT_BASE + 0x100)
@@ -557,13 +571,15 @@ static BOOL
 RunInitialize(HWND hOwner, const DM_DISK *Disk)
 {
     INIT_DATA Data;
+    DM_DISK_ID Id;
     DWORD Error;
 
     Data.Disk = Disk->Number;
     Data.Style = DM_STYLE_MBR;
     if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_INITDISK), hOwner, InitProc, (LPARAM)&Data) != IDOK)
         return FALSE;
-    Error = DmInitializeDisk(Data.Disk, Data.Style);
+    DiskIdOf(Disk, &Id);
+    Error = DmInitializeDisk(Data.Disk, Data.Style, &Id);
     if (Error != ERROR_SUCCESS)
         ShowError(hOwner, Error, NULL);
     return TRUE;
@@ -573,12 +589,14 @@ static BOOL
 RunConvert(HWND hOwner, const DM_DISK *Disk, DM_STYLE To)
 {
     WCHAR Style[32];
+    DM_DISK_ID Id;
     DWORD Error;
 
     LoadStringBuffer(To == DM_STYLE_GPT ? IDS_STYLE_GPT_SHORT : IDS_STYLE_MBR_SHORT, Style, ARRAYSIZE(Style));
     if (!Confirm(hOwner, IDS_CONFIRM_CONVERT, Style))
         return FALSE;
-    Error = DmConvertDisk(Disk->Number, To);
+    DiskIdOf(Disk, &Id);
+    Error = DmConvertDisk(Disk->Number, To, &Id);
     if (Error != ERROR_SUCCESS)
         ShowError(hOwner, Error, NULL);
     return TRUE;
@@ -879,7 +897,7 @@ RunNewVolume(HWND hOwner, const TARGET *Target)
 
     Changed = TRUE;
     SetCursor(LoadCursorW(NULL, IDC_WAIT));
-    Error = DmCreatePartition(Target->Disk, Target->Offset, Target->InExtended, Data->SizeMB * DM_MIB, &Created);
+    Error = DmCreatePartition(Target->Disk, Target->Offset, Target->InExtended, Data->SizeMB * DM_MIB, Layout, &Target->Id, &Created);
     SetCursor(LoadCursorW(NULL, IDC_ARROW));
     if (Error != ERROR_SUCCESS)
     {
@@ -926,18 +944,18 @@ RunDelete(HWND hOwner, const TARGET *Target, BOOL ExtendedPartition, ULONGLONG E
     SetCursor(LoadCursorW(NULL, IDC_WAIT));
     if (ExtendedPartition)
     {
-        Error = DmDeletePartition(Target->Disk, ExtOffset, ExtLength, NULL, FALSE);
+        Error = DmDeletePartition(Target->Disk, ExtOffset, ExtLength, NULL, FALSE, &Target->Id);
     }
     else
     {
-        Error = DmDeletePartition(Target->Disk, Target->Offset, Target->Length, Target->Guid, FALSE);
+        Error = DmDeletePartition(Target->Disk, Target->Offset, Target->Length, Target->Guid, FALSE, &Target->Id);
         if (Error == DM_ERR_VOLUME_IN_USE)
         {
             SetCursor(LoadCursorW(NULL, IDC_ARROW));
             if (!Confirm(hOwner, IDS_CONFIRM_FORCE, NULL))
                 return FALSE;
             SetCursor(LoadCursorW(NULL, IDC_WAIT));
-            Error = DmDeletePartition(Target->Disk, Target->Offset, Target->Length, Target->Guid, TRUE);
+            Error = DmDeletePartition(Target->Disk, Target->Offset, Target->Length, Target->Guid, TRUE, &Target->Id);
         }
     }
     SetCursor(LoadCursorW(NULL, IDC_ARROW));
@@ -959,7 +977,7 @@ RunMarkActive(HWND hOwner, const TARGET *Target, const DM_DISK *Disk)
             OtherActive = TRUE;
     if (OtherActive && !Confirm(hOwner, IDS_CONFIRM_ACTIVE, NULL))
         return FALSE;
-    Error = DmMarkActive(Target->Disk, Target->Offset);
+    Error = DmMarkActive(Target->Disk, Target->Offset, &Target->Id);
     if (Error != ERROR_SUCCESS)
         ShowError(hOwner, Error, NULL);
     return TRUE;
@@ -1018,6 +1036,16 @@ PickProc(HWND hDlg, UINT Message, WPARAM wParam, LPARAM lParam)
                 {
                     SIZE_T Len;
 
+                    /* a path that does not fit is refused before any of it is copied: its first part could name another folder */
+                    if (GetWindowTextLengthW(GetDlgItem(hDlg, IDC_PL_FOLDER)) >= (int)ARRAYSIZE(Data->Folder) - 1)
+                    {
+                        WCHAR Text[160], Title[64];
+
+                        LoadStringBuffer(IDS_PL_FOLDER_TOO_LONG, Text, ARRAYSIZE(Text));
+                        LoadStringBuffer(IDS_ERROR_TITLE, Title, ARRAYSIZE(Title));
+                        MessageBoxW(hDlg, Text, Title, MB_OK | MB_ICONERROR);
+                        return TRUE;
+                    }
                     GetDlgItemTextW(hDlg, IDC_PL_FOLDER, Data->Folder, ARRAYSIZE(Data->Folder));
                     Len = wcslen(Data->Folder);
                     if (Len >= 3 && Data->Folder[Len - 1] != L'\\' && Len + 1 < ARRAYSIZE(Data->Folder))

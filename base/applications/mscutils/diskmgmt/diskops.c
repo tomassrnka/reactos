@@ -38,6 +38,7 @@ static CRITICAL_SECTION g_FormatLock;
 static LONG g_FormatLockInit;
 
 #define FMIFS_PROGRESS      0
+#define FMIFS_VOLUMEINUSE   8
 #define FMIFS_DONE          11
 #define FMIFS_OUTPUT        14
 #define FMIFS_MEDIA_REMOVABLE 11
@@ -55,6 +56,14 @@ DmIoctl(HANDLE Device, DWORD Code, PVOID In, DWORD InSize, PVOID Out, DWORD OutS
     DWORD Dummy;
 
     return DeviceIoControl(Device, Code, In, InSize, Out, OutSize, Returned ? Returned : &Dummy, NULL);
+}
+
+static DM_FAULT_FN g_Fault;
+
+VOID
+DmSetFaultHook(DM_FAULT_FN Hook)
+{
+    g_Fault = Hook;
 }
 
 /* ------------------------------------------------------------------ file systems */
@@ -113,6 +122,106 @@ static VOID
 DmNewGuid(GUID *Guid)
 {
     UuidCreate(Guid);
+}
+
+/* One writer at a time per disk among the programs that use this module. The mutex is recursive, so the operation that holds it
+ * and the table write inside it may both take it. */
+DWORD
+DmLockDisk(ULONG Disk, PHANDLE Lock)
+{
+    WCHAR Name[64];
+    HANDLE Mutex;
+    DWORD Wait;
+
+    *Lock = NULL;
+    StringCchPrintfW(Name, ARRAYSIZE(Name), L"Global\\ReactOSDiskMgmtDisk%u", Disk);
+    Mutex = CreateMutexW(NULL, FALSE, Name);
+    if (Mutex == NULL)
+        return GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+    Wait = WaitForSingleObject(Mutex, 60000);
+    if (Wait != WAIT_OBJECT_0 && Wait != WAIT_ABANDONED)
+    {
+        CloseHandle(Mutex);
+        return ERROR_BUSY;
+    }
+    *Lock = Mutex;
+    return ERROR_SUCCESS;
+}
+
+VOID
+DmUnlockDisk(HANDLE Lock)
+{
+    if (Lock)
+    {
+        ReleaseMutex(Lock);
+        CloseHandle(Lock);
+    }
+}
+
+/* The size and the sector size the driver reports for the disk. */
+static DWORD
+DmReadGeometry(ULONG Disk, PULONGLONG Length, PULONG SectorSize)
+{
+    HANDLE Device = DmOpenDiskHandle(Disk, GENERIC_READ);
+    union { DISK_GEOMETRY_EX Geo; BYTE Raw[1024]; } Geometry;
+    DWORD Error = ERROR_SUCCESS;
+
+    if (Device == INVALID_HANDLE_VALUE)
+        return GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+    ZeroMemory(&Geometry, sizeof(Geometry));
+    if (DmIoctl(Device, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0, &Geometry, sizeof(Geometry), NULL))
+    {
+        *Length = (ULONGLONG)Geometry.Geo.DiskSize.QuadPart;
+        *SectorSize = Geometry.Geo.Geometry.BytesPerSector;
+    }
+    else
+    {
+        Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+    }
+    CloseHandle(Device);
+    return Error;
+}
+
+DWORD
+DmVerifyDiskId(ULONG Disk, const DM_DISK_ID *Id)
+{
+    PDL_LAYOUT Layout;
+    ULONGLONG Length = 0;
+    ULONG SectorSize = 0;
+    DM_STYLE Style = DM_STYLE_RAW;
+    DWORD Signature = 0;
+    GUID DiskId;
+    DWORD Error;
+
+    if (Id == NULL)
+        return ERROR_SUCCESS;
+    ZeroMemory(&DiskId, sizeof(DiskId));
+    Error = DmReadGeometry(Disk, &Length, &SectorSize);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Length != Id->Length || SectorSize != Id->SectorSize)
+        return DM_ERR_CHANGED;
+
+    Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    if (Layout == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Error = DmReadDiskLayout(Disk, Layout);
+    if (Error == ERROR_SUCCESS)
+    {
+        Style = Layout->Style;
+        Signature = Layout->Signature;
+        DiskId = Layout->DiskId;
+    }
+    HeapFree(GetProcessHeap(), 0, Layout);
+    if (Error != ERROR_SUCCESS && Error != ERROR_UNRECOGNIZED_MEDIA)
+        return Error;
+    if (Style != Id->Style)
+        return DM_ERR_CHANGED;
+    if (Style == DM_STYLE_MBR && Signature != Id->Signature)
+        return DM_ERR_CHANGED;
+    if (Style == DM_STYLE_GPT && memcmp(&DiskId, &Id->DiskId, sizeof(GUID)) != 0)
+        return DM_ERR_CHANGED;
+    return ERROR_SUCCESS;
 }
 
 DWORD
@@ -176,6 +285,7 @@ DmReadDiskLayout(ULONG Disk, PDL_LAYOUT Layout)
 static DWORD
 DmWriteLayoutOnce(ULONG Disk, const DL_LAYOUT *Layout)
 {
+    static BOOL InHook;
     HANDLE Device;
     PDRIVE_LAYOUT_INFORMATION_EX Driver, Result;
     ULONG Size = 0;
@@ -183,6 +293,24 @@ DmWriteLayoutOnce(ULONG Disk, const DL_LAYOUT *Layout)
 
     if (!DlIsEncodable(Layout))
         return DM_ERR_LAYOUT_BASE + DL_E_UNREPRESENTABLE;
+    if (g_Fault && !InHook)
+    {
+        PDL_LAYOUT Copy = HeapAlloc(GetProcessHeap(), 0, sizeof(DL_LAYOUT));
+        BOOL Skip;
+
+        if (Copy == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        memcpy(Copy, Layout, sizeof(DL_LAYOUT));
+        Skip = g_Fault(DM_FAULT_LAYOUT_WRITE, Disk, Copy);
+        if (!Skip)
+        {
+            InHook = TRUE;
+            Error = DmWriteLayoutOnce(Disk, Copy);
+            InHook = FALSE;
+        }
+        HeapFree(GetProcessHeap(), 0, Copy);
+        return Error;
+    }
     Driver = DlToDriver(Layout, &Size);
     if (Driver == NULL)
         return ERROR_NOT_ENOUGH_MEMORY;
@@ -245,14 +373,45 @@ DmLayoutsAgree(const DL_LAYOUT *Wanted, const DL_LAYOUT *Found)
     return TRUE;
 }
 
+/* The same disk and the same partitions: what the caller based a change on is still on the disk */
+static BOOL
+DmSameLayout(const DL_LAYOUT *First, const DL_LAYOUT *Second)
+{
+    if (First->Style != Second->Style || First->DiskLength != Second->DiskLength || First->SectorSize != Second->SectorSize)
+        return FALSE;
+    if (First->Style == DM_STYLE_MBR && First->Signature != Second->Signature)
+        return FALSE;
+    if (First->Style == DM_STYLE_GPT && memcmp(&First->DiskId, &Second->DiskId, sizeof(GUID)) != 0)
+        return FALSE;
+    return DmLayoutsAgree(First, Second) && DmLayoutsAgree(Second, First);
+}
+
+/* Reads the disk again, up to five times (a disk may take a moment to show its table), until it holds Wanted. */
+static BOOL
+DmDiskHolds(ULONG Disk, const DL_LAYOUT *Wanted, PDL_LAYOUT Scratch)
+{
+    ULONG Try;
+
+    for (Try = 0; Try < 5; Try++)
+    {
+        if (Try)
+            Sleep(200);
+        if (DmReadDiskLayout(Disk, Scratch) == ERROR_SUCCESS && DmLayoutsAgree(Wanted, Scratch))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* Writes the table. The tables of the disk are written one sector after the other, so a failure half way can leave the
- * chain of the logical drives cut: the table that was there is kept, written back after a failure, and the result is read
- * again to see that the disk has what was asked for. */
+ * chain of the logical drives cut: the table that was there is kept, written back after a failure, and the disk is read again
+ * both after the write and after the write back, since a driver may report success for a write that failed. The write is
+ * refused when the disk no longer holds the table that Layout was made from. */
 DWORD
-DmWriteDiskLayout(ULONG Disk, const DL_LAYOUT *Layout)
+DmWriteDiskLayout(ULONG Disk, const DL_LAYOUT *Baseline, const DL_LAYOUT *Layout)
 {
     PDL_LAYOUT Before = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
     PDL_LAYOUT After = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    HANDLE Lock = NULL;
     DWORD Error;
 
     if (Before == NULL || After == NULL)
@@ -260,33 +419,30 @@ DmWriteDiskLayout(ULONG Disk, const DL_LAYOUT *Layout)
         Error = ERROR_NOT_ENOUGH_MEMORY;
         goto Done;
     }
+    Error = DmLockDisk(Disk, &Lock);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
     /* without the table that is there now nothing could be put back, so nothing is written */
     Error = DmReadDiskLayout(Disk, Before);
     if (Error != ERROR_SUCCESS)
         goto Done;
-    Error = DmWriteLayoutOnce(Disk, Layout);
-    if (Error == ERROR_SUCCESS)
+    if (Baseline != NULL && !DmSameLayout(Baseline, Before))
     {
-        ULONG Try;
-        BOOL Agree = FALSE;
-
-        /* a driver may report success for a write that failed, so the disk is read again; it may take a moment to show the table */
-        for (Try = 0; Try < 5 && !Agree; Try++)
-        {
-            if (Try)
-                Sleep(200);
-            Agree = (DmReadDiskLayout(Disk, After) == ERROR_SUCCESS && DmLayoutsAgree(Layout, After));
-        }
-        if (!Agree)
-            Error = DM_ERR_VERIFY_FAILED;
+        Error = DM_ERR_CHANGED;
+        goto Done;
     }
+    Error = DmWriteLayoutOnce(Disk, Layout);
+    if (Error == ERROR_SUCCESS && !DmDiskHolds(Disk, Layout, After))
+        Error = DM_ERR_VERIFY_FAILED;
     if (Error != ERROR_SUCCESS && Error != DM_ERR_LAYOUT_BASE + DL_E_UNREPRESENTABLE)
     {
-        /* the table may be half written: put the old table back, and say so when that fails too */
-        if (DmWriteLayoutOnce(Disk, Before) != ERROR_SUCCESS)
+        /* the table may be half written: put the old table back, and say so when that fails too; the driver is not trusted
+           to say it worked */
+        if (DmWriteLayoutOnce(Disk, Before) != ERROR_SUCCESS || !DmDiskHolds(Disk, Before, After))
             Error = DM_ERR_RESTORE_FAILED;
     }
 Done:
+    DmUnlockDisk(Lock);
     if (Before)
         HeapFree(GetProcessHeap(), 0, Before);
     if (After)
@@ -328,20 +484,180 @@ DmCheckScratchDisk(ULONG Disk)
     return DmCheckDiskEmpty(Disk);
 }
 
-/* Writes a new, empty table. It never replaces a table that lists partitions. */
-DWORD
-DmInitializeDisk(ULONG Disk, DM_STYLE Style)
+/* The sectors that a new table touches: the first 34 (boot sector, GPT header and its 128 entries) and the last 33 (the
+ * second GPT header and entries), kept so that a table write that fails half way can be undone. */
+#define DM_RAW_HEAD_SECTORS 34
+#define DM_RAW_TAIL_SECTORS 33
+
+typedef struct _DM_RAW_BACKUP
+{
+    ULONG SectorSize;
+    ULONGLONG TailOffset;
+    ULONG HeadBytes;
+    ULONG TailBytes;
+    PBYTE Head;
+    PBYTE Tail;
+} DM_RAW_BACKUP, *PDM_RAW_BACKUP;
+
+/* A handle that goes to the disk and not to the cache, so that what is read is what is on it */
+static HANDLE
+DmOpenRawHandle(ULONG Disk, DWORD Access)
+{
+    WCHAR Path[64];
+
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\\\.\\PhysicalDrive%u", Disk);
+    return CreateFileW(Path, Access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                       FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
+}
+
+static BOOL
+DmRawTransfer(HANDLE Device, ULONGLONG Offset, PBYTE Buffer, ULONG Bytes, BOOL Write)
+{
+    LARGE_INTEGER Position;
+    DWORD Done = 0;
+
+    Position.QuadPart = (LONGLONG)Offset;
+    if (!SetFilePointerEx(Device, Position, NULL, FILE_BEGIN))
+        return FALSE;
+    if (Write)
+        return WriteFile(Device, Buffer, Bytes, &Done, NULL) && Done == Bytes;
+    return ReadFile(Device, Buffer, Bytes, &Done, NULL) && Done == Bytes;
+}
+
+static VOID
+DmRawFree(PDM_RAW_BACKUP Backup)
+{
+    if (Backup->Head)
+        VirtualFree(Backup->Head, 0, MEM_RELEASE);
+    if (Backup->Tail)
+        VirtualFree(Backup->Tail, 0, MEM_RELEASE);
+    ZeroMemory(Backup, sizeof(*Backup));
+}
+
+static DWORD
+DmRawSave(ULONG Disk, PDM_RAW_BACKUP Backup)
 {
     HANDLE Device;
+    ULONGLONG Length = 0;
+    ULONG SectorSize = 0;
+    DWORD Error = DmReadGeometry(Disk, &Length, &SectorSize);
+
+    ZeroMemory(Backup, sizeof(*Backup));
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (SectorSize == 0 || SectorSize > 65536 || Length < (ULONGLONG)SectorSize * (DM_RAW_HEAD_SECTORS + DM_RAW_TAIL_SECTORS))
+        return ERROR_NOT_SUPPORTED;
+    Backup->SectorSize = SectorSize;
+    Backup->HeadBytes = SectorSize * DM_RAW_HEAD_SECTORS;
+    Backup->TailBytes = SectorSize * DM_RAW_TAIL_SECTORS;
+    Backup->TailOffset = Length - Backup->TailBytes;
+    Backup->Head = VirtualAlloc(NULL, Backup->HeadBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    Backup->Tail = VirtualAlloc(NULL, Backup->TailBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (Backup->Head == NULL || Backup->Tail == NULL)
+    {
+        DmRawFree(Backup);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    Device = DmOpenRawHandle(Disk, GENERIC_READ);
+    if (Device == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+        DmRawFree(Backup);
+        return Error;
+    }
+    if (!DmRawTransfer(Device, 0, Backup->Head, Backup->HeadBytes, FALSE) ||
+        !DmRawTransfer(Device, Backup->TailOffset, Backup->Tail, Backup->TailBytes, FALSE))
+    {
+        Error = GetLastError() ? GetLastError() : ERROR_READ_FAULT;
+        CloseHandle(Device);
+        DmRawFree(Backup);
+        return Error;
+    }
+    CloseHandle(Device);
+    return ERROR_SUCCESS;
+}
+
+/* Writes the kept sectors back and reads them again to see that the disk holds them. */
+static BOOL
+DmRawRestore(ULONG Disk, const DM_RAW_BACKUP *Backup)
+{
+    HANDLE Device = DmOpenRawHandle(Disk, GENERIC_READ | GENERIC_WRITE);
+    PBYTE Head, Tail;
+    BOOL Ok = FALSE;
+
+    if (Device == INVALID_HANDLE_VALUE)
+        return FALSE;
+    Head = VirtualAlloc(NULL, Backup->HeadBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    Tail = VirtualAlloc(NULL, Backup->TailBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (Head && Tail &&
+        DmRawTransfer(Device, 0, Backup->Head, Backup->HeadBytes, TRUE) &&
+        DmRawTransfer(Device, Backup->TailOffset, Backup->Tail, Backup->TailBytes, TRUE) &&
+        DmRawTransfer(Device, 0, Head, Backup->HeadBytes, FALSE) &&
+        DmRawTransfer(Device, Backup->TailOffset, Tail, Backup->TailBytes, FALSE) &&
+        memcmp(Head, Backup->Head, Backup->HeadBytes) == 0 && memcmp(Tail, Backup->Tail, Backup->TailBytes) == 0)
+    {
+        Ok = TRUE;
+    }
+    if (Head)
+        VirtualFree(Head, 0, MEM_RELEASE);
+    if (Tail)
+        VirtualFree(Tail, 0, MEM_RELEASE);
+    CloseHandle(Device);
+    return Ok;
+}
+
+/* TRUE when the disk holds an empty table of the style that was asked for */
+static BOOL
+DmHoldsEmptyTable(ULONG Disk, DM_STYLE Style)
+{
+    PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    BOOL Ok = FALSE;
+    ULONG Try, i;
+
+    if (Layout == NULL)
+        return FALSE;
+    for (Try = 0; Try < 5 && !Ok; Try++)
+    {
+        if (Try)
+            Sleep(200);
+        if (DmReadDiskLayout(Disk, Layout) == ERROR_SUCCESS && Layout->Style == Style)
+        {
+            Ok = TRUE;
+            for (i = 0; i < Layout->Count; i++)
+                if (Style == DM_STYLE_MBR || memcmp(&Layout->Entry[i].GptType, &DlGuidReserved, sizeof(GUID)) != 0)
+                    Ok = FALSE;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Layout);
+    return Ok;
+}
+
+/* Writes a new, empty table. It never replaces a table that lists partitions. The table is written by the driver in several
+ * steps (for a GPT disk the protective boot record first), so the sectors it touches are kept first, the disk is read again
+ * afterwards, and a table that is not what was asked for is replaced by what was there. */
+DWORD
+DmInitializeDisk(ULONG Disk, DM_STYLE Style, const DM_DISK_ID *Id)
+{
+    HANDLE Device, Lock = NULL;
     CREATE_DISK Create;
+    DM_RAW_BACKUP Backup;
     GUID Guid;
     DWORD Error = ERROR_SUCCESS;
 
     if (Style != DM_STYLE_MBR && Style != DM_STYLE_GPT)
         return ERROR_INVALID_PARAMETER;
-    Error = DmCheckDiskEmpty(Disk);
+    Error = DmLockDisk(Disk, &Lock);
     if (Error != ERROR_SUCCESS)
         return Error;
+    Error = DmVerifyDiskId(Disk, Id);
+    if (Error == ERROR_SUCCESS)
+        Error = DmCheckDiskEmpty(Disk);
+    if (Error != ERROR_SUCCESS)
+        goto Unlock;
+    Error = DmRawSave(Disk, &Backup);
+    if (Error != ERROR_SUCCESS)
+        goto Unlock;
+
     ZeroMemory(&Create, sizeof(Create));
     DmNewGuid(&Guid);
     if (Style == DM_STYLE_MBR)
@@ -357,17 +673,45 @@ DmInitializeDisk(ULONG Disk, DM_STYLE Style)
     }
     Device = DmOpenDiskHandle(Disk, GENERIC_READ | GENERIC_WRITE);
     if (Device == INVALID_HANDLE_VALUE)
-        return GetLastError();
-    if (!DmIoctl(Device, IOCTL_DISK_CREATE_DISK, &Create, sizeof(Create), NULL, 0, NULL))
+    {
+        Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+        DmRawFree(&Backup);
+        goto Unlock;
+    }
+    if (g_Fault && g_Fault(DM_FAULT_DISK_CREATE, Disk, NULL))
+        Error = ERROR_WRITE_FAULT;
+    else if (!DmIoctl(Device, IOCTL_DISK_CREATE_DISK, &Create, sizeof(Create), NULL, 0, NULL))
         Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
     else
         DmIoctl(Device, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, NULL);
     CloseHandle(Device);
+
+    if (Error == ERROR_SUCCESS && !DmHoldsEmptyTable(Disk, Style))
+        Error = DM_ERR_VERIFY_FAILED;
+    if (Error != ERROR_SUCCESS)
+    {
+        /* the disk may hold half a table: put back what was there, and say so when that does not work */
+        if (!DmRawRestore(Disk, &Backup))
+            Error = DM_ERR_RESTORE_FAILED;
+        else
+        {
+            HANDLE Again = DmOpenDiskHandle(Disk, GENERIC_READ | GENERIC_WRITE);
+
+            if (Again != INVALID_HANDLE_VALUE)
+            {
+                DmIoctl(Again, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, NULL);
+                CloseHandle(Again);
+            }
+        }
+    }
+    DmRawFree(&Backup);
+Unlock:
+    DmUnlockDisk(Lock);
     return Error;
 }
 
 DWORD
-DmConvertDisk(ULONG Disk, DM_STYLE Style)
+DmConvertDisk(ULONG Disk, DM_STYLE Style, const DM_DISK_ID *Id)
 {
     PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
     DWORD Error;
@@ -381,7 +725,7 @@ DmConvertDisk(ULONG Disk, DM_STYLE Style)
     if (Error != ERROR_SUCCESS)
         return Error;
     /* the table must list no partition but a reserved one */
-    return DmInitializeDisk(Disk, Style);
+    return DmInitializeDisk(Disk, Style, Id);
 }
 
 typedef DWORD (WINAPI *DM_CM_LOCATE_FN)(PDWORD Dev, PWSTR Id, ULONG Flags);
@@ -564,8 +908,9 @@ DmRemoveMountPathOf(PCWSTR VolumeGuid, PCWSTR Path)
 {
     WCHAR Target[MAX_PATH];
 
+    /* a path that cannot be resolved is not shown to lead to the volume, so it is left alone */
     DmPathTarget(Path, Target, ARRAYSIZE(Target));
-    if (Target[0] && _wcsicmp(Target, VolumeGuid) != 0)
+    if (Target[0] == 0 || _wcsicmp(Target, VolumeGuid) != 0)
         return DM_ERR_CHANGED;
     return DmRemoveMountPath(Path);
 }
@@ -619,9 +964,10 @@ DmChangeDriveLetter(PCWSTR VolumeGuid, PCWSTR MountPaths, WCHAR NewLetter)
     }
     return ERROR_SUCCESS;
 Restore:
-    /* put back the letters that were taken away */
+    /* put back the letters that were taken away, and say so when one of them cannot be put back */
     for (i = 0; i < Removed; i++)
-        DmAddMountPath(VolumeGuid, Old[i]);
+        if (DmAddMountPath(VolumeGuid, Old[i]) != ERROR_SUCCESS)
+            Error = DM_ERR_PATHS_NOT_RESTORED;
     return Error;
 }
 
@@ -637,8 +983,8 @@ DmReplaceMountPath(PCWSTR VolumeGuid, PCWSTR OldPath, PCWSTR NewPath)
     if (Error != ERROR_SUCCESS)
         return Error;
     Error = DmAddMountPath(VolumeGuid, NewPath);
-    if (Error != ERROR_SUCCESS)
-        DmAddMountPath(VolumeGuid, OldPath);
+    if (Error != ERROR_SUCCESS && DmAddMountPath(VolumeGuid, OldPath) != ERROR_SUCCESS)
+        Error = DM_ERR_PATHS_NOT_RESTORED;
     return Error;
 }
 
@@ -664,6 +1010,9 @@ DmFormatCallback(ULONG Command, ULONG SubAction, PVOID ActionInfo)
             if (Format->Progress && ActionInfo)
                 Format->Progress(Format->Context, *(PDWORD)ActionInfo);
             break;
+        case FMIFS_VOLUMEINUSE:
+            /* the provider could not lock the volume and asks whether to go on: only when the user said it may be dismounted */
+            return Format->Force ? TRUE : FALSE;
         case FMIFS_DONE:
             g_FormatDone = TRUE;
             g_FormatOk = ActionInfo ? *(PBOOLEAN)ActionInfo : FALSE;
@@ -789,18 +1138,19 @@ DmFormatVolume(PDM_FORMAT Format)
     else if (!(Format->Root[1] == L':' && DmIsLetterPath(Format->Root) &&
                GetVolumeNameForVolumeMountPointW(Format->Root, Guid, ARRAYSIZE(Guid))))
         Guid[0] = 0;
-    if (Guid[0] && DmIsSystemVolume(Guid))
+    /* a root that names no volume cannot be checked against the system volume, so it is not formatted */
+    if (Guid[0] == 0)
+        return ERROR_PATH_NOT_FOUND;
+    if (DmIsSystemVolume(Guid))
         return DM_ERR_PROTECTED;
 
     /* The providers of file systems do not all stop when they cannot lock the volume: some go on writing. So the volume is
-     * locked and let go once here, and a volume that is in use is refused before any provider is called, unless the caller
-     * has been told by the user that the volume may be dismounted. */
-    if (Guid[0])
-    {
-        Error = DmLockDismount(Guid, Format->Force);
-        if (Error == DM_ERR_VOLUME_IN_USE)
-            return Error;
-    }
+     * locked and dismounted once here, and a volume that cannot be is refused before any provider is called, whatever the
+     * reason is (in use, not opened, not dismounted); only the user's decision lets a volume that is in use be dismounted. The
+     * providers are asked the same question by their callback and get the same answer. */
+    Error = DmLockDismount(Guid, Format->Force);
+    if (Error != ERROR_SUCCESS)
+        return Error;
 
     /* Windows formats only a volume that has a drive letter or a folder; ReactOS takes the volume name too */
     if (IsGuid && DmBestPath(Guid, Best, ARRAYSIZE(Best)))
@@ -863,17 +1213,26 @@ DWORD
 DmFixPartitionType(ULONG Disk, ULONGLONG Offset, PCWSTR VolumeGuid)
 {
     PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    PDL_LAYOUT Base = HeapAlloc(GetProcessHeap(), 0, sizeof(DL_LAYOUT));
+    HANDLE Lock = NULL;
     WCHAR Fs[32];
     BOOL Fat12 = FALSE, Fat16 = FALSE;
     PDL_ENTRY Entry;
     UCHAR Type;
     DWORD Error;
 
-    if (Layout == NULL)
-        return ERROR_NOT_ENOUGH_MEMORY;
+    if (Layout == NULL || Base == NULL)
+    {
+        Error = ERROR_NOT_ENOUGH_MEMORY;
+        goto Done;
+    }
+    Error = DmLockDisk(Disk, &Lock);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
     Error = DmReadDiskLayout(Disk, Layout);
     if (Error != ERROR_SUCCESS || Layout->Style != DM_STYLE_MBR)
         goto Done;
+    memcpy(Base, Layout, sizeof(DL_LAYOUT));
     Entry = DlFindEntry(Layout, Offset);
     if (Entry == NULL || Entry->Container)
     {
@@ -896,10 +1255,14 @@ DmFixPartitionType(ULONG Disk, ULONGLONG Offset, PCWSTR VolumeGuid)
     if (Type != Entry->MbrType)
     {
         Entry->MbrType = Type;
-        Error = DmWriteDiskLayout(Disk, Layout);
+        Error = DmWriteDiskLayout(Disk, Base, Layout);
     }
 Done:
-    HeapFree(GetProcessHeap(), 0, Layout);
+    DmUnlockDisk(Lock);
+    if (Layout)
+        HeapFree(GetProcessHeap(), 0, Layout);
+    if (Base)
+        HeapFree(GetProcessHeap(), 0, Base);
     return Error;
 }
 
@@ -952,9 +1315,12 @@ DmHideReserved(ULONG Disk, const DL_LAYOUT *Layout)
 }
 
 DWORD
-DmCreatePartition(ULONG Disk, ULONGLONG FreeOffset, BOOL InExtended, ULONGLONG Length, PDM_CREATED Created)
+DmCreatePartition(ULONG Disk, ULONGLONG FreeOffset, BOOL InExtended, ULONGLONG Length, const DL_LAYOUT *Planned,
+                  const DM_DISK_ID *DiskIdentity, PDM_CREATED Created)
 {
     PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    PDL_LAYOUT Base = HeapAlloc(GetProcessHeap(), 0, sizeof(DL_LAYOUT));
+    HANDLE Lock = NULL;
     DL_FREE Free;
     BOOL NeedsExtended;
     DWORD Error;
@@ -963,11 +1329,27 @@ DmCreatePartition(ULONG Disk, ULONGLONG FreeOffset, BOOL InExtended, ULONGLONG L
     PDL_ENTRY New = NULL;
 
     ZeroMemory(Created, sizeof(*Created));
-    if (Layout == NULL)
-        return ERROR_NOT_ENOUGH_MEMORY;
+    if (Layout == NULL || Base == NULL)
+    {
+        Error = ERROR_NOT_ENOUGH_MEMORY;
+        goto Done;
+    }
+    Error = DmLockDisk(Disk, &Lock);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+    Error = DmVerifyDiskId(Disk, DiskIdentity);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
     Error = DmPlanPartition(Disk, FreeOffset, InExtended, &Free, &NeedsExtended, Layout);
     if (Error != ERROR_SUCCESS)
         goto Done;
+    /* the gap was planned on the table the user saw: another table is not the one he agreed to */
+    if (Planned != NULL && !DmSameLayout(Planned, Layout))
+    {
+        Error = DM_ERR_CHANGED;
+        goto Done;
+    }
+    memcpy(Base, Layout, sizeof(DL_LAYOUT));
     if (Length == 0 || Length > Free.MaxLength || (Length % DL_ALIGN) != 0)
     {
         Error = ERROR_INVALID_PARAMETER;
@@ -1023,7 +1405,7 @@ DmCreatePartition(ULONG Disk, ULONGLONG FreeOffset, BOOL InExtended, ULONGLONG L
     Created->Offset = New->Offset;
     Created->Length = New->Length;
 
-    Error = DmWriteDiskLayout(Disk, Layout);
+    Error = DmWriteDiskLayout(Disk, Base, Layout);
     if (Error != ERROR_SUCCESS)
         goto Done;
     /* the volume manager adds the volume a moment after the table is written */
@@ -1032,7 +1414,11 @@ DmCreatePartition(ULONG Disk, ULONGLONG FreeOffset, BOOL InExtended, ULONGLONG L
     if (Created->MadeReserved)
         DmHideReserved(Disk, Layout);
 Done:
-    HeapFree(GetProcessHeap(), 0, Layout);
+    DmUnlockDisk(Lock);
+    if (Layout)
+        HeapFree(GetProcessHeap(), 0, Layout);
+    if (Base)
+        HeapFree(GetProcessHeap(), 0, Base);
     return Error;
 }
 
@@ -1146,22 +1532,34 @@ DmCurrentPaths(PCWSTR VolumeGuid, PWSTR *Paths)
 
 /* Deletes the partition at Offset, which must still be the one the caller saw: Length and the volume are what it had then. */
 DWORD
-DmDeletePartition(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid, BOOL Force)
+DmDeletePartition(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid, BOOL Force, const DM_DISK_ID *DiskIdentity)
 {
     PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    PDL_LAYOUT Base = HeapAlloc(GetProcessHeap(), 0, sizeof(DL_LAYOUT));
+    HANDLE Lock = NULL;
     WCHAR Current[MAX_PATH];
     PWSTR Paths = NULL;
     PCWSTR Todo[DM_MAX_MOUNT_PATHS], Path;
     ULONG TodoCount = 0, Removed, i;
     PDL_ENTRY Entry;
-    BOOL Dismounted = FALSE, HaveGuid;
+    BOOL Dismounted = FALSE, HaveGuid, NotRestored = FALSE;
     DWORD Error;
 
-    if (Layout == NULL)
-        return ERROR_NOT_ENOUGH_MEMORY;
+    if (Layout == NULL || Base == NULL)
+    {
+        Error = ERROR_NOT_ENOUGH_MEMORY;
+        goto Cleanup;
+    }
+    Error = DmLockDisk(Disk, &Lock);
+    if (Error != ERROR_SUCCESS)
+        goto Cleanup;
+    Error = DmVerifyDiskId(Disk, DiskIdentity);
+    if (Error != ERROR_SUCCESS)
+        goto Cleanup;
     Error = DmReadDiskLayout(Disk, Layout);
     if (Error != ERROR_SUCCESS)
         goto Cleanup;
+    memcpy(Base, Layout, sizeof(DL_LAYOUT));
     Entry = DlFindEntry(Layout, Offset);
     if (Entry == NULL)
     {
@@ -1217,40 +1615,66 @@ DmDeletePartition(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeG
             if (Error != ERROR_SUCCESS)
             {
                 for (i = 0; i < Removed; i++)
-                    DmAddMountPath(Current, Todo[i]);
+                    if (DmAddMountPath(Current, Todo[i]) != ERROR_SUCCESS)
+                        NotRestored = TRUE;
                 goto Cleanup;
             }
         }
     }
     Error = DmFromLayout(DlDelete(Layout, Offset));
     if (Error == ERROR_SUCCESS)
-        Error = DmWriteDiskLayout(Disk, Layout);
+        Error = DmWriteDiskLayout(Disk, Base, Layout);
     if (Error != ERROR_SUCCESS && Dismounted)
     {
-        /* the table did not change: give the paths back */
+        /* the table did not change (or was put back): give the paths back */
         for (i = 0; i < TodoCount; i++)
-            DmAddMountPath(Current, Todo[i]);
+            if (DmAddMountPath(Current, Todo[i]) != ERROR_SUCCESS)
+                NotRestored = TRUE;
     }
 Cleanup:
+    /* a table that could not be put back is the worse news; otherwise say that paths are missing */
+    if (NotRestored && Error != ERROR_SUCCESS && Error != DM_ERR_RESTORE_FAILED)
+        Error = DM_ERR_PATHS_NOT_RESTORED;
+    DmUnlockDisk(Lock);
     if (Paths)
         HeapFree(GetProcessHeap(), 0, Paths);
-    HeapFree(GetProcessHeap(), 0, Layout);
+    if (Layout)
+        HeapFree(GetProcessHeap(), 0, Layout);
+    if (Base)
+        HeapFree(GetProcessHeap(), 0, Base);
     return Error;
 }
 
 DWORD
-DmMarkActive(ULONG Disk, ULONGLONG Offset)
+DmMarkActive(ULONG Disk, ULONGLONG Offset, const DM_DISK_ID *DiskIdentity)
 {
     PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    PDL_LAYOUT Base = HeapAlloc(GetProcessHeap(), 0, sizeof(DL_LAYOUT));
+    HANDLE Lock = NULL;
     DWORD Error;
 
-    if (Layout == NULL)
-        return ERROR_NOT_ENOUGH_MEMORY;
-    Error = DmReadDiskLayout(Disk, Layout);
+    if (Layout == NULL || Base == NULL)
+    {
+        Error = ERROR_NOT_ENOUGH_MEMORY;
+        goto Done;
+    }
+    Error = DmLockDisk(Disk, &Lock);
     if (Error == ERROR_SUCCESS)
+        Error = DmVerifyDiskId(Disk, DiskIdentity);
+    if (Error == ERROR_SUCCESS)
+        Error = DmReadDiskLayout(Disk, Layout);
+    if (Error == ERROR_SUCCESS)
+    {
+        memcpy(Base, Layout, sizeof(DL_LAYOUT));
         Error = DmFromLayout(DlSetActive(Layout, Offset, TRUE));
+    }
     if (Error == ERROR_SUCCESS)
-        Error = DmWriteDiskLayout(Disk, Layout);
-    HeapFree(GetProcessHeap(), 0, Layout);
+        Error = DmWriteDiskLayout(Disk, Base, Layout);
+Done:
+    DmUnlockDisk(Lock);
+    if (Layout)
+        HeapFree(GetProcessHeap(), 0, Layout);
+    if (Base)
+        HeapFree(GetProcessHeap(), 0, Base);
     return Error;
 }

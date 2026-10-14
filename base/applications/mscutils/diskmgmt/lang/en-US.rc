@@ -242,6 +242,8 @@ BEGIN
     IDS_ERR_TYPE_NOT_UPDATED "The volume was formatted, but the type of its partition could not be adjusted to the file system."
     IDS_ERR_VERIFY_FAILED   "The disk does not hold the partition table that was written. Refresh the view to see what it holds now."
     IDS_ERR_RESTORE_FAILED  "Writing the partition table failed, and the table that was on the disk could not be written back. The disk may need repair."
+    IDS_ERR_PATHS_NOT_RESTORED "The operation failed, and the drive letters or paths it had taken away from the volume could not all be put back. Check them with Change Drive Letter and Paths."
+    IDS_PL_FOLDER_TOO_LONG  "The folder path is too long."
     IDS_NV_INFO_FMT         "Free space: %s.   Largest volume: %s."
     IDS_NV_NO_LETTER        "Do not assign a drive letter"
     IDS_NV_NO_FORMAT        "Do not format this volume"
