@@ -43,3 +43,5 @@ elseif(ARCH STREQUAL "amd64")
     add_asm_files(wow64_continue_asm ../ntdll/amd64/Wow64Continue.S)
     target_sources(ntdll_wow64_apitest PRIVATE ${wow64_continue_asm})
 endif()
+
+add_subdirectory(sharedviews)

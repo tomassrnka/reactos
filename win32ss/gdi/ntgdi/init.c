@@ -29,6 +29,10 @@ GdiProcessCreate(PEPROCESS Process)
 
     /* Map the GDI handle table to user land */
     Process->Peb->GdiSharedHandleTable = GDI_MapHandleTable(Process);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Win32kUserViewZeroBits(Process) && !Process->Peb->GdiSharedHandleTable)
+        return STATUS_NO_MEMORY;
+#endif
     Process->Peb->GdiDCAttributeList = GDI_BATCH_LIMIT;
 
     /* Create pools for GDI object attributes */
