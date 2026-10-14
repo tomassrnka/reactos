@@ -11,6 +11,8 @@ list(APPEND SOURCE
     ApplicationRestart.c
     AppModel.c
     ConsoleCP.c
+    CopyFile2.c
+    CopyFile2Identity.c
     CreateEventMutexEx.c
     CreateFile2.c
     CreateRemoteThreadEx.c
@@ -132,6 +134,7 @@ set_module_type(kernel32_apitest win32cui)
 add_delay_importlibs(kernel32_apitest advapi32 shlwapi user32)
 add_importlibs(kernel32_apitest netapi32 msvcrt kernel32 ntdll)
 add_dependencies(kernel32_apitest FormatMessage)
+set_source_files_properties(CopyFile2Identity.c PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/copy2_embedded")
 add_pch(kernel32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET kernel32_apitest)
 
