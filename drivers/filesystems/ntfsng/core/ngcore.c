@@ -2157,15 +2157,12 @@ static u64 ngc_boot_sectors(struct ngc_vol *v)
  * Writes the boot sector with @sectors as its sector count, and its copy in the sector after the
  * volume (where Windows and the core look for it), through the journal like any metadata write.
  */
-static int ngc_write_boot(struct ngc_vol *v, u64 sectors)
+static int ngc_write_boot(struct ngc_vol *v, u64 sectors, u8 *buf)
 {
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
 	u32 ss = vol->sector_size;
-	u8 *buf = kmalloc(ss, GFP_NOFS);
 	int err;
 
-	if (!buf)
-		return -ENOMEM;
 	err = kshim_dev_rw(v->bdev, 0, 0, buf, ss);
 	if (!err) {
 		((struct ntfs_boot_sector *)buf)->number_of_sectors = cpu_to_le64(sectors);
@@ -2177,7 +2174,6 @@ static int ngc_write_boot(struct ngc_vol *v, u64 sectors)
 		if (!err)
 			kshim_mapping_update(v->bdev->bd_mapping, 0, buf, ss);
 	}
-	kfree(buf);
 	return err;
 }
 
@@ -2201,6 +2197,7 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 	u32 ss = vol->sector_size;
 	s64 old_nr = vol->nr_clusters, nr, old_bytes, bytes;
 	u64 old_sectors;
+	u8 *boot;
 	int err;
 
 	if (sb_rdonly(v->sb))
@@ -2220,11 +2217,15 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 	if (nr > 0xffffffffLL)
 		return -EFBIG;
 
+	/* Everything that can run out of memory comes before the first change. */
+	boot = kmalloc(ss, GFP_NOFS);
+	if (!boot)
+		return -ENOMEM;
 	err = ngc_mark_dirty(v);
 	if (!err)
 		err = ngc_before_alloc(v);
 	if (err)
-		return err;
+		goto out;
 
 	/* The partition grew under the mount: device I/O may reach its new end. */
 	v->bdev->size = dev_size;
@@ -2240,7 +2241,7 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 			err = ntfs_attr_truncate_i(bni, bytes, HOLES_NO);
 			mutex_unlock(&bni->mrec_lock);
 			if (err)
-				return err;
+				goto out;
 			i_size_write(bvi, bytes);
 			err = ntfs_attr_set(bni, old_bytes, bytes - old_bytes, 0);
 			if (!err && bni->initialized_size < bytes) {
@@ -2250,11 +2251,11 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 			}
 			mark_inode_dirty(bvi);
 			if (err)
-				return ngc_resize_failed(v, err);
+				goto failed;
 		}
 		err = ngc_grow_lcn_hints(vol, old_nr, nr);
 		if (err)
-			return ngc_resize_failed(v, err);
+			goto failed;
 		down_write(&vol->lcnbmp_lock);
 		err = ntfs_bitmap_clear_run(bvi, old_nr, nr - old_nr);
 		if (!err && (nr & 63))
@@ -2263,14 +2264,25 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 			vol->nr_clusters = nr;
 		up_write(&vol->lcnbmp_lock);
 		if (err)
-			return ngc_resize_failed(v, err);
+			goto failed;
 		ngc_recount_free(vol);
 	}
+	/*
+	 * $Bitmap first, the boot sector after it: an interruption between the two commits leaves
+	 * the old size with a $Bitmap larger than it needs, which every reader accepts.  Once the
+	 * clusters are in use in memory, a failed write leaves the volume read-only.
+	 */
 	err = ngc_commit(v);
 	if (!err)
-		err = ngc_write_boot(v, sectors);
+		err = ngc_write_boot(v, sectors, boot);
 	if (!err)
 		err = ngc_commit(v);
+	if (!err)
+		goto out;
+failed:
+	err = ngc_resize_failed(v, err);
+out:
+	kfree(boot);
 	return err;
 }
 
@@ -2340,15 +2352,19 @@ static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
 	struct ntfs_inode *bni = NTFS_I(bvi);
 	u32 ss = vol->sector_size;
 	s64 nr, first, bytes;
+	u8 *boot;
 	int err;
 
 	if (sb_rdonly(v->sb))
 		return -EROFS;
 	if (v->failed)
 		return -EIO;
+	boot = kmalloc(ss, GFP_NOFS);
+	if (!boot)
+		return -ENOMEM;
 	err = ngc_mark_dirty(v);
 	if (err)
-		return err;
+		goto out;
 	nr = (s64)((sectors * ss) >> vol->cluster_size_bits);
 	down_write(&vol->lcnbmp_lock);
 	err = ngc_shrink_check_locked(v, sectors, &first);
@@ -2369,24 +2385,35 @@ static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
 	}
 	up_write(&vol->lcnbmp_lock);
 	if (err)
-		return err;
+		goto out;
+	/*
+	 * In three commits, each leaving a volume every reader accepts: the padding bits (at the old
+	 * size a few free clusters marked in use), the boot sector (the new size with a $Bitmap
+	 * larger than it needs), then the shorter $Bitmap.
+	 */
+	ngc_recount_free(vol);
+	err = ngc_commit(v);
+	if (!err)
+		err = ngc_write_boot(v, sectors, boot);
+	if (!err)
+		err = ngc_commit(v);
 	bytes = ngc_bmp_bytes(nr);
-	if (bytes < i_size_read(bvi)) {
+	if (!err && bytes < i_size_read(bvi)) {
 		/* The cached pages lose the bytes past the new end: the free count reads whole pages. */
 		truncate_setsize(bvi, bytes);
 		mutex_lock(&bni->mrec_lock);
 		err = ntfs_attr_truncate_i(bni, bytes, HOLES_NO);
 		mutex_unlock(&bni->mrec_lock);
 		mark_inode_dirty(bvi);
-		if (err)
-			return ngc_resize_failed(v, err);
+		if (!err) {
+			ngc_recount_free(vol);
+			err = ngc_commit(v);
+		}
 	}
-	ngc_recount_free(vol);
-	err = ngc_commit(v);
-	if (!err)
-		err = ngc_write_boot(v, sectors);
-	if (!err)
-		err = ngc_commit(v);
+	if (err)
+		err = ngc_resize_failed(v, err);
+out:
+	kfree(boot);
 	return err;
 }
 

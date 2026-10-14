@@ -994,6 +994,12 @@ static NTSTATUS NgShrinkVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
     switch (Info->ShrinkRequestType)
     {
         case ShrinkPrepare:
+            /* A handle whose cleanup ran (it forgot the handle's request) may not prepare again. */
+            if (((PNG_CCB)FileObject->FsContext2)->CleanedUp)
+            {
+                Status = STATUS_INVALID_HANDLE;
+                break;
+            }
             if (Vcb->ShrinkOwner && Vcb->ShrinkOwner != FileObject)
             {
                 Status = STATUS_DEVICE_BUSY;
@@ -1280,8 +1286,13 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FSCTL_SHRINK_VOLUME:
             return NgShrinkVolume(Vcb, Fcb, Irp, Stack);
         case FSCTL_GET_NTFS_VOLUME_DATA:
+            if (!Fcb || !Fcb->IsVolume)
+                return STATUS_INVALID_PARAMETER;
             return NgGetNtfsVolumeData(Vcb, Irp, Stack);
         case FSCTL_GET_VOLUME_BITMAP:
+            /* As FastFAT: a volume handle that may manage the volume. */
+            if (!Fcb || !Fcb->IsVolume || !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+                return STATUS_INVALID_PARAMETER;
             return NgGetVolumeBitmap(Vcb, Irp, Stack);
         default:
             return STATUS_INVALID_DEVICE_REQUEST;
