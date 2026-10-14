@@ -204,6 +204,7 @@ typedef struct {
     DWORD apartment_thread;
     HWND notif_hwnd;
     DWORD continue_call;
+    BOOL continue_posted;
 
     CRITICAL_SECTION section;
     task_header_t *task_queue_head, *task_queue_tail;

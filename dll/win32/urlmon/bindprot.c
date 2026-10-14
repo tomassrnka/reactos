@@ -65,6 +65,10 @@ static LRESULT WINAPI notif_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_MK_CONTINUE: {
         BindProtocol *This = (BindProtocol*)lParam;
 
+        EnterCriticalSection(&This->section);
+        This->continue_posted = FALSE;
+        LeaveCriticalSection(&This->section);
+
         process_tasks(This);
 
         IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
@@ -180,6 +184,32 @@ static void push_task(BindProtocol *This, task_header_t *task, task_proc_t proc)
 static inline BOOL is_apartment_thread(BindProtocol *This)
 {
     return This->apartment_thread == GetCurrentThreadId();
+}
+
+/* Tasks queued while the client was inside Read are run from the message loop once no call is active. */
+static void post_pending_tasks(BindProtocol *This)
+{
+    BOOL post;
+
+    if(This->continue_call)
+        return;
+
+    EnterCriticalSection(&This->section);
+    post = This->task_queue_head && !This->continue_posted;
+    if(post)
+        This->continue_posted = TRUE;
+    LeaveCriticalSection(&This->section);
+
+    if(!post)
+        return;
+
+    IInternetProtocolEx_AddRef(&This->IInternetProtocolEx_iface);
+    if(!PostMessageW(This->notif_hwnd, WM_MK_CONTINUE, 0, (LPARAM)This)) {
+        EnterCriticalSection(&This->section);
+        This->continue_posted = FALSE;
+        LeaveCriticalSection(&This->section);
+        IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
+    }
 }
 
 static inline BOOL do_direct_notif(BindProtocol *This)
@@ -780,8 +810,10 @@ static HRESULT WINAPI ProtocolHandler_Read(IInternetProtocol *iface, void *pv,
         if(is_apartment_thread(This))
             This->continue_call++;
         hres = IInternetProtocol_Read(protocol, (BYTE*)pv+read, cb-read, &cread);
-        if(is_apartment_thread(This))
+        if(is_apartment_thread(This)) {
             This->continue_call--;
+            post_pending_tasks(This);
+        }
         read += cread;
 
         if(!This->protocol)
