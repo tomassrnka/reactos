@@ -2126,8 +2126,16 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
             OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_FORCE_ACCESS_CHECK, NULL, NULL);
         Status = ZwOpenKey(&Handle, KEY_QUERY_VALUE, &Attributes);
         if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        {
+            /* The container follows its parent, not the requested child's
+             * lifetime. Let the normal create path check the actual parent,
+             * including hive boundaries, before trying a volatile container. */
             Status = ZwCreateKey(&Handle, KEY_CREATE_SUB_KEY, &Attributes, 0, NULL,
-                                 Context->CreateOptions & REG_OPTION_VOLATILE, NULL);
+                                 REG_OPTION_NON_VOLATILE, NULL);
+            if (Status == STATUS_CHILD_MUST_BE_VOLATILE)
+                Status = ZwCreateKey(&Handle, KEY_CREATE_SUB_KEY, &Attributes, 0, NULL,
+                                     REG_OPTION_VOLATILE, NULL);
+        }
         if (NT_SUCCESS(Status)) ZwClose(Handle);
         else if (Status != STATUS_ACCESS_DENIED)
         {
