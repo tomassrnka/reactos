@@ -172,14 +172,19 @@ static inline HIMAGELIST impl_from_IImageList2(IImageList2 *iface)
 }
 
 static BOOL write_imagelist(HIMAGELIST himl, IStream *pstm, BOOL strict);
+static BOOL vista_writable(HIMAGELIST himl);
+static BOOL write_vista_imagelist(HIMAGELIST himl, IStream *pstm);
 
 /*************************************************************************
  * ImageList_WriteEx [COMCTL32.@]
  *
- * Writes an image list to a stream, in the format that a flag of 0 or ILP_DOWNLEVEL (1) asks for. The
- * format of Windows Vista and later, which a flag of 0 selects there, is not written: both flags give the
- * older format, which ImageList_Read reads on every version. Windows 7 accepts any other flag value
- * as well (measured); those are written the same way.
+ * Writes an image list to a stream. A flag of 0 (ILP_NORMAL) writes the format of Windows Vista and later (version
+ * 0x620): the images in one column, the bitmap and the mask both as bottom-up strips of the width of an image,
+ * and a trailer. ILP_DOWNLEVEL (1) writes the older format (version 0x101, four images to a row), and so does
+ * every other flag value, where Windows 10 writes a stream with the older version number and the new layout
+ * (measured; not copied). Lists whose bitmap has fewer than 16 bits to a pixel are written in the older
+ * format as well. What Windows puts in the eight bytes after the trailer for each image is not known (-tbd-);
+ * zeros are written, which is what it writes for every list measured.
  *
  * RETURNS
  *     S_OK on success, E_POINTER for no image list, E_INVALIDARG for no stream
@@ -192,6 +197,11 @@ HRESULT WINAPI ImageList_WriteEx(HIMAGELIST himl, DWORD dwFlags, IStream *pstm)
         return E_POINTER;
     if (!pstm)
         return E_INVALIDARG;
+
+    if (dwFlags == 0 && write_vista_imagelist(himl, pstm))
+        return S_OK;
+    if (dwFlags == 0 && vista_writable(himl))
+        return E_FAIL;
 
     return write_imagelist(himl, pstm, TRUE) ? S_OK : E_FAIL;
 }
@@ -2575,9 +2585,13 @@ HIMAGELIST WINAPI ImageList_Read(IStream *pstm)
         DWORD *ptr = image_bits;
         BYTE *mask_ptr = mask_bits;
 #ifdef __REACTOS__
-        int stride = himl->cy * (ilHead.usVersion != IMAGELIST_VERSION ? himl->cx : image_info->bmiHeader.biWidth);
-        int image_step = ilHead.usVersion != IMAGELIST_VERSION ? 1 : TILE_COUNT;
-        int mask_step = ilHead.usVersion != IMAGELIST_VERSION ? 4 : 8;
+        /* the older format has four images to a row, the newer one has them in a column; the bytes that the mask
+           of one block of images takes are those of its rows, which are padded to four bytes */
+        BOOL column = ilHead.usVersion != IMAGELIST_VERSION;
+        int mask_row = (image_info->bmiHeader.biWidth + 31) / 32 * 4;
+        int stride = himl->cy * (column ? himl->cx : image_info->bmiHeader.biWidth);
+        int image_step = column ? 1 : TILE_COUNT;
+        int mask_stride = column ? himl->cy * mask_row : stride / 8;
 #else
         int stride = himl->cy * image_info->bmiHeader.biWidth;
 #endif
@@ -2585,7 +2599,9 @@ HIMAGELIST WINAPI ImageList_Read(IStream *pstm)
         {
             ptr += image_info->bmiHeader.biHeight * image_info->bmiHeader.biWidth - stride;
 #ifdef __REACTOS__
-            mask_ptr += (image_info->bmiHeader.biHeight * image_info->bmiHeader.biWidth - stride) / mask_step;
+            mask_ptr += column ? (image_info->bmiHeader.biHeight - himl->cy) * mask_row :
+                                 (image_info->bmiHeader.biHeight * image_info->bmiHeader.biWidth - stride) / 8;
+            mask_stride = -mask_stride;
 #else
             mask_ptr += (image_info->bmiHeader.biHeight * image_info->bmiHeader.biWidth - stride) / 8;
 #endif
@@ -2599,7 +2615,7 @@ HIMAGELIST WINAPI ImageList_Read(IStream *pstm)
             add_dib_bits(himl, i, min(ilHead.cCurImage - i, image_step),
                          himl->cx, himl->cy, image_info, mask_info, ptr, mask_ptr);
             ptr += stride;
-            mask_ptr += stride / mask_step;
+            mask_ptr += mask_stride;
         }
 #else
         for (i = 0; i < ilHead.cCurImage; i += TILE_COUNT)
@@ -2611,6 +2627,31 @@ HIMAGELIST WINAPI ImageList_Read(IStream *pstm)
         }
 #endif
     }
+#ifdef __REACTOS__
+    else if (ilHead.usVersion != IMAGELIST_VERSION)
+    {
+        /* the images are in a column: each one goes to its place in the bitmap of the list */
+        int rows = image_info->bmiHeader.biHeight, y;
+
+        for (i = 0; i < ilHead.cCurImage; i++)
+        {
+            POINT pt;
+
+            imagelist_point_from_index(himl, i, &pt);
+            y = rows > 0 ? rows - (i + 1) * himl->cy : i * himl->cy;
+            StretchDIBits(himl->hdcImage, pt.x, pt.y, himl->cx, himl->cy, 0, y, himl->cx, himl->cy,
+                          image_bits, image_info, DIB_RGB_COLORS, SRCCOPY);
+            if (mask_info)
+            {
+                int mrows = mask_info->bmiHeader.biHeight;
+
+                y = mrows > 0 ? mrows - (i + 1) * himl->cy : i * himl->cy;
+                StretchDIBits(himl->hdcMask, pt.x, pt.y, himl->cx, himl->cy, 0, y, himl->cx, himl->cy,
+                              mask_bits, mask_info, DIB_RGB_COLORS, SRCCOPY);
+            }
+        }
+    }
+#endif
     else
     {
         StretchDIBits( himl->hdcImage, 0, 0, image_info->bmiHeader.biWidth, image_info->bmiHeader.biHeight,
@@ -3422,6 +3463,183 @@ static BOOL write_imagelist(HIMAGELIST himl, IStream *pstm, BOOL strict)
     }
 
     return TRUE;
+}
+
+/* The stream of version 0x620 is written for a list whose bitmap has 16, 24 or 32 bits to a pixel */
+static BOOL vista_writable(HIMAGELIST himl)
+{
+    BITMAP bm;
+
+    if (!is_valid(himl) || !GetObjectW(himl->hbmImage, sizeof(bm), &bm))
+        return FALSE;
+    if (bm.bmBitsPixel != 16 && bm.bmBitsPixel != 24 && bm.bmBitsPixel != 32)
+        return FALSE;
+    if ((himl->flags & ILC_MASK) && !himl->hbmMask)
+        return FALSE;
+    return TRUE;
+}
+
+/* the bits of a bitmap as a bottom-up DIB of its own depth; the caller frees them */
+static BYTE *get_bottom_up_bits(HDC hdc, HBITMAP bitmap, int bpp, BITMAP *bm)
+{
+    char buffer[sizeof(BITMAPINFOHEADER) + 256 * sizeof(RGBQUAD)];
+    BITMAPINFO *bmi = (BITMAPINFO *)buffer;
+    BYTE *bits;
+
+    if (!GetObjectW(bitmap, sizeof(*bm), bm))
+        return NULL;
+    memset(buffer, 0, sizeof(buffer));
+    bmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi->bmiHeader.biWidth = bm->bmWidth;
+    bmi->bmiHeader.biHeight = bm->bmHeight;
+    bmi->bmiHeader.biPlanes = 1;
+    bmi->bmiHeader.biBitCount = bpp;
+    bmi->bmiHeader.biCompression = BI_RGB;
+    bits = heap_alloc_zero(get_dib_stride(bm->bmWidth, bpp) * bm->bmHeight);
+    if (!bits)
+        return NULL;
+    if (GetDIBits(hdc, bitmap, 0, bm->bmHeight, bits, bmi, DIB_RGB_COLORS) != bm->bmHeight)
+    {
+        heap_free(bits);
+        return NULL;
+    }
+    return bits;
+}
+
+/* a DIB of the strip: the file header, the info header, the palette of a mask, the bits */
+static BOOL write_strip(IStream *pstm, int cx, int rows, int bpp, const BYTE *bits, int size)
+{
+    static const RGBQUAD mask_palette[2] = { { 0, 0, 0, 0 }, { 255, 255, 255, 0 } };
+    BITMAPFILEHEADER bmfh;
+    BITMAPINFOHEADER bmih;
+    int off = sizeof(bmfh) + sizeof(bmih) + (bpp == 1 ? sizeof(mask_palette) : 0);
+
+    memset(&bmfh, 0, sizeof(bmfh));
+    bmfh.bfType = ('M' << 8) | 'B';
+    bmfh.bfSize = off;      /* the size of the headers, as Windows writes it (and as the older format does) */
+    bmfh.bfOffBits = off;
+    memset(&bmih, 0, sizeof(bmih));
+    bmih.biSize = sizeof(bmih);
+    bmih.biWidth = cx;
+    bmih.biHeight = rows;
+    bmih.biPlanes = 1;
+    bmih.biBitCount = bpp;
+    bmih.biCompression = BI_RGB;
+    bmih.biSizeImage = size;
+
+    if (FAILED(IStream_Write(pstm, &bmfh, sizeof(bmfh), NULL)) || FAILED(IStream_Write(pstm, &bmih, sizeof(bmih), NULL)))
+        return FALSE;
+    if (bpp == 1 && FAILED(IStream_Write(pstm, mask_palette, sizeof(mask_palette), NULL)))
+        return FALSE;
+    return SUCCEEDED(IStream_Write(pstm, bits, size, NULL));
+}
+
+/* The images of the list one below the other (image 0 at the top), in the order of a bottom-up DIB */
+static BOOL write_vista_imagelist(HIMAGELIST himl, IStream *pstm)
+{
+    BYTE *src = NULL, *dst = NULL, *msrc = NULL, *mdst = NULL, *zeros = NULL;
+    BITMAP bm, mbm;
+    DWORD trailer[5];
+    ILHEAD ilHead;
+    HDC hdc;
+    int bpp, cx = himl->cx, cy = himl->cy, max_images, rows, i, r, x;
+    int src_stride, dst_stride, msrc_stride = 0, mdst_stride = 0;
+    BOOL result = FALSE;
+
+    if (!vista_writable(himl))
+        return FALSE;
+
+    /* room for the images, a multiple of four */
+    max_images = max(himl->cMaxImage, himl->cCurImage);
+    max_images = max((max_images + 3) & ~3, 4);
+    rows = max_images * cy;
+
+    hdc = GetDC(0);
+    GetObjectW(himl->hbmImage, sizeof(bm), &bm);
+    bpp = bm.bmBitsPixel;
+    src = get_bottom_up_bits(hdc, himl->hbmImage, bpp, &bm);
+    if (himl->flags & ILC_MASK)
+        msrc = get_bottom_up_bits(hdc, himl->hbmMask, 1, &mbm);
+    ReleaseDC(0, hdc);
+    if (!src || ((himl->flags & ILC_MASK) && !msrc))
+        goto done;
+
+    src_stride = get_dib_stride(bm.bmWidth, bpp);
+    dst_stride = get_dib_stride(cx, bpp);
+    dst = heap_alloc_zero(dst_stride * rows);
+    if (msrc)
+    {
+        msrc_stride = get_dib_stride(mbm.bmWidth, 1);
+        mdst_stride = get_dib_stride(cx, 1);
+        mdst = heap_alloc_zero(mdst_stride * rows);
+    }
+    if (!dst || (msrc && !mdst))
+        goto done;
+
+    for (i = 0; i < himl->cCurImage; i++)
+    {
+        POINT pt;
+
+        imagelist_point_from_index(himl, i, &pt);
+        for (r = 0; r < cy; r++)
+        {
+            int src_row = bm.bmHeight - 1 - (pt.y + r);
+            int dst_row = rows - 1 - (i * cy + r);
+
+            if (pt.y + r < bm.bmHeight && pt.x + cx <= bm.bmWidth)
+                memcpy(dst + dst_row * dst_stride, src + src_row * src_stride + pt.x * bpp / 8, cx * bpp / 8);
+            if (msrc && pt.y + r < mbm.bmHeight && pt.x + cx <= mbm.bmWidth)
+            {
+                const BYTE *from = msrc + (mbm.bmHeight - 1 - (pt.y + r)) * msrc_stride;
+                BYTE *to = mdst + dst_row * mdst_stride;
+
+                for (x = 0; x < cx; x++)
+                    if (from[(pt.x + x) >> 3] & (0x80 >> ((pt.x + x) & 7)))
+                        to[x >> 3] |= 0x80 >> (x & 7);
+            }
+        }
+    }
+
+    ilHead.usMagic   = (('L' << 8) | 'I');
+    ilHead.usVersion = 0x620;
+    ilHead.cCurImage = himl->cCurImage;
+    ilHead.cMaxImage = max_images;
+    ilHead.cGrow     = himl->cGrow;
+    ilHead.cx        = cx;
+    ilHead.cy        = cy;
+    ilHead.bkcolor   = himl->clrBk;
+    ilHead.flags     = himl->flags;
+    for (i = 0; i < 4; i++)
+        ilHead.ovls[i] = himl->nOvlIdx[i];
+
+    if (FAILED(IStream_Write(pstm, &ilHead, sizeof(ILHEAD), NULL)))
+        goto done;
+    if (!write_strip(pstm, cx, rows, bpp, dst, dst_stride * rows))
+        goto done;
+    if (mdst && !write_strip(pstm, cx, rows, 1, mdst, mdst_stride * rows))
+        goto done;
+
+    /* the trailer: 1, 8, the number of images and the growth, its own size, and eight bytes for each image */
+    trailer[0] = 1;
+    trailer[1] = 8;
+    trailer[2] = himl->cCurImage;
+    trailer[3] = himl->cGrow;
+    trailer[4] = sizeof(trailer) + 8 * himl->cCurImage;
+    if (FAILED(IStream_Write(pstm, trailer, sizeof(trailer), NULL)))
+        goto done;
+    zeros = heap_alloc_zero(8 * himl->cCurImage + 1);
+    if (!zeros || (himl->cCurImage && FAILED(IStream_Write(pstm, zeros, 8 * himl->cCurImage, NULL))))
+        goto done;
+
+    result = TRUE;
+
+done:
+    heap_free(zeros);
+    heap_free(mdst);
+    heap_free(msrc);
+    heap_free(dst);
+    heap_free(src);
+    return result;
 }
 
 /*************************************************************************

@@ -6,7 +6,7 @@
  *
  * The results were measured on Windows Server 2008 R2 (x64 and WOW64) and Windows 10 22H2. The stream that a flag
  * of 0 writes there has the format of Windows Vista and later, and the stream of ILP_DOWNLEVEL the older one:
- * only that both are read back is tested, not their bytes.
+ * the bytes of the first are tested (their layout was measured on Windows 10), both are read back.
  */
 
 #define COBJMACROS
@@ -352,6 +352,179 @@ static void CheckContents(HIMAGELIST List, DWORD Flags)
     CheckPixel(List, 0, 1, 8, 8, 0, 0, 0, Flags);
 }
 
+#include <pshpack2.h>
+typedef struct
+{
+    USHORT Magic, Version;
+    WORD Cur, Max, Grow, Cx, Cy;
+    DWORD Background;
+    WORD Flags;
+    SHORT Overlays[4];
+} STREAMHEAD;
+#include <poppack.h>
+
+/*
+ * The stream of a flag of 0 has the format of Windows Vista and later (measured on Windows 10 with lists of
+ * several sizes and counts): the header of 28 bytes with the version 0x620; the bitmap of the images as a
+ * bottom-up DIB of the width of one image and the height of all the images the list has room for (Max), image 0
+ * at the top; the mask the same, one bit to a pixel and with a palette of black and white; a trailer of the dwords
+ * 1, 8, the number of images, the growth, its own size, and eight bytes for each image. The room that the list
+ * has differs from system to system, so Max is read from the header.
+ */
+static void CheckVistaStream(IStream *Stream)
+{
+    LARGE_INTEGER Start = { { 0 } };
+    STATSTG Stat;
+    BYTE *Data, *Bits, *MaskBits;
+    ULONG Size, Read = 0, Rows, Offset, ImageSize, MaskSize, Row;
+    const STREAMHEAD *Head;
+    const BITMAPINFOHEADER *Image, *Mask;
+    const DWORD *Trailer;
+    static const BYTE Red[3] = { 0, 0, 255 }, Green[3] = { 0, 255, 0 };
+
+    if (FAILED(IStream_Stat(Stream, &Stat, STATFLAG_NONAME)))
+        return;
+    Size = Stat.cbSize.LowPart;
+    Data = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size + 1);
+    if (!Data)
+        return;
+    IStream_Seek(Stream, Start, STREAM_SEEK_SET, NULL);
+    ok(SUCCEEDED(IStream_Read(Stream, Data, Size, &Read)) && Read == Size, "the stream cannot be read back\n");
+    if (Read != Size || Size < sizeof(STREAMHEAD) + 2 * (sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER)))
+        goto done;
+
+    Head = (const STREAMHEAD *)Data;
+    ok(Head->Magic == 0x4c49, "magic %#x\n", Head->Magic);
+    ok(Head->Version == 0x620, "version %#x\n", Head->Version);
+    ok(Head->Cur == 2 && Head->Cx == IMAGE_SIZE && Head->Cy == IMAGE_SIZE, "%u images of %u x %u\n", Head->Cur, Head->Cx, Head->Cy);
+    ok(Head->Max >= 2 && Head->Max < 64, "room for %u images\n", Head->Max);
+    ok(Head->Flags & ILC_MASK, "flags %#x\n", Head->Flags);
+    if (Head->Version != 0x620 || Head->Max < 2 || Head->Max >= 64)
+        goto done;
+    Rows = Head->Max * IMAGE_SIZE;
+
+    Image = (const BITMAPINFOHEADER *)(Data + sizeof(STREAMHEAD) + sizeof(BITMAPFILEHEADER));
+    ImageSize = IMAGE_SIZE * 4 * Rows;
+    ok(Image->biSize == sizeof(*Image) && Image->biWidth == IMAGE_SIZE && Image->biHeight == (LONG)Rows && Image->biPlanes == 1 &&
+       Image->biBitCount == 32 && Image->biCompression == BI_RGB, "image DIB %ld x %ld, %u bits\n", Image->biWidth, Image->biHeight, Image->biBitCount);
+    ok(Image->biSizeImage == ImageSize, "image size %lu, expected %lu\n", Image->biSizeImage, ImageSize);
+    Offset = sizeof(STREAMHEAD) + sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    Bits = Data + Offset;
+    Offset += ImageSize;
+
+    if (Offset + sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) > Size)
+        goto done;
+    Mask = (const BITMAPINFOHEADER *)(Data + Offset + sizeof(BITMAPFILEHEADER));
+    MaskSize = 4 * Rows;
+    ok(Mask->biWidth == IMAGE_SIZE && Mask->biHeight == (LONG)Rows && Mask->biBitCount == 1, "mask DIB %ld x %ld, %u bits\n",
+       Mask->biWidth, Mask->biHeight, Mask->biBitCount);
+    ok(Mask->biSizeImage == MaskSize, "mask size %lu, expected %lu\n", Mask->biSizeImage, MaskSize);
+    Offset += sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + 2 * sizeof(RGBQUAD);
+    MaskBits = Data + Offset;
+    Offset += MaskSize;
+
+    ok(Size == Offset + 5 * sizeof(DWORD) + 8 * Head->Cur, "the stream has %lu bytes, expected %lu\n", Size,
+       Offset + 5 * (ULONG)sizeof(DWORD) + 8 * Head->Cur);
+    if (Size >= Offset + 5 * sizeof(DWORD))
+    {
+        Trailer = (const DWORD *)(Data + Offset);
+        ok(Trailer[0] == 1 && Trailer[1] == 8 && Trailer[2] == Head->Cur && Trailer[3] == Head->Grow && Trailer[4] == 20 + 8 * Head->Cur,
+           "trailer %lu, %lu, %lu, %lu, %lu\n", Trailer[0], Trailer[1], Trailer[2], Trailer[3], Trailer[4]);
+    }
+
+    /* image 0 is at the top (the last rows of the bits): red; image 1 below it: green, hidden on the left half */
+    Row = Rows - 1 - 8;
+    ok(!memcmp(Bits + Row * IMAGE_SIZE * 4 + 8 * 4, Red, 3), "image 0 at (8, 8) is not red\n");
+    Row = Rows - 1 - (IMAGE_SIZE + 8);
+    ok(!memcmp(Bits + Row * IMAGE_SIZE * 4 + 12 * 4, Green, 3), "image 1 at (12, 8) is not green\n");
+    ok(!(MaskBits[Row * 4 + 1] & 0x08), "image 1 at (12, 8) is hidden\n");
+    ok(MaskBits[Row * 4] & 0x08, "image 1 at (4, 8) is not hidden\n");
+    Row = Rows - 1 - 8;
+    ok(!(MaskBits[Row * 4 + 1] & 0x08) && !(MaskBits[Row * 4] & 0x08), "image 0 at (4, 8) or (12, 8) is hidden\n");
+
+done:
+    HeapFree(GetProcessHeap(), 0, Data);
+}
+
+/* Lists of other sizes and depths, written with a flag of 0 and read back: the colour and the mask of each image */
+static void TestRoundTripSizes(PFN_ImageList_WriteEx pImageList_WriteEx)
+{
+    static const struct { INT Size; UINT Flags; } Lists[] =
+    {
+        { 8, ILC_COLOR32 | ILC_MASK }, { 16, ILC_COLOR24 | ILC_MASK }, { 32, ILC_COLOR32 | ILC_MASK },
+        { 32, ILC_COLOR32 }, { 20, ILC_COLOR32 | ILC_MASK }, { 24, ILC_COLOR24 },
+    };
+    ULONG n, Index;
+
+    for (n = 0; n < RTL_NUMBER_OF(Lists); n++)
+    {
+        HIMAGELIST List = ImageList_Create(Lists[n].Size, Lists[n].Size, Lists[n].Flags, 2, 2), Back;
+        IStream *Stream;
+        HDC Dc = GetDC(NULL);
+        HDC Memory = CreateCompatibleDC(Dc);
+        BOOL HasMask = Lists[n].Flags & ILC_MASK;
+
+        for (Index = 0; List && Index < 5; Index++)
+        {
+            HBITMAP Image = CreateCompatibleBitmap(Dc, Lists[n].Size, Lists[n].Size);
+            HBITMAP Mask = CreateBitmap(Lists[n].Size, Lists[n].Size, 1, 1, NULL);
+            HGDIOBJ Old = SelectObject(Memory, Image);
+            HBRUSH Brush = CreateSolidBrush(RGB(40 * Index + 10, 255 - 40 * Index, 30 * Index));
+            RECT Rect = { 0, 0, Lists[n].Size, Lists[n].Size };
+
+            FillRect(Memory, &Rect, Brush);
+            DeleteObject(Brush);
+            SelectObject(Memory, Mask);
+            FillRect(Memory, &Rect, GetStockObject(Index & 1 ? WHITE_BRUSH : BLACK_BRUSH));
+            SelectObject(Memory, Old);
+            ok(ImageList_Add(List, Image, HasMask ? Mask : NULL) == (INT)Index, "image %lu was not added\n", Index);
+            DeleteObject(Image);
+            DeleteObject(Mask);
+        }
+        DeleteDC(Memory);
+        ReleaseDC(NULL, Dc);
+        if (!List)
+        {
+            ok(0, "list %lu was not created\n", n);
+            continue;
+        }
+
+        ok(CreateStreamOnHGlobal(NULL, TRUE, &Stream) == S_OK, "no stream\n");
+        ok(pImageList_WriteEx(List, 0, Stream) == S_OK, "list %lu: not written\n", n);
+        {
+            LARGE_INTEGER Start = { { 0 } };
+
+            IStream_Seek(Stream, Start, STREAM_SEEK_SET, NULL);
+        }
+        Back = ImageList_Read(Stream);
+        ok(Back != NULL, "list %lu: does not read back\n", n);
+        if (Back)
+        {
+            INT Cx = 0, Cy = 0;
+
+            ok(ImageList_GetImageCount(Back) == 5, "list %lu: %d images\n", n, ImageList_GetImageCount(Back));
+            ok(ImageList_GetIconSize(Back, &Cx, &Cy) && Cx == Lists[n].Size && Cy == Lists[n].Size, "list %lu: size %d x %d\n", n, Cx, Cy);
+            for (Index = 0; Index < 5; Index++)
+            {
+                BYTE Got[3], Original[3];
+                INT Mid = Lists[n].Size / 2;
+
+                /* what the list holds is the reference: the colour depth may take the low bits off */
+                if (GetImagePixel(List, Index, 0, Mid, Mid, Original) && GetImagePixel(Back, Index, 0, Mid, Mid, Got))
+                    ok(!memcmp(Original, Got, 3), "list %lu image %lu: colour %02x%02x%02x, the original has %02x%02x%02x\n", n, Index,
+                       Got[0], Got[1], Got[2], Original[0], Original[1], Original[2]);
+                else
+                    ok(0, "list %lu image %lu: no pixel\n", n, Index);
+                if (HasMask && GetImagePixel(List, Index, 1, Mid, Mid, Original) && GetImagePixel(Back, Index, 1, Mid, Mid, Got))
+                    ok(!memcmp(Original, Got, 3), "list %lu image %lu: mask %02x, the original has %02x\n", n, Index, Got[0], Original[0]);
+            }
+            ImageList_Destroy(Back);
+        }
+        IStream_Release(Stream);
+        ImageList_Destroy(List);
+    }
+}
+
 /* Whatever the stream does with its writes, the list must not be reported as written when one of them fails. */
 static void TestFailingStream(PFN_ImageList_WriteEx pImageList_WriteEx, HIMAGELIST List, DWORD Flags)
 {
@@ -449,6 +622,8 @@ START_TEST(ImageListWriteEx)
             continue;
         hr = pImageList_WriteEx(List, Flags[i], Stream);
         ok(hr == S_OK, "flags %#lx: hr %#lx\n", Flags[i], hr);
+        if (Flags[i] == 0 && hr == S_OK)
+            CheckVistaStream(Stream);
         if (Flags[i] <= 1 && hr == S_OK)
         {
             IStream_Seek(Stream, Start, STREAM_SEEK_SET, NULL);
@@ -464,6 +639,8 @@ START_TEST(ImageListWriteEx)
         }
         IStream_Release(Stream);
     }
+
+    TestRoundTripSizes(pImageList_WriteEx);
 
     /* a stream that fails part of the way */
     TestFailingStream(pImageList_WriteEx, List, 0);
