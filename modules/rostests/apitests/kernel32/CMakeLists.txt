@@ -4,6 +4,8 @@ add_subdirectory(redirptest)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    Wow64ThreadApc.c
+    Wow64Threads.c
     Wow64Environment.c
     BindIoCompletionCallback.c
     CancelIoEx.c
@@ -135,3 +137,9 @@ list(APPEND MANIFEST_FILES
 foreach(item ${MANIFEST_FILES})
     add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/${item}")
 endforeach(item)
+
+spec2def(wow64_thread.dll wow64_thread.spec ADD_IMPORTLIB)
+add_library(wow64_thread MODULE wow64_thread.c ${CMAKE_CURRENT_BINARY_DIR}/wow64_thread.def)
+set_module_type(wow64_thread win32dll ENTRYPOINT DllMain 12)
+add_importlibs(wow64_thread kernel32)
+add_rostests_file(TARGET wow64_thread)
