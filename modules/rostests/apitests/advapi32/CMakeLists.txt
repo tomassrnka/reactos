@@ -6,6 +6,7 @@ list(APPEND SOURCE
     EncryptFile.c
     eventlog.c
     EventRegister.c
+    EventProvider.c
     Hash.c
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c

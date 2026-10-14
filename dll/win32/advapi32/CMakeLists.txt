@@ -18,6 +18,7 @@ list(APPEND SOURCE
     misc/dllmain.c
     misc/efs.c
     misc/evntrace.c
+    misc/evtprov.c
     misc/hwprofiles.c
     misc/logon.c
     misc/msi.c

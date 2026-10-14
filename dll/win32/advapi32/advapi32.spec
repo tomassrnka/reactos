@@ -236,6 +236,9 @@
 @ stdcall FileEncryptionStatusW(wstr ptr)
 @ stdcall FindFirstFreeAce(ptr ptr)
 @ stdcall -version=0x502 FlushTraceA(double str ptr) ntdll.EtwFlushTraceA
+@ stdcall -version=0x600+ EventActivityIdControl(long ptr)
+@ stdcall -version=0x602+ EventSetInformation(int64 long ptr long)
+@ stdcall -version=0x601+ EventWriteEx(int64 ptr int64 long ptr ptr long ptr)
 @ stdcall -version=0x600+ FlushTraceA(double str ptr) EtwFlushTraceA
 @ stdcall -version=0x502 FlushTraceW(double wstr ptr) ntdll.EtwFlushTraceW
 @ stdcall -version=0x600+ FlushTraceW(double wstr ptr) EtwFlushTraceW
