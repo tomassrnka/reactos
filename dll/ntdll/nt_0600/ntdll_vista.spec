@@ -17,9 +17,9 @@
 @ stdcall RtlAcquireSRWLockExclusive(ptr)
 @ stdcall RtlReleaseSRWLockExclusive(ptr)
 @ stdcall RtlTryAcquireSRWLockExclusive(ptr)
-@ stdcall RtlWaitOnAddress(ptr ptr long ptr)
-@ stdcall RtlWakeAddressAll(ptr)
-@ stdcall RtlWakeAddressSingle(ptr)
+@ stdcall RtlWaitOnAddress(ptr ptr long ptr) ntdll.RtlWaitOnAddress
+@ stdcall RtlWakeAddressAll(ptr) ntdll.RtlWakeAddressAll
+@ stdcall RtlWakeAddressSingle(ptr) ntdll.RtlWakeAddressSingle
 @ stdcall RtlRunOnceInitialize(ptr)
 @ stdcall RtlRunOnceBeginInitialize(ptr long ptr)
 @ stdcall RtlRunOnceComplete(ptr long ptr)
