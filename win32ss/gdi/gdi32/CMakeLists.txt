@@ -45,6 +45,16 @@ list(APPEND SOURCE
     objects/path.c
     include/precomp.h)
 
+if(NOT MSVC AND (ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64"))
+    list(APPEND SOURCE misc/w32klayout.c)
+    set(W32K_LAYOUT_SOURCE misc/w32klayout.c)
+    if(ARCH STREQUAL "i386")
+        list(APPEND SOURCE misc/w32klayout_wide.c)
+        list(APPEND W32K_LAYOUT_SOURCE misc/w32klayout_wide.c)
+    endif()
+    set_source_files_properties(${W32K_LAYOUT_SOURCE} PROPERTIES COMPILE_OPTIONS -fno-ident SKIP_PRECOMPILE_HEADERS ON)
+endif()
+
 add_library(gdi32 MODULE
     ${SOURCE}
     gdi32.rc
