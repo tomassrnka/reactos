@@ -25,7 +25,7 @@ endfunction()
 
 add_wow64_apitest(kernel32
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
-    IsDBCSLeadByteEx lstrlen)
+    IsDBCSLeadByteEx lstrlen Wow64Environment)
 add_wow64_apitest(ntdll
     NtOpenKey NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString)

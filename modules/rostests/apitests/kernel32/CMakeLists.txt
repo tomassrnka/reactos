@@ -4,6 +4,7 @@ add_subdirectory(redirptest)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    Wow64Environment.c
     BindIoCompletionCallback.c
     CancelIoEx.c
     ConsoleCP.c

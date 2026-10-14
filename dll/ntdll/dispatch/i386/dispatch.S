@@ -29,6 +29,19 @@ _CsrWow64Call@8:
     call dword ptr fs:[HEX(c0)]
     ret 8
 
+/* Private user-mode WoW64 services, sharing the NT argument-list ABI. */
+PUBLIC _RtlpWow64GetNativeSystemInformation@16
+_RtlpWow64GetNativeSystemInformation@16:
+    mov eax, HEX(10001)
+    call dword ptr fs:[HEX(c0)]
+    ret 16
+
+PUBLIC _RtlpWow64EnableFsRedirectionEx@8
+_RtlpWow64EnableFsRedirectionEx@8:
+    mov eax, HEX(10002)
+    call dword ptr fs:[HEX(c0)]
+    ret 8
+
 PUBLIC _LdrInitializeThunk@16
 _LdrInitializeThunk@16:
 

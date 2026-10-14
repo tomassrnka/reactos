@@ -200,6 +200,8 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
 
     /* Thread creation and APC delivery need their own context conversion. */
     if (Peb32->Ldr) { Status = STATUS_NOT_SUPPORTED; goto Failed; }
+    Status = Wow64InitializeRedirection();
+    if (!NT_SUCCESS(Status)) goto Failed;
     Status = InitializePeb(Peb32);
     if (!NT_SUCCESS(Status)) goto Failed;
     Status = MapNtdll(&Ntdll32);
