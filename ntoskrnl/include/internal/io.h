@@ -9,8 +9,13 @@
 #include "ntdddisk.h"
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-/* Captured only by the explicit WoW64 read/write entry ABI. Never inferred
- * from an IOSB's contents or an arbitrary native user pointer. */
+/* Private I/O-manager IRP flag (opt-in amd64 ABI): UserIosb addresses an
+ * eight-byte IO_STATUS_BLOCK32. Captured only by the explicit WoW64 read/write
+ * entry ABI, never inferred from IOSB contents or a native user pointer.
+ * Drivers must preserve this bit when updating Flags or forwarding the IRP;
+ * clearing it changes completion to a native, sixteen-byte UserIosb store.
+ * Do not copy it to a newly allocated IRP with a different UserIosb layout.
+ * Tail.Overlay.DriverContext is driver-owned and cannot retain this tag. */
 #define IRP_WOW64_IO_STATUS 0x80000000
 #endif
 

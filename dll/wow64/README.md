@@ -72,15 +72,32 @@ implementation was copied into these DLLs.
 Thread creation captures the guest context and allocates a separate native
 translation stack. The native thread starts suspended with a startup marker;
 TEB32 and its guest stack bounds are installed before the creator can resume it.
+The native loader identifies its process initializer explicitly. Guest secondary
+threads wait for a release/acquire publication of the complete WoW64 process
+state; native helpers return without entering guest initialization.
 The native loader recognizes this marker and enters the existing i386 loader
 for TLS setup and DLL_THREAD_ATTACH. Guest ExitThread performs DLL_THREAD_DETACH
 and FLS cleanup, and kernel thread rundown releases both stacks. Stack guard
 faults update the TEB for the stack that faulted. Unmarked native helper threads
 retain native startup.
 
+Forced thread termination still releases both stacks. Matching native i386's
+retained stack requires changing post-creation failure cleanup ownership as
+well; otherwise those paths leak the allocations they currently leave to
+thread rundown. That compatibility change remains open.
+
 Guest Get/SetThreadContext and the opt-in Wow64Get/SetThreadContext exports use
 an access-checked kernel APC. It selects the compatibility-mode trap context,
 saved translation state, or a suspended thread's captured startup context.
+During either mode transition the saved state is not authoritative: requests
+return STATUS_RETRY without changing the output or the target. A controller
+must resume a suspended thread before retrying. The transition flag remains
+set across IRET, guest execution and the entire next entry, and is cleared only
+after all saves are complete in the translator. Direct guest NtContinue paths
+also set it. Integer changes accepted inside a translator preserve the changed
+EAX when the system service completes; an unchanged EAX round trip preserves
+the actual service result. APC frame cloning and restoration remain marked
+until the authoritative frame has been published in TLS.
 The trap helpers capture and restore x87 state only for the current guest
 thread, without changing the creator's FPU when initializing a new thread.
 Guest NtCreateThreadEx accepts suspended creation and client-ID/TEB output
@@ -93,7 +110,11 @@ native dispatcher builds an i386 APC frame and enters a nested CPU frame; its
 NtContinue resumes the interrupted native call before returning to the guest.
 Read/write I/O marks an IOSB32 pointer explicitly, and the kernel records that
 layout in the IRP. Completion publishes the eight-byte status block before an
-event or APC becomes visible. Filesystem redirection state remains per thread,
+event or APC becomes visible. IRP_WOW64_IO_STATUS reserves Flags bit 31 in
+opt-in amd64 builds; drivers forwarding an IRP must preserve it and must not
+copy it onto an IRP with a different UserIosb layout. Encoded guest APCs on a
+native-only thread are dropped, since that thread has no guest CPU state.
+Filesystem redirection state remains per thread,
 including across nested APCs.
 Completion-port thunks translate packet keys, contexts and IOSB32 results.
 
@@ -113,7 +134,9 @@ separate from the focused fixtures:
 
 * win32k callbacks and GUI services are not implemented. The complete ntdll
   exception winetest imports user32 and exercises GUI callbacks.
-* The initial guest stack and native translation stacks use fixed allocations.
+* The initial guest stack uses a fixed allocation. Each secondary native stack
+  reserves 1 MB but initially commits 64 KB including a guard page, with native
+  stack growth. Reservations still consume the process's low address space.
   Secondary guest stacks can grow within the supplied reservation. Complete
   debugger and floating-point context compatibility still needs validation.
   The only CPU backend is amd64/i386.
@@ -134,3 +157,10 @@ separate from the focused fixtures:
 
 The feature requires independent review before integration. Runtime test
 results and build/image provenance belong in the accompanying handoff.
+
+`Wow64ReviewThreads` adds native helper exits during guest allocation churn and
+an encoded-APC check on a native-only helper. `phase3a_review.py` under the
+WoW64 apitests instruments disposable builds for deterministic startup and
+instruction-boundary context schedules and observes stack release calls. The
+same probes apply to the reviewed and fixed sources. Published binaries and
+the ordinary pass-bar runs must be rebuilt without these probes.
