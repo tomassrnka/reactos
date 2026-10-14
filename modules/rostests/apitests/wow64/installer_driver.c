@@ -150,8 +150,7 @@ static DWORD DebugProcess(PROCESS_INFORMATION *Process)
                                   Text, Length, &Read))
             {
                 Text[Read] = 0;
-                if (!strncmp(Text, "DASH", 4) || !strncmp(Text, "R3 EXCEPTION", 12))
-                    printf("DEBUG PRINT %s\n", Text);
+                printf("DEBUG PRINT %s\n", Text);
             }
         }
         else if (Event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT)

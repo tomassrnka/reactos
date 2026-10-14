@@ -78,6 +78,9 @@ SysWOW64/cryptui.dll
 SysWOW64/urlmon.dll
 SysWOW64/winspool.drv
 SysWOW64/ws2_32.dll
+SysWOW64/wsock32.dll
+SysWOW64/msafd.dll
+SysWOW64/rasadhlp.dll
 SysWOW64/ws2help.dll
 SysWOW64/mswsock.dll
 SysWOW64/dnsapi.dll
@@ -104,6 +107,7 @@ SysWOW64/libjpeg.dll
 SysWOW64/libpng.dll
 SysWOW64/libtiff.dll
 SysWOW64/advpack.dll
+SysWOW64/ktmw32.dll
 SysWOW64/browseui.dll
 SysWOW64/devmgr.dll
 SysWOW64/fmifs.dll

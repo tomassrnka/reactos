@@ -1,5 +1,6 @@
 /* NT services used by installer loader and administrator checks. */
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <windows.h>
 #include <winioctl.h>
 #include <mountmgr.h>
@@ -151,6 +152,62 @@ static void CheckTokenObjectLabel(void)
         }
     }
     CloseHandle(Token);
+}
+
+static void CheckApplicationLibraries(void)
+{
+    typedef int (WINAPI *STARTUP)(WORD, LPWSADATA);
+    typedef int (WINAPI *CLEANUP)(void);
+    typedef HANDLE (WINAPI *CREATE)(LPSECURITY_ATTRIBUTES, GUID *, DWORD, DWORD, DWORD, DWORD, PWSTR);
+    typedef BOOL (WINAPI *FINISH)(HANDLE);
+    const WCHAR *Names[] = {L"wsock32.dll", L"msafd.dll", L"rasadhlp.dll", L"ktmw32.dll"};
+    HMODULE Modules[4];
+    STARTUP Startup;
+    CLEANUP Cleanup;
+    CREATE Create;
+    FINISH Commit, Rollback;
+    WSADATA Data = {0};
+    HANDLE Transaction;
+    unsigned i;
+
+    for (i = 0; i < 4; ++i)
+    {
+        Modules[i] = LoadLibraryW(Names[i]);
+        CHECK(Modules[i] != NULL);
+    }
+    Startup = (STARTUP)GetProcAddress(Modules[0], "WSAStartup");
+    Cleanup = (CLEANUP)GetProcAddress(Modules[0], "WSACleanup");
+    CHECK(Startup && Cleanup);
+    if (Startup && Cleanup)
+    {
+        CHECK(Startup(MAKEWORD(1, 1), &Data) == 0);
+        CHECK(Data.wVersion == MAKEWORD(1, 1));
+        CHECK(Cleanup() == 0);
+    }
+    Create = (CREATE)GetProcAddress(Modules[3], "CreateTransaction");
+    Commit = (FINISH)GetProcAddress(Modules[3], "CommitTransaction");
+    Rollback = (FINISH)GetProcAddress(Modules[3], "RollbackTransaction");
+    CHECK(Create && Commit && Rollback);
+    if (Create && Commit && Rollback)
+    {
+        for (i = 0; i < 2; ++i)
+        {
+            Transaction = Create(NULL, NULL, 0, 0, 0, 0, NULL);
+            if (Transaction == INVALID_HANDLE_VALUE)
+            {
+                CHECK(GetLastError() == ERROR_CALL_NOT_IMPLEMENTED);
+                CHECK(!(i ? Commit : Rollback)(Transaction));
+                CHECK(GetLastError() == ERROR_CALL_NOT_IMPLEMENTED);
+            }
+            else
+            {
+                CHECK((i ? Commit : Rollback)(Transaction));
+                CHECK(CloseHandle(Transaction));
+            }
+        }
+    }
+    for (i = 0; i < 4; ++i)
+        if (Modules[i]) FreeLibrary(Modules[i]);
 }
 
 static void CheckRuntimeReporting(void)
@@ -685,6 +742,7 @@ int wmain(int argc, WCHAR **argv)
     CheckInterruptTime();
     CheckPerformanceTime();
     CheckTokenObjectLabel();
+    CheckApplicationLibraries();
     CheckRuntimeReporting();
     CheckPrivileges();
     CheckObjectSecurity();
