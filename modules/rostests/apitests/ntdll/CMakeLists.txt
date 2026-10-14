@@ -112,6 +112,7 @@ list(APPEND SOURCE
     RtlAllocateHeap.c
     RtlBitmap.c
     RtlComputePrivatizedDllName_U.c
+    RtlConditionVariable.c
     RtlCopyMappedMemory.c
     RtlCriticalSection.c
     RtlDebugInformation.c
