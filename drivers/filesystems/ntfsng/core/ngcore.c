@@ -2180,13 +2180,24 @@ static int ngc_write_boot(struct ngc_vol *v, u64 sectors, u8 *buf)
 }
 
 /*
- * A change that may have reached the overlay failed half way: nothing more may be written, whatever
- * the error (ngc_writeback_failed retries out-of-space and out-of-memory, which must not happen here).
+ * A resize failed after it changed metadata in memory: nothing more may be written, whatever the
+ * error, so the core stops writing for good (ngc_writeback_failed would retry out-of-space and
+ * out-of-memory).  While the journal holds every metadata write, the disk still has the last
+ * committed state, as after a power cut, and mounts read-write again: the volume is not marked for
+ * repair.  Without the journal, or once it wrote in place or stopped, the disk may hold part of
+ * the change, and the volume is marked for repair.
  */
 static int ngc_resize_failed(struct ngc_vol *v, int err)
 {
-	printk(KERN_ERR "ngc: volume resize failed %d after changing metadata\n", err);
-	ngc_writeback_failed(v, -EIO);
+	if (kshim_jnl_in_place(v->bdev)) {
+		printk(KERN_ERR "ngc: volume resize failed %d; part of it may be on the disk\n", err);
+		ngc_writeback_failed(v, -EIO);
+		return err;
+	}
+	printk(KERN_ERR "ngc: volume resize failed %d; the disk keeps the last committed state, "
+	       "nothing is written until the next mount\n", err);
+	v->failed = 1;
+	v->sb->s_flags |= SB_RDONLY;
 	return err;
 }
 

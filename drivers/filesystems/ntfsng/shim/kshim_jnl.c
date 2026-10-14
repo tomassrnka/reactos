@@ -144,6 +144,12 @@ int kshim_jnl_failed(struct block_device *b)
 	return b->jnl && b->jnl->failed;
 }
 
+int kshim_jnl_in_place(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	return !j || j->degraded || j->failed;
+}
+
 /* A clean volume whose header is still on the medium: the flusher retires it (an earlier retire failed). */
 int kshim_jnl_retire_pending(struct block_device *b)
 {
