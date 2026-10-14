@@ -2,6 +2,7 @@ add_subdirectory(makeimg)
 
 list(APPEND SOURCE
     AttachThreadInput.c
+    AutoRotation.c
     ../include/msgtrace.c
     CharFuncs.c
     CloseWindow.c
@@ -31,6 +32,7 @@ list(APPEND SOURCE
     InitializeLpkHooks.c
     IsDialogMessage.c
     IsServerSideWindow.c
+    IsWindowArranged.c
     KbdLayout.c
     keybd_event.c
     LoadImage.c
@@ -55,6 +57,7 @@ list(APPEND SOURCE
     ScrollWindowEx.c
     SendMessageTimeout.c
     SetActiveWindow.c
+    SetCoalescableTimer.c
     SetCursorPos.c
     SetFocus.c
     SetParent.c
@@ -64,6 +67,7 @@ list(APPEND SOURCE
     SetWindowPlacement.c
     ShowWindow.c
     SwitchDesktop.c
+    SuspendResumeNotification.c
     SwitchToThisWindow.c
     SystemMenu.c
     SystemParametersInfo.c
