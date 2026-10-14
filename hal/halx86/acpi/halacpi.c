@@ -766,6 +766,21 @@ HalpAcpiTableCacheInit(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     return Status;
 }
 
+/* Returns the I/O port of the ACPI power management timer, or 0, and the mask of
+   its counter (24 or 32 bits) */
+ULONG
+NTAPI
+HalpGetAcpiTimerPort(
+    _Out_ PULONG Mask)
+{
+    ULONG Port = HalpFixedAcpiDescTable.pm_tmr_blk_io_port;
+
+    *Mask = (HalpFixedAcpiDescTable.flags & ACPI_TMR_VAL_EXT) ? 0xFFFFFFFF : 0x00FFFFFF;
+    if (!HalpProcessedACPIPhase0 || (HalpFixedAcpiDescTable.pm_tmr_len != 4) || (Port > 0xFFFC))
+        return 0;
+    return Port;
+}
+
 VOID
 NTAPI
 HaliAcpiTimerInit(IN ULONG TimerPort,
