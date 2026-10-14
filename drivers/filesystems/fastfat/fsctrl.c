@@ -4097,8 +4097,9 @@ Routine Description:
     FSCTL_EXTEND_VOLUME: grows the volume to the number of sectors in the
     input buffer, after the partition under it grew.  The FAT tables keep
     their size, so the volume grows as far as they can describe clusters
-    and the FAT type stays what it is (FAT12 below 4087 clusters, FAT16
-    below 65525); beyond that the request fails with STATUS_DISK_FULL and
+    and the FAT type stays what it is (at most 4078 FAT12, 65518 FAT16 and
+    0x0FFFFFEE FAT32 clusters, as the formatter writes them); beyond that
+    the request fails with STATUS_DISK_FULL and
     the FAT has to grow offline first.  The boot sector (and on FAT32 its
     backup and the FsInfo sector) is rewritten write-through, then the
     allocation package is set up again for the new cluster count.  The
@@ -4158,7 +4159,12 @@ Routine Description:
 
     _SEH2_TRY {
 
-        (VOID)FatAcquireExclusiveVcb( IrpContext, Vcb );
+        //
+        //  The Vcb and every Fcb: writes through open files allocate under their Fcb, and the
+        //  allocation package is replaced below.
+        //
+
+        FatAcquireExclusiveVolume( IrpContext, Vcb );
         VcbAcquired = TRUE;
 
         FatVerifyVcb( IrpContext, Vcb );
@@ -4223,7 +4229,11 @@ Routine Description:
         OldClusters = Vcb->AllocationSupport.NumberOfClusters;
         NewClusters = FatNumberOfClusters( &NewBpb );
         Describable = ((FatBytesPerFat( &Vcb->Bpb ) * 8) / Bits) - 2;
-        MaxClusters = Bits == 12 ? 4086 : (Bits == 16 ? 65524 : 0x0FFFFFF5);
+        //
+        //  As the formatter: no cluster number reaches the reserved values (0xFF0, 0xFFF0, 0x0FFFFFF0).
+        //
+
+        MaxClusters = Bits == 12 ? 4078 : (Bits == 16 ? 65518 : 0x0FFFFFEE);
 
         if (FatIndexBitSize( &NewBpb ) != Bits ||
             NewClusters > Describable ||
@@ -4360,8 +4370,28 @@ Routine Description:
         //  The allocation package for the new cluster count.
         //
 
+        //
+        //  The disk already holds the new size.  Should the allocation package not come back (no
+        //  memory, a read error), the mount is unusable: it fails every request until remounted.
+        //
+
         FatTearDownAllocationSupport( IrpContext, Vcb );
-        FatSetupAllocationSupport( IrpContext, Vcb );
+
+        _SEH2_TRY {
+
+            FatSetupAllocationSupport( IrpContext, Vcb );
+
+        } _SEH2_EXCEPT( EXCEPTION_EXECUTE_HANDLER ) {
+
+            FatSetVcbCondition( Vcb, VcbBad );
+            Status = _SEH2_GetExceptionCode();
+            IrpContext->ExceptionStatus = STATUS_SUCCESS;
+        } _SEH2_END;
+
+        if (!NT_SUCCESS( Status )) {
+
+            try_leave( NOTHING );
+        }
 
         //
         //  The FsInfo free count, which other systems read.
@@ -4404,7 +4434,7 @@ Routine Description:
 
         if (VcbAcquired) {
 
-            FatReleaseVcb( IrpContext, Vcb );
+            FatReleaseVolume( IrpContext, Vcb );
         }
 
         DebugTrace(-1, Dbg, "FatExtendVolume -> %08lx\n", Status);
