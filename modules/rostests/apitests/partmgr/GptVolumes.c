@@ -9,7 +9,12 @@
 #include <winioctl.h>
 #include <mountmgr.h>
 
-/* Read-only: it needs a GPT disk to be attached and skips otherwise */
+/* Read-only: it needs a GPT disk to be attached and skips otherwise. The drive letter and volume
+ * name checks apply only to the fixture disk (disk GUID FixtureDiskId), attached for the first time
+ * with automatic mounting on: a basic data partition, one with the no-drive-letter attribute, one
+ * with the hidden attribute, and the EFI system, Microsoft reserved and Windows recovery types. */
+static const GUID FixtureDiskId =
+    { 0x6a7b0c1d, 0x0000, 0x4000, { 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd1, 0x5c } };
 
 static const GUID BasicDataGuid =
     { 0xebd0a0a2, 0xb9e5, 0x4433, { 0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7 } };
@@ -148,7 +153,7 @@ static BOOL QueryMountPoints(PCWSTR DeviceName, const GUID *PartitionId, PULONG 
     return Ret;
 }
 
-static void TestPartition(ULONG DiskNumber, HANDLE Disk, PPARTITION_INFORMATION_EX Entry, PUCHAR Buffer)
+static void TestPartition(ULONG DiskNumber, HANDLE Disk, PPARTITION_INFORMATION_EX Entry, PUCHAR Buffer, BOOL Fixture)
 {
     const PARTITION_INFORMATION_GPT *Gpt = &Entry->Gpt;
     BOOL IsBasicData = IsEqualGUID(&Gpt->PartitionType, &BasicDataGuid);
@@ -169,14 +174,17 @@ static void TestPartition(ULONG DiskNumber, HANDLE Disk, PPARTITION_INFORMATION_
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status;
     WCHAR Mounted[MAX_PATH] = L"";
-    ULONG Letters, Guids;
+    ULONG Letters, Guids, NameLength;
     BOOL Listed, GuidIsPartitionId;
 
     Fs = ClassifyPartition(Disk, Entry->StartingOffset.QuadPart, Entry->PartitionLength.QuadPart, Buffer);
+    NameLength = 0;
+    while (NameLength < _countof(Gpt->Name) && Gpt->Name[NameLength])
+        NameLength++;
     trace("disk %lu partition %lu: offset 0x%I64x length 0x%I64x type %s attributes 0x%I64x name %s, on disk %s\n",
           DiskNumber, Entry->PartitionNumber, Entry->StartingOffset.QuadPart,
           Entry->PartitionLength.QuadPart, wine_dbgstr_guid(&Gpt->PartitionType),
-          Gpt->Attributes, wine_dbgstr_w(Gpt->Name), wine_dbgstr_w(FsName(Fs)));
+          Gpt->Attributes, wine_dbgstr_wn(Gpt->Name, NameLength), wine_dbgstr_w(FsName(Fs)));
 
     _snwprintf(Path, _countof(Path), L"\\\\.\\GLOBALROOT\\Device\\Harddisk%lu\\Partition%lu", DiskNumber, Entry->PartitionNumber);
 
@@ -202,7 +210,11 @@ static void TestPartition(ULONG DiskNumber, HANDLE Disk, PPARTITION_INFORMATION_
     trace("    mount manager: %s, %lu drive letter(s) %c, %lu volume name(s)%s\n",
           Listed ? "listed" : "not listed", Letters, Letter ? (char)Letter : '-', Guids,
           GuidIsPartitionId ? ", one is the partition GUID" : "");
-    if ((IsBasicData && Hidden) || IsSystemPartitionType(&Gpt->PartitionType))
+    if (!Fixture)
+    {
+        /* Earlier assignments and settings decide the names of other disks */
+    }
+    else if ((IsBasicData && Hidden) || IsSystemPartitionType(&Gpt->PartitionType))
     {
         ok(Letters == 0, "partition %lu: hidden or system partition, but drive letter %c\n",
            Entry->PartitionNumber, (char)Letter);
@@ -331,7 +343,8 @@ START_TEST(GptVolumes)
         {
             if (Layout->PartitionEntry[i].PartitionNumber == 0)
                 continue;
-            TestPartition(DiskNumber, Disk, &Layout->PartitionEntry[i], Buffer);
+            TestPartition(DiskNumber, Disk, &Layout->PartitionEntry[i], Buffer,
+                          IsEqualGUID(&Layout->Gpt.DiskId, &FixtureDiskId));
         }
         CloseHandle(Disk);
     }
