@@ -39,6 +39,13 @@ function(syswow64_guest_begin)
     set(_wanted "")
     foreach(_line ${_lines})
         string(STRIP "${_line}" _line)
+        # "@0x600 <file>" is only part of the list at that export level and later
+        if(_line MATCHES "^@(0x[0-9A-Fa-f]+)[ \t]+(.+)$")
+            if(DLL_EXPORT_VERSION LESS ${CMAKE_MATCH_1})
+                continue()
+            endif()
+            set(_line "${CMAKE_MATCH_2}")
+        endif()
         string(TOLOWER "${_line}" _line)
         list(APPEND _wanted "${_line}")
     endforeach()
@@ -182,6 +189,7 @@ function(setup_syswow64)
         COMMAND ${CMAKE_COMMAND}
             -D MANIFEST=${_manifest}
             -D LIST=${SYSWOW64_LIST}
+            -D DLL_EXPORT_VERSION=${DLL_EXPORT_VERSION}
             -D OUT=${_out}
             -D LIVECD_IN=${_boot}/livecd.${_cfg}.lst
             -D LIVECD_OUT=${_out}/livecd.${_cfg}.lst
