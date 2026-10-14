@@ -10,7 +10,7 @@
 #define REACTOS_STR_ORIGINAL_FILENAME "diskmgmt.exe"
 #include <reactos/version.rc>
 
-#include <reactos/manifest_exe.rc>
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "res/diskmgmt.exe.manifest"
 
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 
