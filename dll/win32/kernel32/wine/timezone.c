@@ -773,7 +773,7 @@ GetTimeZoneInformationForYear(
     /* A short value fills the start of the structure, the rest stays zero */
     Status = NtQueryValueKey(Key, &ValueName, KeyValuePartialInformation, &Info, sizeof(Info), &Length);
     NtClose(Key);
-    if (!NT_SUCCESS(Status) || Info.Partial.Type != REG_BINARY)
+    if (!NT_SUCCESS(Status) || Info.Partial.Type != REG_BINARY || Info.Partial.DataLength > sizeof(Tzi))
         return TRUE;
 
     RtlZeroMemory(&Tzi, sizeof(Tzi));
