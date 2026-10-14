@@ -2137,11 +2137,6 @@ WSPConnect(SOCKET Handle,
         return SOCKET_ERROR;
     }
 
-    /* A connect that starts on a socket that is not connected supersedes a
-     * ConnectEx that failed or was cancelled; nothing else reports that */
-    if (Socket->SharedData->State != SocketConnected)
-        Socket->ConnectExPending = FALSE;
-
     /* Bind us First */
     if (Socket->SharedData->State == SocketOpen)
     {
@@ -2292,6 +2287,12 @@ WSPConnect(SOCKET Handle,
                                    connectionInfoSize,
                                    NULL,
                                    0);
+
+    /* A connect that AFD took up supersedes a ConnectEx that failed or was
+     * cancelled, which nothing else reports; a rejected one changes nothing */
+    if (NT_SUCCESS(Status))
+        Socket->ConnectExPending = FALSE;
+
     if (Socket->SharedData->NonBlocking)
     {
         if (Status == STATUS_PENDING)
@@ -2485,7 +2486,8 @@ WSPConnectEx(
     SetLastError(TranslateNtStatusError(Status));
 
     /* Only SO_UPDATE_CONNECT_CONTEXT re-arms the asynchronous events */
-    Socket->ConnectExPending = NT_SUCCESS(Status);
+    if (NT_SUCCESS(Status))
+        Socket->ConnectExPending = TRUE;
 
     return Status == STATUS_SUCCESS;
 }

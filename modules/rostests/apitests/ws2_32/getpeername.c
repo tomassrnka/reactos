@@ -480,7 +480,7 @@ static void CheckConnectTime(SOCKET Socket, const char *What)
     ok(Seconds != 0xFFFFFFFF && Seconds < 30, "%s: SO_CONNECT_TIME is %lu\n", What, Seconds);
 }
 
-static SOCKET Listener(PUSHORT Port, const char *What)
+static SOCKET Listener(PUSHORT Port, int Backlog, BOOL Conditional, const char *What)
 {
     SOCKET Server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     SOCKADDR_IN Address;
@@ -493,7 +493,18 @@ static SOCKET Listener(PUSHORT Port, const char *What)
     Address.sin_family = AF_INET;
     Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     ok(bind(Server, (struct sockaddr *)&Address, sizeof(Address)) == 0, "%s: bind failed: %d\n", What, WSAGetLastError());
-    ok(listen(Server, 4) == 0, "%s: listen failed: %d\n", What, WSAGetLastError());
+    if (Conditional)
+    {
+        BOOL On = TRUE;
+
+        if (setsockopt(Server, SOL_SOCKET, SO_CONDITIONAL_ACCEPT, (const char *)&On, sizeof(On)) != 0)
+        {
+            skip("%s: SO_CONDITIONAL_ACCEPT failed: %d\n", What, WSAGetLastError());
+            closesocket(Server);
+            return INVALID_SOCKET;
+        }
+    }
+    ok(listen(Server, Backlog) == 0, "%s: listen failed: %d\n", What, WSAGetLastError());
     ok(getsockname(Server, (struct sockaddr *)&Address, &Length) == 0, "%s: getsockname failed: %d\n", What, WSAGetLastError());
     *Port = ntohs(Address.sin_port);
     return Server;
@@ -533,7 +544,7 @@ static void Test_UpdateAfterConnect(BOOL Adopt, const char *What)
 
     Window = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
     ok(Window != NULL, "%s: CreateWindowEx failed: %lu\n", What, GetLastError());
-    Server = Listener(&ServerPort, What);
+    Server = Listener(&ServerPort, 4, FALSE, What);
     if (!Window || Server == INVALID_SOCKET)
         goto Cleanup;
 
@@ -633,7 +644,7 @@ static void ConnectExAsyncSelect(BOOL PeerFirst, PULONG Connects, const char *Wh
 
     Window = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
     ok(Window != NULL, "%s: CreateWindowEx failed: %lu\n", What, GetLastError());
-    Server = Listener(&ServerPort, What);
+    Server = Listener(&ServerPort, 4, FALSE, What);
     if (!Window || Server == INVALID_SOCKET)
         goto Cleanup;
 
@@ -729,8 +740,8 @@ static void Test_UpdateAfterFailedConnectEx(void)
 
     Window = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
     ok(Window != NULL, "%s: CreateWindowEx failed: %lu\n", What, GetLastError());
-    Server = Listener(&ServerPort, What);
-    Dead = Listener(&DeadPort, What);
+    Server = Listener(&ServerPort, 4, FALSE, What);
+    Dead = Listener(&DeadPort, 4, FALSE, What);
     if (!Window || Server == INVALID_SOCKET || Dead == INVALID_SOCKET)
         goto Cleanup;
     /* Nothing listens on this port any more */
@@ -799,6 +810,128 @@ Cleanup:
         DestroyWindow(Window);
 }
 
+static int CALLBACK AcceptAll(LPWSABUF CallerId, LPWSABUF CallerData, LPQOS SQos, LPQOS GQos, LPWSABUF CalleeId, LPWSABUF CalleeData, GROUP *Group, DWORD_PTR Context)
+{
+    return CF_ACCEPT;
+}
+
+/* ConnectEx pending on a listener that holds the connection back (conditional accept), then (TryConnect)
+ * connect() on the same socket: the connect is refused with Error and the
+ * ConnectEx goes on. When it completes, the FD_CONNECT messages must be the
+ * same as without the refused connect */
+static void PendingConnectEx(BOOL TryConnect, PULONG Connects, PINT Error, const char *What)
+{
+    GUID Guid = WSAID_CONNECTEX;
+    LPFN_CONNECTEX pConnectEx = NULL;
+    SOCKET Server, Client = INVALID_SOCKET;
+    SOCKADDR_IN Address;
+    OVERLAPPED Overlapped;
+    HWND Window;
+    DWORD Bytes = 0, Start;
+    USHORT ServerPort;
+    int Length, Result;
+
+    Overlapped.hEvent = NULL;
+    *Connects = (ULONG)-1;
+    *Error = 0;
+    Window = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
+    ok(Window != NULL, "%s: CreateWindowEx failed: %lu\n", What, GetLastError());
+    Server = Listener(&ServerPort, 4, TRUE, What);
+    if (!Window || Server == INVALID_SOCKET)
+        goto Cleanup;
+
+    Client = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    ok(Client != INVALID_SOCKET, "%s: WSASocket failed: %d\n", What, WSAGetLastError());
+    if (Client == INVALID_SOCKET)
+        goto Cleanup;
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ok(bind(Client, (struct sockaddr *)&Address, sizeof(Address)) == 0, "%s: bind failed: %d\n", What, WSAGetLastError());
+    Result = WSAIoctl(Client, SIO_GET_EXTENSION_FUNCTION_POINTER, &Guid, sizeof(Guid), &pConnectEx, sizeof(pConnectEx), &Bytes, NULL, NULL);
+    ok(Result == 0, "%s: getting ConnectEx failed: %d\n", What, WSAGetLastError());
+    if (Result != 0)
+        goto Cleanup;
+
+    ConnectMessages = ConnectErrors = 0;
+    ok(WSAAsyncSelect(Client, Window, WM_SOCKET, FD_CONNECT) == 0, "%s: WSAAsyncSelect failed: %d\n", What, WSAGetLastError());
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = WSACreateEvent();
+    Address.sin_port = htons(ServerPort);
+    Result = pConnectEx(Client, (struct sockaddr *)&Address, sizeof(Address), NULL, 0, NULL, &Overlapped);
+    ok(Result || WSAGetLastError() == ERROR_IO_PENDING, "%s: ConnectEx returned %d, error %d\n", What, Result, WSAGetLastError());
+    if (WSAWaitForMultipleEvents(1, &Overlapped.hEvent, FALSE, 1500, FALSE) == WSA_WAIT_EVENT_0)
+    {
+        skip("%s: the ConnectEx did not stay pending\n", What);
+        goto Cleanup;
+    }
+
+    if (TryConnect)
+    {
+        Result = connect(Client, (struct sockaddr *)&Address, sizeof(Address));
+        *Error = Result == 0 ? 0 : WSAGetLastError();
+        trace("%s: connect during the ConnectEx returned %d, error %d\n", What, Result, *Error);
+    }
+
+    /* Let the ConnectEx finish: take every connection off the listener */
+    Start = GetTickCount();
+    while (WSAWaitForMultipleEvents(1, &Overlapped.hEvent, FALSE, 0, FALSE) != WSA_WAIT_EVENT_0 && GetTickCount() - Start < 40000)
+    {
+        fd_set Read;
+        struct timeval Timeout = { 1, 0 };
+
+        FD_ZERO(&Read);
+        FD_SET(Server, &Read);
+        if (select(0, &Read, NULL, NULL, &Timeout) == 1)
+        {
+            SOCKET Accepted = WSAAccept(Server, NULL, NULL, AcceptAll, 0);
+
+            if (Accepted != INVALID_SOCKET)
+                closesocket(Accepted);
+        }
+    }
+    if (!WaitForConnectEx(Client, &Overlapped, 0, What))
+    {
+        skip("%s: the pending ConnectEx did not finish: %d\n", What, WSAGetLastError());
+        goto Cleanup;
+    }
+    Length = sizeof(Address);
+    getpeername(Client, (struct sockaddr *)&Address, &Length);
+    ok(setsockopt(Client, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0) == 0, "%s: SO_UPDATE_CONNECT_CONTEXT failed: %d\n", What, WSAGetLastError());
+    Length = sizeof(Address);
+    ok(getpeername(Client, (struct sockaddr *)&Address, &Length) == 0, "%s: getpeername after the update failed: %d\n", What, WSAGetLastError());
+    PumpMessages(1500, 0);
+    *Connects = ConnectMessages;
+    trace("%s: %lu FD_CONNECT messages\n", What, ConnectMessages);
+    WSAAsyncSelect(Client, Window, 0, 0);
+
+Cleanup:
+    if (Overlapped.hEvent)
+        WSACloseEvent(Overlapped.hEvent);
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Server != INVALID_SOCKET)
+        closesocket(Server);
+    if (Window)
+        DestroyWindow(Window);
+}
+
+/* A connect() on a socket with a ConnectEx in flight is refused and must not
+ * take the ConnectEx's mark: the update still re-arms what it re-armed
+ * without that connect() */
+static void Test_ConnectDuringConnectEx(void)
+{
+    ULONG Connects[2];
+    int Error[2];
+
+    PendingConnectEx(FALSE, &Connects[0], &Error[0], "ConnectEx pending");
+    PendingConnectEx(TRUE, &Connects[1], &Error[1], "ConnectEx pending, connect refused");
+    if (Connects[0] != (ULONG)-1 && Connects[1] != (ULONG)-1)
+        ok(Connects[0] == Connects[1], "FD_CONNECT messages: %lu without, %lu with a connect during the ConnectEx\n", Connects[0], Connects[1]);
+    if (Connects[1] != (ULONG)-1)
+        ok(Error[1] == WSAEINVAL, "connect during a pending ConnectEx: error %d, expected %d\n", Error[1], WSAEINVAL);
+}
+
 START_TEST(getpeername)
 {
     WSADATA WsaData;
@@ -821,6 +954,7 @@ START_TEST(getpeername)
     Test_UpdateAfterConnect(TRUE, "update after getpeername");
     Test_ConnectExAsyncSelect();
     Test_UpdateAfterFailedConnectEx();
+    Test_ConnectDuringConnectEx();
 
     WSACleanup();
 }
