@@ -300,6 +300,21 @@ static const CONTRACT_DATA g_Data[] =
     },
     {
         "shcore.dll",
+        "api-ms-win-shcore-obsolete-l1-1-0.dll\0",
+        "CommandLineToArgvW\0SHStrDupA\0SHStrDupW\0"
+    },
+    {
+        "shcore.dll",
+        "api-ms-win-shcore-stream-winrt-l1-1-0.dll\0",
+        "CreateRandomAccessStreamOnFile\0CreateRandomAccessStreamOverStream\0CreateStreamOverRandomAccessStream\0"
+    },
+    {
+        "shcore.dll",
+        "api-ms-win-shcore-sysinfo-l1-1-0.dll\0",
+        "GetCurrentProcessExplicitAppUserModelID\0IsOS\0SetCurrentProcessExplicitAppUserModelID\0"
+    },
+    {
+        "shcore.dll",
         "api-ms-win-shcore-scaling-l1-1-0.dll\0api-ms-win-shcore-scaling-l1-1-1.dll\0api-ms-win-shcore-scaling-l1-1-2.dll\0",
         "GetDpiForMonitor\0GetProcessDpiAwareness\0GetScaleFactorForDevice\0GetScaleFactorForMonitor\0"
         "RegisterScaleChangeEvent\0RegisterScaleChangeNotifications\0RevokeScaleChangeNotifications\0"
@@ -378,12 +393,76 @@ test_contract(const CONTRACT_DATA *Data)
     FreeLibrary(Home);
 }
 
+/*
+ * Windows 10 hosts every contract of the shcore family in shcore.dll (measured with LoadLibrary and GetModuleFileName on
+ * Windows 10 22H2, x64 and WOW64). The contracts below have functions in ReactOS shcore, so they go there too. The
+ * families path and taskpool are not listed: no ReactOS module exports their functions by the names Windows 10 shcore
+ * uses (shlwapi has the path functions, shcore has only ordinal stubs).
+ */
+static const char *const g_ShcoreHosted[] =
+{
+    "api-ms-win-shcore-comhelpers-l1-1-0.dll",
+    "api-ms-win-shcore-obsolete-l1-1-0.dll",
+    "api-ms-win-shcore-scaling-l1-1-0.dll",
+    "api-ms-win-shcore-scaling-l1-1-1.dll",
+    "api-ms-win-shcore-scaling-l1-1-2.dll",
+    "api-ms-win-shcore-stream-winrt-l1-1-0.dll",
+    "api-ms-win-shcore-sysinfo-l1-1-0.dll",
+    "api-ms-win-shcore-thread-l1-1-0.dll",
+};
+
+static BOOL
+is_windows_10_or_later(void)
+{
+    typedef LONG (WINAPI *FN_RtlGetVersion)(OSVERSIONINFOW *);
+    FN_RtlGetVersion pRtlGetVersion = (FN_RtlGetVersion)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlGetVersion");
+    OSVERSIONINFOW Info = { sizeof(Info) };
+
+    return pRtlGetVersion && pRtlGetVersion(&Info) == 0 && Info.dwMajorVersion >= 10;
+}
+
+static void
+test_shcore_hosts(void)
+{
+    size_t n;
+    HMODULE Shcore = LoadLibraryA("shcore.dll");
+
+    if (!Shcore)
+    {
+        skip("shcore.dll is not present\n");
+        return;
+    }
+
+    for (n = 0; n < RTL_NUMBER_OF(g_ShcoreHosted); ++n)
+    {
+        HMODULE Api = LoadLibraryA(g_ShcoreHosted[n]);
+
+        if (!Api)
+        {
+            if (is_reactos())
+                ok(0, "%s did not load: %lu\n", g_ShcoreHosted[n], GetLastError());
+            else
+                skip("%s is not present\n", g_ShcoreHosted[n]);
+            continue;
+        }
+
+        if (is_reactos() || is_windows_10_or_later())
+            ok(Api == Shcore, "%s is hosted in %p, not in shcore.dll (%p)\n", g_ShcoreHosted[n], (void *)Api, (void *)Shcore);
+        else
+            skip("%s: host not measured on this Windows\n", g_ShcoreHosted[n]);
+        FreeLibrary(Api);
+    }
+    FreeLibrary(Shcore);
+}
+
 START_TEST(contracts)
 {
     size_t n;
 
     for (n = 0; n < RTL_NUMBER_OF(g_Data); ++n)
         test_contract(&g_Data[n]);
+
+    test_shcore_hosts();
 
     trace("Checked %u functions\n", g_Checked);
 }
