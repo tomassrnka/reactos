@@ -922,14 +922,6 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
 {
     NTSTATUS Status;
     WOW64_CLEANUP Cleanup = {0};
-    static ULONG TraceCount;
-    BOOLEAN Trace = wcsstr(NtCurrentPeb()->ProcessParameters->ImagePathName.Buffer, L"\\dash.exe") != NULL &&
-        Number != W64_NtQueryDebugFilterState && TraceCount++ < 12000;
-    if (Trace) DbgPrint("REBASE ENTER pid=%p tid=%p svc=%lx args=%lx,%lx,%lx,%lx\n",
-                        NtCurrentTeb()->ClientId.UniqueProcess, NtCurrentTeb()->ClientId.UniqueThread,
-                        Number, Arguments[0], Arguments[1], Arguments[2], Arguments[3]);
-    if (Trace && Number == W64_NtQueryInformationFile)
-        DbgPrint("REBASE FILEINFO class=%lu\n", Arguments[4]);
     /* All pointer expansion occurs in user mode. Faulting captures become
      * NT errors; no untyped 32-bit argument list is sent to the kernel. */
     _SEH2_TRY
@@ -961,7 +953,6 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
             NtFreeVirtualMemory(Cleanup.Process, &Cleanup.Base, &Size, MEM_RELEASE);
         }
     }
-    if (Trace) DbgPrint("REBASE LEAVE tid=%p svc=%lx status=%lx\n", NtCurrentTeb()->ClientId.UniqueThread, Number, Status);
     if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState &&
         !(Number >= 0x1000 && Number < 0x2000))
         DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);

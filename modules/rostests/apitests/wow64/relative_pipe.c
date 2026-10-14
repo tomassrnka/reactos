@@ -30,6 +30,7 @@ int main(void)
     IsWow64Process(GetCurrentProcess(), &Wow);
     if (!Wow)
     {
+        /* Native ReactOS still has the NPFS relative-root assertion. */
         puts("RELATIVE PIPE skip: this regression targets the WoW64 path");
         return 0;
     }
@@ -60,6 +61,12 @@ int main(void)
         }
         CloseHandle(Server);
     }
+    /* A nonexistent relative name must retain ordinary lookup semantics. */
+    Name.Buffer = L"w643c-relative-missing";
+    Name.Length = wcslen(Name.Buffer) * sizeof(WCHAR); Name.MaximumLength = Name.Length + sizeof(WCHAR);
+    Client = NULL;
+    CHECK(Open(&Client, GENERIC_WRITE | SYNCHRONIZE, &Attributes, &Io, 0, 0x20) == (LONG)0xc0000034);
+    if (Client) CloseHandle(Client);
     CloseHandle(Root);
     printf("RELATIVE PIPE checks=%u failures=%u\n", Checks, Failures);
     return Failures ? 1 : 0;

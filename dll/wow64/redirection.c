@@ -86,6 +86,19 @@ NTSTATUS Wow64RedirectFile(OBJECT_ATTRIBUTES *Attributes, UNICODE_STRING *Name, 
         Status = ObjectName(Attributes->RootDirectory, &RootBuffer);
         if (!NT_SUCCESS(Status)) return Status;
         RootName = ((OBJECT_NAME_INFORMATION *)RootBuffer)->Name;
+        if (Path.Buffer[0] != L'\\' && Prefix(&RootName, &PipeRoot))
+        {
+            struct { ULONG Length; WCHAR Name[4]; } FileName;
+            IO_STATUS_BLOCK Io;
+            /* NPFS includes structure padding in the object-name query's
+             * returned byte count. Use FileNameLength to recognize its root;
+             * bytes following that counted name are not part of the path. */
+            Status = NtQueryInformationFile(Attributes->RootDirectory, &Io,
+                                            &FileName, sizeof(FileName), FileNameInformation);
+            if (NT_SUCCESS(Status) && FileName.Length == sizeof(WCHAR) &&
+                FileName.Name[0] == L'\\')
+                RootName = PipeRoot;
+        }
         if (RootName.Length && RootName.Buffer[RootName.Length / sizeof(WCHAR) - 1] == L'\\')
             RootName.Length -= sizeof(WCHAR);
         PipeRelative = Path.Buffer[0] != L'\\' && RtlEqualUnicodeString(&RootName, &PipeRoot, TRUE);
