@@ -127,6 +127,9 @@ class Apiset:
         else:
             # Check to see if there is any dll we want to swap (kernelbase -> kernel32)
             replace = REDIRECT_HOSTS.get(host.lower(), None)
+            # combase exists and is the only module with the WinRT functions; keep it for those
+            if host.lower() == 'combase.dll' and '-winrt-' in name.lower():
+                replace = None
             if replace:
                 postfix = ' // ' + host
                 host = replace
