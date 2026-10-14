@@ -14,6 +14,7 @@ extern void func_close(void);
 extern void func_closerace(void);
 extern void func_connectex(void);
 extern void func_getaddrinfo(void);
+extern void func_GetHostNameW(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
 extern void func_getpeername(void);
@@ -50,6 +51,7 @@ const struct test winetest_testlist[] =
     { "closerace", func_closerace },
     { "connectex", func_connectex },
     { "getaddrinfo", func_getaddrinfo },
+    { "GetHostNameW", func_GetHostNameW },
     { "gethostname", func_gethostname },
     { "getnameinfo", func_getnameinfo },
     { "getpeername", func_getpeername },
