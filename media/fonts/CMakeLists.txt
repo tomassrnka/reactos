@@ -81,3 +81,9 @@ list(APPEND FONT_FILES
 foreach(item ${FONT_FILES})
     add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/${item}" DESTINATION reactos/Fonts FOR all)
 endforeach(item)
+
+# Licence texts of the open fonts added for script coverage; the OFL and the Apache licence require them to travel with the fonts
+foreach(item Selawik Carlito Caladea NotoSansCJK NotoSansSymbols2 NotoEmoji)
+    add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/doc/${item}/LICENSE.txt" DESTINATION reactos/3rdParty NAME_ON_CD "Font-${item}-LICENSE.txt" FOR all)
+endforeach(item)
+add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/doc/SOURCES.txt" DESTINATION reactos/3rdParty NAME_ON_CD "Fonts-SOURCES.txt" FOR all)

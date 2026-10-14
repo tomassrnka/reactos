@@ -2,7 +2,7 @@ Open fonts added for script coverage and Windows font-name compatibility.
 Every file is the unmodified upstream release file. sha256 is of the file as installed.
 Licences: OFL-1.1 = SIL Open Font License 1.1; Apache-2.0 = Apache License 2.0.
 
-Selawik 1.01 (Microsoft; OFL-1.1; metric-compatible with Segoe UI)
+Selawik 1.01 (Microsoft; OFL-1.1; designed as a Segoe UI fallback; it has no Segoe UI kerning, so widths match only roughly)
   Release: https://github.com/microsoft/Selawik/releases/tag/1.01, Selawik_Release.zip
   zip sha256 3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423
   e9d98518d8ac2817782a9a382430463a2e0793ea68350b695bb727d9a830ee1c  selawk.ttf
@@ -11,14 +11,14 @@ Selawik 1.01 (Microsoft; OFL-1.1; metric-compatible with Segoe UI)
   0a9e9d0549a10f24bef9b3a29e06fe6e0b5c21e7a784c503b048a307841a7783  selawksb.ttf
   8620960344f12093482cded984a1aafa5a57d24cbf7e9299da125ccf0e9d4102  selawksl.ttf
 
-Carlito 1.104 (Google/Lukasz Dziedzic; OFL-1.1; metric-compatible with Calibri)
+Carlito 1.104 (Google/Lukasz Dziedzic; OFL-1.1; advance widths follow Calibri, vertical metrics are documented to differ)
   Repository: https://github.com/googlefonts/carlito, commit 3a810cab78ebd6e2e4eed42af9e8453c4f9b850a, fonts/ttf
   f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595  Carlito-Regular.ttf
   bb5d20f79b82599ec72983597437373a80f2d2085fa91fc144fd74e876a594db  Carlito-Bold.ttf
   0b019225e58d702bfedcbd35c21696769f8ee115cb6343f84c2f240312450d1c  Carlito-Italic.ttf
   b32928186c119599e03ca6a1ffc680fdcb7fac95772f4b95d989cf6cd3861517  Carlito-BoldItalic.ttf
 
-Caladea 1.001 (Huerta Tipografica; OFL-1.1; metric-compatible with Cambria)
+Caladea 1.001 (Huerta Tipografica; OFL-1.1; advance widths follow Cambria)
   Repository: https://github.com/huertatipografica/Caladea, commit 336a529cfad3d103d6527752686f8331d13e820a, fonts/ttf
   f1e899278b7b4491aba5b6a8253c4b04c050cc59b21865be5c37559a775153cd  Caladea-Regular.ttf
   ae3cb2dcbc925809dd29d2a44e9802211cab66be541bacbfc9c08c74b27c3742  Caladea-Bold.ttf
@@ -28,6 +28,7 @@ Caladea 1.001 (Huerta Tipografica; OFL-1.1; metric-compatible with Cambria)
 Noto Sans CJK 2.004, Subset OTF, Regular weight only (Adobe/Google; OFL-1.1; Han, kana, Hangul)
   Release: https://github.com/notofonts/noto-cjk/releases/tag/Sans2.004, 05_NotoSansCJK-SubsetOTF.zip
   zip sha256 2b5462a1cb87ad0e9aec44b754246c4ae865acc05b20145ef11e0936740b8af9
+  Copyright 2014-2021 Adobe (http://www.adobe.com/), Reserved Font Name "Source" (font name table, id 0)
   SC: GB 2312, GBK, Big5, JIS X 0208 and kana in one file.  KR: Hangul syllables and KS X 1001 hanja.
   faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9  NotoSansSC-Regular.otf
   69975a0ac8472717870aefeab0a4d52739308d90856b9955313b2ad5e0148d68  NotoSansKR-Regular.otf
@@ -37,6 +38,6 @@ Noto Sans Symbols 2 2.008 (The Noto Project Authors; OFL-1.1)
   zip sha256 346c930bbe8eb946701a05c54e9c11a2094dee1d93c387bf1771c0a3e335688f
   c4a0a80f0041ce4be81e2478faad22776d23edb98ae3f0d19bd37044820ecf9d  NotoSansSymbols2-Regular.ttf
 
-Noto Emoji 1.05, monochrome (The Noto Project Authors; OFL-1.1)
+Noto Emoji 1.05, monochrome (Copyright 2013 Google Inc., font name table id 0; OFL-1.1)
   Tag: https://github.com/googlefonts/noto-emoji/tree/v2.034, fonts/NotoEmoji-Regular.ttf
   415dc6290378574135b64c808dc640c1df7531973290c4970c51fdeb849cb0c5  NotoEmoji-Regular.ttf

@@ -722,7 +722,7 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList","ProfilesDirecto
 ; Font substitutes
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes",,0x00000012
-; Windows UI and Office face names -> metric-compatible open fonts
+; Windows UI and Office face names -> open stand-ins (similar design, not identical metrics)
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI",0x00000000,"Selawik"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Light",0x00000000,"Selawik Light"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Semilight",0x00000000,"Selawik Semilight"
@@ -730,20 +730,15 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Se
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Symbol",0x00000000,"Noto Sans Symbols 2"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Emoji",0x00000000,"Noto Emoji"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Calibri",0x00000000,"Carlito"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Calibri Light",0x00000000,"Carlito"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Cambria",0x00000000,"Caladea"
 ; East Asian face names (Windows and common legacy names) -> Noto Sans SC / Noto Sans KR
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Batang",0x00000000,"Noto Sans KR"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","BatangChe",0x00000000,"Noto Sans KR"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","DLCMingBold",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","DLCMingMedium",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Dotum",0x00000000,"Noto Sans KR"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","DotumChe",0x00000000,"Noto Sans KR"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","FangSong",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Gulim",0x00000000,"Noto Sans KR"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","GulimChe",0x00000000,"Noto Sans KR"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Gungsuh",0x00000000,"Noto Sans KR"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","GungsuhChe",0x00000000,"Noto Sans KR"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","KaiTi",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Malgun Gothic",0x00000000,"Noto Sans KR"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Meiryo",0x00000000,"Noto Sans SC"
@@ -753,16 +748,11 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Microsoft J
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Microsoft YaHei",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Microsoft YaHei UI",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Ming Light",0x00000000,"Noto Sans SC"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MingLiU",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MingLiU_HKSCS",0x00000000,"Noto Sans SC"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS Gothic",0x00000000,"Noto Sans SC"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS Mincho",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS PGothic",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS PMincho",0x00000000,"Noto Sans SC"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS Song",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS UI Gothic",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS UI Gothic 2",0x00000000,"Noto Sans SC"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","NSimSun",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","PMingLiU",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","SimHei",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","SimSun",0x00000000,"Noto Sans SC"
@@ -946,6 +936,71 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","Fixedsy
 	"NotoEmoji-Regular.ttf,Noto Emoji",\
 	"freesans.ttf,FreeSans"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","Fixedsys Excelsior 3.01-L2",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+
+; FontLink (fixed-pitch East Asian names, not substituted)
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","MS Gothic",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","MS Mincho",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","NSimSun",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","GulimChe",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","DotumChe",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","BatangChe",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","GungsuhChe",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","MingLiU",0x00010000,\
+	"cour.ttf,Courier New",\
+	"NotoSansSC-Regular.otf,Noto Sans SC",\
+	"NotoSansKR-Regular.otf,Noto Sans KR",\
+	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
+	"NotoEmoji-Regular.ttf,Noto Emoji",\
+	"freesans.ttf,FreeSans"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","MS Song",0x00010000,\
 	"cour.ttf,Courier New",\
 	"NotoSansSC-Regular.otf,Noto Sans SC",\
 	"NotoSansKR-Regular.otf,Noto Sans KR",\
