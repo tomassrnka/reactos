@@ -6,6 +6,7 @@ list(APPEND SOURCE
     AddFontResource.c
     AddFontResourceEx.c
     BeginPath.c
+    BitBltCopy32.c
     CombineRgn.c
     CombineTransform.c
     CreateBitmap.c
