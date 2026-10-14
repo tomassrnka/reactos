@@ -24,6 +24,7 @@ list(APPEND SOURCE
     GUIDFromString.cpp
     LockServer.cpp
     Int64ToString.cpp
+    IApplicationAssociationRegistration.cpp
     IQueryAssociations.cpp
     IShellFolderViewCB.cpp
     ItemIDList.cpp
