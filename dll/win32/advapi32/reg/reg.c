@@ -918,7 +918,8 @@ RegConnectRegistryW(LPCWSTR lpMachineName,
  * Retrying the former with the latter's 32-bit selector would create a parent
  * in the wrong tree. Keep this list identical to the kernel's view policy. */
 static NTSTATUS
-GetSharedNestedKeyName(POBJECT_ATTRIBUTES Attributes, PUNICODE_STRING Name)
+GetSharedNestedKeyName(POBJECT_ATTRIBUTES Attributes, REGSAM DesiredAccess,
+                       PUNICODE_STRING Name)
 {
     static const UNICODE_STRING Software = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE");
     PKEY_NAME_INFORMATION RootName = NULL;
@@ -1020,6 +1021,18 @@ BuildName:
             Tail.Buffer += Physical / sizeof(WCHAR);
             Tail.Length = Tail.MaximumLength = Tail.Length - Physical;
         }
+#ifdef _WIN64
+        /* Native default requests already use the logical shared tree. Keep
+         * their relative, selector-free retries: reconstructing an absolute
+         * name and selecting a view imposes a limit on otherwise valid names.
+         * Physical shared aliases still need their native parents resolved. */
+        if (!Physical && !(DesiredAccess & (KEY_WOW64_32KEY | KEY_WOW64_64KEY)))
+        {
+            RtlFreeHeap(ProcessHeap, 0, Full.Buffer);
+            Status = STATUS_SUCCESS;
+            goto Exit;
+        }
+#endif
         for (i = 0; i < RTL_NUMBER_OF(Wow64SharedSoftware); ++i)
         {
             RtlInitUnicodeString(&Prefix, Wow64SharedSoftware[i]);
@@ -1082,7 +1095,7 @@ CreateNestedKey(PHKEY KeyHandle,
     RtlCopyMemory(&LocalObjectAttributes,
                   ObjectAttributes,
                   sizeof(OBJECT_ATTRIBUTES));
-    Status = GetSharedNestedKeyName(ObjectAttributes, &LocalKeyName);
+    Status = GetSharedNestedKeyName(ObjectAttributes, samDesired, &LocalKeyName);
     if (!NT_SUCCESS(Status)) return Status;
     if (LocalKeyName.Buffer)
     {
