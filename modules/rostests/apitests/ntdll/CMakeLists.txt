@@ -68,6 +68,7 @@ list(APPEND SOURCE
     NtMutant.c
     NtNotifyChangeMultipleKeys.c
     NtOpenKey.c
+    NtOpenProcess.c
     NtOpenProcessToken.c
     NtOpenThreadToken.c
     NtProtectVirtualMemory.c
