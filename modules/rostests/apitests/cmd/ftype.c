@@ -130,7 +130,7 @@ static BOOL KeyExists(const char *type)
 START_TEST(ftype)
 {
     char value[512], out[65536], *line, *next;
-    DWORD dwType, dwExit;
+    DWORD dwType, dwExit, dwDisposition;
     HKEY hKey;
     LONG lRet;
     BOOL bFound;
@@ -142,14 +142,20 @@ START_TEST(ftype)
     }
 
     /* The command writes to HKLM */
-    lRet = RegCreateKeyExA(HKEY_LOCAL_MACHINE, CLASSES TYPE_A, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKey, NULL);
+    lRet = RegCreateKeyExA(HKEY_LOCAL_MACHINE, CLASSES TYPE_A, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKey,
+                           &dwDisposition);
     if (lRet != ERROR_SUCCESS)
     {
         skip("Cannot write HKLM\\" CLASSES " (error %ld)\n", lRet);
         return;
     }
     RegCloseKey(hKey);
-    SHDeleteKeyA(HKEY_LOCAL_MACHINE, CLASSES TYPE_A);
+    if (dwDisposition != REG_CREATED_NEW_KEY)
+    {
+        skip("Another user created the key of the test in the meantime, not touching it\n");
+        return;
+    }
+    SHDeleteKeyA(HKEY_LOCAL_MACHINE, CLASSES TYPE_A); // created just above
 
     /* Unknown type: the text goes to the error stream, the exit code is 2 */
     CHECK_RUN("ftype " TYPE_A, 2, NOT_FOUND(TYPE_A));
@@ -207,8 +213,6 @@ START_TEST(ftype)
     /* Removing from a type without an open command key fails and creates nothing */
     CHECK_RUN("ftype " TYPE_NONE "=", 2, NOT_FOUND(TYPE_NONE));
     ok(!KeyExists(TYPE_NONE), "the key was created\n");
-    if (KeyExists(TYPE_NONE))
-        SHDeleteKeyA(HKEY_LOCAL_MACHINE, CLASSES TYPE_NONE); // it did not exist when the test began
 
     SHDeleteKeyA(HKEY_LOCAL_MACHINE, CLASSES TYPE_A);
 }
