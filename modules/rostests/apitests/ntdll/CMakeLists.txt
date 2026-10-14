@@ -122,6 +122,7 @@ list(APPEND SOURCE
     RtlGetProductInfo.c
     RtlGetUnloadEventTrace.c
     RtlHandle.c
+    RtlHeapTailCheck.c
     RtlImageDirectoryEntryToData.c
     RtlImageRvaToVa.c
     RtlInitializeContext.c
