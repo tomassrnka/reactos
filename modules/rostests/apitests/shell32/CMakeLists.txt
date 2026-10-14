@@ -46,6 +46,7 @@ list(APPEND SOURCE
     SHGetKnownFolderPath.cpp
     SHGetPathFromIDListEx.cpp
     SHGetStockIconInfo.cpp
+    SHGetPropertyStoreForWindow.cpp
     SHGetUnreadMailCountW.cpp
     SHIsBadInterfacePtr.cpp
     SHParseDisplayName.cpp

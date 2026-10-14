@@ -45,6 +45,7 @@ list(APPEND SOURCE
     propsheet.cpp
     shell32.cpp
     utils.cpp
+    wndpropstore.cpp
     CShellItem.cpp
     CShellItemArray.cpp
     CShellLink.cpp
