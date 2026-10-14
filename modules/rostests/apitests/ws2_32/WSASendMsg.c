@@ -398,6 +398,26 @@ static void TestConnected(void)
     }
 }
 
+static void TestPacketInfo(WSABUF *Buffers);
+
+/* A header of the type, with a zeroed payload, must fail */
+static void ControlFails(PCSTR What, SOCKET Sender, WSAMSG *Msg, char *Control, int Level, int Type, ULONG Payload, INT Error)
+{
+    WSACMSGHDR *Header = (WSACMSGHDR *)Control;
+    DWORD Sent = NOT_SET;
+    INT Ret;
+
+    ZeroMemory(Control, 64);
+    Header->cmsg_len = sizeof(WSACMSGHDR) + Payload;
+    Header->cmsg_level = Level;
+    Header->cmsg_type = Type;
+    Msg->Control.buf = Control;
+    Msg->Control.len = WSA_CMSGDATA_ALIGN(Header->cmsg_len);
+    WSASetLastError(0);
+    Ret = pWSASendMsg(Sender, Msg, 0, &Sent, NULL, NULL);
+    CheckFailure(What, Ret, WSAGetLastError(), Error, Sent);
+}
+
 static void TestControl(SOCKET Sender)
 {
     static char Hello[] = "hello", World[] = "world";
@@ -463,9 +483,33 @@ static void TestControl(SOCKET Sender)
     CheckFailure("length below the header", Ret, WSAGetLastError(), WSAEINVAL, Sent);
     ExpectNothing("after the failures");
 
-    /* Well-formed control data goes with the datagram */
+    /* The types and the sizes of payload that an IPv4 socket accepts: others are invalid, whatever else is in the buffer */
+    ControlFails("unknown type", Sender, &Msg, Control, IPPROTO_IP, 99, 8, WSAEINVAL);
+    ControlFails("type 0", Sender, &Msg, Control, IPPROTO_IP, 0, 8, WSAEINVAL);
+    ControlFails("IPv6 level on an IPv4 socket", Sender, &Msg, Control, IPPROTO_IPV6, IPV6_PKTINFO, 20, WSAEINVAL);
+    ControlFails("IP_TOS without payload", Sender, &Msg, Control, IPPROTO_IP, IP_TOS, 0, WSAEINVAL);
+    ControlFails("IP_TOS with 2 bytes", Sender, &Msg, Control, IPPROTO_IP, IP_TOS, 2, WSAEINVAL);
+    ControlFails("IP_DONTFRAGMENT with 3 bytes", Sender, &Msg, Control, IPPROTO_IP, IP_DONTFRAGMENT, 3, WSAEINVAL);
+    ControlFails("IP_OPTIONS with 1 byte", Sender, &Msg, Control, IPPROTO_IP, IP_OPTIONS, 1, WSAEINVAL);
+    ControlFails("IP_PKTINFO with 4 bytes", Sender, &Msg, Control, IPPROTO_IP, IP_PKTINFO, 4, WSAEINVAL);
+    ControlFails("type 32 with a payload", Sender, &Msg, Control, IPPROTO_IP, 32, 4, WSAEINVAL);
+
+    /* Packet information that asks for no source and no interface asks for nothing, which is refused */
+    ZeroMemory(Control, sizeof(Control));
+    Header->cmsg_len = WSA_CMSG_LEN(sizeof(IN_PKTINFO));
+    Header->cmsg_level = IPPROTO_IP;
+    Header->cmsg_type = IP_PKTINFO;
+    Msg.Control.len = WSA_CMSGDATA_ALIGN(Header->cmsg_len);
+    Sent = NOT_SET;
+    WSASetLastError(0);
+    Ret = pWSASendMsg(Sender, &Msg, 0, &Sent, NULL, NULL);
+    CheckFailure("IP_PKTINFO with nothing", Ret, WSAGetLastError(), WSAEINVAL, Sent);
+
+    /* A malformed header after a good one is found before anything is refused for its effect */
     {
         IN_PKTINFO *Info;
+        WSACMSGHDR *Second;
+        ULONG First = WSA_CMSGDATA_ALIGN(WSA_CMSG_LEN(sizeof(IN_PKTINFO)));
 
         ZeroMemory(Control, sizeof(Control));
         Header->cmsg_len = WSA_CMSG_LEN(sizeof(IN_PKTINFO));
@@ -473,11 +517,128 @@ static void TestControl(SOCKET Sender)
         Header->cmsg_type = IP_PKTINFO;
         Info = (IN_PKTINFO *)WSA_CMSG_DATA(Header);
         Info->ipi_addr.s_addr = htonl(INADDR_LOOPBACK);
-        Msg.Control.len = WSA_CMSGDATA_ALIGN(Header->cmsg_len);
-        Send("IP_PKTINFO", Sender, &Msg, 0);
-        ExpectDatagram("IP_PKTINFO", "helloworld", 10);
+        Second = (WSACMSGHDR *)(Control + First);
+        Second->cmsg_len = sizeof(WSACMSGHDR);
+        Second->cmsg_level = IPPROTO_IP;
+        Second->cmsg_type = 99;
+        Msg.Control.len = First + sizeof(WSACMSGHDR);
+        Sent = NOT_SET;
+        WSASetLastError(0);
+        Ret = pWSASendMsg(Sender, &Msg, 0, &Sent, NULL, NULL);
+        CheckFailure("IP_PKTINFO and an unknown type", Ret, WSAGetLastError(), WSAEINVAL, Sent);
     }
+    ExpectNothing("after the control failures");
+
+    /* Options that a datagram can carry on Windows; ReactOS has no way to apply them and says so rather than send without them */
+    {
+        INT Tos = 0x10;
+
+        ZeroMemory(Control, sizeof(Control));
+        Header->cmsg_len = WSA_CMSG_LEN(sizeof(Tos));
+        Header->cmsg_level = IPPROTO_IP;
+        Header->cmsg_type = IP_TOS;
+        memcpy(WSA_CMSG_DATA(Header), &Tos, sizeof(Tos));
+        Msg.Control.len = WSA_CMSGDATA_ALIGN(Header->cmsg_len);
+        Sent = NOT_SET;
+        WSASetLastError(0);
+        Ret = pWSASendMsg(Sender, &Msg, 0, &Sent, NULL, NULL);
+        todo_if(is_reactos())
+        {
+            ok(Ret == 0, "IP_TOS: returned %d, error %d\n", Ret, WSAGetLastError());
+        }
+        if (is_reactos())
+        {
+            ok(Ret == SOCKET_ERROR && WSAGetLastError() == WSAEOPNOTSUPP && Sent == NOT_SET, "IP_TOS: returned %d, error %d, sent %lu\n",
+               Ret, WSAGetLastError(), Sent);
+            ExpectNothing("IP_TOS refused");
+        }
+        else
+        {
+            ExpectDatagram("IP_TOS", "helloworld", 10);
+        }
+    }
+
+    TestPacketInfo(Buffers);
 }
+
+/* Packet information for the address the socket is bound to: nothing to apply, so the datagram goes out from that address */
+static void TestPacketInfo(WSABUF *Buffers)
+{
+    char Control[64];
+    WSACMSGHDR *Header = (WSACMSGHDR *)Control;
+    IN_PKTINFO *Info;
+    WSAMSG Msg;
+    SOCKET Bound = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in Local;
+    char Data[64];
+    int Length;
+    DWORD Sent = NOT_SET;
+    INT Ret;
+
+    ok(Bound != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+    if (Bound == INVALID_SOCKET)
+        return;
+    ZeroMemory(&Local, sizeof(Local));
+    Local.sin_family = AF_INET;
+    Local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ok(bind(Bound, (struct sockaddr *)&Local, sizeof(Local)) == 0, "bind failed: %d\n", WSAGetLastError());
+
+    InitMessage(&Msg, Buffers, 2);
+    ZeroMemory(Control, sizeof(Control));
+    Header->cmsg_len = WSA_CMSG_LEN(sizeof(IN_PKTINFO));
+    Header->cmsg_level = IPPROTO_IP;
+    Header->cmsg_type = IP_PKTINFO;
+    Info = (IN_PKTINFO *)WSA_CMSG_DATA(Header);
+    Info->ipi_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Msg.Control.buf = Control;
+    Msg.Control.len = WSA_CMSGDATA_ALIGN(Header->cmsg_len);
+    WSASetLastError(0);
+    Ret = pWSASendMsg(Bound, &Msg, 0, &Sent, NULL, NULL);
+    ok(Ret == 0, "IP_PKTINFO for the bound address: returned %d, error %d\n", Ret, WSAGetLastError());
+    ok(Sent == 10, "IP_PKTINFO for the bound address: sent %lu\n", Sent);
+    Length = Receive(Data, sizeof(Data), 2000);
+    ok(Length == 10, "IP_PKTINFO for the bound address: received %d\n", Length);
+
+    /* An interface cannot be selected: refused (Windows sends the datagram) */
+    Info->ipi_ifindex = 1;
+    Sent = NOT_SET;
+    WSASetLastError(0);
+    Ret = pWSASendMsg(Bound, &Msg, 0, &Sent, NULL, NULL);
+    if (is_reactos())
+    {
+        ok(Ret == SOCKET_ERROR && WSAGetLastError() == WSAEOPNOTSUPP && Sent == NOT_SET, "IP_PKTINFO with an interface: returned %d, error %d\n",
+           Ret, WSAGetLastError());
+        ExpectNothing("IP_PKTINFO with an interface refused");
+    }
+    else
+    {
+        ok(Ret == 0, "IP_PKTINFO with an interface: returned %d, error %d\n", Ret, WSAGetLastError());
+        ExpectDatagram("IP_PKTINFO with an interface", "helloworld", 10);
+    }
+
+    /* Another local address cannot be selected either (the one given is not the one of the socket) */
+    Info->ipi_ifindex = 0;
+    Info->ipi_addr.s_addr = htonl(0x01020304); /* 1.2.3.4, not an address of this host */
+    Sent = NOT_SET;
+    WSASetLastError(0);
+    Ret = pWSASendMsg(Bound, &Msg, 0, &Sent, NULL, NULL);
+    if (is_reactos())
+    {
+        ok(Ret == SOCKET_ERROR && WSAGetLastError() == WSAEOPNOTSUPP && Sent == NOT_SET, "IP_PKTINFO for another address: returned %d, error %d\n",
+           Ret, WSAGetLastError());
+        ExpectNothing("IP_PKTINFO for another address refused");
+    }
+    else
+    {
+        /* Windows Server 2008 R2 and Windows 10 send the datagram whatever the address */
+        ok(Ret == 0, "IP_PKTINFO for another address: returned %d, error %d\n", Ret, WSAGetLastError());
+        ExpectDatagram("IP_PKTINFO for another address", "helloworld", 10);
+    }
+
+    closesocket(Bound);
+}
+
+static void TestRawSize(void);
 
 static void TestTooBig(SOCKET Sender)
 {
@@ -508,6 +669,56 @@ static void TestTooBig(SOCKET Sender)
     Ret = pWSASendMsg(Sender, &Msg, 0, &Sent, NULL, NULL);
     ok(Ret == 0, "Send after the failure: returned %d, error %d\n", Ret, WSAGetLastError());
     ExpectDatagram("after too big", "hello", 5);
+
+    TestRawSize();
+}
+
+/* A raw socket gets an IPv4 header of 20 bytes in front of the data: 65515 bytes are the most it can carry */
+static void TestRawSize(void)
+{
+    static const int Sizes[] = { 65515, 65516, 65520, 65535, 65536 };
+    SOCKET Raw = WSASocketW(AF_INET, SOCK_RAW, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    struct sockaddr_in Destination = g_ReceiverAddress;
+    WSABUF Buffers[1];
+    WSAMSG Msg;
+    char *Big;
+    unsigned i;
+
+    if (Raw == INVALID_SOCKET)
+    {
+        skip("No raw socket: %d\n", WSAGetLastError());
+        return;
+    }
+    Big = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 70000);
+    ok(Big != NULL, "No memory\n");
+    if (!Big)
+    {
+        closesocket(Raw);
+        return;
+    }
+
+    Destination.sin_port = 0;
+    Buffers[0].buf = Big;
+    for (i = 0; i < ARRAYSIZE(Sizes); i++)
+    {
+        DWORD Sent = NOT_SET;
+        INT Ret;
+        char What[32];
+
+        InitMessage(&Msg, Buffers, 1);
+        Msg.name = (LPSOCKADDR)&Destination;
+        Msg.namelen = sizeof(Destination);
+        Buffers[0].len = Sizes[i];
+        sprintf(What, "raw, %d bytes", Sizes[i]);
+        WSASetLastError(0);
+        Ret = pWSASendMsg(Raw, &Msg, 0, &Sent, NULL, NULL);
+        if (Sizes[i] > 65515)
+            CheckFailure(What, Ret, WSAGetLastError(), WSAEMSGSIZE, Sent);
+        else
+            ok(Ret == 0 || WSAGetLastError() != WSAEMSGSIZE, "%s: returned %d, error %d\n", What, Ret, WSAGetLastError());
+    }
+    HeapFree(GetProcessHeap(), 0, Big);
+    closesocket(Raw);
 }
 
 static int g_Completions;
@@ -549,7 +760,10 @@ static BOOL OverlappedRounds(SOCKET Sender, WSABUF *Buffers, DWORD Count, const 
     if (WSAWaitForMultipleEvents(1, &Overlapped.hEvent, TRUE, 2000, FALSE) != WSA_WAIT_EVENT_0)
     {
         ok(0, "%lu buffers: the event is not set\n", Count);
-        /* The operation may still own the structure: it is left alone, and so is the event */
+        /* Cancel what may still own the structure, and wait for it to end before the event goes */
+        CancelIo((HANDLE)Sender);
+        WaitForSingleObject(Overlapped.hEvent, 1000);
+        WSACloseEvent(Overlapped.hEvent);
         return FALSE;
     }
     Transferred = 0;
@@ -578,6 +792,132 @@ static BOOL OverlappedRounds(SOCKET Sender, WSABUF *Buffers, DWORD Count, const 
     sprintf(What, "%lu buffers, overlapped routine", Count);
     ExpectDatagram(What, Expected, ExpectedLength);
     return TRUE;
+}
+
+/* Overlapped storage that cannot be written is refused before anything is sent, without keeping resources of the provider */
+static void TestBadOverlapped(SOCKET Sender)
+{
+    static char Hello[] = "hello", World[] = "world";
+    WSABUF Buffers[2];
+    WSAMSG Msg;
+    void *ReadOnly = VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READONLY);
+    void *NoAccess = VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    LPWSAOVERLAPPED Cases[3];
+    static const char *Names[3] = { "bad pointer", "read-only page", "inaccessible page" };
+    DWORD Handles, HandlesAfter, Sent;
+    unsigned i, Count, Round;
+    INT Ret;
+
+    Buffers[0].buf = Hello; Buffers[0].len = 5;
+    Buffers[1].buf = World; Buffers[1].len = 5;
+    Cases[0] = (LPWSAOVERLAPPED)(ULONG_PTR)0x10;
+    Cases[1] = ReadOnly;
+    Cases[2] = NoAccess;
+
+    for (i = 0; i < ARRAYSIZE(Cases); i++)
+    {
+        for (Count = 1; Count <= 2; Count++)
+        {
+            for (Round = 0; Round < 2; Round++)
+            {
+                char What[64];
+                int k;
+
+                InitMessage(&Msg, Buffers, Count);
+                if (!GetProcessHandleCount(GetCurrentProcess(), &Handles))
+                    Handles = 0;
+                for (k = 0; k < 20; k++)
+                {
+                    Sent = NOT_SET;
+                    WSASetLastError(0);
+                    Ret = pWSASendMsg(Sender, &Msg, 0, &Sent, Cases[i], Round ? Completion : NULL);
+                    if (Ret != SOCKET_ERROR || WSAGetLastError() != WSAEFAULT || Sent != NOT_SET)
+                        break;
+                }
+                sprintf(What, "%s, %u buffers%s", Names[i], Count, Round ? ", routine" : "");
+                CheckFailure(What, Ret, WSAGetLastError(), WSAEFAULT, Sent);
+                if (GetProcessHandleCount(GetCurrentProcess(), &HandlesAfter))
+                    ok(HandlesAfter <= Handles, "%s: %lu handles before, %lu after\n", What, Handles, HandlesAfter);
+            }
+        }
+    }
+    ExpectNothing("after the bad overlapped storage");
+    if (ReadOnly)
+        VirtualFree(ReadOnly, 0, MEM_RELEASE);
+    if (NoAccess)
+        VirtualFree(NoAccess, 0, MEM_RELEASE);
+}
+
+static BOOL IsWow64(void)
+{
+    typedef BOOL (WINAPI *FN_IsWow64Process)(HANDLE, PBOOL);
+    FN_IsWow64Process pIsWow64Process = (FN_IsWow64Process)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process");
+    BOOL Wow64 = FALSE;
+
+    return pIsWow64Process && pIsWow64Process(GetCurrentProcess(), &Wow64) && Wow64;
+}
+
+/* A socket that was not opened as overlapped sends at once, and the overlapped structure is completed as for an overlapped one */
+static void TestNonOverlappedSocket(void)
+{
+    static char Hello[] = "hello", World[] = "world";
+    WSABUF Buffers[2];
+    WSAMSG Msg;
+    SOCKET Plain = WSASocketW(AF_INET, SOCK_DGRAM, 0, NULL, 0, 0);
+    static WSAOVERLAPPED Overlapped;
+    DWORD Sent;
+    INT Ret;
+    unsigned Count, Mode;
+    int i;
+
+    ok(Plain != INVALID_SOCKET, "WSASocket failed: %d\n", WSAGetLastError());
+    if (Plain == INVALID_SOCKET)
+        return;
+
+    Buffers[0].buf = Hello; Buffers[0].len = 5;
+    Buffers[1].buf = World; Buffers[1].len = 5;
+
+    for (Count = 1; Count <= 2; Count++)
+    {
+        /* Mode 0: no event, 1: an event, 2: a completion routine */
+        for (Mode = 0; Mode < 3; Mode++)
+        {
+            char What[64];
+            int Expected = Count == 1 ? 5 : 10;
+
+            sprintf(What, "non-overlapped socket, %u buffers, mode %u", Count, Mode);
+            InitMessage(&Msg, Buffers, Count);
+            ZeroMemory(&Overlapped, sizeof(Overlapped));
+            Overlapped.Internal = 0xCCCCCCCC;
+            Overlapped.hEvent = Mode == 1 ? WSACreateEvent() : NULL;
+            g_Completions = 0;
+            Sent = NOT_SET;
+            WSASetLastError(0);
+            Ret = pWSASendMsg(Plain, &Msg, 0, &Sent, &Overlapped, Mode == 2 ? Completion : NULL);
+            ok(Ret == 0, "%s: returned %d, error %d\n", What, Ret, WSAGetLastError());
+            ok(Sent == (DWORD)Expected, "%s: sent %lu bytes\n", What, Sent);
+            /* the status is the low half: Windows Server 2008 R2 x64 leaves the other half of the field as it likes after two buffers */
+            ok((ULONG)Overlapped.Internal == 0, "%s: Internal is 0x%I64x\n", What, (ULONGLONG)Overlapped.Internal);
+            ok(Overlapped.InternalHigh == (ULONG_PTR)Expected, "%s: InternalHigh is %lu\n", What, (ULONG)Overlapped.InternalHigh);
+            if (Mode == 1)
+            {
+                ok(WaitForSingleObject(Overlapped.hEvent, 0) == WAIT_OBJECT_0, "%s: the event is not set\n", What);
+                WSACloseEvent(Overlapped.hEvent);
+            }
+            for (i = 0; i < 10 && Mode == 2 && !g_Completions; i++)
+                SleepEx(50, TRUE);
+            ok(g_Completions == (Mode == 2 ? 1 : 0), "%s: the completion routine ran %d times\n", What, g_Completions);
+            if (Mode == 2 && g_Completions == 1)
+            {
+                /* A 32-bit process on 64-bit Windows is handed 0 bytes by this completion (measured on Windows Server 2008 R2 and Windows 10) */
+                ok(g_CompletionError == 0 && (IsWow64() || g_CompletionBytes == (DWORD)Expected), "%s: completion error %lu, bytes %lu\n",
+                   What, g_CompletionError, g_CompletionBytes);
+            }
+            ExpectDatagram(What, Count == 1 ? "hello" : "helloworld", Expected);
+        }
+    }
+
+    closesocket(Plain);
 }
 
 static void TestOverlapped(void)
@@ -622,6 +962,9 @@ static void TestOverlapped(void)
         closesocket(Sender);
         return;
     }
+
+    TestBadOverlapped(Sender);
+    TestNonOverlappedSocket();
 
     /* A routine without an overlapped structure is ignored */
     InitMessage(&Msg, Buffers, 2);
