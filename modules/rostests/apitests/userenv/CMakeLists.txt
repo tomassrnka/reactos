@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    DeriveAppContainerSid.c
     GetProfileDirs.c
     LoadUserProfile.c
     testlist.c)
