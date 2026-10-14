@@ -505,12 +505,12 @@ IntGetClassWndProc(PCLS Class, BOOL Ansi)
   {
      for ( i = FNID_FIRST; i <= FNID_SWITCH; i++)
      {
-         if (GETPFNSERVER(i) == Class->lpfnWndProc)
+         if (IntGetClientProcServer(GetW32ProcessInfo(), i) == Class->lpfnWndProc)
          {
             if (Ansi)
-               Ret = GETPFNCLIENTA(i);
+               Ret = IntGetClientProcA(GetW32ProcessInfo(), i);
             else
-               Ret = GETPFNCLIENTW(i);
+               Ret = IntGetClientProcW(GetW32ProcessInfo(), i);
          }
      }
      return Ret;
@@ -521,13 +521,13 @@ IntGetClassWndProc(PCLS Class, BOOL Ansi)
   {
      if (Ansi)
      {
-        if (GETPFNCLIENTW(Class->fnid) == Class->lpfnWndProc)
-           Ret = GETPFNCLIENTA(Class->fnid);
+        if (IntGetClientProcW(GetW32ProcessInfo(), Class->fnid) == Class->lpfnWndProc)
+           Ret = IntGetClientProcA(GetW32ProcessInfo(), Class->fnid);
      }
      else
      {
-        if (GETPFNCLIENTA(Class->fnid) == Class->lpfnWndProc)
-           Ret = GETPFNCLIENTW(Class->fnid);
+        if (IntGetClientProcA(GetW32ProcessInfo(), Class->fnid) == Class->lpfnWndProc)
+           Ret = IntGetClientProcW(GetW32ProcessInfo(), Class->fnid);
      }
   }
 
@@ -582,14 +582,14 @@ IntSetClassWndProc(IN OUT PCLS Class,
    // Switch from Client Side call to Server Side call if match. Ref: "deftest".
    for ( i = FNID_FIRST; i <= FNID_SWITCH; i++)
    {
-       if (GETPFNCLIENTW(i) == Class->lpfnWndProc)
+       if (IntGetClientProcW(GetW32ProcessInfo(), i) == Class->lpfnWndProc)
        {
-          chWndProc = GETPFNSERVER(i);
+          chWndProc = IntGetClientProcServer(GetW32ProcessInfo(), i);
           break;
        }
-       if (GETPFNCLIENTA(i) == Class->lpfnWndProc)
+       if (IntGetClientProcA(GetW32ProcessInfo(), i) == Class->lpfnWndProc)
        {
-          chWndProc = GETPFNSERVER(i);
+          chWndProc = IntGetClientProcServer(GetW32ProcessInfo(), i);
           break;
        }
    }
@@ -700,11 +700,11 @@ IntGetClassForDesktop(IN OUT PCLS BaseClass,
             TRACE("Clone Class 0x%p hM 0x%p\n %S\n",Class, Class->hModule, Class->lpszClientUnicodeMenuName);
 
             /* Restore module address if default user class Ref: Bug 4778 */
-            if ( Class->hModule != hModClient &&
+            if ( Class->hModule != IntGetClientModule(GetW32ProcessInfo()) &&
                  Class->fnid <= FNID_GHOST    &&
                  Class->fnid >= FNID_BUTTON )
             {
-               Class->hModule = hModClient;
+               Class->hModule = IntGetClientModule(GetW32ProcessInfo());
                TRACE("Clone Class 0x%p Reset hM 0x%p\n",Class, Class->hModule);
             }
 
@@ -1193,14 +1193,14 @@ IntCreateClass(IN CONST WNDCLASSEXW* lpwcx,
            */
                for ( i = FNID_FIRST; i <= FNID_SWITCH; i++)
                { // Open ANSI or Unicode, just match, set and break.
-                   if (GETPFNCLIENTW(i) == Class->lpfnWndProc)
+                   if (IntGetClientProcW(pi, i) == Class->lpfnWndProc)
                    {
-                      WndProc = GETPFNSERVER(i);
+                      WndProc = IntGetClientProcServer(pi, i);
                       break;
                    }
-                   if (GETPFNCLIENTA(i) == Class->lpfnWndProc)
+                   if (IntGetClientProcA(pi, i) == Class->lpfnWndProc)
                    {
-                      WndProc = GETPFNSERVER(i);
+                      WndProc = IntGetClientProcServer(pi, i);
                       break;
                    }
                }
@@ -1417,7 +1417,7 @@ IntGetClassAtom(
 
         /* Step 3: Try to find any local class registered by user32 */
         Class = IntFindClass(Atom,
-                             hModClient,
+                             IntGetClientModule(pi),
                              &pi->pclsPrivateList,
                              Link);
         if (Class != NULL)
@@ -1427,7 +1427,7 @@ IntGetClassAtom(
 
         /* Step 4: Try to find any global class registered by user32 */
         Class = IntFindClass(Atom,
-                             hModClient,
+                             IntGetClientModule(pi),
                              &pi->pclsPublicList,
                              Link);
         if (Class == NULL)
@@ -2318,7 +2318,7 @@ UserGetClassInfo(IN PCLS Class,
                                  (PVOID)Class->lpszClientUnicodeMenuName);
     }
 
-    if (hInstance == hModClient)
+    if (hInstance == IntGetClientModule(GetW32ProcessInfo()))
         lpwcx->hInstance = NULL;
     else
         lpwcx->hInstance = hInstance;
@@ -2348,7 +2348,7 @@ UserRegisterSystemClasses(VOID)
     if (ppi->W32PF_flags & W32PF_CLASSESREGISTERED)
        return TRUE;
 
-    if ( hModClient == NULL)
+    if ( IntGetClientModule(GetW32ProcessInfo()) == NULL)
        return FALSE;
 
     RtlZeroMemory(&ClassName, sizeof(ClassName));
@@ -2379,8 +2379,8 @@ UserRegisterSystemClasses(VOID)
         }
         else
         {
-           wc.lpfnWndProc = GETPFNSERVER(DefaultServerClasses[i].fiId);
-           wc.hInstance = hModClient;
+           wc.lpfnWndProc = IntGetClientProcServer(GetW32ProcessInfo(), DefaultServerClasses[i].fiId);
+           wc.hInstance = IntGetClientModule(GetW32ProcessInfo());
         }
 
         wc.cbClsExtra = 0;
@@ -2816,7 +2816,7 @@ NtUserGetClassInfo(
     }
 
     // If null instance use client.
-    if (!hInstance) hInstance = hModClient;
+    if (!hInstance) hInstance = IntGetClientModule(GetW32ProcessInfo());
 
     TRACE("GetClassInfo(%wZ, %p)\n", &SafeClassName, hInstance);
 
