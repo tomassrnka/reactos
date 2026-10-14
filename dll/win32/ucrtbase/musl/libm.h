@@ -20,6 +20,18 @@
 /* Reports a math error the way the Windows CRT does: set errno, return the value */
 double math_error(int type, const char *name, double arg1, double arg2, double retval);
 
+/* The result of an overflow is infinity, and the maximum when the rounding mode is not to nearest; in the
+   mode to nearest a result of exactly the maximum is a valid one */
+static inline int overflowed(double r)
+{
+    return isinf(r) || (fabs(r) >= DBL_MAX && (_controlfp(0, 0) & _MCW_RC) != _RC_NEAR);
+}
+
+static inline int overflowedf(float r)
+{
+    return isinf(r) || (fabsf(r) >= FLT_MAX && (_controlfp(0, 0) & _MCW_RC) != _RC_NEAR);
+}
+
 /* Kernels and reentrant functions shared between the musl files */
 double __sin(double x, double y, int iy);
 double __cos(double x, double y);
