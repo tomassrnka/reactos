@@ -1314,6 +1314,73 @@ done:
     ok(ref == 0, "factory not released, %lu\n", ref);
 }
 
+static void test_bitmap_target_failure(void)
+{
+    enum { W = 32, H = 32 };
+    IDWriteBitmapRenderTarget *target;
+    IDWriteRenderingParams *params;
+    IDWriteGdiInterop *interop;
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    DWRITE_GLYPH_RUN run;
+    UINT16 glyphs[2];
+    FLOAT advances[2] = { 20000000.0f, 0.0f };
+    UINT32 ch = 'H';
+    DIBSECTION ds;
+    unsigned int i, drawn = 0;
+    HRESULT hr;
+    HBITMAP hbm;
+    RECT box;
+    HDC hdc;
+
+    factory = create_factory();
+    hr = IDWriteFactory_GetGdiInterop(factory, &interop);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteGdiInterop_CreateBitmapRenderTarget(interop, NULL, W, H, &target);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteFactory_CreateRenderingParams(factory, &params);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    fontface = create_fontface(factory);
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &ch, 1, &glyphs[0]);
+    ok(hr == S_OK && glyphs[0], "Unexpected hr %#lx.\n", hr);
+    glyphs[1] = glyphs[0];
+
+    hdc = IDWriteBitmapRenderTarget_GetMemoryDC(target);
+    PatBlt(hdc, 0, 0, W, H, WHITENESS);
+
+    /* A run whose second glyph is twenty million pixels away: the run's texture is too large to build. Drawing
+       must either succeed with the first glyph on the target or say that it ran out of memory, not return
+       success and draw nothing. */
+    memset(&run, 0, sizeof(run));
+    run.fontFace = fontface;
+    run.fontEmSize = 20.0f;
+    run.glyphCount = 2;
+    run.glyphIndices = glyphs;
+    run.glyphAdvances = advances;
+
+    SetRectEmpty(&box);
+    hr = IDWriteBitmapRenderTarget_DrawGlyphRun(target, 2.0f, 24.0f, DWRITE_MEASURING_MODE_NATURAL, &run, params,
+            RGB(0, 0, 0), &box);
+    ok(hr == S_OK || hr == E_OUTOFMEMORY, "Unexpected hr %#lx.\n", hr);
+
+    hbm = GetCurrentObject(hdc, OBJ_BITMAP);
+    GetObjectW(hbm, sizeof(ds), &ds);
+    for (i = 0; i < W * H; i++)
+        if ((((DWORD *)ds.dsBm.bmBits)[i] & 0xffffff) != 0xffffff)
+            drawn++;
+    if (hr == S_OK)
+        ok(drawn > 0, "Drawing the run succeeded but nothing was drawn.\n");
+    else
+        ok(drawn == 0, "Drawing the run failed with %#lx but %u pixels changed.\n", hr, drawn);
+
+    IDWriteRenderingParams_Release(params);
+    IDWriteFontFace_Release(fontface);
+    IDWriteBitmapRenderTarget_Release(target);
+    IDWriteGdiInterop_Release(interop);
+    IDWriteFactory_Release(factory);
+}
+
 static void test_glyphrunanalysis_huge_texture(void)
 {
     static const float sizes[] = { 20.0f, 45000.0f, 300000.0f };
@@ -10671,6 +10738,7 @@ START_TEST(font)
     test_CreateFontFromLOGFONT();
     test_CreateBitmapRenderTarget();
     test_bitmap_target_rendering_params();
+    test_bitmap_target_failure();
     test_glyphrunanalysis_huge_texture();
     test_GetFontFamily();
     test_GetFamilyNames();

@@ -191,10 +191,6 @@ void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphb
     LeaveCriticalSection(&fontface->cs);
 }
 
-/* Largest glyph or run bitmap this module builds; a font size in the tens of thousands would otherwise ask for
-   gigabytes and overflow the 32 bit sizes used to describe them. */
-#define DWRITE_MAX_BITMAP_BYTES (256u << 20)
-
 static size_t get_glyph_bitmap_pitch(DWRITE_RENDERING_MODE1 rendering_mode, INT width)
 {
     return rendering_mode == DWRITE_RENDERING_MODE1_ALIASED ? (((size_t)width + 31) >> 5) << 2 : ((size_t)width + 3) / 4 * 4;

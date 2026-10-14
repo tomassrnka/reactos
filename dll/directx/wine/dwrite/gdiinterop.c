@@ -542,8 +542,8 @@ static HRESULT WINAPI rendertarget_DrawGlyphRun(IDWriteBitmapRenderTarget1 *ifac
         UINT32 size;
         BYTE *bitmap;
 
-        /* the target rectangle is clipped to the bitmap, so this only fails for a target that cannot exist */
-        if (size64 > 0x7fffffff)
+        /* the target rectangle is clipped to the bitmap, so this only fails for a very large target */
+        if (size64 > DWRITE_MAX_BITMAP_BYTES)
         {
             IDWriteGlyphRunAnalysis_Release(analysis);
             return E_OUTOFMEMORY;
@@ -568,8 +568,12 @@ static HRESULT WINAPI rendertarget_DrawGlyphRun(IDWriteBitmapRenderTarget1 *ifac
 
             if (bbox_ret) *bbox_ret = target_rect;
         }
+        else
+            WARN("CreateAlphaTexture() failed, 0x%08lx\n", hr);
 
         free(bitmap);
+        IDWriteGlyphRunAnalysis_Release(analysis);
+        return hr;
     }
     else if (bbox_ret)
     {

@@ -570,6 +570,10 @@ struct bidi_char
 
 extern HRESULT bidi_computelevels(struct bidi_char *chars, unsigned int count, UINT8 baselevel);
 
+/* Largest glyph, run or texture bitmap this module builds; a font size in the tens of thousands would otherwise ask
+   for gigabytes and overflow the 32 bit sizes used to describe them. */
+#define DWRITE_MAX_BITMAP_BYTES (256u << 20)
+
 struct dwrite_glyphbitmap
 {
     DWORD simulations;

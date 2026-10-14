@@ -5025,6 +5025,13 @@ IntGetRealGlyph(
         error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
         if (!error)
         {
+            /* The advance that counts is the final one, simulated bold included: FreeType widens a strike by whole
+               pixels and an outline by a fraction, so the simulation has to run on this load as well */
+            if (Cache->Hashed.Aspect.Emu.Bold)
+                FT_GlyphSlot_Embolden(Cache->Hashed.Face->glyph);
+            if (Cache->Hashed.Aspect.Emu.Italic)
+                FT_GlyphSlot_Oblique(Cache->Hashed.Face->glyph);
+
             AdvanceX = Cache->Hashed.Face->glyph->advance.x;
             AdvanceY = Cache->Hashed.Face->glyph->advance.y;
             bKeepAdvance = TRUE;
@@ -5053,17 +5060,18 @@ IntGetRealGlyph(
 
     glyph = Cache->Hashed.Face->glyph;
 
-    if (bKeepAdvance)
-    {
-        glyph->advance.x = AdvanceX;
-        glyph->advance.y = AdvanceY;
-    }
-
     if (Cache->Hashed.Aspect.Emu.Bold)
         FT_GlyphSlot_Embolden(glyph); /* Emulate Bold */
 
     if (Cache->Hashed.Aspect.Emu.Italic)
         FT_GlyphSlot_Oblique(glyph); /* Emulate Italic */
+
+    /* The simulation changed the advance of this glyph; layout keeps the one of the regular load */
+    if (bKeepAdvance)
+    {
+        glyph->advance.x = AdvanceX;
+        glyph->advance.y = AdvanceY;
+    }
 
     realglyph = IntGetBitmapGlyphWithCache(Cache, glyph, RenderMode);
 

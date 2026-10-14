@@ -30,7 +30,7 @@ static BOOL FontInstalled(HDC hdc, PCSTR pszFace)
     return lstrcmpiA(szFace, pszFace) == 0;
 }
 
-static void TestFont(HDC hdc, PCSTR pszFace, INT nHeight)
+static void TestFont(HDC hdc, PCSTR pszFace, INT nHeight, INT nWeight, BOOL bItalic)
 {
     SIZE sizeRef = { 0 }, size;
     INT widthRef[26] = { 0 }, width[26];
@@ -44,6 +44,8 @@ static void TestFont(HDC hdc, PCSTR pszFace, INT nHeight)
         BOOL ret;
 
         lf.lfHeight = nHeight;
+        lf.lfWeight = nWeight;
+        lf.lfItalic = bItalic;
         lf.lfCharSet = DEFAULT_CHARSET;
         lf.lfQuality = g_qualities[iQuality];
         StringCchCopyA(lf.lfFaceName, ARRAYSIZE(lf.lfFaceName), pszFace);
@@ -52,7 +54,7 @@ static void TestFont(HDC hdc, PCSTR pszFace, INT nHeight)
 
         /* Draw first: the glyph cache then holds this quality's glyphs when the width is asked for again */
         ret = ExtTextOutA(hdc, 2, 2, 0, NULL, g_text, lstrlenA(g_text), NULL);
-        ok(ret, "%s %d quality %u: ExtTextOutA failed\n", pszFace, nHeight, g_qualities[iQuality]);
+        ok(ret, "%s %d w%d i%d quality %u: ExtTextOutA failed\n", pszFace, nHeight, nWeight, bItalic, g_qualities[iQuality]);
 
         ret = GetTextExtentPoint32A(hdc, g_text, lstrlenA(g_text), &size);
         ok(ret, "%s %d: GetTextExtentPoint32A failed\n", pszFace, nHeight);
@@ -69,11 +71,11 @@ static void TestFont(HDC hdc, PCSTR pszFace, INT nHeight)
         else
         {
             ok(size.cx == sizeRef.cx && size.cy == sizeRef.cy,
-               "%s %d quality %u: extent %ldx%ld, bilevel gives %ldx%ld\n",
-               pszFace, nHeight, g_qualities[iQuality], size.cx, size.cy, sizeRef.cx, sizeRef.cy);
+               "%s %d w%d i%d quality %u: extent %ldx%ld, bilevel gives %ldx%ld\n",
+               pszFace, nHeight, nWeight, bItalic, g_qualities[iQuality], size.cx, size.cy, sizeRef.cx, sizeRef.cy);
             for (ich = 0; ich < 26; ich++)
-                ok(width[ich] == widthRef[ich], "%s %d quality %u: width of '%c' is %d, bilevel gives %d\n",
-                   pszFace, nHeight, g_qualities[iQuality], 'A' + ich, width[ich], widthRef[ich]);
+                ok(width[ich] == widthRef[ich], "%s %d w%d i%d quality %u: width of '%c' is %d, bilevel gives %d\n",
+                   pszFace, nHeight, nWeight, bItalic, g_qualities[iQuality], 'A' + ich, width[ich], widthRef[ich]);
         }
 
         SelectObject(hdc, hOld);
@@ -107,7 +109,14 @@ START_TEST(GetTextExtentQuality)
             continue;
         }
         for (iHeight = 0; iHeight < ARRAYSIZE(s_heights); iHeight++)
-            TestFont(hdcMem, s_faces[iFace], s_heights[iHeight]);
+        {
+            /* Microsoft Sans Serif has no bold or italic face, so those two are simulated: FreeType widens a strike
+               by whole pixels and an outline by a fraction, and the advance must not depend on which is drawn. */
+            TestFont(hdcMem, s_faces[iFace], s_heights[iHeight], FW_NORMAL, FALSE);
+            TestFont(hdcMem, s_faces[iFace], s_heights[iHeight], FW_BOLD, FALSE);
+            TestFont(hdcMem, s_faces[iFace], s_heights[iHeight], FW_NORMAL, TRUE);
+            TestFont(hdcMem, s_faces[iFace], s_heights[iHeight], FW_BOLD, TRUE);
+        }
     }
 
     SelectObject(hdcMem, hbmOld);
