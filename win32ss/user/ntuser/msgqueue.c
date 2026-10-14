@@ -464,7 +464,8 @@ ClearMsgBitsMask(PTHREADINFO pti, UINT MessageBits)
    }
    if (MessageBits & QS_POSTMESSAGE)
    {
-      if (--pti->nCntsQBits[QSRosPostMessage] == 0) ClrMask |= QS_POSTMESSAGE;
+      /* The last posted message (WM_QUIT included) takes QS_ALLPOSTMESSAGE with it */
+      if (--pti->nCntsQBits[QSRosPostMessage] == 0) ClrMask |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
    }
    if (MessageBits & QS_TIMER) // ReactOS hard coded.
    {  // Handle timer bits here.
