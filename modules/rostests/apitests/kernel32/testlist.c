@@ -108,6 +108,7 @@ extern void func_ThreadContextNpx(void);
 extern void func_ThreadContextObjects(void);
 extern void func_ThreadInformation(void);
 extern void func_TunnelCache(void);
+extern void func_VolumeMountPoint(void);
 extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
 extern void func_UnmapViewOfFileEx(void);
@@ -231,6 +232,7 @@ const struct test winetest_testlist[] =
     { "ThreadInformation",           func_ThreadInformation },
     { "ThreadContextObjects",        func_ThreadContextObjects },
     { "TunnelCache",                 func_TunnelCache },
+    { "VolumeMountPoint",            func_VolumeMountPoint },
     { "TzSetPrivilege",              func_TzSetPrivilege },
     { "UEFIFirmware",                func_UEFIFirmware },
     { "UnmapViewOfFileEx",           func_UnmapViewOfFileEx },
