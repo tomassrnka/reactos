@@ -19,6 +19,7 @@
 
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -33,6 +34,7 @@ typedef struct {
     struct list entry;
     WER_REPORT_INFORMATION info;
     WER_REPORT_TYPE reporttype;
+    BOOL submitted;
     WCHAR eventtype[1];
 } report_t;
 
@@ -48,7 +50,39 @@ static CRITICAL_SECTION report_table_cs = { &report_table_cs_debug, -1, 0, 0, 0,
 
 static struct list report_table = LIST_INIT(report_table);
 
-static const WCHAR regpath_exclude[] = L"Software\\Microsoft\\Windows Error Reporting\\ExcludedApplications";
+/* Windows limits the event type to 63 characters and a parameter value to 259 */
+#define WER_MAX_EVENT_TYPE_LEN  63
+#define WER_MAX_PARAM_VALUE_LEN 259
+#define WER_SUBMIT_KNOWN_FLAGS  0xffff
+
+static const WCHAR regpath_exclude[] = L"Software\\Microsoft\\Windows\\Windows Error Reporting\\ExcludedApplications";
+
+/* The length of a string, counted only up to one past the limit that matters */
+static SIZE_T bounded_length(const WCHAR *text, SIZE_T limit)
+{
+    SIZE_T length = 0;
+
+    while (length <= limit && text[length]) length++;
+    return length;
+}
+
+static BOOL is_report(HREPORT hreport)
+{
+    report_t *cursor;
+    BOOL found = FALSE;
+
+    EnterCriticalSection(&report_table_cs);
+    LIST_FOR_EACH_ENTRY(cursor, &report_table, report_t, entry)
+    {
+        if (cursor == (report_t *)hreport)
+        {
+            found = TRUE;
+            break;
+        }
+    }
+    LeaveCriticalSection(&report_table_cs);
+    return found;
+}
 
 /***********************************************************************
  * WerAddExcludedApplication (wer.@)
@@ -84,9 +118,9 @@ HRESULT WINAPI WerAddExcludedApplication(PCWSTR exeName, BOOL allUsers)
         bs = (LPWSTR) exeName;
 
     if (!RegCreateKeyW(allUsers ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER, regpath_exclude, &hkey)) {
-        RegSetValueExW(hkey, bs, 0, REG_DWORD, (LPBYTE)&value, sizeof(DWORD));
+        LONG lres = RegSetValueExW(hkey, bs, 0, REG_DWORD, (LPBYTE)&value, sizeof(DWORD));
         RegCloseKey(hkey);
-        return S_OK;
+        return lres ? HRESULT_FROM_WIN32(lres) : S_OK;
     }
     return E_ACCESSDENIED;
 }
@@ -127,7 +161,8 @@ HRESULT WINAPI WerRemoveExcludedApplication(PCWSTR exeName, BOOL allUsers)
     if (!RegCreateKeyW(allUsers ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER, regpath_exclude, &hkey)) {
         lres = RegDeleteValueW(hkey, bs);
         RegCloseKey(hkey);
-        return lres ? __HRESULT_FROM_WIN32(ERROR_ENVVAR_NOT_FOUND) : S_OK;
+        if (lres == ERROR_FILE_NOT_FOUND) return E_FAIL;
+        return lres ? HRESULT_FROM_WIN32(lres) : S_OK;
     }
     return E_ACCESSDENIED;
 }
@@ -158,7 +193,12 @@ HRESULT WINAPI WerReportAddDump(HREPORT hReportHandle, HANDLE hProcess, HANDLE h
     FIXME("(%p, %p, %p, %d, %p, %p, %lu) :stub\n", hReportHandle, hProcess, hThread, dumpType,
           pExceptionParam, pDumpCustomOptions, dwFlags);
 
-    return E_NOTIMPL;
+    /* a micro dump is taken of a thread, so Windows needs one for it */
+    if (!is_report(hReportHandle) || !hProcess || (dumpType == WerDumpTypeMicroDump && !hThread)) return E_INVALIDARG;
+    if (dumpType < WerDumpTypeMicroDump || dumpType >= WerDumpTypeMax) return E_FAIL;
+
+    /* the dump is added to a report that is never sent, so none is written */
+    return S_OK;
 }
 
 /***********************************************************************
@@ -179,7 +219,10 @@ HRESULT WINAPI WerReportAddDump(HREPORT hReportHandle, HANDLE hProcess, HANDLE h
  */
 HRESULT WINAPI WerReportAddFile(HREPORT hreport, PCWSTR path, WER_FILE_TYPE type, DWORD flags)
 {
-    FIXME("(%p, %s, %d, 0x%lx) :stub\n", hreport, debugstr_w(path), type, flags);
+    TRACE("(%p, %s, %d, 0x%lx)\n", hreport, debugstr_w(path), type, flags);
+
+    if (!is_report(hreport) || !path) return E_INVALIDARG;
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return __HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
 
     return S_OK;
 }
@@ -247,6 +290,7 @@ HRESULT WINAPI WerReportCloseHandle(HREPORT hreport)
 HRESULT WINAPI WerReportCreate(PCWSTR eventtype, WER_REPORT_TYPE reporttype, PWER_REPORT_INFORMATION reportinfo, HREPORT *phandle)
 {
     report_t *report;
+    SIZE_T length;
 
     TRACE("(%s, %d, %p, %p)\n", debugstr_w(eventtype), reporttype, reportinfo, phandle);
     if (reportinfo) {
@@ -254,16 +298,18 @@ HRESULT WINAPI WerReportCreate(PCWSTR eventtype, WER_REPORT_TYPE reporttype, PWE
         TRACE(".wzApplicationName: %s\n", debugstr_w(reportinfo->wzApplicationName));
     }
 
-    if (phandle)  *phandle = NULL;
-    if (!eventtype || !eventtype[0] || !phandle || (reporttype >= WerReportInvalid)) {
-        return E_INVALIDARG;
-    }
+    if (!eventtype || !phandle) return E_INVALIDARG;
+    *phandle = NULL;
+    if (!eventtype[0]) return E_INVALIDARG;
+    length = bounded_length(eventtype, WER_MAX_EVENT_TYPE_LEN + 1);
+    if (length > WER_MAX_EVENT_TYPE_LEN)
+        return length == WER_MAX_EVENT_TYPE_LEN + 1 && !eventtype[length] ? __HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) : E_INVALIDARG;
 
-    report = calloc(1, FIELD_OFFSET(report_t, eventtype[lstrlenW(eventtype) + 1]));
+    report = calloc(1, FIELD_OFFSET(report_t, eventtype[length + 1]));
     if (!report)
         return __HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY);
 
-    lstrcpyW(report->eventtype, eventtype);
+    memcpy(report->eventtype, eventtype, length * sizeof(WCHAR));
     report->reporttype = reporttype;
 
     if (reportinfo) {
@@ -299,7 +345,10 @@ HRESULT WINAPI WerReportCreate(PCWSTR eventtype, WER_REPORT_TYPE reporttype, PWE
  */
 HRESULT WINAPI WerReportSetParameter(HREPORT hreport, DWORD id, PCWSTR name, PCWSTR value)
 {
-    FIXME("(%p, %ld, %s, %s) :stub\n", hreport, id, debugstr_w(name), debugstr_w(value));
+    TRACE("(%p, %ld, %s, %s)\n", hreport, id, debugstr_w(name), debugstr_w(value));
+
+    if (!is_report(hreport) || id >= WER_MAX_PARAM_COUNT || !value) return E_INVALIDARG;
+    if (bounded_length(value, WER_MAX_PARAM_VALUE_LEN) > WER_MAX_PARAM_VALUE_LEN) return __HRESULT_FROM_WIN32(ERROR_PARAMETER_QUOTA_EXCEEDED);
 
     return S_OK;
 }
@@ -323,13 +372,50 @@ HRESULT WINAPI WerReportSetParameter(HREPORT hreport, DWORD id, PCWSTR name, PCW
  */
 HRESULT WINAPI WerReportSubmit(HREPORT hreport, WER_CONSENT consent, DWORD flags, PWER_SUBMIT_RESULT presult)
 {
+    report_t *report = NULL, *cursor;
+    HRESULT hr;
+
     FIXME("(%p, %d, 0x%lx, %p) :stub\n", hreport, consent, flags, presult);
 
-    if(!presult)
-        return E_INVALIDARG;
+    EnterCriticalSection(&report_table_cs);
+    LIST_FOR_EACH_ENTRY(cursor, &report_table, report_t, entry)
+    {
+        if (cursor == (report_t *)hreport)
+        {
+            report = cursor;
+            break;
+        }
+    }
 
-    *presult = WerDisabled;
-    return S_OK;
+    if (!report)
+    {
+        hr = E_INVALIDARG;
+    }
+    else if (report->submitted)
+    {
+        /* a report is submitted once, and a second attempt is a failed one */
+        if (presult) *presult = WerReportFailed;
+        hr = __HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    }
+    else if (!presult)
+    {
+        hr = __HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    }
+    else if ((int)consent < WerConsentNotAsked || (int)consent >= WerConsentMax || (flags & ~WER_SUBMIT_KNOWN_FLAGS))
+    {
+        /* a consent or a flag that does not exist fails the submission; Windows reports that as a failed report */
+        *presult = WerReportFailed;
+        hr = (int)consent < WerConsentNotAsked ? E_INVALIDARG : __HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    }
+    else
+    {
+        /* no report can be sent from here, which Windows reports as disabled error reporting */
+        report->submitted = TRUE;
+        *presult = WerDisabled;
+        hr = S_OK;
+    }
+    LeaveCriticalSection(&report_table_cs);
+    return hr;
 }
 
 /***********************************************************************
@@ -337,6 +423,34 @@ HRESULT WINAPI WerReportSubmit(HREPORT hreport, WER_CONSENT consent, DWORD flags
  */
 HRESULT WINAPI WerReportSetUIOption(HREPORT hreport, WER_REPORT_UI uitype, PCWSTR value)
 {
-    FIXME("(%p, %d, %s) :stub\n", hreport, uitype, debugstr_w(value));
-    return E_NOTIMPL;
+    TRACE("(%p, %d, %s)\n", hreport, uitype, debugstr_w(value));
+
+    if (!is_report(hreport) || uitype < WerUIAdditionalDataDlgHeader || uitype >= WerUIMax || !value)
+        return E_INVALIDARG;
+
+    return S_OK;
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
+{
+    switch (reason)
+    {
+    case DLL_PROCESS_ATTACH:
+        DisableThreadLibraryCalls(instance);
+        break;
+    case DLL_PROCESS_DETACH:
+        if (!reserved)
+        {
+            report_t *report, *next;
+
+            LIST_FOR_EACH_ENTRY_SAFE(report, next, &report_table, report_t, entry)
+            {
+                list_remove(&report->entry);
+                free(report);
+            }
+            DeleteCriticalSection(&report_table_cs);
+        }
+        break;
+    }
+    return TRUE;
 }
