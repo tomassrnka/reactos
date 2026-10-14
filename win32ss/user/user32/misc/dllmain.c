@@ -2,6 +2,9 @@
 #include <ndk/cmfuncs.h>
 #include <strsafe.h>
 
+/* user32_vista/win8user.c */
+VOID Win8UserProcessDetach(VOID);
+
 #define MAX_USER_MODE_DRV_BUFFER 526
 
 //
@@ -552,6 +555,7 @@ DllMain(
             if (ghImm32)
                 FreeLibrary(ghImm32);
 
+            Win8UserProcessDetach();
             Cleanup();
             break;
         }
