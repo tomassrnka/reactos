@@ -3641,6 +3641,432 @@ BOOL WINAPI SetupDiGetDeviceRegistryPropertyW(
     return (lError == ERROR_SUCCESS);
 }
 
+/*
+ * The properties of the DEVPKEY_Device_* family (identifier a45c254e-...) whose
+ * property identifier is 2 plus a SPDRP_* index, and the type each one has as a
+ * device property. 0xFFFF marks the SPDRP_UNUSED* slots. The types and the
+ * errors below were measured on Windows 7.
+ */
+#define DEVPROP_SPDRP_PID_BASE 2
+#define DEVPROP_POWER_DATA_SIZE 56
+#define DEVPROP_CONFIGFLAG_FINISH_INSTALL 0x00000400
+
+static const USHORT DevPropSpdrpTypes[] =
+{
+    DEVPROP_TYPE_STRING,            /* SPDRP_DEVICEDESC */
+    DEVPROP_TYPE_STRING_LIST,       /* SPDRP_HARDWAREID */
+    DEVPROP_TYPE_STRING_LIST,       /* SPDRP_COMPATIBLEIDS */
+    0xFFFF,                         /* SPDRP_UNUSED0 */
+    DEVPROP_TYPE_STRING,            /* SPDRP_SERVICE */
+    0xFFFF,                         /* SPDRP_UNUSED1 */
+    0xFFFF,                         /* SPDRP_UNUSED2 */
+    DEVPROP_TYPE_STRING,            /* SPDRP_CLASS */
+    DEVPROP_TYPE_GUID,              /* SPDRP_CLASSGUID, a string in the registry */
+    DEVPROP_TYPE_STRING,            /* SPDRP_DRIVER */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_CONFIGFLAGS */
+    DEVPROP_TYPE_STRING,            /* SPDRP_MFG */
+    DEVPROP_TYPE_STRING,            /* SPDRP_FRIENDLYNAME */
+    DEVPROP_TYPE_STRING,            /* SPDRP_LOCATION_INFORMATION */
+    DEVPROP_TYPE_STRING,            /* SPDRP_PHYSICAL_DEVICE_OBJECT_NAME */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_CAPABILITIES */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_UI_NUMBER */
+    DEVPROP_TYPE_STRING_LIST,       /* SPDRP_UPPERFILTERS */
+    DEVPROP_TYPE_STRING_LIST,       /* SPDRP_LOWERFILTERS */
+    DEVPROP_TYPE_GUID,              /* SPDRP_BUSTYPEGUID */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_LEGACYBUSTYPE */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_BUSNUMBER */
+    DEVPROP_TYPE_STRING,            /* SPDRP_ENUMERATOR_NAME */
+    DEVPROP_TYPE_SECURITY_DESCRIPTOR, /* SPDRP_SECURITY */
+    DEVPROP_TYPE_SECURITY_DESCRIPTOR_STRING, /* SPDRP_SECURITY_SDS */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_DEVTYPE */
+    DEVPROP_TYPE_BOOLEAN,           /* SPDRP_EXCLUSIVE */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_CHARACTERISTICS */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_ADDRESS */
+    DEVPROP_TYPE_STRING,            /* SPDRP_UI_NUMBER_DESC_FORMAT */
+    DEVPROP_TYPE_BINARY,            /* SPDRP_DEVICE_POWER_DATA */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_REMOVAL_POLICY */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_REMOVAL_POLICY_HW_DEFAULT */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_REMOVAL_POLICY_OVERRIDE */
+    DEVPROP_TYPE_UINT32,            /* SPDRP_INSTALL_STATE */
+    DEVPROP_TYPE_STRING_LIST,       /* SPDRP_LOCATION_PATHS */
+    DEVPROP_TYPE_GUID,              /* SPDRP_BASE_CONTAINERID */
+};
+
+static const GUID DevPropFmtidDevice =
+    {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}};
+static const GUID DevPropFmtidName =
+    {0xb725f130, 0x47ef, 0x101a, {0xa5, 0xf1, 0x02, 0x60, 0x8c, 0x9e, 0xeb, 0xac}};
+static const GUID DevPropFmtidInstanceId =
+    {0x78c34fc8, 0x104a, 0x4aca, {0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57}};
+static const GUID DevPropFmtidDevNode =
+    {0x4340a6c5, 0x93fa, 0x4706, {0x97, 0x2c, 0x7b, 0x64, 0x80, 0x08, 0xa5, 0xa7}};
+
+#define DEVPROP_PID_NAME 10
+#define DEVPROP_PID_INSTANCEID 256
+#define DEVPROP_PID_DEVNODESTATUS 2
+#define DEVPROP_PID_PROBLEMCODE 3
+#define DEVPROP_PID_PARENT 8
+
+/* Copies a property value out; sets the type and the size as Windows does when the buffer is too small */
+static
+DWORD
+SETUPDI_ReturnDeviceProperty(
+    IN DEVPROPTYPE Type,
+    IN const VOID *Value,
+    IN DWORD ValueSize,
+    OUT DEVPROPTYPE *PropertyType,
+    OUT PBYTE PropertyBuffer,
+    IN DWORD PropertyBufferSize,
+    OUT PDWORD RequiredSize OPTIONAL)
+{
+    *PropertyType = Type;
+    if (RequiredSize)
+        *RequiredSize = ValueSize;
+    if (PropertyBufferSize < ValueSize)
+        return ERROR_INSUFFICIENT_BUFFER;
+    memcpy(PropertyBuffer, Value, ValueSize);
+    return ERROR_SUCCESS;
+}
+
+static BOOL IsDeviceInfoInDeviceInfoSet(struct DeviceInfoSet *deviceInfoSet, struct DeviceInfo *deviceInfo);
+
+/* Reads a SPDRP_* property into a heap block that grows until the value fits; the caller frees it */
+static
+DWORD
+SETUPDI_ReadSpdrpProperty(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData,
+    IN DWORD Property,
+    OUT PDWORD RegType,
+    OUT PBYTE *Value,
+    OUT PDWORD Size)
+{
+    struct DeviceInfoSet *set = (struct DeviceInfoSet *)DeviceInfoSet;
+    struct DeviceInfo *devInfo = (struct DeviceInfo *)DeviceInfoData->Reserved;
+    DWORD Capacity = 256, Round, Error;
+    PBYTE Data;
+    CONFIGRET cr;
+
+    /*
+     * The kernel reports the size of the buffer, not of the value, for some properties: the 56 bytes of
+     * CM_POWER_DATA and the DWORD of the flag and number properties. So ask for exactly that much.
+     */
+    if (Property == SPDRP_DEVICE_POWER_DATA)
+        Capacity = DEVPROP_POWER_DATA_SIZE;
+    else if (DevPropSpdrpTypes[Property] == DEVPROP_TYPE_UINT32 || DevPropSpdrpTypes[Property] == DEVPROP_TYPE_BOOLEAN)
+        Capacity = sizeof(DWORD);
+
+    for (Round = 0; Round < 8; Round++)
+    {
+        /* Two extra zeroed characters, so that a string or a list is always terminated */
+        Data = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Capacity + 2 * sizeof(WCHAR));
+        if (!Data)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        *Size = Capacity;
+
+        if (Property == SPDRP_PHYSICAL_DEVICE_OBJECT_NAME)
+        {
+            /* The registry-property call answers this one with the instance path, which is not the name */
+            cr = CM_Get_DevNode_Registry_Property_ExW(devInfo->dnDevInst, CM_DRP_PHYSICAL_DEVICE_OBJECT_NAME, RegType,
+                                                      Data, Size, 0, set->hMachine);
+            if (cr == CR_SUCCESS)
+            {
+                /* A device node without a device object has no name */
+                if (*Size <= sizeof(WCHAR) || !((PWCHAR)Data)[0])
+                {
+                    HeapFree(GetProcessHeap(), 0, Data);
+                    return ERROR_NOT_FOUND;
+                }
+                *Value = Data;
+                return ERROR_SUCCESS;
+            }
+            Error = (cr == CR_BUFFER_SMALL) ? ERROR_INSUFFICIENT_BUFFER : ERROR_NOT_FOUND;
+        }
+        else if (SetupDiGetDeviceRegistryPropertyW(DeviceInfoSet, DeviceInfoData, Property, RegType, Data, Capacity, Size))
+        {
+            if (Property == SPDRP_DEVICE_POWER_DATA)
+                *Size = DEVPROP_POWER_DATA_SIZE;
+            *Value = Data;
+            return ERROR_SUCCESS;
+        }
+        else
+        {
+            Error = GetLastError();
+        }
+
+        HeapFree(GetProcessHeap(), 0, Data);
+        if (Error != ERROR_INSUFFICIENT_BUFFER)
+            return Error;
+        Capacity = (*Size > Capacity) ? *Size : Capacity * 2;
+    }
+
+    return ERROR_INSUFFICIENT_BUFFER;
+}
+
+/* A SPDRP_* property, in the form of the device property that has the same data */
+static
+DWORD
+SETUPDI_GetDeviceSpdrpProperty(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData,
+    IN DWORD Property,
+    OUT DEVPROPTYPE *PropertyType,
+    OUT PBYTE PropertyBuffer,
+    IN DWORD PropertyBufferSize,
+    OUT PDWORD RequiredSize OPTIONAL)
+{
+    DEVPROPTYPE Type = DevPropSpdrpTypes[Property];
+    DWORD RegType = REG_NONE, Size = 0, Error;
+    PBYTE Data = NULL;
+    GUID Guid;
+    BYTE Boolean;
+
+    Error = SETUPDI_ReadSpdrpProperty(DeviceInfoSet, DeviceInfoData, Property, &RegType, &Data, &Size);
+    if (Error == ERROR_SUCCESS)
+    {
+        switch (Type)
+        {
+            case DEVPROP_TYPE_STRING:
+            {
+                /* Strings come with exactly one terminator, however many the registry value has */
+                PWCHAR String = (PWCHAR)Data;
+                DWORD Length = 0;
+
+                while (Length < Size / sizeof(WCHAR) && String[Length])
+                    Length++;
+                String[Length] = UNICODE_NULL;
+                Error = SETUPDI_ReturnDeviceProperty(Type, String, (Length + 1) * sizeof(WCHAR), PropertyType,
+                                                     PropertyBuffer, PropertyBufferSize, RequiredSize);
+                break;
+            }
+
+            case DEVPROP_TYPE_STRING_LIST:
+            {
+                /* A list ends with one empty string, and an empty list is just that terminator */
+                PWCHAR List = (PWCHAR)Data;
+                DWORD Chars = Size / sizeof(WCHAR), Position = 0;
+
+                while (Position < Chars && List[Position])
+                {
+                    while (Position < Chars && List[Position])
+                        Position++;
+                    Position++;
+                }
+                if (Position > Chars)
+                    Position = Chars;
+                /* An unterminated last string gets its terminator first */
+                if (Position && List[Position - 1])
+                    List[Position++] = UNICODE_NULL;
+                List[Position] = UNICODE_NULL;
+                Error = SETUPDI_ReturnDeviceProperty(Type, List, (Position + 1) * sizeof(WCHAR), PropertyType,
+                                                     PropertyBuffer, PropertyBufferSize, RequiredSize);
+                break;
+            }
+
+            case DEVPROP_TYPE_GUID:
+                /* A string in the registry for the class, 16 bytes for the bus type */
+                if (Property == SPDRP_CLASSGUID)
+                {
+                    if (RegType != REG_SZ || pSetupGuidFromString((PCWSTR)Data, &Guid) != NO_ERROR)
+                        Error = ERROR_NOT_FOUND;
+                }
+                else if (Size == sizeof(GUID))
+                {
+                    memcpy(&Guid, Data, sizeof(GUID));
+                }
+                else
+                {
+                    Error = ERROR_NOT_FOUND;
+                }
+                if (Error == ERROR_SUCCESS)
+                    Error = SETUPDI_ReturnDeviceProperty(Type, &Guid, sizeof(Guid), PropertyType, PropertyBuffer,
+                                                         PropertyBufferSize, RequiredSize);
+                break;
+
+            case DEVPROP_TYPE_UINT32:
+                /* A value cut short (ReactOS gives one byte for the default removal policy) is a number with zeros above it */
+                if (Size > 0 && Size < sizeof(DWORD))
+                    Size = sizeof(DWORD);
+
+                if (Size != sizeof(DWORD))
+                {
+                    Error = ERROR_NOT_FOUND;
+                }
+                else if (Property == SPDRP_INSTALL_STATE)
+                {
+                    /* The kernel answers with the configuration flags; the property is the installation state */
+                    DWORD Flags = *(PDWORD)Data, State = CM_INSTALL_STATE_INSTALLED;
+
+                    if (Flags & CONFIGFLAG_FAILEDINSTALL)
+                        State = CM_INSTALL_STATE_FAILED_INSTALL;
+                    else if (Flags & CONFIGFLAG_REINSTALL)
+                        State = CM_INSTALL_STATE_NEEDS_REINSTALL;
+                    else if (Flags & DEVPROP_CONFIGFLAG_FINISH_INSTALL)
+                        State = CM_INSTALL_STATE_FINISH_INSTALL;
+                    Error = SETUPDI_ReturnDeviceProperty(Type, &State, sizeof(State), PropertyType, PropertyBuffer,
+                                                         PropertyBufferSize, RequiredSize);
+                }
+                else
+                {
+                    Error = SETUPDI_ReturnDeviceProperty(Type, Data, Size, PropertyType, PropertyBuffer,
+                                                         PropertyBufferSize, RequiredSize);
+                }
+                break;
+
+            case DEVPROP_TYPE_BOOLEAN:
+                /* A DWORD in the registry, one byte that is 0 or 0xFF as a device property */
+                if (RegType != REG_DWORD || Size != sizeof(DWORD))
+                {
+                    Error = ERROR_NOT_FOUND;
+                }
+                else
+                {
+                    Boolean = *(PDWORD)Data ? 0xFF : 0x00;
+                    Error = SETUPDI_ReturnDeviceProperty(Type, &Boolean, sizeof(Boolean), PropertyType, PropertyBuffer,
+                                                         PropertyBufferSize, RequiredSize);
+                }
+                break;
+
+            default:
+                Error = SETUPDI_ReturnDeviceProperty(Type, Data, Size, PropertyType, PropertyBuffer,
+                                                     PropertyBufferSize, RequiredSize);
+                break;
+        }
+    }
+    if (Data)
+        HeapFree(GetProcessHeap(), 0, Data);
+
+    if (Error == ERROR_SUCCESS || Error == ERROR_INSUFFICIENT_BUFFER)
+        return Error;
+
+    /* The property is defined, but this device does not have it */
+    if (Error == ERROR_INVALID_DATA || Error == ERROR_FILE_NOT_FOUND || Error == ERROR_INVALID_REG_PROPERTY)
+        Error = ERROR_NOT_FOUND;
+    return Error;
+}
+
+/***********************************************************************
+ *		SetupDiGetDevicePropertyW (SETUPAPI.@)
+ *
+ * The properties that come from the registry values of the device node are
+ * available: the DEVPKEY_Device_* ones that have a SPDRP_* equivalent, the
+ * name, the instance ID, the problem code and status, and the parent.
+ */
+BOOL WINAPI SetupDiGetDevicePropertyW(
+        HDEVINFO DeviceInfoSet,
+        PSP_DEVINFO_DATA DeviceInfoData,
+        const DEVPROPKEY *PropertyKey,
+        DEVPROPTYPE *PropertyType,
+        PBYTE PropertyBuffer,
+        DWORD PropertyBufferSize,
+        PDWORD RequiredSize,
+        DWORD Flags)
+{
+    struct DeviceInfoSet *set = (struct DeviceInfoSet *)DeviceInfoSet;
+    struct DeviceInfo *devInfo;
+    DWORD Error = ERROR_NOT_FOUND, Value;
+    ULONG Status, Problem;
+
+    TRACE("%s(%p %p %p %p %p %d %p %x)\n", __FUNCTION__, DeviceInfoSet, DeviceInfoData, PropertyKey,
+        PropertyType, PropertyBuffer, PropertyBufferSize, RequiredSize, Flags);
+
+    if (!DeviceInfoSet || DeviceInfoSet == INVALID_HANDLE_VALUE || set->magic != SETUP_DEVICE_INFO_SET_MAGIC)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if (!DeviceInfoData || DeviceInfoData->cbSize != sizeof(SP_DEVINFO_DATA) || !DeviceInfoData->Reserved ||
+        !IsDeviceInfoInDeviceInfoSet(set, (struct DeviceInfo *)DeviceInfoData->Reserved))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (Flags)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+    if (!PropertyType || (!PropertyBuffer && PropertyBufferSize))
+    {
+        SetLastError(ERROR_INVALID_USER_BUFFER);
+        return FALSE;
+    }
+    if (!PropertyKey)
+    {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+
+    devInfo = (struct DeviceInfo *)DeviceInfoData->Reserved;
+    *PropertyType = DEVPROP_TYPE_EMPTY;
+
+    if (IsEqualGUID(&PropertyKey->fmtid, &DevPropFmtidDevice))
+    {
+        if (PropertyKey->pid >= DEVPROP_SPDRP_PID_BASE &&
+            PropertyKey->pid - DEVPROP_SPDRP_PID_BASE < ARRAYSIZE(DevPropSpdrpTypes) &&
+            DevPropSpdrpTypes[PropertyKey->pid - DEVPROP_SPDRP_PID_BASE] != 0xFFFF)
+        {
+            Error = SETUPDI_GetDeviceSpdrpProperty(DeviceInfoSet, DeviceInfoData,
+                                                   PropertyKey->pid - DEVPROP_SPDRP_PID_BASE,
+                                                   PropertyType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+        }
+        else
+        {
+            Error = ERROR_INVALID_REG_PROPERTY;
+        }
+    }
+    else if (IsEqualGUID(&PropertyKey->fmtid, &DevPropFmtidName) && PropertyKey->pid == DEVPROP_PID_NAME)
+    {
+        /* The friendly name, else the description */
+        Error = SETUPDI_GetDeviceSpdrpProperty(DeviceInfoSet, DeviceInfoData, SPDRP_FRIENDLYNAME,
+                                               PropertyType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+        if (Error == ERROR_NOT_FOUND)
+        {
+            Error = SETUPDI_GetDeviceSpdrpProperty(DeviceInfoSet, DeviceInfoData, SPDRP_DEVICEDESC,
+                                                   PropertyType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+        }
+    }
+    else if (IsEqualGUID(&PropertyKey->fmtid, &DevPropFmtidInstanceId) && PropertyKey->pid == DEVPROP_PID_INSTANCEID)
+    {
+        Error = SETUPDI_ReturnDeviceProperty(DEVPROP_TYPE_STRING, devInfo->instanceId,
+                                             (lstrlenW(devInfo->instanceId) + 1) * sizeof(WCHAR),
+                                             PropertyType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+    }
+    else if (IsEqualGUID(&PropertyKey->fmtid, &DevPropFmtidDevNode) &&
+             (PropertyKey->pid == DEVPROP_PID_DEVNODESTATUS || PropertyKey->pid == DEVPROP_PID_PROBLEMCODE))
+    {
+        if (CM_Get_DevNode_Status_Ex(&Status, &Problem, devInfo->dnDevInst, 0, set->hMachine) != CR_SUCCESS)
+        {
+            Error = ERROR_NOT_FOUND;
+        }
+        else
+        {
+            Value = (PropertyKey->pid == DEVPROP_PID_DEVNODESTATUS) ? Status : Problem;
+            Error = SETUPDI_ReturnDeviceProperty(DEVPROP_TYPE_UINT32, &Value, sizeof(Value),
+                                                 PropertyType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+        }
+    }
+    else if (IsEqualGUID(&PropertyKey->fmtid, &DevPropFmtidDevNode) && PropertyKey->pid == DEVPROP_PID_PARENT)
+    {
+        WCHAR ParentId[MAX_DEVICE_ID_LEN];
+        DEVINST Parent;
+
+        if (CM_Get_Parent_Ex(&Parent, devInfo->dnDevInst, 0, set->hMachine) != CR_SUCCESS ||
+            CM_Get_Device_ID_ExW(Parent, ParentId, ARRAYSIZE(ParentId), 0, set->hMachine) != CR_SUCCESS)
+        {
+            Error = ERROR_NOT_FOUND;
+        }
+        else
+        {
+            Error = SETUPDI_ReturnDeviceProperty(DEVPROP_TYPE_STRING, ParentId, (lstrlenW(ParentId) + 1) * sizeof(WCHAR),
+                                                 PropertyType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+        }
+    }
+
+    SetLastError(Error);
+    return Error == ERROR_SUCCESS;
+}
+
 /***********************************************************************
  *		Internal for SetupDiSetDeviceRegistryPropertyA/W
  */
