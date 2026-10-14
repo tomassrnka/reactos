@@ -100,6 +100,7 @@ list(APPEND SOURCE
     UpdateLayeredWindow.c
     UserHandleGrantAccess.c
     VirtualKey.c
+    Win8User.c
     WinEventHook.c
     WmPrint.c
     WndProc.c

@@ -103,6 +103,7 @@ extern void func_VirtualKey(void);
 extern void func_WinEventHook(void);
 extern void func_WmPrint(void);
 extern void func_WndProc(void);
+extern void func_Win8User(void);
 extern void func_wsprintfApi(void);
 
 const struct test winetest_testlist[] =
@@ -205,6 +206,7 @@ const struct test winetest_testlist[] =
     { "UpdateLayeredWindow", func_UpdateLayeredWindow },
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
     { "VirtualKey", func_VirtualKey },
+    { "Win8User", func_Win8User },
     { "WinEventHook", func_WinEventHook },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
