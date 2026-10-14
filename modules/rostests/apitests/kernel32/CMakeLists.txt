@@ -35,6 +35,7 @@ list(APPEND SOURCE
     lstrlen.c
     Mailslot.c
     MultiByteToWideChar.c
+    PerformanceCounter.c
     Pipes.c
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
