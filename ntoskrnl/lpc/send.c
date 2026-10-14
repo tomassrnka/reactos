@@ -187,6 +187,7 @@ LpcRequestWaitReplyPort(IN PVOID PortObject,
     USHORT MessageType;
     PLPCP_MESSAGE Message;
     BOOLEAN Callback = FALSE;
+    BOOLEAN ReleaseOwed = FALSE;
     PKSEMAPHORE Semaphore;
 
     PAGED_CODE();
@@ -263,6 +264,9 @@ LpcRequestWaitReplyPort(IN PVOID PortObject,
                         LpcRequest + 1,
                         0,
                         &Thread->Cid);
+
+        /* Start the request with no stale count on the reply semaphore */
+        LpcpResetReplySemaphore(Thread);
 
         /* Acquire the LPC lock */
         KeAcquireGuardedMutex(&LpcpLock);
@@ -373,9 +377,21 @@ LpcRequestWaitReplyPort(IN PVOID PortObject,
         RemoveEntryList(&Thread->LpcReplyChain);
         InitializeListHead(&Thread->LpcReplyChain);
     }
+    else if (Status != STATUS_SUCCESS)
+    {
+        /* We were woken, but the aborted wait did not take the release */
+        ReleaseOwed = TRUE;
+    }
 
     /* Release the lock */
     KeReleaseGuardedMutex(&LpcpLock);
+
+    /* Take the release so that it cannot satisfy a later wait */
+    if (ReleaseOwed)
+    {
+        LpcpCompleteAbortedWait(&Thread->LpcReplySemaphore);
+        Status = STATUS_SUCCESS;
+    }
 
     /* Check if we got a reply */
     if (Status == STATUS_SUCCESS)
@@ -705,6 +721,7 @@ NtRequestWaitReplyPort(IN HANDLE PortHandle,
     KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     PETHREAD Thread = PsGetCurrentThread();
     BOOLEAN Callback;
+    BOOLEAN ReleaseOwed = FALSE;
     PKSEMAPHORE Semaphore;
     ULONG MessageType;
     PLPCP_DATA_INFO DataInfo;
@@ -875,6 +892,9 @@ NtRequestWaitReplyPort(IN HANDLE PortHandle,
         }
         _SEH2_END;
 
+        /* Start the request with no stale count on the reply semaphore */
+        LpcpResetReplySemaphore(Thread);
+
         /* Acquire the LPC lock */
         KeAcquireGuardedMutex(&LpcpLock);
 
@@ -981,9 +1001,21 @@ NtRequestWaitReplyPort(IN HANDLE PortHandle,
         RemoveEntryList(&Thread->LpcReplyChain);
         InitializeListHead(&Thread->LpcReplyChain);
     }
+    else if (Status != STATUS_SUCCESS)
+    {
+        /* We were woken, but the aborted wait did not take the release */
+        ReleaseOwed = TRUE;
+    }
 
     /* Release the lock */
     KeReleaseGuardedMutex(&LpcpLock);
+
+    /* Take the release so that it cannot satisfy a later wait */
+    if (ReleaseOwed)
+    {
+        LpcpCompleteAbortedWait(&Thread->LpcReplySemaphore);
+        Status = STATUS_SUCCESS;
+    }
 
     /* Check if we got a reply */
     if (Status == STATUS_SUCCESS)

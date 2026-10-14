@@ -18,7 +18,8 @@ PVOID
 NTAPI
 LpcpFreeConMsg(IN OUT PLPCP_MESSAGE *Message,
                IN OUT PLPCP_CONNECTION_MESSAGE *ConnectMessage,
-               IN PETHREAD CurrentThread)
+               IN PETHREAD CurrentThread,
+               OUT PBOOLEAN Woken)
 {
     PVOID SectionToMap;
     PLPCP_MESSAGE ReplyMessage;
@@ -32,6 +33,12 @@ LpcpFreeConMsg(IN OUT PLPCP_MESSAGE *Message,
         /* Remove this entry and re-initialize it */
         RemoveEntryList(&CurrentThread->LpcReplyChain);
         InitializeListHead(&CurrentThread->LpcReplyChain);
+        *Woken = FALSE;
+    }
+    else
+    {
+        /* Whoever took us off the chain also releases the semaphore */
+        *Woken = TRUE;
     }
 
     /* Check if there's a reply message */
@@ -104,6 +111,7 @@ NtSecureConnectPort(OUT PHANDLE PortHandle,
     HANDLE Handle;
     PVOID SectionToMap;
     LARGE_INTEGER SectionOffset;
+    BOOLEAN Waited = FALSE, Woken;
     PTOKEN Token;
     PTOKEN_USER TokenUserInfo;
 
@@ -541,6 +549,9 @@ NtSecureConnectPort(OUT PHANDLE PortHandle,
     /* Reset the status code */
     Status = STATUS_SUCCESS;
 
+    /* Start the request with no stale count on the reply semaphore */
+    LpcpResetReplySemaphore(Thread);
+
     /* Acquire the port lock */
     KeAcquireGuardedMutex(&LpcpLock);
 
@@ -600,24 +611,18 @@ NtSecureConnectPort(OUT PHANDLE PortHandle,
 
         /* Now wait for a reply and set 'Status' */
         LpcpConnectWait(&Thread->LpcReplySemaphore, PreviousMode);
+        Waited = TRUE;
     }
 
     /* Now, always free the connection message */
-    SectionToMap = LpcpFreeConMsg(&Message, &ConnectMessage, Thread);
+    SectionToMap = LpcpFreeConMsg(&Message, &ConnectMessage, Thread, &Woken);
 
     /* Check for failure */
     if (!NT_SUCCESS(Status))
     {
-        /* Check if the semaphore got signaled in the meantime */
-        if (KeReadStateSemaphore(&Thread->LpcReplySemaphore))
-        {
-            /* Wait on it */
-            KeWaitForSingleObject(&Thread->LpcReplySemaphore,
-                                  WrExecutive,
-                                  KernelMode,
-                                  FALSE,
-                                  NULL);
-        }
+        /* If we were woken, take the release the aborted wait missed */
+        if (Waited && Woken)
+            LpcpCompleteAbortedWait(&Thread->LpcReplySemaphore);
 
         goto Failure;
     }

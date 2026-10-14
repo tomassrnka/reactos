@@ -14,7 +14,7 @@
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
-VOID
+BOOLEAN
 NTAPI
 LpcpPrepareToWakeClient(IN PETHREAD Thread)
 {
@@ -27,7 +27,11 @@ LpcpPrepareToWakeClient(IN PETHREAD Thread)
         /* Remove it from the list and reinitialize it */
         RemoveEntryList(&Thread->LpcReplyChain);
         InitializeListHead(&Thread->LpcReplyChain);
+        return TRUE;
     }
+
+    /* The client already left its connect wait; it must not be released */
+    return FALSE;
 }
 
 /* PUBLIC FUNCTIONS **********************************************************/
@@ -404,7 +408,7 @@ Cleanup:
     if (ClientThread)
     {
         KeAcquireGuardedMutex(&LpcpLock);
-        if (ClientThread->LpcExitThreadCalled)
+        if (!LpcpPrepareToWakeClient(ClientThread))
         {
             /* The client is gone and will never collect it, free it */
             LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
@@ -412,7 +416,6 @@ Cleanup:
         else
         {
             ClientThread->LpcReplyMessage = Message;
-            LpcpPrepareToWakeClient(ClientThread);
             KeReleaseGuardedMutex(&LpcpLock);
             LpcpCompleteWait(&ClientThread->LpcReplySemaphore);
         }
@@ -440,6 +443,7 @@ NtCompleteConnectPort(IN HANDLE PortHandle)
     NTSTATUS Status;
     KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     PLPCP_PORT_OBJECT Port;
+    PLPCP_MESSAGE Message;
     PETHREAD Thread;
 
     PAGED_CODE();
@@ -488,11 +492,19 @@ NtCompleteConnectPort(IN HANDLE PortHandle)
 
     /* Clear the client thread and wake it up */
     Port->ClientThread = NULL;
-    LpcpPrepareToWakeClient(Thread);
-
-    /* Release the lock and wait for an answer */
-    KeReleaseGuardedMutex(&LpcpLock);
-    LpcpCompleteWait(&Thread->LpcReplySemaphore);
+    if (LpcpPrepareToWakeClient(Thread))
+    {
+        /* Release the lock and wait for an answer */
+        KeReleaseGuardedMutex(&LpcpLock);
+        LpcpCompleteWait(&Thread->LpcReplySemaphore);
+    }
+    else
+    {
+        /* The client left its wait and will never collect the reply */
+        Message = LpcpGetMessageFromThread(Thread);
+        Thread->LpcReplyMessage = NULL;
+        LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
+    }
 
     /* Dereference the Thread and Port and return */
     ObDereferenceObject(Port);
