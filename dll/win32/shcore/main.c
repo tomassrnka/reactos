@@ -439,6 +439,12 @@ HRESULT WINAPI GetCurrentProcessExplicitAppUserModelID(const WCHAR **appid)
     return E_NOTIMPL;
 }
 
+/* The executable path of a command line ends at any C-locale white space; the arguments only split at a space or tab */
+static BOOL is_exe_path_end(WCHAR ch)
+{
+    return ch == ' ' || (ch >= 0x09 && ch <= 0x0d);
+}
+
 /*************************************************************************
  * CommandLineToArgvW            [SHCORE.@]
  *
@@ -522,7 +528,7 @@ WCHAR** WINAPI CommandLineToArgvW(const WCHAR *cmdline, int *numargs)
     else
     {
         /* The executable path ends at the next space, no matter what */
-        while (*s && *s != ' ' && *s != '\t')
+        while (*s && !is_exe_path_end(*s))
             s++;
     }
     /* skip to the first argument, if any */
@@ -604,7 +610,7 @@ WCHAR** WINAPI CommandLineToArgvW(const WCHAR *cmdline, int *numargs)
     else
     {
         /* The executable path ends at the next space, no matter what */
-        while (*d && *d != ' ' && *d != '\t')
+        while (*d && !is_exe_path_end(*d))
             d++;
         s = d;
         if (*s)
