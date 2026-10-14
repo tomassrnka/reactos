@@ -252,7 +252,9 @@ NTSTATUS
 NTAPI
 ObInitProcess(
     IN PEPROCESS Parent OPTIONAL,
-    IN PEPROCESS Process
+    IN PEPROCESS Process,
+    IN PHANDLE HandleList OPTIONAL,
+    IN SIZE_T HandleCount
 );
 
 PHANDLE_TABLE
