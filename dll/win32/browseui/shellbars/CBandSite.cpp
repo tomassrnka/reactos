@@ -567,7 +567,12 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::AddBand(IUnknown *punk)
         }
 
         if (!SendMessageW(m_hwndRebar, RB_INSERTBANDW, (WPARAM)uBand, reinterpret_cast<LPARAM>(&rbi)))
+        {
+            /* The band is not part of the site */
+            ObjWithSite->SetSite(NULL);
+            _FreeBand(NewBand);
             return E_FAIL;
+        }
 
         hRet = (HRESULT)((USHORT)_GetBandID(NewBand));
 
@@ -1246,6 +1251,15 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Save(IStream *pStm, BOOL fClearDirty)
 
         if (FAILED(_StreamTell(pStm, &uliEntryEnd)))
             return E_FAIL;
+
+        /* Load stops at an entry it would refuse, so the bands after it would be lost as well */
+        if (uliEntryEnd.QuadPart - uliEntry.QuadPart - sizeof(entry.cbEntry) > BANDSITE_STREAM_MAXENTRY)
+        {
+            WARN("Band %u is too large to save\n", i);
+            if (FAILED(_StreamSeek(pStm, uliEntry.QuadPart)))
+                return E_FAIL;
+            continue;
+        }
         entry.cbEntry = (DWORD)(uliEntryEnd.QuadPart - uliEntry.QuadPart - sizeof(entry.cbEntry));
         if (FAILED(_StreamSeek(pStm, uliEntry.QuadPart)) ||
             FAILED(pStm->Write(&entry, sizeof(entry), &cbWritten)) || cbWritten != sizeof(entry) ||
