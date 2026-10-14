@@ -550,11 +550,13 @@ Cleanup:
         WaitForSingleObject(pFirst->Overlapped.hEvent, 3000);
 }
 
-/* After a cancelled ConnectEx the socket is bound again: listen() on it works
- * and accepts a connection (Windows Server 2008 R2 and Windows 10). ReactOS
- * left the socket connecting, so listen() failed. ReactOS tcpip still refuses
- * connections to a listener on the port of a cancelled connect (also a new
- * socket bound there, also 75 s later), so those two checks are todo */
+/* After a cancelled ConnectEx the socket is bound again: it reports 0.0.0.0,
+ * and listen() on it works and accepts a loopback connection (Windows Server
+ * 2008 R2 and Windows 10). ReactOS left the socket connecting, so listen()
+ * failed. ReactOS tcpip then reported the socket bound to the interface the
+ * cancelled connect had chosen and listened only there, refusing loopback:
+ * the connect from the unspecified address had written that interface's
+ * address into the address file */
 static
 void
 TestCancelThenListen(void)
@@ -586,18 +588,24 @@ TestCancelThenListen(void)
     ok(CancelIo((HANDLE)Client), "CancelIo failed: %lu\n", GetLastError());
     ok(WaitEventRequest(Client, &First, 3000), "The cancelled ConnectEx did not complete\n");
     ok(First.Error == ERROR_OPERATION_ABORTED, "The cancelled ConnectEx: error %lu\n", First.Error);
+    ok(getsockname(Client, (struct sockaddr *)&Local, &Len) == 0, "getsockname failed: %d\n", WSAGetLastError());
+    ok(Local.sin_addr.s_addr == htonl(INADDR_ANY), "After the cancel the socket is bound to %s, not 0.0.0.0\n",
+       inet_ntoa(Local.sin_addr));
+    ok(Local.sin_port != 0, "After the cancel the socket has no port\n");
 
     Error = listen(Client, 1) ? WSAGetLastError() : 0;
     ok(Error == 0, "listen after a cancelled ConnectEx: error %d\n", Error);
     if (Error)
         goto Cleanup;
+    Len = sizeof(Local);
     ok(getsockname(Client, (struct sockaddr *)&Local, &Len) == 0, "getsockname failed: %d\n", WSAGetLastError());
+    ok(Local.sin_addr.s_addr == htonl(INADDR_ANY), "The listener is bound to %s, not 0.0.0.0\n", inet_ntoa(Local.sin_addr));
     Local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     Peer = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     Error = connect(Peer, (struct sockaddr *)&Local, sizeof(Local)) ? WSAGetLastError() : 0;
-    todo_ros ok(Error == 0, "connect to the listener after a cancelled ConnectEx: error %d\n", Error);
+    ok(Error == 0, "connect to the listener after a cancelled ConnectEx: error %d\n", Error);
     Accepted = AcceptWithin(Client, 5000);
-    todo_ros ok(Accepted != INVALID_SOCKET, "The listener accepted nothing\n");
+    ok(Accepted != INVALID_SOCKET, "The listener accepted nothing\n");
 
 Cleanup:
     if (Accepted != INVALID_SOCKET)
