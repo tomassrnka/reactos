@@ -628,6 +628,19 @@ done:
     free(version);
 }
 
+static BOOL msi_has_server2003_layer(void)
+{
+    WCHAR layers[256], *p;
+    DWORD len = GetEnvironmentVariableW( L"__COMPAT_LAYER", layers, ARRAY_SIZE(layers) );
+
+    if (!len) return FALSE;
+    /* A list that does not fit is not read: assume the layer was chosen on purpose */
+    if (len >= ARRAY_SIZE(layers)) return TRUE;
+    for (p = layers; *p; p++)
+        if (!wcsnicmp( p, L"WINSRV03", 8 )) return TRUE;
+    return FALSE;
+}
+
 static VOID set_installer_properties(MSIPACKAGE *package)
 {
     WCHAR *ptr;
@@ -750,6 +763,10 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     OSVersion.dwOSVersionInfoSize = sizeof(OSVersion);
     RtlGetVersion(&OSVersion);
     verval = OSVersion.dwMinorVersion + OSVersion.dwMajorVersion * 100;
+    /* The system reports 5.2 and provides the Windows 7 platform: packages see Windows 7, unless a Windows Server 2003
+       compatibility layer (the only version layers that also say 5.2) was chosen */
+    if (verval == 502 && OSVersion.dwBuildNumber == 3790 && !msi_has_server2003_layer())
+        verval = 601;
     if (verval > 603)
     {
         verval = 603;

@@ -5634,6 +5634,9 @@ static void test_installprops(void)
     GetNativeSystemInfo(&si);
 
     sprintf(buf, "%d", LOBYTE(LOWORD(GetVersion())) * 100 + HIBYTE(LOWORD(GetVersion())));
+    /* ReactOS reports NT 5.2 and offers the Windows 7 platform: the package sees Windows 7 */
+    if (is_reactos() && !strcmp(buf, "502"))
+        strcpy(buf, "601");
     check_prop(hpkg, "VersionNT", buf, 1, 1);
 
     if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ||
@@ -5644,6 +5647,8 @@ static void test_installprops(void)
         check_prop(hpkg, "MsiAMD64", buf, 1, 0);
         check_prop(hpkg, "Msix64", buf, 1, 0);
         sprintf(buf, "%d", LOBYTE(LOWORD(GetVersion())) * 100 + HIBYTE(LOWORD(GetVersion())));
+        if (is_reactos() && !strcmp(buf, "502"))
+            strcpy(buf, "601");
         check_prop(hpkg, "VersionNT64", buf, 1, 1);
 
         GetSystemDirectoryA(path, MAX_PATH);

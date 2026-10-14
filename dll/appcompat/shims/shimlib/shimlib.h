@@ -86,6 +86,10 @@ typedef struct tagSHIMREG
     _PVGetHookAPIs GetHookAPIs;
     _PVNotify Notify;
     PCSTR ShimName;
+#ifdef _WIN64
+    /* The registrations are laid out by the linker as an array: 32 bytes keep every entry on its natural alignment */
+    PVOID Reserved;
+#endif
 } SHIMREG, *PSHIMREG;
 
 

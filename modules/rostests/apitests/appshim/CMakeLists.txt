@@ -9,10 +9,11 @@ list(APPEND SOURCE
     ignoreloadlib.c
     layer_hooks.c
     versionlie.c
+    verifyversion.c
     testlist.c
     appshim_apitest.h)
 
 add_executable(appshim_apitest ${SOURCE})
 set_module_type(appshim_apitest win32cui)
-add_importlibs(appshim_apitest version msvcrt kernel32 ntdll)
+add_importlibs(appshim_apitest advapi32 version msvcrt kernel32 ntdll)
 add_rostests_file(TARGET appshim_apitest)
