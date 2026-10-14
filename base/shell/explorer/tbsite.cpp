@@ -45,6 +45,7 @@ class CTrayBandSite :
     CComPtr<IContextMenu> m_ContextMenu;
 
     HWND m_Rebar;
+    BOOL m_bNoSave;
 
     union
     {
@@ -111,7 +112,8 @@ public:
 public:
     CTrayBandSite() :
         m_RefCount(0),
-        m_Rebar(NULL)
+        m_Rebar(NULL),
+        m_bNoSave(TRUE)
     {
     }
 
@@ -198,9 +200,19 @@ public:
         /* NOTE: Callback routine called by the shell while saving the task band
                  stream. We use it to intercept the default behavior when the task
                  band is saved to the stream */
-        /* FIXME: Implement */
-        TRACE("IBandSiteStreamCallback::OnSave(0x%p, 0x%p) returns E_NOTIMPL\n", pUnk, pStm);
-        return E_NOTIMPL;
+        CComPtr<IPersistStream> pPersist;
+
+        if (m_TaskBand != NULL && IsSameObject(m_TaskBand, pUnk) == S_OK)
+        {
+            /* The task band has nothing to save but its class */
+            return WriteClassStm(pStm, CLSID_ITaskBand);
+        }
+
+        HRESULT hRet = pUnk->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
+        if (FAILED(hRet))
+            return hRet;
+
+        return OleSaveToStream(pPersist, pStm);
     }
 
     STDMETHODIMP
@@ -264,6 +276,13 @@ public:
 
         /*TRACE("Calling IWinEventHandler::ProcessMessage(0x%p, 0x%x, 0x%p, 0x%p, 0x%p) hWndRebar=0x%p\n", hWnd, uMsg, wParam, lParam, plResult, hWndRebar);*/
         hRet = m_WindowEventHandler->OnWinEvent(hWnd, uMsg, wParam, lParam, plResult);
+
+        if (uMsg == WM_NOTIFY && ((const NMHDR *) lParam)->hwndFrom == m_Rebar &&
+            ((const NMHDR *) lParam)->code == RBN_LAYOUTCHANGED)
+        {
+            /* The user moved a band */
+            SaveBands();
+        }
 
 #if 0
         if (FAILED(hRet))
@@ -432,6 +451,68 @@ public:
 
     /*******************************************************************/
 
+    /* The bands are kept in the registry, in the stream the next Load reads */
+    HRESULT
+    SaveBands()
+    {
+        CComPtr<IPersistStream> pPersist;
+        CComPtr<IStream> pMem;
+        STATSTG stat;
+        HGLOBAL hGlobal;
+        HRESULT hRet;
+
+        if (m_bNoSave || m_BandSite == NULL)
+            return S_FALSE;
+
+        hRet = m_BandSite->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
+        if (FAILED(hRet))
+            return hRet;
+
+        /* Save into memory first, a failed save must not replace the stored bands */
+        hRet = CreateStreamOnHGlobal(NULL, TRUE, &pMem);
+        if (FAILED_UNEXPECTEDLY(hRet))
+            return hRet;
+
+        hRet = pPersist->Save(pMem, TRUE);
+        if (FAILED(hRet))
+            return hRet;
+
+        hRet = pMem->Stat(&stat, STATFLAG_NONAME);
+        if (FAILED(hRet))
+            return hRet;
+        hRet = GetHGlobalFromStream(pMem, &hGlobal);
+        if (FAILED(hRet))
+            return hRet;
+
+        PVOID pData = GlobalLock(hGlobal);
+        if (pData == NULL)
+            return E_OUTOFMEMORY;
+
+        HKEY hkStreams;
+        LONG lRet = RegCreateKeyW(hkExplorer, L"Streams", &hkStreams);
+        if (lRet == ERROR_SUCCESS)
+        {
+            HKEY hkDesktop;
+            lRet = RegCreateKeyW(hkStreams, L"Desktop", &hkDesktop);
+            if (lRet == ERROR_SUCCESS)
+            {
+                lRet = RegSetValueExW(hkDesktop, L"TaskbarWinXP", 0, REG_BINARY,
+                                      (const BYTE *)pData, (DWORD)stat.cbSize.LowPart);
+                RegCloseKey(hkDesktop);
+            }
+            RegCloseKey(hkStreams);
+        }
+
+        GlobalUnlock(hGlobal);
+        return HRESULT_FROM_WIN32(lRet);
+    }
+
+    STDMETHODIMP
+    Save() override
+    {
+        return SaveBands();
+    }
+
     STDMETHODIMP
     AddBand(IN IUnknown *punk) override
     {
@@ -455,6 +536,7 @@ public:
 
         SysFreeString(V_BSTR(&vThemeName));
 
+        SaveBands();
         return S_OK;
     }
 
@@ -520,7 +602,10 @@ public:
     STDMETHODIMP
     RemoveBand(IN DWORD dwBandID) override
     {
-        return m_BandSite->RemoveBand(dwBandID);
+        HRESULT hRet = m_BandSite->RemoveBand(dwBandID);
+        if (SUCCEEDED(hRet))
+            SaveBands();
+        return hRet;
     }
 
     STDMETHODIMP
@@ -795,6 +880,9 @@ public:
 
         /* Should we send this after showing it? */
         Update();
+
+        /* From now on a change of the bands is stored */
+        m_bNoSave = FALSE;
 
         /* FIXME: When should we send this? Does anyone care anyway? */
         FinishInit();
