@@ -76,6 +76,7 @@ list(APPEND SOURCE
     TrackMouseEvent.c
     TrackPopupMenuEx.c
     UnicodeToAnsiMessage.c
+    UpdateLayeredWindow.c
     UserHandleGrantAccess.c
     VirtualKey.c
     WmPrint.c
