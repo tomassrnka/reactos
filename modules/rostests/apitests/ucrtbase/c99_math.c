@@ -12,6 +12,7 @@
 #include <float.h>
 #include <math.h>
 #include <limits.h>
+#include <string.h>
 
 #define DECL_D1(n) static double (__cdecl *p_##n)(double)
 #define DECL_D2(n) static double (__cdecl *p_##n)(double, double)
@@ -21,6 +22,8 @@
 DECL_D1(acosh); DECL_D1(asinh); DECL_D1(atanh); DECL_D1(cbrt); DECL_D1(erf); DECL_D1(erfc);
 DECL_D1(expm1); DECL_D1(log1p); DECL_D1(rint); DECL_D1(nearbyint);
 DECL_D2(copysign); DECL_D2(fdim); DECL_D2(fmax); DECL_D2(fmin); DECL_D2(remainder);
+DECL_D1(lgamma); DECL_D1(lgammal); DECL_D1(tgamma); DECL_D1(tgammal); DECL_D1(logb); DECL_D1(logbl); DECL_D1(_logb);
+DECL_F1(lgammaf); DECL_F1(tgammaf); DECL_F1(logbf); DECL_F1(_logbf);
 DECL_F1(acoshf); DECL_F1(asinhf); DECL_F1(atanhf); DECL_F1(cbrtf); DECL_F1(erff); DECL_F1(erfcf);
 DECL_F1(expm1f); DECL_F1(log1pf); DECL_F1(rintf); DECL_F1(nearbyintf);
 DECL_F2(copysignf); DECL_F2(fdimf); DECL_F2(fmaxf); DECL_F2(fminf); DECL_F2(remainderf);
@@ -543,6 +546,217 @@ static void test_exception_flags(void)
     ok(d == -DBL_MAX && NO_SPURIOUS(sw), "remainder(-max, -inf) = %g, flags 0x%x\n", d, sw);
 }
 
+/* The expected values are those of Windows 10; the results of the transcendental functions differ in the last
+   bits between the Windows versions and architectures, the errno and the special values do not */
+static void test_gamma(void)
+{
+    double d, inf = INFINITY, qnan = p_nan("");
+    float f;
+    int i;
+    static const double pole_args[] = { 0.0, -0.0, -1.0, -2.0, -3.0, -1e15, -9007199254740992.0 };
+    static const double overflow_args[] = { 2.6e305, 1.79e308 };
+
+    CALL(d, p_lgamma(1.0)); ok(d == 0.0, "lgamma(1) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(2.0)); ok(d == 0.0, "lgamma(2) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(3.0)); ok_near(d, 0.69314718055994529, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(0.5)); ok_near(d, 0.57236494292470008, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(10.0)); ok_near(d, 12.801827480081469, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(100.0)); ok_near(d, 359.13420536957545, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(171.5)); ok_near(d, 709.14316303092824, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(-0.5)); ok_near(d, 1.2655121234846454, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(-1.5)); ok_near(d, 0.86004701537648098, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(-2.5)); ok_near(d, -0.056243716497674054, 1e-12); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(-175.5)); ok_near(d, -733.77915503209169, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(1e-300)); ok_near(d, 690.77552789821368, 1e-14); ok_errno(SENTINEL);
+    for (i = 0; i < (int)(sizeof(pole_args) / sizeof(*pole_args)); i++)
+    {
+        CALL(d, p_lgamma(pole_args[i]));
+        ok(d == inf, "lgamma(%g) = %g\n", pole_args[i], d);
+        ok_errno(ERANGE);
+    }
+    for (i = 0; i < (int)(sizeof(overflow_args) / sizeof(*overflow_args)); i++)
+    {
+        CALL(d, p_lgamma(overflow_args[i]));
+        ok(d == inf, "lgamma(%g) = %g\n", overflow_args[i], d);
+        ok_errno(ERANGE);
+    }
+    CALL(d, p_lgamma(inf)); ok(d == inf, "lgamma(inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(-inf)); ok(d == inf, "lgamma(-inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_lgamma(qnan)); ok(is_nan(d), "lgamma(nan) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_lgammal(0.0)); ok(d == inf, "lgammal(0) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_lgammal(10.0)); ok_near(d, 12.801827480081469, 1e-14); ok_errno(SENTINEL);
+
+    CALL(f, p_lgammaf(1.0f)); ok(f == 0.0f, "lgammaf(1) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_lgammaf(0.5f)); ok_nearf(f, 0.572364943f, 1e-5); ok_errno(SENTINEL);
+    CALL(f, p_lgammaf(10.0f)); ok_nearf(f, 12.8018274f, 1e-5); ok_errno(SENTINEL);
+    CALL(f, p_lgammaf(-1.5f)); ok_nearf(f, 0.860047f, 1e-5); ok_errno(SENTINEL);
+    CALL(f, p_lgammaf(0.0f)); ok(f == INFINITY, "lgammaf(0) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_lgammaf(-0.0f)); ok(f == INFINITY, "lgammaf(-0) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_lgammaf(-2.0f)); ok(f == INFINITY, "lgammaf(-2) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_lgammaf(-1e10f)); ok(f == INFINITY, "lgammaf(-1e10) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_lgammaf(4.1e36f)); ok(f == INFINITY, "lgammaf(4.1e36) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_lgammaf(1e38f)); ok(f == INFINITY, "lgammaf(1e38) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_lgammaf(4e36f)); ok(f < INFINITY && f > 3e38f, "lgammaf(4e36) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_lgammaf(INFINITY)); ok(f == INFINITY, "lgammaf(inf) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_lgammaf(-INFINITY)); ok(f == INFINITY, "lgammaf(-inf) = %g\n", (double)f); ok_errno(SENTINEL);
+
+    CALL(d, p_tgamma(1.0)); ok_near(d, 1.0, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(3.0)); ok_near(d, 2.0, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(5.0)); ok_near(d, 24.0, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(10.0)); ok_near(d, 362880.0, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(0.5)); ok_near(d, 1.7724538509055161, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(100.0)); ok_near(d, 9.3326215443944153e+155, 1e-13); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(171.0)); ok_near(d, 7.2574156153079965e+306, 1e-13); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(171.5)); ok_near(d, 9.483367566824799e+307, 1e-13); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(-0.5)); ok_near(d, -3.5449077018110322, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(-1.5)); ok_near(d, 2.3632718012073548, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(-2.5)); ok_near(d, -0.9453087204829419, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(-1e-5)); ok_near(d, -100000.57722555555, 1e-13); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(1e-308)); ok_near(d, 1e308, 1e-13); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(0.0)); ok(d == inf, "tgamma(0) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(-0.0)); ok(d == -inf, "tgamma(-0) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(9.9999999999999694e-311)); ok(d == inf, "tgamma(1e-310) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(-9.9999999999999694e-311)); ok(d == -inf, "tgamma(-1e-310) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(171.62)); ok(d < inf && d > 1e308, "tgamma(171.62) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(171.63)); ok(d == inf, "tgamma(171.63) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(172.0)); ok(d == inf, "tgamma(172) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(1e18)); ok(d == inf, "tgamma(1e18) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(1.79e308)); ok(d == inf, "tgamma(1.79e308) = %g\n", d); ok_errno(ERANGE);
+    for (i = 0; i < (int)(sizeof(pole_args) / sizeof(*pole_args)); i++)
+    {
+        if (pole_args[i] == 0.0)
+            continue;
+        CALL(d, p_tgamma(pole_args[i]));
+        ok(is_nan(d), "tgamma(%g) = %g\n", pole_args[i], d);
+        ok_errno(EDOM);
+    }
+    CALL(d, p_tgamma(-1e300)); ok(is_nan(d), "tgamma(-1e300) = %g\n", d); ok_errno(EDOM);
+    CALL(d, p_tgamma(-inf)); ok(is_nan(d), "tgamma(-inf) = %g\n", d); ok_errno(EDOM);
+    CALL(d, p_tgamma(inf)); ok(d == inf, "tgamma(inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(qnan)); ok(is_nan(d), "tgamma(nan) = %g\n", d); ok_errno(SENTINEL);
+    /* the last argument that gives a subnormal result and the first one that is a range error */
+    CALL(d, p_tgamma(-173.9)); ok_near(d, 2.6511406035844687e-315, 1e-6); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(-173.999)); ok_near(d, 1.5643740586684637e-313, 1e-6); ok_errno(SENTINEL);
+    CALL(d, p_tgamma(-174.001)); ok(d == 0.0 && !is_neg(d), "tgamma(-174.001) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(-174.5)); ok(d == 0.0 && !is_neg(d), "tgamma(-174.5) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(-175.5)); ok(d == 0.0 && !is_neg(d), "tgamma(-175.5) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(-1000.5)); ok(d == 0.0 && !is_neg(d), "tgamma(-1000.5) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgammal(-1.5)); ok_near(d, 2.3632718012073548, 1e-14); ok_errno(SENTINEL);
+    CALL(d, p_tgammal(0.0)); ok(d == inf, "tgammal(0) = %g\n", d); ok_errno(ERANGE);
+
+    CALL(f, p_tgammaf(5.0f)); ok_nearf(f, 24.0f, 1e-6); ok_errno(SENTINEL);
+    CALL(f, p_tgammaf(0.5f)); ok_nearf(f, 1.77245385f, 1e-6); ok_errno(SENTINEL);
+    CALL(f, p_tgammaf(-1.5f)); ok_nearf(f, 2.36327181f, 1e-6); ok_errno(SENTINEL);
+    CALL(f, p_tgammaf(25.5f)); ok_nearf(f, 3.0867698e+24f, 1e-6); ok_errno(SENTINEL);
+    CALL(f, p_tgammaf(0.0f)); ok(f == INFINITY, "tgammaf(0) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_tgammaf(-0.0f)); ok(f == -INFINITY, "tgammaf(-0) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_tgammaf(-1.0f)); ok(is_nan(f), "tgammaf(-1) = %g\n", (double)f); ok_errno(EDOM);
+    CALL(f, p_tgammaf(-1e10f)); ok(is_nan(f), "tgammaf(-1e10) = %g\n", (double)f); ok_errno(EDOM);
+    CALL(f, p_tgammaf(-INFINITY)); ok(is_nan(f), "tgammaf(-inf) = %g\n", (double)f); ok_errno(EDOM);
+    CALL(f, p_tgammaf(INFINITY)); ok(f == INFINITY, "tgammaf(inf) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_tgammaf(36.0f)); ok(f == INFINITY, "tgammaf(36) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_tgammaf(1e30f)); ok(f == INFINITY, "tgammaf(1e30) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_tgammaf(1e-40f)); ok(f == INFINITY, "tgammaf(1e-40) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_tgammaf(-37.9f)); ok(f > 0.0f && f < 1e-40f, "tgammaf(-37.9) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_tgammaf(-38.1f)); ok(f == 0.0f && !is_neg(f), "tgammaf(-38.1) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_tgammaf(-100.5f)); ok(f == 0.0f && !is_neg(f), "tgammaf(-100.5) = %g\n", (double)f); ok_errno(ERANGE);
+}
+
+static struct _exception g_exception;
+static int g_matherr_calls;
+
+static int __cdecl matherr_callback(struct _exception *exception)
+{
+    g_exception = *exception;
+    g_matherr_calls++;
+    return 0;
+}
+
+/* Only the legacy logb reports to the handler of math errors: logb and the gamma functions do not */
+static void test_matherr_reports(void)
+{
+    void (__cdecl *p_setusermatherr)(int (__cdecl *)(struct _exception *));
+    double d;
+    float f;
+
+    p_setusermatherr = (void *)GetProcAddress(GetModuleHandleW(L"ucrtbase.dll"), "__setusermatherr");
+    if (!p_setusermatherr)
+    {
+        skip("__setusermatherr is missing\n");
+        return;
+    }
+    p_setusermatherr(matherr_callback);
+
+    g_matherr_calls = 0;
+    d = p__logb(0.0);
+    ok(g_matherr_calls == 1, "_logb(0) called the handler %d times\n", g_matherr_calls);
+    ok(g_exception.type == _SING && !strcmp(g_exception.name, "_logb") && g_exception.arg1 == 0.0,
+       "_logb(0): type %d, name %s, arg1 %g\n", g_exception.type, g_exception.name, g_exception.arg1);
+    ok(d == -INFINITY, "_logb(0) = %g\n", d);
+    if (p__logbf)
+    {
+        g_matherr_calls = 0;
+        f = p__logbf(0.0f);
+        ok(g_matherr_calls == 1, "_logbf(0) called the handler %d times\n", g_matherr_calls);
+        ok(g_exception.type == _SING && !strcmp(g_exception.name, "_logbf"),
+           "_logbf(0): type %d, name %s\n", g_exception.type, g_exception.name);
+        ok(f == -INFINITY, "_logbf(0) = %g\n", (double)f);
+    }
+
+    g_matherr_calls = 0;
+    p_logb(0.0); p_logbf(0.0f); p_lgamma(0.0); p_lgamma(-1.0); p_lgammaf(0.0f);
+    p_tgamma(0.0); p_tgamma(-1.0); p_tgamma(172.0); p_tgamma(-175.5); p_tgammaf(-1.0f); p_tgammaf(36.0f);
+    ok(g_matherr_calls == 0, "logb and the gamma functions called the handler %d times\n", g_matherr_calls);
+
+    p_setusermatherr(NULL);
+}
+
+static void test_logb(void)
+{
+    double d;
+    float f;
+
+    CALL(d, p_logb(1.0)); ok(d == 0.0, "logb(1) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logb(8.0)); ok(d == 3.0, "logb(8) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logb(0.75)); ok(d == -1.0, "logb(0.75) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logb(-1e300)); ok(d == 996.0, "logb(-1e300) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logb(4.9406564584124654e-324)); ok(d == -1074.0, "logb(min subnormal) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logb(9.9999999999999694e-311)); ok(d == -1030.0, "logb(1e-310) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logb(0.0)); ok(d == -INFINITY, "logb(0) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_logb(-0.0)); ok(d == -INFINITY, "logb(-0) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_logb(INFINITY)); ok(d == INFINITY, "logb(inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logb(-INFINITY)); ok(d == INFINITY, "logb(-inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logb(p_nan(""))); ok(is_nan(d), "logb(nan) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p_logbl(0.0)); ok(d == -INFINITY, "logbl(0) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_logbl(16.0)); ok(d == 4.0, "logbl(16) = %g\n", d); ok_errno(SENTINEL);
+
+    CALL(f, p_logbf(1.0f)); ok(f == 0.0f, "logbf(1) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_logbf(-10.0f)); ok(f == 3.0f, "logbf(-10) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_logbf(0.5f)); ok(f == -1.0f, "logbf(0.5) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_logbf(1.4012985e-45f)); ok(f == -149.0f, "logbf(min subnormal) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_logbf(0.0f)); ok(f == -INFINITY, "logbf(0) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_logbf(-0.0f)); ok(f == -INFINITY, "logbf(-0) = %g\n", (double)f); ok_errno(ERANGE);
+    CALL(f, p_logbf(INFINITY)); ok(f == INFINITY, "logbf(inf) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_logbf(-INFINITY)); ok(f == INFINITY, "logbf(-inf) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, p_logbf(p_nanf(""))); ok(is_nan(f), "logbf(nan) = %g\n", (double)f); ok_errno(SENTINEL);
+
+    /* the legacy name keeps the sign of an infinity, and for floats reports a NaN as a domain error */
+    CALL(d, p__logb(0.0)); ok(d == -INFINITY, "_logb(0) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p__logb(-0.0)); ok(d == -INFINITY, "_logb(-0) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p__logb(100.0)); ok(d == 6.0, "_logb(100) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p__logb(INFINITY)); ok(d == INFINITY, "_logb(inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p__logb(-INFINITY)); ok(d == -INFINITY, "_logb(-inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, p__logb(p_nan(""))); ok(is_nan(d), "_logb(nan) = %g\n", d); ok_errno(SENTINEL);
+    if (p__logbf)
+    {
+        CALL(f, p__logbf(0.0f)); ok(f == -INFINITY, "_logbf(0) = %g\n", (double)f); ok_errno(ERANGE);
+        CALL(f, p__logbf(0.5f)); ok(f == -1.0f, "_logbf(0.5) = %g\n", (double)f); ok_errno(SENTINEL);
+        CALL(f, p__logbf(-INFINITY)); ok(f == -INFINITY, "_logbf(-inf) = %g\n", (double)f); ok_errno(SENTINEL);
+        CALL(f, p__logbf(INFINITY)); ok(f == INFINITY, "_logbf(inf) = %g\n", (double)f); ok_errno(SENTINEL);
+        CALL(f, p__logbf(p_nanf(""))); ok(is_nan(f), "_logbf(nan) = %g\n", (double)f); ok_errno(EDOM);
+    }
+}
+
 static void test_nan(void)
 {
     ok(is_nan(p_nan("")), "nan() is not a NaN\n");
@@ -570,6 +784,9 @@ START_TEST(c99_math)
     *(void **)&p_modff = (void *)GetProcAddress(hUcrt, "modff");
     GET(nan); GET(nanf); GET(ilogb); GET(ilogbf); GET(remquo); GET(remquof);
     GET(lround); GET(lroundf); GET(llround); GET(llroundf); GET(llrint); GET(llrintf);
+    GET(lgamma); GET(lgammal); GET(tgamma); GET(tgammal); GET(logb); GET(logbl); GET(_logb);
+    GET(lgammaf); GET(tgammaf); GET(logbf);
+    *(void **)&p__logbf = (void *)GetProcAddress(hUcrt, "_logbf");
     *(void **)&p_statusfp = (void *)GetProcAddress(hUcrt, "_statusfp");
     *(void **)&p_clearfp = (void *)GetProcAddress(hUcrt, "_clearfp");
     *(void **)&p_controlfp = (void *)GetProcAddress(hUcrt, "_controlfp");
@@ -587,5 +804,8 @@ START_TEST(c99_math)
     test_nearbyint_flags();
     test_modff();
     test_exception_flags();
+    test_gamma();
+    test_logb();
+    test_matherr_reports();
     test_nan();
 }
