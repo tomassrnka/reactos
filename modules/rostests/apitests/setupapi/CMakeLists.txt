@@ -5,6 +5,7 @@ list(APPEND SOURCE
     RootDeviceRemove.c
     SetupDiInstallClassExA.c
     SetupDiGetActualModelsSection.c
+    SetupDiGetDeviceProperty.c
     SetupInstallServicesFromInfSectionEx.c
     testlist.c)
 
