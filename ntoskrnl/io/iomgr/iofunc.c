@@ -436,7 +436,8 @@ IopDeviceFsIoControl(IN HANDLE DeviceHandle,
                 /* If we had an event, signal it */
                 if (Event)
                 {
-                    KeSetEvent(EventObject, IO_NO_INCREMENT, FALSE);
+                    if (!(FileObject->Flags & FO_SKIP_SET_FAST_IO))
+                        KeSetEvent(EventObject, IO_NO_INCREMENT, FALSE);
                     ObDereferenceObject(EventObject);
                 }
 
@@ -447,7 +448,8 @@ IopDeviceFsIoControl(IN HANDLE DeviceHandle,
                 }
 
                 /* Set completion if required */
-                if (CompletionInfo.Port != NULL && UserApcContext != NULL)
+                if (CompletionInfo.Port != NULL && UserApcContext != NULL &&
+                    !(FileObject->Flags & FO_SKIP_COMPLETION_PORT))
                 {
                     if (!NT_SUCCESS(IoSetIoCompletion(CompletionInfo.Port,
                                                       CompletionInfo.Key,
@@ -1889,12 +1891,14 @@ NtLockFile(IN HANDLE FileHandle,
             /* If we had an event, signal it */
             if (EventHandle)
             {
-                KeSetEvent(Event, IO_NO_INCREMENT, FALSE);
+                if (!(FileObject->Flags & FO_SKIP_SET_FAST_IO))
+                    KeSetEvent(Event, IO_NO_INCREMENT, FALSE);
                 ObDereferenceObject(Event);
             }
 
             /* Set completion if required */
-            if (FileObject->CompletionContext != NULL && ApcContext != NULL)
+            if (FileObject->CompletionContext != NULL && ApcContext != NULL &&
+                !(FileObject->Flags & FO_SKIP_COMPLETION_PORT))
             {
                 if (!NT_SUCCESS(IoSetIoCompletion(FileObject->CompletionContext->Port,
                                                   FileObject->CompletionContext->Key,
@@ -2300,6 +2304,7 @@ NtQueryInformationFile(IN HANDLE FileHandle,
     PFILE_MODE_INFORMATION ModeBuffer;
     PFILE_ALIGNMENT_INFORMATION AlignmentBuffer;
     PFILE_ALL_INFORMATION AllBuffer;
+    PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION NotificationBuffer;
     PFAST_IO_DISPATCH FastIoDispatch;
     PAGED_CODE();
     IOTRACE(IO_API_DEBUG, "FileHandle: %p\n", FileHandle);
@@ -2309,7 +2314,7 @@ NtQueryInformationFile(IN HANDLE FileHandle,
     {
         /* Validate the information class */
         if ((FileInformationClass < 0) ||
-            (FileInformationClass >= FileMaximumInformation) ||
+            ((ULONG)FileInformationClass >= RTL_NUMBER_OF(IopQueryOperationLength)) ||
             !(IopQueryOperationLength[FileInformationClass]))
         {
             /* Invalid class */
@@ -2344,7 +2349,7 @@ NtQueryInformationFile(IN HANDLE FileHandle,
     {
         /* Validate the information class */
         if ((FileInformationClass < 0) ||
-            (FileInformationClass >= FileMaximumInformation) ||
+            ((ULONG)FileInformationClass >= RTL_NUMBER_OF(IopQueryOperationLength)) ||
             !(IopQueryOperationLength[FileInformationClass]))
         {
             /* Invalid class */
@@ -2564,6 +2569,19 @@ NtQueryInformationFile(IN HANDLE FileHandle,
         AlignmentBuffer = Irp->AssociatedIrp.SystemBuffer;
         AlignmentBuffer->AlignmentRequirement = DeviceObject->AlignmentRequirement;
         Irp->IoStatus.Information = sizeof(FILE_ALIGNMENT_INFORMATION);
+        CallDriver = FALSE;
+    }
+    else if (FileInformationClass == FileIoCompletionNotificationInformation)
+    {
+        NotificationBuffer = Irp->AssociatedIrp.SystemBuffer;
+        NotificationBuffer->Flags = 0;
+        if (FileObject->Flags & FO_SKIP_COMPLETION_PORT)
+            NotificationBuffer->Flags |= FILE_SKIP_COMPLETION_PORT_ON_SUCCESS;
+        if (FileObject->Flags & FO_SKIP_SET_EVENT)
+            NotificationBuffer->Flags |= FILE_SKIP_SET_EVENT_ON_HANDLE;
+        if (FileObject->Flags & FO_SKIP_SET_FAST_IO)
+            NotificationBuffer->Flags |= FILE_SKIP_SET_USER_EVENT_ON_FAST_IO;
+        Irp->IoStatus.Information = sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION);
         CallDriver = FALSE;
     }
     else if (FileInformationClass == FileAllInformation)
@@ -3124,7 +3142,7 @@ NtSetInformationFile(IN HANDLE FileHandle,
     {
         /* Validate the information class */
         if ((FileInformationClass < 0) ||
-            (FileInformationClass >= FileMaximumInformation) ||
+            ((ULONG)FileInformationClass >= RTL_NUMBER_OF(IopSetOperationLength)) ||
             !(IopSetOperationLength[FileInformationClass]))
         {
             /* Invalid class */
@@ -3161,7 +3179,7 @@ NtSetInformationFile(IN HANDLE FileHandle,
     {
         /* Validate the information class */
         if ((FileInformationClass < 0) ||
-            (FileInformationClass >= FileMaximumInformation) ||
+            ((ULONG)FileInformationClass >= RTL_NUMBER_OF(IopSetOperationLength)) ||
             !(IopSetOperationLength[FileInformationClass]))
         {
             /* Invalid class */
@@ -3369,6 +3387,33 @@ NtSetInformationFile(IN HANDLE FileHandle,
                     Status = STATUS_INSUFFICIENT_RESOURCES;
                 }
             }
+        }
+
+        /* Set the IRP Status */
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+    }
+    else if (FileInformationClass == FileIoCompletionNotificationInformation)
+    {
+        PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION NotificationInfo;
+        ULONG Modes = 0;
+
+        /* The modes only apply to asynchronous I/O; they can be added, never removed */
+        if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            NotificationInfo = Irp->AssociatedIrp.SystemBuffer;
+            if (NotificationInfo->Flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)
+                Modes |= FO_SKIP_COMPLETION_PORT;
+            if (NotificationInfo->Flags & FILE_SKIP_SET_EVENT_ON_HANDLE)
+                Modes |= FO_SKIP_SET_EVENT;
+            if (NotificationInfo->Flags & FILE_SKIP_SET_USER_EVENT_ON_FAST_IO)
+                Modes |= FO_SKIP_SET_FAST_IO;
+            InterlockedOr((PLONG)&FileObject->Flags, Modes);
+            Status = STATUS_SUCCESS;
         }
 
         /* Set the IRP Status */

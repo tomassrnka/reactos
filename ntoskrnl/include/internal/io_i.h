@@ -6,6 +6,11 @@
  * PROGRAMMERS:     Alex Ionescu (alex.ionescu@reactos.org)
  */
 
+/* The NT 5.2 headers end the class list before this Vista class */
+#if (NTDDI_VERSION < NTDDI_VISTA)
+#define FileIoCompletionNotificationInformation ((FILE_INFORMATION_CLASS)41)
+#endif
+
 //
 // File Information Classes
 //
@@ -52,8 +57,8 @@ UCHAR IopQueryOperationLength[] =
     0,
     0,
     0,
-#if 0 // VISTA
     sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
+#if 0 // VISTA
     sizeof(FILE_IOSTATUSBLOCK_RANGE_INFORMATION),
     sizeof(FILE_IO_PRIORITY_HINT_INFORMATION),
     sizeof(FILE_SFIO_RESERVE_INFORMATION),
@@ -63,7 +68,6 @@ UCHAR IopQueryOperationLength[] =
     0,
     sizeof(FILE_NETWORK_PHYSICAL_NAME_INFORMATION),
 #endif
-    0xFF
 };
 
 UCHAR IopSetOperationLength[] =
@@ -109,7 +113,7 @@ UCHAR IopSetOperationLength[] =
     0,
     sizeof(FILE_VALID_DATA_LENGTH_INFORMATION),
     sizeof(UNICODE_STRING),
-    0xFF
+    sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
 };
 
 ACCESS_MASK IopQueryOperationAccess[] =
@@ -155,7 +159,7 @@ ACCESS_MASK IopQueryOperationAccess[] =
     0,
     0,
     0,
-    0xFFFFFFFF
+    FILE_READ_ATTRIBUTES,
 };
 
 ACCESS_MASK IopSetOperationAccess[] =
@@ -201,8 +205,11 @@ ACCESS_MASK IopSetOperationAccess[] =
     0,
     FILE_WRITE_DATA,
     DELETE,
-    0xFFFFFFFF
+    0,
 };
+
+C_ASSERT(RTL_NUMBER_OF(IopQueryOperationAccess) == RTL_NUMBER_OF(IopQueryOperationLength));
+C_ASSERT(RTL_NUMBER_OF(IopSetOperationAccess) == RTL_NUMBER_OF(IopSetOperationLength));
 
 //
 // Volume Information Classes
