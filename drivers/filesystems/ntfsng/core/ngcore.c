@@ -2288,6 +2288,8 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		err = -EIO;
 		goto failed;
 	}
+	if (ngc_resize_fault == 4)
+		kshim_jnl_apply_fault = 1;
 	/*
 	 * $Bitmap first, the boot sector after it: an interruption between the two commits leaves
 	 * the old size with a $Bitmap larger than it needs, which every reader mounts (a checker

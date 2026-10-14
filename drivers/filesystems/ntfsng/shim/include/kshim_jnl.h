@@ -78,6 +78,8 @@ unsigned long kshim_jnl_pending(struct block_device *b);
 void kshim_jnl_report(struct block_device *b);
 /* Test only: nonzero stops the machine half way through writing that commit in place. */
 extern unsigned long kshim_jnl_fault;
+/* Test only: nonzero makes the in-place pass of the next commit fail half way, as a failing device would. */
+extern unsigned long kshim_jnl_apply_fault;
 
 /* Used by kshim_dev_rw. */
 int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len);

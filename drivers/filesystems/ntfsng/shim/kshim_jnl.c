@@ -40,6 +40,7 @@ struct kshim_jnl {
 
 static u32 kj_crc_table[256];
 unsigned long kshim_jnl_fault;
+unsigned long kshim_jnl_apply_fault;
 
 u32 kj_crc32(u32 crc, const void *p, size_t n)
 {
@@ -594,7 +595,16 @@ int kshim_jnl_commit(struct block_device *b)
 		       j->commits + 1, (unsigned long long)j->seq, n / 2, n);
 		ngos_bugcheck("journal fault injection", __FILE__, __LINE__);
 	}
-	err = kj_apply(b, v, n);
+	if (kshim_jnl_apply_fault && n >= 2) {
+		kshim_jnl_apply_fault = 0;
+		kj_apply(b, v, n / 2);
+		kj_dev_flush(b);
+		printk(KERN_ERR "journal: in-place write failure injected in seq %llu: %lu of %lu pages in place\n",
+		       (unsigned long long)j->seq, n / 2, n);
+		err = -EIO;
+	} else {
+		err = kj_apply(b, v, n);
+	}
 	if (!err && kj_dev_flush(b))
 		err = -EIO;
 	if (err) {
