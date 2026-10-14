@@ -66,8 +66,8 @@ static ULONG NextRandom(PULONG State)
     return *State = x;
 }
 
-/* Called right after the lock was taken, from the function that called the acquire function, so that the
-   pattern covers the stack area that the acquire function used */
+/* Must be called from the function that called the acquire function, so that the pattern covers the stack
+   area that the acquire function used */
 static DECLSPEC_NOINLINE VOID HoldWithCanary(ULONG HoldMicros)
 {
     volatile UCHAR Canary[CANARY_SIZE];
@@ -89,13 +89,16 @@ static DECLSPEC_NOINLINE VOID HoldWithCanary(ULONG HoldMicros)
     }
 }
 
-static VOID ExclusiveSection(ULONG HoldMicros)
+static VOID EnterExclusive(VOID)
+{
+    if (InterlockedIncrement(&g_Writers) != 1 || g_Readers != 0)
+        InterlockedIncrement(&g_Violations);
+}
+
+static VOID LeaveExclusive(VOID)
 {
     LONG Value;
 
-    if (InterlockedIncrement(&g_Writers) != 1 || g_Readers != 0)
-        InterlockedIncrement(&g_Violations);
-    HoldWithCanary(HoldMicros);
     Value = g_Data;
     YieldProcessor();
     g_Data = Value + 1;
@@ -103,14 +106,17 @@ static VOID ExclusiveSection(ULONG HoldMicros)
     InterlockedDecrement(&g_Writers);
 }
 
-static VOID SharedSection(ULONG HoldMicros)
+static VOID EnterShared(VOID)
 {
-    LONG Before, After;
-
     InterlockedIncrement(&g_Readers);
     if (g_Writers != 0)
         InterlockedIncrement(&g_Violations);
-    HoldWithCanary(HoldMicros);
+}
+
+static VOID LeaveShared(VOID)
+{
+    LONG Before, After;
+
     Before = g_Data;
     YieldProcessor();
     After = g_Data;
@@ -148,7 +154,9 @@ static VOID OpExclusive(ULONG HoldMicros)
     _SEH2_END;
     if (!Locked)
         return;
-    ExclusiveSection(HoldMicros);
+    EnterExclusive();
+    HoldWithCanary(HoldMicros);
+    LeaveExclusive();
     LockedRelease(pRtlReleaseSRWLockExclusive);
 }
 
@@ -168,7 +176,9 @@ static VOID OpShared(ULONG HoldMicros)
     _SEH2_END;
     if (!Locked)
         return;
-    SharedSection(HoldMicros);
+    EnterShared();
+    HoldWithCanary(HoldMicros);
+    LeaveShared();
     LockedRelease(pRtlReleaseSRWLockShared);
 }
 
@@ -189,23 +199,27 @@ static DWORD WINAPI WorkerThread(LPVOID Parameter)
             OpExclusive(Roll % 5);
         else if (Roll < 65)
             OpShared(Roll % 7);
-        else if (Roll < 80)
+        else if (Roll < 80 && pRtlTryAcquireSRWLockShared)
         {
             if (pRtlTryAcquireSRWLockShared(&g_Lock))
             {
                 InterlockedIncrement(&g_TryOk);
-                SharedSection(1);
+                EnterShared();
+                HoldWithCanary(1);
+                LeaveShared();
                 LockedRelease(pRtlReleaseSRWLockShared);
             }
             else
                 InterlockedIncrement(&g_TryFail);
         }
-        else if (Roll < 95)
+        else if (Roll < 95 && pRtlTryAcquireSRWLockExclusive)
         {
             if (pRtlTryAcquireSRWLockExclusive(&g_Lock))
             {
                 InterlockedIncrement(&g_TryOk);
-                ExclusiveSection(1);
+                EnterExclusive();
+                HoldWithCanary(1);
+                LeaveExclusive();
                 LockedRelease(pRtlReleaseSRWLockExclusive);
             }
             else
@@ -232,9 +246,10 @@ static BOOL ResolveFunctions(PCWSTR DllName)
     pRtlWakeConditionVariable = (FN_WAKE_CV)GetProcAddress(hDll, "RtlWakeConditionVariable");
     pRtlWakeAllConditionVariable = (FN_WAKE_CV)GetProcAddress(hDll, "RtlWakeAllConditionVariable");
     pRtlSleepConditionVariableSRW = (FN_SLEEP_CV_SRW)GetProcAddress(hDll, "RtlSleepConditionVariableSRW");
+    /* The try functions are optional: ntdll_vista.dll, which ReactOS uses below the NT 6.1 level, lacks one */
     return pRtlAcquireSRWLockShared && pRtlReleaseSRWLockShared && pRtlAcquireSRWLockExclusive &&
-           pRtlReleaseSRWLockExclusive && pRtlTryAcquireSRWLockShared && pRtlTryAcquireSRWLockExclusive &&
-           pRtlWakeConditionVariable && pRtlWakeAllConditionVariable && pRtlSleepConditionVariableSRW;
+           pRtlReleaseSRWLockExclusive && pRtlWakeConditionVariable && pRtlWakeAllConditionVariable &&
+           pRtlSleepConditionVariableSRW;
 }
 
 /* One lock, Count workers; the run ends at the first failure, since later results only repeat it */
@@ -407,7 +422,13 @@ static VOID RunCondVarCase(VOID)
     ok(g_Sum == Expected, "Consumed sum is %ld, expected %ld\n", g_Sum, Expected);
     ok(g_QCount == 0, "%ld items left in the queue\n", g_QCount);
     ok(g_EpochSeen > 0, "The shared-mode waiters never saw an epoch change\n");
-    ok(g_QueueLock.Ptr == NULL, "Lock is %p after all threads ended\n", g_QueueLock.Ptr);
+    pRtlAcquireSRWLockExclusive(&g_QueueLock);
+    pRtlReleaseSRWLockExclusive(&g_QueueLock);
+    if (pRtlTryAcquireSRWLockExclusive)
+    {
+        ok(pRtlTryAcquireSRWLockExclusive(&g_QueueLock), "Lock is still owned after all threads ended\n");
+        pRtlReleaseSRWLockExclusive(&g_QueueLock);
+    }
 }
 
 static VOID RunChild(PCSTR Case)

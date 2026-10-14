@@ -226,37 +226,43 @@ RtlpSrwSpinWait(IN OUT PULONG Spins)
 }
 
 
+/* The contention lock bit is only ever set on a lock word that has wait blocks. Setting
+   it on a lock word without them, to find that out afterwards and clear it again, lets
+   the clearing remove the bit of another thread that took it in the meantime, after the
+   lock word had changed to a word with wait blocks. */
 static PRTLP_SRWLOCK_WAITBLOCK
 NTAPI
 RtlpAcquireWaitBlockLock(IN OUT PRTL_SRWLOCK SRWLock)
 {
-    LONG_PTR PrevValue;
-    PRTLP_SRWLOCK_WAITBLOCK WaitBlock;
+    LONG_PTR Value;
     ULONG Spins = 0;
 
     while (1)
     {
-        PrevValue = InterlockedOrPointer(&SRWLock->Ptr,
-                                         RTL_SRWLOCK_CONTENTION_LOCK);
+        Value = *(volatile LONG_PTR *)&SRWLock->Ptr;
 
-        if (!(PrevValue & RTL_SRWLOCK_CONTENTION_LOCK))
-            break;
+        if (!(Value & RTL_SRWLOCK_CONTENDED) ||
+            (Value & ~RTL_SRWLOCK_MASK) == 0)
+        {
+            /* Too bad, looks like the wait block was removed in the
+               meanwhile */
+            return NULL;
+        }
+
+        if (!(Value & RTL_SRWLOCK_CONTENTION_LOCK))
+        {
+            if ((LONG_PTR)InterlockedCompareExchangePointer(&SRWLock->Ptr,
+                                                            (PVOID)(Value | RTL_SRWLOCK_CONTENTION_LOCK),
+                                                            (PVOID)Value) == Value)
+            {
+                return (PRTLP_SRWLOCK_WAITBLOCK)(Value & ~RTL_SRWLOCK_MASK);
+            }
+
+            continue;
+        }
 
         RtlpSrwSpinWait(&Spins);
     }
-
-    if (!(PrevValue & RTL_SRWLOCK_CONTENDED) ||
-        (PrevValue & ~RTL_SRWLOCK_MASK) == 0)
-    {
-        /* Too bad, looks like the wait block was removed in the
-           meanwhile, unlock again */
-        RtlpReleaseWaitBlockLock(SRWLock);
-        return NULL;
-    }
-
-    WaitBlock = (PRTLP_SRWLOCK_WAITBLOCK)(PrevValue & ~RTL_SRWLOCK_MASK);
-
-    return WaitBlock;
 }
 
 
@@ -713,11 +719,9 @@ RtlReleaseSRWLockExclusive(IN OUT PRTL_SRWLOCK SRWLock)
             {
                 /* This is a fast path, we can simply clear the RTL_SRWLOCK_OWNED
                    bit. All other bits should be 0 now because this is a simple
-                   exclusive lock and no one is waiting, except for the contention
-                   lock bit that a thread sets while it finds out that the wait
-                   blocks are gone, and clears again. */
+                   exclusive lock and no one is waiting. */
 
-                ASSERT(!(CurrentValue & ~(RTL_SRWLOCK_OWNED | RTL_SRWLOCK_CONTENTION_LOCK)));
+                ASSERT(!(CurrentValue & ~RTL_SRWLOCK_OWNED));
 
                 NewValue = 0;
                 if ((LONG_PTR)InterlockedCompareExchangePointer(&SRWLock->Ptr,
