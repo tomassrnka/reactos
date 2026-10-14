@@ -37,6 +37,13 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(shcore);
 
+#ifdef __REACTOS__
+UINT WINAPI GetDpiForSystem(void);
+BOOL WINAPI GetProcessDpiAwarenessInternal(HANDLE process, DPI_AWARENESS *awareness);
+BOOL WINAPI SetProcessDpiAwarenessInternal(DPI_AWARENESS awareness);
+BOOL WINAPI GetDpiForMonitorInternal(HMONITOR monitor, UINT type, UINT *x, UINT *y);
+#endif
+
 static DWORD shcore_tls;
 static IUnknown *process_ref;
 
@@ -79,14 +86,11 @@ HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x
     return HRESULT_FROM_WIN32( GetLastError() );
 }
 #else
-/* ReactOS has one system DPI for every monitor and does not scale for a process; user32 keeps no
- * awareness state, so shcore keeps the value set here */
-static LONG shcore_awareness; /* the value set through SetProcessDpiAwareness, plus 1 */
-
+/* The awareness and the DPI are kept by user32 (one DPI for the whole system, no scaling for a process) */
 HRESULT WINAPI GetProcessDpiAwareness(HANDLE process, PROCESS_DPI_AWARENESS *value)
 {
+    DPI_AWARENESS awareness;
     DWORD pid;
-    LONG set;
 
     TRACE("(%p, %p)\n", process, value);
 
@@ -97,7 +101,10 @@ HRESULT WINAPI GetProcessDpiAwareness(HANDLE process, PROCESS_DPI_AWARENESS *val
     {
         pid = GetProcessId(process);
         if (!pid)
+        {
+            *value = (PROCESS_DPI_AWARENESS)-1;
             return (GetLastError() == ERROR_ACCESS_DENIED) ? E_ACCESSDENIED : E_INVALIDARG;
+        }
         /* The state of another process is not known here */
         if (pid != GetCurrentProcessId())
         {
@@ -106,8 +113,9 @@ HRESULT WINAPI GetProcessDpiAwareness(HANDLE process, PROCESS_DPI_AWARENESS *val
         }
     }
 
-    set = InterlockedCompareExchange(&shcore_awareness, 0, 0);
-    *value = set ? (PROCESS_DPI_AWARENESS)(set - 1) : PROCESS_DPI_UNAWARE;
+    if (!GetProcessDpiAwarenessInternal(NULL, &awareness))
+        return HRESULT_FROM_WIN32(GetLastError());
+    *value = (PROCESS_DPI_AWARENESS)awareness;
     return S_OK;
 }
 
@@ -117,55 +125,71 @@ HRESULT WINAPI SetProcessDpiAwareness(PROCESS_DPI_AWARENESS value)
 
     if ((UINT)value > PROCESS_PER_MONITOR_DPI_AWARE)
         return E_INVALIDARG;
-    /* It can be set once */
-    if (InterlockedCompareExchange(&shcore_awareness, value + 1, 0))
-        return E_ACCESSDENIED;
-    return S_OK;
-}
-
-static UINT shcore_system_dpi(int index)
-{
-    HDC hdc = GetDC(NULL);
-    UINT dpi = hdc ? GetDeviceCaps(hdc, index) : 0;
-    if (hdc)
-        ReleaseDC(NULL, hdc);
-    return dpi ? dpi : 96;
+    if (SetProcessDpiAwarenessInternal((DPI_AWARENESS)value))
+        return S_OK;
+    return HRESULT_FROM_WIN32(GetLastError());
 }
 
 HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x, UINT *y)
 {
-    MONITORINFO info;
-
     TRACE("(%p, %d, %p, %p)\n", monitor, type, x, y);
 
-    if (!x || !y)
-        return HRESULT_FROM_WIN32(ERROR_INVALID_ADDRESS);
-    if ((UINT)type > MDT_RAW_DPI)
-        return HRESULT_FROM_WIN32(ERROR_BAD_ARGUMENTS);
-    info.cbSize = sizeof(info);
-    if (!monitor || !GetMonitorInfoW(monitor, &info))
-        return HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE);
-
-    /* The physical size of the screen is not known (Windows answers the same without EDID data) */
-    if (type == MDT_RAW_DPI)
-    {
-        *x = *y = 0;
-        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    }
-
-    *x = shcore_system_dpi(LOGPIXELSX);
-    *y = shcore_system_dpi(LOGPIXELSY);
-    return S_OK;
+    if (GetDpiForMonitorInternal(monitor, type, x, y))
+        return S_OK;
+    return HRESULT_FROM_WIN32(GetLastError());
 }
 
 UINT WINAPI GetDpiForShellUIComponent(int component)
 {
     TRACE("(%d)\n", component);
 
-    return shcore_system_dpi(LOGPIXELSX);
+    return GetDpiForSystem();
 }
 #endif /* __REACTOS__ */
 
+#ifdef __REACTOS__
+static UINT ScaleDistance(UINT a, UINT b)
+{
+    return a > b ? a - b : b - a;
+}
+
+/* The scale factors that Windows offers; the one that is nearest to the DPI of the system is reported */
+static DEVICE_SCALE_FACTOR ScaleFactorFromDpi(UINT dpi)
+{
+    static const DEVICE_SCALE_FACTOR factors[] =
+    {
+        SCALE_100_PERCENT, SCALE_120_PERCENT, SCALE_125_PERCENT, SCALE_140_PERCENT, SCALE_150_PERCENT,
+        SCALE_160_PERCENT, SCALE_175_PERCENT, SCALE_180_PERCENT, SCALE_200_PERCENT, SCALE_225_PERCENT,
+        SCALE_250_PERCENT, SCALE_300_PERCENT, SCALE_350_PERCENT, SCALE_400_PERCENT, SCALE_450_PERCENT,
+        SCALE_500_PERCENT
+    };
+    UINT percent = MulDiv(dpi, 100, 96), i, best = 0;
+
+    for (i = 1; i < ARRAYSIZE(factors); i++)
+    {
+        if (ScaleDistance(factors[i], percent) < ScaleDistance(factors[best], percent))
+            best = i;
+    }
+    return factors[best];
+}
+
+HRESULT WINAPI GetScaleFactorForMonitor(HMONITOR monitor, DEVICE_SCALE_FACTOR *scale)
+{
+    TRACE("(%p %p)\n", monitor, scale);
+
+    if (!scale)
+        return E_INVALIDARG;
+    *scale = ScaleFactorFromDpi(GetDpiForSystem());
+    return S_OK;
+}
+
+DEVICE_SCALE_FACTOR WINAPI GetScaleFactorForDevice(DISPLAY_DEVICE_TYPE device_type)
+{
+    TRACE("(%d)\n", device_type);
+
+    return ScaleFactorFromDpi(GetDpiForSystem());
+}
+#else
 HRESULT WINAPI GetScaleFactorForMonitor(HMONITOR monitor, DEVICE_SCALE_FACTOR *scale)
 {
     FIXME("(%p %p): stub\n", monitor, scale);
@@ -180,6 +204,8 @@ DEVICE_SCALE_FACTOR WINAPI GetScaleFactorForDevice(DISPLAY_DEVICE_TYPE device_ty
 
     return SCALE_100_PERCENT;
 }
+
+#endif
 
 HRESULT WINAPI _IStream_Read(IStream *stream, void *dest, ULONG size)
 {
