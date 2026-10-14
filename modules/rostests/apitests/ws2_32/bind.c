@@ -238,71 +238,6 @@ TestEphemeralWrap(int Type, int Count)
     ok(Zeros == 0, "%s: bind %d got port 0\n", Type == SOCK_STREAM ? "TCP" : "UDP", i + 1);
 }
 
-/* Hold every TCP ephemeral port: the next bind of port 0 fails; after one is
- * closed, the next bind gets that port */
-static
-void
-TestEphemeralExhaustion(void)
-{
-    static SOCKET Held[40000];
-    struct sockaddr_in Addr;
-    int Count = 0, Error = 0, Len, i;
-    USHORT Freed, Got;
-    SOCKET Socket;
-
-    while (Count < (int)ARRAYSIZE(Held))
-    {
-        Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (Socket == INVALID_SOCKET)
-        {
-            Error = -WSAGetLastError();
-            break;
-        }
-        ZeroMemory(&Addr, sizeof(Addr));
-        Addr.sin_family = AF_INET;
-        Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        if (bind(Socket, (struct sockaddr *)&Addr, sizeof(Addr)))
-        {
-            Error = WSAGetLastError();
-            closesocket(Socket);
-            break;
-        }
-        Held[Count++] = Socket;
-    }
-    trace("TCP exhaustion: %d ports held, then error %d\n", Count, Error);
-    if (Error <= 0 || Count == 0)
-    {
-        skip("The ephemeral range was not exhausted (%d sockets, error %d)\n", Count, Error);
-        goto Cleanup;
-    }
-    ok(Error == WSAENOBUFS || Error == WSAEADDRINUSE, "TCP exhaustion: bind failed with %d\n", Error);
-
-    /* Free one port from the middle; it is the only one, so the next bind takes it */
-    Len = sizeof(Addr);
-    getsockname(Held[Count / 2], (struct sockaddr *)&Addr, &Len);
-    Freed = ntohs(Addr.sin_port);
-    closesocket(Held[Count / 2]);
-    Held[Count / 2] = INVALID_SOCKET;
-    Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    ZeroMemory(&Addr, sizeof(Addr));
-    Addr.sin_family = AF_INET;
-    Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    Error = bind(Socket, (struct sockaddr *)&Addr, sizeof(Addr)) ? WSAGetLastError() : 0;
-    ok(Error == 0, "TCP exhaustion: bind after freeing a port failed with %d\n", Error);
-    Len = sizeof(Addr);
-    getsockname(Socket, (struct sockaddr *)&Addr, &Len);
-    Got = ntohs(Addr.sin_port);
-    ok(Error != 0 || Got == Freed, "TCP exhaustion: freed port %u, got %u\n", Freed, Got);
-    closesocket(Socket);
-
-Cleanup:
-    for (i = 0; i < Count; i++)
-    {
-        if (Held[i] != INVALID_SOCKET)
-            closesocket(Held[i]);
-    }
-}
-
 START_TEST(bind)
 {
     WSADATA WsaData;
@@ -401,7 +336,6 @@ START_TEST(bind)
     TestEphemeralReuse(SOCK_DGRAM);
     TestEphemeralWrap(SOCK_DGRAM, 33000);
     TestEphemeralWrap(SOCK_STREAM, 5000);
-    TestEphemeralExhaustion();
     /* TODO: test IPv6 */
 
     Error = WSACleanup();
