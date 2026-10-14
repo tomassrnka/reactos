@@ -32,7 +32,7 @@ stack pages in order to grow the guard page, preserving the reserved stack
 guarantee. Normal returns preserve changes to x87 and MXCSR control state.
 
 Current limits include global/other-thread hooks and hook families other than
-CALLWNDPROC/CALLWNDPROCRET, DDE conversation callbacks, IME callbacks,
+CALLWNDPROC/CALLWNDPROCRET/GETMESSAGE, DDE conversation callbacks, IME callbacks,
 remaining private structures, printer driver pointers, and unconverted
 pointer messages. DDE initialization and string handles work; StartDoc
 retains the native service's stub result. Arbitrary
@@ -52,6 +52,8 @@ Installer fixtures also cover outline-font offsets, input contexts, monitor
 handles, the thread desktop, and CALLWND hook payloads. Hooks are currently
 limited to the calling guest thread; their message payload coverage follows
 the window-message translator.
+The `wow64_message_hook` fixture covers current-thread GETMESSAGE hooks,
+chaining, signed hook results and MSG writeback for PeekMessage/GetMessage.
 
 Regenerate with `python3 dll/wow64win/generate.py`. On the build host, run
 `TMPDIR=<scratch-directory> python3 dll/wow64win/tests/generator.py <source>`

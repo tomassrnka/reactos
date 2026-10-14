@@ -78,6 +78,7 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a);
 NTSTATUS NTAPI Wow64WinInitialize(PVOID Dispatcher);
 NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Status);
+ULONG_PTR Wow64WinCallNextHook(ULONG *Arguments);
 
 BOOL NTAPI NtGdiGetRealizationInfo(HDC hdc, PREALIZATION_INFO Info, HFONT Font);
 DWORD NTAPI NtDxEngGetRedirectionBitmap(DWORD Unknown);

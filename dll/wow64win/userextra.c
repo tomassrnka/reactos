@@ -150,7 +150,8 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a)
         /* A guest procedure must never be installed on a native thread.
          * Cross-thread/global hooks need a separate bitness-aware dispatcher. */
         if (a[2] != HandleToUlong(NtCurrentTeb()->ClientId.UniqueThread) ||
-            ((INT)a[3] != WH_CALLWNDPROC && (INT)a[3] != WH_CALLWNDPROCRET))
+            ((INT)a[3] != WH_CALLWNDPROC && (INT)a[3] != WH_CALLWNDPROCRET &&
+             (INT)a[3] != WH_GETMESSAGE))
         {
             RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
             return 0;
@@ -159,6 +160,8 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a)
         return (ULONG_PTR)NtUserSetWindowsHookEx(P(0), a[1] ? &Module : NULL,
                                                a[2], a[3], P(4), a[5]);
     }
+    case W64_NtUserCallNextHookEx:
+        return Wow64WinCallNextHook(a);
     case W64_NtUserBuildHwndList:
     {
         HWND *List = NULL; ULONG Needed = 0, i; NTSTATUS Status;

@@ -17,7 +17,7 @@ NtUserCallHwndOpt	D+S	manual	see user.c, userextra.c and gdi.c
 NtUserCallHwndParam	D+S	manual	see user.c, userextra.c and gdi.c
 NtUserCallHwndParamLock	D	manual	see user.c, userextra.c and gdi.c
 NtUserCallMsgFilter	C+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallNextHookEx	A+S	unsupported	hook-dependent LPARAM requires private layout conversion
+NtUserCallNextHookEx	A+S	manual	see user.c, userextra.c and gdi.c
 NtUserCallNoParam	D+S	manual	see user.c, userextra.c and gdi.c
 NtUserCallOneParam	D+S	manual	see user.c, userextra.c and gdi.c
 NtUserCallTwoParam	D+S	manual	see user.c, userextra.c and gdi.c

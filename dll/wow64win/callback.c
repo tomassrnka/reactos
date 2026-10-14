@@ -165,6 +165,12 @@ static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG S
     To->offPfn = From->offPfn; To->Ansi = From->Ansi;
     To->Result = 0; To->lParamSize = Size;
     RtlCopyMemory(To->ModuleName, From->ModuleName, sizeof(To->ModuleName));
+    if (From->HookId == WH_GETMESSAGE)
+    {
+        To->lParam = sizeof(*To);
+        MsgNativeTo32((MSG32 *)(To + 1), (const MSG *)(From + 1));
+        return;
+    }
     if (From->HookId == WH_CALLWNDPROC)
     {
         Native = &((const CWP_Struct *)From)->cwps;
@@ -218,6 +224,15 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             HOOKPROC_CALLBACK_ARGUMENTS *Native = Buffer;
             ULONG Base;
             if (Length < sizeof(*Native)) break;
+            if (Native->HookId == WH_GETMESSAGE)
+            {
+                if (Length != sizeof(*Native) + sizeof(MSG) ||
+                    (ULONG_PTR)Native->lParam != sizeof(*Native) || Native->lParamSize) break;
+                GuestLength = sizeof(HOOK32) + sizeof(MSG32);
+                Payload = 0;
+                Status = STATUS_SUCCESS;
+                break;
+            }
             if (Native->HookId == WH_CALLWNDPROC) Base = sizeof(CWP_Struct);
             else if (Native->HookId == WH_CALLWNDPROCRET) Base = sizeof(CWPR_Struct);
             else break;
@@ -404,8 +419,10 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
         {
             HOOKPROC_CALLBACK_ARGUMENTS *Native = Frame->Native;
             if (!Buffer || Length != Frame->GuestLength) { Status = STATUS_INFO_LENGTH_MISMATCH; break; }
-            /* CALLWND hooks have no message-buffer writeback contract. */
             Native->Result = ((HOOK32 *)Buffer)->Result;
+            if (Native->HookId == WH_GETMESSAGE)
+                Msg32ToNative((MSG *)(Native + 1), (const MSG32 *)((HOOK32 *)Buffer + 1));
+            /* CALLWND hooks have no message-buffer writeback contract. */
             Output = Native; OutputLength = Frame->NativeLength;
             break;
         }
@@ -460,6 +477,26 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
     NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Frame->Previous;
     WOW64_TEB32(NtCurrentTeb())->NtTib.ExceptionList = Frame->ExceptionList;
     return NtCallbackReturn(Output,OutputLength,Status);
+}
+
+ULONG_PTR Wow64WinCallNextHook(ULONG *a)
+{
+    WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
+    CALLBACK_FRAME *Frame = Cpu ? Cpu->CallbackFrame : NULL;
+    MSG Message;
+    LRESULT Result;
+    /* The callback, not a caller-supplied selector, determines lParam's ABI. */
+    if (!Frame || Frame->Id != USER32_CALLBACK_HOOKPROC ||
+        ((HOOKPROC_CALLBACK_ARGUMENTS *)Frame->Native)->HookId != WH_GETMESSAGE)
+    {
+        RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    }
+    if (!a[2]) return (LONG_PTR)NtUserCallNextHookEx(a[0], a[1], 0, a[3]);
+    Msg32ToNative(&Message, P32(a[2]));
+    Result = NtUserCallNextHookEx(a[0], a[1], (LPARAM)&Message, a[3]);
+    MsgNativeTo32(P32(a[2]), &Message);
+    return (LONG_PTR)Result;
 }
 
 #define DEFINE_USER32_CALLBACK(id, value, fn) \

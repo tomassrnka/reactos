@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory(prefix='thunk-test-',dir=os.environ['TMPDIR']) 
     for name in outputs:assert (copy/'dll/wow64win'/name).read_bytes()==(root/'dll/wow64win'/name).read_bytes(),name
     generated=(copy/'dll/wow64win/generated.inc').read_text()
     rows={r['name']:r for r in csv.DictReader((copy/'dll/wow64win/coverage.tsv').open(),delimiter='\t')}
-    assert rows['NtUserCallNextHookEx']['implementation']=='unsupported'
+    assert rows['NtUserCallNextHookEx']['implementation']=='manual'
     assert rows['NtUserSetClipboardData']['implementation']=='manual'
     clip=next(l for l in generated.splitlines() if l.startswith('case W64_NtUserCreateLocalMemHandle:'))
     assert '(LONG_PTR)(LONG)a[0]' in clip
