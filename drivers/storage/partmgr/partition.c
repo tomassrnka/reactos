@@ -1052,6 +1052,36 @@ PartitionHandleDeviceControl(
             Irp->IoStatus.Information = headerSize + uniqueId->UniqueIdLength;
             break;
         }
+        case IOCTL_MOUNTDEV_QUERY_STABLE_GUID:
+        {
+            PMOUNTDEV_STABLE_GUID stableGuid = Irp->AssociatedIrp.SystemBuffer;
+            static const GUID nullGuid = { 0 };
+
+            if (!VerifyIrpOutBufferSize(Irp, sizeof(*stableGuid)))
+            {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+
+            PartMgrAcquireLayoutLock(fdoExtension);
+
+            // A GPT partition's volume GUID name is its partition GUID
+            if (fdoExtension->DiskData.PartitionStyle != PARTITION_STYLE_GPT ||
+                RtlCompareMemory(&partExt->Gpt.PartitionId, &nullGuid, sizeof(GUID)) == sizeof(GUID))
+            {
+                PartMgrReleaseLayoutLock(fdoExtension);
+                status = STATUS_INVALID_DEVICE_REQUEST;
+                break;
+            }
+
+            stableGuid->StableGuid = partExt->Gpt.PartitionId;
+
+            PartMgrReleaseLayoutLock(fdoExtension);
+
+            status = STATUS_SUCCESS;
+            Irp->IoStatus.Information = sizeof(*stableGuid);
+            break;
+        }
         case IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME:
         case IOCTL_MOUNTDEV_LINK_CREATED:
         case IOCTL_MOUNTDEV_LINK_DELETED:
@@ -1061,7 +1091,6 @@ PartitionHandleDeviceControl(
         case CTL_CODE(MOUNTDEVCONTROLTYPE, 4, METHOD_BUFFERED, FILE_ANY_ACCESS):
         case CTL_CODE(MOUNTDEVCONTROLTYPE, 5, METHOD_BUFFERED, FILE_ANY_ACCESS):
 #endif
-        case IOCTL_MOUNTDEV_QUERY_STABLE_GUID:
         case IOCTL_MOUNTDEV_UNIQUE_ID_CHANGE_NOTIFY:
         {
             WARN("Ignored MountMgr notification: 0x%lX\n",
