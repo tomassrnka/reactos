@@ -10,6 +10,7 @@ extern void func_GetOwnerModuleFromTcpEntry(void);
 extern void func_GetOwnerModuleFromUdpEntry(void);
 extern void func_icmp(void);
 extern void func_IpTables2(void);
+extern void func_NotifyIpInterfaceChange(void);
 extern void func_SendARP(void);
 
 const struct test winetest_testlist[] =
@@ -22,6 +23,7 @@ const struct test winetest_testlist[] =
     { "GetOwnerModuleFromUdpEntry", func_GetOwnerModuleFromUdpEntry },
     { "icmp",                       func_icmp },
     { "IpTables2",                  func_IpTables2 },
+    { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },
     { "SendARP",                    func_SendARP },
 
     { 0, 0 }

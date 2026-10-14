@@ -11,6 +11,7 @@
 @ stdcall AllocateAndGetUdpExTableFromStack(ptr long long long long)
 @ stdcall AllocateAndGetUdpTableFromStack(ptr long long long)
 @ stdcall CancelIPChangeNotify(ptr)
+@ stdcall -version=0x600+ CancelMibChangeNotify2(ptr)
 @ stub CancelSecurityHealthChangeNotify
 @ stdcall -stub -version=0x600+ ConvertGuidToStringA(ptr ptr long)
 @ stdcall -stub -version=0x600+ ConvertGuidToStringW(ptr ptr long)
@@ -131,6 +132,7 @@
 @ stdcall IpReleaseAddress(ptr)
 @ stdcall IpRenewAddress(ptr)
 @ stub IsLocalAddress
+@ stdcall -version=0x600+ NotifyIpInterfaceChange(long ptr ptr long ptr)
 @ stub NTPTimeToNTFileTime
 @ stub NTTimeToNTPTime
 @ stdcall NhGetGuidFromInterfaceName(wstr ptr long long)

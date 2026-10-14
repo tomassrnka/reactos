@@ -2886,6 +2886,45 @@ DWORD WINAPI ConvertLengthToIpv4Mask(ULONG MaskLength, PULONG Mask)
 }
 
 /******************************************************************
+ *    NotifyIpInterfaceChange (IPHLPAPI.@)
+ *
+ * Register a callback for changes of the IP interfaces.
+ *
+ * NOTES
+ *  The IP helper here cannot see interface changes (NotifyAddrChange does
+ *  not either), so the registration fails with ERROR_NOT_SUPPORTED instead
+ *  of returning a handle whose callback never runs.
+ */
+DWORD WINAPI NotifyIpInterfaceChange(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
+                                     BOOLEAN InitialNotification, HANDLE *NotificationHandle)
+{
+  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !Callback || !NotificationHandle)
+    return ERROR_INVALID_PARAMETER;
+
+  FIXME("(Family %u, Callback %p, Context %p, Initial %d): interface changes are not reported\n",
+        Family, Callback, CallerContext, InitialNotification);
+  return ERROR_NOT_SUPPORTED;
+}
+
+
+/******************************************************************
+ *    CancelMibChangeNotify2 (IPHLPAPI.@)
+ *
+ * Deregister a change notification.
+ *
+ * NOTES
+ *  No notification can be registered (see NotifyIpInterfaceChange), so no
+ *  handle is valid.
+ */
+DWORD WINAPI CancelMibChangeNotify2(HANDLE NotificationHandle)
+{
+  if (!NotificationHandle)
+    return ERROR_INVALID_PARAMETER;
+
+  return ERROR_INVALID_HANDLE;
+}
+
+/******************************************************************
  *    SendARP (IPHLPAPI.@)
  *
  * Send an ARP request.
