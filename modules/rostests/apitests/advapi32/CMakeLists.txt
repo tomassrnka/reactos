@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     AddMandatoryAce.c
+    ConvertStringSidToSid.c
     CreateService.c
     CloseTrace.c
     DuplicateTokenEx.c

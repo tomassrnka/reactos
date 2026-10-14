@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_AddMandatoryAce(void);
+extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_CloseTrace(void);
 extern void func_DuplicateTokenEx(void);
@@ -47,6 +48,7 @@ extern void func_SddlRights(void);
 const struct test winetest_testlist[] =
 {
     { "AddMandatoryAce", func_AddMandatoryAce },
+    { "ConvertStringSidToSid", func_ConvertStringSidToSid },
     { "CreateService", func_CreateService },
     { "CloseTrace", func_CloseTrace },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
