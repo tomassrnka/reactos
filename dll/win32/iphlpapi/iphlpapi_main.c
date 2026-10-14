@@ -3418,15 +3418,6 @@ BOOL WINAPI CancelIPChangeNotify(LPOVERLAPPED notifyOverlapped)
     return 0L;
 }
 
-/*
- * @unimplemented
- */
-DWORD WINAPI GetBestInterfaceEx(struct sockaddr *pDestAddr,PDWORD pdwBestIfIndex)
-{
-    FIXME(":stub\n");
-    return 0L;
-}
-
 #ifdef GetAdaptersAddressesV1
 /*
  * @unimplemented

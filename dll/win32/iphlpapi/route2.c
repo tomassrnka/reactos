@@ -17,22 +17,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
  */
 #define ON_LINK_METRIC 256
 
-/* A luid is the interface type in the top 16 bits and the interface index as the luid index. */
 static BOOL if_index_to_luid(DWORD Index, PULONG Type, NET_LUID *Luid)
 {
-  MIB_IFROW Row;
-
-  memset(&Row, 0, sizeof(Row));
-  Row.dwIndex = Index;
-  if (GetIfEntry(&Row) != NO_ERROR)
-    return FALSE;
-
   Luid->Value = 0;
-  Luid->Info.NetLuidIndex = Index;
-  Luid->Info.IfType = Row.dwType;
-  if (Type)
-    *Type = Row.dwType;
-  return TRUE;
+  return getInterfaceLuidByIndex(Index, Type, &Luid->Value);
 }
 
 /*
@@ -189,8 +177,7 @@ DWORD WINAPI GetBestRoute2(NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex,
 
   if (InterfaceLuid && InterfaceLuid->Value)
   {
-    IfIndex = InterfaceLuid->Info.NetLuidIndex;
-    if (!if_index_to_luid(IfIndex, NULL, &Luid) || Luid.Value != InterfaceLuid->Value)
+    if (!getInterfaceIndexByLuid(InterfaceLuid->Value, &IfIndex))
       return ERROR_NOT_FOUND;
     Constrained = TRUE;
   }
@@ -283,4 +270,67 @@ DWORD WINAPI GetBestRoute2(NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex,
   if (!Found)
     return ERROR_NETWORK_UNREACHABLE;
   return Filled ? NO_ERROR : ERROR_NOT_FOUND;
+}
+
+/******************************************************************
+ *    GetBestInterfaceEx (IPHLPAPI.@)
+ *
+ * Find the interface a packet to a destination leaves by.
+ *
+ * NOTES
+ *  The measured Windows behaviour is followed, on top of the route lookup of GetBestRoute2:
+ *  0.0.0.0/8 (but the unspecified address) and the class E range (but the limited broadcast)
+ *  have no route, the default route is not taken for a link-local destination (which then
+ *  succeeds with interface 0), and so does 224.0.0.1, a group every host has joined. Windows
+ *  gives interface 0 to the other groups this computer joined too; the stack here lists none.
+ *  The limited broadcast takes the interface GetBestRoute2 gives it; Windows takes the lowest
+ *  metric of its 255.255.255.255 routes, which the stack here does not have.
+ *  Only IPv4 is routed: IPv6 destinations have no route, as without an IPv6 stack.
+ */
+DWORD WINAPI GetBestInterfaceEx(struct sockaddr *pDestAddr, PDWORD pdwBestIfIndex)
+{
+  SOCKADDR_INET Dest, Source;
+  MIB_IPFORWARD_ROW2 Row;
+  ULONG Host = 0;
+  DWORD Result;
+
+  TRACE("(%p, %p)\n", pDestAddr, pdwBestIfIndex);
+
+  if (!pDestAddr || !pdwBestIfIndex)
+    return ERROR_INVALID_PARAMETER;
+
+  memset(&Dest, 0, sizeof(Dest));
+  if (pDestAddr->sa_family == AF_INET)
+  {
+    Dest.Ipv4.sin_family = AF_INET;
+    Dest.Ipv4.sin_addr = ((SOCKADDR_IN *)pDestAddr)->sin_addr;
+    Host = ntohl(Dest.Ipv4.sin_addr.s_addr);
+
+    if (Host && !(Host >> 24))
+      return ERROR_NETWORK_UNREACHABLE;
+    if ((Host >> 28) == 0xf && Host != 0xffffffff)
+      return ERROR_NETWORK_UNREACHABLE;
+    if (Host == 0xe0000001)
+    {
+      *pdwBestIfIndex = 0;
+      return NO_ERROR;
+    }
+  }
+  else if (pDestAddr->sa_family == AF_INET6)
+    Dest.Ipv6 = *(SOCKADDR_IN6 *)pDestAddr;
+  else
+    return ERROR_INVALID_PARAMETER;
+
+  Result = GetBestRoute2(NULL, 0, NULL, &Dest, 0, &Row, &Source);
+  if ((Host >> 16) == 0xa9fe && (Result == ERROR_NETWORK_UNREACHABLE ||
+                                 (Result == NO_ERROR && !Row.DestinationPrefix.PrefixLength)))
+  {
+    *pdwBestIfIndex = 0;
+    return NO_ERROR;
+  }
+  if (Result != NO_ERROR)
+    return Result;
+
+  *pdwBestIfIndex = Row.InterfaceIndex;
+  return NO_ERROR;
 }
