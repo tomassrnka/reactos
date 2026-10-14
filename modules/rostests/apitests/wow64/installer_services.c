@@ -148,6 +148,44 @@ static void CheckPipe(void)
     CloseHandle(Read);
 }
 
+static void CheckAsyncPipe(void)
+{
+    WCHAR Name[80];
+    HANDLE Read, Write;
+    struct { OVERLAPPED Io; ULONG Guard[2]; } Pending = {{0}, {0x12345678, 0xabcdef01}};
+    char Buffer[16] = {0};
+    DWORD Bytes, Wait;
+    _snwprintf(Name, 80, L"\\\\.\\pipe\\w643c-async-%lu", GetCurrentProcessId());
+    Read = CreateNamedPipeW(Name, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                           PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, NULL);
+    CHECK(Read != INVALID_HANDLE_VALUE);
+    if (Read == INVALID_HANDLE_VALUE) return;
+    Write = CreateFileW(Name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(Write != INVALID_HANDLE_VALUE);
+    if (Write == INVALID_HANDLE_VALUE) { CloseHandle(Read); return; }
+    Pending.Io.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    CHECK(Pending.Io.hEvent != NULL);
+    if (!Pending.Io.hEvent) { CloseHandle(Write); CloseHandle(Read); return; }
+    CHECK(!ReadFile(Read, Buffer, sizeof(Buffer), &Bytes, &Pending.Io) && GetLastError() == ERROR_IO_PENDING);
+    CHECK(WriteFile(Write, "pipe", 4, &Bytes, NULL) && Bytes == 4);
+    Wait = WaitForSingleObject(Pending.Io.hEvent, 5000);
+    CHECK(Wait == WAIT_OBJECT_0);
+    /* Do not return with an outstanding request pointing into this frame. */
+    if (Wait != WAIT_OBJECT_0) ExitProcess(1);
+    CHECK(GetOverlappedResult(Read, &Pending.Io, &Bytes, FALSE) && Bytes == 4 && !memcmp(Buffer, "pipe", 4));
+    CHECK(Pending.Guard[0] == 0x12345678 && Pending.Guard[1] == 0xabcdef01);
+    CHECK(ResetEvent(Pending.Io.hEvent));
+    CHECK(!ReadFile(Read, Buffer, sizeof(Buffer), &Bytes, &Pending.Io) && GetLastError() == ERROR_IO_PENDING);
+    CHECK(CloseHandle(Write));
+    Wait = WaitForSingleObject(Pending.Io.hEvent, 5000);
+    CHECK(Wait == WAIT_OBJECT_0);
+    if (Wait != WAIT_OBJECT_0) ExitProcess(1);
+    CHECK(!GetOverlappedResult(Read, &Pending.Io, &Bytes, FALSE) && GetLastError() == ERROR_BROKEN_PIPE);
+    CHECK(Pending.Guard[0] == 0x12345678 && Pending.Guard[1] == 0xabcdef01);
+    CloseHandle(Pending.Io.hEvent);
+    CloseHandle(Read);
+}
+
 static void CheckRename(void)
 {
     WCHAR Temp[MAX_PATH], Source[MAX_PATH], Target[MAX_PATH];
@@ -473,6 +511,7 @@ int wmain(int argc, WCHAR **argv)
     CHECK(GetLastError() == ERROR_INVALID_HANDLE);
     CheckRename();
     CheckPipe();
+    CheckAsyncPipe();
     CheckPrivileges();
     CheckObjectSecurity();
     CheckCurrentDirectory();

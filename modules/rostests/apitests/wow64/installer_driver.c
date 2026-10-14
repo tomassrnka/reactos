@@ -1,4 +1,6 @@
-/* Native observer for installer UI and installed-program startup. */
+/* Native observer for installer UI and installed-program startup.
+ * The capture mode also forwards a helper's stdout/stderr to the harness and
+ * serial log, so a stalled installer can be diagnosed without reading its disk. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <tlhelp32.h>
@@ -12,6 +14,19 @@ static ULONG Hash;
 static const WCHAR *ExpectedClass;
 static struct { DWORD Id; HANDLE Handle; BOOL Exited; } Children[64];
 static UINT ChildCount;
+
+static void CaptureOutput(HANDLE Pipe)
+{
+    CHAR Text[1024];
+    DWORD Available, Read;
+    while (PeekNamedPipe(Pipe, NULL, 0, NULL, &Available, NULL) && Available)
+    {
+        if (!ReadFile(Pipe, Text, min(Available, sizeof(Text) - 1), &Read, NULL) || !Read) break;
+        Text[Read] = 0;
+        printf("%s", Text);
+        DbgPrint("INSTALL OUTPUT %s", Text);
+    }
+}
 
 static BOOL InFamily(DWORD Id)
 {
@@ -147,13 +162,16 @@ int wmain(int argc, WCHAR **argv)
     PROCESS_INFORMATION Process;
     DWORD Code = 1, Begin, Limit;
     ULONG OldHash = 0;
-    BOOL Wow = FALSE, Check, Debug, Running, RootExited = FALSE;
+    BOOL Wow = FALSE, Check, Debug, Capture, Running, RootExited = FALSE;
+    SECURITY_ATTRIBUTES Security = {sizeof(Security), NULL, TRUE};
+    HANDLE OutputRead = NULL, OutputWrite = NULL;
     UINT Child;
     int i, Executable;
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 3) return 2;
     Check = !wcscmp(argv[1], L"check");
     Debug = !wcscmp(argv[1], L"debug");
+    Capture = !wcscmp(argv[1], L"capture");
     if (Check && argc < 4) return 2;
     Executable = Check ? 3 : 2;
     if (Check) ExpectedClass = argv[2];
@@ -163,12 +181,27 @@ int wmain(int argc, WCHAR **argv)
         if (wcslen(Command) + wcslen(argv[i]) + 4 >= 4096) return 2;
         wcscat(Command, L" \""); wcscat(Command, argv[i]); wcscat(Command, L"\"");
     }
-    if (!CreateProcessW(argv[Executable], Command, NULL, NULL, FALSE,
+    if (Capture)
+    {
+        if (!CreatePipe(&OutputRead, &OutputWrite, &Security, 0)) return 1;
+        if (!SetHandleInformation(OutputRead, HANDLE_FLAG_INHERIT, 0))
+        {
+            CloseHandle(OutputRead); CloseHandle(OutputWrite);
+            return 1;
+        }
+        Startup.dwFlags |= STARTF_USESTDHANDLES;
+        Startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        Startup.hStdOutput = Startup.hStdError = OutputWrite;
+    }
+    if (!CreateProcessW(argv[Executable], Command, NULL, NULL, Capture,
                         Debug ? DEBUG_ONLY_THIS_PROCESS : 0, NULL, NULL, &Startup, &Process))
     {
         printf("INSTALL START FAILED error=%lu\n", GetLastError());
+        if (OutputRead) CloseHandle(OutputRead);
+        if (OutputWrite) CloseHandle(OutputWrite);
         return 1;
     }
+    if (OutputWrite) CloseHandle(OutputWrite);
     Target = Process.dwProcessId;
     IsWow64Process(Process.hProcess, &Wow);
     printf("INSTALL START pid=%lu wow64=%u path=%ls\n", Target, Wow, argv[Executable]);
@@ -184,6 +217,7 @@ int wmain(int argc, WCHAR **argv)
     while (GetTickCount() - Begin < Limit)
     {
         FindChildren();
+        if (Capture) CaptureOutput(OutputRead);
         Running = WaitForSingleObject(Process.hProcess, 500) == WAIT_TIMEOUT;
         if (!Running && !RootExited)
         {
@@ -223,6 +257,7 @@ int wmain(int argc, WCHAR **argv)
         }
     }
     GetExitCodeProcess(Process.hProcess, &Code);
+    if (Capture) { CaptureOutput(OutputRead); CloseHandle(OutputRead); }
     printf("INSTALL EXIT code=%lu elapsed=%lu\n", Code, GetTickCount() - Begin);
     DbgPrint("INSTALL EXIT code=%lu elapsed=%lu\n", Code, GetTickCount() - Begin);
     if (Code == STILL_ACTIVE) TerminateProcess(Process.hProcess, 98);
