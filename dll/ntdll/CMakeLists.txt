@@ -1,7 +1,15 @@
 
 add_subdirectory(nt_0600)
 
-spec2def(ntdll.dll def/ntdll.spec ADD_IMPORTLIB)
+set(ntdll_spec def/ntdll.spec)
+if(SYSWOW64_GUEST)
+    configure_file(def/ntdll.spec ntdll-guest.spec COPYONLY)
+    file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec"
+        "@ stdcall -arch=i386 LdrInitializeWow64(ptr)\n")
+    file(RELATIVE_PATH ntdll_spec "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec")
+endif()
+spec2def(ntdll.dll ${ntdll_spec} ADD_IMPORTLIB)
 
 # Link GCC stack protector lib
 if (STACK_PROTECTOR)

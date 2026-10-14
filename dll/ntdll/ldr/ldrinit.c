@@ -3487,7 +3487,7 @@ LdrpInit(PCONTEXT Context,
 
 /* EOF */
 
-#ifdef _M_IX86
+#if defined(_M_IX86) && defined(SYSWOW64_GUEST)
 /* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32. */
 VOID NTAPI LdrInitializeWow64(PVOID NtdllBase)
 {

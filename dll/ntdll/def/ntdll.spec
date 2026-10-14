@@ -1935,5 +1935,3 @@
 @ stdcall -arch=arm __rt_udiv()
 @ stdcall -arch=arm __rt_udiv64()
 @ stdcall -arch=arm __rt_srsh()
-
-@ stdcall -arch=i386 LdrInitializeWow64(ptr)

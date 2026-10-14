@@ -29,7 +29,9 @@ add_custom_command(OUTPUT ${wow64_tables}
         "${REACTOS_SOURCE_DIR}/win32ss/w32ksvc32.h"
         "${REACTOS_SOURCE_DIR}/win32ss/w32ksvc64.h"
     VERBATIM)
-add_custom_target(wow64_syscall_tables ALL DEPENDS ${wow64_tables})
+# Consumers in the WoW64 runtime depend on this target explicitly. A native
+# default build must not depend on the translation generator's input grammar.
+add_custom_target(wow64_syscall_tables DEPENDS ${wow64_tables})
 add_custom_target(wow64_syscall_tables_test
     COMMAND "${CMAKE_COMMAND}" "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/wow64-tests"
         -P "${REACTOS_SOURCE_DIR}/sdk/cmake/tests/wow64syscalls.cmake"
