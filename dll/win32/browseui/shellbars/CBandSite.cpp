@@ -512,9 +512,11 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::AddBand(IUnknown *punk)
         /* Initialize the added bands */
         memset(&NewBand[m_cBandsAllocated], 0, (NewAllocated - m_cBandsAllocated) * sizeof(struct BandObject));
 
-        m_cBandsAllocated = NewAllocated;
+        /* The new band takes the first of the added slots, not the first slot of the array */
         CoTaskMemFree(m_bands);
         m_bands = NewBand;
+        NewBand = &m_bands[m_cBandsAllocated];
+        m_cBandsAllocated = NewAllocated;
     }
     else
     {
@@ -568,7 +570,8 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::AddBand(IUnknown *punk)
 
         if (!SendMessageW(m_hwndRebar, RB_INSERTBANDW, (WPARAM)uBand, reinterpret_cast<LPARAM>(&rbi)))
         {
-            /* The band is not part of the site */
+            /* The band is not part of the site: its window goes before the object does, and it lets go of the site */
+            NewBand->DeskBand->CloseDW(0);
             ObjWithSite->SetSite(NULL);
             _FreeBand(NewBand);
             return E_FAIL;
@@ -595,6 +598,9 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::AddBand(IUnknown *punk)
         else
             ERR("Failed to map band id to index!\n");
 
+        /* Whatever the band made before it failed goes too */
+        NewBand->DeskBand->CloseDW(0);
+        ObjWithSite->SetSite(NULL);
         _FreeBand(NewBand);
 
         hRet = E_FAIL;
@@ -1063,6 +1069,20 @@ static HRESULT _LoadObjectFromStream(IStream *pStm, REFIID riid, void **ppv)
     hr = punk->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
     if (FAILED(hr))
         return hr;
+
+    /* Only what a band site can take is asked to read the stream: a stream that names another class must not reach its parser */
+    {
+        CComPtr<IDeskBand> pDeskBand;
+        CComPtr<IObjectWithSite> pWithSite;
+        CComPtr<IWinEventHandler> pEvents;
+        if (FAILED(punk->QueryInterface(IID_PPV_ARG(IDeskBand, &pDeskBand))) ||
+            FAILED(punk->QueryInterface(IID_PPV_ARG(IObjectWithSite, &pWithSite))) ||
+            FAILED(punk->QueryInterface(IID_PPV_ARG(IWinEventHandler, &pEvents))))
+        {
+            return E_NOINTERFACE;
+        }
+    }
+
     hr = pPersist->Load(pStm);
     if (FAILED(hr))
         return hr;
