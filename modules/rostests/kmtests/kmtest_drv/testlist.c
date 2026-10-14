@@ -51,6 +51,7 @@ KMT_TESTFUNC Test_KeMutex;
 KMT_TESTFUNC Test_KeProcessor;
 KMT_TESTFUNC Test_KeSpinLock;
 KMT_TESTFUNC Test_KeTimer;
+KMT_TESTFUNC Test_KeClockTime;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmSection;
@@ -139,6 +140,7 @@ const KMT_TEST TestList[] =
     { "-KeProcessor",                       Test_KeProcessor },
     { "KeSpinLock",                         Test_KeSpinLock },
     { "KeTimer",                            Test_KeTimer },
+    { "KeClockTime",                        Test_KeClockTime },
     { "-KernelType",                        Test_KernelType },
     { "MmMdl",                              Test_MmMdl },
     { "MmSection",                          Test_MmSection },
