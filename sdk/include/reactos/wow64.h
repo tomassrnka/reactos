@@ -52,7 +52,11 @@ typedef struct DECLSPEC_ALIGN(16) _WOW64_CPU_STATE
     ULONG FsRedirectionDisabled;
     ULONG Ecx;
     ULONG Edx;
-    ULONG Reserved[3];
+    /* Zero only while the complete saved context is authoritative. It stays
+     * set throughout return, guest execution and the next gate entry. */
+    volatile LONG InTransition;
+    BOOLEAN ContextEaxChanged;
+    UCHAR Reserved[7];
     UCHAR ExtendedRegisters[512];
     ULONG Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
     PVOID ApcFrame;
@@ -69,6 +73,7 @@ C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Edi) == 32);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ebp) == 36);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ecx) == 44);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Edx) == 48);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, InTransition) == 52);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, ExtendedRegisters) == 64);
 
 typedef NTSTATUS (NTAPI *WOW64_SERVICE)(ULONG Number, ULONG *Arguments);

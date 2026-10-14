@@ -696,6 +696,12 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
 {
     NTSTATUS Status;
     WOW64_CLEANUP Cleanup = {0};
+    WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
+    /* Assembly has finished every save, including EAX and FXSAVE. Keep the
+     * flag set outside this routine: that also covers the low-address gate,
+     * the instructions following CALL and the final IRET itself. */
+    Cpu->ContextEaxChanged = FALSE;
+    InterlockedExchange(&Cpu->InTransition, 0);
     /* All pointer expansion occurs in user mode. Faulting captures become
      * NT errors; no untyped 32-bit argument list is sent to the kernel. */
     _SEH2_TRY
@@ -728,5 +734,7 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
     }
     if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState)
         DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
+    InterlockedExchange(&Cpu->InTransition, 1);
+    if (!Cpu->ContextEaxChanged) Cpu->Eax = Status;
     return Status;
 }

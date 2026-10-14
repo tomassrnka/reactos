@@ -8,6 +8,7 @@ typedef struct _WOW64_APC_FRAME
     WOW64_CPU_STATE *Previous;
     CONTEXT *Native;
     WOW64_CONTEXT *Guest;
+    LONG PreviousTransition;
 } WOW64_APC_FRAME;
 
 PVOID Wow64ApcDispatcher;
@@ -24,12 +25,19 @@ NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
     {
         /* Return through the interrupted native syscall before leaving its
          * translator. It owns temporaries which must remain alive for APCs. */
+        InterlockedExchange(&Cpu->InTransition, 1);
         Apc->Previous->FsRedirectionDisabled = Cpu->FsRedirectionDisabled;
         Wow64ContextToCpu(Apc->Previous, Context);
         NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Apc->Previous;
-        if (Apc->Native->SegCs == 0x23) Wow64ContextToNative(Apc->Native, Context);
+        if (Apc->Native->SegCs == 0x23)
+        {
+            InterlockedExchange(&Apc->Previous->InTransition, 1);
+            Wow64ContextToNative(Apc->Native, Context);
+        }
+        else InterlockedExchange(&Apc->Previous->InTransition, Apc->PreviousTransition);
         return NtContinue(Apc->Native, TestAlert);
     }
+    InterlockedExchange(&Cpu->InTransition, 1);
     while (Apc && Context->Esp >= Apc->Guest->Esp)
     {
         /* An exception or longjmp can unwind out of an APC instead of
@@ -41,6 +49,7 @@ NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
     }
     RtlCaptureContext(&Native);
     Wow64ContextToNative(&Native, Context);
+    InterlockedExchange(&Cpu->InTransition, 1);
     return NtContinue(&Native, TestAlert);
 }
 
@@ -56,10 +65,17 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
         ULONG Registration[2];
     } *Guest;
     WOW64_CPU_STATE *Previous = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
-    WOW64_CPU_STATE Cpu = *Previous;
+    WOW64_CPU_STATE Cpu;
     WOW64_CONTEXT Context;
     WOW64_APC_FRAME Apc;
 
+    /* Encoded guest APCs cannot execute on a native-only helper. Returning
+     * drops this APC; ntdll resumes its interrupted native context. */
+    if (!Previous) return;
+    /* Context APCs must not update either frame while its saved registers
+     * are being cloned or ownership is being transferred to/from it. */
+    Apc.PreviousTransition = InterlockedExchange(&Previous->InTransition, 1);
+    Cpu = *Previous;
     if (Native->SegCs == 0x23) Wow64NativeToContext(&Context, Native);
     else Wow64CpuToContext(&Context, Previous);
     Guest = (PVOID)(ULONG_PTR)((Context.Esp - sizeof(*Guest)) & ~15);
@@ -116,6 +132,7 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     Native.SegCs = 0x23;
     Native.SegSs = Native.SegDs = Native.SegEs = 0x2b;
     Native.SegFs = 0x53;
+    InterlockedExchange(&((WOW64_CPU_STATE *)NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU])->InTransition, 1);
     Status = NtContinue(&Native, FALSE);
     DbgPrint("WoW64: exception dispatch failed: %08lx\n", Status);
 Failed:
@@ -137,5 +154,6 @@ NTSTATUS Wow64RaiseException(const EXCEPTION_RECORD32 *Record, const WOW64_CONTE
     NativeRecord.NumberParameters = Record->NumberParameters;
     for (i = 0; i < Record->NumberParameters; ++i)
         NativeRecord.ExceptionInformation[i] = Record->ExceptionInformation[i];
+    InterlockedExchange(&((WOW64_CPU_STATE *)NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU])->InTransition, 1);
     return NtRaiseException(&NativeRecord, &NativeContext, FirstChance);
 }

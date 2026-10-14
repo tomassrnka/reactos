@@ -77,7 +77,8 @@ typedef struct
     KEVENT Event;
     NTSTATUS Status;
     BOOLEAN Set;
-    WOW64_CONTEXT Context;
+    WOW64_CONTEXT Context, Original;
+    CONTEXT Native;
 } WOW64_CONTEXT_REQUEST;
 
 static VOID NTAPI
@@ -94,12 +95,13 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
 {
     WOW64_CONTEXT_REQUEST *Request = CONTAINING_RECORD(Apc, WOW64_CONTEXT_REQUEST, Apc);
     PKTRAP_FRAME Trap = KeGetTrapFrame(KeGetCurrentThread());
-    CONTEXT Native;
-    WOW64_CONTEXT Original = Request->Context;
+    PCONTEXT Native = &Request->Native;
+    WOW64_CONTEXT *Original = &Request->Original;
     WOW64_CPU_STATE *Cpu;
     PTEB Teb = PsGetCurrentThread()->Tcb.Teb;
     ULONG Flags = Request->Context.ContextFlags;
 
+    *Original = Request->Context;
     UNREFERENCED_PARAMETER(Routine);
     UNREFERENCED_PARAMETER(NormalContext);
     UNREFERENCED_PARAMETER(Argument1);
@@ -109,48 +111,57 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
     {
         ProbeForRead(Teb, sizeof(*Teb), sizeof(PVOID));
         Cpu = Teb->TlsSlots[WOW64_TLS_CPU];
-        RtlZeroMemory(&Native, sizeof(Native));
-        Native.ContextFlags = CONTEXT_ALL;
-        KiGetTrapContext(Trap, &Native);
+        RtlZeroMemory(Native, sizeof(*Native));
+        Native->ContextFlags = CONTEXT_ALL;
+        KiGetTrapContext(Trap, Native);
         if (Trap->SegCs == (KGDT64_R3_CMCODE | RPL_MASK))
         {
             if (Request->Set)
             {
-                Wow64ContextToNative(&Native, &Request->Context);
-                KiSetTrapContext(Trap, &Native, UserMode);
+                Wow64ContextToNative(Native, &Request->Context);
+                KiSetTrapContext(Trap, Native, UserMode);
             }
-            else Wow64NativeToContext(&Request->Context, &Native);
+            else Wow64NativeToContext(&Request->Context, Native);
         }
         else if (Cpu)
         {
+            ProbeForRead(Cpu, sizeof(*Cpu), 16);
+            /* The target cannot progress while its special APC runs. A
+             * suspended caller must resume and retry to leave the gate. */
+            if (Cpu->InTransition) ExRaiseStatus(STATUS_RETRY);
             if (Request->Set)
             {
                 ProbeForWrite(Cpu, sizeof(*Cpu), 16);
+                /* A get/set round trip must not replace the eventual service
+                 * result with its entry service number. Keep explicit edits
+                 * sticky across later round trips in this same service. */
+                if ((Flags & (WOW64_CONTEXT_INTEGER & ~WOW64_CONTEXT_i386)) &&
+                    Request->Context.Eax != Cpu->Eax)
+                    Cpu->ContextEaxChanged = TRUE;
                 Wow64ContextToCpu(Cpu, &Request->Context);
                 /* Hardware debug state also governs the next guest return. */
                 if (Flags & (WOW64_CONTEXT_DEBUG_REGISTERS & ~WOW64_CONTEXT_i386))
                 {
-                    WOW64_CONTEXT Debug = Request->Context;
-                    Debug.ContextFlags = WOW64_CONTEXT_DEBUG_REGISTERS;
-                    Wow64ContextToNative(&Native, &Debug);
-                    KiSetTrapContext(Trap, &Native, UserMode);
+                    Original->ContextFlags = WOW64_CONTEXT_DEBUG_REGISTERS;
+                    Wow64ContextToNative(Native, Original);
+                    KiSetTrapContext(Trap, Native, UserMode);
                 }
             }
             else
             {
                 ProbeForRead(Cpu, sizeof(*Cpu), 16);
                 Wow64CpuToContext(&Request->Context, Cpu);
-                Request->Context.Dr0 = Native.Dr0; Request->Context.Dr1 = Native.Dr1;
-                Request->Context.Dr2 = Native.Dr2; Request->Context.Dr3 = Native.Dr3;
-                Request->Context.Dr6 = Native.Dr6; Request->Context.Dr7 = Native.Dr7;
+                Request->Context.Dr0 = Native->Dr0; Request->Context.Dr1 = Native->Dr1;
+                Request->Context.Dr2 = Native->Dr2; Request->Context.Dr3 = Native->Dr3;
+                Request->Context.Dr6 = Native->Dr6; Request->Context.Dr7 = Native->Dr7;
             }
         }
         else
         {
             /* Before first resume the native startup argument points to the
              * context captured by the creator in the new native stack. */
-            WOW64_CONTEXT *Initial = (PVOID)(ULONG_PTR)Native.Rcx;
-            if (Native.Rdx != WOW64_THREAD_START_MARKER) ExRaiseStatus(STATUS_INVALID_PARAMETER);
+            WOW64_CONTEXT *Initial = (PVOID)(ULONG_PTR)Native->Rcx;
+            if (Native->Rdx != WOW64_THREAD_START_MARKER) ExRaiseStatus(STATUS_INVALID_PARAMETER);
             ProbeForRead(Initial, sizeof(*Initial), sizeof(ULONG));
             if (Request->Set)
             {
@@ -161,8 +172,8 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
         }
         if (!Request->Set)
         {
-            Wow64CopyContext(&Original, &Request->Context, Flags);
-            Request->Context = Original;
+            Wow64CopyContext(Original, &Request->Context, Flags);
+            Request->Context = *Original;
         }
         Request->Context.ContextFlags = Flags;
     }

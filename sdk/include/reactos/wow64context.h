@@ -31,10 +31,9 @@ static __inline VOID Wow64FloatToLegacy(WOW64_CONTEXT *Context)
     Legacy->TagWord = Tags;
 }
 
-static __inline VOID Wow64LegacyToFloat(WOW64_CONTEXT *Context)
+static __inline VOID Wow64LegacyToFloat(XMM_SAVE_AREA32 *Fx,
+                                       const WOW64_FLOATING_SAVE_AREA *Legacy)
 {
-    XMM_SAVE_AREA32 *Fx = (XMM_SAVE_AREA32 *)Context->ExtendedRegisters;
-    const WOW64_FLOATING_SAVE_AREA *Legacy = &Context->FloatSave;
     ULONG i;
     Fx->ControlWord = Legacy->ControlWord;
     Fx->StatusWord = Legacy->StatusWord;
@@ -75,13 +74,7 @@ static __inline VOID Wow64ContextToCpu(WOW64_CPU_STATE *To, const WOW64_CONTEXT 
 #undef COPY
     if (Flags & 32) RtlCopyMemory(To->ExtendedRegisters, From->ExtendedRegisters, 512);
     else if (Flags & 8)
-    {
-        WOW64_CONTEXT Copy;
-        Copy.FloatSave = From->FloatSave;
-        RtlCopyMemory(Copy.ExtendedRegisters, To->ExtendedRegisters, 512);
-        Wow64LegacyToFloat(&Copy);
-        RtlCopyMemory(To->ExtendedRegisters, Copy.ExtendedRegisters, 512);
-    }
+        Wow64LegacyToFloat((XMM_SAVE_AREA32 *)To->ExtendedRegisters, &From->FloatSave);
     *(ULONG *)(To->ExtendedRegisters + 24) &= 0xffbf;
     To->EFlags = (To->EFlags & 0x003f4dd7) | 0x202;
 }
@@ -130,14 +123,9 @@ static __inline VOID Wow64ContextToNative(CONTEXT *To, const WOW64_CONTEXT *From
     }
     if (Flags & (8 | 32))
     {
-        WOW64_CONTEXT Copy = *From;
         To->ContextFlags |= CONTEXT_FLOATING_POINT;
-        if (!(Flags & 32))
-        {
-            RtlCopyMemory(Copy.ExtendedRegisters, &To->FltSave, 512);
-            Wow64LegacyToFloat(&Copy);
-        }
-        RtlCopyMemory(&To->FltSave, Copy.ExtendedRegisters, 512);
+        if (Flags & 32) RtlCopyMemory(&To->FltSave, From->ExtendedRegisters, 512);
+        else Wow64LegacyToFloat(&To->FltSave, &From->FloatSave);
         To->MxCsr = To->FltSave.MxCsr &= 0xffbf;
     }
     if (Flags & 16)
