@@ -348,7 +348,8 @@ RunLateChild(void)
     ExitProcess(CHILD_RAN | Bits);
 }
 
-/* Exclusive: create the file only if it does not exist, so that a run never overwrites a file it did not create */
+/* Exclusive: create the file only if it does not exist, so that a run never overwrites a file it did not create.
+   A file this call created is removed again when it cannot be written completely. */
 static BOOL
 ExtractLocalDll(const WCHAR *Path, BOOL Exclusive)
 {
@@ -356,15 +357,18 @@ ExtractLocalDll(const WCHAR *Path, BOOL Exclusive)
     HGLOBAL Data;
     DWORD Size, Written;
     HANDLE File;
-    BOOL Ret;
+    BOOL Created, Ret;
 
     if (!Resource || !(Data = LoadResource(NULL, Resource)) || !(Size = SizeofResource(NULL, Resource)))
         return FALSE;
     File = CreateFileW(Path, GENERIC_WRITE, 0, NULL, Exclusive ? CREATE_NEW : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (File == INVALID_HANDLE_VALUE)
         return FALSE;
+    Created = Exclusive || GetLastError() != ERROR_ALREADY_EXISTS;
     Ret = WriteFile(File, LockResource(Data), Size, &Written, NULL) && Written == Size;
     CloseHandle(File);
+    if (!Ret && Created)
+        DeleteFileW(Path);
     return Ret;
 }
 
@@ -557,6 +561,71 @@ test_app_local_unlisted(void)
     RemoveDirectoryW(Dir);
 }
 
+#define RETRY_FIRST_LOADED  0x1
+#define RETRY_FIRST_LOCAL   0x2
+#define RETRY_SECOND_LOADED 0x4
+#define RETRY_SECOND_LOCAL  0x8
+
+/*
+ * The copy next to this executable cannot be checked: load the contract, make the copy readable, load it again. The
+ * first answer must not be kept. Freed heap blocks filled with copies of a "system host" entry for the name come
+ * first, so that a decision list the loader allocates and searches without initialising it is likely to read one.
+ */
+static void
+RunRetryChild(void)
+{
+    WCHAR Copy[MAX_PATH];
+    PVOID Blocks[64];
+    HMODULE Module;
+    DWORD n, Bits = 0;
+    WCHAR *Slash;
+
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+    if (!GetModuleFileNameW(NULL, Copy, _countof(Copy)) || !(Slash = wcsrchr(Copy, L'\\')) ||
+        FAILED(StringCchCopyW(Slash + 1, _countof(Copy) - (Slash + 1 - Copy), g_LocalNames[1])))
+    {
+        ExitProcess(0);
+    }
+
+    for (n = 0; n < _countof(Blocks); ++n)
+    {
+        SIZE_T Size = 1024 + 16 * (n % 16), Used;
+        Blocks[n] = HeapAlloc(GetProcessHeap(), 0, Size);
+        for (Used = 0; Blocks[n] && Used + sizeof(L"S") + wcslen(g_LocalNames[1]) * sizeof(WCHAR) <= Size;)
+        {
+            WCHAR *Entry = (WCHAR *)((PUCHAR)Blocks[n] + Used);
+            Entry[0] = L'S';
+            wcscpy(Entry + 1, g_LocalNames[1]);
+            Used += sizeof(L"S") + wcslen(g_LocalNames[1]) * sizeof(WCHAR);
+        }
+    }
+    for (n = 0; n < _countof(Blocks); ++n)
+    {
+        if (Blocks[n])
+            HeapFree(GetProcessHeap(), 0, Blocks[n]);
+    }
+
+    Module = LoadLibraryW(g_LocalNames[1]);
+    if (Module)
+    {
+        Bits |= RETRY_FIRST_LOADED;
+        if (IsAppLocalCopy(Module))
+            Bits |= RETRY_FIRST_LOCAL;
+        FreeLibrary(Module);
+    }
+    if (!SetDenied(Copy, 0))
+        ExitProcess(0);
+    Module = LoadLibraryW(g_LocalNames[1]);
+    if (Module)
+    {
+        Bits |= RETRY_SECOND_LOADED;
+        if (IsAppLocalCopy(Module))
+            Bits |= RETRY_SECOND_LOCAL;
+        FreeLibrary(Module);
+    }
+    ExitProcess(CHILD_RAN | Bits);
+}
+
 /*
  * As above, and the attributes of the copy cannot be read either, so the loader cannot tell whether the copy is
  * there. That must not send the name to the system host: the DLL search decides, as on Windows 7.
@@ -595,6 +664,13 @@ test_app_local_unreadable(void)
             ok(!(Code & LOCAL_LOADED(1)) || (Code & LOCAL_FROM_APP(1)), "the system host was used: 0x%lx\n", Code);
         else
             ok((Code & (LOCAL_LOADED(1) | LOCAL_FROM_APP(1))) == LOCAL_LOADED(1), "child exit code 0x%lx\n", Code);
+
+        /* The undecided name is asked again once the copy can be read (the child makes it readable) */
+        Code = StartChild(Exe, L"retry");
+        if (is_reactos() || GetNTVersion() == 0x0601)
+            ok(Code == (CHILD_RAN | RETRY_SECOND_LOADED | RETRY_SECOND_LOCAL), "retry: child exit code 0x%lx\n", Code);
+        else
+            ok(Code == (CHILD_RAN | RETRY_FIRST_LOADED | RETRY_SECOND_LOADED), "retry: child exit code 0x%lx\n", Code);
     }
 
     ok(SetDenied(Dir, 0), "SetFileSecurityW failed with %lu\n", GetLastError());
@@ -679,6 +755,8 @@ START_TEST(loader)
         RunLocalChild();
     if (argc >= 3 && !strcmp(argv[2], "late"))
         RunLateChild();
+    if (argc >= 3 && !strcmp(argv[2], "retry"))
+        RunRetryChild();
 
     test_minor_versions();
     test_manifests();
