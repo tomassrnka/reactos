@@ -22,6 +22,7 @@ list(APPEND SOURCE
     nostartup.c
     open_osfhandle.c
     recv.c
+    WSASendMsg.c
     send.c
     udpbindretry.c
     udprecv.c

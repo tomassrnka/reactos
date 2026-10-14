@@ -9,6 +9,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <ws2_32.h>
+#include <ws2tcpip.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -234,6 +235,525 @@ WSASendDisconnect(IN SOCKET s,
         }
     }
 
+    /* Return with an Error */
+    SetLastError(ErrorCode);
+    return SOCKET_ERROR;
+}
+
+
+/*
+ * Checks the ancillary data of WSASendMsg. A buffer and a length go together, and every header fits. On an
+ * IPv4 socket the level is IP and the type one of those Windows knows, with a payload of the size that type
+ * needs (measured on Windows Server 2008 R2 and Windows 10, which also know more types): options (1), type of
+ * service (3), do not fragment (14), packet information (19), time to live (21) and routing header (32).
+ * Neither AFD nor the TCP/IP driver has an interface for per-message options, so a request that is well
+ * formed is refused with WSAEOPNOTSUPP, except for packet information that asks for what the socket does
+ * anyway (its own bound address, any interface), instead of being dropped without its effect.
+ */
+#define WS_CMSG_IP_OPTIONS       1
+#define WS_CMSG_IP_TOS           3
+#define WS_CMSG_IP_DONTFRAGMENT 14
+#define WS_CMSG_IP_PKTINFO      19
+#define WS_CMSG_IP_TTL          21
+#define WS_CMSG_IP_RTHDR        32
+
+/* Not inlined: inside the SEH frame of WSASendMsg the i386 optimizer lost the result of the loop */
+static
+DECLSPEC_NOINLINE
+INT
+WsCheckSendMsgControl(IN PWSSOCKET Socket,
+                      IN SOCKET Handle,
+                      IN LPWSABUF Control)
+{
+    PUCHAR Cursor = (PUCHAR)Control->buf;
+    ULONG Remaining = Control->len;
+    LPWSACMSGHDR Header;
+    ULONGLONG Step;
+    INT Family = Socket->CatalogEntry->ProtocolInfo.iAddressFamily;
+    BOOLEAN Unsupported = FALSE;
+
+    if ((Control->buf == NULL) != (Control->len == 0))
+        return WSAEFAULT;
+
+    /* A malformed header anywhere is reported before the refusal of a well formed request: the refusal is only the result at the end */
+    while (Remaining)
+    {
+        ULONG Payload;
+
+        if (Remaining < sizeof(WSACMSGHDR))
+            return WSAEINVAL;
+
+        Header = (LPWSACMSGHDR)Cursor;
+        if (Header->cmsg_len < sizeof(WSACMSGHDR) || Header->cmsg_len > Remaining)
+            return WSAEINVAL;
+        Payload = (ULONG)(Header->cmsg_len - sizeof(WSACMSGHDR));
+
+        if (Family == AF_INET)
+        {
+            if (Header->cmsg_level != IPPROTO_IP)
+                return WSAEINVAL;
+
+            switch (Header->cmsg_type)
+            {
+                case WS_CMSG_IP_OPTIONS:
+                    if (Payload == 1)
+                        return WSAEINVAL;
+                    Unsupported = TRUE;
+                    break;
+                case WS_CMSG_IP_TOS:
+                case WS_CMSG_IP_DONTFRAGMENT:
+                case WS_CMSG_IP_TTL:
+                    if (Payload < sizeof(INT))
+                        return WSAEINVAL;
+                    Unsupported = TRUE;
+                    break;
+                case WS_CMSG_IP_PKTINFO:
+                {
+                    IN_PKTINFO *Info = (IN_PKTINFO *)WSA_CMSG_DATA(Header);
+                    SOCKADDR_IN Local;
+                    INT LocalLength = sizeof(Local), LocalError = NO_ERROR;
+
+                    if (Payload < sizeof(IN_PKTINFO))
+                        return WSAEINVAL;
+
+                    /* No source and no interface asks for nothing at all, which Windows refuses */
+                    if (Info->ipi_addr.s_addr == 0 && Info->ipi_ifindex == 0)
+                        return WSAEINVAL;
+
+                    if (Info->ipi_ifindex != 0 ||
+                        Socket->Provider->Service.lpWSPGetSockName(Handle, (LPSOCKADDR)&Local, &LocalLength, &LocalError) ||
+                        Local.sin_family != AF_INET || Local.sin_addr.s_addr != Info->ipi_addr.s_addr)
+                    {
+                        Unsupported = TRUE;
+                    }
+                    break;
+                }
+                case WS_CMSG_IP_RTHDR:
+                    if (Payload != 0)
+                        return WSAEINVAL;
+                    Unsupported = TRUE;
+                    break;
+                default:
+                    return WSAEINVAL;
+            }
+        }
+        else
+        {
+            /* Other families: the form is checked, the requests cannot be carried out */
+            if (Header->cmsg_level != IPPROTO_IP && Header->cmsg_level != IPPROTO_IPV6)
+                return WSAEINVAL;
+            Unsupported = TRUE;
+        }
+
+        Step = ((ULONGLONG)Header->cmsg_len + TYPE_ALIGNMENT(WSACMSGHDR) - 1) & ~((ULONGLONG)TYPE_ALIGNMENT(WSACMSGHDR) - 1);
+        if (Step >= Remaining)
+            break;
+        Cursor += Step;
+        Remaining -= (ULONG)Step;
+    }
+
+    return Unsupported ? WSAEOPNOTSUPP : NO_ERROR;
+}
+
+/* The largest datagram of an IPv4 UDP socket, and of an IPv4 raw socket (an IPv4 header of 20 bytes is added to it) */
+#define WS_MAX_UDP_PAYLOAD 65507
+#define WS_MAX_RAW_PAYLOAD 65515
+
+typedef struct _WS_SENDMSG_APC
+{
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE Routine;
+    LPWSAOVERLAPPED Overlapped;
+    DWORD Bytes;
+} WS_SENDMSG_APC, *PWS_SENDMSG_APC;
+
+static
+VOID
+NTAPI
+WsSendMsgApc(IN ULONG_PTR Parameter)
+{
+    PWS_SENDMSG_APC Apc = (PWS_SENDMSG_APC)Parameter;
+    WS_SENDMSG_APC Copy = *Apc;
+
+    HeapFree(GetProcessHeap(), 0, Apc);
+    Copy.Routine(NO_ERROR, Copy.Bytes, Copy.Overlapped, 0);
+}
+
+/*
+ * The overlapped structure must be writable before anything is sent: the provider acquires resources
+ * for the request first and cannot release them when its own write to the structure faults.
+ */
+static
+BOOLEAN
+WsProbeOverlapped(IN LPWSAOVERLAPPED Overlapped)
+{
+    BOOLEAN Writable = TRUE;
+
+    _SEH2_TRY
+    {
+        volatile UCHAR *Bytes = (volatile UCHAR *)Overlapped;
+
+        Bytes[0] = Bytes[0];
+        Bytes[sizeof(*Overlapped) - 1] = Bytes[sizeof(*Overlapped) - 1];
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Writable = FALSE;
+    }
+    _SEH2_END;
+
+    return Writable;
+}
+
+/*
+ * A request with an overlapped structure on a socket that was not opened as overlapped is sent at once; the structure
+ * is then completed here, as Windows does for it: the byte count, the event and the completion routine.
+ */
+static
+VOID
+WsCompleteInlineSend(IN LPWSAOVERLAPPED Overlapped,
+                     IN LPWSAOVERLAPPED_COMPLETION_ROUTINE Routine,
+                     IN DWORD Bytes)
+{
+    PWS_SENDMSG_APC Apc;
+
+    Overlapped->Internal = 0;
+    Overlapped->InternalHigh = Bytes;
+    if (Overlapped->hEvent)
+        SetEvent((HANDLE)((ULONG_PTR)Overlapped->hEvent & ~(ULONG_PTR)1));
+
+    if (!Routine)
+        return;
+
+    Apc = HeapAlloc(GetProcessHeap(), 0, sizeof(*Apc));
+    if (!Apc)
+        return;
+    Apc->Routine = Routine;
+    Apc->Overlapped = Overlapped;
+    Apc->Bytes = Bytes;
+    if (!QueueUserAPC(WsSendMsgApc, GetCurrentThread(), (ULONG_PTR)Apc))
+        HeapFree(GetProcessHeap(), 0, Apc);
+}
+
+/*
+ * @implemented
+ *
+ * Only datagram and raw sockets, as on Windows. The message is sent with the
+ * provider's send or send-to call. Ancillary data is checked but not applied.
+ *
+ * AFD sends only the first buffer of a datagram, so a synchronous send of a
+ * message with several buffers gathers them into one here. An overlapped one
+ * on an overlapped socket would need the gathered storage to outlive the call;
+ * that is not supported and fails with WSAEOPNOTSUPP instead of losing data.
+ * On a socket that was not opened as overlapped the send is done at once and the
+ * overlapped structure completed here, as Windows does.
+ */
+INT
+WSAAPI
+WSASendMsg(IN SOCKET s,
+           IN LPWSAMSG lpMsg,
+           IN DWORD dwFlags,
+           OUT LPDWORD lpNumberOfBytesSent,
+           IN LPWSAOVERLAPPED lpOverlapped,
+           IN LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+    PWSSOCKET Socket;
+    INT Status;
+    INT ErrorCode;
+    INT SocketType = 0;
+    INT OptionLength;
+    LPWSATHREADID ThreadId;
+    WSAMSG Msg;
+    SOCKADDR_STORAGE Name;
+    WSABUF Single;
+    LPWSABUF SendBuffers = NULL;
+    LPWSABUF volatile Snapshot = NULL;
+    DWORD Sent = 0, Index;
+    ULONGLONG Total = 0;
+    PCHAR volatile Gathered = NULL;
+    BOOLEAN Inline;
+    DPRINT("WSASendMsg: %lx, %p, %lx\n", s, lpMsg, dwFlags);
+
+    /* Check for WSAStartup */
+    if ((ErrorCode = WsQuickPrologTid(&ThreadId)) != ERROR_SUCCESS)
+        goto Fail;
+
+    if (!lpMsg)
+    {
+        ErrorCode = WSAEFAULT;
+        goto Fail;
+    }
+
+    /* Get the Socket Context */
+    if (!(Socket = WsSockGetSocket(s)))
+    {
+        ErrorCode = WSAENOTSOCK;
+        goto Fail;
+    }
+
+    /* A socket that was not opened as overlapped sends at once; the overlapped structure is completed here */
+    Inline = (lpOverlapped && !Socket->Overlapped);
+
+    ErrorCode = NO_ERROR;
+    _SEH2_TRY
+    {
+        /* The caller's memory is read once; the checks below use the copy */
+        Msg = *lpMsg;
+
+        if (!Msg.lpBuffers || !Msg.dwBufferCount)
+        {
+            ErrorCode = WSAEINVAL;
+        }
+        else if (Msg.dwBufferCount > MAXLONG / sizeof(WSABUF))
+        {
+            ErrorCode = WSAENOBUFS;
+        }
+        else
+        {
+            /* The descriptors are copied, so that the caller cannot change them between the checks and the use */
+            Snapshot = HeapAlloc(GetProcessHeap(), 0, Msg.dwBufferCount * sizeof(WSABUF));
+            if (!Snapshot)
+            {
+                ErrorCode = WSAENOBUFS;
+            }
+            else
+            {
+                RtlCopyMemory(Snapshot, Msg.lpBuffers, Msg.dwBufferCount * sizeof(WSABUF));
+                Msg.lpBuffers = Snapshot;
+                for (Index = 0; Index < Msg.dwBufferCount; Index++)
+                {
+                    if (!Msg.lpBuffers[Index].buf && Msg.lpBuffers[Index].len)
+                    {
+                        ErrorCode = WSAEFAULT;
+                        break;
+                    }
+                    Total += Msg.lpBuffers[Index].len;
+                }
+            }
+        }
+
+        if (ErrorCode == NO_ERROR && (dwFlags & ~(MSG_OOB | MSG_DONTROUTE | MSG_PARTIAL)))
+            ErrorCode = WSAEOPNOTSUPP;
+
+        if (ErrorCode == NO_ERROR)
+        {
+            OptionLength = sizeof(SocketType);
+            if (Socket->Provider->Service.lpWSPGetSockOpt(s, SOL_SOCKET, SO_TYPE, (PCHAR)&SocketType, &OptionLength, &ErrorCode))
+            {
+                if (ErrorCode == NO_ERROR) ErrorCode = WSASYSCALLFAILURE;
+            }
+            else if (SocketType != SOCK_DGRAM && SocketType != SOCK_RAW)
+            {
+                ErrorCode = WSAEINVAL;
+            }
+            else if (Total > MAXLONG ||
+                     (Socket->CatalogEntry->ProtocolInfo.iAddressFamily == AF_INET &&
+                      Total > (SocketType == SOCK_DGRAM ? WS_MAX_UDP_PAYLOAD : WS_MAX_RAW_PAYLOAD)))
+            {
+                ErrorCode = WSAEMSGSIZE;
+            }
+        }
+
+        /* The destination: required unless the socket is connected, and of the socket's address family */
+        if (ErrorCode == NO_ERROR)
+        {
+            if (Msg.name)
+            {
+                INT ExpectedLength;
+
+                if (Msg.namelen < (INT)sizeof(Msg.name->sa_family) || Msg.namelen > (INT)sizeof(Name))
+                {
+                    ErrorCode = WSAEFAULT;
+                }
+                else
+                {
+                    /* The provider gets a copy that cannot fault half way */
+                    RtlCopyMemory(&Name, Msg.name, Msg.namelen);
+                    Msg.name = (LPSOCKADDR)&Name;
+
+                    if (Msg.name->sa_family != Socket->CatalogEntry->ProtocolInfo.iAddressFamily)
+                    {
+                        ErrorCode = WSAEAFNOSUPPORT;
+                    }
+                    else
+                    {
+                        switch (Msg.name->sa_family)
+                        {
+                            case AF_INET:
+                                ExpectedLength = sizeof(SOCKADDR_IN);
+                                break;
+                            case AF_INET6:
+                                ExpectedLength = sizeof(SOCKADDR_IN6);
+                                break;
+                            default:
+                                ExpectedLength = sizeof(SOCKADDR);
+                                break;
+                        }
+                        if (Msg.namelen != ExpectedLength)
+                            ErrorCode = WSAEFAULT;
+                    }
+                }
+            }
+            else if (Msg.namelen)
+            {
+                ErrorCode = WSAEFAULT;
+            }
+            else
+            {
+                SOCKADDR_STORAGE Peer;
+                INT PeerLength = sizeof(Peer);
+                INT PeerError = NO_ERROR;
+
+                /* Without a destination the socket must have a peer */
+                if (Socket->Provider->Service.lpWSPGetPeerName(s, (LPSOCKADDR)&Peer, &PeerLength, &PeerError))
+                {
+                    if (PeerError == WSAENOTCONN)
+                        ErrorCode = WSAEINVAL;
+                    else
+                        ErrorCode = (PeerError != NO_ERROR) ? PeerError : WSASYSCALLFAILURE;
+                }
+            }
+        }
+
+        if (ErrorCode == NO_ERROR)
+            ErrorCode = WsCheckSendMsgControl(Socket, s, &Msg.Control);
+
+        /* A synchronous send has to report its byte count */
+        if (ErrorCode == NO_ERROR && !lpNumberOfBytesSent && !lpOverlapped)
+            ErrorCode = WSAEFAULT;
+
+        /* The structure is probed here, not by the provider */
+        if (ErrorCode == NO_ERROR && lpOverlapped && !WsProbeOverlapped(lpOverlapped))
+            ErrorCode = WSAEFAULT;
+
+        /* One buffer goes to the provider as it is; several are gathered */
+        if (ErrorCode == NO_ERROR)
+        {
+            if (Msg.dwBufferCount == 1)
+            {
+                SendBuffers = Msg.lpBuffers;
+            }
+            else if (lpOverlapped && !Inline)
+            {
+                ErrorCode = WSAEOPNOTSUPP;
+            }
+            else
+            {
+                if (Total)
+                {
+                    Gathered = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Total);
+                    if (!Gathered)
+                    {
+                        ErrorCode = WSAENOBUFS;
+                    }
+                    else
+                    {
+                        PCHAR Cursor = Gathered;
+
+                        for (Index = 0; Index < Msg.dwBufferCount; Index++)
+                        {
+                            RtlCopyMemory(Cursor, Msg.lpBuffers[Index].buf, Msg.lpBuffers[Index].len);
+                            Cursor += Msg.lpBuffers[Index].len;
+                        }
+                    }
+                }
+                Single.buf = Gathered;
+                Single.len = (ULONG)Total;
+                SendBuffers = &Single;
+            }
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ErrorCode = WSAEFAULT;
+    }
+    _SEH2_END;
+
+    if (ErrorCode == NO_ERROR)
+    {
+        Status = SOCKET_ERROR;
+        _SEH2_TRY
+        {
+            if (Msg.name)
+            {
+                Status = Socket->Provider->Service.lpWSPSendTo(s,
+                                                               SendBuffers,
+                                                               1,
+                                                               &Sent,
+                                                               dwFlags,
+                                                               Msg.name,
+                                                               Msg.namelen,
+                                                               Inline ? NULL : lpOverlapped,
+                                                               Inline ? NULL : lpCompletionRoutine,
+                                                               ThreadId,
+                                                               &ErrorCode);
+            }
+            else
+            {
+                Status = Socket->Provider->Service.lpWSPSend(s,
+                                                             SendBuffers,
+                                                             1,
+                                                             &Sent,
+                                                             dwFlags,
+                                                             Inline ? NULL : lpOverlapped,
+                                                             Inline ? NULL : lpCompletionRoutine,
+                                                             ThreadId,
+                                                             &ErrorCode);
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* Bad overlapped storage or buffer memory: the provider touches them directly */
+            Status = SOCKET_ERROR;
+            ErrorCode = WSAEFAULT;
+        }
+        _SEH2_END;
+
+        if (Gathered)
+            HeapFree(GetProcessHeap(), 0, Gathered);
+        if (Snapshot)
+            HeapFree(GetProcessHeap(), 0, Snapshot);
+
+        /* Deference the Socket Context */
+        WsSockDereference(Socket);
+
+        if (Status == ERROR_SUCCESS)
+        {
+            if (Inline)
+                WsCompleteInlineSend(lpOverlapped, lpCompletionRoutine, Sent);
+
+            /* The byte count of a send that completed; the provider leaves a failed or pending one alone */
+            if (lpNumberOfBytesSent)
+            {
+                _SEH2_TRY
+                {
+                    *lpNumberOfBytesSent = Sent;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    ErrorCode = WSAEFAULT;
+                    Status = SOCKET_ERROR;
+                }
+                _SEH2_END;
+            }
+            if (Status == ERROR_SUCCESS)
+                return ERROR_SUCCESS;
+        }
+        else if (ErrorCode == NO_ERROR)
+        {
+            /* If everything seemed fine, then the WSP call failed itself */
+            ErrorCode = WSASYSCALLFAILURE;
+        }
+    }
+    else
+    {
+        if (Gathered)
+            HeapFree(GetProcessHeap(), 0, Gathered);
+        if (Snapshot)
+            HeapFree(GetProcessHeap(), 0, Snapshot);
+        WsSockDereference(Socket);
+    }
+
+Fail:
     /* Return with an Error */
     SetLastError(ErrorCode);
     return SOCKET_ERROR;
