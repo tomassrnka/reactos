@@ -19,6 +19,7 @@ list(APPEND SOURCE
     DeviceIoControl.c
     dosdev.c
     DynamicTls.c
+    DynamicTimeZone.c
     EnumSystemCodePages.c
     ExitThread.c
     FindActCtxSectionStringW.c
