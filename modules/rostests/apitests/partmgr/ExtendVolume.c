@@ -176,7 +176,11 @@ static void TestNtfs(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
     ok(After.NumberSectors.QuadPart == Before.NumberSectors.QuadPart, "NumberSectors %I64d, was %I64d\n",
        After.NumberSectors.QuadPart, Before.NumberSectors.QuadPart);
 
-    ok_int(Grow(Disk, Part->PartitionNumber, 32 * MiB), ERROR_SUCCESS);
+    if (Grow(Disk, Part->PartitionNumber, 32 * MiB) != ERROR_SUCCESS)
+    {
+        ok(FALSE, "IOCTL_DISK_GROW_PARTITION failed: %lu\n", GetLastError());
+        return;
+    }
     PartitionOf(Volume, Part);
     Length = Part->PartitionLength.QuadPart;
     ok(Length == Sectors * 512 + 32 * MiB, "Partition is %I64d bytes\n", Length);
@@ -253,7 +257,14 @@ static void TestNtfsShrink(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX 
     NtfsData(Volume, &Data);
     ok(Data.NumberSectors.QuadPart == Sectors, "Prepare changed the size to %I64d\n", Data.NumberSectors.QuadPart);
 
-    ok_int(Shrink(Volume, ShrinkCommit, 0, 0), ERROR_SUCCESS);
+    if (Shrink(Volume, ShrinkCommit, 0, 0) != ERROR_SUCCESS)
+    {
+        /* The partition must not shrink under a volume that did not. */
+        ok(FALSE, "ShrinkCommit failed: %lu\n", GetLastError());
+        Shrink(Volume, ShrinkAbort, 0, 0);
+        CloseHandle(Other);
+        return;
+    }
     NtfsData(Volume, &Data);
     ok(Data.NumberSectors.QuadPart == Target - 1, "NumberSectors %I64d, expected %I64d\n", Data.NumberSectors.QuadPart, Target - 1);
     ok(Data.TotalClusters.QuadPart == (Target - 1) * 512 / Data.BytesPerCluster, "TotalClusters %I64d\n", Data.TotalClusters.QuadPart);
@@ -299,7 +310,11 @@ static void TestFat(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part, P
 
     ok_int(Extend(Volume, Sectors, 0), ERROR_SUCCESS);
     ok_int(Extend(Volume, Sectors - 2048, 0), ERROR_INVALID_PARAMETER);
-    ok_int(Grow(Disk, Part->PartitionNumber, 32 * MiB), ERROR_SUCCESS);
+    if (Grow(Disk, Part->PartitionNumber, 32 * MiB) != ERROR_SUCCESS)
+    {
+        ok(FALSE, "IOCTL_DISK_GROW_PARTITION failed: %lu\n", GetLastError());
+        return;
+    }
     PartitionOf(Volume, Part);
     Length = Part->PartitionLength.QuadPart;
     ok_int(Extend(Volume, Length / 512 + 2048, 0), ERROR_INVALID_PARAMETER);
@@ -320,6 +335,7 @@ START_TEST(ExtendVolume)
     CHAR Value[8], Root[4], FileSystem[16];
     PARTITION_INFORMATION_EX Part;
     STORAGE_DEVICE_NUMBER Number;
+    DISK_GEOMETRY Geometry;
     DWORD Returned;
     HANDLE Volume;
 
@@ -345,6 +361,15 @@ START_TEST(ExtendVolume)
     }
     trace("%s %s: disk %lu partition %lu, %I64d bytes at %I64d\n", Root, FileSystem, Number.DeviceNumber,
           Part.PartitionNumber, Part.PartitionLength.QuadPart, Part.StartingOffset.QuadPart);
+
+    /* The sizes below are in 512-byte sectors. */
+    if (!DeviceIoControl(Volume, IOCTL_DISK_GET_DRIVE_GEOMETRY, NULL, 0, &Geometry, sizeof(Geometry), &Returned, NULL) ||
+        Geometry.BytesPerSector != 512)
+    {
+        skip("Volume %s is not on a 512-byte-sector disk\n", Root);
+        CloseHandle(Volume);
+        return;
+    }
 
     if (!strcmp(FileSystem, "NTFS"))
     {
