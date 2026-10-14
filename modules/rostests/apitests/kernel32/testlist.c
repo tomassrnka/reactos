@@ -26,6 +26,7 @@ extern void func_DynamicTls(void);
 extern void func_DynamicTimeZone(void);
 extern void func_GetTimeZoneInformationForYear(void);
 extern void func_EnumSystemCodePages(void);
+extern void func_EnumUILanguages(void);
 extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
@@ -139,6 +140,7 @@ const struct test winetest_testlist[] =
     { "DynamicTimeZone",             func_DynamicTimeZone },
     { "GetTimeZoneInformationForYear", func_GetTimeZoneInformationForYear },
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
+    { "EnumUILanguages",             func_EnumUILanguages },
     { "ExitThread",                  func_ExitThread },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },

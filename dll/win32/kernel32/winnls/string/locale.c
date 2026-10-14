@@ -4816,36 +4816,32 @@ BOOL WINAPI SetUserGeoID( GEOID GeoID )
     return TRUE;
 }
 
-typedef struct
-{
-    union
-    {
-        UILANGUAGE_ENUMPROCA procA;
-        UILANGUAGE_ENUMPROCW procW;
-    } u;
-    DWORD flags;
-    LONG_PTR param;
-} ENUM_UILANG_CALLBACK;
-
-static BOOL CALLBACK enum_uilang_proc_a( HMODULE hModule, LPCSTR type,
-                                         LPCSTR name, WORD LangID, LONG_PTR lParam )
-{
-    ENUM_UILANG_CALLBACK *enum_uilang = (ENUM_UILANG_CALLBACK *)lParam;
-    char buf[20];
-
-    sprintf(buf, "%08x", (UINT)LangID);
-    return enum_uilang->u.procA( buf, enum_uilang->param );
-}
-
-static BOOL CALLBACK enum_uilang_proc_w( HMODULE hModule, LPCWSTR type,
-                                         LPCWSTR name, WORD LangID, LONG_PTR lParam )
+/* The installed UI languages of a system without MUI packs: the system UI language and the user UI language. */
+static BOOL enum_installed_uilangs( BOOL unicode, void *proc, LONG_PTR param )
 {
     static const WCHAR formatW[] = {'%','0','8','x',0};
-    ENUM_UILANG_CALLBACK *enum_uilang = (ENUM_UILANG_CALLBACK *)lParam;
-    WCHAR buf[20];
+    LANGID ids[2];
+    UINT i, count = 0;
 
-    sprintfW( buf, formatW, (UINT)LangID );
-    return enum_uilang->u.procW( buf, enum_uilang->param );
+    ids[count++] = GetSystemDefaultUILanguage();
+    if (GetUserDefaultUILanguage() != ids[0]) ids[count++] = GetUserDefaultUILanguage();
+
+    for (i = 0; i < count; i++)
+    {
+        if (unicode)
+        {
+            WCHAR buf[20];
+            sprintfW( buf, formatW, (UINT)ids[i] );
+            if (!((UILANGUAGE_ENUMPROCW)proc)( buf, param )) break;
+        }
+        else
+        {
+            char buf[20];
+            sprintf( buf, "%08x", (UINT)ids[i] );
+            if (!((UILANGUAGE_ENUMPROCA)proc)( buf, param )) break;
+        }
+    }
+    return TRUE;
 }
 
 /******************************************************************************
@@ -4853,8 +4849,6 @@ static BOOL CALLBACK enum_uilang_proc_w( HMODULE hModule, LPCWSTR type,
  */
 BOOL WINAPI EnumUILanguagesA(UILANGUAGE_ENUMPROCA pUILangEnumProc, DWORD dwFlags, LONG_PTR lParam)
 {
-    ENUM_UILANG_CALLBACK enum_uilang;
-
     TRACE("%p, %x, %lx\n", pUILangEnumProc, dwFlags, lParam);
 
     if(!pUILangEnumProc) {
@@ -4866,14 +4860,7 @@ BOOL WINAPI EnumUILanguagesA(UILANGUAGE_ENUMPROCA pUILangEnumProc, DWORD dwFlags
 	return FALSE;
     }
 
-    enum_uilang.u.procA = pUILangEnumProc;
-    enum_uilang.flags = dwFlags;
-    enum_uilang.param = lParam;
-
-    EnumResourceLanguagesA( kernel32_handle, (LPCSTR)RT_STRING,
-                            (LPCSTR)LOCALE_ILANGUAGE, enum_uilang_proc_a,
-                            (LONG_PTR)&enum_uilang);
-    return TRUE;
+    return enum_installed_uilangs(FALSE, pUILangEnumProc, lParam);
 }
 
 /******************************************************************************
@@ -4881,10 +4868,7 @@ BOOL WINAPI EnumUILanguagesA(UILANGUAGE_ENUMPROCA pUILangEnumProc, DWORD dwFlags
  */
 BOOL WINAPI EnumUILanguagesW(UILANGUAGE_ENUMPROCW pUILangEnumProc, DWORD dwFlags, LONG_PTR lParam)
 {
-    ENUM_UILANG_CALLBACK enum_uilang;
-
     TRACE("%p, %x, %lx\n", pUILangEnumProc, dwFlags, lParam);
-
 
     if(!pUILangEnumProc) {
 	SetLastError(ERROR_INVALID_PARAMETER);
@@ -4895,14 +4879,7 @@ BOOL WINAPI EnumUILanguagesW(UILANGUAGE_ENUMPROCW pUILangEnumProc, DWORD dwFlags
 	return FALSE;
     }
 
-    enum_uilang.u.procW = pUILangEnumProc;
-    enum_uilang.flags = dwFlags;
-    enum_uilang.param = lParam;
-
-    EnumResourceLanguagesW( kernel32_handle, (LPCWSTR)RT_STRING,
-                            (LPCWSTR)LOCALE_ILANGUAGE, enum_uilang_proc_w,
-                            (LONG_PTR)&enum_uilang);
-    return TRUE;
+    return enum_installed_uilangs(TRUE, pUILangEnumProc, lParam);
 }
 
 enum locationkind {

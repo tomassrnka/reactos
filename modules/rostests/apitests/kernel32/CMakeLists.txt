@@ -25,6 +25,7 @@ list(APPEND SOURCE
     DynamicTimeZone.c
     GetTimeZoneInformationForYear.c
     EnumSystemCodePages.c
+    EnumUILanguages.c
     ExitThread.c
     FindActCtxSectionStringW.c
     FindFiles.c
