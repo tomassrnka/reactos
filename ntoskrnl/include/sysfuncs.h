@@ -301,4 +301,5 @@
     SVC_(GetCurrentProcessorNumberEx, 1)
     SVC_(RemoveIoCompletionEx, 6)
     SVC_(CancelIoFileEx, 3)
+    SVC_(CreateProcessWithAttributes, 10)
 #endif

@@ -73,6 +73,14 @@ CSR_API(BaseSrvCreateProcess)
     PCSR_PROCESS Process;
     ULONG Flags = 0, DebugFlags = 0, VdmPower = 0;
 
+    if (CreateProcessRequest->ConsoleHandleCount &&
+        (!CreateProcessRequest->HandleListPresent ||
+         !CsrValidateMessageBuffer(ApiMessage,
+                                  (PVOID*)&CreateProcessRequest->ConsoleHandleList,
+                                  CreateProcessRequest->ConsoleHandleCount,
+                                  sizeof(HANDLE))))
+        return STATUS_INVALID_PARAMETER;
+
     /* Get the current client thread */
     CsrThread = CsrGetClientThread();
     ASSERT(CsrThread != NULL);
@@ -149,12 +157,15 @@ CSR_API(BaseSrvCreateProcess)
     /* FIXME: SxS Stuff */
 
     /* Call CSRSRV to create the CSR_PROCESS structure and the first CSR_THREAD */
-    Status = CsrCreateProcess(ProcessHandle,
+    Status = CsrCreateProcessWithHandleList(ProcessHandle,
                               ThreadHandle,
                               &CreateProcessRequest->ClientId,
                               Process->NtSession,
                               DebugFlags,
-                              NULL);
+                              NULL,
+                              CreateProcessRequest->HandleListPresent,
+                              CreateProcessRequest->ConsoleHandleList,
+                              CreateProcessRequest->ConsoleHandleCount);
     if (Status == STATUS_THREAD_IS_TERMINATING)
     {
         DPRINT1("Thread already dead\n");

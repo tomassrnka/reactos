@@ -2320,15 +2320,14 @@ BasepCheckProcThreadAttribute(
 {
     switch (Attribute)
     {
+        case PROC_THREAD_ATTRIBUTE_HANDLE_LIST:
+            return (Size && !(Size % sizeof(HANDLE))) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
         case PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR:
             return (Size == sizeof(PROCESSOR_NUMBER)) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
 
         default:
-            /* Attributes that cannot be honoured are refused here, not silently
-             * dropped when the process is created. A handle list would need
-             * process creation to duplicate only the listed handles (and
-             * consrv's console handles); without that, inheriting every
-             * inheritable handle would leak the others */
+            /* Refuse attributes that cannot be honoured. */
             return ERROR_NOT_SUPPORTED;
     }
 }
@@ -2411,11 +2410,24 @@ BasepIsValidIdealProcessor(
 static
 NTSTATUS
 BasepReadProcThreadAttributes(
-    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList)
+    _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *HandleList)
 {
-    /* UpdateProcThreadAttribute only accepts an ideal processor, which cannot be
-     * applied to the thread of another process, see BasepSetIdealProcessor */
-    return AttributeList->LastAttribute ? STATUS_NOT_SUPPORTED : STATUS_SUCCESS;
+    DWORD i;
+    *HandleList = NULL;
+    if (AttributeList->LastAttribute > AttributeList->AttributeCount ||
+        AttributeList->AttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
+        return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < AttributeList->LastAttribute; ++i)
+    {
+        PPROC_THREAD_ATTRIBUTE_ENTRY Entry = &AttributeList->Attributes[i];
+        if (Entry->Attribute != PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+            return STATUS_NOT_SUPPORTED;
+        if (*HandleList || !Entry->Size || Entry->Size % sizeof(HANDLE))
+            return STATUS_INVALID_PARAMETER;
+        *HandleList = Entry;
+    }
+    return STATUS_SUCCESS;
 }
 
 /* Reads the attributes CreateRemoteThreadEx supports */
@@ -2508,6 +2520,10 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     PVOID TibValue;
     PIMAGE_NT_HEADERS NtHeaders;
     STARTUPINFOW StartupInfo;
+    PPROC_THREAD_ATTRIBUTE_ENTRY HandleListAttribute = NULL;
+    PHANDLE KernelHandleList = NULL, ConsoleHandleList = NULL;
+    SIZE_T KernelHandleCount = 0, ConsoleHandleCount = 0;
+    ROS_PS_ATTRIBUTE_LIST NativeAttributes;
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
     UNICODE_STRING DebuggerString;
     BOOL Result;
@@ -2584,7 +2600,8 @@ CreateProcessInternalW(IN HANDLE hUserToken,
 
         if (((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList)
         {
-            Status = BasepReadProcThreadAttributes(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList);
+            Status = BasepReadProcThreadAttributes(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList,
+                                                   &HandleListAttribute);
             if (!NT_SUCCESS(Status))
             {
                 BaseSetLastNTError(Status);
@@ -2592,6 +2609,11 @@ CreateProcessInternalW(IN HANDLE hUserToken,
             }
         }
         dwCreationFlags &= ~EXTENDED_STARTUPINFO_PRESENT;
+    }
+    if (HandleListAttribute && !bInheritHandles)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
 
     /* Zero out the initial core variables and handles */
@@ -3404,6 +3426,14 @@ StartScan:
     {
         case STATUS_INVALID_IMAGE_WIN_16:
         {
+            /* A VDM task cannot apply a per-process handle list. */
+            if (HandleListAttribute)
+            {
+                BaseSetLastNTError(STATUS_NOT_SUPPORTED);
+                Result = FALSE;
+                goto Quickie;
+            }
+
             /* 16-bit binary. Should we use WOW or does the caller force VDM? */
             if (!(dwCreationFlags & CREATE_FORCEDOS))
             {
@@ -3552,6 +3582,13 @@ StartScan:
                 (Status == STATUS_INVALID_IMAGE_NE_FORMAT) ||
                 (BinarySubType = BaseIsDosApplication(&PathName, Status)))
             {
+                if (HandleListAttribute)
+                {
+                    BaseSetLastNTError(STATUS_NOT_SUPPORTED);
+                    Result = FALSE;
+                    goto Quickie;
+                }
+
                 /* We're launching a DOS application */
                 VdmBinaryType = BINARY_TYPE_DOS;
 
@@ -4108,6 +4145,70 @@ StartScan:
     /* Set inherit flag */
     if (bInheritHandles) Flags |= PROCESS_CREATE_FLAGS_INHERIT_HANDLES;
 
+    /* Capture the caller's list once. Console pseudo-handles belong to CSRSS;
+     * real handles are captured again at the native boundary and filtered while
+     * the kernel creates the child's handle table. Parent flags never change. */
+    if (HandleListAttribute && bInheritHandles)
+    {
+        SIZE_T Size = HandleListAttribute->Size;
+        SIZE_T HandleCount = Size / sizeof(HANDLE), HandleIndex;
+        PHANDLE Source = HandleListAttribute->Value;
+        BOOLEAN EmptyList = FALSE;
+
+        /* No native handle table can contain a larger selection. Match the
+         * native boundary before allocating the user-mode split buffers. */
+        if (HandleCount > ROS_PS_MAX_HANDLE_COUNT)
+        {
+            BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+            Result = FALSE;
+            goto Quickie;
+        }
+        if (Size > MAXULONG / 2)
+        {
+            BaseSetLastNTError(STATUS_NO_MEMORY);
+            Result = FALSE;
+            goto Quickie;
+        }
+        KernelHandleList = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size * 2);
+        if (!KernelHandleList)
+        {
+            BaseSetLastNTError(STATUS_NO_MEMORY);
+            Result = FALSE;
+            goto Quickie;
+        }
+        ConsoleHandleList = KernelHandleList + HandleCount;
+        Status = STATUS_SUCCESS;
+        _SEH2_TRY
+        {
+            for (HandleIndex = 0; HandleIndex < HandleCount; ++HandleIndex)
+            {
+                HANDLE Handle = Source[HandleIndex];
+                if (!Handle) EmptyList = TRUE;
+                if (IsConsoleHandle(Handle))
+                    ConsoleHandleList[ConsoleHandleCount++] = Handle;
+                else
+                    KernelHandleList[KernelHandleCount++] = Handle;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            Result = FALSE;
+            goto Quickie;
+        }
+        if (EmptyList) KernelHandleCount = ConsoleHandleCount = 0;
+        NativeAttributes.TotalLength = sizeof(NativeAttributes);
+        NativeAttributes.Attributes[0].Attribute = ROS_PS_ATTRIBUTE_HANDLE_LIST;
+        NativeAttributes.Attributes[0].Size = KernelHandleCount * sizeof(HANDLE);
+        NativeAttributes.Attributes[0].ValuePtr = KernelHandleList;
+        NativeAttributes.Attributes[0].ReturnLength = NULL;
+    }
+
     /* Check if the process should be created with large pages */
     HavePrivilege = FALSE;
     PrivilegeState = NULL;
@@ -4126,8 +4227,17 @@ StartScan:
     /* Save the current TIB value since kernel overwrites it to store PEB */
     TibValue = Teb->NtTib.ArbitraryUserPointer;
 
-    /* Tell the kernel to create the process */
-    Status = NtCreateProcessEx(&ProcessHandle,
+    if (KernelHandleList)
+    {
+        Status = NtCreateProcessWithAttributes(&ProcessHandle, PROCESS_ALL_ACCESS,
+                                               ObjectAttributes, NtCurrentProcess(),
+                                               Flags, SectionHandle, DebugHandle,
+                                               NULL, InJob, &NativeAttributes);
+    }
+    else
+    {
+        /* Preserve the legacy native creation path without a handle list. */
+        Status = NtCreateProcessEx(&ProcessHandle,
                                PROCESS_ALL_ACCESS,
                                ObjectAttributes,
                                NtCurrentProcess(),
@@ -4136,6 +4246,7 @@ StartScan:
                                DebugHandle,
                                NULL,
                                InJob);
+    }
 
     /* Load the PEB address from the hacky location where the kernel stores it */
     RemotePeb = Teb->NtTib.ArbitraryUserPointer;
@@ -4601,6 +4712,26 @@ StartScan:
         goto Quickie;
     }
 
+    /* Pass the same captured selection to the console server. An explicit
+     * empty console selection is different from legacy console inheritance. */
+    CreateProcessMsg->HandleListPresent = (KernelHandleList != NULL);
+    CreateProcessMsg->ConsoleHandleCount = (ULONG)ConsoleHandleCount;
+    CreateProcessMsg->ConsoleHandleList = NULL;
+    if (ConsoleHandleCount)
+    {
+        ASSERT(CaptureBuffer == NULL);
+        CaptureBuffer = CsrAllocateCaptureBuffer(1, ConsoleHandleCount * sizeof(HANDLE));
+        if (!CaptureBuffer)
+        {
+            BaseSetLastNTError(STATUS_NO_MEMORY);
+            Result = FALSE;
+            goto Quickie;
+        }
+        CsrCaptureMessageBuffer(CaptureBuffer, ConsoleHandleList,
+                                ConsoleHandleCount * sizeof(HANDLE),
+                                (PVOID*)&CreateProcessMsg->ConsoleHandleList);
+    }
+
     /* We are finally ready to call CSRSS to tell it about our new process! */
     CsrClientCallServer((PCSR_API_MESSAGE)&CsrMsg[0],
                         CaptureBuffer,
@@ -4718,6 +4849,7 @@ VdmShortCircuit:
     ThreadHandle = NULL;
 
 Quickie:
+    if (KernelHandleList) RtlFreeHeap(RtlGetProcessHeap(), 0, KernelHandleList);
     /* Free the debugger command line if one was allocated */
     if (DebuggerCmdLine) RtlFreeHeap(RtlGetProcessHeap(), 0, DebuggerCmdLine);
 
