@@ -631,11 +631,6 @@ MsafdWaitForAlert(
     }
 }
 
-static
-INT
-MsafdSyncPendingConnect(
-    _In_ PSOCKET_INFORMATION Socket);
-
 /*
  * FUNCTION: Closes an open socket
  * ARGUMENTS:
@@ -709,9 +704,6 @@ WSPCloseSocket(IN SOCKET Handle,
     References = InterlockedDecrement(&Socket->SharedData->RefCount);
     if (References)
         goto ok;
-
-    /* A connect whose APC was not delivered to this thread still counts */
-    MsafdSyncPendingConnect(Socket);
 
     /* Set the state to close */
     OldState = Socket->SharedData->State;
@@ -1464,12 +1456,14 @@ GetCurrentTimeInSeconds(VOID)
  * A nonblocking connect leaves the user-mode socket state to MsafdConnectAPC,
  * which runs only in an alertable wait of the connecting thread, while select
  * and WSAEventSelect report the finished connection without one. Where the
- * state matters before the APC ran, take it from AFD. Returns a Winsock error
- * code, NO_ERROR when the state is current or the socket is not connected.
+ * state matters before the APC ran, ask AFD. Only the connected state is taken
+ * over, quietly: no asynchronous select event is re-armed and the helper is
+ * not notified, the APC still does both. Returns a Winsock error code,
+ * NO_ERROR also when the socket is simply not connected.
  */
 static
 INT
-MsafdSyncPendingConnect(
+MsafdAdoptConnectedState(
     _In_ PSOCKET_INFORMATION Socket)
 {
     IO_STATUS_BLOCK IOSB;
@@ -1479,7 +1473,8 @@ MsafdSyncPendingConnect(
     HANDLE SockEvent;
     NTSTATUS Status;
 
-    if (!Socket->ConnectPending || Socket->SharedData->State == SocketConnected)
+    /* Every connected socket passed through the bound state in this process */
+    if (Socket->SharedData->State != SocketBound)
         return NO_ERROR;
 
     Status = NtCreateEvent(&SockEvent,
@@ -1537,7 +1532,6 @@ MsafdSyncPendingConnect(
 
     return NT_SUCCESS(Status) ? NO_ERROR : TranslateNtStatusError(Status);
 }
-
 
 _Must_inspect_result_
 SOCKET
@@ -2072,14 +2066,14 @@ MsafdConnectAPC(
         return;
     }
 
-    InterlockedExchange(&Socket->ConnectPending, 0);
-
     Socket->SharedData->SocketLastError = TranslateNtStatusError(IoStatusBlock->Status);
     if (IoStatusBlock->Status == STATUS_SUCCESS)
     {
+        /* WSPGetPeerName may have recorded the connection already */
+        if (Socket->SharedData->State != SocketConnected)
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
         Socket->SharedData->State = SocketConnected;
         Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
-        Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     }
 
     /* Re-enable Async Event */
@@ -2282,9 +2276,6 @@ WSPConnect(SOCKET Handle,
     IOSB->Status = STATUS_PENDING;
     IOSB->Information = 0;
 
-    if (APCFunction)
-        InterlockedExchange(&Socket->ConnectPending, 1);
-
     /* Send IOCTL */
     Status = NtDeviceIoControlFile((HANDLE)Handle,
                                    APCFunction ? NULL : SockEvent,
@@ -2307,7 +2298,6 @@ WSPConnect(SOCKET Handle,
         {
             /* HACK: Allow APC to be processed */
             SleepEx(0, TRUE);
-            InterlockedExchange(&Socket->ConnectPending, 0);
         }
     }
     else
@@ -2698,11 +2688,11 @@ WSPGetPeerName(IN SOCKET s,
 
     if (Socket->SharedData->State != SocketConnected)
     {
-        INT SyncError = MsafdSyncPendingConnect(Socket);
+        INT AdoptError = MsafdAdoptConnectedState(Socket);
 
-        if (SyncError != NO_ERROR)
+        if (AdoptError != NO_ERROR)
         {
-            if (lpErrno) *lpErrno = SyncError;
+            if (lpErrno) *lpErrno = AdoptError;
             return SOCKET_ERROR;
         }
     }
