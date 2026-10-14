@@ -13,6 +13,7 @@ extern void func_IpTables2(void);
 extern void func_NotifyIpInterfaceChange(void);
 extern void func_NotifyRouteChange2(void);
 extern void func_SendARP(void);
+extern void func_TcpUdpTableRows(void);
 
 const struct test winetest_testlist[] =
 {
@@ -27,6 +28,7 @@ const struct test winetest_testlist[] =
     { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },
     { "NotifyRouteChange2",         func_NotifyRouteChange2 },
     { "SendARP",                    func_SendARP },
+    { "TcpUdpTableRows",            func_TcpUdpTableRows },
 
     { 0, 0 }
 };

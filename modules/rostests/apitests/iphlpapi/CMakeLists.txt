@@ -11,6 +11,7 @@ list(APPEND SOURCE
     NotifyIpInterfaceChange.c
     NotifyRouteChange2.c
     SendARP.c
+    TcpUdpTableRows.c
     testlist.c)
 
 add_executable(iphlpapi_apitest ${SOURCE})
