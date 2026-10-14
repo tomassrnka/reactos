@@ -123,6 +123,11 @@ UserDeleteW32Process(
     }
 #endif
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (ppiCurrent->pClientPfn)
+        ExFreePoolWithTag(ppiCurrent->pClientPfn, USERTAG_CLIENTPFN);
+#endif
+
     /* Free the PROCESSINFO */
     ExFreePoolWithTag(ppiCurrent, USERTAG_PROCESSINFO);
 }

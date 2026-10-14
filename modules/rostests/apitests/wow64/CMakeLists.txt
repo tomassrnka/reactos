@@ -52,3 +52,17 @@ elseif(ARCH STREQUAL "amd64")
 endif()
 
 add_subdirectory(sharedviews)
+# The native syscall bridge is deliberately test-only, and uses GNU .code64
+# in a PE32 fixture until wow64win provides the guest GUI entry points.
+if(ARCH STREQUAL "amd64" OR (ARCH STREQUAL "i386" AND NOT MSVC))
+    if(ARCH STREQUAL "i386")
+        add_asm_files(clientpfn_asm i386/ClientPfn.S)
+    endif()
+    add_executable(win32k_wow64_apitest ClientPfn.c clientpfn_testlist.c ${clientpfn_asm})
+    target_include_directories(win32k_wow64_apitest PRIVATE ${REACTOS_SOURCE_DIR}/win32ss/include)
+    target_link_libraries(win32k_wow64_apitest wine ${PSEH_LIB})
+    set_module_type(win32k_wow64_apitest win32cui)
+    add_importlibs(win32k_wow64_apitest msvcrt kernel32 ntdll)
+    add_dependencies(win32k_wow64_apitest wow64_syscall_tables)
+    add_rostests_file(TARGET win32k_wow64_apitest)
+endif()

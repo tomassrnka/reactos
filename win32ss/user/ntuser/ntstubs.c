@@ -96,6 +96,77 @@ NtUserGetAltTabInfo(
    return 0;
 }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+WNDPROC
+IntGetClientProc(PPROCESSINFO ppi, INT fnid, BOOL Ansi)
+{
+    if (ppi->peProcess->Wow64Process)
+    {
+        PCLIENTPFN Client = ppi->pClientPfn;
+        if (!Client) return NULL;
+        return ((WNDPROC *)(Ansi ? &Client->ClientA : &Client->ClientW))[fnid - FNID_FIRST];
+    }
+    return Ansi ? GETPFNCLIENTA(fnid) : GETPFNCLIENTW(fnid);
+}
+
+WNDPROC
+IntGetClientProcServer(PPROCESSINFO ppi, INT fnid)
+{
+    /* The server-to-client mapping is the prefix of the guest's W table. */
+    if (ppi->peProcess->Wow64Process)
+        return IntGetClientProcW(ppi, fnid);
+    return GETPFNSERVER(fnid);
+}
+
+HINSTANCE
+IntGetClientModule(PPROCESSINFO ppi)
+{
+    if (ppi->peProcess->Wow64Process)
+        return ppi->pClientPfn ? ppi->pClientPfn->hModule : NULL;
+    return hModClient;
+}
+
+static NTSTATUS
+IntInitializeWow64ClientPfnArrays(
+    PPROCESSINFO ppi,
+    PPFNCLIENT pfnClientA,
+    PPFNCLIENT pfnClientW,
+    PPFNCLIENTWORKER pfnClientWorker,
+    HINSTANCE hmodUser)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    PCLIENTPFN Client;
+
+    ASSERT(UserIsEnteredExclusive());
+    if (ppi->pClientPfn) return STATUS_SUCCESS;
+
+    Client = ExAllocatePoolWithTag(PagedPool, sizeof(*Client), USERTAG_CLIENTPFN);
+    if (!Client) return STATUS_NO_MEMORY;
+
+    /* The wide guest passes the native layouts. Capture all three tables
+     * before publishing, so a failed capture can be retried safely. */
+    _SEH2_TRY
+    {
+        ProbeForRead(pfnClientA, sizeof(*pfnClientA), 1);
+        ProbeForRead(pfnClientW, sizeof(*pfnClientW), 1);
+        ProbeForRead(pfnClientWorker, sizeof(*pfnClientWorker), 1);
+        RtlCopyMemory(&Client->ClientA, pfnClientA, sizeof(*pfnClientA));
+        RtlCopyMemory(&Client->ClientW, pfnClientW, sizeof(*pfnClientW));
+        RtlCopyMemory(&Client->ClientWorker, pfnClientWorker, sizeof(*pfnClientWorker));
+        Client->hModule = hmodUser;
+        ppi->pClientPfn = Client;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status)) ExFreePoolWithTag(Client, USERTAG_CLIENTPFN);
+    return Status;
+}
+#endif
+
 NTSTATUS
 APIENTRY
 NtUserInitializeClientPfnArrays(
@@ -106,6 +177,18 @@ NtUserInitializeClientPfnArrays(
 {
    NTSTATUS Status = STATUS_SUCCESS;
    TRACE("Enter NtUserInitializeClientPfnArrays User32 0x%p\n", hmodUser);
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+   if (PsGetCurrentProcess()->Wow64Process)
+   {
+      UserEnterExclusive();
+      Status = IntInitializeWow64ClientPfnArrays(GetW32ProcessInfo(),
+                  pfnClientA, pfnClientW, pfnClientWorker, hmodUser);
+      if (!NT_SUCCESS(Status)) SetLastNtError(Status);
+      UserLeave();
+      return Status;
+   }
+#endif
 
    if (ClientPfnInit) return Status;
 
