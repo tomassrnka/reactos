@@ -41,6 +41,8 @@ typedef struct
     BOOL DefaultTimeout;    /* leave the receive timeout at its default */
     EXPECT Expect;
     UINT ExpectedBytes;
+    UINT BufSize;           /* the size of the buffer given to InternetReadFile, 0 for 64 */
+    BOOL Cache;             /* write the response to the cache; a failed body must not be committed */
 } CASE;
 
 static HMODULE s_hWininet;
@@ -53,6 +55,8 @@ static BOOL (WINAPI *pHttpSendRequestA)(HINTERNET, LPCSTR, DWORD, LPVOID, DWORD)
 static BOOL (WINAPI *pInternetReadFile)(HINTERNET, LPVOID, DWORD, LPDWORD);
 static BOOL (WINAPI *pInternetSetOptionA)(HINTERNET, DWORD, LPVOID, DWORD);
 static BOOL (WINAPI *pInternetCloseHandle)(HINTERNET);
+static BOOL (WINAPI *pGetUrlCacheEntryInfoA)(LPCSTR, LPINTERNET_CACHE_ENTRY_INFOA, LPDWORD);
+static BOOL (WINAPI *pDeleteUrlCacheEntryA)(LPCSTR);
 
 static int (WSAAPI *pWSAStartup)(WORD, LPWSADATA);
 static int (WSAAPI *pWSACleanup)(void);
@@ -76,6 +80,7 @@ static BOOL LoadFunctions(void)
 #define GET_INET(name) if (!(p##name = (void *)GetProcAddress(s_hWininet, #name))) return FALSE
     GET_INET(InternetOpenA); GET_INET(InternetConnectA); GET_INET(HttpOpenRequestA); GET_INET(HttpSendRequestA);
     GET_INET(InternetReadFile); GET_INET(InternetSetOptionA); GET_INET(InternetCloseHandle);
+    GET_INET(GetUrlCacheEntryInfoA); GET_INET(DeleteUrlCacheEntryA);
 #undef GET_INET
 #define GET_WS(name) if (!(p##name = (void *)GetProcAddress(s_hWs2, #name))) return FALSE
     GET_WS(WSAStartup); GET_WS(WSACleanup); GET_WS(socket); GET_WS(bind); GET_WS(listen); GET_WS(accept);
@@ -177,6 +182,11 @@ static const CASE Cases[] =
     { "no-trailer", GzNoTrailer, sizeof(GzNoTrailer), FALSE, FALSE, FALSE, EXPECT_DATA, 5 },
     { "half-trailer", GzHalfTrailer, sizeof(GzHalfTrailer), FALSE, FALSE, FALSE, EXPECT_DATA, 5 },
     { "trailing-garbage", GzTrailingGarbage, sizeof(GzTrailingGarbage), FALSE, FALSE, FALSE, EXPECT_DATA, 5 },
+    /* The buffer of the program has the size of the data: no read may hand out data and end cleanly after it */
+    { "bad-size-exact-buffer", GzBadSize, sizeof(GzBadSize), FALSE, FALSE, FALSE, EXPECT_DECODE, 0, 5, TRUE },
+    { "bad-size-cache", GzBadSize, sizeof(GzBadSize), FALSE, FALSE, FALSE, EXPECT_DECODE, 0, 0, TRUE },
+    { "block-then-garbage-exact-buffer", GzBlockThenGarbage, sizeof(GzBlockThenGarbage), FALSE, FALSE, FALSE, EXPECT_DECODE, 0, 5, TRUE },
+    { "valid-cache", GzValid, sizeof(GzValid), FALSE, FALSE, FALSE, EXPECT_DATA, 5, 0, TRUE },
     { "block-then-garbage", GzBlockThenGarbage, sizeof(GzBlockThenGarbage), FALSE, FALSE, FALSE, EXPECT_DECODE, 0 },
     { "block-then-end", GzBlockThenEnd, sizeof(GzBlockThenEnd), FALSE, FALSE, FALSE, EXPECT_DATA, 5 },
     { "block-cut", GzBlockCut, sizeof(GzBlockCut), FALSE, FALSE, FALSE, EXPECT_DATA, 5 },
@@ -198,6 +208,7 @@ typedef struct
     UINT Calls;
     BOOL RequestFailed;
     DWORD RequestError;
+    BOOL CacheEntry;    /* the response is in the cache */
 } OUTCOME;
 
 static void RunCase(const CASE *pCase, OUTCOME *pOutcome)
@@ -210,6 +221,8 @@ static void RunCase(const CASE *pCase, OUTCOME *pOutcome)
     BOOL bDecode = TRUE;
     DWORD dwTimeout = TIMEOUT_MS, dwStart;
     BYTE Buffer[64];
+    char szUrl[96], szObj[48];
+    DWORD cbEntry = 0;
 
     ZeroMemory(pOutcome, sizeof(*pOutcome));
     Server.Listener = psocket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -225,8 +238,10 @@ static void RunCase(const CASE *pCase, OUTCOME *pOutcome)
     pInternetSetOptionA(hInternet, INTERNET_OPTION_HTTP_DECODING, &bDecode, sizeof(bDecode));
     hConnect = pInternetConnectA(hInternet, "127.0.0.1", (INTERNET_PORT)((Addr.sin_port >> 8) | ((Addr.sin_port & 0xff) << 8)),
                                  NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
-    hRequest = pHttpOpenRequestA(hConnect, "GET", "/gz", NULL, NULL, NULL,
-                                 INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_KEEP_CONNECTION, 0);
+    sprintf(szObj, "/gz-%s", pCase->Name);
+    sprintf(szUrl, "http://127.0.0.1:%u%s", (Addr.sin_port >> 8) | ((Addr.sin_port & 0xff) << 8), szObj);
+    hRequest = pHttpOpenRequestA(hConnect, "GET", szObj, NULL, NULL, NULL,
+                                 INTERNET_FLAG_RELOAD | (pCase->Cache ? 0 : INTERNET_FLAG_NO_CACHE_WRITE) | INTERNET_FLAG_KEEP_CONNECTION, 0);
     if (!pCase->DefaultTimeout)
         pInternetSetOptionA(hRequest, INTERNET_OPTION_RECEIVE_TIMEOUT, &dwTimeout, sizeof(dwTimeout));
     dwStart = GetTickCount();
@@ -241,7 +256,7 @@ static void RunCase(const CASE *pCase, OUTCOME *pOutcome)
         {
             DWORD cbRead = 0;
 
-            pOutcome->Ok = pInternetReadFile(hRequest, Buffer, sizeof(Buffer), &cbRead);
+            pOutcome->Ok = pInternetReadFile(hRequest, Buffer, pCase->BufSize ? pCase->BufSize : sizeof(Buffer), &cbRead);
             pOutcome->Error = pOutcome->Ok ? 0 : GetLastError();
             pOutcome->Calls++;
             if (!pOutcome->Ok || !cbRead || pOutcome->Calls > 50)
@@ -252,6 +267,11 @@ static void RunCase(const CASE *pCase, OUTCOME *pOutcome)
     pOutcome->TotalMs = GetTickCount() - dwStart;
 
     pInternetCloseHandle(hRequest);
+    if (pCase->Cache)
+    {
+        pOutcome->CacheEntry = pGetUrlCacheEntryInfoA(szUrl, NULL, &cbEntry) || GetLastError() == ERROR_INSUFFICIENT_BUFFER;
+        pDeleteUrlCacheEntryA(szUrl);
+    }
     pInternetCloseHandle(hConnect);
     pInternetCloseHandle(hInternet);
     pclosesocket(Server.Listener);
@@ -266,6 +286,8 @@ static void CheckOutcome(const CASE *pCase, const OUTCOME *pOutcome)
     ok(!pOutcome->RequestFailed, "%s: HttpSendRequest failed: %lu\n", pCase->Name, pOutcome->RequestError);
     if (pOutcome->RequestFailed)
         return;
+    if (pCase->Cache && pCase->Expect != EXPECT_DATA)
+        ok(!pOutcome->CacheEntry, "%s: The failed body is in the cache\n", pCase->Name);
     switch (pCase->Expect)
     {
         case EXPECT_DATA:

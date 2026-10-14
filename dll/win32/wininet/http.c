@@ -377,6 +377,11 @@ typedef struct {
 static BOOL gzip_end_of_data(data_stream_t *stream, http_request_t *req)
 {
     gzip_stream_t *gzip_stream = (gzip_stream_t*)stream;
+#ifdef __REACTOS__
+    /* the next read reports the damage, whatever is left of the data */
+    if(gzip_stream->failed)
+        return FALSE;
+#endif
     return gzip_stream->end_of_data
         || (!gzip_stream->buf_size && gzip_stream->parent_stream->vtbl->end_of_data(gzip_stream->parent_stream, req));
 }
@@ -442,10 +447,14 @@ static DWORD gzip_read(data_stream_t *stream, http_request_t *req, BYTE *buf, DW
         }else if(zres != Z_OK) {
             WARN("inflate failed %d: %s\n", zres, debugstr_a(zstream->msg));
 #ifdef __REACTOS__
+            /* Windows fails the read at once and hands out nothing of it, and keeps failing */
             gzip_stream->failed = TRUE;
-#endif
+            ret_read = 0;
+            res = ERROR_INTERNET_DECODING_FAILED;
+#else
             if(!ret_read)
                 res = ERROR_INTERNET_DECODING_FAILED;
+#endif
             break;
         }
 
