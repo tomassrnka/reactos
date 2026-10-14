@@ -310,6 +310,106 @@ START_TEST(RegWow64Matrix)
     }
 }
 
+START_TEST(RegWow64SharedLongName)
+{
+    WCHAR component[241], path[100];
+    HKEY keys[140], root, leaf, opened, parent;
+    PKEY_NAME_INFORMATION name;
+    DWORD count = 0, length, target, chars, i, disposition;
+    LONG error;
+    NTSTATUS status;
+    BOOL wow64 = FALSE;
+
+    IsWow64Process(GetCurrentProcess(), &wow64);
+    /* A native root of 65,522 bytes leaves A\\B representable (65,530),
+     * but an absolute A retry with a selector exceeds CM's 65,509-byte limit.
+     * Guest requests already select a view. Keep their destination below
+     * that existing limit (65,508 bytes including A\\B), with A present to
+     * avoid the existing 32-component limit on absolute intermediate retries. */
+    target = wow64 ? 65500 : 65522;
+    trace("shared long-name root: %lu bytes, wow64=%u\n", target, wow64);
+    name = HeapAlloc(GetProcessHeap(), 0, 65536);
+    ok(name != NULL, "name allocation\n");
+    if (!name) return;
+    _snwprintf(path, _countof(path), L"Software\\Policies\\Wow64SharedLongName_%lu",
+               GetCurrentProcessId());
+    error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0,
+                           KEY_ALL_ACCESS, NULL, &root, NULL);
+    ok(error == ERROR_SUCCESS, "shared long-name root: %ld\n", error);
+    if (error) goto free_name;
+    status = NtQueryKey(root, KeyNameInformation, name, 65536, &length);
+    ok(status == STATUS_SUCCESS, "shared root name: %lx\n", status);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    length = name->NameLength;
+    while (length < target && count < _countof(keys))
+    {
+        chars = min(240, (target - length) / sizeof(WCHAR) - 1);
+        for (i = 0; i < chars; ++i) component[i] = L'a';
+        component[chars] = 0;
+        error = RegCreateKeyExW(count ? keys[count - 1] : root, component, 0,
+                               NULL, 0, KEY_ALL_ACCESS, NULL, &keys[count], NULL);
+        ok(error == ERROR_SUCCESS, "shared long-name depth %lu: %ld\n", count, error);
+        if (error) goto cleanup;
+        ++count;
+        length += (chars + 1) * sizeof(WCHAR);
+    }
+    ok(length == target && count, "shared root length %lu, target %lu\n", length, target);
+    if (length != target || !count) goto cleanup;
+    parent = keys[count - 1];
+    status = NtQueryKey(parent, KeyNameInformation, name, 65536, &length);
+    ok(status == STATUS_SUCCESS, "shared long-name query: %lx\n", status);
+    if (!NT_SUCCESS(status)) goto cleanup;
+    ok(name->NameLength == target, "shared NT name length %lu, expected %lu\n",
+       name->NameLength, target);
+    error = RegOpenKeyExW(parent, L"A", 0, KEY_READ, &opened);
+    ok(error == ERROR_FILE_NOT_FOUND, "shared intermediate must be absent: %ld\n", error);
+    if (!error) { RegCloseKey(opened); goto cleanup; }
+    if (wow64)
+    {
+        error = RegCreateKeyExW(parent, L"A", 0, NULL, 0, KEY_ALL_ACCESS,
+                               NULL, &opened, NULL);
+        ok(error == ERROR_SUCCESS, "guest relative intermediate: %ld\n", error);
+        if (error) goto cleanup;
+        RegCloseKey(opened);
+    }
+    disposition = 0;
+    error = RegCreateKeyExW(parent, L"A\\B", 0, NULL, 0, KEY_ALL_ACCESS,
+                           NULL, &leaf, &disposition);
+    ok(error == ERROR_SUCCESS, "shared long relative nested create: %ld\n", error);
+    if (!error)
+    {
+        ok(disposition == REG_CREATED_NEW_KEY, "shared nested disposition: %lu\n", disposition);
+        set_value(leaf, 123);
+        error = RegOpenKeyExW(parent, L"A\\B", 0, KEY_READ, &opened);
+        ok(error == ERROR_SUCCESS, "shared long relative reopen: %ld\n", error);
+        if (!error) { value(opened, 123); RegCloseKey(opened); }
+        status = NtDeleteKey(leaf);
+        ok(status == STATUS_SUCCESS, "shared leaf delete: %lx\n", status);
+        RegCloseKey(leaf);
+    }
+    /* Remove a partially created intermediate even if the nested create failed. */
+    error = RegOpenKeyExW(parent, L"A", 0, KEY_ALL_ACCESS, &opened);
+    if (!error)
+    {
+        status = NtDeleteKey(opened);
+        ok(status == STATUS_SUCCESS, "shared intermediate delete: %lx\n", status);
+        RegCloseKey(opened);
+    }
+cleanup:
+    while (count)
+    {
+        --count;
+        status = NtDeleteKey(keys[count]);
+        ok(status == STATUS_SUCCESS, "shared long-name delete %lu: %lx\n", count, status);
+        RegCloseKey(keys[count]);
+    }
+    status = NtDeleteKey(root);
+    ok(status == STATUS_SUCCESS, "shared root delete: %lx\n", status);
+    RegCloseKey(root);
+free_name:
+    HeapFree(GetProcessHeap(), 0, name);
+}
+
 START_TEST(RegWow64LongName)
 {
     WCHAR component[241], path[80];
