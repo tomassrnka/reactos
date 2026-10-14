@@ -234,6 +234,7 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 NTSTATUS MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive);
 NTSTATUS WarmSocketForConnection( PAFD_FCB FCB );
+VOID AfdCloseConnectionEndpoint( PAFD_FCB FCB );
 NTSTATUS NTAPI
 AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                        PIO_STACK_LOCATION IrpSp);

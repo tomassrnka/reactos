@@ -638,6 +638,8 @@ NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     AFD_DbgPrint(MID_TRACE,("ADDRESSFILE: %p\n", FCB->AddressFile.Handle));
 
+    /* A failed or cancelled connect left its endpoint on the bound socket */
+    AfdCloseConnectionEndpoint( FCB );
     Status = WarmSocketForConnection( FCB );
 
     AFD_DbgPrint(MID_TRACE,("Status from warmsocket %x\n", Status));
