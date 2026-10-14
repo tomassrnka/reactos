@@ -35,8 +35,8 @@ int main(void)
     LRESULT Result=0;
     ULONG i;
     BOOL Wow64=FALSE;
-    /* The wide shared USERCONNECT retains the native 8-byte alignment. */
     DECLSPEC_ALIGN(8) BYTE Connect[576+16];
+    BYTE *UnalignedConnect = Connect + sizeof(ULONG);
     ULONG ConnectSize;
     IsWow64Process(GetCurrentProcess(),&Wow64);
     printf("START win32k ABI wow64=%u\n",Wow64);
@@ -47,6 +47,17 @@ int main(void)
     CHECK(NtUserProcessConnect(NtCurrentProcess(),(PUSERCONNECT)Connect,ConnectSize)==STATUS_SUCCESS);
     for (i=ConnectSize;i<sizeof(Connect);++i) CHECK(Connect[i]==0xa5);
     CHECK(NtUserProcessConnect(NtCurrentProcess(),(PUSERCONNECT)Connect,ConnectSize-1)==STATUS_UNSUCCESSFUL);
+    /* i386 call stacks and buffers need only four-byte alignment. */
+    RtlFillMemory(Connect,sizeof(Connect),0xa5);
+    RtlZeroMemory(UnalignedConnect,ConnectSize);
+    *(ULONG *)UnalignedConnect=USER_VERSION;
+    CHECK(NtUserProcessConnect(NtCurrentProcess(),(PUSERCONNECT)UnalignedConnect,ConnectSize)==STATUS_SUCCESS);
+    CHECK(*(ULONG *)Connect==0xa5a5a5a5);
+    for (i=sizeof(ULONG)+ConnectSize;i<sizeof(Connect);++i) CHECK(Connect[i]==0xa5);
+    SetLastError(0x1234);
+    CHECK(NtUserProcessConnect(NtCurrentProcess(),(PUSERCONNECT)(Connect+1),ConnectSize)==STATUS_DATATYPE_MISALIGNMENT);
+    CHECK(GetLastError()==ERROR_NOACCESS);
+    CHECK(NtUserProcessConnect(NtCurrentProcess(),NULL,ConnectSize)==STATUS_UNSUCCESSFUL);
     Class.lpfnWndProc=Proc; Class.hInstance=GetModuleHandleW(NULL); Class.lpszClassName=L"Wow64Abi";
     CHECK(RegisterClassExW(&Class)!=0);
     Window=CreateWindowExW(0,Class.lpszClassName,L"ABI",0,0,0,80,80,NULL,NULL,Class.hInstance,NULL);

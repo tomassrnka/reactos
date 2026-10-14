@@ -210,7 +210,20 @@ ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a)
          * palette and opaque data retain unsigned GDI/address transport. */
         return (ULONG_PTR)NtUserSetClipboardData(a[0],Data.fGlobalHandle ? H(1) : G(1),&Data);
     }
-    case W64_NtUserProcessConnect: return NtUserProcessConnect(H(0), P(1), a[2]);
+    case W64_NtUserProcessConnect:
+    {
+        USERCONNECT Connect;
+        NTSTATUS Status;
+        if (!a[1] || a[2] != sizeof(Connect)) return STATUS_UNSUCCESSFUL;
+        if (a[1] & (sizeof(ULONG) - 1)) RtlRaiseStatus(STATUS_DATATYPE_MISALIGNMENT);
+        ProbeOutput(a[1], sizeof(Connect));
+        /* Wide guest fields retain their native layout, but i386 callers
+         * only promise four-byte alignment, including on a replaced stack. */
+        RtlCopyMemory(&Connect, P(1), sizeof(Connect));
+        Status = NtUserProcessConnect(H(0), &Connect, sizeof(Connect));
+        if (NT_SUCCESS(Status)) RtlCopyMemory(P(1), &Connect, sizeof(Connect));
+        return Status;
+    }
     case W64_NtUserInitializeClientPfnArrays: return NtUserInitializeClientPfnArrays(P(0), P(1), P(2), P(3));
     case W64_NtUserRegisterClassExWOW:
     {
