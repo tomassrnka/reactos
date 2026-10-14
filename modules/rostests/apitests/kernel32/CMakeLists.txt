@@ -89,6 +89,7 @@ list(APPEND SOURCE
     TunnelCache.c
     TzSetPrivilege.c
     UEFIFirmware.c
+    WaitOnAddress.c
     WerFlags.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
