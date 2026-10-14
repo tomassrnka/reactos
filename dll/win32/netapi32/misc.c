@@ -321,6 +321,22 @@ NetpNtStatusToApiStatus(
     return ApiStatus;
 }
 
+
+NET_API_STATUS
+WINAPI
+NetpRpcStatusToApiStatus(
+    _In_ DWORD Status)
+{
+    /* The exception code is an RPC or Win32 error, or an NT status raised by the stub */
+    if (Status == RPC_S_SERVER_UNAVAILABLE)
+        return ERROR_BAD_NETPATH;
+
+    if ((Status & 0xC0000000) == 0xC0000000)
+        return RtlNtStatusToDosError((NTSTATUS)Status);
+
+    return Status;
+}
+
 /* EOF */
 
 /*
