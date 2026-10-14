@@ -1458,8 +1458,9 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     ROS_PS_ATTRIBUTE_LIST Attributes;
     PHANDLE Handles = NULL;
-    SIZE_T Count = 0, i;
+    SIZE_T Count = 0, CaptureSize = 0, i;
     BOOLEAN Empty = FALSE;
+    BOOLEAN QuotaCharged = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
     PAGED_CODE();
 
@@ -1484,16 +1485,24 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
         else
         {
             Count = Attributes.Attributes[0].Size / sizeof(HANDLE);
-            /* Allocate a sentinel for an explicit empty list, distinct from
-             * NULL, which means the legacy inherit-all path. Charge the caller. */
-            Handles = ExAllocatePoolWithQuotaTag(PagedPool,
-                        Count ? Attributes.Attributes[0].Size : sizeof(HANDLE), 'lHsP');
             if (PreviousMode != KernelMode)
                 ProbeForRead(Attributes.Attributes[0].ValuePtr,
                              Attributes.Attributes[0].Size, sizeof(HANDLE));
-            if (Count)
-                RtlCopyMemory(Handles, Attributes.Attributes[0].ValuePtr,
-                              Attributes.Attributes[0].Size);
+            /* Allocate a sentinel for an explicit empty list, distinct from
+             * NULL, which means the legacy inherit-all path. Charge explicitly:
+             * ExAllocatePoolWithQuotaTag does not charge page-sized allocations. */
+            CaptureSize = Count ? Attributes.Attributes[0].Size : sizeof(HANDLE);
+            Status = PsChargeProcessPagedPoolQuota(PsGetCurrentProcess(), CaptureSize);
+            if (NT_SUCCESS(Status))
+            {
+                QuotaCharged = TRUE;
+                Handles = ExAllocatePoolWithTag(PagedPool, CaptureSize, 'lHsP');
+                if (!Handles)
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                else if (Count)
+                    RtlCopyMemory(Handles, Attributes.Attributes[0].ValuePtr,
+                                  Attributes.Attributes[0].Size);
+            }
         }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -1535,6 +1544,8 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
                                       ExceptionPort, InJob, Handles, Count);
     }
     if (Handles) ExFreePoolWithTag(Handles, 'lHsP');
+    if (QuotaCharged)
+        PsReturnProcessPagedPoolQuota(PsGetCurrentProcess(), CaptureSize);
     return Status;
 }
 
