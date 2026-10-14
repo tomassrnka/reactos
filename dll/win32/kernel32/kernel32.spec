@@ -977,6 +977,7 @@
 @ stdcall RequestDeviceWakeup(long)
 @ stdcall RequestWakeupLatency(long)
 @ stdcall ResetEvent(long)
+@ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall ResetWriteWatch(ptr long)
 @ stdcall RestoreLastError(long) ntdll.RtlRestoreLastWin32Error
 @ stdcall ResumeThread(long)

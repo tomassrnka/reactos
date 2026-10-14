@@ -1,6 +1,9 @@
 /* ReactOS WoW64 NT argument translation. SPDX-License-Identifier: GPL-2.0-or-later */
 #include "wow64p.h"
 #include <mountmgr.h>
+#include <winsock2.h>
+#include <tdi.h>
+#include <drivers/afd/shared.h>
 
 enum
 {
@@ -556,9 +559,22 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     {
         PIO_APC_ROUTINE Routine = a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL;
         PIO_STATUS_BLOCK Iosb = (PVOID)(0x8000000000000000ULL | a[4]);
-        /* This mount-manager query contains counted UTF-16 strings, not
-         * pointers. Other device-specific layouts need their own contracts. */
-        if (a[5] != IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH) return STATUS_NOT_SUPPORTED;
+        /* These requests contain counted strings/addresses or opaque bytes.
+         * AFD requests carrying handles or WSABUF arrays need translation. */
+        switch (a[5])
+        {
+        case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
+        case IOCTL_AFD_BIND:
+        case IOCTL_AFD_START_LISTEN:
+        case IOCTL_AFD_GET_SOCK_NAME:
+        case IOCTL_AFD_GET_PEER_NAME:
+        case IOCTL_AFD_SET_CONTEXT:
+        case IOCTL_AFD_GET_CONTEXT_SIZE:
+        case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
+            break;
+        default:
+            return STATUS_NOT_SUPPORTED;
+        }
         ProbeOutput(a[4], sizeof(WOW64_IOSB));
         return NtDeviceIoControlFile(H(0), H(1), Routine, P(3), Iosb,
                                       a[5], P(6), a[7], P(8), a[9]);

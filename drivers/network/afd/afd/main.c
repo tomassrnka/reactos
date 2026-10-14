@@ -273,15 +273,52 @@ AfdGetTdiHandles(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PULONG HandleFlags = LockRequest(Irp, IrpSp, TRUE, NULL);
+    PULONG HandleFlags;
     PAFD_TDI_HANDLE_DATA HandleData = Irp->UserBuffer;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Wow64 = IoIs32bitProcess(Irp);
+    NTSTATUS Status;
+
+    if (Wow64 && (!IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ||
+                  IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG) ||
+                  IrpSp->Parameters.DeviceIoControl.OutputBufferLength < 2 * sizeof(ULONG)))
+    {
+        Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+#endif
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
+    HandleFlags = LockRequest(Irp, IrpSp, TRUE, NULL);
     if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
 
     if (!HandleFlags)
         return UnlockAndMaybeComplete(FCB, STATUS_NO_MEMORY, Irp, 0);
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Wow64)
+    {
+        PULONG Handles32 = Irp->UserBuffer;
+        Status = STATUS_SUCCESS;
+        _SEH2_TRY
+        {
+            ProbeForWrite(Handles32, 2 * sizeof(ULONG), sizeof(ULONG));
+            if (*HandleFlags & AFD_ADDRESS_HANDLE)
+                Handles32[0] = HandleToUlong(FCB->AddressFile.Handle);
+            if (*HandleFlags & AFD_CONNECTION_HANDLE)
+                Handles32[1] = HandleToUlong(FCB->Connection.Handle);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
+    }
+#endif
 
     if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG) ||
         IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(*HandleData))

@@ -83,6 +83,7 @@ SysWOW64/msafd.dll
 SysWOW64/rasadhlp.dll
 SysWOW64/ws2help.dll
 SysWOW64/mswsock.dll
+SysWOW64/wshtcpip.dll
 SysWOW64/dnsapi.dll
 SysWOW64/notepad.exe
 SysWOW64/regedit.exe

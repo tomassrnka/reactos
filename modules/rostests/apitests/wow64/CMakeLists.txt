@@ -103,6 +103,10 @@ add_executable(wow64_installer_services EXCLUDE_FROM_ALL installer_services.c)
 set_module_type(wow64_installer_services win32cui UNICODE)
 add_importlibs(wow64_installer_services advapi32 msvcrt kernel32)
 
+add_executable(wow64_socket EXCLUDE_FROM_ALL socket.c)
+set_module_type(wow64_socket win32cui)
+add_importlibs(wow64_socket ws2_32 msvcrt kernel32)
+
 add_executable(wow64_relative_pipe EXCLUDE_FROM_ALL relative_pipe.c)
 set_module_type(wow64_relative_pipe win32cui)
 add_importlibs(wow64_relative_pipe msvcrt kernel32)

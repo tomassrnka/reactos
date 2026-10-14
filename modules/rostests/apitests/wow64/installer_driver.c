@@ -101,14 +101,32 @@ static DWORD DebugProcess(PROCESS_INFORMATION *Process)
     {
         if (!WaitForDebugEvent(&Event, 1000)) continue;
         Continue = DBG_CONTINUE;
+        /* Some compatibility paths also deliver child events. Do not read
+         * their addresses through the root handle or mistake their exit for
+         * completion of the process under observation. */
+        if (Event.dwProcessId != Process->dwProcessId)
+        {
+            if (Event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT && Event.u.CreateProcessInfo.hFile)
+                CloseHandle(Event.u.CreateProcessInfo.hFile);
+            else if (Event.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT && Event.u.LoadDll.hFile)
+                CloseHandle(Event.u.LoadDll.hFile);
+            else if (Event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT)
+                printf("DEBUG CHILD EXIT pid=%lu code=%lx\n", Event.dwProcessId, Event.u.ExitProcess.dwExitCode);
+            else if (Event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT &&
+                     Event.u.Exception.ExceptionRecord.ExceptionCode != EXCEPTION_BREAKPOINT &&
+                     Event.u.Exception.ExceptionRecord.ExceptionCode != EXCEPTION_SINGLE_STEP)
+                Continue = DBG_EXCEPTION_NOT_HANDLED;
+            ContinueDebugEvent(Event.dwProcessId, Event.dwThreadId, Continue);
+            continue;
+        }
         if (Event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT)
         {
             EXCEPTION_RECORD *Record = &Event.u.Exception.ExceptionRecord;
             HANDLE Thread = OpenThread(THREAD_GET_CONTEXT, FALSE, Event.dwThreadId);
             CONTEXT Context = {0};
             Context.ContextFlags = CONTEXT_FULL | CONTEXT_SEGMENTS;
-            printf("DEBUG EXCEPTION code=%lx address=%p first=%lu info=%Ix,%Ix\n",
-                   Record->ExceptionCode, Record->ExceptionAddress, Event.u.Exception.dwFirstChance,
+            printf("DEBUG EXCEPTION pid=%lu code=%lx address=%p first=%lu info=%Ix,%Ix\n",
+                   Event.dwProcessId, Record->ExceptionCode, Record->ExceptionAddress, Event.u.Exception.dwFirstChance,
                    Record->ExceptionInformation[0], Record->ExceptionInformation[1]);
             if (Record->ExceptionCode == 0x80000100 && Record->NumberParameters == 2)
             {
@@ -127,6 +145,11 @@ static DWORD DebugProcess(PROCESS_INFORMATION *Process)
                 printf("DEBUG CONTEXT tid=%lu cs=%x gs=%x fs=%x ip=%p sp=%p ax=%Ix\n",
                        Event.dwThreadId, Context.SegCs, Context.SegGs, Context.SegFs,
                        (PVOID)Context.Rip, (PVOID)Context.Rsp, Context.Rax);
+#else
+            if (Thread && GetThreadContext(Thread, &Context))
+                printf("DEBUG CONTEXT tid=%lu cs=%x gs=%x fs=%x ip=%p sp=%p ax=%lx\n",
+                       Event.dwThreadId, Context.SegCs, Context.SegGs, Context.SegFs,
+                       (PVOID)Context.Eip, (PVOID)Context.Esp, Context.Eax);
 #endif
             if (Thread) CloseHandle(Thread);
             if (Record->ExceptionCode != EXCEPTION_BREAKPOINT && Record->ExceptionCode != EXCEPTION_SINGLE_STEP &&

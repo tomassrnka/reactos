@@ -9,6 +9,9 @@
 #ifndef VOLUME_NAME_NT
 #define VOLUME_NAME_NT 2
 #endif
+#ifndef LOCALE_NAME_SYSTEM_DEFAULT
+#define LOCALE_NAME_SYSTEM_DEFAULT L"!x-sys-default-locale"
+#endif
 
 static unsigned Checks, Failures;
 #define CHECK(x) do { ++Checks; if (!(x)) { ++Failures; printf("FAIL line %u: %s error=%lu\n", __LINE__, #x, GetLastError()); } } while (0)
@@ -232,6 +235,42 @@ static void CheckTransactedRegistry(void)
     printf("TRANSACTED REGISTRY A invalid transaction status=%ld\n", Status);
     CHECK(Status == ERROR_CALL_NOT_IMPLEMENTED || Status == ERROR_INVALID_HANDLE || Status == ERROR_INVALID_TRANSACTION);
     if (!Status) { RegCloseKey(Key); RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\w643c-r4-transaction"); }
+}
+
+static void CheckLocaleResolution(void)
+{
+    typedef INT (WINAPI *RESOLVE)(PCWSTR, PWSTR, INT);
+    RESOLVE Resolve = (RESOLVE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "ResolveLocaleName");
+    const struct { PCWSTR Input, Expected; } Cases[] = {
+        {L"EN-us", L"en-US"}, {L"en", L"en-US"},
+        {L"en-US-x-w643c", L"en-US"}, {L"de-DE", L"de-DE"},
+        {L"sr-Latn", L"sr-Latn-RS"}, {L"", L""}, {L"zz-XY", L""},
+        {L"en US", L""}, {L"en/US", L""}, {L"!sys-default-locale", L""}
+    };
+    struct { WCHAR Text[LOCALE_NAME_MAX_LENGTH]; DWORD Guard; } Output;
+    WCHAR Default[LOCALE_NAME_MAX_LENGTH];
+    unsigned i;
+    int Length;
+    CHECK(Resolve != NULL);
+    if (!Resolve) return;
+    for (i = 0; i < ARRAYSIZE(Cases); ++i)
+    {
+        memset(&Output, 0xcc, sizeof(Output));
+        Length = wcslen(Cases[i].Expected) + 1;
+        CHECK(Resolve(Cases[i].Input, NULL, 0) == Length);
+        CHECK(Resolve(Cases[i].Input, Output.Text, ARRAYSIZE(Output.Text)) == Length);
+        CHECK(!wcscmp(Output.Text, Cases[i].Expected) && Output.Guard == 0xcccccccc);
+    }
+    CHECK(GetUserDefaultLocaleName(Default, ARRAYSIZE(Default)) != 0);
+    CHECK(Resolve(NULL, Output.Text, ARRAYSIZE(Output.Text)) != 0 && !wcscmp(Output.Text, Default));
+    CHECK(GetSystemDefaultLocaleName(Default, ARRAYSIZE(Default)) != 0);
+    CHECK(Resolve(LOCALE_NAME_SYSTEM_DEFAULT, Output.Text, ARRAYSIZE(Output.Text)) != 0 && !wcscmp(Output.Text, Default));
+    SetLastError(0);
+    CHECK(Resolve(L"en-US", NULL, 1) == 6);
+    CHECK(!Resolve(L"en-US", Output.Text, -1) && GetLastError() == ERROR_INSUFFICIENT_BUFFER);
+    memset(&Output, 0xcc, sizeof(Output));
+    CHECK(!Resolve(L"en-US", Output.Text, 3) && GetLastError() == ERROR_INSUFFICIENT_BUFFER);
+    CHECK(Output.Text[3] == 0xcccc && Output.Guard == 0xcccccccc);
 }
 
 static void CheckPowerRequests(void)
@@ -837,6 +876,7 @@ int wmain(int argc, WCHAR **argv)
     CheckEventRegistration();
     CheckTransactedRegistry();
     CheckPowerRequests();
+    CheckLocaleResolution();
     CheckRuntimeReporting();
     CheckPrivileges();
     CheckObjectSecurity();
