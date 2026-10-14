@@ -58,6 +58,10 @@ extern DIB_FUNCTIONS DibFunctionsForBitmapFormat[];
 
 /* amd64 memmove from libcntpr is a byte loop (about 2 GB/s); same semantics, overlap allowed */
 #if defined(__GNUC__) && defined(__x86_64__)
+typedef ULONG64 __attribute__((__may_alias__, __aligned__(1))) DIB_UQWORD;
+typedef ULONG __attribute__((__may_alias__, __aligned__(1))) DIB_UDWORD;
+typedef USHORT __attribute__((__may_alias__, __aligned__(1))) DIB_UWORD;
+
 FORCEINLINE
 VOID
 DIB_MoveBytes(
@@ -75,13 +79,13 @@ DIB_MoveBytes(
         __asm__ __volatile__("rep movsq" : "+D"(pjDest), "+S"(pjSrc), "+c"(cq) : : "memory");
         if (cb & 4)
         {
-            *(UNALIGNED ULONG *)pjDest = *(UNALIGNED const ULONG *)pjSrc;
+            *(DIB_UDWORD *)pjDest = *(const DIB_UDWORD *)pjSrc;
             pjDest += 4;
             pjSrc += 4;
         }
         if (cb & 2)
         {
-            *(UNALIGNED USHORT *)pjDest = *(UNALIGNED const USHORT *)pjSrc;
+            *(DIB_UWORD *)pjDest = *(const DIB_UWORD *)pjSrc;
             pjDest += 2;
             pjSrc += 2;
         }
@@ -96,7 +100,7 @@ DIB_MoveBytes(
         while (cb >= 8)
         {
             cb -= 8;
-            *(UNALIGNED ULONG64 *)(pjDest + cb) = *(UNALIGNED const ULONG64 *)(pjSrc + cb);
+            *(DIB_UQWORD *)(pjDest + cb) = *(const DIB_UQWORD *)(pjSrc + cb);
         }
         while (cb != 0)
         {
