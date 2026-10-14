@@ -354,7 +354,7 @@ static int read_fat(struct fg *g, u32 count)
         if (i >= 2 && is_pointer(g, g->fat[i]) && g->fat[i] > g->clusters + 1)
             err = FG_EBADFS;
     }
-    for (; !err && i < held && i < count; i++)
+    for (; !err && i < held; i++)
     {
         if (get_entry(buf, g->bits, i))
             err = FG_EBADFS;
@@ -396,16 +396,13 @@ static int write_boot(struct fg *g, u64 new_sectors, u32 fatsz)
     return err;
 }
 
-static int write_fsinfo(struct fg *g, u32 free_clusters)
+/* s: a buffer of at least one sector. */
+static int write_fsinfo(struct fg *g, u32 free_clusters, u8 *s)
 {
-    u8 *s;
     int err = FG_OK;
 
     if (g->bits != 32 || !g->fsinfo || g->fsinfo >= g->res)
         return FG_OK;
-    s = g->io->alloc(g->io->ctx, g->bps);
-    if (!s)
-        return FG_ENOMEM;
     if (g->io->read(g->io->ctx, (u64)g->fsinfo * g->bps, s, g->bps))
         err = FG_EIO;
     else if (rd32(s) == 0x41615252 && rd32(s + 484) == 0x61417272)
@@ -415,7 +412,6 @@ static int write_fsinfo(struct fg *g, u32 free_clusters)
         if (g->io->write(g->io->ctx, (u64)g->fsinfo * g->bps, s, g->bps))
             err = FG_EIO;
     }
-    g->io->free(g->io->ctx, s);
     return err;
 }
 
@@ -530,9 +526,15 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
             if (!g->fat[i])
                 freec++;
         }
+        patchbuf = io->alloc(io->ctx, g->bps);
+        if (!patchbuf)
+        {
+            err = FG_ENOMEM;
+            goto out;
+        }
         err = write_boot(g, new_sectors, g->fatsz);
         if (!err)
-            err = write_fsinfo(g, freec);
+            err = write_fsinfo(g, freec, patchbuf);
         goto out;
     }
 
@@ -667,7 +669,7 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
         wr32(g->boot + 0x2C, g->rootclus - m);
     err = write_boot(g, new_sectors, fatsz2);
     if (!err)
-        err = write_fsinfo(g, freec);
+        err = write_fsinfo(g, freec, patchbuf);
 
 out:
     if (fatbuf)
