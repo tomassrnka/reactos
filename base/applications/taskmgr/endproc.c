@@ -133,7 +133,7 @@ BOOL ShutdownProcessTree(HANDLE hParentProcess, DWORD dwParentPID)
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     BOOL bResult;
 
-    if (!hSnapshot)
+    if (hSnapshot == INVALID_HANDLE_VALUE)
     {
         return FALSE;
     }
