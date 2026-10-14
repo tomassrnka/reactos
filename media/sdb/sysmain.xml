@@ -568,15 +568,9 @@
             <LAYER NAME="WIN10RTM" />
         </EXE>
 
-        <!-- Programs built with Qt 6 (Qt6Core.dll next to them): Qt 6 supports Windows 10 and later (documented) -->
-        <EXE NAME="*" APP_NAME="Qt 6 applications" VENDOR="The Qt Company">
-            <MATCHING_FILE NAME="Qt6Core.dll">
-                <COMPANY_NAME>The Qt Company Ltd.</COMPANY_NAME>
-                <PRODUCT_NAME>Qt6</PRODUCT_NAME>
-                <ORIGINAL_FILENAME>Qt6Core.dll</ORIGINAL_FILENAME>
-            </MATCHING_FILE>
-            <LAYER NAME="WIN10RTM" />
-        </EXE>
+        <!-- No rule for Qt 6 programs: the database matches the attributes of the program file and of named files next to it,
+             not what it imports, so a rule keyed on Qt6Core.dll would also change unrelated programs in that directory.
+             Qt 6 programs choose the Windows 10 layer themselves. -->
 
         <!-- ReactOS shim used to test the shim engine -->
         <EXE NAME="shimtest_ros.exe" APP_NAME="Shim test application" VENDOR="ReactOS">
