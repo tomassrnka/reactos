@@ -123,6 +123,7 @@ list(APPEND SOURCE
     RtlDetermineDosPathNameType.c
     RtlDoesFileExists.c
     RtlDosApplyFileIsolationRedirection_Ustr.c
+    RtlDosApplyFileIsolationRedirection_LoadFrom.c
     RtlDosPathNameToNtPathName_U.c
     RtlDosSearchPath_U.c
     RtlDosSearchPath_Ustr.c
