@@ -47,6 +47,7 @@ typedef struct _TEST_CASE
     DWORD CredFlags;
     DWORD ContextFlags;
     SECURITY_STATUS Expected;
+    BOOL OwnOutput;
 } TEST_CASE;
 
 #define CONTINUE SEC_I_CONTINUE_NEEDED
@@ -54,41 +55,45 @@ typedef struct _TEST_CASE
 static const TEST_CASE TestCases[] =
 {
     /* Default validation (no manual flag): the handshake itself fails for a bad chain */
-    { "valid", BLOB(CertLeafValid), NoCert, TEST_HOST, 0, 0, CONTINUE },
-    { "valid through an intermediate sent by the server", BLOB(CertLeafViaIntermediate), BLOB(CertIntermediate), TEST_HOST, 0, 0, CONTINUE },
-    { "intermediate not sent", BLOB(CertLeafViaIntermediate), NoCert, TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT },
-    { "expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, 0, 0, SEC_E_CERT_EXPIRED },
-    { "wrong host name", BLOB(CertLeafWrongHost), NoCert, TEST_HOST, 0, 0, SEC_E_WRONG_PRINCIPAL },
-    { "valid, other host asked for", BLOB(CertLeafValid), NoCert, TEST_OTHER_HOST, 0, 0, SEC_E_WRONG_PRINCIPAL },
-    { "self-signed", BLOB(CertLeafSelfSigned), NoCert, TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT },
-    { "untrusted root sent", BLOB(CertLeafUntrustedRoot), BLOB(CertUntrustedRoot), TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT },
-    { "untrusted root not sent", BLOB(CertLeafUntrustedRoot), NoCert, TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT },
-    { "valid, no target name", BLOB(CertLeafValid), NoCert, NULL, 0, 0, SEC_E_WRONG_PRINCIPAL },
-    { "wrong host name, no target name", BLOB(CertLeafWrongHost), NoCert, NULL, 0, 0, SEC_E_WRONG_PRINCIPAL },
-    { "expired, no target name", BLOB(CertLeafExpired), NoCert, NULL, 0, 0, SEC_E_WRONG_PRINCIPAL },
-    { "expired, other host asked for", BLOB(CertLeafExpired), NoCert, TEST_OTHER_HOST, 0, 0, SEC_E_CERT_EXPIRED },
-    { "self-signed, other host asked for", BLOB(CertLeafSelfSigned), NoCert, TEST_OTHER_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT },
-    { "untrusted root sent, other host asked for", BLOB(CertLeafUntrustedRoot), BLOB(CertUntrustedRoot), TEST_OTHER_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT },
-    { "no target name, no server name check", BLOB(CertLeafValid), NoCert, NULL, SCH_CRED_NO_SERVERNAME_CHECK, 0, CONTINUE },
-    { "explicit automatic validation: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_AUTO_CRED_VALIDATION, 0, SEC_E_CERT_EXPIRED },
+    { "valid", BLOB(CertLeafValid), NoCert, TEST_HOST, 0, 0, CONTINUE, FALSE },
+    { "valid through an intermediate sent by the server", BLOB(CertLeafViaIntermediate), BLOB(CertIntermediate), TEST_HOST, 0, 0, CONTINUE, FALSE },
+    { "intermediate not sent", BLOB(CertLeafViaIntermediate), NoCert, TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE },
+    { "expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, 0, 0, SEC_E_CERT_EXPIRED, FALSE },
+    { "wrong host name", BLOB(CertLeafWrongHost), NoCert, TEST_HOST, 0, 0, SEC_E_WRONG_PRINCIPAL, FALSE },
+    { "valid, other host asked for", BLOB(CertLeafValid), NoCert, TEST_OTHER_HOST, 0, 0, SEC_E_WRONG_PRINCIPAL, FALSE },
+    { "self-signed", BLOB(CertLeafSelfSigned), NoCert, TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE },
+    { "untrusted root sent", BLOB(CertLeafUntrustedRoot), BLOB(CertUntrustedRoot), TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE },
+    { "untrusted root not sent", BLOB(CertLeafUntrustedRoot), NoCert, TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE },
+    { "valid, no target name", BLOB(CertLeafValid), NoCert, NULL, 0, 0, SEC_E_WRONG_PRINCIPAL, FALSE },
+    { "wrong host name, no target name", BLOB(CertLeafWrongHost), NoCert, NULL, 0, 0, SEC_E_WRONG_PRINCIPAL, FALSE },
+    { "expired, no target name", BLOB(CertLeafExpired), NoCert, NULL, 0, 0, SEC_E_WRONG_PRINCIPAL, FALSE },
+    { "expired, other host asked for", BLOB(CertLeafExpired), NoCert, TEST_OTHER_HOST, 0, 0, SEC_E_CERT_EXPIRED, FALSE },
+    { "self-signed, other host asked for", BLOB(CertLeafSelfSigned), NoCert, TEST_OTHER_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE },
+    { "untrusted root sent, other host asked for", BLOB(CertLeafUntrustedRoot), BLOB(CertUntrustedRoot), TEST_OTHER_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE },
+    { "no target name, no server name check", BLOB(CertLeafValid), NoCert, NULL, SCH_CRED_NO_SERVERNAME_CHECK, 0, CONTINUE, FALSE },
+    { "intermediate not sent, other host asked for", BLOB(CertLeafViaIntermediate), NoCert, TEST_OTHER_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE },
+    { "signed by a trusted certificate that is not a CA", BLOB(CertLeafFromNonCa), BLOB(CertSignerNotCa), TEST_HOST, 0, 0, SEC_E_CERT_WRONG_USAGE, FALSE },
+    { "own output buffer: valid", BLOB(CertLeafValid), NoCert, TEST_HOST, 0, 0, CONTINUE, TRUE },
+    { "own output buffer: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, 0, 0, SEC_E_CERT_EXPIRED, TRUE },
+    { "explicit automatic validation: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_AUTO_CRED_VALIDATION, 0, SEC_E_CERT_EXPIRED, FALSE },
 
     /* The caller validates: ISC_REQ_MANUAL_CRED_VALIDATION */
-    { "manual (context): valid", BLOB(CertLeafValid), NoCert, TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE },
-    { "manual (context): expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE },
-    { "manual (context): wrong host name", BLOB(CertLeafWrongHost), NoCert, TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE },
-    { "manual (context): self-signed", BLOB(CertLeafSelfSigned), NoCert, TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE },
-    { "manual (context): untrusted root", BLOB(CertLeafUntrustedRoot), BLOB(CertUntrustedRoot), TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE },
+    { "manual (context): valid", BLOB(CertLeafValid), NoCert, TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE, FALSE },
+    { "manual (context): expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE, FALSE },
+    { "manual (context): wrong host name", BLOB(CertLeafWrongHost), NoCert, TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE, FALSE },
+    { "manual (context): self-signed", BLOB(CertLeafSelfSigned), NoCert, TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE, FALSE },
+    { "manual (context): untrusted root", BLOB(CertLeafUntrustedRoot), BLOB(CertUntrustedRoot), TEST_HOST, 0, ISC_REQ_MANUAL_CRED_VALIDATION, CONTINUE, FALSE },
 
     /* The caller validates: SCH_CRED_MANUAL_CRED_VALIDATION */
-    { "manual (credential): valid", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_MANUAL_CRED_VALIDATION, 0, CONTINUE },
-    { "manual (credential): expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_MANUAL_CRED_VALIDATION, 0, CONTINUE },
-    { "manual (credential): wrong host name", BLOB(CertLeafWrongHost), NoCert, TEST_HOST, SCH_CRED_MANUAL_CRED_VALIDATION, 0, CONTINUE },
-    { "manual (credential): self-signed", BLOB(CertLeafSelfSigned), NoCert, TEST_HOST, SCH_CRED_MANUAL_CRED_VALIDATION, 0, CONTINUE },
+    { "manual (credential): valid", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_MANUAL_CRED_VALIDATION, 0, CONTINUE, FALSE },
+    { "manual (credential): expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_MANUAL_CRED_VALIDATION, 0, CONTINUE, FALSE },
+    { "manual (credential): wrong host name", BLOB(CertLeafWrongHost), NoCert, TEST_HOST, SCH_CRED_MANUAL_CRED_VALIDATION, 0, CONTINUE, FALSE },
+    { "manual (credential): self-signed", BLOB(CertLeafSelfSigned), NoCert, TEST_HOST, SCH_CRED_MANUAL_CRED_VALIDATION, 0, CONTINUE, FALSE },
 
     /* Only the name check is switched off */
-    { "no server name check: wrong host name", BLOB(CertLeafWrongHost), NoCert, TEST_HOST, SCH_CRED_NO_SERVERNAME_CHECK, 0, CONTINUE },
-    { "no server name check: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_NO_SERVERNAME_CHECK, 0, SEC_E_CERT_EXPIRED },
-    { "no server name check: self-signed", BLOB(CertLeafSelfSigned), NoCert, TEST_HOST, SCH_CRED_NO_SERVERNAME_CHECK, 0, SEC_E_UNTRUSTED_ROOT },
+    { "no server name check: wrong host name", BLOB(CertLeafWrongHost), NoCert, TEST_HOST, SCH_CRED_NO_SERVERNAME_CHECK, 0, CONTINUE, FALSE },
+    { "no server name check: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_NO_SERVERNAME_CHECK, 0, SEC_E_CERT_EXPIRED, FALSE },
+    { "no server name check: self-signed", BLOB(CertLeafSelfSigned), NoCert, TEST_HOST, SCH_CRED_NO_SERVERNAME_CHECK, 0, SEC_E_UNTRUSTED_ROOT, FALSE },
 };
 
 static HCERTSTORE RootStore;
@@ -192,13 +197,15 @@ static BYTE *BuildServerFlight(const TEST_CASE *Case, ULONG *Size)
 
 static SECURITY_STATUS RunHandshake(const TEST_CASE *Case, PULONG OutSize, PULONG RetAttr)
 {
-    const ULONG BaseFlags = ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_USE_SESSION_KEY | ISC_REQ_CONFIDENTIALITY |
+    const ULONG BaseFlags = ISC_REQ_USE_SESSION_KEY | ISC_REQ_CONFIDENTIALITY |
                             ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_STREAM;
     SCHANNEL_CRED Auth;
     CredHandle Cred;
     CtxtHandle Ctx;
     TimeStamp Expiry;
     SecBuffer OutBuffer, InBuffers[2];
+    BYTE OwnBuffer[16384];
+    ULONG OutFlags = Case->OwnOutput ? 0 : ISC_REQ_ALLOCATE_MEMORY;
     SecBufferDesc OutDesc, InDesc;
     ULONG Attr;
     SECURITY_STATUS Status;
@@ -222,9 +229,9 @@ static SECURITY_STATUS RunHandshake(const TEST_CASE *Case, PULONG OutSize, PULON
     OutDesc.cBuffers = 1;
     OutDesc.pBuffers = &OutBuffer;
     OutBuffer.BufferType = SECBUFFER_TOKEN;
-    OutBuffer.cbBuffer = 0;
-    OutBuffer.pvBuffer = NULL;
-    Status = InitializeSecurityContextW(&Cred, NULL, (SEC_WCHAR *)Case->Target, BaseFlags | Case->ContextFlags,
+    OutBuffer.cbBuffer = Case->OwnOutput ? sizeof(OwnBuffer) : 0;
+    OutBuffer.pvBuffer = Case->OwnOutput ? OwnBuffer : NULL;
+    Status = InitializeSecurityContextW(&Cred, NULL, (SEC_WCHAR *)Case->Target, BaseFlags | OutFlags | Case->ContextFlags,
                                         0, 0, NULL, 0, &Ctx, &OutDesc, &Attr, &Expiry);
     ok(Status == SEC_I_CONTINUE_NEEDED, "%s: ClientHello step returned 0x%08lx\n", Case->Name, Status);
     if (Status != SEC_I_CONTINUE_NEEDED)
@@ -234,7 +241,8 @@ static SECURITY_STATUS RunHandshake(const TEST_CASE *Case, PULONG OutSize, PULON
     }
     ok(OutBuffer.cbBuffer >= 5 && OutBuffer.pvBuffer && ((BYTE *)OutBuffer.pvBuffer)[0] == 0x16,
        "%s: no ClientHello (%lu bytes)\n", Case->Name, OutBuffer.cbBuffer);
-    FreeContextBuffer(OutBuffer.pvBuffer);
+    if (!Case->OwnOutput)
+        FreeContextBuffer(OutBuffer.pvBuffer);
 
     Flight = BuildServerFlight(Case, &FlightSize);
     if (!Flight)
@@ -254,14 +262,14 @@ static SECURITY_STATUS RunHandshake(const TEST_CASE *Case, PULONG OutSize, PULON
     InBuffers[1].cbBuffer = 0;
     InBuffers[1].pvBuffer = NULL;
     OutBuffer.BufferType = SECBUFFER_TOKEN;
-    OutBuffer.cbBuffer = 0;
-    OutBuffer.pvBuffer = NULL;
-    Status = InitializeSecurityContextW(&Cred, &Ctx, (SEC_WCHAR *)Case->Target, BaseFlags | Case->ContextFlags,
+    OutBuffer.cbBuffer = Case->OwnOutput ? sizeof(OwnBuffer) : 0;
+    OutBuffer.pvBuffer = Case->OwnOutput ? OwnBuffer : NULL;
+    Status = InitializeSecurityContextW(&Cred, &Ctx, (SEC_WCHAR *)Case->Target, BaseFlags | OutFlags | Case->ContextFlags,
                                         0, 0, &InDesc, 0, &Ctx, &OutDesc, &Attr, &Expiry);
     trace("%s: 0x%08lx, %lu output bytes, attributes 0x%lx\n", Case->Name, Status, OutBuffer.cbBuffer, Attr);
     *OutSize = OutBuffer.cbBuffer;
     *RetAttr = Attr;
-    if (OutBuffer.pvBuffer)
+    if (OutBuffer.pvBuffer && !Case->OwnOutput)
         FreeContextBuffer(OutBuffer.pvBuffer);
 
     HeapFree(GetProcessHeap(), 0, Flight);
