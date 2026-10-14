@@ -2038,6 +2038,61 @@ exit:
     LeaveCriticalSection(&provider_thread_cs);
 }
 
+void uia_provider_thread_disconnect_all(void)
+{
+    struct list *cursor, *cursor2;
+    struct uia_node **nodes = NULL;
+    ULONG count = 0, i = 0;
+
+    /* The nodes are detached and pinned under the lock, and disconnected without it: releasing a provider can
+     * call back into the provider thread, or here again. */
+    EnterCriticalSection(&provider_thread_cs);
+
+    /* Provider thread hasn't been started, no nodes to disconnect. */
+    if (provider_thread.ref)
+    {
+        LIST_FOR_EACH(cursor, &provider_thread.nodes_list)
+            count++;
+
+        if (count && (nodes = malloc(count * sizeof(*nodes))))
+        {
+            LIST_FOR_EACH_SAFE(cursor, cursor2, &provider_thread.nodes_list)
+            {
+                struct uia_node *node_data = LIST_ENTRY(cursor, struct uia_node, prov_thread_list_entry);
+
+                list_remove(cursor);
+                list_init(&node_data->prov_thread_list_entry);
+                if (!list_empty(&node_data->node_map_list_entry))
+                {
+                    struct uia_provider_thread_map_entry *prov_map = node_data->map;
+
+                    list_remove(&node_data->node_map_list_entry);
+                    list_init(&node_data->node_map_list_entry);
+                    node_data->map = NULL;
+                    if (list_empty(&prov_map->nodes_list))
+                    {
+                        rb_remove(&provider_thread.node_map, &prov_map->entry);
+                        SafeArrayDestroy(prov_map->runtime_id);
+                        free(prov_map);
+                    }
+                }
+
+                IWineUiaNode_AddRef(&node_data->IWineUiaNode_iface);
+                nodes[i++] = node_data;
+            }
+        }
+    }
+
+    LeaveCriticalSection(&provider_thread_cs);
+
+    for (i = 0; nodes && i < count; i++)
+    {
+        IWineUiaNode_disconnect(&nodes[i]->IWineUiaNode_iface);
+        IWineUiaNode_Release(&nodes[i]->IWineUiaNode_iface);
+    }
+    free(nodes);
+}
+
 static HRESULT uia_provider_thread_add_node(HUIANODE node, SAFEARRAY *rt_id)
 {
     struct uia_node *node_data = impl_from_IWineUiaNode((IWineUiaNode *)node);
