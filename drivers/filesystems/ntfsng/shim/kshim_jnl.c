@@ -632,16 +632,14 @@ int kshim_jnl_commit(struct block_device *b)
 		err = -EIO;
 	if (err) {
 		/*
-		 * Part of a committed transaction may be in place.  The next commit would overwrite its
-		 * slots, so from here on the header says the metadata needs repair until an in-place
-		 * pass of the whole overlay succeeds.
+		 * Part of a committed transaction may be in place.  Its COMMITTED header is on the medium,
+		 * and its replay at the next mount puts the whole transaction in place: no further write
+		 * may reach the device until then (a later commit would overwrite its slots, and a header
+		 * saying UNJOURNALED would throw the replay away).
 		 */
-		j->degraded = 1;
-		if (kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn)) {
-			/* Neither the transaction nor the marker: only a replay of the COMMITTED one can help now. */
-			j->failed = 1;
-			printk(KERN_ERR "journal: device writes failing: no further writes until the next mount\n");
-		}
+		j->failed = 1;
+		printk(KERN_ERR "journal: the in-place pass of seq %llu failed: no further writes until the next "
+		       "mount, which replays it\n", (unsigned long long)j->seq);
 		goto out;
 	}
 	j->vol_usn = usn_new;
