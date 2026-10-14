@@ -1,0 +1,5 @@
+add_executable(wer_winetest wer.c)
+target_compile_definitions(wer_winetest PRIVATE STANDALONE __WINESRC__)
+set_module_type(wer_winetest win32cui)
+add_importlibs(wer_winetest wer advapi32 msvcrt kernel32)
+add_rostests_file(TARGET wer_winetest)
