@@ -16,6 +16,7 @@ list(APPEND SOURCE
     msstyles.c
     ncscrollbar.c
     nonclient.c
+    panning.c
     property.c
     resource.h
     stylemap.c
