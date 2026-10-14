@@ -229,7 +229,7 @@ static VOID User32UpdateImcOfImeUI(PIMEUI pimeui, HIMC hNewIMC)
     if (hOldIMC)
         User32SetImeWindowOfImc(hOldIMC, NULL);
 
-    pimeui->hIMC = hNewIMC;
+    KSETSX(pimeui, hIMC, hNewIMC);
 
     if (hNewIMC)
         User32SetImeWindowOfImc(hNewIMC, hImeWnd);
@@ -353,8 +353,8 @@ static INT ImeWnd_OnCreate(PIMEUI pimeui, LPCREATESTRUCT lpCS)
     pimeui->nCntInIMEProc = 0;
     pimeui->fActivate = FALSE;
     pimeui->fDestroy = FALSE;
-    pimeui->hwndIMC = NULL;
-    pimeui->hKL = GetWin32ClientInfo()->hKL;
+    KSETSX(pimeui, hwndIMC, NULL);
+    KSETSX(pimeui, hKL, GetWin32ClientInfo()->hKL);
     pimeui->fCtrlShowStatus = TRUE;
     pimeui->dwLastStatus = 0;
 
@@ -373,7 +373,7 @@ static VOID User32DestroyImeUIWindow(PIMEUI pimeui)
     }
 
     pimeui->fShowStatus = pimeui->fDestroy = FALSE;
-    pimeui->hwndUI = NULL;
+    KSETSX(pimeui, hwndUI, NULL);
 }
 
 /* Handles WM_IME_SELECT message of the default IME window. */
@@ -384,12 +384,12 @@ static VOID ImeWnd_OnImeSelect(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
 
     if (wParam)
     {
-        pimeui->hKL = hKL = (HKL)lParam;
+        KSETSX(pimeui, hKL, hKL = (HKL)lParam);
 
         if (!pimeui->fActivate)
             return;
 
-        pimeui->hwndUI = hwndUI = User32CreateImeUIWindow(pimeui, hKL);
+        KSETSX(pimeui, hwndUI, hwndUI = User32CreateImeUIWindow(pimeui, hKL));
         if (hwndUI)
             User32SendImeUIMessage(pimeui, WM_IME_SELECT, wParam, lParam, TRUE);
 
@@ -406,7 +406,7 @@ static VOID ImeWnd_OnImeSelect(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
 
         User32SendImeUIMessage(pimeui, WM_IME_SELECT, wParam, lParam, TRUE);
         User32DestroyImeUIWindow(pimeui);
-        pimeui->hKL = NULL;
+        KSETSX(pimeui, hKL, NULL);
     }
 }
 
@@ -564,9 +564,9 @@ static VOID FASTCALL User32SetImeActivenessOfWindow(HWND hWnd, BOOL bActive)
 VOID FASTCALL CtfLoadThreadLayout(PIMEUI pimeui)
 {
     IMM_FN(CtfImmTIMActivate)(pimeui->hKL);
-    pimeui->hKL = GetWin32ClientInfo()->hKL;
+    KSETSX(pimeui, hKL, GetWin32ClientInfo()->hKL);
     IMM_FN(ImmLoadIME)(pimeui->hKL);
-    pimeui->hwndUI = NULL;
+    KSETSX(pimeui, hwndUI, NULL);
 }
 
 /* Open the IME help or check the existence of the IME help. */
@@ -847,7 +847,7 @@ LRESULT ImeWnd_OnImeSetContext(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
     if (wParam)
     {
         if (!pimeui->hwndUI)
-            pimeui->hwndUI = User32CreateImeUIWindow(pimeui, pimeui->hKL);
+            KSETSX(pimeui, hwndUI, User32CreateImeUIWindow(pimeui, pimeui->hKL));
 
         if (gfConIme == -1)
         {
@@ -912,11 +912,11 @@ LRESULT ImeWnd_OnImeSetContext(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
 
             hImeWnd = UserHMGetHandle(pimeui->spwnd);
             if (NtUserSetImeOwnerWindow(hImeWnd, hwndFocus))
-                pimeui->hwndIMC = hwndFocus;
+                KSETSX(pimeui, hwndIMC, hwndFocus);
         }
         else
         {
-            pimeui->hwndIMC = hwndFocus;
+            KSETSX(pimeui, hwndIMC, hwndFocus);
 
             hImeWnd = UserHMGetHandle(pimeui->spwnd);
             NtUserSetImeOwnerWindow(hImeWnd, NULL);
@@ -938,7 +938,7 @@ LRESULT ImeWnd_OnImeSetContext(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
     if (wParam)
     {
         pImeWnd = ValidateHwnd(hImeWnd);
-        if (pwndFocus && pImeWnd && pImeWnd->head.pti == pwndFocus->head.pti)
+        if (pwndFocus && pImeWnd && KPTR_EQ(KPTR(pImeWnd->head.pti), KPTR(pwndFocus->head.pti)))
         {
             hwndNewImc = pimeui->hwndIMC;
             if (pimeui->fShowStatus)
@@ -967,7 +967,7 @@ LRESULT ImeWnd_OnImeSetContext(PIMEUI pimeui, WPARAM wParam, LPARAM lParam)
         pImeWnd = pimeui->spwnd;
         hImeWnd = UserHMGetHandle(pImeWnd);
         hwndActive = (HWND)NtUserQueryWindow(hImeWnd, QUERY_WINDOW_ACTIVE);
-        if (!pwndFocus || !hwndActive || pImeWnd->head.pti != pwndFocus->head.pti)
+        if (!pwndFocus || !hwndActive || !KPTR_EQ(KPTR(pImeWnd->head.pti), KPTR(pwndFocus->head.pti)))
         {
             if (IsWindow(hwndOldImc))
             {
@@ -1018,7 +1018,7 @@ ImeWndProc_common(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicod
             NtUserSetWindowFNID(hwnd, FNID_DESTROY);
             return FALSE;
         }
-        pimeui->spwnd = pWnd;
+        KSET(pimeui, spwnd, pWnd);
         SetWindowLongPtrW(hwnd, GWLP_IMEWND_PIMEUI, (LONG_PTR)pimeui);
     }
     else
@@ -1102,7 +1102,7 @@ ImeWndProc_common(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicod
 
         case WM_NCDESTROY:
         case WM_FINALDESTROY:
-            pimeui->spwnd = NULL;
+            KSET(pimeui, spwnd, NULL);
             HeapFree(GetProcessHeap(), 0, pimeui);
             NtUserSetWindowFNID(hwnd, FNID_DESTROY);
             break;

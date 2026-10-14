@@ -299,7 +299,7 @@ GdiDeleteBrushOrPen(
             if (pgO)
             {
                 /// FIXME: we need to mark the object as deleted!
-                pgO->hgdiobj = hobj;
+                KSET(pgO, hgdiobj, hobj);
                 return TRUE;
             }
         }

@@ -1455,7 +1455,7 @@ GdiSelectBrush(
         return hbrOld;
 
     /* Set the new brush and update dirty flags */
-    pdcattr->hbrush = hbr;
+    KSET(pdcattr, hbrush, hbr);
     pdcattr->ulDirty_ |= DC_BRUSH_DIRTY;
     return hbrOld;
 }
@@ -1486,7 +1486,7 @@ GdiSelectPen(
 
     /* Set the new pen and update dirty flags */
     pdcattr->ulDirty_ |= DC_PEN_DIRTY;
-    pdcattr->hpen = hpen;
+    KSET(pdcattr, hpen, hpen);
     return hpenOld;
 }
 
@@ -1515,7 +1515,7 @@ GdiSelectFont(
         return hfontOld;
 
     /* Set the new font and update dirty flags */
-    pdcattr->hlfntNew = hfont;
+    KSET(pdcattr, hlfntNew, hfont);
     pdcattr->ulDirty_ &= ~SLOW_WIDTHS;
     pdcattr->ulDirty_ |= DIRTY_CHARSET;
 
@@ -1527,7 +1527,7 @@ GdiSelectFont(
         pgO = GdiAllocBatchCommand(hdc, GdiBCSelObj);
         if (pgO)
         {
-            pgO->hgdiobj = hfont;
+            KSET(pgO, hgdiobj, hfont);
             return hfontOld;
         }
     }

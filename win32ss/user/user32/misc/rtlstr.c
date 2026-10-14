@@ -56,7 +56,7 @@ RtlInitLargeUnicodeString(IN OUT PLARGE_UNICODE_STRING DestinationString,
         DestinationString->MaximumLength = 0;
     }
 
-    DestinationString->Buffer = (PWSTR)SourceString;
+    KSET(DestinationString, Buffer, (PWSTR)SourceString);
     DestinationString->bAnsi  = FALSE;
 }
 

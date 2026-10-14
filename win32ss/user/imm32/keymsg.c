@@ -606,7 +606,7 @@ ImmRequestMessageAW(
     if (hWnd)
         pWnd = ValidateHwnd(hWnd);
 
-    if (pWnd && pWnd->head.pti == Imm32CurrentPti())
+    if (pWnd && KPTR_EQ(KPTR(pWnd->head.pti), Imm32CurrentPti()))
         ret = Imm32ProcessRequest(hIMC, pWnd, (DWORD)wParam, (LPVOID)lParam, bAnsi);
 
     ImmUnlockIMC(hIMC);

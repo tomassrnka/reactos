@@ -22,8 +22,8 @@ typedef struct _USER_HANDLE_ENTRY
     union
     {
         KFIELD(PVOID, pi);
-        KFIELD(struct _THREADINFO *, pti); /* pointer to Win32ThreadInfo */
-        KFIELD(struct _PROCESSINFO *, ppi); /* pointer to W32ProcessInfo */
+        KPTRFIELD(struct _THREADINFO *, pti); /* pointer to Win32ThreadInfo */
+        KPTRFIELD(struct _PROCESSINFO *, ppi); /* pointer to W32ProcessInfo */
     };
     unsigned char type; /* object type (0 if free) */
     unsigned char flags;
@@ -147,7 +147,7 @@ typedef struct _DESKTOPINFO
     KFIELD(struct _WND *, spwndShell);
     KFIELD(struct _WND *, spwndBkGnd);
 
-    KFIELD(struct _PROCESSINFO *, ppiShellProcess);
+    KPTRFIELD(struct _PROCESSINFO *, ppiShellProcess);
 
     union
     {
@@ -188,13 +188,13 @@ typedef struct _HEAD
 typedef struct _THROBJHEAD
 {
     HEAD;
-    KFIELD(struct _THREADINFO *, pti);
+    KPTRFIELD(struct _THREADINFO *, pti);
 } THROBJHEAD, *PTHROBJHEAD;
 
 typedef struct _THRDESKHEAD
 {
     THROBJHEAD;
-    KFIELD(struct _DESKTOP *, rpdesk);
+    KPTRFIELD(struct _DESKTOP *, rpdesk);
     KFIELD(PVOID, pSelf);
 } THRDESKHEAD, *PTHRDESKHEAD;
 
@@ -219,7 +219,7 @@ typedef struct _PROCDESKHEAD
 {
     HEAD;
     KFIELD(DWORD_PTR, hTaskWow);
-    KFIELD(struct _DESKTOP *, rpdesk);
+    KPTRFIELD(struct _DESKTOP *, rpdesk);
     KFIELD(PVOID, pSelf);
 } PROCDESKHEAD, *PPROCDESKHEAD;
 
@@ -227,7 +227,7 @@ typedef struct _PROCMARKHEAD
 {
     HEAD;
     ULONG hTaskWow;
-    KFIELD(struct _PROCESSINFO *, ppi);
+    KPTRFIELD(struct _PROCESSINFO *, ppi);
 } PROCMARKHEAD, *PPROCMARKHEAD;
 
 #define UserHMGetHandle(obj) ((obj)->head.h)
@@ -246,8 +246,8 @@ typedef struct tagHOOK
     KFIELD(ULONG_PTR, offPfn);
     ULONG flags; /* Some internal flags */
     KFIELD(INT_PTR, ihmod);
-    KFIELD(struct _THREADINFO *, ptiHooked);
-    KFIELD(struct _DESKTOP *, rpdesk);
+    KPTRFIELD(struct _THREADINFO *, ptiHooked);
+    KPTRFIELD(struct _DESKTOP *, rpdesk);
     /* ReactOS */
     KLIST_ENTRY Chain; /* Hook chain entry */
     KFIELD(HOOKPROC, Proc); /* Hook function */
@@ -347,7 +347,7 @@ typedef struct _CLIENTINFO
     KFIELD(LPDWORD, lpdwRegisteredClasses);
     ULONG Win32ClientInfo3[26];
 /* It's just a pointer reference not to be used w the structure in user space. */
-    KFIELD(struct _PROCESSINFO *, ppi);
+    KPTRFIELD(struct _PROCESSINFO *, ppi);
 } CLIENTINFO, *PCLIENTINFO;
 
 /* Make sure it fits into the TEB */
@@ -572,7 +572,7 @@ typedef struct _CLS
     RTL_ATOM atomClassName;
     ATOM atomNVClassName;
     DWORD fnid;
-    KFIELD(struct _DESKTOP *, rpdeskParent);
+    KPTRFIELD(struct _DESKTOP *, rpdeskParent);
     KFIELD(PVOID, pdce);
     DWORD CSF_flags;
     KFIELD(PSTR, lpszClientAnsiMenuName); /* For client use */

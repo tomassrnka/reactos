@@ -10,6 +10,7 @@
  *  - i386 with W32K_WIDE (the WoW64 guest build) must match the amd64 column for every wide structure,
  *    and the i386 column for the others.
  * A wide leaf that grows to 8 bytes keeps its 32-bit member and gains a <name>_K64 twin at the same offset.
+ * A pointer to a thread, process or desktop (KPTRFIELD) has only the <name>_K64 member in the wide build.
  * Regenerate the tables with w32klayout/regen.sh after an intended change.
  *
  * Not pinned: the position of bit-fields (C has no constant for it; the offsets of the members around them,
@@ -48,6 +49,13 @@
 #define W32K_LAYOUT_K64(T, f, o64, z64)
 #endif
 
+/* A KPTRFIELD: the native declaration, and in the wide build the 8-byte <name>_K64 member only */
+#ifdef W32K_WIDE_ACTIVE
+#define W32K_LAYOUT_FIELD_K64ONLY(T, f, o32, o64, z32, z64, twin) W32K_LAYOUT_K64(T, twin, o64, z64)
+#else
+#define W32K_LAYOUT_FIELD_K64ONLY(T, f, o32, o64, z32, z64, twin) W32K_LAYOUT_FIELD(T, f, o32, o64, z32, z64, z32, 1)
+#endif
+
 /* A leaf that only one architecture's declaration has (FLOATOBJ is a two-member structure on i386 only) */
 #if defined(_WIN64)
 #define W32K_LAYOUT_ONLY32(T, f, o, z)
@@ -62,6 +70,12 @@
 #define W32K_LAYOUT_ONLY32(T, f, o, z) \
     _Static_assert(offsetof(T, f) == (o), "offset of " #T "." #f " drifted"); \
     _Static_assert(sizeof(((T *)0)->f) == (z), "size of " #T "." #f " drifted");
+#endif
+
+/* The constants w32kwide.h uses to find the 64-bit TEB of a WoW64 thread */
+#if defined(_WIN64) && defined(KTEB_PTI)
+_Static_assert(offsetof(TEB, Win32ThreadInfo) == KTEB64_WIN32THREADINFO, "Win32ThreadInfo moved in the TEB");
+_Static_assert(ROUND_TO_PAGES(sizeof(TEB)) == KTEB64_BIAS, "the 32-bit TEB no longer follows the 64-bit TEB at this distance");
 #endif
 
 #endif /* _W32KLAYOUT_H */

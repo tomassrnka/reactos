@@ -73,7 +73,7 @@ DeleteRegion(
         pgO = GdiAllocBatchCommand(NULL, GdiBCDelRgn);
         if (pgO)
         {
-            pgO->hgdiobj = hrgn;
+            KSET(pgO, hgdiobj, hrgn);
             return TRUE;
         }
     }

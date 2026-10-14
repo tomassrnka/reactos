@@ -86,6 +86,9 @@ for t in n32:
         (o32, z32), (o64, z64) = l32[k], l64[k]
         zw, twin = z32, None
         if wide:
+            if k not in lw and twins.get(k + "_K64") == (o64, z64):
+                lines.append(f"W32K_LAYOUT_FIELD_K64ONLY({t}, {k}, {o32}, {o64}, {z32}, {z64}, {k}_K64)")
+                continue
             if k not in lw:
                 problems.append(f"{t}.{k}: no wide leaf")
                 continue

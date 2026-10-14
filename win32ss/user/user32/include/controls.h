@@ -61,13 +61,13 @@
 /* combo state struct */
 typedef struct
 {
-   HWND           self;
-   HWND           owner;
+   KFIELD(HWND,   self);
+   KFIELD(HWND,   owner);
    UINT           dwStyle;
-   HWND           hWndEdit;
-   HWND           hWndLBox;
+   KFIELD(HWND,   hWndEdit);
+   KFIELD(HWND,   hWndLBox);
    UINT           wState;
-   HFONT          hFont;
+   KFIELD(HFONT,  hFont);
    RECT           textRect;
    RECT           buttonRect;
    RECT           droppedRect;
