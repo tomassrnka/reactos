@@ -4006,10 +4006,11 @@ Return Value:
 
 static
 NTSTATUS
-FatExtendWriteThrough (
-    IN PIRP_CONTEXT IrpContext,
+FatExtendWriteSector (
     IN PVCB Vcb,
     IN LBO Lbo,
+    IN PVOID Data,
+    IN PVOID Copy,
     IN ULONG Length
     )
 
@@ -4017,63 +4018,39 @@ FatExtendWriteThrough (
 
 Routine Description:
 
-    Writes Length bytes of the virtual volume file at Lbo (pinned and changed
-    by the caller) straight to the device, write-through.
+    Writes Length bytes (Data, pinned and changed by the caller, who keeps the
+    pin until this returns) straight to the device at Lbo, write-through,
+    through Copy, a nonpaged buffer of Length bytes.
 
 --*/
 
 {
-    PBCB Bcb = NULL;
-    PVOID Data;
-    PVOID Copy;
     LARGE_INTEGER Offset;
     IO_STATUS_BLOCK Iosb;
     KEVENT Event;
     PIRP Irp;
     NTSTATUS Status;
 
-    UNREFERENCED_PARAMETER( IrpContext );
-
     Offset.QuadPart = Lbo;
-    Copy = FsRtlAllocatePoolWithTag( NonPagedPoolNx, Length, TAG_IO_BUFFER );
+    RtlCopyMemory( Copy, Data, Length );
 
-    _SEH2_TRY {
+    KeInitializeEvent( &Event, NotificationEvent, FALSE );
+    Irp = IoBuildSynchronousFsdRequest( IRP_MJ_WRITE, Vcb->TargetDeviceObject, Copy, Length, &Offset, &Event, &Iosb );
 
-        if (!CcPinRead( Vcb->VirtualVolumeFile, &Offset, Length, PIN_WAIT, &Bcb, &Data )) {
+    if (Irp == NULL) {
 
-            try_return( Status = STATUS_UNSUCCESSFUL );
-        }
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-        RtlCopyMemory( Copy, Data, Length );
+    SetFlag( IoGetNextIrpStackLocation( Irp )->Flags, SL_WRITE_THROUGH | SL_OVERRIDE_VERIFY_VOLUME );
 
-        KeInitializeEvent( &Event, NotificationEvent, FALSE );
-        Irp = IoBuildSynchronousFsdRequest( IRP_MJ_WRITE, Vcb->TargetDeviceObject, Copy, Length, &Offset, &Event, &Iosb );
+    Status = IoCallDriver( Vcb->TargetDeviceObject, Irp );
 
-        if (Irp == NULL) {
+    if (Status == STATUS_PENDING) {
 
-            try_return( Status = STATUS_INSUFFICIENT_RESOURCES );
-        }
-
-        SetFlag( IoGetNextIrpStackLocation( Irp )->Flags, SL_WRITE_THROUGH | SL_OVERRIDE_VERIFY_VOLUME );
-
-        Status = IoCallDriver( Vcb->TargetDeviceObject, Irp );
-
-        if (Status == STATUS_PENDING) {
-
-            KeWaitForSingleObject( &Event, Executive, KernelMode, FALSE, NULL );
-            Status = Iosb.Status;
-        }
-
-    try_exit: NOTHING;
-    } _SEH2_FINALLY {
-
-        if (Bcb != NULL) {
-
-            CcUnpinData( Bcb );
-        }
-
-        ExFreePool( Copy );
-    } _SEH2_END;
+        KeWaitForSingleObject( &Event, Executive, KernelMode, FALSE, NULL );
+        Status = Iosb.Status;
+    }
 
     return Status;
 }
@@ -4128,6 +4105,9 @@ Routine Description:
     BOOLEAN VcbAcquired = FALSE;
     PBCB Bcb = NULL;
     PUCHAR Sector;
+    PVOID Copy = NULL;
+    UCHAR Saved[6];
+    BOOLEAN BackupWritten = FALSE;
     LARGE_INTEGER Offset;
 
     PAGED_CODE();
@@ -4311,16 +4291,19 @@ Routine Description:
         }
 
         //
-        //  The boot sector, and on FAT32 its backup copy.
+        //  The boot sector, and on FAT32 its backup copy first.  Each is written from its pinned
+        //  cache page, still pinned; a failed write puts the old size back in the page.
         //
+
+        Copy = FsRtlAllocatePoolWithTag( NonPagedPoolNx, Vcb->Bpb.BytesPerSector, TAG_IO_BUFFER );
 
         for (Index = 0; Index < 2; Index++) {
 
-            ULONG SectorNumber = Index == 0 ? 0 : Vcb->Bpb.BackupBootSector;
+            ULONG SectorNumber = Index == 1 ? 0 : Vcb->Bpb.BackupBootSector;
 
-            if (Index == 1 && (!FatIsFat32( Vcb ) || SectorNumber == 0 || SectorNumber >= Vcb->Bpb.ReservedSectors)) {
+            if (Index == 0 && (!FatIsFat32( Vcb ) || SectorNumber == 0 || SectorNumber >= Vcb->Bpb.ReservedSectors)) {
 
-                break;
+                continue;
             }
 
             Offset.QuadPart = (LONGLONG)SectorNumber * Vcb->Bpb.BytesPerSector;
@@ -4335,25 +4318,56 @@ Routine Description:
                 CcUnpinData( Bcb );
                 Bcb = NULL;
 
-                if (Index == 0) {
+                if (Index == 1) {
 
                     try_return( Status = STATUS_FILE_CORRUPT_ERROR );
                 }
 
-                break;
+                continue;
             }
 
+            RtlCopyMemory( &Saved[0], ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.Sectors, 2 );
+            RtlCopyMemory( &Saved[2], ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.LargeSectors, 4 );
             CopyUchar2( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.Sectors, &NewBpb.Sectors );
             CopyUchar4( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.LargeSectors, &NewBpb.LargeSectors );
+
+            Status = FatExtendWriteSector( Vcb, Offset.QuadPart, Sector, Copy, Vcb->Bpb.BytesPerSector );
+
+            if (!NT_SUCCESS( Status )) {
+
+                RtlCopyMemory( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.Sectors, &Saved[0], 2 );
+                RtlCopyMemory( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.LargeSectors, &Saved[2], 4 );
+            }
 
             CcUnpinData( Bcb );
             Bcb = NULL;
 
-            Status = FatExtendWriteThrough( IrpContext, Vcb, Offset.QuadPart, Vcb->Bpb.BytesPerSector );
-
             if (!NT_SUCCESS( Status )) {
 
+                //
+                //  The boot sector keeps the old size: so does its backup, best effort.
+                //
+
+                if (Index == 1 && BackupWritten) {
+
+                    Offset.QuadPart = (LONGLONG)Vcb->Bpb.BackupBootSector * Vcb->Bpb.BytesPerSector;
+
+                    if (CcPinRead( Vcb->VirtualVolumeFile, &Offset, Vcb->Bpb.BytesPerSector, PIN_WAIT, &Bcb, (PVOID *)&Sector )) {
+
+                        RtlCopyMemory( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.Sectors, &Saved[0], 2 );
+                        RtlCopyMemory( ((PPACKED_BOOT_SECTOR)Sector)->PackedBpb.LargeSectors, &Saved[2], 4 );
+                        (VOID)FatExtendWriteSector( Vcb, Offset.QuadPart, Sector, Copy, Vcb->Bpb.BytesPerSector );
+                        CcUnpinData( Bcb );
+                        Bcb = NULL;
+                    }
+                }
+
                 try_leave( NOTHING );
+            }
+
+            if (Index == 0) {
+
+                BackupWritten = TRUE;
             }
         }
 
@@ -4409,15 +4423,11 @@ Routine Description:
                     FsInfo->FsInfoSignature == FSINFO_SIGNATURE) {
 
                     FsInfo->FreeClusterCount = Vcb->AllocationSupport.NumberOfFreeClusters;
-                    CcUnpinData( Bcb );
-                    Bcb = NULL;
-                    (VOID)FatExtendWriteThrough( IrpContext, Vcb, Offset.QuadPart, Vcb->Bpb.BytesPerSector );
-
-                } else {
-
-                    CcUnpinData( Bcb );
-                    Bcb = NULL;
+                    (VOID)FatExtendWriteSector( Vcb, Offset.QuadPart, FsInfo, Copy, Vcb->Bpb.BytesPerSector );
                 }
+
+                CcUnpinData( Bcb );
+                Bcb = NULL;
             }
         }
 
@@ -4430,6 +4440,11 @@ Routine Description:
         if (Bcb != NULL) {
 
             CcUnpinData( Bcb );
+        }
+
+        if (Copy != NULL) {
+
+            ExFreePool( Copy );
         }
 
         if (VcbAcquired) {
