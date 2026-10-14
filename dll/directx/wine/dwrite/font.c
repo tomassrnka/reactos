@@ -166,11 +166,13 @@ void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphb
     params.simulations = bitmap->simulations;
     params.glyph = bitmap->glyph;
     params.emsize = bitmap->emsize;
+    params.dx = bitmap->dx;
+    params.dy = bitmap->dy;
     matrix_2x2_from_dwrite_matrix(&params.m, bitmap->m ? bitmap->m : &identity);
 
     EnterCriticalSection(&fontface->cs);
-    /* For now bypass cache for transformed cases. */
-    if (bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m)))
+    /* For now bypass cache for transformed and subpixel-shifted cases. */
+    if ((bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m))) || bitmap->dx != 0.0f || bitmap->dy != 0.0f)
     {
         params.bbox = &bitmap->bbox;
         UNIX_CALL(get_glyph_bbox, &params);
@@ -196,14 +198,15 @@ static unsigned int get_glyph_bitmap_pitch(DWRITE_RENDERING_MODE1 rendering_mode
 static HRESULT dwrite_fontface_get_glyph_bitmap(struct dwrite_fontface *fontface, DWRITE_RENDERING_MODE1 rendering_mode,
         unsigned int *is_1bpp, struct dwrite_glyphbitmap *bitmap)
 {
-    struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph, .mode = DWRITE_MEASURING_MODE_NATURAL };
+    struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph,
+            .mode = bitmap->lcd ? 0x100 : DWRITE_MEASURING_MODE_NATURAL };
     struct get_glyph_bitmap_params params;
     const RECT *bbox = &bitmap->bbox;
     unsigned int bitmap_size, _1bpp;
     struct cache_entry *entry;
     HRESULT hr = S_OK;
 
-    bitmap_size = get_glyph_bitmap_pitch(rendering_mode, bbox->right - bbox->left) *
+    bitmap_size = get_glyph_bitmap_pitch(rendering_mode, (bbox->right - bbox->left) * (bitmap->lcd ? 3 : 1)) *
             (bbox->bottom - bbox->top);
 
     params.object = fontface->get_font_object(fontface);
@@ -215,11 +218,14 @@ static HRESULT dwrite_fontface_get_glyph_bitmap(struct dwrite_fontface *fontface
     params.pitch = bitmap->pitch;
     params.bitmap = bitmap->buf;
     params.is_1bpp = is_1bpp;
+    params.dx = bitmap->dx;
+    params.dy = bitmap->dy;
+    params.lcd = bitmap->lcd;
     matrix_2x2_from_dwrite_matrix(&params.m, bitmap->m ? bitmap->m : &identity);
 
     EnterCriticalSection(&fontface->cs);
-    /* For now bypass cache for transformed cases. */
-    if (bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m)))
+    /* For now bypass cache for transformed and subpixel-shifted cases. */
+    if ((bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m))) || bitmap->dx != 0.0f || bitmap->dy != 0.0f)
     {
         UNIX_CALL(get_glyph_bitmap, &params);
     }
@@ -6080,6 +6086,21 @@ static ULONG WINAPI glyphrunanalysis_Release(IDWriteGlyphRunAnalysis *iface)
     return refcount;
 }
 
+static BOOL glyphrunanalysis_is_lcd(const struct dwrite_glyphrunanalysis *analysis)
+{
+    return analysis->texture_type == DWRITE_TEXTURE_CLEARTYPE_3x1 &&
+            analysis->rendering_mode != DWRITE_RENDERING_MODE1_ALIASED;
+}
+
+/* Whole pixels go to the bitmap offset; what is left over shifts the outline before it is rendered. */
+static void glyphrunanalysis_split_origin(const D2D_POINT_2F *origin, int *x, int *y, struct dwrite_glyphbitmap *bitmap)
+{
+    *x = (int)floorf(origin->x);
+    *y = (int)floorf(origin->y);
+    bitmap->dx = origin->x - *x;
+    bitmap->dy = origin->y - *y;
+}
+
 static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *analysis, RECT *bounds)
 {
     struct dwrite_glyphbitmap glyph_bitmap;
@@ -6099,19 +6120,26 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
     if (analysis->flags & RUNANALYSIS_USE_TRANSFORM)
         glyph_bitmap.m = &analysis->m;
 
+    glyph_bitmap.lcd = glyphrunanalysis_is_lcd(analysis);
+
     for (i = 0; i < analysis->run.glyphCount; i++) {
         RECT *bbox = &glyph_bitmap.bbox;
         UINT32 bitmap_size;
+        int ox, oy;
 
+        glyphrunanalysis_split_origin(&analysis->origins[i], &ox, &oy, &glyph_bitmap);
         glyph_bitmap.glyph = analysis->run.glyphIndices[i];
         dwrite_fontface_get_glyph_bbox(analysis->run.fontFace, &glyph_bitmap);
+        /* the colour filter reaches one pixel past the outline on each side */
+        if (glyph_bitmap.lcd && !IsRectEmpty(bbox))
+            InflateRect(bbox, 1, 0);
 
-        bitmap_size = get_glyph_bitmap_pitch(analysis->rendering_mode, bbox->right - bbox->left) *
-            (bbox->bottom - bbox->top);
+        bitmap_size = get_glyph_bitmap_pitch(analysis->rendering_mode,
+                (bbox->right - bbox->left) * (glyph_bitmap.lcd ? 3 : 1)) * (bbox->bottom - bbox->top);
         if (bitmap_size > analysis->max_glyph_bitmap_size)
             analysis->max_glyph_bitmap_size = bitmap_size;
 
-        OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
+        OffsetRect(bbox, ox, oy);
         UnionRect(&analysis->bounds, &analysis->bounds, bbox);
     }
 
@@ -6181,23 +6209,28 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
         return E_OUTOFMEMORY;
 
     bbox = &glyph_bitmap.bbox;
+    glyph_bitmap.lcd = glyphrunanalysis_is_lcd(analysis);
 
     for (i = 0; i < analysis->run.glyphCount; ++i)
     {
         BYTE *src = glyph_bitmap.buf, *dst;
-        int x, y, width, height;
+        int x, y, width, height, ox, oy;
         unsigned int is_1bpp;
 
+        glyphrunanalysis_split_origin(&analysis->origins[i], &ox, &oy, &glyph_bitmap);
         glyph_bitmap.glyph = analysis->run.glyphIndices[i];
         dwrite_fontface_get_glyph_bbox(analysis->run.fontFace, &glyph_bitmap);
 
         if (IsRectEmpty(bbox))
             continue;
 
+        if (glyph_bitmap.lcd)
+            InflateRect(bbox, 1, 0);
+
         width = bbox->right - bbox->left;
         height = bbox->bottom - bbox->top;
 
-        glyph_bitmap.pitch = get_glyph_bitmap_pitch(analysis->rendering_mode, width);
+        glyph_bitmap.pitch = get_glyph_bitmap_pitch(analysis->rendering_mode, width * (glyph_bitmap.lcd ? 3 : 1));
         memset(src, 0, height * glyph_bitmap.pitch);
 
         if (FAILED(dwrite_fontface_get_glyph_bitmap(fontface, analysis->rendering_mode, &is_1bpp, &glyph_bitmap)))
@@ -6206,7 +6239,7 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
             continue;
         }
 
-        OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
+        OffsetRect(bbox, ox, oy);
 
         /* blit to analysis bitmap */
         dst = get_pixel_ptr(analysis->bitmap, analysis->texture_type, bbox, &analysis->bounds);
@@ -6230,6 +6263,14 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
                     src += glyph_bitmap.pitch;
                     dst += analysis->bounds.right - analysis->bounds.left;
                 }
+            }
+        }
+        else if (glyph_bitmap.lcd) {
+            for (y = 0; y < height; y++) {
+                for (x = 0; x < width * 3; x++)
+                    dst[x] |= src[x];
+                src += glyph_bitmap.pitch;
+                dst += (analysis->bounds.right - analysis->bounds.left) * 3;
             }
         }
         else {

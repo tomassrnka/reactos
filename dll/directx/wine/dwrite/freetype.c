@@ -26,6 +26,7 @@
 
 #include <sys/types.h>
 #include <dlfcn.h>
+#include <math.h>
 
 #ifdef HAVE_FT2BUILD_H
 #include <ft2build.h>
@@ -514,9 +515,14 @@ static inline void ft_matrix_from_matrix_2x2(const MATRIX_2X2 *m, FT_Matrix *ft_
     ft_matrix->yy =  m->m22 * 0x10000;
 }
 
-static BOOL get_glyph_transform(unsigned int simulations, const MATRIX_2X2 *m, FT_Matrix *ret)
+static BOOL get_glyph_transform(unsigned int simulations, const MATRIX_2X2 *m, float dx, float dy,
+        FT_Matrix *ret, FT_Vector *delta)
 {
     FT_Matrix ftm;
+
+    /* Sub-pixel pen position; the Y axis points the other way in FreeType. */
+    delta->x = lroundf(dx * 64.0f);
+    delta->y = -lroundf(dy * 64.0f);
 
     ret->xx = 1 << 16;
     ret->xy = 0;
@@ -525,7 +531,7 @@ static BOOL get_glyph_transform(unsigned int simulations, const MATRIX_2X2 *m, F
 
     /* Some fonts provide mostly bitmaps and very few outlines, for example for .notdef.
        Disable transform if that's the case. */
-    if (!memcmp(m, &identity_2x2, sizeof(*m)) && !simulations)
+    if (!memcmp(m, &identity_2x2, sizeof(*m)) && !simulations && !delta->x && !delta->y)
         return FALSE;
 
     if (simulations & DWRITE_FONT_SIMULATIONS_OBLIQUE)
@@ -551,6 +557,7 @@ static NTSTATUS get_glyph_bbox(void *args)
     FT_BBox bbox = { 0 };
     BOOL needs_transform;
     FT_Matrix m;
+    FT_Vector delta;
     FT_Size size;
 
     SetRectEmpty(params->bbox);
@@ -558,7 +565,8 @@ static NTSTATUS get_glyph_bbox(void *args)
     if (!(size = freetype_set_face_size(face, params->emsize)))
         return STATUS_UNSUCCESSFUL;
 
-    needs_transform = FT_IS_SCALABLE(face) && get_glyph_transform(params->simulations, &params->m, &m);
+    needs_transform = FT_IS_SCALABLE(face) &&
+            get_glyph_transform(params->simulations, &params->m, params->dx, params->dy, &m, &delta);
 
     if (pFT_Load_Glyph(face, params->glyph, needs_transform ? FT_LOAD_NO_BITMAP : 0))
     {
@@ -574,7 +582,7 @@ static NTSTATUS get_glyph_bbox(void *args)
             embolden_glyph(glyph, params->emsize);
 
         /* Includes oblique and user transform. */
-        pFT_Glyph_Transform(glyph, &m, NULL);
+        pFT_Glyph_Transform(glyph, &m, &delta);
     }
 
     pFT_Glyph_Get_CBox(glyph, FT_GLYPH_BBOX_PIXELS, &bbox);
@@ -684,6 +692,88 @@ static NTSTATUS freetype_get_aa_glyph_bitmap(struct get_glyph_bitmap_params *par
     return STATUS_SUCCESS;
 }
 
+/* Subpixel rendering: the outline is drawn three times as wide, then smoothed with FreeType's default five-tap
+ * filter so that a pixel's three bytes hold the coverage seen by its red, green and blue stripes. */
+static NTSTATUS freetype_get_lcd_glyph_bitmap(struct get_glyph_bitmap_params *params, FT_Glyph glyph)
+{
+    static const int fir[5] = { 0x08, 0x4d, 0x56, 0x4d, 0x08 };
+    const RECT *bbox = &params->bbox;
+    int width = bbox->right - bbox->left;
+    int height = bbox->bottom - bbox->top;
+    int sub_width = width * 3, x, y, k;
+
+    *params->is_1bpp = 0;
+
+    if (glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
+        FT_OutlineGlyph outline = (FT_OutlineGlyph)glyph;
+        const FT_Outline *src = &outline->outline;
+        static const FT_Matrix widen = { 3 << 16, 0, 0, 1 << 16 };
+        FT_Bitmap ft_bitmap;
+        FT_Outline copy;
+        BYTE *tmp;
+
+        if (!(tmp = calloc(height, sub_width)))
+            return STATUS_NO_MEMORY;
+
+        ft_bitmap.width = sub_width;
+        ft_bitmap.rows = height;
+        ft_bitmap.pitch = sub_width;
+        ft_bitmap.pixel_mode = FT_PIXEL_MODE_GRAY;
+        ft_bitmap.buffer = tmp;
+
+        if (pFT_Outline_New(library, src->n_points, src->n_contours, &copy) == 0) {
+            pFT_Outline_Copy(src, &copy);
+            pFT_Outline_Translate(&copy, -bbox->left << 6, bbox->bottom << 6);
+            pFT_Outline_Transform(&copy, &widen);
+            pFT_Outline_Get_Bitmap(library, &copy, &ft_bitmap);
+            pFT_Outline_Done(library, &copy);
+        }
+
+        for (y = 0; y < height; y++) {
+            const BYTE *row = tmp + y * sub_width;
+            BYTE *dst = params->bitmap + y * params->pitch;
+
+            for (x = 0; x < sub_width; x++) {
+                int sum = 0;
+
+                for (k = -2; k <= 2; k++)
+                    if (x + k >= 0 && x + k < sub_width)
+                        sum += fir[k + 2] * row[x + k];
+                sum >>= 8;
+                dst[x] = sum > 255 ? 255 : sum;
+            }
+        }
+        free(tmp);
+    }
+    else if (glyph->format == FT_GLYPH_FORMAT_BITMAP) {
+        const FT_Bitmap *ft_bitmap = &((FT_BitmapGlyph)glyph)->bitmap;
+        int h = min(height, (int)ft_bitmap->rows);
+
+        /* A strike has no subpixel detail: every stripe of a covered pixel is fully covered. */
+        for (y = 0; y < h; y++) {
+            const BYTE *src = ft_bitmap->buffer + y * ft_bitmap->pitch;
+            BYTE *dst = params->bitmap + y * params->pitch;
+
+            for (x = 0; x < (int)ft_bitmap->width && x + 1 < width; x++) {
+                BYTE a;
+
+                if (ft_bitmap->pixel_mode == FT_PIXEL_MODE_MONO)
+                    a = (src[x / 8] & (0x80 >> (x % 8))) ? 255 : 0;
+                else
+                    a = src[x];
+                dst[(x + 1) * 3] = dst[(x + 1) * 3 + 1] = dst[(x + 1) * 3 + 2] = a;
+            }
+        }
+    }
+    else
+    {
+        FIXME("format %x not handled\n", glyph->format);
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS get_glyph_bitmap(void *args)
 {
     struct get_glyph_bitmap_params *params = args;
@@ -693,13 +783,15 @@ static NTSTATUS get_glyph_bitmap(void *args)
     FT_Glyph glyph;
     FT_Size size;
     FT_Matrix m;
+    FT_Vector delta;
 
     *params->is_1bpp = 0;
 
     if (!(size = freetype_set_face_size(face, params->emsize)))
         return STATUS_UNSUCCESSFUL;
 
-    needs_transform = FT_IS_SCALABLE(face) && get_glyph_transform(params->simulations, &params->m, &m);
+    needs_transform = FT_IS_SCALABLE(face) &&
+            get_glyph_transform(params->simulations, &params->m, params->dx, params->dy, &m, &delta);
 
     if (!pFT_Load_Glyph(face, params->glyph, needs_transform ? FT_LOAD_NO_BITMAP : 0))
     {
@@ -710,12 +802,14 @@ static NTSTATUS get_glyph_bitmap(void *args)
             if (params->simulations & DWRITE_FONT_SIMULATIONS_BOLD)
                 embolden_glyph(glyph, params->emsize);
 
-            /* Includes oblique and user transform. */
-            pFT_Glyph_Transform(glyph, &m, NULL);
+            /* Includes oblique, user transform and sub-pixel offset. */
+            pFT_Glyph_Transform(glyph, &m, &delta);
         }
 
         if (params->mode == DWRITE_RENDERING_MODE1_ALIASED)
             ret = freetype_get_aliased_glyph_bitmap(params, glyph);
+        else if (params->lcd)
+            ret = freetype_get_lcd_glyph_bitmap(params, glyph);
         else
             ret = freetype_get_aa_glyph_bitmap(params, glyph);
 
@@ -970,6 +1064,7 @@ static NTSTATUS wow64_get_glyph_bbox(void *args)
         ULONG glyph;
         float emsize;
         MATRIX_2X2 m;
+        float dx, dy;
         PTR32 bbox;
     } const *params32 = args;
     struct get_glyph_bbox_params params =
@@ -979,6 +1074,8 @@ static NTSTATUS wow64_get_glyph_bbox(void *args)
         params32->glyph,
         params32->emsize,
         params32->m,
+        params32->dx,
+        params32->dy,
         ULongToPtr(params32->bbox),
     };
 
@@ -995,10 +1092,12 @@ static NTSTATUS wow64_get_glyph_bitmap(void *args)
         ULONG mode;
         float emsize;
         MATRIX_2X2 m;
+        float dx, dy;
         RECT bbox;
         int pitch;
         PTR32 bitmap;
         PTR32 is_1bpp;
+        ULONG lcd;
     } const *params32 = args;
     struct get_glyph_bitmap_params params =
     {
@@ -1008,10 +1107,13 @@ static NTSTATUS wow64_get_glyph_bitmap(void *args)
         params32->mode,
         params32->emsize,
         params32->m,
+        params32->dx,
+        params32->dy,
         params32->bbox,
         params32->pitch,
         ULongToPtr(params32->bitmap),
         ULongToPtr(params32->is_1bpp),
+        params32->lcd,
     };
 
     return get_glyph_bitmap(&params);

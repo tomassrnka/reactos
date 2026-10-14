@@ -579,6 +579,8 @@ struct dwrite_glyphbitmap
     RECT bbox;
     BYTE *buf;
     DWRITE_MATRIX *m;
+    float dx, dy; /* fractional part of the pen position, in pixels */
+    BOOL lcd;     /* three coverage bytes per pixel, one per subpixel */
 };
 
 enum dwrite_outline_tags

@@ -68,6 +68,7 @@ struct get_glyph_bbox_params
     unsigned int glyph;
     float emsize;
     MATRIX_2X2 m;
+    float dx, dy;
     RECT *bbox;
 };
 
@@ -79,10 +80,12 @@ struct get_glyph_bitmap_params
     unsigned int mode;
     float emsize;
     MATRIX_2X2 m;
+    float dx, dy;
     RECT bbox;
     int pitch;
     BYTE *bitmap;
     unsigned int *is_1bpp;
+    unsigned int lcd;
 };
 
 struct get_design_glyph_metrics_params
