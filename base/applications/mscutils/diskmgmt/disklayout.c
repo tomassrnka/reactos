@@ -709,6 +709,47 @@ DlSetMbrType(PDL_LAYOUT Layout, ULONGLONG Offset, UCHAR Type)
     return DL_OK;
 }
 
+/* The most bytes the partition can grow by: the size Disk Management offers for the free space right behind it. */
+ULONGLONG
+DlMaxGrow(const DL_LAYOUT *Layout, ULONGLONG Offset)
+{
+    DL_FREE Free[DL_MAX_ENTRIES];
+    const DL_ENTRY *Entry = NULL;
+    ULONG i, Count;
+
+    for (i = 0; i < Layout->Count; i++)
+        if (Layout->Entry[i].Offset == Offset)
+            Entry = &Layout->Entry[i];
+    if (Entry == NULL || Entry->Container)
+        return 0;
+    Count = DlFindFree(Layout, Free, DL_MAX_ENTRIES);
+    if (Count > DL_MAX_ENTRIES)
+        Count = DL_MAX_ENTRIES;
+    for (i = 0; i < Count; i++)
+    {
+        if (Free[i].InExtended == Entry->Logical && Free[i].Offset == Entry->Offset + Entry->Length)
+            return Free[i].WizardMax;
+    }
+    return 0;
+}
+
+DL_STATUS
+DlResize(PDL_LAYOUT Layout, ULONGLONG Offset, ULONGLONG NewLength)
+{
+    PDL_ENTRY Entry = DlFindEntry(Layout, Offset);
+
+    if (Entry == NULL)
+        return DL_E_NOT_FOUND;
+    /* a partition made by an old tool does not end on a mebibyte, so a sector is the unit here */
+    if (Entry->Container || NewLength == 0 || (NewLength % (Layout->SectorSize ? Layout->SectorSize : 512)) != 0 ||
+        Entry->Offset > ~0ULL - NewLength)
+        return DL_E_BAD_ARGUMENT;
+    if (NewLength > Entry->Length && NewLength - Entry->Length > DlMaxGrow(Layout, Offset))
+        return DL_E_NO_SPACE;
+    Entry->Length = NewLength;
+    return DL_OK;
+}
+
 /* The CHS limit of the old BIOS: 1024 cylinders of 255 heads and 63 sectors of 512 bytes. */
 #define DL_CHS_LIMIT ((ULONGLONG)1024 * 255 * 63 * 512)
 
