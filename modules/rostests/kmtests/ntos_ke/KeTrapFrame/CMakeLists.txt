@@ -1,0 +1,7 @@
+include_directories(../../include)
+add_library(ketrapframe_drv MODULE ../../kmtest_drv/kmtest_standalone.c KeTrapFrame_drv.c)
+set_module_type(ketrapframe_drv kernelmodedriver)
+target_link_libraries(ketrapframe_drv kmtest_printf ${PSEH_LIB})
+add_importlibs(ketrapframe_drv ntoskrnl hal)
+target_compile_definitions(ketrapframe_drv PRIVATE KMT_STANDALONE_DRIVER NTDDI_VERSION=NTDDI_WS03SP1)
+add_rostests_file(TARGET ketrapframe_drv)
