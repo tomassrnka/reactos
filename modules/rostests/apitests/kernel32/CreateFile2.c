@@ -500,6 +500,29 @@ static void TestNamesAndDirectories(void)
     RemoveDirectoryW(Dir);
     ok(CreateDirectoryW(Dir, NULL), "CreateDirectoryW failed with %lu\n", GetLastError());
 
+    SetLastError(0xdeadbeef);
+    hFile = pCreateFile2(Dir, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, NULL);
+    ok(hFile == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED,
+       "A directory without backup semantics: %p, error %lu\n", hFile, GetLastError());
+    if (hFile != INVALID_HANDLE_VALUE)
+        CloseHandle(hFile);
+
+    /* CreateFileW reports the same, and a trailing backslash makes it a missing path */
+    SetLastError(0xdeadbeef);
+    hFile = CreateFileW(Dir, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(hFile == INVALID_HANDLE_VALUE && GetLastError() == ERROR_ACCESS_DENIED,
+       "CreateFileW on a directory: %p, error %lu\n", hFile, GetLastError());
+    if (hFile != INVALID_HANDLE_VALUE)
+        CloseHandle(hFile);
+    StringCchCatW(Dir, _countof(Dir), L"\\");
+    SetLastError(0xdeadbeef);
+    hFile = CreateFileW(Dir, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(hFile == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND,
+       "CreateFileW on a directory with a trailing backslash: %p, error %lu\n", hFile, GetLastError());
+    if (hFile != INVALID_HANDLE_VALUE)
+        CloseHandle(hFile);
+    Dir[lstrlenW(Dir) - 1] = UNICODE_NULL;
+
     ZeroMemory(&Params, sizeof(Params));
     Params.dwSize = sizeof(Params);
     Params.dwFileFlags = FILE_FLAG_BACKUP_SEMANTICS;
