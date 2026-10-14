@@ -209,6 +209,7 @@
 @ stdcall ElfReportEventW(long long long long ptr long long ptr ptr long ptr ptr)
 @ stdcall -version=0x502 EnableTrace(long long long ptr double) ntdll.EtwEnableTrace
 @ stdcall -version=0x600+ EnableTrace(long long long ptr double) EtwEnableTrace
+@ stdcall -version=0x601+ EnableTraceEx2(int64 ptr long long int64 int64 long ptr)
 @ stdcall EncryptFileA(str)
 @ stdcall EncryptFileW(wstr)
 @ stub EncryptedFileKeyInfo
@@ -237,7 +238,7 @@
 @ stdcall FindFirstFreeAce(ptr ptr)
 @ stdcall -version=0x502 FlushTraceA(double str ptr) ntdll.EtwFlushTraceA
 @ stdcall -version=0x600+ EventActivityIdControl(long ptr)
-@ stdcall -version=0x602+ EventSetInformation(int64 long ptr long)
+@ stdcall -version=0x601+ EventSetInformation(int64 long ptr long)
 @ stdcall -version=0x601+ EventWriteEx(int64 ptr int64 long ptr ptr long ptr)
 @ stdcall -version=0x600+ FlushTraceA(double str ptr) EtwFlushTraceA
 @ stdcall -version=0x502 FlushTraceW(double wstr ptr) ntdll.EtwFlushTraceW

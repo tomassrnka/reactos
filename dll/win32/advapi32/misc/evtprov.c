@@ -118,6 +118,20 @@ EventWriteString(
     return ERROR_SUCCESS;
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN7)
+ULONG
+NTAPI
+EtwEventSetInformation(
+    _In_ REGHANDLE RegHandle,
+    _In_ ULONG InformationClass,
+    _In_reads_bytes_opt_(InformationLength) PVOID EventInformation,
+    _In_ ULONG InformationLength);
+
+/*
+ * Windows 10 leaves the last error alone for an unsupported class and for a length that does not fit
+ * (measured), and sets it for the failures that come after the checks of the arguments: an unusable handle,
+ * a bad buffer, traits that cannot be set or are corrupt, and a descriptor type of class 3 that is not valid.
+ */
 ULONG
 WINAPI
 EventSetInformation(
@@ -126,9 +140,18 @@ EventSetInformation(
     _In_reads_bytes_opt_(InformationLength) PVOID EventInformation,
     _In_ ULONG InformationLength)
 {
-    TRACE("(%I64x, %lu, %p, %lu) stub\n", RegHandle, InformationClass, EventInformation, InformationLength);
-    return ERROR_SUCCESS;
+    ULONG Status;
+
+    Status = EtwEventSetInformation(RegHandle, InformationClass, EventInformation, InformationLength);
+    if (Status == ERROR_INVALID_HANDLE || Status == ERROR_GEN_FAILURE || Status == ERROR_FILE_CORRUPT ||
+        Status == ERROR_NOACCESS ||
+        (Status == ERROR_INVALID_PARAMETER && InformationClass == 3 && InformationLength == 1 && EventInformation))
+    {
+        SetLastError(Status);
+    }
+    return Status;
 }
+#endif
 
 /*
  * The activity id of a thread is kept in its TEB, where Windows Vista and later keep it (measured on
