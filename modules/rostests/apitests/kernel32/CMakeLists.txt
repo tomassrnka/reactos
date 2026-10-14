@@ -74,6 +74,7 @@ list(APPEND SOURCE
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
     SystemFirmware.c
+    Toolhelp32.c
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c
