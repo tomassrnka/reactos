@@ -27,6 +27,7 @@ list(APPEND SOURCE
     FLS.c
     ForcedRelocation.c
     FormatMessage.c
+    GetBinaryType.c
     GetComputerNameEx.c
     GetCPInfo.c
     GetCurrentDirectory.c

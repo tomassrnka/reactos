@@ -29,6 +29,7 @@ extern void func_FindFiles(void);
 extern void func_FLS(void);
 extern void func_ForcedRelocation(void);
 extern void func_FormatMessage(void);
+extern void func_GetBinaryType(void);
 extern void func_GetComputerNameEx(void);
 extern void func_GetCPInfo(void);
 extern void func_GetCurrentDirectory(void);
@@ -120,6 +121,7 @@ const struct test winetest_testlist[] =
     { "FLS",                         func_FLS },
     { "ForcedRelocation",            func_ForcedRelocation },
     { "FormatMessage",               func_FormatMessage },
+    { "GetBinaryType",               func_GetBinaryType },
     { "GetComputerNameEx",           func_GetComputerNameEx },
     { "GetCPInfo",                   func_GetCPInfo },
     { "GetCurrentDirectory",         func_GetCurrentDirectory },
