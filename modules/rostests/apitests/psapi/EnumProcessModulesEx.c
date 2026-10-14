@@ -54,7 +54,10 @@ static void CheckList(const char *Name, PFN_EnumProcessModulesEx Function, DWORD
 static void TestFunction(const char *Name, PFN_EnumProcessModulesEx Function)
 {
     HMODULE Modules[MAX_TEST_MODULES];
-    DWORD Needed, i;
+    DWORD Needed;
+#ifdef _WIN64
+    DWORD i;
+#endif
     BOOL Result;
 
     /* the list of the process is the one of EnumProcessModules */
