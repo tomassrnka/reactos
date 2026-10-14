@@ -369,6 +369,9 @@ typedef struct {
     DWORD buf_size;
     DWORD buf_pos;
     BOOL end_of_data;
+#ifdef __REACTOS__
+    BOOL failed;
+#endif
 } gzip_stream_t;
 
 static BOOL gzip_end_of_data(data_stream_t *stream, http_request_t *req)
@@ -388,6 +391,14 @@ static DWORD gzip_read(data_stream_t *stream, http_request_t *req, BYTE *buf, DW
     DWORD res = ERROR_SUCCESS;
 
     TRACE("(%d %x)\n", size, allow_blocking);
+
+#ifdef __REACTOS__
+    /* Windows reports a damaged stream even when this call decoded data before it found the damage */
+    if(gzip_stream->failed) {
+        *read = 0;
+        return ERROR_INTERNET_DECODING_FAILED;
+    }
+#endif
 
     while(size && !gzip_stream->end_of_data) {
         if(!gzip_stream->buf_size) {
@@ -419,12 +430,20 @@ static DWORD gzip_read(data_stream_t *stream, http_request_t *req, BYTE *buf, DW
         ret_read += current_read;
         gzip_stream->buf_size -= zstream->next_in - (gzip_stream->buf+gzip_stream->buf_pos);
         gzip_stream->buf_pos = zstream->next_in-gzip_stream->buf;
+#ifdef __REACTOS__
+        /* Windows does not compare the CRC-32 of a gzip stream; the data of the stream is complete then */
+        if(zres == Z_DATA_ERROR && zstream->msg && !strcmp(zstream->msg, "incorrect data check"))
+            zres = Z_STREAM_END;
+#endif
         if(zres == Z_STREAM_END) {
             TRACE("end of data\n");
             gzip_stream->end_of_data = TRUE;
             inflateEnd(zstream);
         }else if(zres != Z_OK) {
             WARN("inflate failed %d: %s\n", zres, debugstr_a(zstream->msg));
+#ifdef __REACTOS__
+            gzip_stream->failed = TRUE;
+#endif
             if(!ret_read)
                 res = ERROR_INTERNET_DECODING_FAILED;
             break;
@@ -5872,7 +5891,12 @@ DWORD HTTP_Connect(appinfo_t *hIC, LPCWSTR lpszServerName,
     session->hostPort = serverPort;
     session->connect_timeout = hIC->connect_timeout;
     session->send_timeout = 0;
+#ifdef __REACTOS__
+    /* Windows waits 30 seconds by default; 0 means no timeout */
+    session->receive_timeout = 30000;
+#else
     session->receive_timeout = 0;
+#endif
 
     /* Don't send a handle created callback if this handle was created with InternetOpenUrl */
     if (!(session->hdr.dwInternalFlags & INET_OPENURL))
