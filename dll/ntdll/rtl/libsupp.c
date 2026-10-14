@@ -1026,6 +1026,29 @@ static UNICODE_STRING LdrpAppDirectory;
 static PWSTR LdrpAppContractDecisions;
 static SIZE_T LdrpAppContractDecisionsUsed, LdrpAppContractDecisionsSize;
 
+/* Makes room for a name of Length bytes and the two terminators, so that the following append cannot fail */
+static BOOLEAN
+LdrpReserveName(
+    _Inout_ PWSTR *List,
+    _In_ SIZE_T Used,
+    _Inout_ PSIZE_T Size,
+    _In_ SIZE_T Length)
+{
+    SIZE_T Needed = Length + 2 * sizeof(WCHAR);
+
+    if (Used + Needed > *Size)
+    {
+        SIZE_T NewSize = max(*Size * 2, Used + Needed + 1024);
+        PWSTR NewList = *List ? RtlReAllocateHeap(RtlGetProcessHeap(), 0, *List, NewSize)
+                              : RtlAllocateHeap(RtlGetProcessHeap(), 0, NewSize);
+        if (!NewList)
+            return FALSE;
+        *List = NewList;
+        *Size = NewSize;
+    }
+    return TRUE;
+}
+
 static BOOLEAN
 LdrpAppendName(
     _Inout_ PWSTR *List,
@@ -1034,18 +1057,8 @@ LdrpAppendName(
     _In_reads_bytes_(Length) PCWSTR Name,
     _In_ SIZE_T Length)
 {
-    SIZE_T Needed = Length + 2 * sizeof(WCHAR);
-
-    if (*Used + Needed > *Size)
-    {
-        SIZE_T NewSize = max(*Size * 2, *Used + Needed + 1024);
-        PWSTR NewList = *List ? RtlReAllocateHeap(RtlGetProcessHeap(), 0, *List, NewSize)
-                              : RtlAllocateHeap(RtlGetProcessHeap(), 0, NewSize);
-        if (!NewList)
-            return FALSE;
-        *List = NewList;
-        *Size = NewSize;
-    }
+    if (!LdrpReserveName(List, *Used, Size, Length))
+        return FALSE;
     RtlCopyMemory((PUCHAR)*List + *Used, Name, Length);
     *Used += Length;
     (*List)[*Used / sizeof(WCHAR)] = UNICODE_NULL;
@@ -1260,7 +1273,15 @@ LdrpFindName(
     return FALSE;
 }
 
-/* The directory could not be read: decide the name once by opening the file next to the executable */
+/*
+ * The directory could not be read: decide the name by opening the file next to the executable. Only a conclusive
+ * answer is kept for the life of the process, and it is stored before it is used:
+ * - the file opens: the copy is used (Windows 7);
+ * - it is absent (STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND) or a directory
+ *   (STATUS_FILE_IS_A_DIRECTORY, not a copy either): the name goes to its host.
+ * Anything else (no memory, access denied, a sharing violation, any other I/O error) is inconclusive and is not kept:
+ * the name is then not redirected, so the ordinary DLL search decides as on Windows 7, and the next lookup asks again.
+ */
 static BOOLEAN
 LdrpDecideAppLocalCopy(
     _In_ PUNICODE_STRING Candidate)
@@ -1268,39 +1289,68 @@ LdrpDecideAppLocalCopy(
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK IoStatusBlock;
     UNICODE_STRING Path;
-    WCHAR Tag = L'S', Entry[MAX_PATH + 1];
-    NTSTATUS Status = STATUS_OBJECT_PATH_INVALID;
+    WCHAR Tag, Entry[MAX_PATH + 1];
+    NTSTATUS Status = STATUS_NO_MEMORY;
     HANDLE Handle;
 
     RtlAcquirePebLock();
-    if (!LdrpFindName(LdrpAppContractDecisions, Candidate, TRUE, &Tag))
+    if (LdrpFindName(LdrpAppContractDecisions, Candidate, TRUE, &Tag))
     {
-        Path.MaximumLength = LdrpAppDirectory.Length + Candidate->Length;
-        Path.Length = 0;
-        Path.Buffer = NULL;
-        if (LdrpAppDirectory.Buffer && (ULONG)LdrpAppDirectory.Length + Candidate->Length <= MAXUSHORT)
-            Path.Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Path.MaximumLength);
-        if (Path.Buffer)
-        {
-            RtlAppendUnicodeStringToString(&Path, &LdrpAppDirectory);
-            RtlAppendUnicodeStringToString(&Path, Candidate);
-            InitializeObjectAttributes(&ObjectAttributes, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
-            Status = NtOpenFile(&Handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
-            if (NT_SUCCESS(Status))
-                NtClose(Handle);
-            RtlFreeHeap(RtlGetProcessHeap(), 0, Path.Buffer);
-        }
-        Tag = NT_SUCCESS(Status) ? L'L' : L'S';
-        if (!NT_SUCCESS(Status))
-            DPRINT1("%wZ: no copy next to the executable could be opened (0x%lx), using the system host\n", Candidate, Status);
-
-        Entry[0] = Tag;
-        RtlCopyMemory(Entry + 1, Candidate->Buffer, Candidate->Length);
-        LdrpAppendName(&LdrpAppContractDecisions, &LdrpAppContractDecisionsUsed, &LdrpAppContractDecisionsSize,
-                       Entry, Candidate->Length + sizeof(WCHAR));
+        RtlReleasePebLock();
+        return Tag == L'L';
     }
+
+    /* The entry must fit before anything is decided */
+    if (!LdrpReserveName(&LdrpAppContractDecisions, LdrpAppContractDecisionsUsed, &LdrpAppContractDecisionsSize,
+                         Candidate->Length + sizeof(WCHAR)))
+    {
+        RtlReleasePebLock();
+        DPRINT1("%wZ: no memory to keep a decision, left to the DLL search\n", Candidate);
+        return TRUE;
+    }
+
+    Path.MaximumLength = LdrpAppDirectory.Length + Candidate->Length;
+    Path.Length = 0;
+    Path.Buffer = NULL;
+    if (!LdrpAppDirectory.Buffer || (ULONG)LdrpAppDirectory.Length + Candidate->Length > MAXUSHORT)
+        Status = STATUS_OBJECT_PATH_INVALID;
+    else
+        Path.Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Path.MaximumLength);
+    if (Path.Buffer)
+    {
+        RtlAppendUnicodeStringToString(&Path, &LdrpAppDirectory);
+        RtlAppendUnicodeStringToString(&Path, Candidate);
+        InitializeObjectAttributes(&ObjectAttributes, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&Handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+        if (NT_SUCCESS(Status))
+            NtClose(Handle);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Path.Buffer);
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        Tag = L'L';
+    }
+    else if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND ||
+             Status == STATUS_FILE_IS_A_DIRECTORY)
+    {
+        Tag = L'S';
+        DPRINT1("%wZ: no copy next to the executable (0x%lx), using the system host\n", Candidate, Status);
+    }
+    else
+    {
+        RtlReleasePebLock();
+        DPRINT1("%wZ: the copy next to the executable could not be checked (0x%lx), left to the DLL search\n",
+                Candidate, Status);
+        return TRUE;
+    }
+
+    Entry[0] = Tag;
+    RtlCopyMemory(Entry + 1, Candidate->Buffer, Candidate->Length);
+    LdrpAppendName(&LdrpAppContractDecisions, &LdrpAppContractDecisionsUsed, &LdrpAppContractDecisionsSize,
+                   Entry, Candidate->Length + sizeof(WCHAR));
     RtlReleasePebLock();
     return Tag == L'L';
 }
