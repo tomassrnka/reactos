@@ -82,6 +82,7 @@ list(APPEND SOURCE
     NtNotifyChangeDirectoryFile.c
     NtNotifyChangeMultipleKeys.c
     NtOpenKey.c
+    NtOpenProcess.c
     NtOpenProcessToken.c
     NtOpenThreadToken.c
     NtProtectVirtualMemory.c
