@@ -171,6 +171,8 @@ static inline HIMAGELIST impl_from_IImageList2(IImageList2 *iface)
     return CONTAINING_RECORD(iface, struct _IMAGELIST, IImageList2_iface);
 }
 
+static BOOL write_imagelist(HIMAGELIST himl, IStream *pstm, BOOL strict);
+
 /*************************************************************************
  * ImageList_WriteEx [COMCTL32.@]
  *
@@ -191,7 +193,7 @@ HRESULT WINAPI ImageList_WriteEx(HIMAGELIST himl, DWORD dwFlags, IStream *pstm)
     if (!pstm)
         return E_INVALIDARG;
 
-    return ImageList_Write(himl, pstm) ? S_OK : E_FAIL;
+    return write_imagelist(himl, pstm, TRUE) ? S_OK : E_FAIL;
 }
 
 
@@ -3312,7 +3314,7 @@ ImageList_SetOverlayImage (HIMAGELIST himl, INT iImage, INT iOverlay)
 /* helper for ImageList_Write - write bitmap to pstm
  * currently everything is written as 24 bit RGB, except masks
  */
-static BOOL _write_bitmap(HBITMAP hBitmap, IStream *pstm)
+static BOOL _write_bitmap(HBITMAP hBitmap, IStream *pstm, BOOL strict)
 {
     LPBITMAPFILEHEADER bmfh;
     LPBITMAPINFOHEADER bmih;
@@ -3369,7 +3371,9 @@ static BOOL _write_bitmap(HBITMAP hBitmap, IStream *pstm)
           bmih->biWidth, bmih->biHeight,
           bmih->biPlanes, bmih->biBitCount);
 
-    result = SUCCEEDED(IStream_Write(pstm, data, totalSize, NULL));
+    /* ImageList_Write has always answered TRUE when this write fails; only ImageList_WriteEx reports it */
+    if (FAILED(IStream_Write(pstm, data, totalSize, NULL)) && strict)
+        result = FALSE;
 
 failed:
     heap_free(data);
@@ -3378,24 +3382,7 @@ failed:
 }
 
 
-/*************************************************************************
- * ImageList_Write [COMCTL32.@]
- *
- * Writes an image list to a stream.
- *
- * PARAMS
- *     himl [I] handle to image list
- *     pstm [O] Pointer to a stream.
- *
- * RETURNS
- *     Success: TRUE
- *     Failure: FALSE
- *
- * BUGS
- *     probably.
- */
-
-BOOL WINAPI ImageList_Write(HIMAGELIST himl, IStream *pstm)
+static BOOL write_imagelist(HIMAGELIST himl, IStream *pstm, BOOL strict)
 {
     ILHEAD ilHead;
     int i;
@@ -3425,16 +3412,38 @@ BOOL WINAPI ImageList_Write(HIMAGELIST himl, IStream *pstm)
 	return FALSE;
 
     /* write the bitmap */
-    if(!_write_bitmap(himl->hbmImage, pstm))
+    if(!_write_bitmap(himl->hbmImage, pstm, strict))
 	return FALSE;
 
     /* write the mask if we have one */
     if(himl->flags & ILC_MASK) {
-	if(!_write_bitmap(himl->hbmMask, pstm))
+	if(!_write_bitmap(himl->hbmMask, pstm, strict))
 	    return FALSE;
     }
 
     return TRUE;
+}
+
+/*************************************************************************
+ * ImageList_Write [COMCTL32.@]
+ *
+ * Writes an image list to a stream.
+ *
+ * PARAMS
+ *     himl [I] handle to image list
+ *     pstm [O] Pointer to a stream.
+ *
+ * RETURNS
+ *     Success: TRUE
+ *     Failure: FALSE
+ *
+ * BUGS
+ *     probably.
+ */
+
+BOOL WINAPI ImageList_Write(HIMAGELIST himl, IStream *pstm)
+{
+    return write_imagelist(himl, pstm, FALSE);
 }
 
 

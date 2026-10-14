@@ -271,6 +271,15 @@ static void CompareLists(HIMAGELIST Expected, HIMAGELIST Actual, DWORD Flags)
             continue;
         }
         Size = (ExpectedInfo.rcImage.right - ExpectedInfo.rcImage.left) * (ExpectedInfo.rcImage.bottom - ExpectedInfo.rcImage.top) * 4;
+        /* an image that came back with other dimensions is compared by neither: its buffer has another size */
+        if (ActualInfo.rcImage.right - ActualInfo.rcImage.left != ExpectedInfo.rcImage.right - ExpectedInfo.rcImage.left ||
+            ActualInfo.rcImage.bottom - ActualInfo.rcImage.top != ExpectedInfo.rcImage.bottom - ExpectedInfo.rcImage.top)
+        {
+            ok(0, "flags %#lx: image %d is %ld x %ld, expected %ld x %ld\n", Flags, Index,
+               ActualInfo.rcImage.right - ActualInfo.rcImage.left, ActualInfo.rcImage.bottom - ActualInfo.rcImage.top,
+               ExpectedInfo.rcImage.right - ExpectedInfo.rcImage.left, ExpectedInfo.rcImage.bottom - ExpectedInfo.rcImage.top);
+            continue;
+        }
 
         for (Part = 0; Part < 2; Part++)
         {
@@ -298,6 +307,49 @@ static void CompareLists(HIMAGELIST Expected, HIMAGELIST Actual, DWORD Flags)
         }
     }
     HeapFree(GetProcessHeap(), 0, First);
+}
+
+/* One pixel of one image of a list: the colour bitmap (Part 0) or the mask (Part 1), as red, green and blue */
+static BOOL GetImagePixel(HIMAGELIST List, INT Index, INT Part, INT X, INT Y, BYTE *Rgb)
+{
+    IMAGEINFO Info;
+    BYTE *Pixels;
+
+    if (!ImageList_GetImageInfo(List, Index, &Info))
+        return FALSE;
+    Pixels = GetImagePixels(Part ? Info.hbmMask : Info.hbmImage, &Info.rcImage);
+    if (!Pixels)
+        return FALSE;
+    /* the bits are blue, green, red and a byte that is not looked at */
+    Rgb[0] = Pixels[(Y * (Info.rcImage.right - Info.rcImage.left) + X) * 4 + 2];
+    Rgb[1] = Pixels[(Y * (Info.rcImage.right - Info.rcImage.left) + X) * 4 + 1];
+    Rgb[2] = Pixels[(Y * (Info.rcImage.right - Info.rcImage.left) + X) * 4];
+    HeapFree(GetProcessHeap(), 0, Pixels);
+    return TRUE;
+}
+
+static void CheckPixel(HIMAGELIST List, INT Index, INT Part, INT X, INT Y, BYTE R, BYTE G, BYTE B, DWORD Flags)
+{
+    BYTE Rgb[3];
+
+    if (!GetImagePixel(List, Index, Part, X, Y, Rgb))
+    {
+        ok(0, "flags %#lx: no pixel (%d, %d) of the %s of image %d\n", Flags, X, Y, Part ? "mask" : "colour", Index);
+        return;
+    }
+    ok(Rgb[0] == R && Rgb[1] == G && Rgb[2] == B, "flags %#lx: the %s of image %d at (%d, %d) is %02x%02x%02x, expected %02x%02x%02x\n",
+       Flags, Part ? "mask" : "colour", Index, X, Y, Rgb[0], Rgb[1], Rgb[2], R, G, B);
+}
+
+/* What the original holds and what must come back: red, then green of which only the right half shows (the mask is white where it hides) */
+static void CheckContents(HIMAGELIST List, DWORD Flags)
+{
+    CheckPixel(List, 0, 0, 8, 8, 0xff, 0, 0, Flags);
+    CheckPixel(List, 1, 0, 12, 8, 0, 0xff, 0, Flags);
+    CheckPixel(List, 1, 1, 12, 8, 0, 0, 0, Flags);
+    CheckPixel(List, 1, 1, 4, 8, 0xff, 0xff, 0xff, Flags);
+    /* the first image has no mask of its own: all of it shows */
+    CheckPixel(List, 0, 1, 8, 8, 0, 0, 0, Flags);
 }
 
 /* Whatever the stream does with its writes, the list must not be reported as written when one of them fails. */
@@ -368,6 +420,20 @@ START_TEST(ImageListWriteEx)
         return;
     }
 
+    /*
+     * ReactOS gives the exports without an ordinal of their own the next free one in the order of its spec file: a new
+     * export must not move an old one. DrawShadowText has been number 92 there, and ImageList_WriteEx comes after it.
+     */
+    if (is_reactos())
+    {
+        FARPROC ByOrdinal = GetProcAddress(ComCtl32, MAKEINTRESOURCEA(92));
+        FARPROC ByName = GetProcAddress(ComCtl32, "DrawShadowText");
+
+        ok(ByName != NULL, "DrawShadowText is not exported\n");
+        ok(ByOrdinal == ByName, "export 92 is %p, DrawShadowText is %p\n", ByOrdinal, ByName);
+        ok(GetProcAddress(ComCtl32, MAKEINTRESOURCEA(93)) == (FARPROC)pImageList_WriteEx, "export 93 is not ImageList_WriteEx\n");
+    }
+
     CoInitialize(NULL);
     List = CreateList();
     ok(List != NULL, "ImageList_Create failed\n");
@@ -390,7 +456,9 @@ START_TEST(ImageListWriteEx)
             ok(Back != NULL, "flags %#lx: the stream does not read back\n", Flags[i]);
             if (Back)
             {
+                CheckContents(List, Flags[i]);
                 CompareLists(List, Back, Flags[i]);
+                CheckContents(Back, Flags[i]);
                 ImageList_Destroy(Back);
             }
         }
@@ -400,6 +468,21 @@ START_TEST(ImageListWriteEx)
     /* a stream that fails part of the way */
     TestFailingStream(pImageList_WriteEx, List, 0);
     TestFailingStream(pImageList_WriteEx, List, 1);
+
+    /*
+     * ImageList_Write of ReactOS answers TRUE when the write of the colour bitmap fails and goes on to write the
+     * mask, which Windows does not do. The new export reports the failure, and the old one is kept as it was.
+     */
+    if (is_reactos())
+    {
+        FAILSTREAM Failing;
+        BOOL Ret;
+
+        InitFailStream(&Failing, 2, TRUE);
+        Ret = ImageList_Write(List, &Failing.IStream_iface);
+        ok(Ret == TRUE, "ImageList_Write with a failing second write: %d\n", Ret);
+        ok(Failing.Writes == 3, "ImageList_Write made %lu writes\n", Failing.Writes);
+    }
 
     /* the arguments */
     hr = pImageList_WriteEx(NULL, 0, NULL);
