@@ -183,5 +183,6 @@
 
 ; Exported in v6 but not v5
 @ stdcall DrawShadowText(long wstr long ptr long long long long long)
+@ stdcall -version=0x600+ ImageList_WriteEx(ptr long ptr)
 380 stdcall -version=0x600+ LoadIconMetric(long wstr long long)
 381 stdcall -version=0x600+ LoadIconWithScaleDown(long wstr long long long)
