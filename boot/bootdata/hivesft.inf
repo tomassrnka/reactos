@@ -601,6 +601,15 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug","UserDebuggerHotKey"
 ; Local crash dumps of unhandled exceptions (OrielOS writes them by default)
 HKLM,"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps",,0x00000010
 
+; Mesa3D software OpenGL driver, used by opengl32 for display drivers that bring no OpenGL driver of their own;
+; the driver named by the default value of SOFTWARE\ReactOS\OpenGL is the system default, HKCU\Software\ReactOS\OpenGL overrides it
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Dll",0x00000000,"libgallium_wgl.dll"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Version",0x00010001,0x00000001
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","DriverVersion",0x00010001,0x00000001
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Flags",0x00010001,0x00000001
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","RequiresSSE2",0x00010001,0x00000001
+HKLM,"SOFTWARE\ReactOS\OpenGL",,0x00000000,"Mesa3D"
+
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Accessibility",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Compatibility",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Compatibility32",,0x00000012
