@@ -25,6 +25,7 @@ extern void func_DeviceIoControl(void);
 extern void func_dosdev(void);
 extern void func_DynamicTls(void);
 extern void func_DynamicTimeZone(void);
+extern void func_GetTimeZoneInformationForYear(void);
 extern void func_EnumSystemCodePages(void);
 extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
@@ -133,6 +134,7 @@ const struct test winetest_testlist[] =
     { "dosdev",                      func_dosdev },
     { "DynamicTls",                  func_DynamicTls },
     { "DynamicTimeZone",             func_DynamicTimeZone },
+    { "GetTimeZoneInformationForYear", func_GetTimeZoneInformationForYear },
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
     { "ExitThread",                  func_ExitThread },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
