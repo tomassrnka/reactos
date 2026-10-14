@@ -13,6 +13,8 @@ typedef HRESULT (WINAPI *FN_GetDpiForMonitor)(HMONITOR, INT, UINT *, UINT *);
 typedef UINT (WINAPI *FN_GetDpiForShellUIComponent)(INT);
 typedef HRESULT (WINAPI *FN_GetProcessDpiAwareness)(HANDLE, INT *);
 typedef HRESULT (WINAPI *FN_SetProcessDpiAwareness)(INT);
+typedef HRESULT (WINAPI *FN_GetScaleFactorForMonitor)(HMONITOR, INT *);
+typedef INT (WINAPI *FN_GetScaleFactorForDevice)(INT);
 
 #define UNTOUCHED 0x5555
 
@@ -124,6 +126,12 @@ START_TEST(ProcessDpiAwareness)
     ok(hr == S_OK, "hr 0x%lx\n", hr);
     ok(iAwareness == 0, "awareness %d\n", iAwareness);
 
+    /* A handle that is none gives the invalid awareness */
+    iAwareness = UNTOUCHED;
+    hr = pGetProcessDpiAwareness((HANDLE)(ULONG_PTR)0x4567, &iAwareness);
+    ok(hr == E_INVALIDARG, "bad handle: hr 0x%lx\n", hr);
+    ok(iAwareness == -1, "bad handle: awareness %d\n", iAwareness);
+
     hr = pSetProcessDpiAwareness(3);
     ok(hr == E_INVALIDARG, "3: hr 0x%lx\n", hr);
     hr = pSetProcessDpiAwareness(-1);
@@ -136,8 +144,87 @@ START_TEST(ProcessDpiAwareness)
     hr = pGetProcessDpiAwareness(NULL, &iAwareness);
     ok(hr == S_OK, "hr 0x%lx\n", hr);
     ok(iAwareness == 1, "awareness %d after setting 1\n", iAwareness);
+
+    /* user32 holds the awareness, so it sees it too */
+    {
+        HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+        BOOL (WINAPI *pIsProcessDPIAware)(void) = (void *)GetProcAddress(hUser32, "IsProcessDPIAware");
+        HANDLE (WINAPI *pGetThreadDpiAwarenessContext)(void) = (void *)GetProcAddress(hUser32, "GetThreadDpiAwarenessContext");
+        INT (WINAPI *pGetAwarenessFromDpiAwarenessContext)(HANDLE) = (void *)GetProcAddress(hUser32, "GetAwarenessFromDpiAwarenessContext");
+
+        if (pIsProcessDPIAware)
+            ok(pIsProcessDPIAware(), "IsProcessDPIAware is FALSE after SetProcessDpiAwareness(1)\n");
+        if (pGetThreadDpiAwarenessContext && pGetAwarenessFromDpiAwarenessContext)
+        {
+            INT iUser = pGetAwarenessFromDpiAwarenessContext(pGetThreadDpiAwarenessContext());
+            ok(iUser == 1, "user32 says the awareness is %d\n", iUser);
+        }
+    }
     hr = pSetProcessDpiAwareness(1);
     ok(hr == E_ACCESSDENIED, "1 again: hr 0x%lx\n", hr);
     hr = pSetProcessDpiAwareness(0);
     ok(hr == E_ACCESSDENIED, "0 after 1: hr 0x%lx\n", hr);
+}
+
+START_TEST(GetScaleFactor)
+{
+    HMODULE hShcore = LoadShcore();
+    FN_GetScaleFactorForMonitor pGetScaleFactorForMonitor;
+    FN_GetScaleFactorForDevice pGetScaleFactorForDevice;
+    POINT pt = { 0, 0 };
+    HMONITOR hMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+    INT iScale;
+    HRESULT hr;
+    HDC hdc;
+    UINT uDpi;
+
+    if (!hShcore)
+        return;
+    pGetScaleFactorForMonitor = (FN_GetScaleFactorForMonitor)GetProcAddress(hShcore, "GetScaleFactorForMonitor");
+    pGetScaleFactorForDevice = (FN_GetScaleFactorForDevice)GetProcAddress(hShcore, "GetScaleFactorForDevice");
+    if (!pGetScaleFactorForMonitor || !pGetScaleFactorForDevice)
+    {
+        skip("No scale factor functions in shcore\n");
+        return;
+    }
+
+    /* The DPI of the system as a DPI-aware thread sees it (an unaware thread of Windows sees 96) */
+    {
+        HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+        HANDLE (WINAPI *pSetThreadDpiAwarenessContext)(HANDLE) = (void *)GetProcAddress(hUser32, "SetThreadDpiAwarenessContext");
+        UINT (WINAPI *pGetDpiForSystem)(void) = (void *)GetProcAddress(hUser32, "GetDpiForSystem");
+
+        hdc = GetDC(NULL);
+        uDpi = GetDeviceCaps(hdc, LOGPIXELSX);
+        ReleaseDC(NULL, hdc);
+        if (pSetThreadDpiAwarenessContext && pGetDpiForSystem)
+        {
+            HANDLE Previous = pSetThreadDpiAwarenessContext((HANDLE)(INT_PTR)-2);
+            uDpi = pGetDpiForSystem();
+            pSetThreadDpiAwarenessContext(Previous);
+        }
+    }
+
+    /* At 96 DPI the scale is 100 percent; other DPIs have a scale that this test does not predict */
+    iScale = UNTOUCHED;
+    hr = pGetScaleFactorForMonitor(hMonitor, &iScale);
+    ok(hr == S_OK, "hr 0x%lx\n", hr);
+    if (uDpi == 96)
+        ok(iScale == 100, "scale %d at 96 DPI\n", iScale);
+    else
+        ok(iScale >= 100 && iScale <= 500, "scale %d at %u DPI\n", iScale, uDpi);
+
+    /* The monitor is not looked at */
+    iScale = UNTOUCHED;
+    hr = pGetScaleFactorForMonitor(NULL, &iScale);
+    ok(hr == S_OK, "NULL monitor: hr 0x%lx\n", hr);
+    ok(iScale != UNTOUCHED, "NULL monitor: scale not written\n");
+
+    for (iScale = 0; iScale <= 2; iScale++)
+    {
+        INT iDevice = pGetScaleFactorForDevice(iScale);
+        ok(iDevice == pGetScaleFactorForDevice(0), "device %d: scale %d\n", iScale, iDevice);
+    }
+    if (uDpi == 96)
+        ok(pGetScaleFactorForDevice(0) == 100, "device scale %d at 96 DPI\n", pGetScaleFactorForDevice(0));
 }
