@@ -63,7 +63,8 @@ static void test_WerAddExcludedApplication(void)
 
     /* appname has a path */
     res = GetWindowsDirectoryW(buffer, ARRAY_SIZE(buffer));
-    if (res > 0) {
+    /* the directory, a separator, the name and the end must fit: a longer directory is not tested rather than overrun */
+    if (res > 0 && res + 1 + lstrlenW(winetest_wer) < ARRAY_SIZE(buffer)) {
         /* the last part from the path is added to the inclusion list */
         hr = WerAddExcludedApplication(buffer, FALSE);
         ok(hr == S_OK, "got 0x%lx (expected S_OK)\n", hr);
@@ -115,7 +116,8 @@ static void test_WerRemoveExcludedApplication(void)
 
     /* appname has a path */
     res = GetWindowsDirectoryW(buffer, ARRAY_SIZE(buffer));
-    if (res > 0) {
+    /* the directory, a separator, the name and the end must fit: a longer directory is not tested rather than overrun */
+    if (res > 0 && res + 1 + lstrlenW(winetest_wer) < ARRAY_SIZE(buffer)) {
         hr = WerRemoveExcludedApplication(buffer, FALSE);
         ok((hr == E_FAIL) || (hr == __HRESULT_FROM_WIN32(ERROR_ENVVAR_NOT_FOUND)),
             "got 0x%lx (expected E_FAIL or HRESULT_FROM_WIN32(ERROR_ENVVAR_NOT_FOUND))\n", hr);
