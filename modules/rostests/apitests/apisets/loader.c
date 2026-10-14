@@ -332,7 +332,8 @@ RunLateChild(void)
     if (First)
     {
         Bits |= LATE_FIRST_LOAD;
-        if (ExtractLocalDll(Copy, FALSE))
+        /* Only a copy this child created is deleted again */
+        if (ExtractLocalDll(Copy, TRUE))
         {
             Second = LoadLibraryW(g_LocalNames[1]);
             if (Second == First)
@@ -565,6 +566,27 @@ test_app_local_unlisted(void)
 #define RETRY_FIRST_LOCAL   0x2
 #define RETRY_SECOND_LOADED 0x4
 #define RETRY_SECOND_LOCAL  0x8
+#define RETRY_REFUSED       0x10
+
+/* The parent marks a fixture it created exclusively with this file next to it; the token comes on the command line */
+static BOOL
+MakeFixtureMarkerPath(const WCHAR *Exe, const char *Token, WCHAR *Path, SIZE_T Count)
+{
+    const WCHAR *Slash = wcsrchr(Exe, L'\\');
+    WCHAR WideToken[33];
+    SIZE_T n;
+
+    if (!Slash || !Token || !*Token || strlen(Token) >= _countof(WideToken))
+        return FALSE;
+    for (n = 0; Token[n]; ++n)
+    {
+        if ((Token[n] < '0' || Token[n] > '9') && Token[n] != '-')
+            return FALSE;
+        WideToken[n] = Token[n];
+    }
+    WideToken[n] = UNICODE_NULL;
+    return SUCCEEDED(StringCchPrintfW(Path, Count, L"%.*lsapl-%ls.fixture", (int)(Slash + 1 - Exe), Exe, WideToken));
+}
 
 /*
  * The copy next to this executable cannot be checked: load the contract, make the copy readable (or delete it), load
@@ -573,16 +595,25 @@ test_app_local_unlisted(void)
  * first, so that a decision list the loader allocates and searches without initialising it is likely to read one.
  */
 static void
-RunRetryChild(BOOL MakeAbsent)
+RunRetryChild(BOOL MakeAbsent, const char *Token)
 {
-    WCHAR Copy[MAX_PATH];
+    WCHAR Copy[MAX_PATH], Marker[MAX_PATH];
     PVOID Blocks[64];
     HMODULE Module;
-    DWORD n, Bits = 0;
+    DWORD n, Attributes, Bits = 0;
     WCHAR *Slash;
 
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
-    if (!GetModuleFileNameW(NULL, Copy, _countof(Copy)) || !(Slash = wcsrchr(Copy, L'\\')) ||
+    if (!GetModuleFileNameW(NULL, Copy, _countof(Copy)))
+        ExitProcess(0);
+
+    /* This child changes and deletes the copy: only one the parent created and marked for this run */
+    Attributes = MakeFixtureMarkerPath(Copy, Token, Marker, _countof(Marker)) ? GetFileAttributesW(Marker)
+                                                                              : INVALID_FILE_ATTRIBUTES;
+    if (Attributes == INVALID_FILE_ATTRIBUTES || (Attributes & FILE_ATTRIBUTE_DIRECTORY))
+        ExitProcess(CHILD_RAN | RETRY_REFUSED);
+
+    if (!(Slash = wcsrchr(Copy, L'\\')) ||
         FAILED(StringCchCopyW(Slash + 1, _countof(Copy) - (Slash + 1 - Copy), g_LocalNames[1])))
     {
         ExitProcess(0);
@@ -634,7 +665,8 @@ RunRetryChild(BOOL MakeAbsent)
 static void
 test_app_local_unreadable(void)
 {
-    WCHAR Self[MAX_PATH], Dir[MAX_PATH], Exe[MAX_PATH], Dll[MAX_PATH];
+    WCHAR Self[MAX_PATH], Dir[MAX_PATH], Exe[MAX_PATH], Dll[MAX_PATH], Marker[MAX_PATH], Token[32], Mode[64];
+    HANDLE File;
     DWORD Code;
 
     if (!is_reactos() && GetNTVersion() != 0x0601 && GetNTVersion() < 0x0A00)
@@ -647,7 +679,21 @@ test_app_local_unreadable(void)
     StringCchPrintfW(Exe, _countof(Exe), L"%ls\\apl-unreadable.exe", Dir);
     StringCchPrintfW(Dll, _countof(Dll), L"%ls\\%ls", Dir, g_LocalNames[1]);
     ok(CopyFileW(Self, Exe, FALSE), "CopyFileW failed with %lu\n", GetLastError());
-    ok(ExtractLocalDll(Dll, FALSE), "%ls not written: %lu\n", Dll, GetLastError());
+    if (!ExtractLocalDll(Dll, TRUE))
+    {
+        skip("%ls not created: %lu\n", Dll, GetLastError());
+        DeleteFileW(Exe);
+        RemoveDirectoryW(Dir);
+        return;
+    }
+
+    /* The retry children change and delete the copy only when this marker of the run is next to it */
+    StringCchPrintfW(Token, _countof(Token), L"%lu-%lu", GetCurrentProcessId(), GetTickCount());
+    StringCchPrintfW(Marker, _countof(Marker), L"%ls\\apl-%ls.fixture", Dir, Token);
+    File = CreateFileW(Marker, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "%ls not created: %lu\n", Marker, GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+        CloseHandle(File);
 
     ok(SetDenied(Dll, FILE_READ_ATTRIBUTES), "SetFileSecurityW failed with %lu\n", GetLastError());
     ok(SetDenied(Dir, FILE_LIST_DIRECTORY), "SetFileSecurityW failed with %lu\n", GetLastError());
@@ -666,8 +712,17 @@ test_app_local_unreadable(void)
         else
             ok((Code & (LOCAL_LOADED(1) | LOCAL_FROM_APP(1))) == LOCAL_LOADED(1), "child exit code 0x%lx\n", Code);
 
+        /* Without the marker of this run, or with another token, a retry child touches nothing */
+        Code = StartChild(Exe, L"retry-absent");
+        ok(Code == (CHILD_RAN | RETRY_REFUSED), "retry-absent without a token: child exit code 0x%lx\n", Code);
+        Code = StartChild(Exe, L"retry-absent 1-1");
+        ok(Code == (CHILD_RAN | RETRY_REFUSED), "retry-absent with another token: child exit code 0x%lx\n", Code);
+        ok(GetFileAttributesW(Dll) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_ACCESS_DENIED,
+           "the copy changed: %lu\n", GetLastError());
+
         /* The undecided name is asked again once the copy can be read (the child makes it readable) */
-        Code = StartChild(Exe, L"retry");
+        StringCchPrintfW(Mode, _countof(Mode), L"retry %ls", Token);
+        Code = StartChild(Exe, Mode);
         if (is_reactos() || GetNTVersion() == 0x0601)
             ok(Code == (CHILD_RAN | RETRY_SECOND_LOADED | RETRY_SECOND_LOCAL), "retry: child exit code 0x%lx\n", Code);
         else
@@ -675,7 +730,8 @@ test_app_local_unreadable(void)
 
         /* Again with the copy unreadable; this time the child deletes it before the second load */
         ok(SetDenied(Dll, FILE_READ_ATTRIBUTES), "SetFileSecurityW failed with %lu\n", GetLastError());
-        Code = StartChild(Exe, L"retry-absent");
+        StringCchPrintfW(Mode, _countof(Mode), L"retry-absent %ls", Token);
+        Code = StartChild(Exe, Mode);
         if (is_reactos())
             ok(Code == (CHILD_RAN | RETRY_SECOND_LOADED), "retry-absent: child exit code 0x%lx\n", Code);
         else if (GetNTVersion() == 0x0601)
@@ -688,6 +744,7 @@ test_app_local_unreadable(void)
     ok(SetDenied(Dir, 0), "SetFileSecurityW failed with %lu\n", GetLastError());
     SetDenied(Dll, 0); /* the retry-absent child may have deleted it */
     DeleteFileW(Dll);
+    DeleteFileW(Marker);
     DeleteFileW(Exe);
     RemoveDirectoryW(Dir);
 }
@@ -768,9 +825,9 @@ START_TEST(loader)
     if (argc >= 3 && !strcmp(argv[2], "late"))
         RunLateChild();
     if (argc >= 3 && !strcmp(argv[2], "retry"))
-        RunRetryChild(FALSE);
+        RunRetryChild(FALSE, argc >= 4 ? argv[3] : NULL);
     if (argc >= 3 && !strcmp(argv[2], "retry-absent"))
-        RunRetryChild(TRUE);
+        RunRetryChild(TRUE, argc >= 4 ? argv[3] : NULL);
 
     test_minor_versions();
     test_manifests();
