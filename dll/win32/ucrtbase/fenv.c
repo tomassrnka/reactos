@@ -10,9 +10,10 @@
 #include <float.h>
 #include <fenv.h>
 #include <math.h>
-#include <xmmintrin.h>
 
 #if defined(_M_IX86) || defined(_M_AMD64) || defined(_M_X64)
+
+#include <xmmintrin.h>
 
 #define PF_XMMI64_INSTRUCTIONS_AVAILABLE 10
 
@@ -167,12 +168,19 @@ static unsigned short x87_get_sw(void)
     return value;
 }
 
+/* Not fldcw: it waits and raises an exception that is pending and unmasked before the new word is in use */
 static void x87_set_cw(unsigned short value)
 {
+    X87_ENV env;
+
 #ifdef __GNUC__
-    __asm__ __volatile__("fldcw %0" : : "m"(value));
+    __asm__ __volatile__("fnstenv %0" : "=m"(env));
+    env.control_word = value;
+    __asm__ __volatile__("fldenv %0" : : "m"(env) : "st", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)");
 #else
-    __asm fldcw [value];
+    __asm fnstenv [env];
+    env.control_word = value;
+    __asm fldenv [env];
 #endif
 }
 

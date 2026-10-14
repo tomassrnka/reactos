@@ -10,11 +10,12 @@
 #include <fenv.h>
 #include <float.h>
 #include <math.h>
-#include <xmmintrin.h>
 
 int __cdecl __fpe_flt_rounds(void);
 
 #if defined(_M_IX86) || defined(_M_AMD64)
+
+#include <xmmintrin.h>
 
 static unsigned int get_mxcsr(void)
 {
