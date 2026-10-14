@@ -274,6 +274,57 @@ GetOverlappedResult(IN HANDLE hFile,
  */
 BOOL
 WINAPI
+GetOverlappedResultEx(IN HANDLE hFile,
+                      IN LPOVERLAPPED lpOverlapped,
+                      OUT LPDWORD lpNumberOfBytesTransferred,
+                      IN DWORD dwMilliseconds,
+                      IN BOOL bAlertable)
+{
+    NTSTATUS Status = (NTSTATUS)lpOverlapped->Internal;
+    DWORD WaitStatus;
+
+    /* Check for pending operation */
+    if (Status == STATUS_PENDING)
+    {
+        /* Without a timeout the caller only asks if it is done */
+        if (!dwMilliseconds)
+        {
+            SetLastError(ERROR_IO_INCOMPLETE);
+            return FALSE;
+        }
+
+        WaitStatus = WaitForSingleObjectEx(lpOverlapped->hEvent ? lpOverlapped->hEvent : hFile,
+                                           dwMilliseconds,
+                                           bAlertable);
+        /* Windows leaves the result of the wait as the last error: WAIT_TIMEOUT, or WAIT_IO_COMPLETION when a user
+           APC ran (not ERROR_USER_APC) */
+        if (WaitStatus == WAIT_TIMEOUT || WaitStatus == WAIT_IO_COMPLETION)
+            SetLastError(WaitStatus);
+        if (WaitStatus != WAIT_OBJECT_0)
+            return FALSE;
+
+        Status = (NTSTATUS)lpOverlapped->Internal;
+    }
+
+    /* Return bytes transferred */
+    *lpNumberOfBytesTransferred = lpOverlapped->InternalHigh;
+
+    /* Check for failure during I/O */
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 BindIoCompletionCallback(IN HANDLE FileHandle,
                          IN LPOVERLAPPED_COMPLETION_ROUTINE Function,
                          IN ULONG Flags)
