@@ -49,6 +49,8 @@ typedef VOID (WINAPI *PFREE_MIB_TABLE)(PVOID);
 
 static PGET_BEST_ROUTE2 pGetBestRoute2;
 static ULONG LoopbackIndex, AdapterIndex, AdapterAddress, AdapterMask, Gateway;
+static ULONGLONG LoopbackLuid, AdapterLuid;
+static BOOL HaveLoopbackLuid, HaveAdapterLuid;
 static ULONG LocalAddresses[MAX_LOCAL_ADDRESSES], NumLocalAddresses;
 static BOOL HaveLoopback, HaveAdapter, AddressesTruncated;
 /* 1: the default route of the adapter is the only route of the adapter that covers 8.8.8.8, 0: none covers it, -1: unclear */
@@ -126,12 +128,18 @@ static void FindEnvironment(void)
                 {
                     LoopbackIndex = Adapter->IfIndex;
                     HaveLoopback = TRUE;
+                    HaveLoopbackLuid = Adapter->Length >= sizeof(IP_ADAPTER_ADDRESSES_LH);
+                    if (HaveLoopbackLuid)
+                        LoopbackLuid = ((IP_ADAPTER_ADDRESSES_LH *)Adapter)->Luid.Value;
                 }
                 else if (Adapter->IfType != IF_TYPE_LOOPBACK && !HaveAdapter && Ip != 0)
                 {
                     AdapterIndex = Adapter->IfIndex;
                     AdapterAddress = Ip;
                     HaveAdapter = TRUE;
+                    HaveAdapterLuid = Adapter->Length >= sizeof(IP_ADAPTER_ADDRESSES_LH);
+                    if (HaveAdapterLuid)
+                        AdapterLuid = ((IP_ADAPTER_ADDRESSES_LH *)Adapter)->Luid.Value;
                 }
             }
         }
@@ -254,6 +262,8 @@ static void TestLoopback(void)
                  htonl(INADDR_LOOPBACK));
         ok(Row.Loopback, "127.0.0.1: not a loopback route\n");
         ok(Row.Metric == ON_LINK_METRIC, "127.0.0.1: metric %lu\n", Row.Metric);
+        ok(!HaveLoopbackLuid || Row.InterfaceLuid.Value == LoopbackLuid, "127.0.0.1: luid 0x%I64x, adapter luid 0x%I64x\n",
+           (ULONGLONG)Row.InterfaceLuid.Value, LoopbackLuid);
     }
 
     memset(&Row, 0xcc, sizeof(Row));
@@ -294,6 +304,8 @@ static void TestLocalDestinations(void)
                  AdapterAddress);
         ok(Row.Loopback, "own address: not a loopback route\n");
         ok(Row.InterfaceLuid.Info.IfType != IF_TYPE_LOOPBACK, "own address: loopback luid\n");
+        ok(!HaveAdapterLuid || Row.InterfaceLuid.Value == AdapterLuid, "own address: luid 0x%I64x, adapter luid 0x%I64x\n",
+           (ULONGLONG)Row.InterfaceLuid.Value, AdapterLuid);
         ok(Row.Metric == ON_LINK_METRIC, "own address: metric %lu\n", Row.Metric);
     }
 

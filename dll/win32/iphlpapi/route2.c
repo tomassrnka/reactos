@@ -17,22 +17,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
  */
 #define ON_LINK_METRIC 256
 
-/* A luid is the interface type in the top 16 bits and the interface index as the luid index. */
 static BOOL if_index_to_luid(DWORD Index, PULONG Type, NET_LUID *Luid)
 {
-  MIB_IFROW Row;
-
-  memset(&Row, 0, sizeof(Row));
-  Row.dwIndex = Index;
-  if (GetIfEntry(&Row) != NO_ERROR)
-    return FALSE;
-
   Luid->Value = 0;
-  Luid->Info.NetLuidIndex = Index;
-  Luid->Info.IfType = Row.dwType;
-  if (Type)
-    *Type = Row.dwType;
-  return TRUE;
+  return getInterfaceLuidByIndex(Index, Type, &Luid->Value);
 }
 
 /*
@@ -189,8 +177,7 @@ DWORD WINAPI GetBestRoute2(NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex,
 
   if (InterfaceLuid && InterfaceLuid->Value)
   {
-    IfIndex = InterfaceLuid->Info.NetLuidIndex;
-    if (!if_index_to_luid(IfIndex, NULL, &Luid) || Luid.Value != InterfaceLuid->Value)
+    if (!getInterfaceIndexByLuid(InterfaceLuid->Value, &IfIndex))
       return ERROR_NOT_FOUND;
     Constrained = TRUE;
   }

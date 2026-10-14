@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_GetAdaptersAddresses(void);
 extern void func_GetBestRoute2(void);
 extern void func_GetExtendedTcpTable(void);
 extern void func_GetExtendedUdpTable(void);
@@ -15,6 +16,7 @@ extern void func_SendARP(void);
 
 const struct test winetest_testlist[] =
 {
+    { "GetAdaptersAddresses",       func_GetAdaptersAddresses },
     { "GetBestRoute2",             func_GetBestRoute2 },
     { "GetExtendedTcpTable",        func_GetExtendedTcpTable },
     { "GetExtendedUdpTable",        func_GetExtendedUdpTable },

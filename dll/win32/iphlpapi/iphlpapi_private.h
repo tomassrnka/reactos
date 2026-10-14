@@ -167,6 +167,10 @@ NTSTATUS getIPAddrEntryForIf(HANDLE tcpFile,
                              IFInfo *ifInfo);
 DWORD TCPSendIoctl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer, PULONG pInBufferSize, LPVOID lpOutBuffer, PULONG pOutBufferSize);
 
+ULONG64 makeInterfaceLuid(DWORD Index, ULONG Type);
+BOOL getInterfaceLuidByIndex(DWORD Index, PULONG Type, PULONG64 Luid);
+BOOL getInterfaceIndexByLuid(ULONG64 Luid, PDWORD Index);
+
 #include <w32api.h>
 /* This is here until we switch to version 2.5 of the mingw headers */
 #if (__W32API_MAJOR_VERSION < 2 || __W32API_MINOR_VERSION < 5)
