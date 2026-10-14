@@ -371,7 +371,7 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
      * handles table: this can happen if it is a GUI application having called
      * AllocConsole), then try to inherit handles from the parent process.
      */
-    if ((TargetProcess->Flags & CsrProcessIsConsoleApp) || TargetProcess->HandleListPresent)
+    if (TargetProcess->Flags & CsrProcessIsConsoleApp)
     {
         PCONSOLE_PROCESS_DATA SourceProcessData = ConsoleGetPerProcessData(SourceProcess);
         PCONSRV_CONSOLE SourceConsole;

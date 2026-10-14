@@ -12,6 +12,7 @@
 
 #include "precomp.h"
 #include <stdlib.h>
+#include <ndk/pstypes.h>
 
 #ifndef EXTENDED_STARTUPINFO_PRESENT
 #define EXTENDED_STARTUPINFO_PRESENT 0x00080000
@@ -36,7 +37,8 @@ typedef struct
 {
     ULONG Complete, Count, FlagFailures;
     HANDLE Handles[LARGE_LIST_COUNT + RACE_COUNT + 2];
-    ULONG ConsoleMode[3], StandardInputMode;
+    ULONG ConsoleMode[3], StandardInputMode, StandardOutputMode;
+    BOOL WriteStandardOutput, StandardOutputWritten;
     HANDLE ConsoleHandles[3];
     HANDLE StandardOutput;
 } CHILD_REPORT;
@@ -64,6 +66,12 @@ static VOID Child(PCSTR Name)
     for (i = 0; i < 3; ++i)
         Data->ConsoleMode[i] = GetConsoleMode(Data->ConsoleHandles[i], &Mode);
     Data->StandardOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    Data->StandardOutputMode = GetConsoleMode(Data->StandardOutput, &Mode);
+    if (Data->WriteStandardOutput)
+    {
+        DWORD Written = 0;
+        Data->StandardOutputWritten = WriteConsoleW(Data->StandardOutput, L"H", 1, &Written, NULL) && Written == 1;
+    }
     Data->StandardInputMode = GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &Mode);
     Data->Complete = REPORT_COMPLETE;
     ExitProcess(0);
@@ -300,13 +308,256 @@ static VOID TestConsole(VOID)
     {
         FinishChild(&Pi);
         ok(Report->ConsoleMode[0] && Report->ConsoleMode[1], "Listed console handles unusable\n");
-        ok(!Report->ConsoleMode[2], "Unlisted console handle inherited\n");
+        ok(Report->ConsoleMode[2] == !IsWin8,
+           "Unlisted console inheritance: %lu\n", Report->ConsoleMode[2]);
     }
+    Handles[1] = Handles[0];
+    ExpectFailure(Handles, 2, TRUE, (!IsReactOS && !IsWin8) ?
+                  ERROR_NO_SYSTEM_RESOURCES : ERROR_INVALID_PARAMETER);
+    Handles[1] = Report->ConsoleHandles[1];
     SetHandleInformation(Handles[1], HANDLE_FLAG_INHERIT, 0);
     ExpectFailure(Handles, 2, TRUE, (!IsReactOS && !IsWin8) ?
                   ERROR_NO_SYSTEM_RESOURCES : ERROR_INVALID_PARAMETER);
 Cleanup:
     for (i = 0; i < 3; ++i) CloseHandle(Report->ConsoleHandles[i]);
+}
+
+/* Move all three standard handles away from slots 0-2. Output goes to a private
+ * screen buffer so checking its contents also detects accidental slot aliasing. */
+static VOID TestMovedStandardHandles(VOID)
+{
+    HANDLE Saved[3], Moved[3];
+    DWORD Error = 0, Read;
+    ULONG i, Explicit;
+    COORD Origin = {0, 0};
+    WCHAR Character;
+    PROCESS_INFORMATION Pi;
+    BOOL Ret;
+
+    Moved[0] = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE, &Inheritable,
+                          OPEN_EXISTING, 0, NULL);
+    Moved[1] = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        &Inheritable, CONSOLE_TEXTMODE_BUFFER, NULL);
+    Moved[2] = INVALID_HANDLE_VALUE;
+    if (Moved[0] == INVALID_HANDLE_VALUE || Moved[1] == INVALID_HANDLE_VALUE)
+    {
+        skip("No console for moved standard handles\n");
+        goto Cleanup;
+    }
+    Ret = DuplicateHandle(GetCurrentProcess(), Moved[1], GetCurrentProcess(),
+                           &Moved[2], 0, TRUE, DUPLICATE_SAME_ACCESS);
+    ok(Ret, "Duplicate output: %lu\n", GetLastError());
+    if (!Ret) goto Cleanup;
+    for (i = 0; i < 3; ++i)
+    {
+        Saved[i] = GetStdHandle(STD_INPUT_HANDLE - i);
+        SetStdHandle(STD_INPUT_HANDLE - i, Moved[i]);
+    }
+    Report->Count = 0;
+    Report->WriteStandardOutput = TRUE;
+    for (Explicit = 0; Explicit < 2; ++Explicit)
+    {
+        FillConsoleOutputCharacterW(Moved[1], L' ', 1, Origin, &Read);
+        SetConsoleCursorPosition(Moved[1], Origin);
+        Report->Complete = Report->StandardOutputWritten = 0;
+        Ret = CreateChild(Report->Handles, 1, TRUE, TRUE,
+                           Explicit ? Moved[1] : NULL, &Pi, &Error);
+        ok(Ret, "Moved std handles (%lu): %lu\n", Explicit, Error);
+        if (!Ret) continue;
+        FinishChild(&Pi);
+        /* Windows 8+ filters console handles along with native handles. */
+        if (!IsWin8)
+        {
+            ok(Report->StandardOutput == Moved[1], "Moved output value changed\n");
+            ok(Report->StandardInputMode, "Moved input is unusable\n");
+            ok(Report->StandardOutputMode && Report->StandardOutputWritten,
+               "Moved output is unusable (%lu)\n", Explicit);
+            Character = 0;
+            ReadConsoleOutputCharacterW(Moved[1], &Character, 1, Origin, &Read);
+            ok(Read == 1 && Character == L'H', "Output went to the wrong buffer: %x\n", Character);
+        }
+        else if (Explicit)
+            ok(!Report->StandardOutputMode && !Report->StandardOutputWritten,
+               "Unlisted explicit output inherited on Windows 8+\n");
+        else
+            ok(Report->StandardOutputMode && Report->StandardOutputWritten,
+               "Default Windows 8+ output is unusable\n");
+    }
+    Report->WriteStandardOutput = FALSE;
+    for (i = 0; i < 3; ++i) SetStdHandle(STD_INPUT_HANDLE - i, Saved[i]);
+Cleanup:
+    for (i = 0; i < 3; ++i)
+        if (Moved[i] != INVALID_HANDLE_VALUE) CloseHandle(Moved[i]);
+}
+
+static BOOL QueryCsrUsage(SIZE_T *PrivateBytes, ULONG *Handles)
+{
+    ULONG Size = 0x10000, Needed;
+    PVOID Buffer;
+    PSYSTEM_PROCESS_INFORMATION Entry;
+    NTSTATUS Status;
+    BOOL Found = FALSE;
+
+    for (;;)
+    {
+        Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Buffer) return FALSE;
+        Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, Size, &Needed);
+        if (Status != (NTSTATUS)0xc0000004) break;
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        Size *= 2;
+    }
+    *PrivateBytes = 0;
+    *Handles = 0;
+    if (NT_SUCCESS(Status))
+    {
+        Entry = Buffer;
+        for (;;)
+        {
+            if (Entry->ImageName.Length == 9 * sizeof(WCHAR) &&
+                !_wcsnicmp(Entry->ImageName.Buffer, L"csrss.exe", 9))
+            {
+                *PrivateBytes += Entry->PrivatePageCount;
+                *Handles += Entry->HandleCount;
+                Found = TRUE;
+            }
+            if (!Entry->NextEntryOffset) break;
+            Entry = (PVOID)((PBYTE)Entry + Entry->NextEntryOffset);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return Found;
+}
+
+static VOID TestGuiExit(VOID)
+{
+    enum { ConsoleCount = 4096, Warmup = 16, Iterations = 96 };
+    HANDLE Console, *Copies, Selection;
+    WCHAR GuiImage[MAX_PATH], Command[2 * MAX_PATH];
+    STARTUPINFOEXW Si;
+    PROCESS_INFORMATION Pi;
+    SIZE_T Size = 0, Before = 0, After = 0;
+    ULONG i, BeforeHandles = 0, AfterHandles = 0;
+    DWORD Wait, Exit;
+    BOOL Ret, Measured = FALSE;
+
+    wcscpy(GuiImage, Image);
+    wcscpy(wcsrchr(GuiImage, L'\\') + 1, L"handlelist_gui.exe");
+    if (GetFileAttributesW(GuiImage) == INVALID_FILE_ATTRIBUTES)
+    {
+        skip("handlelist_gui.exe is unavailable\n");
+        return;
+    }
+    Console = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE, &Inheritable,
+                          OPEN_EXISTING, 0, NULL);
+    if (Console == INVALID_HANDLE_VALUE) return;
+    Copies = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, ConsoleCount * sizeof(HANDLE));
+    if (!Copies) { CloseHandle(Console); return; }
+    for (i = 0; i < ConsoleCount; ++i)
+    {
+        if (!DuplicateHandle(GetCurrentProcess(), Console, GetCurrentProcess(),
+                              &Copies[i], 0, TRUE, DUPLICATE_SAME_ACCESS)) break;
+    }
+    ok(i == ConsoleCount, "Only %lu console copies: %lu\n", i, GetLastError());
+    ZeroMemory(&Si, sizeof(Si));
+    Si.StartupInfo.cb = sizeof(Si);
+    pInitialize(NULL, 1, 0, &Size);
+    Si.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Si.lpAttributeList) goto Cleanup;
+    pInitialize(Si.lpAttributeList, 1, 0, &Size);
+    Selection = CreateEventW(&Inheritable, TRUE, FALSE, NULL);
+    Ret = pUpdate(Si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                   &Selection, sizeof(HANDLE), NULL, NULL);
+    ok(Ret, "GUI attribute: %lu\n", GetLastError());
+    if (!Ret) goto FreeList;
+    for (i = 0; i < Warmup + Iterations; ++i)
+    {
+        StringCchPrintfW(Command, _countof(Command), L"\"%s\"", GuiImage);
+        Ret = CreateProcessW(NULL, Command, NULL, NULL, TRUE,
+                              EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                              &Si.StartupInfo, &Pi);
+        ok(Ret, "GUI child %lu: %lu\n", i, GetLastError());
+        if (!Ret) break;
+        Wait = WaitForSingleObject(Pi.hProcess, 30000);
+        ok(Wait == WAIT_OBJECT_0, "GUI child timeout %lu\n", i);
+        if (Wait != WAIT_OBJECT_0) TerminateProcess(Pi.hProcess, 94);
+        GetExitCodeProcess(Pi.hProcess, &Exit);
+        ok(Exit == 0, "GUI child %lu exit %lu\n", i, Exit);
+        CloseHandle(Pi.hThread);
+        CloseHandle(Pi.hProcess);
+        if (i + 1 == Warmup || (i + 1 > Warmup && (i + 1 - Warmup) % 32 == 0))
+        {
+            Sleep(100); /* Allow CSR disconnect to finish before sampling. */
+            if (QueryCsrUsage(&After, &AfterHandles))
+            {
+                trace("GUI exits %lu: csrss private bytes %Iu, handles %lu\n", i + 1, After, AfterHandles);
+                if (i + 1 == Warmup)
+                {
+                    Before = After;
+                    BeforeHandles = AfterHandles;
+                    Measured = TRUE;
+                }
+            }
+        }
+    }
+    if (Measured)
+    {
+        trace("GUI loop csrss delta: bytes %Id, handles %ld\n",
+              (SSIZE_T)After - Before, (LONG)AfterHandles - BeforeHandles);
+        ok(After <= Before + 4 * 1024 * 1024,
+           "GUI exits leaked csrss memory: %Iu -> %Iu\n", Before, After);
+    }
+    else skip("csrss memory counters unavailable\n");
+FreeList:
+    CloseHandle(Selection);
+    pDelete(Si.lpAttributeList);
+    HeapFree(GetProcessHeap(), 0, Si.lpAttributeList);
+Cleanup:
+    for (i = 0; i < ConsoleCount; ++i) if (Copies[i]) CloseHandle(Copies[i]);
+    HeapFree(GetProcessHeap(), 0, Copies);
+    CloseHandle(Console);
+}
+
+static VOID TestListCapacity(VOID)
+{
+    typedef NTSTATUS (NTAPI *CREATE_WITH_ATTRIBUTES)(PHANDLE, ACCESS_MASK,
+        POBJECT_ATTRIBUTES, HANDLE, ULONG, HANDLE, HANDLE, HANDLE, BOOLEAN,
+        PROS_PS_ATTRIBUTE_LIST);
+    CREATE_WITH_ATTRIBUTES CreateNative;
+    ROS_PS_ATTRIBUTE_LIST Attributes;
+    HANDLE Process = NULL;
+    NTSTATUS Status;
+    SIZE_T Count = (SIZE_T)ROS_PS_MAX_HANDLE_COUNT + 1, i;
+    PHANDLE Handles;
+
+    Handles = VirtualAlloc(NULL, Count * sizeof(HANDLE),
+                            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (Handles)
+    {
+        for (i = 0; i < Count; ++i) Handles[i] = Report->Handles[0];
+        ExpectFailure(Handles, Count, TRUE, ERROR_INVALID_PARAMETER);
+        VirtualFree(Handles, 0, MEM_RELEASE);
+    }
+    else skip("Memory for capacity test unavailable: %lu\n", GetLastError());
+
+    CreateNative = (CREATE_WITH_ATTRIBUTES)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
+                                                         "NtCreateProcessWithAttributes");
+    if (!CreateNative) return;
+    ZeroMemory(&Attributes, sizeof(Attributes));
+    Attributes.TotalLength = sizeof(Attributes);
+    Attributes.Attributes[0].Attribute = ROS_PS_ATTRIBUTE_HANDLE_LIST;
+    Attributes.Attributes[0].Size = Count * sizeof(HANDLE);
+    /* An unreadable list must be rejected by count before probing/allocation. */
+    Attributes.Attributes[0].ValuePtr = NULL;
+    Status = CreateNative(&Process, PROCESS_ALL_ACCESS, NULL, GetCurrentProcess(),
+                           4 /* PROCESS_CREATE_FLAGS_INHERIT_HANDLES */,
+                           NULL, NULL, NULL, FALSE, &Attributes);
+    ok(Status == (NTSTATUS)0xc000000d, "Native over-capacity status: %lx\n", Status);
+    ok(Process == NULL, "Native over-capacity call returned a process\n");
+    if (NT_SUCCESS(Status) && Process) CloseHandle(Process);
 }
 
 START_TEST(HandleList)
@@ -388,9 +639,13 @@ START_TEST(HandleList)
     }
     TestRace();
     TestConsole();
+    TestMovedStandardHandles();
+    TestListCapacity();
     CloseHandle(Report->Handles[0]);
     CloseHandle(Report->Handles[1]);
     TestLargeList();
+    /* Enlarging a Windows 7 console table can affect later console attaches. */
+    TestGuiExit();
     UnmapViewOfFile(Report);
     CloseHandle(Mapping);
 }

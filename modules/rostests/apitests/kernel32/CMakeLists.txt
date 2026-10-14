@@ -150,3 +150,9 @@ list(APPEND MANIFEST_FILES
 foreach(item ${MANIFEST_FILES})
     add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/${item}")
 endforeach(item)
+
+add_executable(handlelist_gui handlelist_gui.c)
+set_module_type(handlelist_gui win32gui ENTRYPOINT WinMainCRTStartup)
+add_importlibs(handlelist_gui kernel32)
+add_dependencies(kernel32_apitest handlelist_gui)
+add_rostests_file(TARGET handlelist_gui)

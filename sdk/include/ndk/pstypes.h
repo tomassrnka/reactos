@@ -51,6 +51,7 @@ extern POBJECT_TYPE NTSYSAPI PsJobType;
  * Unlike NtCreateUserProcess, this entry point creates only the process object;
  * kernel32 continues to create the initial thread through NtCreateThread. */
 #define ROS_PS_ATTRIBUTE_HANDLE_LIST 0x0002000b
+#define ROS_PS_MAX_HANDLE_COUNT (1UL << 24)
 typedef struct _ROS_PS_ATTRIBUTE
 {
     ULONG_PTR Attribute;

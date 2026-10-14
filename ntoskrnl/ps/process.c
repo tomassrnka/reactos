@@ -1478,7 +1478,8 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
         if (Attributes.TotalLength != sizeof(Attributes) ||
             Attributes.Attributes[0].Attribute != ROS_PS_ATTRIBUTE_HANDLE_LIST ||
             Attributes.Attributes[0].ReturnLength ||
-            Attributes.Attributes[0].Size % sizeof(HANDLE))
+            Attributes.Attributes[0].Size % sizeof(HANDLE) ||
+            Attributes.Attributes[0].Size / sizeof(HANDLE) > ROS_PS_MAX_HANDLE_COUNT)
         {
             Status = STATUS_INVALID_PARAMETER;
         }

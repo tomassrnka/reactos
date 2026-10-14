@@ -1174,6 +1174,12 @@ ExDupHandleTable(IN PEPROCESS Process,
                     /* Free it since we can't lock it, so we won't use it */
                     Failed = TRUE;
                 }
+                else if (!(HandleTableEntry->Value & Mask))
+                {
+                    /* The inherit flag may have changed before we locked it. */
+                    ExUnlockHandleTableEntry(HandleTable, HandleTableEntry);
+                    Failed = TRUE;
+                }
                 else
                 {
                     /* Copy the handle value */

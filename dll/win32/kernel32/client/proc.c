@@ -3424,6 +3424,14 @@ StartScan:
     {
         case STATUS_INVALID_IMAGE_WIN_16:
         {
+            /* A VDM task cannot apply a per-process handle list. */
+            if (HandleListAttribute)
+            {
+                BaseSetLastNTError(STATUS_NOT_SUPPORTED);
+                Result = FALSE;
+                goto Quickie;
+            }
+
             /* 16-bit binary. Should we use WOW or does the caller force VDM? */
             if (!(dwCreationFlags & CREATE_FORCEDOS))
             {
@@ -3572,6 +3580,13 @@ StartScan:
                 (Status == STATUS_INVALID_IMAGE_NE_FORMAT) ||
                 (BinarySubType = BaseIsDosApplication(&PathName, Status)))
             {
+                if (HandleListAttribute)
+                {
+                    BaseSetLastNTError(STATUS_NOT_SUPPORTED);
+                    Result = FALSE;
+                    goto Quickie;
+                }
+
                 /* We're launching a DOS application */
                 VdmBinaryType = BINARY_TYPE_DOS;
 
@@ -4138,6 +4153,14 @@ StartScan:
         PHANDLE Source = HandleListAttribute->Value;
         BOOLEAN EmptyList = FALSE;
 
+        /* No native handle table can contain a larger selection. Match the
+         * native boundary before allocating the user-mode split buffers. */
+        if (HandleCount > ROS_PS_MAX_HANDLE_COUNT)
+        {
+            BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+            Result = FALSE;
+            goto Quickie;
+        }
         if (Size > MAXULONG / 2)
         {
             BaseSetLastNTError(STATUS_NO_MEMORY);
