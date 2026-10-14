@@ -2014,6 +2014,78 @@ Classes:
     return 0;
 }
 
+/* Compare only the policy prefix, without reconstructing the whole ancestry.
+ * Native relative names outside these aliases have no counted absolute-name
+ * limit, even if an ordinary application component is called Wow6432Node. */
+static BOOLEAN
+CmpWow64MatchComponents(PCM_KEY_CONTROL_BLOCK Kcb, ULONG Depth,
+                       PCUNICODE_STRING Remaining, PULONG Index,
+                       PULONG Position, PCWSTR Prefix)
+{
+    UNICODE_STRING Expected, Actual;
+    PCM_KEY_CONTROL_BLOCK Ancestor;
+    ULONG Start, Level;
+
+    while (*Prefix)
+    {
+        while (*Prefix == L'\\') ++Prefix;
+        if (!*Prefix) break;
+        Expected.Buffer = (PWSTR)Prefix;
+        while (*Prefix && *Prefix != L'\\') ++Prefix;
+        Expected.Length = Expected.MaximumLength = (Prefix - Expected.Buffer) * sizeof(WCHAR);
+        if (*Index < Depth)
+        {
+            Ancestor = Kcb;
+            for (Level = Depth - *Index - 1; Level; --Level) Ancestor = Ancestor->ParentKcb;
+            if (Ancestor->NameBlock->Compressed)
+            {
+                if (CmpCompareCompressedName(&Expected, Ancestor->NameBlock->Name,
+                                             Ancestor->NameBlock->NameLength)) return FALSE;
+            }
+            else
+            {
+                Actual.Buffer = Ancestor->NameBlock->Name;
+                Actual.Length = Actual.MaximumLength = Ancestor->NameBlock->NameLength;
+                if (!RtlEqualUnicodeString(&Actual, &Expected, TRUE)) return FALSE;
+            }
+            ++*Index;
+        }
+        else
+        {
+            while (*Position < Remaining->Length / sizeof(WCHAR) && Remaining->Buffer[*Position] == L'\\')
+                ++*Position;
+            Start = *Position;
+            while (*Position < Remaining->Length / sizeof(WCHAR) && Remaining->Buffer[*Position] != L'\\')
+                ++*Position;
+            Actual.Buffer = Remaining->Buffer + Start;
+            Actual.Length = Actual.MaximumLength = (*Position - Start) * sizeof(WCHAR);
+            if (!RtlEqualUnicodeString(&Actual, &Expected, TRUE)) return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOLEAN
+CmpWow64HasPhysicalAlias(PCM_KEY_CONTROL_BLOCK Kcb, PCUNICODE_STRING Remaining)
+{
+    PCM_KEY_CONTROL_BLOCK Ancestor;
+    ULONG Depth = 0, Index = 0, Position = 0, i, NextIndex, NextPosition;
+    for (Ancestor = Kcb; Ancestor; Ancestor = Ancestor->ParentKcb) ++Depth;
+    if (!CmpWow64MatchComponents(Kcb, Depth, Remaining, &Index, &Position,
+                                L"\\REGISTRY\\MACHINE\\SOFTWARE\\Wow6432Node")) return FALSE;
+    NextIndex = Index;
+    NextPosition = Position;
+    if (CmpWow64MatchComponents(Kcb, Depth, Remaining, &NextIndex, &NextPosition, L"\\Classes")) return TRUE;
+    for (i = 0; i < RTL_NUMBER_OF(CmpWow64SharedSoftware); ++i)
+    {
+        NextIndex = Index;
+        NextPosition = Position;
+        if (CmpWow64MatchComponents(Kcb, Depth, Remaining, &NextIndex, &NextPosition,
+                                   CmpWow64SharedSoftware[i])) return TRUE;
+    }
+    return FALSE;
+}
+
 static NTSTATUS
 CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
                     PCUNICODE_STRING RemainingName, PCM_PARSE_CONTEXT Context)
@@ -2026,7 +2098,7 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
     PWSTR NewName;
     ULONG Length, Separator, Offset, Cut = 0, Insert = sizeof(Node) - sizeof(WCHAR), i;
 
-    if (!Context || !Context->Wow64Flags || Context->Wow64Reparsed)
+    if (!Context || Context->Wow64Reparsed)
         return STATUS_SUCCESS;
     CmpLockRegistry();
     CmpAcquireKcbLockShared(Kcb);
@@ -2035,6 +2107,12 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
         CmpReleaseKcbLock(Kcb);
         CmpUnlockRegistry();
         return STATUS_KEY_DELETED;
+    }
+    if (!Context->Wow64Flags && !CmpWow64HasPhysicalAlias(Kcb, RemainingName))
+    {
+        CmpReleaseKcbLock(Kcb);
+        CmpUnlockRegistry();
+        return STATUS_SUCCESS;
     }
     RootName = CmpConstructName(Kcb);
     CmpReleaseKcbLock(Kcb);
