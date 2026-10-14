@@ -133,6 +133,7 @@ list(APPEND SOURCE
     msxml2.idl
     msxml6.idl
     natupnp.idl
+    ndattrib.idl
     netcon.idl
     netfw.idl
     oaidl.idl
