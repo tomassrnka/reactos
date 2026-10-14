@@ -1452,6 +1452,87 @@ GetCurrentTimeInSeconds(VOID)
     return (DWORD)((Time.ll - u1970.ll) / 10000000ULL);
 }
 
+/*
+ * A nonblocking connect leaves the user-mode socket state to MsafdConnectAPC,
+ * which runs only in an alertable wait of the connecting thread, while select
+ * and WSAEventSelect report the finished connection without one. Where the
+ * state matters before the APC ran, ask AFD. Only the connected state is taken
+ * over, quietly: no asynchronous select event is re-armed and the helper is
+ * not notified, the APC still does both. Returns a Winsock error code,
+ * NO_ERROR also when the socket is simply not connected.
+ */
+static
+INT
+MsafdAdoptConnectedState(
+    _In_ PSOCKET_INFORMATION Socket)
+{
+    IO_STATUS_BLOCK IOSB;
+    SOCK_SHARED_INFO SharedData;
+    AFD_TDI_HANDLE_DATA HandleData;
+    ULONG Flags = AFD_CONNECTION_HANDLE;
+    HANDLE SockEvent;
+    NTSTATUS Status;
+
+    /* Every connected socket passed through the bound state in this process */
+    if (Socket->SharedData->State != SocketBound)
+        return NO_ERROR;
+
+    Status = NtCreateEvent(&SockEvent,
+                           EVENT_ALL_ACCESS,
+                           NULL,
+                           SynchronizationEvent,
+                           FALSE);
+    if (!NT_SUCCESS(Status))
+        return TranslateNtStatusError(Status);
+
+    Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                   SockEvent,
+                                   NULL,
+                                   NULL,
+                                   &IOSB,
+                                   IOCTL_AFD_GET_CONTEXT,
+                                   NULL,
+                                   0,
+                                   &SharedData,
+                                   sizeof(SharedData));
+    if (Status == STATUS_PENDING)
+    {
+        MsafdWaitForAlert(SockEvent);
+        Status = IOSB.Status;
+    }
+
+    /* AFD and the shared enumeration agree on the connected value only */
+    if (NT_SUCCESS(Status) && SharedData.State == SocketConnected)
+    {
+        Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                       SockEvent,
+                                       NULL,
+                                       NULL,
+                                       &IOSB,
+                                       IOCTL_AFD_GET_TDI_HANDLES,
+                                       &Flags,
+                                       sizeof(Flags),
+                                       &HandleData,
+                                       sizeof(HandleData));
+        if (Status == STATUS_PENDING)
+        {
+            MsafdWaitForAlert(SockEvent);
+            Status = IOSB.Status;
+        }
+
+        if (NT_SUCCESS(Status))
+        {
+            Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
+            Socket->SharedData->State = SocketConnected;
+        }
+    }
+
+    NtClose(SockEvent);
+
+    return NT_SUCCESS(Status) ? NO_ERROR : TranslateNtStatusError(Status);
+}
+
 _Must_inspect_result_
 SOCKET
 WSPAPI
@@ -1988,9 +2069,11 @@ MsafdConnectAPC(
     Socket->SharedData->SocketLastError = TranslateNtStatusError(IoStatusBlock->Status);
     if (IoStatusBlock->Status == STATUS_SUCCESS)
     {
+        /* WSPGetPeerName may have recorded the connection already */
+        if (Socket->SharedData->State != SocketConnected)
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
         Socket->SharedData->State = SocketConnected;
         Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
-        Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     }
 
     /* Re-enable Async Event */
@@ -2204,6 +2287,12 @@ WSPConnect(SOCKET Handle,
                                    connectionInfoSize,
                                    NULL,
                                    0);
+
+    /* A connect that AFD took up supersedes a ConnectEx that failed or was
+     * cancelled, which nothing else reports; a rejected one changes nothing */
+    if (NT_SUCCESS(Status))
+        Socket->ConnectExPending = FALSE;
+
     if (Socket->SharedData->NonBlocking)
     {
         if (Status == STATUS_PENDING)
@@ -2395,6 +2484,10 @@ WSPConnectEx(
                                    dwSendDataLength);
 
     SetLastError(TranslateNtStatusError(Status));
+
+    /* Only SO_UPDATE_CONNECT_CONTEXT re-arms the asynchronous events */
+    if (NT_SUCCESS(Status))
+        Socket->ConnectExPending = TRUE;
 
     return Status == STATUS_SUCCESS;
 }
@@ -2601,6 +2694,17 @@ WSPGetPeerName(IN SOCKET s,
     {
         if (lpErrno) *lpErrno = WSAENOTSOCK;
         return SOCKET_ERROR;
+    }
+
+    if (Socket->SharedData->State != SocketConnected)
+    {
+        INT AdoptError = MsafdAdoptConnectedState(Socket);
+
+        if (AdoptError != NO_ERROR)
+        {
+            if (lpErrno) *lpErrno = AdoptError;
+            return SOCKET_ERROR;
+        }
     }
 
     if (Socket->SharedData->State != SocketConnected)
@@ -3119,6 +3223,7 @@ MsafdUpdateConnectionContext(
     SOCK_SHARED_INFO SharedData;
     AFD_TDI_HANDLE_DATA HandleData;
     HANDLE SockEvent;
+    BOOLEAN WasConnected;
     PSOCKET_INFORMATION Socket = GetSocketStructure(Handle);
 
     if (!Socket)
@@ -3127,7 +3232,10 @@ MsafdUpdateConnectionContext(
         return SOCKET_ERROR;
     }
 
-    if (Socket->SharedData->State == SocketConnected)
+    /* A connected socket needs nothing, unless ConnectEx connected it and
+     * WSPGetPeerName recorded that before this option re-armed the events */
+    WasConnected = (Socket->SharedData->State == SocketConnected);
+    if (WasConnected && !Socket->ConnectExPending)
     {
         return NO_ERROR;
     }
@@ -3186,13 +3294,16 @@ MsafdUpdateConnectionContext(
         goto Quit;
 
     Socket->SharedData->State = SharedData.State;
+    Socket->ConnectExPending = FALSE;
 
     if (SharedData.State == SocketConnected)
     {
         /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
         Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
         Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
-        Socket->SharedData->ConnectTime = SharedData.ConnectTime;
+        /* AFD keeps no connect time; WSPGetPeerName may have recorded it */
+        if (!WasConnected)
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
 
         /* Re-enable Async Event */
         SockReenableAsyncSelectEvent(Socket, FD_WRITE);
