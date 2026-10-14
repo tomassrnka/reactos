@@ -48,6 +48,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(schannel);
 #include <mbedtls/md_internal.h>
 #include <mbedtls/ssl_internal.h>
 
+/* wininet.h values of the chain policy checks */
+#define SECURITY_FLAG_IGNORE_REVOCATION      0x00000080
+#define SECURITY_FLAG_IGNORE_CERT_CN_INVALID 0x00001000
+
 #define ROS_SCHAN_IS_BLOCKING(read_len)          ((read_len & 0xFFF00000) == 0xCCC00000)
 #define ROS_SCHAN_IS_BLOCKING_MARSHALL(read_len) ((read_len & 0x000FFFFF) |  0xCCC00000)
 #define ROS_SCHAN_IS_BLOCKING_RETRIEVE(read_len)  (read_len & 0x000FFFFF)
@@ -75,6 +79,10 @@ typedef struct
     mbedtls_entropy_context  entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
     struct schan_transport  *transport;
+    WCHAR                   *target;
+    DWORD                    cred_flags;
+    BOOL                     manual_validation;
+    BOOL                     cert_checked;
 } MBEDTLS_SESSION, *PMBEDTLS_SESSION;
 
 /* custom `net_recv` callback adapter, mbedTLS uses it in mbedtls_ssl_read for
@@ -243,6 +251,7 @@ void schan_imp_dispose_session(schan_imp_session session)
     /* tell the other peer (a server) that we are going away */
     //ssl_close_notify(&s->ssl);
 
+    HeapFree(GetProcessHeap(), 0, s->target);
     mbedtls_ssl_free(&s->ssl);
     mbedtls_ctr_drbg_free(&s->ctr_drbg);
     mbedtls_entropy_free(&s->entropy);
@@ -275,11 +284,160 @@ void schan_imp_set_session_target(schan_imp_session session, const char *target)
     mbedtls_ssl_set_hostname(&s->ssl, target);
 }
 
-SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
+void schan_imp_set_session_validation(schan_imp_session session, const WCHAR *target, DWORD flags, BOOL manual)
 {
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
 
-    int err = mbedtls_ssl_handshake(&s->ssl);
+    s->cred_flags = flags;
+    s->manual_validation = manual || (flags & SCH_CRED_MANUAL_CRED_VALIDATION);
+
+    if (target)
+    {
+        SIZE_T size = (lstrlenW(target) + 1) * sizeof(WCHAR);
+
+        s->target = HeapAlloc(GetProcessHeap(), 0, size);
+        if (s->target)
+            memcpy(s->target, target, size);
+    }
+}
+
+static SECURITY_STATUS schan_add_peer_chain(const mbedtls_x509_crt *peer_cert, HCERTSTORE store,
+                                            PCCERT_CONTEXT *ret);
+
+static SECURITY_STATUS schan_status_from_chain_error(DWORD error)
+{
+    switch (error)
+    {
+        case CERT_E_EXPIRED:
+            return SEC_E_CERT_EXPIRED;
+
+        case CERT_E_CN_NO_MATCH:
+            return SEC_E_WRONG_PRINCIPAL;
+
+        case CERT_E_UNTRUSTEDROOT:
+        case CERT_E_UNTRUSTEDTESTROOT:
+        case CERT_E_CHAINING:
+        case TRUST_E_CERT_SIGNATURE:
+            return SEC_E_UNTRUSTED_ROOT;
+
+        default:
+            return SEC_E_CERT_UNKNOWN;
+    }
+}
+
+/* Windows schannel checks the chain of a server itself unless the caller asked to do it */
+static SECURITY_STATUS schan_validate_server_chain(MBEDTLS_SESSION *s)
+{
+    static char server_auth_oid[] = szOID_PKIX_KP_SERVER_AUTH;
+    char *usages[] = { server_auth_oid };
+    SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl_para;
+    CERT_CHAIN_POLICY_PARA policy_para;
+    CERT_CHAIN_POLICY_STATUS policy_status;
+    CERT_CHAIN_PARA chain_para;
+    PCCERT_CHAIN_CONTEXT chain = NULL;
+    PCCERT_CONTEXT leaf = NULL;
+    HCERTSTORE store;
+    SECURITY_STATUS status;
+    DWORD chain_flags = 0;
+
+    /* Without a target name there is nothing to match, which Windows reports before any chain error */
+    if (!s->target && !(s->cred_flags & SCH_CRED_NO_SERVERNAME_CHECK))
+        return SEC_E_WRONG_PRINCIPAL;
+
+    store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, CERT_STORE_CREATE_NEW_FLAG, NULL);
+    if (!store)
+        return SEC_E_INTERNAL_ERROR;
+
+    status = schan_add_peer_chain(s->ssl.session_negotiate ? s->ssl.session_negotiate->peer_cert : NULL, store, &leaf);
+    if (status != SEC_E_OK || !leaf)
+    {
+        CertCloseStore(store, 0);
+        return SEC_E_CERT_UNKNOWN;
+    }
+
+    memset(&chain_para, 0, sizeof(chain_para));
+    chain_para.cbSize = sizeof(chain_para);
+    chain_para.RequestedUsage.dwType = USAGE_MATCH_TYPE_OR;
+    chain_para.RequestedUsage.Usage.cUsageIdentifier = 1;
+    chain_para.RequestedUsage.Usage.rgpszUsageIdentifier = usages;
+
+    if (s->cred_flags & SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT)
+        chain_flags = CERT_CHAIN_REVOCATION_CHECK_END_CERT;
+    else if (s->cred_flags & SCH_CRED_REVOCATION_CHECK_CHAIN)
+        chain_flags = CERT_CHAIN_REVOCATION_CHECK_CHAIN;
+    else if (s->cred_flags & SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT)
+        chain_flags = CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
+
+    if (!CertGetCertificateChain(NULL, leaf, NULL, store, &chain_para, chain_flags, NULL, &chain))
+    {
+        status = SEC_E_CERT_UNKNOWN;
+        goto done;
+    }
+
+    memset(&ssl_para, 0, sizeof(ssl_para));
+    ssl_para.cbSize = sizeof(ssl_para);
+    ssl_para.dwAuthType = AUTHTYPE_SERVER;
+    if (s->cred_flags & SCH_CRED_NO_SERVERNAME_CHECK)
+        ssl_para.fdwChecks |= SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
+    if (s->cred_flags & (SCH_CRED_IGNORE_NO_REVOCATION_CHECK | SCH_CRED_IGNORE_REVOCATION_OFFLINE))
+        ssl_para.fdwChecks |= SECURITY_FLAG_IGNORE_REVOCATION;
+    ssl_para.pwszServerName = s->target;
+
+    memset(&policy_para, 0, sizeof(policy_para));
+    policy_para.cbSize = sizeof(policy_para);
+    policy_para.pvExtraPolicyPara = &ssl_para;
+
+    memset(&policy_status, 0, sizeof(policy_status));
+    policy_status.cbSize = sizeof(policy_status);
+
+    if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &policy_para, &policy_status))
+        status = SEC_E_CERT_UNKNOWN;
+    else if (policy_status.dwError)
+    {
+        WARN("MBEDTLS server certificate rejected: %#x\n", policy_status.dwError);
+        status = schan_status_from_chain_error(policy_status.dwError);
+    }
+    /* crypt32's SSL policy accepts a chain whose issuer is missing */
+    else if (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_PARTIAL_CHAIN)
+        status = SEC_E_UNTRUSTED_ROOT;
+    else
+        status = SEC_E_OK;
+
+done:
+    if (chain)
+        CertFreeCertificateChain(chain);
+    CertFreeCertificateContext(leaf);
+    CertCloseStore(store, 0);
+    return status;
+}
+
+SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+    int err = 0;
+
+    /* Step through the handshake so the server certificate is checked before the client answers it */
+    while (s->ssl.state != MBEDTLS_SSL_HANDSHAKE_OVER)
+    {
+        if (!s->cert_checked && s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT &&
+            s->ssl.state > MBEDTLS_SSL_SERVER_CERTIFICATE)
+        {
+            s->cert_checked = TRUE;
+
+            /* Windows answers a rejected server with the status alone, no alert record */
+            if (!s->manual_validation)
+            {
+                SECURITY_STATUS status = schan_validate_server_chain(s);
+
+                if (status != SEC_E_OK)
+                    return status;
+            }
+        }
+
+        err = mbedtls_ssl_handshake_step(&s->ssl);
+        if (err != 0)
+            break;
+    }
 
     TRACE("MBEDTLS schan_imp_handshake: %p  err: %#x \n", session, err);
 
@@ -580,16 +738,11 @@ SECURITY_STATUS schan_imp_get_connection_info(schan_imp_session session,
     return SEC_E_OK;
 }
 
-SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session, HCERTSTORE store,
-                                                       PCCERT_CONTEXT *ret)
+static SECURITY_STATUS schan_add_peer_chain(const mbedtls_x509_crt *peer_cert, HCERTSTORE store,
+                                            PCCERT_CONTEXT *ret)
 {
-    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
     PCCERT_CONTEXT cert_context = NULL;
-
     const mbedtls_x509_crt *next_cert;
-    const mbedtls_x509_crt *peer_cert = mbedtls_ssl_get_peer_cert(&s->ssl);
-
-    TRACE("MBEDTLS schan_imp_get_session_peer_certificate %p %p %p %p.\n", session, store, ret, ret != NULL ? *ret : NULL);
 
     if (!peer_cert)
         return SEC_E_INTERNAL_ERROR;
@@ -607,6 +760,16 @@ SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session
 
     *ret = cert_context;
     return SEC_E_OK;
+}
+
+SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session, HCERTSTORE store,
+                                                       PCCERT_CONTEXT *ret)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+
+    TRACE("MBEDTLS schan_imp_get_session_peer_certificate %p %p %p %p.\n", session, store, ret, ret != NULL ? *ret : NULL);
+
+    return schan_add_peer_chain(mbedtls_ssl_get_peer_cert(&s->ssl), store, ret);
 }
 
 SECURITY_STATUS schan_imp_send(schan_imp_session session, const void *buffer,

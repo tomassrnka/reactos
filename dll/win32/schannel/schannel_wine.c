@@ -416,6 +416,7 @@ static SECURITY_STATUS schan_AcquireClientCredentials(const SCHANNEL_CRED *schan
     if (handle == SCHAN_INVALID_HANDLE) goto fail;
 
     creds->credential_use = SECPKG_CRED_OUTBOUND;
+    creds->flags = schanCred ? schanCred->dwFlags : 0;
     if (!schan_imp_allocate_certificate_credentials(creds))
     {
         schan_free_handle(handle, SCHAN_HANDLE_CRED);
@@ -832,6 +833,8 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
                 HeapFree( GetProcessHeap(), 0, target );
             }
         }
+        schan_imp_set_session_validation(ctx->session, pszTargetName, cred->flags,
+                                         (fContextReq & ISC_REQ_MANUAL_CRED_VALIDATION) != 0);
         phNewContext->dwLower = handle;
         phNewContext->dwUpper = 0;
     }
@@ -905,6 +908,9 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
     *pfContextAttr = 0;
     if (ctx->req_ctx_attr & ISC_REQ_ALLOCATE_MEMORY)
         *pfContextAttr |= ISC_RET_ALLOCATED_MEMORY;
+    /* Windows reports the flag for the context request only, not for SCH_CRED_MANUAL_CRED_VALIDATION */
+    if (ctx->req_ctx_attr & ISC_REQ_MANUAL_CRED_VALIDATION)
+        *pfContextAttr |= ISC_RET_MANUAL_CRED_VALIDATION;
 
     return ret;
 }
