@@ -9,11 +9,13 @@
 #include <apitest.h>
 
 extern void func_LsaLogonContext(void);
+extern void func_SchannelProtocols(void);
 extern void func_SchannelServerCert(void);
 
 const struct test winetest_testlist[] =
 {
     { "LsaLogonContext", func_LsaLogonContext },
+    { "SchannelProtocols", func_SchannelProtocols },
     { "SchannelServerCert", func_SchannelServerCert },
 
     { 0, 0 }
