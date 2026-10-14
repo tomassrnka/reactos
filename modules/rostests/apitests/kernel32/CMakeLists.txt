@@ -64,6 +64,7 @@ list(APPEND SOURCE
     ProcessAffinity.c
     QueryCycleTime.c
     QueryUnbiasedInterruptTime.c
+    ProcessToken.c
     QueueUserAPC.c
     RaiseFailFastException.c
     ReadFile.c
