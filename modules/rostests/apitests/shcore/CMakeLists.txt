@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    CommandLineToArgvW.c
     DpiFunctions.c
     StreamFunctions.c
     testlist.c)
