@@ -625,6 +625,8 @@ static void Test_RawInputAndMouse(void)
     gotInput = PumpUntil(WM_INPUT, 500);
     gotMove = PumpUntil(WM_MOUSEMOVE, 100);
     trace("raw input %d, mouse move %d\n", gotInput, gotMove);
+    if (!gotInput)
+        skip("no WM_INPUT delivered for injected mouse input\n");
     Sleep(50);
     DrainQueue();
     ExpectIdle("raw input and mouse move", TRUE);

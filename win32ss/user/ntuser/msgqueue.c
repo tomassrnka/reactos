@@ -432,7 +432,6 @@ MsqWakeQueue(PTHREADINFO pti, DWORD MessageBits, BOOL KeyEvent)
    if (MessageBits & QS_SENDMESSAGE) pti->nCntsQBits[QSRosSendMessage]++;
    if (MessageBits & QS_HOTKEY)      pti->nCntsQBits[QSRosHotKey]++;
    if (MessageBits & QS_EVENT)       pti->nCntsQBits[QSRosEvent]++;
-   if (MessageBits & QS_RAWINPUT)    pti->nCntsQBits[QSRosRawInput]++;
 
    if (KeyEvent)
       KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
@@ -496,10 +495,6 @@ ClearMsgBitsMask(PTHREADINFO pti, UINT MessageBits)
    if (MessageBits & QS_EVENT)
    {
       if (DropQBitCount(&pti->nCntsQBits[QSRosEvent])) ClrMask |= QS_EVENT;
-   }
-   if (MessageBits & QS_RAWINPUT)
-   {
-      if (DropQBitCount(&pti->nCntsQBits[QSRosRawInput])) ClrMask |= QS_RAWINPUT;
    }
 
    /* A posted message sets QS_POSTMESSAGE and QS_ALLPOSTMESSAGE together; the last one out clears both */
@@ -1397,9 +1392,17 @@ MsqPostQuitMessage(PTHREADINFO pti, ULONG ExitCode)
 
    pti->QuitPosted = TRUE;
    pti->exitCode = ExitCode;
-   /* The flag holds one count; a second quit only changes the exit code */
+   /* The flag holds one count; a repeated quit adds none but still refreshes the bits and signals */
    if (!WasPosted)
+   {
       MsqWakeQueue(pti, QS_POSTMESSAGE|QS_ALLPOSTMESSAGE, TRUE);
+   }
+   else
+   {
+      pti->pcti->fsWakeBits |= QS_POSTMESSAGE|QS_ALLPOSTMESSAGE;
+      pti->pcti->fsChangeBits |= QS_POSTMESSAGE|QS_ALLPOSTMESSAGE;
+      KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
+   }
 }
 
 /***********************************************************************
@@ -2259,7 +2262,6 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
    pti->nCntsQBits[QSRosSendMessage] = 0;
    pti->nCntsQBits[QSRosHotKey] = 0;
    pti->nCntsQBits[QSRosEvent] = 0;
-   pti->nCntsQBits[QSRosRawInput] = 0;
 
    /* cleanup posted messages */
    while (!IsListEmpty(&pti->PostedMessagesListHead))
