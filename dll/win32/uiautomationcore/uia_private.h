@@ -82,6 +82,9 @@ struct uia_node {
     struct list prov_thread_list_entry;
     struct list node_map_list_entry;
     struct uia_provider_thread_map_entry *map;
+
+    IWineUiaProvider *detached_prov;
+    DWORD detached_git_cookie;
 };
 
 static inline struct uia_node *impl_from_IWineUiaNode(IWineUiaNode *iface)
@@ -265,6 +268,8 @@ const struct uia_control_type_info *uia_control_type_info_from_id(CONTROLTYPEID 
 HRESULT create_base_hwnd_provider(HWND hwnd, IRawElementProviderSimple **elprov);
 void uia_stop_provider_thread(void);
 void uia_provider_thread_remove_node(HUIANODE node);
+void uia_node_detach_provider(struct uia_node *node);
+void uia_node_release_detached_provider(struct uia_node *node);
 LRESULT uia_lresult_from_node(HUIANODE huianode);
 HRESULT create_msaa_provider(IAccessible *acc, LONG child_id, HWND hwnd, BOOL root_acc_known,
         BOOL is_root_acc, IRawElementProviderSimple **elprov);
