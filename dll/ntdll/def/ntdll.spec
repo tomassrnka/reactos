@@ -74,7 +74,7 @@
 @ stdcall -version=0x600+ EtwEventEnabled(int64 ptr)
 @ stdcall -version=0x600+ EtwEventProviderEnabled(int64 long int64)
 @ stdcall -version=0x600+ EtwEventRegister(ptr ptr ptr ptr)
-@ stdcall -stub -version=0x600+ EtwEventSetInformation(int64 long ptr long)
+@ stdcall -version=0x601+ EtwEventSetInformation(int64 long ptr long)
 @ stdcall -version=0x600+ EtwEventUnregister(int64)
 @ stdcall -version=0x600+ EtwEventWrite(int64 ptr long ptr)
 @ stdcall -stub -version=0x600+ EtwEventWriteEndScenario(long ptr long long)
