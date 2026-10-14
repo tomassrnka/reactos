@@ -2479,6 +2479,10 @@ WSPConnectEx(
 
     SetLastError(TranslateNtStatusError(Status));
 
+    /* Only SO_UPDATE_CONNECT_CONTEXT re-arms the asynchronous events */
+    if (NT_SUCCESS(Status))
+        Socket->ConnectExPending = TRUE;
+
     return Status == STATUS_SUCCESS;
 }
 
@@ -3213,6 +3217,7 @@ MsafdUpdateConnectionContext(
     SOCK_SHARED_INFO SharedData;
     AFD_TDI_HANDLE_DATA HandleData;
     HANDLE SockEvent;
+    BOOLEAN WasConnected;
     PSOCKET_INFORMATION Socket = GetSocketStructure(Handle);
 
     if (!Socket)
@@ -3221,8 +3226,13 @@ MsafdUpdateConnectionContext(
         return SOCKET_ERROR;
     }
 
-    /* No early return for a connected state: WSPGetPeerName may have recorded
-     * it, and ConnectEx has no APC that would re-arm the asynchronous events */
+    /* A connected socket needs nothing, unless ConnectEx connected it and
+     * WSPGetPeerName recorded that before this option re-armed the events */
+    WasConnected = (Socket->SharedData->State == SocketConnected);
+    if (WasConnected && !Socket->ConnectExPending)
+    {
+        return NO_ERROR;
+    }
 
     /* Get the socket context from AFD because when ConnectEx is used, this information is not updated. */
     Status = NtCreateEvent(&SockEvent,
@@ -3278,13 +3288,16 @@ MsafdUpdateConnectionContext(
         goto Quit;
 
     Socket->SharedData->State = SharedData.State;
+    Socket->ConnectExPending = FALSE;
 
     if (SharedData.State == SocketConnected)
     {
         /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
         Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
         Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
-        Socket->SharedData->ConnectTime = SharedData.ConnectTime;
+        /* AFD keeps no connect time; WSPGetPeerName may have recorded it */
+        if (!WasConnected)
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
 
         /* Re-enable Async Event */
         SockReenableAsyncSelectEvent(Socket, FD_WRITE);
