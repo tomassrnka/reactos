@@ -428,3 +428,7 @@ set(baseaddress_xinput9_1_0                    0x6f870000)
 set(baseaddress_xmllite                        0x6f820000)
 set(baseaddress_xolehlp                        0x6f7f0000)
 set(baseaddress_zipfldr                        0x6f6a0000)
+set(baseaddress_evr                           0x6f5d0000) # manually added
+set(baseaddress_mfreadwrite                   0x6f560000) # manually added
+set(baseaddress_mf                            0x6f490000) # manually added
+set(baseaddress_mfplat                        0x6f3b0000) # manually added
