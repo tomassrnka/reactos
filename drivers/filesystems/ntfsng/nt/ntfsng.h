@@ -87,6 +87,8 @@ typedef struct _NG_VCB
     BOOLEAN Removable;              /* removable media: mounted read-only */
     BOOLEAN WrongMedia;             /* a verify found another medium: every request but close fails */
     ULONGLONG BootSectors;          /* boot sector's sector count, compared again at verify */
+    PFILE_OBJECT ShrinkOwner;       /* FSCTL_SHRINK_VOLUME: the handle with a prepared request (CoreLock), or NULL */
+    ULONGLONG ShrinkSectors;        /* the volume size that request asked for, in sectors without the boot copy */
     LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
     PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
     PNOTIFY_SYNC NotifySync;        /* directory change notification (FsRtl) */

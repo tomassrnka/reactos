@@ -130,6 +130,21 @@ int ngc_links(ngc_node *n);
 int ngc_parent_name(ngc_node *n, unsigned long long *parent, unsigned short *out, unsigned int *len);
 int ngc_get_security(ngc_vol *v, ngc_node *n, void **out, unsigned int *len);
 int ngc_set_security(ngc_vol *v, ngc_node *n, const void *sd, unsigned int len);
+/* Volume size (under the caller's volume lock).  Sectors are of the volume's sector size. */
+struct ngc_ntfsdata {
+	unsigned long long serial, sectors, total_clusters, free_clusters;
+	unsigned long long mft_valid_data, mft_lcn, mft2_lcn, mft_zone_start, mft_zone_end;
+	unsigned int bytes_per_sector, bytes_per_cluster, bytes_per_record;
+	unsigned char major, minor;
+};
+void ngc_ntfs_data(ngc_vol *v, struct ngc_ntfsdata *d);
+int ngc_read_bitmap(ngc_vol *v, unsigned long long off, unsigned int len, void *buf);
+/* Grows the volume to @sectors on a device of @dev_size bytes (the sector after the volume holds the boot copy). */
+int ngc_extend(ngc_vol *v, unsigned long long sectors, unsigned long long dev_size);
+/* 0 when @sectors leaves fewer clusters (at least one), else -EINVAL. */
+int ngc_shrink_valid(ngc_vol *v, unsigned long long sectors);
+/* Shrinks to @sectors when every cluster past them is free (-ENOSPC otherwise; no data moves). */
+int ngc_shrink(ngc_vol *v, unsigned long long sectors);
 /* Sets the volume label (@len UTF-16 units, at most NGC_LABEL_MAX; 0 clears it). */
 int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len);
 void ngc_free(void *p);

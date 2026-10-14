@@ -18,6 +18,7 @@
 #include "ntfs/index.h"
 #include "ntfs/reparse.h"
 #include "ntfs/ea.h"
+#include "ntfs/bitmap.h"
 #include "ngapi.h"
 #include <kshim_jnl.h>
 #include "ngjrec.h"
@@ -2098,6 +2099,362 @@ int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len)
 	mutex_unlock(&vol->volume_label_lock);
 	kfree(old);
 	return 0;
+}
+
+/* ------------------------------------------------------------- volume size */
+
+/* $Bitmap bytes for @nr clusters: whole 8-byte units, as format writes it. */
+static s64 ngc_bmp_bytes(s64 nr)
+{
+	return ((nr + 63) >> 6) << 3;
+}
+
+/* The allocator's per-page free-bit hints, grown for @nr clusters (the counts are redone by ngc_recount_free). */
+static int ngc_grow_lcn_hints(struct ntfs_volume *vol, s64 old_nr, s64 nr)
+{
+	size_t oldp = (size_t)((((old_nr + 7) >> 3) + PAGE_SIZE - 1) >> PAGE_SHIFT);
+	size_t newp = (size_t)((((nr + 7) >> 3) + PAGE_SIZE - 1) >> PAGE_SHIFT);
+	unsigned int *a, *old;
+
+	if (newp <= oldp)
+		return 0;
+	a = kvmalloc_array(newp, sizeof(*a), GFP_NOFS);
+	if (!a)
+		return -ENOMEM;
+	memcpy(a, vol->lcn_empty_bits_per_page, oldp * sizeof(*a));
+	memset(a + oldp, 0, (newp - oldp) * sizeof(*a));
+	down_write(&vol->lcnbmp_lock);
+	old = vol->lcn_empty_bits_per_page;
+	vol->lcn_empty_bits_per_page = a;
+	up_write(&vol->lcnbmp_lock);
+	kvfree(old);
+	return 0;
+}
+
+/* The free-cluster count and the per-page hints, read again from $Bitmap for the current nr_clusters. */
+static void ngc_recount_free(struct ntfs_volume *vol)
+{
+	down_write(&vol->lcnbmp_lock);
+	NVolClearFreeClusterKnown(vol);
+	get_nr_free_clusters(vol);
+	up_write(&vol->lcnbmp_lock);
+}
+
+/* Boot sector's sector count (0 if it cannot be read). */
+static u64 ngc_boot_sectors(struct ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	u8 *buf = kmalloc(vol->sector_size, GFP_NOFS);
+	u64 n = 0;
+
+	if (buf && !kshim_dev_rw(v->bdev, 0, 0, buf, vol->sector_size))
+		n = le64_to_cpu(((struct ntfs_boot_sector *)buf)->number_of_sectors);
+	kfree(buf);
+	return n;
+}
+
+/*
+ * Writes the boot sector with @sectors as its sector count, and its copy in the sector after the
+ * volume (where Windows and the core look for it), through the journal like any metadata write.
+ */
+static int ngc_write_boot(struct ngc_vol *v, u64 sectors)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	u32 ss = vol->sector_size;
+	u8 *buf = kmalloc(ss, GFP_NOFS);
+	int err;
+
+	if (!buf)
+		return -ENOMEM;
+	err = kshim_dev_rw(v->bdev, 0, 0, buf, ss);
+	if (!err) {
+		((struct ntfs_boot_sector *)buf)->number_of_sectors = cpu_to_le64(sectors);
+		err = kshim_dev_rw(v->bdev, 1, sectors * ss, buf, ss);
+		if (!err) {
+			kshim_mapping_update(v->bdev->bd_mapping, sectors * ss, buf, ss);
+			err = kshim_dev_rw(v->bdev, 1, 0, buf, ss);
+		}
+		if (!err)
+			kshim_mapping_update(v->bdev->bd_mapping, 0, buf, ss);
+	}
+	kfree(buf);
+	return err;
+}
+
+/* A change that may have reached the overlay failed half way: nothing more may be written. */
+static int ngc_resize_failed(struct ngc_vol *v, int err)
+{
+	printk(KERN_ERR "ngc: volume resize failed %d after changing metadata\n", err);
+	return ngc_writeback_failed(v, err == -ENOMEM ? -EIO : err);
+}
+
+/*
+ * Grows the volume to @sectors sectors on a device now @dev_size bytes long (FSCTL_EXTEND_VOLUME):
+ * $Bitmap grows (its clusters come from the old free space), the new clusters are free, the
+ * padding bits past the last cluster move to the new end, then the boot sector and its copy.
+ */
+static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long long dev_size)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct inode *bvi = vol->lcnbmp_ino;
+	struct ntfs_inode *bni = NTFS_I(bvi);
+	u32 ss = vol->sector_size;
+	s64 old_nr = vol->nr_clusters, nr, old_bytes, bytes;
+	u64 old_sectors;
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (v->failed)
+		return -EIO;
+	if (!sectors || sectors > (U64_MAX / ss) - 1 || (sectors + 1) * ss > dev_size)
+		return -EINVAL;
+	old_sectors = ngc_boot_sectors(v);
+	if (!old_sectors)
+		return -EIO;
+	/* As on Windows: fewer clusters is invalid, the same number changes nothing. */
+	nr = (s64)((sectors * ss) >> vol->cluster_size_bits);
+	if (nr <= old_nr)
+		return nr == old_nr ? 0 : -EINVAL;
+	/* Windows' NTFS limit, and the 32-bit cluster numbers of the NT interfaces. */
+	if (nr > 0xffffffffLL)
+		return -EFBIG;
+
+	err = ngc_mark_dirty(v);
+	if (!err)
+		err = ngc_before_alloc(v);
+	if (err)
+		return err;
+
+	/* The partition grew under the mount: device I/O may reach its new end. */
+	v->bdev->size = dev_size;
+	v->bdev->bd_inode->i_size = dev_size;
+	vol->nr_blocks = dev_size >> v->sb->s_blocksize_bits;
+
+	{
+		old_bytes = i_size_read(bvi);
+		bytes = ngc_bmp_bytes(nr);
+		if (bytes > old_bytes) {
+			/* Real clusters (a sparse $Bitmap is invalid), allocated below the old end. */
+			mutex_lock(&bni->mrec_lock);
+			err = ntfs_attr_truncate_i(bni, bytes, HOLES_NO);
+			mutex_unlock(&bni->mrec_lock);
+			if (err)
+				return err;
+			i_size_write(bvi, bytes);
+			err = ntfs_attr_set(bni, old_bytes, bytes - old_bytes, 0);
+			if (!err && bni->initialized_size < bytes) {
+				mutex_lock(&bni->mrec_lock);
+				err = ntfs_attr_set_initialized_size(bni, bytes);
+				mutex_unlock(&bni->mrec_lock);
+			}
+			mark_inode_dirty(bvi);
+			if (err)
+				return ngc_resize_failed(v, err);
+		}
+		err = ngc_grow_lcn_hints(vol, old_nr, nr);
+		if (err)
+			return ngc_resize_failed(v, err);
+		down_write(&vol->lcnbmp_lock);
+		err = ntfs_bitmap_clear_run(bvi, old_nr, nr - old_nr);
+		if (!err && (nr & 63))
+			err = ntfs_bitmap_set_bits_in_run(bvi, nr, 64 - (nr & 63), 1);
+		if (!err)
+			vol->nr_clusters = nr;
+		up_write(&vol->lcnbmp_lock);
+		if (err)
+			return ngc_resize_failed(v, err);
+		ngc_recount_free(vol);
+	}
+	err = ngc_commit(v);
+	if (!err)
+		err = ngc_write_boot(v, sectors);
+	if (!err)
+		err = ngc_commit(v);
+	return err;
+}
+
+/* A shrink to @sectors sectors leaves fewer clusters, and at least one: 0, else -EINVAL. */
+int ngc_shrink_valid(ngc_vol *v, unsigned long long sectors)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	s64 nr;
+
+	if (!sectors || sectors > U64_MAX / vol->sector_size)
+		return -EINVAL;
+	nr = (s64)((sectors * vol->sector_size) >> vol->cluster_size_bits);
+	return nr >= 1 && nr < vol->nr_clusters ? 0 : -EINVAL;
+}
+
+/*
+ * The shrink check: 0 when every cluster from where a volume of @sectors sectors ends is free,
+ * so that ngc_shrink can drop them; -ENOSPC when one is in use; -EINVAL when @sectors does not
+ * shrink the volume.  Sets *@first_used to the first cluster in use there (or nr_clusters).
+ */
+static int ngc_shrink_check_locked(struct ngc_vol *v, u64 sectors, s64 *first_used)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct address_space *mapping = vol->lcnbmp_ino->i_mapping;
+	s64 nr, lcn;
+	int err;
+
+	*first_used = vol->nr_clusters;
+	err = ngc_shrink_valid(v, sectors);
+	if (err)
+		return err;
+	nr = (s64)((sectors * vol->sector_size) >> vol->cluster_size_bits);
+	for (lcn = nr; lcn < vol->nr_clusters; ) {
+		pgoff_t index = (pgoff_t)(lcn >> (3 + PAGE_SHIFT));
+		struct folio *folio = read_mapping_folio(mapping, index, NULL);
+		s64 page_end = ((s64)index + 1) << (3 + PAGE_SHIFT);
+		u8 *kaddr;
+
+		if (IS_ERR(folio))
+			return PTR_ERR(folio);
+		kaddr = kmap_local_folio(folio, 0);
+		for (; lcn < page_end && lcn < vol->nr_clusters; lcn++) {
+			u64 bit = (u64)lcn & ((8ULL << PAGE_SHIFT) - 1);
+			if (kaddr[bit >> 3] & (1 << (bit & 7))) {
+				*first_used = lcn;
+				break;
+			}
+		}
+		kunmap_local(kaddr);
+		folio_put(folio);
+		if (*first_used != vol->nr_clusters)
+			return -ENOSPC;
+	}
+	return 0;
+}
+
+/*
+ * Shrinks the volume to @sectors sectors (FSCTL_SHRINK_VOLUME ShrinkCommit) when the clusters past
+ * the new end are all free (-ENOSPC otherwise: this driver moves no data): padding bits at the new
+ * end, $Bitmap truncated to the new size, then the boot sector and its copy after the new end.
+ * The device keeps its size; the caller shrinks the partition afterwards.
+ */
+static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct inode *bvi = vol->lcnbmp_ino;
+	struct ntfs_inode *bni = NTFS_I(bvi);
+	u32 ss = vol->sector_size;
+	s64 nr, first, bytes;
+	int err;
+
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	if (v->failed)
+		return -EIO;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	nr = (s64)((sectors * ss) >> vol->cluster_size_bits);
+	down_write(&vol->lcnbmp_lock);
+	err = ngc_shrink_check_locked(v, sectors, &first);
+	if (!err) {
+		err = ntfs_bitmap_set_bits_in_run(bvi, nr, round_up(nr, 64) - nr, 1);
+		if (!err) {
+			vol->nr_clusters = nr;
+			/* The allocator's zones inside the volume again, the MFT zone halved as at mount. */
+			while (vol->mft_zone_end >= nr && vol->mft_zone_end > vol->mft_lcn)
+				vol->mft_zone_end = vol->mft_lcn + (vol->mft_zone_end - vol->mft_lcn) / 2;
+			if (vol->mft_zone_pos >= vol->mft_zone_end)
+				vol->mft_zone_pos = vol->mft_zone_start;
+			if (vol->data1_zone_pos >= nr || vol->data1_zone_pos < vol->mft_zone_end)
+				vol->data1_zone_pos = vol->mft_zone_end;
+			if (vol->data2_zone_pos >= vol->mft_zone_start)
+				vol->data2_zone_pos = 0;
+		}
+	}
+	up_write(&vol->lcnbmp_lock);
+	if (err)
+		return err;
+	bytes = ngc_bmp_bytes(nr);
+	if (bytes < i_size_read(bvi)) {
+		/* The cached pages lose the bytes past the new end: the free count reads whole pages. */
+		truncate_setsize(bvi, bytes);
+		mutex_lock(&bni->mrec_lock);
+		err = ntfs_attr_truncate_i(bni, bytes, HOLES_NO);
+		mutex_unlock(&bni->mrec_lock);
+		mark_inode_dirty(bvi);
+		if (err)
+			return ngc_resize_failed(v, err);
+	}
+	ngc_recount_free(vol);
+	err = ngc_commit(v);
+	if (!err)
+		err = ngc_write_boot(v, sectors);
+	if (!err)
+		err = ngc_commit(v);
+	return err;
+}
+
+int ngc_extend(ngc_vol *v, unsigned long long sectors, unsigned long long dev_size)
+{
+	return ngc_extend_impl(v, sectors, dev_size);
+}
+
+int ngc_shrink(ngc_vol *v, unsigned long long sectors)
+{
+	return ngc_shrink_impl(v, sectors);
+}
+
+/* FSCTL_GET_NTFS_VOLUME_DATA's values. */
+void ngc_ntfs_data(ngc_vol *v, struct ngc_ntfsdata *d)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	s64 fc = atomic64_read(&vol->free_clusters);
+
+	memset(d, 0, sizeof(*d));
+	d->serial = vol->serial_no;
+	d->sectors = ngc_boot_sectors(v);
+	d->total_clusters = vol->nr_clusters;
+	d->free_clusters = fc > 0 ? fc : 0;
+	d->bytes_per_sector = vol->sector_size;
+	d->bytes_per_cluster = vol->cluster_size;
+	d->bytes_per_record = vol->mft_record_size;
+	d->mft_valid_data = NTFS_I(vol->mft_ino)->initialized_size;
+	d->mft_lcn = vol->mft_lcn;
+	d->mft2_lcn = vol->mftmirr_lcn;
+	d->mft_zone_start = vol->mft_zone_start;
+	d->mft_zone_end = vol->mft_zone_end;
+	d->major = vol->major_ver;
+	d->minor = vol->minor_ver;
+}
+
+/* Copies $Bitmap bytes [@off, @off+@len) (FSCTL_GET_VOLUME_BITMAP); bytes past its end read as zero. */
+int ngc_read_bitmap(ngc_vol *v, unsigned long long off, unsigned int len, void *buf)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct address_space *mapping = vol->lcnbmp_ino->i_mapping;
+	u64 size = (u64)ngc_bmp_bytes(vol->nr_clusters);
+	u8 *out = buf;
+	int err = 0;
+
+	memset(buf, 0, len);
+	down_read(&vol->lcnbmp_lock);
+	while (len && off < size) {
+		pgoff_t index = (pgoff_t)(off >> PAGE_SHIFT);
+		unsigned int in = (unsigned int)(off & (PAGE_SIZE - 1));
+		unsigned int n = (unsigned int)min_t(u64, min_t(u64, PAGE_SIZE - in, len), size - off);
+		struct folio *folio = read_mapping_folio(mapping, index, NULL);
+		u8 *kaddr;
+
+		if (IS_ERR(folio)) {
+			err = PTR_ERR(folio);
+			break;
+		}
+		kaddr = kmap_local_folio(folio, 0);
+		memcpy(out, kaddr + in, n);
+		kunmap_local(kaddr);
+		folio_put(folio);
+		off += n;
+		out += n;
+		len -= n;
+	}
+	up_read(&vol->lcnbmp_lock);
+	return err;
 }
 
 /* ------------------------------------------------------------- reparse points */
