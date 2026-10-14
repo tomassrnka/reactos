@@ -1974,6 +1974,7 @@ MsafdConnectAPC(
     _In_ ULONG Reserved)
 {
     PMSAFD_CONNECT_APC_CONTEXT Context = ApcContext;
+    BOOLEAN WasConnected;
 
     TRACE("MsafdConnectAPC(%p %lx %lx)\n", ApcContext, IoStatusBlock->Status, IoStatusBlock->Information);
 
@@ -1985,12 +1986,16 @@ MsafdConnectAPC(
         return;
     }
 
+    /* WSPGetPeerName may have recorded the connection from the state of AFD already */
+    WasConnected = Socket->SharedData->State == SocketConnected;
+
     Socket->SharedData->SocketLastError = TranslateNtStatusError(IoStatusBlock->Status);
     if (IoStatusBlock->Status == STATUS_SUCCESS)
     {
         Socket->SharedData->State = SocketConnected;
         Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
-        Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
+        if (!WasConnected)
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     }
 
     /* Re-enable Async Event */
@@ -1999,7 +2004,7 @@ MsafdConnectAPC(
     /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
     SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
 
-    if (IoStatusBlock->Status == STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT))
+    if (IoStatusBlock->Status == STATUS_SUCCESS && !WasConnected && (Socket->HelperEvents & WSH_NOTIFY_CONNECT))
     {
         Socket->HelperData->WSHNotify(Socket->HelperContext,
                                       Socket->Handle,
@@ -2581,6 +2586,13 @@ WSPGetSockName(IN SOCKET Handle,
 }
 
 
+static
+INT
+NTAPI
+MsafdUpdateConnectionContext(
+    _In_ SOCKET Handle,
+    _Out_ LPINT lpErrno);
+
 INT
 WSPAPI
 WSPGetPeerName(IN SOCKET s,
@@ -2601,6 +2613,15 @@ WSPGetPeerName(IN SOCKET s,
     {
         if (lpErrno) *lpErrno = WSAENOTSOCK;
         return SOCKET_ERROR;
+    }
+
+    if (Socket->SharedData->State != SocketConnected)
+    {
+        /* A nonblocking connect that finished is recorded in this copy of the
+         * state only by MsafdConnectAPC, which needs an alertable wait of the
+         * connecting thread; select and WSAEventSelect report the connection
+         * without one. AFD knows the real state. */
+        MsafdUpdateConnectionContext(s, NULL);
     }
 
     if (Socket->SharedData->State != SocketConnected)
@@ -3185,14 +3206,14 @@ MsafdUpdateConnectionContext(
     if (!NT_SUCCESS(Status))
         goto Quit;
 
-    Socket->SharedData->State = SharedData.State;
-
     if (SharedData.State == SocketConnected)
     {
         /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
+        Socket->SharedData->State = SocketConnected;
         Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
         Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
-        Socket->SharedData->ConnectTime = SharedData.ConnectTime;
+        /* AFD does not keep the time of the connection */
+        Socket->SharedData->ConnectTime = SharedData.ConnectTime ? SharedData.ConnectTime : GetCurrentTimeInSeconds();
 
         /* Re-enable Async Event */
         SockReenableAsyncSelectEvent(Socket, FD_WRITE);
@@ -3200,11 +3221,14 @@ MsafdUpdateConnectionContext(
         /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
         SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
 
-        Socket->HelperData->WSHNotify(Socket->HelperContext,
-                                      Socket->Handle,
-                                      Socket->TdiAddressHandle,
-                                      Socket->TdiConnectionHandle,
-                                      WSH_NOTIFY_CONNECT);
+        if (Socket->HelperEvents & WSH_NOTIFY_CONNECT)
+        {
+            Socket->HelperData->WSHNotify(Socket->HelperContext,
+                                          Socket->Handle,
+                                          Socket->TdiAddressHandle,
+                                          Socket->TdiConnectionHandle,
+                                          WSH_NOTIFY_CONNECT);
+        }
     }
 
     NtClose(SockEvent);
