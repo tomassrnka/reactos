@@ -1128,7 +1128,7 @@ SetROP2(
         return 0;
     }
 
-    if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+    if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
     {
         if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
         {
@@ -1188,7 +1188,7 @@ SetPolyFillMode(
         return 0;
     }
 
-    if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+    if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
     {
         if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
         {
@@ -1256,7 +1256,7 @@ SetGraphicsMode(
     if (iMode == pdcattr->iGraphicsMode)
         return iMode;
 
-    if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+    if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
     {
         if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
         {

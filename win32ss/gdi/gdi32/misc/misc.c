@@ -1210,9 +1210,9 @@ hGetPEBHandle(HANDLECACHETYPE Type, COLORREF cr)
     if ( Number && Number <= MaxNum )
     {
        PBRUSH_ATTR pBrush_Attr;
-       HGDIOBJ *hPtr;
-       hPtr = GdiHandleCache->Handle + Offset;
-       Handle = hPtr[Number - 1];
+       KULONG_PTR *hPtr;
+       hPtr = (KULONG_PTR *)GdiHandleCache->Handle + Offset;
+       Handle = (HGDIOBJ)(ULONG_PTR)hPtr[Number - 1];
 
        if (GdiGetHandleUserData( Handle, GdiType, (PVOID) &pBrush_Attr))
        {
@@ -1220,7 +1220,7 @@ hGetPEBHandle(HANDLECACHETYPE Type, COLORREF cr)
           {
              DPRINT("Get Handle! Type %d Count %lu PEB 0x%p\n", Type, GdiHandleCache->ulNumHandles[Type], NtCurrentTeb()->ProcessEnvironmentBlock);
              pBrush_Attr->AttrFlags &= ~ATTR_CACHED;
-             hPtr[Number - 1] = NULL;
+             hPtr[Number - 1] = 0;
              GdiHandleCache->ulNumHandles[Type]--;
              if ( Type == hctBrushHandle ) // Handle only brush.
              {
@@ -1416,4 +1416,3 @@ GdiAddGlsRecord(HDC hdc,
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return 0;
 }
-

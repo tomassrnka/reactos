@@ -37,12 +37,12 @@ GetW32ThreadInfo(VOID)
 {
     PTHREADINFO ti;
 
-    ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+    ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
     if (ti == NULL)
     {
         /* create the THREADINFO structure */
         NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
-        ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+        ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
     }
 
     return ti;
@@ -145,13 +145,13 @@ WINAPI
 IsGUIThread(
     BOOL bConvert)
 {
-  PTHREADINFO ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+  PTHREADINFO ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
   if (ti == NULL)
   {
     if(bConvert)
     {
       NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
-      if ((PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo) return TRUE;
+      if ((PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo()) return TRUE;
       else
          SetLastError(ERROR_NOT_ENOUGH_MEMORY);
     }
@@ -165,7 +165,7 @@ BOOL
 FASTCALL
 TestWindowProcess(PWND Wnd)
 {
-   if (Wnd->head.pti == (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo)
+   if (Wnd->head.pti == (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo())
       return TRUE;
    else
       return (NtUserQueryWindow(Wnd->head.h, QUERY_WINDOW_UNIQUE_PROCESS_ID) ==

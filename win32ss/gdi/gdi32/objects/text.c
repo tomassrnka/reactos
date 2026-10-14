@@ -579,7 +579,7 @@ ExtTextOutW(
         else if ( cwc <= ((GDIBATCHBUFSIZE - sizeof(GDIBSTEXTOUT)) / sizeof(WCHAR)) )
         {
             PGDIBSTEXTOUT pgO;
-            PTEB pTeb = NtCurrentTeb();
+            PW32TEB pTeb = W32GetCurrentTeb();
 
             pgO = GdiAllocBatchCommand(hdc, GdiBCTextOut);
             if (pgO)
@@ -814,7 +814,7 @@ SetTextCharacterExtra(
         return 0x8000000;
     }
 
-    if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+    if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
     {
         if (pdcattr->ulDirty_ & DC_FONTTEXT_DIRTY)
         {
@@ -965,7 +965,7 @@ SetTextJustification(
     }
 
 
-    if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+    if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
     {
         if (pdcattr->ulDirty_ & DC_FONTTEXT_DIRTY)
         {

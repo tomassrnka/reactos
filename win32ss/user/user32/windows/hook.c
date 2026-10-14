@@ -151,7 +151,7 @@ CallMsgFilterA(
   int nCode)
 {
   MSG Msg;
-  if ( NtCurrentTeb()->Win32ThreadInfo &&
+  if ( W32GetCurrentThreadInfo() &&
       (ISITHOOKED(WH_MSGFILTER) || ISITHOOKED(WH_SYSMSGFILTER)) )
   {
      if ( lpMsg->message & ~WM_MAXIMUM )
@@ -176,7 +176,7 @@ CallMsgFilterW(
   int nCode)
 {
   MSG Msg;
-  if ( NtCurrentTeb()->Win32ThreadInfo &&
+  if ( W32GetCurrentThreadInfo() &&
       (ISITHOOKED(WH_MSGFILTER) || ISITHOOKED(WH_SYSMSGFILTER)) )
   {
      if ( lpMsg->message & ~WM_MAXIMUM )
@@ -389,7 +389,7 @@ WINAPI
 IsWinEventHookInstalled(
     DWORD event)
 {
-  if ((PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo)
+  if ((PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo())
   {
      return (gpsi->dwInstalledEventHooks & GetMaskFromEvent(event)) != 0;
   }
