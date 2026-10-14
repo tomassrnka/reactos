@@ -5810,6 +5810,172 @@ static void test_installprops_compat_layer(void)
     SetEnvironmentVariableA("__COMPAT_LAYER", previous_size && previous_size < sizeof(previous) ? previous : NULL);
 }
 
+struct seltree_state
+{
+    char texts[3][128];
+    char after_texts[3][128];
+    int count;
+    BOOL found;
+    BOOL selected_at_open;
+    int items;
+};
+
+static BOOL CALLBACK seltree_enum_child(HWND hwnd, LPARAM param)
+{
+    struct seltree_state *state = (struct seltree_state *)param;
+    char class[32];
+
+    GetClassNameA(hwnd, class, sizeof(class));
+    if (!lstrcmpiA(class, "Static") && state->count < ARRAY_SIZE(state->texts))
+        GetWindowTextA(hwnd, state->texts[state->count++], sizeof(state->texts[0]));
+    return TRUE;
+}
+
+static HWND seltree_find_dialog(void)
+{
+    HWND wnd = NULL;
+    char title[32];
+
+    while ((wnd = FindWindowExA(NULL, wnd, NULL, NULL)))
+    {
+        GetWindowTextA(wnd, title, sizeof(title));
+        if (!lstrcmpA(title, "seltree") && IsWindowVisible(wnd)) return wnd;
+    }
+    return NULL;
+}
+
+static DWORD WINAPI seltree_thread(void *param)
+{
+    struct seltree_state *state = param;
+    DWORD start = GetTickCount();
+    HWND dialog = NULL, tree, button;
+    HTREEITEM item;
+
+    while (GetTickCount() - start < 20000 && !(dialog = seltree_find_dialog())) Sleep(100);
+    if (!dialog) return 0;
+    state->found = TRUE;
+    Sleep(500);
+
+    state->count = 0;
+    EnumChildWindows(dialog, seltree_enum_child, (LPARAM)state);
+    memcpy(state->after_texts, state->texts, sizeof(state->texts));
+
+    tree = FindWindowExA(dialog, NULL, "SysTreeView32", NULL);
+    if (tree)
+    {
+        state->items = SendMessageA(tree, TVM_GETCOUNT, 0, 0);
+        state->selected_at_open = SendMessageA(tree, TVM_GETNEXTITEM, TVGN_CARET, 0) != 0;
+        item = (HTREEITEM)SendMessageA(tree, TVM_GETNEXTITEM, TVGN_ROOT, 0);
+        item = (HTREEITEM)SendMessageA(tree, TVM_GETNEXTITEM, TVGN_NEXT, (LPARAM)item);
+        SendMessageA(tree, TVM_SELECTITEM, TVGN_CARET, (LPARAM)item);
+        Sleep(500);
+        state->count = 0;
+        EnumChildWindows(dialog, seltree_enum_child, (LPARAM)state);
+    }
+
+    button = FindWindowExA(dialog, NULL, "Button", "Close");
+    if (button) SendMessageA(button, BM_CLICK, 0, 0);
+    else PostMessageA(dialog, WM_CLOSE, 0, 0);
+    return 0;
+}
+
+static void test_selectiontree_events(void)
+{
+    char target[MAX_PATH];
+    struct seltree_state state;
+    MSIHANDLE hdb, hpkg;
+    DWORD size;
+    HANDLE thread;
+    UINT r;
+
+    memset(&state, 0, sizeof(state));
+    MsiSetInternalUI(INSTALLUILEVEL_FULL, NULL);
+
+    hdb = create_package_db();
+    ok(hdb, "failed to create database\n");
+    add_directory_entry(hdb, "'TARGETDIR', '', 'SourceDir'");
+    add_directory_entry(hdb, "'INSTALLDIR', 'TARGETDIR', 'seltree'");
+    create_feature_table(hdb);
+    add_feature_entry(hdb, "'one', '', 'First feature', 'First feature description', 2, 1, 'INSTALLDIR', 0");
+    add_feature_entry(hdb, "'two', '', 'Second feature', 'Second feature description', 2, 1, 'INSTALLDIR', 0");
+    create_component_table(hdb);
+    add_component_entry(hdb, "'comp1', '{4F7D91E1-5B0D-4A73-9A3E-1A5E5C0F0001}', 'INSTALLDIR', 0, '', ''");
+    add_component_entry(hdb, "'comp2', '{4F7D91E1-5B0D-4A73-9A3E-1A5E5C0F0002}', 'INSTALLDIR', 0, '', ''");
+    create_feature_components_table(hdb);
+    add_feature_components_entry(hdb, "'one', 'comp1'");
+    add_feature_components_entry(hdb, "'two', 'comp2'");
+
+    create_dialog_table(hdb);
+    r = run_query(hdb, 0, "INSERT INTO `Dialog` (`Dialog`, `HCentering`, `VCentering`, `Width`, `Height`, `Attributes`, `Title`, `Control_First`) "
+                  "VALUES ('seltreedlg', 50, 50, 300, 200, 3, 'seltree', 'Tree')");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    create_control_table(hdb);
+    r = run_query(hdb, 0, "INSERT INTO `Control` (`Dialog_`, `Control`, `Type`, `X`, `Y`, `Width`, `Height`, `Attributes`, `Property`, `Text`, `Control_Next`) "
+                  "VALUES ('seltreedlg', 'Tree', 'SelectionTree', 10, 10, 150, 80, 3, 'TREEDIR', 'tree', 'Desc')");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    r = run_query(hdb, 0, "INSERT INTO `Control` (`Dialog_`, `Control`, `Type`, `X`, `Y`, `Width`, `Height`, `Attributes`, `Text`, `Control_Next`) "
+                  "VALUES ('seltreedlg', 'Desc', 'Text', 170, 10, 120, 30, 3, 'DescPlaceholder', 'Path')");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    r = run_query(hdb, 0, "INSERT INTO `Control` (`Dialog_`, `Control`, `Type`, `X`, `Y`, `Width`, `Height`, `Attributes`, `Text`, `Control_Next`) "
+                  "VALUES ('seltreedlg', 'Path', 'Text', 170, 50, 120, 20, 3, 'PathPlaceholder', 'Close')");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    r = run_query(hdb, 0, "INSERT INTO `Control` (`Dialog_`, `Control`, `Type`, `X`, `Y`, `Width`, `Height`, `Attributes`, `Text`, `Control_Next`) "
+                  "VALUES ('seltreedlg', 'Close', 'PushButton', 100, 150, 66, 17, 3, 'Close', 'Tree')");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    create_controlevent_table(hdb);
+    r = run_query(hdb, 0, "INSERT INTO `ControlEvent` (`Dialog_`, `Control_`, `Event`, `Argument`, `Condition`, `Ordering`) "
+                  "VALUES ('seltreedlg', 'Close', 'EndDialog', 'Exit', '1', 1)");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    r = run_query(hdb, 0, "CREATE TABLE `EventMapping` (`Dialog_` CHAR(72) NOT NULL, `Control_` CHAR(50) NOT NULL, `Event` CHAR(50) NOT NULL, "
+                  "`Attribute` CHAR(50) NOT NULL PRIMARY KEY `Dialog_`, `Control_`, `Event`)");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    r = run_query(hdb, 0, "INSERT INTO `EventMapping` (`Dialog_`, `Control_`, `Event`, `Attribute`) VALUES ('seltreedlg', 'Desc', 'SelectionDescription', 'Text')");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    r = run_query(hdb, 0, "INSERT INTO `EventMapping` (`Dialog_`, `Control_`, `Event`, `Attribute`) VALUES ('seltreedlg', 'Path', 'SelectionPath', 'Text')");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+
+    r = package_from_db(hdb, &hpkg);
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        DeleteFileA(msifile);
+        return;
+    }
+    ok(r == ERROR_SUCCESS, "failed to create package %u\n", r);
+
+    r = MsiDoActionA(hpkg, "CostInitialize");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    r = MsiDoActionA(hpkg, "FileCost");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    r = MsiDoActionA(hpkg, "CostFinalize");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+
+    size = sizeof(target);
+    r = MsiGetTargetPathA(hpkg, "INSTALLDIR", target, &size);
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+
+    thread = CreateThread(NULL, 0, seltree_thread, &state, 0, NULL);
+    r = MsiDoActionA(hpkg, "seltreedlg");
+    ok(r == ERROR_INSTALL_USEREXIT, "got %u\n", r);
+    WaitForSingleObject(thread, 30000);
+    CloseHandle(thread);
+
+    ok(state.found, "the dialog was not shown\n");
+    if (state.found)
+    {
+        ok(state.items == 2, "got %d tree items\n", state.items);
+        ok(state.selected_at_open, "no feature is selected when the dialog opens\n");
+        ok(state.count >= 2, "got %d texts\n", state.count);
+        ok(!lstrcmpA(state.after_texts[0], "First feature description"), "description at open: '%s'\n", state.after_texts[0]);
+        ok(!lstrcmpiA(state.after_texts[1], target), "path at open: '%s', expected '%s'\n", state.after_texts[1], target);
+        ok(!lstrcmpA(state.texts[0], "Second feature description"), "description after the selection: '%s'\n", state.texts[0]);
+        ok(!lstrcmpiA(state.texts[1], target), "path after the selection: '%s', expected '%s'\n", state.texts[1], target);
+    }
+
+    MsiCloseHandle(hpkg);
+    DeleteFileA(msifile);
+}
+
 static void test_launchconditions(void)
 {
     MSIHANDLE hpkg;
@@ -9670,6 +9836,7 @@ START_TEST(package)
     test_featureparents();
     test_installprops();
     test_installprops_compat_layer();
+    test_selectiontree_events();
     test_launchconditions();
     test_ccpsearch();
     test_complocator();
