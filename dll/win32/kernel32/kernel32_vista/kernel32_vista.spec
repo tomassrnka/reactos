@@ -78,7 +78,7 @@
 @ stdcall FreeLibraryWhenCallbackReturns(ptr ptr) ntdll_vista.TpCallbackUnloadDllOnCompletion
 @ stdcall GetNamedPipeClientProcessId(ptr ptr)
 @ stdcall GetProductInfo(long long long long ptr) ntdll_vista.RtlGetProductInfo
-@ stdcall GetSystemTimePreciseAsFileTime(ptr) kernel32.GetSystemTimeAsFileTime
+@ stdcall GetSystemTimePreciseAsFileTime(ptr) kernel32.GetSystemTimePreciseAsFileTime
 @ stdcall GetThreadDescription(ptr ptr) # Win 10
 @ stdcall SetThreadDescription(ptr wstr) # Win 10
 @ stdcall SetThreadpoolThreadMaximum(ptr long) ntdll_vista.TpSetPoolMaxThreads

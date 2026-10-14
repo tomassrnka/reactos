@@ -9,6 +9,7 @@ list(APPEND SOURCE
     BindIoCompletionCallback.c
     CancelIoEx.c
     ApplicationRestart.c
+    AppModel.c
     ConsoleCP.c
     CreateEventMutexEx.c
     CreateRemoteThreadEx.c
@@ -39,6 +40,7 @@ list(APPEND SOURCE
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
     GetQueuedCompletionStatusEx.c
+    GetSystemTimePrecise.c
     GetVolumeInformation.c
     HandleList.c
     IdleProcessor.c
@@ -62,8 +64,10 @@ list(APPEND SOURCE
     Pipes.c
     PipeSqos.c
     PowerRequest.c
+    PrefetchVirtualMemory.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
+    ProcessMitigationPolicy.c
     QueryCycleTime.c
     QueryUnbiasedInterruptTime.c
     ProcessToken.c
@@ -86,6 +90,7 @@ list(APPEND SOURCE
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c
+    ThreadInformation.c
     TunnelCache.c
     TzSetPrivilege.c
     UEFIFirmware.c

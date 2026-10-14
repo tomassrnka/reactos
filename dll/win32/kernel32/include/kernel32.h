@@ -342,6 +342,15 @@ BaseIsDosApplication(
     IN NTSTATUS Status
 );
 
+/* The handle must be of the given object type and grant one of the access rights (the check of the Windows 8 information functions) */
+NTSTATUS
+WINAPI
+BasepCheckHandleType(
+    IN HANDLE Handle,
+    IN PCWSTR TypeName,
+    IN ACCESS_MASK DesiredAccess
+);
+
 NTSTATUS
 WINAPI
 BasepCheckBadapp(
