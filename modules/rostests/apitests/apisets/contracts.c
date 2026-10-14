@@ -299,6 +299,23 @@ static const CONTRACT_DATA g_Data[] =
         "SHAnsiToAnsi\0SHAnsiToUnicode\0SHUnicodeToAnsi\0SHUnicodeToUnicode\0"
     },
     {
+        "shcore.dll",
+        "api-ms-win-shcore-scaling-l1-1-0.dll\0api-ms-win-shcore-scaling-l1-1-1.dll\0api-ms-win-shcore-scaling-l1-1-2.dll\0",
+        "GetDpiForMonitor\0GetProcessDpiAwareness\0GetScaleFactorForDevice\0GetScaleFactorForMonitor\0"
+        "RegisterScaleChangeEvent\0RegisterScaleChangeNotifications\0RevokeScaleChangeNotifications\0"
+        "SetProcessDpiAwareness\0UnregisterScaleChangeEvent\0"
+    },
+    {
+        "user32.dll",
+        "api-ms-win-rtcore-ntuser-dpi-l1-1-0.dll\0ext-ms-win-rtcore-ntuser-dpi-l1-1-0.dll\0"
+        "ext-ms-win-rtcore-ntuser-dpi-l1-2-2.dll\0",
+        "AdjustWindowRectExForDpi\0AreDpiAwarenessContextsEqual\0EnableNonClientDpiScaling\0"
+        "GetAwarenessFromDpiAwarenessContext\0GetDpiForSystem\0GetDpiForWindow\0GetSystemMetricsForDpi\0"
+        "GetThreadDpiAwarenessContext\0GetWindowDpiAwarenessContext\0IsProcessDPIAware\0"
+        "IsValidDpiAwarenessContext\0SetProcessDpiAwarenessContext\0SetThreadDpiAwarenessContext\0"
+        "SystemParametersInfoForDpi\0"
+    },
+    {
         "shell32.dll",
         "api-ms-win-shell-namespace-l1-1-0.dll\0",
         "SHCreateItemFromParsingName\0SHGetIDListFromObject\0"
