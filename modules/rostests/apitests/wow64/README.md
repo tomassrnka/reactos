@@ -71,3 +71,15 @@ guest DHCP before launching it. The fixture requires an HTTP 200 response,
 the page marker and EOF. All modes print a summary, return nonzero on failure
 and have a 15-second watchdog. These tests do not cover the remaining datagram,
 event-select or extended accept/connect translations.
+
+## System root-store lifetime
+
+The explicit PE32 `wow64_root_store` target opens the local-machine Root store,
+enumerates certificates and their SHA-1 properties, closes it with outstanding
+reference checking, and repeats three times. Run the executable twice in
+separate processes to cover both initial import and a populated registry cache.
+It requires an image with installed system root certificates and a registered
+cryptographic provider. On a runtime staged into the older WoW64 test image,
+register the guest `rsaenh.dll` first, as for the installer tests, and use the
+WIN7SP1 compatibility layer. An empty store is a failed prerequisite, not a
+passing lifetime test. Use the same executable on native i386 and WoW64.

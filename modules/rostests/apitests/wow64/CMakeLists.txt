@@ -107,6 +107,10 @@ add_executable(wow64_socket EXCLUDE_FROM_ALL socket.c)
 set_module_type(wow64_socket win32cui)
 add_importlibs(wow64_socket ws2_32 msvcrt kernel32)
 
+add_executable(wow64_root_store EXCLUDE_FROM_ALL root_store.c)
+set_module_type(wow64_root_store win32cui)
+add_importlibs(wow64_root_store crypt32 msvcrt kernel32)
+
 add_executable(wow64_relative_pipe EXCLUDE_FROM_ALL relative_pipe.c)
 set_module_type(wow64_relative_pipe win32cui)
 add_importlibs(wow64_relative_pipe msvcrt kernel32)
