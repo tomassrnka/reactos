@@ -120,6 +120,22 @@ START_TEST(apisets)
     fail_single(&Fail2);
     fail_single(&Fail3);
 
+    // Only the exact name when asked for (Windows 7)
+    UNICODE_STRING Win7Name = RTL_CONSTANT_STRING(L"API-MS-Win-Core-Synch-L1-1-0.dll");
+    UNICODE_STRING Win7Minor = RTL_CONSTANT_STRING(L"api-ms-win-core-synch-l1-1-5.dll");
+    Resolved = FALSE;
+    Status = ApiSetResolveToHostEx(APISET_WIN7, TRUE, &Win7Name, &Resolved, &Result);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_eq_bool(Resolved, TRUE);
+    Resolved = TRUE;
+    Status = ApiSetResolveToHostEx(APISET_WIN7, TRUE, &Win7Minor, &Resolved, &Result);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_eq_bool(Resolved, FALSE);
+    Resolved = FALSE;
+    Status = ApiSetResolveToHostEx(APISET_WIN7, FALSE, &Win7Minor, &Resolved, &Result);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_eq_bool(Resolved, TRUE);
+
     // Another level, or no minor version at all, is another contract; a path is not a contract name
     UNICODE_STRING Fail4 = RTL_CONSTANT_STRING(L"api-ms-win-core-synch-l1-9-0.dll");
     UNICODE_STRING Fail5 = RTL_CONSTANT_STRING(L"api-ms-win-core-synch-l1-2.dll");

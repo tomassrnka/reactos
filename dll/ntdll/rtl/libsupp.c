@@ -11,7 +11,6 @@
 
 #include <ntdll.h>
 #include <apisets.h>
-#include <compat_undoc.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -1011,47 +1010,185 @@ RtlDosApplyFileIsolationRedirection_Ustr(IN ULONG Flags,
 #define RtlpAllocateStringMemory(Bytes, Tag) RtlpAllocateMemory(Bytes, Tag)
 #endif
 
-static DWORD
-LdrpApisetVersion(VOID)
+/* Windows resolves API set names from the schema of the running system: the supportedOS entries of the application
+   manifest do not change which names load. ReactOS has no schema of its own, so every version in the table counts. */
+static const DWORD LdrpApisetVersion = APISET_WIN7 | APISET_WIN8 | APISET_WIN81 | APISET_WIN10;
+
+/* A contract that Windows 7 does not have is an ordinary DLL name there, so an application that ships its own copy
+   (the app-local deployment of the Universal CRT, for example) runs with that copy. Keep that: the table is only the
+   fallback for such a name when the directory of the executable has no file of that name. The directory is read once,
+   so that every lookup of a name (load, handle lookup, reference counts) gives the same answer for the whole process. */
+static WCHAR LdrpNoAppContracts[1];
+static PWSTR LdrpAppContracts;
+
+static NTSTATUS
+LdrpAddAppContracts(
+    _In_ PUNICODE_STRING Directory,
+    _In_ PUNICODE_STRING Pattern,
+    _Inout_ PWSTR *List,
+    _Inout_ PSIZE_T Used,
+    _Inout_ PSIZE_T Size)
 {
-    static DWORD CachedApisetVersion = ~0u;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    const ULONG BufferSize = 4096;
+    PVOID Buffer;
+    PFILE_DIRECTORY_INFORMATION Info;
+    BOOLEAN First = TRUE;
+    HANDLE Handle;
+    NTSTATUS Status;
 
-    if (CachedApisetVersion == ~0u)
+    InitializeObjectAttributes(&ObjectAttributes, Directory, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, BufferSize);
+    if (!Buffer)
     {
-        DWORD CompatVersion = RosGetProcessCompatVersion();
+        NtClose(Handle);
+        return STATUS_NO_MEMORY;
+    }
 
-        switch (CompatVersion)
+    for (;;)
+    {
+        Status = NtQueryDirectoryFile(Handle, NULL, NULL, NULL, &IoStatusBlock, Buffer, BufferSize,
+                                      FileDirectoryInformation, FALSE, First ? Pattern : NULL, First);
+        First = FALSE;
+        if (!NT_SUCCESS(Status))
+            break;
+
+        for (Info = (PFILE_DIRECTORY_INFORMATION)Buffer;;
+             Info = (PFILE_DIRECTORY_INFORMATION)((ULONG_PTR)Info + Info->NextEntryOffset))
         {
-            case 0:
-                break;
-            case _WIN32_WINNT_VISTA:
-                /* No apisets in vista yet*/
-                CachedApisetVersion = 0;
-                break;
-            case _WIN32_WINNT_WIN7:
-                CachedApisetVersion = APISET_WIN7;
-                DPRINT1("Activating apisets for Win7\n");
-                break;
-            case _WIN32_WINNT_WIN8:
-                CachedApisetVersion = APISET_WIN8;
-                DPRINT1("Activating apisets for Win8\n");
-                break;
-            case _WIN32_WINNT_WINBLUE:
-                CachedApisetVersion = APISET_WIN81;
-                DPRINT1("Activating apisets for Win8.1\n");
-                break;
-            case _WIN32_WINNT_WIN10:
-                CachedApisetVersion = APISET_WIN10;
-                DPRINT1("Activating apisets for Win10\n");
-                break;
-            default:
-                DPRINT1("Unknown version 0x%x\n", CompatVersion);
-                CachedApisetVersion = 0;
+            SIZE_T Needed = Info->FileNameLength + 2 * sizeof(WCHAR);
+
+            if (!(Info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && Info->FileNameLength)
+            {
+                if (*Used + Needed > *Size)
+                {
+                    SIZE_T NewSize = max(*Size * 2, *Used + Needed + 1024);
+                    PWSTR NewList = *List ? RtlReAllocateHeap(RtlGetProcessHeap(), 0, *List, NewSize)
+                                          : RtlAllocateHeap(RtlGetProcessHeap(), 0, NewSize);
+                    if (!NewList)
+                    {
+                        Status = STATUS_NO_MEMORY;
+                        goto Quit;
+                    }
+                    *List = NewList;
+                    *Size = NewSize;
+                }
+                RtlCopyMemory((PUCHAR)*List + *Used, Info->FileName, Info->FileNameLength);
+                *Used += Info->FileNameLength;
+                (*List)[*Used / sizeof(WCHAR)] = UNICODE_NULL;
+                *Used += sizeof(WCHAR);
+            }
+            if (!Info->NextEntryOffset)
                 break;
         }
     }
+    if (Status == STATUS_NO_MORE_FILES || Status == STATUS_NO_SUCH_FILE)
+        Status = STATUS_SUCCESS;
 
-    return CachedApisetVersion;
+Quit:
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    NtClose(Handle);
+    return Status;
+}
+
+static PWSTR
+LdrpReadAppContracts(VOID)
+{
+    static const UNICODE_STRING NtPrefix = RTL_CONSTANT_STRING(L"\\??\\");
+    UNICODE_STRING Patterns[] = { RTL_CONSTANT_STRING(L"api-*.dll"), RTL_CONSTANT_STRING(L"ext-*.dll") };
+    UNICODE_STRING ImagePath = NtCurrentPeb()->ProcessParameters->ImagePathName;
+    UNICODE_STRING Directory, NtDirectory = { 0 };
+    WCHAR DosDirectory[MAX_PATH];
+    PWSTR List = NULL, Old;
+    SIZE_T Used = 0, Size = 0;
+    ULONG n;
+
+    /* The directory of the executable, without the trailing backslash unless it is a root */
+    Directory = ImagePath;
+    while (Directory.Length && Directory.Buffer[Directory.Length / sizeof(WCHAR) - 1] != L'\\')
+        Directory.Length -= sizeof(WCHAR);
+    if (Directory.Length > sizeof(WCHAR) && Directory.Buffer[Directory.Length / sizeof(WCHAR) - 2] != L':')
+        Directory.Length -= sizeof(WCHAR);
+
+    if (Directory.Length && RtlPrefixUnicodeString(&NtPrefix, &Directory, FALSE))
+    {
+        NtDirectory = Directory;
+    }
+    else if (Directory.Length && Directory.Length < sizeof(DosDirectory))
+    {
+        RtlCopyMemory(DosDirectory, Directory.Buffer, Directory.Length);
+        DosDirectory[Directory.Length / sizeof(WCHAR)] = UNICODE_NULL;
+        if (!RtlDosPathNameToNtPathName_U(DosDirectory, &NtDirectory, NULL, NULL))
+            NtDirectory.Buffer = NULL;
+    }
+
+    if (NtDirectory.Buffer)
+    {
+        for (n = 0; n < RTL_NUMBER_OF(Patterns); ++n)
+        {
+            if (!NT_SUCCESS(LdrpAddAppContracts(&NtDirectory, &Patterns[n], &List, &Used, &Size)))
+                break;
+        }
+        if (NtDirectory.Buffer != Directory.Buffer)
+            RtlFreeUnicodeString(&NtDirectory);
+    }
+
+    if (List)
+        List[Used / sizeof(WCHAR)] = UNICODE_NULL;
+    else
+        List = LdrpNoAppContracts;
+
+    Old = InterlockedCompareExchangePointer((PVOID *)&LdrpAppContracts, List, NULL);
+    if (Old)
+    {
+        if (List != LdrpNoAppContracts)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, List);
+        List = Old;
+    }
+    return List;
+}
+
+static BOOLEAN
+LdrpApisetHasAppLocalCopy(
+    _In_ PUNICODE_STRING Name,
+    _In_opt_ PUNICODE_STRING Extension)
+{
+    UNICODE_STRING Host, Candidate, Entry;
+    WCHAR Buffer[MAX_PATH];
+    BOOLEAN Windows7, HasExtension = FALSE;
+    PWSTR List;
+    USHORT n;
+
+    if (NT_SUCCESS(ApiSetResolveToHostEx(APISET_WIN7, TRUE, Name, &Windows7, &Host)) && Windows7)
+        return FALSE;
+
+    for (n = 0; n < Name->Length / sizeof(WCHAR); ++n)
+    {
+        if (Name->Buffer[n] == L'.')
+            HasExtension = TRUE;
+    }
+    RtlInitEmptyUnicodeString(&Candidate, Buffer, sizeof(Buffer));
+    if (!NT_SUCCESS(RtlAppendUnicodeStringToString(&Candidate, Name)))
+        return FALSE;
+    if (!HasExtension && Extension && !NT_SUCCESS(RtlAppendUnicodeStringToString(&Candidate, Extension)))
+        return FALSE;
+
+    List = LdrpAppContracts;
+    if (!List)
+        List = LdrpReadAppContracts();
+    for (; *List; List += wcslen(List) + 1)
+    {
+        RtlInitUnicodeString(&Entry, List);
+        if (RtlEqualUnicodeString(&Entry, &Candidate, TRUE))
+            return TRUE;
+    }
+    return FALSE;
 }
 
 NTSYSAPI
@@ -1088,15 +1225,16 @@ LdrpApplyFileNameRedirection(
     UNICODE_STRING ApisetName = {0};
     NTSTATUS Status = STATUS_SUCCESS;
 
-    DWORD ApisetVersion = LdrpApisetVersion();
-    if (ApisetVersion)
+    Status = ApiSetResolveToHost(LdrpApisetVersion, OriginalName, RedirectedDll, &ApisetName);
+    if (!NT_SUCCESS(Status))
     {
-        Status = ApiSetResolveToHost(ApisetVersion, OriginalName, RedirectedDll, &ApisetName);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("ApiSetResolveToHost FAILED: (Status 0x%x)\n", Status);
-            return Status;
-        }
+        DPRINT1("ApiSetResolveToHost FAILED: (Status 0x%x)\n", Status);
+        return Status;
+    }
+    if (*RedirectedDll && LdrpApisetHasAppLocalCopy(OriginalName, Extension))
+    {
+        DPRINT("%wZ: the application has its own copy\n", OriginalName);
+        *RedirectedDll = FALSE;
     }
 
     if (*RedirectedDll)
