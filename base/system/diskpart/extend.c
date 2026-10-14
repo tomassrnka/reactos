@@ -154,31 +154,82 @@ typedef enum _FAT_EXTEND_KIND
 } FAT_EXTEND_KIND;
 
 /*
+ * The cluster count of a FAT volume of ullSectors sectors whose FATs are grown
+ * by the fewest sectors (a whole number of clusters in all, as the FAT
+ * provider grows them) that describe all of its clusters; *pulFatGrowth gets
+ * that growth per FAT.
+ */
+static
+ULONGLONG
+PlanFatGrowth(
+    _In_ ULONG ulBytesPerSector,
+    _In_ ULONG ulSpc,
+    _In_ ULONG ulFats,
+    _In_ ULONG ulFatSectors,
+    _In_ ULONG ulFirstData,
+    _In_ ULONG ulBits,
+    _In_ ULONGLONG ullSectors,
+    _Out_ PULONG pulFatGrowth)
+{
+    ULONGLONG ullClusters, ullLowest, d;
+
+    /* A lower bound of the FAT size, so the search starts close to the answer. */
+    ullLowest = ((ullSectors - ulFirstData + (ULONGLONG)ulFats * ulFatSectors + 2ULL * ulSpc) * ulBits) /
+                (8ULL * ulBytesPerSector * ulSpc + (ULONGLONG)ulFats * ulBits);
+    d = (ullLowest > (ULONGLONG)ulFatSectors + ulSpc) ? ullLowest - ulFatSectors - ulSpc : 0;
+    for (;; d++)
+    {
+        if (((ULONGLONG)ulFats * d) % ulSpc)
+            continue;
+        if (ullSectors <= ulFirstData + (ULONGLONG)ulFats * d)
+        {
+            *pulFatGrowth = (ULONG)d;
+            return 0;
+        }
+        ullClusters = (ullSectors - ulFirstData - (ULONGLONG)ulFats * d) / ulSpc;
+        if (((ULONGLONG)ulFatSectors + d) * ulBytesPerSector * 8 / ulBits >= ullClusters + 2)
+        {
+            *pulFatGrowth = (ULONG)d;
+            return ullClusters;
+        }
+    }
+}
+
+/*
  * How the FAT volume on hVolume can grow to ullNewSectors sectors.  The FAT
  * type follows from the cluster count, which stays within the counts the
- * formatter writes.  *pullMaxSectors gets the largest size the type allows
- * (an upper bound when the FATs grow).
+ * formatter writes, counted after the FATs grew.  *pullMaxSectors gets the
+ * largest size the type allows.
  */
 static
 FAT_EXTEND_KIND
 GetFatExtendKind(
     _In_ HANDLE hVolume,
+    _In_ ULONG ulSectorSize,
     _In_ ULONGLONG ullNewSectors,
     _Out_ PULONGLONG pullMaxSectors)
 {
-    BYTE Boot[512];
+    PBYTE Boot;
     IO_STATUS_BLOCK Iosb;
     LARGE_INTEGER Offset;
     ULONG ulBytesPerSector, ulReserved, ulFats, ulRootSectors, ulFatSectors, ulSpc;
-    ULONG ulBits, ulDescribable, ulOldClusters, ulOldSectors, ulFirstData, ulMaxClusters;
-    ULONGLONG ullNewClusters;
+    ULONG ulBits, ulOldClusters, ulOldSectors, ulFirstData, ulMaxClusters, ulGrowth;
+    ULONGLONG ullNewClusters, ullFatMax;
+    FAT_EXTEND_KIND Kind = FatExtendUnknown;
     NTSTATUS Status;
 
     *pullMaxSectors = 0;
-    Offset.QuadPart = 0;
-    Status = NtReadFile(hVolume, NULL, NULL, NULL, &Iosb, Boot, sizeof(Boot), &Offset, NULL);
-    if (!NT_SUCCESS(Status))
+    if (ulSectorSize < 512)
+        ulSectorSize = 512;
+
+    /* One whole logical sector: the disk refuses shorter transfers. */
+    Boot = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulSectorSize);
+    if (Boot == NULL)
         return FatExtendUnknown;
+    Offset.QuadPart = 0;
+    Status = NtReadFile(hVolume, NULL, NULL, NULL, &Iosb, Boot, ulSectorSize, &Offset, NULL);
+    if (!NT_SUCCESS(Status) || Iosb.Information != ulSectorSize)
+        goto done;
 
     ulBytesPerSector = *(PUSHORT)&Boot[0x0B];
     ulSpc = Boot[0x0D];
@@ -188,25 +239,41 @@ GetFatExtendKind(
     ulFatSectors = *(PUSHORT)&Boot[0x16] ? *(PUSHORT)&Boot[0x16] : *(PULONG)&Boot[0x24];
     ulOldSectors = *(PUSHORT)&Boot[0x13] ? *(PUSHORT)&Boot[0x13] : *(PULONG)&Boot[0x20];
     ulFirstData = ulReserved + ulFats * ulFatSectors + ulRootSectors;
-    if (!ulBytesPerSector || !ulSpc || ulOldSectors <= ulFirstData)
-        return FatExtendUnknown;
+    if (ulBytesPerSector != ulSectorSize || !ulSpc || !ulFats || !ulFatSectors || ulOldSectors <= ulFirstData)
+        goto done;
 
-    ulOldClusters = (ulOldSectors - ulFirstData) / ulSpc;
     /* The cluster counts the formatter writes: no cluster number reaches a reserved value. */
+    ulOldClusters = (ulOldSectors - ulFirstData) / ulSpc;
     ulBits = (*(PUSHORT)&Boot[0x16] == 0) ? 32 : ((ulOldClusters < 4085) ? 12 : 16);
+
+    /* 4079 to 4086 clusters: not every reader takes it for the same FAT type. */
+    if (ulBits != 32 && ulOldClusters > 4078 && ulOldClusters < 4087)
+        goto done;
     ulMaxClusters = (ulBits == 12) ? 4078 : ((ulBits == 16) ? 65518 : 0x0FFFFFEE);
-    *pullMaxSectors = min((ULONGLONG)ulFirstData + (ULONGLONG)ulMaxClusters * ulSpc, MAXULONG);
+
+    /* The largest volume: the type's most clusters, with the FATs they need. */
+    ullFatMax = (((ULONGLONG)ulMaxClusters + 2) * ulBits + 8ULL * ulBytesPerSector - 1) / (8ULL * ulBytesPerSector);
+    ulGrowth = (ullFatMax > ulFatSectors) ? (ULONG)(ullFatMax - ulFatSectors) : 0;
+    while ((ulFats * ulGrowth) % ulSpc)
+        ulGrowth++;
+    *pullMaxSectors = min((ULONGLONG)ulFirstData + (ULONGLONG)ulFats * ulGrowth + (ULONGLONG)ulMaxClusters * ulSpc,
+                          MAXULONG);
 
     if (ullNewSectors > MAXULONG || ullNewSectors <= ulFirstData)
-        return FatExtendTooBig;
-    ullNewClusters = (ullNewSectors - ulFirstData) / ulSpc;
-    if (ullNewClusters > ulMaxClusters)
-        return FatExtendTooBig;
+    {
+        Kind = FatExtendTooBig;
+        goto done;
+    }
+    ullNewClusters = PlanFatGrowth(ulBytesPerSector, ulSpc, ulFats, ulFatSectors, ulFirstData, ulBits,
+                                   ullNewSectors, &ulGrowth);
+    if (ullNewClusters > ulMaxClusters || ullNewClusters < ulOldClusters)
+        Kind = FatExtendTooBig;
+    else
+        Kind = ulGrowth ? FatExtendOffline : FatExtendInPlace;
 
-    ulDescribable = (ULONG)(((ULONGLONG)ulFatSectors * ulBytesPerSector * 8) / ulBits) - 2;
-    if (ullNewClusters > ulDescribable)
-        return FatExtendOffline;
-    return FatExtendInPlace;
+done:
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Boot);
+    return Kind;
 }
 
 typedef NTSTATUS (NTAPI *PULIB_EXTEND)(PUNICODE_STRING DriveRoot, ULONGLONG NewSectors);
@@ -579,7 +646,7 @@ extend_main(
      */
     if (bHasFileSystem && _wcsnicmp(szFileSystem, L"FAT", 3) == 0)
     {
-        Kind = GetFatExtendKind(hVolume, ullNewSectors, &ullMaxSectors);
+        Kind = GetFatExtendKind(hVolume, ulBytesPerSector, ullNewSectors, &ullMaxSectors);
         if (Kind == FatExtendTooBig)
         {
             ConResPrintf(StdOut, IDS_EXTEND_FAT_TOO_BIG, szFileSystem,
