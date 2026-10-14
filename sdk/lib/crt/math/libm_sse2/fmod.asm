@@ -44,19 +44,11 @@ FPIND		EQU	0fff8000000000000h	; indefinite
 FPSNAN		EQU	07ff7ffffffffffffh	; SNAN
 FPQNAN		EQU	07fffffffffffffffh	; QNAN
 
-X87SW		RECORD	X87SW_B: 1,
-			X87SW_C3: 1,
-			X87SW_TOP: 3,
-			X87SW_C: 3,
-			X87SW_ES: 1,
-			X87SW_SF: 1,
-			X87SW_PE: 1,
-			X87SW_E: 5
-
-X87XAM		EQU	MASK X87SW_C3 OR MASK X87SW_C AND NOT (1 SHL (X87SW_C + 1))
-X87XAM_INF	EQU	5 SHL X87SW_C
-X87XAM_NAN	EQU	1 SHL X87SW_C
-X87XAM_BAD	EQU	MASK X87SW_E AND NOT 2
+; Bits of the x87 status word: C0 0x0100, C2 0x0400, C3 0x4000, exception flags 0x001f
+X87XAM		EQU	04500h			; C3, C2 and C0 of fxam
+X87XAM_INF	EQU	00500h
+X87XAM_NAN	EQU	00100h
+X87XAM_BAD	EQU	0001dh			; all exception flags but denormal operand
 
 		EXTRN	_handle_error: PROC	; float _handle_error (char *fname, int opcode, unsigned long long value, int type, int flags, int error, double arg1, double arg2, int nargs)
 
@@ -95,7 +87,7 @@ fmod		PROC	FRAME
 		DB	0d9h, 0f8h		; fprem
 
 		DB	09bh, 0dfh, 0e0h 	; fstsw	ax
-		test	ax, 4 SHL X87SW_C
+		test	ax, 00400h
 		jnz	@again	; do it again in case of partial result
 
 		DB	0ddh, 01ch, 024h	; fstp	QWORD PTR [rsp]
