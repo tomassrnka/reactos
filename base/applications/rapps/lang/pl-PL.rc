@@ -232,6 +232,7 @@ BEGIN
     IDS_STATUS_WAITING "Oczekiwanie na instalację…"
     IDS_STATUS_FINISHED "Gotowe"
     IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE

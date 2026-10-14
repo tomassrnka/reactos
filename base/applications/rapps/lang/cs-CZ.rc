@@ -231,6 +231,7 @@ BEGIN
     IDS_STATUS_WAITING "Čekám na instalaci…"
     IDS_STATUS_FINISHED "Dokončeno"
     IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE

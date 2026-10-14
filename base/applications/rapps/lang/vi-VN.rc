@@ -230,6 +230,7 @@ BEGIN
     IDS_STATUS_WAITING "Đang chờ cài đặt…"
     IDS_STATUS_FINISHED "Hoàn tất"
     IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE

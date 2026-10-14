@@ -230,6 +230,7 @@ BEGIN
     IDS_STATUS_WAITING "Installimise ootel…"
     IDS_STATUS_FINISHED "Lõpetatud"
     IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE

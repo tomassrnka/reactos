@@ -230,6 +230,7 @@ BEGIN
     IDS_STATUS_WAITING "Menunggu pemasangan…"
     IDS_STATUS_FINISHED "Selesai"
     IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE

@@ -211,6 +211,7 @@
 #define IDS_STATUS_WAITING            806
 #define IDS_STATUS_FINISHED           807
 #define IDS_STATUS_FAILED             808
+#define IDS_STATUS_CANCELLED          809
 
 /* App license names */
 #define IDS_LICENSE_OPENSOURCE      900

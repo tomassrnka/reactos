@@ -87,7 +87,8 @@ enum DownloadStatus
     DLSTATUS_INSTALLING = IDS_STATUS_INSTALLING,
     DLSTATUS_INSTALLED = IDS_STATUS_INSTALLED,
     DLSTATUS_FINISHED = IDS_STATUS_FINISHED,
-    DLSTATUS_FAILED = IDS_STATUS_FAILED
+    DLSTATUS_FAILED = IDS_STATUS_FAILED,
+    DLSTATUS_CANCELLED = IDS_STATUS_CANCELLED
 };
 
 CStringW
@@ -831,7 +832,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     ULONG dwContentLen, dwBytesWritten, dwBytesRead, dwStatus, dwStatusLen;
     ULONG dwCurrentBytesRead = 0;
-    BOOL bTempfile = FALSE, bCancelled = FALSE, bKeepFile = FALSE, bSucceeded = FALSE;
+    BOOL bTempfile = FALSE, bCancelled = FALSE, bKeepFile = FALSE, bSucceeded = FALSE, bAborted = FALSE;
 
     HINTERNET hOpen = NULL;
     HINTERNET hFile = NULL;
@@ -1282,7 +1283,12 @@ run:
                         it = GuessInstallerType(shExInfo.lpFile, extrainfo);
                     }
                     InstallerOutcome outcome = ClassifyInstallerExitCode(dwExitCode, it);
-                    if (outcome == INSTALLER_OUTCOME_FAILED || outcome == INSTALLER_OUTCOME_CRASHED)
+                    if (outcome == INSTALLER_OUTCOME_CANCELLED)
+                    {
+                        // Not an error, but the program was not installed
+                        bAborted = TRUE;
+                    }
+                    else if (outcome == INSTALLER_OUTCOME_FAILED || outcome == INSTALLER_OUTCOME_CRASHED)
                     {
                         bSucceeded = FALSE;
                         if (!IsSilentDialog())
@@ -1337,9 +1343,14 @@ end:
         }
     }
 
-    if (!bSucceeded && !bCancelled)
+    if ((!bSucceeded && !bCancelled) || bAborted)
         InterlockedIncrement(&m_FailedCount);
-    SendMessageW(hDlg, WM_SETSTATUS, (bSucceeded || bCancelled) ? DLSTATUS_FINISHED : DLSTATUS_FAILED, 0);
+    DownloadStatus FinalStatus = DLSTATUS_FINISHED;
+    if (bAborted)
+        FinalStatus = DLSTATUS_CANCELLED;
+    else if (!bSucceeded && !bCancelled)
+        FinalStatus = DLSTATUS_FAILED;
+    SendMessageW(hDlg, WM_SETSTATUS, FinalStatus, 0);
 }
 
 BOOL

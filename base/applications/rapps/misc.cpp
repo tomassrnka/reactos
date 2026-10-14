@@ -208,7 +208,6 @@ ClassifyInstallerExitCode(DWORD ExitCode, InstallerType Type)
         case ERROR_SUCCESS_REBOOT_INITIATED:
         case ERROR_SUCCESS_REBOOT_REQUIRED:
         case ERROR_SUCCESS_RESTART_REQUIRED:
-        case ERROR_PRODUCT_VERSION: // Windows Installer: this or a newer version is already installed
             return INSTALLER_OUTCOME_OK;
         case ERROR_CANCELLED:
         case ERROR_INSTALL_USEREXIT:

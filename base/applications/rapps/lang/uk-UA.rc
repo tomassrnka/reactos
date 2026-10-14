@@ -233,6 +233,7 @@ BEGIN
     IDS_STATUS_WAITING "Очікування завантаження…"
     IDS_STATUS_FINISHED "Завершено"
     IDS_STATUS_FAILED "Failed"
+    IDS_STATUS_CANCELLED "Cancelled"
 END
 
 STRINGTABLE
