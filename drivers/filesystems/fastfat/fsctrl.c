@@ -4295,6 +4295,18 @@ Routine Description:
         //  cache page, still pinned; a failed write puts the old size back in the page.
         //
 
+        //
+        //  Every FAT change still in the cache reaches the disk first: tearing the allocation
+        //  package down below forgets which FAT sectors are dirty, and those would never be written.
+        //
+
+        Status = FatFlushFat( IrpContext, Vcb );
+
+        if (!NT_SUCCESS( Status )) {
+
+            try_leave( NOTHING );
+        }
+
         Copy = FsRtlAllocatePoolWithTag( NonPagedPoolNx, Vcb->Bpb.BytesPerSector, TAG_IO_BUFFER );
 
         for (Index = 0; Index < 2; Index++) {
