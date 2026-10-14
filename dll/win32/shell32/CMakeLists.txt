@@ -77,6 +77,8 @@ list(APPEND SOURCE
     CDefViewBckgrndMenu.cpp
     stubs.cpp
     systray.cpp
+    CApplicationAssociationRegistration.cpp
+    CApplicationAssociationRegistration.h
     CUserEventTimer.cpp
     CUserEventTimer.h
     CUserNotification.cpp

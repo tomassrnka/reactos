@@ -108,6 +108,7 @@
 #include "dialogs/filedefext.h"
 #include "dialogs/drvdefext.h"
 #include "CQueryAssociations.h"
+#include "CApplicationAssociationRegistration.h"
 #include "shellmenu/CMenuBand.h"
 #include "shellmenu/CMenuDeskBar.h"
 #include "shellmenu/CMenuSite.h"
