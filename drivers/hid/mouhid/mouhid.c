@@ -31,6 +31,29 @@ static USHORT MouHid_ButtonDownFlags[] =
 };
 
 
+/* Map an absolute report value onto the 0..65535 range that win32k expects: LogicalMin gives 0, LogicalMax gives 65535. */
+static
+LONG
+MouHid_ScaleAbsolute(
+    IN ULONG Value,
+    IN PHIDP_VALUE_CAPS Caps)
+{
+    LONGLONG Range = (LONGLONG)Caps->LogicalMax - Caps->LogicalMin;
+    LONGLONG Position;
+
+    /* signed fields come back as raw bits */
+    if (Caps->LogicalMin < 0 && Caps->BitSize > 0 && Caps->BitSize < 32)
+        Value = (ULONG)((LONG)(Value << (32 - Caps->BitSize)) >> (32 - Caps->BitSize));
+
+    Position = (LONGLONG)(LONG)Value - Caps->LogicalMin;
+    if (Range <= 0 || Position <= 0)
+        return 0;
+    if (Position >= Range)
+        return VIRTUAL_SCREEN_SIZE_X - 1;
+
+    return (LONG)((Position * (VIRTUAL_SCREEN_SIZE_X - 1) + Range / 2) / Range);
+}
+
 VOID
 MouHid_GetButtonMove(
     IN PMOUHID_DEVICE_EXTENSION DeviceExtension,
@@ -82,7 +105,7 @@ MouHid_GetButtonMove(
                 ASSERT(DeviceExtension->ValueCapsX.LogicalMax > DeviceExtension->ValueCapsX.LogicalMin);
 
                 /* convert to logical range */
-                *LastX = (ValueX * VIRTUAL_SCREEN_SIZE_X) / DeviceExtension->ValueCapsX.LogicalMax;
+                *LastX = MouHid_ScaleAbsolute(ValueX, &DeviceExtension->ValueCapsX);
             }
         }
     }
@@ -106,7 +129,7 @@ MouHid_GetButtonMove(
         ASSERT(DeviceExtension->ValueCapsX.LogicalMax > DeviceExtension->ValueCapsX.LogicalMin);
 
         /* convert to logical range */
-        *LastX = (ValueX * VIRTUAL_SCREEN_SIZE_X) / DeviceExtension->ValueCapsX.LogicalMax;
+        *LastX = MouHid_ScaleAbsolute(ValueX, &DeviceExtension->ValueCapsX);
     }
 
     if (!DeviceExtension->MouseAbsolute)
@@ -147,7 +170,7 @@ MouHid_GetButtonMove(
                 ASSERT(DeviceExtension->ValueCapsY.LogicalMax > DeviceExtension->ValueCapsY.LogicalMin);
 
                 /* convert to logical range */
-                *LastY = (ValueY * VIRTUAL_SCREEN_SIZE_Y) / DeviceExtension->ValueCapsY.LogicalMax;
+                *LastY = MouHid_ScaleAbsolute(ValueY, &DeviceExtension->ValueCapsY);
             }
         }
     }
@@ -171,7 +194,7 @@ MouHid_GetButtonMove(
         ASSERT(DeviceExtension->ValueCapsY.LogicalMax > DeviceExtension->ValueCapsY.LogicalMin);
 
         /* convert to logical range */
-        *LastY = (ValueY * VIRTUAL_SCREEN_SIZE_Y) / DeviceExtension->ValueCapsY.LogicalMax;
+        *LastY = MouHid_ScaleAbsolute(ValueY, &DeviceExtension->ValueCapsY);
     }
 }
 
