@@ -10,7 +10,7 @@
 
 #ifndef _NTGDITYP_
 #define _NTGDITYP_
-
+#include "w32kwide.h"
 #include "ntwin32.h"
 
 /* ENUMERATIONS **************************************************************/
@@ -409,12 +409,12 @@ typedef struct _MATRIX_S
 
 typedef struct _MATRIX
 {
-    FLOATOBJ efM11;
-    FLOATOBJ efM12;
-    FLOATOBJ efM21;
-    FLOATOBJ efM22;
-    FLOATOBJ efDx;
-    FLOATOBJ efDy;
+    KFLOATOBJ efM11;
+    KFLOATOBJ efM12;
+    KFLOATOBJ efM21;
+    KFLOATOBJ efM22;
+    KFLOATOBJ efDx;
+    KFLOATOBJ efDy;
     FIX fxDx;
     FIX fxDy;
     FLONG flAccel;
@@ -431,12 +431,12 @@ typedef union
 
 typedef struct _CFONT
 {
-    struct _CFONT   *pcfNext;
-    HFONT           hf;
+    KFIELD(struct _CFONT   *, pcfNext);
+    KFIELD(HFONT, hf);
     ULONG           cRef;               // Count of all pointers to this CFONT.
     FLONG           fl;
     LONG            lHeight;            // Precomputed logical height.
-    HDC             hdc;                // HDC of realization.  0 for display.
+    KFIELD(HDC, hdc);                // HDC of realization.  0 for display.
     EFLOAT_S        efM11;              // efM11 of WtoD of DC of realization
     EFLOAT_S        efM22;              // efM22 of WtoD of DC of realization
     EFLOAT_S        efDtoWBaseline;     // Precomputed back transform.  (FXtoL)
@@ -466,7 +466,7 @@ typedef struct _GDIBSPATBLT
   int nYLeft;
   int nWidth;
   int nHeight;
-  HANDLE hbrush;
+  KFIELD(HANDLE, hbrush);
   DWORD dwRop;
   COLORREF crForegroundClr;
   COLORREF crBackgroundClr;
@@ -498,7 +498,7 @@ typedef struct _GDIBSPPATBLT
   ULONG ulBackgroundClr;
   ULONG ulBrushClr;
   POINTL ptlViewportOrg;
-  PATRECT pRect[1]; // POLYPATBLT
+  KPATRECT pRect[1]; // POLYPATBLT
 } GDIBSPPATBLT, *PGDIBSPPATBLT;
 
 //
@@ -521,7 +521,7 @@ typedef struct _GDIBSTEXTOUT
   DWORD iCS_CP;
   UINT cbCount;
   UINT Size;
-  HANDLE hlfntNew;
+  KFIELD(HANDLE, hlfntNew);
   FLONG flTextAlign;
   POINTL ptlViewportOrg;
   union {
@@ -557,7 +557,7 @@ typedef struct _GDIBSEXTSELCLPRGN
 typedef struct _GDIBSOBJECT
 {
   GDIBATCHHDR gbHdr;
-  HGDIOBJ hgdiobj;
+  KFIELD(HGDIOBJ, hgdiobj);
 } GDIBSOBJECT, *PGDIBSOBJECT;
 
 /* Declaration missing in ddk/winddi.h */

@@ -1,6 +1,6 @@
 #ifndef __WIN32K_NTUSER_H
 #define __WIN32K_NTUSER_H
-
+#include "w32kwide.h"
 struct _PROCESSINFO;
 struct _THREADINFO;
 struct _DESKTOP;
@@ -18,12 +18,12 @@ struct tagPOPUPMENU;
 
 typedef struct _USER_HANDLE_ENTRY
 {
-    void *ptr; /* pointer to object */
+    KFIELD(void *, ptr); /* pointer to object */
     union
     {
-        PVOID pi;
-        struct _THREADINFO *pti; /* pointer to Win32ThreadInfo */
-        struct _PROCESSINFO *ppi; /* pointer to W32ProcessInfo */
+        KFIELD(PVOID, pi);
+        KFIELD(struct _THREADINFO *, pti); /* pointer to Win32ThreadInfo */
+        KFIELD(struct _PROCESSINFO *, ppi); /* pointer to W32ProcessInfo */
     };
     unsigned char type; /* object type (0 if free) */
     unsigned char flags;
@@ -32,8 +32,8 @@ typedef struct _USER_HANDLE_ENTRY
 
 typedef struct _USER_HANDLE_TABLE
 {
-    PUSER_HANDLE_ENTRY handles;
-    PUSER_HANDLE_ENTRY freelist;
+    KFIELD(PUSER_HANDLE_ENTRY, handles);
+    KFIELD(PUSER_HANDLE_ENTRY, freelist);
     int nb_handles;
     int allocated_handles;
 } USER_HANDLE_TABLE, *PUSER_HANDLE_TABLE;
@@ -86,7 +86,7 @@ typedef struct _LARGE_UNICODE_STRING
     ULONG Length;
     ULONG MaximumLength:31;
     ULONG bAnsi:1;
-    PWSTR Buffer;
+    KFIELD(PWSTR, Buffer);
 } LARGE_UNICODE_STRING, *PLARGE_UNICODE_STRING;
 
 typedef struct _LARGE_STRING
@@ -135,19 +135,19 @@ RtlLargeStringToUnicodeString(
  */
 typedef struct _DESKTOPINFO
 {
-    PVOID pvDesktopBase;
-    PVOID pvDesktopLimit;
-    struct _WND *spwnd;
+    KFIELD(PVOID, pvDesktopBase);
+    KFIELD(PVOID, pvDesktopLimit);
+    KFIELD(struct _WND *, spwnd);
     DWORD fsHooks;
-    LIST_ENTRY aphkStart[NB_HOOKS];
+    KLIST_ENTRY aphkStart[NB_HOOKS];
 
-    HWND hTaskManWindow;
-    HWND hProgmanWindow;
-    HWND hShellWindow;
-    struct _WND *spwndShell;
-    struct _WND *spwndBkGnd;
+    KFIELD(HWND, hTaskManWindow);
+    KFIELD(HWND, hProgmanWindow);
+    KFIELD(HWND, hShellWindow);
+    KFIELD(struct _WND *, spwndShell);
+    KFIELD(struct _WND *, spwndBkGnd);
 
-    struct _PROCESSINFO *ppiShellProcess;
+    KFIELD(struct _PROCESSINFO *, ppiShellProcess);
 
     union
     {
@@ -181,32 +181,32 @@ typedef struct _CLIENTTHREADINFO
 
 typedef struct _HEAD
 {
-    HANDLE h;
+    KFIELD(HANDLE, h);
     DWORD cLockObj;
 } HEAD, *PHEAD;
 
 typedef struct _THROBJHEAD
 {
     HEAD;
-    struct _THREADINFO *pti;
+    KFIELD(struct _THREADINFO *, pti);
 } THROBJHEAD, *PTHROBJHEAD;
 
 typedef struct _THRDESKHEAD
 {
     THROBJHEAD;
-    struct _DESKTOP *rpdesk;
-    PVOID pSelf;
+    KFIELD(struct _DESKTOP *, rpdesk);
+    KFIELD(PVOID, pSelf);
 } THRDESKHEAD, *PTHRDESKHEAD;
 
 typedef struct tagIMC
 {
     THRDESKHEAD    head;
-    struct tagIMC *pImcNext;
-    ULONG_PTR      dwClientImcData;
-    HWND           hImeWnd;
+    KFIELD(struct tagIMC *, pImcNext);
+    KFIELD(ULONG_PTR, dwClientImcData);
+    KFIELD(HWND, hImeWnd);
 } IMC, *PIMC;
 
-#ifndef _WIN64
+#if !defined(_WIN64) && !defined(W32K_WIDE)
 C_ASSERT(offsetof(IMC, head.h) == 0x0);
 C_ASSERT(offsetof(IMC, head.cLockObj) == 0x4);
 C_ASSERT(offsetof(IMC, head.pti) == 0x8);
@@ -218,16 +218,16 @@ C_ASSERT(offsetof(IMC, hImeWnd) == 0x1c);
 typedef struct _PROCDESKHEAD
 {
     HEAD;
-    DWORD_PTR hTaskWow;
-    struct _DESKTOP *rpdesk;
-    PVOID pSelf;
+    KFIELD(DWORD_PTR, hTaskWow);
+    KFIELD(struct _DESKTOP *, rpdesk);
+    KFIELD(PVOID, pSelf);
 } PROCDESKHEAD, *PPROCDESKHEAD;
 
 typedef struct _PROCMARKHEAD
 {
     HEAD;
     ULONG hTaskWow;
-    struct _PROCESSINFO *ppi;
+    KFIELD(struct _PROCESSINFO *, ppi);
 } PROCMARKHEAD, *PPROCMARKHEAD;
 
 #define UserHMGetHandle(obj) ((obj)->head.h)
@@ -241,18 +241,18 @@ struct _ETHREAD;
 typedef struct tagHOOK
 {
     THRDESKHEAD head;
-    struct tagHOOK *phkNext; /* This is for user space. */
+    KFIELD(struct tagHOOK *, phkNext); /* This is for user space. */
     int HookId; /* Hook table index */
-    ULONG_PTR offPfn;
+    KFIELD(ULONG_PTR, offPfn);
     ULONG flags; /* Some internal flags */
-    INT_PTR ihmod;
-    struct _THREADINFO *ptiHooked;
-    struct _DESKTOP *rpdesk;
+    KFIELD(INT_PTR, ihmod);
+    KFIELD(struct _THREADINFO *, ptiHooked);
+    KFIELD(struct _DESKTOP *, rpdesk);
     /* ReactOS */
-    LIST_ENTRY Chain; /* Hook chain entry */
-    HOOKPROC Proc; /* Hook function */
+    KLIST_ENTRY Chain; /* Hook chain entry */
+    KFIELD(HOOKPROC, Proc); /* Hook function */
     BOOLEAN Ansi; /* Is it an Ansi hook? */
-    UNICODE_STRING ModuleName; /* Module name for global hooks */
+    KUNICODE_STRING ModuleName; /* Module name for global hooks */
 } HOOK, *PHOOK;
 
 typedef struct tagCLIPBOARDDATA
@@ -296,9 +296,9 @@ typedef struct tagCLIPBOARDDATA
 
 typedef struct _CALLBACKWND
 {
-    HWND hWnd;
-    struct _WND *pWnd;
-    PVOID pActCtx;
+    KFIELD(HWND, hWnd);
+    KFIELD(struct _WND *, pWnd);
+    KFIELD(PVOID, pActCtx);
 } CALLBACKWND, *PCALLBACKWND;
 
 #define CI_TRANSACTION       0x00000001
@@ -320,38 +320,38 @@ typedef struct _CALLBACKWND
  */
 typedef struct _CLIENTINFO
 {
-    ULONG_PTR CI_flags;
-    ULONG_PTR cSpins;
+    KFIELD(ULONG_PTR, CI_flags);
+    KFIELD(ULONG_PTR, cSpins);
     DWORD dwExpWinVer;
     DWORD dwCompatFlags;
     DWORD dwCompatFlags2;
     DWORD dwTIFlags; /* ThreadInfo TIF_Xxx flags for User space. */
-    PDESKTOPINFO pDeskInfo;
-    ULONG_PTR ulClientDelta;
-    PHOOK phkCurrent;
+    KFIELD(PDESKTOPINFO, pDeskInfo);
+    KFIELD(ULONG_PTR, ulClientDelta);
+    KFIELD(PHOOK, phkCurrent);
     ULONG fsHooks;
     CALLBACKWND CallbackWnd;
     DWORD dwHookCurrent;
     INT cInDDEMLCallback;
-    PCLIENTTHREADINFO pClientThreadInfo;
-    ULONG_PTR dwHookData;
+    KFIELD(PCLIENTTHREADINFO, pClientThreadInfo);
+    KFIELD(ULONG_PTR, dwHookData);
     DWORD dwKeyCache;
     BYTE afKeyState[8];
     DWORD dwAsyncKeyCache;
     BYTE afAsyncKeyState[8];
     BYTE afAsyncKeyStateRecentDow[8];
-    HKL hKL;
+    KFIELD(HKL, hKL);
     USHORT CodePage;
     UCHAR achDbcsCF[2];
-    MSG msgDbcsCB;
-    LPDWORD lpdwRegisteredClasses;
+    KMSG msgDbcsCB;
+    KFIELD(LPDWORD, lpdwRegisteredClasses);
     ULONG Win32ClientInfo3[26];
 /* It's just a pointer reference not to be used w the structure in user space. */
-    struct _PROCESSINFO *ppi;
+    KFIELD(struct _PROCESSINFO *, ppi);
 } CLIENTINFO, *PCLIENTINFO;
 
 /* Make sure it fits into the TEB */
-C_ASSERT(sizeof(CLIENTINFO) <= sizeof(((PTEB)0)->Win32ClientInfo));
+C_ASSERT(W32K_NATIVE_ASSERT(sizeof(CLIENTINFO) <= sizeof(((PTEB)0)->Win32ClientInfo)));
 
 #define GetWin32ClientInfo() ((PCLIENTINFO)(NtCurrentTeb()->Win32ClientInfo))
 
@@ -376,12 +376,12 @@ typedef struct tagITEM
     UINT fType;
     UINT fState;
     UINT wID;
-    struct tagMENU *spSubMenu; /* Pop-up menu. */
-    HANDLE hbmpChecked;
-    HANDLE hbmpUnchecked;
-    USHORT *Xlpstr; /* Item text pointer. */
+    KFIELD(struct tagMENU *, spSubMenu); /* Pop-up menu. */
+    KFIELD(HANDLE, hbmpChecked);
+    KFIELD(HANDLE, hbmpUnchecked);
+    KFIELD(USHORT *, Xlpstr); /* Item text pointer. */
     ULONG cch;
-    DWORD_PTR dwItemData;
+    KFIELD(DWORD_PTR, dwItemData);
     ULONG xItem; /* Item position. left */
     ULONG yItem; /*     "          top */
     ULONG cxItem; /* Item Size Width */
@@ -389,17 +389,17 @@ typedef struct tagITEM
     ULONG dxTab; /* X position of text after Tab */
     ULONG ulX; /* underline.. start position */
     ULONG ulWidth; /* underline.. width */
-    HBITMAP hbmp; /* bitmap */
+    KFIELD(HBITMAP, hbmp); /* bitmap */
     INT cxBmp; /* Width Maximum size of the bitmap items in MIIM_BITMAP state */
     INT cyBmp; /* Height " */
     /* ReactOS */
-    UNICODE_STRING lpstr;
+    KUNICODE_STRING lpstr;
 } ITEM, *PITEM;
 
 typedef struct tagMENULIST
 {
-    struct tagMENULIST *pNext;
-    struct tagMENU *pMenu;
+    KFIELD(struct tagMENULIST *, pNext);
+    KFIELD(struct tagMENU *, pMenu);
 } MENULIST, *PMENULIST;
 
 /* Menu fFlags, upper byte is MNS_X style flags. */
@@ -426,19 +426,19 @@ typedef struct tagMENU
     ULONG cxMenu; /* Width of the whole menu */
     ULONG cyMenu; /* Height of the whole menu */
     ULONG cxTextAlign; /* Offset of text when items have both bitmaps and text */
-    struct _WND *spwndNotify; /* window receiving the messages for ownerdraw */
-    PITEM rgItems; /* Array of menu items */
-    struct tagMENULIST *pParentMenus; /* If this is SubMenu, list of parents. */
+    KFIELD(struct _WND *, spwndNotify); /* window receiving the messages for ownerdraw */
+    KFIELD(PITEM, rgItems); /* Array of menu items */
+    KFIELD(struct tagMENULIST *, pParentMenus); /* If this is SubMenu, list of parents. */
     DWORD dwContextHelpId;
     ULONG cyMax; /* max height of the whole menu, 0 is screen height */
-    DWORD_PTR dwMenuData; /* application defined value */
-    HBRUSH hbrBack; /* brush for menu background */
+    KFIELD(DWORD_PTR, dwMenuData); /* application defined value */
+    KFIELD(HBRUSH, hbrBack); /* brush for menu background */
     INT iTop; /* Current scroll position Top */
     INT iMaxTop; /* Current scroll position Max Top */
     DWORD dwArrowsOn:2; /* Arrows: 0 off, 1 on, 2 to the top, 3 to the bottom. */
     /* ReactOS */
-    LIST_ENTRY ListEntry;
-    HWND hWnd; /* Window containing the menu, use POPUPMENU */
+    KLIST_ENTRY ListEntry;
+    KFIELD(HWND, hWnd); /* Window containing the menu, use POPUPMENU */
     BOOL TimeToHide;
 } MENU, *PMENU;
 
@@ -470,15 +470,15 @@ typedef struct tagPOPUPMENU
     // ULONG fDesktopMenu:1;
     ULONG iDropDir:5;
     ULONG fUseMonitorRect:1;
-    struct _WND *spwndNotify;
-    struct _WND *spwndPopupMenu;
-    struct _WND *spwndNextPopup;
-    struct _WND *spwndPrevPopup;
-    PMENU spmenu;
-    PMENU spmenuAlternate;
-    struct _WND *spwndActivePopup;
-    struct tagPOPUPMENU *ppopupmenuRoot;
-    struct tagPOPUPMENU *ppmDelayedFree;
+    KFIELD(struct _WND *, spwndNotify);
+    KFIELD(struct _WND *, spwndPopupMenu);
+    KFIELD(struct _WND *, spwndNextPopup);
+    KFIELD(struct _WND *, spwndPrevPopup);
+    KFIELD(PMENU, spmenu);
+    KFIELD(PMENU, spmenuAlternate);
+    KFIELD(struct _WND *, spwndActivePopup);
+    KFIELD(struct tagPOPUPMENU *, ppopupmenuRoot);
+    KFIELD(struct tagPOPUPMENU *, ppmDelayedFree);
     UINT posSelectedItem;
     UINT posDropped;
 } POPUPMENU, *PPOPUPMENU;
@@ -552,8 +552,8 @@ typedef enum _GETCPD
 typedef struct _CALLPROCDATA
 {
     PROCDESKHEAD head;
-    struct _CALLPROCDATA *spcpdNext;
-    WNDPROC pfnClientPrevious;
+    KFIELD(struct _CALLPROCDATA *, spcpdNext);
+    KFIELD(WNDPROC, pfnClientPrevious);
     GETCPD wType;
 } CALLPROCDATA, *PCALLPROCDATA;
 
@@ -568,30 +568,30 @@ typedef struct _CALLPROCDATA
 
 typedef struct _CLS
 {
-    struct _CLS *pclsNext;
+    KFIELD(struct _CLS *, pclsNext);
     RTL_ATOM atomClassName;
     ATOM atomNVClassName;
     DWORD fnid;
-    struct _DESKTOP *rpdeskParent;
-    PVOID pdce;
+    KFIELD(struct _DESKTOP *, rpdeskParent);
+    KFIELD(PVOID, pdce);
     DWORD CSF_flags;
-    PSTR  lpszClientAnsiMenuName; /* For client use */
-    PWSTR lpszClientUnicodeMenuName; /* "   "      " */
-    PCALLPROCDATA spcpdFirst;
-    struct _CLS *pclsBase;
-    struct _CLS *pclsClone;
+    KFIELD(PSTR, lpszClientAnsiMenuName); /* For client use */
+    KFIELD(PWSTR, lpszClientUnicodeMenuName); /* "   "      " */
+    KFIELD(PCALLPROCDATA, spcpdFirst);
+    KFIELD(struct _CLS *, pclsBase);
+    KFIELD(struct _CLS *, pclsClone);
     ULONG cWndReferenceCount;
     UINT style;
-    WNDPROC lpfnWndProc;
+    KFIELD(WNDPROC, lpfnWndProc);
     INT cbclsExtra;
     INT cbwndExtra;
-    HINSTANCE hModule;
-    struct _CURICON_OBJECT *spicn;
-    struct _CURICON_OBJECT *spcur;
-    HBRUSH hbrBackground;
-    PWSTR lpszMenuName; /* kernel use */
-    PSTR lpszAnsiClassName; /* " */
-    struct _CURICON_OBJECT *spicnSm;
+    KFIELD(HINSTANCE, hModule);
+    KFIELD(struct _CURICON_OBJECT *, spicn);
+    KFIELD(struct _CURICON_OBJECT *, spcur);
+    KFIELD(HBRUSH, hbrBackground);
+    KFIELD(PWSTR, lpszMenuName); /* kernel use */
+    KFIELD(PSTR, lpszAnsiClassName); /* " */
+    KFIELD(struct _CURICON_OBJECT *, spicnSm);
     ////
     UINT Unicode:1; // !CSF_ANSIPROC
     UINT Global:1; // CS_GLOBALCLASS or CSF_SERVERSIDEPROC
@@ -709,43 +709,43 @@ typedef struct _WND
     /* Style. */
     DWORD style;
     /* Handle of the module that created the window. */
-    HINSTANCE hModule;
+    KFIELD(HINSTANCE, hModule);
     DWORD fnid;
 #endif
-    struct _WND *spwndNext;
-    struct _WND *spwndPrev;
-    struct _WND *spwndParent;
-    struct _WND *spwndChild;
-    struct _WND *spwndOwner;
+    KFIELD(struct _WND *, spwndNext);
+    KFIELD(struct _WND *, spwndPrev);
+    KFIELD(struct _WND *, spwndParent);
+    KFIELD(struct _WND *, spwndChild);
+    KFIELD(struct _WND *, spwndOwner);
     RECT rcWindow;
     RECT rcClient;
-    WNDPROC lpfnWndProc;
+    KFIELD(WNDPROC, lpfnWndProc);
     /* Pointer to the window class. */
-    PCLS pcls;
-    HRGN hrgnUpdate;
+    KFIELD(PCLS, pcls);
+    KFIELD(HRGN, hrgnUpdate);
     /* Property list head.*/
-    LIST_ENTRY PropListHead;
+    KLIST_ENTRY PropListHead;
     ULONG PropListItems;
     /* Scrollbar info */
-    PSBINFO pSBInfo;
+    KFIELD(PSBINFO, pSBInfo);
     /* system menu handle. */
-    HMENU SystemMenu;
+    KFIELD(HMENU, SystemMenu);
     //PMENU spmenuSys;
     /* Window menu handle or window id */
-    UINT_PTR IDMenu; // Use spmenu
+    KFIELD(UINT_PTR, IDMenu); // Use spmenu
     //PMENU spmenu;
-    HRGN hrgnClip;
-    HRGN hrgnNewFrame;
+    KFIELD(HRGN, hrgnClip);
+    KFIELD(HRGN, hrgnNewFrame);
     /* Window name. */
     LARGE_UNICODE_STRING strName;
     /* Size of the extra data associated with the window. */
     ULONG cbwndExtra;
-    struct _WND *spwndLastActive;
-    HIMC hImc; // Input context associated with this window.
-    LONG_PTR dwUserData;
-    PVOID pActCtx;
+    KFIELD(struct _WND *, spwndLastActive);
+    KFIELD(HIMC, hImc); // Input context associated with this window.
+    KFIELD(LONG_PTR, dwUserData);
+    KFIELD(PVOID, pActCtx);
     //PD3DMATRIX pTransForm;
-    struct _WND *spwndClipboardListener;
+    KFIELD(struct _WND *, spwndClipboardListener);
     DWORD ExStyle2;
 
     /* ReactOS */
@@ -763,11 +763,11 @@ typedef struct _WND
     UINT HideAccel:1; /* WS_EX_UISTATEKBACCELHIDDEN ? */
 
     /* Scrollbar info */
-    PSBINFOEX pSBInfoex; // convert to PSBINFO
+    KFIELD(PSBINFOEX, pSBInfoex); // convert to PSBINFO
     /* Entry in the list of thread windows. */
-    LIST_ENTRY ThreadListEntry;
+    KLIST_ENTRY ThreadListEntry;
 
-    PVOID DialogPointer;
+    KFIELD(PVOID, DialogPointer);
 } WND, *PWND;
 
 #define PWND_BOTTOM ((PWND)1)
@@ -784,7 +784,7 @@ typedef struct _MDIWND
 {
   WND wnd;
   DWORD dwReserved;
-  PVOID pmdi;
+  KFIELD(PVOID, pmdi);
 } MDIWND, *PMDIWND;
 
 #define GWLP_MDIWND 4
@@ -792,34 +792,34 @@ typedef struct _MDIWND
 typedef struct _MENUWND
 {
     WND wnd;
-    PPOPUPMENU ppopupmenu;
+    KFIELD(PPOPUPMENU, ppopupmenu);
 } MENUWND, *PMENUWND;
 
 typedef struct _PFNCLIENT
 {
-    WNDPROC pfnScrollBarWndProc;
-    WNDPROC pfnTitleWndProc;
-    WNDPROC pfnMenuWndProc;
-    WNDPROC pfnDesktopWndProc;
-    WNDPROC pfnDefWindowProc;
-    WNDPROC pfnMessageWindowProc;
-    WNDPROC pfnSwitchWindowProc;
-    WNDPROC pfnButtonWndProc;
-    WNDPROC pfnComboBoxWndProc;
-    WNDPROC pfnComboListBoxProc;
-    WNDPROC pfnDialogWndProc;
-    WNDPROC pfnEditWndProc;
-    WNDPROC pfnListBoxWndProc;
-    WNDPROC pfnMDIClientWndProc;
-    WNDPROC pfnStaticWndProc;
-    WNDPROC pfnImeWndProc;
-    WNDPROC pfnGhostWndProc;
-    WNDPROC pfnHkINLPCWPSTRUCT;
-    WNDPROC pfnHkINLPCWPRETSTRUCT;
-    WNDPROC pfnDispatchHook;
-    WNDPROC pfnDispatchDefWindowProc;
-    WNDPROC pfnDispatchMessage;
-    WNDPROC pfnMDIActivateDlgProc;
+    KFIELD(WNDPROC, pfnScrollBarWndProc);
+    KFIELD(WNDPROC, pfnTitleWndProc);
+    KFIELD(WNDPROC, pfnMenuWndProc);
+    KFIELD(WNDPROC, pfnDesktopWndProc);
+    KFIELD(WNDPROC, pfnDefWindowProc);
+    KFIELD(WNDPROC, pfnMessageWindowProc);
+    KFIELD(WNDPROC, pfnSwitchWindowProc);
+    KFIELD(WNDPROC, pfnButtonWndProc);
+    KFIELD(WNDPROC, pfnComboBoxWndProc);
+    KFIELD(WNDPROC, pfnComboListBoxProc);
+    KFIELD(WNDPROC, pfnDialogWndProc);
+    KFIELD(WNDPROC, pfnEditWndProc);
+    KFIELD(WNDPROC, pfnListBoxWndProc);
+    KFIELD(WNDPROC, pfnMDIClientWndProc);
+    KFIELD(WNDPROC, pfnStaticWndProc);
+    KFIELD(WNDPROC, pfnImeWndProc);
+    KFIELD(WNDPROC, pfnGhostWndProc);
+    KFIELD(WNDPROC, pfnHkINLPCWPSTRUCT);
+    KFIELD(WNDPROC, pfnHkINLPCWPRETSTRUCT);
+    KFIELD(WNDPROC, pfnDispatchHook);
+    KFIELD(WNDPROC, pfnDispatchDefWindowProc);
+    KFIELD(WNDPROC, pfnDispatchMessage);
+    KFIELD(WNDPROC, pfnMDIActivateDlgProc);
 } PFNCLIENT, *PPFNCLIENT;
 
 /*
@@ -837,17 +837,17 @@ typedef LRESULT
 
 typedef struct _PFNCLIENTWORKER
 {
-    WNDPROC_EX pfnButtonWndProc;
-    WNDPROC_EX pfnComboBoxWndProc;
-    WNDPROC_EX pfnComboListBoxProc;
-    WNDPROC_EX pfnDialogWndProc;
-    WNDPROC_EX pfnEditWndProc;
-    WNDPROC_EX pfnListBoxWndProc;
-    WNDPROC_EX pfnMDIClientWndProc;
-    WNDPROC_EX pfnStaticWndProc;
-    WNDPROC_EX pfnImeWndProc;
-    WNDPROC_EX pfnGhostWndProc;
-    WNDPROC_EX pfnCtfHookProc;
+    KFIELD(WNDPROC_EX, pfnButtonWndProc);
+    KFIELD(WNDPROC_EX, pfnComboBoxWndProc);
+    KFIELD(WNDPROC_EX, pfnComboListBoxProc);
+    KFIELD(WNDPROC_EX, pfnDialogWndProc);
+    KFIELD(WNDPROC_EX, pfnEditWndProc);
+    KFIELD(WNDPROC_EX, pfnListBoxWndProc);
+    KFIELD(WNDPROC_EX, pfnMDIClientWndProc);
+    KFIELD(WNDPROC_EX, pfnStaticWndProc);
+    KFIELD(WNDPROC_EX, pfnImeWndProc);
+    KFIELD(WNDPROC_EX, pfnGhostWndProc);
+    KFIELD(WNDPROC_EX, pfnCtfHookProc);
 } PFNCLIENTWORKER, *PPFNCLIENTWORKER;
 
 typedef LONG_PTR
@@ -906,11 +906,11 @@ typedef LONG_PTR
 #define ICLASS_TO_MASK(iCls) (1 << ((iCls)))
 
 #define GETPFNCLIENTA(fnid) \
- (WNDPROC)(*(((ULONG_PTR *)&gpsi->apfnClientA) + (fnid - FNID_FIRST)))
+ (WNDPROC)(ULONG_PTR)(*(((KULONG_PTR *)&gpsi->apfnClientA) + (fnid - FNID_FIRST)))
 #define GETPFNCLIENTW(fnid) \
- (WNDPROC)(*(((ULONG_PTR *)&gpsi->apfnClientW) + (fnid - FNID_FIRST)))
+ (WNDPROC)(ULONG_PTR)(*(((KULONG_PTR *)&gpsi->apfnClientW) + (fnid - FNID_FIRST)))
 
-#define GETPFNSERVER(fnid) gpsi->aStoCidPfn[fnid - FNID_FIRST]
+#define GETPFNSERVER(fnid) KA(gpsi->aStoCidPfn[fnid - FNID_FIRST])
 
 /* ICLS's for NtUserGetClassName FNID to ICLS, NtUserInitializeClientPfnArrays */
 #define ICLS_BUTTON       0
@@ -986,8 +986,8 @@ typedef struct tagMBSTRING
 typedef struct tagDPISERVERINFO
 {
     INT gclBorder;      /* 000 */
-    HFONT hCaptionFont; /* 004 */
-    HFONT hMsgFont;     /* 008 */
+    KFIELD(HFONT, hCaptionFont); /* 004 */
+    KFIELD(HFONT, hMsgFont);     /* 008 */
     INT cxMsgFontChar;  /* 00C */
     INT cyMsgFontChar;  /* 010 */
     UINT wMaxBtnSize;   /* 014 */
@@ -1009,8 +1009,8 @@ typedef struct _PERUSERSERVERINFO
     INT aiSysMet[SM_CMETRICS];
     ULONG argbSystemUnmatched[NUM_SYSCOLORS];
     COLORREF argbSystem[NUM_SYSCOLORS];
-    HBRUSH ahbrSystem[NUM_SYSCOLORS];
-    HBRUSH hbrGray;
+    KARRAY(HBRUSH, ahbrSystem, NUM_SYSCOLORS);
+    KFIELD(HBRUSH, hbrGray);
     POINT ptCursor;
     POINT ptCursorReal;
     DWORD dwLastRITEventTickCount;
@@ -1026,8 +1026,8 @@ typedef struct _PERUSERSERVERINFO
     INT cySysFontChar;
     TEXTMETRICW tmSysFont;
     DPISERVERINFO dpiSystem;
-    HICON hIconSmWindows;
-    HICON hIconWindows;
+    KFIELD(HICON, hIconSmWindows);
+    KFIELD(HICON, hIconWindows);
     DWORD dwKeyCache;
     DWORD dwAsyncKeyCache;
     ULONG cCaptures;
@@ -1053,9 +1053,9 @@ typedef struct _PERUSERSERVERINFO
 typedef struct tagSERVERINFO
 {
     DWORD dwSRVIFlags;
-    ULONG_PTR cHandleEntries;
-    PFN_FNID mpFnidPfn[FNID_NUM];
-    WNDPROC aStoCidPfn[FNID_NUMSERVERPROC];
+    KFIELD(ULONG_PTR, cHandleEntries);
+    KARRAY(PFN_FNID, mpFnidPfn, FNID_NUM);
+    KARRAY(WNDPROC, aStoCidPfn, FNID_NUMSERVERPROC);
     USHORT mpFnid_serverCBWndProc[FNID_NUM];
     PFNCLIENT apfnClientA;
     PFNCLIENT apfnClientW;
@@ -1076,7 +1076,7 @@ typedef struct tagSERVERINFO
     PERUSERSERVERINFO;
 } SERVERINFO, *PSERVERINFO;
 
-#ifdef _M_IX86
+#if defined(_M_IX86) && !defined(W32K_WIDE)
 C_ASSERT(sizeof(SERVERINFO) <= PAGE_SIZE);
 #endif
 
@@ -1101,8 +1101,8 @@ typedef struct _PROPLISTITEM
 
 typedef struct _PROPERTY
 {
-    LIST_ENTRY PropListEntry;
-    HANDLE Data;
+    KLIST_ENTRY PropListEntry;
+    KFIELD(HANDLE, Data);
     ATOM Atom;
     WORD fs;
 } PROPERTY, *PPROPERTY;
@@ -1122,7 +1122,7 @@ struct _PROCESSINFO *GetW32ProcessInfo(VOID);
 typedef struct _WNDMSG
 {
     DWORD maxMsgs;
-    PINT abMsgs;
+    KFIELD(PINT, abMsgs);
 } WNDMSG, *PWNDMSG;
 
 /*
@@ -1131,10 +1131,10 @@ typedef struct _WNDMSG
  */
 typedef struct _SHAREDINFO
 {
-    PSERVERINFO psi;         /* Global Server Info */
-    PVOID aheList;           /* Handle Entry List */
-    PVOID pDispInfo;         /* Global PDISPLAYINFO pointer */
-    ULONG_PTR ulSharedDelta; /* Shared USER mapped section delta */
+    KFIELD(PSERVERINFO, psi);         /* Global Server Info */
+    KFIELD(PVOID, aheList);           /* Handle Entry List */
+    KFIELD(PVOID, pDispInfo);         /* Global PDISPLAYINFO pointer */
+    KFIELD(ULONG_PTR, ulSharedDelta); /* Shared USER mapped section delta */
     WNDMSG awmControl[FNID_NUM];
     WNDMSG DefWindowMsgs;
     WNDMSG DefWindowSpecMsgs;
@@ -1152,7 +1152,7 @@ typedef struct _USERCONNECT
 /* WinNT 5.0 compatible user32 / win32k */
 #define USER_VERSION MAKELONG(0x0000, 0x0005)
 
-#if defined(_M_IX86)
+#if defined(_M_IX86) && !defined(W32K_WIDE)
 C_ASSERT(sizeof(USERCONNECT) == 0x124);
 #endif
 
@@ -1221,11 +1221,11 @@ typedef struct tagCURSORDATA
 
 typedef struct tagIMEUI
 {
-    PWND spwnd;
-    HIMC hIMC;
-    HWND hwndIMC;
-    HKL hKL;
-    HWND hwndUI;
+    KFIELD(PWND, spwnd);
+    KFIELD(HIMC, hIMC);
+    KFIELD(HWND, hwndIMC);
+    KFIELD(HKL, hKL);
+    KFIELD(HWND, hwndUI);
     LONG nCntInIMEProc;
     struct {
         UINT fShowStatus:1;
@@ -1242,7 +1242,7 @@ typedef struct tagIMEUI
 typedef struct tagIMEWND
 {
     WND wnd;
-    PIMEUI pimeui;
+    KFIELD(PIMEUI, pimeui);
 } IMEWND, *PIMEWND;
 
 #define GWLP_IMEWND_PIMEUI 0
