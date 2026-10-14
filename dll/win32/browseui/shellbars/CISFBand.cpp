@@ -212,6 +212,15 @@ STDMETHODIMP CISFBand::SetSite(IUnknown *pUnkSite)
 
     TRACE("CISFBand::SetSite(0x%p)\n", pUnkSite);
 
+    /* Letting go of the site takes the window down, or it would outlive the object that handles its messages */
+    if (pUnkSite == NULL)
+    {
+        if (m_hWnd)
+            DestroyWindow();
+        m_Site = NULL;
+        return S_OK;
+    }
+
     hr = IUnknown_GetWindow(pUnkSite, &hwndParent);
     if (FAILED(hr))
     {
@@ -378,17 +387,105 @@ STDMETHODIMP CISFBand::IsDirty()
     return S_FALSE;
 }
 
+/* The persisted band: a version, the toolbar options and the folder it shows */
+#define ISFBAND_STREAM_VERSION  1
+#define ISFBAND_QLAUNCH         0x1
+#define ISFBAND_SHOWTEXT        0x2
+#define ISFBAND_SMALLICON       0x4
+
+/* The persisted band: a version, the toolbar options and the folder it shows, as the path of
+ * a file system folder (empty for the desktop). A stream can be changed by anyone who can write the
+ * registry, a path is parsed by the shell with the checks of any path, an item list is not. */
+#define ISFBAND_STREAM_VERSION  1
+#define ISFBAND_QLAUNCH         0x1
+#define ISFBAND_SHOWTEXT        0x2
+#define ISFBAND_SMALLICON       0x4
+
 STDMETHODIMP CISFBand::Load(IN IStream *pStm)
 {
-    TRACE("CISFBand::Load called\n");
-    /* Nothing to do */
+    DWORD header[3];
+    WCHAR szPath[MAX_PATH];
+    ULONG cbRead;
+    CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidl;
+
+    HRESULT hr = pStm->Read(header, sizeof(header), &cbRead);
+    if (FAILED(hr))
+        return hr;
+    if (cbRead != sizeof(header) || header[0] != ISFBAND_STREAM_VERSION || header[2] >= _countof(szPath))
+        return E_FAIL;
+
+    /* The length of the path in characters without the terminator */
+    if (header[2] != 0)
+    {
+        hr = pStm->Read(szPath, header[2] * sizeof(WCHAR), &cbRead);
+        if (FAILED(hr))
+            return hr;
+        if (cbRead != header[2] * sizeof(WCHAR))
+            return E_FAIL;
+        szPath[header[2]] = UNICODE_NULL;
+        if ((DWORD)lstrlenW(szPath) != header[2])
+            return E_FAIL;
+
+        hr = SHILCreateFromPath(szPath, &pidl, NULL);
+        if (FAILED(hr))
+            return hr;
+    }
+    else
+    {
+        hr = SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &pidl);
+        if (FAILED(hr))
+            return hr;
+    }
+    if (!pidl)
+        return E_FAIL;
+
+    hr = InitializeSFB(NULL, pidl);
+    if (FAILED(hr))
+        return hr;
+
+    m_QLaunch = !!(header[1] & ISFBAND_QLAUNCH);
+    m_bShowText = !!(header[1] & ISFBAND_SHOWTEXT);
+    m_bSmallIcon = !!(header[1] & ISFBAND_SMALLICON);
     return S_OK;
 }
 
 STDMETHODIMP CISFBand::Save(IN IStream *pStm, IN BOOL fClearDirty)
 {
-    /* Nothing to do */
-    return S_OK;
+    DWORD header[3] = { ISFBAND_STREAM_VERSION, 0, 0 };
+    WCHAR szPath[MAX_PATH];
+    ULONG cbWritten;
+
+    if (!m_pidl)
+        return E_FAIL;
+
+    /* Only a file system folder or the desktop can be stored */
+    if (!_ILIsDesktop(m_pidl))
+    {
+        if (!SHGetPathFromIDListW(m_pidl, szPath))
+            return E_FAIL;
+        header[2] = lstrlenW(szPath);
+    }
+
+    if (m_QLaunch)
+        header[1] |= ISFBAND_QLAUNCH;
+    if (m_bShowText)
+        header[1] |= ISFBAND_SHOWTEXT;
+    if (m_bSmallIcon)
+        header[1] |= ISFBAND_SMALLICON;
+
+    HRESULT hr = pStm->Write(header, sizeof(header), &cbWritten);
+    if (FAILED(hr))
+        return hr;
+    if (cbWritten != sizeof(header))
+        return E_FAIL;
+
+    if (header[2] == 0)
+        return S_OK;
+
+    hr = pStm->Write(szPath, header[2] * sizeof(WCHAR), &cbWritten);
+    if (FAILED(hr))
+        return hr;
+    return (cbWritten == header[2] * sizeof(WCHAR)) ? S_OK : E_FAIL;
 }
 
 STDMETHODIMP CISFBand::GetSizeMax(OUT ULARGE_INTEGER *pcbSize)
