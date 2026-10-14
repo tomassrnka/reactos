@@ -39,6 +39,7 @@ list(APPEND SOURCE
     ldr/ldrpe.c
     ldr/ldrutils.c
     ldr/verifier.c
+    rtl/apisetquery.c
     rtl/strcpy_s.c)
 
 if(ARCH STREQUAL "i386")

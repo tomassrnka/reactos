@@ -27,6 +27,8 @@
 @ stdcall -stub -version=0x600+ AlpcRegisterCompletionListWorkerThread(ptr)
 @ stdcall -stub -version=0x600+ AlpcUnregisterCompletionList(ptr)
 @ stdcall -stub -version=0x600+ AlpcUnregisterCompletionListWorkerThread(ptr)
+@ stdcall -version=0x601+ ApiSetQueryApiSetPresence(ptr ptr)
+@ stdcall -version=0x601+ ApiSetQueryApiSetPresenceEx(ptr ptr ptr)
 @ stdcall CsrAllocateCaptureBuffer(long long)
 @ stdcall CsrAllocateMessagePointer(ptr long ptr)
 @ stdcall CsrCaptureMessageBuffer(ptr ptr long ptr)
