@@ -4,6 +4,7 @@
 
 extern void func_Wow64Process(void);
 extern void func_Wow64Threads(void);
+extern void func_Wow64RemoteThread(void);
 extern void func_Wow64ThreadApc(void);
 extern void func_Wow64ThreadLifetime(void);
 extern void func_Wow64ThreadExitProcess(void);
@@ -95,6 +96,7 @@ const struct test winetest_testlist[] =
     { "Wow64ThreadLifetime", func_Wow64ThreadLifetime },
     { "Wow64ThreadExitProcess", func_Wow64ThreadExitProcess },
     { "Wow64Threads", func_Wow64Threads },
+    { "Wow64RemoteThread", func_Wow64RemoteThread },
     { "Wow64Process", func_Wow64Process },
     { "Wow64Run", func_Wow64Run },
     { "Wow64ReviewFixes", func_Wow64ReviewFixes },
