@@ -20,6 +20,7 @@ list(APPEND SOURCE
     dosdev.c
     DynamicTls.c
     DynamicTimeZone.c
+    GetTimeZoneInformationForYear.c
     EnumSystemCodePages.c
     ExitThread.c
     FindActCtxSectionStringW.c

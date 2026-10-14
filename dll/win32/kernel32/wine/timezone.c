@@ -727,4 +727,107 @@ GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION pTimeZoneInformatio
     return Result;
 }
 
+/*
+ * @implemented
+ *
+ * As on Windows 7, the result starts as the caller's own values (the names too),
+ * and the biases and transition dates of the "Dynamic DST" entry for the year
+ * replace theirs. Years before the first entry use the first one, years after
+ * the last one the last one. Nothing is changed when daylight saving time is
+ * marked as not dynamic, when the zone has no complete "Dynamic DST" key, or
+ * for a year that is not between -999 and 9999 as a signed 16-bit number.
+ */
+BOOL
+WINAPI
+GetTimeZoneInformationForYear(
+    _In_ USHORT wYear,
+    _In_opt_ PDYNAMIC_TIME_ZONE_INFORMATION pdtzi,
+    _Out_ LPTIME_ZONE_INFORMATION ptzi)
+{
+    static const WCHAR ZonesPath[] = L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones\\";
+    static const WCHAR DynamicDst[] = L"\\Dynamic DST";
+    DYNAMIC_TIME_ZONE_INFORMATION Local;
+    WCHAR Path[ARRAYSIZE(ZonesPath) + ARRAYSIZE(Local.TimeZoneKeyName) + ARRAYSIZE(DynamicDst)];
+    WCHAR YearName[16];
+    UNICODE_STRING PathName, ValueName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Key;
+    ULONG FirstEntry, LastEntry, Length;
+    LONG Year;
+    NTSTATUS Status;
+    SIZE_T KeyNameLength;
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Partial;
+        UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(TIME_TZI_FORMAT)];
+    } Info;
+    TIME_TZI_FORMAT Tzi;
+
+    if (!pdtzi)
+    {
+        if (GetDynamicTimeZoneInformation(&Local) == TIME_ZONE_ID_INVALID)
+            return FALSE;
+        pdtzi = &Local;
+    }
+
+    RtlCopyMemory(ptzi, pdtzi, sizeof(*ptzi));
+
+    if (pdtzi->DynamicDaylightTimeDisabled)
+        return TRUE;
+
+    Year = (SHORT)wYear;
+    if (Year > 9999 || Year < -999)
+        return TRUE;
+
+    for (KeyNameLength = 0; KeyNameLength < ARRAYSIZE(pdtzi->TimeZoneKeyName); KeyNameLength++)
+    {
+        if (!pdtzi->TimeZoneKeyName[KeyNameLength])
+            break;
+    }
+    if (KeyNameLength == ARRAYSIZE(pdtzi->TimeZoneKeyName))
+        return TRUE;
+    RtlCopyMemory(Path, ZonesPath, sizeof(ZonesPath) - sizeof(WCHAR));
+    RtlCopyMemory(Path + ARRAYSIZE(ZonesPath) - 1, pdtzi->TimeZoneKeyName, KeyNameLength * sizeof(WCHAR));
+    RtlCopyMemory(Path + ARRAYSIZE(ZonesPath) - 1 + KeyNameLength, DynamicDst, sizeof(DynamicDst));
+    RtlInitUnicodeString(&PathName, Path);
+    InitializeObjectAttributes(&ObjectAttributes, &PathName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
+        return TRUE;
+
+    if (!TIME_QueryDwordValue(Key, L"FirstEntry", &FirstEntry) || !TIME_QueryDwordValue(Key, L"LastEntry", &LastEntry))
+    {
+        NtClose(Key);
+        return TRUE;
+    }
+
+    if (Year < (LONG)FirstEntry)
+        Year = (LONG)FirstEntry;
+    else if (Year > (LONG)LastEntry)
+        Year = (LONG)LastEntry;
+
+    ValueName.Buffer = YearName;
+    ValueName.Length = 0;
+    ValueName.MaximumLength = sizeof(YearName);
+    if (!NT_SUCCESS(RtlIntegerToUnicodeString((ULONG)Year, 10, &ValueName)))
+    {
+        NtClose(Key);
+        return TRUE;
+    }
+
+    /* A short value fills the start of the structure, the rest stays zero */
+    Status = NtQueryValueKey(Key, &ValueName, KeyValuePartialInformation, &Info, sizeof(Info), &Length);
+    NtClose(Key);
+    if (!NT_SUCCESS(Status) || Info.Partial.Type != REG_BINARY || Info.Partial.DataLength > sizeof(Tzi))
+        return TRUE;
+
+    RtlZeroMemory(&Tzi, sizeof(Tzi));
+    RtlCopyMemory(&Tzi, Info.Partial.Data, min(Info.Partial.DataLength, sizeof(Tzi)));
+    ptzi->Bias = Tzi.Bias;
+    ptzi->StandardBias = Tzi.StandardBias;
+    ptzi->DaylightBias = Tzi.DaylightBias;
+    ptzi->StandardDate = Tzi.StandardDate;
+    ptzi->DaylightDate = Tzi.DaylightDate;
+    return TRUE;
+}
+
 /* EOF */
