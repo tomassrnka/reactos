@@ -14,6 +14,9 @@
             <DATA NAME="TeSTDaTa3" DATA_STRING="Test string" />
             <!--<DATA NAME="TESTDATA4" DATA_BITS="90 90 90 90" />-->
         </LAYER>
+        <LAYER NAME="DATA_LAYER2">
+            <DATA NAME="TESTDATA1" DATA_DWORD="4444" />
+        </LAYER>
         <!-- Verify that we are able to match this -->
         <EXE>
             <NAME>test_match0.exe</NAME>
@@ -238,6 +241,165 @@
                 <ORIGINAL_FILENAME>OriginalFilename</ORIGINAL_FILENAME>
                 <INTERNAL_NAME>Internal</INTERNAL_NAME>
             </MATCHING_FILE>
+        </EXE>
+        <!-- exact file version -->
+        <EXE>
+            <NAME>test_match13.exe</NAME>
+            <APP_NAME>test_match13.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>1.0.0.0</BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- exact file version, wrong -->
+        <EXE>
+            <NAME>test_match14.exe</NAME>
+            <APP_NAME>test_match14.exe</APP_NAME>
+            <VENDOR>Fail</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>1.0.0.1</BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- UPTO_BIN_FILE_VERSION above -->
+        <EXE>
+            <NAME>test_match15.exe</NAME>
+            <APP_NAME>test_match15.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <UPTO_BIN_FILE_VERSION>2.0.0.0</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- UPTO_BIN_FILE_VERSION equal (inclusive) -->
+        <EXE>
+            <NAME>test_match16.exe</NAME>
+            <APP_NAME>test_match16.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <UPTO_BIN_FILE_VERSION>1.0.0.0</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- UPTO_BIN_FILE_VERSION below -->
+        <EXE>
+            <NAME>test_match17.exe</NAME>
+            <APP_NAME>test_match17.exe</APP_NAME>
+            <VENDOR>Fail</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <UPTO_BIN_FILE_VERSION>0.9.0.0</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- Windows only matches a BIN version that is equal; ReactOS reads BIN and UPTO together as an inclusive range -->
+        <!-- BIN to UPTO range around the version -->
+        <EXE>
+            <NAME>test_match18.exe</NAME>
+            <APP_NAME>test_match18.exe</APP_NAME>
+            <VENDOR>RosSucceed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>0.9.0.0</BIN_FILE_VERSION>
+                <UPTO_BIN_FILE_VERSION>2.0.0.0</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- BIN to UPTO range starting at the version -->
+        <EXE>
+            <NAME>test_match19.exe</NAME>
+            <APP_NAME>test_match19.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>1.0.0.0</BIN_FILE_VERSION>
+                <UPTO_BIN_FILE_VERSION>2.0.0.0</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- BIN to UPTO range above the version -->
+        <EXE>
+            <NAME>test_match20.exe</NAME>
+            <APP_NAME>test_match20.exe</APP_NAME>
+            <VENDOR>Fail</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>1.0.0.1</BIN_FILE_VERSION>
+                <UPTO_BIN_FILE_VERSION>2.0.0.0</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- BIN to UPTO range below the version -->
+        <EXE>
+            <NAME>test_match21.exe</NAME>
+            <APP_NAME>test_match21.exe</APP_NAME>
+            <VENDOR>Fail</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>0.1.0.0</BIN_FILE_VERSION>
+                <UPTO_BIN_FILE_VERSION>0.9.0.0</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- Windows only matches a BIN version that is equal; ReactOS reads BIN and UPTO together as an inclusive range -->
+        <!-- product version, open ended range -->
+        <EXE>
+            <NAME>test_match22.exe</NAME>
+            <APP_NAME>test_match22.exe</APP_NAME>
+            <VENDOR>RosSucceed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_PRODUCT_VERSION>1.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- product version, UPTO below -->
+        <EXE>
+            <NAME>test_match23.exe</NAME>
+            <APP_NAME>test_match23.exe</APP_NAME>
+            <VENDOR>Fail</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <UPTO_BIN_PRODUCT_VERSION>1.0.0.0</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- product version, exact -->
+        <EXE>
+            <NAME>test_match24.exe</NAME>
+            <APP_NAME>test_match24.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_PRODUCT_VERSION>1.0.0.1</BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- UPTO_BIN_FILE_VERSION with the high bit set -->
+        <EXE>
+            <NAME>test_match25.exe</NAME>
+            <APP_NAME>test_match25.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <UPTO_BIN_FILE_VERSION>65535.65535.65535.65535</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+        </EXE>
+        <!-- A layer named in the EXE -->
+        <EXE>
+            <NAME>test_match26.exe</NAME>
+            <APP_NAME>test_match26.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>1.0.0.0</BIN_FILE_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="DATA_LAYER" />
+        </EXE>
+        <!-- A layer chosen by the user is listed before the one the database names -->
+        <EXE>
+            <NAME>test_match27.exe</NAME>
+            <APP_NAME>test_match27.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>1.0.0.0</BIN_FILE_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="DATA_LAYER" />
         </EXE>
     </DATABASE>
 </SDB>

@@ -49,6 +49,107 @@ static BOOL WINAPI SdbpFileExists(LPCWSTR path)
     return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
 }
 
+/* Find an attribute of the file that is available */
+static PATTRINFO SdbpFindAvailableAttr(PATTRINFO attribs, DWORD attr_count, TAG tag)
+{
+    DWORD n;
+
+    for (n = 0; n < attr_count; ++n)
+    {
+        if (attribs[n].flags == ATTRIBUTE_AVAILABLE && attribs[n].type == tag)
+            return attribs + n;
+    }
+    return NULL;
+}
+
+/*
+ * The database stores a binary version either as an exact value (BIN_xxx_VERSION), as an upper
+ * limit (UPTO_BIN_xxx_VERSION), or as both. Windows then wants BIN to be equal and UPTO to be an
+ * upper limit (measured on Server 2008 R2 and Windows 10); ReactOS reads the pair as the
+ * inclusive range from BIN to UPTO, so that its database can say "version 16 and later".
+ * Returns TRUE when the tag was one of these and has been handled (Match holds the verdict).
+ */
+static BOOL SdbpMatchBinVersion(PDB pdb, TAGID matching_file, TAG tag, PATTRINFO attribs, DWORD attr_count, BOOL* Match)
+{
+    TAG tagBin, tagUpto;
+    TAGID bin, upto;
+    PATTRINFO actual;
+
+    switch (tag)
+    {
+    case TAG_BIN_FILE_VERSION:
+    case TAG_UPTO_BIN_FILE_VERSION:
+        tagBin = TAG_BIN_FILE_VERSION;
+        tagUpto = TAG_UPTO_BIN_FILE_VERSION;
+        break;
+    case TAG_BIN_PRODUCT_VERSION:
+    case TAG_UPTO_BIN_PRODUCT_VERSION:
+        tagBin = TAG_BIN_PRODUCT_VERSION;
+        tagUpto = TAG_UPTO_BIN_PRODUCT_VERSION;
+        break;
+    default:
+        return FALSE;
+    }
+
+    bin = SdbFindFirstTag(pdb, matching_file, tagBin);
+    upto = SdbFindFirstTag(pdb, matching_file, tagUpto);
+
+    /* A range is decided when its BIN tag is seen */
+    if (tag == tagUpto && bin != TAGID_NULL)
+    {
+        *Match = TRUE;
+        return TRUE;
+    }
+
+    /* A file without version information cannot match a version */
+    actual = SdbpFindAvailableAttr(attribs, attr_count, tagBin);
+    if (!actual)
+    {
+        *Match = FALSE;
+        return TRUE;
+    }
+
+    if (upto == TAGID_NULL)
+        *Match = (actual->qwattr == SdbReadQWORDTag(pdb, bin, 0));
+    else if (bin == TAGID_NULL)
+        *Match = (actual->qwattr <= SdbReadQWORDTag(pdb, upto, 0));
+    else
+        *Match = (actual->qwattr >= SdbReadQWORDTag(pdb, bin, 0) &&
+                  actual->qwattr <= SdbReadQWORDTag(pdb, upto, 0));
+    return TRUE;
+}
+
+/* Tags of the attributes SdbGetFileAttributes reads from a file */
+static BOOL SdbpIsFileAttributeTag(TAG tag)
+{
+    switch (tag)
+    {
+    case TAG_SIZE:
+    case TAG_CHECKSUM:
+    case TAG_PRODUCT_VERSION:
+    case TAG_FILE_DESCRIPTION:
+    case TAG_COMPANY_NAME:
+    case TAG_PRODUCT_NAME:
+    case TAG_FILE_VERSION:
+    case TAG_ORIGINAL_FILENAME:
+    case TAG_INTERNAL_NAME:
+    case TAG_LEGAL_COPYRIGHT:
+    case TAG_VERDATEHI:
+    case TAG_VERDATELO:
+    case TAG_VERFILEOS:
+    case TAG_VERFILETYPE:
+    case TAG_MODULE_TYPE:
+    case TAG_PE_CHECKSUM:
+    case TAG_LINKER_VERSION:
+    case TAG_LINK_DATE:
+    case TAG_EXPORT_NAME:
+    case TAG_VER_LANGUAGE:
+    case TAG_EXE_WRAPPER:
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* Given a 'MATCHING_FILE' tag and an ATTRINFO array,
    check all tags defined in the MATCHING_FILE against the ATTRINFO */
 static BOOL SdbpMatchFileAttributes(PDB pdb, TAGID matching_file, PATTRINFO attribs, DWORD attr_count)
@@ -60,14 +161,20 @@ static BOOL SdbpMatchFileAttributes(PDB pdb, TAGID matching_file, PATTRINFO attr
     {
         TAG tag = SdbGetTagFromTagID(pdb, child);
         DWORD n;
+        BOOL VersionMatch, Found = FALSE;
 
         /* Already handled! */
         if (tag == TAG_NAME)
             continue;
 
-        if (tag == TAG_UPTO_BIN_FILE_VERSION ||
-            tag == TAG_UPTO_BIN_PRODUCT_VERSION ||
-            tag == TAG_UPTO_LINK_DATE)
+        if (SdbpMatchBinVersion(pdb, matching_file, tag, attribs, attr_count, &VersionMatch))
+        {
+            if (!VersionMatch)
+                return FALSE;
+            continue;
+        }
+
+        if (tag == TAG_UPTO_LINK_DATE)
         {
             SHIM_WARN("Unimplemented TAG_UPTO_XXXXX\n");
             continue;
@@ -81,6 +188,7 @@ static BOOL SdbpMatchFileAttributes(PDB pdb, TAGID matching_file, PATTRINFO attr
                 DWORD dwval;
                 WCHAR* lpval;
                 QWORD qwval;
+                Found = TRUE;
                 switch (tag & TAG_TYPE_MASK)
                 {
                 case TAG_TYPE_DWORD:
@@ -104,8 +212,13 @@ static BOOL SdbpMatchFileAttributes(PDB pdb, TAGID matching_file, PATTRINFO attr
                 }
             }
         }
-        if (n == attr_count)
+        if (!Found)
+        {
+            /* The file does not have the attribute the database asks for */
+            if (SdbpIsFileAttributeTag(tag))
+                return FALSE;
             SHIM_WARN("Unhandled tag %ws in MATCHING_FILE\n", SdbTagToString(tag));
+        }
     }
     return TRUE;
 }
@@ -454,7 +567,7 @@ BOOL WINAPI SdbGetMatchingExe(HSDB hsdb, LPCWSTR path, LPCWSTR module_name,
     ULONG PathType = 0;
     LPWSTR file_name;
     WCHAR wszLayers[MAX_LAYER_LENGTH];
-    DWORD dwSize;
+    DWORD dwSize, dwExeLayers = 0;
     PDB pdb;
 
     /* Load default database if one is not specified */
@@ -557,6 +670,9 @@ BOOL WINAPI SdbGetMatchingExe(HSDB hsdb, LPCWSTR path, LPCWSTR module_name,
     /* Restore the full path. */
     *(--file_name) = L'\\';
 
+    /* Layers the database picks for the file come first; what the user chooses is added behind them and moved to the front below */
+    dwExeLayers = result->dwLayerCount;
+
     dwSize = sizeof(wszLayers);
     if (SdbGetPermLayerKeys(DosApplicationName.String.Buffer, wszLayers, &dwSize, GPLK_MACHINE | GPLK_USER))
     {
@@ -571,6 +687,20 @@ BOOL WINAPI SdbGetMatchingExe(HSDB hsdb, LPCWSTR path, LPCWSTR module_name,
             ret = TRUE;
             result->dwFlags |= SHIMREG_HAS_ENVIRONMENT;
         }
+    }
+
+    /*
+     * The shim engine lets the first of two shims for the same function win. A layer the user chose, with the
+     * Compatibility tab or the environment, has to win over one the database applied by itself.
+     */
+    if (dwExeLayers && result->dwLayerCount > dwExeLayers)
+    {
+        TAGREF atrChosen[SDB_MAX_LAYERS];
+        DWORD dwChosen = result->dwLayerCount - dwExeLayers;
+
+        memcpy(atrChosen, result->atrLayers + dwExeLayers, dwChosen * sizeof(TAGREF));
+        memmove(result->atrLayers + dwChosen, result->atrLayers, dwExeLayers * sizeof(TAGREF));
+        memcpy(result->atrLayers, atrChosen, dwChosen * sizeof(TAGREF));
     }
 
 Cleanup:
