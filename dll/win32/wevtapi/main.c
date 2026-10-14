@@ -500,6 +500,8 @@ static DWORD check_query_list(const WCHAR *query, BOOL file)
             {
                 if (!wcscmp(tag.name, L"Select")) select = TRUE;
                 if (!path) path = query_path;
+                /* a selection with no path of its own and no default of its query selects nothing */
+                if (!path && !wcscmp(tag.name, L"Select")) error = ERROR_EVT_INVALID_QUERY;
                 if (path)
                 {
                     error = check_path(path, file);
@@ -1367,21 +1369,21 @@ BOOL WINAPI EvtFormatMessage(EVT_HANDLE metadata, EVT_HANDLE event, DWORD messag
     return fail(ERROR_INVALID_HANDLE);
 }
 
-BOOL WINAPI EvtGetEventInfo(EVT_HANDLE event, DWORD id, DWORD size, PEVT_VARIANT buffer, DWORD *used)
+BOOL WINAPI EvtGetEventInfo(EVT_HANDLE event, EVT_EVENT_PROPERTY_ID id, DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
-    FIXME("(%p %lu %lu %p %p) semi-stub\n", event, id, size, buffer, used);
+    FIXME("(%p %u %lu %p %p) semi-stub\n", event, id, size, buffer, used);
     return fail(ERROR_INVALID_HANDLE);
 }
 
-BOOL WINAPI EvtGetEventMetadataProperty(EVT_HANDLE metadata, DWORD id, DWORD flags, DWORD size, PEVT_VARIANT buffer, DWORD *used)
+BOOL WINAPI EvtGetEventMetadataProperty(EVT_HANDLE metadata, EVT_EVENT_METADATA_PROPERTY_ID id, DWORD flags, DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
-    FIXME("(%p %lu %#lx %lu %p %p) semi-stub\n", metadata, id, flags, size, buffer, used);
+    FIXME("(%p %u %#lx %lu %p %p) semi-stub\n", metadata, id, flags, size, buffer, used);
     return fail(ERROR_INVALID_HANDLE);
 }
 
-BOOL WINAPI EvtGetPublisherMetadataProperty(EVT_HANDLE metadata, DWORD id, DWORD flags, DWORD size, PEVT_VARIANT buffer, DWORD *used)
+BOOL WINAPI EvtGetPublisherMetadataProperty(EVT_HANDLE metadata, EVT_PUBLISHER_METADATA_PROPERTY_ID id, DWORD flags, DWORD size, PEVT_VARIANT buffer, DWORD *used)
 {
-    FIXME("(%p %lu %#lx %lu %p %p) semi-stub\n", metadata, id, flags, size, buffer, used);
+    FIXME("(%p %u %#lx %lu %p %p) semi-stub\n", metadata, id, flags, size, buffer, used);
     return fail(ERROR_INVALID_HANDLE);
 }
 

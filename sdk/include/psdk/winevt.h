@@ -228,6 +228,74 @@ typedef enum _EVT_LOG_PROPERTY_ID {
     EvtLogPropertyIdEND
 } EVT_LOG_PROPERTY_ID;
 
+typedef enum _EVT_FORMAT_MESSAGE_FLAGS {
+    EvtFormatMessageEvent = 1,
+    EvtFormatMessageLevel,
+    EvtFormatMessageTask,
+    EvtFormatMessageOpcode,
+    EvtFormatMessageKeyword,
+    EvtFormatMessageChannel,
+    EvtFormatMessageProvider,
+    EvtFormatMessageId,
+    EvtFormatMessageXml
+} EVT_FORMAT_MESSAGE_FLAGS;
+
+typedef enum _EVT_EVENT_PROPERTY_ID {
+    EvtEventQueryIDs = 0,
+    EvtEventPath,
+    EvtEventPropertyIdEND
+} EVT_EVENT_PROPERTY_ID;
+
+typedef enum _EVT_PUBLISHER_METADATA_PROPERTY_ID {
+    EvtPublisherMetadataPublisherGuid = 0,
+    EvtPublisherMetadataResourceFilePath,
+    EvtPublisherMetadataParameterFilePath,
+    EvtPublisherMetadataMessageFilePath,
+    EvtPublisherMetadataHelpLink,
+    EvtPublisherMetadataPublisherMessageID,
+    EvtPublisherMetadataChannelReferences,
+    EvtPublisherMetadataChannelReferencePath,
+    EvtPublisherMetadataChannelReferenceIndex,
+    EvtPublisherMetadataChannelReferenceID,
+    EvtPublisherMetadataChannelReferenceFlags,
+    EvtPublisherMetadataChannelReferenceMessageID,
+    EvtPublisherMetadataLevels,
+    EvtPublisherMetadataLevelName,
+    EvtPublisherMetadataLevelValue,
+    EvtPublisherMetadataLevelMessageID,
+    EvtPublisherMetadataTasks,
+    EvtPublisherMetadataTaskName,
+    EvtPublisherMetadataTaskEventGuid,
+    EvtPublisherMetadataTaskValue,
+    EvtPublisherMetadataTaskMessageID,
+    EvtPublisherMetadataOpcodes,
+    EvtPublisherMetadataOpcodeName,
+    EvtPublisherMetadataOpcodeValue,
+    EvtPublisherMetadataOpcodeMessageID,
+    EvtPublisherMetadataKeywords,
+    EvtPublisherMetadataKeywordName,
+    EvtPublisherMetadataKeywordValue,
+    EvtPublisherMetadataKeywordMessageID,
+    EvtPublisherMetadataPropertyIdEND
+} EVT_PUBLISHER_METADATA_PROPERTY_ID;
+
+typedef enum _EVT_CHANNEL_REFERENCE_FLAGS {
+    EvtChannelReferenceImported = 1
+} EVT_CHANNEL_REFERENCE_FLAGS;
+
+typedef enum _EVT_EVENT_METADATA_PROPERTY_ID {
+    EventMetadataEventID,
+    EventMetadataEventVersion,
+    EventMetadataEventChannel,
+    EventMetadataEventLevel,
+    EventMetadataEventOpcode,
+    EventMetadataEventTask,
+    EventMetadataEventKeyword,
+    EventMetadataEventMessageID,
+    EventMetadataEventTemplate,
+    EvtEventMetadataPropertyIdEND
+} EVT_EVENT_METADATA_PROPERTY_ID;
+
 EVT_HANDLE WINAPI EvtOpenSession(EVT_LOGIN_CLASS LoginClass, PVOID Login, DWORD Timeout, DWORD Flags);
 BOOL WINAPI EvtClose(EVT_HANDLE);
 BOOL WINAPI EvtCancel(EVT_HANDLE);
@@ -277,9 +345,9 @@ typedef HANDLE EVT_OBJECT_ARRAY_PROPERTY_HANDLE;
 BOOL WINAPI EvtArchiveExportedLog(EVT_HANDLE Session, LPCWSTR LogFilePath, LCID Locale, DWORD Flags);
 BOOL WINAPI EvtFormatMessage(EVT_HANDLE PublisherMetadata, EVT_HANDLE Event, DWORD MessageId, DWORD ValueCount,
                              PEVT_VARIANT Values, DWORD Flags, DWORD BufferSize, LPWSTR Buffer, PDWORD BufferUsed);
-BOOL WINAPI EvtGetEventInfo(EVT_HANDLE Event, DWORD PropertyId, DWORD PropertyValueBufferSize,
+BOOL WINAPI EvtGetEventInfo(EVT_HANDLE Event, EVT_EVENT_PROPERTY_ID PropertyId, DWORD PropertyValueBufferSize,
                             PEVT_VARIANT PropertyValueBuffer, PDWORD PropertyValueBufferUsed);
-BOOL WINAPI EvtGetEventMetadataProperty(EVT_HANDLE EventMetadata, DWORD PropertyId, DWORD Flags,
+BOOL WINAPI EvtGetEventMetadataProperty(EVT_HANDLE EventMetadata, EVT_EVENT_METADATA_PROPERTY_ID PropertyId, DWORD Flags,
                                         DWORD EventMetadataPropertyBufferSize,
                                         PEVT_VARIANT EventMetadataPropertyBuffer,
                                         PDWORD EventMetadataPropertyBufferUsed);
@@ -287,7 +355,7 @@ BOOL WINAPI EvtGetObjectArrayProperty(EVT_OBJECT_ARRAY_PROPERTY_HANDLE ObjectArr
                                       DWORD ArrayIndex, DWORD Flags, DWORD PropertyValueBufferSize,
                                       PEVT_VARIANT PropertyValueBuffer, PDWORD PropertyValueBufferUsed);
 BOOL WINAPI EvtGetObjectArraySize(EVT_OBJECT_ARRAY_PROPERTY_HANDLE ObjectArray, PDWORD ObjectArraySize);
-BOOL WINAPI EvtGetPublisherMetadataProperty(EVT_HANDLE PublisherMetadata, DWORD PropertyId, DWORD Flags,
+BOOL WINAPI EvtGetPublisherMetadataProperty(EVT_HANDLE PublisherMetadata, EVT_PUBLISHER_METADATA_PROPERTY_ID PropertyId, DWORD Flags,
                                             DWORD PublisherMetadataPropertyBufferSize,
                                             PEVT_VARIANT PublisherMetadataPropertyBuffer,
                                             PDWORD PublisherMetadataPropertyBufferUsed);
