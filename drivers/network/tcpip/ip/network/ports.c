@@ -15,6 +15,7 @@ NTSTATUS PortsStartup( PPORT_SET PortSet,
 		   UINT PortsToManage ) {
     PortSet->StartingPort = StartingPort;
     PortSet->PortsToOversee = PortsToManage;
+    PortSet->NextPort = 0;
 
     PortSet->ProtoBitBuffer =
 	ExAllocatePoolWithTag( NonPagedPool, (PortSet->PortsToOversee + 7) / 8,
@@ -83,26 +84,34 @@ ULONG AllocateAnyPort( PPORT_SET PortSet ) {
     return -1;
 }
 
+/* Next fit: a port is handed out again only after the rest of the range, so a
+   new socket does not take the port a closed one used a moment ago (a connect
+   to that closed port would connect the socket to itself) */
 ULONG AllocatePortFromRange( PPORT_SET PortSet, ULONG Lowest, ULONG Highest ) {
-    ULONG AllocatedPort;
+    ULONG Port, Start, Count, i;
     KIRQL OldIrql;
 
     if ((Lowest < PortSet->StartingPort) ||
-        (Highest >= PortSet->StartingPort + PortSet->PortsToOversee))
+        (Highest >= PortSet->StartingPort + PortSet->PortsToOversee) ||
+        (Lowest > Highest))
     {
         return -1;
     }
 
-    Lowest -= PortSet->StartingPort;
-    Highest -= PortSet->StartingPort;
+    Count = Highest - Lowest + 1;
 
     KeAcquireSpinLock( &PortSet->Lock, &OldIrql );
-    AllocatedPort = RtlFindClearBits( &PortSet->ProtoBitmap, 1, Lowest );
-    if( AllocatedPort != (ULONG)-1 && AllocatedPort <= Highest) {
-	RtlSetBit( &PortSet->ProtoBitmap, AllocatedPort );
-	AllocatedPort += PortSet->StartingPort;
-	KeReleaseSpinLock( &PortSet->Lock, OldIrql );
-	return htons(AllocatedPort);
+    Start = PortSet->NextPort;
+    if (Start < Lowest || Start > Highest)
+        Start = Lowest;
+    for (i = 0; i < Count; i++) {
+        Port = Lowest + (Start - Lowest + i) % Count;
+        if (RtlAreBitsClear( &PortSet->ProtoBitmap, Port - PortSet->StartingPort, 1 )) {
+            RtlSetBits( &PortSet->ProtoBitmap, Port - PortSet->StartingPort, 1 );
+            PortSet->NextPort = Port + 1;
+            KeReleaseSpinLock( &PortSet->Lock, OldIrql );
+            return htons(Port);
+        }
     }
     KeReleaseSpinLock( &PortSet->Lock, OldIrql );
 
