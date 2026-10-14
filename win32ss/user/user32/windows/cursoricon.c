@@ -1736,6 +1736,7 @@ CURSORICON_LoadImageW(
     CURSORICONDIR* dir;
     WORD wResId;
     LPBYTE bits;
+    DWORD cbBits;
     CURSORDATA cursorData;
     BOOL bStatus;
     UNICODE_STRING ustrRsrc;
@@ -1892,6 +1893,7 @@ CURSORICON_LoadImageW(
         FreeResource(handle);
         goto done;
     }
+    cbBits = SizeofResource(hinst, hrsrc);
 
     ZeroMemory(&cursorData, sizeof(cursorData));
 
@@ -1914,6 +1916,27 @@ CURSORICON_LoadImageW(
     bStatus = CURSORICON_GetCursorDataFromBMI(
         &cursorData,
         (BITMAPINFO*)bits);
+
+    if(!bStatus && bIcon)
+    {
+        /* Windows Vista and later accept PNG compressed images in RT_ICON */
+        DWORD cbBmpIcon;
+        PBYTE pbBmpIcon = CURSORICON_ConvertPngToBmpIcon(bits, cbBits, &cbBmpIcon);
+        if(pbBmpIcon)
+        {
+            CURSORICONFILEDIR *bmpDir = (CURSORICONFILEDIR *)pbBmpIcon;
+
+            ZeroMemory(&cursorData, sizeof(cursorData));
+            cursorData.CURSORF_flags = CURSORF_FROMRESOURCE;
+            cursorData.cx = cxDesired;
+            cursorData.cy = cyDesired;
+            cursorData.rt = (USHORT)((ULONG_PTR)RT_ICON);
+            bStatus = CURSORICON_GetCursorDataFromBMI(
+                &cursorData,
+                (PBITMAPINFO)&pbBmpIcon[bmpDir->idEntries[0].dwDIBOffset]);
+            HeapFree(GetProcessHeap(), 0, pbBmpIcon);
+        }
+    }
 
     FreeResource( handle );
 
