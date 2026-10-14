@@ -7,6 +7,16 @@ SysWOW64/advapi32.dll
 SysWOW64/advapi32_vista.dll
 SysWOW64/ntmarta.dll
 
+# The Visual C++ runtime with the C runtime that it forwards to.
+# A line "@0x600 <file>" is only part of the list at that export level and later.
+SysWOW64/ucrtbase.dll
+SysWOW64/vcruntime140.dll
+SysWOW64/msvcp140_2.dll
+SysWOW64/ntdll_vista.dll
+@0x600 SysWOW64/msvcp140.dll
+@0x600 SysWOW64/msvcp140_1.dll
+@0x600 SysWOW64/concrt140.dll
+
 # These DLLs use W32K_WIDE in the nested guest build, including their layout pins.
 # Window creation still needs the win32k syscall and callback translation.
 SysWOW64/user32.dll

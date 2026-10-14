@@ -1,7 +1,7 @@
 
 # Stages the i386 guest build's SysWOW64 files for the amd64 images.
 # Run in script mode by the syswow64_stage target (sdk/cmake/syswow64.cmake):
-#   cmake -D MANIFEST=<guest manifest> -D LIST=<syswow64.lst> -D OUT=<dir>
+#   cmake -D MANIFEST=<guest manifest> -D LIST=<syswow64.lst> -D DLL_EXPORT_VERSION=<level> -D OUT=<dir>
 #         [-D LIVECD_IN=<lst> -D LIVECD_OUT=<lst>] [-D BOOTCD_IN=<lst> -D BOOTCD_OUT=<lst>]
 #         -P syswow64_stage.cmake
 #
@@ -40,6 +40,13 @@ file(STRINGS "${LIST}" _lines REGEX "^[^#]")
 set(_wanted "")
 foreach(_line ${_lines})
     string(STRIP "${_line}" _line)
+    # "@0x600 <file>" is only part of the list at that export level and later
+    if(_line MATCHES "^@(0x[0-9A-Fa-f]+)[ \t]+(.+)$")
+        if(DLL_EXPORT_VERSION LESS ${CMAKE_MATCH_1})
+            continue()
+        endif()
+        set(_line "${CMAKE_MATCH_2}")
+    endif()
     string(TOLOWER "${_line}" _line)
     if(_line)
         if(_line IN_LIST _wanted)

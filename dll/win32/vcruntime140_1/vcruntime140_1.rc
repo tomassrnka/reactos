@@ -1,0 +1,12 @@
+#define REACTOS_VERSION_DLL
+#define REACTOS_STR_FILE_DESCRIPTION  "ReactOS Visual C++ runtime library, exception handling (Wine)"
+#define REACTOS_STR_INTERNAL_NAME     "vcruntime140_1"
+#define REACTOS_STR_ORIGINAL_FILENAME "vcruntime140_1.dll"
+
+/* The version Wine declares for this module in Makefile.in */
+#define REACTOS_FILEVERSION 14,50,35719,0
+#define REACTOS_PRODUCTVERSION 14,50,35719,0
+#define REACTOS_STR_FILE_VERSION "14.50.35719.0"
+#define REACTOS_STR_PRODUCT_VERSION "14.50.35719.0"
+
+#include <reactos/version.rc>
