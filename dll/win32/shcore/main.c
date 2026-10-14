@@ -2765,6 +2765,47 @@ FEATURE_ENABLED_STATE WINAPI GetFeatureEnabledState(UINT32 feature, FEATURE_CHAN
 }
 
 /*************************************************************************
+ * GetFeatureVariant        [SHCORE.@]
+ *
+ * No feature is staged here: every feature has its default state and no variant (Windows 10 answers so for a
+ * feature that no configuration names).
+ */
+FEATURE_ENABLED_STATE WINAPI GetFeatureVariant(UINT32 feature, FEATURE_CHANGE_TIME change_time, UINT32 *payload_id,
+                                               BOOL *has_notification)
+{
+    TRACE("(%u, %u, %p, %p)\n", feature, change_time, payload_id, has_notification);
+    *payload_id = 0;
+    *has_notification = FALSE;
+    return FEATURE_ENABLED_STATE_DEFAULT;
+}
+
+/*************************************************************************
+ * RecordFeatureUsage        [SHCORE.@]
+ */
+void WINAPI RecordFeatureUsage(UINT32 feature, UINT32 kind, UINT32 addend, const char *origin_name)
+{
+    TRACE("(%u, %u, %u, %s)\n", feature, kind, addend, debugstr_a(origin_name));
+}
+
+/*************************************************************************
+ * RecordFeatureError        [SHCORE.@]
+ *
+ * The error record is not looked at: telemetry is not kept.
+ */
+void WINAPI RecordFeatureError(UINT32 feature, const void *error)
+{
+    TRACE("(%u, %p)\n", feature, error);
+}
+
+/*************************************************************************
+ * UnsubscribeFeatureStateChangeNotification        [SHCORE.@]
+ */
+void WINAPI UnsubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRIPTION subscription)
+{
+    TRACE("(%p)\n", subscription);
+}
+
+/*************************************************************************
  * RegisterScaleChangeEvent        [SHCORE.@]
  */
 HRESULT WINAPI RegisterScaleChangeEvent(HANDLE handle, DWORD_PTR *cookie)

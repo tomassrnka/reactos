@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     DpiFunctions.c
+    FeatureStaging.c
     StreamFunctions.c
     testlist.c)
 
