@@ -18,6 +18,7 @@
 #include <winioctl.h>
 #include <ntddstor.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #ifndef FSCTL_EXTEND_VOLUME
 #define FSCTL_EXTEND_VOLUME CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 60, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -365,15 +366,18 @@ static void TestNtfsShrink(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX 
 
 /*
  * ReactOS only, with the driver's test hook armed (PARTMGR_TEST_FAULT names the stage, the same value
- * in the ResizeFault DWORD of the Ntfs service key): an extend that fails half way leaves the volume
- * read-only for every caller, cached writes included.
+ * in the ResizeFault DWORD of the Ntfs service key): a resize that fails half way (an extend, or for
+ * stage 3 a shrink) leaves the volume read-only for every caller, cached writes included, and a flush
+ * of data written before it fails.  What the disk holds is the last state that reached it whole, so
+ * the volume mounts again read-write, with the data written before the resize.
  */
-static void TestNtfsFault(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
+static void TestNtfsFault(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part, ULONG Fault)
 {
+    NTFS_VOLUME_DATA_BUFFER Data;
     CHAR Name[32];
-    HANDLE File;
+    HANDLE File, Dirty;
     DWORD Written, Error;
-    BYTE Data[4096];
+    BYTE Buffer[4096];
 
     sprintf(Name, "%c:\\fault.bin", Letter);
     File = WritePattern("fault.bin", 1 * MiB);
@@ -382,26 +386,109 @@ static void TestNtfsFault(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX P
         FlushFileBuffers(File);
         CloseHandle(File);
     }
-    if (Grow(Disk, Part->PartitionNumber, 32 * MiB) != ERROR_SUCCESS)
+    /* Data in the cache only when the resize fails. */
+    Dirty = WritePattern("dirty.bin", 1 * MiB);
+    if (!NtfsData(*Volume, &Data) || Grow(Disk, Part->PartitionNumber, 32 * MiB) != ERROR_SUCCESS)
     {
         ok(FALSE, "IOCTL_DISK_GROW_PARTITION failed: %lu\n", GetLastError());
+        CloseHandle(Dirty);
         return;
     }
-    PartitionOf(Volume, Part);
-    Error = Extend(Volume, Part->PartitionLength.QuadPart / 512, 0);
-    ok(Error != ERROR_SUCCESS, "The armed extend succeeded\n");
+    PartitionOf(*Volume, Part);
+    if (Fault == 3)
+    {
+        /* The shrink back to the old size fails half way. */
+        ok_int(Extend(*Volume, Part->PartitionLength.QuadPart / 512, 0), ERROR_SUCCESS);
+        ok_int(Shrink(*Volume, ShrinkPrepare, Data.NumberSectors.QuadPart + 1, 0), ERROR_SUCCESS);
+        Error = Shrink(*Volume, ShrinkCommit, 0, 0);
+        ok(Error != ERROR_SUCCESS, "The armed shrink succeeded\n");
+    }
+    else
+    {
+        Error = Extend(*Volume, Part->PartitionLength.QuadPart / 512, 0);
+        ok(Error != ERROR_SUCCESS, "The armed extend succeeded\n");
+    }
+
+    /* The cached data can no longer reach the disk: its flush fails. */
+    SetLastError(0xdeadbeef);
+    ok(!FlushFileBuffers(Dirty), "A flush after the failed resize succeeded\n");
+    CloseHandle(Dirty);
 
     /* An overwrite inside the file would go to the cache and be lost later: it must be refused. */
     File = CreateFileA(Name, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (File == INVALID_HANDLE_VALUE)
     {
         ok_int(GetLastError(), ERROR_WRITE_PROTECT);
+    }
+    else
+    {
+        memset(Buffer, 0xA5, sizeof(Buffer));
+        ok(!WriteFile(File, Buffer, sizeof(Buffer), &Written, NULL), "A write after the failed resize succeeded\n");
+        ok_int(GetLastError(), ERROR_WRITE_PROTECT);
+        CloseHandle(File);
+    }
+
+    /* Mounted again, the volume is writable and holds the data flushed before the resize. */
+    if (!Remount(Volume))
+    {
+        ok(FALSE, "The volume could not be locked for a remount: %lu\n", GetLastError());
         return;
     }
-    memset(Data, 0xA5, sizeof(Data));
-    ok(!WriteFile(File, Data, sizeof(Data), &Written, NULL), "A write after the failed extend succeeded\n");
-    ok_int(GetLastError(), ERROR_WRITE_PROTECT);
-    CloseHandle(File);
+    VerifyPattern("fault.bin", 1 * MiB);
+    File = WritePattern("after.bin", 1 * MiB);
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        ok(FlushFileBuffers(File), "A flush after the remount failed: %lu\n", GetLastError());
+        CloseHandle(File);
+        VerifyPattern("after.bin", 1 * MiB);
+    }
+}
+
+/*
+ * ReactOS only, PARTMGR_TEST_HUGE set: the volume (NTFS, 8 KB clusters) is on a disk of more than
+ * 16 TiB.  ntfsng mounts nothing of 16 TiB or more (its page index is 32 bits), so an extend on a
+ * partition that large is refused and the volume keeps its size; just below the limit it works.
+ */
+static void TestNtfsHuge(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
+{
+    const LONGLONG Limit = 1LL << 44;
+    GET_LENGTH_INFORMATION DiskLength;
+    NTFS_VOLUME_DATA_BUFFER Before, After;
+    HANDLE Handle = OpenDisk(Disk, GENERIC_READ);
+    DWORD Returned;
+    LONGLONG End, Length;
+
+    if (!DeviceIoControl(Handle, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &DiskLength, sizeof(DiskLength), &Returned, NULL) ||
+        DiskLength.Length.QuadPart < Limit + 64 * MiB || !NtfsData(Volume, &Before))
+    {
+        skip("The disk of the volume is not larger than 16 TiB: %lu\n", GetLastError());
+        CloseHandle(Handle);
+        return;
+    }
+    CloseHandle(Handle);
+
+    /* Everything after the partition but the backup GPT's last MiB. */
+    End = Part->StartingOffset.QuadPart + Part->PartitionLength.QuadPart;
+    ok_int(Grow(Disk, Part->PartitionNumber, DiskLength.Length.QuadPart - MiB - End), ERROR_SUCCESS);
+    PartitionOf(Volume, Part);
+    Length = Part->PartitionLength.QuadPart;
+    ok(Length >= Limit, "Partition is %I64d bytes\n", Length);
+    ok(Extend(Volume, Length / 512, 0) != ERROR_SUCCESS, "An extend to %I64d bytes succeeded\n", Length);
+    ok(Extend(Volume, Limit / 512, 0) != ERROR_SUCCESS, "An extend to 16 TiB succeeded\n");
+    NtfsData(Volume, &After);
+    ok(After.NumberSectors.QuadPart == Before.NumberSectors.QuadPart, "NumberSectors %I64d, was %I64d\n",
+       After.NumberSectors.QuadPart, Before.NumberSectors.QuadPart);
+
+    /* 1 MiB below the limit: the volume takes the whole partition. */
+    ok_int(Grow(Disk, Part->PartitionNumber, Limit - MiB - Length), ERROR_SUCCESS);
+    PartitionOf(Volume, Part);
+    Length = Part->PartitionLength.QuadPart;
+    ok(Length == Limit - MiB, "Partition is %I64d bytes\n", Length);
+    ok_int(Extend(Volume, Length / 512, 0), ERROR_SUCCESS);
+    NtfsData(Volume, &After);
+    ok(After.NumberSectors.QuadPart == Length / 512 - 1, "NumberSectors %I64d, expected %I64d\n",
+       After.NumberSectors.QuadPart, Length / 512 - 1);
+    WriteAndVerify(16 * MiB);
 }
 
 static void TestFat(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part, PCSTR FileSystem)
@@ -494,7 +581,9 @@ START_TEST(ExtendVolume)
     if (!strcmp(FileSystem, "NTFS"))
     {
         if (GetEnvironmentVariableA("PARTMGR_TEST_FAULT", Value, sizeof(Value)) && is_reactos())
-            TestNtfsFault(Volume, Number.DeviceNumber, &Part);
+            TestNtfsFault(&Volume, Number.DeviceNumber, &Part, strtoul(Value, NULL, 10));
+        else if (GetEnvironmentVariableA("PARTMGR_TEST_HUGE", Value, sizeof(Value)) && is_reactos())
+            TestNtfsHuge(Volume, Number.DeviceNumber, &Part);
         else if (TestNtfs(Volume, Number.DeviceNumber, &Part))
             TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
         else
