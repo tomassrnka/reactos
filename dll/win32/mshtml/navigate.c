@@ -1624,11 +1624,10 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
             }
         }
 
-        if(!This->sent_headers && request_headers) {
-            V_VT(&headers_var) = VT_BSTR;
-            V_BSTR(&headers_var) = SysAllocString(request_headers);
-            CoTaskMemFree(request_headers);
-        }else if(This->sent_headers) {
+        /* the temporary copy is not needed: a successful call keeps what it built in sent_headers */
+        CoTaskMemFree(request_headers);
+
+        if(This->sent_headers) {
             V_VT(&headers_var) = VT_BSTR;
             V_BSTR(&headers_var) = SysAllocString(This->sent_headers);
         }

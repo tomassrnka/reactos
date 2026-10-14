@@ -55,7 +55,14 @@ HRESULT push_task(task_t *task, task_proc_t proc, task_proc_t destr, LONG magic)
 
     list_add_tail(&thread_data->task_list, &task->entry);
 
-    PostMessageW(thread_data->thread_hwnd, WM_PROCESSTASK, 0, 0);
+    if(!PostMessageW(thread_data->thread_hwnd, WM_PROCESSTASK, 0, 0)) {
+        DWORD err = GetLastError();
+
+        /* nothing will run the task: the caller sees the failure and the task is gone */
+        list_remove(&task->entry);
+        task->destr(task);
+        return err ? HRESULT_FROM_WIN32(err) : E_FAIL;
+    }
     return S_OK;
 }
 

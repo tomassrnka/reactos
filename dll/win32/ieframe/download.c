@@ -88,6 +88,8 @@ typedef struct {
     BOOL ended_ok;              /* the whole file was written */
     BOOL asked;
     BOOL stopped;
+    BOOL start_reported;        /* urlmon called OnStartBinding: it calls OnStopBinding when it is done with us */
+    BOOL stop_reported;
     HRESULT stop_hr;
     BOOL pump_posted;
     BOOL dialog_closed;
@@ -249,24 +251,40 @@ static void set_status(Download *This, const WCHAR *text)
 static BOOL is_device_name(const WCHAR *name);
 static void prefix_device_name(WCHAR *name, size_t max);
 
-/* keeps a name within max characters: the name is kept whole when it fits, else the base name is shortened and the
-   extension (as long as it leaves room for a character of the base) stays */
-static void limit_file_name(WCHAR *name, size_t max)
+/* cuts a name to max characters: the base name goes and the extension stays, as long as it leaves room for a character
+   of the base; the result does not end in a dot or a space */
+static void cut_file_name(WCHAR *name, size_t max)
 {
     WCHAR *ext = PathFindExtensionW(name);
     size_t len = wcslen(name), ext_len = wcslen(ext);
 
-    if(len > max) {
-        if(ext_len < max)
-            memmove(name + max - ext_len, ext, (ext_len + 1) * sizeof(WCHAR));
-        else
-            name[max] = 0;
+    if(len <= max)
+        return;
+    if(ext_len < max)
+        memmove(name + max - ext_len, ext, (ext_len + 1) * sizeof(WCHAR));
+    else
+        name[max] = 0;
 
-        /* a name cut short does not end in a dot or a space, and is not a device name by now */
-        for(len = wcslen(name); len && (name[len - 1] == '.' || name[len - 1] == ' '); len--)
-            name[len - 1] = 0;
-        prefix_device_name(name, max + 1);
+    for(len = wcslen(name); len && (name[len - 1] == '.' || name[len - 1] == ' '); len--)
+        name[len - 1] = 0;
+}
+
+/* keeps a name within max characters: the name is kept whole when it fits; a name that is cut short and is a device
+   name by then is cut one character shorter and gets the underscore, so the extension stays */
+static void limit_file_name(WCHAR *name, size_t max)
+{
+    WCHAR copy[MAX_PATH];
+
+    if(wcslen(name) <= max)
+        return;
+
+    lstrcpynW(copy, name, ARRAY_SIZE(copy));
+    cut_file_name(name, max);
+    if(max > 1 && is_device_name(name)) {
+        lstrcpynW(name, copy, ARRAY_SIZE(copy));
+        cut_file_name(name, max - 1);
     }
+    prefix_device_name(name, max + 1);
 }
 
 static void split_url(Download *This, const WCHAR *url)
@@ -1501,6 +1519,7 @@ static HRESULT WINAPI Download_OnStartBinding(IBindStatusCallback *iface, DWORD 
 
     TRACE("(%p)->(%lx %p)\n", This, reserved, pbind);
 
+    This->start_reported = TRUE;
     if(This->state == DL_ENDED) {
         IBinding_Abort(pbind);
         return S_OK;
@@ -1564,6 +1583,7 @@ static HRESULT WINAPI Download_OnStopBinding(IBindStatusCallback *iface, HRESULT
 
     TRACE("(%p)->(%08lx %s)\n", This, hres, debugstr_w(error));
 
+    This->stop_reported = TRUE;
     if(This->binding) {
         IBinding_Release(This->binding);
         This->binding = NULL;
@@ -1853,8 +1873,12 @@ BOOL download_translate_message(MSG *msg)
 }
 
 /* The notifications of urlmon that are still queued own references of the binding and of the download: they run
-   before the apartment goes (a quit message that is queued ahead of them is kept for the caller) */
-static void drain_download_messages(void)
+   before the apartment goes, and until urlmon has reported the end of the binding (the caller holds a reference of the
+   download for that); a quit message that is queued ahead of them is kept for the caller. A binding that never ends
+   does not hold the thread for more than DL_DRAIN_MAX_MS. */
+#define DL_DRAIN_MAX_MS 30000
+
+static void drain_download_messages(Download *This)
 {
     DWORD start = GetTickCount();
     BOOL quit = FALSE;
@@ -1862,7 +1886,7 @@ static void drain_download_messages(void)
     int idle = 0;
     MSG msg;
 
-    while(GetTickCount() - start < 2000) {
+    while(GetTickCount() - start < DL_DRAIN_MAX_MS) {
         if(PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             if(msg.message == WM_QUIT) {
                 quit = TRUE;
@@ -1872,6 +1896,8 @@ static void drain_download_messages(void)
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             idle = 0;
+        }else if(This->start_reported && !This->stop_reported) {
+            MsgWaitForMultipleObjects(0, NULL, FALSE, 20, QS_ALLINPUT);
         }else if(++idle > 3) {
             break;
         }else {
@@ -1914,8 +1940,8 @@ BOOL WINAPI DoFileDownload(LPWSTR url)
     This->standalone = TRUE;
     if(FAILED(start_download_binding(This))) {
         download_end(This);
+        drain_download_messages(This);
         download_release(This);
-        drain_download_messages();
         if(SUCCEEDED(coinit))
             CoUninitialize();
         return FALSE;
@@ -1941,9 +1967,10 @@ BOOL WINAPI DoFileDownload(LPWSTR url)
     if(This->ask_hwnd)
         EndDialog(This->ask_hwnd, IDCANCEL);
     download_release_engine(This);
-    download_release(This);
 
-    drain_download_messages();
+    /* the reference of this function is kept until urlmon is done with the download */
+    drain_download_messages(This);
+    download_release(This);
     if(SUCCEEDED(coinit))
         CoUninitialize();
     return ret;

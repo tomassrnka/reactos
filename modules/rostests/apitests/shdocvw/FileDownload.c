@@ -38,6 +38,7 @@ static HANDLE g_server_thread;
 
 static WCHAR g_target[MAX_PATH];
 static WCHAR g_expected_name[MAX_PATH];
+static WCHAR g_saveas_name[MAX_PATH];
 static volatile LONG g_scenario_done;
 static DWORD g_main_thread;
 static BOOL g_verbose;
@@ -125,7 +126,7 @@ static void serve_connection(SOCKET c)
         }
     }
     else if (!strncmp(req, "GET /ok.bin", 11) || !strncmp(req, "GET /cd.bin", 11) || !strncmp(req, "GET /longext.bin", 16) ||
-             !strncmp(req, "GET /NULpayload.sdlt", 20))
+             !strncmp(req, "GET /pl/", 8))
     {
         int sent = 0;
         BOOL cd = !strncmp(req, "GET /cd.bin", 11);
@@ -395,7 +396,12 @@ static DWORD WINAPI driver_thread(void *arg)
                 trace("no file name edit found in Save As\n");
             }
             else
+            {
+                /* what the dialog offers, before the test names the file */
+                if (!g_saveas_name[0])
+                    GetWindowTextW(edit, g_saveas_name, ARRAY_SIZE(g_saveas_name));
                 SendMessageW(edit, WM_SETTEXT, 0, (LPARAM)g_target);
+            }
             SendMessageW(dlg, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), 0);
             continue;
         }
@@ -466,6 +472,7 @@ static BOOL run_download(scenario_t scen, const char *path, const WCHAR *expecte
     swprintf(url, ARRAY_SIZE(url), L"http://127.0.0.1:%u/%S", g_port, path);
     lstrcpynW(g_expected_name, expected_name ? expected_name : L"", ARRAY_SIZE(g_expected_name));
     g_scenario_done = 0;
+    g_saveas_name[0] = 0;
     g_saw_progress = g_saw_complete = g_saw_error = g_saw_name = g_saw_saveas = g_saw_ask = 0;
 
     g_main_thread = GetCurrentThreadId();
@@ -590,37 +597,29 @@ static void remove_deep_temp(const WCHAR *base, const WCHAR *deep)
     }
 }
 
-/*
- * The temporary file of Open and Run is shortened to fit the path; a harmless name can become a device name when
- * it is cut (NULpayload.sdlt to NUL.sdlt), and the download would go to the device and report success.
- */
-static void test_temp_name_after_shortening(void)
+static void set_temp_folder(const WCHAR *deep, WCHAR *old_temp, BOOL *have_old_temp, WCHAR *old_tmp, BOOL *have_old_tmp)
+{
+    *have_old_temp = GetEnvironmentVariableW(L"TEMP", old_temp, MAX_PATH) != 0;
+    *have_old_tmp = GetEnvironmentVariableW(L"TMP", old_tmp, MAX_PATH) != 0;
+    SetEnvironmentVariableW(L"TEMP", deep);
+    SetEnvironmentVariableW(L"TMP", deep);
+}
+
+static void restore_temp_folder(const WCHAR *old_temp, BOOL have_old_temp, const WCHAR *old_tmp, BOOL have_old_tmp)
+{
+    SetEnvironmentVariableW(L"TEMP", have_old_temp ? old_temp : NULL);
+    SetEnvironmentVariableW(L"TMP", have_old_tmp ? old_tmp : NULL);
+}
+
+static BOOL register_sdlt(void)
 {
     static const WCHAR ext_key[] = L"Software\\Classes\\.sdlt";
     static const WCHAR type_key[] = L"Software\\Classes\\sdltfile";
-    WCHAR old_temp[MAX_PATH] = L"", old_tmp[MAX_PATH] = L"", base[MAX_PATH], deep[MAX_PATH], expected[MAX_PATH], other[MAX_PATH];
     HKEY key;
-    BOOL ret = FALSE, have_old_temp, have_old_tmp;
-
-    have_old_temp = GetEnvironmentVariableW(L"TEMP", old_temp, ARRAY_SIZE(old_temp)) != 0;
-    have_old_tmp = GetEnvironmentVariableW(L"TMP", old_tmp, ARRAY_SIZE(old_tmp)) != 0;
-    GetTempPathW(ARRAY_SIZE(base), base);
-
-    /* the path of the folder is 242 characters: three characters are left for the base name of NULpayload.sdlt */
-    if (!make_deep_temp(deep, 242))
-    {
-        skip("cannot make a folder with a long path\n");
-        remove_deep_temp(base, deep);
-        return;
-    }
 
     /* an extension of our own that has a description, and a program that does nothing */
     if (RegCreateKeyExW(HKEY_CURRENT_USER, ext_key, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL))
-    {
-        skip("cannot register an extension\n");
-        remove_deep_temp(base, deep);
-        return;
-    }
+        return FALSE;
     RegSetValueExW(key, NULL, 0, REG_SZ, (const BYTE *)L"sdltfile", sizeof(L"sdltfile"));
     RegCloseKey(key);
     if (!RegCreateKeyExW(HKEY_CURRENT_USER, type_key, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL))
@@ -635,34 +634,163 @@ static void test_temp_name_after_shortening(void)
         RegSetValueExW(key, NULL, 0, REG_SZ, (const BYTE *)command, sizeof(command));
         RegCloseKey(key);
     }
+    return TRUE;
+}
 
-    SetEnvironmentVariableW(L"TEMP", deep);
-    SetEnvironmentVariableW(L"TMP", deep);
+static void unregister_sdlt(void)
+{
+    SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\sdltfile");
+    SHDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\.sdlt");
+}
 
-    swprintf(expected, ARRAY_SIZE(expected), L"%s_NUL.sdlt", deep);
+/*
+ * The temporary file of Open and Run is shortened to fit the path; a harmless name can become a device name when
+ * it is cut (NULpayload.sdlt to NUL.sdlt), and the download would go to the device and report success. The room for
+ * the base name is 245 minus the length of the folder path (the extension is five characters): at 243 the old
+ * calculation cut NULpayload.sdlt to the device name, at 242 the new one has to put an underscore in front.
+ * When the first name is taken, the next one is "name (1)", which is no device name.
+ */
+static void test_temp_name_after_shortening(size_t dir_length, const WCHAR *expected_leaf, const WCHAR *device_leaf,
+                                            const WCHAR *taken_leaf)
+{
+    WCHAR old_temp[MAX_PATH], old_tmp[MAX_PATH], base[MAX_PATH], deep[MAX_PATH], expected[MAX_PATH], other[MAX_PATH], taken[MAX_PATH];
+    BOOL have_old_temp, have_old_tmp, ret = FALSE;
+
+    GetTempPathW(ARRAY_SIZE(base), base);
+
+    if (!make_deep_temp(deep, dir_length))
+    {
+        skip("cannot make a folder with a path of %u characters\n", (unsigned)dir_length);
+        remove_deep_temp(base, deep);
+        return;
+    }
+
+    if (!register_sdlt())
+    {
+        skip("cannot register an extension\n");
+        remove_deep_temp(base, deep);
+        return;
+    }
+
+    set_temp_folder(deep, old_temp, &have_old_temp, old_tmp, &have_old_tmp);
+
+    swprintf(expected, ARRAY_SIZE(expected), L"%s%s", deep, expected_leaf);
     /* the extended form names the file, not the device: the folder has no file of that name */
-    swprintf(other, ARRAY_SIZE(other), L"\\\\?\\%sNUL.sdlt", deep);
+    swprintf(other, ARRAY_SIZE(other), L"\\\\?\\%s%s", deep, device_leaf);
     DeleteFileW(expected);
+    taken[0] = 0;
+    if (taken_leaf)
+    {
+        HANDLE file;
 
-    if (run_download(SCEN_OPEN, "NULpayload.sdlt", L"NULpayload.sdlt", &ret))
+        swprintf(taken, ARRAY_SIZE(taken), L"%s%s", deep, taken_leaf);
+        file = CreateFileW(taken, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        ok(file != INVALID_HANDLE_VALUE, "cannot create %S: %lu\n", taken, GetLastError());
+        if (file != INVALID_HANDLE_VALUE)
+            CloseHandle(file);
+    }
+
+    if (run_download(SCEN_OPEN, "pl/NULpayload.sdlt", L"NULpayload.sdlt", &ret))
     {
         ok(ret == TRUE, "DoFileDownload returned %d\n", ret);
         ok(g_saw_ask, "no File Download dialog\n");
-        ok(file_matches(expected, BODY_SIZE), "the file was not saved as _NUL.sdlt in the temporary folder\n");
-        ok(GetFileAttributesW(other) == INVALID_FILE_ATTRIBUTES, "a file NUL.sdlt exists (it would be the device)\n");
+        ok(file_matches(expected, BODY_SIZE), "the file was not saved as %S in the temporary folder\n", expected);
+        ok(GetFileAttributesW(other) == INVALID_FILE_ATTRIBUTES, "a file %S exists (it would be the device)\n", other);
     }
 
     DeleteFileW(expected);
-    if (have_old_temp)
-        SetEnvironmentVariableW(L"TEMP", old_temp);
+    if (taken[0])
+        DeleteFileW(taken);
+    restore_temp_folder(old_temp, have_old_temp, old_tmp, have_old_tmp);
+    unregister_sdlt();
+    remove_deep_temp(base, deep);
+}
+
+static const WCHAR main_keyW[] = L"Software\\Microsoft\\Internet Explorer\\Main";
+
+/* the folder Save As starts in; the old value (if any) is kept for pop_download_dir */
+static BOOL push_download_dir(const WCHAR *dir, WCHAR *old_dir, BOOL *had_old)
+{
+    DWORD size = MAX_PATH * sizeof(WCHAR), type = 0;
+    HKEY key;
+
+    *had_old = FALSE;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, main_keyW, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &key, NULL))
+        return FALSE;
+    *had_old = !RegQueryValueExW(key, L"Default Download Directory", NULL, &type, (BYTE *)old_dir, &size) && type == REG_SZ;
+    RegSetValueExW(key, L"Default Download Directory", 0, REG_SZ, (const BYTE *)dir, (wcslen(dir) + 1) * sizeof(WCHAR));
+    RegCloseKey(key);
+    return TRUE;
+}
+
+static void pop_download_dir(const WCHAR *old_dir, BOOL had_old)
+{
+    HKEY key;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, main_keyW, 0, KEY_WRITE, &key))
+        return;
+    if (had_old)
+        RegSetValueExW(key, L"Default Download Directory", 0, REG_SZ, (const BYTE *)old_dir, (wcslen(old_dir) + 1) * sizeof(WCHAR));
     else
-        SetEnvironmentVariableW(L"TEMP", NULL);
-    if (have_old_tmp)
-        SetEnvironmentVariableW(L"TMP", old_tmp);
-    else
-        SetEnvironmentVariableW(L"TMP", NULL);
-    SHDeleteKeyW(HKEY_CURRENT_USER, type_key);
-    SHDeleteKeyW(HKEY_CURRENT_USER, ext_key);
+        RegDeleteValueW(key, L"Default Download Directory");
+    RegCloseKey(key);
+}
+
+/*
+ * The name Save As offers is shortened to fit the default folder, and a device name that is left by the cut keeps the
+ * extension. The longest folder that can be made has a path of about 248 characters with its closing backslash, so
+ * only a few characters remain behind it (room). A name whose extension is room minus the length of the device name
+ * long is cut to that device name and the extension: the repair has to cut the base name one character more and keep
+ * the extension (COM1payload.eeee is COM1.eeee, a device name, and becomes COM.eeee). The old repair cut the end of
+ * the extension to make room for the underscore.
+ */
+static void test_saveas_name_after_shortening(const char *device, const char *stem)
+{
+    WCHAR base[MAX_PATH], deep[MAX_PATH], old_dir[MAX_PATH] = L"", expected[MAX_PATH];
+    char url[MAX_PATH], ext[MAX_PATH];
+    BOOL had_old, ret = FALSE;
+    size_t length, room, device_len = strlen(device), i;
+
+    GetTempPathW(ARRAY_SIZE(base), base);
+    for (length = 248; length >= 240; length--)
+    {
+        if (make_deep_temp(deep, length))
+            break;
+        remove_deep_temp(base, deep);
+    }
+    if (length < 240)
+    {
+        skip("cannot make a folder with a path of about 248 characters\n");
+        return;
+    }
+
+    /* the room the dialog leaves for the name: the closing zero and a separator are two characters */
+    room = MAX_PATH - 2 - length;
+    ext[0] = '.';
+    for (i = 1; i < room - device_len; i++)
+        ext[i] = 'e';
+    ext[i] = 0;
+    /* the name after the repair: the device name without its last character, then the extension */
+    swprintf(expected, ARRAY_SIZE(expected), L"%.*S%S", (int)device_len - 1, device, ext);
+    snprintf(url, sizeof(url), "pl/%s%s", stem, ext);
+
+    if (!push_download_dir(deep, old_dir, &had_old))
+    {
+        skip("cannot set the default download folder\n");
+        remove_deep_temp(base, deep);
+        return;
+    }
+
+    DeleteFileW(g_target);
+    if (run_download(SCEN_SAVE, url, NULL, &ret))
+    {
+        ok(ret == TRUE, "DoFileDownload returned %d\n", ret);
+        ok(g_saw_saveas, "no Save As dialog\n");
+        ok(!wcscmp(g_saveas_name, expected), "Save As offers \"%S\", expected \"%S\"\n", g_saveas_name, expected);
+    }
+
+    pop_download_dir(old_dir, had_old);
+    DeleteFileW(g_target);
     remove_deep_temp(base, deep);
 }
 
@@ -717,13 +845,21 @@ START_TEST(FileDownload)
         {
             WCHAR longname[260];
 
+            WCHAR old_dir[MAX_PATH] = L"";
+            BOOL had_old, set;
+
             swprintf(longname, ARRAY_SIZE(longname), L"%S.%S", LONG_BASE, LONG_EXT);
+            /* the folder Save As starts in is short, so that the whole name of 211 characters fits behind it */
+            set = push_download_dir(dir, old_dir, &had_old);
             DeleteFileW(g_target);
             if (run_download(SCEN_SAVE, "longext.bin", longname, &ret))
             {
                 ok(ret == TRUE, "DoFileDownload returned %d\n", ret);
                 ok(g_saw_name, "the dialog does not show the whole name of 211 characters\n");
+                ok(!set || !wcscmp(g_saveas_name, longname), "Save As offers \"%S\", not the whole name\n", g_saveas_name);
             }
+            if (set)
+                pop_download_dir(old_dir, had_old);
         }
 
         /* cancel in the first dialog: nothing is written */
@@ -772,7 +908,11 @@ START_TEST(FileDownload)
         }
     }
 
-    test_temp_name_after_shortening();
+    test_temp_name_after_shortening(242, L"_NUL.sdlt", L"NUL.sdlt", NULL);
+    test_temp_name_after_shortening(243, L"NU.sdlt", L"NUL.sdlt", NULL);
+    test_temp_name_after_shortening(242, L"NUL (1).sdlt", L"NUL.sdlt", L"_NUL.sdlt");
+    test_saveas_name_after_shortening("COM1", "COM1payload");
+    test_saveas_name_after_shortening("NUL", "NULpayload");
 
     DeleteFileW(g_target);
     stop_server();
