@@ -57,6 +57,10 @@ typedef struct _CSR_PROCESS
     ULONG Reserved;
     ULONG ShutdownLevel;
     ULONG ShutdownFlags;
+    BOOLEAN HandleListPresent;
+    ULONG InheritHandleCount;
+    PHANDLE InheritHandleList; /* Valid only during CsrInsertProcess. */
+    NTSTATUS InheritStatus;
     PVOID ServerData[ANYSIZE_ARRAY];    // One structure per CSR server.
 } CSR_PROCESS, *PCSR_PROCESS;
 
@@ -286,6 +290,18 @@ CsrCreateProcess(IN HANDLE hProcess,
                  IN PCSR_NT_SESSION NtSession,
                  IN ULONG Flags,
                  IN PCLIENT_ID DebugCid);
+
+NTSTATUS
+NTAPI
+CsrCreateProcessWithHandleList(IN HANDLE hProcess,
+                 IN HANDLE hThread,
+                 IN PCLIENT_ID ClientId,
+                 IN PCSR_NT_SESSION NtSession,
+                 IN ULONG Flags,
+                 IN PCLIENT_ID DebugCid,
+                 IN BOOLEAN HandleListPresent,
+                 IN PHANDLE HandleList,
+                 IN ULONG HandleCount);
 
 NTSTATUS
 NTAPI

@@ -286,6 +286,7 @@
 @ stdcall -stub -version=0x600+ NtCreatePrivateNamespace(ptr long ptr ptr)
 @ stdcall NtCreateProcess(ptr long ptr ptr long ptr ptr ptr)
 @ stdcall NtCreateProcessEx(ptr long ptr ptr long ptr ptr ptr long)
+@ stdcall NtCreateProcessWithAttributes(ptr long ptr ptr long ptr ptr ptr long ptr)
 @ stdcall NtCreateProfile(ptr ptr ptr long long ptr long long long) ; CHECKME
 @ stdcall -stub -version=0x600+ NtCreateResourceManager(ptr long ptr ptr ptr long wstr)
 @ stdcall NtCreateSection(ptr long ptr ptr long long ptr)

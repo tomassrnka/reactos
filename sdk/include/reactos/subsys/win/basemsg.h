@@ -97,6 +97,10 @@ typedef struct _BASE_CREATE_PROCESS
     PVOID PebAddressNative;
     ULONG PebAddressWow64;
     USHORT ProcessorArchitecture;
+    /* ReactOS extension, captured by CSR before dispatch. */
+    BOOLEAN HandleListPresent;
+    ULONG ConsoleHandleCount;
+    PHANDLE ConsoleHandleList;
 } BASE_CREATE_PROCESS, *PBASE_CREATE_PROCESS;
 
 typedef struct _BASE_CREATE_THREAD

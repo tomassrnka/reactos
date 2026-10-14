@@ -4730,7 +4730,7 @@ static void test_handle_list_attribute(BOOL child, HANDLE handle1, HANDLE handle
     HANDLE pipe[2];
     PROCESS_INFORMATION info;
     STARTUPINFOEXA si;
-    SIZE_T size;
+    SIZE_T size = 0;
     BOOL ret;
     SECURITY_ATTRIBUTES sa;
 
@@ -4765,11 +4765,17 @@ static void test_handle_list_attribute(BOOL child, HANDLE handle1, HANDLE handle
     }
 
 #ifdef __REACTOS__
-    if (GetNTVersion() < _WIN32_WINNT_VISTA) {
+    if (!is_reactos() && GetNTVersion() < _WIN32_WINNT_VISTA) {
         skip("test_handle_list_attribute() crashes on WS03.\n");
         return;
     }
 #endif
+    if (!pInitializeProcThreadAttributeList || !pUpdateProcThreadAttribute || !pDeleteProcThreadAttributeList)
+    {
+        win_skip("Process attribute lists unavailable\n");
+        return;
+    }
+
     ret = pInitializeProcThreadAttributeList(NULL, 1, 0, &size);
     ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
             "Got unexpected ret %#x, GetLastError() %lu.\n", ret, GetLastError());
@@ -4796,10 +4802,12 @@ static void test_handle_list_attribute(BOOL child, HANDLE handle1, HANDLE handle
             (STARTUPINFOA *)&si, &info);
     ok(ret, "Got unexpected ret %#x, GetLastError() %lu.\n", ret, GetLastError());
 
-    wait_and_close_child_process(&info);
+    if (ret) wait_and_close_child_process(&info);
 
     CloseHandle(pipe[0]);
     CloseHandle(pipe[1]);
+    pDeleteProcThreadAttributeList(si.lpAttributeList);
+    heap_free(si.lpAttributeList);
 }
 
 static void test_dead_process(void)
@@ -5694,6 +5702,11 @@ START_TEST(process)
         {
             sscanf(myARGV[4], "%p", &h);
             test_parent_process_attribute(atoi(myARGV[3]), h);
+            return;
+        }
+        else if (!strcmp(myARGV[2], "handlelist_only"))
+        {
+            test_handle_list_attribute(FALSE, NULL, NULL);
             return;
         }
         else if (!strcmp(myARGV[2], "handlelist") && myARGC >= 5)
