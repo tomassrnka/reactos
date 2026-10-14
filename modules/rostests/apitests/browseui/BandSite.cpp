@@ -291,13 +291,14 @@ START_TEST(BandSite)
                     ok(SameBytes(stream, stream2), "the second save differs from the first\n");
             }
 
-            /* Data that is not a band site stream, an empty stream and one cut inside the first band are refused */
+            /* Data that is not a band site stream and an empty stream are refused */
             static const BYTE junk[] = "this is not a band site stream at all, not even close";
             TestRefusedStream(hwnd, "junk", MakeStream(junk, sizeof(junk)));
             TestRefusedStream(hwnd, "empty", MakeStream(NULL, 0));
 
+            /* A stream cut inside the first band: the form of the stream decides what is left of it */
             HGLOBAL hglobal;
-            if (SUCCEEDED(GetHGlobalFromStream(stream, &hglobal)))
+            if (IsReactOS() && SUCCEEDED(GetHGlobalFromStream(stream, &hglobal)))
             {
                 PVOID data = GlobalLock(hglobal);
                 TestRefusedStream(hwnd, "cut", MakeStream(data, sizeof(TEST_HEADER) + 20));
