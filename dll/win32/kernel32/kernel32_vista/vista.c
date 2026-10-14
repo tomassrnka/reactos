@@ -1138,3 +1138,58 @@ INT WINAPI CompareStringOrdinal(const WCHAR *str1, INT len1, const WCHAR *str2, 
     if (ret > 0) return CSTR_GREATER_THAN;
     return CSTR_EQUAL;
 }
+
+/******************************************************************************
+ *           FindStringOrdinal    (KERNEL32.@)
+ *
+ * After Wine's kernelbase (dlls/kernelbase/locale.c), Copyright 2001 Alexandre Julliard and others, LGPL-2.1+,
+ * with the argument checks that Windows has (measured on Windows Server 2008 R2).
+ */
+INT
+WINAPI
+FindStringOrdinal(
+    _In_ DWORD dwFindStringOrdinal,
+    _In_ LPCWSTR lpStringSource,
+    _In_ INT cchSource,
+    _In_ LPCWSTR lpStringValue,
+    _In_ INT cchValue,
+    _In_ BOOL bIgnoreCase)
+{
+    INT offset, inc, count;
+
+    /* Windows refuses lengths below -1 and a case flag that is neither 0 nor 1, which Wine does not (measured) */
+    if (!lpStringSource || !lpStringValue || cchSource < -1 || cchValue < -1 || (UINT)bIgnoreCase > 1)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
+
+    /* A flag of 0 searches from the start, like FIND_FROMSTART (measured) */
+    if (dwFindStringOrdinal == 0)
+        dwFindStringOrdinal = FIND_FROMSTART;
+
+    if (dwFindStringOrdinal != FIND_FROMSTART && dwFindStringOrdinal != FIND_FROMEND &&
+        dwFindStringOrdinal != FIND_STARTSWITH && dwFindStringOrdinal != FIND_ENDSWITH)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return -1;
+    }
+
+    if (cchSource == -1) cchSource = lstrlenW(lpStringSource);
+    if (cchValue == -1) cchValue = lstrlenW(lpStringValue);
+
+    SetLastError(ERROR_SUCCESS);
+    cchSource -= cchValue;
+    if (cchSource < 0) return -1;
+
+    count = dwFindStringOrdinal & (FIND_FROMSTART | FIND_FROMEND) ? cchSource + 1 : 1;
+    offset = dwFindStringOrdinal & (FIND_FROMSTART | FIND_STARTSWITH) ? 0 : cchSource;
+    inc = dwFindStringOrdinal & (FIND_FROMSTART | FIND_STARTSWITH) ? 1 : -1;
+    while (count--)
+    {
+        if (CompareStringOrdinal(lpStringSource + offset, cchValue, lpStringValue, cchValue, bIgnoreCase) == CSTR_EQUAL)
+            return offset;
+        offset += inc;
+    }
+    return -1;
+}
