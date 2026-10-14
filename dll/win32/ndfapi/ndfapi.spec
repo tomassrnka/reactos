@@ -8,21 +8,21 @@
 @ stub NdfRunDllDuplicateIPDefendingSystem
 @ stub NdfRunDllDuplicateIPOffendingSystem
 @ stub NdfRunDllHelpTopic
-@ stub NdfCancelIncident
+@ stdcall NdfCancelIncident(ptr)
 @ stdcall NdfCloseIncident(ptr)
 @ stdcall NdfCreateConnectivityIncident(ptr)
-@ stub NdfCreateDNSIncident
+@ stdcall NdfCreateDNSIncident(wstr long ptr)
 @ stub NdfCreateGroupingIncident
 @ stub NdfCreateInboundIncident
 @ stub NdfCreateIncident
 @ stub NdfCreateNetConnectionIncident
 @ stub NdfCreatePnrpIncident
-@ stub NdfCreateSharingIncident
-@ stdcall NdfCreateWebIncident(str ptr)
-@ stub NdfCreateWebIncidentEx
-@ stdcall NdfCreateWinSockIncident(ptr str long str ptr ptr)
+@ stdcall NdfCreateSharingIncident(wstr ptr)
+@ stdcall NdfCreateWebIncident(wstr ptr)
+@ stdcall NdfCreateWebIncidentEx(wstr long wstr ptr)
+@ stdcall NdfCreateWinSockIncident(ptr wstr long wstr ptr ptr)
 @ stdcall NdfDiagnoseIncident(ptr ptr ptr long long)
 @ stdcall NdfExecuteDiagnosis(ptr ptr)
-@ stub NdfGetTraceFile
+@ stdcall NdfGetTraceFile(ptr ptr)
 @ stub NdfRepairIncident
 @ stub NdfRepairIncidentEx

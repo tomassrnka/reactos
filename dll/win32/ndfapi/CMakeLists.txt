@@ -6,9 +6,9 @@ list(APPEND SOURCE
     ${CMAKE_CURRENT_BINARY_DIR}/ndfapi.def)
 
 add_library(ndfapi MODULE ${SOURCE})
-set_module_type(ndfapi win32dll UNICODE ENTRYPOINT 0)
+set_module_type(ndfapi win32dll UNICODE ENTRYPOINT DllMain 12)
 target_link_libraries(ndfapi wine)
-add_importlibs(ndfapi ws2_32 kernel32 ntdll)
+add_importlibs(ndfapi ws2_32 msvcrt kernel32 ntdll)
 add_dependencies(ndfapi psdk)
 add_cd_file(TARGET ndfapi DESTINATION reactos/system32 FOR all)
 set_wine_module_FIXME(ndfapi)
