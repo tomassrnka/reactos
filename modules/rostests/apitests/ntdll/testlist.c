@@ -126,6 +126,7 @@ extern void func_RtlGetUnloadEventTrace(void);
 extern void func_RtlHandle(void);
 extern void func_RtlImageDirectoryEntryToData(void);
 extern void func_RtlImageRvaToVa(void);
+extern void func_RtlInitializeSidEx(void);
 extern void func_RtlIntSafe(void);
 extern void func_RtlIsNameInExpression(void);
 extern void func_RtlIsNameLegalDOS8Dot3(void);
@@ -150,6 +151,7 @@ extern void func_RtlUnhandledExceptionFilter(void);
 extern void func_RtlUnicodeStringToAnsiString(void);
 extern void func_RtlUnicodeStringToCountedOemString(void);
 extern void func_RtlUnicodeToOemN(void);
+extern void func_RtlUTF8(void);
 extern void func_RtlUnwind(void);
 extern void func_RtlUnwindEx(void);
 extern void func_RtlUpcaseUnicodeStringToCountedOemString(void);
@@ -159,6 +161,7 @@ extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
 extern void func_StackOverflow(void);
 extern void func_SystemCallStubs(void);
+extern void func_strcpy_s(void);
 extern void func_SystemDllTls(void);
 extern void func_TimerResolution(void);
 extern void func_UserModeException(void);
@@ -288,6 +291,7 @@ const struct test winetest_testlist[] =
     { "RtlHandle",                      func_RtlHandle },
     { "RtlImageDirectoryEntryToData",   func_RtlImageDirectoryEntryToData },
     { "RtlImageRvaToVa",                func_RtlImageRvaToVa },
+    { "RtlInitializeSidEx",         func_RtlInitializeSidEx },
     { "RtlIntSafe",                     func_RtlIntSafe },
     { "RtlIsNameInExpression",          func_RtlIsNameInExpression},
     { "RtlIsNameLegalDOS8Dot3",         func_RtlIsNameLegalDOS8Dot3 },
@@ -313,11 +317,13 @@ const struct test winetest_testlist[] =
     { "RtlUnicodeStringToAnsiString",   func_RtlUnicodeStringToAnsiString },
     { "RtlUnicodeStringToCountedOemString", func_RtlUnicodeStringToCountedOemString },
     { "RtlUnicodeStringToOemSize",      func_RtlxUnicodeStringToOemSize },
+    { "RtlUTF8",                        func_RtlUTF8 },
     { "RtlUnicodeToOemN",               func_RtlUnicodeToOemN },
     { "RtlUpcaseUnicodeStringToCountedOemString", func_RtlUpcaseUnicodeStringToCountedOemString },
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
     { "StackOverflow",                  func_StackOverflow },
     { "SystemCallStubs",                func_SystemCallStubs },
+    { "strcpy_s",                       func_strcpy_s },
     { "SystemDllTls",                   func_SystemDllTls },
     { "TimerResolution",                func_TimerResolution },
     { "UserModeException",              func_UserModeException },

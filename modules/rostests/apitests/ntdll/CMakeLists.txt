@@ -140,6 +140,7 @@ list(APPEND SOURCE
     RtlImageDirectoryEntryToData.c
     RtlImageRvaToVa.c
     RtlInitializeContext.c
+    RtlInitializeSidEx.c
     RtlIsNameInExpression.c
     RtlIsNameLegalDOS8Dot3.c
     RtlLocale.c
@@ -163,8 +164,10 @@ list(APPEND SOURCE
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
     RtlUnicodeToOemN.c
+    RtlUTF8.c
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
+    strcpy_s.c
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c
