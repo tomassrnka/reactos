@@ -42,29 +42,45 @@ Fail(DWORD Error)
 }
 
 /*
- * Window properties are kept under atoms that are looked up or added once; SetPropW cannot be
- * trusted when the atom table is full, as it then stores the property under atom zero. The
- * atoms stay for the life of the system, so a process adds a reference only when none exists.
+ * Window properties are kept under atoms that are added once; SetPropW cannot be trusted when the atom
+ * table is full, as it then stores the property under atom zero. The process holds one reference of its own
+ * on each atom for as long as user32 is loaded (a lookup would leave the atom to whoever else added it, and
+ * it could be deleted and reused for something else), and gives it back when user32 is unloaded.
  */
-static ATOM s_FeedbackAtom;
-static ATOM s_PointerNotifyAtom;
+static volatile LONG s_FeedbackAtom;
+static volatile LONG s_PointerNotifyAtom;
 
 static BOOL
-EnsureAtom(ATOM *Atom, LPCWSTR Name)
+EnsureAtom(volatile LONG *Atom, LPCWSTR Name)
 {
     if (!*Atom)
     {
         DWORD Error = GetLastError();
-        ATOM Found = GlobalFindAtomW(Name);
+        ATOM Added = GlobalAddAtomW(Name);
 
-        if (!Found)
-            Found = GlobalAddAtomW(Name);
-        if (!Found)
+        if (!Added)
             return FALSE;
-        *Atom = Found;
+
+        /* Two threads can come here at the same time: one reference is kept */
+        if (InterlockedCompareExchange(Atom, Added, 0) != 0)
+            GlobalDeleteAtom(Added);
         SetLastError(Error);
     }
     return TRUE;
+}
+
+/* The references taken above are given back */
+VOID
+Win8UserProcessDetach(VOID)
+{
+    LONG Atom;
+
+    Atom = InterlockedExchange(&s_FeedbackAtom, 0);
+    if (Atom)
+        GlobalDeleteAtom((ATOM)Atom);
+    Atom = InterlockedExchange(&s_PointerNotifyAtom, 0);
+    if (Atom)
+        GlobalDeleteAtom((ATOM)Atom);
 }
 
 /* GetPropW leaves ERROR_FILE_NOT_FOUND behind when the property does not exist; Windows leaves the last error alone. */
