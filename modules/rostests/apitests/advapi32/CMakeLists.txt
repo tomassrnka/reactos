@@ -34,6 +34,7 @@ list(APPEND SOURCE
     TokenIntegrity.c
     ServiceArgs.c
     ServiceEnv.c
+    ServiceFailureActions.c
     ServiceNetwork.c
     SetEntriesInAclOld.c
     SetNamedSecurityInfoInherit.c
