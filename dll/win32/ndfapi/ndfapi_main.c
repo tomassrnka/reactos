@@ -37,6 +37,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(ndfapi);
 
 /* the error that Windows gives for a missing pointer or string, which is not E_POINTER */
 #define NDF_E_BAD_PARAM ((HRESULT)0x8008f905)
+/* and for a helper class name that is missing */
+#define NDF_E_NO_CLASS  ((HRESULT)0x8008f901)
 
 struct incident
 {
@@ -186,6 +188,62 @@ STDAPI NdfCreateWinSockIncident(SOCKET sock, LPCWSTR host, USHORT port, LPCWSTR 
         return HRESULT_FROM_WIN32(WSAGetLastError());
     if (!handle) return NDF_E_BAD_PARAM;
     return create_incident(handle);
+}
+
+STDAPI NdfCreatePnrpIncident(LPCWSTR cloud, LPCWSTR peer, BOOL publisher_only, LPCWSTR app_id, NDFHANDLE *handle)
+{
+    TRACE("%s, %s, %d, %s, %p\n", debugstr_w(cloud), debugstr_w(peer), publisher_only, debugstr_w(app_id), handle);
+
+    /* only the handle is required (measured on Windows 10) */
+    if (!handle) return NDF_E_BAD_PARAM;
+    return create_incident(handle);
+}
+
+STDAPI NdfCreateGroupingIncident(LPCWSTR cloud, LPCWSTR group, LPCWSTR identity, SOCKET_ADDRESS_LIST *addresses,
+                                 LPCWSTR app_id, NDFHANDLE *handle)
+{
+    TRACE("%s, %s, %s, %p, %s, %p\n", debugstr_w(cloud), debugstr_w(group), debugstr_w(identity), addresses,
+          debugstr_w(app_id), handle);
+
+    /* everything but the application is required (measured on Windows 10) */
+    if (!cloud || !group || !identity || !addresses || !handle) return NDF_E_BAD_PARAM;
+    return create_incident(handle);
+}
+
+STDAPI NdfCreateNetConnectionIncident(NDFHANDLE *handle, GUID id)
+{
+    TRACE("%p, %s\n", handle, debugstr_guid(&id));
+
+    /* any identifier makes an incident (measured on Windows 10) */
+    if (!handle) return NDF_E_BAD_PARAM;
+    return create_incident(handle);
+}
+
+STDAPI NdfCreateIncident(LPCWSTR class_name, ULONG count, void *attributes, NDFHANDLE *handle)
+{
+    TRACE("%s, %lu, %p, %p\n", debugstr_w(class_name), count, attributes, handle);
+
+    if (!class_name) return NDF_E_NO_CLASS;
+    if (!handle || (count && !attributes)) return NDF_E_BAD_PARAM;
+    return create_incident(handle);
+}
+
+STDAPI NdfRepairIncident(NDFHANDLE handle, void *repair, DWORD timeout)
+{
+    FIXME("%p, %p, %ld\n", handle, repair, timeout);
+
+    if (!is_incident(handle)) return E_HANDLE;
+
+    /* a repair is one of the ones a diagnosis proposed, and none has run */
+    return E_INVALIDARG;
+}
+
+STDAPI NdfRepairIncidentEx(NDFHANDLE handle, void *repair, DWORD timeout, DWORD flags)
+{
+    FIXME("%p, %p, %ld, %ld\n", handle, repair, timeout, flags);
+
+    if (!is_incident(handle)) return E_HANDLE;
+    return E_INVALIDARG;
 }
 
 STDAPI NdfDiagnoseIncident(NDFHANDLE handle, ULONG *count, RootCauseInfo **causes, DWORD wait, DWORD flags)
