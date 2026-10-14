@@ -5018,9 +5018,10 @@ IntGetRealGlyph(
     {
         NOTHING; /* bitmap fonts keep their strikes */
     }
-    else if (RenderMode == FT_RENDER_MODE_LCD)
+    else if (RenderMode != FT_RENDER_MODE_MONO)
     {
-        /* Layout must not depend on how the glyph is drawn: take the advance from the regular hinted load */
+        /* Layout must not depend on how the glyph is drawn: take the advance from the regular hinted load, which
+           for a font with embedded strikes can differ from the outline's */
         error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
         if (!error)
         {
@@ -5028,12 +5029,12 @@ IntGetRealGlyph(
             AdvanceY = Cache->Hashed.Face->glyph->advance.y;
             bKeepAdvance = TRUE;
         }
-        LoadFlags = FT_LOAD_TARGET_LCD | FT_LOAD_NO_BITMAP;
-    }
-    else if (RenderMode != FT_RENDER_MODE_MONO)
-    {
+
         /* Embedded bitmaps are bilevel; smoothed text uses the outlines */
-        LoadFlags = FT_LOAD_DEFAULT | FT_LOAD_NO_BITMAP;
+        if (RenderMode == FT_RENDER_MODE_LCD)
+            LoadFlags = FT_LOAD_TARGET_LCD | FT_LOAD_NO_BITMAP;
+        else
+            LoadFlags = FT_LOAD_DEFAULT | FT_LOAD_NO_BITMAP;
     }
 
     error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, LoadFlags);

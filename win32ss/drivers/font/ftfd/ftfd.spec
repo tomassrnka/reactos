@@ -102,7 +102,6 @@
   @ cdecl FT_Outline_Reverse ()
   @ cdecl FT_Outline_Transform ()
   @ cdecl FT_Outline_Translate ()
-  @ cdecl FT_Property_Set ()
   @ cdecl FT_Remove_Module ()
   @ cdecl FT_Render_Glyph ()
   @ cdecl FT_Request_Size ()
