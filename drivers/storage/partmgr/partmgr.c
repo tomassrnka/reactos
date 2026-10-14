@@ -1073,8 +1073,9 @@ FdoIoctlDiskGrowPartition(
         limit = layout->Gpt.StartingUsableOffset.QuadPart + layout->Gpt.UsableLength.QuadPart;
     else
         limit = (INT64)FdoExtension->DiskData.DiskSize;
+    // an MBR entry holds a 32-bit sector count (its 32-bit start does not change)
     if (newEnd > limit ||
-        (layout->PartitionStyle == PARTITION_STYLE_MBR && (UINT64)newEnd / sectorSize > MAXULONG))
+        (layout->PartitionStyle == PARTITION_STYLE_MBR && (UINT64)newLen / sectorSize > MAXULONG))
     {
         status = STATUS_INVALID_PARAMETER;
         goto Exit;
@@ -1137,6 +1138,12 @@ FdoIoctlDiskGrowPartition(
 
         if (ext->StartingOffset.QuadPart + ext->PartitionLength.QuadPart < newEnd)
         {
+            if ((UINT64)(newEnd - ext->StartingOffset.QuadPart) / sectorSize > MAXULONG)
+            {
+                ExFreePoolWithTag(newLayout, TAG_PARTMGR);
+                status = STATUS_INVALID_PARAMETER;
+                goto Exit;
+            }
             ext->PartitionLength.QuadPart = newEnd - ext->StartingOffset.QuadPart;
             ext->RewritePartition = TRUE;
         }
