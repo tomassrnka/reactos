@@ -14,20 +14,31 @@
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
-VOID
+BOOLEAN
 NTAPI
-LpcpPrepareToWakeClient(IN PETHREAD Thread)
+LpcpPrepareToWakeClient(IN PETHREAD Thread,
+                        IN PLIST_ENTRY WaitHead)
 {
+    PLIST_ENTRY NextEntry;
+
     PAGED_CODE();
 
-    /* Make sure the thread isn't dying and it has a valid chain */
-    if (!(Thread->LpcExitThreadCalled) &&
-        !(IsListEmpty(&Thread->LpcReplyChain)))
+    /* The client is ours to wake only while it still waits on our list */
+    for (NextEntry = WaitHead->Flink;
+         NextEntry != WaitHead;
+         NextEntry = NextEntry->Flink)
     {
-        /* Remove it from the list and reinitialize it */
-        RemoveEntryList(&Thread->LpcReplyChain);
-        InitializeListHead(&Thread->LpcReplyChain);
+        if (NextEntry == &Thread->LpcReplyChain)
+        {
+            /* Remove it from the list and reinitialize it */
+            RemoveEntryList(&Thread->LpcReplyChain);
+            InitializeListHead(&Thread->LpcReplyChain);
+            return TRUE;
+        }
     }
+
+    /* The client left its connect wait or went on to another one */
+    return FALSE;
 }
 
 /* PUBLIC FUNCTIONS **********************************************************/
@@ -57,6 +68,7 @@ NtAcceptConnectPort(OUT PHANDLE PortHandle,
     PEPROCESS ClientProcess;
     PETHREAD ClientThread;
     LARGE_INTEGER SectionOffset;
+    LIST_ENTRY ParkedClient;
 
     PAGED_CODE();
 
@@ -191,6 +203,11 @@ NtAcceptConnectPort(OUT PHANDLE PortHandle,
     /* At this point, don't let other accept attempts happen */
     ClientThread->LpcReplyMessage = NULL;
     ClientThread->LpcReplyMessageId = 0;
+
+    /* Park the client here: from now on only this call can wake it */
+    InitializeListHead(&ParkedClient);
+    RemoveEntryList(&ClientThread->LpcReplyChain);
+    InsertTailList(&ParkedClient, &ClientThread->LpcReplyChain);
 
     /*
      * Take the client port and section out of the message as well, so that
@@ -379,13 +396,16 @@ NtAcceptConnectPort(OUT PHANDLE PortHandle,
 
     /* Set this message as the LPC Reply message while holding the lock */
     KeAcquireGuardedMutex(&LpcpLock);
-    if (ClientThread->LpcExitThreadCalled)
+    if (IsListEmpty(&ParkedClient))
     {
         /* The client is gone and will never collect it, free it */
         LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
     }
     else
     {
+        /* NtCompleteConnectPort, or the rundown of the new port, wakes it */
+        RemoveEntryList(&ClientThread->LpcReplyChain);
+        InsertTailList(&ServerPort->LpcReplyChainHead, &ClientThread->LpcReplyChain);
         ClientThread->LpcReplyMessage = Message;
         KeReleaseGuardedMutex(&LpcpLock);
     }
@@ -404,7 +424,7 @@ Cleanup:
     if (ClientThread)
     {
         KeAcquireGuardedMutex(&LpcpLock);
-        if (ClientThread->LpcExitThreadCalled)
+        if (!LpcpPrepareToWakeClient(ClientThread, &ParkedClient))
         {
             /* The client is gone and will never collect it, free it */
             LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
@@ -412,9 +432,10 @@ Cleanup:
         else
         {
             ClientThread->LpcReplyMessage = Message;
-            LpcpPrepareToWakeClient(ClientThread);
+            KeEnterCriticalRegion();
             KeReleaseGuardedMutex(&LpcpLock);
             LpcpCompleteWait(&ClientThread->LpcReplySemaphore);
+            KeLeaveCriticalRegion();
         }
         ObDereferenceObject(ClientThread);
     }
@@ -488,11 +509,19 @@ NtCompleteConnectPort(IN HANDLE PortHandle)
 
     /* Clear the client thread and wake it up */
     Port->ClientThread = NULL;
-    LpcpPrepareToWakeClient(Thread);
-
-    /* Release the lock and wait for an answer */
-    KeReleaseGuardedMutex(&LpcpLock);
-    LpcpCompleteWait(&Thread->LpcReplySemaphore);
+    if (LpcpPrepareToWakeClient(Thread, &Port->LpcReplyChainHead))
+    {
+        /* Release the lock and wait for an answer */
+        KeEnterCriticalRegion();
+        KeReleaseGuardedMutex(&LpcpLock);
+        LpcpCompleteWait(&Thread->LpcReplySemaphore);
+        KeLeaveCriticalRegion();
+    }
+    else
+    {
+        /* The client left its wait and took the reply with it */
+        KeReleaseGuardedMutex(&LpcpLock);
+    }
 
     /* Dereference the Thread and Port and return */
     ObDereferenceObject(Port);

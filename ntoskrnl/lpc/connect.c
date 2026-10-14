@@ -18,7 +18,8 @@ PVOID
 NTAPI
 LpcpFreeConMsg(IN OUT PLPCP_MESSAGE *Message,
                IN OUT PLPCP_CONNECTION_MESSAGE *ConnectMessage,
-               IN PETHREAD CurrentThread)
+               IN PETHREAD CurrentThread,
+               OUT PBOOLEAN Woken)
 {
     PVOID SectionToMap;
     PLPCP_MESSAGE ReplyMessage;
@@ -32,6 +33,12 @@ LpcpFreeConMsg(IN OUT PLPCP_MESSAGE *Message,
         /* Remove this entry and re-initialize it */
         RemoveEntryList(&CurrentThread->LpcReplyChain);
         InitializeListHead(&CurrentThread->LpcReplyChain);
+        *Woken = FALSE;
+    }
+    else
+    {
+        /* Whoever took us off the chain also releases the semaphore */
+        *Woken = TRUE;
     }
 
     /* Check if there's a reply message */
@@ -104,6 +111,7 @@ NtSecureConnectPort(OUT PHANDLE PortHandle,
     HANDLE Handle;
     PVOID SectionToMap;
     LARGE_INTEGER SectionOffset;
+    BOOLEAN Woken;
     PTOKEN Token;
     PTOKEN_USER TokenUserInfo;
 
@@ -541,6 +549,9 @@ NtSecureConnectPort(OUT PHANDLE PortHandle,
     /* Reset the status code */
     Status = STATUS_SUCCESS;
 
+    /* Start the request with no stale count on the reply semaphore */
+    LpcpResetReplySemaphore(Thread);
+
     /* Acquire the port lock */
     KeAcquireGuardedMutex(&LpcpLock);
 
@@ -601,25 +612,28 @@ NtSecureConnectPort(OUT PHANDLE PortHandle,
         /* Now wait for a reply and set 'Status' */
         LpcpConnectWait(&Thread->LpcReplySemaphore, PreviousMode);
     }
+    else
+    {
+        /* The request was never queued, free what we still own */
+        goto Failure;
+    }
 
     /* Now, always free the connection message */
-    SectionToMap = LpcpFreeConMsg(&Message, &ConnectMessage, Thread);
+    SectionToMap = LpcpFreeConMsg(&Message, &ConnectMessage, Thread, &Woken);
 
-    /* Check for failure */
-    if (!NT_SUCCESS(Status))
+    /* Check if the wait was aborted (STATUS_USER_APC is not an error code) */
+    if (Status != STATUS_SUCCESS)
     {
-        /* Check if the semaphore got signaled in the meantime */
-        if (KeReadStateSemaphore(&Thread->LpcReplySemaphore))
+        if (!Woken)
         {
-            /* Wait on it */
-            KeWaitForSingleObject(&Thread->LpcReplySemaphore,
-                                  WrExecutive,
-                                  KernelMode,
-                                  FALSE,
-                                  NULL);
+            /* Nobody answered and nobody will, give the request up */
+            Status = STATUS_THREAD_IS_TERMINATING;
+            goto Failure;
         }
 
-        goto Failure;
+        /* We were woken, but the aborted wait did not take the release */
+        LpcpCompleteAbortedWait(&Thread->LpcReplySemaphore);
+        Status = STATUS_SUCCESS;
     }
 
     /* Check if we got a message back */

@@ -183,11 +183,17 @@ LpcpDestroyPortQueue(IN PLPCP_PORT_OBJECT Port,
         RemoveEntryList(&Thread->LpcReplyChain);
         InitializeListHead(&Thread->LpcReplyChain);
 
+        /* No reply may match the request any more, even while the lock is dropped below */
+        Thread->LpcReplyMessageId = 0;
+
         /* Check if someone is waiting */
         if (!KeReadStateSemaphore(&Thread->LpcReplySemaphore))
         {
-            /* Get the message */
+            /* Get the message and wake the thread before the lock can be dropped */
             Message = LpcpGetMessageFromThread(Thread);
+            if (Message) Thread->LpcReplyMessage = NULL;
+            KeReleaseSemaphore(&Thread->LpcReplySemaphore, 0, 1, FALSE);
+
             if (Message)
             {
                 /* Check if it's a connection request */
@@ -204,17 +210,10 @@ LpcpDestroyPortQueue(IN PLPCP_PORT_OBJECT Port,
                     }
                 }
 
-                /* Clear the reply message */
-                Thread->LpcReplyMessage = NULL;
-
                 /* And remove the message from the port zone */
                 LpcpFreeToPortZone(Message, LPCP_LOCK_HELD);
                 NextEntry = Port->LpcReplyChainHead.Flink;
             }
-
-            /* Release the semaphore and reset message id count */
-            Thread->LpcReplyMessageId = 0;
-            KeReleaseSemaphore(&Thread->LpcReplySemaphore, 0, 1, FALSE);
         }
     }
 
