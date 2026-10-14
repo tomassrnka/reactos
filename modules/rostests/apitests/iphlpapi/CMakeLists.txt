@@ -9,6 +9,7 @@ list(APPEND SOURCE
     icmp.c
     IpTables2.c
     NotifyIpInterfaceChange.c
+    NotifyRouteChange2.c
     SendARP.c
     testlist.c)
 
