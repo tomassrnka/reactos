@@ -36,6 +36,18 @@ ApiSetResolveToHost(
     _Out_ PUNICODE_STRING Output
 )
 {
+    return ApiSetResolveToHostEx(ApisetVersion, FALSE, ApiToResolve, Resolved, Output);
+}
+
+NTSTATUS
+ApiSetResolveToHostEx(
+    _In_ DWORD ApisetVersion,
+    _In_ BOOLEAN ExactName,
+    _In_ PCUNICODE_STRING ApiToResolve,
+    _Out_ PBOOLEAN Resolved,
+    _Out_ PUNICODE_STRING Output
+)
+{
     if (ApiToResolve->Length < PrefixSize)
     {
         *Resolved = FALSE;
@@ -58,34 +70,87 @@ ApiSetResolveToHost(
     if (!_wcsnicmp(Extension, L".dll", ExtensionSize / sizeof(WCHAR)))
         Tmp.Length -= ExtensionSize;
 
-    // Binary search the apisets
+    // A contract name is a file name, never a path
+    for (USHORT n = 0; n < Tmp.Length / sizeof(WCHAR); ++n)
+    {
+        if (Tmp.Buffer[n] == L'\\' || Tmp.Buffer[n] == L'/')
+        {
+            *Resolved = FALSE;
+            return STATUS_SUCCESS;
+        }
+    }
+
+    // Windows 10 ignores the minor version, the part after the last hyphen: every minor of a contract resolves to
+    // the host of the contract. Look for the exact name first, then for the newest row of the same contract.
+    UNICODE_STRING Contract = Tmp;
+    while (Contract.Length > PrefixSize && Contract.Buffer[Contract.Length / sizeof(WCHAR) - 1] != L'-')
+        Contract.Length -= sizeof(WCHAR);
+    if (Contract.Length <= PrefixSize)
+    {
+        *Resolved = FALSE;
+        return STATUS_SUCCESS;
+    }
+
+    // Binary search for the first row that is not below the contract name; the rows of the contract follow it.
     // Ideally we should use bsearch here, but that drags in another dependency and we do not want that here.
-    LONG UBnd = g_ApisetsCount - 1;
+    LONG UBnd = g_ApisetsCount;
     LONG LBnd = 0;
-    while (LBnd <= UBnd)
+    while (LBnd < UBnd)
     {
         LONG Index = (UBnd - LBnd) / 2 + LBnd;
 
-        LONG result = RtlCompareUnicodeString(&Tmp, &g_Apisets[Index].Name, TRUE);
-        if (result == 0)
-        {
-            // Check if this version is included
-            if (g_Apisets[Index].dwOsVersions & ApisetVersion)
-            {
-                // Return a static string (does not have to be freed)
-                *Resolved = TRUE;
-                *Output = g_Apisets[Index].Target;
-            }
-            return STATUS_SUCCESS;
-        }
-        else if (result < 0)
-        {
-            UBnd = Index - 1;
-        }
-        else
-        {
+        if (RtlCompareUnicodeString(&g_Apisets[Index].Name, &Contract, TRUE) < 0)
             LBnd = Index + 1;
+        else
+            UBnd = Index;
+    }
+
+    const ROS_APISET *Best = NULL;
+    ULONG BestMinor = 0;
+    for (LONG Index = LBnd; Index < g_ApisetsCount; ++Index)
+    {
+        const ROS_APISET *Row = &g_Apisets[Index];
+        if (!RtlPrefixUnicodeString(&Contract, &Row->Name, TRUE))
+            break;
+
+        // Check if this version is included
+        if (!(Row->dwOsVersions & ApisetVersion))
+            continue;
+
+        if (RtlEqualUnicodeString(&Tmp, &Row->Name, TRUE))
+        {
+            Best = Row;
+            break;
         }
+        if (ExactName)
+            continue;
+
+        // Only rows whose remainder is a minor version belong to the contract
+        USHORT Pos = Contract.Length / sizeof(WCHAR);
+        USHORT End = Row->Name.Length / sizeof(WCHAR);
+        ULONG Minor = 0;
+        if (Pos == End || End - Pos > 5)
+            continue;
+        for (; Pos < End; ++Pos)
+        {
+            WCHAR Ch = Row->Name.Buffer[Pos];
+            if (Ch < L'0' || Ch > L'9')
+                break;
+            Minor = Minor * 10 + (Ch - L'0');
+        }
+        if (Pos == End && (!Best || Minor > BestMinor))
+        {
+            Best = Row;
+            BestMinor = Minor;
+        }
+    }
+
+    if (Best)
+    {
+        // Return a static string (does not have to be freed)
+        *Resolved = TRUE;
+        *Output = Best->Target;
+        return STATUS_SUCCESS;
     }
     *Resolved = FALSE;
     return STATUS_SUCCESS;
