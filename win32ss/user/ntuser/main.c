@@ -274,6 +274,10 @@ InitProcessCallback(PEPROCESS Process)
     if (!NT_SUCCESS(Status))
     {
         TRACE_CH(UserProcess, "Failed to map the global heap! 0x%x\n", Status);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        if (Win32kUserViewZeroBits(Process))
+            goto error_uninitialized;
+#endif
         goto error;
     }
 
@@ -293,6 +297,10 @@ InitProcessCallback(PEPROCESS Process)
     if (!NT_SUCCESS(Status))
     {
         ERR_CH(UserProcess, "GdiProcessCreate failed, Status 0x%08lx\n", Status);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        if (Win32kUserViewZeroBits(Process))
+            goto error_uninitialized;
+#endif
         goto error;
     }
 
@@ -317,6 +325,21 @@ error:
            ppiCurrent, HandleToUlong(Process->UniqueProcessId));
     ExitProcessCallback(Process);
     return Status;
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+error_uninitialized:
+    /* Low address space may be exhausted before GDI pools and gppiList are
+     * initialized. ExitProcessCallback requires a fully initialized process. */
+    if (ppiCurrent->HeapMappings.KernelMapping != NULL)
+        UnmapGlobalUserHeap(Process);
+    if (ppiScrnSaver == ppiCurrent)
+        ppiScrnSaver = NULL;
+    ppiCurrent->W32PF_flags |= W32PF_TERMINATED;
+    PsSetProcessWin32Process(Process, NULL, ppiCurrent);
+    ppiCurrent->peProcess = NULL;
+    IntDereferenceProcessInfo(ppiCurrent);
+    return Status;
+#endif
 }
 
 NTSTATUS

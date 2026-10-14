@@ -216,6 +216,16 @@ UserCreateHeap(OUT PVOID *SectionObject,
         return FALSE;
     }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Low-half desktop/global-heap pointer arithmetic needs one 4 GB window. */
+    ASSERT(HeapSize != 0);
+    ASSERT(((ULONG_PTR)*SystemBase >> 32) ==
+           (((ULONG_PTR)*SystemBase + HeapSize - 1) >> 32));
+    ASSERT((ULONG)(ULONG_PTR)*SystemBase != 0);
+    if (GlobalUserHeap != NULL)
+        ASSERT(((ULONG_PTR)*SystemBase >> 32) == ((ULONG_PTR)GlobalUserHeap >> 32));
+#endif
+
     /* Create the heap */
     pHeap = IntUserHeapCreate(*SectionObject,
                               SystemBase,
@@ -309,7 +319,7 @@ MapGlobalUserHeap(IN  PEPROCESS Process,
     Status = MmMapViewOfSection(GlobalUserHeapSection,
                                 Process,
                                 &UserBase,
-                                0,
+                                Win32kUserViewZeroBits(Process),
                                 0,
                                 &Offset,
                                 &ViewSize,
