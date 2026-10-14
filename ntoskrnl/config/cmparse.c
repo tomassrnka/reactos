@@ -1875,59 +1875,7 @@ CmpWow64Prefix(PCUNICODE_STRING Name, PCUNICODE_STRING Prefix)
            (Name->Length == Prefix->Length || Name->Buffer[Prefix->Length / sizeof(WCHAR)] == L'\\');
 }
 
-/* Windows 7 / Server 2008 R2: shared Software subtrees. Match complete
- * components: similarly named application keys still use the redirected view.
- * See the registry view matrix fixture and its reference measurements. */
-static const PCWSTR CmpWow64SharedSoftware[] = {
-    L"\\Clients",
-    L"\\Microsoft\\COM3",
-    L"\\Microsoft\\Cryptography\\Calais\\Current",
-    L"\\Microsoft\\Cryptography\\Calais\\Readers",
-    L"\\Microsoft\\Cryptography\\Services",
-    L"\\Microsoft\\CTF\\SystemShared",
-    L"\\Microsoft\\CTF\\TIP",
-    L"\\Microsoft\\DFS",
-    L"\\Microsoft\\Driver Signing",
-    L"\\Microsoft\\EnterpriseCertificates",
-    L"\\Microsoft\\EventSystem",
-    L"\\Microsoft\\MSMQ",
-    L"\\Microsoft\\Non-Driver Signing",
-    L"\\Microsoft\\Notepad\\DefaultFonts",
-    L"\\Microsoft\\Ole",
-    L"\\Microsoft\\Ras",
-    L"\\Microsoft\\Rpc",
-    L"\\Microsoft\\Software\\Microsoft\\Shared Tools\\Msinfo",
-    L"\\Microsoft\\SystemCertificates",
-    L"\\Microsoft\\TermServLicensing",
-    L"\\Microsoft\\Transaction Server",
-    L"\\Microsoft\\Windows\\CurrentVersion\\App Paths",
-    L"\\Microsoft\\Windows\\CurrentVersion\\Control Panel\\Cursors\\Schemes",
-    L"\\Microsoft\\Windows\\CurrentVersion\\Explorer\\AutoplayHandlers",
-    L"\\Microsoft\\Windows\\CurrentVersion\\Explorer\\DriveIcons",
-    L"\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KindMap",
-    L"\\Microsoft\\Windows\\CurrentVersion\\Group Policy",
-    L"\\Microsoft\\Windows\\CurrentVersion\\Policies",
-    L"\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers",
-    L"\\Microsoft\\Windows\\CurrentVersion\\Setup",
-    L"\\Microsoft\\Windows\\CurrentVersion\\Telephony\\Locations",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\Console",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\FontDPI",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\FontLink",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\FontMapper",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\GRE_Initialize",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\LanguagePack",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\NetworkCards",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\Perflib",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\Ports",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\Print",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
-    L"\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones",
-    L"\\Policies",
-    L"\\RegisteredApplications",
-};
+#include <wow64reg.h>
 
 static const PCWSTR CmpWow64RedirectedClasses[] = {
     L"\\CLSID", L"\\DirectShow", L"\\Interface", L"\\Media Type", L"\\MediaFoundation"
@@ -1989,8 +1937,8 @@ CmpWow64KeyOffset(PCUNICODE_STRING Name, PULONG Cut)
         Offset += sizeof(L"\\Classes") - sizeof(WCHAR);
         goto Classes;
     }
-    for (i = 0; i < RTL_NUMBER_OF(CmpWow64SharedSoftware); ++i)
-        if (CmpWow64Path(&Tail, CmpWow64SharedSoftware[i])) return 0;
+    for (i = 0; i < RTL_NUMBER_OF(Wow64SharedSoftware); ++i)
+        if (CmpWow64Path(&Tail, Wow64SharedSoftware[i])) return 0;
     return Offset;
 
 Classes:
@@ -2076,12 +2024,12 @@ CmpWow64HasPhysicalAlias(PCM_KEY_CONTROL_BLOCK Kcb, PCUNICODE_STRING Remaining)
     NextIndex = Index;
     NextPosition = Position;
     if (CmpWow64MatchComponents(Kcb, Depth, Remaining, &NextIndex, &NextPosition, L"\\Classes")) return TRUE;
-    for (i = 0; i < RTL_NUMBER_OF(CmpWow64SharedSoftware); ++i)
+    for (i = 0; i < RTL_NUMBER_OF(Wow64SharedSoftware); ++i)
     {
         NextIndex = Index;
         NextPosition = Position;
         if (CmpWow64MatchComponents(Kcb, Depth, Remaining, &NextIndex, &NextPosition,
-                                   CmpWow64SharedSoftware[i])) return TRUE;
+                                   Wow64SharedSoftware[i])) return TRUE;
     }
     return FALSE;
 }
@@ -2170,9 +2118,9 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
             }
             else Offset = Software.Length + sizeof(L"\\Classes") - sizeof(WCHAR);
         }
-        else for (i = 0; i < RTL_NUMBER_OF(CmpWow64SharedSoftware); ++i)
+        else for (i = 0; i < RTL_NUMBER_OF(Wow64SharedSoftware); ++i)
         {
-            if (CmpWow64Path(&Tail, CmpWow64SharedSoftware[i]))
+            if (CmpWow64Path(&Tail, Wow64SharedSoftware[i]))
             {
                 Offset = Software.Length;
                 Cut = Insert;
