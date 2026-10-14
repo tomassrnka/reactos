@@ -94,6 +94,37 @@ RegReadStringA(HKEY  hKey,
 }
 
 
+/* Registry value: five DWORDs (reset period, two string offsets, action count, action offset), then the actions */
+static BOOL
+ParseRegFailureActions(const BYTE *value, DWORD size, DWORD *reset, DWORD *count, DWORD *offset)
+{
+    const DWORD *header = (const DWORD *)value;
+
+    if (size < 5 * sizeof(DWORD))
+        return FALSE;
+
+    *reset = header[0];
+    *count = header[3];
+    *offset = header[4];
+
+#ifdef _M_AMD64
+    /* ReactOS amd64 builds before the Windows layout stored the 40-byte in-memory structure */
+    if (is_reactos() && *count == 0 && size >= 40 && header[6] != 0 && size == 40 + header[6] * sizeof(SC_ACTION))
+    {
+        *count = header[6];
+        *offset = 40;
+        return TRUE;
+    }
+#endif
+
+    /* 0 is what earlier ReactOS builds and a few Windows services store */
+    ok(*offset == 5 * sizeof(DWORD) || *offset == 0, "dwRegOffset = %lu\n", *offset);
+    if (*offset == 0)
+        *offset = 5 * sizeof(DWORD);
+
+    return TRUE;
+}
+
 static int QueryConfig2W(SC_HANDLE hService, LPCWSTR serviceName, DWORD dwInfoLevel)
 {
     int    iRet  = 0;
@@ -187,7 +218,7 @@ static int QueryConfig2W(SC_HANDLE hService, LPCWSTR serviceName, DWORD dwInfoLe
         case SERVICE_CONFIG_FAILURE_ACTIONS:
         {
             LPSERVICE_FAILURE_ACTIONSW lpFailureActions1 = (LPSERVICE_FAILURE_ACTIONSW)lpBuffer;
-            LPSERVICE_FAILURE_ACTIONSW lpFailureActions2 = NULL;
+            LPBYTE lpRegValue = NULL;
             LPWSTR lpRebootMessage  = NULL;
             LPWSTR lpFailureCommand = NULL;
             DWORD  i = 0;
@@ -203,8 +234,8 @@ static int QueryConfig2W(SC_HANDLE hService, LPCWSTR serviceName, DWORD dwInfoLe
             ok(dwType == REG_BINARY, "dwType = %lu, expected REG_BINARY\n", dwType);
             ok(dwRequiredSize != 0, "dwRequiredSize is zero, expected non-zero\n");
 
-            lpFailureActions2 = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwRequiredSize);
-            if (lpFailureActions2 == NULL)
+            lpRegValue = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwRequiredSize);
+            if (lpRegValue == NULL)
             {
                 skip("Cannot allocate %lu bytes of memory\n", dwRequiredSize);
                 break;
@@ -214,7 +245,7 @@ static int QueryConfig2W(SC_HANDLE hService, LPCWSTR serviceName, DWORD dwInfoLe
                                     L"FailureActions",
                                     NULL,
                                     NULL,
-                                    (LPBYTE)lpFailureActions2,
+                                    lpRegValue,
                                     &dwRequiredSize);
             ok(lRet == ERROR_SUCCESS, "RegQueryValueExW returned 0x%08lx\n", lRet);
             ok(dwRequiredSize != 0, "dwRequiredSize is zero, expected non-zero\n");
@@ -223,23 +254,30 @@ static int QueryConfig2W(SC_HANDLE hService, LPCWSTR serviceName, DWORD dwInfoLe
             RegReadStringW(hKey, L"FailureCommand", &lpFailureCommand);
             RegReadStringW(hKey, L"RebootMessage" , &lpRebootMessage );
 
-            /* Check the values */
-            ok(lpFailureActions1->dwResetPeriod == lpFailureActions2->dwResetPeriod, "lpFailureActions1->dwResetPeriod != lpFailureActions2->dwResetPeriod\n");
-#ifndef _M_AMD64 // Fails on Win 2003 x64
-            ok(lpFailureActions1->cActions == lpFailureActions2->cActions, "lpFailureActions1->cActions != lpFailureActions2->cActions\n");
-#endif
-            /* Compare the actions */
-            if (lpFailureActions1->cActions == lpFailureActions2->cActions)
+            /* The registry holds five DWORDs (reset period, two string offsets, action count, action offset) and the actions, on every architecture */
             {
-                lpFailureActions2->lpsaActions = (lpFailureActions2->cActions > 0 ? (LPSC_ACTION)(lpFailureActions2 + 1) : NULL);
+                DWORD dwRegReset = 0, dwRegCount = 0, dwRegOffset = 0;
+                SC_ACTION *pRegActions;
 
-                if (lpFailureActions1->cActions > 0 &&
+                ok(ParseRegFailureActions(lpRegValue, dwRequiredSize, &dwRegReset, &dwRegCount, &dwRegOffset),
+                   "dwRequiredSize = %lu\n", dwRequiredSize);
+                pRegActions = (SC_ACTION *)(lpRegValue + dwRegOffset);
+                ok(dwRegOffset + dwRegCount * sizeof(SC_ACTION) <= dwRequiredSize, "the actions do not fit in the value\n");
+
+                /* Check the values */
+                ok(lpFailureActions1->dwResetPeriod == dwRegReset, "lpFailureActions1->dwResetPeriod != registry reset period\n");
+                ok(lpFailureActions1->cActions == dwRegCount, "lpFailureActions1->cActions = %lu, registry has %lu\n", lpFailureActions1->cActions, dwRegCount);
+
+                /* Compare the actions */
+                if (lpFailureActions1->cActions == dwRegCount &&
+                    dwRegOffset + dwRegCount * sizeof(SC_ACTION) <= dwRequiredSize &&
+                    lpFailureActions1->cActions > 0 &&
                     lpFailureActions1->lpsaActions != NULL)
                 {
                     for (i = 0; i < lpFailureActions1->cActions; ++i)
                     {
-                        ok(lpFailureActions1->lpsaActions[i].Type  == lpFailureActions2->lpsaActions[i].Type , "lpFailureActions1->lpsaActions[%lu].Type  != lpFailureActions2->lpsaActions[%lu].Type\n" , i, i);
-                        ok(lpFailureActions1->lpsaActions[i].Delay == lpFailureActions2->lpsaActions[i].Delay, "lpFailureActions1->lpsaActions[%lu].Delay != lpFailureActions2->lpsaActions[%lu].Delay\n", i, i);
+                        ok(lpFailureActions1->lpsaActions[i].Type  == pRegActions[i].Type , "lpFailureActions1->lpsaActions[%lu].Type  != registry\n" , i);
+                        ok(lpFailureActions1->lpsaActions[i].Delay == pRegActions[i].Delay, "lpFailureActions1->lpsaActions[%lu].Delay != registry\n", i);
                     }
                 }
             }
@@ -270,7 +308,7 @@ static int QueryConfig2W(SC_HANDLE hService, LPCWSTR serviceName, DWORD dwInfoLe
             if (lpFailureCommand)
                 HeapFree(GetProcessHeap(), 0, lpFailureCommand);
 
-            HeapFree(GetProcessHeap(), 0, lpFailureActions2);
+            HeapFree(GetProcessHeap(), 0, lpRegValue);
 
             break;
         }
@@ -380,7 +418,7 @@ static int QueryConfig2A(SC_HANDLE hService, LPCSTR serviceName, DWORD dwInfoLev
         case SERVICE_CONFIG_FAILURE_ACTIONS:
         {
             LPSERVICE_FAILURE_ACTIONSA lpFailureActions1 = (LPSERVICE_FAILURE_ACTIONSA)lpBuffer;
-            LPSERVICE_FAILURE_ACTIONSA lpFailureActions2 = NULL;
+            LPBYTE lpRegValue = NULL;
             LPSTR lpRebootMessage  = NULL;
             LPSTR lpFailureCommand = NULL;
             DWORD i = 0;
@@ -396,8 +434,8 @@ static int QueryConfig2A(SC_HANDLE hService, LPCSTR serviceName, DWORD dwInfoLev
             ok(dwType == REG_BINARY, "dwType = %lu, expected REG_BINARY\n", dwType);
             ok(dwRequiredSize != 0, "dwRequiredSize is zero, expected non-zero\n");
 
-            lpFailureActions2 = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwRequiredSize);
-            if (lpFailureActions2 == NULL)
+            lpRegValue = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwRequiredSize);
+            if (lpRegValue == NULL)
             {
                 skip("Cannot allocate %lu bytes of memory\n", dwRequiredSize);
                 break;
@@ -407,7 +445,7 @@ static int QueryConfig2A(SC_HANDLE hService, LPCSTR serviceName, DWORD dwInfoLev
                                     "FailureActions",
                                     NULL,
                                     NULL,
-                                    (LPBYTE)lpFailureActions2,
+                                    lpRegValue,
                                     &dwRequiredSize);
             ok(lRet == ERROR_SUCCESS, "RegQueryValueExA returned 0x%08lx\n", lRet);
             ok(dwRequiredSize != 0, "dwRequiredSize is zero, expected non-zero\n");
@@ -416,24 +454,30 @@ static int QueryConfig2A(SC_HANDLE hService, LPCSTR serviceName, DWORD dwInfoLev
             RegReadStringA(hKey, "FailureCommand", &lpFailureCommand);
             RegReadStringA(hKey, "RebootMessage" , &lpRebootMessage );
 
-            /* Check the values */
-            ok(lpFailureActions1->dwResetPeriod == lpFailureActions2->dwResetPeriod, "lpFailureActions1->dwResetPeriod != lpFailureActions2->dwResetPeriod\n");
-#ifndef _M_AMD64 // Fails on Win 2003 x64
-            ok(lpFailureActions1->cActions == lpFailureActions2->cActions, "lpFailureActions1->cActions != lpFailureActions2->cActions\n");
-#endif
-
-            /* Compare the actions */
-            if (lpFailureActions1->cActions == lpFailureActions2->cActions)
+            /* The registry holds five DWORDs (reset period, two string offsets, action count, action offset) and the actions, on every architecture */
             {
-                lpFailureActions2->lpsaActions = (lpFailureActions2->cActions > 0 ? (LPSC_ACTION)(lpFailureActions2 + 1) : NULL);
+                DWORD dwRegReset = 0, dwRegCount = 0, dwRegOffset = 0;
+                SC_ACTION *pRegActions;
 
-                if (lpFailureActions1->cActions > 0 &&
+                ok(ParseRegFailureActions(lpRegValue, dwRequiredSize, &dwRegReset, &dwRegCount, &dwRegOffset),
+                   "dwRequiredSize = %lu\n", dwRequiredSize);
+                pRegActions = (SC_ACTION *)(lpRegValue + dwRegOffset);
+                ok(dwRegOffset + dwRegCount * sizeof(SC_ACTION) <= dwRequiredSize, "the actions do not fit in the value\n");
+
+                /* Check the values */
+                ok(lpFailureActions1->dwResetPeriod == dwRegReset, "lpFailureActions1->dwResetPeriod != registry reset period\n");
+                ok(lpFailureActions1->cActions == dwRegCount, "lpFailureActions1->cActions = %lu, registry has %lu\n", lpFailureActions1->cActions, dwRegCount);
+
+                /* Compare the actions */
+                if (lpFailureActions1->cActions == dwRegCount &&
+                    dwRegOffset + dwRegCount * sizeof(SC_ACTION) <= dwRequiredSize &&
+                    lpFailureActions1->cActions > 0 &&
                     lpFailureActions1->lpsaActions != NULL)
                 {
                     for (i = 0; i < lpFailureActions1->cActions; ++i)
                     {
-                        ok(lpFailureActions1->lpsaActions[i].Type  == lpFailureActions2->lpsaActions[i].Type , "lpFailureActions1->lpsaActions[%lu].Type  != lpFailureActions2->lpsaActions[%lu].Type\n" , i, i);
-                        ok(lpFailureActions1->lpsaActions[i].Delay == lpFailureActions2->lpsaActions[i].Delay, "lpFailureActions1->lpsaActions[%lu].Delay != lpFailureActions2->lpsaActions[%lu].Delay\n", i, i);
+                        ok(lpFailureActions1->lpsaActions[i].Type  == pRegActions[i].Type , "lpFailureActions1->lpsaActions[%lu].Type  != registry\n" , i);
+                        ok(lpFailureActions1->lpsaActions[i].Delay == pRegActions[i].Delay, "lpFailureActions1->lpsaActions[%lu].Delay != registry\n", i);
                     }
                 }
             }
@@ -464,7 +508,7 @@ static int QueryConfig2A(SC_HANDLE hService, LPCSTR serviceName, DWORD dwInfoLev
             if (lpFailureCommand)
                 HeapFree(GetProcessHeap(), 0, lpFailureCommand);
 
-            HeapFree(GetProcessHeap(), 0, lpFailureActions2);
+            HeapFree(GetProcessHeap(), 0, lpRegValue);
 
             break;
         }

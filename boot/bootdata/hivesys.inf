@@ -2243,7 +2243,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Spooler","Description",0x00000000,%SPOOL
 HKLM,"SYSTEM\CurrentControlSet\Services\Spooler","DisplayName",0x00000000,%SPOOLER_SERVICE%
 HKLM,"SYSTEM\CurrentControlSet\Services\Spooler","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Spooler","FailureActions",0x00000003, \
-    60,54,00,00,00,00,00,00,00,00,00,00,03,00,00,00,00,00,00,00, \
+    80,51,01,00,00,00,00,00,00,00,00,00,03,00,00,00,14,00,00,00, \
     01,00,00,00,60,ea,00,00,01,00,00,00,60,ea,00,00,00,00,00,00,00,00,00,00
 HKLM,"SYSTEM\CurrentControlSet\Services\Spooler","Group",0x00000000,"SpoolerGroup"
 HKLM,"SYSTEM\CurrentControlSet\Services\Spooler","ImagePath",0x00020000,"%SystemRoot%\system32\spoolsv.exe"
@@ -2287,7 +2287,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Themes","DisplayName",0x00000000,%THEMES
 HKLM,"SYSTEM\CurrentControlSet\Services\Themes","Description",0x00000000,%THEMES_SERVICE_DESCRIPTION%
 HKLM,"SYSTEM\CurrentControlSet\Services\Themes","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Themes","FailureActions",0x00000003, \
-    80,51,01,00,00,00,00,00,00,00,00,00,03,00,00,00,00,00,00,00, \
+    80,51,01,00,00,00,00,00,00,00,00,00,03,00,00,00,14,00,00,00, \
     01,00,00,00,60,ea,00,00,01,00,00,00,60,ea,00,00,00,00,00,00,00,00,00,00
 HKLM,"SYSTEM\CurrentControlSet\Services\Themes","Group",0x00000000,"UIGroup"
 HKLM,"SYSTEM\CurrentControlSet\Services\Themes","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k netsvcs"
