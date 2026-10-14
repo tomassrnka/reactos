@@ -38,11 +38,13 @@ static LSTATUS WINAPI MockOpen(HKEY Root, PCWSTR Name, DWORD Options, REGSAM Acc
     return ERROR_SUCCESS;
 }
 
+#ifdef _M_AMD64
 static LSTATUS WINAPI MockCreate(HKEY Root, PCWSTR Name, DWORD Reserved, PWSTR Class,
     DWORD Options, REGSAM Access, LPSECURITY_ATTRIBUTES Security, PHKEY Key, PDWORD Disposition)
 {
     return MockOpen(Root, Name, Options, Access, Key);
 }
+#endif
 
 static LSTATUS WINAPI MockSet(HKEY Key, PCWSTR Name, DWORD Reserved, DWORD Type,
     const BYTE *Data, DWORD Size)
