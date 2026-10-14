@@ -576,7 +576,27 @@ DiskVolumesProc(HWND hDlg, UINT Message, WPARAM wParam, LPARAM lParam)
                     Item.iItem = Sel;
                     SendMessageW(hList, LVM_GETITEMW, 0, (LPARAM)&Item);
                     if (ShowRegionProperties(hDlg, Data->Disk, (const DM_REGION *)Item.lParam))
+                    {
+                        PDM_REGION Region = (PDM_REGION)Item.lParam;
+                        WCHAR Label[64];
+
                         Data->Changed = TRUE;
+                        /* the label may have changed: the snapshot of this list and the next Properties show what the volume holds now */
+                        if (Region->HasVolume &&
+                            GetVolumeInformationW(Region->VolumeGuid, Label, ARRAYSIZE(Label), NULL, NULL, NULL, NULL, 0))
+                        {
+                            DM_BLOCK_TEXT Block;
+                            LVITEMW Text;
+
+                            StringCchCopyW(Region->Label, ARRAYSIZE(Region->Label), Label);
+                            DmBlockText(Data->Disk, Region, &Block);
+                            ZeroMemory(&Text, sizeof(Text));
+                            Text.mask = LVIF_TEXT;
+                            Text.iItem = Sel;
+                            Text.pszText = Block.Line1;
+                            SendMessageW(hList, LVM_SETITEMTEXTW, Sel, (LPARAM)&Text);
+                        }
+                    }
                 }
                 return TRUE;
             }

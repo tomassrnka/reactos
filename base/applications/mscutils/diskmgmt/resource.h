@@ -260,5 +260,7 @@
 #define IDS_PL_FOLDER_PATH      669
 #define IDS_ID_TITLE            670
 #define IDS_PL_NO_REPARSE       671
+#define IDS_ERR_PATHS_NOT_RESTORED 890
+#define IDS_PL_FOLDER_TOO_LONG  891
 
 #endif
