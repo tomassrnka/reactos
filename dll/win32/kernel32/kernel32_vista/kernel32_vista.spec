@@ -36,7 +36,7 @@
 @ stdcall CreateSymbolicLinkW(wstr wstr long)
 @ stdcall EnumSystemLocalesEx(ptr long long ptr)
 @ stdcall GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr)
-@ stdcall GetApplicationRestart(ptr wstr ptr ptr)
+@ stdcall -version=0x400-0x5ff GetApplicationRestartSettings(ptr ptr ptr ptr)
 @ stdcall GetFileBandwidthReservation(ptr ptr ptr ptr ptr ptr)
 @ stdcall GetFileMUIInfo(long wstr ptr ptr)
 @ stdcall GetFileMUIPath(long wstr wstr ptr wstr ptr ptr)
@@ -57,7 +57,7 @@
 @ stdcall QueryFullProcessImageNameA(ptr long ptr ptr)
 @ stdcall QueryFullProcessImageNameW(ptr long ptr ptr)
 @ stdcall RegisterApplicationRecoveryCallback(ptr ptr long long)
-@ stdcall RegisterApplicationRestart(wstr long)
+@ stdcall -version=0x400-0x5ff RegisterApplicationRestart(wstr long)
 @ stdcall SetFileBandwidthReservation(ptr long long long ptr ptr)
 @ stdcall SetFileInformationByHandle(ptr long ptr long)
 @ stdcall SetThreadPreferredUILanguages(long wstr ptr)
@@ -87,6 +87,7 @@
 @ stdcall SetThreadpoolWait(ptr long ptr) ntdll_vista.TpSetWait
 @ stdcall SubmitThreadpoolWork(ptr) ntdll_vista.TpPostWork
 @ stdcall TrySubmitThreadpoolCallback(ptr ptr ptr)
+@ stdcall -version=0x400-0x5ff UnregisterApplicationRestart()
 @ stdcall WaitForThreadpoolIoCallbacks(ptr long) ntdll_vista.TpWaitForIoCompletion
 @ stdcall WaitForThreadpoolTimerCallbacks(ptr long) ntdll_vista.TpWaitForTimer
 @ stdcall WaitForThreadpoolWaitCallbacks(ptr long) ntdll_vista.TpWaitForWait

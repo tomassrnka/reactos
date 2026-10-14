@@ -7,6 +7,7 @@ add_message_headers(ANSI FormatMessage.mc)
 list(APPEND SOURCE
     BindIoCompletionCallback.c
     CancelIoEx.c
+    ApplicationRestart.c
     ConsoleCP.c
     CreateEventMutexEx.c
     CreateRemoteThreadEx.c
