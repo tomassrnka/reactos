@@ -533,8 +533,49 @@ BOOL
 WINAPI
 SetEnvironmentStringsW(IN LPWCH NewEnvironment)
 {
-    STUB;
-    return FALSE;
+    PWCHAR Entry, Equals, NewBlock, OldBlock;
+    UNICODE_STRING Name, Value;
+    NTSTATUS Status;
+
+    /* Every entry needs a name and an equals sign; a leading one belongs to the name (=C:=C:\) */
+    for (Entry = NewEnvironment; *Entry; Entry += wcslen(Entry) + 1)
+    {
+        Equals = wcschr(Entry + 1, L'=');
+        if (!Equals)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+    }
+
+    Status = RtlCreateEnvironment(FALSE, &NewBlock);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    for (Entry = NewEnvironment; *Entry; Entry += wcslen(Entry) + 1)
+    {
+        Equals = wcschr(Entry + 1, L'=');
+        Name.Buffer = Entry;
+        Name.Length = (USHORT)((Equals - Entry) * sizeof(WCHAR));
+        Name.MaximumLength = Name.Length;
+        RtlInitUnicodeString(&Value, Equals + 1);
+
+        Status = RtlSetEnvironmentVariable(&NewBlock, &Name, &Value);
+        if (!NT_SUCCESS(Status))
+        {
+            RtlDestroyEnvironment(NewBlock);
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+    }
+
+    RtlSetCurrentEnvironment(NewBlock, &OldBlock);
+    if (OldBlock)
+        RtlDestroyEnvironment(OldBlock);
+    return TRUE;
 }
 
 /* EOF */
