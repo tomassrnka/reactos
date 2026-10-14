@@ -41,6 +41,7 @@ list(APPEND SOURCE
     ZeroBits.c
     DllLoadNotification.c
     EmptyPxe.c
+    ApiSetQueryApiSetPresence.c
     LdrEnumResources.c
     LdrFindResource_U.c
     LdrLoadDll.c
