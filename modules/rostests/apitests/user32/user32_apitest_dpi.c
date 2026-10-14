@@ -288,7 +288,6 @@ static void StepWin(const char *Arg)
     char Buf[64];
     CTX Cur = pGetThreadDpiAwarenessContext(), Ctx, Prev;
     HANDLE hThread;
-    BOOL Ret;
     UINT Dpi;
     int Behavior;
 
