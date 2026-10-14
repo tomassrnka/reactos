@@ -172,6 +172,12 @@ static int sync_recv(SOCKET s, void *buffer, int len, DWORD flags)
     {
         ret = WaitForSingleObject(overlapped.hEvent, 1000);
         ok(!ret, "wait timed out\n");
+        if (ret)
+        {
+            /* The request must not outlive its OVERLAPPED */
+            CancelIo((HANDLE)s);
+            WaitForSingleObject(overlapped.hEvent, 5000);
+        }
         ret = WSAGetOverlappedResult(s, &overlapped, &ret_len, FALSE, &flags);
         ret = (ret ? 0 : -1);
     }
