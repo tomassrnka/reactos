@@ -794,6 +794,111 @@ Test_Mbr(VOID)
     HeapFree(GetProcessHeap(), 0, Plan);
 }
 
+static BOOL
+VolumeTotal(PCWSTR Guid, PULONGLONG Bytes)
+{
+    ULARGE_INTEGER Avail, Total, Free;
+
+    if (!GetDiskFreeSpaceExW(Guid, &Avail, &Total, &Free))
+        return FALSE;
+    *Bytes = Total.QuadPart;
+    return TRUE;
+}
+
+static BOOL
+KeepFile(PCWSTR Root, BOOL Write)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE File;
+    DWORD Done = 0;
+    CHAR Back[32] = "";
+    BOOL Ok = FALSE;
+
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"%skeep.txt", Root);
+    File = CreateFileW(Path, Write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ, NULL, Write ? CREATE_ALWAYS : OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        trace("open %ls: %lu\n", Path, GetLastError());
+        return FALSE;
+    }
+    if (Write)
+        Ok = WriteFile(File, "resize me", 9, &Done, NULL) && Done == 9;
+    else
+        Ok = ReadFile(File, Back, sizeof(Back) - 1, &Done, NULL) && Done == 9 && strcmp(Back, "resize me") == 0;
+    if (!Ok)
+        trace("file: done %lu '%s' err %lu\n", Done, Back, GetLastError());
+    CloseHandle(File);
+    return Ok;
+}
+
+/* Growing and shrinking go through requests that a driver may not have yet; the test skips then. */
+static VOID
+Test_Resize(VOID)
+{
+    DM_CREATED P1;
+    DM_DISK_ID Id, Other;
+    ULONGLONG Max = 0, Total = 0, Before = 0, After = 0;
+    PDL_LAYOUT Layout;
+    PDL_ENTRY Entry;
+    DWORD Error;
+
+    ok_int(Create(1 * MiB, FALSE, 200, &P1), ERROR_SUCCESS);
+    if (!P1.VolumeGuid[0])
+        return;
+    ok(Format(P1.VolumeGuid, L"NTFS", L"RSZ", TRUE), "NTFS format failed\n");
+    /* another disk behind the number: neither the file system nor the table is touched, whatever the driver can do */
+    GetId(&Id);
+    Other = Id;
+    Other.Signature ^= 0x5A5A5A5A;
+    ok_int(DmExtendVolume(g_Disk, P1.Offset, P1.Length, P1.VolumeGuid, 100 * MiB, &Other), DM_ERR_CHANGED);
+    ok_int(DmShrinkVolume(g_Disk, P1.Offset, P1.Length, P1.VolumeGuid, 100 * MiB, &Other), DM_ERR_CHANGED);
+    if (DmProbeExtend(g_Disk, P1.VolumeGuid) == DM_ERR_NOT_SUPPORTED || DmProbeShrink(P1.VolumeGuid) == DM_ERR_NOT_SUPPORTED)
+    {
+        skip("the system cannot grow partitions, or extend or shrink NTFS volumes, yet\n");
+        Del(P1.Offset, P1.VolumeGuid, FALSE);
+        return;
+    }
+    ok(KeepFile(P1.VolumeGuid, TRUE), "no file on the new volume\n");
+    ok(VolumeTotal(P1.VolumeGuid, &Before), "no size of the new volume\n");
+
+    /* the room behind the volume is what the wizard offers, 1 MiB less than the free gap */
+    ok_int(DmQueryExtend(g_Disk, P1.Offset, &Max), ERROR_SUCCESS);
+    ok(Max == 3893 * MiB, "room to grow %I64u MiB\n", Max / MiB);
+    ok_int(DmExtendVolume(g_Disk, P1.Offset, P1.Length, P1.VolumeGuid, 100 * MiB, &Id), ERROR_SUCCESS);
+    Layout = ReadLayout(&Error);
+    Entry = Error == ERROR_SUCCESS ? DlFindEntry(Layout, P1.Offset) : NULL;
+    ok(Entry && Entry->Length == 300 * MiB, "partition after growing: %I64u MiB\n", Entry ? Entry->Length / MiB : 0);
+    HeapFree(GetProcessHeap(), 0, Layout);
+    ok(VolumeTotal(P1.VolumeGuid, &After) && After > Before && After >= 290 * MiB, "volume after growing: %I64u MiB\n", After / MiB);
+    ok(KeepFile(P1.VolumeGuid, FALSE), "the file is gone after growing\n");
+
+    ok_int(DmQueryShrink(g_Disk, P1.Offset, P1.VolumeGuid, &Total, &Max), ERROR_SUCCESS);
+    ok(Total == 300 * MiB && Max >= 100 * MiB, "shrink query: total %I64u MiB, can give %I64u MiB\n", Total / MiB, Max / MiB);
+    ok_int(DmShrinkVolume(g_Disk, P1.Offset, 300 * MiB, P1.VolumeGuid, 100 * MiB, &Id), ERROR_SUCCESS);
+    /* the table is written again to cut the partition, and the volume manager may make the volume anew */
+    ok_int(DmFindVolume(g_Disk, P1.Offset, 15000, P1.VolumeGuid, ARRAYSIZE(P1.VolumeGuid)), ERROR_SUCCESS);
+    Layout = ReadLayout(&Error);
+    Entry = Error == ERROR_SUCCESS ? DlFindEntry(Layout, P1.Offset) : NULL;
+    ok(Entry && Entry->Length == 200 * MiB, "partition after shrinking: %I64u MiB\n", Entry ? Entry->Length / MiB : 0);
+    HeapFree(GetProcessHeap(), 0, Layout);
+    ok(VolumeTotal(P1.VolumeGuid, &After) && After <= 200 * MiB && After >= 190 * MiB, "volume after shrinking: %I64u MiB\n", After / MiB);
+    /* the volume is made anew after the table was written, and may take a moment to take requests */
+    {
+        ULONG Try;
+        BOOL Read = FALSE;
+
+        for (Try = 0; Try < 10 && !Read; Try++)
+        {
+            Read = KeepFile(P1.VolumeGuid, FALSE);
+            if (!Read)
+                Sleep(1000);
+        }
+        ok(Read, "the file is gone after shrinking\n");
+    }
+    ok_int(Del(P1.Offset, P1.VolumeGuid, FALSE), ERROR_SUCCESS);
+}
+
 static VOID
 Test_Gpt(VOID)
 {
@@ -1064,5 +1169,8 @@ START_TEST(DiskOps)
     }
     Test_Mbr();
     if (!g_Keep)
+    {
+        Test_Resize();
         Test_Gpt();
+    }
 }
