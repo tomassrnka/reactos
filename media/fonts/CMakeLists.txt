@@ -5,6 +5,14 @@ list(APPEND FONT_FILES
     arialbi.ttf
     ariali.ttf
     ariblk.ttf
+    Caladea-Bold.ttf
+    Caladea-BoldItalic.ttf
+    Caladea-Italic.ttf
+    Caladea-Regular.ttf
+    Carlito-Bold.ttf
+    Carlito-BoldItalic.ttf
+    Carlito-Italic.ttf
+    Carlito-Regular.ttf
     comic.ttf
     comicbd.ttf
     cour.ttf
@@ -26,6 +34,15 @@ list(APPEND FONT_FILES
     lucon.ttf
     Marlett.ttf
     micross.ttf
+    NotoEmoji-Regular.ttf
+    NotoSansKR-Regular.otf
+    NotoSansSC-Regular.otf
+    NotoSansSymbols2-Regular.ttf
+    selawk.ttf
+    selawkb.ttf
+    selawkl.ttf
+    selawksb.ttf
+    selawksl.ttf
     pala.ttf
     palab.ttf
     palabi.ttf
