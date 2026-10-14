@@ -152,7 +152,7 @@ INT WINAPI wglDescribePixelFormat(HDC hdc, INT format, UINT size, PIXELFORMATDES
         /* SetPixelFormat may have NULLified this */
         if (!icd_data)
             icd_data = IntGetIcdData(hdc);
-        if(!icd_data->DrvDescribePixelFormat(hdc, format, size, descr))
+        if(!icd_data || !icd_data->DrvDescribePixelFormat(hdc, format, size, descr))
         {
             ret = 0;
         }
@@ -198,7 +198,8 @@ INT WINAPI wglChoosePixelFormat(HDC hdc, const PIXELFORMATDESCRIPTOR* ppfd)
     {
         if (!wglDescribePixelFormat( hdc, i, sizeof(format), &format )) continue;
 
-        if (ppfd->iPixelType != format.iPixelType)
+        /* Like Windows: every pixel type other than colour index asks for RGBA */
+        if (((ppfd->iPixelType == PFD_TYPE_COLORINDEX) ? PFD_TYPE_COLORINDEX : PFD_TYPE_RGBA) != format.iPixelType)
         {
             TRACE( "pixel type mismatch for iPixelFormat=%d\n", i );
             continue;
@@ -339,7 +340,9 @@ INT WINAPI wglChoosePixelFormat(HDC hdc, const PIXELFORMATDESCRIPTOR* ppfd)
                 continue;
             }
         }
-        continue;
+        /* Every requested attribute matches but none was a reason to prefer this format: the first such format will do */
+        if (best_format)
+            continue;
 
     found:
         /* Prefer HW accelerated formats */
@@ -566,8 +569,14 @@ BOOL WINAPI wglDescribeLayerPlane(HDC hdc,
         return FALSE;
     }
 
-    if(iPixelFormat <= dc_data->nb_icd_formats)
-        return dc_data->icd_data->DrvDescribeLayerPlane(hdc, iPixelFormat, iLayerPlane, nBytes, plpd);
+    if((iPixelFormat > 0) && (iPixelFormat <= dc_data->nb_icd_formats))
+    {
+        /* Choosing a generic format cleared the ICD of the DC, but the ICD's formats are still listed */
+        struct ICD_Data* icd_data = dc_data->icd_data ? dc_data->icd_data : IntGetIcdData(hdc);
+
+        if(icd_data)
+            return icd_data->DrvDescribeLayerPlane(hdc, iPixelFormat, iLayerPlane, nBytes, plpd);
+    }
 
     /* SW implementation doesn't support this */
     return FALSE;

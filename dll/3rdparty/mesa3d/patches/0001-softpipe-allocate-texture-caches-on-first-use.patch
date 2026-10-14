@@ -1,0 +1,86 @@
+softpipe: allocate the texture caches when a sampler view is first bound
+
+softpipe_create_context allocated a texture tile cache for each of the
+128 sampler view slots of each of the 6 shader stages, about 250 MB of
+zeroed memory for every context. A 32-bit process has 2 GB of address
+space, and a Direct3D program through wined3d creates several contexts,
+so its persistent buffer allocation failed and it crashed. A cache now
+exists only for a slot that was bound at least once.
+
+diff -ru a/src/gallium/drivers/softpipe/sp_context.c b/src/gallium/drivers/softpipe/sp_context.c
+--- a/src/gallium/drivers/softpipe/sp_context.c
++++ b/src/gallium/drivers/softpipe/sp_context.c
+@@ -238,14 +238,8 @@
+       softpipe->cbuf_cache[i] = sp_create_tile_cache( &softpipe->pipe );
+    softpipe->zsbuf_cache = sp_create_tile_cache( &softpipe->pipe );
+ 
+-   /* Allocate texture caches */
+-   for (sh = 0; sh < ARRAY_SIZE(softpipe->tex_cache); sh++) {
+-      for (i = 0; i < ARRAY_SIZE(softpipe->tex_cache[0]); i++) {
+-         softpipe->tex_cache[sh][i] = sp_create_tex_tile_cache(&softpipe->pipe);
+-         if (!softpipe->tex_cache[sh][i])
+-            goto fail;
+-      }
+-   }
++   /* The texture caches are allocated when a sampler view is first bound to a slot:
++    * allocating all of them here takes about 250 MB per context. */
+ 
+    softpipe->fs_machine = tgsi_exec_machine_create(MESA_SHADER_FRAGMENT);
+ 
+diff -ru a/src/gallium/drivers/softpipe/sp_state_sampler.c b/src/gallium/drivers/softpipe/sp_state_sampler.c
+--- a/src/gallium/drivers/softpipe/sp_state_sampler.c
++++ b/src/gallium/drivers/softpipe/sp_state_sampler.c
+@@ -118,9 +118,17 @@
+          &softpipe->tgsi.sampler[shader]->sp_sview[start + i];
+       struct pipe_sampler_view **pview = &softpipe->sampler_views[shader][start + i];
+ 
+-      pipe_sampler_view_reference(pview, views[i]);
+-      sp_tex_tile_cache_set_sampler_view(softpipe->tex_cache[shader][start + i],
+-                                         views[i]);
++      struct pipe_sampler_view *view = views[i];
++      struct softpipe_tex_tile_cache *tc = softpipe->tex_cache[shader][start + i];
++
++      if (view && !tc)
++         tc = softpipe->tex_cache[shader][start + i] = sp_create_tex_tile_cache(&softpipe->pipe);
++      if (view && !tc)
++         view = NULL;
++
++      pipe_sampler_view_reference(pview, view);
++      if (tc)
++         sp_tex_tile_cache_set_sampler_view(tc, view);
+       /*
+        * We don't really have variants, however some bits are different per shader,
+        * so just copy?
+@@ -130,7 +138,7 @@
+          memcpy(sp_sviewdst, sp_sviewsrc, sizeof(*sp_sviewsrc));
+          sp_sviewdst->compute_lambda = softpipe_get_lambda_func(&sp_sviewdst->base, shader);
+          sp_sviewdst->compute_lambda_from_grad = softpipe_get_lambda_from_grad_func(&sp_sviewdst->base, shader);
+-         sp_sviewdst->cache = softpipe->tex_cache[shader][start + i];
++         sp_sviewdst->cache = tc;
+       }
+       else {
+          memset(sp_sviewdst, 0,  sizeof(*sp_sviewsrc));
+@@ -139,8 +147,9 @@
+    for (; i < num + unbind_num_trailing_slots; i++) {
+       struct pipe_sampler_view **pview = &softpipe->sampler_views[shader][start + i];
+       pipe_sampler_view_reference(pview, NULL);
+-      sp_tex_tile_cache_set_sampler_view(softpipe->tex_cache[shader][start + i],
+-                                         NULL);
++      if (softpipe->tex_cache[shader][start + i])
++         sp_tex_tile_cache_set_sampler_view(softpipe->tex_cache[shader][start + i],
++                                            NULL);
+    }
+ 
+ 
+diff -ru a/src/gallium/drivers/softpipe/sp_tex_tile_cache.c b/src/gallium/drivers/softpipe/sp_tex_tile_cache.c
+--- a/src/gallium/drivers/softpipe/sp_tex_tile_cache.c
++++ b/src/gallium/drivers/softpipe/sp_tex_tile_cache.c
+@@ -167,7 +167,7 @@
+ {
+    int pos;
+ 
+-   if (tc->texture) {
++   if (tc && tc->texture) {
+       /* caching a texture, mark all entries as empty */
+       for (pos = 0; pos < ARRAY_SIZE(tc->entries); pos++) {
+          tc->entries[pos].addr.bits.invalid = 1;
