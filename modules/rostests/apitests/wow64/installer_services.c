@@ -110,6 +110,49 @@ static void CheckPerformanceTime(void)
     CHECK(Storage[0] == 0x12345678 && Storage[3] == 0xabcdef01);
 }
 
+static void CheckTokenObjectLabel(void)
+{
+    HANDLE Token = NULL;
+    DWORD Length = 0, Error;
+    BYTE Buffer[256];
+    BOOL Present = FALSE, Defaulted = FALSE;
+    PACL Sacl = NULL;
+    PVOID Ace = NULL;
+
+    CHECK(OpenProcessToken(GetCurrentProcess(), READ_CONTROL | WRITE_OWNER, &Token));
+    if (!Token) return;
+    SetLastError(0);
+    CHECK(!GetKernelObjectSecurity(Token, LABEL_SECURITY_INFORMATION, NULL, 0, &Length));
+    Error = GetLastError();
+    CHECK(Error == ERROR_INSUFFICIENT_BUFFER || Error == ERROR_NOT_SUPPORTED);
+    if (Error == ERROR_NOT_SUPPORTED)
+    {
+        puts("TOKEN OBJECT LABEL integrity labels unavailable");
+    }
+    else if (Error == ERROR_INSUFFICIENT_BUFFER)
+    {
+        CHECK(Length <= sizeof(Buffer));
+        if (Length <= sizeof(Buffer))
+        {
+            CHECK(GetKernelObjectSecurity(Token, LABEL_SECURITY_INFORMATION, Buffer, sizeof(Buffer), &Length));
+            CHECK(GetSecurityDescriptorSacl(Buffer, &Present, &Sacl, &Defaulted));
+            CHECK(Present && Sacl != NULL);
+            if (Present && Sacl)
+            {
+                CHECK(IsValidAcl(Sacl) && Sacl->AceCount != 0);
+                CHECK(GetAce(Sacl, 0, &Ace));
+                if (Ace)
+                {
+                    SYSTEM_MANDATORY_LABEL_ACE *Label = Ace;
+                    CHECK(Label->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE);
+                    CHECK(IsValidSid(&Label->SidStart));
+                }
+            }
+        }
+    }
+    CloseHandle(Token);
+}
+
 static void CheckRuntimeReporting(void)
 {
     typedef HRESULT (WINAPI *MODULE)(PCWSTR, PVOID);
@@ -641,6 +684,7 @@ int wmain(int argc, WCHAR **argv)
     CheckVolumeByHandle();
     CheckInterruptTime();
     CheckPerformanceTime();
+    CheckTokenObjectLabel();
     CheckRuntimeReporting();
     CheckPrivileges();
     CheckObjectSecurity();
