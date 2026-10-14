@@ -250,7 +250,7 @@ ObInitSystem(VOID)
     KeInitializeGuardedMutex(&ObpDeviceMapLock);
 
     /* Setup default access for the system process */
-    PsGetCurrentProcess()->GrantedAccess = PROCESS_ALL_ACCESS;
+    PsGetCurrentProcess()->GrantedAccess = PSP_PROCESS_ALL_ACCESS;
     PsGetCurrentThread()->GrantedAccess = THREAD_ALL_ACCESS;
 
     /* Setup the Object Reaper */

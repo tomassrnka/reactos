@@ -66,6 +66,11 @@
 #define PSP_MAX_CREATE_PROCESS_NOTIFY           8
 
 //
+// Process rights of Vista and later (the NT 5.2 headers end them at 0xFFF)
+//
+#define PSP_PROCESS_ALL_ACCESS                  (STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xFFFF)
+
+//
 // Job Scheduling Classes
 //
 // The default is 5 per Yosifovich, P., "Windows 10 System Programming, Part 1"
