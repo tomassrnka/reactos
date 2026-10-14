@@ -296,7 +296,7 @@ TestLockIrps(PFILE_OBJECT FileObject)
     FILE_LOCK FileLock;
     TEST_RANGE Range = { 0, 10, NULL, 0, TRUE };
     LARGE_INTEGER Offset, Length;
-    PIRP Waiter, Cancelled, Unlock;
+    PIRP Waiter, Cancelled, PreCancelled, Unlock;
     NTSTATUS Status;
     BOOLEAN Result;
 
@@ -310,8 +310,9 @@ TestLockIrps(PFILE_OBJECT FileObject)
 
     Waiter = BuildLockIrp(FileObject, IRP_MN_LOCK, 0, SL_EXCLUSIVE_LOCK);
     Cancelled = BuildLockIrp(FileObject, IRP_MN_LOCK, 0, SL_EXCLUSIVE_LOCK);
+    PreCancelled = BuildLockIrp(FileObject, IRP_MN_LOCK, 0, SL_EXCLUSIVE_LOCK);
     Unlock = BuildLockIrp(FileObject, IRP_MN_UNLOCK_SINGLE, 0, 0);
-    if (!skip(Waiter && Cancelled && Unlock, "No IRPs\n"))
+    if (!skip(Waiter && Cancelled && PreCancelled && Unlock, "No IRPs\n"))
     {
         Status = FsRtlProcessFileLock(&FileLock, Waiter, NULL);
         ok_eq_hex(Status, STATUS_PENDING);
@@ -341,10 +342,20 @@ TestLockIrps(PFILE_OBJECT FileObject)
         ok_eq_hex(Completion.LastStatus, STATUS_CANCELLED);
         ok(Completion.Irql < DISPATCH_LEVEL, "Cancel completion at IRQL %u\n", Completion.Irql);
 
+        /* Cancelled before it is queued: the queue cancels it while FsRtl queues it */
+        PreCancelled->Cancel = TRUE;
+        Status = FsRtlProcessFileLock(&FileLock, PreCancelled, NULL);
+        ok_eq_hex(Status, STATUS_PENDING);
+        ok_eq_long(Completion.Calls, 3L);
+        ok(Completion.LastIrp == PreCancelled, "Completed IRP %p, expected %p\n", Completion.LastIrp, PreCancelled);
+        ok_eq_hex(Completion.LastStatus, STATUS_CANCELLED);
+        ok(Completion.Irql < DISPATCH_LEVEL, "Inline cancel completion at IRQL %u\n", Completion.Irql);
+        ok_eq_bool(Completion.Reentered, TRUE);
+
         /* Unlock through an IRP */
         Status = FsRtlProcessFileLock(&FileLock, Unlock, NULL);
         ok_eq_hex(Status, STATUS_SUCCESS);
-        ok_eq_long(Completion.Calls, 3L);
+        ok_eq_long(Completion.Calls, 4L);
         ok(Completion.LastIrp == Unlock, "Completed IRP %p, expected %p\n", Completion.LastIrp, Unlock);
         ok_eq_bool(Completion.Reentered, TRUE);
         ok_eq_bool(Completion.ReentryResult, TRUE);
@@ -352,8 +363,50 @@ TestLockIrps(PFILE_OBJECT FileObject)
     }
     if (Waiter) IoFreeIrp(Waiter);
     if (Cancelled) IoFreeIrp(Cancelled);
+    if (PreCancelled) IoFreeIrp(PreCancelled);
     if (Unlock) IoFreeIrp(Unlock);
     FsRtlUninitializeFileLock(&FileLock);
+}
+
+/* FsRtlAllocateFileLock (paged): enumeration visits every range once and stays at the end until restarted */
+static
+VOID
+TestEnumeration(PFILE_OBJECT FileObject)
+{
+    PFILE_LOCK FileLock = FsRtlAllocateFileLock(NULL, NULL);
+    TEST_RANGE Range = { 0, 10, NULL, 0, TRUE };
+    PFILE_LOCK_INFO Info;
+    ULONG i, Count, OfA;
+    LONGLONG First;
+
+    if (skip(FileLock != NULL, "No file lock\n"))
+        return;
+    Range.Process = ProcessA;
+    for (i = 0; i < 5; i++)
+    {
+        Range.Start = 1000 - i * 100;
+        ok(TakeLock(FileLock, FileObject, &Range), "Lock %lu not granted\n", i);
+    }
+    Count = CountLocks(FileLock, ProcessA, &OfA);
+    ok_eq_ulong(Count, 5UL);
+    ok_eq_ulong(OfA, 5UL);
+    ok(FsRtlGetNextFileLock(FileLock, FALSE) == NULL, "Enumeration continued after its end\n");
+    Info = FsRtlGetNextFileLock(FileLock, TRUE);
+    ok(Info != NULL, "Restart found no range\n");
+    if (Info)
+    {
+        First = Info->StartingByte.QuadPart;
+        /* A check between two enumeration calls must not move the enumeration */
+        (void)CanRead(FileLock, FileObject, 1000, 1, ProcessB, 0);
+        Count = 1;
+        while ((Info = FsRtlGetNextFileLock(FileLock, FALSE)) != NULL && Count < 10)
+        {
+            ok(Info->StartingByte.QuadPart != First, "Range %I64d enumerated twice\n", First);
+            Count++;
+        }
+        ok_eq_ulong(Count, 5UL);
+    }
+    FsRtlFreeFileLock(FileLock);
 }
 
 START_TEST(FsRtlFileLock)
@@ -371,6 +424,7 @@ START_TEST(FsRtlFileLock)
     TestFirstLockVisible(FileObject);
     TestUnlockAllInterleaved(FileObject);
     TestUnlockAllByKey(FileObject);
+    TestEnumeration(FileObject);
 
     ExFreePoolWithTag(FileObject, 'kLsF');
 }
