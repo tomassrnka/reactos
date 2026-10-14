@@ -178,6 +178,7 @@ User32CreateWindowEx(DWORD dwExStyle,
     LPCWSTR lpLibFileName = NULL;
     HANDLE pCtx = NULL;
     DWORD dwFlagsVer;
+    PVOID DpiCreation;
 
 #if 0
     DbgPrint("[window] User32CreateWindowEx style %d, exstyle %d, parent %d\n", dwStyle, dwExStyle, hWndParent);
@@ -288,6 +289,8 @@ User32CreateWindowEx(DWORD dwExStyle,
         plstrClassVersion = &lstrClassVersion;
     }
 
+    DpiCreation = DpiBeginWindow(hWndParent, dwStyle);
+
     for (;;)
     {
         Handle = NtUserCreateWindowEx(dwExStyle,
@@ -329,6 +332,8 @@ User32CreateWindowEx(DWORD dwExStyle,
 #if 0
     DbgPrint("[window] NtUserCreateWindowEx() == %d\n", Handle);
 #endif
+
+    DpiEndWindow(Handle, DpiCreation);
 
 cleanup:
     if (!Unicode)

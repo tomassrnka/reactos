@@ -119,6 +119,12 @@ BOOL get_icon_size(HICON hIcon, SIZE *size);
 VOID FASTCALL IntNotifyWinEvent(DWORD, HWND, LONG, LONG, DWORD);
 UINT WINAPI WinPosGetMinMaxInfo(HWND hWnd, POINT* MaxSize, POINT* MaxPos, POINT* MinTrack, POINT* MaxTrack);
 VOID UserGetWindowBorders(DWORD, DWORD, SIZE *, BOOL);
+
+/* DPI functions, see user32_vista/dpi.c */
+UINT WINAPI GetDpiForSystem(VOID);
+int WINAPI GetSystemMetricsForDpi(int, UINT);
+PVOID DpiBeginWindow(HWND hWndParent, DWORD Style);
+VOID DpiEndWindow(HWND hWnd, PVOID Creation);
 VOID FASTCALL GetConnected(VOID);
 extern BOOL FASTCALL EnumNamesA(HWINSTA WindowStation, NAMEENUMPROCA EnumFunc, LPARAM Context, BOOL Desktops);
 extern BOOL FASTCALL EnumNamesW(HWINSTA WindowStation, NAMEENUMPROCW EnumFunc, LPARAM Context, BOOL Desktops);

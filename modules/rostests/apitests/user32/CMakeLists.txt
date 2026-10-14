@@ -13,6 +13,7 @@ list(APPEND SOURCE
     DeferWindowPos.c
     DestroyCursorIcon.c
     DM_REPOSITION.c
+    DpiFunctions.c
     DrawIconEx.c
     DrawText.c
     desktop.c
@@ -107,6 +108,12 @@ set_module_type(user32_apitest_connect win32cui UNICODE)
 add_importlibs(user32_apitest_connect msvcrt kernel32)
 add_rostests_file(TARGET user32_apitest_connect)
 add_dependencies(user32_apitest user32_apitest_connect)
+
+add_executable(user32_apitest_dpi user32_apitest_dpi.c)
+set_module_type(user32_apitest_dpi win32cui)
+add_importlibs(user32_apitest_dpi gdi32 user32 msvcrt kernel32)
+add_rostests_file(TARGET user32_apitest_dpi)
+add_dependencies(user32_apitest user32_apitest_dpi)
 
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest1.manifest")
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest2.manifest")
