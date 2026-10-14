@@ -5,6 +5,8 @@ add_definitions(-D_KERNEL32_)
 include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys)
 set(kernel32_spec kernel32.spec)
 if(BUILD_WOW64_ENABLED OR SYSWOW64_GUEST)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernel32.spec")
     file(READ "${CMAKE_CURRENT_SOURCE_DIR}/kernel32.spec" wow64_kernel32_spec)
     foreach(function Wow64GetThreadContext Wow64SetThreadContext)
         string(REPLACE "@ stub -version=0x600+ ${function}" "@ stdcall -version=0x600+ ${function}(ptr ptr)" wow64_kernel32_spec "${wow64_kernel32_spec}")
