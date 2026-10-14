@@ -12,6 +12,7 @@ extern void func_CancelIoEx(void);
 extern void func_ApplicationRestart(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateEventMutexEx(void);
+extern void func_CreateFile2(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
 extern void func_CreateWaitableTimerEx(void);
@@ -103,6 +104,7 @@ const struct test winetest_testlist[] =
     { "ApplicationRestart",          func_ApplicationRestart },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },
+    { "CreateFile2",                 func_CreateFile2 },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },

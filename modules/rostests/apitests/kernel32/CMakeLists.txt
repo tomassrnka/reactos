@@ -10,6 +10,7 @@ list(APPEND SOURCE
     ApplicationRestart.c
     ConsoleCP.c
     CreateEventMutexEx.c
+    CreateFile2.c
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateWaitableTimerEx.c
