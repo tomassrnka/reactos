@@ -24,8 +24,52 @@ typedef enum _SEND_MODE
     SendNothing         /* the client closes without sending */
 } SEND_MODE;
 
+typedef struct _CLOSE_JOB
+{
+    SOCKET Sockets[3];
+} CLOSE_JOB;
+
+/* Set when a close or a request did not finish: nothing after it touches the sockets or WSACleanup */
+static BOOL TeardownHung;
 static LPFN_ACCEPTEX pAcceptExExtension;
 static LPFN_GETACCEPTEXSOCKADDRS pGetAcceptExSockaddrsExtension;
+
+static DWORD WINAPI CloseThread(PVOID Parameter)
+{
+    CLOSE_JOB *Job = Parameter;
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(Job->Sockets); i++)
+    {
+        if (Job->Sockets[i] != INVALID_SOCKET)
+            closesocket(Job->Sockets[i]);
+    }
+    return 0;
+}
+
+/* A close can wait without bound for a transport request that never completes, so it runs
+ * on a worker; if the worker does not finish, its job and handle are left to it for good */
+static BOOL CloseSockets(SOCKET First, SOCKET Second, SOCKET Third)
+{
+    CLOSE_JOB *Job;
+    HANDLE Thread;
+
+    Job = HeapAlloc(GetProcessHeap(), 0, sizeof(*Job));
+    if (!Job)
+        return FALSE;
+    Job->Sockets[0] = First;
+    Job->Sockets[1] = Second;
+    Job->Sockets[2] = Third;
+
+    Thread = CreateThread(NULL, 0, CloseThread, Job, 0, NULL);
+    if (!Thread)
+        return FALSE;
+    if (WaitForSingleObject(Thread, WAIT_MS) != WAIT_OBJECT_0)
+        return FALSE;
+    CloseHandle(Thread);
+    HeapFree(GetProcessHeap(), 0, Job);
+    return TRUE;
+}
 
 static UCHAR Pattern(ULONG Index)
 {
@@ -50,6 +94,7 @@ static BOOL CreateListener(SOCKET *Listener, SOCKADDR_IN *Address)
     {
         ok(0, "listener setup failed: %d\n", WSAGetLastError());
         closesocket(*Listener);
+        *Listener = INVALID_SOCKET;
         return FALSE;
     }
     return TRUE;
@@ -122,7 +167,10 @@ static void TestAcceptEx(LPFN_ACCEPTEX pAcceptEx, LPFN_GETACCEPTEXSOCKADDRS pGet
     UCHAR *Buffer = NULL, Data[DATA_LENGTH], Rest[DATA_LENGTH];
     SOCKADDR *LocalSockaddr = NULL, *RemoteSockaddr = NULL;
     INT LocalSockaddrLength = 0, RemoteSockaddrLength = 0;
-    BOOL Ret;
+    BOOL Ret, Pending = FALSE;
+
+    if (TeardownHung)
+        return;
 
     trace("%s: receive length %lu, local length %lu, mode %d\n", Via, ReceiveLength, LocalLength, Mode);
 
@@ -165,6 +213,7 @@ static void TestAcceptEx(LPFN_ACCEPTEX pAcceptEx, LPFN_GETACCEPTEXSOCKADDRS pGet
        Ret, WSAGetLastError());
     if (!Ret && WSAGetLastError() != ERROR_IO_PENDING)
         goto cleanup;
+    Pending = !Ret;
 
     if (Mode != SendBeforePost)
     {
@@ -185,20 +234,8 @@ static void TestAcceptEx(LPFN_ACCEPTEX pAcceptEx, LPFN_GETACCEPTEXSOCKADDRS pGet
     Wait = WaitForSingleObject(Overlapped->hEvent, WAIT_MS);
     ok(Wait == WAIT_OBJECT_0, "AcceptEx did not complete: %lu\n", Wait);
     if (Wait != WAIT_OBJECT_0)
-    {
-        /* Closing the sockets ends the request; a cancel could wait without bound */
-        closesocket(Client);
-        closesocket(Acceptor);
-        closesocket(Listener);
-        Client = Acceptor = Listener = INVALID_SOCKET;
-        if (WaitForSingleObject(Overlapped->hEvent, WAIT_MS) != WAIT_OBJECT_0)
-        {
-            ok(0, "AcceptEx still pending; its buffer and OVERLAPPED are not freed\n");
-            Buffer = NULL;
-            Overlapped = NULL;
-        }
         goto cleanup;
-    }
+    Pending = FALSE;
     Ret = WSAGetOverlappedResult(Listener, Overlapped, &Bytes, FALSE, &Flags);
     ok(Ret, "AcceptEx failed: %d\n", WSAGetLastError());
     if (!Ret)
@@ -265,14 +302,22 @@ static void TestAcceptEx(LPFN_ACCEPTEX pAcceptEx, LPFN_GETACCEPTEXSOCKADDRS pGet
     }
 
 cleanup:
+    /* Closing the sockets ends a request that is still pending. If that does not finish, the
+     * transport may still use the buffer and the OVERLAPPED, so they are left allocated */
+    if (!CloseSockets(Client, Acceptor, Listener))
+    {
+        ok(0, "closing the sockets did not finish\n");
+        TeardownHung = TRUE;
+        return;
+    }
+    if (Pending && Overlapped && WaitForSingleObject(Overlapped->hEvent, WAIT_MS) != WAIT_OBJECT_0)
+    {
+        ok(0, "AcceptEx still pending after its sockets were closed\n");
+        TeardownHung = TRUE;
+        return;
+    }
     if (Buffer)
         VirtualFree(Buffer, 0, MEM_RELEASE);
-    if (Client != INVALID_SOCKET)
-        closesocket(Client);
-    if (Acceptor != INVALID_SOCKET)
-        closesocket(Acceptor);
-    if (Listener != INVALID_SOCKET)
-        closesocket(Listener);
     if (Overlapped)
     {
         WSACloseEvent(Overlapped->hEvent);
@@ -320,5 +365,11 @@ START_TEST(AcceptEx)
     TestAcceptEx(AcceptEx, GetAcceptExSockaddrs, "mswsock", DATA_LENGTH, ADDRESS_LENGTH, SendAfterPost);
     TestAcceptEx(AcceptEx, GetAcceptExSockaddrs, "mswsock", 0, ADDRESS_LENGTH, SendAfterPost);
 
+    /* A close or a request that never finished leaves the stack in an unknown state */
+    if (TeardownHung)
+    {
+        skip("a socket close or an AcceptEx request did not finish\n");
+        return;
+    }
     WSACleanup();
 }
