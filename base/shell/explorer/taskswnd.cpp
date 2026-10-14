@@ -697,8 +697,12 @@ public:
             TBBUTTONINFO tbbi = { 0 };
             tbbi.cbSize = sizeof(tbbi);
             tbbi.dwMask = TBIF_BYINDEX | TBIF_IMAGE;
-            TaskItem->IconIndex = ImageList_ReplaceIcon(m_ImageList, TaskItem->IconIndex, hIcon);
-            tbbi.iImage = TaskItem->IconIndex;
+            /* The icon may be gone by now; on failure keep the image and the slot we have */
+            INT iImage = ImageList_ReplaceIcon(m_ImageList, TaskItem->IconIndex, hIcon);
+            if (iImage < 0)
+                return 0;
+            TaskItem->IconIndex = iImage;
+            tbbi.iImage = iImage;
             m_TaskBar.SetButtonInfo(TaskItem->Index, &tbbi);
         }
         return 0;
