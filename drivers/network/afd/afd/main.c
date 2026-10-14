@@ -1391,6 +1391,16 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
         {
             RemoveEntryList(CurrentEntry);
             CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
+            /* Nobody waits for the transport connect any more: stop it, so the
+               socket can connect again, as on Windows */
+            if ((Function == FUNCTION_CONNECT || Function == FUNCTION_CONNECTEX) &&
+                FCB->SharedData.State == SOCKET_STATE_CONNECTING &&
+                IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECT]) &&
+                IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]) &&
+                FCB->ConnectIrp.InFlightRequest)
+            {
+                IoCancelIrp(FCB->ConnectIrp.InFlightRequest);
+            }
             if (Function == FUNCTION_PREACCEPT)
             {
                 /* Unlock the acceptor socket so that it can be reused */
