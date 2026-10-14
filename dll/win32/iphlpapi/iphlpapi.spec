@@ -46,6 +46,7 @@
 @ stdcall GetBestInterfaceEx(ptr ptr)
 @ stub GetBestInterfaceFromStack
 @ stdcall GetBestRoute(long long long)
+@ stdcall -version=0x600+ GetBestRoute2(ptr long ptr ptr long ptr ptr)
 @ stub GetBestRouteFromStack
 @ stdcall -stub -version=0x600+ GetCurrentThreadCompartmentId()
 @ stdcall GetExtendedTcpTable(ptr ptr long long long long)
