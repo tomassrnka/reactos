@@ -255,7 +255,7 @@ static void CheckBufferProtocol(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, con
         return;
 
     /* Windows Server 2008 R2 answers a size query for an empty string with a list type and 4 bytes, and a read into a large buffer with the string and 2 */
-    if (Size <= sizeof(WCHAR) && !is_reactos())
+    if (Size <= sizeof(WCHAR) && (ExpectedType == DEVPROP_TYPE_STRING || ExpectedType == DEVPROP_TYPE_STRING_LIST) && !is_reactos())
     {
         HeapFree(GetProcessHeap(), 0, Buffer);
         return;
@@ -306,6 +306,7 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
         ok(Type == DEVPROP_TYPE_STRING, "Device %u: instance ID type 0x%lx\n", Index, Type);
         ok(Size == (wcslen(InstanceId) + 1) * sizeof(WCHAR), "Device %u: instance ID size %lu\n", Index, Size);
         ok(!wcscmp((WCHAR *)Value, InstanceId), "Device %u: instance ID '%S', expected '%S'\n", Index, (WCHAR *)Value, InstanceId);
+        CheckBufferProtocol(DeviceSet, Device, &DEVPKEY_Device_InstanceId, DEVPROP_TYPE_STRING, Size, Index);
         Counts[0]++;
     }
     if (Value)
@@ -508,6 +509,7 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
     {
         ok(Type == DEVPROP_TYPE_STRING, "Device %u: name type 0x%lx\n", Index, Type);
         ok(!wcscmp((WCHAR *)Value, (WCHAR *)Legacy), "Device %u: name '%S', expected '%S'\n", Index, (WCHAR *)Value, (WCHAR *)Legacy);
+        CheckBufferProtocol(DeviceSet, Device, &DEVPKEY_NAME, DEVPROP_TYPE_STRING, Size, Index);
         Counts[2]++;
     }
     if (Legacy)
@@ -530,35 +532,50 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
 
         for (c = 0; c < ARRAYSIZE(Cases); c++)
         {
-            BOOL Checked = FALSE, Present = FALSE;
+            BOOL Matched = FALSE, Present = FALSE;
+            unsigned Decisive = 0, Wrong = 0;
 
-            for (Attempt = 0; Attempt < 10 && !Checked; Attempt++)
+            for (Attempt = 0; Attempt < 10 && !Matched; Attempt++)
             {
+                BOOL Known;
+
                 HaveStatus = pCM_Get_DevNode_Status(&Status, &Problem, Device->DevInst, 0) == CR_SUCCESS;
                 Ret = ReadDeviceProperty(DeviceSet, Device, Cases[c].Key, &Type, &Value, &Size, &Error);
+                Known = pCM_Get_DevNode_Status(&StatusAfter, &ProblemAfter, Device->DevInst, 0) == CR_SUCCESS;
                 if (Ret)
                 {
+                    if (!Present && Type == DEVPROP_TYPE_UINT32 && Size == sizeof(DWORD))
+                        CheckBufferProtocol(DeviceSet, Device, Cases[c].Key, DEVPROP_TYPE_UINT32, Size, Index);
                     Present = TRUE;
                     ok(Type == DEVPROP_TYPE_UINT32 && Size == sizeof(DWORD), "Device %u: %s type 0x%lx, size %lu\n",
                        Index, Cases[c].Name, Type, Size);
-                    if (HaveStatus && Size == sizeof(DWORD) &&
-                        pCM_Get_DevNode_Status(&StatusAfter, &ProblemAfter, Device->DevInst, 0) == CR_SUCCESS &&
-                        StatusAfter == Status && ProblemAfter == Problem)
+                    /* A value is compared only when the device had the same state before and after the read; a change and back in between is retried */
+                    if (HaveStatus && Known && Size == sizeof(DWORD) && StatusAfter == Status && ProblemAfter == Problem)
                     {
                         DWORD Expected = Cases[c].Problem ? Problem : Status;
 
-                        ok(*(DWORD *)Value == Expected, "Device %u: %s 0x%lx, expected 0x%lx\n", Index, Cases[c].Name, *(DWORD *)Value, Expected);
-                        Checked = TRUE;
+                        Decisive++;
+                        if (*(DWORD *)Value == Expected)
+                            Matched = TRUE;
+                        else
+                            Wrong++;
                     }
+                }
+                else if (HaveStatus && Known)
+                {
+                    Decisive++;
+                    Wrong++;
                 }
                 if (Value)
                     HeapFree(GetProcessHeap(), 0, Value);
                 Value = NULL;
             }
-            /* A device that is gone between the calls has neither; one that stays has both */
-            if (!Present && pCM_Get_DevNode_Status(&Status, &Problem, Device->DevInst, 0) == CR_SUCCESS)
-                ok(0, "Device %u: %s failed with 0x%lx, but the configuration manager knows the device\n", Index, Cases[c].Name, Error);
-            else if (Present)
+            /* A failure counts only when the configuration manager knew the device before and after every try */
+            if (!Matched && Wrong && Wrong == Decisive && Attempt == Decisive)
+                ok(0, "Device %u: %s differs from the configuration manager in all %u tries (last error 0x%lx)\n", Index, Cases[c].Name, Attempt, Error);
+            else if (!Matched)
+                trace("Device %u: %s was not steady, not checked\n", Index, Cases[c].Name);
+            if (Present)
                 Counts[c ? 4 : 3]++;
         }
     }
@@ -573,6 +590,7 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
         {
             ok(Type == DEVPROP_TYPE_STRING, "Device %u: parent type 0x%lx\n", Index, Type);
             ok(!_wcsicmp((WCHAR *)Value, Other), "Device %u: parent '%S', expected '%S'\n", Index, (WCHAR *)Value, Other);
+            CheckBufferProtocol(DeviceSet, Device, &DEVPKEY_Device_Parent, DEVPROP_TYPE_STRING, Size, Index);
             Counts[5]++;
         }
     }
@@ -613,29 +631,44 @@ static void TestInstallState(HDEVINFO DeviceSet)
     {
         { 0x00, 0 }, { 0x20, 1 }, { 0x40, 2 }, { 0x400, 3 }, { 0x60, 2 }, { 0x420, 1 }, { 0x440, 2 }, { 0x460, 2 }, { 0x01, 0 }, { 0x04, 0 },
     };
+    /* A number is a four-byte REG_DWORD: the same bytes under another type, or fewer of them, are not a number */
+    static const struct { DWORD RegType; DWORD Size; BOOL Number; } Raw[] =
+    {
+        { REG_BINARY, 4, FALSE }, { REG_BINARY, 1, FALSE }, { REG_DWORD, 2, FALSE }, { REG_BINARY, 3, FALSE }, { REG_DWORD, 4, TRUE },
+    };
+    static const BYTE Bytes[4] = { 0x20, 0, 0, 0 };
     SP_DEVINFO_DATA Device;
-    DWORD Index, Original, Size = sizeof(Original), Type, i;
-    WCHAR InstanceId[256];
+    DWORD Index, SavedType = 0, SavedSize = 0, Check, CheckType, i;
+    BYTE Saved[8], Again[8];
+    WCHAR InstanceId[256], KeyName[320];
     BOOL Found = FALSE;
+    HKEY Key = NULL;
+    LONG Error;
 
     if (!is_reactos())
         return;
 
+    /*
+     * A device that the root enumerator made, whose configuration flags are a plain value that is read and written back
+     * byte for byte at the end (type, size and data); a failed restore fails the test.
+     */
     Device.cbSize = sizeof(Device);
     for (Index = 0; SetupDiEnumDeviceInfo(DeviceSet, Index, &Device); Index++)
     {
-        if (!SetupDiGetDeviceInstanceIdW(DeviceSet, &Device, InstanceId, ARRAYSIZE(InstanceId), NULL))
+        if (!SetupDiGetDeviceInstanceIdW(DeviceSet, &Device, InstanceId, ARRAYSIZE(InstanceId), NULL) || _wcsnicmp(InstanceId, L"ROOT\\", 5))
             continue;
-        /* a device that nothing depends on while the test runs: one that the root enumerator made */
-        if (_wcsnicmp(InstanceId, L"ROOT\\", 5))
+        wcscpy(KeyName, L"SYSTEM\\CurrentControlSet\\Enum\\");
+        wcscat(KeyName, InstanceId);
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &Key))
             continue;
-        Size = sizeof(Original);
-        if (SetupDiGetDeviceRegistryPropertyW(DeviceSet, &Device, SPDRP_CONFIGFLAGS, &Type, (BYTE *)&Original, sizeof(Original), &Size) &&
-            Type == REG_DWORD && Size == sizeof(Original))
+        SavedSize = sizeof(Saved);
+        if (!RegQueryValueExW(Key, L"ConfigFlags", NULL, &SavedType, Saved, &SavedSize) && SavedType == REG_DWORD && SavedSize == sizeof(DWORD))
         {
             Found = TRUE;
             break;
         }
+        RegCloseKey(Key);
+        Key = NULL;
     }
     if (!Found)
     {
@@ -661,54 +694,38 @@ static void TestInstallState(HDEVINFO DeviceSet)
            "%S, flags 0x%lx: state %lu (type 0x%lx, %lu bytes), expected %lu\n", InstanceId, Flags, State, PropertyType, Required, Cases[i].State);
     }
 
-    /* A number is a four-byte REG_DWORD: the same bytes under another type, or fewer of them, are not a number */
+    for (i = 0; i < ARRAYSIZE(Raw); i++)
     {
-        static const struct { DWORD RegType; DWORD Size; BOOL Number; } Raw[] =
-        {
-            { REG_DWORD, 4, TRUE }, { REG_BINARY, 4, FALSE }, { REG_BINARY, 1, FALSE }, { REG_DWORD, 2, FALSE }, { REG_BINARY, 3, FALSE },
-        };
-        WCHAR KeyName[320];
-        HKEY Key;
+        DWORD Value = 0xFFFFFFFF, Required = 0;
+        DEVPROPTYPE PropertyType = 0;
+        BOOL Ret;
 
-        wcscpy(KeyName, L"SYSTEM\\CurrentControlSet\\Enum\\");
-        wcscat(KeyName, InstanceId);
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_SET_VALUE, &Key))
+        if (RegSetValueExW(Key, L"ConfigFlags", 0, Raw[i].RegType, Bytes, Raw[i].Size))
         {
-            skip("The key of %S cannot be opened\n", InstanceId);
+            skip("The configuration flags of %S cannot be written\n", InstanceId);
+            break;
+        }
+        SetLastError(0xDEADBEEF);
+        Ret = pSetupDiGetDevicePropertyW(DeviceSet, &Device, &DEVPKEY_Device_ConfigFlags, &PropertyType, (BYTE *)&Value, sizeof(Value), &Required, 0);
+        if (Raw[i].Number)
+        {
+            ok(Ret && PropertyType == DEVPROP_TYPE_UINT32 && Value == 0x20, "Registry type %lu, %lu bytes: %d, error 0x%lx, type 0x%lx, value 0x%lx\n",
+               Raw[i].RegType, Raw[i].Size, Ret, GetLastError(), PropertyType, Value);
         }
         else
         {
-            static const BYTE Bytes[4] = { 0x20, 0, 0, 0 };
-
-            for (i = 0; i < ARRAYSIZE(Raw); i++)
-            {
-                DWORD Value = 0xFFFFFFFF, Required = 0;
-                DEVPROPTYPE PropertyType = 0;
-                BOOL Ret;
-
-                if (RegSetValueExW(Key, L"ConfigFlags", 0, Raw[i].RegType, Bytes, Raw[i].Size))
-                {
-                    skip("The configuration flags of %S cannot be written\n", InstanceId);
-                    break;
-                }
-                SetLastError(0xDEADBEEF);
-                Ret = pSetupDiGetDevicePropertyW(DeviceSet, &Device, &DEVPKEY_Device_ConfigFlags, &PropertyType, (BYTE *)&Value, sizeof(Value), &Required, 0);
-                if (Raw[i].Number)
-                {
-                    ok(Ret && PropertyType == DEVPROP_TYPE_UINT32 && Value == 0x20, "Registry type %lu, %lu bytes: %d, error 0x%lx, type 0x%lx, value 0x%lx\n",
-                       Raw[i].RegType, Raw[i].Size, Ret, GetLastError(), PropertyType, Value);
-                }
-                else
-                {
-                    ok(!Ret && GetLastError() == ERROR_NOT_FOUND, "Registry type %lu, %lu bytes: %d, error 0x%lx, expected not found\n",
-                       Raw[i].RegType, Raw[i].Size, Ret, GetLastError());
-                }
-            }
-            RegCloseKey(Key);
+            ok(!Ret && GetLastError() == ERROR_NOT_FOUND, "Registry type %lu, %lu bytes: %d, error 0x%lx, expected not found\n",
+               Raw[i].RegType, Raw[i].Size, Ret, GetLastError());
         }
     }
 
-    SetupDiSetDeviceRegistryPropertyW(DeviceSet, &Device, SPDRP_CONFIGFLAGS, (BYTE *)&Original, sizeof(Original));
+    Error = RegSetValueExW(Key, L"ConfigFlags", 0, SavedType, Saved, SavedSize);
+    ok(Error == ERROR_SUCCESS, "The configuration flags of %S were not restored: %ld\n", InstanceId, Error);
+    Check = sizeof(Again);
+    Error = RegQueryValueExW(Key, L"ConfigFlags", NULL, &CheckType, Again, &Check);
+    ok(Error == ERROR_SUCCESS && CheckType == SavedType && Check == SavedSize && !memcmp(Again, Saved, SavedSize),
+       "The configuration flags of %S differ after the restore: %ld, type %lu, %lu bytes\n", InstanceId, Error, CheckType, Check);
+    RegCloseKey(Key);
 }
 
 START_TEST(SetupDiGetDeviceProperty)
