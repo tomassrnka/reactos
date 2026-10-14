@@ -733,6 +733,188 @@ static void test_bad_parameters(void)
     ok_err(ERROR_INVALID_HANDLE);
 }
 
+/* The head of a segment and a range of uncommitted pages as ReactOS keeps them (the walk reads them from memory) */
+typedef struct
+{
+    BYTE Entry[2 * sizeof(PVOID)];
+    ULONG SegmentSignature;
+    ULONG SegmentFlags;
+    LIST_ENTRY SegmentListEntry;
+    PVOID Heap;
+    PVOID BaseAddress;
+    ULONG NumberOfPages;
+    PVOID FirstEntry;
+    PVOID LastValidEntry;
+    ULONG NumberOfUnCommittedPages;
+    ULONG NumberOfUnCommittedRanges;
+    USHORT SegmentAllocatorBackTraceIndex;
+    USHORT Reserved;
+    LIST_ENTRY UCRSegmentList;
+} TEST_SEGMENT;
+
+typedef struct
+{
+    LIST_ENTRY ListEntry;
+    LIST_ENTRY SegmentEntry;
+    PVOID Address;
+    SIZE_T Size;
+} TEST_UCR;
+
+#define TEST_SEGMENT_SIGNATURE 0xFFEEFFEE
+
+typedef struct
+{
+    HANDLE Heap;
+    NTSTATUS Status;
+    DWORD Count;
+} UCR_WALK;
+
+static DWORD WINAPI UcrWalker(PVOID Parameter)
+{
+    UCR_WALK *Walk = Parameter;
+    RTL_ENTRY Entry;
+
+    memset(&Entry, 0xcd, sizeof(Entry));
+    Entry.lpData = NULL;
+    while (!(Walk->Status = pRtlWalkHeap(Walk->Heap, &Entry)))
+    {
+        if (++Walk->Count > 100000)
+            break;
+    }
+    return 0;
+}
+
+/* The whole walk of a heap on another thread: a walk that does not end in 10 seconds is reported and left behind */
+static BOOL RunUcrWalk(HANDLE Heap, NTSTATUS *Status)
+{
+    UCR_WALK Walk = { Heap, STATUS_PENDING, 0 };
+    HANDLE Thread = CreateThread(NULL, 0, UcrWalker, &Walk, 0, NULL);
+
+    ok(Thread != NULL, "CreateThread failed with %lu\n", GetLastError());
+    if (!Thread)
+        return FALSE;
+    if (WaitForSingleObject(Thread, 10000) != WAIT_OBJECT_0)
+    {
+        ok(0, "The walk of a heap with a damaged list of uncommitted ranges does not end\n");
+        TerminateThread(Thread, 0);
+        CloseHandle(Thread);
+        return FALSE;
+    }
+    CloseHandle(Thread);
+    *Status = Walk.Status;
+    return TRUE;
+}
+
+/* The list of uncommitted ranges of a segment that is damaged or longer than the old limit of 65536 descriptors */
+static void test_ucr_list(void)
+{
+    PROCESS_HEAP_ENTRY Entry;
+    RTL_ENTRY RtlEntry;
+    TEST_SEGMENT *Segment = NULL;
+    TEST_UCR *Real, *Fake = NULL;
+    TEST_UCR Saved;
+    LIST_ENTRY SavedList;
+    PVOID SavedLast;
+    ULONG_PTR End, Reserve;
+    NTSTATUS Status;
+    HANDLE Heap;
+    DWORD i;
+    const DWORD Count = 70000;
+
+    Heap = HeapCreate(0, 0x2000, 0x20000);
+    ok(Heap != NULL, "HeapCreate failed with %lu\n", GetLastError());
+    if (Heap == NULL)
+        return;
+
+    memset(&Entry, 0, sizeof(Entry));
+    while (HeapWalk(Heap, &Entry))
+    {
+        if (Entry.wFlags == PROCESS_HEAP_REGION)
+        {
+            Segment = Entry.lpData;
+            break;
+        }
+    }
+    if (!Segment || Segment->SegmentSignature != TEST_SEGMENT_SIGNATURE || Segment->BaseAddress != Segment ||
+        Segment->UCRSegmentList.Flink == &Segment->UCRSegmentList)
+    {
+        skip("The heap is not laid out as expected\n");
+        HeapDestroy(Heap);
+        return;
+    }
+
+    Real = CONTAINING_RECORD(Segment->UCRSegmentList.Flink, TEST_UCR, SegmentEntry);
+    Saved = *Real;
+    SavedList = Segment->UCRSegmentList;
+    SavedLast = Segment->LastValidEntry;
+    End = (ULONG_PTR)Real->Address;
+    ok(End > (ULONG_PTR)Segment && End < (ULONG_PTR)SavedLast && Real->Size, "Range at %Ix, size %Ix, segment %p to %p\n",
+       End, Real->Size, Segment, SavedLast);
+
+    /* The same heap, undamaged, walks to its end */
+    Status = STATUS_PENDING;
+    ok(RunUcrWalk(Heap, &Status) && Status == STATUS_NO_MORE_ENTRIES, "The walk of the undamaged heap ends with %lx\n", Status);
+
+    /* A list that goes in circles, in a segment that claims to be as big as the address space */
+    Real->Address = (PVOID)(End + 0x1000);
+    Real->SegmentEntry.Flink = &Real->SegmentEntry;
+    Segment->LastValidEntry = (PVOID)((ULONG_PTR)-1 & ~(ULONG_PTR)(PAGE_SIZE - 1));
+    Status = STATUS_PENDING;
+    if (RunUcrWalk(Heap, &Status))
+        ok(Status == STATUS_INVALID_PARAMETER, "The walk with a list that goes in circles ends with %lx\n", Status);
+    else
+        return; /* the walker is still inside the heap: nothing is put back or destroyed */
+    *Real = Saved;
+    Segment->LastValidEntry = SavedLast;
+
+    /* Ranges that are not in ascending order: the one at the end of the committed range is behind a higher one */
+    Reserve = 0x20000000;
+    Fake = VirtualAlloc(NULL, Count * sizeof(*Fake), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok(Fake != NULL, "VirtualAlloc failed with %lu\n", GetLastError());
+    if (!Fake)
+    {
+        HeapDestroy(Heap);
+        return;
+    }
+    Fake[0].Address = (PVOID)(End + 0x1000);
+    Fake[0].Size = 0x800;
+    Fake[0].SegmentEntry.Flink = &Fake[1].SegmentEntry;
+    Fake[1].Address = (PVOID)End;
+    Fake[1].Size = Saved.Size;
+    Fake[1].SegmentEntry.Flink = &Segment->UCRSegmentList;
+    Segment->UCRSegmentList.Flink = &Fake[0].SegmentEntry;
+    Status = STATUS_PENDING;
+    if (RunUcrWalk(Heap, &Status))
+        ok(Status == STATUS_INVALID_PARAMETER, "The walk with ranges that are not in order ends with %lx\n", Status);
+    Segment->UCRSegmentList = SavedList;
+
+    /* A valid list of more than 65536 ranges, in a segment of the size that holds them: asking for the last one finds it */
+    Segment->LastValidEntry = (PVOID)((ULONG_PTR)Segment + Reserve);
+    for (i = 0; i < Count; i++)
+    {
+        Fake[i].Address = (PVOID)(End + (ULONG_PTR)i * 0x1000);
+        Fake[i].Size = 0x800;
+        Fake[i].SegmentEntry.Flink = i + 1 < Count ? &Fake[i + 1].SegmentEntry : &Segment->UCRSegmentList;
+    }
+    Fake[Count - 1].Size = (ULONG_PTR)Segment->LastValidEntry - (ULONG_PTR)Fake[Count - 1].Address;
+    Segment->UCRSegmentList.Flink = &Fake[0].SegmentEntry;
+
+    memset(&RtlEntry, 0, sizeof(RtlEntry));
+    RtlEntry.lpData = Fake[Count - 1].Address;
+    RtlEntry.wFlags = RTL_UNCOMMITTED;
+    Status = pRtlWalkHeap(Heap, &RtlEntry);
+    ok_hex(Status, STATUS_NO_MORE_ENTRIES);
+
+    Segment->UCRSegmentList = SavedList;
+    Segment->LastValidEntry = SavedLast;
+    *Real = Saved;
+    VirtualFree(Fake, 0, MEM_RELEASE);
+
+    Status = STATUS_PENDING;
+    ok(RunUcrWalk(Heap, &Status) && Status == STATUS_NO_MORE_ENTRIES, "The walk of the repaired heap ends with %lx\n", Status);
+    ok(HeapDestroy(Heap), "HeapDestroy failed with %lu\n", GetLastError());
+}
+
 START_TEST(HeapWalk)
 {
     HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -758,6 +940,7 @@ START_TEST(HeapWalk)
     {
         test_unlocked_walk();
         test_bad_parameters();
+        test_ucr_list();
     }
     else
     {
