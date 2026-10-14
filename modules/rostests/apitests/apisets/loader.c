@@ -279,23 +279,34 @@ static const WCHAR *g_LocalNames[] =
 #define LOCAL_LOADED(n) (1 << (2 * (n)))
 #define LOCAL_FROM_APP(n) (1 << (2 * (n) + 1))
 
+/* The module is the copy next to the executable: it carries the contract name and is not under the Windows directory
+   (the system hosts are kernel32, kernelbase, ucrtbase and so on). The path form can differ from that of the
+   executable (\\?\Volume{...}\), so the directory of the executable is not compared. */
+static BOOL
+IsAppLocalCopy(const WCHAR *Host, const WCHAR *Name)
+{
+    WCHAR Windows[MAX_PATH];
+    const WCHAR *File = wcsrchr(Host, L'\\');
+    UINT Length = GetWindowsDirectoryW(Windows, _countof(Windows));
+
+    if (!File || _wcsicmp(File + 1, Name))
+        return FALSE;
+    return !Length || Length >= _countof(Windows) || _wcsnicmp(Host, Windows, Length);
+}
+
 static void
 RunLocalChild(void)
 {
-    WCHAR Self[MAX_PATH], Host[MAX_PATH];
+    WCHAR Host[MAX_PATH];
     DWORD n, Error, Bits = 0;
-    WCHAR *Slash;
 
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
-    if (!GetModuleFileNameW(NULL, Self, _countof(Self)) || !(Slash = wcsrchr(Self, L'\\')))
-        ExitProcess(0);
-    Slash[1] = UNICODE_NULL;
     for (n = 0; n < _countof(g_LocalNames); ++n)
     {
         if (!LoadName(g_LocalNames[n], Host, _countof(Host), &Error))
             continue;
         Bits |= LOCAL_LOADED(n);
-        if (!_wcsnicmp(Host, Self, wcslen(Self)) && !wcschr(Host + wcslen(Self), L'\\'))
+        if (IsAppLocalCopy(Host, g_LocalNames[n]))
             Bits |= LOCAL_FROM_APP(n);
     }
     ExitProcess(CHILD_RAN | Bits);
@@ -420,6 +431,134 @@ test_app_local(void)
     RemoveDirectoryW(Dir);
 }
 
+/* What a child that loads g_LocalNames finds when the second name has a copy next to it */
+static DWORD
+ExpectedWithLocalCopy(void)
+{
+    DWORD Expected = CHILD_RAN | LOCAL_LOADED(0) | LOCAL_LOADED(1);
+
+    if (is_reactos() || GetNTVersion() == 0x0601)
+        Expected |= LOCAL_FROM_APP(1);
+    return Expected;
+}
+
+/*
+ * The executable is started through the volume name of the root of the system drive (\\?\Volume{...}\), with a copy of
+ * a contract next to it: the root of a volume is its directory.
+ */
+static void
+test_app_local_volume_root(void)
+{
+    WCHAR Self[MAX_PATH], Windows[MAX_PATH], Volume[64], Exe[MAX_PATH], VolumeExe[MAX_PATH], Dll[MAX_PATH];
+    DWORD Code, Expected;
+
+    if (!is_reactos() && GetNTVersion() != 0x0601 && GetNTVersion() < 0x0A00)
+    {
+        skip("no measurement for Windows 0x%lx\n", GetNTVersion());
+        return;
+    }
+    if (!GetModuleFileNameW(NULL, Self, _countof(Self)) || GetWindowsDirectoryW(Windows, _countof(Windows)) < 3)
+    {
+        skip("no module or Windows directory\n");
+        return;
+    }
+    Windows[3] = UNICODE_NULL;
+    if (!GetVolumeNameForVolumeMountPointW(Windows, Volume, _countof(Volume)))
+    {
+        skip("GetVolumeNameForVolumeMountPointW(%ls) failed with %lu\n", Windows, GetLastError());
+        return;
+    }
+    StringCchPrintfW(Exe, _countof(Exe), L"%lsapisetldr-%lu.exe", Windows, GetCurrentProcessId());
+    StringCchPrintfW(VolumeExe, _countof(VolumeExe), L"%lsapisetldr-%lu.exe", Volume, GetCurrentProcessId());
+    StringCchPrintfW(Dll, _countof(Dll), L"%ls%ls", Windows, g_LocalNames[1]);
+    if (GetFileAttributesW(Dll) != INVALID_FILE_ATTRIBUTES)
+    {
+        skip("%ls exists already\n", Dll);
+        return;
+    }
+    if (!CopyFileW(Self, Exe, FALSE))
+    {
+        skip("CopyFileW(%ls) failed with %lu\n", Exe, GetLastError());
+        return;
+    }
+    ok(ExtractLocalDll(Dll), "%ls not written: %lu\n", Dll, GetLastError());
+
+    Expected = ExpectedWithLocalCopy();
+    Code = StartChild(VolumeExe, L"local");
+    ok(Code == Expected, "%ls: child exit code 0x%lx, expected 0x%lx\n", VolumeExe, Code, Expected);
+
+    DeleteFileW(Dll);
+    DeleteFileW(Exe);
+}
+
+static BOOL
+SetListDenied(const WCHAR *Dir, BOOL Deny)
+{
+    SID_IDENTIFIER_AUTHORITY World = { SECURITY_WORLD_SID_AUTHORITY };
+    SECURITY_DESCRIPTOR Descriptor;
+    DWORD AclBuffer[64];
+    PACL Acl = (PACL)AclBuffer;
+    PSID Everyone = NULL;
+    BOOL Ret;
+
+    if (!AllocateAndInitializeSid(&World, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &Everyone))
+        return FALSE;
+    Ret = InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION) &&
+          (!Deny || AddAccessDeniedAce(Acl, ACL_REVISION, FILE_LIST_DIRECTORY, Everyone)) &&
+          AddAccessAllowedAce(Acl, ACL_REVISION, FILE_ALL_ACCESS, Everyone) &&
+          InitializeSecurityDescriptor(&Descriptor, SECURITY_DESCRIPTOR_REVISION) &&
+          SetSecurityDescriptorDacl(&Descriptor, TRUE, Acl, FALSE) &&
+          SetFileSecurityW(Dir, DACL_SECURITY_INFORMATION, &Descriptor);
+    FreeSid(Everyone);
+    return Ret;
+}
+
+/*
+ * The directory of the executable cannot be listed, but its files can be opened: the copy of a contract next to the
+ * executable is still found where Windows 7 finds it.
+ */
+static void
+test_app_local_unlisted(void)
+{
+    WCHAR Self[MAX_PATH], Dir[MAX_PATH], Exe[MAX_PATH], Dll[MAX_PATH], Pattern[MAX_PATH];
+    WIN32_FIND_DATAW FindData;
+    HANDLE Find;
+    DWORD Code, Expected;
+
+    if (!is_reactos() && GetNTVersion() != 0x0601 && GetNTVersion() < 0x0A00)
+    {
+        skip("no measurement for Windows 0x%lx\n", GetNTVersion());
+        return;
+    }
+    if (!MakeTestDir(L"unlisted", Self, Dir))
+        return;
+    StringCchPrintfW(Exe, _countof(Exe), L"%ls\\apl-unlisted.exe", Dir);
+    StringCchPrintfW(Dll, _countof(Dll), L"%ls\\%ls", Dir, g_LocalNames[1]);
+    StringCchPrintfW(Pattern, _countof(Pattern), L"%ls\\*", Dir);
+    ok(CopyFileW(Self, Exe, FALSE), "CopyFileW failed with %lu\n", GetLastError());
+    ok(ExtractLocalDll(Dll), "%ls not written: %lu\n", Dll, GetLastError());
+
+    ok(SetListDenied(Dir, TRUE), "SetFileSecurityW failed with %lu\n", GetLastError());
+    Find = FindFirstFileW(Pattern, &FindData);
+    if (Find != INVALID_HANDLE_VALUE)
+    {
+        FindClose(Find);
+        skip("the file system of %ls does not deny listing\n", Dir);
+    }
+    else
+    {
+        ok(GetLastError() == ERROR_ACCESS_DENIED, "FindFirstFileW failed with %lu\n", GetLastError());
+        Expected = ExpectedWithLocalCopy();
+        Code = StartChild(Exe, L"local");
+        ok(Code == Expected, "child exit code 0x%lx, expected 0x%lx\n", Code, Expected);
+    }
+
+    ok(SetListDenied(Dir, FALSE), "SetFileSecurityW failed with %lu\n", GetLastError());
+    DeleteFileW(Dll);
+    DeleteFileW(Exe);
+    RemoveDirectoryW(Dir);
+}
+
 static void
 check_family(const WCHAR *Reference, const WCHAR *Name)
 {
@@ -499,4 +638,6 @@ START_TEST(loader)
     test_minor_versions();
     test_manifests();
     test_app_local();
+    test_app_local_volume_root();
+    test_app_local_unlisted();
 }
