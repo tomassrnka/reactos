@@ -583,12 +583,18 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
 
     else if (Type == PsProcessType || Type == PsThreadType)
     {
+        /*
+         * A process is labelled from its own token. A thread is labelled from
+         * the owning process's token and its creator's primary token, also
+         * when the creator impersonates.
+         */
         PEPROCESS Process = (Type == PsProcessType) ?
                             Object : ((PETHREAD)Object)->ThreadsProcess;
         PACCESS_TOKEN Token = PsReferencePrimaryToken(Process);
 
-        /* NT 6 uses the owning process token, even when the creator impersonates. */
         Status = SeAssignProcessObjectLabel(Token,
+                                            (Type == PsProcessType) ? Token :
+                                            AccessState->SubjectSecurityContext.PrimaryToken,
                                             &NewDescriptor,
                                             &Type->TypeInfo.GenericMapping);
         PsDereferencePrimaryToken(Token);

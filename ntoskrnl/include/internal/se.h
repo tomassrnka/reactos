@@ -408,6 +408,12 @@ SepComputeIntegrityLevel(
 
 NTSTATUS
 NTAPI
+SepValidateLabelAce(
+    _In_ PACE_HEADER Header,
+    _Out_opt_ PULONG Rid);
+
+NTSTATUS
+NTAPI
 SepGetDescriptorLabel(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
     _Out_ PBOOLEAN HasLabel,
@@ -431,7 +437,8 @@ SeAssignObjectLabel(
 NTSTATUS
 NTAPI
 SeAssignProcessObjectLabel(
-    _In_ PTOKEN Token,
+    _In_ PTOKEN OwnerToken,
+    _In_ PTOKEN CreatorToken,
     _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
     _In_ PGENERIC_MAPPING GenericMapping);
 

@@ -581,6 +581,48 @@ InsertTokenToProcessCommon(
 }
 
 /*
+ * The caller's descriptor decides; an owner, group or DACL it leaves out
+ * comes from the default descriptor, as creation would have defaulted it.
+ * Returns the descriptor to apply: the caller's own when it is complete.
+ */
+static PSECURITY_DESCRIPTOR
+MergeProcessSecurity(
+    _In_ PSECURITY_DESCRIPTOR Explicit,
+    _In_ PSECURITY_DESCRIPTOR Default,
+    _Out_ PSECURITY_DESCRIPTOR Merged)
+{
+    const SECURITY_DESCRIPTOR_CONTROL DaclBits = SE_DACL_AUTO_INHERIT_REQ |
+                                                 SE_DACL_AUTO_INHERITED |
+                                                 SE_DACL_PROTECTED;
+    PSECURITY_DESCRIPTOR DaclSource = Explicit;
+    SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    PSID Owner = NULL, Group = NULL;
+    PACL Dacl = NULL;
+    BOOL Present = FALSE, Defaulted;
+    DWORD Revision;
+
+    if (!GetSecurityDescriptorOwner(Explicit, &Owner, &Defaulted)) Owner = NULL;
+    if (!GetSecurityDescriptorGroup(Explicit, &Group, &Defaulted)) Group = NULL;
+    if (!GetSecurityDescriptorDacl(Explicit, &Present, &Dacl, &Defaulted)) Present = FALSE;
+    if (Owner && Group && Present) return Explicit;
+
+    if (!Owner) GetSecurityDescriptorOwner(Default, &Owner, &Defaulted);
+    if (!Group) GetSecurityDescriptorGroup(Default, &Group, &Defaulted);
+    if (!Present)
+    {
+        DaclSource = Default;
+        GetSecurityDescriptorDacl(Default, &Present, &Dacl, &Defaulted);
+    }
+    InitializeSecurityDescriptor(Merged, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorOwner(Merged, Owner, FALSE);
+    SetSecurityDescriptorGroup(Merged, Group, FALSE);
+    SetSecurityDescriptorDacl(Merged, Present, Dacl, FALSE);
+    if (GetSecurityDescriptorControl(DaclSource, &Control, &Revision))
+        SetSecurityDescriptorControl(Merged, DaclBits, Control & DaclBits);
+    return Merged;
+}
+
+/*
  * The NT 5 creation path installs the primary token after creating both
  * objects. Complete their NT 6 labels before releasing the suspended thread.
  * Native ProcessAccessToken assignment alone does not relabel objects.
@@ -732,12 +774,13 @@ CreateProcessAsUserCommon(
     _Inout_ LPPROCESS_INFORMATION lpProcessInformation)
 {
     NTSTATUS Status = STATUS_SUCCESS, StatusOnExit;
-    DWORD LabelError = ERROR_SUCCESS;
+    DWORD SecurityError = ERROR_SUCCESS;
     BOOL Success;
     TOKEN_TYPE Type;
     ULONG ReturnLength;
     OBJECT_ATTRIBUTES ObjectAttributes;
     PSECURITY_DESCRIPTOR DefaultSd = NULL, ProcessSd, ThreadSd;
+    SECURITY_DESCRIPTOR MergedProcessSd, MergedThreadSd;
     HANDLE hTokenDup = NULL;
     HANDLE OriginalImpersonationToken = NULL;
     HANDLE NullToken = NULL;
@@ -926,7 +969,8 @@ CreateProcessAsUserCommon(
          */
         if (lpProcessAttributes && lpProcessAttributes->lpSecurityDescriptor)
         {
-            ProcessSd = lpProcessAttributes->lpSecurityDescriptor;
+            ProcessSd = MergeProcessSecurity(lpProcessAttributes->lpSecurityDescriptor,
+                                             DefaultSd, &MergedProcessSd);
         }
         else
         {
@@ -935,7 +979,8 @@ CreateProcessAsUserCommon(
 
         if (lpThreadAttributes && lpThreadAttributes->lpSecurityDescriptor)
         {
-            ThreadSd = lpThreadAttributes->lpSecurityDescriptor;
+            ThreadSd = MergeProcessSecurity(lpThreadAttributes->lpSecurityDescriptor,
+                                            DefaultSd, &MergedThreadSd);
         }
         else
         {
@@ -947,7 +992,7 @@ CreateProcessAsUserCommon(
             !SetProcessTokenLabel(lpProcessInformation->hThread, hTokenDup,
                                    lpThreadAttributes ? lpThreadAttributes->lpSecurityDescriptor : NULL))
         {
-            LabelError = GetLastError();
+            SecurityError = GetLastError();
             Status = STATUS_UNSUCCESSFUL;
             Success = FALSE;
             NtClose(hTokenDup);
@@ -961,6 +1006,8 @@ CreateProcessAsUserCommon(
                                          ThreadSd))
         {
             ERR("Failed to set new security information for process and thread\n");
+            SecurityError = GetLastError();
+            Status = STATUS_UNSUCCESSFUL;
             NtClose(hTokenDup);
             Success = FALSE;
             goto Quit;
@@ -1012,13 +1059,13 @@ Quit:
     if (!NT_SUCCESS(Status))
     {
         TerminateProcess(lpProcessInformation->hProcess, Status);
-        if (LabelError != ERROR_SUCCESS)
+        if (SecurityError != ERROR_SUCCESS)
         {
             CloseHandle(lpProcessInformation->hThread);
             CloseHandle(lpProcessInformation->hProcess);
             ZeroMemory(lpProcessInformation, sizeof(*lpProcessInformation));
         }
-        SetLastError(LabelError ? LabelError : RtlNtStatusToDosError(Status));
+        SetLastError(SecurityError ? SecurityError : RtlNtStatusToDosError(Status));
     }
 
     /* Resume the main thread only after completing its security. */
