@@ -14,6 +14,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <k32.h>
+#include <fileapi.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -53,6 +54,17 @@ HANDLE WINAPI CreateFileA (LPCSTR			lpFileName,
    return FileHandle;
 }
 
+static
+HANDLE
+BasepCreateFile(LPCWSTR lpFileName,
+                DWORD dwDesiredAccess,
+                DWORD dwShareMode,
+                LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+                DWORD dwCreationDisposition,
+                DWORD dwFlagsAndAttributes,
+                HANDLE hTemplateFile,
+                BOOLEAN NoRecall,
+                BOOLEAN QosPresent);
 
 /*
  * @implemented
@@ -64,6 +76,89 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 			    DWORD			dwCreationDisposition,
 			    DWORD			dwFlagsAndAttributes,
 			    HANDLE			hTemplateFile)
+{
+   return BasepCreateFile(lpFileName,
+                          dwDesiredAccess,
+                          dwShareMode,
+                          lpSecurityAttributes,
+                          dwCreationDisposition,
+                          dwFlagsAndAttributes,
+                          hTemplateFile,
+                          (dwFlagsAndAttributes & FILE_FLAG_OPEN_NO_RECALL) != 0,
+                          (dwFlagsAndAttributes & SECURITY_SQOS_PRESENT) != 0);
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+CreateFile2(IN LPCWSTR lpFileName,
+            IN DWORD dwDesiredAccess,
+            IN DWORD dwShareMode,
+            IN DWORD dwCreationDisposition,
+            IN LPCREATEFILE2_EXTENDED_PARAMETERS pCreateExParams OPTIONAL)
+{
+    /* What Windows takes from each of the three fields; the rest is ignored */
+    static const DWORD AttributesMask = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
+                                        FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_TEMPORARY |
+                                        FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_ENCRYPTED;
+    static const DWORD FlagsMask = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_DELETE_ON_CLOSE |
+                                   FILE_FLAG_NO_BUFFERING | FILE_FLAG_OPEN_NO_RECALL |
+                                   FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OVERLAPPED |
+                                   FILE_FLAG_POSIX_SEMANTICS | FILE_FLAG_RANDOM_ACCESS |
+                                   FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH;
+    static const DWORD SecurityMask = SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS | SECURITY_IDENTIFICATION |
+                                      SECURITY_IMPERSONATION | SECURITY_DELEGATION |
+                                      SECURITY_CONTEXT_TRACKING | SECURITY_EFFECTIVE_ONLY;
+    SECURITY_ATTRIBUTES *SecurityAttributes = NULL;
+    HANDLE TemplateFile = NULL;
+    DWORD FlagsAndAttributes = 0;
+    BOOLEAN NoRecall = FALSE, QosPresent = FALSE;
+
+    if (pCreateExParams)
+    {
+        /* A structure from a later Windows is larger and accepted */
+        if (pCreateExParams->dwSize < sizeof(*pCreateExParams))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return INVALID_HANDLE_VALUE;
+        }
+
+        SecurityAttributes = pCreateExParams->lpSecurityAttributes;
+        TemplateFile = pCreateExParams->hTemplateFile;
+        /* one bit means FILE_FLAG_OPEN_NO_RECALL in the flags and SECURITY_SQOS_PRESENT in the quality of service */
+        NoRecall = (pCreateExParams->dwFileFlags & FILE_FLAG_OPEN_NO_RECALL) != 0;
+        QosPresent = (pCreateExParams->dwSecurityQosFlags & SECURITY_SQOS_PRESENT) != 0;
+        FlagsAndAttributes = (pCreateExParams->dwFileAttributes & AttributesMask) |
+                             (pCreateExParams->dwFileFlags & FlagsMask & ~FILE_FLAG_OPEN_NO_RECALL) |
+                             (pCreateExParams->dwSecurityQosFlags & SecurityMask & ~SECURITY_SQOS_PRESENT);
+    }
+
+    return BasepCreateFile(lpFileName,
+                           dwDesiredAccess,
+                           dwShareMode,
+                           SecurityAttributes,
+                           dwCreationDisposition,
+                           FlagsAndAttributes,
+                           TemplateFile,
+                           NoRecall,
+                           QosPresent);
+}
+
+/* The two bits of dwFlagsAndAttributes that CreateFileW cannot tell apart, FILE_FLAG_OPEN_NO_RECALL and
+   SECURITY_SQOS_PRESENT, are given separately so that CreateFile2 can keep its two fields apart */
+static
+HANDLE
+BasepCreateFile(LPCWSTR lpFileName,
+                DWORD dwDesiredAccess,
+                DWORD dwShareMode,
+                LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+                DWORD dwCreationDisposition,
+                DWORD dwFlagsAndAttributes,
+                HANDLE hTemplateFile,
+                BOOLEAN NoRecall,
+                BOOLEAN QosPresent)
 {
    OBJECT_ATTRIBUTES ObjectAttributes;
    SECURITY_QUALITY_OF_SERVICE SecurityQos;
@@ -170,7 +265,7 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
    if(dwFlagsAndAttributes & FILE_FLAG_OPEN_REPARSE_POINT)
       Flags |= FILE_OPEN_REPARSE_POINT;
 
-   if(dwFlagsAndAttributes & FILE_FLAG_OPEN_NO_RECALL)
+   if (NoRecall)
       Flags |= FILE_OPEN_NO_RECALL;
 
    FileAttributes = (dwFlagsAndAttributes & (FILE_ATTRIBUTE_VALID_FLAGS & ~FILE_ATTRIBUTE_DIRECTORY));
@@ -195,7 +290,7 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 
    TrailingBackslash = FALSE;
    if (NtPathU.Length >= sizeof(WCHAR) &&
-       NtPathU.Buffer[NtPathU.Length / sizeof(WCHAR) - 1])
+       NtPathU.Buffer[NtPathU.Length / sizeof(WCHAR) - 1] == L'\\')
    {
       TrailingBackslash = TRUE;
    }
@@ -292,7 +387,7 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
     ObjectAttributes.Attributes |= OBJ_CASE_INSENSITIVE;
 
    /* the caller limits what the server end of a pipe may do with its identity */
-   if (dwFlagsAndAttributes & SECURITY_SQOS_PRESENT)
+   if (QosPresent)
    {
       SecurityQos.Length = sizeof(SecurityQos);
       SecurityQos.ImpersonationLevel = (dwFlagsAndAttributes >> 16) & 0x3;
@@ -317,10 +412,6 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 			  EaBuffer,
 			  EaLength);
 
-   RtlFreeHeap(RtlGetProcessHeap(),
-               0,
-               NtPathU.Buffer);
-
    /* free the extended attributes buffer if allocated */
    if (EaBuffer != NULL)
    {
@@ -332,6 +423,9 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
    /* error */
    if (!NT_SUCCESS(Status))
    {
+      FILE_BASIC_INFORMATION ExistingInformation;
+      BOOLEAN IsDirectory = FALSE;
+
       /* In the case file creation was rejected due to CREATE_NEW flag
        * was specified and file with that name already exists, correct
        * last error is ERROR_FILE_EXISTS and not ERROR_ALREADY_EXISTS.
@@ -340,7 +434,15 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
       if (Status == STATUS_OBJECT_NAME_COLLISION &&
           dwCreationDisposition == FILE_CREATE)
       {
-         SetLastError( ERROR_FILE_EXISTS );
+         /* Windows 10 refuses to create a file over a directory with access denied; the name that was opened is
+            asked again, as it was opened (the current directory may have changed since) */
+         if (NT_SUCCESS(NtQueryAttributesFile(&ObjectAttributes, &ExistingInformation)) &&
+             (ExistingInformation.FileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+         {
+            IsDirectory = TRUE;
+         }
+
+         SetLastError( IsDirectory ? ERROR_ACCESS_DENIED : ERROR_FILE_EXISTS );
       }
       else if (Status == STATUS_FILE_IS_A_DIRECTORY &&
                TrailingBackslash)
@@ -352,8 +454,11 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
          BaseSetLastNTError (Status);
       }
 
+      RtlFreeHeap(RtlGetProcessHeap(), 0, NtPathU.Buffer);
       return INVALID_HANDLE_VALUE;
    }
+
+   RtlFreeHeap(RtlGetProcessHeap(), 0, NtPathU.Buffer);
 
   /*
   create with OPEN_ALWAYS (FILE_OPEN_IF) returns info = FILE_OPENED or FILE_CREATED

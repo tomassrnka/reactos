@@ -12,6 +12,7 @@ extern void func_CancelIoEx(void);
 extern void func_ApplicationRestart(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateEventMutexEx(void);
+extern void func_CreateFile2(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
 extern void func_CreateWaitableTimerEx(void);
@@ -46,6 +47,7 @@ extern void func_GetLocaleInfo(void);
 extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetNumaProcessorNodeEx(void);
+extern void func_GetOverlappedResultEx(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetVolumeInformation(void);
 extern void func_HandleList(void);
@@ -123,6 +125,7 @@ const struct test winetest_testlist[] =
     { "ApplicationRestart",          func_ApplicationRestart },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },
+    { "CreateFile2",                 func_CreateFile2 },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
@@ -157,6 +160,7 @@ const struct test winetest_testlist[] =
     { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetNumaProcessorNodeEx",      func_GetNumaProcessorNodeEx },
+    { "GetOverlappedResultEx",       func_GetOverlappedResultEx },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "HandleList",                  func_HandleList },

@@ -11,6 +11,7 @@ list(APPEND SOURCE
     ApplicationRestart.c
     ConsoleCP.c
     CreateEventMutexEx.c
+    CreateFile2.c
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateWaitableTimerEx.c
@@ -45,6 +46,7 @@ list(APPEND SOURCE
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
     GetNumaProcessorNodeEx.c
+    GetOverlappedResultEx.c
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
     HandleList.c
