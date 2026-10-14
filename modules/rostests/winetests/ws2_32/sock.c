@@ -8708,15 +8708,29 @@ todo_wine
     ok(bytesReturned == 1, "bytesReturned isn't supposed to be %d\n", bytesReturned);
     ok(buffer[0] == 'a', "the initial data is at the start of the buffer, got %02x\n", (unsigned char)buffer[0]);
 
-    /* The accepted socket keeps receiving after the initial data */
-    optlen = 2000;
-    iret = setsockopt(acceptor, SOL_SOCKET, SO_RCVTIMEO, (char *)&optlen, sizeof(optlen));
-    ok(!iret, "setsockopt failed %d\n", WSAGetLastError());
+    /* The accepted socket keeps receiving after the initial data. select() bounds the wait,
+     * a blocking recv() on ReactOS ignores SO_RCVTIMEO */
     iret = send(connector, "bcd", 3, 0);
     ok(iret == 3, "could not send 3 bytes: send %d errno %d\n", iret, WSAGetLastError());
     memset(ipbuffer, 0, sizeof(ipbuffer));
-    iret = recv(acceptor, ipbuffer, 3, 0);
-    ok(iret == 3, "recv after the initial data returned %d errno %d\n", iret, WSAGetLastError());
+    {
+        fd_set fds_recv;
+        struct timeval recv_timeout = {2, 0};
+        int total = 0;
+
+        while (total < 3)
+        {
+            FD_ZERO(&fds_recv);
+            FD_SET(acceptor, &fds_recv);
+            if (select(0, &fds_recv, NULL, NULL, &recv_timeout) != 1)
+                break;
+            iret = recv(acceptor, ipbuffer + total, 3 - total, 0);
+            if (iret <= 0)
+                break;
+            total += iret;
+        }
+        ok(total == 3, "received %d of 3 bytes after the initial data, errno %d\n", total, WSAGetLastError());
+    }
     ok(!memcmp(ipbuffer, "bcd", 3), "recv after the initial data got %.3s\n", ipbuffer);
 
     closesocket(connector);
