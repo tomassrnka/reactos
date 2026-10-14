@@ -870,7 +870,8 @@ MsgiAnsiToUnicodeReply(LPMSG UnicodeMsg, LPMSG AnsiMsg, LRESULT *Result)
 //
 //  Unicode to Ansi callout ->
 //
-static BOOL FASTCALL
+/* GCC 8.4 -O2 miscompiles this helper when inlined into i386 SEH code */
+static DECLSPEC_NOINLINE BOOL FASTCALL
 MsgiUnicodeToAnsiMessage(HWND hwnd, LPMSG AnsiMsg, LPMSG UnicodeMsg)
 {
   ANSI_STRING AnsiString;
