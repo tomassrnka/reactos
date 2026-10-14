@@ -11,6 +11,7 @@ extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
 extern void func_ApplicationRestart(void);
 extern void func_ConsoleCP(void);
+extern void func_CopyFile2(void);
 extern void func_CreateFile2(void);
 extern void func_CreateEventMutexEx(void);
 extern void func_CreateRemoteThreadEx(void);
@@ -103,6 +104,7 @@ const struct test winetest_testlist[] =
     { "CancelIoEx",                  func_CancelIoEx },
     { "ApplicationRestart",          func_ApplicationRestart },
     { "ConsoleCP",                   func_ConsoleCP },
+    { "CopyFile2",                   func_CopyFile2 },
     { "CreateFile2",                 func_CreateFile2 },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
