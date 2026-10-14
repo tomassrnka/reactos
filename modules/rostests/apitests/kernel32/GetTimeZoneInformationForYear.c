@@ -139,6 +139,50 @@ static void SetEntries(HKEY hKey, DWORD First, DWORD Last)
     ok(!RegSetValueExW(hKey, L"LastEntry", 0, REG_DWORD, (const BYTE *)&Last, sizeof(Last)), "LastEntry\n");
 }
 
+/* Values of 4 to 44 bytes are read, the end of the structure staying zero; bigger ones are not read as a year's data */
+static void TestValueSizes(HKEY hDynamic)
+{
+    static const DWORD Read[] = { 4, 12, 20, 43, 44 };
+    static const DWORD Refused[] = { 45, 48, 64, 100 };
+    TIME_ZONE_INFORMATION Info;
+    DYNAMIC_TIME_ZONE_INFORMATION Own;
+    TZI_FORMAT Full, Expected;
+    BYTE Raw[128];
+    unsigned i;
+    BOOL Ret;
+
+    SetEntries(hDynamic, 2000, 2000);
+    MakeYearData(&Full, 2000);
+    ZeroMemory(Raw, sizeof(Raw));
+    CopyMemory(Raw, &Full, sizeof(Full));
+
+    for (i = 0; i < ARRAYSIZE(Read); i++)
+    {
+        ZeroMemory(&Expected, sizeof(Expected));
+        CopyMemory(&Expected, &Full, Read[i]);
+        ok(!RegSetValueExW(hDynamic, L"2000", 0, REG_BINARY, Raw, Read[i]), "Cannot store %lu bytes\n", Read[i]);
+        Ret = Query(2000, TEST_ZONE, FALSE, &Info, &Own);
+        ok(Ret, "%lu bytes: failed: %lu\n", Read[i], GetLastError());
+        ok(Info.Bias == Expected.Bias, "%lu bytes: bias %ld, expected %ld\n", Read[i], Info.Bias, Expected.Bias);
+        ok(Info.StandardBias == Expected.StandardBias, "%lu bytes: standard bias %ld, expected %ld\n",
+           Read[i], Info.StandardBias, Expected.StandardBias);
+        ok(Info.DaylightBias == Expected.DaylightBias, "%lu bytes: daylight bias %ld, expected %ld\n",
+           Read[i], Info.DaylightBias, Expected.DaylightBias);
+        ok(!memcmp(&Info.StandardDate, &Expected.StandardDate, sizeof(SYSTEMTIME)), "%lu bytes: standard date differs\n", Read[i]);
+        ok(!memcmp(&Info.DaylightDate, &Expected.DaylightDate, sizeof(SYSTEMTIME)), "%lu bytes: daylight date differs\n", Read[i]);
+    }
+
+    for (i = 0; i < ARRAYSIZE(Refused); i++)
+    {
+        ok(!RegSetValueExW(hDynamic, L"2000", 0, REG_BINARY, Raw, Refused[i]), "Cannot store %lu bytes\n", Refused[i]);
+        Ret = Query(2000, TEST_ZONE, FALSE, &Info, &Own);
+        ok(Ret, "%lu bytes: failed: %lu\n", Refused[i], GetLastError());
+        /* Windows Server 2008 R2 hands back values of its own in this case; ReactOS gives the caller's */
+        if (is_reactos())
+            ExpectOwnData("oversized value", 2000, &Own, &Info);
+    }
+}
+
 static void TestZoneData(HKEY hDynamic)
 {
     TIME_ZONE_INFORMATION Info;
@@ -210,6 +254,8 @@ static void TestZoneData(HKEY hDynamic)
     Ret = Query(2001, TEST_ZONE, FALSE, &Info, &Own);
     ok(Ret, "Failed: %lu\n", GetLastError());
     ExpectOwnData("no LastEntry", 2001, &Own, &Info);
+
+    TestValueSizes(hDynamic);
 }
 
 static void TestNoDynamicData(HKEY hZone)
@@ -265,31 +311,45 @@ static BOOL ReadDword(HKEY hKey, PCWSTR Name, DWORD *Value)
     return !RegQueryValueExW(hKey, Name, NULL, &Type, (BYTE *)Value, &Size) && Type == REG_DWORD && Size == sizeof(*Value);
 }
 
-/* The zone has an entry for the year (or the first or last one that the year falls back to), complete for all the fields */
-static BOOL HasYearData(PCWSTR KeyName, USHORT Year)
+enum { YEAR_NONE, YEAR_DATA, YEAR_UNKNOWN };
+
+/*
+ * What the zone gives for the year. YEAR_DATA: the value that the function reads (a binary value of 4 to 44 bytes; a
+ * shorter one is zero padded, as measured), returned in Data. YEAR_NONE: no entry range, so the zone in effect.
+ * YEAR_UNKNOWN: a value that is missing, of another type or of a size that Windows and ReactOS treat in their own ways.
+ */
+static int GetYearData(PCWSTR KeyName, USHORT Year, TZI_FORMAT *Data)
 {
     WCHAR Path[256], Name[16];
     HKEY hKey;
     DWORD First, Last, Type, Size = 0;
     LONG Used = (SHORT)Year;
-    BOOL Found = FALSE;
+    int Result = YEAR_UNKNOWN;
 
     if (!KeyName[0])
-        return FALSE;
+        return YEAR_NONE;
     StringCchPrintfW(Path, ARRAYSIZE(Path), ZONES_KEY L"\\%s\\Dynamic DST", KeyName);
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &hKey))
-        return FALSE;
-    if (ReadDword(hKey, L"FirstEntry", &First) && ReadDword(hKey, L"LastEntry", &Last))
+        return YEAR_NONE;
+    if (!ReadDword(hKey, L"FirstEntry", &First) || !ReadDword(hKey, L"LastEntry", &Last))
     {
-        if (Used < (LONG)First)
-            Used = (LONG)First;
-        else if (Used > (LONG)Last)
-            Used = (LONG)Last;
-        StringCchPrintfW(Name, ARRAYSIZE(Name), L"%ld", Used);
-        Found = !RegQueryValueExW(hKey, Name, NULL, &Type, NULL, &Size) && Type == REG_BINARY && Size >= sizeof(TZI_FORMAT);
+        RegCloseKey(hKey);
+        return YEAR_NONE;
+    }
+    if (Used < (LONG)First)
+        Used = (LONG)First;
+    else if (Used > (LONG)Last)
+        Used = (LONG)Last;
+    StringCchPrintfW(Name, ARRAYSIZE(Name), L"%ld", Used);
+    if (!RegQueryValueExW(hKey, Name, NULL, &Type, NULL, &Size) && Type == REG_BINARY &&
+        Size >= sizeof(DWORD) && Size <= sizeof(*Data))
+    {
+        ZeroMemory(Data, sizeof(*Data));
+        if (!RegQueryValueExW(hKey, Name, NULL, &Type, (BYTE *)Data, &Size) && Type == REG_BINARY)
+            Result = YEAR_DATA;
     }
     RegCloseKey(hKey);
-    return Found;
+    return Result;
 }
 
 static void ExpectSameZone(PCSTR What, const TIME_ZONE_INFORMATION *Info, const TIME_ZONE_INFORMATION *Expected, BOOL All)
@@ -307,13 +367,40 @@ static void ExpectSameZone(PCSTR What, const TIME_ZONE_INFORMATION *Info, const 
     ok(!memcmp(&Info->DaylightDate, &Expected->DaylightDate, sizeof(SYSTEMTIME)), "%s: daylight date differs\n", What);
 }
 
+/* The names always come from the zone in effect; the other fields from the year's value when the zone has one */
+static void ExpectCurrentZone(PCSTR What, const TIME_ZONE_INFORMATION *Info, const TIME_ZONE_INFORMATION *Current,
+                              int Kind, const TZI_FORMAT *Data)
+{
+    if (Kind == YEAR_DATA)
+    {
+        ExpectSameZone(What, Info, Current, FALSE);
+        ok(Info->Bias == Data->Bias, "%s: bias %ld, the year's value has %ld\n", What, Info->Bias, Data->Bias);
+        ok(Info->StandardBias == Data->StandardBias, "%s: standard bias %ld, the year's value has %ld\n",
+           What, Info->StandardBias, Data->StandardBias);
+        ok(Info->DaylightBias == Data->DaylightBias, "%s: daylight bias %ld, the year's value has %ld\n",
+           What, Info->DaylightBias, Data->DaylightBias);
+        ok(!memcmp(&Info->StandardDate, &Data->StandardDate, sizeof(SYSTEMTIME)), "%s: standard date differs from the year's value\n", What);
+        ok(!memcmp(&Info->DaylightDate, &Data->DaylightDate, sizeof(SYSTEMTIME)), "%s: daylight date differs from the year's value\n", What);
+    }
+    else if (Kind == YEAR_NONE)
+    {
+        ExpectSameZone(What, Info, Current, TRUE);
+    }
+    else
+    {
+        skip("%s: the year's value is not one that every version reads in the same way\n", What);
+    }
+}
+
 static void TestCurrentZone(void)
 {
     FN_GetDynamicTimeZoneInformation pGetDynamicTimeZoneInformation;
     DYNAMIC_TIME_ZONE_INFORMATION Dynamic;
     TIME_ZONE_INFORMATION Info, Current, Explicit;
+    TZI_FORMAT Data = {0};
     SYSTEMTIME Now;
-    BOOL Ret, All;
+    BOOL Ret;
+    int Kind;
 
     pGetDynamicTimeZoneInformation = (FN_GetDynamicTimeZoneInformation)
         GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetDynamicTimeZoneInformation");
@@ -328,8 +415,8 @@ static void TestCurrentZone(void)
     }
     Dynamic.TimeZoneKeyName[ARRAYSIZE(Dynamic.TimeZoneKeyName) - 1] = UNICODE_NULL;
 
-    /* A zone with usable yearly data has the dates of that year, the others the ones in effect */
-    All = Dynamic.DynamicDaylightTimeDisabled || !HasYearData(Dynamic.TimeZoneKeyName, Now.wYear);
+    /* A zone with yearly data has the values of that year, the others the ones in effect */
+    Kind = Dynamic.DynamicDaylightTimeDisabled ? YEAR_NONE : GetYearData(Dynamic.TimeZoneKeyName, Now.wYear, &Data);
 
     /* No dynamic information: the zone in effect */
     RtlFillMemory(&Info, sizeof(Info), 0xBB);
@@ -339,7 +426,7 @@ static void TestCurrentZone(void)
     if (Ret)
     {
         ok(Info.Bias != (LONG)0xBBBBBBBB, "The structure was not filled\n");
-        ExpectSameZone("no dynamic information", &Info, &Current, All);
+        ExpectCurrentZone("no dynamic information", &Info, &Current, Kind, &Data);
     }
 
     /* The information of GetDynamicTimeZoneInformation gives the same, all of it */
@@ -349,7 +436,7 @@ static void TestCurrentZone(void)
     if (Ret)
     {
         ok(Explicit.Bias != (LONG)0xBBBBBBBB, "The structure was not filled\n");
-        ExpectSameZone("explicit information", &Explicit, &Current, All);
+        ExpectCurrentZone("explicit information", &Explicit, &Current, Kind, &Data);
         if (Info.Bias != (LONG)0xBBBBBBBB)
             ExpectSameZone("explicit and implicit", &Explicit, &Info, TRUE);
     }
