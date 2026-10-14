@@ -504,6 +504,74 @@
             <SHIM_REF NAME="MsysDecoy" />
         </EXE>
 
+        <!--
+            Programs that refuse to run on the Windows version the system reports (NT 5.2). Each one gets the
+            lowest layer that was measured to pass its check, or the minimum the project documents when the
+            program cannot be run here for other reasons (marked "documented").
+        -->
+
+        <!-- Node.js 16 to 21 exits with 216 below Windows 8 (measured with 16.20.2: WIN7RTM is not enough, WIN8RTM starts it) -->
+        <EXE NAME="node.exe" APP_NAME="Node.js 16 to 21" VENDOR="Node.js">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Node.js</COMPANY_NAME>
+                <PRODUCT_NAME>Node.js</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>node.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>16.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>21.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN8RTM" />
+        </EXE>
+
+        <!-- Python 3.9 to 3.12 installers (a Burn bundle; the name carries the version): "Windows Server 2012 or later is required"
+             (measured with 3.9.13 and 3.11.9: WIN7RTM still refuses, WIN8RTM passes) -->
+        <EXE NAME="*" APP_NAME="Python 3.9 to 3.12 installer" VENDOR="Python Software Foundation">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Python Software Foundation</COMPANY_NAME>
+                <INTERNAL_NAME>setup</INTERNAL_NAME>
+                <BIN_FILE_VERSION>3.9.0.0</BIN_FILE_VERSION>
+                <UPTO_BIN_FILE_VERSION>3.12.65535.65535</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN8RTM" />
+        </EXE>
+
+        <!-- python.exe and pythonw.exe 3.9 to 3.12, the lowest Windows these versions support (documented; the interpreter does not run here yet) -->
+        <EXE NAME="python.exe" APP_NAME="Python 3.9 to 3.12" VENDOR="Python Software Foundation">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Python Software Foundation</COMPANY_NAME>
+                <PRODUCT_NAME>Python</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>python.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>3.9.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>3.12.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN8RTM" />
+        </EXE>
+        <EXE NAME="pythonw.exe" APP_NAME="Python 3.9 to 3.12 (windowed)" VENDOR="Python Software Foundation">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Python Software Foundation</COMPANY_NAME>
+                <PRODUCT_NAME>Python</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>pythonw.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>3.9.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>3.12.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN8RTM" />
+        </EXE>
+
+        <!-- LibreOffice 24.8 and later need Windows 10 (documented; the installer is an MSI, see the layers on msiexec.exe) -->
+        <EXE NAME="soffice.exe" APP_NAME="LibreOffice 24.8 and later" VENDOR="The Document Foundation">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>The Document Foundation</COMPANY_NAME>
+                <PRODUCT_NAME>LibreOffice</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>soffice.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>24.8.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN10RTM" />
+        </EXE>
+
+        <!-- No rule for Qt 6 programs: the database matches the attributes of the program file and of named files next to it,
+             not what it imports, so a rule keyed on Qt6Core.dll would also change unrelated programs in that directory.
+             Qt 6 programs choose the Windows 10 layer themselves. -->
+
         <!-- ReactOS shim used to test the shim engine -->
         <EXE NAME="shimtest_ros.exe" APP_NAME="Shim test application" VENDOR="ReactOS">
             <MATCHING_FILE NAME="*">

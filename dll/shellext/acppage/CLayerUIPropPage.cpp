@@ -35,6 +35,7 @@ static struct {
     { L"Windows Vista (SP2)", L"VISTASP2" },
     { L"Windows 7", L"WIN7RTM" },
     { L"Windows 7 (SP1)", L"WIN7SP1" },
+    { L"Windows 8", L"WIN8RTM" },
     { L"Windows 8.1", L"WIN81RTM" },
     { L"Windows 10", L"WIN10RTM" },
     { L"Windows Server 2016", L"WINSRV16RTM" },
