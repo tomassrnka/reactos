@@ -163,12 +163,86 @@ ParseNumber(
 
 static
 BOOL
-IsDrivePath(
+IsAsciiLetter(
+    WCHAR ch)
+{
+    return (ch >= L'A' && ch <= L'Z') || (ch >= L'a' && ch <= L'z');
+}
+
+
+/* A drive letter with a colon, or LPT1 to LPT9 and COM1 to COM9 with trailing dots and a final colon allowed */
+static
+BOOL
+IsDeviceName(
+    PCWSTR pszName)
+{
+    PCWSTR p;
+
+    if (IsAsciiLetter(pszName[0]) && pszName[1] == L':' && pszName[2] == UNICODE_NULL)
+        return TRUE;
+
+    if (_wcsnicmp(pszName, L"LPT", 3) != 0 && _wcsnicmp(pszName, L"COM", 3) != 0)
+        return FALSE;
+
+    if (pszName[3] < L'1' || pszName[3] > L'9')
+        return FALSE;
+
+    p = &pszName[4];
+    while (*p == L'.')
+        p++;
+    if (*p == L':')
+        p++;
+
+    return *p == UNICODE_NULL;
+}
+
+
+/* The characters a share name may not have: the command prints its usage text for such a name */
+static
+BOOL
+HasIllegalNameChar(
+    PCWSTR pszName)
+{
+    PCWSTR p;
+
+    for (p = pszName; *p != UNICODE_NULL; p++)
+    {
+        if (*p < L' ' || wcschr(L"\"/\\[]:|<>+=;,?*", *p) != NULL)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+/* What the command takes as the resource of a share: a device, or a path that has no wildcards and no trailing separator */
+static
+BOOL
+IsSharePath(
     PCWSTR pszPath)
 {
-    return (pszPath[0] != UNICODE_NULL &&
-            iswalpha(pszPath[0]) &&
-            pszPath[1] == L':');
+    SIZE_T Length = wcslen(pszPath);
+
+    if (IsDeviceName(pszPath))
+        return TRUE;
+
+    if (wcspbrk(pszPath, L"*?") != NULL)
+        return FALSE;
+
+    if (IsAsciiLetter(pszPath[0]) && pszPath[1] == L':' && (pszPath[2] == L'\\' || pszPath[2] == L'/'))
+    {
+        /* Another colon makes it a path the server has to judge */
+        if (wcschr(&pszPath[2], L':') != NULL)
+            return TRUE;
+
+        return Length == 3 || (pszPath[Length - 1] != L'\\' && pszPath[Length - 1] != L'/');
+    }
+
+    /* \\.\ names a device or a drive path directly */
+    if (_wcsnicmp(pszPath, L"\\\\.\\", 4) == 0)
+        return Length > 4 && pszPath[Length - 1] != L'\\' && pszPath[Length - 1] != L'/';
+
+    return FALSE;
 }
 
 
@@ -655,7 +729,17 @@ DeleteShare(
 {
     NET_API_STATUS Status;
 
-    if (IsDrivePath(pOptions->pszName))
+    if (IsDeviceName(pOptions->pszName))
+    {
+        DWORD dwType;
+
+        /* A device that is not shared is reported before anything is looked up by path */
+        Status = NetShareCheck(pOptions->pszServer, pOptions->pszName, &dwType);
+        if (Status != NERR_Success)
+            return ShareError(Status);
+    }
+
+    if (IsSharePath(pOptions->pszName))
     {
         PSHARE_INFO_2 pBuffer = NULL;
         PWSTR *ppszNames = NULL, *ppszNew;
@@ -736,6 +820,10 @@ done:
         return result;
     }
 
+    /* A colon is not asked of the server: the name is not a device or a path */
+    if (wcschr(pOptions->pszName, L':') != NULL)
+        return ShareError(ERROR_INVALID_NAME);
+
     Status = NetShareDel(pOptions->pszServer, pOptions->pszName, 0);
     if (Status != NERR_Success)
         return ShareError(Status);
@@ -783,7 +871,10 @@ cmdShare(
     WCHAR **argv)
 {
     SHARE_OPTIONS Options;
+    WCHAR szRoot[4];
     PWSTR pszSpec = NULL;
+    BOOL bExtra = FALSE;
+    INT nPositional = 0;
     PWSTR ptr;
     PCWSTR pszValue;
     INT i;
@@ -864,19 +955,27 @@ cmdShare(
                 return UnknownOption(argv[i]);
             }
         }
-        else if (argv[i][0] == L'\\' && argv[i][1] == L'\\' && Options.pszServer == NULL)
+        else if (argv[i][0] == L'\\' && argv[i][1] == L'\\' && wcschr(&argv[i][2], L'\\') == NULL &&
+                 Options.pszServer == NULL && nPositional <= 1)
         {
             Options.pszServer = argv[i];
+            nPositional++;
         }
         else if (pszSpec == NULL)
         {
             pszSpec = argv[i];
+            nPositional++;
         }
         else
         {
-            return SyntaxError();
+            /* Deleting a share ignores what follows the name and the computer */
+            bExtra = TRUE;
+            nPositional++;
         }
     }
+
+    if (bExtra && !Options.bDelete)
+        return SyntaxError();
 
     /* A computer name is only accepted to delete a share there */
     if (Options.pszServer != NULL && (pszSpec == NULL || !Options.bDelete))
@@ -891,18 +990,41 @@ cmdShare(
         return EnumerateShares(NULL);
     }
 
-    if (wcslen(pszSpec) > MAX_SHARE_NAME + 1 + MAX_PATH || wcschr(pszSpec, L'/') != NULL)
+    if (wcslen(pszSpec) > MAX_SHARE_NAME + 1 + MAX_PATH)
         return SyntaxError();
 
-    ptr = wcschr(pszSpec, L'=');
+    /* To delete, the whole argument is the name of the share */
+    ptr = Options.bDelete ? NULL : wcschr(pszSpec, L'=');
     if (ptr != NULL)
     {
-        if (ptr == pszSpec || ptr[1] == UNICODE_NULL || !IsDrivePath(&ptr[1]) || Options.bDelete ||
+        if (ptr == pszSpec || ptr[1] == UNICODE_NULL || !IsSharePath(&ptr[1]) ||
             (size_t)(ptr - pszSpec) > MAX_SHARE_NAME)
             return SyntaxError();
 
         *ptr++ = UNICODE_NULL;
+        if (HasIllegalNameChar(pszSpec))
+            return SyntaxError();
         Options.pszPath = ptr;
+
+        /* A drive letter alone names the root of the drive */
+        if (IsAsciiLetter(ptr[0]) && ptr[1] == L':' && ptr[2] == UNICODE_NULL)
+        {
+            szRoot[0] = ptr[0];
+            szRoot[1] = L':';
+            szRoot[2] = L'\\';
+            szRoot[3] = UNICODE_NULL;
+            Options.pszPath = szRoot;
+        }
+    }
+    else if (!Options.bDelete)
+    {
+        if (HasIllegalNameChar(pszSpec))
+            return SyntaxError();
+    }
+    else if (wcschr(pszSpec, L'/') != NULL && !IsSharePath(pszSpec))
+    {
+        /* A slash starts an option, except in the path of a share that is deleted by its path */
+        return SyntaxError();
     }
 
     Options.pszName = pszSpec;
