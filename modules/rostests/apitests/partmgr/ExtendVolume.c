@@ -137,6 +137,70 @@ static BOOL WriteAndVerify(LONGLONG Bytes)
     return Ok;
 }
 
+/* A file of Bytes of a pattern, written through the cache and left open (not flushed). */
+static HANDLE WritePattern(PCSTR Leaf, LONGLONG Bytes)
+{
+    CHAR Name[32];
+    PULONG Buffer = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)MiB);
+    LONGLONG Done;
+    DWORD Count, i;
+    HANDLE File;
+
+    sprintf(Name, "%c:\\%s", Letter, Leaf);
+    File = CreateFileA(Name, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    for (Done = 0; File != INVALID_HANDLE_VALUE && Buffer && Done < Bytes; Done += MiB)
+    {
+        for (i = 0; i < MiB / sizeof(ULONG); i++)
+            Buffer[i] = 0x5A000000 ^ (ULONG)(Done / sizeof(ULONG) + i);
+        if (!WriteFile(File, Buffer, (DWORD)MiB, &Count, NULL) || Count != MiB)
+            break;
+    }
+    ok(Done >= Bytes, "Writing %s failed at %I64d: %lu\n", Name, Done, GetLastError());
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return File;
+}
+
+static BOOL VerifyPattern(PCSTR Leaf, LONGLONG Bytes)
+{
+    CHAR Name[32];
+    PULONG Buffer = VirtualAlloc(NULL, (SIZE_T)MiB, MEM_COMMIT, PAGE_READWRITE);    /* sector-aligned, for uncached reads */
+    LONGLONG Done;
+    DWORD Count, i;
+    HANDLE File;
+    BOOL Ok = TRUE;
+
+    sprintf(Name, "%c:\\%s", Letter, Leaf);
+    File = CreateFileA(Name, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
+    Ok = File != INVALID_HANDLE_VALUE && Buffer && GetFileSize(File, NULL) == (DWORD)Bytes;
+    for (Done = 0; Ok && Done < Bytes; Done += MiB)
+    {
+        Ok = ReadFile(File, Buffer, (DWORD)MiB, &Count, NULL) && Count == MiB;
+        for (i = 0; Ok && i < MiB / sizeof(ULONG); i++)
+            Ok = Buffer[i] == (0x5A000000 ^ (ULONG)(Done / sizeof(ULONG) + i));
+    }
+    ok(Ok, "%s differs at %I64d (%lu)\n", Name, Done, GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+        CloseHandle(File);
+    if (Buffer)
+        VirtualFree(Buffer, 0, MEM_RELEASE);
+    return Ok;
+}
+
+/* Dismounts the volume through *Volume (locked first) and opens it again: the next access mounts what is on
+ * the disk. A handle left open on the dismounted volume would keep the old mount alive. */
+static BOOL Remount(HANDLE *Volume)
+{
+    DWORD Returned;
+
+    if (!DeviceIoControl(*Volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &Returned, NULL))
+        return FALSE;
+    ok(DeviceIoControl(*Volume, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &Returned, NULL), "Dismount failed: %lu\n", GetLastError());
+    CloseHandle(*Volume);
+    *Volume = OpenVolume(GENERIC_READ | GENERIC_WRITE);
+    ok(*Volume != INVALID_HANDLE_VALUE, "The volume did not open again: %lu\n", GetLastError());
+    return TRUE;
+}
+
 /* The boot sector copy in the last sector of the volume's range, read through the disk. */
 static BOOL BootCopyAt(ULONG Disk, LONGLONG Offset, LONGLONG Sectors)
 {
@@ -299,30 +363,77 @@ static void TestNtfsShrink(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX 
     ok(Data.NumberSectors.QuadPart == Sectors, "NumberSectors %I64d, was %I64d\n", Data.NumberSectors.QuadPart, Sectors);
 }
 
-static void TestFat(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part, PCSTR FileSystem)
+/*
+ * ReactOS only, with the driver's test hook armed (PARTMGR_TEST_FAULT names the stage, the same value
+ * in the ResizeFault DWORD of the Ntfs service key): an extend that fails half way leaves the volume
+ * read-only for every caller, cached writes included.
+ */
+static void TestNtfsFault(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
 {
-    LONGLONG Sectors = Part->PartitionLength.QuadPart / 512, Length;
-    ULONGLONG TotalBefore = TotalBytes();
-    DWORD Error;
+    CHAR Name[32];
+    HANDLE File;
+    DWORD Written, Error;
+    BYTE Data[4096];
 
-    if (!is_reactos())
+    sprintf(Name, "%c:\\fault.bin", Letter);
+    File = WritePattern("fault.bin", 1 * MiB);
+    if (File != INVALID_HANDLE_VALUE)
     {
-        ok_int(Extend(Volume, Sectors, 0), ERROR_INVALID_FUNCTION);
-        return;
+        FlushFileBuffers(File);
+        CloseHandle(File);
     }
-
-    ok_int(Extend(Volume, Sectors, 0), ERROR_SUCCESS);
-    ok_int(Extend(Volume, Sectors - 2048, 0), ERROR_INVALID_PARAMETER);
     if (Grow(Disk, Part->PartitionNumber, 32 * MiB) != ERROR_SUCCESS)
     {
         ok(FALSE, "IOCTL_DISK_GROW_PARTITION failed: %lu\n", GetLastError());
         return;
     }
     PartitionOf(Volume, Part);
+    Error = Extend(Volume, Part->PartitionLength.QuadPart / 512, 0);
+    ok(Error != ERROR_SUCCESS, "The armed extend succeeded\n");
+
+    /* An overwrite inside the file would go to the cache and be lost later: it must be refused. */
+    File = CreateFileA(Name, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        ok_int(GetLastError(), ERROR_WRITE_PROTECT);
+        return;
+    }
+    memset(Data, 0xA5, sizeof(Data));
+    ok(!WriteFile(File, Data, sizeof(Data), &Written, NULL), "A write after the failed extend succeeded\n");
+    ok_int(GetLastError(), ERROR_WRITE_PROTECT);
+    CloseHandle(File);
+}
+
+static void TestFat(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part, PCSTR FileSystem)
+{
+    LONGLONG Sectors = Part->PartitionLength.QuadPart / 512, Length;
+    ULONGLONG TotalBefore = TotalBytes();
+    HANDLE Pending;
+    DWORD Error;
+
+    if (!is_reactos())
+    {
+        ok_int(Extend(*Volume, Sectors, 0), ERROR_INVALID_FUNCTION);
+        return;
+    }
+
+    ok_int(Extend(*Volume, Sectors, 0), ERROR_SUCCESS);
+    ok_int(Extend(*Volume, Sectors - 2048, 0), ERROR_INVALID_PARAMETER);
+    if (Grow(Disk, Part->PartitionNumber, 32 * MiB) != ERROR_SUCCESS)
+    {
+        ok(FALSE, "IOCTL_DISK_GROW_PARTITION failed: %lu\n", GetLastError());
+        return;
+    }
+    PartitionOf(*Volume, Part);
     Length = Part->PartitionLength.QuadPart;
-    ok_int(Extend(Volume, Length / 512 + 2048, 0), ERROR_INVALID_PARAMETER);
-    ok_int(Extend(Volume, Length / 512, 4), ERROR_INVALID_PARAMETER);
-    Error = Extend(Volume, Length / 512, 0);
+    ok_int(Extend(*Volume, Length / 512 + 2048, 0), ERROR_INVALID_PARAMETER);
+    ok_int(Extend(*Volume, Length / 512, 4), ERROR_INVALID_PARAMETER);
+
+    /* A file whose clusters are allocated but whose FAT changes are still in the cache. */
+    Pending = WritePattern("pending.bin", 8 * MiB);
+    Error = Extend(*Volume, Length / 512, 0);
+    if (Pending != INVALID_HANDLE_VALUE)
+        CloseHandle(Pending);
     if (Error == ERROR_DISK_FULL)
     {
         skip("%s volume: its FATs have no room for the new clusters\n", FileSystem);
@@ -330,7 +441,13 @@ static void TestFat(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part, P
     }
     ok_int(Error, ERROR_SUCCESS);
     ok(TotalBytes() >= TotalBefore + 32 * MiB - 1 * MiB, "Total %I64u, was %I64u\n", TotalBytes(), TotalBefore);
-    WriteAndVerify(Sectors * 512 + 8 * MiB);
+
+    /* The extend kept those FAT changes: the file reads back after a fresh mount. */
+    if (Remount(Volume))
+        VerifyPattern("pending.bin", 8 * MiB);
+    else
+        skip("The volume could not be locked for a remount: %lu\n", GetLastError());
+    WriteAndVerify(Sectors * 512);
 }
 
 START_TEST(ExtendVolume)
@@ -376,15 +493,18 @@ START_TEST(ExtendVolume)
 
     if (!strcmp(FileSystem, "NTFS"))
     {
-        if (TestNtfs(Volume, Number.DeviceNumber, &Part))
+        if (GetEnvironmentVariableA("PARTMGR_TEST_FAULT", Value, sizeof(Value)) && is_reactos())
+            TestNtfsFault(Volume, Number.DeviceNumber, &Part);
+        else if (TestNtfs(Volume, Number.DeviceNumber, &Part))
             TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
         else
             skip("NTFS volume did not grow: no shrink tests\n");
     }
     else if (!strncmp(FileSystem, "FAT", 3))
-        TestFat(Volume, Number.DeviceNumber, &Part, FileSystem);
+        TestFat(&Volume, Number.DeviceNumber, &Part, FileSystem);
     else
         skip("No expectations for %s\n", FileSystem);
 
-    CloseHandle(Volume);
+    if (Volume != INVALID_HANDLE_VALUE)
+        CloseHandle(Volume);
 }
