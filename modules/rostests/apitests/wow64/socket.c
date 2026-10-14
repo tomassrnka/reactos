@@ -1,9 +1,13 @@
 /* Cross-bitness socket I/O. SPDX-License-Identifier: LGPL-2.1-or-later */
+#define WIN32_NO_STATUS
 #include <winsock2.h>
 #include <windows.h>
-#include <winternl.h>
+#undef WIN32_NO_STATUS
+#include <ndk/ntndk.h>
 #include <winioctl.h>
 #include <tdi.h>
+#include <tdiinfo.h>
+#include <tcpioctl.h>
 #include <drivers/afd/shared.h>
 #include <stdio.h>
 #include <string.h>
@@ -52,6 +56,50 @@ static void CheckHandleReply(SOCKET Socket)
     CHECK(Io.Guard == 0x12345678);
 }
 
+static void CheckTcpQuery(void)
+{
+    typedef NTSTATUS (NTAPI *OPEN)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG, ULONG);
+    typedef NTSTATUS (NTAPI *IOCTL)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK, ULONG, PVOID, ULONG, PVOID, ULONG);
+    HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
+    OPEN Open = (OPEN)GetProcAddress(Ntdll, "NtOpenFile");
+    IOCTL Ioctl = (IOCTL)GetProcAddress(Ntdll, "NtDeviceIoControlFile");
+    WCHAR Path[] = L"\\Device\\Tcp";
+    UNICODE_STRING Name = {sizeof(Path) - sizeof(WCHAR), sizeof(Path), Path};
+    OBJECT_ATTRIBUTES Attributes;
+    struct { IO_STATUS_BLOCK Io; ULONG Guard; } Result = {{{0}}, 0x12345678};
+    struct { ULONG Before; TCP_REQUEST_QUERY_INFORMATION_EX Query; ULONG After; } Input;
+    struct { TDIEntityID Entities[128]; ULONG Guard; } Output;
+    HANDLE Handle = NULL;
+    NTSTATUS Status;
+
+    CHECK(Open && Ioctl);
+    if (!Open || !Ioctl) return;
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = Open(&Handle, GENERIC_READ | SYNCHRONIZE, &Attributes, &Result.Io,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT);
+    CHECK(Status == 0);
+    if (Status) return;
+    memset(&Input, 0, sizeof(Input));
+    Input.Before = Input.After = Output.Guard = 0xabcdef01;
+    Input.Query.ID.toi_entity.tei_entity = GENERIC_ENTITY;
+    Input.Query.ID.toi_class = INFO_CLASS_GENERIC;
+    Input.Query.ID.toi_type = INFO_TYPE_PROVIDER;
+    Input.Query.ID.toi_id = ENTITY_LIST_ID;
+    memset(Input.Query.Context, 0x5a, sizeof(Input.Query.Context));
+    Status = Ioctl(Handle, NULL, NULL, NULL, &Result.Io, IOCTL_TCP_QUERY_INFORMATION_EX,
+                   &Input.Query, sizeof(Input.Query), Output.Entities, sizeof(Output.Entities));
+    CHECK(Status == 0 && Result.Io.Status == 0 && Result.Io.Information >= sizeof(TDIEntityID));
+    CHECK(Result.Io.Information <= sizeof(Output.Entities) && Result.Io.Information % sizeof(TDIEntityID) == 0);
+    CHECK(Input.Before == 0xabcdef01 && Input.After == 0xabcdef01 && Output.Guard == 0xabcdef01);
+    CHECK(Result.Guard == 0x12345678);
+    CHECK(((BYTE *)Input.Query.Context)[0] == 0x5a && ((BYTE *)Input.Query.Context)[15] == 0x5a);
+    Status = Ioctl(Handle, NULL, NULL, NULL, &Result.Io, IOCTL_TCP_QUERY_INFORMATION_EX,
+                   &Input.Query, sizeof(Input.Query) - 1, Output.Entities, sizeof(Output.Entities));
+    CHECK(Status == STATUS_INVALID_PARAMETER);
+    CHECK(Input.After == 0xabcdef01 && Output.Guard == 0xabcdef01 && Result.Guard == 0x12345678);
+    CloseHandle(Handle);
+}
+
 int main(int argc, char **argv)
 {
     WSADATA Data;
@@ -84,6 +132,7 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "--bind-abi"))
     {
         CheckHandleReply(Listener);
+        CheckTcpQuery();
         goto End;
     }
     if (argc == 2 && !strcmp(argv[1], "--bind-only")) goto End;

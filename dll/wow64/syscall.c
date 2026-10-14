@@ -3,6 +3,7 @@
 #include <mountmgr.h>
 #include <winsock2.h>
 #include <tdi.h>
+#include <tcpioctl.h>
 #include <drivers/afd/shared.h>
 
 enum
@@ -564,6 +565,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         switch (a[5])
         {
         case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
+        case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
         case IOCTL_AFD_BIND:
         case IOCTL_AFD_START_LISTEN:
         case IOCTL_AFD_GET_SOCK_NAME:
