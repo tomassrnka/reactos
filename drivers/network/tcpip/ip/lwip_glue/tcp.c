@@ -892,12 +892,49 @@ void LibTCPFreeSocket(PTCP_PCB pcb)
 }
 
 
+/* Called with the core lock held: does any PCB, one in TIME-WAIT included,
+   use this local port (host order)? */
+static
+BOOLEAN
+LibTCPLocalPortUsed(ULONG Port)
+{
+    struct tcp_pcb *pcb;
+    u8_t i;
+
+    for (i = 0; i < NUM_TCP_PCB_LISTS; i++)
+    {
+        for (pcb = *tcp_pcb_lists[i]; pcb != NULL; pcb = pcb->next)
+        {
+            if (pcb->local_port == Port)
+                return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+/* Every ephemeral TCP port comes from the port bitmap, which address files
+   share; like lwIP's own allocator it skips ports a PCB still uses. Returns
+   the port in network order, or (UINT)-1 if the range is exhausted */
+UINT
+LibTCPAllocateEphemeralPort(VOID)
+{
+    UINT Port;
+
+    LOCK_TCPIP_CORE();
+    Port = TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
+    UNLOCK_TCPIP_CORE();
+
+    return Port;
+}
+
 static
 void
 LibTCPBindCallback(void *arg)
 {
     struct lwip_callback_msg *msg = arg;
     PTCP_PCB pcb = msg->Input.Bind.Connection->SocketContext;
+    UINT Port = msg->Input.Bind.Port;
 
     ASSERT(msg);
 
@@ -910,16 +947,38 @@ LibTCPBindCallback(void *arg)
     /* We're guaranteed that the local address is valid to bind at this point */
     pcb->so_options |= SOF_REUSEADDR;
 
+    if (!Port)
+    {
+        /* lwIP would pick a port the bitmap may have given to an address file */
+        Port = TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
+        if (Port == (UINT)-1)
+        {
+            /* Every ephemeral port is taken: WSAENOBUFS, as on Windows */
+            msg->Output.Bind.Error = ERR_MEM;
+            goto done;
+        }
+    }
+
     msg->Output.Bind.Error = tcp_bind(pcb,
                                       msg->Input.Bind.IpAddress,
-                                      lwip_ntohs(msg->Input.Bind.Port));
+                                      lwip_ntohs((u16_t)Port));
+
+    if (!msg->Input.Bind.Port)
+    {
+        if (msg->Output.Bind.Error == ERR_OK)
+            msg->Output.Bind.Port = (u16_t)Port;
+        else
+            TCPFreePort(Port);
+    }
 
 done:
     KeSetEvent(&msg->Event, IO_NO_INCREMENT, FALSE);
 }
 
+/* Port 0 binds an ephemeral port, which stays reserved in the port bitmap;
+   it is returned in *BoundPort (network order) */
 err_t
-LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port)
+LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port, u16_t *const BoundPort)
 {
     struct lwip_callback_msg *msg;
     err_t ret;
@@ -931,6 +990,7 @@ LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_
         msg->Input.Bind.Connection = Connection;
         msg->Input.Bind.IpAddress = ipaddr;
         msg->Input.Bind.Port = port;
+        msg->Output.Bind.Port = port;
 
         tcpip_callback_with_block(LibTCPBindCallback, msg, 1);
 
@@ -938,6 +998,9 @@ LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_
             ret = msg->Output.Bind.Error;
         else
             ret = ERR_CLSD;
+
+        if (ret == ERR_OK && BoundPort)
+            *BoundPort = msg->Output.Bind.Port;
 
         ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
 

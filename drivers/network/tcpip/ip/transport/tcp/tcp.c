@@ -312,7 +312,7 @@ NTSTATUS TCPConnect
     ip_addr_t bindaddr, connaddr;
     IP_ADDRESS RemoteAddress;
     USHORT RemotePort;
-    TA_IP_ADDRESS LocalAddress;
+    u16_t BoundPort;
     PTDI_BUCKET Bucket;
     PNEIGHBOR_CACHE_ENTRY NCE;
 
@@ -360,7 +360,8 @@ NTSTATUS TCPConnect
 
     Status = TCPTranslateError(LibTCPBind(Connection,
                                           &bindaddr,
-                                          Connection->AddressFile->Port));
+                                          Connection->AddressFile->Port,
+                                          &BoundPort));
 
     if (!NT_SUCCESS(Status))
     {
@@ -373,26 +374,8 @@ NTSTATUS TCPConnect
     /* Check if we had an unspecified port */
     if (!Connection->AddressFile->Port)
     {
-        UINT AllocatedPort;
-
-        /* We did, so we need to copy back the port */
-        Status = TCPGetSockAddress(Connection, (PTRANSPORT_ADDRESS)&LocalAddress, FALSE);
-        if (!NT_SUCCESS(Status))
-        {
-            UnlockObject(Connection);
-            return Status;
-        }
-
-        /* Allocate the port in the port bitmap */
-        AllocatedPort = TCPAllocatePort(LocalAddress.Address[0].Address[0].sin_port);
-        /* This should never fail unless all ports are in use */
-        if (AllocatedPort == (UINT) -1)
-        {
-            DbgPrint("ERR: No more ports available.\n");
-            UnlockObject(Connection);
-            return STATUS_TOO_MANY_ADDRESSES;
-        }
-        Connection->AddressFile->Port = AllocatedPort;
+        /* LibTCPBind reserved an ephemeral port in the port bitmap */
+        Connection->AddressFile->Port = BoundPort;
     }
 
     connaddr.addr = RemoteAddress.Address.IPv4Address;
@@ -667,7 +650,13 @@ UINT TCPAllocatePort(const UINT HintPort)
         }
     }
     else
-        return AllocatePortFromRange( &TCPPorts, 1024, 5000 );
+        return LibTCPAllocateEphemeralPort();
+}
+
+/* A free port of the dynamic range that InUse does not report as taken */
+UINT TCPAllocateEphemeralPort(PPORT_IN_USE_ROUTINE InUse)
+{
+    return AllocatePortFromRangeUnless(&TCPPorts, TCP_EPHEMERAL_FIRST, TCP_EPHEMERAL_LAST, InUse);
 }
 
 VOID TCPFreePort(const UINT Port)
