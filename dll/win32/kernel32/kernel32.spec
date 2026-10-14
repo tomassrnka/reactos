@@ -124,6 +124,7 @@
 @ stdcall CreateEventW(ptr long long wstr)
 @ stdcall CreateFiber(long ptr ptr)
 @ stdcall CreateFiberEx(long long long ptr ptr)
+@ stdcall CreateFile2(wstr long long long ptr)
 @ stdcall CreateFileA(str long long ptr long long long)
 @ stdcall CreateFileMappingA(long ptr long long long str)
 @ stdcall -stub -version=0x600+ CreateFileMappingNumaA(ptr ptr long long long str long)
