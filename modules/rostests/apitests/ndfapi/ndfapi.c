@@ -370,6 +370,141 @@ static void test_com(void)
     ok(Object == NULL, "got %p\n", Object);
 }
 
+/* The functions that make an incident out of more than a string; measured on Windows 10 (the first two and the last exist on older Windows too) */
+static void test_create_more(void)
+{
+    typedef HRESULT (WINAPI *PPnrp)(LPCWSTR, LPCWSTR, BOOL, LPCWSTR, NDFHANDLE *);
+    typedef HRESULT (WINAPI *PGrouping)(LPCWSTR, LPCWSTR, LPCWSTR, PVOID, LPCWSTR, NDFHANDLE *);
+    typedef HRESULT (WINAPI *PNetConnection)(NDFHANDLE *, GUID);
+    typedef HRESULT (WINAPI *PCreateIncident)(LPCWSTR, ULONG, PVOID, NDFHANDLE *);
+    typedef HRESULT (WINAPI *PRepair)(NDFHANDLE, PVOID, DWORD);
+    typedef HRESULT (WINAPI *PRepairEx)(NDFHANDLE, PVOID, DWORD, DWORD);
+    PPnrp pPnrp = (PVOID)GetProcAddress(hNdfapi, "NdfCreatePnrpIncident");
+    PGrouping pGrouping = (PVOID)GetProcAddress(hNdfapi, "NdfCreateGroupingIncident");
+    PNetConnection pNetConnection = (PVOID)GetProcAddress(hNdfapi, "NdfCreateNetConnectionIncident");
+    PCreateIncident pCreateIncident = (PVOID)GetProcAddress(hNdfapi, "NdfCreateIncident");
+    PRepair pRepair = (PVOID)GetProcAddress(hNdfapi, "NdfRepairIncident");
+    PRepairEx pRepairEx = (PVOID)GetProcAddress(hNdfapi, "NdfRepairIncidentEx");
+    SOCKADDR_IN Address = { AF_INET };
+    SOCKET_ADDRESS_LIST Addresses = { 1, { { (LPSOCKADDR)&Address, sizeof(Address) } } };
+    NDFHANDLE Incident, Other;
+    HRESULT hr;
+    GUID Id = { 1, 2, 3, { 4, 5, 6, 7, 8, 9, 10, 11 } }, None = { 0 };
+
+    /* Windows Server 2008 R2 asks for more (the application name of a grouping incident is needed there) and some of its calls crash */
+    if (!is_reactos() && GetNTVersion() < 0x0A00)
+    {
+        skip("The argument checks were measured on Windows 10\n");
+        return;
+    }
+
+    if (pPnrp)
+    {
+        /* only the handle is needed */
+        Incident = MARKER;
+        hr = pPnrp(L"cloud", L"peer", TRUE, L"app", &Incident);
+        ok(hr == S_OK, "got 0x%lx\n", hr);
+        ok(Incident != NULL && Incident != MARKER, "got %p\n", Incident);
+        if (hr == S_OK)
+            pNdfCloseIncident(Incident);
+        Incident = MARKER;
+        hr = pPnrp(NULL, NULL, FALSE, NULL, &Incident);
+        ok(hr == S_OK, "got 0x%lx\n", hr);
+        if (hr == S_OK)
+            pNdfCloseIncident(Incident);
+        hr = pPnrp(L"cloud", L"peer", TRUE, L"app", NULL);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+    }
+
+    /* the two functions below were measured with strings that name no class and no address: Windows 10 crashes or refuses
+       when it gets what it looks into (a class name that exists, an address list that is not empty), so only ReactOS is held to them */
+    if (is_reactos() && pGrouping)
+    {
+        /* everything but the application name is needed */
+        Incident = MARKER;
+        hr = pGrouping(L"cloud", L"group", L"identity", &Addresses, NULL, &Incident);
+        ok(hr == S_OK, "got 0x%lx\n", hr);
+        if (hr == S_OK)
+            pNdfCloseIncident(Incident);
+        Incident = MARKER;
+        hr = pGrouping(NULL, L"group", L"identity", &Addresses, L"app", &Incident);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+        hr = pGrouping(L"cloud", NULL, L"identity", &Addresses, L"app", &Incident);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+        hr = pGrouping(L"cloud", L"group", NULL, &Addresses, L"app", &Incident);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+        hr = pGrouping(L"cloud", L"group", L"identity", NULL, L"app", &Incident);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+        hr = pGrouping(L"cloud", L"group", L"identity", &Addresses, L"app", NULL);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+        ok(Incident == MARKER, "got %p\n", Incident);
+    }
+
+    if (pNetConnection)
+    {
+        Incident = MARKER;
+        hr = pNetConnection(&Incident, Id);
+        ok(hr == S_OK, "got 0x%lx\n", hr);
+        ok(Incident != NULL && Incident != MARKER, "got %p\n", Incident);
+        if (hr == S_OK)
+            pNdfCloseIncident(Incident);
+        Incident = MARKER;
+        hr = pNetConnection(&Incident, None);
+        ok(hr == S_OK, "got 0x%lx\n", hr);
+        if (hr == S_OK)
+            pNdfCloseIncident(Incident);
+        hr = pNetConnection(NULL, Id);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+    }
+
+    if (is_reactos() && pCreateIncident)
+    {
+        Incident = MARKER;
+        hr = pCreateIncident(L"class", 0, NULL, &Incident);
+        ok(hr == S_OK, "got 0x%lx\n", hr);
+        ok(Incident != NULL && Incident != MARKER, "got %p\n", Incident);
+        if (hr == S_OK)
+            pNdfCloseIncident(Incident);
+        Incident = MARKER;
+        hr = pCreateIncident(L"", 0, NULL, &Incident);
+        ok(hr == S_OK, "got 0x%lx\n", hr);
+        if (hr == S_OK)
+            pNdfCloseIncident(Incident);
+        Incident = MARKER;
+        hr = pCreateIncident(NULL, 0, NULL, &Incident);
+        ok(hr == 0x8008f901, "got 0x%lx\n", hr);
+        ok(Incident == MARKER, "got %p\n", Incident);
+        hr = pCreateIncident(L"class", 0, NULL, NULL);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+        hr = pCreateIncident(L"class", 1, NULL, &Incident);
+        ok(hr == NDF_E_BAD_PARAM, "got 0x%lx\n", hr);
+        ok(Incident == MARKER, "got %p\n", Incident);
+    }
+
+    /* without a diagnosis nothing is proposed to repair: no handle, then no repair */
+    Other = NULL;
+    if ((pRepair || pRepairEx) && pNdfCreateConnectivityIncident(&Other) == S_OK)
+    {
+        if (pRepair)
+        {
+            hr = pRepair(NULL, NULL, 0);
+            ok(hr == E_HANDLE, "got 0x%lx\n", hr);
+            hr = pRepair(Other, NULL, 0);
+            ok(hr == E_INVALIDARG, "got 0x%lx\n", hr);
+            hr = pRepair(Other, NULL, 1000);
+            ok(hr == E_INVALIDARG, "got 0x%lx\n", hr);
+        }
+        if (pRepairEx)
+        {
+            hr = pRepairEx(NULL, NULL, 0, 0);
+            ok(hr == E_HANDLE, "got 0x%lx\n", hr);
+            hr = pRepairEx(Other, NULL, 0, 0);
+            ok(hr == E_INVALIDARG, "got 0x%lx\n", hr);
+        }
+        pNdfCloseIncident(Other);
+    }
+}
+
 START_TEST(ndfapi)
 {
     hNdfapi = LoadLibraryW(L"ndfapi.dll");
@@ -404,6 +539,7 @@ START_TEST(ndfapi)
     }
 
     test_create();
+    test_create_more();
     test_handle_checks();
     test_winsock();
     test_diagnosis_without_service();

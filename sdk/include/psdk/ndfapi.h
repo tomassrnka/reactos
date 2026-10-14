@@ -29,6 +29,12 @@ STDAPI NdfCreateConnectivityIncident(NDFHANDLE *handle);
 STDAPI NdfCreateDNSIncident(LPCWSTR hostname, WORD queryType, NDFHANDLE *handle);
 STDAPI NdfCreateSharingIncident(LPCWSTR uncPath, NDFHANDLE *handle);
 STDAPI NdfCreateWebIncident(LPCWSTR url, NDFHANDLE *handle);
+STDAPI NdfCreatePnrpIncident(LPCWSTR cloudName, LPCWSTR peerName, BOOL diagnosePublisherOnly, LPCWSTR appId, NDFHANDLE *handle);
+STDAPI NdfCreateGroupingIncident(LPCWSTR cloudName, LPCWSTR groupName, LPCWSTR identity, SOCKET_ADDRESS_LIST *addresses, LPCWSTR appId, NDFHANDLE *handle);
+STDAPI NdfCreateNetConnectionIncident(NDFHANDLE *handle, GUID id);
+STDAPI NdfCreateIncident(LPCWSTR helperClassName, ULONG attributeCount, PVOID attributes, NDFHANDLE *handle);
+STDAPI NdfRepairIncident(NDFHANDLE handle, PVOID repair, DWORD timeout);
+STDAPI NdfRepairIncidentEx(NDFHANDLE handle, PVOID repair, DWORD timeout, DWORD flags);
 STDAPI NdfCreateWebIncidentEx(LPCWSTR url, BOOL useWinHTTP, LPWSTR modulePath, NDFHANDLE *handle);
 STDAPI NdfCreateWinSockIncident(SOCKET sock, LPCWSTR host, USHORT port, LPCWSTR appId, SID *userId, NDFHANDLE *handle);
 
