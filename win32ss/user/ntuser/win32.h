@@ -289,6 +289,10 @@ typedef struct _PROCESSINFO
     DWORD dwRegisteredClasses;
 
     /* ReactOS */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Published once under the USER lock; lives until PROCESSINFO is freed. */
+    struct _CLIENTPFN *pClientPfn;
+#endif
     FAST_MUTEX PrivateFontListLock;
     LIST_ENTRY PrivateFontListHead;
     LIST_ENTRY PrivateMemFontListHead;
@@ -327,3 +331,28 @@ lstrlenW(
 }
 
 #define strlenW lstrlenW
+
+/* Client procedure addresses belong to a process, even for system classes.
+ * Default builds expand to the original session-wide table accesses. */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+#ifndef __cplusplus
+typedef struct _CLIENTPFN
+{
+    PFNCLIENT ClientA;
+    PFNCLIENT ClientW;
+    PFNCLIENTWORKER ClientWorker;
+    HINSTANCE hModule;
+} CLIENTPFN, *PCLIENTPFN;
+#endif
+
+WNDPROC IntGetClientProc(PPROCESSINFO ppi, INT fnid, BOOL Ansi);
+HINSTANCE IntGetClientModule(PPROCESSINFO ppi);
+#define IntGetClientProcA(ppi, fnid) IntGetClientProc(ppi, fnid, TRUE)
+#define IntGetClientProcW(ppi, fnid) IntGetClientProc(ppi, fnid, FALSE)
+WNDPROC IntGetClientProcServer(PPROCESSINFO ppi, INT fnid);
+#else
+#define IntGetClientProcA(ppi, fnid) GETPFNCLIENTA(fnid)
+#define IntGetClientProcW(ppi, fnid) GETPFNCLIENTW(fnid)
+#define IntGetClientProcServer(ppi, fnid) GETPFNSERVER(fnid)
+#define IntGetClientModule(ppi) hModClient
+#endif
