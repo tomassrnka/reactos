@@ -55,7 +55,7 @@ typedef struct _COPY2_ID
     DWORD Volume;
     ULONGLONG Index;
     BOOL HasDevice;
-    WCHAR Device[48];                   /* "\\Device\\HarddiskVolume2": two volumes can have the same serial number */
+    WCHAR Device[160];                  /* "\\Device\\HarddiskVolume2": two volumes can have the same serial number */
     BOOL HasName;
     WCHAR Name[COPY2_NAME_CHARS];       /* upper case */
     WCHAR Alias[16];                    /* the 8.3 name of the leaf, upper case, if there is one */
@@ -212,34 +212,61 @@ Copy2UpperName(
     To[Length] = UNICODE_NULL;
 }
 
-/* The device part of the name of the open file, which tells two mounted volumes apart whatever their serial numbers */
-static VOID
+/*
+ * The device part of the name of the open file, which tells two mounted volumes apart whatever their serial numbers.
+ * The name is read whole, however long the path is. FALSE when the device cannot be found: a file with no known
+ * device is never told apart from another by its volume serial number and index alone, as volumes cloned from one
+ * another have both.
+ */
+static BOOL
 Copy2ReadDevice(
     _In_ HANDLE File,
     _Inout_ COPY2_ID *Id)
 {
-    UCHAR Buffer[sizeof(OBJECT_NAME_INFORMATION) + COPY2_NAME_CHARS * sizeof(WCHAR)];
-    OBJECT_NAME_INFORMATION *Name = (OBJECT_NAME_INFORMATION *)Buffer;
-    ULONG Length, Slashes = 0, i;
+    OBJECT_NAME_INFORMATION *Name = NULL;
+    ULONG Size = sizeof(*Name) + COPY2_NAME_CHARS * sizeof(WCHAR), Needed = 0, Length, Slashes = 0, i;
+    NTSTATUS Status = STATUS_INSUFFICIENT_RESOURCES;
+    BOOL Found = FALSE;
+    int Tries;
 
-    if (!NT_SUCCESS(NtQueryObject(File, ObjectNameInformation, Buffer, sizeof(Buffer), NULL)) ||
-        !Name->Name.Buffer || Name->Name.Length < 2 * sizeof(WCHAR))
+    for (Tries = 0; Tries < 4; Tries++)
     {
-        return;
-    }
+        Name = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+        if (!Name)
+            return FALSE;
 
-    /* "\Device\HarddiskVolume2\dir\file": up to the third backslash */
-    Length = Name->Name.Length / sizeof(WCHAR);
-    for (i = 0; i < Length; i++)
-    {
-        if (Name->Name.Buffer[i] == L'\\' && ++Slashes == 3)
+        Status = NtQueryObject(File, ObjectNameInformation, Name, Size, &Needed);
+        if (NT_SUCCESS(Status))
             break;
-    }
-    if (Slashes < 3 || i >= ARRAYSIZE(Id->Device))
-        return;
 
-    Copy2UpperName(Id->Device, ARRAYSIZE(Id->Device), Name->Name.Buffer, i);
-    Id->HasDevice = TRUE;
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Name);
+        Name = NULL;
+        if (Status != STATUS_INFO_LENGTH_MISMATCH && Status != STATUS_BUFFER_OVERFLOW && Status != STATUS_BUFFER_TOO_SMALL)
+            return FALSE;
+        Size = (Needed > Size) ? Needed : Size * 2;
+    }
+    if (!Name)
+        return FALSE;
+
+    if (Name->Name.Buffer && Name->Name.Length >= 2 * sizeof(WCHAR))
+    {
+        /* "\Device\HarddiskVolume2\dir\file": up to the third backslash; a volume opened itself has two */
+        Length = Name->Name.Length / sizeof(WCHAR);
+        for (i = 0; i < Length; i++)
+        {
+            if (Name->Name.Buffer[i] == L'\\' && ++Slashes == 3)
+                break;
+        }
+        if (Slashes >= 2 && Name->Name.Buffer[0] == L'\\' && i < ARRAYSIZE(Id->Device))
+        {
+            Copy2UpperName(Id->Device, ARRAYSIZE(Id->Device), Name->Name.Buffer, i);
+            Id->HasDevice = TRUE;
+            Found = TRUE;
+        }
+    }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Name);
+    return Found;
 }
 
 static VOID
@@ -259,7 +286,12 @@ Copy2ReadId(
     Id->Valid = TRUE;
     Id->Volume = Info.dwVolumeSerialNumber;
     Id->Index = ((ULONGLONG)Info.nFileIndexHigh << 32) | Info.nFileIndexLow;
-    Copy2ReadDevice(File, Id);
+    if (!Copy2ReadDevice(File, Id))
+    {
+        /* An identity without its device decides nothing */
+        Id->Valid = FALSE;
+        return;
+    }
     if (Id->Index)
         return;
 
@@ -305,9 +337,9 @@ Copy2SameFile(
 
     if (!First->Valid || !Second->Valid)
         return Copy2Unknown;
-    if (First->Volume != Second->Volume)
-        return Copy2Different;
-    if (First->HasDevice && Second->HasDevice && wcscmp(First->Device, Second->Device))
+    if (!First->HasDevice || !Second->HasDevice)
+        return Copy2Unknown;
+    if (First->Volume != Second->Volume || wcscmp(First->Device, Second->Device))
         return Copy2Different;
     if (First->Index || Second->Index)
         return First->Index == Second->Index ? Copy2Same : Copy2Different;
