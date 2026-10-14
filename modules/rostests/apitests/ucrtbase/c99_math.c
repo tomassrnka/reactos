@@ -669,9 +669,11 @@ static void test_gamma(void)
 static void test_gamma_rounding_modes(void)
 {
     unsigned int old = p_controlfp(0, 0);
-    /* INFINITY is computed by an overflow, which the round-down mode clamps */
-    const double inf = INFINITY;
-    const float finf = INFINITY;
+    /* INFINITY is computed by an overflow, which the round-down mode clamps (and the compiler may compute it after the mode was changed) */
+    static const union { unsigned long long bits; double value; } pos_inf = { 0x7ff0000000000000ULL };
+    static const union { unsigned int bits; float value; } pos_inff = { 0x7f800000U };
+    const double inf = pos_inf.value;
+    const float finf = pos_inff.value;
     double d;
     float f;
 
@@ -682,6 +684,43 @@ static void test_gamma_rounding_modes(void)
     CALL(d, p_lgamma(2.6e305)); ok(d >= DBL_MAX, "lgamma(2.6e305) = %g\n", d); ok_errno(ERANGE);
     CALL(d, p_tgamma(172.0)); ok(d >= DBL_MAX, "tgamma(172) = %g\n", d); ok_errno(ERANGE);
     CALL(f, p_tgammaf(36.0f)); ok(f >= FLT_MAX, "tgammaf(36) = %g\n", (double)f); ok_errno(ERANGE);
+    p_controlfp(old, _MCW_RC);
+}
+
+/* The poles at zero are a divide by zero: the flag is raised, in every rounding mode and for both zeros */
+static void test_gamma_pole_flags(void)
+{
+    static const unsigned int modes[] = { _RC_NEAR, _RC_DOWN, _RC_UP, _RC_CHOP };
+    /* INFINITY is made by an overflow, which the round-down and chop modes clamp */
+    static const union { unsigned long long bits; double value; } pos_inf = { 0x7ff0000000000000ULL };
+    static const union { unsigned int bits; float value; } pos_inff = { 0x7f800000U };
+    unsigned int old, sw;
+    double d;
+    float f;
+    unsigned i;
+
+    if (!p_controlfp || !p_statusfp || !p_clearfp)
+    {
+        skip("The floating-point control functions are missing\n");
+        return;
+    }
+
+    old = p_controlfp(0, 0);
+    for (i = 0; i < ARRAYSIZE(modes); i++)
+    {
+        p_controlfp(modes[i], _MCW_RC);
+
+        p_clearfp(); d = p_lgamma(0.0); sw = p_statusfp();
+        ok(d == pos_inf.value && (sw & _SW_ZERODIVIDE), "mode %x: lgamma(0) = %g, flags 0x%x\n", modes[i], d, sw);
+        p_clearfp(); d = p_lgamma(-0.0); sw = p_statusfp();
+        ok(d == pos_inf.value && (sw & _SW_ZERODIVIDE), "mode %x: lgamma(-0) = %g, flags 0x%x\n", modes[i], d, sw);
+        p_clearfp(); d = p_lgammal(0.0); sw = p_statusfp();
+        ok(d == pos_inf.value && (sw & _SW_ZERODIVIDE), "mode %x: lgammal(0) = %g, flags 0x%x\n", modes[i], d, sw);
+        p_clearfp(); f = p_lgammaf(0.0f); sw = p_statusfp();
+        ok(f == pos_inff.value && (sw & _SW_ZERODIVIDE), "mode %x: lgammaf(0) = %g, flags 0x%x\n", modes[i], (double)f, sw);
+        p_clearfp(); f = p_lgammaf(-0.0f); sw = p_statusfp();
+        ok(f == pos_inff.value && (sw & _SW_ZERODIVIDE), "mode %x: lgammaf(-0) = %g, flags 0x%x\n", modes[i], (double)f, sw);
+    }
     p_controlfp(old, _MCW_RC);
 }
 
@@ -732,6 +771,85 @@ static void test_matherr_reports(void)
     ok(g_matherr_calls == 0, "logb and the gamma functions called the handler %d times\n", g_matherr_calls);
 
     p_setusermatherr(NULL);
+}
+
+/* The _o_ variants give the results of the plain functions, but touch neither errno nor the handler of math errors */
+static void test_o_variants(void)
+{
+    HMODULE hUcrt = GetModuleHandleW(L"ucrtbase.dll");
+    double (__cdecl *o_lgamma)(double) = (void *)GetProcAddress(hUcrt, "_o_lgamma");
+    double (__cdecl *o_lgammal)(double) = (void *)GetProcAddress(hUcrt, "_o_lgammal");
+    double (__cdecl *o_tgamma)(double) = (void *)GetProcAddress(hUcrt, "_o_tgamma");
+    double (__cdecl *o_tgammal)(double) = (void *)GetProcAddress(hUcrt, "_o_tgammal");
+    double (__cdecl *o_logb)(double) = (void *)GetProcAddress(hUcrt, "_o_logb");
+    double (__cdecl *o_logbl)(double) = (void *)GetProcAddress(hUcrt, "_o_logbl");
+    double (__cdecl *o__logb)(double) = (void *)GetProcAddress(hUcrt, "_o__logb");
+    float (__cdecl *o_lgammaf)(float) = (void *)GetProcAddress(hUcrt, "_o_lgammaf");
+    float (__cdecl *o_tgammaf)(float) = (void *)GetProcAddress(hUcrt, "_o_tgammaf");
+    float (__cdecl *o_logbf)(float) = (void *)GetProcAddress(hUcrt, "_o_logbf");
+    float (__cdecl *o__logbf)(float) = (void *)GetProcAddress(hUcrt, "_o__logbf");
+    void (__cdecl *p_setusermatherr)(int (__cdecl *)(struct _exception *)) = (void *)GetProcAddress(hUcrt, "__setusermatherr");
+    double d;
+    float f;
+
+    if (!o_lgamma || !o_tgamma || !o_logb || !o__logb)
+    {
+        skip("The _o_ variants are not available\n");
+        return;
+    }
+    ok(o_lgammal && o_tgammal && o_logbl && o_lgammaf && o_tgammaf && o_logbf, "Some _o_ variants are missing\n");
+    if (!o_lgammal || !o_tgammal || !o_logbl || !o_lgammaf || !o_tgammaf || !o_logbf)
+        return;
+    if (p_setusermatherr)
+        p_setusermatherr(matherr_callback);
+    g_matherr_calls = 0;
+
+    CALL(d, o_lgamma(0.0)); ok(d == INFINITY, "_o_lgamma(0) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_lgamma(-0.0)); ok(d == INFINITY, "_o_lgamma(-0) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_lgamma(-1.0)); ok(d == INFINITY, "_o_lgamma(-1) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_lgamma(2.6e305)); ok(d == INFINITY, "_o_lgamma(2.6e305) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_lgamma(5.0)); ok_near(d, 3.1780538303479458, 1e-14); ok_errno(SENTINEL);
+    CALL(d, o_lgammal(0.0)); ok(d == INFINITY, "_o_lgammal(0) = %g\n", d); ok_errno(SENTINEL);
+    CALL(f, o_lgammaf(0.0f)); ok(f == INFINITY, "_o_lgammaf(0) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, o_lgammaf(-2.0f)); ok(f == INFINITY, "_o_lgammaf(-2) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, o_lgammaf(5.0f)); ok_nearf(f, 3.17805383f, 1e-6); ok_errno(SENTINEL);
+
+    CALL(d, o_tgamma(0.0)); ok(d == INFINITY, "_o_tgamma(0) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_tgamma(-0.0)); ok(d == -INFINITY, "_o_tgamma(-0) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_tgamma(-1.0)); ok(is_nan(d), "_o_tgamma(-1) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_tgamma(172.0)); ok(d == INFINITY, "_o_tgamma(172) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_tgamma(-175.5)); ok(d == 0.0, "_o_tgamma(-175.5) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_tgamma(5.0)); ok_near(d, 24.0, 1e-14); ok_errno(SENTINEL);
+    CALL(d, o_tgammal(-1.0)); ok(is_nan(d), "_o_tgammal(-1) = %g\n", d); ok_errno(SENTINEL);
+    CALL(f, o_tgammaf(-1.0f)); ok(is_nan(f), "_o_tgammaf(-1) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, o_tgammaf(36.0f)); ok(f == INFINITY, "_o_tgammaf(36) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, o_tgammaf(-100.5f)); ok(f == 0.0f, "_o_tgammaf(-100.5) = %g\n", (double)f); ok_errno(SENTINEL);
+
+    /* logb: the C99 numbers (+inf for both infinities) */
+    CALL(d, o_logb(0.0)); ok(d == -INFINITY, "_o_logb(0) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_logb(8.0)); ok(d == 3.0, "_o_logb(8) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_logb(-INFINITY)); ok(d == INFINITY, "_o_logb(-inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o_logbl(0.0)); ok(d == -INFINITY, "_o_logbl(0) = %g\n", d); ok_errno(SENTINEL);
+    CALL(f, o_logbf(-0.0f)); ok(f == -INFINITY, "_o_logbf(-0) = %g\n", (double)f); ok_errno(SENTINEL);
+    CALL(f, o_logbf(-INFINITY)); ok(f == INFINITY, "_o_logbf(-inf) = %g\n", (double)f); ok_errno(SENTINEL);
+
+    /* the legacy logb: the sign of an infinity stays, and a NaN is not a domain error */
+    CALL(d, o__logb(0.0)); ok(d == -INFINITY, "_o__logb(0) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o__logb(100.0)); ok(d == 6.0, "_o__logb(100) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o__logb(-INFINITY)); ok(d == -INFINITY, "_o__logb(-inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o__logb(INFINITY)); ok(d == INFINITY, "_o__logb(inf) = %g\n", d); ok_errno(SENTINEL);
+    CALL(d, o__logb(p_nan(""))); ok(is_nan(d), "_o__logb(nan) = %g\n", d); ok_errno(SENTINEL);
+    if (o__logbf)
+    {
+        CALL(f, o__logbf(0.0f)); ok(f == -INFINITY, "_o__logbf(0) = %g\n", (double)f); ok_errno(SENTINEL);
+        CALL(f, o__logbf(0.5f)); ok(f == -1.0f, "_o__logbf(0.5) = %g\n", (double)f); ok_errno(SENTINEL);
+        CALL(f, o__logbf(-INFINITY)); ok(f == -INFINITY, "_o__logbf(-inf) = %g\n", (double)f); ok_errno(SENTINEL);
+        CALL(f, o__logbf(p_nanf(""))); ok(is_nan(f), "_o__logbf(nan) = %g\n", (double)f); ok_errno(SENTINEL);
+    }
+
+    ok(g_matherr_calls == 0, "The _o_ variants called the handler %d times\n", g_matherr_calls);
+    if (p_setusermatherr)
+        p_setusermatherr(NULL);
 }
 
 static void test_logb(void)
@@ -829,7 +947,9 @@ START_TEST(c99_math)
     test_exception_flags();
     test_gamma();
     test_gamma_rounding_modes();
+    test_gamma_pole_flags();
     test_logb();
     test_matherr_reports();
+    test_o_variants();
     test_nan();
 }
