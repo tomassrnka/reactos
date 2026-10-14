@@ -1943,7 +1943,7 @@ CmpWow64Path(PCUNICODE_STRING Name, PCWSTR Path)
 
 /* Return the insertion point in bytes, or zero for a shared/physical path. */
 static ULONG
-CmpWow64KeyOffset(PCUNICODE_STRING Name)
+CmpWow64KeyOffset(PCUNICODE_STRING Name, PULONG Cut)
 {
     static const UNICODE_STRING Software = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE");
     static const UNICODE_STRING Users = RTL_CONSTANT_STRING(L"\\REGISTRY\\USER\\");
@@ -1996,6 +1996,19 @@ CmpWow64KeyOffset(PCUNICODE_STRING Name)
 Classes:
     Tail.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Offset);
     Tail.Length = Tail.MaximumLength = Name->Length - Offset;
+    if (CmpWow64Path(&Tail, L"\\Wow6432Node"))
+    {
+        ULONG NodeLength = sizeof(L"\\Wow6432Node") - sizeof(WCHAR);
+        Tail.Buffer += NodeLength / sizeof(WCHAR);
+        Tail.Length = Tail.MaximumLength = Tail.Length - NodeLength;
+        /* The container itself and redirected children stay physical. Only
+         * shared children are aliases, and only in the 32-bit Classes view. */
+        if (!Tail.Length || CmpWow64Path(&Tail, L"\\Wow6432Node")) return 0;
+        for (i = 0; i < RTL_NUMBER_OF(CmpWow64RedirectedClasses); ++i)
+            if (CmpWow64Path(&Tail, CmpWow64RedirectedClasses[i])) return 0;
+        *Cut = NodeLength;
+        return Offset;
+    }
     for (i = 0; i < RTL_NUMBER_OF(CmpWow64RedirectedClasses); ++i)
         if (CmpWow64Path(&Tail, CmpWow64RedirectedClasses[i])) return Offset;
     return 0;
@@ -2074,7 +2087,7 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
             Full.Length -= Insert;
             if (Context->Wow64Flags & KEY_WOW64_32KEY)
             {
-                Offset = CmpWow64KeyOffset(&Full);
+                Offset = CmpWow64KeyOffset(&Full, &Cut);
                 if (!Offset) { Offset = Software.Length; Insert = 0; }
             }
             else Offset = Software.Length + sizeof(L"\\Classes") - sizeof(WCHAR);
@@ -2091,7 +2104,8 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
         }
     }
     else if (Context->Wow64Flags & KEY_WOW64_32KEY)
-        Offset = CmpWow64KeyOffset(&Full);
+        Offset = CmpWow64KeyOffset(&Full, &Cut);
+    if (Cut) Insert = 0;
     if (!Offset)
     {
         ExFreePoolWithTag(Full.Buffer, TAG_CM);
