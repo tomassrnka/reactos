@@ -53,8 +53,21 @@ typedef UINT32 TBS_RESULT;
 #define TPM_IFTYPE_EMULATOR                 4
 #define TPM_IFTYPE_SPB                      5
 
+#define TBS_OWNERAUTH_TYPE_FULL             1
+#define TBS_OWNERAUTH_TYPE_ADMIN            2
+#define TBS_OWNERAUTH_TYPE_USER             3
+#define TBS_OWNERAUTH_TYPE_ENDORSEMENT      4
+#define TBS_OWNERAUTH_TYPE_ENDORSEMENT_20   12
+#define TBS_OWNERAUTH_TYPE_STORAGE_20       13
+
+#define TBS_TCGLOG_SRTM_BOOT                0
+#define TBS_TCGLOG_SRTM_CURRENT             1
+#define TBS_TCGLOG_DRTM_BOOT                2
+#define TBS_TCGLOG_DRTM_CURRENT             3
+
 typedef UINT32 TBS_COMMAND_PRIORITY;
 typedef UINT32 TBS_COMMAND_LOCALITY;
+typedef UINT32 TBS_OWNERAUTH_TYPE;
 
 typedef struct tdTBS_CONTEXT_PARAMS
 {
@@ -98,6 +111,10 @@ typedef void *TBS_HCONTEXT, **PTBS_HCONTEXT;
 TBSIMP Tbsi_Context_Create(PCTBS_CONTEXT_PARAMS, PTBS_HCONTEXT);
 TBSIMP Tbsi_GetDeviceInfo(UINT32, PVOID);
 TBSIMP Tbsi_Get_TCG_Log(TBS_HCONTEXT, PBYTE, PUINT32);
+TBSIMP Tbsi_Get_TCG_Log_Ex(UINT32, PBYTE, PUINT32);
+TBSIMP Tbsi_Get_OwnerAuth(TBS_HCONTEXT, TBS_OWNERAUTH_TYPE, PBYTE, PUINT32);
+TBSIMP Tbsi_Revoke_Attestation(void);
+TBSIMP Tbsi_Create_Windows_Key(UINT32);
 TBSIMP Tbsi_Physical_Presence_Command(TBS_HCONTEXT, const BYTE *, UINT32, PBYTE, PUINT32);
 TBSIMP Tbsip_Cancel_Commands(TBS_HCONTEXT);
 TBSIMP Tbsip_Context_Close(TBS_HCONTEXT);
