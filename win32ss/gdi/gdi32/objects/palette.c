@@ -193,7 +193,7 @@ UpdateColors(
     HDC	hdc
 )
 {
-    ((PW32CLIENTINFO)NtCurrentTeb()->Win32ClientInfo)->cSpins = 0;
+    GdiResetUserPollCount();
     return NtGdiUpdateColors(hdc);
 }
 

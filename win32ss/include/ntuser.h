@@ -1,6 +1,7 @@
 #ifndef __WIN32K_NTUSER_H
 #define __WIN32K_NTUSER_H
 #include "w32kwide.h"
+#include "w32kteb.h"
 struct _PROCESSINFO;
 struct _THREADINFO;
 struct _DESKTOP;
@@ -353,7 +354,10 @@ typedef struct _CLIENTINFO
 /* Make sure it fits into the TEB */
 C_ASSERT(W32K_NATIVE_ASSERT(sizeof(CLIENTINFO) <= sizeof(((PTEB)0)->Win32ClientInfo)));
 
-#define GetWin32ClientInfo() ((PCLIENTINFO)(NtCurrentTeb()->Win32ClientInfo))
+#define GetWin32ClientInfo() ((PCLIENTINFO)(W32GetCurrentTeb()->Win32ClientInfo))
+#ifdef W32K_WIDE_ACTIVE
+C_ASSERT(sizeof(CLIENTINFO) <= sizeof(((PTEB64)0)->Win32ClientInfo));
+#endif
 
 typedef struct tagDDEPACK
 {
@@ -905,12 +909,23 @@ typedef LONG_PTR
 
 #define ICLASS_TO_MASK(iCls) (1 << ((iCls)))
 
+#ifdef W32K_WIDE_ACTIVE
+/* Registered by this guest user32. SERVERINFO contains native procedures. */
+extern PFNCLIENT pfnClientA, pfnClientW;
+#define GETPFNCLIENTA(fnid) \
+ (WNDPROC)(ULONG_PTR)(((KULONG_PTR *)&pfnClientA)[(fnid) - FNID_FIRST])
+#define GETPFNCLIENTW(fnid) \
+ (WNDPROC)(ULONG_PTR)(((KULONG_PTR *)&pfnClientW)[(fnid) - FNID_FIRST])
+/* Matches IntGetClientProcServer's per-process W-table prefix. */
+#define GETPFNSERVER(fnid) GETPFNCLIENTW(fnid)
+#else
 #define GETPFNCLIENTA(fnid) \
  (WNDPROC)(ULONG_PTR)(*(((KULONG_PTR *)&gpsi->apfnClientA) + (fnid - FNID_FIRST)))
 #define GETPFNCLIENTW(fnid) \
  (WNDPROC)(ULONG_PTR)(*(((KULONG_PTR *)&gpsi->apfnClientW) + (fnid - FNID_FIRST)))
 
 #define GETPFNSERVER(fnid) KA(gpsi->aStoCidPfn[fnid - FNID_FIRST])
+#endif
 
 /* ICLS's for NtUserGetClassName FNID to ICLS, NtUserInitializeClientPfnArrays */
 #define ICLS_BUTTON       0

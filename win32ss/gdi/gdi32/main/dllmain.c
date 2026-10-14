@@ -51,12 +51,12 @@ GdiProcessSetup(VOID)
         hProcessHeap = GetProcessHeap();
 
         /* map the gdi handle table to user space */
-        GdiHandleTable = NtCurrentTeb()->ProcessEnvironmentBlock->GdiSharedHandleTable;
-        GdiSharedHandleTable = NtCurrentTeb()->ProcessEnvironmentBlock->GdiSharedHandleTable;
+        GdiHandleTable = W32GetGdiSharedHandleTable();
+        GdiSharedHandleTable = W32GetGdiSharedHandleTable();
         GdiDevCaps = &GdiSharedHandleTable->DevCaps;
         CurrentProcessId = NtCurrentTeb()->ClientId.UniqueProcess;
-        GDI_BatchLimit = (DWORD) NtCurrentTeb()->ProcessEnvironmentBlock->GdiDCAttributeList;
-        GdiHandleCache = (PGDIHANDLECACHE)NtCurrentTeb()->ProcessEnvironmentBlock->GdiHandleBuffer;
+        GDI_BatchLimit = (DWORD) W32GetCurrentPeb()->GdiDCAttributeList;
+        GdiHandleCache = (PGDIHANDLECACHE)W32GetCurrentPeb()->GdiHandleBuffer;
         RtlInitializeCriticalSection(&semLocal);
         InitializeCriticalSection(&gcsClientObjLinks);
         InitializeCriticalSection(&gcsDrawStream);
@@ -103,8 +103,8 @@ GdiDllInitialize(
 
         case DLL_THREAD_ATTACH:
         {
-            NtCurrentTeb()->GdiTebBatch.Offset = 0;
-            NtCurrentTeb()->GdiBatchCount = 0;
+            W32GetCurrentTeb()->GdiTebBatch.Offset = 0;
+            W32GetCurrentTeb()->GdiBatchCount = 0;
             break;
         }
 
