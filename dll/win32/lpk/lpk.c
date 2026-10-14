@@ -232,6 +232,36 @@ LpkDllInitialize(
 }
 
 
+static BOOL LPK_FontLacksChars(HDC hdc, LPCWSTR str, UINT count)
+{
+    WORD stackBuf[64], *indices = stackBuf;
+    UINT i;
+    BOOL lacks = FALSE;
+
+    if (count > _countof(stackBuf))
+    {
+        indices = HeapAlloc(GetProcessHeap(), 0, count * sizeof(WORD));
+        if (!indices)
+            return FALSE;
+    }
+
+    if (GetGlyphIndicesW(hdc, str, count, indices, GGI_MARK_NONEXISTING_GLYPHS) != GDI_ERROR)
+    {
+        for (i = 0; i < count; i++)
+        {
+            if (indices[i] == 0xFFFF && str[i] >= L' ')
+            {
+                lacks = TRUE;
+                break;
+            }
+        }
+    }
+
+    if (indices != stackBuf)
+        HeapFree(GetProcessHeap(), 0, indices);
+    return lacks;
+}
+
 /*
  * @implemented
  */
@@ -276,6 +306,14 @@ LpkExtTextOut(
         bReorder = BIDI_Reorder(hdc, lpString, uCount, GCP_REORDER,
                                 (fuOptions & ETO_RTLREADING) ? WINE_GCPW_FORCE_RTL : WINE_GCPW_FORCE_LTR,
                                 reordered_str, uCount, NULL, &glyphs, &cGlyphs);
+
+        /* The glyph array only knows the selected font. If it lacks a character, draw the reordered
+           string instead so that the font linking in win32k can supply the missing glyphs. */
+        if (glyphs && bReorder && LPK_FontLacksChars(hdc, lpString, uCount))
+        {
+            HeapFree(GetProcessHeap(), 0, glyphs);
+            glyphs = NULL;
+        }
 
         /* Now display the reordered text if any of the arrays is valid and if BIDI_Reorder() succeeded */
         if ((glyphs || reordered_str) && bReorder)
