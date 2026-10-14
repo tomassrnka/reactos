@@ -73,6 +73,8 @@ static const TEST_CASE TestCases[] =
     { "untrusted root sent, other host asked for", BLOB(CertLeafUntrustedRoot), BLOB(CertUntrustedRoot), TEST_OTHER_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE, FALSE },
     { "no target name, no server name check", BLOB(CertLeafValid), NoCert, NULL, SCH_CRED_NO_SERVERNAME_CHECK, 0, CONTINUE, FALSE, FALSE },
     { "intermediate not sent, other host asked for", BLOB(CertLeafViaIntermediate), NoCert, TEST_OTHER_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE, FALSE },
+    { "expired, issuer unknown", BLOB(CertLeafExpiredUntrusted), NoCert, TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE, TRUE },
+    { "expired, untrusted root sent", BLOB(CertLeafExpiredUntrusted), BLOB(CertUntrustedRoot), TEST_HOST, 0, 0, SEC_E_UNTRUSTED_ROOT, FALSE, FALSE },
     { "signed by a trusted certificate that is not a CA", BLOB(CertLeafFromNonCa), BLOB(CertSignerNotCa), TEST_HOST, 0, 0, SEC_E_CERT_WRONG_USAGE, FALSE, FALSE },
     { "own output buffer: valid", BLOB(CertLeafValid), NoCert, TEST_HOST, 0, 0, CONTINUE, TRUE, FALSE },
     { "own output buffer: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, 0, 0, SEC_E_CERT_EXPIRED, TRUE, FALSE },
@@ -293,7 +295,8 @@ static void RunCases(void)
 
         Status = RunHandshake(Case, &OutSize, &RetAttr);
 
-        /* ReactOS: the ignore flag for a missing revocation check also needs the offline flag */
+        /* ReactOS differs in two rows: the ignore flag for a missing revocation check also needs the offline
+         * flag, and an expired certificate of an unknown issuer is reported as expired, not as untrusted */
         todo_ros_if(Case->TodoRos)
             ok(Status == Case->Expected, "%s: expected 0x%08lx, got 0x%08lx\n",
                Case->Name, (ULONG)Case->Expected, Status);
