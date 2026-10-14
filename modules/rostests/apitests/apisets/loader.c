@@ -567,12 +567,13 @@ test_app_local_unlisted(void)
 #define RETRY_SECOND_LOCAL  0x8
 
 /*
- * The copy next to this executable cannot be checked: load the contract, make the copy readable, load it again. The
- * first answer must not be kept. Freed heap blocks filled with copies of a "system host" entry for the name come
+ * The copy next to this executable cannot be checked: load the contract, make the copy readable (or delete it), load
+ * it again. The first answer must not be kept: with a readable copy the second load uses it (a kept "host" answer
+ * fails this), with the copy gone it uses the host (a kept "copy" answer fails this). Freed heap blocks filled with copies of a "system host" entry for the name come
  * first, so that a decision list the loader allocates and searches without initialising it is likely to read one.
  */
 static void
-RunRetryChild(void)
+RunRetryChild(BOOL MakeAbsent)
 {
     WCHAR Copy[MAX_PATH];
     PVOID Blocks[64];
@@ -613,7 +614,7 @@ RunRetryChild(void)
             Bits |= RETRY_FIRST_LOCAL;
         FreeLibrary(Module);
     }
-    if (!SetDenied(Copy, 0))
+    if (!SetDenied(Copy, 0) || (MakeAbsent && !DeleteFileW(Copy)))
         ExitProcess(0);
     Module = LoadLibraryW(g_LocalNames[1]);
     if (Module)
@@ -671,10 +672,21 @@ test_app_local_unreadable(void)
             ok(Code == (CHILD_RAN | RETRY_SECOND_LOADED | RETRY_SECOND_LOCAL), "retry: child exit code 0x%lx\n", Code);
         else
             ok(Code == (CHILD_RAN | RETRY_FIRST_LOADED | RETRY_SECOND_LOADED), "retry: child exit code 0x%lx\n", Code);
+
+        /* Again with the copy unreadable; this time the child deletes it before the second load */
+        ok(SetDenied(Dll, FILE_READ_ATTRIBUTES), "SetFileSecurityW failed with %lu\n", GetLastError());
+        Code = StartChild(Exe, L"retry-absent");
+        if (is_reactos())
+            ok(Code == (CHILD_RAN | RETRY_SECOND_LOADED), "retry-absent: child exit code 0x%lx\n", Code);
+        else if (GetNTVersion() == 0x0601)
+            ok(Code == CHILD_RAN, "retry-absent: child exit code 0x%lx\n", Code);
+        else
+            ok(Code == (CHILD_RAN | RETRY_FIRST_LOADED | RETRY_SECOND_LOADED), "retry-absent: child exit code 0x%lx\n",
+               Code);
     }
 
     ok(SetDenied(Dir, 0), "SetFileSecurityW failed with %lu\n", GetLastError());
-    ok(SetDenied(Dll, 0), "SetFileSecurityW failed with %lu\n", GetLastError());
+    SetDenied(Dll, 0); /* the retry-absent child may have deleted it */
     DeleteFileW(Dll);
     DeleteFileW(Exe);
     RemoveDirectoryW(Dir);
@@ -756,7 +768,9 @@ START_TEST(loader)
     if (argc >= 3 && !strcmp(argv[2], "late"))
         RunLateChild();
     if (argc >= 3 && !strcmp(argv[2], "retry"))
-        RunRetryChild();
+        RunRetryChild(FALSE);
+    if (argc >= 3 && !strcmp(argv[2], "retry-absent"))
+        RunRetryChild(TRUE);
 
     test_minor_versions();
     test_manifests();
