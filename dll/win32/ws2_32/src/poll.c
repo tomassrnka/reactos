@@ -225,8 +225,9 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
             Status = IoStatus.Status;
         }
 
-        /* A socket closed before AFD took the request: report it and ask again for the others */
-        if (Status == STATUS_INVALID_HANDLE || Status == STATUS_OBJECT_TYPE_MISMATCH)
+        /* A socket closed before AFD took the request: report it and ask again for the others. AFD reports the failed
+         * reference of a secondary handle as no memory, so that status counts only when a stale entry is confirmed */
+        if (Status == STATUS_INVALID_HANDLE || Status == STATUS_OBJECT_TYPE_MISMATCH || Status == STATUS_NO_MEMORY)
         {
             ULONG Kept = 0;
 
@@ -254,6 +255,8 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
                     Status = STATUS_SUCCESS;
                     break;
                 }
+                /* The stale entries are already a result: look at the others without waiting */
+                PollInfo->Timeout.QuadPart = 0;
                 continue;
             }
         }

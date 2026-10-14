@@ -680,6 +680,81 @@ static void test_WSAPoll_close_race(void)
     }
 }
 
+typedef struct _CLOSE_SPIN
+{
+    SOCKET Socket;
+    volatile LONG Go;
+    LONG Spin;
+} CLOSE_SPIN;
+
+static DWORD WINAPI CloseAfterSpinThread(void *param)
+{
+    CLOSE_SPIN *Close = param;
+    volatile LONG Counter;
+    LONG i;
+
+    while (!Close->Go)
+        ;
+    for (i = 0, Counter = 0; i < Close->Spin; i++)
+        Counter++;
+    closesocket(Close->Socket);
+    return 0;
+}
+
+/* The close lands at a varying point around the submission of the poll. Whatever the timing, the call must not fail
+ * with an error, must report the closed socket as POLLNVAL, and must not wait for the timeout when it reports one:
+ * the other socket is idle, so a retry that keeps the timeout shows as a call that runs to its end. The point of
+ * the close cannot be forced from user mode, so this stresses the window and does not pin it. */
+static void test_WSAPoll_close_submit(void)
+{
+    ULONG Round, Reported = 0;
+
+    for (Round = 0; Round < 300; Round++)
+    {
+        SOCKET Client, Server, OtherClient, OtherServer;
+        CLOSE_SPIN Close;
+        HANDLE Thread;
+        WSAPOLLFD fds[2];
+        DWORD Start, Elapsed;
+        int ret;
+
+        tcp_socketpair(&Client, &Server);
+        tcp_socketpair(&OtherClient, &OtherServer);
+
+        Close.Socket = Client;
+        Close.Go = 0;
+        Close.Spin = (Round * 1237) % 200000;
+        Thread = CreateThread(NULL, 0, CloseAfterSpinThread, &Close, 0, NULL);
+
+        fds[0].fd = Client;
+        fds[0].events = POLLRDNORM;
+        fds[0].revents = 0xdead;
+        fds[1].fd = OtherClient;
+        fds[1].events = POLLRDNORM;
+        fds[1].revents = 0xdead;
+        Start = GetTickCount();
+        InterlockedExchange(&Close.Go, 1);
+        ret = pWSAPoll(fds, 2, 400);
+        Elapsed = GetTickCount() - Start;
+
+        ok(ret >= 0, "round %lu: got %d, error %d\n", Round, ret, WSAGetLastError());
+        ok(fds[0].revents == POLLNVAL, "round %lu: got events %#x\n", Round, fds[0].revents);
+        ok(!fds[1].revents, "round %lu: got events %#x for the other socket\n", Round, fds[1].revents);
+        if (ret == 1)
+        {
+            Reported++;
+            ok(Elapsed < 250, "round %lu: the closed socket was reported after %lu ms\n", Round, Elapsed);
+        }
+
+        WaitForSingleObject(Thread, 5000);
+        CloseHandle(Thread);
+        closesocket(Server);
+        closesocket(OtherClient);
+        closesocket(OtherServer);
+    }
+    trace("the closed socket was reported by %lu of 300 calls\n", Reported);
+}
+
 START_TEST(WSAPoll)
 {
     WSADATA data;
@@ -695,6 +770,7 @@ START_TEST(WSAPoll)
     {
         test_WSAPoll();
         test_WSAPoll_close_race();
+        test_WSAPoll_close_submit();
     }
     else
         skip("WSAPoll is not available\n");
