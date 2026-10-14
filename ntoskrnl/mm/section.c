@@ -3560,7 +3560,25 @@ grab_image_section_object:
     return Status;
 }
 
-
+/*
+ * Pages of commit charge a view of this segment takes: all of them when a
+ * page can become private on write (the copy-on-write test of the fault
+ * handler: a copy-on-write segment or protection, and a writable view).
+ */
+static
+SIZE_T
+MiViewCommitCharge(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ ULONG Protect,
+    _In_ SIZE_T ViewSize)
+{
+    if ((Protect & PAGE_IS_WRITECOPY) ||
+        (Segment->WriteCopy && (Protect & PAGE_IS_WRITABLE)))
+    {
+        return BYTES_TO_PAGES(ViewSize);
+    }
+    return 0;
+}
 
 static NTSTATUS
 MmMapViewOfSegment(
@@ -3571,9 +3589,11 @@ MmMapViewOfSegment(
     SIZE_T ViewSize,
     ULONG Protect,
     LONGLONG ViewOffset,
-    ULONG AllocationType)
+    ULONG AllocationType,
+    SIZE_T CommitCharge)
 {
     PMEMORY_AREA MArea;
+    PEPROCESS Process;
     NTSTATUS Status;
     ULONG Granularity;
 
@@ -3625,6 +3645,15 @@ MmMapViewOfSegment(
         return Status;
     }
 
+    /* Nothing is mapped and nothing refers to the area yet: free it if this fails */
+    Status = MmInitializeRegion(&MArea->SectionData.RegionListHead,
+                                ViewSize, 0, Protect);
+    if (!NT_SUCCESS(Status))
+    {
+        MmFreeMemoryArea(AddressSpace, MArea, NULL, NULL);
+        return Status;
+    }
+
     InterlockedIncrement64(Segment->ReferenceCount);
 
     /* A file truncation must not cut through a view of a process, even once the section is closed */
@@ -3633,13 +3662,17 @@ MmMapViewOfSegment(
 
     MArea->SectionData.Segment = Segment;
     MArea->SectionData.ViewOffset = ViewOffset;
+
+    /* The view owns the charge the caller took for it from now on */
+    MArea->SectionData.CommitCharge = CommitCharge;
+    Process = MmGetAddressSpaceOwner(AddressSpace);
+    if (Process != NULL)
+        MiAddProcessCommit(Process, CommitCharge);
+
     if (AsImage)
     {
         MArea->VadNode.u.VadFlags.VadType = VadImageMap;
     }
-
-    MmInitializeRegion(&MArea->SectionData.RegionListHead,
-                       ViewSize, 0, Protect);
 
     return STATUS_SUCCESS;
 }
@@ -3775,6 +3808,8 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
                      PVOID BaseAddress)
 {
     NTSTATUS Status;
+    PEPROCESS Process;
+    SIZE_T CommitCharge;
     PMEMORY_AREA MemoryArea;
     PMM_SECTION_SEGMENT Segment;
     PLIST_ENTRY CurrentEntry;
@@ -3802,6 +3837,7 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
 #endif
 
     MemoryArea->DeleteInProgress = TRUE;
+    CommitCharge = MemoryArea->SectionData.CommitCharge;
 
     /*
      * Let paging file I/O already started on private pages of the view
@@ -3839,6 +3875,14 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
         InterlockedDecrement(&Segment->UserMapCount);
     MmUnlockSectionSegment(Segment);
     MmDereferenceSegment(Segment);
+
+    /* Give back what the view was charged */
+    Process = MmGetAddressSpaceOwner(AddressSpace);
+    if (Process != NULL)
+        MiReturnProcessCommit(Process, CommitCharge);
+    else
+        MiReturnCommit(CommitCharge);
+
     return Status;
 }
 
@@ -4302,6 +4346,7 @@ MmMapViewOfSection(
     BOOLEAN IsAttached = FALSE;
     KAPC_STATE ApcState;
     ULONG_PTR HighestAddress;
+    SIZE_T Unassigned, ViewCommit;
 
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
         return STATUS_INVALID_PARAMETER_4;
@@ -4342,6 +4387,13 @@ MmMapViewOfSection(
         AllocationType |= SEC_NO_CHANGE;
 
     MmLockAddressSpace(AddressSpace);
+
+    /* Address space cleanup has run: nothing may be mapped any more */
+    if (Process->VmDeleted)
+    {
+        Status = STATUS_PROCESS_IS_TERMINATING;
+        goto Exit;
+    }
 
     if (Section->u.Flags.Image)
     {
@@ -4428,10 +4480,29 @@ MmMapViewOfSection(
             NotAtBase = TRUE;
         }
 
+        /*
+         * Every copy-on-write segment can become private in this process:
+         * charge the whole image once, before any segment is mapped. Each
+         * mapped segment takes its share; what is not handed out yet goes
+         * back on failure, the shares go back with the rollback's unmaps.
+         */
+        Unassigned = 0;
+        for (i = 0; i < NrSegments; i++)
+            Unassigned += MiViewCommitCharge(&SectionSegments[i], SectionSegments[i].Protection,
+                                             (SIZE_T)SectionSegments[i].Length.QuadPart);
+        if (!MiChargeCommit(Unassigned, MiCommitUser))
+        {
+            Status = STATUS_COMMITMENT_LIMIT;
+            goto Exit;
+        }
+
         for (i = 0; i < NrSegments; i++)
         {
             PVOID SBaseAddress = (PVOID)
                                  ((char*)ImageBase + (ULONG_PTR)SectionSegments[i].Image.VirtualAddress);
+            SIZE_T Share = MiViewCommitCharge(&SectionSegments[i], SectionSegments[i].Protection,
+                                              (SIZE_T)SectionSegments[i].Length.QuadPart);
+
             MmLockSectionSegment(&SectionSegments[i]);
             Status = MmMapViewOfSegment(AddressSpace,
                                         TRUE,
@@ -4440,22 +4511,25 @@ MmMapViewOfSection(
                                         SectionSegments[i].Length.QuadPart,
                                         SectionSegments[i].Protection,
                                         0,
-                                        0);
+                                        0,
+                                        Share);
             MmUnlockSectionSegment(&SectionSegments[i]);
             if (!NT_SUCCESS(Status))
             {
-                /* roll-back */
+                MiReturnCommit(Unassigned);
+
+                /* roll-back: MmUnmapViewOfSegment takes the segment lock itself */
                 while (i--)
                 {
                     SBaseAddress =  ((char*)ImageBase + (ULONG_PTR)SectionSegments[i].Image.VirtualAddress);
-                    MmLockSectionSegment(&SectionSegments[i]);
                     MmUnmapViewOfSegment(AddressSpace, SBaseAddress);
-                    MmUnlockSectionSegment(&SectionSegments[i]);
                 }
 
                 goto Exit;
             }
+            Unassigned -= Share;
         }
+        ASSERT(Unassigned == 0);
 
         *BaseAddress = (PVOID)ImageBase;
         *ViewSize = ImageSize;
@@ -4584,6 +4658,14 @@ MmMapViewOfSection(
             }
         }
 
+        /* A copy-on-write view is charged in full: any page can become private */
+        ViewCommit = MiViewCommitCharge(Segment, Protect, *ViewSize);
+        if (!MiChargeCommit(ViewCommit, MiCommitUser))
+        {
+            Status = STATUS_COMMITMENT_LIMIT;
+            goto Exit;
+        }
+
         MmLockSectionSegment(Segment);
         Status = MmMapViewOfSegment(AddressSpace,
                                     FALSE,
@@ -4592,10 +4674,12 @@ MmMapViewOfSection(
                                     *ViewSize,
                                     Protect,
                                     ViewOffset,
-                                    AllocationType & (MEM_TOP_DOWN|SEC_NO_CHANGE));
+                                    AllocationType & (MEM_TOP_DOWN|SEC_NO_CHANGE),
+                                    ViewCommit);
         MmUnlockSectionSegment(Segment);
         if (!NT_SUCCESS(Status))
         {
+            MiReturnCommit(ViewCommit);
             goto Exit;
         }
     }
@@ -4925,7 +5009,8 @@ MmMapViewInSystemSpaceEx (
                                 *ViewSize,
                                 PAGE_READWRITE,
                                 SectionOffset->QuadPart,
-                                SEC_RESERVE);
+                                SEC_RESERVE,
+                                0);
 
     MmUnlockSectionSegment(Segment);
     MmUnlockAddressSpace(AddressSpace);

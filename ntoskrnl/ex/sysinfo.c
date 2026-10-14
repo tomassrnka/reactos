@@ -723,13 +723,9 @@ QSI_DEF(SystemPerformanceInformation)
 
     Spi->AvailablePages = (ULONG)MmAvailablePages;
 
+    /* Commit charge and limit (RAM plus the current paging files), in pages */
     Spi->CommittedPages = MmTotalCommittedPages;
-    /*
-     *  Add up the full system total + pagefile.
-     *  All this make Taskmgr happy but not sure it is the right numbers.
-     *  This too, fixes some of GlobalMemoryStatusEx numbers.
-     */
-    Spi->CommitLimit = MmNumberOfPhysicalPages + MiFreeSwapPages + MiUsedSwapPages;
+    Spi->CommitLimit = MmTotalCommitLimit;
 
     Spi->PeakCommitment = MmPeakCommitment;
     Spi->PageFaultCount = 0; /* FIXME */
@@ -1494,6 +1490,7 @@ QSI_DEF(SystemPageFileInformation)
     Spfi->TotalInUse = MiUsedSwapPages;
     Spfi->PeakUsage = MiUsedSwapPages; /* FIXME */
     Spfi->PageFileName = FileName;
+    *ReqSize = sizeof(SYSTEM_PAGEFILE_INFORMATION);
     return STATUS_SUCCESS;
 }
 

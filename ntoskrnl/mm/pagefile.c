@@ -266,6 +266,20 @@ MiReadPageFile(
     return(Status);
 }
 
+/* Paging file growth (see MiWaitForPagingFileGrowth) */
+static KEVENT MiPagingFileGrowthRequestEvent;
+static KEVENT MiPagingFileGrowthDoneEvent;
+static volatile SIZE_T MiPagingFileGrowthShortfall;
+static volatile LONG MiPagingFileGrowthGeneration;
+static volatile LONG MiPagingFileGrowthActive;
+/* 0: no thread, 1: being created, 2: running */
+static volatile LONG MiPagingFileGrowthThreadState;
+/* Page the growth thread certifies new paging file space with, taken when it starts */
+static PFN_NUMBER MiPagingFileCertifyPage;
+
+/* At least this much is added at a time */
+#define MI_PAGING_FILE_GROWTH_MINIMUM ((64 * 1024 * 1024) >> PAGE_SHIFT)
+
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -274,6 +288,8 @@ MmInitPagingFile(VOID)
     ULONG i;
 
     KeInitializeGuardedMutex(&MmPageFileCreationLock);
+    KeInitializeEvent(&MiPagingFileGrowthRequestEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&MiPagingFileGrowthDoneEvent, NotificationEvent, FALSE);
 
     MiFreeSwapPages = 0;
     MiUsedSwapPages = 0;
@@ -322,9 +338,257 @@ MmFreeSwapPage(SWAPENTRY Entry)
 
     MiFreeSwapPages++;
     MiUsedSwapPages--;
-    UpdateTotalCommittedPages(-1);
 
     KeReleaseGuardedMutex(&MmPageFileCreationLock);
+}
+
+/* Write and read back one page of the paging file: proves the file system can do paging I/O there */
+static
+NTSTATUS
+MiCertifyPagingFilePage(
+    _In_ PMMPAGING_FILE PagingFile,
+    _In_ PFN_NUMBER FilePage)
+{
+    UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
+    PMDL Mdl = (PMDL)MdlBase;
+    LARGE_INTEGER FileOffset;
+    IO_STATUS_BLOCK Iosb;
+    PFN_NUMBER Page = MiPagingFileCertifyPage;
+    KEVENT Event;
+    NTSTATUS Status;
+
+    FileOffset.QuadPart = (LONGLONG)FilePage * PAGE_SIZE;
+
+    MmInitializeMdl(Mdl, NULL, PAGE_SIZE);
+    MmBuildMdlFromPages(Mdl, &Page);
+    Mdl->MdlFlags |= MDL_PAGES_LOCKED;
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Status = IoSynchronousPageWrite(PagingFile->FileObject, Mdl, &FileOffset, &Event, &Iosb);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Iosb.Status;
+    }
+    if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+        MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+
+    if (NT_SUCCESS(Status))
+    {
+        MmInitializeMdl(Mdl, NULL, PAGE_SIZE);
+        MmBuildMdlFromPages(Mdl, &Page);
+        Mdl->MdlFlags |= MDL_PAGES_LOCKED;
+        KeInitializeEvent(&Event, NotificationEvent, FALSE);
+        Status = IoPageRead(PagingFile->FileObject, Mdl, &FileOffset, &Event, &Iosb);
+        if (Status == STATUS_PENDING)
+        {
+            KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+            Status = Iosb.Status;
+        }
+        if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+            MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+    }
+
+    return Status;
+}
+
+/* Grow paging files by at least Shortfall pages, as far as their maximum allows */
+static
+VOID
+MiGrowPagingFiles(
+    _In_ SIZE_T Shortfall)
+{
+    PMMPAGING_FILE PagingFile;
+    FILE_END_OF_FILE_INFORMATION EndOfFile;
+    IO_STATUS_BLOCK Iosb;
+    PFN_NUMBER OldSize, Growth;
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = 0; (i < MAX_PAGING_FILES) && (Shortfall > 0); i++)
+    {
+        KeAcquireGuardedMutex(&MmPageFileCreationLock);
+        PagingFile = MmPagingFile[i];
+        if ((PagingFile == NULL) || PagingFile->CannotGrow || (PagingFile->Size >= PagingFile->MaximumSize))
+        {
+            KeReleaseGuardedMutex(&MmPageFileCreationLock);
+            continue;
+        }
+        OldSize = PagingFile->Size;
+        Growth = max(max((PFN_NUMBER)Shortfall, MI_PAGING_FILE_GROWTH_MINIMUM), OldSize / 8);
+        Growth = min(Growth, PagingFile->MaximumSize - OldSize);
+        KeReleaseGuardedMutex(&MmPageFileCreationLock);
+
+        /* Only this thread changes a paging file's size: no lock across the I/O */
+        EndOfFile.EndOfFile.QuadPart = (LONGLONG)(OldSize + Growth) * PAGE_SIZE;
+        Status = ZwSetInformationFile(PagingFile->FileHandle,
+                                      &Iosb,
+                                      &EndOfFile,
+                                      sizeof(EndOfFile),
+                                      FileEndOfFileInformation);
+        if (NT_SUCCESS(Status))
+            Status = MiCertifyPagingFilePage(PagingFile, OldSize + Growth - 1);
+
+        if (!NT_SUCCESS(Status))
+        {
+            /* A shortage (an IRP, pool) may pass; anything else is the file system's answer */
+            DPRINT1("Paging file %wZ cannot grow from %Iu to %Iu pages: 0x%lx\n",
+                    &PagingFile->PageFileName, OldSize, OldSize + Growth, Status);
+            if ((Status != STATUS_INSUFFICIENT_RESOURCES) && (Status != STATUS_NO_MEMORY))
+                PagingFile->CannotGrow = TRUE;
+            continue;
+        }
+
+        /* The new slots exist: they back committed memory from now on */
+        KeAcquireGuardedMutex(&MmPageFileCreationLock);
+        PagingFile->Size += Growth;
+        PagingFile->FreeSpace += Growth;
+        MiFreeSwapPages += Growth;
+        InterlockedExchangeAddSizeT(&MmTotalCommitLimit, Growth);
+        KeReleaseGuardedMutex(&MmPageFileCreationLock);
+
+        DPRINT1("Paging file %wZ grew from %Iu to %Iu pages\n",
+                &PagingFile->PageFileName, OldSize, OldSize + Growth);
+        Shortfall = (Growth >= Shortfall) ? 0 : (Shortfall - Growth);
+    }
+}
+
+static
+VOID
+NTAPI
+MiPagingFileGrowthThread(
+    _In_ PVOID Context)
+{
+    SIZE_T Shortfall;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    for (;;)
+    {
+        KeWaitForSingleObject(&MiPagingFileGrowthRequestEvent, Executive, KernelMode, FALSE, NULL);
+
+        InterlockedExchange(&MiPagingFileGrowthActive, 1);
+        Shortfall = InterlockedExchangeSizeT(&MiPagingFileGrowthShortfall, 0);
+        if (Shortfall != 0)
+            MiGrowPagingFiles(Shortfall);
+
+        InterlockedIncrement(&MiPagingFileGrowthGeneration);
+        InterlockedExchange(&MiPagingFileGrowthActive, 0);
+        KePulseEvent(&MiPagingFileGrowthDoneEvent, IO_NO_INCREMENT, FALSE);
+    }
+}
+
+/* Start the one thread that grows paging files; a failed start is retried by the next caller */
+static
+VOID
+MiStartPagingFileGrowthThread(VOID)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ThreadHandle;
+    NTSTATUS Status;
+
+    if (InterlockedCompareExchange(&MiPagingFileGrowthThreadState, 1, 0) != 0)
+        return;
+
+    /* A retry can run in any process: the handle must not land in its handle table */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = STATUS_NO_MEMORY;
+    if ((MiPagingFileCertifyPage != 0) ||
+        NT_SUCCESS(MmRequestPageMemoryConsumer(MC_SYSTEM, TRUE, &MiPagingFileCertifyPage)))
+    {
+        /* A retry runs when user commitment is exhausted: the stack may use the kernel reserve */
+        MiKernelTierStackCreator = KeGetCurrentThread();
+        Status = PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, &ObjectAttributes, NULL, NULL,
+                                      MiPagingFileGrowthThread, NULL);
+        MiKernelTierStackCreator = NULL;
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        ZwClose(ThreadHandle);
+        InterlockedExchange(&MiPagingFileGrowthThreadState, 2);
+    }
+    else
+    {
+        InterlockedExchange(&MiPagingFileGrowthThreadState, 0);
+    }
+}
+
+/*
+ * Ask the growth thread to grow paging files by Shortfall pages and wait
+ * for it. Returns TRUE when the commit limit grew. Takes no commitment:
+ * the caller charges again. Call it with no lock held: the growth thread
+ * waits for file system I/O.
+ */
+BOOLEAN
+NTAPI
+MiWaitForPagingFileGrowth(
+    _In_ SIZE_T Shortfall)
+{
+    SIZE_T Remaining = 0, Requested, LimitBefore;
+    LARGE_INTEGER Timeout;
+    LONG Generation;
+    ULONG i, Waits;
+
+    /*
+     * A thread inside a critical or guarded region may hold a resource that
+     * the file system needs to grow the file: it does not wait.
+     */
+    if ((MmNumberOfPagingFiles == 0) ||
+        (KeGetCurrentIrql() != PASSIVE_LEVEL) ||
+        (KeGetCurrentThread()->CombinedApcDisable != 0))
+    {
+        return FALSE;
+    }
+
+    /* Its start may have failed when the paging file was created */
+    if (MiPagingFileGrowthThreadState != 2)
+    {
+        MiStartPagingFileGrowthThread();
+        if (MiPagingFileGrowthThreadState != 2)
+            return FALSE;
+    }
+
+    /* A request that cannot fit even at the maximum fails at once and changes nothing */
+    KeAcquireGuardedMutex(&MmPageFileCreationLock);
+    for (i = 0; i < MAX_PAGING_FILES; i++)
+    {
+        if ((MmPagingFile[i] != NULL) && !MmPagingFile[i]->CannotGrow)
+            Remaining += MmPagingFile[i]->MaximumSize - MmPagingFile[i]->Size;
+    }
+    KeReleaseGuardedMutex(&MmPageFileCreationLock);
+    if (Shortfall > Remaining)
+        return FALSE;
+
+    LimitBefore = MmTotalCommitLimit;
+    Generation = MiPagingFileGrowthGeneration;
+
+    /* Keep the largest request that is waiting */
+    Requested = MiPagingFileGrowthShortfall;
+    while ((Shortfall > Requested) &&
+           (InterlockedCompareExchangeSizeT(&MiPagingFileGrowthShortfall, Shortfall, Requested) != Requested))
+    {
+        Requested = MiPagingFileGrowthShortfall;
+    }
+    KeSetEvent(&MiPagingFileGrowthRequestEvent, IO_NO_INCREMENT, FALSE);
+
+    /*
+     * Wait, up to 30 s, until a round has finished since then, no round is
+     * running and no request is left: then a round that started after our
+     * request has taken it and is done.
+     */
+    Timeout.QuadPart = -100 * 10000LL;
+    for (Waits = 0; Waits < 300; Waits++)
+    {
+        KeWaitForSingleObject(&MiPagingFileGrowthDoneEvent, Executive, KernelMode, FALSE, &Timeout);
+        if ((MiPagingFileGrowthGeneration != Generation) &&
+            !MiPagingFileGrowthActive &&
+            (MiPagingFileGrowthShortfall == 0))
+        {
+            break;
+        }
+    }
+
+    return (MmTotalCommitLimit > LimitBefore);
 }
 
 SWAPENTRY
@@ -359,7 +623,6 @@ MmAllocSwapPage(VOID)
             MmPagingFile[i]->CurrentUsage++;
             MiUsedSwapPages++;
             MiFreeSwapPages--;
-            UpdateTotalCommittedPages(1);
 
             KeReleaseGuardedMutex(&MmPageFileCreationLock);
 
@@ -811,9 +1074,16 @@ EarlyQuit:
     MmPagingFile[MmNumberOfPagingFiles] = PagingFile;
     MmNumberOfPagingFiles++;
     MiFreeSwapPages = MiFreeSwapPages + PagingFile->FreeSpace;
+
+    /* Its slots back committed memory from now on */
+    InterlockedExchangeAddSizeT(&MmTotalCommitLimit, PagingFile->FreeSpace);
+    InterlockedExchangeAddSizeT(&MmTotalCommitLimitMaximum, PagingFile->MaximumSize - 1);
     KeReleaseGuardedMutex(&MmPageFileCreationLock);
 
     MmSwapSpaceMessage = FALSE;
+
+    /* The thread that grows paging files toward their maximum */
+    MiStartPagingFileGrowthThread();
 
     if (!MmSystemPageFileLocated && BooleanFlagOn(FileObject->DeviceObject->Flags, DO_SYSTEM_BOOT_PARTITION))
     {

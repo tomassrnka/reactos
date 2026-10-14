@@ -467,6 +467,12 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
         }
 
         //
+        // Paged pool is committed memory; it may use the kernel reserve. A
+        // range taken from the S-LIST above kept its charge.
+        //
+        if (!MiChargeCommit(SizeInPages, MiCommitKernel)) return NULL;
+
+        //
         // Lock the paged pool mutex
         //
         KeAcquireGuardedMutex(&MmPagedPoolMutex);
@@ -496,6 +502,7 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
                 //
                 DPRINT1("FAILED to allocate %Iu bytes from paged pool\n", SizeInBytes);
                 KeReleaseGuardedMutex(&MmPagedPoolMutex);
+                MiReturnCommit(SizeInPages);
                 return NULL;
             }
 
@@ -546,6 +553,7 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
 
                 /* Nothing was changed yet: the allocation map search failed */
                 KeReleaseGuardedMutex(&MmPagedPoolMutex);
+                MiReturnCommit(SizeInPages);
                 DPRINT1("OUT OF AVAILABLE PAGES for paged pool expansion! Required %lu, Available %Iu\n",
                         PageTableCount, MmAvailablePages);
                 return NULL;
@@ -630,6 +638,7 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
                 //
                 DPRINT1("FAILED to allocate %Iu bytes from paged pool\n", SizeInBytes);
                 KeReleaseGuardedMutex(&MmPagedPoolMutex);
+                MiReturnCommit(SizeInPages);
                 return NULL;
             }
         }
@@ -839,6 +848,12 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
     KeReleaseQueuedSpinLock(LockQueueMmNonPagedPoolLock, OldIrql);
 
     //
+    // Pages taken to expand nonpaged pool stay in the pool for good: charge
+    // them now, they are never given back (they may use the kernel reserve)
+    //
+    if (!MiChargeCommit(SizeInPages, MiCommitKernel)) return NULL;
+
+    //
     // Allocate some system PTEs
     //
     StartPte = MiReserveSystemPtes(SizeInPages, NonPagedPoolExpansion);
@@ -849,6 +864,7 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
         // Ran out of memory
         //
         DPRINT("Out of NP Expansion Pool\n");
+        MiReturnCommit(SizeInPages);
         return NULL;
     }
 
@@ -869,6 +885,7 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
         KeReleaseQueuedSpinLock(LockQueueMmNonPagedPoolLock, OldIrql);
 
         MiReleaseSystemPtes(StartPte, SizeInPages, NonPagedPoolExpansion);
+        MiReturnCommit(SizeInPages);
 
         DPRINT1("OUT OF AVAILABLE PAGES! Required %lu, Available %lu\n", SizeInPages, MmAvailablePages);
 
@@ -973,6 +990,9 @@ MiFreePoolPages(IN PVOID StartingVa)
         PointerPte = MmPagedPoolInfo.FirstPteForPagedPool + i;
         FreePages = MiDeleteSystemPageableVm(PointerPte, NumberOfPages, 0, NULL);
         ASSERT(FreePages == NumberOfPages);
+
+        /* The range was charged when it was allocated (a range kept on the S-LIST keeps it) */
+        MiReturnCommit(NumberOfPages);
 
         //
         // Acquire the paged pool lock

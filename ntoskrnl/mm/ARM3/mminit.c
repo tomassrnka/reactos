@@ -1303,6 +1303,9 @@ MmFreeLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     MiReleasePfnLock(OldIrql);
     KeFlushEntireTb(TRUE, TRUE);
 
+    /* They were charged as boot-time memory */
+    MiReturnBootCommit(LoaderPages);
+
     /* Free our run structure */
     ExFreePoolWithTag(Buffer, 'lMmM');
 }
@@ -2676,10 +2679,8 @@ MmArmInitSystem(IN ULONG Phase,
         /* Initialize the system cache */
         //MiInitializeSystemCache(MmSystemCacheWsMinimum, MmAvailablePages);
 
-        /* Update the commit limit */
-        MmTotalCommitLimit = MmAvailablePages;
-        if (MmTotalCommitLimit > 1024) MmTotalCommitLimit -= 1024;
-        MmTotalCommitLimitMaximum = MmTotalCommitLimit;
+        /* Set the commit limit from RAM; paging files raise it later */
+        MiInitializeCommitLimit();
 
         /* Size up paged pool and build the shadow system page directory */
         MiBuildPagedPool();
