@@ -40,6 +40,7 @@ RETARGET_HOSTS = {
     ),
     'kernelbase_ros.dll': (
         'api-ms-win-core-path-l1-1',
+        'api-ms-win-core-synch-l1-2',
     ),
     'shcore.dll': (
         'api-ms-win-shcore-scaling-l1-1',

@@ -1,16 +1,15 @@
 /*
  * PROJECT:     ReactOS system libraries
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     WaitOnAddress
- *
- * Kept apart from sync.c: kernel32 exports this at every export level, and sync.c also
- * holds functions that need the NT6 ntdll exports, which an NT5 ntdll does not have.
+ * PURPOSE:     WaitOnAddress, exported by kernelbase and not by kernel32, as on Windows
  */
 
-#include "k32_vista.h"
-
-#define NDEBUG
-#include <debug.h>
+#include <stdarg.h>
+#include <ntstatus.h>
+#define WIN32_NO_STATUS
+#include <windef.h>
+#include <winbase.h>
+#include <winternl.h>
 
 BOOL
 WINAPI
@@ -30,7 +29,7 @@ WaitOnAddress(
         Timeout = &Time;
     }
 
-    Status = RtlWaitOnAddress(Address, CompareAddress, AddressSize, Timeout);
+    Status = RtlWaitOnAddress((const void *)Address, CompareAddress, AddressSize, Timeout);
     if (Status != STATUS_SUCCESS)
     {
         SetLastError(RtlNtStatusToDosError(Status));
@@ -38,4 +37,3 @@ WaitOnAddress(
     }
     return TRUE;
 }
-
