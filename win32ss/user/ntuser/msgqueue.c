@@ -385,6 +385,16 @@ IntMsqSetWakeMask(DWORD WakeMask)
 
    IdlePing();
 
+   /* The idle hook has run. From here the thread waits for input and is not hung.
+      An alertable wait is left out: an APC runs while the mask would still be set. */
+   if (Win32Thread->pcti)
+   {
+      if (LOWORD(WakeMask) & QS_INPUT)
+         Win32Thread->pcti->timeLastRead = EngGetTickCount32();
+      if (!(dwFlags & MWMO_ALERTABLE))
+         Win32Thread->pcti->fsWakeMask = LOWORD(WakeMask);
+   }
+
    return MessageEventHandle;
 }
 
@@ -398,6 +408,9 @@ IntMsqClearWakeMask(VOID)
       return FALSE;
    // Very hacky, but that is what they do.
    Win32Thread->pcti->fsWakeBits = 0;
+   if (Win32Thread->pcti->fsWakeMask & QS_INPUT)
+      Win32Thread->pcti->timeLastRead = EngGetTickCount32();
+   Win32Thread->pcti->fsWakeMask = 0;
 
    IdlePong();
 
@@ -2128,6 +2141,9 @@ co_MsqWaitForNewMessages(PTHREADINFO pti, PWND WndFilter,
       IntCoalesceMouseMove(pti);
    }
 
+   /* The thread waits for input from here until it owns the lock again */
+   pti->pcti->fsWakeMask = GetWakeMask(MsgFilterMin, MsgFilterMax);
+
    UserLeaveCo();
 
    ZwYieldExecution(); // Let someone else run!
@@ -2138,6 +2154,10 @@ co_MsqWaitForNewMessages(PTHREADINFO pti, PWND WndFilter,
                                 FALSE,
                                 NULL );
    UserEnterCo();
+
+   if (pti->pcti->fsWakeMask & QS_INPUT)
+      pti->pcti->timeLastRead = EngGetTickCount32();
+   pti->pcti->fsWakeMask = 0;
    if ( ret == STATUS_USER_APC )
    {
       TRACE("MWFNW User APC\n");
@@ -2152,8 +2172,7 @@ MsqIsHung(PTHREADINFO pti, DWORD TimeOut)
     DWORD dwTimeStamp = EngGetTickCount32();
     if (dwTimeStamp - pti->pcti->timeLastRead > TimeOut &&
        !(pti->pcti->fsWakeMask & QS_INPUT) &&
-       !PsGetThreadFreezeCount(pti->pEThread) &&
-       !(pti->ppi->W32PF_flags & W32PF_APPSTARTING))
+       !PsGetThreadFreezeCount(pti->pEThread))
     {
         TRACE("\nMsqIsHung(pti %p, TimeOut %lu)\n"
             "pEThread %p, ThreadsProcess %p, ImageFileName '%s'\n"
@@ -2175,6 +2194,40 @@ MsqIsHung(PTHREADINFO pti, DWORD TimeOut)
     }
 
    return FALSE;
+}
+
+/*
+ * SMTO_ABORTIFHUNG and SMTO_NOTIMEOUTIFNOTHUNG give a starting process the first
+ * MSQ_APPSTARTING_TIMEOUT ms. After that its clock runs from the end of that
+ * time at the earliest, as MsqIsHung does from then on. IsHungAppWindow does not
+ * make this exception. Elapsed times are unsigned so that a tick count wrap is harmless.
+ */
+BOOL FASTCALL
+MsqIsHungForSend(PTHREADINFO pti, DWORD TimeOut)
+{
+    PPROCESSINFO ppi = pti->ppi;
+    DWORD dwNow = EngGetTickCount32();
+    DWORD dwSinceRead = dwNow - pti->pcti->timeLastRead;
+
+    if (ppi->W32PF_flags & W32PF_APPSTARTING)
+    {
+        DWORD dwAge = dwNow - ppi->AppStartTick;
+
+        if (dwAge < MSQ_APPSTARTING_TIMEOUT)
+            return FALSE;
+
+        /* Time since the end of the startup time, if that is shorter */
+        if (dwAge - MSQ_APPSTARTING_TIMEOUT < dwSinceRead)
+            dwSinceRead = dwAge - MSQ_APPSTARTING_TIMEOUT;
+
+        /* From here on the startup time makes no difference for any thread */
+        if (dwAge - MSQ_APPSTARTING_TIMEOUT > MSQ_HUNG)
+            ppi->W32PF_flags &= ~W32PF_APPSTARTING;
+    }
+
+    return (dwSinceRead > TimeOut) &&
+           !(pti->pcti->fsWakeMask & QS_INPUT) &&
+           !PsGetThreadFreezeCount(pti->pEThread);
 }
 
 BOOL FASTCALL
