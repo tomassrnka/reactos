@@ -136,7 +136,7 @@ NetConnectionEnum(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -162,7 +162,7 @@ NetFileClose(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -238,7 +238,7 @@ NetFileEnum(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -270,7 +270,7 @@ NetFileGetInfo(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -298,7 +298,7 @@ NetRemoteTOD(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -356,7 +356,7 @@ NetServerDiskEnum(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -386,7 +386,7 @@ NetServerGetInfo(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -416,7 +416,7 @@ NetServerSetInfo(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -446,7 +446,7 @@ I_NetServerSetServiceBits(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -474,7 +474,7 @@ NetServerTransportAdd(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -502,7 +502,7 @@ NetServerTransportAddEx(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -530,7 +530,7 @@ NetServerTransportDel(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -599,7 +599,7 @@ NetServerTransportEnum(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -627,7 +627,7 @@ NetSessionDel(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -745,7 +745,7 @@ NetSessionEnum(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -837,7 +837,7 @@ NetSessionGetInfo(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -870,7 +870,7 @@ NetShareAdd(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -898,7 +898,7 @@ NetShareCheck(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -929,7 +929,7 @@ NetShareDel(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -960,7 +960,7 @@ NetShareDelSticky(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -1062,7 +1062,7 @@ NetShareEnum(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -1164,7 +1164,7 @@ NetShareEnumSticky(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -1202,7 +1202,7 @@ NetShareGetInfo(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 
@@ -1238,7 +1238,7 @@ NetShareSetInfo(
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
-        status = I_RpcMapWin32Status(RpcExceptionCode());
+        status = NetpRpcStatusToApiStatus(RpcExceptionCode());
     }
     RpcEndExcept;
 

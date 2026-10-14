@@ -3,6 +3,7 @@ add_definitions(-D__USE_W32_SOCKETS)
 
 list(APPEND SOURCE
     main.c
+    output.c
     cmdAccounts.c
     cmdComputer.c
     cmdConfig.c
@@ -19,6 +20,7 @@ list(APPEND SOURCE
     cmdStop.c
     cmdUse.c
     cmdUser.c
+    cmdView.c
     net.h)
 
 add_executable(net ${SOURCE} net.rc)

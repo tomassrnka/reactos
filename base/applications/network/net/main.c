@@ -39,7 +39,7 @@ COMMAND cmds[] =
     {L"time",       unimplemented},
     {L"use",        cmdUse},
     {L"user",       cmdUser},
-    {L"view",       unimplemented},
+    {L"view",       cmdView},
     {NULL,          NULL}
 };
 

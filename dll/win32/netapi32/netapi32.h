@@ -94,6 +94,11 @@ WINAPI
 NetpNtStatusToApiStatus(
     _In_ NTSTATUS Status);
 
+NET_API_STATUS
+WINAPI
+NetpRpcStatusToApiStatus(
+    _In_ DWORD Status);
+
 /* wksta.c */
 
 BOOL

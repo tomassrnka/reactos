@@ -1996,14 +1996,17 @@ SymbolicName=MSG_SHARE_SYNTAX
 Severity=Success
 Facility=System
 Language=English
-NET SHARE sharename=drive:path [/GRANT:user,[READ | CHANGE | FULL]]
+NET SHARE
+sharename
+          sharename=drive:path [/GRANT:user,[READ | CHANGE | FULL]]
                                [/USERS:number | /UNLIMITED]
                                [/REMARK:"text"]
-                               [/CACHE:Manual | Documents| Programs | None]
+                               [/CACHE:Manual | Documents| Programs | BranchCache | None]
           sharename [/USERS:number | /UNLIMITED]
                     [/REMARK:"text"]
-                    [/CACHE:Manual | Documents | Programs | None]
+                    [/CACHE:Manual | Documents | Programs | BranchCache | None]
           {sharename | devicename | drive:path} /DELETE
+          sharename \\computername /DELETE
 .
 Language=Polish
 NET SHARE nazwa_udziału=dysk:ścieżka [/GRANT:użytkownik,[READ | CHANGE | FULL]]
@@ -2093,24 +2096,26 @@ sharename          Is the network name of the shared resource. Type
 drive:path         Specifies the absolute path of the directory to
                    be shared.
 /GRANT:user,perm   Creates the share with a security descriptor that gives
-                   the requested permissions to the specified user. This
+                   the requested permissions to the specified user.  This
                    option may be used more than once to give share permissions
                    to multiple users.
 /USERS:number      Sets the maximum number of users who can
                    simultaneously access the shared resource.
 /UNLIMITED         Specifies an unlimited number of users can
-                   simultaneously access the shared resource.
+                   simultaneously access the shared resource
 /REMARK:"text"     Adds a descriptive comment about the resource.
                    Enclose the text in quotation marks.
 devicename         Is one or more printers (LPT1: through LPT9:)
                    shared by sharename.
 /DELETE            Stops sharing the resource.
 /CACHE:Manual      Enables manual client caching of programs and documents
-                   from this share.
-/CACHE:Documents   Enables automatic caching of documents from this share.
+                   from this share
+/CACHE:Documents   Enables automatic caching of documents from this share
 /CACHE:Programs    Enables automatic caching of documents and programs
-                   from this share.
-/CACHE:None        Disables caching from this share.
+                   from this share
+/CACHE:BranchCache Manual caching of documents with BranchCache enabled
+                   from this share
+/CACHE:None        Disables caching from this share
 
 NET HELP command | MORE displays Help one screen at a time.
 .
@@ -3543,7 +3548,8 @@ SymbolicName=MSG_VIEW_SYNTAX
 Severity=Success
 Facility=System
 Language=English
-NET VIEW ...
+NET VIEW
+[\\computername [/CACHE] | [/ALL] | /DOMAIN[:domainname]]
 .
 Language=Polish
 NET VIEW ...
@@ -3573,8 +3579,20 @@ SymbolicName=MSG_VIEW_HELP
 Severity=Success
 Facility=System
 Language=English
-VIEW
-...
+NET VIEW displays a list of resources being shared on a computer. When used
+without options, it displays a list of computers in the current domain or
+network.
+
+\\computername             Is a computer whose shared resources you want
+                           to view.
+/DOMAIN:domainname         Specifies the domain for which you want to
+                           view the available computers. If domainname is
+                           omitted, displays all domains in the local area
+                           network.
+/CACHE                     Displays the offline client caching settings for
+                           the resources on the specified computer
+/ALL			         Displays all the shares including the $ shares
+
 .
 Language=Polish
 VIEW
@@ -3899,4 +3917,154 @@ The following conventions are used to indicate command syntax:
 -  When typed at the command prompt, service names of two words or
    more must be enclosed in quotation marks. For example,
    NET START "COMPUTER BROWSER" starts the computer browser service.
+.
+
+
+MessageId=10042
+SymbolicName=MSG_SHARE_CACHE_MANUAL
+Severity=Success
+Facility=System
+Language=English
+Manual caching of documents%0
+.
+Language=Polish
+Manual caching of documents%0
+.
+Language=Romanian
+Manual caching of documents%0
+.
+Language=Russian
+Manual caching of documents%0
+.
+Language=Spanish
+Manual caching of documents%0
+.
+Language=Turkish
+Manual caching of documents%0
+.
+Language=Chinese
+Manual caching of documents%0
+.
+Language=Taiwanese
+Manual caching of documents%0
+.
+
+
+MessageId=10043
+SymbolicName=MSG_SHARE_CACHE_DOCUMENTS
+Severity=Success
+Facility=System
+Language=English
+Automatic caching of documents%0
+.
+Language=Polish
+Automatic caching of documents%0
+.
+Language=Romanian
+Automatic caching of documents%0
+.
+Language=Russian
+Automatic caching of documents%0
+.
+Language=Spanish
+Automatic caching of documents%0
+.
+Language=Turkish
+Automatic caching of documents%0
+.
+Language=Chinese
+Automatic caching of documents%0
+.
+Language=Taiwanese
+Automatic caching of documents%0
+.
+
+
+MessageId=10044
+SymbolicName=MSG_SHARE_CACHE_PROGRAMS
+Severity=Success
+Facility=System
+Language=English
+Automatic caching of programs and documents%0
+.
+Language=Polish
+Automatic caching of programs and documents%0
+.
+Language=Romanian
+Automatic caching of programs and documents%0
+.
+Language=Russian
+Automatic caching of programs and documents%0
+.
+Language=Spanish
+Automatic caching of programs and documents%0
+.
+Language=Turkish
+Automatic caching of programs and documents%0
+.
+Language=Chinese
+Automatic caching of programs and documents%0
+.
+Language=Taiwanese
+Automatic caching of programs and documents%0
+.
+
+
+MessageId=10045
+SymbolicName=MSG_SHARE_CACHE_NONE
+Severity=Success
+Facility=System
+Language=English
+Caching disabled%0
+.
+Language=Polish
+Caching disabled%0
+.
+Language=Romanian
+Caching disabled%0
+.
+Language=Russian
+Caching disabled%0
+.
+Language=Spanish
+Caching disabled%0
+.
+Language=Turkish
+Caching disabled%0
+.
+Language=Chinese
+Caching disabled%0
+.
+Language=Taiwanese
+Caching disabled%0
+.
+
+
+MessageId=10046
+SymbolicName=MSG_SHARE_CACHE_BRANCHCACHE
+Severity=Success
+Facility=System
+Language=English
+Manual caching of documents with BranchCache enabled%0
+.
+Language=Polish
+Manual caching of documents with BranchCache enabled%0
+.
+Language=Romanian
+Manual caching of documents with BranchCache enabled%0
+.
+Language=Russian
+Manual caching of documents with BranchCache enabled%0
+.
+Language=Spanish
+Manual caching of documents with BranchCache enabled%0
+.
+Language=Turkish
+Manual caching of documents with BranchCache enabled%0
+.
+Language=Chinese
+Manual caching of documents with BranchCache enabled%0
+.
+Language=Taiwanese
+Manual caching of documents with BranchCache enabled%0
 .
