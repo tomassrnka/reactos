@@ -766,6 +766,7 @@ RawQueryFsSizeInfo(IN PVCB Vcb,
     PDEVICE_OBJECT RealDevice;
     DISK_GEOMETRY DiskGeometry;
     PARTITION_INFORMATION PartitionInformation;
+    PARTITION_INFORMATION_EX PartitionInformationEx;
     BOOLEAN DiskHasPartitions;
     PAGED_CODE();
 
@@ -823,14 +824,14 @@ RawQueryFsSizeInfo(IN PVCB Vcb,
     }
     else
     {
-        /* Setup query IRP */
+        /* Setup query IRP: the extended call knows GPT partitions too */
         KeClearEvent(&Event);
-        Irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_PARTITION_INFO,
+        Irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_PARTITION_INFO_EX,
                                             RealDevice,
                                             NULL,
                                             0,
-                                            &PartitionInformation,
-                                            sizeof(PARTITION_INFORMATION),
+                                            &PartitionInformationEx,
+                                            sizeof(PARTITION_INFORMATION_EX),
                                             FALSE,
                                             &Event,
                                             &IoStatusBlock);
@@ -849,16 +850,51 @@ RawQueryFsSizeInfo(IN PVCB Vcb,
             Status = IoStatusBlock.Status;
         }
 
-        /* If this was an invalid request, then the disk is not partitioned */
-        if (Status == STATUS_INVALID_DEVICE_REQUEST)
+        if (NT_SUCCESS(Status))
         {
-            DiskHasPartitions = FALSE;
+            /* Use the partition, MBR or GPT */
+            PartitionInformation.PartitionLength = PartitionInformationEx.PartitionLength;
+            DiskHasPartitions = TRUE;
         }
         else
         {
-            /* Otherwise, it must be */
-            ASSERT(NT_SUCCESS(Status));
-            DiskHasPartitions = TRUE;
+            /* Setup query IRP */
+            KeClearEvent(&Event);
+            Irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_PARTITION_INFO,
+                                                RealDevice,
+                                                NULL,
+                                                0,
+                                                &PartitionInformation,
+                                                sizeof(PARTITION_INFORMATION),
+                                                FALSE,
+                                                &Event,
+                                                &IoStatusBlock);
+            if (!Irp) return STATUS_INSUFFICIENT_RESOURCES;
+
+            /* Call driver and check if we're pending */
+            Status = IoCallDriver(RealDevice, Irp);
+            if (Status == STATUS_PENDING)
+            {
+                /* Wait on driver to finish */
+                KeWaitForSingleObject(&Event,
+                                      Executive,
+                                      KernelMode,
+                                      FALSE,
+                                      NULL);
+                Status = IoStatusBlock.Status;
+            }
+
+            /* If this was an invalid request, then the disk is not partitioned */
+            if (Status == STATUS_INVALID_DEVICE_REQUEST)
+            {
+                DiskHasPartitions = FALSE;
+            }
+            else
+            {
+                /* Otherwise, it must be */
+                ASSERT(NT_SUCCESS(Status));
+                DiskHasPartitions = TRUE;
+            }
         }
     }
 

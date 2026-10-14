@@ -36,6 +36,16 @@ PDEVICE_OBJECT gdeviceObject;
 KEVENT UnloadEvent;
 LONG Unloading;
 
+/* GPT partition types of Windows' own system partitions: no automatic drive letter */
+static const GUID GptSystemPartitionTypes[] =
+{
+    {0xC12A7328, 0xF81F, 0x11D2, {0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B}}, /* EFI system */
+    {0xE3C9E316, 0x0B5C, 0x4DB8, {0x81, 0x7D, 0xF9, 0x2D, 0xF0, 0x02, 0x15, 0xAE}}, /* Microsoft reserved */
+    {0x5808C8AA, 0x7E8F, 0x42E0, {0x85, 0xD2, 0xE1, 0xE9, 0x04, 0x34, 0xCF, 0xB3}}, /* LDM metadata */
+    {0xAF9B60A0, 0x1431, 0x4F62, {0xBC, 0x68, 0x33, 0x11, 0x71, 0x4A, 0x69, 0xAD}}, /* LDM data */
+    {0xDE94BBA4, 0x06D1, 0x4D40, {0xA1, 0x6A, 0xBF, 0xD5, 0x01, 0x79, 0xD6, 0xAC}}, /* Windows recovery */
+};
+
 static const WCHAR Cunc[] = L"\\??\\C:";
 #define Cunc_LETTER_POSITION 4
 
@@ -340,10 +350,34 @@ QueryDeviceInformation(
             {
                 Status = STATUS_SUCCESS;
             }
-            /* Check if it has a drive letter */
-            else if (GptAttributes.GptAttributes & GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER)
+            /* Check if it has a drive letter: neither a hidden nor a no-drive-letter volume gets one */
+            else if (GptAttributes.GptAttributes &
+                     (GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER | GPT_BASIC_DATA_ATTRIBUTE_HIDDEN))
             {
                 *GptDriveLetter = FALSE;
+            }
+
+            /* Nor does a system partition */
+            if (*GptDriveLetter &&
+                NT_SUCCESS(MountMgrSendSyncDeviceIoCtl(IOCTL_DISK_GET_PARTITION_INFO_EX,
+                                                       DeviceObject,
+                                                       NULL,
+                                                       0,
+                                                       &PartitionInfo,
+                                                       sizeof(PartitionInfo),
+                                                       NULL)) &&
+                PartitionInfo.PartitionStyle == PARTITION_STYLE_GPT)
+            {
+                ULONG i;
+
+                for (i = 0; i < RTL_NUMBER_OF(GptSystemPartitionTypes); i++)
+                {
+                    if (RtlCompareMemory(&PartitionInfo.Gpt.PartitionType, &GptSystemPartitionTypes[i], sizeof(GUID)) == sizeof(GUID))
+                    {
+                        *GptDriveLetter = FALSE;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -547,6 +581,25 @@ QueryDeviceInformation(
                                                 sizeof(GUID),
                                                 FileObject);
         *HasGuid = NT_SUCCESS(IntStatus);
+
+        /* Another volume may have that name already (a cloned GPT disk): this one gets a new name */
+        if (*HasGuid && DeviceName && DeviceName->Length)
+        {
+            UNICODE_STRING GuidName, OtherDevice;
+
+            if (NT_SUCCESS(CreateNewVolumeName(&GuidName, StableGuid)))
+            {
+                if (NT_SUCCESS(QueryDeviceInformation(&GuidName, &OtherDevice, NULL, NULL, NULL, NULL, NULL, NULL)))
+                {
+                    if (!RtlEqualUnicodeString(&OtherDevice, DeviceName, TRUE))
+                        *HasGuid = FALSE;
+
+                    FreePool(OtherDevice.Buffer);
+                }
+
+                FreePool(GuidName.Buffer);
+            }
+        }
     }
 
     ObDereferenceObject(DeviceObject);
