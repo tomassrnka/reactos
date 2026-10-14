@@ -44,7 +44,7 @@ PKL FASTCALL IntHKLtoPKL(_Inout_ PTHREADINFO pti, _In_ HKL hKL)
     pKL = pFirstKL;
 
     /* hKL can have special value HKL_NEXT or HKL_PREV */
-    if (IntHklEqual(hKL, UlongToHandle(HKL_NEXT))) /* Looking forward */
+    if (hKL == UlongToHandle(HKL_NEXT)) /* Looking forward */
     {
         do
         {
@@ -53,7 +53,7 @@ PKL FASTCALL IntHKLtoPKL(_Inout_ PTHREADINFO pti, _In_ HKL hKL)
                 return pKL;
         } while (pKL != pFirstKL);
     }
-    else if (IntHklEqual(hKL, UlongToHandle(HKL_PREV))) /* Looking backward */
+    else if (hKL == UlongToHandle(HKL_PREV)) /* Looking backward */
     {
         do
         {
@@ -67,7 +67,7 @@ PKL FASTCALL IntHKLtoPKL(_Inout_ PTHREADINFO pti, _In_ HKL hKL)
         /* No KL_UNLOAD check */
         do
         {
-            if (IntHklEqual(pKL->hkl, hKL))
+            if (pKL->hkl == hKL)
                 return pKL;
 
             pKL = pKL->pklNext;
@@ -545,7 +545,7 @@ UserHklToKbl(HKL hKl)
 
     do
     {
-        if (IntHklEqual(pKl->hkl, hKl))
+        if (pKl->hkl == hKl)
             return pKl;
 
         pKl = pKl->pklNext;
@@ -726,7 +726,7 @@ co_UserActivateKeyboardLayout(
     if (gptiForeground && (gptiForeground->ppi == pti->ppi) && ISITHOOKED(WH_SHELL))
     {
         /* Send the HKL if needed and remember it */
-        if (!IntHklEqual(ghKLSentToShell, pKL->hkl))
+        if (ghKLSentToShell != pKL->hkl)
         {
             co_IntShellHookNotify(HSHELL_LANGUAGE, 0, (LPARAM)pKL->hkl);
             ghKLSentToShell = pKL->hkl;
@@ -898,7 +898,7 @@ co_IntLoadKeyboardLayoutEx(
         return NULL;
 
     /* If hOldKL is specified, unload it and load new layput as default */
-    if (hOldKL && !IntHklEqual(hOldKL, hNewKL))
+    if (hOldKL && hOldKL != hNewKL)
     {
         pOldKL = UserHklToKbl(hOldKL);
         if (pOldKL)

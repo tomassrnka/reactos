@@ -31,10 +31,12 @@ output and rejected input using isolated fixtures in the build directory.
 Phase 3c must consume `sdk/cmake/wow64handles.cmake` before resolving typedefs.
 Each pipe-delimited row gives the declared type, family, 32-to-64 extension and
 64-to-32 truncation. `SIGN` means `(LONG64)(LONG)(ULONG)value`; `ZERO` means
-`(ULONG64)(ULONG)value`; `TRUNCATE` keeps the low 32 bits. USER and NT handles
-sign-extend, including negative pseudo-handles. GDI, HKL and address-valued
-handles zero-extend. GDI handles stored in DC_ATTR and batch records also use
-zero extension, matching win32k's issued handles and full-width comparisons.
+`(ULONG64)(ULONG)value`; `TRUNCATE` keeps the low 32 bits. USER, NT and HKL handles
+sign-extend, including negative pseudo-handles. GDI and address-valued
+handles zero-extend. The GDI rule is specific to ReactOS; Windows issues
+bit-31 GDI handles sign-extended and accepts both forms. GDI handles stored
+in DC_ATTR and batch records also use zero extension, matching win32k's
+issued handles and full-width comparisons.
 
 This is an explicit table, not an H-prefix heuristic. An unknown type requires
 review. Generic HANDLE parameters need their semantic family checked: for
@@ -44,8 +46,10 @@ zero-extends. Do not classify HDEV, HRAWINPUT or other opaque values by name.
 
 LPARAM/LRESULT sign-extend and WPARAM zero-extends under the separate integer
 table. Message-specific thunks can recover a known payload type; otherwise
-win32k accepts the low 32 bits for residual GDI/HKL lookups in WoW64-enabled
-amd64 images. Default native builds retain their previous comparisons.
+win32k accepts the low 32 bits for residual GDI lookups in WoW64-enabled
+amd64 images. HKL keeps full-width equality: typed HKL arguments and HKLs in
+LPARAM both arrive sign-extended, as Windows requires. Default native builds
+retain their previous comparisons.
 
-See [the handle measurements](wow64handles.md) for the Windows HKL mismatch
+See [the handle measurements](wow64handles.md) for the Windows reference results
 and the limits of the step-3b tests.

@@ -545,7 +545,7 @@ NtUserSetThreadLayoutHandles(
 
     pti = GetW32ThreadInfo();
     pOldKL = pti->KeyboardLayout;
-    if (pOldKL && !IntHklEqual(pOldKL->hkl, hOldKL))
+    if (pOldKL && pOldKL->hkl != hOldKL)
         goto Quit;
 
     pNewKL = UserHklToKbl(hNewKL);
@@ -650,7 +650,7 @@ IntImmProcessKey(
 
     if (IME_HOTKEY_DSWITCH_FIRST <= dwHotKeyId && dwHotKeyId <= IME_HOTKEY_DSWITCH_LAST)
     {
-        if (!IntHklEqual(pKL->hkl, hKL))
+        if (pKL->hkl != hKL)
         {
             UserPostMessage(hWnd, WM_INPUTLANGCHANGEREQUEST,
                             ((pKL->dwFontSigs & gSystemFS) ? INPUTLANGCHANGE_SYSCHARSET : 0),
@@ -1022,7 +1022,7 @@ UserGetImeInfoEx(
     {
         do
         {
-            if (IntHklEqual(pInfoEx->hkl, pkl->hkl))
+            if (pInfoEx->hkl == pkl->hkl)
             {
                 if (!pkl->piiex)
                 {
@@ -1183,7 +1183,7 @@ UserSetImeInfoEx(
 
     do
     {
-        if (!IntHklEqual(pkl->hkl, pImeInfoEx->hkl))
+        if (pkl->hkl != pImeInfoEx->hkl)
         {
             pkl = pkl->pklNext;
             continue;

@@ -182,12 +182,3 @@ ReleaseDeviceInfoListMutex(VOID)
 
 extern PKL gspklBaseLayout;
 extern KEYBOARD_ATTRIBUTES gKeyboardInfo;
-
-/* Typed WoW64 HKLs are zero-extended, but an untyped LPARAM can carry the
- * sign-extended form. Messages can cross processes, so this is an image-wide
- * rule, not a check on the currently executing process. */
-#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-#define IntHklEqual(a, b) (HandleToUlong(a) == HandleToUlong(b))
-#else
-#define IntHklEqual(a, b) ((a) == (b))
-#endif

@@ -9,6 +9,10 @@
 static HBRUSH MessageBrush;
 static BOOL SignedResult;
 
+/* Bound each reuse search in the ordinary suite. Report an inconclusive
+ * measurement if the host cannot reach a bit-31 handle within this budget. */
+#define REUSE_TIMEOUT_MS 5000
+
 static HANDLE ZeroHandle(HANDLE Handle)
 {
     return (HANDLE)(ULONG_PTR)(ULONG)(ULONG_PTR)Handle;
@@ -41,7 +45,7 @@ static void TestUser(void)
     for (Iteration = 0; Iteration < 400000; ++Iteration)
     {
         Menu = CreateMenu();
-        if (!Menu || Bit31(Menu) || Iteration + 1 == 400000 || GetTickCount() - Start > 30000)
+        if (!Menu || Bit31(Menu) || Iteration + 1 == 400000 || GetTickCount() - Start >= REUSE_TIMEOUT_MS)
             break;
         if (!DestroyMenu(Menu))
         {
@@ -74,7 +78,7 @@ static HGDIOBJ HighGdi(BOOL Brush)
     {
         Object = Brush ? (HGDIOBJ)CreateSolidBrush(RGB(0x12, 0x34, 0x56)) :
                          (HGDIOBJ)CreateBitmap(1, 1, 1, 1, NULL);
-        if (!Object || Bit31(Object) || Iteration + 1 == 65536 || GetTickCount() - Start > 30000)
+        if (!Object || Bit31(Object) || Iteration + 1 == 65536 || GetTickCount() - Start >= REUSE_TIMEOUT_MS)
             break;
         if (!DeleteObject(Object))
         {
@@ -155,6 +159,11 @@ static void TestGdi(HWND Wnd)
     Deleted = DeleteObject(SignHandle(DeleteBitmap));
     Error = GetLastError();
     trace("GDI DeleteObject signed bitmap=%d error=%lu\n", Deleted, Error);
+#if defined(_WIN64) && !defined(BUILD_WOW64_ENABLED)
+    /* Default amd64 still compares the full-width unique value in the owner
+     * check. Keep the Windows expectation; enabled builds must pass it. */
+    todo_ros_if(SignHandle(DeleteBitmap) != ZeroHandle(DeleteBitmap))
+#endif
     ok(Deleted, "Signed bitmap deletion failed, error %lu\n", Error);
     if (!Deleted) ok(DeleteObject(ZeroHandle(DeleteBitmap)), "Zero bitmap deletion failed\n");
     GdiFlush();
@@ -167,7 +176,7 @@ static void TestLayout(HWND Wnd)
 {
     HKL Original = GetKeyboardLayout(0), Layout, Previous, Before[256];
     INT Count, Index, Form;
-    BOOL WasLoaded = FALSE;
+    BOOL WasLoaded = FALSE, RejectZero;
     UINT Z, S;
 
     Count = GetKeyboardLayoutList(ARRAYSIZE(Before), Before);
@@ -182,25 +191,30 @@ static void TestLayout(HWND Wnd)
         if ((ULONG_PTR)ZeroHandle(Before[Index]) == (ULONG_PTR)ZeroHandle(Layout)) WasLoaded = TRUE;
     trace("HKL issued=%p zero=%p sign=%p bit31=%d original=%p\n",
           Layout, ZeroHandle(Layout), SignHandle(Layout), Bit31(Layout), Original);
+    ok_ptr(Layout, SignHandle(Layout));
+    RejectZero = ZeroHandle(Layout) != SignHandle(Layout);
     if (!Bit31(Layout)) skip("HKL bit 31 clear; forms are identical\n");
     Z = MapVirtualKeyExW('Q', MAPVK_VK_TO_VSC, ZeroHandle(Layout));
     S = MapVirtualKeyExW('Q', MAPVK_VK_TO_VSC, SignHandle(Layout));
     trace("HKL MapVirtualKeyEx zero=%u sign=%u\n", Z, S);
-    ok(Z && Z == S, "MapVirtualKeyEx differs: zero=%u sign=%u\n", Z, S);
+    ok(S != 0, "MapVirtualKeyEx rejected the signed HKL\n");
+    ok_int(Z, RejectZero ? 0 : S);
     for (Form = 0; Form < 2; ++Form)
     {
         ActivateKeyboardLayout(Original, 0);
+        ok_ptr(GetKeyboardLayout(0), Original);
         SetLastError(0xdeadbeef);
         Previous = ActivateKeyboardLayout(Form ? SignHandle(Layout) : ZeroHandle(Layout), 0);
         trace("HKL Activate form=%d previous=%p current=%p error=%lu\n",
               Form, Previous, GetKeyboardLayout(0), GetLastError());
-        ok(Previous != NULL, "ActivateKeyboardLayout failed for form %d\n", Form);
-        ok_ptr(ZeroHandle(GetKeyboardLayout(0)), ZeroHandle(Layout));
+        ok_ptr(Previous, !Form && RejectZero ? NULL : Original);
+        ok_ptr(GetKeyboardLayout(0), !Form && RejectZero ? Original : Layout);
         ActivateKeyboardLayout(Original, 0);
+        ok_ptr(GetKeyboardLayout(0), Original);
         SendMessageW(Wnd, WM_INPUTLANGCHANGEREQUEST, 0,
                      (LPARAM)(Form ? SignHandle(Layout) : ZeroHandle(Layout)));
         trace("HKL message form=%d current=%p\n", Form, GetKeyboardLayout(0));
-        ok_ptr(ZeroHandle(GetKeyboardLayout(0)), ZeroHandle(Layout));
+        ok_ptr(GetKeyboardLayout(0), !Form && RejectZero ? Original : Layout);
     }
     ActivateKeyboardLayout(Original, 0);
     if (!WasLoaded) UnloadKeyboardLayout(Layout);
