@@ -2654,6 +2654,9 @@ LdrpInit(PCONTEXT Context,
     NTSTATUS Status, LoaderStatus = STATUS_SUCCESS;
     MEMORY_BASIC_INFORMATION MemoryBasicInfo;
     PPEB Peb = NtCurrentPeb();
+#ifdef BUILD_WOW64_ENABLED
+    BOOLEAN ProcessStartup = FALSE;
+#endif
 
     DPRINT("LdrpInit() %p/%p\n",
         NtCurrentTeb()->RealClientId.UniqueProcess,
@@ -2705,6 +2708,9 @@ LdrpInit(PCONTEXT Context,
     /* Check if we have already setup LDR data */
     if (!Peb->Ldr)
     {
+#ifdef BUILD_WOW64_ENABLED
+        ProcessStartup = TRUE;
+#endif
         /* Setup the Loader Lock */
         Peb->LoaderLock = &LdrpLoaderLock;
 
@@ -2779,7 +2785,7 @@ LdrpInit(PCONTEXT Context,
         if (NT_SUCCESS(LoaderStatus))
             LoaderStatus = LdrGetProcedureAddress(Module, &ApcEntry, 0, &Wow64PrepareForApc);
         if (NT_SUCCESS(LoaderStatus))
-            ((VOID (NTAPI *)(PCONTEXT))Procedure)(Context);
+            ((VOID (NTAPI *)(PCONTEXT, BOOLEAN))Procedure)(Context, ProcessStartup);
     }
 #endif
 

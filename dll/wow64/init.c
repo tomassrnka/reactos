@@ -192,6 +192,9 @@ static NTSTATUS MapNtdll(PVOID *Base)
 }
 
 static PVOID Wow64Ntdll32, Wow64Loader32, Wow64Gate;
+/* Only the native loader's process initializer may build the guest process.
+ * Publish all shared pointers together, including on weakly ordered hosts. */
+static LONG Wow64ProcessReady;
 
 VOID Wow64InitializeTeb(TEB32 *Teb32, const TEB *Teb, PTEB RemoteTeb, const INITIAL_TEB *Stack)
 {
@@ -212,7 +215,7 @@ VOID Wow64InitializeTeb(TEB32 *Teb32, const TEB *Teb, PTEB RemoteTeb, const INIT
     Teb32->StaticUnicodeString.MaximumLength = sizeof(Teb32->StaticUnicodeBuffer);
 }
 
-VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
+VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
 {
     PPEB Peb = NtCurrentPeb();
     PTEB Teb = NtCurrentTeb();
@@ -224,11 +227,14 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
     NTSTATUS Status;
     WOW64_CONTEXT *GuestContext = NULL;
 
-    /* Native loader initialization is serialized before this entry. A new
-     * guest thread carries its captured context on its own native stack. */
-    if (Wow64Loader32)
+    if (!ProcessStartup)
     {
+        LARGE_INTEGER Delay;
+        /* Native helper threads never initialize or enter the guest loader. */
         if (Context->Rdx != WOW64_THREAD_START_MARKER) return;
+        Delay.QuadPart = -10000;
+        while (!InterlockedCompareExchange(&Wow64ProcessReady, 0, 0))
+            NtDelayExecution(FALSE, &Delay);
         GuestContext = (WOW64_CONTEXT *)(ULONG_PTR)Context->Rcx;
         if (!GuestContext) { Status = STATUS_INVALID_PARAMETER; goto Failed; }
         Ntdll32 = Wow64Ntdll32;
@@ -291,6 +297,7 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
     Teb32->WOW32Reserved = PtrToUlong(Gate);
     Teb32->StaticUnicodeString.Buffer = PtrToUlong(Teb32->StaticUnicodeBuffer);
     Teb32->StaticUnicodeString.MaximumLength = sizeof(Teb32->StaticUnicodeBuffer);
+    InterlockedExchange(&Wow64ProcessReady, 1);
 ThreadReady:
     /* Preserve the parent's pre-resume activation-context setup in TEB32. */
     Teb32->WOW32Reserved = PtrToUlong(Gate);
