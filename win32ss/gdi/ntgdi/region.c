@@ -2279,6 +2279,9 @@ REGION_AllocRgnWithHandle(
 
     //hReg = pReg->BaseObject.hHmgr;
 
+    /* REGION_vCleanup needs the attribute pointer if the buffer allocation fails */
+    pReg->prgnattr = &pReg->rgnattr;
+
     if ((nReg == 0) || (nReg == 1))
     {
         /* Testing shows that > 95% of all regions have only 1 rect.
@@ -2517,7 +2520,8 @@ VOID
 FASTCALL
 REGION_Delete(PREGION pRgn)
 {
-    if (pRgn == prgnDefault)
+    /* A failed allocation leaves callers with a NULL region */
+    if (!pRgn || pRgn == prgnDefault)
         return;
 
     GDIOBJ_vDeleteObject(&pRgn->BaseObject);

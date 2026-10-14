@@ -191,6 +191,17 @@ UserScrollDC(
 
       /* Add the source rect */
       RgnTmp = IntSysCreateRectpRgnIndirect(&rcSrc);
+      if (!RgnOwn || !RgnTmp)
+      {
+         DC_UnlockDc(pDC);
+         REGION_Delete(RgnTmp);
+         if (hrgnUpdate)
+            REGION_UnlockRgn(RgnUpdate);
+         else if (!RgnUpdate)
+            REGION_Delete(RgnOwn);
+         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+         return ERROR;
+      }
       IntGdiCombineRgn(RgnOwn, RgnOwn, RgnTmp, RGN_OR);
 
       /* Substract the part of the dest that was visible in source */
@@ -338,12 +349,11 @@ IntScrollWindowEx(
    RgnTemp = IntSysCreateRectpRgn(0, 0, 0, 0);
    if (!RgnTemp)
    {
+       /* Go on: the children and the caret still need their update */
        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
        Result = ERROR;
-       goto Cleanup;
    }
-
-   if (co_IntGetUpdateRgn(Window, RgnTemp, FALSE) != NULLREGION)
+   else if (co_IntGetUpdateRgn(Window, RgnTemp, FALSE) != NULLREGION)
    {
       PREGION RgnClip = IntSysCreateRectpRgnIndirect(&rcClip);
       if (RgnClip)
@@ -351,15 +361,23 @@ IntScrollWindowEx(
           if (hrgnUpdate)
           {
              RgnWinupd = IntSysCreateRectpRgn(0, 0, 0, 0);
-             // FIXME: What to do if RgnWinupd == NULL??
-             IntGdiCombineRgn( RgnWinupd, RgnTemp, 0, RGN_COPY);
+             if (RgnWinupd)
+             {
+                IntGdiCombineRgn( RgnWinupd, RgnTemp, 0, RGN_COPY);
+             }
+             else
+             {
+                /* The damage cannot be returned to the caller */
+                EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                Result = ERROR;
+             }
           }
 
           REGION_bOffsetRgn(RgnTemp, dx, dy);
 
           IntGdiCombineRgn(RgnTemp, RgnTemp, RgnClip, RGN_AND);
 
-          if (hrgnUpdate)
+          if (RgnWinupd)
               IntGdiCombineRgn( RgnWinupd, RgnWinupd, RgnTemp, RGN_OR );
 
           co_UserRedrawWindow(Window, NULL, RgnTemp, rdw_flags );
@@ -429,9 +447,14 @@ IntScrollWindowEx(
    if (hrgnUpdate && (Result != ERROR))
    {
        /* Give everything back to the caller */
+       /* A callback may have deleted the caller's region */
        RgnTemp = REGION_LockRgn(hrgnUpdate);
-       /* The handle should still be valid */
-       ASSERT(RgnTemp);
+       if (!RgnTemp)
+       {
+           EngSetLastError(ERROR_INVALID_HANDLE);
+           Result = ERROR;
+           goto Cleanup;
+       }
        if (RgnWinupd)
            IntGdiCombineRgn(RgnTemp, RgnUpdate, RgnWinupd, RGN_OR);
        else

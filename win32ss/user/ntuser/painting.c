@@ -100,12 +100,20 @@ IntValidateParents(PWND Child, BOOL Recurse)
             if (!IntIntersectWithParents(Child, &Rect)) break;
 
             Rgn = IntSysCreateRectpRgnIndirect(&Rect);
+            if (!Rgn)
+            {
+               Ret = FALSE;
+               break;
+            }
 
             if (Child->hrgnClip)
             {
                PREGION RgnClip = REGION_LockRgn(Child->hrgnClip);
-               IntGdiCombineRgn(Rgn, Rgn, RgnClip, RGN_AND);
-               REGION_UnlockRgn(RgnClip);
+               if (RgnClip)
+               {
+                  IntGdiCombineRgn(Rgn, Rgn, RgnClip, RGN_AND);
+                  REGION_UnlockRgn(RgnClip);
+               }
             }
          }
 
@@ -901,6 +909,7 @@ co_UserRedrawWindow(
    ULONG Flags)
 {
    PREGION TmpRgn = NULL;
+   BOOL bRgnAllocated = FALSE;
    TRACE("co_UserRedrawWindow start Rgn %p\n",UpdateRgn);
 
    /*
@@ -931,6 +940,11 @@ co_UserRedrawWindow(
       if (UpdateRgn)
       {
           TmpRgn = IntSysCreateRectpRgn(0, 0, 0, 0);
+          if (!TmpRgn)
+          {
+             EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+             return FALSE;
+          }
 
           if (UpdateRgn > PRGN_WINDOW)
           {
@@ -946,6 +960,7 @@ co_UserRedrawWindow(
       {
          if (UpdateRect != NULL)
          {
+            bRgnAllocated = TRUE;
             if (Window == UserGetDesktopWindow())
             {
                TmpRgn = IntSysCreateRectpRgnIndirect(UpdateRect);
@@ -964,15 +979,27 @@ co_UserRedrawWindow(
                 (Flags & (RDW_VALIDATE | RDW_NOFRAME)) == (RDW_VALIDATE | RDW_NOFRAME))
             {
                if (!RECTL_bIsEmptyRect(&Window->rcWindow))
+               {
+                   bRgnAllocated = TRUE;
                    TmpRgn = IntSysCreateRectpRgnIndirect(&Window->rcWindow);
+               }
             }
             else
             {
                if (!RECTL_bIsEmptyRect(&Window->rcClient))
+               {
+                   bRgnAllocated = TRUE;
                    TmpRgn = IntSysCreateRectpRgnIndirect(&Window->rcClient);
+               }
             }
          }
       }
+   }
+
+   if (bRgnAllocated && TmpRgn == NULL)
+   {
+      EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+      return FALSE;
    }
 
    /* Fixes test RDW_INTERNALPAINT behavior */
@@ -1048,6 +1075,8 @@ PaintSuspendedWindow(PWND pwnd, HRGN hrgnOrig)
       else
       {
          hrgnTemp = GreCreateRectRgnIndirect(&pwnd->rcWindow);
+         if (!hrgnTemp)
+            hrgnTemp = HRGN_WINDOW;
       }
 
       if ( hrgnOrig &&
@@ -1070,9 +1099,13 @@ PaintSuspendedWindow(PWND pwnd, HRGN hrgnOrig)
 
       UserReleaseDC(pwnd, hDC, FALSE);
 
-      prgn = REGION_LockRgn(hrgnTemp);
-      IntInvalidateWindows(pwnd, prgn, RDW_INVALIDATE | RDW_FRAME | RDW_ERASE | RDW_ALLCHILDREN);
-      REGION_UnlockRgn(prgn);
+      prgn = (hrgnTemp > HRGN_WINDOW) ? REGION_LockRgn(hrgnTemp) : NULL;
+      /* Without a region the pending update region stays as it is */
+      if (prgn)
+      {
+         IntInvalidateWindows(pwnd, prgn, RDW_INVALIDATE | RDW_FRAME | RDW_ERASE | RDW_ALLCHILDREN);
+         REGION_UnlockRgn(prgn);
+      }
 
       // Set updates for this window.
       pwnd->state |= WNDS_SENDNCPAINT|WNDS_SENDERASEBACKGROUND|WNDS_UPDATEDIRTY;
@@ -2489,6 +2522,12 @@ co_UserExcludeUpdateRgn(HDC hDC, PWND Window)
                     HRGN hrgnScreen;
                     PMONITOR pm = UserGetPrimaryMonitor();
                     hrgnScreen = NtGdiCreateRectRgn(0,0,0,0);
+                    if (!hrgnScreen)
+                    {
+                        GreDeleteObject(hrgn);
+                        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        return ERROR;
+                    }
                     NtGdiCombineRgn(hrgnScreen, hrgnScreen, pm->hrgnMonitor, RGN_OR);
 
                     NtGdiCombineRgn(hrgn, hrgnScreen, NULL, RGN_COPY);
