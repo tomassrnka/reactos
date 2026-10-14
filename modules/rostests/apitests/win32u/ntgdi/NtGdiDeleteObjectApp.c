@@ -33,6 +33,13 @@ START_TEST(NtGdiDeleteObjectApp)
     ok_int(GdiIsHandleValid(hdc), 0);
 
 #ifdef _WIN64
+#ifdef BUILD_WOW64_ENABLED
+    /* Bits above 31 come from integer message transport, not the reuse count. */
+    ok_hex(GDI_HANDLE_GET_REUSECNT((HANDLE)0xffffffff801000aaULL), 0x80);
+    ok_hex(GDI_HANDLE_GET_UNIQUE((HANDLE)0xffffffff801000aaULL), 0x8010);
+    ok_hex(GDI_HANDLE_GET_REUSECNT((HANDLE)0x12345678ff1000aaULL), 0xff);
+    ok_hex(GDI_HANDLE_GET_UNIQUE((HANDLE)0x12345678ff1000aaULL), 0xff10);
+#endif
     /* Test upper 32 bits */
     SetLastError(0);
     hdc = (HDC)((ULONG64)CreateCompatibleDC(NULL) | 0xFFFFFFFF00000000ULL);
