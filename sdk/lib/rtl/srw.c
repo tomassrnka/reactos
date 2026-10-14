@@ -194,12 +194,39 @@ RtlpReleaseWaitBlockLock(IN OUT PRTL_SRWLOCK SRWLock)
 }
 
 
+/* Waiting by spinning alone keeps a lock owner of lower or equal priority from
+   running on a busy machine, which can stall it for seconds: spin briefly, then
+   give the processor away, then sleep. There are no kernel-mode users. */
+static VOID
+RtlpSrwSpinWait(IN OUT PULONG Spins)
+{
+    LARGE_INTEGER Delay;
+
+    if (*Spins < 128)
+    {
+        (*Spins)++;
+        YieldProcessor();
+    }
+    else if (*Spins < 192)
+    {
+        (*Spins)++;
+        ZwYieldExecution();
+    }
+    else
+    {
+        Delay.QuadPart = -10 * 1000;
+        ZwDelayExecution(FALSE, &Delay);
+    }
+}
+
+
 static PRTLP_SRWLOCK_WAITBLOCK
 NTAPI
 RtlpAcquireWaitBlockLock(IN OUT PRTL_SRWLOCK SRWLock)
 {
     LONG_PTR PrevValue;
     PRTLP_SRWLOCK_WAITBLOCK WaitBlock;
+    ULONG Spins = 0;
 
     while (1)
     {
@@ -209,7 +236,7 @@ RtlpAcquireWaitBlockLock(IN OUT PRTL_SRWLOCK SRWLock)
         if (!(PrevValue & RTL_SRWLOCK_CONTENTION_LOCK))
             break;
 
-        YieldProcessor();
+        RtlpSrwSpinWait(&Spins);
     }
 
     if (!(PrevValue & RTL_SRWLOCK_CONTENDED) ||
@@ -233,6 +260,7 @@ RtlpAcquireSRWLockExclusiveWait(IN OUT PRTL_SRWLOCK SRWLock,
                                 IN PRTLP_SRWLOCK_WAITBLOCK WaitBlock)
 {
     LONG_PTR CurrentValue;
+    ULONG Spins = 0;
 
     while (1)
     {
@@ -257,7 +285,7 @@ RtlpAcquireSRWLockExclusiveWait(IN OUT PRTL_SRWLOCK SRWLock,
             }
         }
 
-        YieldProcessor();
+        RtlpSrwSpinWait(&Spins);
     }
 }
 
@@ -268,11 +296,13 @@ RtlpAcquireSRWLockSharedWait(IN OUT PRTL_SRWLOCK SRWLock,
                              IN OUT PRTLP_SRWLOCK_WAITBLOCK FirstWait  OPTIONAL,
                              IN OUT PRTLP_SRWLOCK_SHARED_WAKE WakeChain)
 {
+    ULONG Spins = 0;
+
     if (FirstWait != NULL)
     {
         while (WakeChain->Wake == 0)
         {
-            YieldProcessor();
+            RtlpSrwSpinWait(&Spins);
         }
     }
     else
@@ -306,7 +336,7 @@ RtlpAcquireSRWLockSharedWait(IN OUT PRTL_SRWLOCK SRWLock,
                 }
             }
 
-            YieldProcessor();
+            RtlpSrwSpinWait(&Spins);
         }
     }
 }
