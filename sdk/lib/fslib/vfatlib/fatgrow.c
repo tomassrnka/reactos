@@ -23,11 +23,16 @@ typedef unsigned short u16;
 typedef unsigned int u32;
 typedef unsigned long long u64;
 
-#define FAT12_MAX_CLUSTERS 4084     /* below 4085 on every reader (the specification says < 4085, FastFAT < 4087) */
+/*
+ * The cluster counts the formatter (fat12.c, fat16.c, fat32.c) writes: the type is the same on every
+ * reader (FAT12 below 4085 by the specification, below 4087 for FastFAT) and no cluster number
+ * reaches the reserved values 0xFF0, 0xFFF0 and 0x0FFFFFF0.
+ */
+#define FAT12_MAX_CLUSTERS 4078
 #define FAT16_MIN_CLUSTERS 4087
-#define FAT16_MAX_CLUSTERS 65524
+#define FAT16_MAX_CLUSTERS 65518
 #define FAT32_MIN_CLUSTERS 65525
-#define FAT32_MAX_CLUSTERS 0x0FFFFFF5
+#define FAT32_MAX_CLUSTERS 0x0FFFFFEE
 
 struct ref
 {
@@ -240,14 +245,11 @@ out:
 }
 
 /* Rewrites the first-cluster field at every recorded place: directory clusters on disk, the root region in memory. */
-static int patch_refs(struct fg *g)
+static int patch_refs(struct fg *g, u8 *buf)
 {
     u32 csize = g->spc * g->bps, i, cur = 0;
-    u8 *buf = g->io->alloc(g->io->ctx, csize);
     int err = FG_OK;
 
-    if (!buf)
-        return FG_ENOMEM;
     for (i = 0; i < g->nrefs && !err; i++)
     {
         struct ref *r = &g->refs[i];
@@ -280,7 +282,6 @@ static int patch_refs(struct fg *g)
     }
     if (!err && cur && g->io->write(g->io->ctx, cluster_offset(g, cur), buf, csize))
         err = FG_EIO;
-    g->io->free(g->io->ctx, buf);
     return err;
 }
 
@@ -300,15 +301,13 @@ static void sort_refs(struct ref *r, u32 n)
     }
 }
 
-static int write_fats(struct fg *g, u32 fatsz, u32 count, const u32 *entries)
+/* buf: fatsz sectors, zero-filled. */
+static int write_fats(struct fg *g, u32 fatsz, u32 count, const u32 *entries, u8 *buf)
 {
     u64 bytes = (u64)fatsz * g->bps;
-    u8 *buf = g->io->alloc(g->io->ctx, bytes);
     u32 i, k;
     int err = FG_OK;
 
-    if (!buf)
-        return FG_ENOMEM;
     for (i = 0; i < count; i++)
         put_entry(buf, g->bits, i, entries[i]);
     if (g->bits == 32)
@@ -326,13 +325,17 @@ static int write_fats(struct fg *g, u32 fatsz, u32 count, const u32 *entries)
                 err = FG_EIO;
         }
     }
-    g->io->free(g->io->ctx, buf);
     return err;
 }
 
+/*
+ * Reads FAT 1 into g->fat: the entries of the clusters (pointers must stay inside the volume), and
+ * the spare entries the FAT holds past them, which must be free: the grown volume takes them over.
+ */
 static int read_fat(struct fg *g, u32 count)
 {
     u64 bytes = (u64)g->fatsz * g->bps, done;
+    u64 held = bytes * 8 / g->bits;
     u8 *buf = g->io->alloc(g->io->ctx, bytes);
     u32 i;
     int err = FG_OK;
@@ -349,6 +352,11 @@ static int read_fat(struct fg *g, u32 count)
     {
         g->fat[i] = get_entry(buf, g->bits, i);
         if (i >= 2 && is_pointer(g, g->fat[i]) && g->fat[i] > g->clusters + 1)
+            err = FG_EBADFS;
+    }
+    for (; !err && i < held && i < count; i++)
+    {
+        if (get_entry(buf, g->bits, i))
             err = FG_EBADFS;
     }
     if (!err && g->bits == 32)
@@ -425,6 +433,7 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
     struct fg G, *g = &G;
     u32 fatsz2, d, m, newc, i, used, moved = 0, freec = 0, y;
     u32 *remap = 0, *newfat = 0;
+    u8 *patchbuf = 0, *fatbuf = 0;
     u8 head[512];
     int err;
 
@@ -465,7 +474,7 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
             return FG_EBADFS;
     }
     else
-        g->bits = g->clusters <= FAT12_MAX_CLUSTERS ? 12 : 16;
+        g->bits = g->clusters < 4085 ? 12 : 16;
     if (!type_ok(g->bits, g->clusters) || (u64)g->fatsz * g->bps * 8 / g->bits < (u64)g->clusters + 2)
         return FG_EBADFS;
     if (new_sectors <= g->totsec || new_sectors > 0xFFFFFFFFULL)
@@ -509,7 +518,7 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
         err = FG_EIO;
         goto out;
     }
-    err = read_fat(g, g->clusters + 2);
+    err = read_fat(g, g->fat_count);
     if (err)
         goto out;
 
@@ -518,11 +527,6 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
         /* The FATs have room: only the size changes. */
         for (i = 2; i < newc + 2; i++)
         {
-            if (i >= g->clusters + 2 && g->fat[i])
-            {
-                err = FG_EBADFS;
-                goto out;
-            }
             if (!g->fat[i])
                 freec++;
         }
@@ -550,13 +554,21 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
     if (err)
         goto out;
 
-    /* Out of the way of the FATs: clusters 2 .. m+1 move to free clusters, highest first. */
+    /*
+     * Every buffer before the first write: from the first directory entry rewritten until the
+     * boot sector is written the volume is in neither numbering, and must not stop half way.
+     */
     remap = io->alloc(io->ctx, ((u64)m + 2) * sizeof(u32));
-    if (!remap)
+    newfat = io->alloc(io->ctx, ((u64)newc + 2) * sizeof(u32));
+    patchbuf = io->alloc(io->ctx, (u64)g->spc * g->bps);
+    fatbuf = io->alloc(io->ctx, (u64)fatsz2 * g->bps);
+    if (!remap || !newfat || !patchbuf || !fatbuf)
     {
         err = FG_ENOMEM;
         goto out;
     }
+
+    /* Out of the way of the FATs: clusters 2 .. m+1 move to free clusters, highest first. */
     for (used = 0, i = 2; i < m + 2 && i < g->fat_count; i++)
     {
         if (g->fat[i])
@@ -566,12 +578,7 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
     if (used)
     {
         u32 csize = g->spc * g->bps;
-        u8 *buf = io->alloc(io->ctx, csize);
-        if (!buf)
-        {
-            err = FG_ENOMEM;
-            goto out;
-        }
+        u8 *buf = patchbuf;     /* copies into free clusters change nothing yet */
         for (i = 2; i < m + 2 && !err; i++)
         {
             if (!g->fat[i])
@@ -600,7 +607,6 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
             moved++;
             y--;
         }
-        io->free(io->ctx, buf);
         if (err)
             goto out;
         for (i = 2; i < g->fat_count; i++)
@@ -622,12 +628,6 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
         result->moved_clusters = moved;
 
     /* New numbering: old cluster c is cluster c - m. */
-    newfat = io->alloc(io->ctx, ((u64)newc + 2) * sizeof(u32));
-    if (!newfat)
-    {
-        err = FG_ENOMEM;
-        goto out;
-    }
     newfat[0] = g->fat[0];
     newfat[1] = g->fat[1];
     for (i = 2; i < newc + 2; i++)
@@ -651,7 +651,7 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
     sort_refs(g->refs, g->nrefs);
 
     /* Directory entries first (their clusters do not move again), then the root region, the FATs, the boot sector. */
-    err = patch_refs(g);
+    err = patch_refs(g, patchbuf);
     if (err)
         goto out;
     if (g->bits != 32 &&
@@ -660,7 +660,7 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
         err = FG_EIO;
         goto out;
     }
-    err = write_fats(g, fatsz2, newc + 2, newfat);
+    err = write_fats(g, fatsz2, newc + 2, newfat, fatbuf);
     if (err)
         goto out;
     if (g->bits == 32)
@@ -670,6 +670,10 @@ int fatgrow(const fatgrow_io *io, unsigned long long new_sectors, fatgrow_result
         err = write_fsinfo(g, freec);
 
 out:
+    if (fatbuf)
+        io->free(io->ctx, fatbuf);
+    if (patchbuf)
+        io->free(io->ctx, patchbuf);
     if (newfat)
         io->free(io->ctx, newfat);
     if (remap)
