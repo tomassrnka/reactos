@@ -1313,13 +1313,22 @@ run:
             // TODO: issue an install operation separately so that the apps could be downloaded in the background
             if (shExInfo.hProcess)
             {
-                DWORD dwExitCode = 0;
-                WaitForSingleObject(shExInfo.hProcess, INFINITE);
-                BOOL bHasExitCode = GetExitCodeProcess(shExInfo.hProcess, &dwExitCode);
+                DWORD dwExitCode = 0, dwQueryError = ERROR_SUCCESS;
+                BOOL bHasExitCode = WaitForSingleObject(shExInfo.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+                                    GetExitCodeProcess(shExInfo.hProcess, &dwExitCode);
+                if (!bHasExitCode)
+                    dwQueryError = GetLastError();
                 CloseHandle(shExInfo.hProcess);
                 SendMessageW(hMainWnd, WM_NOTIFY_INSTALLERFINISHED, 0, (LPARAM)(PCWSTR)Info.szPackageName);
 
-                if (bHasExitCode && dwExitCode != ERROR_SUCCESS)
+                if (!bHasExitCode)
+                {
+                    // Nothing says that the installer finished its work
+                    bSucceeded = FALSE;
+                    if (!IsSilentDialog())
+                        ShowLastError(hDlg, FALSE, dwQueryError);
+                }
+                else if (dwExitCode != ERROR_SUCCESS)
                 {
                     InstallerType it = Info.IExecType != INSTALLER_UNKNOWN ? Info.IExecType : Info.IType;
                     if (it == INSTALLER_UNKNOWN || it == INSTALLER_EXEINZIP)
