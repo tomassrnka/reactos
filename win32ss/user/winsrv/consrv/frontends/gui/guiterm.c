@@ -72,19 +72,66 @@ GuiConsoleMoveWindow(PGUI_CONSOLE_DATA GuiData)
     }
 }
 
+/*
+ * Writers must not call into USER here: each call waits for the USER lock,
+ * which the window thread holds while it paints, and a paint can take as long
+ * as the video driver needs. They record what changed and arm the update
+ * timer once; the window thread invalidates from the timer
+ * (see GuiInvalidateDirty). The console must be locked.
+ */
+static VOID
+ArmUpdateTimer(PGUI_CONSOLE_DATA GuiData)
+{
+    // HACK!!
+    // Set up the update timer (very short interval) - this is a "hack" for getting the OS to
+    // repaint the window without having it just freeze up and stay on the screen permanently.
+    if (!GuiData->hWindow || InterlockedExchange(&GuiData->UpdateTimerArmed, TRUE)) return;
+
+    if (!SetTimer(GuiData->hWindow, CONGUI_UPDATE_TIMER, CONGUI_UPDATE_TIME, NULL))
+        InterlockedExchange(&GuiData->UpdateTimerArmed, FALSE);
+}
+
 static VOID
 DrawRegion(PGUI_CONSOLE_DATA GuiData,
            SMALL_RECT* Region)
 {
-    RECT RegionRect;
+    PSMALL_RECT Dirty = &GuiData->DirtyRegion;
 
-    SmallRectToRect(GuiData, &RegionRect, Region);
-    /* Do not erase the background: it speeds up redrawing and reduce flickering */
-    InvalidateRect(GuiData->hWindow, &RegionRect, FALSE);
-    /**UpdateWindow(GuiData->hWindow);**/
+    if (!GuiData->DirtyCells)
+    {
+        *Dirty = *Region;
+        GuiData->DirtyCells = TRUE;
+    }
+    else
+    {
+        Dirty->Left   = min(Dirty->Left  , Region->Left  );
+        Dirty->Top    = min(Dirty->Top   , Region->Top   );
+        Dirty->Right  = max(Dirty->Right , Region->Right );
+        Dirty->Bottom = max(Dirty->Bottom, Region->Bottom);
+    }
+    ArmUpdateTimer(GuiData);
 }
 
+/* Called by the update timer in the window thread, with the console locked */
 VOID
+GuiInvalidateDirty(PGUI_CONSOLE_DATA GuiData)
+{
+    RECT Rect;
+
+    if (GuiData->DirtyView || (GuiData->DirtyCells && !GuiData->ActiveBuffer))
+    {
+        InvalidateRect(GuiData->hWindow, NULL, FALSE);
+    }
+    else if (GuiData->DirtyCells)
+    {
+        SmallRectToRect(GuiData, &Rect, &GuiData->DirtyRegion);
+        /* Do not erase the background: it speeds up redrawing and reduce flickering */
+        InvalidateRect(GuiData->hWindow, &Rect, FALSE);
+    }
+    GuiData->DirtyView = GuiData->DirtyCells = FALSE;
+}
+
+static VOID
 InvalidateCell(PGUI_CONSOLE_DATA GuiData,
                SHORT x, SHORT y)
 {
@@ -649,7 +696,6 @@ GuiWriteStream(IN OUT PFRONTEND This,
     PGUI_CONSOLE_DATA GuiData = This->Context;
     PCONSOLE_SCREEN_BUFFER Buff;
     SHORT CursorEndX, CursorEndY;
-    RECT ScrollRect;
 
     if (NULL == GuiData || NULL == GuiData->hWindow) return;
 
@@ -659,22 +705,9 @@ GuiWriteStream(IN OUT PFRONTEND This,
     Buff = GuiData->ActiveBuffer;
     if (GetType(Buff) != TEXTMODE_BUFFER) return;
 
+    /* Repaint the view instead of copying its pixels in the writer's thread */
     if (0 != ScrolledLines)
-    {
-        ScrollRect.left = 0;
-        ScrollRect.top = 0;
-        ScrollRect.right = Buff->ViewSize.X * GuiData->CharWidth;
-        ScrollRect.bottom = Region->Top * GuiData->CharHeight;
-
-        ScrollWindowEx(GuiData->hWindow,
-                       0,
-                       -(int)(ScrolledLines * GuiData->CharHeight),
-                       &ScrollRect,
-                       NULL,
-                       NULL,
-                       NULL,
-                       SW_INVALIDATE);
-    }
+        GuiData->DirtyView = TRUE;
 
     DrawRegion(GuiData, Region);
 
@@ -693,11 +726,8 @@ GuiWriteStream(IN OUT PFRONTEND This,
         InvalidateCell(GuiData, CursorEndX, CursorEndY);
     }
 
-    // HACK!!
-    // Set up the update timer (very short interval) - this is a "hack" for getting the OS to
-    // repaint the window without having it just freeze up and stay on the screen permanently.
     Buff->CursorBlinkOn = TRUE;
-    SetTimer(GuiData->hWindow, CONGUI_UPDATE_TIMER, CONGUI_UPDATE_TIME, NULL);
+    ArmUpdateTimer(GuiData);
 }
 
 /* static */ VOID NTAPI

@@ -54,6 +54,15 @@ typedef struct _GUI_CONSOLE_DATA
 
     POINT OldCursor;
 
+    /*
+     * Cells and view to repaint. Writers record them here, with the console
+     * locked, and the window thread invalidates them from its update timer.
+     */
+    SMALL_RECT DirtyRegion;     /* In screen buffer coordinates, valid if DirtyCells */
+    BOOLEAN DirtyCells;
+    BOOLEAN DirtyView;          /* The whole view needs repainting */
+    LONG UpdateTimerArmed;      /* Set when a writer arms the update timer, cleared by the timer */
+
     LONG_PTR WndStyle;
     LONG_PTR WndStyleEx;
     BOOL IsWndMax;

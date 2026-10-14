@@ -61,6 +61,9 @@ SmallRectToRect(PGUI_CONSOLE_DATA GuiData, PRECT Rect, PSMALL_RECT SmallRect)
 VOID
 GuiConsoleMoveWindow(PGUI_CONSOLE_DATA GuiData);
 
+VOID
+GuiInvalidateDirty(PGUI_CONSOLE_DATA GuiData);
+
 
 /* conwnd.c */
 

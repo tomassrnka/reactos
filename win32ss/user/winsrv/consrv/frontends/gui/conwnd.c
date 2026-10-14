@@ -1304,16 +1304,14 @@ Quit:
 }
 
 
-// FIXME: Remove after fixing OnTimer
-VOID
-InvalidateCell(PGUI_CONSOLE_DATA GuiData,
-               SHORT x, SHORT y);
-
 static VOID
 OnTimer(PGUI_CONSOLE_DATA GuiData)
 {
     PCONSRV_CONSOLE Console = GuiData->Console;
     PCONSOLE_SCREEN_BUFFER Buff;
+
+    /* Let the next write arm the update timer again */
+    InterlockedExchange(&GuiData->UpdateTimerArmed, FALSE);
 
     /* Do nothing if the window is hidden */
     if (!GuiData->IsWindowVisible) return;
@@ -1324,12 +1322,20 @@ OnTimer(PGUI_CONSOLE_DATA GuiData)
 
     Buff = GuiData->ActiveBuffer;
 
+    /* Invalidate what the writers changed since the last tick */
+    GuiInvalidateDirty(GuiData);
+
     if (GetType(Buff) == TEXTMODE_BUFFER)
     {
         /* Repaint the caret */
         if (GuiData->IsWindowActive || Buff->CursorBlinkOn)
         {
-            InvalidateCell(GuiData, Buff->CursorPosition.X, Buff->CursorPosition.Y);
+            SMALL_RECT CursorCell = { Buff->CursorPosition.X, Buff->CursorPosition.Y,
+                                      Buff->CursorPosition.X, Buff->CursorPosition.Y };
+            RECT CursorRect;
+
+            SmallRectToRect(GuiData, &CursorRect, &CursorCell);
+            InvalidateRect(GuiData->hWindow, &CursorRect, FALSE);
             Buff->CursorBlinkOn = !Buff->CursorBlinkOn;
         }
 
@@ -1389,14 +1395,6 @@ OnTimer(PGUI_CONSOLE_DATA GuiData)
             {
                 Buff->ViewOrigin.X = NewScrollX;
                 Buff->ViewOrigin.Y = NewScrollY;
-                ScrollWindowEx(GuiData->hWindow,
-                               (OldScrollX - NewScrollX) * GuiData->CharWidth,
-                               (OldScrollY - NewScrollY) * GuiData->CharHeight,
-                               NULL,
-                               NULL,
-                               NULL,
-                               NULL,
-                               SW_INVALIDATE);
                 if (NewScrollX >= 0)
                 {
                     sInfo.nPos = NewScrollX;
@@ -1407,8 +1405,12 @@ OnTimer(PGUI_CONSOLE_DATA GuiData)
                     sInfo.nPos = NewScrollY;
                     SetScrollInfo(GuiData->hWindow, SB_VERT, &sInfo, TRUE);
                 }
-                UpdateWindow(GuiData->hWindow);
-                // InvalidateRect(GuiData->hWindow, NULL, FALSE);
+                /*
+                 * Repaint the view later instead of scrolling and painting it
+                 * now: both wait for the video driver with the console lock
+                 * held, and a writer waits for that lock.
+                 */
+                InvalidateRect(GuiData->hWindow, NULL, FALSE);
                 GuiData->OldCursor.x = Buff->CursorPosition.X;
                 GuiData->OldCursor.y = Buff->CursorPosition.Y;
             }
