@@ -511,32 +511,61 @@ ShowProperties(VOID)
     if (!ResolveSelection(&Disk, &Region))
         return;
     if (Region == NULL)
-        ShowDiskProperties(g_hMain, Disk);
+    {
+        /* a volume renamed in the sheet of the disk shows in the main view too */
+        if (ShowDiskProperties(g_hMain, Disk))
+            Refresh();
+    }
     else if (Region->Kind == DM_KIND_PRIMARY || Region->Kind == DM_KIND_LOGICAL)
-        ShowRegionProperties(g_hMain, Disk, Region);
+    {
+        if (ShowRegionProperties(g_hMain, Disk, Region))
+            Refresh();
+    }
 }
 
 static VOID
 ShowContextMenu(int X, int Y)
 {
-    HMENU hMenu = LoadMenuW(g_hInst, MAKEINTRESOURCEW(IDR_POPUP));
-    HMENU hPopup;
+    HMENU hPopup = CreatePopupMenu();
+    PDM_DISK Disk;
+    PDM_REGION Region;
 
-    if (hMenu == NULL)
+    if (hPopup == NULL)
         return;
-    hPopup = GetSubMenu(hMenu, 0);
-    EnableMenuItem(hPopup, ID_PROPERTIES, MF_BYCOMMAND | (CanShowProperties() ? MF_ENABLED : MF_GRAYED));
+    ResolveSelection(&Disk, &Region);
+    ActionsBuildMenu(hPopup, Disk, Region, TRUE);
     SetMenuDefaultItem(hPopup, ID_PROPERTIES, FALSE);
     TrackPopupMenu(hPopup, TPM_LEFTALIGN | TPM_RIGHTBUTTON, X, Y, 0, g_hMain, NULL);
-    DestroyMenu(hMenu);
+    DestroyMenu(hPopup);
 }
 
 static VOID
 UpdateMenus(HMENU hMenu)
 {
+    HMENU hAction = GetSubMenu(hMenu, 1), hTasks = hAction ? GetSubMenu(hAction, 3) : NULL;
+    PDM_DISK Disk;
+    PDM_REGION Region;
+
     CheckMenuRadioItem(hMenu, ID_TOP_DISKLIST, ID_TOP_GRAPH, ID_TOP_DISKLIST + (int)g_TopView, MF_BYCOMMAND);
     CheckMenuRadioItem(hMenu, ID_BOT_DISKLIST, ID_BOT_HIDDEN, ID_BOT_DISKLIST + (int)g_BottomView, MF_BYCOMMAND);
     EnableMenuItem(hMenu, ID_PROPERTIES, MF_BYCOMMAND | (CanShowProperties() ? MF_ENABLED : MF_GRAYED));
+    if (hTasks)
+    {
+        ResolveSelection(&Disk, &Region);
+        ActionsBuildMenu(hTasks, Disk, Region, FALSE);
+        EnableMenuItem(hAction, 3, MF_BYPOSITION | (GetMenuItemCount(hTasks) > 0 && Disk ? MF_ENABLED : MF_GRAYED));
+    }
+}
+
+static VOID
+DoAction(UINT Id)
+{
+    PDM_DISK Disk = NULL;
+    PDM_REGION Region = NULL;
+
+    ResolveSelection(&Disk, &Region);
+    if (ActionsRun(g_hMain, Id, Disk, Region))
+        Refresh();
 }
 
 static VOID
@@ -776,6 +805,7 @@ MainWndProc(HWND hWnd, UINT Message, WPARAM wParam, LPARAM lParam)
             {
                 case ID_EXIT:           DestroyWindow(hWnd); break;
                 case ID_REFRESH:        Refresh(); break;
+                case ID_RESCAN:         DoAction(ID_RESCAN); break;
                 case ID_PROPERTIES:     ShowProperties(); break;
                 case ID_TOP_DISKLIST:   ChooseTop(VIEW_DISKLIST); break;
                 case ID_TOP_VOLLIST:    ChooseTop(VIEW_VOLLIST); break;
@@ -785,6 +815,10 @@ MainWndProc(HWND hWnd, UINT Message, WPARAM wParam, LPARAM lParam)
                 case ID_BOT_GRAPH:      ChooseBottom(VIEW_GRAPH); break;
                 case ID_BOT_HIDDEN:     ChooseBottom(VIEW_HIDDEN); break;
                 case ID_ABOUT:          ShowAbout(); break;
+                default:
+                    if (LOWORD(wParam) >= ID_ACT_FIRST && LOWORD(wParam) <= ID_ACT_LAST)
+                        DoAction(LOWORD(wParam));
+                    break;
             }
             return 0;
 

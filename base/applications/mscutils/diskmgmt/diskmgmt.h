@@ -23,6 +23,7 @@
 #include <strsafe.h>
 
 #include "diskmodel.h"
+#include "diskops.h"
 #include "resource.h"
 
 /* The part of the model the user picked: a disk, or a block of a disk. */
@@ -53,8 +54,13 @@ BOOL GraphGetSelection(HWND hWnd, PDM_SELECTION Selection);
 VOID GraphGetSelectedPoint(HWND hWnd, LPPOINT Point);
 
 /* props.c */
-VOID ShowRegionProperties(HWND hOwner, const DM_DISK *Disk, const DM_REGION *Region);
-VOID ShowDiskProperties(HWND hOwner, const DM_DISK *Disk);
+BOOL ShowRegionProperties(HWND hOwner, const DM_DISK *Disk, const DM_REGION *Region);
+BOOL ShowDiskProperties(HWND hOwner, const DM_DISK *Disk);
+
+/* actions.c */
+BOOL ActionsEnabled(UINT Id, const DM_DISK *Disk, const DM_REGION *Region);
+VOID ActionsBuildMenu(HMENU hMenu, const DM_DISK *Disk, const DM_REGION *Region, BOOL WithProperties);
+BOOL ActionsRun(HWND hOwner, UINT Id, const DM_DISK *Disk, const DM_REGION *Region);
 
 /* diskmgmt.c */
 BOOL LoadStringBuffer(UINT Id, PWSTR Buffer, int Count);
