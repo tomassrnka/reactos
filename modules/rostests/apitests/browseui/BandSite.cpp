@@ -103,7 +103,7 @@ static bool CreateBandSite(HWND hwnd, BandSite &bs)
     return bs.hwndRebar != NULL;
 }
 
-static HRESULT AddFolderBand(BandSite &bs, PCIDLIST_ABSOLUTE pidl, BOOL bQuickLaunch)
+static HRESULT AddFolderBand(BandSite &bs, PCIDLIST_ABSOLUTE pidl, BOOL bQuickLaunch, BOOL bMustSucceed = TRUE)
 {
     CComPtr<IShellFolderBand> band;
     HRESULT hr = CoCreateInstance(CLSID_ISFBand, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IShellFolderBand, &band));
@@ -120,7 +120,7 @@ static HRESULT AddFolderBand(BandSite &bs, PCIDLIST_ABSOLUTE pidl, BOOL bQuickLa
     }
 
     hr = bs.site->AddBand(band);
-    ok(SUCCEEDED(hr), "AddBand failed with 0x%08lx\n", hr);
+    ok(!bMustSucceed || SUCCEEDED(hr), "AddBand failed with 0x%08lx\n", hr);
     return hr;
 }
 
@@ -209,6 +209,92 @@ static void TestRefusedStream(HWND hwnd, const char *what, IStream *stream)
     HRESULT hr = bs.persist->Load(stream);
     ok(FAILED(hr), "%s: Load returned 0x%08lx\n", what, hr);
     ok(CountBands(bs.site) == 0, "%s: %u bands were added\n", what, CountBands(bs.site));
+}
+
+/* The rebar refuses the first insertion, as it does when it is out of memory */
+static LONG g_RefuseInsertions;
+static WNDPROC g_RebarProc;
+
+static LRESULT CALLBACK RefusingRebarProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    if (uMsg == RB_INSERTBANDW && InterlockedCompareExchange(&g_RefuseInsertions, 0, 0) > 0)
+    {
+        InterlockedDecrement(&g_RefuseInsertions);
+        return FALSE;
+    }
+    return CallWindowProcW(g_RebarProc, hwnd, uMsg, wParam, lParam);
+}
+
+static BOOL CALLBACK CountChild(HWND hwnd, LPARAM lParam)
+{
+    (*(UINT *)lParam)++;
+    return TRUE;
+}
+
+static UINT CountChildWindows(HWND hwnd)
+{
+    UINT count = 0;
+    EnumChildWindows(hwnd, CountChild, (LPARAM)&count);
+    return count;
+}
+
+/* A band that cannot be inserted leaves nothing behind, and the same site takes the next one */
+static void TestFailedInsertion(HWND hwnd, PCIDLIST_ABSOLUTE pidl)
+{
+    BandSite bs;
+    if (!CreateBandSite(hwnd, bs))
+        return;
+
+    g_RebarProc = (WNDPROC)SetWindowLongPtrW(bs.hwndRebar, GWLP_WNDPROC, (LONG_PTR)RefusingRebarProc);
+    g_RefuseInsertions = 1;
+
+    UINT before = CountChildWindows(bs.hwndRebar);
+    HRESULT hr = AddFolderBand(bs, pidl, FALSE, FALSE);
+    ok(FAILED(hr), "AddBand succeeded although the rebar refused the band: 0x%08lx\n", hr);
+    ok_int(CountBands(bs.site), 0);
+    ok(CountChildWindows(bs.hwndRebar) == before, "The window of the refused band is still there: %u child windows of %u\n",
+       CountChildWindows(bs.hwndRebar), before);
+
+    hr = AddFolderBand(bs, pidl, FALSE);
+    ok(SUCCEEDED(hr), "The next band was refused: 0x%08lx\n", hr);
+    ok_int(CountBands(bs.site), 1);
+    ok(CountChildWindows(bs.hwndRebar) == before + 1, "%u child windows, expected %u\n", CountChildWindows(bs.hwndRebar), before + 1);
+
+    SetWindowLongPtrW(bs.hwndRebar, GWLP_WNDPROC, (LONG_PTR)g_RebarProc);
+}
+
+/* More bands than the first allocation holds: every band has an id of its own, and all of them are saved and loaded */
+static void TestManyBands(HWND hwnd, PCIDLIST_ABSOLUTE pidl)
+{
+    BandSite one, two;
+    DWORD ids[10] = { 0 };
+    const UINT total = 10;
+
+    if (!CreateBandSite(hwnd, one))
+        return;
+    for (UINT i = 0; i < total; i++)
+        AddFolderBand(one, pidl, FALSE);
+    ok_int(CountBands(one.site), (int)total);
+    for (UINT i = 0; i < total; i++)
+    {
+        HRESULT hrEnum = one.site->EnumBands(i, &ids[i]);
+        ok(SUCCEEDED(hrEnum), "no band %u\n", i);
+        if (FAILED(hrEnum))
+            continue;
+        for (UINT j = 0; j < i; j++)
+            ok(ids[i] != ids[j], "bands %u and %u have the id %lu\n", j, i, ids[i]);
+    }
+    ok_int((int)SendMessageW(one.hwndRebar, RB_GETBANDCOUNT, 0, 0), (int)total);
+
+    CComPtr<IStream> stream;
+    if (SUCCEEDED(SaveSite(one, stream)) && CreateBandSite(hwnd, two))
+    {
+        Rewind(stream);
+        HRESULT hr = two.persist->Load(stream);
+        ok_hex(hr, S_OK);
+        ok_int(CountBands(two.site), (int)total);
+        ok_int((int)SendMessageW(two.hwndRebar, RB_GETBANDCOUNT, 0, 0), (int)total);
+    }
 }
 
 START_TEST(BandSite)
@@ -382,6 +468,44 @@ START_TEST(BandSite)
     {
         skip("The form of the stream is that of ReactOS\n");
     }
+
+    if (IsReactOS() && pidlWindows)
+        TestManyBands(hwnd, pidlWindows);
+
+    /* An entry of a class that is not a band is not asked to read the stream (a shell link whose list of
+       items claims 65535 bytes in a list of 5 would be read outside of its memory) */
+    if (IsReactOS())
+    {
+        static const BYTE link[] =
+        {
+            0x4C, 0, 0, 0,                                                                  /* header size */
+            0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46,                  /* CLSID_ShellLink */
+            0x01, 0, 0, 0,                                                                  /* link flags: has an id list */
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,         /* attributes, times */
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,         /* size, icon, show, hot key, reserved */
+            0, 0, 0, 0,
+            5, 0,                                                                           /* id list of 5 bytes */
+            0xFF, 0xFF, 0x31, 0, 0                                                          /* the first item claims 65535 */
+        };
+        BYTE stream[sizeof(TEST_HEADER) + sizeof(TEST_ENTRY) + sizeof(link)];
+        TEST_HEADER *header = (TEST_HEADER *)stream;
+        TEST_ENTRY *entry = (TEST_ENTRY *)(stream + sizeof(TEST_HEADER));
+
+        header->magic = 0x53425242;
+        header->version = 1;
+        header->count = 1;
+        entry->length = sizeof(TEST_ENTRY) - sizeof(DWORD) + sizeof(link);
+        entry->flags = 0;
+        entry->cx = 0;
+        entry->clsid = CLSID_ShellLink;
+        memcpy(stream + sizeof(TEST_HEADER) + sizeof(TEST_ENTRY), link, sizeof(link));
+        ok_int((int)sizeof(link), 83);
+        TestRefusedStream(hwnd, "a shell link with a list of items that does not fit", MakeStream(stream, sizeof(stream)));
+    }
+
+    /* last: a window that outlives its band calls freed code when the next message reaches it */
+    if (IsReactOS() && pidlWindows)
+        TestFailedInsertion(hwnd, pidlWindows);
 
     for (UINT i = 0; i < 3; i++)
         RemoveDirectoryW(szDirs[i]);
