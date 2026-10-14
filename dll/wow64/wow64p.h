@@ -42,6 +42,8 @@ NTSTATUS Wow64CopyString(WOW64_STRING *To, const UNICODE_STRING *From);
 NTSTATUS Wow64CsrDispatch(ULONG Operation, ULONG *Arguments);
 extern PVOID Wow64ExceptionDispatcher;
 NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert);
+NTSTATUS Wow64InitializeRedirection(VOID);
+NTSTATUS Wow64RedirectFile(OBJECT_ATTRIBUTES *Attributes, UNICODE_STRING *Name, PVOID *Buffer);
 
 typedef struct
 {
@@ -50,3 +52,5 @@ typedef struct
     ULONG MinimumUserModeAddress, MaximumUserModeAddress, ActiveProcessorsAffinityMask;
     CCHAR NumberOfProcessors;
 } WOW64_SYSTEM_BASIC_INFORMATION;
+
+NTSTATUS Wow64CreateEnvironment(PVOID *Environment);

@@ -73,6 +73,7 @@ typedef struct
     HANDLE Process;
     PVOID Base;
     BOOLEAN Mapped;
+    PVOID Buffer;
 } WOW64_CLEANUP;
 
 static VOID ProbeOutput(ULONG Address, ULONG Size)
@@ -92,6 +93,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     PVOID Base;
     SIZE_T Size;
     ULONG Length;
+    BOOLEAN NativeSystemInformation = Number == 0x10001;
 
 #define H(i) HANDLE32(a[i])
 #define P(i) PTR32(a[i])
@@ -99,12 +101,25 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
 #define ATTR(i) do { Status = Attributes32(&Attributes, &Name, &Descriptor, a[i]); \
     if (!NT_SUCCESS(Status)) return Status; } while (0)
 #define OA(i) (a[i] ? &Attributes : NULL)
+#define FILEATTR(i) do { ATTR(i); \
+    Status = Wow64RedirectFile(&Attributes, &Name, &Cleanup->Buffer); \
+    if (!NT_SUCCESS(Status)) return Status; } while (0)
 #define PROBE(i) ProbeOutput(a[i], sizeof(ULONG))
 #define RETURN_HANDLE_AT(i) do { \
     if (NT_SUCCESS(Status)) U(i) = HandleToUlong(Cleanup->Handle); \
     Cleanup->Handle = NULL; return Status; } while (0)
 #define RETURN_HANDLE() RETURN_HANDLE_AT(0)
     if (Number == 0x10000) return Wow64CsrDispatch(a[0], P(1));
+    if (Number == 0x10002)
+    {
+        WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
+        /* Write the old token before changing state: a bad output pointer
+         * must leave redirection enabled, including nested disable calls. */
+        U(1) = Cpu->FsRedirectionDisabled;
+        Cpu->FsRedirectionDisabled = a[0];
+        return STATUS_SUCCESS;
+    }
+    if (NativeSystemInformation) Number = W64_NtQuerySystemInformation;
     switch (Number)
     {
     case W64_NtClose: return NtClose(H(0));
@@ -302,7 +317,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtReleaseKeyedEvent: return NtReleaseKeyedEvent(H(0), P(1), a[2], P(3));
     case W64_NtOpenFile:
         PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
-        ATTR(2);
+        FILEATTR(2);
         Status = NtOpenFile(&Cleanup->Handle, a[1], OA(2), &Io, a[4], a[5]);
         /* Failed native calls do not transfer handle ownership. In particular,
          * an undefined failure output must not be closed if StoreIo faults. */
@@ -310,14 +325,27 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         StoreIo(a[3], &Io); RETURN_HANDLE();
     case W64_NtCreateFile:
         PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
-        ATTR(2);
+        FILEATTR(2);
         Status = NtCreateFile(&Cleanup->Handle, a[1], OA(2), &Io, P(4), a[5], a[6], a[7], a[8], P(9), a[10]);
         if (!NT_SUCCESS(Status)) Cleanup->Handle = NULL;
         StoreIo(a[3], &Io); RETURN_HANDLE();
     case W64_NtQueryAttributesFile:
-        ATTR(0); return NtQueryAttributesFile(OA(0), P(1));
+        FILEATTR(0); return NtQueryAttributesFile(OA(0), P(1));
     case W64_NtQueryFullAttributesFile:
-        ATTR(0); return NtQueryFullAttributesFile(OA(0), P(1));
+        FILEATTR(0); return NtQueryFullAttributesFile(OA(0), P(1));
+    case W64_NtDeleteFile:
+        FILEATTR(0); return NtDeleteFile(OA(0));
+    case W64_NtSetInformationFile:
+        switch (a[4])
+        {
+        case FileBasicInformation: case FileDispositionInformation:
+        case FilePositionInformation: case FileEndOfFileInformation:
+        case FileAllocationInformation:
+            ProbeOutput(a[1], sizeof(WOW64_IOSB));
+            Status = NtSetInformationFile(H(0), &Io, P(2), a[3], a[4]);
+            StoreIo(a[1], &Io); return Status;
+        default: return STATUS_NOT_SUPPORTED;
+        }
     case W64_NtQueryInformationFile:
         /* Only fixed-width layouts used by the loader and console startup. */
         switch (a[4])
@@ -325,6 +353,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case FileBasicInformation: case FileStandardInformation: case FilePositionInformation:
         case FileNameInformation: case FileModeInformation: case FileInternalInformation:
         case FileAlignmentInformation: case FileNetworkOpenInformation:
+        case FileAttributeTagInformation:
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
@@ -375,6 +404,20 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         else
             Status = NtWriteFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], P(7), P(8));
         StoreIo(a[4], &Io); return Status;
+    }
+    case W64_NtOpenProcess:
+    {
+        CLIENT_ID Id, *ClientId = NULL;
+        PROBE(0);
+        ATTR(2);
+        if (a[3])
+        {
+            Id.UniqueProcess = HANDLE32(((ULONG *)P(3))[0]);
+            Id.UniqueThread = HANDLE32(((ULONG *)P(3))[1]);
+            ClientId = &Id;
+        }
+        Status = NtOpenProcess(&Cleanup->Handle, a[1], OA(2), ClientId);
+        RETURN_HANDLE();
     }
     case W64_NtOpenProcessToken:
         PROBE(2);
@@ -458,7 +501,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             {
                 RtlCopyMemory(To, &From, 7 * sizeof(ULONG));
                 To->MinimumUserModeAddress = 0x10000;
-                To->MaximumUserModeAddress = 0x7ffeffff;
+                To->MaximumUserModeAddress = NativeSystemInformation ? 0xfffeffff : 0x7ffeffff;
                 To->ActiveProcessorsAffinityMask = (ULONG)From.ActiveProcessorsAffinityMask;
                 To->NumberOfProcessors = From.NumberOfProcessors;
                 if (a[3]) U(3) = sizeof(*To);
@@ -467,7 +510,12 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         }
         switch (a[0])
         {
-        case SystemProcessorInformation: case SystemTimeOfDayInformation:
+        case SystemProcessorInformation:
+            Status = NtQuerySystemInformation(a[0], P(1), a[2], P(3));
+            if (NT_SUCCESS(Status) && !NativeSystemInformation)
+                ((SYSTEM_PROCESSOR_INFORMATION *)P(1))->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
+            return Status;
+        case SystemTimeOfDayInformation:
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
         default: return STATUS_NOT_SUPPORTED;
         }
@@ -495,6 +543,7 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
     }
     _SEH2_END;
     if (Cleanup.Handle) NtClose(Cleanup.Handle);
+    if (Cleanup.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Cleanup.Buffer);
     if (Cleanup.Base)
     {
         if (Cleanup.Mapped)
@@ -505,6 +554,7 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
             NtFreeVirtualMemory(Cleanup.Process, &Cleanup.Base, &Size, MEM_RELEASE);
         }
     }
-    if (!NT_SUCCESS(Status)) DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
+    if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState)
+        DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
     return Status;
 }

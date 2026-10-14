@@ -6,7 +6,9 @@ function(add_wow64_apitest library)
     set(sources)
     set(testlist "#define STANDALONE\n#include <apitest.h>\n")
     foreach(test ${ARGN})
-        list(APPEND sources ../${library}/${test}.c)
+        if(NOT test MATCHES "^Wow64(ProgramFiles|EnvironmentBlock)$")
+            list(APPEND sources ../${library}/${test}.c)
+        endif()
         string(APPEND testlist "extern void func_${test}(void);\n")
     endforeach()
     string(APPEND testlist "const struct test winetest_testlist[] = {\n")
@@ -25,7 +27,7 @@ endfunction()
 
 add_wow64_apitest(kernel32
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
-    IsDBCSLeadByteEx lstrlen)
+    IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock)
 add_wow64_apitest(ntdll
     Wow64Continue NtOpenKey NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString)

@@ -61,7 +61,7 @@ static NTSTATUS InitializeParameters(PEB32 *Peb32)
     PRTL_USER_PROCESS_PARAMETERS From = RtlNormalizeProcessParams(NtCurrentPeb()->ProcessParameters);
     WOW64_PARAMETERS *To;
     NTSTATUS Status;
-    PVOID Environment;
+    PVOID Environment, NativeEnvironment = NULL;
     SIZE_T Size;
     ULONG i;
 
@@ -99,17 +99,22 @@ static NTSTATUS InitializeParameters(PEB32 *Peb32)
 #undef COPY_STRING
     Status = CopyDllPath(&To->DllPath, &From->DllPath);
     if (!NT_SUCCESS(Status)) return Status;
-    if (From->Environment)
+    Status = Wow64CreateEnvironment(&NativeEnvironment);
+    if (NT_SUCCESS(Status))
     {
-        PWSTR End = From->Environment;
+        PWSTR End = NativeEnvironment;
         while (*End) End += wcslen(End) + 1;
-        Size = (End + 1 - From->Environment) * sizeof(WCHAR);
+        Size = (End + 1 - (PWSTR)NativeEnvironment) * sizeof(WCHAR);
         Status = Wow64Allocate(Size, &Environment);
-        if (!NT_SUCCESS(Status)) return Status;
-        RtlCopyMemory(Environment, From->Environment, Size);
-        To->Environment = PtrToUlong(Environment);
-        To->EnvironmentSize = Size;
+        if (NT_SUCCESS(Status))
+        {
+            RtlCopyMemory(Environment, NativeEnvironment, Size);
+            To->Environment = PtrToUlong(Environment);
+            To->EnvironmentSize = Size;
+        }
     }
+    if (NativeEnvironment) RtlDestroyEnvironment(NativeEnvironment);
+    if (!NT_SUCCESS(Status)) return Status;
     Peb32->ProcessParameters = PtrToUlong(To);
     return STATUS_SUCCESS;
 }
@@ -200,6 +205,8 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
 
     /* Thread creation and APC delivery need their own context conversion. */
     if (Peb32->Ldr) { Status = STATUS_NOT_SUPPORTED; goto Failed; }
+    Status = Wow64InitializeRedirection();
+    if (!NT_SUCCESS(Status)) goto Failed;
     Status = InitializePeb(Peb32);
     if (!NT_SUCCESS(Status)) goto Failed;
     Status = MapNtdll(&Ntdll32);
