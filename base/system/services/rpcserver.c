@@ -1019,6 +1019,7 @@ RControlService(
     LPCWSTR lpLogStrings[2];
     WCHAR szLogBuffer[80];
     UINT uID;
+    HANDLE hControlPipe;
 
     DPRINT("RControlService() called\n");
 
@@ -1184,11 +1185,16 @@ RControlService(
                 break;
         }
 
-        /* Send control code to the service */
-        dwError = ScmControlService(lpService->lpImage->hControlPipe,
-                                    lpService->lpServiceName,
-                                    dwControl,
-                                    (SERVICE_STATUS_HANDLE)lpService);
+        /* Send control code to the service; the image can go away meanwhile, so use a copy of its pipe */
+        dwError = ScmDuplicateControlPipe(lpService, FALSE, &hControlPipe);
+        if (dwError == ERROR_SUCCESS)
+        {
+            dwError = ScmControlService(hControlPipe,
+                                        lpService->lpServiceName,
+                                        dwControl,
+                                        (SERVICE_STATUS_HANDLE)lpService);
+            CloseHandle(hControlPipe);
+        }
 
         /* Return service status information */
         RtlCopyMemory(lpServiceStatus,
@@ -1616,35 +1622,42 @@ ScmStopThread(PVOID pParam)
     PSERVICE lpService = (PSERVICE)pParam;
     WCHAR szLogBuffer[80];
     LPCWSTR lpLogStrings[2];
+    HANDLE hControlPipe;
 
     /* Check if we are about to stop this service */
-    if (lpService->lpImage->dwImageRunCount == 1)
+    if (ScmDuplicateControlPipe(lpService, TRUE, &hControlPipe) == ERROR_SUCCESS &&
+        hControlPipe != INVALID_HANDLE_VALUE)
     {
         /* Stop the dispatcher thread.
          * We must not send a control message while holding the database lock, otherwise it can cause timeouts
-         * We are sure that the service won't be deleted in the meantime because we still have a reference to it. */
+         * We are sure that the service won't be deleted in the meantime because we still have a reference to it.
+         * The image can go away while the request is sent, so the request uses a copy of the pipe. */
         DPRINT("Stopping the dispatcher thread for service %S\n", lpService->lpServiceName);
-        ScmControlService(lpService->lpImage->hControlPipe,
+        ScmControlService(hControlPipe,
                           L"",
                           SERVICE_CONTROL_STOP,
                           (SERVICE_STATUS_HANDLE)lpService);
+        CloseHandle(hControlPipe);
     }
 
     /* Lock the service database exclusively */
     ScmLockDatabaseExclusive();
 
-    DPRINT("Service %S image count:%d\n", lpService->lpServiceName, lpService->lpImage->dwImageRunCount);
-
-    /* Decrement the image run counter */
-    lpService->lpImage->dwImageRunCount--;
-
-    /* If we just stopped the last running service... */
-    if (lpService->lpImage->dwImageRunCount == 0)
+    if (lpService->lpImage != NULL)
     {
-        /* Remove the service image */
-        DPRINT("Removing service image for %S\n", lpService->lpServiceName);
-        ScmRemoveServiceImage(lpService->lpImage);
-        lpService->lpImage = NULL;
+        DPRINT("Service %S image count:%d\n", lpService->lpServiceName, lpService->lpImage->dwImageRunCount);
+
+        /* Decrement the image run counter */
+        lpService->lpImage->dwImageRunCount--;
+
+        /* If we just stopped the last running service... */
+        if (lpService->lpImage->dwImageRunCount == 0)
+        {
+            /* Remove the service image */
+            DPRINT("Removing service image for %S\n", lpService->lpServiceName);
+            ScmRemoveServiceImage(lpService->lpImage);
+            lpService->lpImage = NULL;
+        }
     }
 
     /* Report the results of the status change here */
@@ -1696,6 +1709,7 @@ RSetServiceStatus(
     DWORD dwPreviousType;
     LPCWSTR lpLogStrings[2];
     WCHAR szLogBuffer[80];
+    WCHAR szDisplayName[MAX_PATH];
     UINT uID;
 
     DPRINT("RSetServiceStatus() called\n");
@@ -1750,6 +1764,22 @@ RSetServiceStatus(
 
     /* Lock the service database exclusively */
     ScmLockDatabaseExclusive();
+
+    /*
+     * The status handle is the address of the service record. A service that is gone, or whose
+     * process ended and was cleaned up, cannot report that it is running again.
+     */
+    if (!ScmIsServiceListed(lpService) ||
+        (lpServiceStatus->dwCurrentState != SERVICE_STOPPED && lpService->lpImage == NULL))
+    {
+        ScmUnlockDatabase();
+        return ERROR_INVALID_HANDLE;
+    }
+
+    lpService->bStatusReported = TRUE;
+
+    /* The service can end with its process at any time once the lock is released: keep what the log needs */
+    StringCchCopyW(szDisplayName, ARRAYSIZE(szDisplayName), lpService->lpDisplayName);
 
     /* Save the current service state */
     dwPreviousState = lpService->Status.dwCurrentState;
@@ -1831,7 +1861,7 @@ RSetServiceStatus(
         }
 
         LoadStringW(GetModuleHandle(NULL), uID, szLogBuffer, ARRAYSIZE(szLogBuffer));
-        lpLogStrings[0] = lpService->lpDisplayName;
+        lpLogStrings[0] = szDisplayName;
         lpLogStrings[1] = szLogBuffer;
 
         ScmLogEvent(EVENT_SERVICE_STATUS_SUCCESS,
@@ -1840,7 +1870,6 @@ RSetServiceStatus(
                     lpLogStrings);
     }
 
-    DPRINT("Set %S to %lu\n", lpService->lpDisplayName, lpService->Status.dwCurrentState);
     DPRINT("RSetServiceStatus() done\n");
 
     return ERROR_SUCCESS;
@@ -5215,7 +5244,7 @@ RChangeServiceConfig2A(
  */
 #define FAILURE_ACTIONS_HEADER_SIZE (5 * sizeof(DWORD))
 
-static DWORD
+DWORD
 ScmReadFailureActions(HKEY hServiceKey,
                       PDWORD pdwResetPeriod,
                       PDWORD pcActions,
@@ -6686,6 +6715,7 @@ RI_ScSendPnPMessage(
     ULONG_PTR Ptr;
     DWORD dwControlsAccepted, dwCurrentState;
     DWORD dwError = ERROR_SUCCESS;
+    HANDLE hControlPipe;
 
     DPRINT("RI_ScSendPnPMessage(%p %lx %lu %lu %p)\n",
            hServiceStatus, dwControl, dwEventType, dwEventSize, pEventData);
@@ -6754,12 +6784,17 @@ RI_ScSendPnPMessage(
         RtlCopyMemory((PULONG)Ptr, pEventData, dwEventSize);
     }
 
-    /* Send the control packet */
-    dwError = ScmSendControlPacket(pService->lpImage->hControlPipe,
-                                   pService->lpServiceName,
-                                   dwControl,
-                                   PacketSize,
-                                   ControlPacket);
+    /* Send the control packet; the image can go away meanwhile, so use a copy of its pipe */
+    dwError = ScmDuplicateControlPipe(pService, FALSE, &hControlPipe);
+    if (dwError == ERROR_SUCCESS)
+    {
+        dwError = ScmSendControlPacket(hControlPipe,
+                                       pService->lpServiceName,
+                                       dwControl,
+                                       PacketSize,
+                                       ControlPacket);
+        CloseHandle(hControlPipe);
+    }
 
     /* Free the control packet */
     HeapFree(GetProcessHeap(), 0, ControlPacket);

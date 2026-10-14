@@ -32,6 +32,9 @@ static DWORD ResumeCount = 1;
 static DWORD NoInteractiveServices = 0;
 static DWORD ServiceTag = 0;
 
+/* The threads that run failure actions and handle ended processes use the database: shutdown waits for them */
+static LONG ScmActiveWorkers = 0;
+
 /* The critical section synchronizes service control requests */
 static CRITICAL_SECTION ControlServiceCriticalSection;
 static DWORD PipeTimeout = 30000; /* 30 Seconds */
@@ -162,7 +165,8 @@ ScmGetServiceImageByImagePath(LPWSTR lpImagePath)
         CurrentImage = CONTAINING_RECORD(ImageEntry,
                                          SERVICE_IMAGE,
                                          ImageListEntry);
-        if (_wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
+        if (!CurrentImage->bProcessEnded &&
+            _wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
         {
             DPRINT("Found image: '%S'\n", CurrentImage->pszImagePath);
             return CurrentImage;
@@ -496,9 +500,13 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
     DPRINT("ImagePath: '%wZ'\n", &ImagePath);
     DPRINT("ObjectName: '%wZ'\n", &ObjectName);
 
+    /* The watching threads and the status calls read the images and the services under the database lock */
+    ScmLockDatabaseExclusive();
     pServiceImage = ScmGetServiceImageByImagePath(ImagePath.Buffer);
     if (pServiceImage == NULL)
     {
+        ScmUnlockDatabase();
+
         dwRecordSize = sizeof(SERVICE_IMAGE) +
                        ImagePath.Length + sizeof(WCHAR) +
                        ((ObjectName.Length != 0) ? (ObjectName.Length + sizeof(WCHAR)) : 0);
@@ -582,6 +590,7 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
 
 
         /* Append service record */
+        ScmLockDatabaseExclusive();
         InsertTailList(&ImageListHead,
                        &pServiceImage->ImageListEntry);
     }
@@ -592,6 +601,7 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
         /* Fail if services in an image use different accounts */
         if (!ScmIsSameServiceAccount(pServiceImage->pszAccountName, ObjectName.Buffer))
         {
+            ScmUnlockDatabase();
             dwError = ERROR_DIFFERENT_SERVICE_ACCOUNT;
             goto done;
         }
@@ -606,6 +616,7 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
 
     /* Link the service image to the service */
     pService->lpImage = pServiceImage;
+    ScmUnlockDatabase();
 
 done:
     RtlFreeUnicodeString(&ObjectName);
@@ -617,10 +628,564 @@ done:
 }
 
 
+/*
+ * A service process is watched on a thread of its own. When the process ends while a
+ * service of it is not stopped, the service did not end on its own: the process crashed
+ * or was killed. The service is reported as stopped and its failure actions run.
+ */
+struct _SERVICE_PROCESS_WATCH
+{
+    LONG RefCount;
+    HANDLE hProcess;
+    HANDLE hCancel;
+};
+
+typedef struct _FAILURE_ACTION_CONTEXT
+{
+    PSERVICE Service;
+    SC_ACTION_TYPE Type;
+    DWORD dwDelay;
+    DWORD dwFailureCount;
+    LPWSTR lpCommand;
+    HANDLE hToken; /* The account of the service, or NULL for the account of the controller */
+    LPVOID lpEnvironment; /* Made while the profile of the service account is still loaded */
+} FAILURE_ACTION_CONTEXT, *PFAILURE_ACTION_CONTEXT;
+
+static VOID
+ScmReleaseProcessWatch(PSERVICE_PROCESS_WATCH pWatch)
+{
+    if (InterlockedDecrement(&pWatch->RefCount) == 0)
+    {
+        CloseHandle(pWatch->hProcess);
+        CloseHandle(pWatch->hCancel);
+        HeapFree(GetProcessHeap(), 0, pWatch);
+    }
+}
+
+/* The command of a failure action names the failure count as "%1%" */
+static LPWSTR
+ScmExpandFailureCommand(LPCWSTR lpCommand, DWORD dwFailureCount)
+{
+    WCHAR szCount[16];
+    SIZE_T cchCount, cchNeeded = 1;
+    LPCWSTR lpSrc;
+    LPWSTR lpResult, lpDst;
+
+    StringCchPrintfW(szCount, ARRAYSIZE(szCount), L"%lu", dwFailureCount);
+    cchCount = wcslen(szCount);
+
+    for (lpSrc = lpCommand; *lpSrc; )
+    {
+        if (!_wcsnicmp(lpSrc, L"%1%", 3))
+        {
+            cchNeeded += cchCount;
+            lpSrc += 3;
+        }
+        else
+        {
+            cchNeeded++;
+            lpSrc++;
+        }
+    }
+
+    lpResult = HeapAlloc(GetProcessHeap(), 0, cchNeeded * sizeof(WCHAR));
+    if (lpResult == NULL)
+        return NULL;
+
+    for (lpSrc = lpCommand, lpDst = lpResult; *lpSrc; )
+    {
+        if (!_wcsnicmp(lpSrc, L"%1%", 3))
+        {
+            wcscpy(lpDst, szCount);
+            lpDst += cchCount;
+            lpSrc += 3;
+        }
+        else
+        {
+            *lpDst++ = *lpSrc++;
+        }
+    }
+    *lpDst = UNICODE_NULL;
+    return lpResult;
+}
+
+static VOID
+ScmRunFailureCommand(PFAILURE_ACTION_CONTEXT pContext)
+{
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInformation;
+    LPWSTR lpCommandLine;
+    BOOL bResult = FALSE;
+    DWORD dwError = ERROR_SUCCESS;
+
+    if (pContext->lpCommand == NULL)
+        return;
+
+    lpCommandLine = ScmExpandFailureCommand(pContext->lpCommand, pContext->dwFailureCount);
+    if (lpCommandLine == NULL)
+        return;
+
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+
+    if (pContext->hToken != NULL)
+    {
+        /* The command runs in the account of the service */
+        if (ImpersonateLoggedOnUser(pContext->hToken))
+        {
+            bResult = CreateProcessAsUserW(pContext->hToken,
+                                           NULL,
+                                           lpCommandLine,
+                                           NULL,
+                                           NULL,
+                                           FALSE,
+                                           CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                                           pContext->lpEnvironment,
+                                           NULL,
+                                           &StartupInfo,
+                                           &ProcessInformation);
+            if (!bResult)
+                dwError = GetLastError();
+            RevertToSelf();
+        }
+        else
+        {
+            dwError = GetLastError();
+        }
+    }
+    else
+    {
+        bResult = CreateProcessW(NULL,
+                                 lpCommandLine,
+                                 NULL,
+                                 NULL,
+                                 FALSE,
+                                 CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                                 pContext->lpEnvironment,
+                                 NULL,
+                                 &StartupInfo,
+                                 &ProcessInformation);
+        if (!bResult)
+            dwError = GetLastError();
+    }
+
+    if (bResult)
+    {
+        CloseHandle(ProcessInformation.hThread);
+        CloseHandle(ProcessInformation.hProcess);
+    }
+    else
+    {
+        DPRINT1("Failure command of service %S failed with error %lu\n",
+                pContext->Service->lpServiceName, dwError);
+    }
+
+    HeapFree(GetProcessHeap(), 0, lpCommandLine);
+}
+
+static VOID
+ScmFreeFailureActionContext(PFAILURE_ACTION_CONTEXT pContext)
+{
+    if (pContext->lpEnvironment)
+        DestroyEnvironmentBlock(pContext->lpEnvironment);
+    if (pContext->hToken)
+        CloseHandle(pContext->hToken);
+    if (pContext->lpCommand)
+        HeapFree(GetProcessHeap(), 0, pContext->lpCommand);
+    HeapFree(GetProcessHeap(), 0, pContext);
+}
+
+static DWORD WINAPI
+ScmFailureActionThread(PVOID pParam)
+{
+    PFAILURE_ACTION_CONTEXT pContext = pParam;
+    PSERVICE Service = pContext->Service;
+    BOOL bStart = FALSE;
+    DWORD dwRemaining = pContext->dwDelay, dwSlice;
+
+    /* The delay ends early when the system shuts down */
+    while (dwRemaining != 0 && !ScmShutdown)
+    {
+        dwSlice = min(100, dwRemaining);
+        Sleep(dwSlice);
+        dwRemaining -= dwSlice;
+    }
+
+    /* The database goes away at shutdown: touch nothing of it then */
+    if (ScmShutdown)
+    {
+        ScmFreeFailureActionContext(pContext);
+        InterlockedDecrement(&ScmActiveWorkers);
+        return 0;
+    }
+
+    if (pContext->Type == SC_ACTION_RESTART)
+    {
+        ScmLockDatabaseShared();
+        bStart = !Service->bDeleted &&
+                 Service->dwStartType != SERVICE_DISABLED &&
+                 Service->Status.dwCurrentState == SERVICE_STOPPED;
+        ScmUnlockDatabase();
+
+        if (bStart)
+            ScmStartService(Service, 0, NULL);
+    }
+    else if (pContext->Type == SC_ACTION_RUN_COMMAND)
+    {
+        ScmRunFailureCommand(pContext);
+    }
+
+    /* Drop the reference that kept the service for this action */
+    if (!ScmShutdown)
+    {
+        ScmLockDatabaseExclusive();
+        ScmDereferenceService(Service);
+        ScmUnlockDatabase();
+    }
+
+    ScmFreeFailureActionContext(pContext);
+    InterlockedDecrement(&ScmActiveWorkers);
+    return 0;
+}
+
+/*
+ * The events about failed services are queued while the database lock is held and written when it is
+ * released: the event log is another service, and the database must not wait for it.
+ */
+typedef struct _FAILURE_LOG_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    DWORD dwEventId;
+    WORD wStrings;
+    WCHAR szName[MAX_PATH];
+    WCHAR szCount[16];
+    WCHAR szDelay[16];
+    LPCWSTR lpActionText;
+} FAILURE_LOG_ENTRY, *PFAILURE_LOG_ENTRY;
+
+static VOID
+ScmQueueFailureLog(PLIST_ENTRY pQueue,
+                   DWORD dwEventId,
+                   LPCWSTR lpName,
+                   DWORD dwCount,
+                   DWORD dwDelay,
+                   LPCWSTR lpActionText)
+{
+    PFAILURE_LOG_ENTRY pEntry = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pEntry));
+
+    if (pEntry == NULL)
+        return;
+
+    pEntry->dwEventId = dwEventId;
+    pEntry->wStrings = (lpActionText != NULL) ? 5 : 2;
+    pEntry->lpActionText = lpActionText;
+    StringCchCopyW(pEntry->szName, ARRAYSIZE(pEntry->szName), lpName);
+    StringCchPrintfW(pEntry->szCount, ARRAYSIZE(pEntry->szCount), L"%lu", dwCount);
+    StringCchPrintfW(pEntry->szDelay, ARRAYSIZE(pEntry->szDelay), L"%lu", dwDelay);
+    InsertTailList(pQueue, &pEntry->ListEntry);
+}
+
+/* Called without the database lock */
+static VOID
+ScmFlushFailureLog(PLIST_ENTRY pQueue)
+{
+    PFAILURE_LOG_ENTRY pEntry;
+    LPCWSTR lpLogStrings[5];
+
+    while (!IsListEmpty(pQueue))
+    {
+        pEntry = CONTAINING_RECORD(RemoveHeadList(pQueue), FAILURE_LOG_ENTRY, ListEntry);
+
+        lpLogStrings[0] = pEntry->szName;
+        lpLogStrings[1] = pEntry->szCount;
+        lpLogStrings[2] = pEntry->szDelay;
+        lpLogStrings[3] = L"";
+        lpLogStrings[4] = pEntry->lpActionText;
+        ScmLogEvent(pEntry->dwEventId, EVENTLOG_ERROR_TYPE, pEntry->wStrings, lpLogStrings);
+
+        HeapFree(GetProcessHeap(), 0, pEntry);
+    }
+}
+
+/*
+ * Count a failure of a service and run the action its failure actions name for that count.
+ * Called with the database lock held exclusively.
+ */
+static VOID
+ScmProcessServiceFailure(PSERVICE Service, PLIST_ENTRY pLogQueue)
+{
+    HKEY hServiceKey;
+    DWORD dwResetPeriod = 0, cActions = 0, dwError;
+    LPSC_ACTION lpActions = NULL;
+    LPWSTR lpCommand = NULL;
+    PFAILURE_ACTION_CONTEXT pContext;
+    HANDLE hThread;
+    SC_ACTION Action = { SC_ACTION_NONE, 0 };
+    FILETIME ft;
+    ULARGE_INTEGER Now;
+    LPCWSTR lpActionText;
+
+    GetSystemTimeAsFileTime(&ft);
+    Now.LowPart = ft.dwLowDateTime;
+    Now.HighPart = ft.dwHighDateTime;
+
+    dwError = ScmOpenServiceKey(Service->lpServiceName, KEY_READ, &hServiceKey);
+    if (dwError == ERROR_SUCCESS)
+    {
+        if (ScmReadFailureActions(hServiceKey, &dwResetPeriod, &cActions, &lpActions) != ERROR_SUCCESS)
+            cActions = 0;
+        ScmReadString(hServiceKey, L"FailureCommand", &lpCommand);
+        RegCloseKey(hServiceKey);
+    }
+
+    /* The failure count starts over when the service ran without failing for the reset period.
+       A clock that was set back does not do that. */
+    if (Service->dwFailureCount != 0 &&
+        (dwResetPeriod != INFINITE) &&
+        (Now.QuadPart >= Service->ullLastFailureTime) &&
+        ((Now.QuadPart - Service->ullLastFailureTime) / 10000000ULL) >= dwResetPeriod)
+    {
+        Service->dwFailureCount = 0;
+    }
+    Service->dwFailureCount++;
+    Service->ullLastFailureTime = Now.QuadPart;
+
+    if (cActions != 0)
+        Action = lpActions[min(Service->dwFailureCount, cActions) - 1];
+
+    if (Action.Type == SC_ACTION_RESTART || Action.Type == SC_ACTION_RUN_COMMAND)
+    {
+        lpActionText = (Action.Type == SC_ACTION_RESTART) ? L"Restart the service" : L"Run a command";
+        ScmQueueFailureLog(pLogQueue, EVENT_SERVICE_CRASH, Service->lpDisplayName,
+                           Service->dwFailureCount, Action.Delay, lpActionText);
+
+        pContext = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pContext));
+        if (pContext != NULL)
+        {
+            pContext->Service = Service;
+            pContext->Type = Action.Type;
+            pContext->dwDelay = Action.Delay;
+            pContext->dwFailureCount = Service->dwFailureCount;
+            pContext->lpCommand = lpCommand;
+            lpCommand = NULL;
+
+            /* A command runs in the account of the service, which the image no longer holds by then */
+            if (Action.Type == SC_ACTION_RUN_COMMAND &&
+                Service->lpImage != NULL &&
+                Service->lpImage->hToken != NULL &&
+                !DuplicateTokenEx(Service->lpImage->hToken,
+                                  MAXIMUM_ALLOWED,
+                                  NULL,
+                                  SecurityImpersonation,
+                                  TokenPrimary,
+                                  &pContext->hToken))
+            {
+                DPRINT1("Cannot copy the token of service %S (Error %lu), no recovery command runs\n",
+                        Service->lpServiceName, GetLastError());
+                ScmFreeFailureActionContext(pContext);
+                pContext = NULL;
+            }
+            else if (Action.Type == SC_ACTION_RUN_COMMAND)
+            {
+                /* The environment of a service account needs its profile, which goes with the image */
+                if (!CreateEnvironmentBlock(&pContext->lpEnvironment, pContext->hToken, pContext->hToken == NULL))
+                    pContext->lpEnvironment = NULL;
+            }
+        }
+
+        if (pContext != NULL)
+        {
+            ScmReferenceService(Service);
+            InterlockedIncrement(&ScmActiveWorkers);
+            hThread = CreateThread(NULL, 0, ScmFailureActionThread, pContext, 0, NULL);
+            if (hThread != NULL)
+            {
+                CloseHandle(hThread);
+            }
+            else
+            {
+                DPRINT1("Failed to create the failure action thread of service %S\n", Service->lpServiceName);
+                InterlockedDecrement(&ScmActiveWorkers);
+                ScmDereferenceService(Service);
+                ScmFreeFailureActionContext(pContext);
+            }
+        }
+    }
+    else
+    {
+        /* FIXME: SC_ACTION_REBOOT */
+        ScmQueueFailureLog(pLogQueue, EVENT_SERVICE_CRASH_NO_ACTION, Service->lpDisplayName,
+                           Service->dwFailureCount, 0, NULL);
+    }
+
+    if (lpCommand)
+        HeapFree(GetProcessHeap(), 0, lpCommand);
+    if (lpActions)
+        HeapFree(GetProcessHeap(), 0, lpActions);
+}
+
+/* Called with the database lock held exclusively */
+static VOID
+ScmHandleServiceProcessExit(PSERVICE_PROCESS_WATCH pWatch, PLIST_ENTRY pLogQueue)
+{
+    PLIST_ENTRY ServiceEntry;
+    PSERVICE Service;
+    PSERVICE_IMAGE Image;
+
+    /* The services stop with their processes at shutdown */
+    if (ScmShutdown)
+        return;
+
+    ServiceEntry = ServiceListHead.Flink;
+    while (ServiceEntry != &ServiceListHead)
+    {
+        Service = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
+        ServiceEntry = ServiceEntry->Flink;
+
+        /* Only a service that is not stopped holds its image and keeps it valid */
+        if (Service->Status.dwCurrentState == SERVICE_STOPPED ||
+            Service->lpImage == NULL ||
+            Service->lpImage->pWatch != pWatch)
+            continue;
+
+        Image = Service->lpImage;
+        DPRINT1("The process of service %S ended\n", Service->lpServiceName);
+
+        Service->Status.dwCurrentState = SERVICE_STOPPED;
+        Service->Status.dwControlsAccepted = 0;
+        Service->Status.dwWin32ExitCode = ERROR_PROCESS_ABORTED;
+        Service->Status.dwServiceSpecificExitCode = 0;
+        Service->Status.dwCheckPoint = 0;
+        Service->Status.dwWaitHint = 0;
+
+        /* A restart makes a new image; this one goes when the services that still hold it let it go */
+        Image->bProcessEnded = TRUE;
+
+        ScmProcessServiceFailure(Service, pLogQueue);
+
+        Service->lpImage = NULL;
+        Image->dwImageRunCount--;
+        if (Image->dwImageRunCount == 0)
+            ScmRemoveServiceImage(Image);
+
+        /* Remove the reference that was added when the service started; this can delete the service */
+        ScmDereferenceService(Service);
+    }
+}
+
+static DWORD WINAPI
+ScmProcessWatchThread(PVOID pParam)
+{
+    PSERVICE_PROCESS_WATCH pWatch = pParam;
+    HANDLE Handles[2];
+
+    Handles[0] = pWatch->hProcess;
+    Handles[1] = pWatch->hCancel;
+    if (WaitForMultipleObjects(2, Handles, FALSE, INFINITE) == WAIT_OBJECT_0)
+    {
+        /* Count before the shutdown flag is read, so that shutdown cannot miss this thread */
+        InterlockedIncrement(&ScmActiveWorkers);
+        if (!ScmShutdown)
+        {
+            LIST_ENTRY LogQueue;
+
+            InitializeListHead(&LogQueue);
+            ScmLockDatabaseExclusive();
+            ScmHandleServiceProcessExit(pWatch, &LogQueue);
+            ScmUnlockDatabase();
+            ScmFlushFailureLog(&LogQueue);
+        }
+        InterlockedDecrement(&ScmActiveWorkers);
+    }
+
+    ScmReleaseProcessWatch(pWatch);
+    return 0;
+}
+
+VOID
+ScmWatchServiceProcess(PSERVICE_IMAGE pServiceImage)
+{
+    PSERVICE_PROCESS_WATCH pWatch;
+    HANDLE hThread;
+
+    if (pServiceImage->hProcess == NULL || pServiceImage->hProcess == INVALID_HANDLE_VALUE)
+        return;
+
+    pWatch = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pWatch));
+    if (pWatch == NULL)
+        return;
+
+    pWatch->RefCount = 2; /* The image and the watching thread */
+    pWatch->hCancel = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (pWatch->hCancel == NULL ||
+        !DuplicateHandle(GetCurrentProcess(),
+                         pServiceImage->hProcess,
+                         GetCurrentProcess(),
+                         &pWatch->hProcess,
+                         SYNCHRONIZE,
+                         FALSE,
+                         0))
+    {
+        DPRINT1("Cannot watch the process of %S\n", pServiceImage->pszImagePath);
+        if (pWatch->hCancel)
+            CloseHandle(pWatch->hCancel);
+        HeapFree(GetProcessHeap(), 0, pWatch);
+        return;
+    }
+
+    pServiceImage->pWatch = pWatch;
+    hThread = CreateThread(NULL, 0, ScmProcessWatchThread, pWatch, 0, NULL);
+    if (hThread == NULL)
+    {
+        DPRINT1("Cannot create a thread to watch %S\n", pServiceImage->pszImagePath);
+        pServiceImage->pWatch = NULL;
+        pWatch->RefCount = 1;
+        ScmReleaseProcessWatch(pWatch);
+        return;
+    }
+    CloseHandle(hThread);
+}
+
+/*
+ * The watching thread cannot see a process that ended before the service had left the stopped
+ * state, so the loader looks once more when the service has been started.
+ */
+VOID
+ScmCheckServiceProcessExited(PSERVICE Service)
+{
+    PSERVICE_PROCESS_WATCH pWatch;
+    LIST_ENTRY LogQueue;
+
+    InitializeListHead(&LogQueue);
+
+    ScmLockDatabaseExclusive();
+    if (Service->Status.dwCurrentState != SERVICE_STOPPED &&
+        Service->lpImage != NULL &&
+        Service->lpImage->pWatch != NULL)
+    {
+        pWatch = Service->lpImage->pWatch;
+        InterlockedIncrement(&pWatch->RefCount);
+        if (WaitForSingleObject(pWatch->hProcess, 0) == WAIT_OBJECT_0)
+            ScmHandleServiceProcessExit(pWatch, &LogQueue);
+        ScmReleaseProcessWatch(pWatch);
+    }
+    ScmUnlockDatabase();
+
+    ScmFlushFailureLog(&LogQueue);
+}
+
 VOID
 ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage)
 {
     DPRINT1("ScmRemoveServiceImage() called\n");
+
+    /* Stop watching the process; the watching thread may be the caller, it keeps its own reference */
+    if (pServiceImage->pWatch != NULL)
+    {
+        SetEvent(pServiceImage->pWatch->hCancel);
+        ScmReleaseProcessWatch(pServiceImage->pWatch);
+        pServiceImage->pWatch = NULL;
+    }
 
     /* FIXME: Terminate the process */
 
@@ -649,6 +1214,60 @@ ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage)
 
     /* Release the service image */
     HeapFree(GetProcessHeap(), 0, pServiceImage);
+}
+
+
+/*
+ * Copy the control pipe of the image of a service, so that a control request can be sent without
+ * the database lock while the image can still go away (its process may end at any time).
+ * With bOnlyLastService the copy is made only when this is the last service of the image;
+ * the handle is INVALID_HANDLE_VALUE otherwise. The caller closes the handle.
+ */
+DWORD
+ScmDuplicateControlPipe(PSERVICE Service, BOOL bOnlyLastService, PHANDLE phPipe)
+{
+    DWORD dwError = ERROR_SUCCESS;
+
+    *phPipe = INVALID_HANDLE_VALUE;
+
+    ScmLockDatabaseShared();
+    if (Service->lpImage == NULL || Service->lpImage->hControlPipe == INVALID_HANDLE_VALUE)
+    {
+        dwError = ERROR_SERVICE_NOT_ACTIVE;
+    }
+    else if (!bOnlyLastService || Service->lpImage->dwImageRunCount == 1)
+    {
+        if (!DuplicateHandle(GetCurrentProcess(),
+                             Service->lpImage->hControlPipe,
+                             GetCurrentProcess(),
+                             phPipe,
+                             0,
+                             FALSE,
+                             DUPLICATE_SAME_ACCESS))
+        {
+            dwError = GetLastError();
+        }
+    }
+    ScmUnlockDatabase();
+
+    return dwError;
+}
+
+
+/* Called with the database lock held */
+BOOL
+ScmIsServiceListed(PSERVICE lpService)
+{
+    PLIST_ENTRY ServiceEntry;
+
+    for (ServiceEntry = ServiceListHead.Flink;
+         ServiceEntry != &ServiceListHead;
+         ServiceEntry = ServiceEntry->Flink)
+    {
+        if (CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry) == lpService)
+            return TRUE;
+    }
+    return FALSE;
 }
 
 
@@ -1272,7 +1891,18 @@ ScmCreateServiceDatabase(VOID)
 VOID
 ScmShutdownServiceDatabase(VOID)
 {
+    DWORD i;
+
     DPRINT("ScmShutdownServiceDatabase() called\n");
+
+    /*
+     * A worker that began before the shutdown flag was set finishes first; wait for it outside the locks.
+     * One that does not finish keeps the database: the process is ending anyway.
+     */
+    for (i = 0; i < 50 && InterlockedCompareExchange(&ScmActiveWorkers, 0, 0) != 0; i++)
+        Sleep(100);
+    if (InterlockedCompareExchange(&ScmActiveWorkers, 0, 0) != 0)
+        return;
 
     ScmDeleteMarkedServices();
     RtlDeleteResource(&DatabaseLock);
@@ -1942,6 +2572,9 @@ ScmStartUserModeService(PSERVICE Service,
     ResumeThread(ProcessInformation.hThread);
     CloseHandle(ProcessInformation.hThread);
 
+    /* Notice when the process ends without the service having stopped */
+    ScmWatchServiceProcess(Service->lpImage);
+
     /* Connect control pipe */
     dwError = ScmWaitForServiceConnect(Service);
     if (dwError != ERROR_SUCCESS)
@@ -1982,6 +2615,12 @@ ScmLoadService(PSERVICE Service,
         return ERROR_SERVICE_ALREADY_RUNNING;
     }
 
+    /* The service can be deleted or disabled while its start waits for the start lock */
+    if (Service->bDeleted)
+        return ERROR_SERVICE_MARKED_FOR_DELETE;
+    if (Service->dwStartType == SERVICE_DISABLED)
+        return ERROR_SERVICE_DISABLED;
+
     DPRINT("Service->Type: %lu\n", Service->Status.dwServiceType);
 
     if (Service->Status.dwServiceType & SERVICE_DRIVER)
@@ -1992,24 +2631,50 @@ ScmLoadService(PSERVICE Service,
     else // if (Service->Status.dwServiceType & (SERVICE_WIN32 | SERVICE_INTERACTIVE_PROCESS))
     {
         /* Start user-mode service */
+        ScmLockDatabaseExclusive();
+        Service->bStatusReported = FALSE;
+        ScmUnlockDatabase();
+
         dwError = ScmCreateOrReferenceServiceImage(Service);
         if (dwError == ERROR_SUCCESS)
         {
             dwError = ScmStartUserModeService(Service, argc, argv);
             if (dwError == ERROR_SUCCESS)
             {
-                Service->Status.dwCurrentState = SERVICE_START_PENDING;
-                Service->Status.dwControlsAccepted = 0;
-                ScmReferenceService(Service);
+                /*
+                 * The service may have reported its state already, before the start control returned.
+                 * It then took the reference of a started service, and it must not be set back.
+                 */
+                ScmLockDatabaseExclusive();
+                if (!Service->bStatusReported && Service->Status.dwCurrentState == SERVICE_STOPPED && Service->lpImage != NULL)
+                {
+                    Service->Status.dwCurrentState = SERVICE_START_PENDING;
+                    Service->Status.dwControlsAccepted = 0;
+                    ScmReferenceService(Service);
+                }
+                ScmUnlockDatabase();
+
+                ScmCheckServiceProcessExited(Service);
             }
             else
             {
-                Service->lpImage->dwImageRunCount--;
-                if (Service->lpImage->dwImageRunCount == 0)
+                /* The watching thread reads the images under the database lock */
+                ScmLockDatabaseExclusive();
+
+                /*
+                 * A service that has reported its state already owns its share of the image:
+                 * the report, the stop or the end of its process releases it.
+                 */
+                if (Service->lpImage != NULL && !Service->bStatusReported)
                 {
-                    ScmRemoveServiceImage(Service->lpImage);
-                    Service->lpImage = NULL;
+                    Service->lpImage->dwImageRunCount--;
+                    if (Service->lpImage->dwImageRunCount == 0)
+                    {
+                        ScmRemoveServiceImage(Service->lpImage);
+                        Service->lpImage = NULL;
+                    }
                 }
+                ScmUnlockDatabase();
             }
         }
     }
