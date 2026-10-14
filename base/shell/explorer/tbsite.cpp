@@ -73,7 +73,6 @@ class CTrayBandSite :
     HWND m_Rebar;
     BOOL m_bNoSave;
     BOOL m_bSaving;
-    BOOL m_bTaskBandLoaded;
 
     union
     {
@@ -142,8 +141,7 @@ public:
         m_RefCount(0),
         m_Rebar(NULL),
         m_bNoSave(TRUE),
-        m_bSaving(FALSE),
-        m_bTaskBandLoaded(FALSE)
+        m_bSaving(FALSE)
     {
     }
 
@@ -187,9 +185,8 @@ public:
                     ASSERT(m_TaskBand != NULL);
 
                     /* There is one task band, a second entry of the stream is refused */
-                    if (m_bTaskBandLoaded)
+                    if (HasTaskBand())
                         return E_FAIL;
-                    m_bTaskBandLoaded = TRUE;
                     /* We're trying to load the task band! Let's create it... */
 
                     hRet = m_TaskBand->QueryInterface(

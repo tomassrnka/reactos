@@ -250,13 +250,13 @@ START_TEST(BandSite)
         AddFolderBand(one, pidlSystem, FALSE);
         ok_int(CountBands(one.site), 3);
 
-        /* Put the last band between the other two and start a new row with the first band */
+        /* Quick Launch asks to be added to the front: move it to the end, and start a row at the middle band */
         ok_int((int)SendMessageW(one.hwndRebar, RB_GETBANDCOUNT, 0, 0), 3);
-        SendMessageW(one.hwndRebar, RB_MOVEBAND, 2, 1);
+        SendMessageW(one.hwndRebar, RB_MOVEBAND, 0, 2);
         REBARBANDINFOW rbi = { sizeof(rbi), RBBIM_STYLE };
-        SendMessageW(one.hwndRebar, RB_GETBANDINFOW, 2, (LPARAM)&rbi);
+        SendMessageW(one.hwndRebar, RB_GETBANDINFOW, 1, (LPARAM)&rbi);
         rbi.fStyle |= RBBS_BREAK;
-        SendMessageW(one.hwndRebar, RB_SETBANDINFOW, 2, (LPARAM)&rbi);
+        SendMessageW(one.hwndRebar, RB_SETBANDINFOW, 1, (LPARAM)&rbi);
 
         CComPtr<IStream> stream;
         HRESULT hr = SaveSite(one, stream);
@@ -306,46 +306,76 @@ START_TEST(BandSite)
         }
     }
 
-    /* Malformed streams in the form of this implementation */
-    if (IsReactOS())
+    /* Malformed streams, made by changing a saved one in the form of this implementation */
+    if (IsReactOS() && pidlWindows)
     {
-        TEST_HEADER header = { 0x53425242, 1, 1 };
-        struct { TEST_HEADER header; TEST_ENTRY entry; BYTE tail[16]; } stream = {};
-        memset(&stream.tail, 0xFF, sizeof(stream.tail));
+        BandSite src;
+        CComPtr<IStream> good;
+        if (CreateBandSite(hwnd, src) && SUCCEEDED(AddFolderBand(src, pidlWindows, FALSE)) && SUCCEEDED(SaveSite(src, good)))
+        {
+            HGLOBAL hglobal;
+            STATSTG stat = {};
+            good->Stat(&stat, STATFLAG_NONAME);
+            ULONG cb = stat.cbSize.LowPart;
+            CHeapPtr<BYTE> bytes;
+            if (!bytes.Allocate(cb))
+                return;
+            if (SUCCEEDED(GetHGlobalFromStream(good, &hglobal)))
+            {
+                memcpy(bytes.m_pData, GlobalLock(hglobal), cb);
+                GlobalUnlock(hglobal);
+            }
+            ok(cb > sizeof(TEST_HEADER) + sizeof(TEST_ENTRY), "the saved stream is only %lu bytes\n", cb);
 
-        /* A length that wraps the position of the next entry back into the stream */
-        stream.header = header;
-        stream.entry.length = 0xFFFFFFFC;
-        stream.entry.clsid = CLSID_ISFBand;
-        TestRefusedStream(hwnd, "wrapping length", MakeStream(&stream, sizeof(stream)));
+            /* The stream itself loads */
+            {
+                BandSite bs;
+                if (CreateBandSite(hwnd, bs))
+                {
+                    HRESULT hr = bs.persist->Load(MakeStream(bytes.m_pData, cb));
+                    ok_hex(hr, S_OK);
+                    ok_int(CountBands(bs.site), 1);
+                }
+            }
 
-        /* A length beyond the end of the stream */
-        stream.entry.length = 0x1000;
-        TestRefusedStream(hwnd, "length beyond the end", MakeStream(&stream, sizeof(stream)));
+            TEST_ENTRY *entry = (TEST_ENTRY *)(bytes.m_pData + sizeof(TEST_HEADER));
+            const DWORD goodLength = entry->length;
+            ok(goodLength == cb - sizeof(TEST_HEADER) - sizeof(DWORD), "entry length %lu in a stream of %lu bytes\n", goodLength, cb);
 
-        /* A length too short for the class */
-        stream.entry.length = 8;
-        TestRefusedStream(hwnd, "length too short", MakeStream(&stream, sizeof(stream)));
+            /* A length that wraps the position of the next entry back into the stream */
+            entry->length = 0xFFFFFFFC;
+            TestRefusedStream(hwnd, "wrapping length", MakeStream(bytes.m_pData, cb));
+            /* A length beyond the end of the stream */
+            entry->length = goodLength + 4;
+            TestRefusedStream(hwnd, "length beyond the end", MakeStream(bytes.m_pData, cb));
+            /* A length too short for the class */
+            entry->length = 8;
+            TestRefusedStream(hwnd, "length too short", MakeStream(bytes.m_pData, cb));
+            /* A length one short: the band must not read the last byte, which is outside its entry */
+            entry->length = goodLength - 1;
+            TestRefusedStream(hwnd, "length one byte short", MakeStream(bytes.m_pData, cb));
+            entry->length = goodLength;
 
-        /* A class that cannot load itself from a stream */
-        stream.entry.length = sizeof(stream.entry) - sizeof(DWORD) + sizeof(stream.tail);
-        stream.entry.clsid = CLSID_ACLHistory;
-        TestRefusedStream(hwnd, "class without IPersistStream", MakeStream(&stream, sizeof(stream)));
+            /* A class that cannot load itself from a stream */
+            entry->clsid = CLSID_ACLHistory;
+            TestRefusedStream(hwnd, "class without IPersistStream", MakeStream(bytes.m_pData, cb));
+            entry->clsid = CLSID_ISFBand;
 
-        /* A folder band whose item list claims more bytes than the stream has */
-        stream.entry.clsid = CLSID_ISFBand;
-        struct { TEST_HEADER header; TEST_ENTRY entry; DWORD version, options; WORD cb; BYTE items[8]; } pidl = {};
-        pidl.header = header;
-        pidl.entry = stream.entry;
-        pidl.entry.length = sizeof(pidl.entry) - sizeof(DWORD) + sizeof(pidl.version) + sizeof(pidl.options) + sizeof(pidl.cb) + sizeof(pidl.items);
-        pidl.version = 1;
-        pidl.cb = 0xFFFF;
-        memset(pidl.items, 0xFF, sizeof(pidl.items));
-        TestRefusedStream(hwnd, "item list longer than the stream", MakeStream(&pidl, sizeof(pidl)));
-
-        /* An item that is longer than the list it is in */
-        pidl.cb = sizeof(pidl.items);
-        TestRefusedStream(hwnd, "item longer than the list", MakeStream(&pidl, sizeof(pidl)));
+            /* A folder band with a version it does not know, and with a path that is not one */
+            BYTE *payload = bytes.m_pData + sizeof(TEST_HEADER) + sizeof(TEST_ENTRY);
+            DWORD version = *(DWORD *)payload;
+            *(DWORD *)payload = 0x7FFFFFFF;
+            TestRefusedStream(hwnd, "unknown band version", MakeStream(bytes.m_pData, cb));
+            *(DWORD *)payload = version;
+            DWORD cch = ((DWORD *)payload)[2];
+            ((DWORD *)payload)[2] = 0x7FFFFFFF;
+            TestRefusedStream(hwnd, "path of a size that does not fit", MakeStream(bytes.m_pData, cb));
+            ((DWORD *)payload)[2] = cch;
+            ((WCHAR *)(payload + 3 * sizeof(DWORD)))[0] = L'\0';
+            TestRefusedStream(hwnd, "path that ends early", MakeStream(bytes.m_pData, cb));
+            memset(payload + 3 * sizeof(DWORD), 'Z', cch * sizeof(WCHAR));
+            TestRefusedStream(hwnd, "path of a folder that is not there", MakeStream(bytes.m_pData, cb));
+        }
     }
     else
     {
