@@ -258,18 +258,38 @@ static void TestUnknownZones(void)
     }
 }
 
-static BOOL HasDynamicDst(PCWSTR KeyName)
+static BOOL ReadDword(HKEY hKey, PCWSTR Name, DWORD *Value)
 {
-    WCHAR Path[256];
+    DWORD Type, Size = sizeof(*Value);
+
+    return !RegQueryValueExW(hKey, Name, NULL, &Type, (BYTE *)Value, &Size) && Type == REG_DWORD && Size == sizeof(*Value);
+}
+
+/* The zone has an entry for the year (or the first or last one that the year falls back to), complete for all the fields */
+static BOOL HasYearData(PCWSTR KeyName, USHORT Year)
+{
+    WCHAR Path[256], Name[16];
     HKEY hKey;
+    DWORD First, Last, Type, Size = 0;
+    LONG Used = (SHORT)Year;
+    BOOL Found = FALSE;
 
     if (!KeyName[0])
         return FALSE;
     StringCchPrintfW(Path, ARRAYSIZE(Path), ZONES_KEY L"\\%s\\Dynamic DST", KeyName);
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &hKey))
         return FALSE;
+    if (ReadDword(hKey, L"FirstEntry", &First) && ReadDword(hKey, L"LastEntry", &Last))
+    {
+        if (Used < (LONG)First)
+            Used = (LONG)First;
+        else if (Used > (LONG)Last)
+            Used = (LONG)Last;
+        StringCchPrintfW(Name, ARRAYSIZE(Name), L"%ld", Used);
+        Found = !RegQueryValueExW(hKey, Name, NULL, &Type, NULL, &Size) && Type == REG_BINARY && Size >= sizeof(TZI_FORMAT);
+    }
     RegCloseKey(hKey);
-    return TRUE;
+    return Found;
 }
 
 static void ExpectSameZone(PCSTR What, const TIME_ZONE_INFORMATION *Info, const TIME_ZONE_INFORMATION *Expected, BOOL All)
@@ -308,8 +328,8 @@ static void TestCurrentZone(void)
     }
     Dynamic.TimeZoneKeyName[ARRAYSIZE(Dynamic.TimeZoneKeyName) - 1] = UNICODE_NULL;
 
-    /* A zone with yearly data has the dates of that year, the others the ones in effect */
-    All = Dynamic.DynamicDaylightTimeDisabled || !HasDynamicDst(Dynamic.TimeZoneKeyName);
+    /* A zone with usable yearly data has the dates of that year, the others the ones in effect */
+    All = Dynamic.DynamicDaylightTimeDisabled || !HasYearData(Dynamic.TimeZoneKeyName, Now.wYear);
 
     /* No dynamic information: the zone in effect */
     RtlFillMemory(&Info, sizeof(Info), 0xBB);
@@ -317,7 +337,10 @@ static void TestCurrentZone(void)
     Ret = pGetTimeZoneInformationForYear(Now.wYear, NULL, &Info);
     ok(Ret, "Failed: %lu\n", GetLastError());
     if (Ret)
+    {
+        ok(Info.Bias != (LONG)0xBBBBBBBB, "The structure was not filled\n");
         ExpectSameZone("no dynamic information", &Info, &Current, All);
+    }
 
     /* The information of GetDynamicTimeZoneInformation gives the same, all of it */
     RtlFillMemory(&Explicit, sizeof(Explicit), 0xBB);
@@ -325,8 +348,9 @@ static void TestCurrentZone(void)
     ok(Ret, "Failed: %lu\n", GetLastError());
     if (Ret)
     {
+        ok(Explicit.Bias != (LONG)0xBBBBBBBB, "The structure was not filled\n");
         ExpectSameZone("explicit information", &Explicit, &Current, All);
-        if (Info.Bias != 0xBBBBBBBB)
+        if (Info.Bias != (LONG)0xBBBBBBBB)
             ExpectSameZone("explicit and implicit", &Explicit, &Info, TRUE);
     }
 }
