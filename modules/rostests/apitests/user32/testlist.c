@@ -72,6 +72,7 @@ extern void func_SystemParametersInfo(void);
 extern void func_SystemMenu(void);
 extern void func_TrackMouseEvent(void);
 extern void func_TrackPopupMenuEx(void);
+extern void func_UnicodeToAnsiMessage(void);
 extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
 extern void func_WmPrint(void);
@@ -151,6 +152,7 @@ const struct test winetest_testlist[] =
     { "SystemParametersInfo", func_SystemParametersInfo },
     { "TrackMouseEvent", func_TrackMouseEvent },
     { "TrackPopupMenuEx", func_TrackPopupMenuEx },
+    { "UnicodeToAnsiMessage", func_UnicodeToAnsiMessage },
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
     { "VirtualKey", func_VirtualKey },
     { "Win8User", func_Win8User },

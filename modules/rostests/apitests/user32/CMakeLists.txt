@@ -70,6 +70,7 @@ list(APPEND SOURCE
     SystemParametersInfo.c
     TrackMouseEvent.c
     TrackPopupMenuEx.c
+    UnicodeToAnsiMessage.c
     UserHandleGrantAccess.c
     VirtualKey.c
     Win8User.c
