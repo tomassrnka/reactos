@@ -107,6 +107,7 @@ extern void func_RtlDebugInformation(void);
 extern void func_RtlDeleteAce(void);
 extern void func_RtlDetermineDosPathNameType(void);
 extern void func_RtlDosApplyFileIsolationRedirection_Ustr(void);
+extern void func_RtlDosApplyFileIsolationRedirection_LoadFrom(void);
 extern void func_RtlDoesFileExists(void);
 extern void func_RtlDosPathNameToNtPathName_U(void);
 extern void func_RtlDosSearchPath_U(void);
@@ -273,6 +274,8 @@ const struct test winetest_testlist[] =
     { "RtlDebugInformation",            func_RtlDebugInformation },
     { "RtlDeleteAce",                   func_RtlDeleteAce },
     { "RtlDetermineDosPathNameType",    func_RtlDetermineDosPathNameType },
+    { "RtlDosApplyFileIsolationRedirection_LoadFrom",
+      func_RtlDosApplyFileIsolationRedirection_LoadFrom },
     { "RtlDosApplyFileIsolationRedirection_Ustr", func_RtlDosApplyFileIsolationRedirection_Ustr },
     { "RtlDoesFileExists",              func_RtlDoesFileExists },
     { "RtlDosPathNameToNtPathName_U",   func_RtlDosPathNameToNtPathName_U },

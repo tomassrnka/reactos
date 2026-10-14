@@ -720,13 +720,111 @@ NTSTATUS get_buffer(LPWSTR *buffer, SIZE_T needed, PUNICODE_STRING CallerBuffer,
     return STATUS_SUCCESS;
 }
 
+/*
+ * The path of a <file> element that names a loadFrom location: the path segments of the
+ * redirection record, with %variables% expanded when the record says so, followed by the file
+ * name. Ported from Wine's build_dlldata_path (dlls/ntdll/loader.c, LGPL).
+ */
+static NTSTATUS
+build_dlldata_path( PUNICODE_STRING pnameW, ACTCTX_SECTION_KEYED_DATA *data, LPWSTR *fullname,
+                    PUNICODE_STRING CallerBuffer, BOOLEAN bAllocateBuffer)
+{
+    ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION *dlldata = data->lpData;
+    ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH_SEGMENT *path;
+    char *base = data->lpSectionBase;
+    SIZE_T total = 0, expanded, needed;
+    WCHAR *p, *buffer, *result;
+    NTSTATUS status;
+    ULONG i;
+
+    if (dlldata->PathSegmentCount > (data->ulLength - sizeof(*dlldata)) / sizeof(*path))
+        return STATUS_SXS_KEY_NOT_FOUND;
+
+    path = (ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH_SEGMENT *)(dlldata + 1);
+    for (i = 0; i < dlldata->PathSegmentCount; i++)
+    {
+        if (path[i].Offset > data->ulSectionTotalLength ||
+            path[i].Length > data->ulSectionTotalLength - path[i].Offset)
+            return STATUS_SXS_KEY_NOT_FOUND;
+        total += path[i].Length;
+    }
+
+    total += pnameW->Length + sizeof(WCHAR);
+    if (!(p = buffer = RtlAllocateHeap( RtlGetProcessHeap(), 0, total )))
+        return STATUS_NO_MEMORY;
+
+    for (i = 0; i < dlldata->PathSegmentCount; i++)
+    {
+        memcpy( p, base + path[i].Offset, path[i].Length );
+        p += path[i].Length / sizeof(WCHAR);
+    }
+    /* A path that does not end in a backslash is the full file name, as in Wine */
+    if (p == buffer || p[-1] == L'\\')
+    {
+        memcpy( p, pnameW->Buffer, pnameW->Length );
+        p += pnameW->Length / sizeof(WCHAR);
+    }
+    *p = UNICODE_NULL;
+    result = buffer;
+
+    if (dlldata->Flags & ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH_EXPAND)
+    {
+        UNICODE_STRING Source, Expanded;
+        ULONG NeededBytes;
+
+        /* RtlInitUnicodeString would cut a path that a UNICODE_STRING cannot describe */
+        if (wcslen( buffer ) >= UNICODE_STRING_MAX_CHARS)
+        {
+            RtlFreeHeap( RtlGetProcessHeap(), 0, buffer );
+            return STATUS_NAME_TOO_LONG;
+        }
+
+        /* The environment can change between calls, so a result that did not fit is retried */
+        RtlInitUnicodeString( &Source, buffer );
+        expanded = MAX_PATH;
+        for (;;)
+        {
+            if (!(result = RtlAllocateHeap( RtlGetProcessHeap(), 0, expanded * sizeof(WCHAR) )))
+            {
+                RtlFreeHeap( RtlGetProcessHeap(), 0, buffer );
+                return STATUS_NO_MEMORY;
+            }
+            RtlInitEmptyUnicodeString( &Expanded, result, (USHORT)(expanded * sizeof(WCHAR)) );
+            status = RtlExpandEnvironmentStrings_U( NULL, &Source, &Expanded, &NeededBytes );
+            if (NT_SUCCESS(status)) break;
+
+            RtlFreeHeap( RtlGetProcessHeap(), 0, result );
+            if (status != STATUS_BUFFER_TOO_SMALL || NeededBytes / sizeof(WCHAR) <= expanded ||
+                NeededBytes / sizeof(WCHAR) > UNICODE_STRING_MAX_CHARS)
+            {
+                RtlFreeHeap( RtlGetProcessHeap(), 0, buffer );
+                return status == STATUS_BUFFER_TOO_SMALL ? STATUS_NAME_TOO_LONG : status;
+            }
+            expanded = NeededBytes / sizeof(WCHAR);
+        }
+        RtlFreeHeap( RtlGetProcessHeap(), 0, buffer );
+    }
+
+    needed = (wcslen(result) + 1) * sizeof(WCHAR);
+    /* The caller keeps the path in a UNICODE_STRING, which cannot describe more */
+    if (needed / sizeof(WCHAR) > UNICODE_STRING_MAX_CHARS)
+        status = STATUS_NAME_TOO_LONG;
+    else
+        status = get_buffer( fullname, needed, CallerBuffer, bAllocateBuffer );
+    if (NT_SUCCESS(status))
+        memcpy( *fullname, result, needed );
+    RtlFreeHeap( RtlGetProcessHeap(), 0, result );
+    return status;
+}
+
 /* NOTE: Remove this one once our actctx support becomes better */
 NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STRING CallerBuffer, BOOLEAN bAllocateBuffer)
 {
     static const WCHAR winsxsW[] = {'\\','w','i','n','s','x','s','\\'};
     static const WCHAR dotManifestW[] = {'.','m','a','n','i','f','e','s','t',0};
 
-    ACTIVATION_CONTEXT_ASSEMBLY_DETAILED_INFORMATION *info;
+    ACTIVATION_CONTEXT_ASSEMBLY_DETAILED_INFORMATION *info = NULL;
+    ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION *dlldata;
     ACTCTX_SECTION_KEYED_DATA data;
     NTSTATUS status;
     SIZE_T needed, size = 1024;
@@ -740,6 +838,18 @@ NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STR
     {
         //DPRINT1("RtlFindActivationContextSectionString returned 0x%x for %wZ\n", status, pnameW);
         return status;
+    }
+
+    if (data.ulLength < sizeof(*dlldata))
+    {
+        status = STATUS_SXS_KEY_NOT_FOUND;
+        goto done;
+    }
+    dlldata = data.lpData;
+    if (!(dlldata->Flags & ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH_OMITS_ASSEMBLY_ROOT))
+    {
+        status = build_dlldata_path( pnameW, &data, fullname, CallerBuffer, bAllocateBuffer );
+        goto done;
     }
 
     for (;;)
@@ -815,7 +925,8 @@ NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STR
     *p = L'\0';
 
 done:
-    RtlFreeHeap( RtlGetProcessHeap(), 0, info );
+    if (info)
+        RtlFreeHeap( RtlGetProcessHeap(), 0, info );
     RtlReleaseActivationContext( data.hActCtx );
     DPRINT("%S\n", fullname);
     return status;
