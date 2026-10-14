@@ -280,7 +280,8 @@ NtReplyPort(IN HANDLE PortHandle,
     if ((WakeupThread->LpcReplyMessageId != CapturedReplyMessage.MessageId) ||
         ((LpcpGetMessageFromThread(WakeupThread)) &&
         (LpcpGetMessageType(&LpcpGetMessageFromThread(WakeupThread)-> Request)
-            != LPC_REQUEST)))
+            != LPC_REQUEST)) ||
+        (IsListEmpty(&WakeupThread->LpcReplyChain)))
     {
         /* It isn't, fail */
         LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
@@ -307,6 +308,9 @@ NtReplyPort(IN HANDLE PortHandle,
         _SEH2_YIELD(return _SEH2_GetExceptionCode());
     }
     _SEH2_END;
+
+    /* No suspension between taking the client off its chain and the release it waits for */
+    KeEnterCriticalRegion();
 
     /* Reference the thread while we use it */
     ObReferenceObject(WakeupThread);
@@ -343,6 +347,7 @@ NtReplyPort(IN HANDLE PortHandle,
     /* Release the lock and release the LPC semaphore to wake up waiters */
     KeReleaseGuardedMutex(&LpcpLock);
     LpcpCompleteWait(&WakeupThread->LpcReplySemaphore);
+    KeLeaveCriticalRegion();
 
     /* Now we can let go of the thread */
     ObDereferenceObject(WakeupThread);
@@ -524,7 +529,8 @@ NtReplyWaitReceivePortEx(IN HANDLE PortHandle,
         if ((WakeupThread->LpcReplyMessageId != CapturedReplyMessage.MessageId) ||
             ((LpcpGetMessageFromThread(WakeupThread)) &&
              (LpcpGetMessageType(&LpcpGetMessageFromThread(WakeupThread)->Request)
-                != LPC_REQUEST)))
+                != LPC_REQUEST)) ||
+            (IsListEmpty(&WakeupThread->LpcReplyChain)))
         {
             /* It isn't, fail */
             LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
@@ -553,6 +559,9 @@ NtReplyWaitReceivePortEx(IN HANDLE PortHandle,
             _SEH2_YIELD(return _SEH2_GetExceptionCode());
         }
         _SEH2_END;
+
+        /* No suspension between taking the client off its chain and the release it waits for */
+        KeEnterCriticalRegion();
 
         /* Reference the thread while we use it */
         ObReferenceObject(WakeupThread);
@@ -589,6 +598,7 @@ NtReplyWaitReceivePortEx(IN HANDLE PortHandle,
         /* Release the lock and release the LPC semaphore to wake up waiters */
         KeReleaseGuardedMutex(&LpcpLock);
         LpcpCompleteWait(&WakeupThread->LpcReplySemaphore);
+        KeLeaveCriticalRegion();
 
         /* Now we can let go of the thread */
         ObDereferenceObject(WakeupThread);

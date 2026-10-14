@@ -111,7 +111,7 @@ NtSecureConnectPort(OUT PHANDLE PortHandle,
     HANDLE Handle;
     PVOID SectionToMap;
     LARGE_INTEGER SectionOffset;
-    BOOLEAN Waited = FALSE, Woken;
+    BOOLEAN Woken;
     PTOKEN Token;
     PTOKEN_USER TokenUserInfo;
 
@@ -611,20 +611,29 @@ NtSecureConnectPort(OUT PHANDLE PortHandle,
 
         /* Now wait for a reply and set 'Status' */
         LpcpConnectWait(&Thread->LpcReplySemaphore, PreviousMode);
-        Waited = TRUE;
+    }
+    else
+    {
+        /* The request was never queued, free what we still own */
+        goto Failure;
     }
 
     /* Now, always free the connection message */
     SectionToMap = LpcpFreeConMsg(&Message, &ConnectMessage, Thread, &Woken);
 
-    /* Check for failure */
-    if (!NT_SUCCESS(Status))
+    /* Check if the wait was aborted (STATUS_USER_APC is not an error code) */
+    if (Status != STATUS_SUCCESS)
     {
-        /* If we were woken, take the release the aborted wait missed */
-        if (Waited && Woken)
-            LpcpCompleteAbortedWait(&Thread->LpcReplySemaphore);
+        if (!Woken)
+        {
+            /* Nobody answered and nobody will, give the request up */
+            Status = STATUS_THREAD_IS_TERMINATING;
+            goto Failure;
+        }
 
-        goto Failure;
+        /* We were woken, but the aborted wait did not take the release */
+        LpcpCompleteAbortedWait(&Thread->LpcReplySemaphore);
+        Status = STATUS_SUCCESS;
     }
 
     /* Check if we got a message back */
