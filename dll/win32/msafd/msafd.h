@@ -552,4 +552,21 @@ VOID
 MsafdWaitForAlert(
     _In_ HANDLE hObject);
 
+VOID
+MsafdWaitForRequest(
+    _In_ HANDLE hSocket,
+    _In_ HANDLE hEvent,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ ULONG Timeout);
+
+/* The blocking calls of a socket created without WSA_FLAG_OVERLAPPED do not time out */
+FORCEINLINE
+ULONG
+MsafdSocketTimeout(
+    _In_ PSOCKET_INFORMATION Socket,
+    _In_ ULONG Timeout)
+{
+    return (Socket->SharedData->CreateFlags & WSA_FLAG_OVERLAPPED) ? Timeout : 0;
+}
+
 #endif /* __MSAFD_H */

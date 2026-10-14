@@ -212,8 +212,8 @@ WSPSocket(int AddressFamily,
         Socket->SharedData->ProviderFlags = lpProtocolInfo->dwProviderFlags;
         Socket->SharedData->UseSAN = FALSE;
         Socket->SharedData->NonBlocking = FALSE; /* Sockets start blocking */
-        Socket->SharedData->RecvTimeout = INFINITE;
-        Socket->SharedData->SendTimeout = INFINITE;
+        Socket->SharedData->RecvTimeout = 0;
+        Socket->SharedData->SendTimeout = 0;
         Socket->SharedData->OobInline = FALSE;
 
         /* Ask alex about this */
@@ -542,6 +542,7 @@ TranslateNtStatusError(NTSTATUS Status)
           return WSAEWOULDBLOCK;
 
        case STATUS_TIMEOUT:
+       case STATUS_IO_TIMEOUT:
           return WSAETIMEDOUT;
 
        case STATUS_SUCCESS:
@@ -629,6 +630,57 @@ MsafdWaitForAlert(
         if (Result != WAIT_IO_COMPLETION)
             break;
     }
+}
+
+/*
+ * A blocking request waits for Timeout milliseconds (0 and INFINITE: without limit). On expiry the
+ * request is cancelled and waited for, so the status block is not used after this returns.
+ */
+VOID
+MsafdWaitForRequest(
+    _In_ HANDLE hSocket,
+    _In_ HANDLE hEvent,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ ULONG Timeout)
+{
+    IO_STATUS_BLOCK CancelStatusBlock;
+    DWORD Start, Elapsed, Result;
+
+    if (Timeout == 0 || Timeout == INFINITE)
+    {
+        MsafdWaitForAlert(hEvent);
+        return;
+    }
+
+    Start = GetTickCount();
+    for (;;)
+    {
+        Elapsed = GetTickCount() - Start;
+        if (Elapsed >= Timeout)
+        {
+            Result = WAIT_TIMEOUT;
+            break;
+        }
+
+        Result = WaitForSingleObjectEx(hEvent, Timeout - Elapsed, TRUE);
+        if (Result != WAIT_IO_COMPLETION)
+            break;
+    }
+
+    if (Result == WAIT_OBJECT_0)
+        return;
+
+#if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
+    NtCancelIoFileEx(hSocket, IoStatusBlock, &CancelStatusBlock);
+#else
+    /* The thread's other requests on this socket are cancelled too */
+    NtCancelIoFile(hSocket, &CancelStatusBlock);
+#endif
+
+    /* The request that completed before the cancellation keeps its own status */
+    MsafdWaitForAlert(hEvent);
+    if (IoStatusBlock->Status == STATUS_CANCELLED)
+        IoStatusBlock->Status = STATUS_IO_TIMEOUT;
 }
 
 /*
@@ -1810,6 +1862,8 @@ WSPAccept(
     AcceptSocketInfo->SharedData->State = SocketConnected;
     AcceptSocketInfo->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     AcceptSocketInfo->SharedData->NonBlocking = Socket->SharedData->NonBlocking;
+    AcceptSocketInfo->SharedData->RecvTimeout = Socket->SharedData->RecvTimeout;
+    AcceptSocketInfo->SharedData->SendTimeout = Socket->SharedData->SendTimeout;
 
     /* Return Address in SOCKADDR FORMAT */
     if( SocketAddress )

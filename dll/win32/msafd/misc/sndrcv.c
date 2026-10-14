@@ -375,9 +375,8 @@ WSPRecv(SOCKET Handle,
     /* Wait for completion if not overlapped */
     if (!lpOverlapped && Status == STATUS_PENDING)
     {
-        /* It's up to the protocol to time out recv. We must wait
-         * until the protocol decides it's had enough. */
-        MsafdWaitForAlert(SockEvent);
+        MsafdWaitForRequest((HANDLE)Handle, SockEvent, IOSB,
+                            MsafdSocketTimeout(Socket, Socket->SharedData->RecvTimeout));
         Status = IOSB->Status;
     }
 
@@ -422,7 +421,10 @@ WSPRecv(SOCKET Handle,
     }
 
     TRACE("Leaving (%lx %ld)\n", Status, NumberOfBytesRead);
-    return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead, lpNumberOfBytesRead);
+
+    /* A timed out receive leaves the caller's byte count unchanged */
+    return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead,
+                                (Status == STATUS_IO_TIMEOUT) ? NULL : lpNumberOfBytesRead);
 }
 
 int
@@ -612,8 +614,8 @@ WSPRecvFrom(SOCKET Handle,
     /* Wait for completion if not overlapped */
     if (!lpOverlapped && Status == STATUS_PENDING)
     {
-        /* FIXME: Shouldn't wait infinitely for receive... */
-        MsafdWaitForAlert(SockEvent);
+        MsafdWaitForRequest((HANDLE)Handle, SockEvent, IOSB,
+                            MsafdSocketTimeout(Socket, Socket->SharedData->RecvTimeout));
         Status = IOSB->Status;
     }
 
@@ -659,7 +661,10 @@ WSPRecvFrom(SOCKET Handle,
     }
 
     TRACE("Leaving (%lx %ld)\n", Status, NumberOfBytesRead);
-    return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead, lpNumberOfBytesRead);
+
+    /* A timed out receive leaves the caller's byte count unchanged */
+    return MsafdReturnWithErrno(Status, lpErrno, NumberOfBytesRead,
+                                (Status == STATUS_IO_TIMEOUT) ? NULL : lpNumberOfBytesRead);
 }
 
 
