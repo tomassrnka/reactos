@@ -34,65 +34,18 @@ UserGetMouseButtonsState(VOID)
 VOID NTAPI
 UserRawInputMouseProcess(PINPUT_DEVICE_INFO pDeviceInfo, PMOUSE_INPUT_DATA mid)
 {
-    PTHREADINFO pti;
-    HWND hwndTarget;
-    WPARAM wParam;
-    HRAWINPUT hRawInput;
     RAWMOUSE rm = {0};
-    MSG Msg = {0};
 
-    if (!UserGetRawInputTarget(RIM_TYPEMOUSE, &pti, &hwndTarget, &wParam))
-        return;
+    /* MOUSE_MOVE_* and the button flags use the same values as the raw input ones */
+    rm.usFlags = mid->Flags & (MOUSE_MOVE_ABSOLUTE | MOUSE_VIRTUAL_DESKTOP);
+    rm.usButtonFlags = mid->ButtonFlags;
+    rm.usButtonData = mid->ButtonData;
+    rm.ulRawButtons = mid->RawButtons;
+    rm.lLastX = mid->LastX;
+    rm.lLastY = mid->LastY;
+    rm.ulExtraInformation = mid->ExtraInformation;
 
-    if (mid->LastX != 0 || mid->LastY != 0)
-    {
-        rm.usFlags |= MOUSE_MOVE_RELATIVE;
-    }
-
-    /* Flags for absolute move */
-    if (mid->Flags & MOUSE_MOVE_ABSOLUTE)
-        rm.usFlags |= MOUSE_MOVE_ABSOLUTE;
-    if (mid->Flags & MOUSE_VIRTUAL_DESKTOP)
-        rm.usFlags |= MOUSE_VIRTUAL_DESKTOP;
-
-    /* Left button */
-    if (mid->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN)
-        rm.usButtonFlags |= RI_MOUSE_LEFT_BUTTON_DOWN;
-    if (mid->ButtonFlags & MOUSE_LEFT_BUTTON_UP)
-        rm.usButtonFlags |= RI_MOUSE_LEFT_BUTTON_UP;
-
-    /* Middle button */
-    if (mid->ButtonFlags & MOUSE_MIDDLE_BUTTON_DOWN)
-        rm.usButtonFlags |= RI_MOUSE_MIDDLE_BUTTON_DOWN;
-    if (mid->ButtonFlags & MOUSE_MIDDLE_BUTTON_UP)
-        rm.usButtonFlags |= RI_MOUSE_MIDDLE_BUTTON_UP;
-
-    /* Right button */
-    if (mid->ButtonFlags & MOUSE_RIGHT_BUTTON_DOWN)
-        rm.usButtonFlags |= RI_MOUSE_RIGHT_BUTTON_DOWN;
-    if (mid->ButtonFlags & MOUSE_RIGHT_BUTTON_UP)
-        rm.usButtonFlags |= RI_MOUSE_RIGHT_BUTTON_UP;
-    rm.lLastX   = mid->LastX;
-    rm.lLastY   = mid->LastY;
-
-    hRawInput = UserCreateRawInput(pti,
-                                   RIM_TYPEMOUSE,
-                                   (HANDLE)pDeviceInfo,
-                                   wParam,
-                                   &rm,
-                                   sizeof(rm));
-    if (!hRawInput)
-        return;
-
-    Msg.hwnd = hwndTarget;
-    Msg.message = WM_INPUT;
-    Msg.wParam = wParam;
-    Msg.lParam = (LPARAM)hRawInput;
-    Msg.time = EngGetTickCount32();
-    Msg.pt = gpsi->ptCursor;
-
-    if (!MsqPostMessage(pti, &Msg, TRUE, QS_RAWINPUT, 0, 0))
-        UserFreeRawInput(pti->MessageQueue, hRawInput);
+    UserRawInputDeliver(RIM_TYPEMOUSE, (HANDLE)pDeviceInfo, &rm, sizeof(rm));
 }
 
 /*
@@ -246,6 +199,10 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
     dwFlags = IntFixMouseInputButtons(pmi->dwFlags);
 
     gppiInputProvider = ((PTHREADINFO)PsGetCurrentThreadWin32Thread())->ppi;
+
+    /* Both X buttons and the wheel use mouseData: such input is rejected below */
+    if (bInjected && !((pmi->dwFlags & (MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP)) && (pmi->dwFlags & MOUSEEVENTF_WHEEL)))
+        UserRawInputSendMouse(pmi);
 
     if (pmi->dwFlags & MOUSEEVENTF_MOVE)
     {

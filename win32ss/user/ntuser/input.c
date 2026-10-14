@@ -582,6 +582,9 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
 
            CurIcon = ptiFrom->MessageQueue->CursorObject;
 
+           /* The queue of ptiFrom goes away with its raw input, and the wake bit with it */
+           MsqPurgeRawInputOfThread(ptiFrom);
+
            MsqDestroyMessageQueue(ptiFrom);
 
            if (CurIcon)
@@ -659,6 +662,9 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
            ASSERT(ptiTo->MessageQueue->cThreads >= 1);
 
            IntDereferenceMessageQueue(ptiTo->MessageQueue);
+
+           /* Raw input posted to ptiFrom stays behind in the shared queue */
+           MsqPurgeRawInputOfThread(ptiFrom);
 
            ptiFrom->MessageQueue = MsqCreateMessageQueue(ptiFrom);
 

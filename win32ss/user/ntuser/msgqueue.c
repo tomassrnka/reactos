@@ -436,6 +436,7 @@ MsqWakeQueue(PTHREADINFO pti, DWORD MessageBits, BOOL KeyEvent)
    if (MessageBits & QS_SENDMESSAGE) pti->nCntsQBits[QSRosSendMessage]++;
    if (MessageBits & QS_HOTKEY)      pti->nCntsQBits[QSRosHotKey]++;
    if (MessageBits & QS_EVENT)       pti->nCntsQBits[QSRosEvent]++;
+   if (MessageBits & QS_RAWINPUT)    pti->nCntsQBits[QSRosRawInput]++;
 
    if (KeyEvent)
       KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
@@ -491,6 +492,10 @@ ClearMsgBitsMask(PTHREADINFO pti, UINT MessageBits)
    if (MessageBits & QS_EVENT)
    {
       if (--pti->nCntsQBits[QSRosEvent] == 0) ClrMask |= QS_EVENT;
+   }
+   if (MessageBits & QS_RAWINPUT)
+   {
+      if (pti->nCntsQBits[QSRosRawInput] == 0 || --pti->nCntsQBits[QSRosRawInput] == 0) ClrMask |= QS_RAWINPUT;
    }
 
    pti->pcti->fsWakeBits &= ~ClrMask;
@@ -695,10 +700,17 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
            gpqCursor = MessageQueue;
 
            /* Mouse move is a special case */
-           MessageQueue->QF_flags |= QF_MOUSEMOVED;
-           gdwMouseMoveExtraInfo = dwExtraInfo;
-           gdwMouseMoveTimeStamp = Msg->time;
-           MsqWakeQueue(pti, QS_MOUSEMOVE, TRUE);
+           if (!UserRawInputNoLegacy(pti->ppi, RIM_TYPEMOUSE))
+           {
+              MessageQueue->QF_flags |= QF_MOUSEMOVED;
+              gdwMouseMoveExtraInfo = dwExtraInfo;
+              gdwMouseMoveTimeStamp = Msg->time;
+              MsqWakeQueue(pti, QS_MOUSEMOVE, TRUE);
+           }
+       }
+       else if (UserRawInputNoLegacy(pti->ppi, RIM_TYPEMOUSE))
+       {
+           /* The process gets raw input instead of mouse messages */
        }
        else
        {
@@ -1954,6 +1966,7 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
    LONG_PTR ExtraInfo;
    MSG clk_msg;
    BOOL Ret = FALSE;
+   PTHREADINFO ptiOwner;
    PUSER_MESSAGE_QUEUE MessageQueue = pti->MessageQueue;
 
    if (!filter_contains_hw_range( MsgFilterLow, MsgFilterHigh )) return FALSE;
@@ -2002,6 +2015,9 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
          msg = CurrentMessage->Msg;
          ExtraInfo = CurrentMessage->ExtraInfo;
          QS_Flags = CurrentMessage->QS_Flags;
+         /* The raw input wake bit was counted for the thread the message was posted to,
+            which differs from the reader when threads share an attached queue */
+         ptiOwner = CurrentMessage->pti ? CurrentMessage->pti : pti;
          clk_msg = MessageQueue->msgDblClk;
 
          NotForUs = FALSE;
@@ -2026,7 +2042,9 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
              {
                 MsqDestroyMessage(CurrentMessage);
              }
-             ClearMsgBitsMask(pti, QS_Flags);
+             ClearMsgBitsMask(pti, QS_Flags & ~QS_RAWINPUT);
+             if (QS_Flags & QS_RAWINPUT)
+                ClearMsgBitsMask(ptiOwner, QS_RAWINPUT);
          }
 
          MessageQueue->idSysPeek = idSave;
@@ -2332,6 +2350,38 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
    }
 }
 
+/*
+   Drop the WM_INPUT messages posted to a thread from the queue it leaves and
+   charge their wake bit back to that thread. Called under the USER lock.
+ */
+VOID FASTCALL
+MsqPurgeRawInputOfThread(PTHREADINFO pti)
+{
+   PUSER_MESSAGE_QUEUE MessageQueue = pti->MessageQueue;
+   PLIST_ENTRY CurrentEntry = MessageQueue->HardwareMessagesListHead.Flink;
+   PUSER_MESSAGE CurrentMessage;
+
+   if (pti->hPrevRawInput)
+   {
+      UserFreeRawInput(MessageQueue, pti->hPrevRawInput);
+      pti->hPrevRawInput = NULL;
+   }
+
+   while (CurrentEntry != &MessageQueue->HardwareMessagesListHead)
+   {
+      CurrentMessage = CONTAINING_RECORD(CurrentEntry, USER_MESSAGE, ListEntry);
+      CurrentEntry = CurrentEntry->Flink;
+
+      if (CurrentMessage->pti == pti && CurrentMessage->Msg.message == WM_INPUT &&
+          (CurrentMessage->QS_Flags & QS_RAWINPUT))
+      {
+         ClearMsgBitsMask(pti, QS_RAWINPUT);
+         UserFreeRawInput(MessageQueue, (HRAWINPUT)CurrentMessage->Msg.lParam);
+         MsqDestroyMessage(CurrentMessage);
+      }
+   }
+}
+
 VOID FASTCALL
 MsqCleanupMessageQueue(PTHREADINFO pti)
 {
@@ -2351,6 +2401,10 @@ MsqCleanupMessageQueue(PTHREADINFO pti)
    if (MessageQueue->cThreads)
    {
       if (MessageQueue->ptiSysLock == pti) MessageQueue->ptiSysLock = NULL;
+
+      /* Raw input messages keep a pointer to the thread they were posted to
+         (wake bit accounting), so none may outlive that thread */
+      MsqPurgeRawInputOfThread(pti);
    }
 
    if (MessageQueue->cThreads == 0) //// Fix a crash related to CORE-10471 testing.

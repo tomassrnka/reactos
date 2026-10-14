@@ -36,7 +36,7 @@
 #define W32PF_APIHOOKUNLOADING       (0x80000000)
 #define W32PF_JOBRESTRICTED          (0x40000000)
 
-#define QSIDCOUNTS 7
+#define QSIDCOUNTS 8
 
 typedef enum _QS_ROS_TYPES
 {
@@ -47,6 +47,7 @@ typedef enum _QS_ROS_TYPES
     QSRosSendMessage,
     QSRosHotKey,
     QSRosEvent,
+    QSRosRawInput,
 } QS_ROS_TYPES, *PQS_ROS_TYPES;
 
 extern BOOL ClientPfnInit;
@@ -289,6 +290,7 @@ typedef struct _PROCESSINFO
     DWORD dwRegisteredClasses;
 
     /* ReactOS */
+    struct _RAWINPUT_REGTABLE *pRawInputRegs;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     /* Published once under the USER lock; lives until PROCESSINFO is freed. */
     struct _CLIENTPFN *pClientPfn;

@@ -196,6 +196,8 @@ UserProcessDestroy(PEPROCESS Process)
 
     IntFreeImeHotKeys();
 
+    UserRawInputProcessDestroy(ppiCurrent);
+
     if (gpwlCache)
     {
         ExFreePoolWithTag(gpwlCache, USERTAG_WINDOWLIST);
@@ -805,6 +807,8 @@ ExitThreadCallback(PETHREAD Thread)
     ASSERT(ppiCurrent);
 
     IsRemoveAttachThread(ptiCurrent);
+
+    UserRawInputThreadCleanup(ptiCurrent);
 
     if (gpwlList)
     {
