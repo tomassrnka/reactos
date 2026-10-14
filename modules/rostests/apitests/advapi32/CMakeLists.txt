@@ -3,10 +3,12 @@ list(APPEND SOURCE
     AddMandatoryAce.c
     CreateService.c
     DuplicateTokenEx.c
+    EnableTraceEx2.c
     EncryptFile.c
     eventlog.c
     EventRegister.c
     EventProvider.c
+    EventSetInformation.c
     Hash.c
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c
