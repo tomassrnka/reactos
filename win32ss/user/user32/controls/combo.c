@@ -74,7 +74,7 @@ const struct builtin_class_descr COMBO_builtin_class =
 #else
     WINPROC_COMBO,        /* proc */
 #endif
-    sizeof(HEADCOMBO *),  /* extra */
+    sizeof(KCOPYOF(HEADCOMBO *)),  /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };

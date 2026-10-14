@@ -129,7 +129,7 @@ const struct builtin_class_descr LISTBOX_builtin_class =
     CS_DBLCLKS /*| CS_PARENTDC*/,  /* style */
     ListBoxWndProcA,      /* procA */
     ListBoxWndProcW,      /* procW */
-    sizeof(LB_DESCR *),   /* extra */
+    sizeof(KCOPYOF(LB_DESCR *)),   /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };
@@ -145,7 +145,7 @@ const struct builtin_class_descr COMBOLBOX_builtin_class =
     CS_DBLCLKS | CS_SAVEBITS,  /* style */
     ListBoxWndProcA,      /* procA */
     ListBoxWndProcW,      /* procW */
-    sizeof(LB_DESCR *),   /* extra */
+    sizeof(KCOPYOF(LB_DESCR *)),   /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };
