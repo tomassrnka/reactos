@@ -1080,6 +1080,41 @@ static void TestFeedbackAncestors(void)
     DestroyWindow(Parent);
 }
 
+/*
+ * The atom under which the feedback settings are kept: another user of the same name adds it before the first
+ * use in this process and lets go of it afterwards; the atom must not be freed under the process.
+ */
+static void TestAtomLifetime(HWND Window)
+{
+    static const WCHAR Name[] = L"User32Win8Feedback";
+    ATOM External, Found;
+    BOOL Value = TRUE;
+
+    if (!is_reactos())
+    {
+        skip("The atom is an implementation detail of ReactOS\n");
+        return;
+    }
+    if (GlobalFindAtomW(Name))
+    {
+        skip("The atom exists already\n");
+        return;
+    }
+
+    External = GlobalAddAtomW(Name);
+    ok(External != 0, "GlobalAddAtom failed, error %lu\n", GetLastError());
+    if (!External)
+        return;
+
+    ok_succeed(pSetWindowFeedbackSetting(Window, 1, 0, sizeof(BOOL), &Value));
+    ok(GlobalDeleteAtom(External) == 0, "GlobalDeleteAtom failed, error %lu\n", GetLastError());
+
+    Found = GlobalFindAtomW(Name);
+    ok(Found == External, "The atom is 0x%x after the other user let go of it, expected 0x%x\n", Found, External);
+
+    pSetWindowFeedbackSetting(Window, 1, 0, 0, NULL);
+}
+
 START_TEST(Win8User)
 {
     HWND Window;
@@ -1105,6 +1140,7 @@ START_TEST(Win8User)
     Window = CreateTestWindow();
     ok(Window != NULL, "CreateWindow failed, error %lu\n", GetLastError());
 
+    TestAtomLifetime(Window);
     TestPointerQueries();
     TestPointerDevices();
     TestDeviceNotifications(Window);
