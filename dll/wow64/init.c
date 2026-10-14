@@ -218,13 +218,15 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
         Ordinals = (PVOID)((PUCHAR)Ntdll32 + Exports->AddressOfNameOrdinals);
         for (i = 0; i < Exports->NumberOfNames; ++i)
         {
+            if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserExceptionDispatcher") &&
+                Ordinals[i] < Exports->NumberOfFunctions)
+                Wow64ExceptionDispatcher = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
             if (!strcmp((PCHAR)Ntdll32 + Names[i], Name.Buffer) && Ordinals[i] < Exports->NumberOfFunctions)
             {
                 Entry = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
-                break;
             }
         }
-        if (!Entry) { Status = STATUS_ENTRYPOINT_NOT_FOUND; goto Failed; }
+        if (!Entry || !Wow64ExceptionDispatcher) { Status = STATUS_ENTRYPOINT_NOT_FOUND; goto Failed; }
     }
     Status = Wow64CpuInitialize(Wow64SystemService, &Gate);
     if (!NT_SUCCESS(Status)) goto Failed;
@@ -255,15 +257,4 @@ Failed:
     DbgPrint("WoW64: initialization failed: %08lx\n", Status);
     NtTerminateProcess(NtCurrentProcess(), Status);
     for (;;) NtTerminateThread(NtCurrentThread(), Status);
-}
-
-/* Phase 1 cannot dispatch a native exception frame through i386 SEH.
- * Fail with the original exception code; native thunk captures retain their
- * ordinary 64-bit exception handlers. */
-VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
-{
-    if (Context->SegCs != 0x23) return;
-    DbgPrint("WoW64: unhandled i386 exception %08lx at %p\n",
-             Record->ExceptionCode, Record->ExceptionAddress);
-    NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
 }

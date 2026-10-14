@@ -11,6 +11,7 @@ add_subdirectory(kernel32)
 add_subdirectory(ntos_cc)
 add_subdirectory(ntos_cm)
 add_subdirectory(ntos_io)
+add_subdirectory(ntos_ke/KeTrapFrame)
 add_subdirectory(ntos_mm)
 add_subdirectory(ntos_po)
 add_subdirectory(tcpip)
@@ -196,6 +197,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoReadWrite_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_ke/KeSystemCall32_user.c
+    ntos_ke/KeTrapFrame/KeTrapFrame_user.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/NtCreateSection_user.c
     ntos_po/PoIrp_user.c
@@ -203,6 +205,11 @@ list(APPEND KMTEST_SOURCE
     ${COMMON_SOURCE}
 
     kmtest/kmtest.rc)
+
+if(ARCH STREQUAL "i386")
+    add_asm_files(kmtest_trap_asm ntos_ke/KeTrapFrame/KeTrapFrame_i386.S)
+    list(APPEND KMTEST_SOURCE ${kmtest_trap_asm})
+endif()
 
 if(ARCH STREQUAL "amd64")
     add_asm_files(kmtest_cstar_asm ntos_ke/KeSystemCall32_amd64.S)
@@ -223,6 +230,7 @@ add_rostests_file(TARGET kmtest)
 add_custom_target(kmtest_drivers)
 add_dependencies(kmtest_drivers
     kmtest_drv
+    ketrapframe_drv
     example_drv
     hidp_drv
     iocreatefile_drv
