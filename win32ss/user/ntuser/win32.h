@@ -163,6 +163,10 @@ typedef struct _THREADINFO
 #if DBG
     USHORT acExclusiveLockCount[GDIObjTypeTotal + 1];
     UINT cRefObjectCo;
+    /* Region allocation failure injection, see REGION_iDbgArmAllocFailure */
+    BOOLEAN bDbgRgnFailArmed;
+    BOOLEAN bDbgRgnFailFired;
+    LONG lDbgRgnFailCountdown;
 #endif
 #endif // __cplusplus
 } THREADINFO;

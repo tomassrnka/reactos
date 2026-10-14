@@ -2075,7 +2075,8 @@ co_WinPosSetWindowPos(
           VisAfter != NULL &&
           !(WvrFlags & WVR_REDRAW) &&
           !(WinPos.flags & SWP_NOCOPYBITS) &&
-          !(Window->ExStyle & WS_EX_TRANSPARENT))
+          !(Window->ExStyle & WS_EX_TRANSPARENT) &&
+          (CopyRgn = IntSysCreateRectpRgn(0, 0, 0, 0)) != NULL)
       {
 
          /*
@@ -2087,7 +2088,6 @@ co_WinPosSetWindowPos(
           * region...)
           */
 
-         CopyRgn = IntSysCreateRectpRgn(0, 0, 0, 0);
          if ((WinPos.flags & SWP_NOSIZE) && (WinPos.flags & SWP_NOCLIENTSIZE))
             RgnType = IntGdiCombineRgn(CopyRgn, VisAfter, VisBefore, RGN_AND);
          else if (VisBeforeJustClient != NULL)
@@ -2124,8 +2124,10 @@ co_WinPosSetWindowPos(
                   (WinPos.flags & SWP_FRAMECHANGED) )
          {
              HRGN DcRgn = NtGdiCreateRectRgn(0, 0, 0, 0);
-             PREGION DcRgnObj = REGION_LockRgn(DcRgn);
+             PREGION DcRgnObj = DcRgn ? REGION_LockRgn(DcRgn) : NULL;
 
+             if (DcRgnObj)
+             {
           /*
            * Small trick here: there is no function to bitblt a region. So
            * we set the region as the clipping region, take the bounding box
@@ -2154,7 +2156,15 @@ co_WinPosSetWindowPos(
 
             UserReleaseDC(Window, Dc, FALSE);
             IntValidateParent(Window, CopyRgn);
-            GreDeleteObject(DcRgn);
+             }
+             else
+             {
+                /* Nothing was copied: the whole visible region is redrawn */
+                REGION_Delete(CopyRgn);
+                CopyRgn = NULL;
+             }
+             if (DcRgn)
+                GreDeleteObject(DcRgn);
          }
       }
       else
@@ -2228,12 +2238,20 @@ co_WinPosSetWindowPos(
                         else  // Use region handling
                         {
                             HRGN DcRgn = NtGdiCreateRectRgn(0, 0, 0, 0);
-                            PREGION DcRgnObj = REGION_LockRgn(DcRgn);
+                            PREGION DcRgnObj = DcRgn ? REGION_LockRgn(DcRgn) : NULL;
                             TRACE("SWP_FRAMECHANGED win %p hRgn %p\n",pwnd, DcRgn);
-                            IntGdiCombineRgn(DcRgnObj, VisBefore, NULL, RGN_COPY);
-                            REGION_UnlockRgn(DcRgnObj);
-                            ForceNCPaintErase(pwnd, DcRgn, DcRgnObj);
-                            GreDeleteObject(DcRgn);
+                            if (DcRgnObj)
+                            {
+                                IntGdiCombineRgn(DcRgnObj, VisBefore, NULL, RGN_COPY);
+                                REGION_UnlockRgn(DcRgnObj);
+                                ForceNCPaintErase(pwnd, DcRgn, DcRgnObj);
+                            }
+                            else
+                            {
+                                IntSendNCPaint(pwnd, HRGN_WINDOW);
+                            }
+                            if (DcRgn)
+                                GreDeleteObject(DcRgn);
                         }
                     }
                 }
@@ -2622,10 +2640,14 @@ void IntForceMinimizeWindow(PWND pWnd)
 
     // Invalidate and redraw the window region
     hRgn = GreCreateRectRgnIndirect(&pWnd->rcWindow);
-    pRgn = REGION_LockRgn(hRgn);
-    co_UserRedrawWindow(UserGetDesktopWindow(), NULL, pRgn, RDW_ALLCHILDREN | RDW_ERASE | RDW_INVALIDATE);
-    REGION_UnlockRgn(pRgn);
-    GreDeleteObject(hRgn);
+    pRgn = hRgn ? REGION_LockRgn(hRgn) : NULL;
+    if (pRgn)
+    {
+        co_UserRedrawWindow(UserGetDesktopWindow(), NULL, pRgn, RDW_ALLCHILDREN | RDW_ERASE | RDW_INVALIDATE);
+        REGION_UnlockRgn(pRgn);
+    }
+    if (hRgn)
+        GreDeleteObject(hRgn);
 
     // Activate the other window if necessary
     if (pWnd->spwndParent == pWnd->head.rpdesk->pDeskInfo->spwnd)

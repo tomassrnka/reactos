@@ -1623,6 +1623,8 @@ UserRedrawDesktop(VOID)
 
     Window = UserGetDesktopWindow();
     Rgn = IntSysCreateRectpRgnIndirect(&Window->rcWindow);
+    if (!Rgn)
+        return;
 
     IntInvalidateWindows(Window,
                          Rgn,

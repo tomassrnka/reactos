@@ -35,6 +35,11 @@ VIS_ComputeVisibleRegion(
       VisRgn = IntSysCreateRectpRgnIndirect(&Wnd->rcWindow);
    }
 
+   if (!VisRgn)
+   {
+      return NULL;
+   }
+
    /*
     * Walk through all parent windows and for each clip the visble region
     * to the parent's client area and exclude all siblings that are over
@@ -61,6 +66,11 @@ VIS_ComputeVisibleRegion(
       }
 
       ClipRgn = IntSysCreateRectpRgnIndirect(&CurrentWindow->rcClient);
+      if (!ClipRgn)
+      {
+         REGION_Delete(VisRgn);
+         return NULL;
+      }
       IntGdiCombineRgn(VisRgn, VisRgn, ClipRgn, RGN_AND);
       REGION_Delete(ClipRgn);
 
@@ -75,6 +85,11 @@ VIS_ComputeVisibleRegion(
                 !(CurrentSibling->ExStyle & WS_EX_TRANSPARENT))
             {
                ClipRgn = IntSysCreateRectpRgnIndirect(&CurrentSibling->rcWindow);
+               if (!ClipRgn)
+               {
+                  REGION_Delete(VisRgn);
+                  return NULL;
+               }
                /* Combine it with the window region if available */
                if (CurrentSibling->hrgnClip && !(CurrentSibling->style & WS_MINIMIZE))
                {
@@ -107,6 +122,11 @@ VIS_ComputeVisibleRegion(
              !(CurrentWindow->ExStyle & WS_EX_TRANSPARENT))
          {
             ClipRgn = IntSysCreateRectpRgnIndirect(&CurrentWindow->rcWindow);
+            if (!ClipRgn)
+            {
+               REGION_Delete(VisRgn);
+               return NULL;
+            }
             /* Combine it with the window region if available */
             if (CurrentWindow->hrgnClip && !(CurrentWindow->style & WS_MINIMIZE))
             {

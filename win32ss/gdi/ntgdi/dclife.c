@@ -250,7 +250,11 @@ DC_vInitDc(
 	pdc->dclevel.prgnMeta = NULL;
     /* Allocate a Vis region */
     pdc->prgnVis = IntSysCreateRectpRgn(0, 0, pdc->dclevel.sizl.cx, pdc->dclevel.sizl.cy);
-	ASSERT(pdc->prgnVis);
+    if (!pdc->prgnVis)
+    {
+        /* Out of memory: the DC draws nothing until a Vis region can be allocated */
+        pdc->prgnVis = prgnDefault;
+    }
 
     /* Setup Vis Region Attribute information */
     UpdateVisRgn(pdc);

@@ -65,6 +65,8 @@ extern void func_OffsetRgn(void);
 extern void func_PaintRgn(void);
 extern void func_PatBlt(void);
 extern void func_Rectangle(void);
+extern void func_RegionAllocFailClip(void);
+extern void func_RegionAllocFailVis(void);
 extern void func_RealizePalette(void);
 extern void func_SelectObject(void);
 extern void func_SetBoundsRect(void);
@@ -146,6 +148,8 @@ const struct test winetest_testlist[] =
     { "PaintRgn", func_PaintRgn },
     { "PatBlt", func_PatBlt },
     { "Rectangle", func_Rectangle },
+    { "RegionAllocFailClip", func_RegionAllocFailClip },
+    { "RegionAllocFailVis", func_RegionAllocFailVis },
     { "RealizePalette", func_RealizePalette },
     { "SelectObject", func_SelectObject },
     { "SetBoundsRect", func_SetBoundsRect },
