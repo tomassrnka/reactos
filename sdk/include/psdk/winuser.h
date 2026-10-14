@@ -5153,6 +5153,9 @@ BOOL WINAPI IsMenu(_In_ HMENU);
 BOOL WINAPI IsRectEmpty(_In_ LPCRECT);
 BOOL WINAPI IsWindow(_In_opt_ HWND);
 BOOL WINAPI IsWindowEnabled(_In_ HWND);
+#if (_WIN32_WINNT >= 0x0601)
+BOOL WINAPI IsWindowArranged(_In_ HWND);
+#endif
 BOOL WINAPI IsWindowUnicode(_In_ HWND);
 BOOL WINAPI IsWindowVisible(_In_ HWND);
 #if (_WIN32_WINNT >= 0x0501)
@@ -5479,6 +5482,9 @@ BOOL WINAPI SetSystemCursor(_In_ HCURSOR, _In_ DWORD);
 BOOL WINAPI SetSystemMenu(HWND,HMENU);
 BOOL WINAPI SetThreadDesktop(_In_ HDESK);
 UINT_PTR WINAPI SetTimer(_In_opt_ HWND, _In_ UINT_PTR, _In_ UINT, _In_opt_ TIMERPROC);
+#if (_WIN32_WINNT >= 0x0601)
+UINT_PTR WINAPI SetCoalescableTimer(_In_opt_ HWND, _In_ UINT_PTR, _In_ UINT, _In_opt_ TIMERPROC, _In_ ULONG);
+#endif
 UINT_PTR WINAPI SetSystemTimer(HWND,UINT_PTR,UINT,TIMERPROC);
 
 BOOL

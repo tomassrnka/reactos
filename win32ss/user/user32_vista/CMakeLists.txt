@@ -9,7 +9,9 @@ list(APPEND VISTA_SOURCE
      wine/input.c
      wine/misc.c
      wine/sysparams.c
-     wine/win.c)
+     wine/win.c
+     autorotation.c
+     suspendresume.c)
      
 
 list(APPEND SOURCE

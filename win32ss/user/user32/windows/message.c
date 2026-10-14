@@ -3437,3 +3437,37 @@ BroadcastSystemMessageExW(
   return IntBroadcastSystemMessage( dwflags, lpdwRecipients, uiMessage, wParam, lParam , pBSMInfo, FALSE );
 }
 
+
+#define TIMERV_NO_COALESCING     0xFFFFFFFF
+#define TIMERV_MAX_COALESCING    0x7FFFFFF5
+
+/*
+ * @implemented
+ *
+ * The tolerance is a hint that lets the system group timers; the timer itself is the one of SetTimer. A tolerance
+ * has to be no coalescing or at most the maximum (measured on Windows 10).
+ */
+UINT_PTR
+WINAPI
+SetCoalescableTimer(
+    HWND hWnd,
+    UINT_PTR nIDEvent,
+    UINT uElapse,
+    TIMERPROC lpTimerFunc,
+    ULONG uToleranceDelay)
+{
+    if (uToleranceDelay > TIMERV_MAX_COALESCING && uToleranceDelay != TIMERV_NO_COALESCING)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    /* SetTimer of this system makes a timer without a window for a handle that is none; Windows refuses it */
+    if (hWnd && !IsWindow(hWnd))
+    {
+        SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        return 0;
+    }
+
+    return SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc);
+}
