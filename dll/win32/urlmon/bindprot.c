@@ -64,8 +64,16 @@ static LRESULT WINAPI notif_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     switch(msg) {
     case WM_MK_CONTINUE: {
         BindProtocol *This = (BindProtocol*)lParam;
+        BOOL busy;
 
-        process_tasks(This);
+        EnterCriticalSection(&This->section);
+        This->continue_posted = FALSE;
+        busy = This->continue_call != 0;
+        LeaveCriticalSection(&This->section);
+
+        /* Whoever holds continue_call drains the queue or posts again when its call ends. */
+        if(!busy)
+            process_tasks(This);
 
         IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
         return 0;
@@ -152,9 +160,41 @@ void release_notif_hwnd(HWND hwnd)
     }
 }
 
+static inline BOOL is_apartment_thread(BindProtocol *This)
+{
+    return This->apartment_thread == GetCurrentThreadId();
+}
+
+/* Posts the message that runs the queued tasks, unless there are none, a call of the client is active or a message is
+   already on its way. */
+static void post_continue(BindProtocol *This)
+{
+    BOOL do_post;
+
+    EnterCriticalSection(&This->section);
+    do_post = This->task_queue_head && !This->continue_call && !This->continue_posted;
+    if(do_post)
+        This->continue_posted = TRUE;
+    LeaveCriticalSection(&This->section);
+
+    if(!do_post)
+        return;
+
+    IInternetProtocolEx_AddRef(&This->IInternetProtocolEx_iface);
+    if(!PostMessageW(This->notif_hwnd, WM_MK_CONTINUE, 0, (LPARAM)This)) {
+        EnterCriticalSection(&This->section);
+        This->continue_posted = FALSE;
+        LeaveCriticalSection(&This->section);
+        IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
+    }
+}
+
 static void push_task(BindProtocol *This, task_header_t *task, task_proc_t proc)
 {
-    BOOL do_post = FALSE;
+    BOOL apartment = is_apartment_thread(This);
+
+    /* The apartment thread may run the task and end the protocol before this call is over. */
+    IInternetProtocolEx_AddRef(&This->IInternetProtocolEx_iface);
 
     task->proc = proc;
     task->next = NULL;
@@ -166,20 +206,16 @@ static void push_task(BindProtocol *This, task_header_t *task, task_proc_t proc)
         This->task_queue_tail = task;
     }else {
         This->task_queue_tail = This->task_queue_head = task;
-        do_post = !This->continue_call;
     }
 
     LeaveCriticalSection(&This->section);
 
-    if(do_post) {
-        IInternetProtocolEx_AddRef(&This->IInternetProtocolEx_iface);
-        PostMessageW(This->notif_hwnd, WM_MK_CONTINUE, 0, (LPARAM)This);
-    }
-}
+    post_continue(This);
 
-static inline BOOL is_apartment_thread(BindProtocol *This)
-{
-    return This->apartment_thread == GetCurrentThreadId();
+    /* The protocol is ended on the apartment thread (it owns the notification window): another thread hands its
+       reference to the message that the apartment thread releases. */
+    if(apartment || !PostMessageW(This->notif_hwnd, WM_MK_CONTINUE, 0, (LPARAM)This))
+        IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
 }
 
 static inline BOOL do_direct_notif(BindProtocol *This)
@@ -425,12 +461,24 @@ static HRESULT WINAPI BindProtocol_Read(IInternetProtocolEx *iface, void *pv,
         ULONG cb, ULONG *pcbRead)
 {
     BindProtocol *This = impl_from_IInternetProtocolEx(iface);
+    BOOL apartment = is_apartment_thread(This);
+    HRESULT hres;
 
     TRACE("(%p)->(%p %lu %p)\n", This, pv, cb, pcbRead);
 
     if(pcbRead)
         *pcbRead = 0;
-    return IInternetProtocol_Read(This->protocol_handler, pv, cb, pcbRead);
+
+    /* No notification is delivered while the client is inside Read, also not when a MIME filter runs messages. */
+    if(apartment)
+        This->continue_call++;
+    hres = IInternetProtocol_Read(This->protocol_handler, pv, cb, pcbRead);
+    if(apartment) {
+        This->continue_call--;
+        /* the protocol may have reported while we were inside Read, and the client is not in a callback */
+        post_continue(This);
+    }
+    return hres;
 }
 
 static HRESULT WINAPI BindProtocol_Seek(IInternetProtocolEx *iface, LARGE_INTEGER dlibMove,
@@ -780,8 +828,11 @@ static HRESULT WINAPI ProtocolHandler_Read(IInternetProtocol *iface, void *pv,
         if(is_apartment_thread(This))
             This->continue_call++;
         hres = IInternetProtocol_Read(protocol, (BYTE*)pv+read, cb-read, &cread);
-        if(is_apartment_thread(This))
+        if(is_apartment_thread(This)) {
             This->continue_call--;
+            /* a filter reads here directly, outside of BindProtocol_Read, and nobody else posts for it */
+            post_continue(This);
+        }
         read += cread;
 
         if(!This->protocol)
