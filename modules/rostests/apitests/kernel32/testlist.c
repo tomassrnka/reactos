@@ -26,6 +26,7 @@ extern void func_EnumSystemCodePages(void);
 extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
+extern void func_FindStringOrdinal(void);
 extern void func_FLS(void);
 extern void func_ForcedRelocation(void);
 extern void func_FormatMessage(void);
@@ -117,6 +118,7 @@ const struct test winetest_testlist[] =
     { "ExitThread",                  func_ExitThread },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
+    { "FindStringOrdinal",           func_FindStringOrdinal },
     { "FLS",                         func_FLS },
     { "ForcedRelocation",            func_ForcedRelocation },
     { "FormatMessage",               func_FormatMessage },
