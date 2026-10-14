@@ -33,6 +33,7 @@ struct kshim_jnl {
 	int errors_durable;		/* a header with the errors mark has reached the medium */
 	int errors_writing;
 	int strict;			/* a resize runs: nothing goes in place; a fallback fails instead */
+	int apply_fault, capture_fault;	/* test only (kshim_jnl_arm_fault) */
 	u64 vol_rec_off;		/* device offset of $MFT record 3 ($Volume) */
 	u16 vol_usn;			/* its update sequence number on disk (after the last in-place pass) */
 	u8 *hdrpage;
@@ -41,7 +42,6 @@ struct kshim_jnl {
 
 static u32 kj_crc_table[256];
 unsigned long kshim_jnl_fault;
-unsigned long kshim_jnl_apply_fault;
 
 u32 kj_crc32(u32 crc, const void *p, size_t n)
 {
@@ -151,10 +151,28 @@ int kshim_jnl_in_place(struct block_device *b)
 	return !j || j->degraded || j->failed;
 }
 
+void kshim_jnl_arm_fault(struct block_device *b, int kind)
+{
+	if (!b->jnl)
+		return;
+	if (kind == KJ_FAULT_APPLY)
+		b->jnl->apply_fault = 1;
+	else if (kind == KJ_FAULT_CAPTURE)
+		b->jnl->capture_fault = 1;
+}
+
+int kshim_jnl_degraded(struct block_device *b)
+{
+	return b->jnl && b->jnl->degraded;
+}
+
 void kshim_jnl_strict(struct block_device *b, int on)
 {
-	if (b->jnl)
+	if (b->jnl) {
 		b->jnl->strict = on;
+		if (!on)
+			b->jnl->capture_fault = 0;
+	}
 }
 
 /* A clean volume whose header is still on the medium: the flusher retires it (an earlier retire failed). */
@@ -320,6 +338,11 @@ unsigned long kshim_jnl_pending(struct block_device *b)
 int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len)
 {
 	struct kshim_jnl *j = b->jnl;
+	if (j->capture_fault && j->strict) {
+		if (j->capture_fault++ == 1)
+			printk(KERN_ERR "journal: no memory for overlay pages until the resize ends (injected)\n");
+		return -ENOMEM;
+	}
 	if (j->degraded)
 		return -ENOMEM;
 	if (kj_in_area(j, off, len)) {
@@ -618,8 +641,8 @@ int kshim_jnl_commit(struct block_device *b)
 		       j->commits + 1, (unsigned long long)j->seq, n / 2, n);
 		ngos_bugcheck("journal fault injection", __FILE__, __LINE__);
 	}
-	if (kshim_jnl_apply_fault && n >= 2) {
-		kshim_jnl_apply_fault = 0;
+	if (j->apply_fault && n >= 2) {
+		j->apply_fault = 0;
 		kj_apply(b, v, n / 2);
 		kj_dev_flush(b);
 		printk(KERN_ERR "journal: in-place write failure injected in seq %llu: %lu of %lu pages in place\n",

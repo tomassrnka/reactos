@@ -82,8 +82,12 @@ unsigned long kshim_jnl_pending(struct block_device *b);
 void kshim_jnl_report(struct block_device *b);
 /* Test only: nonzero stops the machine half way through writing that commit in place. */
 extern unsigned long kshim_jnl_fault;
-/* Test only: nonzero makes the in-place pass of the next commit fail half way, as a failing device would. */
-extern unsigned long kshim_jnl_apply_fault;
+/* Test only, for this volume: the in-place pass of its next commit fails half way, as a failing device
+ * would (KJ_FAULT_APPLY), or no overlay page can be allocated until the resize ends (KJ_FAULT_CAPTURE). */
+enum { KJ_FAULT_APPLY = 1, KJ_FAULT_CAPTURE = 2 };
+void kshim_jnl_arm_fault(struct block_device *b, int kind);
+/* The overlay failed and metadata goes in place until a commit's in-place pass succeeds. */
+int kshim_jnl_degraded(struct block_device *b);
 
 /* Used by kshim_dev_rw. */
 int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len);

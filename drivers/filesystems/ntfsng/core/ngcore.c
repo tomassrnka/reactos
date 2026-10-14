@@ -2329,8 +2329,12 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		err = ngc_before_alloc(v);
 	if (err)
 		goto out;
+	if (ngc_resize_fault == 5)
+		kshim_jnl_degrade(v->bdev);
 	/* From here every metadata write goes through the journal or fails: none goes in place. */
 	kshim_jnl_strict(v->bdev, 1);
+	if (ngc_resize_fault == 6)
+		kshim_jnl_arm_fault(v->bdev, KJ_FAULT_CAPTURE);
 
 	/* The partition grew under the mount: device I/O may reach its new end. */
 	v->bdev->size = dev_size;
@@ -2378,7 +2382,7 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		goto failed;
 	}
 	if (ngc_resize_fault == 4)
-		kshim_jnl_apply_fault = 1;
+		kshim_jnl_arm_fault(v->bdev, KJ_FAULT_APPLY);
 	/*
 	 * $Bitmap first, the boot sector after it: an interruption between the two commits leaves
 	 * the old size with a $Bitmap larger than it needs, which every reader mounts (a checker
@@ -2390,6 +2394,8 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		err = -EIO;
 	if (!err)
 		err = ngc_write_boot(v, sectors, boot);
+	if (!err && ngc_resize_fault == 7)
+		kshim_jnl_arm_fault(v->bdev, KJ_FAULT_APPLY);
 	if (!err)
 		err = ngc_commit(v);
 	if (!err)
