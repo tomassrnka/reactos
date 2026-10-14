@@ -21,6 +21,7 @@ list(APPEND SOURCE
     DynamicTls.c
     DynamicTimeZone.c
     EnumSystemCodePages.c
+    EnumUILanguages.c
     ExitThread.c
     FindActCtxSectionStringW.c
     FindFiles.c
