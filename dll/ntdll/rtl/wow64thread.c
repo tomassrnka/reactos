@@ -109,7 +109,8 @@ NtCreateThreadEx(PHANDLE ThreadHandle, ACCESS_MASK Access, POBJECT_ATTRIBUTES Ob
             NtWaitForSingleObject(Thread, FALSE, NULL);
             NtClose(Thread);
         }
-        if (Stack.AllocatedStackBase) RtlpFreeUserStack(Process, &Stack);
+        /* Once created, thread rundown owns both stacks. */
+        else if (Stack.AllocatedStackBase) RtlpFreeUserStack(Process, &Stack);
     }
     else NtClose(Thread);
     return Status;

@@ -56,6 +56,7 @@ typedef struct
 NTSTATUS Wow64CreateEnvironment(PVOID *Environment);
 
 VOID Wow64InitializeTeb(TEB32 *, const TEB *, PTEB, const INITIAL_TEB *);
+VOID Wow64AbortThread(HANDLE, HANDLE, NTSTATUS);
 NTSTATUS Wow64CreateThread(HANDLE *, ACCESS_MASK, OBJECT_ATTRIBUTES *, HANDLE,
                            CLIENT_ID *, const WOW64_CONTEXT *, const ULONG *, BOOLEAN);
 NTSTATUS Wow64QueryThread(HANDLE, ULONG, PVOID, ULONG, PULONG);

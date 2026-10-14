@@ -373,8 +373,13 @@ Quit:
             RtlFreeActivationContextStack(ActivationContextStack);
 
         NtTerminateThread(hThread, Status);
+#ifdef SYSWOW64_GUEST
+        /* Guest thread rundown releases both stacks after successful create. */
+        NtWaitForSingleObject(hThread, FALSE, NULL);
+#else
         // FIXME: Wait for the thread to terminate?
         BaseFreeThreadStack(hProcess, &InitialTeb);
+#endif
         NtClose(hThread);
 
         BaseSetLastNTError(Status);

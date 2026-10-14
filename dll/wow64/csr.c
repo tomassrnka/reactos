@@ -199,6 +199,15 @@ static NTSTATUS Call(ULONG *a)
         return CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api,
                                   sizeof(BASE_CREATE_THREAD));
     }
+    case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepGetTempFile):
+    {
+        BASE_API_MESSAGE BaseMessage = {0};
+        if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api,
+                                     sizeof(BASE_GET_TEMP_FILE));
+        Data[0] = BaseMessage.Data.GetTempFileRequest.UniqueID;
+        return Status;
+    }
     case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepExitProcess):
     {
         BASE_API_MESSAGE BaseMessage = {0};

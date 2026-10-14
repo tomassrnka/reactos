@@ -76,6 +76,7 @@ typedef struct
     BOOLEAN Mapped;
     PVOID Buffer;
     HANDLE Thread;
+    HANDLE ThreadProcess;
 } WOW64_CLEANUP;
 
 static VOID ProbeOutput(ULONG Address, ULONG Size)
@@ -131,6 +132,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(0);
         if (a[4]) ProbeOutput(a[4], 2 * sizeof(ULONG));
         ATTR(2);
+        Cleanup->ThreadProcess = H(3);
         Status = Wow64CreateThread(&Cleanup->Thread, THREAD_ALL_ACCESS, OA(2), H(3), &Id, P(5), P(6), TRUE);
         if (NT_SUCCESS(Status))
             Status = NtDuplicateObject(NtCurrentProcess(), Cleanup->Thread, NtCurrentProcess(),
@@ -391,6 +393,29 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                           P(3), a[4], a[5], P(6));
     case W64_NtCancelTimer: return NtCancelTimer(H(0), P(1));
     case W64_NtQueryTimer: return NtQueryTimer(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtCreateIoCompletion:
+        PROBE(0);
+        ATTR(2); Status = NtCreateIoCompletion(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
+    case W64_NtOpenIoCompletion:
+        PROBE(0);
+        ATTR(2); Status = NtOpenIoCompletion(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtQueryIoCompletion:
+        return NtQueryIoCompletion(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtSetIoCompletion:
+        return NtSetIoCompletion(H(0), P(1), P(2), a[3], a[4]);
+    case W64_NtRemoveIoCompletion:
+    {
+        PVOID Key, Context;
+        PROBE(1); PROBE(2); ProbeOutput(a[3], sizeof(WOW64_IOSB));
+        Status = NtRemoveIoCompletion(H(0), &Key, &Context, &Io, P(4));
+        if (Status == STATUS_SUCCESS)
+        {
+            U(1) = PtrToUlong(Key);
+            U(2) = PtrToUlong(Context);
+            StoreIo(a[3], &Io);
+        }
+        return Status;
+    }
     case W64_NtCreateKeyedEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateKeyedEvent(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
@@ -419,6 +444,17 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtSetInformationFile:
         switch (a[4])
         {
+        case FileCompletionInformation:
+        {
+            FILE_COMPLETION_INFORMATION Completion;
+            if (a[3] != 2 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            ProbeOutput(a[1], sizeof(WOW64_IOSB));
+            Completion.Port = HANDLE32(((ULONG *)P(2))[0]);
+            Completion.Key = PTR32(((ULONG *)P(2))[1]);
+            Status = NtSetInformationFile(H(0), &Io, &Completion, sizeof(Completion), a[4]);
+            StoreIo(a[1], &Io);
+            return Status;
+        }
         case FileBasicInformation: case FileDispositionInformation:
         case FilePositionInformation: case FileEndOfFileInformation:
         case FileAllocationInformation:
@@ -607,6 +643,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtSetInformationThread(H(0), a[1], &Index, sizeof(Index));
         }
         case ThreadQuerySetWin32StartAddress: case ThreadAffinityMask:
+        case ThreadIdealProcessor: case ThreadPriorityBoost:
         {
             ULONG_PTR Value;
             if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
@@ -614,7 +651,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtSetInformationThread(H(0), a[1], &Value, sizeof(Value));
         }
         case ThreadHideFromDebugger: case ThreadPriority: case ThreadBasePriority:
-        case ThreadIdealProcessor: case ThreadPriorityBoost: case ThreadBreakOnTermination:
+        case ThreadBreakOnTermination:
             return NtSetInformationThread(H(0), a[1], P(2), a[3]);
         default: return STATUS_NOT_SUPPORTED;
         }
@@ -671,11 +708,7 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
     }
     _SEH2_END;
     if (Cleanup.Thread)
-    {
-        NtTerminateThread(Cleanup.Thread, Status);
-        NtWaitForSingleObject(Cleanup.Thread, FALSE, NULL);
-        NtClose(Cleanup.Thread);
-    }
+        Wow64AbortThread(Cleanup.Thread, Cleanup.ThreadProcess, Status);
     if (Cleanup.Handle)
     {
         if (Cleanup.HandleProcess)

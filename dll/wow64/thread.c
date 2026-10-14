@@ -1,6 +1,22 @@
 /* ReactOS WoW64 thread translation. SPDX-License-Identifier: GPL-2.0-or-later */
 #include "wow64p.h"
 
+VOID Wow64AbortThread(HANDLE Thread, HANDLE Process, NTSTATUS Status)
+{
+    THREAD_BASIC_INFORMATION Info;
+    ULONG Zero = 0;
+    /* A failed NtCreateThread leaves the guest stack owned by its caller.
+     * The thread has not resumed, so remove its rundown ownership before
+     * terminating it. Kernel rundown still releases the native stack. */
+    if (NT_SUCCESS(NtQueryInformationThread(Thread, ThreadBasicInformation,
+                                            &Info, sizeof(Info), NULL)))
+        NtWriteVirtualMemory(Process, &WOW64_TEB32(Info.TebBaseAddress)->DeallocationStack,
+                             &Zero, sizeof(Zero), NULL);
+    NtTerminateThread(Thread, Status);
+    NtWaitForSingleObject(Thread, FALSE, NULL);
+    NtClose(Thread);
+}
+
 NTSTATUS Wow64CreateThread(HANDLE *Handle, ACCESS_MASK Access,
                            OBJECT_ATTRIBUTES *Attributes, HANDLE Process,
                            CLIENT_ID *Id, const WOW64_CONTEXT *Context,
@@ -74,12 +90,9 @@ NTSTATUS Wow64CreateThread(HANDLE *Handle, ACCESS_MASK Access,
     if (!NT_SUCCESS(Status))
     {
         if (Thread)
-        {
-            NtTerminateThread(Thread, Status);
-            NtWaitForSingleObject(Thread, FALSE, NULL);
-            NtClose(Thread);
-        }
-        NtFreeVirtualMemory(Process, &Stack.AllocatedStackBase, &Zero, MEM_RELEASE);
+            Wow64AbortThread(Thread, Process, Status);
+        else
+            NtFreeVirtualMemory(Process, &Stack.AllocatedStackBase, &Zero, MEM_RELEASE);
         return Status;
     }
     *Handle = Thread;
