@@ -24,6 +24,7 @@ list(APPEND SOURCE
     ../crt/system.c
     ../crt/tan.c
     ../crt/wctomb.c
+    math_errno.c
     c99_math.c
     testlist.c
 )
