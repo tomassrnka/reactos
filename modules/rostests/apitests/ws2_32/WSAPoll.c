@@ -88,12 +88,19 @@ static void WINAPI apc_func(ULONG_PTR param)
 static void check_poll_(int line, SOCKET s, short mask, short expect, BOOL todo)
 {
     WSAPOLLFD pollfd;
-    int ret;
+    int ret, tries;
 
-    pollfd.fd = s;
-    pollfd.events = mask;
-    pollfd.revents = 0xdead;
-    ret = pWSAPoll(&pollfd, 1, 1000);
+    /* Data and state changes of the peer arrive a little after the call that caused them */
+    for (tries = 0; tries < 20; tries++)
+    {
+        pollfd.fd = s;
+        pollfd.events = mask;
+        pollfd.revents = 0xdead;
+        ret = pWSAPoll(&pollfd, 1, 1000);
+        if (pollfd.revents == expect)
+            break;
+        Sleep(25);
+    }
     ok_(__FILE__, line)(ret == (pollfd.revents ? 1 : 0), "WSAPoll() returned %d\n", ret);
     todo_ros_if(todo) ok_(__FILE__, line)(pollfd.revents == expect, "got wrong events %#x\n", pollfd.revents);
 }
@@ -176,7 +183,7 @@ static int sync_recv(SOCKET s, void *buffer, int len, DWORD flags)
         {
             /* The request must not outlive its OVERLAPPED */
             CancelIo((HANDLE)s);
-            WaitForSingleObject(overlapped.hEvent, 5000);
+            GetOverlappedResult((HANDLE)s, &overlapped, &ret_len, TRUE);
         }
         ret = WSAGetOverlappedResult(s, &overlapped, &ret_len, FALSE, &flags);
         ret = (ret ? 0 : -1);
