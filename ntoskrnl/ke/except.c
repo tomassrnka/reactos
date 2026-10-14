@@ -170,17 +170,25 @@ KiRaiseException(
 
 NTSTATUS
 NTAPI
+#ifdef _M_AMD64
+KiRaiseExceptionService(
+#else
 NtRaiseException(
+#endif
     _In_ PEXCEPTION_RECORD ExceptionRecord,
     _In_ PCONTEXT Context,
-    _In_ BOOLEAN FirstChance)
+    _In_ BOOLEAN FirstChance
+#ifdef _M_AMD64
+    , _Inout_ PKEXCEPTION_FRAME ExceptionFrame
+#endif
+    )
 {
     NTSTATUS Status;
     PKTHREAD Thread;
     PKTRAP_FRAME TrapFrame;
 #ifdef _M_IX86
     PKEXCEPTION_FRAME ExceptionFrame = NULL;
-#else
+#elif !defined(_M_AMD64)
     KEXCEPTION_FRAME LocalExceptionFrame;
     PKEXCEPTION_FRAME ExceptionFrame = &LocalExceptionFrame;
 #endif
@@ -188,7 +196,6 @@ NtRaiseException(
     /* Get trap frame and link previous one */
     Thread = KeGetCurrentThread();
     TrapFrame = Thread->TrapFrame;
-    Thread->TrapFrame = KiGetLinkedTrapFrame(TrapFrame);
 
     /* Set exception list */
 #ifdef _M_IX86
@@ -208,22 +215,32 @@ NtRaiseException(
         return Status;
     }
 
+    Thread->TrapFrame = KiGetLinkedTrapFrame(TrapFrame);
+
     /* It was handled, so exit restoring all state */
     KiExceptionExit(TrapFrame, ExceptionFrame);
 }
 
 NTSTATUS
 NTAPI
+#ifdef _M_AMD64
+KiContinueService(
+#else
 NtContinue(
+#endif
     _In_ PCONTEXT Context,
-    _In_ BOOLEAN TestAlert)
+    _In_ BOOLEAN TestAlert
+#ifdef _M_AMD64
+    , _Inout_ PKEXCEPTION_FRAME ExceptionFrame
+#endif
+    )
 {
     PKTHREAD Thread;
     NTSTATUS Status;
     PKTRAP_FRAME TrapFrame;
 #ifdef _M_IX86
     PKEXCEPTION_FRAME ExceptionFrame = NULL;
-#else
+#elif !defined(_M_AMD64)
     KEXCEPTION_FRAME LocalExceptionFrame;
     PKEXCEPTION_FRAME ExceptionFrame = &LocalExceptionFrame;
 #endif
@@ -231,7 +248,6 @@ NtContinue(
     /* Get trap frame and link previous one*/
     Thread = KeGetCurrentThread();
     TrapFrame = Thread->TrapFrame;
-    Thread->TrapFrame = KiGetLinkedTrapFrame(TrapFrame);
 
     /* Continue from this point on */
     Status = KiContinue(Context, ExceptionFrame, TrapFrame);
@@ -240,6 +256,8 @@ NtContinue(
         DPRINT1("KiContinue failed. Status = 0x%lx\n", Status);
         return Status;
     }
+
+    Thread->TrapFrame = KiGetLinkedTrapFrame(TrapFrame);
 
     /* Check if alert was requested */
     if (TestAlert)

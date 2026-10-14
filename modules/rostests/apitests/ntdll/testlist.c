@@ -46,6 +46,7 @@ extern void func_NtApphelpCacheControl(void);
 extern void func_NtCompareTokens(void);
 extern void func_NtConnectPortTerminate(void);
 extern void func_NtContinue(void);
+extern void func_Wow64Continue(void);
 extern void func_NtCreateDirectoryObject(void);
 extern void func_NtCreateFile(void);
 extern void func_NtCreateKey(void);
@@ -204,6 +205,7 @@ const struct test winetest_testlist[] =
     { "NtCompareTokens",                func_NtCompareTokens },
     { "NtConnectPortTerminate",         func_NtConnectPortTerminate },
     { "NtContinue",                     func_NtContinue },
+    { "Wow64Continue",                  func_Wow64Continue },
     { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },
     { "NtCreateFile",                   func_NtCreateFile },
     { "NtCreateKey",                    func_NtCreateKey },

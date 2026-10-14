@@ -957,6 +957,38 @@ PUBLIC KiSystemCallEntry64
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_EFlags], r11
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rbp], rbp
 
+    /* NtContinue/NtRaiseException can return through KiExceptionExit with a
+     * partial context. Every trap slot that path restores or reports must
+     * describe user state, including groups omitted from the supplied context. */
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_R10], r10
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_R11], r11
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm0], xmm0
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm1], xmm1
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm2], xmm2
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm3], xmm3
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm4], xmm4
+    movaps [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Xmm5], xmm5
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegDs], ds
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegEs], es
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegFs], fs
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegGs], gs
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegCs], (KGDT64_R3_CODE or RPL_MASK)
+    mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegSs], (KGDT64_R3_DATA or RPL_MASK)
+    mov rax, dr0
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr0], rax
+    mov rax, dr1
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr1], rax
+    mov rax, dr2
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr2], rax
+    mov rax, dr3
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr3], rax
+    mov rax, dr6
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr6], rax
+    mov rax, dr7
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr7], rax
+
+    mov byte ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_PreviousIrql], PASSIVE_LEVEL
+
     /* Store user stack pointer in the trap frame */
     mov rax, gs:[PcUserRsp]
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rsp], rax
@@ -1271,6 +1303,29 @@ KiConvertToGuiThreadFailed:
     ret
 
 ENDFUNC
+
+/* Capture the service caller's nonvolatile state before any C prologue.
+ * KeContextToTrapFrame replaces only the context groups explicitly supplied.
+ * On a probing failure, the normal ABI return preserves the same registers. */
+EXTERN KiContinueService:PROC
+PUBLIC NtContinue
+.PROC NtContinue
+    GENERATE_EXCEPTION_FRAME
+    mov r8, rsp
+    call KiContinueService
+    RESTORE_EXCEPTION_STATE
+    ret
+.ENDP
+
+EXTERN KiRaiseExceptionService:PROC
+PUBLIC NtRaiseException
+.PROC NtRaiseException
+    GENERATE_EXCEPTION_FRAME
+    mov r9, rsp
+    call KiRaiseExceptionService
+    RESTORE_EXCEPTION_STATE
+    ret
+.ENDP
 
 EXTERN KiGetTrapContextInternal:PROC
 
