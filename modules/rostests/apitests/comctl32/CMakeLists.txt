@@ -5,6 +5,7 @@ list(APPEND SOURCE
     imagelist.c
     listview.c
     propsheet.c
+    propsheet_title.c
     testlist.c
     toolbar.c
     tooltip.c)

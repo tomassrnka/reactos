@@ -5,6 +5,7 @@ extern void func_buttonv6(void);
 extern void func_ImageListApi(void);
 extern void func_listviewv6(void);
 extern void func_propsheetv6(void);
+extern void func_propsheet_title(void);
 extern void func_toolbarv6(void);
 extern void func_tooltipv6(void);
 
@@ -14,6 +15,7 @@ const struct test winetest_testlist[] =
     { "ImageListApi", func_ImageListApi },
     { "listviewv6", func_listviewv6 },
     { "propsheetv6", func_propsheetv6 },
+    { "propsheet_title", func_propsheet_title },
     { "toolbarv6", func_toolbarv6 },
     { "tooltipv6", func_tooltipv6 },
     { 0, 0 }
