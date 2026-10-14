@@ -1114,10 +1114,11 @@ RawDispatch(IN PDEVICE_OBJECT DeviceObject,
             Status = RawFileSystemControl(Vcb, Irp, IoStackLocation);
             break;
 
-        /* R/W or IOCTL request */
+        /* R/W, IOCTL or flush request: the device handles it */
         case IRP_MJ_READ:
         case IRP_MJ_WRITE:
         case IRP_MJ_DEVICE_CONTROL:
+        case IRP_MJ_FLUSH_BUFFERS:
 
             Status = RawReadWriteDeviceControl(Vcb, Irp, IoStackLocation);
             break;
@@ -1258,6 +1259,7 @@ RawFsDriverEntry(IN PDRIVER_OBJECT DriverObject,
     DriverObject->MajorFunction[IRP_MJ_SET_INFORMATION] =
     DriverObject->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] =
     DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] =
+    DriverObject->MajorFunction[IRP_MJ_FLUSH_BUFFERS] =
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = RawDispatch;
 
     /* Shutdown and unload */

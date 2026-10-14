@@ -106,8 +106,8 @@ static void ExtendFree(void *Ctx, void *Pointer)
 /*
  * Flushes the write cache of the disk under the volume Volume (dismounted by
  * now, so the file system no longer passes a flush on): what fatgrow wrote is
- * on the medium before the volume is given back.  A disk without a write
- * cache to flush (STATUS_INVALID_DEVICE_REQUEST) counts as flushed.
+ * on the medium before the volume is given back.  The whole-disk handle goes
+ * through RawFS, which passes the flush to the disk.
  */
 static
 NTSTATUS
@@ -136,7 +136,7 @@ FlushDisk(
         return Status;
     Status = NtFlushBuffersFile(Disk, &Iosb);
     NtClose(Disk);
-    return (Status == STATUS_INVALID_DEVICE_REQUEST) ? STATUS_SUCCESS : Status;
+    return Status;
 }
 
 /*
