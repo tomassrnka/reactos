@@ -66,6 +66,7 @@ extern void func_NtMutant(void);
 extern void func_NtNotifyChangeDirectoryFile(void);
 extern void func_NtNotifyChangeMultipleKeys(void);
 extern void func_NtOpenKey(void);
+extern void func_NtOpenProcess(void);
 extern void func_NtOpenProcessToken(void);
 extern void func_NtOpenThreadToken(void);
 extern void func_NtProtectVirtualMemory(void);
@@ -232,6 +233,7 @@ const struct test winetest_testlist[] =
     { "NtNotifyChangeDirectoryFile",    func_NtNotifyChangeDirectoryFile },
     { "NtNotifyChangeMultipleKeys",     func_NtNotifyChangeMultipleKeys },
     { "NtOpenKey",                      func_NtOpenKey },
+    { "NtOpenProcess",                  func_NtOpenProcess },
     { "NtOpenProcessToken",             func_NtOpenProcessToken },
     { "NtOpenThreadToken",              func_NtOpenThreadToken },
     { "NtProtectVirtualMemory",         func_NtProtectVirtualMemory },

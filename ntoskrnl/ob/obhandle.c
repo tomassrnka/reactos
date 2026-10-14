@@ -21,6 +21,19 @@ PHANDLE_TABLE ObpKernelHandleTable = NULL;
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
+/* Since Vista a process handle with the full query right also has the limited one */
+static
+ACCESS_MASK
+ObpAddImpliedAccess(
+    _In_ POBJECT_TYPE ObjectType,
+    _In_ ACCESS_MASK GrantedAccess)
+{
+    if ((ObjectType == PsProcessType) && (GrantedAccess & PROCESS_QUERY_INFORMATION))
+        GrantedAccess |= PROCESS_QUERY_LIMITED_INFORMATION;
+
+    return GrantedAccess;
+}
+
 PHANDLE_TABLE
 NTAPI
 ObReferenceProcessHandleTable(IN PEPROCESS Process)
@@ -1403,6 +1416,7 @@ ObpCreateUnnamedHandle(IN PVOID Object,
     /* Remove what's not in the valid access mask */
     GrantedAccess = DesiredAccess & (ObjectType->TypeInfo.ValidAccessMask |
                                      ACCESS_SYSTEM_SECURITY);
+    GrantedAccess = ObpAddImpliedAccess(ObjectType, GrantedAccess);
 
     /* Handle extra references */
     if (AdditionalReferences)
@@ -1614,6 +1628,7 @@ ObpCreateHandle(IN OB_OPEN_REASON OpenReason,
     /* Remove what's not in the valid access mask */
     GrantedAccess = DesiredAccess & (ObjectType->TypeInfo.ValidAccessMask |
                                      ACCESS_SYSTEM_SECURITY);
+    GrantedAccess = ObpAddImpliedAccess(ObjectType, GrantedAccess);
 
     /* Update the value in the access state */
     AccessState->PreviouslyGrantedAccess = GrantedAccess;
@@ -2409,7 +2424,7 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
     /* Set the target access, always propagate ACCESS_SYSTEM_SECURITY */
     TargetAccess = DesiredAccess & (ObjectType->TypeInfo.ValidAccessMask |
                                     ACCESS_SYSTEM_SECURITY);
-    NewHandleEntry.GrantedAccess = TargetAccess;
+    NewHandleEntry.GrantedAccess = ObpAddImpliedAccess(ObjectType, TargetAccess);
 
     /* Check if we're asking for new access */
     if (TargetAccess & ~SourceAccess)
