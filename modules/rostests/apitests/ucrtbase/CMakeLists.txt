@@ -25,6 +25,7 @@ list(APPEND SOURCE
     ../crt/tan.c
     ../crt/wctomb.c
     c99_math.c
+    fenv.c
     testlist.c
 )
 
