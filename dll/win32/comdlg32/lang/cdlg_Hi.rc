@@ -20,6 +20,7 @@ STRINGTABLE
 / : < > |"
     IDS_PATHNOTEXISTING     "पथ मौजूद नहीं है"
     IDS_FILENOTEXISTING     "फ़ाइल मौजूद नहीं है"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "चयन में एक गैर-फ़ोल्डर ऑब्जेक्ट है"
 }
 

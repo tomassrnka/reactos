@@ -35,6 +35,7 @@ Kas soovite asendada selle?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Koht ei eksisteeri"
     IDS_FILENOTEXISTING     "Fail ei eksisteeri"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "Valik sisaldab muid objekte kui kausti."
 }
 

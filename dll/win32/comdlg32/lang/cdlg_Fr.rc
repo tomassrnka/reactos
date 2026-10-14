@@ -34,6 +34,7 @@ Voulez-vous le remplacer ?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Le chemin d'accès n'existe pas"
     IDS_FILENOTEXISTING     "Le fichier n'existe pas"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 

@@ -177,7 +177,7 @@ HRESULT FileOpenDialog_Constructor(IUnknown *pUnkOuter, REFIID riid, void **ppv)
 HRESULT FileSaveDialog_Constructor(IUnknown *pUnkOuter, REFIID riid, void **ppv);
 
 /* Shared helper functions */
-void COMDLG32_GetCanonicalPath(PCIDLIST_ABSOLUTE pidlAbsCurrent, LPWSTR lpstrFile, LPWSTR lpstrPathAndFile);
+BOOL COMDLG32_GetCanonicalPath(PCIDLIST_ABSOLUTE pidlAbsCurrent, LPCWSTR lpstrFile, LPWSTR lpstrPathAndFile);
 #ifdef __REACTOS__
 struct FileOpenDlgInfos;
 int FILEDLG95_ValidatePathAction(struct FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
@@ -188,6 +188,7 @@ int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
 #endif
 int COMDLG32_SplitFileNames(LPWSTR lpstrEdit, UINT nStrLen, LPWSTR *lpstrFileList, UINT *sizeUsed);
 void FILEDLG95_OnOpenMessage(HWND hwnd, int idCaption, int idText);
+void FILEDLG95_OnPathTooLong(HWND hwnd, LPCWSTR lpstrNames, UINT nNames);
 
 extern BOOL GetFileName31A( OPENFILENAMEA *lpofn, UINT dlgType );
 extern BOOL GetFileName31W( OPENFILENAMEW *lpofn, UINT dlgType );

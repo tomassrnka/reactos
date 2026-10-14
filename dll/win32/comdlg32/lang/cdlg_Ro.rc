@@ -37,6 +37,7 @@ Se creează fişierul?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Calea nu există"
     IDS_FILENOTEXISTING     "Fișierul nu există"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "Selecția nu conține un folder"
 }
 

@@ -34,6 +34,7 @@ Ar norite jį pakeisti?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Kelias neegzistuoja"
     IDS_FILENOTEXISTING     "Failas neegzistuoja"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 

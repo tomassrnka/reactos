@@ -35,6 +35,7 @@ Czy chcesz go zastąpić?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Katalog nie istnieje"
     IDS_FILENOTEXISTING     "Plik nie istnieje"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "Wybór nie zawiera folderu"
 }
 
