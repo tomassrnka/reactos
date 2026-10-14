@@ -133,7 +133,7 @@ shrink_main(
     _In_ PWSTR *argv)
 {
     PPARTENTRY PartEntry;
-    PWSTR pszSuffix = NULL;
+    PWSTR pszSuffix = NULL, pszEnd;
     WCHAR szFileSystem[32];
     ULONGLONG ullDesired = 0, ullMinimum = 0, ullMax, ullShrink, ullLength;
     ULONG ulDiskNumber, ulBytesPerSector;
@@ -150,8 +150,9 @@ shrink_main(
     {
         if (HasPrefix(argv[i], L"desired=", &pszSuffix))
         {
-            ullDesired = _wcstoui64(pszSuffix, NULL, 10);
-            if (ullDesired == 0)
+            ullDesired = _wcstoui64(pszSuffix, &pszEnd, 10);
+            if (ullDesired == 0 || *pszEnd != UNICODE_NULL || !iswdigit(*pszSuffix) ||
+                ullDesired > MAXLONGLONG / SIZE_1MB)
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return EXIT_SUCCESS;
@@ -159,8 +160,9 @@ shrink_main(
         }
         else if (HasPrefix(argv[i], L"minimum=", &pszSuffix))
         {
-            ullMinimum = _wcstoui64(pszSuffix, NULL, 10);
-            if (ullMinimum == 0)
+            ullMinimum = _wcstoui64(pszSuffix, &pszEnd, 10);
+            if (ullMinimum == 0 || *pszEnd != UNICODE_NULL || !iswdigit(*pszSuffix) ||
+                ullMinimum > MAXLONGLONG / SIZE_1MB)
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return EXIT_SUCCESS;
@@ -205,7 +207,12 @@ shrink_main(
         return EXIT_SUCCESS;
     }
 
-    GetPartitionFileSystem(hVolume, szFileSystem, ARRAYSIZE(szFileSystem));
+    Status = GetPartitionFileSystem(hVolume, szFileSystem, ARRAYSIZE(szFileSystem));
+    if (!NT_SUCCESS(Status))
+    {
+        ConResPrintf(StdOut, IDS_SHRINK_FAIL, Status);
+        goto done;
+    }
     if (_wcsicmp(szFileSystem, L"NTFS") != 0)
     {
         ConResPuts(StdOut, IDS_SHRINK_FS_UNSUPPORTED);
@@ -233,8 +240,8 @@ shrink_main(
         goto done;
     }
 
-    /* The volume ends one sector before the new end of the partition (its boot sector copy). */
-    Status = ShrinkRequest(hVolume, ShrinkPrepare, (LONGLONG)((ullLength - ullShrink * SIZE_1MB) / ulBytesPerSector) - 1);
+    /* The new partition's sectors: FSCTL_SHRINK_VOLUME counts the boot sector copy in the last one. */
+    Status = ShrinkRequest(hVolume, ShrinkPrepare, (LONGLONG)((ullLength - ullShrink * SIZE_1MB) / ulBytesPerSector));
     if (NT_SUCCESS(Status))
     {
         Status = ShrinkRequest(hVolume, ShrinkCommit, 0);

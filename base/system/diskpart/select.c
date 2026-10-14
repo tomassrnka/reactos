@@ -173,6 +173,8 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    /* The partition's volume, if any, gets the focus too. */
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -193,6 +195,8 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    /* The partition's volume, if any, gets the focus too. */
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -214,6 +218,8 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    /* The partition's volume, if any, gets the focus too. */
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -279,6 +285,10 @@ SelectVolume(
         if (VolumeEntry->VolumeNumber == ulValue)
         {
             CurrentVolume = VolumeEntry;
+            /* The partition of a basic volume, and its disk, get the focus too. */
+            CurrentPartition = GetPartitionForVolume(VolumeEntry);
+            if (CurrentPartition != NULL)
+                CurrentDisk = CurrentPartition->DiskEntry;
             ConResPrintf(StdOut, IDS_SELECT_VOLUME, CurrentVolume->VolumeNumber);
             return EXIT_SUCCESS;
         }

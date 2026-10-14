@@ -452,7 +452,7 @@ OpenPartitionDevice(
     _In_ BOOL bWholeDisk,
     _Out_ PHANDLE phDevice);
 
-VOID
+NTSTATUS
 GetPartitionFileSystem(
     _In_ HANDLE hVolume,
     _Out_writes_(cchFileSystem) PWSTR pszFileSystem,

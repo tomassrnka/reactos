@@ -41,15 +41,15 @@ typedef struct _BTRFS_RESIZE
     UINT64 size;    /* 0: the size of the device */
 } BTRFS_RESIZE;
 
-/* A one-device Btrfs volume takes its whole (grown) device. */
+/* The device of a one-device, writable Btrfs volume (checked before anything changes). */
 static
 NTSTATUS
-ExtendBtrfs(
-    _In_ HANDLE hVolume)
+GetBtrfsDevice(
+    _In_ HANDLE hVolume,
+    _Out_ PUINT64 pDeviceId)
 {
     BYTE Buffer[1024];
     PBTRFS_DEVICE Device = (PBTRFS_DEVICE)Buffer;
-    BTRFS_RESIZE Resize;
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status;
 
@@ -58,12 +58,31 @@ ExtendBtrfs(
         return Status;
     if (Device->next_entry != 0 || Device->readonly || Device->missing)
         return STATUS_NOT_SUPPORTED;
+    *pDeviceId = Device->dev_id;
+    return STATUS_SUCCESS;
+}
 
-    Resize.device = Device->dev_id;
+/* The Btrfs volume takes its whole (grown) device. */
+static
+NTSTATUS
+ExtendBtrfs(
+    _In_ HANDLE hVolume,
+    _In_ UINT64 DeviceId)
+{
+    BTRFS_RESIZE Resize;
+    IO_STATUS_BLOCK Iosb;
+
+    Resize.device = DeviceId;
     Resize.size = 0;
     return NtFsControlFile(hVolume, NULL, NULL, NULL, &Iosb, FSCTL_BTRFS_RESIZE, &Resize, sizeof(Resize), NULL, 0);
 }
 
+/*
+ * A handle to the whole disk of the partition (bWholeDisk), or to the volume
+ * on it, opened by the volume's own device name: a \Device\HarddiskN\PartitionM
+ * link can name another partition once the layout changed in this session.
+ * STATUS_OBJECT_NAME_NOT_FOUND when the partition has no volume.
+ */
 NTSTATUS
 OpenPartitionDevice(
     _In_ PPARTENTRY PartEntry,
@@ -74,11 +93,21 @@ OpenPartitionDevice(
     UNICODE_STRING Name;
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK Iosb;
+    PVOLENTRY VolumeEntry;
 
-    StringCchPrintfW(szName, ARRAYSIZE(szName),
-                     L"\\Device\\Harddisk%lu\\Partition%lu",
-                     PartEntry->DiskEntry->DiskNumber,
-                     bWholeDisk ? 0 : PartEntry->PartitionNumber);
+    *phDevice = NULL;
+    if (bWholeDisk)
+    {
+        StringCchPrintfW(szName, ARRAYSIZE(szName), L"\\Device\\Harddisk%lu\\Partition0",
+                         PartEntry->DiskEntry->DiskNumber);
+    }
+    else
+    {
+        VolumeEntry = GetVolumeFromPartition(PartEntry);
+        if (VolumeEntry == NULL || VolumeEntry->DeviceName[0] == UNICODE_NULL)
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+        StringCchCopyW(szName, ARRAYSIZE(szName), VolumeEntry->DeviceName);
+    }
     RtlInitUnicodeString(&Name, szName);
     InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
@@ -90,8 +119,8 @@ OpenPartitionDevice(
                       FILE_SYNCHRONOUS_IO_NONALERT);
 }
 
-/* The file system on the partition ("NTFS", "FAT32", "RAW", ...), empty if it cannot be queried. */
-VOID
+/* The file system on the volume ("NTFS", "FAT32", "RAW", ...). */
+NTSTATUS
 GetPartitionFileSystem(
     _In_ HANDLE hVolume,
     _Out_writes_(cchFileSystem) PWSTR pszFileSystem,
@@ -113,6 +142,7 @@ GetPartitionFileSystem(
         StringCchCopyNW(pszFileSystem, cchFileSystem, Attributes.Info.FileSystemName,
                         Attributes.Info.FileSystemNameLength / sizeof(WCHAR));
     }
+    return Status;
 }
 
 typedef enum _FAT_EXTEND_KIND
@@ -125,9 +155,9 @@ typedef enum _FAT_EXTEND_KIND
 
 /*
  * How the FAT volume on hVolume can grow to ullNewSectors sectors.  The FAT
- * type follows from the cluster count, which may not cross a type boundary
- * (FAT12 below 4085 clusters, FAT16 up to 65524).  *pullMaxSectors gets the
- * largest size the type allows (an upper bound when the FATs grow).
+ * type follows from the cluster count, which stays within the counts the
+ * formatter writes.  *pullMaxSectors gets the largest size the type allows
+ * (an upper bound when the FATs grow).
  */
 static
 FAT_EXTEND_KIND
@@ -162,8 +192,9 @@ GetFatExtendKind(
         return FatExtendUnknown;
 
     ulOldClusters = (ulOldSectors - ulFirstData) / ulSpc;
+    /* The cluster counts the formatter writes: no cluster number reaches a reserved value. */
     ulBits = (*(PUSHORT)&Boot[0x16] == 0) ? 32 : ((ulOldClusters < 4085) ? 12 : 16);
-    ulMaxClusters = (ulBits == 12) ? 4084 : ((ulBits == 16) ? 65524 : 0x0FFFFFF5);
+    ulMaxClusters = (ulBits == 12) ? 4078 : ((ulBits == 16) ? 65518 : 0x0FFFFFEE);
     *pullMaxSectors = min((ULONGLONG)ulFirstData + (ULONGLONG)ulMaxClusters * ulSpc, MAXULONG);
 
     if (ullNewSectors > MAXULONG || ullNewSectors <= ulFirstData)
@@ -173,12 +204,31 @@ GetFatExtendKind(
         return FatExtendTooBig;
 
     ulDescribable = (ULONG)(((ULONGLONG)ulFatSectors * ulBytesPerSector * 8) / ulBits) - 2;
-    if (ullNewClusters > ulDescribable || (ulBits == 12 && ullNewClusters >= 4087))
+    if (ullNewClusters > ulDescribable)
         return FatExtendOffline;
     return FatExtendInPlace;
 }
 
 typedef NTSTATUS (NTAPI *PULIB_EXTEND)(PUNICODE_STRING DriveRoot, ULONGLONG NewSectors);
+
+/* The FAT provider's offline Extend, loaded (the caller frees *phModule), or NULL. */
+static
+PULIB_EXTEND
+GetFatExtend(
+    _Out_ HMODULE *phModule)
+{
+    PULIB_EXTEND pExtend;
+
+    if (!GetFsModule(L"FAT", phModule))
+        return NULL;
+    pExtend = (PULIB_EXTEND)GetProcAddress(*phModule, "Extend");
+    if (pExtend == NULL)
+    {
+        FreeLibrary(*phModule);
+        *phModule = NULL;
+    }
+    return pExtend;
+}
 
 /*
  * Grows a FAT volume whose FATs are too small, offline: the FAT provider
@@ -188,25 +238,19 @@ typedef NTSTATUS (NTAPI *PULIB_EXTEND)(PUNICODE_STRING DriveRoot, ULONGLONG NewS
 static
 NTSTATUS
 ExtendFatOffline(
-    _In_ PPARTENTRY PartEntry,
+    _In_ PCWSTR pszVolumeDevice,
     _In_ ULONGLONG ullNewSectors)
 {
-    WCHAR szName[MAX_PATH];
     UNICODE_STRING Name;
     HMODULE hModule;
     PULIB_EXTEND pExtend;
-    NTSTATUS Status = STATUS_NOT_SUPPORTED;
+    NTSTATUS Status;
 
-    if (!GetFsModule(L"FAT", &hModule))
+    pExtend = GetFatExtend(&hModule);
+    if (pExtend == NULL)
         return STATUS_NOT_SUPPORTED;
-    pExtend = (PULIB_EXTEND)GetProcAddress(hModule, "Extend");
-    if (pExtend != NULL)
-    {
-        StringCchPrintfW(szName, ARRAYSIZE(szName), L"\\Device\\Harddisk%lu\\Partition%lu",
-                         PartEntry->DiskEntry->DiskNumber, PartEntry->PartitionNumber);
-        RtlInitUnicodeString(&Name, szName);
-        Status = pExtend(&Name, ullNewSectors);
-    }
+    RtlInitUnicodeString(&Name, pszVolumeDevice);
+    Status = pExtend(&Name, ullNewSectors);
     FreeLibrary(hModule);
     return Status;
 }
@@ -225,13 +269,19 @@ CanLockVolume(
     return TRUE;
 }
 
-/* The partition with the focus: the selected volume's, else the selected partition. */
+/*
+ * The partition with the focus: the selected partition (selecting a volume
+ * selects its partition, selecting a partition its volume), else the
+ * partition of the selected volume.
+ */
 PPARTENTRY
 GetFocusPartition(VOID)
 {
+    if (CurrentPartition != NULL)
+        return CurrentPartition;
     if (CurrentVolume != NULL)
         return GetPartitionForVolume(CurrentVolume);
-    return CurrentPartition;
+    return NULL;
 }
 
 /*
@@ -282,13 +332,17 @@ RefreshAfterResize(
     }
 
     CurrentPartition = Found;
-    if (Found != NULL && bVolumeFocus)
+    if (Found != NULL)
+    {
+        /* The partition's volume gets the focus with it, as SELECT PARTITION gives it. */
         SelectVolumeOfNewPartition(Found);
+    }
     else
     {
         DestroyVolumeList();
         CreateVolumeList();
     }
+    UNREFERENCED_PARAMETER(bVolumeFocus);
 }
 
 /* The unpartitioned space right after the partition, in its MBR container or after the container. */
@@ -339,24 +393,24 @@ GrowPartition(
 }
 
 /*
- * The file system on the partition takes the whole partition (NTFS keeps the
- * last sector for its boot sector copy).  The volume must be open on hVolume.
+ * The file system on the volume takes the whole partition (NTFS keeps the
+ * last sector for its boot sector copy; FSCTL_EXTEND_VOLUME counts it).
  */
 static
 NTSTATUS
 ExtendFileSystem(
-    _In_ HANDLE hVolume)
+    _In_ HANDLE hVolume,
+    _In_ PCWSTR pszFileSystem,
+    _In_ UINT64 BtrfsDevice)
 {
     GET_LENGTH_INFORMATION Length;
     DISK_GEOMETRY Geometry;
     IO_STATUS_BLOCK Iosb;
     LONGLONG llSectors;
-    WCHAR szFileSystem[32];
     NTSTATUS Status;
 
-    GetPartitionFileSystem(hVolume, szFileSystem, ARRAYSIZE(szFileSystem));
-    if (_wcsicmp(szFileSystem, L"Btrfs") == 0)
-        return ExtendBtrfs(hVolume);
+    if (_wcsicmp(pszFileSystem, L"Btrfs") == 0)
+        return ExtendBtrfs(hVolume, BtrfsDevice);
 
     Status = NtDeviceIoControlFile(hVolume, NULL, NULL, NULL, &Iosb, IOCTL_DISK_GET_LENGTH_INFO,
                                    NULL, 0, &Length, sizeof(Length));
@@ -389,15 +443,17 @@ extend_main(
     _In_ PWSTR *argv)
 {
     PPARTENTRY PartEntry, FreeEntry;
-    PWSTR pszSuffix = NULL;
-    WCHAR szFileSystem[32];
-    ULONGLONG ullSize = 0, ullFree, ullBytes;
-    ULONG ulDiskNumber;
+    PVOLENTRY VolumeEntry;
+    PWSTR pszSuffix = NULL, pszEnd;
+    WCHAR szFileSystem[32], szVolumeDevice[MAX_PATH];
+    ULONGLONG ullSize = 0, ullFree, ullBytes, ullNewSectors, ullMaxSectors;
+    ULONG ulDiskNumber, ulBytesPerSector;
     ULONGLONG ullStartSector;
-    BOOL bFileSystemOnly = FALSE, bVolumeFocus, bHasFileSystem, bFat, bOffline;
-    ULONGLONG ullNewSectors, ullMaxSectors;
-    FAT_EXTEND_KIND Kind;
+    BOOL bFileSystemOnly = FALSE, bVolumeFocus, bHasFileSystem = FALSE, bOffline = FALSE;
+    FAT_EXTEND_KIND Kind = FatExtendInPlace;
+    UINT64 BtrfsDevice = 0;
     HANDLE hVolume = NULL;
+    HMODULE hModule;
     NTSTATUS Status;
     INT i;
 
@@ -405,9 +461,10 @@ extend_main(
     {
         if (HasPrefix(argv[i], L"size=", &pszSuffix))
         {
-            /* size=<N> (MB) */
-            ullSize = _wcstoui64(pszSuffix, NULL, 10);
-            if (ullSize == 0)
+            /* size=<N> (MB), a whole decimal number that fits in a byte count */
+            ullSize = _wcstoui64(pszSuffix, &pszEnd, 10);
+            if (ullSize == 0 || *pszEnd != UNICODE_NULL || !iswdigit(*pszSuffix) ||
+                ullSize > MAXLONGLONG / SIZE_1MB)
             {
                 ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
                 return EXIT_SUCCESS;
@@ -443,136 +500,156 @@ extend_main(
     }
     ulDiskNumber = PartEntry->DiskEntry->DiskNumber;
     ullStartSector = PartEntry->StartSector.QuadPart;
+    ulBytesPerSector = PartEntry->DiskEntry->BytesPerSector;
 
-    /* The file system decides first, so that nothing changes when it cannot follow. */
+    /*
+     * Everything that decides whether the file system can follow comes before
+     * the partition changes: the volume and its file system, the FAT type
+     * limit, a FAT volume that must be free to have its tables grown, the
+     * provider that grows them, a one-device Btrfs volume and the privilege
+     * WinBtrfs asks for.
+     */
+    VolumeEntry = GetVolumeFromPartition(PartEntry);
     szFileSystem[0] = UNICODE_NULL;
-    Status = OpenPartitionDevice(PartEntry, FALSE, &hVolume);
-    if (NT_SUCCESS(Status))
-        GetPartitionFileSystem(hVolume, szFileSystem, ARRAYSIZE(szFileSystem));
-    else
-        hVolume = NULL;
-    bHasFileSystem = (szFileSystem[0] != UNICODE_NULL) && (_wcsicmp(szFileSystem, L"RAW") != 0);
+    szVolumeDevice[0] = UNICODE_NULL;
+    if (VolumeEntry != NULL)
+    {
+        StringCchCopyW(szVolumeDevice, ARRAYSIZE(szVolumeDevice), VolumeEntry->DeviceName);
+        Status = OpenPartitionDevice(PartEntry, FALSE, &hVolume);
+        if (NT_SUCCESS(Status))
+            Status = GetPartitionFileSystem(hVolume, szFileSystem, ARRAYSIZE(szFileSystem));
+        if (!NT_SUCCESS(Status))
+        {
+            ConResPrintf(StdOut, IDS_EXTEND_FAIL, Status);
+            goto done;
+        }
+        bHasFileSystem = (_wcsicmp(szFileSystem, L"RAW") != 0);
+    }
 
     if (bHasFileSystem && !IsExtendableFileSystem(szFileSystem))
     {
         ConResPuts(StdOut, IDS_EXTEND_FS_UNSUPPORTED);
         goto done;
     }
+    if (bFileSystemOnly && !bHasFileSystem)
+    {
+        /* A partition without a file system: nothing to extend (as Windows answers). */
+        ConResPuts(StdOut, IDS_EXTEND_FS_SUCCESS);
+        goto done;
+    }
 
-    /* WinBtrfs resizes only for a caller whose manage-volume privilege is enabled. */
     if (bHasFileSystem && _wcsicmp(szFileSystem, L"Btrfs") == 0)
     {
         BOOLEAN bOldState;
 
         Status = RtlAdjustPrivilege(SE_MANAGE_VOLUME_PRIVILEGE, TRUE, FALSE, &bOldState);
-        if (Status != STATUS_SUCCESS)
+        if (Status == STATUS_NOT_ALL_ASSIGNED)
+            Status = STATUS_PRIVILEGE_NOT_HELD;
+        if (NT_SUCCESS(Status))
+            Status = GetBtrfsDevice(hVolume, &BtrfsDevice);
+        if (!NT_SUCCESS(Status))
         {
-            ConResPrintf(StdOut, IDS_EXTEND_FAIL, Status == STATUS_NOT_ALL_ASSIGNED ? STATUS_PRIVILEGE_NOT_HELD : Status);
+            ConResPrintf(StdOut, IDS_EXTEND_FAIL, Status);
             goto done;
         }
     }
 
     if (bFileSystemOnly)
     {
-        if (!bHasFileSystem || hVolume == NULL)
-        {
-            ConResPuts(StdOut, IDS_EXTEND_FS_UNSUPPORTED);
-            goto done;
-        }
-        bFat = (_wcsnicmp(szFileSystem, L"FAT", 3) == 0);
-        Kind = bFat ? GetFatExtendKind(hVolume, PartEntry->SectorCount.QuadPart, &ullMaxSectors) : FatExtendInPlace;
-        if (Kind == FatExtendTooBig)
-        {
-            ConResPrintf(StdOut, IDS_EXTEND_FAT_TOO_BIG, szFileSystem,
-                         ullMaxSectors * PartEntry->DiskEntry->BytesPerSector / SIZE_1MB);
-            goto done;
-        }
-        if (Kind == FatExtendOffline)
-        {
-            if (!CanLockVolume(hVolume))
-            {
-                ConResPuts(StdOut, IDS_EXTEND_IN_USE);
-                goto done;
-            }
-            NtClose(hVolume);
-            hVolume = NULL;
-            Status = ExtendFatOffline(PartEntry, PartEntry->SectorCount.QuadPart);
-        }
-        else
-        {
-            Status = ExtendFileSystem(hVolume);
-        }
-        if (NT_SUCCESS(Status))
-            ConResPuts(StdOut, IDS_EXTEND_FS_SUCCESS);
-        else
-            ConResPrintf(StdOut, IDS_EXTEND_FAIL, Status);
-        goto done;
+        ullBytes = 0;
+        ullNewSectors = PartEntry->SectorCount.QuadPart;
     }
-
-    FreeEntry = GetFreeSpaceAfter(PartEntry);
-    ullFree = FreeEntry ? FreeEntry->SectorCount.QuadPart * PartEntry->DiskEntry->BytesPerSector : 0;
-    ullBytes = ullSize ? ullSize * SIZE_1MB : ullFree;
-    if (ullFree == 0 || ullBytes > ullFree)
+    else
     {
-        ConResPuts(StdOut, IDS_EXTEND_NO_SPACE);
-        goto done;
+        FreeEntry = GetFreeSpaceAfter(PartEntry);
+        ullFree = FreeEntry ? FreeEntry->SectorCount.QuadPart * ulBytesPerSector : 0;
+        ullBytes = ullSize ? ullSize * SIZE_1MB : ullFree;
+        if (ullFree == 0 || ullBytes > ullFree)
+        {
+            ConResPuts(StdOut, IDS_EXTEND_NO_SPACE);
+            goto done;
+        }
+        ullNewSectors = PartEntry->SectorCount.QuadPart + ullBytes / ulBytesPerSector;
     }
 
     /*
      * A FAT volume extends in place while its FATs can describe the new
      * clusters; otherwise its FATs grow offline, which needs the volume to
-     * itself: checked before anything changes.
+     * itself and the FAT provider's Extend.
      */
-    ullNewSectors = (PartEntry->SectorCount.QuadPart * PartEntry->DiskEntry->BytesPerSector + ullBytes) /
-                    PartEntry->DiskEntry->BytesPerSector;
-    Kind = FatExtendInPlace;
     if (bHasFileSystem && _wcsnicmp(szFileSystem, L"FAT", 3) == 0)
+    {
         Kind = GetFatExtendKind(hVolume, ullNewSectors, &ullMaxSectors);
-    if (Kind == FatExtendTooBig)
-    {
-        ConResPrintf(StdOut, IDS_EXTEND_FAT_TOO_BIG, szFileSystem,
-                     ullMaxSectors * PartEntry->DiskEntry->BytesPerSector / SIZE_1MB);
-        goto done;
-    }
-    bOffline = (Kind == FatExtendOffline);
-    if (bOffline && !CanLockVolume(hVolume))
-    {
-        ConResPuts(StdOut, IDS_EXTEND_IN_USE);
-        goto done;
+        if (Kind == FatExtendTooBig)
+        {
+            ConResPrintf(StdOut, IDS_EXTEND_FAT_TOO_BIG, szFileSystem,
+                         ullMaxSectors * ulBytesPerSector / SIZE_1MB);
+            goto done;
+        }
+        if (Kind == FatExtendUnknown)
+        {
+            ConResPrintf(StdOut, IDS_EXTEND_FAIL, STATUS_FILE_CORRUPT_ERROR);
+            goto done;
+        }
+        bOffline = (Kind == FatExtendOffline);
+        if (bOffline)
+        {
+            if (GetFatExtend(&hModule) == NULL)
+            {
+                ConResPuts(StdOut, IDS_EXTEND_FS_UNSUPPORTED);
+                goto done;
+            }
+            FreeLibrary(hModule);
+            if (!CanLockVolume(hVolume))
+            {
+                ConResPuts(StdOut, IDS_EXTEND_IN_USE);
+                goto done;
+            }
+        }
     }
 
-    Status = GrowPartition(PartEntry, (LONGLONG)ullBytes);
-    if (!NT_SUCCESS(Status))
+    if (!bFileSystemOnly)
     {
-        ConResPrintf(StdOut, IDS_EXTEND_FAIL, Status);
-        goto done;
+        Status = GrowPartition(PartEntry, (LONGLONG)ullBytes);
+        if (!NT_SUCCESS(Status))
+        {
+            ConResPrintf(StdOut, IDS_EXTEND_FAIL, Status);
+            goto done;
+        }
     }
 
     if (bOffline)
     {
         NtClose(hVolume);
         hVolume = NULL;
-        Status = ExtendFatOffline(PartEntry, ullNewSectors);
-        if (!NT_SUCCESS(Status))
-        {
-            ConResPrintf(StdOut, IDS_EXTEND_FS_FAIL, Status);
-            goto refresh;
-        }
+        Status = ExtendFatOffline(szVolumeDevice, ullNewSectors);
     }
     else if (bHasFileSystem)
     {
-        Status = ExtendFileSystem(hVolume);
-        if (!NT_SUCCESS(Status))
-        {
-            /* The partition grew; "extend filesystem" can finish the job later. */
-            ConResPrintf(StdOut, IDS_EXTEND_FS_FAIL, Status);
-            goto refresh;
-        }
+        Status = ExtendFileSystem(hVolume, szFileSystem, BtrfsDevice);
+    }
+    else
+    {
+        Status = STATUS_SUCCESS;
     }
 
-    ConResPuts(StdOut, IDS_EXTEND_SUCCESS);
+    if (bFileSystemOnly)
+    {
+        if (NT_SUCCESS(Status))
+            ConResPuts(StdOut, IDS_EXTEND_FS_SUCCESS);
+        else
+            ConResPrintf(StdOut, IDS_EXTEND_FAIL, Status);
+    }
+    else if (NT_SUCCESS(Status))
+    {
+        ConResPuts(StdOut, IDS_EXTEND_SUCCESS);
+    }
+    else
+    {
+        /* The partition grew; EXTEND FILESYSTEM can finish the job later. */
+        ConResPrintf(StdOut, IDS_EXTEND_FS_FAIL, Status);
+    }
 
-refresh:
     if (hVolume != NULL)
     {
         NtClose(hVolume);
