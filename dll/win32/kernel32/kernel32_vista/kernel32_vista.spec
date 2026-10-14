@@ -30,12 +30,12 @@
 @ stdcall SetFirmwareEnvironmentVariableExA(str str ptr long long)
 @ stdcall SetFirmwareEnvironmentVariableExW(str str ptr long long)
 
-@ stdcall ApplicationRecoveryFinished(long)
-@ stdcall ApplicationRecoveryInProgress(ptr)
+@ stdcall -version=0x400-0x5ff ApplicationRecoveryFinished(long)
+@ stdcall -version=0x400-0x5ff ApplicationRecoveryInProgress(ptr)
 @ stdcall CreateSymbolicLinkA(str str long)
 @ stdcall CreateSymbolicLinkW(wstr wstr long)
 @ stdcall EnumSystemLocalesEx(ptr long long ptr)
-@ stdcall GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr)
+@ stdcall -version=0x400-0x5ff GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr)
 @ stdcall -version=0x400-0x5ff GetApplicationRestartSettings(ptr ptr ptr ptr)
 @ stdcall GetFileBandwidthReservation(ptr ptr ptr ptr ptr ptr)
 @ stdcall GetFileMUIInfo(long wstr ptr ptr)
@@ -56,7 +56,7 @@
 @ stdcall OpenFileById(ptr ptr long long ptr long)
 @ stdcall QueryFullProcessImageNameA(ptr long ptr ptr)
 @ stdcall QueryFullProcessImageNameW(ptr long ptr ptr)
-@ stdcall RegisterApplicationRecoveryCallback(ptr ptr long long)
+@ stdcall -version=0x400-0x5ff RegisterApplicationRecoveryCallback(ptr ptr long long)
 @ stdcall -version=0x400-0x5ff RegisterApplicationRestart(wstr long)
 @ stdcall SetFileBandwidthReservation(ptr long long long ptr ptr)
 @ stdcall SetFileInformationByHandle(ptr long ptr long)
@@ -87,6 +87,7 @@
 @ stdcall SetThreadpoolWait(ptr long ptr) ntdll_vista.TpSetWait
 @ stdcall SubmitThreadpoolWork(ptr) ntdll_vista.TpPostWork
 @ stdcall TrySubmitThreadpoolCallback(ptr ptr ptr)
+@ stdcall -version=0x400-0x5ff UnregisterApplicationRecoveryCallback()
 @ stdcall -version=0x400-0x5ff UnregisterApplicationRestart()
 @ stdcall WaitForThreadpoolIoCallbacks(ptr long) ntdll_vista.TpWaitForIoCompletion
 @ stdcall WaitForThreadpoolTimerCallbacks(ptr long) ntdll_vista.TpWaitForTimer
