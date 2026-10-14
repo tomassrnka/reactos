@@ -188,6 +188,17 @@ typedef enum
 #define MSR_AMD_ACCESS          0x9C5A203A
 #define MSR_IA32_MISC_ENABLE    0x01A0
 #define MSR_EFER                0xC0000080
+#define MSR_PAT                 0x0277
+
+//
+// Caching values for the PAT MSR
+//
+#define PAT_UC                  0ULL
+#define PAT_WC                  1ULL
+#define PAT_WT                  4ULL
+#define PAT_WP                  5ULL
+#define PAT_WB                  6ULL
+#define PAT_UCM                 7ULL
 
 //
 // MSR internal Values

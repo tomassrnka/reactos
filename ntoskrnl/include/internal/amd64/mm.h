@@ -104,6 +104,7 @@
 #define MI_PAGE_WRITE_COMBINED(x)  ((x)->u.Hard.WriteThrough = 0)
 /* PAT entry 1 (PWT set, PCD clear) is write-combining, see KiInitializeCpu */
 #define MI_PAGE_WRITE_COMBINED_PAT(x) ((x)->u.Hard.CacheDisable = 0, (x)->u.Hard.WriteThrough = 1)
+#define MI_WRITE_COMBINED_PAT_AVAILABLE() TRUE
 #define MI_IS_PAGE_LARGE(x)        ((x)->u.Hard.LargePage == 1)
 #if !defined(CONFIG_SMP)
 #define MI_IS_PAGE_WRITEABLE(x)    ((x)->u.Hard.Write == 1)

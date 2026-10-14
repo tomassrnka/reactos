@@ -145,7 +145,7 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
 
 #ifdef MI_PAGE_WRITE_COMBINED_PAT
             /* Device memory only: RAM pages have no PFN cache type tracking that would keep other mappings consistent */
-            if (IsIoMapping)
+            if (IsIoMapping && MI_WRITE_COMBINED_PAT_AVAILABLE())
             {
                 PFN_COUNT i;
 

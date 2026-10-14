@@ -625,6 +625,8 @@ KiInitializePAT(
     VOID
 );
 
+extern BOOLEAN KiPatWriteCombining;
+
 CODE_SEG("INIT")
 VOID
 NTAPI

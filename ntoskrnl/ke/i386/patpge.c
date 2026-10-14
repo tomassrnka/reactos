@@ -55,13 +55,69 @@ Ki386EnableGlobalPage(IN ULONG_PTR Context)
     return 0;
 }
 
+/* Every processor runs with the layout below; PWT alone selects write-combining */
+BOOLEAN KiPatWriteCombining;
+
+static
+VOID
+Ki386FlushEntireCurrentTb(VOID)
+{
+    ULONG Cr4 = __readcr4();
+
+    /* Clearing PGE also drops global translations */
+    if (Cr4 & CR4_PGE)
+    {
+        __writecr4(Cr4 & ~CR4_PGE);
+        __writecr4(Cr4);
+    }
+    else
+    {
+        __writecr3(__readcr3());
+    }
+}
+
+CODE_SEG("INIT")
+static
+ULONG_PTR
+NTAPI
+Ki386EnablePat(IN ULONG_PTR Context)
+{
+    ULONG Cr0;
+    BOOLEAN Enable;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    /* The update sequence of Intel SDM vol. 3, "MTRR Considerations in MP Systems":
+       no-fill cache mode, flush caches and TLB, write, flush again */
+    Enable = KeDisableInterrupts();
+    Cr0 = __readcr0();
+    __writecr0((Cr0 | CR0_CD) & ~CR0_NW);
+    __wbinvd();
+    Ki386FlushEntireCurrentTb();
+
+    /* Entries 4-7 repeat 0-3 so the PAT bit of a PTE changes nothing */
+    __writemsr(MSR_PAT,
+               (PAT_WB << 0)  | (PAT_WC << 8)  | (PAT_UCM << 16) | (PAT_UC << 24) |
+               (PAT_WB << 32) | (PAT_WC << 40) | (PAT_UCM << 48) | (PAT_UC << 56));
+
+    __wbinvd();
+    Ki386FlushEntireCurrentTb();
+    __writecr0(Cr0);
+    KeRestoreInterrupts(Enable);
+    return 0;
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI
 KiInitializePAT(VOID)
 {
-    /* FIXME: Support this */
-    DPRINT("PAT support detected but not yet taken advantage of\n");
+    /* Same layout as amd64. Entries 0, 2 and 3 keep their power-on types
+       (WB, UC-, UC), so only PWT-without-PCD mappings change meaning, from
+       write-through to write-combining; Mm creates those only for device
+       memory once KiPatWriteCombining is set */
+    KeIpiGenericCall(Ki386EnablePat, 0);
+    KiPatWriteCombining = TRUE;
 }
 
 CODE_SEG("INIT")
