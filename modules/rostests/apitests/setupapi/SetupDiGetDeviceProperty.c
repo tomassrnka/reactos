@@ -30,12 +30,19 @@ static FN_SetupDiGetDevicePropertyW pSetupDiGetDevicePropertyW;
 typedef CONFIGRET (WINAPI *FN_CM_Get_DevNode_Status)(PULONG, PULONG, DEVINST, ULONG);
 typedef CONFIGRET (WINAPI *FN_CM_Get_Parent)(PDEVINST, DEVINST, ULONG);
 typedef CONFIGRET (WINAPI *FN_CM_Get_Device_IDW)(DEVINST, PWSTR, ULONG, ULONG);
+typedef CONFIGRET (WINAPI *FN_CM_Get_DevNode_Registry_PropertyW)(DEVINST, ULONG, PULONG, PVOID, PULONG, ULONG);
 
 static FN_CM_Get_DevNode_Status pCM_Get_DevNode_Status;
 static FN_CM_Get_Parent pCM_Get_Parent;
 static FN_CM_Get_Device_IDW pCM_Get_Device_IDW;
+static FN_CM_Get_DevNode_Registry_PropertyW pCM_Get_DevNode_Registry_PropertyW;
 
 #define NOT_SET 0xDEADBEEF
+
+/* the configuration flags that decide the installation state */
+#define TEST_CONFIGFLAG_REINSTALL       0x00000020
+#define TEST_CONFIGFLAG_FAILEDINSTALL   0x00000040
+#define TEST_CONFIGFLAG_FINISH_INSTALL  0x00000400
 
 /* The type that each SPDRP_* property has as a device property, indexed by SPDRP_*; 0xFFFF for the unused slots */
 static const USHORT ExpectedTypes[] =
@@ -235,6 +242,48 @@ static BOOL ReadDeviceProperty(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, cons
     return FALSE;
 }
 
+/* The size protocol of a property that exists: too small gives the type and the size, the exact size works */
+static void CheckBufferProtocol(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, const DEVPROPKEY *Key, DEVPROPTYPE ExpectedType, DWORD Size, unsigned Index)
+{
+    DEVPROPTYPE Type;
+    BYTE *Buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size + 8);
+    DWORD Required;
+    BOOL Ret;
+
+    ok(Buffer != NULL, "No memory\n");
+    if (!Buffer)
+        return;
+
+    /* Windows Server 2008 R2 answers a size query for an empty string with a list type and 4 bytes, and a read into a large buffer with the string and 2 */
+    if (Size <= sizeof(WCHAR) && !is_reactos())
+    {
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        return;
+    }
+
+    Type = NOT_SET; Required = NOT_SET; SetLastError(0xDEADBEEF);
+    Ret = pSetupDiGetDevicePropertyW(DeviceSet, Device, Key, &Type, NULL, 0, &Required, 0);
+    ok(!Ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER && Type == ExpectedType && Required == Size,
+       "Device %u, property %lu, size query: %d, error 0x%lx, type 0x%lx, size %lu, expected %lu\n",
+       Index, Key->pid, Ret, GetLastError(), Type, Required, Size);
+
+    if (Size > 1)
+    {
+        Type = NOT_SET; Required = NOT_SET; SetLastError(0xDEADBEEF);
+        Ret = pSetupDiGetDevicePropertyW(DeviceSet, Device, Key, &Type, Buffer, Size - 1, &Required, 0);
+        ok(!Ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER && Type == ExpectedType && Required == Size,
+           "Device %u, property %lu, one byte short: %d, error 0x%lx, type 0x%lx, size %lu\n",
+           Index, Key->pid, Ret, GetLastError(), Type, Required);
+    }
+
+    Type = NOT_SET; Required = NOT_SET; SetLastError(0xDEADBEEF);
+    Ret = pSetupDiGetDevicePropertyW(DeviceSet, Device, Key, &Type, Buffer, Size, &Required, 0);
+    ok(Ret && Type == ExpectedType && Required == Size, "Device %u, property %lu, exact size: %d, error 0x%lx, type 0x%lx, size %lu\n",
+       Index, Key->pid, Ret, GetLastError(), Type, Required);
+
+    HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
 static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Index, unsigned *Counts)
 {
     WCHAR InstanceId[256], Other[256];
@@ -267,11 +316,27 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
     {
         /* Asking the root device node for its capabilities (the address, the power data) makes a checked ReactOS kernel assert in the PnP root enumerator */
         if ((Property == SPDRP_ADDRESS || Property == SPDRP_DEVICE_POWER_DATA) && !_wcsnicmp(InstanceId, L"HTREE\\", 6))
+        {
+            /* The root node has neither: the property is not found, and the capability request is not made */
+            if (is_reactos())
+            {
+                BYTE RootBuffer[128];
+
+                Key = DEVPKEY_Device_DeviceDesc;
+                Key.pid = Property + 2;
+                Size = 0;
+                SetLastError(0xDEADBEEF);
+                Ret = pSetupDiGetDevicePropertyW(DeviceSet, Device, &Key, &Type, RootBuffer, sizeof(RootBuffer), &Size, 0);
+                ok(!Ret && GetLastError() == ERROR_NOT_FOUND, "Root node, property %lu: %d, error 0x%lx\n", Property, Ret, GetLastError());
+            }
             continue;
+        }
 
         Key = DEVPKEY_Device_DeviceDesc;
         Key.pid = Property + 2;
         Ret = ReadDeviceProperty(DeviceSet, Device, &Key, &Type, &Value, &Size, &Error);
+        if (Ret && ExpectedTypes[Property] != 0xFFFF)
+            CheckBufferProtocol(DeviceSet, Device, &Key, ExpectedTypes[Property], Size, Index);
 
         if (ExpectedTypes[Property] == 0xFFFF)
         {
@@ -282,18 +347,65 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
             continue;
         }
 
-        /* The properties that are not read from the same value */
+        /* The properties that are not read from the same value: each is found exactly when its own source has it */
         if (Property == SPDRP_PHYSICAL_DEVICE_OBJECT_NAME || Property == SPDRP_DEVICE_POWER_DATA || Property == SPDRP_INSTALL_STATE)
         {
+            BOOL Expected = FALSE;
+            BYTE *Source = NULL;
+            DWORD SourceType = 0, SourceSize = 0;
+            WCHAR PdoName[260] = L"";
+
+            if (Property == SPDRP_PHYSICAL_DEVICE_OBJECT_NAME)
+            {
+                ULONG Length = sizeof(PdoName);
+
+                Expected = pCM_Get_DevNode_Registry_PropertyW &&
+                           pCM_Get_DevNode_Registry_PropertyW(Device->DevInst, CM_DRP_PHYSICAL_DEVICE_OBJECT_NAME, NULL, PdoName, &Length, 0) == CR_SUCCESS &&
+                           PdoName[0] != UNICODE_NULL;
+            }
+            else
+            {
+                Expected = ReadRegistryProperty(DeviceSet, Device, Property, &SourceType, &Source, &SourceSize);
+                if (Expected && Property == SPDRP_INSTALL_STATE && (SourceType != REG_DWORD || SourceSize != sizeof(DWORD)))
+                    Expected = FALSE;
+            }
+
+            ok(Ret == Expected, "Device %u, property %lu: the device property %s, its source %s (error 0x%lx)\n",
+               Index, Property, Ret ? "exists" : "does not", Expected ? "has it" : "does not", Error);
             if (Ret)
             {
                 ok(Type == ExpectedTypes[Property], "Device %u, property %lu: type 0x%lx\n", Index, Property, Type);
                 if (Property == SPDRP_PHYSICAL_DEVICE_OBJECT_NAME)
+                {
                     ok(!_wcsnicmp((WCHAR *)Value, L"\\Device\\", 8), "Device %u: PDO name '%S'\n", Index, (WCHAR *)Value);
+                    ok(!wcscmp((WCHAR *)Value, PdoName), "Device %u: PDO name '%S', expected '%S'\n", Index, (WCHAR *)Value, PdoName);
+                }
                 else if (Property == SPDRP_DEVICE_POWER_DATA)
+                {
                     ok(Size == 56 && *(DWORD *)Value == 56, "Device %u: power data of %lu bytes, PD_Size %lu\n", Index, Size, *(DWORD *)Value);
+                    ok(Source && SourceSize >= 56 && Size == 56 && !memcmp(Value, Source, 56), "Device %u: the power data differs\n", Index);
+                }
                 else
-                    ok(Size == sizeof(DWORD) && *(DWORD *)Value <= 3, "Device %u: install state %lu bytes, value %lu\n", Index, Size, *(DWORD *)Value);
+                {
+                    DWORD Flags = Source ? *(DWORD *)Source : 0, State = CM_INSTALL_STATE_INSTALLED;
+
+                    /* ReactOS has the configuration flags where Windows has the state */
+                    if (is_reactos())
+                    {
+                        if (Flags & TEST_CONFIGFLAG_FAILEDINSTALL)
+                            State = CM_INSTALL_STATE_FAILED_INSTALL;
+                        else if (Flags & TEST_CONFIGFLAG_REINSTALL)
+                            State = CM_INSTALL_STATE_NEEDS_REINSTALL;
+                        else if (Flags & TEST_CONFIGFLAG_FINISH_INSTALL)
+                            State = CM_INSTALL_STATE_FINISH_INSTALL;
+                    }
+                    else
+                    {
+                        State = Flags;
+                    }
+                    ok(Size == sizeof(DWORD) && *(DWORD *)Value == State, "Device %u: install state %lu bytes, value %lu, expected %lu\n",
+                       Index, Size, *(DWORD *)Value, State);
+                }
                 Counts[1]++;
             }
             else
@@ -302,6 +414,8 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
             }
             if (Value)
                 HeapFree(GetProcessHeap(), 0, Value);
+            if (Source)
+                HeapFree(GetProcessHeap(), 0, Source);
             continue;
         }
 
@@ -359,9 +473,19 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
             }
             else if (ExpectedTypes[Property] == DEVPROP_TYPE_UINT32)
             {
-                /* A number is four bytes (ReactOS gives fewer for some of them in the registry-property call, then the rest is zero) */
-                ok(Size == sizeof(DWORD) && LegacySize >= 1 && !memcmp(Value, Legacy, min(LegacySize, sizeof(DWORD))),
-                   "Device %u, property %lu: size %lu, the data differs\n", Index, Property, Size);
+                /* A number is a four-byte DWORD; only the default removal policy has fewer bytes in the registry-property call of ReactOS, then the rest is zero */
+                if (Property == SPDRP_REMOVAL_POLICY_HW_DEFAULT && is_reactos() && LegacySize == 1)
+                {
+                    ok(Size == sizeof(DWORD) && *(DWORD *)Value == Legacy[0], "Device %u, property %lu: size %lu, value %lu, the byte is %u\n",
+                       Index, Property, Size, *(DWORD *)Value, Legacy[0]);
+                }
+                else
+                {
+                    ok(LegacyType == REG_DWORD && LegacySize == sizeof(DWORD), "Device %u, property %lu: the registry value has type %lu, %lu bytes\n",
+                       Index, Property, LegacyType, LegacySize);
+                    ok(Size == sizeof(DWORD) && LegacySize == sizeof(DWORD) && !memcmp(Value, Legacy, sizeof(DWORD)),
+                       "Device %u, property %lu: size %lu, the data differs\n", Index, Property, Size);
+                }
             }
             else
             {
@@ -391,37 +515,53 @@ static void TestDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device, unsigned Ind
     if (Value)
         HeapFree(GetProcessHeap(), 0, Value);
 
-    /* The status and the problem code: what the configuration manager says before and after the calls */
-    HaveStatus = pCM_Get_DevNode_Status(&Status, &Problem, Device->DevInst, 0) == CR_SUCCESS;
-    Ret = ReadDeviceProperty(DeviceSet, Device, &DEVPKEY_Device_DevNodeStatus, &Type, &Value, &Size, &Error);
-    ok(Ret, "Device %u: status failed: 0x%lx\n", Index, Error);
-    if (Ret)
+    /*
+     * The status and the problem code: what the configuration manager says before and after the call. The value is
+     * checked when the device did not change in between (it can change or go away at any time); a device that never
+     * holds still is not checked.
+     */
     {
-        ok(Type == DEVPROP_TYPE_UINT32 && Size == sizeof(DWORD), "Device %u: status type 0x%lx, size %lu\n", Index, Type, Size);
-        Counts[3]++;
-        if (HaveStatus && Size == sizeof(DWORD) &&
-            pCM_Get_DevNode_Status(&StatusAfter, &ProblemAfter, Device->DevInst, 0) == CR_SUCCESS)
+        static const struct { const DEVPROPKEY *Key; BOOL Problem; PCSTR Name; } Cases[] =
         {
-            ok(*(DWORD *)Value == Status || *(DWORD *)Value == StatusAfter, "Device %u: status 0x%lx, expected 0x%lx\n", Index, *(DWORD *)Value, Status);
+            { &DEVPKEY_Device_DevNodeStatus, FALSE, "status" },
+            { &DEVPKEY_Device_ProblemCode, TRUE, "problem code" },
+        };
+        unsigned c, Attempt;
+
+        for (c = 0; c < ARRAYSIZE(Cases); c++)
+        {
+            BOOL Checked = FALSE, Present = FALSE;
+
+            for (Attempt = 0; Attempt < 10 && !Checked; Attempt++)
+            {
+                HaveStatus = pCM_Get_DevNode_Status(&Status, &Problem, Device->DevInst, 0) == CR_SUCCESS;
+                Ret = ReadDeviceProperty(DeviceSet, Device, Cases[c].Key, &Type, &Value, &Size, &Error);
+                if (Ret)
+                {
+                    Present = TRUE;
+                    ok(Type == DEVPROP_TYPE_UINT32 && Size == sizeof(DWORD), "Device %u: %s type 0x%lx, size %lu\n",
+                       Index, Cases[c].Name, Type, Size);
+                    if (HaveStatus && Size == sizeof(DWORD) &&
+                        pCM_Get_DevNode_Status(&StatusAfter, &ProblemAfter, Device->DevInst, 0) == CR_SUCCESS &&
+                        StatusAfter == Status && ProblemAfter == Problem)
+                    {
+                        DWORD Expected = Cases[c].Problem ? Problem : Status;
+
+                        ok(*(DWORD *)Value == Expected, "Device %u: %s 0x%lx, expected 0x%lx\n", Index, Cases[c].Name, *(DWORD *)Value, Expected);
+                        Checked = TRUE;
+                    }
+                }
+                if (Value)
+                    HeapFree(GetProcessHeap(), 0, Value);
+                Value = NULL;
+            }
+            /* A device that is gone between the calls has neither; one that stays has both */
+            if (!Present && pCM_Get_DevNode_Status(&Status, &Problem, Device->DevInst, 0) == CR_SUCCESS)
+                ok(0, "Device %u: %s failed with 0x%lx, but the configuration manager knows the device\n", Index, Cases[c].Name, Error);
+            else if (Present)
+                Counts[c ? 4 : 3]++;
         }
     }
-    if (Value)
-        HeapFree(GetProcessHeap(), 0, Value);
-    HaveStatus = pCM_Get_DevNode_Status(&Status, &Problem, Device->DevInst, 0) == CR_SUCCESS;
-    Ret = ReadDeviceProperty(DeviceSet, Device, &DEVPKEY_Device_ProblemCode, &Type, &Value, &Size, &Error);
-    ok(Ret, "Device %u: problem code failed: 0x%lx\n", Index, Error);
-    if (Ret)
-    {
-        ok(Type == DEVPROP_TYPE_UINT32 && Size == sizeof(DWORD), "Device %u: problem code type 0x%lx, size %lu\n", Index, Type, Size);
-        Counts[4]++;
-        if (HaveStatus && Size == sizeof(DWORD) &&
-            pCM_Get_DevNode_Status(&StatusAfter, &ProblemAfter, Device->DevInst, 0) == CR_SUCCESS)
-        {
-            ok(*(DWORD *)Value == Problem || *(DWORD *)Value == ProblemAfter, "Device %u: problem code %lu, expected %lu\n", Index, *(DWORD *)Value, Problem);
-        }
-    }
-    if (Value)
-        HeapFree(GetProcessHeap(), 0, Value);
 
     /* The parent */
     Ret = ReadDeviceProperty(DeviceSet, Device, &DEVPKEY_Device_Parent, &Type, &Value, &Size, &Error);
@@ -463,6 +603,114 @@ static void TestForeignDevice(HDEVINFO DeviceSet, SP_DEVINFO_DATA *Device)
     SetupDiDestroyDeviceInfoList(Other);
 }
 
+/*
+ * ReactOS reads the installation state from the configuration flags of the device: the flags of a device are set to
+ * each combination and the property is read (the value that was there is put back). Windows keeps the state apart.
+ */
+static void TestInstallState(HDEVINFO DeviceSet)
+{
+    static const struct { DWORD Flags; DWORD State; } Cases[] =
+    {
+        { 0x00, 0 }, { 0x20, 1 }, { 0x40, 2 }, { 0x400, 3 }, { 0x60, 2 }, { 0x420, 1 }, { 0x440, 2 }, { 0x460, 2 }, { 0x01, 0 }, { 0x04, 0 },
+    };
+    SP_DEVINFO_DATA Device;
+    DWORD Index, Original, Size = sizeof(Original), Type, i;
+    WCHAR InstanceId[256];
+    BOOL Found = FALSE;
+
+    if (!is_reactos())
+        return;
+
+    Device.cbSize = sizeof(Device);
+    for (Index = 0; SetupDiEnumDeviceInfo(DeviceSet, Index, &Device); Index++)
+    {
+        if (!SetupDiGetDeviceInstanceIdW(DeviceSet, &Device, InstanceId, ARRAYSIZE(InstanceId), NULL))
+            continue;
+        /* a device that nothing depends on while the test runs: one that the root enumerator made */
+        if (_wcsnicmp(InstanceId, L"ROOT\\", 5))
+            continue;
+        Size = sizeof(Original);
+        if (SetupDiGetDeviceRegistryPropertyW(DeviceSet, &Device, SPDRP_CONFIGFLAGS, &Type, (BYTE *)&Original, sizeof(Original), &Size) &&
+            Type == REG_DWORD && Size == sizeof(Original))
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    if (!Found)
+    {
+        skip("No device whose configuration flags can be changed\n");
+        return;
+    }
+
+    for (i = 0; i < ARRAYSIZE(Cases); i++)
+    {
+        DWORD Flags = Cases[i].Flags, State = 0xFFFFFFFF, Required = 0;
+        DEVPROPTYPE PropertyType = 0;
+        BOOL Ret;
+
+        if (!SetupDiSetDeviceRegistryPropertyW(DeviceSet, &Device, SPDRP_CONFIGFLAGS, (BYTE *)&Flags, sizeof(Flags)))
+        {
+            skip("The configuration flags of %S cannot be set: 0x%lx\n", InstanceId, GetLastError());
+            break;
+        }
+        SetLastError(0xDEADBEEF);
+        Ret = pSetupDiGetDevicePropertyW(DeviceSet, &Device, &DEVPKEY_Device_InstallState, &PropertyType, (BYTE *)&State, sizeof(State), &Required, 0);
+        ok(Ret, "%S, flags 0x%lx: failed with 0x%lx\n", InstanceId, Flags, GetLastError());
+        ok(!Ret || (PropertyType == DEVPROP_TYPE_UINT32 && Required == sizeof(DWORD) && State == Cases[i].State),
+           "%S, flags 0x%lx: state %lu (type 0x%lx, %lu bytes), expected %lu\n", InstanceId, Flags, State, PropertyType, Required, Cases[i].State);
+    }
+
+    /* A number is a four-byte REG_DWORD: the same bytes under another type, or fewer of them, are not a number */
+    {
+        static const struct { DWORD RegType; DWORD Size; BOOL Number; } Raw[] =
+        {
+            { REG_DWORD, 4, TRUE }, { REG_BINARY, 4, FALSE }, { REG_BINARY, 1, FALSE }, { REG_DWORD, 2, FALSE }, { REG_BINARY, 3, FALSE },
+        };
+        WCHAR KeyName[320];
+        HKEY Key;
+
+        wcscpy(KeyName, L"SYSTEM\\CurrentControlSet\\Enum\\");
+        wcscat(KeyName, InstanceId);
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_SET_VALUE, &Key))
+        {
+            skip("The key of %S cannot be opened\n", InstanceId);
+        }
+        else
+        {
+            static const BYTE Bytes[4] = { 0x20, 0, 0, 0 };
+
+            for (i = 0; i < ARRAYSIZE(Raw); i++)
+            {
+                DWORD Value = 0xFFFFFFFF, Required = 0;
+                DEVPROPTYPE PropertyType = 0;
+                BOOL Ret;
+
+                if (RegSetValueExW(Key, L"ConfigFlags", 0, Raw[i].RegType, Bytes, Raw[i].Size))
+                {
+                    skip("The configuration flags of %S cannot be written\n", InstanceId);
+                    break;
+                }
+                SetLastError(0xDEADBEEF);
+                Ret = pSetupDiGetDevicePropertyW(DeviceSet, &Device, &DEVPKEY_Device_ConfigFlags, &PropertyType, (BYTE *)&Value, sizeof(Value), &Required, 0);
+                if (Raw[i].Number)
+                {
+                    ok(Ret && PropertyType == DEVPROP_TYPE_UINT32 && Value == 0x20, "Registry type %lu, %lu bytes: %d, error 0x%lx, type 0x%lx, value 0x%lx\n",
+                       Raw[i].RegType, Raw[i].Size, Ret, GetLastError(), PropertyType, Value);
+                }
+                else
+                {
+                    ok(!Ret && GetLastError() == ERROR_NOT_FOUND, "Registry type %lu, %lu bytes: %d, error 0x%lx, expected not found\n",
+                       Raw[i].RegType, Raw[i].Size, Ret, GetLastError());
+                }
+            }
+            RegCloseKey(Key);
+        }
+    }
+
+    SetupDiSetDeviceRegistryPropertyW(DeviceSet, &Device, SPDRP_CONFIGFLAGS, (BYTE *)&Original, sizeof(Original));
+}
+
 START_TEST(SetupDiGetDeviceProperty)
 {
     HDEVINFO DeviceSet;
@@ -488,6 +736,7 @@ START_TEST(SetupDiGetDeviceProperty)
         pCM_Get_DevNode_Status = (FN_CM_Get_DevNode_Status)GetProcAddress(hCfgMgr, "CM_Get_DevNode_Status");
         pCM_Get_Parent = (FN_CM_Get_Parent)GetProcAddress(hCfgMgr, "CM_Get_Parent");
         pCM_Get_Device_IDW = (FN_CM_Get_Device_IDW)GetProcAddress(hCfgMgr, "CM_Get_Device_IDW");
+        pCM_Get_DevNode_Registry_PropertyW = (FN_CM_Get_DevNode_Registry_PropertyW)GetProcAddress(hCfgMgr, "CM_Get_DevNode_Registry_PropertyW");
         if (!hCfgMgr || !pCM_Get_DevNode_Status || !pCM_Get_Parent || !pCM_Get_Device_IDW)
         {
             skip("cfgmgr32 is not available\n");
@@ -508,6 +757,7 @@ START_TEST(SetupDiGetDeviceProperty)
     Device.cbSize = sizeof(Device);
     if (!SetupDiEnumDeviceInfo(DeviceSet, 0, &Device))
     {
+        ok(GetLastError() == ERROR_NO_MORE_ITEMS, "The first enumeration failed with 0x%lx\n", GetLastError());
         skip("No devices\n");
         SetupDiDestroyDeviceInfoList(DeviceSet);
         FreeLibrary(hCfgMgr);
@@ -516,6 +766,7 @@ START_TEST(SetupDiGetDeviceProperty)
 
     TestArguments(DeviceSet, &Device);
     TestForeignDevice(DeviceSet, &Device);
+    TestInstallState(DeviceSet);
 
     for (Index = 0; ; Index++)
     {
