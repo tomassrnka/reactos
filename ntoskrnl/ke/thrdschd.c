@@ -807,6 +807,20 @@ KiSwapThread(IN PKTHREAD CurrentThread,
     ASSERT(__readeflags() & EFLAGS_INTERRUPT_MASK);
 #endif
 
+#ifdef CONFIG_SMP
+    /* Threads readied under the dispatcher lock right before this wait (a
+       set-and-wait, a queue waiter activated by this thread) are still on
+       the deferred ready list: place them first, or the thread chosen below
+       may be a lower-priority one and they wait until this processor next
+       retires DPCs, which under load is the next quantum end */
+    if (Prcb->DeferredReadyListHead.Next)
+    {
+        KIRQL OldIrql = KeRaiseIrqlToSynchLevel();
+        KiProcessDeferredReadyList(Prcb);
+        KeLowerIrql(OldIrql);
+    }
+#endif
+
     /* Acquire the PRCB lock */
     KiAcquirePrcbLock(Prcb);
 
