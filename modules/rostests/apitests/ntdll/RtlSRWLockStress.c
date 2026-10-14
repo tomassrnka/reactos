@@ -436,6 +436,7 @@ static VOID RunChild(PCSTR Case)
     static const ULONG Writers[] = { MODE_EXCLUSIVE, MODE_EXCLUSIVE };
     static const ULONG WriterReader[] = { MODE_EXCLUSIVE, MODE_SHARED };
     static const ULONG WriterReaders[] = { MODE_EXCLUSIVE, MODE_SHARED, MODE_SHARED };
+    static const ULONG WriterManyReaders[] = { MODE_EXCLUSIVE, MODE_SHARED, MODE_SHARED, MODE_SHARED, MODE_SHARED, MODE_SHARED };
     static const ULONG Mixed[] = { MODE_MIXED, MODE_MIXED, MODE_MIXED, MODE_MIXED };
 
     QueryPerformanceFrequency(&g_Freq);
@@ -446,6 +447,8 @@ static VOID RunChild(PCSTR Case)
         RunLockCase(Case, _countof(WriterReader), WriterReader);
     else if (!strcmp(Case, "writerreaders"))
         RunLockCase(Case, _countof(WriterReaders), WriterReaders);
+    else if (!strcmp(Case, "manyreaders"))
+        RunLockCase(Case, _countof(WriterManyReaders), WriterManyReaders);
     else if (!strcmp(Case, "mixed"))
         RunLockCase(Case, _countof(Mixed), Mixed);
     else if (!strcmp(Case, "condvar"))
@@ -494,6 +497,7 @@ START_TEST(RtlSRWLockStress)
     RunCase(argv[0], "writers");
     RunCase(argv[0], "writerreader");
     RunCase(argv[0], "writerreaders");
+    RunCase(argv[0], "manyreaders");
     RunCase(argv[0], "mixed");
     RunCase(argv[0], "condvar");
 }
