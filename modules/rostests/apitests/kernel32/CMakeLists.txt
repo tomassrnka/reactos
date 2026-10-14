@@ -38,6 +38,7 @@ list(APPEND SOURCE
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
+    GetOverlappedResultEx.c
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
     IdleProcessor.c
