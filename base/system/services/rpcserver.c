@@ -5207,161 +5207,173 @@ RChangeServiceConfig2A(
 }
 
 
+/*
+ * The FailureActions registry value has the same layout on every architecture:
+ * five DWORDs (reset period, reboot message offset, command offset, action
+ * count, offset of the action array) followed by the SC_ACTION array. The
+ * reboot message and the command are stored in their own values.
+ */
+#define FAILURE_ACTIONS_HEADER_SIZE (5 * sizeof(DWORD))
+
+static DWORD
+ScmReadFailureActions(HKEY hServiceKey,
+                      PDWORD pdwResetPeriod,
+                      PDWORD pcActions,
+                      LPSC_ACTION *ppActions)
+{
+    PBYTE pValue = NULL;
+    DWORD dwType = 0;
+    DWORD dwSize = 0;
+    DWORD dwOffset, cActions, dwError;
+
+    *pdwResetPeriod = 0;
+    *pcActions = 0;
+    *ppActions = NULL;
+
+    dwError = RegQueryValueExW(hServiceKey,
+                               L"FailureActions",
+                               NULL,
+                               &dwType,
+                               NULL,
+                               &dwSize);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    if (dwType != REG_BINARY || dwSize < FAILURE_ACTIONS_HEADER_SIZE)
+        return ERROR_INVALID_DATA;
+
+    pValue = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
+    if (pValue == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    dwError = RegQueryValueExW(hServiceKey,
+                               L"FailureActions",
+                               NULL,
+                               NULL,
+                               pValue,
+                               &dwSize);
+    if (dwError != ERROR_SUCCESS)
+        goto done;
+
+    if (dwSize < FAILURE_ACTIONS_HEADER_SIZE)
+    {
+        dwError = ERROR_INVALID_DATA;
+        goto done;
+    }
+
+    cActions = ((PDWORD)pValue)[3];
+    dwOffset = ((PDWORD)pValue)[4];
+
+    /* Values written before the offset was stored have 0 here */
+    if (dwOffset < FAILURE_ACTIONS_HEADER_SIZE)
+        dwOffset = FAILURE_ACTIONS_HEADER_SIZE;
+
+#ifdef _WIN64
+    /* Earlier amd64 builds stored the 40-byte in-memory structure: the count at byte 24 and the actions at byte 40 */
+    if (cActions == 0 && dwSize >= 40 && ((PDWORD)pValue)[6] != 0 &&
+        dwSize == 40 + ((PDWORD)pValue)[6] * sizeof(SC_ACTION))
+    {
+        cActions = ((PDWORD)pValue)[6];
+        dwOffset = 40;
+    }
+#endif
+
+    if (dwOffset >= dwSize)
+        cActions = 0;
+    else
+        cActions = min(cActions, (dwSize - dwOffset) / sizeof(SC_ACTION));
+
+    if (cActions > 0)
+    {
+        *ppActions = HeapAlloc(GetProcessHeap(), 0, cActions * sizeof(SC_ACTION));
+        if (*ppActions == NULL)
+        {
+            dwError = ERROR_NOT_ENOUGH_MEMORY;
+            goto done;
+        }
+
+        RtlCopyMemory(*ppActions, pValue + dwOffset, cActions * sizeof(SC_ACTION));
+    }
+
+    *pdwResetPeriod = ((PDWORD)pValue)[0];
+    *pcActions = cActions;
+
+done:
+    HeapFree(GetProcessHeap(), 0, pValue);
+    return dwError;
+}
+
+
 static DWORD
 ScmSetFailureActions(HKEY hServiceKey,
                      LPSERVICE_FAILURE_ACTIONSW lpFailureActions)
 {
-    LPSERVICE_FAILURE_ACTIONSW lpReadBuffer = NULL;
-    LPSERVICE_FAILURE_ACTIONSW lpWriteBuffer = NULL;
+    LPSC_ACTION lpOldActions = NULL;
+    PBYTE pWriteBuffer = NULL;
+    DWORD dwOldResetPeriod = 0;
+    DWORD cOldActions = 0;
+    DWORD dwResetPeriod, cActions;
+    LPSC_ACTION lpActions;
     DWORD dwRequiredSize = 0;
-    DWORD dwType = 0;
     DWORD dwError;
 
     /* There is nothing to be done if we have no failure actions */
     if (lpFailureActions == NULL)
         return ERROR_SUCCESS;
 
-    /*
-     * 1- Retrieve the original value of FailureActions.
-     */
-
-    /* Query value length */
-    dwError = RegQueryValueExW(hServiceKey,
-                               L"FailureActions",
-                               NULL,
-                               &dwType,
-                               NULL,
-                               &dwRequiredSize);
+    /* Retrieve the original value of FailureActions (none if it is missing or invalid) */
+    dwError = ScmReadFailureActions(hServiceKey,
+                                    &dwOldResetPeriod,
+                                    &cOldActions,
+                                    &lpOldActions);
     if (dwError != ERROR_SUCCESS &&
-        dwError != ERROR_MORE_DATA &&
-        dwError != ERROR_FILE_NOT_FOUND)
-    {
+        dwError != ERROR_FILE_NOT_FOUND &&
+        dwError != ERROR_INVALID_DATA)
         return dwError;
-    }
-
-    dwRequiredSize = (dwType == REG_BINARY) ? max(sizeof(SERVICE_FAILURE_ACTIONSW), dwRequiredSize)
-                                            : sizeof(SERVICE_FAILURE_ACTIONSW);
-
-    /* Initialize the read buffer */
-    lpReadBuffer = HeapAlloc(GetProcessHeap(),
-                             HEAP_ZERO_MEMORY,
-                             dwRequiredSize);
-    if (lpReadBuffer == NULL)
-        return ERROR_NOT_ENOUGH_MEMORY;
-
-    /* Now we can fill the read buffer */
-    if (dwError != ERROR_FILE_NOT_FOUND &&
-        dwType == REG_BINARY)
-    {
-        dwError = RegQueryValueExW(hServiceKey,
-                                   L"FailureActions",
-                                   NULL,
-                                   NULL,
-                                   (LPBYTE)lpReadBuffer,
-                                   &dwRequiredSize);
-        if (dwError != ERROR_SUCCESS &&
-            dwError != ERROR_FILE_NOT_FOUND)
-            goto done;
-
-        if (dwRequiredSize < sizeof(SERVICE_FAILURE_ACTIONSW))
-            dwRequiredSize = sizeof(SERVICE_FAILURE_ACTIONSW);
-    }
-    else
-    {
-        /*
-         * The value of the error doesn't really matter, the only
-         * important thing is that it must be != ERROR_SUCCESS.
-         */
-        dwError = ERROR_INVALID_DATA;
-    }
-
-    if (dwError == ERROR_SUCCESS)
-    {
-        lpReadBuffer->cActions = min(lpReadBuffer->cActions, (dwRequiredSize - sizeof(SERVICE_FAILURE_ACTIONSW)) / sizeof(SC_ACTION));
-        lpReadBuffer->lpsaActions = (lpReadBuffer->cActions > 0 ? (LPSC_ACTION)(lpReadBuffer + 1) : NULL);
-    }
-    else
-    {
-        lpReadBuffer->dwResetPeriod = 0;
-        lpReadBuffer->cActions = 0;
-        lpReadBuffer->lpsaActions = NULL;
-    }
-
-    lpReadBuffer->lpRebootMsg = NULL;
-    lpReadBuffer->lpCommand = NULL;
-
-    /*
-     * 2- Initialize the new value to set.
-     */
-
-    dwRequiredSize = sizeof(SERVICE_FAILURE_ACTIONSW);
 
     if (lpFailureActions->lpsaActions == NULL)
     {
         /*
-         * lpFailureActions->cActions is ignored.
-         * Therefore we use the original values
-         * of cActions and lpsaActions.
+         * lpFailureActions->dwResetPeriod and lpFailureActions->cActions are ignored.
+         * Therefore we use the original values of dwResetPeriod, cActions and the actions.
          */
-        dwRequiredSize += lpReadBuffer->cActions * sizeof(SC_ACTION);
+        dwResetPeriod = dwOldResetPeriod;
+        cActions = cOldActions;
+        lpActions = lpOldActions;
+    }
+    else if (lpFailureActions->cActions > 0)
+    {
+        dwResetPeriod = lpFailureActions->dwResetPeriod;
+        cActions = lpFailureActions->cActions;
+        lpActions = lpFailureActions->lpsaActions;
     }
     else
     {
-        /*
-         * The reset period and array of failure actions
-         * are deleted if lpFailureActions->cActions == 0 .
-         */
-        dwRequiredSize += lpFailureActions->cActions * sizeof(SC_ACTION);
+        /* The reset period and array of failure actions are deleted */
+        dwResetPeriod = 0;
+        cActions = 0;
+        lpActions = NULL;
     }
 
-    lpWriteBuffer = HeapAlloc(GetProcessHeap(),
-                              HEAP_ZERO_MEMORY,
-                              dwRequiredSize);
-    if (lpWriteBuffer == NULL)
+    dwRequiredSize = FAILURE_ACTIONS_HEADER_SIZE + cActions * sizeof(SC_ACTION);
+    pWriteBuffer = HeapAlloc(GetProcessHeap(),
+                             HEAP_ZERO_MEMORY,
+                             dwRequiredSize);
+    if (pWriteBuffer == NULL)
     {
         dwError = ERROR_NOT_ENOUGH_MEMORY;
         goto done;
     }
 
-    /* Clean the pointers as they have no meaning when the structure is stored in the registry */
-    lpWriteBuffer->lpRebootMsg = NULL;
-    lpWriteBuffer->lpCommand = NULL;
-    lpWriteBuffer->lpsaActions = NULL;
+    ((PDWORD)pWriteBuffer)[0] = dwResetPeriod;
+    ((PDWORD)pWriteBuffer)[3] = cActions;
+    ((PDWORD)pWriteBuffer)[4] = FAILURE_ACTIONS_HEADER_SIZE;
 
-    /* Set the members */
-    if (lpFailureActions->lpsaActions == NULL)
+    if (cActions > 0)
     {
-        /*
-         * lpFailureActions->dwResetPeriod and lpFailureActions->cActions are ignored.
-         * Therefore we use the original values of dwResetPeriod, cActions and lpsaActions.
-         */
-        lpWriteBuffer->dwResetPeriod = lpReadBuffer->dwResetPeriod;
-        lpWriteBuffer->cActions = lpReadBuffer->cActions;
-
-        if (lpReadBuffer->lpsaActions != NULL)
-        {
-            memmove(lpWriteBuffer + 1,
-                    lpReadBuffer->lpsaActions,
-                    lpReadBuffer->cActions * sizeof(SC_ACTION));
-        }
-    }
-    else
-    {
-        if (lpFailureActions->cActions > 0)
-        {
-            lpWriteBuffer->dwResetPeriod = lpFailureActions->dwResetPeriod;
-            lpWriteBuffer->cActions = lpFailureActions->cActions;
-
-            memmove(lpWriteBuffer + 1,
-                    lpFailureActions->lpsaActions,
-                    lpFailureActions->cActions * sizeof(SC_ACTION));
-        }
-        else
-        {
-            /* The reset period and array of failure actions are deleted */
-            lpWriteBuffer->dwResetPeriod = 0;
-            lpWriteBuffer->cActions = 0;
-        }
+        RtlCopyMemory(pWriteBuffer + FAILURE_ACTIONS_HEADER_SIZE,
+                      lpActions,
+                      cActions * sizeof(SC_ACTION));
     }
 
     /* Save the new failure actions into the registry */
@@ -5369,7 +5381,7 @@ ScmSetFailureActions(HKEY hServiceKey,
                              L"FailureActions",
                              0,
                              REG_BINARY,
-                             (LPBYTE)lpWriteBuffer,
+                             pWriteBuffer,
                              dwRequiredSize);
 
     /* We modify the strings only in case of success.*/
@@ -5419,11 +5431,11 @@ ScmSetFailureActions(HKEY hServiceKey,
     }
 
 done:
-    if (lpWriteBuffer != NULL)
-        HeapFree(GetProcessHeap(), 0, lpWriteBuffer);
+    if (pWriteBuffer != NULL)
+        HeapFree(GetProcessHeap(), 0, pWriteBuffer);
 
-    if (lpReadBuffer != NULL)
-        HeapFree(GetProcessHeap(), 0, lpReadBuffer);
+    if (lpOldActions != NULL)
+        HeapFree(GetProcessHeap(), 0, lpOldActions);
 
     return dwError;
 }
@@ -5576,7 +5588,7 @@ RQueryServiceConfig2A(
     PSERVICE lpService = NULL;
     HKEY hServiceKey = NULL;
     DWORD dwRequiredSize = 0;
-    DWORD dwType = 0;
+    LPSC_ACTION lpActions = NULL;
     LPWSTR lpDescriptionW = NULL;
     LPWSTR lpRebootMessageW = NULL;
     LPWSTR lpFailureCommandW = NULL;
@@ -5672,22 +5684,20 @@ RQueryServiceConfig2A(
         LPSERVICE_FAILURE_ACTIONSA lpFailureActions = (LPSERVICE_FAILURE_ACTIONSA)lpBuffer;
         LPSTR lpStr = NULL;
 
-        /* Query value length */
-        dwError = RegQueryValueExW(hServiceKey,
-                                   L"FailureActions",
-                                   NULL,
-                                   &dwType,
-                                   NULL,
-                                   &dwRequiredSize);
-        if (dwError != ERROR_SUCCESS &&
-            dwError != ERROR_MORE_DATA &&
-            dwError != ERROR_FILE_NOT_FOUND)
-        {
-            goto done;
-        }
+        DWORD dwResetPeriod = 0;
+        DWORD cActions = 0;
 
-        dwRequiredSize = (dwType == REG_BINARY) ? max(sizeof(SERVICE_FAILURE_ACTIONSA), dwRequiredSize)
-                                                : sizeof(SERVICE_FAILURE_ACTIONSA);
+        /* A missing or invalid value means that no failure actions are set */
+        dwError = ScmReadFailureActions(hServiceKey,
+                                        &dwResetPeriod,
+                                        &cActions,
+                                        &lpActions);
+        if (dwError != ERROR_SUCCESS &&
+            dwError != ERROR_FILE_NOT_FOUND &&
+            dwError != ERROR_INVALID_DATA)
+            goto done;
+
+        dwRequiredSize = sizeof(SERVICE_FAILURE_ACTIONSA) + cActions * sizeof(SC_ACTION);
 
         /* Get the strings */
         ScmReadString(hServiceKey,
@@ -5711,46 +5721,18 @@ RQueryServiceConfig2A(
             goto done;
         }
 
-        /* Now we can fill the buffer */
-        if (dwError != ERROR_FILE_NOT_FOUND && dwType == REG_BINARY)
-        {
-            dwError = RegQueryValueExW(hServiceKey,
-                                       L"FailureActions",
-                                       NULL,
-                                       NULL,
-                                       (LPBYTE)lpFailureActions,
-                                       &dwRequiredSize);
-            if (dwError != ERROR_SUCCESS && dwError != ERROR_FILE_NOT_FOUND)
-                goto done;
+        lpFailureActions->dwResetPeriod = dwResetPeriod;
+        lpFailureActions->cActions = cActions;
+        lpFailureActions->lpsaActions = NULL;
 
-            if (dwRequiredSize < sizeof(SERVICE_FAILURE_ACTIONSA))
-                dwRequiredSize = sizeof(SERVICE_FAILURE_ACTIONSA);
-        }
-        else
+        if (cActions > 0)
         {
-            /*
-             * The value of the error doesn't really matter, the only
-             * important thing is that it must be != ERROR_SUCCESS .
-             */
-            dwError = ERROR_INVALID_DATA;
-        }
-
-        if (dwError == ERROR_SUCCESS)
-        {
-            lpFailureActions->cActions = min(lpFailureActions->cActions, (dwRequiredSize - sizeof(SERVICE_FAILURE_ACTIONSA)) / sizeof(SC_ACTION));
-
             /* Here lpFailureActions->lpsaActions contains an offset. The conversion is done by the caller. */
-            lpFailureActions->lpsaActions = (lpFailureActions->cActions > 0 ? (LPSC_ACTION)(ULONG_PTR)sizeof(SERVICE_FAILURE_ACTIONSA) : NULL);
+            lpFailureActions->lpsaActions = (LPSC_ACTION)(ULONG_PTR)sizeof(SERVICE_FAILURE_ACTIONSA);
+            RtlCopyMemory(lpFailureActions + 1, lpActions, cActions * sizeof(SC_ACTION));
+        }
 
-            lpStr = (LPSTR)((ULONG_PTR)(lpFailureActions + 1) + lpFailureActions->cActions * sizeof(SC_ACTION));
-        }
-        else
-        {
-            lpFailureActions->dwResetPeriod = 0;
-            lpFailureActions->cActions = 0;
-            lpFailureActions->lpsaActions = NULL;
-            lpStr = (LPSTR)(lpFailureActions + 1);
-        }
+        lpStr = (LPSTR)((ULONG_PTR)(lpFailureActions + 1) + cActions * sizeof(SC_ACTION));
 
         lpFailureActions->lpRebootMsg = NULL;
         lpFailureActions->lpCommand = NULL;
@@ -5762,7 +5744,7 @@ RQueryServiceConfig2A(
                                 lpRebootMessageW,
                                 -1,
                                 lpStr,
-                                (int)wcslen(lpRebootMessageW),
+                                (int)((wcslen(lpRebootMessageW) + 1) * sizeof(WCHAR)),
                                 NULL,
                                 NULL);
             lpFailureActions->lpRebootMsg = (LPSTR)((ULONG_PTR)lpStr - (ULONG_PTR)lpFailureActions);
@@ -5776,7 +5758,7 @@ RQueryServiceConfig2A(
                                 lpFailureCommandW,
                                 -1,
                                 lpStr,
-                                (int)wcslen(lpFailureCommandW),
+                                (int)((wcslen(lpFailureCommandW) + 1) * sizeof(WCHAR)),
                                 NULL,
                                 NULL);
             lpFailureActions->lpCommand = (LPSTR)((ULONG_PTR)lpStr - (ULONG_PTR)lpFailureActions);
@@ -5798,6 +5780,9 @@ done:
 
     if (lpFailureCommandW != NULL)
         HeapFree(GetProcessHeap(), 0, lpFailureCommandW);
+
+    if (lpActions != NULL)
+        HeapFree(GetProcessHeap(), 0, lpActions);
 
     if (hServiceKey != NULL)
         RegCloseKey(hServiceKey);
@@ -5823,7 +5808,7 @@ RQueryServiceConfig2W(
     PSERVICE lpService = NULL;
     HKEY hServiceKey = NULL;
     DWORD dwRequiredSize = 0;
-    DWORD dwType = 0;
+    LPSC_ACTION lpActions = NULL;
     LPWSTR lpDescription = NULL;
     LPWSTR lpRebootMessage = NULL;
     LPWSTR lpFailureCommand = NULL;
@@ -5910,22 +5895,20 @@ RQueryServiceConfig2W(
         LPSERVICE_FAILURE_ACTIONSW lpFailureActions = (LPSERVICE_FAILURE_ACTIONSW)lpBuffer;
         LPWSTR lpStr = NULL;
 
-        /* Query value length */
-        dwError = RegQueryValueExW(hServiceKey,
-                                   L"FailureActions",
-                                   NULL,
-                                   &dwType,
-                                   NULL,
-                                   &dwRequiredSize);
-        if (dwError != ERROR_SUCCESS &&
-            dwError != ERROR_MORE_DATA &&
-            dwError != ERROR_FILE_NOT_FOUND)
-        {
-            goto done;
-        }
+        DWORD dwResetPeriod = 0;
+        DWORD cActions = 0;
 
-        dwRequiredSize = (dwType == REG_BINARY) ? max(sizeof(SERVICE_FAILURE_ACTIONSW), dwRequiredSize)
-                                                : sizeof(SERVICE_FAILURE_ACTIONSW);
+        /* A missing or invalid value means that no failure actions are set */
+        dwError = ScmReadFailureActions(hServiceKey,
+                                        &dwResetPeriod,
+                                        &cActions,
+                                        &lpActions);
+        if (dwError != ERROR_SUCCESS &&
+            dwError != ERROR_FILE_NOT_FOUND &&
+            dwError != ERROR_INVALID_DATA)
+            goto done;
+
+        dwRequiredSize = sizeof(SERVICE_FAILURE_ACTIONSW) + cActions * sizeof(SC_ACTION);
 
         /* Get the strings */
         ScmReadString(hServiceKey,
@@ -5949,46 +5932,18 @@ RQueryServiceConfig2W(
             goto done;
         }
 
-        /* Now we can fill the buffer */
-        if (dwError != ERROR_FILE_NOT_FOUND && dwType == REG_BINARY)
-        {
-            dwError = RegQueryValueExW(hServiceKey,
-                                       L"FailureActions",
-                                       NULL,
-                                       NULL,
-                                       (LPBYTE)lpFailureActions,
-                                       &dwRequiredSize);
-            if (dwError != ERROR_SUCCESS && dwError != ERROR_FILE_NOT_FOUND)
-                goto done;
+        lpFailureActions->dwResetPeriod = dwResetPeriod;
+        lpFailureActions->cActions = cActions;
+        lpFailureActions->lpsaActions = NULL;
 
-            if (dwRequiredSize < sizeof(SERVICE_FAILURE_ACTIONSW))
-                dwRequiredSize = sizeof(SERVICE_FAILURE_ACTIONSW);
-        }
-        else
+        if (cActions > 0)
         {
-            /*
-             * The value of the error doesn't really matter, the only
-             * important thing is that it must be != ERROR_SUCCESS .
-             */
-            dwError = ERROR_INVALID_DATA;
-        }
-
-        if (dwError == ERROR_SUCCESS)
-        {
-            lpFailureActions->cActions = min(lpFailureActions->cActions, (dwRequiredSize - sizeof(SERVICE_FAILURE_ACTIONSW)) / sizeof(SC_ACTION));
-
             /* Here lpFailureActions->lpsaActions contains an offset. The conversion is done by the caller. */
-            lpFailureActions->lpsaActions = (lpFailureActions->cActions > 0 ? (LPSC_ACTION)(ULONG_PTR)sizeof(SERVICE_FAILURE_ACTIONSW) : NULL);
+            lpFailureActions->lpsaActions = (LPSC_ACTION)(ULONG_PTR)sizeof(SERVICE_FAILURE_ACTIONSW);
+            RtlCopyMemory(lpFailureActions + 1, lpActions, cActions * sizeof(SC_ACTION));
+        }
 
-            lpStr = (LPWSTR)((ULONG_PTR)(lpFailureActions + 1) + lpFailureActions->cActions * sizeof(SC_ACTION));
-        }
-        else
-        {
-            lpFailureActions->dwResetPeriod = 0;
-            lpFailureActions->cActions = 0;
-            lpFailureActions->lpsaActions = NULL;
-            lpStr = (LPWSTR)(lpFailureActions + 1);
-        }
+        lpStr = (LPWSTR)((ULONG_PTR)(lpFailureActions + 1) + cActions * sizeof(SC_ACTION));
 
         lpFailureActions->lpRebootMsg = NULL;
         lpFailureActions->lpCommand   = NULL;
@@ -6022,6 +5977,9 @@ done:
 
     if (lpFailureCommand != NULL)
         HeapFree(GetProcessHeap(), 0, lpFailureCommand);
+
+    if (lpActions != NULL)
+        HeapFree(GetProcessHeap(), 0, lpActions);
 
     if (hServiceKey != NULL)
         RegCloseKey(hServiceKey);
