@@ -1019,6 +1019,22 @@ FdoIoctlDiskGrowPartition(
         goto Exit;
     }
 
+    // The layout numbers the partitions in order, while a partition device keeps the number it got
+    // when it appeared; after a layout change the two can differ. Only a partition both agree on
+    // is grown, never one that a device-number client did not mean.
+    for (PSINGLE_LIST_ENTRY cur = FdoExtension->PartitionList.Next; cur != NULL; cur = cur->Next)
+    {
+        PPARTITION_EXTENSION pe = CONTAINING_RECORD(cur, PARTITION_EXTENSION, ListEntry);
+
+        if (pe->StartingOffset == (UINT64)entry->StartingOffset.QuadPart &&
+            pe->PartitionLength == (UINT64)entry->PartitionLength.QuadPart &&
+            pe->DetectedNumber != grow->PartitionNumber)
+        {
+            status = STATUS_NO_SUCH_DEVICE;
+            goto Exit;
+        }
+    }
+
     sectorSize = FdoExtension->DiskData.BytesPerSector ? FdoExtension->DiskData.BytesPerSector : 512;
     start = entry->StartingOffset.QuadPart;
     oldEnd = start + entry->PartitionLength.QuadPart;
@@ -1128,14 +1144,19 @@ FdoIoctlDiskGrowPartition(
 
     if (newLayout->PartitionStyle == PARTITION_STYLE_MBR && index >= 4)
     {
-        // the link entry of the previous EBR spans this partition's EBR and the partition
+        // the link entry of the previous EBR spans this partition's EBR and the partition:
+        // it follows a shrink when it ended with the partition, and holds a larger one
         for (i = 4; i < newLayout->PartitionCount; i++)
         {
             PPARTITION_INFORMATION_EX link = &newLayout->PartitionEntry[i];
+            INT64 linkEnd = link->StartingOffset.QuadPart + link->PartitionLength.QuadPart;
 
-            if (IsContainerPartition(link->Mbr.PartitionType) &&
-                link->StartingOffset.QuadPart <= start &&
-                link->StartingOffset.QuadPart + link->PartitionLength.QuadPart == oldEnd)
+            if (!IsContainerPartition(link->Mbr.PartitionType) ||
+                link->StartingOffset.QuadPart > start || linkEnd <= start)
+            {
+                continue;
+            }
+            if (linkEnd < newEnd || (linkEnd == oldEnd && newEnd < oldEnd))
             {
                 link->PartitionLength.QuadPart = newEnd - link->StartingOffset.QuadPart;
                 link->RewritePartition = TRUE;
