@@ -79,6 +79,7 @@
 80 stdcall ImageList_SetImageCount(ptr long)
 81 stdcall ImageList_SetOverlayImage(ptr long long)
 82 stdcall ImageList_Write(ptr ptr)
+@ stdcall -version=0x600+ ImageList_WriteEx(ptr long ptr)
 83 stdcall InitCommonControlsEx(ptr)
 84 stdcall InitMUILanguage(long)
 85 stdcall InitializeFlatSB(long)

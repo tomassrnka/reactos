@@ -171,6 +171,30 @@ static inline HIMAGELIST impl_from_IImageList2(IImageList2 *iface)
     return CONTAINING_RECORD(iface, struct _IMAGELIST, IImageList2_iface);
 }
 
+/*************************************************************************
+ * ImageList_WriteEx [COMCTL32.@]
+ *
+ * Writes an image list to a stream, in the format that a flag of 0 or ILP_DOWNLEVEL (1) asks for. The
+ * format of Windows Vista and later, which a flag of 0 selects there, is not written: both flags give the
+ * older format, which ImageList_Read reads on every version. Windows 7 accepts any other flag value
+ * as well (measured); those are written the same way.
+ *
+ * RETURNS
+ *     S_OK on success, E_POINTER for no image list, E_INVALIDARG for no stream
+ */
+HRESULT WINAPI ImageList_WriteEx(HIMAGELIST himl, DWORD dwFlags, IStream *pstm)
+{
+    TRACE("%p %lx %p\n", himl, dwFlags, pstm);
+
+    if (!himl)
+        return E_POINTER;
+    if (!pstm)
+        return E_INVALIDARG;
+
+    return ImageList_Write(himl, pstm) ? S_OK : E_FAIL;
+}
+
+
 static HBITMAP ImageList_CreateImage(HDC hdc, HIMAGELIST himl, UINT count);
 static HRESULT ImageListImpl_CreateInstance(const IUnknown *pUnkOuter, REFIID iid, void** ppv);
 static BOOL is_valid(HIMAGELIST himl);
@@ -3345,10 +3369,7 @@ static BOOL _write_bitmap(HBITMAP hBitmap, IStream *pstm)
           bmih->biWidth, bmih->biHeight,
           bmih->biPlanes, bmih->biBitCount);
 
-    if(FAILED(IStream_Write(pstm, data, totalSize, NULL)))
-	goto failed;
-
-    result = TRUE;
+    result = SUCCEEDED(IStream_Write(pstm, data, totalSize, NULL));
 
 failed:
     heap_free(data);
