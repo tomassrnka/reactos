@@ -226,6 +226,10 @@ static void ngc_core_error(struct super_block *sb, const char *msg)
 	struct ntfs_volume *vol = NTFS_SB(sb);
 	if (!vol || NVolErrors(vol) || !ngc_msg_means_corruption(msg))
 		return;
+	/* A resize's write refused for lack of memory reads to the core as an I/O error: the resize
+	 * fails and ngc_resize_failed decides, the disk holding the last committed state. */
+	if (kshim_jnl_refusing(sb->s_bdev))
+		return;
 	NVolSetErrors(vol);
 	kshim_jnl_mark_errors(sb->s_bdev);
 }

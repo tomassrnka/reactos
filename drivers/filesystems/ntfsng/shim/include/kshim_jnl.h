@@ -72,6 +72,8 @@ int kshim_jnl_failed(struct block_device *b);	/* a write could not be protected:
 int kshim_jnl_in_place(struct block_device *b);
 /* While on (a resize), a commit or overlay write that would go in place fails instead. */
 void kshim_jnl_strict(struct block_device *b, int on);
+/* During a resize, the journal refused a write fallback: the write errors that follow are refusals. */
+int kshim_jnl_refusing(struct block_device *b);
 int kshim_jnl_errors_pending(struct block_device *b);	/* errors known, not yet on the medium */
 void kshim_jnl_deactivate(struct block_device *b);
 int kshim_jnl_commit(struct block_device *b);	/* 1 committed (device flushed), 0 nothing to do, <0 error */
