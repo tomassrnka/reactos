@@ -9,7 +9,9 @@ list(APPEND VISTA_SOURCE
      wine/input.c
      wine/misc.c
      wine/sysparams.c
-     wine/win.c)
+     wine/win.c
+     pointer.c
+     win8user.c)
      
 
 list(APPEND SOURCE
