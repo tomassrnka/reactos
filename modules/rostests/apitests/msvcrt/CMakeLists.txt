@@ -43,6 +43,7 @@ list(APPEND SOURCE_CRT_TESTS
     ../crt/log10.c
     ../crt/mbstowcs.c
     ../crt/mbtowc.c
+    ../crt/memops.c
     ../crt/rand_s.c
     ../crt/setjmp.c
     ../crt/sin.c
