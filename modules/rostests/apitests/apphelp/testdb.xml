@@ -401,5 +401,17 @@
             </MATCHING_FILE>
             <LAYER NAME="DATA_LAYER" />
         </EXE>
+        <!-- The user chooses the second of the layers the database names: it moves to the front -->
+        <EXE>
+            <NAME>test_match28.exe</NAME>
+            <APP_NAME>test_match28.exe</APP_NAME>
+            <VENDOR>Succeed</VENDOR>
+            <MATCHING_FILE>
+                <NAME>*</NAME>
+                <BIN_FILE_VERSION>1.0.0.0</BIN_FILE_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="DATA_LAYER" />
+            <LAYER NAME="DATA_LAYER2" />
+        </EXE>
     </DATABASE>
 </SDB>

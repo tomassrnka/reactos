@@ -8,6 +8,7 @@ list(APPEND SOURCE
     ignorefreelib.c
     ignoreloadlib.c
     layer_hooks.c
+    versionconflict.c
     versionlie.c
     verifyversion.c
     testlist.c

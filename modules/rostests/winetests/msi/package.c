@@ -5715,6 +5715,101 @@ done:
     MsiSetInternalUI(uilevel, NULL);
 }
 
+/*
+ * ReactOS reports NT 5.2 and gives packages Windows 7, unless the environment names a Windows Server 2003
+ * compatibility layer (whole words of the list, up to the 255 characters the compatibility database reads).
+ * Windows gives the real version whatever the variable says, because nothing shims this process.
+ */
+static void test_installprops_compat_layer(void)
+{
+    static const struct
+    {
+        const char *layers;
+        BOOL server2003;
+    } tests[] =
+    {
+        { NULL, FALSE },
+        { "", FALSE },
+        { "WINSRV03SP1", TRUE },
+        { "winsrv03rtm", TRUE },
+        { "WINSRV03SP2 256COLOR", TRUE },
+        { "256COLOR  WINSRV03RTM", TRUE },
+        { "!WINSRV03SP1", TRUE },
+        { "#WINSRV03SP1", TRUE },
+        { "256COLOR\tWINSRV03SP2", TRUE },
+        { "NOTWINSRV03", FALSE },
+        { "WINSRV03SP1X", FALSE },
+        { "WINSRV03", FALSE },
+        { "WINSRV03SP", FALSE },
+        { "WINXPSP3", FALSE },
+        { "WIN7RTM 256COLOR", FALSE },
+    };
+    char value[MAX_PATH + 300], buf[MAX_PATH], expected[16];
+    char previous[512];
+    DWORD size, previous_size;
+    MSIHANDLE hdb, hpkg;
+    unsigned int i;
+    UINT r;
+
+    if (!is_reactos())
+        return;
+
+    previous_size = GetEnvironmentVariableA("__COMPAT_LAYER", previous, sizeof(previous));
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    for (i = 0; i < ARRAY_SIZE(tests) + 2; i++)
+    {
+        BOOL server2003;
+        const char *layers;
+
+        if (i < ARRAY_SIZE(tests))
+        {
+            layers = tests[i].layers;
+            server2003 = tests[i].server2003;
+        }
+        else
+        {
+            /* A list the database does not read (more than 255 characters) names no layer, whatever is in it */
+            memset(value, ' ', 300);
+            value[300] = 0;
+            if (i == ARRAY_SIZE(tests))
+                memcpy(value, "WINSRV03SP1", 11);
+            else
+                memcpy(value + 290, "WINSRV03SP1", 11);
+            layers = value;
+            server2003 = FALSE;
+        }
+
+        SetEnvironmentVariableA("__COMPAT_LAYER", layers);
+
+        hdb = create_package_db();
+        ok(hdb, "failed to create database\n");
+        r = package_from_db(hdb, &hpkg);
+        if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+        {
+            skip("Not enough rights to perform tests\n");
+            DeleteFileA(msifile);
+            break;
+        }
+        ok(r == ERROR_SUCCESS, "failed to create package %u\n", r);
+        MsiCloseHandle(hdb);
+
+        size = sizeof(buf);
+        buf[0] = 0;
+        r = MsiGetPropertyA(hpkg, "VersionNT", buf, &size);
+        ok(r == ERROR_SUCCESS, "failed to get property: %u\n", r);
+        sprintf(expected, "%d", LOBYTE(LOWORD(GetVersion())) * 100 + HIBYTE(LOWORD(GetVersion())));
+        if (!strcmp(expected, "502") && !server2003)
+            strcpy(expected, "601");
+        ok(!strcmp(buf, expected), "layers '%.40s' (%u): VersionNT is '%s', expected '%s'\n", layers ? layers : "(none)", i, buf, expected);
+
+        MsiCloseHandle(hpkg);
+        DeleteFileA(msifile);
+    }
+
+    SetEnvironmentVariableA("__COMPAT_LAYER", previous_size && previous_size < sizeof(previous) ? previous : NULL);
+}
+
 static void test_launchconditions(void)
 {
     MSIHANDLE hpkg;
@@ -9574,6 +9669,7 @@ START_TEST(package)
     test_appsearch_drlocator();
     test_featureparents();
     test_installprops();
+    test_installprops_compat_layer();
     test_launchconditions();
     test_ccpsearch();
     test_complocator();

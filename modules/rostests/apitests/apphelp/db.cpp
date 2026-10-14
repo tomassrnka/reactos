@@ -1513,7 +1513,7 @@ static void test_match_ex(const WCHAR* workdir, HSDB hsdb)
         test_create_exe(exename, 0);
 
         /* The layer in the environment is the user's choice, the EXE entry names the other one */
-        bool env_layer = is_reactos() && !_wcsicmp(TestName, L"test_match27.exe");
+        bool env_layer = is_reactos() && (!_wcsicmp(TestName, L"test_match27.exe") || !_wcsicmp(TestName, L"test_match28.exe"));
         if (env_layer)
             SetEnvironmentVariableW(L"__COMPAT_LAYER", L"DATA_LAYER2");
         ret = pSdbGetMatchingExe(hsdb, exename, NULL, NULL, 0, (SDBQUERYRESULT_VISTA*)&query);
