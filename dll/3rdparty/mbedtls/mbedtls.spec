@@ -22,3 +22,5 @@
 @ cdecl mbedtls_md_get_size(ptr)
 @ cdecl mbedtls_psa_get_random(ptr ptr long)
 @ cdecl psa_crypto_init()
+@ cdecl mbedtls_pk_get_bitlen(ptr)
+@ cdecl mbedtls_ssl_ciphersuite_get_cipher_key_bitlen(ptr)

@@ -534,6 +534,25 @@ static DWORD netcon_secure_connect_setup(netconn_t *connection, BOOL compat_mode
                 0, NULL, &out_desc, &attrs, NULL);
         TRACE("InitializeSecurityContext ret %08lx\n", status);
 
+#ifdef __REACTOS__
+        /* TLS 1.3 completes the handshake with the client's last flight; Windows returns it with SEC_E_OK */
+        if(status == SEC_E_OK && out_buf.cbBuffer) {
+            TRACE("sending %lu bytes\n", out_buf.cbBuffer);
+
+            size = sock_send(connection->socket, out_buf.pvBuffer, out_buf.cbBuffer, 0);
+            if(size != out_buf.cbBuffer) {
+                ERR("send failed\n");
+                status = ERROR_INTERNET_SECURITY_CHANNEL_ERROR;
+            }
+
+            FreeContextBuffer(out_buf.pvBuffer);
+            out_buf.pvBuffer = NULL;
+            out_buf.cbBuffer = 0;
+            if(status != SEC_E_OK)
+                break;
+        }
+#endif
+
         if(status == SEC_E_OK) {
             if(SecIsValidHandle(&connection->ssl_ctx))
                 DeleteSecurityContext(&connection->ssl_ctx);

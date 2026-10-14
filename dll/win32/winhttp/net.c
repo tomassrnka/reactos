@@ -394,6 +394,25 @@ DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD secur
                 0, NULL, &out_desc, &attrs, NULL);
         TRACE( "InitializeSecurityContext ret %#lx\n", status );
 
+#ifdef __REACTOS__
+        /* TLS 1.3 completes the handshake with the client's last flight; Windows returns it with SEC_E_OK */
+        if(status == SEC_E_OK && out_buf.cbBuffer) {
+            TRACE( "sending %lu bytes\n", out_buf.cbBuffer );
+
+            size = sock_send(conn->socket, out_buf.pvBuffer, out_buf.cbBuffer, NULL);
+            if(size != out_buf.cbBuffer) {
+                ERR("send failed\n");
+                res = ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
+            }
+
+            FreeContextBuffer(out_buf.pvBuffer);
+            out_buf.pvBuffer = NULL;
+            out_buf.cbBuffer = 0;
+            if(res != ERROR_SUCCESS)
+                break;
+        }
+#endif
+
         if(status == SEC_E_OK) {
             if(in_bufs[1].BufferType == SECBUFFER_EXTRA)
                 FIXME("SECBUFFER_EXTRA not supported\n");

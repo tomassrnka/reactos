@@ -170,7 +170,8 @@ static void read_config(void)
         {{'S','S','L',' ','3','.','0',0}, SP_PROT_SSL3_CLIENT, TRUE, FALSE},
         {{'T','L','S',' ','1','.','0',0}, SP_PROT_TLS1_0_CLIENT, TRUE, FALSE},
         {{'T','L','S',' ','1','.','1',0}, SP_PROT_TLS1_1_CLIENT, TRUE, FALSE /* NOTE: not enabled by default on Windows */ },
-        {{'T','L','S',' ','1','.','2',0}, SP_PROT_TLS1_2_CLIENT, TRUE, FALSE /* NOTE: not enabled by default on Windows */ }
+        {{'T','L','S',' ','1','.','2',0}, SP_PROT_TLS1_2_CLIENT, TRUE, FALSE /* NOTE: not enabled by default on Windows */ },
+        {{'T','L','S',' ','1','.','3',0}, SP_PROT_TLS1_3_CLIENT, TRUE, FALSE /* NOTE: like Windows 11 and Server 2022, not like Windows 10 */ }
     };
 
     /* No need for thread safety */

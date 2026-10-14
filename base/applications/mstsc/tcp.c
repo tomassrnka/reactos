@@ -606,6 +606,20 @@ ssl_handshake(RD_BOOL compat_mode)
 		status = InitializeSecurityContextA(cred, &ctx, g_ssl_server,  isc_req_flags, 0, 0, &in_desc,
 				0, NULL, &out_desc, &attrs, NULL);
 
+		/* TLS 1.3 completes the handshake with the client's last flight; Windows returns it with SEC_E_OK */
+		if (status == SEC_E_OK && out_buf.cbBuffer) {
+			size = send(g_sock, out_buf.pvBuffer, out_buf.cbBuffer, 0);
+			if (size != out_buf.cbBuffer) {
+				res = -1;
+			}
+
+			FreeContextBuffer(out_buf.pvBuffer);
+			out_buf.pvBuffer = NULL;
+			out_buf.cbBuffer = 0;
+			if (res != ERROR_SUCCESS)
+				break;
+		}
+
 		if (status == SEC_E_OK) {
 			if (SecIsValidHandle(&g_ssl->ssl_ctx))
 				DeleteSecurityContext(&g_ssl->ssl_ctx);
