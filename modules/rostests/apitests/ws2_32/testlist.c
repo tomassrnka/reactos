@@ -33,6 +33,7 @@ extern void func_udprecv(void);
 extern void func_timewait(void);
 extern void func_WSAAsync(void);
 extern void func_WSAIoctl(void);
+extern void func_WSAPoll(void);
 extern void func_WSALookupService(void);
 extern void func_WSARecv(void);
 extern void func_WSARecvFrom(void);
@@ -72,6 +73,7 @@ const struct test winetest_testlist[] =
     { "timewait", func_timewait },
     { "WSAAsync", func_WSAAsync },
     { "WSAIoctl", func_WSAIoctl },
+    { "WSAPoll", func_WSAPoll },
     { "WSALookupService", func_WSALookupService },
     { "WSARecv", func_WSARecv },
     { "WSARecvFrom", func_WSARecvFrom },
