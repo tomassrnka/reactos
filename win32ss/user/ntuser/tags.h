@@ -299,3 +299,5 @@
 #define USERTAG_WOWTDB                   'owsU'
 #define USERTAG_WOWPROCESSINFO           'pwsU'
 #define USERTAG_WOWTHREADINFO            'twsU'
+
+#define USERTAG_CLIENTPFN 'nfcU'
