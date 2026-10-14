@@ -203,7 +203,7 @@ CallNextHookEx(
   LPARAM lParam)
 {
   PCLIENTINFO ClientInfo;
-  DWORD Flags, Save;
+  DWORD Flags; KCOPYOF(DWORD) Save;
   PHOOK pHook, phkNext;
   LRESULT lResult = 0;
 
@@ -220,12 +220,12 @@ CallNextHookEx(
   if ( phkNext->HookId == WH_CALLWNDPROC ||
        phkNext->HookId == WH_CALLWNDPROCRET)
   {
-     Save = ClientInfo->dwHookData;
+     Save = KGET(ClientInfo, dwHookData);
      Flags = ClientInfo->CI_flags & CI_CURTHPRHOOK;
 // wParam: If the message was sent by the current thread/process, it is
 // nonzero; otherwise, it is zero.
-     if (wParam) ClientInfo->CI_flags |= CI_CURTHPRHOOK;
-     else        ClientInfo->CI_flags &= ~CI_CURTHPRHOOK;
+     if (wParam) KOR(ClientInfo, CI_flags, CI_CURTHPRHOOK);
+     else        KCLR(ClientInfo, CI_flags, CI_CURTHPRHOOK);
 
      if (phkNext->HookId == WH_CALLWNDPROC)
      {
@@ -243,7 +243,7 @@ CallNextHookEx(
      {
         PCWPRETSTRUCT pCWPR = (PCWPRETSTRUCT)lParam;
 
-        ClientInfo->dwHookData = pCWPR->lResult;
+        KSETSX(ClientInfo, dwHookData, pCWPR->lResult);
 
         NtUserMessageCall( pCWPR->hwnd,
                            pCWPR->message,
@@ -253,8 +253,8 @@ CallNextHookEx(
                            FNID_CALLWNDPROCRET,
                            phkNext->Ansi);
      }
-     ClientInfo->CI_flags ^= ((ClientInfo->CI_flags ^ Flags) & CI_CURTHPRHOOK);
-     ClientInfo->dwHookData = Save;
+     KXOR(ClientInfo, CI_flags, (ClientInfo->CI_flags ^ Flags) & CI_CURTHPRHOOK);
+     KPUT(ClientInfo, dwHookData, Save);
   }
   else
      lResult = NtUserCallNextHookEx(Code, wParam, lParam, pHook->Ansi);

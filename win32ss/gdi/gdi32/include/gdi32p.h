@@ -930,4 +930,22 @@ return EMFDC_ArcChordPie( dc_attr, left, top, right, bottom, xstart, ystart, xen
 
 BOOL WINAPI EMFDC_GdiComment( HDC hdc, UINT bytes, const BYTE *buffer );
 
+/* PolyPatBlt copies the caller's 20-byte records into batch records of the 64-bit layout win32k reads (24 bytes) */
+#ifdef W32K_WIDE_ACTIVE
+static __inline VOID
+KCopyPolyPatBlt(KPATRECT *pDest, const POLYPATBLT *pSrc, DWORD nCount)
+{
+    DWORD i;
+
+    for (i = 0; i < nCount; i++)
+    {
+        RtlCopyMemory(&pDest[i].r, &pSrc[i], sizeof(RECT));
+        KSET(&pDest[i], hBrush, pSrc[i].hBrush);
+    }
+}
+#define KCOPY_POLYPATBLT(d, s, n) KCopyPolyPatBlt(d, s, n)
+#else
+#define KCOPY_POLYPATBLT(d, s, n) RtlCopyMemory((d), (s), (n) * sizeof(PATRECT))
+#endif
+
 /* EOF */

@@ -165,7 +165,7 @@ BOOL
 FASTCALL
 TestWindowProcess(PWND Wnd)
 {
-   if (Wnd->head.pti == (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo)
+   if (KPTR_EQ(KPTR(Wnd->head.pti), KTEB_PTI()))
       return TRUE;
    else
       return (NtUserQueryWindow(Wnd->head.h, QUERY_WINDOW_UNIQUE_PROCESS_ID) ==
@@ -344,7 +344,7 @@ ValidateCallProc(HANDLE hCallProc)
 
   pEntry = GetUser32Handle(hCallProc);
 
-  if (CallProc != NULL && pEntry->ppi == g_ppi)
+  if (CallProc != NULL && KPTR_EQ(KPTR(pEntry->ppi), g_ppi))
      return CallProc;
 
   return NULL;
@@ -487,3 +487,14 @@ DWORD WINAPI MBToWCSEx(WORD CodePage,LPSTR MBString,LONG MBSize,LPWSTR *UnicodeS
 	}
 	return Size;
 }
+
+#ifdef W32K_WIDE_ACTIVE
+KPTRTYPE(PTHREADINFO)
+GetW32ThreadInfoK(VOID)
+{
+    if (KPTR_NULL(KTEB_PTI()))
+        NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
+
+    return KTEB_PTI();
+}
+#endif
