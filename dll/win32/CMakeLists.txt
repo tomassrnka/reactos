@@ -280,6 +280,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(dwmapi)
     add_subdirectory(ktmw32)
     add_subdirectory(ncrypt)
+    add_subdirectory(tbs)
     add_subdirectory(tdh)
 endif()
 
