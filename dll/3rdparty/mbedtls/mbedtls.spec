@@ -12,6 +12,7 @@
 @ cdecl mbedtls_ssl_get_max_frag_len(ptr)
 @ cdecl mbedtls_ssl_get_version(ptr)
 @ cdecl mbedtls_ssl_handshake(ptr)
+@ cdecl mbedtls_ssl_handshake_step(ptr)
 @ cdecl mbedtls_ssl_init(ptr)
 @ cdecl mbedtls_ssl_read(ptr ptr long)
 @ cdecl mbedtls_ssl_conf_authmode(ptr long)
