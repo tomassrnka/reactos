@@ -10,6 +10,7 @@ list(APPEND SOURCE
     DeviceIoControl.c
     dosdev.c
     DynamicTimeZone.c
+    GetTimeZoneInformationForYear.c
     EnumSystemCodePages.c
     FindActCtxSectionStringW.c
     FindFiles.c
