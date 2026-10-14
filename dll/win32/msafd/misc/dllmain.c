@@ -3221,10 +3221,8 @@ MsafdUpdateConnectionContext(
         return SOCKET_ERROR;
     }
 
-    if (Socket->SharedData->State == SocketConnected)
-    {
-        return NO_ERROR;
-    }
+    /* No early return for a connected state: WSPGetPeerName may have recorded
+     * it, and ConnectEx has no APC that would re-arm the asynchronous events */
 
     /* Get the socket context from AFD because when ConnectEx is used, this information is not updated. */
     Status = NtCreateEvent(&SockEvent,

@@ -8,6 +8,7 @@
 #include "ws2_32.h"
 
 #include <iphlpapi.h>
+#include <mswsock.h>
 
 /* Ports whose two bytes differ, so a byte-order mistake shows */
 static const USHORT TestPorts[] = { 0x1234, 0x2345, 0x3456, 0x4567, 0x5678, 0x6789, 0x789a, 0x89ab };
@@ -340,6 +341,104 @@ static void Test_NonBlockingConnect(BOOL UseEvents, DWORD PreDelay, const char *
     closesocket(Server);
 }
 
+/* A ConnectEx socket takes part in asynchronous notification only after
+ * SO_UPDATE_CONNECT_CONTEXT: asking for the peer address first must not stand
+ * in for that option */
+static void Test_ConnectExOrder(void)
+{
+    GUID Guid = WSAID_CONNECTEX;
+    LPFN_CONNECTEX pConnectEx = NULL;
+    SOCKET Server, Client, Accepted;
+    SOCKADDR_IN Address;
+    OVERLAPPED Overlapped;
+    WSAEVENT Event;
+    WSANETWORKEVENTS Events;
+    fd_set Read;
+    struct timeval Timeout = { 10, 0 };
+    DWORD Bytes = 0;
+    int Length, Result;
+    USHORT ServerPort;
+
+    Server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Server != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+    if (Server == INVALID_SOCKET)
+        return;
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ok(bind(Server, (struct sockaddr *)&Address, sizeof(Address)) == 0, "bind failed: %d\n", WSAGetLastError());
+    ok(listen(Server, 1) == 0, "listen failed: %d\n", WSAGetLastError());
+    Length = sizeof(Address);
+    ok(getsockname(Server, (struct sockaddr *)&Address, &Length) == 0, "getsockname failed: %d\n", WSAGetLastError());
+    ServerPort = ntohs(Address.sin_port);
+
+    Client = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    ok(Client != INVALID_SOCKET, "WSASocket failed: %d\n", WSAGetLastError());
+    if (Client == INVALID_SOCKET)
+    {
+        closesocket(Server);
+        return;
+    }
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ok(bind(Client, (struct sockaddr *)&Address, sizeof(Address)) == 0, "client bind failed: %d\n", WSAGetLastError());
+    Result = WSAIoctl(Client, SIO_GET_EXTENSION_FUNCTION_POINTER, &Guid, sizeof(Guid), &pConnectEx, sizeof(pConnectEx), &Bytes, NULL, NULL);
+    ok(Result == 0, "getting ConnectEx failed: %d\n", WSAGetLastError());
+    if (Result != 0)
+        goto Cleanup;
+
+    Event = WSACreateEvent();
+    ok(WSAEventSelect(Client, Event, FD_CONNECT | FD_WRITE) == 0, "WSAEventSelect failed: %d\n", WSAGetLastError());
+
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = WSACreateEvent();
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Address.sin_port = htons(ServerPort);
+    Result = pConnectEx(Client, (struct sockaddr *)&Address, sizeof(Address), NULL, 0, NULL, &Overlapped);
+    ok(Result || WSAGetLastError() == ERROR_IO_PENDING, "ConnectEx failed: %d\n", WSAGetLastError());
+    ok(WSAGetOverlappedResult(Client, &Overlapped, &Bytes, TRUE, &(DWORD){ 0 }), "ConnectEx did not complete: %d\n", WSAGetLastError());
+
+    /* Windows refuses this before the option; what ReactOS answers is not the point */
+    Length = sizeof(Address);
+    getpeername(Client, (struct sockaddr *)&Address, &Length);
+
+    ok(setsockopt(Client, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0) == 0, "SO_UPDATE_CONNECT_CONTEXT failed: %d\n", WSAGetLastError());
+    Length = sizeof(Address);
+    memset(&Address, 0x55, sizeof(Address));
+    Result = getpeername(Client, (struct sockaddr *)&Address, &Length);
+    ok(Result == 0, "getpeername after the update failed: %d\n", WSAGetLastError());
+    if (Result == 0)
+        CheckAddress(&Address, Length, TRUE, ServerPort, "ConnectEx getpeername");
+
+    Result = WSAWaitForMultipleEvents(1, &Event, FALSE, 5000, FALSE);
+    ok(Result == WSA_WAIT_EVENT_0, "no network event after ConnectEx and the update: %d\n", Result);
+    if (Result == WSA_WAIT_EVENT_0)
+    {
+        ZeroMemory(&Events, sizeof(Events));
+        ok(WSAEnumNetworkEvents(Client, Event, &Events) == 0, "WSAEnumNetworkEvents failed: %d\n", WSAGetLastError());
+        ok(Events.lNetworkEvents & (FD_CONNECT | FD_WRITE), "events 0x%lx\n", Events.lNetworkEvents);
+    }
+    WSAEventSelect(Client, NULL, 0);
+    WSACloseEvent(Event);
+    WSACloseEvent(Overlapped.hEvent);
+
+    FD_ZERO(&Read);
+    FD_SET(Server, &Read);
+    if (select(0, &Read, NULL, NULL, &Timeout) == 1)
+    {
+        Accepted = accept(Server, NULL, NULL);
+        ok(Accepted != INVALID_SOCKET, "accept failed: %d\n", WSAGetLastError());
+        if (Accepted != INVALID_SOCKET)
+            closesocket(Accepted);
+    }
+Cleanup:
+    closesocket(Client);
+    closesocket(Server);
+}
+
 START_TEST(getpeername)
 {
     WSADATA WsaData;
@@ -357,6 +456,7 @@ START_TEST(getpeername)
     Test_NonBlockingConnect(FALSE, 100, "select after delay");
     Test_NonBlockingConnect(TRUE, 0, "event");
     Test_NonBlockingConnect(TRUE, 100, "event after delay");
+    Test_ConnectExOrder();
 
     WSACleanup();
 }
