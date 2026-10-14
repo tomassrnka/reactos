@@ -831,11 +831,106 @@ Cleanup:
         CloseHandle(Done);
 }
 
+static volatile LONG g_ChurnStop;
+static volatile LONG g_ChurnCorrupt;
+static volatile LONG g_ChurnHeaps;
+
+/* Creates heaps, fills their blocks with a pattern, checks it and destroys them again, as fast as it can */
+static DWORD WINAPI DestroyerThread(PVOID Parameter)
+{
+    enum { BLOCKS = 24, SIZE = 120 };
+    void *Block[BLOCKS];
+    HANDLE Heap;
+    unsigned i, j;
+
+    while (!g_ChurnStop)
+    {
+        Heap = HeapCreate(0, 0, 0);
+        if (!Heap)
+            continue;
+        for (i = 0; i < BLOCKS; i++)
+        {
+            Block[i] = HeapAlloc(Heap, 0, SIZE);
+            if (Block[i])
+                memset(Block[i], 0xA5 + i, SIZE);
+        }
+        SwitchToThread();
+        for (i = 0; i < BLOCKS; i++)
+        {
+            if (!Block[i])
+                continue;
+            for (j = 0; j < SIZE; j++)
+            {
+                if (((BYTE *)Block[i])[j] != (BYTE)(0xA5 + i))
+                {
+                    InterlockedIncrement(&g_ChurnCorrupt);
+                    break;
+                }
+            }
+        }
+        HeapDestroy(Heap);
+        InterlockedIncrement(&g_ChurnHeaps);
+    }
+    return 0;
+}
+
+/*
+ * Heaps that another thread creates and destroys while the blocks of the heaps are read: the reader must not
+ * touch a heap that is gone (it would write to memory that has a new owner) or hold the heap list up for good.
+ */
+static void test_heap_blocks_while_destroying(void)
+{
+    HANDLE Heaps[MAX_HEAPS];
+    HANDLE Thread[2];
+    SDK_HEAPENTRY32 Entry;
+    DWORD Pid = GetCurrentProcessId(), Start, Count, Reads = 0, i, k;
+    BOOL Ret;
+
+    g_ChurnStop = 0;
+    g_ChurnCorrupt = 0;
+    g_ChurnHeaps = 0;
+    for (k = 0; k < ARRAYSIZE(Thread); k++)
+    {
+        Thread[k] = CreateThread(NULL, 0, DestroyerThread, NULL, 0, NULL);
+        ok(Thread[k] != NULL, "CreateThread failed with %lu\n", GetLastError());
+    }
+
+    Start = GetTickCount();
+    while (GetTickCount() - Start < 3000)
+    {
+        Count = GetProcessHeaps(MAX_HEAPS, Heaps);
+        for (i = 0; i < min(Count, MAX_HEAPS); i++)
+        {
+            memset(&Entry, 0, sizeof(Entry));
+            Entry.dwSize = sizeof(Entry);
+            Ret = Heap32First((HEAPENTRY32 *)&Entry, Pid, (ULONG_PTR)Heaps[i]);
+            if (Ret)
+                Reads++;
+            if (i == 1 || i >= 3)
+                break;
+        }
+    }
+
+    InterlockedExchange(&g_ChurnStop, 1);
+    for (k = 0; k < ARRAYSIZE(Thread); k++)
+    {
+        if (Thread[k])
+        {
+            ok(WaitForSingleObject(Thread[k], 30000) == WAIT_OBJECT_0, "A thread that destroys heaps does not stop\n");
+            CloseHandle(Thread[k]);
+        }
+    }
+    ok(g_ChurnCorrupt == 0, "%ld blocks of other heaps were overwritten while the heaps were read\n", g_ChurnCorrupt);
+    ok(Reads != 0, "No heap could be read\n");
+    trace("%lu reads, %ld heaps created and destroyed\n", Reads, g_ChurnHeaps);
+}
+
 static void test_heaps(void)
 {
     test_heap_list_own();
     test_heap_errors();
     test_heap_blocks_own();
+    test_heap_blocks_while_destroying();
     test_heap_child();
     test_heap_child_busy();
 }
