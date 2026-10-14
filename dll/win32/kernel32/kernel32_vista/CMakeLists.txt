@@ -8,6 +8,7 @@ spec2def(kernel32_vista.dll kernel32_vista.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     CancelIoEx.c
+    DiscardVirtualMemory.c
     EnumSystemLocalesEx.c
     firmware.c
     GetLocaleInfoEx.c
@@ -20,10 +21,12 @@ list(APPEND SOURCE
     InitOnce.c
     IoCompletion.c
     IsValidLocaleName.c
+    LoadString.c
     LCIDToLocaleName.c
     LocaleNameToLCID.c
     PreferredUILanguages.c
     SetFileInformationByHandle.c
+    UserDefaultGeoName.c
     restart.c
     ResolveLocaleName.c
     sync.c
