@@ -1,0 +1,18 @@
+# Mapping probe deliberately uses native win32k calls in both process types.
+# The small PE32 bridge is specific to the ReactOS phase-2 WoW64 runtime.
+if(ARCH STREQUAL "amd64")
+    include_directories(${REACTOS_SOURCE_DIR}/win32ss/include ../../gditools)
+    spec2def(w643b5_probe.dll probe.spec)
+    add_library(w643b5_probe MODULE probe.c ${CMAKE_CURRENT_BINARY_DIR}/w643b5_probe.def)
+    set_module_type(w643b5_probe win32dll ENTRYPOINT 0)
+    target_link_libraries(w643b5_probe libcntpr)
+    add_importlibs(w643b5_probe win32u ntdll)
+endif()
+if(ARCH STREQUAL "amd64" OR (ARCH STREQUAL "i386" AND NOT MSVC))
+    add_executable(w643b5_sharedviews runner.c)
+    if(ARCH STREQUAL "i386")
+        target_sources(w643b5_sharedviews PRIVATE call64.S)
+    endif()
+    set_module_type(w643b5_sharedviews win32cui)
+    add_importlibs(w643b5_sharedviews msvcrt kernel32 ntdll)
+endif()

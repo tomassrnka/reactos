@@ -3362,7 +3362,7 @@ IntMapDesktopView(IN PDESKTOP pdesk)
     Status = MmMapViewOfSection(pdesk->hsectionDesktop,
                                 PsGetCurrentProcess(),
                                 &UserBase,
-                                0,
+                                Win32kUserViewZeroBits(PsGetCurrentProcess()),
                                 0,
                                 &Offset,
                                 &ViewSize,

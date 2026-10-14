@@ -1030,6 +1030,20 @@ ObpIncrementHandleCount(IN PVOID Object,
         /* Check if the open procedure failed */
         if (!NT_SUCCESS(Status))
         {
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            if (Process->Wow64Process != NULL && ObjectType == ExDesktopObjectType)
+            {
+                /* A WoW64 desktop view can run out of low address space.
+                 * No handle was created and the failed open acquired no view,
+                 * so undo our count without invoking the close callback. */
+                ASSERT(!ObjectType->TypeInfo.MaintainHandleCount);
+                ASSERT(!Exclusive);
+                ObpAcquireObjectLock(ObjectHeader);
+                InterlockedDecrementSizeT(&ObjectHeader->HandleCount);
+                ObpReleaseObjectLock(ObjectHeader);
+                goto Quickie;
+            }
+#endif
             /* FIXME: This should never happen for now */
             DPRINT1("Unhandled case\n");
             ASSERT(FALSE);

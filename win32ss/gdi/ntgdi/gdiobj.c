@@ -1570,7 +1570,7 @@ GDI_MapHandleTable(PEPROCESS pProcess)
     Status = MmMapViewOfSection(gpvGdiHdlTblSection,
                                 pProcess,
                                 &pvMappedView,
-                                0,
+                                Win32kUserViewZeroBits(pProcess),
                                 0,
                                 &liOffset,
                                 &cjViewSize,
