@@ -74,6 +74,8 @@ VOID CreateNativeTo32(CREATE32 *To, const CREATESTRUCTW *From);
 VOID WindowPos32ToNative(WINDOWPOS *To, const WINDOWPOS32 *From);
 VOID WindowPosNativeTo32(WINDOWPOS32 *To, const WINDOWPOS *From);
 ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a);
+ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a);
+ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a);
 NTSTATUS NTAPI Wow64WinInitialize(PVOID Dispatcher);
 NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Status);
 

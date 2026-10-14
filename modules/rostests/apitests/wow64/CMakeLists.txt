@@ -91,12 +91,32 @@ if(ARCH STREQUAL "amd64" OR (ARCH STREQUAL "i386" AND NOT MSVC))
 endif()
 
 # Explicit GUI integration fixture; default image contents stay unchanged.
+add_executable(wow64_gui_apps EXCLUDE_FROM_ALL gui_apps.c)
+set_module_type(wow64_gui_apps win32cui)
+add_importlibs(wow64_gui_apps user32 msvcrt kernel32)
+
+add_executable(wow64_gui_controls EXCLUDE_FROM_ALL gui_controls.c)
+set_module_type(wow64_gui_controls win32cui)
+add_importlibs(wow64_gui_controls comdlg32 comctl32 user32 gdi32 msvcrt kernel32 ntdll)
+
+add_executable(wow64_callback_unwind EXCLUDE_FROM_ALL callback_unwind.c)
+target_link_libraries(wow64_callback_unwind ${PSEH_LIB})
+set_module_type(wow64_callback_unwind win32cui)
+add_importlibs(wow64_callback_unwind user32 msvcrt kernel32)
+
 add_executable(wow64_first_window EXCLUDE_FROM_ALL first_window.c)
 set_module_type(wow64_first_window win32cui)
 add_importlibs(wow64_first_window user32 gdi32 msvcrt kernel32)
 
 if(ARCH STREQUAL "i386")
     add_asm_files(wow64_win32k_stubs win32k_stubs.S)
+    if(NOT MSVC)
+        add_asm_files(wow64_callback_boundary_asm i386/CallbackBoundary.S)
+        add_executable(wow64_callback_boundary EXCLUDE_FROM_ALL callback_boundary.c ${wow64_callback_boundary_asm} ${wow64_win32k_stubs})
+        target_include_directories(wow64_callback_boundary PRIVATE ${REACTOS_SOURCE_DIR}/win32ss ${REACTOS_SOURCE_DIR}/win32ss/include)
+        set_module_type(wow64_callback_boundary win32cui)
+        add_importlibs(wow64_callback_boundary user32 msvcrt kernel32 ntdll)
+    endif()
     add_executable(wow64_win32k_abi EXCLUDE_FROM_ALL win32k_abi.c ${wow64_win32k_stubs})
     target_include_directories(wow64_win32k_abi PRIVATE ${REACTOS_SOURCE_DIR}/win32ss ${REACTOS_SOURCE_DIR}/win32ss/include)
     set_module_type(wow64_win32k_abi win32cui)

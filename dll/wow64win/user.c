@@ -32,6 +32,8 @@ VOID Msg32ToNative(MSG *To, const MSG32 *From)
 {
     To->hwnd = H32(From->hwnd); To->message = From->message;
     To->wParam = From->wParam; To->lParam = (LONG)From->lParam;
+    if (From->message == WM_TIMER || From->message == 0x118 /* WM_SYSTIMER */)
+        To->lParam = (ULONG_PTR)From->lParam;
     To->time = From->time; To->pt = From->pt;
 }
 VOID MsgNativeTo32(MSG32 *To, const MSG *From)
@@ -145,8 +147,13 @@ static ULONG_PTR MessageCall(ULONG *a)
         }
         else Param = (LPARAM)P(3);
         break;
-    case WM_SETTEXT: case WM_GETTEXT: case WM_GETMINMAXINFO: case WM_STYLECHANGING:
+    case WM_SETTEXT: case WM_GETTEXT: case WM_SETTINGCHANGE: case WM_GETMINMAXINFO: case WM_STYLECHANGING:
     case WM_STYLECHANGED: case WM_SIZING: case WM_MOVING:
+    case EM_GETRECT: case EM_SETRECT: case EM_SETRECTNP: case EM_REPLACESEL: case EM_GETLINE:
+    case LB_ADDSTRING: case LB_INSERTSTRING: case LB_FINDSTRING: case LB_FINDSTRINGEXACT:
+    case LB_SELECTSTRING: case LB_GETTEXT: case LB_GETITEMRECT:
+    case CB_ADDSTRING: case CB_INSERTSTRING: case CB_FINDSTRING: case CB_FINDSTRINGEXACT:
+    case CB_SELECTSTRING: case CB_GETLBTEXT: case CB_GETDROPPEDCONTROLRECT: case WM_ASKCBFORMATNAME:
         Param = (LPARAM)P(3); break;
     }
     Ret = NtUserMessageCall(H(0), a[1], a[2], Param, ResultInfo, a[5], a[6]);
@@ -340,8 +347,6 @@ ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a)
     { POINT Pt = {a[1],a[2]}; return NtUserDragDetect(H(0),Pt); }
     case W64_NtUserWindowFromPoint: return (ULONG_PTR)NtUserWindowFromPoint(a[0],a[1]);
     default:
-        DbgPrint("WoW64win: unsupported service %lx\n",Number);
-        RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
-        return Wow64WinFailure(Number,STATUS_NOT_IMPLEMENTED);
+        return Wow64WinExtraService(Number, a);
     }
 }

@@ -17,18 +17,19 @@ typedef TEB64 W32TEB, *PW32TEB;
  * TEB. Both TEBs and the native PEB are below 2 GB in a WoW64 process. Do not
  * redirect NtCurrentTeb itself: last error, TLS, loader state and callbacks
  * still belong to the guest runtime. Pin the allocation contract here. */
-C_ASSERT(((sizeof(TEB64) + 0xfff) & ~0xfff) == 0x2000);
+C_ASSERT(((sizeof(TEB64) + 0xfff) & ~0xfff) == KTEB64_BIAS);
 C_ASSERT(FIELD_OFFSET(TEB64, Win32ThreadInfo) == 0x78);
 C_ASSERT(FIELD_OFFSET(TEB64, Win32ClientInfo) == 0x800);
 C_ASSERT(FIELD_OFFSET(PEB64, GdiHandleBuffer) == 0x140);
 
 FORCEINLINE PTEB64 W32GetCurrentTeb(VOID)
 {
-    return (PTEB64)((PBYTE)NtCurrentTeb() - 0x2000);
+    return (PTEB64)((PBYTE)NtCurrentTeb() - KTEB64_BIAS);
 }
 
 FORCEINLINE PPEB64 W32GetCurrentPeb(VOID)
 {
+    ASSERT((W32GetCurrentTeb()->ProcessEnvironmentBlock >> 32) == 0);
     return (PPEB64)(ULONG_PTR)W32GetCurrentTeb()->ProcessEnvironmentBlock;
 }
 

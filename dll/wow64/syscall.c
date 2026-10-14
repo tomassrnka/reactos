@@ -126,6 +126,10 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     if (NativeSystemInformation) Number = W64_NtQuerySystemInformation;
     switch (Number)
     {
+    case W64_NtAddAtom: return NtAddAtom(P(0), a[1], P(2));
+    case W64_NtFindAtom: return NtFindAtom(P(0), a[1], P(2));
+    case W64_NtDeleteAtom: return NtDeleteAtom(a[0]);
+    case W64_NtQueryInformationAtom: return NtQueryInformationAtom(a[0], a[1], P(2), a[3], P(4));
     case W64_NtCallbackReturn: return Wow64WinCallbackReturn(P(0), a[1], a[2]);
     case W64_NtCreateThread:
     {
@@ -728,7 +732,8 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
             NtFreeVirtualMemory(Cleanup.Process, &Cleanup.Base, &Size, MEM_RELEASE);
         }
     }
-    if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState)
+    if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState &&
+        !(Number >= 0x1000 && Number < 0x2000))
         DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
     return Status;
 }

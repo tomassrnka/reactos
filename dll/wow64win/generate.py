@@ -32,7 +32,16 @@ NtUserCallTwoParam NtUserCallHwndParam NtUserCallHwndParamLock
 NtUserCallNoParam NtUserCallHwnd NtUserCallHwndLock NtUserCallHwndOpt
 NtUserGetThreadState NtUserGetObjectInformation NtUserSetWindowLong
 NtUserSetClassLong NtUserSetClassLongPtr NtUserMonitorFromPoint NtUserDragDetect
-NtUserWindowFromPoint NtGdiOpenDCW NtUserFindExistingCursorIcon'''.split())
+NtUserWindowFromPoint NtGdiOpenDCW NtUserFindExistingCursorIcon
+NtUserBuildHwndList NtUserCallMsgFilter NtUserFindWindowEx NtUserFlashWindowEx
+NtUserGetAtomName NtUserGetClassName NtUserGetClipboardData NtUserGetComboBoxInfo
+NtUserGetCursorInfo NtUserGetGUIThreadInfo NtUserGetIconInfo NtUserGetKeyboardLayoutList
+NtUserGetKeyboardLayoutName NtUserGetMenuBarInfo NtUserRegisterWindowMessage
+NtUserSystemParametersInfo NtUserThunkedMenuInfo NtUserThunkedMenuItemInfo
+NtUserTrackMouseEvent NtUserTranslateAccelerator
+NtUserSetCursorIconData
+NtGdiCreateDIBSection NtGdiDoPalette NtGdiExtCreatePen NtGdiExtGetObjectW
+NtGdiPolyPolyDraw NtGdiStartDoc'''.split())
 services = set('Nt'+n for n in re.findall(r'SVC_\((\w+),',
                           (ROOT/'win32ss/w32ksvc32.h').read_text()))
 # Reviewed fixed-width structures absent from the measured catalogue. Each
@@ -59,7 +68,7 @@ for row in rows:
         failure.append(f'case W64_{name}: return (ULONG_PTR)(LONG_PTR)Status;')
     if name not in services or row['i386_args'] == '-': reason = 'no i386 service entry'
     elif name in manual:
-        coverage.append(f'{name}\t{cls}\tmanual\tsee user.c')
+        coverage.append(f'{name}\t{cls}\tmanual\tsee user.c, userextra.c and gdi.c')
         continue
     elif name in deferred: reason = deferred[name]
     elif cls[0] not in 'AB': reason = 'requires private structure or selector translation'

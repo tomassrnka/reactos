@@ -5,6 +5,8 @@
 static PVOID GuestDispatcher;
 typedef struct { STRING32 Library, Init; BOOL Unload, ApiHook; } LIBRARY32;
 C_ASSERT(sizeof(LIBRARY32) == 24);
+typedef struct { ULONG String, Dc; INT x, y; UINT Flags; RECT Rect; UINT Count; BOOL HasRect; } LPK32;
+C_ASSERT(sizeof(LPK32) == 44);
 typedef struct
 {
     WOW64_CPU_STATE *Previous;
@@ -12,6 +14,27 @@ typedef struct
     ULONG NativeLength, GuestLength, Id, ExceptionList;
     ULONG64 Handles[7];
 } CALLBACK_FRAME;
+
+static VOID ProbeGuestStack(ULONG Top, ULONG_PTR Bottom)
+{
+    TEB32 *Teb = WOW64_TEB32(NtCurrentTeb());
+    ULONG_PTR Address, Reserve = Teb->DeallocationStack, Base = Teb->NtTib.StackBase;
+    SIZE_T Guarantee;
+    if (Base <= Reserve || Top > Base || Bottom > Top || Bottom < Reserve)
+        RtlRaiseStatus(STATUS_STACK_OVERFLOW);
+    Guarantee = ROUND_TO_PAGES(min((SIZE_T)Teb->GuaranteedStackBytes, Base - Reserve));
+    if (Bottom - Reserve <= PAGE_SIZE + Guarantee)
+        RtlRaiseStatus(STATUS_STACK_OVERFLOW);
+    /* Fault each guard page in order, like _chkstk. MiCheckForUserStackOverflow
+     * identifies the guest stack by its address even though this code is 64-bit. */
+    Address = (Top - 1) & ~(ULONG_PTR)(PAGE_SIZE - 1);
+    while (Address > Bottom)
+    {
+        *(volatile BYTE *)Address = *(volatile BYTE *)Address;
+        Address -= PAGE_SIZE;
+    }
+    *(volatile BYTE *)Bottom = *(volatile BYTE *)Bottom;
+}
 
 static LONG PayloadSize(UINT Msg, WPARAM Wparam, LONG Size)
 {
@@ -25,7 +48,7 @@ static LONG PayloadSize(UINT Msg, WPARAM Wparam, LONG Size)
     case WM_NCCALCSIZE:
         if (!Wparam) return Size == sizeof(RECT) ? Size : -2;
         return Size == sizeof(NCCALCSIZE_PARAMS) + sizeof(WINDOWPOS) ? sizeof(NCCALCSIZE32) + sizeof(WINDOWPOS32) : -2;
-    case WM_GETMINMAXINFO: case WM_GETTEXT: case WM_SETTEXT:
+    case WM_GETMINMAXINFO: case WM_GETTEXT: case WM_SETTEXT: case WM_SETTINGCHANGE:
     case WM_STYLECHANGING: case WM_STYLECHANGED: case WM_SIZING: case WM_MOVING:
     case WM_ERASEBKGND: case WM_PAINT: case WM_NCPAINT:
         return Size;
@@ -76,8 +99,9 @@ static VOID UnpackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, U
     switch (Msg)
     {
     case WM_CREATE: case WM_NCCREATE:
-        /* Native user32 changes its packed string offsets to addresses too.
-         * win32k discards this payload; preserve the original native block. */
+        /* The guest dispatcher has changed the packed string offsets to
+         * addresses, just as native user32 does. Preserve the reply fields. */
+        Create32ToNative(To, From);
         break;
     case WM_WINDOWPOSCHANGING:
         WindowPos32ToNative(To, From); break;
@@ -125,6 +149,7 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
         case USER32_CALLBACK_SENDASYNCPROC:
             if (Length == sizeof(SENDASYNCPROC_CALLBACK_ARGUMENTS)) { GuestLength = 20; Status = STATUS_SUCCESS; } break;
         case USER32_CALLBACK_CLIENTTHREADSTARTUP: case USER32_CALLBACK_LOADSYSMENUTEMPLATE:
+        case USER32_CALLBACK_DELIVERUSERAPC:
             if (!Length) Status = STATUS_SUCCESS;
             break;
         case USER32_CALLBACK_LOADDEFAULTCURSORS:
@@ -146,6 +171,15 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             { GuestLength = Length - FIELD_OFFSET(LOADMENU_CALLBACK_ARGUMENTS, MenuName) + 8; Status = STATUS_SUCCESS; } break;
         case USER32_CALLBACK_COPYIMAGE:
             if (Length == sizeof(COPYIMAGE_CALLBACK_ARGUMENTS)) { GuestLength = 20; Status = STATUS_SUCCESS; } break;
+        case USER32_CALLBACK_LPK:
+            if (Length >= sizeof(LPK_CALLBACK_ARGUMENTS))
+            {
+                LPK_CALLBACK_ARGUMENTS *Native = Buffer;
+                ULONG_PTR Offset = (ULONG_PTR)Native->lpString;
+                if (Offset >= sizeof(*Native) && Offset <= Length && Native->count <= (Length - Offset) / sizeof(WCHAR))
+                { GuestLength = Length - sizeof(*Native) + sizeof(LPK32); Status = STATUS_SUCCESS; }
+            }
+            break;
         }
         if (NT_SUCCESS(Status))
         {
@@ -155,9 +189,7 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
                 RtlRaiseStatus(STATUS_STACK_OVERFLOW);
             Guest = P32((Previous->Esp - GuestLength - 64) & ~15);
             Stack = (ULONG *)Guest - 8;
-            if ((ULONG_PTR)Stack < WOW64_TEB32(NtCurrentTeb())->NtTib.StackLimit ||
-                Previous->Esp > WOW64_TEB32(NtCurrentTeb())->NtTib.StackBase)
-                RtlRaiseStatus(STATUS_STACK_OVERFLOW);
+            ProbeGuestStack(Previous->Esp, (ULONG_PTR)Stack);
             Frame.GuestLength = GuestLength;
             switch (Id)
             {
@@ -211,6 +243,15 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             }
             case USER32_CALLBACK_SETWNDICONS:
                 RtlZeroMemory(Guest,GuestLength); break;
+            case USER32_CALLBACK_LPK:
+            {
+                LPK_CALLBACK_ARGUMENTS *Native = Buffer; LPK32 *Target = Guest;
+                Target->String = (ULONG_PTR)Native->lpString - sizeof(*Native) + sizeof(*Target);
+                Target->Dc = HandleToUlong(Native->hdc); Target->x = Native->x; Target->y = Native->y;
+                Target->Flags = Native->flags; Target->Rect = Native->rect; Target->Count = Native->count; Target->HasRect = Native->bRect;
+                RtlCopyMemory(Target + 1, Native + 1, Length - sizeof(*Native));
+                break;
+            }
             default: RtlCopyMemory(Guest,Buffer,GuestLength); break;
             }
             /* i386 KiUserCallbackDispatcher: return, index, buffer, length,
@@ -241,13 +282,25 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
     if (!Frame) return STATUS_NO_CALLBACK_ACTIVE;
     if (Status == STATUS_CALLBACK_POP_STACK)
     {
-        /* amd64 POP_STACK resumes the callback-return syscall's trap frame.
-         * That cannot resume an i386 RtlUnwind continuation. Do not restore an
-         * unrelated CPU frame and return to it. Cross-callback unwind needs
-         * a dedicated guest continuation implementation. */
-        DbgPrint("WoW64win: cross-callback unwind is not supported\n");
-        NtTerminateProcess(NtCurrentProcess(), STATUS_NOT_SUPPORTED);
-        return STATUS_NOT_SUPPORTED;
+        WOW64_CPU_STATE *Previous = Frame->Previous;
+        ULONG64 NativeStack = Previous->NativeStack;
+        PVOID ApcFrame = Previous->ApcFrame;
+        PVOID CallbackFrame = Previous->CallbackFrame;
+
+        /* POP_STACK resumes this native NtCallbackReturn call after win32k
+         * has unwound its callout. The guest must then resume the i386 stub
+         * inside KiUserCallbackExceptionHandler, not the interrupted USER
+         * syscall. Move that continuation to the surviving simulation frame;
+         * the next guest syscall uses its original native stack. Each nested
+         * callback is popped separately as i386 RtlUnwind walks the SEH chain.
+         * Leave ExceptionList alone: RtlUnwind owns its removal here. */
+        *Previous = *Cpu;
+        Previous->NativeStack = NativeStack;
+        Previous->ApcFrame = ApcFrame;
+        Previous->CallbackFrame = CallbackFrame;
+        NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Previous;
+        NtCurrentTeb()->LastErrorValue = WOW64_TEB32(NtCurrentTeb())->LastErrorValue;
+        return NtCallbackReturn(NULL, 0, Status);
     }
     _SEH2_TRY
     {
@@ -264,6 +317,9 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
             Output = Native; OutputLength = Frame->NativeLength; break;
         }
         case USER32_CALLBACK_CLIENTLOADLIBRARY:
+            if (!Buffer || Length != sizeof(BOOL)) { Status = STATUS_INFO_LENGTH_MISMATCH; break; }
+            Frame->Handles[0] = *(ULONG *)Buffer;
+            Output = Frame->Handles; OutputLength = sizeof(HINSTANCE); break;
         case USER32_CALLBACK_LOADMENU: case USER32_CALLBACK_LOADSYSMENUTEMPLATE:
         case USER32_CALLBACK_LOADDEFAULTCURSORS: case USER32_CALLBACK_COPYIMAGE:
             if (!Buffer || Length != sizeof(ULONG)) { Status = STATUS_INFO_LENGTH_MISMATCH; break; }
@@ -280,6 +336,10 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
             if (!Buffer || Length != Frame->NativeLength) { Status=STATUS_INFO_LENGTH_MISMATCH; break; }
             RtlCopyMemory(Frame->Native,Buffer,Length);
             Output=Frame->Native; OutputLength=Frame->NativeLength; break;
+        case USER32_CALLBACK_LPK:
+            if (!Buffer || Length != sizeof(BOOL)) { Status = STATUS_INFO_LENGTH_MISMATCH; break; }
+            Frame->Handles[0] = *(ULONG *)Buffer;
+            Output = Frame->Handles; OutputLength = sizeof(BOOL); break;
         default: break;
         }
     }
@@ -290,6 +350,10 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
     _SEH2_END;
     NtCurrentTeb()->LastErrorValue = WOW64_TEB32(NtCurrentTeb())->LastErrorValue;
     Frame->Previous->FsRedirectionDisabled = Cpu->FsRedirectionDisabled;
+    /* Callback changes to the floating-point environment survive the USER
+     * call. Keep the outer register data, but propagate its control state. */
+    *(USHORT *)Frame->Previous->ExtendedRegisters = *(USHORT *)Cpu->ExtendedRegisters;
+    *(ULONG *)(Frame->Previous->ExtendedRegisters + 24) = *(ULONG *)(Cpu->ExtendedRegisters + 24);
     NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Frame->Previous;
     WOW64_TEB32(NtCurrentTeb())->NtTib.ExceptionList = Frame->ExceptionList;
     return NtCallbackReturn(Output,OutputLength,Status);
