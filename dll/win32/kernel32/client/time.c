@@ -136,13 +136,73 @@ GetSystemTimeAsFileTime(OUT PFILETIME lpFileTime)
 }
 
 /*
- * @unimplemented
+ * The system time advances once per clock tick; the performance counter fills in the time between two ticks.
+ * PreciseDelta is the largest difference of system time and counter, in 100 ns units, that any call has seen:
+ * the call that reads the system time right after a tick gets the difference closest to the real one. A call
+ * adds the counter to it, so the result never lags the system time. It may run ahead of the system time, as
+ * the counter does not follow a clock that was set back or slowed, and the system time itself lags when the
+ * clock interrupt is late; PRECISE_TIME_MAX_LEAD (100 ms) limits how far. The stored difference is never lowered:
+ * a sample is old by the time it could be stored, and a lowered value from an old sample would let another thread's
+ * time go back. After a clock was set back by more than the limit the result follows the system time with that
+ * lead, in ticks, until the process ends.
+ */
+#define PRECISE_TIME_NO_DELTA   MAXLONGLONG
+#define PRECISE_TIME_MAX_LEAD   1000000LL
+
+static volatile LONGLONG PreciseDelta = PRECISE_TIME_NO_DELTA;
+
+static
+LONGLONG
+CounterTo100ns(
+    _In_ LONGLONG Counter,
+    _In_ LONGLONG Frequency)
+{
+    return (Counter / Frequency) * 10000000 + (Counter % Frequency) * 10000000 / Frequency;
+}
+
+/*
+ * @implemented
+ *
+ * Windows 8 and later.
  */
 VOID
 WINAPI
 GetSystemTimePreciseAsFileTime(OUT PFILETIME lpFileTime)
 {
-    STUB;
+    LARGE_INTEGER SystemTime, Counter, Frequency;
+    LONGLONG Delta, NewDelta, Old, Estimate, Current;
+
+    SystemTime = KiReadSystemTime(&SharedUserData->SystemTime);
+    if (!NT_SUCCESS(NtQueryPerformanceCounter(&Counter, &Frequency)) || Frequency.QuadPart <= 0)
+    {
+        Estimate = SystemTime.QuadPart;
+        goto Done;
+    }
+
+    Current = CounterTo100ns(Counter.QuadPart, Frequency.QuadPart);
+    NewDelta = SystemTime.QuadPart - Current;
+
+    /* Reading by an exchange of the sentinel with itself is atomic on i386 too */
+    Delta = InterlockedCompareExchange64(&PreciseDelta, PRECISE_TIME_NO_DELTA, PRECISE_TIME_NO_DELTA);
+    while (Delta == PRECISE_TIME_NO_DELTA || Delta < NewDelta)
+    {
+        /* The estimate is behind the system time: the difference only moves forward */
+        Old = InterlockedCompareExchange64(&PreciseDelta, NewDelta, Delta);
+        if (Old == Delta)
+        {
+            Delta = NewDelta;
+            break;
+        }
+        Delta = Old;
+    }
+
+    Estimate = Current + Delta;
+    if (Estimate - SystemTime.QuadPart > PRECISE_TIME_MAX_LEAD)
+        Estimate = SystemTime.QuadPart + PRECISE_TIME_MAX_LEAD;
+
+Done:
+    lpFileTime->dwLowDateTime = (DWORD)Estimate;
+    lpFileTime->dwHighDateTime = (DWORD)(Estimate >> 32);
 }
 
 /*
