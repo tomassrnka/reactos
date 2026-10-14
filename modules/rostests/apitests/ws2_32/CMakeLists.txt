@@ -14,6 +14,7 @@ list(APPEND SOURCE
     nostartup.c
     open_osfhandle.c
     recv.c
+    WSASendMsg.c
     send.c
     WSAAsync.c
     WSAIoctl.c
