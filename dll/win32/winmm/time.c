@@ -47,7 +47,9 @@ static    LPWINE_TIMERENTRY 	TIME_TimersList;
 static    HANDLE                TIME_hKillEvent;
 static    HANDLE                TIME_hWakeEvent;
 static    BOOL                  TIME_TimeToDie = TRUE;
-static    LARGE_INTEGER         TIME_qpcFreq;
+/* Counts per millisecond while a period of 5 ms or less is requested, else 0; timeBeginPeriod, timeEndPeriod and
+   timeGetTime race, so it is only read and written with interlocked 64-bit operations */
+static    volatile LONGLONG     TIME_qpcFreq;
 
 /*
  * Some observations on the behavior of winmm on Windows.
@@ -426,10 +428,12 @@ MMRESULT WINAPI timeBeginPeriod(UINT wPeriod)
         return TIMERR_NOCANDO;
 
     /*  High resolution timer requested, use QPC */
-    if (wPeriod <= 5 && TIME_qpcFreq.QuadPart == 0)
+    if (wPeriod <= 5 && InterlockedCompareExchange64(&TIME_qpcFreq, 0, 0) == 0)
     {
-        if (QueryPerformanceFrequency(&TIME_qpcFreq))
-            TIME_qpcFreq.QuadPart /= 1000;
+        LARGE_INTEGER qpcFreq;
+
+        if (QueryPerformanceFrequency(&qpcFreq))
+            InterlockedExchange64(&TIME_qpcFreq, qpcFreq.QuadPart / 1000);
     }
 
     if (wPeriod > MMSYSTIME_MININTERVAL)
@@ -449,8 +453,8 @@ MMRESULT WINAPI timeEndPeriod(UINT wPeriod)
         return TIMERR_NOCANDO;
 
     /*  High resolution timer no longer requested, stop using QPC */
-    if (wPeriod <= 5 && TIME_qpcFreq.QuadPart != 0)
-        TIME_qpcFreq.QuadPart = 0;
+    if (wPeriod <= 5)
+        InterlockedExchange64(&TIME_qpcFreq, 0);
 
     if (wPeriod > MMSYSTIME_MININTERVAL)
     {
@@ -466,6 +470,7 @@ MMRESULT WINAPI timeEndPeriod(UINT wPeriod)
 DWORD WINAPI timeGetTime(void)
 {
     LARGE_INTEGER perfCount;
+    LONGLONG qpcFreq;
 #if defined(COMMENTOUTPRIORTODELETING)
     DWORD       count;
 
@@ -476,10 +481,11 @@ DWORD WINAPI timeGetTime(void)
     if (pFnRestoreThunkLock) pFnRestoreThunkLock(count);
 #endif
     /* Use QPC if a high-resolution timer was requested (<= 5ms) */
-    if (TIME_qpcFreq.QuadPart != 0)
+    qpcFreq = InterlockedCompareExchange64(&TIME_qpcFreq, 0, 0);
+    if (qpcFreq != 0)
     {
         QueryPerformanceCounter(&perfCount);
-        return (DWORD)(perfCount.QuadPart / TIME_qpcFreq.QuadPart);
+        return (DWORD)(perfCount.QuadPart / qpcFreq);
     }
     /* Otherwise continue using GetTickCount */
     return GetTickCount();
