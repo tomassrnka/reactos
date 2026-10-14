@@ -4184,14 +4184,20 @@ RtlpHeapWalkFindUcr(
     _Out_ PHEAP_UCR_DESCRIPTOR Descriptor)
 {
     ULONG_PTR Head, Link;
-    ULONG Limit = 0x10000;
+    ULONG_PTR Limit;
     NTSTATUS Status;
 
     Head = (ULONG_PTR)Walker->Segment.BaseAddress + FIELD_OFFSET(HEAP_SEGMENT, UCRSegmentList);
     Link = (ULONG_PTR)Walker->Segment.UCRSegmentList.Flink;
 
-    while (Link != Head && Limit--)
+    /* Every range is at least a page of its own, so a list longer than the pages of the segment goes in circles */
+    Limit = ((ULONG_PTR)Walker->Segment.LastValidEntry - (ULONG_PTR)Walker->Segment.BaseAddress) / PAGE_SIZE + 1;
+
+    while (Link != Head)
     {
+        if (Limit-- == 0)
+            return STATUS_INVALID_PARAMETER;
+
         Status = RtlpHeapWalkRead(Walker,
                                   Link - FIELD_OFFSET(HEAP_UCR_DESCRIPTOR, SegmentEntry),
                                   Descriptor,

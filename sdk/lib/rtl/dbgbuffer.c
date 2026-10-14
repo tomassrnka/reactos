@@ -617,6 +617,91 @@ RtlpRemoteHeapIsLocked(_In_ PRTLP_REMOTE_READ Remote,
 }
 
 /*
+ * Reads a heap of this process. The heap list lock is held for the whole read: RtlDestroyHeap takes a heap
+ * off the list before it deletes the lock of the heap and releases its memory, so a heap that is on the list
+ * stays whole until the read is done. The lock of the heap is taken without waiting, because a thread that
+ * holds it may be waiting for the list lock; the list lock is given up for a moment and the heap tried again.
+ */
+static
+NTSTATUS
+RtlpEnumerateLocalHeap(_In_ PVOID HeapAddress,
+                       _In_ PRTLP_HEAP_WALK_CALLBACK Callback,
+                       _In_ PVOID Context,
+                       _Out_ PULONG Flags)
+{
+    PPEB Peb = RtlGetCurrentPeb();
+    PHEAP Heap = HeapAddress;
+    PHEAP_LOCK HeapLock;
+    LARGE_INTEGER RetryDelay;
+    NTSTATUS Status;
+    ULONG Index, Try;
+    BOOLEAN Locked, Faulted;
+
+    RetryDelay.QuadPart = -10000; /* 1 ms */
+
+    for (Try = 0; Try < 10000; Try++)
+    {
+        Faulted = FALSE;
+        RtlEnterCriticalSection(&RtlpProcessHeapsListLock);
+
+        for (Index = 0; Index < Peb->NumberOfHeaps; Index++)
+        {
+            if (Peb->ProcessHeaps[Index] == HeapAddress)
+                break;
+        }
+
+        /* The heap is gone: it has no blocks to report */
+        if (Index == Peb->NumberOfHeaps)
+        {
+            RtlLeaveCriticalSection(&RtlpProcessHeapsListLock);
+            return STATUS_INVALID_HANDLE;
+        }
+
+        /* A page heap and what is not a heap are left to the walk, which refuses them */
+        HeapLock = NULL;
+        Locked = TRUE;
+        _SEH2_TRY
+        {
+            if (!(Heap->ForceFlags & HEAP_FLAG_PAGE_ALLOCS) && Heap->Signature == HEAP_SIGNATURE &&
+                !(Heap->Flags & HEAP_NO_SERIALIZE) && Heap->LockVariable != NULL)
+            {
+                HeapLock = Heap->LockVariable;
+                Locked = RtlTryEnterHeapLock(HeapLock, TRUE);
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            HeapLock = NULL;
+            Locked = FALSE;
+            Faulted = TRUE;
+        }
+        _SEH2_END;
+
+        if (Faulted)
+        {
+            RtlLeaveCriticalSection(&RtlpProcessHeapsListLock);
+            return STATUS_INVALID_HANDLE;
+        }
+        if (!Locked)
+        {
+            RtlLeaveCriticalSection(&RtlpProcessHeapsListLock);
+            NtDelayExecution(FALSE, &RetryDelay);
+            continue;
+        }
+
+        /* The walk takes the lock of the heap again, which it may as the owner */
+        Status = RtlpEnumerateHeap(NULL, NULL, HeapAddress, Callback, Context, Flags);
+
+        if (HeapLock)
+            RtlLeaveHeapLock(HeapLock);
+        RtlLeaveCriticalSection(&RtlpProcessHeapsListLock);
+        return Status;
+    }
+
+    return STATUS_RETRY;
+}
+
+/*
  * The blocks of the heaps that the list holds. The heaps of this process are locked while they are
  * read. Those of another process cannot be: a heap is read when its lock is free, and again if the
  * lock was taken meanwhile or what was read does not add up. A heap that does not come out right is
@@ -667,7 +752,7 @@ RtlpQueryProcessHeapBlocks(_In_opt_ HANDLE ProcessHandle,
 
             if (Remote == NULL)
             {
-                Status = RtlpEnumerateHeap(NULL, NULL, Blocks.Heap->BaseAddress, RtlpHeapBlocksCallback, &Blocks, &Flags);
+                Status = RtlpEnumerateLocalHeap(Blocks.Heap->BaseAddress, RtlpHeapBlocksCallback, &Blocks, &Flags);
             }
             else if (RtlpRemoteHeapIsLocked(Remote, Blocks.Heap->BaseAddress))
             {
