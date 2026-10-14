@@ -9,7 +9,8 @@
  * changes drive letters of a volume and runs only when the environment names a scratch volume that has no
  * drive letter and no path: KERNEL32_TEST_VOLUME is its name ("\\?\Volume{GUID}\"), or KERNEL32_TEST_LABEL
  * is the label to look for. KERNEL32_TEST_HOST, the root of an NTFS volume ("Q:\"), is where the mount
- * point folders of the last part are made; without it the temporary folder is used.
+ * point folders of the last part are made; without it the temporary folder is used. The two checks that delete a
+ * drive letter that this test does not own run only when KERNEL32_TEST_ISOLATED is set, where nothing else assigns letters.
  */
 
 #include "precomp.h"
@@ -71,6 +72,14 @@ VolumePathCount(PCWSTR Volume)
             Count++;
     HeapFree(GetProcessHeap(), 0, Paths);
     return Ok ? Count : (DWORD)-1;
+}
+
+/* Deleting a drive letter that nothing of ours owns could remove the mapping of another process that took it in
+ * the meantime: those checks run only where the drive letters are controlled (KERNEL32_TEST_ISOLATED is set) */
+static BOOL
+IsIsolatedEnvironment(VOID)
+{
+    return GetEnvironmentVariableW(L"KERNEL32_TEST_ISOLATED", NULL, 0) != 0;
 }
 
 static VOID
@@ -137,9 +146,16 @@ Test_Arguments(VOID)
     ok_lasterr(ERROR_DIR_NOT_EMPTY);
 
     /* deleting what is not there */
-    SetLastError(0xDEADBEEF);
-    ok(!DeleteVolumeMountPointW(Root), "a letter nothing uses\n");
-    ok_lasterr(ERROR_FILE_NOT_FOUND);
+    if (IsIsolatedEnvironment())
+    {
+        SetLastError(0xDEADBEEF);
+        ok(!DeleteVolumeMountPointW(Root), "a letter nothing uses\n");
+        ok_lasterr(ERROR_FILE_NOT_FOUND);
+    }
+    else
+    {
+        skip("KERNEL32_TEST_ISOLATED is not set: no drive letter is deleted that this test does not own\n");
+    }
 
     /* a folder that is no mount point: on a file system without reparse points there is nothing to ask about */
     StringCchPrintfW(Temp, ARRAYSIZE(Temp), L"%ls\\", Windows);
@@ -220,9 +236,12 @@ Test_Letters(PCWSTR Volume)
     ok(DeleteVolumeMountPointW(Root), "DeleteVolumeMountPointW(%ls) failed: %lu\n", Root, GetLastError());
     ok(!VolumeHasPath(Volume, Root), "the volume keeps %ls\n", Root);
     ok_int(GetDriveTypeW(Root), DRIVE_NO_ROOT_DIR);
-    SetLastError(0xDEADBEEF);
-    ok(!DeleteVolumeMountPointW(Root), "the letter twice\n");
-    ok_lasterr(ERROR_FILE_NOT_FOUND);
+    if (IsIsolatedEnvironment())
+    {
+        SetLastError(0xDEADBEEF);
+        ok(!DeleteVolumeMountPointW(Root), "the letter twice\n");
+        ok_lasterr(ERROR_FILE_NOT_FOUND);
+    }
 
     /* upper and lower case are the same letter */
     Lower[0] = (WCHAR)towlower(Letter); Lower[1] = L':'; Lower[2] = L'\\'; Lower[3] = 0;
