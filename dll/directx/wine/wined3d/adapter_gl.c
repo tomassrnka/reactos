@@ -5002,40 +5002,6 @@ static float wined3d_adapter_find_fill_offset(struct wined3d_caps_gl_ctx *ctx)
     return -1.0f / 64.0f;
 }
 
-#ifdef __REACTOS__
-static DWORD WINAPI wined3d_no_3d_warning_proc(void *param)
-{
-    MessageBoxW(NULL,
-            L"ReactOS DirectX Needs at least OpenGL 2.0 or better\n\n"
-            L"Install a display driver that provides an OpenGL ICD to enable 3D "
-#ifdef _M_IX86
-            L"acceleration. Or install Mesa3D from the Applications Manager",
-#else
-            L"acceleration.",
-#endif
-            L"ReactOS - no 3D acceleration",
-            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
-    return 0;
-}
-
-static void wined3d_warn_no_3d(unsigned int wined3d_creation_flags)
-{
-    static LONG warned;
-    HANDLE thread;
-
-    /* DirectDraw falls back to 2D without 3D support, as on Windows without a 3D driver. */
-    if (wined3d_creation_flags & WINED3D_REACTOS_NO3D_FALLBACK)
-        return;
-
-    /* Only warn once per process */
-    if (InterlockedCompareExchange(&warned, 1, 0))
-        return;
-
-    if ((thread = CreateThread(NULL, 0, wined3d_no_3d_warning_proc, NULL, 0, NULL)))
-        CloseHandle(thread);
-}
-#endif /* __REACTOS__ */
-
 static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         unsigned int ordinal, unsigned int wined3d_creation_flags)
 {
@@ -5127,9 +5093,6 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         if (!gl_info->supported[required_extensions[i].extension])
         {
             ERR("Required extension %s is not supported.\n", required_extensions[i].string);
-#ifdef __REACTOS__
-            wined3d_warn_no_3d(wined3d_creation_flags);
-#endif
             wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
             goto fail;
         }
@@ -5138,9 +5101,6 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     if (!gl_info->supported[ARB_TEXTURE_NON_POWER_OF_TWO] && !gl_info->supported[WINED3D_GL_NORMALIZED_TEXRECT])
     {
         ERR("Required extension ARB_texture_non_power_of_two is not supported.\n");
-#ifdef __REACTOS__
-        wined3d_warn_no_3d(wined3d_creation_flags);
-#endif
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
         goto fail;
     }
@@ -5149,9 +5109,6 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     {
         ERR("GLSL version %s is too low; 1.20 is required.\n",
                 (const char *)gl_info->gl_ops.gl.p_glGetString(GL_SHADING_LANGUAGE_VERSION_ARB));
-#ifdef __REACTOS__
-        wined3d_warn_no_3d(wined3d_creation_flags);
-#endif
         wined3d_caps_gl_ctx_destroy(&caps_gl_ctx);
         goto fail;
     }
