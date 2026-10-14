@@ -554,10 +554,148 @@ static void Test_NtFreeVirtualMemory_LockedPages(void)
     LockedPagesLeakCheck(LockedNoAccessRelease);
 }
 
+static volatile LONG ReleaseCostStop;
+
+static DWORD WINAPI ReleaseCostSpinner(PVOID Parameter)
+{
+    while (!ReleaseCostStop)
+        YieldProcessor();
+    return 0;
+}
+
+static double ReleaseCostNow(void)
+{
+    LARGE_INTEGER Counter, Frequency;
+    QueryPerformanceCounter(&Counter);
+    QueryPerformanceFrequency(&Frequency);
+    return (double)Counter.QuadPart * 1000.0 / (double)Frequency.QuadPart;
+}
+
+/*
+ * Releasing touched memory must not cost much more than decommitting the
+ * same amount: both remove valid pages and flush the TB. A release that
+ * flushes every processor's TB once per page is dozens of times slower with
+ * other processors busy, and holds the PFN lock all that time. The fastest
+ * of several tries of each operation is compared, so a single pause cannot
+ * fail the check and a single slow decommit cannot hide a slow release.
+ */
+static void Test_NtFreeVirtualMemory_ReleaseCost(void)
+{
+    const SIZE_T Size = 32 * 1024 * 1024;
+    SYSTEM_INFO SystemInfo;
+    HANDLE Threads[31];
+    ULONG Count = 0, i;
+    double BestDecommit = 1e9, BestRelease = 1e9;
+    int Try, Done = 0;
+
+    GetSystemInfo(&SystemInfo);
+    if (SystemInfo.dwNumberOfProcessors < 2)
+    {
+        skip("Needs more than one processor\n");
+        return;
+    }
+
+    /* Keep the other processors busy, so a TB flush has to interrupt them */
+    ReleaseCostStop = 0;
+    for (i = 1; i < SystemInfo.dwNumberOfProcessors && Count < _countof(Threads); i++)
+    {
+        Threads[Count] = CreateThread(NULL, 0, ReleaseCostSpinner, NULL, 0, NULL);
+        if (!Threads[Count])
+            break;
+        Count++;
+    }
+    if (Count == 0)
+    {
+        skip("CreateThread failed: %lu\n", GetLastError());
+        return;
+    }
+
+    for (Try = 0; Try < 5; Try++)
+    {
+        PVOID Decommit = NULL, Release = NULL;
+        SIZE_T Length, Offset;
+        double Start, DecommitTime, ReleaseTime;
+        NTSTATUS Status, DecommitStatus, ReleaseStatus;
+
+        Length = Size;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Decommit, 0, &Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            Decommit = NULL;
+        Length = Size;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Release, 0, &Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            Release = NULL;
+
+        if (Decommit && Release)
+        {
+            for (Offset = 0; Offset < Size; Offset += PAGE_SIZE)
+            {
+                ((volatile UCHAR *)Decommit)[Offset] = 1;
+                ((volatile UCHAR *)Release)[Offset] = 1;
+            }
+
+            Length = Size;
+            Start = ReleaseCostNow();
+            DecommitStatus = NtFreeVirtualMemory(NtCurrentProcess(), &Decommit, &Length, MEM_DECOMMIT);
+            DecommitTime = ReleaseCostNow() - Start;
+            ok_ntstatus(DecommitStatus, STATUS_SUCCESS);
+
+            Length = 0;
+            Start = ReleaseCostNow();
+            ReleaseStatus = NtFreeVirtualMemory(NtCurrentProcess(), &Release, &Length, MEM_RELEASE);
+            ReleaseTime = ReleaseCostNow() - Start;
+            ok_ntstatus(ReleaseStatus, STATUS_SUCCESS);
+            if (NT_SUCCESS(ReleaseStatus))
+                Release = NULL;
+
+            if (NT_SUCCESS(DecommitStatus) && NT_SUCCESS(ReleaseStatus))
+            {
+                trace("Try %d: decommit %.2f ms, release %.2f ms\n", Try, DecommitTime, ReleaseTime);
+                if (DecommitTime < BestDecommit)
+                    BestDecommit = DecommitTime;
+                if (ReleaseTime < BestRelease)
+                    BestRelease = ReleaseTime;
+                Done++;
+            }
+        }
+
+        if (Decommit)
+        {
+            Length = 0;
+            Status = NtFreeVirtualMemory(NtCurrentProcess(), &Decommit, &Length, MEM_RELEASE);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+        }
+        if (Release)
+        {
+            Length = 0;
+            Status = NtFreeVirtualMemory(NtCurrentProcess(), &Release, &Length, MEM_RELEASE);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+        }
+    }
+
+    ReleaseCostStop = 1;
+    WaitForMultipleObjects(Count, Threads, TRUE, 10000);
+    for (i = 0; i < Count; i++)
+        CloseHandle(Threads[i]);
+
+    if (!Done)
+    {
+        skip("No complete measurement\n");
+        return;
+    }
+
+    /* Two milliseconds of slack for the scheduler */
+    ok(BestRelease < 4.0 * BestDecommit + 2.0,
+       "Releasing touched memory takes %.2f ms, decommitting it %.2f ms\n", BestRelease, BestDecommit);
+}
+
 START_TEST(NtFreeVirtualMemory)
 {
     Test_NtFreeVirtualMemory();
     Test_NtFreeVirtualMemory_Parameters();
     Test_NtFreeVirtualMemory_DecommitInaccessible();
     Test_NtFreeVirtualMemory_LockedPages();
+    Test_NtFreeVirtualMemory_ReleaseCost();
 }
