@@ -161,6 +161,12 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
     AFD_DbgPrint(MID_TRACE,("FCB %p Receive data waiting %u\n",
                             FCB, FCB->Recv.Content));
 
+    /* An AcceptEx that received initial data leaves no receive in flight. Only for
+     * completions: a receive completed inline would complete a request queued by
+     * the caller behind its back */
+    if (Irp == NULL && FCB->SharedData.State == SOCKET_STATE_CONNECTED)
+        RefillSocketBuffer(FCB);
+
     if( CantReadMore( FCB ) ) {
         /* Success here means that we got an EOF.  Complete a pending read
          * with zero bytes if we haven't yet overread, then kill the others.
