@@ -1305,6 +1305,50 @@ HotkeyThread(LPVOID Parameter)
 }
 
 
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+static BOOL
+InitializeWow64ProgramFiles(PCWSTR Program, PCWSTR Common)
+{
+    WCHAR Program32[MAX_PATH], Common32[MAX_PATH];
+    HKEY Key;
+    LONG Error;
+    SIZE_T Length = wcslen(Program);
+
+    if (Length + 6 >= ARRAYSIZE(Program32) || wcslen(Common) + 6 >= ARRAYSIZE(Common32))
+        return FALSE;
+    wcscpy(Program32, Program);
+    wcscat(Program32, L" (x86)");
+    wcscpy(Common32, Program32);
+    wcscat(Common32, Common + Length);
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+                          0, KEY_SET_VALUE, &Key);
+    if (Error) return FALSE;
+    Error = RegSetValueExW(Key, L"ProgramFilesDir (x86)", 0, REG_SZ,
+                           (const BYTE *)Program32, (wcslen(Program32) + 1) * sizeof(WCHAR));
+    if (!Error)
+        Error = RegSetValueExW(Key, L"CommonFilesDir (x86)", 0, REG_SZ,
+                               (const BYTE *)Common32, (wcslen(Common32) + 1) * sizeof(WCHAR));
+    RegCloseKey(Key);
+    if (Error) return FALSE;
+    /* Initialize the physical guest view even before registry redirection is
+     * enabled. This also keeps this setup change usable on its own branch. */
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion",
+        0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &Key, NULL);
+    if (Error) return FALSE;
+    Error = RegSetValueExW(Key, L"ProgramFilesDir", 0, REG_SZ,
+                           (const BYTE *)Program32, (wcslen(Program32) + 1) * sizeof(WCHAR));
+    if (!Error)
+        Error = RegSetValueExW(Key, L"CommonFilesDir", 0, REG_SZ,
+                               (const BYTE *)Common32, (wcslen(Common32) + 1) * sizeof(WCHAR));
+    RegCloseKey(Key);
+    if (Error) return FALSE;
+    if (!CreateDirectoryW(Program32, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
+    if (!CreateDirectoryW(Common32, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
+    return TRUE;
+}
+#endif
+
 static
 BOOL
 InitializeProgramFilesDir(VOID)
@@ -1416,7 +1460,11 @@ InitializeProgramFilesDir(VOID)
         }
     }
 
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+    return InitializeWow64ProgramFiles(szProgramFilesDirPath, szCommonFilesDirPath);
+#else
     return TRUE;
+#endif
 }
 
 

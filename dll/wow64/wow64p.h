@@ -52,3 +52,5 @@ typedef struct
     ULONG MinimumUserModeAddress, MaximumUserModeAddress, ActiveProcessorsAffinityMask;
     CCHAR NumberOfProcessors;
 } WOW64_SYSTEM_BASIC_INFORMATION;
+
+NTSTATUS Wow64CreateEnvironment(PVOID *Environment);
