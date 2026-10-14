@@ -354,7 +354,7 @@ RunLateChild(void)
 static BOOL
 ExtractLocalDll(const WCHAR *Path, BOOL Exclusive)
 {
-    HRSRC Resource = FindResourceW(NULL, MAKEINTRESOURCEW(IDR_LOCALDLL), RT_RCDATA);
+    HRSRC Resource = FindResourceW(NULL, MAKEINTRESOURCEW(IDR_LOCALDLL), (LPCWSTR)RT_RCDATA);
     HGLOBAL Data;
     DWORD Size, Written;
     HANDLE File;
