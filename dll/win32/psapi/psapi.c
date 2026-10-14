@@ -608,6 +608,89 @@ ReadModuleList32(HANDLE hProcess, ULONG_PTR Peb32, HMODULE *Modules, ULONG Max, 
 }
 
 /*
+ * The lists of another process change while they are read: a list that grew between the call that counts and the call
+ * that fills is read again with room for what it now has, a few times.
+ */
+#define LIST_RETRIES 8
+
+/* the test of the retry compiles this file with a list that changes under it */
+#ifndef PSAPI_ENUM_NATIVE
+#define PSAPI_ENUM_NATIVE EnumProcessModules
+#endif
+
+static BOOL
+ReadNativeModuleList(HANDLE hProcess, HMODULE **List, ULONG *Count)
+{
+    DWORD Needed = 0, Size, Tries;
+    HMODULE *Buffer;
+
+    *List = NULL;
+    *Count = 0;
+    if (!PSAPI_ENUM_NATIVE(hProcess, NULL, 0, &Needed))
+        return FALSE;
+
+    for (Tries = 0; Tries < LIST_RETRIES; Tries++)
+    {
+        Size = Needed + 16 * sizeof(HMODULE);
+        Buffer = LocalAlloc(LMEM_FIXED, Size);
+        if (!Buffer)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        if (!PSAPI_ENUM_NATIVE(hProcess, Buffer, Size, &Needed))
+        {
+            LocalFree(Buffer);
+            return FALSE;
+        }
+        if (Needed <= Size)
+        {
+            *List = Buffer;
+            *Count = Needed / sizeof(HMODULE);
+            return TRUE;
+        }
+        LocalFree(Buffer);
+    }
+
+    SetLastError(ERROR_PARTIAL_COPY);
+    return FALSE;
+}
+
+static BOOL
+ReadWow64ModuleList(HANDLE hProcess, ULONG_PTR Peb32, HMODULE **List, ULONG *Count)
+{
+    DWORD Tries;
+    ULONG Counted;
+    HMODULE *Buffer;
+
+    *List = NULL;
+    *Count = 0;
+    for (Tries = 0; Tries < LIST_RETRIES; Tries++)
+    {
+        if (!ReadModuleList32(hProcess, Peb32, NULL, 0, &Counted))
+            return FALSE;
+        Buffer = LocalAlloc(LMEM_FIXED, (Counted + 16) * sizeof(HMODULE));
+        if (!Buffer)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        if (ReadModuleList32(hProcess, Peb32, Buffer, Counted + 16, Count))
+        {
+            *List = Buffer;
+            return TRUE;
+        }
+        LocalFree(Buffer);
+        /* only a list that grew is read again */
+        if (GetLastError() != ERROR_PARTIAL_COPY)
+            return FALSE;
+    }
+
+    SetLastError(ERROR_PARTIAL_COPY);
+    return FALSE;
+}
+
+/*
  * The list of a WOW64 target for a 64-bit caller (measured on Windows 10): the 32-bit filter gives the 32-bit
  * loader list, the 64-bit filter the native one without the executable (it is a 32-bit image), both of them give
  * the 32-bit list followed by the native one, and the default is the native list with the executable.
@@ -621,37 +704,20 @@ EnumWow64Modules(HANDLE hProcess,
                  DWORD dwFilterFlag)
 {
     HMODULE *Native = NULL, *List32 = NULL, *Result;
-    DWORD NativeNeeded = 0, Capacity = cb / sizeof(HMODULE), i;
+    DWORD Capacity = cb / sizeof(HMODULE), i;
     ULONG NativeCount = 0, Count32 = 0, Total = 0, Skip = 0;
     BOOL Ok = FALSE;
 
     /* the native list is needed for every filter but the 32-bit one */
     if ((dwFilterFlag & LIST_MODULES_ALL) != LIST_MODULES_32BIT)
     {
-        if (!EnumProcessModules(hProcess, NULL, 0, &NativeNeeded))
+        if (!ReadNativeModuleList(hProcess, &Native, &NativeCount))
             goto done;
-        Native = LocalAlloc(LMEM_FIXED, NativeNeeded + sizeof(HMODULE));
-        if (!Native)
-        {
-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            goto done;
-        }
-        if (!EnumProcessModules(hProcess, Native, NativeNeeded + sizeof(HMODULE), &NativeNeeded))
-            goto done;
-        NativeCount = NativeNeeded / sizeof(HMODULE);
     }
 
     if (dwFilterFlag & LIST_MODULES_32BIT)
     {
-        if (!ReadModuleList32(hProcess, Peb32, NULL, 0, &Count32))
-            goto done;
-        List32 = LocalAlloc(LMEM_FIXED, (Count32 + 1) * sizeof(HMODULE));
-        if (!List32)
-        {
-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            goto done;
-        }
-        if (!ReadModuleList32(hProcess, Peb32, List32, Count32 + 1, &Count32))
+        if (!ReadWow64ModuleList(hProcess, Peb32, &List32, &Count32))
             goto done;
     }
 

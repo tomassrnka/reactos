@@ -162,99 +162,161 @@ static BOOL SameSnapshot(const WOW64_LISTS *First, const WOW64_LISTS *Second)
            !memcmp(First->Only32, Second->Only32, First->Needed32) && !memcmp(First->Only64, Second->Only64, First->Needed64);
 }
 
-/* The lists of a 32-bit process, from a 64-bit caller: the 32-bit filter, the 64-bit one without the executable, both */
-static void TestWow64Target(const char *Name, PFN_EnumProcessModulesEx Function)
+typedef struct
 {
-    char Directory[MAX_PATH], Command[MAX_PATH + 96];
+    PROCESS_INFORMATION Info;
+    HANDLE Output;
+} WOW64_CHILD;
+
+/*
+ * A 32-bit command interpreter that says "ready" on a pipe once it runs a command, then waits for a while: the signal
+ * comes from the child itself, so the number of modules it has loaded does not matter.
+ */
+static BOOL StartWow64Child(WOW64_CHILD *Child)
+{
+    char Directory[MAX_PATH], Command[MAX_PATH + 96], Text[16];
     STARTUPINFOA StartupInfo = { sizeof(StartupInfo) };
-    PROCESS_INFORMATION ProcessInfo;
-    static WOW64_LISTS First, Second;
-    HMODULE Native[MAX_TEST_MODULES];
-    DWORD NativeNeeded = 0, Tries, i;
-    BOOL Wow64 = FALSE, Stable = FALSE;
+    SECURITY_ATTRIBUTES Security = { sizeof(Security), NULL, TRUE };
+    HANDLE Read, Write;
+    DWORD Deadline, Got = 0, Total = 0;
 
     if (!GetSystemWow64DirectoryA(Directory, sizeof(Directory)))
     {
         skip("no 32-bit programs here\n");
-        return;
+        return FALSE;
     }
+    if (!CreatePipe(&Read, &Write, &Security, 0))
+    {
+        skip("no pipe (%lu)\n", GetLastError());
+        return FALSE;
+    }
+    SetHandleInformation(Read, HANDLE_FLAG_INHERIT, 0);
+
     lstrcpyA(Command, "\"");
     lstrcatA(Command, Directory);
-    lstrcatA(Command, "\\cmd.exe\" /c ping -n 12 127.0.0.1 > nul");
-    if (!CreateProcessA(NULL, Command, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+    lstrcatA(Command, "\\cmd.exe\" /c echo ready& ping -n 30 127.0.0.1 > nul");
+    StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    StartupInfo.hStdOutput = Write;
+    StartupInfo.hStdError = Write;
+    StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    if (!CreateProcessA(NULL, Command, NULL, NULL, TRUE, 0, NULL, NULL, &StartupInfo, &Child->Info))
     {
         skip("the 32-bit process did not start (%lu)\n", GetLastError());
+        CloseHandle(Read);
+        CloseHandle(Write);
+        return FALSE;
+    }
+    CloseHandle(Write);
+
+    memset(Text, 0, sizeof(Text));
+    Deadline = GetTickCount() + 30000;
+    while (Total < 5 && GetTickCount() < Deadline)
+    {
+        DWORD Available = 0;
+
+        if (!PeekNamedPipe(Read, NULL, 0, NULL, &Available, NULL))
+            break;
+        if (Available && ReadFile(Read, Text + Total, min(Available, 5 - Total), &Got, NULL))
+            Total += Got;
+        else
+            Sleep(50);
+    }
+    CloseHandle(Read);
+
+    if (strncmp(Text, "ready", 5))
+    {
+        skip("the 32-bit process did not signal in time\n");
+        TerminateProcess(Child->Info.hProcess, 0);
+        CloseHandle(Child->Info.hThread);
+        CloseHandle(Child->Info.hProcess);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void StopWow64Child(WOW64_CHILD *Child)
+{
+    TerminateProcess(Child->Info.hProcess, 0);
+    CloseHandle(Child->Info.hThread);
+    CloseHandle(Child->Info.hProcess);
+}
+
+/* The lists of a 32-bit process, from a 64-bit caller: the 32-bit filter, the 64-bit one without the executable, both */
+static void TestWow64Target(const char *Name, PFN_EnumProcessModulesEx Function)
+{
+    static WOW64_LISTS First, Second;
+    WOW64_CHILD Child;
+    DWORD Deadline, i, Error = 0;
+    BOOL Wow64 = FALSE, Stable = FALSE, Have = FALSE;
+
+    if (!StartWow64Child(&Child))
+        return;
+
+    IsWow64Process(Child.Info.hProcess, &Wow64);
+    if (!Wow64)
+    {
+        skip("the process is not a 32-bit one\n");
+        StopWow64Child(&Child);
         return;
     }
 
-    /* it is ready when the native list, which EnumProcessModules gives, has the loader of WOW64 in it */
-    for (Tries = 0; Tries < 50; Tries++)
+    /*
+     * The libraries of the process may still load after its signal: complete snapshots are taken again until two
+     * of them agree, and a snapshot that fails (the loader may be in the middle of a change) is taken again as well.
+     * Only a failure that lasts to the end of the time is a failure of the function.
+     */
+    Deadline = GetTickCount() + 20000;
+    while (GetTickCount() < Deadline)
     {
-        NativeNeeded = 0;
-        if (EnumProcessModules(ProcessInfo.hProcess, Native, sizeof(Native), &NativeNeeded) && NativeNeeded / sizeof(HMODULE) >= 5)
+        TakeSnapshot(Function, Child.Info.hProcess, &Second);
+        if (!Second.Ok)
+        {
+            Error = GetLastError();
+            Have = FALSE;
+        }
+        else if (Have && SameSnapshot(&First, &Second))
+        {
+            Stable = TRUE;
             break;
+        }
+        else
+        {
+            memcpy(&First, &Second, sizeof(First));
+            Have = TRUE;
+        }
         Sleep(100);
     }
 
-    IsWow64Process(ProcessInfo.hProcess, &Wow64);
-    if (!Wow64 || NativeNeeded / sizeof(HMODULE) < 5)
+    ok(Have || Stable, "%s: a list of the 32-bit process was not given (last error %lu)\n", Name, Error);
+    ok(!Have || Stable, "%s: the lists of the process did not settle\n", Name);
+    if (Have && Stable)
     {
-        skip("the process is not a 32-bit one or did not start in time\n");
-    }
-    else
-    {
-        /* the libraries of the process load for a while: the lists are taken again until two of them agree */
-        Sleep(500);
-        TakeSnapshot(Function, ProcessInfo.hProcess, &First);
-        for (Tries = 0; Tries < 20 && First.Ok; Tries++)
+        /* the 32-bit list starts with the executable, which is not in the 64-bit list; the other 32-bit modules are below 4 GB */
+        ok(First.Needed32 / sizeof(HMODULE) > 3, "%s: %lu 32-bit modules\n", Name, First.Needed32 / (DWORD)sizeof(HMODULE));
+        ok(First.Needed64 > 0, "%s: no 64-bit modules\n", Name);
+        for (i = 0; i < First.Needed32 / sizeof(HMODULE); i++)
+            ok((ULONG_PTR)First.Only32[i] < 0x100000000ULL, "%s: 32-bit module %lu is %p\n", Name, i, First.Only32[i]);
+        ok(First.NeededDefault == First.Needed64 + sizeof(HMODULE), "%s: the default list has %lu bytes, the 64-bit one %lu\n",
+           Name, First.NeededDefault, First.Needed64);
+        if (First.NeededDefault == First.Needed64 + sizeof(HMODULE))
         {
-            Sleep(100);
-            TakeSnapshot(Function, ProcessInfo.hProcess, &Second);
-            if (!Second.Ok)
-            {
-                First.Ok = FALSE;
-                break;
-            }
-            if (SameSnapshot(&First, &Second))
-            {
-                Stable = TRUE;
-                break;
-            }
-            memcpy(&First, &Second, sizeof(First));
+            ok(First.Default[0] == First.Only32[0], "%s: the default list starts with %p, not the executable %p\n", Name,
+               First.Default[0], First.Only32[0]);
+            ok(!memcmp(First.Default + 1, First.Only64, First.Needed64), "%s: the 64-bit list is not the default one without the executable\n", Name);
         }
-
-        ok(First.Ok, "%s: a list of the 32-bit process was not given (last error %lu)\n", Name, GetLastError());
-        ok(!First.Ok || Stable, "%s: the lists of the process did not settle\n", Name);
-        if (First.Ok && Stable)
+        ok(First.NeededBoth == First.Needed32 + First.Needed64, "%s: both lists have %lu bytes, expected %lu\n", Name,
+           First.NeededBoth, First.Needed32 + First.Needed64);
+        if (First.NeededBoth == First.Needed32 + First.Needed64)
         {
-            /* the 32-bit list starts with the executable, which is not in the 64-bit list; the other 32-bit modules are below 4 GB */
-            ok(First.Needed32 / sizeof(HMODULE) > 3, "%s: %lu 32-bit modules\n", Name, First.Needed32 / (DWORD)sizeof(HMODULE));
-            ok(First.Needed64 > 0, "%s: no 64-bit modules\n", Name);
-            for (i = 0; i < First.Needed32 / sizeof(HMODULE); i++)
-                ok((ULONG_PTR)First.Only32[i] < 0x100000000ULL, "%s: 32-bit module %lu is %p\n", Name, i, First.Only32[i]);
-            ok(First.NeededDefault == First.Needed64 + sizeof(HMODULE), "%s: the default list has %lu bytes, the 64-bit one %lu\n",
-               Name, First.NeededDefault, First.Needed64);
-            if (First.NeededDefault == First.Needed64 + sizeof(HMODULE))
-            {
-                ok(First.Default[0] == First.Only32[0], "%s: the default list starts with %p, not the executable %p\n", Name,
-                   First.Default[0], First.Only32[0]);
-                ok(!memcmp(First.Default + 1, First.Only64, First.Needed64), "%s: the 64-bit list is not the default one without the executable\n", Name);
-            }
-            ok(First.NeededBoth == First.Needed32 + First.Needed64, "%s: both lists have %lu bytes, expected %lu\n", Name,
-               First.NeededBoth, First.Needed32 + First.Needed64);
-            if (First.NeededBoth == First.Needed32 + First.Needed64)
-            {
-                ok(!memcmp(First.Both, First.Only32, First.Needed32), "%s: both lists do not start with the 32-bit one\n", Name);
-                ok(!memcmp(First.Both + First.Needed32 / sizeof(HMODULE), First.Only64, First.Needed64),
-                   "%s: both lists do not end with the 64-bit one\n", Name);
-            }
+            ok(!memcmp(First.Both, First.Only32, First.Needed32), "%s: both lists do not start with the 32-bit one\n", Name);
+            ok(!memcmp(First.Both + First.Needed32 / sizeof(HMODULE), First.Only64, First.Needed64),
+               "%s: both lists do not end with the 64-bit one\n", Name);
         }
     }
 
-    TerminateProcess(ProcessInfo.hProcess, 0);
-    CloseHandle(ProcessInfo.hThread);
-    CloseHandle(ProcessInfo.hProcess);
+    StopWow64Child(&Child);
 }
+
 #endif
 
 START_TEST(EnumProcessModulesEx)
