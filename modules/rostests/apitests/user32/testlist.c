@@ -74,6 +74,7 @@ extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
 extern void func_WmPrint(void);
 extern void func_WndProc(void);
+extern void func_Win8User(void);
 extern void func_wsprintfApi(void);
 
 const struct test winetest_testlist[] =
@@ -148,6 +149,7 @@ const struct test winetest_testlist[] =
     { "TrackPopupMenuEx", func_TrackPopupMenuEx },
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
     { "VirtualKey", func_VirtualKey },
+    { "Win8User", func_Win8User },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
     { "wsprintfApi", func_wsprintfApi },

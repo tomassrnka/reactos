@@ -913,20 +913,6 @@ BOOL WINAPI SetGestureConfig( HWND hwnd, DWORD reserved, UINT count,
     return FALSE;
 }
 
-BOOL WINAPI GetPointerTouchInfo( UINT32 id, POINTER_TOUCH_INFO *info )
-{
-    FIXME( "id %u, info %p stub!\n", id, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
-
-BOOL WINAPI GetPointerTouchInfoHistory( UINT32 id, UINT32 *count, POINTER_TOUCH_INFO *info )
-{
-    FIXME( "id %u, count %p, info %p stub!\n", id, count, info );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
-
 #ifndef __REACTOS__
 /*******************************************************************
  *           SetForegroundWindow  (USER32.@)
@@ -1012,9 +998,3 @@ HWND WINAPI GetTaskmanWindow(void)
 }
 #endif
 
-HSYNTHETICPOINTERDEVICE WINAPI CreateSyntheticPointerDevice(POINTER_INPUT_TYPE type, ULONG max_count, POINTER_FEEDBACK_MODE mode)
-{
-    FIXME( "type %ld, max_count %ld, mode %d stub!\n", type, max_count, mode);
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return NULL;
-}
