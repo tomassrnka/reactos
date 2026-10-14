@@ -57,6 +57,16 @@ UINT
 WaitForProcess(HANDLE hProcess);
 BOOL
 StartProcess(const CStringW &Path, BOOL Wait);
+
+enum InstallerOutcome
+{
+    INSTALLER_OUTCOME_OK,
+    INSTALLER_OUTCOME_CANCELLED,
+    INSTALLER_OUTCOME_FAILED,
+    INSTALLER_OUTCOME_CRASHED,
+};
+InstallerOutcome
+ClassifyInstallerExitCode(DWORD ExitCode, InstallerType Type);
 BOOL
 GetStorageDirectory(CStringW &lpDirectory);
 

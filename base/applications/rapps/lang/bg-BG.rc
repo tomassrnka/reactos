@@ -215,6 +215,8 @@ BEGIN
     IDS_CFG_LOG_ENABLED "Вписване на слаганията и маханията на приложения"
     IDS_CFG_SMALL_ICONS "Малки значета"
     IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
+    IDS_DL_INSTALLER_FAILED "The installer of %s did not finish successfully (exit code %lu).\n\nThe program may not be installed."
+    IDS_DL_INSTALLER_CRASHED "The installer of %s stopped unexpectedly (error 0x%08lX).\n\nThe program may not be installed."
 END
 
 STRINGTABLE
@@ -227,6 +229,7 @@ BEGIN
     IDS_STATUS_INSTALLING "Installing…"
     IDS_STATUS_WAITING "Waiting to install…"
     IDS_STATUS_FINISHED "Finished"
+    IDS_STATUS_FAILED "Failed"
 END
 
 STRINGTABLE

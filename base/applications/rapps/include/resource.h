@@ -210,6 +210,7 @@
 #define IDS_STATUS_INSTALLING         805
 #define IDS_STATUS_WAITING            806
 #define IDS_STATUS_FINISHED           807
+#define IDS_STATUS_FAILED             808
 
 /* App license names */
 #define IDS_LICENSE_OPENSOURCE      900
@@ -243,6 +244,8 @@
 #define IDS_INSTGEN_CONFIRMUNINST               1000
 #define IDS_INSTGEN_CONFIRMINSTRUNAPP           1001
 #define IDS_DL_STANDALONE_PROGRAM               1002
+#define IDS_DL_INSTALLER_FAILED                 1003
+#define IDS_DL_INSTALLER_CRASHED                1004
 
 /* Accelerators */
 #define HOTKEYS                  715

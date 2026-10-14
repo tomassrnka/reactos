@@ -199,6 +199,35 @@ WaitForProcess(HANDLE hProcess)
     return code;
 }
 
+InstallerOutcome
+ClassifyInstallerExitCode(DWORD ExitCode, InstallerType Type)
+{
+    switch (ExitCode)
+    {
+        case ERROR_SUCCESS:
+        case ERROR_SUCCESS_REBOOT_INITIATED:
+        case ERROR_SUCCESS_REBOOT_REQUIRED:
+        case ERROR_SUCCESS_RESTART_REQUIRED:
+        case ERROR_PRODUCT_VERSION: // Windows Installer: this or a newer version is already installed
+            return INSTALLER_OUTCOME_OK;
+        case ERROR_CANCELLED:
+        case ERROR_INSTALL_USEREXIT:
+        case 0xC000013A: // STATUS_CONTROL_C_EXIT
+            return INSTALLER_OUTCOME_CANCELLED;
+    }
+
+    // Exit codes of Inno Setup (2 and 5 are Cancel) and NSIS (1 is Cancel)
+    if (Type == INSTALLER_INNO && (ExitCode == 2 || ExitCode == 5))
+        return INSTALLER_OUTCOME_CANCELLED;
+    if (Type == INSTALLER_NSIS && ExitCode == 1)
+        return INSTALLER_OUTCOME_CANCELLED;
+
+    // An unhandled exception ends the process with its NTSTATUS code
+    if ((ExitCode & 0xF0000000) == 0xC0000000)
+        return INSTALLER_OUTCOME_CRASHED;
+    return INSTALLER_OUTCOME_FAILED;
+}
+
 BOOL
 StartProcess(const CStringW &Path, BOOL Wait)
 {

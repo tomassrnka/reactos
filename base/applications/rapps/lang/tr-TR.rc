@@ -218,6 +218,8 @@ BEGIN
     IDS_CFG_LOG_ENABLED "Programların Kurulma ve Kaldırma Günlüğünü Sakla"
     IDS_CFG_SMALL_ICONS "Küçük simgeler"
     IDS_UNABLE_TO_RUN_32BIT "%s cannot be installed: its installer is a 32-bit program, and 32-bit programs cannot run on this 64-bit system yet."
+    IDS_DL_INSTALLER_FAILED "The installer of %s did not finish successfully (exit code %lu).\n\nThe program may not be installed."
+    IDS_DL_INSTALLER_CRASHED "The installer of %s stopped unexpectedly (error 0x%08lX).\n\nThe program may not be installed."
 END
 
 STRINGTABLE
@@ -230,6 +232,7 @@ BEGIN
     IDS_STATUS_INSTALLING "Kuruluyor…"
     IDS_STATUS_WAITING "Yükleme için bekliyor…"
     IDS_STATUS_FINISHED "Tamamlandı"
+    IDS_STATUS_FAILED "Failed"
 END
 
 STRINGTABLE
