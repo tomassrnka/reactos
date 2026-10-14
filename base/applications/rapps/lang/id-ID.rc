@@ -195,6 +195,8 @@ BEGIN
     IDS_INFORMATION "Informasi"
     IDS_UNABLE_TO_DOWNLOAD "Tidak bisa mengunduh paket! Alamat tidak ditemukan!"
     IDS_UNABLE_TO_DOWNLOAD2 "Tidak bisa mengunduh paket! Cek sambungan internet!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Tidak bisa menghapus data program dari registri!"
     IDS_UNABLE_TO_INSTALL "Tidak bisa membuka pemasang!"
     IDS_UNABLE_TO_QUERY_CERT "Tidak bisa mengambil info terkait sertifikat.\n\nTetap lanjutkan?"

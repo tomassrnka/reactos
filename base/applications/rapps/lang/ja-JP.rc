@@ -197,6 +197,8 @@ BEGIN
     IDS_INFORMATION "情報"
     IDS_UNABLE_TO_DOWNLOAD "パッケージをダウンロードできません。アドレスが見つかりません。"
     IDS_UNABLE_TO_DOWNLOAD2 "パッケージをダウンロードできません。インターネット接続を確認して下さい。"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "レジストリからこのプログラムに関するデータを削除できません。"
     IDS_UNABLE_TO_INSTALL "インストーラを開けません。"
     IDS_UNABLE_TO_QUERY_CERT "証明書情報を取得できません。\n\nそれでも続けますか？"

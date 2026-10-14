@@ -200,6 +200,8 @@ BEGIN
     IDS_INFORMATION "Информация"
     IDS_UNABLE_TO_DOWNLOAD "Не удалось скачать приложение! Не найден адрес!"
     IDS_UNABLE_TO_DOWNLOAD2 "Не удалось скачать приложение! Проверьте подключение к сети Интернет!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Не удалось удалить данные о программе из реестра!"
     IDS_UNABLE_TO_INSTALL "Не удалось завершить установку!"
     IDS_UNABLE_TO_QUERY_CERT "Не удалось получить информацию о сертификате.\n\nВы хотите продолжить в любом случае?"

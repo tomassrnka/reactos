@@ -199,6 +199,8 @@ BEGIN
     IDS_INFORMATION "信息"
     IDS_UNABLE_TO_DOWNLOAD "无法下载该软件包！找不到网络的地址！"
     IDS_UNABLE_TO_DOWNLOAD2 "无法下载该软件包！请检查网络连接！"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "无法从注册表删除该程序的数据！"
     IDS_UNABLE_TO_INSTALL "无法打开安装程序！"
     IDS_UNABLE_TO_QUERY_CERT "无法获取证书信息。\n\n您是否仍然想继续？"

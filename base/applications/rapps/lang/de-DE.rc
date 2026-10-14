@@ -198,6 +198,8 @@ BEGIN
     IDS_INFORMATION "Informationen"
     IDS_UNABLE_TO_DOWNLOAD "Paket konnte nicht geladen werden! Adresse wurde nicht gefunden!"
     IDS_UNABLE_TO_DOWNLOAD2 "Paket konnte nicht geladen werden! Prüfen Sie Ihre Internetverbindung!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Konnte die Daten nicht aus der Registry löschen!"
     IDS_UNABLE_TO_INSTALL "Paket konnte nicht installiert werden!"
     IDS_UNABLE_TO_QUERY_CERT "Zertifikatsinformationen können nicht abgerufen werden.\n\nMöchten Sie trotzdem fortfahren?"

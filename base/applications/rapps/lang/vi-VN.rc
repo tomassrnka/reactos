@@ -195,6 +195,8 @@ BEGIN
     IDS_INFORMATION "Thông tin"
     IDS_UNABLE_TO_DOWNLOAD "Không thể tải xuống gói! Không tìm thấy địa chỉ!"
     IDS_UNABLE_TO_DOWNLOAD2 "Không thể tải xuống gói! Hãy kiểm tra kết nối Internet!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Không thể xóa dữ liệu của chương trình khỏi registry!"
     IDS_UNABLE_TO_INSTALL "Không thể mở bộ cài đặt!"
     IDS_UNABLE_TO_QUERY_CERT "Không thể truy xuất thông tin chứng chỉ.\n\nBạn có muốn tiếp tục không?"

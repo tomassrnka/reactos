@@ -476,6 +476,39 @@ ShowLastError(HWND hWndOwner, BOOL bInetError, DWORD dwLastError, LPCWSTR pszIns
     return TRUE;
 }
 
+#define MAX_DOWNLOAD_ATTEMPTS 3
+#define DOWNLOAD_RETRY_DELAY_MS 1500
+
+static BOOL
+IsTransientDownloadFailure(BOOL bGotResponse, DWORD dwStatus, DWORD dwError)
+{
+    if (bGotResponse)
+    {
+        return dwStatus == HTTP_STATUS_REQUEST_TIMEOUT || dwStatus == 429 || dwStatus == HTTP_STATUS_SERVER_ERROR ||
+               dwStatus == HTTP_STATUS_BAD_GATEWAY || dwStatus == HTTP_STATUS_SERVICE_UNAVAIL ||
+               dwStatus == HTTP_STATUS_GATEWAY_TIMEOUT;
+    }
+    return dwError == ERROR_INTERNET_TIMEOUT || dwError == ERROR_INTERNET_CONNECTION_ABORTED ||
+           dwError == ERROR_INTERNET_CONNECTION_RESET;
+}
+
+static VOID
+ShowHttpStatusError(HWND hWndOwner, HINTERNET hFile, DWORD dwStatus)
+{
+    WCHAR szText[256] = L"";
+    DWORD cbText = sizeof(szText) - sizeof(WCHAR);
+    if (!HttpQueryInfoW(hFile, HTTP_QUERY_STATUS_TEXT, szText, &cbText, NULL))
+        szText[0] = UNICODE_NULL;
+
+    CStringW szMsgText, szFormat;
+    if (szFormat.LoadStringW(IDS_UNABLE_TO_DOWNLOAD_HTTP))
+    {
+        szMsgText.Format(szFormat, dwStatus, szText);
+        szMsgText.TrimRight();
+        MessageBoxW(hWndOwner, szMsgText, NULL, MB_OK | MB_ICONERROR);
+    }
+}
+
 #ifdef _WIN64
 static BOOL
 IsUnrunnable32BitProgram(LPCWSTR Path)
@@ -953,28 +986,71 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     if (urlComponents.nScheme == INTERNET_SCHEME_HTTP || urlComponents.nScheme == INTERNET_SCHEME_HTTPS)
     {
-        hFile = InternetOpenUrlW(hOpen, Info.szUrl, NULL, 0, dwUrlConnectFlags, 0);
-        if (!hFile)
+        for (UINT attempt = 1;; ++attempt)
         {
-            if (!ShowLastError(hMainWnd, TRUE, GetLastError()))
+            DWORD dwError = ERROR_SUCCESS;
+            dwStatus = 0;
+            hFile = InternetOpenUrlW(hOpen, Info.szUrl, NULL, 0, dwUrlConnectFlags, 0);
+            if (hFile)
             {
-                /* Workaround for CORE-17377 */
-                MessageBox_LoadString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD2);
+                // query connection
+                dwStatusLen = sizeof(dwStatus);
+                if (!HttpQueryInfoW(hFile, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &dwStatus, &dwStatusLen, NULL))
+                {
+                    ShowLastError(hMainWnd, TRUE, GetLastError());
+                    goto end;
+                }
+                if (dwStatus == HTTP_STATUS_OK)
+                    break;
             }
-            goto end;
-        }
+            else
+            {
+                dwError = GetLastError();
+            }
 
-        // query connection
-        if (!HttpQueryInfoW(hFile, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &dwStatus, &dwStatusLen, NULL))
-        {
-            ShowLastError(hMainWnd, TRUE, GetLastError());
-            goto end;
-        }
+            if (IsCancelled())
+            {
+                bCancelled = TRUE;
+                bTempfile = FALSE; // nothing was written yet, a file of an earlier download stays
+                goto end;
+            }
 
-        if (dwStatus != HTTP_STATUS_OK)
-        {
-            MessageBox_LoadString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD);
-            goto end;
+            // A busy or restarting server often answers on the next try
+            if (attempt >= MAX_DOWNLOAD_ATTEMPTS || !IsTransientDownloadFailure(hFile != NULL, dwStatus, dwError))
+            {
+                if (!hFile)
+                {
+                    if (!ShowLastError(hMainWnd, TRUE, dwError))
+                    {
+                        /* Workaround for CORE-17377 */
+                        MessageBox_LoadString(hMainWnd, IDS_UNABLE_TO_DOWNLOAD2);
+                    }
+                }
+                else
+                {
+                    ShowHttpStatusError(hMainWnd, hFile, dwStatus);
+                }
+                goto end;
+            }
+
+            if (hFile)
+            {
+                InternetCloseHandle(hFile);
+                hFile = NULL;
+            }
+
+            CStringW szRetry;
+            szRetry.Format(IDS_DL_RETRY, attempt + 1, (UINT)MAX_DOWNLOAD_ATTEMPTS);
+            SetWindowTextW(hStatus, szRetry);
+            for (UINT waited = 0; waited < attempt * DOWNLOAD_RETRY_DELAY_MS && !IsCancelled(); waited += 100)
+                Sleep(100);
+            if (IsCancelled())
+            {
+                bCancelled = TRUE;
+                bTempfile = FALSE;
+                goto end;
+            }
+            SetFriendlyUrl(hStatus, Info.szUrl);
         }
 
         // query content length

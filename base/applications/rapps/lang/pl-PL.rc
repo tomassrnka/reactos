@@ -197,6 +197,8 @@ BEGIN
     IDS_INFORMATION "Informacja"
     IDS_UNABLE_TO_DOWNLOAD "Nie można pobrać pakietu! Nie znaleziono adresu!"
     IDS_UNABLE_TO_DOWNLOAD2 "Nie można pobrać pakietu! Sprawdź połączenie z siecią!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Nie można było usunąć wpisu z rejestru!"
     IDS_UNABLE_TO_INSTALL "Nie można uruchomić instalatora!"
     IDS_UNABLE_TO_QUERY_CERT "Nie można odnaleźć informacji o certyfikacie.\n\nCzy chcesz mimo to kontynuować?"

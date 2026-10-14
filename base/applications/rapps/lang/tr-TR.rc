@@ -198,6 +198,8 @@ BEGIN
     IDS_INFORMATION "Bilgi"
     IDS_UNABLE_TO_DOWNLOAD "Paket indirilemiyor! Adres bulunamadı!"
     IDS_UNABLE_TO_DOWNLOAD2 "Paket indirilemiyor! İnternet bağlantınızı denetleyiniz!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Programın girdisi kayıt defterinden silinemiyor."
     IDS_UNABLE_TO_INSTALL "Yükleyici açılamıyor!"
     IDS_UNABLE_TO_QUERY_CERT "Sertifika bilgisi alınamıyor.\n\nYine de devam edilsin mi?"
