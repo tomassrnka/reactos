@@ -14,6 +14,7 @@ list(APPEND SOURCE
     IStreamPidl.cpp
     MapWin32ErrorToSTG.c
     NextPath.c
+    PathCanonicalize.c
     PathFileExistsDefExtAndAttributesW.c
     PathFindOnPath.c
     PathIsUNC.c
