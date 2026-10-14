@@ -31,6 +31,7 @@ list(APPEND SOURCE
     GetWindowPlacement.c
     GW_ENABLEDPOPUP.c
     Handle32.c
+    HungWindow.c
     InitializeLpkHooks.c
     IsDialogMessage.c
     IsServerSideWindow.c
