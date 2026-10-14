@@ -5,6 +5,8 @@
  * COPYRIGHT:   Copyright 2016-2025 Mark Jansen <mark.jansen@reactos.org>
  */
 
+#include <cerrno>
+#include <cctype>
 #include "xml2sdb.h"
 #include "sdbpapi.h"
 #include "tinyxml2.h"
@@ -119,6 +121,17 @@ std::string ReadStringNode(XMLHandle dbNode, const char* nodeName)
     return ToString(dbNode.FirstChildElement(nodeName));
 }
 
+// A version that is there but empty is an error; it must not read as a version that is not there
+static std::string ReadVersionNode(XMLHandle dbNode, const char* nodeName)
+{
+    std::string value = ReadStringNode(dbNode, nodeName);
+    tinyxml2::XMLElement* elem = dbNode.ToElement();
+    bool present = (elem && elem->Attribute(nodeName)) || dbNode.FirstChildElement(nodeName).ToElement();
+    if (value.empty() && present)
+        return "(empty)";
+    return value;
+}
+
 QWORD ReadQWordNode(XMLHandle dbNode, const char* nodeName)
 {
     std::string value = ReadStringNode(dbNode, nodeName);
@@ -134,6 +147,78 @@ QWORD ReadQWordNode(XMLHandle dbNode, const char* nodeName)
 DWORD ReadDWordNode(XMLHandle dbNode, const char* nodeName)
 {
     return static_cast<DWORD>(ReadQWordNode(dbNode, nodeName));
+}
+
+// One unsigned number, decimal or 0x hex, made of digits only; false when it is empty, negative or too large
+static bool ParseBinNumber(const char* text, size_t length, unsigned long long limit, unsigned long long& result)
+{
+    std::string number(text, length);
+    int base = 10;
+    if (number.size() > 2 && number[0] == '0' && (number[1] == 'x' || number[1] == 'X'))
+    {
+        base = 16;
+        number = number.substr(2);
+    }
+    if (number.empty())
+        return false;
+    for (size_t n = 0; n < number.size(); ++n)
+    {
+        unsigned char c = static_cast<unsigned char>(number[n]);
+        if (base == 16 ? !isxdigit(c) : !isdigit(c))
+            return false;
+    }
+
+    errno = 0;
+    char* end = NULL;
+    unsigned long long value = strtoull(number.c_str(), &end, base);
+    if (errno == ERANGE || !end || *end || value > limit)
+        return false;
+    result = value;
+    return true;
+}
+
+// A binary version as 'a.b.c.d' (four 16-bit parts, most significant first) or as one number
+static bool ParseBinVersion(const std::string& value, QWORD& result)
+{
+    unsigned long long number;
+
+    if (value.find('.') == std::string::npos)
+    {
+        if (!ParseBinNumber(value.c_str(), value.size(), ~0ULL, number))
+            return false;
+        result = number;
+        return true;
+    }
+
+    QWORD version = 0;
+    size_t pos = 0;
+    for (int part = 0; part < 4; ++part)
+    {
+        size_t dot = value.find('.', pos);
+        if (part < 3 ? dot == std::string::npos : dot != std::string::npos)
+            return false;
+        size_t length = (dot == std::string::npos ? value.size() : dot) - pos;
+        if (!ParseBinNumber(value.c_str() + pos, length, 0xffff, number))
+            return false;
+        version = (version << 16) | number;
+        pos = dot + 1;
+    }
+    result = version;
+    return true;
+}
+
+static bool WriteBinVersion(Database& db, TAG tag, const std::string& value, const char* name)
+{
+    QWORD version;
+    if (value.empty())
+        return true;
+    if (!ParseBinVersion(value, version))
+    {
+        SHIM_ERR("Unable to parse %s '%s'\n", name, value.c_str());
+        return false;
+    }
+    db.WriteQWord(tag, version, true);
+    return true;
 }
 
 PlatformType ReadPlatformNode(XMLHandle dbNode, const char *nodeName)
@@ -371,6 +456,24 @@ bool ShimRef::toSdb(Database& db)
 
 
 /***********************************************************************
+ *   LayerRef
+ */
+
+bool LayerRef::fromXml(XMLHandle dbNode)
+{
+    Name = ReadStringNode(dbNode, "NAME");
+    return !Name.empty();
+}
+
+bool LayerRef::toSdb(Database& db)
+{
+    TAGID tagid = db.BeginWriteListTag(TAG_LAYER);
+    db.WriteString(TAG_NAME, Name, true);
+    return !!db.EndWriteListTag(tagid);
+}
+
+
+/***********************************************************************
  *   FlagRef
  */
 
@@ -556,12 +659,14 @@ bool MatchingFile::fromXml(XMLHandle dbNode)
     ProductName = ReadStringNode(dbNode, "PRODUCT_NAME");
     ProductVersion = ReadStringNode(dbNode, "PRODUCT_VERSION");
     FileVersion = ReadStringNode(dbNode, "FILE_VERSION");
-    BinFileVersion = ReadStringNode(dbNode, "BIN_FILE_VERSION");
+    BinFileVersion = ReadVersionNode(dbNode, "BIN_FILE_VERSION");
+    BinProductVersion = ReadVersionNode(dbNode, "BIN_PRODUCT_VERSION");
     LinkDate = ReadDWordNode(dbNode, "LINK_DATE");
     VerLanguage = ReadStringNode(dbNode, "VER_LANGUAGE");
     FileDescription = ReadStringNode(dbNode, "FILE_DESCRIPTION");
     OriginalFilename = ReadStringNode(dbNode, "ORIGINAL_FILENAME");
-    UptoBinFileVersion = ReadStringNode(dbNode, "UPTO_BIN_FILE_VERSION");
+    UptoBinFileVersion = ReadVersionNode(dbNode, "UPTO_BIN_FILE_VERSION");
+    UptoBinProductVersion = ReadVersionNode(dbNode, "UPTO_BIN_PRODUCT_VERSION");
     LinkerVersion = ReadDWordNode(dbNode, "LINKER_VERSION");
     return true;
 }
@@ -578,18 +683,19 @@ bool MatchingFile::toSdb(Database& db)
     db.WriteString(TAG_PRODUCT_NAME, ProductName);
     db.WriteString(TAG_PRODUCT_VERSION, ProductVersion);
     db.WriteString(TAG_FILE_VERSION, FileVersion);
-    if (!BinFileVersion.empty())
-        SHIM_ERR("TAG_BIN_FILE_VERSION Unimplemented\n"); //db.WriteQWord(TAG_BIN_FILE_VERSION, BinFileVersion);
+    bool versionsOk = WriteBinVersion(db, TAG_BIN_FILE_VERSION, BinFileVersion, "BIN_FILE_VERSION");
+    versionsOk = WriteBinVersion(db, TAG_BIN_PRODUCT_VERSION, BinProductVersion, "BIN_PRODUCT_VERSION") && versionsOk;
     db.WriteDWord(TAG_LINK_DATE, LinkDate);
     if (!VerLanguage.empty())
         SHIM_ERR("TAG_VER_LANGUAGE Unimplemented\n"); //db.WriteDWord(TAG_VER_LANGUAGE, VerLanguage);
     db.WriteString(TAG_FILE_DESCRIPTION, FileDescription);
     db.WriteString(TAG_ORIGINAL_FILENAME, OriginalFilename);
-    if (!UptoBinFileVersion.empty())
-        SHIM_ERR("TAG_UPTO_BIN_FILE_VERSION Unimplemented\n"); //db.WriteQWord(TAG_UPTO_BIN_FILE_VERSION, UptoBinFileVersion);
+    versionsOk = WriteBinVersion(db, TAG_UPTO_BIN_FILE_VERSION, UptoBinFileVersion, "UPTO_BIN_FILE_VERSION") && versionsOk;
+    versionsOk = WriteBinVersion(db, TAG_UPTO_BIN_PRODUCT_VERSION, UptoBinProductVersion, "UPTO_BIN_PRODUCT_VERSION") && versionsOk;
     db.WriteDWord(TAG_LINKER_VERSION, LinkerVersion);
 
-    return !!db.EndWriteListTag(tagid);
+    /* A version that cannot be read must not turn into a condition that matches more */
+    return !!db.EndWriteListTag(tagid) && versionsOk;
 }
 
 
@@ -608,6 +714,7 @@ bool Exe::fromXml(XMLHandle dbNode)
 
     ReadGeneric(dbNode, ShimRefs, "SHIM_REF");
     ReadGeneric(dbNode, FlagRefs, "FLAG_REF");
+    ReadGeneric(dbNode, LayerRefs, "LAYER");
 
     Platform = ReadPlatformNode(dbNode, "RUNTIME_PLATFORM");
 
@@ -632,6 +739,8 @@ bool Exe::toSdb(Database& db)
     if (!WriteGeneric(ShimRefs, db))
         return false;
     if (!WriteGeneric(FlagRefs, db))
+        return false;
+    if (!WriteGeneric(LayerRefs, db))
         return false;
 
     return !!db.EndWriteListTag(Tagid);
