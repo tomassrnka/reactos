@@ -76,7 +76,7 @@ C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, ExtendedRegisters) == 64);
 typedef NTSTATUS (NTAPI *WOW64_SERVICE)(ULONG Number, ULONG *Arguments);
 NTSTATUS NTAPI Wow64CpuInitialize(WOW64_SERVICE Service, PVOID *Gate);
 DECLSPEC_NORETURN VOID NTAPI Wow64CpuRun(WOW64_CPU_STATE *State);
-VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context);
+VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup);
 
 NTSTATUS NTAPI Wow64WinInitialize(PVOID Dispatcher);
 NTSTATUS NTAPI Wow64WinSystemService(ULONG Number, ULONG *Arguments);
