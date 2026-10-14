@@ -2651,12 +2651,21 @@ MmMapViewOfArm3Section(
         return STATUS_INVALID_PARAMETER_10;
     }
 
-    /* The complete, page-rounded view must fit even when ViewSize was zero. */
-    if (*BaseAddress &&
-        ((ULONG_PTR)*BaseAddress > HighestAddress ||
-         *ViewSize > HighestAddress ||
-         PAGE_ROUND_UP(*ViewSize) - 1 > HighestAddress - (ULONG_PTR)*BaseAddress))
-        return STATUS_INVALID_PARAMETER_4;
+    /* Check the base MiMapViewOfDataSection will actually use. Kernel callers
+     * may supply an unaligned address; i386 MEM_DOS_LIM uses page granularity. */
+    if (*BaseAddress)
+    {
+        ULONG Granularity = MM_VIRTMEM_GRANULARITY;
+        ULONG_PTR StartAddress;
+#ifdef _M_IX86
+        if (AllocationType & MEM_DOS_LIM) Granularity = PAGE_SIZE;
+#endif
+        StartAddress = ALIGN_DOWN_BY((ULONG_PTR)*BaseAddress, Granularity);
+        if (StartAddress > HighestAddress ||
+            *ViewSize > HighestAddress ||
+            PAGE_ROUND_UP(*ViewSize) - 1 > HighestAddress - StartAddress)
+            return STATUS_INVALID_PARAMETER_4;
+    }
 
     /* Start by attaching to the current process if needed */
     if (PsGetCurrentProcess() != Process)
