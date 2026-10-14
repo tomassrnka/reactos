@@ -4,6 +4,7 @@
 
 extern void func_AddMandatoryAce(void);
 extern void func_CreateService(void);
+extern void func_CloseTrace(void);
 extern void func_DuplicateTokenEx(void);
 extern void func_EncryptFile(void);
 extern void func_eventlog_supp(void);
@@ -64,6 +65,7 @@ const struct test winetest_testlist[] =
     { "RegWow64Volatile", func_RegWow64Volatile },
     { "RegWow64Aliases", func_RegWow64Aliases },
     { "CreateService", func_CreateService },
+    { "CloseTrace", func_CloseTrace },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
     { "EncryptFile", func_EncryptFile },
     { "eventlog_supp", func_eventlog_supp },
