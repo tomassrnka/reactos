@@ -219,6 +219,113 @@ Cleanup:
     closesocket(Server);
 }
 
+/* A nonblocking connect that select or WSAEventSelect reported as finished
+ * must leave a connected socket: getpeername and getsockname succeed at once.
+ * PreDelay lets the connection complete before the application waits, the way
+ * a busy event loop sees it */
+static void Test_NonBlockingConnect(BOOL UseEvents, DWORD PreDelay, const char *What)
+{
+    SOCKET Server, Client, Accepted;
+    SOCKADDR_IN Address;
+    int Length, Result, Iteration;
+    USHORT ServerPort;
+    ULONG NonBlocking = 1;
+
+    Server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ok(Server != INVALID_SOCKET, "%s: socket failed: %d\n", What, WSAGetLastError());
+    if (Server == INVALID_SOCKET)
+        return;
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ok(bind(Server, (struct sockaddr *)&Address, sizeof(Address)) == 0, "%s: bind failed: %d\n", What, WSAGetLastError());
+    ok(listen(Server, 8) == 0, "%s: listen failed: %d\n", What, WSAGetLastError());
+    Length = sizeof(Address);
+    ok(getsockname(Server, (struct sockaddr *)&Address, &Length) == 0, "%s: getsockname failed: %d\n", What, WSAGetLastError());
+    ServerPort = ntohs(Address.sin_port);
+
+    for (Iteration = 0; Iteration < 25; Iteration++)
+    {
+        BOOL Ready = FALSE;
+
+        Client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        ok(Client != INVALID_SOCKET, "%s: socket failed: %d\n", What, WSAGetLastError());
+        if (Client == INVALID_SOCKET)
+            break;
+        ok(ioctlsocket(Client, FIONBIO, &NonBlocking) == 0, "%s: FIONBIO failed: %d\n", What, WSAGetLastError());
+
+        ZeroMemory(&Address, sizeof(Address));
+        Address.sin_family = AF_INET;
+        Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        Address.sin_port = htons(ServerPort);
+        Result = connect(Client, (struct sockaddr *)&Address, sizeof(Address));
+        ok(Result == 0 || WSAGetLastError() == WSAEWOULDBLOCK, "%s: connect returned %d, error %d\n", What, Result, WSAGetLastError());
+
+        if (PreDelay)
+            Sleep(PreDelay);
+
+        if (UseEvents)
+        {
+            WSAEVENT Event = WSACreateEvent();
+            WSANETWORKEVENTS Events;
+
+            ok(WSAEventSelect(Client, Event, FD_CONNECT) == 0, "%s: WSAEventSelect failed: %d\n", What, WSAGetLastError());
+            Result = WSAWaitForMultipleEvents(1, &Event, FALSE, 10000, FALSE);
+            ok(Result == WSA_WAIT_EVENT_0, "%s: wait returned %d\n", What, Result);
+            if (Result == WSA_WAIT_EVENT_0)
+            {
+                ZeroMemory(&Events, sizeof(Events));
+                ok(WSAEnumNetworkEvents(Client, Event, &Events) == 0, "%s: WSAEnumNetworkEvents failed: %d\n", What, WSAGetLastError());
+                ok(Events.lNetworkEvents & FD_CONNECT, "%s: no FD_CONNECT, events 0x%lx\n", What, Events.lNetworkEvents);
+                ok(Events.iErrorCode[FD_CONNECT_BIT] == 0, "%s: FD_CONNECT error %d\n", What, Events.iErrorCode[FD_CONNECT_BIT]);
+                Ready = (Events.lNetworkEvents & FD_CONNECT) != 0;
+            }
+            WSAEventSelect(Client, NULL, 0);
+            WSACloseEvent(Event);
+        }
+        else
+        {
+            fd_set Write, Except;
+            struct timeval Timeout = { 10, 0 };
+
+            FD_ZERO(&Write);
+            FD_ZERO(&Except);
+            FD_SET(Client, &Write);
+            FD_SET(Client, &Except);
+            Result = select(0, NULL, &Write, &Except, &Timeout);
+            ok(Result == 1, "%s: select returned %d\n", What, Result);
+            ok(FD_ISSET(Client, &Write), "%s: not writable after connect\n", What);
+            Ready = FD_ISSET(Client, &Write) != 0;
+        }
+
+        if (Ready)
+        {
+            char Byte = 'x';
+
+            Length = sizeof(Address);
+            memset(&Address, 0x55, sizeof(Address));
+            Result = getpeername(Client, (struct sockaddr *)&Address, &Length);
+            ok(Result == 0, "%s %d: getpeername failed: %d\n", What, Iteration, WSAGetLastError());
+            if (Result == 0)
+                CheckAddress(&Address, Length, TRUE, ServerPort, What);
+
+            Length = sizeof(Address);
+            Result = getsockname(Client, (struct sockaddr *)&Address, &Length);
+            ok(Result == 0, "%s %d: getsockname failed: %d\n", What, Iteration, WSAGetLastError());
+
+            Result = send(Client, &Byte, 1, 0);
+            ok(Result == 1, "%s %d: send returned %d, error %d\n", What, Iteration, Result, WSAGetLastError());
+        }
+
+        Accepted = accept(Server, NULL, NULL);
+        ok(Accepted != INVALID_SOCKET, "%s: accept failed: %d\n", What, WSAGetLastError());
+        if (Accepted != INVALID_SOCKET)
+            closesocket(Accepted);
+        closesocket(Client);
+    }
+    closesocket(Server);
+}
+
 START_TEST(getpeername)
 {
     WSADATA WsaData;
@@ -232,6 +339,10 @@ START_TEST(getpeername)
     Test_TcpAddresses(TRUE, FALSE);
     Test_TcpAddresses(FALSE, FALSE);
     Test_TcpAddresses(FALSE, TRUE);
+    Test_NonBlockingConnect(FALSE, 0, "select");
+    Test_NonBlockingConnect(FALSE, 100, "select after delay");
+    Test_NonBlockingConnect(TRUE, 0, "event");
+    Test_NonBlockingConnect(TRUE, 100, "event after delay");
 
     WSACleanup();
 }
