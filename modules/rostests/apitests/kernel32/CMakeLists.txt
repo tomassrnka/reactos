@@ -30,6 +30,7 @@ list(APPEND SOURCE
     FLS.c
     ForcedRelocation.c
     FormatMessage.c
+    FormatMessageInsert.c
     GetComputerNameEx.c
     GetCPInfo.c
     GetCurrentDirectory.c
