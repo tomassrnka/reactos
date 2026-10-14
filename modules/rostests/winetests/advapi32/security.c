@@ -8839,6 +8839,73 @@ static void test_window_security(void)
     LocalFree(sd);
 }
 
+/* Adapted from Wine's check_token_label() (dlls/advapi32/tests/security.c,
+ * Wine commit a15ee2ccf20e2fc9f470badd916855801933d31f, LGPL-2.1-or-later).
+ * Processes and threads have a different default policy from token objects.
+ */
+static void test_process_thread_label(void)
+{
+    HANDLE token, objects[2] = {GetCurrentProcess(), GetCurrentThread()};
+    char token_buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+    TOKEN_MANDATORY_LABEL *label = (void *)token_buffer;
+    SYSTEM_MANDATORY_LABEL_ACE *ace;
+    SECURITY_DESCRIPTOR_CONTROL control;
+    SECURITY_DESCRIPTOR *sd;
+    BOOL ret, present, defaulted;
+    DWORD size, revision, i;
+    ACL *sacl;
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token);
+    ok(ret, "OpenProcessToken failed: %lu\n", GetLastError());
+    if (!ret) return;
+    ret = GetTokenInformation(token, TokenIntegrityLevel, token_buffer, sizeof(token_buffer), &size);
+    CloseHandle(token);
+    if (!ret)
+    {
+        win_skip("TokenIntegrityLevel not supported\n");
+        return;
+    }
+    for (i = 0; i < ARRAY_SIZE(objects); ++i)
+    {
+        size = 0;
+        ret = GetKernelObjectSecurity(objects[i], LABEL_SECURITY_INFORMATION, NULL, 0, &size);
+        ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+           "Unexpected GetKernelObjectSecurity return %d, error %lu\n", ret, GetLastError());
+        if (!size) continue;
+        sd = malloc(size);
+        if (!sd) continue;
+        ret = GetKernelObjectSecurity(objects[i], LABEL_SECURITY_INFORMATION, sd, size, &size);
+        ok(ret, "GetKernelObjectSecurity failed: %lu\n", GetLastError());
+        if (!ret) { free(sd); continue; }
+        ret = GetSecurityDescriptorControl(sd, &control, &revision);
+        ok(ret, "GetSecurityDescriptorControl failed: %lu\n", GetLastError());
+        ok(control == (SE_SELF_RELATIVE | SE_SACL_AUTO_INHERITED | SE_SACL_PRESENT),
+           "Unexpected control %#x\n", control);
+        ok(revision == 1, "Unexpected revision %lu\n", revision);
+        sacl = NULL;
+        ret = GetSecurityDescriptorSacl(sd, &present, &sacl, &defaulted);
+        ok(ret, "GetSecurityDescriptorSacl failed: %lu\n", GetLastError());
+        ok(present && sacl, "Object %lu has no mandatory-label SACL\n", i);
+        ok(!defaulted, "SACL defaulted\n");
+        if (sacl)
+        {
+            ok(sacl->AceCount == 1, "Unexpected ACE count %u\n", sacl->AceCount);
+            ret = GetAce(sacl, 0, (void **)&ace);
+            ok(ret, "GetAce failed: %lu\n", GetLastError());
+            if (ret)
+            {
+                ok(ace->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                   "Unexpected ACE type %#x\n", ace->Header.AceType);
+                ok(!ace->Header.AceFlags, "Unexpected ACE flags %#x\n", ace->Header.AceFlags);
+                ok(ace->Mask == (SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP),
+                   "Unexpected ACE mask %#lx\n", ace->Mask);
+                ok(EqualSid(&ace->SidStart, label->Label.Sid), "Label differs from primary token\n");
+            }
+        }
+        free(sd);
+    }
+}
+
 START_TEST(security)
 {
     init();
@@ -8846,7 +8913,9 @@ START_TEST(security)
 
     if (myARGC >= 3)
     {
-        if (!strcmp(myARGV[2], "test_token_sd"))
+        if (!strcmp(myARGV[2], "process_thread_label"))
+            test_process_thread_label();
+        else if (!strcmp(myARGV[2], "test_token_sd"))
             test_child_token_sd();
         else if (!strcmp(myARGV[2], "test"))
             test_process_security_child();
@@ -8899,6 +8968,7 @@ START_TEST(security)
     test_pseudo_tokens();
     test_maximum_allowed();
     test_token_label();
+    test_process_thread_label();
     test_GetExplicitEntriesFromAclW();
     test_BuildSecurityDescriptorW();
     test_duplicate_handle_access();

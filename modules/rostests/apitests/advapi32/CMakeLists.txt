@@ -19,6 +19,7 @@ list(APPEND SOURCE
     IsTextUnicode.c
     LockServiceDatabase.c
     LogonUser.c
+    ProcessThreadLabel.c
     QueryServiceConfig2.c
     RegConcurrentWrite.c
     RegCreateKeyEx.c
