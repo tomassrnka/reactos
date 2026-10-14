@@ -219,8 +219,20 @@ IopDeviceFsIoControl(IN HANDLE DeviceHandle,
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     ULONG BufferLength;
     POOL_TYPE PoolType;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Wow64Iosb = FALSE;
+#endif
 
     PAGED_CODE();
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Use the same explicit guest IOSB marker as NtReadFile/NtWriteFile. */
+    if (PreviousMode == UserMode && PsGetCurrentProcess()->Wow64Process &&
+        ((ULONG64)IoStatusBlock >> 32) == 0x80000000)
+    {
+        Wow64Iosb = TRUE;
+        IoStatusBlock = (PVOID)(ULONG_PTR)(ULONG)(ULONG_PTR)IoStatusBlock;
+    }
+#endif
 
     IOTRACE(IO_CTL_DEBUG, "Handle: %p. CTL: %lx. Type: %lx\n",
             DeviceHandle, IoControlCode, IsDevIoCtl);
@@ -234,7 +246,11 @@ IopDeviceFsIoControl(IN HANDLE DeviceHandle,
         _SEH2_TRY
         {
             /* Probe the status block */
-            ProbeForWriteIoStatusBlock(IoStatusBlock);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            if (Wow64Iosb) ProbeForWrite(IoStatusBlock, sizeof(IO_STATUS_BLOCK32), sizeof(ULONG));
+            else
+#endif
+                ProbeForWriteIoStatusBlock(IoStatusBlock);
 
             /* Check if this is buffered I/O */
             if (AccessType == METHOD_BUFFERED)
@@ -418,8 +434,16 @@ IopDeviceFsIoControl(IN HANDLE DeviceHandle,
                 /* Write the IOSB back */
                 _SEH2_TRY
                 {
-                    *IoStatusBlock = KernelIosb;
-
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                    if (Wow64Iosb)
+                    {
+                        ((PIO_STATUS_BLOCK32)IoStatusBlock)->Information = (ULONG)KernelIosb.Information;
+                        KeMemoryBarrier();
+                        ((PIO_STATUS_BLOCK32)IoStatusBlock)->Status = KernelIosb.Status;
+                    }
+                    else
+#endif
+                        *IoStatusBlock = KernelIosb;
                 }
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
@@ -624,6 +648,10 @@ IopDeviceFsIoControl(IN HANDLE DeviceHandle,
             Irp->UserBuffer = OutputBuffer;
             StackPtr->Parameters.DeviceIoControl.Type3InputBuffer = InputBuffer;
     }
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Wow64Iosb) Irp->Flags |= IRP_WOW64_IO_STATUS;
+#endif
 
     /* Use deferred completion for FS I/O */
     if (!IsDevIoCtl)

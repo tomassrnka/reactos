@@ -57,6 +57,7 @@ typedef struct DECLSPEC_ALIGN(16) _WOW64_CPU_STATE
     ULONG Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
     PVOID ApcFrame;
     PVOID CallbackFrame;
+    PVOID ProcessParameters;
 
 } WOW64_CPU_STATE;
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, NativeStack) == 0);

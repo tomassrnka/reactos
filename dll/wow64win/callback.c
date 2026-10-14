@@ -9,6 +9,24 @@ typedef struct { ULONG String, Dc; INT x, y; UINT Flags; RECT Rect; UINT Count; 
 C_ASSERT(sizeof(LPK32) == 44);
 typedef struct
 {
+    INT HookId, Code;
+    ULONG wParam, lParam, Proc;
+    INT Mod;
+    ULONG offPfn;
+    BOOLEAN Ansi;
+    LONG Result;
+    UINT lParamSize;
+    WCHAR ModuleName[512];
+} HOOK32;
+typedef struct { ULONG lParam, wParam, message, hwnd; } CWP32;
+typedef struct { LONG Result; CWP32 Cwp; } CWPR32;
+typedef struct { HOOK32 Header; CWP32 Cwp; ULONG Extra[4]; } CWPCALL32;
+typedef struct { HOOK32 Header; CWPR32 Cwp; ULONG Extra[4]; } CWPRCALL32;
+C_ASSERT(sizeof(HOOK32) == 1064);
+C_ASSERT(sizeof(CWPCALL32) == 1096);
+C_ASSERT(sizeof(CWPRCALL32) == 1100);
+typedef struct
+{
     WOW64_CPU_STATE *Previous;
     PVOID Native;
     ULONG NativeLength, GuestLength, Id, ExceptionList;
@@ -120,6 +138,64 @@ static VOID UnpackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, U
     }
 }
 
+/* CALLWND hooks receive a CWP structure followed by the message buffer.
+ * Unlike WINDOWPROC's CREATE packet, these are ordinary CREATESTRUCT fields,
+ * not offsets. Other pointer messages use the same kernel packing rules. */
+static LONG HookPayloadSize(const HOOKPROC_CALLBACK_ARGUMENTS *Header)
+{
+    const CWPSTRUCT *Cwp;
+    if (Header->HookId == WH_CALLWNDPROC)
+        Cwp = &((const CWP_Struct *)Header)->cwps;
+    else
+        Cwp = (const CWPSTRUCT *)&((const CWPR_Struct *)Header)->cwprs.lParam;
+    if (!Header->lParamSize) return 0;
+    if (Cwp->message == WM_CREATE || Cwp->message == WM_NCCREATE)
+        return Header->lParamSize == sizeof(CREATESTRUCTW) ? sizeof(CREATE32) : -2;
+    return PayloadSize(Cwp->message, Cwp->wParam, Header->lParamSize);
+}
+
+static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG Size)
+{
+    const CWPSTRUCT *Native;
+    CWP32 *Guest;
+    PVOID Input, Output;
+    To->HookId = From->HookId; To->Code = From->Code;
+    To->wParam = From->wParam; To->lParam = From->lParam;
+    To->Proc = PtrToUlong(From->Proc); To->Mod = From->Mod;
+    To->offPfn = From->offPfn; To->Ansi = From->Ansi;
+    To->Result = 0; To->lParamSize = Size;
+    RtlCopyMemory(To->ModuleName, From->ModuleName, sizeof(To->ModuleName));
+    if (From->HookId == WH_CALLWNDPROC)
+    {
+        Native = &((const CWP_Struct *)From)->cwps;
+        Input = (PVOID)&((const CWP_Struct *)From)->Extra;
+        Guest = &((CWPCALL32 *)To)->Cwp;
+        Output = &((CWPCALL32 *)To)->Extra;
+    }
+    else
+    {
+        Native = (const CWPSTRUCT *)&((const CWPR_Struct *)From)->cwprs.lParam;
+        Input = (PVOID)&((const CWPR_Struct *)From)->Extra;
+        Guest = &((CWPRCALL32 *)To)->Cwp.Cwp;
+        ((CWPRCALL32 *)To)->Cwp.Result = ((const CWPR_Struct *)From)->cwprs.lResult;
+        Output = &((CWPRCALL32 *)To)->Extra;
+    }
+    Guest->lParam = Native->lParam; Guest->wParam = Native->wParam;
+    Guest->message = Native->message; Guest->hwnd = HandleToUlong(Native->hwnd);
+    if (Size)
+    {
+        if (Native->message == WM_CREATE || Native->message == WM_NCCREATE)
+        {
+            const CREATESTRUCTW *Create = Input;
+            /* Original guest strings/pointers are retained by the kernel. */
+            if ((ULONG_PTR)Create->lpszName > MAXULONG || (ULONG_PTR)Create->lpszClass > MAXULONG)
+                RtlRaiseStatus(STATUS_NOT_SUPPORTED);
+            CreateNativeTo32(Output, Input);
+        }
+        else PackPayload(Output, Input, Native->message, Native->wParam, From->lParamSize);
+    }
+}
+
 static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
 {
     WOW64_CPU_STATE *Previous = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
@@ -137,6 +213,21 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
     {
         switch (Id)
         {
+        case USER32_CALLBACK_HOOKPROC:
+        {
+            HOOKPROC_CALLBACK_ARGUMENTS *Native = Buffer;
+            ULONG Base;
+            if (Length < sizeof(*Native)) break;
+            if (Native->HookId == WH_CALLWNDPROC) Base = sizeof(CWP_Struct);
+            else if (Native->HookId == WH_CALLWNDPROCRET) Base = sizeof(CWPR_Struct);
+            else break;
+            if (Length < Base || Native->lParamSize != Length - Base) break;
+            Payload = HookPayloadSize(Native);
+            if (Payload < 0) break;
+            GuestLength = (Native->HookId == WH_CALLWNDPROC ? sizeof(CWPCALL32) : sizeof(CWPRCALL32)) + Payload;
+            Status = STATUS_SUCCESS;
+            break;
+        }
         case USER32_CALLBACK_WINDOWPROC:
         {
             WINDOWPROC_CALLBACK_ARGUMENTS *Native = Buffer;
@@ -193,6 +284,9 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             Frame.GuestLength = GuestLength;
             switch (Id)
             {
+            case USER32_CALLBACK_HOOKPROC:
+                PackHook(Guest, Buffer, Payload);
+                break;
             case USER32_CALLBACK_WINDOWPROC:
             {
                 WINDOWPROC_CALLBACK_ARGUMENTS *Native = Buffer;
@@ -306,6 +400,15 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
     {
         if (NT_SUCCESS(Status)) switch (Frame->Id)
         {
+        case USER32_CALLBACK_HOOKPROC:
+        {
+            HOOKPROC_CALLBACK_ARGUMENTS *Native = Frame->Native;
+            if (!Buffer || Length != Frame->GuestLength) { Status = STATUS_INFO_LENGTH_MISMATCH; break; }
+            /* CALLWND hooks have no message-buffer writeback contract. */
+            Native->Result = ((HOOK32 *)Buffer)->Result;
+            Output = Native; OutputLength = Frame->NativeLength;
+            break;
+        }
         case USER32_CALLBACK_WINDOWPROC:
         {
             WINDOWPROC_CALLBACK_ARGUMENTS *Native = Frame->Native;

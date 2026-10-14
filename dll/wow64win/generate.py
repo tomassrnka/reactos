@@ -39,9 +39,11 @@ NtUserGetCursorInfo NtUserGetGUIThreadInfo NtUserGetIconInfo NtUserGetKeyboardLa
 NtUserGetKeyboardLayoutName NtUserGetMenuBarInfo NtUserRegisterWindowMessage
 NtUserSystemParametersInfo NtUserThunkedMenuInfo NtUserThunkedMenuItemInfo
 NtUserTrackMouseEvent NtUserTranslateAccelerator
-NtUserSetCursorIconData
+NtUserSetCursorIconData NtUserQueryInputContext NtUserUpdateInputContext
+NtUserSetWindowsHookEx
+NtUserEnumDisplayMonitors
 NtGdiCreateDIBSection NtGdiDoPalette NtGdiExtCreatePen NtGdiExtGetObjectW
-NtGdiPolyPolyDraw NtGdiStartDoc'''.split())
+NtGdiPolyPolyDraw NtGdiStartDoc NtGdiGetOutlineTextMetricsInternalW'''.split())
 services = set('Nt'+n for n in re.findall(r'SVC_\((\w+),',
                           (ROOT/'win32ss/w32ksvc32.h').read_text()))
 # Reviewed fixed-width structures absent from the measured catalogue. Each

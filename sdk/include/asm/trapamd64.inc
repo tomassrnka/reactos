@@ -249,6 +249,10 @@ MACRO(ExitTrap, Flags)
     ASSERT_TRAP_FRAME_INTS_ENABLED rbp
     ASSERT_IRQL_PASSIVE
 
+#ifdef BUILD_WOW64_ENABLED
+    EXTERN KiRestoreWow64Gs:PROC
+    call KiRestoreWow64Gs
+#endif
     cli
 
     /* Swap gs to user mode */
@@ -306,4 +310,3 @@ MACRO(TRAP_ENTRY, Trap, Flags)
         ExitTrap Flags
     ENDFUNC
 ENDM
-

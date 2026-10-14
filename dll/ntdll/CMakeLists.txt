@@ -8,7 +8,8 @@ if(SYSWOW64_GUEST)
     string(REPLACE "@ stub -version=0x600+ NtCreateThreadEx" "@ stdcall -version=0x600+ NtCreateThreadEx(ptr long ptr ptr ptr ptr long long long long ptr)" guest_thread_spec "${guest_thread_spec}")
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec" "${guest_thread_spec}")
     file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec"
-        "@ stdcall -arch=i386 LdrInitializeWow64(ptr ptr)\n")
+        "@ stdcall -arch=i386 LdrInitializeWow64(ptr ptr)\n"
+        "@ stdcall -arch=i386 RtlWow64CreateProcess(ptr)\n")
     file(RELATIVE_PATH ntdll_spec "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec")
 endif()

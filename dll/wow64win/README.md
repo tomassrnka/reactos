@@ -31,7 +31,8 @@ removal remains with the i386 unwinder. Callback allocation touches guest
 stack pages in order to grow the guard page, preserving the reserved stack
 guarantee. Normal returns preserve changes to x87 and MXCSR control state.
 
-Current limits include hooks, DDE conversation callbacks, IME callbacks,
+Current limits include global/other-thread hooks and hook families other than
+CALLWNDPROC/CALLWNDPROCRET, DDE conversation callbacks, IME callbacks,
 remaining private structures, printer driver pointers, and unconverted
 pointer messages. DDE initialization and string handles work; StartDoc
 retains the native service's stub result. Arbitrary
@@ -45,8 +46,12 @@ painting, button notification, destruction and class unregistration.
 Additional explicit fixtures cover four exception/unwind paths, a 32-position
 stack-boundary sweep, menus/edit/list/combobox controls, clipboard, timers,
 common dialogs and a native driver for the guest notepad/regedit executables.
-All remain excluded from default image contents. The unwind fixture accepts
-individual case numbers because guest CreateProcess is a separate limitation.
+All remain excluded from default image contents. The unwind fixture can run
+its child cases through guest CreateProcess or accept individual case numbers.
+Installer fixtures also cover outline-font offsets, input contexts, monitor
+handles, the thread desktop, and CALLWND hook payloads. Hooks are currently
+limited to the calling guest thread; their message payload coverage follows
+the window-message translator.
 
 Regenerate with `python3 dll/wow64win/generate.py`. On the build host, run
 `TMPDIR=<scratch-directory> python3 dll/wow64win/tests/generator.py <source>`

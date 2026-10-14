@@ -13,6 +13,18 @@
 #include <debug.h>
 
 /* FUNCTIONS *****************************************************************/
+#ifdef BUILD_WOW64_ENABLED
+VOID NTAPI KiRestoreWow64Gs(VOID)
+{
+    PKTHREAD Thread = KeGetCurrentThread();
+    /* A compatibility-mode segment reload can clear the base installed by
+     * the scheduler. Native dispatchers and the WoW64 transition use GS to
+     * reach the native TEB, including returns without a context switch. */
+    if (PsGetCurrentProcess()->Wow64Process && Thread->Teb &&
+        __readmsr(MSR_GS_SWAP) != (ULONG64)Thread->Teb)
+        __writemsr(MSR_GS_SWAP, (ULONG64)Thread->Teb);
+}
+#endif
 
 VOID
 NTAPI

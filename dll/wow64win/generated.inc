@@ -20,6 +20,7 @@ case W64_NtUserCopyAcceleratorTable: return (ULONG_PTR)NtUserCopyAcceleratorTabl
 case W64_NtUserCountClipboardFormats: return (ULONG_PTR)NtUserCountClipboardFormats();
 case W64_NtUserCreateAcceleratorTable: return (ULONG_PTR)NtUserCreateAcceleratorTable((LPACCEL)((ULONG_PTR)a[0]), (ULONG)(a[1]));
 case W64_NtUserCreateCaret: return (ULONG_PTR)NtUserCreateCaret((HWND)((LONG_PTR)(LONG)a[0]), (HBITMAP)((ULONG_PTR)a[1]), (int)((LONG)a[2]), (int)((LONG)a[3]));
+case W64_NtUserCreateInputContext: return (ULONG_PTR)NtUserCreateInputContext((ULONG_PTR)(a[0]));
 case W64_NtUserCreateLocalMemHandle: return (ULONG_PTR)NtUserCreateLocalMemHandle((HANDLE)((LONG_PTR)(LONG)a[0]), (PVOID)((ULONG_PTR)a[1]), (DWORD)(a[2]), (DWORD *)((ULONG_PTR)a[3]));
 case W64_NtUserCtxDisplayIOCtl: return (ULONG_PTR)NtUserCtxDisplayIOCtl((DWORD)(a[0]), (DWORD)(a[1]), (DWORD)(a[2]));
 case W64_NtUserDbgWin32HeapFail: return (ULONG_PTR)NtUserDbgWin32HeapFail((DWORD)(a[0]), (DWORD)(a[1]));
@@ -31,6 +32,7 @@ case W64_NtUserDeferWindowPos: return (ULONG_PTR)NtUserDeferWindowPos((HDWP)((LO
 case W64_NtUserDeleteMenu: return (ULONG_PTR)NtUserDeleteMenu((HMENU)((LONG_PTR)(LONG)a[0]), (UINT)(a[1]), (UINT)(a[2]));
 case W64_NtUserDestroyAcceleratorTable: return (ULONG_PTR)NtUserDestroyAcceleratorTable((HACCEL)((LONG_PTR)(LONG)a[0]));
 case W64_NtUserDestroyCursor: return (ULONG_PTR)NtUserDestroyCursor((HANDLE)((LONG_PTR)(LONG)a[0]), (BOOL)((LONG)a[1]));
+case W64_NtUserDestroyInputContext: return (ULONG_PTR)NtUserDestroyInputContext((HIMC)((LONG_PTR)(LONG)a[0]));
 case W64_NtUserDestroyMenu: return (ULONG_PTR)NtUserDestroyMenu((HMENU)((LONG_PTR)(LONG)a[0]));
 case W64_NtUserDestroyWindow: return (ULONG_PTR)NtUserDestroyWindow((HWND)((LONG_PTR)(LONG)a[0]));
 case W64_NtUserDisableThreadIme: return (ULONG_PTR)NtUserDisableThreadIme((DWORD)(a[0]));

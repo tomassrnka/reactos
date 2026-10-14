@@ -91,11 +91,14 @@ requested access.
 Guest APC routines are encoded separately from native routine addresses. The
 native dispatcher builds an i386 APC frame and enters a nested CPU frame; its
 NtContinue resumes the interrupted native call before returning to the guest.
-Read/write I/O marks an IOSB32 pointer explicitly, and the kernel records that
-layout in the IRP. Completion publishes the eight-byte status block before an
-event or APC becomes visible. Filesystem redirection state remains per thread,
-including across nested APCs.
+Read/write I/O and the supported mount-manager device query mark an IOSB32
+pointer explicitly, and the kernel records that layout in the IRP. Completion
+publishes the eight-byte status block before an event or APC becomes visible.
+Filesystem redirection state remains per thread, including across nested APCs.
 Completion-port thunks translate packet keys, contexts and IOSB32 results.
+Kernel returns restore the native GS base for WoW64 threads after compatibility
+code reloads a segment selector. The `wow64_segment_return` fixture exercises
+exception dispatch and subsequent services on the main and a secondary thread.
 
 The fixtures Wow64Threads, QueueUserAPC, Wow64ThreadApc and
 Wow64ThreadLifetime cover stress, TLS/FLS, loader notifications, redirection
@@ -111,15 +114,17 @@ Use identical PE32 fixtures for native i386 and WoW64 comparisons.
 This remains an experimental runtime; the full Wine compatibility gate is
 separate from the focused fixtures:
 
-* win32k callbacks and GUI services are not implemented. The complete ntdll
-  exception winetest imports user32 and exercises GUI callbacks.
+* GUI services and callbacks are translated by `wow64win`; its coverage tables
+  and README describe the implemented selectors and remaining limits.
 * The initial guest stack and native translation stacks use fixed allocations.
   Secondary guest stacks can grow within the supplied reservation. Complete
   debugger and floating-point context compatibility still needs validation.
   The only CPU backend is amd64/i386.
 * Pointer-bearing IOCTLs and most information classes are unimplemented.
-  Asynchronous I/O support here covers NtReadFile/NtWriteFile; other I/O APIs
-  retain their existing restrictions.
+  Device control currently accepts only the mount-manager DOS-volume-path
+  query, whose buffers contain counted strings. Pipe peeking and flushing
+  accept synchronous file handles; read/write I/O and the supported device
+  query also retain event/APC completion semantics.
 * CSR covers initial Base/console connection and the console operations
   implemented in `csr.c`. The Base static-data copy is a startup snapshot;
   live updates and INI mapping are not implemented. Console control falls
@@ -127,8 +132,17 @@ separate from the focused fixtures:
 * DLL discovery selects `SysWOW64` and `KnownDlls32`, retaining application and
   other search directories in their original order. Filesystem/registry
   redirection and environment translation cover the phase-2 console subset.
-  Arbitrary guest-initiated process creation, services and installers remain
-  outside that subset.
+  Guest process creation resolves the executable in the guest and calls the
+  native creator with captured parent parameters. System32, SysWOW64, Sysnative
+  and the thread's redirection state select the executable architecture.
+  Extended startup attributes remain unsupported. The installer fixtures cover
+  additional file, token, COM and GUI paths; they are not complete API coverage.
+  Guest current-directory references own their path buffer and handle together,
+  retaining relative-path handles across directory changes. Explicit guest
+  version layers also cover RtlGetNtVersionNumbers, which MSYS consults after
+  RtlGetVersion; selecting a layer does not change the default system version.
+  Object-directory enumeration repacks counted names and type names with guest
+  pointers, including single-entry sizing, restart and continuation.
 * i386 ntdll must map at its preferred base. Guest image relocation remains
   subject to the existing i386 loader's restrictions.
 

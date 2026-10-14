@@ -37,6 +37,8 @@ typedef struct
 
 NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments);
 NTSTATUS Wow64Allocate(SIZE_T Size, PVOID *Base);
+extern ULONG Wow64HighestUserAddress;
+ULONG_PTR Wow64ZeroBits(ULONG ZeroBits);
 
 NTSTATUS Wow64CopyString(WOW64_STRING *To, const UNICODE_STRING *From);
 NTSTATUS Wow64CsrDispatch(ULONG Operation, ULONG *Arguments);
@@ -54,6 +56,7 @@ typedef struct
 } WOW64_SYSTEM_BASIC_INFORMATION;
 
 NTSTATUS Wow64CreateEnvironment(PVOID *Environment);
+NTSTATUS Wow64CreateProcess(PVOID Request);
 
 VOID Wow64InitializeTeb(TEB32 *, const TEB *, PTEB, const INITIAL_TEB *);
 VOID Wow64AbortThread(HANDLE, HANDLE, NTSTATUS);

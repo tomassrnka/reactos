@@ -91,6 +91,66 @@ if(ARCH STREQUAL "amd64" OR (ARCH STREQUAL "i386" AND NOT MSVC))
 endif()
 
 # Explicit GUI integration fixture; default image contents stay unchanged.
+add_executable(wow64_process_create EXCLUDE_FROM_ALL process_create.c)
+set_module_type(wow64_process_create win32cui UNICODE)
+add_importlibs(wow64_process_create msvcrt kernel32 ntdll)
+
+add_executable(wow64_installer_driver EXCLUDE_FROM_ALL installer_driver.c)
+set_module_type(wow64_installer_driver win32cui UNICODE)
+add_importlibs(wow64_installer_driver user32 msvcrt kernel32 ntdll)
+
+add_executable(wow64_installer_services EXCLUDE_FROM_ALL installer_services.c)
+set_module_type(wow64_installer_services win32cui UNICODE)
+add_importlibs(wow64_installer_services advapi32 msvcrt kernel32)
+
+add_executable(wow64_relative_pipe EXCLUDE_FROM_ALL relative_pipe.c)
+set_module_type(wow64_relative_pipe win32cui)
+add_importlibs(wow64_relative_pipe msvcrt kernel32)
+
+add_executable(wow64_registration EXCLUDE_FROM_ALL registration.c)
+set_module_type(wow64_registration win32cui UNICODE)
+add_importlibs(wow64_registration msvcrt kernel32)
+
+spec2def(wow64_registration_dll.dll registration_dll.spec)
+add_library(wow64_registration_dll MODULE EXCLUDE_FROM_ALL registration_dll.c
+    ${CMAKE_CURRENT_BINARY_DIR}/wow64_registration_dll.def)
+set_module_type(wow64_registration_dll win32dll UNICODE)
+add_importlibs(wow64_registration_dll msvcrt kernel32)
+
+add_executable(wow64_installer_gui EXCLUDE_FROM_ALL installer_gui.c)
+set_module_type(wow64_installer_gui win32cui)
+add_importlibs(wow64_installer_gui imm32 gdi32 user32 msvcrt kernel32)
+
+add_executable(wow64_system_timer EXCLUDE_FROM_ALL system_timer.c)
+set_module_type(wow64_system_timer win32cui)
+add_importlibs(wow64_system_timer user32 gdi32 msvcrt kernel32)
+
+if(ARCH STREQUAL "i386")
+    add_asm_files(segment_return_asm i386/SegmentReturn.S)
+    add_executable(wow64_segment_return EXCLUDE_FROM_ALL segment_return.c ${segment_return_asm})
+    set_module_type(wow64_segment_return win32cui)
+    add_importlibs(wow64_segment_return msvcrt kernel32)
+
+    foreach(aware 0 1)
+        set(memory_target wow64_installer_memory${aware})
+        add_executable(${memory_target} EXCLUDE_FROM_ALL installer_memory.c)
+        target_compile_definitions(${memory_target} PRIVATE EXPECT_LARGE_ADDRESS=${aware})
+        set_module_type(${memory_target} win32cui)
+        add_importlibs(${memory_target} msvcrt kernel32)
+        if(MSVC)
+            if(aware)
+                target_link_options(${memory_target} PRIVATE /LARGEADDRESSAWARE)
+            else()
+                target_link_options(${memory_target} PRIVATE /LARGEADDRESSAWARE:NO)
+            endif()
+        elseif(aware)
+            target_link_options(${memory_target} PRIVATE -Wl,--large-address-aware)
+        else()
+            target_link_options(${memory_target} PRIVATE -Wl,--disable-large-address-aware)
+        endif()
+    endforeach()
+endif()
+
 add_executable(wow64_gui_apps EXCLUDE_FROM_ALL gui_apps.c)
 set_module_type(wow64_gui_apps win32cui)
 add_importlibs(wow64_gui_apps user32 msvcrt kernel32)
@@ -122,3 +182,10 @@ if(ARCH STREQUAL "i386")
     set_module_type(wow64_win32k_abi win32cui)
     add_importlibs(wow64_win32k_abi user32 gdi32 msvcrt kernel32 ntdll)
 endif()
+
+# Guest-only loader change; keep the fixture out of default native images.
+add_executable(wow64_loadfrom EXCLUDE_FROM_ALL loadfrom.c loadfrom_testlist.c)
+target_include_directories(wow64_loadfrom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ntdll)
+set_module_type(wow64_loadfrom win32cui)
+target_link_libraries(wow64_loadfrom wine ${PSEH_LIB})
+add_importlibs(wow64_loadfrom ntdll msvcrt kernel32)

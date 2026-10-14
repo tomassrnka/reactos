@@ -1,5 +1,32 @@
 /* ReactOS WoW64 startup. SPDX-License-Identifier: GPL-2.0-or-later */
 #include "wow64p.h"
+#include <reactos/compat_undoc.h>
+
+ULONG Wow64HighestUserAddress;
+
+ULONG_PTR Wow64ZeroBits(ULONG ZeroBits)
+{
+    if (!ZeroBits) return Wow64HighestUserAddress;
+    if (ZeroBits < 32)
+        return max(ZeroBits, Wow64HighestUserAddress < 0x80000000 ? 1 : 0);
+    return min(ZeroBits, Wow64HighestUserAddress);
+}
+
+static NTSTATUS InitializeAddressLimit(VOID)
+{
+    PIMAGE_NT_HEADERS Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+    PVOID Boundary;
+    SIZE_T Size = 0x10000;
+    if (!Header) return STATUS_INVALID_IMAGE_FORMAT;
+    Wow64HighestUserAddress = (Header->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ?
+                             0xfffeffff : 0x7ffeffff;
+    /* ZeroBits masks round to their highest set bit. Reserve the final 64 KiB
+     * so a top-down guest allocation cannot end at 2/4 GiB and wrap pointer
+     * arithmetic. This also preserves the documented maximum user address. */
+    Boundary = (PVOID)((ULONG_PTR)Wow64HighestUserAddress + 1);
+    return NtAllocateVirtualMemory(NtCurrentProcess(), &Boundary, 0, &Size,
+                                   MEM_RESERVE, PAGE_NOACCESS);
+}
 
 NTSTATUS Wow64Allocate(SIZE_T Size, PVOID *Base)
 {
@@ -149,6 +176,21 @@ static NTSTATUS InitializePeb(PEB32 *To)
 #define COPY_NLS(Field) To->Field = PtrToUlong((PUCHAR)Nls + ((PUCHAR)From->Field - (PUCHAR)Info.BaseAddress))
     COPY_NLS(AnsiCodePageData); COPY_NLS(OemCodePageData); COPY_NLS(UnicodeCaseTableData);
 #undef COPY_NLS
+    if (From->pShimData)
+    {
+        ReactOS_ShimData *Native = From->pShimData, *Guest;
+        /* The query and version fields are fixed-width. Only amd64 appends
+         * an aligned pointer to its private MSYS helper; the guest loader
+         * owns its own helper and must not receive that native pointer. */
+        const ULONG GuestSize = FIELD_OFFSET(ReactOS_ShimData, dwRosProcessCompatVersion) + sizeof(DWORD);
+        if (Native->dwMagic != REACTOS_SHIMDATA_MAGIC || Native->dwSize != sizeof(*Native))
+            return STATUS_INVALID_PARAMETER;
+        Status = Wow64Allocate(GuestSize, (PVOID *)&Guest);
+        if (!NT_SUCCESS(Status)) return Status;
+        RtlCopyMemory(Guest, Native, GuestSize);
+        Guest->dwSize = GuestSize;
+        To->pShimData = PtrToUlong(Guest);
+    }
     return InitializeParameters(To);
 }
 
@@ -237,6 +279,8 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
         Gate = Wow64Gate;
         goto ThreadReady;
     }
+    Status = InitializeAddressLimit();
+    if (!NT_SUCCESS(Status)) goto Failed;
     Status = Wow64InitializeRedirection();
     if (!NT_SUCCESS(Status)) goto Failed;
     Status = InitializePeb(Peb32);

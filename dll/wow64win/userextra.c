@@ -1,6 +1,7 @@
 /* Private USER arguments used by dialogs and common controls.
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "wow64win.h"
+#include <undocuser.h>
 
 typedef struct { ULONG cbSize, fMask, dwStyle, cyMax, hbrBack, dwContextHelpID, dwMenuData; } MENUINFO32;
 typedef struct {
@@ -110,6 +111,54 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a)
 {
     switch (Number)
     {
+    case W64_NtUserEnumDisplayMonitors:
+    {
+        HMONITOR *Monitors = NULL;
+        INT Count;
+        ULONG i;
+        if (a[4] > MAXLONG / sizeof(HMONITOR))
+        {
+            RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+            return (ULONG_PTR)-1;
+        }
+        if (a[2] && a[4])
+        {
+            Monitors = RtlAllocateHeap(RtlGetProcessHeap(), 0, a[4] * sizeof(HMONITOR));
+            if (!Monitors)
+            {
+                RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY);
+                return (ULONG_PTR)-1;
+            }
+        }
+        _SEH2_TRY
+        {
+            Count = NtUserEnumDisplayMonitors(G(0), P(1), Monitors, P(3), a[4]);
+            if (Monitors && Count > 0)
+                for (i = 0; i < min((ULONG)Count, a[4]); ++i)
+                    ((ULONG *)P(2))[i] = HandleToUlong(Monitors[i]);
+        }
+        _SEH2_FINALLY
+        {
+            if (Monitors) RtlFreeHeap(RtlGetProcessHeap(), 0, Monitors);
+        }
+        _SEH2_END;
+        return (LONG_PTR)Count;
+    }
+    case W64_NtUserSetWindowsHookEx:
+    {
+        UNICODE_STRING Module;
+        /* A guest procedure must never be installed on a native thread.
+         * Cross-thread/global hooks need a separate bitness-aware dispatcher. */
+        if (a[2] != HandleToUlong(NtCurrentTeb()->ClientId.UniqueThread) ||
+            ((INT)a[3] != WH_CALLWNDPROC && (INT)a[3] != WH_CALLWNDPROCRET))
+        {
+            RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
+            return 0;
+        }
+        if (a[1]) StringIn(&Module, a[1]);
+        return (ULONG_PTR)NtUserSetWindowsHookEx(P(0), a[1] ? &Module : NULL,
+                                               a[2], a[3], P(4), a[5]);
+    }
     case W64_NtUserBuildHwndList:
     {
         HWND *List = NULL; ULONG Needed = 0, i; NTSTATUS Status;
@@ -320,6 +369,15 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a)
         Info.cbSize = sizeof(Info); Info.hwnd = H32(Guest[1]); Info.dwFlags = Guest[2]; Info.uCount = Guest[3]; Info.dwTimeout = Guest[4];
         return NtUserFlashWindowEx(&Info);
     }
+    case W64_NtUserQueryInputContext:
+        if (a[1] > QIC_DEFAULTIMC) return 0;
+        return NtUserQueryInputContext(H(0), a[1]);
+    case W64_NtUserUpdateInputContext:
+        if (a[1] == UIC_CLIENTIMCDATA)
+            return NtUserUpdateInputContext(H(0), a[1], (ULONG_PTR)P(2));
+        if (a[1] == UIC_IMEWINDOW)
+            return NtUserUpdateInputContext(H(0), a[1], (ULONG_PTR)H(2));
+        return FALSE;
     default:
         return Wow64WinGdiService(Number, a);
     }

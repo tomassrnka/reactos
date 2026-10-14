@@ -1115,7 +1115,11 @@ VOID PatchNewModules(PPEB Peb)
 
 VOID SeiInitPaths(VOID)
 {
+#ifdef SYSWOW64_GUEST
+#define SYSTEM32  L"\\SysWOW64"
+#else
 #define SYSTEM32  L"\\system32"
+#endif
 #define WINSXS  L"\\winsxs"
 
     PWSTR WindowsDirectory = SdbpStrDup(SharedUserData->NtSystemRoot);
@@ -1320,7 +1324,13 @@ VOID SeiInit(LPCWSTR ProcessImage, HSDB hsdb, SDBQUERYRESULT* pQuery, BOOLEAN Pr
                 continue;
             }
 
+#ifdef SYSWOW64_GUEST
+            /* Guest shim libraries are staged with the guest runtime; the
+             * shared compatibility database remains in AppPatch. */
+            if (!SUCCEEDED(StringCchCopyW(FullNameBuffer, ARRAYSIZE(FullNameBuffer), g_System32Directory.Buffer)))
+#else
             if (!SUCCEEDED(SdbGetAppPatchDir(NULL, FullNameBuffer, ARRAYSIZE(FullNameBuffer))))
+#endif
             {
                 SHIMENG_WARN("Failed to get the AppPatch dir\n");
                 continue;

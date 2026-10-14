@@ -116,7 +116,8 @@ static ULONG_PTR MessageCall(ULONG *a)
     switch (a[5])
     {
     case FNID_DEFWINDOWPROC: case FNID_SCROLLBAR: case FNID_DESKTOP: case FNID_MENU:
-    case FNID_SENDMESSAGE: case FNID_SENDNOTIFYMESSAGE: break;
+    case FNID_SENDMESSAGE: case FNID_SENDNOTIFYMESSAGE:
+    case FNID_CALLWNDPROC: case FNID_CALLWNDPROCRET: break;
     case FNID_SENDMESSAGECALLBACK:
         if (!a[4]) return FALSE;
         Callback.CallBack = P32(((ULONG *)P(4))[0]); Callback.Context = ((ULONG *)P(4))[1];

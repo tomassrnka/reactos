@@ -11,6 +11,62 @@ C_ASSERT(sizeof(BITMAP32) == 24);
 C_ASSERT(sizeof(DIBSECTION32) == 84);
 C_ASSERT(sizeof(BRUSH32) == 12);
 
+static ULONG QueryOutlineMetrics(ULONG *a)
+{
+    const ULONG Prefix = FIELD_OFFSET(OUTLINETEXTMETRICW, otmpFamilyName);
+    const ULONG GuestHeader = 216, Difference = sizeof(OUTLINETEXTMETRICW) - 216;
+    OUTLINETEXTMETRICW *Native;
+    ULONG Size, Ret = 0, Names[4], i;
+    PSTR *NativeNames;
+    C_ASSERT(FIELD_OFFSET(OUTLINETEXTMETRICW, otmpFamilyName) == 200);
+    C_ASSERT(sizeof(OUTLINETEXTMETRICW) == 232);
+
+    Size = NtGdiGetOutlineTextMetricsInternalW(G(0), 0, NULL, P(3));
+    if (Size < sizeof(*Native)) return 0;
+    if (!a[2]) return Size - Difference;
+    if (a[1] < Size - Difference)
+    {
+        NtCurrentTeb()->LastErrorValue = ERROR_INSUFFICIENT_BUFFER;
+        return 0;
+    }
+    Native = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+    if (!Native)
+    {
+        NtCurrentTeb()->LastErrorValue = ERROR_NOT_ENOUGH_MEMORY;
+        return 0;
+    }
+    _SEH2_TRY
+    {
+        Ret = NtGdiGetOutlineTextMetricsInternalW(G(0), Size, Native, P(3));
+        if (!Ret) _SEH2_LEAVE;
+        if (Ret < sizeof(*Native) || Ret > Size) { Ret = 0; _SEH2_LEAVE; }
+        NativeNames = &Native->otmpFamilyName;
+        for (i = 0; i < 4; ++i)
+        {
+            ULONG_PTR Offset = (ULONG_PTR)NativeNames[i];
+            if (Offset && (Offset < sizeof(*Native) || Offset >= Ret))
+            {
+                Ret = 0;
+                _SEH2_LEAVE;
+            }
+            Names[i] = Offset ? Offset - Difference : 0;
+        }
+        /* The trailing strings are shared data; the four PSTR fields hold
+         * byte offsets from the header, not virtual addresses. */
+        RtlCopyMemory(P(2), Native, Prefix);
+        RtlCopyMemory((BYTE *)P(2) + Prefix, Names, sizeof(Names));
+        RtlCopyMemory((BYTE *)P(2) + GuestHeader, Native + 1, Ret - sizeof(*Native));
+        Ret -= Difference;
+        *(ULONG *)P(2) = Ret;
+    }
+    _SEH2_FINALLY
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Native);
+    }
+    _SEH2_END;
+    return Ret;
+}
+
 static INT QueryObject(ULONG *a)
 {
     ULONG Type = GDI_HANDLE_GET_TYPE(G(0));
@@ -68,6 +124,7 @@ ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a)
 {
     switch (Number)
     {
+    case W64_NtGdiGetOutlineTextMetricsInternalW: return QueryOutlineMetrics(a);
     case W64_NtGdiCreateDIBSection:
     {
         PVOID Bits = NULL; HBITMAP Bitmap;

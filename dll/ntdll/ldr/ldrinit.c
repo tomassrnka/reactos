@@ -2575,8 +2575,13 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         }
     }
 
-    /* Check if we had Shim Data */
-    if (OldShimData)
+    /* The guest loader applies shims to PE32 imports after WoW64 copies the
+     * compatibility data. The native support loader has no PE32 imports. */
+    if (OldShimData
+#ifdef BUILD_WOW64_ENABLED
+        && !IsWow64
+#endif
+       )
     {
         /* Load the Shim Engine */
         Peb->AppCompatInfo = NULL;
