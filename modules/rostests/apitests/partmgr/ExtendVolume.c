@@ -154,7 +154,8 @@ static BOOL BootCopyAt(ULONG Disk, LONGLONG Offset, LONGLONG Sectors)
     return Ok;
 }
 
-static void TestNtfs(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
+/* TRUE when the volume grew as expected (TestNtfsShrink depends on the free space it added). */
+static BOOL TestNtfs(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
 {
     NTFS_VOLUME_DATA_BUFFER Before, After;
     LONGLONG Sectors, Length;
@@ -163,7 +164,7 @@ static void TestNtfs(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
     if (!NtfsData(Volume, &Before))
     {
         ok(FALSE, "FSCTL_GET_NTFS_VOLUME_DATA failed: %lu\n", GetLastError());
-        return;
+        return FALSE;
     }
     Sectors = Part->PartitionLength.QuadPart / 512;
     TotalBefore = TotalBytes();
@@ -179,7 +180,7 @@ static void TestNtfs(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
     if (Grow(Disk, Part->PartitionNumber, 32 * MiB) != ERROR_SUCCESS)
     {
         ok(FALSE, "IOCTL_DISK_GROW_PARTITION failed: %lu\n", GetLastError());
-        return;
+        return FALSE;
     }
     PartitionOf(Volume, Part);
     Length = Part->PartitionLength.QuadPart;
@@ -193,6 +194,8 @@ static void TestNtfs(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
     NtfsData(Volume, &After);
     ok(After.NumberSectors.QuadPart == Length / 512 - 1, "NumberSectors %I64d, expected %I64d\n",
        After.NumberSectors.QuadPart, Length / 512 - 1);
+    if (After.NumberSectors.QuadPart != Length / 512 - 1)
+        return FALSE;
     ok(After.TotalClusters.QuadPart == After.NumberSectors.QuadPart * 512 / After.BytesPerCluster,
        "TotalClusters %I64d for %I64d sectors\n", After.TotalClusters.QuadPart, After.NumberSectors.QuadPart);
     ok(After.FreeClusters.QuadPart >= Before.FreeClusters.QuadPart + (After.TotalClusters.QuadPart - Before.TotalClusters.QuadPart) - 16,
@@ -207,7 +210,7 @@ static void TestNtfs(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
     ok(Before.NumberSectors.QuadPart == After.NumberSectors.QuadPart, "NumberSectors %I64d\n", Before.NumberSectors.QuadPart);
 
     /* The new space holds data: more than the old volume could. */
-    WriteAndVerify(Sectors * 512 + 8 * MiB);
+    return WriteAndVerify(Sectors * 512 + 8 * MiB);
 }
 
 static DWORD Shrink(HANDLE Volume, SHRINK_VOLUME_REQUEST_TYPES Type, LONGLONG Sectors, DWORD InLength)
@@ -373,8 +376,10 @@ START_TEST(ExtendVolume)
 
     if (!strcmp(FileSystem, "NTFS"))
     {
-        TestNtfs(Volume, Number.DeviceNumber, &Part);
-        TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
+        if (TestNtfs(Volume, Number.DeviceNumber, &Part))
+            TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
+        else
+            skip("NTFS volume did not grow: no shrink tests\n");
     }
     else if (!strncmp(FileSystem, "FAT", 3))
         TestFat(Volume, Number.DeviceNumber, &Part, FileSystem);
