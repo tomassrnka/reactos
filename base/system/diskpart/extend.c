@@ -678,6 +678,12 @@ extend_main(
         bOffline = (Kind == FatExtendOffline);
         if (bOffline)
         {
+            /* Not crash-safe: never on the volume the system runs from. */
+            if (VolumeEntry->IsBoot || VolumeEntry->IsSystem)
+            {
+                ConResPuts(StdOut, IDS_EXTEND_FAT_SYSTEM);
+                goto done;
+            }
             if (GetFatExtend(&hModule) == NULL)
             {
                 ConResPuts(StdOut, IDS_EXTEND_FS_UNSUPPORTED);
@@ -691,6 +697,10 @@ extend_main(
             }
         }
     }
+
+    /* The offline growth of the FATs is not crash-safe: said before anything is written. */
+    if (bOffline)
+        ConResPuts(StdOut, IDS_EXTEND_FAT_OFFLINE);
 
     if (!bFileSystemOnly)
     {

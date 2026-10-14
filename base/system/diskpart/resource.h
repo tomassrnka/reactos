@@ -79,6 +79,8 @@
 #define IDS_DETAIL_NO_DISKS            1137
 #define IDS_DETAIL_NO_VOLUME           1138
 
+#define IDS_EXTEND_FAT_OFFLINE         1158
+#define IDS_EXTEND_FAT_SYSTEM          1159
 #define IDS_EXTEND_SUCCESS             1160
 #define IDS_EXTEND_FS_SUCCESS          1161
 #define IDS_EXTEND_NO_SPACE            1162

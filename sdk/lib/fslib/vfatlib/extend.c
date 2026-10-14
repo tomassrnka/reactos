@@ -7,6 +7,7 @@
 
 #include "vfatlib.h"
 #include "fatgrow.h"
+#include <ntddstor.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -103,11 +104,49 @@ static void ExtendFree(void *Ctx, void *Pointer)
 }
 
 /*
+ * Flushes the write cache of the disk under the volume Volume (dismounted by
+ * now, so the file system no longer passes a flush on): what fatgrow wrote is
+ * on the medium before the volume is given back.  A disk without a write
+ * cache to flush (STATUS_INVALID_DEVICE_REQUEST) counts as flushed.
+ */
+static
+NTSTATUS
+FlushDisk(
+    _In_ HANDLE Volume)
+{
+    STORAGE_DEVICE_NUMBER Number;
+    WCHAR Buffer[64];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK Iosb;
+    HANDLE Disk;
+    NTSTATUS Status;
+
+    Status = NtDeviceIoControlFile(Volume, NULL, NULL, NULL, &Iosb, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                                   NULL, 0, &Number, sizeof(Number));
+    if (!NT_SUCCESS(Status))
+        return Status;
+    _snwprintf(Buffer, ARRAYSIZE(Buffer) - 1, L"\\Device\\Harddisk%lu\\Partition0", Number.DeviceNumber);
+    Buffer[ARRAYSIZE(Buffer) - 1] = UNICODE_NULL;
+    RtlInitUnicodeString(&Name, Buffer);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Disk, FILE_GENERIC_WRITE | SYNCHRONIZE, &ObjectAttributes, &Iosb,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = NtFlushBuffersFile(Disk, &Iosb);
+    NtClose(Disk);
+    return (Status == STATUS_INVALID_DEVICE_REQUEST) ? STATUS_SUCCESS : Status;
+}
+
+/*
  * Grows the FAT volume DriveRoot (an NT device path) to NewSectors sectors,
  * growing its FATs when they cannot describe the new clusters (see fatgrow.h).
  * The partition must already hold NewSectors sectors.  The volume is locked
  * for the whole operation (STATUS_ACCESS_DENIED while files are open on it)
- * and dismounted, so the next access mounts the grown volume.
+ * and dismounted, so the next access mounts the grown volume.  NOT CRASH-SAFE:
+ * a power cut or a write error after the directories are renumbered and
+ * before the boot sector is written leaves a volume in neither numbering.
  */
 NTSTATUS
 NTAPI
@@ -171,6 +210,12 @@ VfatExtend(
         case FG_ENOSPC: Status = STATUS_DISK_FULL; break;
         case FG_ETYPE: Status = STATUS_NOT_SUPPORTED; break;
         default: Status = STATUS_IO_DEVICE_ERROR; break;
+    }
+    if (Err == FG_OK)
+    {
+        Status = FlushDisk(Io.Handle);
+        if (!NT_SUCCESS(Status))
+            DPRINT1("VfatExtend: the disk flush failed: 0x%08lx\n", Status);
     }
 
 Unlock:

@@ -122,6 +122,8 @@ BEGIN
     IDS_FORMAT_FAIL "\nDiskPart failed to format the selected volume.\n"
     IDS_FORMAT_SUCCESS "\nDiskPart successfully formated the selected volume.\n"
     IDS_FORMAT_PROGRESS "\r  %3lu percent completed"
+    IDS_EXTEND_FAT_OFFLINE "\nThe FAT tables of this volume must grow first. DiskPart moves data and rewrites every\ndirectory of the volume for that. This step is not safe against a power failure or a disk\nerror: the volume can be lost. Back up its data before you extend it this way.\n"
+    IDS_EXTEND_FAT_SYSTEM "\nThe FAT tables of this volume must grow, which cannot be done on the system or boot volume.\n"
     IDS_EXTEND_SUCCESS "\nDiskPart successfully extended the volume.\n"
     IDS_EXTEND_FS_SUCCESS "\nDiskPart successfully extended the file system on the volume.\n"
     IDS_EXTEND_NO_SPACE "\nThere is not enough free space right after the partition to extend the volume.\n"
