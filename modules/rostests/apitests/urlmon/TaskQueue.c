@@ -25,8 +25,13 @@ typedef enum {
     MODE_WORKER,        /* a worker thread of the protocol reports the end while the client has not read yet; the client
                            then reads outside every callback and the Read runs a message loop */
     MODE_WORKER_LAST,   /* like MODE_WORKER, and the client keeps nothing: the worker's reference may be the last one */
-    MODE_FILTER         /* like MODE_READ_LATER, behind a MIME filter that runs a message loop after it has read */
+    MODE_FILTER,        /* like MODE_READ_LATER, behind a MIME filter that runs a message loop after it has read */
+    MODE_HOOK,          /* like MODE_WORKER_LAST, with the posts of urlmon failing through its test hook */
+    MODE_EXIT           /* like MODE_HOOK, and the apartment thread exits without running a message loop */
 } test_mode_t;
+
+#define CLIENT_HOLDS_NOTHING() (g_mode == MODE_WORKER_LAST || g_mode == MODE_HOOK || g_mode == MODE_EXIT)
+#define WORKER_REPORTS() (g_mode == MODE_WORKER || CLIENT_HOLDS_NOTHING())
 
 typedef struct {
     IBindStatusCallback IBindStatusCallback_iface;
@@ -54,6 +59,8 @@ static char g_read_buf[16];
 static HANDLE g_go, g_posted, g_worker;
 static DWORD g_destroy_thread;
 static int g_reference_growth;
+static IInternetProtocolSink *g_exit_sink;
+static ULONG g_exit_before, g_exit_pending;
 
 static void client_read(void)
 {
@@ -149,6 +156,12 @@ static DWORD WINAPI worker_thread(void *arg)
     Protocol *This = arg;
 
     WaitForSingleObject(g_go, 10000);
+    if (g_mode == MODE_EXIT)
+    {
+        g_exit_sink = This->sink;
+        IInternetProtocolSink_AddRef(g_exit_sink);
+        g_exit_before = sink_references(g_exit_sink);
+    }
     if (g_mode == MODE_WORKER_LAST)
     {
         /* the references of the protocol that urlmon holds across this call, seen from outside */
@@ -177,7 +190,7 @@ static HRESULT WINAPI Protocol_Start(IInternetProtocol *iface, LPCWSTR url, IInt
 
     IInternetProtocolSink_ReportProgress(sink, BINDSTATUS_VERIFIEDMIMETYPEAVAILABLE, L"application/octet-stream");
     IInternetProtocolSink_ReportData(sink, BSCF_FIRSTDATANOTIFICATION | BSCF_AVAILABLEDATASIZEUNKNOWN, 0, 0);
-    if (g_mode == MODE_WORKER || g_mode == MODE_WORKER_LAST)
+    if (WORKER_REPORTS())
     {
         g_worker = CreateThread(NULL, 0, worker_thread, This, 0, NULL);
         if (g_mode == MODE_WORKER_LAST)
@@ -663,7 +676,7 @@ static HRESULT WINAPI Callback_OnDataAvailable(IBindStatusCallback *iface, DWORD
     if (bscf & BSCF_FIRSTDATANOTIFICATION)
     {
         g_first++;
-        if (stgmed && stgmed->tymed == TYMED_ISTREAM && stgmed->pstm && !This->stream && g_mode != MODE_WORKER_LAST)
+        if (stgmed && stgmed->tymed == TYMED_ISTREAM && stgmed->pstm && !This->stream && !CLIENT_HOLDS_NOTHING())
         {
             This->stream = stgmed->pstm;
             IStream_AddRef(This->stream);
@@ -671,7 +684,7 @@ static HRESULT WINAPI Callback_OnDataAvailable(IBindStatusCallback *iface, DWORD
 
         if (g_mode == MODE_READ_IN_CALLBACK)
             client_read();
-        else if (g_mode != MODE_WORKER && g_mode != MODE_WORKER_LAST)
+        else if (!WORKER_REPORTS())
             PostThreadMessageW(GetCurrentThreadId(), WM_READ_NOW, 0, 0);
     }
     if (bscf & BSCF_LASTDATANOTIFICATION)
@@ -879,6 +892,177 @@ static void test_last_reference(void)
     SetProcessAffinityMask(GetCurrentProcess(), old_mask);
 }
 
+static BOOL (WINAPI *p_UrlmonTestPostHook)(BOOL (WINAPI *)(BOOL));
+static LONG g_hook_mode, g_carriers;
+static HANDLE g_main_done;
+
+enum { HOOK_PASS, HOOK_FAIL_ALL, HOOK_FAIL_LAST_CARRIER };
+
+/* Called by urlmon before it posts a message that hands a reference to the apartment window. */
+static BOOL WINAPI post_hook(BOOL carrier)
+{
+    if (g_hook_mode == HOOK_FAIL_ALL)
+        return FALSE;
+    if (g_hook_mode == HOOK_FAIL_LAST_CARRIER && carrier && InterlockedIncrement(&g_carriers) == 2)
+    {
+        /* the apartment thread has run everything and let go of the references it holds: the worker's is the last */
+        WaitForSingleObject(g_main_done, 10000);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void reset_state(test_mode_t mode)
+{
+    g_mode = mode;
+    g_in_read = FALSE;
+    g_go = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g_posted = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g_worker = NULL;
+    g_destroy_thread = 0;
+    g_first = g_last = g_stop = g_calls_in_read = g_read_bytes = g_terminated = 0;
+    g_stop_hr = E_FAIL;
+    memset(&g_callback, 0, sizeof(g_callback));
+    g_callback.IBindStatusCallback_iface.lpVtbl = &CallbackVtbl;
+    g_callback.ref = 1;
+}
+
+static void bind_and_let_go(const WCHAR *url)
+{
+    IMoniker *mon;
+    IBindCtx *bindctx;
+    IUnknown *unk = NULL;
+    HRESULT hr;
+
+    hr = CreateURLMoniker(NULL, url, &mon);
+    ok(hr == S_OK, "CreateURLMoniker returned %08lx\n", hr);
+    hr = CreateAsyncBindCtx(0, &g_callback.IBindStatusCallback_iface, NULL, &bindctx);
+    ok(hr == S_OK, "CreateAsyncBindCtx returned %08lx\n", hr);
+    hr = IMoniker_BindToStorage(mon, bindctx, NULL, &IID_IStream, (void **)&unk);
+    ok(hr == S_OK || hr == MK_S_ASYNCHRONOUS, "BindToStorage returned %08lx\n", hr);
+    if (unk)
+        IUnknown_Release(unk);
+    IBindCtx_Release(bindctx);
+    IMoniker_Release(mon);
+}
+
+static void close_worker(void)
+{
+    if (g_worker)
+    {
+        WaitForSingleObject(g_worker, 5000);
+        CloseHandle(g_worker);
+    }
+    CloseHandle(g_go);
+    CloseHandle(g_posted);
+}
+
+/*
+ * The worker's reference is the last one when its message cannot be posted: it must not end the protocol on the worker
+ * thread, whose notification window is not the apartment's. The hook of urlmon makes the post of the last call fail
+ * after the apartment thread has run every task and let go of everything else; urlmon has to keep the reference for the
+ * apartment thread, which releases it when it is asked to retry.
+ */
+static void test_post_failure(void)
+{
+    HWND hwnd;
+    DWORD start;
+
+    reset_state(MODE_HOOK);
+    g_hook_mode = HOOK_FAIL_LAST_CARRIER;
+    g_carriers = 0;
+    g_main_done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    p_UrlmonTestPostHook(post_hook);
+
+    bind_and_let_go(L"rostest:post-failure");
+    SetEvent(g_go);
+
+    start = GetTickCount();
+    while (!g_terminated && (DWORD)(GetTickCount() - start) < 5000)
+    {
+        pump_messages(20);
+        Sleep(1);
+    }
+    ok(g_terminated == 1, "the protocol was terminated %d times\n", g_terminated);
+    pump_messages(100);
+    SetEvent(g_main_done);
+
+    ok(WaitForSingleObject(g_posted, 10000) == WAIT_OBJECT_0, "the worker did not finish\n");
+    p_UrlmonTestPostHook(NULL);
+    g_hook_mode = HOOK_PASS;
+
+    /* urlmon retries what failed whenever its window gets a message; WM_NULL is such a request */
+    hwnd = FindWindowExW(HWND_MESSAGE, NULL, L"URL Moniker Notification Window", NULL);
+    if (hwnd)
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+    start = GetTickCount();
+    while (g_alive && (DWORD)(GetTickCount() - start) < 3000)
+    {
+        pump_messages(20);
+        Sleep(1);
+    }
+    ok(!g_alive, "%ld test objects are still alive\n", g_alive);
+    ok(g_destroy_thread == GetCurrentThreadId(), "the protocol was ended on thread %lx, not on the apartment thread\n",
+       g_destroy_thread);
+    pump_messages(100);
+    ok(!FindWindowExW(HWND_MESSAGE, NULL, L"URL Moniker Notification Window", NULL),
+       "the notification window of urlmon is still there\n");
+
+    close_worker();
+    CloseHandle(g_main_done);
+}
+
+static DWORD WINAPI exit_thread(void *arg)
+{
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+    bind_and_let_go(L"rostest:thread-exit");
+    SetEvent(g_go);
+    ok(WaitForSingleObject(g_posted, 10000) == WAIT_OBJECT_0, "the worker did not report\n");
+    g_exit_pending = sink_references(g_exit_sink);
+
+    /* no message loop: the messages the worker posted are still queued when the thread ends */
+    CoUninitialize();
+    return 0;
+}
+
+/*
+ * The apartment thread ends while the references handed to the messages of its window are not dispatched. Urlmon counts
+ * them at the end of the thread: afterwards the protocol is held by what the client's objects hold and nothing else.
+ */
+static void test_thread_exit(LONG hook_mode, const char *name)
+{
+    HANDLE thread;
+    ULONG after;
+
+    reset_state(MODE_EXIT);
+    g_hook_mode = hook_mode;
+    g_exit_sink = NULL;
+    g_exit_before = g_exit_pending = 0;
+    if (hook_mode != HOOK_PASS)
+        p_UrlmonTestPostHook(post_hook);
+
+    thread = CreateThread(NULL, 0, exit_thread, NULL, 0, NULL);
+    ok(WaitForSingleObject(thread, 20000) == WAIT_OBJECT_0, "%s: the thread did not end\n", name);
+    CloseHandle(thread);
+    p_UrlmonTestPostHook(NULL);
+    g_hook_mode = HOOK_PASS;
+
+    ok(!FindWindowExW(HWND_MESSAGE, NULL, L"URL Moniker Notification Window", NULL),
+       "%s: the notification window of the ended thread is still there\n", name);
+    ok(g_exit_sink != NULL, "%s: the worker did not run\n", name);
+    if (g_exit_sink)
+    {
+        ok(g_exit_pending > g_exit_before, "%s: nothing was pending when the thread ended (%lu, before: %lu)\n",
+           name, g_exit_pending, g_exit_before);
+        after = sink_references(g_exit_sink);
+        ok(after == g_exit_before, "%s: %lu references after the thread ended, %lu before the worker reported\n",
+           name, after, g_exit_before);
+        IInternetProtocolSink_Release(g_exit_sink);
+    }
+    close_worker();
+}
+
 START_TEST(TaskQueue)
 {
     IInternetSession *session;
@@ -920,6 +1104,21 @@ START_TEST(TaskQueue)
     {
         run_bind(MODE_FILTER, "filter");
         IInternetSession_UnregisterMimeFilter(session, &g_filter_factory, L"application/octet-stream");
+    }
+
+    /* they look into the hook and the references of ReactOS' urlmon; the protocols of these tests stay alive (the
+       apartment that would run their last notifications is gone), so they come last */
+    if (is_reactos())
+    {
+        p_UrlmonTestPostHook = (void *)GetProcAddress(GetModuleHandleW(L"urlmon.dll"), "UrlmonTestPostHook");
+        if (p_UrlmonTestPostHook)
+        {
+            test_post_failure();
+            test_thread_exit(HOOK_PASS, "exit");
+            test_thread_exit(HOOK_FAIL_ALL, "exit after failed posts");
+        }
+        else
+            skip("urlmon has no test hook\n");
     }
 
     IInternetSession_UnregisterNameSpace(session, &g_factory, L"rostest");
