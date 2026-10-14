@@ -248,6 +248,7 @@ typedef struct _CONNECTION_ENDPOINT {
     ERESOURCE Resource;         /* The lock protecting this structure */
     PVOID ClientContext;        /* Pointer to client context information */
     PADDRESS_FILE AddressFile;  /* Associated address file object (NULL if none) */
+    IPv4_RAW_ADDRESS ConnectAddress; /* Local address of the connect, if the address file has none */
 
     /* Requests */
     LIST_ENTRY ConnectRequest; /* Queued connect requests */

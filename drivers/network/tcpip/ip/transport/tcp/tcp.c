@@ -368,8 +368,10 @@ NTSTATUS TCPConnect
         return Status;
     }
 
-    /* Copy bind address into connection */
-    Connection->AddressFile->Address.Address.IPv4Address = bindaddr.addr;
+    /* The address file keeps its unspecified address: after a failed or
+       cancelled connect the socket is bound to it again, and a listen on it
+       must not be limited to the interface this connect chose */
+    Connection->ConnectAddress = bindaddr.addr;
     /* Check if we had an unspecified port */
     if (!Connection->AddressFile->Port)
     {
@@ -741,6 +743,9 @@ BOOLEAN TCPRemoveIRP( PCONNECTION_ENDPOINT Endpoint, PIRP Irp )
                 RemoveEntryList( &Bucket->Entry );
                 ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
                 Found = TRUE;
+                /* The connect was abandoned: the socket reports the address file's address again */
+                if (ListHead[i] == &Endpoint->ConnectRequest && IsListEmpty(&Endpoint->ConnectRequest))
+                    Endpoint->ConnectAddress = 0;
                 break;
             }
         }
