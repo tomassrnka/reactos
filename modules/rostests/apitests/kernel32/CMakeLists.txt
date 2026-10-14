@@ -9,6 +9,7 @@ list(APPEND SOURCE
     CancelIoEx.c
     ApplicationRestart.c
     ConsoleCP.c
+    CreateFile2.c
     CreateEventMutexEx.c
     CreateRemoteThreadEx.c
     CreateProcess.c
