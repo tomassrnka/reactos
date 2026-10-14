@@ -26,21 +26,37 @@
 
 /* FUNCTIONS *****************************************************************/
 
+/* The socket of a handle, with a reference that the caller releases; NULL for anything else */
+static
+PWSSOCKET
+WsPollGetSocket(IN SOCKET Handle)
+{
+    if ((INT_PTR)Handle < 0)
+        return NULL;
+
+    return WsSockGetSocket(Handle);
+}
+
+/* The handle was closed, or its value belongs to another socket or object by now */
 static
 BOOL
-WsPollIsSocket(IN SOCKET Handle)
+WsPollIsStale(IN SOCKET Handle,
+              IN PWSSOCKET Context)
 {
-    PWSSOCKET Socket;
+    PWSSOCKET Current;
+    ULONG Flags;
+    BOOL Same;
 
-    if ((INT_PTR)Handle < 0)
-        return FALSE;
+    if (!GetHandleInformation((HANDLE)Handle, &Flags))
+        return TRUE;
 
-    Socket = WsSockGetSocket(Handle);
-    if (!Socket)
-        return FALSE;
+    Current = WsPollGetSocket(Handle);
+    if (!Current)
+        return TRUE;
 
-    WsSockDereference(Socket);
-    return TRUE;
+    Same = (Current == Context);
+    WsSockDereference(Current);
+    return !Same;
 }
 
 static
@@ -77,13 +93,14 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
         IN INT timeout)
 {
     PAFD_POLL_INFO PollInfo;
+    PWSSOCKET *Context;
     PULONG Index;
-    SOCKET PollSocket = INVALID_SOCKET;
     IO_STATUS_BLOCK IoStatus;
     HANDLE Event;
     NTSTATUS Status;
-    ULONG PollSize, Valid = 0, i, k;
+    ULONG PollSize, Count = 0, i, j, k;
     INT ErrorCode, Ready = 0;
+    BOOL Invalid;
 
     ErrorCode = WsQuickProlog();
     if (ErrorCode != ERROR_SUCCESS)
@@ -102,72 +119,34 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
         SetLastError(WSAEFAULT);
         return SOCKET_ERROR;
     }
-    if (fds > (MAXLONG - sizeof(AFD_POLL_INFO)) / (sizeof(AFD_HANDLE) + sizeof(ULONG)))
+    if (fds > (MAXLONG - sizeof(AFD_POLL_INFO)) / (sizeof(AFD_HANDLE) + sizeof(ULONG) + sizeof(PWSSOCKET)))
     {
         SetLastError(WSAENOBUFS);
         return SOCKET_ERROR;
     }
 
-    for (i = 0; i < fds; i++)
-    {
-        fdArray[i].revents = 0;
-        if (WsPollIsSocket(fdArray[i].fd))
-        {
-            PollSocket = fdArray[i].fd;
-            Valid++;
-        }
-    }
-
-    if (!Valid)
-    {
-        for (i = 0; i < fds; i++)
-            fdArray[i].revents = POLLNVAL;
-        SetLastError(WSAENOTSOCK);
-        return SOCKET_ERROR;
-    }
-
-    /* The requested events are checked for every entry that is not a negative handle */
-    for (i = 0; i < fds; i++)
-    {
-        if ((INT_PTR)fdArray[i].fd >= 0 && (fdArray[i].events & ~POLL_REQUEST_EVENTS))
-        {
-            SetLastError(WSAEINVAL);
-            return SOCKET_ERROR;
-        }
-    }
-
-    PollSize = FIELD_OFFSET(AFD_POLL_INFO, Handles) + Valid * sizeof(AFD_HANDLE);
-    PollInfo = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, PollSize + Valid * sizeof(ULONG));
+    PollSize = FIELD_OFFSET(AFD_POLL_INFO, Handles) + fds * sizeof(AFD_HANDLE);
+    PollInfo = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                         PollSize + fds * sizeof(ULONG) + fds * sizeof(PWSSOCKET));
     if (!PollInfo)
     {
         SetLastError(WSAENOBUFS);
         return SOCKET_ERROR;
     }
     Index = (PULONG)((PUCHAR)PollInfo + PollSize);
+    Context = (PWSSOCKET *)(Index + fds);
 
-    Event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (!Event)
+    /* One pass: the sockets that exist, each kept referenced so that a reused handle value is told from them */
+    for (i = 0; i < fds; i++)
     {
-        HeapFree(GetProcessHeap(), 0, PollInfo);
-        SetLastError(WSAENOBUFS);
-        return SOCKET_ERROR;
-    }
-
-    if (timeout >= 0)
-        PollInfo->Timeout.QuadPart = (LONGLONG)timeout * -10000;
-    else
-        PollInfo->Timeout.QuadPart = MAXLONGLONG;
-    PollInfo->HandleCount = Valid;
-
-    for (i = 0, k = 0; i < fds; i++)
-    {
+        PWSSOCKET Socket;
         ULONG Events = AFD_EVENT_DISCONNECT | AFD_EVENT_ABORT | AFD_EVENT_CONNECT_FAIL;
 
-        if (!WsPollIsSocket(fdArray[i].fd))
-        {
-            fdArray[i].revents = POLLNVAL;
+        fdArray[i].revents = 0;
+
+        Socket = WsPollGetSocket(fdArray[i].fd);
+        if (!Socket)
             continue;
-        }
 
         if (fdArray[i].events & POLLRDNORM)
             Events |= AFD_EVENT_ACCEPT | AFD_EVENT_RECEIVE;
@@ -176,52 +155,118 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
         if (fdArray[i].events & POLLWRNORM)
             Events |= AFD_EVENT_SEND;
 
-        /* A socket closed in between is dropped from the request */
-        if (k >= Valid)
-            break;
-        PollInfo->Handles[k].Handle = fdArray[i].fd;
-        PollInfo->Handles[k].Events = Events;
-        Index[k++] = i;
+        PollInfo->Handles[Count].Handle = fdArray[i].fd;
+        PollInfo->Handles[Count].Events = Events;
+        Context[Count] = Socket;
+        Index[Count++] = i;
     }
-    PollInfo->HandleCount = k;
-    PollSize = FIELD_OFFSET(AFD_POLL_INFO, Handles) + k * sizeof(AFD_HANDLE);
 
-    if (!k)
+    if (!Count)
     {
-        CloseHandle(Event);
+        for (i = 0; i < fds; i++)
+            fdArray[i].revents = POLLNVAL;
         HeapFree(GetProcessHeap(), 0, PollInfo);
         SetLastError(WSAENOTSOCK);
         return SOCKET_ERROR;
     }
 
-    Status = NtDeviceIoControlFile((HANDLE)PollSocket,
-                                   Event,
-                                   NULL,
-                                   NULL,
-                                   &IoStatus,
-                                   IOCTL_AFD_SELECT,
-                                   PollInfo,
-                                   PollSize,
-                                   PollInfo,
-                                   PollSize);
-    if (Status == STATUS_PENDING)
+    /* The requested events are checked for every entry that is not a negative handle */
+    Invalid = FALSE;
+    for (i = 0; i < fds; i++)
     {
-        /* Queued APCs run, the poll goes on */
-        while (WaitForSingleObjectEx(Event, INFINITE, TRUE) == WAIT_IO_COMPLETION)
-            ;
-        Status = IoStatus.Status;
+        if ((INT_PTR)fdArray[i].fd >= 0 && (fdArray[i].events & ~POLL_REQUEST_EVENTS))
+            Invalid = TRUE;
+    }
+
+    Event = Invalid ? NULL : CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (Invalid || !Event)
+    {
+        for (k = 0; k < Count; k++)
+            WsSockDereference(Context[k]);
+        HeapFree(GetProcessHeap(), 0, PollInfo);
+        SetLastError(Invalid ? WSAEINVAL : WSAENOBUFS);
+        return SOCKET_ERROR;
+    }
+
+    /* Entries that are not sockets */
+    for (i = 0, j = 0; i < fds; i++)
+    {
+        if (j < Count && Index[j] == i)
+            j++;
+        else
+            fdArray[i].revents = POLLNVAL;
+    }
+
+    if (timeout >= 0)
+        PollInfo->Timeout.QuadPart = (LONGLONG)timeout * -10000;
+    else
+        PollInfo->Timeout.QuadPart = MAXLONGLONG;
+
+    for (;;)
+    {
+        PollInfo->HandleCount = Count;
+        PollSize = FIELD_OFFSET(AFD_POLL_INFO, Handles) + Count * sizeof(AFD_HANDLE);
+
+        Status = NtDeviceIoControlFile((HANDLE)PollInfo->Handles[0].Handle,
+                                       Event,
+                                       NULL,
+                                       NULL,
+                                       &IoStatus,
+                                       IOCTL_AFD_SELECT,
+                                       PollInfo,
+                                       PollSize,
+                                       PollInfo,
+                                       PollSize);
+        if (Status == STATUS_PENDING)
+        {
+            /* Queued APCs run, the poll goes on */
+            while (WaitForSingleObjectEx(Event, INFINITE, TRUE) == WAIT_IO_COMPLETION)
+                ;
+            Status = IoStatus.Status;
+        }
+
+        /* A socket closed before AFD took the request: report it and ask again for the others */
+        if (Status == STATUS_INVALID_HANDLE || Status == STATUS_OBJECT_TYPE_MISMATCH)
+        {
+            ULONG Kept = 0;
+
+            for (k = 0; k < Count; k++)
+            {
+                if (WsPollIsStale(PollInfo->Handles[k].Handle, Context[k]))
+                {
+                    fdArray[Index[k]].revents = POLLNVAL;
+                    Ready++;
+                    WsSockDereference(Context[k]);
+                }
+                else
+                {
+                    PollInfo->Handles[Kept] = PollInfo->Handles[k];
+                    Context[Kept] = Context[k];
+                    Index[Kept++] = Index[k];
+                }
+            }
+
+            if (Kept != Count)
+            {
+                Count = Kept;
+                if (!Count)
+                {
+                    Status = STATUS_SUCCESS;
+                    break;
+                }
+                continue;
+            }
+        }
+
+        break;
     }
 
     if (Status == STATUS_CANCELLED)
     {
         /* AFD cancels the poll, without events, when a socket of the set is closed */
-        for (k = 0; k < PollInfo->HandleCount; k++)
+        for (k = 0; k < Count; k++)
         {
-            ULONG Flags;
-
-            /* The handle is gone, or it was reused for something that is not a socket */
-            if (!GetHandleInformation((HANDLE)PollInfo->Handles[k].Handle, &Flags) ||
-                !WsPollIsSocket(PollInfo->Handles[k].Handle))
+            if (WsPollIsStale(PollInfo->Handles[k].Handle, Context[k]))
             {
                 fdArray[Index[k]].revents = POLLNVAL;
                 Ready++;
@@ -232,7 +277,7 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
     }
     else if (NT_SUCCESS(Status))
     {
-        for (k = 0; k < PollInfo->HandleCount; k++)
+        for (k = 0; k < Count && k < PollInfo->HandleCount; k++)
         {
             ULONG Flags = PollInfo->Handles[k].Events;
             ULONG Revents = 0;
@@ -257,6 +302,8 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
         }
     }
 
+    for (k = 0; k < Count; k++)
+        WsSockDereference(Context[k]);
     CloseHandle(Event);
     HeapFree(GetProcessHeap(), 0, PollInfo);
 

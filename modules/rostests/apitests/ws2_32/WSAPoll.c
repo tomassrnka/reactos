@@ -611,6 +611,75 @@ static void test_WSAPoll(void)
     closesocket(server);
 }
 
+typedef struct _CLOSE_REUSE
+{
+    SOCKET Socket;
+    HANDLE Polling;
+} CLOSE_REUSE;
+
+/* Closes the socket while the poll is pending, then opens sockets at once so that the handle value may be reused */
+static DWORD WINAPI CloseAndReuseThread(void *param)
+{
+    CLOSE_REUSE *Close = param;
+    SOCKET Fresh[4];
+    ULONG i;
+
+    WaitForSingleObject(Close->Polling, 5000);
+    Sleep(30);
+    closesocket(Close->Socket);
+    for (i = 0; i < ARRAY_SIZE(Fresh); i++)
+        Fresh[i] = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    Sleep(200);
+    for (i = 0; i < ARRAY_SIZE(Fresh); i++)
+    {
+        if (Fresh[i] != INVALID_SOCKET)
+            closesocket(Fresh[i]);
+    }
+    return 0;
+}
+
+/* A socket that is closed while polled is POLLNVAL, also with other sockets in the set and when its handle
+ * value is taken by a new socket at once */
+static void test_WSAPoll_close_race(void)
+{
+    ULONG Round;
+
+    for (Round = 0; Round < 20; Round++)
+    {
+        SOCKET Client, Server, OtherClient, OtherServer;
+        CLOSE_REUSE Close;
+        HANDLE Thread;
+        WSAPOLLFD fds[2];
+        int ret;
+
+        tcp_socketpair(&Client, &Server);
+        tcp_socketpair(&OtherClient, &OtherServer);
+
+        Close.Socket = Client;
+        Close.Polling = CreateEventA(NULL, FALSE, FALSE, NULL);
+        Thread = CreateThread(NULL, 0, CloseAndReuseThread, &Close, 0, NULL);
+
+        fds[0].fd = Client;
+        fds[0].events = POLLRDNORM;
+        fds[0].revents = 0xdead;
+        fds[1].fd = OtherClient;
+        fds[1].events = POLLRDNORM;
+        fds[1].revents = 0xdead;
+        SetEvent(Close.Polling);
+        ret = pWSAPoll(fds, 2, 5000);
+        ok(ret == 1, "round %lu: got %d, error %d\n", Round, ret, WSAGetLastError());
+        ok(fds[0].revents == POLLNVAL, "round %lu: got events %#x\n", Round, fds[0].revents);
+        ok(!fds[1].revents, "round %lu: got events %#x for the other socket\n", Round, fds[1].revents);
+
+        WaitForSingleObject(Thread, 5000);
+        CloseHandle(Thread);
+        CloseHandle(Close.Polling);
+        closesocket(Server);
+        closesocket(OtherClient);
+        closesocket(OtherServer);
+    }
+}
+
 START_TEST(WSAPoll)
 {
     WSADATA data;
@@ -623,7 +692,10 @@ START_TEST(WSAPoll)
 
     pWSAPoll = (void *)GetProcAddress(GetModuleHandleA("ws2_32.dll"), "WSAPoll");
     if (pWSAPoll)
+    {
         test_WSAPoll();
+        test_WSAPoll_close_race();
+    }
     else
         skip("WSAPoll is not available\n");
 
