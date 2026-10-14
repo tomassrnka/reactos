@@ -1747,9 +1747,8 @@ COMBOEX_EditWndProc (HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
 		cbeend.fChanged = TRUE;
 		cbeend.iWhy = CBENF_RETURN;
 		if (COMBOEX_NotifyEndEdit (infoPtr, &cbeend, edit_text)) {
-		    /* abort the change, restore previous */
+		    /* The handler keeps the text it left in the edit control, it is not put back to the text of the last paint */
 		    TRACE("Notify requested abort of change\n");
-                    COMBOEX_SetEditText (infoPtr, &infoPtr->edit);
 		    RedrawWindow (infoPtr->hwndCombo, 0, 0, RDW_ERASE |
 				  RDW_INVALIDATE);
 		    return 0;

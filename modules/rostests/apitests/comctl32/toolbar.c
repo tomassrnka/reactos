@@ -248,6 +248,7 @@ static INT g_ntf_why;
 static CHAR g_ntf_text[64];
 static UINT g_ntf_codes[8];
 static LRESULT g_ntf_result;
+static HWND g_ntf_settext_wnd;
 
 static LRESULT CALLBACK NotifyParentProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -275,6 +276,17 @@ static LRESULT CALLBACK NotifyParentProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
             NMCBEENDEDITA *ed = (NMCBEENDEDITA *)hdr;
             g_ntf_why = ed->iWhy;
             lstrcpynA(g_ntf_text, ed->szText, sizeof(g_ntf_text));
+        }
+        if (g_ntf_settext_wnd && hdr->code == CBEN_ENDEDITW)
+        {
+            COMBOBOXEXITEMW item = {0};
+
+            SetWindowTextW(g_ntf_settext_wnd, L"navigated");
+            item.mask = CBEIF_IMAGE | CBEIF_SELECTEDIMAGE;
+            item.iItem = -1;
+            item.iImage = 1;
+            item.iSelectedImage = 1;
+            SendMessageW(g_ntf_settext_wnd, CBEM_SETITEMW, 0, (LPARAM)&item);
         }
         return g_ntf_result;
     }
@@ -484,6 +496,67 @@ done:
     DestroyWindow(parent);
 }
 
+/* The program navigates in response to the end of editing and puts the new path into the control */
+static void TestComboBoxExAbortEndEdit(void)
+{
+    static const struct
+    {
+        BOOL visible;   /* the window is shown and painted */
+        BOOL repaint;   /* painted again after the text was typed */
+        BOOL settext;   /* the handler sets another text */
+        LRESULT result; /* returned from the handler */
+        const WCHAR *expected;
+    } tests[] =
+    {
+        { FALSE, FALSE, TRUE,  0, L"navigated" },
+        { FALSE, FALSE, TRUE,  1, L"navigated" },
+        { TRUE,  TRUE,  TRUE,  0, L"navigated" },
+        { TRUE,  TRUE,  TRUE,  1, L"navigated" },
+        { TRUE,  TRUE,  FALSE, 0, L"typed" },
+        { TRUE,  TRUE,  FALSE, 1, L"typed" },
+        { TRUE,  FALSE, FALSE, 0, L"typed" },
+        { TRUE,  FALSE, FALSE, 1, L"typed" },
+        { TRUE,  FALSE, TRUE,  1, L"navigated" },
+    };
+    HINSTANCE hinst = GetModuleHandleW(NULL);
+    WCHAR text[32];
+    UINT i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        HWND parent = CreateNotifyParent(FALSE);
+        HWND toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, NULL, WS_CHILD | WS_VISIBLE, 0, 0, 250, 30, parent, (HMENU)5, hinst, NULL);
+        HWND combo = CreateWindowExW(0, WC_COMBOBOXEXW, NULL, WS_CHILD | WS_VISIBLE | CBS_DROPDOWN, 0, 0, 200, 200,
+                                     toolbar, (HMENU)7, hinst, NULL);
+        HWND edit = (HWND)SendMessageW(combo, CBEM_GETEDITCONTROL, 0, 0);
+
+        ok(edit != NULL, "ComboBoxEx has no edit control\n");
+        if (edit)
+        {
+            SetWindowTextW(combo, L"before");
+            if (tests[i].visible)
+            {
+                ShowWindow(parent, SW_SHOW);
+                RedrawWindow(parent, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            }
+            SetWindowTextW(edit, L"typed");
+            if (tests[i].repaint)
+                RedrawWindow(parent, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+
+            g_ntf_settext_wnd = tests[i].settext ? combo : NULL;
+            g_ntf_result = tests[i].result;
+            SendMessageW(edit, WM_KEYDOWN, VK_RETURN, 0);
+            g_ntf_settext_wnd = NULL;
+
+            GetWindowTextW(edit, text, ARRAY_SIZE(text));
+            trace("test %u: edit text after Enter is '%ls'\n", i, text);
+            ok(!wcscmp(text, tests[i].expected), "test %u: edit text '%ls', expected '%ls'\n", i, text, tests[i].expected);
+        }
+        DestroyWindow(parent);
+    }
+    g_ntf_result = NTF_RESULT;
+}
+
 static void TestToolbarChildNotify(BOOL v6)
 {
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES | ICC_USEREX_CLASSES };
@@ -493,6 +566,7 @@ static void TestToolbarChildNotify(BOOL v6)
     TestChildNotifyAnsiParent();
     TestComboBoxExInToolbar(FALSE);
     TestComboBoxExInToolbar(TRUE);
+    TestComboBoxExAbortEndEdit();
 }
 
 
