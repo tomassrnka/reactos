@@ -116,6 +116,10 @@ static const unsigned int message_pointer_flags[] =
     SET(WM_ASKCBFORMATNAME)
 };
 
+#ifndef SMTO_ERRORONEXIT
+#define SMTO_ERRORONEXIT 0x20
+#endif
+
 /* check whether a given message type includes pointers */
 static inline int is_pointer_message( UINT message, WPARAM wparam )
 {
@@ -1684,6 +1688,14 @@ co_IntSendMessageTimeoutSingle( HWND hWnd,
     while ((Status == STATUS_TIMEOUT) &&
            (uFlags & SMTO_NOTIMEOUTIFNOTHUNG) &&
            !MsqIsHungForSend(ptiSendTo, MSQ_HUNG)); // FIXME: Set window hung and add to a list.
+
+    if ((uFlags & SMTO_ERRORONEXIT) &&
+        Status == ((uFlags & SMTO_BLOCK) ? STATUS_WAIT_1 : STATUS_WAIT_2))
+    {
+        /* The receiving thread exited during the call */
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        goto Cleanup; // Return FALSE
+    }
 
     if (Status == STATUS_TIMEOUT)
     {
