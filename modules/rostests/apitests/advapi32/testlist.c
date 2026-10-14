@@ -33,10 +33,20 @@ extern void func_ServiceEnv(void);
 extern void func_ServiceNetwork(void);
 
 extern void func_RegWow64(void);
+extern void func_RegWow64Unicode(void);
+extern void func_RegWow64Views(void);
+extern void func_RegWow64Matrix(void);
+extern void func_RegWow64LongName(void);
+extern void func_RegWow64Volatile(void);
 
 const struct test winetest_testlist[] =
 {
     { "RegWow64", func_RegWow64 },
+    { "RegWow64Unicode", func_RegWow64Unicode },
+    { "RegWow64Views", func_RegWow64Views },
+    { "RegWow64Matrix", func_RegWow64Matrix },
+    { "RegWow64LongName", func_RegWow64LongName },
+    { "RegWow64Volatile", func_RegWow64Volatile },
     { "CreateService", func_CreateService },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
     { "EncryptFile", func_EncryptFile },

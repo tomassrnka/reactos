@@ -1875,22 +1875,146 @@ CmpWow64Prefix(PCUNICODE_STRING Name, PCUNICODE_STRING Prefix)
            (Name->Length == Prefix->Length || Name->Buffer[Prefix->Length / sizeof(WCHAR)] == L'\\');
 }
 
+/* Windows 7 / Server 2008 R2: shared Software subtrees. Match complete
+ * components: similarly named application keys still use the redirected view.
+ * See the registry view matrix fixture and its reference measurements. */
+static const PCWSTR CmpWow64SharedSoftware[] = {
+    L"\\Clients",
+    L"\\Microsoft\\COM3",
+    L"\\Microsoft\\Cryptography\\Calais\\Current",
+    L"\\Microsoft\\Cryptography\\Calais\\Readers",
+    L"\\Microsoft\\Cryptography\\Services",
+    L"\\Microsoft\\CTF\\SystemShared",
+    L"\\Microsoft\\CTF\\TIP",
+    L"\\Microsoft\\DFS",
+    L"\\Microsoft\\Driver Signing",
+    L"\\Microsoft\\EnterpriseCertificates",
+    L"\\Microsoft\\EventSystem",
+    L"\\Microsoft\\MSMQ",
+    L"\\Microsoft\\Non-Driver Signing",
+    L"\\Microsoft\\Notepad\\DefaultFonts",
+    L"\\Microsoft\\Ole",
+    L"\\Microsoft\\Ras",
+    L"\\Microsoft\\Rpc",
+    L"\\Microsoft\\Software\\Microsoft\\Shared Tools\\Msinfo",
+    L"\\Microsoft\\SystemCertificates",
+    L"\\Microsoft\\TermServLicensing",
+    L"\\Microsoft\\Transaction Server",
+    L"\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+    L"\\Microsoft\\Windows\\CurrentVersion\\Control Panel\\Cursors\\Schemes",
+    L"\\Microsoft\\Windows\\CurrentVersion\\Explorer\\AutoplayHandlers",
+    L"\\Microsoft\\Windows\\CurrentVersion\\Explorer\\DriveIcons",
+    L"\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KindMap",
+    L"\\Microsoft\\Windows\\CurrentVersion\\Group Policy",
+    L"\\Microsoft\\Windows\\CurrentVersion\\Policies",
+    L"\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers",
+    L"\\Microsoft\\Windows\\CurrentVersion\\Setup",
+    L"\\Microsoft\\Windows\\CurrentVersion\\Telephony\\Locations",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\Console",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\FontDPI",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\FontLink",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\FontMapper",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\GRE_Initialize",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\LanguagePack",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\NetworkCards",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\Perflib",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\Ports",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\Print",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+    L"\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones",
+    L"\\Policies",
+    L"\\RegisteredApplications",
+};
+
+static const PCWSTR CmpWow64RedirectedClasses[] = {
+    L"\\CLSID", L"\\DirectShow", L"\\Interface", L"\\Media Type", L"\\MediaFoundation"
+};
+
+static BOOLEAN
+CmpWow64Path(PCUNICODE_STRING Name, PCWSTR Path)
+{
+    UNICODE_STRING Prefix;
+    RtlInitUnicodeString(&Prefix, Path);
+    return CmpWow64Prefix(Name, &Prefix);
+}
+
+/* Return the insertion point in bytes, or zero for a shared/physical path. */
+static ULONG
+CmpWow64KeyOffset(PCUNICODE_STRING Name)
+{
+    static const UNICODE_STRING Software = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE");
+    static const UNICODE_STRING Users = RTL_CONSTANT_STRING(L"\\REGISTRY\\USER\\");
+    UNICODE_STRING Tail, Component;
+    ULONG Offset, i;
+    BOOLEAN Machine = CmpWow64Prefix(Name, &Software);
+
+    if (Machine)
+    {
+        Offset = Software.Length;
+    }
+    else if (RtlPrefixUnicodeString(&Users, Name, TRUE))
+    {
+        /* HKCU's Classes tree and a separately mounted <SID>_Classes hive
+         * have the same subviews. Other per-user software remains shared. */
+        Offset = Users.Length;
+        while (Offset < Name->Length && Name->Buffer[Offset / sizeof(WCHAR)] != L'\\')
+            Offset += sizeof(WCHAR);
+        Component.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Users.Length);
+        Component.Length = Component.MaximumLength = Offset - Users.Length;
+        if (Component.Length >= 8 * sizeof(WCHAR))
+        {
+            UNICODE_STRING Suffix = RTL_CONSTANT_STRING(L"_Classes");
+            Component.Buffer += Component.Length / sizeof(WCHAR) - 8;
+            Component.Length = Component.MaximumLength = 8 * sizeof(WCHAR);
+            if (RtlEqualUnicodeString(&Component, &Suffix, TRUE)) goto Classes;
+        }
+        Tail.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Offset);
+        Tail.Length = Tail.MaximumLength = Name->Length - Offset;
+        if (!CmpWow64Path(&Tail, L"\\Software\\Classes")) return 0;
+        Offset += sizeof(L"\\Software\\Classes") - sizeof(WCHAR);
+        goto Classes;
+    }
+    else return 0;
+
+    Tail.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Offset);
+    Tail.Length = Tail.MaximumLength = Name->Length - Offset;
+    /* A root handle already in the physical 32-bit tree stays there even
+     * when the caller requests KEY_WOW64_64KEY. Never strip its node. */
+    if (CmpWow64Path(&Tail, L"\\Wow6432Node")) return 0;
+    if (CmpWow64Path(&Tail, L"\\Classes"))
+    {
+        Offset += sizeof(L"\\Classes") - sizeof(WCHAR);
+        goto Classes;
+    }
+    for (i = 0; i < RTL_NUMBER_OF(CmpWow64SharedSoftware); ++i)
+        if (CmpWow64Path(&Tail, CmpWow64SharedSoftware[i])) return 0;
+    return Offset;
+
+Classes:
+    Tail.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Offset);
+    Tail.Length = Tail.MaximumLength = Name->Length - Offset;
+    for (i = 0; i < RTL_NUMBER_OF(CmpWow64RedirectedClasses); ++i)
+        if (CmpWow64Path(&Tail, CmpWow64RedirectedClasses[i])) return Offset;
+    return 0;
+}
+
 static NTSTATUS
 CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
                     PCUNICODE_STRING RemainingName, PCM_PARSE_CONTEXT Context)
 {
     static const UNICODE_STRING Software = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE");
-    static const UNICODE_STRING Physical = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE\\Wow6432Node");
-    static const UNICODE_STRING Classes = RTL_CONSTANT_STRING(L"\\Classes");
     static const WCHAR Node[] = L"\\Wow6432Node";
     PCM_KEY_CONTROL_BLOCK Kcb = Root->KeyControlBlock;
     PUNICODE_STRING RootName;
     UNICODE_STRING Full, Tail;
     PWSTR NewName;
-    ULONG Length, Separator, Cut = 0, Insert = 0;
-    BOOLEAN Root32;
+    ULONG Length, Separator, Offset, Cut = 0, Insert = sizeof(Node) - sizeof(WCHAR), i;
 
-    if (!Context || !Context->Wow64Flags || Context->Wow64Reparsed) return STATUS_SUCCESS;
+    if (!Context || !Context->Wow64Flags || Context->Wow64Reparsed)
+        return STATUS_SUCCESS;
     CmpLockRegistry();
     CmpAcquireKcbLockShared(Kcb);
     if (Kcb->Delete)
@@ -1903,7 +2027,6 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
     CmpReleaseKcbLock(Kcb);
     CmpUnlockRegistry();
     if (!RootName) return STATUS_INSUFFICIENT_RESOURCES;
-    Root32 = CmpWow64Prefix(RootName, &Physical);
     Separator = RemainingName->Length && RemainingName->Buffer[0] != L'\\' ? sizeof(WCHAR) : 0;
     Length = RootName->Length + Separator + RemainingName->Length;
     if (Length > MAXUSHORT - sizeof(Node))
@@ -1924,22 +2047,56 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
     RtlCopyMemory((PUCHAR)Full.Buffer + RootName->Length + Separator,
                   RemainingName->Buffer, RemainingName->Length);
     ExFreePoolWithTag(RootName, TAG_CM);
-    if (!CmpWow64Prefix(&Full, &Software)) goto Unchanged;
-
-    /* A physical node explicitly present in the input is an ordinary key.
-     * A node inherited from the root handle can switch to the other view. */
-    if (CmpWow64Prefix(&Full, &Physical))
+    /* The ordinary name parser accepts repeated separators. Classify the
+     * same components so an alternate spelling cannot choose another view. */
+    for (i = 0, Length = 0; i < Full.Length / sizeof(WCHAR); ++i)
     {
-        if (!Root32) goto Unchanged;
-        Cut = sizeof(Node) - sizeof(WCHAR);
+        if (Full.Buffer[i] == L'\\' && Length && Full.Buffer[Length - 1] == L'\\')
+            continue;
+        Full.Buffer[Length++] = Full.Buffer[i];
     }
-    Tail.Buffer = (PWSTR)((PUCHAR)Full.Buffer + Software.Length + Cut);
-    Tail.Length = Tail.MaximumLength = Full.Length - Software.Length - Cut;
-    /* Windows 7 Classes is shared. COM class/interface subviews and the rest
-     * of the documented per-key exception list are later extensions. */
-    if ((Context->Wow64Flags & KEY_WOW64_32KEY) && !CmpWow64Prefix(&Tail, &Classes))
-        Insert = sizeof(Node) - sizeof(WCHAR);
-    if (Cut == Insert) goto Unchanged;
+    Full.Length = Length * sizeof(WCHAR);
+    Offset = 0;
+    if (CmpWow64Path(&Full, L"\\REGISTRY\\MACHINE\\SOFTWARE\\Wow6432Node"))
+    {
+        /* Windows exposes shared subtrees through the physical Software view
+         * as well. Only those aliases leave a physical root; an ordinary
+         * 32-bit application key remains anchored regardless of selector. */
+        Tail.Buffer = (PWSTR)((PUCHAR)Full.Buffer + Software.Length + Insert);
+        Tail.Length = Tail.MaximumLength = Full.Length - Software.Length - Insert;
+        if (CmpWow64Path(&Tail, L"\\Classes"))
+        {
+            /* Software32\Classes aliases the Classes tree. A 32-bit view
+             * applies the shared/redirected Classes matrix there; an explicit
+             * native view exposes its physical 32-bit container. */
+            RtlMoveMemory((PUCHAR)Full.Buffer + Software.Length,
+                          Tail.Buffer, Tail.Length);
+            Full.Length -= Insert;
+            if (Context->Wow64Flags & KEY_WOW64_32KEY)
+            {
+                Offset = CmpWow64KeyOffset(&Full);
+                if (!Offset) { Offset = Software.Length; Insert = 0; }
+            }
+            else Offset = Software.Length + sizeof(L"\\Classes") - sizeof(WCHAR);
+        }
+        else for (i = 0; i < RTL_NUMBER_OF(CmpWow64SharedSoftware); ++i)
+        {
+            if (CmpWow64Path(&Tail, CmpWow64SharedSoftware[i]))
+            {
+                Offset = Software.Length;
+                Cut = Insert;
+                Insert = 0;
+                break;
+            }
+        }
+    }
+    else if (Context->Wow64Flags & KEY_WOW64_32KEY)
+        Offset = CmpWow64KeyOffset(&Full);
+    if (!Offset)
+    {
+        ExFreePoolWithTag(Full.Buffer, TAG_CM);
+        return STATUS_SUCCESS;
+    }
     Length = Full.Length - Cut + Insert;
     NewName = ExAllocatePoolWithTag(PagedPool, Length + sizeof(WCHAR), TAG_CM);
     if (!NewName)
@@ -1947,20 +2104,45 @@ CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
         ExFreePoolWithTag(Full.Buffer, TAG_CM);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    RtlCopyMemory(NewName, Full.Buffer, Software.Length);
-    if (Insert) RtlCopyMemory((PUCHAR)NewName + Software.Length, Node, Insert);
-    RtlCopyMemory((PUCHAR)NewName + Software.Length + Insert, Tail.Buffer, Tail.Length);
+    RtlCopyMemory(NewName, Full.Buffer, Offset);
+    RtlCopyMemory((PUCHAR)NewName + Offset, Node, Insert);
+    RtlCopyMemory((PUCHAR)NewName + Offset + Insert, (PUCHAR)Full.Buffer + Offset + Cut, Full.Length - Offset - Cut);
     NewName[Length / sizeof(WCHAR)] = UNICODE_NULL;
     ExFreePoolWithTag(Full.Buffer, TAG_CM);
+
+    /* New per-user Classes trees need their physical view container. Create
+     * only that container, under the caller's token and ordinary ACL checks;
+     * an open never creates registry objects. The requested key itself still
+     * goes through the original access state on the reparse. */
+    if (Context->CreateOperation && Insert)
+    {
+        UNICODE_STRING Container;
+        OBJECT_ATTRIBUTES Attributes;
+        HANDLE Handle;
+        NTSTATUS Status;
+        Container.Buffer = NewName;
+        Container.Length = Container.MaximumLength = Offset + Insert;
+        InitializeObjectAttributes(&Attributes, &Container,
+            OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_FORCE_ACCESS_CHECK, NULL, NULL);
+        Status = ZwOpenKey(&Handle, KEY_QUERY_VALUE, &Attributes);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = ZwCreateKey(&Handle, KEY_CREATE_SUB_KEY, &Attributes, 0, NULL,
+                                 Context->CreateOptions & REG_OPTION_VOLATILE, NULL);
+        if (NT_SUCCESS(Status)) ZwClose(Handle);
+        else if (Status != STATUS_ACCESS_DENIED)
+        {
+            ExFreePoolWithTag(NewName, TAG_CM);
+            return Status;
+        }
+        /* An inaccessible existing container adds no rights requirement:
+         * the reparse below still checks the requested object's access. */
+    }
     ExFreePool(CompleteName->Buffer);
     CompleteName->Buffer = NewName;
     CompleteName->Length = Length;
     CompleteName->MaximumLength = Length + sizeof(WCHAR);
     Context->Wow64Reparsed = TRUE;
     return STATUS_REPARSE;
-Unchanged:
-    ExFreePoolWithTag(Full.Buffer, TAG_CM);
-    return STATUS_SUCCESS;
 }
 #endif
 

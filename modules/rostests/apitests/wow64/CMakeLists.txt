@@ -6,7 +6,7 @@ function(add_wow64_apitest library)
     set(sources)
     set(testlist "#define STANDALONE\n#include <apitest.h>\n")
     foreach(test ${ARGN})
-        if(NOT test MATCHES "^Wow64(ProgramFiles|EnvironmentBlock)$")
+        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|Volatile)|Wow64ProgramFiles|Wow64EnvironmentBlock)$")
             list(APPEND sources ../${library}/${test}.c)
         endif()
         string(APPEND testlist "extern void func_${test}(void);\n")
@@ -32,7 +32,9 @@ add_wow64_apitest(ntdll
     Wow64Continue NtOpenKey NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString)
 add_wow64_apitest(advapi32
-    RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64)
+    RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64Matrix RegWow64LongName RegWow64Volatile)
+
+target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
 
 if(ARCH STREQUAL "i386")
     add_asm_files(wow64_continue_asm ../ntdll/i386/Wow64Continue.S)

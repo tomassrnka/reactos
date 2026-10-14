@@ -26,7 +26,17 @@ passes.
 
 This selection does not establish general service, RPC, network or GUI
 support. Guest APCs, additional threads, software exception raising and
-floating-point/debug exception contexts require further work. The basic
-registry policy redirects HKLM Software and shares HKCU, HKLM SYSTEM and
-Software Classes; COM subviews, the remaining Windows 7 key exceptions,
-reflection and registry symbolic-link view propagation are separate gates.
+floating-point/debug exception contexts require further work. The registry policy follows the Windows 7 shared/redirected matrix for
+machine Software and machine/per-user Classes, including the five redirected
+COM/media subtrees. Windows 7 does not reflect registry writes. General
+registry symbolic-link view propagation remains a separate gate.
+
+Review regression fixtures cover integer continuation and native partial
+contexts, Unicode/compressed registry ancestry, native object-name length
+bounds, physical roots, nested view creation, repeated separators, volatile
+Classes and the shared/redirected matrix. Environment fixtures cover redirected
+delete, all six shared directories, native filesystem controls, architecture
+variables, installed Program Files values and native environment-block creation.
+Native calls without registry selectors are explicit controls; native i386
+continues to ignore selectors. The additional guest-thread limitation means
+these tests do not claim concurrent guest redirection-isolation coverage.

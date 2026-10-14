@@ -969,7 +969,7 @@ CreateNestedKey(PHKEY KeyHandle,
         LocalKeyName.Length = (USHORT)wcslen(LocalKeyName.Buffer) * sizeof(WCHAR);
 
         Status = NtCreateKey(&LocalKeyHandle,
-                             KEY_CREATE_SUB_KEY,
+                             KEY_CREATE_SUB_KEY | (samDesired & (KEY_WOW64_32KEY | KEY_WOW64_64KEY)),
                              &LocalObjectAttributes,
                              0,
                              NULL,
@@ -1008,7 +1008,7 @@ CreateNestedKey(PHKEY KeyHandle,
         }
 
         Status = NtCreateKey(&LocalKeyHandle,
-                             KEY_CREATE_SUB_KEY,
+                             KEY_CREATE_SUB_KEY | (samDesired & (KEY_WOW64_32KEY | KEY_WOW64_64KEY)),
                              &LocalObjectAttributes,
                              0,
                              NULL,

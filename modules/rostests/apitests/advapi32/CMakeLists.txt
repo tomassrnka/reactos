@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     RegWow64.c
+    RegWow64Review.c
     CreateService.c
     DuplicateTokenEx.c
     EncryptFile.c
