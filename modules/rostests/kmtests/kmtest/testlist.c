@@ -37,6 +37,7 @@ KMT_TESTFUNC Test_RtlCaptureContext;
 KMT_TESTFUNC Test_RtlException;
 KMT_TESTFUNC Test_RtlIntSafe;
 KMT_TESTFUNC Test_RtlMemory;
+KMT_TESTFUNC Test_RtlMemoryOps;
 KMT_TESTFUNC Test_RtlRegistry;
 KMT_TESTFUNC Test_RtlSplayTree;
 KMT_TESTFUNC Test_RtlStack;
@@ -79,6 +80,7 @@ const KMT_TEST TestList[] =
     { "RtlException",                 Test_RtlException },
     { "RtlIntSafe",                   Test_RtlIntSafe },
     { "RtlMemory",                    Test_RtlMemory },
+    { "RtlMemoryOps",                 Test_RtlMemoryOps },
     { "RtlRegistry",                  Test_RtlRegistry },
     { "RtlSplayTree",                 Test_RtlSplayTree },
     { "RtlStack",                     Test_RtlStack },
