@@ -48,6 +48,7 @@ SelectDisk(
 
         CurrentDisk = DiskEntry;
         CurrentPartition = NULL;
+        CurrentVolume = NULL;
         ConResPrintf(StdOut, IDS_SELECT_DISK, CurrentDisk->DiskNumber);
         return EXIT_SUCCESS;
     }
@@ -56,6 +57,7 @@ SelectDisk(
         if (CurrentDisk == NULL)
         {
             CurrentPartition = NULL;
+            CurrentVolume = NULL;
             ConResPuts(StdErr, IDS_SELECT_DISK_ENUM_NO_START);
             return EXIT_SUCCESS;
         }
@@ -64,6 +66,7 @@ SelectDisk(
         {
             CurrentDisk = NULL;
             CurrentPartition = NULL;
+            CurrentVolume = NULL;
             ConResPuts(StdErr, IDS_SELECT_DISK_ENUM_FINISHED);
             return EXIT_SUCCESS;
         }
@@ -74,6 +77,7 @@ SelectDisk(
 
         CurrentDisk = DiskEntry;
         CurrentPartition = NULL;
+        CurrentVolume = NULL;
         ConResPrintf(StdOut, IDS_SELECT_DISK, CurrentDisk->DiskNumber);
         return EXIT_SUCCESS;
     }
@@ -86,7 +90,10 @@ SelectDisk(
             return EXIT_SUCCESS;
         }
 
+        /* The partition and volume of the disk selected before lose the focus too. */
         CurrentDisk = NULL;
+        CurrentPartition = NULL;
+        CurrentVolume = NULL;
 
         Entry = DiskListHead.Flink;
         while (Entry != &DiskListHead)
@@ -97,6 +104,7 @@ SelectDisk(
             {
                 CurrentDisk = DiskEntry;
                 CurrentPartition = NULL;
+                CurrentVolume = NULL;
                 ConResPrintf(StdOut, IDS_SELECT_DISK, CurrentDisk->DiskNumber);
                 return EXIT_SUCCESS;
             }
@@ -173,6 +181,8 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    /* The partition's volume, if any, gets the focus too. */
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -193,6 +203,8 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    /* The partition's volume, if any, gets the focus too. */
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -214,6 +226,8 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    /* The partition's volume, if any, gets the focus too. */
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -279,6 +293,31 @@ SelectVolume(
         if (VolumeEntry->VolumeNumber == ulValue)
         {
             CurrentVolume = VolumeEntry;
+            /*
+             * The partition of a basic volume, and its disk, get the focus too;
+             * a volume without one leaves no partition selected.
+             */
+            CurrentPartition = GetPartitionForVolume(VolumeEntry);
+            if (CurrentPartition != NULL)
+            {
+                CurrentDisk = CurrentPartition->DiskEntry;
+            }
+            else if (VolumeEntry->pExtents != NULL && VolumeEntry->pExtents->NumberOfDiskExtents != 0)
+            {
+                /* A volume on a disk without a matching partition: its (first) disk. */
+                PLIST_ENTRY DiskListEntry;
+
+                for (DiskListEntry = DiskListHead.Flink; DiskListEntry != &DiskListHead; DiskListEntry = DiskListEntry->Flink)
+                {
+                    PDISKENTRY DiskEntry = CONTAINING_RECORD(DiskListEntry, DISKENTRY, ListEntry);
+
+                    if (DiskEntry->DiskNumber == VolumeEntry->pExtents->Extents[0].DiskNumber)
+                    {
+                        CurrentDisk = DiskEntry;
+                        break;
+                    }
+                }
+            }
             ConResPrintf(StdOut, IDS_SELECT_VOLUME, CurrentVolume->VolumeNumber);
             return EXIT_SUCCESS;
         }

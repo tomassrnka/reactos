@@ -1510,11 +1510,16 @@ AddDiskToList(
     }
     else if (DiskEntry->PartitionStyle == PARTITION_STYLE_GPT)
     {
-        /* Calculate the number of usable sectors */
+        /*
+         * Calculate the number of usable sectors: from the first aligned sector after
+         * the start of the usable area to the last sector before the last alignment
+         * boundary inside it (the backup table follows the usable area).
+         */
         DiskEntry->StartSector.QuadPart = AlignDown(DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart / DiskEntry->BytesPerSector,
                                                     DiskEntry->SectorAlignment) + (ULONGLONG)DiskEntry->SectorAlignment;
-        DiskEntry->EndSector.QuadPart = AlignDown(DiskEntry->StartSector.QuadPart + (DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart / DiskEntry->BytesPerSector) - 1,
-                                                  DiskEntry->SectorAlignment);
+        DiskEntry->EndSector.QuadPart = AlignDown((DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart +
+                                                   DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart) / DiskEntry->BytesPerSector,
+                                                  DiskEntry->SectorAlignment) - 1;
 
         if (DiskEntry->LayoutBuffer->PartitionCount == 0)
         {
@@ -1865,7 +1870,6 @@ GetDiskForVolume(
 }
 
 
-static
 PPARTENTRY
 GetPartitionForVolume(
     _In_ PVOLENTRY VolumeEntry)
@@ -3131,6 +3135,39 @@ RefreshVolumeList(
  * listed before are kept across all the reads; if they cannot be saved,
  * the list is not read again and no volume gets the focus.
  */
+/*
+ * The selected volume, if the selected disk and partition agree with it:
+ * NULL when a partition is selected that is not the volume's, or the volume
+ * lies on disks other than the selected one. Commands that act on a volume
+ * take it from here, so that none acts on a volume of another disk.
+ */
+PVOLENTRY
+GetFocusVolume(VOID)
+{
+    ULONG i;
+
+    if (CurrentVolume == NULL)
+        return NULL;
+
+    if (CurrentPartition != NULL &&
+        GetPartitionForVolume(CurrentVolume) != CurrentPartition)
+        return NULL;
+
+    /* Volumes that are not on a disk (CD-ROM) have no extents */
+    if (CurrentDisk != NULL && CurrentVolume->pExtents != NULL)
+    {
+        for (i = 0; i < CurrentVolume->pExtents->NumberOfDiskExtents; i++)
+        {
+            if (CurrentVolume->pExtents->Extents[i].DiskNumber == CurrentDisk->DiskNumber)
+                return CurrentVolume;
+        }
+        return NULL;
+    }
+
+    return CurrentVolume;
+}
+
+
 VOID
 SelectVolumeOfNewPartition(
     _In_ PPARTENTRY PartEntry)

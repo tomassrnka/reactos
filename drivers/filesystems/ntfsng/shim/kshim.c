@@ -652,8 +652,9 @@ static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf
 			int r = kshim_jnl_capture(b, off, buf, len);
 			if (r != -ENOMEM)
 				return r;
-			if (kshim_jnl_degrade(b))
-				return -EIO;
+			r = kshim_jnl_degrade(b);
+			if (r)
+				return r == -ENOMEM ? -ENOMEM : -EIO;	/* -ENOMEM: a resize refused to go in place */
 		}
 		if (b->jnl)
 			kshim_jnl_patch(b, 1, off, buf, len);
@@ -864,9 +865,11 @@ static int kshim_bio_do(struct bio *b)
 }
 void submit_bio(struct bio *b)
 {
-	/* The core's MFT write completion ignores bi_status: keep the error for the next consistency point. */
-	if (kshim_bio_do(b) && (b->bi_opf & REQ_OP_MASK) == REQ_OP_WRITE && !b->bi_bdev->kshim_wb_err)
-		b->bi_bdev->kshim_wb_err = -EIO;
+	/* The core's MFT write completion ignores bi_status: keep the error for the next consistency point
+	 * (out of memory stays that, so a resize that refused to go in place does not count as a device error). */
+	int err = kshim_bio_do(b);
+	if (err && (b->bi_opf & REQ_OP_MASK) == REQ_OP_WRITE && !b->bi_bdev->kshim_wb_err)
+		b->bi_bdev->kshim_wb_err = err == -ENOMEM ? -ENOMEM : -EIO;
 	if (b->bi_end_io) b->bi_end_io(b);
 }
 int submit_bio_wait(struct bio *b) { return kshim_bio_do(b); }
@@ -1424,7 +1427,18 @@ void discard_new_inode(struct inode *i)
 	iput(i);
 }
 void iget_failed(struct inode *i) { discard_new_inode(i); }
-struct inode *igrab(struct inode *i) { atomic_inc(&i->i_count); return i; }
+/*
+ * As in Linux, an inode being evicted cannot be grabbed: __ntfs_write_inode grabs the inode it writes,
+ * and when eviction writes a dirty inode (a read-only volume skips the writeback before it), its iput
+ * would evict the inode a second time.  No lock: find_inode_nowait calls this under kshim_inode_lock.
+ */
+struct inode *igrab(struct inode *i)
+{
+	if (i->i_state & I_FREEING)
+		return NULL;
+	atomic_inc(&i->i_count);
+	return i;
+}
 void ihold(struct inode *i) { atomic_inc(&i->i_count); }
 static void kshim_evict(struct inode *i)
 {

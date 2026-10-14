@@ -942,6 +942,298 @@ FdoIoctlDiskDeleteDriveLayout(
 
 static
 CODE_SEG("PAGE")
+BOOLEAN
+PartMgrIsUsedEntry(
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Layout,
+    _In_ PPARTITION_INFORMATION_EX Entry)
+{
+    PAGED_CODE();
+
+    if (Layout->PartitionStyle == PARTITION_STYLE_MBR)
+        return Entry->Mbr.PartitionType != PARTITION_ENTRY_UNUSED && Entry->PartitionLength.QuadPart != 0;
+    return Entry->PartitionLength.QuadPart != 0;
+}
+
+/**
+ * @brief
+ * IOCTL_DISK_GROW_PARTITION: changes the length of one partition by
+ * BytesToGrow (negative shrinks it), keeping its start, number and device.
+ * The new end must stay on the disk (an MBR logical partition's container
+ * grows with it), in the GPT usable area, and off every other partition and
+ * EBR. Behaviour measured on Windows Server 2008 R2.
+ **/
+static
+CODE_SEG("PAGE")
+NTSTATUS
+FdoIoctlDiskGrowPartition(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PIRP Irp)
+{
+    PDISK_GROW_PARTITION grow = Irp->AssociatedIrp.SystemBuffer;
+    PDRIVE_LAYOUT_INFORMATION_EX layout, newLayout;
+    PPARTITION_INFORMATION_EX entry = NULL;
+    PPARTITION_EXTENSION partExt = NULL;
+    UINT32 i, index = 0, partNumber = 0, container = MAXULONG;
+    INT64 start, oldEnd, newLen, newEnd, limit;
+    UINT64 sectorSize;
+    BOOLEAN changed = FALSE;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    if (!VerifyIrpInBufferSize(Irp, sizeof(*grow)))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    PartMgrAcquireLayoutLock(FdoExtension);
+
+    status = PartMgrGetDriveLayout(FdoExtension, &layout);
+    if (!NT_SUCCESS(status))
+        goto Exit;
+
+    if (FdoExtension->IsSuperFloppy || layout->PartitionStyle == PARTITION_STYLE_RAW)
+    {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        goto Exit;
+    }
+
+    // partition numbers count the used entries that are not MBR containers, in layout order
+    for (i = 0; i < layout->PartitionCount; i++)
+    {
+        PPARTITION_INFORMATION_EX cur = &layout->PartitionEntry[i];
+
+        if (!PartMgrIsUsedEntry(layout, cur) ||
+            (layout->PartitionStyle == PARTITION_STYLE_MBR && IsContainerPartition(cur->Mbr.PartitionType)))
+        {
+            continue;
+        }
+        if (++partNumber == grow->PartitionNumber)
+        {
+            entry = cur;
+            index = i;
+            break;
+        }
+    }
+    if (!entry || grow->PartitionNumber == 0)
+    {
+        status = STATUS_NO_SUCH_DEVICE;
+        goto Exit;
+    }
+
+    // The layout numbers the partitions in order, while a partition device keeps the number it got
+    // when it appeared; after a layout change the two can differ. Only a partition both agree on
+    // is grown: the device of the entry (if any) carries the number, and no other device does.
+    for (PSINGLE_LIST_ENTRY cur = FdoExtension->PartitionList.Next; cur != NULL; cur = cur->Next)
+    {
+        PPARTITION_EXTENSION pe = CONTAINING_RECORD(cur, PARTITION_EXTENSION, ListEntry);
+        BOOLEAN isEntry = pe->StartingOffset == (UINT64)entry->StartingOffset.QuadPart &&
+                          pe->PartitionLength == (UINT64)entry->PartitionLength.QuadPart;
+
+        if (isEntry != (pe->DetectedNumber == grow->PartitionNumber))
+        {
+            status = STATUS_NO_SUCH_DEVICE;
+            goto Exit;
+        }
+    }
+
+    sectorSize = FdoExtension->DiskData.BytesPerSector ? FdoExtension->DiskData.BytesPerSector : 512;
+    start = entry->StartingOffset.QuadPart;
+    oldEnd = start + entry->PartitionLength.QuadPart;
+    if (grow->BytesToGrow.QuadPart == 0)
+    {
+        status = STATUS_SUCCESS;
+        goto Exit;
+    }
+    if (grow->BytesToGrow.QuadPart <= -entry->PartitionLength.QuadPart ||
+        grow->BytesToGrow.QuadPart > (INT64)FdoExtension->DiskData.DiskSize)
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+    // bytes become whole sectors as the table stores them: an MBR sector count,
+    // a GPT ending LBA (which takes in a partial last sector)
+    newEnd = oldEnd + grow->BytesToGrow.QuadPart;
+    if (layout->PartitionStyle == PARTITION_STYLE_GPT)
+        newEnd = (INT64)(((UINT64)(newEnd - 1) / sectorSize + 1) * sectorSize);
+    else
+        newEnd = start + (INT64)((UINT64)(newEnd - start) / sectorSize * sectorSize);
+    newLen = newEnd - start;
+    if (newLen <= 0)
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+    if (newEnd == oldEnd)
+    {
+        status = STATUS_SUCCESS;
+        goto Exit;
+    }
+
+    // the area the partition may occupy
+    if (layout->PartitionStyle == PARTITION_STYLE_GPT)
+        limit = layout->Gpt.StartingUsableOffset.QuadPart + layout->Gpt.UsableLength.QuadPart;
+    else
+        limit = (INT64)FdoExtension->DiskData.DiskSize;
+    // an MBR entry holds a 32-bit sector count (its 32-bit start does not change)
+    if (newEnd > limit ||
+        (layout->PartitionStyle == PARTITION_STYLE_MBR && (UINT64)newLen / sectorSize > MAXULONG))
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    // a logical partition may take its container along past the container's end
+    if (layout->PartitionStyle == PARTITION_STYLE_MBR && index >= 4)
+    {
+        for (i = 0; i < min(layout->PartitionCount, 4); i++)
+        {
+            PPARTITION_INFORMATION_EX cur = &layout->PartitionEntry[i];
+
+            if (IsContainerPartition(cur->Mbr.PartitionType) &&
+                start >= cur->StartingOffset.QuadPart &&
+                start < cur->StartingOffset.QuadPart + cur->PartitionLength.QuadPart)
+            {
+                container = i;
+                break;
+            }
+        }
+    }
+
+    // the grown range may not reach any other partition (logical: nor the next EBR)
+    for (i = 0; i < layout->PartitionCount && newEnd > oldEnd; i++)
+    {
+        PPARTITION_INFORMATION_EX cur = &layout->PartitionEntry[i];
+        INT64 curStart = cur->StartingOffset.QuadPart;
+        INT64 curEnd = curStart + cur->PartitionLength.QuadPart;
+
+        if (i == index || i == container || !PartMgrIsUsedEntry(layout, cur))
+            continue;
+        // a link entry starts at the next EBR
+        if (layout->PartitionStyle == PARTITION_STYLE_MBR && i >= 4 && IsContainerPartition(cur->Mbr.PartitionType))
+            curEnd = curStart + (INT64)sectorSize;
+        if (curStart < newEnd && curEnd > oldEnd)
+        {
+            status = STATUS_INVALID_PARAMETER;
+            goto Exit;
+        }
+    }
+
+    size_t layoutSize = FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry[0]) +
+                        layout->PartitionCount * sizeof(PARTITION_INFORMATION_EX);
+    newLayout = ExAllocatePoolWithTag(PagedPool, layoutSize, TAG_PARTMGR);
+    if (!newLayout)
+    {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
+    RtlCopyMemory(newLayout, layout, layoutSize);
+
+    for (i = 0; i < newLayout->PartitionCount; i++)
+        newLayout->PartitionEntry[i].RewritePartition = FALSE;
+    newLayout->PartitionEntry[index].PartitionLength.QuadPart = newLen;
+    newLayout->PartitionEntry[index].RewritePartition = TRUE;
+
+    if (container != MAXULONG)
+    {
+        PPARTITION_INFORMATION_EX ext = &newLayout->PartitionEntry[container];
+
+        if (ext->StartingOffset.QuadPart + ext->PartitionLength.QuadPart < newEnd)
+        {
+            if ((UINT64)(newEnd - ext->StartingOffset.QuadPart) / sectorSize > MAXULONG)
+            {
+                ExFreePoolWithTag(newLayout, TAG_PARTMGR);
+                status = STATUS_INVALID_PARAMETER;
+                goto Exit;
+            }
+            ext->PartitionLength.QuadPart = newEnd - ext->StartingOffset.QuadPart;
+            ext->RewritePartition = TRUE;
+        }
+    }
+
+    if (newLayout->PartitionStyle == PARTITION_STYLE_MBR && index >= 4)
+    {
+        // the link entry of the previous EBR spans this partition's EBR and the partition:
+        // it follows a shrink when it ended with the partition, and holds a larger one
+        for (i = 4; i < newLayout->PartitionCount; i++)
+        {
+            PPARTITION_INFORMATION_EX link = &newLayout->PartitionEntry[i];
+            INT64 linkEnd = link->StartingOffset.QuadPart + link->PartitionLength.QuadPart;
+
+            if (!IsContainerPartition(link->Mbr.PartitionType) ||
+                link->StartingOffset.QuadPart > start || linkEnd <= start)
+            {
+                continue;
+            }
+            if (linkEnd < newEnd || (linkEnd == oldEnd && newEnd < oldEnd))
+            {
+                link->PartitionLength.QuadPart = newEnd - link->StartingOffset.QuadPart;
+                link->RewritePartition = TRUE;
+            }
+        }
+    }
+
+    status = IoWritePartitionTableEx(FdoExtension->LowerDevice, newLayout);
+    if (!NT_SUCCESS(status))
+    {
+        ExFreePoolWithTag(newLayout, TAG_PARTMGR);
+        FdoExtension->LayoutValid = FALSE;
+        goto Exit;
+    }
+
+    for (i = 0; i < newLayout->PartitionCount; i++)
+        newLayout->PartitionEntry[i].RewritePartition = FALSE;
+
+    // the partition device keeps its identity and gets the new length
+    for (PSINGLE_LIST_ENTRY cur = FdoExtension->PartitionList.Next; cur != NULL; cur = cur->Next)
+    {
+        PPARTITION_EXTENSION pe = CONTAINING_RECORD(cur, PARTITION_EXTENSION, ListEntry);
+
+        if (pe->StartingOffset == (UINT64)start && pe->PartitionLength == (UINT64)(oldEnd - start))
+        {
+            pe->PartitionLength = newLen;
+            // kept for the notification after the layout lock goes, when a removal may run
+            if (pe->IsEnumerated)
+            {
+                partExt = pe;
+                ObReferenceObject(pe->DeviceObject);
+            }
+            break;
+        }
+    }
+
+    ExFreePool(FdoExtension->LayoutCache);
+    FdoExtension->LayoutCache = newLayout;
+    FdoExtension->LayoutValid = TRUE;
+    changed = TRUE;
+
+Exit:
+    PartMgrReleaseLayoutLock(FdoExtension);
+
+    if (changed)
+    {
+        TARGET_DEVICE_CUSTOM_NOTIFICATION notification;
+
+        notification.Version = 1;
+        notification.Size = FIELD_OFFSET(TARGET_DEVICE_CUSTOM_NOTIFICATION, CustomDataBuffer);
+        notification.FileObject = NULL;
+        notification.NameBufferOffset = -1;
+
+        notification.Event = GUID_IO_DISK_LAYOUT_CHANGE;
+        IoReportTargetDeviceChangeAsynchronous(FdoExtension->PhysicalDiskDO, &notification, NULL, NULL);
+
+        if (partExt)
+        {
+            notification.Event = GUID_IO_VOLUME_CHANGE_SIZE;
+            IoReportTargetDeviceChangeAsynchronous(partExt->DeviceObject, &notification, NULL, NULL);
+            ObDereferenceObject(partExt->DeviceObject);
+        }
+    }
+
+    Irp->IoStatus.Information = 0;
+    return status;
+}
+
+static
+CODE_SEG("PAGE")
 NTSTATUS
 FdoHandleStartDevice(
     _In_ PFDO_EXTENSION FdoExtension,
@@ -1290,7 +1582,10 @@ PartMgrDeviceControl(
         case IOCTL_DISK_DELETE_DRIVE_LAYOUT:
             status = FdoIoctlDiskDeleteDriveLayout(fdoExtension, Irp);
             break;
-        // case IOCTL_DISK_GROW_PARTITION: // todo
+        case IOCTL_DISK_GROW_PARTITION:
+            status = FdoIoctlDiskGrowPartition(fdoExtension, Irp);
+            break;
+
         default:
             return ForwardIrpAndForget(DeviceObject, Irp);
     }

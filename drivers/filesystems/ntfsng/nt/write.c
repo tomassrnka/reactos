@@ -843,6 +843,9 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     /* After the lock holder's direct writes only the disk's cache is flushed, never the mounted state. */
     if (Fcb && Fcb->IsVolume && Vcb->RawWritten)
         return NgDevFlushDurable(Vcb->StorageDevice) ? STATUS_UNEXPECTED_IO_ERROR : STATUS_SUCCESS;
+    /* Data written before a failed resize can no longer reach the disk: a flush must not report it there. */
+    if (Fcb && Vcb->WritesLost)
+        return STATUS_UNEXPECTED_IO_ERROR;
     if (!Fcb || Vcb->ReadOnly)
         return STATUS_SUCCESS;
     if (Fcb->IsVolume)

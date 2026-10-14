@@ -4785,6 +4785,33 @@ end:
     return Status;
 }
 
+#ifdef __REACTOS__
+extern UNICODE_STRING registry_path;
+
+/* Test only: the "ResizeFault" DWORD of the service key makes the first allocation of the next grow
+ * of a device (its free space range) fail, as running out of memory there would. */
+static bool resize_fault_armed(void) {
+    OBJECT_ATTRIBUTES oa;
+    UNICODE_STRING name = RTL_CONSTANT_STRING(L"ResizeFault");
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    KEY_VALUE_PARTIAL_INFORMATION* kvpi = (KEY_VALUE_PARTIAL_INFORMATION*)buf;
+    HANDLE h;
+    ULONG retlen;
+    bool armed = false;
+
+    InitializeObjectAttributes(&oa, &registry_path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&h, KEY_QUERY_VALUE, &oa)))
+        return false;
+    if (NT_SUCCESS(ZwQueryValueKey(h, &name, KeyValuePartialInformation, kvpi, sizeof(buf), &retlen)) &&
+        kvpi->Type == REG_DWORD && kvpi->DataLength == sizeof(ULONG))
+        armed = *(ULONG*)kvpi->Data != 0;
+    ZwClose(h);
+    if (armed)
+        ERR("ResizeFault armed\n");
+    return armed;
+}
+#endif
+
 static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP Irp) {
     btrfs_resize* br = (btrfs_resize*)data;
     NTSTATUS Status;
@@ -4954,6 +4981,62 @@ static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP
         delta = br->size - dev->devitem.total_bytes;
 
         old_size = dev->devitem.total_bytes;
+
+#ifdef __REACTOS__
+        /*
+         * Everything that can fail comes before the first change, so that a failed grow leaves
+         * nothing behind for the next commit: the device item is found and the new free range
+         * (from where the device used to end) is added before the item is rewritten in place.
+         */
+        {
+            struct btrfs_key searchkey;
+            traverse_ptr tp;
+            tree* t;
+
+            searchkey.objectid = 1;
+            searchkey.type = BTRFS_DEV_ITEM_KEY;
+            searchkey.offset = dev->devitem.devid;
+
+            Status = find_item(Vcb, Vcb->chunk_root, &tp, &searchkey, false, Irp);
+            if (!NT_SUCCESS(Status)) {
+                ERR("find_item returned %08lx\n", Status);
+                goto end;
+            }
+
+            if (keycmp(tp.item->key, searchkey) || tp.item->size < sizeof(struct btrfs_dev_item)) {
+                ERR("could not find btrfs_dev_item for device %I64x\n", dev->devitem.devid);
+                Status = STATUS_INTERNAL_ERROR;
+                goto end;
+            }
+
+            if (resize_fault_armed())
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            else
+                Status = space_list_add2(&dev->space, NULL, old_size, delta, NULL, NULL);
+            if (!NT_SUCCESS(Status)) {
+                ERR("space_list_add2 returned %08lx\n", Status);
+                goto end;
+            }
+
+            dev->devitem.total_bytes = br->size;
+            RtlCopyMemory(tp.item->data, &dev->devitem, sizeof(struct btrfs_dev_item));
+
+            if (!tp.tree->write) {
+                tp.tree->write = true;
+                Vcb->need_write = true;
+            }
+
+            for (t = tp.tree; t; t = t->parent) {
+                if (t->paritem && t->paritem->ignore) {
+                    t->paritem->ignore = false;
+                    t->parent->header.nritems++;
+                    t->parent->size += sizeof(struct btrfs_key_ptr);
+                }
+
+                t->header.generation = Vcb->superblock.generation;
+            }
+        }
+#else
         dev->devitem.total_bytes = br->size;
 
         Status = update_dev_item(Vcb, dev, Irp);
@@ -4963,12 +5046,14 @@ static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP
             goto end;
         }
 
-        Status = space_list_add2(&dev->space, NULL, dev->devitem.total_bytes,
+        /* The new space starts where the device used to end. */
+        Status = space_list_add2(&dev->space, NULL, old_size,
                                  delta, NULL, NULL);
         if (!NT_SUCCESS(Status)) {
             dev->devitem.total_bytes = old_size;
             goto end;
         }
+#endif
 
         Vcb->superblock.total_bytes += delta;
     }

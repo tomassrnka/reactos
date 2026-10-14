@@ -68,6 +68,12 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 int kshim_jnl_retire(struct block_device *b);
 int kshim_jnl_retire_pending(struct block_device *b);
 int kshim_jnl_failed(struct block_device *b);	/* a write could not be protected: all writes refused */
+/* The disk may hold metadata no commit covers: no journal, or it wrote in place or stopped. */
+int kshim_jnl_in_place(struct block_device *b);
+/* While on (a resize), a commit or overlay write that would go in place fails instead. */
+void kshim_jnl_strict(struct block_device *b, int on);
+/* During a resize, the journal refused a write fallback: the write errors that follow are refusals. */
+int kshim_jnl_refusing(struct block_device *b);
 int kshim_jnl_errors_pending(struct block_device *b);	/* errors known, not yet on the medium */
 void kshim_jnl_deactivate(struct block_device *b);
 int kshim_jnl_commit(struct block_device *b);	/* 1 committed (device flushed), 0 nothing to do, <0 error */
@@ -78,6 +84,12 @@ unsigned long kshim_jnl_pending(struct block_device *b);
 void kshim_jnl_report(struct block_device *b);
 /* Test only: nonzero stops the machine half way through writing that commit in place. */
 extern unsigned long kshim_jnl_fault;
+/* Test only, for this volume: the in-place pass of its next commit fails half way, as a failing device
+ * would (KJ_FAULT_APPLY), or no overlay page can be allocated until the resize ends (KJ_FAULT_CAPTURE). */
+enum { KJ_FAULT_APPLY = 1, KJ_FAULT_CAPTURE = 2 };
+void kshim_jnl_arm_fault(struct block_device *b, int kind);
+/* The overlay failed and metadata goes in place until a commit's in-place pass succeeds. */
+int kshim_jnl_degraded(struct block_device *b);
 
 /* Used by kshim_dev_rw. */
 int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len);
