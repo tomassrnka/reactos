@@ -363,4 +363,15 @@ typedef struct _FONT_ATTR
 } FONT_ATTR, *PFONT_ATTR;
 
 
+/* Typed GDI handles are zero-extended. Untyped message integers can carry
+ * other upper bits. Keep the native definitions and declaration lines intact. */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+#define GDI_HANDLE_GET_UNIQUE(h) ((USHORT)((ULONG_PTR)(h) >> 16))
+#undef GDI_HANDLE_GET_REUSECNT
+#define GDI_HANDLE_GET_REUSECNT(h) \
+    ((((ULONG_PTR)(h)) & GDI_HANDLE_REUSE_MASK) >> GDI_HANDLE_REUSECNT_SHIFT)
+#else
+#define GDI_HANDLE_GET_UNIQUE(h) ((ULONG_PTR)(h) >> 16)
+#endif
+
 #endif
