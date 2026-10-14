@@ -25,6 +25,24 @@
 #define DM_VOLUME_POLL_MS   250
 #define DM_MAX_MOUNT_PATHS  64
 
+#ifndef FSCTL_SHRINK_VOLUME
+#define FSCTL_SHRINK_VOLUME CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 108, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+#endif
+#ifndef FSCTL_EXTEND_VOLUME
+#define FSCTL_EXTEND_VOLUME CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 60, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+
+typedef struct _DM_SHRINK_INFO
+{
+    ULONG RequestType;          /* 1 prepare, 2 commit, 3 abort */
+    ULONGLONG Flags;
+    LONGLONG NewNumberOfSectors;
+} DM_SHRINK_INFO;
+
+#define DM_SHRINK_PREPARE   1
+#define DM_SHRINK_COMMIT    2
+#define DM_SHRINK_ABORT     3
+
 typedef BOOLEAN (NTAPI *DM_FMIFS_CALLBACK)(ULONG Command, ULONG SubAction, PVOID ActionInfo);
 typedef BOOLEAN (NTAPI *DM_QUERY_FS_FN)(DWORD Index, PWCHAR FileSystem, UCHAR *Major, UCHAR *Minor, BOOLEAN *Latest);
 typedef VOID (NTAPI *DM_FORMATEX_FN)(PWCHAR DriveRoot, ULONG MediaFlag, PWCHAR Format, PWCHAR Label, BOOLEAN Quick,
@@ -1252,5 +1270,395 @@ DmMarkActive(ULONG Disk, ULONGLONG Offset)
     if (Error == ERROR_SUCCESS)
         Error = DmWriteDiskLayout(Disk, Layout);
     HeapFree(GetProcessHeap(), 0, Layout);
+    return Error;
+}
+
+/* ------------------------------------------------------------- growing and shrinking */
+
+static BOOL
+DmDriverSaysNo(DWORD Error)
+{
+    return Error == ERROR_INVALID_FUNCTION || Error == ERROR_CALL_NOT_IMPLEMENTED || Error == ERROR_NOT_SUPPORTED;
+}
+
+static HANDLE
+DmOpenVolumeHandle(PCWSTR VolumeGuid, DWORD Access)
+{
+    WCHAR Device[MAX_PATH];
+
+    if (!DmTrimGuid(VolumeGuid, Device, ARRAYSIZE(Device)))
+        return INVALID_HANDLE_VALUE;
+    return CreateFileW(Device, Access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+}
+
+/* A grow of nothing: a driver that has no such request answers with "not supported"; any other answer means it has. */
+DWORD
+DmProbeExtend(ULONG Disk, PCWSTR VolumeGuid)
+{
+    DISK_GROW_PARTITION Grow;
+    HANDLE Handle;
+    DWORD Error, Number = 0, Returned;
+    LONGLONG Sectors = 0;
+    PDL_LAYOUT Layout;
+    ULONG i;
+    union { VOLUME_DISK_EXTENTS Extents; BYTE Raw[512]; } Buffer;
+
+    /* partition number of the volume */
+    Handle = DmOpenVolumeHandle(VolumeGuid, 0);
+    if (Handle == INVALID_HANDLE_VALUE)
+        return GetLastError();
+    ZeroMemory(&Buffer, sizeof(Buffer));
+    if (DmIoctl(Handle, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, NULL, 0, &Buffer, sizeof(Buffer), &Returned) &&
+        Buffer.Extents.NumberOfDiskExtents == 1)
+    {
+        Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+        if (Layout && DmReadDiskLayout(Disk, Layout) == ERROR_SUCCESS)
+        {
+            for (i = 0; i < Layout->Count; i++)
+                if (Layout->Entry[i].Offset == (ULONGLONG)Buffer.Extents.Extents[0].StartingOffset.QuadPart)
+                    Number = Layout->Entry[i].Number;
+        }
+        if (Layout)
+            HeapFree(GetProcessHeap(), 0, Layout);
+    }
+    CloseHandle(Handle);
+    if (Number == 0)
+        return DM_ERR_NOT_SUPPORTED;
+
+    Handle = DmOpenDiskHandle(Disk, GENERIC_READ | GENERIC_WRITE);
+    if (Handle == INVALID_HANDLE_VALUE)
+        return GetLastError();
+    ZeroMemory(&Grow, sizeof(Grow));
+    Grow.PartitionNumber = Number;
+    Grow.BytesToGrow.QuadPart = 0;
+    Error = DmIoctl(Handle, IOCTL_DISK_GROW_PARTITION, &Grow, sizeof(Grow), NULL, 0, &Returned) ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(Handle);
+    if (DmDriverSaysNo(Error))
+        return DM_ERR_NOT_SUPPORTED;
+
+    Handle = DmOpenVolumeHandle(VolumeGuid, GENERIC_READ | GENERIC_WRITE);
+    if (Handle == INVALID_HANDLE_VALUE)
+        return GetLastError();
+    Error = DmIoctl(Handle, FSCTL_EXTEND_VOLUME, &Sectors, sizeof(Sectors), NULL, 0, &Returned) ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(Handle);
+    return DmDriverSaysNo(Error) ? DM_ERR_NOT_SUPPORTED : ERROR_SUCCESS;
+}
+
+DWORD
+DmProbeShrink(PCWSTR VolumeGuid)
+{
+    DM_SHRINK_INFO Info;
+    HANDLE Handle = DmOpenVolumeHandle(VolumeGuid, GENERIC_READ | GENERIC_WRITE);
+    DWORD Error, Returned;
+
+    if (Handle == INVALID_HANDLE_VALUE)
+        return GetLastError();
+    /* an abort when nothing was prepared changes nothing */
+    ZeroMemory(&Info, sizeof(Info));
+    Info.RequestType = DM_SHRINK_ABORT;
+    Error = DmIoctl(Handle, FSCTL_SHRINK_VOLUME, &Info, sizeof(Info), NULL, 0, &Returned) ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(Handle);
+    return DmDriverSaysNo(Error) ? DM_ERR_NOT_SUPPORTED : ERROR_SUCCESS;
+}
+
+DWORD
+DmQueryExtend(ULONG Disk, ULONGLONG Offset, PULONGLONG MaxBytes)
+{
+    PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    DWORD Error;
+
+    *MaxBytes = 0;
+    if (Layout == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Error = DmReadDiskLayout(Disk, Layout);
+    if (Error == ERROR_SUCCESS)
+        *MaxBytes = DlMaxGrow(Layout, Offset);
+    HeapFree(GetProcessHeap(), 0, Layout);
+    return Error;
+}
+
+/* The partition and the volume the user looked at must still be the ones on the disk: the volume sits at that offset of that
+ * disk, and the partition has the length it had. */
+static DWORD
+DmCheckTarget(PDL_LAYOUT Layout, ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid, PDL_ENTRY *Entry)
+{
+    *Entry = DlFindEntry(Layout, Offset);
+    if (*Entry == NULL)
+        return DM_ERR_LAYOUT_BASE + DL_E_NOT_FOUND;
+    if ((*Entry)->Length != Length || (*Entry)->Container || !DmVolumeOnDisk(VolumeGuid, Disk, Offset))
+        return DM_ERR_CHANGED;
+    return ERROR_SUCCESS;
+}
+
+DWORD
+DmExtendVolume(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid, ULONGLONG AddBytes)
+{
+    PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    DISK_GROW_PARTITION Grow;
+    PDL_ENTRY Entry;
+    HANDLE Disk_, Volume = INVALID_HANDLE_VALUE;
+    DWORD Error, Returned;
+    LONGLONG Sectors;
+    ULONGLONG NewLength;
+
+    if (Layout == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Error = DmReadDiskLayout(Disk, Layout);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+    Error = DmCheckTarget(Layout, Disk, Offset, Length, VolumeGuid, &Entry);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+    if (AddBytes == 0 || (AddBytes % DL_ALIGN) != 0 || AddBytes > DlMaxGrow(Layout, Offset))
+    {
+        Error = DM_ERR_LAYOUT_BASE + DL_E_NO_SPACE;
+        goto Done;
+    }
+    NewLength = Entry->Length + AddBytes;
+
+    /* the volume is opened first: a volume that cannot be opened must not get a partition that is larger than its file system */
+    Volume = DmOpenVolumeHandle(VolumeGuid, GENERIC_READ | GENERIC_WRITE);
+    if (Volume == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError();
+        goto Done;
+    }
+    Disk_ = DmOpenDiskHandle(Disk, GENERIC_READ | GENERIC_WRITE);
+    if (Disk_ == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError();
+        goto Done;
+    }
+    ZeroMemory(&Grow, sizeof(Grow));
+    Grow.PartitionNumber = Entry->Number;
+    Grow.BytesToGrow.QuadPart = (LONGLONG)AddBytes;
+    if (!DmIoctl(Disk_, IOCTL_DISK_GROW_PARTITION, &Grow, sizeof(Grow), NULL, 0, &Returned))
+        Error = DmDriverSaysNo(GetLastError()) ? DM_ERR_NOT_SUPPORTED : GetLastError();
+    CloseHandle(Disk_);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+
+    /* the number of sectors the volume has afterwards */
+    Sectors = (LONGLONG)(NewLength / Layout->SectorSize);
+    if (!DmIoctl(Volume, FSCTL_EXTEND_VOLUME, &Sectors, sizeof(Sectors), NULL, 0, &Returned))
+    {
+        /* the partition is larger now and the file system is not, whatever the reason: say that, so that it is not taken
+         * for nothing done */
+        Error = DM_ERR_EXTEND_PARTIAL;
+    }
+Done:
+    if (Volume != INVALID_HANDLE_VALUE)
+        CloseHandle(Volume);
+    HeapFree(GetProcessHeap(), 0, Layout);
+    return Error;
+}
+
+/* The space at the end of the volume that no cluster uses, read from the volume bitmap. */
+DWORD
+DmQueryShrink(ULONG Disk, ULONGLONG Offset, PCWSTR VolumeGuid, PULONGLONG TotalBytes, PULONGLONG MaxBytes)
+{
+    PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    HANDLE Handle;
+    STARTING_LCN_INPUT_BUFFER Start;
+    PVOLUME_BITMAP_BUFFER Bitmap;
+    DWORD Error = ERROR_SUCCESS, Returned, Sectors, Bytes, Free, Total, BufferSize = 1024 * 1024;
+    PDL_ENTRY Entry;
+    ULONGLONG ClusterBytes, LastUsed = 0, Next = 0, VolumeClusters = 0, i;
+    BOOL More;
+
+    *TotalBytes = *MaxBytes = 0;
+    if (Layout == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Error = DmReadDiskLayout(Disk, Layout);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+    Entry = DlFindEntry(Layout, Offset);
+    if (Entry == NULL)
+    {
+        Error = DM_ERR_LAYOUT_BASE + DL_E_NOT_FOUND;
+        goto Done;
+    }
+    *TotalBytes = Entry->Length;
+    if (!GetDiskFreeSpaceW(VolumeGuid, &Sectors, &Bytes, &Free, &Total))
+    {
+        Error = GetLastError();
+        goto Done;
+    }
+    ClusterBytes = (ULONGLONG)Sectors * Bytes;
+    {
+        /* the number of clusters of the volume, from its size: the answer of the bitmap request names only its own piece */
+        ULARGE_INTEGER Avail, TotalBytes, FreeBytes;
+
+        if (!ClusterBytes || !GetDiskFreeSpaceExW(VolumeGuid, &Avail, &TotalBytes, &FreeBytes))
+        {
+            Error = GetLastError() ? GetLastError() : ERROR_INVALID_PARAMETER;
+            goto Done;
+        }
+        VolumeClusters = TotalBytes.QuadPart / ClusterBytes;
+    }
+    Handle = DmOpenVolumeHandle(VolumeGuid, GENERIC_READ);
+    if (Handle == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError();
+        goto Done;
+    }
+    Bitmap = HeapAlloc(GetProcessHeap(), 0, BufferSize);
+    if (Bitmap == NULL)
+    {
+        CloseHandle(Handle);
+        Error = ERROR_NOT_ENOUGH_MEMORY;
+        goto Done;
+    }
+    /* the bitmap of a large volume comes in pieces: each answer says where it starts and how much of the volume is left */
+    do
+    {
+        ULONGLONG PieceStart, PieceClusters, Seen;
+        DWORD Last;
+
+        More = FALSE;
+        Start.StartingLcn.QuadPart = (LONGLONG)Next;
+        if (!DmIoctl(Handle, FSCTL_GET_VOLUME_BITMAP, &Start, sizeof(Start), Bitmap, BufferSize, &Returned))
+        {
+            Last = GetLastError();
+            if (Last != ERROR_MORE_DATA)
+            {
+                Error = DmDriverSaysNo(Last) ? DM_ERR_NOT_SUPPORTED : Last;
+                break;
+            }
+            More = TRUE;
+        }
+        if (Returned < FIELD_OFFSET(VOLUME_BITMAP_BUFFER, Buffer))
+        {
+            Error = ERROR_BAD_LENGTH;
+            break;
+        }
+        PieceStart = (ULONGLONG)Bitmap->StartingLcn.QuadPart;
+        PieceClusters = (ULONGLONG)Bitmap->BitmapSize.QuadPart;
+        Seen = (ULONGLONG)(Returned - FIELD_OFFSET(VOLUME_BITMAP_BUFFER, Buffer)) * 8;
+        if (Seen > PieceClusters)
+            Seen = PieceClusters;
+        /* every piece must move the cursor on, or the read would never end */
+        if (PieceStart > Next || PieceStart + Seen <= Next)
+        {
+            Error = ERROR_BAD_LENGTH;
+            break;
+        }
+        for (i = 0; i < Seen; i++)
+            if (Bitmap->Buffer[i / 8] & (1 << (i % 8)))
+                LastUsed = PieceStart + i + 1;
+        Next = PieceStart + Seen;
+    } while (More);
+
+    if (Error == ERROR_SUCCESS)
+    {
+        /* what could not be read counts as in use */
+        if (Next < VolumeClusters)
+            LastUsed = VolumeClusters;
+        if (LastUsed * ClusterBytes < Entry->Length)
+            *MaxBytes = DlAlignDown(Entry->Length - LastUsed * ClusterBytes);
+    }
+    HeapFree(GetProcessHeap(), 0, Bitmap);
+    CloseHandle(Handle);
+Done:
+    HeapFree(GetProcessHeap(), 0, Layout);
+    return Error;
+}
+
+DWORD
+DmShrinkVolume(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid, ULONGLONG ShrinkBytes)
+{
+    PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    PDL_LAYOUT Planned = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    DM_SHRINK_INFO Info;
+    PDL_ENTRY Entry;
+    HANDLE Handle;
+    DWORD Error, Returned;
+    ULONGLONG NewLength;
+
+    if (Layout == NULL || Planned == NULL)
+    {
+        Error = ERROR_NOT_ENOUGH_MEMORY;
+        goto Done;
+    }
+    Error = DmReadDiskLayout(Disk, Layout);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+    Error = DmCheckTarget(Layout, Disk, Offset, Length, VolumeGuid, &Entry);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+    if (ShrinkBytes == 0 || (ShrinkBytes % DL_ALIGN) != 0 || ShrinkBytes >= Entry->Length)
+    {
+        Error = DM_ERR_LAYOUT_BASE + DL_E_BAD_ARGUMENT;
+        goto Done;
+    }
+    NewLength = Entry->Length - ShrinkBytes;
+    /* the table that follows is planned first: a request the table cannot take must not shrink the file system */
+    memcpy(Planned, Layout, sizeof(DL_LAYOUT));
+    Error = DmFromLayout(DlResize(Planned, Offset, NewLength));
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+
+    /* the file system gives up the space first; the table follows */
+    Handle = DmOpenVolumeHandle(VolumeGuid, GENERIC_READ | GENERIC_WRITE);
+    if (Handle == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError();
+        goto Done;
+    }
+    /* data that is still in the cache must be on the disk before the file system moves or the table is written again */
+    if (!FlushFileBuffers(Handle))
+    {
+        Error = GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
+        CloseHandle(Handle);
+        goto Done;
+    }
+    ZeroMemory(&Info, sizeof(Info));
+    Info.RequestType = DM_SHRINK_PREPARE;
+    Info.NewNumberOfSectors = (LONGLONG)(NewLength / Layout->SectorSize);
+    if (!DmIoctl(Handle, FSCTL_SHRINK_VOLUME, &Info, sizeof(Info), NULL, 0, &Returned))
+    {
+        Error = DmDriverSaysNo(GetLastError()) ? DM_ERR_NOT_SUPPORTED : GetLastError();
+    }
+    else
+    {
+        /* commit and abort carry no size: a size in them is refused as a bad parameter (measured on Windows) */
+        Info.NewNumberOfSectors = 0;
+        Info.RequestType = DM_SHRINK_COMMIT;
+        if (!DmIoctl(Handle, FSCTL_SHRINK_VOLUME, &Info, sizeof(Info), NULL, 0, &Returned))
+        {
+            Error = GetLastError();
+            Info.RequestType = DM_SHRINK_ABORT;
+            DmIoctl(Handle, FSCTL_SHRINK_VOLUME, &Info, sizeof(Info), NULL, 0, &Returned);
+        }
+        else if (!FlushFileBuffers(Handle))
+        {
+            /* the file system is smaller and not yet on the disk: the partition keeps its size, which is safe */
+            Error = DM_ERR_SHRINK_PARTIAL;
+        }
+    }
+    CloseHandle(Handle);
+    if (Error != ERROR_SUCCESS)
+        goto Done;
+    /* The table is read again and the change is made on what the disk holds now, so that a change another program made to
+     * other partitions meanwhile is not written over; if this partition changed, nothing is written. */
+    Error = DmReadDiskLayout(Disk, Planned);
+    if (Error == ERROR_SUCCESS)
+    {
+        PDL_ENTRY Now = DlFindEntry(Planned, Offset);
+
+        if (Now == NULL || Now->Length != Length)
+            Error = DM_ERR_CHANGED;
+        else
+            Error = DmFromLayout(DlResize(Planned, Offset, NewLength));
+    }
+    if (Error == ERROR_SUCCESS)
+        Error = DmWriteDiskLayout(Disk, Planned);
+    if (Error != ERROR_SUCCESS)
+        Error = DM_ERR_SHRINK_PARTIAL;      /* the file system is smaller and the partition is not */
+Done:
+    if (Layout)
+        HeapFree(GetProcessHeap(), 0, Layout);
+    if (Planned)
+        HeapFree(GetProcessHeap(), 0, Planned);
     return Error;
 }
