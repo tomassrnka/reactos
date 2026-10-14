@@ -369,7 +369,9 @@ static void TestNtfsShrink(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX 
  * in the ResizeFault DWORD of the Ntfs service key): a resize that fails half way (an extend, or for
  * stage 3 a shrink) leaves the volume read-only for every caller, cached writes included, and a flush
  * of data written before it fails.  What the disk holds is the last state that reached it whole, so
- * the volume mounts again read-write, with the data written before the resize.
+ * the volume mounts again read-write, with the data written before the resize.  Stage 5 (a degraded
+ * journal) refuses the extend before anything changes; stage 7 fails the boot-sector commit of an
+ * extend that ends half way into a page.
  */
 static void TestNtfsFault(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part, ULONG Fault)
 {
@@ -388,7 +390,7 @@ static void TestNtfsFault(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATION_EX 
     }
     /* Data in the cache only when the resize fails. */
     Dirty = WritePattern("dirty.bin", 1 * MiB);
-    if (!NtfsData(*Volume, &Data) || Grow(Disk, Part->PartitionNumber, 32 * MiB) != ERROR_SUCCESS)
+    if (!NtfsData(*Volume, &Data) || Grow(Disk, Part->PartitionNumber, 32 * MiB + (Fault == 7 ? 512 : 0)) != ERROR_SUCCESS)
     {
         ok(FALSE, "IOCTL_DISK_GROW_PARTITION failed: %lu\n", GetLastError());
         CloseHandle(Dirty);
@@ -407,6 +409,23 @@ static void TestNtfsFault(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATION_EX 
     {
         Error = Extend(*Volume, Part->PartitionLength.QuadPart / 512, 0);
         ok(Error != ERROR_SUCCESS, "The armed extend succeeded\n");
+    }
+    if (Fault == 5)
+    {
+        /* Refused before any change: the volume keeps its size and stays writable. */
+        NTFS_VOLUME_DATA_BUFFER After;
+        NtfsData(*Volume, &After);
+        ok(After.NumberSectors.QuadPart == Data.NumberSectors.QuadPart, "NumberSectors %I64d, was %I64d\n",
+           After.NumberSectors.QuadPart, Data.NumberSectors.QuadPart);
+        ok(FlushFileBuffers(Dirty), "A flush after the refused extend failed: %lu\n", GetLastError());
+        CloseHandle(Dirty);
+        File = WritePattern("after.bin", 1 * MiB);
+        if (File != INVALID_HANDLE_VALUE)
+        {
+            ok(FlushFileBuffers(File), "A flush after the refused extend failed: %lu\n", GetLastError());
+            CloseHandle(File);
+        }
+        return;
     }
 
     /* The cached data can no longer reach the disk: its flush fails. */

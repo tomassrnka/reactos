@@ -380,6 +380,11 @@ START_TEST(GrowPartition)
     }
     CloseHandle(Disk);
 
+    /* A handle to the whole disk flushes the disk's write cache (the FAT provider's offline growth relies on it). */
+    Disk = OpenDisk(GENERIC_READ | GENERIC_WRITE);
+    ok(FlushFileBuffers(Disk), "Flushing disk %lu failed: %lu\n", DiskNumber, GetLastError());
+    CloseHandle(Disk);
+
     TestMbrPrimary();
     TestMbrLogical();
     TestGpt();
