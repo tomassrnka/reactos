@@ -41,6 +41,7 @@ extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetVolumeInformation(void);
+extern void func_HeapWalk(void);
 extern void func_IdleProcessor(void);
 extern void func_InitOnce(void);
 extern void func_interlck(void);
@@ -132,6 +133,7 @@ const struct test winetest_testlist[] =
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
     { "GetVolumeInformation",        func_GetVolumeInformation },
+    { "HeapWalk",                    func_HeapWalk },
     { "IdleProcessor",               func_IdleProcessor },
     { "InitOnce",                    func_InitOnce },
     { "interlck",                    func_interlck },
