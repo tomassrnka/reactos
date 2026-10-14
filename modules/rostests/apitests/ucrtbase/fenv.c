@@ -10,6 +10,7 @@
 #include <fenv.h>
 #include <float.h>
 #include <math.h>
+#include <xmmintrin.h>
 
 int __cdecl __fpe_flt_rounds(void);
 
@@ -61,9 +62,6 @@ static unsigned short get_x87_sw(void)
     return value;
 }
 #endif /* _M_IX86 */
-
-#endif /* x86 */
-
 
 /* The words of an fenv_t: the shared low bits and a high byte for each unit, the x87 one only on i386 */
 #ifdef _M_IX86
@@ -243,6 +241,20 @@ static void test_fesetenv(void)
     fegetenv(&cur);
     ok(cur._Fe_ctl == FE_DFL_ENV->_Fe_ctl, "_Fe_ctl = %lx\n", cur._Fe_ctl);
 
+#ifdef _M_IX86
+    /* both precisions at once, and rounding bits in the status, are not an environment that fegetenv makes */
+    env._Fe_ctl = 0x3f3f303fUL;
+    env._Fe_stat = 0;
+    ret = fesetenv(&env);
+    ok(ret == 1, "fesetenv with two precisions returned %d\n", ret);
+    fesetenv(&saved_env);
+    env._Fe_ctl = FE_DFL_ENV->_Fe_ctl;
+    env._Fe_stat = 0x80000200UL;
+    ret = fesetenv(&env);
+    ok(ret == 1, "fesetenv with rounding bits in the status returned %d\n", ret);
+    fesetenv(&saved_env);
+#endif
+
 #ifdef _M_AMD64
     /* the x87 unit has no place in the environment of this architecture */
     env._Fe_ctl = 0x3f3f103fUL;
@@ -365,10 +377,13 @@ START_TEST(fenv)
 {
     fenv_t env;
 
-#if !defined(_M_IX86) && !defined(_M_AMD64)
-    skip("The floating-point environment is only known on x86\n");
-    return;
-#else
+#ifdef _M_IX86
+    if (!IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE))
+    {
+        skip("SSE2 is not available\n");
+        return;
+    }
+#endif
     fegetenv(&env);
     test_default_env();
     test_rounding();
@@ -378,5 +393,13 @@ START_TEST(fenv)
     test_feholdexcept();
     test_fpreset();
     fesetenv(&env);
-#endif
 }
+
+#else /* x86 */
+
+START_TEST(fenv)
+{
+    skip("The floating-point environment is only known on x86\n");
+}
+
+#endif /* x86 */

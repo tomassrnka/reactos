@@ -10,6 +10,7 @@
 #include <float.h>
 #include <fenv.h>
 #include <math.h>
+#include <xmmintrin.h>
 
 #if defined(_M_IX86) || defined(_M_AMD64) || defined(_M_X64)
 
@@ -140,14 +141,16 @@ typedef struct _X87_ENV
     unsigned short data_segment, unused5;
 } X87_ENV;
 
+/* The forms that do not wait: an unmasked exception that is pending must not be raised by reading the words
+   that are needed to clear it */
 static unsigned short x87_get_cw(void)
 {
     unsigned short value;
 
 #ifdef __GNUC__
-    __asm__ __volatile__("fstcw %0" : "=m"(value));
+    __asm__ __volatile__("fnstcw %0" : "=m"(value));
 #else
-    __asm fstcw [value];
+    __asm fnstcw [value];
 #endif
     return value;
 }
@@ -157,9 +160,9 @@ static unsigned short x87_get_sw(void)
     unsigned short value;
 
 #ifdef __GNUC__
-    __asm__ __volatile__("fstsw %0" : "=m"(value));
+    __asm__ __volatile__("fnstsw %0" : "=m"(value));
 #else
-    __asm fstsw [value];
+    __asm fnstsw [value];
 #endif
     return value;
 }
@@ -517,6 +520,8 @@ int __cdecl fesetenv(const fenv_t *env)
 
     valid = fenv_decode(env->_Fe_ctl, &x87_cw, &cw);
     valid &= fenv_decode(env->_Fe_stat, &x87_stat, &stat);
+    /* a status holds no more than exception flags, and the precision of the x87 unit is one of three */
+    valid &= !((x87_stat | stat) & ~_MCW_EM) && (x87_cw & _MCW_PC) != _MCW_PC;
 
 #ifdef _M_IX86
     _setfp(&x87_cw, ~0, &x87_stat, ~0);
@@ -573,7 +578,8 @@ int __cdecl fegetexceptflag(fexcept_t *status, int excepts)
 /* Windows does not enter the non-stop mode, it fails and changes nothing while any exception is unmasked */
 int __cdecl feholdexcept(fenv_t *env)
 {
-    unsigned long masks = fenv_encode(FE_ALL_EXCEPT, FE_ALL_EXCEPT);
+    /* only the units that are present have masks in the environment */
+    unsigned long masks = fenv_encode(FE_ALL_EXCEPT, sse2_supported() ? FE_ALL_EXCEPT : 0);
 
     fegetenv(env);
     if ((env->_Fe_ctl & masks) != masks)
