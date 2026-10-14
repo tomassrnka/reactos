@@ -110,6 +110,18 @@ static DWORD DebugProcess(PROCESS_INFORMATION *Process)
             printf("DEBUG EXCEPTION code=%lx address=%p first=%lu info=%Ix,%Ix\n",
                    Record->ExceptionCode, Record->ExceptionAddress, Event.u.Exception.dwFirstChance,
                    Record->ExceptionInformation[0], Record->ExceptionInformation[1]);
+            if (Record->ExceptionCode == 0x80000100 && Record->NumberParameters == 2)
+            {
+                CHAR Name[2][128] = {{0}};
+                SIZE_T Read;
+                unsigned Field, Byte;
+                for (Field = 0; Field < 2; ++Field)
+                    for (Byte = 0; Byte < sizeof(Name[Field]) - 1; ++Byte)
+                        if (!ReadProcessMemory(Process->hProcess,
+                            (PBYTE)(ULONG_PTR)Record->ExceptionInformation[Field] + Byte,
+                            &Name[Field][Byte], 1, &Read) || Read != 1 || !Name[Field][Byte]) break;
+                printf("DEBUG STUB module=%s function=%s\n", Name[0], Name[1]);
+            }
 #ifdef _WIN64
             if (Thread && GetThreadContext(Thread, &Context))
                 printf("DEBUG CONTEXT tid=%lu cs=%x gs=%x fs=%x ip=%p sp=%p ax=%Ix\n",

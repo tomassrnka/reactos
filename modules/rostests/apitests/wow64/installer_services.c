@@ -48,6 +48,51 @@ static void CheckVolumeQuery(const WCHAR *NtPath)
     CloseHandle(Device);
 }
 
+static void CheckVolumeByHandle(void)
+{
+    typedef BOOL (WINAPI *VOLUME)(HANDLE, PWSTR, DWORD, PDWORD, PDWORD, PDWORD, PWSTR, DWORD);
+    VOLUME Query = (VOLUME)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetVolumeInformationByHandleW");
+    WCHAR Path[MAX_PATH], Root[4], Label[MAX_PATH], FileSystem[MAX_PATH];
+    struct { WCHAR Text[MAX_PATH]; ULONG Guard; } OutLabel, OutSystem;
+    DWORD Serial, Maximum, Flags, OutSerial, OutMaximum, OutFlags;
+    HANDLE File;
+    CHECK(Query != NULL);
+    if (!Query) return;
+    CHECK(GetModuleFileNameW(NULL, Path, MAX_PATH));
+    memcpy(Root, Path, 3 * sizeof(WCHAR)); Root[3] = 0;
+    CHECK(GetVolumeInformationW(Root, Label, MAX_PATH, &Serial, &Maximum, &Flags, FileSystem, MAX_PATH));
+    File = CreateFileW(Path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(File != INVALID_HANDLE_VALUE);
+    if (File == INVALID_HANDLE_VALUE) return;
+    OutLabel.Guard = OutSystem.Guard = 0x12345678;
+    CHECK(Query(File, OutLabel.Text, MAX_PATH, &OutSerial, &OutMaximum, &OutFlags, OutSystem.Text, MAX_PATH));
+    CHECK(!wcscmp(Label, OutLabel.Text) && !wcscmp(FileSystem, OutSystem.Text));
+    CHECK(Serial == OutSerial && Maximum == OutMaximum && Flags == OutFlags);
+    CHECK(OutLabel.Guard == 0x12345678 && OutSystem.Guard == 0x12345678);
+    CHECK(Query(File, NULL, 0, NULL, NULL, NULL, NULL, 0));
+    CHECK(Query(File, OutLabel.Text, wcslen(Label) + 1, NULL, NULL, NULL, OutSystem.Text, wcslen(FileSystem) + 1));
+    OutSystem.Text[0] = 0x5555;
+    CHECK(!Query(File, NULL, 0, NULL, NULL, NULL, OutSystem.Text, wcslen(FileSystem)) && GetLastError() == ERROR_BAD_LENGTH);
+    CHECK(OutSystem.Text[0] == 0x5555 && OutSystem.Guard == 0x12345678);
+    /* Depending on label length, either the native query overflows or the
+     * returned label cannot be terminated in the caller's empty buffer. */
+    OutLabel.Text[0] = 0x5555;
+    CHECK(!Query(File, OutLabel.Text, 0, NULL, NULL, NULL, NULL, 0));
+    CHECK(GetLastError() == ERROR_MORE_DATA || GetLastError() == ERROR_BAD_LENGTH);
+    CHECK(OutLabel.Text[0] == 0x5555 && OutLabel.Guard == 0x12345678);
+    CHECK(GetFileType(File) == FILE_TYPE_DISK);
+    CHECK(CloseHandle(File));
+    CHECK(!Query(INVALID_HANDLE_VALUE, NULL, 0, &OutSerial, NULL, NULL, NULL, 0) && GetLastError() == ERROR_INVALID_HANDLE);
+    File = CreateFileW(Root, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    CHECK(File != INVALID_HANDLE_VALUE);
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        CHECK(Query(File, NULL, 0, &OutSerial, NULL, NULL, NULL, 0) && OutSerial == Serial);
+        CloseHandle(File);
+    }
+}
+
 static void CheckObjectName(HANDLE File, const WCHAR *Path)
 {
     typedef LONG (WINAPI *QUERY)(HANDLE, ULONG, PVOID, ULONG, PULONG);
@@ -512,6 +557,7 @@ int wmain(int argc, WCHAR **argv)
     CheckRename();
     CheckPipe();
     CheckAsyncPipe();
+    CheckVolumeByHandle();
     CheckPrivileges();
     CheckObjectSecurity();
     CheckCurrentDirectory();

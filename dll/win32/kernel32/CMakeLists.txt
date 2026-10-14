@@ -93,6 +93,7 @@ list(APPEND SOURCE
     client/file/rw.c
     client/file/tape.c
     client/file/volume.c
+    client/file/volume_by_handle.c
     client/file/volumeansi.c
     wine/actctx.c
     wine/comm.c
