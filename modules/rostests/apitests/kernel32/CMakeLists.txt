@@ -11,6 +11,8 @@ list(APPEND SOURCE
     ApplicationRestart.c
     AppModel.c
     ConsoleCP.c
+    CopyFile2.c
+    CreateFile2.c
     CreateEventMutexEx.c
     CreateRemoteThreadEx.c
     CreateProcess.c
@@ -36,6 +38,7 @@ list(APPEND SOURCE
     GetEnvironmentVariable.c
     GetFileType.c
     GetFinalPathNameByHandle.c
+    GetOverlappedResultEx.c
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c

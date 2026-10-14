@@ -14,6 +14,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <k32.h>
+#include <fileapi.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -195,7 +196,7 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 
    TrailingBackslash = FALSE;
    if (NtPathU.Length >= sizeof(WCHAR) &&
-       NtPathU.Buffer[NtPathU.Length / sizeof(WCHAR) - 1])
+       NtPathU.Buffer[NtPathU.Length / sizeof(WCHAR) - 1] == L'\\')
    {
       TrailingBackslash = TRUE;
    }
@@ -373,6 +374,58 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
   }
 
   return FileHandle;
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+CreateFile2(IN LPCWSTR lpFileName,
+            IN DWORD dwDesiredAccess,
+            IN DWORD dwShareMode,
+            IN DWORD dwCreationDisposition,
+            IN LPCREATEFILE2_EXTENDED_PARAMETERS pCreateExParams OPTIONAL)
+{
+    /* What Windows takes from each of the three fields; the rest is ignored */
+    static const DWORD AttributesMask = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
+                                        FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_TEMPORARY |
+                                        FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_ENCRYPTED;
+    static const DWORD FlagsMask = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_DELETE_ON_CLOSE |
+                                   FILE_FLAG_NO_BUFFERING | FILE_FLAG_OPEN_NO_RECALL |
+                                   FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OVERLAPPED |
+                                   FILE_FLAG_POSIX_SEMANTICS | FILE_FLAG_RANDOM_ACCESS |
+                                   FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH;
+    static const DWORD SecurityMask = SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS | SECURITY_IDENTIFICATION |
+                                      SECURITY_IMPERSONATION | SECURITY_DELEGATION |
+                                      SECURITY_CONTEXT_TRACKING | SECURITY_EFFECTIVE_ONLY;
+    SECURITY_ATTRIBUTES *SecurityAttributes = NULL;
+    HANDLE TemplateFile = NULL;
+    DWORD FlagsAndAttributes = 0;
+
+    if (pCreateExParams)
+    {
+        /* A structure from a later Windows is larger and accepted */
+        if (pCreateExParams->dwSize < sizeof(*pCreateExParams))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return INVALID_HANDLE_VALUE;
+        }
+
+        SecurityAttributes = pCreateExParams->lpSecurityAttributes;
+        TemplateFile = pCreateExParams->hTemplateFile;
+        FlagsAndAttributes = (pCreateExParams->dwFileAttributes & AttributesMask) |
+                             (pCreateExParams->dwFileFlags & FlagsMask) |
+                             (pCreateExParams->dwSecurityQosFlags & SecurityMask);
+    }
+
+    return CreateFileW(lpFileName,
+                       dwDesiredAccess,
+                       dwShareMode,
+                       SecurityAttributes,
+                       dwCreationDisposition,
+                       FlagsAndAttributes,
+                       TemplateFile);
 }
 
 /*

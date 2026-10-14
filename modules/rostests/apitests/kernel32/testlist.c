@@ -12,6 +12,8 @@ extern void func_CancelIoEx(void);
 extern void func_ApplicationRestart(void);
 extern void func_AppModel(void);
 extern void func_ConsoleCP(void);
+extern void func_CopyFile2(void);
+extern void func_CreateFile2(void);
 extern void func_CreateEventMutexEx(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
@@ -37,6 +39,7 @@ extern void func_GetDriveType(void);
 extern void func_GetEnvironmentVariable(void);
 extern void func_GetFileType(void);
 extern void func_GetFinalPathNameByHandle(void);
+extern void func_GetOverlappedResultEx(void);
 extern void func_GetLocaleInfo(void);
 extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
@@ -117,6 +120,8 @@ const struct test winetest_testlist[] =
     { "ApplicationRestart",          func_ApplicationRestart },
     { "AppModel",                    func_AppModel },
     { "ConsoleCP",                   func_ConsoleCP },
+    { "CopyFile2",                   func_CopyFile2 },
+    { "CreateFile2",                 func_CreateFile2 },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
@@ -142,6 +147,7 @@ const struct test winetest_testlist[] =
     { "GetEnvironmentVariable",      func_GetEnvironmentVariable },
     { "GetFileType",                 func_GetFileType },
     { "GetFinalPathNameByHandle",    func_GetFinalPathNameByHandle },
+    { "GetOverlappedResultEx",       func_GetOverlappedResultEx },
     { "GetLocaleInfo",               func_GetLocaleInfo },
     { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },

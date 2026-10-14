@@ -61,6 +61,7 @@ list(APPEND SOURCE
     client/file/backup.c
     client/file/cnotify.c
     client/file/copy.c
+    client/file/copy2.c
     client/file/copyansi.c
     client/file/create.c
     client/file/delete.c
