@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     cmd.c
+    echoenc.c
     fc.c
     start.c
     testlist.c)

@@ -171,10 +171,10 @@ static NtQueryInformationProcessProc NtQueryInformationProcessPtr = NULL;
 static NtReadVirtualMemoryProc       NtReadVirtualMemoryPtr = NULL;
 
 /*
- * Default output file stream translation mode is UTF8, but CMD switches
- * allow to change it to either UTF16 (/U) or ANSI (/A).
+ * Default output file stream translation mode is ANSI (the code page of the console
+ * output), as in Windows, but CMD switches allow to change it to UTF16 (/U).
  */
-CON_STREAM_MODE OutputStreamMode = UTF8Text; // AnsiText;
+CON_STREAM_MODE OutputStreamMode = AnsiText;
 
 #ifdef INCLUDE_CMD_COLOR
 WORD wDefColor = 0;     /* Default color */
