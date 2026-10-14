@@ -7,6 +7,7 @@
 @ stub -private DllInstall                                                   #stdcall DllInstall(long wstr)
 @ stub -private DllRegisterServer                                            #stdcall DllRegisterServer()
 @ stub -private DllUnregisterServer                                          #stdcall DllUnregisterServer()
+@ stdcall -version=0x601+ DeriveAppContainerSidFromAppContainerName(wstr ptr)
 182 stdcall EnterCriticalPolicySection(long)
 183 stdcall ExpandEnvironmentStringsForUserA(ptr str str long)
 184 stdcall ExpandEnvironmentStringsForUserW(ptr wstr wstr long)
