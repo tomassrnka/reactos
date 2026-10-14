@@ -406,32 +406,31 @@ WsProbeOverlapped(IN LPWSAOVERLAPPED Overlapped)
 
 /*
  * A request with an overlapped structure on a socket that was not opened as overlapped is sent at once; the structure
- * is then completed here, as Windows does for it: the byte count, the event and the completion routine.
+ * is then completed here, as Windows does for it: the byte count, and the completion routine when there is one, else
+ * the event (the event is ignored when a routine is given). The context of the routine is reserved before the
+ * datagram is sent, so that the completion cannot be lost afterwards.
  */
 static
 VOID
 WsCompleteInlineSend(IN LPWSAOVERLAPPED Overlapped,
-                     IN LPWSAOVERLAPPED_COMPLETION_ROUTINE Routine,
+                     IN PWS_SENDMSG_APC Apc,
                      IN DWORD Bytes)
 {
-    PWS_SENDMSG_APC Apc;
-
     Overlapped->Internal = 0;
     Overlapped->InternalHigh = Bytes;
-    if (Overlapped->hEvent)
-        SetEvent((HANDLE)((ULONG_PTR)Overlapped->hEvent & ~(ULONG_PTR)1));
 
-    if (!Routine)
-        return;
-
-    Apc = HeapAlloc(GetProcessHeap(), 0, sizeof(*Apc));
     if (!Apc)
+    {
+        if (Overlapped->hEvent)
+            SetEvent((HANDLE)((ULONG_PTR)Overlapped->hEvent & ~(ULONG_PTR)1));
         return;
-    Apc->Routine = Routine;
+    }
+
     Apc->Overlapped = Overlapped;
     Apc->Bytes = Bytes;
+    /* The datagram is gone: a routine that cannot be queued runs here rather than never */
     if (!QueueUserAPC(WsSendMsgApc, GetCurrentThread(), (ULONG_PTR)Apc))
-        HeapFree(GetProcessHeap(), 0, Apc);
+        WsSendMsgApc((ULONG_PTR)Apc);
 }
 
 /*
@@ -470,6 +469,7 @@ WSASendMsg(IN SOCKET s,
     DWORD Sent = 0, Index;
     ULONGLONG Total = 0;
     PCHAR volatile Gathered = NULL;
+    PWS_SENDMSG_APC volatile CompletionApc = NULL;
     BOOLEAN Inline;
     DPRINT("WSASendMsg: %lx, %p, %lx\n", s, lpMsg, dwFlags);
 
@@ -625,6 +625,16 @@ WSASendMsg(IN SOCKET s,
         if (ErrorCode == NO_ERROR && lpOverlapped && !WsProbeOverlapped(lpOverlapped))
             ErrorCode = WSAEFAULT;
 
+        /* The completion of a send that is done here needs its context before anything is sent */
+        if (ErrorCode == NO_ERROR && Inline && lpCompletionRoutine)
+        {
+            CompletionApc = HeapAlloc(GetProcessHeap(), 0, sizeof(*CompletionApc));
+            if (!CompletionApc)
+                ErrorCode = WSAENOBUFS;
+            else
+                CompletionApc->Routine = lpCompletionRoutine;
+        }
+
         /* One buffer goes to the provider as it is; several are gathered */
         if (ErrorCode == NO_ERROR)
         {
@@ -716,10 +726,13 @@ WSASendMsg(IN SOCKET s,
         /* Deference the Socket Context */
         WsSockDereference(Socket);
 
+        if (Status != ERROR_SUCCESS && CompletionApc)
+            HeapFree(GetProcessHeap(), 0, CompletionApc);
+
         if (Status == ERROR_SUCCESS)
         {
             if (Inline)
-                WsCompleteInlineSend(lpOverlapped, lpCompletionRoutine, Sent);
+                WsCompleteInlineSend(lpOverlapped, CompletionApc, Sent);
 
             /* The byte count of a send that completed; the provider leaves a failed or pending one alone */
             if (lpNumberOfBytesSent)
@@ -750,6 +763,8 @@ WSASendMsg(IN SOCKET s,
             HeapFree(GetProcessHeap(), 0, Gathered);
         if (Snapshot)
             HeapFree(GetProcessHeap(), 0, Snapshot);
+        if (CompletionApc)
+            HeapFree(GetProcessHeap(), 0, CompletionApc);
         WsSockDereference(Socket);
     }
 
