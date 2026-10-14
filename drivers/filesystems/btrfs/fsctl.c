@@ -4789,7 +4789,7 @@ end:
 extern UNICODE_STRING registry_path;
 
 /* Test only: the "ResizeFault" DWORD of the service key makes the first allocation of the next grow
- * of a device fail, as running out of memory there would. */
+ * of a device (its free space range) fail, as running out of memory there would. */
 static bool resize_fault_armed(void) {
     OBJECT_ATTRIBUTES oa;
     UNICODE_STRING name = RTL_CONSTANT_STRING(L"ResizeFault");
@@ -4810,8 +4810,6 @@ static bool resize_fault_armed(void) {
         ERR("ResizeFault armed\n");
     return armed;
 }
-
-bool resize_fault_first_alloc;
 #endif
 
 static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP Irp) {
@@ -4983,15 +4981,65 @@ static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP
         delta = br->size - dev->devitem.total_bytes;
 
         old_size = dev->devitem.total_bytes;
-        dev->devitem.total_bytes = br->size;
 
 #ifdef __REACTOS__
-        resize_fault_first_alloc = resize_fault_armed();
-#endif
+        /*
+         * Everything that can fail comes before the first change, so that a failed grow leaves
+         * nothing behind for the next commit: the device item is found and the new free range
+         * (from where the device used to end) is added before the item is rewritten in place.
+         */
+        {
+            struct btrfs_key searchkey;
+            traverse_ptr tp;
+            tree* t;
+
+            searchkey.objectid = 1;
+            searchkey.type = BTRFS_DEV_ITEM_KEY;
+            searchkey.offset = dev->devitem.devid;
+
+            Status = find_item(Vcb, Vcb->chunk_root, &tp, &searchkey, false, Irp);
+            if (!NT_SUCCESS(Status)) {
+                ERR("find_item returned %08lx\n", Status);
+                goto end;
+            }
+
+            if (keycmp(tp.item->key, searchkey) || tp.item->size < sizeof(struct btrfs_dev_item)) {
+                ERR("could not find btrfs_dev_item for device %I64x\n", dev->devitem.devid);
+                Status = STATUS_INTERNAL_ERROR;
+                goto end;
+            }
+
+            if (resize_fault_armed())
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            else
+                Status = space_list_add2(&dev->space, NULL, old_size, delta, NULL, NULL);
+            if (!NT_SUCCESS(Status)) {
+                ERR("space_list_add2 returned %08lx\n", Status);
+                goto end;
+            }
+
+            dev->devitem.total_bytes = br->size;
+            RtlCopyMemory(tp.item->data, &dev->devitem, sizeof(struct btrfs_dev_item));
+
+            if (!tp.tree->write) {
+                tp.tree->write = true;
+                Vcb->need_write = true;
+            }
+
+            for (t = tp.tree; t; t = t->parent) {
+                if (t->paritem && t->paritem->ignore) {
+                    t->paritem->ignore = false;
+                    t->parent->header.nritems++;
+                    t->parent->size += sizeof(struct btrfs_key_ptr);
+                }
+
+                t->header.generation = Vcb->superblock.generation;
+            }
+        }
+#else
+        dev->devitem.total_bytes = br->size;
+
         Status = update_dev_item(Vcb, dev, Irp);
-#ifdef __REACTOS__
-        resize_fault_first_alloc = false;
-#endif
         if (!NT_SUCCESS(Status)) {
             ERR("update_dev_item returned %08lx\n", Status);
             dev->devitem.total_bytes = old_size;
@@ -5005,6 +5053,7 @@ static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP
             dev->devitem.total_bytes = old_size;
             goto end;
         }
+#endif
 
         Vcb->superblock.total_bytes += delta;
     }

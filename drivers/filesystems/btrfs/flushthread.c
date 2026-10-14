@@ -4243,14 +4243,7 @@ NTSTATUS update_dev_item(device_extension* Vcb, device* device, PIRP Irp) {
         return Status;
     }
 
-#ifdef __REACTOS__
-    {
-        extern bool resize_fault_first_alloc;   /* test only, fsctl.c */
-        di = resize_fault_first_alloc ? NULL : ExAllocatePoolWithTag(PagedPool, sizeof(struct btrfs_dev_item), ALLOC_TAG);
-    }
-#else
     di = ExAllocatePoolWithTag(PagedPool, sizeof(struct btrfs_dev_item), ALLOC_TAG);
-#endif
     if (!di) {
         ERR("out of memory\n");
         return STATUS_INSUFFICIENT_RESOURCES;
