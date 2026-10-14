@@ -13,6 +13,7 @@ typedef struct _PROP_DATA
 {
     const DM_DISK *Disk;
     const DM_REGION *Region;
+    BOOL Changed;               /* the label was changed: the window reads the disks again */
 } PROP_DATA, *PPROP_DATA;
 
 #define COLOR_USED  RGB(0, 0, 255)
@@ -180,6 +181,11 @@ VolGeneralProc(HWND hDlg, UINT Message, WPARAM wParam, LPARAM lParam)
                 SendDlgItemMessageW(hDlg, IDC_VOL_ICON, STM_SETICON, (WPARAM)Icon, 0);
 
             SetText(hDlg, IDC_VOL_NAME, Region->Label);
+            if (Disk->Device == DM_DEV_CDROM || !Region->HasFsInfo || Region->VolumeGuid[0] == 0 || Region->IsDynamic)
+                SendDlgItemMessageW(hDlg, IDC_VOL_NAME, EM_SETREADONLY, TRUE, 0);
+            else
+                SendDlgItemMessageW(hDlg, IDC_VOL_NAME, EM_LIMITTEXT,
+                                    (_wcsicmp(Region->FileSystem, L"FAT") == 0 || _wcsicmp(Region->FileSystem, L"FAT32") == 0) ? 11 : 32, 0);
             LoadStringBuffer(Disk->Device == DM_DEV_CDROM ? IDS_TYPE_CDROM :
                              Disk->Device == DM_DEV_REMOVABLE ? IDS_TYPE_REMOVABLE : IDS_TYPE_LOCAL, Text, ARRAYSIZE(Text));
             SetText(hDlg, IDC_VOL_TYPE, Text);
@@ -232,6 +238,43 @@ VolGeneralProc(HWND hDlg, UINT Message, WPARAM wParam, LPARAM lParam)
             }
             return TRUE;
         }
+
+        case WM_NOTIFY:
+            if (((NMHDR *)lParam)->code == PSN_APPLY)
+            {
+                WCHAR Label[64];
+
+                Data = (PPROP_DATA)GetWindowLongPtrW(hDlg, DWLP_USER);
+                if (!(GetWindowLongW(GetDlgItem(hDlg, IDC_VOL_NAME), GWL_STYLE) & ES_READONLY))
+                {
+                    GetDlgItemTextW(hDlg, IDC_VOL_NAME, Label, ARRAYSIZE(Label));
+                    if (wcscmp(Label, Data->Region->Label) != 0)
+                    {
+                        DWORD Error = DmSetVolumeLabel(Data->Region->VolumeGuid, Label);
+
+                        if (Error == ERROR_SUCCESS)
+                        {
+                            Data->Changed = TRUE;
+                        }
+                        else
+                        {
+                            WCHAR Format[96], Message[256], Detail[160], Title[64];
+
+                            FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, Error, 0, Detail,
+                                           ARRAYSIZE(Detail), NULL);
+                            LoadStringBuffer(IDS_PROP_LABEL_FAILED, Format, ARRAYSIZE(Format));
+                            StringCchPrintfW(Message, ARRAYSIZE(Message), Format, Detail);
+                            LoadStringBuffer(IDS_ERROR_TITLE, Title, ARRAYSIZE(Title));
+                            MessageBoxW(hDlg, Message, Title, MB_OK | MB_ICONERROR);
+                            SetWindowLongPtrW(hDlg, DWLP_MSGRESULT, PSNRET_INVALID_NOCHANGEPAGE);
+                            return TRUE;
+                        }
+                    }
+                }
+                SetWindowLongPtrW(hDlg, DWLP_MSGRESULT, PSNRET_NOERROR);
+                return TRUE;
+            }
+            return FALSE;
 
         case WM_DESTROY:
         {
@@ -532,7 +575,28 @@ DiskVolumesProc(HWND hDlg, UINT Message, WPARAM wParam, LPARAM lParam)
                     Item.mask = LVIF_PARAM;
                     Item.iItem = Sel;
                     SendMessageW(hList, LVM_GETITEMW, 0, (LPARAM)&Item);
-                    ShowRegionProperties(hDlg, Data->Disk, (const DM_REGION *)Item.lParam);
+                    if (ShowRegionProperties(hDlg, Data->Disk, (const DM_REGION *)Item.lParam))
+                    {
+                        PDM_REGION Region = (PDM_REGION)Item.lParam;
+                        WCHAR Label[64];
+
+                        Data->Changed = TRUE;
+                        /* the label may have changed: the snapshot of this list and the next Properties show what the volume holds now */
+                        if (Region->HasVolume &&
+                            GetVolumeInformationW(Region->VolumeGuid, Label, ARRAYSIZE(Label), NULL, NULL, NULL, NULL, 0))
+                        {
+                            DM_BLOCK_TEXT Block;
+                            LVITEMW Text;
+
+                            StringCchCopyW(Region->Label, ARRAYSIZE(Region->Label), Label);
+                            DmBlockText(Data->Disk, Region, &Block);
+                            ZeroMemory(&Text, sizeof(Text));
+                            Text.mask = LVIF_TEXT;
+                            Text.iItem = Sel;
+                            Text.pszText = Block.Line1;
+                            SendMessageW(hList, LVM_SETITEMTEXTW, Sel, (LPARAM)&Text);
+                        }
+                    }
                 }
                 return TRUE;
             }
@@ -583,7 +647,7 @@ InitPage(PROPSHEETPAGEW *Page, UINT Template, UINT TitleId, DLGPROC Proc, PPROP_
     Page->lParam = (LPARAM)Data;
 }
 
-VOID
+BOOL
 ShowRegionProperties(HWND hOwner, const DM_DISK *Disk, const DM_REGION *Region)
 {
     PROP_DATA Data;
@@ -592,13 +656,15 @@ ShowRegionProperties(HWND hOwner, const DM_DISK *Disk, const DM_REGION *Region)
 
     Data.Disk = Disk;
     Data.Region = Region;
+    Data.Changed = FALSE;
     InitPage(&Pages[0], IDD_VOL_GENERAL, IDS_PAGE_GENERAL, VolGeneralProc, &Data, Titles[0]);
     InitPage(&Pages[1], IDD_VOL_PARTITION, IDS_PAGE_PARTITION, VolPartitionProc, &Data, Titles[1]);
     RegionTitle(Disk, Region, Caption, ARRAYSIZE(Caption));
     RunSheet(hOwner, Caption, Pages, 2);
+    return Data.Changed;
 }
 
-VOID
+BOOL
 ShowDiskProperties(HWND hOwner, const DM_DISK *Disk)
 {
     PROP_DATA Data;
@@ -607,10 +673,12 @@ ShowDiskProperties(HWND hOwner, const DM_DISK *Disk)
 
     Data.Disk = Disk;
     Data.Region = NULL;
+    Data.Changed = FALSE;
     InitPage(&Pages[0], IDD_DISK_GENERAL, IDS_PAGE_GENERAL, DiskGeneralProc, &Data, Titles[0]);
     InitPage(&Pages[1], IDD_DISK_VOLUMES, IDS_PAGE_VOLUMES, DiskVolumesProc, &Data, Titles[1]);
     LoadStringBuffer(IDS_PROP_DISK_TITLE, Format, ARRAYSIZE(Format));
     StringCchPrintfW(Caption, ARRAYSIZE(Caption), Format,
                      Disk->DeviceName[0] ? Disk->DeviceName : Disk->BusText);
     RunSheet(hOwner, Caption, Pages, 2);
+    return Data.Changed;
 }
