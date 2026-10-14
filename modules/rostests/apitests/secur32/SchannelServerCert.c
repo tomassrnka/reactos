@@ -93,6 +93,14 @@ static const TEST_CASE TestCases[] =
     { "leaf revocation offline, end certificate checked", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT, 0, CRYPT_E_REVOCATION_OFFLINE, FALSE, FALSE },
     { "leaf revocation offline, end certificate checked, no-check ignored only", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, CRYPT_E_REVOCATION_OFFLINE, FALSE, FALSE },
     { "leaf revocation offline, end certificate checked, offline ignored", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, CONTINUE, FALSE, FALSE },
+    { "wrong host, revocation offline, chain checked", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_OTHER_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN, 0, SEC_E_WRONG_PRINCIPAL, FALSE, FALSE },
+    { "wrong host, revocation offline, end certificate checked", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_OTHER_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT, 0, SEC_E_WRONG_PRINCIPAL, FALSE, FALSE },
+    { "wrong host, revocation offline ignored, chain checked", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_OTHER_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, SEC_E_WRONG_PRINCIPAL, FALSE, FALSE },
+    { "wrong host, revocation offline ignored, end certificate checked", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_OTHER_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, SEC_E_WRONG_PRINCIPAL, FALSE, FALSE },
+    { "wrong host, revocation offline, no-check ignored only", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_OTHER_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, SEC_E_WRONG_PRINCIPAL, FALSE, FALSE },
+    { "wrong host, revocation offline, both ignored", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_OTHER_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN | SCH_CRED_IGNORE_NO_REVOCATION_CHECK | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, SEC_E_WRONG_PRINCIPAL, FALSE, FALSE },
+    { "wrong host, no revocation information", BLOB(CertLeafValid), NoCert, TEST_OTHER_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT, 0, SEC_E_WRONG_PRINCIPAL, FALSE, FALSE },
+    { "wrong host, no revocation information, check ignored", BLOB(CertLeafValid), NoCert, TEST_OTHER_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, SEC_E_WRONG_PRINCIPAL, FALSE, FALSE },
     { "explicit automatic validation: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_AUTO_CRED_VALIDATION, 0, SEC_E_CERT_EXPIRED, FALSE, FALSE },
 
     /* The caller validates: ISC_REQ_MANUAL_CRED_VALIDATION */

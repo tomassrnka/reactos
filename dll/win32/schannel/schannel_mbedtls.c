@@ -432,6 +432,9 @@ static SECURITY_STATUS schan_validate_server_chain(MBEDTLS_SESSION *s)
         status = SEC_E_CERT_WRONG_USAGE;
     else if (chain->TrustStatus.dwErrorStatus & SCHAN_FATAL_CHAIN_ERRORS)
         status = SEC_E_UNTRUSTED_ROOT;
+    /* Windows reports a name mismatch before any revocation state, so an excused revocation error cannot hide it */
+    else if (policy_status.dwError == CERT_E_CN_NO_MATCH)
+        status = SEC_E_WRONG_PRINCIPAL;
     else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_REVOKED))
         status = CRYPT_E_REVOKED;
     /* A source that was unreachable makes the whole revocation state offline, and only the offline flag may excuse it;
@@ -444,8 +447,6 @@ static SECURITY_STATUS schan_validate_server_chain(MBEDTLS_SESSION *s)
     else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_REVOCATION_STATUS_UNKNOWN) &&
              !(s->cred_flags & SCH_CRED_IGNORE_NO_REVOCATION_CHECK))
         status = CRYPT_E_NO_REVOCATION_CHECK;
-    else if (policy_status.dwError == CERT_E_CN_NO_MATCH)
-        status = SEC_E_WRONG_PRINCIPAL;
 
 done:
     if (chain)
