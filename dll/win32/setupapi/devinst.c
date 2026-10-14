@@ -3748,6 +3748,17 @@ SETUPDI_ReadSpdrpProperty(
     CONFIGRET cr;
 
     /*
+     * The address and the power data of the root device node come from a query of its capabilities, which the root
+     * enumerator of the checked kernel answers with an assertion failure (it handles no request but the one for the
+     * device relations). The root node has neither: the properties are not found, as the release kernel says.
+     */
+    if ((Property == SPDRP_ADDRESS || Property == SPDRP_DEVICE_POWER_DATA) &&
+        !_wcsnicmp(devInfo->instanceId, L"HTREE\\ROOT\\", 11))
+    {
+        return ERROR_NOT_FOUND;
+    }
+
+    /*
      * The kernel reports the size of the buffer, not of the value, for some properties: the 56 bytes of
      * CM_POWER_DATA and the DWORD of the flag and number properties. So ask for exactly that much.
      */
@@ -3884,11 +3895,14 @@ SETUPDI_GetDeviceSpdrpProperty(
                 break;
 
             case DEVPROP_TYPE_UINT32:
-                /* A value cut short (ReactOS gives one byte for the default removal policy) is a number with zeros above it */
-                if (Size > 0 && Size < sizeof(DWORD))
+                /*
+                 * A number is a four-byte REG_DWORD. The one exception is the default removal policy, which the
+                 * ReactOS kernel reports as a single byte: that is a number with zeros above it.
+                 */
+                if (Property == SPDRP_REMOVAL_POLICY_HW_DEFAULT && Size == 1)
                     Size = sizeof(DWORD);
 
-                if (Size != sizeof(DWORD))
+                if (Size != sizeof(DWORD) || RegType != REG_DWORD)
                 {
                     Error = ERROR_NOT_FOUND;
                 }
