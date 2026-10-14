@@ -19,6 +19,7 @@ extern void func_getnameinfo(void);
 extern void func_getpeername(void);
 extern void func_getservbyname(void);
 extern void func_getservbyport(void);
+extern void func_iocpskip(void);
 extern void func_ioctlsocket(void);
 extern void func_listen(void);
 extern void func_nonblocking(void);
@@ -55,6 +56,7 @@ const struct test winetest_testlist[] =
     { "getpeername", func_getpeername },
     { "getservbyname", func_getservbyname },
     { "getservbyport", func_getservbyport },
+    { "iocpskip", func_iocpskip },
     { "ioctlsocket", func_ioctlsocket },
     { "listen", func_listen },
     { "nonblocking", func_nonblocking },
