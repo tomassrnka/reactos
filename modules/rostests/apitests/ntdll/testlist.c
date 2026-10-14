@@ -99,6 +99,7 @@ extern void func_RtlAllocateHeap(void);
 extern void func_RtlBitmapApi(void);
 extern void func_RtlCaptureContext(void);
 extern void func_RtlComputePrivatizedDllName_U(void);
+extern void func_RtlConditionVariable(void);
 extern void func_RtlCopyMappedMemory(void);
 extern void func_RtlCriticalSection(void);
 extern void func_RtlDebugInformation(void);
@@ -263,6 +264,7 @@ const struct test winetest_testlist[] =
     { "RtlAllocateHeap",                func_RtlAllocateHeap },
     { "RtlBitmapApi",                   func_RtlBitmapApi },
     { "RtlComputePrivatizedDllName_U",  func_RtlComputePrivatizedDllName_U },
+    { "RtlConditionVariable",           func_RtlConditionVariable },
     { "RtlCopyMappedMemory",            func_RtlCopyMappedMemory },
     { "RtlCriticalSection",             func_RtlCriticalSection },
     { "RtlDebugInformation",            func_RtlDebugInformation },
