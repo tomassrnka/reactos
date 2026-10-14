@@ -34,6 +34,7 @@ list(APPEND SOURCE
     keybd_event.c
     LoadImage.c
     LoadImageGCC.c
+    LoadImagePngIcon.c
     LookupIconIdFromDirectoryEx.c
     MenuUI.c
     MessageStateAnalyzer.c
