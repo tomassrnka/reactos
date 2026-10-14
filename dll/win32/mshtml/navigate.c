@@ -725,6 +725,16 @@ static HRESULT process_response_headers(nsChannelBSC *This, const WCHAR *headers
     LIST_FOR_EACH_ENTRY(iter, &This->nschannel->response_headers, http_header_t, entry) {
         if(!strcmpiW(iter->header, content_typeW))
             parse_content_type(This, iter->data);
+#ifdef __REACTOS__
+        else if(!strcmpiW(iter->header, L"content-disposition")) {
+            const WCHAR *value = iter->data;
+
+            while(*value == ' ' || *value == '\t')
+                value++;
+            if(!strncmpiW(value, L"attachment", 10))
+                This->is_attachment = TRUE;
+        }
+#endif
     }
 
     return S_OK;
@@ -986,6 +996,11 @@ static HRESULT read_stream_data(nsChannelBSC *This, IStream *stream)
     if(!This->nschannel)
         return S_OK;
 
+#ifdef __REACTOS__
+    if(This->extern_handled)
+        return S_OK;
+#endif
+
     if(!This->nslistener) {
         BYTE buf[1024];
 
@@ -1208,6 +1223,10 @@ static void nsChannelBSC_destroy(BSCallback *bsc)
 {
     nsChannelBSC *This = nsChannelBSC_from_BSCallback(bsc);
 
+#ifdef __REACTOS__
+    heap_free(This->sent_headers);
+#endif
+
     if(This->nschannel)
         nsIHttpChannel_Release(&This->nschannel->nsIHttpChannel_iface);
     if(This->nslistener)
@@ -1379,6 +1398,14 @@ static HRESULT nsChannelBSC_stop_binding(BSCallback *bsc, HRESULT result)
 {
     nsChannelBSC *This = nsChannelBSC_from_BSCallback(bsc);
 
+#ifdef __REACTOS__
+    /* handed to the browser: Gecko never saw the request start, so it only gets the cancellation */
+    if(This->extern_handled) {
+        on_stop_nsrequest(This, E_ABORT);
+        return S_OK;
+    }
+#endif
+
     if(result != E_ABORT) {
         if(FAILED(result))
             handle_navigation_error(This, result);
@@ -1479,6 +1506,63 @@ static IUri *get_moniker_uri(IMoniker *mon)
     return ret;
 }
 
+#ifdef __REACTOS__
+static HRESULT nsChannelBSC_beginning_transaction(BSCallback*,WCHAR**);
+
+typedef struct {
+    task_t header;
+    nsChannelBSC *bsc;
+} extern_abort_task_t;
+
+static void extern_abort_proc(task_t *_task)
+{
+    extern_abort_task_t *task = (extern_abort_task_t*)_task;
+
+    if(task->bsc->bsc.binding)
+        IBinding_Abort(task->bsc->bsc.binding);
+}
+
+static void extern_abort_task_destr(task_t *_task)
+{
+    extern_abort_task_t *task = (extern_abort_task_t*)_task;
+
+    IBindStatusCallback_Release(&task->bsc->bsc.IBindStatusCallback_iface);
+    heap_free(task);
+}
+
+/* the document stops reading this binding: the browser downloads the content with a binding of its own */
+static void abort_extern_binding(nsChannelBSC *This)
+{
+    extern_abort_task_t *task;
+    IBinding *binding;
+    HRESULT hres = E_OUTOFMEMORY;
+
+    This->extern_handled = TRUE;
+
+    if(!This->bsc.window || !This->bsc.binding)
+        return;
+
+    task = heap_alloc(sizeof(*task));
+    if(task) {
+        IBindStatusCallback_AddRef(&This->bsc.IBindStatusCallback_iface);
+        task->bsc = This;
+        /* push_task destroys the task when it fails */
+        hres = push_task(&task->header, extern_abort_proc, extern_abort_task_destr, This->bsc.window->task_magic);
+    }
+    if(SUCCEEDED(hres))
+        return;
+
+    /* Reads are not made any more, so a binding that is not ended here never ends: it is aborted at once */
+    binding = This->bsc.binding;
+    IBinding_AddRef(binding);
+    IBinding_Abort(binding);
+    IBinding_Release(binding);
+}
+
+/* same string in ieframe */
+static const WCHAR download_handoffW[] = L"ReactOS Download Handoff";
+#endif
+
 static void handle_extern_mime_navigation(nsChannelBSC *This)
 {
     IWebBrowserPriv2IE9 *webbrowser_priv;
@@ -1488,6 +1572,11 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
     IUri *uri;
     VARIANT flags;
     HRESULT hres;
+#ifdef __REACTOS__
+    VARIANT headers_var, post_var;
+    SAFEARRAY *post_array = NULL;
+    BOOL handed_off = FALSE;
+#endif
 
     if(!This->bsc.window || !This->bsc.window->base.outer_window || !This->bsc.window->base.outer_window->doc_obj)
         return;
@@ -1517,12 +1606,68 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
         return;
     }
 
+#ifdef __REACTOS__
+    IBindCtx_RegisterObjectParam(bind_ctx, (LPOLESTR)download_handoffW, (IUnknown*)uri);
+
+    V_VT(&headers_var) = VT_EMPTY;
+    {
+        /* the headers the original request carried, as sent by the binding */
+        WCHAR *request_headers = NULL;
+
+        if(!This->sent_headers) {
+            hres = nsChannelBSC_beginning_transaction(&This->bsc, &request_headers);
+            if(FAILED(hres)) {
+                /* the request must keep its headers */
+                IBindCtx_Release(bind_ctx);
+                IUri_Release(uri);
+                return;
+            }
+        }
+
+        if(!This->sent_headers && request_headers) {
+            V_VT(&headers_var) = VT_BSTR;
+            V_BSTR(&headers_var) = SysAllocString(request_headers);
+            CoTaskMemFree(request_headers);
+        }else if(This->sent_headers) {
+            V_VT(&headers_var) = VT_BSTR;
+            V_BSTR(&headers_var) = SysAllocString(This->sent_headers);
+        }
+
+        if(V_VT(&headers_var) == VT_BSTR && !V_BSTR(&headers_var)) {
+            /* the request must keep its headers */
+            IBindCtx_Release(bind_ctx);
+            IUri_Release(uri);
+            return;
+        }
+    }
+
+    V_VT(&post_var) = VT_EMPTY;
+    if(This->bsc.request_data.post_data && This->bsc.request_data.post_data_len) {
+        post_array = SafeArrayCreateVector(VT_UI1, 0, This->bsc.request_data.post_data_len);
+        if(!post_array) {
+            /* a POST must not turn into a GET */
+            VariantClear(&headers_var);
+            IBindCtx_Release(bind_ctx);
+            IUri_Release(uri);
+            return;
+        }
+        memcpy(post_array->pvData, This->bsc.request_data.post_data, This->bsc.request_data.post_data_len);
+        V_VT(&post_var) = VT_ARRAY|VT_UI1;
+        V_ARRAY(&post_var) = post_array;
+    }
+#endif
+
     V_VT(&flags) = VT_I4;
     V_I4(&flags) = navHyperlink;
 
     hres = IUnknown_QueryInterface(doc_obj->webbrowser, &IID_IWebBrowserPriv2IE8, (void**)&webbrowser_priv);
     if(SUCCEEDED(hres)) {
+#ifdef __REACTOS__
+        hres = IWebBrowserPriv2IE9_NavigateWithBindCtx2(webbrowser_priv, uri, &flags, NULL, &post_var, &headers_var, bind_ctx, NULL, 0);
+        handed_off = SUCCEEDED(hres);
+#else
         hres = IWebBrowserPriv2IE9_NavigateWithBindCtx2(webbrowser_priv, uri, &flags, NULL, NULL, NULL, bind_ctx, NULL, 0);
+#endif
         IWebBrowserPriv2IE9_Release(webbrowser_priv);
     }else {
         IWebBrowserPriv *webbrowser_priv_old;
@@ -1540,6 +1685,14 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
         }
     }
 
+#ifdef __REACTOS__
+    VariantClear(&headers_var);
+    if(post_array)
+        SafeArrayDestroy(post_array);
+    IBindCtx_Release(bind_ctx);
+    (void)handed_off;
+#endif
+
     IUri_Release(uri);
 }
 
@@ -1549,6 +1702,21 @@ static HRESULT nsChannelBSC_on_progress(BSCallback *bsc, ULONG status_code, LPCW
 
     switch(status_code) {
     case BINDSTATUS_MIMETYPEAVAILABLE:
+#ifdef __REACTOS__
+        if(This->extern_handled)
+            return S_OK;
+
+        if(This->is_doc_channel && This->nschannel && (This->is_attachment || !is_supported_doc_mime(status_text))) {
+            TRACE("external content, MIME %s attachment %d\n", debugstr_w(status_text), This->is_attachment);
+
+            /* a failed request is shown as an error page, not offered as a download */
+            if(This->nschannel->response_status < 400)
+                handle_extern_mime_navigation(This);
+
+            abort_extern_binding(This);
+            return S_OK;
+        }
+#else
         if(This->is_doc_channel && !is_supported_doc_mime(status_text)) {
             FIXME("External MIME: %s\n", debugstr_w(status_text));
 
@@ -1556,6 +1724,7 @@ static HRESULT nsChannelBSC_on_progress(BSCallback *bsc, ULONG status_code, LPCW
 
             This->nschannel = NULL;
         }
+#endif
 
         if(!This->nschannel)
             return S_OK;
@@ -1689,6 +1858,18 @@ static HRESULT nsChannelBSC_beginning_transaction(BSCallback *bsc, WCHAR **addit
     }
 
     *ptr = 0;
+
+#ifdef __REACTOS__
+    /* keep what the first request carried: a redirect continues with a channel of its own */
+    if(!This->sent_headers) {
+        This->sent_headers = heap_strdupW(*additional_headers);
+        if(!This->sent_headers) {
+            CoTaskMemFree(*additional_headers);
+            *additional_headers = NULL;
+            return E_OUTOFMEMORY;
+        }
+    }
+#endif
 
     return S_OK;
 }

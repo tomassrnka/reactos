@@ -305,6 +305,12 @@ LRESULT process_dochost_tasks(DocHost*);
 void InternetExplorer_WebBrowser_Init(InternetExplorer*);
 HRESULT update_ie_statustext(InternetExplorer*, LPCWSTR);
 void released_obj(void);
+#ifdef __REACTOS__
+BOOL lock_ie_process(DocHost*);
+void dochost_set_status_text(DocHost*,const WCHAR*);
+HRESULT start_file_download(DocHost*,const WCHAR*,const WCHAR*,const BYTE*,DWORD);
+BOOL download_translate_message(MSG*);
+#endif
 DWORD release_extern_ref(InternetExplorer*,BOOL);
 
 void register_iewindow_class(void);

@@ -81,3 +81,75 @@
 #define IDS_ENDDOWNLOADDATA            (IDS_STATUSFMT_FIRST + 6)
 #define IDS_SENDINGREQUEST             (IDS_STATUSFMT_FIRST + 11)
 #define IDS_STATUSFMT_MAXLEN           256
+
+#ifdef __REACTOS__
+/* File download: File Download dialog, progress dialog and their strings */
+#define IDD_DOWNLOAD_ASK               1500
+#define IDD_DOWNLOAD_PROGRESS          1501
+
+#define IDC_DLA_QUESTION               1510
+#define IDC_DLA_ICON                   1511
+#define IDC_DLA_NAME                   1512
+#define IDC_DLA_TYPE                   1513
+#define IDC_DLA_FROM                   1514
+#define IDC_DLA_OPEN                   1515
+#define IDC_DLA_SAVE                   1516
+#define IDC_DLA_WARNICON               1517
+#define IDC_DLA_WARNING                1518
+
+#define IDC_DLP_ICON                   1530
+#define IDC_DLP_TITLE                  1531
+#define IDC_DLP_NAME                   1532
+#define IDC_DLP_BAR                    1533
+#define IDC_DLP_LABEL1                 1534
+#define IDC_DLP_VALUE1                 1535
+#define IDC_DLP_VALUE2                 1536
+#define IDC_DLP_VALUE3                 1537
+#define IDC_DLP_CLOSE                  1538
+#define IDC_DLP_OPEN                   1539
+#define IDC_DLP_FOLDER                 1540
+
+#define IDS_DL_FIRST                   1600
+#define IDS_DL_ASK_TITLE               1600
+#define IDS_DL_ASK_TITLE_WARN          1601
+#define IDS_DL_Q_RUN                   1602
+#define IDS_DL_Q_OPEN                  1603
+#define IDS_DL_Q_SAVE                  1604
+#define IDS_DL_WARN_APP                1605
+#define IDS_DL_WARN_FILE               1606
+#define IDS_DL_WARN_UNKNOWN            1607
+#define IDS_DL_BTN_RUN                 1608
+#define IDS_DL_BTN_OPEN                1609
+#define IDS_DL_TYPE_UNKNOWN            1610
+#define IDS_DL_TYPE_SIZE               1611
+#define IDS_DL_CAPTION_PCT             1612
+#define IDS_DL_CAPTION_COPIED          1613
+#define IDS_DL_CAPTION_DONE            1614
+#define IDS_DL_NAME_FROM               1615
+#define IDS_DL_TIMELEFT                1616
+#define IDS_DL_TIMELEFT_VAL            1617
+#define IDS_DL_TIMELEFT_UNKNOWN        1618
+#define IDS_DL_DOWNLOADED              1619
+#define IDS_DL_DOWNLOADED_VAL          1620
+#define IDS_DL_RATE_VAL                1621
+#define IDS_DL_COMPLETE                1622
+#define IDS_DL_BTN_CLOSE               1623
+#define IDS_DL_BTN_CANCEL              1624
+#define IDS_DL_STATUS_START            1625
+#define IDS_DL_STATUS_PROGRESS         1626
+#define IDS_DL_STATUS_DONE             1627
+#define IDS_DL_ERR_FMT                 1628
+#define IDS_DL_ERR_HTTP                1629
+#define IDS_DL_ERR_INTERRUPTED         1630
+#define IDS_DL_ERR_NET                 1631
+#define IDS_DL_ERR_WRITE               1632
+#define IDS_DL_ERR_CREATE              1633
+#define IDS_DL_ERR_TITLE               1634
+#define IDS_DL_SAVEAS_ALL              1635
+#define IDS_DL_UNIT_BYTES              1636
+#define IDS_DL_TIME_HMS                1637
+#define IDS_DL_TIME_MS                 1638
+#define IDS_DL_TIME_S                  1639
+#define IDS_DL_ERR_OPEN                1640
+#define IDS_DL_SEC_ZERO                1641
+#endif

@@ -81,3 +81,92 @@ FONT 8, "MS Shell Dlg"
     DEFPUSHBUTTON "OK", IDOK, 90, 50, 50, 14
     PUSHBUTTON "Cancel", IDCANCEL, 145, 50, 50, 14
 }
+#ifdef __REACTOS__
+IDD_DOWNLOAD_ASK DIALOGEX 0, 0, 250, 142
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "File Download"
+FONT 8, "MS Shell Dlg"
+{
+    LTEXT "", IDC_DLA_QUESTION, 12, 10, 226, 20
+    ICON "", IDC_DLA_ICON, 14, 34, 21, 20, SS_ICON
+    RTEXT "Name:", -1, 44, 34, 36, 9
+    LTEXT "", IDC_DLA_NAME, 86, 34, 156, 9, SS_ENDELLIPSIS | SS_NOPREFIX
+    RTEXT "Type:", -1, 44, 46, 36, 9
+    LTEXT "", IDC_DLA_TYPE, 86, 46, 156, 9, SS_ENDELLIPSIS | SS_NOPREFIX
+    RTEXT "From:", -1, 44, 58, 36, 9
+    LTEXT "", IDC_DLA_FROM, 86, 58, 156, 9, SS_ENDELLIPSIS | SS_NOPREFIX
+    PUSHBUTTON "&Open", IDC_DLA_OPEN, 86, 78, 48, 14
+    PUSHBUTTON "&Save", IDC_DLA_SAVE, 138, 78, 48, 14
+    DEFPUSHBUTTON "Cancel", IDCANCEL, 190, 78, 48, 14
+    ICON "", IDC_DLA_WARNICON, 14, 108, 21, 20, SS_ICON
+    LTEXT "", IDC_DLA_WARNING, 44, 104, 198, 32
+}
+
+IDD_DOWNLOAD_PROGRESS DIALOGEX 0, 0, 250, 130
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "File Download"
+FONT 8, "MS Shell Dlg"
+{
+    ICON "", IDC_DLP_ICON, 14, 8, 21, 20, SS_ICON
+    LTEXT "", IDC_DLP_TITLE, 44, 14, 198, 9, SS_NOPREFIX
+    LTEXT "", IDC_DLP_NAME, 12, 36, 226, 9, SS_ENDELLIPSIS | SS_NOPREFIX
+    CONTROL "", IDC_DLP_BAR, "msctls_progress32", WS_BORDER, 12, 48, 226, 8
+    LTEXT "", IDC_DLP_LABEL1, 12, 62, 62, 9, SS_NOPREFIX
+    LTEXT "", IDC_DLP_VALUE1, 78, 62, 164, 9, SS_ENDELLIPSIS | SS_NOPREFIX
+    LTEXT "Download to:", -1, 12, 74, 62, 9
+    LTEXT "", IDC_DLP_VALUE2, 78, 74, 164, 9, SS_PATHELLIPSIS | SS_NOPREFIX
+    LTEXT "Transfer rate:", -1, 12, 86, 62, 9
+    LTEXT "", IDC_DLP_VALUE3, 78, 86, 164, 9, SS_NOPREFIX
+    AUTOCHECKBOX "&Close this dialog box when download completes", IDC_DLP_CLOSE, 12, 100, 226, 10
+    PUSHBUTTON "&Open", IDC_DLP_OPEN, 86, 112, 48, 14, WS_DISABLED
+    PUSHBUTTON "Open &Folder", IDC_DLP_FOLDER, 138, 112, 52, 14, WS_DISABLED
+    DEFPUSHBUTTON "Cancel", IDCANCEL, 194, 112, 48, 14
+}
+
+STRINGTABLE
+{
+    IDS_DL_ASK_TITLE        "File Download"
+    IDS_DL_ASK_TITLE_WARN   "File Download - Security Warning"
+    IDS_DL_Q_RUN            "Do you want to run or save this file?"
+    IDS_DL_Q_OPEN           "Do you want to open or save this file?"
+    IDS_DL_Q_SAVE           "Do you want to save this file?"
+    IDS_DL_WARN_APP         "While files from the Internet can be useful, this file type can potentially harm your computer. If you do not trust the source, do not run or save this software."
+    IDS_DL_WARN_FILE        "While files from the Internet can be useful, some files can potentially harm your computer. If you do not trust the source, do not open or save this file."
+    IDS_DL_WARN_UNKNOWN     "While files from the Internet can be useful, some files can potentially harm your computer. If you do not trust the source, do not save this file."
+    IDS_DL_BTN_RUN          "&Run"
+    IDS_DL_BTN_OPEN         "&Open"
+    IDS_DL_TYPE_UNKNOWN     "Unknown File Type"
+    IDS_DL_TYPE_SIZE        "%s, %s"
+    IDS_DL_CAPTION_PCT      "%u%% of %s from %s Completed"
+    IDS_DL_CAPTION_COPIED   "%s of %s from %s Copied"
+    IDS_DL_CAPTION_DONE     "Download complete"
+    IDS_DL_NAME_FROM        "%s from %s"
+    IDS_DL_TIMELEFT         "Estimated time left:"
+    IDS_DL_TIMELEFT_VAL     "%s (%s of %s copied)"
+    IDS_DL_TIMELEFT_UNKNOWN "Not known (copied so far %s)"
+    IDS_DL_DOWNLOADED       "Downloaded:"
+    IDS_DL_DOWNLOADED_VAL   "%s in %s"
+    IDS_DL_RATE_VAL         "%s/Sec"
+    IDS_DL_COMPLETE         "Download Complete"
+    IDS_DL_BTN_CLOSE        "Close"
+    IDS_DL_BTN_CANCEL       "Cancel"
+    IDS_DL_STATUS_START     "Start downloading from site: %s"
+    IDS_DL_STATUS_PROGRESS  "Downloading from site: %s (%s)"
+    IDS_DL_STATUS_DONE      "Download complete: %s"
+    IDS_DL_ERR_FMT          "Cannot download %s from %s.\n\n%s"
+    IDS_DL_ERR_HTTP         "The server replied with the error HTTP %u."
+    IDS_DL_ERR_INTERRUPTED  "The connection was closed before the file was complete (%s of %s received)."
+    IDS_DL_ERR_NET          "The site could not be reached, or the connection failed (error 0x%08X)."
+    IDS_DL_ERR_WRITE        "The file could not be written: %s"
+    IDS_DL_ERR_CREATE       "The file could not be created: %s"
+    IDS_DL_ERR_TITLE        "Internet Browser"
+    IDS_DL_SAVEAS_ALL       "All Files"
+    IDS_DL_UNIT_BYTES       "bytes"
+    IDS_DL_TIME_HMS         "%u hr %u min %u sec"
+    IDS_DL_TIME_MS          "%u min %u sec"
+    IDS_DL_TIME_S           "%u sec"
+    IDS_DL_ERR_OPEN         "The file was saved but could not be opened: %s"
+    IDS_DL_SEC_ZERO         "1 sec"
+}
+#endif
