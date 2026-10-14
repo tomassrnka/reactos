@@ -2966,6 +2966,7 @@ void Test_collided_unwind(void)
         _SEH2_END;
     }
 
+    ok(ret == 1, "setjmp returned %d instead of the longjmp value\n", ret);
     ok(Flags == (1 | 2 | 8), "Flags = %x\n", Flags);
     ok(Count == 2, "Count = %d\n", Count);
 #ifdef _M_IX86
@@ -3020,6 +3021,27 @@ void Test_nested_from_except(void)
 #endif
 }
 
+#if defined(_M_AMD64) && defined(__GNUC__) && !defined(__clang__)
+static double ReturnThroughFinally(double Value)
+{
+    volatile double Result = Value;
+
+    _SEH2_TRY
+    {
+        _SEH2_YIELD(return Result);
+    }
+    _SEH2_FINALLY
+    {
+        /* GCC keeps the evaluated return value in a nonvolatile XMM register
+         * across the cleanup call. The funclet must preserve that value. */
+        __asm__ __volatile__("pxor %%xmm6, %%xmm6" : : : "xmm6");
+    }
+    _SEH2_END;
+
+    return 0;
+}
+#endif
+
 #ifdef __cplusplus
 START_TEST(pseh_cpp)
 #else
@@ -3034,6 +3056,12 @@ START_TEST(pseh)
 #endif
     Test_collided_unwind();
     Test_nested_from_except();
+#if defined(_M_AMD64) && defined(__GNUC__) && !defined(__clang__)
+    {
+        double Result = ReturnThroughFinally(1.25);
+        ok(Result == 1.25, "finally changed the return value to %f\n", Result);
+    }
+#endif
 
 	const struct subtest testsuite[] =
 	{

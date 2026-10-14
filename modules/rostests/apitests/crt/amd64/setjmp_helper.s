@@ -38,7 +38,8 @@ xmm15_data:
     .quad HEX(0F0F0F0F0F0F0F0F), HEX(1F1F1F1F1F1F1F1F)
 
 
-.code64
+/* GAS .code64 changes the instruction mode, but leaves us in .const. */
+.code
 
 PUBLIC get_sp
 get_sp:

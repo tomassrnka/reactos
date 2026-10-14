@@ -3,6 +3,7 @@ spec2def(psapi.dll psapi.spec ADD_IMPORTLIB)
 
 list(APPEND PSAPI_STATIC_SOURCE psapi.c)
 add_library(psapi_static ${PSAPI_STATIC_SOURCE})
+target_link_libraries(psapi_static ${PSEH_LIB})
 add_dependencies(psapi_static psdk)
 
 list(APPEND SOURCE

@@ -37,6 +37,7 @@ list(APPEND SOURCE
 
 # Static library used for the dll and for setuplib_unittest.
 add_library(setuplib_static STATIC ${SOURCE})
+target_link_libraries(setuplib_static ${PSEH_LIB})
 add_pch(setuplib_static precomp.h SOURCE)
 add_dependencies(setuplib_static xdk) # psdk
 target_include_directories(setuplib_static INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -9,6 +9,11 @@
 #include <gcc-plugin.h>
 #include <plugin-version.h>
 #include <function.h>
+#include <rtl.h>
+#include <memmodel.h>
+#include <emit-rtl.h>
+#include <output.h>
+#include <tree-pass.h>
 #include <tree.h>
 #include <c-family/c-pragma.h>
 #include <c-family/c-common.h>
@@ -76,6 +81,7 @@ struct seh_function
 };
 
 static std::unordered_map<struct function*, struct seh_function*> func_seh_map = {};
+static bool have_seh_functions = false;
 
 static
 struct seh_function*
@@ -259,9 +265,10 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
     if (search == func_seh_map.end())
         return;
 
-    /* Get our SEH details and remove us from the map */
+    /* Template instantiations inherit the completed assembler statement. */
     seh_function* seh_fun = search->second;
     func_seh_map.erase(search);
+    have_seh_functions = true;
 
     make_seh_function_locals_volatile(fndef);
 
@@ -300,8 +307,92 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
             TREE_STRING_LENGTH(seh_fun->asm_header_text));
 
     trace(stderr, "ASM: %s\n", asm_str.str().c_str());
-
     delete seh_fun;
+}
+
+/* A funclet uses its parent's RBP for locals but the trampoline's RSP for
+ * calls. Reserve the largest outgoing argument area in this translation unit.
+ * Measuring every emitted function also covers template instantiations and
+ * compiler clones, which have different function objects from the parser. */
+static HOST_WIDE_INT seh_outgoing_size = 32;
+
+static
+void
+record_outgoing_arguments(void* event_data, void* UNUSED user_data)
+{
+    /* final releases the RTL state; read it while constructing the prologue. */
+    opt_pass* pass = (opt_pass*)event_data;
+    if (!pass->name || strcmp(pass->name, "pro_and_epilogue") != 0)
+        return;
+
+#if GCCPLUGIN_VERSION_MAJOR >= 8
+    HOST_WIDE_INT size = crtl->outgoing_args_size.to_constant();
+#else
+    HOST_WIDE_INT size = crtl->outgoing_args_size;
+#endif
+    if (size > seh_outgoing_size)
+        seh_outgoing_size = size;
+}
+
+static
+void
+emit_seh_trampoline(void* UNUSED event_data, void* UNUSED user_data)
+{
+    if (!have_seh_functions)
+        return;
+
+    /* Eight pushes preserve alignment; include the return address when
+     * aligning the outgoing area to the Windows x64 calling convention. */
+    HOST_WIDE_INT xmm_offset = (seh_outgoing_size + 15) & ~15;
+    HOST_WIDE_INT allocation = xmm_offset + 10 * 16 + 8;
+    fprintf(asm_out_file,
+        "\n\t.text\n\t.p2align 4, 0x90\n"
+        "\t.seh_proc __seh2_global_filter_func\n"
+        "__seh2_global_filter_func:\n"
+        /* RAX is the builtin frame address; recover its offset from RBP. */
+        "\tsub %%rbp, %%rax\n");
+    const char* saved[] = {"rbp", "rbx", "rdi", "rsi", "r12", "r13", "r14", "r15"};
+    for (const char* reg : saved)
+        fprintf(asm_out_file, "\tpush %%%s\n\t.seh_pushreg %%%s\n", reg, reg);
+    if (allocation >= 4096)
+    {
+        /* Touch each page before moving RSP, so a large outgoing area cannot
+         * jump over the stack guard. R10 and R11 are volatile scratch registers. */
+        fprintf(asm_out_file,
+            "\tlea -" HOST_WIDE_INT_PRINT_DEC "(%%rsp), %%r11\n"
+            "\tmov %%rsp, %%r10\n"
+            "1:\n\tsub $4096, %%r10\n"
+            "\tcmp %%r11, %%r10\n\tjb 2f\n"
+            "\ttestb $0, (%%r10)\n\tjmp 1b\n"
+            "2:\n\ttestb $0, (%%r11)\n",
+            allocation);
+    }
+    fprintf(asm_out_file,
+        "\tsub $" HOST_WIDE_INT_PRINT_DEC ", %%rsp\n"
+        "\t.seh_stackalloc " HOST_WIDE_INT_PRINT_DEC "\n",
+        allocation, allocation);
+    /* Cleanup calls have the same nonvolatile-register contract as any C call. */
+    for (unsigned int reg = 6; reg <= 15; ++reg)
+    {
+        HOST_WIDE_INT offset = xmm_offset + (reg - 6) * 16;
+        fprintf(asm_out_file,
+            "\tmovaps %%xmm%u, " HOST_WIDE_INT_PRINT_DEC "(%%rsp)\n"
+            "\t.seh_savexmm %%xmm%u, " HOST_WIDE_INT_PRINT_DEC "\n",
+            reg, offset, reg, offset);
+    }
+    fprintf(asm_out_file,
+        "\t.seh_endprologue\n"
+        "\tsub %%rax, %%rdx\n"
+        "\tmov %%rdx, %%rbp\n"
+        "\tjmp *%%r8\n"
+        "__seh2_global_filter_func_exit:\n");
+    for (unsigned int reg = 6; reg <= 15; ++reg)
+        fprintf(asm_out_file, "\tmovaps " HOST_WIDE_INT_PRINT_DEC "(%%rsp), %%xmm%u\n",
+                xmm_offset + (reg - 6) * 16, reg);
+    fprintf(asm_out_file, "\tadd $" HOST_WIDE_INT_PRINT_DEC ", %%rsp\n", allocation);
+    for (int i = 7; i >= 0; --i)
+        fprintf(asm_out_file, "\tpop %%%s\n", saved[i]);
+    fprintf(asm_out_file, "\tret\n\t.seh_endproc\n");
 }
 
 static
@@ -325,6 +416,9 @@ int plugin_init(struct plugin_name_args   *info,  /* Argument infor */
 
     register_callback(info->base_name, PLUGIN_PRAGMAS, register_seh_pragmas, NULL);
     register_callback(info->base_name, PLUGIN_FINISH_PARSE_FUNCTION, finish_seh_function, NULL);
+
+    register_callback(info->base_name, PLUGIN_PASS_EXECUTION, record_outgoing_arguments, NULL);
+    register_callback(info->base_name, PLUGIN_FINISH_UNIT, emit_seh_trampoline, NULL);
 
     return 0;
 }
