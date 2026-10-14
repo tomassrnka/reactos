@@ -281,6 +281,11 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
     }
     Status = InitializeAddressLimit();
     if (!NT_SUCCESS(Status)) goto Failed;
+    /* Establish the guest stack before variable-size startup data. A child
+     * may replace its bootstrap stack with the parent's stack reservation;
+     * RuntimeData must not take that range merely because it is nonempty. */
+    Status = Wow64Allocate(1024 * 1024, &Stack);
+    if (!NT_SUCCESS(Status)) goto Failed;
     Status = Wow64InitializeRedirection();
     if (!NT_SUCCESS(Status)) goto Failed;
     Status = InitializePeb(Peb32);
@@ -322,8 +327,6 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
     Wow64Ntdll32 = Ntdll32;
     Wow64Loader32 = Entry;
     Wow64Gate = Gate;
-    Status = Wow64Allocate(1024 * 1024, &Stack);
-    if (!NT_SUCCESS(Status)) goto Failed;
     RtlZeroMemory(Teb32, sizeof(*Teb32));
     Teb32->NtTib.ExceptionList = MAXULONG;
     Teb32->NtTib.Version = 30 << 8;
