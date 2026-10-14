@@ -32,8 +32,8 @@
 static
 BOOL
 SetUserEnvironmentVariable(PWSTR* Environment,
-                           LPWSTR lpName,
-                           LPWSTR lpValue,
+                           LPCWSTR lpName,
+                           LPCWSTR lpValue,
                            BOOL bExpand)
 {
     NTSTATUS Status;
