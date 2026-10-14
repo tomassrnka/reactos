@@ -350,9 +350,11 @@ static void test_query_after_generic_format(HWND hwnd)
             generic = i;
     }
     ok(generic > 0, "no generic window format among %d\n", count);
-    if (generic > 0 && SetPixelFormat(hdc, generic, &pfd))
+    if (generic > 0)
     {
         BOOL ret;
+
+        ok(SetPixelFormat(hdc, generic, &pfd), "SetPixelFormat(%d) failed, error %lu\n", generic, GetLastError());
 
         ok(DescribePixelFormat(hdc, 1, sizeof(pfd), &pfd) != 0, "DescribePixelFormat(1) failed after SetPixelFormat\n");
         memset(&plane, 0, sizeof(plane));
