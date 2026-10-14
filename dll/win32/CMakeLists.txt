@@ -291,6 +291,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
         add_subdirectory(msvcp140_1)
     endif()
     add_subdirectory(ncrypt)
+    add_subdirectory(tbs)
     add_subdirectory(tdh)
 endif()
 
