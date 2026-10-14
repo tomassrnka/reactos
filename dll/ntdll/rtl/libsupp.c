@@ -1043,6 +1043,9 @@ LdrpReserveName(
                               : RtlAllocateHeap(RtlGetProcessHeap(), 0, NewSize);
         if (!NewList)
             return FALSE;
+        /* A new list is empty: it may be searched before anything is appended */
+        if (!*List)
+            NewList[0] = UNICODE_NULL;
         *List = NewList;
         *Size = NewSize;
     }
