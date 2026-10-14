@@ -276,4 +276,5 @@ BEGIN
     IDS_INSTGEN_CONFIRMUNINST "%s をアンインストールしてもよろしいですか?"
     IDS_INSTGEN_CONFIRMINSTRUNAPP "インストールが完了しました。今すぐ %s を実行しますか?"
     IDS_DL_STANDALONE_PROGRAM "%s may be a stand-alone program that does not need to be installed. It was saved to:\n\n%s\n\nRun it now?"
+    IDS_DL_DEPENDENCY_FAILED "%s was not installed because %s, which it needs, could not be installed."
 END
