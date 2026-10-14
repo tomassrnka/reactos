@@ -11,7 +11,9 @@ list(APPEND VISTA_SOURCE
      wine/sysparams.c
      wine/win.c
      autorotation.c
-     suspendresume.c)
+     suspendresume.c
+     pointer.c
+     win8user.c)
      
 
 list(APPEND SOURCE

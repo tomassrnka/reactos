@@ -526,109 +526,6 @@ BOOL WINAPI IsWindowRedirectedForPrint( HWND hwnd )
     return FALSE;
 }
 
-/**********************************************************************
- * RegisterPointerDeviceNotifications [USER32.@]
- */
-BOOL WINAPI RegisterPointerDeviceNotifications(HWND hwnd, BOOL notifyrange)
-{
-    FIXME("(%p %d): stub\n", hwnd, notifyrange);
-    return TRUE;
-}
-
-/**********************************************************************
- * GetPointerDevices [USER32.@]
- */
-BOOL WINAPI GetPointerDevices(UINT32 *device_count, POINTER_DEVICE_INFO *devices)
-{
-    FIXME("(%p %p): partial stub\n", device_count, devices);
-
-    if (!device_count)
-        return FALSE;
-
-    if (devices)
-        return FALSE;
-
-    *device_count = 0;
-    return TRUE;
-}
-
-/**********************************************************************
- * RegisterTouchHitTestingWindow [USER32.@]
- */
-BOOL WINAPI RegisterTouchHitTestingWindow(HWND hwnd, ULONG value)
-{
-    FIXME("(%p %ld): stub\n", hwnd, value);
-    return TRUE;
-}
-
-/**********************************************************************
- * EvaluateProximityToRect [USER32.@]
- */
-BOOL WINAPI EvaluateProximityToRect(const RECT *box,
-                                    const TOUCH_HIT_TESTING_INPUT *input,
-                                    TOUCH_HIT_TESTING_PROXIMITY_EVALUATION *proximity)
-{
-    FIXME("(%p,%p,%p): stub\n", box, input, proximity);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
-}
-
-/**********************************************************************
- * PackTouchHitTestingProximityEvaluation [USER32.@]
- */
-LRESULT WINAPI PackTouchHitTestingProximityEvaluation(const TOUCH_HIT_TESTING_INPUT *input,
-                                                      const TOUCH_HIT_TESTING_PROXIMITY_EVALUATION *proximity)
-{
-    FIXME("(%p,%p): stub\n", input, proximity);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
-}
-
-/**********************************************************************
- * GetPointerType [USER32.@]
- */
-BOOL WINAPI GetPointerType(UINT32 id, POINTER_INPUT_TYPE *type)
-{
-    FIXME("(%d %p): stub\n", id, type);
-
-    if(!id || !type)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    *type = PT_MOUSE;
-    return TRUE;
-}
-
-BOOL WINAPI GetPointerInfo(UINT32 id, POINTER_INFO *info)
-{
-    FIXME("(%d %p): stub\n", id, info);
-
-    SetLastError(ERROR_INVALID_PARAMETER);
-    return FALSE;
-}
-
-/**********************************************************************
- * GetPointerDevice [USER32.@]
- */
-BOOL WINAPI GetPointerDevice(HANDLE device, POINTER_DEVICE_INFO *pointer_device)
-{
-    FIXME("(%p %p): stub\n", device, pointer_device);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
-}
-
-/**********************************************************************
- * GetPointerPenInfo [USER32.@]
- */
-BOOL WINAPI GetPointerPenInfo(UINT32 id, VOID *pen_info)
-{
-    FIXME("(%d %p): stub\n", id, pen_info);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
-}
-
 #ifndef __REACTOS__
 LRESULT WINAPI ImeWndProcA( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
@@ -664,7 +561,35 @@ BOOL WINAPI ChangeWindowMessageFilter( UINT message, DWORD flag )
  */
 BOOL WINAPI ChangeWindowMessageFilterEx( HWND hwnd, UINT message, DWORD action, CHANGEFILTERSTRUCT *changefilter )
 {
-    FIXME( "%p %x %ld %p\n", hwnd, message, action, changefilter );
+    DWORD pid = 0;
+
+    /* The checks and results are those of Windows 10; ReactOS has no user interface privilege
+       isolation, so every message already passes. */
+    if (!IsWindow( hwnd ))
+    {
+        SetLastError( ERROR_INVALID_WINDOW_HANDLE );
+        return FALSE;
+    }
+    GetWindowThreadProcessId( hwnd, &pid );
+    if (pid != GetCurrentProcessId())
+    {
+        SetLastError( ERROR_ACCESS_DENIED );
+        return FALSE;
+    }
+    /* An unreadable structure fails without an error code */
+    if (changefilter && IsBadWritePtr( changefilter, sizeof(*changefilter) ))
+        return FALSE;
+    if (changefilter && changefilter->cbSize != sizeof(*changefilter))
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if ((action != 1 && action != 2) || !message)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (changefilter) changefilter->ExtStatus = 0;
     return TRUE;
 }
 

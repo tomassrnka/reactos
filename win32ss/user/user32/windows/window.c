@@ -964,6 +964,24 @@ GetAncestor(_In_ HWND hwnd, _In_ UINT uType)
 }
 
 /*
+ * A window is arranged when it is snapped to an edge of the work area. Windows 10 reports
+ * ERROR_INVALID_PARAMETER, not ERROR_INVALID_WINDOW_HANDLE, for a handle that is no window.
+ */
+BOOL WINAPI
+IsWindowArranged(HWND hWnd)
+{
+    PWND Wnd = ValidateHwnd(hWnd);
+
+    if (!Wnd)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return (Wnd->ExStyle2 & (WS_EX2_VERTICALLYMAXIMIZEDLEFT | WS_EX2_VERTICALLYMAXIMIZEDRIGHT)) != 0;
+}
+
+/*
  * @implemented
  */
 BOOL WINAPI
