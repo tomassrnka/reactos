@@ -211,6 +211,27 @@ static void CheckApplicationLibraries(void)
         if (Modules[i]) FreeLibrary(Modules[i]);
 }
 
+static void CheckTransactedRegistry(void)
+{
+    typedef LSTATUS (WINAPI *CREATE)(HKEY, const void *, DWORD, void *, DWORD, REGSAM,
+                                    LPSECURITY_ATTRIBUTES, PHKEY, PDWORD, HANDLE, void *);
+    HMODULE Advapi = GetModuleHandleW(L"advapi32.dll");
+    CREATE CreateW = (CREATE)GetProcAddress(Advapi, "RegCreateKeyTransactedW");
+    CREATE CreateA = (CREATE)GetProcAddress(Advapi, "RegCreateKeyTransactedA");
+    HKEY Key = NULL;
+    LSTATUS Status;
+    CHECK(CreateW && CreateA);
+    if (!CreateW || !CreateA) return;
+    Status = CreateW(HKEY_CURRENT_USER, L"Software\\w643c-r4-transaction", 0, NULL,
+                     REG_OPTION_NON_VOLATILE, KEY_READ, NULL, &Key, NULL, INVALID_HANDLE_VALUE, NULL);
+    CHECK(Status == ERROR_CALL_NOT_IMPLEMENTED || Status == ERROR_INVALID_HANDLE);
+    if (!Status) { RegCloseKey(Key); RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\w643c-r4-transaction"); }
+    Status = CreateA(HKEY_CURRENT_USER, "Software\\w643c-r4-transaction", 0, NULL,
+                     REG_OPTION_NON_VOLATILE, KEY_READ, NULL, &Key, NULL, INVALID_HANDLE_VALUE, NULL);
+    CHECK(Status == ERROR_CALL_NOT_IMPLEMENTED || Status == ERROR_INVALID_HANDLE);
+    if (!Status) { RegCloseKey(Key); RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\w643c-r4-transaction"); }
+}
+
 static void CheckEventRegistration(void)
 {
     typedef ULONG (WINAPI *REGISTER)(LPCGUID, PENABLECALLBACK, PVOID, PREGHANDLE);
@@ -782,6 +803,7 @@ int wmain(int argc, WCHAR **argv)
     CheckTokenObjectLabel();
     CheckApplicationLibraries();
     CheckEventRegistration();
+    CheckTransactedRegistry();
     CheckRuntimeReporting();
     CheckPrivileges();
     CheckObjectSecurity();

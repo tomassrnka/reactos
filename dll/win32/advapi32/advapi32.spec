@@ -491,6 +491,8 @@
 @ stdcall RegCreateKeyA(long str ptr)
 @ stdcall RegCreateKeyExA(long str long ptr long long ptr ptr ptr)
 @ stdcall RegCreateKeyExW(long wstr long ptr long long ptr ptr ptr)
+@ stdcall -version=0x600+ RegCreateKeyTransactedA(long str long str long long ptr ptr ptr ptr ptr)
+@ stdcall -version=0x600+ RegCreateKeyTransactedW(long wstr long wstr long long ptr ptr ptr ptr ptr)
 @ stdcall RegCreateKeyW(long wstr ptr)
 @ stdcall RegDeleteKeyA(long str)
 @ stdcall RegDeleteKeyExA(long str long long)
