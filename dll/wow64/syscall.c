@@ -126,6 +126,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     if (NativeSystemInformation) Number = W64_NtQuerySystemInformation;
     switch (Number)
     {
+    case W64_NtCallbackReturn: return Wow64WinCallbackReturn(P(0), a[1], a[2]);
     case W64_NtCreateThread:
     {
         CLIENT_ID Id;
@@ -700,7 +701,8 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
      * NT errors; no untyped 32-bit argument list is sent to the kernel. */
     _SEH2_TRY
     {
-        Status = Dispatch(Number, Arguments, &Cleanup);
+        Status = (Number >= 0x1000 && Number < 0x2000) ?
+            Wow64WinSystemService(Number, Arguments) : Dispatch(Number, Arguments, &Cleanup);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {

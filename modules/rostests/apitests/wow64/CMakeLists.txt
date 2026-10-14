@@ -66,3 +66,16 @@ if(ARCH STREQUAL "amd64" OR (ARCH STREQUAL "i386" AND NOT MSVC))
     add_dependencies(win32k_wow64_apitest wow64_syscall_tables)
     add_rostests_file(TARGET win32k_wow64_apitest)
 endif()
+
+# Explicit GUI integration fixture; default image contents stay unchanged.
+add_executable(wow64_first_window EXCLUDE_FROM_ALL first_window.c)
+set_module_type(wow64_first_window win32cui)
+add_importlibs(wow64_first_window user32 gdi32 msvcrt kernel32)
+
+if(ARCH STREQUAL "i386")
+    add_asm_files(wow64_win32k_stubs win32k_stubs.S)
+    add_executable(wow64_win32k_abi EXCLUDE_FROM_ALL win32k_abi.c ${wow64_win32k_stubs})
+    target_include_directories(wow64_win32k_abi PRIVATE ${REACTOS_SOURCE_DIR}/win32ss ${REACTOS_SOURCE_DIR}/win32ss/include)
+    set_module_type(wow64_win32k_abi win32cui)
+    add_importlibs(wow64_win32k_abi user32 gdi32 msvcrt kernel32 ntdll)
+endif()

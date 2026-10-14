@@ -256,6 +256,9 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
         Ordinals = (PVOID)((PUCHAR)Ntdll32 + Exports->AddressOfNameOrdinals);
         for (i = 0; i < Exports->NumberOfNames; ++i)
         {
+            if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserCallbackDispatcher") &&
+                Ordinals[i] < Exports->NumberOfFunctions)
+                Wow64WinInitialize((PUCHAR)Ntdll32 + Functions[Ordinals[i]]);
             if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserApcDispatcher") &&
                 Ordinals[i] < Exports->NumberOfFunctions)
                 Wow64ApcDispatcher = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];

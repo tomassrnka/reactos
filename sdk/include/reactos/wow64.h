@@ -56,6 +56,7 @@ typedef struct DECLSPEC_ALIGN(16) _WOW64_CPU_STATE
     UCHAR ExtendedRegisters[512];
     ULONG Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
     PVOID ApcFrame;
+    PVOID CallbackFrame;
 
 } WOW64_CPU_STATE;
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, NativeStack) == 0);
@@ -75,3 +76,7 @@ typedef NTSTATUS (NTAPI *WOW64_SERVICE)(ULONG Number, ULONG *Arguments);
 NTSTATUS NTAPI Wow64CpuInitialize(WOW64_SERVICE Service, PVOID *Gate);
 DECLSPEC_NORETURN VOID NTAPI Wow64CpuRun(WOW64_CPU_STATE *State);
 VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context);
+
+NTSTATUS NTAPI Wow64WinInitialize(PVOID Dispatcher);
+NTSTATUS NTAPI Wow64WinSystemService(ULONG Number, ULONG *Arguments);
+NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Status);
