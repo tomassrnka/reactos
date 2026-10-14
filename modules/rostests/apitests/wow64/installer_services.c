@@ -48,6 +48,32 @@ static void CheckVolumeQuery(const WCHAR *NtPath)
     CloseHandle(Device);
 }
 
+static void CheckInterruptTime(void)
+{
+    typedef BOOL (WINAPI *QUERY)(PULONGLONG);
+    QUERY Query = (QUERY)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "QueryUnbiasedInterruptTime");
+    ULONG Storage[4] = {0x12345678, 0, 0, 0xabcdef01};
+    ULONGLONG *Value = (PVOID)&Storage[1], Start, Previous;
+    DWORD Tick;
+    unsigned i;
+    CHECK(Query != NULL);
+    if (!Query) return;
+    CHECK(!Query(NULL) && GetLastError() == ERROR_INVALID_PARAMETER);
+    CHECK(Query(Value) && *Value != 0);
+    Start = Previous = *Value;
+    Tick = GetTickCount();
+    Sleep(100);
+    CHECK(Query(Value) && *Value > Start);
+    CHECK((*Value - Start) / 10000 >= 50);
+    CHECK((*Value - Start) / 10000 <= (DWORD)(GetTickCount() - Tick) + 1000);
+    for (i = 0; i < 64; ++i)
+    {
+        CHECK(Query(Value) && *Value >= Previous);
+        Previous = *Value;
+    }
+    CHECK(Storage[0] == 0x12345678 && Storage[3] == 0xabcdef01);
+}
+
 static void CheckVolumeByHandle(void)
 {
     typedef BOOL (WINAPI *VOLUME)(HANDLE, PWSTR, DWORD, PDWORD, PDWORD, PDWORD, PWSTR, DWORD);
@@ -558,6 +584,7 @@ int wmain(int argc, WCHAR **argv)
     CheckPipe();
     CheckAsyncPipe();
     CheckVolumeByHandle();
+    CheckInterruptTime();
     CheckPrivileges();
     CheckObjectSecurity();
     CheckCurrentDirectory();

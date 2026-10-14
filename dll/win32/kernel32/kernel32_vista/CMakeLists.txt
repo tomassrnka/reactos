@@ -22,6 +22,7 @@ list(APPEND SOURCE
     IsValidLocaleName.c
     LCIDToLocaleName.c
     LocaleNameToLCID.c
+    QueryUnbiasedInterruptTime.c
     sync.c
     ThreadDescription.c
     threadpool.c
