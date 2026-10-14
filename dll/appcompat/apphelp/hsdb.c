@@ -568,6 +568,8 @@ BOOL WINAPI SdbGetMatchingExe(HSDB hsdb, LPCWSTR path, LPCWSTR module_name,
     LPWSTR file_name;
     WCHAR wszLayers[MAX_LAYER_LENGTH];
     DWORD dwSize, dwExeLayers = 0;
+    SDBQUERYRESULT chosen;
+    TAGREF atrExe[SDB_MAX_LAYERS];
     PDB pdb;
 
     /* Load default database if one is not specified */
@@ -670,37 +672,43 @@ BOOL WINAPI SdbGetMatchingExe(HSDB hsdb, LPCWSTR path, LPCWSTR module_name,
     /* Restore the full path. */
     *(--file_name) = L'\\';
 
-    /* Layers the database picks for the file come first; what the user chooses is added behind them and moved to the front below */
+    /*
+     * The shim engine lets the first of two shims for the same function win. A layer the user chose, with the
+     * Compatibility tab or the environment, has to win over one the database applied by itself, also when the
+     * database names the same layer: the chosen layers are collected apart and put in front of the others.
+     */
     dwExeLayers = result->dwLayerCount;
+    memcpy(atrExe, result->atrLayers, dwExeLayers * sizeof(TAGREF));
+    memset(&chosen, 0, sizeof(chosen));
 
     dwSize = sizeof(wszLayers);
     if (SdbGetPermLayerKeys(DosApplicationName.String.Buffer, wszLayers, &dwSize, GPLK_MACHINE | GPLK_USER))
     {
-        SdbpAddLayerMatches(hsdb, wszLayers, dwSize, result);
+        SdbpAddLayerMatches(hsdb, wszLayers, dwSize, &chosen);
         ret = TRUE;
     }
 
     if (!(flags & SDBGMEF_IGNORE_ENVIRONMENT))
     {
-        if (SdbpPropagateEnvLayers(hsdb, (LPWSTR)env, result))
+        if (SdbpPropagateEnvLayers(hsdb, (LPWSTR)env, &chosen))
         {
             ret = TRUE;
             result->dwFlags |= SHIMREG_HAS_ENVIRONMENT;
         }
     }
 
-    /*
-     * The shim engine lets the first of two shims for the same function win. A layer the user chose, with the
-     * Compatibility tab or the environment, has to win over one the database applied by itself.
-     */
-    if (dwExeLayers && result->dwLayerCount > dwExeLayers)
+    if (chosen.dwLayerCount)
     {
-        TAGREF atrChosen[SDB_MAX_LAYERS];
-        DWORD dwChosen = result->dwLayerCount - dwExeLayers;
+        TAGREF atrFirst[SDB_MAX_LAYERS];
+        DWORD dwFirst = chosen.dwLayerCount, n;
 
-        memcpy(atrChosen, result->atrLayers + dwExeLayers, dwChosen * sizeof(TAGREF));
-        memmove(result->atrLayers + dwChosen, result->atrLayers, dwExeLayers * sizeof(TAGREF));
-        memcpy(result->atrLayers, atrChosen, dwChosen * sizeof(TAGREF));
+        memcpy(atrFirst, chosen.atrLayers, dwFirst * sizeof(TAGREF));
+        SdbpAddDatabaseGuid(hsdb->pdb, result);
+        result->dwLayerCount = 0;
+        for (n = 0; n < dwFirst; ++n)
+            SdbpAddSingleLayerMatch(atrFirst[n], result);
+        for (n = 0; n < dwExeLayers; ++n)
+            SdbpAddSingleLayerMatch(atrExe[n], result);
     }
 
 Cleanup:

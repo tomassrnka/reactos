@@ -628,16 +628,34 @@ done:
     free(version);
 }
 
+static BOOL msi_is_server2003_layer( const WCHAR *name, SIZE_T len )
+{
+    static const WCHAR *layers[] = { L"WINSRV03RTM", L"WINSRV03SP1", L"WINSRV03SP2" };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(layers); i++)
+        if (wcslen( layers[i] ) == len && !wcsnicmp( name, layers[i], len )) return TRUE;
+    return FALSE;
+}
+
+/* The layers are the words of the list, as the compatibility database reads them */
 static BOOL msi_has_server2003_layer(void)
 {
-    WCHAR layers[256], *p;
+    WCHAR layers[256], *p = layers, *end;
     DWORD len = GetEnvironmentVariableW( L"__COMPAT_LAYER", layers, ARRAY_SIZE(layers) );
 
-    if (!len) return FALSE;
-    /* A list that does not fit is not read: assume the layer was chosen on purpose */
-    if (len >= ARRAY_SIZE(layers)) return TRUE;
-    for (p = layers; *p; p++)
-        if (!wcsnicmp( p, L"WINSRV03", 8 )) return TRUE;
+    /* A list that does not fit the 255 characters the database reads is not applied at all */
+    if (!len || len >= ARRAY_SIZE(layers)) return FALSE;
+
+    while (*p == '!' || *p == '#' || *p == ' ' || *p == '\t') p++;
+    while (*p)
+    {
+        end = p;
+        while (*end && *end != ' ' && *end != '\t') end++;
+        if (msi_is_server2003_layer( p, end - p )) return TRUE;
+        p = end;
+        while (*p == ' ' || *p == '\t') p++;
+    }
     return FALSE;
 }
 
