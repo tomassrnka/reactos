@@ -36,6 +36,7 @@ list(APPEND SOURCE
     GetEnvironmentVariable.c
     GetFileType.c
     GetFinalPathNameByHandle.c
+    GetOverlappedResultEx.c
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
