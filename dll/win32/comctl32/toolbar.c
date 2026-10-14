@@ -6646,12 +6646,40 @@ TOOLBAR_Notify (TOOLBAR_INFO *infoPtr, LPNMHDR lpnmh)
     case TTN_GETDISPINFOW:
         return TOOLBAR_TTGetDispInfo(infoPtr, (LPNMTTDISPINFOW)lpnmh);
 
-    case TTN_GETDISPINFOA:
-        FIXME("TTN_GETDISPINFOA - should not be received; please report\n");
-        return 0;
+    case CBEN_ENDEDITW:
+        /* A child control hosted in the toolbar, such as a ComboBoxEx, notifies its parent, which is the toolbar */
+        if (!infoPtr->bUnicode)
+        {
+            const NMCBEENDEDITW *nmedW = (const NMCBEENDEDITW *)lpnmh;
+            NMCBEENDEDITA nmedA;
 
+            memset(&nmedA, 0, sizeof(nmedA));
+            nmedA.hdr = nmedW->hdr;
+            nmedA.hdr.code = CBEN_ENDEDITA;
+            nmedA.fChanged = nmedW->fChanged;
+            nmedA.iNewSelection = nmedW->iNewSelection;
+            nmedA.iWhy = nmedW->iWhy;
+            WideCharToMultiByte(CP_ACP, 0, nmedW->szText, -1, nmedA.szText, ARRAY_SIZE(nmedA.szText) - 1, NULL, NULL);
+            /* a text that did not fit ends with half of a double byte character */
+            for (CHAR *psz = nmedA.szText; *psz; psz = CharNextExA(CP_ACP, psz, 0))
+            {
+                if (IsDBCSLeadByteEx(CP_ACP, (BYTE)*psz) && !psz[1])
+                {
+                    *psz = 0;
+                    break;
+                }
+            }
+            return SendMessageW(infoPtr->hwndNotify, WM_NOTIFY, nmedA.hdr.idFrom, (LPARAM)&nmedA);
+        }
+        return SendMessageW(infoPtr->hwndNotify, WM_NOTIFY, lpnmh->idFrom, (LPARAM)lpnmh);
+
+    case TTN_SHOW:
+        /* the tooltip control of a version 6 toolbar notifies itself and does not reach the parent */
+        if (infoPtr->iVersion == 6)
+            return 0;
+        /* fall through */
     default:
-        return 0;
+        return SendMessageW(infoPtr->hwndNotify, WM_NOTIFY, lpnmh->idFrom, (LPARAM)lpnmh);
     }
 }
 
