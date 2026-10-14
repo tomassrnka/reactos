@@ -2177,11 +2177,15 @@ static int ngc_write_boot(struct ngc_vol *v, u64 sectors, u8 *buf)
 	return err;
 }
 
-/* A change that may have reached the overlay failed half way: nothing more may be written. */
+/*
+ * A change that may have reached the overlay failed half way: nothing more may be written, whatever
+ * the error (ngc_writeback_failed retries out-of-space and out-of-memory, which must not happen here).
+ */
 static int ngc_resize_failed(struct ngc_vol *v, int err)
 {
 	printk(KERN_ERR "ngc: volume resize failed %d after changing metadata\n", err);
-	return ngc_writeback_failed(v, err == -ENOMEM ? -EIO : err);
+	ngc_writeback_failed(v, -EIO);
+	return err;
 }
 
 /*
