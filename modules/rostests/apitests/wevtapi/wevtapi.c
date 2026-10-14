@@ -499,6 +499,16 @@ static void test_query(void)
     SetLastError(0xdeadbeef);
     Query = pEvtQuery(NULL, NULL, L"<QueryList><Query Id=\"0\"><Select Path=\"Application\">*</Select><Suppress Path=\"wevtapi_apitest_no_such_channel\">*[System[Level=9]]</Suppress></Query></QueryList>", EvtQueryChannelPath);
     ok_handle_error(Query, ERROR_EVT_CHANNEL_NOT_FOUND);
+    /* every selection needs a path of its own or the default of its query: one that has neither is refused, also behind one that has */
+    SetLastError(0xdeadbeef);
+    Query = pEvtQuery(NULL, NULL, L"<QueryList><Query Id=\"0\"><Select>*</Select></Query></QueryList>", EvtQueryChannelPath);
+    ok_handle_error(Query, ERROR_EVT_INVALID_QUERY);
+    SetLastError(0xdeadbeef);
+    Query = pEvtQuery(NULL, NULL, L"<QueryList><Query Id=\"0\"><Select Path='Application'>*</Select><Select>*</Select></Query></QueryList>", EvtQueryChannelPath);
+    ok_handle_error(Query, ERROR_EVT_INVALID_QUERY);
+    SetLastError(0xdeadbeef);
+    Query = pEvtQuery(NULL, NULL, L"<QueryList><Query Id=\"0\" Path=\"Application\"><Select>*</Select></Query><Query Id=\"1\"><Select>*</Select></Query></QueryList>", EvtQueryChannelPath);
+    ok_handle_error(Query, ERROR_EVT_INVALID_QUERY);
     SetLastError(0xdeadbeef);
     Query = pEvtQuery(NULL, NULL, L"<QueryList></QueryList>", EvtQueryChannelPath);
     ok_handle_error(Query, ERROR_INVALID_PARAMETER);
@@ -826,6 +836,18 @@ static void test_extended_status(void)
     ok(Used == 0, "got %lu\n", Used);
 }
 
+/* the names of the header have the values of the Windows header: ordinary source that uses them compiles and means the same */
+static void test_header_names(void)
+{
+    ok(EvtFormatMessageEvent == 1 && EvtFormatMessageXml == 9, "format message flags\n");
+    ok(EvtEventQueryIDs == 0 && EvtEventPath == 1 && EvtEventPropertyIdEND == 2, "event properties\n");
+    ok(EvtPublisherMetadataPublisherGuid == 0 && EvtPublisherMetadataChannelReferences == 6 &&
+       EvtPublisherMetadataLevels == 12 && EvtPublisherMetadataTasks == 16 && EvtPublisherMetadataOpcodes == 21 &&
+       EvtPublisherMetadataKeywords == 25 && EvtPublisherMetadataPropertyIdEND == 29, "publisher metadata properties\n");
+    ok(EvtChannelReferenceImported == 1, "channel reference flags\n");
+    ok(EventMetadataEventID == 0 && EventMetadataEventTemplate == 8 && EvtEventMetadataPropertyIdEND == 9, "event metadata properties\n");
+}
+
 START_TEST(wevtapi)
 {
     hWevtapi = LoadLibraryW(L"wevtapi.dll");
@@ -837,6 +859,7 @@ START_TEST(wevtapi)
     }
 
     test_exports();
+    test_header_names();
 
 #define GET(name) p##name = (PVOID)GetProcAddress(hWevtapi, #name)
     GET(EvtOpenSession); GET(EvtClose); GET(EvtCancel); GET(EvtGetExtendedStatus);
