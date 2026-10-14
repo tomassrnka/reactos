@@ -347,6 +347,7 @@ static void TestActions(void)
     ok(EventCount == 2 && Events[1].Type == COPYFILE2_CALLBACK_STREAM_FINISHED && Events[1].StreamBytes == 0,
        "%d messages\n", EventCount);
     ok(Exists(DestFile), "A stop at the start of the stream deleted the destination\n");
+    ok(SizeOf(DestFile) == 100, "A stop at the start of the stream left a destination of %I64u bytes, the source has 100\n", SizeOf(DestFile));
     hr = RunCopy(0, TRUE, 3, COPYFILE2_PROGRESS_STOP, NULL, -1, &Error);
     ok(hr == HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED) && EventCount == 4, "hr = %#lx, %d messages\n", hr, EventCount);
     ok(Exists(DestFile) && SizeOf(DestFile) == 100 && SameContent(SourceFile, DestFile),
@@ -841,6 +842,90 @@ static void TestRelativeNames(void)
     RemoveDirectoryW(OtherDirectory);
 }
 
+/* A file is never copied onto itself, however its name is written (an extended name, the short name) */
+static void TestSameFile(void)
+{
+    COPYFILE2_EXTENDED_PARAMETERS Params;
+    WCHAR Short[MAX_PATH], Extended[MAX_PATH];
+    HRESULT hr;
+    DWORD ShortLength;
+
+    ZeroMemory(&Params, sizeof(Params));
+    Params.dwSize = sizeof(Params);
+    StringCchPrintfW(Extended, _countof(Extended), L"\\\\?\\%s", SourceFile);
+
+    /* an empty file has no file index on some file systems: it is the same file all the same */
+    RemoveFiles();
+    WritePattern(SourceFile, 0, FILE_ATTRIBUTE_NORMAL);
+    hr = pCopyFile2(SourceFile, Extended, &Params);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION), "empty file onto its extended name: hr = %#lx\n", hr);
+    ok(Exists(SourceFile), "empty file onto its extended name: the file is gone\n");
+    hr = pCopyFile2(Extended, SourceFile, &Params);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION), "empty file from its extended name: hr = %#lx\n", hr);
+    ok(Exists(SourceFile), "empty file from its extended name: the file is gone\n");
+    hr = pCopyFile2(Extended, Extended, &Params);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION), "empty file onto itself, extended names: hr = %#lx\n", hr);
+    ok(Exists(SourceFile), "empty file onto itself, extended names: the file is gone\n");
+
+    ShortLength = GetShortPathNameW(SourceFile, Short, _countof(Short));
+    if (ShortLength && ShortLength < _countof(Short) && _wcsicmp(Short, SourceFile))
+    {
+        hr = pCopyFile2(SourceFile, Short, &Params);
+        ok(hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION), "empty file onto its short name: hr = %#lx\n", hr);
+        ok(Exists(SourceFile), "empty file onto its short name: the file is gone\n");
+        hr = pCopyFile2(Short, SourceFile, &Params);
+        ok(hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION), "empty file from its short name: hr = %#lx\n", hr);
+        ok(Exists(SourceFile), "empty file from its short name: the file is gone\n");
+
+        /* a cancel after the check must not take the source with it */
+        {
+            BOOL Cancel = TRUE;
+
+            Params.pfCancel = &Cancel;
+            hr = pCopyFile2(SourceFile, Short, &Params);
+            Params.pfCancel = NULL;
+            ok(FAILED(hr), "a cancelled copy onto the short name: hr = %#lx\n", hr);
+            ok(Exists(SourceFile), "a cancelled copy onto the short name took the source\n");
+        }
+    }
+    else
+    {
+        skip("The volume has no short names\n");
+    }
+
+    /* a file with data keeps it */
+    WritePattern(SourceFile, 1000, FILE_ATTRIBUTE_NORMAL);
+    hr = pCopyFile2(SourceFile, Extended, &Params);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION), "file onto its extended name: hr = %#lx\n", hr);
+    ok(SizeOf(SourceFile) == 1000, "file onto its extended name: %I64u bytes are left of 1000\n", SizeOf(SourceFile));
+    RemoveFiles();
+}
+
+/* The flags that change what is opened or copied */
+static void TestFlags(void)
+{
+    COPYFILE2_EXTENDED_PARAMETERS Params;
+    HRESULT hr;
+
+    ZeroMemory(&Params, sizeof(Params));
+    Params.dwSize = sizeof(Params);
+
+    /* COPY_FILE_OPEN_SOURCE_FOR_WRITE changes nothing that can be seen: a read only source is copied with it as without it (measured on Windows 10) */
+    RemoveFiles();
+    WritePattern(SourceFile, 100, FILE_ATTRIBUTE_READONLY);
+    Params.dwCopyFlags = 0;
+    hr = pCopyFile2(SourceFile, DestFile, &Params);
+    ok(hr == S_OK, "read-only source, no flags: hr = %#lx\n", hr);
+    SetFileAttributesW(DestFile, FILE_ATTRIBUTE_NORMAL);
+    DeleteFileW(DestFile);
+    Params.dwCopyFlags = COPY_FILE_OPEN_SOURCE_FOR_WRITE;
+    hr = pCopyFile2(SourceFile, DestFile, &Params);
+    ok(hr == S_OK, "read-only source, OPEN_SOURCE_FOR_WRITE: hr = %#lx\n", hr);
+    ok(Exists(DestFile) && SizeOf(DestFile) == 100, "read-only source, OPEN_SOURCE_FOR_WRITE: the destination is not a copy\n");
+    SetFileAttributesW(DestFile, FILE_ATTRIBUTE_NORMAL);
+    RemoveFiles();
+}
+
 START_TEST(CopyFile2)
 {
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
@@ -867,6 +952,8 @@ START_TEST(CopyFile2)
     TestStreams();
     TestRelativeNames();
     TestExtendedNames();
+    TestSameFile();
+    TestFlags();
 
     RemoveFiles();
 }

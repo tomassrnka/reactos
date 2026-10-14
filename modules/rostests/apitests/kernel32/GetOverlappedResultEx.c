@@ -156,7 +156,7 @@ static void TestPipe(void)
     static const WCHAR PipeName[] = L"\\\\.\\pipe\\GetOverlappedResultEx-test";
     OVERLAPPED Overlapped;
     HANDLE hServer, hClient, hEvent;
-    DWORD Number, Written, Error, Start, Elapsed;
+    DWORD Number, Error, Start, Elapsed;
     char Buffer[16];
     WORKER Work;
     HANDLE hWorker;
