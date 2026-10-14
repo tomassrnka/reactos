@@ -13,7 +13,6 @@
 #define NDEBUG
 #include <debug.h>
 
-static
 BOOL
 GetFsModule(
     _In_ PWSTR pszFileSystem,

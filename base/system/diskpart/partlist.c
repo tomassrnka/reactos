@@ -1865,7 +1865,6 @@ GetDiskForVolume(
 }
 
 
-static
 PPARTENTRY
 GetPartitionForVolume(
     _In_ PVOLENTRY VolumeEntry)

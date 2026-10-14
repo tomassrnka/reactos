@@ -79,6 +79,16 @@
 #define IDS_DETAIL_NO_DISKS            1137
 #define IDS_DETAIL_NO_VOLUME           1138
 
+#define IDS_EXTEND_SUCCESS             1160
+#define IDS_EXTEND_FS_SUCCESS          1161
+#define IDS_EXTEND_NO_SPACE            1162
+#define IDS_EXTEND_FS_UNSUPPORTED      1163
+#define IDS_EXTEND_FAIL                1165
+#define IDS_EXTEND_FS_FAIL             1166
+#define IDS_EXTEND_NOT_PARTITION       1167
+#define IDS_EXTEND_IN_USE              1168
+#define IDS_EXTEND_FAT_TOO_BIG         1169
+
 #define IDS_FILESYSTEMS_CURRENT        1170
 #define IDS_FILESYSTEMS_FORMATTING     1171
 #define IDS_FILESYSTEMS_TYPE           1172
@@ -137,6 +147,13 @@
 #define IDS_SETID_SUCCESS              4451
 #define IDS_SETID_INVALID_FORMAT       4452
 #define IDS_SETID_INVALID_TYPE         4453
+
+#define IDS_SHRINK_SUCCESS             4460
+#define IDS_SHRINK_QUERYMAX            4461
+#define IDS_SHRINK_TOO_BIG             4462
+#define IDS_SHRINK_FS_UNSUPPORTED      4463
+#define IDS_SHRINK_FAIL                4464
+#define IDS_SHRINK_NOT_PARTITION       4465
 
 #define IDS_UNIQUID_DISK_INVALID_STYLE 4500
 
