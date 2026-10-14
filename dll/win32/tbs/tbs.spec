@@ -4,14 +4,14 @@
 @ stdcall GetDeviceIDString(ptr long ptr ptr)
 @ stub GetDeviceIDWithTimeout
 @ stdcall Tbsi_Context_Create(ptr ptr)
-@ stub Tbsi_Create_Windows_Key
+@ stdcall Tbsi_Create_Windows_Key(long)
 @ stub Tbsi_FilterLog
 @ stdcall Tbsi_GetDeviceInfo(long ptr)
-@ stub Tbsi_Get_OwnerAuth
+@ stdcall Tbsi_Get_OwnerAuth(ptr long ptr ptr)
 @ stdcall Tbsi_Get_TCG_Log(ptr ptr ptr)
-@ stub Tbsi_Get_TCG_Log_Ex
+@ stdcall Tbsi_Get_TCG_Log_Ex(long ptr ptr)
 @ stdcall Tbsi_Physical_Presence_Command(ptr ptr long ptr ptr)
-@ stub Tbsi_Revoke_Attestation
+@ stdcall Tbsi_Revoke_Attestation()
 @ stub Tbsi_ShaHash
 @ stdcall Tbsip_Cancel_Commands(ptr)
 @ stdcall Tbsip_Context_Close(ptr)

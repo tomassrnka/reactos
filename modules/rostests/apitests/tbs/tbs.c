@@ -158,9 +158,15 @@ static void test_device_id_convention(void)
         return;
     }
 
+#ifdef _MSC_VER
+    __asm mov Before, esp
+    pGetDeviceIDString(Buffer, ARRAYSIZE(Buffer), &Used, &Protected);
+    __asm mov After, esp
+#else
     __asm__ volatile ("movl %%esp, %0" : "=r"(Before) : : "memory");
     pGetDeviceIDString(Buffer, ARRAYSIZE(Buffer), &Used, &Protected);
     __asm__ volatile ("movl %%esp, %0" : "=r"(After) : : "memory");
+#endif
     ok(Before == After, "the stack pointer moved by %ld\n", (LONG)(Before - After));
 }
 #endif
@@ -253,6 +259,71 @@ static void test_context_functions(void)
     ok(Result == TBS_E_INVALID_CONTEXT, "got 0x%lx\n", Result);
 }
 
+/* Windows 8 and later export these; Windows 7 and Windows Server 2008 R2 do not */
+static void test_windows8_exports(void)
+{
+    typedef TBS_RESULT (WINAPI *POwnerAuth)(TBS_HCONTEXT, UINT32, BYTE *, UINT32 *);
+    typedef TBS_RESULT (WINAPI *PLogEx)(UINT32, BYTE *, UINT32 *);
+    typedef TBS_RESULT (WINAPI *PRevoke)(void);
+    typedef TBS_RESULT (WINAPI *PCreateKey)(UINT32);
+    POwnerAuth pOwnerAuth = (PVOID)GetProcAddress(hTbs, "Tbsi_Get_OwnerAuth");
+    PLogEx pLogEx = (PVOID)GetProcAddress(hTbs, "Tbsi_Get_TCG_Log_Ex");
+    PRevoke pRevoke = (PVOID)GetProcAddress(hTbs, "Tbsi_Revoke_Attestation");
+    PCreateKey pCreateKey = (PVOID)GetProcAddress(hTbs, "Tbsi_Create_Windows_Key");
+    static const UINT32 Types[] = { 0, 1, 2, 3, 4, 12, 13, 0x7fff };
+    static const ULONG_PTR Contexts[] = { 0, 0x1234 };
+    BYTE Buffer[64];
+    UINT32 Size;
+    TBS_RESULT Result;
+    UINT i, j;
+
+    if (!pOwnerAuth || !pLogEx || !pRevoke || !pCreateKey)
+    {
+        skip("The exports of Windows 8 are not there\n");
+        return;
+    }
+
+    /* the output pointers are looked at first; then no context and no type fits */
+    Size = sizeof(Buffer);
+    Result = pOwnerAuth(NULL, 1, NULL, &Size);
+    ok(Result == TBS_E_INVALID_OUTPUT_POINTER, "got 0x%lx\n", Result);
+    Result = pOwnerAuth(NULL, 1, Buffer, NULL);
+    ok(Result == TBS_E_INVALID_OUTPUT_POINTER, "got 0x%lx\n", Result);
+    for (i = 0; i < ARRAYSIZE(Contexts); i++)
+    {
+        for (j = 0; j < ARRAYSIZE(Types); j++)
+        {
+            Size = sizeof(Buffer);
+            Buffer[0] = 0xcc;
+            Result = pOwnerAuth((TBS_HCONTEXT)Contexts[i], Types[j], Buffer, &Size);
+            ok(Result == TBS_E_INVALID_CONTEXT_PARAM, "%Iu, %lu: got 0x%lx\n", Contexts[i], (ULONG)Types[j], Result);
+            ok(Size == sizeof(Buffer) && Buffer[0] == 0xcc, "%Iu, %lu: the output was changed\n", Contexts[i], (ULONG)Types[j]);
+        }
+    }
+
+    /* the log of a machine without a TPM: only the pointer to the size is checked before that */
+    for (j = 0; j < 5; j++)
+    {
+        Size = sizeof(Buffer);
+        Result = pLogEx(j, Buffer, &Size);
+        ok(Result == TBS_E_TPM_NOT_FOUND, "%u: got 0x%lx\n", j, Result);
+        ok(Size == sizeof(Buffer), "%u: the size is %lu\n", j, (ULONG)Size);
+    }
+    Result = pLogEx(1, Buffer, NULL);
+    ok(Result == TBS_E_BAD_PARAMETER, "got 0x%lx\n", Result);
+    Size = sizeof(Buffer);
+    Result = pLogEx(1, NULL, &Size);
+    ok(Result == TBS_E_TPM_NOT_FOUND, "got 0x%lx\n", Result);
+
+    Result = pRevoke();
+    ok(Result == TBS_E_TPM_NOT_FOUND, "got 0x%lx\n", Result);
+
+    Result = pCreateKey(0);
+    ok(Result == TBS_E_BAD_PARAMETER, "got 0x%lx\n", Result);
+    Result = pCreateKey(1);
+    ok(Result == TBS_E_BAD_PARAMETER, "got 0x%lx\n", Result);
+}
+
 START_TEST(tbs)
 {
     hTbs = LoadLibraryW(L"tbs.dll");
@@ -288,6 +359,7 @@ START_TEST(tbs)
 
     test_context_create();
     test_device_info();
+    test_windows8_exports();
 #ifdef __i386__
     test_device_id_convention();
 #endif

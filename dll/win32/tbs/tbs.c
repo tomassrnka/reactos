@@ -89,6 +89,37 @@ TBS_RESULT WINAPI Tbsi_Physical_Presence_Command(TBS_HCONTEXT context, const BYT
     return TBS_E_INVALID_CONTEXT;
 }
 
+TBS_RESULT WINAPI Tbsi_Get_OwnerAuth(TBS_HCONTEXT context, TBS_OWNERAUTH_TYPE type, BYTE *buffer, UINT32 *size)
+{
+    FIXME("(%p, %u, %p, %p) stub\n", context, type, buffer, size);
+
+    if (!buffer || !size) return TBS_E_INVALID_OUTPUT_POINTER;
+    /* measured on Windows 10: whatever the context and the type are, there is none that fits */
+    return TBS_E_INVALID_CONTEXT_PARAM;
+}
+
+TBS_RESULT WINAPI Tbsi_Get_TCG_Log_Ex(UINT32 type, BYTE *buffer, UINT32 *size)
+{
+    FIXME("(%u, %p, %p) stub\n", type, buffer, size);
+
+    if (!size) return TBS_E_BAD_PARAMETER;
+    return TBS_E_TPM_NOT_FOUND;
+}
+
+TBS_RESULT WINAPI Tbsi_Revoke_Attestation(void)
+{
+    FIXME("() stub\n");
+    return TBS_E_TPM_NOT_FOUND;
+}
+
+TBS_RESULT WINAPI Tbsi_Create_Windows_Key(UINT32 key)
+{
+    FIXME("(%u) stub\n", key);
+
+    /* Windows 10 refuses every value without a TPM */
+    return TBS_E_BAD_PARAMETER;
+}
+
 HRESULT WINAPI GetDeviceIDString(WCHAR *out, UINT32 size, UINT32 *used, BOOL *tpm)
 {
     FIXME("(%p, %u, %p, %p) stub\n", out, size, used, tpm);
