@@ -15,6 +15,7 @@
 #endif
 #include <stdio.h>
 #include <strsafe.h>
+#include <uxtheme.h>
 #include "wine/test.h"
 #include "apitest_iathook.h"
 #include "appshim_apitest.h"
@@ -265,20 +266,41 @@ static void post_640_2_no(void)
     bFix = TRUE;
 }
 
+/* An acgenral that imports uxtheme only when it needs it (ReactOS) has no import to redirect: its effect on the real uxtheme is checked instead */
+static BOOL g_ThemeViaRealUxtheme;
+static HMODULE g_RealUxtheme;
+static DWORD g_RealThemeFlags;
+static void (WINAPI *pRealSetThemeAppProperties)(DWORD dwFlags);
+static DWORD (WINAPI *pRealGetThemeAppProperties)(void);
+#define THEME_PROPS_ALL (STAP_ALLOW_NONCLIENT | STAP_ALLOW_CONTROLS | STAP_ALLOW_WEBCONTENT)
+
 static void pre_theme(void)
 {
     g_ThemeCount = 0;
     g_LastThemeFlags = 0xffffffff;
+    if (g_ThemeViaRealUxtheme)
+        pRealSetThemeAppProperties(THEME_PROPS_ALL);
 }
 
 static void post_theme(void)
 {
+    if (g_ThemeViaRealUxtheme)
+    {
+        ok_hex(pRealGetThemeAppProperties(), 0);
+        return;
+    }
     ok_int(g_ThemeCount, 1);
     ok_hex(g_LastThemeFlags, 0);
 }
 
 static void post_theme_no(void)
 {
+    if (g_ThemeViaRealUxtheme)
+    {
+        /* 2k3 does not guard against a second initialization */
+        ok_hex(pRealGetThemeAppProperties(), g_Version == _WIN32_WINNT_WS03 ? 0 : THEME_PROPS_ALL);
+        return;
+    }
     if (g_Version == _WIN32_WINNT_WS03)
     {
         ok_int(g_ThemeCount, 1);
@@ -306,11 +328,36 @@ static VOID unhook_disp(HMODULE dll)
 
 static BOOL hook_theme(HMODULE dll)
 {
-    return RedirectIat(dll, "uxtheme.dll", "SetThemeAppProperties", (ULONG_PTR)mSetThemeAppProperties, (ULONG_PTR*)&pSetThemeAppProperties);
+    g_ThemeViaRealUxtheme = FALSE;
+    if (FindImportDescriptor((PBYTE)dll, "uxtheme.dll"))
+        return RedirectIat(dll, "uxtheme.dll", "SetThemeAppProperties", (ULONG_PTR)mSetThemeAppProperties, (ULONG_PTR*)&pSetThemeAppProperties);
+
+    g_RealUxtheme = LoadLibraryA("uxtheme.dll");
+    if (!g_RealUxtheme)
+        return FALSE;
+    pRealSetThemeAppProperties = (PVOID)GetProcAddress(g_RealUxtheme, "SetThemeAppProperties");
+    pRealGetThemeAppProperties = (PVOID)GetProcAddress(g_RealUxtheme, "GetThemeAppProperties");
+    if (!pRealSetThemeAppProperties || !pRealGetThemeAppProperties)
+    {
+        FreeLibrary(g_RealUxtheme);
+        g_RealUxtheme = NULL;
+        return FALSE;
+    }
+    g_RealThemeFlags = pRealGetThemeAppProperties();
+    g_ThemeViaRealUxtheme = TRUE;
+    return TRUE;
 }
 
 static VOID unhook_theme(HMODULE dll)
 {
+    if (g_ThemeViaRealUxtheme)
+    {
+        pRealSetThemeAppProperties(g_RealThemeFlags);
+        FreeLibrary(g_RealUxtheme);
+        g_RealUxtheme = NULL;
+        g_ThemeViaRealUxtheme = FALSE;
+        return;
+    }
     RestoreIat(dll, "uxtheme.dll", "SetThemeAppProperties", (ULONG_PTR)pSetThemeAppProperties);
 }
 
