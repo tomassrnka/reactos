@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    timeBeginPeriod.c
     timeGetTime.c
     testlist.c)
 
