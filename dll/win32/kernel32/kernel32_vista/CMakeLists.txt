@@ -26,7 +26,6 @@ list(APPEND SOURCE
     restart.c
     ResolveLocaleName.c
     sync.c
-    WaitOnAddress.c
     ThreadDescription.c
     threadpool.c
     vista.c

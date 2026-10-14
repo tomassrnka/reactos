@@ -4772,27 +4772,6 @@ RtlSleepConditionVariableSRW(
     _Inout_ PRTL_SRWLOCK SRWLock,
     _In_opt_ PLARGE_INTEGER TimeOut,
     _In_ ULONG Flags);
-
-NTSYSAPI
-NTSTATUS
-NTAPI
-RtlWaitOnAddress(
-    _In_ const volatile VOID *Address,
-    _In_ PVOID CompareAddress,
-    _In_ SIZE_T AddressSize,
-    _In_opt_ PLARGE_INTEGER Timeout);
-
-NTSYSAPI
-VOID
-NTAPI
-RtlWakeAddressAll(
-    _In_ const volatile VOID *Address);
-
-NTSYSAPI
-VOID
-NTAPI
-RtlWakeAddressSingle(
-    _In_ const volatile VOID *Address);
 #endif
 
 //
