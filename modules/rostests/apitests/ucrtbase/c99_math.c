@@ -660,6 +660,24 @@ static void test_gamma(void)
     CALL(f, p_tgammaf(-37.9f)); ok(f > 0.0f && f < 1e-40f, "tgammaf(-37.9) = %g\n", (double)f); ok_errno(SENTINEL);
     CALL(f, p_tgammaf(-38.1f)); ok(f == 0.0f && !is_neg(f), "tgammaf(-38.1) = %g\n", (double)f); ok_errno(ERANGE);
     CALL(f, p_tgammaf(-100.5f)); ok(f == 0.0f && !is_neg(f), "tgammaf(-100.5) = %g\n", (double)f); ok_errno(ERANGE);
+
+    /* the result is rounded to double before it is returned: the x87 range would keep it finite */
+    d = p_tgamma(184.0) / 8.98846567431158e307;
+    ok(d == inf, "tgamma(184) / 2^1023 = %g\n", d);
+}
+
+static void test_gamma_rounding_modes(void)
+{
+    unsigned int old = p_controlfp(0, 0);
+    double d;
+    float f;
+
+    /* what overflowed is a range error also when the mode clamps it to the maximum */
+    p_controlfp(_RC_DOWN, _MCW_RC);
+    CALL(d, p_lgamma(2.6e305)); ok(d >= DBL_MAX, "lgamma(2.6e305) = %g\n", d); ok_errno(ERANGE);
+    CALL(d, p_tgamma(172.0)); ok(d >= DBL_MAX, "tgamma(172) = %g\n", d); ok_errno(ERANGE);
+    CALL(f, p_tgammaf(36.0f)); ok(f >= FLT_MAX, "tgammaf(36) = %g\n", (double)f); ok_errno(ERANGE);
+    p_controlfp(old, _MCW_RC);
 }
 
 static struct _exception g_exception;
@@ -805,6 +823,7 @@ START_TEST(c99_math)
     test_modff();
     test_exception_flags();
     test_gamma();
+    test_gamma_rounding_modes();
     test_logb();
     test_matherr_reports();
     test_nan();

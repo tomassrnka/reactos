@@ -19,7 +19,7 @@ double __cdecl lgamma(double x)
 	r = eval_as_double(__lgamma_r(x, &sign));
 
 	/* ReactOS: the poles and an overflow are range errors on Windows, the infinite arguments are not */
-	if (isinf(r) && isfinite(x))
+	if (fabs(r) >= DBL_MAX && isfinite(x))  /* also the maximum that a rounding mode clamps to */
 		errno = ERANGE;
 	return r;
 }

@@ -16,7 +16,7 @@ float __cdecl tgammaf(float x)
 		errno = ERANGE;
 		return 0;
 	}
-	if (isfinite(x) && x != 0 && (isinf(f) || f == 0))
+	if (isfinite(x) && x != 0 && (fabs(d) > FLT_MAX || f == 0))
 		errno = ERANGE;
 	return f;
 }

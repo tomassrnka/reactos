@@ -129,7 +129,7 @@ double __cdecl tgamma(double x)
 	if (ix < (0x3ff-54)<<20) {
 		/* |x| < 2^-54: tgamma(x) ~ 1/x, +-0 raises div-by-zero */
 		y = eval_as_double(1/x);
-		if (isinf(y)) errno = ERANGE;  /* ReactOS: the zeros and the subnormals whose inverse overflows */
+		if (fabs(y) >= DBL_MAX) errno = ERANGE;  /* ReactOS: the zeros and the subnormals whose inverse overflows */
 		return y;
 	}
 
@@ -156,8 +156,7 @@ double __cdecl tgamma(double x)
 	/* x =< -184: tgamma(x)=+-0 with underflow */
 	if (ix >= 0x40670000) { /* |x| >= 184 */
 		errno = ERANGE;
-		x *= 0x1p1023;
-		return x;
+		return eval_as_double(x * 0x1p1023);  /* ReactOS: rounded to double, the x87 range would keep it finite */
 	}
 
 	absx = sign ? -x : x;
@@ -185,7 +184,7 @@ double __cdecl tgamma(double x)
 	z = pow(y, 0.5*z);
 	y = eval_as_double(r * z * z);
 	/* ReactOS: a result that left the range of double is a range error, as on Windows */
-	if (isinf(y) || y == 0.0)
+	if (fabs(y) >= DBL_MAX || y == 0.0)  /* ReactOS: also the result that a rounding mode clamped to the maximum */
 		errno = ERANGE;
 	return y;
 }
