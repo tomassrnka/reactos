@@ -246,19 +246,27 @@ static void set_status(Download *This, const WCHAR *text)
         dochost_set_status_text(This->doc_host, text);
 }
 
-/* keeps a name to at most 200 characters and its extension (up to 100); the full path is bounded again where it is built */
-static void limit_file_name(WCHAR *name)
+static BOOL is_device_name(const WCHAR *name);
+static void prefix_device_name(WCHAR *name, size_t max);
+
+/* keeps a name within max characters: the name is kept whole when it fits, else the base name is shortened and the
+   extension (as long as it leaves room for a character of the base) stays */
+static void limit_file_name(WCHAR *name, size_t max)
 {
     WCHAR *ext = PathFindExtensionW(name);
     size_t len = wcslen(name), ext_len = wcslen(ext);
 
-    if(len <= 200)
-        return;
-    if(ext_len > 100) {
-        name[200] = 0;
-        return;
+    if(len > max) {
+        if(ext_len < max)
+            memmove(name + max - ext_len, ext, (ext_len + 1) * sizeof(WCHAR));
+        else
+            name[max] = 0;
+
+        /* a name cut short does not end in a dot or a space, and is not a device name by now */
+        for(len = wcslen(name); len && (name[len - 1] == '.' || name[len - 1] == ' '); len--)
+            name[len - 1] = 0;
+        prefix_device_name(name, max + 1);
     }
-    memmove(name + 200 - ext_len, ext, (ext_len + 1) * sizeof(WCHAR));
 }
 
 static void split_url(Download *This, const WCHAR *url)
@@ -330,32 +338,39 @@ static void sanitize_file_name(WCHAR *name)
     while(dst > name && (dst[-1] == '.' || dst[-1] == ' '))
         *--dst = 0;
 
-    /* DOS device names open the device whatever the extension or the directory */
-    {
-        static const WCHAR *devices[] = { L"CON", L"PRN", L"AUX", L"NUL" };
-        size_t base = 0, i;
+    prefix_device_name(name, MAX_PATH);
+}
 
-        while(name[base] && name[base] != '.')
-            base++;
-        while(base && name[base - 1] == ' ')
-            base--;
+/* DOS device names open the device whatever the extension or the directory */
+static BOOL is_device_name(const WCHAR *name)
+{
+    static const WCHAR *devices[] = { L"CON", L"PRN", L"AUX", L"NUL" };
+    size_t base = 0, i;
 
-        for(i = 0; i < ARRAY_SIZE(devices); i++)
-            if(base == 3 && !wcsnicmp(name, devices[i], 3))
-                break;
-        if(i == ARRAY_SIZE(devices) && base == 4 && (!wcsnicmp(name, L"COM", 3) || !wcsnicmp(name, L"LPT", 3)) &&
-           name[3] >= '1' && name[3] <= '9')
-            i = 0;
+    while(name[base] && name[base] != '.')
+        base++;
+    while(base && name[base - 1] == ' ')
+        base--;
 
-        if(i < ARRAY_SIZE(devices)) {
-            size_t len = wcslen(name);
+    for(i = 0; i < ARRAY_SIZE(devices); i++)
+        if(base == 3 && !wcsnicmp(name, devices[i], 3))
+            return TRUE;
+    return base == 4 && (!wcsnicmp(name, L"COM", 3) || !wcsnicmp(name, L"LPT", 3)) && name[3] >= '1' && name[3] <= '9';
+}
 
-            if(len + 2 > MAX_PATH)
-                name[MAX_PATH - 2] = 0, len = MAX_PATH - 2;
-            memmove(name + 1, name, (len + 1) * sizeof(WCHAR));
-            name[0] = '_';
-        }
-    }
+/* a device name gets an underscore in front; max is the room of the buffer in characters, the end included */
+static void prefix_device_name(WCHAR *name, size_t max)
+{
+    size_t len;
+
+    if(!is_device_name(name))
+        return;
+
+    len = wcslen(name);
+    if(len + 2 > max)
+        name[max - 2] = 0, len = max - 2;
+    memmove(name + 1, name, (len + 1) * sizeof(WCHAR));
+    name[0] = '_';
 }
 
 static int hex_digit(WCHAR c)
@@ -579,12 +594,18 @@ static BOOL create_temp_file(Download *This)
 
     /* the whole path has to fit MAX_PATH: shorten the base name, the extension stays */
     {
-        size_t room = MAX_PATH - 1 - wcslen(dir) - wcslen(ext) - 8 /* " (999)" and a separator */;
+        size_t room = MAX_PATH - 1 - wcslen(dir) - wcslen(ext) - 9 /* " (999)", a separator and an underscore */;
 
         if((int)room < 1)
             return FALSE;
-        if(wcslen(base) > room)
+        if(wcslen(base) > room) {
+            size_t len;
+
             base[room] = 0;
+            /* a name cut short does not end in a dot or a space */
+            for(len = wcslen(base); len > 1 && (base[len - 1] == '.' || base[len - 1] == ' '); len--)
+                base[len - 1] = 0;
+        }
     }
 
     for(i = 0; i < 1000; i++) {
@@ -592,6 +613,8 @@ static BOOL create_temp_file(Download *This)
             dl_swprintf(leaf, ARRAY_SIZE(leaf), L"%s (%u)%s", base, i, ext);
         else
             dl_swprintf(leaf, ARRAY_SIZE(leaf), L"%s%s", base, ext);
+        /* shortening and the number can make a device name of a harmless one (NULpayload.txt, NUL (1).txt) */
+        prefix_device_name(leaf, ARRAY_SIZE(leaf));
         if(!PathCombineW(candidate, dir, leaf))
             return FALSE;
 
@@ -1217,6 +1240,13 @@ static BOOL choose_save_path(Download *This, WCHAR *file)
     *p = 0;
 
     lstrcpynW(file, This->name, MAX_PATH);
+    {
+        /* the name offered has to fit behind the folder (a separator and the end take two characters) */
+        size_t room = MAX_PATH - 2 - wcslen(dir);
+
+        if(room >= 8 && wcslen(file) > room)
+            limit_file_name(file, room);
+    }
     ofn.hwndOwner = This->owner && IsWindow(This->owner) ? This->owner : NULL;
     ofn.lpstrFilter = filter;
     ofn.nFilterIndex = 1;
@@ -1510,7 +1540,7 @@ static HRESULT WINAPI Download_OnProgress(IBindStatusCallback *iface, ULONG prog
             This->url = wcsdup(text);
             split_url(This, text);
             sanitize_file_name(This->name);
-            limit_file_name(This->name);
+            limit_file_name(This->name, ARRAY_SIZE(This->name) - 2);
         }
         break;
     case BINDSTATUS_BEGINDOWNLOADDATA:
@@ -1641,8 +1671,9 @@ static HRESULT WINAPI DownloadHttpNegotiate_BeginningTransaction(IHttpNegotiate 
         SIZE_T size = (wcslen(This->headers) + 1) * sizeof(WCHAR);
 
         *additional = CoTaskMemAlloc(size);
-        if(*additional)
-            memcpy(*additional, This->headers, size);
+        if(!*additional)
+            return E_OUTOFMEMORY;
+        memcpy(*additional, This->headers, size);
     }
     return S_OK;
 }
@@ -1677,7 +1708,7 @@ static HRESULT WINAPI DownloadHttpNegotiate_OnResponse(IHttpNegotiate *iface, DW
 
             if(parse_content_disposition(value, file, ARRAY_SIZE(file))) {
                 lstrcpynW(This->name, file, ARRAY_SIZE(This->name));
-                limit_file_name(This->name);
+                limit_file_name(This->name, ARRAY_SIZE(This->name) - 2);
                 TRACE("file name from Content-Disposition: %s\n", debugstr_w(This->name));
             }
         }
@@ -1736,7 +1767,7 @@ static Download *create_download(DocHost *doc_host, const WCHAR *url, const WCHA
 
     split_url(This, url);
     sanitize_file_name(This->name);
-    limit_file_name(This->name);
+    limit_file_name(This->name, ARRAY_SIZE(This->name) - 2);
 
     if(doc_host) {
         This->doc_host = doc_host;
@@ -1821,6 +1852,37 @@ BOOL download_translate_message(MSG *msg)
     return IsDialogMessageW(root, msg);
 }
 
+/* The notifications of urlmon that are still queued own references of the binding and of the download: they run
+   before the apartment goes (a quit message that is queued ahead of them is kept for the caller) */
+static void drain_download_messages(void)
+{
+    DWORD start = GetTickCount();
+    BOOL quit = FALSE;
+    WPARAM code = 0;
+    int idle = 0;
+    MSG msg;
+
+    while(GetTickCount() - start < 2000) {
+        if(PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if(msg.message == WM_QUIT) {
+                quit = TRUE;
+                code = msg.wParam;
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            idle = 0;
+        }else if(++idle > 3) {
+            break;
+        }else {
+            Sleep(5);
+        }
+    }
+
+    if(quit)
+        PostQuitMessage((int)code);
+}
+
 /***********************************************************************
  *          DoFileDownload (IEFRAME.@)
  *
@@ -1853,6 +1915,7 @@ BOOL WINAPI DoFileDownload(LPWSTR url)
     if(FAILED(start_download_binding(This))) {
         download_end(This);
         download_release(This);
+        drain_download_messages();
         if(SUCCEEDED(coinit))
             CoUninitialize();
         return FALSE;
@@ -1880,6 +1943,7 @@ BOOL WINAPI DoFileDownload(LPWSTR url)
     download_release_engine(This);
     download_release(This);
 
+    drain_download_messages();
     if(SUCCEEDED(coinit))
         CoUninitialize();
     return ret;

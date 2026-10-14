@@ -1534,6 +1534,8 @@ static void extern_abort_task_destr(task_t *_task)
 static void abort_extern_binding(nsChannelBSC *This)
 {
     extern_abort_task_t *task;
+    IBinding *binding;
+    HRESULT hres = E_OUTOFMEMORY;
 
     This->extern_handled = TRUE;
 
@@ -1541,13 +1543,20 @@ static void abort_extern_binding(nsChannelBSC *This)
         return;
 
     task = heap_alloc(sizeof(*task));
-    if(!task)
+    if(task) {
+        IBindStatusCallback_AddRef(&This->bsc.IBindStatusCallback_iface);
+        task->bsc = This;
+        /* push_task destroys the task when it fails */
+        hres = push_task(&task->header, extern_abort_proc, extern_abort_task_destr, This->bsc.window->task_magic);
+    }
+    if(SUCCEEDED(hres))
         return;
 
-    IBindStatusCallback_AddRef(&This->bsc.IBindStatusCallback_iface);
-    task->bsc = This;
-    /* push_task destroys the task when it fails */
-    push_task(&task->header, extern_abort_proc, extern_abort_task_destr, This->bsc.window->task_magic);
+    /* Reads are not made any more, so a binding that is not ended here never ends: it is aborted at once */
+    binding = This->bsc.binding;
+    IBinding_AddRef(binding);
+    IBinding_Abort(binding);
+    IBinding_Release(binding);
 }
 
 /* same string in ieframe */
@@ -1605,7 +1614,17 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
         /* the headers the original request carried, as sent by the binding */
         WCHAR *request_headers = NULL;
 
-        if(!This->sent_headers && SUCCEEDED(nsChannelBSC_beginning_transaction(&This->bsc, &request_headers)) && request_headers) {
+        if(!This->sent_headers) {
+            hres = nsChannelBSC_beginning_transaction(&This->bsc, &request_headers);
+            if(FAILED(hres)) {
+                /* the request must keep its headers */
+                IBindCtx_Release(bind_ctx);
+                IUri_Release(uri);
+                return;
+            }
+        }
+
+        if(!This->sent_headers && request_headers) {
             V_VT(&headers_var) = VT_BSTR;
             V_BSTR(&headers_var) = SysAllocString(request_headers);
             CoTaskMemFree(request_headers);
@@ -1842,8 +1861,14 @@ static HRESULT nsChannelBSC_beginning_transaction(BSCallback *bsc, WCHAR **addit
 
 #ifdef __REACTOS__
     /* keep what the first request carried: a redirect continues with a channel of its own */
-    if(!This->sent_headers)
+    if(!This->sent_headers) {
         This->sent_headers = heap_strdupW(*additional_headers);
+        if(!This->sent_headers) {
+            CoTaskMemFree(*additional_headers);
+            *additional_headers = NULL;
+            return E_OUTOFMEMORY;
+        }
+    }
 #endif
 
     return S_OK;
