@@ -72,6 +72,10 @@ KMT_TESTFUNC Test_KeTimer;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmSection;
+KMT_TESTFUNC Test_MmSpecialPool;
+KMT_TESTFUNC Test_MmSpecialPoolOverrun;
+KMT_TESTFUNC Test_MmSpecialPoolUnderrun;
+KMT_TESTFUNC Test_MmSpecialPoolUseAfterFree;
 KMT_TESTFUNC Test_MmReservedMapping;
 KMT_TESTFUNC Test_NpfsConnect;
 KMT_TESTFUNC Test_NpfsCreate;
@@ -178,6 +182,10 @@ const KMT_TEST TestList[] =
     { "-KernelType",                        Test_KernelType },
     { "MmMdl",                              Test_MmMdl },
     { "MmSection",                          Test_MmSection },
+    { "MmSpecialPool",                      Test_MmSpecialPool },
+    { "-MmSpecialPoolOverrun",              Test_MmSpecialPoolOverrun },
+    { "-MmSpecialPoolUnderrun",             Test_MmSpecialPoolUnderrun },
+    { "-MmSpecialPoolUseAfterFree",         Test_MmSpecialPoolUseAfterFree },
     { "MmReservedMapping",                  Test_MmReservedMapping },
     { "NpfsConnect",                        Test_NpfsConnect },
     { "NpfsCreate",                         Test_NpfsCreate },
