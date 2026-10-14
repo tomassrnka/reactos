@@ -811,17 +811,16 @@ InternalErrorEventHandler(void *arg, const err_t err)
     /* The PCB is dead now */
     Connection->SocketContext = NULL;
 
-    /* A reset discards what was received and not read yet, as on Windows */
+    /* A reader that finds the queue empty must also find the failure: a reset
+       discards what was received and not read yet, as on Windows */
+    LockObject(Connection);
     if (err == ERR_RST)
-    {
-        LockObject(Connection);
         LibTCPEmptyQueue(Connection);
-        UnlockObject(Connection);
-    }
-
-    /* Give them one shot to receive the remaining data */
     Connection->ReceiveShutdown = TRUE;
     Connection->ReceiveShutdownStatus = TCPTranslateError(err);
+    UnlockObject(Connection);
+
+    /* Give them one shot to receive the remaining data */
     TCPRecvEventHandler(Connection);
 
     /* Terminate the connection */
