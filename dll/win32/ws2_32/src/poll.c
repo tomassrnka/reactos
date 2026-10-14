@@ -219,7 +219,9 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
         {
             ULONG Flags;
 
-            if (!GetHandleInformation((HANDLE)PollInfo->Handles[k].Handle, &Flags))
+            /* The handle is gone, or it was reused for something that is not a socket */
+            if (!GetHandleInformation((HANDLE)PollInfo->Handles[k].Handle, &Flags) ||
+                !WsPollIsSocket(PollInfo->Handles[k].Handle))
             {
                 fdArray[Index[k]].revents = POLLNVAL;
                 Ready++;
