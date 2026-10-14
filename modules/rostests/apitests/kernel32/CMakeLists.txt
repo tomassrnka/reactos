@@ -97,6 +97,7 @@ list(APPEND SOURCE
     ThreadContextObjects.c
     ThreadInformation.c
     TunnelCache.c
+    VolumeMountPoint.c
     TzSetPrivilege.c
     UEFIFirmware.c
     WaitOnAddress.c
