@@ -3,7 +3,16 @@ add_subdirectory(kernel32_vista)
 
 add_definitions(-D_KERNEL32_)
 include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys)
-spec2def(kernel32.dll kernel32.spec ADD_IMPORTLIB)
+set(kernel32_spec kernel32.spec)
+if(BUILD_WOW64_ENABLED OR SYSWOW64_GUEST)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/kernel32.spec" wow64_kernel32_spec)
+    foreach(function Wow64GetThreadContext Wow64SetThreadContext)
+        string(REPLACE "@ stub -version=0x600+ ${function}" "@ stdcall -version=0x600+ ${function}(ptr ptr)" wow64_kernel32_spec "${wow64_kernel32_spec}")
+    endforeach()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/kernel32-wow64.spec" "${wow64_kernel32_spec}")
+    file(RELATIVE_PATH kernel32_spec "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/kernel32-wow64.spec")
+endif()
+spec2def(kernel32.dll ${kernel32_spec} ADD_IMPORTLIB)
 
 # Shared between kernel32 and kernel32_vista
 add_library(kernel32_shared

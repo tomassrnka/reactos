@@ -825,6 +825,27 @@ PspExitThread(IN NTSTATUS ExitStatus)
                                                      UserMode);
         }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        if (CurrentProcess->Wow64Process)
+        {
+            PVOID NativeStack = NULL, GuestStack = NULL;
+            /* Both stacks belong to this thread. The native stack cannot be
+             * released by guest ExitThread; forced exits also arrive here. */
+            _SEH2_TRY
+            {
+                NativeStack = Teb->DeallocationStack;
+                GuestStack = UlongToPtr(PS_GET_TEB32_FROM_TEB(Teb)->DeallocationStack);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { }
+            _SEH2_END;
+            Dummy = 0;
+            if (GuestStack && GuestStack != NativeStack)
+                ZwFreeVirtualMemory(NtCurrentProcess(), &GuestStack, &Dummy, MEM_RELEASE);
+            Dummy = 0;
+            if (NativeStack)
+                ZwFreeVirtualMemory(NtCurrentProcess(), &NativeStack, &Dummy, MEM_RELEASE);
+        }
+#endif
         /* Decommit the TEB */
         MmDeleteTeb(CurrentProcess, Teb);
         Thread->Tcb.Teb = NULL;

@@ -373,8 +373,13 @@ Quit:
             RtlFreeActivationContextStack(ActivationContextStack);
 
         NtTerminateThread(hThread, Status);
+#ifdef SYSWOW64_GUEST
+        /* Guest thread rundown releases both stacks after successful create. */
+        NtWaitForSingleObject(hThread, FALSE, NULL);
+#else
         // FIXME: Wait for the thread to terminate?
         BaseFreeThreadStack(hProcess, &InitialTeb);
+#endif
         NtClose(hThread);
 
         BaseSetLastNTError(Status);
@@ -1467,3 +1472,30 @@ TlsSetValue(IN DWORD Index,
 }
 
 /* EOF */
+
+#if defined(BUILD_WOW64_ENABLED) || defined(SYSWOW64_GUEST)
+BOOL WINAPI Wow64GetThreadContext(HANDLE Thread, PWOW64_CONTEXT Context)
+{
+#ifdef _WIN64
+    NTSTATUS Status = NtQueryInformationThread(Thread, ThreadWow64Context, Context, sizeof(*Context), NULL);
+    if (NT_SUCCESS(Status)) return TRUE;
+    BaseSetLastNTError(Status);
+    return FALSE;
+#else
+    return GetThreadContext(Thread, (PCONTEXT)Context);
+#endif
+}
+
+BOOL WINAPI Wow64SetThreadContext(HANDLE Thread, const WOW64_CONTEXT *Context)
+{
+#ifdef _WIN64
+    NTSTATUS Status = NtSetInformationThread(Thread, ThreadWow64Context, (PVOID)Context, sizeof(*Context));
+    if (NT_SUCCESS(Status)) return TRUE;
+    BaseSetLastNTError(Status);
+    return FALSE;
+#else
+    return SetThreadContext(Thread, (const CONTEXT *)Context);
+#endif
+}
+
+#endif

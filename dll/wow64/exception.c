@@ -3,66 +3,78 @@
 
 PVOID Wow64ExceptionDispatcher;
 
-static VOID ContextTo32(WOW64_CONTEXT *To, const CONTEXT *From)
+typedef struct _WOW64_APC_FRAME
 {
-    RtlZeroMemory(To, sizeof(*To));
-    /* Floating-point/debug context delivery is a separate extension. Do not
-     * advertise state that the native exception dispatcher does not capture. */
-    To->ContextFlags = WOW64_CONTEXT_FULL;
-#define REG(x, y) To->x = (ULONG)From->y
-    REG(Eax, Rax); REG(Ebx, Rbx); REG(Ecx, Rcx); REG(Edx, Rdx);
-    REG(Esi, Rsi); REG(Edi, Rdi); REG(Ebp, Rbp); REG(Esp, Rsp); REG(Eip, Rip);
-    REG(EFlags, EFlags);
-    REG(SegCs, SegCs); REG(SegSs, SegSs); REG(SegDs, SegDs);
-    REG(SegEs, SegEs); REG(SegFs, SegFs); REG(SegGs, SegGs);
-#undef REG
-}
+    WOW64_CPU_STATE *Previous;
+    CONTEXT *Native;
+    WOW64_CONTEXT *Guest;
+} WOW64_APC_FRAME;
 
-static NTSTATUS ContextFrom32(CONTEXT *To, const WOW64_CONTEXT *From)
-{
-    ULONG Flags = From->ContextFlags;
-    if ((Flags & WOW64_CONTEXT_FULL) != WOW64_CONTEXT_FULL ||
-        (Flags & ~(WOW64_CONTEXT_FULL)))
-        return STATUS_NOT_SUPPORTED;
-    RtlCaptureContext(To);
-    /* The guest supplies integer state only. Preserve the native capture's
-     * floating-point state when continuing through the native exit path. */
-    To->ContextFlags = CONTEXT_FLOATING_POINT;
-    if (Flags & (WOW64_CONTEXT_INTEGER & ~WOW64_CONTEXT_i386))
-    {
-        To->ContextFlags |= CONTEXT_INTEGER;
-#define REG(x, y) To->x = From->y
-        REG(Rax, Eax); REG(Rbx, Ebx); REG(Rcx, Ecx); REG(Rdx, Edx);
-        REG(Rsi, Esi); REG(Rdi, Edi);
-#undef REG
-    }
-    if (Flags & (WOW64_CONTEXT_CONTROL & ~WOW64_CONTEXT_i386))
-    {
-        To->ContextFlags |= CONTEXT_CONTROL | CONTEXT_INTEGER;
-        To->Rbp = From->Ebp;
-        To->Rsp = From->Esp;
-        To->Rip = From->Eip;
-        To->EFlags = From->EFlags;
-        To->SegCs = 0x23;
-        To->SegSs = 0x2b;
-    }
-    if (Flags & (WOW64_CONTEXT_SEGMENTS & ~WOW64_CONTEXT_i386))
-    {
-        To->ContextFlags |= CONTEXT_SEGMENTS;
-        To->SegDs = From->SegDs;
-        To->SegEs = From->SegEs;
-        To->SegFs = 0x53;
-        To->SegGs = From->SegGs;
-    }
-    return STATUS_SUCCESS;
-}
+PVOID Wow64ApcDispatcher;
 
 NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
 {
     CONTEXT Native;
-    NTSTATUS Status = ContextFrom32(&Native, Context);
-    if (!NT_SUCCESS(Status)) return Status;
+    WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
+    WOW64_APC_FRAME *Apc = Cpu->ApcFrame;
+    if ((Context->ContextFlags & WOW64_CONTEXT_FULL) != WOW64_CONTEXT_FULL ||
+        (Context->ContextFlags & ~WOW64_CONTEXT_ALL))
+        return STATUS_NOT_SUPPORTED;
+    if (Apc && Context == Apc->Guest)
+    {
+        /* Return through the interrupted native syscall before leaving its
+         * translator. It owns temporaries which must remain alive for APCs. */
+        Apc->Previous->FsRedirectionDisabled = Cpu->FsRedirectionDisabled;
+        Wow64ContextToCpu(Apc->Previous, Context);
+        NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Apc->Previous;
+        if (Apc->Native->SegCs == 0x23) Wow64ContextToNative(Apc->Native, Context);
+        return NtContinue(Apc->Native, TestAlert);
+    }
+    while (Apc && Context->Esp >= Apc->Guest->Esp)
+    {
+        /* An exception or longjmp can unwind out of an APC instead of
+         * returning to its dispatcher. Discard its native simulation frame. */
+        Apc->Previous->FsRedirectionDisabled = Cpu->FsRedirectionDisabled;
+        Cpu = Apc->Previous;
+        NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Cpu;
+        Apc = Cpu->ApcFrame;
+    }
+    RtlCaptureContext(&Native);
+    Wow64ContextToNative(&Native, Context);
     return NtContinue(&Native, TestAlert);
+}
+
+/* The native dispatcher supplies its complete interrupted context in R9.
+ * Negative routine values encode a guest address; normal native APCs retain
+ * the ordinary ntdll dispatch path. */
+VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Native)
+{
+    struct
+    {
+        ULONG Routine, Arg1, Arg2, Arg3;
+        WOW64_CONTEXT Context;
+        ULONG Registration[2];
+    } *Guest;
+    WOW64_CPU_STATE *Previous = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
+    WOW64_CPU_STATE Cpu = *Previous;
+    WOW64_CONTEXT Context;
+    WOW64_APC_FRAME Apc;
+
+    if (Native->SegCs == 0x23) Wow64NativeToContext(&Context, Native);
+    else Wow64CpuToContext(&Context, Previous);
+    Guest = (PVOID)(ULONG_PTR)((Context.Esp - sizeof(*Guest)) & ~15);
+    Guest->Routine = (ULONG)(-(LONG64)Native->P4Home >> 2);
+    Guest->Arg1 = PtrToUlong(Arg1);
+    Guest->Arg2 = PtrToUlong(Arg2);
+    Guest->Arg3 = PtrToUlong(Arg3);
+    Guest->Context = Context;
+    Apc.Previous = Previous;
+    Apc.Native = Native;
+    Apc.Guest = &Guest->Context;
+    Cpu.ApcFrame = &Apc;
+    Cpu.Esp = PtrToUlong(Guest);
+    Cpu.Eip = PtrToUlong(Wow64ApcDispatcher);
+    Wow64CpuRun(&Cpu);
 }
 
 VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
@@ -89,7 +101,7 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
      * frame is below it and cannot overwrite the source context or record.
      * The i386 dispatcher takes two pointers at ESP, with no return address. */
     Native = *Context;
-    ContextTo32(&Frame.Context, Context);
+    Wow64NativeToContext(&Frame.Context, Context);
     RtlZeroMemory(&Frame.Record, sizeof(Frame.Record));
     Frame.Record.ExceptionCode = Record->ExceptionCode;
     Frame.Record.ExceptionFlags = Record->ExceptionFlags;
@@ -108,4 +120,22 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     DbgPrint("WoW64: exception dispatch failed: %08lx\n", Status);
 Failed:
     NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
+}
+
+NTSTATUS Wow64RaiseException(const EXCEPTION_RECORD32 *Record, const WOW64_CONTEXT *Context,
+                              BOOLEAN FirstChance)
+{
+    EXCEPTION_RECORD NativeRecord = {0};
+    CONTEXT NativeContext;
+    ULONG i;
+    if (Record->NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS) return STATUS_INVALID_PARAMETER;
+    RtlCaptureContext(&NativeContext);
+    Wow64ContextToNative(&NativeContext, Context);
+    NativeRecord.ExceptionCode = Record->ExceptionCode;
+    NativeRecord.ExceptionFlags = Record->ExceptionFlags;
+    NativeRecord.ExceptionAddress = PTR32(Record->ExceptionAddress);
+    NativeRecord.NumberParameters = Record->NumberParameters;
+    for (i = 0; i < Record->NumberParameters; ++i)
+        NativeRecord.ExceptionInformation[i] = Record->ExceptionInformation[i];
+    return NtRaiseException(&NativeRecord, &NativeContext, FirstChance);
 }

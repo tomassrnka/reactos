@@ -6,7 +6,7 @@ function(add_wow64_apitest library)
     set(sources)
     set(testlist "#define STANDALONE\n#include <apitest.h>\n")
     foreach(test ${ARGN})
-        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock)$")
+        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock|Wow64Thread(Lifetime|ExitProcess))$")
             list(APPEND sources ../${library}/${test}.c)
         endif()
         string(APPEND testlist "extern void func_${test}(void);\n")
@@ -26,6 +26,8 @@ function(add_wow64_apitest library)
 endfunction()
 
 add_wow64_apitest(kernel32
+    Wow64RemoteThread
+    Wow64ThreadApc Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock)
 add_wow64_apitest(ntdll

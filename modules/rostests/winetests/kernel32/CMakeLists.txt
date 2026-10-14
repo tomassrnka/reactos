@@ -107,3 +107,21 @@ target_compile_definitions(kernel32_winetest PRIVATE
     __WINESRC__
     strncasecmp=_strnicmp
     strcasecmp=_stricmp)
+
+# The original thread/synchronization/fiber Wine test sources have no GUI
+# imports. Keep their assertions and child-process dispatch intact.
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/threads_testlist.c
+"#define STANDALONE\n#include <wine/test.h>\nextern void func_thread(void);\nextern void func_sync(void);\nextern void func_fiber(void);\nconst struct test winetest_testlist[] = {{\"thread\",func_thread},{\"sync\",func_sync},{\"fiber\",func_fiber},{0,0}};\n")
+add_executable(kernel32_threads_winetest
+    thread.c
+    sync.c
+    fiber.c
+    ${CMAKE_CURRENT_BINARY_DIR}/threads_testlist.c)
+target_link_libraries(kernel32_threads_winetest wine ${PSEH_LIB})
+set_module_type(kernel32_threads_winetest win32cui)
+add_importlibs(kernel32_threads_winetest advapi32 msvcrt kernel32 ntdll)
+add_rostests_file(TARGET kernel32_threads_winetest)
+target_compile_definitions(kernel32_threads_winetest PRIVATE WINETEST_USE_DBGSTR_LONGLONG __WINESRC__ strncasecmp=_strnicmp strcasecmp=_stricmp)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(kernel32_threads_winetest PRIVATE -Wno-format -Wno-int-conversion -Wno-old-style-declaration -Wno-unused)
+endif()
