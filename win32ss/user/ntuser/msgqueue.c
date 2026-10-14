@@ -377,7 +377,6 @@ IntMsqSetWakeMask(DWORD WakeMask)
       if ( (Win32Thread->pcti->fsChangeBits & LOWORD(WakeMask)) ||
            ( (dwFlags & MWMO_INPUTAVAILABLE) && (Win32Thread->pcti->fsWakeBits & LOWORD(WakeMask)) ) )
       {
-         ERR("Chg 0x%x Wake 0x%x Mask 0x%x\n",Win32Thread->pcti->fsChangeBits, Win32Thread->pcti->fsWakeBits, WakeMask);
          KeSetEvent(Win32Thread->pEventQueueServer, IO_NO_INCREMENT, FALSE); // Wake it up!
          return MessageEventHandle;
       }
@@ -396,9 +395,6 @@ IntMsqClearWakeMask(VOID)
    Win32Thread = PsGetCurrentThreadWin32Thread();
    if (Win32Thread == NULL || Win32Thread->MessageQueue == NULL)
       return FALSE;
-   // Very hacky, but that is what they do.
-   Win32Thread->pcti->fsWakeBits = 0;
-
    IdlePong();
 
    return TRUE;
@@ -436,9 +432,18 @@ MsqWakeQueue(PTHREADINFO pti, DWORD MessageBits, BOOL KeyEvent)
    if (MessageBits & QS_SENDMESSAGE) pti->nCntsQBits[QSRosSendMessage]++;
    if (MessageBits & QS_HOTKEY)      pti->nCntsQBits[QSRosHotKey]++;
    if (MessageBits & QS_EVENT)       pti->nCntsQBits[QSRosEvent]++;
+   if (MessageBits & QS_RAWINPUT)    pti->nCntsQBits[QSRosRawInput]++;
 
    if (KeyEvent)
       KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
+}
+
+/* A count that is already zero stays zero, so an extra clear cannot wrap it and leave the bit set for good */
+static BOOL FASTCALL
+DropQBitCount(DWORD *pCount)
+{
+   if (*pCount) --*pCount;
+   return *pCount == 0;
 }
 
 VOID FASTCALL
@@ -448,7 +453,7 @@ ClearMsgBitsMask(PTHREADINFO pti, UINT MessageBits)
 
    if (MessageBits & QS_KEY)
    {
-      if (--pti->nCntsQBits[QSRosKey] == 0) ClrMask |= QS_KEY;
+      if (DropQBitCount(&pti->nCntsQBits[QSRosKey])) ClrMask |= QS_KEY;
    }
    if (MessageBits & QS_MOUSEMOVE)
    {  // Account for tracking mouse moves..
@@ -460,11 +465,11 @@ ClearMsgBitsMask(PTHREADINFO pti, UINT MessageBits)
    }
    if (MessageBits & QS_MOUSEBUTTON)
    {
-      if (--pti->nCntsQBits[QSRosMouseButton] == 0) ClrMask |= QS_MOUSEBUTTON;
+      if (DropQBitCount(&pti->nCntsQBits[QSRosMouseButton])) ClrMask |= QS_MOUSEBUTTON;
    }
    if (MessageBits & QS_POSTMESSAGE)
    {
-      if (--pti->nCntsQBits[QSRosPostMessage] == 0) ClrMask |= QS_POSTMESSAGE;
+      if (DropQBitCount(&pti->nCntsQBits[QSRosPostMessage])) ClrMask |= QS_POSTMESSAGE;
    }
    if (MessageBits & QS_TIMER) // ReactOS hard coded.
    {  // Handle timer bits here.
@@ -482,16 +487,23 @@ ClearMsgBitsMask(PTHREADINFO pti, UINT MessageBits)
    }
    if (MessageBits & QS_SENDMESSAGE)
    {
-      if (--pti->nCntsQBits[QSRosSendMessage] == 0) ClrMask |= QS_SENDMESSAGE;
+      if (DropQBitCount(&pti->nCntsQBits[QSRosSendMessage])) ClrMask |= QS_SENDMESSAGE;
    }
    if (MessageBits & QS_HOTKEY)
    {
-      if (--pti->nCntsQBits[QSRosHotKey] == 0) ClrMask |= QS_HOTKEY;
+      if (DropQBitCount(&pti->nCntsQBits[QSRosHotKey])) ClrMask |= QS_HOTKEY;
    }
    if (MessageBits & QS_EVENT)
    {
-      if (--pti->nCntsQBits[QSRosEvent] == 0) ClrMask |= QS_EVENT;
+      if (DropQBitCount(&pti->nCntsQBits[QSRosEvent])) ClrMask |= QS_EVENT;
    }
+   if (MessageBits & QS_RAWINPUT)
+   {
+      if (DropQBitCount(&pti->nCntsQBits[QSRosRawInput])) ClrMask |= QS_RAWINPUT;
+   }
+
+   /* A posted message sets QS_POSTMESSAGE and QS_ALLPOSTMESSAGE together; the last one out clears both */
+   if (ClrMask & QS_POSTMESSAGE) ClrMask |= QS_ALLPOSTMESSAGE;
 
    pti->pcti->fsWakeBits &= ~ClrMask;
    pti->pcti->fsChangeBits &= ~ClrMask;
@@ -1381,9 +1393,13 @@ MsqPostMessage(PTHREADINFO pti,
 VOID FASTCALL
 MsqPostQuitMessage(PTHREADINFO pti, ULONG ExitCode)
 {
+   BOOL WasPosted = pti->QuitPosted;
+
    pti->QuitPosted = TRUE;
    pti->exitCode = ExitCode;
-   MsqWakeQueue(pti, QS_POSTMESSAGE|QS_ALLPOSTMESSAGE, TRUE);
+   /* The flag holds one count; a second quit only changes the exit code */
+   if (!WasPosted)
+      MsqWakeQueue(pti, QS_POSTMESSAGE|QS_ALLPOSTMESSAGE, TRUE);
 }
 
 /***********************************************************************
@@ -2243,6 +2259,7 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
    pti->nCntsQBits[QSRosSendMessage] = 0;
    pti->nCntsQBits[QSRosHotKey] = 0;
    pti->nCntsQBits[QSRosEvent] = 0;
+   pti->nCntsQBits[QSRosRawInput] = 0;
 
    /* cleanup posted messages */
    while (!IsListEmpty(&pti->PostedMessagesListHead))
