@@ -22,6 +22,7 @@ list(APPEND SOURCE
     IsValidLocaleName.c
     LCIDToLocaleName.c
     LocaleNameToLCID.c
+    PreferredUILanguages.c
     SetFileInformationByHandle.c
     restart.c
     ResolveLocaleName.c

@@ -865,6 +865,21 @@ AddUILanguage(
     }
 }
 
+/* The languages of the process come first in the list of a thread */
+static
+VOID
+AddProcessUILanguages(
+    _Inout_ PUI_LANGUAGE_LIST List,
+    _In_ BOOLEAN WithParents)
+{
+    LANGID Ids[MAX_PROCESS_UI_LANGUAGES];
+    ULONG Count, i;
+
+    Count = BasepGetProcessUILanguageIds(Ids);
+    for (i = 0; i < Count; i++)
+        AddUILanguage(List, Ids[i], WithParents);
+}
+
 /* Writes a language list as a double null-terminated multi-string of
  * hexadecimal language identifiers or of locale names */
 static
@@ -998,23 +1013,27 @@ GetThreadPreferredUILanguages(
         return FALSE;
     }
 
-    /* No thread or process preferred languages can be set yet, so the list
-     * is the user language followed by the system language as fallbacks,
-     * the fallbacks with their parent languages */
+    /* No thread preferred languages can be set yet, so the list is the languages of the process
+     * (SetProcessPreferredUILanguages), then the user language followed by the system language as
+     * fallbacks, the fallbacks with their parent languages. The languages of the process have theirs
+     * when the fallbacks of the system are merged (measured on Windows Server 2008 R2). */
     switch (dwFlags & (MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK | MUI_THREAD_LANGUAGES))
     {
         case 0:
         case MUI_MERGE_USER_FALLBACK:
+            AddProcessUILanguages(&List, FALSE);
             AddUILanguage(&List, GetUserDefaultUILanguage(), FALSE);
             AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
             break;
 
         case MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK:
+            AddProcessUILanguages(&List, TRUE);
             AddUILanguage(&List, GetUserDefaultUILanguage(), TRUE);
             AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
             break;
 
         case MUI_MERGE_SYSTEM_FALLBACK:
+            AddProcessUILanguages(&List, TRUE);
             AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
             break;
 
