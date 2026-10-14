@@ -188,6 +188,51 @@ typedef enum _THREAD_INFORMATION_CLASS
     ThreadInformationClassMax
 } THREAD_INFORMATION_CLASS;
 
+#if (_WIN32_WINNT >= 0x0602) || defined(__REACTOS__)
+
+#define MEMORY_PRIORITY_LOWEST          0
+#define MEMORY_PRIORITY_VERY_LOW        1
+#define MEMORY_PRIORITY_LOW             2
+#define MEMORY_PRIORITY_MEDIUM          3
+#define MEMORY_PRIORITY_BELOW_NORMAL    4
+#define MEMORY_PRIORITY_NORMAL          5
+
+typedef struct _MEMORY_PRIORITY_INFORMATION
+{
+    ULONG MemoryPriority;
+} MEMORY_PRIORITY_INFORMATION, *PMEMORY_PRIORITY_INFORMATION;
+
+#define THREAD_POWER_THROTTLING_CURRENT_VERSION 1
+#define THREAD_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#define THREAD_POWER_THROTTLING_VALID_FLAGS     (THREAD_POWER_THROTTLING_EXECUTION_SPEED)
+
+typedef struct _THREAD_POWER_THROTTLING_STATE
+{
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+} THREAD_POWER_THROTTLING_STATE, *PTHREAD_POWER_THROTTLING_STATE;
+
+WINBASEAPI
+BOOL
+WINAPI
+GetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _Out_writes_bytes_(ThreadInformationSize) LPVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize);
+
+WINBASEAPI
+BOOL
+WINAPI
+SetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _In_reads_bytes_(ThreadInformationSize) LPVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize);
+
+#endif // (_WIN32_WINNT >= 0x0602) || defined(__REACTOS__)
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
