@@ -4963,7 +4963,8 @@ static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP
             goto end;
         }
 
-        Status = space_list_add2(&dev->space, NULL, dev->devitem.total_bytes,
+        /* The new space starts where the device used to end. */
+        Status = space_list_add2(&dev->space, NULL, old_size,
                                  delta, NULL, NULL);
         if (!NT_SUCCESS(Status)) {
             dev->devitem.total_bytes = old_size;
