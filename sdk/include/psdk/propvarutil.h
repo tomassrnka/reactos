@@ -85,6 +85,7 @@ PSSTDAPI PropVariantToGUID(const PROPVARIANT *ppropvar, GUID *guid);
 PSSTDAPI VariantToGUID(const VARIANT *pvar, GUID *guid);
 PSSTDAPI_(INT) PropVariantCompareEx(REFPROPVARIANT propvar1, REFPROPVARIANT propvar2,
                                 PROPVAR_COMPARE_UNIT uint, PROPVAR_COMPARE_FLAGS flags);
+PSSTDAPI_(INT) VariantCompare(REFVARIANT var1, REFVARIANT var2);
 PSSTDAPI InitPropVariantFromFileTime(const FILETIME *pftIn, PROPVARIANT *ppropvar);
 PSSTDAPI InitPropVariantFromStringVector(PCWSTR *strs, ULONG count, PROPVARIANT *ppropvar);
 
