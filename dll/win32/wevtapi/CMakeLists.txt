@@ -6,7 +6,7 @@ list(APPEND SOURCE
     ${CMAKE_CURRENT_BINARY_DIR}/wevtapi.def)
 
 add_library(wevtapi MODULE ${SOURCE})
-set_module_type(wevtapi win32dll UNICODE ENTRYPOINT 0)
+set_module_type(wevtapi win32dll UNICODE ENTRYPOINT DllMain 12)
 target_link_libraries(wevtapi wine)
 add_importlibs(wevtapi advapi32 msvcrt kernel32 ntdll)
 add_dependencies(wevtapi psdk)
