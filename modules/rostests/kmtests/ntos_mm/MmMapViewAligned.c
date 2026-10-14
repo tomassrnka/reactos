@@ -43,7 +43,8 @@ START_TEST(MmMapViewAligned)
         {
             ok_eq_pointer(Base, i ? (PVOID)0x03fff000 : (PVOID)0x03ff0000);
             ok_eq_size(ViewSize, PAGE_SIZE);
-            ok_eq_hex(MmUnmapViewOfSection(PsGetCurrentProcess(), Base), STATUS_SUCCESS);
+            Status = MmUnmapViewOfSection(PsGetCurrentProcess(), Base);
+            ok_eq_hex(Status, STATUS_SUCCESS);
         }
     }
     ObDereferenceObject(Section);
