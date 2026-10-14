@@ -38,6 +38,9 @@ RETARGET_HOSTS = {
         'api-ms-win-eventing-provider-l1-1',
         'api-ms-win-security-base-l1-1',
     ),
+    'kernelbase_ros.dll': (
+        'api-ms-win-core-path-l1-1',
+    ),
     'shell32.dll': (
         'api-ms-win-shell-namespace-l1-1',
         'ext-ms-win-shell32-shellfolders-l1-1',
