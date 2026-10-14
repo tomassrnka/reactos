@@ -86,6 +86,13 @@ static const TEST_CASE TestCases[] =
     { "revocation of the chain asked for", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN, 0, CRYPT_E_NO_REVOCATION_CHECK, FALSE, FALSE },
     { "revocation of the chain without the root asked for", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, 0, CRYPT_E_NO_REVOCATION_CHECK, FALSE, FALSE },
     { "revocation of the chain asked for, check ignored", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, CONTINUE, FALSE, FALSE },
+    { "mixed chain: leaf revocation offline, no information above", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN, 0, CRYPT_E_REVOCATION_OFFLINE, FALSE, FALSE },
+    { "mixed chain, no-check ignored only", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, CRYPT_E_REVOCATION_OFFLINE, FALSE, FALSE },
+    { "mixed chain, offline ignored only", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, CONTINUE, FALSE, FALSE },
+    { "mixed chain, both ignored", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN | SCH_CRED_IGNORE_NO_REVOCATION_CHECK | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, CONTINUE, FALSE, FALSE },
+    { "leaf revocation offline, end certificate checked", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT, 0, CRYPT_E_REVOCATION_OFFLINE, FALSE, FALSE },
+    { "leaf revocation offline, end certificate checked, no-check ignored only", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, CRYPT_E_REVOCATION_OFFLINE, FALSE, FALSE },
+    { "leaf revocation offline, end certificate checked, offline ignored", BLOB(CertLeafOfflineRevocation), BLOB(CertIntermediate), TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, CONTINUE, FALSE, FALSE },
     { "explicit automatic validation: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_AUTO_CRED_VALIDATION, 0, SEC_E_CERT_EXPIRED, FALSE, FALSE },
 
     /* The caller validates: ISC_REQ_MANUAL_CRED_VALIDATION */
