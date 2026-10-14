@@ -31,6 +31,8 @@ void test_C_PathCch(void)
 #endif
     PCWSTR pcsz;
     PWSTR pszPathOut;
+    PWSTR pszPathEnd;
+    size_t cchFree;
     WCHAR szPathOut[MAX_PATH];
 
     pszPathOut = NULL;
@@ -121,7 +123,8 @@ void test_C_PathCch(void)
 
     hr = StringCchCopyW(szPathOut, _countof(szPathOut), szExtraPath1);
     ok_hr(hr, S_OK);
-    hr = PathCchRemoveBackslashEx(szPathOut, _countof(szPathOut), NULL, NULL);
+    /* Windows rejects a NULL end pointer or a NULL free size with E_INVALIDARG */
+    hr = PathCchRemoveBackslashEx(szPathOut, _countof(szPathOut), &pszPathEnd, &cchFree);
     ok_hr(hr, S_OK);
     ok_wstr(szPathOut, szExtraPath0);
 
