@@ -105,13 +105,17 @@ KiTimerExpiration(IN PKDPC Dpc,
     /* Bring interrupts back */
     _enable();
 
-    /* Get the index of the timer and normalize it */
+    /* Get the tick count of the request and normalize it: scan from its hand
+       to the current one, or the whole table if the tick count moved a table
+       revolution or more since (unsigned, across the wrap of the tick count) */
     Index = PtrToLong(SystemArgument1);
-    if ((Limit - Index) >= TIMER_TABLE_SIZE)
+    if (((ULONG)Limit - (ULONG)Index) >= TIMER_TABLE_SIZE)
     {
         /* Normalize it */
+        Index &= (TIMER_TABLE_SIZE - 1);
         Limit = Index + TIMER_TABLE_SIZE - 1;
     }
+    Index &= (TIMER_TABLE_SIZE - 1);
 
     /* Setup index and actual limit */
     Index--;
