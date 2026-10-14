@@ -64,6 +64,7 @@ extern void func_OffsetClipRgn(void);
 extern void func_OffsetRgn(void);
 extern void func_PaintRgn(void);
 extern void func_PatBlt(void);
+extern void func_PolyPatBlt(void);
 extern void func_Rectangle(void);
 extern void func_RealizePalette(void);
 extern void func_SelectObject(void);
@@ -145,6 +146,7 @@ const struct test winetest_testlist[] =
     { "OffsetRgn", func_OffsetRgn },
     { "PaintRgn", func_PaintRgn },
     { "PatBlt", func_PatBlt },
+    { "PolyPatBlt", func_PolyPatBlt },
     { "Rectangle", func_Rectangle },
     { "RealizePalette", func_RealizePalette },
     { "SelectObject", func_SelectObject },
