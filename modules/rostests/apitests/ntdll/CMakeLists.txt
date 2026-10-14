@@ -161,6 +161,7 @@ list(APPEND SOURCE
     RtlRemovePrivileges.c
     RtlSRWLock.c
     RtlSRWLockStress.c
+    RtlSRWLockThroughput.c
     RtlSRWLockWait.c
     RtlUnhandledExceptionFilter.c
     RtlUnicodeStringToAnsiString.c

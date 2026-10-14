@@ -80,6 +80,32 @@ typedef struct _RTLP_SRWLOCK_WAITBLOCK
 } volatile RTLP_SRWLOCK_WAITBLOCK, *PRTLP_SRWLOCK_WAITBLOCK;
 
 
+/* The wake flag of a waiter has two bits: granted, set by the releaser, and sleeping, set by the
+   waiter with a compare-exchange before it blocks on the keyed event whose key is the flag itself.
+   The releaser's single interlocked OR tells it whether the waiter blocks, and then, and only then,
+   releases the keyed event. A sleeping waiter cannot return before that, so the wait block is still
+   valid when its address is used as the key; a spinning waiter may return at once, and the releaser
+   does not look at it again. */
+#define RTL_SRWLOCK_WAKE_GRANTED    1
+#define RTL_SRWLOCK_WAKE_SLEEPING   2
+
+#ifndef RTL_SRWLOCK_SPIN_COUNT
+#define RTL_SRWLOCK_SPIN_COUNT      1024
+#endif
+#ifndef RTL_SRWLOCK_YIELD_COUNT
+#define RTL_SRWLOCK_YIELD_COUNT     64
+#endif
+
+static VOID
+RtlpSrwGrant(IN volatile LONG *Wake)
+{
+    if (InterlockedOr((PLONG)Wake, RTL_SRWLOCK_WAKE_GRANTED) & RTL_SRWLOCK_WAKE_SLEEPING)
+    {
+        (void)NtReleaseKeyedEvent(NULL, (PVOID)Wake, FALSE, NULL);
+    }
+}
+
+
 /* The wait blocks live on the stacks of the waiting threads, and a waiter returns
    (and its stack is reused) as soon as it has been woken. A releaser therefore reads
    everything it needs from a wait block before it publishes the new lock value, and
@@ -136,8 +162,7 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
 
     if (Exclusive)
     {
-        (void)InterlockedOr(&FirstWaitBlock->Wake,
-                            TRUE);
+        RtlpSrwGrant(&FirstWaitBlock->Wake);
     }
     else
     {
@@ -147,8 +172,7 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
         {
             NextWake = WakeChain->Next;
 
-            (void)InterlockedOr((PLONG)&WakeChain->Wake,
-                                TRUE);
+            RtlpSrwGrant(&WakeChain->Wake);
 
             WakeChain = NextWake;
         } while (WakeChain != NULL);
@@ -186,8 +210,7 @@ RtlpReleaseWaitBlockLockLastShared(IN OUT PRTL_SRWLOCK SRWLock,
 
     (void)InterlockedExchangePointer(&SRWLock->Ptr, (PVOID)NewValue);
 
-    (void)InterlockedOr(&FirstWaitBlock->Wake,
-                        TRUE);
+    RtlpSrwGrant(&FirstWaitBlock->Wake);
 }
 
 
@@ -266,6 +289,49 @@ RtlpAcquireWaitBlockLock(IN OUT PRTL_SRWLOCK SRWLock)
 }
 
 
+/* Waits until the releaser has set the granted bit. Spinning alone keeps a lock owner of lower or
+   equal priority from running on a busy machine, which can stall it for seconds, and sleeping in
+   timer ticks makes every hand-over of a contended lock wait for a tick; so: spin for a while (not
+   on one processor, where the owner cannot run meanwhile), give the processor away a few times,
+   then block until the releaser wakes this thread. There are no kernel-mode users. */
+static VOID
+NTAPI
+RtlpSrwWait(IN volatile LONG *Wake)
+{
+    ULONG Spins;
+    LONG Old;
+
+    if (NtCurrentPeb()->NumberOfProcessors > 1)
+    {
+        for (Spins = 0; Spins < RTL_SRWLOCK_SPIN_COUNT; Spins++)
+        {
+            if (*Wake & RTL_SRWLOCK_WAKE_GRANTED)
+                return;
+            YieldProcessor();
+        }
+    }
+
+    for (Spins = 0; Spins < RTL_SRWLOCK_YIELD_COUNT; Spins++)
+    {
+        if (*Wake & RTL_SRWLOCK_WAKE_GRANTED)
+            return;
+        ZwYieldExecution();
+    }
+
+    for (;;)
+    {
+        Old = InterlockedCompareExchange((PLONG)Wake, RTL_SRWLOCK_WAKE_SLEEPING, 0);
+        if (Old & RTL_SRWLOCK_WAKE_GRANTED)
+            return;
+
+        /* The sleeping bit is set, by this call or an earlier one that returned too soon */
+        (void)NtWaitForKeyedEvent(NULL, (PVOID)Wake, FALSE, NULL);
+        if (*Wake & RTL_SRWLOCK_WAKE_GRANTED)
+            return;
+    }
+}
+
+
 /* A waiter is granted the lock only by the thread that releases it, which sets the
    wake flag as its last access to the wait block. The lock word alone must not end
    the wait: it changes before the flag is set, and a waiter that returned on it would
@@ -275,12 +341,7 @@ NTAPI
 RtlpAcquireSRWLockExclusiveWait(IN OUT PRTL_SRWLOCK SRWLock,
                                 IN PRTLP_SRWLOCK_WAITBLOCK WaitBlock)
 {
-    ULONG Spins = 0;
-
-    while (WaitBlock->Wake == 0)
-    {
-        RtlpSrwSpinWait(&Spins);
-    }
+    RtlpSrwWait(&WaitBlock->Wake);
 }
 
 
@@ -289,12 +350,7 @@ NTAPI
 RtlpAcquireSRWLockSharedWait(IN OUT PRTL_SRWLOCK SRWLock,
                              IN OUT PRTLP_SRWLOCK_SHARED_WAKE WakeChain)
 {
-    ULONG Spins = 0;
-
-    while (WakeChain->Wake == 0)
-    {
-        RtlpSrwSpinWait(&Spins);
-    }
+    RtlpSrwWait(&WakeChain->Wake);
 }
 
 
