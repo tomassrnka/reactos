@@ -217,7 +217,7 @@ NtUserSetCapture	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserSetClassLong	D+S	manual	see user.c
 NtUserSetClassLongPtr	D+S	unsupported	no i386 service entry
 NtUserSetClassWord	A	generated	typed arguments; handle policy; measured layouts
-NtUserSetClipboardData	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetClipboardData	B+S	manual	see user.c
 NtUserSetClipboardViewer	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserSetConsoleReserveKeys	A	generated	typed arguments; handle policy; measured layouts
 NtUserSetCursor	A+s	generated	typed arguments; handle policy; measured layouts

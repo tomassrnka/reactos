@@ -195,6 +195,13 @@ ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a)
     case W64_NtUserDefSetText:
     { LARGE_STRING Text; return NtUserDefSetText(H(0),LargeString32(&Text,a[1])); }
     case W64_NtUserQueryWindow: return NtUserQueryWindow(H(0),a[1]);
+    case W64_NtUserSetClipboardData:
+    {
+        SETCLIPBDATA Data = *(PSETCLIPBDATA)P(2);
+        /* Converted global data uses a USER TYPE_CLIPDATA handle. Bitmap,
+         * palette and opaque data retain unsigned GDI/address transport. */
+        return (ULONG_PTR)NtUserSetClipboardData(a[0],Data.fGlobalHandle ? H(1) : G(1),&Data);
+    }
     case W64_NtUserProcessConnect: return NtUserProcessConnect(H(0), P(1), a[2]);
     case W64_NtUserInitializeClientPfnArrays: return NtUserInitializeClientPfnArrays(P(0), P(1), P(2), P(3));
     case W64_NtUserRegisterClassExWOW:
@@ -230,11 +237,18 @@ ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a)
     case W64_NtUserGetClassInfo:
     {
         WNDCLASSEXW Class = {0}; UNICODE_STRING Name; LPWSTR Menu = NULL; BOOL Ret;
+        ULONG GuestSize;
         ProbeOutput(a[2],sizeof(CLASS32));
         if (a[3]) ProbeOutput(a[3],sizeof(ULONG));
-        String32(&Name, P(1)); Class.cbSize = sizeof(Class);
+        String32(&Name, P(1)); Class32ToNative(&Class, P(2));
+        GuestSize = ((CLASS32 *)P(2))->cbSize;
         Ret = NtUserGetClassInfo(P(0), &Name, &Class, a[3] ? &Menu : NULL, a[4]);
-        if (Ret) { ClassNativeTo32(P(2), &Class); if (a[3]) *(ULONG *)P(3) = PtrToUlong(Menu); }
+        if (Ret)
+        {
+            ClassNativeTo32(P(2), &Class);
+            ((CLASS32 *)P(2))->cbSize = GuestSize;
+            if (a[3]) *(ULONG *)P(3) = PtrToUlong(Menu);
+        }
         return Ret;
     }
     case W64_NtUserCreateWindowEx:

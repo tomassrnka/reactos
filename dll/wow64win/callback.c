@@ -125,9 +125,17 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
         case USER32_CALLBACK_SENDASYNCPROC:
             if (Length == sizeof(SENDASYNCPROC_CALLBACK_ARGUMENTS)) { GuestLength = 20; Status = STATUS_SUCCESS; } break;
         case USER32_CALLBACK_CLIENTTHREADSTARTUP: case USER32_CALLBACK_LOADSYSMENUTEMPLATE:
-        case USER32_CALLBACK_LOADDEFAULTCURSORS: case USER32_CALLBACK_GETCHARSETINFO:
+            if (!Length) Status = STATUS_SUCCESS;
+            break;
+        case USER32_CALLBACK_LOADDEFAULTCURSORS:
+            if (Length == sizeof(BOOL)) Status = STATUS_SUCCESS;
+            break;
+        case USER32_CALLBACK_GETCHARSETINFO:
+            if (Length == sizeof(GET_CHARSET_INFO)) Status = STATUS_SUCCESS;
+            break;
         case USER32_CALLBACK_SETOBM:
-            Status = STATUS_SUCCESS; break;
+            if (Length == sizeof(SETOBM_CALLBACK_ARGUMENTS)) Status = STATUS_SUCCESS;
+            break;
         case USER32_CALLBACK_CLIENTLOADLIBRARY:
             if (Length >= sizeof(CLIENT_LOAD_LIBRARY_ARGUMENTS))
             { GuestLength = Length-sizeof(CLIENT_LOAD_LIBRARY_ARGUMENTS)+sizeof(LIBRARY32); Status=STATUS_SUCCESS; } break;
@@ -269,7 +277,9 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
             for (i=0;i<7;++i) Frame->Handles[i] = (LONG64)((LONG *)Buffer)[i];
             Output=Frame->Handles; OutputLength=sizeof(Frame->Handles); break;
         case USER32_CALLBACK_GETCHARSETINFO: case USER32_CALLBACK_SETOBM:
-            Output=Buffer; OutputLength=Length; break;
+            if (!Buffer || Length != Frame->NativeLength) { Status=STATUS_INFO_LENGTH_MISMATCH; break; }
+            RtlCopyMemory(Frame->Native,Buffer,Length);
+            Output=Frame->Native; OutputLength=Frame->NativeLength; break;
         default: break;
         }
     }

@@ -18,8 +18,6 @@ unsigned = set('ACCESS_MASK ARCTYPE ATOM BYTE COLORREF DWORD FLONG GETCPD LFTYPE
 overrides = {
     ('NtUserGetDCEx', 'hRegion'): 'ZERO',
     ('NtUserSetProp', 'Data'): 'ZERO',
-    ('NtUserSetClipboardData', 'hMem'): 'ZERO',
-    ('NtUserCreateLocalMemHandle', 'hMem'): 'ZERO',
 }
 # These GDI entry points explicitly carry NT process/event handles.
 nt_gdi = {'NtGdiDdDDIGetProcessSchedulingPriorityClass',
@@ -27,6 +25,7 @@ nt_gdi = {'NtGdiDdDDIGetProcessSchedulingPriorityClass',
           'NtGdiDdDDIReleaseProcessVidPnSourceOwners'}
 manual = set('''NtUserProcessConnect NtUserInitializeClientPfnArrays
 NtUserRegisterClassExWOW NtUserUnregisterClass NtUserCreateWindowEx NtUserGetClassInfo
+NtUserSetClipboardData
 NtUserGetMessage NtUserPeekMessage NtUserDispatchMessage NtUserTranslateMessage
 NtUserBeginPaint NtUserEndPaint NtUserDefSetText NtUserQueryWindow NtUserMessageCall NtUserCallOneParam
 NtUserCallTwoParam NtUserCallHwndParam NtUserCallHwndParamLock
@@ -122,14 +121,17 @@ for row in rows:
 (HERE/'generated.inc').write_text('\n'.join(code)+'\n')
 (HERE/'coverage.tsv').write_text('\n'.join(coverage)+'\n')
 (HERE/'failure.inc').write_text('\n'.join(failure)+'\n')
-# Known pointer-bearing messages without a reviewed packer must never reach
-# win32k with a guest layout, even if the callback would later reject them.
+# Known system pointer messages without a reviewed packer must never reach
+# win32k with a guest layout. WM_USER and above belong to the target class or
+# application; catalogue control protocols must not block another class's
+# scalar message with the same number.
 converted = {'WM_CREATE','WM_NCCREATE','WM_NCCALCSIZE','WM_WINDOWPOSCHANGING','WM_WINDOWPOSCHANGED'}
 blocked = {}
 for row in csv.DictReader((HERE/'catalog/messages.tsv').open(),delimiter='\t'):
     if row['class'] in ('C','D') and row['message'] not in converted:
         try: value=int(row['value'],0)
         except ValueError: continue
+        if value >= 0x400: continue
         blocked.setdefault(value,[]).append(row['message'])
 (HERE/'messages-unsupported.inc').write_text('/* Generated from message catalogue. */\n' +
     ''.join(f'case 0x{value:04x}: /* {", ".join(names)} */\n' for value,names in sorted(blocked.items())))

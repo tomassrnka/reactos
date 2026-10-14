@@ -20,7 +20,7 @@ case W64_NtUserCopyAcceleratorTable: return (ULONG_PTR)NtUserCopyAcceleratorTabl
 case W64_NtUserCountClipboardFormats: return (ULONG_PTR)NtUserCountClipboardFormats();
 case W64_NtUserCreateAcceleratorTable: return (ULONG_PTR)NtUserCreateAcceleratorTable((LPACCEL)((ULONG_PTR)a[0]), (ULONG)(a[1]));
 case W64_NtUserCreateCaret: return (ULONG_PTR)NtUserCreateCaret((HWND)((LONG_PTR)(LONG)a[0]), (HBITMAP)((ULONG_PTR)a[1]), (int)((LONG)a[2]), (int)((LONG)a[3]));
-case W64_NtUserCreateLocalMemHandle: return (ULONG_PTR)NtUserCreateLocalMemHandle((HANDLE)((ULONG_PTR)a[0]), (PVOID)((ULONG_PTR)a[1]), (DWORD)(a[2]), (DWORD *)((ULONG_PTR)a[3]));
+case W64_NtUserCreateLocalMemHandle: return (ULONG_PTR)NtUserCreateLocalMemHandle((HANDLE)((LONG_PTR)(LONG)a[0]), (PVOID)((ULONG_PTR)a[1]), (DWORD)(a[2]), (DWORD *)((ULONG_PTR)a[3]));
 case W64_NtUserCtxDisplayIOCtl: return (ULONG_PTR)NtUserCtxDisplayIOCtl((DWORD)(a[0]), (DWORD)(a[1]), (DWORD)(a[2]));
 case W64_NtUserDbgWin32HeapFail: return (ULONG_PTR)NtUserDbgWin32HeapFail((DWORD)(a[0]), (DWORD)(a[1]));
 case W64_NtUserDbgWin32HeapStat: return (ULONG_PTR)NtUserDbgWin32HeapStat((DWORD)(a[0]), (DWORD)(a[1]));
@@ -141,7 +141,6 @@ case W64_NtUserSetActiveWindow: return (ULONG_PTR)NtUserSetActiveWindow((HWND)((
 case W64_NtUserSetAppImeLevel: return (ULONG_PTR)NtUserSetAppImeLevel((HWND)((LONG_PTR)(LONG)a[0]), (DWORD)(a[1]));
 case W64_NtUserSetCapture: return (ULONG_PTR)NtUserSetCapture((HWND)((LONG_PTR)(LONG)a[0]));
 case W64_NtUserSetClassWord: return (ULONG_PTR)NtUserSetClassWord((HWND)((LONG_PTR)(LONG)a[0]), (INT)((LONG)a[1]), (WORD)(a[2]));
-case W64_NtUserSetClipboardData: return (ULONG_PTR)NtUserSetClipboardData((UINT)(a[0]), (HANDLE)((ULONG_PTR)a[1]), (PSETCLIPBDATA)((ULONG_PTR)a[2]));
 case W64_NtUserSetClipboardViewer: return (ULONG_PTR)NtUserSetClipboardViewer((HWND)((LONG_PTR)(LONG)a[0]));
 case W64_NtUserSetConsoleReserveKeys: return (ULONG_PTR)NtUserSetConsoleReserveKeys((DWORD)(a[0]), (DWORD)(a[1]));
 case W64_NtUserSetCursor: return (ULONG_PTR)NtUserSetCursor((HCURSOR)((LONG_PTR)(LONG)a[0]));

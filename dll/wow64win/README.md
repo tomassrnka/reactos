@@ -34,3 +34,8 @@ The explicit `wow64_first_window` and `wow64_win32k_abi` targets are excluded
 from normal images. Run the same PE32 executables on i386 and WoW64. The GUI
 fixture requires an external mouse click and checks creation payloads,
 painting, button notification, destruction and class unregistration.
+
+Regenerate with `python3 dll/wow64win/generate.py`. On the build host, run
+`TMPDIR=<scratch-directory> python3 dll/wow64win/tests/generator.py <source>`
+to verify determinism, handle-policy propagation, rejection of measured
+layout drift, and failure/message metadata.
