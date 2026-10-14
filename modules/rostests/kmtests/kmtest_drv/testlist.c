@@ -7,6 +7,7 @@
 #include <kmt_test.h>
 
 KMT_TESTFUNC Test_KeSystemCall32;
+KMT_TESTFUNC Test_MmMapViewAligned;
 
 KMT_TESTFUNC Test_CcPurgeCacheSection;
 KMT_TESTFUNC Test_CmSecurity;
@@ -169,6 +170,7 @@ const KMT_TEST TestList[] =
     { "-KeProcessor",                       Test_KeProcessor },
     { "KeQpc",                              Test_KeQpc },
     { "KeSpinLock",                         Test_KeSpinLock },
+    { "MmMapViewAligned",            Test_MmMapViewAligned },
     { "KeSystemCall32",              Test_KeSystemCall32 },
     { "KeTimer",                            Test_KeTimer },
     { "-KernelType",                        Test_KernelType },
