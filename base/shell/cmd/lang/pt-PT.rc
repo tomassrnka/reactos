@@ -461,6 +461,7 @@ título      Novo título\n"
     STRING_COPY_OPTION "SNT"
     STRING_ALIAS_ERROR "Linha de comando muito longa após a expansão do alias!\n"
     STRING_ASSOC_ERROR "Associação de ficheiro não encontrada para a extensão %s\n"
+    STRING_FTYPE_ERROR "File type '%s' not found or no open command associated with it.\n"
     STRING_BATCH_ERROR "Erro ao abrir arquivo batch\n"
     STRING_CHOICE_ERROR "Opção inválida. Formato esperado: /C[:]opções\n"
     STRING_CHOICE_ERROR_TXT "Opção inválida. Formato esperado: /T[:]c,nn\n"
@@ -541,4 +542,20 @@ título      Novo título\n"
     STRING_EXPECTED_CLOSE_PAREN "Esperado ')'.\n"
     STRING_EXPECTED_NUMBER_OR_VARIABLE "Esperado numero ou nome da variável.\n"
     STRING_SYNTAX_COMMAND_INCORRECT "A sintaxe do comando está incorrecta.\n"
+END
+
+STRINGTABLE
+BEGIN
+    STRING_FTYPE_HELP "Shows or changes the open command of a file type.\n\n\
+ftype [fileType[=[openCommand]]]\n\
+\n\
+ftype (shows every file type that has an open command)\n\
+ftype fileType (shows the open command of one file type)\n\
+ftype fileType= (removes the open command of the file type)\n\
+ftype fileType=openCommand (sets the open command)\n\
+\n\
+In an open command, %1 stands for the name of the file that is opened and\n\
+%* for the arguments that follow it. The command is stored in the registry\n\
+as an expandable string. Use it with ASSOC, which connects an extension\n\
+to a file type.\n"
 END
