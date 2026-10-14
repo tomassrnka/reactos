@@ -31,6 +31,7 @@ list(APPEND SOURCE
     ServiceArgs.c
     ServiceEnv.c
     ServiceNetwork.c
+    SetNamedSecurityInfoInherit.c
     svchlp.c)
 
 list(APPEND PCH_SKIP_SOURCE
