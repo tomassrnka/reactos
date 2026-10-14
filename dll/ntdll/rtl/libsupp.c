@@ -1011,7 +1011,7 @@ RtlDosApplyFileIsolationRedirection_Ustr(IN ULONG Flags,
 #define RtlpAllocateStringMemory(Bytes, Tag) RtlpAllocateMemory(Bytes, Tag)
 #endif
 
-static DWORD
+DWORD
 LdrpApisetVersion(VOID)
 {
     static DWORD CachedApisetVersion = ~0u;

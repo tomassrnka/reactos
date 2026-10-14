@@ -744,6 +744,7 @@
 @ stdcall InterlockedPushEntrySList(ptr ptr) ntdll.RtlInterlockedPushEntrySList
 @ fastcall -version=0x600+ InterlockedPushListSList(ptr ptr ptr long) ntdll.RtlInterlockedPushListSList
 @ stdcall InvalidateConsoleDIBits(long long)
+@ stdcall -version=0x601+ IsApiSetImplemented(str)
 @ stdcall IsBadCodePtr(ptr)
 @ stdcall IsBadHugeReadPtr(ptr long)
 @ stdcall IsBadHugeWritePtr(ptr long)

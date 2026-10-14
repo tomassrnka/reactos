@@ -83,6 +83,39 @@ RtlInitializeSid(IN PSID Sid_,
 
 /*
  * @implemented
+ *
+ * The sub-authorities follow the count as ULONG arguments. More than SID_MAX_SUB_AUTHORITIES of them is
+ * STATUS_INVALID_PARAMETER and leaves the SID alone (measured on Windows 10).
+ */
+NTSTATUS
+__cdecl
+RtlInitializeSidEx(
+    _Out_ PSID Sid_,
+    _In_ PSID_IDENTIFIER_AUTHORITY IdentifierAuthority,
+    _In_ UCHAR SubAuthorityCount,
+    ...)
+{
+    PISID Sid = Sid_;
+    va_list Arguments;
+    UCHAR i;
+
+    if (SubAuthorityCount > SID_MAX_SUB_AUTHORITIES)
+        return STATUS_INVALID_PARAMETER;
+
+    Sid->Revision = SID_REVISION;
+    Sid->SubAuthorityCount = SubAuthorityCount;
+    Sid->IdentifierAuthority = *IdentifierAuthority;
+
+    va_start(Arguments, SubAuthorityCount);
+    for (i = 0; i < SubAuthorityCount; i++)
+        Sid->SubAuthority[i] = va_arg(Arguments, ULONG);
+    va_end(Arguments);
+
+    return STATUS_SUCCESS;
+}
+
+/*
+ * @implemented
  */
 PULONG
 NTAPI
