@@ -2201,10 +2201,88 @@ static int ngc_resize_failed(struct ngc_vol *v, int err)
 	return err;
 }
 
+/* $Bitmap pages one resize step may change: half of what makes a commit, so that the step, its MFT
+ * record and the bits of its own clusters fit the journal (0 without the journal: no steps). */
+static s64 ngc_step_pages(struct ngc_vol *v)
+{
+	if (!v->bdev->jnl)
+		return 0;
+	return max_t(s64, 1, (s64)(ngc_commit_threshold(v) / 2));
+}
+
+/*
+ * Grows $Bitmap from @from to @to bytes, the new bytes zero, with real clusters below the old end
+ * (a sparse $Bitmap is invalid).  With the journal it grows in steps that each fit one commit, and
+ * commits after each but the last: one large transaction would not fit the journal and would go to
+ * the disk in place.  Every state between the steps is the old size with a larger $Bitmap.
+ */
+static int ngc_grow_bitmap(struct ngc_vol *v, s64 from, s64 to)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct inode *bvi = vol->lcnbmp_ino;
+	struct ntfs_inode *bni = NTFS_I(bvi);
+	s64 pages = ngc_step_pages(v), cur = from, end, n = 0, steps;
+	int err = 0;
+
+	steps = pages ? (to - from + (pages << PAGE_SHIFT) - 1) / (pages << PAGE_SHIFT) : 1;
+	while (cur < to) {
+		end = pages ? min_t(s64, to, round_down(cur, PAGE_SIZE) + (pages << PAGE_SHIFT)) : to;
+		mutex_lock(&bni->mrec_lock);
+		err = ntfs_attr_truncate_i(bni, end, HOLES_NO);
+		mutex_unlock(&bni->mrec_lock);
+		if (err)
+			break;
+		i_size_write(bvi, end);
+		err = ntfs_attr_set(bni, cur, end - cur, 0);
+		if (!err && bni->initialized_size < end) {
+			mutex_lock(&bni->mrec_lock);
+			err = ntfs_attr_set_initialized_size(bni, end);
+			mutex_unlock(&bni->mrec_lock);
+		}
+		mark_inode_dirty(bvi);
+		if (err)
+			break;
+		cur = end;
+		n++;
+		if (cur < to && pages) {
+			err = ngc_commit(v);
+			if (err)
+				break;
+			printk(KERN_INFO "ngc: extend: $Bitmap step %lld of %lld committed\n", n, steps);
+		}
+	}
+	return err;
+}
+
+/* Clears the bits [@from, @to) of $Bitmap, committing after each step but the last (see ngc_grow_bitmap). */
+static int ngc_clear_bits_stepped(struct ngc_vol *v, s64 from, s64 to)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	s64 bits = ngc_step_pages(v) << (PAGE_SHIFT + 3), end;
+	int err = 0;
+
+	while (from < to) {
+		end = bits ? min_t(s64, to, round_down(from, 8LL << PAGE_SHIFT) + bits) : to;
+		down_write(&vol->lcnbmp_lock);
+		err = ntfs_bitmap_clear_run(vol->lcnbmp_ino, from, end - from);
+		up_write(&vol->lcnbmp_lock);
+		if (err)
+			break;
+		from = end;
+		if (from < to && bits) {
+			err = ngc_commit(v);
+			if (err)
+				break;
+		}
+	}
+	return err;
+}
+
 /*
  * Grows the volume to @sectors sectors on a device now @dev_size bytes long (FSCTL_EXTEND_VOLUME):
- * $Bitmap grows (its clusters come from the old free space), the new clusters are free, the
- * padding bits past the last cluster move to the new end, then the boot sector and its copy.
+ * $Bitmap grows (its clusters come from the old free space, in journal-sized steps), the new
+ * clusters are free, the padding bits past the last cluster move to the new end, then the boot
+ * sector and its copy.
  */
 static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long long dev_size)
 {
@@ -2243,6 +2321,8 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		err = ngc_before_alloc(v);
 	if (err)
 		goto out;
+	/* From here every metadata write goes through the journal or fails: none goes in place. */
+	kshim_jnl_strict(v->bdev, 1);
 
 	/* The partition grew under the mount: device I/O may reach its new end. */
 	v->bdev->size = dev_size;
@@ -2254,10 +2334,9 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		bytes = ngc_bmp_bytes(nr);
 		if (bytes > old_bytes) {
 			/*
-			 * Real clusters (a sparse $Bitmap is invalid), allocated below the old end.  The core
-			 * does not promise to undo a failed expand completely, so a failure here leaves the
-			 * volume read-only; the free space is checked first, so that a full volume refuses
-			 * cleanly instead.
+			 * Real clusters (a sparse $Bitmap is invalid), allocated below the old end.  The free
+			 * space is checked first, so that a full volume refuses cleanly instead of failing
+			 * half way.
 			 */
 			s64 need = (s64)((round_up((u64)bytes, vol->cluster_size) - (u64)bni->allocated_size)
 					 >> vol->cluster_size_bits);
@@ -2265,28 +2344,19 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 				err = -ENOSPC;
 				goto out;
 			}
-			mutex_lock(&bni->mrec_lock);
-			err = ntfs_attr_truncate_i(bni, bytes, HOLES_NO);
-			mutex_unlock(&bni->mrec_lock);
-			if (err)
-				goto failed;
-			i_size_write(bvi, bytes);
-			err = ntfs_attr_set(bni, old_bytes, bytes - old_bytes, 0);
-			if (!err && bni->initialized_size < bytes) {
-				mutex_lock(&bni->mrec_lock);
-				err = ntfs_attr_set_initialized_size(bni, bytes);
-				mutex_unlock(&bni->mrec_lock);
-			}
-			mark_inode_dirty(bvi);
+			err = ngc_grow_bitmap(v, old_bytes, bytes);
 			if (err)
 				goto failed;
 		}
 		err = ngc_grow_lcn_hints(vol, old_nr, nr);
 		if (err)
 			goto failed;
+		/* The bits that were padding before become free clusters; the grown bytes are zero already. */
+		err = ngc_clear_bits_stepped(v, old_nr, min_t(s64, nr, (s64)old_bytes << 3));
+		if (err)
+			goto failed;
 		down_write(&vol->lcnbmp_lock);
-		err = ntfs_bitmap_clear_run(bvi, old_nr, nr - old_nr);
-		if (!err && (nr & 63))
+		if (nr & 63)
 			err = ntfs_bitmap_set_bits_in_run(bvi, nr, 64 - (nr & 63), 1);
 		if (!err)
 			vol->nr_clusters = nr;
@@ -2319,6 +2389,7 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 failed:
 	err = ngc_resize_failed(v, err);
 out:
+	kshim_jnl_strict(v->bdev, 0);
 	kfree(boot);
 	return err;
 }
@@ -2402,6 +2473,7 @@ static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
 	err = ngc_mark_dirty(v);
 	if (err)
 		goto out;
+	kshim_jnl_strict(v->bdev, 1);
 	nr = (s64)((sectors * ss) >> vol->cluster_size_bits);
 	down_write(&vol->lcnbmp_lock);
 	err = ngc_shrink_check_locked(v, sectors, &first);
@@ -2453,6 +2525,7 @@ static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
 	if (err)
 		err = ngc_resize_failed(v, err);
 out:
+	kshim_jnl_strict(v->bdev, 0);
 	kfree(boot);
 	return err;
 }

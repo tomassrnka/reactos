@@ -32,6 +32,7 @@ struct kshim_jnl {
 	int failed;			/* a metadata write could not be protected: no write may reach the device */
 	int errors_durable;		/* a header with the errors mark has reached the medium */
 	int errors_writing;
+	int strict;			/* a resize runs: nothing goes in place; a fallback fails instead */
 	u64 vol_rec_off;		/* device offset of $MFT record 3 ($Volume) */
 	u16 vol_usn;			/* its update sequence number on disk (after the last in-place pass) */
 	u8 *hdrpage;
@@ -148,6 +149,12 @@ int kshim_jnl_in_place(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
 	return !j || j->degraded || j->failed;
+}
+
+void kshim_jnl_strict(struct block_device *b, int on)
+{
+	if (b->jnl)
+		b->jnl->strict = on;
 }
 
 /* A clean volume whose header is still on the medium: the flusher retires it (an earlier retire failed). */
@@ -503,6 +510,10 @@ int kshim_jnl_commit(struct block_device *b)
 		tmp = kmalloc_array(n, sizeof(*v), GFP_NOFS);
 		if (!v || !tmp) {
 			/* No memory to build a transaction: in place, under an UNJOURNALED header. */
+			if (j->strict && !j->degraded) {
+				err = -ENOMEM;
+				goto out;	/* nothing written: the overlay stays */
+			}
 			j->fallbacks++;
 			err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
 			if (err)
@@ -526,6 +537,12 @@ int kshim_jnl_commit(struct block_device *b)
 	}
 	if (j->degraded || ndesc + n > j->capacity) {
 		/* Does not fit (or the overlay failed): in place under an UNJOURNALED header. */
+		if (j->strict && !j->degraded) {
+			printk(KERN_ERR "journal: %lu pages do not fit (%llu slots): refused during a resize\n",
+			       n, (unsigned long long)j->capacity);
+			err = -ENOSPC;
+			goto out;
+		}
 		j->fallbacks++;
 		printk(KERN_WARNING "journal: %lu pages do not fit (%llu slots) or degraded=%d: writing in place\n",
 		       n, (unsigned long long)j->capacity, j->degraded);
@@ -769,6 +786,8 @@ int kshim_jnl_degrade(struct block_device *b)
 		return -EIO;
 	if (!j || j->degraded)
 		return 0;
+	if (j->strict)
+		return -ENOMEM;
 	printk(KERN_ERR "journal: out of memory for the overlay: writing in place until the next commit\n");
 	if (kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn))
 		return -EIO;
