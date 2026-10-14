@@ -1842,6 +1842,11 @@ co_WinPosSetWindowPosEx(
 
    TRACE("pwnd %p, after %p, %d,%d (%dx%d), flags 0x%x\n",
          Window, WndInsertAfter, x, y, cx, cy, flags);
+
+   /* A request to activate a top-level window ends the startup of its process. This
+      must see the flags as given: WinPosFixupFlags drops SWP_SHOWWINDOW for a visible window. */
+   if (!(flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) && !(Window->style & WS_CHILD))
+      UserEndAppStarting(Window);
 #if DBG
    dump_winpos_flags(flags);
 #endif
@@ -2042,6 +2047,7 @@ co_WinPosSetWindowPosEx(
 
       Window->style |= WS_VISIBLE; //IntSetStyle( Window, WS_VISIBLE, 0 );
       Window->head.pti->cVisWindows++;
+
       IntNotifyWinEvent(EVENT_OBJECT_SHOW, Window, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
    }
    else if (!NoMessages)
@@ -2913,6 +2919,15 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
       default:
          //ERR("co_WinPosShowWindow Exit Good 4\n");
          return FALSE;
+   }
+
+   /* The commands that activate a top-level window end the startup of its process
+      (the ones that return above changed nothing) */
+   if (!(style & WS_CHILD) &&
+       (Cmd == SW_SHOW || Cmd == SW_SHOWNORMAL || Cmd == SW_SHOWDEFAULT || Cmd == SW_RESTORE ||
+        Cmd == SW_SHOWMAXIMIZED || Cmd == SW_SHOWMINIMIZED))
+   {
+      UserEndAppStarting(Wnd);
    }
 
    ShowFlag = (Cmd != SW_HIDE);

@@ -680,6 +680,7 @@ NtUserCallHwndLock(
 
         case HWNDLOCK_ROUTINE_SETFOREGROUNDWINDOW:
             TRACE("co_IntSetForegroundWindow 1 0x%p\n", hWnd);
+            UserEndAppStarting(Window);
             Ret = co_IntSetForegroundWindow(Window);
             TRACE("co_IntSetForegroundWindow 2 0x%p\n", hWnd);
             break;
