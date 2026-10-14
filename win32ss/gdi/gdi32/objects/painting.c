@@ -576,7 +576,7 @@ PatBlt(
             pgO->nHeight = nHeight;
             pgO->dwRop   = dwRop;
             /* Snapshot attributes */
-            pgO->hbrush          = pdcattr->hbrush;
+            KPUT(pgO, hbrush, KGET(pdcattr, hbrush));
             pgO->crForegroundClr = pdcattr->crForegroundClr;
             pgO->crBackgroundClr = pdcattr->crBackgroundClr;
             pgO->crBrushClr      = pdcattr->crBrushClr;
@@ -650,9 +650,9 @@ PolyPatBlt(
         if (pgO)
         {
             USHORT cjSize = 0;
-            if (nCount > 1) cjSize = (nCount-1) * sizeof(PATRECT);
+            if (nCount > 1) cjSize = (nCount-1) * sizeof(KPATRECT);
 
-            if ((pTeb->GdiTebBatch.Offset + cjSize) <= GDIBATCHBUFSIZE)
+            if (KBATCH_COUNT_FITS(nCount) && (pTeb->GdiTebBatch.Offset + cjSize) <= GDIBATCHBUFSIZE)
             {
                 pdcattr->ulDirty_ |= DC_MODE_DIRTY;
                 pgO->Count = nCount;
@@ -665,7 +665,7 @@ PolyPatBlt(
                 pgO->ulForegroundClr = pdcattr->ulForegroundClr;
                 pgO->ulBackgroundClr = pdcattr->ulBackgroundClr;
                 pgO->ulBrushClr      = pdcattr->ulBrushClr;
-                RtlCopyMemory(pgO->pRect, pPoly, nCount * sizeof(PATRECT));
+                KCOPY_POLYPATBLT(pgO->pRect, pPoly, nCount);
                 // Recompute offset and return size, remember one is already accounted for in the structure.
                 pTeb->GdiTebBatch.Offset += cjSize;
                 ((PGDIBATCHHDR)pgO)->Size += cjSize;

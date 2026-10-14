@@ -58,12 +58,12 @@ typedef struct
 /* Listbox structure */
 typedef struct
 {
-    HWND        self;           /* Our own window handle */
-    HWND        owner;          /* Owner window to send notifications to */
+    KFIELD(HWND, self);         /* Our own window handle */
+    KFIELD(HWND, owner);        /* Owner window to send notifications to */
     UINT        style;          /* Window style */
     INT         width;          /* Window width */
     INT         height;         /* Window height */
-    LB_ITEMDATA  *items;        /* Array of items */
+    KFIELD(LB_ITEMDATA *, items); /* Array of items */
     INT         nb_items;       /* Number of items */
     INT         top_item;       /* Top visible item */
     INT         selected_item;  /* Selected item */
@@ -129,7 +129,7 @@ const struct builtin_class_descr LISTBOX_builtin_class =
     CS_DBLCLKS /*| CS_PARENTDC*/,  /* style */
     ListBoxWndProcA,      /* procA */
     ListBoxWndProcW,      /* procW */
-    sizeof(LB_DESCR *),   /* extra */
+    sizeof(KCOPYOF(LB_DESCR *)),   /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };
@@ -145,7 +145,7 @@ const struct builtin_class_descr COMBOLBOX_builtin_class =
     CS_DBLCLKS | CS_SAVEBITS,  /* style */
     ListBoxWndProcA,      /* procA */
     ListBoxWndProcW,      /* procW */
-    sizeof(LB_DESCR *),   /* extra */
+    sizeof(KCOPYOF(LB_DESCR *)),   /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };
@@ -757,7 +757,7 @@ static LRESULT LISTBOX_InitStorage( LB_DESCR *descr, INT nb_items )
         SEND_NOTIFICATION( descr, LBN_ERRSPACE );
         return LB_ERRSPACE;
     }
-    descr->items = item;
+    KSET(descr, items, item);
     return LB_OKAY;
 }
 
@@ -1585,7 +1585,7 @@ static LRESULT LISTBOX_InsertItem( LB_DESCR *descr, INT index,
             SEND_NOTIFICATION( descr, LBN_ERRSPACE );
             return LB_ERRSPACE;
         }
-        descr->items = item;
+        KSET(descr, items, item);
     }
 
     /* Insert the item structure */
@@ -1752,7 +1752,7 @@ static LRESULT LISTBOX_RemoveItem( LB_DESCR *descr, INT index )
         max_items -= LB_ARRAY_GRANULARITY;
         item = HeapReAlloc( GetProcessHeap(), 0, descr->items,
                             max_items * sizeof(LB_ITEMDATA) );
-        if (item) descr->items = item;
+        if (item) KSET(descr, items, item);
     }
     /* Repaint the items */
 
@@ -1798,7 +1798,7 @@ static void LISTBOX_ResetContent( LB_DESCR *descr )
     descr->selected_item = -1;
     descr->focus_item    = 0;
     descr->anchor_item   = -1;
-    descr->items         = NULL;
+    KSET(descr, items, NULL);
 }
 
 
@@ -2552,12 +2552,12 @@ static BOOL LISTBOX_Create( HWND hwnd, LPHEADCOMBO lphc )
         return FALSE;
 
     GetClientRect( hwnd, &rect );
-    descr->self          = hwnd;
-    descr->owner         = GetParent( descr->self );
+    KSETSX(descr, self, hwnd);
+    KSETSX(descr, owner, GetParent( descr->self ));
     descr->style         = GetWindowLongPtrW( descr->self, GWL_STYLE );
     descr->width         = rect.right - rect.left;
     descr->height        = rect.bottom - rect.top;
-    descr->items         = NULL;
+    KSET(descr, items, NULL);
     descr->nb_items      = 0;
     descr->top_item      = 0;
     descr->selected_item = -1;
@@ -2582,7 +2582,7 @@ static BOOL LISTBOX_Create( HWND hwnd, LPHEADCOMBO lphc )
     if( lphc )
     {
         TRACE("[%p]: resetting owner %p -> %p\n", descr->self, descr->owner, lphc->self );
-        descr->owner = lphc->self;
+        KSETSX(descr, owner, lphc->self);
     }
 
     SetWindowLongPtrW( descr->self, 0, (LONG_PTR)descr );
@@ -3271,7 +3271,7 @@ LRESULT WINAPI ListBoxWndProc_common( HWND hwnd, UINT msg,
 
     case WM_NCDESTROY:
         if( lphc && (lphc->dwStyle & CBS_DROPDOWNLIST) != CBS_SIMPLE )
-            lphc->hWndLBox = 0;
+            KSETSX(lphc, hWndLBox, 0);
 #ifdef __REACTOS__
         NtUserSetWindowFNID(hwnd, FNID_DESTROY);
 #endif
@@ -3320,3 +3320,9 @@ LRESULT WINAPI ListBoxWndProcW( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 {
     return ListBoxWndProc_common( hwnd, msg, wParam, lParam, TRUE );
 }
+
+/* NtUserGetListBoxInfo reads page_size through win32k's own copy of this structure, which has the amd64 layout */
+#if defined(_WIN64) || defined(W32K_WIDE_ACTIVE)
+C_ASSERT(offsetof(LB_DESCR, self) == 0 && offsetof(LB_DESCR, owner) == 8 &&
+         offsetof(LB_DESCR, items) == 32 && offsetof(LB_DESCR, page_size) == 64);
+#endif

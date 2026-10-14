@@ -161,7 +161,7 @@ Imm32UIntToStr(
     _Out_ PWSTR pszBuff,
     _In_ USHORT cchBuff);
 
-PTHREADINFO FASTCALL Imm32CurrentPti(VOID);
+KPTRTYPE(PTHREADINFO) FASTCALL Imm32CurrentPti(VOID);
 
 HRESULT CtfImmTIMCreateInputContext(_In_ HIMC hIMC);
 HRESULT CtfImmTIMDestroyInputContext(_In_ HIMC hIMC);

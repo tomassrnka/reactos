@@ -1498,7 +1498,7 @@ IntCallWindowProcW(BOOL IsAnsiProc,
       }
       _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
       {
-         ERR("Exception Dialog Ansi %p Msg %d pti %p Wndpti %p\n",WndProc,Msg,GetW32ThreadInfo(),pWnd->head.pti);
+         ERR("Exception Dialog Ansi %p Msg %d pti %p Wndpti %p\n",WndProc,Msg,GetW32ThreadInfo(),KPTR_LOW(KPTR(pWnd->head.pti)));
       }
       _SEH2_END;
       }
@@ -1554,7 +1554,7 @@ IntCallWindowProcW(BOOL IsAnsiProc,
       }
       _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
       {
-         ERR("Exception Dialog unicode %p Msg %d pti %p Wndpti %p\n",WndProc, Msg,GetW32ThreadInfo(),pWnd->head.pti);
+         ERR("Exception Dialog unicode %p Msg %d pti %p Wndpti %p\n",WndProc, Msg,GetW32ThreadInfo(),KPTR_LOW(KPTR(pWnd->head.pti)));
       }
       _SEH2_END;
       }
@@ -1648,7 +1648,7 @@ IntCallWindowProcA(BOOL IsAnsiProc,
       }
       _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
       {
-         ERR("Exception Dialog Ansi %p Msg %d pti %p Wndpti %p\n",WndProc,Msg,GetW32ThreadInfo(),pWnd->head.pti);
+         ERR("Exception Dialog Ansi %p Msg %d pti %p Wndpti %p\n",WndProc,Msg,GetW32ThreadInfo(),KPTR_LOW(KPTR(pWnd->head.pti)));
       }
       _SEH2_END;
       }
@@ -1711,7 +1711,7 @@ IntCallWindowProcA(BOOL IsAnsiProc,
       }
       _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
       {
-         ERR("Exception Dialog unicode %p Msg %d pti %p Wndpti %p\n",WndProc, Msg,GetW32ThreadInfo(),pWnd->head.pti);
+         ERR("Exception Dialog unicode %p Msg %d pti %p Wndpti %p\n",WndProc, Msg,GetW32ThreadInfo(),KPTR_LOW(KPTR(pWnd->head.pti)));
       }
       _SEH2_END;
       }
@@ -1754,7 +1754,7 @@ IntCallMessageProc(IN PWND Wnd, IN HWND hWnd, IN UINT Msg, IN WPARAM wParam, IN 
     Class = DesktopPtrToUser(Wnd->pcls);
     WndProc = NULL;
 
-    if ( Wnd->head.pti != GetW32ThreadInfo())
+    if ( !KPTR_EQ(KPTR(Wnd->head.pti), GetW32ThreadInfoK()))
     {  // Must be inside the same thread!
        SetLastError( ERROR_MESSAGE_SYNC_ONLY );
        return 0;
@@ -2156,7 +2156,7 @@ PeekMessageWorker( PMSG pMsg,
 
   if (!hWnd && pci && pcti)
   {
-     pci->cSpins++;
+     KINC(pci, cSpins);
 
      if ((pci->cSpins >= 100) && (pci->dwTIFlags & TIF_SPINNING))
      {  // Yield after 100 spin cycles and ready to swap vinyl.
@@ -2168,7 +2168,7 @@ PeekMessageWorker( PMSG pMsg,
               {  // Up the msg read count if over 1 sec.
                  NtUserGetThreadState(THREADSTATE_UPTIMELASTREAD);
               }
-              pci->cSpins = 0;
+              KSET(pci, cSpins, 0);
               ZwYieldExecution();
               FIXME("seeSpins!\n");
               return FALSE;
@@ -2374,7 +2374,7 @@ SendMessageW(HWND Wnd,
   LRESULT Result;
   BOOL Ret;
   PWND Window;
-  PTHREADINFO ti = GetW32ThreadInfo();
+  KPTRTYPE(PTHREADINFO) ti = GetW32ThreadInfoK();
 
   if ( Msg & ~WM_MAXIMUM )
   {
@@ -2387,7 +2387,7 @@ SendMessageW(HWND Wnd,
       Window = ValidateHwnd(Wnd);
 
       if ( Window != NULL &&
-           Window->head.pti == ti &&
+           KPTR_EQ(KPTR(Window->head.pti), ti) &&
           !ISITHOOKED(WH_CALLWNDPROC) &&
           !ISITHOOKED(WH_CALLWNDPROCRET) &&
           !(Window->state & WNDS_SERVERSIDEWINDOWPROC) )
@@ -2446,7 +2446,7 @@ SendMessageA(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam)
   LRESULT Result;
   BOOL Ret;
   PWND Window;
-  PTHREADINFO ti = GetW32ThreadInfo();
+  KPTRTYPE(PTHREADINFO) ti = GetW32ThreadInfoK();
 
   if ( Msg & ~WM_MAXIMUM )
   {
@@ -2459,7 +2459,7 @@ SendMessageA(HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam)
       Window = ValidateHwnd(Wnd);
 
       if ( Window != NULL &&
-           Window->head.pti == ti &&
+           KPTR_EQ(KPTR(Window->head.pti), ti) &&
           !ISITHOOKED(WH_CALLWNDPROC) &&
           !ISITHOOKED(WH_CALLWNDPROCRET) &&
           !(Window->state & WNDS_SERVERSIDEWINDOWPROC) )

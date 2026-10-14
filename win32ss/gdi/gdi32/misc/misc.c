@@ -1104,7 +1104,7 @@ GdiSetLDC(HDC hdc, PVOID pvLDC)
     }
 
     /* Set the LDC pointer */
-    pdcattr->pvLDC = pvLDC;
+    KSET(pdcattr, pvLDC, pvLDC);
     return TRUE;
 }
 
