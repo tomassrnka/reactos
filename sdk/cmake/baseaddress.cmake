@@ -475,3 +475,4 @@ set(baseaddress_xolehlp                        0x6ebb0000)
 set(baseaddress_zipfldr                        0x6ea60000)
 set(baseaddress_explorerframe                  0x6e960000) # manually added
 set(baseaddress_kernelbase                     0x6e950000) # manually added
+set(baseaddress_wevtapi                        0x70120000) # manually added

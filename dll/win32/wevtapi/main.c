@@ -107,11 +107,7 @@ BOOL WINAPI EvtNextChannelPath(EVT_HANDLE channel_enum, DWORD buffer_len, WCHAR 
 EVT_HANDLE WINAPI EvtOpenChannelConfig(EVT_HANDLE Session, LPCWSTR ChannelPath, DWORD Flags)
 {
     FIXME("(%p %s %lu) stub\n", Session, debugstr_w(ChannelPath), Flags);
-#ifdef __REACTOS__
-    return (EVT_HANDLE)(UINT_PTR)0xdeadbeef;
-#else
     return (EVT_HANDLE)0xdeadbeef;
-#endif
 }
 
 EVT_HANDLE WINAPI EvtQuery(EVT_HANDLE session, const WCHAR *path, const WCHAR *query, DWORD flags)

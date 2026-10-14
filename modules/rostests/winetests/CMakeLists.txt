@@ -161,6 +161,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(ncrypt)
     add_subdirectory(tdh)
     add_subdirectory(uiautomationcore)
+    add_subdirectory(wevtapi)
 endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)

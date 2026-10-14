@@ -435,3 +435,4 @@ set(baseaddress_mf                            0x73520000) # manually added
 set(baseaddress_mfplat                        0x73440000) # manually added
 set(baseaddress_explorerframe                  0x73340000) # manually added
 set(baseaddress_kernelbase                     0x73330000) # manually added
+set(baseaddress_wevtapi                        0x73c10000) # manually added
