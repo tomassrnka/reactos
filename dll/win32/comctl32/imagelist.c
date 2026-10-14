@@ -3345,10 +3345,7 @@ static BOOL _write_bitmap(HBITMAP hBitmap, IStream *pstm)
           bmih->biWidth, bmih->biHeight,
           bmih->biPlanes, bmih->biBitCount);
 
-    if(FAILED(IStream_Write(pstm, data, totalSize, NULL)))
-	goto failed;
-
-    result = TRUE;
+    result = SUCCEEDED(IStream_Write(pstm, data, totalSize, NULL));
 
 failed:
     heap_free(data);
