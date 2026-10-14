@@ -549,6 +549,7 @@
 @ stdcall -stub -version=0x601+ GetNumaNodeProcessorMaskEx(long ptr)
 @ stdcall GetNumaNodeProcessorMask(long ptr)
 @ stdcall GetNumaProcessorNode(long ptr)
+@ stdcall -version=0x601+ GetNumaProcessorNodeEx(ptr ptr)
 @ stub -version=0x600+ GetNumaProximityNode
 @ stdcall GetNumberFormatA(long long str ptr ptr long)
 @ stdcall -version=0x600+ GetNumberFormatEx(wstr long wstr ptr wstr long)
@@ -1197,6 +1198,7 @@
 @ stdcall UnlockFile(long long long long long)
 @ stdcall UnlockFileEx(long long long long ptr)
 @ stdcall UnmapViewOfFile(ptr)
+@ stdcall -version=0x601+ UnmapViewOfFileEx(ptr long)
 @ stdcall -version=0x600+ UnregisterApplicationRecoveryCallback()
 @ stdcall -version=0x600+ UnregisterApplicationRestart()
 @ stdcall UnregisterConsoleIME()

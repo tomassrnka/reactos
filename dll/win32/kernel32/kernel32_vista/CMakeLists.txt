@@ -24,6 +24,7 @@ list(APPEND SOURCE
     LoadString.c
     LCIDToLocaleName.c
     LocaleNameToLCID.c
+    NumaProcessorNodeEx.c
     PreferredUILanguages.c
     SetFileInformationByHandle.c
     UserDefaultGeoName.c
@@ -31,6 +32,7 @@ list(APPEND SOURCE
     ResolveLocaleName.c
     sync.c
     ThreadDescription.c
+    UnmapViewOfFileEx.c
     threadpool.c
     vista.c
     wer.c)
