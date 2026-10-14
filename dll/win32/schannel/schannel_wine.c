@@ -904,6 +904,13 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
         SecBuffer *buffer = &out_buffers->desc->pBuffers[out_buffers->current_buffer_idx];
         buffer->cbBuffer = out_buffers->offset;
     }
+    else if (pOutput)
+    {
+        /* No token was produced, so a caller provided buffer is empty as well */
+        int idx = schan_find_sec_buffer_idx(pOutput, 0, SECBUFFER_TOKEN);
+        if (idx != -1)
+            pOutput->pBuffers[idx].cbBuffer = 0;
+    }
 
     *pfContextAttr = 0;
     if (ctx->req_ctx_attr & ISC_REQ_ALLOCATE_MEMORY)

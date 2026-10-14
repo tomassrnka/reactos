@@ -48,6 +48,16 @@ WINE_DEFAULT_DEBUG_CHANNEL(schannel);
 #include <mbedtls/md_internal.h>
 #include <mbedtls/ssl_internal.h>
 
+/* Chain errors that make a server certificate unusable and that the SSL policy of crypt32 does not report */
+#define SCHAN_FATAL_CHAIN_ERRORS (CERT_TRUST_IS_NOT_SIGNATURE_VALID | CERT_TRUST_IS_UNTRUSTED_ROOT | \
+                                  CERT_TRUST_IS_CYCLIC | CERT_TRUST_IS_PARTIAL_CHAIN | \
+                                  CERT_TRUST_INVALID_BASIC_CONSTRAINTS | CERT_TRUST_INVALID_NAME_CONSTRAINTS | \
+                                  CERT_TRUST_HAS_NOT_SUPPORTED_NAME_CONSTRAINT | \
+                                  CERT_TRUST_HAS_NOT_DEFINED_NAME_CONSTRAINT | \
+                                  CERT_TRUST_HAS_NOT_PERMITTED_NAME_CONSTRAINT | \
+                                  CERT_TRUST_HAS_EXCLUDED_NAME_CONSTRAINT | CERT_TRUST_INVALID_POLICY_CONSTRAINTS | \
+                                  CERT_TRUST_IS_EXPLICIT_DISTRUST)
+
 /* wininet.h values of the chain policy checks */
 #define SECURITY_FLAG_IGNORE_REVOCATION      0x00000080
 #define SECURITY_FLAG_IGNORE_CERT_CN_INVALID 0x00001000
@@ -377,10 +387,10 @@ static SECURITY_STATUS schan_validate_server_chain(MBEDTLS_SESSION *s)
     memset(&ssl_para, 0, sizeof(ssl_para));
     ssl_para.cbSize = sizeof(ssl_para);
     ssl_para.dwAuthType = AUTHTYPE_SERVER;
+    /* The policy would also drop a known revocation, so revocation is judged below from the chain status */
+    ssl_para.fdwChecks = SECURITY_FLAG_IGNORE_REVOCATION;
     if (s->cred_flags & SCH_CRED_NO_SERVERNAME_CHECK)
         ssl_para.fdwChecks |= SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
-    if (s->cred_flags & (SCH_CRED_IGNORE_NO_REVOCATION_CHECK | SCH_CRED_IGNORE_REVOCATION_OFFLINE))
-        ssl_para.fdwChecks |= SECURITY_FLAG_IGNORE_REVOCATION;
     ssl_para.pwszServerName = s->target;
 
     memset(&policy_para, 0, sizeof(policy_para));
@@ -391,17 +401,32 @@ static SECURITY_STATUS schan_validate_server_chain(MBEDTLS_SESSION *s)
     policy_status.cbSize = sizeof(policy_status);
 
     if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &policy_para, &policy_status))
+    {
         status = SEC_E_CERT_UNKNOWN;
-    else if (policy_status.dwError)
+        goto done;
+    }
+
+    status = SEC_E_OK;
+    if (policy_status.dwError && policy_status.dwError != CERT_E_CN_NO_MATCH)
     {
         WARN("MBEDTLS server certificate rejected: %#x\n", policy_status.dwError);
         status = schan_status_from_chain_error(policy_status.dwError);
     }
-    /* crypt32's SSL policy accepts a chain whose issuer is missing */
-    else if (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_PARTIAL_CHAIN)
+    /* crypt32's SSL policy ignores these, so a missing issuer, a signer that is not a CA or a name constraint pass it */
+    else if (chain->TrustStatus.dwErrorStatus & CERT_TRUST_INVALID_BASIC_CONSTRAINTS)
+        status = SEC_E_CERT_WRONG_USAGE;
+    else if (chain->TrustStatus.dwErrorStatus & SCHAN_FATAL_CHAIN_ERRORS)
         status = SEC_E_UNTRUSTED_ROOT;
-    else
-        status = SEC_E_OK;
+    else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_REVOKED))
+        status = CRYPT_E_REVOKED;
+    else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_REVOCATION_STATUS_UNKNOWN) &&
+             !(s->cred_flags & SCH_CRED_IGNORE_NO_REVOCATION_CHECK))
+        status = CRYPT_E_NO_REVOCATION_CHECK;
+    else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_OFFLINE_REVOCATION) &&
+             !(s->cred_flags & SCH_CRED_IGNORE_REVOCATION_OFFLINE))
+        status = CRYPT_E_REVOCATION_OFFLINE;
+    else if (policy_status.dwError == CERT_E_CN_NO_MATCH)
+        status = SEC_E_WRONG_PRINCIPAL;
 
 done:
     if (chain)
