@@ -11,7 +11,8 @@
 #include "precomp.h"
 
 typedef BOOL (WINAPI *PFN_GetNumaProcessorNodeEx)(PPROCESSOR_NUMBER, PUSHORT);
-typedef BOOL (WINAPI *PFN_GetNumaProcessorNode)(UCHAR, PUCHAR);
+typedef BOOL (WINAPI *PFN_GetNumaHighestNodeNumber)(PULONG);
+typedef BOOL (WINAPI *PFN_GetNumaNodeProcessorMask)(UCHAR, PULONGLONG);
 typedef WORD (WINAPI *PFN_GetActiveProcessorGroupCount)(void);
 
 #define PENDING_ERROR 0xdeadbeef
@@ -20,15 +21,17 @@ START_TEST(GetNumaProcessorNodeEx)
 {
     HMODULE Kernel32 = GetModuleHandleW(L"kernel32.dll");
     PFN_GetNumaProcessorNodeEx pGetNumaProcessorNodeEx;
-    PFN_GetNumaProcessorNode pGetNumaProcessorNode;
+    PFN_GetNumaHighestNodeNumber pGetNumaHighestNodeNumber;
+    PFN_GetNumaNodeProcessorMask pGetNumaNodeProcessorMask;
     PFN_GetActiveProcessorGroupCount pGetActiveProcessorGroupCount;
     SYSTEM_INFO Info;
     PROCESSOR_NUMBER Processor;
     USHORT Node;
-    UCHAR Expected;
     DWORD Error;
     BOOL Result;
-    ULONG i, Groups = 1;
+    ULONG i, Groups = 1, Highest = 0, Node0;
+    ULONGLONG Masks[64];
+    BOOL HaveMasks = FALSE;
 
     pGetNumaProcessorNodeEx = (PFN_GetNumaProcessorNodeEx)GetProcAddress(Kernel32, "GetNumaProcessorNodeEx");
     /* Windows Vista and older have none; ReactOS has it from export level 0x601, which a kernel32 with the Windows 7 functions shows */
@@ -39,11 +42,26 @@ START_TEST(GetNumaProcessorNodeEx)
         return;
     }
 
-    pGetNumaProcessorNode = (PFN_GetNumaProcessorNode)GetProcAddress(Kernel32, "GetNumaProcessorNode");
+    pGetNumaHighestNodeNumber = (PFN_GetNumaHighestNodeNumber)GetProcAddress(Kernel32, "GetNumaHighestNodeNumber");
+    pGetNumaNodeProcessorMask = (PFN_GetNumaNodeProcessorMask)GetProcAddress(Kernel32, "GetNumaNodeProcessorMask");
     pGetActiveProcessorGroupCount = (PFN_GetActiveProcessorGroupCount)GetProcAddress(Kernel32, "GetActiveProcessorGroupCount");
     if (pGetActiveProcessorGroupCount)
         Groups = pGetActiveProcessorGroupCount();
     GetSystemInfo(&Info);
+
+    /*
+     * The nodes of the processors come from the masks of the nodes, which are 64 bits wide: GetNumaProcessorNode takes
+     * no processor above 31 and is no reference for those (the active processor mask of the system is the other source)
+     */
+    if (pGetNumaHighestNodeNumber && pGetNumaNodeProcessorMask && pGetNumaHighestNodeNumber(&Highest) && Highest < RTL_NUMBER_OF(Masks))
+    {
+        HaveMasks = TRUE;
+        for (Node0 = 0; Node0 <= Highest; Node0++)
+            if (!pGetNumaNodeProcessorMask((UCHAR)Node0, &Masks[Node0]))
+                HaveMasks = FALSE;
+    }
+    if (!HaveMasks)
+        trace("no node masks: every present processor is expected on node 0\n");
 
     /* a processor of group 0 that is there gives its node and leaves the last error alone; the others fail */
     for (i = 0; i < 8 * sizeof(DWORD_PTR); i++)
@@ -60,10 +78,17 @@ START_TEST(GetNumaProcessorNodeEx)
         ok(Result == Present, "processor %lu: got %d\n", i, Result);
         if (Present)
         {
-            /* the node of the processor, which the older function knows too; one node is the node 0 */
-            Expected = 0;
-            if (pGetNumaProcessorNode)
-                ok(pGetNumaProcessorNode((UCHAR)i, &Expected), "processor %lu: no node\n", i);
+            /* the node whose mask holds the processor; one node is the node 0 */
+            USHORT Expected = 0;
+
+            if (HaveMasks)
+            {
+                for (Node0 = 0; Node0 <= Highest; Node0++)
+                    if ((Masks[Node0] >> i) & 1)
+                        break;
+                ok(Node0 <= Highest, "processor %lu is in no node mask\n", i);
+                Expected = (USHORT)Node0;
+            }
             ok(Node == Expected, "processor %lu: node %u, expected %u\n", i, Node, Expected);
             ok(Error == PENDING_ERROR, "processor %lu: the last error became %lu\n", i, Error);
         }

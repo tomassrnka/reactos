@@ -68,6 +68,17 @@ AddUiLanguage(
     return TRUE;
 }
 
+/* The list lives in kernel32 only: this file is linked into kernel32 and into kernel32_vista, and the copy of the latter is never set */
+static
+BOOL
+IsInKernel32(VOID)
+{
+    HMODULE Self;
+
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              (LPCWSTR)IsInKernel32, &Self) && Self == GetModuleHandleW(L"kernel32.dll");
+}
+
 /* The identifiers of the languages of the process, for the list of a thread: it starts with them */
 ULONG
 BasepGetProcessUILanguageIds(
@@ -75,6 +86,24 @@ BasepGetProcessUILanguageIds(
 {
     WCHAR Names[MAX_PROCESS_UI_LANGUAGES][LOCALE_NAME_MAX_LENGTH];
     ULONG Count, i;
+
+    if (!IsInKernel32())
+    {
+        /* four hexadecimal digits and a zero for each language, one more zero at the end */
+        WCHAR Text[MAX_PROCESS_UI_LANGUAGES * 5 + 1];
+        BOOL (WINAPI *GetProcessLanguages)(DWORD, PULONG, PZZWSTR, PULONG);
+        ULONG Size = RTL_NUMBER_OF(Text), Number = 0;
+        PCWSTR Entry;
+
+        GetProcessLanguages = (PVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessPreferredUILanguages");
+        if (!GetProcessLanguages || !GetProcessLanguages(MUI_LANGUAGE_ID, &Number, Text, &Size))
+            return 0;
+
+        Count = 0;
+        for (Entry = Text; *Entry && Count < MAX_PROCESS_UI_LANGUAGES; Entry += wcslen(Entry) + 1)
+            Ids[Count++] = (LANGID)wcstoul(Entry, NULL, 16);
+        return Count;
+    }
 
     LockProcessUi();
     Count = ProcessUiCount;

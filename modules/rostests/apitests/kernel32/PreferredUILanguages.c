@@ -15,6 +15,7 @@ typedef BOOL (WINAPI *PFN_Get)(DWORD, PULONG, PZZWSTR, PULONG);
 #define PENDING_ERROR 0xdeadbeef
 #define MUI_ID   0x4
 #define MUI_NAME 0x8
+#define MAX_NAMES 32
 
 static PFN_Set pSet;
 static PFN_Get pGet;
@@ -76,21 +77,24 @@ static void CheckGet(DWORD Flags, const char *Expected, ULONG ExpectedCount, int
 /* The names of a language list, from the multi-string; the thread list comes from the thread function */
 typedef BOOL (WINAPI *PFN_GetThread)(DWORD, PULONG, PZZWSTR, PULONG);
 
-static ULONG ThreadNames(PFN_GetThread GetThread, DWORD Flags, WCHAR Names[16][32])
+static ULONG ThreadNames(PFN_GetThread GetThread, DWORD Flags, WCHAR Names[MAX_NAMES][32])
 {
-    WCHAR Buffer[256];
+    WCHAR Buffer[1024];
     ULONG Count = 0, Size = RTL_NUMBER_OF(Buffer), n = 0;
     PCWSTR Entry;
 
     memset(Buffer, 0, sizeof(Buffer));
     if (!GetThread(Flags, &n, Buffer, &Size))
         return 0;
-    for (Entry = Buffer; *Entry && Count < 16; Entry += wcslen(Entry) + 1)
+    for (Entry = Buffer; *Entry && Count < MAX_NAMES; Entry += wcslen(Entry) + 1)
         lstrcpynW(Names[Count++], Entry, 32);
+    /* the count that is given is the number of entries, and the size the length of all of them and the two zeros */
+    ok(n == Count, "thread flags %#lx: count %lu, %lu entries\n", Flags, n, Count);
+    ok(Count < MAX_NAMES, "the list has %lu entries or more, more than the test takes\n", Count);
     return Count;
 }
 
-static BOOL ListHas(WCHAR Names[16][32], ULONG Count, PCWSTR Name)
+static BOOL ListHas(WCHAR Names[MAX_NAMES][32], ULONG Count, PCWSTR Name)
 {
     ULONG i;
 
@@ -101,20 +105,23 @@ static BOOL ListHas(WCHAR Names[16][32], ULONG Count, PCWSTR Name)
 }
 
 /* The list of a thread starts with the languages of the process, then its own fallbacks without repeating one */
-static void CheckThreadList(PFN_GetThread GetThread, DWORD Flags, WCHAR Base[16][32], ULONG BaseCount, PCWSTR const *Head,
+static void CheckThreadList(PFN_GetThread GetThread, DWORD Flags, WCHAR Base[MAX_NAMES][32], ULONG BaseCount, PCWSTR const *Head,
                             ULONG HeadCount, int Line)
 {
-    WCHAR Now[16][32], Expected[16][32];
+    WCHAR Now[MAX_NAMES][32], Expected[MAX_NAMES][32];
     ULONG NowCount, ExpectedCount = 0, i;
 
     for (i = 0; i < HeadCount; i++)
         lstrcpyW(Expected[ExpectedCount++], Head[i]);
-    for (i = 0; i < BaseCount && ExpectedCount < 16; i++)
+    for (i = 0; i < BaseCount && ExpectedCount < MAX_NAMES; i++)
         if (!ListHas(Expected, ExpectedCount, Base[i]))
             lstrcpyW(Expected[ExpectedCount++], Base[i]);
 
     NowCount = ThreadNames(GetThread, Flags, Now);
     ok(NowCount == ExpectedCount, "line %d: thread flags %#lx: %lu languages, expected %lu\n", Line, Flags, NowCount, ExpectedCount);
+    if (NowCount != ExpectedCount)
+        for (i = 0; i < max(NowCount, ExpectedCount); i++)
+            trace("entry %lu: %ls, expected %ls\n", i, i < NowCount ? Now[i] : L"-", i < ExpectedCount ? Expected[i] : L"-");
     for (i = 0; i < min(NowCount, ExpectedCount); i++)
         ok(!lstrcmpiW(Now[i], Expected[i]), "line %d: thread flags %#lx: entry %lu is %ls, expected %ls\n", Line, Flags, i, Now[i], Expected[i]);
 }
@@ -125,8 +132,8 @@ START_TEST(PreferredUILanguages)
     static const DWORD BadGet[] = { 1, 2, 0x10, 0x20, 0x40, 0x100, 0x200, 0x300, 0x80000, 0x80000000 };
     static const DWORD BadSet[] = { 1, 2, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 5, 9, 0xc, 0xd, 0x14, 0x18, 0x28, 0x108, 0x80000000 };
     WCHAR Buffer[256];
-    WCHAR Base8[16][32], Base10[16][32], Base40[16][32];
-    ULONG Count, Size, i, Base8Count = 0, Base10Count = 0, Base40Count = 0;
+    WCHAR Base8[MAX_NAMES][32], Base10[MAX_NAMES][32], Base30[MAX_NAMES][32], Base40[MAX_NAMES][32];
+    ULONG Count, Size, i, Base8Count = 0, Base10Count = 0, Base30Count = 0, Base40Count = 0;
     PFN_GetThread pGetThread = NULL;
     BOOL Result;
 
@@ -151,6 +158,7 @@ START_TEST(PreferredUILanguages)
     {
         Base8Count = ThreadNames(pGetThread, MUI_NAME, Base8);
         Base10Count = ThreadNames(pGetThread, 0x10, Base10);
+        Base30Count = ThreadNames(pGetThread, 0x30, Base30);
         Base40Count = ThreadNames(pGetThread, 0x40, Base40);
     }
 
@@ -228,6 +236,56 @@ START_TEST(PreferredUILanguages)
         CheckThreadList(pGetThread, 0x20, Base8, Base8Count, Plain, 2, __LINE__);
         CheckThreadList(pGetThread, 0x10, Base10, Base10Count, Parents, 4, __LINE__);
         CheckThreadList(pGetThread, 0x40, Base40, Base40Count, NULL, 0, __LINE__);
+    }
+
+    /*
+     * Five languages that have two parents each, and the user and the system language with theirs: seventeen entries
+     * when the fallbacks are merged and both of these are English, the whole list and the count are compared
+     */
+    SETOK(MUI_NAME, "sr-Latn-CS|az-Latn-AZ|uz-Latn-UZ|bs-Latn-BA|zh-CN|", 5);
+    if (pGetThread)
+    {
+        static const PCWSTR Deep[] =
+        {
+            L"sr-Latn-CS", L"sr-Latn", L"sr", L"az-Latn-AZ", L"az-Latn", L"az", L"uz-Latn-UZ", L"uz-Latn", L"uz",
+            L"bs-Latn-BA", L"bs-Latn", L"bs", L"zh-CN", L"zh-Hans", L"zh",
+        };
+        WCHAR Now[MAX_NAMES][32];
+
+                CheckThreadList(pGetThread, 0x10, Base10, Base10Count, Deep, RTL_NUMBER_OF(Deep), __LINE__);
+        CheckThreadList(pGetThread, 0x30, Base30, Base30Count, Deep, RTL_NUMBER_OF(Deep), __LINE__);
+        ok(ThreadNames(pGetThread, 0x10, Now) >= RTL_NUMBER_OF(Deep), "the list of the thread is shorter than the languages of the process\n");
+    }
+    SETOK(MUI_NAME, "fr-FR|de-DE|", 2);
+
+    /* the thread list of kernel32_vista, which has no process list of its own, is the one of kernel32 */
+    {
+        HMODULE Vista = LoadLibraryW(L"kernel32_vista.dll");
+        PFN_GetThread pVistaGetThread = Vista ? (PFN_GetThread)GetProcAddress(Vista, "GetThreadPreferredUILanguages") : NULL;
+        WCHAR FromKernel32[MAX_NAMES][32], FromVista[MAX_NAMES][32];
+        ULONG KernelCount, VistaCount, j;
+
+        if (!pVistaGetThread)
+        {
+            skip("kernel32_vista.dll is not here\n");
+        }
+        else
+        {
+            static const DWORD FlagSets[] = { MUI_NAME, 0x20, 0x10, 0x30 };
+
+            for (j = 0; j < RTL_NUMBER_OF(FlagSets); j++)
+            {
+                KernelCount = ThreadNames(pGetThread, FlagSets[j] | MUI_NAME, FromKernel32);
+                VistaCount = ThreadNames(pVistaGetThread, FlagSets[j] | MUI_NAME, FromVista);
+                ok(KernelCount >= 2 && VistaCount == KernelCount, "flags %#lx: kernel32_vista gives %lu languages, kernel32 %lu\n",
+                   FlagSets[j], VistaCount, KernelCount);
+                for (i = 0; i < min(KernelCount, VistaCount); i++)
+                    ok(!lstrcmpiW(FromKernel32[i], FromVista[i]), "flags %#lx: entry %lu is %ls, kernel32 has %ls\n", FlagSets[j], i,
+                       FromVista[i], FromKernel32[i]);
+            }
+        }
+        if (Vista)
+            FreeLibrary(Vista);
     }
 
     /* the size of the buffer */
