@@ -1536,6 +1536,26 @@ IsServerSideWindow(
 
 /*
  * @implemented
+ *
+ * A window is arranged when it is snapped to a side of the screen. A handle that is no window is an invalid
+ * parameter here, not an invalid window handle (measured on Windows 10).
+ */
+BOOL WINAPI
+IsWindowArranged(HWND hWnd)
+{
+    PWND Wnd = ValidateHwndNoErr(hWnd);
+
+    if (Wnd == NULL || (Wnd->state & WNDS_DESTROYED))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return (Wnd->ExStyle2 & (WS_EX2_VERTICALLYMAXIMIZEDLEFT | WS_EX2_VERTICALLYMAXIMIZEDRIGHT)) != 0;
+}
+
+/*
+ * @implemented
  */
 BOOL WINAPI
 IsWindow(HWND hWnd)

@@ -253,6 +253,7 @@
 @ stdcall GetAppCompatFlags(long)
 @ stdcall GetAppCompatFlags2(long)
 @ stdcall GetAsyncKeyState(long)
+@ stdcall -version=0x601+ GetAutoRotationState(ptr)
 @ stdcall GetCapture()
 @ stdcall GetCaretBlinkTime() NtUserGetCaretBlinkTime
 @ stdcall GetCaretPos(ptr) NtUserGetCaretPos
@@ -285,7 +286,7 @@
 # GetDbgTagFlags
 @ stdcall GetDesktopWindow()
 @ stdcall GetDialogBaseUnits()
-@ stdcall -version=0x602+ GetDisplayAutoRotationPreferences(ptr)
+@ stdcall -version=0x601+ GetDisplayAutoRotationPreferences(ptr)
 @ stdcall -version=0x600+ GetDisplayConfigBufferSizes(long ptr ptr)
 @ stdcall GetDlgCtrlID(long)
 @ stdcall GetDlgItem(long long)
@@ -466,6 +467,7 @@
 @ stdcall -stub -version=0xA00+ IsValidDpiAwarenessContext(long)
 @ stdcall IsWinEventHookInstalled(long)
 @ stdcall IsWindow(long)
+@ stdcall -version=0x601+ IsWindowArranged(long)
 @ stdcall IsWindowEnabled(long)
 @ stdcall IsWindowInDestroy(long)
 @ stdcall -version=0x600+ IsWindowRedirectedForPrint(long)
@@ -592,6 +594,7 @@
 @ stdcall -version=0x600+ RegisterPowerSettingNotification(long ptr long)
 @ stdcall -import RegisterRawInputDevices(ptr long long) NtUserRegisterRawInputDevices
 @ stdcall RegisterServicesProcess(long)
+@ stdcall -version=0x601+ RegisterSuspendResumeNotification(ptr long)
 @ stdcall RegisterShellHookWindow(long)
 @ stdcall RegisterSystemThread(long long)
 @ stdcall RegisterTasklist(long) NtUserRegisterTasklist
@@ -645,7 +648,7 @@
 # SetDbgTag
 @ stdcall SetDebugErrorLevel(long)
 @ stdcall SetDeskWallpaper(ptr)
-@ stdcall -version=0x602+ SetDisplayAutoRotationPreferences(long)
+@ stdcall -version=0x601+ SetDisplayAutoRotationPreferences(long)
 @ stdcall -version=0x600+ SetDisplayConfig(long ptr long ptr long)
 @ stdcall SetDlgItemInt(long long long long)
 @ stdcall SetDlgItemTextA(long long str)
@@ -692,6 +695,7 @@
 @ stdcall SetSystemTimer(long long long ptr) NtUserSetSystemTimer
 @ stdcall SetTaskmanWindow (long)
 @ stdcall SetThreadDesktop(long) NtUserSetThreadDesktop
+@ stdcall -version=0x601+ SetCoalescableTimer(long long long ptr long)
 @ stdcall SetTimer(long long long ptr) NtUserSetTimer
 @ stdcall SetUserObjectInformationA(long long ptr long) NtUserSetObjectInformation
 @ stdcall SetUserObjectInformationW(long long ptr long) NtUserSetObjectInformation
@@ -762,7 +766,7 @@
 @ stdcall UnregisterMessagePumpHook()
 @ stdcall -version=0x601+ UnregisterTouchWindow(ptr)
 @ stdcall -version=0x600+ UnregisterPowerSettingNotification(ptr)
-@ stdcall -version=0x602+ UnregisterSuspendResumeNotification(ptr)
+@ stdcall -version=0x601+ UnregisterSuspendResumeNotification(ptr)
 @ stdcall UnregisterUserApiHook() NtUserUnregisterUserApiHook
 @ stdcall UpdateLayeredWindow(long long ptr ptr long ptr long ptr long)
 @ stdcall UpdateLayeredWindowIndirect(long ptr)
