@@ -327,12 +327,32 @@ START_TEST(WaitOnAddress)
     }
     RunAll(TRUE);
 
-    /* ReactOS has no kernelbase.dll under that name; its kernel32 and kernelbase_ros hold the functions. */
+    /* The other functions of the contract still resolve through the same module */
+    {
+        static const char *const Names[] =
+        {
+            "Sleep", "SleepEx", "SetEvent", "WaitForSingleObjectEx", "EnterCriticalSection", "InitializeCriticalSectionEx",
+            "InitializeSRWLock", "AcquireSRWLockExclusive", "InitializeConditionVariable", "SleepConditionVariableCS",
+            "InitOnceExecuteOnce", "CreateEventExW",
+        };
+        ULONG i;
+
+        /* Some of them depend on the export level of kernel32; whatever kernel32 exports, the contract has to provide too */
+        for (i = 0; i < _countof(Names); i++)
+        {
+            if (GetProcAddress(GetModuleHandleW(L"kernel32.dll"), Names[i]) != NULL)
+                ok(GetProcAddress(Module, Names[i]) != NULL, "api-ms-win-core-synch-l1-2-0 does not provide %s\n", Names[i]);
+        }
+    }
+
+    /* Windows exports these functions from kernelbase.dll and not from kernel32.dll; ReactOS keeps them in kernelbase_ros.dll. */
     if (is_reactos())
     {
-        ok(LoadApi(GetModuleHandleW(L"kernel32.dll"), "kernel32"), "kernel32 does not export WaitOnAddress\n");
-        if (g_Api.Wait)
-            RunAll(FALSE);
+        HMODULE Kernel32 = GetModuleHandleW(L"kernel32.dll");
+
+        ok(GetProcAddress(Kernel32, "WaitOnAddress") == NULL, "kernel32 exports WaitOnAddress\n");
+        ok(GetProcAddress(Kernel32, "WakeByAddressAll") == NULL, "kernel32 exports WakeByAddressAll\n");
+        ok(GetProcAddress(Kernel32, "WakeByAddressSingle") == NULL, "kernel32 exports WakeByAddressSingle\n");
         Module = LoadLibraryW(L"kernelbase_ros.dll");
         if (Module != NULL)
         {
