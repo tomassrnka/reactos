@@ -1906,6 +1906,65 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
 }
 
 
+/* the three groups of an ACL in canonical order: audit, denied and allowed (everything else) */
+#define ACEGROUP_AUDIT   0
+#define ACEGROUP_DENIED  1
+#define ACEGROUP_ALLOWED 2
+
+static DWORD
+AccpGetAceGroup(IN PACE_HEADER AceHeader)
+{
+    switch (AceHeader->AceType)
+    {
+        case SYSTEM_AUDIT_ACE_TYPE:
+        case SYSTEM_ALARM_ACE_TYPE:
+        case SYSTEM_MANDATORY_LABEL_ACE_TYPE:
+        case SYSTEM_AUDIT_OBJECT_ACE_TYPE:
+        case SYSTEM_ALARM_OBJECT_ACE_TYPE:
+        case SYSTEM_AUDIT_CALLBACK_ACE_TYPE:
+        case SYSTEM_ALARM_CALLBACK_ACE_TYPE:
+        case SYSTEM_AUDIT_CALLBACK_OBJECT_ACE_TYPE:
+        case SYSTEM_ALARM_CALLBACK_OBJECT_ACE_TYPE:
+            return ACEGROUP_AUDIT;
+
+        case ACCESS_DENIED_ACE_TYPE:
+        case ACCESS_DENIED_OBJECT_ACE_TYPE:
+        case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+        case ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE:
+            return ACEGROUP_DENIED;
+
+        default:
+            return ACEGROUP_ALLOWED;
+    }
+}
+
+/* appends the kept ACEs of one group of the old ACL */
+static DWORD
+AccpCopyOldAces(IN OUT PACL pNew,
+                IN UCHAR Revision,
+                IN PACL OldAcl OPTIONAL,
+                IN ULONG OldAceCount,
+                IN BOOLEAN *pKeepAce OPTIONAL,
+                IN DWORD Group)
+{
+    PACE_HEADER pAce;
+    ULONG j;
+
+    for (j = 0; OldAcl != NULL && j < OldAceCount; j++)
+    {
+        if (!pKeepAce[j])
+            continue;
+        if (!GetAce(OldAcl, j, (PVOID *)&pAce))
+            return GetLastError();
+        if (AccpGetAceGroup(pAce) != Group)
+            continue;
+        if (!AddAce(pNew, Revision, MAXDWORD, pAce, pAce->AceSize))
+            return GetLastError();
+    }
+
+    return ERROR_SUCCESS;
+}
+
 /**********************************************************************
  * AccRewriteSetEntriesInAcl				EXPORTED
  *
@@ -1920,6 +1979,7 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
     PACL pNew = NULL;
     ACL_SIZE_INFORMATION SizeInformation;
     PACE_HEADER pAce;
+    UCHAR Revision;
     BOOLEAN KeepAceBuf[8];
     BOOLEAN *pKeepAce = NULL;
     GUID ObjectTypeGuid, InheritedObjectTypeGuid;
@@ -2036,7 +2096,8 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
         Ret = ERROR_NOT_ENOUGH_MEMORY;
         goto Cleanup;
     }
-    if (!InitializeAcl(pNew, SizeInformation.AclBytesInUse, ACL_REVISION))
+    Revision = (OldAcl != NULL && OldAcl->AclRevision > ACL_REVISION) ? OldAcl->AclRevision : ACL_REVISION;
+    if (!InitializeAcl(pNew, SizeInformation.AclBytesInUse, Revision))
     {
         Ret = GetLastError();
         goto Cleanup;
@@ -2047,7 +2108,9 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
     /* FIXME */
 
     /* 1b) Existing audit entries */
-    /* FIXME */
+    Ret = AccpCopyOldAces(pNew, Revision, OldAcl, SizeInformation.AceCount, pKeepAce, ACEGROUP_AUDIT);
+    if (Ret != ERROR_SUCCESS)
+        goto Cleanup;
 
     /* 2a) New denied entries (DENY_ACCESS) */
     for (i = 0; i < cCountOfExplicitEntries; i++)
@@ -2091,7 +2154,9 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
     }
 
     /* 2b) Existing denied entries */
-    /* FIXME */
+    Ret = AccpCopyOldAces(pNew, Revision, OldAcl, SizeInformation.AceCount, pKeepAce, ACEGROUP_DENIED);
+    if (Ret != ERROR_SUCCESS)
+        goto Cleanup;
 
     /* 3a) New allow entries (GRANT_ACCESS, SET_ACCESS) */
     for (i = 0; i < cCountOfExplicitEntries; i++)
@@ -2136,7 +2201,9 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
     }
 
     /* 3b) Existing allow entries */
-    /* FIXME */
+    Ret = AccpCopyOldAces(pNew, Revision, OldAcl, SizeInformation.AceCount, pKeepAce, ACEGROUP_ALLOWED);
+    if (Ret != ERROR_SUCCESS)
+        goto Cleanup;
 
     *NewAcl = pNew;
 
