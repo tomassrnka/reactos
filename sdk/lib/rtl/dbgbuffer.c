@@ -618,9 +618,10 @@ RtlpRemoteHeapIsLocked(_In_ PRTLP_REMOTE_READ Remote,
 
 /*
  * Reads a heap of this process. The heap list lock is held for the whole read: RtlDestroyHeap takes a heap
- * off the list before it deletes the lock of the heap and releases its memory, so a heap that is on the list
- * stays whole until the read is done. The lock of the heap is taken without waiting, because a thread that
- * holds it may be waiting for the list lock; the list lock is given up for a moment and the heap tried again.
+ * off the list before it deletes the lock of the heap, so the lock of a heap that is on the list is there
+ * until the read is done (its memory is released earlier, so a read may fault and is then left out). The lock
+ * of the heap is taken without waiting, because a thread that holds it may be waiting for the list lock; the
+ * list lock is given up for a moment and the heap tried again.
  */
 static
 NTSTATUS

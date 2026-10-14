@@ -4183,15 +4183,16 @@ RtlpHeapWalkFindUcr(
     _In_ BOOLEAN Above,
     _Out_ PHEAP_UCR_DESCRIPTOR Descriptor)
 {
-    ULONG_PTR Head, Link;
-    ULONG_PTR Limit;
+    ULONG_PTR Head, Link, Limit, Floor, Last;
     NTSTATUS Status;
 
     Head = (ULONG_PTR)Walker->Segment.BaseAddress + FIELD_OFFSET(HEAP_SEGMENT, UCRSegmentList);
     Link = (ULONG_PTR)Walker->Segment.UCRSegmentList.Flink;
+    Last = (ULONG_PTR)Walker->Segment.LastValidEntry;
 
     /* Every range is at least a page of its own, so a list longer than the pages of the segment goes in circles */
-    Limit = ((ULONG_PTR)Walker->Segment.LastValidEntry - (ULONG_PTR)Walker->Segment.BaseAddress) / PAGE_SIZE + 1;
+    Limit = (Last - (ULONG_PTR)Walker->Segment.BaseAddress) / PAGE_SIZE + 1;
+    Floor = (ULONG_PTR)Walker->Segment.FirstEntry;
 
     while (Link != Head)
     {
@@ -4205,18 +4206,18 @@ RtlpHeapWalkFindUcr(
         if (!NT_SUCCESS(Status))
             return Status;
 
-        if (Above ? ((ULONG_PTR)Descriptor->Address > Address) : ((ULONG_PTR)Descriptor->Address == Address))
+        /* The ranges are sorted by address and do not overlap, so a list that goes in circles breaks this at once */
+        if ((ULONG_PTR)Descriptor->Address < Floor ||
+            (ULONG_PTR)Descriptor->Address >= Last ||
+            Descriptor->Size == 0 ||
+            Descriptor->Size > Last - (ULONG_PTR)Descriptor->Address)
         {
-            if ((ULONG_PTR)Descriptor->Address < (ULONG_PTR)Walker->Segment.FirstEntry ||
-                (ULONG_PTR)Descriptor->Address >= (ULONG_PTR)Walker->Segment.LastValidEntry ||
-                Descriptor->Size == 0 ||
-                Descriptor->Size > (ULONG_PTR)Walker->Segment.LastValidEntry - (ULONG_PTR)Descriptor->Address)
-            {
-                return STATUS_INVALID_PARAMETER;
-            }
-
-            return STATUS_SUCCESS;
+            return STATUS_INVALID_PARAMETER;
         }
+        Floor = (ULONG_PTR)Descriptor->Address + Descriptor->Size;
+
+        if (Above ? ((ULONG_PTR)Descriptor->Address > Address) : ((ULONG_PTR)Descriptor->Address == Address))
+            return STATUS_SUCCESS;
 
         Link = (ULONG_PTR)Descriptor->SegmentEntry.Flink;
     }
