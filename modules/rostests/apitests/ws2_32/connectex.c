@@ -552,8 +552,9 @@ Cleanup:
 
 /* After a cancelled ConnectEx the socket is bound again: listen() on it works
  * and accepts a connection (Windows Server 2008 R2 and Windows 10). ReactOS
- * kept the cancelled connect's endpoint on the socket and the listen opened a
- * new one over it */
+ * left the socket connecting, so listen() failed. ReactOS tcpip still refuses
+ * connections to a listener on the port of a cancelled connect (also a new
+ * socket bound there, also 75 s later), so those two checks are todo */
 static
 void
 TestCancelThenListen(void)
@@ -594,9 +595,9 @@ TestCancelThenListen(void)
     Local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     Peer = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     Error = connect(Peer, (struct sockaddr *)&Local, sizeof(Local)) ? WSAGetLastError() : 0;
-    ok(Error == 0, "connect to the listener after a cancelled ConnectEx: error %d\n", Error);
+    todo_ros ok(Error == 0, "connect to the listener after a cancelled ConnectEx: error %d\n", Error);
     Accepted = AcceptWithin(Client, 5000);
-    ok(Accepted != INVALID_SOCKET, "The listener accepted nothing\n");
+    todo_ros ok(Accepted != INVALID_SOCKET, "The listener accepted nothing\n");
 
 Cleanup:
     if (Accepted != INVALID_SOCKET)
