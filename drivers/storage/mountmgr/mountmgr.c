@@ -581,6 +581,25 @@ QueryDeviceInformation(
                                                 sizeof(GUID),
                                                 FileObject);
         *HasGuid = NT_SUCCESS(IntStatus);
+
+        /* Another volume may have that name already (a cloned GPT disk): this one gets a new name */
+        if (*HasGuid && DeviceName && DeviceName->Length)
+        {
+            UNICODE_STRING GuidName, OtherDevice;
+
+            if (NT_SUCCESS(CreateNewVolumeName(&GuidName, StableGuid)))
+            {
+                if (NT_SUCCESS(QueryDeviceInformation(&GuidName, &OtherDevice, NULL, NULL, NULL, NULL, NULL, NULL)))
+                {
+                    if (!RtlEqualUnicodeString(&OtherDevice, DeviceName, TRUE))
+                        *HasGuid = FALSE;
+
+                    FreePool(OtherDevice.Buffer);
+                }
+
+                FreePool(GuidName.Buffer);
+            }
+        }
     }
 
     ObDereferenceObject(DeviceObject);
