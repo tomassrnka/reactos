@@ -1424,7 +1424,18 @@ void discard_new_inode(struct inode *i)
 	iput(i);
 }
 void iget_failed(struct inode *i) { discard_new_inode(i); }
-struct inode *igrab(struct inode *i) { atomic_inc(&i->i_count); return i; }
+/*
+ * As in Linux, an inode being evicted cannot be grabbed: __ntfs_write_inode grabs the inode it writes,
+ * and when eviction writes a dirty inode (a read-only volume skips the writeback before it), its iput
+ * would evict the inode a second time.  No lock: find_inode_nowait calls this under kshim_inode_lock.
+ */
+struct inode *igrab(struct inode *i)
+{
+	if (i->i_state & I_FREEING)
+		return NULL;
+	atomic_inc(&i->i_count);
+	return i;
+}
 void ihold(struct inode *i) { atomic_inc(&i->i_count); }
 static void kshim_evict(struct inode *i)
 {
