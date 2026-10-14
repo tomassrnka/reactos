@@ -628,7 +628,9 @@ static void ConnectExAsyncSelect(BOOL PeerFirst, PULONG Connects, const char *Wh
     Address.sin_port = htons(ServerPort);
     Result = pConnectEx(Client, (struct sockaddr *)&Address, sizeof(Address), NULL, 0, NULL, &Overlapped);
     ok(Result || WSAGetLastError() == ERROR_IO_PENDING, "%s: ConnectEx failed: %d\n", What, WSAGetLastError());
-    ok(WSAGetOverlappedResult(Client, &Overlapped, &Bytes, TRUE, &Flags), "%s: ConnectEx did not complete: %d\n", What, WSAGetLastError());
+    Result = WSAWaitForMultipleEvents(1, &Overlapped.hEvent, FALSE, 10000, FALSE);
+    ok(Result == WSA_WAIT_EVENT_0, "%s: ConnectEx did not complete: %d\n", What, Result);
+    ok(WSAGetOverlappedResult(Client, &Overlapped, &Bytes, FALSE, &Flags), "%s: ConnectEx failed: %d\n", What, WSAGetLastError());
     WSACloseEvent(Overlapped.hEvent);
 
     if (PeerFirst)
