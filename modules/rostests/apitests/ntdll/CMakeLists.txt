@@ -177,6 +177,7 @@ list(APPEND SOURCE
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
     strcpy_s.c
+    RtlWaitOnAddress.c
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c

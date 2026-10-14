@@ -104,6 +104,7 @@ list(APPEND SOURCE
     TzSetPrivilege.c
     UEFIFirmware.c
     UnmapViewOfFileEx.c
+    WaitOnAddress.c
     WerFlags.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
