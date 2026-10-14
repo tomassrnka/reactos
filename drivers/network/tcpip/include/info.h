@@ -163,9 +163,9 @@ VOID InsertTDIInterfaceEntity( PIP_INTERFACE Interface );
 
 VOID RemoveTDIInterfaceEntity( PIP_INTERFACE Interface );
 
-VOID AddEntity(ULONG EntityType,
-               PVOID Context,
-               ULONG Flags);
+NTSTATUS AddEntity(ULONG EntityType,
+                   PVOID Context,
+                   ULONG Flags);
 
 VOID RemoveEntityByContext(PVOID Context);
 

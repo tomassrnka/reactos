@@ -435,6 +435,8 @@ NTSTATUS FileOpenAddress(
 {
   PADDRESS_FILE AddrFile;
   UINT AllocatedPort;
+  ULONG EntityType, EntityFlags;
+  NTSTATUS Status;
 
   TI_DbgPrint(MID_TRACE, ("Called (Proto %d).\n", Protocol));
 
@@ -535,7 +537,8 @@ NTSTATUS FileOpenAddress(
           AddrFile->Port = 0;
       }
 
-      AddEntity(CO_TL_ENTITY, AddrFile, CO_TL_TCP);
+      EntityType = CO_TL_ENTITY;
+      EntityFlags = CO_TL_TCP;
 
       AddrFile->Send = NULL; /* TCPSendData */
       break;
@@ -557,7 +560,8 @@ NTSTATUS FileOpenAddress(
                              AddrFile->Port,
                              Address->Address[0].Address[0].sin_port));
 
-      AddEntity(CL_TL_ENTITY, AddrFile, CL_TL_UDP);
+      EntityType = CL_TL_ENTITY;
+      EntityFlags = CL_TL_UDP;
 
       AddrFile->Send = UDPSendDatagram;
       break;
@@ -567,7 +571,8 @@ NTSTATUS FileOpenAddress(
     AddrFile->Send = ICMPSendDatagram;
 
     /* FIXME: Verify this */
-    AddEntity(ER_ENTITY, AddrFile, ER_ICMP);
+    EntityType = ER_ENTITY;
+    EntityFlags = ER_ICMP;
     break;
 
   default:
@@ -576,7 +581,8 @@ NTSTATUS FileOpenAddress(
     AddrFile->Send = RawIPSendDatagram;
 
     /* FIXME: Verify this */
-    AddEntity(CL_TL_ENTITY, AddrFile, 0);
+    EntityType = CL_TL_ENTITY;
+    EntityFlags = 0;
     break;
   }
 
@@ -595,6 +601,19 @@ NTSTATUS FileOpenAddress(
 
   /* Initialize spin lock that protects the address file object */
   ExInitializeResourceLite(&AddrFile->Resource);
+
+  /* Running out of memory here fails the open cleanly (WSAENOBUFS) */
+  Status = AddEntity(EntityType, AddrFile, EntityFlags);
+  if (!NT_SUCCESS(Status))
+  {
+      if (Protocol == IPPROTO_TCP && AddrFile->Port)
+          TCPFreePort(AddrFile->Port);
+      else if (Protocol == IPPROTO_UDP)
+          UDPFreePort(AddrFile->Port);
+      ExDeleteResourceLite(&AddrFile->Resource);
+      ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+      return Status;
+  }
 
   /* Return address file object */
   Request->Handle.AddressHandle = AddrFile;

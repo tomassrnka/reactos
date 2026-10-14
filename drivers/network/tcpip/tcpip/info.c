@@ -12,27 +12,86 @@
 
 #include <debug.h>
 
-VOID AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
+/* Make room for one more entity. The list holds one entity per address file,
+   so it grows with the number of sockets. Called and returns with the lock held */
+static
+BOOLEAN
+GrowEntityList(PKIRQL OldIrql)
+{
+    TDIEntityInfo *NewList, *OldList = NULL;
+    PUCHAR NewUsed, OldUsed = NULL;
+    ULONG Max;
+
+    while (EntityCount == EntityMax)
+    {
+        Max = EntityMax;
+        TcpipReleaseSpinLock(&EntityListLock, *OldIrql);
+
+        if (Max > MAXULONG / 2 / sizeof(TDIEntityInfo))
+        {
+            TcpipAcquireSpinLock(&EntityListLock, OldIrql);
+            return FALSE;
+        }
+        NewList = ExAllocatePoolWithTag(NonPagedPool, 2 * Max * sizeof(TDIEntityInfo), TDI_ENTITY_TAG);
+        NewUsed = ExAllocatePoolWithTag(NonPagedPool, 2 * Max + 1, TDI_ENTITY_TAG);
+        if (!NewList || !NewUsed)
+        {
+            if (NewList)
+                ExFreePoolWithTag(NewList, TDI_ENTITY_TAG);
+            if (NewUsed)
+                ExFreePoolWithTag(NewUsed, TDI_ENTITY_TAG);
+            TcpipAcquireSpinLock(&EntityListLock, OldIrql);
+            return FALSE;
+        }
+
+        TcpipAcquireSpinLock(&EntityListLock, OldIrql);
+        if (EntityMax == Max)
+        {
+            RtlCopyMemory(NewList, EntityList, EntityCount * sizeof(TDIEntityInfo));
+            OldList = EntityList;
+            OldUsed = EntityInstanceUsed;
+            EntityList = NewList;
+            EntityInstanceUsed = NewUsed;
+            EntityMax = 2 * Max;
+        }
+        else
+        {
+            /* Another caller grew it meanwhile */
+            OldList = NewList;
+            OldUsed = NewUsed;
+        }
+        ExFreePoolWithTag(OldList, TDI_ENTITY_TAG);
+        ExFreePoolWithTag(OldUsed, TDI_ENTITY_TAG);
+    }
+
+    return TRUE;
+}
+
+NTSTATUS AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
 {
     KIRQL OldIrql;
-    ULONG i, Instance = 0;
-    BOOLEAN ChoseIndex = FALSE;
+    ULONG i, Instance;
 
     TcpipAcquireSpinLock(&EntityListLock, &OldIrql);
 
-    while (!ChoseIndex)
+    if (!GrowEntityList(&OldIrql))
     {
-         ChoseIndex = TRUE;
-         for (i = 0; i < EntityCount; i++)
-         {
-             if (EntityList[i].tei_entity == EntityType &&
-                 EntityList[i].tei_instance == Instance)
-             {
-                 Instance++;
-                 ChoseIndex = FALSE;
-             }
-         }
+        TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+    /* The lowest instance number this type does not use yet. Only
+       EntityCount entities exist, so it is at most EntityCount */
+    RtlZeroMemory(EntityInstanceUsed, EntityCount + 1);
+    for (i = 0; i < EntityCount; i++)
+    {
+        if (EntityList[i].tei_entity == EntityType &&
+            EntityList[i].tei_instance <= EntityCount)
+        {
+            EntityInstanceUsed[EntityList[i].tei_instance] = TRUE;
+        }
+    }
+    for (Instance = 0; EntityInstanceUsed[Instance]; Instance++);
 
     EntityList[EntityCount].tei_entity = EntityType;
     EntityList[EntityCount].tei_instance = Instance;
@@ -41,6 +100,8 @@ VOID AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
     EntityCount++;
 
     TcpipReleaseSpinLock(&EntityListLock, OldIrql);
+
+    return STATUS_SUCCESS;
 }
 
 VOID RemoveEntityByContext(PVOID Context)
@@ -50,15 +111,12 @@ VOID RemoveEntityByContext(PVOID Context)
 
    TcpipAcquireSpinLock(&EntityListLock, &OldIrql);
 
-   for (i = 0; i < EntityCount; i++) {
+   for (i = 0; i < EntityCount; ) {
 	if( EntityList[i].context == Context ) {
-	    if( i != EntityCount - 1 ) {
-		memcpy( &EntityList[i],
-			&EntityList[--EntityCount],
-			sizeof(EntityList[i]) );
-	    } else {
-		EntityCount--;
-	    }
+	    /* The last entity moves into this slot; check the slot again */
+	    EntityList[i] = EntityList[--EntityCount];
+	} else {
+	    i++;
 	}
     }
 
