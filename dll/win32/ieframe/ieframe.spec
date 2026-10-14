@@ -5,6 +5,7 @@
 @ stdcall -private DllGetClassObject(ptr ptr ptr)
 @ stdcall -private DllRegisterServer()
 @ stdcall -private DllUnregisterServer()
+@ stdcall DoFileDownload(wstr)
 @ stdcall IEGetWriteableHKCU(ptr)
 @ stdcall IERefreshElevationPolicy()
 @ stdcall OpenURL(long long str long)

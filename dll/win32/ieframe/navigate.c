@@ -129,6 +129,26 @@ static void set_status_text(BindStatusCallback *This, ULONG statuscode, LPCWSTR 
 
 }
 
+#ifdef __REACTOS__
+void dochost_set_status_text(DocHost *This, const WCHAR *text)
+{
+    VARIANTARG arg;
+    DISPPARAMS dispparams = {&arg, NULL, 1, 0};
+
+    V_VT(&arg) = VT_BSTR;
+    V_BSTR(&arg) = SysAllocString(text ? text : emptyW);
+
+    call_sink(This->cps.wbe2, DISPID_STATUSTEXTCHANGE, &dispparams);
+
+    if(This->frame)
+        IOleInPlaceFrame_SetStatusText(This->frame, V_BSTR(&arg));
+    else if(This->container_vtbl)
+        This->container_vtbl->set_status_text(This, V_BSTR(&arg));
+
+    VariantClear(&arg);
+}
+#endif
+
 HRESULT set_dochost_url(DocHost *This, const WCHAR *url)
 {
     WCHAR *new_url;
@@ -1686,10 +1706,66 @@ static ULONG WINAPI WebBrowserPriv2IE9_Release(IWebBrowserPriv2IE9 *iface)
     return IUnknown_Release(This->outer);
 }
 
+#ifdef __REACTOS__
+/* mshtml hands over content it cannot show; this bind context parameter marks the call (same string in mshtml) */
+static HRESULT start_handed_off_download(HlinkFrame *This, IUri *uri, VARIANT *post_data, VARIANT *headers)
+{
+    SAFEARRAY *post_array = NULL;
+    const BYTE *post = NULL;
+    const WCHAR *hdr = NULL;
+    ULONG post_len = 0;
+    BSTR url;
+    HRESULT hres;
+
+    hres = IUri_GetAbsoluteUri(uri, &url);
+    if(FAILED(hres))
+        return hres;
+
+    if(headers && V_VT(headers) == VT_BSTR)
+        hdr = V_BSTR(headers);
+
+    if(post_data && V_VT(post_data) == (VT_ARRAY|VT_UI1))
+        post_array = V_ARRAY(post_data);
+    else if(post_data && V_VT(post_data) == (VT_ARRAY|VT_UI1|VT_BYREF) && V_ARRAYREF(post_data))
+        post_array = *V_ARRAYREF(post_data);
+    if(post_array) {
+        LONG ubound;
+
+        hres = SafeArrayAccessData(post_array, (void**)&post);
+        if(SUCCEEDED(hres)) {
+            if(SUCCEEDED(SafeArrayGetUBound(post_array, 1, &ubound)) && ubound >= 0)
+                post_len = ubound + 1;
+        }else {
+            SysFreeString(url);
+            return hres;
+        }
+    }
+
+    hres = start_file_download(This->doc_host, url, hdr, post, post_len);
+
+    if(post)
+        SafeArrayUnaccessData(post_array);
+    SysFreeString(url);
+    return hres;
+}
+#endif
+
 static HRESULT WINAPI WebBrowserPriv2IE9_NavigateWithBindCtx2(IWebBrowserPriv2IE9 *iface, IUri *uri, VARIANT *flags,
         VARIANT *target_frame, VARIANT *post_data, VARIANT *headers, IBindCtx *bind_ctx, LPOLESTR url_fragment, DWORD unused)
 {
     HlinkFrame *This = impl_from_IWebBrowserPriv2IE9(iface);
+
+#ifdef __REACTOS__
+    if(bind_ctx && uri) {
+        IUnknown *marker = NULL;
+
+        if(SUCCEEDED(IBindCtx_GetObjectParam(bind_ctx, (LPOLESTR)L"ReactOS Download Handoff", &marker)) && marker) {
+            IUnknown_Release(marker);
+            return start_handed_off_download(This, uri, post_data, headers);
+        }
+    }
+#endif
+
     FIXME("(%p)->(%p %s %s %s %s %p %s)\n", This, uri, debugstr_variant(flags), debugstr_variant(target_frame),
           debugstr_variant(post_data), debugstr_variant(headers), bind_ctx, debugstr_w(url_fragment));
     return E_NOTIMPL;

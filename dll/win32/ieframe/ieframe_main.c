@@ -204,11 +204,17 @@ BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD fdwReason, LPVOID lpv)
     case DLL_PROCESS_ATTACH:
         ieframe_instance = hInstDLL;
         register_iewindow_class();
+#ifdef __REACTOS__
+        register_download_class();
+#endif
         DisableThreadLibraryCalls(ieframe_instance);
         break;
     case DLL_PROCESS_DETACH:
         if (lpv) break;
         unregister_iewindow_class();
+#ifdef __REACTOS__
+        unregister_download_class();
+#endif
         release_typelib();
     }
 
