@@ -2137,6 +2137,11 @@ WSPConnect(SOCKET Handle,
         return SOCKET_ERROR;
     }
 
+    /* A connect that starts on a socket that is not connected supersedes a
+     * ConnectEx that failed or was cancelled; nothing else reports that */
+    if (Socket->SharedData->State != SocketConnected)
+        Socket->ConnectExPending = FALSE;
+
     /* Bind us First */
     if (Socket->SharedData->State == SocketOpen)
     {
@@ -2480,8 +2485,7 @@ WSPConnectEx(
     SetLastError(TranslateNtStatusError(Status));
 
     /* Only SO_UPDATE_CONNECT_CONTEXT re-arms the asynchronous events */
-    if (NT_SUCCESS(Status))
-        Socket->ConnectExPending = TRUE;
+    Socket->ConnectExPending = NT_SUCCESS(Status);
 
     return Status == STATUS_SUCCESS;
 }

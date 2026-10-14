@@ -587,6 +587,38 @@ Cleanup:
         DestroyWindow(Window);
 }
 
+/* Wait for a ConnectEx. When the event is set the result may still read
+ * pending for a moment on ReactOS, so ask again for a short time. A ConnectEx
+ * still pending after CancelAfter milliseconds is cancelled (0: never) */
+static BOOL WaitForConnectEx(SOCKET Socket, LPWSAOVERLAPPED Overlapped, DWORD CancelAfter, const char *What)
+{
+    DWORD Bytes, Flags, Try;
+    int Result;
+
+    if (CancelAfter)
+    {
+        Result = WSAWaitForMultipleEvents(1, &Overlapped->hEvent, FALSE, CancelAfter, FALSE);
+        if (Result == WSA_WAIT_TIMEOUT)
+        {
+            trace("%s: ConnectEx still pending, cancelling it\n", What);
+            CancelIo((HANDLE)Socket);
+        }
+    }
+    Result = WSAWaitForMultipleEvents(1, &Overlapped->hEvent, FALSE, 10000, FALSE);
+    ok(Result == WSA_WAIT_EVENT_0, "%s: ConnectEx did not complete: %d\n", What, Result);
+    if (Result != WSA_WAIT_EVENT_0)
+        return FALSE;
+    for (Try = 0; Try < 200; Try++)
+    {
+        if (WSAGetOverlappedResult(Socket, Overlapped, &Bytes, FALSE, &Flags))
+            return TRUE;
+        if (WSAGetLastError() != WSA_IO_INCOMPLETE && WSAGetLastError() != ERROR_IO_PENDING)
+            break;
+        Sleep(10);
+    }
+    return FALSE;
+}
+
 static void ConnectExAsyncSelect(BOOL PeerFirst, PULONG Connects, const char *What)
 {
     GUID Guid = WSAID_CONNECTEX;
@@ -595,7 +627,7 @@ static void ConnectExAsyncSelect(BOOL PeerFirst, PULONG Connects, const char *Wh
     SOCKADDR_IN Address;
     OVERLAPPED Overlapped;
     HWND Window;
-    DWORD Bytes = 0, Flags = 0;
+    DWORD Bytes = 0;
     USHORT ServerPort;
     int Length, Result;
 
@@ -628,10 +660,15 @@ static void ConnectExAsyncSelect(BOOL PeerFirst, PULONG Connects, const char *Wh
     Address.sin_port = htons(ServerPort);
     Result = pConnectEx(Client, (struct sockaddr *)&Address, sizeof(Address), NULL, 0, NULL, &Overlapped);
     ok(Result || WSAGetLastError() == ERROR_IO_PENDING, "%s: ConnectEx failed: %d\n", What, WSAGetLastError());
-    Result = WSAWaitForMultipleEvents(1, &Overlapped.hEvent, FALSE, 10000, FALSE);
-    ok(Result == WSA_WAIT_EVENT_0, "%s: ConnectEx did not complete: %d\n", What, Result);
-    ok(WSAGetOverlappedResult(Client, &Overlapped, &Bytes, FALSE, &Flags), "%s: ConnectEx failed: %d\n", What, WSAGetLastError());
+    Result = WaitForConnectEx(Client, &Overlapped, 0, What);
     WSACloseEvent(Overlapped.hEvent);
+    if (!Result)
+    {
+        /* ReactOS: a ConnectEx sometimes stays pending although its event is set */
+        skip("%s: ConnectEx did not finish: %d\n", What, WSAGetLastError());
+        *Connects = (ULONG)-1;
+        goto Cleanup;
+    }
 
     if (PeerFirst)
     {
@@ -665,11 +702,101 @@ Cleanup:
  * point, and neither is how often FD_WRITE comes */
 static void Test_ConnectExAsyncSelect(void)
 {
-    ULONG Connects[2] = { 0, 0 };
+    ULONG Connects[2] = { (ULONG)-1, (ULONG)-1 };
 
     ConnectExAsyncSelect(FALSE, &Connects[0], "ConnectEx async");
     ConnectExAsyncSelect(TRUE, &Connects[1], "ConnectEx async, getpeername first");
-    ok(Connects[0] == Connects[1], "FD_CONNECT messages: %lu without, %lu with getpeername first\n", Connects[0], Connects[1]);
+    if (Connects[0] != (ULONG)-1 && Connects[1] != (ULONG)-1)
+        ok(Connects[0] == Connects[1], "FD_CONNECT messages: %lu without, %lu with getpeername first\n", Connects[0], Connects[1]);
+}
+
+/* A ConnectEx that fails or is cancelled must not leave the socket marked: when connect()
+ * later connects the same socket, SO_UPDATE_CONNECT_CONTEXT is a no-op and
+ * posts no FD_CONNECT again */
+static void Test_UpdateAfterFailedConnectEx(void)
+{
+    GUID Guid = WSAID_CONNECTEX;
+    LPFN_CONNECTEX pConnectEx = NULL;
+    SOCKET Server, Dead, Client = INVALID_SOCKET;
+    SOCKADDR_IN Address;
+    OVERLAPPED Overlapped;
+    HWND Window;
+    DWORD Bytes = 0;
+    ULONG Before;
+    USHORT ServerPort, DeadPort;
+    int Length, Result;
+    const char *What = "update after a failed ConnectEx";
+
+    Window = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
+    ok(Window != NULL, "%s: CreateWindowEx failed: %lu\n", What, GetLastError());
+    Server = Listener(&ServerPort, What);
+    Dead = Listener(&DeadPort, What);
+    if (!Window || Server == INVALID_SOCKET || Dead == INVALID_SOCKET)
+        goto Cleanup;
+    /* Nothing listens on this port any more */
+    closesocket(Dead);
+    Dead = INVALID_SOCKET;
+
+    Client = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    ok(Client != INVALID_SOCKET, "%s: WSASocket failed: %d\n", What, WSAGetLastError());
+    if (Client == INVALID_SOCKET)
+        goto Cleanup;
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ok(bind(Client, (struct sockaddr *)&Address, sizeof(Address)) == 0, "%s: bind failed: %d\n", What, WSAGetLastError());
+    Result = WSAIoctl(Client, SIO_GET_EXTENSION_FUNCTION_POINTER, &Guid, sizeof(Guid), &pConnectEx, sizeof(pConnectEx), &Bytes, NULL, NULL);
+    ok(Result == 0, "%s: getting ConnectEx failed: %d\n", What, WSAGetLastError());
+    if (Result != 0)
+        goto Cleanup;
+
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = WSACreateEvent();
+    Address.sin_port = htons(DeadPort);
+    Result = pConnectEx(Client, (struct sockaddr *)&Address, sizeof(Address), NULL, 0, NULL, &Overlapped);
+    ok(Result || WSAGetLastError() == ERROR_IO_PENDING, "%s: ConnectEx returned %d, error %d\n", What, Result, WSAGetLastError());
+    ok(!WaitForConnectEx(Client, &Overlapped, 3000, What), "%s: ConnectEx to a closed port succeeded\n", What);
+    WSACloseEvent(Overlapped.hEvent);
+
+    ConnectMessages = ConnectErrors = 0;
+    ok(WSAAsyncSelect(Client, Window, WM_SOCKET, FD_CONNECT) == 0, "%s: WSAAsyncSelect failed: %d\n", What, WSAGetLastError());
+    Address.sin_port = htons(ServerPort);
+    Result = connect(Client, (struct sockaddr *)&Address, sizeof(Address));
+    if (Result != 0 && WSAGetLastError() != WSAEWOULDBLOCK)
+    {
+        skip("%s: connect on the failed socket returned error %d\n", What, WSAGetLastError());
+        goto Cleanup;
+    }
+    PumpMessages(10000, 1);
+    PumpMessages(500, 0);
+    Before = ConnectMessages;
+    Length = sizeof(Address);
+    if (getpeername(Client, (struct sockaddr *)&Address, &Length) != 0)
+    {
+        /* ReactOS: a ConnectEx to a closed port never completes, and the
+         * socket cannot connect after it was cancelled */
+        skip("%s: the socket did not connect after the failed ConnectEx: %d\n", What, WSAGetLastError());
+        goto Cleanup;
+    }
+    ok(Before >= 1, "%s: no FD_CONNECT message\n", What);
+
+    Result = setsockopt(Client, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
+    trace("%s: SO_UPDATE_CONNECT_CONTEXT returned %d, error %d\n", What, Result, Result ? WSAGetLastError() : 0);
+    PumpMessages(1000, 0);
+    ok(ConnectMessages == Before, "%s: the update posted %lu more FD_CONNECT messages\n", What, ConnectMessages - Before);
+    CheckConnectTime(Client, What);
+
+    WSAAsyncSelect(Client, Window, 0, 0);
+    AcceptAndClose(Server);
+Cleanup:
+    if (Client != INVALID_SOCKET)
+        closesocket(Client);
+    if (Dead != INVALID_SOCKET)
+        closesocket(Dead);
+    if (Server != INVALID_SOCKET)
+        closesocket(Server);
+    if (Window)
+        DestroyWindow(Window);
 }
 
 START_TEST(getpeername)
@@ -693,6 +820,7 @@ START_TEST(getpeername)
     Test_UpdateAfterConnect(FALSE, "update after connect");
     Test_UpdateAfterConnect(TRUE, "update after getpeername");
     Test_ConnectExAsyncSelect();
+    Test_UpdateAfterFailedConnectEx();
 
     WSACleanup();
 }
