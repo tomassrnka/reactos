@@ -224,12 +224,44 @@ static void CheckTransactedRegistry(void)
     if (!CreateW || !CreateA) return;
     Status = CreateW(HKEY_CURRENT_USER, L"Software\\w643c-r4-transaction", 0, NULL,
                      REG_OPTION_NON_VOLATILE, KEY_READ, NULL, &Key, NULL, INVALID_HANDLE_VALUE, NULL);
-    CHECK(Status == ERROR_CALL_NOT_IMPLEMENTED || Status == ERROR_INVALID_HANDLE);
+    printf("TRANSACTED REGISTRY W invalid transaction status=%ld\n", Status);
+    CHECK(Status == ERROR_CALL_NOT_IMPLEMENTED || Status == ERROR_INVALID_HANDLE || Status == ERROR_INVALID_TRANSACTION);
     if (!Status) { RegCloseKey(Key); RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\w643c-r4-transaction"); }
     Status = CreateA(HKEY_CURRENT_USER, "Software\\w643c-r4-transaction", 0, NULL,
                      REG_OPTION_NON_VOLATILE, KEY_READ, NULL, &Key, NULL, INVALID_HANDLE_VALUE, NULL);
-    CHECK(Status == ERROR_CALL_NOT_IMPLEMENTED || Status == ERROR_INVALID_HANDLE);
+    printf("TRANSACTED REGISTRY A invalid transaction status=%ld\n", Status);
+    CHECK(Status == ERROR_CALL_NOT_IMPLEMENTED || Status == ERROR_INVALID_HANDLE || Status == ERROR_INVALID_TRANSACTION);
     if (!Status) { RegCloseKey(Key); RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\w643c-r4-transaction"); }
+}
+
+static void CheckPowerRequests(void)
+{
+    typedef HANDLE (WINAPI *CREATE)(PREASON_CONTEXT);
+    typedef BOOL (WINAPI *ACTION)(HANDLE, ULONG);
+    HMODULE Kernel = GetModuleHandleW(L"kernel32.dll");
+    CREATE Create = (CREATE)GetProcAddress(Kernel, "PowerCreateRequest");
+    ACTION Set = (ACTION)GetProcAddress(Kernel, "PowerSetRequest");
+    ACTION Clear = (ACTION)GetProcAddress(Kernel, "PowerClearRequest");
+    REASON_CONTEXT Context = {0};
+    HANDLE Request;
+    CHECK(Create && Set && Clear);
+    if (!Create || !Set || !Clear) return;
+    Context.Flags = 1; /* POWER_REQUEST_CONTEXT_SIMPLE_STRING */
+    Context.Reason.SimpleReasonString = L"WoW64 power-request test";
+    Request = Create(&Context);
+    if (Request == INVALID_HANDLE_VALUE)
+    {
+        CHECK(GetLastError() == ERROR_CALL_NOT_IMPLEMENTED);
+        CHECK(!Set(Request, 1) && GetLastError() == ERROR_CALL_NOT_IMPLEMENTED);
+        CHECK(!Clear(Request, 1) && GetLastError() == ERROR_CALL_NOT_IMPLEMENTED);
+        puts("POWER REQUEST objects unavailable");
+    }
+    else
+    {
+        CHECK(Set(Request, 1)); /* PowerRequestSystemRequired */
+        CHECK(Clear(Request, 1));
+        CHECK(CloseHandle(Request));
+    }
 }
 
 static void CheckEventRegistration(void)
@@ -804,6 +836,7 @@ int wmain(int argc, WCHAR **argv)
     CheckApplicationLibraries();
     CheckEventRegistration();
     CheckTransactedRegistry();
+    CheckPowerRequests();
     CheckRuntimeReporting();
     CheckPrivileges();
     CheckObjectSecurity();

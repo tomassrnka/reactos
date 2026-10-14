@@ -23,6 +23,7 @@ list(APPEND SOURCE
     LCIDToLocaleName.c
     LocaleNameToLCID.c
     QueryUnbiasedInterruptTime.c
+    PowerRequest.c
     sync.c
     ThreadDescription.c
     threadpool.c
