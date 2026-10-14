@@ -15,6 +15,7 @@ list(APPEND SOURCE
     CreateWaitableTimerEx.c
     DebugTrapInterrupts.c
     DefaultActCtx.c
+    DiscardVirtualMemory.c
     DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
@@ -24,6 +25,7 @@ list(APPEND SOURCE
     ExitThread.c
     FindActCtxSectionStringW.c
     FindFiles.c
+    FindStringOrdinal.c
     FLS.c
     ForcedRelocation.c
     FormatMessage.c
@@ -34,9 +36,11 @@ list(APPEND SOURCE
     GetEnvironmentVariable.c
     GetFileType.c
     GetFinalPathNameByHandle.c
+    GetUserDefaultGeoName.c
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
+    GetNumaProcessorNodeEx.c
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
     IdleProcessor.c
@@ -47,6 +51,7 @@ list(APPEND SOURCE
     JapaneseCalendar.c
     JobObject.c
     LCMapString.c
+    LoadString.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
     LoadLibraryMachine.c
@@ -60,6 +65,7 @@ list(APPEND SOURCE
     MultiByteToWideChar.c
     Pipes.c
     PipeSqos.c
+    PreferredUILanguages.c
     PowerRequest.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
@@ -88,6 +94,7 @@ list(APPEND SOURCE
     TunnelCache.c
     TzSetPrivilege.c
     UEFIFirmware.c
+    UnmapViewOfFileEx.c
     WerFlags.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
