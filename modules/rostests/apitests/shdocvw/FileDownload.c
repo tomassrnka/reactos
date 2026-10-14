@@ -17,12 +17,18 @@ typedef BOOL (WINAPI *FN_DoFileDownload)(LPWSTR);
 #define SHORT_SENT  40000
 #define SHORT_SIZE  100000
 
+#define LONG_BASE \
+    "b123456789b123456789b123456789b123456789b123456789b123456789b123456789b123456789b123456789b123456789"
+#define LONG_EXT \
+    "e123456789e123456789e123456789e123456789e123456789e123456789e123456789e123456789e123456789e123456789e123456789"
+
 typedef enum {
     SCEN_SAVE,          /* Save, name the file, wait for completion, Close */
     SCEN_CANCEL_ASK,    /* Cancel in the File Download dialog */
     SCEN_CANCEL_SAVEAS, /* Save, then Cancel in Save As */
     SCEN_CANCEL_RUN,    /* Save, then Cancel in the progress dialog */
-    SCEN_ERROR_BOX      /* an error box has to appear; click OK */
+    SCEN_ERROR_BOX,     /* an error box has to appear; click OK */
+    SCEN_OPEN           /* Open: the file goes to the temporary folder and is started */
 } scenario_t;
 
 static SOCKET g_listener = INVALID_SOCKET;
@@ -118,14 +124,19 @@ static void serve_connection(SOCKET c)
             Sleep(20);
         }
     }
-    else if (!strncmp(req, "GET /ok.bin", 11) || !strncmp(req, "GET /cd.bin", 11))
+    else if (!strncmp(req, "GET /ok.bin", 11) || !strncmp(req, "GET /cd.bin", 11) || !strncmp(req, "GET /longext.bin", 16) ||
+             !strncmp(req, "GET /NULpayload.sdlt", 20))
     {
         int sent = 0;
         BOOL cd = !strncmp(req, "GET /cd.bin", 11);
+        BOOL longext = !strncmp(req, "GET /longext.bin", 16);
+        char longname[320];
 
+        /* a name of 100 characters, a dot and an extension of 110 characters: 211 in all */
+        snprintf(longname, sizeof(longname), "Content-Disposition: attachment; filename=\"%s.%s\"\r\n", LONG_BASE, LONG_EXT);
         n = snprintf(head, sizeof(head), "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n%s"
                      "Content-Length: %d\r\nConnection: close\r\n\r\n",
-                     cd ? "Content-Disposition: attachment; filename=\"from-header.dat\"\r\n" : "", BODY_SIZE);
+                     cd ? "Content-Disposition: attachment; filename=\"from-header.dat\"\r\n" : (longext ? longname : ""), BODY_SIZE);
         send_all(c, head, n);
         while (sent < BODY_SIZE)
         {
@@ -352,6 +363,11 @@ static DWORD WINAPI driver_thread(void *arg)
                 click_button(dlg, L"Cancel");
                 saved = TRUE;
             }
+            else if (scen == SCEN_OPEN)
+            {
+                click_button(dlg, L"Open");
+                saved = TRUE;
+            }
             else
             {
                 click_button(dlg, L"Save");
@@ -520,6 +536,136 @@ static void test_invalid_arguments(void)
     }
 }
 
+/* A folder for temporary files with a path of exactly Length characters, made of directories one below the other */
+static BOOL make_deep_temp(WCHAR *path, size_t Length)
+{
+    unsigned n = 0;
+
+    GetTempPathW(MAX_PATH, path);
+    PathAddBackslashW(path);
+    while (wcslen(path) < Length)
+    {
+        size_t left = Length - wcslen(path), part, i;
+        WCHAR *end = path + wcslen(path);
+
+        if (left < 3)
+            return FALSE;
+        part = left - 1;                /* the backslash is one of them */
+        if (part > 40)
+        {
+            part = 40;
+            if (left - 41 < 3)
+                part = left - 4;        /* what is left must be able to take another directory */
+        }
+        end[0] = L's';
+        end[1] = L'0' + (n++ % 10);
+        for (i = 2; i < part; i++)
+            end[i] = L'x';
+        end[part] = L'\\';
+        end[part + 1] = 0;
+        if (!CreateDirectoryW(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+            return FALSE;
+    }
+    return wcslen(path) == Length;
+}
+
+static void remove_deep_temp(const WCHAR *base, const WCHAR *deep)
+{
+    WCHAR path[MAX_PATH];
+    size_t length;
+
+    wcscpy(path, deep);
+    while ((length = wcslen(path)) > wcslen(base) && !_wcsnicmp(path, base, wcslen(base)))
+    {
+        WCHAR *slash;
+
+        if (path[length - 1] == L'\\')
+            path[length - 1] = 0;
+        if (!RemoveDirectoryW(path))
+            break;
+        slash = wcsrchr(path, L'\\');
+        if (!slash)
+            break;
+        slash[1] = 0;
+    }
+}
+
+/*
+ * The temporary file of Open and Run is shortened to fit the path; a harmless name can become a device name when
+ * it is cut (NULpayload.sdlt to NUL.sdlt), and the download would go to the device and report success.
+ */
+static void test_temp_name_after_shortening(void)
+{
+    static const WCHAR ext_key[] = L"Software\\Classes\\.sdlt";
+    static const WCHAR type_key[] = L"Software\\Classes\\sdltfile";
+    WCHAR old_temp[MAX_PATH] = L"", old_tmp[MAX_PATH] = L"", base[MAX_PATH], deep[MAX_PATH], expected[MAX_PATH], other[MAX_PATH];
+    HKEY key;
+    BOOL ret = FALSE, have_old_temp, have_old_tmp;
+
+    have_old_temp = GetEnvironmentVariableW(L"TEMP", old_temp, ARRAY_SIZE(old_temp)) != 0;
+    have_old_tmp = GetEnvironmentVariableW(L"TMP", old_tmp, ARRAY_SIZE(old_tmp)) != 0;
+    GetTempPathW(ARRAY_SIZE(base), base);
+
+    /* the path of the folder is 242 characters: three characters are left for the base name of NULpayload.sdlt */
+    if (!make_deep_temp(deep, 242))
+    {
+        skip("cannot make a folder with a long path\n");
+        remove_deep_temp(base, deep);
+        return;
+    }
+
+    /* an extension of our own that has a description, and a program that does nothing */
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, ext_key, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL))
+    {
+        skip("cannot register an extension\n");
+        remove_deep_temp(base, deep);
+        return;
+    }
+    RegSetValueExW(key, NULL, 0, REG_SZ, (const BYTE *)L"sdltfile", sizeof(L"sdltfile"));
+    RegCloseKey(key);
+    if (!RegCreateKeyExW(HKEY_CURRENT_USER, type_key, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL))
+    {
+        RegSetValueExW(key, NULL, 0, REG_SZ, (const BYTE *)L"SDLT Test File", sizeof(L"SDLT Test File"));
+        RegCloseKey(key);
+    }
+    if (!RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\sdltfile\\shell\\open\\command", 0, NULL, 0, KEY_WRITE, NULL, &key, NULL))
+    {
+        static const WCHAR command[] = L"cmd.exe /c exit";
+
+        RegSetValueExW(key, NULL, 0, REG_SZ, (const BYTE *)command, sizeof(command));
+        RegCloseKey(key);
+    }
+
+    SetEnvironmentVariableW(L"TEMP", deep);
+    SetEnvironmentVariableW(L"TMP", deep);
+
+    swprintf(expected, ARRAY_SIZE(expected), L"%s_NUL.sdlt", deep);
+    /* the extended form names the file, not the device: the folder has no file of that name */
+    swprintf(other, ARRAY_SIZE(other), L"\\\\?\\%sNUL.sdlt", deep);
+    DeleteFileW(expected);
+
+    if (run_download(SCEN_OPEN, "NULpayload.sdlt", L"NULpayload.sdlt", &ret))
+    {
+        ok(ret == TRUE, "DoFileDownload returned %d\n", ret);
+        ok(g_saw_ask, "no File Download dialog\n");
+        ok(file_matches(expected, BODY_SIZE), "the file was not saved as _NUL.sdlt in the temporary folder\n");
+        ok(GetFileAttributesW(other) == INVALID_FILE_ATTRIBUTES, "a file NUL.sdlt exists (it would be the device)\n");
+    }
+
+    DeleteFileW(expected);
+    if (have_old_temp)
+        SetEnvironmentVariableW(L"TEMP", old_temp);
+    else
+        SetEnvironmentVariableW(L"TEMP", NULL);
+    if (have_old_tmp)
+        SetEnvironmentVariableW(L"TMP", old_tmp);
+    else
+        SetEnvironmentVariableW(L"TMP", NULL);
+    SHDeleteKeyW(HKEY_CURRENT_USER, type_key);
+    SHDeleteKeyW(HKEY_CURRENT_USER, ext_key);
+    remove_deep_temp(base, deep);
+}
+
 START_TEST(FileDownload)
 {
     WCHAR dir[MAX_PATH];
@@ -567,6 +713,19 @@ START_TEST(FileDownload)
             ok(file_matches(g_target, BODY_SIZE), "the saved file differs from the served data\n");
         }
 
+        /* a name that fits the folder is kept whole, extension included */
+        {
+            WCHAR longname[260];
+
+            swprintf(longname, ARRAY_SIZE(longname), L"%S.%S", LONG_BASE, LONG_EXT);
+            DeleteFileW(g_target);
+            if (run_download(SCEN_SAVE, "longext.bin", longname, &ret))
+            {
+                ok(ret == TRUE, "DoFileDownload returned %d\n", ret);
+                ok(g_saw_name, "the dialog does not show the whole name of 211 characters\n");
+            }
+        }
+
         /* cancel in the first dialog: nothing is written */
         DeleteFileW(g_target);
         if (run_download(SCEN_CANCEL_ASK, "ok.bin", NULL, &ret))
@@ -612,6 +771,8 @@ START_TEST(FileDownload)
             ok(GetFileAttributesW(g_target) == INVALID_FILE_ATTRIBUTES, "the truncated file was kept\n");
         }
     }
+
+    test_temp_name_after_shortening();
 
     DeleteFileW(g_target);
     stop_server();
