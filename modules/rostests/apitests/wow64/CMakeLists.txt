@@ -30,4 +30,4 @@ add_wow64_apitest(ntdll
     NtOpenKey NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString)
 add_wow64_apitest(advapi32
-    RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW)
+    RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64)

@@ -32,8 +32,11 @@ extern void func_ServiceArgs(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceNetwork(void);
 
+extern void func_RegWow64(void);
+
 const struct test winetest_testlist[] =
 {
+    { "RegWow64", func_RegWow64 },
     { "CreateService", func_CreateService },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
     { "EncryptFile", func_EncryptFile },

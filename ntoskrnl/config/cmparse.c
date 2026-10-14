@@ -1864,6 +1864,106 @@ CmpBuildHashStackAndLookupCache(
     return Status;
 }
 
+#ifdef BUILD_WOW64_ENABLED
+/* Reparse inside the configuration manager, after object-name capture. Both
+ * native KEY_WOW64_32KEY callers and the user-mode WoW64 translator use this
+ * path, with the original access state and security checks left in place. */
+static BOOLEAN
+CmpWow64Prefix(PCUNICODE_STRING Name, PCUNICODE_STRING Prefix)
+{
+    return RtlPrefixUnicodeString(Prefix, Name, TRUE) &&
+           (Name->Length == Prefix->Length || Name->Buffer[Prefix->Length / sizeof(WCHAR)] == L'\\');
+}
+
+static NTSTATUS
+CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
+                    PCUNICODE_STRING RemainingName, PCM_PARSE_CONTEXT Context)
+{
+    static const UNICODE_STRING Software = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE");
+    static const UNICODE_STRING Physical = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE\\Wow6432Node");
+    static const UNICODE_STRING Classes = RTL_CONSTANT_STRING(L"\\Classes");
+    static const WCHAR Node[] = L"\\Wow6432Node";
+    PCM_KEY_CONTROL_BLOCK Kcb = Root->KeyControlBlock;
+    PUNICODE_STRING RootName;
+    UNICODE_STRING Full, Tail;
+    PWSTR NewName;
+    ULONG Length, Separator, Cut = 0, Insert = 0;
+    BOOLEAN Root32;
+
+    if (!Context || !Context->Wow64Flags || Context->Wow64Reparsed) return STATUS_SUCCESS;
+    CmpLockRegistry();
+    CmpAcquireKcbLockShared(Kcb);
+    if (Kcb->Delete)
+    {
+        CmpReleaseKcbLock(Kcb);
+        CmpUnlockRegistry();
+        return STATUS_KEY_DELETED;
+    }
+    RootName = CmpConstructName(Kcb);
+    CmpReleaseKcbLock(Kcb);
+    CmpUnlockRegistry();
+    if (!RootName) return STATUS_INSUFFICIENT_RESOURCES;
+    Root32 = CmpWow64Prefix(RootName, &Physical);
+    Separator = RemainingName->Length && RemainingName->Buffer[0] != L'\\' ? sizeof(WCHAR) : 0;
+    Length = RootName->Length + Separator + RemainingName->Length;
+    if (Length > MAXUSHORT - sizeof(Node))
+    {
+        ExFreePoolWithTag(RootName, TAG_CM);
+        return STATUS_NAME_TOO_LONG;
+    }
+    Full.Buffer = ExAllocatePoolWithTag(PagedPool, Length + sizeof(Node), TAG_CM);
+    if (!Full.Buffer)
+    {
+        ExFreePoolWithTag(RootName, TAG_CM);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    Full.Length = Length;
+    Full.MaximumLength = Length + sizeof(Node);
+    RtlCopyMemory(Full.Buffer, RootName->Buffer, RootName->Length);
+    if (Separator) Full.Buffer[RootName->Length / sizeof(WCHAR)] = L'\\';
+    RtlCopyMemory((PUCHAR)Full.Buffer + RootName->Length + Separator,
+                  RemainingName->Buffer, RemainingName->Length);
+    ExFreePoolWithTag(RootName, TAG_CM);
+    if (!CmpWow64Prefix(&Full, &Software)) goto Unchanged;
+
+    /* A physical node explicitly present in the input is an ordinary key.
+     * A node inherited from the root handle can switch to the other view. */
+    if (CmpWow64Prefix(&Full, &Physical))
+    {
+        if (!Root32) goto Unchanged;
+        Cut = sizeof(Node) - sizeof(WCHAR);
+    }
+    Tail.Buffer = (PWSTR)((PUCHAR)Full.Buffer + Software.Length + Cut);
+    Tail.Length = Tail.MaximumLength = Full.Length - Software.Length - Cut;
+    /* Windows 7 Classes is shared. COM class/interface subviews and the rest
+     * of the documented per-key exception list are later extensions. */
+    if ((Context->Wow64Flags & KEY_WOW64_32KEY) && !CmpWow64Prefix(&Tail, &Classes))
+        Insert = sizeof(Node) - sizeof(WCHAR);
+    if (Cut == Insert) goto Unchanged;
+    Length = Full.Length - Cut + Insert;
+    NewName = ExAllocatePoolWithTag(PagedPool, Length + sizeof(WCHAR), TAG_CM);
+    if (!NewName)
+    {
+        ExFreePoolWithTag(Full.Buffer, TAG_CM);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(NewName, Full.Buffer, Software.Length);
+    if (Insert) RtlCopyMemory((PUCHAR)NewName + Software.Length, Node, Insert);
+    RtlCopyMemory((PUCHAR)NewName + Software.Length + Insert, Tail.Buffer, Tail.Length);
+    NewName[Length / sizeof(WCHAR)] = UNICODE_NULL;
+    ExFreePoolWithTag(Full.Buffer, TAG_CM);
+    ExFreePool(CompleteName->Buffer);
+    CompleteName->Buffer = NewName;
+    CompleteName->Length = Length;
+    CompleteName->MaximumLength = Length + sizeof(WCHAR);
+    Context->Wow64Reparsed = TRUE;
+    return STATUS_REPARSE;
+Unchanged:
+    ExFreePoolWithTag(Full.Buffer, TAG_CM);
+    return STATUS_SUCCESS;
+}
+#endif
+
 NTSTATUS
 NTAPI
 CmpParseKey(IN PVOID ParseObject,
@@ -1904,6 +2004,12 @@ CmpParseKey(IN PVOID ParseObject,
 
     /* Fail if this isn't a key object */
     if (ObjectType != CmpKeyObjectType) return STATUS_OBJECT_TYPE_MISMATCH;
+
+#ifdef BUILD_WOW64_ENABLED
+    *Object = NULL;
+    Status = CmpRedirectWow64Key(ParseObject, CompleteName, RemainingName, Context);
+    if (Status != STATUS_SUCCESS) return Status;
+#endif
 
     /* Copy the remaining name */
     Current = *RemainingName;

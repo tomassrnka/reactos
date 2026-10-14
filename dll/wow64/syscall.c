@@ -93,6 +93,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     PVOID Base;
     SIZE_T Size;
     ULONG Length;
+    ACCESS_MASK KeyAccess;
     BOOLEAN NativeSystemInformation = Number == 0x10001;
 
 #define H(i) HANDLE32(a[i])
@@ -275,13 +276,18 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         return Status;
     case W64_NtOpenKey:
         PROBE(0);
-        ATTR(2); Status = NtOpenKey(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+        ATTR(2);
+        KeyAccess = a[1];
+        if (!(KeyAccess & KEY_WOW64_RES)) KeyAccess |= KEY_WOW64_32KEY;
+        Status = NtOpenKey(&Cleanup->Handle, KeyAccess, OA(2)); RETURN_HANDLE();
     case W64_NtCreateKey:
     {
         UNICODE_STRING Class;
         PROBE(0);
         ATTR(2);
-        Status = NtCreateKey(&Cleanup->Handle, a[1], OA(2), a[3], String32(&Class, P(4)), a[5], P(6));
+        KeyAccess = a[1];
+        if (!(KeyAccess & KEY_WOW64_RES)) KeyAccess |= KEY_WOW64_32KEY;
+        Status = NtCreateKey(&Cleanup->Handle, KeyAccess, OA(2), a[3], String32(&Class, P(4)), a[5], P(6));
         RETURN_HANDLE();
     }
     case W64_NtQueryValueKey:
