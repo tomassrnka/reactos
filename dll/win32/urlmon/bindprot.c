@@ -34,6 +34,20 @@ struct _task_header_t {
 #define WM_MK_CONTINUE   (WM_USER+101)
 #define WM_MK_RELEASE    (WM_USER+102)
 
+static void post_continue(BindProtocol *This);
+
+/* A post that failed left references with the thread: run what they stand for and release them. */
+static void drain_orphan_handoffs(void)
+{
+    LONG count = count_orphan_handoffs();
+    BindProtocol *This;
+
+    while(count-- > 0 && (This = take_orphan_handoff())) {
+        post_continue(This);
+        IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
+    }
+}
+
 static void process_tasks(BindProtocol *This)
 {
     task_header_t *task;
@@ -66,6 +80,10 @@ static LRESULT WINAPI notif_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         BindProtocol *This = (BindProtocol*)lParam;
         BOOL busy;
 
+        /* the message carries a reference that the apartment thread's exit releases when it is not dispatched */
+        if(!take_handoff(This))
+            return 0;
+
         EnterCriticalSection(&This->section);
         This->continue_posted = FALSE;
         busy = This->continue_call != 0;
@@ -76,8 +94,13 @@ static LRESULT WINAPI notif_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             process_tasks(This);
 
         IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
+        drain_orphan_handoffs();
         return 0;
     }
+    case WM_NULL:
+        /* a request to retry the posts that failed */
+        drain_orphan_handoffs();
+        break;
     case WM_MK_RELEASE: {
         tls_data_t *data = get_tls_data();
 
@@ -150,7 +173,7 @@ void release_notif_hwnd(HWND hwnd)
         return;
 
     if(data->notif_hwnd != hwnd) {
-        PostMessageW(data->notif_hwnd, WM_MK_RELEASE, 0, 0);
+        PostMessageW(hwnd, WM_MK_RELEASE, 0, 0);
         return;
     }
 
@@ -163,6 +186,44 @@ void release_notif_hwnd(HWND hwnd)
 static inline BOOL is_apartment_thread(BindProtocol *This)
 {
     return This->apartment_thread == GetCurrentThreadId();
+}
+
+static BOOL (WINAPI *post_hook)(BOOL);
+
+/* For tests: the hook runs before every post that hands a reference to the apartment window, TRUE posts and FALSE acts
+   as if the posting had failed. The argument says whether the message only returns the reference of a call. */
+void WINAPI UrlmonTestPostHook(BOOL (WINAPI *hook)(BOOL))
+{
+    post_hook = hook;
+}
+
+/* Hands the caller's reference to a message for the apartment window, which releases it on the apartment thread. A post
+   that fails leaves the reference to the apartment thread (it retries, and its exit releases it); the reference is
+   released here only when that thread is gone, so the caller must not use the protocol after this call. */
+static void post_handoff(BindProtocol *This, BOOL carrier)
+{
+    BOOL (WINAPI *hook)(BOOL) = post_hook;
+
+    if(!add_handoff(This)) {
+        if(!carrier) {
+            EnterCriticalSection(&This->section);
+            This->continue_posted = FALSE;
+            LeaveCriticalSection(&This->section);
+        }
+        IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
+        return;
+    }
+
+    if((!hook || hook(carrier)) && This->notif_hwnd
+            && PostMessageW(This->notif_hwnd, WM_MK_CONTINUE, 0, (LPARAM)This))
+        return;
+
+    if(!carrier) {
+        EnterCriticalSection(&This->section);
+        This->continue_posted = FALSE;
+        LeaveCriticalSection(&This->section);
+    }
+    orphan_handoff(This);
 }
 
 /* Posts the message that runs the queued tasks, unless there are none, a call of the client is active or a message is
@@ -181,12 +242,7 @@ static void post_continue(BindProtocol *This)
         return;
 
     IInternetProtocolEx_AddRef(&This->IInternetProtocolEx_iface);
-    if(!PostMessageW(This->notif_hwnd, WM_MK_CONTINUE, 0, (LPARAM)This)) {
-        EnterCriticalSection(&This->section);
-        This->continue_posted = FALSE;
-        LeaveCriticalSection(&This->section);
-        IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
-    }
+    post_handoff(This, FALSE);
 }
 
 static void push_task(BindProtocol *This, task_header_t *task, task_proc_t proc)
@@ -213,9 +269,11 @@ static void push_task(BindProtocol *This, task_header_t *task, task_proc_t proc)
     post_continue(This);
 
     /* The protocol is ended on the apartment thread (it owns the notification window): another thread hands its
-       reference to the message that the apartment thread releases. */
-    if(apartment || !PostMessageW(This->notif_hwnd, WM_MK_CONTINUE, 0, (LPARAM)This))
+       reference to a message that the apartment thread releases. */
+    if(apartment)
         IInternetProtocolEx_Release(&This->IInternetProtocolEx_iface);
+    else
+        post_handoff(This, TRUE);
 }
 
 static inline BOOL do_direct_notif(BindProtocol *This)
@@ -1516,6 +1574,7 @@ HRESULT create_binding_protocol(BindProtocol **protocol)
 
     ret->ref = 1;
     ret->apartment_thread = GetCurrentThreadId();
+    list_init(&ret->handoff_entry);
     ret->notif_hwnd = get_notif_hwnd();
     ret->protocol_handler = &ret->default_protocol_handler.IInternetProtocol_iface;
     ret->protocol_sink_handler = &ret->default_protocol_handler.IInternetProtocolSink_iface;

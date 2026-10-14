@@ -45,6 +45,7 @@
 @ stdcall -private DllRegisterServer()
 @ stdcall -private DllRegisterServerEx()
 @ stdcall -private DllUnregisterServer()
+@ stdcall -private UrlmonTestPostHook(ptr)
 @ stdcall Extract(ptr str)
 @ stdcall FaultInIEFeature(long ptr ptr long)
 @ stub FindMediaType

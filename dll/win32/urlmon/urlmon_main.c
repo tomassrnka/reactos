@@ -77,6 +77,9 @@ tls_data_t *get_tls_data(void)
         if(!data)
             return NULL;
 
+        data->thread_id = GetCurrentThreadId();
+        list_init(&data->handoffs);
+
         EnterCriticalSection(&tls_cs);
         list_add_tail(&tls_list, &data->entry);
         LeaveCriticalSection(&tls_cs);
@@ -103,9 +106,120 @@ static void free_tls_list(void)
     TlsFree(urlmon_tls);
 }
 
-static void detach_thread(void)
+static tls_data_t *find_apartment_tls(BindProtocol *protocol)
 {
     tls_data_t *data;
+
+    LIST_FOR_EACH_ENTRY(data, &tls_list, tls_data_t, entry) {
+        if(data->thread_id == protocol->apartment_thread && data->notif_hwnd == protocol->notif_hwnd)
+            return data;
+    }
+
+    return NULL;
+}
+
+static void unlink_handoff(BindProtocol *protocol)
+{
+    if(!protocol->handoff_posted && !protocol->handoff_orphans)
+        list_remove(&protocol->handoff_entry);
+}
+
+/* A protocol hands one of its references to a message for the window of its apartment thread. The registry lets the
+   thread release the reference of a message that no one will dispatch when the thread ends (or when posting fails). */
+BOOL add_handoff(BindProtocol *protocol)
+{
+    tls_data_t *data;
+    BOOL ret = FALSE;
+
+    EnterCriticalSection(&tls_cs);
+    data = find_apartment_tls(protocol);
+    if(data) {
+        if(!protocol->handoff_posted && !protocol->handoff_orphans)
+            list_add_tail(&data->handoffs, &protocol->handoff_entry);
+        protocol->handoff_posted++;
+        ret = TRUE;
+    }
+    LeaveCriticalSection(&tls_cs);
+
+    return ret;
+}
+
+/* The apartment thread dispatched a message: the reference it carried is the caller's now. */
+BOOL take_handoff(BindProtocol *protocol)
+{
+    BOOL ret;
+
+    EnterCriticalSection(&tls_cs);
+    ret = protocol->handoff_posted > 0;
+    if(ret) {
+        protocol->handoff_posted--;
+        unlink_handoff(protocol);
+    }
+    LeaveCriticalSection(&tls_cs);
+
+    return ret;
+}
+
+/* Posting failed: the reference stays with the apartment thread, which retries and releases it. */
+void orphan_handoff(BindProtocol *protocol)
+{
+    tls_data_t *data;
+
+    EnterCriticalSection(&tls_cs);
+    data = find_apartment_tls(protocol);
+    /* without the thread the reference was already released by its exit */
+    if(data && protocol->handoff_posted > 0) {
+        protocol->handoff_posted--;
+        protocol->handoff_orphans++;
+        data->handoff_orphans++;
+    }
+    LeaveCriticalSection(&tls_cs);
+}
+
+LONG count_orphan_handoffs(void)
+{
+    tls_data_t *data = urlmon_tls != TLS_OUT_OF_INDEXES ? TlsGetValue(urlmon_tls) : NULL;
+    LONG ret;
+
+    if(!data)
+        return 0;
+
+    EnterCriticalSection(&tls_cs);
+    ret = data->handoff_orphans;
+    LeaveCriticalSection(&tls_cs);
+
+    return ret;
+}
+
+/* Returns a protocol of this thread whose orphaned reference now belongs to the caller. */
+BindProtocol *take_orphan_handoff(void)
+{
+    tls_data_t *data = urlmon_tls != TLS_OUT_OF_INDEXES ? TlsGetValue(urlmon_tls) : NULL;
+    BindProtocol *protocol, *ret = NULL;
+
+    if(!data)
+        return NULL;
+
+    EnterCriticalSection(&tls_cs);
+    LIST_FOR_EACH_ENTRY(protocol, &data->handoffs, BindProtocol, handoff_entry) {
+        if(protocol->handoff_orphans) {
+            protocol->handoff_orphans--;
+            data->handoff_orphans--;
+            unlink_handoff(protocol);
+            ret = protocol;
+            break;
+        }
+    }
+    LeaveCriticalSection(&tls_cs);
+
+    return ret;
+}
+
+static void detach_thread(void)
+{
+    BindProtocol *protocol;
+    tls_data_t *data;
+    LONG refs;
 
     if(urlmon_tls == TLS_OUT_OF_INDEXES)
         return;
@@ -119,10 +233,29 @@ static void detach_thread(void)
     LeaveCriticalSection(&tls_cs);
 
     if(data->notif_hwnd) {
-        WARN("notif_hwnd not destroyed\n");
+        if(list_empty(&data->handoffs))
+            WARN("notif_hwnd not destroyed\n");
         DestroyWindow(data->notif_hwnd);
     }
 
+    /* the messages that carried these references die with the thread */
+    for(;;) {
+        EnterCriticalSection(&tls_cs);
+        if(list_empty(&data->handoffs)) {
+            LeaveCriticalSection(&tls_cs);
+            break;
+        }
+        protocol = LIST_ENTRY(list_head(&data->handoffs), BindProtocol, handoff_entry);
+        list_remove(&protocol->handoff_entry);
+        refs = protocol->handoff_posted + protocol->handoff_orphans;
+        protocol->handoff_posted = protocol->handoff_orphans = 0;
+        LeaveCriticalSection(&tls_cs);
+
+        while(refs-- > 0)
+            IInternetProtocolEx_Release(&protocol->IInternetProtocolEx_iface);
+    }
+
+    TlsSetValue(urlmon_tls, NULL);
     free(data);
 }
 
@@ -149,10 +282,10 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID fImpLoad)
 {
     TRACE("%p 0x%lx %p\n", hinstDLL, fdwReason, fImpLoad);
 
-    URLMON_DllMain( hinstDLL, fdwReason, fImpLoad );
-
     switch(fdwReason) {
     case DLL_PROCESS_ATTACH:
+        /* the proxy entry point would disable the thread notifications that detach_thread needs */
+        hProxyDll = hinstDLL;
         urlmon_instance = hinstDLL;
         init_session();
         break;
