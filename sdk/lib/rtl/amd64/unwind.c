@@ -84,24 +84,25 @@ RtlLookupFunctionTable(
     OUT PDWORD64 ImageBase,
     OUT PULONG Length)
 {
-    PVOID Table;
+    PVOID Table, Base;
     ULONG Size;
 
     /* Find corresponding file header from code address */
-    if (!RtlPcToFileHeader((PVOID)ControlPc, (PVOID*)ImageBase))
+    if (!RtlPcToFileHeader((PVOID)ControlPc, &Base))
     {
-        /* Nothing found */
+        /* Nothing found, leave ImageBase untouched */
         return NULL;
     }
+    *ImageBase = (DWORD64)Base;
 
     /* Locate the exception directory */
-    Table = RtlImageDirectoryEntryToData((PVOID)*ImageBase,
+    Table = RtlImageDirectoryEntryToData(Base,
                                          TRUE,
                                          IMAGE_DIRECTORY_ENTRY_EXCEPTION,
                                          &Size);
 
-    /* Return the number of entries */
-    *Length = Size / sizeof(RUNTIME_FUNCTION);
+    /* Return the size of the table in bytes, as Windows does */
+    *Length = Size;
 
     /* Return the address of the table */
     return Table;
@@ -138,6 +139,9 @@ RtlLookupFunctionEntry(
     {
         return RtlpLookupDynamicFunctionEntry(ControlPc, ImageBase, HistoryTable);
     }
+
+    /* The table size is in bytes */
+    TableLength /= sizeof(RUNTIME_FUNCTION);
 
     /* Use relative virtual address */
     ControlPc -= *ImageBase;
