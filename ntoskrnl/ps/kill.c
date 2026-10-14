@@ -485,6 +485,9 @@ PspExitThread(IN NTSTATUS ExitStatus)
     PLIST_ENTRY FirstEntry, CurrentEntry;
     PKAPC Apc;
     PTOKEN PrimaryToken;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN FreeNativeStack = TRUE;
+#endif
     PAGED_CODE();
     PSTRACE(PS_KILL_DEBUG, "ExitStatus: %d\n", ExitStatus);
 
@@ -809,6 +812,9 @@ PspExitThread(IN NTSTATUS ExitStatus)
             /* Check if we need to free its stack */
             if (Teb->FreeStackOnTermination)
             {
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                FreeNativeStack = FALSE;
+#endif
                 /* Set the TEB's Deallocation Stack as the Base Address */
                 Dummy = 0;
                 DeallocationStack = Teb->DeallocationStack;
@@ -833,6 +839,9 @@ PspExitThread(IN NTSTATUS ExitStatus)
              * released by guest ExitThread; forced exits also arrive here. */
             _SEH2_TRY
             {
+                /* RtlExitUserThread on a native helper already released this
+                 * allocation above. Do not release a new allocation which
+                 * another thread may have placed at the same address. */
                 NativeStack = Teb->DeallocationStack;
                 GuestStack = UlongToPtr(PS_GET_TEB32_FROM_TEB(Teb)->DeallocationStack);
             }
@@ -842,7 +851,7 @@ PspExitThread(IN NTSTATUS ExitStatus)
             if (GuestStack && GuestStack != NativeStack)
                 ZwFreeVirtualMemory(NtCurrentProcess(), &GuestStack, &Dummy, MEM_RELEASE);
             Dummy = 0;
-            if (NativeStack)
+            if (NativeStack && FreeNativeStack)
                 ZwFreeVirtualMemory(NtCurrentProcess(), &NativeStack, &Dummy, MEM_RELEASE);
         }
 #endif
