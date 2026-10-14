@@ -130,6 +130,7 @@ BEGIN
     IDS_EXTEND_FS_SUCCESS "\nDiskPart successfully extended the file system on the volume.\n"
     IDS_EXTEND_NO_SPACE "\nThere is not enough free space right after the partition to extend the volume.\n"
     IDS_EXTEND_FS_UNSUPPORTED "\nThe volume cannot be extended because the file system does not support it.\n"
+    IDS_EXTEND_NTFS_TOO_BIG "\nAn NTFS volume cannot grow beyond %I64u MB.\n"
     IDS_EXTEND_FAIL "\nDiskPart failed to extend the volume (status 0x%08lx).\n"
     IDS_EXTEND_FS_FAIL "\nThe partition was extended, but its file system was not (status 0x%08lx).\nUse EXTEND FILESYSTEM to try again.\n"
     IDS_EXTEND_NOT_PARTITION "\nThe selected volume is not a partition of a basic disk.\n"

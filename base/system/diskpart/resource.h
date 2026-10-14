@@ -83,6 +83,7 @@
 #define IDS_EXTEND_FS_SUCCESS          1161
 #define IDS_EXTEND_NO_SPACE            1162
 #define IDS_EXTEND_FS_UNSUPPORTED      1163
+#define IDS_EXTEND_NTFS_TOO_BIG        1164
 #define IDS_EXTEND_FAIL                1165
 #define IDS_EXTEND_FS_FAIL             1166
 #define IDS_EXTEND_NOT_PARTITION       1167

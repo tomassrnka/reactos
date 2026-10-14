@@ -16,6 +16,9 @@
 #define FSCTL_EXTEND_VOLUME CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 60, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
 
+/* The NTFS driver's limit: no partition of this size or more mounts. */
+#define NTFS_MAX_BYTES (1ULL << 44)
+
 /* WinBtrfs' own interface (drivers/filesystems/btrfs/btrfsioctl.h): its FSCTL_EXTEND_VOLUME is a stub. */
 #define FSCTL_BTRFS_GET_DEVICES CTL_CODE(FILE_DEVICE_UNKNOWN, 0x82e, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 #define FSCTL_BTRFS_RESIZE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x848, METHOD_IN_DIRECT, FILE_ANY_ACCESS)
@@ -640,6 +643,17 @@ extend_main(
             goto done;
         }
         ullNewSectors = PartEntry->SectorCount.QuadPart + ullBytes / ulBytesPerSector;
+    }
+
+    /*
+     * The NTFS driver mounts no volume of 16 TiB or more (its page index is
+     * 32 bits): the partition stays below that, so that it mounts again.
+     */
+    if (bHasFileSystem && _wcsicmp(szFileSystem, L"NTFS") == 0 &&
+        ullNewSectors >= NTFS_MAX_BYTES / ulBytesPerSector)
+    {
+        ConResPrintf(StdOut, IDS_EXTEND_NTFS_TOO_BIG, (NTFS_MAX_BYTES - SIZE_1MB) / SIZE_1MB);
+        goto done;
     }
 
     /*

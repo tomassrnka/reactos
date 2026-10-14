@@ -114,6 +114,8 @@ void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads
 /* Drops the clean, unreferenced shim page-cache pages of a node. */
 void ngc_trim(ngc_node *n);
 /* Write side (all under the caller's volume lock). */
+/* ntfsng mounts no device of this size or more: its page index is 32 bits (2^32 pages of 4 KiB). */
+#define NGC_MAX_DEVICE_BYTES (1ULL << 44)
 int ngc_is_rw(ngc_vol *v);
 /* True when the core stopped writing for good: changes not committed yet are lost. */
 int ngc_failed(ngc_vol *v);

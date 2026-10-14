@@ -282,7 +282,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     /* The page index is 32 bits, so a byte offset at or above 16 TiB (2^32 pages of 4 KiB) wraps.
      * Refuse such a volume rather than alias its block-device and file I/O onto low offsets. */
-    if (Size >= (1ULL << 44))
+    if (Size >= NGC_MAX_DEVICE_BYTES)
     {
         DPRINT1("ntfsng: volume of %I64u bytes is 16 TiB or larger, not mounting (32-bit page index)\n", Size);
         return STATUS_UNRECOGNIZED_VOLUME;

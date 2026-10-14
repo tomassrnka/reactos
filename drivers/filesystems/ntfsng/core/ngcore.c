@@ -2306,6 +2306,9 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		return -EIO;
 	if (!sectors || sectors > (U64_MAX / ss) - 1 || (sectors + 1) * ss > dev_size)
 		return -EINVAL;
+	/* A device that large would not mount again, and its page indexes would wrap now. */
+	if (dev_size >= NGC_MAX_DEVICE_BYTES)
+		return -EFBIG;
 	old_sectors = ngc_boot_sectors(v);
 	if (!old_sectors)
 		return -EIO;
