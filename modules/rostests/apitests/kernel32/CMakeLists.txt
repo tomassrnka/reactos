@@ -60,6 +60,7 @@ list(APPEND SOURCE
     MultiByteToWideChar.c
     Pipes.c
     PipeSqos.c
+    PreferredUILanguages.c
     PowerRequest.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
