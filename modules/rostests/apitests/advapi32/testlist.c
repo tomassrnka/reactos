@@ -36,6 +36,7 @@ extern void func_TokenIntegrity(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceFailureActions(void);
+extern void func_ServiceRecovery(void);
 extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
 extern void func_SetNamedSecurityInfoInherit(void);
@@ -77,6 +78,7 @@ const struct test winetest_testlist[] =
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceFailureActions", func_ServiceFailureActions },
+    { "ServiceRecovery", func_ServiceRecovery },
     { "ServiceNetwork", func_ServiceNetwork },
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
