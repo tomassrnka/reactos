@@ -236,6 +236,13 @@ ExInitializeNPagedLookasideList(IN PNPAGED_LOOKASIDE_LIST Lookaside,
     Lookaside->L.LastTotalAllocates = 0;
     Lookaside->L.LastAllocateMisses = 0;
 
+    /* Special pool has to see every free of a selected allocation */
+    if (MmSpecialPoolSelectsLookaside(Size, Tag))
+    {
+        Lookaside->L.Depth = 0;
+        Lookaside->L.MaximumDepth = 0;
+    }
+
     /* Set the Allocate/Free Routines */
     if (Allocate)
     {
@@ -287,6 +294,13 @@ ExInitializePagedLookasideList(IN PPAGED_LOOKASIDE_LIST Lookaside,
     Lookaside->L.MaximumDepth = 256;
     Lookaside->L.LastTotalAllocates = 0;
     Lookaside->L.LastAllocateMisses = 0;
+
+    /* Special pool has to see every free of a selected allocation */
+    if (MmSpecialPoolSelectsLookaside(Size, Tag))
+    {
+        Lookaside->L.Depth = 0;
+        Lookaside->L.MaximumDepth = 0;
+    }
 
     /* Set the Allocate/Free Routines */
     if (Allocate)

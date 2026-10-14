@@ -51,7 +51,17 @@ PFN_COUNT MiSpecialPagesNonPaged;
 PFN_COUNT MiSpecialPagesNonPagedPeak;
 PFN_COUNT MiSpecialPagesNonPagedMaximum;
 
-BOOLEAN MmSpecialPoolCatchOverruns = TRUE;
+/* Registry PoolTagOverruns: nonzero puts the data at the end of the page (guard page after it), zero at the start */
+ULONG MmSpecialPoolCatchOverruns = TRUE;
+
+/* Registry SpecialPoolTags (REG_SZ or REG_MULTI_SZ): more tag patterns, see MiSpecialPoolParseTags */
+WCHAR MiSpecialPoolTagList[128];
+ULONG MiSpecialPoolTagListLength = sizeof(MiSpecialPoolTagList);
+
+#define MI_SPECIAL_POOL_MAX_PATTERNS 16
+static ULONG MiSpecialPoolPatterns[MI_SPECIAL_POOL_MAX_PATTERNS];
+static ULONG MiSpecialPoolPatternCount;
+static BOOLEAN MiSpecialPoolPatternsParsed;
 
 typedef struct _MI_FREED_SPECIAL_POOL
 {
@@ -72,22 +82,133 @@ typedef struct _MI_FREED_SPECIAL_POOL
 
 VOID NTAPI MiTestSpecialPool(VOID);
 
+/* A pattern holds the tag bytes in memory order; '?' matches any byte, '*' matches the rest of the tag */
+static
+BOOLEAN
+MiSpecialPoolTagMatches(ULONG Pattern, ULONG Tag)
+{
+    ULONG i;
+    UCHAR PatternChar;
+
+    for (i = 0; i < sizeof(ULONG); i++)
+    {
+        PatternChar = (UCHAR)(Pattern >> (i * 8));
+        if (PatternChar == '*') return TRUE;
+        if ((PatternChar != '?') && (PatternChar != (UCHAR)(Tag >> (i * 8)))) return FALSE;
+    }
+
+    return TRUE;
+}
+
+static
+VOID
+MiSpecialPoolAddPattern(ULONG Pattern)
+{
+    if (MiSpecialPoolPatternCount < MI_SPECIAL_POOL_MAX_PATTERNS)
+    {
+        MiSpecialPoolPatterns[MiSpecialPoolPatternCount++] = Pattern;
+    }
+}
+
+/*
+ * PoolTag (REG_DWORD) is the documented single pattern; 0x2A ('*') selects every tag.
+ * SpecialPoolTags is text: patterns of at most four characters separated by spaces,
+ * commas, semicolons or NULs, e.g. "NTN* LTAB Mm??". A pattern shorter than four
+ * characters without '*' is padded with spaces, like the tags themselves.
+ */
+static
+VOID
+MiSpecialPoolParseTags(VOID)
+{
+    ULONG Chars, i, Length, Pattern;
+    WCHAR c;
+    BOOLEAN Valid;
+
+    if (MiSpecialPoolPatternsParsed) return;
+    MiSpecialPoolPatternsParsed = TRUE;
+
+    if ((MmSpecialPoolTag != 0) && (MmSpecialPoolTag != -1))
+    {
+        MiSpecialPoolAddPattern(MmSpecialPoolTag);
+    }
+
+    /* The control vector stores -1 when the value is absent */
+    if (MiSpecialPoolTagListLength > sizeof(MiSpecialPoolTagList)) return;
+    Chars = MiSpecialPoolTagListLength / sizeof(WCHAR);
+
+    i = 0;
+    while (i < Chars)
+    {
+        c = MiSpecialPoolTagList[i];
+        if ((c == UNICODE_NULL) || (c == L' ') || (c == L',') || (c == L';'))
+        {
+            i++;
+            continue;
+        }
+
+        Pattern = 0;
+        Length = 0;
+        Valid = TRUE;
+        while (i < Chars)
+        {
+            c = MiSpecialPoolTagList[i];
+            if ((c == UNICODE_NULL) || (c == L' ') || (c == L',') || (c == L';')) break;
+            if ((c < 0x21) || (c > 0x7E) || (Length == sizeof(ULONG))) Valid = FALSE;
+            else Pattern |= (ULONG)c << (Length * 8);
+            Length++;
+            i++;
+        }
+
+        if (!Valid)
+        {
+            DbgPrint("Special pool: ignoring tag pattern %lu characters long or not printable ASCII\n", Length);
+            continue;
+        }
+
+        if (!((Pattern >> ((Length - 1) * 8)) == '*'))
+        {
+            while (Length < sizeof(ULONG)) Pattern |= (ULONG)' ' << (Length++ * 8);
+        }
+
+        MiSpecialPoolAddPattern(Pattern);
+    }
+}
+
+BOOLEAN
+NTAPI
+MiSpecialPoolConfigured(VOID)
+{
+    MiSpecialPoolParseTags();
+    return (MiSpecialPoolPatternCount != 0);
+}
+
 BOOLEAN
 NTAPI
 MmUseSpecialPool(SIZE_T NumberOfBytes, ULONG Tag)
 {
+    ULONG i;
+
     /* Special pool is not suitable for allocations bigger than 1 page */
     if (NumberOfBytes > (PAGE_SIZE - sizeof(POOL_HEADER)))
     {
         return FALSE;
     }
 
-    if (MmSpecialPoolTag == '*')
+    Tag &= ~PROTECTED_POOL;
+    for (i = 0; i < MiSpecialPoolPatternCount; i++)
     {
-        return TRUE;
+        if (MiSpecialPoolTagMatches(MiSpecialPoolPatterns[i], Tag)) return TRUE;
     }
 
-    return Tag == MmSpecialPoolTag;
+    return FALSE;
+}
+
+/* Lookaside lists of selected allocations must not cache freed entries, or a use after free would go unseen */
+BOOLEAN
+NTAPI
+MmSpecialPoolSelectsLookaside(SIZE_T NumberOfBytes, ULONG Tag)
+{
+    return (MiSpecialPoolFirstPte != NULL) && MmUseSpecialPool(NumberOfBytes, Tag);
 }
 
 BOOLEAN
@@ -118,6 +239,15 @@ MmIsSpecialPoolAddressFree(PVOID P)
     return TRUE;
 }
 
+/* Pages pair up from MmSpecialPoolStart: a data page, then its guard page */
+BOOLEAN
+NTAPI
+MiIsSpecialPoolGuardPage(PVOID P)
+{
+    ASSERT(MmIsSpecialPoolAddress(P));
+    return ((((ULONG_PTR)P - (ULONG_PTR)MmSpecialPoolStart) >> PAGE_SHIFT) & 1) != 0;
+}
+
 VOID
 NTAPI
 MiInitializeSpecialPool(VOID)
@@ -126,8 +256,7 @@ MiInitializeSpecialPool(VOID)
     PMMPTE PointerPte;
 
     /* Check if there is a special pool tag */
-    if ((MmSpecialPoolTag == 0) ||
-        (MmSpecialPoolTag == -1)) return;
+    if (!MiSpecialPoolConfigured()) return;
 
     /* Calculate number of system PTEs for the special pool */
     if (MmNumberOfSystemPtes >= 0x3000)
@@ -163,10 +292,13 @@ MiInitializeSpecialPool(VOID)
     ASSERT(SpecialPoolPtes >= PTE_PER_PAGE);
 
     /* Save first PTE and its address */
-    MiSpecialPoolFirstPte = PointerPte;
     MmSpecialPoolStart = MiPteToAddress(PointerPte);
 
-    for (i = 0; i < PTE_PER_PAGE / 2; i++)
+    /* The first pair stays unmapped, so that an underrun of the first page faults too */
+    PointerPte += 2;
+    MiSpecialPoolFirstPte = PointerPte;
+
+    for (i = 1; i < PTE_PER_PAGE / 2; i++)
     {
         /* Point it to the next entry */
         PointerPte->u.List.NextEntry = &PointerPte[2] - MmSystemPteBase;
@@ -193,7 +325,11 @@ MiInitializeSpecialPool(VOID)
     if (MmNumberOfPhysicalPages > 0x3FFF)
         MiSpecialPagesNonPagedMaximum = MmResidentAvailablePages >> 3;
 
-    DPRINT1("Special pool start %p - end %p\n", MmSpecialPoolStart, MmSpecialPoolEnd);
+    DbgPrint("Special pool: %lu tag pattern(s), %s, %lu PTEs at %p\n",
+             MiSpecialPoolPatternCount,
+             MmSpecialPoolCatchOverruns ? "overruns" : "underruns",
+             SpecialPoolPtes,
+             MmSpecialPoolStart);
     ExpPoolFlags |= POOL_FLAG_SPECIAL_POOL;
 
     //MiTestSpecialPool();
@@ -257,6 +393,9 @@ MmAllocateSpecialPool(SIZE_T NumberOfBytes, ULONG Tag, POOL_TYPE PoolType, ULONG
 
     /* Check if the pool is initialized and quit if it's not */
     if (!MiSpecialPoolFirstPte) return NULL;
+
+    /* The data lands at a 16-byte boundary next to the guard page, never on a cache line */
+    if (PoolType & CACHE_ALIGNED_POOL_MASK) return NULL;
 
     /* Get the pool type */
     PoolType &= BASE_POOL_TYPE_MASK;
@@ -611,9 +750,8 @@ MmFreeSpecialPool(PVOID P)
 
         MI_ERASE_PTE(PointerPte);
 
-        /* Flush the TLB */
-        //FIXME: Use KeFlushSingleTb() instead
-        KeFlushEntireTb(TRUE, TRUE);
+        /* Flush the TLB on every processor, so that a use after free faults */
+        KeFlushSingleTb(PAGE_ALIGN(P), TRUE);
     }
     else
     {

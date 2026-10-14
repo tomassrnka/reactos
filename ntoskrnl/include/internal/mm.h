@@ -838,6 +838,21 @@ MmUseSpecialPool(
 
 BOOLEAN
 NTAPI
+MiSpecialPoolConfigured(VOID);
+
+BOOLEAN
+NTAPI
+MiIsSpecialPoolGuardPage(
+    IN PVOID P);
+
+BOOLEAN
+NTAPI
+MmSpecialPoolSelectsLookaside(
+    IN SIZE_T NumberOfBytes,
+    IN ULONG Tag);
+
+BOOLEAN
+NTAPI
 MmIsSpecialPoolAddress(
     IN PVOID P);
 

@@ -2327,7 +2327,7 @@ MmArmInitSystem(IN ULONG Phase,
                 //
                 MmNumberOfSystemPtes <<= 1;
             }
-            if (MmSpecialPoolTag != 0 && MmSpecialPoolTag != -1)
+            if (MiSpecialPoolConfigured())
             {
                 //
                 // Add some extra PTEs for special pool
