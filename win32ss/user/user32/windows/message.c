@@ -2599,6 +2599,9 @@ SendMessageCallbackW(
                           FALSE);
 }
 
+/* Windows 7 rejects only the flags above 0x3F, and so accepts SMTO_ERRORONEXIT and two undefined bits */
+#define SMTO_VALID_FLAGS 0x3F
+
 /*
  * @implemented
  */
@@ -2617,7 +2620,7 @@ SendMessageTimeoutA(
   LRESULT Result;
   DOSENDMESSAGE dsm;
 
-  if ( Msg & ~WM_MAXIMUM || fuFlags & ~(SMTO_NOTIMEOUTIFNOTHUNG|SMTO_ABORTIFHUNG|SMTO_BLOCK))
+  if ( Msg & ~WM_MAXIMUM || fuFlags & ~SMTO_VALID_FLAGS)
   {
      SetLastError( ERROR_INVALID_PARAMETER );
      return 0;
@@ -2687,7 +2690,7 @@ SendMessageTimeoutW(
   DOSENDMESSAGE dsm;
   MSG UMMsg, KMMsg;
 
-  if ( Msg & ~WM_MAXIMUM || fuFlags & ~(SMTO_NOTIMEOUTIFNOTHUNG|SMTO_ABORTIFHUNG|SMTO_BLOCK))
+  if ( Msg & ~WM_MAXIMUM || fuFlags & ~SMTO_VALID_FLAGS)
   {
      SetLastError( ERROR_INVALID_PARAMETER );
      return 0;
