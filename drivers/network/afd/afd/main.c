@@ -1247,6 +1247,22 @@ CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_ACTIVE_
     }
 }
 
+/* Irp is the only request on the connect and ConnectEx queues */
+static
+BOOLEAN
+AfdIsOnlyConnectRequest(PAFD_FCB FCB, PIRP Irp)
+{
+    PLIST_ENTRY Connect = &FCB->PendingIrpList[FUNCTION_CONNECT];
+    PLIST_ENTRY ConnectEx = &FCB->PendingIrpList[FUNCTION_CONNECTEX];
+    PLIST_ENTRY Entry = &Irp->Tail.Overlay.ListEntry;
+
+    if (Connect->Flink == Entry && Entry->Flink == Connect && IsListEmpty(ConnectEx))
+        return TRUE;
+    if (ConnectEx->Flink == Entry && Entry->Flink == ConnectEx && IsListEmpty(Connect))
+        return TRUE;
+    return FALSE;
+}
+
 static
 BOOLEAN
 AfdIsIrpQueued(PAFD_FCB FCB, PIRP Irp)
@@ -1389,18 +1405,23 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
         if (CurrentIrp == Irp)
         {
-            RemoveEntryList(CurrentEntry);
-            CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
-            /* Nobody waits for the transport connect any more: stop it, so the
-               socket can connect again, as on Windows */
+            /* The last connect request of a socket whose transport connect runs: stop the
+               transport connect and leave this request queued. Its completion completes the
+               request with the transport's result once the socket is bound or connected
+               again, so the caller never sees a cancel while the socket still connects */
             if ((Function == FUNCTION_CONNECT || Function == FUNCTION_CONNECTEX) &&
                 FCB->SharedData.State == SOCKET_STATE_CONNECTING &&
-                IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECT]) &&
-                IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]) &&
-                FCB->ConnectIrp.InFlightRequest)
+                FCB->ConnectIrp.InFlightRequest &&
+                AfdIsOnlyConnectRequest(FCB, Irp))
             {
                 IoCancelIrp(FCB->ConnectIrp.InFlightRequest);
+                SocketStateUnlock(FCB);
+                ObDereferenceObject(FileObject);
+                return;
             }
+
+            RemoveEntryList(CurrentEntry);
+            CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
             if (Function == FUNCTION_PREACCEPT)
             {
                 /* Unlock the acceptor socket so that it can be reused */
