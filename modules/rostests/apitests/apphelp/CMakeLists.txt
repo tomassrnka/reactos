@@ -12,6 +12,7 @@ list(APPEND SOURCE
     env.c
     layerapi.c
     register.cpp
+    shimload.c
     testlist.c
     testdata.rc
     testdb.xml)
@@ -25,4 +26,11 @@ add_executable(apphelp_apitest ${SOURCE})
 set_module_type(apphelp_apitest win32cui)
 target_link_libraries(apphelp_apitest ${PSEH_LIB} cpprt atl_classes)
 add_importlibs(apphelp_apitest advapi32 userenv version shlwapi msvcrt kernel32 ntdll)
+add_dependencies(apphelp_apitest apphelp_shimload_child)
 add_rostests_file(TARGET apphelp_apitest)
+
+# Helper for the shimload test: imports the C runtime and little else, like the programs that matter
+add_executable(apphelp_shimload_child shimload_child.c)
+set_module_type(apphelp_shimload_child win32cui)
+add_importlibs(apphelp_shimload_child msvcrt kernel32)
+add_rostests_file(TARGET apphelp_shimload_child)
