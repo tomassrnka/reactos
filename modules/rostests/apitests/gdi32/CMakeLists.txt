@@ -65,6 +65,7 @@ list(APPEND SOURCE
     OffsetRgn.c
     PaintRgn.c
     PatBlt.c
+    PolyPatBlt.c
     Rectangle.c
     RegionAllocFailure.c
     RealizePalette.c
