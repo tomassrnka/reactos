@@ -10,6 +10,7 @@ list(APPEND SOURCE
     CancelIoEx.c
     ApplicationRestart.c
     ConsoleCP.c
+    ConsoleWriteLatency.c
     CreateEventMutexEx.c
     CreateFile2.c
     CreateRemoteThreadEx.c
