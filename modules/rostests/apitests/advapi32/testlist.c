@@ -40,9 +40,28 @@ extern void func_SetEntriesInAclOld(void);
 extern void func_SetNamedSecurityInfoInherit(void);
 extern void func_SddlRights(void);
 
+extern void func_RegWow64(void);
+extern void func_RegWow64Unicode(void);
+extern void func_RegWow64Views(void);
+extern void func_RegWow64Matrix(void);
+extern void func_RegWow64LongName(void);
+extern void func_RegWow64SharedLongName(void);
+extern void func_RegWow64Volatile(void);
+extern void func_RegWow64SharedCreate(void);
+extern void func_RegWow64Aliases(void);
+
 const struct test winetest_testlist[] =
 {
     { "AddMandatoryAce", func_AddMandatoryAce },
+    { "RegWow64", func_RegWow64 },
+    { "RegWow64Unicode", func_RegWow64Unicode },
+    { "RegWow64Views", func_RegWow64Views },
+    { "RegWow64SharedCreate", func_RegWow64SharedCreate },
+    { "RegWow64Matrix", func_RegWow64Matrix },
+    { "RegWow64LongName", func_RegWow64LongName },
+    { "RegWow64SharedLongName", func_RegWow64SharedLongName },
+    { "RegWow64Volatile", func_RegWow64Volatile },
+    { "RegWow64Aliases", func_RegWow64Aliases },
     { "CreateService", func_CreateService },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
     { "EncryptFile", func_EncryptFile },

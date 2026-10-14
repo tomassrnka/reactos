@@ -897,13 +897,13 @@ NTAPI
 CmpConstructName(IN PCM_KEY_CONTROL_BLOCK Kcb)
 {
     PUNICODE_STRING KeyName;
-    ULONG i;
-    USHORT NameLength;
+    ULONG NameLength, ComponentLength;
     PCM_KEY_CONTROL_BLOCK MyKcb;
     PCM_KEY_NODE KeyNode;
-    BOOLEAN DeletedKey = FALSE;
-    PWCHAR TargetBuffer, CurrentNameW;
-    PUCHAR CurrentName;
+    BOOLEAN DeletedKey = FALSE, Compressed;
+    PWCHAR TargetBuffer;
+    PWSTR CurrentName;
+    ULONG SourceLength;
 
     /* Calculate how much size our key name is going to occupy */
     NameLength = 0;
@@ -924,6 +924,10 @@ CmpConstructName(IN PCM_KEY_CONTROL_BLOCK Kcb)
 
         /* Sum up the separator too */
         NameLength += sizeof(WCHAR);
+
+        /* UNICODE_STRING lengths are USHORT byte counts. Relative opens can
+         * build an ancestry longer than any single supplied object name. */
+        if (NameLength > MAXUSHORT) return NULL;
 
         /* Go to the parent KCB */
         MyKcb = MyKcb->ParentKcb;
@@ -977,53 +981,40 @@ CmpConstructName(IN PCM_KEY_CONTROL_BLOCK Kcb)
         }
 
         /* Get the pointer to the beginning of the current key name */
-        NameLength += (MyKcb->NameBlock->NameLength + 1) * sizeof(WCHAR);
+        ComponentLength = MyKcb->NameBlock->Compressed ?
+            CmpCompressedNameSize(MyKcb->NameBlock->Name, MyKcb->NameBlock->NameLength) :
+            MyKcb->NameBlock->NameLength;
+        NameLength += ComponentLength + sizeof(WCHAR);
+        if (NameLength > KeyName->Length)
+        {
+            if (KeyNode) HvReleaseCell(MyKcb->KeyHive, MyKcb->KeyCell);
+            CmpFree(KeyName, 0);
+            return NULL;
+        }
         TargetBuffer = &KeyName->Buffer[(KeyName->Length - NameLength) / sizeof(WCHAR)];
 
         /* Add a separator */
         TargetBuffer[0] = OBJ_NAME_PATH_SEPARATOR;
 
-        /* Add the name, but remember to go from the end to the beginning */
-        if (!MyKcb->NameBlock->Compressed)
+        /* The cached uppercase spelling may compress even when the live
+         * spelling does not (for example U+0131 uppercases to ASCII I). Use
+         * the compression flag belonging to the actual source buffer. */
+        if ((MyKcb->Flags & (KEY_HIVE_ENTRY | KEY_HIVE_EXIT)) || !KeyNode)
         {
-            /* Get the pointer to the name (from the keynode, if possible) */
-            if ((MyKcb->Flags & (KEY_HIVE_ENTRY | KEY_HIVE_EXIT)) ||
-                !KeyNode)
-            {
-                CurrentNameW = MyKcb->NameBlock->Name;
-            }
-            else
-            {
-                CurrentNameW = KeyNode->Name;
-            }
-
-            /* Copy the name */
-            for (i=0; i < MyKcb->NameBlock->NameLength; i++)
-            {
-                TargetBuffer[i+1] = *CurrentNameW;
-                CurrentNameW++;
-            }
+            CurrentName = MyKcb->NameBlock->Name;
+            SourceLength = MyKcb->NameBlock->NameLength;
+            Compressed = MyKcb->NameBlock->Compressed;
         }
         else
         {
-            /* Get the pointer to the name (from the keynode, if possible) */
-            if ((MyKcb->Flags & (KEY_HIVE_ENTRY | KEY_HIVE_EXIT)) ||
-                !KeyNode)
-            {
-                CurrentName = (PUCHAR)MyKcb->NameBlock->Name;
-            }
-            else
-            {
-                CurrentName = (PUCHAR)KeyNode->Name;
-            }
-
-            /* Copy the name */
-            for (i=0; i < MyKcb->NameBlock->NameLength; i++)
-            {
-                TargetBuffer[i+1] = (WCHAR)*CurrentName;
-                CurrentName++;
-            }
+            CurrentName = KeyNode->Name;
+            SourceLength = KeyNode->NameLength;
+            Compressed = (KeyNode->Flags & KEY_COMP_NAME) != 0;
         }
+        if (Compressed)
+            CmpCopyCompressedName(TargetBuffer + 1, ComponentLength, CurrentName, SourceLength);
+        else
+            RtlCopyMemory(TargetBuffer + 1, CurrentName, ComponentLength);
 
         /* Release the cell, if needed */
         if (KeyNode) HvReleaseCell(MyKcb->KeyHive, MyKcb->KeyCell);

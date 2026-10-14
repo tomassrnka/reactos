@@ -2024,7 +2024,7 @@ CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
     BOOLEAN Allocate = TRUE;
     PCMHIVE CmHive, LoadedHive;
     NTSTATUS Status;
-    CM_PARSE_CONTEXT ParseContext;
+    CM_PARSE_CONTEXT ParseContext = {0};
 
     /* Check if we have a trust key */
     if (KeyBody)
