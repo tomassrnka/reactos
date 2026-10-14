@@ -167,4 +167,3 @@ InitializeProgramFilesDir(VOID)
 #endif
     return TRUE;
 }
-
