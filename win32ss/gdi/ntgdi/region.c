@@ -127,6 +127,62 @@ SOFTWARE.
 #include <debug.h>
 
 PREGION prgnDefault = NULL;
+
+#if DBG
+INT
+FASTCALL
+REGION_iDbgArmAllocFailure(
+    _In_reads_bytes_opt_(cjIn) PVOID pvIn,
+    _In_ INT cjIn)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+    LONG lAllowed;
+    INT iRet;
+
+    if (!pti || !pvIn || cjIn != sizeof(LONG))
+        return -1;
+
+    _SEH2_TRY
+    {
+        ProbeForRead(pvIn, sizeof(LONG), 1);
+        lAllowed = *(LONG *)pvIn;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return -1);
+    }
+    _SEH2_END;
+
+    /* Returns 2 when a failure was injected since the previous arming, else 1 */
+    iRet = pti->bDbgRgnFailFired ? 2 : 1;
+    pti->bDbgRgnFailFired = FALSE;
+    pti->bDbgRgnFailArmed = (lAllowed >= 0);
+    pti->lDbgRgnFailCountdown = lAllowed;
+    return iRet;
+}
+
+static
+BOOL
+REGION_bDbgFailAlloc(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    if (!pti || !pti->bDbgRgnFailArmed)
+        return FALSE;
+
+    if (pti->lDbgRgnFailCountdown > 0)
+    {
+        pti->lDbgRgnFailCountdown--;
+        return FALSE;
+    }
+
+    /* One failure per arming */
+    pti->bDbgRgnFailArmed = FALSE;
+    pti->bDbgRgnFailFired = TRUE;
+    DPRINT1("Injected region allocation failure\n");
+    return TRUE;
+}
+#endif
 HRGN    hrgnDefault = NULL;
 
 // Internal Functions
@@ -2207,6 +2263,11 @@ REGION_AllocRgnWithHandle(
     //HRGN hReg;
     PREGION pReg;
 
+#if DBG
+    if (REGION_bDbgFailAlloc())
+        return NULL;
+#endif
+
     pReg = (PREGION)GDIOBJ_AllocateObject(GDIObjType_RGN_TYPE,
                                           sizeof(REGION),
                                           BASEFLAG_LOOKASIDE);
@@ -2414,6 +2475,11 @@ IntSysCreateRectpRgn(
     INT BottomRect)
 {
     PREGION prgn;
+
+#if DBG
+    if (REGION_bDbgFailAlloc())
+        return NULL;
+#endif
 
     /* Allocate a region, without a handle */
     prgn = (PREGION)GDIOBJ_AllocateObject(GDIObjType_RGN_TYPE, sizeof(REGION), BASEFLAG_LOOKASIDE);

@@ -19,6 +19,14 @@ typedef struct _REGION
 /* Globals ********************************************************************/
 
 extern PREGION prgnDefault;
+
+#if DBG
+/* Debug builds only: ExtEscape code that makes one region allocation of the calling
+   thread fail. Input: a LONG, the number of allocations to let through first; -1 disarms.
+   Returns 2 if a failure was injected since the previous call, 1 if not, -1 on bad input. */
+#define GDI_DBG_ESCAPE_FAIL_REGION_ALLOC 0x7FFE5247
+INT FASTCALL REGION_iDbgArmAllocFailure(_In_reads_bytes_opt_(cjIn) PVOID pvIn, _In_ INT cjIn);
+#endif
 extern HRGN hrgnDefault;
 
 /* Functions ******************************************************************/
