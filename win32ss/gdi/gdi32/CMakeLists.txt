@@ -60,6 +60,11 @@ add_library(gdi32 MODULE
     gdi32.rc
     ${CMAKE_CURRENT_BINARY_DIR}/gdi32.def)
 
+if(SYSWOW64_GUEST)
+    # The layout pin is compiled with the same definitions as the DLL.
+    target_compile_definitions(gdi32 PRIVATE W32K_WIDE)
+endif()
+
 set_module_type(gdi32 win32dll UNICODE ENTRYPOINT DllMain 12)
 
 target_link_libraries(gdi32

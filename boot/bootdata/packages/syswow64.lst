@@ -1,4 +1,4 @@
-# Console API-test runtime. RPC transports and GUI libraries are separate gates.
+# Console API-test runtime. RPC transports are a separate gate.
 SysWOW64/ntdll.dll
 SysWOW64/kernel32.dll
 SysWOW64/kernel32_vista.dll
@@ -6,6 +6,12 @@ SysWOW64/msvcrt.dll
 SysWOW64/advapi32.dll
 SysWOW64/advapi32_vista.dll
 SysWOW64/ntmarta.dll
+
+# These DLLs use W32K_WIDE in the nested guest build, including their layout pins.
+# Window creation still needs the win32k syscall and callback translation.
+SysWOW64/user32.dll
+SysWOW64/gdi32.dll
+SysWOW64/imm32.dll
 
 # Code-page data used by the guest kernel32 NLS loader.
 SysWOW64/c_037.nls

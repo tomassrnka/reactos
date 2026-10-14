@@ -10,6 +10,16 @@ and amd64 with WoW64 enabled. Use the same i386 runtime DLLs on both systems,
 set `WINETEST_PLATFORM=reactos`, and record individual test summaries and exits.
 An unsupported process launch or missing summary is not a passing test.
 
+The explicit i386 target `wow64_gui_load` is a separate GUI DLL load smoke
+test and is not installed in default images. Run it on the WoW64 image to
+load user32, gdi32 and imm32 through the ordinary loader, print their loaded
+paths, and call SetRect and GdiGetBatchLimit without creating a window. DLL
+initialization itself requires win32k translation; a failure here remains
+a failure even when the wide DLLs compile and are packaged correctly.
+The host-side `sdk/cmake/tests/syswow64-wide.py` checks the Ninja compile
+commands (including layout pins and shared rtl sources), guest-only wide
+definitions, and the cabinet/live-image copies after `syswow64_stage`.
+
 The selection covers current directories, environment variables, drive types,
 code pages, integer SEH, NT registry queries, ACL-bearing registry creation,
 registry enumeration and value queries. `Wow64Environment` adds process
