@@ -603,7 +603,10 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Transfer.AfdFlags = From[2];
             Transfer.TdiFlags = From[3];
             Buffers = PTR32(From[0]);
-            if (!Transfer.BufferCount || Transfer.BufferCount > MAXULONG / sizeof(AFD_WSABUF))
+            /* AFD's capture adds two pointer-sized mapping fields per buffer
+             * and uses a ULONG byte count. Bound that allocation as well. */
+            if (!Transfer.BufferCount ||
+                Transfer.BufferCount > MAXULONG / (sizeof(AFD_WSABUF) + 2 * sizeof(PVOID)))
                 return STATUS_INVALID_PARAMETER;
             Transfer.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
                                         Transfer.BufferCount * sizeof(AFD_WSABUF));

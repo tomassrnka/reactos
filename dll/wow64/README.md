@@ -91,7 +91,7 @@ requested access.
 Guest APC routines are encoded separately from native routine addresses. The
 native dispatcher builds an i386 APC frame and enters a nested CPU frame; its
 NtContinue resumes the interrupted native call before returning to the guest.
-Read/write I/O and the supported mount-manager device query mark an IOSB32
+Read/write I/O and supported device queries mark an IOSB32
 pointer explicitly, and the kernel records that layout in the IRP. Completion
 publishes the eight-byte status block before an event or APC becomes visible.
 Filesystem redirection state remains per thread, including across nested APCs.
@@ -120,11 +120,16 @@ separate from the focused fixtures:
   Secondary guest stacks can grow within the supplied reservation. Complete
   debugger and floating-point context compatibility still needs validation.
   The only CPU backend is amd64/i386.
-* Pointer-bearing IOCTLs and most information classes are unimplemented.
-  Device control currently accepts only the mount-manager DOS-volume-path
-  query, whose buffers contain counted strings. Pipe peeking and flushing
-  accept synchronous file handles; read/write I/O and the supported device
-  query also retain event/APC completion semantics.
+* Device control accepts the mount-manager DOS-volume-path query, TCP entity
+  queries and the AFD stream operations covered by `wow64_socket`. Accept
+  handles and send/receive WSABUF arrays are widened in user mode; AFD captures
+  them before returning pending. AFD owns native poll buffers through readiness,
+  timeout and cancellation, then packs the guest output before completing the
+  IOSB32. TDI handle replies and TCP query contexts use their guest layouts.
+  Datagram-specific, event-select, extended accept/connect and shared-context
+  retrieval requests still need translation. Other device controls and most
+  information classes remain unimplemented. Pipe peeking and flushing accept
+  synchronous file handles.
 * CSR covers initial Base/console connection and the console operations
   implemented in `csr.c`. The Base static-data copy is a startup snapshot;
   live updates and INI mapping are not implemented. Console control falls

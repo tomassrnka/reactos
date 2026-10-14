@@ -151,6 +151,9 @@ static void CheckPendingReceive(SOCKET Client, SOCKET Server)
     Result = WSARecv(Server, Buffers, 2, &Count, &Flags, &Pending.Io, NULL);
     CHECK(Result == SOCKET_ERROR && WSAGetLastError() == WSA_IO_PENDING);
     CHECK(WaitForSingleObject(Pending.Io.hEvent, 0) == WAIT_TIMEOUT);
+    /* Descriptors are captured before WSARecv returns; only their data and
+     * the OVERLAPPED must remain live until completion. */
+    memset(Buffers, 0, sizeof(Buffers));
     CHECK(send(Client, "async", 5, 0) == 5);
     CHECK(WaitForSingleObject(Pending.Io.hEvent, 2000) == WAIT_OBJECT_0);
     CHECK(WSAGetOverlappedResult(Server, &Pending.Io, &Count, FALSE, &Flags) && Count == 5);
@@ -159,7 +162,42 @@ static void CheckPendingReceive(SOCKET Client, SOCKET Server)
     WSACloseEvent(Pending.Io.hEvent);
 }
 
-static void CheckPollReply(SOCKET Server, SOCKET Listener)
+static void CheckTransferCapture(SOCKET Socket)
+{
+    typedef NTSTATUS (NTAPI *IOCTL)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK, ULONG, PVOID, ULONG, PVOID, ULONG);
+    IOCTL Ioctl = (IOCTL)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtDeviceIoControlFile");
+    struct { IO_STATUS_BLOCK Io; ULONG Guard; } Result = {{{0}}, 0x12345678};
+    AFD_RECV_INFO Request = {NULL, 1, AFD_OVERLAPPED, 0};
+    ULONG Codes[] = {IOCTL_AFD_SEND, IOCTL_AFD_RECV};
+    NTSTATUS Status;
+    BOOL Wow = FALSE;
+    unsigned i;
+
+    CHECK(Ioctl && IsWow64Process(GetCurrentProcess(), &Wow));
+    if (!Ioctl || !Wow) return;
+    for (i = 0; i < sizeof(Codes) / sizeof(Codes[0]); ++i)
+    {
+        Status = Ioctl((HANDLE)Socket, NULL, NULL, NULL, &Result.Io, Codes[i],
+                       &Request, sizeof(Request) - 1, NULL, 0);
+        CHECK(Status == STATUS_BUFFER_TOO_SMALL);
+        Request.BufferCount = 0;
+        Status = Ioctl((HANDLE)Socket, NULL, NULL, NULL, &Result.Io, Codes[i],
+                       &Request, sizeof(Request), NULL, 0);
+        CHECK(Status == STATUS_INVALID_PARAMETER);
+        /* Native WSABUF bytes fit in ULONG, but AFD's appended map does not. */
+        Request.BufferCount = 0x08000000;
+        Status = Ioctl((HANDLE)Socket, NULL, NULL, NULL, &Result.Io, Codes[i],
+                       &Request, sizeof(Request), NULL, 0);
+        CHECK(Status == STATUS_INVALID_PARAMETER);
+        Request.BufferCount = 1;
+        Status = Ioctl((HANDLE)Socket, NULL, NULL, NULL, &Result.Io, Codes[i],
+                       &Request, sizeof(Request), NULL, 0);
+        CHECK(Status == STATUS_ACCESS_VIOLATION);
+        CHECK(Result.Guard == 0x12345678);
+    }
+}
+
+static void CheckPollReply(SOCKET Server, SOCKET Listener, SOCKET Client)
 {
     typedef NTSTATUS (NTAPI *IOCTL)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK, ULONG, PVOID, ULONG, PVOID, ULONG);
     typedef NTSTATUS (NTAPI *CANCEL)(HANDLE, PIO_STATUS_BLOCK);
@@ -201,6 +239,27 @@ static void CheckPollReply(SOCKET Server, SOCKET Listener)
     CHECK(Poll.Handles[0].Handle == Server && Poll.Handles[1].Handle == Listener);
     CHECK(Poll.Guard == 0xabcdef01 && Result.Guard == 0x12345678);
     if (Wow) CHECK(Poll.Exclusive == 1);
+
+    ResetEvent(Event);
+    Poll.Timeout.QuadPart = -100000000;
+    Poll.Exclusive = 1;
+    Poll.Handles[0].Events = AFD_EVENT_RECEIVE;
+    Poll.Handles[1].Events = AFD_EVENT_ACCEPT;
+    Status = Ioctl((HANDLE)Server, Event, NULL, NULL, &Result.Io, IOCTL_AFD_SELECT,
+                   &Poll, Length, &Poll, Length);
+    CHECK(Status == STATUS_PENDING && WaitForSingleObject(Event, 0) == WAIT_TIMEOUT);
+    CHECK(send(Client, "poll", 4, 0) == 4);
+    CHECK(WaitForSingleObject(Event, 2000) == WAIT_OBJECT_0);
+    CHECK(Result.Io.Status == STATUS_SUCCESS && Result.Io.Information == Length);
+    CHECK(Poll.Handles[0].Events == AFD_EVENT_RECEIVE && Poll.Handles[1].Events == 0);
+    CHECK(Poll.Handles[0].Handle == Server && Poll.Handles[1].Handle == Listener);
+    CHECK(Poll.Guard == 0xabcdef01 && Result.Guard == 0x12345678);
+    if (Wow) CHECK(Poll.Exclusive == 1);
+    {
+        char Text[4];
+        CHECK(recv(Server, Text, sizeof(Text), MSG_WAITALL) == sizeof(Text) &&
+              !memcmp(Text, "poll", sizeof(Text)));
+    }
 
     ResetEvent(Event);
     Poll.Timeout.QuadPart = -1000000000;
@@ -291,7 +350,8 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "--afd-abi"))
     {
         CheckHandleReply(Server, AFD_ADDRESS_HANDLE | AFD_CONNECTION_HANDLE);
-        CheckPollReply(Server, Listener);
+        CheckTransferCapture(Server);
+        CheckPollReply(Server, Listener, Client);
     }
     FD_ZERO(&Read);
     FD_SET(Server, &Read);
