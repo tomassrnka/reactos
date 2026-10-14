@@ -3247,7 +3247,11 @@ HandleTrayContextMenu:
         {
             HWND hwnd = g_MinimizedAll[i].hwnd;
             if (::IsWindowVisible(hwnd) && ::IsIconic(hwnd))
-                ::SetWindowPlacement(hwnd, &g_MinimizedAll[i].wndpl);
+            {
+                /* The windows were only minimized, so only their show state needs restoring; the
+                   asynchronous form never waits for the window's thread */
+                ::ShowWindowAsync(hwnd, g_MinimizedAll[i].wndpl.showCmd);
+            }
         }
 
         g_MinimizedAll.RemoveAll();
