@@ -460,6 +460,9 @@ public:
 
         SendMessage(m_DesktopWnd, WM_PROGMAN_SAVESTATE, 0, 0);
 
+        if (m_TrayBandSite)
+            m_TrayBandSite->Save();
+
         if (SHRestricted(REST_CLEARRECENTDOCSONEXIT))
             ClearRecentAndMru();
     }

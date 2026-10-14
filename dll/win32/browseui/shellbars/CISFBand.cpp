@@ -378,17 +378,62 @@ STDMETHODIMP CISFBand::IsDirty()
     return S_FALSE;
 }
 
+/* The persisted band: a version, the toolbar options and the folder it shows */
+#define ISFBAND_STREAM_VERSION  1
+#define ISFBAND_QLAUNCH         0x1
+#define ISFBAND_SHOWTEXT        0x2
+#define ISFBAND_SMALLICON       0x4
+
 STDMETHODIMP CISFBand::Load(IN IStream *pStm)
 {
-    TRACE("CISFBand::Load called\n");
-    /* Nothing to do */
+    DWORD header[2];
+    ULONG cbRead;
+    CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidl;
+
+    HRESULT hr = pStm->Read(header, sizeof(header), &cbRead);
+    if (FAILED(hr))
+        return hr;
+    if (cbRead != sizeof(header) || header[0] != ISFBAND_STREAM_VERSION)
+        return E_FAIL;
+
+    hr = ILLoadFromStream(pStm, (PIDLIST_RELATIVE *)&pidl);
+    if (FAILED(hr))
+        return hr;
+    if (!pidl)
+        return E_FAIL;
+
+    hr = InitializeSFB(NULL, pidl);
+    if (FAILED(hr))
+        return hr;
+
+    m_QLaunch = !!(header[1] & ISFBAND_QLAUNCH);
+    m_bShowText = !!(header[1] & ISFBAND_SHOWTEXT);
+    m_bSmallIcon = !!(header[1] & ISFBAND_SMALLICON);
     return S_OK;
 }
 
 STDMETHODIMP CISFBand::Save(IN IStream *pStm, IN BOOL fClearDirty)
 {
-    /* Nothing to do */
-    return S_OK;
+    DWORD header[2] = { ISFBAND_STREAM_VERSION, 0 };
+    ULONG cbWritten;
+
+    if (!m_pidl)
+        return E_FAIL;
+
+    if (m_QLaunch)
+        header[1] |= ISFBAND_QLAUNCH;
+    if (m_bShowText)
+        header[1] |= ISFBAND_SHOWTEXT;
+    if (m_bSmallIcon)
+        header[1] |= ISFBAND_SMALLICON;
+
+    HRESULT hr = pStm->Write(header, sizeof(header), &cbWritten);
+    if (FAILED(hr))
+        return hr;
+    if (cbWritten != sizeof(header))
+        return E_FAIL;
+
+    return ILSaveToStream(pStm, m_pidl);
 }
 
 STDMETHODIMP CISFBand::GetSizeMax(OUT ULARGE_INTEGER *pcbSize)

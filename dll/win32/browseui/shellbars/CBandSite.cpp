@@ -62,6 +62,28 @@ struct CBandSiteBase::BandObject *CBandSiteBase::_GetBandByID(DWORD dwBandID)
     return &m_bands[dwBandID];
 }
 
+struct CBandSiteBase::BandObject *CBandSiteBase::_GetBandByObject(IUnknown *punk)
+{
+    CComPtr<IUnknown> pIdentity;
+
+    if (FAILED(punk->QueryInterface(IID_PPV_ARG(IUnknown, &pIdentity))))
+        return NULL;
+
+    for (LONG i = 0; i < m_cBandsAllocated; i++)
+    {
+        CComPtr<IUnknown> pBandIdentity;
+
+        if (m_bands[i].DeskBand != NULL &&
+            SUCCEEDED(m_bands[i].DeskBand->QueryInterface(IID_PPV_ARG(IUnknown, &pBandIdentity))) &&
+            pBandIdentity == pIdentity)
+        {
+            return &m_bands[i];
+        }
+    }
+
+    return NULL;
+}
+
 void CBandSiteBase::_FreeBand(struct BandObject *Band)
 {
     ATLASSERT(Band->DeskBand != NULL);
@@ -158,6 +180,20 @@ VOID CBandSiteBase::_BuildBandInfo(struct BandObject *Band, REBARBANDINFOW *prbi
     {
         prbi->fMask |= RBBIM_STYLE;
         prbi->fStyle |= RBBS_HIDETITLE;
+    }
+
+    if (Band->bBreak)
+    {
+        prbi->fMask |= RBBIM_STYLE;
+        prbi->fStyle |= RBBS_BREAK;
+    }
+
+    /* The width the band had when it was saved: the rebar has none to give yet while the
+       shell starts, and would hand all the room to the first band */
+    if (Band->cxSaved > 0)
+    {
+        prbi->fMask |= RBBIM_SIZE;
+        prbi->cx = Band->cxSaved;
     }
 
     if ((Band->dbi.dwMask & (DBIM_BKCOLOR | DBIM_MODEFLAGS)) == (DBIM_BKCOLOR | DBIM_MODEFLAGS) &&
@@ -345,7 +381,13 @@ HRESULT CBandSiteBase::_OnContextMenu(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         }
         else if(uCommand == IDM_BAND_CLOSE)
         {
-            hr = RemoveBand(dwBandID);
+            /* Use QueryInterface so that the owner of the site sees the change */
+            CComPtr<IBandSite> pbs;
+            hr = this->QueryInterface(IID_PPV_ARG(IBandSite, &pbs));
+            if (FAILED_UNEXPECTEDLY(hr))
+                return hr;
+
+            hr = pbs->RemoveBand(dwBandID);
             if (FAILED_UNEXPECTEDLY(hr))
                 return hr;
         }
@@ -737,6 +779,13 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::OnWinEvent(HWND hWnd, UINT uMsg, WPARAM
         }
         else
         {
+            if (pnmhdr->code == RBN_LAYOUTCHANGED)
+            {
+                /* The user resized or moved a band, the widths saved earlier are obsolete */
+                for (int i = 0; i < m_cBandsAllocated; i++)
+                    m_bands[i].cxSaved = 0;
+            }
+
             for (int i = 0; i < m_cBandsAllocated; i++)
             {
                 if (m_bands[i].WndEvtHandler && m_bands[i].OleWindow)
@@ -952,24 +1001,225 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::QueryService(REFGUID guidService, REFII
     return E_NOTIMPL;
 }
 
+/* The persisted band site: a header, then one length-prefixed entry for every band that can be
+ * saved. An entry holds the placement of the band in the rebar and the band itself in the form
+ * of OleSaveToStream, written and read through the IBandSiteHelper of the owner of the site. */
+#define BANDSITE_STREAM_MAGIC   0x53425242
+#define BANDSITE_STREAM_VERSION 1
+#define BANDSITE_STREAM_MAXBANDS 64
+#define BSE_HIDDENTITLE         0x1
+#define BSE_BREAK               0x2
+
+struct BANDSITE_STREAM_HEADER
+{
+    DWORD dwMagic;
+    DWORD dwVersion;
+    DWORD cBands;
+};
+
+struct BANDSITE_STREAM_ENTRY
+{
+    DWORD cbEntry; /* bytes that follow this member */
+    DWORD dwFlags;
+    DWORD cx;
+};
+
+static HRESULT _StreamTell(IStream *pStm, ULARGE_INTEGER *puli)
+{
+    LARGE_INTEGER liZero;
+    liZero.QuadPart = 0;
+    return pStm->Seek(liZero, STREAM_SEEK_CUR, puli);
+}
+
+static HRESULT _StreamSeek(IStream *pStm, ULONGLONG ullPos)
+{
+    LARGE_INTEGER li;
+    li.QuadPart = (LONGLONG)ullPos;
+    return pStm->Seek(li, STREAM_SEEK_SET, NULL);
+}
+
 HRESULT STDMETHODCALLTYPE CBandSiteBase::GetClassID(CLSID *pClassID)
 {
-    return E_NOTIMPL;
+    if (pClassID == NULL)
+        return E_POINTER;
+
+    *pClassID = CLSID_RebarBandSite;
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CBandSiteBase::IsDirty()
 {
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CBandSiteBase::Load(IStream *pStm)
 {
-    return E_NOTIMPL;
+    BANDSITE_STREAM_HEADER header;
+    CComPtr<IBandSite> pSite;
+    CComPtr<IBandSiteHelper> pHelper;
+    DWORD ids[BANDSITE_STREAM_MAXBANDS];
+    DWORD cLoaded = 0;
+    ULONG cbRead;
+    HRESULT hr;
+
+    if (pStm == NULL || m_hwndRebar == NULL)
+        return E_FAIL;
+
+    hr = pStm->Read(&header, sizeof(header), &cbRead);
+    if (FAILED(hr) || cbRead != sizeof(header) ||
+        header.dwMagic != BANDSITE_STREAM_MAGIC || header.dwVersion != BANDSITE_STREAM_VERSION ||
+        header.cBands > BANDSITE_STREAM_MAXBANDS)
+    {
+        return E_FAIL;
+    }
+
+    /* Use QueryInterface so that we get the outer object in case we have one */
+    hr = this->QueryInterface(IID_PPV_ARG(IBandSite, &pSite));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+    hr = this->QueryInterface(IID_PPV_ARG(IBandSiteHelper, &pHelper));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+
+    for (DWORD i = 0; i < header.cBands; i++)
+    {
+        BANDSITE_STREAM_ENTRY entry;
+        ULARGE_INTEGER uliStart;
+        CComPtr<IUnknown> punk;
+
+        if (FAILED(_StreamTell(pStm, &uliStart)))
+            break;
+        hr = pStm->Read(&entry, sizeof(entry), &cbRead);
+        if (FAILED(hr) || cbRead != sizeof(entry) || entry.cbEntry < sizeof(entry) - sizeof(entry.cbEntry))
+            break;
+
+        hr = pHelper->LoadFromStreamBS(pStm, IID_IUnknown, (void **)&punk);
+
+        /* The next entry follows this one whatever the band consumed or whether it loaded */
+        if (FAILED(_StreamSeek(pStm, uliStart.QuadPart + sizeof(entry.cbEntry) + entry.cbEntry)))
+            break;
+
+        if (FAILED(hr) || FAILED(pSite->AddBand(punk)))
+        {
+            WARN("Skipping band %u of the band site stream: %x\n", i, hr);
+            continue;
+        }
+
+        struct BandObject *Band = _GetBandByObject(punk);
+        if (Band != NULL)
+        {
+            Band->bHiddenTitle = !!(entry.dwFlags & BSE_HIDDENTITLE);
+            Band->bBreak = !!(entry.dwFlags & BSE_BREAK);
+            Band->cxSaved = (LONG)entry.cx;
+            ids[cLoaded++] = _GetBandID(Band);
+        }
+    }
+
+    if (cLoaded == 0 && header.cBands != 0)
+        return E_FAIL;
+
+    /* Restore the order of the bands, the rebar was filled in the order of the stream and
+       the bands that ask to be added to the front moved */
+    for (DWORD i = 0; i < cLoaded; i++)
+    {
+        UINT uIndex = (UINT)SendMessageW(m_hwndRebar, RB_IDTOINDEX, ids[i], 0);
+        if (uIndex != (UINT)-1 && uIndex != i)
+            SendMessageW(m_hwndRebar, RB_MOVEBAND, uIndex, i);
+    }
+
+    _UpdateAllBands();
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CBandSiteBase::Save(IStream *pStm, BOOL fClearDirty)
 {
-    return E_NOTIMPL;
+    BANDSITE_STREAM_HEADER header = { BANDSITE_STREAM_MAGIC, BANDSITE_STREAM_VERSION, 0 };
+    CComPtr<IBandSiteHelper> pHelper;
+    ULARGE_INTEGER uliStart, uliEnd;
+    ULONG cbWritten;
+    HRESULT hr;
+
+    if (pStm == NULL || m_hwndRebar == NULL)
+        return E_FAIL;
+
+    hr = this->QueryInterface(IID_PPV_ARG(IBandSiteHelper, &pHelper));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+
+    hr = _StreamTell(pStm, &uliStart);
+    if (FAILED(hr))
+        return hr;
+    hr = pStm->Write(&header, sizeof(header), &cbWritten);
+    if (FAILED(hr) || cbWritten != sizeof(header))
+        return FAILED(hr) ? hr : E_FAIL;
+
+    UINT cRebarBands = (UINT)SendMessageW(m_hwndRebar, RB_GETBANDCOUNT, 0, 0);
+    for (UINT i = 0; i < cRebarBands && header.cBands < BANDSITE_STREAM_MAXBANDS; i++)
+    {
+        REBARBANDINFOW rbi = { sizeof(rbi), RBBIM_ID | RBBIM_STYLE };
+        BANDSITE_STREAM_ENTRY entry = { 0, 0, 0 };
+        RECT rcBand = { 0 };
+        ULARGE_INTEGER uliEntry, uliEntryEnd;
+        CComPtr<IPersistStream> pPersist;
+
+        if (!SendMessageW(m_hwndRebar, RB_GETBANDINFOW, i, (LPARAM)&rbi))
+            continue;
+
+        struct BandObject *Band = _GetBandByID(rbi.wID);
+        if (Band == NULL || FAILED(Band->DeskBand->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist))))
+            continue;
+
+        if (SendMessageW(m_hwndRebar, RB_GETRECT, i, (LPARAM)&rcBand))
+            entry.cx = (_GetViewMode() == DBIF_VIEWMODE_VERTICAL) ? (rcBand.bottom - rcBand.top) : (rcBand.right - rcBand.left);
+
+        if (Band->bHiddenTitle)
+            entry.dwFlags |= BSE_HIDDENTITLE;
+        if (rbi.fStyle & RBBS_BREAK)
+            entry.dwFlags |= BSE_BREAK;
+        Band->bBreak = !!(rbi.fStyle & RBBS_BREAK);
+
+        if (FAILED(_StreamTell(pStm, &uliEntry)))
+            return E_FAIL;
+        hr = pStm->Write(&entry, sizeof(entry), &cbWritten);
+        if (FAILED(hr) || cbWritten != sizeof(entry))
+            return FAILED(hr) ? hr : E_FAIL;
+
+        hr = pHelper->SaveToStreamBS(Band->DeskBand, pStm);
+        if (FAILED(hr))
+        {
+            /* Leave this band out */
+            WARN("Cannot save band %u: %x\n", i, hr);
+            if (FAILED(_StreamSeek(pStm, uliEntry.QuadPart)))
+                return E_FAIL;
+            continue;
+        }
+
+        if (FAILED(_StreamTell(pStm, &uliEntryEnd)))
+            return E_FAIL;
+        entry.cbEntry = (DWORD)(uliEntryEnd.QuadPart - uliEntry.QuadPart - sizeof(entry.cbEntry));
+        if (FAILED(_StreamSeek(pStm, uliEntry.QuadPart)) ||
+            FAILED(pStm->Write(&entry, sizeof(entry), &cbWritten)) || cbWritten != sizeof(entry) ||
+            FAILED(_StreamSeek(pStm, uliEntryEnd.QuadPart)))
+        {
+            return E_FAIL;
+        }
+
+        header.cBands++;
+    }
+
+    hr = _StreamTell(pStm, &uliEnd);
+    if (FAILED(hr))
+        return hr;
+    if (FAILED(_StreamSeek(pStm, uliStart.QuadPart)) ||
+        FAILED(pStm->Write(&header, sizeof(header), &cbWritten)) || cbWritten != sizeof(header) ||
+        FAILED(_StreamSeek(pStm, uliEnd.QuadPart)))
+    {
+        return E_FAIL;
+    }
+
+    /* Drop what an earlier, longer save left behind */
+    pStm->SetSize(uliEnd);
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CBandSiteBase::GetSizeMax(ULARGE_INTEGER *pcbSize)
@@ -998,14 +1248,20 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Drop(IDataObject *pDataObj, DWORD grfKe
     return E_NOTIMPL;
 }
 
-HRESULT STDMETHODCALLTYPE CBandSiteBase::LoadFromStreamBS(IStream *, const GUID &, void **)
+HRESULT STDMETHODCALLTYPE CBandSiteBase::LoadFromStreamBS(IStream *pStm, const GUID &riid, void **ppv)
 {
-    return E_NOTIMPL;
+    return OleLoadFromStream(pStm, riid, ppv);
 }
 
-HRESULT STDMETHODCALLTYPE CBandSiteBase::SaveToStreamBS(IUnknown *, IStream *)
+HRESULT STDMETHODCALLTYPE CBandSiteBase::SaveToStreamBS(IUnknown *punk, IStream *pStm)
 {
-    return E_NOTIMPL;
+    CComPtr<IPersistStream> pPersist;
+
+    HRESULT hr = punk->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
+    if (FAILED(hr))
+        return hr;
+
+    return OleSaveToStream(pPersist, pStm);
 }
 
 extern "C"
