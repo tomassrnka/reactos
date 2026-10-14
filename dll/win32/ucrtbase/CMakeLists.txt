@@ -14,14 +14,52 @@ add_compile_definitions(
 )
 
 add_library(ucrtbase SHARED
+    math_c99.c
     printf.c
     stubs.c
     ucrtbase_stubs.c
     ucrtbase.def
+    musl/acosh.c
+    musl/acoshf.c
+    musl/asinh.c
+    musl/asinhf.c
+    musl/atanh.c
+    musl/atanhf.c
+    musl/cbrt.c
+    musl/cbrtf.c
+    musl/copysign.c
+    musl/copysignf.c
+    musl/erf.c
+    musl/erff.c
+    musl/expm1.c
+    musl/expm1f.c
+    musl/fdim.c
+    musl/fdimf.c
+    musl/fmax.c
+    musl/fmaxf.c
+    musl/fmin.c
+    musl/fminf.c
+    musl/ilogb.c
+    musl/ilogbf.c
+    musl/log1p.c
+    musl/log1pf.c
+    musl/nan.c
+    musl/nanf.c
+    musl/remainder.c
+    musl/remainderf.c
+    musl/remquo.c
+    musl/remquof.c
 )
+
+if(NOT ARCH STREQUAL "i386")
+    # The musl modff keeps the sign of a zero fraction, the one of the SSE library does not
+    target_sources(ucrtbase PRIVATE musl/rint.c musl/rintf.c musl/modff.c)
+endif()
 
 if(NOT MSVC)
     target_compile_options(ucrtbase PRIVATE -Wno-builtin-declaration-mismatch)
+    # GCC would replace the calls of rint by code that only rounds to nearest
+    set_source_files_properties(math_c99.c PROPERTIES COMPILE_OPTIONS "-fno-builtin-rint;-fno-builtin-rintf")
 endif()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "Clang")

@@ -21,6 +21,7 @@ extern void func_sqrt(void);
 extern void func_system(void);
 extern void func_tan(void);
 extern void func_wctomb(void);
+extern void func_c99_math(void);
 
 
 const struct test winetest_testlist[] =
@@ -43,6 +44,7 @@ const struct test winetest_testlist[] =
     { "system", func_system },
     { "tan", func_tan },
     { "wctomb", func_wctomb },
+    { "c99_math", func_c99_math },
 
     { 0, 0 }
 };
