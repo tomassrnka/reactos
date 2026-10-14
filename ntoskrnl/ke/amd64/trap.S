@@ -974,18 +974,9 @@ PUBLIC KiSystemCallEntry64
     mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegGs], gs
     mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegCs], (KGDT64_R3_CODE or RPL_MASK)
     mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegSs], (KGDT64_R3_DATA or RPL_MASK)
-    mov rax, dr0
-    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr0], rax
-    mov rax, dr1
-    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr1], rax
-    mov rax, dr2
-    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr2], rax
-    mov rax, dr3
-    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr3], rax
-    mov rax, dr6
-    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr6], rax
-    mov rax, dr7
-    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr7], rax
+    /* Debug registers are maintained in the base trap frame by the context
+     * APIs. Until amd64 loads them into hardware, reading DRs here would
+     * overwrite that user state with the kernel's hardware debug state. */
 
     mov byte ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_PreviousIrql], PASSIVE_LEVEL
 
