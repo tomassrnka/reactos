@@ -8,6 +8,13 @@
 
 #ifdef _M_IX86
 static volatile LONG Handled;
+
+static VOID SendCommand(ULONG Code)
+{
+    DWORD Error = KmtSendToDriver(Code);
+    ok_eq_ulong(Error, ERROR_SUCCESS);
+}
+
 VOID __cdecl CaptureTrapContext(PCONTEXT Context);
 
 static LONG CALLBACK
@@ -17,7 +24,7 @@ ExceptionHandler(PEXCEPTION_POINTERS Pointers)
         return EXCEPTION_CONTINUE_SEARCH;
     /* Observe NtRaiseException's unlink before the dispatcher calls NtContinue. */
     trace("Checking link in NtRaiseException handler\n");
-    ok_eq_ulong(KmtSendToDriver(2), ERROR_SUCCESS);
+    SendCommand(2);
     ++Handled;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -30,7 +37,7 @@ TestContextService(BOOLEAN Raise)
     volatile LONG Resumed = 0;
     NTSTATUS Status;
 
-    ok_eq_ulong(KmtSendToDriver(1), ERROR_SUCCESS);
+    SendCommand(1);
     CaptureTrapContext(&Context);
     if (!Resumed)
     {
@@ -48,7 +55,7 @@ TestContextService(BOOLEAN Raise)
         ok(FALSE, "Context service returned %lx\n", Status);
     }
     trace("Checking link after %s\n", Raise ? "NtRaiseException" : "NtContinue");
-    ok_eq_ulong(KmtSendToDriver(2), ERROR_SUCCESS);
+    SendCommand(2);
 }
 #endif
 
