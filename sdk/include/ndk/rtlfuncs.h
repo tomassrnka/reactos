@@ -5217,6 +5217,24 @@ BOOLEAN
 NTAPI
 RtlTryAcquireSRWLockExclusive(PRTL_SRWLOCK SRWLock);
 
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryPerformanceCounter(
+    _Out_ PLARGE_INTEGER PerformanceCounter);
+
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryPerformanceFrequency(
+    _Out_ PLARGE_INTEGER PerformanceFrequency);
+
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryUnbiasedInterruptTime(
+    _Out_ PULONGLONG UnbiasedTime);
+
 #endif /* Win7 or ReactOS Ntdll build */
 
 #endif // NTOS_MODE_USER

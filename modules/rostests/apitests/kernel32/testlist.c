@@ -59,6 +59,7 @@ extern void func_PowerRequest(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
 extern void func_QueryCycleTime(void);
+extern void func_QueryUnbiasedInterruptTime(void);
 extern void func_QueueUserAPC(void);
 extern void func_RaiseFailFastException(void);
 extern void func_RegisterWait(void);
@@ -138,6 +139,7 @@ const struct test winetest_testlist[] =
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
     { "ProcessAffinity",             func_ProcessAffinity },
     { "QueryCycleTime",              func_QueryCycleTime },
+    { "QueryUnbiasedInterruptTime",  func_QueryUnbiasedInterruptTime },
     { "QueueUserAPC",                func_QueueUserAPC },
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "RegisterWait",                func_RegisterWait },

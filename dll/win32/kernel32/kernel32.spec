@@ -922,6 +922,7 @@
 @ stub -version=0x600+ QueryProcessAffinityUpdateMode
 @ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
 @ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
+@ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
 @ stdcall QueueUserAPC(ptr long long)
 @ stdcall QueueUserWorkItem(ptr ptr long)
 @ stdcall -norelay RaiseException(long long long ptr)

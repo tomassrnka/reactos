@@ -61,6 +61,7 @@ list(APPEND SOURCE
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
     QueryCycleTime.c
+    QueryUnbiasedInterruptTime.c
     QueueUserAPC.c
     RaiseFailFastException.c
     ReadFile.c

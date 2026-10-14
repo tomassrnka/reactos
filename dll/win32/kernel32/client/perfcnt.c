@@ -60,3 +60,38 @@ QueryPerformanceFrequency(OUT PLARGE_INTEGER lpFrequency)
 }
 
 /* EOF */
+
+/*
+ * @implemented
+ *
+ * Windows 7 implements this in kernel32 (ntdll exports RtlQueryUnbiasedInterruptTime from Windows 8 on).
+ */
+BOOL
+WINAPI
+QueryUnbiasedInterruptTime(
+    _Out_ PULONGLONG UnbiasedTime)
+{
+    LARGE_INTEGER InterruptTime;
+    ULONGLONG Bias = 0;
+
+    if (!UnbiasedTime)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    /* The bias is the time spent in sleep and hibernation; it must not change while the time is read */
+    do
+    {
+        Bias = SharedUserData->InterruptTimeBias;
+        InterruptTime = KiReadSystemTime(&SharedUserData->InterruptTime);
+    } while (Bias != SharedUserData->InterruptTimeBias);
+#else
+    /* Shared user data of this NT version has no bias: the kernel does not take time spent asleep out */
+    InterruptTime = KiReadSystemTime(&SharedUserData->InterruptTime);
+#endif
+
+    *UnbiasedTime = InterruptTime.QuadPart - Bias;
+    return TRUE;
+}

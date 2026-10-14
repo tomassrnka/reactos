@@ -151,6 +151,7 @@ list(APPEND SOURCE
     RtlQueryEnvironmentVariable.c
     RtlQueryEnvironmentVariable_U.c
     RtlQueryRegistryValues.c
+    RtlQueryPerformanceCounter.c
     RtlQueryTimeZoneInfo.c
     RtlSetTimeZoneInformation.c
     RtlReAllocateHeap.c
