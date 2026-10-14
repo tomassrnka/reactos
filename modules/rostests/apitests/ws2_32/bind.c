@@ -6,6 +6,7 @@
  */
 
 #include "ws2_32.h"
+#include <mswsock.h>
 
 static CHAR LocalAddress[sizeof("255.255.255.255")];
 #define PORT 58888
@@ -127,6 +128,68 @@ TestBind(IN_ADDR Address)
     ok(Error == 0, "Unexpected error %d %d on closesocket for broadcast test\n", Error, WSAGetLastError());
 }
 
+/* The local port of a socket closed a moment ago is not the next socket's
+ * port, so a connect to the closed port is refused instead of connecting the
+ * new socket to itself (Windows Server 2008 R2 and Windows 10: refused after
+ * 1-2 s). ReactOS handed out the lowest free port again, and the ConnectEx
+ * never completed */
+static
+void
+TestEphemeralReuse(int Type)
+{
+    GUID Guid = WSAID_CONNECTEX;
+    LPFN_CONNECTEX pConnectEx = NULL;
+    SOCKET First, Second;
+    struct sockaddr_in Addr, Closed;
+    OVERLAPPED Overlapped;
+    DWORD Bytes = 0, Flags;
+    int Len, Error;
+    BOOL Ret;
+
+    ZeroMemory(&Addr, sizeof(Addr));
+    Addr.sin_family = AF_INET;
+    Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    First = socket(AF_INET, Type, 0);
+    ok(First != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+    ok(bind(First, (struct sockaddr *)&Addr, sizeof(Addr)) == 0, "bind failed: %d\n", WSAGetLastError());
+    if (Type == SOCK_STREAM)
+        ok(listen(First, 1) == 0, "listen failed: %d\n", WSAGetLastError());
+    Len = sizeof(Closed);
+    ok(getsockname(First, (struct sockaddr *)&Closed, &Len) == 0, "getsockname failed: %d\n", WSAGetLastError());
+    closesocket(First);
+
+    Second = socket(AF_INET, Type, 0);
+    ok(Second != INVALID_SOCKET, "socket failed: %d\n", WSAGetLastError());
+    ok(bind(Second, (struct sockaddr *)&Addr, sizeof(Addr)) == 0, "bind failed: %d\n", WSAGetLastError());
+    Len = sizeof(Addr);
+    ok(getsockname(Second, (struct sockaddr *)&Addr, &Len) == 0, "getsockname failed: %d\n", WSAGetLastError());
+    ok(Addr.sin_port != Closed.sin_port, "%s: the new socket got the closed socket's port %u\n",
+       Type == SOCK_STREAM ? "TCP" : "UDP", ntohs(Addr.sin_port));
+
+    if (Type == SOCK_STREAM &&
+        WSAIoctl(Second, SIO_GET_EXTENSION_FUNCTION_POINTER, &Guid, sizeof(Guid),
+                 &pConnectEx, sizeof(pConnectEx), &Bytes, NULL, NULL) == 0)
+    {
+        ZeroMemory(&Overlapped, sizeof(Overlapped));
+        Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+        Ret = pConnectEx(Second, (struct sockaddr *)&Closed, sizeof(Closed), NULL, 0, NULL, &Overlapped);
+        Error = Ret ? 0 : WSAGetLastError();
+        if (Error == ERROR_IO_PENDING)
+        {
+            ok(WaitForSingleObject(Overlapped.hEvent, 10000) == WAIT_OBJECT_0, "ConnectEx to the closed port did not complete\n");
+            Error = WSAGetOverlappedResult(Second, &Overlapped, &Bytes, FALSE, &Flags) ? 0 : WSAGetLastError();
+        }
+        ok(Error == WSAECONNREFUSED, "ConnectEx to the closed port: error %d\n", Error);
+        closesocket(Second);
+        WaitForSingleObject(Overlapped.hEvent, 3000);
+        CloseHandle(Overlapped.hEvent);
+    }
+    else
+    {
+        closesocket(Second);
+    }
+}
+
 START_TEST(bind)
 {
     WSADATA WsaData;
@@ -221,6 +284,8 @@ START_TEST(bind)
     EndSeh(STATUS_SUCCESS);
 
     TestBind(Address);
+    TestEphemeralReuse(SOCK_STREAM);
+    TestEphemeralReuse(SOCK_DGRAM);
     /* TODO: test IPv6 */
 
     Error = WSACleanup();
