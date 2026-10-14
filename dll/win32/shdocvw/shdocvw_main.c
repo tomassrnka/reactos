@@ -589,15 +589,6 @@ void WINAPI InstallReg_RunDLL(HWND hwnd, HINSTANCE handle, LPCSTR cmdline, INT s
 }
 
 /******************************************************************
- * DoFileDownload (SHDOCVW.@)
- */
-BOOL WINAPI DoFileDownload(LPWSTR filename)
-{
-    FIXME("(%s) stub\n", debugstr_w(filename));
-    return FALSE;
-}
-
-/******************************************************************
  * DoOrganizeFavDlgW (SHDOCVW.@)
  */
 BOOL WINAPI DoOrganizeFavDlgW(HWND hwnd, LPCWSTR initDir)
