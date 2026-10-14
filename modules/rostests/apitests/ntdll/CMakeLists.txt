@@ -2,6 +2,7 @@
 add_subdirectory(load_notifications)
 add_subdirectory(empty_dll)
 add_subdirectory(crtkeydtor)
+add_subdirectory(apiset_win10)
 
 include_directories($<TARGET_FILE_DIR:load_notifications>)
 include_directories($<TARGET_FILE_DIR:empty_dll>)

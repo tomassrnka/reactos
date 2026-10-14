@@ -40,7 +40,8 @@ list(APPEND SOURCE
     ldr/ldrutils.c
     ldr/verifier.c
     rtl/apisetquery.c
-    rtl/strcpy_s.c)
+    rtl/strcpy_s.c
+    rtl/utf8.c)
 
 if(ARCH STREQUAL "i386")
     list(APPEND ASM_SOURCE dispatch/i386/dispatch.S)

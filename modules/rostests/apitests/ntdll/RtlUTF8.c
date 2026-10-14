@@ -140,4 +140,54 @@ START_TEST(RtlUTF8)
             ok(SizeOnly == Cases[i].Count * sizeof(WCHAR), "%lu: size query %lu\n", i, SizeOnly);
         }
     }
+
+    /*
+     * ReactOS also has the function in ntdll_vista (the export of Windows Vista) and in the kernel, and the callers
+     * inside ntdll use it: they are kept as they were, so for input that is not UTF-8 they answer differently from
+     * the export of ntdll that this test measured on Windows 10.
+     */
+    if (is_reactos())
+    {
+        HMODULE Vista = LoadLibraryW(L"ntdll_vista.dll");
+        PFN_UTF8ToUnicodeN pOld = Vista ? (PFN_UTF8ToUnicodeN)GetProcAddress(Vista, "RtlUTF8ToUnicodeN") : NULL;
+        static const struct
+        {
+            UCHAR Bytes[4];
+            ULONG Length;
+            ULONG OldCount;
+            WCHAR Old[4];
+            ULONG NewCount;
+            WCHAR New[4];
+        } Differing[] =
+        {
+            { { 0xf0, 0x80, 0x80, 0x41 }, 4, 2, { 0xfffd, 0x41 }, 3, { 0xfffd, 0xfffd, 0x41 } },
+            { { 0xe2, 0x41 },             2, 1, { 0xfffd },       2, { 0xfffd, 0x41 } },
+        };
+
+        if (!pOld)
+        {
+            skip("ntdll_vista.dll has no RtlUTF8ToUnicodeN\n");
+        }
+        else
+        {
+            for (i = 0; i < RTL_NUMBER_OF(Differing); i++)
+            {
+                memset(Wide, 0x55, sizeof(Wide));
+                BytesOut = 0;
+                Status = pOld(Wide, sizeof(Wide), &BytesOut, (const CHAR *)Differing[i].Bytes, Differing[i].Length);
+                ok(Status == STATUS_SOME_NOT_MAPPED, "old %lu: status %#lx\n", i, Status);
+                ok(BytesOut == Differing[i].OldCount * sizeof(WCHAR), "old %lu: got %lu bytes\n", i, BytesOut);
+                ok(!memcmp(Wide, Differing[i].Old, Differing[i].OldCount * sizeof(WCHAR)), "old %lu: bad conversion\n", i);
+
+                memset(Wide, 0x55, sizeof(Wide));
+                BytesOut = 0;
+                Status = pRtlUTF8ToUnicodeN(Wide, sizeof(Wide), &BytesOut, (const CHAR *)Differing[i].Bytes, Differing[i].Length);
+                ok(Status == STATUS_SOME_NOT_MAPPED, "new %lu: status %#lx\n", i, Status);
+                ok(BytesOut == Differing[i].NewCount * sizeof(WCHAR), "new %lu: got %lu bytes\n", i, BytesOut);
+                ok(!memcmp(Wide, Differing[i].New, Differing[i].NewCount * sizeof(WCHAR)), "new %lu: bad conversion\n", i);
+            }
+        }
+        if (Vista)
+            FreeLibrary(Vista);
+    }
 }

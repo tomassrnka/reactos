@@ -1259,7 +1259,7 @@
 @ stdcall RtlUpdateTimer(ptr ptr long long)
 @ stdcall RtlUpperChar(long)
 @ stdcall RtlUpperString(ptr ptr)
-@ stdcall -version=0x601+ RtlUTF8ToUnicodeN(ptr long ptr ptr long)
+@ stdcall -version=0x601+ RtlUTF8ToUnicodeN(ptr long ptr ptr long) RtlpUTF8ToUnicodeNWindows
 @ stdcall -version=0x502 RtlUsageHeap(ptr long ptr)
 @ stdcall -stub -version=0x600+ RtlUserThreadStart(long long)
 @ stdcall RtlValidAcl(ptr)

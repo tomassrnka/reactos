@@ -10,9 +10,11 @@
  *
  * The first function answers for a contract family: it ignores the extension of a file and the minor version of
  * the name, and never fails. The extended one needs a name that starts like a contract and has no extension, and
- * knows the contract by its name or by a newer revision of its family; it fails with an invalid parameter and leaves the answers alone otherwise. A contract
- * that the schema of Windows lists without a module is not in the table here, so it is not reported as in the
- * schema.
+ * knows the contract by the name that the loader resolves; it fails with an invalid parameter and leaves the
+ * answers alone otherwise. Windows 10 also knows the older revisions of a family that its schema lists by the
+ * newest one; the loader here resolves exact names only, and a contract that is reported must be one that can be
+ * loaded, so those older revisions are reported only where the loader's table has them. A contract that the schema
+ * of Windows lists without a module is not in the table here, so it is not reported as in the schema.
  */
 
 #include <ntdll.h>
@@ -55,54 +57,6 @@ StartsLikeContract(
            (!_wcsnicmp(Name->Buffer, L"api-", 4) || !_wcsnicmp(Name->Buffer, L"ext-", 4));
 }
 
-/*
- * The schema of a version of Windows lists the newest revision of a contract (the table here too), and the older
- * revisions of the family are known as well; a revision that is newer than the listed one is not.
- */
-static
-BOOLEAN
-IsKnownContractOrNewer(
-    _In_ PCUNICODE_STRING Name)
-{
-    WCHAR Buffer[MAX_CONTRACT_CHARS];
-    UNICODE_STRING Newer;
-    ULONG Chars = Name->Length / sizeof(WCHAR), Family, Minor = 0, Digit, Revision;
-
-    if (IsKnownContract(Name))
-        return TRUE;
-
-    if (Chars >= RTL_NUMBER_OF(Buffer) - 4)
-        return FALSE;
-
-    for (Family = Chars; Family > 0 && Name->Buffer[Family - 1] != L'-'; Family--)
-        ;
-    if (Family == 0 || Family == Chars || Chars - Family > 2)
-        return FALSE;
-    for (Digit = Family; Digit < Chars; Digit++)
-    {
-        if (Name->Buffer[Digit] < L'0' || Name->Buffer[Digit] > L'9')
-            return FALSE;
-        Minor = Minor * 10 + (Name->Buffer[Digit] - L'0');
-    }
-
-    RtlCopyMemory(Buffer, Name->Buffer, Family * sizeof(WCHAR));
-    for (Revision = Minor + 1; Revision <= MAX_MINOR_VERSION; Revision++)
-    {
-        ULONG Length = Family;
-
-        if (Revision >= 10)
-            Buffer[Length++] = L'0' + (WCHAR)(Revision / 10);
-        Buffer[Length++] = L'0' + (WCHAR)(Revision % 10);
-
-        Newer.Buffer = Buffer;
-        Newer.Length = Newer.MaximumLength = (USHORT)(Length * sizeof(WCHAR));
-        if (IsKnownContract(&Newer))
-            return TRUE;
-    }
-
-    return FALSE;
-}
-
 NTSTATUS
 NTAPI
 ApiSetQueryApiSetPresenceEx(
@@ -122,7 +76,7 @@ ApiSetQueryApiSetPresenceEx(
             return STATUS_INVALID_PARAMETER;
     }
 
-    Known = IsKnownContractOrNewer(Namespace);
+    Known = IsKnownContract(Namespace);
     *InSchema = Known;
     *Present = Known;
     return STATUS_SUCCESS;
