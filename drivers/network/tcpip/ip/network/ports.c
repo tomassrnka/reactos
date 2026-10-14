@@ -91,8 +91,10 @@ ULONG AllocatePortFromRange( PPORT_SET PortSet, ULONG Lowest, ULONG Highest ) {
     ULONG Port, Start, Count, i;
     KIRQL OldIrql;
 
+    /* The range is inclusive, and a port must fit in 16 bits */
     if ((Lowest < PortSet->StartingPort) ||
         (Highest >= PortSet->StartingPort + PortSet->PortsToOversee) ||
+        (Highest > 0xFFFF) ||
         (Lowest > Highest))
     {
         return -1;

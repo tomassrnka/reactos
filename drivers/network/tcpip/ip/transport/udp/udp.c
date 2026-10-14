@@ -455,7 +455,7 @@ UINT UDPAllocatePort( UINT HintPort ) {
         else return (UINT)-1;
     } else return AllocatePortFromRange
                ( &UDPPorts, UDP_STARTING_PORT,
-                 UDP_STARTING_PORT + UDP_DYNAMIC_PORTS );
+                 UDP_STARTING_PORT + UDP_DYNAMIC_PORTS - 1 );
 }
 
 VOID UDPFreePort( UINT Port ) {
