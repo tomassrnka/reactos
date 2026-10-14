@@ -451,6 +451,10 @@ START_TEST(SchannelProtocols)
 
         Connect(Tls13, SP_PROT_TLS1_2_CLIENT, &Result);
         ok(Result.Status != SEC_E_OK, "TLS 1.2 against a TLS 1.3 server worked\n");
+
+        /* TLS 1.3 is not in the default protocol set, as on Windows 10 22H2 */
+        Connect(Tls13, 0, &Result);
+        ok(Result.Status != SEC_E_OK, "the default protocols reached a TLS 1.3 server\n");
     }
 
     TestParallel(Tls12, Tls13);

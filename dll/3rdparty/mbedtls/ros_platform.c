@@ -69,8 +69,12 @@ static void ros_mutex_init(mbedtls_threading_mutex_t *mutex)
 {
     CRITICAL_SECTION *cs = HeapAlloc(GetProcessHeap(), 0, sizeof(*cs));
 
-    if (cs)
-        InitializeCriticalSection(cs);
+    /* InitializeCriticalSection raises an exception when its debug data cannot be allocated; this returns an error */
+    if (cs && !InitializeCriticalSectionAndSpinCount(cs, 0))
+    {
+        HeapFree(GetProcessHeap(), 0, cs);
+        cs = NULL;
+    }
     mutex->cs = cs;
 }
 

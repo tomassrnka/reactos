@@ -171,7 +171,7 @@ static void read_config(void)
         {{'T','L','S',' ','1','.','0',0}, SP_PROT_TLS1_0_CLIENT, TRUE, FALSE},
         {{'T','L','S',' ','1','.','1',0}, SP_PROT_TLS1_1_CLIENT, TRUE, FALSE /* NOTE: not enabled by default on Windows */ },
         {{'T','L','S',' ','1','.','2',0}, SP_PROT_TLS1_2_CLIENT, TRUE, FALSE /* NOTE: not enabled by default on Windows */ },
-        {{'T','L','S',' ','1','.','3',0}, SP_PROT_TLS1_3_CLIENT, TRUE, FALSE /* NOTE: like Windows 11 and Server 2022, not like Windows 10 */ }
+        {{'T','L','S',' ','1','.','3',0}, SP_PROT_TLS1_3_CLIENT, TRUE, TRUE /* NOTE: off by default like Windows 10 22H2, which has no TLS 1.3 client; Mbed TLS 3.6 fails on KeyUpdate */ }
     };
 
     /* No need for thread safety */
