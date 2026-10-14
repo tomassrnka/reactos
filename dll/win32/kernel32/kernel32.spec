@@ -214,6 +214,7 @@
 @ stdcall DisableThreadLibraryCalls(ptr)
 @ stub -version=0x600+ DisassociateCurrentThreadFromCallback
 @ stdcall DisconnectNamedPipe(long)
+@ stdcall -version=0x601+ DiscardVirtualMemory(ptr long)
 @ stdcall DnsHostnameToComputerNameA(str ptr ptr)
 @ stdcall DnsHostnameToComputerNameW(wstr ptr ptr)
 @ stdcall DosDateTimeToFileTime(long long ptr)
@@ -658,6 +659,7 @@
 @ stdcall GetUserDefaultLangID()
 @ stdcall -version=0x600+ GetUserDefaultLocaleName(wstr long)
 @ stdcall GetUserDefaultUILanguage()
+@ stdcall -version=0x601+ GetUserDefaultGeoName(ptr long)
 @ stdcall GetUserGeoID(long)
 @ stdcall -version=0x600+ GetUserPreferredUILanguages(long ptr wstr ptr)
 @ stdcall GetVDMCurrentDirectories(long long)
@@ -823,8 +825,10 @@
 @ stdcall LoadLibraryW(wstr)
 @ stdcall LoadModule(str ptr)
 @ stdcall LoadResource(long long)
+@ stdcall -version=0x601+ LoadStringA(long long ptr long)
 @ stub -version=0x600+ LoadStringBaseExW
 @ stub -version=0x600+ LoadStringBaseW
+@ stdcall -version=0x601+ LoadStringW(long long ptr long)
 @ stdcall LocalAlloc(long long)
 @ stdcall LocalCompact(long)
 @ stdcall LocalFileTimeToFileTime(ptr ptr)
