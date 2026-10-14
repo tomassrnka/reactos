@@ -572,6 +572,18 @@
              not what it imports, so a rule keyed on Qt6Core.dll would also change unrelated programs in that directory.
              Qt 6 programs choose the Windows 10 layer themselves. -->
 
+        <!-- Sysinternals DebugView 5.x (the GUI and the console program, 32 and 64 bit) stops at start with "requires Windows 10
+             version 1809 (build 17763)" below that. WIN10RTM reports 10.0 build 18362, which is above the limit (measured with 5.02) -->
+        <EXE NAME="*" APP_NAME="Sysinternals DebugView 5 and later" VENDOR="Sysinternals">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Sysinternals</COMPANY_NAME>
+                <PRODUCT_NAME>Sysinternals Debugview</PRODUCT_NAME>
+                <BIN_PRODUCT_VERSION>5.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN10RTM" />
+        </EXE>
+
         <!-- ReactOS shim used to test the shim engine -->
         <EXE NAME="shimtest_ros.exe" APP_NAME="Shim test application" VENDOR="ReactOS">
             <MATCHING_FILE NAME="*">
