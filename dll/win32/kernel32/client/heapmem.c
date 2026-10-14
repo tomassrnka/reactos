@@ -285,22 +285,72 @@ HeapUsage(HANDLE hHeap,
 
 /*
  * @implemented
+ *
+ * The entry says where the walk is, as the entry that RtlWalkHeap reports, in the words of Win32:
+ * the flags are not the same and, in 64 bits, neither is the layout. The caller has to lock the
+ * heap for the whole walk, because the heap can change between two calls.
  */
 BOOL
 WINAPI
-HeapWalk(HANDLE	hHeap,
+HeapWalk(HANDLE hHeap,
          LPPROCESS_HEAP_ENTRY lpEntry)
 {
+    RTL_HEAP_WALK_ENTRY Entry;
     NTSTATUS Status;
 
-    DPRINT1("Warning, HeapWalk is calling RtlWalkHeap with Win32 parameters\n");
+    if (lpEntry == NULL)
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
 
-    Status = RtlWalkHeap(hHeap, lpEntry);
+    RtlZeroMemory(&Entry, sizeof(Entry));
+    Entry.DataAddress = lpEntry->lpData;
+    Entry.DataSize = lpEntry->cbData;
+    Entry.OverheadBytes = lpEntry->cbOverhead;
+    Entry.SegmentIndex = lpEntry->iRegionIndex;
 
+    if (lpEntry->wFlags & PROCESS_HEAP_ENTRY_BUSY)
+        Entry.Flags |= RTL_HEAP_WALK_BUSY;
+    if (lpEntry->wFlags & PROCESS_HEAP_REGION)
+        Entry.Flags |= RTL_HEAP_WALK_REGION;
+    if (lpEntry->wFlags & PROCESS_HEAP_UNCOMMITTED_RANGE)
+        Entry.Flags |= RTL_HEAP_WALK_UNCOMMITTED;
+
+    Status = RtlWalkHeap(hHeap, &Entry);
     if (!NT_SUCCESS(Status))
     {
-        SetLastError(RtlNtStatusToDosError(Status));
+        BaseSetLastNTError(Status);
         return FALSE;
+    }
+
+    lpEntry->lpData = Entry.DataAddress;
+    lpEntry->cbData = (DWORD)Entry.DataSize;
+    lpEntry->cbOverhead = Entry.OverheadBytes;
+    lpEntry->iRegionIndex = Entry.SegmentIndex;
+
+    if (Entry.Flags & RTL_HEAP_WALK_REGION)
+    {
+        lpEntry->wFlags = PROCESS_HEAP_REGION;
+        lpEntry->Region.dwCommittedSize = Entry.Segment.CommittedSize;
+        lpEntry->Region.dwUnCommittedSize = Entry.Segment.UnCommittedSize;
+        lpEntry->Region.lpFirstBlock = Entry.Segment.FirstEntry;
+        lpEntry->Region.lpLastBlock = Entry.Segment.LastEntry;
+    }
+    else if (Entry.Flags & (RTL_HEAP_WALK_UNCOMMITTED | 0x1000))
+    {
+        lpEntry->wFlags = PROCESS_HEAP_UNCOMMITTED_RANGE;
+    }
+    else if (Entry.Flags & RTL_HEAP_WALK_BUSY)
+    {
+        /* Windows 7 marks the blocks that are too big for the heap as shared with DDE */
+        lpEntry->wFlags = PROCESS_HEAP_ENTRY_BUSY;
+        if (Entry.Flags & RTL_HEAP_WALK_VIRTUAL)
+            lpEntry->wFlags |= PROCESS_HEAP_ENTRY_DDESHARE;
+    }
+    else
+    {
+        lpEntry->wFlags = 0;
     }
 
     return TRUE;

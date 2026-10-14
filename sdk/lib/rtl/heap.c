@@ -4044,13 +4044,767 @@ RtlCreateTagHeap(_In_ HANDLE HeapHandle,
     return 0;
 }
 
+/* HEAP WALKING **************************************************************/
+
+/*
+ * Walking reads every heap structure through a routine, never through the pointer, so that one
+ * implementation serves this process (under the heap lock) and another process (see dbgbuffer.c).
+ * A reading failure or a chain that does not add up ends the walk with an error; it never faults.
+ */
+
+typedef struct _RTLP_HEAP_WALKER
+{
+    PRTLP_HEAP_READ_ROUTINE Read;
+    PVOID ReadContext;
+    ULONG_PTR HeapAddress;
+    LONG CachedIndex;
+    HEAP_SEGMENT Segment;
+    HEAP Header;
+} RTLP_HEAP_WALKER, *PRTLP_HEAP_WALKER;
+
+#define HEAP_WALK_UNKNOWN_SIZE ((ULONG)-1)
+#define HEAP_WALK_MAX_ENTRIES  0x10000000
+
+static
+NTSTATUS
+NTAPI
+RtlpHeapWalkReadLocal(
+    _In_opt_ PVOID Context,
+    _In_ PVOID Address,
+    _Out_writes_bytes_(Size) PVOID Buffer,
+    _In_ SIZE_T Size)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    _SEH2_TRY
+    {
+        RtlCopyMemory(Buffer, Address, Size);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+FORCEINLINE
+NTSTATUS
+RtlpHeapWalkRead(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG_PTR Address,
+    _Out_writes_bytes_(Size) PVOID Buffer,
+    _In_ SIZE_T Size)
+{
+    return Walker->Read(Walker->ReadContext, (PVOID)Address, Buffer, Size);
+}
+
+static
+NTSTATUS
+RtlpHeapWalkOpen(
+    _Out_ PRTLP_HEAP_WALKER Walker,
+    _In_opt_ PRTLP_HEAP_READ_ROUTINE Read,
+    _In_opt_ PVOID ReadContext,
+    _In_ ULONG_PTR HeapAddress)
+{
+    NTSTATUS Status;
+
+    Walker->Read = Read ? Read : RtlpHeapWalkReadLocal;
+    Walker->ReadContext = ReadContext;
+    Walker->HeapAddress = HeapAddress;
+    Walker->CachedIndex = -1;
+
+    /* The copy runs up to and including the segment table */
+    RtlZeroMemory(&Walker->Header, sizeof(Walker->Header));
+    Status = RtlpHeapWalkRead(Walker, HeapAddress, &Walker->Header, FIELD_OFFSET(HEAP, AllocatorBackTraceIndex));
+    if (!NT_SUCCESS(Status))
+        return STATUS_INVALID_HANDLE;
+
+    /* The heap is its own first segment */
+    if (Walker->Header.Signature != HEAP_SIGNATURE ||
+        (ULONG_PTR)Walker->Header.BaseAddress != HeapAddress ||
+        (ULONG_PTR)Walker->Header.Segments[0] != HeapAddress)
+    {
+        return STATUS_INVALID_HANDLE;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* Returns STATUS_NOT_FOUND for an index without a segment */
+static
+NTSTATUS
+RtlpHeapWalkGetSegment(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG Index)
+{
+    ULONG_PTR Address;
+    NTSTATUS Status;
+
+    if (Index >= HEAP_SEGMENTS)
+        return STATUS_NOT_FOUND;
+
+    Address = (ULONG_PTR)Walker->Header.Segments[Index];
+    if (Address == 0)
+        return STATUS_NOT_FOUND;
+
+    if (Walker->CachedIndex == (LONG)Index)
+        return STATUS_SUCCESS;
+
+    Walker->CachedIndex = -1;
+    Status = RtlpHeapWalkRead(Walker, Address, &Walker->Segment, sizeof(Walker->Segment));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Walker->Segment.SegmentSignature != HEAP_SEGMENT_SIGNATURE ||
+        (ULONG_PTR)Walker->Segment.BaseAddress != Address ||
+        Walker->Segment.Entry.SegmentOffset != Index ||
+        Walker->Segment.Entry.Size == 0 ||
+        (ULONG_PTR)Walker->Segment.FirstEntry <= Address ||
+        (ULONG_PTR)Walker->Segment.FirstEntry >= (ULONG_PTR)Walker->Segment.LastValidEntry ||
+        ((ULONG_PTR)Walker->Segment.FirstEntry & (sizeof(HEAP_ENTRY) - 1)) != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Walker->CachedIndex = (LONG)Index;
+    return STATUS_SUCCESS;
+}
+
+/* Finds the range that starts at Address, or with Above the first range that starts above it */
+static
+NTSTATUS
+RtlpHeapWalkFindUcr(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG_PTR Address,
+    _In_ BOOLEAN Above,
+    _Out_ PHEAP_UCR_DESCRIPTOR Descriptor)
+{
+    ULONG_PTR Head, Link, Limit, Floor, Last;
+    NTSTATUS Status;
+
+    Head = (ULONG_PTR)Walker->Segment.BaseAddress + FIELD_OFFSET(HEAP_SEGMENT, UCRSegmentList);
+    Link = (ULONG_PTR)Walker->Segment.UCRSegmentList.Flink;
+    Last = (ULONG_PTR)Walker->Segment.LastValidEntry;
+
+    /* Every range is at least a page of its own, so a list longer than the pages of the segment goes in circles */
+    Limit = (Last - (ULONG_PTR)Walker->Segment.BaseAddress) / PAGE_SIZE + 1;
+    Floor = (ULONG_PTR)Walker->Segment.FirstEntry;
+
+    while (Link != Head)
+    {
+        if (Limit-- == 0)
+            return STATUS_INVALID_PARAMETER;
+
+        Status = RtlpHeapWalkRead(Walker,
+                                  Link - FIELD_OFFSET(HEAP_UCR_DESCRIPTOR, SegmentEntry),
+                                  Descriptor,
+                                  sizeof(*Descriptor));
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        /* The ranges are sorted by address and do not overlap, so a list that goes in circles breaks this at once */
+        if ((ULONG_PTR)Descriptor->Address < Floor ||
+            (ULONG_PTR)Descriptor->Address >= Last ||
+            Descriptor->Size == 0 ||
+            Descriptor->Size > Last - (ULONG_PTR)Descriptor->Address)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        Floor = (ULONG_PTR)Descriptor->Address + Descriptor->Size;
+
+        if (Above ? ((ULONG_PTR)Descriptor->Address > Address) : ((ULONG_PTR)Descriptor->Address == Address))
+            return STATUS_SUCCESS;
+
+        Link = (ULONG_PTR)Descriptor->SegmentEntry.Flink;
+    }
+
+    return STATUS_NOT_FOUND;
+}
+
+static
+VOID
+RtlpHeapWalkFillRegion(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG Index,
+    _Out_ PRTL_HEAP_WALK_ENTRY Entry)
+{
+    PHEAP_SEGMENT Segment = &Walker->Segment;
+    SIZE_T Reserved, Uncommitted;
+
+    Reserved = (ULONG_PTR)Segment->LastValidEntry - (ULONG_PTR)Segment->BaseAddress;
+    Uncommitted = (SIZE_T)Segment->NumberOfUnCommittedPages * PAGE_SIZE;
+    if (Uncommitted > Reserved)
+        Uncommitted = Reserved;
+
+    RtlZeroMemory(Entry, sizeof(*Entry));
+
+    /* The data of a region is its header, without the entry that every block starts with */
+    Entry->DataAddress = Segment->BaseAddress;
+    Entry->DataSize = ((SIZE_T)Segment->Entry.Size << HEAP_ENTRY_SHIFT) - sizeof(HEAP_ENTRY);
+    Entry->SegmentIndex = (UCHAR)Index;
+    Entry->Flags = RTL_HEAP_WALK_REGION;
+    Entry->Segment.CommittedSize = (ULONG)(Reserved - Uncommitted);
+    Entry->Segment.UnCommittedSize = (ULONG)Uncommitted;
+    Entry->Segment.FirstEntry = Segment->FirstEntry;
+    Entry->Segment.LastEntry = Segment->LastValidEntry;
+}
+
+static
+NTSTATUS
+RtlpHeapWalkFillBlock(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG Index,
+    _In_ ULONG_PTR Address,
+    _In_ PHEAP_ENTRY Header,
+    _Out_ PRTL_HEAP_WALK_ENTRY Entry)
+{
+    SIZE_T Size = (SIZE_T)Header->Size << HEAP_ENTRY_SHIFT;
+    HEAP_ENTRY_EXTRA Extra;
+    SIZE_T Unused;
+    NTSTATUS Status;
+
+    RtlZeroMemory(Entry, sizeof(*Entry));
+    Entry->SegmentIndex = (UCHAR)Index;
+
+    if (Header->Flags & HEAP_ENTRY_BUSY)
+    {
+        /* The unused bytes count the entry and the extra data too, as the overhead does */
+        Unused = Header->UnusedBytes;
+        if (Unused > Size)
+            return STATUS_INVALID_PARAMETER;
+
+        Entry->DataAddress = (PVOID)(Address + sizeof(HEAP_ENTRY));
+        Entry->DataSize = Size - Unused;
+        Entry->OverheadBytes = (UCHAR)Unused;
+        Entry->Flags = RTL_HEAP_WALK_BUSY | (Header->Flags & HEAP_ENTRY_SETTABLE_FLAGS);
+
+        if ((Header->Flags & HEAP_ENTRY_EXTRA_PRESENT) && Size >= 2 * sizeof(HEAP_ENTRY))
+        {
+            Status = RtlpHeapWalkRead(Walker,
+                                      Address + Size - sizeof(HEAP_ENTRY_EXTRA),
+                                      &Extra,
+                                      sizeof(Extra));
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            Entry->Flags |= RTL_HEAP_WALK_BLOCK;
+            Entry->Block.Settable = Extra.Settable;
+            Entry->Block.TagIndex = Extra.TagIndex;
+            Entry->Block.AllocatorBackTraceIndex = Extra.AllocatorBackTraceIndex;
+        }
+    }
+    else
+    {
+        if (Size < sizeof(HEAP_FREE_ENTRY))
+            return STATUS_INVALID_PARAMETER;
+
+        Entry->DataAddress = (PVOID)(Address + sizeof(HEAP_FREE_ENTRY));
+        Entry->DataSize = Size - sizeof(HEAP_FREE_ENTRY);
+        Entry->OverheadBytes = sizeof(HEAP_FREE_ENTRY);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+RtlpHeapWalkFillUcr(
+    _In_ ULONG Index,
+    _In_ PHEAP_UCR_DESCRIPTOR Descriptor,
+    _Out_ PRTL_HEAP_WALK_ENTRY Entry)
+{
+    RtlZeroMemory(Entry, sizeof(*Entry));
+    Entry->DataAddress = Descriptor->Address;
+    Entry->DataSize = Descriptor->Size;
+    Entry->SegmentIndex = (UCHAR)Index;
+    Entry->Flags = RTL_HEAP_WALK_UNCOMMITTED;
+}
+
+/* The blocks that are too big for the segments are the nodes of a list, after the segments */
+static
+NTSTATUS
+RtlpHeapWalkVirtual(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG_PTR Node,
+    _In_ ULONG_PTR Previous,
+    _Out_ PRTL_HEAP_WALK_ENTRY Entry)
+{
+    HEAP_VIRTUAL_ALLOC_ENTRY Block;
+    NTSTATUS Status;
+
+    if (Node == Walker->HeapAddress + FIELD_OFFSET(HEAP, VirtualAllocdBlocks))
+        return STATUS_NO_MORE_ENTRIES;
+
+    Status = RtlpHeapWalkRead(Walker, Node, &Block, sizeof(Block));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The list is a ring through the head of the heap: a node must hang on the one before it */
+    if (!(Block.BusyBlock.Flags & HEAP_ENTRY_VIRTUAL_ALLOC) || Block.BusyBlock.Size > Block.CommitSize ||
+        (ULONG_PTR)Block.Entry.Blink != Previous || (ULONG_PTR)Block.Entry.Flink == Node)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(Entry, sizeof(*Entry));
+    Entry->DataAddress = (PVOID)(Node + sizeof(HEAP_VIRTUAL_ALLOC_ENTRY));
+    Entry->DataSize = Block.CommitSize - Block.BusyBlock.Size;
+    Entry->OverheadBytes = sizeof(HEAP_VIRTUAL_ALLOC_ENTRY);
+    Entry->SegmentIndex = HEAP_SEGMENTS;
+    Entry->Flags = RTL_HEAP_WALK_BUSY | RTL_HEAP_WALK_VIRTUAL | (Block.BusyBlock.Flags & HEAP_ENTRY_SETTABLE_FLAGS);
+
+    if (Block.BusyBlock.Flags & HEAP_ENTRY_EXTRA_PRESENT)
+    {
+        Entry->Flags |= RTL_HEAP_WALK_BLOCK;
+        Entry->Block.Settable = Block.ExtraStuff.Settable;
+        Entry->Block.TagIndex = Block.ExtraStuff.TagIndex;
+        Entry->Block.AllocatorBackTraceIndex = Block.ExtraStuff.AllocatorBackTraceIndex;
+    }
+
+    /* The measured entries of Windows leave this alone: here it holds the size that was committed, which the data and the overhead do not add up to */
+    Entry->Block.Reserved[0] = (ULONG)Block.CommitSize;
+
+    return STATUS_SUCCESS;
+}
+
+/* The first region from Index on, else the first big block, else the end */
+static
+NTSTATUS
+RtlpHeapWalkNextRegion(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG Index,
+    _Out_ PRTL_HEAP_WALK_ENTRY Entry)
+{
+    NTSTATUS Status;
+
+    for (; Index < HEAP_SEGMENTS; Index++)
+    {
+        Status = RtlpHeapWalkGetSegment(Walker, Index);
+        if (Status == STATUS_NOT_FOUND)
+            continue;
+
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        RtlpHeapWalkFillRegion(Walker, Index, Entry);
+        return STATUS_SUCCESS;
+    }
+
+    return RtlpHeapWalkVirtual(Walker,
+                               (ULONG_PTR)Walker->Header.VirtualAllocdBlocks.Flink,
+                               Walker->HeapAddress + FIELD_OFFSET(HEAP, VirtualAllocdBlocks),
+                               Entry);
+}
+
+/*
+ * Reports the first entry of the segment that is cached in the walker, from Current on, whose
+ * address is above After (0 means any). PreviousSize is what the block at Current must say about
+ * its predecessor, or HEAP_WALK_UNKNOWN_SIZE.
+ */
+static
+NTSTATUS
+RtlpHeapWalkScan(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG Index,
+    _In_ ULONG_PTR Current,
+    _In_ ULONG PreviousSize,
+    _In_ ULONG_PTR After,
+    _Out_ PRTL_HEAP_WALK_ENTRY Entry)
+{
+    PHEAP_SEGMENT Segment = &Walker->Segment;
+    HEAP_UCR_DESCRIPTOR Ucr;
+    HEAP_ENTRY Header;
+    ULONG_PTR End;
+    BOOLEAN Guard;
+    NTSTATUS Status;
+
+    for (;;)
+    {
+        if (Current >= (ULONG_PTR)Segment->LastValidEntry)
+            return RtlpHeapWalkNextRegion(Walker, Index + 1, Entry);
+
+        if (Current < (ULONG_PTR)Segment->FirstEntry || (Current & (sizeof(HEAP_ENTRY) - 1)) != 0)
+            return STATUS_INVALID_PARAMETER;
+
+        Status = RtlpHeapWalkRead(Walker, Current, &Header, sizeof(Header));
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        End = Current + ((ULONG_PTR)Header.Size << HEAP_ENTRY_SHIFT);
+        if (Header.Size == 0 ||
+            End > (ULONG_PTR)Segment->LastValidEntry ||
+            Header.SegmentOffset != Index ||
+            (PreviousSize != HEAP_WALK_UNKNOWN_SIZE && Header.PreviousSize != PreviousSize))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        /* One entry long, busy and last: this is the guard that ends a committed range, not a block */
+        Guard = (Header.Flags & (HEAP_ENTRY_BUSY | HEAP_ENTRY_LAST_ENTRY)) == (HEAP_ENTRY_BUSY | HEAP_ENTRY_LAST_ENTRY) &&
+                Header.Size == 1;
+        if (Current > After && !Guard)
+            return RtlpHeapWalkFillBlock(Walker, Index, Current, &Header, Entry);
+
+        if (!(Header.Flags & HEAP_ENTRY_LAST_ENTRY))
+        {
+            Current = End;
+            PreviousSize = Header.Size;
+            continue;
+        }
+
+        /* The committed range ends here: an uncommitted range or the end of the segment follows */
+        if (End == (ULONG_PTR)Segment->LastValidEntry)
+            return RtlpHeapWalkNextRegion(Walker, Index + 1, Entry);
+
+        Status = RtlpHeapWalkFindUcr(Walker, End, FALSE, &Ucr);
+        if (Status == STATUS_NOT_FOUND && Guard)
+        {
+            /* A range that is too short for a free block ends in two guards */
+            Current = End;
+            PreviousSize = Header.Size;
+            continue;
+        }
+
+        if (!NT_SUCCESS(Status))
+            return (Status == STATUS_NOT_FOUND) ? STATUS_INVALID_PARAMETER : Status;
+
+        if ((ULONG_PTR)Ucr.Address > After)
+        {
+            RtlpHeapWalkFillUcr(Index, &Ucr, Entry);
+            return STATUS_SUCCESS;
+        }
+
+        Current = (ULONG_PTR)Ucr.Address + Ucr.Size;
+        PreviousSize = 0;
+    }
+}
+
+/* The segment that holds Address, cached in the walker */
+static
+NTSTATUS
+RtlpHeapWalkFindSegment(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG Hint,
+    _In_ ULONG_PTR Address,
+    _Out_ PULONG Index)
+{
+    ULONG i;
+    NTSTATUS Status;
+
+    if (Hint < HEAP_SEGMENTS)
+    {
+        Status = RtlpHeapWalkGetSegment(Walker, Hint);
+        if (NT_SUCCESS(Status) &&
+            Address >= (ULONG_PTR)Walker->Segment.BaseAddress &&
+            Address < (ULONG_PTR)Walker->Segment.LastValidEntry)
+        {
+            *Index = Hint;
+            return STATUS_SUCCESS;
+        }
+    }
+
+    for (i = 0; i < HEAP_SEGMENTS; i++)
+    {
+        Status = RtlpHeapWalkGetSegment(Walker, i);
+        if (Status == STATUS_NOT_FOUND)
+            continue;
+
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        if (Address >= (ULONG_PTR)Walker->Segment.BaseAddress &&
+            Address < (ULONG_PTR)Walker->Segment.LastValidEntry)
+        {
+            *Index = i;
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return STATUS_INVALID_PARAMETER;
+}
+
+/* The entry after a big block: the block must still be in the list, with both neighbours agreeing */
+static
+NTSTATUS
+RtlpHeapWalkAfterVirtual(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _In_ ULONG_PTR Data,
+    _Out_ PRTL_HEAP_WALK_ENTRY Entry)
+{
+    ULONG_PTR Node, Neighbour;
+    HEAP_VIRTUAL_ALLOC_ENTRY Block;
+    LIST_ENTRY Link;
+    NTSTATUS Status;
+
+    Node = Data - sizeof(HEAP_VIRTUAL_ALLOC_ENTRY);
+    Status = RtlpHeapWalkRead(Walker, Node, &Block, sizeof(Block));
+    if (!NT_SUCCESS(Status) || !(Block.BusyBlock.Flags & HEAP_ENTRY_VIRTUAL_ALLOC))
+        return STATUS_INVALID_PARAMETER;
+
+    if ((ULONG_PTR)Block.Entry.Flink == Node || (ULONG_PTR)Block.Entry.Blink == Node)
+        return STATUS_INVALID_PARAMETER;
+
+    Neighbour = (ULONG_PTR)Block.Entry.Blink;
+    Status = RtlpHeapWalkRead(Walker, Neighbour, &Link, sizeof(Link));
+    if (!NT_SUCCESS(Status) || (ULONG_PTR)Link.Flink != Node)
+        return STATUS_INVALID_PARAMETER;
+
+    Neighbour = (ULONG_PTR)Block.Entry.Flink;
+    Status = RtlpHeapWalkRead(Walker, Neighbour, &Link, sizeof(Link));
+    if (!NT_SUCCESS(Status) || (ULONG_PTR)Link.Blink != Node)
+        return STATUS_INVALID_PARAMETER;
+
+    return RtlpHeapWalkVirtual(Walker, Neighbour, Node, Entry);
+}
+
+/* Replaces the entry, which marks the place, with the one after it */
+static
+NTSTATUS
+RtlpHeapWalkNext(
+    _In_ PRTLP_HEAP_WALKER Walker,
+    _Inout_ PRTL_HEAP_WALK_ENTRY Entry)
+{
+    ULONG_PTR Data = (ULONG_PTR)Entry->DataAddress;
+    ULONG Flags = Entry->Flags;
+    ULONG Index = Entry->SegmentIndex;
+    ULONG_PTR Start;
+    HEAP_UCR_DESCRIPTOR Ucr;
+    NTSTATUS Status;
+
+    if (Data == 0)
+        return RtlpHeapWalkNextRegion(Walker, 0, Entry);
+
+    if (Index == HEAP_SEGMENTS && !(Flags & (RTL_HEAP_WALK_REGION | RTL_HEAP_WALK_UNCOMMITTED)))
+        return RtlpHeapWalkAfterVirtual(Walker, Data, Entry);
+
+    if (Flags & RTL_HEAP_WALK_REGION)
+    {
+        for (Index = 0; Index < HEAP_SEGMENTS; Index++)
+        {
+            if ((ULONG_PTR)Walker->Header.Segments[Index] == Data)
+                break;
+        }
+
+        if (Index == HEAP_SEGMENTS)
+            return STATUS_INVALID_PARAMETER;
+
+        Status = RtlpHeapWalkGetSegment(Walker, Index);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        return RtlpHeapWalkScan(Walker,
+                                Index,
+                                (ULONG_PTR)Walker->Segment.FirstEntry,
+                                Walker->Segment.Entry.Size,
+                                0,
+                                Entry);
+    }
+
+    if (Flags & RTL_HEAP_WALK_UNCOMMITTED)
+        Start = Data;
+    else
+        Start = Data - ((Flags & RTL_HEAP_WALK_BUSY) ? sizeof(HEAP_ENTRY) : sizeof(HEAP_FREE_ENTRY));
+
+    Status = RtlpHeapWalkFindSegment(Walker, Index, Start, &Index);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* Follow the chain on from the entry that marks the place */
+    if (Flags & RTL_HEAP_WALK_UNCOMMITTED)
+    {
+        if (NT_SUCCESS(RtlpHeapWalkFindUcr(Walker, Start, FALSE, &Ucr)))
+        {
+            Status = RtlpHeapWalkScan(Walker, Index, (ULONG_PTR)Ucr.Address + Ucr.Size, 0, 0, Entry);
+            if (NT_SUCCESS(Status) || Status == STATUS_NO_MORE_ENTRIES)
+                return Status;
+        }
+    }
+    else
+    {
+        Status = RtlpHeapWalkScan(Walker, Index, Start, HEAP_WALK_UNKNOWN_SIZE, Start, Entry);
+        if (NT_SUCCESS(Status) || Status == STATUS_NO_MORE_ENTRIES)
+            return Status;
+    }
+
+    /* The place does not match the chain, for instance after its block was freed: find it from the start */
+    Status = RtlpHeapWalkFindSegment(Walker, Index, Start, &Index);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    return RtlpHeapWalkScan(Walker,
+                            Index,
+                            (ULONG_PTR)Walker->Segment.FirstEntry,
+                            Walker->Segment.Entry.Size,
+                            Start,
+                            Entry);
+}
+
+/*
+ * Takes the lock of a heap in this process and gives it back, which is NULL when the heap needs none.
+ * A heap that another thread destroys meanwhile is that thread's mistake, but must not fault the walk.
+ */
+static
+NTSTATUS
+RtlpHeapWalkLock(
+    _In_ PHEAP Heap,
+    _Out_ PHEAP_LOCK *Lock)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    *Lock = NULL;
+
+    _SEH2_TRY
+    {
+        if (Heap->ForceFlags & HEAP_FLAG_PAGE_ALLOCS)
+        {
+            Status = STATUS_NOT_IMPLEMENTED;
+        }
+        else if (Heap->Signature != HEAP_SIGNATURE)
+        {
+            Status = STATUS_INVALID_HANDLE;
+        }
+        else if (!(Heap->Flags & HEAP_NO_SERIALIZE) && Heap->LockVariable != NULL)
+        {
+            PHEAP_LOCK HeapLock = Heap->LockVariable;
+
+            RtlEnterHeapLock(HeapLock, TRUE);
+            *Lock = HeapLock;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_INVALID_HANDLE;
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+static
+VOID
+RtlpHeapWalkUnlock(
+    _In_ PHEAP_LOCK Lock)
+{
+    _SEH2_TRY
+    {
+        RtlLeaveHeapLock(Lock);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    _SEH2_END;
+}
+
+NTSTATUS
+NTAPI
+RtlpEnumerateHeap(
+    _In_opt_ PRTLP_HEAP_READ_ROUTINE Read,
+    _In_opt_ PVOID ReadContext,
+    _In_ PVOID HeapAddress,
+    _In_ PRTLP_HEAP_WALK_CALLBACK Callback,
+    _In_opt_ PVOID CallbackContext,
+    _Out_opt_ PULONG HeapFlags)
+{
+    RTLP_HEAP_WALKER Walker;
+    RTL_HEAP_WALK_ENTRY Entry;
+    PHEAP_LOCK Lock = NULL;
+    ULONG Count = 0;
+    NTSTATUS Status;
+
+    if (!Read)
+    {
+        /* A heap in this process is locked while it is read */
+        Status = RtlpHeapWalkLock(HeapAddress, &Lock);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    Status = RtlpHeapWalkOpen(&Walker, Read, ReadContext, (ULONG_PTR)HeapAddress);
+    if (NT_SUCCESS(Status))
+    {
+        if (HeapFlags)
+            *HeapFlags = Walker.Header.Flags;
+
+        RtlZeroMemory(&Entry, sizeof(Entry));
+        for (;;)
+        {
+            Status = RtlpHeapWalkNext(&Walker, &Entry);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            /* No heap has this many entries; a damaged one can go in circles */
+            if (++Count > HEAP_WALK_MAX_ENTRIES)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            if (!Callback(CallbackContext, &Entry))
+                break;
+        }
+
+        if (Status == STATUS_NO_MORE_ENTRIES)
+            Status = STATUS_SUCCESS;
+    }
+
+    if (Lock)
+        RtlpHeapWalkUnlock(Lock);
+
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 RtlWalkHeap(IN HANDLE HeapHandle,
             IN PVOID HeapEntry)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PHEAP Heap = (PHEAP)HeapHandle;
+    RTLP_HEAP_WALKER Walker;
+    RTL_HEAP_WALK_ENTRY Entry;
+    PHEAP_LOCK Lock;
+    NTSTATUS Status;
+
+    /* Windows faults on both; an error is kinder */
+    if (HeapEntry == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (Heap == NULL)
+        return STATUS_INVALID_HANDLE;
+
+    Status = RtlpHeapWalkReadLocal(NULL, HeapEntry, &Entry, sizeof(Entry));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = RtlpHeapWalkLock(Heap, &Lock);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = RtlpHeapWalkOpen(&Walker, NULL, NULL, (ULONG_PTR)Heap);
+    if (NT_SUCCESS(Status))
+        Status = RtlpHeapWalkNext(&Walker, &Entry);
+
+    if (Lock)
+        RtlpHeapWalkUnlock(Lock);
+
+    /* The entry is left alone when there is nothing more to report */
+    if (NT_SUCCESS(Status))
+    {
+        _SEH2_TRY
+        {
+            RtlCopyMemory(HeapEntry, &Entry, sizeof(Entry));
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = STATUS_ACCESS_VIOLATION;
+        }
+        _SEH2_END;
+    }
+
+    return Status;
 }
 
 PVOID

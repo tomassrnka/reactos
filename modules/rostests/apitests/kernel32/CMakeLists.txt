@@ -40,6 +40,7 @@ list(APPEND SOURCE
     GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
     HandleList.c
+    HeapWalk.c
     IdleProcessor.c
     InitOnce.c
     interlck.c
