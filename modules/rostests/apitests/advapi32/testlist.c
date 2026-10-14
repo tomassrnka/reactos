@@ -31,6 +31,7 @@ extern void func_RegQueryValueExW(void);
 extern void func_RegGetValue(void);
 extern void func_RtlEncryptMemory(void);
 extern void func_SaferIdentifyLevel(void);
+extern void func_TokenIntegrity(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceNetwork(void);
@@ -66,6 +67,7 @@ const struct test winetest_testlist[] =
     { "RegGetValue", func_RegGetValue },
     { "RtlEncryptMemory", func_RtlEncryptMemory },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
+    { "TokenIntegrity", func_TokenIntegrity },
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceNetwork", func_ServiceNetwork },
