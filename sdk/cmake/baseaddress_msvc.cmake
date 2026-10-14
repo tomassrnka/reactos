@@ -400,3 +400,7 @@ set(baseaddress_zipfldr                        0x73d70000)
 set(baseaddress_rshell                         0x73d10000) # manually added
 set(baseaddress_vfd                            0x73ce0000) # manually added
 set(baseaddress_notifyhook                     0x75cc0000) # manually added
+set(baseaddress_evr                           0x73c10000) # manually added
+set(baseaddress_mfreadwrite                   0x73ba0000) # manually added
+set(baseaddress_mf                            0x73ad0000) # manually added
+set(baseaddress_mfplat                        0x739f0000) # manually added

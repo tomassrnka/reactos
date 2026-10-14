@@ -398,3 +398,7 @@ set(baseaddress_xmllite                        0x70420000)
 set(baseaddress_xolehlp                        0x703f0000)
 set(baseaddress_zipfldr                        0x702b0000)
 set(baseaddress_rshell                         0x701e0000) # manually added
+set(baseaddress_evr                           0x70110000) # manually added
+set(baseaddress_mfreadwrite                   0x700a0000) # manually added
+set(baseaddress_mf                            0x6ffd0000) # manually added
+set(baseaddress_mfplat                        0x6fef0000) # manually added

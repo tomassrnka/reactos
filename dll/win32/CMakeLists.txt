@@ -281,6 +281,13 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(ncrypt)
 endif()
 
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    add_subdirectory(evr)
+    add_subdirectory(mf)
+    add_subdirectory(mfplat)
+    add_subdirectory(mfreadwrite)
+endif()
+
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x603)
    add_subdirectory(rtworkq)
 endif()
