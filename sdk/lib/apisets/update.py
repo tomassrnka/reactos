@@ -43,6 +43,7 @@ RETARGET_HOSTS = {
     ),
     'kernelbase_ros.dll': (
         'api-ms-win-core-path-l1-1',
+        'api-ms-win-core-synch-l1-2',
     ),
     'shell32.dll': (
         'api-ms-win-shell-namespace-l1-1',

@@ -32,7 +32,6 @@ list(APPEND SOURCE
     restart.c
     ResolveLocaleName.c
     sync.c
-    WaitOnAddress.c
     ThreadDescription.c
     UnmapViewOfFileEx.c
     threadpool.c
