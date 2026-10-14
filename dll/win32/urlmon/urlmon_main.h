@@ -49,7 +49,6 @@ extern HRESULT MkProtocol_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 extern HRESULT MimeFilter_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 extern HRESULT Uri_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 
-extern BOOL WINAPI URLMON_DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
 extern HRESULT WINAPI URLMON_DllGetClassObject(REFCLSID rclsid, REFIID iid,LPVOID *ppv);
 extern HRESULT WINAPI URLMON_DllRegisterServer(void);
 extern HRESULT WINAPI URLMON_DllUnregisterServer(void);
@@ -206,6 +205,10 @@ typedef struct {
     DWORD continue_call;
     BOOL continue_posted;
 
+    /* references handed to messages for the apartment window, guarded by the thread list lock */
+    struct list handoff_entry;
+    LONG handoff_posted, handoff_orphans;
+
     CRITICAL_SECTION section;
     task_header_t *task_queue_head, *task_queue_tail;
 
@@ -223,6 +226,10 @@ typedef struct {
     HWND notif_hwnd;
     DWORD notif_hwnd_cnt;
 
+    DWORD thread_id;
+    struct list handoffs;
+    LONG handoff_orphans;
+
     struct list entry;
 } tls_data_t;
 
@@ -231,6 +238,13 @@ tls_data_t *get_tls_data(void);
 void unregister_notif_wnd_class(void);
 HWND get_notif_hwnd(void);
 void release_notif_hwnd(HWND);
+
+void WINAPI UrlmonTestPostHook(BOOL (WINAPI *)(BOOL));
+BOOL add_handoff(BindProtocol*);
+BOOL take_handoff(BindProtocol*);
+void orphan_handoff(BindProtocol*);
+LONG count_orphan_handoffs(void);
+BindProtocol *take_orphan_handoff(void);
 
 const char *debugstr_bindstatus(ULONG);
 
