@@ -290,6 +290,15 @@ NtReplyPort(IN HANDLE PortHandle,
         return STATUS_REPLY_MESSAGE_MISMATCH;
     }
 
+    /* Only a port of the client's connection may answer it */
+    if (!LpcpValidateClientPort(WakeupThread, Port))
+    {
+        LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
+        ObDereferenceObject(WakeupThread);
+        ObDereferenceObject(Port);
+        return STATUS_ACCESS_DENIED;
+    }
+
     /* Copy the message */
     _SEH2_TRY
     {
@@ -538,6 +547,16 @@ NtReplyWaitReceivePortEx(IN HANDLE PortHandle,
             ObDereferenceObject(WakeupThread);
             ObDereferenceObject(Port);
             return STATUS_REPLY_MESSAGE_MISMATCH;
+        }
+
+        /* Only a port of the client's connection may answer it */
+        if (!LpcpValidateClientPort(WakeupThread, Port))
+        {
+            LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
+            if (ConnectionPort) ObDereferenceObject(ConnectionPort);
+            ObDereferenceObject(WakeupThread);
+            ObDereferenceObject(Port);
+            return STATUS_ACCESS_DENIED;
         }
 
         /* Copy the message */
