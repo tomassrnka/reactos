@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
+#include <evntprov.h>
 #include <winioctl.h>
 #include <mountmgr.h>
 #include <stdio.h>
@@ -208,6 +209,43 @@ static void CheckApplicationLibraries(void)
     }
     for (i = 0; i < 4; ++i)
         if (Modules[i]) FreeLibrary(Modules[i]);
+}
+
+static void CheckEventRegistration(void)
+{
+    typedef ULONG (WINAPI *REGISTER)(LPCGUID, PENABLECALLBACK, PVOID, PREGHANDLE);
+    typedef ULONG (WINAPI *UNREGISTER)(REGHANDLE);
+    typedef ULONG (WINAPI *WRITE)(REGHANDLE, PCEVENT_DESCRIPTOR, ULONG, PEVENT_DATA_DESCRIPTOR);
+    HMODULE Advapi = GetModuleHandleW(L"advapi32.dll");
+    REGISTER Register = (REGISTER)GetProcAddress(Advapi, "EventRegister");
+    UNREGISTER Unregister = (UNREGISTER)GetProcAddress(Advapi, "EventUnregister");
+    WRITE Write = (WRITE)GetProcAddress(Advapi, "EventWrite");
+    GUID Id = {0x5326de93, 0x2e16, 0x47f4, {0xa0, 0x39, 0x2b, 0x84, 0x03, 0xc4, 0x3c, 0x01}};
+    DECLSPEC_ALIGN(8) ULONG Storage[4] = {0x12345678, 0xffffffff, 0xffffffff, 0xabcdef01};
+    PREGHANDLE Handle = (PREGHANDLE)&Storage[1];
+    EVENT_DESCRIPTOR Event = {0};
+    ULONG Status;
+
+    CHECK(Register && Unregister && Write);
+    if (!Register || !Unregister || !Write) return;
+    SetLastError(0x1234);
+    Status = Register(&Id, NULL, NULL, Handle);
+    CHECK(Status == ERROR_SUCCESS || Status == ERROR_CALL_NOT_IMPLEMENTED);
+    CHECK(GetLastError() == 0x1234);
+    CHECK(Storage[0] == 0x12345678 && Storage[3] == 0xabcdef01);
+    if (Status == ERROR_SUCCESS)
+    {
+        CHECK(*Handle != 0);
+        CHECK(Write(*Handle, &Event, 0, NULL) == ERROR_SUCCESS);
+        CHECK(Unregister(*Handle) == ERROR_SUCCESS);
+    }
+    else if (Status == ERROR_CALL_NOT_IMPLEMENTED)
+    {
+        CHECK(*Handle == 0);
+        CHECK(Write(*Handle, &Event, 0, NULL) == ERROR_INVALID_HANDLE);
+        CHECK(Unregister(*Handle) == ERROR_SUCCESS);
+        puts("EVENT REGISTRATION manifest providers unavailable");
+    }
 }
 
 static void CheckRuntimeReporting(void)
@@ -743,6 +781,7 @@ int wmain(int argc, WCHAR **argv)
     CheckPerformanceTime();
     CheckTokenObjectLabel();
     CheckApplicationLibraries();
+    CheckEventRegistration();
     CheckRuntimeReporting();
     CheckPrivileges();
     CheckObjectSecurity();

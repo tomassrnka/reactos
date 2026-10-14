@@ -6,11 +6,43 @@
 
 #include <wmistr.h>
 #include <evntrace.h>
+#include <evntprov.h>
 
 #define NDEBUG
 #include <debug.h>
 
 #define FIXME DPRINT1
+
+/* Manifest-based ETW providers are not supported yet. Return a capability
+ * error without creating a registration that could be mistaken for active
+ * tracing. In particular, never leave the caller's handle uninitialized. */
+ULONG NTAPI
+EtwEventRegister(LPCGUID ProviderId, PENABLECALLBACK Callback, PVOID Context,
+                 PREGHANDLE Registration)
+{
+    UNREFERENCED_PARAMETER(Callback);
+    UNREFERENCED_PARAMETER(Context);
+    if (!ProviderId || !Registration) return ERROR_INVALID_PARAMETER;
+    *Registration = 0;
+    return ERROR_CALL_NOT_IMPLEMENTED;
+}
+
+ULONG NTAPI
+EtwEventUnregister(REGHANDLE Registration)
+{
+    return Registration ? ERROR_INVALID_HANDLE : ERROR_SUCCESS;
+}
+
+ULONG NTAPI
+EtwEventWrite(REGHANDLE Registration, PCEVENT_DESCRIPTOR Event,
+              ULONG Count, PEVENT_DATA_DESCRIPTOR Data)
+{
+    UNREFERENCED_PARAMETER(Registration);
+    UNREFERENCED_PARAMETER(Event);
+    UNREFERENCED_PARAMETER(Count);
+    UNREFERENCED_PARAMETER(Data);
+    return ERROR_INVALID_HANDLE;
+}
 
 /*
  * @unimplemented
