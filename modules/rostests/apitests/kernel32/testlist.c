@@ -65,6 +65,7 @@ extern void func_QueryUnbiasedInterruptTime(void);
 extern void func_QueueUserAPC(void);
 extern void func_RaiseFailFastException(void);
 extern void func_RegisterWait(void);
+extern void func_ResolveLocaleName(void);
 extern void func_SetComputerNameExW(void);
 extern void func_SetConsoleWindowInfo(void);
 extern void func_SetCurrentDirectory(void);
@@ -148,6 +149,7 @@ const struct test winetest_testlist[] =
     { "QueueUserAPC",                func_QueueUserAPC },
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "RegisterWait",                func_RegisterWait },
+    { "ResolveLocaleName",           func_ResolveLocaleName },
     { "SetComputerNameExW",          func_SetComputerNameExW },
     { "SetConsoleWindowInfo",        func_SetConsoleWindowInfo },
     { "SetCurrentDirectory",         func_SetCurrentDirectory },

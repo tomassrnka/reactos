@@ -68,6 +68,7 @@ list(APPEND SOURCE
     RaiseFailFastException.c
     ReadFile.c
     RegisterWait.c
+    ResolveLocaleName.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c
     SetCurrentDirectory.c

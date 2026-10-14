@@ -22,3 +22,7 @@
 
 /* Internal Kernel32 Header */
 #include "../include/kernel32.h"
+
+LCID
+BasepSpecialNeutralLcidToSpecific(
+    _In_ LCID Lcid);
