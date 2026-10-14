@@ -40,6 +40,7 @@ extern void func_GetLocaleInfo(void);
 extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetQueuedCompletionStatusEx(void);
+extern void func_GetSystemTimePreciseAsFileTime(void);
 extern void func_GetVolumeInformation(void);
 extern void func_IdleProcessor(void);
 extern void func_InitOnce(void);
@@ -131,6 +132,7 @@ const struct test winetest_testlist[] =
     { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
+    { "GetSystemTimePreciseAsFileTime", func_GetSystemTimePreciseAsFileTime },
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "IdleProcessor",               func_IdleProcessor },
     { "InitOnce",                    func_InitOnce },

@@ -38,6 +38,7 @@ list(APPEND SOURCE
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
     GetQueuedCompletionStatusEx.c
+    GetSystemTimePreciseAsFileTime.c
     GetVolumeInformation.c
     IdleProcessor.c
     InitOnce.c
