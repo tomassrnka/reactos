@@ -8677,7 +8677,8 @@ todo_wine
     ok( !iret, "getsockname failed.\n");
 
     /* AcceptEx() could complete any time now */
-    iret = send(connector, buffer, 1, 0);
+    buffer[0] = 0;
+    iret = send(connector, "a", 1, 0);
     ok(iret == 1, "could not send 1 byte: send %d errno %d\n", iret, WSAGetLastError());
 
     dwret = WaitForSingleObject(overlapped.hEvent, 1000);
@@ -8705,6 +8706,18 @@ todo_wine
     bret = GetOverlappedResult((HANDLE)listener, &overlapped, &bytesReturned, FALSE);
     ok(bret, "GetOverlappedResult failed, error %d\n", GetLastError());
     ok(bytesReturned == 1, "bytesReturned isn't supposed to be %d\n", bytesReturned);
+    ok(buffer[0] == 'a', "the initial data is at the start of the buffer, got %02x\n", (unsigned char)buffer[0]);
+
+    /* The accepted socket keeps receiving after the initial data */
+    optlen = 2000;
+    iret = setsockopt(acceptor, SOL_SOCKET, SO_RCVTIMEO, (char *)&optlen, sizeof(optlen));
+    ok(!iret, "setsockopt failed %d\n", WSAGetLastError());
+    iret = send(connector, "bcd", 3, 0);
+    ok(iret == 3, "could not send 3 bytes: send %d errno %d\n", iret, WSAGetLastError());
+    memset(ipbuffer, 0, sizeof(ipbuffer));
+    iret = recv(acceptor, ipbuffer, 3, 0);
+    ok(iret == 3, "recv after the initial data returned %d errno %d\n", iret, WSAGetLastError());
+    ok(!memcmp(ipbuffer, "bcd", 3), "recv after the initial data got %.3s\n", ipbuffer);
 
     closesocket(connector);
     connector = INVALID_SOCKET;
