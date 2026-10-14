@@ -341,6 +341,19 @@ START_TEST(RegWow64LongName)
     }
     if (count == _countof(keys))
     {
+        HKEY middle, leaf;
+        error = RegCreateKeyExW(keys[count-1], L"Wow6432Node\\Leaf", 0, NULL, 0,
+                               KEY_ALL_ACCESS, NULL, &leaf, NULL);
+        ok(error == ERROR_SUCCESS, "native long relative nested create: %ld\n", error);
+        if (!error)
+        {
+            set_value(leaf, 123);
+            NtDeleteKey(leaf);
+            RegCloseKey(leaf);
+            error = RegOpenKeyExW(keys[count-1], L"Wow6432Node", 0, KEY_ALL_ACCESS, &middle);
+            ok(error == ERROR_SUCCESS, "native long relative parent: %ld\n", error);
+            if (!error) { NtDeleteKey(middle); RegCloseKey(middle); }
+        }
         status = NtQueryObject(keys[count-1], ObjectNameInformation, buffer, sizeof(buffer), &length);
         ok(status == STATUS_INSUFFICIENT_RESOURCES, "unrepresentable object name: %lx\n", status);
     }
@@ -388,6 +401,24 @@ START_TEST(RegWow64Volatile)
     ok(error == ERROR_SUCCESS, "load fixture hive: %ld\n", error);
     if (error) goto cleanup;
     _snwprintf(child, _countof(child), L"%ls\\Software\\Classes", mount);
+    error = RegCreateKeyExW(HKEY_USERS, child, 0, NULL, 0,
+                           KEY_ALL_ACCESS, NULL, &parent, NULL);
+    ok(error == ERROR_SUCCESS, "stable Classes parent: %ld\n", error);
+    if (!error)
+    {
+        error = RegCreateKeyExW(parent, L"CLSID", 0, NULL, REG_OPTION_VOLATILE,
+                               KEY_ALL_ACCESS | KEY_WOW64_32KEY, NULL, &key, NULL);
+        ok(error == ERROR_SUCCESS, "stable parent volatile first child: %ld\n", error);
+        if (!error) { NtDeleteKey(key); RegCloseKey(key); }
+        error = RegCreateKeyExW(parent, L"Interface", 0, NULL, 0,
+                               KEY_ALL_ACCESS | KEY_WOW64_32KEY, NULL, &key, NULL);
+        ok(error == ERROR_SUCCESS, "stable parent stable second child: %ld\n", error);
+        if (!error) { NtDeleteKey(key); RegCloseKey(key); }
+        RegDeleteKeyW(parent, L"Wow6432Node");
+        NtDeleteKey(parent);
+        RegCloseKey(parent);
+    }
+    _snwprintf(child, _countof(child), L"%ls\\Software\\Classes", mount);
     error = RegCreateKeyExW(HKEY_USERS, child, 0, NULL, REG_OPTION_VOLATILE,
                            KEY_ALL_ACCESS, NULL, &parent, NULL);
     ok(error == ERROR_SUCCESS, "volatile Classes parent: %ld\n", error);
@@ -400,6 +431,10 @@ START_TEST(RegWow64Volatile)
             ok(error == ERROR_SUCCESS, "volatile Classes view %lu: %ld\n", view, error);
             if (!error) { NtDeleteKey(key); RegCloseKey(key); }
         }
+        error = RegCreateKeyExW(parent, L"Interface", 0, NULL, 0,
+                               KEY_ALL_ACCESS | KEY_WOW64_32KEY, NULL, &key, NULL);
+        ok(error == ERROR_CHILD_MUST_BE_VOLATILE, "volatile parent stable child: %ld\n", error);
+        if (!error) { NtDeleteKey(key); RegCloseKey(key); }
         RegDeleteKeyW(parent, L"Wow6432Node");
         NtDeleteKey(parent);
         RegCloseKey(parent);
@@ -411,4 +446,151 @@ cleanup:
 privileges:
     RtlAdjustPrivilege(SE_BACKUP_PRIVILEGE, backup, FALSE, &backup);
     RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, restore, FALSE, &restore);
+}
+
+
+/* Start with an absent shared boundary, so intermediate creation cannot be
+ * hidden by a native parent prepared by the matrix fixture. */
+START_TEST(RegWow64SharedCreate)
+{
+    static const REGSAM views[] = {KEY_WOW64_32KEY, 0, KEY_WOW64_64KEY};
+    SYSTEM_INFO native;
+    HKEY root, key, opened;
+    WCHAR path[180];
+    DWORD i, relative, disposition, forms;
+    LONG error;
+    GetNativeSystemInfo(&native);
+    forms = native.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? 4 : 2;
+#ifdef _WIN64
+    forms = 6; /* Include roots duplicated with zero granted access. */
+#endif
+    for (relative = 0; relative < forms; ++relative)
+    for (i = 0; i < _countof(views); ++i)
+    {
+        error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Notepad", 0,
+                              KEY_READ | KEY_WOW64_64KEY, &key);
+        ok(error == ERROR_FILE_NOT_FOUND, "native Notepad must be absent: %ld\n", error);
+        if (!error) { RegCloseKey(key); return; }
+        if (native.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
+        {
+            error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Microsoft\\Notepad", 0,
+                                  KEY_READ | KEY_WOW64_64KEY, &key);
+            ok(error == ERROR_FILE_NOT_FOUND, "physical Notepad must be absent: %ld\n", error);
+            if (!error) { RegCloseKey(key); return; }
+        }
+        root = HKEY_LOCAL_MACHINE;
+        if ((relative & 1) || relative >= 4)
+        {
+            error = RegOpenKeyExW(root, relative == 3 || relative == 5 ? L"Software\\Wow6432Node\\Microsoft" : L"Software\\Microsoft", 0,
+                                  KEY_ALL_ACCESS | KEY_WOW64_64KEY, &root);
+            ok(error == ERROR_SUCCESS, "relative Microsoft root: %ld\n", error);
+            if (error) return;
+#ifdef _WIN64
+            if (relative >= 4)
+            {
+                HKEY duplicate = NULL;
+                NTSTATUS status = NtDuplicateObject(NtCurrentProcess(), root, NtCurrentProcess(),
+                                                     (PHANDLE)&duplicate, 0, 0, 0);
+                ok(status == STATUS_SUCCESS, "zero-access root duplicate: %lx\n", status);
+                RegCloseKey(root);
+                if (!NT_SUCCESS(status)) return;
+                root = duplicate;
+            }
+#endif
+        }
+        wcscpy(path, ((relative & 1) || relative >= 4) ? L"Notepad\\DefaultFonts\\Review\\Leaf" :
+                     relative == 2 ? L"Software\\Wow6432Node\\Microsoft\\Notepad\\DefaultFonts\\Review\\Leaf" :
+                                     L"Software\\Microsoft\\Notepad\\DefaultFonts\\Review\\Leaf");
+        error = RegCreateKeyExW(root, path, 0, NULL, 0, KEY_ALL_ACCESS | views[i],
+                                NULL, &key, &disposition);
+        ok(error == ERROR_SUCCESS, "shared nested create relative %lu view %lx: %ld\n", relative, views[i], error);
+        if (!error)
+        {
+            ok(disposition == REG_CREATED_NEW_KEY, "shared nested disposition %lu\n", disposition);
+            set_value(key, 123);
+            RegCloseKey(key);
+            error = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                L"Software\\Microsoft\\Notepad\\DefaultFonts\\Review\\Leaf", 0,
+                KEY_READ | KEY_WOW64_64KEY, &opened);
+            ok(error == ERROR_SUCCESS, "shared nested native leaf: %ld\n", error);
+            if (!error) { value(opened, 123); RegCloseKey(opened); }
+        }
+        if ((relative & 1) || relative >= 4) RegCloseKey(root);
+        if (native.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
+        {
+            error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Microsoft\\Notepad", 0,
+                                  KEY_READ | KEY_WOW64_64KEY, &opened);
+            ok(error == ERROR_FILE_NOT_FOUND, "shared create left wrong-view parent: %ld\n", error);
+            if (!error) RegCloseKey(opened);
+            RegDeleteKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wow6432Node\\Microsoft\\Notepad", KEY_WOW64_64KEY, 0);
+        }
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Notepad\\DefaultFonts\\Review\\Leaf", KEY_WOW64_64KEY, 0);
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Notepad\\DefaultFonts\\Review", KEY_WOW64_64KEY, 0);
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Notepad\\DefaultFonts", KEY_WOW64_64KEY, 0);
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Notepad", KEY_WOW64_64KEY, 0);
+    }
+}
+
+START_TEST(RegWow64Aliases)
+{
+    static const REGSAM views[] = {0, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+    SYSTEM_INFO native;
+    BOOL wow64 = FALSE, aliased;
+    WCHAR logical[200], physical[240], leaf[80];
+    HKEY root, key, opened, container;
+    DWORD which, view, disposition;
+    LONG error;
+    GetNativeSystemInfo(&native);
+    IsWow64Process(GetCurrentProcess(), &wow64);
+    _snwprintf(leaf, _countof(leaf), L"ReviewAlias_%lu", GetCurrentProcessId());
+    for (which = 0; which < 3; ++which)
+    {
+        root = which == 1 ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE;
+        _snwprintf(logical, _countof(logical), L"%ls\\%ls",
+            which == 2 ? L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies" : L"Software\\Classes", leaf);
+        _snwprintf(physical, _countof(physical), L"%ls\\%ls",
+            which == 2 ? L"Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Policies" :
+                         L"Software\\Classes\\Wow6432Node", leaf);
+        error = RegCreateKeyExW(root, logical, 0, NULL, 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY, NULL, &key, NULL);
+        ok(error == ERROR_SUCCESS, "alias logical create %lu: %ld\n", which, error);
+        if (error) continue;
+        set_value(key, 64);
+        for (view = 0; view < _countof(views); ++view)
+        {
+            aliased = native.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 &&
+                      (which == 2 || views[view] == KEY_WOW64_32KEY || (!views[view] && wow64));
+            error = RegOpenKeyExW(root, physical, 0, KEY_READ | views[view], &opened);
+            ok(error == (aliased ? ERROR_SUCCESS : ERROR_FILE_NOT_FOUND),
+               "physical alias %lu view %lx: %ld expected alias %u\n", which, views[view], error, aliased);
+            if (!error) { value(opened, 64); RegCloseKey(opened); }
+            if (!aliased) continue;
+            error = RegCreateKeyExW(root, physical, 0, NULL, 0, KEY_ALL_ACCESS | views[view], NULL, &opened, &disposition);
+            ok(error == ERROR_SUCCESS, "alias create %lu view %lx: %ld\n", which, views[view], error);
+            if (!error)
+            {
+                ok(disposition == REG_OPENED_EXISTING_KEY, "alias created divergent key: %lu\n", disposition);
+                set_value(opened, 32);
+                value(key, 32);
+                set_value(key, 64);
+                RegCloseKey(opened);
+            }
+        }
+        if (which != 2 && native.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
+        {
+            error = RegCreateKeyExW(root, L"Software\\Classes\\Wow6432Node", 0, NULL, 0,
+                                    KEY_ALL_ACCESS | KEY_WOW64_64KEY, NULL, &container, NULL);
+            ok(error == ERROR_SUCCESS, "physical Classes container: %ld\n", error);
+            if (!error)
+            {
+                error = RegOpenKeyExW(container, leaf, 0, KEY_READ | KEY_WOW64_32KEY, &opened);
+                ok(error == ERROR_SUCCESS, "relative physical Classes alias: %ld\n", error);
+                if (!error) { value(opened, 64); RegCloseKey(opened); }
+                RegCloseKey(container);
+            }
+        }
+        NtDeleteKey(key);
+        RegCloseKey(key);
+        /* Clean a divergent key left by the before image, if any. */
+        RegDeleteKeyExW(root, physical, KEY_WOW64_64KEY, 0);
+    }
 }
