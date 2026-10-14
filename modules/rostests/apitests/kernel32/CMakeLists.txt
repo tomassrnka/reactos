@@ -1,5 +1,6 @@
 
 add_subdirectory(redirptest)
+add_subdirectory(tlsdyn)
 
 add_message_headers(ANSI FormatMessage.mc)
 
@@ -16,6 +17,7 @@ list(APPEND SOURCE
     DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
+    DynamicTls.c
     EnumSystemCodePages.c
     ExitThread.c
     FindActCtxSectionStringW.c
