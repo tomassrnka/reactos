@@ -115,6 +115,8 @@ void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads
 void ngc_trim(ngc_node *n);
 /* Write side (all under the caller's volume lock). */
 int ngc_is_rw(ngc_vol *v);
+/* True when the core stopped writing for good: changes not committed yet are lost. */
+int ngc_failed(ngc_vol *v);
 int ngc_mark_dirty(ngc_vol *v);
 int ngc_sync(ngc_vol *v);
 int ngc_commit_now(ngc_vol *v);

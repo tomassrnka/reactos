@@ -921,11 +921,14 @@ static NTSTATUS NgResizeStatus(int Err)
 /*
  * After a resize (CoreLock held): the volume information again, and a core that a failed resize left
  * read-only (nothing more may be written) makes the whole mount read-only, so that no write, cached
- * or paging, is accepted that could never reach the disk.
+ * or paging, is accepted that could never reach the disk.  A core that stopped writing for good also
+ * makes flushes fail (WritesLost): what was written before can no longer reach the disk either.
  */
 static VOID NgResizeEnded(PNG_VCB Vcb)
 {
     ngc_volinfo(Vcb->Core, &Vcb->Info);
+    if (ngc_failed(Vcb->Core))
+        Vcb->WritesLost = TRUE;
     if (!ngc_is_rw(Vcb->Core) && !Vcb->ReadOnly)
     {
         DPRINT1("ntfsng: volume %08lx: a resize failed half way, the volume is read-only now\n", Vcb->Vpb->SerialNumber);

@@ -1408,6 +1408,11 @@ int ngc_is_rw(ngc_vol *v)
 	return !sb_rdonly(v->sb);
 }
 
+int ngc_failed(ngc_vol *v)
+{
+	return v->failed || kshim_jnl_failed(v->bdev);
+}
+
 /*
  * Writeback did not complete, so committing now would publish part of an operation (an MFT record
  * without its bitmap change).  Nothing is committed: the overlay and the dirty pages stay, and the
