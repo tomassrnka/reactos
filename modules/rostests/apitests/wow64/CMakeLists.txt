@@ -37,6 +37,11 @@ add_wow64_apitest(advapi32
 target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
 
 if(ARCH STREQUAL "i386")
+    # Explicit smoke-test target; do not change default image contents.
+    add_executable(wow64_gui_load EXCLUDE_FROM_ALL gui_load.c)
+    set_module_type(wow64_gui_load win32cui)
+    add_importlibs(wow64_gui_load msvcrt kernel32)
+
     add_asm_files(wow64_continue_asm ../ntdll/i386/Wow64Continue.S)
     target_sources(ntdll_wow64_apitest PRIVATE ${wow64_continue_asm})
 elseif(ARCH STREQUAL "amd64")

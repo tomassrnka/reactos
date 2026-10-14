@@ -89,6 +89,10 @@ add_library(user32 MODULE
     ${user32_asm}
     user32.rc
     ${CMAKE_CURRENT_BINARY_DIR}/user32.def)
+if(SYSWOW64_GUEST)
+    # Include the shared rtl sources and layout pin in the wide guest build.
+    target_compile_definitions(user32 PRIVATE W32K_WIDE)
+endif()
 add_pch(user32 include/user32.h SOURCE)
 
 set_module_type(user32 win32dll UNICODE ENTRYPOINT DllMain 12)

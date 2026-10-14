@@ -38,6 +38,10 @@ if(NOT MSVC AND (ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64"))
 endif()
 
 add_library(imm32 MODULE ${SOURCE} imm32.rc)
+if(SYSWOW64_GUEST)
+    # The layout pin is compiled with the same definitions as the DLL.
+    target_compile_definitions(imm32 PRIVATE W32K_WIDE)
+endif()
 set_module_type(imm32 win32dll UNICODE ENTRYPOINT ImmDllInitialize 12)
 target_link_libraries(imm32 wine win32ksys uuid)
 add_importlibs(imm32 advapi32 user32 gdi32 kernel32 ntdll)
