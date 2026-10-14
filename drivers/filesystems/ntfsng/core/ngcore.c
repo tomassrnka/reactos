@@ -2331,6 +2331,11 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		goto out;
 	if (ngc_resize_fault == 5)
 		kshim_jnl_degrade(v->bdev);
+	/* A degraded journal writes in place: no resize until a commit has made it whole again. */
+	if (kshim_jnl_degraded(v->bdev)) {
+		err = -ENOMEM;
+		goto out;
+	}
 	/* From here every metadata write goes through the journal or fails: none goes in place. */
 	kshim_jnl_strict(v->bdev, 1);
 	if (ngc_resize_fault == 6)
@@ -2485,6 +2490,8 @@ static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
 	if (!boot)
 		return -ENOMEM;
 	err = ngc_mark_dirty(v);
+	if (!err && kshim_jnl_degraded(v->bdev))
+		err = -ENOMEM;	/* a degraded journal writes in place: see ngc_extend_impl */
 	if (err)
 		goto out;
 	kshim_jnl_strict(v->bdev, 1);
