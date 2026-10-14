@@ -2290,8 +2290,9 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 	}
 	/*
 	 * $Bitmap first, the boot sector after it: an interruption between the two commits leaves
-	 * the old size with a $Bitmap larger than it needs, which every reader accepts.  Once the
-	 * clusters are in use in memory, a failed write leaves the volume read-only.
+	 * the old size with a $Bitmap larger than it needs, which every reader mounts (a checker
+	 * reports the free bits past the old end and sets them).  Once the clusters are in use in
+	 * memory, a failed write leaves the volume read-only.
 	 */
 	err = ngc_commit(v);
 	if (!err && ngc_resize_fault == 2)
@@ -2410,9 +2411,10 @@ static int ngc_shrink_impl(ngc_vol *v, unsigned long long sectors)
 	if (err)
 		goto out;
 	/*
-	 * In three commits, each leaving a volume every reader accepts: the padding bits (at the old
-	 * size a few free clusters marked in use), the boot sector (the new size with a $Bitmap
-	 * larger than it needs), then the shorter $Bitmap.
+	 * In three commits, each leaving a volume every reader mounts (a checker reports the bitmap
+	 * bits of the first state and corrects them): the padding bits (at the old size a few free
+	 * clusters marked in use), the boot sector (the new size with a $Bitmap larger than it
+	 * needs), then the shorter $Bitmap.
 	 */
 	ngc_recount_free(vol);
 	err = ngc_commit(v);
