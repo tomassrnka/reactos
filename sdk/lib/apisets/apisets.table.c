@@ -200,6 +200,7 @@ const ROS_APISET g_Apisets[] = {
     { RTL_CONSTANT_STRING(L"api-MS-Win-Core-ProcessThreads-L1-1-0"), RTL_CONSTANT_STRING(L"kernel32.dll"), APISET_WIN7 | APISET_WIN8 | APISET_WIN81 },
     { RTL_CONSTANT_STRING(L"api-ms-win-core-processthreads-l1-1-1"), RTL_CONSTANT_STRING(L"kernel32.dll"), APISET_WIN8 | APISET_WIN81 },
     { RTL_CONSTANT_STRING(L"api-ms-win-core-processthreads-l1-1-2"), RTL_CONSTANT_STRING(L"kernel32.dll"), APISET_WIN81 },
+    { RTL_CONSTANT_STRING(L"api-ms-win-core-processthreads-l1-1-3"), RTL_CONSTANT_STRING(L"kernel32.dll"), APISET_WIN10 },
     { RTL_CONSTANT_STRING(L"api-ms-win-core-processthreads-l1-1-4"), RTL_CONSTANT_STRING(L"kernel32.dll"), APISET_WIN10 },
     { RTL_CONSTANT_STRING(L"api-ms-win-core-processtopology-l1-1-0"), RTL_CONSTANT_STRING(L"kernel32.dll"), APISET_WIN8 | APISET_WIN81 | APISET_WIN10 }, // kernelbase.dll
     { RTL_CONSTANT_STRING(L"api-ms-win-core-processtopology-l1-2-0"), RTL_CONSTANT_STRING(L"kernel32.dll"), APISET_WIN81 | APISET_WIN10 }, // kernelbase.dll

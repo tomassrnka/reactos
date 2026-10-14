@@ -188,6 +188,351 @@ typedef enum _THREAD_INFORMATION_CLASS
     ThreadInformationClassMax
 } THREAD_INFORMATION_CLASS;
 
+#if (_WIN32_WINNT >= 0x0602) || defined(__REACTOS__)
+
+#define MEMORY_PRIORITY_LOWEST          0
+#define MEMORY_PRIORITY_VERY_LOW        1
+#define MEMORY_PRIORITY_LOW             2
+#define MEMORY_PRIORITY_MEDIUM          3
+#define MEMORY_PRIORITY_BELOW_NORMAL    4
+#define MEMORY_PRIORITY_NORMAL          5
+
+typedef struct _MEMORY_PRIORITY_INFORMATION
+{
+    ULONG MemoryPriority;
+} MEMORY_PRIORITY_INFORMATION, *PMEMORY_PRIORITY_INFORMATION;
+
+#define THREAD_POWER_THROTTLING_CURRENT_VERSION 1
+#define THREAD_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#define THREAD_POWER_THROTTLING_VALID_FLAGS     (THREAD_POWER_THROTTLING_EXECUTION_SPEED)
+
+typedef struct _THREAD_POWER_THROTTLING_STATE
+{
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+} THREAD_POWER_THROTTLING_STATE, *PTHREAD_POWER_THROTTLING_STATE;
+
+WINBASEAPI
+BOOL
+WINAPI
+GetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _Out_writes_bytes_(ThreadInformationSize) LPVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize);
+
+WINBASEAPI
+BOOL
+WINAPI
+SetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _In_reads_bytes_(ThreadInformationSize) LPVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize);
+
+
+typedef enum _PROCESS_MITIGATION_POLICY
+{
+    ProcessDEPPolicy,
+    ProcessASLRPolicy,
+    ProcessDynamicCodePolicy,
+    ProcessStrictHandleCheckPolicy,
+    ProcessSystemCallDisablePolicy,
+    ProcessMitigationOptionsMask,
+    ProcessExtensionPointDisablePolicy,
+    ProcessControlFlowGuardPolicy,
+    ProcessSignaturePolicy,
+    ProcessFontDisablePolicy,
+    ProcessImageLoadPolicy,
+    ProcessSystemCallFilterPolicy,
+    ProcessPayloadRestrictionPolicy,
+    ProcessChildProcessPolicy,
+    ProcessSideChannelIsolationPolicy,
+    ProcessUserShadowStackPolicy,
+    ProcessRedirectionTrustPolicy,
+    ProcessUserPointerAuthPolicy,
+    ProcessSEHOPPolicy,
+    MaxProcessMitigationPolicy
+} PROCESS_MITIGATION_POLICY, *PPROCESS_MITIGATION_POLICY;
+
+typedef struct _PROCESS_MITIGATION_DEP_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD Enable:1;
+            DWORD DisableAtlThunkEmulation:1;
+            DWORD ReservedFlags:30;
+        };
+    };
+    BOOLEAN Permanent;
+} PROCESS_MITIGATION_DEP_POLICY, *PPROCESS_MITIGATION_DEP_POLICY;
+
+typedef struct _PROCESS_MITIGATION_ASLR_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD EnableBottomUpRandomization:1;
+            DWORD EnableForceRelocateImages:1;
+            DWORD EnableHighEntropy:1;
+            DWORD DisallowStrippedImages:1;
+            DWORD ReservedFlags:28;
+        };
+    };
+} PROCESS_MITIGATION_ASLR_POLICY, *PPROCESS_MITIGATION_ASLR_POLICY;
+
+typedef struct _PROCESS_MITIGATION_DYNAMIC_CODE_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD ProhibitDynamicCode:1;
+            DWORD AllowThreadOptOut:1;
+            DWORD AllowRemoteDowngrade:1;
+            DWORD AuditProhibitDynamicCode:1;
+            DWORD ReservedFlags:28;
+        };
+    };
+} PROCESS_MITIGATION_DYNAMIC_CODE_POLICY, *PPROCESS_MITIGATION_DYNAMIC_CODE_POLICY;
+
+typedef struct _PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD RaiseExceptionOnInvalidHandleReference:1;
+            DWORD HandleExceptionsPermanentlyEnabled:1;
+            DWORD ReservedFlags:30;
+        };
+    };
+} PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY, *PPROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY;
+
+typedef struct _PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD DisallowWin32kSystemCalls:1;
+            DWORD AuditDisallowWin32kSystemCalls:1;
+            DWORD ReservedFlags:30;
+        };
+    };
+} PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY, *PPROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY;
+
+typedef struct _PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD DisableExtensionPoints:1;
+            DWORD ReservedFlags:31;
+        };
+    };
+} PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY, *PPROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY;
+
+typedef struct _PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD EnableControlFlowGuard:1;
+            DWORD EnableExportSuppression:1;
+            DWORD StrictMode:1;
+            DWORD EnableXfg:1;
+            DWORD EnableXfgAuditMode:1;
+            DWORD ReservedFlags:27;
+        };
+    };
+} PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY, *PPROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY;
+
+typedef struct _PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD MicrosoftSignedOnly:1;
+            DWORD StoreSignedOnly:1;
+            DWORD MitigationOptIn:1;
+            DWORD AuditMicrosoftSignedOnly:1;
+            DWORD AuditStoreSignedOnly:1;
+            DWORD ReservedFlags:27;
+        };
+    };
+} PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY, *PPROCESS_MITIGATION_BINARY_SIGNATURE_POLICY;
+
+typedef struct _PROCESS_MITIGATION_FONT_DISABLE_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD DisableNonSystemFonts:1;
+            DWORD AuditNonSystemFontLoading:1;
+            DWORD ReservedFlags:30;
+        };
+    };
+} PROCESS_MITIGATION_FONT_DISABLE_POLICY, *PPROCESS_MITIGATION_FONT_DISABLE_POLICY;
+
+typedef struct _PROCESS_MITIGATION_IMAGE_LOAD_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD NoRemoteImages:1;
+            DWORD NoLowMandatoryLabelImages:1;
+            DWORD PreferSystem32Images:1;
+            DWORD AuditNoRemoteImages:1;
+            DWORD AuditNoLowMandatoryLabelImages:1;
+            DWORD ReservedFlags:27;
+        };
+    };
+} PROCESS_MITIGATION_IMAGE_LOAD_POLICY, *PPROCESS_MITIGATION_IMAGE_LOAD_POLICY;
+
+typedef struct _PROCESS_MITIGATION_SYSTEM_CALL_FILTER_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD FilterId:4;
+            DWORD ReservedFlags:28;
+        };
+    };
+} PROCESS_MITIGATION_SYSTEM_CALL_FILTER_POLICY, *PPROCESS_MITIGATION_SYSTEM_CALL_FILTER_POLICY;
+
+typedef struct _PROCESS_MITIGATION_PAYLOAD_RESTRICTION_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD EnableExportAddressFilter:1;
+            DWORD AuditExportAddressFilter:1;
+            DWORD EnableExportAddressFilterPlus:1;
+            DWORD AuditExportAddressFilterPlus:1;
+            DWORD EnableImportAddressFilter:1;
+            DWORD AuditImportAddressFilter:1;
+            DWORD EnableRopStackPivot:1;
+            DWORD AuditRopStackPivot:1;
+            DWORD EnableRopCallerCheck:1;
+            DWORD AuditRopCallerCheck:1;
+            DWORD EnableRopSimExec:1;
+            DWORD AuditRopSimExec:1;
+            DWORD ReservedFlags:20;
+        };
+    };
+} PROCESS_MITIGATION_PAYLOAD_RESTRICTION_POLICY, *PPROCESS_MITIGATION_PAYLOAD_RESTRICTION_POLICY;
+
+typedef struct _PROCESS_MITIGATION_CHILD_PROCESS_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD NoChildProcessCreation:1;
+            DWORD AuditNoChildProcessCreation:1;
+            DWORD AllowSecureProcessCreation:1;
+            DWORD ReservedFlags:29;
+        };
+    };
+} PROCESS_MITIGATION_CHILD_PROCESS_POLICY, *PPROCESS_MITIGATION_CHILD_PROCESS_POLICY;
+
+typedef struct _PROCESS_MITIGATION_SIDE_CHANNEL_ISOLATION_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD SmtBranchTargetIsolation:1;
+            DWORD IsolateSecurityDomain:1;
+            DWORD DisablePageCombine:1;
+            DWORD SpeculativeStoreBypassDisable:1;
+            DWORD RestrictCoreSharing:1;
+            DWORD ReservedFlags:27;
+        };
+    };
+} PROCESS_MITIGATION_SIDE_CHANNEL_ISOLATION_POLICY, *PPROCESS_MITIGATION_SIDE_CHANNEL_ISOLATION_POLICY;
+
+typedef struct _PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD EnableUserShadowStack:1;
+            DWORD AuditUserShadowStack:1;
+            DWORD SetContextIpValidation:1;
+            DWORD AuditSetContextIpValidation:1;
+            DWORD EnableUserShadowStackStrictMode:1;
+            DWORD BlockNonCetBinaries:1;
+            DWORD BlockNonCetBinariesNonEhcont:1;
+            DWORD AuditBlockNonCetBinaries:1;
+            DWORD CetDynamicApisOutOfProcOnly:1;
+            DWORD SetContextIpValidationRelaxedMode:1;
+            DWORD ReservedFlags:22;
+        };
+    };
+} PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY, *PPROCESS_MITIGATION_USER_SHADOW_STACK_POLICY;
+
+typedef struct _PROCESS_MITIGATION_REDIRECTION_TRUST_POLICY
+{
+    union
+    {
+        DWORD Flags;
+        struct
+        {
+            DWORD EnforceRedirectionTrust:1;
+            DWORD AuditRedirectionTrust:1;
+            DWORD ReservedFlags:30;
+        };
+    };
+} PROCESS_MITIGATION_REDIRECTION_TRUST_POLICY, *PPROCESS_MITIGATION_REDIRECTION_TRUST_POLICY;
+
+WINBASEAPI
+BOOL
+WINAPI
+GetProcessMitigationPolicy(
+    _In_ HANDLE hProcess,
+    _In_ PROCESS_MITIGATION_POLICY MitigationPolicy,
+    _Out_writes_bytes_(nLength) PVOID lpBuffer,
+    _In_ SIZE_T nLength);
+
+WINBASEAPI
+BOOL
+WINAPI
+SetProcessMitigationPolicy(
+    _In_ PROCESS_MITIGATION_POLICY MitigationPolicy,
+    _In_reads_bytes_(nLength) PVOID lpBuffer,
+    _In_ SIZE_T nLength);
+
+#endif // (_WIN32_WINNT >= 0x0602) || defined(__REACTOS__)
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
