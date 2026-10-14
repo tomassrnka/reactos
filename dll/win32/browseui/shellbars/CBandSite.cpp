@@ -1007,6 +1007,7 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::QueryService(REFGUID guidService, REFII
 #define BANDSITE_STREAM_MAGIC   0x53425242
 #define BANDSITE_STREAM_VERSION 1
 #define BANDSITE_STREAM_MAXBANDS 64
+#define BANDSITE_STREAM_MAXENTRY 0x100000
 #define BSE_HIDDENTITLE         0x1
 #define BSE_BREAK               0x2
 
@@ -1116,6 +1117,8 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Load(IStream *pStm)
         BANDSITE_STREAM_ENTRY entry;
         ULARGE_INTEGER uliStart;
         CComPtr<IUnknown> punk;
+        CComPtr<IStream> pBody;
+        CComHeapPtr<BYTE> body;
 
         if (FAILED(_StreamTell(pStm, &uliStart)))
             break;
@@ -1125,18 +1128,26 @@ HRESULT STDMETHODCALLTYPE CBandSiteBase::Load(IStream *pStm)
 
         /* An entry holds its fixed part and the class of the band and stays inside the stream */
         if (entry.cbEntry < sizeof(entry) - sizeof(entry.cbEntry) + sizeof(CLSID) ||
-            entry.cbEntry > stat.cbSize.QuadPart - uliStart.QuadPart - sizeof(entry.cbEntry))
+            entry.cbEntry > stat.cbSize.QuadPart - uliStart.QuadPart - sizeof(entry.cbEntry) ||
+            entry.cbEntry > BANDSITE_STREAM_MAXENTRY)
         {
             break;
         }
 
-        hr = pHelper->LoadFromStreamBS(pStm, IID_IUnknown, (void **)&punk);
+        /* The band reads from a stream of its own, it cannot take bytes of the next entry */
+        DWORD cbBody = entry.cbEntry - (sizeof(entry) - sizeof(entry.cbEntry));
+        if (!body.Allocate(cbBody))
+            break;
+        hr = pStm->Read(body, cbBody, &cbRead);
+        if (FAILED(hr) || cbRead != cbBody)
+            break;
+        pBody.Attach(SHCreateMemStream(body, cbBody));
+        if (!pBody)
+            break;
+
+        hr = pHelper->LoadFromStreamBS(pBody, IID_IUnknown, (void **)&punk);
         if (FAILED(hr))
             punk.Detach();
-
-        /* The next entry follows this one whatever the band consumed or whether it loaded */
-        if (FAILED(_StreamSeek(pStm, uliStart.QuadPart + sizeof(entry.cbEntry) + entry.cbEntry)))
-            break;
 
         if (FAILED(hr) || FAILED(pSite->AddBand(punk)))
         {

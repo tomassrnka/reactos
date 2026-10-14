@@ -384,65 +384,51 @@ STDMETHODIMP CISFBand::IsDirty()
 #define ISFBAND_SHOWTEXT        0x2
 #define ISFBAND_SMALLICON       0x4
 
-/* ILLoadFromStream trusts the sizes in the stream, which can be changed by anyone who can write the registry */
-static HRESULT _LoadPidlFromStream(IStream *pStm, CComHeapPtr<ITEMIDLIST_ABSOLUTE> &pidl)
-{
-    WORD cb;
-    ULONG cbRead;
-    STATSTG stat;
-    ULARGE_INTEGER pos;
-    LARGE_INTEGER zero;
-
-    zero.QuadPart = 0;
-    HRESULT hr = pStm->Read(&cb, sizeof(cb), &cbRead);
-    if (FAILED(hr) || cbRead != sizeof(cb) || cb < sizeof(WORD))
-        return E_FAIL;
-    hr = pStm->Seek(zero, STREAM_SEEK_CUR, &pos);
-    if (FAILED(hr))
-        return hr;
-    hr = pStm->Stat(&stat, STATFLAG_NONAME);
-    if (FAILED(hr))
-        return hr;
-    if (pos.QuadPart + cb > stat.cbSize.QuadPart)
-        return E_FAIL;
-
-    if (!pidl.AllocateBytes(cb))
-        return E_OUTOFMEMORY;
-    hr = pStm->Read(pidl, cb, &cbRead);
-    if (FAILED(hr) || cbRead != cb)
-        return E_FAIL;
-
-    /* The items end with the terminator inside the bytes that were read */
-    const BYTE *pb = (const BYTE *)pidl.m_pData;
-    UINT off = 0;
-    for (;;)
-    {
-        if (off + sizeof(WORD) > cb)
-            return E_FAIL;
-        WORD item = *(const WORD *)(pb + off);
-        if (item == 0)
-            return S_OK;
-        if (item < sizeof(WORD))
-            return E_FAIL;
-        off += item;
-    }
-}
+/* The persisted band: a version, the toolbar options and the folder it shows, as the path of
+ * a file system folder (empty for the desktop). A stream can be changed by anyone who can write the
+ * registry, a path is parsed by the shell with the checks of any path, an item list is not. */
+#define ISFBAND_STREAM_VERSION  1
+#define ISFBAND_QLAUNCH         0x1
+#define ISFBAND_SHOWTEXT        0x2
+#define ISFBAND_SMALLICON       0x4
 
 STDMETHODIMP CISFBand::Load(IN IStream *pStm)
 {
-    DWORD header[2];
+    DWORD header[3];
+    WCHAR szPath[MAX_PATH];
     ULONG cbRead;
     CComHeapPtr<ITEMIDLIST_ABSOLUTE> pidl;
 
     HRESULT hr = pStm->Read(header, sizeof(header), &cbRead);
     if (FAILED(hr))
         return hr;
-    if (cbRead != sizeof(header) || header[0] != ISFBAND_STREAM_VERSION)
+    if (cbRead != sizeof(header) || header[0] != ISFBAND_STREAM_VERSION || header[2] >= _countof(szPath))
         return E_FAIL;
 
-    hr = _LoadPidlFromStream(pStm, pidl);
-    if (FAILED(hr))
-        return hr;
+    /* The length of the path in characters without the terminator */
+    if (header[2] != 0)
+    {
+        hr = pStm->Read(szPath, header[2] * sizeof(WCHAR), &cbRead);
+        if (FAILED(hr))
+            return hr;
+        if (cbRead != header[2] * sizeof(WCHAR))
+            return E_FAIL;
+        szPath[header[2]] = UNICODE_NULL;
+        if ((DWORD)lstrlenW(szPath) != header[2])
+            return E_FAIL;
+
+        hr = SHILCreateFromPath(szPath, &pidl, NULL);
+        if (FAILED(hr))
+            return hr;
+    }
+    else
+    {
+        hr = SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &pidl);
+        if (FAILED(hr))
+            return hr;
+    }
+    if (!pidl)
+        return E_FAIL;
 
     hr = InitializeSFB(NULL, pidl);
     if (FAILED(hr))
@@ -456,11 +442,20 @@ STDMETHODIMP CISFBand::Load(IN IStream *pStm)
 
 STDMETHODIMP CISFBand::Save(IN IStream *pStm, IN BOOL fClearDirty)
 {
-    DWORD header[2] = { ISFBAND_STREAM_VERSION, 0 };
+    DWORD header[3] = { ISFBAND_STREAM_VERSION, 0, 0 };
+    WCHAR szPath[MAX_PATH];
     ULONG cbWritten;
 
     if (!m_pidl)
         return E_FAIL;
+
+    /* Only a file system folder or the desktop can be stored */
+    if (!_ILIsDesktop(m_pidl))
+    {
+        if (!SHGetPathFromIDListW(m_pidl, szPath))
+            return E_FAIL;
+        header[2] = lstrlenW(szPath);
+    }
 
     if (m_QLaunch)
         header[1] |= ISFBAND_QLAUNCH;
@@ -475,7 +470,13 @@ STDMETHODIMP CISFBand::Save(IN IStream *pStm, IN BOOL fClearDirty)
     if (cbWritten != sizeof(header))
         return E_FAIL;
 
-    return ILSaveToStream(pStm, m_pidl);
+    if (header[2] == 0)
+        return S_OK;
+
+    hr = pStm->Write(szPath, header[2] * sizeof(WCHAR), &cbWritten);
+    if (FAILED(hr))
+        return hr;
+    return (cbWritten == header[2] * sizeof(WCHAR)) ? S_OK : E_FAIL;
 }
 
 STDMETHODIMP CISFBand::GetSizeMax(OUT ULARGE_INTEGER *pcbSize)
