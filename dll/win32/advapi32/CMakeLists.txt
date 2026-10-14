@@ -81,5 +81,12 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     target_link_libraries(advapi32 etwtrace)
 endif()
 add_delay_importlibs(advapi32 secur32)
-add_importlibs(advapi32 advapi32_vista rpcrt4 kernel32 ntdll)
+if(SYSWOW64_GUEST)
+    # Local registry/security APIs do not need an RPC transport. Keep the
+    # console guest runtime independent of the socket/user32 import chain.
+    add_delay_importlibs(advapi32 rpcrt4)
+else()
+    add_importlibs(advapi32 rpcrt4)
+endif()
+add_importlibs(advapi32 advapi32_vista kernel32 ntdll)
 add_cd_file(TARGET advapi32 DESTINATION reactos/system32 FOR all)
