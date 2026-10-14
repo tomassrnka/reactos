@@ -295,6 +295,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(tbs)
     add_subdirectory(tdh)
     add_subdirectory(wer)
+    add_subdirectory(wevtapi)
 endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x603)
