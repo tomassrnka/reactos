@@ -5168,22 +5168,6 @@ RtlConvertLCIDToString(
     _Out_writes_(Size) PWSTR pResultBuf,
     _In_ ULONG Size);
 
-_Success_(return != FALSE)
-NTSYSAPI
-BOOLEAN
-NTAPI
-RtlCultureNameToLCID(
-    _In_ PCUNICODE_STRING String,
-    _Out_ PLCID Lcid);
-
-_Success_(return != FALSE)
-NTSYSAPI
-BOOLEAN
-NTAPI
-RtlLCIDToCultureName(
-    _In_ LCID Lcid,
-    _Inout_ PUNICODE_STRING String);
-
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -5246,6 +5230,27 @@ RtlQueryUnbiasedInterruptTime(
 #endif /* Win7 or ReactOS Ntdll build */
 
 #endif // NTOS_MODE_USER
+
+#if (defined(NTOS_MODE_USER) && (_WIN32_WINNT >= _WIN32_WINNT_VISTA)) || \
+    (_WIN32_WINNT >= _WIN32_WINNT_WIN8) || defined(__REACTOS__)
+
+_Success_(return != FALSE)
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlCultureNameToLCID(
+    _In_ PCUNICODE_STRING String,
+    _Out_ PLCID Lcid);
+
+_Success_(return != FALSE)
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlLCIDToCultureName(
+    _In_ LCID Lcid,
+    _Inout_ PUNICODE_STRING String);
+
+#endif /* Vista+ ntdll, Win8+ ntoskrnl, or ReactOS */
 
 NTSYSAPI
 NTSTATUS

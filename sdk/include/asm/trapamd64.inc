@@ -51,6 +51,7 @@ NoUserApcPending:
 ENDM
 
 APIC_EOI = HEX(0FFFFFFFFFFFE00B0)
+APIC_ESR = HEX(0FFFFFFFFFFFE0280)
 X2APIC_MSR_EOI = HEX(80B)
 
 /* The BOOLEAN that tells whether the local APIC is in x2APIC mode */

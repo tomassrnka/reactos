@@ -18,6 +18,8 @@
 
 typedef NTSTATUS (NTAPI *PCSR_CREATE_REMOTE_THREAD)(IN HANDLE ThreadHandle, IN PCLIENT_ID ClientId);
 
+#define THREAD_ALL_ACCESS_NT6 (STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|0xFFFF)
+
 /* FUNCTIONS ******************************************************************/
 
 NTSTATUS
@@ -270,7 +272,7 @@ CreateRemoteThreadEx(
 
     /* Create the Kernel Thread Object */
     Status = NtCreateThread(&hThread,
-                            THREAD_ALL_ACCESS,
+                            THREAD_ALL_ACCESS_NT6,
                             ObjectAttributes,
                             hProcess,
                             &ClientId,

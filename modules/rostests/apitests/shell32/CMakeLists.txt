@@ -59,6 +59,7 @@ list(APPEND SOURCE
     ShellExecuteEx.cpp
     ShellExecuteLinkDir.cpp
     #ShellExecuteW.cpp # Broke on Windows
+    ShellFolder.cpp
     ShellHook.cpp
     ShellInfo.cpp
     ShellState.cpp

@@ -52,6 +52,7 @@ extern void func_ShellExecCmdLine(void);
 extern void func_ShellExecuteEx(void);
 extern void func_ShellExecuteLinkDir(void);
 extern void func_ShellExecuteW(void);
+extern void func_ShellFolder(void);
 extern void func_ShellHook(void);
 extern void func_ShellState(void);
 extern void func_SHGetAttributesFromDataObject(void);
@@ -62,6 +63,7 @@ extern void func_SHBindToFolderIDListParent(void);
 extern void func_SHGetKnownFolderPath(void);
 extern void func_SHGetPathFromIDListEx(void);
 extern void func_SHGetStockIconInfo(void);
+extern void func_SHGetNewLinkInfo(void);
 extern void func_SHGetUnreadMailCountW(void);
 extern void func_SHGetUserDisplayName(void);
 extern void func_SHIsBadInterfacePtr(void);
@@ -125,6 +127,7 @@ const struct test winetest_testlist[] =
     { "ShellExecuteEx", func_ShellExecuteEx }, // Mostly broken on Windows, only simple tests enabled
     //{ "ShellExecuteW", func_ShellExecuteW }, Broke on Windows
     { "ShellExecuteLinkDir", func_ShellExecuteLinkDir },
+    { "ShellFolder", func_ShellFolder },
     { "ShellHook", func_ShellHook },
     { "ShellState", func_ShellState },
     { "SHGetAttributesFromDataObject", func_SHGetAttributesFromDataObject },
@@ -135,6 +138,7 @@ const struct test winetest_testlist[] =
     { "SHGetKnownFolderPath", func_SHGetKnownFolderPath },
     { "SHGetPathFromIDListEx", func_SHGetPathFromIDListEx },
     { "SHGetStockIconInfo", func_SHGetStockIconInfo },
+    { "SHGetNewLinkInfo", func_SHGetNewLinkInfo },
     { "SHGetUnreadMailCountW", func_SHGetUnreadMailCountW },
     { "SHGetUserDisplayName", func_SHGetUserDisplayName },
     { "SHIsBadInterfacePtr", func_SHIsBadInterfacePtr },

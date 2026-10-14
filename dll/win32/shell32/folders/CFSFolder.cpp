@@ -1614,13 +1614,12 @@ HRESULT WINAPI CFSFolder::SetNameOf(
 
 HRESULT WINAPI CFSFolder::GetDefaultSearchGUID(GUID * pguid)
 {
-    FIXME ("(%p)\n", this);
     return E_NOTIMPL;
 }
 
 HRESULT WINAPI CFSFolder::EnumSearches(IEnumExtraSearch ** ppenum)
 {
-    FIXME ("(%p)\n", this);
+    *ppenum = NULL;
     return E_NOTIMPL;
 }
 
@@ -1628,13 +1627,7 @@ HRESULT WINAPI CFSFolder::GetDefaultColumn(DWORD dwRes,
         ULONG * pSort, ULONG * pDisplay)
 {
     TRACE ("(%p)\n", this);
-
-    if (pSort)
-        *pSort = 0;
-    if (pDisplay)
-        *pDisplay = 0;
-
-    return S_OK;
+    return E_NOTIMPL; // Not required when column 0 is our default.
 }
 
 HRESULT WINAPI CFSFolder::GetDefaultColumnState(UINT iColumn,
