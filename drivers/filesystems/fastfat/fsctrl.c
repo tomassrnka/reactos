@@ -4060,6 +4060,78 @@ Routine Description:
 //  Local Support Routine
 //
 
+static
+BOOLEAN
+FatExtendFaultBegin (
+    IN PVCB Vcb,
+    OUT PVBO Vbo,
+    OUT PULONG Length
+    )
+
+/*++
+
+Routine Description:
+
+    Test only: with the ExtendFault DWORD of the service key set, the first
+    dirty range of the FAT is marked clean, as a volume file write does when
+    it starts its transfer (write.c), so that the flush that follows skips
+    it.  FatExtendFaultEnd then marks it dirty again, as that write does when
+    it fails.  Together they are a FAT write running at the same time as the
+    flush and failing.
+
+--*/
+
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING( L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\fastfat" );
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING( L"ExtendFault" );
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    HANDLE Key;
+    ULONG Returned;
+    BOOLEAN Armed = FALSE;
+
+    InitializeObjectAttributes( &ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL );
+
+    if (NT_SUCCESS( ZwOpenKey( &Key, KEY_READ, &ObjectAttributes ))) {
+
+        if (NT_SUCCESS( ZwQueryValueKey( Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Returned )) &&
+            Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG) && *(PULONG)Info->Data != 0) {
+
+            Armed = TRUE;
+        }
+
+        ZwClose( Key );
+    }
+
+    if (!Armed ||
+        !FatFindDirtyFat( Vcb, FatReservedBytes( &Vcb->Bpb ), FatBytesPerFat( &Vcb->Bpb ), Vbo, Length )) {
+
+        return FALSE;
+    }
+
+    DbgPrint( "FatExtendVolume: ExtendFault: FAT bytes %lu+%lu are written at the same time as the flush and fail\n", *Vbo, *Length );
+    FatSetDirtyFatBits( Vcb, *Vbo, *Length, FALSE );
+    return TRUE;
+}
+
+static
+VOID
+FatExtendFaultEnd (
+    IN PVCB Vcb,
+    IN VBO Vbo,
+    IN ULONG Length
+    )
+{
+    FatMarkFatDirty( Vcb, Vbo, Length );
+    InterlockedIncrement( &Vcb->DirtyFatWriteFailures );
+}
+
+
+//
+//  Local Support Routine
+//
+
 _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatExtendVolume (
@@ -4109,6 +4181,9 @@ Routine Description:
     UCHAR Saved[6];
     BOOLEAN BackupWritten = FALSE;
     LARGE_INTEGER Offset;
+    BOOLEAN Hidden;
+    VBO HiddenVbo;
+    ULONG HiddenLength;
 
     PAGED_CODE();
 
@@ -4291,21 +4366,28 @@ Routine Description:
         }
 
         //
-        //  The boot sector, and on FAT32 its backup copy first.  Each is written from its pinned
-        //  cache page, still pinned; a failed write puts the old size back in the page.
-        //
-
-        //
         //  Every FAT change still in the cache reaches the disk first: tearing the allocation
         //  package down below forgets which FAT sectors are dirty, and those would never be written.
         //
 
+        Hidden = FatExtendFaultBegin( Vcb, &HiddenVbo, &HiddenLength );
+
         Status = FatFlushFat( IrpContext, Vcb );
+
+        if (Hidden) {
+
+            FatExtendFaultEnd( Vcb, HiddenVbo, HiddenLength );
+        }
 
         if (!NT_SUCCESS( Status )) {
 
             try_leave( NOTHING );
         }
+
+        //
+        //  The boot sector, and on FAT32 its backup copy first.  Each is written from its pinned
+        //  cache page, still pinned; a failed write puts the old size back in the page.
+        //
 
         Copy = FsRtlAllocatePoolWithTag( NonPagedPoolNx, Vcb->Bpb.BytesPerSector, TAG_IO_BUFFER );
 
