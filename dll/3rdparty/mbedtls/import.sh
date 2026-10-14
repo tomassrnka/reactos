@@ -30,4 +30,5 @@ cp "$SRC"/library/*.c "$SRC"/library/*.h "$HERE"/
 cp "$SRC"/include/mbedtls/*.h "$INC/mbedtls/"
 cp "$SRC"/include/psa/*.h "$INC/psa/"
 cp "$HERE/ros_config.h" "$INC/mbedtls/mbedtls_config.h"
+patch -d "$HERE" -p0 < "$HERE/ros_hrr_cookie.patch"
 echo "Imported Mbed TLS $VERSION"

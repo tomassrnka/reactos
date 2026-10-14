@@ -1677,6 +1677,14 @@ int mbedtls_ssl_tls13_check_received_extension(
     }
 
     ssl->handshake->received_extensions |= extension_mask;
+
+    /* RFC 8446 section 4.2.2: a server may put a cookie in a HelloRetryRequest that the client did not
+     * ask for, which the check below would call unsupported (ReactOS patch, ros_hrr_cookie.patch) */
+    if (hs_msg_type == MBEDTLS_SSL_TLS1_3_HS_HELLO_RETRY_REQUEST &&
+        received_extension_type == MBEDTLS_TLS_EXT_COOKIE) {
+        return 0;
+    }
+
     /*
      * If it is a message containing extension responses, check that we
      * previously sent the extension.
