@@ -19,6 +19,7 @@ list(APPEND SOURCE
     registry.c
     resinfo_reactos.c
     route_reactos.c
+    route2.c
     iphlpapi_private.h
     ${CMAKE_CURRENT_BINARY_DIR}/iphlpapi_stubs.c)
 

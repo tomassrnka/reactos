@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_GetBestRoute2(void);
 extern void func_GetExtendedTcpTable(void);
 extern void func_GetExtendedUdpTable(void);
 extern void func_GetInterfaceName(void);
@@ -17,6 +18,7 @@ extern void func_TcpUdpTableRows(void);
 
 const struct test winetest_testlist[] =
 {
+    { "GetBestRoute2",             func_GetBestRoute2 },
     { "GetExtendedTcpTable",        func_GetExtendedTcpTable },
     { "GetExtendedUdpTable",        func_GetExtendedUdpTable },
     { "GetInterfaceName",           func_GetInterfaceName },
