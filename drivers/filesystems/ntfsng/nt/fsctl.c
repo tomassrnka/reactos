@@ -918,6 +918,21 @@ static NTSTATUS NgResizeStatus(int Err)
     return NgErrnoToStatus(Err);
 }
 
+/*
+ * After a resize (CoreLock held): the volume information again, and a core that a failed resize left
+ * read-only (nothing more may be written) makes the whole mount read-only, so that no write, cached
+ * or paging, is accepted that could never reach the disk.
+ */
+static VOID NgResizeEnded(PNG_VCB Vcb)
+{
+    ngc_volinfo(Vcb->Core, &Vcb->Info);
+    if (!ngc_is_rw(Vcb->Core) && !Vcb->ReadOnly)
+    {
+        DPRINT1("ntfsng: volume %08lx: a resize failed half way, the volume is read-only now\n", Vcb->Vpb->SerialNumber);
+        Vcb->ReadOnly = TRUE;
+    }
+}
+
 /* A volume handle that may change the volume (as FSCTL_LOCK_VOLUME), on a volume the core may write. */
 static NTSTATUS NgResizeAllowed(PNG_VCB Vcb, PNG_FCB Fcb, PFILE_OBJECT FileObject)
 {
@@ -963,7 +978,7 @@ static NTSTATUS NgExtendVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
     if (Vcb->Core)
     {
         struct ngc_ntfsdata d;
-        ngc_volinfo(Vcb->Core, &Vcb->Info);
+        NgResizeEnded(Vcb);
         ngc_ntfs_data(Vcb->Core, &d);
         if (d.sectors)
             Vcb->BootSectors = d.sectors;
@@ -1034,13 +1049,13 @@ static NTSTATUS NgShrinkVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
                 break;
             }
             Err = ngc_shrink(Vcb->Core, Vcb->ShrinkSectors);
+            NgResizeEnded(Vcb);
             if (Err == -NGC_ENOSPC)
             {
                 /* Data past the new end: the request stays prepared, as on Windows. */
                 Status = STATUS_ACCESS_DENIED;
                 break;
             }
-            ngc_volinfo(Vcb->Core, &Vcb->Info);
             {
                 struct ngc_ntfsdata d;
                 ngc_ntfs_data(Vcb->Core, &d);
