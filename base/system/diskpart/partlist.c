@@ -1510,11 +1510,16 @@ AddDiskToList(
     }
     else if (DiskEntry->PartitionStyle == PARTITION_STYLE_GPT)
     {
-        /* Calculate the number of usable sectors */
+        /*
+         * Calculate the number of usable sectors: from the first aligned sector after
+         * the start of the usable area to the last sector before the last alignment
+         * boundary inside it (the backup table follows the usable area).
+         */
         DiskEntry->StartSector.QuadPart = AlignDown(DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart / DiskEntry->BytesPerSector,
                                                     DiskEntry->SectorAlignment) + (ULONGLONG)DiskEntry->SectorAlignment;
-        DiskEntry->EndSector.QuadPart = AlignDown(DiskEntry->StartSector.QuadPart + (DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart / DiskEntry->BytesPerSector) - 1,
-                                                  DiskEntry->SectorAlignment);
+        DiskEntry->EndSector.QuadPart = AlignDown((DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart +
+                                                   DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart) / DiskEntry->BytesPerSector,
+                                                  DiskEntry->SectorAlignment) - 1;
 
         if (DiskEntry->LayoutBuffer->PartitionCount == 0)
         {
