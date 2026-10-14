@@ -1205,6 +1205,178 @@ static void test_CreateFontFromLOGFONT(void)
     ok(ref == 0, "factory is not released, %lu\n", ref);
 }
 
+static BOOL draw_params_run(IDWriteBitmapRenderTarget *target, IDWriteFontFace *fontface, UINT16 glyph,
+        float level, DWRITE_PIXEL_GEOMETRY geometry, DWORD *pixels, int width, int height)
+{
+    IDWriteFactory *factory;
+    IDWriteRenderingParams *params;
+    DWRITE_GLYPH_RUN run;
+    FLOAT advance = 0.0f;
+    DIBSECTION ds;
+    HRESULT hr;
+    HBITMAP hbm;
+    RECT box;
+    HDC hdc;
+
+    factory = create_factory();
+    hr = IDWriteFactory_CreateCustomRenderingParams(factory, 1.0f, 0.0f, level, geometry,
+            DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, &params);
+    ok(hr == S_OK, "Failed to create rendering params, hr %#lx.\n", hr);
+
+    hdc = IDWriteBitmapRenderTarget_GetMemoryDC(target);
+    PatBlt(hdc, 0, 0, width, height, WHITENESS);
+
+    memset(&run, 0, sizeof(run));
+    run.fontFace = fontface;
+    run.fontEmSize = 30.0f;
+    run.glyphCount = 1;
+    run.glyphIndices = &glyph;
+    run.glyphAdvances = &advance;
+
+    /* A fractional origin: stripes only differ from grayscale where an edge falls inside a pixel. */
+    hr = IDWriteBitmapRenderTarget_DrawGlyphRun(target, 4.33f, 36.0f, DWRITE_MEASURING_MODE_NATURAL, &run, params,
+            RGB(0, 0, 0), &box);
+    ok(hr == S_OK, "Failed to draw a run, hr %#lx.\n", hr);
+
+    hbm = GetCurrentObject(hdc, OBJ_BITMAP);
+    GetObjectW(hbm, sizeof(ds), &ds);
+    memcpy(pixels, ds.dsBm.bmBits, width * height * sizeof(*pixels));
+
+    IDWriteRenderingParams_Release(params);
+    IDWriteFactory_Release(factory);
+    return hr == S_OK;
+}
+
+static void test_bitmap_target_rendering_params(void)
+{
+    enum { W = 64, H = 48 };
+    static DWORD rgb[W * H], bgr[W * H], flat[W * H], level0[W * H], half[W * H];
+    IDWriteBitmapRenderTarget *target;
+    IDWriteGdiInterop *interop;
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    unsigned int i, colored = 0, drawn = 0, differs = 0;
+    UINT32 ch = 'H';
+    UINT16 glyph = 0;
+    HRESULT hr;
+    ULONG ref;
+
+    factory = create_factory();
+    hr = IDWriteFactory_GetGdiInterop(factory, &interop);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteGdiInterop_CreateBitmapRenderTarget(interop, NULL, W, H, &target);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    fontface = create_fontface(factory);
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &ch, 1, &glyph);
+    ok(hr == S_OK && glyph, "Unexpected hr %#lx, glyph %u.\n", hr, glyph);
+
+    if (!draw_params_run(target, fontface, glyph, 1.0f, DWRITE_PIXEL_GEOMETRY_RGB, rgb, W, H) ||
+        !draw_params_run(target, fontface, glyph, 1.0f, DWRITE_PIXEL_GEOMETRY_BGR, bgr, W, H) ||
+        !draw_params_run(target, fontface, glyph, 1.0f, DWRITE_PIXEL_GEOMETRY_FLAT, flat, W, H) ||
+        !draw_params_run(target, fontface, glyph, 0.0f, DWRITE_PIXEL_GEOMETRY_RGB, level0, W, H) ||
+        !draw_params_run(target, fontface, glyph, 0.5f, DWRITE_PIXEL_GEOMETRY_RGB, half, W, H))
+        goto done;
+
+    for (i = 0; i < W * H; i++)
+    {
+        DWORD p = rgb[i] & 0xffffff;
+
+        if (p != 0xffffff) drawn++;
+        if (((p >> 16) & 0xff) != (p & 0xff)) colored++;
+
+        /* flat geometry and level 0 give gray pixels */
+        ok(((flat[i] >> 16) & 0xff) == (flat[i] & 0xff) && ((flat[i] >> 8) & 0xff) == (flat[i] & 0xff),
+                "pixel %u: flat geometry gave %08lx.\n", i, flat[i]);
+        ok(((level0[i] >> 16) & 0xff) == (level0[i] & 0xff) && ((level0[i] >> 8) & 0xff) == (level0[i] & 0xff),
+                "pixel %u: level 0 gave %08lx.\n", i, level0[i]);
+
+        /* black text on white: the BGR image is the RGB image with red and blue exchanged */
+        ok((bgr[i] & 0xff00) == (rgb[i] & 0xff00) && ((bgr[i] >> 16) & 0xff) == (rgb[i] & 0xff) &&
+                (bgr[i] & 0xff) == ((rgb[i] >> 16) & 0xff),
+                "pixel %u: BGR gave %08lx, RGB gave %08lx.\n", i, bgr[i], rgb[i]);
+
+        /* half level sits between grayscale and the full stripes */
+        if ((half[i] & 0xffffff) != (rgb[i] & 0xffffff))
+            differs++;
+    }
+    ok(drawn > 0, "Nothing was drawn.\n");
+    ok(colored > 0, "Clear type level 1 with an RGB geometry produced no coloured pixel.\n");
+    ok(differs > 0 || !colored, "Clear type level 0.5 equals level 1.\n");
+
+done:
+    IDWriteFontFace_Release(fontface);
+    ref = IDWriteBitmapRenderTarget_Release(target);
+    ok(ref == 0, "render target not released, %lu\n", ref);
+    ref = IDWriteGdiInterop_Release(interop);
+    ok(ref == 0, "interop not released, %lu\n", ref);
+    ref = IDWriteFactory_Release(factory);
+    ok(ref == 0, "factory not released, %lu\n", ref);
+}
+
+static void test_glyphrunanalysis_huge_texture(void)
+{
+    static const float sizes[] = { 20.0f, 45000.0f, 300000.0f };
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    UINT32 ch = 'H';
+    UINT16 glyph = 0;
+    unsigned int i;
+    HRESULT hr;
+    ULONG ref;
+
+    factory = create_factory();
+    fontface = create_fontface(factory);
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &ch, 1, &glyph);
+    ok(hr == S_OK && glyph, "Unexpected hr %#lx, glyph %u.\n", hr, glyph);
+
+    for (i = 0; i < ARRAY_SIZE(sizes); i++)
+    {
+        IDWriteGlyphRunAnalysis *analysis;
+        DWRITE_GLYPH_RUN run;
+        FLOAT advance = 0.0f;
+        BYTE buffer[16] = { 0 };
+        RECT bounds, huge = { 0, 0, 65536, 65536 };
+
+        memset(&run, 0, sizeof(run));
+        run.fontFace = fontface;
+        run.fontEmSize = sizes[i];
+        run.glyphCount = 1;
+        run.glyphIndices = &glyph;
+        run.glyphAdvances = &advance;
+
+        hr = IDWriteFactory_CreateGlyphRunAnalysis(factory, &run, 1.0f, NULL, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+                DWRITE_MEASURING_MODE_NATURAL, 0.0f, 0.0f, &analysis);
+        ok(hr == S_OK, "Size %.0f: unexpected hr %#lx.\n", sizes[i], hr);
+        if (FAILED(hr))
+            continue;
+
+        /* A texture can be asked for with a size that overflows 32 bits once it is multiplied by three: the buffer
+           must be refused, not written into. */
+        hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &huge, buffer,
+                sizeof(buffer));
+        ok(FAILED(hr), "Size %.0f: a 65536x65536 texture in %u bytes gave hr %#lx.\n", sizes[i], (unsigned int)sizeof(buffer), hr);
+
+        /* The run's own bounds are fine to ask for, however large the glyph is. */
+        SetRectEmpty(&bounds);
+        hr = IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds);
+        ok(hr == S_OK, "Size %.0f: unexpected hr %#lx.\n", sizes[i], hr);
+        if (hr == S_OK && !IsRectEmpty(&bounds))
+        {
+            hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds, buffer,
+                    sizeof(buffer));
+            ok(FAILED(hr), "Size %.0f: a texture of %s in %u bytes gave hr %#lx.\n", sizes[i],
+                    wine_dbgstr_rect(&bounds), (unsigned int)sizeof(buffer), hr);
+        }
+
+        IDWriteGlyphRunAnalysis_Release(analysis);
+    }
+
+    IDWriteFontFace_Release(fontface);
+    ref = IDWriteFactory_Release(factory);
+    ok(ref == 0, "factory not released, %lu\n", ref);
+}
+
 static void test_CreateBitmapRenderTarget(void)
 {
     IDWriteBitmapRenderTarget *target, *target2;
@@ -10498,6 +10670,8 @@ START_TEST(font)
     test_object_lifetime();
     test_CreateFontFromLOGFONT();
     test_CreateBitmapRenderTarget();
+    test_bitmap_target_rendering_params();
+    test_glyphrunanalysis_huge_texture();
     test_GetFontFamily();
     test_GetFamilyNames();
     test_CreateFontFace();

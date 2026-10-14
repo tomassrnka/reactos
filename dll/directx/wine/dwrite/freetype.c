@@ -96,9 +96,17 @@ static FT_Error (*pFT_Outline_EmboldenXY)(FT_Outline *, FT_Pos, FT_Pos);
 
 #define FaceFromObject(o) ((FT_Face)(ULONG_PTR)(o))
 
-static FT_Size freetype_set_face_size(FT_Face face, FT_UInt emsize)
+/* FreeType keeps ppem in 16 bits and a size in the hundreds of thousands of pixels never finishes hinting a glyph;
+   nothing drawn on a bitmap needs more than this. */
+#define DWRITE_MAX_EM_SIZE 16384.0f
+
+static FT_Size freetype_set_face_size(FT_Face face, float em_size)
 {
+    FT_UInt emsize;
     FT_Size size;
+
+    if (!(em_size >= 0.0f && em_size <= DWRITE_MAX_EM_SIZE)) return NULL;
+    emsize = (FT_UInt)em_size;
 
     if (pFT_New_Size(face, &size)) return NULL;
 
@@ -549,13 +557,23 @@ static BOOL get_glyph_transform(unsigned int simulations, const MATRIX_2X2 *m, f
     return TRUE;
 }
 
+/* Whether the glyph shape (simulations, matrix) rules out an embedded strike. The sub-pixel offset is left out on
+   purpose: whether a glyph comes from a strike or from its outline must not change with a quarter pixel shift. */
+static BOOL glyph_shape_needs_outline(unsigned int simulations, const MATRIX_2X2 *m)
+{
+    FT_Matrix ftm;
+    FT_Vector delta;
+
+    return get_glyph_transform(simulations, m, 0.0f, 0.0f, &ftm, &delta);
+}
+
 static NTSTATUS get_glyph_bbox(void *args)
 {
     struct get_glyph_bbox_params *params = args;
     FT_Face face = FaceFromObject(params->object);
     FT_Glyph glyph = NULL;
     FT_BBox bbox = { 0 };
-    BOOL needs_transform;
+    BOOL needs_transform, needs_outline;
     FT_Matrix m;
     FT_Vector delta;
     FT_Size size;
@@ -567,8 +585,9 @@ static NTSTATUS get_glyph_bbox(void *args)
 
     needs_transform = FT_IS_SCALABLE(face) &&
             get_glyph_transform(params->simulations, &params->m, params->dx, params->dy, &m, &delta);
+    needs_outline = FT_IS_SCALABLE(face) && glyph_shape_needs_outline(params->simulations, &params->m);
 
-    if (pFT_Load_Glyph(face, params->glyph, needs_transform ? FT_LOAD_NO_BITMAP : 0))
+    if (pFT_Load_Glyph(face, params->glyph, needs_outline ? FT_LOAD_NO_BITMAP : 0))
     {
         WARN("Failed to load glyph %u.\n", params->glyph);
         pFT_Done_Size(size);
@@ -576,7 +595,7 @@ static NTSTATUS get_glyph_bbox(void *args)
     }
 
     pFT_Get_Glyph(face->glyph, &glyph);
-    if (needs_transform)
+    if (needs_transform && glyph->format == FT_GLYPH_FORMAT_OUTLINE)
     {
         if (params->simulations & DWRITE_FONT_SIMULATIONS_BOLD)
             embolden_glyph(glyph, params->emsize);
@@ -641,6 +660,54 @@ static NTSTATUS freetype_get_aliased_glyph_bitmap(struct get_glyph_bitmap_params
     return STATUS_SUCCESS;
 }
 
+/* One row of an embedded strike as 8 bit coverage. FreeType hands out packed 1, 2 and 4 bit rows as well as 8 bit
+ * ones, with the row stride in pitch; anything else (LCD, BGRA, ...) is refused. */
+static BOOL freetype_bitmap_row_coverage(const FT_Bitmap *bm, int y, unsigned int count, BYTE *dst)
+{
+    const BYTE *row;
+    unsigned int x, width = bm->width, bits, row_bytes;
+    int pitch = bm->pitch;
+
+    switch (bm->pixel_mode)
+    {
+        case FT_PIXEL_MODE_MONO: bits = 1; break;
+        case FT_PIXEL_MODE_GRAY2: bits = 2; break;
+        case FT_PIXEL_MODE_GRAY4: bits = 4; break;
+        case FT_PIXEL_MODE_GRAY: bits = 8; break;
+        default: return FALSE;
+    }
+
+    memset(dst, 0, count);
+    if (y < 0 || (unsigned int)y >= bm->rows)
+        return TRUE;
+
+    row_bytes = ((UINT64)width * bits + 7) / 8;
+    if ((unsigned int)abs(pitch) < row_bytes || !bm->buffer)
+        return FALSE;
+
+    row = bm->buffer + (ptrdiff_t)y * pitch;
+    if (width > count)
+        width = count;
+
+    for (x = 0; x < width; x++)
+    {
+        unsigned int v;
+
+        switch (bits)
+        {
+            case 1: v = (row[x >> 3] >> (7 - (x & 7))) & 1; dst[x] = v ? 255 : 0; break;
+            case 2: v = (row[x >> 2] >> (6 - 2 * (x & 3))) & 3; dst[x] = v * 85; break;
+            case 4: v = (row[x >> 1] >> (4 - 4 * (x & 1))) & 15; dst[x] = v * 17; break;
+            default:
+                v = row[x];
+                if (bm->num_grays > 1 && bm->num_grays < 256) v = v * 255 / (bm->num_grays - 1);
+                dst[x] = v > 255 ? 255 : v;
+                break;
+        }
+    }
+    return TRUE;
+}
+
 static NTSTATUS freetype_get_aa_glyph_bitmap(struct get_glyph_bitmap_params *params, FT_Glyph glyph)
 {
     const RECT *bbox = &params->bbox;
@@ -670,18 +737,12 @@ static NTSTATUS freetype_get_aa_glyph_bitmap(struct get_glyph_bitmap_params *par
         }
     }
     else if (glyph->format == FT_GLYPH_FORMAT_BITMAP) {
-        FT_Bitmap *ft_bitmap = &((FT_BitmapGlyph)glyph)->bitmap;
-        BYTE *src = ft_bitmap->buffer, *dst = params->bitmap;
-        int w = min(params->pitch, (ft_bitmap->width + 7) >> 3);
-        int h = min(height, ft_bitmap->rows);
+        const FT_Bitmap *ft_bitmap = &((FT_BitmapGlyph)glyph)->bitmap;
+        int y, h = min(height, (int)ft_bitmap->rows);
 
-        while (h--) {
-            memcpy(dst, src, w);
-            src += ft_bitmap->pitch;
-            dst += params->pitch;
-        }
-
-        *params->is_1bpp = 1;
+        for (y = 0; y < h; y++)
+            if (!freetype_bitmap_row_coverage(ft_bitmap, y, min(width, params->pitch), params->bitmap + (ptrdiff_t)y * params->pitch))
+                return STATUS_NOT_IMPLEMENTED;
     }
     else
     {
@@ -748,22 +809,24 @@ static NTSTATUS freetype_get_lcd_glyph_bitmap(struct get_glyph_bitmap_params *pa
     else if (glyph->format == FT_GLYPH_FORMAT_BITMAP) {
         const FT_Bitmap *ft_bitmap = &((FT_BitmapGlyph)glyph)->bitmap;
         int h = min(height, (int)ft_bitmap->rows);
+        BYTE *cov;
 
-        /* A strike has no subpixel detail: every stripe of a covered pixel is fully covered. */
+        if (!(cov = malloc(width + 1)))
+            return STATUS_NO_MEMORY;
+
+        /* A strike has no subpixel detail: every stripe of a covered pixel is fully covered. The pixel columns start
+           one pixel in, past the margin the filter would have needed. */
         for (y = 0; y < h; y++) {
-            const BYTE *src = ft_bitmap->buffer + y * ft_bitmap->pitch;
-            BYTE *dst = params->bitmap + y * params->pitch;
+            BYTE *dst = params->bitmap + (ptrdiff_t)y * params->pitch;
 
-            for (x = 0; x < (int)ft_bitmap->width && x + 1 < width; x++) {
-                BYTE a;
-
-                if (ft_bitmap->pixel_mode == FT_PIXEL_MODE_MONO)
-                    a = (src[x / 8] & (0x80 >> (x % 8))) ? 255 : 0;
-                else
-                    a = src[x];
-                dst[(x + 1) * 3] = dst[(x + 1) * 3 + 1] = dst[(x + 1) * 3 + 2] = a;
+            if (!freetype_bitmap_row_coverage(ft_bitmap, y, max(width - 1, 0), cov)) {
+                free(cov);
+                return STATUS_NOT_IMPLEMENTED;
             }
+            for (x = 0; x + 1 < width; x++)
+                dst[(x + 1) * 3] = dst[(x + 1) * 3 + 1] = dst[(x + 1) * 3 + 2] = cov[x];
         }
+        free(cov);
     }
     else
     {
@@ -778,7 +841,7 @@ static NTSTATUS get_glyph_bitmap(void *args)
 {
     struct get_glyph_bitmap_params *params = args;
     FT_Face face = FaceFromObject(params->object);
-    BOOL needs_transform;
+    BOOL needs_transform, needs_outline;
     BOOL ret = FALSE;
     FT_Glyph glyph;
     FT_Size size;
@@ -792,12 +855,13 @@ static NTSTATUS get_glyph_bitmap(void *args)
 
     needs_transform = FT_IS_SCALABLE(face) &&
             get_glyph_transform(params->simulations, &params->m, params->dx, params->dy, &m, &delta);
+    needs_outline = FT_IS_SCALABLE(face) && glyph_shape_needs_outline(params->simulations, &params->m);
 
-    if (!pFT_Load_Glyph(face, params->glyph, needs_transform ? FT_LOAD_NO_BITMAP : 0))
+    if (!pFT_Load_Glyph(face, params->glyph, needs_outline ? FT_LOAD_NO_BITMAP : 0))
     {
         pFT_Get_Glyph(face->glyph, &glyph);
 
-        if (needs_transform)
+        if (needs_transform && glyph->format == FT_GLYPH_FORMAT_OUTLINE)
         {
             if (params->simulations & DWRITE_FONT_SIMULATIONS_BOLD)
                 embolden_glyph(glyph, params->emsize);
