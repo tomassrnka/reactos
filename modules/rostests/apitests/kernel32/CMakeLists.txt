@@ -65,6 +65,7 @@ list(APPEND SOURCE
     QueryCycleTime.c
     QueryUnbiasedInterruptTime.c
     ProcessToken.c
+    ProcessorGroups.c
     QueueUserAPC.c
     RaiseFailFastException.c
     ReadFile.c
@@ -77,6 +78,7 @@ list(APPEND SOURCE
     SetThreadStackGuarantee.c
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
+    SetWaitableTimerEx.c
     SystemFirmware.c
     Toolhelp32.c
     TerminateProcess.c

@@ -63,6 +63,7 @@ extern void func_ProcessAffinity(void);
 extern void func_QueryCycleTime(void);
 extern void func_QueryUnbiasedInterruptTime(void);
 extern void func_ProcessToken(void);
+extern void func_ProcessorGroups(void);
 extern void func_QueueUserAPC(void);
 extern void func_RaiseFailFastException(void);
 extern void func_RegisterWait(void);
@@ -73,6 +74,7 @@ extern void func_SetCurrentDirectory(void);
 extern void func_SetThreadStackGuarantee(void);
 extern void func_SetUnhandledExceptionFilter(void);
 extern void func_SuspendThreadContext(void);
+extern void func_SetWaitableTimerEx(void);
 extern void func_SystemFirmware(void);
 extern void func_Toolhelp32(void);
 extern void func_TerminateProcess(void);
@@ -149,6 +151,7 @@ const struct test winetest_testlist[] =
     { "QueryCycleTime",              func_QueryCycleTime },
     { "QueryUnbiasedInterruptTime",  func_QueryUnbiasedInterruptTime },
     { "ProcessToken",                func_ProcessToken },
+    { "ProcessorGroups",             func_ProcessorGroups },
     { "QueueUserAPC",                func_QueueUserAPC },
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "RegisterWait",                func_RegisterWait },
@@ -159,6 +162,7 @@ const struct test winetest_testlist[] =
     { "SetThreadStackGuarantee",     func_SetThreadStackGuarantee },
     { "SetUnhandledExceptionFilter", func_SetUnhandledExceptionFilter },
     { "SuspendThreadContext",        func_SuspendThreadContext },
+    { "SetWaitableTimerEx",          func_SetWaitableTimerEx },
     { "SystemFirmware",              func_SystemFirmware },
     { "Toolhelp32",                  func_Toolhelp32 },
     { "TerminateProcess",            func_TerminateProcess },
