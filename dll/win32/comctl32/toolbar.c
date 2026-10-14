@@ -6661,8 +6661,16 @@ TOOLBAR_Notify (TOOLBAR_INFO *infoPtr, LPNMHDR lpnmh)
             nmedA.fChanged = nmedW->fChanged;
             nmedA.iNewSelection = nmedW->iNewSelection;
             nmedA.iWhy = nmedW->iWhy;
-            WideCharToMultiByte(CP_ACP, 0, nmedW->szText, -1, nmedA.szText, ARRAY_SIZE(nmedA.szText), NULL, NULL);
-            nmedA.szText[ARRAY_SIZE(nmedA.szText) - 1] = 0;
+            WideCharToMultiByte(CP_ACP, 0, nmedW->szText, -1, nmedA.szText, ARRAY_SIZE(nmedA.szText) - 1, NULL, NULL);
+            /* a text that did not fit ends with half of a double byte character */
+            for (CHAR *psz = nmedA.szText; *psz; psz = CharNextExA(CP_ACP, psz, 0))
+            {
+                if (IsDBCSLeadByteEx(CP_ACP, (BYTE)*psz) && !psz[1])
+                {
+                    *psz = 0;
+                    break;
+                }
+            }
             return SendMessageW(infoPtr->hwndNotify, WM_NOTIFY, nmedA.hdr.idFrom, (LPARAM)&nmedA);
         }
         return SendMessageW(infoPtr->hwndNotify, WM_NOTIFY, lpnmh->idFrom, (LPARAM)lpnmh);

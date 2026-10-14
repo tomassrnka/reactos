@@ -543,10 +543,14 @@ static void TestComboBoxExAbortEndEdit(void)
             if (tests[i].repaint)
                 RedrawWindow(parent, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 
+            NotifyReset();
             g_ntf_settext_wnd = tests[i].settext ? combo : NULL;
             g_ntf_result = tests[i].result;
             SendMessageW(edit, WM_KEYDOWN, VK_RETURN, 0);
             g_ntf_settext_wnd = NULL;
+
+            ok(g_ntf_calls >= 1 && g_ntf_codes[0] == CBEN_ENDEDITW, "test %u: end of editing was not notified\n", i);
+            ok(g_ntf_why == CBENF_RETURN, "test %u: reason %d\n", i, g_ntf_why);
 
             GetWindowTextW(edit, text, ARRAY_SIZE(text));
             trace("test %u: edit text after Enter is '%ls'\n", i, text);
