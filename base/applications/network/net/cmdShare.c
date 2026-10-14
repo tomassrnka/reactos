@@ -786,7 +786,7 @@ cmdShare(
     PWSTR pszSpec = NULL;
     PWSTR ptr;
     PCWSTR pszValue;
-    INT i, result = 0;
+    INT i;
 
     ZeroMemory(&Options, sizeof(Options));
 
