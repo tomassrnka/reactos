@@ -2,6 +2,7 @@
 add_subdirectory(load_notifications)
 add_subdirectory(empty_dll)
 add_subdirectory(crtkeydtor)
+add_subdirectory(apiset_win10)
 
 include_directories($<TARGET_FILE_DIR:load_notifications>)
 include_directories($<TARGET_FILE_DIR:empty_dll>)
@@ -42,6 +43,7 @@ list(APPEND SOURCE
     CommitCharge.c
     DllLoadNotification.c
     EmptyPxe.c
+    ApiSetQueryApiSetPresence.c
     LdrEnumResources.c
     LdrFindResource_U.c
     LdrLoadDll.c
@@ -142,6 +144,7 @@ list(APPEND SOURCE
     RtlImageDirectoryEntryToData.c
     RtlImageRvaToVa.c
     RtlInitializeContext.c
+    RtlInitializeSidEx.c
     RtlIsNameInExpression.c
     RtlIsNameLegalDOS8Dot3.c
     RtlLocale.c
@@ -167,8 +170,10 @@ list(APPEND SOURCE
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
     RtlUnicodeToOemN.c
+    RtlUTF8.c
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
+    strcpy_s.c
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c

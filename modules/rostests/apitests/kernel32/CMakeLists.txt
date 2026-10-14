@@ -44,6 +44,7 @@ list(APPEND SOURCE
     IdleProcessor.c
     InitOnce.c
     interlck.c
+    IsApiSetImplemented.c
     IsDBCSLeadByteEx.c
     JapaneseCalendar.c
     JobObject.c

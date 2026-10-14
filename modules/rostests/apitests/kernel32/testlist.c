@@ -46,6 +46,7 @@ extern void func_HeapWalk(void);
 extern void func_IdleProcessor(void);
 extern void func_InitOnce(void);
 extern void func_interlck(void);
+extern void func_IsApiSetImplemented(void);
 extern void func_IsDBCSLeadByteEx(void);
 extern void func_JapaneseCalendar(void);
 extern void func_JobObject(void);
@@ -139,6 +140,7 @@ const struct test winetest_testlist[] =
     { "IdleProcessor",               func_IdleProcessor },
     { "InitOnce",                    func_InitOnce },
     { "interlck",                    func_interlck },
+    { "IsApiSetImplemented",         func_IsApiSetImplemented },
     { "IsDBCSLeadByteEx",            func_IsDBCSLeadByteEx },
     { "JapaneseCalendar",            func_JapaneseCalendar },
     { "JobObject",                   func_JobObject },
