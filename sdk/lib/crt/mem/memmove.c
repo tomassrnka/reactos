@@ -1,5 +1,9 @@
 #include <string.h>
 
+#if defined(_MSC_VER) && defined(_M_AMD64)
+#include <intrin.h>
+#endif
+
 #ifdef __GNUC__
 typedef unsigned long long __attribute__((__may_alias__, __aligned__(1))) crt_uqword;
 #else

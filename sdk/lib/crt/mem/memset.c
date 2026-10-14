@@ -1,6 +1,10 @@
 
 #include <string.h>
 
+#if defined(_MSC_VER) && defined(_M_AMD64)
+#include <intrin.h>
+#endif
+
 #ifdef _MSC_VER
 #pragma function(memset)
 #endif /* _MSC_VER */
