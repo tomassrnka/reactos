@@ -434,6 +434,8 @@ typedef struct _CM_HASH_CACHE_STACK
 //
 typedef struct _CM_PARSE_CONTEXT
 {
+    ULONG Wow64Flags;
+    BOOLEAN Wow64Reparsed;
     ULONG TitleIndex;
     UNICODE_STRING Class;
     ULONG CreateOptions;

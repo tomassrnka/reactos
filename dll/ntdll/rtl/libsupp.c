@@ -1176,6 +1176,11 @@ NTSTATUS
 NTAPI
 RtlWow64EnableFsRedirection(IN BOOLEAN Wow64FsEnableRedirection)
 {
+#ifdef _M_IX86
+    PVOID Old;
+    if (NtCurrentTeb()->WOW32Reserved)
+        return RtlWow64EnableFsRedirectionEx((PVOID)(ULONG_PTR)!Wow64FsEnableRedirection, &Old);
+#endif
     /* This is what Windows returns on x86 */
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -1189,8 +1194,25 @@ NTAPI
 RtlWow64EnableFsRedirectionEx(IN PVOID Wow64FsEnableRedirection,
                               OUT PVOID *OldFsRedirectionLevel)
 {
+#ifdef _M_IX86
+    NTSTATUS NTAPI RtlpWow64EnableFsRedirectionEx(PVOID, PVOID *);
+    if (NtCurrentTeb()->WOW32Reserved)
+        return RtlpWow64EnableFsRedirectionEx(Wow64FsEnableRedirection, OldFsRedirectionLevel);
+#endif
     /* This is what Windows returns on x86 */
     return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS NTAPI
+RtlGetNativeSystemInformation(SYSTEM_INFORMATION_CLASS Class, PVOID Buffer,
+                              ULONG Length, PULONG ReturnLength)
+{
+#ifdef _M_IX86
+    NTSTATUS NTAPI RtlpWow64GetNativeSystemInformation(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+    if (NtCurrentTeb()->WOW32Reserved)
+        return RtlpWow64GetNativeSystemInformation(Class, Buffer, Length, ReturnLength);
+#endif
+    return NtQuerySystemInformation(Class, Buffer, Length, ReturnLength);
 }
 
 /*

@@ -16,6 +16,8 @@
 #include <advapi32.h>
 
 #include <ndk/cmfuncs.h>
+#include <ndk/obfuncs.h>
+#include <wow64reg.h>
 #include <pseh/pseh2.h>
 
 #include "reg.h"
@@ -911,6 +913,150 @@ RegConnectRegistryW(LPCWSTR lpMachineName,
 }
 
 
+/* Resolve a shared Software destination before shortening a failed create.
+ * For example, Notepad is redirected but Notepad\\DefaultFonts is shared.
+ * Retrying the former with the latter's 32-bit selector would create a parent
+ * in the wrong tree. Keep this list identical to the kernel's view policy. */
+static NTSTATUS
+GetSharedNestedKeyName(POBJECT_ATTRIBUTES Attributes, REGSAM DesiredAccess,
+                       PUNICODE_STRING Name)
+{
+    static const UNICODE_STRING Software = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE");
+    PKEY_NAME_INFORMATION RootName = NULL;
+    PCWSTR RootBuffer = NULL;
+    ULONG RootLength = 0;
+    UNICODE_STRING Full, Tail, Prefix;
+#ifndef _WIN64
+    BOOL Wow64;
+#endif
+    ULONG Size = 0, Length, i, j, Physical = 0;
+    NTSTATUS Status;
+
+    Name->Buffer = NULL;
+#if defined(_WIN64) && !defined(BUILD_WOW64_ENABLED)
+    return STATUS_SUCCESS;
+#elif !defined(_WIN64)
+    if (!IsWow64Process(GetCurrentProcess(), &Wow64) || !Wow64)
+        return STATUS_SUCCESS; /* Native i386 ignores both selectors. */
+#endif
+
+    if (Attributes->RootDirectory)
+    {
+        Status = NtQueryKey(Attributes->RootDirectory, KeyNameInformation, NULL, 0, &Size);
+#ifdef _WIN64
+        if (Status == STATUS_ACCESS_DENIED)
+        {
+            /* A zero-access duplicate can be a relative create root, but
+             * KeyNameInformation requires an access bit. Object names do not. */
+            Status = NtQueryObject(Attributes->RootDirectory, ObjectNameInformation, NULL, 0, &Size);
+            if (Status != STATUS_INFO_LENGTH_MISMATCH && Status != STATUS_BUFFER_TOO_SMALL &&
+                Status != STATUS_BUFFER_OVERFLOW) return STATUS_SUCCESS;
+            RootName = RtlAllocateHeap(ProcessHeap, 0, Size);
+            if (!RootName) return STATUS_INSUFFICIENT_RESOURCES;
+            Status = NtQueryObject(Attributes->RootDirectory, ObjectNameInformation, RootName, Size, &Size);
+            if (!NT_SUCCESS(Status))
+            {
+                Status = STATUS_SUCCESS;
+                goto Exit;
+            }
+            RootBuffer = ((PUNICODE_STRING)RootName)->Buffer;
+            RootLength = ((PUNICODE_STRING)RootName)->Length;
+            goto BuildName;
+        }
+#endif
+        if (Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW)
+            return STATUS_SUCCESS; /* Keep relative retries for unrepresentable ancestry. */
+        RootName = RtlAllocateHeap(ProcessHeap, 0, Size);
+        if (!RootName) return STATUS_INSUFFICIENT_RESOURCES;
+        Status = NtQueryKey(Attributes->RootDirectory, KeyNameInformation, RootName, Size, &Size);
+        if (!NT_SUCCESS(Status))
+        {
+            Status = STATUS_SUCCESS;
+            goto Exit;
+        }
+        RootBuffer = RootName->Name;
+        RootLength = RootName->NameLength;
+    }
+#ifdef _WIN64
+BuildName:
+#endif
+    Length = (RootName ? RootLength + sizeof(WCHAR) : 0) + Attributes->ObjectName->Length;
+    if (Length > MAXUSHORT - sizeof(WCHAR))
+    {
+        Status = STATUS_SUCCESS; /* Native relative names have no absolute-name limit. */
+        goto Exit;
+    }
+    Full.Buffer = RtlAllocateHeap(ProcessHeap, 0, Length + sizeof(WCHAR));
+    if (!Full.Buffer)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
+    Full.Length = Length;
+    Full.MaximumLength = Length + sizeof(WCHAR);
+    i = 0;
+    if (RootName)
+    {
+        RtlCopyMemory(Full.Buffer, RootBuffer, RootLength);
+        i = RootLength / sizeof(WCHAR);
+        Full.Buffer[i++] = L'\\';
+    }
+    RtlCopyMemory(Full.Buffer + i, Attributes->ObjectName->Buffer, Attributes->ObjectName->Length);
+    for (i = j = 0; i < Full.Length / sizeof(WCHAR); ++i)
+    {
+        if (Full.Buffer[i] == L'\\' && j && Full.Buffer[j - 1] == L'\\') continue;
+        Full.Buffer[j++] = Full.Buffer[i];
+    }
+    Full.Buffer[j] = UNICODE_NULL;
+    Full.Length = j * sizeof(WCHAR);
+    if (RtlPrefixUnicodeString(&Software, &Full, TRUE))
+    {
+        Tail.Buffer = Full.Buffer + Software.Length / sizeof(WCHAR);
+        Tail.Length = Tail.MaximumLength = Full.Length - Software.Length;
+        RtlInitUnicodeString(&Prefix, L"\\Wow6432Node");
+        if (RtlPrefixUnicodeString(&Prefix, &Tail, TRUE) &&
+            (Tail.Length == Prefix.Length || Tail.Buffer[Prefix.Length / sizeof(WCHAR)] == L'\\'))
+        {
+            Physical = Prefix.Length;
+            Tail.Buffer += Physical / sizeof(WCHAR);
+            Tail.Length = Tail.MaximumLength = Tail.Length - Physical;
+        }
+#ifdef _WIN64
+        /* Native default requests already use the logical shared tree. Keep
+         * their relative, selector-free retries: reconstructing an absolute
+         * name and selecting a view imposes a limit on otherwise valid names.
+         * Physical shared aliases still need their native parents resolved. */
+        if (!Physical && !(DesiredAccess & (KEY_WOW64_32KEY | KEY_WOW64_64KEY)))
+        {
+            RtlFreeHeap(ProcessHeap, 0, Full.Buffer);
+            Status = STATUS_SUCCESS;
+            goto Exit;
+        }
+#endif
+        for (i = 0; i < RTL_NUMBER_OF(Wow64SharedSoftware); ++i)
+        {
+            RtlInitUnicodeString(&Prefix, Wow64SharedSoftware[i]);
+            if (RtlPrefixUnicodeString(&Prefix, &Tail, TRUE) &&
+                (Tail.Length == Prefix.Length || Tail.Buffer[Prefix.Length / sizeof(WCHAR)] == L'\\'))
+            {
+                if (Physical)
+                {
+                    RtlMoveMemory(Full.Buffer + Software.Length / sizeof(WCHAR), Tail.Buffer, Tail.Length);
+                    Full.Length -= Physical;
+                    Full.Buffer[Full.Length / sizeof(WCHAR)] = UNICODE_NULL;
+                }
+                *Name = Full;
+                break;
+            }
+        }
+    }
+    if (!Name->Buffer) RtlFreeHeap(ProcessHeap, 0, Full.Buffer);
+    Status = STATUS_SUCCESS;
+Exit:
+    if (RootName) RtlFreeHeap(ProcessHeap, 0, RootName);
+    return Status;
+}
+
 /************************************************************************
  *  CreateNestedKey
  *
@@ -932,6 +1078,7 @@ CreateNestedKey(PHKEY KeyHandle,
     ULONG Length;
     PWCHAR Ptr;
     HANDLE LocalKeyHandle;
+    REGSAM IntermediateAccess = KEY_CREATE_SUB_KEY | (samDesired & (KEY_WOW64_32KEY | KEY_WOW64_64KEY));
 
     Status = NtCreateKey((PHANDLE) KeyHandle,
                          samDesired,
@@ -948,9 +1095,17 @@ CreateNestedKey(PHKEY KeyHandle,
     RtlCopyMemory(&LocalObjectAttributes,
                   ObjectAttributes,
                   sizeof(OBJECT_ATTRIBUTES));
-    RtlCreateUnicodeString(&LocalKeyName,
-                           ObjectAttributes->ObjectName->Buffer);
+    Status = GetSharedNestedKeyName(ObjectAttributes, samDesired, &LocalKeyName);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (LocalKeyName.Buffer)
+    {
+        LocalObjectAttributes.RootDirectory = NULL;
+        IntermediateAccess = KEY_CREATE_SUB_KEY | KEY_WOW64_64KEY;
+    }
+    else if (!RtlCreateUnicodeString(&LocalKeyName, ObjectAttributes->ObjectName->Buffer))
+        return STATUS_INSUFFICIENT_RESOURCES;
     LocalObjectAttributes.ObjectName = &LocalKeyName;
+    Status = STATUS_OBJECT_NAME_NOT_FOUND;
     FullNameLength = LocalKeyName.Length / sizeof(WCHAR);
 
     LocalKeyHandle = NULL;
@@ -969,7 +1124,7 @@ CreateNestedKey(PHKEY KeyHandle,
         LocalKeyName.Length = (USHORT)wcslen(LocalKeyName.Buffer) * sizeof(WCHAR);
 
         Status = NtCreateKey(&LocalKeyHandle,
-                             KEY_CREATE_SUB_KEY,
+                             IntermediateAccess,
                              &LocalObjectAttributes,
                              0,
                              NULL,
@@ -1008,7 +1163,7 @@ CreateNestedKey(PHKEY KeyHandle,
         }
 
         Status = NtCreateKey(&LocalKeyHandle,
-                             KEY_CREATE_SUB_KEY,
+                             IntermediateAccess,
                              &LocalObjectAttributes,
                              0,
                              NULL,
@@ -1316,13 +1471,6 @@ RegDeleteKeyExW(
         return ErrorCode;
     }
 
-    if (samDesired & KEY_WOW64_32KEY)
-        ERR("Wow64 not yet supported!\n");
-
-    if (samDesired & KEY_WOW64_64KEY)
-        ERR("Wow64 not yet supported!\n");
-
-
     RtlInitUnicodeString(&SubKeyName, lpSubKey);
     InitializeObjectAttributes(&ObjectAttributes,
                                &SubKeyName,
@@ -1330,7 +1478,7 @@ RegDeleteKeyExW(
                                ParentKey,
                                NULL);
     Status = NtOpenKey(&TargetKey,
-                       DELETE,
+                       DELETE | (samDesired & KEY_WOW64_RES),
                        &ObjectAttributes);
     if (!NT_SUCCESS(Status))
     {

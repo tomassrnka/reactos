@@ -17,6 +17,7 @@ typedef struct _WOW64_CPU_STATE
     ULONG Esi;
     ULONG Edi;
     ULONG Ebp;
+    ULONG FsRedirectionDisabled;
 } WOW64_CPU_STATE;
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, NativeStack) == 0);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Esp) == 8);

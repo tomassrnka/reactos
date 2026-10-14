@@ -2239,7 +2239,7 @@ CmShutdownSystem(VOID)
 
 VOID
 NTAPI
-CmpSetVersionData(VOID)
+CmpSetVersionDataForView(BOOLEAN Wow64View)
 {
     NTSTATUS Status;
     OBJECT_ATTRIBUTES ObjectAttributes;
@@ -2259,7 +2259,8 @@ CmpSetVersionData(VOID)
      * (create the intermediate subkeys if needed).
      */
 
-    RtlInitUnicodeString(&KeyName, L"\\REGISTRY\\MACHINE\\SOFTWARE");
+    RtlInitUnicodeString(&KeyName, Wow64View ? L"\\REGISTRY\\MACHINE\\SOFTWARE\\Wow6432Node" :
+                                           L"\\REGISTRY\\MACHINE\\SOFTWARE");
     InitializeObjectAttributes(&ObjectAttributes,
                                &KeyName,
                                OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
@@ -2449,6 +2450,16 @@ Quit:
 
     if (SoftwareKeyHandle != NULL)
         NtClose(SoftwareKeyHandle);
+}
+
+VOID
+NTAPI
+CmpSetVersionData(VOID)
+{
+    CmpSetVersionDataForView(FALSE);
+#ifdef BUILD_WOW64_ENABLED
+    CmpSetVersionDataForView(TRUE);
+#endif
 }
 
 /* EOF */

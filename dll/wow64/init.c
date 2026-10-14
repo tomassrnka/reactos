@@ -61,7 +61,7 @@ static NTSTATUS InitializeParameters(PEB32 *Peb32)
     PRTL_USER_PROCESS_PARAMETERS From = RtlNormalizeProcessParams(NtCurrentPeb()->ProcessParameters);
     WOW64_PARAMETERS *To;
     NTSTATUS Status;
-    PVOID Environment;
+    PVOID Environment, NativeEnvironment = NULL;
     SIZE_T Size;
     ULONG i;
 
@@ -99,17 +99,22 @@ static NTSTATUS InitializeParameters(PEB32 *Peb32)
 #undef COPY_STRING
     Status = CopyDllPath(&To->DllPath, &From->DllPath);
     if (!NT_SUCCESS(Status)) return Status;
-    if (From->Environment)
+    Status = Wow64CreateEnvironment(&NativeEnvironment);
+    if (NT_SUCCESS(Status))
     {
-        PWSTR End = From->Environment;
+        PWSTR End = NativeEnvironment;
         while (*End) End += wcslen(End) + 1;
-        Size = (End + 1 - From->Environment) * sizeof(WCHAR);
+        Size = (End + 1 - (PWSTR)NativeEnvironment) * sizeof(WCHAR);
         Status = Wow64Allocate(Size, &Environment);
-        if (!NT_SUCCESS(Status)) return Status;
-        RtlCopyMemory(Environment, From->Environment, Size);
-        To->Environment = PtrToUlong(Environment);
-        To->EnvironmentSize = Size;
+        if (NT_SUCCESS(Status))
+        {
+            RtlCopyMemory(Environment, NativeEnvironment, Size);
+            To->Environment = PtrToUlong(Environment);
+            To->EnvironmentSize = Size;
+        }
     }
+    if (NativeEnvironment) RtlDestroyEnvironment(NativeEnvironment);
+    if (!NT_SUCCESS(Status)) return Status;
     Peb32->ProcessParameters = PtrToUlong(To);
     return STATUS_SUCCESS;
 }
@@ -200,6 +205,8 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
 
     /* Thread creation and APC delivery need their own context conversion. */
     if (Peb32->Ldr) { Status = STATUS_NOT_SUPPORTED; goto Failed; }
+    Status = Wow64InitializeRedirection();
+    if (!NT_SUCCESS(Status)) goto Failed;
     Status = InitializePeb(Peb32);
     if (!NT_SUCCESS(Status)) goto Failed;
     Status = MapNtdll(&Ntdll32);
@@ -218,13 +225,15 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
         Ordinals = (PVOID)((PUCHAR)Ntdll32 + Exports->AddressOfNameOrdinals);
         for (i = 0; i < Exports->NumberOfNames; ++i)
         {
+            if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserExceptionDispatcher") &&
+                Ordinals[i] < Exports->NumberOfFunctions)
+                Wow64ExceptionDispatcher = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
             if (!strcmp((PCHAR)Ntdll32 + Names[i], Name.Buffer) && Ordinals[i] < Exports->NumberOfFunctions)
             {
                 Entry = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
-                break;
             }
         }
-        if (!Entry) { Status = STATUS_ENTRYPOINT_NOT_FOUND; goto Failed; }
+        if (!Entry || !Wow64ExceptionDispatcher) { Status = STATUS_ENTRYPOINT_NOT_FOUND; goto Failed; }
     }
     Status = Wow64CpuInitialize(Wow64SystemService, &Gate);
     if (!NT_SUCCESS(Status)) goto Failed;
@@ -255,15 +264,4 @@ Failed:
     DbgPrint("WoW64: initialization failed: %08lx\n", Status);
     NtTerminateProcess(NtCurrentProcess(), Status);
     for (;;) NtTerminateThread(NtCurrentThread(), Status);
-}
-
-/* Phase 1 cannot dispatch a native exception frame through i386 SEH.
- * Fail with the original exception code; native thunk captures retain their
- * ordinary 64-bit exception handlers. */
-VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
-{
-    if (Context->SegCs != 0x23) return;
-    DbgPrint("WoW64: unhandled i386 exception %08lx at %p\n",
-             Record->ExceptionCode, Record->ExceptionAddress);
-    NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
 }

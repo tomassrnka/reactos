@@ -8,6 +8,7 @@ list(APPEND SOURCE
     install.c
     logfile.c
     netinstall.c
+    programfiles.c
     proppage.c
     security.c
     wizard.c
