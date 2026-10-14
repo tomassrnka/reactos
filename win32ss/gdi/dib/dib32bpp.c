@@ -357,7 +357,7 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
           + 4 * BltInfo->SourcePoint.x;
         for (j = BltInfo->DestRect.top; j < BltInfo->DestRect.bottom; j++)
         {
-          RtlMoveMemory(DestBits, SourceBits, 4 * DestWidth);
+          DIB_MoveBytes(DestBits, SourceBits, 4 * DestWidth);
           SourceBits += BltInfo->SourceSurface->lDelta;
           DestBits += BltInfo->DestSurface->lDelta;
         }
@@ -374,7 +374,7 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
           + 4 * BltInfo->DestRect.left;
         for (j = BltInfo->DestRect.bottom - 1; BltInfo->DestRect.top <= j; j--)
         {
-          RtlMoveMemory(DestBits, SourceBits, 4 * DestWidth);
+          DIB_MoveBytes(DestBits, SourceBits, 4 * DestWidth);
           SourceBits -= BltInfo->SourceSurface->lDelta;
           DestBits -= BltInfo->DestSurface->lDelta;
         }
@@ -399,7 +399,7 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
           + 4 * BltInfo->SourcePoint.x;
         for (j = BltInfo->DestRect.top; j < BltInfo->DestRect.bottom; j++)
         {
-          RtlMoveMemory(DestBits, SourceBits, 4 * DestWidth);
+          DIB_MoveBytes(DestBits, SourceBits, 4 * DestWidth);
           SourceBits += BltInfo->SourceSurface->lDelta;
           DestBits += BltInfo->DestSurface->lDelta;
         }
@@ -417,7 +417,7 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
           + 4 * BltInfo->DestRect.left;
         for (j = BltInfo->DestRect.bottom - 1; BltInfo->DestRect.top <= j; j--)
         {
-          RtlMoveMemory(DestBits, SourceBits, 4 * DestWidth);
+          DIB_MoveBytes(DestBits, SourceBits, 4 * DestWidth);
           SourceBits -= BltInfo->SourceSurface->lDelta;
           DestBits -= BltInfo->DestSurface->lDelta;
         }
@@ -627,7 +627,7 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
                 + 4 * BltInfo->SourcePoint.x;
               for (j = BltInfo->DestRect.top; j < BltInfo->DestRect.bottom; j++)
               {
-                RtlMoveMemory(DestBits, SourceBits, 4 * DestWidth);
+                DIB_MoveBytes(DestBits, SourceBits, 4 * DestWidth);
                 SourceBits += BltInfo->SourceSurface->lDelta;
                 DestBits += BltInfo->DestSurface->lDelta;
               }
@@ -645,7 +645,7 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
                 + 4 * BltInfo->DestRect.left;
               for (j = BltInfo->DestRect.bottom - 1; BltInfo->DestRect.top <= j; j--)
               {
-                RtlMoveMemory(DestBits, SourceBits, 4 * DestWidth);
+                DIB_MoveBytes(DestBits, SourceBits, 4 * DestWidth);
                 SourceBits -= BltInfo->SourceSurface->lDelta;
                 DestBits -= BltInfo->DestSurface->lDelta;
               }
@@ -662,13 +662,13 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
           for (j = 0; j < DestHeight / 2 ; j++)
           {
             /* Store bottom row of Source pixels */
-            RtlMoveMemory(store, SourceBitsB, 4 * DestWidth);
+            DIB_MoveBytes(store, SourceBitsB, 4 * DestWidth);
 
             /* Copy top Source row to bottom Destination row overwriting it */
-            RtlMoveMemory(DestBitsB, SourceBitsT, 4 * DestWidth);
+            DIB_MoveBytes(DestBitsB, SourceBitsT, 4 * DestWidth);
 
             /* Copy stored bottom row of Source pixels to Destination top row of pixels */
-            RtlMoveMemory(DestBitsT, store, 4 * DestWidth);
+            DIB_MoveBytes(DestBitsT, store, 4 * DestWidth);
 
             /* Index top rows down and bottom rows up */
             SourceBitsT += BltInfo->SourceSurface->lDelta;
@@ -681,7 +681,7 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
           {
             /* If we had an odd number of lines we handle the center one here */
             DPRINT("Handling Top To Bottom with Odd Number of lines.\n");
-            RtlMoveMemory(DestBitsB, SourceBitsT, 4 * DestWidth);
+            DIB_MoveBytes(DestBitsB, SourceBitsT, 4 * DestWidth);
           }
           ExFreePoolWithTag(store, TAG_DIB);
         }

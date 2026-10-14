@@ -56,6 +56,59 @@ typedef struct
 
 extern DIB_FUNCTIONS DibFunctionsForBitmapFormat[];
 
+/* amd64 memmove from libcntpr is a byte loop (about 2 GB/s); same semantics, overlap allowed */
+#if defined(__GNUC__) && defined(__x86_64__)
+FORCEINLINE
+VOID
+DIB_MoveBytes(
+    _Out_writes_bytes_(cb) PVOID pvDest,
+    _In_reads_bytes_(cb) const VOID *pvSrc,
+    _In_ SIZE_T cb)
+{
+    PUCHAR pjDest = (PUCHAR)pvDest;
+    const UCHAR *pjSrc = (const UCHAR *)pvSrc;
+
+    if ((pjDest <= pjSrc) || (pjDest >= pjSrc + cb))
+    {
+        SIZE_T cq = cb >> 3;
+
+        __asm__ __volatile__("rep movsq" : "+D"(pjDest), "+S"(pjSrc), "+c"(cq) : : "memory");
+        if (cb & 4)
+        {
+            *(UNALIGNED ULONG *)pjDest = *(UNALIGNED const ULONG *)pjSrc;
+            pjDest += 4;
+            pjSrc += 4;
+        }
+        if (cb & 2)
+        {
+            *(UNALIGNED USHORT *)pjDest = *(UNALIGNED const USHORT *)pjSrc;
+            pjDest += 2;
+            pjSrc += 2;
+        }
+        if (cb & 1)
+        {
+            *pjDest = *pjSrc;
+        }
+    }
+    else
+    {
+        /* the destination starts inside the source */
+        while (cb >= 8)
+        {
+            cb -= 8;
+            *(UNALIGNED ULONG64 *)(pjDest + cb) = *(UNALIGNED const ULONG64 *)(pjSrc + cb);
+        }
+        while (cb != 0)
+        {
+            cb--;
+            pjDest[cb] = pjSrc[cb];
+        }
+    }
+}
+#else
+#define DIB_MoveBytes(pvDest, pvSrc, cb) RtlMoveMemory(pvDest, pvSrc, cb)
+#endif
+
 VOID Dummy_PutPixel(SURFOBJ*,LONG,LONG,ULONG);
 ULONG Dummy_GetPixel(SURFOBJ*,LONG,LONG);
 VOID Dummy_HLine(SURFOBJ*,LONG,LONG,LONG,ULONG);
