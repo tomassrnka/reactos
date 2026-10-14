@@ -136,13 +136,285 @@ GetSystemTimeAsFileTime(OUT PFILETIME lpFileTime)
 }
 
 /*
- * @unimplemented
+ * The system time in the shared user data only changes at a clock tick (15.6 ms, whatever shorter interval the timer
+ * interrupts have been set to). GetSystemTimePreciseAsFileTime interpolates between ticks with the performance
+ * counter: it keeps one anchor (a counter value and the system time that belongs to it) per process and predicts the
+ * time from it. The first anchor is taken at a tick edge, where the system time and the counter agree. Every later
+ * prediction has to lie in the band the coarse system time allows: not before the coarse time read first, and not
+ * later than the coarse time read last plus one tick. A prediction outside the band moves the anchor into it, so a
+ * counter that runs at another rate than the tick clock (as in a virtual machine that loses ticks), and a change of
+ * the system time, are followed without waiting for another tick edge. The result never goes back by less than a tick.
+ *
+ * The anchor is read and written without a lock that a caller could wait on: two slots, the version selects the
+ * one to read, a writer fills the other one and then publishes the next version, and a writer that finds another
+ * one at work, or a version that is no longer the one the anchor was read at, does not write. A caller reads the
+ * anchor before it takes its samples of the clocks, so a correction made from samples that are older than the anchor
+ * that is current cannot be published.
+ */
+#define PRECISE_SLACK           20000LL     /* 2 ms in 100 ns: jitter of the tick interrupt */
+#define PRECISE_DEFAULT_TICK    156250LL
+
+typedef struct _PRECISE_ANCHOR
+{
+    LONGLONG Counter;
+    LONGLONG Time;
+    LONGLONG Tick;
+} PRECISE_ANCHOR;
+
+typedef struct _PRECISE_SLOT
+{
+    volatile LONGLONG Counter;
+    volatile LONGLONG Time;
+    volatile LONGLONG Tick;
+} PRECISE_SLOT;
+
+static PRECISE_SLOT BasepPreciseSlots[2];
+static volatile LONGLONG BasepPreciseVersion;   /* 0: no anchor yet; else the slot is Version & 1; never wraps */
+static volatile LONG BasepPreciseWriter;
+static volatile LONGLONG BasepPreciseLast;
+
+static
+LONGLONG
+BasepReadCoarseTime(VOID)
+{
+    LARGE_INTEGER SystemTime;
+
+    SystemTime = KiReadSystemTime(&SharedUserData->SystemTime);
+    return SystemTime.QuadPart;
+}
+
+/* The system time moves by the biggest increment of the timer (the "minimum resolution"), not by the current one */
+static
+LONGLONG
+BasepQueryTick(VOID)
+{
+    ULONG Minimum, Maximum, Current;
+
+    if (NT_SUCCESS(NtQueryTimerResolution(&Minimum, &Maximum, &Current)) && Minimum != 0)
+        return Minimum;
+
+    return PRECISE_DEFAULT_TICK;
+}
+
+static
+LONGLONG
+BasepPredictPreciseTime(
+    _In_ const PRECISE_ANCHOR *Anchor,
+    _In_ LONGLONG Counter,
+    _In_ LONGLONG Frequency)
+{
+    LONGLONG Delta = Counter - Anchor->Counter;
+
+    /* Whole seconds first, so that the multiplication cannot overflow after a long time */
+    return Anchor->Time + (Delta / Frequency) * 10000000LL + (Delta % Frequency) * 10000000LL / Frequency;
+}
+
+/* 1: read the anchor and its version, 0: there is none, -1: it changed all the time */
+static
+LONG
+BasepReadPreciseAnchor(
+    _Out_ PRECISE_ANCHOR *Anchor,
+    _Out_ PLONGLONG Version)
+{
+    PRECISE_SLOT *Slot;
+    LONGLONG Current;
+    ULONG Tries;
+
+    for (Tries = 0; Tries < 16; Tries++)
+    {
+        Current = InterlockedCompareExchange64(&BasepPreciseVersion, 0, 0);
+        *Version = Current;
+        if (Current == 0)
+            return 0;
+
+        Slot = &BasepPreciseSlots[Current & 1];
+        Anchor->Counter = Slot->Counter;
+        Anchor->Time = Slot->Time;
+        Anchor->Tick = Slot->Tick;
+        if (Current == InterlockedCompareExchange64(&BasepPreciseVersion, 0, 0))
+            return 1;
+    }
+
+    return -1;
+}
+
+static
+VOID
+BasepPublishPreciseAnchor(
+    _In_ const PRECISE_ANCHOR *Anchor,
+    _In_ LONGLONG ReadVersion)
+{
+    PRECISE_SLOT *Slot;
+
+    if (InterlockedCompareExchange(&BasepPreciseWriter, 1, 0) != 0)
+        return;
+
+    /* Only the successor of the version that the anchor was made from */
+    if (InterlockedCompareExchange64(&BasepPreciseVersion, 0, 0) == ReadVersion)
+    {
+        Slot = &BasepPreciseSlots[(ReadVersion + 1) & 1];
+        Slot->Counter = Anchor->Counter;
+        Slot->Time = Anchor->Time;
+        Slot->Tick = Anchor->Tick;
+        InterlockedCompareExchange64(&BasepPreciseVersion, ReadVersion + 1, ReadVersion);
+    }
+
+    InterlockedExchange(&BasepPreciseWriter, 0);
+}
+
+static
+VOID
+BasepTakePreciseAnchor(
+    _Out_ PRECISE_ANCHOR *Anchor,
+    _In_ LONGLONG Frequency)
+{
+    LARGE_INTEGER Before, After;
+    LONGLONG First, Current, PreviousBefore, Limit, MaxWidth = Frequency / 5000;
+
+    /*
+     * Wait for the next tick (at most two of them): the tick happened between the reads of the system time of two
+     * rounds, so between the counter read before the one and the counter read after the other. A sample over a
+     * long time (the thread was preempted) does not say when it was, and the wait goes on for the next tick.
+     */
+    NtQueryPerformanceCounter(&Before, NULL);
+    Limit = Before.QuadPart + Frequency / 25;
+    First = BasepReadCoarseTime();
+    PreviousBefore = Before.QuadPart;
+    NtQueryPerformanceCounter(&After, NULL);
+    for (;;)
+    {
+        NtQueryPerformanceCounter(&Before, NULL);
+        Current = BasepReadCoarseTime();
+        NtQueryPerformanceCounter(&After, NULL);
+
+        if (Current != First)
+        {
+            if (After.QuadPart - PreviousBefore <= MaxWidth)
+            {
+                Anchor->Time = Current;
+                Anchor->Counter = PreviousBefore + (After.QuadPart - PreviousBefore) / 2;
+                Anchor->Tick = BasepQueryTick();
+                return;
+            }
+
+            First = Current;
+        }
+
+        if (After.QuadPart > Limit)
+            break;
+
+        PreviousBefore = Before.QuadPart;
+        YieldProcessor();
+    }
+
+    /* No tick in time: the system time as it is now, it is moved into place by the calls that follow */
+    Anchor->Time = Current;
+    Anchor->Counter = Before.QuadPart + (After.QuadPart - Before.QuadPart) / 2;
+    Anchor->Tick = BasepQueryTick();
+}
+
+/*
+ * @implemented
  */
 VOID
 WINAPI
 GetSystemTimePreciseAsFileTime(OUT PFILETIME lpFileTime)
 {
-    STUB;
+    PRECISE_ANCHOR Anchor;
+    LARGE_INTEGER Counter, Frequency;
+    LONGLONG First, Last, Time, Lower, Upper, Seen, Old, Fresh, Version = 0;
+    LONG State;
+    ULONG Attempt;
+    NTSTATUS Status;
+
+    for (Attempt = 0;; Attempt++)
+    {
+        /* The anchor first, then the samples that are to be compared to it */
+        State = BasepReadPreciseAnchor(&Anchor, &Version);
+        if (State == 0 && Attempt < 8)
+        {
+            /* The first call of the process: take the anchor, then start again so that the samples come after it */
+            NtQueryPerformanceCounter(&Counter, &Frequency);
+            if (Frequency.QuadPart > 0)
+            {
+                BasepTakePreciseAnchor(&Anchor, Frequency.QuadPart);
+                BasepPublishPreciseAnchor(&Anchor, 0);
+            }
+            continue;
+        }
+
+        First = BasepReadCoarseTime();
+        Status = NtQueryPerformanceCounter(&Counter, &Frequency);
+        if (!NT_SUCCESS(Status) || Frequency.QuadPart <= 0)
+        {
+            /* No counter: the coarse time is all there is */
+            Time = First;
+            goto Done;
+        }
+        Last = BasepReadCoarseTime();
+
+        if (State <= 0)
+        {
+            /* The anchor is being replaced all the time: the coarse time for this call */
+            Time = Last;
+            Anchor.Tick = PRECISE_DEFAULT_TICK;
+            goto Clamp;
+        }
+
+        break;
+    }
+
+    Time = BasepPredictPreciseTime(&Anchor, Counter.QuadPart, Frequency.QuadPart);
+    Lower = First;
+    Upper = Last + Anchor.Tick;
+
+    if (Time < Lower)
+    {
+        /* The counter runs slower than the tick clock, or the system time was set forward */
+        Anchor.Time += Lower - Time;
+        Time = Lower;
+        BasepPublishPreciseAnchor(&Anchor, Version);
+    }
+    else if (Time > Upper)
+    {
+        /* The counter runs faster than the tick clock, or the system time was set back */
+        Anchor.Time -= Time - Upper;
+        Time = Upper;
+        BasepPublishPreciseAnchor(&Anchor, Version);
+    }
+
+Clamp:
+    /*
+     * Never go back. A caller that was preempted after it sampled has an old value and returns the newest one;
+     * only a newest value that the system time cannot have reached by now (it was set back) is dropped.
+     */
+    Seen = InterlockedCompareExchange64(&BasepPreciseLast, 0, 0);
+    for (;;)
+    {
+        if (Time < Seen)
+        {
+            Fresh = BasepReadCoarseTime();
+            if (Seen <= Fresh + Anchor.Tick + 2 * PRECISE_SLACK)
+            {
+                Time = Seen;
+                break;
+            }
+        }
+        else if (Time == Seen)
+        {
+            break;
+        }
+
+        Old = InterlockedCompareExchange64(&BasepPreciseLast, Time, Seen);
+        if (Old == Seen)
+            break;
+
+        Seen = Old;
+    }
+
+Done:
+    lpFileTime->dwLowDateTime = (DWORD)Time;
+    lpFileTime->dwHighDateTime = (DWORD)(Time >> 32);
 }
 
 /*
