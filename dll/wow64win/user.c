@@ -106,7 +106,21 @@ static ULONG_PTR MessageCall(ULONG *a)
     DOSENDMESSAGE Timeout;
     CALL_BACK_INFO Callback;
     ULONG_PTR ResultInfo = a[4] ? (ULONG_PTR)&Result : 0;
-    switch (a[1])
+    /* WM_NOTIFY is an application-defined record beginning with NMHDR.
+     * The kernel does not inspect or capture it. On the same guest thread,
+     * keep that guest record intact through both hooks and the window proc.
+     * Cross-thread/broadcast delivery still needs its own lifetime contract. */
+    if (a[1] == WM_NOTIFY)
+    {
+        if (NtUserQueryWindow(H(0), QUERY_WINDOW_UNIQUE_THREAD_ID) !=
+            (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread)
+        {
+            RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
+            return FALSE;
+        }
+        Param = (LPARAM)P(3);
+    }
+    else switch (a[1])
     {
 #include "messages-unsupported.inc"
         RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED); return FALSE;

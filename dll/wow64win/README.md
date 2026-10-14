@@ -54,6 +54,12 @@ limited to the calling guest thread; their message payload coverage follows
 the window-message translator.
 The `wow64_message_hook` fixture covers current-thread GETMESSAGE hooks,
 chaining, signed hook results and MSG writeback for PeekMessage/GetMessage.
+WM_NOTIFY records, including application-defined NMHDR extensions, retain
+their guest layout when sent to a window on the calling guest thread. The
+kernel does not capture these records; hooks and the window procedure receive
+the original guest pointer. Other-thread and broadcast WM_NOTIFY remain
+unsupported. `wow64_notify` checks delivery, hooks, signed results and writes
+to the original record.
 
 Regenerate with `python3 dll/wow64win/generate.py`. On the build host, run
 `TMPDIR=<scratch-directory> python3 dll/wow64win/tests/generator.py <source>`
