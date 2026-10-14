@@ -279,6 +279,15 @@ MmFreeMemoryArea(
 {
     ULONG_PTR Address;
     PVOID EndAddress;
+    MM_TB_FLUSH_LIST FlushList;
+    ULONG Pending;
+    struct
+    {
+        PVOID Address;
+        PFN_NUMBER Page;
+        SWAPENTRY SwapEntry;
+        BOOLEAN Dirty;
+    } PendingFree[16];
 
     /* Make sure we own the address space lock! */
     ASSERT(CONTAINING_RECORD(AddressSpace, EPROCESS, Vm)->AddressCreationLock.Owner == KeGetCurrentThread());
@@ -296,6 +305,8 @@ MmFreeMemoryArea(
             KeAttachProcess(&Process->Pcb);
         }
 
+        MmInitializeTbFlushList(&FlushList, Process == NULL);
+        Pending = 0;
         EndAddress = MM_ROUND_UP(MA_GetEndingAddress(MemoryArea), PAGE_SIZE);
         for (Address = MA_GetStartingAddress(MemoryArea);
                 Address < (ULONG_PTR)EndAddress;
@@ -314,18 +325,34 @@ MmFreeMemoryArea(
                 /* We'll have to do some cleanup when we're on the page file */
                 DoFree = TRUE;
             }
-            else if (FreePage == NULL)
-            {
-                DoFree = MmDeletePhysicalMapping(Process, (PVOID)Address, &Dirty, &Page);
-            }
             else
             {
-                DoFree = MmDeleteVirtualMapping(Process, (PVOID)Address, &Dirty, &Page);
+                DoFree = MmDeleteVirtualMappingDeferFlush(Process, (PVOID)Address, &Dirty, &Page,
+                                                          FreePage == NULL, &FlushList);
             }
             if (DoFree && (FreePage != NULL))
             {
-                FreePage(FreePageContext, MemoryArea, (PVOID)Address,
-                         Page, SwapEntry, (BOOLEAN)Dirty);
+                PendingFree[Pending].Address = (PVOID)Address;
+                PendingFree[Pending].Page = Page;
+                PendingFree[Pending].SwapEntry = SwapEntry;
+                PendingFree[Pending].Dirty = Dirty;
+                Pending++;
+            }
+
+            /* Freeing a page needs every processor's stale translation of it gone */
+            if ((Pending == RTL_NUMBER_OF(PendingFree)) ||
+                (Address + PAGE_SIZE >= (ULONG_PTR)EndAddress))
+            {
+                ULONG i;
+
+                MmFlushTbList(&FlushList);
+                for (i = 0; i < Pending; i++)
+                {
+                    FreePage(FreePageContext, MemoryArea, PendingFree[i].Address,
+                             PendingFree[i].Page, PendingFree[i].SwapEntry,
+                             PendingFree[i].Dirty);
+                }
+                Pending = 0;
             }
         }
 

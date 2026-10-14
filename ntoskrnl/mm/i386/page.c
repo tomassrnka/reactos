@@ -233,13 +233,15 @@ MmGetPfnForProcess(PEPROCESS Process,
  * @return Whether there was actually a page mapped at the given address.
  */
 _Success_(return)
+static
 BOOLEAN
 MmDeleteVirtualMappingEx(
     _Inout_opt_ PEPROCESS Process,
     _In_ PVOID Address,
     _Out_opt_ BOOLEAN* WasDirty,
     _Out_opt_ PPFN_NUMBER Page,
-    _In_ BOOLEAN IsPhysical)
+    _In_ BOOLEAN IsPhysical,
+    _Inout_opt_ PMM_TB_FLUSH_LIST FlushList)
 {
     PMMPTE PointerPte;
     MMPTE OldPte;
@@ -294,7 +296,15 @@ MmDeleteVirtualMappingEx(
         OldPte.u.Long = InterlockedExchangePte(PointerPte, 0);
 
         /* System space is shared by every processor, a process only by those running it */
-        KeFlushSingleTb(Address, Process == NULL);
+        if (FlushList != NULL)
+        {
+            ASSERT(FlushList->AllProcessors == (Process == NULL));
+            MmAddToTbFlushList(FlushList, Address);
+        }
+        else
+        {
+            KeFlushSingleTb(Address, Process == NULL);
+        }
 
         if (OldPte.u.Long != 0)
         {
@@ -354,7 +364,7 @@ MmDeleteVirtualMapping(
     _Out_opt_ BOOLEAN * WasDirty,
     _Out_opt_ PPFN_NUMBER Page)
 {
-    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, FALSE);
+    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, FALSE, NULL);
 }
 
 _Success_(return)
@@ -365,7 +375,20 @@ MmDeletePhysicalMapping(
     _Out_opt_ BOOLEAN * WasDirty,
     _Out_opt_ PPFN_NUMBER Page)
 {
-    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, TRUE);
+    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, TRUE, NULL);
+}
+
+_Success_(return)
+BOOLEAN
+MmDeleteVirtualMappingDeferFlush(
+    _Inout_opt_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _Out_opt_ BOOLEAN * WasDirty,
+    _Out_opt_ PPFN_NUMBER Page,
+    _In_ BOOLEAN IsPhysical,
+    _Inout_ PMM_TB_FLUSH_LIST FlushList)
+{
+    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, IsPhysical, FlushList);
 }
 
 VOID
@@ -829,9 +852,9 @@ MmGetPageProtect(PEPROCESS Process, PVOID Address)
     return(Protect);
 }
 
+static
 VOID
-NTAPI
-MmSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect)
+MmSetPageProtectEx(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLUSH_LIST FlushList)
 {
     ULONG ProtectionMask;
     PMMPTE PointerPte;
@@ -881,9 +904,28 @@ MmSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect)
     }
 
     if (OldPte.u.Long != TempPte.u.Long)
-        KeFlushSingleTb(Address, FALSE);
+    {
+        if (FlushList != NULL)
+            MmAddToTbFlushList(FlushList, Address);
+        else
+            KeFlushSingleTb(Address, FALSE);
+    }
 
     MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+}
+
+VOID
+NTAPI
+MmSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect)
+{
+    MmSetPageProtectEx(Process, Address, flProtect, NULL);
+}
+
+VOID
+NTAPI
+MmSetPageProtectDeferFlush(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLUSH_LIST FlushList)
+{
+    MmSetPageProtectEx(Process, Address, flProtect, FlushList);
 }
 
 VOID

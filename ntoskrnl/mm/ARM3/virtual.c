@@ -2225,6 +2225,24 @@ MiIsEntireRangeCommitted(IN ULONG_PTR StartingAddress,
     return TRUE;
 }
 
+/* Release pages made inaccessible once no processor can still reach them */
+static
+VOID
+MiReleaseProtectedPages(IN OUT PMM_TB_FLUSH_LIST FlushList,
+                        IN PMMPFN *Pages,
+                        IN OUT PULONG Count)
+{
+    KIRQL OldIrql;
+    ULONG i;
+
+    MmFlushTbList(FlushList);
+    OldIrql = MiAcquirePfnLock();
+    for (i = 0; i < *Count; i++)
+        MiDecrementShareCount(Pages[i], MiGetPfnEntryIndex(Pages[i]));
+    MiReleasePfnLock(OldIrql);
+    *Count = 0;
+}
+
 NTSTATUS
 NTAPI
 MiProtectVirtualMemory(IN PEPROCESS Process,
@@ -2245,9 +2263,13 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     NTSTATUS Status = STATUS_SUCCESS;
     PETHREAD Thread = PsGetCurrentThread();
     TABLE_SEARCH_RESULT Result;
+    MM_TB_FLUSH_LIST FlushList;
+    PMMPFN ReleasePfn[32];
+    ULONG ReleaseCount = 0;
 
     /* We must be attached */
     ASSERT(Process == PsGetCurrentProcess());
+    MmInitializeTbFlushList(&FlushList, FALSE);
 
     /* Calculate base address for the VAD */
     StartingAddress = (ULONG_PTR)PAGE_ALIGN((*BaseAddress));
@@ -2464,15 +2486,17 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     /* Write the PTE, and release the page only when no processor can still use it */
                     // FIXME: remove the page from the WS
                     MI_WRITE_INVALID_PTE(PointerPte, PteContents);
-                    KeFlushSingleTb(MiPteToAddress(PointerPte), FALSE);
-                    MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
-
-                    /* We are done for this PTE */
                     MiReleasePfnLock(OldIrql);
+
+                    /* The working set lock keeps faults off the page until it is released */
+                    MmAddToTbFlushList(&FlushList, MiPteToAddress(PointerPte));
+                    ReleasePfn[ReleaseCount++] = Pfn1;
+                    if (ReleaseCount == RTL_NUMBER_OF(ReleasePfn))
+                        MiReleaseProtectedPages(&FlushList, ReleasePfn, &ReleaseCount);
                 }
                 else
                 {
-                    /* Write the protection mask and write it with a TLB flush */
+                    /* Write the protection mask, the TB is flushed after the loop */
                     Pfn1->OriginalPte.u.Soft.Protection = ProtectionMask;
                     MiFlushTbAndCapture(Vad,
                                         PointerPte,
@@ -2497,11 +2521,13 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
             PointerPte++;
         }
 
-#ifdef CONFIG_SMP
+        if (ReleaseCount != 0)
+            MiReleaseProtectedPages(&FlushList, ReleasePfn, &ReleaseCount);
+
+        /* One flush for every protection changed above, before the call returns */
         KeFlushRangeTb((PVOID)StartingAddress,
-                       (EndingAddress + 1 - StartingAddress) / PAGE_SIZE,
+                       (ULONG)((EndingAddress + 1 - StartingAddress) / PAGE_SIZE),
                        FALSE);
-#endif
 
         /* Unlock the working set */
         MiUnlockProcessWorkingSetUnsafe(Process, Thread);

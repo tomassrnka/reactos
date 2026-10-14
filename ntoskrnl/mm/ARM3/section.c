@@ -1945,16 +1945,11 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     }
 
     //
-    // Write the new PTE, making sure we are only changing the bits
+    // Write the new PTE, making sure we are only changing the bits. The caller
+    // flushes the TB for its whole range before it releases the working set.
     //
+    ASSERT(PreviousPte.u.Hard.Valid == 1);
     MI_UPDATE_VALID_PTE(PointerPte, TempPte);
-
-    //
-    // Flush the TLB
-    //
-    ASSERT(PreviousPte.u.Hard.Valid == 1);
-    KeFlushEntireTb(TRUE, TRUE);
-    ASSERT(PreviousPte.u.Hard.Valid == 1);
 
     //
     // Windows updates the relevant PFN1 information, we currently don't.

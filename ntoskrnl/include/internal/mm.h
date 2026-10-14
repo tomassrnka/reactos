@@ -1353,6 +1353,65 @@ NTSTATUS
 NTAPI
 MmGetExecuteOptions(IN PULONG ExecuteOptions);
 
+/*
+ * Pages whose translations were removed or changed, flushed together with one
+ * request to the processors that may cache them (one IPI round per batch).
+ * KeFlushRangeTb flushes the whole TB of the targets above its own threshold.
+ * A page that was unmapped must not be freed or reused before the list that
+ * holds it is flushed.
+ */
+typedef struct _MM_TB_FLUSH_LIST
+{
+    ULONG_PTR Low;
+    ULONG_PTR High;
+    ULONG Count;
+    BOOLEAN AllProcessors;
+} MM_TB_FLUSH_LIST, *PMM_TB_FLUSH_LIST;
+
+FORCEINLINE
+VOID
+MmInitializeTbFlushList(
+    _Out_ PMM_TB_FLUSH_LIST List,
+    _In_ BOOLEAN AllProcessors)
+{
+    List->Low = List->High = 0;
+    List->Count = 0;
+    List->AllProcessors = AllProcessors;
+}
+
+FORCEINLINE
+VOID
+MmAddToTbFlushList(
+    _Inout_ PMM_TB_FLUSH_LIST List,
+    _In_ PVOID Address)
+{
+    ULONG_PTR Page = (ULONG_PTR)PAGE_ALIGN(Address);
+
+    if (List->Count++ == 0)
+        List->Low = List->High = Page;
+    else if (Page < List->Low)
+        List->Low = Page;
+    else if (Page > List->High)
+        List->High = Page;
+}
+
+FORCEINLINE
+VOID
+MmFlushTbList(
+    _Inout_ PMM_TB_FLUSH_LIST List)
+{
+    ULONG_PTR Pages;
+
+    if (List->Count == 0)
+        return;
+
+    Pages = ((List->High - List->Low) >> PAGE_SHIFT) + 1;
+    KeFlushRangeTb((PVOID)List->Low,
+                   (Pages > MAXULONG) ? MAXULONG : (ULONG)Pages,
+                   List->AllProcessors);
+    List->Count = 0;
+}
+
 _Success_(return)
 BOOLEAN
 MmDeleteVirtualMapping(
@@ -1360,6 +1419,28 @@ MmDeleteVirtualMapping(
     _In_ PVOID Address,
     _Out_opt_ BOOLEAN* WasDirty,
     _Out_opt_ PPFN_NUMBER Page
+);
+
+/* The caller flushes FlushList before it frees the page */
+_Success_(return)
+BOOLEAN
+MmDeleteVirtualMappingDeferFlush(
+    _Inout_opt_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _Out_opt_ BOOLEAN* WasDirty,
+    _Out_opt_ PPFN_NUMBER Page,
+    _In_ BOOLEAN IsPhysical,
+    _Inout_ PMM_TB_FLUSH_LIST FlushList
+);
+
+/* The caller flushes FlushList before it returns or drops the address space lock */
+VOID
+NTAPI
+MmSetPageProtectDeferFlush(
+    struct _EPROCESS *Process,
+    PVOID Address,
+    ULONG flProtect,
+    PMM_TB_FLUSH_LIST FlushList
 );
 
 _Success_(return)
