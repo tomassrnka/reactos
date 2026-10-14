@@ -179,6 +179,7 @@ BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD fdwReason, LPVOID fImpLoad)
         {
             /* now unload all remaining drivers... */
             DRIVER_UnloadAll();
+            TIME_ReleaseResolution();
         }
 
 	WINMM_DeleteIData();
