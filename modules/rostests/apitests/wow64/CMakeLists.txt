@@ -27,7 +27,15 @@ add_wow64_apitest(kernel32
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment)
 add_wow64_apitest(ntdll
-    NtOpenKey NtQueryKey NtQueryValueKey
+    Wow64Continue NtOpenKey NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString)
 add_wow64_apitest(advapi32
     RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW)
+
+if(ARCH STREQUAL "i386")
+    add_asm_files(wow64_continue_asm ../ntdll/i386/Wow64Continue.S)
+    target_sources(ntdll_wow64_apitest PRIVATE ${wow64_continue_asm})
+elseif(ARCH STREQUAL "amd64")
+    add_asm_files(wow64_continue_asm ../ntdll/amd64/Wow64Continue.S)
+    target_sources(ntdll_wow64_apitest PRIVATE ${wow64_continue_asm})
+endif()

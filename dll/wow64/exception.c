@@ -25,7 +25,9 @@ static NTSTATUS ContextFrom32(CONTEXT *To, const WOW64_CONTEXT *From)
         (Flags & ~(WOW64_CONTEXT_FULL)))
         return STATUS_NOT_SUPPORTED;
     RtlCaptureContext(To);
-    To->ContextFlags = CONTEXT_AMD64;
+    /* The guest supplies integer state only. Preserve the native capture's
+     * floating-point state when continuing through the native exit path. */
+    To->ContextFlags = CONTEXT_FLOATING_POINT;
     if (Flags & (WOW64_CONTEXT_INTEGER & ~WOW64_CONTEXT_i386))
     {
         To->ContextFlags |= CONTEXT_INTEGER;
