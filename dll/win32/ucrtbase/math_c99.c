@@ -291,3 +291,90 @@ float __cdecl nearbyintf(float x)
     return rintf(x);
 #endif
 }
+
+/* The legacy logb of Windows differs from logb at the infinities and, for the float one, at NaN, and it reports
+   the pole to the user handler of math errors, which logb does not (measured on Windows 10): the sign of an
+   infinity stays and _logbf(NaN) is a domain error */
+int __cdecl _invoke_matherr(int type, char *name, double arg1, double arg2, double retval);
+
+double __cdecl _logb(double x)
+{
+    if (!isfinite(x))
+        return x;
+    if (x == 0)
+    {
+        double r = -1 / (x * x);
+
+        if (!_invoke_matherr(_SING, "_logb", x, 0, r))
+            errno = ERANGE;
+        return r;
+    }
+    return ilogb(x);
+}
+
+#ifndef _M_IX86
+float __cdecl _logbf(float x)
+{
+    if (isnan(x))
+    {
+        errno = EDOM;
+        return x;
+    }
+    if (isinf(x))
+        return x;
+    if (x == 0)
+    {
+        float r = -1 / (x * x);
+
+        if (!_invoke_matherr(_SING, "_logbf", x, 0, r))
+            errno = ERANGE;
+        return r;
+    }
+    return ilogbf(x);
+}
+#endif
+
+/*
+ * The _o_ variants: the same results, but they never set errno and never call the handler of math errors
+ * (measured on Windows 10). The functions below call the plain ones and put errno back, except for the
+ * legacy logb, whose results differ and which would call the handler.
+ */
+#define O_WRAPPER(Type, Name, Function) \
+    Type __cdecl Name(Type x) \
+    { \
+        int saved = errno; \
+        Type r = Function(x); \
+        errno = saved; \
+        return r; \
+    }
+
+O_WRAPPER(double, _o_lgamma, lgamma)
+O_WRAPPER(float, _o_lgammaf, lgammaf)
+O_WRAPPER(double, _o_lgammal, lgamma)
+O_WRAPPER(double, _o_tgamma, tgamma)
+O_WRAPPER(float, _o_tgammaf, tgammaf)
+O_WRAPPER(double, _o_tgammal, tgamma)
+O_WRAPPER(double, _o_logb, logb)
+O_WRAPPER(float, _o_logbf, logbf)
+O_WRAPPER(double, _o_logbl, logb)
+
+/* The legacy logb keeps the sign of an infinity */
+double __cdecl _o__logb(double x)
+{
+    if (!isfinite(x))
+        return x;
+    if (x == 0)
+        return -1 / (x * x);
+    return ilogb(x);
+}
+
+#ifndef _M_IX86
+float __cdecl _o__logbf(float x)
+{
+    if (!isfinite(x))
+        return x;
+    if (x == 0)
+        return -1 / (x * x);
+    return ilogbf(x);
+}
+#endif
