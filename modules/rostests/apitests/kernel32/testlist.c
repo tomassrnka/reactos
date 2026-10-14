@@ -79,10 +79,14 @@ extern void func_WerFlags(void);
 extern void func_WideCharToMultiByte(void);
 
 extern void func_Wow64Environment(void);
+extern void func_Wow64ProgramFiles(void);
+extern void func_Wow64EnvironmentBlock(void);
 
 const struct test winetest_testlist[] =
 {
     { "Wow64Environment", func_Wow64Environment },
+    { "Wow64ProgramFiles", func_Wow64ProgramFiles },
+    { "Wow64EnvironmentBlock", func_Wow64EnvironmentBlock },
     { "Wow64Process", func_Wow64Process },
     { "Wow64Run", func_Wow64Run },
     { "Wow64ReviewFixes", func_Wow64ReviewFixes },
