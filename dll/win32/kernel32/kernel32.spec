@@ -910,6 +910,7 @@
 @ stdcall Process32Next(ptr ptr)
 @ stdcall Process32NextW(ptr ptr)
 @ stdcall ProcessIdToSessionId(long ptr)
+@ stdcall PrefetchVirtualMemory(long long ptr long)
 @ stdcall PulseEvent(long)
 @ stdcall PurgeComm(long long)
 @ stub -version=0x600+ QueryActCtxSettingsW

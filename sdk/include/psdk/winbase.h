@@ -3053,6 +3053,25 @@ GetFirmwareType(
 
 #endif /* _WIN32_WINNT >= 0x0602 */
 
+#if (_WIN32_WINNT >= 0x0602) || defined(__REACTOS__)
+
+typedef struct _WIN32_MEMORY_RANGE_ENTRY
+{
+    PVOID VirtualAddress;
+    SIZE_T NumberOfBytes;
+} WIN32_MEMORY_RANGE_ENTRY, *PWIN32_MEMORY_RANGE_ENTRY;
+
+WINBASEAPI
+BOOL
+WINAPI
+PrefetchVirtualMemory(
+    _In_ HANDLE hProcess,
+    _In_ ULONG_PTR NumberOfEntries,
+    _In_reads_(NumberOfEntries) PWIN32_MEMORY_RANGE_ENTRY VirtualAddresses,
+    _In_ ULONG Flags);
+
+#endif /* (_WIN32_WINNT >= 0x0602) || defined(__REACTOS__) */
+
 UINT WINAPI SetHandleCount(UINT);
 BOOL WINAPI SetHandleInformation(HANDLE,DWORD,DWORD);
 
