@@ -11,6 +11,7 @@ add_subdirectory(kernel32)
 add_subdirectory(ntos_cc)
 add_subdirectory(ntos_cm)
 add_subdirectory(ntos_io)
+add_subdirectory(ntos_ke/KeTrapFrame)
 add_subdirectory(ntos_mm)
 add_subdirectory(ntos_po)
 add_subdirectory(tcpip)
@@ -195,6 +196,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoReadWrite_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_ke/KeSystemCall32_user.c
+    ntos_ke/KeTrapFrame/KeTrapFrame_user.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/NtCreateSection_user.c
     ntos_po/PoIrp_user.c

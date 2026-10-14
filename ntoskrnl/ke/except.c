@@ -185,7 +185,7 @@ NtRaiseException(
 {
     NTSTATUS Status;
     PKTHREAD Thread;
-    PKTRAP_FRAME TrapFrame;
+    PKTRAP_FRAME TrapFrame, LinkedTrapFrame;
 #ifdef _M_IX86
     PKEXCEPTION_FRAME ExceptionFrame = NULL;
 #elif !defined(_M_AMD64)
@@ -196,6 +196,8 @@ NtRaiseException(
     /* Get trap frame and link previous one */
     Thread = KeGetCurrentThread();
     TrapFrame = Thread->TrapFrame;
+    /* i386 stores this link in Edx, which context restoration overwrites. */
+    LinkedTrapFrame = KiGetLinkedTrapFrame(TrapFrame);
 
     /* Set exception list */
 #ifdef _M_IX86
@@ -215,7 +217,7 @@ NtRaiseException(
         return Status;
     }
 
-    Thread->TrapFrame = KiGetLinkedTrapFrame(TrapFrame);
+    Thread->TrapFrame = LinkedTrapFrame;
 
     /* It was handled, so exit restoring all state */
     KiExceptionExit(TrapFrame, ExceptionFrame);
@@ -237,7 +239,7 @@ NtContinue(
 {
     PKTHREAD Thread;
     NTSTATUS Status;
-    PKTRAP_FRAME TrapFrame;
+    PKTRAP_FRAME TrapFrame, LinkedTrapFrame;
 #ifdef _M_IX86
     PKEXCEPTION_FRAME ExceptionFrame = NULL;
 #elif !defined(_M_AMD64)
@@ -248,6 +250,8 @@ NtContinue(
     /* Get trap frame and link previous one*/
     Thread = KeGetCurrentThread();
     TrapFrame = Thread->TrapFrame;
+    /* i386 stores this link in Edx, which context restoration overwrites. */
+    LinkedTrapFrame = KiGetLinkedTrapFrame(TrapFrame);
 
     /* Continue from this point on */
     Status = KiContinue(Context, ExceptionFrame, TrapFrame);
@@ -257,7 +261,7 @@ NtContinue(
         return Status;
     }
 
-    Thread->TrapFrame = KiGetLinkedTrapFrame(TrapFrame);
+    Thread->TrapFrame = LinkedTrapFrame;
 
     /* Check if alert was requested */
     if (TestAlert)
