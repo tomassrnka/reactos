@@ -299,7 +299,25 @@ SelectVolume(
              */
             CurrentPartition = GetPartitionForVolume(VolumeEntry);
             if (CurrentPartition != NULL)
+            {
                 CurrentDisk = CurrentPartition->DiskEntry;
+            }
+            else if (VolumeEntry->pExtents != NULL && VolumeEntry->pExtents->NumberOfDiskExtents != 0)
+            {
+                /* A volume on a disk without a matching partition: its (first) disk. */
+                PLIST_ENTRY DiskListEntry;
+
+                for (DiskListEntry = DiskListHead.Flink; DiskListEntry != &DiskListHead; DiskListEntry = DiskListEntry->Flink)
+                {
+                    PDISKENTRY DiskEntry = CONTAINING_RECORD(DiskListEntry, DISKENTRY, ListEntry);
+
+                    if (DiskEntry->DiskNumber == VolumeEntry->pExtents->Extents[0].DiskNumber)
+                    {
+                        CurrentDisk = DiskEntry;
+                        break;
+                    }
+                }
+            }
             ConResPrintf(StdOut, IDS_SELECT_VOLUME, CurrentVolume->VolumeNumber);
             return EXIT_SUCCESS;
         }
