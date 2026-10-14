@@ -1,0 +1,30 @@
+# Evaluate the production import declarations without linking. This also catches
+# order regressions when a library has no live imports in a particular build.
+cmake_minimum_required(VERSION 3.17)
+if(NOT DEFINED REACTOS_SOURCE_DIR)
+    get_filename_component(REACTOS_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+endif()
+foreach(command spec2def add_definitions include_directories add_rpc_files
+        add_custom_target add_library add_dependencies target_link_libraries
+        target_compile_definitions add_pch set_module_type add_cd_file)
+    function(${command})
+    endfunction()
+endforeach()
+function(add_importlibs target)
+    if(target STREQUAL "advapi32")
+        set(imports ${imports} ${ARGN} PARENT_SCOPE)
+    endif()
+endfunction()
+function(add_delay_importlibs target)
+    if(target STREQUAL "advapi32")
+        set(delayed ${delayed} ${ARGN} PARENT_SCOPE)
+    endif()
+endfunction()
+set(DLL_EXPORT_VERSION 0x601)
+set(SYSWOW64_GUEST OFF)
+include("${REACTOS_SOURCE_DIR}/dll/win32/advapi32/CMakeLists.txt")
+if(NOT "${imports}" STREQUAL "advapi32_vista;rpcrt4;kernel32;ntdll" OR
+   NOT "${delayed}" STREQUAL "secur32")
+    message(FATAL_ERROR "Native advapi32 import order changed: ${imports}; delayed=${delayed}")
+endif()
+message(STATUS "Native advapi32 import declarations match the pre-WoW64 order")
