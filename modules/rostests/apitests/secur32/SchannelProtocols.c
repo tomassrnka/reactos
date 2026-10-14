@@ -33,6 +33,7 @@ typedef struct _CONNECTION
     SOCKET Socket;
     BYTE *Buffer;
     ULONG Used;
+    BOOL HaveContext;
 } CONNECTION;
 
 typedef struct _RESULT
@@ -165,6 +166,8 @@ static SECURITY_STATUS Handshake(CONNECTION *Conn, PCSTR Target, DWORD Protocols
                 Conn->Used = 0;
             }
         }
+        if (First && (Status == SEC_I_CONTINUE_NEEDED || Status == SEC_E_OK))
+            Conn->HaveContext = TRUE;
         First = FALSE;
 
         if (Status == SEC_E_OK)
@@ -301,8 +304,10 @@ static void Connect(PCSTR Address, DWORD Protocols, RESULT *Result)
         if (QueryContextAttributesA(&Conn.Ctx, SECPKG_ATTR_CONNECTION_INFO, &Info) == SEC_E_OK)
             Result->Protocol = Info.dwProtocol;
         Result->GotResponse = GetPage(&Conn);
-        DeleteSecurityContext(&Conn.Ctx);
     }
+    /* a failed handshake leaves a context behind as well */
+    if (Conn.HaveContext)
+        DeleteSecurityContext(&Conn.Ctx);
     if (Conn.Cred.dwLower || Conn.Cred.dwUpper)
         FreeCredentialsHandle(&Conn.Cred);
 
@@ -310,6 +315,86 @@ done:
     if (Conn.Socket != INVALID_SOCKET)
         closesocket(Conn.Socket);
     HeapFree(GetProcessHeap(), 0, Conn.Buffer);
+}
+
+#define WORKERS 8
+#define ROUNDS 5
+
+typedef struct _WORKER
+{
+    PCSTR Address;
+    DWORD Protocols;
+    LONG Failures;
+} WORKER;
+
+static BOOL Tls13Supported(void)
+{
+    SCHANNEL_CRED Auth;
+    CredHandle Cred;
+    BOOL Supported;
+
+    ZeroMemory(&Auth, sizeof(Auth));
+    Auth.dwVersion = SCHANNEL_CRED_VERSION;
+    Auth.grbitEnabledProtocols = SP_PROT_TLS1_3_CLIENT;
+    Auth.dwFlags = SCH_CRED_NO_DEFAULT_CREDS;
+    Supported = AcquireCredentialsHandleA(NULL, (SEC_CHAR *)UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL, &Auth,
+                                          NULL, NULL, &Cred, NULL) == SEC_E_OK;
+    if (Supported)
+        FreeCredentialsHandle(&Cred);
+    return Supported;
+}
+
+/* Sessions of several threads share the crypto state of the library */
+static DWORD WINAPI ConnectionWorker(void *Param)
+{
+    WORKER *Worker = Param;
+    RESULT Result;
+    ULONG i;
+
+    for (i = 0; i < ROUNDS; i++)
+    {
+        Connect(Worker->Address, Worker->Protocols, &Result);
+        if (Result.Status != SEC_E_OK || Result.Protocol != Worker->Protocols || !Result.GotResponse)
+            InterlockedIncrement(&Worker->Failures);
+    }
+
+    return 0;
+}
+
+static void TestParallel(PCSTR Tls12, PCSTR Tls13)
+{
+    WORKER Workers[WORKERS];
+    HANDLE Threads[WORKERS];
+    BOOL Have13 = Tls13 && Tls13Supported();
+    ULONG i, Started = 0;
+    LONG Failures = 0;
+
+    if (!Tls12 && !Have13)
+        return;
+
+    for (i = 0; i < WORKERS; i++)
+    {
+        BOOL Use13 = Have13 && (!Tls12 || (i & 1));
+
+        Workers[i].Address = Use13 ? Tls13 : Tls12;
+        Workers[i].Protocols = Use13 ? SP_PROT_TLS1_3_CLIENT : SP_PROT_TLS1_2_CLIENT;
+        Workers[i].Failures = 0;
+        Threads[i] = CreateThread(NULL, 0, ConnectionWorker, &Workers[i], 0, NULL);
+        if (Threads[i])
+            Started++;
+    }
+
+    for (i = 0; i < WORKERS; i++)
+    {
+        if (!Threads[i])
+            continue;
+        WaitForSingleObject(Threads[i], 120000);
+        CloseHandle(Threads[i]);
+        Failures += Workers[i].Failures;
+    }
+
+    ok(Started == WORKERS, "%lu workers started\n", Started);
+    ok(Failures == 0, "%ld of %lu connections of parallel sessions failed\n", Failures, Started * ROUNDS);
 }
 
 START_TEST(SchannelProtocols)
@@ -356,6 +441,8 @@ START_TEST(SchannelProtocols)
         Connect(Tls13, SP_PROT_TLS1_2_CLIENT, &Result);
         ok(Result.Status != SEC_E_OK, "TLS 1.2 against a TLS 1.3 server worked\n");
     }
+
+    TestParallel(Tls12, Tls13);
 
     WSACleanup();
 }

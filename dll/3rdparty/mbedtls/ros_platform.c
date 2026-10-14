@@ -13,6 +13,7 @@
 #include <mbedtls/build_info.h>
 
 #include <mbedtls/entropy.h>
+#include <mbedtls/threading.h>
 
 #if defined(MBEDTLS_ENTROPY_HARDWARE_ALT)
 
@@ -61,4 +62,60 @@ int vsnprintf_s(char *buffer, size_t size, size_t count, const char *format, va_
 
     buffer[ret] = '\0';
     return ret;
+}
+
+/* Mutexes of the library: a CRITICAL_SECTION behind the pointer of the mutex type */
+static void ros_mutex_init(mbedtls_threading_mutex_t *mutex)
+{
+    CRITICAL_SECTION *cs = HeapAlloc(GetProcessHeap(), 0, sizeof(*cs));
+
+    if (cs)
+        InitializeCriticalSection(cs);
+    mutex->cs = cs;
+}
+
+static void ros_mutex_free(mbedtls_threading_mutex_t *mutex)
+{
+    if (mutex->cs)
+    {
+        DeleteCriticalSection(mutex->cs);
+        HeapFree(GetProcessHeap(), 0, mutex->cs);
+        mutex->cs = NULL;
+    }
+}
+
+static int ros_mutex_lock(mbedtls_threading_mutex_t *mutex)
+{
+    if (!mutex->cs)
+        return MBEDTLS_ERR_THREADING_BAD_INPUT_DATA;
+
+    EnterCriticalSection(mutex->cs);
+    return 0;
+}
+
+static int ros_mutex_unlock(mbedtls_threading_mutex_t *mutex)
+{
+    if (!mutex->cs)
+        return MBEDTLS_ERR_THREADING_BAD_INPUT_DATA;
+
+    LeaveCriticalSection(mutex->cs);
+    return 0;
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
+{
+    switch (reason)
+    {
+        case DLL_PROCESS_ATTACH:
+            DisableThreadLibraryCalls(instance);
+            mbedtls_threading_set_alt(ros_mutex_init, ros_mutex_free, ros_mutex_lock, ros_mutex_unlock);
+            break;
+
+        case DLL_PROCESS_DETACH:
+            if (!reserved)
+                mbedtls_threading_free_alt();
+            break;
+    }
+
+    return TRUE;
 }

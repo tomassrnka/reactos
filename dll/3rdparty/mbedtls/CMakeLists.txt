@@ -59,6 +59,7 @@ list(APPEND SOURCE
     sha1.c
     sha256.c
     sha512.c
+    threading.c
     # x509
     x509.c
     x509_crt.c

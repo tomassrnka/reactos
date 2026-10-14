@@ -4445,6 +4445,11 @@
 
 /** \} name SECTION: Module configuration options */
 
+/* ReactOS: sessions of any thread share the PSA key store and random generator, so the library locks them
+ * (the mutexes are critical sections, installed by DllMain in ros_platform.c) */
+#define MBEDTLS_THREADING_C
+#define MBEDTLS_THREADING_ALT
+
 /* ReactOS: the hardware entropy source is ros_entropy.c (RtlGenRandom); bcrypt.dll cannot be a dependency of this DLL */
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT

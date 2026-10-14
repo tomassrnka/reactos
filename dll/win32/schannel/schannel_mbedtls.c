@@ -151,6 +151,17 @@ DWORD schan_imp_enabled_protocols(void)
         ;
 }
 
+/* Only elliptic curve groups: a server cannot pick a finite field group through a HelloRetryRequest, and
+ * the connection info that says ECDH for TLS 1.3 stays true */
+static const uint16_t schan_groups[] =
+{
+    MBEDTLS_SSL_IANA_TLS_GROUP_X25519,
+    MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1,
+    MBEDTLS_SSL_IANA_TLS_GROUP_SECP384R1,
+    MBEDTLS_SSL_IANA_TLS_GROUP_SECP521R1,
+    MBEDTLS_SSL_IANA_TLS_GROUP_NONE
+};
+
 /* The PSA crypto module of Mbed TLS 3 that TLS 1.3 uses has to be started once, before the first session */
 static volatile LONG schan_psa_state;
 
@@ -211,6 +222,8 @@ BOOL schan_imp_create_session(schan_imp_session *session, schan_credentials *cre
         ERR("mbedtls_ssl_config_defaults failed\n");
         goto fail;
     }
+
+    mbedtls_ssl_conf_groups(&s->conf, schan_groups);
 
     /* Only the versions the credentials ask for are offered, and the server's pick is limited to them */
     mbedtls_ssl_conf_min_tls_version(&s->conf, tls12 ? MBEDTLS_SSL_VERSION_TLS1_2 : MBEDTLS_SSL_VERSION_TLS1_3);

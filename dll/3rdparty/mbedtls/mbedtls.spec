@@ -24,3 +24,4 @@
 @ cdecl psa_crypto_init()
 @ cdecl mbedtls_pk_get_bitlen(ptr)
 @ cdecl mbedtls_ssl_ciphersuite_get_cipher_key_bitlen(ptr)
+@ cdecl mbedtls_ssl_conf_groups(ptr ptr)
