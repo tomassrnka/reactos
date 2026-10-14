@@ -205,6 +205,11 @@ list(APPEND KMTEST_SOURCE
 
     kmtest/kmtest.rc)
 
+if(ARCH STREQUAL "i386")
+    add_asm_files(kmtest_trap_asm ntos_ke/KeTrapFrame/KeTrapFrame_i386.S)
+    list(APPEND KMTEST_SOURCE ${kmtest_trap_asm})
+endif()
+
 if(ARCH STREQUAL "amd64")
     add_asm_files(kmtest_cstar_asm ntos_ke/KeSystemCall32_amd64.S)
     list(APPEND KMTEST_SOURCE ${kmtest_cstar_asm})

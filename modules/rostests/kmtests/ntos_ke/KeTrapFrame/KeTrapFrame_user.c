@@ -8,6 +8,7 @@
 
 #ifdef _M_IX86
 static volatile LONG Handled;
+VOID __cdecl CaptureTrapContext(PCONTEXT Context);
 
 static LONG CALLBACK
 ExceptionHandler(PEXCEPTION_POINTERS Pointers)
@@ -30,7 +31,7 @@ TestContextService(BOOLEAN Raise)
     NTSTATUS Status;
 
     ok_eq_ulong(KmtSendToDriver(1), ERROR_SUCCESS);
-    RtlCaptureContext(&Context);
+    CaptureTrapContext(&Context);
     if (!Resumed)
     {
         Resumed = 1;
