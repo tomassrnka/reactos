@@ -19,6 +19,7 @@ EXTERN RtlRaiseStatus:PROC
 
 .data
 
+PUBLIC Wow64PrepareForException
 Wow64PrepareForException:
     .quad 0
 

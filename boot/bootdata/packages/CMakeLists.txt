@@ -12,8 +12,19 @@
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/concat.cmake "
     file(READ \${SRC1} S1)
     file(READ \${SRC2} S2)
-    file(WRITE \${DST} \"\${S1}\${S2}\")
+    set(S3 \"\")
+    if(SRC3)
+        file(READ \${SRC3} S3)
+    endif()
+    file(WRITE \${DST} \"\${S1}\${S2}\${S3}\")
 ")
+
+# With SYSWOW64, a third part lists the i386 files (sdk/cmake/syswow64.cmake)
+if(SYSWOW64)
+    set(_syswow64_args -D SRC3=${SYSWOW64_DFF})
+    set(_syswow64_depends ${SYSWOW64_DFF})
+    set_property(GLOBAL APPEND PROPERTY REACTOS_CAB_DEPENDS ${SYSWOW64_STAMP})
+endif()
 
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.cmake "")
 
@@ -29,13 +40,15 @@ add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff
     COMMAND ${CMAKE_COMMAND} -D SRC1=${CMAKE_CURRENT_SOURCE_DIR}/reactos.dff.in
                              -D SRC2=${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.$<CONFIG>.dyn
+                             ${_syswow64_args}
                              -D DST=${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.maydiff
                              -P ${CMAKE_CURRENT_BINARY_DIR}/concat.cmake
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                              ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.maydiff
                              ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/reactos.dff.in
-    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.$<CONFIG>.dyn)
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.$<CONFIG>.dyn
+    DEPENDS ${_syswow64_depends})
 
 add_custom_command(
     COMMAND native-cabman -C ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff -L ${CMAKE_CURRENT_BINARY_DIR} -I -P ${REACTOS_SOURCE_DIR}
@@ -44,6 +57,9 @@ add_custom_command(
 
 add_custom_target(
     reactos_cab_inf DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf)
+if(SYSWOW64)
+    add_dependencies(reactos_cab_inf syswow64_stage)
+endif()
 
 add_cd_file(
     TARGET reactos_cab_inf

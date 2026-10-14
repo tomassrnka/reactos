@@ -1128,8 +1128,16 @@ PUBLIC KiServiceExit3
 
 PUBLIC KiSystemCallEntry32
 KiSystemCallEntry32:
-    swapgs
-    int 3
+    /*
+     * SYSCALL has not switched stacks or GS. No 32-bit argument thunk is
+     * installed here: reject the call without touching user memory, taking
+     * an exception on the user stack, or falling into KiZwSystemService.
+     * Truncate RIP/RSP to compatibility width before the non-REX.W SYSRET.
+     */
+    mov eax, HEX(0C000001C) /* STATUS_INVALID_SYSTEM_SERVICE */
+    mov ecx, ecx
+    mov esp, esp
+    .byte HEX(0F), HEX(07) /* SYSRET with 32-bit operand size, no REX.W. */
 
 
 PUBLIC KiZwSystemService

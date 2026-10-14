@@ -2069,13 +2069,6 @@ IoIs32bitProcess(
 
     pProcess = CONTAINING_RECORD(pThread->Tcb.Process, EPROCESS, Pcb);
 
-    /* FIXME: A two-part hack: delay setting Process->Wow64Process, so 64-bit
-       NTDLL can use IO to init stuff. */
-    if (pProcess->Wow64Process == UlongToPtr(1))
-    {
-        return FALSE;
-    }
-
     return pProcess->Wow64Process != NULL;
 }
 #endif

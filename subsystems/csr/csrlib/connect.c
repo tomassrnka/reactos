@@ -205,6 +205,19 @@ CsrClientConnectToServer(
     NTSTATUS Status;
     PIMAGE_NT_HEADERS NtHeader;
 
+#ifdef _M_IX86
+    if (CsrIsWow64())
+    {
+        ULONG Arguments[] = {PtrToUlong(ObjectDirectory), ServerId,
+                             PtrToUlong(ConnectionInfo), PtrToUlong(ConnectionInfoSize),
+                             PtrToUlong(ServerToServerCall)};
+        /* Native CSR owns the LPC connection. Captures here remain local
+         * until the typed bridge builds a native message and capture. */
+        CsrPortHeap = RtlGetProcessHeap();
+        return CsrWow64Call(0, Arguments);
+    }
+#endif
+
     DPRINT("CsrClientConnectToServer: %lx %p\n", ServerId, ConnectionInfo);
 
     /* Validate the Connection Info */
@@ -372,6 +385,16 @@ CsrClientCallServer(
     _In_ ULONG DataLength)
 {
     NTSTATUS Status;
+
+#ifdef _M_IX86
+    if (CsrIsWow64())
+    {
+        ULONG Arguments[] = {PtrToUlong(ApiMessage), PtrToUlong(CaptureBuffer),
+                             ApiNumber, DataLength};
+        ApiMessage->Status = CsrWow64Call(1, Arguments);
+        return ApiMessage->Status;
+    }
+#endif
 
     /* Make sure the length is valid */
     if (DataLength > (MAXSHORT - sizeof(CSR_API_MESSAGE)))

@@ -3874,8 +3874,12 @@ StartScan:
     }
 
     /* Make sure the image was compiled for this processor */
-    if ((ImageInformation.Machine < SharedUserData->ImageNumberLow) ||
-        (ImageInformation.Machine > SharedUserData->ImageNumberHigh))
+    if (((ImageInformation.Machine < SharedUserData->ImageNumberLow) ||
+         (ImageInformation.Machine > SharedUserData->ImageNumberHigh))
+#ifdef BUILD_WOW64_ENABLED
+        && (ImageInformation.Machine != IMAGE_FILE_MACHINE_I386)
+#endif
+        )
     {
 #ifdef _WIN64
         /* There is no WoW64: a 32-bit or foreign image is simply not runnable here */
@@ -4489,8 +4493,22 @@ StartScan:
     /* Write the remote PEB address and clear it locally, we no longer use it */
     CreateProcessMsg->PebAddressNative = RemotePeb;
 #ifdef _WIN64
-    DPRINT("TODO: WOW64 is not supported yet\n");
     CreateProcessMsg->PebAddressWow64 = 0;
+#ifdef BUILD_WOW64_ENABLED
+    if (ImageInformation.Machine == IMAGE_FILE_MACHINE_I386)
+    {
+        ULONG_PTR Peb32 = 0;
+        Status = NtQueryInformationProcess(ProcessHandle, ProcessWow64Information,
+                                           &Peb32, sizeof(Peb32), NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            Result = FALSE;
+            goto Quickie;
+        }
+        CreateProcessMsg->PebAddressWow64 = (ULONG)Peb32;
+    }
+#endif
 #else
     CreateProcessMsg->PebAddressWow64 = (ULONG)RemotePeb;
 #endif

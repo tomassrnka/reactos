@@ -72,7 +72,8 @@ SetupExtractFile(
     IN OUT PFILEQUEUEHEADER QueueHeader,
     IN PCWSTR CabinetFileName,
     IN PCWSTR SourceFileName,
-    IN PCWSTR DestinationPathName)
+    IN PCWSTR DestinationPathName,
+    IN PCWSTR TargetFileName OPTIONAL)
 {
     ULONG CabStatus;
 
@@ -148,7 +149,8 @@ SetupExtractFile(
     }
 
     CabinetSetDestinationPath(&QueueHeader->CabinetContext, DestinationPathName);
-    CabStatus = CabinetExtractFile(&QueueHeader->CabinetContext, &QueueHeader->Search);
+    CabStatus = CabinetExtractFile(&QueueHeader->CabinetContext, &QueueHeader->Search,
+                                  TargetFileName);
     if (CabStatus != CAB_STATUS_SUCCESS)
     {
         DPRINT("Cannot extract file %S (%d)\n", SourceFileName, CabStatus);
@@ -884,18 +886,10 @@ EndRename:
 
         /* Build the full target path */
         RtlStringCchCopyW(FileDstPath, ARRAYSIZE(FileDstPath), Entry->TargetDirectory);
-        if (Entry->SourceCabinet == NULL)
-        {
-            /* If the file is not in a cabinet, possibly use a different target name */
-            if (Entry->TargetFileName != NULL)
-                ConcatPaths(FileDstPath, ARRAYSIZE(FileDstPath), 1, Entry->TargetFileName);
-            else
-                ConcatPaths(FileDstPath, ARRAYSIZE(FileDstPath), 1, Entry->SourceFileName);
-        }
+        if (Entry->TargetFileName != NULL)
+            ConcatPaths(FileDstPath, ARRAYSIZE(FileDstPath), 1, Entry->TargetFileName);
         else
-        {
             ConcatPaths(FileDstPath, ARRAYSIZE(FileDstPath), 1, Entry->SourceFileName);
-        }
 
         DPRINT(" -----> " "Copy: '%S' ==> '%S'\n", FileSrcPath, FileDstPath);
 
@@ -925,15 +919,12 @@ EndRename:
 RetryCopy:
         if (Entry->SourceCabinet != NULL)
         {
-            /*
-             * The file is in a cabinet, use only the destination path
-             * and keep the source name as the target name.
-             */
             /* Extract the file from the cabinet */
             Status = SetupExtractFile(QueueHeader,
                                       FileSrcPath, // Specifies the cabinet path
                                       Entry->SourceFileName,
-                                      Entry->TargetDirectory);
+                                      Entry->TargetDirectory,
+                                      Entry->TargetFileName);
         }
         else
         {

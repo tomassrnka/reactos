@@ -1324,39 +1324,9 @@ NtQueryInformationProcess(
             /* Make sure the process isn't dying */
             if (ExAcquireRundownProtection(&Process->RundownProtect))
             {
-                /* FIXME: A two-part hack: delay setting Process->Wow64Process,
-                   so 64-bit NTDLL can use IO to init stuff. */
-                if (IS_WOW64_PROCESS_INITIALIZING(Process))
-                {
-                    PsChargeProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-                    Process->Wow64Process = ExAllocatePoolWithTag(NonPagedPool, sizeof(WOW64_PROCESS), TAG_PS_WOW64);
-                    if (!Process->Wow64Process)
-                    {
-                        PsReturnProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-
-                        Status = STATUS_NO_MEMORY;
-                        Process->Wow64Process = UlongToPtr(1);
-                    }
-                    else
-                    {
-                        Process->Wow64Process->Wow64 = (PVOID)((ULONG_PTR)(Process->Peb) + ROUND_TO_PAGES(sizeof(PEB)));
-                    }
-                }
-
-                /* Get the WOW64 process structure */
-                if (Process->Wow64Process == NULL)
-                {
-                    Wow64 = 0;
-                }
-                /* FIXME */
-                else if (IS_WOW64_PROCESS_INITIALIZING(Process))
-                {
-                    Wow64 = TRUE;
-                }
-                else
-                {
-                    Wow64 = (ULONG_PTR)Process->Wow64Process->Wow64;
-                }
+                /* Process creation owns allocation; a query never changes state. */
+                if (Process->Wow64Process)
+                    Wow64 = (ULONG_PTR)Process->Wow64Process->Peb;
 
                 /* Release the lock */
                 ExReleaseRundownProtection(&Process->RundownProtect);

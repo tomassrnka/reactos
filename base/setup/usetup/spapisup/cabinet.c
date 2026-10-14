@@ -958,13 +958,15 @@ Validate(VOID)
  * FUNCTION: Extracts a file from the cabinet
  * ARGUMENTS:
  *     Search = Pointer to PCAB_SEARCH structure used to locate the file
+ *     TargetFileName = Optional name to use in the destination directory
  * RETURNS
  *     Status of operation
  */
 ULONG
 CabinetExtractFile(
     IN PCABINET_CONTEXT CabinetContext,
-    IN PCAB_SEARCH Search)
+    IN PCAB_SEARCH Search,
+    IN PCWSTR TargetFileName OPTIONAL)
 {
     ULONG Size;                 // remaining file bytes to decompress
     ULONG CurrentOffset;        // current uncompressed offset within the folder
@@ -1044,13 +1046,22 @@ CabinetExtractFile(
     }
     else
     {
-        RtlInitAnsiString(&AnsiString, Search->File->FileName);
         wcscpy(DestName, CabinetContext->DestPath);
-        StringLength = wcslen(DestName);
-        UnicodeString.MaximumLength = sizeof(DestName) - (USHORT)StringLength * sizeof(WCHAR);
-        UnicodeString.Buffer = DestName + StringLength;
-        UnicodeString.Length = 0;
-        RtlAnsiStringToUnicodeString(&UnicodeString, &AnsiString, FALSE);
+        if (TargetFileName)
+        {
+            NtStatus = RtlStringCchCatW(DestName, ARRAYSIZE(DestName), TargetFileName);
+        }
+        else
+        {
+            RtlInitAnsiString(&AnsiString, Search->File->FileName);
+            StringLength = wcslen(DestName);
+            UnicodeString.MaximumLength = sizeof(DestName) - (USHORT)StringLength * sizeof(WCHAR);
+            UnicodeString.Buffer = DestName + StringLength;
+            UnicodeString.Length = 0;
+            NtStatus = RtlAnsiStringToUnicodeString(&UnicodeString, &AnsiString, FALSE);
+        }
+        if (!NT_SUCCESS(NtStatus))
+            return CAB_STATUS_CANNOT_CREATE;
 
         /* Create destination file, fail if it already exists */
         RtlInitUnicodeString(&UnicodeString, DestName);

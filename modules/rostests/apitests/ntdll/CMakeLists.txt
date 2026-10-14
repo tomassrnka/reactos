@@ -38,6 +38,7 @@ target_link_libraries(ntdll_crt_test_lib ${PSEH_LIB})
 add_dependencies(ntdll_crt_test_lib psdk)
 
 list(APPEND SOURCE
+    ZeroBits.c
     DllLoadNotification.c
     EmptyPxe.c
     LdrEnumResources.c

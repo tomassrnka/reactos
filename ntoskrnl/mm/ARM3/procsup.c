@@ -37,6 +37,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     LARGE_INTEGER CurrentTime;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     BOOLEAN IsWow64;
+    PWOW64_PROCESS Wow64Process = NULL;
 #endif
     BOOLEAN IsPeb;
 
@@ -76,13 +77,14 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    IsWow64 = FALSE;
+    IsWow64 = (Process->Wow64Process != NULL);
 
     if (Process->SectionBaseAddress != NULL)
     {
         PIMAGE_NT_HEADERS NtHeader = RtlImageNtHeader(Process->SectionBaseAddress);
 
-        if (NtHeader != NULL && NtHeader->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
+        if (NtHeader != NULL && NtHeader->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 &&
+            NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
         {
             IsWow64 = TRUE;
         }
@@ -135,6 +137,31 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 #endif
     }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (IsPeb && IsWow64)
+    {
+        ASSERT(Process->Wow64Process == NULL);
+        Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(*Wow64Process));
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(Vad, 'ldaV');
+            goto FailPath;
+        }
+
+        Wow64Process = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Wow64Process), TAG_PS_WOW64);
+        if (!Wow64Process)
+        {
+            PsReturnProcessNonPagedPoolQuota(Process, sizeof(*Wow64Process));
+            ExFreePoolWithTag(Vad, 'ldaV');
+            Status = STATUS_NO_MEMORY;
+            goto FailPath;
+        }
+        RtlZeroMemory(Wow64Process, sizeof(*Wow64Process));
+    }
+#endif
+
+    /* Size may now include the explicit 32-bit structure. */
+    Vad->u.VadFlags.CommitCharge = BYTES_TO_PAGES(Size);
     *BaseAddress = 0;
     Status = MiInsertVadEx((PMMVAD)Vad,
                            BaseAddress,
@@ -150,9 +177,10 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     }
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    if (IsPeb && IsWow64)
+    if (Wow64Process)
     {
-        Process->Wow64Process = UlongToPtr(1);
+        Wow64Process->Peb = PS_GET_PEB32_FROM_PEB(*BaseAddress);
+        Process->Wow64Process = Wow64Process;
     }
 #endif
 
@@ -160,6 +188,13 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     return STATUS_SUCCESS;
 
 FailPath:
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Wow64Process)
+    {
+        ExFreePoolWithTag(Wow64Process, TAG_PS_WOW64);
+        PsReturnProcessNonPagedPoolQuota(Process, sizeof(*Wow64Process));
+    }
+#endif
     PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
 
     return Status;

@@ -278,6 +278,10 @@ function(add_cd_file)
         message(FATAL_ERROR "You must provide a cd name (or \"all\" for all of them) to install the file on!")
     endif()
 
+    if(SYSWOW64_GUEST)
+        syswow64_guest_add_cd_file("${_CD_TARGET}" "${_CD_FILE}" "${_CD_DESTINATION}" "${_CD_NAME_ON_CD}" "${_CD_FOR}")
+    endif()
+
     # get file if we need to
     if(NOT _CD_FILE)
         set(_CD_FILE "$<TARGET_FILE:${_CD_TARGET}>")

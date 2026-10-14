@@ -1,0 +1,34 @@
+/* ReactOS user-mode WoW64 ABI. SPDX-License-Identifier: GPL-2.0-or-later */
+#pragma once
+
+/* Reserved in the native loader's TLS bitmap, never exposed to i386 TLS. */
+#define WOW64_TLS_CPU 1
+#define WOW64_PEB32(Peb) ((PEB32 *)((ULONG_PTR)(Peb) + ROUND_TO_PAGES(sizeof(PEB))))
+#define WOW64_TEB32(Teb) ((TEB32 *)((ULONG_PTR)(Teb) + ROUND_TO_PAGES(sizeof(TEB))))
+
+typedef struct _WOW64_CPU_STATE
+{
+    ULONG64 NativeStack;
+    ULONG Esp;
+    ULONG Eip;
+    ULONG EFlags;
+    ULONG Eax;
+    ULONG Ebx;
+    ULONG Esi;
+    ULONG Edi;
+    ULONG Ebp;
+} WOW64_CPU_STATE;
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, NativeStack) == 0);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Esp) == 8);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Eip) == 12);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, EFlags) == 16);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Eax) == 20);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ebx) == 24);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Esi) == 28);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Edi) == 32);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ebp) == 36);
+
+typedef NTSTATUS (NTAPI *WOW64_SERVICE)(ULONG Number, ULONG *Arguments);
+NTSTATUS NTAPI Wow64CpuInitialize(WOW64_SERVICE Service, PVOID *Gate);
+DECLSPEC_NORETURN VOID NTAPI Wow64CpuRun(WOW64_CPU_STATE *State);
+DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context);
