@@ -160,15 +160,94 @@ HDSKSPC WINAPI SetupDuplicateDiskSpaceListA(HDSKSPC DiskSpace, PVOID Reserved1, 
     return SetupDuplicateDiskSpaceListW(DiskSpace, Reserved1, Reserved2, Flags);
 }
 
-/***********************************************************************
- *		SetupAddInstallSectionToDiskSpaceListA  (SETUPAPI.@)
- */
-BOOL WINAPI SetupAddInstallSectionToDiskSpaceListA(HDSKSPC DiskSpace,
-                        HINF InfHandle, HINF LayoutInfHandle,
-                        LPCSTR SectionName, PVOID Reserved1, UINT Reserved2)
+static BOOL query_drives(HDSKSPC handle, void *buffer, BOOL wide, DWORD size, DWORD *ret_size)
 {
-    FIXME ("Stub\n");
+    struct disk_space_list *list = handle;
+    BOOL used[26] = {FALSE};
+    DWORD count = 0, fit, pos = 0;
+
+    if (!handle)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < list->count; ++i)
+    {
+        WCHAR letter = towlower(list->files[i].path[0]);
+
+        if (!used[letter - 'a'])
+        {
+            used[letter - 'a'] = TRUE;
+            ++count;
+        }
+    }
+
+    /* Each drive takes three characters ("c:" and a terminator); one more ends the list. */
+    if (!buffer)
+    {
+        if (ret_size)
+            *ret_size = count * 3 + 1;
+        SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    }
+
+    fit = min(count, size / 3);
+
+    for (unsigned int letter = 0; letter < 26 && pos < fit * 3; ++letter)
+    {
+        if (!used[letter])
+            continue;
+        if (wide)
+        {
+            ((WCHAR *)buffer)[pos++] = 'a' + letter;
+            ((WCHAR *)buffer)[pos++] = ':';
+            ((WCHAR *)buffer)[pos++] = 0;
+        }
+        else
+        {
+            ((char *)buffer)[pos++] = 'a' + letter;
+            ((char *)buffer)[pos++] = ':';
+            ((char *)buffer)[pos++] = 0;
+        }
+    }
+
+    if (count * 3 + 1 > size)
+    {
+        if (ret_size)
+            *ret_size = (fit < count ? fit + 1 : fit) * 3 + 1;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    if (wide)
+        ((WCHAR *)buffer)[pos] = 0;
+    else
+        ((char *)buffer)[pos] = 0;
+    if (ret_size)
+        *ret_size = count * 3 + 1;
+    SetLastError(ERROR_SUCCESS);
     return TRUE;
+}
+
+/***********************************************************************
+ *		SetupQueryDrivesInDiskSpaceListW  (SETUPAPI.@)
+ */
+BOOL WINAPI SetupQueryDrivesInDiskSpaceListW(HDSKSPC handle, WCHAR *buffer, DWORD size, DWORD *ret_size)
+{
+    TRACE("handle %p, buffer %p, size %u, ret_size %p.\n", handle, buffer, size, ret_size);
+
+    return query_drives(handle, buffer, TRUE, size, ret_size);
+}
+
+/***********************************************************************
+ *		SetupQueryDrivesInDiskSpaceListA  (SETUPAPI.@)
+ */
+BOOL WINAPI SetupQueryDrivesInDiskSpaceListA(HDSKSPC handle, char *buffer, DWORD size, DWORD *ret_size)
+{
+    TRACE("handle %p, buffer %p, size %u, ret_size %p.\n", handle, buffer, size, ret_size);
+
+    return query_drives(handle, buffer, FALSE, size, ret_size);
 }
 
 /***********************************************************************
@@ -269,6 +348,227 @@ BOOL WINAPI SetupQuerySpaceRequiredOnDriveA(HDSKSPC DiskSpace,
 
     free(DriveSpecW);
 
+    return ret;
+}
+
+static BOOL get_source_size(HINF inf, const WCHAR *file, LONGLONG *size)
+{
+    WCHAR actual[MAX_PATH], text[32], *end;
+    INFCONTEXT ctx;
+    ULONGLONG value = 0;
+
+    if ((!SetupDiGetActualSectionToInstallW(inf, L"SourceDisksFiles", actual, ARRAYSIZE(actual), NULL, NULL)
+            || !SetupFindFirstLineW(inf, actual, file, &ctx))
+            && !SetupFindFirstLineW(inf, L"SourceDisksFiles", file, &ctx))
+    {
+        SetLastError(ERROR_LINE_NOT_FOUND);
+        return FALSE;
+    }
+
+    /* the size is a 32-bit value on Windows */
+    if (SetupGetFieldCount(&ctx) >= 3)
+    {
+        if (!SetupGetStringFieldW(&ctx, 3, text, ARRAYSIZE(text), NULL))
+            return FALSE;
+        value = _wcstoui64(text, &end, 0);
+        if (end == text)
+            value = 0;
+        else if (value > MAXDWORD)
+            value = MAXDWORD;
+    }
+
+    *size = value;
+    return TRUE;
+}
+
+static BOOL add_file_list(HDSKSPC handle, HINF inf, HINF layout, const WCHAR *dir_section,
+        const WCHAR *name, const WCHAR *source, UINT op)
+{
+    WCHAR dir[MAX_PATH], path[MAX_PATH * 2];
+    LONGLONG size = 0;
+    size_t len;
+
+    if (op == FILEOP_COPY && !get_source_size(layout, source, &size))
+        return FALSE;
+
+    if (!SetupGetTargetPathW(inf, NULL, dir_section, dir, ARRAYSIZE(dir), NULL))
+        return FALSE;
+
+    len = wcslen(dir);
+    if (len && dir[len - 1] == '\\')
+        dir[--len] = 0;
+    _snwprintf(path, ARRAYSIZE(path), L"%s\\%s", dir, name);
+    return SetupAddToDiskSpaceListW(handle, path, size, op, NULL, 0);
+}
+
+static BOOL add_section(HDSKSPC handle, HINF inf, HINF layout, const WCHAR *section, UINT op)
+{
+    WCHAR name[MAX_PATH], source[MAX_PATH];
+    INFCONTEXT line;
+    BOOL more;
+
+    if (SetupGetLineCountW(inf, section) < 0)
+        return FALSE;
+
+    for (more = SetupFindFirstLineW(inf, section, NULL, &line); more; more = SetupFindNextLine(&line, &line))
+    {
+        DWORD count = SetupGetFieldCount(&line);
+
+        if (!count)
+            continue;
+        if (!SetupGetStringFieldW(&line, 1, name, ARRAYSIZE(name), NULL))
+            return FALSE;
+        if (!name[0])
+            continue;
+        source[0] = 0;
+        if (count >= 2 && !SetupGetStringFieldW(&line, 2, source, ARRAYSIZE(source), NULL))
+            return FALSE;
+        if (!source[0])
+            wcscpy(source, name);
+        if (!add_file_list(handle, inf, layout, section, name, source, op))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/***********************************************************************
+ *		SetupAddSectionToDiskSpaceListW  (SETUPAPI.@)
+ */
+BOOL WINAPI SetupAddSectionToDiskSpaceListW(HDSKSPC handle, HINF inf, HINF layout,
+        const WCHAR *section, UINT op, void *reserved1, UINT reserved2)
+{
+    TRACE("handle %p, inf %p, layout %p, section %s, op %#x, reserved1 %p, reserved2 %#x.\n",
+            handle, inf, layout, debugstr_w(section), op, reserved1, reserved2);
+
+    if (!handle)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    if (!section)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!layout || layout == INVALID_HANDLE_VALUE)
+        layout = inf;
+
+    if (!add_section(handle, inf, layout, section, op))
+        return FALSE;
+
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+/***********************************************************************
+ *		SetupAddSectionToDiskSpaceListA  (SETUPAPI.@)
+ */
+BOOL WINAPI SetupAddSectionToDiskSpaceListA(HDSKSPC handle, HINF inf, HINF layout,
+        const char *section, UINT op, void *reserved1, UINT reserved2)
+{
+    WCHAR *sectionW = NULL;
+    BOOL ret;
+
+    if (section && !(sectionW = strdupAtoW(section)))
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    ret = SetupAddSectionToDiskSpaceListW(handle, inf, layout, sectionW, op, reserved1, reserved2);
+    HeapFree(GetProcessHeap(), 0, sectionW);
+    return ret;
+}
+
+static BOOL add_copy_files(HDSKSPC handle, HINF inf, HINF layout, const WCHAR *section,
+        const WCHAR *key, UINT op)
+{
+    INFCONTEXT line;
+    BOOL more;
+
+    for (more = SetupFindFirstLineW(inf, section, key, &line); more;
+            more = SetupFindNextMatchLineW(&line, key, &line))
+    {
+        DWORD count = SetupGetFieldCount(&line);
+
+        for (DWORD i = 1; i <= count; ++i)
+        {
+            WCHAR list[MAX_PATH];
+
+            if (!SetupGetStringFieldW(&line, i, list, ARRAYSIZE(list), NULL))
+                return FALSE;
+            if (!list[0])
+                continue;
+
+            if (list[0] == '@')
+            {
+                if (!add_file_list(handle, inf, layout, L"DefaultDestDir", list + 1, list + 1, op))
+                    return FALSE;
+            }
+            else if (SetupGetLineCountW(inf, list) >= 0 && !add_section(handle, inf, layout, list, op))
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/***********************************************************************
+ *		SetupAddInstallSectionToDiskSpaceListW  (SETUPAPI.@)
+ */
+BOOL WINAPI SetupAddInstallSectionToDiskSpaceListW(HDSKSPC handle, HINF inf, HINF layout,
+        const WCHAR *section, void *reserved1, UINT reserved2)
+{
+    TRACE("handle %p, inf %p, layout %p, section %s, reserved1 %p, reserved2 %#x.\n",
+            handle, inf, layout, debugstr_w(section), reserved1, reserved2);
+
+    if (!handle)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    if (!section)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!inf || inf == INVALID_HANDLE_VALUE)
+    {
+        SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    }
+
+    if (!layout || layout == INVALID_HANDLE_VALUE)
+        layout = inf;
+
+    if (!add_copy_files(handle, inf, layout, section, L"CopyFiles", FILEOP_COPY)
+            || !add_copy_files(handle, inf, layout, section, L"DelFiles", FILEOP_DELETE))
+        return FALSE;
+
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+/***********************************************************************
+ *		SetupAddInstallSectionToDiskSpaceListA  (SETUPAPI.@)
+ */
+BOOL WINAPI SetupAddInstallSectionToDiskSpaceListA(HDSKSPC handle, HINF inf, HINF layout,
+        const char *section, void *reserved1, UINT reserved2)
+{
+    WCHAR *sectionW = NULL;
+    BOOL ret;
+
+    if (section && !(sectionW = strdupAtoW(section)))
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    ret = SetupAddInstallSectionToDiskSpaceListW(handle, inf, layout, sectionW, reserved1, reserved2);
+    HeapFree(GetProcessHeap(), 0, sectionW);
     return ret;
 }
 
