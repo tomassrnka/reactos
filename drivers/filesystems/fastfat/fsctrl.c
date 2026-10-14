@@ -4379,6 +4379,24 @@ Routine Description:
             FatExtendFaultEnd( Vcb, HiddenVbo, HiddenLength );
         }
 
+        //
+        //  A volume file write that was under way during the flush and failed marks its sectors
+        //  dirty again (write.c), after the flush passed them.  FatIsFatDirty waits for the
+        //  writes in progress; the flush runs again while sectors are dirty, and the extension
+        //  fails if they stay dirty.
+        //
+
+        for (Index = 0; NT_SUCCESS( Status ) && FatIsFatDirty( Vcb ); Index++) {
+
+            if (Index == 3) {
+
+                Status = STATUS_UNEXPECTED_IO_ERROR;
+                break;
+            }
+
+            Status = FatFlushFat( IrpContext, Vcb );
+        }
+
         if (!NT_SUCCESS( Status )) {
 
             try_leave( NOTHING );
