@@ -195,7 +195,7 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 
    TrailingBackslash = FALSE;
    if (NtPathU.Length >= sizeof(WCHAR) &&
-       NtPathU.Buffer[NtPathU.Length / sizeof(WCHAR) - 1])
+       NtPathU.Buffer[NtPathU.Length / sizeof(WCHAR) - 1] == L'\\')
    {
       TrailingBackslash = TRUE;
    }
@@ -317,10 +317,6 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
 			  EaBuffer,
 			  EaLength);
 
-   RtlFreeHeap(RtlGetProcessHeap(),
-               0,
-               NtPathU.Buffer);
-
    /* free the extended attributes buffer if allocated */
    if (EaBuffer != NULL)
    {
@@ -332,6 +328,9 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
    /* error */
    if (!NT_SUCCESS(Status))
    {
+      FILE_BASIC_INFORMATION ExistingInformation;
+      BOOLEAN IsDirectory = FALSE;
+
       /* In the case file creation was rejected due to CREATE_NEW flag
        * was specified and file with that name already exists, correct
        * last error is ERROR_FILE_EXISTS and not ERROR_ALREADY_EXISTS.
@@ -340,7 +339,15 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
       if (Status == STATUS_OBJECT_NAME_COLLISION &&
           dwCreationDisposition == FILE_CREATE)
       {
-         SetLastError( ERROR_FILE_EXISTS );
+         /* Windows 10 refuses to create a file over a directory with access denied; the name that was opened is
+            asked again, as it was opened (the current directory may have changed since) */
+         if (NT_SUCCESS(NtQueryAttributesFile(&ObjectAttributes, &ExistingInformation)) &&
+             (ExistingInformation.FileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+         {
+            IsDirectory = TRUE;
+         }
+
+         SetLastError( IsDirectory ? ERROR_ACCESS_DENIED : ERROR_FILE_EXISTS );
       }
       else if (Status == STATUS_FILE_IS_A_DIRECTORY &&
                TrailingBackslash)
@@ -352,8 +359,11 @@ HANDLE WINAPI CreateFileW (LPCWSTR			lpFileName,
          BaseSetLastNTError (Status);
       }
 
+      RtlFreeHeap(RtlGetProcessHeap(), 0, NtPathU.Buffer);
       return INVALID_HANDLE_VALUE;
    }
+
+   RtlFreeHeap(RtlGetProcessHeap(), 0, NtPathU.Buffer);
 
   /*
   create with OPEN_ALWAYS (FILE_OPEN_IF) returns info = FILE_OPENED or FILE_CREATED
