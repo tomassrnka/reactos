@@ -1599,7 +1599,11 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
         FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
     if (!Fcb->IsDirectory && !Fcb->IsVolume)
+    {
+        ExAcquireFastMutex(&Fcb->FileLockMutex);
         FsRtlFastUnlockAll(&Fcb->FileLock, FileObject, IoGetRequestorProcess(Irp), NULL);
+        ExReleaseFastMutex(&Fcb->FileLockMutex);
+    }
     ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
     if (Ccb && Ccb->DeleteOnClose && !Fcb->IsRoot && !Fcb->IsVolume && Ccb->NameLength)
         NgSetDeletePending(Fcb, Ccb);
@@ -1724,6 +1728,13 @@ NTSTATUS NgLockControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return STATUS_INVALID_PARAMETER;
     }
-    /* FsRtlProcessFileLock completes the IRP. */
-    return FsRtlProcessFileLock(&Fcb->FileLock, Irp, NULL);
+    /* FsRtlProcessFileLock completes the IRP.  FileLockMutex serializes its RangeTable against the
+     * read/write lock checks and cleanup's FsRtlFastUnlockAll. */
+    {
+        NTSTATUS LockStatus;
+        ExAcquireFastMutex(&Fcb->FileLockMutex);
+        LockStatus = FsRtlProcessFileLock(&Fcb->FileLock, Irp, NULL);
+        ExReleaseFastMutex(&Fcb->FileLockMutex);
+        return LockStatus;
+    }
 }

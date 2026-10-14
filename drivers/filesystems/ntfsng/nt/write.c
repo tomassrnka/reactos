@@ -626,8 +626,14 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     /* A handle with FILE_APPEND_DATA but not FILE_WRITE_DATA writes at the end of the file. */
     if (FileObject->FsContext2 && ((PNG_CCB)FileObject->FsContext2)->AppendOnly)
         Append = TRUE;
-    if (!FsRtlCheckLockForWriteAccess(&Fcb->FileLock, Irp))
-        return STATUS_FILE_LOCK_CONFLICT;
+    {
+        BOOLEAN LockOk;
+        ExAcquireFastMutex(&Fcb->FileLockMutex);
+        LockOk = FsRtlCheckLockForWriteAccess(&Fcb->FileLock, Irp);
+        ExReleaseFastMutex(&Fcb->FileLockMutex);
+        if (!LockOk)
+            return STATUS_FILE_LOCK_CONFLICT;
+    }
     if (NonCached && !Append && ((Offset.LowPart | Length) & (Vcb->SectorSize - 1)))
         return STATUS_INVALID_PARAMETER;
 

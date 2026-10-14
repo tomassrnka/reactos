@@ -148,6 +148,7 @@ typedef struct _NG_FCB
     WCHAR DelName[256];
     UNICODE_STRING DelPath;         /* full path for the change notification */
     FILE_LOCK FileLock;             /* byte-range locks (FsRtl) */
+    FAST_MUTEX FileLockMutex;       /* serializes every FsRtl FileLock call: its RangeTable splays on lookup */
     ULONGLONG MftNo;
     BOOLEAN IsPagingFile;           /* opened with SL_OPEN_PAGING_FILE: paging I/O goes through Runs */
     KSPIN_LOCK RunLock;

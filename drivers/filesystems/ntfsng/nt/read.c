@@ -137,8 +137,15 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     FileSize = Fcb->Header.FileSize.QuadPart;
     if (Offset.QuadPart >= FileSize)
         return STATUS_END_OF_FILE;
-    if (!Paging && !FsRtlCheckLockForReadAccess(&Fcb->FileLock, Irp))
-        return STATUS_FILE_LOCK_CONFLICT;
+    if (!Paging)
+    {
+        BOOLEAN LockOk;
+        ExAcquireFastMutex(&Fcb->FileLockMutex);
+        LockOk = FsRtlCheckLockForReadAccess(&Fcb->FileLock, Irp);
+        ExReleaseFastMutex(&Fcb->FileLockMutex);
+        if (!LockOk)
+            return STATUS_FILE_LOCK_CONFLICT;
+    }
     if (!Paging && Offset.QuadPart + Length > FileSize)
         Length = (ULONG)(FileSize - Offset.QuadPart);
     /* Before any mapping of Mm's MDL: the paging file's pages go straight to its clusters. */

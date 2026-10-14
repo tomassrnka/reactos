@@ -202,6 +202,7 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
     ExInitializeResourceLite(&Fcb->MainResource);
     ExInitializeResourceLite(&Fcb->PagingIoResource);
     FsRtlInitializeFileLock(&Fcb->FileLock, NULL, NULL);
+    ExInitializeFastMutex(&Fcb->FileLockMutex);
     KeInitializeSpinLock(&Fcb->RunLock);
     Fcb->Header.IsFastIoPossible = FastIoIsQuestionable;
     Fcb->Vcb = Vcb;
@@ -457,7 +458,9 @@ NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
         FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
     if (!Fcb->IsDirectory && !Fcb->IsVolume)
     {
+        ExAcquireFastMutex(&Fcb->FileLockMutex);
         FsRtlFastUnlockAll(&Fcb->FileLock, FileObject, IoGetRequestorProcess(Irp), NULL);
+        ExReleaseFastMutex(&Fcb->FileLockMutex);
         CcUninitializeCacheMap(FileObject, NULL, NULL);
     }
     ExAcquireFastMutex(&Vcb->FcbListLock);
@@ -519,6 +522,11 @@ static BOOLEAN NTAPI NgFastIoCheckIfPossible(PFILE_OBJECT FileObject, PLARGE_INT
         return FALSE;
     /* Cached data of a medium that is gone, or may be: the IRP path verifies first. */
     if (Fcb->Vcb->WrongMedia || (Fcb->Vcb->Removable && (Fcb->Vcb->Vpb->RealDevice->Flags & DO_VERIFY_VOLUME)))
+        return FALSE;
+    /* A byte-range lock check splays FileLock's RangeTable, which must not run unserialized against
+     * the IRP lock paths.  When any lock exists, decline fast I/O so the read takes the serialized
+     * IRP path (NgRead holds FileLockMutex).  No table is touched when LockInformation is NULL. */
+    if (Fcb->FileLock.LockInformation)
         return FALSE;
     Len.QuadPart = Length;
     return FsRtlFastCheckLockForRead(&Fcb->FileLock, FileOffset, &Len, LockKey, FileObject, PsGetCurrentProcess());
