@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     GetAdaptersAddresses.c
+    GetBestInterfaceEx.c
     GetBestRoute2.c
     GetExtendedTcpTable.c
     GetExtendedUdpTable.c
