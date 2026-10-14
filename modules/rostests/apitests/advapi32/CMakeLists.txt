@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     AddMandatoryAce.c
     CreateService.c
+    CloseTrace.c
     DuplicateTokenEx.c
     EncryptFile.c
     eventlog.c

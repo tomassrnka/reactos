@@ -3,6 +3,7 @@
  * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
  * PURPOSE:     advapi32.dll Event tracing stubs
  * COPYRIGHT:   Copyright 2017 Mark Jansen (mark.jansen@reactos.org)
+ *              Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
 #include <advapi32.h>
@@ -28,6 +29,14 @@ OpenTraceW(IN PEVENT_TRACE_LOGFILEW Logfile)
     UNIMPLEMENTED;
     SetLastError(ERROR_ACCESS_DENIED);
     return INVALID_PROCESSTRACE_HANDLE;
+}
+
+/* OpenTrace never returns a valid handle, so there is nothing to close */
+ULONG
+WINAPI
+CloseTrace(IN TRACEHANDLE TraceHandle)
+{
+    return ERROR_INVALID_HANDLE;
 }
 
 ULONG
