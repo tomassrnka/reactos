@@ -879,8 +879,8 @@ static void TestNonOverlappedSocket(void)
 
     for (Count = 1; Count <= 2; Count++)
     {
-        /* Mode 0: no event, 1: an event, 2: a completion routine */
-        for (Mode = 0; Mode < 3; Mode++)
+        /* Mode 0: no event, 1: an event, 2: a completion routine, 3: both (the event is ignored then) */
+        for (Mode = 0; Mode < 4; Mode++)
         {
             char What[64];
             int Expected = Count == 1 ? 5 : 10;
@@ -889,25 +889,28 @@ static void TestNonOverlappedSocket(void)
             InitMessage(&Msg, Buffers, Count);
             ZeroMemory(&Overlapped, sizeof(Overlapped));
             Overlapped.Internal = 0xCCCCCCCC;
-            Overlapped.hEvent = Mode == 1 ? WSACreateEvent() : NULL;
+            Overlapped.hEvent = (Mode == 1 || Mode == 3) ? WSACreateEvent() : NULL;
             g_Completions = 0;
             Sent = NOT_SET;
             WSASetLastError(0);
-            Ret = pWSASendMsg(Plain, &Msg, 0, &Sent, &Overlapped, Mode == 2 ? Completion : NULL);
+            Ret = pWSASendMsg(Plain, &Msg, 0, &Sent, &Overlapped, Mode >= 2 ? Completion : NULL);
             ok(Ret == 0, "%s: returned %d, error %d\n", What, Ret, WSAGetLastError());
             ok(Sent == (DWORD)Expected, "%s: sent %lu bytes\n", What, Sent);
             /* the status is the low half: Windows Server 2008 R2 x64 leaves the other half of the field as it likes after two buffers */
             ok((ULONG)Overlapped.Internal == 0, "%s: Internal is 0x%I64x\n", What, (ULONGLONG)Overlapped.Internal);
             ok(Overlapped.InternalHigh == (ULONG_PTR)Expected, "%s: InternalHigh is %lu\n", What, (ULONG)Overlapped.InternalHigh);
             if (Mode == 1)
-            {
                 ok(WaitForSingleObject(Overlapped.hEvent, 0) == WAIT_OBJECT_0, "%s: the event is not set\n", What);
-                WSACloseEvent(Overlapped.hEvent);
-            }
-            for (i = 0; i < 10 && Mode == 2 && !g_Completions; i++)
+            else if (Mode == 3)
+                ok(WaitForSingleObject(Overlapped.hEvent, 0) == WAIT_TIMEOUT, "%s: the event is set, but a routine was given\n", What);
+            for (i = 0; i < 10 && Mode >= 2 && !g_Completions; i++)
                 SleepEx(50, TRUE);
-            ok(g_Completions == (Mode == 2 ? 1 : 0), "%s: the completion routine ran %d times\n", What, g_Completions);
-            if (Mode == 2 && g_Completions == 1)
+            if (Mode == 3)
+                ok(WaitForSingleObject(Overlapped.hEvent, 0) == WAIT_TIMEOUT, "%s: the event is set after the completion\n", What);
+            if (Mode == 1 || Mode == 3)
+                WSACloseEvent(Overlapped.hEvent);
+            ok(g_Completions == (Mode >= 2 ? 1 : 0), "%s: the completion routine ran %d times\n", What, g_Completions);
+            if (Mode >= 2 && g_Completions == 1)
             {
                 /* A 32-bit process on 64-bit Windows is handed 0 bytes by this completion (measured on Windows Server 2008 R2 and Windows 10) */
                 ok(g_CompletionError == 0 && (IsWow64() || g_CompletionBytes == (DWORD)Expected), "%s: completion error %lu, bytes %lu\n",
