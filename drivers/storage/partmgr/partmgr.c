@@ -1021,14 +1021,14 @@ FdoIoctlDiskGrowPartition(
 
     // The layout numbers the partitions in order, while a partition device keeps the number it got
     // when it appeared; after a layout change the two can differ. Only a partition both agree on
-    // is grown, never one that a device-number client did not mean.
+    // is grown: the device of the entry (if any) carries the number, and no other device does.
     for (PSINGLE_LIST_ENTRY cur = FdoExtension->PartitionList.Next; cur != NULL; cur = cur->Next)
     {
         PPARTITION_EXTENSION pe = CONTAINING_RECORD(cur, PARTITION_EXTENSION, ListEntry);
+        BOOLEAN isEntry = pe->StartingOffset == (UINT64)entry->StartingOffset.QuadPart &&
+                          pe->PartitionLength == (UINT64)entry->PartitionLength.QuadPart;
 
-        if (pe->StartingOffset == (UINT64)entry->StartingOffset.QuadPart &&
-            pe->PartitionLength == (UINT64)entry->PartitionLength.QuadPart &&
-            pe->DetectedNumber != grow->PartitionNumber)
+        if (isEntry != (pe->DetectedNumber == grow->PartitionNumber))
         {
             status = STATUS_NO_SUCH_DEVICE;
             goto Exit;
