@@ -13,7 +13,7 @@ double __cdecl lgamma(double x)
 	/* ReactOS: the pole is answered here, the log of 0 would call the handler of math errors that Windows does not call */
 	if (x == 0) {
 		errno = ERANGE;
-		return INFINITY;
+		return asdouble(0x7ff0000000000000ULL);  /* not INFINITY: its arithmetic clamps in the round-down mode */
 	}
 	/* ReactOS: Wine keeps the sign in a global that Windows does not have */
 	r = eval_as_double(__lgamma_r(x, &sign));

@@ -669,11 +669,16 @@ static void test_gamma(void)
 static void test_gamma_rounding_modes(void)
 {
     unsigned int old = p_controlfp(0, 0);
+    /* INFINITY is computed by an overflow, which the round-down mode clamps */
+    const double inf = INFINITY;
+    const float finf = INFINITY;
     double d;
     float f;
 
     /* what overflowed is a range error also when the mode clamps it to the maximum */
     p_controlfp(_RC_DOWN, _MCW_RC);
+    CALL(d, p_lgamma(0.0)); ok(d == inf, "lgamma(0) = %g\n", d); ok_errno(ERANGE);
+    CALL(f, p_lgammaf(-0.0f)); ok(f == finf, "lgammaf(-0) = %g\n", (double)f); ok_errno(ERANGE);
     CALL(d, p_lgamma(2.6e305)); ok(d >= DBL_MAX, "lgamma(2.6e305) = %g\n", d); ok_errno(ERANGE);
     CALL(d, p_tgamma(172.0)); ok(d >= DBL_MAX, "tgamma(172) = %g\n", d); ok_errno(ERANGE);
     CALL(f, p_tgammaf(36.0f)); ok(f >= FLT_MAX, "tgammaf(36) = %g\n", (double)f); ok_errno(ERANGE);

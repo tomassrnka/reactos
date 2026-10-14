@@ -13,7 +13,7 @@ float __cdecl lgammaf(float x)
 	/* ReactOS: the pole is answered here, the log of 0 would call the handler of math errors that Windows does not call */
 	if (x == 0) {
 		errno = ERANGE;
-		return INFINITY;
+		return asfloat(0x7f800000);  /* not INFINITY: its arithmetic clamps in the round-down mode */
 	}
 	/* ReactOS: Wine keeps the sign in a global that Windows does not have */
 	r = eval_as_float(__lgammaf_r(x, &sign));
