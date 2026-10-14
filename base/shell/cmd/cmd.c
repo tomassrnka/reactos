@@ -568,33 +568,17 @@ Execute(LPTSTR Full, LPTSTR First, LPTSTR Rest, PARSED_COMMAND *Cmd)
 
 
 /*
- * Look through the internal commands and determine whether or not this
- * command is one of them. If it is, call the command. If not, call
- * execute to run it as an external program.
- *
- * first - first word on command line
- * rest  - rest of command line
+ * Look through the internal commands for the one named by the first word of
+ * a command line. Returns NULL if it is an external program.
+ * The length of the word's command name is returned in *pcl.
  */
-INT
-DoCommand(LPTSTR first, LPTSTR rest, PARSED_COMMAND *Cmd)
+static LPCOMMAND
+FindInternalCommand(LPTSTR first, INT *pcl)
 {
-    TCHAR *com;
     TCHAR *cp;
-    LPTSTR param;   /* Pointer to command's parameters */
     INT cl;
     LPCOMMAND cmdptr;
     BOOL nointernal = FALSE;
-    INT ret;
-
-    TRACE ("DoCommand: (\'%s\' \'%s\')\n", debugstr_aw(first), debugstr_aw(rest));
-
-    /* Full command line */
-    com = cmd_alloc((_tcslen(first) + _tcslen(rest) + 2) * sizeof(TCHAR));
-    if (com == NULL)
-    {
-        error_out_of_memory();
-        return 1;
-    }
 
     /* If present in the first word, these characters end the name of an
      * internal command and become the beginning of its parameters. */
@@ -616,33 +600,69 @@ DoCommand(LPTSTR first, LPTSTR rest, PARSED_COMMAND *Cmd)
         }
     }
 
+    *pcl = cl;
+
     /* Scan internal command table */
     for (cmdptr = cmds; !nointernal && cmdptr->name; cmdptr++)
     {
         if (!_tcsnicmp(first, cmdptr->name, cl) && cmdptr->name[cl] == _T('\0'))
+            return cmdptr;
+    }
+
+    return NULL;
+}
+
+/*
+ * Look through the internal commands and determine whether or not this
+ * command is one of them. If it is, call the command. If not, call
+ * execute to run it as an external program.
+ *
+ * first - first word on command line
+ * rest  - rest of command line
+ */
+INT
+DoCommand(LPTSTR first, LPTSTR rest, PARSED_COMMAND *Cmd)
+{
+    TCHAR *com;
+    LPTSTR param;   /* Pointer to command's parameters */
+    INT cl;
+    LPCOMMAND cmdptr;
+    INT ret;
+
+    TRACE ("DoCommand: (\'%s\' \'%s\')\n", debugstr_aw(first), debugstr_aw(rest));
+
+    /* Full command line */
+    com = cmd_alloc((_tcslen(first) + _tcslen(rest) + 2) * sizeof(TCHAR));
+    if (com == NULL)
+    {
+        error_out_of_memory();
+        return 1;
+    }
+
+    cmdptr = FindInternalCommand(first, &cl);
+    if (cmdptr)
+    {
+        _tcscpy(com, first);
+        _tcscat(com, rest);
+        param = &com[cl];
+
+        /* Skip over whitespace to rest of line, exclude 'echo' command */
+        if (_tcsicmp(cmdptr->name, _T("echo")) != 0)
         {
-            _tcscpy(com, first);
-            _tcscat(com, rest);
-            param = &com[cl];
-
-            /* Skip over whitespace to rest of line, exclude 'echo' command */
-            if (_tcsicmp(cmdptr->name, _T("echo")) != 0)
-            {
-                while (_istspace(*param))
-                    param++;
-            }
-
-            /* Set the new console title */
-            SetConTitle(com);
-
-            ret = cmdptr->func(param);
-
-            /* Restore the original console title */
-            ResetConTitle();
-
-            cmd_free(com);
-            return ret;
+            while (_istspace(*param))
+                param++;
         }
+
+        /* Set the new console title */
+        SetConTitle(com);
+
+        ret = cmdptr->func(param);
+
+        /* Restore the original console title */
+        ResetConTitle();
+
+        cmd_free(com);
+        return ret;
     }
 
     ret = Execute(com, first, rest, Cmd);
@@ -672,11 +692,129 @@ INT ParseCommandLine(LPTSTR cmd)
     return Ret;
 }
 
-/* Execute a command without waiting for it to finish. If it's an internal
- * command or batch file, we must create a new cmd.exe process to handle it.
- * TODO: For now, this just always creates a cmd.exe process.
- *       This works, but is inefficient for running external programs,
- *       which could just be run directly. */
+/* Set the console to the standard mode, as Execute does before and after a program */
+static VOID
+SetStandardConsoleModes(VOID)
+{
+    SetConsoleMode(ConStreamGetOSHandle(StdIn),
+                   ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+    SetConsoleMode(ConStreamGetOSHandle(StdOut),
+                   ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT);
+}
+
+/* Start the plain external program First/Rest directly, the way Execute does.
+ * Returns NULL if it is not one. */
+static HANDLE
+StartProgram(LPTSTR First, LPCTSTR Rest)
+{
+    TCHAR szProgram[MAX_PATH];
+    TCHAR szFullName[MAX_PATH];
+    TCHAR szCmdLine[CMDLINE_LENGTH];
+    PCTSTR pszEnd, pszDot;
+    SIZE_T cchProgram;
+    BOOL bInside = FALSE;
+    INT cl;
+    STARTUPINFO stui;
+    PROCESS_INFORMATION prci;
+
+    if (FindInternalCommand(First, &cl))
+        return NULL;
+
+    /* The program name ends as in Execute: spaces and ,;=/ end it unless
+     * it starts with a slash or a drive letter */
+    if (First[0] == _T('/') || (First[0] && First[1] == _T(':')))
+    {
+        pszEnd = First + _tcslen(First);
+    }
+    else
+    {
+        for (pszEnd = First; *pszEnd; pszEnd++)
+        {
+            if (!bInside && (_istspace(*pszEnd) || _tcschr(_T(",;=/"), *pszEnd)))
+                break;
+            bInside ^= *pszEnd == _T('"');
+        }
+    }
+
+    cchProgram = pszEnd - First;
+    if (cchProgram == 0 || cchProgram >= ARRAYSIZE(szProgram))
+        return NULL;
+    memcpy(szProgram, First, cchProgram * sizeof(TCHAR));
+    szProgram[cchProgram] = _T('\0');
+    StripQuotes(szProgram);
+
+    /* A drive change needs the shell */
+    if (_istalpha(szProgram[0]) && !_tcscmp(szProgram + 1, _T(":")))
+        return NULL;
+
+    if (!SearchForExecutable(szProgram, szFullName))
+        return NULL;
+
+    pszDot = _tcsrchr(szFullName, _T('.'));
+    if (pszDot && (!_tcsicmp(pszDot, _T(".bat")) || !_tcsicmp(pszDot, _T(".cmd"))))
+        return NULL;
+
+    /* The command line must fit as it is, a cut one would lose arguments */
+    if (_tcslen(szProgram) + 2 + 1 + _tcslen(pszEnd) + _tcslen(Rest) >= CMDLINE_LENGTH)
+        return NULL;
+
+    /* Same command line as Execute builds for a program */
+    _tcscpy(szCmdLine, _tcschr(szProgram, _T(' ')) ? _T("\"") : _T(""));
+    _tcsncat(szCmdLine, szProgram, CMDLINE_LENGTH - _tcslen(szCmdLine) - 1);
+    if (_tcschr(szProgram, _T(' ')))
+        _tcsncat(szCmdLine, _T("\""), CMDLINE_LENGTH - _tcslen(szCmdLine) - 1);
+    if (*pszEnd || *Rest)
+    {
+        _tcsncat(szCmdLine, _T(" "), CMDLINE_LENGTH - _tcslen(szCmdLine) - 1);
+        _tcsncat(szCmdLine, pszEnd, CMDLINE_LENGTH - _tcslen(szCmdLine) - 1);
+        _tcsncat(szCmdLine, Rest, CMDLINE_LENGTH - _tcslen(szCmdLine) - 1);
+    }
+
+    memset(&stui, 0, sizeof(stui));
+    stui.cb = sizeof(stui);
+    stui.dwFlags = 0;
+    stui.wShowWindow = SW_SHOWNORMAL;
+
+    if (!CreateProcess(szFullName, szCmdLine, NULL, NULL, TRUE, 0,
+                       NULL, NULL, &stui, &prci))
+        return NULL;
+
+    CloseHandle(prci.hThread);
+    return prci.hProcess;
+}
+
+/* Start a plain external program of a pipeline directly, without a cmd.exe
+ * in between, as Windows does. Returns NULL if the command needs cmd.exe
+ * (internal command, batch file, redirection, drive change or a program that
+ * is not found or that CreateProcess refuses), so the caller falls back to it. */
+static HANDLE
+ExecuteDirect(PARSED_COMMAND *Cmd)
+{
+    LPTSTR First, Rest;
+    HANDLE hProcess = NULL;
+
+    if (Cmd->Type != C_COMMAND || Cmd->Redirections || bDelayedExpansion)
+        return NULL;
+
+    /* Substitute the FOR variables, as ExecuteCommand does */
+    First = DoDelayedExpansion(Cmd->Command.First);
+    if (First)
+    {
+        Rest = DoDelayedExpansion(Cmd->Command.Rest);
+        if (Rest)
+        {
+            hProcess = StartProgram(First, Rest);
+            cmd_free(Rest);
+        }
+        cmd_free(First);
+    }
+
+    return hProcess;
+}
+
+/* Execute a command without waiting for it to finish. A plain external
+ * program is started directly. If it's an internal command or batch file,
+ * we must create a new cmd.exe process to handle it. */
 static HANDLE
 ExecuteAsync(PARSED_COMMAND *Cmd)
 {
@@ -684,6 +822,11 @@ ExecuteAsync(PARSED_COMMAND *Cmd)
     TCHAR CmdParams[CMDLINE_LENGTH], *ParamsEnd;
     STARTUPINFO stui;
     PROCESS_INFORMATION prci;
+    HANDLE hProcess;
+
+    hProcess = ExecuteDirect(Cmd);
+    if (hProcess)
+        return hProcess;
 
     /* Get the path to cmd.exe */
     GetModuleFileName(NULL, CmdPath, ARRAYSIZE(CmdPath));
@@ -721,6 +864,9 @@ ExecutePipeline(PARSED_COMMAND *Cmd)
     HANDLE hProcess[MAXIMUM_WAIT_OBJECTS];
     INT nProcesses = 0;
     DWORD dwExitCode;
+
+    /* The programs of the pipeline start from the standard console mode */
+    SetStandardConsoleModes();
 
     /* Do all but the last pipe command */
     do
@@ -777,6 +923,8 @@ ExecutePipeline(PARSED_COMMAND *Cmd)
     WaitForMultipleObjects(nProcesses, hProcess, TRUE, INFINITE);
     LeaveCriticalSection(&ChildProcessRunningLock);
 
+    SetStandardConsoleModes();
+
     /* Use the exit code of the last process in the pipeline */
     GetExitCodeProcess(hProcess[nProcesses - 1], &dwExitCode);
     nErrorLevel = (INT)dwExitCode;
@@ -795,6 +943,7 @@ failed:
     }
     SetStdHandle(STD_INPUT_HANDLE, hOldConIn);
     SetStdHandle(STD_OUTPUT_HANDLE, hOldConOut);
+    SetStandardConsoleModes();
 #endif
 
     return nErrorLevel;
