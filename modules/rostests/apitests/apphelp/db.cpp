@@ -2096,6 +2096,66 @@ static int validate_SDBQUERYRESULT_size()
 }
 
 
+/*
+ * An entry for any executable name that gives a compatibility layer (a Windows version) must recognise the program
+ * itself, by its own file attributes: a rule that is keyed on another file next to the program reaches every program
+ * in that directory.
+ */
+static void test_SystemDatabaseWildcards(void)
+{
+    WCHAR path[MAX_PATH];
+    PDB pdb;
+    TAGID dbtag, exetag, nametag, filetag, child;
+    LPWSTR name, filename;
+    unsigned exes = 0, wildcards = 0;
+
+    if (!is_reactos())
+    {
+        skip("The Windows database is not ours\n");
+        return;
+    }
+    GetWindowsDirectoryW(path, ARRAYSIZE(path));
+    lstrcatW(path, L"\\AppPatch\\sysmain.sdb");
+    pdb = pSdbOpenDatabase(path, DOS_PATH);
+    ok(pdb != NULL, "Cannot open %ls: %lu\n", path, GetLastError());
+    if (!pdb)
+        return;
+
+    dbtag = pSdbFindFirstTag(pdb, TAGID_ROOT, TAG_DATABASE);
+    ok(dbtag != TAGID_NULL, "Expected to get a valid TAG_DATABASE\n");
+    for (exetag = pSdbFindFirstTag(pdb, dbtag, TAG_EXE); exetag; exetag = pSdbFindNextTag(pdb, dbtag, exetag))
+    {
+        BOOL Own = FALSE;
+
+        exes++;
+        nametag = pSdbFindFirstTag(pdb, exetag, TAG_NAME);
+        name = nametag ? pSdbGetStringTagPtr(pdb, nametag) : NULL;
+        ok(name != NULL, "An entry without a name\n");
+        if (!name || (!wcschr(name, L'*') && !wcschr(name, L'?')))
+            continue;
+        wildcards++;
+        if (!pSdbFindFirstTag(pdb, exetag, TAG_LAYER))
+            continue;
+
+        for (filetag = pSdbFindFirstTag(pdb, exetag, TAG_MATCHING_FILE); filetag && !Own; filetag = pSdbFindNextTag(pdb, exetag, filetag))
+        {
+            nametag = pSdbFindFirstTag(pdb, filetag, TAG_NAME);
+            filename = nametag ? pSdbGetStringTagPtr(pdb, nametag) : NULL;
+            if (!filename || wcscmp(filename, L"*"))
+                continue;
+            for (child = pSdbGetFirstChild(pdb, filetag); child; child = pSdbGetNextChild(pdb, filetag, child))
+            {
+                if (pSdbGetTagFromTagID(pdb, child) != TAG_NAME)
+                    Own = TRUE;
+            }
+        }
+        ok(Own, "The entry '%ls' gives a layer to every program that has a file next to it, not to one that it recognises\n", name);
+    }
+    ok(exes > 0, "No entries in %ls\n", path);
+    trace("%u entries, %u with a wildcard\n", exes, wildcards);
+    pSdbCloseDatabase(pdb);
+}
+
 START_TEST(db)
 {
     //SetEnvironmentVariableA("SHIM_DEBUG_LEVEL", "4");
@@ -2180,4 +2240,5 @@ START_TEST(db)
     test_Data();
     skip("test_SecondaryDB()\n");
     test_IndexKeyFromString();
+    test_SystemDatabaseWildcards();
 }

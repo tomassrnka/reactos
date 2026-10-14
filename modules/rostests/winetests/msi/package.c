@@ -5775,7 +5775,7 @@ static void test_installprops_compat_layer(void)
             if (i == ARRAY_SIZE(tests))
                 memcpy(value, "WINSRV03SP1", 11);
             else
-                memcpy(value + 290, "WINSRV03SP1", 11);
+                memcpy(value + 289, "WINSRV03SP1", 11);
             layers = value;
             server2003 = FALSE;
         }
