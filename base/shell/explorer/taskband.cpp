@@ -268,6 +268,17 @@ public:
 
         TRACE("CTaskBand::SetSite(0x%p)\n", pUnkSite);
 
+        /* The window of the task list goes with the site, also before a new one is made */
+        if (m_hWnd != NULL)
+        {
+            DestroyWindow(m_hWnd);
+            m_hWnd = NULL;
+        }
+        m_TasksWnd.Release();
+        m_Site.Release();
+        if (pUnkSite == NULL)
+            return S_OK;
+
         hRet = IUnknown_GetWindow(pUnkSite, &hwndSite);
         if (FAILED_UNEXPECTEDLY(hRet))
             return hRet;

@@ -46,6 +46,20 @@ LoadObjectFromStream(IN IStream *pStm, IN REFIID riid, OUT PVOID *pvObj)
     hr = punk->QueryInterface(IID_PPV_ARG(IPersistStream, &pPersist));
     if (FAILED(hr))
         return hr;
+
+    /* Only what a band site can take is asked to read the stream: a stream that names another class must not reach its parser */
+    {
+        CComPtr<IDeskBand> pDeskBand;
+        CComPtr<IObjectWithSite> pWithSite;
+        CComPtr<IWinEventHandler> pEvents;
+        if (FAILED(punk->QueryInterface(IID_PPV_ARG(IDeskBand, &pDeskBand))) ||
+            FAILED(punk->QueryInterface(IID_PPV_ARG(IObjectWithSite, &pWithSite))) ||
+            FAILED(punk->QueryInterface(IID_PPV_ARG(IWinEventHandler, &pEvents))))
+        {
+            return E_NOINTERFACE;
+        }
+    }
+
     hr = pPersist->Load(pStm);
     if (FAILED(hr))
         return hr;
