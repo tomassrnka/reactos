@@ -6,7 +6,7 @@
 #define NTOS_MODE_USER
 #include <ndk/ntndk.h>
 #include <pseh/pseh2.h>
-#include <reactos/wow64.h>
+#include <reactos/wow64context.h>
 
 #define PTR32(Value) ((PVOID)(ULONG_PTR)(ULONG)(Value))
 #define HANDLE32(Value) ((HANDLE)(LONG_PTR)(LONG)(Value))
@@ -54,3 +54,12 @@ typedef struct
 } WOW64_SYSTEM_BASIC_INFORMATION;
 
 NTSTATUS Wow64CreateEnvironment(PVOID *Environment);
+
+VOID Wow64InitializeTeb(TEB32 *, const TEB *, PTEB, const INITIAL_TEB *);
+NTSTATUS Wow64CreateThread(HANDLE *, ACCESS_MASK, OBJECT_ATTRIBUTES *, HANDLE,
+                           CLIENT_ID *, const WOW64_CONTEXT *, const ULONG *, BOOLEAN);
+NTSTATUS Wow64QueryThread(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+extern PVOID Wow64ApcDispatcher;
+
+NTSTATUS Wow64RaiseException(const EXCEPTION_RECORD32 *, const WOW64_CONTEXT *, BOOLEAN);

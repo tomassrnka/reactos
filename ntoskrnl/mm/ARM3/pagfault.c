@@ -39,6 +39,9 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     PVOID StackBase, DeallocationStack, NextStackAddress;
     SIZE_T GuaranteedSize, StackSize, RegionSize;
     NTSTATUS Status;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    PTEB32 GuestTeb = NULL;
+#endif
 
     /* Do we own the address space lock? */
     if (CurrentThread->AddressSpaceOwner == 1)
@@ -61,6 +64,20 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     StackBase = Teb->NtTib.StackBase;
     DeallocationStack = Teb->DeallocationStack;
     GuaranteedSize = Teb->GuaranteedStackBytes;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (CurrentThread->ThreadsProcess->Wow64Process)
+    {
+        PTEB32 Candidate = PS_GET_TEB32_FROM_TEB(Teb);
+        if ((ULONG_PTR)Address >= Candidate->DeallocationStack &&
+            (ULONG_PTR)Address < Candidate->NtTib.StackBase)
+        {
+            GuestTeb = Candidate;
+            StackBase = UlongToPtr(GuestTeb->NtTib.StackBase);
+            DeallocationStack = UlongToPtr(GuestTeb->DeallocationStack);
+            GuaranteedSize = GuestTeb->GuaranteedStackBytes;
+        }
+    }
+#endif
     DPRINT("Handling guard page fault with Stacks Addresses 0x%p and 0x%p, guarantee: %lx\n",
             StackBase, DeallocationStack, GuaranteedSize);
 
@@ -113,15 +130,11 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         if (NT_SUCCESS(Status))
         {
             /* Success! */
-            Teb->NtTib.StackLimit = NextStackAddress;
-
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-            /* Update WOW64 32-bit TEB stack limit */
-            if (CurrentThread->ThreadsProcess->Wow64Process != NULL)
-            {
-                PS_GET_TEB32_FROM_TEB(Teb)->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
-            }
+            if (GuestTeb) GuestTeb->NtTib.StackLimit = PtrToUlong(NextStackAddress);
+            else
 #endif
+                Teb->NtTib.StackLimit = NextStackAddress;
         }
         else
         {
@@ -135,15 +148,11 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     ASSERT((PsGetCurrentProcess()->Peb->NtGlobalFlag & FLG_DISABLE_STACK_EXTENSION) == 0);
 
     /* Update the stack limit */
-    Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + PAGE_SIZE);
-
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    /* Update WOW64 32-bit TEB stack limit */
-    if (CurrentThread->ThreadsProcess->Wow64Process != NULL)
-    {
-        PS_GET_TEB32_FROM_TEB(Teb)->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
-    }
+    if (GuestTeb) GuestTeb->NtTib.StackLimit = PtrToUlong(NextStackAddress) + PAGE_SIZE;
+    else
 #endif
+        Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + PAGE_SIZE);
 
     /* Now move the guard page to the next page */
     RegionSize = PAGE_SIZE;

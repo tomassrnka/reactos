@@ -70,10 +70,12 @@ static VOID StoreIo(ULONG Address, const IO_STATUS_BLOCK *Io)
 typedef struct
 {
     HANDLE Handle;
+    HANDLE HandleProcess;
     HANDLE Process;
     PVOID Base;
     BOOLEAN Mapped;
     PVOID Buffer;
+    HANDLE Thread;
 } WOW64_CLEANUP;
 
 static VOID ProbeOutput(ULONG Address, ULONG Size)
@@ -123,18 +125,80 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     if (NativeSystemInformation) Number = W64_NtQuerySystemInformation;
     switch (Number)
     {
+    case W64_NtCreateThread:
+    {
+        CLIENT_ID Id;
+        PROBE(0);
+        if (a[4]) ProbeOutput(a[4], 2 * sizeof(ULONG));
+        ATTR(2);
+        Status = Wow64CreateThread(&Cleanup->Thread, THREAD_ALL_ACCESS, OA(2), H(3), &Id, P(5), P(6), TRUE);
+        if (NT_SUCCESS(Status))
+            Status = NtDuplicateObject(NtCurrentProcess(), Cleanup->Thread, NtCurrentProcess(),
+                                        &Cleanup->Handle, a[1], a[2] ? Attributes.Attributes & OBJ_INHERIT : 0, 0);
+        if (NT_SUCCESS(Status))
+        {
+            U(0) = HandleToUlong(Cleanup->Handle);
+            if (a[4])
+            {
+                ((ULONG *)P(4))[0] = HandleToUlong(Id.UniqueProcess);
+                ((ULONG *)P(4))[1] = HandleToUlong(Id.UniqueThread);
+            }
+            if (!a[7]) Status = NtResumeThread(Cleanup->Thread, NULL);
+            if (NT_SUCCESS(Status))
+            {
+                NtClose(Cleanup->Thread);
+                Cleanup->Thread = NULL;
+                Cleanup->Handle = NULL;
+            }
+        }
+        return Status;
+    }
+    case W64_NtGetContextThread:
+        return NtQueryInformationThread(H(0), ThreadWow64Context, P(1), sizeof(WOW64_CONTEXT), NULL);
+    case W64_NtSetContextThread:
+        return NtSetInformationThread(H(0), ThreadWow64Context, P(1), sizeof(WOW64_CONTEXT));
+    case W64_NtQueueApcThread:
+        return NtQueueApcThread(H(0), (PKNORMAL_ROUTINE)(ULONG_PTR)(-((LONG64)a[1] << 2)), P(2), P(3), P(4));
+    case W64_NtDuplicateObject:
+        if (a[3]) PROBE(3);
+        Cleanup->HandleProcess = H(2);
+        Status = NtDuplicateObject(H(0), H(1), H(2), a[3] ? &Cleanup->Handle : NULL, a[4], a[5], a[6]);
+        if (a[3]) { RETURN_HANDLE_AT(3); }
+        return Status;
+    case W64_NtSuspendThread: return NtSuspendThread(H(0), P(1));
+    case W64_NtResumeThread: return NtResumeThread(H(0), P(1));
+    case W64_NtAlertThread: return NtAlertThread(H(0));
+    case W64_NtAlertResumeThread: return NtAlertResumeThread(H(0), P(1));
+    case W64_NtQueryInformationThread: return Wow64QueryThread(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtReadVirtualMemory:
+    case W64_NtWriteVirtualMemory:
+    {
+        SIZE_T Bytes = 0;
+        if (a[4]) PROBE(4);
+        if (Number == W64_NtReadVirtualMemory)
+            Status = NtReadVirtualMemory(H(0), P(1), P(2), a[3], &Bytes);
+        else
+            Status = NtWriteVirtualMemory(H(0), P(1), P(2), a[3], &Bytes);
+        if (a[4]) U(4) = (ULONG)Bytes;
+        return Status;
+    }
+    case W64_NtSignalAndWaitForSingleObject: return NtSignalAndWaitForSingleObject(H(0), H(1), a[2], P(3));
+    case W64_NtPulseEvent: return NtPulseEvent(H(0), P(1));
+    case W64_NtClearEvent: return NtClearEvent(H(0));
+    case W64_NtQueryEvent: return NtQueryEvent(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtQuerySemaphore: return NtQuerySemaphore(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtQueryMutant: return NtQueryMutant(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtOpenSemaphore:
+        PROBE(0); ATTR(2); Status = NtOpenSemaphore(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtOpenMutant:
+        PROBE(0); ATTR(2); Status = NtOpenMutant(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtClose: return NtClose(H(0));
     case W64_NtContinue: return Wow64Continue(P(0), a[1]);
     case W64_NtQueryObject:
         if (a[1] == ObjectBasicInformation)
             return NtQueryObject(H(0), a[1], P(2), a[3], P(4));
         return STATUS_NOT_SUPPORTED;
-    case W64_NtRaiseException:
-        /* Guest exception delivery is not implemented yet. Preserve the
-         * exception status and fail closed instead of recursively raising
-         * STATUS_INVALID_SYSTEM_SERVICE on the i386 stack. */
-        DbgPrint("WoW64: guest exception %08lx at %08lx\n", U(0), ((ULONG *)P(0))[3]);
-        return NtTerminateProcess(NtCurrentProcess(), U(0));
+    case W64_NtRaiseException: return Wow64RaiseException(P(0), P(1), a[2]);
     case W64_NtTestAlert: return NtTestAlert();
     case W64_NtYieldExecution: return NtYieldExecution();
     case W64_NtTerminateProcess: return NtTerminateProcess(H(0), a[1]);
@@ -316,6 +380,17 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(0);
         ATTR(2); Status = NtCreateMutant(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
     case W64_NtReleaseMutant: return NtReleaseMutant(H(0), P(1));
+    case W64_NtCreateTimer:
+        PROBE(0);
+        ATTR(2); Status = NtCreateTimer(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
+    case W64_NtOpenTimer:
+        PROBE(0);
+        ATTR(2); Status = NtOpenTimer(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtSetTimer:
+        return NtSetTimer(H(0), P(1), a[2] ? (PTIMER_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
+                          P(3), a[4], a[5], P(6));
+    case W64_NtCancelTimer: return NtCancelTimer(H(0), P(1));
+    case W64_NtQueryTimer: return NtQueryTimer(H(0), a[1], P(2), a[3], P(4));
     case W64_NtCreateKeyedEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateKeyedEvent(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
@@ -398,20 +473,22 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtReadFile:
     case W64_NtWriteFile:
     {
-        FILE_MODE_INFORMATION Mode;
-        if (a[1] || a[2] || a[3]) return STATUS_NOT_SUPPORTED;
-        Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
-        if (!NT_SUCCESS(Status)) return Status;
-        if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
-            return STATUS_NOT_SUPPORTED;
+        PIO_APC_ROUTINE Routine = a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL;
+        PIO_STATUS_BLOCK Iosb = (PVOID)(0x8000000000000000ULL | a[4]);
         ProbeOutput(a[4], sizeof(WOW64_IOSB));
+        /* The kernel captures this explicit IOSB32 marker in the IRP. Its
+         * completion writes the guest block before signaling or queuing APCs,
+         * with no per-request user allocation to leak on thread termination. */
         if (Number == W64_NtReadFile)
-            Status = NtReadFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], P(7), P(8));
-        else
-            Status = NtWriteFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], P(7), P(8));
-        StoreIo(a[4], &Io); return Status;
+            return NtReadFile(H(0), H(1), Routine, P(3), Iosb, P(5), a[6], P(7), P(8));
+        return NtWriteFile(H(0), H(1), Routine, P(3), Iosb, P(5), a[6], P(7), P(8));
     }
+    case W64_NtCancelIoFile:
+        ProbeOutput(a[1], sizeof(WOW64_IOSB));
+        Status = NtCancelIoFile(H(0), &Io);
+        StoreIo(a[1], &Io); return Status;
     case W64_NtOpenProcess:
+    case W64_NtOpenThread:
     {
         CLIENT_ID Id, *ClientId = NULL;
         PROBE(0);
@@ -422,7 +499,9 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Id.UniqueThread = HANDLE32(((ULONG *)P(3))[1]);
             ClientId = &Id;
         }
-        Status = NtOpenProcess(&Cleanup->Handle, a[1], OA(2), ClientId);
+        if (Number == W64_NtOpenThread)
+            Status = NtOpenThread(&Cleanup->Handle, a[1], OA(2), ClientId);
+        else Status = NtOpenProcess(&Cleanup->Handle, a[1], OA(2), ClientId);
         RETURN_HANDLE();
     }
     case W64_NtOpenProcessToken:
@@ -466,6 +545,25 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         default: return STATUS_NOT_SUPPORTED;
         }
     case W64_NtQueryInformationProcess:
+        if (a[1] == ProcessBasicInformation)
+        {
+            PROCESS_BASIC_INFORMATION Native;
+            ULONG_PTR Peb;
+            struct { LONG Exit; ULONG Peb, Affinity; LONG Priority; ULONG Id, Parent; } *Guest = P(2);
+            if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+            Status = NtQueryInformationProcess(H(0), ProcessBasicInformation, &Native, sizeof(Native), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            Status = NtQueryInformationProcess(H(0), ProcessWow64Information, &Peb, sizeof(Peb), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            Guest->Exit = Native.ExitStatus;
+            Guest->Peb = (ULONG)Peb;
+            Guest->Affinity = Native.AffinityMask;
+            Guest->Priority = Native.BasePriority;
+            Guest->Id = Native.UniqueProcessId;
+            Guest->Parent = Native.InheritedFromUniqueProcessId;
+            if (a[4]) U(4) = sizeof(*Guest);
+            return STATUS_SUCCESS;
+        }
         if (a[1] == ProcessWow64Information)
         {
             ULONG_PTR Peb;
@@ -483,6 +581,13 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         default: return STATUS_NOT_SUPPORTED;
         }
     case W64_NtSetInformationProcess:
+        if (a[1] == ProcessAffinityMask)
+        {
+            ULONG_PTR Affinity;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Affinity = U(2);
+            return NtSetInformationProcess(H(0), a[1], &Affinity, sizeof(Affinity));
+        }
         switch (a[1])
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
@@ -492,7 +597,24 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtSetInformationThread:
         switch (a[1])
         {
+        case ThreadZeroTlsCell:
+        {
+            ULONG Index;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Index = U(2);
+            if (Index >= TLS_MINIMUM_AVAILABLE + TLS_EXPANSION_SLOTS) return STATUS_INVALID_PARAMETER;
+            Index |= 0x80000000;
+            return NtSetInformationThread(H(0), a[1], &Index, sizeof(Index));
+        }
+        case ThreadQuerySetWin32StartAddress: case ThreadAffinityMask:
+        {
+            ULONG_PTR Value;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Value = U(2);
+            return NtSetInformationThread(H(0), a[1], &Value, sizeof(Value));
+        }
         case ThreadHideFromDebugger: case ThreadPriority: case ThreadBasePriority:
+        case ThreadIdealProcessor: case ThreadPriorityBoost: case ThreadBreakOnTermination:
             return NtSetInformationThread(H(0), a[1], P(2), a[3]);
         default: return STATUS_NOT_SUPPORTED;
         }
@@ -548,7 +670,18 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
-    if (Cleanup.Handle) NtClose(Cleanup.Handle);
+    if (Cleanup.Thread)
+    {
+        NtTerminateThread(Cleanup.Thread, Status);
+        NtWaitForSingleObject(Cleanup.Thread, FALSE, NULL);
+        NtClose(Cleanup.Thread);
+    }
+    if (Cleanup.Handle)
+    {
+        if (Cleanup.HandleProcess)
+            NtDuplicateObject(Cleanup.HandleProcess, Cleanup.Handle, NULL, NULL, 0, 0, DUPLICATE_CLOSE_SOURCE);
+        else NtClose(Cleanup.Handle);
+    }
     if (Cleanup.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Cleanup.Buffer);
     if (Cleanup.Base)
     {
