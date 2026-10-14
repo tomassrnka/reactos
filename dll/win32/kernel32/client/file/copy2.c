@@ -54,6 +54,8 @@ typedef struct _COPY2_ID
     BOOL Valid;
     DWORD Volume;
     ULONGLONG Index;
+    BOOL HasDevice;
+    WCHAR Device[48];                   /* "\\Device\\HarddiskVolume2": two volumes can have the same serial number */
     BOOL HasName;
     WCHAR Name[COPY2_NAME_CHARS];       /* upper case */
     WCHAR Alias[16];                    /* the 8.3 name of the leaf, upper case, if there is one */
@@ -210,6 +212,36 @@ Copy2UpperName(
     To[Length] = UNICODE_NULL;
 }
 
+/* The device part of the name of the open file, which tells two mounted volumes apart whatever their serial numbers */
+static VOID
+Copy2ReadDevice(
+    _In_ HANDLE File,
+    _Inout_ COPY2_ID *Id)
+{
+    UCHAR Buffer[sizeof(OBJECT_NAME_INFORMATION) + COPY2_NAME_CHARS * sizeof(WCHAR)];
+    OBJECT_NAME_INFORMATION *Name = (OBJECT_NAME_INFORMATION *)Buffer;
+    ULONG Length, Slashes = 0, i;
+
+    if (!NT_SUCCESS(NtQueryObject(File, ObjectNameInformation, Buffer, sizeof(Buffer), NULL)) ||
+        !Name->Name.Buffer || Name->Name.Length < 2 * sizeof(WCHAR))
+    {
+        return;
+    }
+
+    /* "\Device\HarddiskVolume2\dir\file": up to the third backslash */
+    Length = Name->Name.Length / sizeof(WCHAR);
+    for (i = 0; i < Length; i++)
+    {
+        if (Name->Name.Buffer[i] == L'\\' && ++Slashes == 3)
+            break;
+    }
+    if (Slashes < 3 || i >= ARRAYSIZE(Id->Device))
+        return;
+
+    Copy2UpperName(Id->Device, ARRAYSIZE(Id->Device), Name->Name.Buffer, i);
+    Id->HasDevice = TRUE;
+}
+
 static VOID
 Copy2ReadId(
     _In_ HANDLE File,
@@ -227,6 +259,7 @@ Copy2ReadId(
     Id->Valid = TRUE;
     Id->Volume = Info.dwVolumeSerialNumber;
     Id->Index = ((ULONGLONG)Info.nFileIndexHigh << 32) | Info.nFileIndexLow;
+    Copy2ReadDevice(File, Id);
     if (Id->Index)
         return;
 
@@ -250,7 +283,8 @@ Copy2IdUnchanged(
     _In_ const COPY2_ID *First,
     _In_ const COPY2_ID *Second)
 {
-    return First->Valid && Second->Valid && First->Volume == Second->Volume && First->Index == Second->Index;
+    return First->Valid && Second->Valid && First->Volume == Second->Volume && First->Index == Second->Index &&
+           First->HasDevice == Second->HasDevice && (!First->HasDevice || !wcscmp(First->Device, Second->Device));
 }
 
 static const WCHAR *
@@ -272,6 +306,8 @@ Copy2SameFile(
     if (!First->Valid || !Second->Valid)
         return Copy2Unknown;
     if (First->Volume != Second->Volume)
+        return Copy2Different;
+    if (First->HasDevice && Second->HasDevice && wcscmp(First->Device, Second->Device))
         return Copy2Different;
     if (First->Index || Second->Index)
         return First->Index == Second->Index ? Copy2Same : Copy2Different;
@@ -956,13 +992,33 @@ Copy2CopyLink(
             goto Done;
         }
 
+        if (!GetFileInformationByHandle(Dest, &DestInfo))
+        {
+            Error = GetLastError();
+            goto Done;
+        }
+
+        /* Only a file is replaced by a link to a file and a link to a directory by one; a directory and any kind of
+           reparse point but a symbolic link stay as they are */
+        if (((DestInfo.dwFileAttributes ^ SourceInfo.dwFileAttributes) & FILE_ATTRIBUTE_DIRECTORY) ||
+            ((DestInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(DestInfo.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)))
+        {
+            Error = ERROR_ACCESS_DENIED;
+            goto Done;
+        }
+
         /* An old link has to lose its reparse data before the new data can be set */
-        if (GetFileInformationByHandle(Dest, &DestInfo) && (DestInfo.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        if (DestInfo.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
         {
             if (!DeviceIoControl(Dest, FSCTL_GET_REPARSE_POINT, NULL, 0, Reparse + MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
                                  MAXIMUM_REPARSE_DATA_BUFFER_SIZE, &OldLength, NULL) || OldLength < 8)
             {
                 Error = GetLastError() ? GetLastError() : ERROR_INVALID_REPARSE_DATA;
+                goto Done;
+            }
+            if (*(ULONG *)(Reparse + MAXIMUM_REPARSE_DATA_BUFFER_SIZE) != IO_REPARSE_TAG_SYMLINK)
+            {
+                Error = ERROR_ACCESS_DENIED;
                 goto Done;
             }
 
@@ -976,13 +1032,16 @@ Copy2CopyLink(
             }
         }
 
-        /* From here on the file is this copy's */
+        /* From here on the file is this copy's; a directory has no data to cut down */
         Made = TRUE;
-        Status = Copy2SetLength(Dest, 0);
-        if (!NT_SUCCESS(Status))
+        if (!(DestInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
         {
-            Error = RtlNtStatusToDosError(Status);
-            goto Done;
+            Status = Copy2SetLength(Dest, 0);
+            if (!NT_SUCCESS(Status))
+            {
+                Error = RtlNtStatusToDosError(Status);
+                goto Done;
+            }
         }
     }
 
@@ -1167,8 +1226,13 @@ CopyFile2(
         }
 
         /* What CREATE_ALWAYS does with a file that exists: a hidden or system file has to be asked for as such */
-        if (GetFileInformationByHandle(Dest, &DestInfo) &&
-            (DestInfo.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) & ~DestAttributes))
+        if (!GetFileInformationByHandle(Dest, &DestInfo))
+        {
+            Result = HRESULT_FROM_WIN32(GetLastError());
+            Copy2NotifyError(&State, COPYFILE2_PHASE_PREPARE_DEST, 1, Result, 0, SourceSize, 0);
+            goto Done;
+        }
+        if (DestInfo.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) & ~DestAttributes)
         {
             Result = HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
             Copy2NotifyError(&State, COPYFILE2_PHASE_PREPARE_DEST, 1, Result, 0, SourceSize, 0);

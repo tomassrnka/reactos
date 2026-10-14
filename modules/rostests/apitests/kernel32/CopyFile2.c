@@ -1577,8 +1577,17 @@ static void TestLinks(void)
     ok(hr == S_OK && GetLastError() == ERROR_SUCCESS && IsLink(DestFile),
        "a link with the cancel flag set: hr = %#lx, error %lu\n", hr, GetLastError());
 
-    /* a source that is no link is copied as usual */
+    /* a directory is not replaced by a link, and is still there after the refusal */
     Params.pfCancel = NULL;
+    DeleteFileW(DestFile);
+    ok(CreateDirectoryW(DestFile, NULL), "CreateDirectoryW failed with %lu\n", GetLastError());
+    hr = pCopyFile2(Link, DestFile, &Params);
+    ok(FAILED(hr), "a link onto a directory: hr = %#lx\n", hr);
+    ok((GetFileAttributesW(DestFile) & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == FILE_ATTRIBUTE_DIRECTORY,
+       "The directory is gone or changed: attributes %#lx\n", GetFileAttributesW(DestFile));
+    RemoveDirectoryW(DestFile);
+
+    /* a source that is no link is copied as usual */
     DeleteFileW(DestFile);
     hr = pCopyFile2(SourceFile, DestFile, &Params);
     ok(hr == S_OK && SizeOf(DestFile) == 40 && !IsLink(DestFile), "hr = %#lx\n", hr);
