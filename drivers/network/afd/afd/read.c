@@ -80,7 +80,12 @@ static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Info
     /* Receive failed with no data (unexpected closure) */
     else
     {
-        /* Previously received data remains intact */
+        /* A reset discards the data not read yet, as on Windows; other failures keep it */
+        if (Status == STATUS_CONNECTION_RESET)
+        {
+            FCB->Recv.Content = 0;
+            FCB->Recv.BytesUsed = 0;
+        }
         FCB->TdiReceiveClosed = TRUE;
     }
 }
