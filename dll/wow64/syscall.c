@@ -560,6 +560,10 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     {
         PIO_APC_ROUTINE Routine = a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL;
         PIO_STATUS_BLOCK Iosb = (PVOID)(0x8000000000000000ULL | a[4]);
+        PVOID Input = P(6);
+        ULONG InputLength = a[7];
+        AFD_RECV_INFO Transfer;
+        AFD_ACCEPT_DATA Accept;
         /* These requests contain counted strings/addresses or opaque bytes.
          * AFD requests carrying handles or WSABUF arrays need translation. */
         switch (a[5])
@@ -567,19 +571,60 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH:
         case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
         case IOCTL_AFD_BIND:
+        case IOCTL_AFD_CONNECT:
         case IOCTL_AFD_START_LISTEN:
+        case IOCTL_AFD_WAIT_FOR_LISTEN:
+        case IOCTL_AFD_DISCONNECT:
+        case IOCTL_AFD_GET_INFO:
+        case IOCTL_AFD_SET_INFO:
         case IOCTL_AFD_GET_SOCK_NAME:
         case IOCTL_AFD_GET_PEER_NAME:
         case IOCTL_AFD_SET_CONTEXT:
         case IOCTL_AFD_GET_CONTEXT_SIZE:
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
+        case IOCTL_AFD_SELECT: /* AFD owns the translated output until completion. */
             break;
+        case IOCTL_AFD_ACCEPT:
+            if (InputLength < 3 * sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+            Accept.UseSAN = ((ULONG *)Input)[0];
+            Accept.SequenceNumber = ((ULONG *)Input)[1];
+            Accept.ListenHandle = HANDLE32(((ULONG *)Input)[2]);
+            Input = &Accept;
+            InputLength = sizeof(Accept);
+            break;
+        case IOCTL_AFD_SEND:
+        case IOCTL_AFD_RECV:
+        {
+            const ULONG *From = Input;
+            const ULONG *Buffers;
+            ULONG i;
+            if (InputLength < 4 * sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+            Transfer.BufferCount = From[1];
+            Transfer.AfdFlags = From[2];
+            Transfer.TdiFlags = From[3];
+            Buffers = PTR32(From[0]);
+            if (!Transfer.BufferCount || Transfer.BufferCount > MAXULONG / sizeof(AFD_WSABUF))
+                return STATUS_INVALID_PARAMETER;
+            Transfer.BufferArray = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
+                                        Transfer.BufferCount * sizeof(AFD_WSABUF));
+            if (!Transfer.BufferArray) return STATUS_NO_MEMORY;
+            for (i = 0; i < Transfer.BufferCount; ++i)
+            {
+                Transfer.BufferArray[i].len = Buffers[2 * i];
+                Transfer.BufferArray[i].buf = PTR32(Buffers[2 * i + 1]);
+            }
+            /* AFD captures both the request and the descriptors and locks the
+             * actual user buffers before returning STATUS_PENDING. */
+            Input = &Transfer;
+            InputLength = sizeof(Transfer);
+            break;
+        }
         default:
             return STATUS_NOT_SUPPORTED;
         }
         ProbeOutput(a[4], sizeof(WOW64_IOSB));
         return NtDeviceIoControlFile(H(0), H(1), Routine, P(3), Iosb,
-                                      a[5], P(6), a[7], P(8), a[9]);
+                                      a[5], Input, InputLength, P(8), a[9]);
     }
     case W64_NtFsControlFile:
     {

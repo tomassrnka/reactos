@@ -26,13 +26,13 @@ static DWORD WINAPI Watchdog(void *Done)
 }
 
 /* ReactOS's private AFD contract; enabled explicitly, never on Windows. */
-static void CheckHandleReply(SOCKET Socket)
+static void CheckHandleReply(SOCKET Socket, ULONG Flags)
 {
     typedef LONG (WINAPI *IOCTL)(HANDLE, HANDLE, PVOID, PVOID, PVOID, ULONG, PVOID, ULONG, PVOID, ULONG);
     IOCTL Ioctl = (IOCTL)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtDeviceIoControlFile");
     struct { ULONG_PTR Status, Information; ULONG Guard; } Io = {0, 0, 0x12345678};
     ULONG Words[4] = {0xabcdef01, 0, 0x76543210, 0xabcdef01};
-    ULONG Flags = AFD_ADDRESS_HANDLE;
+    ULONG Connection;
     LONG Status;
     BOOL Wow = FALSE;
 
@@ -41,7 +41,9 @@ static void CheckHandleReply(SOCKET Socket)
     Status = Ioctl((HANDLE)Socket, NULL, NULL, NULL, &Io, IOCTL_AFD_GET_TDI_HANDLES,
                    &Flags, sizeof(Flags), &Words[1], 2 * sizeof(ULONG));
     CHECK(Status == 0 && Io.Status == 0 && Words[1] != 0);
-    CHECK(Words[0] == 0xabcdef01 && Words[2] == 0x76543210 && Words[3] == 0xabcdef01);
+    Connection = Words[2];
+    CHECK(Words[0] == 0xabcdef01 && Words[3] == 0xabcdef01);
+    CHECK((Flags & AFD_CONNECTION_HANDLE) ? Connection != 0 : Connection == 0x76543210);
     CHECK(Io.Guard == 0x12345678);
     Status = Ioctl((HANDLE)Socket, NULL, NULL, NULL, &Io, IOCTL_AFD_GET_TDI_HANDLES,
                    &Flags, sizeof(Flags), &Words[1], 2 * sizeof(ULONG) - 1);
@@ -52,7 +54,7 @@ static void CheckHandleReply(SOCKET Socket)
     Status = Ioctl((HANDLE)Socket, NULL, NULL, NULL, &Io, IOCTL_AFD_GET_TDI_HANDLES,
                    &Flags, sizeof(Flags), NULL, 2 * sizeof(ULONG));
     CHECK(Status == (LONG)0xc0000005); /* STATUS_ACCESS_VIOLATION */
-    CHECK(Words[0] == 0xabcdef01 && Words[2] == 0x76543210 && Words[3] == 0xabcdef01);
+    CHECK(Words[0] == 0xabcdef01 && Words[2] == Connection && Words[3] == 0xabcdef01);
     CHECK(Io.Guard == 0x12345678);
 }
 
@@ -100,6 +102,135 @@ static void CheckTcpQuery(void)
     CloseHandle(Handle);
 }
 
+static void CheckHttp(void)
+{
+    static const char Request[] = "GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    struct sockaddr_in Address = {0};
+    char Response[4096];
+    SOCKET Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int Used = 0, Count = -1;
+    DWORD Timeout = 5000;
+
+    CHECK(Socket != INVALID_SOCKET);
+    if (Socket == INVALID_SOCKET) return;
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = inet_addr("10.0.2.2");
+    Address.sin_port = htons(18463);
+    CHECK(setsockopt(Socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout)) == 0);
+    if (connect(Socket, (struct sockaddr *)&Address, sizeof(Address)))
+    {
+        CHECK(FALSE);
+        closesocket(Socket);
+        return;
+    }
+    CHECK(send(Socket, Request, sizeof(Request) - 1, 0) == sizeof(Request) - 1);
+    while (Used < sizeof(Response) - 1)
+    {
+        Count = recv(Socket, Response + Used, sizeof(Response) - 1 - Used, 0);
+        if (Count <= 0) break;
+        Used += Count;
+    }
+    Response[Used] = 0;
+    CHECK(Count == 0);
+    CHECK(!strncmp(Response, "HTTP/1.0 200 ", 13) || !strncmp(Response, "HTTP/1.1 200 ", 13));
+    CHECK(strstr(Response, "Local HTTP page loaded.") != NULL);
+    printf("HTTP bytes=%d status=%.12s\n", Used, Response);
+    CHECK(closesocket(Socket) == 0);
+}
+
+static void CheckPendingReceive(SOCKET Client, SOCKET Server)
+{
+    struct { char Text[8]; ULONG Guard; } Reply = {{0}, 0xabcdef01};
+    struct { WSAOVERLAPPED Io; ULONG Guard; } Pending = {{0}, 0x12345678};
+    WSABUF Buffers[2] = {{2, Reply.Text}, {3, Reply.Text + 2}};
+    DWORD Count = 0, Flags = 0;
+    int Result;
+
+    Pending.Io.hEvent = WSACreateEvent();
+    CHECK(Pending.Io.hEvent != WSA_INVALID_EVENT);
+    Result = WSARecv(Server, Buffers, 2, &Count, &Flags, &Pending.Io, NULL);
+    CHECK(Result == SOCKET_ERROR && WSAGetLastError() == WSA_IO_PENDING);
+    CHECK(WaitForSingleObject(Pending.Io.hEvent, 0) == WAIT_TIMEOUT);
+    CHECK(send(Client, "async", 5, 0) == 5);
+    CHECK(WaitForSingleObject(Pending.Io.hEvent, 2000) == WAIT_OBJECT_0);
+    CHECK(WSAGetOverlappedResult(Server, &Pending.Io, &Count, FALSE, &Flags) && Count == 5);
+    CHECK(!memcmp(Reply.Text, "async", 5) && Reply.Guard == 0xabcdef01);
+    CHECK(Pending.Guard == 0x12345678);
+    WSACloseEvent(Pending.Io.hEvent);
+}
+
+static void CheckPollReply(SOCKET Server, SOCKET Listener)
+{
+    typedef NTSTATUS (NTAPI *IOCTL)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK, ULONG, PVOID, ULONG, PVOID, ULONG);
+    typedef NTSTATUS (NTAPI *CANCEL)(HANDLE, PIO_STATUS_BLOCK);
+    HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
+    IOCTL Ioctl = (IOCTL)GetProcAddress(Ntdll, "NtDeviceIoControlFile");
+    CANCEL Cancel = (CANCEL)GetProcAddress(Ntdll, "NtCancelIoFile");
+    typedef struct
+    {
+        LARGE_INTEGER Timeout;
+        ULONG HandleCount;
+        ULONG_PTR Exclusive;
+        AFD_HANDLE Handles[2];
+        ULONG Guard;
+    } POLL_REPLY;
+    POLL_REPLY Poll = {0};
+    struct { IO_STATUS_BLOCK Io; ULONG Guard; } Result = {{{0}}, 0x12345678};
+    IO_STATUS_BLOCK CancelIo;
+    HANDLE Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ULONG Length = FIELD_OFFSET(POLL_REPLY, Guard);
+    NTSTATUS Status;
+    BOOL Wow = FALSE;
+
+    CHECK(Ioctl && Cancel && Event && IsWow64Process(GetCurrentProcess(), &Wow));
+    if (!Ioctl || !Cancel || !Event) return;
+    Poll.HandleCount = 2;
+    Poll.Exclusive = 1;
+    Poll.Handles[0].Handle = Server;
+    Poll.Handles[0].Events = AFD_EVENT_RECEIVE;
+    Poll.Handles[1].Handle = Listener;
+    Poll.Handles[1].Events = AFD_EVENT_ACCEPT;
+    Poll.Timeout.QuadPart = -500000;
+    Poll.Guard = 0xabcdef01;
+    Status = Ioctl((HANDLE)Server, Event, NULL, NULL, &Result.Io, IOCTL_AFD_SELECT,
+                   &Poll, Length, &Poll, Length);
+    CHECK(Status == STATUS_PENDING || Status == STATUS_TIMEOUT);
+    CHECK(WaitForSingleObject(Event, 2000) == WAIT_OBJECT_0);
+    CHECK(Result.Io.Status == STATUS_TIMEOUT && Result.Io.Information == Length);
+    CHECK(Poll.HandleCount == 2 && Poll.Handles[0].Events == 0 && Poll.Handles[1].Events == 0);
+    CHECK(Poll.Handles[0].Handle == Server && Poll.Handles[1].Handle == Listener);
+    CHECK(Poll.Guard == 0xabcdef01 && Result.Guard == 0x12345678);
+    if (Wow) CHECK(Poll.Exclusive == 1);
+
+    ResetEvent(Event);
+    Poll.Timeout.QuadPart = -1000000000;
+    Poll.Exclusive = 1;
+    Poll.Handles[0].Events = AFD_EVENT_RECEIVE;
+    Poll.Handles[1].Events = AFD_EVENT_ACCEPT;
+    Status = Ioctl((HANDLE)Server, Event, NULL, NULL, &Result.Io, IOCTL_AFD_SELECT,
+                   &Poll, Length, &Poll, Length);
+    CHECK(Status == STATUS_PENDING);
+    CHECK(Cancel((HANDLE)Server, &CancelIo) == 0);
+    CHECK(WaitForSingleObject(Event, 2000) == WAIT_OBJECT_0 && Result.Io.Status == STATUS_CANCELLED);
+    CHECK(Poll.Guard == 0xabcdef01 && Result.Guard == 0x12345678);
+    if (Wow)
+    {
+        Poll.Exclusive = 1;
+        Status = Ioctl((HANDLE)Server, Event, NULL, NULL, &Result.Io, IOCTL_AFD_SELECT,
+                       &Poll, Length - 1, &Poll, Length);
+        CHECK(Status == STATUS_BUFFER_TOO_SMALL);
+        Status = Ioctl((HANDLE)Server, Event, NULL, NULL, &Result.Io, IOCTL_AFD_SELECT,
+                       &Poll, Length, &Poll, Length - 1);
+        CHECK(Status == STATUS_BUFFER_TOO_SMALL);
+        Poll.HandleCount = MAXULONG;
+        Status = Ioctl((HANDLE)Server, Event, NULL, NULL, &Result.Io, IOCTL_AFD_SELECT,
+                       &Poll, Length, &Poll, Length);
+        CHECK(Status == STATUS_INVALID_PARAMETER);
+        CHECK(Poll.Guard == 0xabcdef01 && Result.Guard == 0x12345678);
+    }
+    CloseHandle(Event);
+}
+
 int main(int argc, char **argv)
 {
     WSADATA Data;
@@ -108,6 +239,7 @@ int main(int argc, char **argv)
     struct { char Text[8]; DWORD Guard; } Reply = {{0}, 0x12345678};
     WSABUF Buffers[2] = {{2, "Wo"}, {3, "W64"}};
     DWORD Count = 0, Timeout = 2000;
+    u_long Mode;
     int Length = sizeof(Address);
     HANDLE Done, Thread;
     fd_set Read;
@@ -119,6 +251,11 @@ int main(int argc, char **argv)
     CHECK(Done && Thread);
     if (!Done || !Thread) return 1;
     CHECK(WSAStartup(MAKEWORD(2, 2), &Data) == 0);
+    if (argc == 2 && !strcmp(argv[1], "--http"))
+    {
+        CheckHttp();
+        goto End;
+    }
     Listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     CHECK(Listener != INVALID_SOCKET);
     if (Listener == INVALID_SOCKET) goto End;
@@ -131,7 +268,7 @@ int main(int argc, char **argv)
     if (Failures) goto End;
     if (argc == 2 && !strcmp(argv[1], "--bind-abi"))
     {
-        CheckHandleReply(Listener);
+        CheckHandleReply(Listener, AFD_ADDRESS_HANDLE);
         CheckTcpQuery();
         goto End;
     }
@@ -146,10 +283,30 @@ int main(int argc, char **argv)
     if (Server == INVALID_SOCKET) goto End;
     CHECK(setsockopt(Server, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout)) == 0);
     CHECK(setsockopt(Client, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout)) == 0);
+    Mode = 1;
+    CHECK(ioctlsocket(Server, FIONBIO, &Mode) == 0);
+    CHECK(recv(Server, Reply.Text, 1, 0) == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK);
+    Mode = 0;
+    CHECK(ioctlsocket(Server, FIONBIO, &Mode) == 0);
+    if (argc == 2 && !strcmp(argv[1], "--afd-abi"))
+    {
+        CheckHandleReply(Server, AFD_ADDRESS_HANDLE | AFD_CONNECTION_HANDLE);
+        CheckPollReply(Server, Listener);
+    }
+    FD_ZERO(&Read);
+    FD_SET(Server, &Read);
+    FD_SET(Listener, &Read);
+    Wait.tv_sec = 0; Wait.tv_usec = 50000;
+    CHECK(select(0, &Read, NULL, NULL, &Wait) == 0 && Read.fd_count == 0);
+    CheckPendingReceive(Client, Server);
     CHECK(WSASend(Client, Buffers, 2, &Count, 0, NULL, NULL) == 0 && Count == 5);
     FD_ZERO(&Read);
     FD_SET(Server, &Read);
-    CHECK(select(0, &Read, NULL, NULL, &Wait) == 1 && FD_ISSET(Server, &Read));
+    FD_SET(Listener, &Read);
+    Wait.tv_sec = 2; Wait.tv_usec = 0;
+    CHECK(select(0, &Read, NULL, NULL, &Wait) == 1 && FD_ISSET(Server, &Read) && !FD_ISSET(Listener, &Read));
+    Mode = 0;
+    CHECK(ioctlsocket(Server, FIONREAD, &Mode) == 0 && Mode == 5);
     CHECK(recv(Server, Reply.Text, 5, MSG_WAITALL) == 5);
     CHECK(!memcmp(Reply.Text, "WoW64", 5) && Reply.Guard == 0x12345678);
     CHECK(send(Server, Reply.Text, 5, 0) == 5);

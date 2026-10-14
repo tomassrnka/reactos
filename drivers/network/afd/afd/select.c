@@ -10,6 +10,79 @@
 
 #include "afd.h"
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+typedef struct
+{
+    ULONG Handle, Events;
+    NTSTATUS Status;
+} AFD_HANDLE32;
+
+typedef struct
+{
+    LARGE_INTEGER Timeout;
+    ULONG HandleCount, Exclusive;
+    AFD_HANDLE32 Handles[1];
+} AFD_POLL_INFO32;
+
+C_ASSERT(FIELD_OFFSET(AFD_POLL_INFO32, Handles) == 16);
+C_ASSERT(sizeof(AFD_HANDLE32) == 12);
+
+/* METHOD_BUFFERED keeps the native poll alive through timeout/cancellation.
+ * Completion packs its result before the I/O manager copies it to the guest. */
+static NTSTATUS
+AfdCapturePoll32(PIRP Irp, PIO_STACK_LOCATION IrpSp)
+{
+    AFD_POLL_INFO32 *From = Irp->AssociatedIrp.SystemBuffer;
+    PAFD_POLL_INFO To;
+    ULONG Count, i, Length;
+
+    if (!From || IrpSp->Parameters.DeviceIoControl.InputBufferLength <
+                 FIELD_OFFSET(AFD_POLL_INFO32, Handles))
+        return STATUS_BUFFER_TOO_SMALL;
+    Count = From->HandleCount;
+    if (!Count || Count > (MAXULONG - FIELD_OFFSET(AFD_POLL_INFO, Handles)) / sizeof(AFD_HANDLE))
+        return STATUS_INVALID_PARAMETER;
+    Length = FIELD_OFFSET(AFD_POLL_INFO32, Handles) + Count * sizeof(AFD_HANDLE32);
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < Length ||
+        IrpSp->Parameters.DeviceIoControl.OutputBufferLength < Length)
+        return STATUS_BUFFER_TOO_SMALL;
+    To = ExAllocatePoolWithTag(NonPagedPool,
+                              FIELD_OFFSET(AFD_POLL_INFO, Handles) + Count * sizeof(AFD_HANDLE),
+                              TAG_AFD_DATA_BUFFER);
+    if (!To) return STATUS_NO_MEMORY;
+    To->Timeout = From->Timeout;
+    To->HandleCount = Count;
+    To->Exclusive = From->Exclusive;
+    Irp->Tail.Overlay.DriverContext[3] = UlongToPtr(From->Exclusive);
+    for (i = 0; i < Count; ++i)
+    {
+        To->Handles[i].Handle = (SOCKET)(LONG_PTR)(LONG)From->Handles[i].Handle;
+        To->Handles[i].Events = From->Handles[i].Events;
+        To->Handles[i].Status = From->Handles[i].Status;
+    }
+    ExFreePool(From);
+    Irp->AssociatedIrp.SystemBuffer = To;
+    return STATUS_SUCCESS;
+}
+
+static VOID
+AfdCompletePoll32(PIRP Irp, PAFD_POLL_INFO From)
+{
+    AFD_POLL_INFO32 *To = (PVOID)From;
+    ULONG Count = From->HandleCount, i;
+
+    To->Exclusive = PtrToUlong(Irp->Tail.Overlay.DriverContext[3]);
+    for (i = 0; i < Count; ++i)
+    {
+        AFD_HANDLE Handle = From->Handles[i];
+        To->Handles[i].Handle = (ULONG)Handle.Handle;
+        To->Handles[i].Events = Handle.Events;
+        To->Handles[i].Status = Handle.Status;
+    }
+    Irp->IoStatus.Information = FIELD_OFFSET(AFD_POLL_INFO32, Handles) + Count * sizeof(AFD_HANDLE32);
+}
+#endif
+
 static VOID PrintEvents( ULONG Events ) {
 #if DBG
     char *events_list[] = { "AFD_EVENT_RECEIVE",
@@ -88,6 +161,9 @@ VOID SignalSocket(
               PollReq->Handles[i].Status));
     }
     UnlockHandles( AFD_HANDLES(PollReq), PollReq->HandleCount );
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (IoIs32bitProcess(Irp)) AfdCompletePoll32(Irp, PollReq);
+#endif
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AFD_DbgPrint(MID_TRACE,("Completing\n"));
     AfdClearCancelRoutine(Irp);
@@ -179,7 +255,23 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_DEVICE_EXTENSION DeviceExt = DeviceObject->DeviceExtension;
     KIRQL OldIrql;
     UINT i, Signalled = 0;
-    ULONG Exclusive = PollReq->Exclusive;
+    ULONG Exclusive;
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (IoIs32bitProcess(Irp))
+    {
+        Status = AfdCapturePoll32(Irp, IrpSp);
+        if (!NT_SUCCESS(Status))
+        {
+            Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+            return Status;
+        }
+        PollReq = Irp->AssociatedIrp.SystemBuffer;
+    }
+#endif
+    Exclusive = PollReq->Exclusive;
 
     UNREFERENCED_PARAMETER(IrpSp);
 
