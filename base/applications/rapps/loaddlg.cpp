@@ -512,6 +512,26 @@ IsUnrunnable32BitProgram(LPCWSTR Path)
 }
 #endif
 
+static void
+SplitDependencies(const CStringW &Dependencies, CAtlList<CStringW> &Names)
+{
+    CStringW deps = Dependencies;
+    for (int pos = 1; pos > 0; deps = deps.Mid(pos + 1))
+    {
+        pos = deps.Find(L'|');
+        CStringW pkg = (pos > 0 ? deps.Left(pos) : deps).Trim();
+
+        // In the future a package might need to specify dependency version or WoW64
+        // information ("vcredist*x64" etc), for now, just remove possible modifiers.
+        int suffix = pkg.FindOneOf(L"*<=>:/\\?");
+        if (suffix > 0)
+            pkg = pkg.Left(suffix);
+
+        if (!pkg.IsEmpty())
+            Names.AddTail(pkg);
+    }
+}
+
 // Download dialog (loaddlg.cpp)
 HWND g_hDownloadWnd = NULL;
 
@@ -608,6 +628,8 @@ protected:
     BOOL m_bModal;
     UINT m_fDaf = 0;
     volatile LONG m_FailedCount;
+    CAtlList<CStringW> m_FailedIds;
+    CAtlList<CStringW> m_FailedNames;
     WCHAR m_szCaptionFmt[100];
     ATL::CSimpleArray<DownloadInfo> m_List;
     CDowloadingAppsListView m_ListView;
@@ -638,18 +660,11 @@ CDownloadManager::Add(const DownloadInfo &Info)
 
     if (!Info.szDependencies.IsEmpty())
     {
-        CStringW deps = Info.szDependencies;
-        for (int pos = 1; pos > 0; deps = deps.Mid(pos + 1))
+        CAtlList<CStringW> Names;
+        SplitDependencies(Info.szDependencies, Names);
+        for (POSITION it = Names.GetHeadPosition(); it;)
         {
-            pos = deps.Find(L'|');
-            CStringW pkg = (pos > 0 ? deps.Left(pos) : deps).Trim();
-
-            // In the future a package might need to specify dependency version or WoW64
-            // information ("vcredist*x64" etc), for now, just remove possible modifiers.
-            int suffix = pkg.FindOneOf(L"*<=>:/\\?");
-            if (suffix > 0)
-                pkg = pkg.Left(suffix);
-
+            const CStringW &pkg = Names.GetNext(it);
             CAvailableApplicationInfo *pApp = CAppDB::CreateAvailableAppInstance(pkg);
             Deleter <CAvailableApplicationInfo*>del(pApp);
             if (!pApp || pApp->IsInstalled())
@@ -832,7 +847,7 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
 
     ULONG dwContentLen, dwBytesWritten, dwBytesRead, dwStatus, dwStatusLen;
     ULONG dwCurrentBytesRead = 0;
-    BOOL bTempfile = FALSE, bCancelled = FALSE, bKeepFile = FALSE, bSucceeded = FALSE, bAborted = FALSE;
+    BOOL bTempfile = FALSE, bCancelled = FALSE, bKeepFile = FALSE, bSucceeded = FALSE, bAborted = FALSE, bSkipped = FALSE;
 
     HINTERNET hOpen = NULL;
     HINTERNET hFile = NULL;
@@ -845,6 +860,36 @@ CDownloadManager::PerformDownloadAndInstall(const DownloadInfo &Info)
     URL_COMPONENTSW urlComponents;
     size_t urlLength;
     unsigned char lpBuffer[4096];
+
+    // A package whose dependency failed is not downloaded or installed
+    if (Info.DLType == DLTYPE_APPLICATION && !Info.szDependencies.IsEmpty())
+    {
+        CAtlList<CStringW> Needs;
+        SplitDependencies(Info.szDependencies, Needs);
+        for (POSITION it = Needs.GetHeadPosition(); it && !bSkipped;)
+        {
+            const CStringW &pkg = Needs.GetNext(it);
+            POSITION idPos = m_FailedIds.GetHeadPosition(), namePos = m_FailedNames.GetHeadPosition();
+            while (idPos && namePos)
+            {
+                const CStringW &id = m_FailedIds.GetNext(idPos);
+                const CStringW &name = m_FailedNames.GetNext(namePos);
+                if (!id.CompareNoCase(pkg))
+                {
+                    bSkipped = TRUE;
+                    if (!IsSilentDialog())
+                    {
+                        CStringW szMsgText;
+                        szMsgText.Format(IDS_DL_DEPENDENCY_FAILED, Info.szName.GetString(), name.GetString());
+                        MessageBoxW(hDlg, szMsgText, Info.szName, MB_OK | MB_ICONERROR);
+                    }
+                    break;
+                }
+            }
+        }
+        if (bSkipped)
+            goto end;
+    }
 
     // Change caption to show the currently downloaded app
     switch (Info.DLType)
@@ -1268,13 +1313,22 @@ run:
             // TODO: issue an install operation separately so that the apps could be downloaded in the background
             if (shExInfo.hProcess)
             {
-                DWORD dwExitCode = 0;
-                WaitForSingleObject(shExInfo.hProcess, INFINITE);
-                BOOL bHasExitCode = GetExitCodeProcess(shExInfo.hProcess, &dwExitCode);
+                DWORD dwExitCode = 0, dwQueryError = ERROR_SUCCESS;
+                BOOL bHasExitCode = WaitForSingleObject(shExInfo.hProcess, INFINITE) == WAIT_OBJECT_0 &&
+                                    GetExitCodeProcess(shExInfo.hProcess, &dwExitCode);
+                if (!bHasExitCode)
+                    dwQueryError = GetLastError();
                 CloseHandle(shExInfo.hProcess);
                 SendMessageW(hMainWnd, WM_NOTIFY_INSTALLERFINISHED, 0, (LPARAM)(PCWSTR)Info.szPackageName);
 
-                if (bHasExitCode && dwExitCode != ERROR_SUCCESS)
+                if (!bHasExitCode)
+                {
+                    // Nothing says that the installer finished its work
+                    bSucceeded = FALSE;
+                    if (!IsSilentDialog())
+                        ShowLastError(hDlg, FALSE, dwQueryError);
+                }
+                else if (dwExitCode != ERROR_SUCCESS)
                 {
                     InstallerType it = Info.IExecType != INSTALLER_UNKNOWN ? Info.IExecType : Info.IType;
                     if (it == INSTALLER_UNKNOWN || it == INSTALLER_EXEINZIP)
@@ -1345,6 +1399,12 @@ end:
 
     if ((!bSucceeded && !bCancelled) || bAborted)
         InterlockedIncrement(&m_FailedCount);
+    if (((!bSucceeded && !bCancelled) || bAborted) && Info.DLType == DLTYPE_APPLICATION)
+    {
+        // Packages later in the list that need this one are skipped
+        m_FailedIds.AddTail(Info.szPackageName);
+        m_FailedNames.AddTail(Info.szName);
+    }
     DownloadStatus FinalStatus = DLSTATUS_FINISHED;
     if (bAborted)
         FinalStatus = DLSTATUS_CANCELLED;

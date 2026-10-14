@@ -247,6 +247,7 @@
 #define IDS_DL_STANDALONE_PROGRAM               1002
 #define IDS_DL_INSTALLER_FAILED                 1003
 #define IDS_DL_INSTALLER_CRASHED                1004
+#define IDS_DL_DEPENDENCY_FAILED                1020
 
 /* Accelerators */
 #define HOTKEYS                  715
