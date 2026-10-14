@@ -52,6 +52,29 @@ elseif(ARCH STREQUAL "amd64")
 endif()
 
 add_subdirectory(sharedviews)
+# Explicit, uninstalled unit fixture for wide guest readers. It compiles the
+# production accessors and selected DLL sources, and uses the test-only native
+# bridge until guest GUI syscall/callback dispatch is available.
+if(ARCH STREQUAL "i386" AND NOT MSVC)
+    add_asm_files(gueststate_asm i386/ClientPfn.S i386/GuestState.S)
+    add_executable(wow64_guest_state EXCLUDE_FROM_ALL
+        GuestState.c GuestStateUser.c GuestStateGdi.c GuestStateImm.c
+        gueststate_testlist.c ${gueststate_asm})
+    target_compile_definitions(wow64_guest_state PRIVATE W32K_WIDE)
+    target_compile_options(wow64_guest_state PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(wow64_guest_state PRIVATE -Wl,--gc-sections)
+    target_include_directories(wow64_guest_state PRIVATE
+        ${REACTOS_SOURCE_DIR}/win32ss/include
+        ${REACTOS_SOURCE_DIR}/win32ss/user/user32/include
+        ${REACTOS_SOURCE_DIR}/win32ss/gdi/gdi32/include
+        ${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys
+        ${REACTOS_SOURCE_DIR}/sdk/include/wine)
+    target_link_libraries(wow64_guest_state wine ${PSEH_LIB})
+    set_module_type(wow64_guest_state win32cui)
+    add_importlibs(wow64_guest_state msvcrt kernel32 ntdll)
+    add_dependencies(wow64_guest_state wow64_syscall_tables)
+endif()
+
 # The native syscall bridge is deliberately test-only, and uses GNU .code64
 # in a PE32 fixture until wow64win provides the guest GUI entry points.
 if(ARCH STREQUAL "amd64" OR (ARCH STREQUAL "i386" AND NOT MSVC))
