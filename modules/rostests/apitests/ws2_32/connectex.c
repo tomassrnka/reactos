@@ -550,6 +550,64 @@ Cleanup:
         WaitForSingleObject(pFirst->Overlapped.hEvent, 3000);
 }
 
+/* After a cancelled ConnectEx the socket is bound again: listen() on it works
+ * and accepts a connection (Windows Server 2008 R2 and Windows 10). ReactOS
+ * kept the cancelled connect's endpoint on the socket and the listen opened a
+ * new one over it */
+static
+void
+TestCancelThenListen(void)
+{
+    static EV_REQUEST First;
+    SOCKET Client, Peer = INVALID_SOCKET, Accepted = INVALID_SOCKET;
+    struct sockaddr_in Silent, Local;
+    int Error, Len = sizeof(Local), i;
+
+    for (i = 0; i < 60 && !SilentAddress(&Silent); i++)
+        Sleep(500);
+    if (i == 60)
+    {
+        skip("No local IPv4 subnet to connect into\n");
+        return;
+    }
+    Client = EventSocket(htonl(INADDR_ANY));
+    if (Client == INVALID_SOCKET)
+    {
+        skip("Setup failed: %d\n", WSAGetLastError());
+        return;
+    }
+    Error = StartConnectExEvent(Client, &Silent, &First);
+    if (Error || WaitEventRequest(Client, &First, 300))
+    {
+        skip("The connect to the silent address did not stay pending (error %d, %lu)\n", Error, First.Error);
+        goto Cleanup;
+    }
+    ok(CancelIo((HANDLE)Client), "CancelIo failed: %lu\n", GetLastError());
+    ok(WaitEventRequest(Client, &First, 3000), "The cancelled ConnectEx did not complete\n");
+    ok(First.Error == ERROR_OPERATION_ABORTED, "The cancelled ConnectEx: error %lu\n", First.Error);
+
+    Error = listen(Client, 1) ? WSAGetLastError() : 0;
+    ok(Error == 0, "listen after a cancelled ConnectEx: error %d\n", Error);
+    if (Error)
+        goto Cleanup;
+    ok(getsockname(Client, (struct sockaddr *)&Local, &Len) == 0, "getsockname failed: %d\n", WSAGetLastError());
+    Local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Peer = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    Error = connect(Peer, (struct sockaddr *)&Local, sizeof(Local)) ? WSAGetLastError() : 0;
+    ok(Error == 0, "connect to the listener after a cancelled ConnectEx: error %d\n", Error);
+    Accepted = AcceptWithin(Client, 5000);
+    ok(Accepted != INVALID_SOCKET, "The listener accepted nothing\n");
+
+Cleanup:
+    if (Accepted != INVALID_SOCKET)
+        closesocket(Accepted);
+    if (Peer != INVALID_SOCKET)
+        closesocket(Peer);
+    closesocket(Client);
+    if (First.Overlapped.hEvent)
+        WaitForSingleObject(First.Overlapped.hEvent, 3000);
+}
+
 typedef struct _CONNECT_CALL
 {
     SOCKET Socket;
@@ -646,6 +704,7 @@ START_TEST(connectex)
         TestFailedThenAgain();
         TestCancelThenConnect(FALSE);
         TestCancelThenConnect(TRUE);
+        TestCancelThenListen();
         TestConnectWhileConnecting(FALSE);
         TestConnectWhileConnecting(TRUE);
         CloseHandle(Port);
