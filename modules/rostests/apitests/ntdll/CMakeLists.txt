@@ -158,6 +158,7 @@ list(APPEND SOURCE
     RtlReAllocateHeap.c
     RtlRemovePrivileges.c
     RtlSRWLock.c
+    RtlSRWLockStress.c
     RtlSRWLockWait.c
     RtlUnhandledExceptionFilter.c
     RtlUnicodeStringToAnsiString.c
