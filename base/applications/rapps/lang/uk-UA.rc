@@ -198,6 +198,8 @@ BEGIN
     IDS_INFORMATION "Інформація"
     IDS_UNABLE_TO_DOWNLOAD "Неможливо завантажити додаток! Адресу не знайдено!"
     IDS_UNABLE_TO_DOWNLOAD2 "Неможливо завантажити додаток! Перевірте підключення до мережі Інтернет!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Не вдалося видалити дані про програму з реєстру!"
     IDS_UNABLE_TO_INSTALL "Не вдалося завершити інсталювання!"
     IDS_UNABLE_TO_QUERY_CERT "Unable to retrieve certificate info.\n\nDo you want to continue anyway?"

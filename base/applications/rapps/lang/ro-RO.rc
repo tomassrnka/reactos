@@ -197,6 +197,8 @@ BEGIN
     IDS_INFORMATION "Informație"
     IDS_UNABLE_TO_DOWNLOAD "Pachetul nu se poate descărca! Adresa nu este găsită!"
     IDS_UNABLE_TO_DOWNLOAD2 "Pachetul nu se poate descărca! Verificați conexiunea de Internet!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Datele de registru pentru acest program nu s-au putut elimina!"
     IDS_UNABLE_TO_INSTALL "Programul de instalare nu se poate executa!"
     IDS_UNABLE_TO_QUERY_CERT "Imposibil de obținut informații despre certificat.\n\nContinuați oricum?"

@@ -196,6 +196,8 @@ BEGIN
     IDS_INFORMATION "資訊"
     IDS_UNABLE_TO_DOWNLOAD "無法下載軟件套件！找不到網絡位址！"
     IDS_UNABLE_TO_DOWNLOAD2 "無法下載軟件套件！請檢查網絡連線！"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "無法從登錄檔刪除該程式的資料！"
     IDS_UNABLE_TO_INSTALL "無法打開安裝程式！"
     IDS_UNABLE_TO_QUERY_CERT "無法取得證書資訊。\n\n您是否仍要繼續？"

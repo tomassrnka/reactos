@@ -196,6 +196,8 @@ BEGIN
     IDS_INFORMATION "Informácie"
     IDS_UNABLE_TO_DOWNLOAD "Súbor sa nepodarilo stiahnuť! Adresa nebola nájdená!"
     IDS_UNABLE_TO_DOWNLOAD2 "Balíček sa nepodarilo stiahnuť! Skontrolujte pripojenie k Internetu"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Nie je možné odstrániť z registrov údaje o programe!"
     IDS_UNABLE_TO_INSTALL "Nepodarilo sa otvoriť inštalátor!"
     IDS_UNABLE_TO_QUERY_CERT "Nepodarilo sa získať informácie o certifikáte.\n\nChcete napriek tomu pokračovať?"

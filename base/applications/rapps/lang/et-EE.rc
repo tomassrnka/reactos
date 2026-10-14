@@ -195,6 +195,8 @@ BEGIN
     IDS_INFORMATION "Informatsioon"
     IDS_UNABLE_TO_DOWNLOAD "Pakendi allalaadimine ebaõnnestus! Aadressit ei leitud!"
     IDS_UNABLE_TO_DOWNLOAD2 "Pakendi allalaadimine ebaõnnestus! Kontrolli interneti ühendust!"
+    IDS_UNABLE_TO_DOWNLOAD_HTTP "Unable to download the package! The server answered: %u %s"
+    IDS_DL_RETRY "The server is busy. Trying again (attempt %u of %u)…"
     IDS_UNABLE_TO_REMOVE "Programmi andmete registrist eemaldamine ebaõnnestus!"
     IDS_UNABLE_TO_INSTALL "Installeri avamine ebaõnnestus!"
     IDS_UNABLE_TO_QUERY_CERT "Sertifikaadi informatsiooni hankimine ebaõnnestus.\n\nKas soovid siiski jätkata?"
