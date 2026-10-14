@@ -380,12 +380,14 @@ MiDropVirtualLock(IN PMMPFN Pfn1)
     return TRUE;
 }
 
-VOID
-NTAPI
-MiDeletePte(IN PMMPTE PointerPte,
-            IN PVOID VirtualAddress,
-            IN PEPROCESS CurrentProcess,
-            IN PMMPTE PrototypePte)
+/* Returns TRUE when a valid translation was removed and the caller must flush the TB
+   before releasing the PFN lock */
+static
+BOOLEAN
+MiDeletePteNoFlush(IN PMMPTE PointerPte,
+                   IN PVOID VirtualAddress,
+                   IN PEPROCESS CurrentProcess,
+                   IN PMMPTE PrototypePte)
 {
     PMMPFN Pfn1;
     MMPTE TempPte;
@@ -436,7 +438,7 @@ MiDeletePte(IN PMMPTE PointerPte,
 
             /* Dropping a VirtualLock frees the page, unless an MDL still holds it */
             if (MiDropVirtualLock(Pfn1))
-                return;
+                return FALSE;
 
             /*
              * It is either on a list (refcount == 0), being written, or still
@@ -457,7 +459,7 @@ MiDeletePte(IN PMMPTE PointerPte,
                 /* This will put it back in free list and clean properly up */
                 MiDecrementReferenceCount(Pfn1, PageFrameIndex);
             }
-            return;
+            return FALSE;
         }
     }
 
@@ -545,8 +547,18 @@ MiDeletePte(IN PMMPTE PointerPte,
         //CurrentProcess->NumberOfPrivatePages--;
     }
 
-    /* Flush the TLB */
-    KeFlushEntireTb(TRUE, TRUE);
+    return TRUE;
+}
+
+VOID
+NTAPI
+MiDeletePte(IN PMMPTE PointerPte,
+            IN PVOID VirtualAddress,
+            IN PEPROCESS CurrentProcess,
+            IN PMMPTE PrototypePte)
+{
+    if (MiDeletePteNoFlush(PointerPte, VirtualAddress, CurrentProcess, PrototypePte))
+        KeFlushEntireTb(TRUE, TRUE);
 }
 
 VOID
@@ -568,6 +580,7 @@ MiDeleteVirtualAddresses(
     PEPROCESS CurrentProcess;
     KIRQL OldIrql;
     BOOLEAN AddressGap = FALSE;
+    BOOLEAN FlushTb;
     PSUBSECTION Subsection;
 
     /* We should never get RosMm memory areas here */
@@ -681,6 +694,7 @@ MiDeleteVirtualAddresses(
 
         /* Lock the PFN Database while we delete the PTEs */
         OldIrql = MiAcquirePfnLock();
+        FlushTb = FALSE;
         PointerPte = MiAddressToPte(Va);
         do
         {
@@ -735,11 +749,11 @@ MiDeleteVirtualAddresses(
                     }
                     else
                     {
-                        /* Delete the PTE proper */
-                        MiDeletePte(PointerPte,
-                                    (PVOID)Va,
-                                    CurrentProcess,
-                                    PrototypePte);
+                        /* Delete the PTE proper, the TB is flushed once for the whole run */
+                        FlushTb |= MiDeletePteNoFlush(PointerPte,
+                                                      (PVOID)Va,
+                                                      CurrentProcess,
+                                                      PrototypePte);
                     }
                 }
                 else
@@ -771,6 +785,9 @@ MiDeleteVirtualAddresses(
             PointerPte++;
             PrototypePte++;
         } while ((Va & (PDE_MAPPED_VA - 1)) && (Va <= EndingAddress));
+
+        /* The freed pages may be reused as soon as the PFN lock is released */
+        if (FlushTb) KeFlushEntireTb(TRUE, TRUE);
 
         /* Release the lock */
         MiReleasePfnLock(OldIrql);
