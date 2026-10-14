@@ -19,6 +19,7 @@ list(APPEND SOURCE
     GetUserDefaultLocaleName.c
     InitOnce.c
     IoCompletion.c
+    IsApiSetImplemented.c
     IsValidLocaleName.c
     LCIDToLocaleName.c
     LocaleNameToLCID.c
