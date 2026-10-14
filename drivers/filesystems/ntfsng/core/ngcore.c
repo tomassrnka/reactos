@@ -2236,12 +2236,23 @@ static int ngc_extend_impl(ngc_vol *v, unsigned long long sectors, unsigned long
 		old_bytes = i_size_read(bvi);
 		bytes = ngc_bmp_bytes(nr);
 		if (bytes > old_bytes) {
-			/* Real clusters (a sparse $Bitmap is invalid), allocated below the old end. */
+			/*
+			 * Real clusters (a sparse $Bitmap is invalid), allocated below the old end.  The core
+			 * does not promise to undo a failed expand completely, so a failure here leaves the
+			 * volume read-only; the free space is checked first, so that a full volume refuses
+			 * cleanly instead.
+			 */
+			s64 need = (s64)((round_up((u64)bytes, vol->cluster_size) - (u64)bni->allocated_size)
+					 >> vol->cluster_size_bits);
+			if (need > 0 && atomic64_read(&vol->free_clusters) - atomic64_read(&vol->dirty_clusters) < need + 16) {
+				err = -ENOSPC;
+				goto out;
+			}
 			mutex_lock(&bni->mrec_lock);
 			err = ntfs_attr_truncate_i(bni, bytes, HOLES_NO);
 			mutex_unlock(&bni->mrec_lock);
 			if (err)
-				goto out;
+				goto failed;
 			i_size_write(bvi, bytes);
 			err = ntfs_attr_set(bni, old_bytes, bytes - old_bytes, 0);
 			if (!err && bni->initialized_size < bytes) {
