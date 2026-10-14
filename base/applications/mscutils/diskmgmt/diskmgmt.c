@@ -5,7 +5,8 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
-#include "diskmgmt.h"
+#include "uicommon.h"
+#include <objbase.h>
 
 #define MAIN_CLASS      L"DiskMgmtMainWindow"
 #define SPLITTER_H      4
@@ -116,7 +117,8 @@ CanShowProperties(VOID)
 
     if (!ResolveSelection(&Disk, &Region))
         return FALSE;
-    return Region == NULL || Region->Kind == DM_KIND_PRIMARY || Region->Kind == DM_KIND_LOGICAL;
+    return Region == NULL || Region->Kind == DM_KIND_PRIMARY || Region->Kind == DM_KIND_LOGICAL ||
+           Region->Kind == DM_KIND_UNALLOCATED;
 }
 
 static VOID
@@ -510,7 +512,7 @@ ShowProperties(VOID)
 
     if (!ResolveSelection(&Disk, &Region))
         return;
-    if (Region == NULL)
+    if (Region == NULL || Region->Kind == DM_KIND_UNALLOCATED)
     {
         /* a volume renamed in the sheet of the disk shows in the main view too */
         if (ShowDiskProperties(g_hMain, Disk))
@@ -557,6 +559,22 @@ UpdateMenus(HMENU hMenu)
     }
 }
 
+/* Windows offers to initialize the disks that have no partition table as soon as it sees them */
+static VOID
+PromptInitialize(VOID)
+{
+    ULONG i;
+    BOOL Any = FALSE;
+
+    if (g_Model == NULL)
+        return;
+    for (i = 0; i < g_Model->DiskCount; i++)
+        if (DiskNeedsInit(g_Model->Disks[i]))
+            Any = TRUE;
+    if (Any && DlgInitialize(g_hMain, g_Model, NULL))
+        Refresh();
+}
+
 static VOID
 DoAction(UINT Id)
 {
@@ -564,8 +582,38 @@ DoAction(UINT Id)
     PDM_REGION Region = NULL;
 
     ResolveSelection(&Disk, &Region);
-    if (ActionsRun(g_hMain, Id, Disk, Region))
+    if (ActionsRun(g_hMain, Id, Disk, Region, g_Model))
+    {
         Refresh();
+        if (Id == ID_RESCAN)
+            PromptInitialize();
+    }
+}
+
+/* A greyed item says in the status bar why it is greyed. */
+static VOID
+OnMenuSelect(WPARAM wParam, LPARAM lParam)
+{
+    UINT Id = LOWORD(wParam), Flags = HIWORD(wParam);
+    PDM_DISK Disk;
+    PDM_REGION Region;
+    WCHAR Text[256];
+
+    if (Flags == 0xFFFF && lParam == 0)
+    {
+        UpdateStatusBar();
+        return;
+    }
+    if ((Flags & MF_POPUP) || !(Flags & MF_GRAYED) || Id < ID_ACT_FIRST || Id > ID_ACT_LAST)
+    {
+        UpdateStatusBar();
+        return;
+    }
+    ResolveSelection(&Disk, &Region);
+    if (ActionsReason(Id, Disk, Region, Text, ARRAYSIZE(Text)))
+        SendMessageW(g_hStatus, SB_SETTEXTW, 0, (LPARAM)Text);
+    else
+        UpdateStatusBar();
 }
 
 static VOID
@@ -800,6 +848,14 @@ MainWndProc(HWND hWnd, UINT Message, WPARAM wParam, LPARAM lParam)
             UpdateMenus(GetMenu(hWnd));
             return 0;
 
+        case WM_MENUSELECT:
+            OnMenuSelect(wParam, lParam);
+            return 0;
+
+        case WM_DM_STARTED:
+            PromptInitialize();
+            return 0;
+
         case WM_COMMAND:
             switch (LOWORD(wParam))
             {
@@ -1000,6 +1056,7 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCm
     Controls.dwSize = sizeof(Controls);
     Controls.dwICC = ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_WIN95_CLASSES;
     InitCommonControlsEx(&Controls);
+    CoInitialize(NULL);
     CreateFonts();
     if (!GraphRegisterClass(hInstance))
         return 1;
@@ -1040,6 +1097,7 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCm
     ShowWindow(g_hMain, nCmdShow);
     UpdateWindow(g_hMain);
     SetFocus(ViewWindow(g_TopView));
+    PostMessageW(g_hMain, WM_DM_STARTED, 0, 0);
 
     hAccel = LoadAcceleratorsW(hInstance, MAKEINTRESOURCEW(IDR_ACCEL));
     while (GetMessageW(&Msg, NULL, 0, 0) > 0)

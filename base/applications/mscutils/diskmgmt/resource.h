@@ -35,7 +35,7 @@
 #define ID_CONVERT_GPT          249
 #define ID_CONVERT_MBR          250
 #define ID_RESCAN               251
-#define ID_ACT_LAST             251
+#define ID_ACT_LAST             262
 #define ID_ALL_TASKS            260
 
 /* control ids of the main window */
@@ -158,7 +158,6 @@
 
 /* dialogs of the actions */
 #define IDD_INITDISK            600
-#define IDD_NEWVOL              601
 #define IDD_LETTER              602
 #define IDD_PICKLETTER          603
 #define IDD_FORMAT              604
@@ -168,13 +167,6 @@
 #define IDC_ID_MBR              611
 #define IDC_ID_GPT              612
 
-#define IDC_NV_INFO             620
-#define IDC_NV_SIZE             621
-#define IDC_NV_LETTER           622
-#define IDC_NV_FS               623
-#define IDC_NV_LABEL            624
-#define IDC_NV_QUICK            625
-#define IDC_NV_NOTE             626
 
 #define IDC_CL_VOLUME           630
 #define IDC_CL_LIST             631
@@ -187,7 +179,6 @@
 #define IDC_PL_FOLDER_RADIO     642
 #define IDC_PL_FOLDER           643
 
-#define IDC_FM_VOLUME           650
 #define IDC_FM_LABEL            651
 #define IDC_FM_FS               652
 #define IDC_FM_CLUSTER          653
@@ -262,5 +253,145 @@
 #define IDS_PL_NO_REPARSE       671
 #define IDS_ERR_PATHS_NOT_RESTORED 890
 #define IDS_PL_FOLDER_TOO_LONG  891
+
+
+/* the Windows 7 style dialogs and wizards */
+#define IDC_ID_LIST             613
+#define IDC_ID_NOTE             614
+#define IDC_FM_COMPRESS         655
+#define IDC_CL_TEXT             635
+#define IDC_PL_BROWSE           644
+#define IDC_PL_TEXT             645
+#define IDC_SH_BEFORE           670
+#define IDC_SH_AVAIL            671
+#define IDC_SH_AMOUNT           672
+#define IDC_SH_SPIN             673
+#define IDC_SH_AFTER            674
+#define IDC_SH_NOTE             675
+#define IDC_SH_ICON             676
+
+#define IDD_NVW_WELCOME         700
+#define IDC_NVW_TITLE           701
+#define IDD_NVW_SIZE            710
+#define IDC_NV_MAX              711
+#define IDC_NV_MIN              712
+#define IDC_NV_SIZE             713
+#define IDC_NV_SPIN             714
+#define IDD_NVW_LETTER          720
+#define IDC_NL_RADIO_LETTER     721
+#define IDC_NL_LETTER           722
+#define IDC_NL_RADIO_FOLDER     723
+#define IDC_NL_FOLDER           724
+#define IDC_NL_BROWSE           725
+#define IDC_NL_RADIO_NONE       726
+#define IDD_NVW_FORMAT          730
+#define IDC_NF_RADIO_NO         731
+#define IDC_NF_RADIO_YES        732
+#define IDC_NF_FS               733
+#define IDC_NF_CLUSTER          734
+#define IDC_NF_LABEL            735
+#define IDC_NF_QUICK            736
+#define IDC_NF_COMPRESS         737
+#define IDD_NVW_FINISH          750
+#define IDC_NVW_FTITLE          751
+#define IDC_NVW_SUMMARY         752
+
+#define IDD_EXW_WELCOME         760
+#define IDC_EXW_TITLE           761
+#define IDD_EXW_DISKS           770
+#define IDC_EX_AVAIL            771
+#define IDC_EX_SELECTED         772
+#define IDC_EX_ADD              773
+#define IDC_EX_REMOVE           774
+#define IDC_EX_REMOVEALL        775
+#define IDC_EX_TOTAL            776
+#define IDC_EX_MAX              777
+#define IDC_EX_AMOUNT           778
+#define IDC_EX_SPIN             779
+#define IDD_EXW_FINISH          790
+#define IDC_EXW_FTITLE          791
+#define IDC_EX_SUMMARY          792
+
+#define ID_EXTEND_VOLUME        252
+#define ID_SHRINK_VOLUME        253
+#define ID_ADD_MIRROR           254
+#define ID_NEW_SPANNED          255
+#define ID_NEW_STRIPED          256
+#define ID_NEW_MIRRORED         257
+#define ID_NEW_RAID5            258
+#define ID_CONVERT_DYNAMIC      259
+#define ID_OFFLINE              261
+#define ID_HELP_TOPIC           262
+
+#define IDB_WIZ_WATERMARK       112
+#define IDB_WIZ_HEADER          113
+#define IDD_SHRINK              606
+
+/* menu items of the actions that only an unsupported feature or a missing driver can take away */
+#define IDS_ACT_EXTEND          800
+#define IDS_ACT_SHRINK          801
+#define IDS_ACT_ADD_MIRROR      802
+#define IDS_ACT_SPANNED         803
+#define IDS_ACT_STRIPED         804
+#define IDS_ACT_MIRRORED        805
+#define IDS_ACT_RAID5           806
+#define IDS_ACT_DYNAMIC         807
+#define IDS_ACT_OFFLINE         808
+#define IDS_ACT_HELP            809
+
+/* why a menu item is greyed, shown in the status bar */
+#define IDS_WHY_NO_SELECTION    820
+#define IDS_WHY_NO_HELP         821
+#define IDS_WHY_NO_DYNAMIC      822
+#define IDS_WHY_NO_OFFLINE      823
+#define IDS_WHY_DISK_STATE      824
+#define IDS_WHY_NO_FS           825
+#define IDS_WHY_NO_PATH         826
+#define IDS_WHY_NOT_PRIMARY     827
+#define IDS_WHY_ALREADY_ACTIVE  828
+#define IDS_WHY_NO_VOLUME       829
+#define IDS_WHY_PROTECTED       830
+#define IDS_WHY_EXTENDED_USED   831
+#define IDS_WHY_NO_SPACE        832
+#define IDS_WHY_EXTEND_FS       833
+#define IDS_WHY_SHRINK_FS       834
+#define IDS_WHY_NO_GAP_BEHIND   835
+#define IDS_WHY_EXTEND_DRIVER   836
+#define IDS_WHY_SHRINK_DRIVER   837
+#define IDS_WHY_INITIALIZED     838
+#define IDS_WHY_HAS_PARTITIONS  839
+
+#define IDS_CONFIRM_DELETE_TITLE      850
+#define IDS_CONFIRM_DELETE_PART_TITLE 851
+#define IDS_CONFIRM_DELETE_PART       852
+
+#define IDS_PL_ADD_TEXT         855
+#define IDS_PL_CHANGE_TEXT      856
+#define IDS_PL_BROWSE           857
+#define IDS_SH_QUERYING         858
+#define IDS_SH_NOTHING          859
+
+#define IDS_NVW_CAPTION         860
+#define IDS_NVW_SIZE_TITLE      861
+#define IDS_NVW_SIZE_SUB        862
+#define IDS_NVW_LETTER_TITLE    863
+#define IDS_NVW_LETTER_SUB      864
+#define IDS_NVW_FORMAT_TITLE    865
+#define IDS_NVW_FORMAT_SUB      866
+#define IDS_NS_TYPE             867
+#define IDS_NS_DISK             868
+#define IDS_NS_SIZE             869
+#define IDS_NS_PATH             870
+#define IDS_NS_NONE             871
+#define IDS_NS_FS               872
+#define IDS_NS_ALLOC            873
+#define IDS_NS_LABEL            874
+#define IDS_NS_QUICK            875
+#define IDS_EXW_CAPTION         876
+#define IDS_EXW_DISKS_TITLE     877
+#define IDS_EXW_DISKS_SUB       878
+#define IDS_EX_DISK             879
+#define IDS_ERR_EXTEND_PARTIAL  880
+#define IDS_ERR_SHRINK_PARTIAL  881
 
 #endif

@@ -109,6 +109,10 @@ DL_STATUS DlDelete(PDL_LAYOUT Layout, ULONGLONG Offset);
 DL_STATUS DlSetActive(PDL_LAYOUT Layout, ULONGLONG Offset, BOOL Active);
 DL_STATUS DlSetMbrType(PDL_LAYOUT Layout, ULONGLONG Offset, UCHAR Type);
 
+/* Growing and shrinking: the gap right behind a partition limits how far it grows. */
+ULONGLONG DlMaxGrow(const DL_LAYOUT *Layout, ULONGLONG Offset);
+DL_STATUS DlResize(PDL_LAYOUT Layout, ULONGLONG Offset, ULONGLONG NewLength);
+
 /* Windows creates the fourth volume of an MBR disk as an extended partition with a logical drive in it. */
 BOOL DlWantsExtendedForNext(const DL_LAYOUT *Layout, const DL_FREE *Free);
 /* Partition type of an MBR partition after a format, as Windows sets it. */
