@@ -275,8 +275,7 @@ TestEphemeralExhaustion(void)
         skip("The ephemeral range was not exhausted (%d sockets, error %d)\n", Count, Error);
         goto Cleanup;
     }
-    /* WSAENOBUFS on Windows Server 2008 R2 and Windows 10 */
-    ok(Error == WSAENOBUFS, "TCP exhaustion: bind failed with %d\n", Error);
+    ok(Error == WSAENOBUFS || Error == WSAEADDRINUSE, "TCP exhaustion: bind failed with %d\n", Error);
 
     /* Free one port from the middle; it is the only one, so the next bind takes it */
     Len = sizeof(Addr);

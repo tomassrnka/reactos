@@ -521,11 +521,11 @@ NTSTATUS FileOpenAddress(
           /* The client is trying to bind to a local address so allocate a port now too */
           AllocatedPort = TCPAllocatePort(0);
 
-          /* Every ephemeral port is taken: WSAENOBUFS, as on Windows */
+          /* Check for bind success */
           if (AllocatedPort == (UINT)-1)
           {
               ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
-              return STATUS_INSUFFICIENT_RESOURCES;
+              return STATUS_ADDRESS_ALREADY_EXISTS;
           }
           AddrFile->Port = AllocatedPort;
       }
