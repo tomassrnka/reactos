@@ -4,7 +4,8 @@ spec2def(ws2_32.dll ws2_32.spec ADD_IMPORTLIB)
 
 include_directories(
     inc
-    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/winsock)
+    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/winsock
+    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/drivers)
 
 list(APPEND SOURCE
     src/addrconv.c
@@ -46,8 +47,13 @@ list(APPEND SOURCE
     src/wsautil.c
     inc/ws2_32.h)
 
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
+    list(APPEND PCH_SKIP_SOURCE src/poll.c)
+endif()
+
 add_library(ws2_32 MODULE
     ${SOURCE}
+    ${PCH_SKIP_SOURCE}
     ws2_32.rc
     ${CMAKE_CURRENT_BINARY_DIR}/ws2_32_stubs.c
     ${CMAKE_CURRENT_BINARY_DIR}/ws2_32.def)
