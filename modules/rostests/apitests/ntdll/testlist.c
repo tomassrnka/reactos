@@ -155,6 +155,7 @@ extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
 extern void func_StackOverflow(void);
 extern void func_SystemCallStubs(void);
+extern void func_SystemDllTls(void);
 extern void func_TimerResolution(void);
 extern void func_UserModeException(void);
 
@@ -310,6 +311,7 @@ const struct test winetest_testlist[] =
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
     { "StackOverflow",                  func_StackOverflow },
     { "SystemCallStubs",                func_SystemCallStubs },
+    { "SystemDllTls",                   func_SystemDllTls },
     { "TimerResolution",                func_TimerResolution },
     { "UserModeException",              func_UserModeException },
 #ifdef _M_IX86
