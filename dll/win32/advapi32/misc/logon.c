@@ -580,6 +580,94 @@ InsertTokenToProcessCommon(
     return STATUS_SUCCESS;
 }
 
+/*
+ * The NT 5 creation path installs the primary token after creating both
+ * objects. Complete their NT 6 labels before releasing the suspended thread.
+ * Native ProcessAccessToken assignment alone does not relabel objects.
+ */
+static BOOL
+SetProcessTokenLabel(
+    HANDLE Object,
+    HANDLE Token,
+    PSECURITY_DESCRIPTOR ExplicitDescriptor)
+{
+    ULONG TokenBuffer[(sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE + sizeof(ULONG) - 1) / sizeof(ULONG)];
+    PTOKEN_MANDATORY_LABEL Label = (PVOID)TokenBuffer;
+    ULONG AclBuffer[16], Length, Index;
+    SECURITY_DESCRIPTOR Descriptor;
+    PSECURITY_DESCRIPTOR Existing = NULL;
+    PACE_HEADER Ace;
+    PACL Sacl = NULL;
+    BOOLEAN HasLabel = FALSE;
+    BOOL Present, Defaulted, Ret;
+    DWORD Error;
+    NTSTATUS Status;
+
+    if (!GetTokenInformation(Token, TokenIntegrityLevel, TokenBuffer, sizeof(TokenBuffer), &Length))
+        return FALSE;
+
+    if (ExplicitDescriptor &&
+        GetSecurityDescriptorSacl(ExplicitDescriptor, &Present, &Sacl, &Defaulted) &&
+        Present && Sacl)
+    {
+        for (Index = 0; Index < Sacl->AceCount; ++Index)
+        {
+            if (!GetAce(Sacl, Index, (PVOID *)&Ace)) return FALSE;
+            if (Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) HasLabel = TRUE;
+        }
+    }
+
+    if (HasLabel)
+    {
+        /* Creation has already validated the explicit label and added its minimum policy. */
+        Error = GetSecurityInfo(Object, SE_KERNEL_OBJECT, LABEL_SECURITY_INFORMATION,
+                                NULL, NULL, NULL, &Sacl, &Existing);
+        if (Error != ERROR_SUCCESS)
+        {
+            SetLastError(Error);
+            return FALSE;
+        }
+    }
+    else
+    {
+        Sacl = (PACL)AclBuffer;
+        InitializeAcl(Sacl, sizeof(AclBuffer), ACL_REVISION);
+        Status = RtlAddMandatoryAce(Sacl, ACL_REVISION, 0, Label->Label.Sid,
+                                    SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+                                    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_READ_UP);
+        if (!NT_SUCCESS(Status))
+        {
+            SetLastError(RtlNtStatusToDosError(Status));
+            return FALSE;
+        }
+    }
+
+    InitializeSecurityDescriptor(&Descriptor, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorSacl(&Descriptor, TRUE, Sacl, FALSE);
+
+    /* Use the assigned token for the label ceiling, just as during NT 6 creation. */
+    Ret = ImpersonateLoggedOnUser(Token);
+    if (Ret)
+    {
+        Ret = SetKernelObjectSecurity(Object, LABEL_SECURITY_INFORMATION, &Descriptor);
+        Error = GetLastError();
+        if (!RevertToSelf())
+        {
+            Error = GetLastError();
+            Ret = FALSE;
+        }
+        /* Creation reports a missing relabel privilege, unlike a later label update. */
+        if (!Ret && Error == ERROR_INVALID_LABEL) Error = ERROR_PRIVILEGE_NOT_HELD;
+    }
+    else
+    {
+        Error = GetLastError();
+    }
+    if (Existing) LocalFree(Existing);
+    if (!Ret) SetLastError(Error);
+    return Ret;
+}
+
 /**
  * @brief
  * Internal function that serves as a helper for
@@ -644,6 +732,7 @@ CreateProcessAsUserCommon(
     _Inout_ LPPROCESS_INFORMATION lpProcessInformation)
 {
     NTSTATUS Status = STATUS_SUCCESS, StatusOnExit;
+    DWORD LabelError = ERROR_SUCCESS;
     BOOL Success;
     TOKEN_TYPE Type;
     ULONG ReturnLength;
@@ -853,6 +942,18 @@ CreateProcessAsUserCommon(
             ThreadSd = DefaultSd;
         }
 
+        if (!SetProcessTokenLabel(lpProcessInformation->hProcess, hTokenDup,
+                                   lpProcessAttributes ? lpProcessAttributes->lpSecurityDescriptor : NULL) ||
+            !SetProcessTokenLabel(lpProcessInformation->hThread, hTokenDup,
+                                   lpThreadAttributes ? lpThreadAttributes->lpSecurityDescriptor : NULL))
+        {
+            LabelError = GetLastError();
+            Status = STATUS_UNSUCCESSFUL;
+            Success = FALSE;
+            NtClose(hTokenDup);
+            goto Quit;
+        }
+
         /* Set new security info to the process and thread now */
         if (!InsertProcessSecurityCommon(lpProcessInformation->hProcess,
                                          lpProcessInformation->hThread,
@@ -911,11 +1012,17 @@ Quit:
     if (!NT_SUCCESS(Status))
     {
         TerminateProcess(lpProcessInformation->hProcess, Status);
-        SetLastError(RtlNtStatusToDosError(Status));
+        if (LabelError != ERROR_SUCCESS)
+        {
+            CloseHandle(lpProcessInformation->hThread);
+            CloseHandle(lpProcessInformation->hProcess);
+            ZeroMemory(lpProcessInformation, sizeof(*lpProcessInformation));
+        }
+        SetLastError(LabelError ? LabelError : RtlNtStatusToDosError(Status));
     }
 
-    /* Resume the main thread */
-    if (!(dwCreationFlags & CREATE_SUSPENDED))
+    /* Resume the main thread only after completing its security. */
+    if (NT_SUCCESS(Status) && !(dwCreationFlags & CREATE_SUSPENDED))
     {
         ResumeThread(lpProcessInformation->hThread);
     }

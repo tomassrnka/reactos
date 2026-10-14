@@ -422,8 +422,16 @@ SeCheckLabelChange(
 
 NTSTATUS
 NTAPI
-SeAssignTokenObjectLabel(
-    _In_ PVOID Object,
+SeAssignObjectLabel(
+    _In_ PTOKEN Token,
+    _In_ ACCESS_MASK Policy,
+    _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
+    _In_ PGENERIC_MAPPING GenericMapping);
+
+NTSTATUS
+NTAPI
+SeAssignProcessObjectLabel(
+    _In_ PTOKEN Token,
     _Inout_ PSECURITY_DESCRIPTOR *SecurityDescriptor,
     _In_ PGENERIC_MAPPING GenericMapping);
 

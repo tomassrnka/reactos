@@ -485,9 +485,14 @@ ObpChargeQuotaForObject(IN POBJECT_HEADER ObjectHeader,
 
 NTSTATUS
 NTAPI
-ObpValidateAccessMask(IN PACCESS_STATE AccessState)
+ObpValidateAccessMask(IN PACCESS_STATE AccessState,
+                      IN BOOLEAN AllowLabelOnly)
 {
     PISECURITY_DESCRIPTOR SecurityDescriptor;
+    PACL Sacl;
+    PACE_HEADER Ace;
+    ULONG Index;
+    BOOLEAN LabelsOnly;
 
     /* We're only interested if the object for this access state has an SD */
     SecurityDescriptor = AccessState->SecurityDescriptor;
@@ -497,8 +502,19 @@ ObpValidateAccessMask(IN PACCESS_STATE AccessState)
         if ((SecurityDescriptor->Control & SE_SACL_PRESENT) &&
             !(AccessState->PreviouslyGrantedAccess & ACCESS_SYSTEM_SECURITY))
         {
-            /* We're gonna need access */
-            AccessState->RemainingDesiredAccess |= ACCESS_SYSTEM_SECURITY;
+            /* A process/thread label alone is not a request to set auditing. */
+            Sacl = SepGetSaclFromDescriptor(SecurityDescriptor);
+            LabelsOnly = AllowLabelOnly && Sacl && Sacl->AceCount;
+            for (Index = 0; LabelsOnly && Index < Sacl->AceCount; ++Index)
+            {
+                if (!NT_SUCCESS(RtlGetAce(Sacl, Index, (PVOID *)&Ace)) ||
+                    Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                {
+                    LabelsOnly = FALSE;
+                }
+            }
+            if (!LabelsOnly)
+                AccessState->RemainingDesiredAccess |= ACCESS_SYSTEM_SECURITY;
         }
     }
 
@@ -2622,7 +2638,7 @@ ObOpenObjectByName(IN POBJECT_ATTRIBUTES ObjectAttributes,
     }
 
     /* Validate the access mask */
-    Status = ObpValidateAccessMask(PassedAccessState);
+    Status = ObpValidateAccessMask(PassedAccessState, FALSE);
     if (!NT_SUCCESS(Status))
     {
         /* Cleanup after lookup */
@@ -3070,7 +3086,8 @@ ObInsertObject(IN PVOID Object,
     AccessState->SecurityDescriptor = ObjectCreateInfo->SecurityDescriptor;
 
     /* Validate the access mask */
-    Status = ObpValidateAccessMask(AccessState);
+    Status = ObpValidateAccessMask(AccessState,
+                                   ObjectType == PsProcessType || ObjectType == PsThreadType);
     if (!NT_SUCCESS(Status))
     {
         /* Fail */
