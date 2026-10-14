@@ -27,6 +27,7 @@ list(APPEND SOURCE
     ExcludeClipRect.c
     ExtCreatePen.c
     ExtCreateRegion.c
+    FontResourceLeak.c
     FrameRgn.c
     GdiConvertBitmap.c
     GdiConvertBrush.c
