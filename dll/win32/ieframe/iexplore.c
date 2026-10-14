@@ -814,6 +814,19 @@ static const IDocHostContainerVtbl DocHostContainerVtbl = {
     DocHostContainer_set_url
 };
 
+#ifdef __REACTOS__
+/* Keeps iexplore running while a download of one of its windows is in progress.
+ * Other hosts (an embedded WebBrowser) have no use for it, and released_obj would end their message loop. */
+BOOL lock_ie_process(DocHost *doc_host)
+{
+    if(doc_host->container_vtbl != &DocHostContainerVtbl)
+        return FALSE;
+
+    InterlockedIncrement(&obj_cnt);
+    return TRUE;
+}
+#endif
+
 static HRESULT create_ie(InternetExplorer **ret_obj)
 {
     InternetExplorer *ret;
@@ -952,6 +965,8 @@ void released_obj(void)
     if(!InterlockedDecrement(&obj_cnt))
         PostQuitMessage(0);
 }
+
+
 
 static BOOL create_ie_window(BOOL nohome, const WCHAR *cmdline)
 {
@@ -1216,6 +1231,10 @@ DWORD WINAPI IEWinMain(const WCHAR *cmdline, int nShowWindow)
     /* run the message loop for this thread */
     while (GetMessageW(&msg, 0, 0, 0))
     {
+#ifdef __REACTOS__
+        if (download_translate_message(&msg))
+            continue;
+#endif
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

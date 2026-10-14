@@ -103,6 +103,11 @@ struct nsChannelBSC {
     BOOL is_js;
     BOOL is_doc_channel;
     BOOL response_processed;
+#ifdef __REACTOS__
+    BOOL is_attachment;
+    BOOL extern_handled;
+    WCHAR *sent_headers;
+#endif
 
     nsProtocolStream *nsstream;
 };
