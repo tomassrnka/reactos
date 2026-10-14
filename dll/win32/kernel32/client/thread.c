@@ -1492,4 +1492,415 @@ TlsSetValue(IN DWORD Index,
     return TRUE;
 }
 
+/*
+ * Windows 8 thread information. The kernel has no page priority and no power throttling for threads, so
+ * the memory priority a thread of this process asks for is remembered here, in a small table that is keyed
+ * by thread id and creation time (an id that is used again by another thread never matches an old entry).
+ * Nothing acts on it: both are hints about how pages and processor time should be spent.
+ */
+#define BASEP_MEMORY_PRIORITY_SLOTS     64
+#define BASEP_MEMORY_PRIORITY_DEFAULT   MEMORY_PRIORITY_NORMAL
+
+typedef struct _BASEP_MEMORY_PRIORITY
+{
+    HANDLE ThreadId;
+    LONGLONG CreateTime;
+    ULONG Priority;
+} BASEP_MEMORY_PRIORITY;
+
+static BASEP_MEMORY_PRIORITY BasepMemoryPriority[BASEP_MEMORY_PRIORITY_SLOTS];
+static ULONG BasepMemoryPriorityNext;
+
+/* The critical section for the data structures of kernel32: a thread that waits for it does not keep the owner off the processor */
+#define BasepLockMemoryPriority()   RtlEnterCriticalSection(&BaseDllDirectoryLock)
+#define BasepUnlockMemoryPriority() RtlLeaveCriticalSection(&BaseDllDirectoryLock)
+
+/*
+ * Handle checks of the thread information functions: the same errors as the kernel gives on Windows. The identity of
+ * the thread (its id and creation time) is only read when the handle may query the thread: the kernel here takes
+ * THREAD_QUERY_INFORMATION for that, Windows takes less, and a handle that Windows serves must be served.
+ */
+static
+NTSTATUS
+BasepCheckThreadHandle(
+    _In_ HANDLE ThreadHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _Out_ PTHREAD_BASIC_INFORMATION BasicInfo,
+    _Out_ PLONGLONG CreateTime,
+    _Out_ PBOOLEAN HaveIdentity)
+{
+    KERNEL_USER_TIMES Times;
+    NTSTATUS Status;
+
+    *HaveIdentity = FALSE;
+    Status = BasepCheckHandleType(ThreadHandle, L"Thread", DesiredAccess);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtQueryInformationThread(ThreadHandle, ThreadBasicInformation, BasicInfo, sizeof(*BasicInfo), NULL);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtQueryInformationThread(ThreadHandle, ThreadTimes, &Times, sizeof(Times), NULL);
+        if (NT_SUCCESS(Status))
+        {
+            *CreateTime = Times.CreateTime.QuadPart;
+            *HaveIdentity = TRUE;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static
+ULONG
+BasepGetMemoryPriority(
+    _In_ const CLIENT_ID *ClientId,
+    _In_ LONGLONG CreateTime)
+{
+    ULONG Priority = BASEP_MEMORY_PRIORITY_DEFAULT, i;
+
+    if (ClientId->UniqueProcess != NtCurrentTeb()->ClientId.UniqueProcess)
+        return Priority;
+
+    BasepLockMemoryPriority();
+    for (i = 0; i < BASEP_MEMORY_PRIORITY_SLOTS; i++)
+    {
+        if (BasepMemoryPriority[i].ThreadId == ClientId->UniqueThread &&
+            BasepMemoryPriority[i].CreateTime == CreateTime)
+        {
+            Priority = BasepMemoryPriority[i].Priority;
+            break;
+        }
+    }
+    BasepUnlockMemoryPriority();
+    return Priority;
+}
+
+static
+VOID
+BasepSetMemoryPriority(
+    _In_ const CLIENT_ID *ClientId,
+    _In_ LONGLONG CreateTime,
+    _In_ ULONG Priority)
+{
+    ULONG i, Slot = BASEP_MEMORY_PRIORITY_SLOTS;
+
+    if (ClientId->UniqueProcess != NtCurrentTeb()->ClientId.UniqueProcess)
+        return;
+
+    BasepLockMemoryPriority();
+    for (i = 0; i < BASEP_MEMORY_PRIORITY_SLOTS; i++)
+    {
+        if (BasepMemoryPriority[i].ThreadId == ClientId->UniqueThread)
+        {
+            /* The same id again: the same thread, or an old one that is gone */
+            Slot = i;
+            break;
+        }
+        if (Slot == BASEP_MEMORY_PRIORITY_SLOTS && BasepMemoryPriority[i].ThreadId == NULL)
+            Slot = i;
+    }
+    if (Slot == BASEP_MEMORY_PRIORITY_SLOTS)
+    {
+        /* Full: the oldest entry goes */
+        Slot = BasepMemoryPriorityNext++ % BASEP_MEMORY_PRIORITY_SLOTS;
+    }
+
+    BasepMemoryPriority[Slot].ThreadId = ClientId->UniqueThread;
+    BasepMemoryPriority[Slot].CreateTime = CreateTime;
+    BasepMemoryPriority[Slot].Priority = Priority;
+    BasepUnlockMemoryPriority();
+}
+
+/* The base priority of the process of a thread: the thread priorities are increments of it */
+static
+NTSTATUS
+BasepQueryProcessBasePriority(
+    _In_ const CLIENT_ID *ClientId,
+    _Out_ PLONG BasePriority)
+{
+    PROCESS_BASIC_INFORMATION BasicInfo;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    CLIENT_ID Process;
+    HANDLE Handle = NtCurrentProcess();
+    NTSTATUS Status;
+
+    if (ClientId->UniqueProcess != NtCurrentTeb()->ClientId.UniqueProcess)
+    {
+        InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+        Process.UniqueProcess = ClientId->UniqueProcess;
+        Process.UniqueThread = NULL;
+        Status = NtOpenProcess(&Handle, PROCESS_QUERY_INFORMATION, &ObjectAttributes, &Process);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    Status = NtQueryInformationProcess(Handle, ProcessBasicInformation, &BasicInfo, sizeof(BasicInfo), NULL);
+    if (Handle != NtCurrentProcess())
+        NtClose(Handle);
+    if (NT_SUCCESS(Status))
+        *BasePriority = BasicInfo.BasePriority;
+
+    return Status;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _Out_writes_bytes_(ThreadInformationSize) LPVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize)
+{
+    THREAD_BASIC_INFORMATION BasicInfo;
+    LONGLONG CreateTime = 0;
+    LONG ProcessBase, Priority;
+    ULONG Value = 0;
+    BOOLEAN HaveIdentity;
+    NTSTATUS Status;
+
+    switch (ThreadInformationClass)
+    {
+        case ThreadMemoryPriority:
+        case ThreadAbsoluteCpuPriority:
+        case ThreadDynamicCodePolicy:
+            break;
+
+        default:
+            /* Windows 10 knows no other class that can be read; this includes the power throttling state */
+            BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+            return FALSE;
+    }
+
+    /* The sizes and the pointer are checked before the handle, as the kernel does */
+    if (ThreadInformationSize != sizeof(ULONG))
+    {
+        BaseSetLastNTError(STATUS_INFO_LENGTH_MISMATCH);
+        return FALSE;
+    }
+
+    if (!ThreadInformation)
+    {
+        BaseSetLastNTError(STATUS_ACCESS_VIOLATION);
+        return FALSE;
+    }
+
+    Status = BasepCheckThreadHandle(hThread,
+                                    THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION,
+                                    &BasicInfo,
+                                    &CreateTime,
+                                    &HaveIdentity);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if (ThreadInformationClass == ThreadMemoryPriority)
+    {
+        Value = HaveIdentity ? BasepGetMemoryPriority(&BasicInfo.ClientId, CreateTime) : BASEP_MEMORY_PRIORITY_DEFAULT;
+    }
+    else if (ThreadInformationClass == ThreadAbsoluteCpuPriority)
+    {
+        /* The base priority comes from the thread, which this handle may not read */
+        if (!HaveIdentity)
+        {
+            BaseSetLastNTError(STATUS_ACCESS_DENIED);
+            return FALSE;
+        }
+
+        /* The priority that the thread has before the scheduler adds anything: the process base and the increment */
+        Status = BasepQueryProcessBasePriority(&BasicInfo.ClientId, &ProcessBase);
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+
+        if (BasicInfo.BasePriority >= (HIGH_PRIORITY + 1) / 2)
+            Priority = (ProcessBase >= LOW_REALTIME_PRIORITY) ? HIGH_PRIORITY : (LOW_REALTIME_PRIORITY - 1);
+        else if (BasicInfo.BasePriority <= -(HIGH_PRIORITY + 1) / 2)
+            Priority = (ProcessBase >= LOW_REALTIME_PRIORITY) ? LOW_REALTIME_PRIORITY : 1;
+        else
+            Priority = ProcessBase + BasicInfo.BasePriority;
+
+        if (ProcessBase >= LOW_REALTIME_PRIORITY)
+            Priority = min(max(Priority, LOW_REALTIME_PRIORITY), HIGH_PRIORITY);
+        else
+            Priority = min(max(Priority, 1), LOW_REALTIME_PRIORITY - 1);
+        Value = Priority;
+    }
+
+    _SEH2_TRY
+    {
+        *(PULONG)ThreadInformation = Value;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _In_reads_bytes_(ThreadInformationSize) LPVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize)
+{
+    THREAD_BASIC_INFORMATION BasicInfo;
+    LONGLONG CreateTime = 0;
+    THREAD_POWER_THROTTLING_STATE Throttling;
+    LONG ProcessBase, Increment;
+    ULONG Value = 0;
+    BOOLEAN HaveIdentity;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    switch (ThreadInformationClass)
+    {
+        case ThreadMemoryPriority:
+        case ThreadAbsoluteCpuPriority:
+        case ThreadDynamicCodePolicy:
+            if (ThreadInformationSize != sizeof(ULONG))
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+            break;
+
+        case ThreadPowerThrottling:
+            if (ThreadInformationSize < sizeof(THREAD_POWER_THROTTLING_STATE))
+                Status = STATUS_INVALID_PARAMETER;
+            break;
+
+        default:
+            Status = STATUS_INVALID_PARAMETER;
+            break;
+    }
+    if (NT_SUCCESS(Status) && !ThreadInformation)
+        Status = STATUS_ACCESS_VIOLATION;
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        if (ThreadInformationClass == ThreadPowerThrottling)
+            Throttling = *(PTHREAD_POWER_THROTTLING_STATE)ThreadInformation;
+        else
+            Value = *(PULONG)ThreadInformation;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    /* The value is checked first, then the handle */
+    switch (ThreadInformationClass)
+    {
+        case ThreadMemoryPriority:
+            /* Windows takes the values from 1 (very low) to 5 (normal) */
+            if (Value < MEMORY_PRIORITY_VERY_LOW || Value > MEMORY_PRIORITY_NORMAL)
+                Status = STATUS_INVALID_PARAMETER;
+            break;
+
+        case ThreadAbsoluteCpuPriority:
+            /* 1 to 15; the real-time priorities, 16 to 31, take a privilege that is not given here */
+            if (Value == 0 || Value > HIGH_PRIORITY)
+                Status = STATUS_INVALID_PARAMETER;
+            else if (Value >= LOW_REALTIME_PRIORITY)
+                Status = STATUS_PRIVILEGE_NOT_HELD;
+            break;
+
+        case ThreadDynamicCodePolicy:
+            /* 0 and 1 are the values of the policy; Windows 10 gives no process the right to change it */
+            Status = (Value > 1) ? STATUS_INVALID_PARAMETER : STATUS_ACCESS_DENIED;
+            break;
+
+        default:
+            /* The version is 0 or 1; only the execution speed bit exists, and a state needs its control bit */
+            if (Throttling.Version > THREAD_POWER_THROTTLING_CURRENT_VERSION ||
+                (Throttling.ControlMask & ~THREAD_POWER_THROTTLING_VALID_FLAGS) ||
+                (Throttling.StateMask & ~Throttling.ControlMask))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+            }
+            break;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    Status = BasepCheckThreadHandle(hThread, THREAD_SET_INFORMATION, &BasicInfo, &CreateTime, &HaveIdentity);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if (ThreadInformationClass == ThreadMemoryPriority)
+    {
+        /* A handle that may not query the thread cannot say which one it is: the hint is taken and not kept */
+        if (HaveIdentity)
+            BasepSetMemoryPriority(&BasicInfo.ClientId, CreateTime, Value);
+    }
+    else if (ThreadInformationClass == ThreadAbsoluteCpuPriority)
+    {
+        if (!HaveIdentity)
+        {
+            BaseSetLastNTError(STATUS_ACCESS_DENIED);
+            return FALSE;
+        }
+
+        /*
+         * The kernel sets the priority of a thread as an increment of the base priority of the process, 2 up or
+         * down, or to the highest or lowest priority of the class; the others cannot be set.
+         */
+        Status = BasepQueryProcessBasePriority(&BasicInfo.ClientId, &ProcessBase);
+        if (NT_SUCCESS(Status))
+        {
+            if ((LONG)Value >= ProcessBase + THREAD_BASE_PRIORITY_MIN && (LONG)Value <= ProcessBase + THREAD_BASE_PRIORITY_MAX)
+                Increment = (LONG)Value - ProcessBase;
+            else if (Value == LOW_REALTIME_PRIORITY - 1)
+                Increment = (HIGH_PRIORITY + 1) / 2;
+            else if (Value == 1)
+                Increment = -((HIGH_PRIORITY + 1) / 2);
+            else
+                Status = STATUS_NOT_SUPPORTED;
+        }
+        if (NT_SUCCESS(Status))
+            Status = NtSetInformationThread(hThread, ThreadBasePriority, &Increment, sizeof(Increment));
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
 /* EOF */

@@ -31,6 +31,41 @@ PRTL_COUNT_STRINGA Basep8BitStringToUnicodeSize = BasepAnsiStringToUnicodeSize;
 
 /* FUNCTIONS ******************************************************************/
 
+NTSTATUS
+WINAPI
+BasepCheckHandleType(
+    IN HANDLE Handle,
+    IN PCWSTR TypeName,
+    IN ACCESS_MASK DesiredAccess)
+{
+    union
+    {
+        OBJECT_TYPE_INFORMATION Information;
+        UCHAR Buffer[sizeof(OBJECT_TYPE_INFORMATION) + 128];
+    } Type;
+    OBJECT_BASIC_INFORMATION Basic;
+    UNICODE_STRING Expected;
+    NTSTATUS Status;
+
+    /* The kernel answers an invalid handle, and a handle of another type, with the errors that Windows gives */
+    Status = NtQueryObject(Handle, ObjectTypeInformation, &Type, sizeof(Type), NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlInitUnicodeString(&Expected, TypeName);
+    if (!RtlEqualUnicodeString(&Type.Information.TypeName, &Expected, TRUE))
+        return STATUS_OBJECT_TYPE_MISMATCH;
+
+    Status = NtQueryObject(Handle, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if ((Basic.GrantedAccess & DesiredAccess) == 0)
+        return STATUS_ACCESS_DENIED;
+
+    return STATUS_SUCCESS;
+}
+
 ULONG
 NTAPI
 BasepUnicodeStringToOemSize(IN PUNICODE_STRING String)

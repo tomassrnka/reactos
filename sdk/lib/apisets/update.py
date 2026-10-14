@@ -75,6 +75,12 @@ RETARGET_HOSTS = {
 }
 RETARGET_BY_FAMILY = {family: module for module, families in RETARGET_HOSTS.items() for family in families}
 
+# Contracts of Windows builds that the schema files do not cover: (name, host on Windows, Windows versions). The
+# minor version is part of the name that a program imports, and the loader looks the whole name up.
+EXTRA_APISETS = (
+    ('api-ms-win-core-processthreads-l1-1-3.dll', 'kernel32.dll', ('APISET_WIN10',)),
+)
+
 def contract_family(name):
     return re.sub(r'-\d+$', '', name.lower())
 
@@ -170,6 +176,11 @@ class CombinedSchemas:
                 apiset = self._apisets[lowername]
             apiset.add_version(schema.version)
 
+    def add_extra(self, name, host, versions):
+        apiset = self._apisets.setdefault(name.lower(), Apiset(name, host))
+        for version in versions:
+            apiset.add_version(version)
+
     def generate(self, output):
         for key in sorted(self._apisets):
             apiset = self._apisets[key]
@@ -184,6 +195,9 @@ def process_apisetschemas(input_dir: Path, output_file):
         # Skip Win11 for now
         if schema.version != 'APISET_WIN11':
             schemas.add(schema)
+
+    for name, host, versions in EXTRA_APISETS:
+        schemas.add_extra(name, host, versions)
 
     output_file.write(OUTPUT_HEADER.encode('utf-8'))
     schemas.generate(output_file)

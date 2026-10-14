@@ -10,6 +10,7 @@ extern void func_ActCtxWithXmlNamespaces(void);
 extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
 extern void func_ApplicationRestart(void);
+extern void func_AppModel(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateEventMutexEx(void);
 extern void func_CreateFile2(void);
@@ -50,6 +51,7 @@ extern void func_GetModuleFileName(void);
 extern void func_GetNumaProcessorNodeEx(void);
 extern void func_GetOverlappedResultEx(void);
 extern void func_GetQueuedCompletionStatusEx(void);
+extern void func_GetSystemTimePrecise(void);
 extern void func_GetVolumeInformation(void);
 extern void func_HandleList(void);
 extern void func_HeapWalk(void);
@@ -77,8 +79,10 @@ extern void func_Pipes(void);
 extern void func_PipeSqos(void);
 extern void func_PreferredUILanguages(void);
 extern void func_PowerRequest(void);
+extern void func_PrefetchVirtualMemory(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
+extern void func_ProcessMitigationPolicy(void);
 extern void func_QueryCycleTime(void);
 extern void func_QueryUnbiasedInterruptTime(void);
 extern void func_ProcessToken(void);
@@ -99,6 +103,7 @@ extern void func_Toolhelp32(void);
 extern void func_TerminateProcess(void);
 extern void func_ThreadContextNpx(void);
 extern void func_ThreadContextObjects(void);
+extern void func_ThreadInformation(void);
 extern void func_TunnelCache(void);
 extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
@@ -125,6 +130,7 @@ const struct test winetest_testlist[] =
     { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
     { "CancelIoEx",                  func_CancelIoEx },
     { "ApplicationRestart",          func_ApplicationRestart },
+    { "AppModel",                    func_AppModel },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },
     { "CreateFile2",                 func_CreateFile2 },
@@ -165,6 +171,7 @@ const struct test winetest_testlist[] =
     { "GetNumaProcessorNodeEx",      func_GetNumaProcessorNodeEx },
     { "GetOverlappedResultEx",       func_GetOverlappedResultEx },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
+    { "GetSystemTimePrecise",        func_GetSystemTimePrecise },
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "HandleList",                  func_HandleList },
     { "HeapWalk",                    func_HeapWalk },
@@ -192,7 +199,9 @@ const struct test winetest_testlist[] =
     { "PipeSqos",                    func_PipeSqos },
     { "PreferredUILanguages",        func_PreferredUILanguages },
     { "PowerRequest",                func_PowerRequest },
+    { "PrefetchVirtualMemory",       func_PrefetchVirtualMemory },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
+    { "ProcessMitigationPolicy",     func_ProcessMitigationPolicy },
     { "ProcessAffinity",             func_ProcessAffinity },
     { "QueryCycleTime",              func_QueryCycleTime },
     { "QueryUnbiasedInterruptTime",  func_QueryUnbiasedInterruptTime },
@@ -213,6 +222,7 @@ const struct test winetest_testlist[] =
     { "Toolhelp32",                  func_Toolhelp32 },
     { "TerminateProcess",            func_TerminateProcess },
     { "ThreadContextNpx",            func_ThreadContextNpx },
+    { "ThreadInformation",           func_ThreadInformation },
     { "ThreadContextObjects",        func_ThreadContextObjects },
     { "TunnelCache",                 func_TunnelCache },
     { "TzSetPrivilege",              func_TzSetPrivilege },
