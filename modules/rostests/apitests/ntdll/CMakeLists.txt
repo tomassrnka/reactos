@@ -134,6 +134,7 @@ list(APPEND SOURCE
     RtlGetLengthWithoutTrailingPathSeperators.c
     RtlGetLongestNtPathLength.c
     RtlGetNtProductType.c
+    RtlGrowableFunctionTable.c
     RtlGetProcessHeaps.c
     RtlGetProductInfo.c
     RtlGetUnloadEventTrace.c
