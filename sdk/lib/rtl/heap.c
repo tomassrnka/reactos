@@ -78,8 +78,20 @@ UCHAR FillPattern[HEAP_ENTRY_SIZE] =
     HEAP_TAIL_FILL,
     HEAP_TAIL_FILL,
     HEAP_TAIL_FILL,
+    HEAP_TAIL_FILL,
+#ifdef _WIN64
+    HEAP_TAIL_FILL,
+    HEAP_TAIL_FILL,
+    HEAP_TAIL_FILL,
+    HEAP_TAIL_FILL,
+    HEAP_TAIL_FILL,
+    HEAP_TAIL_FILL,
+    HEAP_TAIL_FILL,
     HEAP_TAIL_FILL
+#endif
 };
+/* Every byte of the pattern must be initialized */
+C_ASSERT(HEAP_ENTRY_SIZE == 2 * sizeof(PVOID));
 
 static
 BOOLEAN
