@@ -10,6 +10,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <hal.h>
+#include <reactos/rosclock.h>
 typedef unsigned int UINT;
 #include <x86x64/Cpuid.h>
 
@@ -94,6 +95,9 @@ HaliQueryProcessorBrandString(
     return STATUS_SUCCESS;
 }
 
+/* Set by the clock code when its interrupt counts lost periods */
+BOOLEAN HalpClockCountsLostInterrupts;
+
 NTSTATUS
 NTAPI
 HaliQuerySystemInformation(IN HAL_QUERY_INFORMATION_CLASS InformationClass,
@@ -101,6 +105,15 @@ HaliQuerySystemInformation(IN HAL_QUERY_INFORMATION_CLASS InformationClass,
                            IN OUT PVOID Buffer,
                            OUT PULONG ReturnedLength)
 {
+    if (InformationClass == HalReactOSClockInformation)
+    {
+        *ReturnedLength = sizeof(ULONG);
+        if (BufferSize < sizeof(ULONG))
+            return STATUS_INFO_LENGTH_MISMATCH;
+        *(PULONG)Buffer = HalpClockCountsLostInterrupts ? HAL_ROS_CLOCK_COUNTS_LOST_INTERRUPTS : 0;
+        return STATUS_SUCCESS;
+    }
+
 #define REPORT_THIS_CASE(X) case X: DPRINT1("Unhandled case: %s\n", #X); break
     switch (InformationClass)
     {
