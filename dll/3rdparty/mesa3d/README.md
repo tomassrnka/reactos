@@ -20,7 +20,7 @@ or newer.
 | `patches/` | Changes to Mesa that the build applies (two, see below) |
 | `SHA256SUMS` | Hashes of the tarball, the two DLLs and the licence file |
 | `mesa3d-licenses.txt` | The licence texts and copyright lines of every file that was compiled into the DLLs (made by `gen-licenses.py`); installed as `system32\mesa3d-licenses.txt` next to the DLL |
-| `gen-licenses.py` | Reads the compiled sources and headers of a build and writes `mesa3d-licenses.txt`; `build-mesa.sh` runs it |
+| `gen-licenses.py` | Reads the compiled sources and headers of a build and writes `mesa3d-licenses.txt`, with the copyright files of the packages `mingw-w64-common` and `gcc-mingw-w64-base` of the build host appended (the statically linked runtime); `build-mesa.sh` runs it and stops when those files are missing |
 
 The DLLs are committed instead of being built with the image because the build needs Python
 (meson), a second toolchain and a download of 68 MB, and a ReactOS build must not depend on any

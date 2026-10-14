@@ -7,7 +7,7 @@ Every source file of the two builds (compile_commands.json) and every header the
 that lies in the Mesa tree, in zlib or in the generated files is read. The first comment block of each file
 gives its copyright lines and its licence text; files are grouped by licence text, each text is printed once
 with all copyright lines found for it. A file with an SPDX tag and no text gets the text of that licence from
-Mesa's licenses/ directory. The toolchain runtime that is linked statically is added by hand at the end.
+Mesa's licenses/ directory. The copyright files of the toolchain runtime that is linked statically are added at the end.
 """
 import glob, hashlib, json, os, re, subprocess, sys
 
@@ -34,8 +34,16 @@ def header_block(path):
         return ''
     m = re.search(r'/\*.*?\*/', text, re.S)
     if m and m.start() < 400:
+        raw, end = m.group(0), m.end()
+        # a first comment that says nothing of licences (Bison: "A Bison parser, made by ...") is followed by the one that does
+        while not re.search(r'permission|redistribut|licen[sc]e|warrant', raw, re.I):
+            nxt = re.match(r'\s*(/\*.*?\*/)', text[end:], re.S)
+            if not nxt:
+                break
+            raw += '\n' + nxt.group(1)
+            end += nxt.end()
         lines = []
-        for l in m.group(0).splitlines():
+        for l in raw.splitlines():
             l = l.strip()
             l = re.sub(r'^/\*+', '', l)
             l = re.sub(r'\*+/$', '', l)
@@ -52,23 +60,53 @@ def header_block(path):
     return '\n'.join(lines)
 
 
-COPY = re.compile(r'^\s*(copyright\b|\(c\)|\xa9)', re.I)
+COPY = re.compile(r'^\s*(copyright\b|\(c\)|\xa9|SPDX-FileCopyrightText:)', re.I)
+COPY_NOT = re.compile(r'^\s*copyright\s+(?!\(c\)|\xa9|by\b)[a-z]', re.I | re.S)  # "copyright notice", "copyright holders": prose
+AUTH = re.compile(r'^\s*(Authors?\b|@author\b|File originally authored by\b)', re.I)
 SPDX = re.compile(r'SPDX-License-Identifier:\s*(.+)')
+PROSE = re.compile(r'permission|redistribut|warrant|liabil|licen[sc]e|notice|disclaimer|conditions', re.I)
+
+
+def attributions(lines):
+    """The attribution entries of a block (a copyright line with the line it wraps onto, an authors line with
+    its names) and the indexes of the lines they use. Nothing else is taken: the licence text stays whole."""
+    entries, used = [], set()
+    i = 0
+    while i < len(lines):
+        l = lines[i]
+        if COPY.match(l) and not COPY_NOT.match(l):
+            parts, used_here = [l.strip()], [i]
+            while (not re.search(r'[.;)]\s*$', parts[-1]) and i + 1 < len(lines) and lines[i + 1].strip()
+                   and not COPY.match(lines[i + 1]) and not AUTH.match(lines[i + 1])
+                   and re.match(r'\s*[A-Z]', lines[i + 1]) and len(lines[i + 1].strip()) < 80
+                   and not PROSE.search(lines[i + 1])):
+                i += 1
+                parts.append(lines[i].strip())
+                used_here.append(i)
+            entries.append(re.sub(r'\s+', ' ', ' '.join(parts)))
+            used.update(used_here)
+        elif AUTH.match(l):
+            parts, used_here = [l.strip()], [i]
+            while (len(parts) < 6 and i + 1 < len(lines) and lines[i + 1].strip() and lines[i + 1][:1] in ' \t'
+                   and not PROSE.search(lines[i + 1])):
+                i += 1
+                parts.append(lines[i].strip())
+                used_here.append(i)
+            entries.append(re.sub(r'\s+', ' ', ' '.join(parts)))
+            used.update(used_here)
+        i += 1
+    return entries, used
 
 
 def classify(path):
     block = header_block(path)
     spdx = SPDX.search(block)
-    copyrights, body = [], []
-    for l in block.splitlines():
-        if COPY.match(l):
-            copyrights.append(re.sub(r'\s+', ' ', l.strip()))
-        elif SPDX.search(l) or re.match(r'^\s*(Authors?|@author)\b', l, re.I):
-            continue
-        else:
-            body.append(l)
-    text = '\n'.join(body).strip()
-    words = re.sub(r'all rights reserved\.?', '', text, flags=re.I)
+    lines = block.splitlines()
+    copyrights, used = attributions(lines)
+    # the key leaves out the attribution and the SPDX tag; the text that is printed leaves out nothing
+    body = [l for n, l in enumerate(lines) if n not in used and not SPDX.search(l)]
+    text = block.strip()
+    words = re.sub(r'all rights reserved\.?', '', '\n'.join(body), flags=re.I)
     words = re.sub(r'[^a-z0-9]+', ' ', words.lower()).strip()
     licensed = bool(re.search(r'permission|redistribut|provided .as-is|license|licence', words))
     if licensed and len(words) > 150:
@@ -113,12 +151,24 @@ for n, (key, g) in enumerate(order, 1):
     if g['cr']:
         out.append('Copyright lines of these files:\n' + '\n'.join('  ' + c for c in sorted(g['cr'])) + '\n')
 
-out.append('=' * 78 + '\nStatically linked toolchain runtime\n' + '=' * 78 + '''
+def doc(path):
+    try:
+        return open(path, errors='replace').read().strip()
+    except OSError:
+        sys.exit('gen-licenses.py: %s is missing; the notices of the toolchain runtime come from the packages of the build host' % path)
 
-The DLL contains the GCC runtime libraries (libgcc, libstdc++), which are licensed under the GNU General
-Public License version 3 with the GCC Runtime Library Exception: the exception permits linking them into a
-program under other terms. It also contains the mingw-w64 runtime (version 11.0.1 of the Ubuntu 24.04
-package), whose files are under the Zope Public License 2.1, BSD-style licences or the public domain, each
-file naming its own terms; the text of those terms is in the mingw-w64 package and in the GCC sources.
-''')
+
+out.append('=' * 78 + '\nStatically linked toolchain runtime\n' + '=' * 78 + """
+
+The DLL contains the GCC runtime libraries (libgcc, libstdc++), licensed under the GNU General Public License
+version 3 with the GCC Runtime Library Exception, and the mingw-w64 runtime. Both are reproduced here as the
+packages of the build host give them (Ubuntu 24.04: mingw-w64-common 11.0.1, gcc-mingw-w64-base 13.2.0): the
+first block is /usr/share/doc/mingw-w64-common/copyright, which names the terms and holders of every file of the
+mingw-w64 runtime, the second is /usr/share/doc/gcc-mingw-w64-base/copyright, which holds the GCC licences with
+the Runtime Library Exception.
+""")
+out.append('-' * 78 + '\nmingw-w64-common: /usr/share/doc/mingw-w64-common/copyright\n' + '-' * 78 + '\n\n' +
+           doc('/usr/share/doc/mingw-w64-common/copyright') + '\n')
+out.append('-' * 78 + '\ngcc-mingw-w64-base: /usr/share/doc/gcc-mingw-w64-base/copyright\n' + '-' * 78 + '\n\n' +
+           doc('/usr/share/doc/gcc-mingw-w64-base/copyright') + '\n')
 sys.stdout.write('\n'.join(out))
