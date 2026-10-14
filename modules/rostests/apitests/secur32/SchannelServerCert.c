@@ -79,7 +79,13 @@ static const TEST_CASE TestCases[] =
     { "own output buffer: valid", BLOB(CertLeafValid), NoCert, TEST_HOST, 0, 0, CONTINUE, TRUE, FALSE },
     { "own output buffer: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, 0, 0, SEC_E_CERT_EXPIRED, TRUE, FALSE },
     { "revocation asked for, no revocation information", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT, 0, CRYPT_E_NO_REVOCATION_CHECK, FALSE, FALSE },
-    { "revocation asked for, no revocation information, check ignored", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, CONTINUE, FALSE, TRUE },
+    { "revocation asked for, no revocation information, check ignored", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, CONTINUE, FALSE, FALSE },
+    { "revocation: ignore-no-check flag alone", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, CONTINUE, FALSE, FALSE },
+    { "revocation asked for, offline ignored only", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, CRYPT_E_NO_REVOCATION_CHECK, FALSE, FALSE },
+    { "revocation asked for, both ignored", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_END_CERT | SCH_CRED_IGNORE_NO_REVOCATION_CHECK | SCH_CRED_IGNORE_REVOCATION_OFFLINE, 0, CONTINUE, FALSE, FALSE },
+    { "revocation of the chain asked for", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN, 0, CRYPT_E_NO_REVOCATION_CHECK, FALSE, FALSE },
+    { "revocation of the chain without the root asked for", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, 0, CRYPT_E_NO_REVOCATION_CHECK, FALSE, FALSE },
+    { "revocation of the chain asked for, check ignored", BLOB(CertLeafValid), NoCert, TEST_HOST, SCH_CRED_REVOCATION_CHECK_CHAIN | SCH_CRED_IGNORE_NO_REVOCATION_CHECK, 0, CONTINUE, FALSE, FALSE },
     { "explicit automatic validation: expired", BLOB(CertLeafExpired), NoCert, TEST_HOST, SCH_CRED_AUTO_CRED_VALIDATION, 0, SEC_E_CERT_EXPIRED, FALSE, FALSE },
 
     /* The caller validates: ISC_REQ_MANUAL_CRED_VALIDATION */
@@ -295,8 +301,7 @@ static void RunCases(void)
 
         Status = RunHandshake(Case, &OutSize, &RetAttr);
 
-        /* ReactOS differs in two rows: the ignore flag for a missing revocation check also needs the offline
-         * flag, and an expired certificate of an unknown issuer is reported as expired, not as untrusted */
+        /* ReactOS differs in one row: an expired certificate of an unknown issuer is reported as expired, not as untrusted */
         todo_ros_if(Case->TodoRos)
             ok(Status == Case->Expected, "%s: expected 0x%08lx, got 0x%08lx\n",
                Case->Name, (ULONG)Case->Expected, Status);

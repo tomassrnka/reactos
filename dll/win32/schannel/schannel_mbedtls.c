@@ -422,7 +422,10 @@ static SECURITY_STATUS schan_validate_server_chain(MBEDTLS_SESSION *s)
     else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_REVOCATION_STATUS_UNKNOWN) &&
              !(s->cred_flags & SCH_CRED_IGNORE_NO_REVOCATION_CHECK))
         status = CRYPT_E_NO_REVOCATION_CHECK;
+    /* crypt32 sets the offline bit together with the unknown one when there is no revocation information, which the
+     * unknown check above already judged */
     else if (chain_flags && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_OFFLINE_REVOCATION) &&
+             !(chain->TrustStatus.dwErrorStatus & CERT_TRUST_REVOCATION_STATUS_UNKNOWN) &&
              !(s->cred_flags & SCH_CRED_IGNORE_REVOCATION_OFFLINE))
         status = CRYPT_E_REVOCATION_OFFLINE;
     else if (policy_status.dwError == CERT_E_CN_NO_MATCH)
