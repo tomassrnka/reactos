@@ -725,6 +725,16 @@ static HRESULT process_response_headers(nsChannelBSC *This, const WCHAR *headers
     LIST_FOR_EACH_ENTRY(iter, &This->nschannel->response_headers, http_header_t, entry) {
         if(!strcmpiW(iter->header, content_typeW))
             parse_content_type(This, iter->data);
+#ifdef __REACTOS__
+        else if(!strcmpiW(iter->header, L"content-disposition")) {
+            const WCHAR *value = iter->data;
+
+            while(*value == ' ' || *value == '\t')
+                value++;
+            if(!strncmpiW(value, L"attachment", 10))
+                This->is_attachment = TRUE;
+        }
+#endif
     }
 
     return S_OK;
@@ -986,6 +996,11 @@ static HRESULT read_stream_data(nsChannelBSC *This, IStream *stream)
     if(!This->nschannel)
         return S_OK;
 
+#ifdef __REACTOS__
+    if(This->extern_handled)
+        return S_OK;
+#endif
+
     if(!This->nslistener) {
         BYTE buf[1024];
 
@@ -1208,6 +1223,10 @@ static void nsChannelBSC_destroy(BSCallback *bsc)
 {
     nsChannelBSC *This = nsChannelBSC_from_BSCallback(bsc);
 
+#ifdef __REACTOS__
+    heap_free(This->sent_headers);
+#endif
+
     if(This->nschannel)
         nsIHttpChannel_Release(&This->nschannel->nsIHttpChannel_iface);
     if(This->nslistener)
@@ -1379,6 +1398,14 @@ static HRESULT nsChannelBSC_stop_binding(BSCallback *bsc, HRESULT result)
 {
     nsChannelBSC *This = nsChannelBSC_from_BSCallback(bsc);
 
+#ifdef __REACTOS__
+    /* handed to the browser: Gecko never saw the request start, so it only gets the cancellation */
+    if(This->extern_handled) {
+        on_stop_nsrequest(This, E_ABORT);
+        return S_OK;
+    }
+#endif
+
     if(result != E_ABORT) {
         if(FAILED(result))
             handle_navigation_error(This, result);
@@ -1479,6 +1506,90 @@ static IUri *get_moniker_uri(IMoniker *mon)
     return ret;
 }
 
+#ifdef __REACTOS__
+typedef struct {
+    task_t header;
+    nsChannelBSC *bsc;
+} extern_abort_task_t;
+
+static void extern_abort_proc(task_t *_task)
+{
+    extern_abort_task_t *task = (extern_abort_task_t*)_task;
+
+    if(task->bsc->bsc.binding)
+        IBinding_Abort(task->bsc->bsc.binding);
+}
+
+static void extern_abort_task_destr(task_t *_task)
+{
+    extern_abort_task_t *task = (extern_abort_task_t*)_task;
+
+    IBindStatusCallback_Release(&task->bsc->bsc.IBindStatusCallback_iface);
+    heap_free(task);
+}
+
+/* The document reads no more of this binding (the browser downloads the content with a binding of its own), so it has
+   to end: it is aborted from a task, not inside the progress callback. When no task can be run it is aborted at once. */
+static void abort_extern_binding(nsChannelBSC *This)
+{
+    extern_abort_task_t *task;
+    IBinding *binding;
+
+    This->extern_handled = TRUE;
+    if(!This->bsc.binding)
+        return;
+
+    if(This->bsc.window) {
+        task = heap_alloc(sizeof(*task));
+        if(task) {
+            IBindStatusCallback_AddRef(&This->bsc.IBindStatusCallback_iface);
+            task->bsc = This;
+            /* push_task destroys the task when it fails */
+            if(SUCCEEDED(push_task(&task->header, extern_abort_proc, extern_abort_task_destr, This->bsc.window->task_magic)))
+                return;
+        }
+    }
+
+    binding = This->bsc.binding;
+    IBinding_AddRef(binding);
+    IBinding_Abort(binding);
+    IBinding_Release(binding);
+}
+
+/* the request of the document as the browser repeats it for the download: the headers the first request carried
+   and the POST body; FALSE when a copy cannot be made, so that a request is never changed silently */
+static BOOL get_handoff_request(nsChannelBSC *This, VARIANT *headers, VARIANT *post)
+{
+    const WCHAR *request_headers = This->sent_headers ? This->sent_headers : This->bsc.request_data.headers;
+
+    V_VT(headers) = VT_EMPTY;
+    V_VT(post) = VT_EMPTY;
+
+    if(request_headers && *request_headers) {
+        V_BSTR(headers) = SysAllocString(request_headers);
+        if(!V_BSTR(headers))
+            return FALSE;
+        V_VT(headers) = VT_BSTR;
+    }
+
+    if(This->bsc.request_data.post_data && This->bsc.request_data.post_data_len) {
+        SAFEARRAY *array = SafeArrayCreateVector(VT_UI1, 0, This->bsc.request_data.post_data_len);
+
+        if(!array) {
+            VariantClear(headers);
+            return FALSE;
+        }
+        memcpy(array->pvData, This->bsc.request_data.post_data, This->bsc.request_data.post_data_len);
+        V_VT(post) = VT_ARRAY|VT_UI1;
+        V_ARRAY(post) = array;
+    }
+    return TRUE;
+}
+
+/* the name of the bind context parameter that tells ieframe the call is a hand-off (same string there) */
+static const WCHAR download_handoffW[] = L"ReactOS Download Handoff";
+#endif
+
 static void handle_extern_mime_navigation(nsChannelBSC *This)
 {
     IWebBrowserPriv2IE9 *webbrowser_priv;
@@ -1488,6 +1599,9 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
     IUri *uri;
     VARIANT flags;
     HRESULT hres;
+#ifdef __REACTOS__
+    VARIANT headers_var, post_var;
+#endif
 
     if(!This->bsc.window || !This->bsc.window->base.outer_window || !This->bsc.window->base.outer_window->doc_obj)
         return;
@@ -1517,12 +1631,25 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
         return;
     }
 
+#ifdef __REACTOS__
+    if(!get_handoff_request(This, &headers_var, &post_var)) {
+        IBindCtx_Release(bind_ctx);
+        IUri_Release(uri);
+        return;
+    }
+    IBindCtx_RegisterObjectParam(bind_ctx, (LPOLESTR)download_handoffW, (IUnknown*)uri);
+#endif
+
     V_VT(&flags) = VT_I4;
     V_I4(&flags) = navHyperlink;
 
     hres = IUnknown_QueryInterface(doc_obj->webbrowser, &IID_IWebBrowserPriv2IE8, (void**)&webbrowser_priv);
     if(SUCCEEDED(hres)) {
+#ifdef __REACTOS__
+        hres = IWebBrowserPriv2IE9_NavigateWithBindCtx2(webbrowser_priv, uri, &flags, NULL, &post_var, &headers_var, bind_ctx, NULL, 0);
+#else
         hres = IWebBrowserPriv2IE9_NavigateWithBindCtx2(webbrowser_priv, uri, &flags, NULL, NULL, NULL, bind_ctx, NULL, 0);
+#endif
         IWebBrowserPriv2IE9_Release(webbrowser_priv);
     }else {
         IWebBrowserPriv *webbrowser_priv_old;
@@ -1540,6 +1667,11 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
         }
     }
 
+#ifdef __REACTOS__
+    VariantClear(&headers_var);
+    VariantClear(&post_var);
+    IBindCtx_Release(bind_ctx);
+#endif
     IUri_Release(uri);
 }
 
@@ -1549,6 +1681,20 @@ static HRESULT nsChannelBSC_on_progress(BSCallback *bsc, ULONG status_code, LPCW
 
     switch(status_code) {
     case BINDSTATUS_MIMETYPEAVAILABLE:
+#ifdef __REACTOS__
+        if(This->extern_handled)
+            return S_OK;
+
+        if(This->is_doc_channel && This->nschannel && (This->is_attachment || !is_supported_doc_mime(status_text))) {
+            TRACE("external content, MIME %s attachment %d\n", debugstr_w(status_text), This->is_attachment);
+
+            /* an error response keeps the browser's error page; it is not offered as a download */
+            if(This->nschannel->response_status < 400)
+                handle_extern_mime_navigation(This);
+            abort_extern_binding(This);
+            return S_OK;
+        }
+#else
         if(This->is_doc_channel && !is_supported_doc_mime(status_text)) {
             FIXME("External MIME: %s\n", debugstr_w(status_text));
 
@@ -1556,6 +1702,7 @@ static HRESULT nsChannelBSC_on_progress(BSCallback *bsc, ULONG status_code, LPCW
 
             This->nschannel = NULL;
         }
+#endif
 
         if(!This->nschannel)
             return S_OK;
@@ -1662,8 +1809,12 @@ static HRESULT nsChannelBSC_beginning_transaction(BSCallback *bsc, WCHAR **addit
             len += strlenW(iter->header) + 2 /* ": " */ + strlenW(iter->data) + 2 /* "\r\n" */;
     }
 
-    if(!len)
+    if(!len) {
+#ifdef __REACTOS__
+        This->headers_recorded = TRUE;
+#endif
         return S_OK;
+    }
 
     *additional_headers = ptr = CoTaskMemAlloc((len+1)*sizeof(WCHAR));
     if(!ptr)
@@ -1689,6 +1840,19 @@ static HRESULT nsChannelBSC_beginning_transaction(BSCallback *bsc, WCHAR **addit
     }
 
     *ptr = 0;
+
+#ifdef __REACTOS__
+    /* A redirect continues with a channel of its own, so what the first request carried is kept for the download. */
+    if(!This->headers_recorded) {
+        This->headers_recorded = TRUE;
+        This->sent_headers = heap_strdupW(*additional_headers);
+        if(!This->sent_headers) {
+            CoTaskMemFree(*additional_headers);
+            *additional_headers = NULL;
+            return E_OUTOFMEMORY;
+        }
+    }
+#endif
 
     return S_OK;
 }

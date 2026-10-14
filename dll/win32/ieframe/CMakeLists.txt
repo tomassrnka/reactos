@@ -5,6 +5,8 @@ list(APPEND SOURCE
     classinfo.c
     client.c
     dochost.c
+    download.c
+    download_name.c
     events.c
     frame.c
     ie.c
@@ -40,6 +42,7 @@ set_module_type(ieframe win32dll)
 add_idl_reg_scripts(ieframe registry ieframe_v1.idl)
 add_idl_reg_scripts(ieframe regtypelib ieframe_v1.idl)
 target_link_libraries(ieframe uuid wine wine_dll_register wine_dll_canunload oldnames)
+add_delay_importlibs(ieframe comdlg32)
 add_importlibs(ieframe urlmon shell32 comctl32 shlwapi oleaut32 ole32 user32 gdi32 advapi32 msvcrt kernel32 ntdll)
 add_pch(ieframe precomp.h SOURCE)
 add_cd_file(TARGET ieframe DESTINATION reactos/system32 FOR all)
