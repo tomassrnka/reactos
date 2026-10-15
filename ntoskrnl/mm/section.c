@@ -3637,7 +3637,11 @@ grab_image_section_object:
 
     if (Section->SizeOfSection.QuadPart == 0)
     {
-        Section->SizeOfSection.QuadPart = ImageSectionObject->ImageInformation.ImageFileSize;
+        /* Mapping overwrites ImageFileSize, so take the header's SizeOfImage when there is one */
+        if (ImageSectionObject->SizeOfImage != 0)
+            Section->SizeOfSection.QuadPart = PAGE_ROUND_UP_64((ULONGLONG)ImageSectionObject->SizeOfImage);
+        else
+            Section->SizeOfSection.QuadPart = ImageSectionObject->ImageInformation.ImageFileSize;
     }
     else if (NT_SUCCESS(Status) &&
              (ImageSectionObject->SizeOfImage != 0) &&
