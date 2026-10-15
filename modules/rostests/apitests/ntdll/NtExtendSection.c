@@ -376,7 +376,9 @@ static void Test_ExtendClosedFile(PCWSTR Path)
     PVOID Base = NULL;
     SIZE_T ViewSize = 0;
     WCHAR Root[4], FsName[16];
-    BOOL IsFat;
+    BOOL IsFat, Todo, Written;
+    LONGLONG Size;
+    int Byte;
 
     lstrcpynW(Root, Path, 4);
     IsFat = GetVolumeInformationW(Root, NULL, 0, NULL, NULL, NULL, FsName, ARRAYSIZE(FsName)) &&
@@ -399,29 +401,31 @@ static void Test_ExtendClosedFile(PCWSTR Path)
     }
 
     /* ReactOS fastfat refuses a new end of file on a cleaned-up, uncached file object (STATUS_FILE_CLOSED) */
-    todo_if(is_reactos() && IsFat)
+    Todo = is_reactos() && IsFat;
+    Status = Extend(hSection, 0x2800, &Returned);
+    todo_if(Todo) ok(Status == STATUS_SUCCESS, "Extend after closing the file: 0x%08lx\n", Status);
+    Size = QuerySize(hSection);
+    todo_if(Todo) ok(Size == 0x2800, "Size after extension 0x%I64x\n", Size);
+    Status = NtMapViewOfSection(hSection, NtCurrentProcess(), &Base, 0, 0, NULL, &ViewSize,
+                                ViewShare, 0, PAGE_READWRITE);
+    ok(Status == STATUS_SUCCESS, "NtMapViewOfSection: 0x%08lx\n", Status);
+    if (NT_SUCCESS(Status))
     {
-        Status = Extend(hSection, 0x2800, &Returned);
-        ok(Status == STATUS_SUCCESS, "Extend after closing the file: 0x%08lx\n", Status);
-        ok(QuerySize(hSection) == 0x2800, "Size after extension 0x%I64x\n", QuerySize(hSection));
-        Status = NtMapViewOfSection(hSection, NtCurrentProcess(), &Base, 0, 0, NULL, &ViewSize,
-                                    ViewShare, 0, PAGE_READWRITE);
-        ok(Status == STATUS_SUCCESS, "NtMapViewOfSection: 0x%08lx\n", Status);
-        if (NT_SUCCESS(Status))
-        {
-            ok(WriteByte((PBYTE)Base + 0x27FF, 0xA7), "Write to the extended range faulted\n");
-            NtUnmapViewOfSection(NtCurrentProcess(), Base);
-        }
+        Written = WriteByte((PBYTE)Base + 0x27FF, 0xA7);
+        todo_if(Todo) ok(Written, "Write to the extended range faulted\n");
+        NtUnmapViewOfSection(NtCurrentProcess(), Base);
+    }
 
-        /* The file grew while the section was still open */
-        hFile = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-        ok(hFile != INVALID_HANDLE_VALUE, "Cannot reopen %ls: %lu\n", Path, GetLastError());
-        if (hFile != INVALID_HANDLE_VALUE)
-        {
-            ok(GetSize(hFile) == 0x2800, "File size after extension 0x%I64x\n", GetSize(hFile));
-            ok(ReadFileByte(hFile, 0x27FF) == 0xA7, "File byte at 0x27FF: %d\n", ReadFileByte(hFile, 0x27FF));
-            CloseHandle(hFile);
-        }
+    /* The file grew while the section was still open */
+    hFile = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(hFile != INVALID_HANDLE_VALUE, "Cannot reopen %ls: %lu\n", Path, GetLastError());
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        Size = GetSize(hFile);
+        Byte = ReadFileByte(hFile, 0x27FF);
+        todo_if(Todo) ok(Size == 0x2800, "File size after extension 0x%I64x\n", Size);
+        todo_if(Todo) ok(Byte == 0xA7, "File byte at 0x27FF: %d\n", Byte);
+        CloseHandle(hFile);
     }
     NtClose(hSection);
     DeleteFileW(Path);
