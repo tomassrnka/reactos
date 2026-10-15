@@ -350,6 +350,102 @@ TestReceiveBuffer(void)
     closesocket(Server);
 }
 
+typedef struct _RESETTER
+{
+    SOCKET Socket;
+    DWORD Bytes;
+    DWORD Read;
+} RESETTER;
+
+/* Reads Bytes bytes and resets the connection at once; the thread runs at the highest priority */
+static
+DWORD
+WINAPI
+ResetThread(LPVOID Parameter)
+{
+    RESETTER *Resetter = Parameter;
+    struct linger Linger = { 1, 0 };
+    UCHAR Data[8192];
+    int Got;
+
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    while (Resetter->Read < Resetter->Bytes)
+    {
+        Got = recv(Resetter->Socket, (char *)Data, min(sizeof(Data), Resetter->Bytes - Resetter->Read), 0);
+        if (Got <= 0)
+            break;
+        Resetter->Read += Got;
+    }
+    setsockopt(Resetter->Socket, SOL_SOCKET, SO_LINGER, (char *)&Linger, sizeof(Linger));
+    closesocket(Resetter->Socket);
+    return 0;
+}
+
+/*
+ * One overlapped send of 16 MiB. The peer reads 100000 bytes and then resets the connection. A
+ * send that fails has to report at least the bytes of it that the peer received, so that a caller
+ * can carry on after them instead of sending them again. Windows accepts such a send whole at
+ * once, and reports 0 bytes for one that is still waiting when the reset comes.
+ */
+static
+void
+TestFailedSend(void)
+{
+    enum { LENGTH = 16 * 1024 * 1024, READ = 100000 };
+    SOCKET Client, Server;
+    WSAOVERLAPPED Overlapped;
+    WSABUF Buf;
+    RESETTER Resetter;
+    HANDLE Thread;
+    PUCHAR Buffer;
+    DWORD i, Sent = 0, Flags = 0;
+    BOOL Result;
+    int Error;
+
+    if (!OpenPair(&Client, &Server))
+    {
+        ok(0, "connection setup failed: %d\n", WSAGetLastError());
+        return;
+    }
+    Buffer = HeapAlloc(GetProcessHeap(), 0, LENGTH);
+    for (i = 0; i < LENGTH; i++)
+        Buffer[i] = (UCHAR)(i * 7 + (i >> 8));
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Resetter.Socket = Server;
+    Resetter.Bytes = READ;
+    Resetter.Read = 0;
+    Thread = CreateThread(NULL, 0, ResetThread, &Resetter, 0, NULL);
+
+    Buf.buf = (char *)Buffer;
+    Buf.len = LENGTH;
+    if (WSASend(Client, &Buf, 1, &Sent, 0, &Overlapped, NULL) && WSAGetLastError() != WSA_IO_PENDING)
+        ok(0, "WSASend failed: %d\n", WSAGetLastError());
+
+    ok(WaitForSingleObject(Thread, 30000) == WAIT_OBJECT_0, "the peer did not finish\n");
+    ok(Resetter.Read == READ, "the peer read %lu bytes\n", Resetter.Read);
+    ok(WaitForSingleObject(Overlapped.hEvent, 30000) == WAIT_OBJECT_0, "the send did not complete\n");
+    Sent = 0xdeadbeef;
+    Result = WSAGetOverlappedResult(Client, &Overlapped, &Sent, FALSE, &Flags);
+    Error = Result ? 0 : WSAGetLastError();
+    trace("the send %s (error %d) and reported %lu of %d bytes\n", Result ? "succeeded" : "failed", Error, Sent, LENGTH);
+    if (!Result)
+    {
+        ok(Sent >= Resetter.Read, "the send failed with %d after the peer received %lu of its bytes, but reported %lu\n",
+           Error, Resetter.Read, Sent);
+        ok(Sent <= LENGTH, "the send reported %lu bytes of %d\n", Sent, LENGTH);
+    }
+    else
+    {
+        ok(Sent == LENGTH, "the send reported %lu bytes of %d\n", Sent, LENGTH);
+    }
+
+    CloseHandle(Thread);
+    CloseHandle(Overlapped.hEvent);
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    closesocket(Client);
+}
+
 static
 void
 Start(WSADATA *WsaData)
@@ -372,5 +468,14 @@ START_TEST(rcvbuf)
 
     Start(&WsaData);
     TestReceiveBuffer();
+    WSACleanup();
+}
+
+START_TEST(failedsend)
+{
+    WSADATA WsaData;
+
+    Start(&WsaData);
+    TestFailedSend();
     WSACleanup();
 }
