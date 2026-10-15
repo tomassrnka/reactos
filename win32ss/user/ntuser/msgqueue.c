@@ -513,6 +513,7 @@ MsqWakeQueue(PTHREADINFO pti, DWORD MessageBits, BOOL KeyEvent)
    if (MessageBits & QS_SENDMESSAGE) pti->nCntsQBits[QSRosSendMessage]++;
    if (MessageBits & QS_HOTKEY)      pti->nCntsQBits[QSRosHotKey]++;
    if (MessageBits & QS_EVENT)       pti->nCntsQBits[QSRosEvent]++;
+   if (MessageBits & QS_RAWINPUT)    pti->nCntsQBits[QSRosRawInput]++;
 
    if (KeyEvent)
       KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
@@ -576,6 +577,10 @@ ClearMsgBitsMask(PTHREADINFO pti, UINT MessageBits)
    if (MessageBits & QS_EVENT)
    {
       if (DropQBitCount(&pti->nCntsQBits[QSRosEvent])) ClrMask |= QS_EVENT;
+   }
+   if (MessageBits & QS_RAWINPUT)
+   {
+      if (pti->nCntsQBits[QSRosRawInput] == 0 || --pti->nCntsQBits[QSRosRawInput] == 0) ClrMask |= QS_RAWINPUT;
    }
 
    /* A posted message sets QS_POSTMESSAGE and QS_ALLPOSTMESSAGE together; the last one out clears both */
@@ -783,10 +788,17 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
            gpqCursor = MessageQueue;
 
            /* Mouse move is a special case */
-           MessageQueue->QF_flags |= QF_MOUSEMOVED;
-           gdwMouseMoveExtraInfo = dwExtraInfo;
-           gdwMouseMoveTimeStamp = Msg->time;
-           MsqWakeQueue(pti, QS_MOUSEMOVE, TRUE);
+           if (!UserRawInputNoLegacy(pwnd->head.pti->ppi, RIM_TYPEMOUSE))
+           {
+              MessageQueue->QF_flags |= QF_MOUSEMOVED;
+              gdwMouseMoveExtraInfo = dwExtraInfo;
+              gdwMouseMoveTimeStamp = Msg->time;
+              MsqWakeQueue(pti, QS_MOUSEMOVE, TRUE);
+           }
+       }
+       else if (UserRawInputNoLegacy(pwnd->head.pti->ppi, RIM_TYPEMOUSE))
+       {
+           /* The process gets raw input instead of mouse messages */
        }
        else
        {
@@ -2036,6 +2048,85 @@ static inline BOOL is_mouse_message( UINT message )
              ( message >= WM_LBUTTONDOWN  && message <= WM_RBUTTONDBLCLK ) );
 }
 
+static VOID
+MsqBeginHardwareWalk(PTHREADINFO pti, PUSER_MESSAGE_QUEUE MessageQueue, PMSQ_HW_WALK Walk)
+{
+   /* The queue outlives the walk even if the thread attaches away and the queue is destroyed */
+   IntReferenceMessageQueue(MessageQueue);
+   Walk->MessageQueue = MessageQueue;
+   Walk->pNext = MessageQueue->HardwareMessagesListHead.Flink;
+   Walk->pCurrent = NULL;
+   InsertHeadList(&MessageQueue->HwWalkListHead, &Walk->QueueLink);
+   Walk->pPrevOfThread = pti->pHwWalks;
+   pti->pHwWalks = Walk;
+}
+
+static VOID
+MsqEndHardwareWalk(PTHREADINFO pti, PMSQ_HW_WALK Walk)
+{
+   PUSER_MESSAGE_QUEUE MessageQueue = Walk->MessageQueue;
+
+   ASSERT(pti->pHwWalks == Walk);
+   pti->pHwWalks = Walk->pPrevOfThread;
+   RemoveEntryList(&Walk->QueueLink);
+   IntDereferenceMessageQueue(MessageQueue);
+}
+
+/* A thread that ends inside a callout of a peek leaves its walks behind on its stack
+   (thread cleanup resets cEnterCount and the stack swap state itself) */
+VOID FASTCALL
+MsqRundownHardwareWalks(PTHREADINFO pti)
+{
+   PMSQ_HW_WALK Walk;
+
+   while ((Walk = pti->pHwWalks) != NULL)
+   {
+      PUSER_MESSAGE_QUEUE MessageQueue = Walk->MessageQueue;
+
+      pti->pHwWalks = Walk->pPrevOfThread;
+      if (MessageQueue->ptiSysLock == pti)
+         MessageQueue->ptiSysLock = NULL;
+      RemoveEntryList(&Walk->QueueLink);
+      IntDereferenceMessageQueue(MessageQueue);
+   }
+}
+
+/* Is the message held by a walk (any thread, any nesting level) while it calls out? */
+BOOL FASTCALL
+MsqHardwareMessageInPlay(PUSER_MESSAGE_QUEUE MessageQueue, PUSER_MESSAGE Message)
+{
+   PLIST_ENTRY Entry;
+
+   for (Entry = MessageQueue->HwWalkListHead.Flink;
+        Entry != &MessageQueue->HwWalkListHead;
+        Entry = Entry->Flink)
+   {
+      if (CONTAINING_RECORD(Entry, MSQ_HW_WALK, QueueLink)->pCurrent == Message)
+         return TRUE;
+   }
+   return FALSE;
+}
+
+/* The only way a node leaves a hardware message list: the walks step over it first */
+VOID FASTCALL
+MsqDestroyHardwareMessage(PUSER_MESSAGE_QUEUE MessageQueue, PUSER_MESSAGE Message)
+{
+   PLIST_ENTRY Entry;
+
+   for (Entry = MessageQueue->HwWalkListHead.Flink;
+        Entry != &MessageQueue->HwWalkListHead;
+        Entry = Entry->Flink)
+   {
+      PMSQ_HW_WALK Walk = CONTAINING_RECORD(Entry, MSQ_HW_WALK, QueueLink);
+
+      if (Walk->pNext == &Message->ListEntry)
+         Walk->pNext = Message->ListEntry.Flink;
+      if (Walk->pCurrent == Message)
+         Walk->pCurrent = NULL;
+   }
+   MsqDestroyMessage(Message);
+}
+
 BOOL APIENTRY
 co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
                          IN BOOL Remove,
@@ -2047,20 +2138,18 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
 {
    BOOL AcceptMessage, NotForUs;
    PUSER_MESSAGE CurrentMessage;
-   PLIST_ENTRY ListHead;
    MSG msg;
-   ULONG_PTR idSave;
    DWORD QS_Flags;
    LONG_PTR ExtraInfo;
    MSG clk_msg;
    BOOL Ret = FALSE;
+   PTHREADINFO ptiOwner;
+   MSQ_HW_WALK Walk;
    PUSER_MESSAGE_QUEUE MessageQueue = pti->MessageQueue;
 
    if (!filter_contains_hw_range( MsgFilterLow, MsgFilterHigh )) return FALSE;
 
-   ListHead = MessageQueue->HardwareMessagesListHead.Flink;
-
-   if (IsListEmpty(ListHead)) return FALSE;
+   if (IsListEmpty(&MessageQueue->HardwareMessagesListHead)) return FALSE;
 
    if (!MessageQueue->ptiSysLock)
    {
@@ -2074,12 +2163,15 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
       return FALSE;
    }
 
-   while (ListHead != &MessageQueue->HardwareMessagesListHead)
-   {
-      CurrentMessage = CONTAINING_RECORD(ListHead, USER_MESSAGE, ListEntry);
-      ListHead = ListHead->Flink;
+   MsqBeginHardwareWalk(pti, MessageQueue, &Walk);
 
-      if (MessageQueue->idSysPeek == (ULONG_PTR)CurrentMessage)
+   while (Walk.pNext != &MessageQueue->HardwareMessagesListHead)
+   {
+      CurrentMessage = CONTAINING_RECORD(Walk.pNext, USER_MESSAGE, ListEntry);
+      Walk.pNext = Walk.pNext->Flink;
+
+      /* An outer peek (or another thread's) is processing it */
+      if (MsqHardwareMessageInPlay(MessageQueue, CurrentMessage))
       {
          TRACE("Skip this message due to it is in play!\n");
          continue;
@@ -2096,8 +2188,7 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
             ( is_mouse_message(CurrentMessage->Msg.message) ) ) && // Null window for anything mouse.
             ( CurrentMessage->QS_Flags & QSflags ) )
       {
-         idSave = MessageQueue->idSysPeek;
-         MessageQueue->idSysPeek = (ULONG_PTR)CurrentMessage;
+         Walk.pCurrent = CurrentMessage;
 
          msg = CurrentMessage->Msg;
          ExtraInfo = CurrentMessage->ExtraInfo;
@@ -2107,7 +2198,26 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
          NotForUs = FALSE;
 
          UpdateKeyStateFromMsg(MessageQueue, &msg);
+         /* Hooks and sent messages run here: nested peeks, retirements, attaching and the
+            thread's end can all remove nodes, this one included */
          AcceptMessage = co_IntProcessHardwareMessage(&msg, &Remove, &NotForUs, ExtraInfo, MsgFilterLow, MsgFilterHigh);
+
+         CurrentMessage = Walk.pCurrent;
+         Walk.pCurrent = NULL;
+
+         if (pti->MessageQueue != MessageQueue)
+         {
+            /* The thread attached to or detached from another queue meanwhile: what is
+               left in this one is no longer its input */
+            Ret = FALSE;
+            break;
+         }
+
+         if (!CurrentMessage)
+         {
+            /* Taken by a nested peek or dropped: whoever removed it did its accounting */
+            continue;
+         }
 
          if (!NotForUs && (MsgFilterLow != 0 || MsgFilterHigh != 0))
          {
@@ -2115,21 +2225,20 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
              if (msg.message < MsgFilterLow || msg.message > MsgFilterHigh)
              {
                  MessageQueue->msgDblClk = clk_msg;
-                 MessageQueue->idSysPeek = idSave;
                  continue;
              }
          }
 
          if (Remove)
          {
-             if (CurrentMessage->pti != NULL && (MessageQueue->idSysPeek == (ULONG_PTR)CurrentMessage))
-             {
-                MsqDestroyMessage(CurrentMessage);
-             }
-             ClearMsgBitsMask(pti, QS_Flags);
+             /* The raw input wake bit was counted for the thread the message was posted to,
+                which differs from the reader when threads share an attached queue */
+             ptiOwner = CurrentMessage->pti ? CurrentMessage->pti : pti;
+             MsqDestroyHardwareMessage(MessageQueue, CurrentMessage);
+             ClearMsgBitsMask(pti, QS_Flags & ~QS_RAWINPUT);
+             if (QS_Flags & QS_RAWINPUT)
+                ClearMsgBitsMask(ptiOwner, QS_RAWINPUT);
          }
-
-         MessageQueue->idSysPeek = idSave;
 
          if (NotForUs)
          {
@@ -2154,8 +2263,12 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
       }
    }
 
-   MessageQueue->ptiSysLock = NULL;
+   if (MessageQueue->ptiSysLock == pti)
+      MessageQueue->ptiSysLock = NULL;
    pti->pcti->CTI_flags &= ~CTI_THREADSYSLOCK;
+
+   MsqEndHardwareWalk(pti, &Walk);
+
    return Ret;
 }
 
@@ -2342,6 +2455,7 @@ BOOLEAN FASTCALL
 MsqInitializeMessageQueue(PTHREADINFO pti, PUSER_MESSAGE_QUEUE MessageQueue)
 {
    InitializeListHead(&MessageQueue->HardwareMessagesListHead); // Keep here!
+   InitializeListHead(&MessageQueue->HwWalkListHead);
    InitializeListHead(&MessageQueue->RawInputListHead);
    MessageQueue->cRawInput = 0;
    MessageQueue->spwndFocus = NULL;
@@ -2472,6 +2586,46 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
    }
 }
 
+/*
+   Retire one WM_INPUT message of a queue: free its packet, give its wake bit back to the
+   thread it was posted to, and drop the message (walks in progress step over it).
+   Called under the USER lock.
+ */
+VOID FASTCALL
+MsqRetireRawInputMessage(PUSER_MESSAGE_QUEUE MessageQueue, PUSER_MESSAGE Message)
+{
+   ClearMsgBitsMask(Message->pti, QS_RAWINPUT);
+   UserFreeRawInput(MessageQueue, (HRAWINPUT)Message->Msg.lParam);
+   MsqDestroyHardwareMessage(MessageQueue, Message);
+}
+
+/* Drop the WM_INPUT messages posted to a thread from the queue it leaves */
+VOID FASTCALL
+MsqPurgeRawInputOfThread(PTHREADINFO pti)
+{
+   PUSER_MESSAGE_QUEUE MessageQueue = pti->MessageQueue;
+   PLIST_ENTRY CurrentEntry = MessageQueue->HardwareMessagesListHead.Flink;
+   PUSER_MESSAGE CurrentMessage;
+
+   if (pti->hPrevRawInput)
+   {
+      UserFreeRawInput(MessageQueue, pti->hPrevRawInput);
+      pti->hPrevRawInput = NULL;
+   }
+
+   while (CurrentEntry != &MessageQueue->HardwareMessagesListHead)
+   {
+      CurrentMessage = CONTAINING_RECORD(CurrentEntry, USER_MESSAGE, ListEntry);
+      CurrentEntry = CurrentEntry->Flink;
+
+      if (CurrentMessage->pti == pti && CurrentMessage->Msg.message == WM_INPUT &&
+          (CurrentMessage->QS_Flags & QS_RAWINPUT))
+      {
+         MsqRetireRawInputMessage(MessageQueue, CurrentMessage);
+      }
+   }
+}
+
 VOID FASTCALL
 MsqCleanupMessageQueue(PTHREADINFO pti)
 {
@@ -2491,6 +2645,10 @@ MsqCleanupMessageQueue(PTHREADINFO pti)
    if (MessageQueue->cThreads)
    {
       if (MessageQueue->ptiSysLock == pti) MessageQueue->ptiSysLock = NULL;
+
+      /* Raw input messages keep a pointer to the thread they were posted to
+         (wake bit accounting), so none may outlive that thread */
+      MsqPurgeRawInputOfThread(pti);
    }
 
    if (MessageQueue->cThreads == 0) //// Fix a crash related to CORE-10471 testing.
@@ -2501,7 +2659,7 @@ MsqCleanupMessageQueue(PTHREADINFO pti)
          CurrentEntry = MessageQueue->HardwareMessagesListHead.Flink;
          CurrentMessage = CONTAINING_RECORD(CurrentEntry, USER_MESSAGE, ListEntry);
          ERR("MQ Cleanup Post Messages %p\n",CurrentMessage);
-         MsqDestroyMessage(CurrentMessage);
+         MsqDestroyHardwareMessage(MessageQueue, CurrentMessage);
       }
 
       UserCleanupRawInput(MessageQueue);
