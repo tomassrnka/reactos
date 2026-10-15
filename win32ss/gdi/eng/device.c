@@ -569,8 +569,8 @@ EngpUpdateMonitorDevices(
     _In_ PGRAPHICS_DEVICE pGraphicsDevice)
 {
     PDEVICE_RELATIONS pDeviceRelations;
-    PVIDEO_MONITOR_DEVICE pMonitorDevices;
-    ULONG i, bytesWritten, monitorCount;
+    PVIDEO_MONITOR_DEVICE pMonitorDevices, pNewMonDev, pOldMonDev;
+    ULONG i, bytesWritten, monitorCount, oldCount;
     NTSTATUS Status;
     HANDLE hkRegistry;
 
@@ -622,39 +622,69 @@ EngpUpdateMonitorDevices(
     for (monitorCount = 0; pMonitorDevices[monitorCount].pdo; ++monitorCount)
         ;
 
-    if (pGraphicsDevice->pvMonDev)
-    {
-        /* Erase everything */
-        for (i = 0; i < pGraphicsDevice->dwMonCnt; i++)
-            ObDereferenceObject(pGraphicsDevice->pvMonDev[i].pdo);
-        ExFreePoolWithTag(pGraphicsDevice->pvMonDev, GDITAG_GDEVICE);
-        pGraphicsDevice->pvMonDev = NULL;
-        pGraphicsDevice->dwMonCnt = 0;
-    }
-
+    /* Build the new list before publishing it; videoprt referenced each PDO for us */
+    pNewMonDev = NULL;
     if (monitorCount > 0)
     {
-        pGraphicsDevice->pvMonDev = ExAllocatePoolZero(PagedPool,
-                                                       monitorCount * sizeof(VIDEO_MONITOR_DEVICE),
-                                                       GDITAG_GDEVICE);
-        if (!pGraphicsDevice->pvMonDev)
+        pNewMonDev = ExAllocatePoolZero(PagedPool,
+                                        monitorCount * sizeof(VIDEO_MONITOR_DEVICE),
+                                        GDITAG_GDEVICE);
+        if (!pNewMonDev)
         {
-            for (i = 0; pMonitorDevices[i].pdo; ++i)
+            for (i = 0; i < monitorCount; ++i)
                 ObDereferenceObject(pMonitorDevices[i].pdo);
             ExFreePool(pMonitorDevices);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        /* Copy data */
         for (i = 0; i < monitorCount; i++)
         {
             TRACE("%S\\Monitor%u: PDO %p HwID %u\n", pGraphicsDevice->szWinDeviceName, i, pMonitorDevices[i].pdo, pMonitorDevices[i].HwID);
-            pGraphicsDevice->pvMonDev[pGraphicsDevice->dwMonCnt++] = pMonitorDevices[i];
+            pNewMonDev[i] = pMonitorDevices[i];
         }
     }
-
     ExFreePool(pMonitorDevices);
+
+    /* Concurrent callers (EnumDisplayDevices runs under the shared USER lock) swap the list one at a time */
+    EngAcquireSemaphore(ghsemGraphicsDeviceList);
+    pOldMonDev = pGraphicsDevice->pvMonDev;
+    oldCount = pGraphicsDevice->dwMonCnt;
+    pGraphicsDevice->pvMonDev = pNewMonDev;
+    pGraphicsDevice->dwMonCnt = monitorCount;
+    EngReleaseSemaphore(ghsemGraphicsDeviceList);
+
+    if (pOldMonDev)
+    {
+        for (i = 0; i < oldCount; i++)
+            ObDereferenceObject(pOldMonDev[i].pdo);
+        ExFreePoolWithTag(pOldMonDev, GDITAG_GDEVICE);
+    }
+
     return STATUS_SUCCESS;
+}
+
+/* Returns a referenced monitor PDO; the caller dereferences it */
+BOOLEAN
+NTAPI
+EngpGetMonitorDevice(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice,
+    _In_ ULONG iMonitor,
+    _Out_ PDEVICE_OBJECT *ppdo,
+    _Out_ PULONG pulFlags)
+{
+    BOOLEAN bFound = FALSE;
+
+    EngAcquireSemaphoreShared(ghsemGraphicsDeviceList);
+    if (iMonitor < pGraphicsDevice->dwMonCnt)
+    {
+        *ppdo = pGraphicsDevice->pvMonDev[iMonitor].pdo;
+        *pulFlags = pGraphicsDevice->pvMonDev[iMonitor].flag;
+        ObReferenceObject(*ppdo);
+        bFound = TRUE;
+    }
+    EngReleaseSemaphore(ghsemGraphicsDeviceList);
+
+    return bFound;
 }
 
 PGRAPHICS_DEVICE

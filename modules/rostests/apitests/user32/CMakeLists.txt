@@ -19,6 +19,7 @@ list(APPEND SOURCE
     EditInk.c
     desktop.c
     EmptyClipboard.c
+    EnumDisplayDevices.c
     EnumDisplaySettings.c
     GetClassInfo.c
     GetDCEx.c
