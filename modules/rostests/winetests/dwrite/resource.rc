@@ -22,3 +22,8 @@
 
 /* @makedep: wine_test.ttf */
 1 RCDATA "wine_test.ttf"
+
+/* The test font of the GDI compatible advance and texture tests: a subset of the fork's own Tahoma clone with a
+   TrueType program, strikes for 8 to 16 px, a gasp table and no hdmx table. */
+/* @makedep: ros_fixture.ttf */
+2 RCDATA "ros_fixture.ttf"

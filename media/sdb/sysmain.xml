@@ -410,6 +410,12 @@
             <SHIM_REF NAME="GlobalMemoryStatus2GB" />
             <!-- TODO: Add more fixes! -->
         </LAYER>
+        <!-- ReactOS specific. The Windows 7 SP1 version answer alone, without the memory cap of WIN7SP1, as a default for programs
+             that need it (Firefox). It is a layer so that a layer the user or the environment chooses (Compatibility tab,
+             __COMPAT_LAYER) comes first and wins: only the first version lie of a program is kept. -->
+        <LAYER NAME="WIN7VERSIONDEFAULT">
+            <SHIM_REF NAME="Win7SP1VersionLie" />
+        </LAYER>
         <LAYER NAME="WIN8RTM">
             <SHIM_REF NAME="Win8RTMVersionLie" />
             <DATA NAME="SHIMVERSIONNT" DATA_DWORD="602" />
@@ -554,6 +560,22 @@
                 <UPTO_BIN_PRODUCT_VERSION>3.12.65535.65535</UPTO_BIN_PRODUCT_VERSION>
             </MATCHING_FILE>
             <LAYER NAME="WIN8RTM" />
+        </EXE>
+
+        <!-- Firefox 4 and later: on a system that does not report Windows 7 or later (NT 6.1 SP1 or build 7600) Firefox rejects
+             DirectWrite ("IsNotWin7PreRTM"), falls back to GDI fonts, and draws all text as grayscale bitmap blobs instead of
+             through WebRender with ClearType. Only the version answer is changed, through the layer that has the Windows 7 SP1
+             version lie and nothing else (WIN7SP1 also caps the reported memory, which would change Firefox's cache and process
+             decisions). It is a default: a layer chosen by the user or the environment wins. Measured with Firefox 115.43 ESR (amd64). -->
+        <EXE NAME="firefox.exe" APP_NAME="Firefox" VENDOR="Mozilla">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Mozilla Corporation</COMPANY_NAME>
+                <PRODUCT_NAME>Firefox</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>firefox.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>4.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN7VERSIONDEFAULT" />
         </EXE>
 
         <!-- LibreOffice 24.8 and later need Windows 10 (documented; the installer is an MSI, see the layers on msiexec.exe) -->

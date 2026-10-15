@@ -38,6 +38,7 @@ WINE_DECLARE_DEBUG_CHANNEL(dwrite_file);
 #define MS_NAME_TAG DWRITE_MAKE_OPENTYPE_TAG('n','a','m','e')
 #define MS_VDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('V','D','M','X')
 #define MS_GASP_TAG DWRITE_MAKE_OPENTYPE_TAG('g','a','s','p')
+#define MS_HDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('h','d','m','x')
 #define MS_CPAL_TAG DWRITE_MAKE_OPENTYPE_TAG('C','P','A','L')
 #define MS_COLR_TAG DWRITE_MAKE_OPENTYPE_TAG('C','O','L','R')
 
@@ -126,6 +127,26 @@ static struct cache_entry * fontface_get_cache_entry(struct dwrite_fontface *fon
     return entry;
 }
 
+/* A font with an hdmx table keeps the advances of the hinted load, which come from that table for the sizes it lists.
+   Windows 7 gives the same advance as GDI for the Tahoma, Arial and Verdana it ships, all of which have the table.
+   What Windows does for a size the table does not list is not measured. */
+static BOOL fontface_has_hdmx(struct dwrite_fontface *fontface)
+{
+    return get_fontface_table(&fontface->IDWriteFontFace5_iface, MS_HDMX_TAG, &fontface->hdmx) != NULL;
+}
+
+/* The advance of a font without an hdmx table in the GDI measuring modes, in whole pixels. Windows 7 (Server 2008 R2)
+   was measured with a font that has a TrueType program and one that has not, with strikes and without, and with
+   Courier New, Lucida Console, MS Gothic, MS Mincho and MingLiU (1615 glyph and size pairs each, sizes 8 to 24): the
+   advance does not depend on the program. It is the design advance scaled to 26.6 fixed point and rounded to the nearest
+   1/64 pixel, plus a bias of 32 (GDI classic, a cutoff at 32/64: plain rounding) or of 34 (GDI natural, a cutoff at
+   30/64), then divided by 64. The 26.6 step is why an advance of 8.496 px (the O of the test font at 12 px) comes out as 9.
+   Not reproduced: Calibri in GDI classic (49 pairs one pixel wider on Windows), Batang and Gulim (programs that move
+   the advance), and Cambria in GDI natural (one pair, n at 8 px: the test font gives 5 for the same design advance
+   and size, Cambria gives 4, so no rule on advance and size alone fits both). */
+static int fontface_get_linear_gdi_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
+        DWRITE_MEASURING_MODE mode, BOOL *has_contours);
+
 static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
         unsigned short mode, BOOL *has_contours)
 {
@@ -133,6 +154,9 @@ static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fo
     struct get_glyph_advance_params params;
     struct cache_entry *entry;
     unsigned int value;
+
+    if (mode != DWRITE_MEASURING_MODE_NATURAL && !fontface_has_hdmx(fontface))
+        return fontface_get_linear_gdi_advance(fontface, fontsize, glyph, mode, has_contours);
 
     if (!(entry = fontface_get_cache_entry(fontface, 0, &key)))
         return 0;
@@ -156,9 +180,34 @@ static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fo
     return entry->advance;
 }
 
+static int fontface_get_linear_gdi_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
+        DWRITE_MEASURING_MODE mode, BOOL *has_contours)
+{
+    unsigned int upem = fontface->metrics.designUnitsPerEm;
+    int design = fontface_get_glyph_advance(fontface, upem, glyph, DWRITE_MEASURING_MODE_NATURAL, has_contours);
+    int fixed;
+
+    if (!upem)
+        return 0;
+
+    fixed = (int)floor((double)design * fontsize * 64.0 / upem + 0.5);
+    return (fixed + (mode == DWRITE_MEASURING_MODE_GDI_NATURAL ? 34 : 32)) >> 6;
+}
+
+/* Strike-capable modes give different glyphs than the outline modes for some faces, so their cache entries differ. */
+static unsigned short glyph_cache_mode(BOOL lcd, unsigned int rendering_mode)
+{
+    unsigned short mode = lcd ? 0x100 : DWRITE_MEASURING_MODE_NATURAL;
+
+    if (rendering_mode == DWRITE_RENDERING_MODE1_ALIASED || rendering_mode == DWRITE_RENDERING_MODE1_GDI_CLASSIC)
+        mode += 0x200 + rendering_mode;
+
+    return mode;
+}
+
 void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphbitmap *bitmap)
 {
-    struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph, .mode = DWRITE_MEASURING_MODE_NATURAL };
+    struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph, .mode = glyph_cache_mode(FALSE, bitmap->mode) };
     struct dwrite_fontface *fontface = unsafe_impl_from_IDWriteFontFace(iface);
     struct get_glyph_bbox_params params;
     struct cache_entry *entry;
@@ -166,6 +215,7 @@ void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphb
     params.object = fontface->get_font_object(fontface);
     params.simulations = bitmap->simulations;
     params.glyph = bitmap->glyph;
+    params.mode = bitmap->mode;
     params.emsize = bitmap->emsize;
     params.dx = bitmap->dx;
     params.dy = bitmap->dy;
@@ -220,7 +270,7 @@ static HRESULT dwrite_fontface_get_glyph_bitmap(struct dwrite_fontface *fontface
         unsigned int *is_1bpp, struct dwrite_glyphbitmap *bitmap)
 {
     struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph,
-            .mode = bitmap->lcd ? 0x100 : DWRITE_MEASURING_MODE_NATURAL };
+            .mode = glyph_cache_mode(bitmap->lcd, rendering_mode) };
     struct get_glyph_bitmap_params params;
     const RECT *bbox = &bitmap->bbox;
     unsigned int _1bpp;
@@ -890,6 +940,8 @@ static ULONG WINAPI dwritefontface_Release(IDWriteFontFace5 *iface)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->vdmx.context);
         if (fontface->gasp.context)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->gasp.context);
+        if (fontface->hdmx.context)
+            IDWriteFontFace5_ReleaseFontTable(iface, fontface->hdmx.context);
         if (fontface->cpal.context)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->cpal.context);
         if (fontface->colr.context)
@@ -5517,6 +5569,7 @@ HRESULT create_fontface(const struct fontface_desc *desc, struct list *cached_li
     fontface->refcount = 1;
     fontface->type = desc->face_type;
     fontface->vdmx.exists = TRUE;
+    fontface->hdmx.exists = TRUE;
     fontface->gasp.exists = TRUE;
     fontface->cpal.exists = TRUE;
     fontface->colr.exists = TRUE;
@@ -6168,6 +6221,7 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
         glyph_bitmap.m = &analysis->m;
 
     glyph_bitmap.lcd = glyphrunanalysis_is_lcd(analysis);
+    glyph_bitmap.mode = analysis->rendering_mode;
 
     for (i = 0; i < analysis->run.glyphCount; i++) {
         RECT *bbox = &glyph_bitmap.bbox;
@@ -6260,6 +6314,7 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
 
     bbox = &glyph_bitmap.bbox;
     glyph_bitmap.lcd = glyphrunanalysis_is_lcd(analysis);
+    glyph_bitmap.mode = analysis->rendering_mode;
 
     for (i = 0; i < analysis->run.glyphCount; ++i)
     {

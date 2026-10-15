@@ -567,6 +567,31 @@ static BOOL glyph_shape_needs_outline(unsigned int simulations, const MATRIX_2X2
     return get_glyph_transform(simulations, m, 0.0f, 0.0f, &ftm, &delta);
 }
 
+/* Code page bits of OS/2 for Japanese, simplified Chinese, Korean and traditional Chinese. */
+#define OS2_CODEPAGE_EAST_ASIAN 0x001e0000
+
+/* Whether the embedded strikes of a scalable face may be drawn instead of its outlines. Measured against Windows 7
+   (Server 2008 R2): the natural and symmetric modes always draw outlines, as do the aliased and GDI classic modes for
+   Latin faces such as Tahoma, Courier New, Lucida Console or Calibri although they have strikes. The aliased and GDI
+   classic modes draw the strikes of MS Gothic, MS Mincho, Batang, Gulim and MingLiU, all of which claim an East Asian
+   code page. What exactly Windows tests is not known: the code page bits alone are not enough there (a Latin font
+   with the bits set draws outlines). A face without outlines always uses its strikes. */
+static BOOL face_may_use_strikes(FT_Face face, unsigned int mode)
+{
+    const TT_OS2 *os2;
+
+    if (!FT_IS_SCALABLE(face))
+        return TRUE;
+
+    if (mode != DWRITE_RENDERING_MODE1_ALIASED && mode != DWRITE_RENDERING_MODE1_GDI_CLASSIC)
+        return FALSE;
+
+    if (!(os2 = pFT_Get_Sfnt_Table(face, FT_SFNT_OS2)) || os2->version < 1)
+        return FALSE;
+
+    return !!(os2->ulCodePageRange1 & OS2_CODEPAGE_EAST_ASIAN);
+}
+
 static NTSTATUS get_glyph_bbox(void *args)
 {
     struct get_glyph_bbox_params *params = args;
@@ -585,7 +610,8 @@ static NTSTATUS get_glyph_bbox(void *args)
 
     needs_transform = FT_IS_SCALABLE(face) &&
             get_glyph_transform(params->simulations, &params->m, params->dx, params->dy, &m, &delta);
-    needs_outline = FT_IS_SCALABLE(face) && glyph_shape_needs_outline(params->simulations, &params->m);
+    needs_outline = FT_IS_SCALABLE(face) && (glyph_shape_needs_outline(params->simulations, &params->m) ||
+            !face_may_use_strikes(face, params->mode));
 
     if (pFT_Load_Glyph(face, params->glyph, needs_outline ? FT_LOAD_NO_BITMAP : 0))
     {
@@ -855,7 +881,8 @@ static NTSTATUS get_glyph_bitmap(void *args)
 
     needs_transform = FT_IS_SCALABLE(face) &&
             get_glyph_transform(params->simulations, &params->m, params->dx, params->dy, &m, &delta);
-    needs_outline = FT_IS_SCALABLE(face) && glyph_shape_needs_outline(params->simulations, &params->m);
+    needs_outline = FT_IS_SCALABLE(face) && (glyph_shape_needs_outline(params->simulations, &params->m) ||
+            !face_may_use_strikes(face, params->mode));
 
     if (!pFT_Load_Glyph(face, params->glyph, needs_outline ? FT_LOAD_NO_BITMAP : 0))
     {
@@ -1126,6 +1153,7 @@ static NTSTATUS wow64_get_glyph_bbox(void *args)
         UINT64 object;
         ULONG simulations;
         ULONG glyph;
+        ULONG mode;
         float emsize;
         MATRIX_2X2 m;
         float dx, dy;
@@ -1136,6 +1164,7 @@ static NTSTATUS wow64_get_glyph_bbox(void *args)
         params32->object,
         params32->simulations,
         params32->glyph,
+        params32->mode,
         params32->emsize,
         params32->m,
         params32->dx,
