@@ -151,7 +151,9 @@ typedef struct _AFD_IN_FLIGHT_REQUEST {
 typedef struct _AFD_DATA_WINDOW {
     PCHAR Window;
     UINT BytesUsed, Size, Content;
-    /* Size asked for while the transport held the window; 0 if none */
+    /* Replacement window (NewSize bytes) allocated when a new size was asked for, put in place once
+       the transport no longer holds the window; NULL if none */
+    PCHAR NewWindow;
     UINT NewSize;
 } AFD_DATA_WINDOW, *PAFD_DATA_WINDOW;
 
@@ -397,6 +399,9 @@ NTSTATUS NTAPI
 AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			 PIO_STACK_LOCATION IrpSp);
 UINT AfdCancelStreamSend(PAFD_FCB FCB, PIRP Irp);
-NTSTATUS AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Used);
+NTSTATUS AfdRequestWindowResize(PAFD_DATA_WINDOW Data, UINT Size);
+BOOLEAN AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Offset, UINT Used);
+VOID AfdApplyRecvResize(PAFD_FCB FCB);
+VOID AfdReleaseIrpMdls(PIRP Irp);
 
 #endif /* _AFD_H */

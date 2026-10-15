@@ -207,7 +207,11 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     }
     else
     {
-        /* Begin receive buffer */
+        /*
+         * Begin receive buffer. The accepted socket is in use by now: with its lock held,
+         * a resize of the receive window cannot change the window between the two reads
+         */
+        SocketAcquireStateLock(FCB2);
         Status = TdiReceive(
             &FCB2->ReceiveIrp.InFlightRequest,
             FCB2->Connection.Object,
@@ -216,6 +220,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
             FCB2->Recv.Size,
             ReceiveComplete,
             FCB2);
+        SocketStateUnlock(FCB2);
 
         if (Status == STATUS_PENDING)
             Status = STATUS_SUCCESS;

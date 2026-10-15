@@ -32,11 +32,11 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     _SEH2_TRY {
         switch( InfoReq->InformationClass ) {
         case AFD_INFO_RECEIVE_WINDOW_SIZE:
-            InfoReq->Information.Ulong = FCB->Recv.NewSize ? FCB->Recv.NewSize : FCB->Recv.Size;
+            InfoReq->Information.Ulong = FCB->Recv.NewWindow ? FCB->Recv.NewSize : FCB->Recv.Size;
             break;
 
         case AFD_INFO_SEND_WINDOW_SIZE:
-            InfoReq->Information.Ulong = FCB->Send.NewSize ? FCB->Send.NewSize : FCB->Send.Size;
+            InfoReq->Information.Ulong = FCB->Send.NewWindow ? FCB->Send.NewSize : FCB->Send.Size;
             AFD_DbgPrint(MID_TRACE,("Send window size %u\n", FCB->Send.Size));
             break;
 
@@ -99,43 +99,111 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 }
 
 /*
- * Gives the window the size asked for in NewSize, keeping the Used bytes at its start. The caller
- * makes sure the transport does not hold the window. A window that is too small for its data
- * keeps the request until the data has gone.
+ * A new window size is asked for: the replacement window is allocated now, so that running out of
+ * memory fails the request, and put in place by AfdApplyWindowResize once the transport does not
+ * hold the window. Asking for the current size cancels a request that waits.
  */
 NTSTATUS
-AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Used)
+AfdRequestWindowResize(PAFD_DATA_WINDOW Data, UINT Size)
 {
-    PCHAR NewBuffer;
-    UINT NewSize = Data->NewSize;
+    PCHAR NewWindow;
 
-    if (NewSize == 0)
-        return STATUS_SUCCESS;
-
-    if (NewSize == Data->Size)
+    if (Size == Data->Size)
     {
+        if (Data->NewWindow)
+            ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
+        Data->NewWindow = NULL;
         Data->NewSize = 0;
         return STATUS_SUCCESS;
     }
 
-    if (NewSize < Used)
-        return STATUS_PENDING;
+    if (Data->NewWindow && Data->NewSize == Size)
+        return STATUS_SUCCESS;
 
-    NewBuffer = ExAllocatePoolWithTag(PagedPool, NewSize, TAG_AFD_DATA_BUFFER);
-    if (!NewBuffer)
+    NewWindow = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_DATA_BUFFER);
+    if (!NewWindow)
         return STATUS_NO_MEMORY;
 
-    if (Data->Window)
-    {
-        RtlCopyMemory(NewBuffer, Data->Window, Used);
-        ExFreePoolWithTag(Data->Window, TAG_AFD_DATA_BUFFER);
-    }
-
-    Data->Window = NewBuffer;
-    Data->Size = NewSize;
-    Data->NewSize = 0;
+    if (Data->NewWindow)
+        ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
+    Data->NewWindow = NewWindow;
+    Data->NewSize = Size;
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * Puts the replacement window in place, keeping the Used bytes that start at Offset in the old
+ * one. The transport must not hold the old window, and no completed request may still have an
+ * MDL on it (see AfdReleaseIrpMdls). A window too small for the data keeps the request until the
+ * data has gone. Returns TRUE if the window was replaced.
+ */
+BOOLEAN
+AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Offset, UINT Used)
+{
+    PCHAR OldWindow;
+
+    if (!Data->NewWindow || Used > Data->NewSize)
+        return FALSE;
+
+    if (Used)
+        RtlCopyMemory(Data->NewWindow, Data->Window + Offset, Used);
+
+    OldWindow = Data->Window;
+    Data->Window = Data->NewWindow;
+    Data->Size = Data->NewSize;
+    Data->NewWindow = NULL;
+    Data->NewSize = 0;
+
+    if (OldWindow)
+        ExFreePoolWithTag(OldWindow, TAG_AFD_DATA_BUFFER);
+
+    return TRUE;
+}
+
+/*
+ * A stream socket keeps the unread data, at the start of the new window; a datagram socket copies
+ * each datagram out of the window at once and has nothing to keep.
+ */
+VOID
+AfdApplyRecvResize(PAFD_FCB FCB)
+{
+    UINT Offset = 0, Used = 0;
+
+    if (!FCB->Recv.NewWindow)
+        return;
+
+    if (!(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+    {
+        Offset = FCB->Recv.BytesUsed;
+        Used = FCB->Recv.Content - Offset;
+    }
+
+    if (AfdApplyWindowResize(&FCB->Recv, Offset, Used) && !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+    {
+        FCB->Recv.Content = Used;
+        FCB->Recv.BytesUsed = 0;
+    }
+}
+
+/*
+ * The I/O manager unlocks and frees the MDL of a completed IRP after the completion routine has
+ * returned, so a window that the routine freed could still be locked by it. The routines of the
+ * requests that use a window call this first, with the lock held: nobody who finds the request no
+ * longer in flight can see a leftover MDL on the window.
+ */
+VOID
+AfdReleaseIrpMdls(PIRP Irp)
+{
+    PMDL Mdl;
+
+    while ((Mdl = Irp->MdlAddress) != NULL)
+    {
+        Irp->MdlAddress = Mdl->Next;
+        if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
+            MmUnlockPages(Mdl);
+        IoFreeMdl(Mdl);
+    }
 }
 
 NTSTATUS NTAPI
@@ -169,20 +237,11 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     /* FIXME: likely not right, check tcpip.sys for TDI_QUERY_MAX_DATAGRAM_INFO */
                     if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF)
                     {
-                        FCB->Recv.NewSize = InfoReq->Information.Ulong;
-                        Status = STATUS_SUCCESS;
+                        Status = AfdRequestWindowResize(&FCB->Recv, InfoReq->Information.Ulong);
 
                         /* While a receive is in flight the transport writes into the window */
-                        if (!FCB->ReceiveIrp.InFlightRequest)
-                        {
-                            /* A datagram socket copies each datagram out of the window at once */
-                            Status = AfdApplyWindowResize(&FCB->Recv,
-                                                          (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) ? 0 : FCB->Recv.Content);
-                            if (Status == STATUS_PENDING)
-                                Status = STATUS_SUCCESS;
-                            else if (!NT_SUCCESS(Status))
-                                FCB->Recv.NewSize = 0;
-                        }
+                        if (NT_SUCCESS(Status) && !FCB->ReceiveIrp.InFlightRequest)
+                            AfdApplyRecvResize(FCB);
                     }
                     else
                     {
@@ -200,17 +259,13 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 {
                     if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF)
                     {
-                        FCB->Send.NewSize = InfoReq->Information.Ulong;
-                        Status = STATUS_SUCCESS;
+                        Status = AfdRequestWindowResize(&FCB->Send, InfoReq->Information.Ulong);
 
                         /* While a send is in flight the transport reads the window; datagrams do not use it */
-                        if (!FCB->SendIrp.InFlightRequest || (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+                        if (NT_SUCCESS(Status) &&
+                            (!FCB->SendIrp.InFlightRequest || (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)))
                         {
-                            Status = AfdApplyWindowResize(&FCB->Send, FCB->Send.BytesUsed);
-                            if (Status == STATUS_PENDING)
-                                Status = STATUS_SUCCESS;
-                            else if (!NT_SUCCESS(Status))
-                                FCB->Send.NewSize = 0;
+                            AfdApplyWindowResize(&FCB->Send, 0, FCB->Send.BytesUsed);
                         }
                     }
                     else
