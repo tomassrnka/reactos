@@ -133,6 +133,7 @@ VOID FASTCALL UserRawInputDeliver(DWORD dwType,
                                   CONST VOID *pData,
                                   UINT cbData);
 BOOL FASTCALL UserRawInputNoLegacy(PPROCESSINFO ppi, DWORD dwType);
+BOOL FASTCALL UserRawInputQueueNoLegacy(PUSER_MESSAGE_QUEUE pFocusQueue, DWORD dwType);
 VOID FASTCALL UserRawInputProcessDestroy(PPROCESSINFO ppi);
 VOID FASTCALL UserRawInputThreadCleanup(PTHREADINFO pti);
 BOOL FASTCALL UserFreeRawInput(PUSER_MESSAGE_QUEUE MessageQueue, HRAWINPUT hRawInput);

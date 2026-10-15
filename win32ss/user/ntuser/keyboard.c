@@ -1086,7 +1086,8 @@ IntHandleAltNumpad(
                 msgChar.time = dwTime;
                 msgChar.pt = gpsi->ptCursor;
 
-                MsqPostMessage(pFocusQueue->ptiKeyboard, &msgChar, FALSE, QS_KEY, 0, 0);
+                if (!UserRawInputQueueNoLegacy(pFocusQueue, RIM_TYPEKEYBOARD))
+                    MsqPostMessage(pFocusQueue->ptiKeyboard, &msgChar, FALSE, QS_KEY, 0, 0);
             }
         }
 
@@ -1406,13 +1407,12 @@ UserSendKeyboardInput(KEYBDINPUT *pKbdInput, BOOL bInjected)
     if (bInjected && RawInputEnabled && wVk != VK_PACKET)
     {
         BOOL bUp = !!(pKbdInput->dwFlags & KEYEVENTF_KEYUP);
-        /* The message that a key makes follows the Alt state after the key, so the
-           release of Alt itself is a plain key message */
-        BOOL bAltAfter = (wVk == VK_MENU || wVk == VK_LMENU || wVk == VK_RMENU) ? !bUp :
-                         (IS_KEY_DOWN(gafAsyncKeyState, VK_MENU) && !IS_KEY_DOWN(gafAsyncKeyState, VK_CONTROL));
-        BOOL bSys = bAltAfter;
+        /* Alt held (AltGr too) makes SYS messages; the key of Alt itself is SYS on the way
+           down and plain on the way up (measured) */
+        WORD wRawVk = IntSimplifyVk(wVk); /* left and right keys are one key in raw input */
+        BOOL bSys = (wRawVk == VK_MENU) ? !bUp : IS_KEY_DOWN(gafAsyncKeyState, VK_MENU);
 
-        UserRawInputSendKeyboard(wScanCode, wVk, bUp, bExt, pKbdInput->dwExtraInfo,
+        UserRawInputSendKeyboard(wScanCode, wRawVk, bUp, bExt, pKbdInput->dwExtraInfo,
                                  bUp ? (bSys ? WM_SYSKEYUP : WM_KEYUP) : (bSys ? WM_SYSKEYDOWN : WM_KEYDOWN));
     }
 
@@ -1432,7 +1432,7 @@ UserRawInputProcessKeyboardInput(
 
     kb.MakeCode = wScanCode & 0x7F;
     kb.Flags = bIsDown ? RI_KEY_MAKE : RI_KEY_BREAK;
-    kb.VKey = wVk & 0xFF; // Note: wVk is simplified by msg queue
+    kb.VKey = IntSimplifyVk(wVk) & 0xFF;
     kb.Message = bIsDown ? WM_KEYDOWN : WM_KEYUP;
     if (pKbdInputData->Flags & KEY_E1)
         kb.Flags |= RI_KEY_E1;

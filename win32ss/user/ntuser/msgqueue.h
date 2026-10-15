@@ -163,6 +163,10 @@ PUSER_MESSAGE_QUEUE FASTCALL MsqCreateMessageQueue(PTHREADINFO);
 VOID FASTCALL MsqCleanupThreadMsgs(PTHREADINFO);
 VOID FASTCALL MsqDestroyMessageQueue(_In_ PTHREADINFO pti);
 VOID FASTCALL MsqPurgeRawInputOfThread(_In_ PTHREADINFO pti);
+VOID FASTCALL MsqRetireRawInputMessage(_In_ PUSER_MESSAGE_QUEUE MessageQueue, _In_ PUSER_MESSAGE Message);
+VOID FASTCALL MsqSweepDeadRawInput(_In_ PUSER_MESSAGE_QUEUE MessageQueue);
+/* dwQEvent of a raw input message that was retired while a peek walked the list */
+#define POSTEVENT_DEADRAW 0x44524157
 CODE_SEG("INIT") NTSTATUS NTAPI MsqInitializeImpl(VOID);
 BOOLEAN FASTCALL co_MsqDispatchOneSentMessage(_In_ PTHREADINFO pti);
 NTSTATUS FASTCALL

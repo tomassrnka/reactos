@@ -700,7 +700,7 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
            gpqCursor = MessageQueue;
 
            /* Mouse move is a special case */
-           if (!UserRawInputNoLegacy(pti->ppi, RIM_TYPEMOUSE))
+           if (!UserRawInputNoLegacy(pwnd->head.pti->ppi, RIM_TYPEMOUSE))
            {
               MessageQueue->QF_flags |= QF_MOUSEMOVED;
               gdwMouseMoveExtraInfo = dwExtraInfo;
@@ -708,7 +708,7 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
               MsqWakeQueue(pti, QS_MOUSEMOVE, TRUE);
            }
        }
-       else if (UserRawInputNoLegacy(pti->ppi, RIM_TYPEMOUSE))
+       else if (UserRawInputNoLegacy(pwnd->head.pti->ppi, RIM_TYPEMOUSE))
        {
            /* The process gets raw input instead of mouse messages */
        }
@@ -1987,6 +1987,14 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
       return FALSE;
    }
 
+   /* A peek nested in a hook of an outer peek must leave the marks alone: the outer one
+      may hold the next node */
+   if (!MessageQueue->idSysPeek)
+   {
+      MsqSweepDeadRawInput(MessageQueue);
+      ListHead = MessageQueue->HardwareMessagesListHead.Flink;
+   }
+
    while (ListHead != &MessageQueue->HardwareMessagesListHead)
    {
       CurrentMessage = CONTAINING_RECORD(ListHead, USER_MESSAGE, ListEntry);
@@ -2351,9 +2359,48 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
 }
 
 /*
-   Drop the WM_INPUT messages posted to a thread from the queue it leaves and
-   charge their wake bit back to that thread. Called under the USER lock.
+   Retire one WM_INPUT message of a queue: free its packet, give its wake bit back to the
+   thread it was posted to, and drop the message. A peek that is walking the list may
+   hold the next node while a hook runs (and hooks can detach threads or read the raw
+   input buffer), so while a peek holds the queue the entry only becomes a dead mark,
+   which the next peek removes. Called under the USER lock.
  */
+VOID FASTCALL
+MsqRetireRawInputMessage(PUSER_MESSAGE_QUEUE MessageQueue, PUSER_MESSAGE Message)
+{
+   ClearMsgBitsMask(Message->pti, QS_RAWINPUT);
+   UserFreeRawInput(MessageQueue, (HRAWINPUT)Message->Msg.lParam);
+
+   if (MessageQueue->ptiSysLock)
+   {
+      Message->QS_Flags = 0;
+      Message->Msg.message = WM_NULL;
+      Message->Msg.lParam = 0;
+      Message->dwQEvent = POSTEVENT_DEADRAW;
+   }
+   else
+   {
+      MsqDestroyMessage(Message);
+   }
+}
+
+VOID FASTCALL
+MsqSweepDeadRawInput(PUSER_MESSAGE_QUEUE MessageQueue)
+{
+   PLIST_ENTRY CurrentEntry = MessageQueue->HardwareMessagesListHead.Flink;
+   PUSER_MESSAGE CurrentMessage;
+
+   while (CurrentEntry != &MessageQueue->HardwareMessagesListHead)
+   {
+      CurrentMessage = CONTAINING_RECORD(CurrentEntry, USER_MESSAGE, ListEntry);
+      CurrentEntry = CurrentEntry->Flink;
+
+      if (CurrentMessage->dwQEvent == POSTEVENT_DEADRAW)
+         MsqDestroyMessage(CurrentMessage);
+   }
+}
+
+/* Drop the WM_INPUT messages posted to a thread from the queue it leaves */
 VOID FASTCALL
 MsqPurgeRawInputOfThread(PTHREADINFO pti)
 {
@@ -2375,9 +2422,7 @@ MsqPurgeRawInputOfThread(PTHREADINFO pti)
       if (CurrentMessage->pti == pti && CurrentMessage->Msg.message == WM_INPUT &&
           (CurrentMessage->QS_Flags & QS_RAWINPUT))
       {
-         ClearMsgBitsMask(pti, QS_RAWINPUT);
-         UserFreeRawInput(MessageQueue, (HRAWINPUT)CurrentMessage->Msg.lParam);
-         MsqDestroyMessage(CurrentMessage);
+         MsqRetireRawInputMessage(MessageQueue, CurrentMessage);
       }
    }
 }

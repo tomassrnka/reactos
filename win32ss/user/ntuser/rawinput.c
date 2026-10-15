@@ -24,8 +24,13 @@
 typedef struct _USER_RAWINPUT
 {
     LIST_ENTRY ListEntry;
+    HRAWINPUT Handle;
     RAWINPUT RawInput;
 } USER_RAWINPUT, *PUSER_RAWINPUT;
+
+/* Handles are serial numbers, not addresses: a freed packet's memory is reused at once,
+   and an old handle must not read the packet that took its place */
+static ULONG gRawInputSerial;
 
 C_ASSERT(FIELD_OFFSET(RAWINPUT, data) == sizeof(RAWINPUTHEADER));
 C_ASSERT(sizeof(RAWINPUTHEADER) + sizeof(RAWMOUSE) <= sizeof(RAWINPUT));
@@ -349,8 +354,8 @@ RawRegAlloc(
     return Table;
 }
 
-/* Sets (or with Remove clears) one registration; the table is copied first so a
-   failed allocation leaves the old table untouched */
+/* Sets (or with Remove clears) one registration. Adding copies the table first so a
+   failed allocation leaves the old table untouched; removing works in place. */
 static
 BOOL
 RawRegApply(
@@ -394,13 +399,12 @@ RawRegApply(
             return TRUE;
         }
 
-        New = RawRegAlloc(cOld - 1);
-        if (!New)
-            return FALSE;
-        for (i = 0; i < Pos; i++)
-            New->aRegs[i] = Old->aRegs[i];
+        /* Removal never allocates: it cannot fail, so a thread exit or a REMOVE always
+           drops the registration (and a NOLEGACY with it) */
         for (i = Pos + 1; i < cOld; i++)
-            New->aRegs[i - 1] = Old->aRegs[i];
+            Old->aRegs[i - 1] = Old->aRegs[i];
+        Old->cRegs--;
+        return TRUE;
     }
     else if (Found)
     {
@@ -456,13 +460,7 @@ UserRawInputThreadCleanup(
         {
             RAWINPUTDEVICE Entry = Table->aRegs[i].Device;
 
-            if (!RawRegApply(ppi, &Entry, NULL, TRUE))
-            {
-                /* Out of memory: keep the registration but forget the dying thread */
-                Table->aRegs[i].ptiTarget = NULL;
-                i++;
-                continue;
-            }
+            RawRegApply(ppi, &Entry, NULL, TRUE);
             Table = ppi->pRawInputRegs;
             continue;
         }
@@ -503,7 +501,7 @@ RawInputEntryFromHandle(
          Entry = Entry->Flink)
     {
         PUSER_RAWINPUT RawEntry = CONTAINING_RECORD(Entry, USER_RAWINPUT, ListEntry);
-        if ((HRAWINPUT)&RawEntry->RawInput == hRawInput)
+        if (RawEntry->Handle == hRawInput)
             return RawEntry;
     }
 
@@ -573,9 +571,15 @@ UserCreateRawInput(
     RawEntry->RawInput.header.wParam = wParam;
     RtlCopyMemory(&RawEntry->RawInput.data, pData, cbData);
 
+    do
+    {
+        ++gRawInputSerial;
+    } while ((gRawInputSerial & 0x3FFFFFFF) == 0);
+    RawEntry->Handle = (HRAWINPUT)(ULONG_PTR)(((gRawInputSerial & 0x3FFFFFFF) << 2) | 1);
+
     InsertTailList(&pti->MessageQueue->RawInputListHead, &RawEntry->ListEntry);
     pti->MessageQueue->cRawInput++;
-    return (HRAWINPUT)&RawEntry->RawInput;
+    return RawEntry->Handle;
 }
 
 BOOL
@@ -627,6 +631,35 @@ UserCleanupRawInput(
     }
 }
 
+/* Process that owns the focus (else the active) window of the foreground queue; the
+   thread recorded in the queue at its creation is not the owner once threads attach */
+static
+PPROCESSINFO
+RawInputFocusProcess(
+    PUSER_MESSAGE_QUEUE pFocusQueue)
+{
+    PWND pWnd;
+
+    if (!pFocusQueue)
+        return NULL;
+
+    pWnd = pFocusQueue->spwndFocus ? pFocusQueue->spwndFocus : pFocusQueue->spwndActive;
+    if (pWnd && pWnd->head.pti)
+        return pWnd->head.pti->ppi;
+
+    return pFocusQueue->ptiKeyboard ? pFocusQueue->ptiKeyboard->ppi : NULL;
+}
+
+/* NOLEGACY for the keys that the focus queue posts on its own (Alt+Numpad characters) */
+BOOL
+FASTCALL
+UserRawInputQueueNoLegacy(
+    PUSER_MESSAGE_QUEUE pFocusQueue,
+    DWORD dwType)
+{
+    return UserRawInputNoLegacy(RawInputFocusProcess(pFocusQueue), dwType);
+}
+
 /* Window that receives the raw input of one process, NULL if it gets none now */
 static
 PWND
@@ -671,8 +704,7 @@ UserRawInputDeliver(
         return;
 
     pFocusQueue = IntGetFocusMessageQueue();
-    if (pFocusQueue && pFocusQueue->ptiKeyboard)
-        ppiFocus = pFocusQueue->ptiKeyboard->ppi;
+    ppiFocus = RawInputFocusProcess(pFocusQueue);
 
     for (ppi = gppiList; ppi; ppi = ppi->ppiNext)
     {
@@ -709,6 +741,10 @@ UserRawInputDeliver(
         }
         else if (Reg->dwFlags & RIDEV_EXINPUTSINK)
         {
+            /* Sinks of any kind only reach windows of the input desktop: nothing may
+               listen to the keys typed on another one (the secure desktop) */
+            if (!pti->rpdesk || !IntIsActiveDesktop(pti->rpdesk))
+                continue;
             /* Background delivery only while the foreground process gets none */
             if (ppiFocus && RawRegLookupType(ppiFocus->pRawInputRegs, dwType))
                 continue;
@@ -930,7 +966,11 @@ NtUserGetRawInputBuffer(
         ProbeForRead(pcbSize, sizeof(*pcbSize), sizeof(UINT));
         BufferSize = *pcbSize;
         if (pData)
-            ProbeForWrite(pData, BufferSize, sizeof(PVOID));
+        {
+            /* Windows takes DWORD alignment in every ABI (measured natively and under WOW64) */
+            ULONG Alignment = sizeof(DWORD);
+            ProbeForWrite(pData, BufferSize, Alignment);
+        }
 
         if (!MessageQueue)
         {
@@ -974,11 +1014,9 @@ NtUserGetRawInputBuffer(
             UsedSize += RawSize;
             Count++;
 
-            /* The bits were counted at enqueue time for Message->pti */
-            ClearMsgBitsMask(Message->pti, Message->QS_Flags);
+            /* The bit was counted at enqueue time for Message->pti */
             pti->timeLast = Message->Msg.time;
-            MsqDestroyMessage(Message);
-            RawInputFreeEntry(MessageQueue, RawEntry);
+            MsqRetireRawInputMessage(MessageQueue, Message);
 
             /* Windows wants one spare byte: an exact fit still consumes and copies
                the entry but reports a too small buffer */
