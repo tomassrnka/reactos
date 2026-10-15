@@ -9,6 +9,7 @@
  */
 
 #include "mouhid.h"
+#include "../hidclass/hidbounds.h"
 #include "mouscale.h"
 
 static USHORT MouHid_ButtonUpFlags[] =
@@ -75,11 +76,15 @@ MouHid_GetButtonMove(
                                         DeviceExtension->Report,
                                         DeviceExtension->ReportLength);
 
-                /* failed extraction or an invalid logical range gives no movement */
-                *LastX = MouHid_ScaleAbsolute(Status, ValueX,
-                                               DeviceExtension->ValueCapsX.LogicalMin,
-                                               DeviceExtension->ValueCapsX.LogicalMax,
-                                               VIRTUAL_SCREEN_SIZE_X);
+                /* a failed extraction or an invalid range keeps the axis' last valid
+                   coordinate (the helper leaves it untouched) instead of an edge */
+                MouHid_ScaleAbsolute(Status, ValueX,
+                                     DeviceExtension->ValueCapsX.BitSize,
+                                     DeviceExtension->ValueCapsX.LogicalMin,
+                                     DeviceExtension->ValueCapsX.LogicalMax,
+                                     VIRTUAL_SCREEN_SIZE_X,
+                                     &DeviceExtension->LastAbsoluteX);
+                *LastX = DeviceExtension->LastAbsoluteX;
             }
         }
     }
@@ -95,11 +100,15 @@ MouHid_GetButtonMove(
                                     DeviceExtension->Report,
                                     DeviceExtension->ReportLength);
 
-        /* failed extraction or an invalid logical range gives no movement */
-        *LastX = MouHid_ScaleAbsolute(Status, ValueX,
-                                       DeviceExtension->ValueCapsX.LogicalMin,
-                                       DeviceExtension->ValueCapsX.LogicalMax,
-                                       VIRTUAL_SCREEN_SIZE_X);
+        /* a failed extraction or an invalid range keeps the axis' last valid
+           coordinate (the helper leaves it untouched) instead of an edge */
+        MouHid_ScaleAbsolute(Status, ValueX,
+                             DeviceExtension->ValueCapsX.BitSize,
+                             DeviceExtension->ValueCapsX.LogicalMin,
+                             DeviceExtension->ValueCapsX.LogicalMax,
+                             VIRTUAL_SCREEN_SIZE_X,
+                             &DeviceExtension->LastAbsoluteX);
+        *LastX = DeviceExtension->LastAbsoluteX;
     }
 
     if (!DeviceExtension->MouseAbsolute)
@@ -132,11 +141,15 @@ MouHid_GetButtonMove(
                                         DeviceExtension->Report,
                                         DeviceExtension->ReportLength);
 
-                /* failed extraction or an invalid logical range gives no movement */
-                *LastY = MouHid_ScaleAbsolute(Status, ValueY,
-                                               DeviceExtension->ValueCapsY.LogicalMin,
-                                               DeviceExtension->ValueCapsY.LogicalMax,
-                                               VIRTUAL_SCREEN_SIZE_Y);
+                /* a failed extraction or an invalid range keeps the axis' last valid
+                   coordinate (the helper leaves it untouched) instead of an edge */
+                MouHid_ScaleAbsolute(Status, ValueY,
+                                     DeviceExtension->ValueCapsY.BitSize,
+                                     DeviceExtension->ValueCapsY.LogicalMin,
+                                     DeviceExtension->ValueCapsY.LogicalMax,
+                                     VIRTUAL_SCREEN_SIZE_Y,
+                                     &DeviceExtension->LastAbsoluteY);
+                *LastY = DeviceExtension->LastAbsoluteY;
             }
         }
     }
@@ -152,11 +165,15 @@ MouHid_GetButtonMove(
                                 DeviceExtension->Report,
                                 DeviceExtension->ReportLength);
 
-        /* failed extraction or an invalid logical range gives no movement */
-        *LastY = MouHid_ScaleAbsolute(Status, ValueY,
-                                       DeviceExtension->ValueCapsY.LogicalMin,
-                                       DeviceExtension->ValueCapsY.LogicalMax,
-                                       VIRTUAL_SCREEN_SIZE_Y);
+        /* a failed extraction or an invalid range keeps the axis' last valid
+           coordinate (the helper leaves it untouched) instead of an edge */
+        MouHid_ScaleAbsolute(Status, ValueY,
+                             DeviceExtension->ValueCapsY.BitSize,
+                             DeviceExtension->ValueCapsY.LogicalMin,
+                             DeviceExtension->ValueCapsY.LogicalMax,
+                             VIRTUAL_SCREEN_SIZE_Y,
+                             &DeviceExtension->LastAbsoluteY);
+        *LastY = DeviceExtension->LastAbsoluteY;
     }
 }
 
@@ -317,6 +334,15 @@ MouHid_ReadCompletion(
 
         /* signal completion event */
         KeSetEvent(&DeviceExtension->ReadCompletionEvent, 0, 0);
+        return STATUS_MORE_PROCESSING_REQUIRED;
+    }
+
+    /* a failed or zero-byte completion carries no new report: do not decode
+       the previous report still in the buffer, just keep reading */
+    if (!HidClient_IsReportDecodable(Irp->IoStatus.Status, Irp->IoStatus.Information))
+    {
+        DPRINT("[MOUHID] no report (status %x, %Iu bytes), not decoded\n", Irp->IoStatus.Status, Irp->IoStatus.Information);
+        MouHid_InitiateRead(DeviceExtension);
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
 
@@ -930,6 +956,10 @@ MouHid_StartDevice(
             DPRINT("[MOUHID] mouse wheel support detected with z-axis\n", Status);
         }
     }
+
+    /* until a valid absolute report arrives, sit at the centre, not an edge */
+    DeviceExtension->LastAbsoluteX = VIRTUAL_SCREEN_SIZE_X / 2;
+    DeviceExtension->LastAbsoluteY = VIRTUAL_SCREEN_SIZE_Y / 2;
 
     /* check if mice is absolute */
     if (DeviceExtension->ValueCapsY.IsAbsolute &&

@@ -67,3 +67,31 @@ HidClass_PlaceInputReport(
     *Information = Offset + ReportLength;
     return TRUE;
 }
+
+//
+// A read is serviceable only with a non-zero length and an MDL to place the
+// report into. A zero-length read leaves the MDL NULL; the completion would
+// otherwise map it.
+//
+static __inline
+BOOLEAN
+HidClass_IsReadRequestValid(
+    IN ULONG Length,
+    IN PVOID Mdl)
+{
+    return (Length != 0 && Mdl != NULL);
+}
+
+//
+// Client side (kbdhid, mouhid): a completed read is decoded only when it
+// succeeded and actually transferred bytes. A successful zero-byte completion
+// must not replay the previous report still sitting in the buffer.
+//
+static __inline
+BOOLEAN
+HidClient_IsReportDecodable(
+    IN NTSTATUS Status,
+    IN ULONG_PTR Information)
+{
+    return (NT_SUCCESS(Status) && Information != 0);
+}

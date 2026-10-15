@@ -8,31 +8,66 @@
 #pragma once
 
 //
-// Convert an absolute axis value into the 0..VirtualSize range. The value and
-// the logical range come from an untrusted report descriptor: a failed
-// extraction (e.g. a field wider than 32 bits) or a zero/negative range yields
-// no movement instead of an uninitialized value or a division by zero.
+// Convert an absolute axis value into 0..VirtualSize by normalizing over the
+// logical range: (value - LogicalMin) * VirtualSize / (LogicalMax - LogicalMin),
+// in 64-bit arithmetic.
+//
+// Signedness follows the HID spec: a negative LogicalMin makes the field
+// signed, so the raw value is sign-extended from BitSize bits (all-negative
+// ranges are valid). A non-negative LogicalMin with a negative LogicalMax means
+// the maximum was encoded with its top bit set and is read as unsigned. The
+// value is clamped to both endpoints.
+//
+// Returns FALSE (and leaves *Scaled untouched) on a failed extraction or an
+// empty/inverted range; the caller keeps the axis' last valid coordinate
+// instead of jumping to an edge.
 //
 static __inline
-LONG
+BOOLEAN
 MouHid_ScaleAbsolute(
     IN NTSTATUS ExtractStatus,
-    IN ULONG Value,
+    IN ULONG RawValue,
+    IN USHORT BitSize,
     IN LONG LogicalMin,
     IN LONG LogicalMax,
-    IN ULONG VirtualSize)
+    IN ULONG VirtualSize,
+    OUT PLONG Scaled)
 {
-    ULONGLONG Scaled;
+    LONGLONG Low, High, Value;
+    ULONG Mask;
 
     if (ExtractStatus != HIDP_STATUS_SUCCESS)
-        return 0;
+        return FALSE;
 
-    if (LogicalMax <= 0 || LogicalMax <= LogicalMin)
-        return 0;
+    Mask = (BitSize > 0 && BitSize < 32) ? ((1UL << BitSize) - 1) : 0xFFFFFFFFUL;
 
-    if (Value > (ULONG)LogicalMax)
-        Value = (ULONG)LogicalMax;
+    Low = LogicalMin;
+    if (LogicalMin >= 0 && LogicalMax < 0)
+        High = (LONGLONG)((ULONG)LogicalMax & Mask);    /* unsigned maximum */
+    else
+        High = LogicalMax;
 
-    Scaled = ((ULONGLONG)Value * VirtualSize) / (ULONG)LogicalMax;
-    return (LONG)Scaled;
+    if (LogicalMin < 0)
+    {
+        /* signed field: sign-extend the raw value from BitSize bits */
+        RawValue &= Mask;
+        if (BitSize > 0 && BitSize < 32 && (RawValue & (1UL << (BitSize - 1))))
+            RawValue |= ~Mask;
+        Value = (LONG)RawValue;
+    }
+    else
+    {
+        Value = (LONGLONG)(RawValue & Mask);
+    }
+
+    if (High <= Low)
+        return FALSE;
+
+    if (Value < Low)
+        Value = Low;
+    if (Value > High)
+        Value = High;
+
+    *Scaled = (LONG)(((Value - Low) * (LONGLONG)VirtualSize) / (High - Low));
+    return TRUE;
 }
