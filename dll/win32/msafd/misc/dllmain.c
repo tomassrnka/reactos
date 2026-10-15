@@ -643,6 +643,7 @@ MsafdWaitForRequest(
     _In_ PIO_STATUS_BLOCK IoStatusBlock,
     _In_ ULONG Timeout)
 {
+#if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
     IO_STATUS_BLOCK CancelStatusBlock;
     DWORD Start, Elapsed, Result;
 
@@ -670,17 +671,20 @@ MsafdWaitForRequest(
     if (Result == WAIT_OBJECT_0)
         return;
 
-#if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
+    /* Only this request is cancelled: it is the status block that names it */
     NtCancelIoFileEx(hSocket, IoStatusBlock, &CancelStatusBlock);
-#else
-    /* The thread's other requests on this socket are cancelled too */
-    NtCancelIoFile(hSocket, &CancelStatusBlock);
-#endif
 
     /* The request that completed before the cancellation keeps its own status */
     MsafdWaitForAlert(hEvent);
     if (IoStatusBlock->Status == STATUS_CANCELLED)
         IoStatusBlock->Status = STATUS_IO_TIMEOUT;
+#else
+    /* Below 0x600 ntdll has no per-request cancel, and NtCancelIoFile would cancel the thread's other requests too */
+    UNREFERENCED_PARAMETER(hSocket);
+    UNREFERENCED_PARAMETER(IoStatusBlock);
+    UNREFERENCED_PARAMETER(Timeout);
+    MsafdWaitForAlert(hEvent);
+#endif
 }
 
 /*

@@ -13,6 +13,15 @@
 #define HANG_MS 4000
 #define NO_BYTES 0xdeadbeef
 
+/* msafd cancels only the timed out request through NtCancelIoFileEx, which ntdll exports from 0x600 on; below that the
+ * time-out is not applied, and a datagram receive (recvfrom on UDP) is never timed out on ReactOS */
+#if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
+#define ROS_TIMEOUTS 1
+#else
+#define ROS_TIMEOUTS 0
+#endif
+#define TIMEOUTS_APPLY() (!is_reactos() || ROS_TIMEOUTS)
+
 typedef enum
 {
     ApiRecv,
@@ -465,6 +474,12 @@ Test_Udp(void)
     int Length = sizeof(Address);
     RECV_JOB Job;
 
+    if (is_reactos())
+    {
+        skip("ReactOS does not time out a datagram socket: AFD leaks the buffers of a cancelled datagram receive\n");
+        return;
+    }
+
     Receiver = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     Sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     ZeroMemory(&Address, sizeof(Address));
@@ -529,6 +544,115 @@ Test_Overlapped(void)
     ok(Transferred == 2, "received %lu bytes\n", Transferred);
     WSACloseEvent(Overlapped.hEvent);
 
+    closesocket(Client);
+    closesocket(Server);
+}
+
+typedef struct
+{
+    SOCKET Socket;
+    HANDLE Issued;
+    HANDLE Done;
+    WSAOVERLAPPED Overlapped;
+    char Data[16];
+    int Result;
+    int Error;
+    DWORD Elapsed;
+    int Pending;
+} SAME_THREAD;
+
+static
+DWORD
+WINAPI
+SameThreadProc(LPVOID Context)
+{
+    SAME_THREAD *Job = Context;
+    WSABUF Buffer;
+    DWORD Bytes = 0, Flags = 0, Start;
+    char Small[16];
+    int Result;
+
+    Buffer.buf = Job->Data;
+    Buffer.len = sizeof(Job->Data);
+    Result = WSARecv(Job->Socket, &Buffer, 1, &Bytes, &Flags, &Job->Overlapped, NULL);
+    Job->Pending = (Result == SOCKET_ERROR && WSAGetLastError() == WSA_IO_PENDING);
+
+    /* the blocking receive of the same thread on the same socket */
+    Start = GetTickCount();
+    Job->Result = recv(Job->Socket, Small, sizeof(Small), 0);
+    Job->Error = (Job->Result == SOCKET_ERROR) ? WSAGetLastError() : 0;
+    Job->Elapsed = GetTickCount() - Start;
+    SetEvent(Job->Issued);
+
+    /* a request of an exiting thread is cancelled, so the thread stays until the test has looked at it */
+    WaitForSingleObject(Job->Done, 20000);
+    return 0;
+}
+
+static
+void
+Test_PendingSurvives(void)
+{
+    static const DWORD Timeout = 250;
+    SOCKET Client, Server;
+    SAME_THREAD Job;
+    HANDLE Thread;
+    DWORD Transferred = 0, Flags = 0;
+    BOOL Ok, Ended;
+
+    if (!OpenPair(&Client, &Server, WSA_FLAG_OVERLAPPED))
+        return;
+
+    /* the time-out of a blocking receive cancels that request and no other one of the thread */
+    SetTimeout(Client, SO_RCVTIMEO, Timeout);
+    ZeroMemory(&Job, sizeof(Job));
+    Job.Socket = Client;
+    Job.Issued = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Job.Done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Job.Overlapped.hEvent = WSACreateEvent();
+    Thread = CreateThread(NULL, 0, SameThreadProc, &Job, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed\n");
+    if (!Thread)
+        goto Done;
+
+    if (WaitForSingleObject(Job.Issued, HANG_MS) != WAIT_OBJECT_0)
+    {
+        ok(0, "the blocking receive did not return within %d ms\n", HANG_MS);
+        send(Server, "R", 1, 0);
+        WaitForSingleObject(Job.Issued, HANG_MS);
+    }
+    else
+    {
+        ok(Job.Pending, "the overlapped receive was not pending\n");
+        ok(Job.Result == SOCKET_ERROR && Job.Error == WSAETIMEDOUT, "recv returned %d, error %d\n", Job.Result, Job.Error);
+        ok(Job.Elapsed + SLACK_BELOW >= Timeout, "recv returned after %lu ms\n", Job.Elapsed);
+    }
+
+    Ended = (WaitForSingleObject(Job.Overlapped.hEvent, 300) == WAIT_OBJECT_0);
+    if (is_reactos())
+        ok(!Ended, "the overlapped receive ended with the time-out of the other one\n");
+
+    if (Ended && !is_reactos())
+    {
+        /* Windows 10 aborts it (error 995): its time-out cancels all the thread's requests on the socket */
+        skip("Windows cancelled the overlapped receive with the time-out of the other one\n");
+    }
+    else if (!Ended)
+    {
+        ok(send(Server, "ov", 2, 0) == 2, "send failed: %d\n", WSAGetLastError());
+        ok(WaitForSingleObject(Job.Overlapped.hEvent, 5000) == WAIT_OBJECT_0, "the overlapped receive did not complete\n");
+        Ok = WSAGetOverlappedResult(Client, &Job.Overlapped, &Transferred, FALSE, &Flags);
+        ok(Ok && Transferred >= 1, "the overlapped receive failed: %d, %lu bytes\n", WSAGetLastError(), Transferred);
+    }
+
+    SetEvent(Job.Done);
+    WaitForSingleObject(Thread, 5000);
+    CloseHandle(Thread);
+
+Done:
+    WSACloseEvent(Job.Overlapped.hEvent);
+    CloseHandle(Job.Issued);
+    CloseHandle(Job.Done);
     closesocket(Client);
     closesocket(Server);
 }
@@ -852,12 +976,20 @@ START_TEST(sotimeout)
     ok(WSAStartup(MAKEWORD(2, 2), &Data) == 0, "WSAStartup failed\n");
 
     Test_Defaults();
+    if (!TIMEOUTS_APPLY())
+    {
+        skip("this build of msafd does not apply time-outs (DLL_EXPORT_VERSION below 0x600)\n");
+        WSACleanup();
+        return;
+    }
+
     Test_RecvTimeout();
     Test_RecvApis();
     Test_NoTimeout();
     Test_Accepted();
     Test_Udp();
     Test_Overlapped();
+    Test_PendingSurvives();
     Test_NonBlocking();
     Test_NonOverlappedSocket();
     Test_Race();
