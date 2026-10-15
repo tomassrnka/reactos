@@ -564,12 +564,8 @@ ConDllInitialize(IN ULONG Reason,
         }
         else if (Reason == DLL_PROCESS_DETACH)
         {
-            /* Free our resources */
-            if (ConsoleInitialized != FALSE)
-            {
-                ConsoleInitialized = FALSE;
-                RtlDeleteCriticalSection(&ConsoleLock);
-            }
+            /* ConsoleLock stays valid: a control thread may be waiting for it as the process exits */
+            ConsoleInitialized = FALSE;
         }
 
         return TRUE;

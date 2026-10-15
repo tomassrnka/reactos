@@ -97,6 +97,9 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
     DPRINT1("Console Dispatcher Active: %lx %lx\n", CodeAndFlag, nCode);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
+    /* kernel32 has detached: the process is exiting */
+    if (!ConsoleInitialized) ExitThread(0);
+
     switch(nCode)
     {
         case CTRL_C_EVENT:
@@ -160,9 +163,6 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
             ASSERT(FALSE);
             break;
     }
-
-    /* The process is exiting: kernel32 has detached and ConsoleLock is gone */
-    if (!ConsoleInitialized) ExitThread(0);
 
     RtlEnterCriticalSection(&ConsoleLock);
 
