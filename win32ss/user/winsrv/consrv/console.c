@@ -1286,7 +1286,8 @@ ConSrvRemoveConsole(
              * and then send the last close notification.
              */
             Console->NotifyLastClose = FALSE;
-            ConSrvConsoleCtrlEvent(CTRL_LAST_CLOSE_EVENT, Console->NotifiedLastCloseProcess);
+            if (!NT_SUCCESS(ConSrvConsoleCtrlEvent(CTRL_LAST_CLOSE_EVENT, Console->NotifiedLastCloseProcess)))
+                DPRINT1("CONSRV: Last-close notification could not be queued for delivery\n");
 
             /* Only now, reset the pointer */
             Console->NotifiedLastCloseProcess = NULL;
@@ -1381,6 +1382,7 @@ ConSrvCtrlEventThread(IN PVOID Parameter)
 {
     PLIST_ENTRY Entry;
     PCONSRV_CTRL_EVENT Event;
+    NTSTATUS Status;
 
     UNREFERENCED_PARAMETER(Parameter);
 
@@ -1401,7 +1403,10 @@ ConSrvCtrlEventThread(IN PVOID Parameter)
             RtlLeaveCriticalSection(&CtrlEventLock);
 
             Event = CONTAINING_RECORD(Entry, CONSRV_CTRL_EVENT, ListEntry);
-            ConSrvSendCtrlEvent(Event->ProcessHandle, Event->CtrlRoutine, Event->CtrlEvent, 0);
+            Status = ConSrvSendCtrlEvent(Event->ProcessHandle, Event->CtrlRoutine, Event->CtrlEvent, 0);
+            /* Delivery is asynchronous; a failed handler-thread creation cannot be returned to the caller, so record it */
+            if (!NT_SUCCESS(Status))
+                DPRINT1("CONSRV: Control event %lu delivery failed, Status = 0x%08lx\n", Event->CtrlEvent, Status);
             NtClose(Event->ProcessHandle);
             ConsoleFreeHeap(Event);
         }
@@ -1417,7 +1422,13 @@ ConSrvInitCtrlEvents(VOID)
     HANDLE Thread;
     CLIENT_ID ClientId;
 
-    RtlInitializeCriticalSection(&CtrlEventLock);
+    Status = RtlInitializeCriticalSection(&CtrlEventLock);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CONSRV: Cannot initialize the control event lock, Status = 0x%08lx\n", Status);
+        CtrlEventStatus = Status;
+        return;
+    }
     InitializeListHead(&CtrlEventQueue);
 
     Status = NtCreateEvent(&CtrlEventWake, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
@@ -1439,7 +1450,15 @@ ConSrvInitCtrlEvents(VOID)
         return;
     }
     CsrAddStaticServerThread(Thread, &ClientId, 0);
-    NtResumeThread(Thread, NULL);
+
+    /* Only report ready once the worker is actually running */
+    Status = NtResumeThread(Thread, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CONSRV: Cannot resume the control event thread, Status = 0x%08lx\n", Status);
+        CtrlEventStatus = Status;
+        return;
+    }
     CtrlEventStatus = STATUS_SUCCESS;
 }
 
@@ -1467,8 +1486,7 @@ ConSrvConsoleCtrlEvent(IN ULONG CtrlEvent,
                        IN PCONSOLE_PROCESS_DATA ProcessData)
 {
     NTSTATUS Status;
-    PCONSRV_CTRL_EVENT Event, Queued;
-    PLIST_ENTRY Entry;
+    PCONSRV_CTRL_EVENT Event;
 
     if (ProcessData->CtrlRoutine == NULL) return STATUS_SUCCESS;
     if (!NT_SUCCESS(CtrlEventStatus)) return CtrlEventStatus;
@@ -1495,21 +1513,7 @@ ConSrvConsoleCtrlEvent(IN ULONG CtrlEvent,
 
     RtlEnterCriticalSection(&CtrlEventLock);
 
-    /* Newest queued event of this process */
-    for (Entry = CtrlEventQueue.Blink; Entry != &CtrlEventQueue; Entry = Entry->Blink)
-    {
-        Queued = CONTAINING_RECORD(Entry, CONSRV_CTRL_EVENT, ListEntry);
-        if (Queued->ProcessId == Event->ProcessId) break;
-    }
-    if (Entry != &CtrlEventQueue &&
-        Queued->CtrlRoutine == Event->CtrlRoutine &&
-        Queued->CtrlEvent == Event->CtrlEvent)
-    {
-        RtlLeaveCriticalSection(&CtrlEventLock);
-        NtClose(Event->ProcessHandle);
-        ConsoleFreeHeap(Event);
-        return STATUS_SUCCESS;
-    }
+    /* Every event is distinct and must reach the handler: do not coalesce (Windows delivers each) */
     if (CtrlEventCount >= CONSRV_MAX_CTRL_EVENTS)
     {
         RtlLeaveCriticalSection(&CtrlEventLock);
@@ -1595,7 +1599,9 @@ ConSrvConsoleProcessCtrlEvent(IN PCONSRV_CONSOLE Console,
          */
         if (ProcessGroupId == 0 || current->Process->ProcessGroupId == ProcessGroupId)
         {
-            Status = ConSrvConsoleCtrlEvent(CtrlEvent, current);
+            NTSTATUS EventStatus = ConSrvConsoleCtrlEvent(CtrlEvent, current);
+            /* A failed recipient must not be masked by a later success */
+            if (!NT_SUCCESS(EventStatus)) Status = EventStatus;
         }
     }
 
