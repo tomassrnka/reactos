@@ -665,7 +665,12 @@ HidParser_InitReportItem(
         ReportItem->Mask = 0xFFFFFFFF;
     else
         ReportItem->Mask = ~(0xFFFFFFFF << GlobalItemState->ReportSize);
-    ReportItem->BitCount = GlobalItemState->ReportSize;
+    //
+    // BitCount is a UCHAR: a wider field is clamped to 0xFF rather than
+    // truncated (256 would become 0). Any value above 32 marks the field as
+    // wide, which every value API refuses; offsets use the full ULONG width.
+    //
+    ReportItem->BitCount = (UCHAR)min(GlobalItemState->ReportSize, 0xFF);
     ReportItem->HasData = (ItemData->DataConstant == FALSE);
     ReportItem->Array = (ItemData->ArrayVariable == 0);
     ReportItem->Relative = (ItemData->Relative != FALSE);
@@ -1286,7 +1291,16 @@ HidParser_ParseReportDescriptor(
 
                     case ITEM_TAG_GLOBAL_REPORT_ID:
                         DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_ID %x\n", Data);
-                        ParserContext->GlobalItemState.ReportId = Data;
+                        //
+                        // report IDs are 1..255 (0 is reserved); anything else
+                        // would be truncated into the UCHAR identifier
+                        //
+                        if (Data == 0 || Data > 0xFF)
+                        {
+                            Status = HIDP_STATUS_INTERNAL_ERROR;
+                            goto ParseError;
+                        }
+                        ParserContext->GlobalItemState.ReportId = (UCHAR)Data;
                         ParserContext->UseReportIDs = TRUE;
                         break;
 

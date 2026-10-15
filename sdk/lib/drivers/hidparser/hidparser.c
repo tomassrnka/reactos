@@ -63,6 +63,15 @@ HidParser_GetCollectionDescription(
     // get collection count
     //
     CollectionCount = HidParser_NumberOfTopCollections(ParserContext);
+    //
+    // CollectionNumber is a UCHAR (1-based): more than 255 top-level
+    // collections cannot be numbered without wrapping
+    //
+    if (CollectionCount > 0xFF)
+    {
+        HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
+        return HIDP_STATUS_INTERNAL_ERROR;
+    }
     if (CollectionCount == 0)
     {
         //
