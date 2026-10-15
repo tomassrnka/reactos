@@ -5988,7 +5988,7 @@ MmExtendSection(
             if (Segment->RawLength.QuadPart < NewSize->QuadPart)
             {
                 Segment->RawLength = *NewSize;
-                Segment->Length.QuadPart = (NewSize->QuadPart + PAGE_SIZE - 1) & ~((LONGLONG)PAGE_SIZE);
+                Segment->Length.QuadPart = PAGE_ROUND_UP_64(NewSize->QuadPart);
             }
             MmUnlockSectionSegment(Segment);
         }
