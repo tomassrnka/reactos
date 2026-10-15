@@ -133,6 +133,40 @@ NtGdiResetDC(
 }
 
 
+/* A DC holds a bitmap while the bitmap is selected into it or sits in one of its saved states */
+BOOL
+FASTCALL
+DC_bSurfaceInSavedState(
+    _In_ PDC pdc,
+    _In_ PSURFACE psurf)
+{
+    HDC hdcSave = pdc->dclevel.hdcSave;
+    BOOL bFound = FALSE;
+
+    while (hdcSave && !bFound)
+    {
+        PDC pdcSave = DC_LockDc(hdcSave);
+        if (!pdcSave)
+            break;
+        bFound = (pdcSave->dclevel.pSurface == psurf);
+        hdcSave = pdcSave->dclevel.hdcSave;
+        DC_UnlockDc(pdcSave);
+    }
+    return bFound;
+}
+
+/* The DC lets go of a bitmap: it stays marked as selected only while the DC still holds it */
+VOID
+FASTCALL
+DC_vReleaseSurface(
+    _In_ PDC pdc,
+    _In_opt_ PSURFACE psurf)
+{
+    if (!psurf || psurf == pdc->dclevel.pSurface || DC_bSurfaceInSavedState(pdc, psurf))
+        return;
+    InterlockedCompareExchangePointer((PVOID*)&psurf->hdc, NULL, pdc->BaseObject.hHmgr);
+}
+
 VOID
 NTAPI
 DC_vRestoreDC(
@@ -141,6 +175,7 @@ DC_vRestoreDC(
 {
     HDC hdcSave;
     PDC pdcSave;
+    PSURFACE psurfPrev;
 
     NT_ASSERT(iSaveLevel > 0);
     DPRINT("DC_vRestoreDC(%p, %ld)\n", pdc->BaseObject.hHmgr, iSaveLevel);
@@ -174,6 +209,7 @@ DC_vRestoreDC(
 
         /* Remove the saved dc from the queue */
         pdc->dclevel.hdcSave = pdcSave->dclevel.hdcSave;
+        psurfPrev = NULL;
 
         /* Decrement save level */
         pdc->dclevel.lSaveDepth--;
@@ -186,11 +222,37 @@ DC_vRestoreDC(
 
             /* Only memory DC's change their surface */
             if (pdc->dctype == DCTYPE_MEMORY)
+            {
+                /* The bitmap that leaves is still needed below to release its mark */
+                psurfPrev = pdc->dclevel.pSurface;
+                if (psurfPrev)
+                    GDIOBJ_vReferenceObjectByPointer((POBJ)psurfPrev);
+
                 DC_vSelectSurface(pdc, pdcSave->dclevel.pSurface);
+
+                /* The restored bitmap is held by this DC; it was marked while saved */
+                if (pdc->dclevel.pSurface)
+                {
+                    InterlockedCompareExchangePointer((PVOID*)&pdc->dclevel.pSurface->hdc,
+                                                      pdc->BaseObject.hHmgr,
+                                                      NULL);
+                }
+            }
 
             if (pdcSave->dclevel.hPath)
             {
                PATH_RestorePath( pdc, pdcSave );
+            }
+        }
+
+        /* The bitmaps that this state and the restore let go of are free, unless a state still holds them */
+        if (pdc->dctype == DCTYPE_MEMORY)
+        {
+            DC_vReleaseSurface(pdc, pdcSave->dclevel.pSurface);
+            if (psurfPrev)
+            {
+                DC_vReleaseSurface(pdc, psurfPrev);
+                SURFACE_ShareUnlockSurface(psurfPrev);
             }
         }
 
