@@ -556,6 +556,17 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                                        a[10], a[11], a[12], P(13));
         if (!NT_SUCCESS(Status)) Cleanup->Handle = NULL;
         StoreIo(a[3], &Io); RETURN_HANDLE();
+    case W64_NtLockFile:
+        return NtLockFile(H(0), H(1),
+                         a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
+                         P(3), (PVOID)(0x8000000000000000ULL | a[4]),
+                         P(5), P(6), a[7], a[8], a[9]);
+    case W64_NtUnlockFile:
+        ProbeOutput(a[1], sizeof(WOW64_IOSB));
+        /* Native unlock waits for completion, including asynchronous handles. */
+        Status = NtUnlockFile(H(0), &Io, P(2), P(3), a[4]);
+        StoreIo(a[1], &Io);
+        return Status;
     case W64_NtDeviceIoControlFile:
     {
         PIO_APC_ROUTINE Routine = a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL;

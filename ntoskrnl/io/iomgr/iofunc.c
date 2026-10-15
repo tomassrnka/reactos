@@ -1840,7 +1840,19 @@ NtLockFile(IN HANDLE FileHandle,
     NTSTATUS Status;
     OBJECT_HANDLE_INFORMATION HandleInformation;
     PFAST_IO_DISPATCH FastIoDispatch;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Wow64Iosb = FALSE;
+#endif
     PAGED_CODE();
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Explicit guest IOSB marker, shared with read/write/device control. */
+    if (PreviousMode == UserMode && PsGetCurrentProcess()->Wow64Process &&
+        ((ULONG64)IoStatusBlock >> 32) == 0x80000000)
+    {
+        Wow64Iosb = TRUE;
+        IoStatusBlock = (PVOID)(ULONG_PTR)(ULONG)(ULONG_PTR)IoStatusBlock;
+    }
+#endif
     CapturedByteOffset.QuadPart = 0;
     CapturedLength.QuadPart = 0;
     IOTRACE(IO_API_DEBUG, "FileHandle: %p\n", FileHandle);
@@ -1877,7 +1889,11 @@ NtLockFile(IN HANDLE FileHandle,
         _SEH2_TRY
         {
             /* Probe the I/O STatus block */
-            ProbeForWriteIoStatusBlock(IoStatusBlock);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            if (Wow64Iosb) ProbeForWrite(IoStatusBlock, sizeof(IO_STATUS_BLOCK32), sizeof(ULONG));
+            else
+#endif
+                ProbeForWriteIoStatusBlock(IoStatusBlock);
 
             /* Probe and capture the large integers */
             CapturedByteOffset = ProbeForReadLargeInteger(ByteOffset);
@@ -1934,7 +1950,16 @@ NtLockFile(IN HANDLE FileHandle,
             /* Write the IOSB back */
             _SEH2_TRY
             {
-                *IoStatusBlock = KernelIosb;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                if (Wow64Iosb)
+                {
+                    ((PIO_STATUS_BLOCK32)IoStatusBlock)->Information = (ULONG)KernelIosb.Information;
+                    KeMemoryBarrier();
+                    ((PIO_STATUS_BLOCK32)IoStatusBlock)->Status = KernelIosb.Status;
+                }
+                else
+#endif
+                    *IoStatusBlock = KernelIosb;
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1996,6 +2021,9 @@ NtLockFile(IN HANDLE FileHandle,
     /* Set up the IRP */
     Irp->RequestorMode = PreviousMode;
     Irp->UserIosb = IoStatusBlock;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Wow64Iosb) Irp->Flags |= IRP_WOW64_IO_STATUS;
+#endif
     Irp->UserEvent = Event;
     Irp->Tail.Overlay.Thread = PsGetCurrentThread();
     Irp->Tail.Overlay.OriginalFileObject = FileObject;

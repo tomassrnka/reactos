@@ -213,3 +213,7 @@ target_include_directories(wow64_loadfrom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..
 set_module_type(wow64_loadfrom win32cui)
 target_link_libraries(wow64_loadfrom wine ${PSEH_LIB})
 add_importlibs(wow64_loadfrom ntdll msvcrt kernel32)
+
+add_executable(wow64_file_lock EXCLUDE_FROM_ALL file_lock.c)
+set_module_type(wow64_file_lock win32cui)
+add_importlibs(wow64_file_lock msvcrt kernel32)
