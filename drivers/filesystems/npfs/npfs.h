@@ -272,6 +272,7 @@ typedef struct _NP_CCB
     NP_DATA_QUEUE DataQueue[2];
     PSECURITY_CLIENT_CONTEXT ClientContext;
     LIST_ENTRY IrpList;
+    LONGLONG IndexNumber;
 } NP_CCB, *PNP_CCB;
 
 /* A Volume Control Block (VCB) */

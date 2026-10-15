@@ -217,11 +217,11 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
                 IN OUT PULONG Length)
 {
     PFILE_NAME_INFORMATION InfoBuffer = Buffer;
-    USHORT NameLength;
+    USHORT NameLength, CopyLength;
     NTSTATUS Status;
     PWCHAR Name;
 
-    *Length -= sizeof(*InfoBuffer);
+    *Length -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
 
     if (Ccb->NodeType == NPFS_NTC_ROOT_DCB_CCB)
     {
@@ -234,20 +234,22 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
         Name = Ccb->Fcb->FullName.Buffer;
     }
 
+    /* A short buffer gets what fits, and the length of the whole name */
     if (*Length < NameLength)
     {
         Status = STATUS_BUFFER_OVERFLOW;
-        NameLength = (USHORT)*Length;
+        CopyLength = (USHORT)*Length;
     }
     else
     {
         Status = STATUS_SUCCESS;
+        CopyLength = NameLength;
     }
 
-    RtlCopyMemory(InfoBuffer->FileName, Name, NameLength);
+    RtlCopyMemory(InfoBuffer->FileName, Name, CopyLength);
     InfoBuffer->FileNameLength = NameLength;
 
-    *Length -= NameLength;
+    *Length -= CopyLength;
     return Status;
 }
 
@@ -261,7 +263,7 @@ NpQueryInternalInfo(IN PNP_CCB Ccb,
 
     *Length -= sizeof(*InfoBuffer);
 
-    RtlZeroMemory(InfoBuffer, sizeof(*InfoBuffer));
+    InfoBuffer->IndexNumber.QuadPart = Ccb->IndexNumber;
 
     return STATUS_SUCCESS;
 }
@@ -399,6 +401,15 @@ NpCommonQueryInformation(IN PDEVICE_OBJECT DeviceObject,
         {
             return STATUS_INVALID_PARAMETER;
         }
+    }
+
+    /* The I/O manager does not check the length for kernel callers */
+    if (((InfoClass == FileNameInformation) &&
+         (Length < FIELD_OFFSET(FILE_NAME_INFORMATION, FileName))) ||
+        ((InfoClass == FileAllInformation) &&
+         (Length < FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName))))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
     }
 
     switch (InfoClass)
