@@ -17,6 +17,11 @@
 #include "precomp.h"
 #include <winioctl.h>
 #include <ntddstor.h>
+#include <wingdi.h>
+#include <winuser.h>
+#include <winreg.h>
+#include <setupapi.h>
+#include <cfgmgr32.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -161,17 +166,14 @@ static HANDLE WritePattern(PCSTR Leaf, LONGLONG Bytes)
     return File;
 }
 
-static BOOL VerifyPattern(PCSTR Leaf, LONGLONG Bytes)
+/* Reads the pattern of WritePattern back through File (opened without buffering) and closes it. */
+static BOOL VerifyPatternIn(HANDLE File, PCSTR What, LONGLONG Bytes)
 {
-    CHAR Name[32];
     PULONG Buffer = VirtualAlloc(NULL, (SIZE_T)MiB, MEM_COMMIT, PAGE_READWRITE);    /* sector-aligned, for uncached reads */
     LONGLONG Done;
     DWORD Count, i;
-    HANDLE File;
     BOOL Ok = TRUE;
 
-    sprintf(Name, "%c:\\%s", Letter, Leaf);
-    File = CreateFileA(Name, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
     Ok = File != INVALID_HANDLE_VALUE && Buffer && GetFileSize(File, NULL) == (DWORD)Bytes;
     for (Done = 0; Ok && Done < Bytes; Done += MiB)
     {
@@ -179,12 +181,21 @@ static BOOL VerifyPattern(PCSTR Leaf, LONGLONG Bytes)
         for (i = 0; Ok && i < MiB / sizeof(ULONG); i++)
             Ok = Buffer[i] == (0x5A000000 ^ (ULONG)(Done / sizeof(ULONG) + i));
     }
-    ok(Ok, "%s differs at %I64d (%lu)\n", Name, Done, GetLastError());
+    ok(Ok, "%s differs at %I64d (%lu)\n", What, Done, GetLastError());
     if (File != INVALID_HANDLE_VALUE)
         CloseHandle(File);
     if (Buffer)
         VirtualFree(Buffer, 0, MEM_RELEASE);
     return Ok;
+}
+
+static BOOL VerifyPattern(PCSTR Leaf, LONGLONG Bytes)
+{
+    CHAR Name[32];
+
+    sprintf(Name, "%c:\\%s", Letter, Leaf);
+    return VerifyPatternIn(CreateFileA(Name, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL),
+                           Name, Bytes);
 }
 
 /* Dismounts the volume through *Volume (locked first) and opens it again: the next access mounts what is on
@@ -217,6 +228,76 @@ static BOOL BootCopyAt(ULONG Disk, LONGLONG Offset, LONGLONG Sectors)
     CloseHandle(Handle);
     VirtualFree(Sector, 0, MEM_RELEASE);
     return Ok;
+}
+
+/* GUID_DEVINTERFACE_VOLUME */
+static const GUID VolumeInterfaceGuid = { 0x53f5630d, 0xb6bf, 0x11d0, { 0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b } };
+
+/* The device instance of the volume interface whose storage device number is Number's, or 0. */
+static DEVINST VolumeDevInst(PSTORAGE_DEVICE_NUMBER Number)
+{
+    BYTE Buffer[1024];
+    PSP_DEVICE_INTERFACE_DETAIL_DATA_W Detail = (PVOID)Buffer;
+    SP_DEVICE_INTERFACE_DATA Interface;
+    SP_DEVINFO_DATA Device;
+    STORAGE_DEVICE_NUMBER Other;
+    DEVINST Instance = 0;
+    DWORD Index, Returned;
+    HDEVINFO Set;
+    HANDLE Handle;
+
+    Set = SetupDiGetClassDevsW(&VolumeInterfaceGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (Set == INVALID_HANDLE_VALUE)
+        return 0;
+    Interface.cbSize = sizeof(Interface);
+    for (Index = 0; !Instance && SetupDiEnumDeviceInterfaces(Set, NULL, &VolumeInterfaceGuid, Index, &Interface); Index++)
+    {
+        Detail->cbSize = sizeof(*Detail);
+        Device.cbSize = sizeof(Device);
+        if (!SetupDiGetDeviceInterfaceDetailW(Set, &Interface, Detail, sizeof(Buffer), NULL, &Device))
+            continue;
+        Handle = CreateFileW(Detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (Handle == INVALID_HANDLE_VALUE)
+            continue;
+        if (DeviceIoControl(Handle, IOCTL_STORAGE_GET_DEVICE_NUMBER, NULL, 0, &Other, sizeof(Other), &Returned, NULL) &&
+            Other.DeviceType == Number->DeviceType && Other.DeviceNumber == Number->DeviceNumber &&
+            Other.PartitionNumber == Number->PartitionNumber)
+        {
+            Instance = Device.DevInst;
+        }
+        CloseHandle(Handle);
+    }
+    SetupDiDestroyDeviceInfoList(Set);
+    return Instance;
+}
+
+/*
+ * An orderly removal of the device under a mounted volume that has an open handle (the test's own
+ * volume handle) is refused, as Windows file systems refuse it, and the volume stays.  On ReactOS
+ * the file system answers the query (it comes through the volume's VPB); the request from user mode
+ * is not implemented there yet, so the test is skipped.
+ */
+static void TestQueryRemoveBusy(PSTORAGE_DEVICE_NUMBER Number)
+{
+    PNP_VETO_TYPE Veto = PNP_VetoTypeUnknown;
+    WCHAR Name[MAX_PATH] = L"";
+    DEVINST Instance = VolumeDevInst(Number);
+    CONFIGRET Result;
+
+    if (!Instance)
+    {
+        skip("No volume device for the scratch volume\n");
+        return;
+    }
+    Result = CM_Query_And_Remove_SubTreeW(Instance, &Veto, Name, RTL_NUMBER_OF(Name), CM_REMOVE_NO_RESTART);
+    if (Result == CR_CALL_NOT_IMPLEMENTED && is_reactos())
+    {
+        /* PiControlQueryRemoveDevice is a stub: the query cannot be sent from user mode yet */
+        skip("An orderly removal cannot be requested from user mode\n");
+        return;
+    }
+    ok(Result == CR_REMOVE_VETOED, "The removal of a volume with an open handle was not refused: %lu\n", Result);
+    ok(TotalBytes() != 0, "The volume is gone: %lu\n", GetLastError());
 }
 
 /* TRUE when the volume grew as expected (TestNtfsShrink depends on the free space it added). */
@@ -362,6 +443,201 @@ static void TestNtfsShrink(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX 
     ok_int(Shrink(Volume, ShrinkAbort, 0, 0), ERROR_SUCCESS);
     NtfsData(Volume, &Data);
     ok(Data.NumberSectors.QuadPart == Sectors, "NumberSectors %I64d, was %I64d\n", Data.NumberSectors.QuadPart, Sectors);
+}
+
+/* The GUID path (with its trailing backslash) of the volume whose one extent is Length bytes at Offset on disk Disk. */
+static BOOL FindVolumeAt(ULONG Disk, LONGLONG Offset, LONGLONG Length, PWCHAR Guid, DWORD Count)
+{
+    union { VOLUME_DISK_EXTENTS Extents; BYTE Raw[512]; } Buffer;
+    WCHAR Device[MAX_PATH];
+    DWORD Returned;
+    HANDLE Find, Handle;
+    BOOL Found = FALSE;
+    SIZE_T Len;
+
+    Find = FindFirstVolumeW(Guid, Count);
+    if (Find == INVALID_HANDLE_VALUE)
+        return FALSE;
+    do
+    {
+        wcscpy(Device, Guid);
+        Len = wcslen(Device);
+        if (Len && Device[Len - 1] == L'\\')
+            Device[Len - 1] = 0;
+        Handle = CreateFileW(Device, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (Handle == INVALID_HANDLE_VALUE)
+            continue;
+        ZeroMemory(&Buffer, sizeof(Buffer));
+        Found = DeviceIoControl(Handle, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, NULL, 0, &Buffer, sizeof(Buffer), &Returned, NULL) &&
+                Buffer.Extents.NumberOfDiskExtents == 1 && Buffer.Extents.Extents[0].DiskNumber == Disk &&
+                Buffer.Extents.Extents[0].StartingOffset.QuadPart == Offset &&
+                Buffer.Extents.Extents[0].ExtentLength.QuadPart == Length;
+        CloseHandle(Handle);
+    } while (!Found && FindNextVolumeW(Find, Guid, Count));
+    FindVolumeClose(Find);
+    return Found;
+}
+
+/* Writes, flushes and renames a file through one handle until told to stop, while the volume goes away. */
+typedef struct _RACE
+{
+    HANDLE File;
+    volatile LONG Stop;
+    LONG Done, Failed;
+} RACE, *PRACE;
+
+static DWORD WINAPI RaceThread(PVOID Context)
+{
+    PRACE Race = Context;
+    static BYTE Data[64 * 1024];
+    struct { FILE_RENAME_INFORMATION Info; WCHAR More[16]; } Rename;
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER Zero;
+    DWORD Written;
+    ULONG n;
+
+    Zero.QuadPart = 0;
+    for (n = 0; !Race->Stop && n < 100000; n++)
+    {
+        BOOL Ok = SetFilePointerEx(Race->File, Zero, NULL, FILE_BEGIN) &&
+                  WriteFile(Race->File, Data, sizeof(Data), &Written, NULL) && FlushFileBuffers(Race->File);
+        ZeroMemory(&Rename, sizeof(Rename));
+        Rename.Info.ReplaceIfExists = TRUE;
+        Rename.Info.FileNameLength = 9 * sizeof(WCHAR);
+        memcpy(Rename.Info.FileName, (n & 1) ? L"race1.bin" : L"race2.bin", 9 * sizeof(WCHAR));
+        Ok = NT_SUCCESS(NtSetInformationFile(Race->File, &Iosb, &Rename, sizeof(Rename), FileRenameInformation)) && Ok;
+        InterlockedIncrement(Ok ? &Race->Done : &Race->Failed);
+    }
+    return 0;
+}
+
+/*
+ * After a shrink the partition table is written again with the smaller partition while the volume
+ * is mounted.  Windows Server 2008 R2 then removes the volume and makes it anew, without the drive
+ * letter it had (it gets the next free one), unlike a shrink through IOCTL_DISK_GROW_PARTITION,
+ * which keeps the volume (TestNtfsShrink).  The new volume holds the shrunk file system with its
+ * files.  On ReactOS the file system on the old partition device gives it up at the removal, and
+ * the removal reaches the partition manager.
+ */
+static void TestNtfsShrinkTable(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
+{
+    BYTE Buffer[8192];
+    PDRIVE_LAYOUT_INFORMATION_EX Layout = (PVOID)Buffer;
+    NTFS_VOLUME_DATA_BUFFER Data;
+    LONGLONG Target = 0, Start = Part->StartingOffset.QuadPart;
+    WCHAR Guid[MAX_PATH], Path[MAX_PATH];
+    DWORD Returned, i;
+    HANDLE File, Handle, RaceThreadHandle = NULL, OldPartition;
+    BOOL Found = FALSE, Back = FALSE;
+    RACE Race = { INVALID_HANDLE_VALUE, 0, 0, 0 };
+
+    File = WritePattern("table.bin", 4 * MiB);
+    if (File != INVALID_HANDLE_VALUE)
+        CloseHandle(File);
+    if (!NtfsData(*Volume, &Data))
+    {
+        ok(FALSE, "FSCTL_GET_NTFS_VOLUME_DATA failed: %lu\n", GetLastError());
+        return;
+    }
+    Target = Data.NumberSectors.QuadPart + 1 - 8 * 2048;
+    ok_int(Shrink(*Volume, ShrinkPrepare, Target, 0), ERROR_SUCCESS);
+    if (Shrink(*Volume, ShrinkCommit, 0, 0) != ERROR_SUCCESS)
+    {
+        ok(FALSE, "ShrinkCommit failed: %lu\n", GetLastError());
+        Shrink(*Volume, ShrinkAbort, 0, 0);
+        return;
+    }
+    ok(FlushFileBuffers(*Volume), "Flushing the volume failed: %lu\n", GetLastError());
+    CloseHandle(*Volume);
+    *Volume = INVALID_HANDLE_VALUE;
+
+    /* A handle on the old partition device itself (no access: no mount), for a device control after the table changed. */
+    sprintf((PCHAR)Buffer, "\\\\.\\GLOBALROOT\\Device\\Harddisk%lu\\Partition%lu", Disk, Part->PartitionNumber);
+    OldPartition = CreateFileA((PCSTR)Buffer, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(OldPartition != INVALID_HANDLE_VALUE, "Opening %s failed: %lu\n", (PCSTR)Buffer, GetLastError());
+
+    /* A file of the old volume is written, flushed and renamed all the time while it goes away: the
+     * requests that are under way then must fail, not crash. */
+    sprintf((PCHAR)Buffer, "%c:\\race1.bin", Letter);
+    Race.File = CreateFileA((PCSTR)Buffer, GENERIC_READ | GENERIC_WRITE | DELETE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(Race.File != INVALID_HANDLE_VALUE, "Creating %s failed: %lu\n", (PCSTR)Buffer, GetLastError());
+    RaceThreadHandle = Race.File != INVALID_HANDLE_VALUE ? CreateThread(NULL, 0, RaceThread, &Race, 0, NULL) : NULL;
+    for (i = 0; RaceThreadHandle && i < 100 && !Race.Done; i++)
+        Sleep(50);
+
+    Handle = OpenDisk(Disk, GENERIC_READ | GENERIC_WRITE);
+    if (!DeviceIoControl(Handle, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, NULL, 0, Layout, sizeof(Buffer), &Returned, NULL))
+    {
+        ok(FALSE, "IOCTL_DISK_GET_DRIVE_LAYOUT_EX failed: %lu\n", GetLastError());
+        CloseHandle(Handle);
+        return;
+    }
+    for (i = 0; i < Layout->PartitionCount; i++)
+    {
+        Layout->PartitionEntry[i].RewritePartition = FALSE;
+        if (Layout->PartitionEntry[i].StartingOffset.QuadPart == Start && Layout->PartitionEntry[i].PartitionLength.QuadPart)
+        {
+            Layout->PartitionEntry[i].PartitionLength.QuadPart = Target * 512;
+            Layout->PartitionEntry[i].RewritePartition = TRUE;
+            Found = TRUE;
+        }
+    }
+    ok(Found, "No layout entry at %I64d\n", Start);
+    ok(DeviceIoControl(Handle, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, Layout,
+                       FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry[Layout->PartitionCount]),
+                       NULL, 0, &Returned, NULL),
+       "IOCTL_DISK_SET_DRIVE_LAYOUT_EX failed: %lu\n", GetLastError());
+    DeviceIoControl(Handle, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &Returned, NULL);
+    CloseHandle(Handle);
+
+    /* The new volume may take a moment to appear. */
+    for (i = 0; i < 60 && !Back; i++)
+    {
+        Back = FindVolumeAt(Disk, Start, Target * 512, Guid, MAX_PATH);
+        if (!Back)
+            Sleep(500);
+    }
+    if (RaceThreadHandle)
+    {
+        LONG Before = Race.Failed;
+        DWORD Written;
+
+        Sleep(1000);
+        InterlockedExchange(&Race.Stop, 1);
+        ok(WaitForSingleObject(RaceThreadHandle, 30000) == WAIT_OBJECT_0, "The racing requests did not end\n");
+        CloseHandle(RaceThreadHandle);
+        trace("racing requests: %ld succeeded, %ld failed (%ld before the new volume was there)\n", Race.Done, Race.Failed, Before);
+        ok(Race.Done > 0, "No request on the old volume succeeded before the table changed\n");
+        ok(!WriteFile(Race.File, Buffer, 512, &Written, NULL), "A write to the removed volume succeeded\n");
+    }
+    if (Race.File != INVALID_HANDLE_VALUE)
+        CloseHandle(Race.File);
+    if (OldPartition != INVALID_HANDLE_VALUE)
+    {
+        PARTITION_INFORMATION_EX Info;
+
+        /* ReactOS: the partition device left the layout and takes no device control (behaviour on Windows not measured) */
+        if (is_reactos())
+            ok(!DeviceIoControl(OldPartition, IOCTL_DISK_GET_PARTITION_INFO_EX, NULL, 0, &Info, sizeof(Info), &Returned, NULL),
+               "The old partition device still answers IOCTL_DISK_GET_PARTITION_INFO_EX\n");
+        CloseHandle(OldPartition);
+    }
+    ok(Back, "No volume with a %I64d-byte partition at %I64d\n", Target * 512, Start);
+    if (!Back)
+        return;
+    wcscpy(Path, Guid);
+    Path[wcslen(Path) - 1] = 0;
+    Handle = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "The new volume does not open: %lu\n", GetLastError());
+    if (Handle == INVALID_HANDLE_VALUE)
+        return;
+    ok(NtfsData(Handle, &Data), "No NTFS on the new volume: %lu\n", GetLastError());
+    ok(Data.NumberSectors.QuadPart == Target - 1, "NumberSectors %I64d, expected %I64d\n", Data.NumberSectors.QuadPart, Target - 1);
+    CloseHandle(Handle);
+    wcscat(Guid, L"table.bin");
+    ok(VerifyPatternIn(CreateFileW(Guid, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL),
+                       "table.bin on the new volume", 4 * MiB),
+       "The file did not survive the new table\n");
 }
 
 /*
@@ -603,10 +879,17 @@ START_TEST(ExtendVolume)
             TestNtfsFault(&Volume, Number.DeviceNumber, &Part, strtoul(Value, NULL, 10));
         else if (GetEnvironmentVariableA("PARTMGR_TEST_HUGE", Value, sizeof(Value)) && is_reactos())
             TestNtfsHuge(Volume, Number.DeviceNumber, &Part);
-        else if (TestNtfs(Volume, Number.DeviceNumber, &Part))
-            TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
         else
-            skip("NTFS volume did not grow: no shrink tests\n");
+        {
+            TestQueryRemoveBusy(&Number);
+            if (TestNtfs(Volume, Number.DeviceNumber, &Part))
+            {
+                TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
+                TestNtfsShrinkTable(&Volume, Number.DeviceNumber, &Part);
+            }
+            else
+                skip("NTFS volume did not grow: no shrink tests\n");
+        }
     }
     else if (!strncmp(FileSystem, "FAT", 3))
         TestFat(&Volume, Number.DeviceNumber, &Part, FileSystem);
