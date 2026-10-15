@@ -134,17 +134,35 @@ CON_API(SrvSetConsoleDisplayMode,
 
     ASSERT((PCONSOLE)Console == Buff->Header.Console);
 
-    if (TermSetDisplayMode(Console, SetDisplayModeRequest->DisplayMode))
-    {
-        SetDisplayModeRequest->NewSBDim = Buff->ScreenBufferSize;
-        Status = STATUS_SUCCESS;
-    }
-    else
+    if (SetDisplayModeRequest->DisplayMode & ~(CONSOLE_FULLSCREEN_MODE | CONSOLE_WINDOWED_MODE))
     {
         Status = STATUS_INVALID_PARAMETER;
     }
+    else if (!TermSetDisplayMode(Console, SetDisplayModeRequest->DisplayMode))
+    {
+        /* The GUI terminal could not wait until the mode was applied */
+        Status = STATUS_IO_TIMEOUT;
+    }
+    else
+    {
+        /*
+         * The GUI terminal waits for its window thread with the console
+         * unlocked: meanwhile the buffer may be closed, or the process may
+         * have moved to another console and reused the handle value. Use it
+         * only if it is still a buffer of this console.
+         */
+        Status = ConSrvGetObjectOfLockedConsole(ProcessData,
+                                                SetDisplayModeRequest->OutputHandle,
+                                                (PCONSOLE)Console,
+                                                (PCONSOLE_IO_OBJECT*)&Buff,
+                                                GENERIC_WRITE,
+                                                SCREEN_BUFFER);
+        if (NT_SUCCESS(Status))
+            SetDisplayModeRequest->NewSBDim = Buff->ScreenBufferSize;
+    }
 
-    ConSrvReleaseScreenBuffer(Buff, TRUE);
+    /* Not ConSrvReleaseScreenBuffer: Buff may be gone */
+    ConSrvReleaseConsole(Console, TRUE);
     return Status;
 }
 

@@ -20,10 +20,6 @@
 #include "guiterm.h"
 #include "resource.h"
 
-// HACK!! Remove it when the hack in GuiWriteStream is fixed
-#define CONGUI_UPDATE_TIME    0
-#define CONGUI_UPDATE_TIMER   1
-
 #define PM_CREATE_CONSOLE     (WM_APP + 1)
 #define PM_DESTROY_CONSOLE    (WM_APP + 2)
 
@@ -48,8 +44,6 @@ extern HICON   ghDefaultIcon;
 extern HICON   ghDefaultIconSm;
 extern HCURSOR ghDefaultCursor;
 
-VOID
-SetConWndConsoleLeaderCID(IN PGUI_CONSOLE_DATA GuiData);
 BOOLEAN
 RegisterConWndClass(IN HINSTANCE hInstance);
 BOOLEAN
@@ -72,19 +66,71 @@ GuiConsoleMoveWindow(PGUI_CONSOLE_DATA GuiData)
     }
 }
 
+/*
+ * Locking
+ *
+ * Order: the console lock (Console->Lock), then the terminal lock
+ * (GuiData->Lock), then USER. A thread holding the terminal lock never takes
+ * the console lock and never calls USER, and no thread calls USER or waits for
+ * another thread while it holds the console lock, except as listed below.
+ *
+ * - Writers and the frontend callbacks run with the console locked, on any
+ *   thread. They only record what the window needs in GuiData and wake the
+ *   console input thread through its wake event, a kernel event
+ *   (GuiRequestWork).
+ * - The console input thread owns the console windows of its desktop and
+ *   their timers. It copies the recorded work and the buffer geometry under
+ *   the console lock, releases it, and then calls USER (GuiProcessWork).
+ *   WM_PAINT takes the console lock (and the terminal lock just to read the
+ *   active buffer), composes the framebuffer, and releases the console lock
+ *   before copying the framebuffer to the screen.
+ * - GuiData->ActiveBuffer changes only with both locks held, and a screen
+ *   buffer is destroyed only with the console locked, so a buffer read under
+ *   the console lock stays valid until that lock is released.
+ *
+ * Exceptions: GuiChangeIcon, GuiGetLargestConsoleWindowSize and GuiSetCodePage
+ * return a result computed by USER, RealizePalette on the
+ * framebuffer (a memory DC) goes through USER, and the input thread's keyboard,
+ * mouse, selection and sizing handlers act on their own window, all with the
+ * console locked. None of them sends a message to another thread, so they wait
+ * only for the USER lock, whose owner never waits for a console lock. The
+ * clipboard is used with the console unlocked. Known limit: the full-screen
+ * switch (Alt+Enter, SetConsoleDisplayMode) runs in the input thread with the
+ * console locked, and ChangeDisplaySettings sends WM_DISPLAYCHANGE to every
+ * top-level window with a 100 ms timeout each.
+ */
+
+/* Record work for the window thread and wake it. Never calls USER. */
+VOID
+GuiRequestWork(PGUI_CONSOLE_DATA GuiData, LONG Work)
+{
+    if (InterlockedOr(&GuiData->PendingWork, Work) == 0 && GuiData->hWakeEvent)
+        NtSetEvent(GuiData->hWakeEvent, NULL);
+}
+
+/* The console must be locked */
 static VOID
 DrawRegion(PGUI_CONSOLE_DATA GuiData,
            SMALL_RECT* Region)
 {
-    RECT RegionRect;
+    PSMALL_RECT Dirty = &GuiData->DirtyRegion;
 
-    SmallRectToRect(GuiData, &RegionRect, Region);
-    /* Do not erase the background: it speeds up redrawing and reduce flickering */
-    InvalidateRect(GuiData->hWindow, &RegionRect, FALSE);
-    /**UpdateWindow(GuiData->hWindow);**/
+    if (!GuiData->DirtyCells)
+    {
+        *Dirty = *Region;
+        GuiData->DirtyCells = TRUE;
+    }
+    else
+    {
+        Dirty->Left   = min(Dirty->Left  , Region->Left  );
+        Dirty->Top    = min(Dirty->Top   , Region->Top   );
+        Dirty->Right  = max(Dirty->Right , Region->Right );
+        Dirty->Bottom = max(Dirty->Bottom, Region->Bottom);
+    }
+    GuiRequestWork(GuiData, GUI_WORK_UPDATE);
 }
 
-VOID
+static VOID
 InvalidateCell(PGUI_CONSOLE_DATA GuiData,
                SHORT x, SHORT y)
 {
@@ -101,6 +147,19 @@ InvalidateCell(PGUI_CONSOLE_DATA GuiData,
 VOID
 CreateSysMenu(HWND hWnd);
 
+/* Run the recorded work of every console window of this thread */
+static VOID
+GuiProcessAllWork(PLIST_ENTRY WindowList)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = WindowList->Flink; Entry != WindowList; Entry = Entry->Flink)
+    {
+        PGUI_CONSOLE_DATA GuiData = CONTAINING_RECORD(Entry, GUI_CONSOLE_DATA, InputThreadLink);
+        if (GuiData->PendingWork) GuiProcessWork(GuiData, FALSE);
+    }
+}
+
 static ULONG NTAPI
 GuiConsoleInputThread(PVOID Param)
 {
@@ -110,6 +169,8 @@ GuiConsoleInputThread(PVOID Param)
     DESKTOP_CONSOLE_THREAD DesktopConsoleThreadInfo;
     ULONG_PTR InputThreadId = HandleToUlong(NtCurrentTeb()->ClientId.UniqueThread);
     HANDLE hThread = NULL;
+    HANDLE hWakeEvent = NULL;
+    LIST_ENTRY WindowList;
 
     LONG WindowCount = 0;
     MSG msg;
@@ -119,6 +180,15 @@ GuiConsoleInputThread(PVOID Param)
      * notification window. It is common for all the console windows
      * in a given desktop in a window station.
      */
+
+    InitializeListHead(&WindowList);
+
+    /*
+     * Writers set this event when they record work for one of our windows.
+     * Without it the windows still update from their blink timer.
+     */
+    if (!NT_SUCCESS(NtCreateEvent(&hWakeEvent, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE)))
+        hWakeEvent = NULL;
 
     /* Assign this console input thread to this desktop */
     DesktopConsoleThreadInfo.DesktopHandle = GuiInitInfo->Desktop; // Duplicated desktop handle
@@ -140,8 +210,26 @@ GuiConsoleInputThread(PVOID Param)
     NtSetEvent(GuiInitInfo->GuiThreadStartupEvent, NULL);
     Status = STATUS_SUCCESS;
 
-    while (GetMessageW(&msg, NULL, 0, 0))
+    for (;;)
     {
+        if (!PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+        {
+            /* Wait for a message or for work recorded by a writer */
+            if (MsgWaitForMultipleObjectsEx(hWakeEvent ? 1 : 0, &hWakeEvent, INFINITE,
+                                            QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_OBJECT_0 &&
+                hWakeEvent)
+            {
+                GuiProcessAllWork(&WindowList);
+            }
+            continue;
+        }
+
+        if (msg.message == WM_QUIT) break;
+
+        /* Do not let a stream of messages delay the output */
+        if (hWakeEvent && WaitForSingleObject(hWakeEvent, 0) == WAIT_OBJECT_0)
+            GuiProcessAllWork(&WindowList);
+
         switch (msg.message)
         {
             case PM_CREATE_CONSOLE:
@@ -152,6 +240,8 @@ GuiConsoleInputThread(PVOID Param)
                 RECT rcWnd;
 
                 DPRINT("PM_CREATE_CONSOLE -- creating window\n");
+
+                GuiData->hWakeEvent = hWakeEvent;
 
                 NewWindow = CreateWindowExW(WS_EX_CLIENTEDGE,
                                             GUI_CONWND_CLASS,
@@ -168,12 +258,21 @@ GuiConsoleInputThread(PVOID Param)
                 if (NewWindow == NULL)
                 {
                     DPRINT1("Failed to create a new console window\n");
+                    /* GuiInitFrontEnd waits for this and then sees hWindow == NULL */
+                    GuiData->hWindow = NULL;
+                    GuiData->hWakeEvent = NULL;
+                    if (!GuiData->InitEventSet)
+                    {
+                        GuiData->InitEventSet = TRUE;
+                        NtSetEvent(GuiData->hGuiInitEvent, NULL);
+                    }
                     continue;
                 }
 
                 ASSERT(NewWindow == GuiData->hWindow);
 
                 _InterlockedIncrement(&WindowCount);
+                InsertTailList(&WindowList, &GuiData->InputThreadLink);
 
                 //
                 // FIXME: TODO: Move everything there into conwnd.c!OnNcCreate()
@@ -217,25 +316,29 @@ GuiConsoleInputThread(PVOID Param)
             case PM_DESTROY_CONSOLE:
             {
                 PGUI_CONSOLE_DATA GuiData = (PGUI_CONSOLE_DATA)msg.lParam;
-                MSG TempMsg;
 
                 /* Exit the full screen mode if it was already set */
                 // LeaveFullScreen(GuiData);
 
                 /*
-                 * Window creation is done using a PostMessage(), so it's possible
-                 * that the window that we want to destroy doesn't exist yet.
-                 * So first empty the message queue.
+                 * PM_CREATE_CONSOLE for this console was handled before:
+                 * GuiInitFrontEnd waits for it. Do not empty the queue here:
+                 * DispatchMessage drops thread messages, so the creation or
+                 * destruction of another console would be lost and its
+                 * caller would wait forever.
                  */
-                while (PeekMessageW(&TempMsg, NULL, 0, 0, PM_REMOVE))
+                if (GuiData->hWindow == NULL)
                 {
-                    DispatchMessageW(&TempMsg);
+                    NtSetEvent(GuiData->hGuiTermEvent, NULL);
+                    continue;
                 }
 
-                if (GuiData->hWindow == NULL) continue;
+                RemoveEntryList(&GuiData->InputThreadLink);
+                InitializeListHead(&GuiData->InputThreadLink);
 
                 DestroyWindow(GuiData->hWindow);
 
+                GuiData->hWakeEvent = NULL;
                 NtSetEvent(GuiData->hGuiTermEvent, NULL);
 
                 if (_InterlockedDecrement(&WindowCount) == 0)
@@ -273,6 +376,8 @@ Quit:
 
         CsrDereferenceThread(pcsrt);
     }
+
+    if (hWakeEvent) NtClose(hWakeEvent);
 
     /* Exit the thread */
     RtlExitUserThread(Status);
@@ -507,6 +612,7 @@ GuiInitFrontEnd(IN OUT PFRONTEND This,
     Console->FixedSize = FALSE;
 
     InitializeCriticalSection(&GuiData->Lock);
+    InitializeListHead(&GuiData->InputThreadLink);
 
     /*
      * Set up GUI data
@@ -567,15 +673,26 @@ GuiInitFrontEnd(IN OUT PFRONTEND This,
                   NULL, SynchronizationEvent, FALSE);
     NtCreateEvent(&GuiData->hGuiTermEvent, EVENT_ALL_ACCESS,
                   NULL, SynchronizationEvent, FALSE);
+    if (!NT_SUCCESS(NtCreateEvent(&GuiData->hDisplayModeEvent, EVENT_ALL_ACCESS,
+                                  NULL, SynchronizationEvent, FALSE)))
+    {
+        GuiData->hDisplayModeEvent = NULL;
+    }
 
     DPRINT("GUI - Checkpoint\n");
 
-    /* Create the terminal window */
-    PostThreadMessageW(GuiData->InputThreadId, PM_CREATE_CONSOLE, 0, (LPARAM)GuiData);
-
-    /* Wait until initialization has finished */
-    NtWaitForSingleObject(GuiData->hGuiInitEvent, FALSE, NULL);
-    DPRINT("OK we created the console window\n");
+    /* Create the terminal window; the input thread sets hGuiInitEvent */
+    if (PostThreadMessageW(GuiData->InputThreadId, PM_CREATE_CONSOLE, 0, (LPARAM)GuiData))
+    {
+        /* Wait until initialization has finished */
+        NtWaitForSingleObject(GuiData->hGuiInitEvent, FALSE, NULL);
+        DPRINT("OK we created the console window\n");
+    }
+    else
+    {
+        DPRINT1("CONSRV: Cannot post PM_CREATE_CONSOLE to the input thread, error %lu\n", GetLastError());
+        GuiData->hWindow = NULL;
+    }
     NtClose(GuiData->hGuiInitEvent);
     GuiData->hGuiInitEvent = NULL;
 
@@ -596,11 +713,19 @@ GuiDeinitFrontEnd(IN OUT PFRONTEND This)
     PGUI_CONSOLE_DATA GuiData = This->Context;
 
     DPRINT("Send PM_DESTROY_CONSOLE message and wait on hGuiTermEvent...\n");
-    PostThreadMessageW(GuiData->InputThreadId, PM_DESTROY_CONSOLE, 0, (LPARAM)GuiData);
-    NtWaitForSingleObject(GuiData->hGuiTermEvent, FALSE, NULL);
-    DPRINT("hGuiTermEvent set\n");
+    if (PostThreadMessageW(GuiData->InputThreadId, PM_DESTROY_CONSOLE, 0, (LPARAM)GuiData))
+    {
+        NtWaitForSingleObject(GuiData->hGuiTermEvent, FALSE, NULL);
+        DPRINT("hGuiTermEvent set\n");
+    }
+    else
+    {
+        DPRINT1("CONSRV: Cannot post PM_DESTROY_CONSOLE to the input thread, error %lu\n", GetLastError());
+    }
     NtClose(GuiData->hGuiTermEvent);
     GuiData->hGuiTermEvent = NULL;
+    if (GuiData->hDisplayModeEvent) NtClose(GuiData->hDisplayModeEvent);
+    GuiData->hDisplayModeEvent = NULL;
 
     CloseDesktop(GuiData->Desktop); // NtUserCloseDesktop
     CloseWindowStation(GuiData->WinSta); // NtUserCloseWindowStation
@@ -649,7 +774,6 @@ GuiWriteStream(IN OUT PFRONTEND This,
     PGUI_CONSOLE_DATA GuiData = This->Context;
     PCONSOLE_SCREEN_BUFFER Buff;
     SHORT CursorEndX, CursorEndY;
-    RECT ScrollRect;
 
     if (NULL == GuiData || NULL == GuiData->hWindow) return;
 
@@ -659,22 +783,9 @@ GuiWriteStream(IN OUT PFRONTEND This,
     Buff = GuiData->ActiveBuffer;
     if (GetType(Buff) != TEXTMODE_BUFFER) return;
 
+    /* Repaint the view instead of copying its pixels in the writer's thread */
     if (0 != ScrolledLines)
-    {
-        ScrollRect.left = 0;
-        ScrollRect.top = 0;
-        ScrollRect.right = Buff->ViewSize.X * GuiData->CharWidth;
-        ScrollRect.bottom = Region->Top * GuiData->CharHeight;
-
-        ScrollWindowEx(GuiData->hWindow,
-                       0,
-                       -(int)(ScrolledLines * GuiData->CharHeight),
-                       &ScrollRect,
-                       NULL,
-                       NULL,
-                       NULL,
-                       SW_INVALIDATE);
-    }
+        GuiData->DirtyView = TRUE;
 
     DrawRegion(GuiData, Region);
 
@@ -693,11 +804,10 @@ GuiWriteStream(IN OUT PFRONTEND This,
         InvalidateCell(GuiData, CursorEndX, CursorEndY);
     }
 
-    // HACK!!
-    // Set up the update timer (very short interval) - this is a "hack" for getting the OS to
-    // repaint the window without having it just freeze up and stay on the screen permanently.
+    /* Show the caret at once and restart its blink (see GuiProcessWork) */
     Buff->CursorBlinkOn = TRUE;
-    SetTimer(GuiData->hWindow, CONGUI_UPDATE_TIMER, CONGUI_UPDATE_TIME, NULL);
+    GuiData->ShowCaret = TRUE;
+    GuiRequestWork(GuiData, GUI_WORK_UPDATE);
 }
 
 /* static */ VOID NTAPI
@@ -706,7 +816,7 @@ GuiRingBell(IN OUT PFRONTEND This)
     PGUI_CONSOLE_DATA GuiData = This->Context;
 
     /* Emit an error beep sound */
-    SendNotifyMessage(GuiData->hWindow, PM_CONSOLE_BEEP, 0, 0);
+    GuiRequestWork(GuiData, GUI_WORK_BEEP);
 }
 
 static BOOL NTAPI
@@ -754,9 +864,10 @@ GuiResizeTerminal(IN OUT PFRONTEND This)
     PGUI_CONSOLE_DATA GuiData = This->Context;
 
     /* Resize the window to the user's values */
-    PostMessageW(GuiData->hWindow, PM_RESIZE_TERMINAL, 0, 0);
+    GuiRequestWork(GuiData, GUI_WORK_RESIZE);
 }
 
+/* Called with the console locked */
 static VOID NTAPI
 GuiSetActiveScreenBuffer(IN OUT PFRONTEND This)
 {
@@ -765,15 +876,9 @@ GuiSetActiveScreenBuffer(IN OUT PFRONTEND This)
     HPALETTE hPalette;
 
     EnterCriticalSection(&GuiData->Lock);
-    GuiData->WindowSizeLock = TRUE;
-
-    InterlockedExchangePointer((PVOID*)&GuiData->ActiveBuffer,
-                               ConDrvGetActiveScreenBuffer((PCONSOLE)GuiData->Console));
-
-    GuiData->WindowSizeLock = FALSE;
+    ActiveBuffer = ConDrvGetActiveScreenBuffer((PCONSOLE)GuiData->Console);
+    InterlockedExchangePointer((PVOID*)&GuiData->ActiveBuffer, ActiveBuffer);
     LeaveCriticalSection(&GuiData->Lock);
-
-    ActiveBuffer = GuiData->ActiveBuffer;
 
     /* Change the current palette */
     if (ActiveBuffer->PaletteHandle == NULL)
@@ -792,8 +897,9 @@ GuiSetActiveScreenBuffer(IN OUT PFRONTEND This)
     /* Realize the (logical) palette */
     RealizePalette(GuiData->hMemDC);
 
-    GuiResizeTerminal(This);
-    // ConioDrawConsole(Console);
+    /* Show the whole new buffer, not only what changes next */
+    GuiData->DirtyView = TRUE;
+    GuiRequestWork(GuiData, GUI_WORK_RESIZE | GUI_WORK_UPDATE);
 }
 
 static VOID NTAPI
@@ -831,11 +937,7 @@ GuiReleaseScreenBuffer(IN OUT PFRONTEND This,
     else
     {
         EnterCriticalSection(&GuiData->Lock);
-        GuiData->WindowSizeLock = TRUE;
-
         InterlockedExchangePointer((PVOID*)&GuiData->ActiveBuffer, NULL);
-
-        GuiData->WindowSizeLock = FALSE;
         LeaveCriticalSection(&GuiData->Lock);
     }
 }
@@ -850,7 +952,7 @@ GuiRefreshInternalInfo(IN OUT PFRONTEND This)
     PGUI_CONSOLE_DATA GuiData = This->Context;
 
     /* Update the console leader information held by the window */
-    SetConWndConsoleLeaderCID(GuiData);
+    GuiRequestWork(GuiData, GUI_WORK_LEADER);
 
     /*
      * HACK:
@@ -870,7 +972,7 @@ static VOID NTAPI
 GuiChangeTitle(IN OUT PFRONTEND This)
 {
     PGUI_CONSOLE_DATA GuiData = This->Context;
-    PostMessageW(GuiData->hWindow, PM_CONSOLE_SET_TITLE, 0, 0);
+    GuiRequestWork(GuiData, GUI_WORK_TITLE);
 }
 
 static BOOL NTAPI
@@ -1083,7 +1185,10 @@ GuiSetDisplayMode(IN OUT PFRONTEND This,
                   ULONG NewMode)
 {
     PGUI_CONSOLE_DATA GuiData = This->Context;
+    PCONSRV_CONSOLE Console = GuiData->Console;
+    LARGE_INTEGER Timeout;
     BOOL FullScreen;
+    LONG Request, LockCount, i;
 
     if (NewMode & ~(CONSOLE_FULLSCREEN_MODE | CONSOLE_WINDOWED_MODE))
         return FALSE;
@@ -1093,12 +1198,34 @@ GuiSetDisplayMode(IN OUT PFRONTEND This,
 
     FullScreen = ((NewMode & CONSOLE_FULLSCREEN_MODE) != 0);
 
-    if (FullScreen != GuiData->GuiInfo.FullScreen)
-    {
-        SwitchFullScreen(GuiData, FullScreen);
-    }
+    /*
+     * The switch sends messages to the window: let its thread do it,
+     * because that thread may be waiting for the console lock we hold.
+     */
+    GuiData->RequestedFullScreen = FullScreen;
+    Request = InterlockedIncrement(&GuiData->DisplayModeRequest);
+    GuiRequestWork(GuiData, GUI_WORK_DISPLAY_MODE);
 
-    return TRUE;
+    /*
+     * Return only once the mode is set, waiting with the console unlocked
+     * (the caller holds it, maybe twice), as GuiInitFrontEnd waits for the
+     * window. The caller holds a console reference, which keeps GuiData.
+     */
+    /* Not done when it cannot wait or the wait ends first: the caller fails */
+    if (!GuiData->hDisplayModeEvent ||
+        Console->Lock.OwningThread != NtCurrentTeb()->ClientId.UniqueThread)
+    {
+        return FALSE;
+    }
+    Timeout.QuadPart = -5000000LL; /* 500 ms */
+    LockCount = Console->Lock.RecursionCount;
+    for (i = 0; i < LockCount; i++) LeaveCriticalSection(&Console->Lock);
+    /* The blink timer runs the work even in a modal loop, so this ends */
+    for (i = 0; i < 20 && (LONG)(GuiData->DisplayModeDone - Request) < 0; i++)
+        NtWaitForSingleObject(GuiData->hDisplayModeEvent, FALSE, &Timeout);
+    for (i = 0; i < LockCount; i++) EnterCriticalSection(&Console->Lock);
+
+    return ((LONG)(GuiData->DisplayModeDone - Request) >= 0);
 }
 
 static INT NTAPI
@@ -1113,8 +1240,8 @@ GuiShowMouseCursor(IN OUT PFRONTEND This,
         if (Show) ++GuiData->MouseCursorRefCount;
         else      --GuiData->MouseCursorRefCount;
 
-        /* Effectively show (or hide) the cursor (use special values for (w|l)Param) */
-        PostMessageW(GuiData->hWindow, WM_SETCURSOR, -1, -1);
+        /* Effectively show (or hide) the cursor */
+        GuiRequestWork(GuiData, GUI_WORK_CURSOR);
     }
 
     return GuiData->MouseCursorRefCount;
@@ -1135,8 +1262,8 @@ GuiSetMouseCursor(IN OUT PFRONTEND This,
      */
     GuiData->hCursor = (CursorHandle ? CursorHandle : ghDefaultCursor);
 
-    /* Effectively modify the shape of the cursor (use special values for (w|l)Param) */
-    PostMessageW(GuiData->hWindow, WM_SETCURSOR, -1, -1);
+    /* Effectively modify the shape of the cursor */
+    GuiRequestWork(GuiData, GUI_WORK_CURSOR);
 
     return TRUE;
 }
@@ -1168,8 +1295,9 @@ GuiSetMenuClose(IN OUT PFRONTEND This,
 
     if (GuiData->hSysMenu == NULL) return FALSE;
 
+    /* EnableMenuItem can redraw the caption, a send to the window thread */
     GuiData->IsCloseButtonEnabled = Enable;
-    EnableMenuItem(GuiData->hSysMenu, SC_CLOSE, MF_BYCOMMAND | (Enable ? MF_ENABLED : MF_GRAYED));
+    GuiRequestWork(GuiData, GUI_WORK_CLOSE_MENU);
 
     return TRUE;
 }

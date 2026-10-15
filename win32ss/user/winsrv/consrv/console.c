@@ -835,8 +835,17 @@ ConSrvDeleteConsole(PCONSRV_CONSOLE Console)
     NtClose(Console->InitEvents[INIT_FAILURE]);
     NtClose(Console->InitEvents[INIT_SUCCESS]);
 
+    /*
+     * Now, call the driver. ConDrvDetachTerminal is called on-demand.
+     * It marks the console as terminating and destroys the terminal window,
+     * so free what the window thread reads (title, line input, history)
+     * only afterwards.
+     */
+    ConDrvDeleteConsole((PCONSOLE)Console);
+
     /* Clean the Input Line Discipline */
     if (Console->LineBuffer) ConsoleFreeHeap(Console->LineBuffer);
+    Console->LineBuffer = NULL;
 
     /* Clean aliases and history */
     IntDeleteAllAliases(Console);
@@ -845,9 +854,6 @@ ConSrvDeleteConsole(PCONSRV_CONSOLE Console)
     /* Free the console title */
     ConsoleFreeUnicodeString(&Console->OriginalTitle);
     ConsoleFreeUnicodeString(&Console->Title);
-
-    /* Now, call the driver. ConDrvDetachTerminal is called on-demand. */
-    ConDrvDeleteConsole((PCONSOLE)Console);
 
     /* Deinit the ConSrv terminal */
     // FIXME!!
