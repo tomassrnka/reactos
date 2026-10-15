@@ -10,6 +10,10 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(user32);
 
+#ifndef WM_MOUSEHWHEEL
+#define WM_MOUSEHWHEEL 0x020E
+#endif
+
 /*
  * @implemented
  */
@@ -408,8 +412,9 @@ User32DefWindowProc(HWND hWnd,
             break;
 
         case WM_MOUSEWHEEL:
+        case WM_MOUSEHWHEEL:
             if (GetWindowLongPtrW(hWnd, GWL_STYLE) & WS_CHILD)
-                return SendMessageW( GetParent(hWnd), WM_MOUSEWHEEL, wParam, lParam);
+                return SendMessageW( GetParent(hWnd), Msg, wParam, lParam);
             break;
 
         case WM_ERASEBKGND:

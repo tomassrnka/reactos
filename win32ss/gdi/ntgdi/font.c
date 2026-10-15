@@ -1227,8 +1227,28 @@ NtGdiGetFontFileData(
     _Out_writes_bytes_(cjBuf) PVOID pvBuf,
     _In_ SIZE_T cjBuf)
 {
-    UNIMPLEMENTED;
-    return 0;
+    ULONGLONG Offset = 0;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    _SEH2_TRY
+    {
+        ProbeForRead(pullFileOffset, sizeof(*pullFileOffset), 1);
+        Offset = *pullFileOffset;
+        ProbeForWrite(pvBuf, cjBuf, 1);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastNtError(Status);
+        return FALSE;
+    }
+
+    return ftGdiGetFontFileData(uFileCollectionID, uFileIndex, Offset, pvBuf, cjBuf);
 }
 
 DWORD
@@ -1240,8 +1260,55 @@ NtGdiGetFontFileInfo(
     _In_ SIZE_T cjSize,
     _Out_opt_ PSIZE_T pcjActualSize)
 {
-    UNIMPLEMENTED;
-    return 0;
+    PFONT_FILE_INFO Info;
+    SIZE_T cbInfo;
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOL Ret = FALSE;
+
+    _SEH2_TRY
+    {
+        if (pcjActualSize)
+            ProbeForWrite(pcjActualSize, sizeof(*pcjActualSize), 1);
+        ProbeForWrite(pffi, cjSize, 1);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastNtError(Status);
+        return FALSE;
+    }
+
+    if (!ftGdiGetFontFileInfo(uFileCollectionID, uFileIndex, &Info, &cbInfo))
+        return FALSE;
+
+    _SEH2_TRY
+    {
+        if (pcjActualSize)
+            *pcjActualSize = cbInfo;
+
+        if (cbInfo <= cjSize)
+        {
+            RtlCopyMemory(pffi, Info, cbInfo);
+            Ret = TRUE;
+        }
+        else
+        {
+            EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastNtError(_SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    ExFreePoolWithTag(Info, TAG_FONT);
+    return Ret;
 }
 
 BOOL
@@ -1250,8 +1317,77 @@ NtGdiGetFontRealizationInfo(
     _In_ HDC hdc,
     _Out_ FONT_REALIZATION_INFO* info)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    PDC pDc;
+    PTEXTOBJ pTextObj;
+    PFONTGDI pFontGdi;
+    LOGFONTW LogFont;
+    FONT_REALIZATION_INFO Fri;
+    DWORD cbInfo = 0;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    _SEH2_TRY
+    {
+        ProbeForRead(info, sizeof(DWORD), 1);
+        cbInfo = info->size;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastNtError(Status);
+        return FALSE;
+    }
+
+    /* Only the two layouts of the structure exist: up to instance_id, and up to face_index and simulations */
+    if (cbInfo != FIELD_OFFSET(FONT_REALIZATION_INFO, file_count) &&
+        cbInfo != sizeof(FONT_REALIZATION_INFO))
+        return FALSE;
+
+    pDc = DC_LockDc(hdc);
+    if (!pDc)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    pTextObj = RealizeFontInit(pDc->pdcattr->hlfntNew);
+    DC_UnlockDc(pDc);
+    if (!pTextObj)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    /* The text object stays locked while the font is read, so the font cannot go away */
+    pFontGdi = ObjToGDI(pTextObj->Font, FONT);
+    LogFont = pTextObj->logfont.elfEnumLogfontEx.elfLogFont;
+    RtlZeroMemory(&Fri, sizeof(Fri));
+    ftGdiGetFontRealization(pFontGdi, &LogFont, &Fri);
+    TEXTOBJ_UnlockText(pTextObj);
+    Fri.size = cbInfo;
+
+    _SEH2_TRY
+    {
+        ProbeForWrite(info, cbInfo, 1);
+        RtlCopyMemory(info, &Fri, cbInfo);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastNtError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 HFONT

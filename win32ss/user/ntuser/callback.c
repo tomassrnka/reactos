@@ -597,7 +597,7 @@ co_IntCallHookProc(INT HookId,
          ArgumentLength += sizeof(MSLLHOOKSTRUCT);
          break;
      case WH_MOUSE:
-         ArgumentLength += sizeof(MOUSEHOOKSTRUCT);
+         ArgumentLength += sizeof(MOUSEHOOKSTRUCTEX);
          break;
      case WH_CALLWNDPROC:
      {
@@ -701,7 +701,7 @@ co_IntCallHookProc(INT HookId,
          Common->lParam = (LPARAM) (Extra - (PCHAR) Common);
          break;
       case WH_MOUSE:
-         RtlCopyMemory(Extra, (PVOID) lParam, sizeof(MOUSEHOOKSTRUCT));
+         RtlCopyMemory(Extra, (PVOID) lParam, sizeof(MOUSEHOOKSTRUCTEX));
          Common->lParam = (LPARAM) (Extra - (PCHAR) Common);
          break;
       case WH_CALLWNDPROC:
