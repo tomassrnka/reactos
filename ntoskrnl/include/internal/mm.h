@@ -1637,7 +1637,8 @@ NTSTATUS
 NTAPI
 MmExtendSection(
     _In_ PVOID Section,
-    _Inout_ PLARGE_INTEGER NewSize);
+    _Inout_ PLARGE_INTEGER NewSize,
+    _In_ BOOLEAN IgnoreFileSizeChecking);
 
 /* sptab.c *******************************************************************/
 
