@@ -27,6 +27,7 @@ extern void func_wcstoul(void);
 extern void func_wcstombs(void);
 
 extern void func_CommitCharge(void);
+extern void func_CreatorAccess(void);
 extern void func_DllLoadNotification(void);
 extern void func_EmptyPxeFree(void);
 extern void func_EmptyPxeProtect(void);
@@ -69,6 +70,7 @@ extern void func_NtMutant(void);
 extern void func_NtNotifyChangeDirectoryFile(void);
 extern void func_NtNotifyChangeMultipleKeys(void);
 extern void func_NtOpenKey(void);
+extern void func_NtOpenProcess(void);
 extern void func_NtOpenProcessToken(void);
 extern void func_NtOpenThreadToken(void);
 extern void func_NtProtectVirtualMemory(void);
@@ -206,6 +208,7 @@ const struct test winetest_testlist[] =
     { "wcstombs", func_wcstombs },
 
     { "CommitCharge",                   func_CommitCharge },
+    { "CreatorAccess",                  func_CreatorAccess },
     { "DllLoadNotification",            func_DllLoadNotification },
     { "EmptyPxeFree",                   func_EmptyPxeFree },
     { "EmptyPxeProtect",                func_EmptyPxeProtect },
@@ -248,6 +251,7 @@ const struct test winetest_testlist[] =
     { "NtNotifyChangeDirectoryFile",    func_NtNotifyChangeDirectoryFile },
     { "NtNotifyChangeMultipleKeys",     func_NtNotifyChangeMultipleKeys },
     { "NtOpenKey",                      func_NtOpenKey },
+    { "NtOpenProcess",                  func_NtOpenProcess },
     { "NtOpenProcessToken",             func_NtOpenProcessToken },
     { "NtOpenThreadToken",              func_NtOpenThreadToken },
     { "NtProtectVirtualMemory",         func_NtProtectVirtualMemory },

@@ -16,6 +16,7 @@
 #include <debug.h>
 
 #define THREAD_ALL_ACCESS_NT6 (STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|0xFFFF)
+#define PROCESS_ALL_ACCESS_NT6 (STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|0xFFFF)
 
 /* GLOBALS *******************************************************************/
 
@@ -4284,7 +4285,7 @@ StartScan:
 
     if (KernelHandleList)
     {
-        Status = NtCreateProcessWithAttributes(&ProcessHandle, PROCESS_ALL_ACCESS,
+        Status = NtCreateProcessWithAttributes(&ProcessHandle, PROCESS_ALL_ACCESS_NT6,
                                                ObjectAttributes, NtCurrentProcess(),
                                                Flags, SectionHandle, DebugHandle,
                                                NULL, InJob, &NativeAttributes);
@@ -4293,7 +4294,7 @@ StartScan:
     {
         /* Preserve the legacy native creation path without a handle list. */
         Status = NtCreateProcessEx(&ProcessHandle,
-                               PROCESS_ALL_ACCESS,
+                               PROCESS_ALL_ACCESS_NT6,
                                ObjectAttributes,
                                NtCurrentProcess(),
                                Flags,

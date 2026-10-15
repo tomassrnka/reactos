@@ -330,6 +330,7 @@ PspSetPrimaryToken(IN PEPROCESS Process,
                                        PROCESS_VM_READ |
                                        PROCESS_VM_WRITE |
                                        PROCESS_QUERY_INFORMATION |
+                                       PROCESS_QUERY_LIMITED_INFORMATION |
                                        PROCESS_TERMINATE |
                                        PROCESS_CREATE_THREAD |
                                        PROCESS_DUP_HANDLE |

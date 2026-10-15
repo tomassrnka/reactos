@@ -41,6 +41,7 @@ add_dependencies(ntdll_crt_test_lib psdk)
 list(APPEND SOURCE
     ZeroBits.c
     CommitCharge.c
+    CreatorAccess.c
     DllLoadNotification.c
     EmptyPxe.c
     ApiSetQueryApiSetPresence.c
@@ -84,6 +85,7 @@ list(APPEND SOURCE
     NtNotifyChangeDirectoryFile.c
     NtNotifyChangeMultipleKeys.c
     NtOpenKey.c
+    NtOpenProcess.c
     NtOpenProcessToken.c
     NtOpenThreadToken.c
     NtProtectVirtualMemory.c

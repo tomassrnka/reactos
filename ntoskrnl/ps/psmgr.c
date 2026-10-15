@@ -23,9 +23,9 @@ GENERIC_MAPPING PspProcessMapping =
     STANDARD_RIGHTS_READ    | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
     STANDARD_RIGHTS_WRITE   | PROCESS_CREATE_PROCESS    | PROCESS_CREATE_THREAD   |
     PROCESS_VM_OPERATION    | PROCESS_VM_WRITE          | PROCESS_DUP_HANDLE      |
-    PROCESS_TERMINATE       | PROCESS_SET_QUOTA         | PROCESS_SET_INFORMATION |
-    PROCESS_SUSPEND_RESUME,
-    STANDARD_RIGHTS_EXECUTE | SYNCHRONIZE,
+    PROCESS_SET_QUOTA       | PROCESS_SET_INFORMATION   | PROCESS_SUSPEND_RESUME,
+    STANDARD_RIGHTS_EXECUTE | SYNCHRONIZE               | PROCESS_TERMINATE       |
+    PROCESS_QUERY_LIMITED_INFORMATION,
     PROCESS_ALL_ACCESS
 };
 
@@ -415,7 +415,7 @@ PspInitPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     ObjectTypeInitializer.DefaultNonPagedPoolCharge = sizeof(EPROCESS);
     ObjectTypeInitializer.GenericMapping = PspProcessMapping;
     ObjectTypeInitializer.ValidAccessMask = PROCESS_ALL_ACCESS;
-    ObjectTypeInitializer.OpenProcedure = NULL;
+    ObjectTypeInitializer.OpenProcedure = PspProcessOpen;
     ObjectTypeInitializer.DeleteProcedure = PspDeleteProcess;
     ObCreateObjectType(&Name, &ObjectTypeInitializer, NULL, &PsProcessType);
 
