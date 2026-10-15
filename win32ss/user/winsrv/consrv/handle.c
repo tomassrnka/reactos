@@ -363,6 +363,45 @@ ConSrvRemoveObject(IN PCONSOLE_PROCESS_DATA ProcessData,
     return STATUS_SUCCESS;
 }
 
+/*
+ * The object behind Handle, only if it still belongs to Console, which the
+ * caller holds locked: objects are destroyed only with their console locked,
+ * so no reference is taken. For a caller that released the console lock for
+ * a while, during which the process may have changed consoles and reused the
+ * handle value.
+ */
+NTSTATUS
+ConSrvGetObjectOfLockedConsole(IN PCONSOLE_PROCESS_DATA ProcessData,
+                               IN HANDLE Handle,
+                               IN PCONSOLE Console,
+                               OUT PCONSOLE_IO_OBJECT* Object,
+                               IN ULONG Access,
+                               IN CONSOLE_IO_OBJECT_TYPE Type)
+{
+    NTSTATUS Status = STATUS_INVALID_HANDLE;
+    ULONG Index = HandleToULong(Handle) >> 2;
+    PCONSOLE_IO_HANDLE HandleEntry;
+
+    *Object = NULL;
+
+    RtlEnterCriticalSection(&ProcessData->HandleTableLock);
+    if (IsConsoleHandle(Handle) && Index < ProcessData->HandleTableSize)
+    {
+        HandleEntry = &ProcessData->HandleTable[Index];
+        if (HandleEntry->Object &&
+            HandleEntry->Object->Console == Console &&
+            (HandleEntry->Access & Access) != 0 &&
+            (Type == 0 || (HandleEntry->Object->Type & Type) != 0))
+        {
+            *Object = HandleEntry->Object;
+            Status = STATUS_SUCCESS;
+        }
+    }
+    RtlLeaveCriticalSection(&ProcessData->HandleTableLock);
+
+    return Status;
+}
+
 NTSTATUS
 ConSrvGetObject(IN PCONSOLE_PROCESS_DATA ProcessData,
                 IN HANDLE Handle,

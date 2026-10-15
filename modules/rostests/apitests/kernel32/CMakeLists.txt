@@ -10,8 +10,13 @@ list(APPEND SOURCE
     CancelIoEx.c
     ApplicationRestart.c
     AppModel.c
+    ConsoleBufferSwitch.c
+    ConsoleCaret.c
     ConsoleCP.c
+    ConsoleCreateRace.c
     ConsoleCtrlEventRace.c
+    ConsoleDisplayMode.c
+    ConsoleWriteLatency.c
     CopyFile2.c
     CopyFile2Identity.c
     CreateEventMutexEx.c
@@ -132,7 +137,7 @@ add_executable(kernel32_apitest
 
 target_link_libraries(kernel32_apitest wine ${PSEH_LIB})
 set_module_type(kernel32_apitest win32cui)
-add_delay_importlibs(kernel32_apitest advapi32 shlwapi user32)
+add_delay_importlibs(kernel32_apitest advapi32 shlwapi user32 gdi32)
 add_importlibs(kernel32_apitest netapi32 msvcrt kernel32 ntdll)
 add_dependencies(kernel32_apitest FormatMessage)
 set_source_files_properties(CopyFile2Identity.c PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/copy2_embedded")
