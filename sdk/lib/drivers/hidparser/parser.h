@@ -354,6 +354,10 @@ HidParser_ParseReportDescriptor(
     ULONG ReportSize,
     OUT PVOID *ParserContext);
 
+VOID
+HidParser_FreeContext(
+    IN PHID_PARSER_CONTEXT ParserContext);
+
 ULONG
 HidParser_NumberOfTopCollections(
     IN PVOID ParserContext);
