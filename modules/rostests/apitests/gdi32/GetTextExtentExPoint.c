@@ -290,8 +290,8 @@ static void Test_SurrogateExtents(void)
     DeleteDC(hdc);
 }
 
-#define DRAW_WIDTH 200
-#define DRAW_HEIGHT 48
+#define DRAW_WIDTH 400
+#define DRAW_HEIGHT 180
 #define DRAW_FILL 0x00FF0000
 #define DRAW_X 10
 /* Windows pads a text background by a pixel or two on each side; the faults tested for are many pixels off */
@@ -352,7 +352,13 @@ static void Test_SurrogateDraw(void)
     static const WCHAR loneHigh[] = { 0xD83D };
     static const WCHAR highThenChar[] = { 0xD83D, 'B' };
     static const WCHAR charThenHigh[] = { 'A', 0xD83D };
+    static const WCHAR pairThenChar[] = { 0xD83D, 0xDE00, 'B' };
+    static const WCHAR pair[] = { 0xD83D, 0xDE00 };
+    static const WCHAR lowThenChar[] = { 0xDE00, 'B' };
+    static const WCHAR loneLow[] = { 0xDE00 };
+    static const WCHAR ab[] = { 'A', 'B' };
     static const INT dx[2] = { 40, 40 };
+    static const INT dxPdy[4] = { 40, 0, 40, 0 };
     static const UINT options[2] = { 0, ETO_IGNORELANGUAGE };
     static const PCSTR names[2] = { "default", "ignore language" };
     HDC hdcScreen = GetDC(NULL), hdc = CreateCompatibleDC(hdcScreen);
@@ -360,7 +366,9 @@ static void Test_SurrogateDraw(void)
     BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER), DRAW_WIDTH, -DRAW_HEIGHT, 1, 32, BI_RGB } };
     DWORD *pixels = NULL;
     HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (PVOID*)&pixels, NULL, 0), hbmOld;
-    SIZE sizeHigh, sizeHighB, sizeAHigh;
+    SIZE sizeHigh, sizeHighB, sizeAHigh, sizePair, sizePairB, sizeLow, sizeLowB, sizeAB, sizeA;
+    WORD glyphs[2];
+    BOOL bHaveGlyphs;
     DRAWN lone, drawn;
     UINT i;
 
@@ -379,6 +387,14 @@ static void Test_SurrogateDraw(void)
     GetTextExtentPoint32W(hdc, loneHigh, 1, &sizeHigh);
     GetTextExtentPoint32W(hdc, highThenChar, 2, &sizeHighB);
     GetTextExtentPoint32W(hdc, charThenHigh, 2, &sizeAHigh);
+    GetTextExtentPoint32W(hdc, pair, 2, &sizePair);
+    GetTextExtentPoint32W(hdc, pairThenChar, 3, &sizePairB);
+    GetTextExtentPoint32W(hdc, loneLow, 1, &sizeLow);
+    GetTextExtentPoint32W(hdc, lowThenChar, 2, &sizeLowB);
+    GetTextExtentPoint32W(hdc, ab, 2, &sizeAB);
+    GetTextExtentPoint32W(hdc, ab, 1, &sizeA);
+    bHaveGlyphs = (GetGlyphIndicesW(hdc, ab, 2, glyphs, GGI_MARK_NONEXISTING_GLYPHS) == 2 &&
+                   glyphs[0] != 0xFFFF && glyphs[1] != 0xFFFF);
 
     for (i = 0; i < ARRAYSIZE(options); i++)
     {
@@ -421,6 +437,109 @@ static void Test_SurrogateDraw(void)
         ok(drawn.inkRight >= DRAW_X + dx[0],
            "%s: the character after the high surrogate is not drawn at its advance: ink ends at %ld, expected past %d\n",
            pszName, drawn.inkRight, DRAW_X + dx[0]);
+
+        /* The same with an advance and a vertical offset for every code unit */
+        DrawString(hdc, pixels, pszName, options[i] | ETO_PDY, TA_LEFT | TA_TOP, DRAW_X, highThenChar, 2, dxPdy, &drawn);
+        ok(abs((drawn.fillRight - drawn.fillLeft) - (dxPdy[0] + dxPdy[2])) <= DRAW_SLACK,
+           "%s: ETO_PDY: background is %ld wide, the advances add up to %d\n",
+           pszName, drawn.fillRight - drawn.fillLeft, dxPdy[0] + dxPdy[2]);
+        ok(drawn.inkRight >= DRAW_X + dxPdy[0],
+           "%s: ETO_PDY: the character after the high surrogate is not drawn at its advance: ink ends at %ld, expected past %d\n",
+           pszName, drawn.inkRight, DRAW_X + dxPdy[0]);
+
+        /* A valid pair is one glyph and the character after it is drawn after it */
+        DrawString(hdc, pixels, pszName, options[i], TA_LEFT | TA_TOP, DRAW_X, pairThenChar, 3, NULL, &drawn);
+        ok(drawn.inkRight >= DRAW_X + sizePair.cx + 2,
+           "%s: the character after a surrogate pair is not drawn: ink ends at %ld, the pair ends at %ld\n",
+           pszName, drawn.inkRight, DRAW_X + sizePair.cx);
+        /* Windows draws a pair as two glyphs when the language layer is bypassed, and measures it as one */
+        if (!(options[i] & ETO_IGNORELANGUAGE))
+        {
+            ok(abs((drawn.fillRight - drawn.fillLeft) - sizePairB.cx) <= DRAW_SLACK,
+               "%s: background of a pair and a character is %ld wide, the string measures %ld\n",
+               pszName, drawn.fillRight - drawn.fillLeft, sizePairB.cx);
+        }
+
+        /* A lone low surrogate is a code unit of its own too */
+        DrawString(hdc, pixels, pszName, options[i], TA_LEFT | TA_TOP, DRAW_X, lowThenChar, 2, NULL, &drawn);
+        ok(drawn.inkRight >= DRAW_X + sizeLow.cx + 2,
+           "%s: the character after a lone low surrogate is not drawn: ink ends at %ld, the surrogate ends at %ld\n",
+           pszName, drawn.inkRight, DRAW_X + sizeLow.cx);
+        ok(abs((drawn.fillRight - drawn.fillLeft) - sizeLowB.cx) <= DRAW_SLACK,
+           "%s: background of a low surrogate and a character is %ld wide, the string measures %ld\n",
+           pszName, drawn.fillRight - drawn.fillLeft, sizeLowB.cx);
+
+        /* Glyph indices are never surrogates */
+        if (bHaveGlyphs)
+        {
+            DrawString(hdc, pixels, pszName, options[i] | ETO_GLYPH_INDEX, TA_LEFT | TA_TOP, DRAW_X,
+                       (PCWSTR)glyphs, 2, NULL, &drawn);
+            ok(drawn.inkRight >= DRAW_X + sizeA.cx + 2,
+               "%s: glyph indices: the second glyph is not drawn: ink ends at %ld, the first ends at %ld\n",
+               pszName, drawn.inkRight, DRAW_X + sizeA.cx);
+            ok(abs((drawn.fillRight - drawn.fillLeft) - sizeAB.cx) <= DRAW_SLACK,
+               "%s: glyph indices: background is %ld wide, the string measures %ld\n",
+               pszName, drawn.fillRight - drawn.fillLeft, sizeAB.cx);
+        }
+    }
+
+    SelectObject(hdc, hOldFont);
+    SelectObject(hdc, hbmOld);
+    DeleteObject(hbm);
+Cleanup:
+    DeleteObject(hfont);
+    DeleteDC(hdc);
+}
+
+/* With an explicit advance for every character the text is placed by those advances alone, so the background and the
+   alignment, which are worked out before the glyphs are drawn, must not add the pair kerning of the font either */
+static void Test_DrawKerning(void)
+{
+    static const WCHAR av[] = { 'A', 'V' };
+    static const INT dx[2] = { 100, 100 };
+    HDC hdcScreen = GetDC(NULL), hdc = CreateCompatibleDC(hdcScreen);
+    HFONT hfont = CreateArial(-140), hOldFont;
+    BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER), DRAW_WIDTH, -DRAW_HEIGHT, 1, 32, BI_RGB } };
+    DWORD *pixels = NULL;
+    HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (PVOID*)&pixels, NULL, 0), hbmOld;
+    SIZE sizeAV, sizeA, sizeV;
+    DRAWN drawn;
+    UINT i;
+    static const UINT options[2] = { 0, ETO_IGNORELANGUAGE };
+    static const PCSTR names[2] = { "default", "ignore language" };
+
+    ReleaseDC(NULL, hdcScreen);
+    if (!hbm || !pixels)
+    {
+        skip("no DIB section\n");
+        goto Cleanup;
+    }
+
+    hbmOld = SelectObject(hdc, hbm);
+    hOldFont = SelectObject(hdc, hfont);
+    SetTextColor(hdc, RGB(0, 0, 0));
+    SetBkColor(hdc, RGB(255, 0, 0));
+    SetBkMode(hdc, OPAQUE);
+    GetTextExtentPoint32W(hdc, av, 2, &sizeAV);
+    GetTextExtentPoint32W(hdc, av, 1, &sizeA);
+    GetTextExtentPoint32W(hdc, av + 1, 1, &sizeV);
+    trace("kerning: A %ld, V %ld, AV %ld\n", sizeA.cx, sizeV.cx, sizeAV.cx);
+    if (sizeAV.cx >= sizeA.cx + sizeV.cx - 4)
+        skip("the font does not kern A and V\n");
+    else
+    {
+        for (i = 0; i < ARRAYSIZE(options); i++)
+        {
+            DrawString(hdc, pixels, names[i], options[i], TA_LEFT | TA_TOP, DRAW_X, av, 2, dx, &drawn);
+            ok(abs((drawn.fillRight - drawn.fillLeft) - (dx[0] + dx[1])) <= DRAW_SLACK,
+               "%s: background is %ld wide, the advances add up to %d\n",
+               names[i], drawn.fillRight - drawn.fillLeft, dx[0] + dx[1]);
+            DrawString(hdc, pixels, names[i], options[i], TA_RIGHT | TA_TOP, DRAW_WIDTH - 10, av, 2, dx, &drawn);
+            ok(abs(drawn.fillLeft - (DRAW_WIDTH - 10 - dx[0] - dx[1])) <= DRAW_SLACK &&
+               abs(drawn.fillRight - (DRAW_WIDTH - 10)) <= DRAW_SLACK,
+               "%s: right-aligned box is %ld..%ld, expected %d..%d\n",
+               names[i], drawn.fillLeft, drawn.fillRight, DRAW_WIDTH - 10 - dx[0] - dx[1], DRAW_WIDTH - 10);
+        }
     }
 
     SelectObject(hdc, hOldFont);
@@ -436,5 +555,6 @@ START_TEST(GetTextExtentExPoint)
     Test_GetTextExtentExPoint();
     Test_SurrogateExtents();
     Test_SurrogateDraw();
+    Test_DrawKerning();
     Test_LargeHimetricHeight();
 }

@@ -6796,8 +6796,8 @@ IntGetTextDisposition(
             }
         }
 
-        /* Retrieve kerning distance */
-        if (use_kerning && previous && glyph_index)
+        /* Retrieve kerning distance; rendering ignores it when the caller gives the advances */
+        if (use_kerning && previous && glyph_index && NULL == Dx)
         {
             FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
             X64 += delta.x;
