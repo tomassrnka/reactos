@@ -183,7 +183,11 @@ extern "C" {
 #if (WINVER >= 0x0600)
 #define LOCALE_NAME_USER_DEFAULT    NULL
 #define LOCALE_NAME_INVARIANT      L""
+#if defined(BUILD_WOW64_ENABLED) || defined(SYSWOW64_GUEST)
+#define LOCALE_NAME_SYSTEM_DEFAULT      L"!x-sys-default-locale"
+#else
 #define LOCALE_NAME_SYSTEM_DEFAULT      L"!sys-default-locale"
+#endif
 #endif
 
 #define LOCALE_IDEFAULTUNIXCODEPAGE   0x1030 /* Wine extension */

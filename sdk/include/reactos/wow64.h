@@ -1,12 +1,44 @@
 /* ReactOS user-mode WoW64 ABI. SPDX-License-Identifier: GPL-2.0-or-later */
 #pragma once
 
+/* Kernel builds do not include winnt.h's user-mode context declarations. */
+#ifndef WOW64_CONTEXT_i386
+#define WOW64_CONTEXT_i386 0x10000
+#define WOW64_CONTEXT_CONTROL (WOW64_CONTEXT_i386 | 1)
+#define WOW64_CONTEXT_INTEGER (WOW64_CONTEXT_i386 | 2)
+#define WOW64_CONTEXT_SEGMENTS (WOW64_CONTEXT_i386 | 4)
+#define WOW64_CONTEXT_FLOATING_POINT (WOW64_CONTEXT_i386 | 8)
+#define WOW64_CONTEXT_DEBUG_REGISTERS (WOW64_CONTEXT_i386 | 16)
+#define WOW64_CONTEXT_EXTENDED_REGISTERS (WOW64_CONTEXT_i386 | 32)
+#define WOW64_CONTEXT_FULL (WOW64_CONTEXT_i386 | 7)
+#define WOW64_CONTEXT_ALL (WOW64_CONTEXT_i386 | 63)
+typedef struct
+{
+    ULONG ControlWord, StatusWord, TagWord, ErrorOffset, ErrorSelector;
+    ULONG DataOffset, DataSelector;
+    UCHAR RegisterArea[80];
+    ULONG Cr0NpxState;
+} WOW64_FLOATING_SAVE_AREA;
+typedef struct _WOW64_CONTEXT
+{
+    ULONG ContextFlags, Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
+    WOW64_FLOATING_SAVE_AREA FloatSave;
+    ULONG SegGs, SegFs, SegEs, SegDs;
+    ULONG Edi, Esi, Ebx, Edx, Ecx, Eax, Ebp, Eip, SegCs, EFlags, Esp, SegSs;
+    UCHAR ExtendedRegisters[512];
+} WOW64_CONTEXT;
+#endif
+C_ASSERT(sizeof(WOW64_CONTEXT) == 716);
+C_ASSERT(FIELD_OFFSET(WOW64_CONTEXT, ExtendedRegisters) == 204);
+
+
 /* Reserved in the native loader's TLS bitmap, never exposed to i386 TLS. */
 #define WOW64_TLS_CPU 1
+#define WOW64_THREAD_START_MARKER 0x574f573332ULL
 #define WOW64_PEB32(Peb) ((PEB32 *)((ULONG_PTR)(Peb) + ROUND_TO_PAGES(sizeof(PEB))))
 #define WOW64_TEB32(Teb) ((TEB32 *)((ULONG_PTR)(Teb) + ROUND_TO_PAGES(sizeof(TEB))))
 
-typedef struct _WOW64_CPU_STATE
+typedef struct DECLSPEC_ALIGN(16) _WOW64_CPU_STATE
 {
     ULONG64 NativeStack;
     ULONG Esp;
@@ -18,6 +50,15 @@ typedef struct _WOW64_CPU_STATE
     ULONG Edi;
     ULONG Ebp;
     ULONG FsRedirectionDisabled;
+    ULONG Ecx;
+    ULONG Edx;
+    ULONG Reserved[3];
+    UCHAR ExtendedRegisters[512];
+    ULONG Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
+    PVOID ApcFrame;
+    PVOID CallbackFrame;
+    PVOID ProcessParameters;
+
 } WOW64_CPU_STATE;
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, NativeStack) == 0);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Esp) == 8);
@@ -28,8 +69,15 @@ C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ebx) == 24);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Esi) == 28);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Edi) == 32);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ebp) == 36);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ecx) == 44);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Edx) == 48);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, ExtendedRegisters) == 64);
 
 typedef NTSTATUS (NTAPI *WOW64_SERVICE)(ULONG Number, ULONG *Arguments);
 NTSTATUS NTAPI Wow64CpuInitialize(WOW64_SERVICE Service, PVOID *Gate);
 DECLSPEC_NORETURN VOID NTAPI Wow64CpuRun(WOW64_CPU_STATE *State);
-DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context);
+VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context);
+
+NTSTATUS NTAPI Wow64WinInitialize(PVOID Dispatcher);
+NTSTATUS NTAPI Wow64WinSystemService(ULONG Number, ULONG *Arguments);
+NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Status);

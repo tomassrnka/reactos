@@ -2,7 +2,7 @@
 include(../ntos.cmake)
 
 include_directories(${REACTOS_SOURCE_DIR}/ntoskrnl)
-spec2def(ntkrnlmp.exe ../ntoskrnl.spec)
+spec2def(ntkrnlmp.exe ../${ntoskrnl_spec})
 
 if(MSVC_IDE)
     set_source_files_properties(${NTKRNLMP_ASM_SOURCE} PROPERTIES COMPILE_DEFINITIONS "CONFIG_SMP")

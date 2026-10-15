@@ -1,5 +1,10 @@
 /* ReactOS WoW64 NT argument translation. SPDX-License-Identifier: GPL-2.0-or-later */
 #include "wow64p.h"
+#include <mountmgr.h>
+#include <winsock2.h>
+#include <tdi.h>
+#include <tcpioctl.h>
+#include <drivers/afd/shared.h>
 
 enum
 {
@@ -24,6 +29,26 @@ static UNICODE_STRING *String32(UNICODE_STRING *To, const WOW64_STRING *From)
     return To;
 }
 
+static PSECURITY_DESCRIPTOR Security32(SECURITY_DESCRIPTOR *To, PSECURITY_DESCRIPTOR From)
+{
+    /* Self-relative descriptors have a fixed-width representation. Absolute
+     * descriptors instead contain four guest pointers (NLS and registry APIs
+     * routinely pass them). The kernel still captures/probes the SID/ACLs. */
+    if (From && !(((PISECURITY_DESCRIPTOR)From)->Control & SE_SELF_RELATIVE))
+    {
+        const SECURITY_DESCRIPTOR_RELATIVE *FromSd = From;
+        To->Revision = FromSd->Revision;
+        To->Sbz1 = FromSd->Sbz1;
+        To->Control = FromSd->Control;
+        To->Owner = PTR32(FromSd->Owner);
+        To->Group = PTR32(FromSd->Group);
+        To->Sacl = PTR32(FromSd->Sacl);
+        To->Dacl = PTR32(FromSd->Dacl);
+        return To;
+    }
+    return From;
+}
+
 static NTSTATUS Attributes32(OBJECT_ATTRIBUTES *To, UNICODE_STRING *Name,
                              SECURITY_DESCRIPTOR *Descriptor, ULONG Address)
 {
@@ -33,24 +58,8 @@ static NTSTATUS Attributes32(OBJECT_ATTRIBUTES *To, UNICODE_STRING *Name,
     if (From->Length != sizeof(*From)) return STATUS_INVALID_PARAMETER;
     InitializeObjectAttributes(To, String32(Name, PTR32(From->ObjectName)),
                                From->Attributes, HANDLE32(From->RootDirectory),
-                               PTR32(From->SecurityDescriptor));
+                               Security32(Descriptor, PTR32(From->SecurityDescriptor)));
     To->SecurityQualityOfService = PTR32(From->SecurityQualityOfService);
-    /* Self-relative descriptors have a fixed-width representation. Absolute
-     * descriptors instead contain four guest pointers (NLS and registry APIs
-     * routinely pass them). The kernel still captures/probes the SID/ACLs. */
-    if (To->SecurityDescriptor &&
-        !(((PISECURITY_DESCRIPTOR)To->SecurityDescriptor)->Control & SE_SELF_RELATIVE))
-    {
-        const SECURITY_DESCRIPTOR_RELATIVE *FromSd = To->SecurityDescriptor;
-        Descriptor->Revision = FromSd->Revision;
-        Descriptor->Sbz1 = FromSd->Sbz1;
-        Descriptor->Control = FromSd->Control;
-        Descriptor->Owner = PTR32(FromSd->Owner);
-        Descriptor->Group = PTR32(FromSd->Group);
-        Descriptor->Sacl = PTR32(FromSd->Sacl);
-        Descriptor->Dacl = PTR32(FromSd->Dacl);
-        To->SecurityDescriptor = Descriptor;
-    }
     return STATUS_SUCCESS;
 }
 
@@ -70,11 +79,37 @@ static VOID StoreIo(ULONG Address, const IO_STATUS_BLOCK *Io)
 typedef struct
 {
     HANDLE Handle;
+    HANDLE HandleProcess;
     HANDLE Process;
     PVOID Base;
     BOOLEAN Mapped;
     PVOID Buffer;
+    HANDLE Thread;
+    HANDLE ThreadProcess;
 } WOW64_CLEANUP;
+
+typedef struct
+{
+    BOOLEAN Replace;
+    ULONG Root, Length;
+    WCHAR Name[1];
+} WOW64_RENAME_INFORMATION;
+
+typedef struct
+{
+    LARGE_INTEGER PerProcessUserTimeLimit, PerJobUserTimeLimit;
+    ULONG LimitFlags, MinimumWorkingSetSize, MaximumWorkingSetSize;
+    ULONG ActiveProcessLimit, Affinity, PriorityClass, SchedulingClass;
+} WOW64_JOB_BASIC_LIMIT;
+
+typedef struct
+{
+    WOW64_JOB_BASIC_LIMIT Basic;
+    IO_COUNTERS IoInfo;
+    ULONG ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+} WOW64_JOB_EXTENDED_LIMIT;
+C_ASSERT(sizeof(WOW64_JOB_BASIC_LIMIT) == 48);
+C_ASSERT(sizeof(WOW64_JOB_EXTENDED_LIMIT) == 112);
 
 static VOID ProbeOutput(ULONG Address, ULONG Size)
 {
@@ -111,6 +146,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     Cleanup->Handle = NULL; return Status; } while (0)
 #define RETURN_HANDLE() RETURN_HANDLE_AT(0)
     if (Number == 0x10000) return Wow64CsrDispatch(a[0], P(1));
+    if (Number == 0x10003) return Wow64CreateProcess(P(0));
     if (Number == 0x10002)
     {
         WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
@@ -123,20 +159,85 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     if (NativeSystemInformation) Number = W64_NtQuerySystemInformation;
     switch (Number)
     {
+    case W64_NtCreateThread:
+    {
+        CLIENT_ID Id;
+        PROBE(0);
+        if (a[4]) ProbeOutput(a[4], 2 * sizeof(ULONG));
+        ATTR(2);
+        Cleanup->ThreadProcess = H(3);
+        Status = Wow64CreateThread(&Cleanup->Thread, THREAD_ALL_ACCESS, OA(2), H(3), &Id, P(5), P(6), TRUE);
+        if (NT_SUCCESS(Status))
+            Status = NtDuplicateObject(NtCurrentProcess(), Cleanup->Thread, NtCurrentProcess(),
+                                        &Cleanup->Handle, a[1], a[2] ? Attributes.Attributes & OBJ_INHERIT : 0, 0);
+        if (NT_SUCCESS(Status))
+        {
+            U(0) = HandleToUlong(Cleanup->Handle);
+            if (a[4])
+            {
+                ((ULONG *)P(4))[0] = HandleToUlong(Id.UniqueProcess);
+                ((ULONG *)P(4))[1] = HandleToUlong(Id.UniqueThread);
+            }
+            if (!a[7]) Status = NtResumeThread(Cleanup->Thread, NULL);
+            if (NT_SUCCESS(Status))
+            {
+                NtClose(Cleanup->Thread);
+                Cleanup->Thread = NULL;
+                Cleanup->Handle = NULL;
+            }
+        }
+        return Status;
+    }
+    case W64_NtGetContextThread:
+        return NtQueryInformationThread(H(0), ThreadWow64Context, P(1), sizeof(WOW64_CONTEXT), NULL);
+    case W64_NtSetContextThread:
+        return NtSetInformationThread(H(0), ThreadWow64Context, P(1), sizeof(WOW64_CONTEXT));
+    case W64_NtQueueApcThread:
+        return NtQueueApcThread(H(0), (PKNORMAL_ROUTINE)(ULONG_PTR)(-((LONG64)a[1] << 2)), P(2), P(3), P(4));
+    case W64_NtDuplicateObject:
+        if (a[3]) PROBE(3);
+        Cleanup->HandleProcess = H(2);
+        Status = NtDuplicateObject(H(0), H(1), H(2), a[3] ? &Cleanup->Handle : NULL, a[4], a[5], a[6]);
+        if (a[3]) { RETURN_HANDLE_AT(3); }
+        return Status;
+    case W64_NtSuspendThread: return NtSuspendThread(H(0), P(1));
+    case W64_NtResumeThread: return NtResumeThread(H(0), P(1));
+    case W64_NtAlertThread: return NtAlertThread(H(0));
+    case W64_NtAlertResumeThread: return NtAlertResumeThread(H(0), P(1));
+    case W64_NtQueryInformationThread: return Wow64QueryThread(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtAreMappedFilesTheSame: return NtAreMappedFilesTheSame(P(0), P(1));
+    case W64_NtReadVirtualMemory:
+    case W64_NtWriteVirtualMemory:
+    {
+        SIZE_T Bytes = 0;
+        if (a[4]) PROBE(4);
+        if (Number == W64_NtReadVirtualMemory)
+            Status = NtReadVirtualMemory(H(0), P(1), P(2), a[3], &Bytes);
+        else
+            Status = NtWriteVirtualMemory(H(0), P(1), P(2), a[3], &Bytes);
+        if (a[4]) U(4) = (ULONG)Bytes;
+        return Status;
+    }
+    case W64_NtSignalAndWaitForSingleObject: return NtSignalAndWaitForSingleObject(H(0), H(1), a[2], P(3));
+    case W64_NtPulseEvent: return NtPulseEvent(H(0), P(1));
+    case W64_NtClearEvent: return NtClearEvent(H(0));
+    case W64_NtQueryEvent: return NtQueryEvent(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtQuerySemaphore: return NtQuerySemaphore(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtQueryMutant: return NtQueryMutant(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtOpenSemaphore:
+        PROBE(0); ATTR(2); Status = NtOpenSemaphore(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtOpenMutant:
+        PROBE(0); ATTR(2); Status = NtOpenMutant(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtClose: return NtClose(H(0));
     case W64_NtContinue: return Wow64Continue(P(0), a[1]);
     case W64_NtQueryObject:
         if (a[1] == ObjectBasicInformation)
             return NtQueryObject(H(0), a[1], P(2), a[3], P(4));
         return STATUS_NOT_SUPPORTED;
-    case W64_NtRaiseException:
-        /* Guest exception delivery is not implemented yet. Preserve the
-         * exception status and fail closed instead of recursively raising
-         * STATUS_INVALID_SYSTEM_SERVICE on the i386 stack. */
-        DbgPrint("WoW64: guest exception %08lx at %08lx\n", U(0), ((ULONG *)P(0))[3]);
-        return NtTerminateProcess(NtCurrentProcess(), U(0));
+    case W64_NtRaiseException: return Wow64RaiseException(P(0), P(1), a[2]);
     case W64_NtTestAlert: return NtTestAlert();
     case W64_NtYieldExecution: return NtYieldExecution();
+    case W64_NtIsProcessInJob: return NtIsProcessInJob(H(0), H(1));
     case W64_NtTerminateProcess: return NtTerminateProcess(H(0), a[1]);
     case W64_NtTerminateThread: return NtTerminateThread(H(0), a[1]);
     case W64_NtQueryDebugFilterState: return NtQueryDebugFilterState(a[0], a[1]);
@@ -163,7 +264,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         Cleanup->Process = H(0);
         Cleanup->Mapped = FALSE;
         Length = !Base || (a[4] & MEM_RESERVE);
-        Status = NtAllocateVirtualMemory(H(0), &Base, a[2] ? a[2] : 0xFFFFFFFF,
+        Status = NtAllocateVirtualMemory(H(0), &Base, Wow64ZeroBits(a[2]),
                                          &Size, a[4], a[5]);
         if (NT_SUCCESS(Status))
         {
@@ -210,7 +311,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         Base = PTR32(U(2)); Size = U(6);
         Cleanup->Process = H(1);
         Cleanup->Mapped = TRUE;
-        Status = NtMapViewOfSection(H(0), H(1), &Base, a[3] ? a[3] : 0xFFFFFFFF,
+        Status = NtMapViewOfSection(H(0), H(1), &Base, Wow64ZeroBits(a[3]),
                                     a[4], P(5), &Size, a[7], a[8], a[9]);
         if (NT_SUCCESS(Status))
         {
@@ -300,6 +401,45 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtDeleteKey: return NtDeleteKey(H(0));
     case W64_NtDeleteValueKey: return NtDeleteValueKey(H(0), String32(&Name, P(1)));
     case W64_NtFlushKey: return NtFlushKey(H(0));
+    case W64_NtCreateJobObject:
+        PROBE(0); ATTR(2);
+        Status = NtCreateJobObject(&Cleanup->Handle, a[1], OA(2));
+        RETURN_HANDLE();
+    case W64_NtOpenJobObject:
+        PROBE(0); ATTR(2);
+        Status = NtOpenJobObject(&Cleanup->Handle, a[1], OA(2));
+        RETURN_HANDLE();
+    case W64_NtAssignProcessToJobObject: return NtAssignProcessToJobObject(H(0), H(1));
+    case W64_NtTerminateJobObject: return NtTerminateJobObject(H(0), a[1]);
+    case W64_NtSetInformationJobObject:
+        if (a[1] == JobObjectBasicLimitInformation || a[1] == JobObjectExtendedLimitInformation)
+        {
+            const WOW64_JOB_EXTENDED_LIMIT *From = P(2);
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION To = {0};
+            BOOLEAN Extended = a[1] == JobObjectExtendedLimitInformation;
+            if (a[3] != (Extended ? sizeof(*From) : sizeof(From->Basic)))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            To.BasicLimitInformation.PerProcessUserTimeLimit = From->Basic.PerProcessUserTimeLimit;
+            To.BasicLimitInformation.PerJobUserTimeLimit = From->Basic.PerJobUserTimeLimit;
+            To.BasicLimitInformation.LimitFlags = From->Basic.LimitFlags;
+            To.BasicLimitInformation.MinimumWorkingSetSize = From->Basic.MinimumWorkingSetSize;
+            To.BasicLimitInformation.MaximumWorkingSetSize = From->Basic.MaximumWorkingSetSize;
+            To.BasicLimitInformation.ActiveProcessLimit = From->Basic.ActiveProcessLimit;
+            To.BasicLimitInformation.Affinity = From->Basic.Affinity;
+            To.BasicLimitInformation.PriorityClass = From->Basic.PriorityClass;
+            To.BasicLimitInformation.SchedulingClass = From->Basic.SchedulingClass;
+            if (Extended)
+            {
+                To.IoInfo = From->IoInfo;
+                To.ProcessMemoryLimit = From->ProcessMemoryLimit;
+                To.JobMemoryLimit = From->JobMemoryLimit;
+                To.PeakProcessMemoryUsed = From->PeakProcessMemoryUsed;
+                To.PeakJobMemoryUsed = From->PeakJobMemoryUsed;
+            }
+            return NtSetInformationJobObject(H(0), a[1], &To,
+                       Extended ? sizeof(To) : sizeof(To.BasicLimitInformation));
+        }
+        return STATUS_NOT_SUPPORTED;
     case W64_NtCreateEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateEvent(&Cleanup->Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
@@ -316,6 +456,17 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(0);
         ATTR(2); Status = NtCreateMutant(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
     case W64_NtReleaseMutant: return NtReleaseMutant(H(0), P(1));
+    case W64_NtCreateTimer:
+        PROBE(0);
+        ATTR(2); Status = NtCreateTimer(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
+    case W64_NtOpenTimer:
+        PROBE(0);
+        ATTR(2); Status = NtOpenTimer(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtSetTimer:
+        return NtSetTimer(H(0), P(1), a[2] ? (PTIMER_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
+                          P(3), a[4], a[5], P(6));
+    case W64_NtCancelTimer: return NtCancelTimer(H(0), P(1));
+    case W64_NtQueryTimer: return NtQueryTimer(H(0), a[1], P(2), a[3], P(4));
     case W64_NtCreateKeyedEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateKeyedEvent(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
@@ -412,6 +563,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         StoreIo(a[4], &Io); return Status;
     }
     case W64_NtOpenProcess:
+    case W64_NtOpenThread:
     {
         CLIENT_ID Id, *ClientId = NULL;
         PROBE(0);
@@ -422,7 +574,9 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Id.UniqueThread = HANDLE32(((ULONG *)P(3))[1]);
             ClientId = &Id;
         }
-        Status = NtOpenProcess(&Cleanup->Handle, a[1], OA(2), ClientId);
+        if (Number == W64_NtOpenThread)
+            Status = NtOpenThread(&Cleanup->Handle, a[1], OA(2), ClientId);
+        else Status = NtOpenProcess(&Cleanup->Handle, a[1], OA(2), ClientId);
         RETURN_HANDLE();
     }
     case W64_NtOpenProcessToken:
@@ -466,6 +620,25 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         default: return STATUS_NOT_SUPPORTED;
         }
     case W64_NtQueryInformationProcess:
+        if (a[1] == ProcessBasicInformation)
+        {
+            PROCESS_BASIC_INFORMATION Native;
+            ULONG_PTR Peb;
+            struct { LONG Exit; ULONG Peb, Affinity; LONG Priority; ULONG Id, Parent; } *Guest = P(2);
+            if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+            Status = NtQueryInformationProcess(H(0), ProcessBasicInformation, &Native, sizeof(Native), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            Status = NtQueryInformationProcess(H(0), ProcessWow64Information, &Peb, sizeof(Peb), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            Guest->Exit = Native.ExitStatus;
+            Guest->Peb = (ULONG)Peb;
+            Guest->Affinity = Native.AffinityMask;
+            Guest->Priority = Native.BasePriority;
+            Guest->Id = Native.UniqueProcessId;
+            Guest->Parent = Native.InheritedFromUniqueProcessId;
+            if (a[4]) U(4) = sizeof(*Guest);
+            return STATUS_SUCCESS;
+        }
         if (a[1] == ProcessWow64Information)
         {
             ULONG_PTR Peb;
@@ -483,6 +656,13 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         default: return STATUS_NOT_SUPPORTED;
         }
     case W64_NtSetInformationProcess:
+        if (a[1] == ProcessAffinityMask)
+        {
+            ULONG_PTR Affinity;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Affinity = U(2);
+            return NtSetInformationProcess(H(0), a[1], &Affinity, sizeof(Affinity));
+        }
         switch (a[1])
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
@@ -492,7 +672,25 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtSetInformationThread:
         switch (a[1])
         {
+        case ThreadZeroTlsCell:
+        {
+            ULONG Index;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Index = U(2);
+            if (Index >= TLS_MINIMUM_AVAILABLE + TLS_EXPANSION_SLOTS) return STATUS_INVALID_PARAMETER;
+            Index |= 0x80000000;
+            return NtSetInformationThread(H(0), a[1], &Index, sizeof(Index));
+        }
+        case ThreadQuerySetWin32StartAddress: case ThreadAffinityMask:
+        case ThreadIdealProcessor: case ThreadPriorityBoost:
+        {
+            ULONG_PTR Value;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Value = U(2);
+            return NtSetInformationThread(H(0), a[1], &Value, sizeof(Value));
+        }
         case ThreadHideFromDebugger: case ThreadPriority: case ThreadBasePriority:
+        case ThreadBreakOnTermination:
             return NtSetInformationThread(H(0), a[1], P(2), a[3]);
         default: return STATUS_NOT_SUPPORTED;
         }
@@ -507,7 +705,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             {
                 RtlCopyMemory(To, &From, 7 * sizeof(ULONG));
                 To->MinimumUserModeAddress = 0x10000;
-                To->MaximumUserModeAddress = NativeSystemInformation ? 0xfffeffff : 0x7ffeffff;
+                To->MaximumUserModeAddress = NativeSystemInformation ? 0xfffeffff : Wow64HighestUserAddress;
                 To->ActiveProcessorsAffinityMask = (ULONG)From.ActiveProcessorsAffinityMask;
                 To->NumberOfProcessors = From.NumberOfProcessors;
                 if (a[3]) U(3) = sizeof(*To);
@@ -521,6 +719,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             if (NT_SUCCESS(Status) && !NativeSystemInformation)
                 ((SYSTEM_PROCESSOR_INFORMATION *)P(1))->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
             return Status;
+        case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
         default: return STATUS_NOT_SUPPORTED;
@@ -548,7 +747,14 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
-    if (Cleanup.Handle) NtClose(Cleanup.Handle);
+    if (Cleanup.Thread)
+        Wow64AbortThread(Cleanup.Thread, Cleanup.ThreadProcess, Status);
+    if (Cleanup.Handle)
+    {
+        if (Cleanup.HandleProcess)
+            NtDuplicateObject(Cleanup.HandleProcess, Cleanup.Handle, NULL, NULL, 0, 0, DUPLICATE_CLOSE_SOURCE);
+        else NtClose(Cleanup.Handle);
+    }
     if (Cleanup.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Cleanup.Buffer);
     if (Cleanup.Base)
     {
@@ -560,7 +766,8 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
             NtFreeVirtualMemory(Cleanup.Process, &Cleanup.Base, &Size, MEM_RELEASE);
         }
     }
-    if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState)
+    if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState &&
+        !(Number >= 0x1000 && Number < 0x2000))
         DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
     return Status;
 }

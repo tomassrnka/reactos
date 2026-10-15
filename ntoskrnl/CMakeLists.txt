@@ -14,7 +14,16 @@ set(NTOSKRNL_ASM_SOURCE ${ASM_SOURCE})
 set(NTKRNLMP_SOURCE ${SOURCE})
 set(NTKRNLMP_ASM_SOURCE ${ASM_SOURCE})
 
-spec2def(ntoskrnl.exe ntoskrnl.spec ADD_IMPORTLIB)
+set(ntoskrnl_spec ntoskrnl.spec)
+if(BUILD_WOW64_ENABLED)
+    # The shared trap-return macro is used by both the kernel and the HAL.
+    configure_file(ntoskrnl.spec ntoskrnl-wow64.spec COPYONLY)
+    file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/ntoskrnl-wow64.spec"
+        "\n@ stdcall -arch=x86_64 KiRestoreWow64Gs() #ReactOS-Specific\n")
+    file(RELATIVE_PATH ntoskrnl_spec "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/ntoskrnl-wow64.spec")
+endif()
+spec2def(ntoskrnl.exe ${ntoskrnl_spec} ADD_IMPORTLIB)
 
 # Link GCC stack protector lib
 if (STACK_PROTECTOR)
