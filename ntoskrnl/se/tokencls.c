@@ -68,11 +68,11 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     /* TokenVirtualizationAllowed */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenVirtualizationEnabled */
-    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE | ICIF_SET),
     /* TokenIntegrityLevel */
     IQS_SAME(TOKEN_MANDATORY_LABEL, ULONG, ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE),
     /* TokenUIAccess */
-    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE | ICIF_SET),
     /* TokenMandatoryPolicy */
     IQS_NONE,
     /* TokenLogonSid */
@@ -451,32 +451,51 @@ SeQueryInformationToken(
 }
 
 /*
- * TokenElevation without UAC. Measured on Windows 7 and 10 with UAC off: an
- * administrator's token is elevated and stays so when it is duplicated, set to
- * medium integrity or restricted (the administrators group for deny only, no
- * privileges); the tokens of the three service accounts are elevated; the
- * anonymous token is not. So the answer follows the user and the groups the
- * token was made with, not their attributes and not the integrity level.
+ * TokenElevation without UAC, as measured on Windows 7 (Server 2008 R2) with
+ * UAC off: a token is elevated when the administrators group is in it and not
+ * for deny only, or when it holds one of the privileges below, enabled or not.
+ * Other groups, the user (LocalSystem and the service accounts included), the
+ * other privileges and the integrity level do not count. (Windows 10 also keeps
+ * restricted copies of an administrator's logon token elevated.)
  */
+static const ULONG SepElevatingPrivileges[] =
+{
+    SE_CREATE_TOKEN_PRIVILEGE,
+    SE_TCB_PRIVILEGE,
+    SE_TAKE_OWNERSHIP_PRIVILEGE,
+    SE_LOAD_DRIVER_PRIVILEGE,
+    SE_BACKUP_PRIVILEGE,
+    SE_RESTORE_PRIVILEGE,
+    SE_DEBUG_PRIVILEGE,
+    SE_IMPERSONATE_PRIVILEGE,
+    SE_RELABEL_PRIVILEGE,
+};
+
 static
 ULONG
 SepIsTokenElevated(
     _In_ PTOKEN Token)
 {
-    PSID User = Token->UserAndGroups[0].Sid;
-    ULONG i;
-
-    if (RtlEqualSid(User, SeLocalSystemSid) ||
-        RtlEqualSid(User, SeLocalServiceSid) ||
-        RtlEqualSid(User, SeNetworkServiceSid))
-    {
-        return TRUE;
-    }
+    ULONG i, j;
 
     for (i = 1; i < Token->UserAndGroupCount; i++)
     {
-        if (RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
+        if (!(Token->UserAndGroups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) &&
+            RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
+        {
             return TRUE;
+        }
+    }
+
+    for (i = 0; i < Token->PrivilegeCount; i++)
+    {
+        if (Token->Privileges[i].Luid.HighPart != 0)
+            continue;
+        for (j = 0; j < RTL_NUMBER_OF(SepElevatingPrivileges); j++)
+        {
+            if (Token->Privileges[i].Luid.LowPart == SepElevatingPrivileges[j])
+                return TRUE;
+        }
     }
 
     return FALSE;
@@ -1162,19 +1181,25 @@ NtQueryInformationToken(
 
             /*
              * NT 6 classes. There is no UAC: no token is split into a filtered
-             * and a full one, so every token has the default elevation type,
-             * no linked token, no UI access and no virtualization.
+             * and a full one, so every token has the default elevation type and
+             * no linked token. UI access and virtualization are token flags.
              */
             case TokenElevationType:
             case TokenVirtualizationAllowed:
             case TokenVirtualizationEnabled:
             case TokenUIAccess:
             {
-                ULONG Value = 0;
+                ULONG Value;
 
                 DPRINT("NtQueryInformationToken(%d)\n", TokenInformationClass);
                 if (TokenInformationClass == TokenElevationType)
                     Value = TokenElevationTypeDefault;
+                else if (TokenInformationClass == TokenVirtualizationAllowed)
+                    Value = !!(Token->TokenFlags & TOKEN_VIRTUALIZE_ALLOWED);
+                else if (TokenInformationClass == TokenVirtualizationEnabled)
+                    Value = !!(Token->TokenFlags & TOKEN_VIRTUALIZE_ENABLED);
+                else
+                    Value = !!(Token->TokenFlags & TOKEN_UIACCESS);
                 RequiredLength = sizeof(ULONG);
 
                 _SEH2_TRY
@@ -1734,6 +1759,57 @@ NtSetInformationToken(
                 /* Unlock the token */
                 SepReleaseTokenLock(Token);
 
+                break;
+            }
+
+            case TokenVirtualizationEnabled:
+            case TokenUIAccess:
+            {
+                ULONG Value, Flag;
+
+                _SEH2_TRY
+                {
+                    /* Buffer size was already verified, no need to check here again */
+                    Value = *(PULONG)TokenInformation;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                    _SEH2_YIELD(goto Cleanup);
+                }
+                _SEH2_END;
+
+                /* Windows: granting UI access needs SeTcbPrivilege, clearing it does not */
+                if (TokenInformationClass == TokenUIAccess)
+                {
+                    Flag = TOKEN_UIACCESS;
+                    if (Value && !SeSinglePrivilegeCheck(SeTcbPrivilege, PreviousMode))
+                    {
+                        Status = STATUS_PRIVILEGE_NOT_HELD;
+                        break;
+                    }
+                }
+                else
+                {
+                    Flag = TOKEN_VIRTUALIZE_ENABLED;
+                }
+
+                SepAcquireTokenLockExclusive(Token);
+
+                /* Windows: enabling virtualization succeeds but has no effect unless the token allows it */
+                if (Flag == TOKEN_VIRTUALIZE_ENABLED && !(Token->TokenFlags & TOKEN_VIRTUALIZE_ALLOWED))
+                    Value = 0;
+
+                if (!!(Token->TokenFlags & Flag) != !!Value)
+                {
+                    if (Value)
+                        Token->TokenFlags |= Flag;
+                    else
+                        Token->TokenFlags &= ~Flag;
+                    ExAllocateLocallyUniqueId(&Token->ModifiedId);
+                }
+
+                SepReleaseTokenLock(Token);
                 break;
             }
 
