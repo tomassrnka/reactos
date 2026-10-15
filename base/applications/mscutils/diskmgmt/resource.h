@@ -21,6 +21,23 @@
 #define ID_BOT_HIDDEN           223
 #define ID_ABOUT                230
 
+/* actions of the writer */
+#define ID_ACT_FIRST            240
+#define ID_OPEN                 240
+#define ID_EXPLORE              241
+#define ID_MARK_ACTIVE          242
+#define ID_CHANGE_LETTER        243
+#define ID_FORMAT               244
+#define ID_DELETE_VOLUME        245
+#define ID_DELETE_PARTITION     246
+#define ID_NEW_VOLUME           247
+#define ID_INIT_DISK            248
+#define ID_CONVERT_GPT          249
+#define ID_CONVERT_MBR          250
+#define ID_RESCAN               251
+#define ID_ACT_LAST             251
+#define ID_ALL_TASKS            260
+
 /* control ids of the main window */
 #define IDC_TOOLBAR             300
 #define IDC_STATUSBAR           301
@@ -138,5 +155,112 @@
 #define IDS_PROP_LABEL          575
 #define IDS_BYTES_FMT           576
 #define IDS_NOT_AVAILABLE       579
+
+/* dialogs of the actions */
+#define IDD_INITDISK            600
+#define IDD_NEWVOL              601
+#define IDD_LETTER              602
+#define IDD_PICKLETTER          603
+#define IDD_FORMAT              604
+#define IDD_PROGRESS            605
+
+#define IDC_ID_TEXT             610
+#define IDC_ID_MBR              611
+#define IDC_ID_GPT              612
+
+#define IDC_NV_INFO             620
+#define IDC_NV_SIZE             621
+#define IDC_NV_LETTER           622
+#define IDC_NV_FS               623
+#define IDC_NV_LABEL            624
+#define IDC_NV_QUICK            625
+#define IDC_NV_NOTE             626
+
+#define IDC_CL_VOLUME           630
+#define IDC_CL_LIST             631
+#define IDC_CL_ADD              632
+#define IDC_CL_CHANGE           633
+#define IDC_CL_REMOVE           634
+
+#define IDC_PL_LETTER_RADIO     640
+#define IDC_PL_LETTER           641
+#define IDC_PL_FOLDER_RADIO     642
+#define IDC_PL_FOLDER           643
+
+#define IDC_FM_VOLUME           650
+#define IDC_FM_LABEL            651
+#define IDC_FM_FS               652
+#define IDC_FM_CLUSTER          653
+#define IDC_FM_QUICK            654
+
+#define IDC_PR_TEXT             660
+#define IDC_PR_BAR              661
+
+/* strings of the actions */
+#define IDS_ACT_OPEN            600
+#define IDS_ACT_EXPLORE         601
+#define IDS_ACT_ACTIVE          602
+#define IDS_ACT_LETTER          603
+#define IDS_ACT_FORMAT          604
+#define IDS_ACT_DELETE_VOLUME   605
+#define IDS_ACT_DELETE_PARTITION 606
+#define IDS_ACT_NEW             607
+#define IDS_ACT_INIT            608
+#define IDS_ACT_GPT             609
+#define IDS_ACT_MBR             610
+#define IDS_ACT_RESCAN          611
+#define IDS_ACT_PROPERTIES      612
+#define IDS_ACT_ALL_TASKS       613
+#define IDS_CONFIRM_TITLE       620
+#define IDS_CONFIRM_DELETE      621
+#define IDS_CONFIRM_FORMAT      622
+#define IDS_CONFIRM_ACTIVE      623
+#define IDS_CONFIRM_CONVERT     624
+#define IDS_CONFIRM_LETTER      625
+#define IDS_CONFIRM_FORCE       626
+#define IDS_CONFIRM_REMOVE_PATH 627
+#define IDS_ERROR_TITLE         630
+#define IDS_ERR_GENERIC         631
+#define IDS_ERR_FORMAT          632
+#define IDS_ERR_NO_PROVIDER     633
+#define IDS_ERR_IN_USE          634
+#define IDS_ERR_NOT_EMPTY       635
+#define IDS_ERR_LAYOUT          636
+#define IDS_ERR_NO_VOLUME       637
+#define IDS_ERR_NOT_SUPPORTED   638
+#define IDS_ERR_PROTECTED       639
+#define IDS_ERR_FORMAT_CODE     640
+#define IDS_FORMAT_DONE         641
+#define IDS_FORMATTING          642
+#define IDS_WORKING             643
+#define IDS_ERR_CHANGED         644
+#define IDS_ERR_UNREADABLE      645
+#define IDS_ERR_TYPE_NOT_UPDATED 646
+#define IDS_ERR_VERIFY_FAILED   647
+#define IDS_ERR_RESTORE_FAILED  648
+#define IDS_NV_INFO_FMT         650
+#define IDS_NV_NO_LETTER        651
+#define IDS_NV_NO_FORMAT        652
+#define IDS_NV_SIZE_RANGE       653
+#define IDS_NV_LABEL_DEFAULT    654
+#define IDS_NV_NOTE_EXTENDED    655
+#define IDS_NV_NOTE_RESERVED    656
+#define IDS_NV_NOTE_LOGICAL     657
+#define IDS_NV_TITLE            658
+#define IDS_NV_CREATED_NO_VOLUME 659
+#define IDS_ID_TEXT_FMT         660
+#define IDS_FM_CLUSTER_DEFAULT  661
+#define IDS_FM_TITLE            662
+#define IDS_FM_VOLUME_FMT       663
+#define IDS_CL_TITLE            664
+#define IDS_PL_BAD_FOLDER       665
+#define IDS_PL_NO_LETTER_FREE   666
+#define IDS_CL_NOTHING          667
+#define IDS_PROP_LABEL_FAILED   668
+#define IDS_PL_FOLDER_PATH      669
+#define IDS_ID_TITLE            670
+#define IDS_PL_NO_REPARSE       671
+#define IDS_ERR_PATHS_NOT_RESTORED 890
+#define IDS_PL_FOLDER_TOO_LONG  891
 
 #endif

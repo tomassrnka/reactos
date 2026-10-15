@@ -9,6 +9,12 @@ BEGIN
     POPUP "&Action"
     BEGIN
         MENUITEM "&Refresh\tF5", ID_REFRESH
+        MENUITEM "Rescan &Disks", ID_RESCAN
+        MENUITEM SEPARATOR
+        POPUP "All T&asks"
+        BEGIN
+            MENUITEM "(none)", 0, GRAYED
+        END
         MENUITEM SEPARATOR
         MENUITEM "P&roperties\tAlt+Enter", ID_PROPERTIES
     END
@@ -50,7 +56,7 @@ CAPTION "General"
 FONT 8, "MS Shell Dlg", 0, 0
 BEGIN
     ICON "", IDC_VOL_ICON, 10, 10, 21, 20, SS_ICON
-    LTEXT "", IDC_VOL_NAME, 46, 14, 196, 12, SS_NOPREFIX
+    EDITTEXT IDC_VOL_NAME, 46, 12, 196, 12, ES_AUTOHSCROLL
     CONTROL "", -1, "Static", SS_ETCHEDHORZ | WS_GROUP, 8, 38, 236, 1
     LTEXT "Type:", -1, 10, 48, 54, 8
     LTEXT "", IDC_VOL_TYPE, 70, 48, 170, 8, SS_NOPREFIX
@@ -148,7 +154,7 @@ BEGIN
     IDS_LEGEND_FREE         "Free space"
     IDS_LEGEND_LOGICAL      "Logical drive"
     IDS_STATUS_COUNTS       "%u disks, %u volumes"
-    IDS_ABOUT_TEXT          "Shows the disks, partitions and volumes of this computer. This version is view only."
+    IDS_ABOUT_TEXT          "Shows the disks, partitions and volumes of this computer and changes them: initializes disks, creates, formats and deletes volumes, and assigns drive letters and paths."
     IDS_TIP_PROPERTIES      "Properties"
     IDS_TIP_REFRESH         "Refresh"
     IDS_STYLE_MBR_SHORT     "MBR"
@@ -191,4 +197,158 @@ BEGIN
     IDS_PROP_LABEL          "Label"
     IDS_BYTES_FMT           "%s bytes"
     IDS_NOT_AVAILABLE       "N/A"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_ACT_OPEN            "&Open"
+    IDS_ACT_EXPLORE         "E&xplore"
+    IDS_ACT_ACTIVE          "Mark Partition as &Active"
+    IDS_ACT_LETTER          "&Change Drive Letter and Paths..."
+    IDS_ACT_FORMAT          "&Format..."
+    IDS_ACT_DELETE_VOLUME   "&Delete Volume..."
+    IDS_ACT_DELETE_PARTITION "&Delete Partition..."
+    IDS_ACT_NEW             "New &Simple Volume..."
+    IDS_ACT_INIT            "&Initialize Disk"
+    IDS_ACT_GPT             "Convert to &GPT Disk"
+    IDS_ACT_MBR             "Convert to &MBR Disk"
+    IDS_ACT_RESCAN          "Rescan &Disks"
+    IDS_ACT_PROPERTIES      "P&roperties"
+    IDS_ACT_ALL_TASKS       "All T&asks"
+    IDS_CONFIRM_TITLE       "Disk Management"
+    IDS_CONFIRM_DELETE      "Deleting this volume will erase all data on it. Back up any data you want to keep before deleting. Do you want to continue?"
+    IDS_CONFIRM_FORMAT      "Formatting this volume will erase all data on it. Back up any data you want to keep before formatting. Do you want to continue?"
+    IDS_CONFIRM_ACTIVE      "Ensure that the partition you are about to make active includes valid system files. Otherwise the disk will not start. Do you want to continue?"
+    IDS_CONFIRM_CONVERT     "Converting this disk to %s keeps no data on it, because the disk holds no volumes. Do you want to continue?"
+    IDS_CONFIRM_LETTER      "Some programs that rely on drive letters might not run correctly. Do you want to continue?"
+    IDS_CONFIRM_FORCE       "The volume is in use by a program. If you continue, the volume is dismounted and the program may lose data. Do you want to continue?"
+    IDS_CONFIRM_REMOVE_PATH "Some programs that rely on drive letters might not run correctly. Are you sure you want to remove this drive letter?"
+    IDS_ERROR_TITLE         "Disk Management"
+    IDS_ERR_GENERIC         "The operation failed.\n\n%s"
+    IDS_ERR_FORMAT          "The format failed.%s"
+    IDS_ERR_NO_PROVIDER     "The file system is not installed on this computer."
+    IDS_ERR_IN_USE          "The volume is in use and cannot be locked."
+    IDS_ERR_NOT_EMPTY       "The disk holds partitions. Delete every volume on the disk first."
+    IDS_ERR_LAYOUT          "The partition layout does not allow this change."
+    IDS_ERR_NO_VOLUME       "The system has not made a volume for the new partition yet. Use Rescan Disks."
+    IDS_ERR_NOT_SUPPORTED   "This system does not support the operation."
+    IDS_ERR_PROTECTED       "This volume holds the running system, so it cannot be changed here."
+    IDS_ERR_FORMAT_CODE     "\n\n%s"
+    IDS_FORMAT_DONE         "The format is complete."
+    IDS_FORMATTING          "Formatting %s"
+    IDS_WORKING             "Please wait..."
+    IDS_ERR_CHANGED         "The disk changed since it was read, so nothing was done. Refresh the view and try again."
+    IDS_ERR_UNREADABLE      "The partition table of this disk is not one this program can change."
+    IDS_ERR_TYPE_NOT_UPDATED "The volume was formatted, but the type of its partition could not be adjusted to the file system."
+    IDS_ERR_VERIFY_FAILED   "The disk does not hold the partition table that was written. Refresh the view to see what it holds now."
+    IDS_ERR_RESTORE_FAILED  "Writing the partition table failed, and the table that was on the disk could not be written back. The disk may need repair."
+    IDS_ERR_PATHS_NOT_RESTORED "The operation failed, and the drive letters or paths it had taken away from the volume could not all be put back. Check them with Change Drive Letter and Paths."
+    IDS_PL_FOLDER_TOO_LONG  "The folder path is too long."
+    IDS_NV_INFO_FMT         "Free space: %s.   Largest volume: %s."
+    IDS_NV_NO_LETTER        "Do not assign a drive letter"
+    IDS_NV_NO_FORMAT        "Do not format this volume"
+    IDS_NV_SIZE_RANGE       "The size must be a whole number of megabytes from 1 to %I64u."
+    IDS_NV_LABEL_DEFAULT    "New Volume"
+    IDS_NV_NOTE_EXTENDED    "The fourth partition of this disk is made as a logical drive in a new extended partition."
+    IDS_NV_NOTE_RESERVED    "A reserved partition is created first, as Windows does on a GPT disk."
+    IDS_NV_NOTE_LOGICAL     "The volume is created as a logical drive in the extended partition."
+    IDS_NV_TITLE            "New Simple Volume - Disk %u"
+    IDS_NV_CREATED_NO_VOLUME "The partition was created, but the system has not made its volume yet. Use Rescan Disks, then format it."
+    IDS_ID_TEXT_FMT         "Disk %u must be initialized before Disk Management can use it. Choose the partition style."
+    IDS_FM_CLUSTER_DEFAULT  "Default"
+    IDS_FM_TITLE            "Format %s"
+    IDS_FM_VOLUME_FMT       "Volume: %s"
+    IDS_CL_TITLE            "Change Drive Letter and Paths for %s"
+    IDS_PL_BAD_FOLDER       "Enter the path of an empty folder that ends with a backslash, for example C:\\Mount\\Data\\."
+    IDS_PL_NO_LETTER_FREE   "Every drive letter is in use."
+    IDS_CL_NOTHING          "(no drive letter or path)"
+    IDS_PROP_LABEL_FAILED   "The label could not be changed.\n\n%s"
+    IDS_PL_FOLDER_PATH      "Folder"
+    IDS_ID_TITLE            "Initialize Disk"
+    IDS_PL_NO_REPARSE       "The file system of that folder does not keep mount points. Choose a folder on an NTFS volume that supports them."
+END
+
+IDD_INITDISK DIALOGEX 0, 0, 236, 112
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Initialize Disk"
+FONT 8, "MS Shell Dlg", 0, 0
+BEGIN
+    LTEXT "", IDC_ID_TEXT, 10, 10, 216, 26
+    GROUPBOX "Partition style", -1, 10, 42, 216, 44
+    AUTORADIOBUTTON "&MBR (Master Boot Record)", IDC_ID_MBR, 20, 56, 190, 10, WS_GROUP | WS_TABSTOP
+    AUTORADIOBUTTON "&GPT (GUID Partition Table)", IDC_ID_GPT, 20, 70, 190, 10
+    DEFPUSHBUTTON "OK", IDOK, 122, 92, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 176, 92, 50, 14
+END
+
+IDD_NEWVOL DIALOGEX 0, 0, 254, 190
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "New Simple Volume"
+FONT 8, "MS Shell Dlg", 0, 0
+BEGIN
+    LTEXT "", IDC_NV_INFO, 10, 8, 234, 18
+    LTEXT "Simple volume &size in MB:", -1, 10, 32, 120, 8
+    EDITTEXT IDC_NV_SIZE, 140, 30, 60, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT "&Drive letter:", -1, 10, 50, 120, 8
+    COMBOBOX IDC_NV_LETTER, 140, 48, 104, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "&File system:", -1, 10, 68, 120, 8
+    COMBOBOX IDC_NV_FS, 140, 66, 104, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "&Volume label:", -1, 10, 86, 120, 8
+    EDITTEXT IDC_NV_LABEL, 140, 84, 104, 12, ES_AUTOHSCROLL
+    AUTOCHECKBOX "&Perform a quick format", IDC_NV_QUICK, 140, 102, 104, 10
+    LTEXT "", IDC_NV_NOTE, 10, 120, 234, 40
+    DEFPUSHBUTTON "OK", IDOK, 142, 168, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 196, 168, 50, 14
+END
+
+IDD_LETTER DIALOGEX 0, 0, 236, 140
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Change Drive Letter and Paths"
+FONT 8, "MS Shell Dlg", 0, 0
+BEGIN
+    LTEXT "", IDC_CL_VOLUME, 10, 8, 216, 10, SS_NOPREFIX
+    LISTBOX IDC_CL_LIST, 10, 24, 216, 70, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_BORDER | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON "&Add...", IDC_CL_ADD, 10, 100, 60, 14
+    PUSHBUTTON "&Change...", IDC_CL_CHANGE, 88, 100, 60, 14
+    PUSHBUTTON "&Remove", IDC_CL_REMOVE, 166, 100, 60, 14
+    DEFPUSHBUTTON "Close", IDOK, 176, 120, 50, 14
+END
+
+IDD_PICKLETTER DIALOGEX 0, 0, 236, 108
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Add Drive Letter or Path"
+FONT 8, "MS Shell Dlg", 0, 0
+BEGIN
+    AUTORADIOBUTTON "Assign the following &drive letter:", IDC_PL_LETTER_RADIO, 10, 12, 130, 10, WS_GROUP | WS_TABSTOP
+    COMBOBOX IDC_PL_LETTER, 150, 10, 60, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTORADIOBUTTON "&Mount in the following empty NTFS folder:", IDC_PL_FOLDER_RADIO, 10, 36, 216, 10
+    EDITTEXT IDC_PL_FOLDER, 26, 50, 200, 12, ES_AUTOHSCROLL
+    DEFPUSHBUTTON "OK", IDOK, 122, 86, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 176, 86, 50, 14
+END
+
+IDD_FORMAT DIALOGEX 0, 0, 236, 138
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Format"
+FONT 8, "MS Shell Dlg", 0, 0
+BEGIN
+    LTEXT "", IDC_FM_VOLUME, 10, 8, 216, 10, SS_NOPREFIX
+    LTEXT "&Volume label:", -1, 10, 28, 90, 8
+    EDITTEXT IDC_FM_LABEL, 110, 26, 116, 12, ES_AUTOHSCROLL
+    LTEXT "&File system:", -1, 10, 46, 90, 8
+    COMBOBOX IDC_FM_FS, 110, 44, 116, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "&Allocation unit size:", -1, 10, 64, 90, 8
+    COMBOBOX IDC_FM_CLUSTER, 110, 62, 116, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX "Perform a &quick format", IDC_FM_QUICK, 110, 82, 116, 10
+    DEFPUSHBUTTON "OK", IDOK, 122, 116, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 176, 116, 50, 14
+END
+
+IDD_PROGRESS DIALOGEX 0, 0, 220, 52
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION
+CAPTION "Disk Management"
+FONT 8, "MS Shell Dlg", 0, 0
+BEGIN
+    LTEXT "", IDC_PR_TEXT, 10, 8, 200, 10, SS_NOPREFIX
+    CONTROL "", IDC_PR_BAR, "msctls_progress32", WS_BORDER, 10, 24, 200, 12
 END
