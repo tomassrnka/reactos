@@ -5440,6 +5440,64 @@ MiReadSegmentPage(
     return (Status == STATUS_END_OF_FILE) ? STATUS_SUCCESS : Status;
 }
 
+typedef struct _MI_ZERO_WAIT
+{
+    ULONGLONG Start;       /* interrupt time of the first wait; 0 until then */
+    ULONGLONG Progress;    /* interrupt time reclamation last moved */
+    LONG Reclaimed;        /* MiReclaimProgress snapshot */
+    BOOLEAN FinalAttempt;  /* one last allocation attempt was allowed past the deadline */
+    BOOLEAN MayWait;       /* FALSE for a reclaim thread that must never sleep on reclamation */
+} MI_ZERO_WAIT, *PMI_ZERO_WAIT;
+
+/*
+ * Wait for memory so a zeroing allocation can be retried, mirroring MmMakeDataSectionResident: kick the
+ * balancer and sleep 50 ms between tries, give up once reclamation has stalled for 30 seconds or the whole
+ * wait has run two minutes -- with one last attempt past the deadline -- and stop at once if the thread is
+ * terminating. The deadline state is seeded on the first wait, so the clock starts at the first shortage.
+ * Returns FALSE when the caller must stop waiting and fail the zeroing, which its callers absorb. MayWait is
+ * FALSE for a reclaim thread that must not sleep on reclamation; such a thread never waits.
+ */
+static
+BOOLEAN
+MiZeroSegmentWaitForMemory(
+    _Inout_ PMI_ZERO_WAIT State)
+{
+    ULONGLONG Now;
+    LARGE_INTEGER Delay;
+
+    if (!State->MayWait || PsIsThreadTerminating(PsGetCurrentThread()))
+        return FALSE;
+
+    Now = KeQueryInterruptTime();
+    if (State->Start == 0)
+    {
+        State->Start = Now;
+        State->Progress = Now;
+        State->Reclaimed = MiReclaimProgress;
+    }
+
+    MmRebalanceMemoryConsumers();
+    Delay.QuadPart = -50 * 10000LL;  /* 50 ms */
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+
+    Now = KeQueryInterruptTime();
+    if (MiReclaimProgress != State->Reclaimed)
+    {
+        State->Reclaimed = MiReclaimProgress;
+        State->Progress = Now;
+    }
+
+    /* Stop after 30 s with no reclamation, or 2 minutes overall, but make one last attempt first */
+    if ((Now - State->Progress >= 30 * 1000 * 10000ULL) || (Now - State->Start >= 120 * 1000 * 10000ULL))
+    {
+        if (State->FinalAttempt)
+            return FALSE;
+        State->FinalAttempt = TRUE;
+    }
+
+    return TRUE;
+}
+
 /*
  * The work of CcZeroData on a cached file, decided page by page under the segment lock:
  * - a page in memory keeps its content (data written through the cache or a view, possibly past the valid data
@@ -5465,6 +5523,19 @@ MmZeroSegmentRange(
     PMM_SECTION_SEGMENT Segment;
     NTSTATUS Status = STATUS_SUCCESS;
     LARGE_INTEGER Offset;
+    /*
+     * Bringing a gap page in needs a NonPagedPool page-table slice and a physical page; both can fail under
+     * pressure. We cannot read or publish a page we never locked, so on a shortage we wait for memory and
+     * retry. A reclaim thread must not: the balancer, the modified-page writer and the lazy writer are the
+     * threads that free the pages, so waiting on them would wait on ourselves. PsIsSystemThread is the decisive
+     * guard -- they are all system threads, and fastfat overwrites the mod-write top-level IRP marker before it
+     * zeroes, so that marker is not reliable here. A reclaim thread fails at once with STATUS_NO_MEMORY and the
+     * page-out path keeps the page dirty and retries; a file-system write absorbs the failure by holding the
+     * grown size and valid data length until the zeroing succeeds and rolling them back otherwise, so no
+     * grown-but-unzeroed gap is ever exposed.
+     */
+    MI_ZERO_WAIT WaitState = { 0 };
+    WaitState.MayWait = Wait && !PsIsSystemThread(PsGetCurrentThread());
 
     Segment = MiGrabDataSection(SectionObjectPointer);
     if (!Segment)
@@ -5476,47 +5547,95 @@ MmZeroSegmentRange(
         LONGLONG ZeroEnd = min(Offset.QuadPart + PAGE_SIZE, End);
         ULONG_PTR Entry;
         PFN_NUMBER Page;
+        BOOLEAN Resident = FALSE;
 
         MmLockSectionSegment(Segment);
-        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
-        while (MM_IS_WAIT_PTE(Entry))
+
+        /*
+         * Claim the page under the segment lock: spin while another thread's read is in flight, keep and dirty
+         * a resident page, or put a wait entry on a missing one so nobody else touches it while it is read or
+         * zeroed below with the lock dropped. A page that another thread faults in while the lock is dropped
+         * reads zero past the valid data length -- the read path clamps the disk read to it, and the file system
+         * holds the length at its old value until the zeroing finishes -- so keeping it is correct.
+         */
+        for (;;)
         {
-            /* A fast-I/O caller cannot block on a read in flight: let it take its own path */
+            Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+
+            if (MM_IS_WAIT_PTE(Entry))
+            {
+                /* A fast-I/O caller cannot block on a read in flight: let it take its own path */
+                if (!Wait)
+                {
+                    MmUnlockSectionSegment(Segment);
+                    Status = STATUS_CANT_WAIT;
+                    goto done;
+                }
+                /* A reclaim thread must not poll another thread's wait entry either: its holder may itself be in
+                 * a memory wait, so this could spin as long as that wait. Fail; the page stays dirty and retries. */
+                if (!WaitState.MayWait)
+                {
+                    MmUnlockSectionSegment(Segment);
+                    Status = STATUS_NO_MEMORY;
+                    goto done;
+                }
+                /* Another thread's read is in flight: let it finish. This is not a memory shortage. */
+                MmUnlockSectionSegment(Segment);
+                KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                MmLockSectionSegment(Segment);
+                continue;
+            }
+
+            /* Cc's segment: no page-file entries */
+            ASSERT(!IS_SWAP_FROM_SSE(Entry));
+
+            if (Entry != 0)
+            {
+                /* A resident page keeps its content and is dirtied; its slice exists, so this cannot fail */
+                NT_VERIFY(NT_SUCCESS(MmSetPageEntrySectionSegment(Segment, &Offset, DIRTY_SSE(Entry))));
+                Resident = TRUE;
+                break;
+            }
+
             if (!Wait)
             {
                 MmUnlockSectionSegment(Segment);
                 Status = STATUS_CANT_WAIT;
                 goto done;
             }
+
+            /* Keep everybody else off this page while it is read or zeroed */
+            if (NT_SUCCESS(MmSetPageEntrySectionSegment(Segment, &Offset, MAKE_SWAP_SSE(MM_WAIT_ENTRY))))
+                break;
+
+            /* The slice allocation failed and nothing is published: wait for memory, or fail if we must not */
             MmUnlockSectionSegment(Segment);
-            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+            if (!MiZeroSegmentWaitForMemory(&WaitState))
+            {
+                Status = STATUS_NO_MEMORY;
+                goto done;
+            }
             MmLockSectionSegment(Segment);
-            Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
         }
-
-        /* Cc's segment: no page-file entries */
-        ASSERT(!IS_SWAP_FROM_SSE(Entry));
-
-        if (Entry != 0)
-        {
-            MmSetPageEntrySectionSegment(Segment, &Offset, DIRTY_SSE(Entry));
-            MmUnlockSectionSegment(Segment);
-            continue;
-        }
-
-        if (!Wait)
-        {
-            MmUnlockSectionSegment(Segment);
-            Status = STATUS_CANT_WAIT;
-            break;
-        }
-
-        /* Keep everybody else off this page while it is read or zeroed */
-        MmSetPageEntrySectionSegment(Segment, &Offset, MAKE_SWAP_SSE(MM_WAIT_ENTRY));
         MmUnlockSectionSegment(Segment);
 
-        /* The page comes zeroed. Read only the one page that straddles Start, to keep its bytes below Start */
-        Status = MmRequestPageMemoryConsumer(MC_USER, TRUE, &Page);
+        if (Resident)
+            continue;
+
+        /*
+         * The page comes zeroed. The wait entry set above holds the page while we get one; MmRequestPageMemoryConsumer
+         * does not itself wait, so wait for memory the same bounded way, or give up (the finalize below drops the wait
+         * entry and the failure returns). Read only the one page that straddles Start, to keep its bytes below Start;
+         * a genuine read error there is not memory pressure and is left to propagate.
+         */
+        for (;;)
+        {
+            Status = MmRequestPageMemoryConsumer(MC_USER, TRUE, &Page);
+            if (Status != STATUS_NO_MEMORY)
+                break;
+            if (!MiZeroSegmentWaitForMemory(&WaitState))
+                break;
+        }
         if (NT_SUCCESS(Status) && (Offset.QuadPart < Start))
         {
             Status = MiReadSegmentPage(Segment, Offset.QuadPart, Page);
