@@ -29,6 +29,7 @@ extern void func_open_osfhandle(void);
 extern void func_recv(void);
 extern void func_send(void);
 extern void func_udpbindretry(void);
+extern void func_udpcancel(void);
 extern void func_udprecv(void);
 extern void func_timewait(void);
 extern void func_WSAAsync(void);
@@ -68,6 +69,7 @@ const struct test winetest_testlist[] =
     { "recv", func_recv },
     { "send", func_send },
     { "udpbindretry", func_udpbindretry },
+    { "udpcancel", func_udpcancel },
     { "udprecv", func_udprecv },
     { "timewait", func_timewait },
     { "WSAAsync", func_WSAAsync },

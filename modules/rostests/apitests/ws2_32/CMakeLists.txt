@@ -26,6 +26,7 @@ list(APPEND SOURCE
     WSASendMsg.c
     send.c
     udpbindretry.c
+    udpcancel.c
     udprecv.c
     timewait.c
     WSAAsync.c
