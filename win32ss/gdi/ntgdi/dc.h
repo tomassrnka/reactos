@@ -197,7 +197,12 @@ VOID FASTCALL DC_vUpdateViewportExt(PDC pdc);
 VOID FASTCALL DC_vCopyState(PDC pdcSrc, PDC pdcDst, BOOL To);
 VOID FASTCALL DC_vFinishBlit(PDC pdc1, PDC pdc2);
 VOID FASTCALL DC_vPrepareDCsForBlit(PDC pdcDest, const RECT* rcDest, PDC pdcSrc, const RECT* rcSrc);
-VOID FASTCALL DC_vPrepareDCsForBlitEx(PDC pdcDest, const RECT* rcDest, PDC pdcSrc, const RECT* rcSrc, BOOL bSplitDest);
+/* DC_vPrepareDCsForBlitEx flags: the caller removes the pointer itself around the part of the blit that reaches it;
+ * the destination only reaches what lies inside the DC clip object (it draws through pdc->co) */
+#define DCPREP_SPLIT_DEST 1
+#define DCPREP_CLIP_DEST  2
+VOID FASTCALL DC_vPrepareDCsForBlitEx(PDC pdcDest, const RECT* rcDest, PDC pdcSrc, const RECT* rcSrc, FLONG fl);
+VOID FASTCALL DC_vGetClipLimit(PDC pdc, RECTL *prcl);
 
 VOID NTAPI DC_vRestoreDC(IN PDC pdc, INT iSaveLevel);
 
