@@ -224,8 +224,11 @@ test_spi(void)
     Ret = pSystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(Ncm192), &Ncm192, 0, 192);
     ok(Ret, "SPI_GETNONCLIENTMETRICS at 192 DPI failed: %lu\n", GetLastError());
     ok(Ncm96.Old.cbSize == sizeof(Ncm96), "cbSize is %u\n", Ncm96.Old.cbSize);
-    ok(Ncm96.iPaddedBorderWidth == 4, "padded border at 96 DPI: %d\n", Ncm96.iPaddedBorderWidth);
-    ok(Ncm192.iPaddedBorderWidth == 8, "padded border at 192 DPI: %d\n", Ncm192.iPaddedBorderWidth);
+    /* The padded border is that of the metric (4 on Windows 10, 0 on ReactOS: see FrameMetrics) */
+    ok(Ncm96.iPaddedBorderWidth == pGetSystemMetricsForDpi(92, 96), "padded border at 96 DPI: %d, metric %d\n",
+       Ncm96.iPaddedBorderWidth, pGetSystemMetricsForDpi(92, 96));
+    ok(Ncm192.iPaddedBorderWidth == pGetSystemMetricsForDpi(92, 192), "padded border at 192 DPI: %d, metric %d\n",
+       Ncm192.iPaddedBorderWidth, pGetSystemMetricsForDpi(92, 192));
     ok(Ncm96.Old.iBorderWidth >= 1 && Ncm192.Old.iBorderWidth == 2 * Ncm96.Old.iBorderWidth, "border %d at 96, %d at 192 DPI\n",
        Ncm96.Old.iBorderWidth, Ncm192.Old.iBorderWidth);
     ok(abs(Ncm192.Old.iScrollWidth - 2 * Ncm96.Old.iScrollWidth) <= 1, "scroll width %d at 96, %d at 192 DPI\n",

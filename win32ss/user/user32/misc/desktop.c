@@ -353,6 +353,21 @@ RealSystemParametersInfoW(UINT uiAction,
           RtlInitUnicodeString(&ustrWallpaper, pvParam);
           return NtUserSystemParametersInfo(SPI_SETDESKWALLPAPER, uiParam, &ustrWallpaper, fWinIni);
       }
+
+    case SPI_GETNONCLIENTMETRICS:
+      {
+          BOOL Ret = NtUserSystemParametersInfo(uiAction, uiParam, pvParam, fWinIni);
+
+          /* The structure of Windows Vista and later ends with the padded border, which win32k does not know
+             (it copies its own structure over the first part, cbSize included): the padded border is the one of
+             the frame that ReactOS draws, and cbSize stays what the caller passed */
+          if (Ret && pvParam && uiParam == sizeof(NONCLIENTMETRICSW) + sizeof(int))
+          {
+              ((NONCLIENTMETRICSW *)pvParam)->cbSize = uiParam;
+              *(int *)((PBYTE)pvParam + sizeof(NONCLIENTMETRICSW)) = RealGetSystemMetrics(92 /* SM_CXPADDEDBORDER */);
+          }
+          return Ret;
+      }
   }
   return NtUserSystemParametersInfo(uiAction, uiParam, pvParam, fWinIni);
 }

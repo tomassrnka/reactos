@@ -1021,7 +1021,8 @@ GetScaledNonClientMetrics(NCM_VISTA *Out, UINT Dpi)
     ScaleLogFont(&Ncm->lfMenuFont, Dpi, SystemDpi);
     ScaleLogFont(&Ncm->lfStatusFont, Dpi, SystemDpi);
     ScaleLogFont(&Ncm->lfMessageFont, Dpi, SystemDpi);
-    Out->iPaddedBorderWidth = ScaleToDpi(4, Dpi, USER_DEFAULT_SCREEN_DPI_);
+    /* The padded border is part of the frame of a window, which ReactOS draws with none (see MetricsForDpi) */
+    Out->iPaddedBorderWidth = ScaleToDpi(GetSystemMetrics(92), Dpi, SystemDpi);
     return TRUE;
 }
 

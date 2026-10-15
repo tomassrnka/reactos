@@ -15,6 +15,16 @@
 #endif
 
 static int (WINAPI *pGetSystemMetricsForDpi)(int, UINT);
+static BOOL (WINAPI *pSystemParametersInfoForDpi)(UINT, UINT, PVOID, UINT, UINT);
+
+/* NONCLIENTMETRICSW of Windows Vista and later: 504 bytes that end with iPaddedBorderWidth */
+typedef struct _NCM504
+{
+    NONCLIENTMETRICSW Ncm;
+    int iPaddedBorderWidth;
+} NCM504;
+C_ASSERT(sizeof(NCM504) == 504);
+
 static UINT (WINAPI *pGetDpiForSystem)(void);
 
 static void
@@ -75,6 +85,35 @@ test_for_dpi(int Frame)
        "SM_CYFRAME and SM_CXFRAME differ at %u DPI\n", Dpi);
 }
 
+/* The frame is the border width of the metrics, the dialog frame and the padded border */
+static void
+test_ncm(int Frame)
+{
+    NCM504 Ncm;
+    int DlgFrame = GetSystemMetrics(SM_CXDLGFRAME);
+
+    memset(&Ncm, 0xcc, sizeof(Ncm));
+    Ncm.Ncm.cbSize = sizeof(Ncm);
+    ok(SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(Ncm), &Ncm, 0), "SPI_GETNONCLIENTMETRICS failed: %lu\n", GetLastError());
+    ok(Ncm.Ncm.iBorderWidth + DlgFrame + Ncm.iPaddedBorderWidth == Frame,
+       "SystemParametersInfo: border %d + dialog frame %d + padded border %d, the frame is %d\n",
+       Ncm.Ncm.iBorderWidth, DlgFrame, Ncm.iPaddedBorderWidth, Frame);
+
+    if (pSystemParametersInfoForDpi && pGetSystemMetricsForDpi)
+    {
+        UINT Dpi = pGetDpiForSystem();
+
+        memset(&Ncm, 0xcc, sizeof(Ncm));
+        Ncm.Ncm.cbSize = sizeof(Ncm);
+        ok(pSystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(Ncm), &Ncm, 0, Dpi),
+           "SPI_GETNONCLIENTMETRICS for %u DPI failed: %lu\n", Dpi, GetLastError());
+        DlgFrame = pGetSystemMetricsForDpi(SM_CXDLGFRAME, Dpi);
+        ok(Ncm.Ncm.iBorderWidth + DlgFrame + Ncm.iPaddedBorderWidth == Frame,
+           "SystemParametersInfoForDpi at %u DPI: border %d + dialog frame %d + padded border %d, the frame is %d\n",
+           Dpi, Ncm.Ncm.iBorderWidth, DlgFrame, Ncm.iPaddedBorderWidth, Frame);
+    }
+}
+
 START_TEST(FrameMetrics)
 {
     HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
@@ -90,6 +129,8 @@ START_TEST(FrameMetrics)
 
     pGetSystemMetricsForDpi = (void *)GetProcAddress(hUser32, "GetSystemMetricsForDpi");
     pGetDpiForSystem = (void *)GetProcAddress(hUser32, "GetDpiForSystem");
+    pSystemParametersInfoForDpi = (void *)GetProcAddress(hUser32, "SystemParametersInfoForDpi");
+    test_ncm(Frame);
     if (pGetSystemMetricsForDpi && pGetDpiForSystem)
         test_for_dpi(Frame);
     else
