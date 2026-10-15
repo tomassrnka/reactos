@@ -27,6 +27,11 @@ HidParser_GetCollectionDescription(
     PVOID ParserContext;
 
     //
+    // a failed call leaves an empty description
+    //
+    ZeroFunction(DeviceDescription, sizeof(HIDP_DEVICE_DESC));
+
+    //
     // first parse the report descriptor
     //
     ParserStatus = HidParser_ParseReportDescriptor(ReportDesc, DescLength, &ParserContext);
@@ -51,11 +56,6 @@ HidParser_GetCollectionDescription(
         ASSERT(FALSE);
         return STATUS_NO_DATA_DETECTED;
     }
-
-    //
-    // zero description
-    //
-    ZeroFunction(DeviceDescription, sizeof(HIDP_DEVICE_DESC));
 
     //
     // allocate collection
@@ -139,9 +139,13 @@ HidParser_GetCollectionDescription(
         DeviceDescription->CollectionDesc[Index].OutputLength = DeviceDescription->ReportIDs[Index].OutputLength;
         DeviceDescription->CollectionDesc[Index].FeatureLength = DeviceDescription->ReportIDs[Index].FeatureLength;
 
-        DeviceDescription->CollectionDesc[Index].InputLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_INPUT) == FALSE ? 1 : 0);
-        DeviceDescription->CollectionDesc[Index].OutputLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_OUTPUT) == FALSE ? 1 : 0);
-        DeviceDescription->CollectionDesc[Index].FeatureLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_FEATURE) == FALSE ? 1 : 0);
+        // ... but only to a report type the collection has
+        if (DeviceDescription->CollectionDesc[Index].InputLength)
+            DeviceDescription->CollectionDesc[Index].InputLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_INPUT) == FALSE ? 1 : 0);
+        if (DeviceDescription->CollectionDesc[Index].OutputLength)
+            DeviceDescription->CollectionDesc[Index].OutputLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_OUTPUT) == FALSE ? 1 : 0);
+        if (DeviceDescription->CollectionDesc[Index].FeatureLength)
+            DeviceDescription->CollectionDesc[Index].FeatureLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_FEATURE) == FALSE ? 1 : 0);
 
 
     }
