@@ -389,3 +389,4 @@ set(baseaddress_mfreadwrite                   0x6c170000) # manually added
 set(baseaddress_mf                            0x6c0a0000) # manually added
 set(baseaddress_mfplat                        0x6bfc0000) # manually added
 set(baseaddress_explorerframe                  0x6bec0000) # manually added
+set(baseaddress_kernelbase                     0x6beb0000) # manually added

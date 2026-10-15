@@ -1237,8 +1237,8 @@
 #@ stdcall QueryIoRingCapabilities(ptr)
 #@ stdcall QueryIdleProcessorCycleTime(ptr ptr)
 #@ stdcall QueryIdleProcessorCycleTimeEx(long ptr ptr)
-#@ stdcall QueryInterruptTime(ptr)
-#@ stdcall QueryInterruptTimePrecise(ptr)
+@ stdcall QueryInterruptTime(ptr)
+@ stdcall QueryInterruptTimePrecise(ptr)
 #@ stdcall QueryMemoryResourceNotification(ptr ptr)
 # #@ stub QueryOptionalDelayLoadedAPI
 #@ stdcall QueryPerformanceCounter(ptr) ntdll.RtlQueryPerformanceCounter
@@ -1252,8 +1252,8 @@
 # #@ stub QueryStateContainerItemInfo
 #@ stdcall QueryThreadCycleTime(long ptr)
 #@ stdcall QueryThreadpoolStackInformation(ptr ptr)
-#@ stdcall QueryUnbiasedInterruptTime(ptr) ntdll.RtlQueryUnbiasedInterruptTime
-#@ stdcall QueryUnbiasedInterruptTimePrecise(ptr)
+@ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr) kernel32.QueryUnbiasedInterruptTime
+@ stdcall QueryUnbiasedInterruptTimePrecise(ptr)
 #@ stdcall QueryVirtualMemoryInformation(long ptr long ptr long ptr)
 #@ stdcall QueryWorkingSet(long ptr long)
 #@ stdcall QueryWorkingSetEx(long ptr long)
