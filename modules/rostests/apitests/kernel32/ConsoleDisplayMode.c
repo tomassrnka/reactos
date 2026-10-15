@@ -6,6 +6,8 @@
  */
 
 #include "precomp.h"
+#include <wingdi.h>
+#include <winuser.h>
 
 #ifndef SW_SHOWNOACTIVATE
 #define SW_SHOWNOACTIVATE 4
@@ -62,6 +64,126 @@ RunChild(VOID)
     WriteFile(hOut, Line, (DWORD)strlen(Line), &Written, NULL);
 }
 
+/*
+ * The switch to full screen takes a while, and the console server waits for
+ * it with the console unlocked. Meanwhile a second thread moves the process
+ * to another console, whose output handle gets the same value. The display
+ * mode call must then fail with ERROR_INVALID_HANDLE instead of reporting the
+ * buffer of the other console. Exit code: 0 passed, 1 failed, 2 no overlap.
+ */
+static volatile LONG Attached;
+static LARGE_INTEGER AttachDone;
+static DWORD HelperPid;
+
+static
+DWORD
+WINAPI
+MoveThread(
+    _In_ LPVOID Parameter)
+{
+    UNREFERENCED_PARAMETER(Parameter);
+
+    Sleep(20);
+    FreeConsole();
+    if (AttachConsole(HelperPid))
+    {
+        QueryPerformanceCounter(&AttachDone);
+        InterlockedExchange(&Attached, TRUE);
+    }
+    return 0;
+}
+
+static
+int
+RunAttachChild(VOID)
+{
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE), hThread;
+    LARGE_INTEGER Freq, Done;
+    COORD Size;
+    BOOL Ret;
+    DWORD Error;
+    int Result;
+
+    hThread = CreateThread(NULL, 0, MoveThread, NULL, 0, NULL);
+    if (!hThread)
+        return 3;
+    Ret = SetConsoleDisplayMode(hOut, CONSOLE_FULLSCREEN_MODE, &Size);
+    Error = GetLastError();
+    QueryPerformanceCounter(&Done);
+    WaitForSingleObject(hThread, INFINITE);
+    CloseHandle(hThread);
+
+    /* The first console may have been deleted in full screen */
+    ChangeDisplaySettingsW(NULL, 0);
+
+    /* Conclusive only if the move ended clearly before the call returned */
+    QueryPerformanceFrequency(&Freq);
+    if (!Attached || (Done.QuadPart - AttachDone.QuadPart) * 1000 / Freq.QuadPart < 20)
+        Result = 2;
+    else
+        Result = (!Ret && Error == ERROR_INVALID_HANDLE) ? 0 : 1;
+    return Result;
+}
+
+static
+VOID
+TestMoveDuringSwitch(
+    _In_ PCWSTR FileName)
+{
+    WCHAR CommandLine[MAX_PATH + 60];
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION Helper, Child;
+    DWORD Wait, ExitCode;
+    ULONG i, Conclusive = 0, Failed = 0;
+
+    RtlZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    StringCbPrintfW(CommandLine, sizeof(CommandLine), L"\"%ls\" ConsoleDisplayMode helper", FileName);
+    if (!CreateProcessW(FileName, CommandLine, NULL, NULL, FALSE, CREATE_NEW_CONSOLE | CREATE_NO_WINDOW,
+                        NULL, NULL, &StartupInfo, &Helper))
+    {
+        skip("CreateProcess failed with %lu\n", GetLastError());
+        return;
+    }
+    CloseHandle(Helper.hThread);
+    Sleep(1000);
+
+    StartupInfo.dwFlags = STARTF_USESHOWWINDOW;
+    StartupInfo.wShowWindow = SW_SHOWNOACTIVATE;
+    StringCbPrintfW(CommandLine, sizeof(CommandLine), L"\"%ls\" ConsoleDisplayMode attach %lu",
+                    FileName, Helper.dwProcessId);
+    for (i = 0; i < 4 && Conclusive < 2; i++)
+    {
+        if (!CreateProcessW(FileName, CommandLine, NULL, NULL, FALSE, CREATE_NEW_CONSOLE,
+                            NULL, NULL, &StartupInfo, &Child))
+        {
+            break;
+        }
+        CloseHandle(Child.hThread);
+        Wait = WaitForSingleObject(Child.hProcess, CHILD_TIMEOUT_MS);
+        ok(Wait == WAIT_OBJECT_0, "The child process did not exit: %lu\n", Wait);
+        if (Wait != WAIT_OBJECT_0)
+            TerminateProcess(Child.hProcess, 1);
+        if (Wait == WAIT_OBJECT_0 && GetExitCodeProcess(Child.hProcess, &ExitCode) && ExitCode <= 1)
+        {
+            Conclusive++;
+            if (ExitCode == 1) Failed++;
+        }
+        CloseHandle(Child.hProcess);
+    }
+
+    TerminateProcess(Helper.hProcess, 0);
+    CloseHandle(Helper.hProcess);
+
+    if (!Conclusive)
+    {
+        skip("The console move never overlapped the display mode switch\n");
+        return;
+    }
+    ok(Failed == 0, "SetConsoleDisplayMode used the console the process moved to, in %lu of %lu runs\n",
+       Failed, Conclusive);
+}
+
 START_TEST(ConsoleDisplayMode)
 {
     int argc;
@@ -82,6 +204,16 @@ START_TEST(ConsoleDisplayMode)
     {
         RunChild();
         return;
+    }
+    if (argc >= 3 && !strcmp(argv[2], "helper"))
+    {
+        Sleep(CHILD_TIMEOUT_MS);
+        return;
+    }
+    if (argc >= 4 && !strcmp(argv[2], "attach"))
+    {
+        HelperPid = strtoul(argv[3], NULL, 10);
+        ExitProcess(RunAttachChild());
     }
 
     if (!CreatePipe(&hRead, &hWrite, &Sa, 0))
@@ -141,4 +273,6 @@ START_TEST(ConsoleDisplayMode)
     }
     ok(Full == ROUNDS, "GetConsoleDisplayMode reported full screen after %lu of %d switches\n", Full, ROUNDS);
     ok(Windowed == ROUNDS, "GetConsoleDisplayMode reported windowed after %lu of %d switches back\n", Windowed, ROUNDS);
+
+    TestMoveDuringSwitch(FileName);
 }

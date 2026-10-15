@@ -1211,10 +1211,11 @@ GuiSetDisplayMode(IN OUT PFRONTEND This,
      * (the caller holds it, maybe twice), as GuiInitFrontEnd waits for the
      * window. The caller holds a console reference, which keeps GuiData.
      */
+    /* Not done when it cannot wait or the wait ends first: the caller fails */
     if (!GuiData->hDisplayModeEvent ||
         Console->Lock.OwningThread != NtCurrentTeb()->ClientId.UniqueThread)
     {
-        return TRUE;
+        return FALSE;
     }
     Timeout.QuadPart = -5000000LL; /* 500 ms */
     LockCount = Console->Lock.RecursionCount;
@@ -1224,7 +1225,7 @@ GuiSetDisplayMode(IN OUT PFRONTEND This,
         NtWaitForSingleObject(GuiData->hDisplayModeEvent, FALSE, &Timeout);
     for (i = 0; i < LockCount; i++) EnterCriticalSection(&Console->Lock);
 
-    return TRUE;
+    return ((LONG)(GuiData->DisplayModeDone - Request) >= 0);
 }
 
 static INT NTAPI

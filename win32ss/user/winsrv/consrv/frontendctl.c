@@ -134,27 +134,31 @@ CON_API(SrvSetConsoleDisplayMode,
 
     ASSERT((PCONSOLE)Console == Buff->Header.Console);
 
-    /*
-     * The GUI terminal waits for its window thread to switch, with the
-     * console unlocked: the buffer may be closed meanwhile, so look it up
-     * again for its size.
-     */
-    if (TermSetDisplayMode(Console, SetDisplayModeRequest->DisplayMode))
+    if (SetDisplayModeRequest->DisplayMode & ~(CONSOLE_FULLSCREEN_MODE | CONSOLE_WINDOWED_MODE))
     {
-        if (NT_SUCCESS(ConSrvGetScreenBuffer(ProcessData,
-                                             SetDisplayModeRequest->OutputHandle,
-                                             &Buff,
-                                             GENERIC_WRITE,
-                                             FALSE)))
-        {
-            SetDisplayModeRequest->NewSBDim = Buff->ScreenBufferSize;
-            ConSrvReleaseScreenBuffer(Buff, FALSE);
-        }
-        Status = STATUS_SUCCESS;
+        Status = STATUS_INVALID_PARAMETER;
+    }
+    else if (!TermSetDisplayMode(Console, SetDisplayModeRequest->DisplayMode))
+    {
+        /* The GUI terminal could not wait until the mode was applied */
+        Status = STATUS_IO_TIMEOUT;
     }
     else
     {
-        Status = STATUS_INVALID_PARAMETER;
+        /*
+         * The GUI terminal waits for its window thread with the console
+         * unlocked: meanwhile the buffer may be closed, or the process may
+         * have moved to another console and reused the handle value. Use it
+         * only if it is still a buffer of this console.
+         */
+        Status = ConSrvGetObjectOfLockedConsole(ProcessData,
+                                                SetDisplayModeRequest->OutputHandle,
+                                                (PCONSOLE)Console,
+                                                (PCONSOLE_IO_OBJECT*)&Buff,
+                                                GENERIC_WRITE,
+                                                SCREEN_BUFFER);
+        if (NT_SUCCESS(Status))
+            SetDisplayModeRequest->NewSBDim = Buff->ScreenBufferSize;
     }
 
     /* Not ConSrvReleaseScreenBuffer: Buff may be gone */

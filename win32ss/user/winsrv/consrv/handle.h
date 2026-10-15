@@ -33,6 +33,13 @@ NTSTATUS
 ConSrvRemoveObject(IN PCONSOLE_PROCESS_DATA ProcessData,
                    IN HANDLE Handle);
 NTSTATUS
+ConSrvGetObjectOfLockedConsole(IN PCONSOLE_PROCESS_DATA ProcessData,
+                               IN HANDLE Handle,
+                               IN PCONSOLE Console,
+                               OUT PCONSOLE_IO_OBJECT* Object,
+                               IN ULONG Access,
+                               IN CONSOLE_IO_OBJECT_TYPE Type);
+NTSTATUS
 ConSrvGetObject(IN PCONSOLE_PROCESS_DATA ProcessData,
                 IN HANDLE Handle,
                 OUT PCONSOLE_IO_OBJECT* Object,
