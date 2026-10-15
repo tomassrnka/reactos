@@ -83,6 +83,9 @@ typedef struct
     BOOL keep_alive;
     DWORD64 keep_until;
     struct list pool_entry;
+#ifdef __REACTOS__
+    DWORD recv_timeout;
+#endif
 } netconn_t;
 
 BOOL is_valid_netconn(netconn_t *);

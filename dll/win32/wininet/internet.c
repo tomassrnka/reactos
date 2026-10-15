@@ -111,7 +111,12 @@ typedef struct {
 static ULONG max_conns = 2, max_1_0_conns = 4;
 static ULONG connect_timeout = 60000;
 static ULONG send_timeout = 60000;
+#ifdef __REACTOS__
+/* Windows waits 30 seconds for a response by default (Wine 10 uses 60) */
+static ULONG receive_timeout = 30000;
+#else
 static ULONG receive_timeout = 60000;
+#endif
 static ULONG data_send_timeout = 60000;
 static ULONG data_receive_timeout = 60000;
 
