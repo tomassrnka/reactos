@@ -221,6 +221,7 @@ typedef struct _WLSESSION
 {
     GINAINSTANCE Gina;
     DWORD SASAction;
+    BOOL ForceLogoff; /* the shutdown or logoff request asked for EWX_FORCE */
     BOOL SuppressStatus;
     BOOL TaskManHotkey;
     BOOL LockWkStaHotkey;
