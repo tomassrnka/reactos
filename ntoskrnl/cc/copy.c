@@ -816,6 +816,8 @@ CcZeroData (
     LARGE_INTEGER WriteOffset;
     LONGLONG Length;
     PROS_VACB Vacb;
+    LARGE_INTEGER ValidDataLength;
+    KIRQL OldIrql;
     PROS_SHARED_CACHE_MAP SharedCacheMap = FileObject->SectionObjectPointer->SharedCacheMap;
 
     CCTRACE(CC_API_DEBUG, "FileObject=%p StartOffset=%I64u EndOffset=%I64u Wait=%d\n",
@@ -882,6 +884,15 @@ CcZeroData (
 
     ASSERT(EndOffset->QuadPart <= SharedCacheMap->SectionSize.QuadPart);
 
+    /*
+     * Cc and Mm take nothing past the cache map's valid data length from the file. Below it, a page that is not in
+     * memory is read and kept: the file system returns zeros past its own valid data length, and data it already
+     * wrote there (a lazily written view page) must not be wiped.
+     */
+    KeAcquireSpinLock(&SharedCacheMap->CacheMapLock, &OldIrql);
+    ValidDataLength = SharedCacheMap->ValidDataLength;
+    KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
+
     while(WriteOffset.QuadPart < EndOffset->QuadPart)
     {
         ULONG VacbOffset = WriteOffset.QuadPart % VACB_MAPPING_GRANULARITY;
@@ -896,43 +907,19 @@ CcZeroData (
 
         _SEH2_TRY
         {
-            ULONG Done;
-
-            /* Without waiting only resident pages can be handled, and those are kept as they are */
-            if (!Wait && !MmIsDataSectionResident(FileObject->SectionObjectPointer,
-                                                  Vacb->FileOffset.QuadPart + VacbOffset,
-                                                  VacbLength))
-            {
-                return FALSE;
-            }
-
-            /* A resident page holds the file's data there, possibly written through a view past the valid data
-             * length: keep it, zero only pages brought in. The whole range is made dirty below either way */
-            for (Done = 0; Done < VacbLength; )
-            {
-                ULONG PageOffset = VacbOffset + Done;
-                ULONG Chunk = min(VacbLength - Done, PAGE_SIZE - (PageOffset % PAGE_SIZE));
-
-                if (!MmIsDataSectionResident(FileObject->SectionObjectPointer,
-                                             Vacb->FileOffset.QuadPart + PageOffset,
-                                             Chunk))
-                {
-                    CcRosEnsureVacbResident(Vacb, TRUE, FALSE, PageOffset, Chunk, FALSE);
-                    RtlZeroMemory((PVOID)((ULONG_PTR)Vacb->BaseAddress + PageOffset), Chunk);
-                }
-
-                Done += Chunk;
-            }
+            /* Pages in memory keep what they hold; see MmZeroSegmentRange */
+            Status = MmZeroSegmentRange(FileObject->SectionObjectPointer,
+                                        WriteOffset.QuadPart,
+                                        WriteOffset.QuadPart + VacbLength,
+                                        ValidDataLength.QuadPart,
+                                        Wait);
+            if (Status == STATUS_CANT_WAIT)
+                _SEH2_YIELD(return FALSE);
+            if (!NT_SUCCESS(Status))
+                ExRaiseStatus(Status);
 
             WriteOffset.QuadPart += VacbLength;
             Length -= VacbLength;
-
-            /* Tell Mm */
-            Status = MmMakeSegmentDirty(FileObject->SectionObjectPointer,
-                                        Vacb->FileOffset.QuadPart + VacbOffset,
-                                        VacbLength);
-            if (!NT_SUCCESS(Status))
-                ExRaiseStatus(Status);
         }
         _SEH2_FINALLY
         {
