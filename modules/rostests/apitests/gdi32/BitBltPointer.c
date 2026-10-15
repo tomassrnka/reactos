@@ -327,6 +327,86 @@ Check(const char *name, DRAWPROC proc)
     DeleteDC(hdcRef);
 }
 
+/* Move the pointer in steps that overlap, touch and miss the old place, then compare the window with what was drawn: a
+ * wrong saved background under the pointer shows as pixels that differ after the read, which takes the pointer off */
+static void
+CheckMoves(const char *name)
+{
+    static const int steps[][2] =
+    {
+        {1, 0}, {2, 1}, {-3, 2}, {0, -4}, {5, 5}, {-6, 3}, {31, 0}, {-31, 1}, {0, 33}, {1, -33}, {40, 20}, {-40, -20},
+        {64, 0}, {-64, 10}, {0, 50}, {100, -20}, {-100, 25}, {3, 3}, {-1, -1}, {20, -30}, {-20, 30}, {70, 0}, {-70, 0}
+    };
+    ULONG *pulRef;
+    HBITMAP hbmRef;
+    HDC hdcRef, hdcRefRead;
+    HGDIOBJ hOld, hOldRead;
+    int i, x = PTR_X, y = PTR_Y, bad = 0, firstx = -1, firsty = -1, px, py;
+    ULONG got = 0, expected = 0;
+
+    hdcRef = CreateCompatibleDC(ghdcWnd);
+    hbmRef = CreateCompatibleBitmap(ghdcWnd, WIDTH, HEIGHT);
+    hOld = SelectObject(hdcRef, hbmRef);
+    FillBase(ghdcWnd);
+    FillBase(hdcRef);
+    DrawBitBltFull(ghdcWnd);
+    DrawBitBltFull(hdcRef);
+
+    for (i = 0; i < sizeof(steps) / sizeof(steps[0]); i++)
+    {
+        x += steps[i][0];
+        y += steps[i][1];
+        if (x < 4) x = 4;
+        if (y < 4) y = 4;
+        if (x > WIDTH - 36) x = WIDTH - 36;
+        if (y > HEIGHT - 36) y = HEIGHT - 36;
+        SetCursorPos(gOrgX + x, gOrgY + y);
+        Sleep(15);
+    }
+    Pump();
+
+    BitBlt(ghdcRead, 0, 0, WIDTH, HEIGHT, ghdcWnd, 0, 0, SRCCOPY);
+    hdcRefRead = CreateCompatibleDC(ghdcWnd);
+    {
+        HBITMAP hbmRefRead = CreateBits32(ghdcWnd, &pulRef);
+
+        hOldRead = SelectObject(hdcRefRead, hbmRefRead);
+        BitBlt(hdcRefRead, 0, 0, WIDTH, HEIGHT, hdcRef, 0, 0, SRCCOPY);
+        GdiFlush();
+        for (py = 0; py < HEIGHT; py++)
+        {
+            for (px = 0; px < WIDTH; px++)
+            {
+                ULONG a = gpulRead[py * WIDTH + px] & 0xFFFFFF;
+                ULONG b = pulRef[py * WIDTH + px] & 0xFFFFFF;
+
+                if (a != b)
+                {
+                    if (!bad)
+                    {
+                        firstx = px;
+                        firsty = py;
+                        got = a;
+                        expected = b;
+                    }
+                    bad++;
+                }
+            }
+        }
+        SelectObject(hdcRefRead, hOldRead);
+        DeleteObject(hbmRefRead);
+    }
+    DeleteDC(hdcRefRead);
+    ok(bad == 0, "%s: %d pixels differ, first at (%d,%d): got %06lx, expected %06lx\n",
+       name, bad, firstx, firsty, got, expected);
+
+    SelectObject(hdcRef, hOld);
+    DeleteObject(hbmRef);
+    DeleteDC(hdcRef);
+    SetCursorPos(gOrgX + PTR_X, gOrgY + PTR_Y);
+    Pump();
+}
+
 static BOOL
 Setup(void)
 {
@@ -419,6 +499,8 @@ START_TEST(BitBltPointer)
     Check("BitBlt with a clip of two rectangles through the pointer", DrawClipTwoRects);
     Check("PatBlt with a clip that has a hole over the pointer", DrawClipHole);
     Check("Clip that changes between operations", DrawClipChanges);
+
+    CheckMoves("Pointer moves leave the window as drawn");
 
     DeleteDC(ghdcRead);
     DeleteObject(ghbmRead);
