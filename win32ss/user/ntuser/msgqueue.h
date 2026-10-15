@@ -60,6 +60,10 @@ typedef struct _USER_MESSAGE_QUEUE
   /* Outstanding raw input packets for the queue. */
   LIST_ENTRY RawInputListHead;
   ULONG cRawInput;
+  /* Walks of the hardware message list in progress (nested ones count) and retired
+     raw input messages that wait for them to end */
+  ULONG cHwTraversals;
+  ULONG cDeadRaw;
   /* Last click message for translating double clicks */
   MSG msgDblClk;
   /* Current capture window for this queue. */

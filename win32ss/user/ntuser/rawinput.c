@@ -535,6 +535,17 @@ InitRawInputImpl(VOID)
     return STATUS_SUCCESS;
 }
 
+ULONG
+FASTCALL
+UserRawInputSetSerial(
+    ULONG Serial)
+{
+    ULONG Old = gRawInputSerial;
+
+    gRawInputSerial = Serial;
+    return Old;
+}
+
 HRAWINPUT
 FASTCALL
 UserCreateRawInput(
@@ -554,7 +565,7 @@ UserCreateRawInput(
     if (cbData > sizeof(RawEntry->RawInput.data))
         return NULL;
 
-    if (pti->MessageQueue->cRawInput >= MAX_RAWINPUT_PER_QUEUE)
+    if (pti->MessageQueue->cRawInput + pti->MessageQueue->cDeadRaw >= MAX_RAWINPUT_PER_QUEUE)
     {
         DPRINT("Dropping raw input, queue %p is not being pumped\n", pti->MessageQueue);
         return NULL;
@@ -571,11 +582,15 @@ UserCreateRawInput(
     RawEntry->RawInput.header.wParam = wParam;
     RtlCopyMemory(&RawEntry->RawInput.data, pData, cbData);
 
+    /* The serial space wraps: a handle that is still live in the queue is skipped */
     do
     {
-        ++gRawInputSerial;
-    } while ((gRawInputSerial & 0x3FFFFFFF) == 0);
-    RawEntry->Handle = (HRAWINPUT)(ULONG_PTR)(((gRawInputSerial & 0x3FFFFFFF) << 2) | 1);
+        do
+        {
+            ++gRawInputSerial;
+        } while ((gRawInputSerial & 0x3FFFFFFF) == 0);
+        RawEntry->Handle = (HRAWINPUT)(ULONG_PTR)(((gRawInputSerial & 0x3FFFFFFF) << 2) | 1);
+    } while (RawInputEntryFromHandle(pti->MessageQueue, RawEntry->Handle));
 
     InsertTailList(&pti->MessageQueue->RawInputListHead, &RawEntry->ListEntry);
     pti->MessageQueue->cRawInput++;

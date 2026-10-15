@@ -1987,13 +1987,9 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
       return FALSE;
    }
 
-   /* A peek nested in a hook of an outer peek must leave the marks alone: the outer one
-      may hold the next node */
-   if (!MessageQueue->idSysPeek)
-   {
-      MsqSweepDeadRawInput(MessageQueue);
-      ListHead = MessageQueue->HardwareMessagesListHead.Flink;
-   }
+   /* Every traversal of the list counts, nested ones too: while one runs, a hook may
+      detach threads or read raw input, and no node it can reach may be freed */
+   MessageQueue->cHwTraversals++;
 
    while (ListHead != &MessageQueue->HardwareMessagesListHead)
    {
@@ -2082,6 +2078,10 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
 
    MessageQueue->ptiSysLock = NULL;
    pti->pcti->CTI_flags &= ~CTI_THREADSYSLOCK;
+
+   if (--MessageQueue->cHwTraversals == 0 && MessageQueue->cDeadRaw)
+      MsqSweepDeadRawInput(MessageQueue);
+
    return Ret;
 }
 
@@ -2362,8 +2362,8 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
    Retire one WM_INPUT message of a queue: free its packet, give its wake bit back to the
    thread it was posted to, and drop the message. A peek that is walking the list may
    hold the next node while a hook runs (and hooks can detach threads or read the raw
-   input buffer), so while a peek holds the queue the entry only becomes a dead mark,
-   which the next peek removes. Called under the USER lock.
+   input buffer), so while any traversal is running the entry only becomes a dead mark,
+   which the last traversal to finish removes. Called under the USER lock.
  */
 VOID FASTCALL
 MsqRetireRawInputMessage(PUSER_MESSAGE_QUEUE MessageQueue, PUSER_MESSAGE Message)
@@ -2371,12 +2371,13 @@ MsqRetireRawInputMessage(PUSER_MESSAGE_QUEUE MessageQueue, PUSER_MESSAGE Message
    ClearMsgBitsMask(Message->pti, QS_RAWINPUT);
    UserFreeRawInput(MessageQueue, (HRAWINPUT)Message->Msg.lParam);
 
-   if (MessageQueue->ptiSysLock)
+   if (MessageQueue->cHwTraversals)
    {
       Message->QS_Flags = 0;
       Message->Msg.message = WM_NULL;
       Message->Msg.lParam = 0;
       Message->dwQEvent = POSTEVENT_DEADRAW;
+      MessageQueue->cDeadRaw++;
    }
    else
    {
@@ -2398,6 +2399,7 @@ MsqSweepDeadRawInput(PUSER_MESSAGE_QUEUE MessageQueue)
       if (CurrentMessage->dwQEvent == POSTEVENT_DEADRAW)
          MsqDestroyMessage(CurrentMessage);
    }
+   MessageQueue->cDeadRaw = 0;
 }
 
 /* Drop the WM_INPUT messages posted to a thread from the queue it leaves */

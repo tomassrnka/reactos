@@ -1409,7 +1409,7 @@ UserSendKeyboardInput(KEYBDINPUT *pKbdInput, BOOL bInjected)
         BOOL bUp = !!(pKbdInput->dwFlags & KEYEVENTF_KEYUP);
         /* Alt held (AltGr too) makes SYS messages; the key of Alt itself is SYS on the way
            down and plain on the way up (measured) */
-        WORD wRawVk = IntSimplifyVk(wVk); /* left and right keys are one key in raw input */
+        WORD wRawVk = IntSimplifyVk(wVk & 0xFF); /* left and right keys are one key in raw input */
         BOOL bSys = (wRawVk == VK_MENU) ? !bUp : IS_KEY_DOWN(gafAsyncKeyState, VK_MENU);
 
         UserRawInputSendKeyboard(wScanCode, wRawVk, bUp, bExt, pKbdInput->dwExtraInfo,
@@ -1432,7 +1432,7 @@ UserRawInputProcessKeyboardInput(
 
     kb.MakeCode = wScanCode & 0x7F;
     kb.Flags = bIsDown ? RI_KEY_MAKE : RI_KEY_BREAK;
-    kb.VKey = IntSimplifyVk(wVk) & 0xFF;
+    kb.VKey = IntSimplifyVk(wVk & 0xFF) & 0xFF;
     kb.Message = bIsDown ? WM_KEYDOWN : WM_KEYUP;
     if (pKbdInputData->Flags & KEY_E1)
         kb.Flags |= RI_KEY_E1;

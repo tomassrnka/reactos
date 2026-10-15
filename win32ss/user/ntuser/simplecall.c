@@ -293,6 +293,11 @@ NtUserCallOneParam(
             break;
         }
 
+        case ONEPARAM_ROUTINE_SETRAWINPUTSERIAL:
+            /* Test hook: puts the raw input handle counter near its wrap */
+            Result = UserRawInputSetSerial((ULONG)Param);
+            break;
+
         case ONEPARAM_ROUTINE_ENABLEPROCWNDGHSTING:
         {
             BOOL Enable;
