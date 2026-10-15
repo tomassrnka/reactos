@@ -6977,7 +6977,7 @@ static void test_GetGdiCompatibleGlyphAdvances(void)
 }
 
 /* Advances of ros_fixture.ttf in whole pixels for the characters 0x20 to 0x7e, sizes 8 to 24 px, measured with
- * GetGdiCompatibleGlyphMetrics on Windows 7 (Server 2008 R2) and Windows 10. */
+ * GetGdiCompatibleGlyphMetrics on Windows 7 (Server 2008 R2). Not measured on Windows 10. */
 static const unsigned char fixture_classic_advances[17][95] =
 {
     { /* 8 px */

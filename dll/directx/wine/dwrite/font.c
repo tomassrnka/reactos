@@ -137,11 +137,13 @@ static BOOL fontface_has_hdmx(struct dwrite_fontface *fontface)
 
 /* The advance of a font without an hdmx table in the GDI measuring modes, in whole pixels. Windows 7 (Server 2008 R2)
    was measured with a font that has a TrueType program and one that has not, with strikes and without, and with
-   Courier New, Lucida Console, Cambria, MS Gothic, MS Mincho and MingLiU (1615 glyph and size pairs each, sizes 8 to
-   24): the advance does not depend on the program, and is the design advance scaled to 26.6 fixed point and rounded
-   to the nearest 1/64 pixel, then rounded to whole pixels at 32/64 for GDI classic and at 34/64 for GDI natural.
-   The 26.6 step is why an advance of 8.496 px (the O of the test font at 12 px) comes out as 9. Faces whose programs
-   move the advance (Calibri in GDI classic, Batang and Gulim) are not reproduced. */
+   Courier New, Lucida Console, MS Gothic, MS Mincho and MingLiU (1615 glyph and size pairs each, sizes 8 to 24): the
+   advance does not depend on the program. It is the design advance scaled to 26.6 fixed point and rounded to the nearest
+   1/64 pixel, plus a bias of 32 (GDI classic, a cutoff at 32/64: plain rounding) or of 34 (GDI natural, a cutoff at
+   30/64), then divided by 64. The 26.6 step is why an advance of 8.496 px (the O of the test font at 12 px) comes out as 9.
+   Not reproduced: Calibri in GDI classic (49 pairs one pixel wider on Windows), Batang and Gulim (programs that move
+   the advance), and Cambria in GDI natural (one pair, n at 8 px: the test font gives 5 for the same design advance
+   and size, Cambria gives 4, so no rule on advance and size alone fits both). */
 static int fontface_get_linear_gdi_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
         DWRITE_MEASURING_MODE mode, BOOL *has_contours);
 
