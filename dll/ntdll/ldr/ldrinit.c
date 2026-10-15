@@ -979,6 +979,48 @@ Quickie:
 }
 
 /*
+ * Runs the FLS callbacks of the calling thread (the C++ runtime destroys its
+ * thread_local objects from one) and empties the slots. The data block stays
+ * for the caller, which frees it with the thread.
+ */
+static
+VOID
+LdrpRundownFls(VOID)
+{
+    PTEB Teb = NtCurrentTeb();
+    ULONG n, FlsHighIndex;
+    PRTL_FLS_DATA pFlsData;
+    PFLS_CALLBACK_FUNCTION lpCallback;
+
+    /* Mimic BaseRundownFls */
+    pFlsData = Teb->FlsData;
+    if (!pFlsData)
+        return;
+
+    /* Unlinked first, so that a concurrent FlsFree does not call the callbacks a second time */
+    RtlAcquirePebLock();
+    FlsHighIndex = NtCurrentPeb()->FlsHighIndex;
+    RemoveEntryList(&pFlsData->ListEntry);
+    InitializeListHead(&pFlsData->ListEntry);
+    RtlReleasePebLock();
+
+    for (n = 1; n <= FlsHighIndex; ++n)
+    {
+        /* An index that FlsFree released (its callback may have raised) runs nothing */
+        RtlAcquirePebLock();
+        lpCallback = RtlAreBitsSet(NtCurrentPeb()->FlsBitmap, n, 1) ? NtCurrentPeb()->FlsCallback[n] : NULL;
+        RtlReleasePebLock();
+        if (lpCallback && pFlsData->Data[n])
+        {
+            lpCallback(pFlsData->Data[n]);
+
+            /* The callback saw its value; the DLL notifications after it must not */
+            pFlsData->Data[n] = NULL;
+        }
+    }
+}
+
+/*
  * @implemented
  */
 NTSTATUS
@@ -1011,6 +1053,9 @@ LdrShutdownProcess(VOID)
     /* Set the shutdown variables */
     LdrpShutdownThreadId = NtCurrentTeb()->RealClientId.UniqueThread;
     LdrpShutdownInProgress = TRUE;
+
+    /* The calling thread's FLS callbacks come before the DLL notifications, as on Windows */
+    LdrpRundownFls();
 
     /* Enter the Loader Lock */
     RtlEnterCriticalSection(&LdrpLoaderLock);
@@ -1145,37 +1190,8 @@ LdrShutdownThread(VOID)
     }
 #endif
 
-    /*
-     * The FLS callbacks run first, like on Windows: before the DLL thread
-     * notifications and while the TLS is still there (the C++ runtime
-     * destroys its thread_local objects from an FLS callback)
-     */
-    if (Teb->FlsData)
-    {
-        /* Mimic BaseRundownFls */
-        ULONG n, FlsHighIndex;
-        PRTL_FLS_DATA pFlsData;
-        PFLS_CALLBACK_FUNCTION lpCallback;
-
-        pFlsData = Teb->FlsData;
-
-        RtlAcquirePebLock();
-        FlsHighIndex = NtCurrentPeb()->FlsHighIndex;
-        RemoveEntryList(&pFlsData->ListEntry);
-        RtlReleasePebLock();
-
-        for (n = 1; n <= FlsHighIndex; ++n)
-        {
-            lpCallback = NtCurrentPeb()->FlsCallback[n];
-            if (lpCallback && pFlsData->Data[n])
-            {
-                lpCallback(pFlsData->Data[n]);
-
-                /* The callback saw its value; the DLL notifications after it must not */
-                pFlsData->Data[n] = NULL;
-            }
-        }
-    }
+    /* The FLS callbacks run first, like on Windows: before the DLL notifications and with the TLS still there */
+    LdrpRundownFls();
 
     /* Get the Ldr Lock */
     RtlEnterCriticalSection(&LdrpLoaderLock);
