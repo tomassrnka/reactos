@@ -1054,7 +1054,7 @@ static const DWORD table_c0000202[396] =
    ERROR_DS_GC_NOT_AVAILABLE,              /* c00002b0 (STATUS_DS_GC_NOT_AVAILABLE) */
    ERROR_DS_DS_REQUIRED,                   /* c00002b1 (STATUS_DIRECTORY_SERVICE_REQUIRED) */
    ERROR_REPARSE_ATTRIBUTE_CONFLICT,       /* c00002b2 (STATUS_REPARSE_ATTRIBUTE_CONFLICT) */
-   0,                                      /* c00002b3 (STATUS_CANT_ENABLE_DENY_ONLY) */
+   ERROR_CANT_ENABLE_DENY_ONLY,            /* c00002b3 (STATUS_CANT_ENABLE_DENY_ONLY) */
    0,                                      /* c00002b4 (STATUS_FLOAT_MULTIPLE_FAULTS) */
    0,                                      /* c00002b5 (STATUS_FLOAT_MULTIPLE_TRAPS) */
    ERROR_DEVICE_REMOVED,                   /* c00002b6 (STATUS_DEVICE_REMOVED) */

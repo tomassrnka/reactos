@@ -364,6 +364,8 @@ AdjustTokenGroups(HANDLE TokenHandle,
        return FALSE;
     }
 
+    /* Success; a group missing from the token is reported with ERROR_NOT_ALL_ASSIGNED */
+    SetLastError(Status == STATUS_NOT_ALL_ASSIGNED ? ERROR_NOT_ALL_ASSIGNED : ERROR_SUCCESS);
     return TRUE;
 }
 
