@@ -31,6 +31,9 @@ list(APPEND SOURCE
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
 
+# The ExplorerBrowser in explorerframe is Wine's code, so the todo_wine marks of its tests describe it
+set_source_files_properties(ebrowser.c PROPERTIES COMPILE_DEFINITIONS "USE_WINE_TODOS;USE_WIN_SKIP")
+
 add_executable(shell32_winetest
     ${SOURCE}
     ${PCH_SKIP_SOURCE}
