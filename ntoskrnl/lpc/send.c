@@ -12,6 +12,79 @@
 #define NDEBUG
 #include <debug.h>
 
+/* PRIVATE FUNCTIONS *********************************************************/
+
+static
+BOOLEAN
+LpcpIsWaitingClient(
+    _In_ PETHREAD Thread,
+    _In_ PPORT_MESSAGE Request)
+{
+    /* No callback is ever delivered, so a waiting request has no callback id */
+    return (Thread->LpcReplyMessageId == Request->MessageId) &&
+           (Request->CallbackId == 0) &&
+           !IsListEmpty(&Thread->LpcReplyChain) &&
+           (LpcpGetPortFromThread(Thread) != NULL);
+}
+
+/*
+ * Checks a callback request (LPC_REQUEST sent by a server back to a client that waits
+ * for its reply) against the client it names. Callbacks are not delivered: a request
+ * that names a waiting client through the right port gets STATUS_NOT_IMPLEMENTED.
+ */
+static
+NTSTATUS
+LpcpCheckCallbackRequest(
+    _In_ PLPCP_PORT_OBJECT Port,
+    _In_ PPORT_MESSAGE Request)
+{
+    PETHREAD ClientThread = NULL, LookupThread = NULL;
+    PLPCP_PORT_OBJECT ClientPort;
+    PLIST_ENTRY Entry;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Request->MessageId == 0) return STATUS_INVALID_PARAMETER;
+
+    /* The message id names the client; the client id is only a hint */
+    if (!NT_SUCCESS(PsLookupProcessThreadByCid(&Request->ClientId, NULL, &LookupThread)))
+        LookupThread = NULL;
+
+    KeAcquireGuardedMutex(&LpcpLock);
+
+    for (Entry = Port->LpcReplyChainHead.Flink;
+         Entry != &Port->LpcReplyChainHead;
+         Entry = Entry->Flink)
+    {
+        ClientThread = CONTAINING_RECORD(Entry, ETHREAD, LpcReplyChain);
+        if (LpcpIsWaitingClient(ClientThread, Request)) break;
+        ClientThread = NULL;
+    }
+
+    if (!ClientThread && LookupThread && LpcpIsWaitingClient(LookupThread, Request))
+        ClientThread = LookupThread;
+
+    if (!ClientThread)
+    {
+        Status = STATUS_INVALID_MESSAGE;
+    }
+    else
+    {
+        /* Only the server side of the client's connection may call back */
+        ClientPort = LpcpGetPortFromThread(ClientThread);
+        if ((Port != ClientPort->ConnectedPort) && (Port != ClientPort->ConnectionPort))
+            Status = STATUS_ACCESS_DENIED;
+        else
+            Status = STATUS_NOT_IMPLEMENTED;
+    }
+
+    KeReleaseGuardedMutex(&LpcpLock);
+
+    if (LookupThread) ObDereferenceObject(LookupThread);
+    return Status;
+}
+
 /* PUBLIC FUNCTIONS **********************************************************/
 
 /*
@@ -251,10 +324,9 @@ LpcRequestWaitReplyPort(IN PVOID PortObject,
     /* Check if this is a callback */
     if (Callback)
     {
-        /* FIXME: TODO */
-        Semaphore = NULL; // we'd use the Thread Semaphore here
-        ASSERT(FALSE);
-        return STATUS_NOT_IMPLEMENTED;
+        /* Callbacks are checked and refused, never queued */
+        LpcpFreeToPortZone(Message, 0);
+        return LpcpCheckCallbackRequest(Port, LpcRequest);
     }
     else
     {
@@ -802,10 +874,7 @@ NtRequestWaitReplyPort(IN HANDLE PortHandle,
     /* Get the message type */
     MessageType = CapturedLpcRequest.u2.s2.Type;
 
-    /* Due to the above probe, we know that TotalLength is positive */
-    ASSERT(CapturedLpcRequest.u1.s1.TotalLength >= 0);
-
-    /* Validate the length */
+    /* Validate the length; a negative TotalLength reads as a huge ULONG and fails the port check below */
     if ((((ULONG)(USHORT)CapturedLpcRequest.u1.s1.DataLength + sizeof(PORT_MESSAGE)) >
          (ULONG)CapturedLpcRequest.u1.s1.TotalLength))
     {
@@ -850,9 +919,11 @@ NtRequestWaitReplyPort(IN HANDLE PortHandle,
     /* Check if this is a callback */
     if (Callback)
     {
-        /* FIXME: TODO */
-        Semaphore = NULL; // we'd use the Thread Semaphore here
-        ASSERT(FALSE);
+        /* Callbacks are checked and refused, never queued */
+        LpcpFreeToPortZone(Message, 0);
+        Status = LpcpCheckCallbackRequest(Port, &CapturedLpcRequest);
+        ObDereferenceObject(Port);
+        return Status;
     }
     else
     {
