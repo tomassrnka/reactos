@@ -915,9 +915,8 @@ RtlIsRangeAvailable(IN PRTL_RANGE_LIST RangeList,
                     IN PRTL_CONFLICT_RANGE_CALLBACK Callback OPTIONAL,
                     OUT PBOOLEAN Available)
 {
-    if (Start > End)
-        return STATUS_INVALID_PARAMETER;
-
+    /* A window with Start above End is not refused: it is available unless an
+     * entry starts at or below End and ends at or above Start, as on Windows */
     *Available = RtlpWindowIsAvailable(RangeList,
                                        Start,
                                        End,
