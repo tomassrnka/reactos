@@ -501,6 +501,44 @@ DC_vUpdateDC(PDC pdc)
     pdc->pdcattr->ulDirty_ |= DIRTY_DEFAULT ;
 }
 
+/* Take the pointer out of the way of a blit on a direct DC. What the
+ * destination draws is limited by its clip box; what the source reads is not.
+ * With bCount only, the pointer stays and the caller removes it around the
+ * part of the blit that reaches it. */
+static
+VOID
+DC_vMouseSafetyStart(
+    PDC pdc,
+    const RECT *prc,
+    BOOL bIsDest,
+    BOOL bCount)
+{
+    RECTL rcHazard;
+
+    if (!prc)
+    {
+        prc = &pdc->erclClip;
+    }
+    else if (bIsDest)
+    {
+        rcHazard = *prc;
+        RECTL_vMakeWellOrdered(&rcHazard);
+        if (!RECTL_bIntersectRect(&rcHazard, &rcHazard, &pdc->erclClip))
+        {
+            bCount = TRUE;
+        }
+        prc = &rcHazard;
+    }
+
+    if (bCount)
+    {
+        MouseSafetyOnDrawEnter(pdc->ppdev);
+        return;
+    }
+
+    MouseSafetyOnDrawStart(pdc->ppdev, prc->left, prc->top, prc->right, prc->bottom);
+}
+
 /* Prepare a blit for up to 2 DCs */
 /* rc1 and rc2 are the rectangles where we want to draw or
  * from where we take pixels. */
@@ -512,8 +550,23 @@ DC_vPrepareDCsForBlit(
     PDC pdcSrc,
     const RECT* rcSrc)
 {
+    DC_vPrepareDCsForBlitEx(pdcDest, rcDest, pdcSrc, rcSrc, FALSE);
+}
+
+/* bSplitDest: the caller draws the destination in pieces and removes the
+ * pointer only around the piece under it (see IntEngBitBltAvoidPointer). */
+VOID
+FASTCALL
+DC_vPrepareDCsForBlitEx(
+    PDC pdcDest,
+    const RECT* rcDest,
+    PDC pdcSrc,
+    const RECT* rcSrc,
+    BOOL bSplitDest)
+{
     PDC pdcFirst, pdcSecond;
     const RECT *prcFirst, *prcSecond;
+    BOOL bFirstIsDest = TRUE;
 
     /* Update brushes */
     if (pdcDest->pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
@@ -540,6 +593,7 @@ DC_vPrepareDCsForBlit(
             prcFirst = rcSrc;
             pdcSecond = pdcDest;
             prcSecond = rcDest;
+            bFirstIsDest = FALSE;
         }
     }
     else
@@ -567,14 +621,10 @@ DC_vPrepareDCsForBlit(
 
     if (pdcFirst->dctype == DCTYPE_DIRECT)
     {
-        if (!prcFirst)
-            prcFirst = &pdcFirst->erclClip;
-
-        MouseSafetyOnDrawStart(pdcFirst->ppdev,
-                               prcFirst->left,
-                               prcFirst->top,
-                               prcFirst->right,
-                               prcFirst->bottom) ;
+        DC_vMouseSafetyStart(pdcFirst,
+                             prcFirst,
+                             bFirstIsDest,
+                             bSplitDest && bFirstIsDest);
     }
 
 #if DBG
@@ -598,13 +648,10 @@ DC_vPrepareDCsForBlit(
 
     if (pdcSecond->dctype == DCTYPE_DIRECT)
     {
-        if (!prcSecond)
-            prcSecond = &pdcSecond->erclClip;
-        MouseSafetyOnDrawStart(pdcSecond->ppdev,
-                               prcSecond->left,
-                               prcSecond->top,
-                               prcSecond->right,
-                               prcSecond->bottom) ;
+        DC_vMouseSafetyStart(pdcSecond,
+                             prcSecond,
+                             !bFirstIsDest,
+                             bSplitDest && !bFirstIsDest);
     }
 
 #if DBG

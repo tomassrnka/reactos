@@ -308,6 +308,123 @@ done:
     return Ret;
 }
 
+/*
+ * Draw a rectangle on a direct DC in pieces, so that the pointer is removed
+ * only while the piece under it is drawn and the rest of the rectangle never
+ * takes it away. The DC must have been prepared with bSplitDest, the source
+ * (if any) must not be on the screen, and the pieces only touch what the
+ * whole operation touches. prclDest is well ordered.
+ */
+static
+BOOL
+IntEngBitBltAvoidPointer(
+    PDC pdc,
+    SURFOBJ *psoDest,
+    SURFOBJ *psoSource,
+    SURFOBJ *psoMask,
+    XLATEOBJ *pxlo,
+    RECTL *prclDest,
+    POINTL *pptlSource,
+    POINTL *pptlMask,
+    BRUSHOBJ *pbo,
+    POINTL *pptlBrush,
+    ROP4 rop4)
+{
+    RECTL rcHit, rcPiece[5];
+    POINTL ptlSource, ptlMask, ptlOrigin;
+    SURFOBJ *psoSave;
+    BOOL bRet = TRUE;
+    ULONG i;
+
+    if (!MouseSafetyGetPointerHit(pdc->ppdev, prclDest, &pdc->erclClip, &rcHit))
+    {
+        return IntEngBitBlt(psoDest, psoSource, psoMask, (CLIPOBJ *)&pdc->co, pxlo,
+                            prclDest, pptlSource, pptlMask, pbo, pptlBrush, rop4);
+    }
+
+    /* Around the pointer first, the part under it last */
+    rcPiece[0] = (RECTL){prclDest->left, prclDest->top, prclDest->right, rcHit.top};
+    rcPiece[1] = (RECTL){prclDest->left, rcHit.bottom, prclDest->right, prclDest->bottom};
+    rcPiece[2] = (RECTL){prclDest->left, rcHit.top, rcHit.left, rcHit.bottom};
+    rcPiece[3] = (RECTL){rcHit.right, rcHit.top, prclDest->right, rcHit.bottom};
+    rcPiece[4] = rcHit;
+
+    for (i = 0; i < 5; i++)
+    {
+        if (rcPiece[i].left >= rcPiece[i].right || rcPiece[i].top >= rcPiece[i].bottom)
+            continue;
+
+        if (pptlSource)
+        {
+            ptlSource.x = pptlSource->x + rcPiece[i].left - prclDest->left;
+            ptlSource.y = pptlSource->y + rcPiece[i].top - prclDest->top;
+        }
+        if (pptlMask)
+        {
+            ptlMask.x = pptlMask->x + rcPiece[i].left - prclDest->left;
+            ptlMask.y = pptlMask->y + rcPiece[i].top - prclDest->top;
+        }
+
+        if (i < 4)
+        {
+            if (!IntEngBitBlt(psoDest, psoSource, psoMask, (CLIPOBJ *)&pdc->co, pxlo,
+                              &rcPiece[i],
+                              pptlSource ? &ptlSource : NULL,
+                              pptlMask ? &ptlMask : NULL,
+                              pbo, pptlBrush, rop4))
+            {
+                bRet = FALSE;
+            }
+            continue;
+        }
+
+        /* The part under the pointer. A clip without holes lets it draw into the pixels saved
+         * under the pointer, which the pointer is then put over again. Otherwise take the pointer off. */
+        if (pdc->co.iDComplexity != DC_COMPLEX && MouseSafetyBeginUnderDraw(pdc->ppdev, &psoSave, &ptlOrigin))
+        {
+            RECTL rcSave;
+            POINTL ptlBrush;
+
+            rcSave.left = rcHit.left - ptlOrigin.x;
+            rcSave.top = rcHit.top - ptlOrigin.y;
+            rcSave.right = rcHit.right - ptlOrigin.x;
+            rcSave.bottom = rcHit.bottom - ptlOrigin.y;
+            if (pptlBrush)
+            {
+                ptlBrush.x = pptlBrush->x - ptlOrigin.x;
+                ptlBrush.y = pptlBrush->y - ptlOrigin.y;
+            }
+
+            if (!IntEngBitBlt(psoSave, psoSource, psoMask, NULL, pxlo,
+                              &rcSave,
+                              pptlSource ? &ptlSource : NULL,
+                              pptlMask ? &ptlMask : NULL,
+                              pbo, pptlBrush ? &ptlBrush : NULL, rop4))
+            {
+                bRet = FALSE;
+            }
+
+            MouseSafetyEndUnderDraw(pdc->ppdev);
+            continue;
+        }
+
+        MouseSafetyOnDrawStart(pdc->ppdev, rcHit.left, rcHit.top, rcHit.right, rcHit.bottom);
+
+        if (!IntEngBitBlt(psoDest, psoSource, psoMask, (CLIPOBJ *)&pdc->co, pxlo,
+                          &rcPiece[i],
+                          pptlSource ? &ptlSource : NULL,
+                          pptlMask ? &ptlMask : NULL,
+                          pbo, pptlBrush, rop4))
+        {
+            bRet = FALSE;
+        }
+
+        MouseSafetyOnDrawEnd(pdc->ppdev);
+    }
+
+    return bRet;
+}
+
 BOOL APIENTRY
 NtGdiMaskBlt(
     HDC hdcDest,
@@ -335,7 +452,7 @@ NtGdiMaskBlt(
     BOOL Status = FALSE;
     EXLATEOBJ exlo;
     XLATEOBJ *XlateObj = NULL;
-    BOOL UsesSource, UsesPattern;
+    BOOL UsesSource, UsesPattern, bSplit;
     ROP4 rop4;
 
     rop4 = WIN32_ROP4_TO_ENG_ROP4(dwRop4);
@@ -465,8 +582,9 @@ NtGdiMaskBlt(
         SourceRect.bottom = 0;
     }
 
-    /* Prepare blit */
-    DC_vPrepareDCsForBlit(DCDest, &DestRect, DCSrc, &SourceRect);
+    /* Prepare blit; a source on the screen can show the pointer, so only a memory source is split */
+    bSplit = (DCDest->dctype == DCTYPE_DIRECT) && (!UsesSource || DCSrc->dctype != DCTYPE_DIRECT);
+    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
@@ -511,17 +629,34 @@ NtGdiMaskBlt(
     RECTL_vMakeWellOrdered(&DestRect);
 
     /* Perform the bitblt operation */
-    Status = IntEngBitBlt(&BitmapDest->SurfObj,
-                          BitmapSrc ? &BitmapSrc->SurfObj : NULL,
-                          psurfMask ? &psurfMask->SurfObj : NULL,
-                          (CLIPOBJ *)&DCDest->co,
-                          XlateObj,
-                          &DestRect,
-                          &SourcePoint,
-                          &MaskPoint,
-                          &DCDest->eboFill.BrushObject,
-                          &DCDest->dclevel.pbrFill->ptOrigin,
-                          rop4);
+    if (bSplit)
+    {
+        Status = IntEngBitBltAvoidPointer(DCDest,
+                                          &BitmapDest->SurfObj,
+                                          BitmapSrc ? &BitmapSrc->SurfObj : NULL,
+                                          psurfMask ? &psurfMask->SurfObj : NULL,
+                                          XlateObj,
+                                          &DestRect,
+                                          &SourcePoint,
+                                          &MaskPoint,
+                                          &DCDest->eboFill.BrushObject,
+                                          &DCDest->dclevel.pbrFill->ptOrigin,
+                                          rop4);
+    }
+    else
+    {
+        Status = IntEngBitBlt(&BitmapDest->SurfObj,
+                              BitmapSrc ? &BitmapSrc->SurfObj : NULL,
+                              psurfMask ? &psurfMask->SurfObj : NULL,
+                              (CLIPOBJ *)&DCDest->co,
+                              XlateObj,
+                              &DestRect,
+                              &SourcePoint,
+                              &MaskPoint,
+                              &DCDest->eboFill.BrushObject,
+                              &DCDest->dclevel.pbrFill->ptOrigin,
+                              rop4);
+    }
 
     if (UsesSource)
         EXLATEOBJ_vCleanup(&exlo);
@@ -904,21 +1039,38 @@ IntPatBlt(
     BrushOrigin.y = pbrush->ptOrigin.y + pdc->ptlDCOrig.y;
 #endif
 
-    DC_vPrepareDCsForBlit(pdc, &DestRect, NULL, NULL);
+    DC_vPrepareDCsForBlitEx(pdc, &DestRect, NULL, NULL, pdc->dctype == DCTYPE_DIRECT);
 
     psurf = pdc->dclevel.pSurface;
 
-    ret = IntEngBitBlt(&psurf->SurfObj,
-                       NULL,
-                       NULL,
-                       (CLIPOBJ *)&pdc->co,
-                       NULL,
-                       &DestRect,
-                       NULL,
-                       NULL,
-                       &pebo->BrushObject,
-                       &BrushOrigin,
-                       WIN32_ROP3_TO_ENG_ROP4(dwRop3));
+    if (pdc->dctype == DCTYPE_DIRECT)
+    {
+        ret = IntEngBitBltAvoidPointer(pdc,
+                                       &psurf->SurfObj,
+                                       NULL,
+                                       NULL,
+                                       NULL,
+                                       &DestRect,
+                                       NULL,
+                                       NULL,
+                                       &pebo->BrushObject,
+                                       &BrushOrigin,
+                                       WIN32_ROP3_TO_ENG_ROP4(dwRop3));
+    }
+    else
+    {
+        ret = IntEngBitBlt(&psurf->SurfObj,
+                           NULL,
+                           NULL,
+                           (CLIPOBJ *)&pdc->co,
+                           NULL,
+                           &DestRect,
+                           NULL,
+                           NULL,
+                           &pebo->BrushObject,
+                           &BrushOrigin,
+                           WIN32_ROP3_TO_ENG_ROP4(dwRop3));
+    }
 
     DC_vFinishBlit(pdc, NULL);
 
