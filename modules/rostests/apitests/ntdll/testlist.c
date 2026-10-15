@@ -175,6 +175,7 @@ extern void func_RtlWaitOnAddress(void);
 extern void func_RtlVirtualUnwind(void);
 extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
+extern void func_SectionFaultCost(void);
 extern void func_StackOverflow(void);
 extern void func_SystemCallStubs(void);
 extern void func_strcpy_s(void);
@@ -354,6 +355,7 @@ const struct test winetest_testlist[] =
     { "RtlUpcaseUnicodeStringToCountedOemString", func_RtlUpcaseUnicodeStringToCountedOemString },
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
+    { "SectionFaultCost",               func_SectionFaultCost },
     { "StackOverflow",                  func_StackOverflow },
     { "SystemCallStubs",                func_SystemCallStubs },
     { "strcpy_s",                       func_strcpy_s },

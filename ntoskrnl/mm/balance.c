@@ -335,16 +335,32 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
                             PPFN_NUMBER AllocatedPage)
 {
     PFN_NUMBER Page;
-
-    /* Delay some requests for the Memory Manager to recover pages (CORE-17624).
-     * FIXME: This is suboptimal.
-     */
-    static INT i = 0;
+    ULONG Pace = 0, Dirty, Low, Range;
+    static LONG Requests;
     static LARGE_INTEGER TinyTime = {{-1L, -1L}};
-    if (i++ >= 100)
+
+    /*
+     * Pace the requests with one tick every Pace-th request (CORE-17624). While pages are short,
+     * every hundredth, as this function always did. While dirty cache data exceeds a quarter of
+     * the dirty page threshold, every hundredth at first and more often as it grows, up to every
+     * fourth at three eighths, so that a writer cannot fill the cache views with dirty data
+     * faster than the lazy writer cleans them. With free pages and a clean cache nothing waits.
+     */
+    if (MmAvailablePages < MiMinimumAvailablePages)
+        Pace = 100;
+
+    Dirty = CcTotalDirtyPages;
+    Low = CcDirtyPageThreshold / 4;
+    Range = max(CcDirtyPageThreshold / 8, 1);
+    if (Dirty > Low)
+        Pace = (Dirty - Low >= Range) ? 4 : 100 - (ULONG)((ULONGLONG)96 * (Dirty - Low) / Range);
+
+    if ((Pace != 0) &&
+        (PsGetCurrentThreadId() != MiBalancerThreadId.UniqueThread) &&
+        (KeGetCurrentIrql() < DISPATCH_LEVEL) &&
+        ((ULONG)InterlockedIncrement(&Requests) % Pace == 0))
     {
         KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
-        i = 0;
     }
 
     /*
