@@ -118,6 +118,7 @@ list(APPEND SOURCE
     RtlConditionVariable.c
     RtlCopyMappedMemory.c
     RtlCriticalSection.c
+    RtlCriticalSectionRace.c
     RtlDebugInformation.c
     RtlDeleteAce.c
     RtlDetermineDosPathNameType.c
