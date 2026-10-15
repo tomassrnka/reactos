@@ -290,9 +290,151 @@ static void Test_SurrogateExtents(void)
     DeleteDC(hdc);
 }
 
+#define DRAW_WIDTH 200
+#define DRAW_HEIGHT 48
+#define DRAW_FILL 0x00FF0000
+#define DRAW_X 10
+/* Windows pads a text background by a pixel or two on each side; the faults tested for are many pixels off */
+#define DRAW_SLACK 4
+
+typedef struct
+{
+    LONG ink, inkRight, fillLeft, fillRight;
+} DRAWN;
+
+/* Draws on white with a red text background: red is the background box the kernel sizes from the string, anything
+   else that is not white is the glyphs */
+static void DrawString(HDC hdc, const DWORD *pixels, PCSTR pszName, UINT fuOptions, UINT uAlign, INT x,
+                       PCWSTR psz, INT cch, const INT *pDx, DRAWN *pDrawn)
+{
+    INT ix, iy;
+    BOOL ret;
+
+    PatBlt(hdc, 0, 0, DRAW_WIDTH, DRAW_HEIGHT, WHITENESS);
+    SetTextAlign(hdc, uAlign);
+    ret = ExtTextOutW(hdc, x, 5, fuOptions, NULL, psz, cch, pDx);
+    ok(ret, "%s: ExtTextOutW failed\n", pszName);
+    GdiFlush();
+
+    pDrawn->ink = 0;
+    pDrawn->inkRight = -1;
+    pDrawn->fillLeft = DRAW_WIDTH;
+    pDrawn->fillRight = 0;
+    for (iy = 0; iy < DRAW_HEIGHT; iy++)
+    {
+        for (ix = 0; ix < DRAW_WIDTH; ix++)
+        {
+            DWORD pixel = pixels[iy * DRAW_WIDTH + ix] & 0x00FFFFFF;
+
+            if (pixel == 0x00FFFFFF)
+                continue;
+            if (pixel == DRAW_FILL)
+            {
+                if (ix < pDrawn->fillLeft)
+                    pDrawn->fillLeft = ix;
+                if (ix + 1 > pDrawn->fillRight)
+                    pDrawn->fillRight = ix + 1;
+            }
+            else
+            {
+                pDrawn->ink++;
+                if (ix > pDrawn->inkRight)
+                    pDrawn->inkRight = ix;
+            }
+        }
+    }
+}
+
+/* The draw loop walks the string as the measuring loop does: a high surrogate that no low surrogate follows is a
+   code unit of its own and the character after it is drawn, sized and aligned like any other */
+static void Test_SurrogateDraw(void)
+{
+    static const WCHAR loneHigh[] = { 0xD83D };
+    static const WCHAR highThenChar[] = { 0xD83D, 'B' };
+    static const WCHAR charThenHigh[] = { 'A', 0xD83D };
+    static const INT dx[2] = { 40, 40 };
+    static const UINT options[2] = { 0, ETO_IGNORELANGUAGE };
+    static const PCSTR names[2] = { "default", "ignore language" };
+    HDC hdcScreen = GetDC(NULL), hdc = CreateCompatibleDC(hdcScreen);
+    HFONT hfont = CreateArial(-20), hOldFont;
+    BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER), DRAW_WIDTH, -DRAW_HEIGHT, 1, 32, BI_RGB } };
+    DWORD *pixels = NULL;
+    HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (PVOID*)&pixels, NULL, 0), hbmOld;
+    SIZE sizeHigh, sizeHighB, sizeAHigh;
+    DRAWN lone, drawn;
+    UINT i;
+
+    ReleaseDC(NULL, hdcScreen);
+    if (!hbm || !pixels)
+    {
+        skip("no DIB section\n");
+        goto Cleanup;
+    }
+
+    hbmOld = SelectObject(hdc, hbm);
+    hOldFont = SelectObject(hdc, hfont);
+    SetTextColor(hdc, RGB(0, 0, 0));
+    SetBkColor(hdc, RGB(255, 0, 0));
+    SetBkMode(hdc, OPAQUE);
+    GetTextExtentPoint32W(hdc, loneHigh, 1, &sizeHigh);
+    GetTextExtentPoint32W(hdc, highThenChar, 2, &sizeHighB);
+    GetTextExtentPoint32W(hdc, charThenHigh, 2, &sizeAHigh);
+
+    for (i = 0; i < ARRAYSIZE(options); i++)
+    {
+        PCSTR pszName = names[i];
+
+        /* A high surrogate followed by a character: the character is drawn after it, and the background box is
+           as wide as the string measures */
+        DrawString(hdc, pixels, pszName, options[i], TA_LEFT | TA_TOP, DRAW_X, loneHigh, 1, NULL, &lone);
+        DrawString(hdc, pixels, pszName, options[i], TA_LEFT | TA_TOP, DRAW_X, highThenChar, 2, NULL, &drawn);
+        trace("%s: lone ink %ld right %ld fill %ld..%ld | then char ink %ld right %ld fill %ld..%ld | cx %ld %ld\n",
+              pszName, lone.ink, lone.inkRight, lone.fillLeft, lone.fillRight,
+              drawn.ink, drawn.inkRight, drawn.fillLeft, drawn.fillRight, sizeHigh.cx, sizeHighB.cx);
+        ok(drawn.inkRight >= DRAW_X + sizeHigh.cx + 2,
+           "%s: the character after a lone high surrogate is not drawn: ink ends at %ld, the surrogate ends at %ld\n",
+           pszName, drawn.inkRight, DRAW_X + sizeHigh.cx);
+        ok(abs((drawn.fillRight - drawn.fillLeft) - sizeHighB.cx) <= DRAW_SLACK,
+           "%s: background is %ld wide, the string measures %ld\n",
+           pszName, drawn.fillRight - drawn.fillLeft, sizeHighB.cx);
+        ok(abs((lone.fillRight - lone.fillLeft) - sizeHigh.cx) <= DRAW_SLACK,
+           "%s: background of the lone surrogate is %ld wide, it measures %ld\n",
+           pszName, lone.fillRight - lone.fillLeft, sizeHigh.cx);
+
+        /* A high surrogate at the end is a unit of its own: it counts in the width */
+        DrawString(hdc, pixels, pszName, options[i], TA_LEFT | TA_TOP, DRAW_X, charThenHigh, 2, NULL, &drawn);
+        ok(abs((drawn.fillRight - drawn.fillLeft) - sizeAHigh.cx) <= DRAW_SLACK,
+           "%s: background of a trailing high surrogate is %ld wide, the string measures %ld\n",
+           pszName, drawn.fillRight - drawn.fillLeft, sizeAHigh.cx);
+
+        /* Right alignment places the box by the whole width */
+        DrawString(hdc, pixels, pszName, options[i], TA_RIGHT | TA_TOP, 150, highThenChar, 2, NULL, &drawn);
+        ok(abs(drawn.fillLeft - (150 - sizeHighB.cx)) <= DRAW_SLACK && abs(drawn.fillRight - 150) <= DRAW_SLACK,
+           "%s: right-aligned box is %ld..%ld, expected %ld..150\n",
+           pszName, drawn.fillLeft, drawn.fillRight, 150 - sizeHighB.cx);
+
+        /* With an explicit advance for every code unit */
+        DrawString(hdc, pixels, pszName, options[i], TA_LEFT | TA_TOP, DRAW_X, highThenChar, 2, dx, &drawn);
+        ok(abs((drawn.fillRight - drawn.fillLeft) - (dx[0] + dx[1])) <= DRAW_SLACK,
+           "%s: background is %ld wide, the advances add up to %d\n",
+           pszName, drawn.fillRight - drawn.fillLeft, dx[0] + dx[1]);
+        ok(drawn.inkRight >= DRAW_X + dx[0],
+           "%s: the character after the high surrogate is not drawn at its advance: ink ends at %ld, expected past %d\n",
+           pszName, drawn.inkRight, DRAW_X + dx[0]);
+    }
+
+    SelectObject(hdc, hOldFont);
+    SelectObject(hdc, hbmOld);
+    DeleteObject(hbm);
+Cleanup:
+    DeleteObject(hfont);
+    DeleteDC(hdc);
+}
+
 START_TEST(GetTextExtentExPoint)
 {
     Test_GetTextExtentExPoint();
     Test_SurrogateExtents();
+    Test_SurrogateDraw();
     Test_LargeHimetricHeight();
 }
