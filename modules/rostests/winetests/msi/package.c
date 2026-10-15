@@ -5810,6 +5810,259 @@ static void test_installprops_compat_layer(void)
     SetEnvironmentVariableA("__COMPAT_LAYER", previous_size && previous_size < sizeof(previous) ? previous : NULL);
 }
 
+static void check_folder_properties(MSIHANDLE hpkg, BOOL common, const char *context)
+{
+    static const struct { const char *name; int user, common; } folders[] =
+    {
+        { "ProgramMenuFolder", CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS },
+        { "StartMenuFolder", CSIDL_STARTMENU, CSIDL_COMMON_STARTMENU },
+        { "StartupFolder", CSIDL_STARTUP, CSIDL_COMMON_STARTUP },
+        { "DesktopFolder", CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY },
+        { "AdminToolsFolder", CSIDL_ADMINTOOLS, CSIDL_COMMON_ADMINTOOLS },
+        { "TemplateFolder", CSIDL_TEMPLATES, CSIDL_COMMON_TEMPLATES },
+    };
+    char expected[MAX_PATH], buf[MAX_PATH];
+    DWORD size;
+    UINT r, i;
+
+    for (i = 0; i < ARRAY_SIZE(folders); i++)
+    {
+        HRESULT hr = SHGetFolderPathA(NULL, (common ? folders[i].common : folders[i].user) | CSIDL_FLAG_DONT_VERIFY,
+                                      NULL, SHGFP_TYPE_CURRENT, expected);
+        if (hr != S_OK)
+        {
+            skip("%s: no path for %s\n", context, folders[i].name);
+            continue;
+        }
+        lstrcatA(expected, "\\");
+
+        size = MAX_PATH;
+        buf[0] = 0;
+        r = MsiGetPropertyA(hpkg, folders[i].name, buf, &size);
+        ok(r == ERROR_SUCCESS, "%s: %s: got %u\n", context, folders[i].name, r);
+        ok(!lstrcmpiA(buf, expected), "%s: %s: expected %s, got %s\n", context, folders[i].name, expected, buf);
+    }
+}
+
+static void test_allusers_folders(void)
+{
+    static const struct { const char *value; const char *peruser; BOOL common; const char *name; } tests[] =
+    {
+        { NULL, NULL, FALSE, "no ALLUSERS" },
+        { "1", NULL, TRUE, "ALLUSERS=1" },
+        { "2", NULL, TRUE, "ALLUSERS=2" },
+        { "2", "1", FALSE, "ALLUSERS=2 MSIINSTALLPERUSER=1" },
+        { "1", "1", TRUE, "ALLUSERS=1 MSIINSTALLPERUSER=1" },
+        { NULL, "1", FALSE, "MSIINSTALLPERUSER=1" },
+    };
+    MSIHANDLE hpkg, hdb;
+    CHAR buf[MAX_PATH], expected[MAX_PATH], values[64];
+    DWORD size;
+    UINT r, i;
+
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        hdb = create_package_db();
+        ok(hdb, "failed to create database\n");
+        create_property_table(hdb);
+        if (tests[i].value)
+        {
+            sprintf(values, "'ALLUSERS', '%s'", tests[i].value);
+            add_property_entry(hdb, values);
+        }
+        if (tests[i].peruser)
+        {
+            sprintf(values, "'MSIINSTALLPERUSER', '%s'", tests[i].peruser);
+            add_property_entry(hdb, values);
+        }
+        r = package_from_db(hdb, &hpkg);
+        if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+        {
+            skip("Not enough rights to perform tests\n");
+            DeleteFileA(msifile);
+            return;
+        }
+        ok(r == ERROR_SUCCESS, "failed to create package %u\n", r);
+
+        check_folder_properties(hpkg, tests[i].common, tests[i].name);
+
+        if (tests[i].peruser)
+        {
+            /* measured on Windows: ALLUSERS 2 with MSIINSTALLPERUSER empties ALLUSERS; MSIINSTALLPERUSER is cleared
+               unless ALLUSERS is 2 */
+            size = MAX_PATH;
+            buf[0] = 0;
+            r = MsiGetPropertyA(hpkg, "ALLUSERS", buf, &size);
+            ok(r == ERROR_SUCCESS, "%s: got %u\n", tests[i].name, r);
+            ok(!lstrcmpA(buf, tests[i].common ? "1" : ""), "%s: ALLUSERS is '%s'\n", tests[i].name, buf);
+            size = MAX_PATH;
+            buf[0] = 0;
+            r = MsiGetPropertyA(hpkg, "MSIINSTALLPERUSER", buf, &size);
+            ok(r == ERROR_SUCCESS, "%s: got %u\n", tests[i].name, r);
+            ok(!lstrcmpA(buf, lstrcmpA(tests[i].value ? tests[i].value : "", "2") ? "" : "1"), "%s: MSIINSTALLPERUSER is '%s'\n", tests[i].name, buf);
+        }
+
+        /* the per-user folders do not depend on ALLUSERS */
+        if (SHGetFolderPathA(NULL, CSIDL_APPDATA | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_CURRENT, expected) == S_OK)
+        {
+            lstrcatA(expected, "\\");
+            size = MAX_PATH;
+            buf[0] = 0;
+            r = MsiGetPropertyA(hpkg, "AppDataFolder", buf, &size);
+            ok(r == ERROR_SUCCESS, "%s: got %u\n", tests[i].name, r);
+            ok(!lstrcmpiA(buf, expected), "%s: AppDataFolder: expected %s, got %s\n", tests[i].name, expected, buf);
+        }
+
+        MsiCloseHandle(hpkg);
+        DeleteFileA(msifile);
+    }
+
+    /* the folders are chosen when the package is opened; a later change of ALLUSERS does not move them */
+    hdb = create_package_db();
+    ok(hdb, "failed to create database\n");
+    r = package_from_db(hdb, &hpkg);
+    ok(r == ERROR_SUCCESS, "failed to create package %u\n", r);
+    r = MsiSetPropertyA(hpkg, "ALLUSERS", "1");
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    check_folder_properties(hpkg, FALSE, "ALLUSERS set after open");
+    MsiCloseHandle(hpkg);
+    DeleteFileA(msifile);
+}
+
+static BOOL log_has_property(const char *data, const char *name, const char *value)
+{
+    char line[MAX_PATH * 2];
+    const char *p = strstr(data, "Property(S): ");
+    size_t len = strlen(name);
+
+    while (p)
+    {
+        p += 13;
+        if (!strncmp(p, name, len) && !strncmp(p + len, " = ", 3))
+        {
+            size_t n = strcspn(p + len + 3, "\r\n");
+            if (n >= sizeof(line)) return FALSE;
+            memcpy(line, p + len + 3, n);
+            line[n] = 0;
+            return !lstrcmpiA(line, value);
+        }
+        p = strstr(p, "Property(S): ");
+    }
+    return FALSE;
+}
+
+static void test_allusers_install_folders(void)
+{
+    static const struct { const char *cmdline; BOOL common; const char *desktop; } tests[] =
+    {
+        { "ALLUSERS=1", TRUE, NULL },
+        { "ALLUSERS=2 MSIINSTALLPERUSER=1", FALSE, NULL },
+        { "ALLUSERS=2", TRUE, NULL },
+        { "", FALSE, NULL },
+    };
+    char expected[MAX_PATH], log[MAX_PATH], *data;
+    MSIHANDLE hdb;
+    DWORD size, read;
+    HANDLE file;
+    UINT r, i;
+
+    GetTempPathA(MAX_PATH, log);
+    lstrcatA(log, "msiallusers.log");
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        hdb = create_package_db();
+        ok(hdb, "failed to create database\n");
+        create_property_table(hdb);
+        add_property_entry(hdb, "'ProductCode', '{3A7D5E3C-4F42-4B0C-9E11-2C9D8F6A7B01}'");
+        add_property_entry(hdb, "'ProductName', 'allusers'");
+        add_property_entry(hdb, "'ProductVersion', '1.0.0'");
+        add_property_entry(hdb, "'Manufacturer', 'Wine'");
+        add_property_entry(hdb, "'ProductLanguage', '1033'");
+        add_directory_entry(hdb, "'TARGETDIR', '', 'SourceDir'");
+        create_feature_table(hdb);
+        add_feature_entry(hdb, "'one', '', 'One', 'One', 2, 1, 'TARGETDIR', 0");
+        create_component_table(hdb);
+        add_component_entry(hdb, "'comp1', '{4F7D91E1-5B0D-4A73-9A3E-1A5E5C0F0003}', 'TARGETDIR', 0, '', ''");
+        create_feature_components_table(hdb);
+        add_feature_components_entry(hdb, "'one', 'comp1'");
+        create_media_table(hdb);
+        add_media_entry(hdb, "1, 1, '', '', '', ''");
+        create_install_execute_sequence_table(hdb);
+        add_install_execute_sequence_entry(hdb, "'CostInitialize', '', 800");
+        add_install_execute_sequence_entry(hdb, "'FileCost', '', 900");
+        add_install_execute_sequence_entry(hdb, "'CostFinalize', '', 1000");
+        add_install_execute_sequence_entry(hdb, "'InstallValidate', '', 1400");
+        add_install_execute_sequence_entry(hdb, "'InstallInitialize', '', 1500");
+        add_install_execute_sequence_entry(hdb, "'ProcessComponents', '', 1600");
+        add_install_execute_sequence_entry(hdb, "'RegisterProduct', '', 6100");
+        add_install_execute_sequence_entry(hdb, "'PublishProduct', '', 6400");
+        add_install_execute_sequence_entry(hdb, "'InstallFinalize', '', 6600");
+        r = MsiDatabaseCommit(hdb);
+        ok(r == ERROR_SUCCESS, "got %u\n", r);
+        MsiCloseHandle(hdb);
+
+        DeleteFileA(log);
+        MsiEnableLogA(INSTALLLOGMODE_VERBOSE | INSTALLLOGMODE_PROPERTYDUMP, log, 0);
+        r = MsiInstallProductA(msifile, tests[i].cmdline);
+        MsiEnableLogA(0, NULL, 0);
+        if (r == ERROR_SUCCESS)
+        {
+            char remove[128];
+            UINT rr;
+            sprintf(remove, "%s REMOVE=ALL", tests[i].cmdline);
+            rr = MsiInstallProductA(msifile, remove);
+            ok(rr == ERROR_SUCCESS, "%s: removing it gave %u\n", tests[i].cmdline, rr);
+        }
+        if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+        {
+            skip("Not enough rights to perform tests\n");
+            DeleteFileA(msifile);
+            return;
+        }
+        ok(r == ERROR_SUCCESS, "%s: got %u\n", tests[i].cmdline, r);
+
+        file = CreateFileA(log, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        ok(file != INVALID_HANDLE_VALUE, "%s: no log, error %lu\n", tests[i].cmdline, GetLastError());
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            size = GetFileSize(file, NULL);
+            data = calloc(1, size + 2);
+            ReadFile(file, data, size, &read, NULL);
+            CloseHandle(file);
+            /* the log of Windows Installer is ANSI or UTF-16 */
+            if (size >= 2 && (BYTE)data[0] == 0xff && (BYTE)data[1] == 0xfe)
+            {
+                char *ansi = calloc(1, size);
+                WideCharToMultiByte(CP_ACP, 0, (WCHAR *)(data + 2), -1, ansi, size, NULL, NULL);
+                free(data);
+                data = ansi;
+            }
+
+            SHGetFolderPathA(NULL, (tests[i].common ? CSIDL_COMMON_PROGRAMS : CSIDL_PROGRAMS) | CSIDL_FLAG_DONT_VERIFY,
+                             NULL, SHGFP_TYPE_CURRENT, expected);
+            lstrcatA(expected, "\\");
+            ok(log_has_property(data, "ProgramMenuFolder", expected), "%s: expected ProgramMenuFolder %s\n", tests[i].cmdline, expected);
+
+            if (tests[i].desktop)
+                lstrcpyA(expected, tests[i].desktop);
+            else
+            {
+                SHGetFolderPathA(NULL, (tests[i].common ? CSIDL_COMMON_DESKTOPDIRECTORY : CSIDL_DESKTOPDIRECTORY) | CSIDL_FLAG_DONT_VERIFY,
+                                 NULL, SHGFP_TYPE_CURRENT, expected);
+                lstrcatA(expected, "\\");
+            }
+            ok(log_has_property(data, "DesktopFolder", expected), "%s: expected DesktopFolder %s\n", tests[i].cmdline, expected);
+            free(data);
+        }
+        DeleteFileA(msifile);
+    }
+    DeleteFileA(log);
+}
+
 static void test_launchconditions(void)
 {
     MSIHANDLE hpkg;
@@ -9670,6 +9923,8 @@ START_TEST(package)
     test_featureparents();
     test_installprops();
     test_installprops_compat_layer();
+    test_allusers_folders();
+    test_allusers_install_folders();
     test_launchconditions();
     test_ccpsearch();
     test_complocator();
