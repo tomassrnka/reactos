@@ -405,6 +405,10 @@ typedef struct tagMSIPACKAGE
 {
     MSIOBJECTHDR hdr;
     MSIDATABASE *db;
+#ifdef __REACTOS__
+    BOOL folders_chosen;    /* the ALLUSERS folders were set, for the all-users ones if folders_common */
+    BOOL folders_common;
+#endif
     INT version;
     enum platform platform;
     UINT num_langids;
@@ -924,6 +928,9 @@ extern UINT msi_package_add_media_disk(MSIPACKAGE *, DWORD, DWORD, DWORD, LPWSTR
 extern UINT msi_clone_properties(MSIDATABASE *);
 extern UINT msi_set_context(MSIPACKAGE *);
 extern void msi_adjust_privilege_properties(MSIPACKAGE *);
+#ifdef __REACTOS__
+extern void msi_set_context_folders(MSIPACKAGE *);
+#endif
 extern UINT MSI_GetFeatureCost(MSIPACKAGE *, MSIFEATURE *, MSICOSTTREE, INSTALLSTATE, LPINT);
 
 /* for deformating */
