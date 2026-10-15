@@ -478,6 +478,39 @@ static BOOL FindVolumeAt(ULONG Disk, LONGLONG Offset, LONGLONG Length, PWCHAR Gu
     return Found;
 }
 
+/* Writes, flushes and renames a file through one handle until told to stop, while the volume goes away. */
+typedef struct _RACE
+{
+    HANDLE File;
+    volatile LONG Stop;
+    LONG Done, Failed;
+} RACE, *PRACE;
+
+static DWORD WINAPI RaceThread(PVOID Context)
+{
+    PRACE Race = Context;
+    static BYTE Data[64 * 1024];
+    struct { FILE_RENAME_INFORMATION Info; WCHAR More[16]; } Rename;
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER Zero;
+    DWORD Written;
+    ULONG n;
+
+    Zero.QuadPart = 0;
+    for (n = 0; !Race->Stop && n < 100000; n++)
+    {
+        BOOL Ok = SetFilePointerEx(Race->File, Zero, NULL, FILE_BEGIN) &&
+                  WriteFile(Race->File, Data, sizeof(Data), &Written, NULL) && FlushFileBuffers(Race->File);
+        ZeroMemory(&Rename, sizeof(Rename));
+        Rename.Info.ReplaceIfExists = TRUE;
+        Rename.Info.FileNameLength = 9 * sizeof(WCHAR);
+        memcpy(Rename.Info.FileName, (n & 1) ? L"race1.bin" : L"race2.bin", 9 * sizeof(WCHAR));
+        Ok = NT_SUCCESS(NtSetInformationFile(Race->File, &Iosb, &Rename, sizeof(Rename), FileRenameInformation)) && Ok;
+        InterlockedIncrement(Ok ? &Race->Done : &Race->Failed);
+    }
+    return 0;
+}
+
 /*
  * After a shrink the partition table is written again with the smaller partition while the volume
  * is mounted.  Windows Server 2008 R2 then removes the volume and makes it anew, without the drive
@@ -494,8 +527,9 @@ static void TestNtfsShrinkTable(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATI
     LONGLONG Target = 0, Start = Part->StartingOffset.QuadPart;
     WCHAR Guid[MAX_PATH], Path[MAX_PATH];
     DWORD Returned, i;
-    HANDLE File, Handle;
+    HANDLE File, Handle, RaceThreadHandle = NULL;
     BOOL Found = FALSE, Back = FALSE;
+    RACE Race = { INVALID_HANDLE_VALUE, 0, 0, 0 };
 
     File = WritePattern("table.bin", 4 * MiB);
     if (File != INVALID_HANDLE_VALUE)
@@ -516,6 +550,15 @@ static void TestNtfsShrinkTable(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATI
     ok(FlushFileBuffers(*Volume), "Flushing the volume failed: %lu\n", GetLastError());
     CloseHandle(*Volume);
     *Volume = INVALID_HANDLE_VALUE;
+
+    /* A file of the old volume is written, flushed and renamed all the time while it goes away: the
+     * requests that are under way then must fail, not crash. */
+    sprintf((PCHAR)Buffer, "%c:\\race1.bin", Letter);
+    Race.File = CreateFileA((PCSTR)Buffer, GENERIC_READ | GENERIC_WRITE | DELETE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(Race.File != INVALID_HANDLE_VALUE, "Creating %s failed: %lu\n", (PCSTR)Buffer, GetLastError());
+    RaceThreadHandle = Race.File != INVALID_HANDLE_VALUE ? CreateThread(NULL, 0, RaceThread, &Race, 0, NULL) : NULL;
+    for (i = 0; RaceThreadHandle && i < 100 && !Race.Done; i++)
+        Sleep(50);
 
     Handle = OpenDisk(Disk, GENERIC_READ | GENERIC_WRITE);
     if (!DeviceIoControl(Handle, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, NULL, 0, Layout, sizeof(Buffer), &Returned, NULL))
@@ -549,6 +592,21 @@ static void TestNtfsShrinkTable(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATI
         if (!Back)
             Sleep(500);
     }
+    if (RaceThreadHandle)
+    {
+        LONG Before = Race.Failed;
+        DWORD Written;
+
+        Sleep(1000);
+        InterlockedExchange(&Race.Stop, 1);
+        ok(WaitForSingleObject(RaceThreadHandle, 30000) == WAIT_OBJECT_0, "The racing requests did not end\n");
+        CloseHandle(RaceThreadHandle);
+        trace("racing requests: %ld succeeded, %ld failed (%ld before the new volume was there)\n", Race.Done, Race.Failed, Before);
+        ok(Race.Done > 0, "No request on the old volume succeeded before the table changed\n");
+        ok(!WriteFile(Race.File, Buffer, 512, &Written, NULL), "A write to the removed volume succeeded\n");
+    }
+    if (Race.File != INVALID_HANDLE_VALUE)
+        CloseHandle(Race.File);
     ok(Back, "No volume with a %I64d-byte partition at %I64d\n", Target * 512, Start);
     if (!Back)
         return;
