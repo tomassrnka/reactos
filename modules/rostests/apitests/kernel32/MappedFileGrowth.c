@@ -6,7 +6,8 @@
  *
  * Measured on FAT32 and NTFS volumes of Windows Server 2008 R2 and Windows 10 22H2 (x64 and WOW64): every byte
  * written through a view stays readable, and a file that is cut and grown again reads zero in the grown range.
- * The test uses the volume of the temporary directory, or the directory named by MAPPEDFILEGROWTH_DIR.
+ * The test uses the volume of the temporary directory, or the directory named by MAPPEDFILEGROWTH_DIR. The 15 s soak
+ * of four threads runs only when MAPPEDFILEGROWTH_SOAK is set.
  */
 
 #include "precomp.h"
@@ -219,6 +220,146 @@ static void TestCutAndGrow(void)
     CloseHandle(File);
 }
 
+static HANDLE OpenNamed(PCWSTR Name, DWORD Disposition, DWORD Flags)
+{
+    WCHAR Path[MAX_PATH];
+
+    StringCchPrintfW(Path, _countof(Path), L"%s\\%s", TestDir, Name);
+    return CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, Disposition, Flags, NULL);
+}
+
+/*
+ * A file cut at an unaligned size, with every handle closed before it grows again, so that the pages past the cut
+ * are no longer in memory: the grown range reads zero, from the cut on and again after another reopen.
+ */
+static void TestCutCloseGrow(BOOL Flush)
+{
+    HANDLE File;
+    DWORD Cut = 0x1801;
+
+    File = OpenNamed(L"cutclose.bin", CREATE_ALWAYS, 0);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    ok(WriteAt(File, 0, 0x3000, 5), "WriteFile failed: %lu\n", GetLastError());
+    if (Flush)
+        ok(FlushFileBuffers(File), "FlushFileBuffers failed: %lu\n", GetLastError());
+    ok(SetSize(File, Cut), "SetEndOfFile failed: %lu\n", GetLastError());
+    CloseHandle(File);
+
+    File = OpenNamed(L"cutclose.bin", OPEN_EXISTING, 0);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    ok(SetSize(File, 0x3000), "SetEndOfFile failed: %lu\n", GetLastError());
+    ok(CountBad(File, Cut, 0x3000 - Cut, 0) == 0, "flush %d: grown range: %lu bytes not zero\n", Flush, CountBad(File, Cut, 0x3000 - Cut, 0));
+    ok(CountBad(File, 0, Cut, 5) == 0, "flush %d: kept range: %lu bad\n", Flush, CountBad(File, 0, Cut, 5));
+    CloseHandle(File);
+
+    File = OpenNamed(L"cutclose.bin", OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    ok(CountBad(File, Cut, 0x3000 - Cut, 0) == 0, "flush %d: after reopen: %lu bytes not zero\n", Flush, CountBad(File, Cut, 0x3000 - Cut, 0));
+    CloseHandle(File);
+}
+
+/*
+ * Pages read into the cache from disk, then cut away at an unaligned size; the file grows again and a write past
+ * the grown range makes the file system zero the gap: the old contents must not come back, through ReadFile or a
+ * view, before or after a reopen.
+ */
+static void TestCachedCutGrowWrite(BOOL ThroughView)
+{
+    HANDLE File, Mapping;
+    PBYTE View;
+    DWORD Cut = 0x2345, i, Bad;
+
+    File = OpenNamed(L"cutgrow.bin", CREATE_ALWAYS, 0);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    if (ThroughView)
+    {
+        ok(SetSize(File, 0x6000), "SetEndOfFile failed: %lu\n", GetLastError());
+        View = MapFile(File, 0, &Mapping);
+        if (View)
+        {
+            FillView(View, 0, 0x6000, 6);
+            UnmapViewOfFile(View);
+            CloseHandle(Mapping);
+        }
+    }
+    else
+    {
+        ok(WriteAt(File, 0, 0x3000, 6) && WriteAt(File, 0x3000, 0x3000, 6), "WriteFile failed: %lu\n", GetLastError());
+    }
+    ok(FlushFileBuffers(File), "FlushFileBuffers failed: %lu\n", GetLastError());
+    CloseHandle(File);
+
+    File = OpenNamed(L"cutgrow.bin", OPEN_EXISTING, 0);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    ok(CountBad(File, 0, 0x6000, 6) == 0, "view %d: contents: %lu bad\n", ThroughView, CountBad(File, 0, 0x6000, 6));
+    ok(SetSize(File, Cut), "SetEndOfFile failed: %lu\n", GetLastError());
+    ok(SetSize(File, 0x6000), "SetEndOfFile failed: %lu\n", GetLastError());
+    ok(WriteAt(File, 0x6000, 0x100, 7), "WriteFile failed: %lu\n", GetLastError());
+    ok(CountBad(File, Cut, 0x6000 - Cut, 0) == 0, "view %d: gap: %lu bytes not zero\n", ThroughView, CountBad(File, Cut, 0x6000 - Cut, 0));
+    ok(CountBad(File, 0, Cut, 6) == 0, "view %d: kept range: %lu bad\n", ThroughView, CountBad(File, 0, Cut, 6));
+    View = MapFile(File, 0, &Mapping);
+    if (View)
+    {
+        for (i = Cut, Bad = 0; i < 0x6000; i++)
+            Bad += View[i] != 0;
+        ok(Bad == 0, "view %d: gap through a view: %lu bytes not zero\n", ThroughView, Bad);
+        UnmapViewOfFile(View);
+        CloseHandle(Mapping);
+    }
+    ok(FlushFileBuffers(File), "FlushFileBuffers failed: %lu\n", GetLastError());
+    CloseHandle(File);
+
+    File = OpenNamed(L"cutgrow.bin", OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    ok(CountBad(File, Cut, 0x6000 - Cut, 0) == 0, "view %d: gap after reopen: %lu bytes not zero\n", ThroughView, CountBad(File, Cut, 0x6000 - Cut, 0));
+    ok(CountBad(File, 0x6000, 0x100, 7) == 0, "view %d: append after reopen: %lu bad\n", ThroughView, CountBad(File, 0x6000, 0x100, 7));
+    CloseHandle(File);
+}
+
+/* View data past the valid data length written to disk by a flush, then every handle closed; a cached append after the reopen */
+static void TestViewFlushReopenAppend(void)
+{
+    HANDLE File, Mapping;
+    PBYTE View;
+
+    File = OpenNamed(L"vflush.bin", CREATE_ALWAYS, 0);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    ok(WriteAt(File, 0, 0x200, 1), "WriteFile failed: %lu\n", GetLastError());
+    View = MapFile(File, 0x9000, &Mapping);
+    if (View)
+    {
+        FillView(View, 0x4000, 0x2800, 2);
+        ok(FlushViewOfFile(View, 0), "FlushViewOfFile failed: %lu\n", GetLastError());
+        UnmapViewOfFile(View);
+        CloseHandle(Mapping);
+    }
+    CloseHandle(File);
+
+    File = OpenNamed(L"vflush.bin", OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+    ok(WriteAt(File, 0x9000, 0x100, 3), "WriteFile failed: %lu\n", GetLastError());
+    ok(CountBad(File, 0x4000, 0x2800, 2) == 0, "view-written bytes: %lu bad\n", CountBad(File, 0x4000, 0x2800, 2));
+    ok(CountBad(File, 0x200, 0x3E00, 0) == 0, "gap: %lu not zero\n", CountBad(File, 0x200, 0x3E00, 0));
+    CloseHandle(File);
+}
+
 /* Several threads grow their own files by cached appends and by mappings whose tail they write; every byte is checked */
 typedef struct _SOAK
 {
@@ -391,7 +532,15 @@ START_TEST(MappedFileGrowth)
     TestTwoRangesThenWrite();
     TestCloseReopen();
     TestCutAndGrow();
-    TestSoak();
+    TestCutCloseGrow(FALSE);
+    TestCutCloseGrow(TRUE);
+    TestCachedCutGrowWrite(FALSE);
+    TestCachedCutGrowWrite(TRUE);
+    TestViewFlushReopenAppend();
+    if (GetEnvironmentVariableW(L"MAPPEDFILEGROWTH_SOAK", Temp, _countof(Temp)))
+        TestSoak();
+    else
+        skip("soak not run: set MAPPEDFILEGROWTH_SOAK to run it\n");
 
     RemoveDirectoryW(TestDir);
 }
