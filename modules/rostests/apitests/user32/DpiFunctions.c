@@ -181,9 +181,11 @@ test_metrics(void)
     }
     ok(pGetSystemMetricsForDpi(SM_CXFRAME, 96) >= GetSystemMetrics(SM_CXDLGFRAME), "SM_CXFRAME is smaller than SM_CXDLGFRAME\n");
 
-    /* The padded border exists at every DPI, whether or not GetSystemMetrics has one */
-    ok(pGetSystemMetricsForDpi(92, 96) == 4, "padded border at 96 DPI: %d\n", pGetSystemMetricsForDpi(92, 96));
-    ok(pGetSystemMetricsForDpi(92, 192) == 8, "padded border at 192 DPI: %d\n", pGetSystemMetricsForDpi(92, 192));
+    /* The padded border is part of the frame of a window (FrameMetrics checks the sum): it never shrinks with the DPI */
+    ok(pGetSystemMetricsForDpi(92, 192) >= pGetSystemMetricsForDpi(92, 96), "padded border %d at 96 DPI, %d at 192 DPI\n",
+       pGetSystemMetricsForDpi(92, 96), pGetSystemMetricsForDpi(92, 192));
+    ok(abs(pGetSystemMetricsForDpi(92, 192) - 2 * pGetSystemMetricsForDpi(92, 96)) <= 1, "padded border %d at 96 DPI, %d at 192 DPI\n",
+       pGetSystemMetricsForDpi(92, 96), pGetSystemMetricsForDpi(92, 192));
 
     /* Icons and cursors have their own steps */
     ok(pGetSystemMetricsForDpi(SM_CXICON, 120) == 40, "icon at 120 DPI: %d\n", pGetSystemMetricsForDpi(SM_CXICON, 120));

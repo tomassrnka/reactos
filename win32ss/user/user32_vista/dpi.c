@@ -1104,9 +1104,10 @@ MetricsForDpi(int index, UINT dpi)
     ICONMETRICSW Im;
     int Value;
 
-    /* The padded border is not part of the metrics of ReactOS, it is the one of Windows 10 */
+    /* The frame of a ReactOS window has no padded border: the metric is the one of GetSystemMetrics, which
+     * programs add to SM_CXFRAME to get the width of the frame of a window */
     if (index == 92)
-        return ScaleToDpi(4, dpi, USER_DEFAULT_SCREEN_DPI_);
+        return ScaleToDpi(GetSystemMetrics(index), dpi, SystemDpi);
 
     /* The icons and cursors have one size in ReactOS whatever the DPI, so they are scaled also at the DPI of the system */
     if (dpi == SystemDpi && index != SM_CXICON && index != SM_CYICON && index != SM_CXSMICON && index != SM_CYSMICON &&
