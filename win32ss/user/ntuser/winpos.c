@@ -1799,6 +1799,28 @@ co_WinPosSetWindowPos(
    UINT flags
    )
 {
+   return co_WinPosSetWindowPosEx(Window, WndInsertAfter, x, y, cx, cy, flags, FALSE);
+}
+
+/*
+ * NoMessages: apply the new geometry with no callback into user mode at all
+ * (no window procedure, hook or WinEvent), as UpdateLayeredWindow needs. The
+ * client area keeps its offsets from the window edges. The caller passes
+ * SWP_NOACTIVATE and SWP_DEFERERASE, and afterwards calls
+ * co_WinPosNoMessagesNotify for the notifications that are left out.
+ */
+BOOLEAN FASTCALL
+co_WinPosSetWindowPosEx(
+   PWND Window,
+   HWND WndInsertAfter,
+   INT x,
+   INT y,
+   INT cx,
+   INT cy,
+   UINT flags,
+   BOOL NoMessages
+   )
+{
    WINDOWPOS WinPos;
    RECTL NewWindowRect;
    RECTL NewClientRect;
@@ -1855,6 +1877,12 @@ co_WinPosSetWindowPos(
          return TRUE;
       }
       return FALSE;
+   }
+
+   if (NoMessages)
+   {
+      ASSERT((flags & (SWP_NOACTIVATE | SWP_DEFERERASE)) == (SWP_NOACTIVATE | SWP_DEFERERASE));
+      WinPos.flags |= SWP_NOSENDCHANGING;
    }
 
    co_WinPosDoWinPosChanging(Window, &WinPos, &NewWindowRect, &NewClientRect);
@@ -1930,7 +1958,22 @@ co_WinPosSetWindowPos(
        Window->hrgnNewFrame = NULL;
    }
 
-   WvrFlags = co_WinPosDoNCCALCSize(Window, &WinPos, &NewWindowRect, &NewClientRect, valid_rects);
+   if (NoMessages)
+   {
+      /* NewClientRect already moved with the window; follow a resize too */
+      NewClientRect.right  += (NewWindowRect.right - NewWindowRect.left) - (Window->rcWindow.right - Window->rcWindow.left);
+      NewClientRect.bottom += (NewWindowRect.bottom - NewWindowRect.top) - (Window->rcWindow.bottom - Window->rcWindow.top);
+      FixClientRect(&NewClientRect, &NewWindowRect);
+      if (NewClientRect.left != Window->rcClient.left || NewClientRect.top != Window->rcClient.top)
+         WinPos.flags &= ~SWP_NOCLIENTMOVE;
+      if (NewClientRect.right - NewClientRect.left != Window->rcClient.right - Window->rcClient.left ||
+          NewClientRect.bottom - NewClientRect.top != Window->rcClient.bottom - Window->rcClient.top)
+         WinPos.flags &= ~SWP_NOCLIENTSIZE;
+      RECTL_vSetEmptyRect(&valid_rects[0]);
+      RECTL_vSetEmptyRect(&valid_rects[1]);
+   }
+   else
+      WvrFlags = co_WinPosDoNCCALCSize(Window, &WinPos, &NewWindowRect, &NewClientRect, valid_rects);
 
 //   ERR("co_WinPosDoNCCALCSize returned 0x%x\n valid dest: %d %d %d %d\n valid src : %d %d %d %d\n", WvrFlags,
 //      valid_rects[0].left,valid_rects[0].top,valid_rects[0].right,valid_rects[0].bottom,
@@ -2001,7 +2044,7 @@ co_WinPosSetWindowPos(
       Window->head.pti->cVisWindows++;
       IntNotifyWinEvent(EVENT_OBJECT_SHOW, Window, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
    }
-   else
+   else if (!NoMessages)
    {
       IntCheckFullscreen(Window);
    }
@@ -2376,7 +2419,8 @@ co_WinPosSetWindowPos(
 
    TRACE("\tstatus hwnd %p flags = %04x\n", Window ? UserHMGetHandle(Window) : NULL, WinPos.flags & SWP_AGG_STATUSFLAGS);
 
-   if (((WinPos.flags & SWP_AGG_STATUSFLAGS) != SWP_AGG_NOPOSCHANGE)
+   if (!NoMessages &&
+       ((WinPos.flags & SWP_AGG_STATUSFLAGS) != SWP_AGG_NOPOSCHANGE)
             && !((flags & SWP_AGG_NOCLIENTCHANGE) && (flags & SWP_SHOWWINDOW)))
    {
       /* WM_WINDOWPOSCHANGED is sent even if SWP_NOSENDCHANGING is set
@@ -2389,6 +2433,11 @@ co_WinPosSetWindowPos(
       TRACE("WM_WINDOWPOSCHANGED hwnd %p Flags %04x\n",WinPos.hwnd,WinPos.flags);
       co_IntSendMessageNoWait(WinPos.hwnd, WM_WINDOWPOSCHANGED, 0, (LPARAM) &WinPos);
    }
+
+   /* The caller of the NoMessages mode sends the notifications below with
+      co_WinPosNoMessagesNotify once its own work is done: each can call back */
+   if (NoMessages)
+      return TRUE;
 
    if ( WinPos.flags & SWP_FRAMECHANGED  || WinPos.flags & SWP_STATECHANGED ||
       !(WinPos.flags & SWP_NOCLIENTSIZE) || !(WinPos.flags & SWP_NOCLIENTMOVE) )
@@ -2417,6 +2466,37 @@ co_WinPosSetWindowPos(
    }
 
    return TRUE;
+}
+
+/* The notifications co_WinPosSetWindowPosEx leaves out in its NoMessages mode.
+   Window is referenced by the caller; any of these can call back and destroy it */
+VOID FASTCALL
+co_WinPosNoMessagesNotify(PWND Window, BOOL PointerCrossed)
+{
+   ASSERT_REFS_CO(Window);
+
+#define WINDOW_ALIVE(w) (!((w)->state & WNDS_DESTROYED) && !((w)->state2 & WNDS2_INDESTROY))
+   if (WINDOW_ALIVE(Window))
+      IntCheckFullscreen(Window);
+
+   /* Raised by the calling thread, which did the change (it may not own the window) */
+   if (WINDOW_ALIVE(Window))
+      IntNotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, Window, OBJID_WINDOW, CHILDID_SELF, 0);
+
+   if (IS_IMM_MODE())
+      IntImeWindowPosChanged();
+
+   if (PointerCrossed)
+   {
+      /* Generate mouse move message */
+      MSG msg;
+      msg.message = WM_MOUSEMOVE;
+      msg.wParam = UserGetMouseButtonsState();
+      msg.lParam = MAKELPARAM(gpsi->ptCursor.x, gpsi->ptCursor.y);
+      msg.pt = gpsi->ptCursor;
+      co_MsqInsertMouseMessage(&msg, 0, 0, TRUE);
+   }
+#undef WINDOW_ALIVE
 }
 
 LRESULT FASTCALL
