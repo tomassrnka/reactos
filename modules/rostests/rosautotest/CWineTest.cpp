@@ -104,7 +104,8 @@ CWineTest::GetNextFile()
             /* Check for 'special' tests (e.g. "kmtest") or full test name ("ntdll_winetest") */
             if (Module.length() >= 4 && Module.substr(Module.length() - 4, 4) == L"test")
             {
-                m_SingleFile = true;
+                /* A pattern ("*test", "kernel32_*test") can match several programs */
+                m_SingleFile = (Module.find_first_of(L"*?") == wstring::npos);
 
                 /* Search for files with the pattern "modulename.exe" */
                 FindPath += Configuration.GetModule();
