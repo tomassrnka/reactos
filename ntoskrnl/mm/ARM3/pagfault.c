@@ -1754,26 +1754,6 @@ MiDispatchFault(IN ULONG FaultCode,
     return Status;
 }
 
-/* Special pool pages are never paged out: an invalid one is a guard page or a freed allocation.
-   Reads no page table entry, so it is safe for any address at any IRQL. */
-static
-VOID
-MiCheckSpecialPoolFault(
-    _In_ PVOID Address,
-    _In_ ULONG FaultCode,
-    _In_opt_ PVOID TrapInformation)
-{
-    if (!MmIsSpecialPoolAddress(Address)) return;
-
-    KeBugCheckEx(MiIsSpecialPoolGuardPage(Address) ?
-                     PAGE_FAULT_BEYOND_END_OF_ALLOCATION :
-                     PAGE_FAULT_IN_FREED_SPECIAL_POOL,
-                 (ULONG_PTR)Address,
-                 MI_IS_WRITE_ACCESS(FaultCode),
-                 TrapInformation ? KeGetTrapFramePc((PKTRAP_FRAME)TrapInformation) : 0,
-                 (ULONG_PTR)TrapInformation);
-}
-
 NTSTATUS
 NTAPI
 MmArmAccessFault(IN ULONG FaultCode,
@@ -1844,8 +1824,6 @@ MmArmAccessFault(IN ULONG FaultCode,
                 DbgPrint("MM:***R11 %p, R12 %p SP %p, LR %p\n", TrapFrame->R11, TrapFrame->R12, TrapFrame->Sp, TrapFrame->Lr);
 #endif
             }
-
-            MiCheckSpecialPoolFault(Address, FaultCode, TrapInformation);
 
             /* Tell the trap handler to fail */
             return STATUS_IN_PAGE_ERROR | 0x10000000;
@@ -2002,8 +1980,6 @@ _WARN("Session space stuff is not implemented yet!")
             /* Handle this as a user mode fault */
             goto UserFault;
         }
-
-        MiCheckSpecialPoolFault(Address, FaultCode, TrapInformation);
 
         /* Get the current thread */
         CurrentThread = PsGetCurrentThread();

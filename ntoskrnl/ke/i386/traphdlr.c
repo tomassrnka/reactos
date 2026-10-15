@@ -1388,6 +1388,9 @@ KiTrap0EHandler(IN PKTRAP_FRAME TrapFrame)
     /* Check if we came in with interrupts disabled */
     if (!(TrapFrame->EFlags & EFLAGS_INTERRUPT_MASK))
     {
+        /* A special pool fault names itself even here */
+        if (MmSpecialPoolEnabled) MmCheckSpecialPoolFault(TrapFrame->ErrCode, (PVOID)Cr2, TrapFrame);
+
         /* This is completely illegal, bugcheck the system */
         KeBugCheckWithTf(IRQL_NOT_LESS_OR_EQUAL,
                          Cr2,

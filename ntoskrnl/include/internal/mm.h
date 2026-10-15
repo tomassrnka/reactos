@@ -840,10 +840,14 @@ BOOLEAN
 NTAPI
 MiSpecialPoolConfigured(VOID);
 
-BOOLEAN
+extern BOOLEAN MmSpecialPoolEnabled;
+
+VOID
 NTAPI
-MiIsSpecialPoolGuardPage(
-    IN PVOID P);
+MmCheckSpecialPoolFault(
+    _In_ ULONG FaultCode,
+    _In_ PVOID Address,
+    _In_opt_ PVOID TrapInformation);
 
 BOOLEAN
 NTAPI
