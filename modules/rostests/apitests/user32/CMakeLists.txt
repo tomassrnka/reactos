@@ -16,6 +16,7 @@ list(APPEND SOURCE
     DpiFunctions.c
     DrawIconEx.c
     DrawText.c
+    EditInk.c
     desktop.c
     EmptyClipboard.c
     EnumDisplaySettings.c

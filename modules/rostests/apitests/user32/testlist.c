@@ -17,6 +17,7 @@ extern void func_DpiFunctions(void);
 extern void func_DpiProcess(void);
 extern void func_DrawIconEx(void);
 extern void func_DrawText(void);
+extern void func_EditInk(void);
 extern void func_desktop(void);
 extern void func_EmptyClipboard(void);
 extern void func_EnumDisplaySettings(void);
@@ -103,6 +104,7 @@ const struct test winetest_testlist[] =
     { "DpiProcess", func_DpiProcess },
     { "DrawIconEx", func_DrawIconEx },
     { "DrawText", func_DrawText },
+    { "EditInk", func_EditInk },
     { "desktop", func_desktop },
     { "EmptyClipboard", func_EmptyClipboard },
     { "EnumDisplaySettings", func_EnumDisplaySettings },
