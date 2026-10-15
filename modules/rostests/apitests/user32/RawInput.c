@@ -245,6 +245,8 @@ static UINT registered_count(void)
     return n;
 }
 
+static HANDLE spawn_child(const char *mode, const char *evReady, const char *evStop);
+
 static const UINT RAWMOUSE_TOTAL = sizeof(RAWINPUTHEADER) + sizeof(RAWMOUSE);
 static const UINT RAWKBD_TOTAL = sizeof(RAWINPUTHEADER) + sizeof(RAWKEYBOARD);
 
@@ -329,9 +331,13 @@ static void test_register_errors(void)
     SetLastError(0xdeadbeef);
     ok(!RegisterRawInputDevices(d, 1, 0), "size 0 succeeded\n");
     ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError());
-    SetLastError(0xdeadbeef);
-    ok(!RegisterRawInputDevices(d, 1, sizeof(d[0]) + 4), "size + 4 succeeded\n");
-    ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError());
+    /* under WOW64 the size of the 64-bit structure is accepted too (it reads the array as one) */
+    if (!g_wow64)
+    {
+        SetLastError(0xdeadbeef);
+        ok(!RegisterRawInputDevices(d, 1, sizeof(d[0]) + 4), "size + 4 succeeded\n");
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError());
+    }
     SetLastError(0xdeadbeef);
     ok(!RegisterRawInputDevices(d, 1, sizeof(d[0]) - 4), "size - 4 succeeded\n");
     ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError());
@@ -906,6 +912,11 @@ static BOOL running_on_reactos(void)
     return TRUE;
 }
 
+static BOOL windows8_or_later(void)
+{
+    return !running_on_reactos() && GetNTVersion() >= _WIN32_WINNT_WIN8;
+}
+
 struct attach_ctx
 {
     HANDLE ready, go1, ack1, go2, done;
@@ -1016,6 +1027,516 @@ static void test_attach_wake_bits(void)
     CloseHandle(c.ack1);
     CloseHandle(c.go2);
     CloseHandle(c.done);
+}
+
+#define TRYCALL(label, expr, wantret) \
+    do { \
+        DWORD code_ = 0, err_; \
+        UINT ret_ = 0xdead; \
+        SetLastError(0xdeadbeef); \
+        _SEH2_TRY { ret_ = (expr); } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { code_ = _SEH2_GetExceptionCode(); } _SEH2_END; \
+        err_ = GetLastError(); \
+        ok(code_ == 0, "%s: exception %lx\n", label, code_); \
+        ok(ret_ == (wantret) && err_ == ERROR_NOACCESS, "%s: ret %u error %lu\n", label, ret_, err_); \
+    } while (0)
+
+static void test_buffer_alignment_and_protection(void)
+{
+    BYTE *page = VirtualAlloc(NULL, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    BYTE *bad = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    RAWINPUTDEVICELIST list[8];
+    RAWINPUTDEVICE d[2];
+    BYTE tmp[256];
+    UINT n, size, ret;
+
+    ok(page && bad, "VirtualAlloc failed\n");
+    if (!page || !bad)
+        return;
+
+    /* Windows wants DWORD alignment, in 64-bit and in WOW64 processes alike */
+    ok(reg1(1, 2, 0, g_hwndA), "register failed: %lu\n", GetLastError());
+    pump(50);
+    mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
+    Sleep(50);
+    size = 1024;
+    SetLastError(0xdeadbeef);
+    ret = GetRawInputBuffer((PRAWINPUT)(page + 1), &size, sizeof(RAWINPUTHEADER));
+    ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "offset 1: ret %u error %lu\n", ret, GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = GetRawInputBuffer((PRAWINPUT)(page + 2), &size, sizeof(RAWINPUTHEADER));
+    ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "offset 2: ret %u error %lu\n", ret, GetLastError());
+    size = 1024;
+    ret = GetRawInputBuffer((PRAWINPUT)(page + 4), &size, sizeof(RAWINPUTHEADER));
+    ok(ret == 1, "offset 4: ret %u\n", ret);
+    ok(((PRAWINPUT)(page + 4))->header.dwType == RIM_TYPEMOUSE, "type %lu\n", ((PRAWINPUT)(page + 4))->header.dwType);
+    ok(registered_count() == 1, "got %u registrations\n", registered_count());
+    pump(100);
+    unreg_all();
+
+    /* output buffers and size pointers in protected memory fail cleanly */
+    d[0] = mkdev(1, 2, 0, g_hwndA);
+    d[1] = mkdev(1, 6, 0, g_hwndA);
+    ok(RegisterRawInputDevices(d, 2, sizeof(d[0])), "register failed: %lu\n", GetLastError());
+    n = 2;
+    TRYCALL("GetRegistered out buffer", GetRegisteredRawInputDevices((PRAWINPUTDEVICE)bad, &n, sizeof(RAWINPUTDEVICE)), (UINT)-1);
+    TRYCALL("GetRegistered count pointer", GetRegisteredRawInputDevices(NULL, (PUINT)bad, sizeof(RAWINPUTDEVICE)), (UINT)-1);
+    n = 8;
+    TRYCALL("DeviceList out buffer", GetRawInputDeviceList((PRAWINPUTDEVICELIST)bad, &n, sizeof(RAWINPUTDEVICELIST)), (UINT)-1);
+    TRYCALL("DeviceList count pointer", GetRawInputDeviceList(NULL, (PUINT)bad, sizeof(RAWINPUTDEVICELIST)), (UINT)-1);
+    n = 8;
+    GetRawInputDeviceList(list, &n, sizeof(RAWINPUTDEVICELIST));
+    size = 256;
+    TRYCALL("DeviceInfo out buffer", GetRawInputDeviceInfoW(list[0].hDevice, RIDI_DEVICENAME, bad, &size), (UINT)-1);
+    TRYCALL("DeviceInfo size pointer", GetRawInputDeviceInfoW(list[0].hDevice, RIDI_DEVICENAME, tmp, (PUINT)bad), (UINT)-1);
+    mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
+    Sleep(50);
+    size = 1024;
+    TRYCALL("GetRawInputBuffer out buffer", GetRawInputBuffer((PRAWINPUT)bad, &size, sizeof(RAWINPUTHEADER)), (UINT)-1);
+    TRYCALL("GetRawInputBuffer size pointer", GetRawInputBuffer((PRAWINPUT)tmp, (PUINT)bad, sizeof(RAWINPUTHEADER)), (UINT)-1);
+    size = 1024;
+    ret = GetRawInputBuffer((PRAWINPUT)tmp, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == 1, "the packet was lost by the faults: ret %u\n", ret);
+    pump(100);
+    unreg_all();
+    VirtualFree(page, 0, MEM_RELEASE);
+    VirtualFree(bad, 0, MEM_RELEASE);
+}
+
+static void test_stale_handles(void)
+{
+    MSG msg;
+    RAWINPUT ri;
+    UINT size, ret;
+    HRAWINPUT h1, h2, h3, h4;
+
+    ok(reg1(1, 2, 0, g_hwndA), "register failed: %lu\n", GetLastError());
+    pump(50);
+
+    mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
+    Sleep(50);
+    ok(PeekMessageW(&msg, g_hwndA, WM_INPUT, WM_INPUT, PM_NOREMOVE), "no WM_INPUT\n");
+    h1 = (HRAWINPUT)msg.lParam;
+    size = sizeof(ri);
+    ret = GetRawInputData(h1, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == RAWMOUSE_TOTAL, "handle of a peeked message: ret %u\n", ret);
+    ok(PeekMessageW(&msg, g_hwndA, WM_INPUT, WM_INPUT, PM_REMOVE), "no WM_INPUT\n");
+    ok((HRAWINPUT)msg.lParam == h1, "the handle changed\n");
+
+    /* the next packet is queued but not retrieved: the old handle still reads the old data */
+    mouse_event(MOUSEEVENTF_MOVE, 2, 0, 0, 0);
+    Sleep(50);
+    size = sizeof(ri);
+    ret = GetRawInputData(h1, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == RAWMOUSE_TOTAL && ri.data.mouse.lLastX == 1, "old handle: ret %u x %ld\n", ret, ri.data.mouse.lLastX);
+    ok(PeekMessageW(&msg, g_hwndA, WM_INPUT, WM_INPUT, PM_REMOVE), "no WM_INPUT\n");
+    h2 = (HRAWINPUT)msg.lParam;
+    ok(h2 != h1, "the new message has the old handle\n");
+    size = sizeof(ri);
+    SetLastError(0xdeadbeef);
+    ret = GetRawInputData(h1, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == (UINT)-1 && GetLastError() == ERROR_INVALID_HANDLE, "old handle after the next message: ret %u error %lu\n", ret, GetLastError());
+
+    /* a packet queued now must not take over the handle that was freed */
+    mouse_event(MOUSEEVENTF_MOVE, 3, 0, 0, 0);
+    Sleep(50);
+    size = sizeof(ri);
+    SetLastError(0xdeadbeef);
+    ret = GetRawInputData(h1, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == (UINT)-1 && GetLastError() == ERROR_INVALID_HANDLE, "freed handle reads the new packet: ret %u error %lu x %ld\n", ret, GetLastError(), ri.data.mouse.lLastX);
+    size = sizeof(ri);
+    ret = GetRawInputData(h2, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == RAWMOUSE_TOTAL && ri.data.mouse.lLastX == 2, "current handle: ret %u x %ld\n", ret, ri.data.mouse.lLastX);
+    ok(PeekMessageW(&msg, g_hwndA, WM_INPUT, WM_INPUT, PM_REMOVE), "no WM_INPUT\n");
+    h3 = (HRAWINPUT)msg.lParam;
+    ok(h3 != h2 && h3 != h1, "handles repeat: %p %p %p\n", h1, h2, h3);
+
+    /* any retrieved message ends the life of the handle */
+    PostMessageW(g_hwndA, WM_USER + 1, 0, 0);
+    mouse_event(MOUSEEVENTF_MOVE, 4, 0, 0, 0);
+    Sleep(50);
+    ok(PeekMessageW(&msg, g_hwndA, WM_INPUT, WM_INPUT, PM_REMOVE), "no WM_INPUT\n");
+    h4 = (HRAWINPUT)msg.lParam;
+    ok(PeekMessageW(&msg, g_hwndA, WM_USER + 1, WM_USER + 1, PM_REMOVE), "no WM_USER message\n");
+    size = sizeof(ri);
+    SetLastError(0xdeadbeef);
+    ret = GetRawInputData(h4, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == (UINT)-1 && GetLastError() == ERROR_INVALID_HANDLE, "handle after another message: ret %u error %lu\n", ret, GetLastError());
+    pump(100);
+    unreg_all();
+}
+
+static void inject_alt_numpad(void)
+{
+    keybd_event(VK_MENU, 0x38, 0, 0);
+    keybd_event(VK_NUMPAD6, 0x4D, 0, 0);
+    keybd_event(VK_NUMPAD6, 0x4D, KEYEVENTF_KEYUP, 0);
+    keybd_event(VK_NUMPAD5, 0x4C, 0, 0);
+    keybd_event(VK_NUMPAD5, 0x4C, KEYEVENTF_KEYUP, 0);
+}
+
+static void test_alt_numpad(void)
+{
+    int i, chars;
+
+    ok(reg1(1, 6, 0, NULL), "register failed: %lu\n", GetLastError());
+    log_reset();
+    inject_alt_numpad();
+    keybd_event(VK_MENU, 0x38, KEYEVENTF_KEYUP, 0);
+    pump(200);
+    ok(count_msg(WM_INPUT) == 6, "plain: got %d WM_INPUT messages\n", count_msg(WM_INPUT));
+    chars = count_msg(WM_CHAR);
+    ok(chars == 1, "plain: got %d WM_CHAR messages\n", chars);
+    if (chars)
+        ok(g_log[find_msg(WM_CHAR, 0)].wParam == 'A', "character %Ix\n", g_log[find_msg(WM_CHAR, 0)].wParam);
+    i = find_msg(WM_INPUT, 0);
+    if (i >= 0)
+        ok(kbd_event_at(i)->VKey == VK_MENU && kbd_event_at(i)->Message == WM_SYSKEYDOWN, "vkey %x message %x\n", kbd_event_at(i)->VKey, kbd_event_at(i)->Message);
+    unreg_all();
+
+    /* the character that Alt+Numpad composes is a legacy message too */
+    ok(reg1(1, 6, RIDEV_NOLEGACY, NULL), "register failed: %lu\n", GetLastError());
+    log_reset();
+    inject_alt_numpad();
+    pump(50);
+    ok(GetAsyncKeyState(VK_MENU) & 0x8000, "Alt is not down in the async state\n");
+    keybd_event(VK_MENU, 0x38, KEYEVENTF_KEYUP, 0);
+    pump(200);
+    ok(count_msg(WM_INPUT) == 6, "NOLEGACY: got %d WM_INPUT messages\n", count_msg(WM_INPUT));
+    ok(count_msg(WM_CHAR) == 0, "NOLEGACY: got %d WM_CHAR messages\n", count_msg(WM_CHAR));
+    ok(count_legacy() == 0, "NOLEGACY: got %d legacy messages\n", count_legacy());
+    ok(!(GetAsyncKeyState(VK_MENU) & 0x8000), "Alt is still down in the async state\n");
+    unreg_all();
+}
+
+static void test_altgr(void)
+{
+    HKL old = GetKeyboardLayout(0), de;
+    int i, down = -1, ctrl_raw = 0, q_raw = 0, menu_raw = 0;
+    BOOL win8plus = windows8_or_later();
+
+    de = LoadKeyboardLayoutW(L"00000407", KLF_ACTIVATE);
+    if (!de)
+    {
+        skip("no German layout\n");
+        return;
+    }
+    ActivateKeyboardLayout(de, 0);
+    pump(200);
+    if (LOWORD(GetKeyboardLayout(0)) != 0x0407)
+    {
+        skip("the German layout is not active\n");
+        goto done;
+    }
+
+    ok(reg1(1, 6, 0, NULL), "register failed: %lu\n", GetLastError());
+    log_reset();
+    keybd_event(VK_RMENU, 0x38, KEYEVENTF_EXTENDEDKEY, 0);
+    keybd_event('Q', 0x10, 0, 0);
+    keybd_event('Q', 0x10, KEYEVENTF_KEYUP, 0);
+    keybd_event(VK_RMENU, 0x38, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0);
+    pump(250);
+    ok(count_msg(WM_CHAR) == 1 && g_log[find_msg(WM_CHAR, 0)].wParam == '@', "got %d characters\n", count_msg(WM_CHAR));
+    for (i = 0; i < log_count(); i++)
+    {
+        LOGENT *e = &g_log[i];
+
+        if (e->message == WM_KEYDOWN && e->wParam == VK_CONTROL && down < 0)
+            down = i;
+        if (e->message != WM_INPUT)
+            continue;
+        if (e->data.data.keyboard.VKey == VK_CONTROL) ctrl_raw++;
+        if (e->data.data.keyboard.VKey == 'Q') q_raw++;
+        if (e->data.data.keyboard.VKey == VK_MENU) menu_raw++;
+        if (e->data.data.keyboard.VKey == 'Q')
+            ok(e->data.data.keyboard.Message == WM_SYSKEYDOWN || e->data.data.keyboard.Message == WM_SYSKEYUP,
+               "Q with AltGr: message %x\n", e->data.data.keyboard.Message);
+    }
+    ok(menu_raw == 2 && q_raw == 2, "got %d raw packets for AltGr and %d for Q\n", menu_raw, q_raw);
+    ok(down >= 0, "no legacy Ctrl for AltGr\n");
+    if (!win8plus)
+    {
+        /* the Ctrl that AltGr implies is a legacy message only, and it comes first */
+        ok(ctrl_raw == 0, "got %d raw packets for the implied Ctrl\n", ctrl_raw);
+        i = find_msg(WM_INPUT, 0);
+        ok(i > down && down >= 0, "the first raw packet (%d) is not after the legacy Ctrl (%d)\n", i, down);
+    }
+    unreg_all();
+done:
+    ActivateKeyboardLayout(old, 0);
+    UnloadKeyboardLayout(de);
+    pump(100);
+}
+
+static int g_deskCount;
+
+static LRESULT CALLBACK CountProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_INPUT)
+        g_deskCount++;
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/* child: a window on its own desktop (or the current one) with a registration; reports the WM_INPUT count */
+static int child_desk_main(const char *flavor, const char *evReady, const char *evStop)
+{
+    HANDLE hr = OpenEventA(EVENT_ALL_ACCESS, FALSE, evReady), hs = OpenEventA(EVENT_ALL_ACCESS, FALSE, evStop);
+    BOOL other = strstr(flavor, "other") != NULL;
+    DWORD flags = strstr(flavor, "ex") ? RIDEV_EXINPUTSINK : RIDEV_INPUTSINK;
+    WNDCLASSW wc;
+    RAWINPUTDEVICE d[2];
+    HDESK desk = NULL;
+    HWND hwnd;
+    MSG msg;
+    BOOL registered;
+
+    if (other)
+    {
+        desk = CreateDesktopW(L"RawInputTestDesktop", NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL);
+        if (!desk || !SetThreadDesktop(desk))
+            return 250;
+    }
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = CountProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"RawInputTestDeskWnd";
+    RegisterClassW(&wc);
+    hwnd = CreateWindowExW(0, wc.lpszClassName, L"rawdesk", WS_POPUP | WS_VISIBLE, 600, 400, 100, 100, NULL, NULL, wc.hInstance, NULL);
+    d[0] = mkdev(1, 2, flags, hwnd);
+    d[1] = mkdev(1, 6, flags, hwnd);
+    registered = RegisterRawInputDevices(d, 2, sizeof(d[0]));
+    if (!hwnd || !registered)
+        return 251;
+    SetEvent(hr);
+    for (;;)
+    {
+        DWORD r;
+
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+            DispatchMessageW(&msg);
+        r = MsgWaitForMultipleObjects(1, &hs, FALSE, 20000, QS_ALLINPUT);
+        if (r == WAIT_OBJECT_0 || r == WAIT_TIMEOUT)
+            break;
+    }
+    return g_deskCount > 200 ? 200 : g_deskCount;
+}
+
+static int run_desk_child(const char *flavor)
+{
+    char n1[64], n2[64];
+    HANDLE er, es, hp;
+    DWORD code = 255;
+
+    sprintf(n1, "RawInputDeskReady%lu", GetCurrentProcessId());
+    sprintf(n2, "RawInputDeskStop%lu", GetCurrentProcessId());
+    er = CreateEventA(NULL, TRUE, FALSE, n1);
+    es = CreateEventA(NULL, TRUE, FALSE, n2);
+    hp = spawn_child(flavor, n1, n2);
+    if (hp)
+    {
+        if (WaitForSingleObject(er, 10000) == WAIT_OBJECT_0)
+        {
+            pump(100);
+            mouse_event(MOUSEEVENTF_MOVE, 5, 3, 0, 0);
+            keybd_event('A', 0x1E, 0, 0);
+            keybd_event('A', 0x1E, KEYEVENTF_KEYUP, 0);
+            pump(300);
+            mouse_event(MOUSEEVENTF_MOVE, (DWORD)-5, (DWORD)-3, 0, 0);
+            pump(50);
+        }
+        SetEvent(es);
+        if (WaitForSingleObject(hp, 10000) != WAIT_OBJECT_0)
+            TerminateProcess(hp, 1);
+        GetExitCodeProcess(hp, &code);
+        CloseHandle(hp);
+    }
+    CloseHandle(er);
+    CloseHandle(es);
+    return (int)code;
+}
+
+static void test_other_desktop_sinks(void)
+{
+    int n;
+
+    /* a background process hears the input of its own desktop ... */
+    n = run_desk_child("deskexcontrol");
+    ok(n == 4, "EXINPUTSINK on the input desktop: %d packets\n", n);
+    n = run_desk_child("desksinkcontrol");
+    ok(n == 4, "INPUTSINK on the input desktop: %d packets\n", n);
+    /* ... and nothing of the keys typed on a desktop other than its own */
+    n = run_desk_child("deskexother");
+    ok(n == 0, "EXINPUTSINK on another desktop: %d packets\n", n);
+    n = run_desk_child("desksinkother");
+    ok(n == 0, "INPUTSINK on another desktop: %d packets\n", n);
+}
+
+struct hook_ctx
+{
+    HANDLE ready, cmd, ack, stop;
+    DWORD tidMain, tidB;
+    HWND hwnd;
+    volatile LONG op;
+    UINT result, bits;
+    BOOL attached;
+};
+
+static DWORD WINAPI HookThreadB(LPVOID arg)
+{
+    struct hook_ctx *c = arg;
+    BYTE buf[1024];
+    HANDLE h[2];
+
+    c->hwnd = make_window(700, 500);
+    c->attached = AttachThreadInput(GetCurrentThreadId(), c->tidMain, TRUE);
+    SetEvent(c->ready);
+    h[0] = c->cmd;
+    h[1] = c->stop;
+    for (;;)
+    {
+        /* only sent messages (the main thread's focus changes) are served: the packets must
+           stay queued until the test asks for them */
+        DWORD r = MsgWaitForMultipleObjects(2, h, FALSE, 20000, QS_SENDMESSAGE);
+        MSG msg;
+
+        if (r == WAIT_OBJECT_0)
+        {
+            if (c->op == 1)
+            {
+                UINT size = sizeof(buf);
+
+                c->result = GetRawInputBuffer((PRAWINPUT)buf, &size, sizeof(RAWINPUTHEADER));
+            }
+            else
+            {
+                c->bits = HIWORD(GetQueueStatus(QS_RAWINPUT)) & QS_RAWINPUT;
+            }
+            SetEvent(c->ack);
+        }
+        else if (r == WAIT_OBJECT_0 + 2)
+        {
+            PeekMessageW(&msg, NULL, WM_NULL, WM_NULL, PM_REMOVE | PM_QS_SENDMESSAGE);
+        }
+        else
+        {
+            break;
+        }
+    }
+    DestroyWindow(c->hwnd);
+    return 0;
+}
+
+static struct hook_ctx *g_hookCtx;
+static int g_hookCalls;
+
+static LRESULT CALLBACK DetachHook(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code >= 0 && !g_hookCalls++)
+        AttachThreadInput(g_hookCtx->tidB, g_hookCtx->tidMain, FALSE);
+    return CallNextHookEx(NULL, code, wParam, lParam);
+}
+
+static UINT ask_b(struct hook_ctx *c, LONG op)
+{
+    c->op = op;
+    SetEvent(c->cmd);
+    WaitForSingleObject(c->ack, 5000);
+    return op == 1 ? c->result : c->bits;
+}
+
+static void test_attached_threads_and_hooks(void)
+{
+    struct hook_ctx c;
+    HANDLE th;
+    HHOOK hook;
+    UINT n;
+    int i;
+
+    ZeroMemory(&c, sizeof(c));
+    c.ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    c.cmd = CreateEventW(NULL, FALSE, FALSE, NULL);
+    c.ack = CreateEventW(NULL, FALSE, FALSE, NULL);
+    c.stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    c.tidMain = GetCurrentThreadId();
+    th = CreateThread(NULL, 0, HookThreadB, &c, 0, &c.tidB);
+    WaitForSingleObject(c.ready, 5000);
+    pump(100);
+    click_at(150, 150);
+    ok(c.attached, "AttachThreadInput failed\n");
+    SetForegroundWindow(g_hwndA);
+    SetFocus(g_hwndA);
+    trace("focus %p active %p foreground %p window A %p\n", GetFocus(), GetActiveWindow(), GetForegroundWindow(), g_hwndA);
+    {
+        BOOL r_ = reg1(1, 2, RIDEV_INPUTSINK, c.hwnd);
+        DWORD e_ = GetLastError();
+
+        ok(r_, "register failed: %lu, window %p valid %d thread %lu (B %lu)\n", e_, c.hwnd, IsWindow(c.hwnd),
+           c.hwnd ? GetWindowThreadProcessId(c.hwnd, NULL) : 0, c.tidB);
+    }
+
+    /* the packets belong to the thread that owns the target window, not to the one that reads */
+    for (i = 0; i < 3; i++)
+        mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
+    Sleep(100);
+    if (running_on_reactos())
+    {
+        UINT size = 1024;
+        BYTE buf[1024];
+
+        n = GetRawInputBuffer((PRAWINPUT)buf, &size, sizeof(RAWINPUTHEADER));
+        ok(n == 0, "the other thread's packets were read: %u\n", n);
+        trace("main read %u\n", n);
+        ok(ask_b(&c, 1) == 3, "the owner read %u packets\n", c.result);
+        ok(ask_b(&c, 2) == 0, "QS_RAWINPUT left on the owner: %x\n", c.bits);
+    }
+    else
+    {
+        ask_b(&c, 1);
+        trace("owner read %u packets\n", c.result);
+    }
+    pump(100);
+
+    /* a hook that detaches the owner while the reader walks the shared queue */
+    g_hookCtx = &c;
+    g_hookCalls = 0;
+    hook = SetWindowsHookExW(WH_KEYBOARD, DetachHook, NULL, GetCurrentThreadId());
+    ok(hook != NULL, "SetWindowsHookEx failed: %lu\n", GetLastError());
+    log_reset();
+    keybd_event('A', 0x1E, 0, 0);
+    keybd_event('A', 0x1E, KEYEVENTF_KEYUP, 0);
+    for (i = 0; i < 3; i++)
+        mouse_event(MOUSEEVENTF_MOVE, (DWORD)-1, 0, 0, 0);
+    Sleep(100);
+    pump(300);
+    trace("keys %d raw %d hook calls %d\n", count_msg(WM_KEYDOWN), count_msg(WM_INPUT), g_hookCalls);
+    /* Windows does not run the hook of the thread in this setup (the keys do not reach it); the
+       point on ReactOS is that the detach inside the hook is safe */
+    ok(g_hookCalls > 0 || !running_on_reactos(), "the hook was not called\n");
+    trace("hook calls %d\n", g_hookCalls);
+    if (hook)
+        UnhookWindowsHookEx(hook);
+    pump(100);
+    ok(!(HIWORD(GetQueueStatus(QS_RAWINPUT)) & QS_RAWINPUT), "QS_RAWINPUT left on the reader\n");
+    ask_b(&c, 2);
+    ok(!c.bits || !running_on_reactos(), "QS_RAWINPUT left on the detached thread: %x\n", c.bits);
+    unreg_all();
+
+    /* the queue works on after it */
+    ok(reg1(1, 2, 0, g_hwndA), "register failed: %lu\n", GetLastError());
+    log_reset();
+    mouse_event(MOUSEEVENTF_MOVE, 2, 0, 0, 0);
+    pump(150);
+    ok(count_msg(WM_INPUT) == 1 || !running_on_reactos(), "got %d WM_INPUT messages after the detach\n", count_msg(WM_INPUT));
+    mouse_event(MOUSEEVENTF_MOVE, (DWORD)-2, 0, 0, 0);
+    pump(100);
+    unreg_all();
+
+    SetEvent(c.stop);
+    WaitForSingleObject(th, 5000);
+    CloseHandle(th);
+    CloseHandle(c.ready);
+    CloseHandle(c.cmd);
+    CloseHandle(c.ack);
+    CloseHandle(c.stop);
 }
 
 static int child_main(const char *evReady, const char *evStop, BOOL registers)
@@ -1416,6 +1937,11 @@ START_TEST(RawInput)
         child_main(argv[3], argv[4], FALSE);
         return;
     }
+    if (argc >= 5 && !strncmp(argv[2], "desk", 4))
+    {
+        ExitProcess(child_desk_main(argv[2], argv[3], argv[4]));
+        return;
+    }
     if (argc >= 5 && !strcmp(argv[2], "reg"))
     {
         child_main(argv[3], argv[4], TRUE);
@@ -1456,7 +1982,14 @@ START_TEST(RawInput)
     click_at(150, 150);
     test_attach_wake_bits();
     click_at(150, 150);
+    test_buffer_alignment_and_protection();
+    test_stale_handles();
+    test_alt_numpad();
+    test_altgr();
+    test_attached_threads_and_hooks();
+    click_at(150, 150);
     test_background();
+    test_other_desktop_sinks();
 
     unreg_all();
     DestroyWindow(g_hwndA);
