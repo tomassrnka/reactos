@@ -335,7 +335,7 @@ START_TEST(bind)
     TestEphemeralReuse(SOCK_STREAM);
     TestEphemeralReuse(SOCK_DGRAM);
     TestEphemeralWrap(SOCK_DGRAM, 33000);
-    TestEphemeralWrap(SOCK_STREAM, 5000);
+    TestEphemeralWrap(SOCK_STREAM, 17000);
     /* TODO: test IPv6 */
 
     Error = WSACleanup();

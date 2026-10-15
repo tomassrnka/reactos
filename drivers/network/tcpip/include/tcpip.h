@@ -166,9 +166,13 @@ extern KSPIN_LOCK AddressFileListLock;
 extern NDIS_HANDLE GlobalPacketPool;
 extern NDIS_HANDLE GlobalBufferPool;
 extern KSPIN_LOCK EntityListLock;
+/* Starting size of the entity list; it grows with the number of address files */
+#define TDI_ENTITIES_INITIAL 64
+
 extern TDIEntityInfo *EntityList;
 extern ULONG EntityCount;
 extern ULONG EntityMax;
+extern PUCHAR EntityInstanceUsed;
 
 extern NTSTATUS TiGetProtocolNumber( PUNICODE_STRING FileName,
 				     PULONG Protocol );

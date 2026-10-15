@@ -88,6 +88,13 @@ ULONG AllocateAnyPort( PPORT_SET PortSet ) {
    new socket does not take the port a closed one used a moment ago (a connect
    to that closed port would connect the socket to itself) */
 ULONG AllocatePortFromRange( PPORT_SET PortSet, ULONG Lowest, ULONG Highest ) {
+    return AllocatePortFromRangeUnless( PortSet, Lowest, Highest, NULL );
+}
+
+/* As AllocatePortFromRange, but also skip the ports InUse (called with the
+   port lock held, port in host order) reports as taken */
+ULONG AllocatePortFromRangeUnless( PPORT_SET PortSet, ULONG Lowest, ULONG Highest,
+                                   PPORT_IN_USE_ROUTINE InUse ) {
     ULONG Port, Start, Count, i;
     KIRQL OldIrql;
 
@@ -108,7 +115,8 @@ ULONG AllocatePortFromRange( PPORT_SET PortSet, ULONG Lowest, ULONG Highest ) {
         Start = Lowest;
     for (i = 0; i < Count; i++) {
         Port = Lowest + (Start - Lowest + i) % Count;
-        if (RtlAreBitsClear( &PortSet->ProtoBitmap, Port - PortSet->StartingPort, 1 )) {
+        if (RtlAreBitsClear( &PortSet->ProtoBitmap, Port - PortSet->StartingPort, 1 ) &&
+            (!InUse || !InUse( Port ))) {
             RtlSetBits( &PortSet->ProtoBitmap, Port - PortSet->StartingPort, 1 );
             PortSet->NextPort = Port + 1;
             KeReleaseSpinLock( &PortSet->Lock, OldIrql );

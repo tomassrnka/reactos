@@ -159,13 +159,22 @@ TDI_STATUS SetConnectionInfo(TDIObjectID *ID,
                              UINT BufferSize);
 
 /* Insert and remove entities */
-VOID InsertTDIInterfaceEntity( PIP_INTERFACE Interface );
+NTSTATUS InsertTDIInterfaceEntity( PIP_INTERFACE Interface );
 
 VOID RemoveTDIInterfaceEntity( PIP_INTERFACE Interface );
 
-VOID AddEntity(ULONG EntityType,
-               PVOID Context,
-               ULONG Flags);
+typedef struct _TDI_ENTITY_ADD {
+    ULONG EntityType;
+    PVOID Context;
+    ULONG Flags;
+} TDI_ENTITY_ADD;
+
+NTSTATUS AddEntities(const TDI_ENTITY_ADD *Entries,
+                     ULONG Count);
+
+NTSTATUS AddEntity(ULONG EntityType,
+                   PVOID Context,
+                   ULONG Flags);
 
 VOID RemoveEntityByContext(PVOID Context);
 
