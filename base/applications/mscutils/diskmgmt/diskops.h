@@ -80,6 +80,12 @@ typedef struct _DM_DISK_ID
 typedef BOOL (*DM_FAULT_FN)(ULONG Point, ULONG Disk, PVOID Data);
 #define DM_FAULT_LAYOUT_WRITE   1
 #define DM_FAULT_DISK_CREATE    2
+/* The creation of a table is not made and reports success, as a driver that does not write would. */
+#define DM_FAULT_DISK_CREATE_SILENT 3
+/* A disk number is about to be opened; Data points at the number, which the hook may change (to let the number lead to
+ * another disk). OPEN_RAW is the handle that goes to the disk and not to the cache, OPEN_DISK every other handle. */
+#define DM_FAULT_OPEN_DISK      4
+#define DM_FAULT_OPEN_RAW       5
 VOID DmSetFaultHook(DM_FAULT_FN Hook);
 
 /* ---- file systems ---- */

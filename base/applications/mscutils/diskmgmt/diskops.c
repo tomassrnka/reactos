@@ -66,6 +66,17 @@ DmSetFaultHook(DM_FAULT_FN Hook)
     g_Fault = Hook;
 }
 
+/* The apitest may let a disk number lead to another disk, to see that no operation trusts a number twice. */
+static ULONG
+DmMapDiskNumber(ULONG Point, ULONG Disk)
+{
+    ULONG Mapped = Disk;
+
+    if (g_Fault)
+        g_Fault(Point, Disk, &Mapped);
+    return Mapped;
+}
+
 /* ------------------------------------------------------------------ file systems */
 
 BOOL
@@ -114,7 +125,7 @@ DmOpenDiskHandle(ULONG Disk, DWORD Access)
 {
     WCHAR Path[64];
 
-    StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\\\.\\PhysicalDrive%u", Disk);
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\\\.\\PhysicalDrive%u", DmMapDiskNumber(DM_FAULT_OPEN_DISK, Disk));
     return CreateFileW(Path, Access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
 }
 
@@ -158,26 +169,30 @@ DmUnlockDisk(HANDLE Lock)
     }
 }
 
+/* The size and the sector size the driver reports for the device behind a handle. */
+static DWORD
+DmGeometryOf(HANDLE Device, PULONGLONG Length, PULONG SectorSize)
+{
+    union { DISK_GEOMETRY_EX Geo; BYTE Raw[1024]; } Geometry;
+
+    ZeroMemory(&Geometry, sizeof(Geometry));
+    if (!DmIoctl(Device, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0, &Geometry, sizeof(Geometry), NULL))
+        return GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+    *Length = (ULONGLONG)Geometry.Geo.DiskSize.QuadPart;
+    *SectorSize = Geometry.Geo.Geometry.BytesPerSector;
+    return ERROR_SUCCESS;
+}
+
 /* The size and the sector size the driver reports for the disk. */
 static DWORD
 DmReadGeometry(ULONG Disk, PULONGLONG Length, PULONG SectorSize)
 {
     HANDLE Device = DmOpenDiskHandle(Disk, GENERIC_READ);
-    union { DISK_GEOMETRY_EX Geo; BYTE Raw[1024]; } Geometry;
-    DWORD Error = ERROR_SUCCESS;
+    DWORD Error;
 
     if (Device == INVALID_HANDLE_VALUE)
         return GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
-    ZeroMemory(&Geometry, sizeof(Geometry));
-    if (DmIoctl(Device, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0, &Geometry, sizeof(Geometry), NULL))
-    {
-        *Length = (ULONGLONG)Geometry.Geo.DiskSize.QuadPart;
-        *SectorSize = Geometry.Geo.Geometry.BytesPerSector;
-    }
-    else
-    {
-        Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
-    }
+    Error = DmGeometryOf(Device, Length, SectorSize);
     CloseHandle(Device);
     return Error;
 }
@@ -383,7 +398,31 @@ DmSameLayout(const DL_LAYOUT *First, const DL_LAYOUT *Second)
         return FALSE;
     if (First->Style == DM_STYLE_GPT && memcmp(&First->DiskId, &Second->DiskId, sizeof(GUID)) != 0)
         return FALSE;
-    return DmLayoutsAgree(First, Second) && DmLayoutsAgree(Second, First);
+    if (!DmLayoutsAgree(First, Second) || !DmLayoutsAgree(Second, First))
+        return FALSE;
+    if (First->Style == DM_STYLE_GPT)
+    {
+        ULONG i, j;
+
+        /* the attributes and the name of a partition belong to the table as much as its place: a write of the old ones
+         * would put them back */
+        for (i = 0; i < First->Count; i++)
+        {
+            const DL_ENTRY *F = &First->Entry[i];
+
+            for (j = 0; j < Second->Count; j++)
+            {
+                const DL_ENTRY *S = &Second->Entry[j];
+
+                if (F->Offset != S->Offset || F->Length != S->Length || memcmp(&F->GptId, &S->GptId, sizeof(GUID)) != 0)
+                    continue;
+                if (F->GptAttributes != S->GptAttributes || wcsncmp(F->GptName, S->GptName, ARRAYSIZE(F->GptName)) != 0)
+                    return FALSE;
+                break;
+            }
+        }
+    }
+    return TRUE;
 }
 
 /* Reads the disk again, up to five times (a disk may take a moment to show its table), until it holds Wanted. */
@@ -505,7 +544,7 @@ DmOpenRawHandle(ULONG Disk, DWORD Access)
 {
     WCHAR Path[64];
 
-    StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\\\.\\PhysicalDrive%u", Disk);
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\\\.\\PhysicalDrive%u", DmMapDiskNumber(DM_FAULT_OPEN_RAW, Disk));
     return CreateFileW(Path, Access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
                        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
 }
@@ -534,13 +573,13 @@ DmRawFree(PDM_RAW_BACKUP Backup)
     ZeroMemory(Backup, sizeof(*Backup));
 }
 
+/* Reads the kept sectors of the device behind Device into Backup (its buffers are allocated here). */
 static DWORD
-DmRawSave(ULONG Disk, PDM_RAW_BACKUP Backup)
+DmRawSave(HANDLE Device, PDM_RAW_BACKUP Backup)
 {
-    HANDLE Device;
     ULONGLONG Length = 0;
     ULONG SectorSize = 0;
-    DWORD Error = DmReadGeometry(Disk, &Length, &SectorSize);
+    DWORD Error = DmGeometryOf(Device, &Length, &SectorSize);
 
     ZeroMemory(Backup, sizeof(*Backup));
     if (Error != ERROR_SUCCESS)
@@ -558,35 +597,64 @@ DmRawSave(ULONG Disk, PDM_RAW_BACKUP Backup)
         DmRawFree(Backup);
         return ERROR_NOT_ENOUGH_MEMORY;
     }
-    Device = DmOpenRawHandle(Disk, GENERIC_READ);
-    if (Device == INVALID_HANDLE_VALUE)
-    {
-        Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
-        DmRawFree(Backup);
-        return Error;
-    }
     if (!DmRawTransfer(Device, 0, Backup->Head, Backup->HeadBytes, FALSE) ||
         !DmRawTransfer(Device, Backup->TailOffset, Backup->Tail, Backup->TailBytes, FALSE))
     {
         Error = GetLastError() ? GetLastError() : ERROR_READ_FAULT;
-        CloseHandle(Device);
         DmRawFree(Backup);
         return Error;
     }
-    CloseHandle(Device);
     return ERROR_SUCCESS;
 }
 
-/* Writes the kept sectors back and reads them again to see that the disk holds them. */
-static BOOL
-DmRawRestore(ULONG Disk, const DM_RAW_BACKUP *Backup)
+/* DM_ERR_CHANGED unless the number still leads to the device that Device is: the size and the kept sectors read through the
+ * handle and through a fresh open of the number are the same. A number is only a name; the operations that write raw sectors
+ * keep their handle and trust it, so that a disk that comes and goes cannot get the sectors of another. */
+static DWORD
+DmSameDevice(HANDLE Device, ULONG Disk)
 {
-    HANDLE Device = DmOpenRawHandle(Disk, GENERIC_READ | GENERIC_WRITE);
+    DM_RAW_BACKUP Mine, Theirs;
+    ULONGLONG Length = 0, OtherLength = 0;
+    ULONG SectorSize = 0, OtherSector = 0;
+    HANDLE Other;
+    DWORD Error = DmGeometryOf(Device, &Length, &SectorSize);
+
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    Error = DmReadGeometry(Disk, &OtherLength, &OtherSector);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Length != OtherLength || SectorSize != OtherSector)
+        return DM_ERR_CHANGED;
+    Error = DmRawSave(Device, &Mine);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    Other = DmOpenRawHandle(Disk, GENERIC_READ);
+    if (Other == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+        DmRawFree(&Mine);
+        return Error;
+    }
+    Error = DmRawSave(Other, &Theirs);
+    CloseHandle(Other);
+    if (Error == ERROR_SUCCESS)
+    {
+        if (memcmp(Mine.Head, Theirs.Head, Mine.HeadBytes) != 0 || memcmp(Mine.Tail, Theirs.Tail, Mine.TailBytes) != 0)
+            Error = DM_ERR_CHANGED;
+        DmRawFree(&Theirs);
+    }
+    DmRawFree(&Mine);
+    return Error;
+}
+
+/* Writes the kept sectors back through the handle they were read from and reads them again to see that the device holds them. */
+static BOOL
+DmRawRestore(HANDLE Device, const DM_RAW_BACKUP *Backup)
+{
     PBYTE Head, Tail;
     BOOL Ok = FALSE;
 
-    if (Device == INVALID_HANDLE_VALUE)
-        return FALSE;
     Head = VirtualAlloc(NULL, Backup->HeadBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     Tail = VirtualAlloc(NULL, Backup->TailBytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (Head && Tail &&
@@ -602,15 +670,16 @@ DmRawRestore(ULONG Disk, const DM_RAW_BACKUP *Backup)
         VirtualFree(Head, 0, MEM_RELEASE);
     if (Tail)
         VirtualFree(Tail, 0, MEM_RELEASE);
-    CloseHandle(Device);
     return Ok;
 }
 
-/* TRUE when the disk holds an empty table of the style that was asked for */
+/* TRUE when the disk holds the empty table that was just written: the style asked for, no partition but a reserved one, and
+ * the signature or the disk id that was put in it (a driver that reports success without writing leaves the old ones). */
 static BOOL
-DmHoldsEmptyTable(ULONG Disk, DM_STYLE Style)
+DmHoldsNewTable(ULONG Disk, const CREATE_DISK *Created)
 {
     PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
+    DM_STYLE Style = Created->PartitionStyle == PARTITION_STYLE_GPT ? DM_STYLE_GPT : DM_STYLE_MBR;
     BOOL Ok = FALSE;
     ULONG Try, i;
 
@@ -626,6 +695,10 @@ DmHoldsEmptyTable(ULONG Disk, DM_STYLE Style)
             for (i = 0; i < Layout->Count; i++)
                 if (Style == DM_STYLE_MBR || memcmp(&Layout->Entry[i].GptType, &DlGuidReserved, sizeof(GUID)) != 0)
                     Ok = FALSE;
+            if (Style == DM_STYLE_MBR && Layout->Signature != Created->Mbr.Signature)
+                Ok = FALSE;
+            if (Style == DM_STYLE_GPT && memcmp(&Layout->DiskId, &Created->Gpt.DiskId, sizeof(GUID)) != 0)
+                Ok = FALSE;
         }
     }
     HeapFree(GetProcessHeap(), 0, Layout);
@@ -634,7 +707,9 @@ DmHoldsEmptyTable(ULONG Disk, DM_STYLE Style)
 
 /* Writes a new, empty table. It never replaces a table that lists partitions. The table is written by the driver in several
  * steps (for a GPT disk the protective boot record first), so the sectors it touches are kept first, the disk is read again
- * afterwards, and a table that is not what was asked for is replaced by what was there. */
+ * afterwards, and a table that is not what was asked for is replaced by what was there. One handle goes through the whole
+ * operation, the keeping of the sectors, the creation and the putting back, and the number is checked against it before the
+ * first write: a number that leads to another disk later cannot send the sectors of this one there. */
 DWORD
 DmInitializeDisk(ULONG Disk, DM_STYLE Style, const DM_DISK_ID *Id)
 {
@@ -654,9 +729,17 @@ DmInitializeDisk(ULONG Disk, DM_STYLE Style, const DM_DISK_ID *Id)
         Error = DmCheckDiskEmpty(Disk);
     if (Error != ERROR_SUCCESS)
         goto Unlock;
-    Error = DmRawSave(Disk, &Backup);
-    if (Error != ERROR_SUCCESS)
+    Device = DmOpenRawHandle(Disk, GENERIC_READ | GENERIC_WRITE);
+    if (Device == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
         goto Unlock;
+    }
+    Error = DmSameDevice(Device, Disk);
+    if (Error == ERROR_SUCCESS)
+        Error = DmRawSave(Device, &Backup);
+    if (Error != ERROR_SUCCESS)
+        goto CloseDevice;
 
     ZeroMemory(&Create, sizeof(Create));
     DmNewGuid(&Guid);
@@ -671,40 +754,28 @@ DmInitializeDisk(ULONG Disk, DM_STYLE Style, const DM_DISK_ID *Id)
         Create.Gpt.DiskId = Guid;
         Create.Gpt.MaxPartitionCount = 128;
     }
-    Device = DmOpenDiskHandle(Disk, GENERIC_READ | GENERIC_WRITE);
-    if (Device == INVALID_HANDLE_VALUE)
-    {
-        Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
-        DmRawFree(&Backup);
-        goto Unlock;
-    }
     if (g_Fault && g_Fault(DM_FAULT_DISK_CREATE, Disk, NULL))
         Error = ERROR_WRITE_FAULT;
+    else if (g_Fault && g_Fault(DM_FAULT_DISK_CREATE_SILENT, Disk, NULL))
+        Error = ERROR_SUCCESS;
     else if (!DmIoctl(Device, IOCTL_DISK_CREATE_DISK, &Create, sizeof(Create), NULL, 0, NULL))
         Error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
     else
         DmIoctl(Device, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, NULL);
-    CloseHandle(Device);
 
-    if (Error == ERROR_SUCCESS && !DmHoldsEmptyTable(Disk, Style))
+    if (Error == ERROR_SUCCESS && !DmHoldsNewTable(Disk, &Create))
         Error = DM_ERR_VERIFY_FAILED;
     if (Error != ERROR_SUCCESS)
     {
         /* the disk may hold half a table: put back what was there, and say so when that does not work */
-        if (!DmRawRestore(Disk, &Backup))
+        if (!DmRawRestore(Device, &Backup))
             Error = DM_ERR_RESTORE_FAILED;
         else
-        {
-            HANDLE Again = DmOpenDiskHandle(Disk, GENERIC_READ | GENERIC_WRITE);
-
-            if (Again != INVALID_HANDLE_VALUE)
-            {
-                DmIoctl(Again, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, NULL);
-                CloseHandle(Again);
-            }
-        }
+            DmIoctl(Device, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, NULL);
     }
     DmRawFree(&Backup);
+CloseDevice:
+    CloseHandle(Device);
 Unlock:
     DmUnlockDisk(Lock);
     return Error;

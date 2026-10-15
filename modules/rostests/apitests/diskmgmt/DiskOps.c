@@ -20,6 +20,8 @@
 #define MiB (1024ULL * 1024)
 
 static ULONG g_Disk;
+static ULONG g_Disk2;   /* a second scratch disk (DISKMGMT_TEST_DISK2), 0 when there is none: the swapped-disk tests need it */
+static BOOL g_HaveDisk2;
 static BOOL g_Keep;     /* leave the partitions and the files, so that the disk image can be checked offline */
 
 static PDL_LAYOUT
@@ -270,6 +272,141 @@ TrashingHook(ULONG Point, ULONG Disk, PVOID Data)
 }
 
 /* The disk is an empty MBR disk of the test geometry; it is one again when this returns. */
+/* Sectors of any disk as they are on it; Offset counts from the start, or from the end when Tail is set. */
+static BOOL
+ReadRawOf(ULONG Disk, BOOL Tail, PBYTE Buffer, ULONG Bytes)
+{
+    WCHAR Path[64];
+    HANDLE Device;
+    DWORD Done = 0;
+    GET_LENGTH_INFORMATION Length;
+    LARGE_INTEGER Position;
+    BOOL Ok = FALSE;
+
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"\\\\.\\PhysicalDrive%lu", Disk);
+    Device = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
+    if (Device == INVALID_HANDLE_VALUE)
+        return FALSE;
+    Position.QuadPart = 0;
+    if (!Tail || DeviceIoControl(Device, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &Length, sizeof(Length), &Done, NULL))
+    {
+        if (Tail)
+            Position.QuadPart = Length.Length.QuadPart - Bytes;
+        Ok = SetFilePointerEx(Device, Position, NULL, FILE_BEGIN) && ReadFile(Device, Buffer, Bytes, &Done, NULL) && Done == Bytes;
+    }
+    CloseHandle(Device);
+    return Ok;
+}
+
+#define RAW_TAIL_BYTES (33 * 512)
+
+static BOOL g_SwapNow;          /* every handle for g_Disk goes to g_Disk2 from now on */
+static BOOL g_SwapFirstRaw;     /* only the first raw handle for g_Disk goes to g_Disk2 */
+static LONG g_RawOpens;
+
+/* The creation of a table fails and from then on the number of the disk leads to the other disk (or the first raw open already
+ * leads there): what an operation does with a number it used before is seen on the other disk. */
+static BOOL
+SwapHook(ULONG Point, ULONG Disk, PVOID Data)
+{
+    if (Point == DM_FAULT_DISK_CREATE)
+    {
+        g_SwapNow = !g_SwapFirstRaw;
+        return TRUE;
+    }
+    if ((Point == DM_FAULT_OPEN_DISK || Point == DM_FAULT_OPEN_RAW) && Disk == g_Disk && *(PULONG)Data == g_Disk)
+    {
+        if (g_SwapFirstRaw)
+        {
+            if (Point == DM_FAULT_OPEN_RAW && InterlockedIncrement(&g_RawOpens) == 1)
+                *(PULONG)Data = g_Disk2;
+        }
+        else if (g_SwapNow)
+        {
+            *(PULONG)Data = g_Disk2;
+        }
+    }
+    return FALSE;
+}
+
+/* a driver that reports success for a table it did not write */
+static BOOL
+SilentHook(ULONG Point, ULONG Disk, PVOID Data)
+{
+    return Point == DM_FAULT_DISK_CREATE_SILENT;
+}
+
+static VOID
+Test_Initialize(const DM_DISK_ID *Right)
+{
+    DM_DISK_ID Now;
+
+    /* the signature that was put into the table is read back: a table that is still the old one is no success, even when it is
+     * empty and of the style that was asked for */
+    DmSetFaultHook(SilentHook);
+    ok_int(DmInitializeDisk(g_Disk, DM_STYLE_MBR, Right), DM_ERR_VERIFY_FAILED);
+    DmSetFaultHook(NULL);
+    GetId(&Now);
+    ok(memcmp(&Now, Right, sizeof(*Right)) == 0, "the disk is not the same disk after the table that was not written\n");
+
+    if (!g_HaveDisk2)
+    {
+        skip("DISKMGMT_TEST_DISK2 names no second scratch disk: the swapped-disk tests are not run\n");
+        return;
+    }
+    {
+        PBYTE A1 = VirtualAlloc(NULL, RAW_HEAD_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        PBYTE A2 = VirtualAlloc(NULL, RAW_HEAD_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        PBYTE BH1 = VirtualAlloc(NULL, RAW_HEAD_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        PBYTE BH2 = VirtualAlloc(NULL, RAW_HEAD_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        PBYTE BT1 = VirtualAlloc(NULL, RAW_TAIL_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        PBYTE BT2 = VirtualAlloc(NULL, RAW_TAIL_BYTES, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+        if (!A1 || !A2 || !BH1 || !BH2 || !BT1 || !BT2 ||
+            !ReadRawOf(g_Disk, FALSE, A1, RAW_HEAD_BYTES) || !ReadRawOf(g_Disk2, FALSE, BH1, RAW_HEAD_BYTES) ||
+            !ReadRawOf(g_Disk2, TRUE, BT1, RAW_TAIL_BYTES))
+        {
+            skip("the sectors of the two disks cannot be read\n");
+        }
+        else
+        {
+            /* the creation fails and the number then leads to the other disk: the sectors that were kept go back to the disk
+             * they came from, and the other disk is not written */
+            g_SwapNow = FALSE;
+            g_SwapFirstRaw = FALSE;
+            DmSetFaultHook(SwapHook);
+            ok_int(DmInitializeDisk(g_Disk, DM_STYLE_GPT, Right), ERROR_WRITE_FAULT);
+            DmSetFaultHook(NULL);
+            g_SwapNow = FALSE;
+            ok(ReadRawOf(g_Disk, FALSE, A2, RAW_HEAD_BYTES) && memcmp(A1, A2, RAW_HEAD_BYTES) == 0,
+               "the first sectors of the disk are not as they were\n");
+            ok(ReadRawOf(g_Disk2, FALSE, BH2, RAW_HEAD_BYTES) && memcmp(BH1, BH2, RAW_HEAD_BYTES) == 0,
+               "the rollback wrote the first sectors of the other disk\n");
+            ok(ReadRawOf(g_Disk2, TRUE, BT2, RAW_TAIL_BYTES) && memcmp(BT1, BT2, RAW_TAIL_BYTES) == 0,
+               "the rollback wrote the last sectors of the other disk\n");
+
+            /* the number leads to the other disk already when the handle is opened: nothing is written to either disk */
+            g_SwapFirstRaw = TRUE;
+            g_RawOpens = 0;
+            DmSetFaultHook(SwapHook);
+            ok_int(DmInitializeDisk(g_Disk, DM_STYLE_GPT, Right), DM_ERR_CHANGED);
+            DmSetFaultHook(NULL);
+            g_SwapFirstRaw = FALSE;
+            ok(ReadRawOf(g_Disk, FALSE, A2, RAW_HEAD_BYTES) && memcmp(A1, A2, RAW_HEAD_BYTES) == 0,
+               "the first sectors of the disk changed after the refused operation\n");
+            ok(ReadRawOf(g_Disk2, FALSE, BH2, RAW_HEAD_BYTES) && memcmp(BH1, BH2, RAW_HEAD_BYTES) == 0 &&
+               ReadRawOf(g_Disk2, TRUE, BT2, RAW_TAIL_BYTES) && memcmp(BT1, BT2, RAW_TAIL_BYTES) == 0,
+               "the other disk changed after the refused operation\n");
+        }
+        if (A1) VirtualFree(A1, 0, MEM_RELEASE);
+        if (A2) VirtualFree(A2, 0, MEM_RELEASE);
+        if (BH1) VirtualFree(BH1, 0, MEM_RELEASE);
+        if (BH2) VirtualFree(BH2, 0, MEM_RELEASE);
+        if (BT1) VirtualFree(BT1, 0, MEM_RELEASE);
+        if (BT2) VirtualFree(BT2, 0, MEM_RELEASE);
+    }
+}
+
 static VOID
 Test_Safety(VOID)
 {
@@ -414,6 +551,7 @@ Test_Safety(VOID)
         ok_int(Style, DM_STYLE_MBR);
         GetId(&Wrong);
         ok(memcmp(&Wrong, &Right, sizeof(Right)) == 0, "the disk is not the same disk after the failed creation\n");
+        Test_Initialize(&Right);
     }
     else
     {
@@ -726,6 +864,48 @@ Test_Gpt(VOID)
     Error = Create(P1.Offset + P1.Length, FALSE, 100, &P2);
     ok_int(Error, ERROR_SUCCESS);
 
+    /* what a plan was made on includes the attributes and the name of a GPT partition: a change of them behind its back is
+     * not written over with the old ones */
+    {
+        PDL_LAYOUT Base = ReadLayout(&Error), Changed = HeapAlloc(GetProcessHeap(), 0, sizeof(DL_LAYOUT)), Back;
+        PDL_ENTRY Entry;
+        ULONG Kind;
+
+        ok_int(Error, ERROR_SUCCESS);
+        if (Error == ERROR_SUCCESS && Changed && (Entry = DlFindEntry(Base, P1.Offset)) != NULL)
+        {
+            for (Kind = 0; Kind < 2; Kind++)
+            {
+                PDL_ENTRY New;
+
+                memcpy(Changed, Base, sizeof(DL_LAYOUT));
+                New = DlFindEntry(Changed, P1.Offset);
+                if (Kind == 0)
+                    New->GptAttributes ^= 4;    /* legacy BIOS bootable: harmless here */
+                else
+                    StringCchCopyW(New->GptName, ARRAYSIZE(New->GptName), L"Renamed behind the plan");
+                ok_int(DmWriteDiskLayout(g_Disk, Base, Changed), ERROR_SUCCESS);
+                ok_int(DmWriteDiskLayout(g_Disk, Base, Base), DM_ERR_CHANGED);
+                Back = ReadLayout(&Error);
+                New = Error == ERROR_SUCCESS ? DlFindEntry(Back, P1.Offset) : NULL;
+                ok(New && ((Kind == 0 && New->GptAttributes == (Entry->GptAttributes ^ 4)) ||
+                           (Kind == 1 && wcsncmp(New->GptName, L"Renamed behind the plan", 23) == 0)),
+                   "the change of %s was written over\n", Kind == 0 ? "the attributes" : "the name");
+                HeapFree(GetProcessHeap(), 0, Back);
+                /* put the partition as it was, from what the disk holds now */
+                Back = ReadLayout(&Error);
+                if (Error == ERROR_SUCCESS)
+                    ok_int(DmWriteDiskLayout(g_Disk, Back, Base), ERROR_SUCCESS);
+                HeapFree(GetProcessHeap(), 0, Back);
+            }
+            /* the rewrites took the volumes away and brought them back */
+            ok_int(DmFindVolume(g_Disk, P1.Offset, 15000, P1.VolumeGuid, ARRAYSIZE(P1.VolumeGuid)), ERROR_SUCCESS);
+            ok_int(DmFindVolume(g_Disk, P2.Offset, 15000, P2.VolumeGuid, ARRAYSIZE(P2.VolumeGuid)), ERROR_SUCCESS);
+        }
+        HeapFree(GetProcessHeap(), 0, Changed);
+        HeapFree(GetProcessHeap(), 0, Base);
+    }
+
     if (g_Keep)
     {
         HeapFree(GetProcessHeap(), 0, Plan);
@@ -863,6 +1043,18 @@ START_TEST(DiskOps)
     {
         skip("disk %lu holds partitions or the system, the live test needs an empty scratch disk\n", g_Disk);
         return;
+    }
+    if (GetEnvironmentVariableW(L"DISKMGMT_TEST_DISK2", Value, ARRAYSIZE(Value)) != 0 && ParseDisk(Value, &g_Disk2) &&
+        g_Disk2 != g_Disk)
+    {
+        ULONG First = g_Disk;
+
+        /* the second disk must be as empty as the first */
+        g_Disk = g_Disk2;
+        g_HaveDisk2 = DiskIsScratch();
+        g_Disk = First;
+        if (!g_HaveDisk2)
+            skip("disk %lu is not an empty scratch disk, the swapped-disk tests are not run\n", g_Disk2);
     }
     g_Keep = GetEnvironmentVariableW(L"DISKMGMT_TEST_KEEP", Value, ARRAYSIZE(Value)) != 0;
     if (GetEnvironmentVariableW(L"DISKMGMT_TEST_STYLE", Value, ARRAYSIZE(Value)) != 0 && _wcsicmp(Value, L"GPT") == 0)
