@@ -1878,7 +1878,9 @@ co_WinPosSetWindowPos(
    if ( (WinPos.flags & (SWP_NOZORDER | SWP_HIDEWINDOW | SWP_SHOWWINDOW)) != SWP_NOZORDER &&
          Ancestor && UserHMGetHandle(Ancestor) == IntGetDesktopWindow() )
    {
-      WinPos.hwndInsertAfter = WinPosDoOwnedPopups(Window, WinPos.hwndInsertAfter);
+      /* SWP_NOOWNERZORDER leaves the relation between a window and its owned popups alone */
+      if (!(WinPos.flags & SWP_NOOWNERZORDER))
+         WinPos.hwndInsertAfter = WinPosDoOwnedPopups(Window, WinPos.hwndInsertAfter);
    }
 
    if (!(WinPos.flags & SWP_NOREDRAW))
