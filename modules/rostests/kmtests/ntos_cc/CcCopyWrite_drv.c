@@ -16,6 +16,7 @@ typedef struct _TEST_FCB
     SECTION_OBJECT_POINTERS SectionObjectPointers;
     FAST_MUTEX HeaderMutex;
     ULONG WriteLength;
+    BOOLEAN Cluster;
 } TEST_FCB, *PTEST_FCB;
 
 static PFILE_OBJECT TestFileObject;
@@ -27,6 +28,10 @@ static BOOLEAN InBehaviourTest;
 BOOLEAN ReadCalled;
 LARGE_INTEGER ReadOffset;
 ULONG ReadLength;
+
+/* Paging writes the flush of the ClusterFile sent */
+static ULONG ClusterWrites;
+static ULONG ClusterBytes;
 
 static
 BOOLEAN
@@ -315,6 +320,16 @@ TestIrpHandler(
             Fcb->Header.ValidDataLength.QuadPart = 1000000;
         }
         else if (IoStack->FileObject->FileName.Length >= 2 * sizeof(WCHAR) &&
+                 IoStack->FileObject->FileName.Buffer[1] == 'C')
+        {
+            Fcb->Header.AllocationSize.QuadPart = 1000000;
+            Fcb->Header.FileSize.QuadPart = 1000000;
+            Fcb->Header.ValidDataLength.QuadPart = 1000000;
+            Fcb->Cluster = TRUE;
+            ClusterWrites = 0;
+            ClusterBytes = 0;
+        }
+        else if (IoStack->FileObject->FileName.Length >= 2 * sizeof(WCHAR) &&
                  IoStack->FileObject->FileName.Buffer[1] == 'S')
         {
             Fcb->Header.AllocationSize.QuadPart = 512;
@@ -361,7 +376,8 @@ TestIrpHandler(
 
         ok(BooleanFlagOn(Irp->Flags, IRP_NOCACHE), "IRP not coming from Cc!\n");
         ok_irql(APC_LEVEL);
-        ok((Offset.QuadPart == 0 || Offset.QuadPart == 4096 || Offset.QuadPart == 8192), "Unexpected offset: %I64i\n", Offset.QuadPart);
+        if (!Fcb->Cluster)
+            ok((Offset.QuadPart == 0 || Offset.QuadPart == 4096 || Offset.QuadPart == 8192), "Unexpected offset: %I64i\n", Offset.QuadPart);
         ok(Length % PAGE_SIZE == 0, "Length is not aligned: %I64i\n", Length);
 
         ReadCalled = TRUE;
@@ -437,7 +453,14 @@ TestIrpHandler(
         {
             ok_irql(PASSIVE_LEVEL);
 
-            if (InBehaviourTest)
+            if (Fcb->Cluster)
+            {
+                ok(Offset.QuadPart % PAGE_SIZE == 0, "Unaligned offset: %I64i\n", Offset.QuadPart);
+                ok(Length % PAGE_SIZE == 0, "Unaligned length: %lu\n", Length);
+                ClusterWrites++;
+                ClusterBytes += Length;
+            }
+            else if (InBehaviourTest)
             {
                 /* We wrote only to the 1st and 3rd page */
                 ok((Offset.QuadPart == 0) || (Offset.QuadPart == PAGE_SIZE * 2), "Expected a non-cached write on 1st or 3rd page\n");
@@ -472,6 +495,13 @@ TestIrpHandler(
 
         Fcb = IoStack->FileObject->FsContext;
         CcFlushCache(&Fcb->SectionObjectPointers, NULL, 0, &IoStatus);
+
+        if (Fcb->Cluster)
+        {
+            /* 16 adjacent dirty pages: few paging writes, not one per page */
+            ok_eq_ulong(ClusterBytes, 16 * PAGE_SIZE);
+            ok(ClusterWrites >= 1 && ClusterWrites <= 2, "Flushing 16 dirty pages took %lu writes\n", ClusterWrites);
+        }
 
         Status = STATUS_SUCCESS;
     }

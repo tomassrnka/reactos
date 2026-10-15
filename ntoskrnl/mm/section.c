@@ -264,32 +264,32 @@ static GENERIC_MAPPING MmpSectionMapping =
 
 
 
+/* Adjacent dirty pages of a data file that one flush writes with one paging write (64 KB) */
+#define MM_FLUSH_CLUSTER_PAGES 16
+
+static
 NTSTATUS
-NTAPI
-MiWritePage(PMM_SECTION_SEGMENT Segment,
-            LONGLONG SegOffset,
-            PFN_NUMBER Page)
-/*
- * FUNCTION: write a page for a section backed memory area.
- * PARAMETERS:
- *       MemoryArea - Memory area to write the page for.
- *       Offset - Offset of the page to write.
- *       Page - Page which contains the data to write.
- */
+MiWritePages(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ LONGLONG SegOffset,
+    _In_reads_(Count) PPFN_NUMBER Pages,
+    _In_ ULONG Count)
 {
     NTSTATUS Status;
     IO_STATUS_BLOCK IoStatus;
     KEVENT Event;
-    UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
-    PMDL Mdl = (PMDL)MdlBase;
+    PFN_NUMBER MdlBuffer[(sizeof(MDL) + sizeof(PFN_NUMBER) - 1) / sizeof(PFN_NUMBER) + MM_FLUSH_CLUSTER_PAGES];
+    PMDL Mdl = (PMDL)MdlBuffer;
     PFILE_OBJECT FileObject = Segment->FileObject;
     LARGE_INTEGER FileOffset;
 
+    ASSERT((Count != 0) && (Count <= MM_FLUSH_CLUSTER_PAGES));
+
     FileOffset.QuadPart = Segment->Image.FileOffset + SegOffset;
 
-    RtlZeroMemory(MdlBase, sizeof(MdlBase));
-    MmInitializeMdl(Mdl, NULL, PAGE_SIZE);
-    MmBuildMdlFromPages(Mdl, &Page);
+    RtlZeroMemory(MdlBuffer, sizeof(MdlBuffer));
+    MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
+    MmBuildMdlFromPages(Mdl, Pages);
     Mdl->MdlFlags |= MDL_PAGES_LOCKED;
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
@@ -305,9 +305,25 @@ MiWritePage(PMM_SECTION_SEGMENT Segment,
     }
 
     if (NT_SUCCESS(Status))
-        InterlockedIncrement(&MiReclaimProgress);
+        InterlockedExchangeAdd(&MiReclaimProgress, (LONG)Count);
 
     return Status;
+}
+
+NTSTATUS
+NTAPI
+MiWritePage(PMM_SECTION_SEGMENT Segment,
+            LONGLONG SegOffset,
+            PFN_NUMBER Page)
+/*
+ * FUNCTION: write a page for a section backed memory area.
+ * PARAMETERS:
+ *       MemoryArea - Memory area to write the page for.
+ *       Offset - Offset of the page to write.
+ *       Page - Page which contains the data to write.
+ */
+{
+    return MiWritePages(Segment, SegOffset, &Page, 1);
 }
 
 
@@ -5912,6 +5928,87 @@ MmMakeSegmentDirty(
     return STATUS_SUCCESS;
 }
 
+/* A dirty page of a data file that a cluster write may take: resident, not being written already */
+FORCEINLINE
+BOOLEAN
+MiIsClusterableDirtyEntry(
+    _In_ ULONG_PTR Entry)
+{
+    return (Entry != 0) && !IS_SWAP_FROM_SSE(Entry) && IS_DIRTY_SSE(Entry) && !IS_WRITE_SSE(Entry) &&
+           (SHARE_COUNT_FROM_SSE(Entry) < MAX_SHARE_COUNT);
+}
+
+/*
+ * Writes the dirty page at Start and the dirty pages that follow it (up to MM_FLUSH_CLUSTER_PAGES,
+ * not past End) with one paging write, as MmCheckDirtySegment does for one page: each page is held
+ * (share count) and marked as being written while the segment is unlocked, and stays dirty when the
+ * write fails or the page was dirtied again meanwhile. Returns the pages handled.
+ */
+_Requires_exclusive_lock_held_(Segment->Lock)
+static
+ULONG
+MiFlushDirtyCluster(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ PLARGE_INTEGER Start,
+    _In_ LONGLONG End)
+{
+    PFN_NUMBER Pages[MM_FLUSH_CLUSTER_PAGES];
+    LARGE_INTEGER Offset = *Start;
+    ULONG_PTR Entry;
+    NTSTATUS Status;
+    ULONG Count = 0, i;
+
+    ASSERT(Segment->Locked);
+    ASSERT(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT));
+
+    while ((Count < MM_FLUSH_CLUSTER_PAGES) && (Offset.QuadPart < End))
+    {
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        if (!MiIsClusterableDirtyEntry(Entry))
+            break;
+        Pages[Count++] = PFN_FROM_SSE(Entry);
+        Offset.QuadPart += PAGE_SIZE;
+    }
+
+    /* A lone page, or one already being written: the single page path, as before */
+    if (Count <= 1)
+    {
+        MmCheckDirtySegment(Segment, Start, FALSE, FALSE);
+        return 1;
+    }
+
+    /* Hold the pages, mark them as being written and clean */
+    for (i = 0, Offset = *Start; i < Count; i++, Offset.QuadPart += PAGE_SIZE)
+    {
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry) + 1);
+        MmSetPageEntrySectionSegment(Segment, &Offset, WRITE_SSE(Entry));
+    }
+
+    MmUnlockSectionSegment(Segment);
+    Status = MiWritePages(Segment, Start->QuadPart, Pages, Count);
+    MmLockSectionSegment(Segment);
+
+    if (!NT_SUCCESS(Status))
+        DPRINT1("MiWritePages FAILED: Status 0x%08x (%lu pages at 0x%I64x)\n", Status, Count, Start->QuadPart);
+
+    /* Drop the holds; a page that failed or was dirtied again meanwhile stays dirty */
+    for (i = 0, Offset = *Start; i < Count; i++, Offset.QuadPart += PAGE_SIZE)
+    {
+        BOOLEAN DirtyAgain;
+
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        ASSERT(PFN_FROM_SSE(Entry) == Pages[i]);
+        DirtyAgain = !NT_SUCCESS(Status) || IS_DIRTY_SSE(Entry);
+        Entry = MAKE_SSE(Pages[i] << PAGE_SHIFT, SHARE_COUNT_FROM_SSE(Entry) - 1);
+        if (DirtyAgain)
+            Entry = DIRTY_SSE(Entry);
+        MmSetPageEntrySectionSegment(Segment, &Offset, Entry);
+    }
+
+    return Count;
+}
+
 NTSTATUS
 NTAPI
 MmFlushSegment(
@@ -5968,16 +6065,17 @@ MmFlushSegment(
     while (FlushStart.QuadPart < FlushEnd.QuadPart)
     {
         ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &FlushStart);
+        ULONG Pages = 1;
 
         if (IS_DIRTY_SSE(Entry))
         {
-            MmCheckDirtySegment(Segment, &FlushStart, FALSE, FALSE);
+            Pages = MiFlushDirtyCluster(Segment, &FlushStart, FlushEnd.QuadPart);
 
             if (Iosb)
-                Iosb->Information += PAGE_SIZE;
+                Iosb->Information += Pages * PAGE_SIZE;
         }
 
-        FlushStart.QuadPart += PAGE_SIZE;
+        FlushStart.QuadPart += Pages * PAGE_SIZE;
     }
 
     MmUnlockSectionSegment(Segment);
