@@ -32,6 +32,13 @@ LIST_ENTRY Entries[5];
         ok_eq_pointer(Value, Expected);             \
 } while (0)
 
+#ifdef _WIN64
+/* There is no ExfInterlocked* redirection on 64 bit: the macros and the
+ * functions are the same code, which poisons with the 64 bit pattern */
+#undef ok_eq_free
+#define ok_eq_free ok_eq_free2
+#endif
+
 START_TEST(ExDoubleList)
 {
     KSPIN_LOCK SpinLock;
