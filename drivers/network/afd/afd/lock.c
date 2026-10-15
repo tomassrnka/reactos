@@ -306,43 +306,54 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
 }
 
 /* Produce a kernel-land handle array with handles replaced by object
- * pointers.  This will allow the system to do proper alerting */
-PAFD_HANDLE LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount ) {
+ * pointers.  This will allow the system to do proper alerting.
+ * Every handle must name a socket of this device */
+NTSTATUS LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount,
+                      PDEVICE_OBJECT DeviceObject, KPROCESSOR_MODE AccessMode,
+                      PAFD_HANDLE *LockedHandles ) {
     UINT i;
     NTSTATUS Status = STATUS_SUCCESS;
+    PFILE_OBJECT FileObject;
+    PAFD_HANDLE FileObjects;
 
-    PAFD_HANDLE FileObjects = ExAllocatePoolWithTag(NonPagedPool,
-                                                    HandleCount * sizeof(AFD_HANDLE),
-                                                    TAG_AFD_POLL_HANDLE);
+    *LockedHandles = NULL;
 
-    for( i = 0; FileObjects && i < HandleCount; i++ ) {
-        FileObjects[i].Status = 0;
+    FileObjects = ExAllocatePoolZero(NonPagedPool,
+                                     HandleCount * sizeof(AFD_HANDLE),
+                                     TAG_AFD_POLL_HANDLE);
+    if( !FileObjects ) return STATUS_NO_MEMORY;
+
+    for( i = 0; i < HandleCount; i++ ) {
         FileObjects[i].Events = HandleArray[i].Events;
-        FileObjects[i].Handle = 0;
-        if( !HandleArray[i].Handle ) continue;
-        if( NT_SUCCESS(Status) ) {
-                Status = ObReferenceObjectByHandle
-                    ( (PVOID)HandleArray[i].Handle,
-                      FILE_ALL_ACCESS,
-                      NULL,
-                       KernelMode,
-                       (PVOID*)&FileObjects[i].Handle,
-                       NULL );
+
+        Status = ObReferenceObjectByHandle( (HANDLE)HandleArray[i].Handle,
+                                            0,
+                                            *IoFileObjectType,
+                                            AccessMode,
+                                            (PVOID*)&FileObject,
+                                            NULL );
+        if( !NT_SUCCESS(Status) ) {
+            AFD_DbgPrint(MIN_TRACE,("Failed to reference handle %u (0x%x)\n", i, Status));
+            break;
         }
 
-        if( !NT_SUCCESS(Status) )
-        {
-            AFD_DbgPrint(MIN_TRACE,("Failed to reference handles (0x%x)\n", Status));
-            FileObjects[i].Handle = 0;
+        if( FileObject->DeviceObject != DeviceObject || !FileObject->FsContext ) {
+            AFD_DbgPrint(MIN_TRACE,("Handle %u is not a socket\n", i));
+            ObDereferenceObject( FileObject );
+            Status = STATUS_INVALID_HANDLE;
+            break;
         }
+
+        FileObjects[i].Handle = (SOCKET)FileObject;
     }
 
     if( !NT_SUCCESS(Status) ) {
         UnlockHandles( FileObjects, HandleCount );
-        return NULL;
+        return Status;
     }
 
-    return FileObjects;
+    *LockedHandles = FileObjects;
+    return STATUS_SUCCESS;
 }
 
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount ) {

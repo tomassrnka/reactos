@@ -98,11 +98,9 @@ typedef struct IPADDR_ENTRY {
 					   * for ancillary data on packet
 					   * requests. */
 
-/* XXX This is a hack we should clean up later
- * We do this in order to get some storage for the locked handle table
- * Maybe I'll use some tail item in the irp instead */
-#define AFD_HANDLES(x) ((PAFD_HANDLE)(x)->Exclusive)
-#define SET_AFD_HANDLES(x,y) (((x)->Exclusive) = (ULONG_PTR)(y))
+/* The referenced handle table of a select request; the caller's buffer is copied back to it */
+#define AFD_HANDLES(Irp) ((PAFD_HANDLE)(Irp)->Tail.Overlay.DriverContext[2])
+#define SET_AFD_HANDLES(Irp,y) ((Irp)->Tail.Overlay.DriverContext[2] = (y))
 
 typedef struct _AFD_MAPBUF {
     PVOID BufferAddress;
@@ -328,7 +326,9 @@ VOID SocketStateUnlock( PAFD_FCB FCB );
 BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB );
 VOID AfdClearCancelRoutine( PIRP Irp );
 NTSTATUS LostSocket( PIRP Irp );
-PAFD_HANDLE LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
+NTSTATUS LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount,
+                      PDEVICE_OBJECT DeviceObject, KPROCESSOR_MODE AccessMode,
+                      PAFD_HANDLE *LockedHandles );
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode );
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );
