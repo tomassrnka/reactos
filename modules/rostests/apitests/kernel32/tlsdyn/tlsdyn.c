@@ -110,9 +110,25 @@ PVOID WINAPI TlsDynGetFlsAtDetach(VOID)
     return FlsAtDetach;
 }
 
+/* The events so far go to this handle at the process detach, the last thing a program that exits can still do */
+static HANDLE DumpHandle;
+
+VOID WINAPI TlsDynDumpAtProcessDetach(HANDLE Handle)
+{
+    DumpHandle = Handle;
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     Record('M', fdwReason);
+    if (fdwReason == DLL_PROCESS_DETACH && DumpHandle)
+    {
+        DWORD Written;
+        LONG Count = *LogCount;
+        if (Count > EVENTS_SIZE - 1)
+            Count = EVENTS_SIZE - 1;
+        WriteFile(DumpHandle, Log, Count, &Written, NULL);
+    }
     if (fdwReason == DLL_THREAD_DETACH && FlsWatchIndex != FLS_OUT_OF_INDEXES)
         FlsAtDetach = FlsGetValue(FlsWatchIndex);
     return TRUE;
