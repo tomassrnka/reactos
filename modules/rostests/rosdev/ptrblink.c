@@ -16,6 +16,7 @@
  *   alpha       AlphaBlend without scaling
  *   transparent TransparentBlt without scaling
  *   clip        the full BitBlt with the DC clipped to a corner (nothing is drawn near the pointer)
+ *   alphaclip   the same with AlphaBlend; stretchclip the same with the doubling StretchBlt
  *   text        TextOut of a short string in the corner
  * Written without the C runtime so that it also starts from a payload on a bare install.
  */
@@ -58,6 +59,18 @@ static void draw(const char *mode, HDC wdc, HDC hmem, HRGN corner, int cw, int c
     {
         SelectClipRgn(wdc, corner);
         BitBlt(wdc, 0, 0, cw, ch, hmem, 0, 0, SRCCOPY);
+        SelectClipRgn(wdc, NULL);
+    }
+    else if (streq(mode, "alphaclip"))
+    {
+        SelectClipRgn(wdc, corner);
+        AlphaBlend(wdc, 0, 0, cw, ch, hmem, 0, 0, cw, ch, bf);
+        SelectClipRgn(wdc, NULL);
+    }
+    else if (streq(mode, "stretchclip"))
+    {
+        SelectClipRgn(wdc, corner);
+        StretchBlt(wdc, 0, 0, cw, ch, hmem, 0, 0, cw / 2, ch / 2, SRCCOPY);
         SelectClipRgn(wdc, NULL);
     }
     else if (streq(mode, "text")) TextOutA(wdc, 2, 2, "text", 4);
