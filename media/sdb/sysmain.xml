@@ -558,7 +558,9 @@
 
         <!-- Firefox 4 and later: on a system that does not report Windows 7 or later (NT 6.1 SP1 or build 7600) Firefox rejects
              DirectWrite ("IsNotWin7PreRTM"), falls back to GDI fonts, and draws all text as grayscale bitmap blobs instead of
-             through WebRender with ClearType. WIN7SP1 (and WIN7RTM) lift that; measured with Firefox 115.43 ESR (amd64) -->
+             through WebRender with ClearType. Only the version answer is changed: the Windows 7 SP1 version lie shim without the
+             rest of the WIN7SP1 layer, because that layer also caps the reported memory (GlobalMemoryStatus2GB), which
+             would change Firefox's cache and process decisions. Measured with Firefox 115.43 ESR (amd64). -->
         <EXE NAME="firefox.exe" APP_NAME="Firefox" VENDOR="Mozilla">
             <MATCHING_FILE NAME="*">
                 <COMPANY_NAME>Mozilla Corporation</COMPANY_NAME>
@@ -567,7 +569,7 @@
                 <BIN_PRODUCT_VERSION>4.0.0.0</BIN_PRODUCT_VERSION>
                 <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
             </MATCHING_FILE>
-            <LAYER NAME="WIN7SP1" />
+            <SHIM_REF NAME="Win7SP1VersionLie" />
         </EXE>
 
         <!-- LibreOffice 24.8 and later need Windows 10 (documented; the installer is an MSI, see the layers on msiexec.exe) -->
