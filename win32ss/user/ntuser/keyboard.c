@@ -706,6 +706,7 @@ co_CallLowLevelKeyboardHook(WORD wVk, WORD wScanCode, DWORD dwFlags, BOOL bInjec
     KBDLLHOOKSTRUCT KbdHookData;
     UINT uMsg;
 
+    RtlZeroMemory(&KbdHookData, sizeof(KbdHookData));
     KbdHookData.vkCode = wVk;
     KbdHookData.scanCode = wScanCode;
     KbdHookData.flags = 0;
