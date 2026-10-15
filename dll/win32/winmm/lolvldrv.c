@@ -55,6 +55,11 @@ static WINE_LLTYPE	llTypes[MMDRV_MAX] = {
 };
 #undef A
 
+static CRITICAL_SECTION MMDRV_cs;
+static BOOL MMDRV_Loading;
+static volatile LONG MMDRV_Loaded;
+static void MMDRV_LoadDrivers(void);
+
 /**************************************************************************
  * 			MMDRV_GetNum				[internal]
  */
@@ -62,6 +67,7 @@ UINT	MMDRV_GetNum(UINT type)
 {
     TRACE("(%04x)\n", type);
     assert(type < MMDRV_MAX);
+    MMDRV_LoadDrivers();
     return llTypes[type].wMaxId;
 }
 
@@ -127,6 +133,8 @@ LPWINE_MLD	MMDRV_Alloc(UINT size, UINT type, LPHANDLE hndl, DWORD* dwFlags,
     UINT_PTR i;
     TRACE("(%d, %04x, %p, %p, %p, %p)\n",
           size, type, hndl, dwFlags, dwCallback, dwInstance);
+
+    MMDRV_LoadDrivers();
 
     mld = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
     if (!mld)	return NULL;
@@ -254,6 +262,7 @@ LPWINE_MLD	MMDRV_Get(HANDLE _hndl, UINT type, BOOL bCanBeID)
     TRACE("(%p, %04x, %c)\n", _hndl, type, bCanBeID ? 'Y' : 'N');
 
     assert(type < MMDRV_MAX);
+    MMDRV_LoadDrivers();
 
     if (hndl >= llTypes[type].wMaxId &&
 	hndl != (UINT16)-1 && hndl != (UINT)-1) {
@@ -525,9 +534,9 @@ BOOL	MMDRV_Install(LPCSTR drvRegName, LPCSTR drvFileName, BOOL bIsMapper)
 }
 
 /**************************************************************************
- * 				MMDRV_Init
+ * 				MMDRV_InitDrivers
  */
-BOOL	MMDRV_Init(void)
+static BOOL MMDRV_InitDrivers(void)
 {
 /* Redundant code, keeping this for reference only (for now) */
 #if 0
@@ -578,6 +587,34 @@ BOOL	MMDRV_Init(void)
     return TRUE;
 //    return ( driver_count > 0 );
 #endif
+}
+
+/* The drivers are loaded on first use, as Windows does: loading them from DllMain made every
+   process that loads winmm load more DLLs under the loader lock. A driver that calls back into
+   winmm while it loads sees the drivers loaded so far. */
+static void MMDRV_LoadDrivers(void)
+{
+    if (MMDRV_Loaded)
+        return;
+
+    EnterCriticalSection(&MMDRV_cs);
+    if (!MMDRV_Loaded && !MMDRV_Loading)
+    {
+        MMDRV_Loading = TRUE;
+        MMDRV_InitDrivers();
+        MMDRV_Loading = FALSE;
+        InterlockedExchange(&MMDRV_Loaded, TRUE);
+    }
+    LeaveCriticalSection(&MMDRV_cs);
+}
+
+/**************************************************************************
+ * 				MMDRV_Init
+ */
+BOOL	MMDRV_Init(void)
+{
+    InitializeCriticalSection(&MMDRV_cs);
+    return TRUE;
 }
 
 /******************************************************************
@@ -649,4 +686,6 @@ void    MMDRV_Exit(void)
         HeapFree(GetProcessHeap(), 0, llTypes[MMDRV_WAVEIN].lpMlds - 1);
     if (llTypes[MMDRV_WAVEOUT].lpMlds)
         HeapFree(GetProcessHeap(), 0, llTypes[MMDRV_WAVEOUT].lpMlds - 1);
+
+    DeleteCriticalSection(&MMDRV_cs);
 }
