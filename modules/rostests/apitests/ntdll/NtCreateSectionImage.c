@@ -649,6 +649,27 @@ static void Test_Layout(BOOL Pe64, WORD Machine)
     }
 }
 
+/* Size of a new image section created with size 0; -1 if it cannot be created */
+static LONGLONG QueryImageSize(HANDLE hFile, NTSTATUS *CreateStatus)
+{
+    SECTION_BASIC_INFORMATION Sbi;
+    HANDLE hSection = NULL;
+    LARGE_INTEGER Size;
+    NTSTATUS Status;
+
+    Size.QuadPart = 0;
+    Status = NtCreateSection(&hSection, SECTION_MAP_READ | SECTION_QUERY, NULL, &Size,
+                             PAGE_READONLY, SEC_IMAGE, hFile);
+    if (CreateStatus)
+        *CreateStatus = Status;
+    if (!NT_SUCCESS(Status))
+        return -1;
+    Status = NtQuerySection(hSection, SectionBasicInformation, &Sbi, sizeof(Sbi), NULL);
+    ok(Status == STATUS_SUCCESS, "NtQuerySection: 0x%08lx\n", Status);
+    NtClose(hSection);
+    return NT_SUCCESS(Status) ? Sbi.Size.QuadPart : -1;
+}
+
 /*
  * An image section may be as large as the page-rounded SizeOfImage, also when
  * the sections end below it, and also after the image has been mapped once.
@@ -709,6 +730,10 @@ static void Test_SizeLimit(void)
         if (NT_SUCCESS(Status))
             NtClose(hSection2);
 
+        /* Size 0 takes the page-rounded SizeOfImage, before and after a mapping */
+        Size.QuadPart = QueryImageSize(hFile, NULL);
+        ok(Size.QuadPart == 0x10000, "SizeLimit pass %lu: size 0 gives 0x%I64x\n", Pass, Size.QuadPart);
+
         /* Map it once, which must not change the limit for the next sections */
         if (Pass == 0 && hSection)
         {
@@ -722,6 +747,63 @@ static void Test_SizeLimit(void)
 
     if (hSection)
         NtClose(hSection);
+    CloseHandle(hFile);
+    DeleteFileW(Path);
+}
+
+/*
+ * A SizeOfImage that is not a multiple of the page size: an image section
+ * created with size 0 reports it rounded up to the page, before and after a
+ * mapping.
+ */
+static void Test_SizeUnaligned(void)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE hFile, hSection = NULL;
+    LONGLONG Size;
+    PVOID Base = NULL;
+    SIZE_T ViewSize = 0;
+    NTSTATUS Status;
+
+    NtOffset = IMG_NT_OFFSET;
+    ImageFileSize = IMG_FILE_SIZE;
+    BuildImage(NATIVE_PE64, NATIVE_PE64 ? IMAGE_FILE_MACHINE_AMD64 : IMAGE_FILE_MACHINE_I386, TRUE, TRUE);
+    SET_OPT(SizeOfImage, 0x2100);
+    if (!GetTempFileNameW(TempDir, L"ncu", 0, Path) || !WriteImage(Path))
+    {
+        skip("SizeUnaligned: cannot write the image, error %lu\n", GetLastError());
+        return;
+    }
+    hFile = CreateFileW(Path, GENERIC_READ | GENERIC_EXECUTE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        skip("SizeUnaligned: cannot open %ls, error %lu\n", Path, GetLastError());
+        DeleteFileW(Path);
+        return;
+    }
+
+    Size = QueryImageSize(hFile, &Status);
+    trace("CASE SizeUnaligned: %08lx\n", Status);
+    ok(Status == STATUS_SUCCESS, "SizeUnaligned: NtCreateSection: 0x%08lx\n", Status);
+    ok(Size == 0x3000, "SizeUnaligned: size 0 gives 0x%I64x before a mapping\n", Size);
+
+    Status = NtCreateSection(&hSection, SECTION_MAP_READ | SECTION_QUERY, NULL, NULL,
+                             PAGE_READONLY, SEC_IMAGE, hFile);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtMapViewOfSection(hSection, NtCurrentProcess(), &Base, 0, 0, NULL, &ViewSize,
+                                    ViewShare, 0, PAGE_READONLY);
+        ok(NT_SUCCESS(Status), "SizeUnaligned: NtMapViewOfSection: 0x%08lx\n", Status);
+        if (NT_SUCCESS(Status))
+        {
+            ok(ViewSize == 0x3000, "SizeUnaligned: ViewSize 0x%Ix\n", ViewSize);
+            NtUnmapViewOfSection(NtCurrentProcess(), Base);
+        }
+        Size = QueryImageSize(hFile, NULL);
+        ok(Size == 0x3000, "SizeUnaligned: size 0 gives 0x%I64x after a mapping\n", Size);
+        NtClose(hSection);
+    }
+
     CloseHandle(hFile);
     DeleteFileW(Path);
 }
@@ -757,4 +839,5 @@ START_TEST(NtCreateSectionImage)
     if (KernelIs64 && NATIVE_PE64)
         Test_Layout(FALSE, IMAGE_FILE_MACHINE_I386);
     Test_SizeLimit();
+    Test_SizeUnaligned();
 }

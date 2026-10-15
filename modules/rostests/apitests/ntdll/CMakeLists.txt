@@ -73,6 +73,7 @@ list(APPEND SOURCE
     NtDeleteKey.c
     NtDuplicateObject.c
     NtDuplicateToken.c
+    NtExtendSection.c
     NtFilterToken.c
     NtFreeVirtualMemory.c
     NtGetCurrentProcessorNumberEx.c
