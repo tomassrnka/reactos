@@ -18,6 +18,7 @@ list(APPEND SOURCE
     DrawText.c
     desktop.c
     EmptyClipboard.c
+    EnumDisplayDevices.c
     EnumDisplaySettings.c
     GetClassInfo.c
     GetDCEx.c
