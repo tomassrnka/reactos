@@ -22,6 +22,7 @@ list(APPEND SOURCE
     CreateFile2.c
     CreateRemoteThreadEx.c
     CreateProcess.c
+    CreateProcessRace.c
     CreateWaitableTimerEx.c
     ThreadImpersonationToken.c
     DebugTrapInterrupts.c
