@@ -17,20 +17,20 @@
 
 /* FUNCTIONS ******************************************************************/
 
-VOID
+/*
+ * The selected area as a CF_BITMAP bitmap for the clipboard, or NULL.
+ * The console must be locked; the clipboard is not touched.
+ */
+HBITMAP
 GuiCopyFromGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
                           PGUI_CONSOLE_DATA GuiData)
 {
-    /*
-     * This function supposes that the system clipboard was opened.
-     */
-
     HDC hMemDC;
     HBITMAP  hBitmapTarget, hBitmapOld;
     HPALETTE hPalette, hPaletteOld;
     ULONG selWidth, selHeight;
 
-    if (Buffer->BitMap == NULL) return;
+    if (Buffer->BitMap == NULL) return NULL;
 
     selWidth  = ConioRectWidth(&GuiData->Selection.srSelection);
     selHeight = ConioRectHeight(&GuiData->Selection.srSelection);
@@ -41,14 +41,14 @@ GuiCopyFromGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
            GuiData->Selection.srSelection.Bottom);
 
     hMemDC = CreateCompatibleDC(GuiData->hMemDC);
-    if (hMemDC == NULL) return;
+    if (hMemDC == NULL) return NULL;
 
     /* Allocate a bitmap to be given to the clipboard, so it will not be freed here */
     hBitmapTarget = CreateCompatibleBitmap(GuiData->hMemDC, selWidth, selHeight);
     if (hBitmapTarget == NULL)
     {
         DeleteDC(hMemDC);
-        return;
+        return NULL;
     }
 
     /* Select the new bitmap */
@@ -101,10 +101,8 @@ GuiCopyFromGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
     if (hPalette) SelectPalette(hMemDC, hPaletteOld, FALSE);
     SelectObject(hMemDC, hBitmapOld);
 
-    EmptyClipboard();
-    SetClipboardData(CF_BITMAP, hBitmapTarget);
-
     DeleteDC(hMemDC);
+    return hBitmapTarget;
 }
 
 VOID

@@ -101,7 +101,7 @@ GuiConsoleSetFullScreen(PGUI_CONSOLE_DATA GuiData, BOOL FullScreen);
 
 /* graphics.c */
 
-VOID
+HBITMAP
 GuiCopyFromGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
                           PGUI_CONSOLE_DATA GuiData);
 VOID
@@ -122,12 +122,9 @@ PasteText(
     IN PWCHAR Buffer,
     IN SIZE_T cchSize);
 
-VOID
+HANDLE
 GuiCopyFromTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                           PGUI_CONSOLE_DATA GuiData);
-VOID
-GuiPasteToTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
-                         PGUI_CONSOLE_DATA GuiData);
 BOOL
 GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                        PGUI_CONSOLE_DATA GuiData,

@@ -29,6 +29,7 @@
 #define GUI_WORK_BEEP           0x0010
 #define GUI_WORK_LEADER         0x0020  /* Console leader process changed */
 #define GUI_WORK_DISPLAY_MODE   0x0040  /* Switch to RequestedFullScreen */
+#define GUI_WORK_CLOSE_MENU     0x0080  /* Enable or gray the Close menu item */
 
 /* Flags for GetKeyState */
 #define KEY_TOGGLED 0x0001
@@ -76,8 +77,12 @@ typedef struct _GUI_CONSOLE_DATA
     BOOLEAN InitEventSet;       /* hGuiInitEvent was set (window thread only) */
     LONG PendingWork;           /* GUI_WORK_* */
     BOOL RequestedFullScreen;   /* For GUI_WORK_DISPLAY_MODE */
+    LONG DisplayModeRequest;    /* Number of the last display mode request */
+    LONG DisplayModeDone;       /* Number of the last one the window thread handled */
+    HANDLE hDisplayModeEvent;   /* Set when DisplayModeDone changes */
     HANDLE hWakeEvent;          /* The input thread's wake event, set by PM_CREATE_CONSOLE */
     LIST_ENTRY InputThreadLink; /* In the input thread's window list (that thread only) */
+    DWORD BlinkRestartTick;     /* When the blink timer was last (re)started (window thread only) */
 
     LONG_PTR WndStyle;
     LONG_PTR WndStyleEx;

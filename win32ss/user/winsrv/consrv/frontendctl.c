@@ -134,9 +134,22 @@ CON_API(SrvSetConsoleDisplayMode,
 
     ASSERT((PCONSOLE)Console == Buff->Header.Console);
 
+    /*
+     * The GUI terminal waits for its window thread to switch, with the
+     * console unlocked: the buffer may be closed meanwhile, so look it up
+     * again for its size.
+     */
     if (TermSetDisplayMode(Console, SetDisplayModeRequest->DisplayMode))
     {
-        SetDisplayModeRequest->NewSBDim = Buff->ScreenBufferSize;
+        if (NT_SUCCESS(ConSrvGetScreenBuffer(ProcessData,
+                                             SetDisplayModeRequest->OutputHandle,
+                                             &Buff,
+                                             GENERIC_WRITE,
+                                             FALSE)))
+        {
+            SetDisplayModeRequest->NewSBDim = Buff->ScreenBufferSize;
+            ConSrvReleaseScreenBuffer(Buff, FALSE);
+        }
         Status = STATUS_SUCCESS;
     }
     else
@@ -144,7 +157,8 @@ CON_API(SrvSetConsoleDisplayMode,
         Status = STATUS_INVALID_PARAMETER;
     }
 
-    ConSrvReleaseScreenBuffer(Buff, TRUE);
+    /* Not ConSrvReleaseScreenBuffer: Buff may be gone */
+    ConSrvReleaseConsole(Console, TRUE);
     return Status;
 }
 

@@ -263,19 +263,21 @@ SendMenuEvent(PCONSRV_CONSOLE Console, UINT CmdId)
 }
 
 static VOID
-Copy(PGUI_CONSOLE_DATA GuiData);
+CopySelection(PGUI_CONSOLE_DATA GuiData, PCONSOLE_SCREEN_BUFFER Buffer,
+              PUINT Format, PHANDLE Data);
 static VOID
-Paste(PGUI_CONSOLE_DATA GuiData);
+PutClipboard(PGUI_CONSOLE_DATA GuiData, UINT Format, HANDLE Data);
+static VOID
+PasteFromClipboard(PGUI_CONSOLE_DATA GuiData);
 static VOID
 UpdateSelection(PGUI_CONSOLE_DATA GuiData,
                 PCOORD SelectionAnchor OPTIONAL,
                 PCOORD coord);
 
+/* The console must be locked */
 static VOID
-Mark(PGUI_CONSOLE_DATA GuiData)
+Mark(PGUI_CONSOLE_DATA GuiData, PCONSOLE_SCREEN_BUFFER ActiveBuffer)
 {
-    PCONSOLE_SCREEN_BUFFER ActiveBuffer = GuiData->ActiveBuffer;
-
     /* Clear the old selection */
     GuiData->Selection.dwFlags = CONSOLE_NO_SELECTION;
 
@@ -286,10 +288,10 @@ Mark(PGUI_CONSOLE_DATA GuiData)
                     &GuiData->dwSelectionCursor);
 }
 
+/* The console must be locked */
 static VOID
-SelectAll(PGUI_CONSOLE_DATA GuiData)
+SelectAll(PGUI_CONSOLE_DATA GuiData, PCONSOLE_SCREEN_BUFFER ActiveBuffer)
 {
-    PCONSOLE_SCREEN_BUFFER ActiveBuffer = GuiData->ActiveBuffer;
     COORD SelectionAnchor;
 
     /* Clear the old selection */
@@ -347,20 +349,32 @@ OnCommand(PGUI_CONSOLE_DATA GuiData, WPARAM wParam, LPARAM lParam)
     /* ... otherwise, perform actions. */
     switch (wParam)
     {
+        /* The screen buffer is used only with the console locked, the clipboard only without */
         case ID_SYSTEM_EDIT_MARK:
-            Mark(GuiData);
-            break;
-
+        case ID_SYSTEM_EDIT_SELECTALL:
         case ID_SYSTEM_EDIT_COPY:
-            Copy(GuiData);
+        {
+            UINT Format = 0;
+            HANDLE Data = NULL;
+
+            if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE)) break;
+            if (GuiData->ActiveBuffer)
+            {
+                if (wParam == ID_SYSTEM_EDIT_MARK)
+                    Mark(GuiData, GuiData->ActiveBuffer);
+                else if (wParam == ID_SYSTEM_EDIT_SELECTALL)
+                    SelectAll(GuiData, GuiData->ActiveBuffer);
+                else
+                    CopySelection(GuiData, GuiData->ActiveBuffer, &Format, &Data);
+            }
+            LeaveCriticalSection(&Console->Lock);
+
+            PutClipboard(GuiData, Format, Data);
             break;
+        }
 
         case ID_SYSTEM_EDIT_PASTE:
-            Paste(GuiData);
-            break;
-
-        case ID_SYSTEM_EDIT_SELECTALL:
-            SelectAll(GuiData);
+            PasteFromClipboard(GuiData);
             break;
 
         case ID_SYSTEM_EDIT_SCROLL:
@@ -738,6 +752,7 @@ OnNcCreate(HWND hWnd, LPCREATESTRUCTW Create)
     if (GuiData->IsWindowVisible)
     {
         SetTimer(GuiData->hWindow, CONGUI_BLINK_TIMER, CURSOR_BLINK_TIME, NULL);
+        GuiData->BlinkRestartTick = GetTickCount();
     }
 
     // FIXME: HACK: Potential HACK for CORE-8129; see revision 63595.
@@ -1205,6 +1220,8 @@ OnKey(PGUI_CONSOLE_DATA GuiData, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     PCONSRV_CONSOLE Console = GuiData->Console;
     PCONSOLE_SCREEN_BUFFER ActiveBuffer;
+    UINT ClipFormat = 0;
+    HANDLE ClipData = NULL;
 
     if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE)) return;
 
@@ -1219,7 +1236,7 @@ OnKey(PGUI_CONSOLE_DATA GuiData, UINT msg, WPARAM wParam, LPARAM lParam)
         if (VirtualKeyCode == VK_RETURN)
         {
             /* Copy (and clear) selection if ENTER is pressed */
-            Copy(GuiData);
+            CopySelection(GuiData, ActiveBuffer, &ClipFormat, &ClipData);
             goto Quit;
         }
         else if ( VirtualKeyCode == VK_ESCAPE ||
@@ -1357,6 +1374,9 @@ OnKey(PGUI_CONSOLE_DATA GuiData, UINT msg, WPARAM wParam, LPARAM lParam)
 
 Quit:
     LeaveCriticalSection(&Console->Lock);
+
+    /* The clipboard owner may be waiting for this console: never under its lock */
+    PutClipboard(GuiData, ClipFormat, ClipData);
 }
 
 
@@ -1372,9 +1392,10 @@ GuiProcessWork(PGUI_CONSOLE_DATA GuiData, BOOLEAN BlinkTick)
     PCONSRV_CONSOLE Console = GuiData->Console;
     PCONSOLE_SCREEN_BUFFER Buff;
     LONG Work = InterlockedExchange(&GuiData->PendingWork, 0);
+    LONG ModeRequest = GuiData->DisplayModeRequest;
     RECT DirtyRect, CaretRect;
     BOOL InvalidateAll = FALSE, InvalidateDirty = FALSE, InvalidateCaret = FALSE;
-    BOOL RestartBlink = FALSE, SetLeader = FALSE, FullScreen = FALSE;
+    BOOL RestartBlink = FALSE, SetLeader = FALSE, FullScreen = FALSE, CloseEnabled = TRUE;
     INT NewScrollX = -1, NewScrollY = -1;
     PWCHAR Title = NULL;
     CLIENT_ID Leader = {NULL, NULL};
@@ -1383,7 +1404,7 @@ GuiProcessWork(PGUI_CONSOLE_DATA GuiData, BOOLEAN BlinkTick)
     /* The geometry first, so that the repaint below uses the new one */
     if (Work & GUI_WORK_RESIZE) GuiResizeFrame(GuiData);
 
-    if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE)) return;
+    if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE)) goto Done;
 
     /* A hidden window keeps its title and leader information, but is not painted */
     Buff = GuiData->IsWindowVisible ? GuiData->ActiveBuffer : NULL;
@@ -1487,6 +1508,7 @@ GuiProcessWork(PGUI_CONSOLE_DATA GuiData, BOOLEAN BlinkTick)
     }
 
     if (Work & GUI_WORK_DISPLAY_MODE) FullScreen = GuiData->RequestedFullScreen;
+    if (Work & GUI_WORK_CLOSE_MENU) CloseEnabled = GuiData->IsCloseButtonEnabled;
 
     LeaveCriticalSection(&Console->Lock);
 
@@ -1516,7 +1538,10 @@ GuiProcessWork(PGUI_CONSOLE_DATA GuiData, BOOLEAN BlinkTick)
     }
 
     if (RestartBlink)
+    {
         SetTimer(GuiData->hWindow, CONGUI_BLINK_TIMER, CURSOR_BLINK_TIME, NULL);
+        GuiData->BlinkRestartTick = GetTickCount();
+    }
 
     if (Title)
     {
@@ -1528,6 +1553,12 @@ GuiProcessWork(PGUI_CONSOLE_DATA GuiData, BOOLEAN BlinkTick)
     {
         SetWindowLongPtrW(GuiData->hWindow, GWLP_CONSOLE_LEADER_PID, (LONG_PTR)Leader.UniqueProcess);
         SetWindowLongPtrW(GuiData->hWindow, GWLP_CONSOLE_LEADER_TID, (LONG_PTR)Leader.UniqueThread);
+    }
+
+    if ((Work & GUI_WORK_CLOSE_MENU) && GuiData->hSysMenu)
+    {
+        EnableMenuItem(GuiData->hSysMenu, SC_CLOSE,
+                       MF_BYCOMMAND | (CloseEnabled ? MF_ENABLED : MF_GRAYED));
     }
 
     /* Show, hide or change the mouse cursor (special values for (w|l)Param) */
@@ -1542,13 +1573,28 @@ GuiProcessWork(PGUI_CONSOLE_DATA GuiData, BOOLEAN BlinkTick)
         DPRINT1("Beep\n");
         Beep(800, 200);
     }
+
+Done:
+    /* Release GuiSetDisplayMode, even if the console went away */
+    if ((Work & GUI_WORK_DISPLAY_MODE) && GuiData->hDisplayModeEvent)
+    {
+        InterlockedExchange(&GuiData->DisplayModeDone, ModeRequest);
+        NtSetEvent(GuiData->hDisplayModeEvent, NULL);
+    }
 }
 
 static VOID
 OnTimer(PGUI_CONSOLE_DATA GuiData)
 {
+    /*
+     * A tick fetched before a work pass restarted the blink is stale: it
+     * must not turn off the caret that the output just showed. A real tick
+     * comes CURSOR_BLINK_TIME after the restart.
+     */
+    BOOLEAN BlinkTick = (GetTickCount() - GuiData->BlinkRestartTick) >= CURSOR_BLINK_TIME / 2;
+
     /* The blink timer also runs the work while a modal loop replaces the input thread's loop */
-    GuiProcessWork(GuiData, TRUE);
+    GuiProcessWork(GuiData, BlinkTick);
 }
 
 static BOOL
@@ -1727,7 +1773,9 @@ PointToCoord(PGUI_CONSOLE_DATA GuiData, LPARAM lParam)
 static LRESULT
 OnMouse(PGUI_CONSOLE_DATA GuiData, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    BOOL DoDefault = FALSE;
+    BOOL DoDefault = FALSE, DoPaste = FALSE;
+    UINT ClipFormat = 0;
+    HANDLE ClipData = NULL;
     PCONSRV_CONSOLE Console = GuiData->Console;
 
     /*
@@ -1880,11 +1928,11 @@ OnMouse(PGUI_CONSOLE_DATA GuiData, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 if (!(GuiData->Selection.dwFlags & CONSOLE_SELECTION_NOT_EMPTY))
                 {
-                    Paste(GuiData);
+                    DoPaste = TRUE;
                 }
                 else
                 {
-                    Copy(GuiData);
+                    CopySelection(GuiData, GuiData->ActiveBuffer, &ClipFormat, &ClipData);
                 }
 
                 /* Ignore the next mouse move event */
@@ -2141,6 +2189,10 @@ OnMouse(PGUI_CONSOLE_DATA GuiData, UINT msg, WPARAM wParam, LPARAM lParam)
 
     LeaveCriticalSection(&Console->Lock);
 
+    /* The clipboard owner may be waiting for this console: never under its lock */
+    PutClipboard(GuiData, ClipFormat, ClipData);
+    if (DoPaste) PasteFromClipboard(GuiData);
+
 Quit:
     if (!DoDefault)
         return 0;
@@ -2175,47 +2227,86 @@ Quit:
 }
 
 
+/*
+ * Take the selection as clipboard data and clear it. The console must be
+ * locked; the clipboard is set later, without the lock (PutClipboard).
+ */
 static VOID
-Copy(PGUI_CONSOLE_DATA GuiData)
+CopySelection(PGUI_CONSOLE_DATA GuiData, PCONSOLE_SCREEN_BUFFER Buffer,
+              PUINT Format, PHANDLE Data)
 {
-    if (OpenClipboard(GuiData->hWindow))
-    {
-        PCONSOLE_SCREEN_BUFFER Buffer = GuiData->ActiveBuffer;
+    *Format = 0;
+    *Data = NULL;
 
+    if (Buffer && (GuiData->Selection.dwFlags & CONSOLE_SELECTION_NOT_EMPTY))
+    {
         if (GetType(Buffer) == TEXTMODE_BUFFER)
         {
-            GuiCopyFromTextModeBuffer((PTEXTMODE_SCREEN_BUFFER)Buffer, GuiData);
+            *Format = CF_UNICODETEXT;
+            *Data = GuiCopyFromTextModeBuffer((PTEXTMODE_SCREEN_BUFFER)Buffer, GuiData);
         }
         else /* if (GetType(Buffer) == GRAPHICS_BUFFER) */
         {
-            GuiCopyFromGraphicsBuffer((PGRAPHICS_SCREEN_BUFFER)Buffer, GuiData);
+            *Format = CF_BITMAP;
+            *Data = GuiCopyFromGraphicsBuffer((PGRAPHICS_SCREEN_BUFFER)Buffer, GuiData);
         }
-
-        CloseClipboard();
     }
 
     /* Clear the selection */
     UpdateSelection(GuiData, NULL, NULL);
 }
 
+/* The console must not be locked: the clipboard calls can wait for its owner */
 static VOID
-Paste(PGUI_CONSOLE_DATA GuiData)
+PutClipboard(PGUI_CONSOLE_DATA GuiData, UINT Format, HANDLE Data)
 {
+    if (!Data) return;
+
     if (OpenClipboard(GuiData->hWindow))
     {
-        PCONSOLE_SCREEN_BUFFER Buffer = GuiData->ActiveBuffer;
-
-        if (GetType(Buffer) == TEXTMODE_BUFFER)
-        {
-            GuiPasteToTextModeBuffer((PTEXTMODE_SCREEN_BUFFER)Buffer, GuiData);
-        }
-        else /* if (GetType(Buffer) == GRAPHICS_BUFFER) */
-        {
-            GuiPasteToGraphicsBuffer((PGRAPHICS_SCREEN_BUFFER)Buffer, GuiData);
-        }
-
+        EmptyClipboard();
+        if (SetClipboardData(Format, Data)) Data = NULL;
         CloseClipboard();
     }
+
+    if (Data)
+    {
+        if (Format == CF_BITMAP) DeleteObject(Data);
+        else GlobalFree(Data);
+    }
+}
+
+/* The console must not be locked: the clipboard calls can wait for its owner */
+static VOID
+PasteFromClipboard(PGUI_CONSOLE_DATA GuiData)
+{
+    PCONSRV_CONSOLE Console = GuiData->Console;
+    PWCHAR Text = NULL;
+    HANDLE hData;
+    LPWSTR pszText;
+    SIZE_T Length;
+
+    if (!OpenClipboard(GuiData->hWindow)) return;
+    hData = GetClipboardData(CF_UNICODETEXT);
+    if (hData && (pszText = GlobalLock(hData)))
+    {
+        Length = wcslen(pszText);
+        Text = ConsoleAllocHeap(0, (Length + 1) * sizeof(WCHAR));
+        if (Text) RtlCopyMemory(Text, pszText, (Length + 1) * sizeof(WCHAR));
+        GlobalUnlock(hData);
+    }
+    CloseClipboard();
+    if (!Text) return;
+
+    DPRINT("Got data <%S> from clipboard\n", Text);
+    if (ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE))
+    {
+        /* Pasting into a graphics screen buffer is not implemented */
+        if (GuiData->ActiveBuffer && GetType(GuiData->ActiveBuffer) == TEXTMODE_BUFFER)
+            PasteText(Console, Text, wcslen(Text));
+        LeaveCriticalSection(&Console->Lock);
+    }
+    ConsoleFreeHeap(Text);
 }
 
 static VOID
@@ -2355,7 +2446,9 @@ OnDropFiles(PCONSRV_CONSOLE Console, HDROP hDrop)
         pszPath = &szPath[1];
     }
 
+    if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE)) return;
     PasteText(Console, pszPath, wcslen(pszPath));
+    LeaveCriticalSection(&Console->Lock);
 }
 
 /*

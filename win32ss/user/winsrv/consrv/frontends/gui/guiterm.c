@@ -88,15 +88,16 @@ GuiConsoleMoveWindow(PGUI_CONSOLE_DATA GuiData)
  *   buffer is destroyed only with the console locked, so a buffer read under
  *   the console lock stays valid until that lock is released.
  *
- * Exceptions: GuiChangeIcon, GuiGetLargestConsoleWindowSize, GuiSetCodePage and
- * GuiSetMenuClose return a result computed by USER, RealizePalette on the
+ * Exceptions: GuiChangeIcon, GuiGetLargestConsoleWindowSize and GuiSetCodePage
+ * return a result computed by USER, RealizePalette on the
  * framebuffer (a memory DC) goes through USER, and the input thread's keyboard,
  * mouse, selection and sizing handlers act on their own window, all with the
  * console locked. None of them sends a message to another thread, so they wait
  * only for the USER lock, whose owner never waits for a console lock. The
- * full-screen switch (Alt+Enter, SetConsoleDisplayMode) runs in the input
- * thread with the console locked; ChangeDisplaySettings waits at most 100 ms
- * for each window it notifies.
+ * clipboard is used with the console unlocked. Known limit: the full-screen
+ * switch (Alt+Enter, SetConsoleDisplayMode) runs in the input thread with the
+ * console locked, and ChangeDisplaySettings sends WM_DISPLAYCHANGE to every
+ * top-level window with a 100 ms timeout each.
  */
 
 /* Record work for the window thread and wake it. Never calls USER. */
@@ -672,6 +673,11 @@ GuiInitFrontEnd(IN OUT PFRONTEND This,
                   NULL, SynchronizationEvent, FALSE);
     NtCreateEvent(&GuiData->hGuiTermEvent, EVENT_ALL_ACCESS,
                   NULL, SynchronizationEvent, FALSE);
+    if (!NT_SUCCESS(NtCreateEvent(&GuiData->hDisplayModeEvent, EVENT_ALL_ACCESS,
+                                  NULL, SynchronizationEvent, FALSE)))
+    {
+        GuiData->hDisplayModeEvent = NULL;
+    }
 
     DPRINT("GUI - Checkpoint\n");
 
@@ -718,6 +724,8 @@ GuiDeinitFrontEnd(IN OUT PFRONTEND This)
     }
     NtClose(GuiData->hGuiTermEvent);
     GuiData->hGuiTermEvent = NULL;
+    if (GuiData->hDisplayModeEvent) NtClose(GuiData->hDisplayModeEvent);
+    GuiData->hDisplayModeEvent = NULL;
 
     CloseDesktop(GuiData->Desktop); // NtUserCloseDesktop
     CloseWindowStation(GuiData->WinSta); // NtUserCloseWindowStation
@@ -1177,7 +1185,10 @@ GuiSetDisplayMode(IN OUT PFRONTEND This,
                   ULONG NewMode)
 {
     PGUI_CONSOLE_DATA GuiData = This->Context;
+    PCONSRV_CONSOLE Console = GuiData->Console;
+    LARGE_INTEGER Timeout;
     BOOL FullScreen;
+    LONG Request, LockCount, i;
 
     if (NewMode & ~(CONSOLE_FULLSCREEN_MODE | CONSOLE_WINDOWED_MODE))
         return FALSE;
@@ -1192,7 +1203,26 @@ GuiSetDisplayMode(IN OUT PFRONTEND This,
      * because that thread may be waiting for the console lock we hold.
      */
     GuiData->RequestedFullScreen = FullScreen;
+    Request = InterlockedIncrement(&GuiData->DisplayModeRequest);
     GuiRequestWork(GuiData, GUI_WORK_DISPLAY_MODE);
+
+    /*
+     * Return only once the mode is set, waiting with the console unlocked
+     * (the caller holds it, maybe twice), as GuiInitFrontEnd waits for the
+     * window. The caller holds a console reference, which keeps GuiData.
+     */
+    if (!GuiData->hDisplayModeEvent ||
+        Console->Lock.OwningThread != NtCurrentTeb()->ClientId.UniqueThread)
+    {
+        return TRUE;
+    }
+    Timeout.QuadPart = -5000000LL; /* 500 ms */
+    LockCount = Console->Lock.RecursionCount;
+    for (i = 0; i < LockCount; i++) LeaveCriticalSection(&Console->Lock);
+    /* The blink timer runs the work even in a modal loop, so this ends */
+    for (i = 0; i < 20 && (LONG)(GuiData->DisplayModeDone - Request) < 0; i++)
+        NtWaitForSingleObject(GuiData->hDisplayModeEvent, FALSE, &Timeout);
+    for (i = 0; i < LockCount; i++) EnterCriticalSection(&Console->Lock);
 
     return TRUE;
 }
@@ -1264,8 +1294,9 @@ GuiSetMenuClose(IN OUT PFRONTEND This,
 
     if (GuiData->hSysMenu == NULL) return FALSE;
 
+    /* EnableMenuItem can redraw the caption, a send to the window thread */
     GuiData->IsCloseButtonEnabled = Enable;
-    EnableMenuItem(GuiData->hSysMenu, SC_CLOSE, MF_BYCOMMAND | (Enable ? MF_ENABLED : MF_GRAYED));
+    GuiRequestWork(GuiData, GUI_WORK_CLOSE_MENU);
 
     return TRUE;
 }
