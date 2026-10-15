@@ -15,10 +15,12 @@ private:
     wstring m_CurrentFile;
     wstring m_CurrentListCommand;
     wstring m_TestPath;
+    bool m_SingleFile;
 
     bool GetNextFile();
     bool GetNextTest();
     CTestInfo* GetNextTestInfo();
+    CTestInfo* MakeTestInfo();
     DWORD DoListCommand();
     void RunTest(CTestInfo* TestInfo);
 
