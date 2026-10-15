@@ -234,6 +234,27 @@ AfdSetConnectDataSize(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 }
 
 
+/* A failed or cancelled connect leaves its connection endpoint behind; the
+   next connect opens a new one, so close the old one first. Called with the
+   state lock held and no transport request on the connection */
+VOID
+AfdCloseConnectionEndpoint(PAFD_FCB FCB)
+{
+    ASSERT(!FCB->ConnectIrp.InFlightRequest);
+
+    if (FCB->Connection.Object)
+    {
+        TdiDisassociateAddressFile(FCB->Connection.Object);
+        ObDereferenceObject(FCB->Connection.Object);
+        FCB->Connection.Object = NULL;
+    }
+    if (FCB->Connection.Handle != INVALID_HANDLE_VALUE)
+    {
+        ZwClose(FCB->Connection.Handle);
+        FCB->Connection.Handle = INVALID_HANDLE_VALUE;
+    }
+}
+
 NTSTATUS
 WarmSocketForConnection(PAFD_FCB FCB) {
     NTSTATUS Status;
@@ -367,6 +388,21 @@ StreamSocketConnectSendComplete(
     return STATUS_SUCCESS;
 }
 
+/* A queued ConnectEx was cancelled while its transport connect completed */
+static BOOLEAN AfdConnectExCancelled(PAFD_FCB FCB)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = FCB->PendingIrpList[FUNCTION_CONNECTEX].Flink;
+         Entry != &FCB->PendingIrpList[FUNCTION_CONNECTEX];
+         Entry = Entry->Flink)
+    {
+        if (CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry)->Cancel)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* The ConnectEx initial-send buffer, on paths where no send owns it */
 static VOID FreeConnectSendBuffer(PAFD_FCB FCB)
 {
@@ -486,6 +522,13 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         if( Status == STATUS_PENDING )
             Status = STATUS_SUCCESS;
+
+        if (FCB->OnConnectSendBuffer && AfdConnectExCancelled(FCB))
+        {
+            /* Its cancel routine is spent, so a stalled initial send could never be cancelled */
+            Status = STATUS_CANCELLED;
+            goto end;
+        }
 
         if (FCB->OnConnectSendBuffer)
         {
@@ -628,6 +671,12 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         break;
 
     case SOCKET_STATE_CONNECTING:
+        /* WSAEINVAL while a ConnectEx connects, as on Windows */
+        if (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            break;
+        }
         return LeaveIrpUntilLater( FCB, Irp, FUNCTION_CONNECT );
 
     case SOCKET_STATE_CREATED:
@@ -666,6 +715,7 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             break;
         }
 
+        AfdCloseConnectionEndpoint( FCB );
         Status = WarmSocketForConnection( FCB );
 
         if( !NT_SUCCESS(Status) )
@@ -700,6 +750,8 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             FCB->ConnectCallInfo->OptionsLength = FCB->ConnectOptionsSize;
 
             FCB->SharedData.State = SOCKET_STATE_CONNECTING;
+            /* An earlier connect's failure does not belong to this one */
+            FCB->PollState &= ~AFD_EVENT_CONNECT_FAIL;
 
             AFD_DbgPrint(MID_TRACE,("Queueing IRP %p\n", Irp));
             Status = QueueUserModeIrp(FCB, Irp, FUNCTION_CONNECT);
@@ -833,6 +885,7 @@ AfdStreamSocketSuperConnect(
             break;
         }
 
+        AfdCloseConnectionEndpoint(FCB);
         Status = WarmSocketForConnection(FCB);
         if (!NT_SUCCESS(Status))
             break;
@@ -864,6 +917,8 @@ AfdStreamSocketSuperConnect(
         FCB->ConnectCallInfo->Options = FCB->ConnectOptions;
         FCB->ConnectCallInfo->OptionsLength = FCB->ConnectOptionsSize;
         FCB->SharedData.State = SOCKET_STATE_CONNECTING;
+        /* An earlier connect's failure does not belong to this one */
+        FCB->PollState &= ~AFD_EVENT_CONNECT_FAIL;
 
         AFD_DbgPrint(MID_TRACE,("Queueing IRP %p\n", Irp));
         Status = QueueUserModeIrp( FCB, Irp, FUNCTION_CONNECTEX );
