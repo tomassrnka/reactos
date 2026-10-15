@@ -79,6 +79,7 @@ list(APPEND SOURCE
     NtFreeVirtualMemory.c
     NtGetCurrentProcessorNumberEx.c
     NtImpersonateAnonymousToken.c
+    NtKeyedEvent.c
     NtLoadUnloadKey.c
     NtMapViewOfSection.c
     NtMutant.c
