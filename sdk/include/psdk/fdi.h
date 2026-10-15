@@ -23,7 +23,12 @@
 extern "C" {
 #endif /* defined(__cplusplus) */
 
+#ifdef _WIN64
+/* Windows does not pack FDINOTIFICATION to 4 on x64 */
+#include <pshpack8.h>
+#else
 #include <pshpack4.h>
+#endif
 
 #ifndef INCLUDED_TYPES_FCI_FDI
 #define INCLUDED_TYPES_FCI_FDI 1
