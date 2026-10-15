@@ -48,8 +48,15 @@ HaliHandlePCIConfigSpaceAccess(_In_ BOOLEAN IsRead,
                                _In_ ULONG Length,
                                _Inout_ PULONG Buffer)
 {
+    /* The interpreter calls this for the ports of its list entry only; refuse
+     * others without touching the buffer, as Windows does */
+    if ((Port < 0x0CF8) || (Port > 0x0CFF) ||
+        (Length == 0) || (Length > 4) || (Port + Length > 0x0D00))
+    {
+        return STATUS_UNSUCCESSFUL;
+    }
+
     DPRINT1("HaliHandlePCIConfigSpaceAccess: IsRead %X, Port 0x%X, Length %u, Buffer %p\n", IsRead, Port, Length, Buffer);
-    //ASSERT(FALSE);
     return STATUS_NOT_IMPLEMENTED;
 }
 
