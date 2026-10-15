@@ -126,17 +126,29 @@ separate from the focused fixtures:
   them before returning pending. AFD owns native poll buffers through readiness,
   timeout and cancellation, then packs the guest output before completing the
   IOSB32. TDI handle replies and TCP query contexts use their guest layouts.
-  Datagram-specific, event-select, extended accept/connect and shared-context
-  retrieval requests still need translation. Other device controls and most
-  information classes remain unimplemented. Pipe peeking and flushing accept
-  synchronous file handles.
+  AFD also captures event-selection handles and packs network-event replies,
+  including event reset and rearming after a receive. Datagram-specific,
+  extended accept/connect and shared-context retrieval requests still need
+  translation. Other device controls and most information classes remain
+  unimplemented. Named-pipe listen/wait/transceive/peek/disconnect retain the
+  guest IOSB through pending completion; flushing accepts synchronous handles.
+* File locking uses the same retained guest IOSB contract, including event/APC
+  completion. Unlock waits for native completion before copying its IOSB.
+  The optional `wow64_file_lock --pending` conflict test exposes a shared
+  native debug assertion in FsRtlProcessFileLock; the ordinary fail-immediate
+  installer path is covered separately.
+* Job creation/opening, process assignment, termination, and basic/extended
+  limit setting capture guest handles and pointer-sized limits. Native job
+  semantics still apply; other job information classes require their own
+  translations. Current time-zone queries forward a fixed-width record.
 * CSR covers initial Base/console connection and the console operations
   implemented in `csr.c`. The Base static-data copy is a startup snapshot;
   live updates and INI mapping are not implemented. Console control falls
   back to termination; property and IME callbacks are unsupported.
 * DLL discovery selects `SysWOW64` and `KnownDlls32`, retaining application and
-  other search directories in their original order. Filesystem/registry
-  redirection and environment translation cover the phase-2 console subset.
+  other search directories in their original order. GetSystemWow64Directory
+  reports the guest system directory to both bitnesses in enabled builds.
+  Filesystem/registry redirection and environment translation cover the phase-2 console subset.
   Guest process creation resolves the executable in the guest and calls the
   native creator with captured parent parameters. System32, SysWOW64, Sysnative
   and the thread's redirection state select the executable architecture.
