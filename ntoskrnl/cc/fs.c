@@ -311,6 +311,7 @@ CcSetFileSizes (
     KIRQL OldIrql;
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     LARGE_INTEGER OldSectionSize;
+    LARGE_INTEGER OldFileSize;
 
     CCTRACE(CC_API_DEBUG, "FileObject=%p FileSizes=%p\n",
         FileObject, FileSizes);
@@ -334,10 +335,20 @@ CcSetFileSizes (
     /* Update the relevant fields */
     KeAcquireSpinLock(&SharedCacheMap->CacheMapLock, &OldIrql);
     OldSectionSize = SharedCacheMap->SectionSize;
+    OldFileSize = SharedCacheMap->FileSize;
     SharedCacheMap->SectionSize = FileSizes->AllocationSize;
     SharedCacheMap->FileSize = FileSizes->FileSize;
     SharedCacheMap->ValidDataLength = FileSizes->ValidDataLength;
     KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
+
+    /* Pages past a reduced file size can stay resident: clear them, so that a regrown file reads zero there.
+     * To the segment's end: a view may have written past the old size in its last page */
+    if (FileSizes->FileSize.QuadPart < OldFileSize.QuadPart)
+    {
+        MmZeroResidentSegmentRange(FileObject->SectionObjectPointer,
+                                   FileSizes->FileSize.QuadPart,
+                                   MAXLONGLONG);
+    }
 
     if (FileSizes->AllocationSize.QuadPart < OldSectionSize.QuadPart)
     {
@@ -396,6 +407,8 @@ CcUninitializeCacheMap (
             SharedCacheMap->FileSize = *TruncateSize;
         }
         KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
+        /* The purge keeps pages it cannot drop; they must not show the old bytes if the file grows again */
+        MmZeroResidentSegmentRange(FileObject->SectionObjectPointer, TruncateSize->QuadPart, MAXLONGLONG);
         CcPurgeCacheSection(FileObject->SectionObjectPointer,
                             TruncateSize,
                             0,

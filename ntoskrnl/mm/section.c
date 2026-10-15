@@ -5424,6 +5424,224 @@ MiGetSegmentPageTableEnd(
     return End;
 }
 
+/* Zero [Start, End) in the pages of a file's data segment that are in memory; reads nothing in. End may lie past
+ * the segment's pages (MAXLONGLONG: to the end) */
+VOID
+NTAPI
+MmZeroResidentSegmentRange(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+    PMM_SECTION_SEGMENT Segment;
+    PCACHE_SECTION_PAGE_TABLE PageTable;
+    PVOID RestartKey;
+
+    if (Start >= End)
+        return;
+
+    Segment = MiGrabDataSection(SectionObjectPointer);
+    if (!Segment)
+        return;
+
+    MmLockSectionSegment(Segment);
+
+    /*
+     * Walk the allocated page tables, not every offset: a sparse file cut to a small size would otherwise scan
+     * from Start to the highest page at 256-page steps under the lock. For each page table that overlaps the range,
+     * zero the resident pages its 256 entries hold.
+     */
+restart:
+    RestartKey = NULL;
+    while ((PageTable = RtlEnumerateGenericTableWithoutSplaying(&Segment->PageTable, &RestartKey)))
+    {
+        LONGLONG TableStart = PageTable->FileOffset.QuadPart;
+        LONGLONG TableEnd = TableStart + (LONGLONG)_countof(PageTable->PageEntries) * PAGE_SIZE;
+        LONGLONG PageOffset;
+
+        if (TableEnd <= Start || TableStart >= End)
+            continue;
+
+        for (PageOffset = max(TableStart, PAGE_ROUND_DOWN_64(Start)); PageOffset < min(TableEnd, End); PageOffset += PAGE_SIZE)
+        {
+            LONGLONG ZeroStart = max(PageOffset, Start);
+            LONGLONG ZeroEnd = min(PageOffset + PAGE_SIZE, End);
+            LARGE_INTEGER PageOff;
+            ULONG_PTR Entry;
+            PUCHAR Address;
+            KIRQL Irql;
+
+            PageOff.QuadPart = PageOffset;
+            Entry = MmGetPageEntrySectionSegment(Segment, &PageOff);
+
+            /* A read in flight would assign the old contents after us. Dropping the lock invalidates the
+             * enumeration, so restart it after the wait. */
+            if (MM_IS_WAIT_PTE(Entry))
+            {
+                MmUnlockSectionSegment(Segment);
+                KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                MmLockSectionSegment(Segment);
+                goto restart;
+            }
+
+            if ((Entry == 0) || IS_SWAP_FROM_SSE(Entry))
+                continue;
+
+            Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
+            RtlZeroMemory(Address + (ZeroStart - PageOffset), (SIZE_T)(ZeroEnd - ZeroStart));
+            MiUnmapPageInHyperSpace(Process, Address, Irql);
+        }
+    }
+
+    MmUnlockSectionSegment(Segment);
+    MmDereferenceSegment(Segment);
+}
+
+/* Read one page of a data segment from its file */
+static
+NTSTATUS
+MiReadSegmentPage(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ LONGLONG Offset,
+    _In_ PFN_NUMBER Page)
+{
+    UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
+    PMDL Mdl = (PMDL)MdlBase;
+    LARGE_INTEGER FileOffset;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
+    KEVENT Event;
+    KIRQL OldIrql;
+
+    RtlZeroMemory(MdlBase, sizeof(MdlBase));
+    MmInitializeMdl(Mdl, NULL, PAGE_SIZE);
+    MmBuildMdlFromPages(Mdl, &Page);
+    Mdl->MdlFlags |= MDL_PAGES_LOCKED | MDL_IO_PAGE_READ;
+
+    FileOffset.QuadPart = Segment->Image.FileOffset + Offset;
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+
+    KeRaiseIrql(APC_LEVEL, &OldIrql);
+    Status = IoPageRead(Segment->FileObject, Mdl, &FileOffset, &Event, &Iosb);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, WrPageIn, KernelMode, FALSE, NULL);
+        Status = Iosb.Status;
+    }
+    if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+        MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+    KeLowerIrql(OldIrql);
+
+    return (Status == STATUS_END_OF_FILE) ? STATUS_SUCCESS : Status;
+}
+
+/*
+ * The work of CcZeroData on a cached file, decided page by page under the segment lock:
+ * - a page in memory keeps its content (data written through the cache or a view, possibly past the valid data
+ *   length, or what the file system returned for it) and is left dirty;
+ * - a page not in memory that lies wholly inside [Start, End) becomes a dirty zero page, read from nothing: the
+ *   caller passes Start = the boundary of valid data, so the whole page is gap. This is why a file system that
+ *   does not zero-fill reads past its valid data length (vfatfs) cannot disclose stale blocks here;
+ * - the one page that straddles Start (only the first) is read, so the bytes below Start (valid data) survive,
+ *   and [Start, End) within it is zeroed. Start is the file system's true valid-data boundary, passed in; a
+ *   caller's cache-map valid data length may lie above Start (vfatfs advances it before the gap is zeroed), so
+ *   it must not raise the zero bound, or old disk bytes in [Start, that length) would survive on the read page.
+ * Returns STATUS_CANT_WAIT if !Wait and a page would have to be brought in.
+ */
+NTSTATUS
+NTAPI
+MmZeroSegmentRange(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End,
+    _In_ BOOLEAN Wait)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+    PMM_SECTION_SEGMENT Segment;
+    NTSTATUS Status = STATUS_SUCCESS;
+    LARGE_INTEGER Offset;
+
+    Segment = MiGrabDataSection(SectionObjectPointer);
+    if (!Segment)
+        return STATUS_NOT_MAPPED_VIEW;
+
+    for (Offset.QuadPart = PAGE_ROUND_DOWN_64(Start); Offset.QuadPart < End; Offset.QuadPart += PAGE_SIZE)
+    {
+        LONGLONG ZeroStart = max(Offset.QuadPart, Start);
+        LONGLONG ZeroEnd = min(Offset.QuadPart + PAGE_SIZE, End);
+        ULONG_PTR Entry;
+        PFN_NUMBER Page;
+
+        MmLockSectionSegment(Segment);
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        while (MM_IS_WAIT_PTE(Entry))
+        {
+            /* A fast-I/O caller cannot block on a read in flight: let it take its own path */
+            if (!Wait)
+            {
+                MmUnlockSectionSegment(Segment);
+                Status = STATUS_CANT_WAIT;
+                goto done;
+            }
+            MmUnlockSectionSegment(Segment);
+            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+            MmLockSectionSegment(Segment);
+            Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        }
+
+        /* Cc's segment: no page-file entries */
+        ASSERT(!IS_SWAP_FROM_SSE(Entry));
+
+        if (Entry != 0)
+        {
+            MmSetPageEntrySectionSegment(Segment, &Offset, DIRTY_SSE(Entry));
+            MmUnlockSectionSegment(Segment);
+            continue;
+        }
+
+        if (!Wait)
+        {
+            MmUnlockSectionSegment(Segment);
+            Status = STATUS_CANT_WAIT;
+            break;
+        }
+
+        /* Keep everybody else off this page while it is read or zeroed */
+        MmSetPageEntrySectionSegment(Segment, &Offset, MAKE_SWAP_SSE(MM_WAIT_ENTRY));
+        MmUnlockSectionSegment(Segment);
+
+        /* The page comes zeroed. Read only the one page that straddles Start, to keep its bytes below Start */
+        Status = MmRequestPageMemoryConsumer(MC_USER, TRUE, &Page);
+        if (NT_SUCCESS(Status) && (Offset.QuadPart < Start))
+        {
+            Status = MiReadSegmentPage(Segment, Offset.QuadPart, Page);
+            if (NT_SUCCESS(Status) && (ZeroStart < ZeroEnd))
+            {
+                KIRQL Irql;
+                PUCHAR Address = MiMapPageInHyperSpace(Process, Page, &Irql);
+
+                RtlZeroMemory(Address + (ZeroStart - Offset.QuadPart), (SIZE_T)(ZeroEnd - ZeroStart));
+                MiUnmapPageInHyperSpace(Process, Address, Irql);
+            }
+            if (!NT_SUCCESS(Status))
+                MmReleasePageMemoryConsumer(MC_USER, Page);
+        }
+
+        MmLockSectionSegment(Segment);
+        ASSERT(MM_IS_WAIT_PTE(MmGetPageEntrySectionSegment(Segment, &Offset)));
+        MmSetPageEntrySectionSegment(Segment, &Offset, NT_SUCCESS(Status) ? DIRTY_SSE(MAKE_SSE(Page << PAGE_SHIFT, 0)) : 0);
+        MmUnlockSectionSegment(Segment);
+
+        if (!NT_SUCCESS(Status))
+            break;
+    }
+
+done:
+    MmDereferenceSegment(Segment);
+    return Status;
+}
+
 /* Like CcPurgeCache but for the in-memory segment */
 BOOLEAN
 NTAPI
