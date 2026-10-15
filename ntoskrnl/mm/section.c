@@ -4736,6 +4736,13 @@ MmMapViewOfSection(
 
         *ViewSize = PAGE_ROUND_UP(*ViewSize);
 
+        /* Nothing left to map: a section of size 0, or a view that starts at its end */
+        if (*ViewSize == 0)
+        {
+            Status = STATUS_INVALID_VIEW_SIZE;
+            goto Exit;
+        }
+
         if (ZeroBits)
         {
             if (*BaseAddress)
