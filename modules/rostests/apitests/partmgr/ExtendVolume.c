@@ -17,6 +17,11 @@
 #include "precomp.h"
 #include <winioctl.h>
 #include <ntddstor.h>
+#include <wingdi.h>
+#include <winuser.h>
+#include <winreg.h>
+#include <setupapi.h>
+#include <cfgmgr32.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -223,6 +228,69 @@ static BOOL BootCopyAt(ULONG Disk, LONGLONG Offset, LONGLONG Sectors)
     CloseHandle(Handle);
     VirtualFree(Sector, 0, MEM_RELEASE);
     return Ok;
+}
+
+/* GUID_DEVINTERFACE_VOLUME */
+static const GUID VolumeInterfaceGuid = { 0x53f5630d, 0xb6bf, 0x11d0, { 0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b } };
+
+/* The device instance of the volume interface whose storage device number is Number's, or 0. */
+static DEVINST VolumeDevInst(PSTORAGE_DEVICE_NUMBER Number)
+{
+    BYTE Buffer[1024];
+    PSP_DEVICE_INTERFACE_DETAIL_DATA_W Detail = (PVOID)Buffer;
+    SP_DEVICE_INTERFACE_DATA Interface;
+    SP_DEVINFO_DATA Device;
+    STORAGE_DEVICE_NUMBER Other;
+    DEVINST Instance = 0;
+    DWORD Index, Returned;
+    HDEVINFO Set;
+    HANDLE Handle;
+
+    Set = SetupDiGetClassDevsW(&VolumeInterfaceGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (Set == INVALID_HANDLE_VALUE)
+        return 0;
+    Interface.cbSize = sizeof(Interface);
+    for (Index = 0; !Instance && SetupDiEnumDeviceInterfaces(Set, NULL, &VolumeInterfaceGuid, Index, &Interface); Index++)
+    {
+        Detail->cbSize = sizeof(*Detail);
+        Device.cbSize = sizeof(Device);
+        if (!SetupDiGetDeviceInterfaceDetailW(Set, &Interface, Detail, sizeof(Buffer), NULL, &Device))
+            continue;
+        Handle = CreateFileW(Detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (Handle == INVALID_HANDLE_VALUE)
+            continue;
+        if (DeviceIoControl(Handle, IOCTL_STORAGE_GET_DEVICE_NUMBER, NULL, 0, &Other, sizeof(Other), &Returned, NULL) &&
+            Other.DeviceType == Number->DeviceType && Other.DeviceNumber == Number->DeviceNumber &&
+            Other.PartitionNumber == Number->PartitionNumber)
+        {
+            Instance = Device.DevInst;
+        }
+        CloseHandle(Handle);
+    }
+    SetupDiDestroyDeviceInfoList(Set);
+    return Instance;
+}
+
+/*
+ * An orderly removal of the device under a mounted volume that has an open handle (the test's own
+ * volume handle) is refused, as Windows file systems refuse it, and the volume stays.  On ReactOS
+ * the file system answers the query (it comes through the volume's VPB).
+ */
+static void TestQueryRemoveBusy(PSTORAGE_DEVICE_NUMBER Number)
+{
+    PNP_VETO_TYPE Veto = PNP_VetoTypeUnknown;
+    WCHAR Name[MAX_PATH] = L"";
+    DEVINST Instance = VolumeDevInst(Number);
+    CONFIGRET Result;
+
+    if (!Instance)
+    {
+        skip("No volume device for the scratch volume\n");
+        return;
+    }
+    Result = CM_Query_And_Remove_SubTreeW(Instance, &Veto, Name, RTL_NUMBER_OF(Name), CM_REMOVE_NO_RESTART);
+    ok(Result == CR_REMOVE_VETOED, "The removal of a volume with an open handle was not refused: %lu\n", Result);
+    ok(TotalBytes() != 0, "The volume is gone: %lu\n", GetLastError());
 }
 
 /* TRUE when the volume grew as expected (TestNtfsShrink depends on the free space it added). */
@@ -731,13 +799,17 @@ START_TEST(ExtendVolume)
             TestNtfsFault(&Volume, Number.DeviceNumber, &Part, strtoul(Value, NULL, 10));
         else if (GetEnvironmentVariableA("PARTMGR_TEST_HUGE", Value, sizeof(Value)) && is_reactos())
             TestNtfsHuge(Volume, Number.DeviceNumber, &Part);
-        else if (TestNtfs(Volume, Number.DeviceNumber, &Part))
-        {
-            TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
-            TestNtfsShrinkTable(&Volume, Number.DeviceNumber, &Part);
-        }
         else
-            skip("NTFS volume did not grow: no shrink tests\n");
+        {
+            TestQueryRemoveBusy(&Number);
+            if (TestNtfs(Volume, Number.DeviceNumber, &Part))
+            {
+                TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
+                TestNtfsShrinkTable(&Volume, Number.DeviceNumber, &Part);
+            }
+            else
+                skip("NTFS volume did not grow: no shrink tests\n");
+        }
     }
     else if (!strncmp(FileSystem, "FAT", 3))
         TestFat(&Volume, Number.DeviceNumber, &Part, FileSystem);
