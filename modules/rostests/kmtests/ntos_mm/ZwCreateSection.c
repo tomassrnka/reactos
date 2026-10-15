@@ -427,17 +427,43 @@ SimpleErrorChecks(HANDLE FileHandleReadOnly, HANDLE FileHandleWriteOnly, HANDLE 
     Status = ZwQueryInformationFile(FileHandleExecuteOnly, &IoStatusBlock, &FileStandardInfo, sizeof(FILE_STANDARD_INFORMATION), FileStandardInformation);
     if (!skip(NT_SUCCESS(Status), "Cannot query file information\n"))
     {
+        SECTION_BASIC_INFORMATION Sbi;
+        LONGLONG ImageSize = 0;
+
+        /* An image section may be as large as its page-rounded SizeOfImage, whatever
+         * the size of the file; a file can be larger (data after the last section) */
+        MaximumSize.QuadPart = 0;
+        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandleExecuteOnly, STATUS_SUCCESS, NO_HANDLE_CLOSE);
+        if (NT_SUCCESS(Status))
+        {
+            Status = ZwQuerySection(Section, SectionBasicInformation, &Sbi, sizeof(Sbi), NULL);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+                ImageSize = ROUND_TO_PAGES(Sbi.Size.QuadPart);
+            ZwClose(Section);
+            Section = NULL;
+        }
+        ok(ImageSize != 0, "No image size\n");
+
+#define IMAGE_SIZE_STATUS(Size) (((Size) <= ImageSize) ? STATUS_SUCCESS : STATUS_SECTION_TOO_BIG)
         //as big as file
         MaximumSize = FileStandardInfo.EndOfFile;
-        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandleExecuteOnly, STATUS_SUCCESS, STATUS_SUCCESS);
+        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandleExecuteOnly, IMAGE_SIZE_STATUS(MaximumSize.QuadPart), STATUS_SUCCESS);
 
         //less than file
         MaximumSize.QuadPart = FileStandardInfo.EndOfFile.QuadPart - 2;
-        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandleExecuteOnly, STATUS_SUCCESS, STATUS_SUCCESS);
+        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandleExecuteOnly, IMAGE_SIZE_STATUS(MaximumSize.QuadPart), STATUS_SUCCESS);
 
         //larger than file
         MaximumSize.QuadPart = FileStandardInfo.EndOfFile.QuadPart + 2;
+        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandleExecuteOnly, IMAGE_SIZE_STATUS(MaximumSize.QuadPart), STATUS_SUCCESS);
+
+        //as big as the image, and one byte more
+        MaximumSize.QuadPart = ImageSize;
         CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandleExecuteOnly, STATUS_SUCCESS, STATUS_SUCCESS);
+        MaximumSize.QuadPart = ImageSize + 1;
+        CREATE_SECTION(Section, SECTION_ALL_ACCESS, NULL, MaximumSize, PAGE_EXECUTE_READ, SEC_IMAGE, FileHandleExecuteOnly, STATUS_SECTION_TOO_BIG, IGNORE);
+#undef IMAGE_SIZE_STATUS
 
         //0
         MaximumSize.QuadPart = 0;
