@@ -12,6 +12,7 @@ extern void func_CancelIoEx(void);
 extern void func_ApplicationRestart(void);
 extern void func_AppModel(void);
 extern void func_ConsoleCP(void);
+extern void func_ConsoleCtrlEventRace(void);
 extern void func_CopyFile2(void);
 extern void func_CopyFile2Identity(void);
 extern void func_CreateEventMutexEx(void);
@@ -134,6 +135,7 @@ const struct test winetest_testlist[] =
     { "ApplicationRestart",          func_ApplicationRestart },
     { "AppModel",                    func_AppModel },
     { "ConsoleCP",                   func_ConsoleCP },
+    { "ConsoleCtrlEventRace",        func_ConsoleCtrlEventRace },
     { "CopyFile2",                   func_CopyFile2 },
     { "CopyFile2Identity",           func_CopyFile2Identity },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },

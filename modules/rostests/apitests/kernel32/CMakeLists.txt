@@ -11,6 +11,7 @@ list(APPEND SOURCE
     ApplicationRestart.c
     AppModel.c
     ConsoleCP.c
+    ConsoleCtrlEventRace.c
     CopyFile2.c
     CopyFile2Identity.c
     CreateEventMutexEx.c
