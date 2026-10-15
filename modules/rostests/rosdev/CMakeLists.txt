@@ -10,3 +10,8 @@ list(APPEND SOURCE
 add_executable(rosdev ${SOURCE})
 set_module_type(rosdev win32gui UNICODE)
 add_importlibs(rosdev ws2_32 advapi32 user32 gdi32 msvcrt kernel32)
+
+# ptrblink: GUI load for the mouse pointer blink test (host/ptrblink-test); not placed on any ISO either
+add_executable(ptrblink ptrblink.c)
+set_module_type(ptrblink win32gui)
+add_importlibs(ptrblink msimg32 user32 gdi32 msvcrt kernel32)
