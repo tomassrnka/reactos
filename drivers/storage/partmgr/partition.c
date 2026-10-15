@@ -17,6 +17,7 @@ PartitionCreateDevice(
     _In_ PPARTITION_INFORMATION_EX PartitionEntry,
     _In_ UINT32 PdoNumber,
     _In_ PARTITION_STYLE PartitionStyle,
+    _In_reads_(PARTITION_INSTANCE_ID_CHARS) PCWCH BaseId,
     _Out_ PDEVICE_OBJECT *PDO)
 {
     PAGED_CODE();
@@ -92,6 +93,9 @@ PartitionCreateDevice(
     partExt->OnDiskNumber = PartitionEntry->PartitionNumber; // the "physical" partition number
     partExt->DetectedNumber = PdoNumber; // counts only partitions with PDO created
     partExt->VolumeNumber = volumeNum;
+    partExt->CreatedVpb = partitionDevice->Vpb;
+    RtlCopyMemory(partExt->BaseId, BaseId, sizeof(partExt->BaseId));
+    partExt->BaseId[PARTITION_INSTANCE_ID_CHARS - 1] = UNICODE_NULL;
 
     // The device is initialized
     partitionDevice->Flags &= ~DO_DEVICE_INITIALIZING;
@@ -434,41 +438,9 @@ PartitionHandleQueryId(
         }
         case BusQueryInstanceID:
         {
-            WCHAR string[64];
-            PFDO_EXTENSION fdoExtension = PartExt->LowerDevice->DeviceExtension;
-
-            PartMgrAcquireLayoutLock(fdoExtension);
-
-            if (fdoExtension->DiskData.PartitionStyle == PARTITION_STYLE_MBR)
-            {
-                _swprintf(string, L"S%08lx_O%I64x_L%I64x",
-                          fdoExtension->DiskData.Mbr.Signature,
-                          PartExt->StartingOffset,
-                          PartExt->PartitionLength);
-            }
-            else
-            {
-                _swprintf(string,
-                          L"S%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02xS_O%I64x_L%I64x",
-                          fdoExtension->DiskData.Gpt.DiskId.Data1,
-                          fdoExtension->DiskData.Gpt.DiskId.Data2,
-                          fdoExtension->DiskData.Gpt.DiskId.Data3,
-                          fdoExtension->DiskData.Gpt.DiskId.Data4[0],
-                          fdoExtension->DiskData.Gpt.DiskId.Data4[1],
-                          fdoExtension->DiskData.Gpt.DiskId.Data4[2],
-                          fdoExtension->DiskData.Gpt.DiskId.Data4[3],
-                          fdoExtension->DiskData.Gpt.DiskId.Data4[4],
-                          fdoExtension->DiskData.Gpt.DiskId.Data4[5],
-                          fdoExtension->DiskData.Gpt.DiskId.Data4[6],
-                          fdoExtension->DiskData.Gpt.DiskId.Data4[7],
-                          PartExt->StartingOffset,
-                          PartExt->PartitionLength);
-            }
-
-            PartMgrReleaseLayoutLock(fdoExtension);
-
-            status = RtlCreateUnicodeString(&idString, string)
-                     ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
+            // the same for the whole life of the device: PnP knows the device by it, also after
+            // IOCTL_DISK_GROW_PARTITION changed its length
+            status = PartMgrQueryInstanceId(PartExt->LowerDevice->DeviceExtension, PartExt, &idString);
             break;
         }
         default:
@@ -542,6 +514,20 @@ PartitionHandlePnp(
         }
         case IRP_MN_REMOVE_DEVICE:
         {
+            PFDO_EXTENSION fdoExtension = partExt->LowerDevice->DeviceExtension;
+            BOOLEAN attached;
+
+            // A partition that is still in the layout (and in PartitionList) stays: only its links
+            // and interfaces go; it is deleted when it leaves the layout or with the disk.
+            PartMgrAcquireLayoutLock(fdoExtension);
+            attached = partExt->Attached;
+            PartMgrReleaseLayoutLock(fdoExtension);
+            if (attached)
+            {
+                status = PartitionHandleRemove(partExt, FALSE);
+                break;
+            }
+            PartMgrReleaseInstanceId(fdoExtension, partExt, FALSE);
             status = PartitionHandleRemove(partExt, TRUE);
             break;
         }
@@ -620,7 +606,9 @@ PartitionHandleDeviceControl(
 
     ASSERT(!partExt->IsFDO);
 
-    if (!partExt->IsEnumerated)
+    // as reads and writes: a partition that left the layout takes no device control, handled here
+    // or passed on, as its storage may belong to another partition now
+    if (!partExt->IsEnumerated || !partExt->Attached)
     {
         Irp->IoStatus.Status = STATUS_DEVICE_DOES_NOT_EXIST;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
