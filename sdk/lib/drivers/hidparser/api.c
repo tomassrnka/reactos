@@ -404,9 +404,10 @@ HidParser_GetUsagesWithReport(
 
         //
         // a zero-width field carries no bits; skip it (it would otherwise read
-        // one byte past the report)
+        // one byte past the report). A wide field (> 32 bits) is not a usage
+        // selector this API can decode; skip it too.
         //
-        if (ReportItem->BitCount == 0)
+        if (ReportItem->BitCount == 0 || ReportItem->BitCount > 32)
             continue;
 
         //

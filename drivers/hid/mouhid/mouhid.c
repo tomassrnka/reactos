@@ -9,6 +9,7 @@
  */
 
 #include "mouhid.h"
+#include "mouscale.h"
 
 static USHORT MouHid_ButtonUpFlags[] =
 {
@@ -31,29 +32,6 @@ static USHORT MouHid_ButtonDownFlags[] =
 };
 
 
-/* Map an absolute report value onto the 0..65535 range that win32k expects: LogicalMin gives 0, LogicalMax gives 65535. */
-static
-LONG
-MouHid_ScaleAbsolute(
-    IN ULONG Value,
-    IN PHIDP_VALUE_CAPS Caps)
-{
-    LONGLONG Range = (LONGLONG)Caps->LogicalMax - Caps->LogicalMin;
-    LONGLONG Position;
-
-    /* signed fields come back as raw bits */
-    if (Caps->LogicalMin < 0 && Caps->BitSize > 0 && Caps->BitSize < 32)
-        Value = (ULONG)((LONG)(Value << (32 - Caps->BitSize)) >> (32 - Caps->BitSize));
-
-    Position = (LONGLONG)(LONG)Value - Caps->LogicalMin;
-    if (Range <= 0 || Position <= 0)
-        return 0;
-    if (Position >= Range)
-        return VIRTUAL_SCREEN_SIZE_X - 1;
-
-    return (LONG)((Position * (VIRTUAL_SCREEN_SIZE_X - 1) + Range / 2) / Range);
-}
-
 VOID
 MouHid_GetButtonMove(
     IN PMOUHID_DEVICE_EXTENSION DeviceExtension,
@@ -61,7 +39,7 @@ MouHid_GetButtonMove(
     OUT PLONG LastY)
 {
     NTSTATUS Status;
-    ULONG ValueX, ValueY;
+    ULONG ValueX = 0, ValueY = 0;
 
     /* init result */
     *LastX = 0;
@@ -97,15 +75,11 @@ MouHid_GetButtonMove(
                                         DeviceExtension->Report,
                                         DeviceExtension->ReportLength);
 
-                /* FIXME handle error */
-                ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-                /* absolute pointing devices values need be in range 0 - 0xffff */
-                ASSERT(DeviceExtension->ValueCapsX.LogicalMax > 0);
-                ASSERT(DeviceExtension->ValueCapsX.LogicalMax > DeviceExtension->ValueCapsX.LogicalMin);
-
-                /* convert to logical range */
-                *LastX = MouHid_ScaleAbsolute(ValueX, &DeviceExtension->ValueCapsX);
+                /* failed extraction or an invalid logical range gives no movement */
+                *LastX = MouHid_ScaleAbsolute(Status, ValueX,
+                                               DeviceExtension->ValueCapsX.LogicalMin,
+                                               DeviceExtension->ValueCapsX.LogicalMax,
+                                               VIRTUAL_SCREEN_SIZE_X);
             }
         }
     }
@@ -121,15 +95,11 @@ MouHid_GetButtonMove(
                                     DeviceExtension->Report,
                                     DeviceExtension->ReportLength);
 
-        /* FIXME handle error */
-        ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-        /* absolute pointing devices values need be in range 0 - 0xffff */
-        ASSERT(DeviceExtension->ValueCapsX.LogicalMax > 0);
-        ASSERT(DeviceExtension->ValueCapsX.LogicalMax > DeviceExtension->ValueCapsX.LogicalMin);
-
-        /* convert to logical range */
-        *LastX = MouHid_ScaleAbsolute(ValueX, &DeviceExtension->ValueCapsX);
+        /* failed extraction or an invalid logical range gives no movement */
+        *LastX = MouHid_ScaleAbsolute(Status, ValueX,
+                                       DeviceExtension->ValueCapsX.LogicalMin,
+                                       DeviceExtension->ValueCapsX.LogicalMax,
+                                       VIRTUAL_SCREEN_SIZE_X);
     }
 
     if (!DeviceExtension->MouseAbsolute)
@@ -162,15 +132,11 @@ MouHid_GetButtonMove(
                                         DeviceExtension->Report,
                                         DeviceExtension->ReportLength);
 
-                /* FIXME handle error */
-                ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-                /* absolute pointing devices values need be in range 0 - 0xffff */
-                ASSERT(DeviceExtension->ValueCapsY.LogicalMax > 0);
-                ASSERT(DeviceExtension->ValueCapsY.LogicalMax > DeviceExtension->ValueCapsY.LogicalMin);
-
-                /* convert to logical range */
-                *LastY = MouHid_ScaleAbsolute(ValueY, &DeviceExtension->ValueCapsY);
+                /* failed extraction or an invalid logical range gives no movement */
+                *LastY = MouHid_ScaleAbsolute(Status, ValueY,
+                                               DeviceExtension->ValueCapsY.LogicalMin,
+                                               DeviceExtension->ValueCapsY.LogicalMax,
+                                               VIRTUAL_SCREEN_SIZE_Y);
             }
         }
     }
@@ -186,15 +152,11 @@ MouHid_GetButtonMove(
                                 DeviceExtension->Report,
                                 DeviceExtension->ReportLength);
 
-        /* FIXME handle error */
-        ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-        /* absolute pointing devices values need be in range 0 - 0xffff */
-        ASSERT(DeviceExtension->ValueCapsY.LogicalMax > 0);
-        ASSERT(DeviceExtension->ValueCapsY.LogicalMax > DeviceExtension->ValueCapsY.LogicalMin);
-
-        /* convert to logical range */
-        *LastY = MouHid_ScaleAbsolute(ValueY, &DeviceExtension->ValueCapsY);
+        /* failed extraction or an invalid logical range gives no movement */
+        *LastY = MouHid_ScaleAbsolute(Status, ValueY,
+                                       DeviceExtension->ValueCapsY.LogicalMin,
+                                       DeviceExtension->ValueCapsY.LogicalMax,
+                                       VIRTUAL_SCREEN_SIZE_Y);
     }
 }
 

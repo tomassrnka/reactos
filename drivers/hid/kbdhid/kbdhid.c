@@ -155,7 +155,13 @@ KbdHid_ReadCompletion(
                               DeviceExtension->PreparsedData,
                               DeviceExtension->Report,
                               DeviceExtension->ReportLength);
-    ASSERT(Status == HIDP_STATUS_SUCCESS);
+    if (Status != HIDP_STATUS_SUCCESS)
+    {
+        /* the usage list is not valid for this report: drop it, keep reading */
+        DPRINT1("[KBDHID] HidP_GetUsagesEx failed with %x, report dropped\n", Status);
+        KbdHid_InitiateRead(DeviceExtension);
+        return STATUS_MORE_PROCESSING_REQUIRED;
+    }
 
     /* FIXME check if needs mapping */
 
