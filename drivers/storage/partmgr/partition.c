@@ -606,7 +606,9 @@ PartitionHandleDeviceControl(
 
     ASSERT(!partExt->IsFDO);
 
-    if (!partExt->IsEnumerated)
+    // as reads and writes: a partition that left the layout takes no device control, handled here
+    // or passed on, as its storage may belong to another partition now
+    if (!partExt->IsEnumerated || !partExt->Attached)
     {
         Irp->IoStatus.Status = STATUS_DEVICE_DOES_NOT_EXIST;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);

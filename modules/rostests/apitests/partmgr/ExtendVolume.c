@@ -527,7 +527,7 @@ static void TestNtfsShrinkTable(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATI
     LONGLONG Target = 0, Start = Part->StartingOffset.QuadPart;
     WCHAR Guid[MAX_PATH], Path[MAX_PATH];
     DWORD Returned, i;
-    HANDLE File, Handle, RaceThreadHandle = NULL;
+    HANDLE File, Handle, RaceThreadHandle = NULL, OldPartition;
     BOOL Found = FALSE, Back = FALSE;
     RACE Race = { INVALID_HANDLE_VALUE, 0, 0, 0 };
 
@@ -550,6 +550,11 @@ static void TestNtfsShrinkTable(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATI
     ok(FlushFileBuffers(*Volume), "Flushing the volume failed: %lu\n", GetLastError());
     CloseHandle(*Volume);
     *Volume = INVALID_HANDLE_VALUE;
+
+    /* A handle on the old partition device itself (no access: no mount), for a device control after the table changed. */
+    sprintf((PCHAR)Buffer, "\\\\.\\GLOBALROOT\\Device\\Harddisk%lu\\Partition%lu", Disk, Part->PartitionNumber);
+    OldPartition = CreateFileA((PCSTR)Buffer, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(OldPartition != INVALID_HANDLE_VALUE, "Opening %s failed: %lu\n", (PCSTR)Buffer, GetLastError());
 
     /* A file of the old volume is written, flushed and renamed all the time while it goes away: the
      * requests that are under way then must fail, not crash. */
@@ -607,6 +612,16 @@ static void TestNtfsShrinkTable(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATI
     }
     if (Race.File != INVALID_HANDLE_VALUE)
         CloseHandle(Race.File);
+    if (OldPartition != INVALID_HANDLE_VALUE)
+    {
+        PARTITION_INFORMATION_EX Info;
+
+        /* ReactOS: the partition device left the layout and takes no device control (behaviour on Windows not measured) */
+        if (is_reactos())
+            ok(!DeviceIoControl(OldPartition, IOCTL_DISK_GET_PARTITION_INFO_EX, NULL, 0, &Info, sizeof(Info), &Returned, NULL),
+               "The old partition device still answers IOCTL_DISK_GET_PARTITION_INFO_EX\n");
+        CloseHandle(OldPartition);
+    }
     ok(Back, "No volume with a %I64d-byte partition at %I64d\n", Target * 512, Start);
     if (!Back)
         return;
