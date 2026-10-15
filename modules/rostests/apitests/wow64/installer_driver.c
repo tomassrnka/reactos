@@ -212,8 +212,13 @@ int wmain(int argc, WCHAR **argv)
     _snwprintf(Command, 4096, L"\"%ls\"", argv[Executable]);
     for (i = Executable + 1; i < argc; ++i)
     {
+        BOOL Quote = !argv[i][0] || wcspbrk(argv[i], L" \t") != NULL;
         if (wcslen(Command) + wcslen(argv[i]) + 4 >= 4096) return 2;
-        wcscat(Command, L" \""); wcscat(Command, argv[i]); wcscat(Command, L"\"");
+        /* Some tools parse their option prefixes before removing quotes.
+         * Quote paths/values only when their whitespace requires it. */
+        wcscat(Command, Quote ? L" \"" : L" ");
+        wcscat(Command, argv[i]);
+        if (Quote) wcscat(Command, L"\"");
     }
     if (Capture)
     {
