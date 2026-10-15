@@ -9,7 +9,9 @@ list(APPEND SOURCE
     BindIoCompletionCallback.c
     CancelIoEx.c
     ApplicationRestart.c
+    ConsoleBufferSwitch.c
     ConsoleCP.c
+    ConsoleCreateRace.c
     ConsoleWriteLatency.c
     CreateEventMutexEx.c
     CreateFile2.c
