@@ -44,6 +44,7 @@ list(APPEND SOURCE
     MenuItemData.c
     MenuUI.c
     MessageStateAnalyzer.c
+    MsgWaitForMultipleObjectsEx.c
     NCRButtonDown.c
     NcPaintRgn.c
     NextDlgItem.c
