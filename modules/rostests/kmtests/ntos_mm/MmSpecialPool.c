@@ -13,9 +13,17 @@
  *   PoolTag         REG_DWORD  0x70536D4B ("KmSp")
  *   SpecialPoolTags REG_SZ     "KmS? Kmz* KmP"
  *   PoolTagOverruns REG_DWORD  1 or absent (guard page after the data), 0 (guard page before it)
- * Without that configuration the test skips. The hidden tests -MmSpecialPoolOverrun,
- * -MmSpecialPoolUnderrun and -MmSpecialPoolUseAfterFree make a bad access on purpose:
- * each one must stop the system with PAGE_FAULT_IN_NONPAGED_AREA (0x50).
+ * Without that configuration the test skips. The hidden tests make a bad access on purpose and
+ * must stop the system at once: -MmSpecialPoolOverrun and -MmSpecialPoolUnderrun with
+ * PAGE_FAULT_BEYOND_END_OF_ALLOCATION (0xCD); -MmSpecialPoolUseAfterFree, -MmSpecialPoolUseAfterFreeDpc
+ * (at DISPATCH_LEVEL) and -MmSpecialPoolUseAfterFreeNoInts (interrupts off) with
+ * PAGE_FAULT_IN_FREED_SPECIAL_POOL (0xCC), not a hang or another code.
+ *
+ * The hidden test -MmSpecialPoolMalformed checks that malformed values are ignored. Boot it with
+ * one of these instead of the configuration above:
+ *   M1: PoolTag REG_BINARY 4B 6D 53 70 ("KmSp"), PoolTagOverruns REG_BINARY 00, SpecialPoolTags REG_SZ "ABCDEFGH Kmz*"
+ *   M2: SpecialPoolTags REG_DWORD 0x2A (would read as "*", every tag), nothing else
+ * Only "Kmz*" in M1 may select anything.
  */
 
 #define TAG_EXACT       'pSmK' /* "KmSp", PoolTag */
@@ -314,4 +322,87 @@ START_TEST(MmSpecialPoolUseAfterFree)
     trace("Writing %p after its free\n", Buffer);
     *(volatile UCHAR *)Buffer = 0xF1;
     ok(0, "The write after the free did not fault\n");
+}
+
+START_TEST(MmSpecialPoolUseAfterFreeDpc)
+{
+    PUCHAR Buffer = AllocateForFault();
+    KIRQL OldIrql;
+
+    if (!Buffer)
+        return;
+
+    ExFreePoolWithTag(Buffer, TAG_EXACT);
+    trace("Reading %p after its free, at DISPATCH_LEVEL\n", Buffer);
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    (void)*(volatile UCHAR *)Buffer;
+    KeLowerIrql(OldIrql);
+    ok(0, "The read after the free did not fault\n");
+}
+
+START_TEST(MmSpecialPoolUseAfterFreeNoInts)
+{
+    PUCHAR Buffer = AllocateForFault();
+
+    if (!Buffer)
+        return;
+
+    ExFreePoolWithTag(Buffer, TAG_EXACT);
+    trace("Reading %p after its free, with interrupts off\n", Buffer);
+    _disable();
+    (void)*(volatile UCHAR *)Buffer;
+    _enable();
+    ok(0, "The read after the free did not fault\n");
+}
+
+/* Selected tags and the ones a mis-parse could produce: the long token, its halves, "*" and the wrongly typed PoolTag */
+START_TEST(MmSpecialPoolMalformed)
+{
+    static const struct { ULONG Tag; PCSTR Why; } NotSelected[] =
+    {
+        { 'pSmK', "PoolTag of the wrong type" },
+        { 'DCBA', "first four characters of a long token" },
+        { 'HGFE', "last four characters of a long token" },
+        { 'wZyX', "an unrelated tag (\"*\" from a REG_DWORD)" },
+    };
+    ULONG DataSize, Type, i, Special;
+    WCHAR List[64] = { 0 };
+    BOOLEAN ExpectKmz;
+    PVOID Buffer;
+
+    ExpectKmz = QueryMemoryManagementValue(L"SpecialPoolTags", List, sizeof(List) - sizeof(WCHAR), &DataSize, &Type) &&
+                (Type == REG_SZ) && (wcscmp(List, L"ABCDEFGH Kmz*") == 0);
+    if (!ExpectKmz && !(QueryMemoryManagementValue(L"SpecialPoolTags", List, sizeof(List), &DataSize, &Type) && Type == REG_DWORD))
+    {
+        skip(FALSE, "Not booted with a malformed configuration (M1 or M2, see the file header)\n");
+        return;
+    }
+
+    /* PoolTagOverruns of the wrong type must leave the default: data at the end of the page */
+    CatchOverruns = TRUE;
+    trace("Configuration %s\n", ExpectKmz ? "M1" : "M2");
+
+    for (i = 0; i < RTL_NUMBER_OF(NotSelected); i++)
+    {
+        Buffer = ExAllocatePoolWithTag(NonPagedPool, 40, NotSelected[i].Tag);
+        ok(Buffer != NULL, "[%.4s] allocation failed\n", (PCSTR)&NotSelected[i].Tag);
+        if (!Buffer)
+            continue;
+        Special = LooksSpecial(Buffer, 40);
+        ExFreePoolWithTag(Buffer, NotSelected[i].Tag);
+        if (Special)
+        {
+            /* An ordinary block may end a page by chance; a second one rules that out */
+            Buffer = ExAllocatePoolWithTag(NonPagedPool, 56, NotSelected[i].Tag);
+            Special = Buffer && LooksSpecial(Buffer, 56);
+            if (Buffer) ExFreePoolWithTag(Buffer, NotSelected[i].Tag);
+        }
+        ok(!Special, "[%.4s] came from special pool: %s\n", (PCSTR)&NotSelected[i].Tag, NotSelected[i].Why);
+    }
+
+    if (ExpectKmz)
+    {
+        TestSelected(NonPagedPool, TAG_ANY_REST, 40);
+        TestSelected(PagedPool, TAG_ANY_REST, 2000);
+    }
 }
