@@ -199,6 +199,8 @@ VOID FASTCALL DC_vFinishBlit(PDC pdc1, PDC pdc2);
 VOID FASTCALL DC_vPrepareDCsForBlit(PDC pdcDest, const RECT* rcDest, PDC pdcSrc, const RECT* rcSrc);
 
 VOID NTAPI DC_vRestoreDC(IN PDC pdc, INT iSaveLevel);
+BOOL FASTCALL DC_bSurfaceInSavedState(_In_ PDC pdc, _In_ PSURFACE psurf);
+VOID FASTCALL DC_vReleaseSurface(_In_ PDC pdc, _In_opt_ PSURFACE psurf);
 
 VOID NTAPI DC_vFreeDcAttr(PDC pdc);
 VOID NTAPI DC_vInitDc(PDC pdc, DCTYPE dctype, PPDEVOBJ ppdev);
@@ -248,12 +250,9 @@ VOID
 DC_vSelectSurface(PDC pdc, PSURFACE psurfNew)
 {
     PSURFACE psurfOld = pdc->dclevel.pSurface;
+    /* The mark of the surface (hdc) is not touched here, see DC_vReleaseSurface */
     if (psurfOld)
-    {
-        /* Only the DC that is marked as holding the bitmap clears the mark, not a saved state */
-        InterlockedCompareExchangePointer((PVOID*)&psurfOld->hdc, NULL, pdc->BaseObject.hHmgr);
         SURFACE_ShareUnlockSurface(psurfOld);
-    }
     if (psurfNew)
         GDIOBJ_vReferenceObjectByPointer((POBJ)psurfNew);
     pdc->dclevel.pSurface = psurfNew;

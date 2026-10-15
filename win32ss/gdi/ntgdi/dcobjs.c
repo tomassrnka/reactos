@@ -420,7 +420,7 @@ NtGdiSelectBitmap(
 
         /* Set the bitmap's hdc and check if it was set before */
         hdcOld = InterlockedCompareExchangePointer((PVOID*)&psurfNew->hdc, hdc, 0);
-        if (hdcOld != NULL)
+        if (hdcOld != NULL && !(hdcOld == hdc && DC_bSurfaceInSavedState(pdc, psurfNew)))
         {
             /* The bitmap is already selected into a different DC */
             ASSERT(hdcOld != hdc);
@@ -453,8 +453,8 @@ NtGdiSelectBitmap(
     /* Check if there was a bitmap selected before */
     if (psurfOld)
     {
-        /* Reset hdc of the old bitmap, it isn't selected anymore */
-        InterlockedCompareExchangePointer((PVOID*)&psurfOld->hdc, NULL, pdc->BaseObject.hHmgr);
+        /* Reset hdc of the old bitmap, unless a saved state of the DC holds it */
+        DC_vReleaseSurface(pdc, psurfOld);
 
         /* Dereference the old bitmap */
         SURFACE_ShareUnlockSurface(psurfOld);

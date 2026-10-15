@@ -369,6 +369,11 @@ DC_vCleanup(PVOID ObjectBody)
     DC_vRestoreDC(pdc, 1);
 
     /* Deselect dc objects */
+    if (pdc->dclevel.pSurface)
+    {
+        /* A saved state is not the DC that the bitmap is marked with, so this leaves its bitmap alone */
+        InterlockedCompareExchangePointer((PVOID*)&pdc->dclevel.pSurface->hdc, NULL, pdc->BaseObject.hHmgr);
+    }
     DC_vSelectSurface(pdc, NULL);
     DC_vSelectFillBrush(pdc, NULL);
     DC_vSelectLineBrush(pdc, NULL);
