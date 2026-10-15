@@ -16,6 +16,35 @@ NTAPI
 MouseSafetyOnDrawEnd(
     _Inout_ PPDEVOBJ ppdev);
 
+_Requires_lock_held_(*ppdev->hsemDevLock)
+VOID
+NTAPI
+MouseSafetyOnDrawEnter(
+    _Inout_ PPDEVOBJ ppdev);
+
+_Requires_lock_held_(*ppdev->hsemDevLock)
+BOOL
+NTAPI
+MouseSafetyGetPointerHit(
+    _In_ PPDEVOBJ ppdev,
+    _In_ const RECTL *prclDraw,
+    _In_ const RECTL *prclClip,
+    _Out_ RECTL *prclHit);
+
+_Requires_lock_held_(*ppdev->hsemDevLock)
+BOOL
+NTAPI
+MouseSafetyBeginUnderDraw(
+    _In_ PPDEVOBJ ppdev,
+    _Out_ SURFOBJ **ppsoSave,
+    _Out_ POINTL *pptlOrigin);
+
+_Requires_lock_held_(*ppdev->hsemDevLock)
+VOID
+NTAPI
+MouseSafetyEndUnderDraw(
+    _Inout_ PPDEVOBJ ppdev);
+
 ULONG
 NTAPI
 IntEngSetPointerShape(
