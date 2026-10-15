@@ -233,3 +233,7 @@ add_importlibs(wow64_pipe_connect msvcrt kernel32)
 add_executable(wow64_time_zone EXCLUDE_FROM_ALL time_zone.c)
 set_module_type(wow64_time_zone win32cui)
 add_importlibs(wow64_time_zone msvcrt kernel32)
+
+add_executable(wow64_socket_event EXCLUDE_FROM_ALL socket_event.c)
+set_module_type(wow64_socket_event win32cui)
+add_importlibs(wow64_socket_event ws2_32 msvcrt kernel32 ntdll)

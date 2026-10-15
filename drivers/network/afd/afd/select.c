@@ -19,6 +19,12 @@ typedef struct
 
 typedef struct
 {
+    ULONG Event, PollEvents;
+    NTSTATUS EventStatus[AFD_MAX_EVENTS];
+} AFD_ENUM_NETWORK_EVENTS_INFO32;
+
+typedef struct
+{
     LARGE_INTEGER Timeout;
     ULONG HandleCount, Exclusive;
     AFD_HANDLE32 Handles[1];
@@ -370,12 +376,27 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp ) {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     NTSTATUS Status = STATUS_NO_MEMORY;
-    PAFD_EVENT_SELECT_INFO EventSelectInfo =
-        (PAFD_EVENT_SELECT_INFO)LockRequest( Irp, IrpSp, FALSE, NULL );
+    PAFD_EVENT_SELECT_INFO EventSelectInfo;
+    HANDLE EventHandle;
+    ULONG Events;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Guest = IoIs32bitProcess(Irp);
+#endif
     PAFD_FCB FCB = FileObject->FsContext;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest && (!IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ||
+                  IrpSp->Parameters.DeviceIoControl.InputBufferLength < 2 * sizeof(ULONG)))
+    {
+        if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
+        return UnlockAndMaybeComplete(FCB,
+            IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ? STATUS_BUFFER_TOO_SMALL : STATUS_INVALID_PARAMETER,
+            Irp, 0);
+    }
+#endif
+    EventSelectInfo = LockRequest(Irp, IrpSp, FALSE, NULL);
     if( !SocketAcquireStateLock( FCB ) ) {
         return LostSocket( Irp );
     }
@@ -384,16 +405,25 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
          return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp,
                                         0 );
     }
-    AFD_DbgPrint(MID_TRACE,("Called (Event %p Triggers %u)\n",
-                            EventSelectInfo->EventObject,
-                            EventSelectInfo->Events));
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest)
+    {
+        EventHandle = (HANDLE)(LONG_PTR)(LONG)((PULONG)EventSelectInfo)[0];
+        Events = ((PULONG)EventSelectInfo)[1];
+    }
+    else
+#endif
+    {
+        EventHandle = EventSelectInfo->EventObject;
+        Events = EventSelectInfo->Events;
+    }
+    AFD_DbgPrint(MID_TRACE,("Called (Event %p Triggers %u)\n", EventHandle, Events));
 
     if( FCB->EventSelect ) ObDereferenceObject( FCB->EventSelect );
     FCB->EventSelect = NULL;
 
-    if( EventSelectInfo->EventObject && EventSelectInfo->Events ) {
-        Status = ObReferenceObjectByHandle( (PVOID)EventSelectInfo->
-                                            EventObject,
+    if( EventHandle && Events ) {
+        Status = ObReferenceObjectByHandle( EventHandle,
                                             EVENT_ALL_ACCESS,
                                             *ExEventObjectType,
                                             UserMode,
@@ -406,7 +436,7 @@ AfdEventSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             FCB->EventSelect = NULL;
         }
         else
-            FCB->EventSelectTriggers = EventSelectInfo->Events;
+            FCB->EventSelectTriggers = Events;
     } else {
         FCB->EventSelect = NULL;
         FCB->EventSelectTriggers = 0;
@@ -432,8 +462,11 @@ NTSTATUS NTAPI
 AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                PIO_STACK_LOCATION IrpSp ) {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
-    PAFD_ENUM_NETWORK_EVENTS_INFO EnumReq =
-        (PAFD_ENUM_NETWORK_EVENTS_INFO)LockRequest( Irp, IrpSp, TRUE, NULL );
+    PAFD_ENUM_NETWORK_EVENTS_INFO EnumReq;
+    HANDLE EventHandle;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Guest = IoIs32bitProcess(Irp);
+#endif
     PAFD_FCB FCB = FileObject->FsContext;
     PKEVENT UserEvent;
     NTSTATUS Status;
@@ -442,6 +475,17 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     AFD_DbgPrint(MID_TRACE,("Called (FCB %p)\n", FCB));
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest && (!IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ||
+                  IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_ENUM_NETWORK_EVENTS_INFO32)))
+    {
+        if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
+        return UnlockAndMaybeComplete(FCB,
+            IrpSp->Parameters.DeviceIoControl.Type3InputBuffer ? STATUS_BUFFER_TOO_SMALL : STATUS_INVALID_PARAMETER,
+            Irp, 0);
+    }
+#endif
+    EnumReq = LockRequest(Irp, IrpSp, TRUE, NULL);
     if( !SocketAcquireStateLock( FCB ) ) {
         return LostSocket( Irp );
     }
@@ -450,10 +494,17 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
          return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
     }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest)
+        EventHandle = (HANDLE)(LONG_PTR)(LONG)((AFD_ENUM_NETWORK_EVENTS_INFO32 *)EnumReq)->Event;
+    else
+#endif
+        EventHandle = EnumReq->Event;
+
     /* An event may optionally be provided for us to clear */
-    if (EnumReq->Event != NULL)
+    if (EventHandle != NULL)
     {
-        Status = ObReferenceObjectByHandle(EnumReq->Event,
+        Status = ObReferenceObjectByHandle(EventHandle,
                                            EVENT_ALL_ACCESS,
                                            *ExEventObjectType,
                                            UserMode,
@@ -471,10 +522,19 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     /* Copy the poll state, masking out disabled events */
-    EnumReq->PollEvents = (FCB->PollState & ~FCB->EventSelectDisabled);
-    RtlCopyMemory( EnumReq->EventStatus,
-                   FCB->PollStatus,
-                   sizeof(EnumReq->EventStatus) );
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Guest)
+    {
+        AFD_ENUM_NETWORK_EVENTS_INFO32 *To = (PVOID)EnumReq;
+        To->PollEvents = FCB->PollState & ~FCB->EventSelectDisabled;
+        RtlCopyMemory(To->EventStatus, FCB->PollStatus, sizeof(To->EventStatus));
+    }
+    else
+#endif
+    {
+        EnumReq->PollEvents = (FCB->PollState & ~FCB->EventSelectDisabled);
+        RtlCopyMemory(EnumReq->EventStatus, FCB->PollStatus, sizeof(EnumReq->EventStatus));
+    }
 
     /* Disable the events that triggered the select until the reenabling function is called */
     FCB->EventSelectDisabled |= (FCB->PollState & FCB->EventSelectTriggers);

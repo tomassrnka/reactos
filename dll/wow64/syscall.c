@@ -648,6 +648,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_AFD_SET_CONTEXT:
         case IOCTL_AFD_GET_CONTEXT_SIZE:
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
+        case IOCTL_AFD_EVENT_SELECT: /* AFD captures event handles and the in/out record. */
+        case IOCTL_AFD_ENUM_NETWORK_EVENTS:
         case IOCTL_AFD_SELECT: /* AFD owns the translated output until completion. */
             break;
         case IOCTL_AFD_ACCEPT:
