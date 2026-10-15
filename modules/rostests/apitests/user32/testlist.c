@@ -38,6 +38,7 @@ extern void func_IsServerSideWindow(void);
 extern void func_IsWindowArranged(void);
 extern void func_KbdLayout(void);
 extern void func_keybd_event(void);
+extern void func_MouseWheel(void);
 extern void func_LoadImage(void);
 extern void func_LoadImageGCC(void);
 extern void func_LoadImagePngIcon(void);
@@ -122,6 +123,7 @@ const struct test winetest_testlist[] =
     { "IsWindowArranged", func_IsWindowArranged },
     { "KbdLayout", func_KbdLayout },
     { "keybd_event", func_keybd_event },
+    { "MouseWheel", func_MouseWheel },
     { "LoadImage", func_LoadImage },
     { "LoadImageGCC", func_LoadImageGCC },
     { "LoadImagePngIcon", func_LoadImagePngIcon },
