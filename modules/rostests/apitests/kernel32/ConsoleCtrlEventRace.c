@@ -14,15 +14,23 @@
  * delivers each event by creating a thread in every process on the console,
  * and process creation and attach look up a process and then lock its console.
  * A child that does not exit in time is stuck in a console server request.
+ *
+ * A second child sends bursts of alternating Ctrl+C and Ctrl+Break events to
+ * its own console and checks that the handler is called once per event, with
+ * no distinct event lost when the console server still holds earlier ones.
+ * Handler threads run concurrently, so only the counts per type are checked.
  */
 #define RACE_MS             15000
 #define SPAWNERS            2
 #define ATTACHERS           2
 #define CHILD_TIMEOUT_MS    (RACE_MS + 60000)
+#define ORDER_BURSTS        200
+#define ORDER_WAIT_MS       10000
+#define ORDER_TIMEOUT_MS    120000
 
 static WCHAR FileName[MAX_PATH];
 static volatile LONG Stop;
-static LONG Events, Spawned, Handled;
+static LONG Events, Spawned, Handled, HandledC, HandledBreak;
 
 static
 BOOL
@@ -50,6 +58,7 @@ CtrlHandler(
 {
     if (CtrlType != CTRL_BREAK_EVENT && CtrlType != CTRL_C_EVENT)
         return FALSE;
+    InterlockedIncrement(CtrlType == CTRL_C_EVENT ? &HandledC : &HandledBreak);
     InterlockedIncrement(&Handled);
     return TRUE;
 }
@@ -179,12 +188,77 @@ RaceChild(VOID)
     ExitProcess(0);
 }
 
+/* Child: bursts of C, Break, C, Break, C; each burst must be handled in full before the next */
+static
+VOID
+OrderChild(VOID)
+{
+    static const DWORD Burst[] =
+    {
+        CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_C_EVENT
+    };
+    LONG WantC, WantBreak;
+    DWORD Start;
+    ULONG i, j;
+
+    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+
+    for (i = 1; i <= ORDER_BURSTS; i++)
+    {
+        for (j = 0; j < _countof(Burst); j++)
+        {
+            if (!GenerateConsoleCtrlEvent(Burst[j], 0))
+                ExitProcess(211);
+        }
+
+        WantC = i * 3;
+        WantBreak = i * 2;
+        Start = GetTickCount();
+        while ((HandledC < WantC || HandledBreak < WantBreak) &&
+               GetTickCount() - Start < ORDER_WAIT_MS)
+        {
+            Sleep(1);
+        }
+        if (HandledC != WantC || HandledBreak != WantBreak)
+            ExitProcess(1000 + i);
+    }
+    ExitProcess(0);
+}
+
+static
+VOID
+RunChild(
+    _In_ PCWSTR Mode,
+    _In_ DWORD TimeoutMs)
+{
+    PROCESS_INFORMATION ProcessInfo;
+    DWORD Wait, ExitCode = 0;
+
+    if (!StartSelf(Mode, CREATE_NEW_CONSOLE, &ProcessInfo))
+    {
+        skip("CreateProcessW failed with %lu\n", GetLastError());
+        return;
+    }
+    CloseHandle(ProcessInfo.hThread);
+    Wait = WaitForSingleObject(ProcessInfo.hProcess, TimeoutMs);
+    ok(Wait == WAIT_OBJECT_0, "The %ls child did not exit within %lu ms (stuck in a console server request)\n",
+       Mode, TimeoutMs);
+    if (Wait != WAIT_OBJECT_0)
+    {
+        TerminateProcess(ProcessInfo.hProcess, 1);
+    }
+    else
+    {
+        GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+        ok(ExitCode == 0, "The %ls child exited with %lu\n", Mode, ExitCode);
+    }
+    CloseHandle(ProcessInfo.hProcess);
+}
+
 START_TEST(ConsoleCtrlEventRace)
 {
     int argc;
     char **argv;
-    PROCESS_INFORMATION ProcessInfo;
-    DWORD Wait, ExitCode = 0;
 
     GetModuleFileNameW(NULL, FileName, _countof(FileName));
 
@@ -195,24 +269,9 @@ START_TEST(ConsoleCtrlEventRace)
         AttachChild(strtoul(argv[3], NULL, 10));
     if (argc >= 3 && !strcmp(argv[2], "race"))
         RaceChild();
+    if (argc >= 3 && !strcmp(argv[2], "order"))
+        OrderChild();
 
-    if (!StartSelf(L"race", CREATE_NEW_CONSOLE, &ProcessInfo))
-    {
-        skip("CreateProcessW failed with %lu\n", GetLastError());
-        return;
-    }
-    CloseHandle(ProcessInfo.hThread);
-    Wait = WaitForSingleObject(ProcessInfo.hProcess, CHILD_TIMEOUT_MS);
-    ok(Wait == WAIT_OBJECT_0, "The child did not exit within %d ms (stuck in a console server request)\n",
-       CHILD_TIMEOUT_MS);
-    if (Wait != WAIT_OBJECT_0)
-    {
-        TerminateProcess(ProcessInfo.hProcess, 1);
-    }
-    else
-    {
-        GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
-        ok(ExitCode == 0, "The child exited with %lu\n", ExitCode);
-    }
-    CloseHandle(ProcessInfo.hProcess);
+    RunChild(L"race", CHILD_TIMEOUT_MS);
+    RunChild(L"order", ORDER_TIMEOUT_MS);
 }
