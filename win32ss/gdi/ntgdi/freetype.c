@@ -4988,6 +4988,53 @@ IntFaceWantsGrayAt(FT_Face Face)
     return (Flags & FT_GASP_DO_GRAY) != 0;
 }
 
+/* The final advance of a glyph, read from a hinted load alone: layout must not depend on a bitmap being built.
+   Simulated bold is included, as FreeType widens a strike by whole pixels and an outline by a fraction. */
+static BOOL
+IntLoadGlyphAdvance(
+    IN PFONT_CACHE_ENTRY Cache,
+    OUT FT_Pos *pAdvanceX,
+    OUT FT_Pos *pAdvanceY)
+{
+    FT_Face Face = Cache->Hashed.Face;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    if (FT_Load_Glyph(Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT))
+        return FALSE;
+
+    if (Cache->Hashed.Aspect.Emu.Bold)
+        FT_GlyphSlot_Embolden(Face->glyph);
+
+    *pAdvanceX = Face->glyph->advance.x;
+    *pAdvanceY = Face->glyph->advance.y;
+    return TRUE;
+}
+
+/* A glyph's advance for measuring: the cached bitmap's when it exists, else a load. Never builds a bitmap. */
+static BOOL
+IntGetGlyphAdvance(
+    IN OUT PFONT_CACHE_ENTRY Cache,
+    OUT FT_Pos *pAdvanceX,
+    OUT FT_Pos *pAdvanceY)
+{
+    FT_BitmapGlyph realglyph;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    Cache->dwHash = IntGetHash(&Cache->Hashed, sizeof(Cache->Hashed) / sizeof(DWORD));
+
+    realglyph = IntFindGlyphCache(Cache);
+    if (realglyph)
+    {
+        *pAdvanceX = realglyph->root.advance.x >> 10;
+        *pAdvanceY = realglyph->root.advance.y >> 10;
+        return TRUE;
+    }
+
+    return IntLoadGlyphAdvance(Cache, pAdvanceX, pAdvanceY);
+}
+
 static FT_BitmapGlyph
 IntGetRealGlyph(
     IN OUT PFONT_CACHE_ENTRY Cache)
@@ -5022,20 +5069,7 @@ IntGetRealGlyph(
     {
         /* Layout must not depend on how the glyph is drawn: take the advance from the regular hinted load, which
            for a font with embedded strikes can differ from the outline's */
-        error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
-        if (!error)
-        {
-            /* The advance that counts is the final one, simulated bold included: FreeType widens a strike by whole
-               pixels and an outline by a fraction, so the simulation has to run on this load as well */
-            if (Cache->Hashed.Aspect.Emu.Bold)
-                FT_GlyphSlot_Embolden(Cache->Hashed.Face->glyph);
-            if (Cache->Hashed.Aspect.Emu.Italic)
-                FT_GlyphSlot_Oblique(Cache->Hashed.Face->glyph);
-
-            AdvanceX = Cache->Hashed.Face->glyph->advance.x;
-            AdvanceY = Cache->Hashed.Face->glyph->advance.y;
-            bKeepAdvance = TRUE;
-        }
+        bKeepAdvance = IntLoadGlyphAdvance(Cache, &AdvanceX, &AdvanceY);
 
         /* Embedded bitmaps are bilevel; smoothed text uses the outlines */
         if (RenderMode == FT_RENDER_MODE_LCD)
@@ -5095,7 +5129,7 @@ TextIntGetTextExtentPoint(
     _In_ FLONG fl)
 {
     PFONTGDI FontGDI;
-    FT_BitmapGlyph realglyph;
+    FT_Pos AdvanceX = 0, AdvanceY = 0;
     INT glyph_index, i, previous, nTenthsOfDegrees;
     ULONGLONG TotalWidth64 = 0;
     LOGFONTW *plf;
@@ -5161,9 +5195,12 @@ TextIntGetTextExtentPoint(
                                                (fl & GTEF_INDICES));
         Cache.Hashed.GlyphIndex = glyph_index;
 
-        realglyph = IntGetRealGlyph(&Cache);
-        if (!realglyph)
-            break;
+        /* A glyph without an advance fails the call; a partial total would pass for the width */
+        if (!IntGetGlyphAdvance(&Cache, &AdvanceX, &AdvanceY))
+        {
+            IntUnLockFreeType();
+            return FALSE;
+        }
 
         /* Retrieve kerning distance */
         if (use_kerning && previous && glyph_index)
@@ -5173,7 +5210,7 @@ TextIntGetTextExtentPoint(
             TotalWidth64 += delta.x;
         }
 
-        TotalWidth64 += realglyph->root.advance.x >> 10;
+        TotalWidth64 += AdvanceX;
 
         if (((TotalWidth64 + 32) >> 6) <= MaxExtent && NULL != Fit)
         {
@@ -6710,7 +6747,7 @@ IntGetTextDisposition(
 {
     LONGLONG X64 = 0, Y64 = 0;
     INT i, glyph_index;
-    FT_BitmapGlyph realglyph;
+    FT_Pos AdvanceX = 0, AdvanceY = 0;
     FT_Face face = Cache->Hashed.Face;
     BOOL use_kerning = FT_HAS_KERNING(face);
     ULONG previous = 0;
@@ -6737,8 +6774,8 @@ IntGetTextDisposition(
                                                (fuOptions & ETO_GLYPH_INDEX));
         Cache->Hashed.GlyphIndex = glyph_index;
 
-        realglyph = IntGetRealGlyph(Cache);
-        if (!realglyph)
+        /* Only a width taken from the glyphs needs their advances */
+        if (NULL == Dx && !IntGetGlyphAdvance(Cache, &AdvanceX, &AdvanceY))
             return FALSE;
 
         /* Retrieve kerning distance */
@@ -6751,8 +6788,8 @@ IntGetTextDisposition(
 
         if (NULL == Dx)
         {
-            X64 += realglyph->root.advance.x >> 10;
-            Y64 -= realglyph->root.advance.y >> 10;
+            X64 += AdvanceX;
+            Y64 -= AdvanceY;
         }
         else if (fuOptions & ETO_PDY)
         {
