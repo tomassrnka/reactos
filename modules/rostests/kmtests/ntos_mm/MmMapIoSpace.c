@@ -18,10 +18,11 @@
 #define IA32_PAT            0x277
 #define PAT_TYPE_UC         0
 #define PAT_TYPE_WC         1
+#define PAT_TYPE_WT         4
 #define PAT_TYPE_WB         6
 #define PAT_TYPE_UCM        7
 
-#define TEST_PAGES          3
+#define TEST_PAGES          8
 
 static BOOLEAN g_IsReactOS;
 
@@ -68,35 +69,51 @@ CpuHasPat(VOID)
     return (Regs[3] & (1 << 16)) != 0;
 }
 
-/* Every active processor uses the documented layout: WB, WC, UC-, UC, twice */
+/* The PAT layout is WB, WC, UC-, UC twice on every active processor if all of them have a PAT,
+   else every processor keeps the power-on layout. Returns TRUE if write-combining is expected */
 static
-VOID
+BOOLEAN
 TestPatLayout(VOID)
 {
-    static const UCHAR Expected[8] = { PAT_TYPE_WB, PAT_TYPE_WC, PAT_TYPE_UCM, PAT_TYPE_UC,
-                                       PAT_TYPE_WB, PAT_TYPE_WC, PAT_TYPE_UCM, PAT_TYPE_UC };
-    KAFFINITY Active = KeQueryActiveProcessors();
+    static const UCHAR Programmed[8] = { PAT_TYPE_WB, PAT_TYPE_WC, PAT_TYPE_UCM, PAT_TYPE_UC,
+                                         PAT_TYPE_WB, PAT_TYPE_WC, PAT_TYPE_UCM, PAT_TYPE_UC };
+    static const UCHAR PowerOn[8] = { PAT_TYPE_WB, PAT_TYPE_WT, PAT_TYPE_UCM, PAT_TYPE_UC,
+                                      PAT_TYPE_WB, PAT_TYPE_WT, PAT_TYPE_UCM, PAT_TYPE_UC };
+    KAFFINITY Active = KeQueryActiveProcessors(), HasPat = 0;
+    ULONGLONG Pat[sizeof(KAFFINITY) * 8];
+    const UCHAR *Expected;
     ULONG Cpu, Entry;
 
     for (Cpu = 0; Cpu < sizeof(KAFFINITY) * 8; Cpu++)
     {
-        ULONGLONG Pat;
-
         if (!(Active & ((KAFFINITY)1 << Cpu)))
             continue;
-
         KeSetSystemAffinityThread((KAFFINITY)1 << Cpu);
-        Pat = __readmsr(IA32_PAT);
+        if (CpuHasPat())
+        {
+            HasPat |= (KAFFINITY)1 << Cpu;
+            Pat[Cpu] = __readmsr(IA32_PAT);
+        }
         KeRevertToUserAffinityThread();
+    }
+    if (skip(HasPat != 0, "The processors have no PAT\n"))
+        return FALSE;
 
-        trace("CPU %lu: IA32_PAT = 0x%016I64x\n", Cpu, Pat);
+    /* One processor without a PAT keeps the power-on layout on all of them */
+    Expected = (HasPat == Active) ? Programmed : PowerOn;
+    for (Cpu = 0; Cpu < sizeof(KAFFINITY) * 8; Cpu++)
+    {
+        if (!(HasPat & ((KAFFINITY)1 << Cpu)))
+            continue;
+        trace("CPU %lu: IA32_PAT = 0x%016I64x\n", Cpu, Pat[Cpu]);
         for (Entry = 0; Entry < 8; Entry++)
         {
-            ok((UCHAR)((Pat >> (Entry * 8)) & 7) == Expected[Entry],
+            ok((UCHAR)((Pat[Cpu] >> (Entry * 8)) & 7) == Expected[Entry],
                "CPU %lu: PAT entry %lu is %u, expected %u\n",
-               Cpu, Entry, (UCHAR)((Pat >> (Entry * 8)) & 7), Expected[Entry]);
+               Cpu, Entry, (UCHAR)((Pat[Cpu] >> (Entry * 8)) & 7), Expected[Entry]);
         }
     }
+    return (HasPat == Active);
 }
 
 static
@@ -157,11 +174,14 @@ FindDevicePages(PPHYSICAL_ADDRESS Device)
 
 static
 PVOID
-MapIoPage(PHYSICAL_ADDRESS Physical, MEMORY_CACHING_TYPE CacheType)
+MapIo(PHYSICAL_ADDRESS Device, ULONG Page, ULONG Pages, MEMORY_CACHING_TYPE CacheType)
 {
-    PVOID Mapping = MmMapIoSpace(Physical, PAGE_SIZE, CacheType);
+    PHYSICAL_ADDRESS Physical;
+    PVOID Mapping;
 
-    ok(Mapping != NULL, "MmMapIoSpace(0x%I64x, %d) failed\n", Physical.QuadPart, CacheType);
+    Physical.QuadPart = Device.QuadPart + (LONGLONG)Page * PAGE_SIZE;
+    Mapping = MmMapIoSpace(Physical, Pages * PAGE_SIZE, CacheType);
+    ok(Mapping != NULL, "MmMapIoSpace(0x%I64x, %lu pages, %d) failed\n", Physical.QuadPart, Pages, CacheType);
     return Mapping;
 }
 
@@ -169,34 +189,147 @@ static
 ULONG
 CacheBits(PVOID Address)
 {
-    return (ULONG)(GetPteValue(Address) & PTE_CACHE_BITS);
+    return Address ? (ULONG)(GetPteValue(Address) & PTE_CACHE_BITS) : MAXULONG;
+}
+
+static
+VOID
+Unmap(PVOID Mapping, ULONG Pages)
+{
+    if (Mapping)
+        MmUnmapIoSpace(Mapping, Pages * PAGE_SIZE);
 }
 
 static
 ULONG
-MappedCacheBits(PHYSICAL_ADDRESS Physical, MEMORY_CACHING_TYPE CacheType)
+MappedCacheBits(PHYSICAL_ADDRESS Device, ULONG Page, MEMORY_CACHING_TYPE CacheType)
 {
-    PVOID Mapping;
-    ULONG Bits;
+    PVOID Mapping = MapIo(Device, Page, 1, CacheType);
+    ULONG Bits = CacheBits(Mapping);
 
-    Mapping = MapIoPage(Physical, CacheType);
-    if (!Mapping)
-        return MAXULONG;
-
-    Bits = CacheBits(Mapping);
-    MmUnmapIoSpace(Mapping, PAGE_SIZE);
+    Unmap(Mapping, 1);
     return Bits;
 }
 
-/* An MDL over an existing mapping of device memory, mapped again with the same cache type */
+#define WC_BITS     PTE_WRITE_THROUGH
+#define UCM_BITS    PTE_CACHE_DISABLE
+#define UC_BITS     PTE_CACHE_BITS
+
+/* A live mapping never changes type, and no page is write-combined beside another type */
 static
 VOID
-TestMdlMapping(PHYSICAL_ADDRESS Physical, KPROCESSOR_MODE Mode, ULONG ExpectedBits)
+TestWriteCombiningRules(PHYSICAL_ADDRESS Device)
+{
+    PVOID A, B, C;
+
+    /* Page 0: a later uncached request on a write-combined page gets write-combining too; once
+       everything is unmapped the page is free again; WC beside a live UC mapping is UC- */
+    A = MapIo(Device, 0, 1, MmWriteCombined);
+    B = MapIo(Device, 0, 1, MmNonCached);
+    ok_eq_hex(CacheBits(A), (ULONG)WC_BITS);
+    ok_eq_hex(CacheBits(B), (ULONG)WC_BITS);
+    Unmap(B, 1);
+    ok_eq_hex(CacheBits(A), (ULONG)WC_BITS);
+    Unmap(A, 1);
+    A = MapIo(Device, 0, 1, MmNonCached);
+    ok_eq_hex(CacheBits(A), (ULONG)UC_BITS);
+    ok_eq_hex(MappedCacheBits(Device, 0, MmWriteCombined), (ULONG)UCM_BITS);
+    ok_eq_hex(CacheBits(A), (ULONG)UC_BITS);
+    Unmap(A, 1);
+    ok_eq_hex(MappedCacheBits(Device, 0, MmWriteCombined), (ULONG)WC_BITS);
+
+    /* Pages 1-2, partial overlap: UC on page 1, WC on page 2, then WC over both pages */
+    A = MapIo(Device, 1, 1, MmNonCached);
+    B = MapIo(Device, 2, 1, MmWriteCombined);
+    C = MapIo(Device, 1, 2, MmWriteCombined);
+    ok_eq_hex(CacheBits(A), (ULONG)UC_BITS);
+    ok_eq_hex(CacheBits(B), (ULONG)WC_BITS);
+    if (C)
+    {
+        ok_eq_hex(CacheBits(C), (ULONG)UCM_BITS);
+        ok_eq_hex(CacheBits((PUCHAR)C + PAGE_SIZE), (ULONG)WC_BITS);
+    }
+    Unmap(C, 2);
+    Unmap(B, 1);
+    Unmap(A, 1);
+
+    /* Pages 3-4, partial overlap: WC over both, WC on page 4, then UC on page 3, then UC over both
+       once only page 4 is still mapped */
+    A = MapIo(Device, 3, 2, MmWriteCombined);
+    B = MapIo(Device, 4, 1, MmWriteCombined);
+    C = MapIo(Device, 3, 1, MmNonCached);
+    if (A)
+    {
+        ok_eq_hex(CacheBits(A), (ULONG)WC_BITS);
+        ok_eq_hex(CacheBits((PUCHAR)A + PAGE_SIZE), (ULONG)WC_BITS);
+    }
+    ok_eq_hex(CacheBits(B), (ULONG)WC_BITS);
+    ok_eq_hex(CacheBits(C), (ULONG)WC_BITS);
+    Unmap(C, 1);
+    Unmap(A, 2);
+    C = MapIo(Device, 3, 2, MmNonCached);
+    if (C)
+    {
+        ok_eq_hex(CacheBits(C), (ULONG)UC_BITS);
+        ok_eq_hex(CacheBits((PUCHAR)C + PAGE_SIZE), (ULONG)WC_BITS);
+    }
+    ok_eq_hex(CacheBits(B), (ULONG)WC_BITS);
+    Unmap(C, 2);
+    Unmap(B, 1);
+
+    /* Page 5, unmap order: each unmap gives the page back, so the next request gets its own type */
+    A = MapIo(Device, 5, 1, MmNonCached);
+    ok_eq_hex(CacheBits(A), (ULONG)UC_BITS);
+    Unmap(A, 1);
+    A = MapIo(Device, 5, 1, MmWriteCombined);
+    ok_eq_hex(CacheBits(A), (ULONG)WC_BITS);
+    Unmap(A, 1);
+    A = MapIo(Device, 5, 1, MmCached);
+    ok_eq_hex(CacheBits(A), 0UL);
+    Unmap(A, 1);
+    ok_eq_hex(MappedCacheBits(Device, 5, MmWriteCombined), (ULONG)WC_BITS);
+}
+
+/* A kernel MDL describing a write-combined device page, mapped with another cache type */
+static
+VOID
+TestKernelMdl(PHYSICAL_ADDRESS Device)
+{
+    PVOID Kernel, Mapped;
+    PMDL Mdl;
+
+    Kernel = MapIo(Device, 6, 1, MmWriteCombined);
+    if (!Kernel)
+        return;
+    Mdl = IoAllocateMdl(Kernel, PAGE_SIZE, FALSE, FALSE, NULL);
+    ok(Mdl != NULL, "IoAllocateMdl failed\n");
+    if (Mdl)
+    {
+        MmGetMdlPfnArray(Mdl)[0] = (PFN_NUMBER)((Device.QuadPart >> PAGE_SHIFT) + 6);
+        Mdl->MdlFlags |= MDL_PAGES_LOCKED | MDL_IO_SPACE;
+        Mapped = MmMapLockedPagesSpecifyCache(Mdl, KernelMode, MmNonCached, NULL, FALSE, NormalPagePriority);
+        ok(Mapped != NULL, "MmMapLockedPagesSpecifyCache failed\n");
+        if (Mapped)
+        {
+            ok_eq_hex(CacheBits(Mapped), (ULONG)WC_BITS);
+            ok_eq_hex(CacheBits(Kernel), (ULONG)WC_BITS);
+            MmUnmapLockedPages(Mapped, Mdl);
+        }
+        Mdl->MdlFlags &= ~(MDL_PAGES_LOCKED | MDL_IO_SPACE);
+        IoFreeMdl(Mdl);
+    }
+    Unmap(Kernel, 1);
+}
+
+/* A user MDL mapping of a device page follows the page's type, and its unmap gives the page back */
+static
+VOID
+TestUserMdl(PHYSICAL_ADDRESS Device, MEMORY_CACHING_TYPE KernelType, ULONG ExpectedUserBits)
 {
     PVOID Kernel, Mapped = NULL;
     PMDL Mdl;
 
-    Kernel = MapIoPage(Physical, MmWriteCombined);
+    Kernel = MapIo(Device, 7, 1, KernelType);
     if (!Kernel)
         return;
     Mdl = IoAllocateMdl(Kernel, PAGE_SIZE, FALSE, FALSE, NULL);
@@ -205,31 +338,28 @@ TestMdlMapping(PHYSICAL_ADDRESS Physical, KPROCESSOR_MODE Mode, ULONG ExpectedBi
     {
         MmBuildMdlForNonPagedPool(Mdl);
         ok(Mdl->MdlFlags & MDL_IO_SPACE, "MDL flags 0x%x, expected MDL_IO_SPACE\n", Mdl->MdlFlags);
-
         KmtStartSeh()
-            Mapped = MmMapLockedPagesSpecifyCache(Mdl, Mode, MmWriteCombined, NULL, FALSE, NormalPagePriority);
+            Mapped = MmMapLockedPagesSpecifyCache(Mdl, UserMode, MmWriteCombined, NULL, FALSE, NormalPagePriority);
         KmtEndSeh(STATUS_SUCCESS);
-        ok(Mapped != NULL, "MmMapLockedPagesSpecifyCache(%d) failed\n", Mode);
+        ok(Mapped != NULL, "MmMapLockedPagesSpecifyCache(UserMode) failed\n");
         if (Mapped)
         {
-            /* Both mappings have one type, whichever path asked first */
-            ok_eq_hex(CacheBits(Mapped), ExpectedBits);
-            ok_eq_hex(CacheBits(Kernel), ExpectedBits);
+            ok_eq_hex(CacheBits(Mapped), ExpectedUserBits);
             MmUnmapLockedPages(Mapped, Mdl);
         }
         IoFreeMdl(Mdl);
     }
-    MmUnmapIoSpace(Kernel, PAGE_SIZE);
+    Unmap(Kernel, 1);
+    ok_eq_hex(MappedCacheBits(Device, 7, MmWriteCombined), (ULONG)WC_BITS);
 }
 
 static
 VOID
-TestIoSpaceCacheBits(BOOLEAN HasPat)
+TestIoSpaceCacheBits(BOOLEAN PatWc)
 {
-    const ULONG WcBits = HasPat ? PTE_WRITE_THROUGH : PTE_CACHE_DISABLE;
-    PHYSICAL_ADDRESS Device, Page;
-    PHYSICAL_ADDRESS Ram;
-    PVOID Buffer, First, Second;
+    const ULONG WcBits = PatWc ? WC_BITS : UCM_BITS;
+    PHYSICAL_ADDRESS Device, Ram;
+    PVOID Buffer;
 
     if (!FindDevicePages(&Device))
     {
@@ -238,54 +368,45 @@ TestIoSpaceCacheBits(BOOLEAN HasPat)
     else
     {
         trace("Device pages 0x%I64x\n", Device.QuadPart);
-
-        /* Page 0: each caching type alone */
-        ok_eq_hex(MappedCacheBits(Device, MmCached), 0UL);
-        ok_eq_hex(MappedCacheBits(Device, MmNonCached), (ULONG)PTE_CACHE_BITS);
+        ok_eq_hex(MappedCacheBits(Device, 0, MmCached), 0UL);
+        ok_eq_hex(MappedCacheBits(Device, 0, MmNonCached), (ULONG)UC_BITS);
         /* PAT entry 1, write-combining; PCD alone is UC- and stays uncached under an UC MTRR */
-        ok_eq_hex(MappedCacheBits(Device, MmWriteCombined), WcBits);
+        ok_eq_hex(MappedCacheBits(Device, 0, MmWriteCombined), WcBits);
 
-        /* Page 0: an uncached mapping turns the write-combined one into UC-, and a write-combined request
-           made while the uncached one lives gets UC-: never a WC alias of an UC page */
-        First = MapIoPage(Device, MmWriteCombined);
-        if (First)
+        if (!skip(PatWc, "No PAT write-combining\n"))
         {
-            ok_eq_hex(CacheBits(First), WcBits);
-            Second = MapIoPage(Device, MmNonCached);
-            if (Second)
-            {
-                ok_eq_hex(CacheBits(Second), (ULONG)PTE_CACHE_BITS);
-                ok_eq_hex(CacheBits(First), (ULONG)PTE_CACHE_DISABLE);
-                ok_eq_hex(MappedCacheBits(Device, MmWriteCombined), (ULONG)PTE_CACHE_DISABLE);
-                MmUnmapIoSpace(Second, PAGE_SIZE);
-            }
-            MmUnmapIoSpace(First, PAGE_SIZE);
+            TestWriteCombiningRules(Device);
+            TestKernelMdl(Device);
+            /* UC kernel mapping: the user WC request gets UC-; WC kernel mapping: the user one too */
+            TestUserMdl(Device, MmNonCached, UCM_BITS);
+            TestUserMdl(Device, MmWriteCombined, WC_BITS);
         }
-        /* Nothing maps the page any more */
-        ok_eq_hex(MappedCacheBits(Device, MmWriteCombined), WcBits);
-
-        /* Page 1: a kernel MDL mapping with the same cache type gets the same type */
-        Page.QuadPart = Device.QuadPart + PAGE_SIZE;
-        TestMdlMapping(Page, KernelMode, WcBits);
-
-        /* Page 2: a user mapping is never write-combined, so the kernel mapping follows it to UC-.
-           User mappings keep their claim until reboot, so the page stays UC- afterwards */
-        Page.QuadPart = Device.QuadPart + 2 * PAGE_SIZE;
-        TestMdlMapping(Page, UserMode, PTE_CACHE_DISABLE);
-        ok_eq_hex(MappedCacheBits(Page, MmWriteCombined), (ULONG)PTE_CACHE_DISABLE);
     }
 
     /* RAM is never mapped write-combined: another mapping of the page caches it */
     Buffer = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, 'TapK');
     if (!skip(Buffer != NULL, "No memory\n"))
     {
+        PVOID Mapping;
+
         Ram = MmGetPhysicalAddress(Buffer);
-        ok_eq_hex(MappedCacheBits(Ram, MmCached), 0UL);
-        ok_eq_hex(MappedCacheBits(Ram, MmWriteCombined), (ULONG)PTE_CACHE_DISABLE);
+        Mapping = MmMapIoSpace(Ram, PAGE_SIZE, MmCached);
+        ok_eq_hex(CacheBits(Mapping), 0UL);
+        Unmap(Mapping, 1);
+        Mapping = MmMapIoSpace(Ram, PAGE_SIZE, MmWriteCombined);
+        ok_eq_hex(CacheBits(Mapping), (ULONG)UCM_BITS);
+        Unmap(Mapping, 1);
         ok_eq_hex(CacheBits(Buffer), 0UL);
         ExFreePoolWithTag(Buffer, 'TapK');
     }
 }
+
+typedef struct _ALIAS_LARGE
+{
+    ULONGLONG BasePage;
+    ULONGLONG PageCount;
+    ULONG Type;
+} ALIAS_LARGE;
 
 typedef struct _ALIAS_SCAN
 {
@@ -293,7 +414,23 @@ typedef struct _ALIAS_SCAN
     PULONGLONG Entries;         /* page << 2 | PCD/PWT */
     ULONG Count;
     ULONG Max;
+    ALIAS_LARGE Large[64];
+    ULONG LargeCount;
+    BOOLEAN Overflow;
 } ALIAS_SCAN, *PALIAS_SCAN;
+
+static
+ULONGLONG
+PteFrame(ULONGLONG Pte)
+{
+#ifdef _M_IX86
+    if (ExIsProcessorFeaturePresent(PF_PAE_ENABLED))
+        return (Pte >> PAGE_SHIFT) & 0xFFFFFFULL;
+    return (Pte >> PAGE_SHIFT) & 0xFFFFFULL;
+#else
+    return (Pte >> PAGE_SHIFT) & 0xFFFFFFFFFULL;
+#endif
+}
 
 static
 VOID
@@ -303,18 +440,33 @@ AddPte(PALIAS_SCAN Scan, ULONGLONG Pte)
 
     if (!(Pte & PTE_VALID))
         return;
-#ifdef _M_IX86
-    if (ExIsProcessorFeaturePresent(PF_PAE_ENABLED))
-        Page = (Pte >> PAGE_SHIFT) & 0xFFFFFFULL;
-    else
-        Page = (Pte >> PAGE_SHIFT) & 0xFFFFFULL;
-#else
-    Page = (Pte >> PAGE_SHIFT) & 0xFFFFFFFFFULL;
-#endif
+    Page = PteFrame(Pte);
     if (IsRamPage(Scan->Ranges, Page))
         return;
     if (Scan->Count < Scan->Max)
         Scan->Entries[Scan->Count++] = (Page << 2) | ((Pte & PTE_CACHE_BITS) >> 3);
+    else
+        Scan->Overflow = TRUE;
+}
+
+/* A large page: bit 12 is its PAT bit, so the frame starts above it */
+static
+VOID
+AddLarge(PALIAS_SCAN Scan, ULONGLONG Entry, ULONGLONG PageCount)
+{
+    ULONGLONG Page = PteFrame(Entry) & ~(PageCount - 1);
+
+    if (Scan->LargeCount < RTL_NUMBER_OF(Scan->Large))
+    {
+        Scan->Large[Scan->LargeCount].BasePage = Page;
+        Scan->Large[Scan->LargeCount].PageCount = PageCount;
+        Scan->Large[Scan->LargeCount].Type = (ULONG)((Entry & PTE_CACHE_BITS) >> 3);
+        Scan->LargeCount++;
+    }
+    else
+    {
+        Scan->Overflow = TRUE;
+    }
 }
 
 static
@@ -337,7 +489,7 @@ ReadEntry(PVOID Address, ULONG Size)
     return Value;
 }
 
-/* Every valid system-space PTE that maps device memory */
+/* Every valid system-space PTE, large pages included */
 static
 VOID
 CollectSystemMappings(PALIAS_SCAN Scan)
@@ -360,7 +512,8 @@ CollectSystemMappings(PALIAS_SCAN Scan)
             continue;
         if (Pde & PTE_LARGE_PAGE)
         {
-            AddPte(Scan, Pde);
+            if (!IsRamPage(Scan->Ranges, PteFrame(Pde) & ~((PageTableSpan >> PAGE_SHIFT) - 1)))
+                AddLarge(Scan, Pde, PageTableSpan >> PAGE_SHIFT);
             continue;
         }
         Pte = PTE_BASE + (Va >> PAGE_SHIFT) * EntrySize;
@@ -381,8 +534,14 @@ CollectSystemMappings(PALIAS_SCAN Scan)
         {
             Va = (Pxi << 39) | (Ppi << 30);
             Entry = ReadEntry((PVOID)(PPE_BASE + ((Va >> 30) & 0x3FFFF) * 8), 8);
-            if (!(Entry & PTE_VALID) || (Entry & PTE_LARGE_PAGE))
+            if (!(Entry & PTE_VALID))
                 continue;
+            if (Entry & PTE_LARGE_PAGE)
+            {
+                if (!IsRamPage(Scan->Ranges, PteFrame(Entry) & ~0x3FFFFULL))
+                    AddLarge(Scan, Entry, 0x40000);
+                continue;
+            }
             for (Pdi = 0; Pdi < 512; Pdi++)
             {
                 Va = (Pxi << 39) | (Ppi << 30) | (Pdi << 21);
@@ -391,7 +550,8 @@ CollectSystemMappings(PALIAS_SCAN Scan)
                     continue;
                 if (Entry & PTE_LARGE_PAGE)
                 {
-                    AddPte(Scan, Entry);
+                    if (!IsRamPage(Scan->Ranges, PteFrame(Entry) & ~0x1FFULL))
+                        AddLarge(Scan, Entry, 0x200);
                     continue;
                 }
                 for (Pti = 0; Pti < 512; Pti++)
@@ -405,24 +565,49 @@ CollectSystemMappings(PALIAS_SCAN Scan)
 #endif
 }
 
-/* With the PAT in use, no device page (the framebuffer above all) is mapped write-combined and with another type at once */
+/* Types (bit per PCD/PWT value) every mapping of the page has */
+static
+ULONG
+PageTypes(PALIAS_SCAN Scan, ULONGLONG Page)
+{
+    ULONG Types = 0, i, Low = 0, High = Scan->Count;
+
+    while (Low < High)
+    {
+        i = (Low + High) / 2;
+        if ((Scan->Entries[i] >> 2) < Page)
+            Low = i + 1;
+        else
+            High = i;
+    }
+    for (i = Low; (i < Scan->Count) && ((Scan->Entries[i] >> 2) == Page); i++)
+        Types |= 1 << (ULONG)(Scan->Entries[i] & 3);
+    for (i = 0; i < Scan->LargeCount; i++)
+    {
+        if ((Page >= Scan->Large[i].BasePage) && (Page < Scan->Large[i].BasePage + Scan->Large[i].PageCount))
+            Types |= 1 << Scan->Large[i].Type;
+    }
+    return Types;
+}
+
+/* No device page (the framebuffer above all) is mapped write-combined and with another type at once */
 static
 VOID
 TestNoWriteCombinedAliases(VOID)
 {
     ALIAS_SCAN Scan;
-    ULONG i, j, Gap, WcPages = 0, Aliases = 0;
-    ULONGLONG Temp;
+    ULONG i, j, Gap, WcPages = 0, Aliases = 0, Types;
+    ULONGLONG Temp, Page;
 
+    RtlZeroMemory(&Scan, sizeof(Scan));
     Scan.Max = 512 * 1024;
-    Scan.Count = 0;
     Scan.Ranges = MmGetPhysicalMemoryRanges();
     Scan.Entries = ExAllocatePoolWithTag(NonPagedPool, Scan.Max * sizeof(ULONGLONG), 'TapK');
     if (skip(Scan.Ranges && Scan.Entries, "No memory\n"))
         goto Cleanup;
 
     CollectSystemMappings(&Scan);
-    ok(Scan.Count < Scan.Max, "Too many device mappings: %lu\n", Scan.Count);
+    ok(!Scan.Overflow, "Too many device mappings: %lu, %lu large\n", Scan.Count, Scan.LargeCount);
 
     /* Shell sort by page, then type */
     for (Gap = Scan.Count / 2; Gap > 0; Gap /= 2)
@@ -438,23 +623,34 @@ TestNoWriteCombinedAliases(VOID)
 
     for (i = 0; i < Scan.Count; i = j)
     {
-        ULONG Types = 0;
-
-        for (j = i; (j < Scan.Count) && ((Scan.Entries[j] >> 2) == (Scan.Entries[i] >> 2)); j++)
-            Types |= 1 << (ULONG)(Scan.Entries[j] & 3);
+        Page = Scan.Entries[i] >> 2;
+        for (j = i; (j < Scan.Count) && ((Scan.Entries[j] >> 2) == Page); j++);
+        Types = PageTypes(&Scan, Page);
         if (Types & (1 << 1))
         {
             WcPages++;
-            if (Types != (1 << 1))
+            if ((Types != (1 << 1)) && (Aliases++ < 10))
+                trace("Page 0x%I64x is write-combined and also mapped with types 0x%lx\n", Page, Types);
+        }
+    }
+
+    /* Large pages against each other */
+    for (i = 0; i < Scan.LargeCount; i++)
+    {
+        for (j = i + 1; j < Scan.LargeCount; j++)
+        {
+            if ((Scan.Large[i].BasePage < Scan.Large[j].BasePage + Scan.Large[j].PageCount) &&
+                (Scan.Large[j].BasePage < Scan.Large[i].BasePage + Scan.Large[i].PageCount) &&
+                (Scan.Large[i].Type != Scan.Large[j].Type) &&
+                ((Scan.Large[i].Type == 1) || (Scan.Large[j].Type == 1)))
             {
-                if (Aliases++ < 10)
-                    trace("Page 0x%I64x is write-combined and also mapped with types 0x%lx\n",
-                          Scan.Entries[i] >> 2, Types);
+                Aliases++;
             }
         }
     }
 
-    trace("%lu device PTEs, %lu write-combined device pages\n", Scan.Count, WcPages);
+    trace("%lu device PTEs, %lu large device pages, %lu write-combined device pages\n",
+          Scan.Count, Scan.LargeCount, WcPages);
     ok_eq_ulong(Aliases, 0UL);
 
 Cleanup:
@@ -466,18 +662,15 @@ Cleanup:
 
 START_TEST(MmMapIoSpace)
 {
-    BOOLEAN HasPat;
+    BOOLEAN PatWc;
 
     g_IsReactOS = *(PULONG)(KI_USER_SHARED_DATA + PAGE_SIZE - sizeof(ULONG)) == 0x8eac705;
-    HasPat = CpuHasPat();
-
-    if (!skip(HasPat, "The processor has no PAT\n"))
-        TestPatLayout();
+    PatWc = TestPatLayout();
 
     /* Windows randomizes the PTE base */
     if (!skip(g_IsReactOS, "PTE checks run on ReactOS only\n"))
     {
-        TestIoSpaceCacheBits(HasPat);
+        TestIoSpaceCacheBits(PatWc);
         TestNoWriteCombinedAliases();
     }
 }
