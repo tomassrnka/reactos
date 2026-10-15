@@ -548,6 +548,7 @@ l_ReadHeaderFromFile:
         if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfImage))
         {
             ImageSectionObject->ImageInformation.ImageFileSize = piohOptHeader->SizeOfImage;
+            ImageSectionObject->SizeOfImage = piohOptHeader->SizeOfImage;
             nSizeOfImage = piohOptHeader->SizeOfImage;
         }
 
@@ -626,6 +627,7 @@ l_ReadHeaderFromFile:
                 DIE(("SizeOfImage exceeds the address space\n"));
 
             ImageSectionObject->ImageInformation.ImageFileSize = pioh64OptHeader->SizeOfImage;
+            ImageSectionObject->SizeOfImage = pioh64OptHeader->SizeOfImage;
             nSizeOfImage = pioh64OptHeader->SizeOfImage;
         }
 
@@ -2605,8 +2607,22 @@ MmCreateDataFileSection(PSECTION *SectionObject,
             }
         }
 
+        /* A negative size must never reach the file system as an end of file */
+        if (MaximumSize.QuadPart < 0)
+        {
+            ObDereferenceObject(Section);
+            return STATUS_SECTION_TOO_BIG;
+        }
+
         if (MaximumSize.QuadPart > FileSize.QuadPart)
         {
+            /* Only a section that can write to the file extends it */
+            if (!(SectionPageProtection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+            {
+                ObDereferenceObject(Section);
+                return STATUS_SECTION_TOO_BIG;
+            }
+
             Status = IoSetInformation(FileObject,
                                       FileEndOfFileInformation,
                                       sizeof(LARGE_INTEGER),
@@ -3551,6 +3567,16 @@ grab_image_section_object:
     if (Section->SizeOfSection.QuadPart == 0)
     {
         Section->SizeOfSection.QuadPart = ImageSectionObject->ImageInformation.ImageFileSize;
+    }
+    else if (NT_SUCCESS(Status) &&
+             (ImageSectionObject->SizeOfImage != 0) &&
+             ((ULONGLONG)Section->SizeOfSection.QuadPart >
+              (((ULONGLONG)ImageSectionObject->SizeOfImage + PAGE_SIZE - 1) & ~(ULONGLONG)(PAGE_SIZE - 1))))
+    {
+        /* An image section is never larger than its page-rounded SizeOfImage,
+         * which is 0 when the optional header is too short to hold it */
+        ObDereferenceObject(Section);
+        return STATUS_SECTION_TOO_BIG;
     }
 
     //KeSetEvent((PVOID)&FileObject->Lock, IO_NO_INCREMENT, FALSE);
@@ -5212,7 +5238,7 @@ MmCreateSection (OUT PVOID  * Section,
                                       FileObject);
 
         /* If the file was ivalid, and we got a FileObject passed, fall back to data section */
-        if (!NT_SUCCESS(Status) && HaveFileObject)
+        if (!NT_SUCCESS(Status) && (Status != STATUS_SECTION_TOO_BIG) && HaveFileObject)
         {
             AllocationAttributes &= ~SEC_IMAGE;
         }

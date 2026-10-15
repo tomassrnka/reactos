@@ -649,6 +649,83 @@ static void Test_Layout(BOOL Pe64, WORD Machine)
     }
 }
 
+/*
+ * An image section may be as large as the page-rounded SizeOfImage, also when
+ * the sections end below it, and also after the image has been mapped once.
+ */
+static void Test_SizeLimit(void)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE hFile, hSection = NULL, hSection2;
+    LARGE_INTEGER Size;
+    PVOID Base = NULL;
+    SIZE_T ViewSize = 0;
+    NTSTATUS Status;
+    ULONG Pass;
+
+    NtOffset = IMG_NT_OFFSET;
+    ImageFileSize = IMG_FILE_SIZE;
+    BuildImage(NATIVE_PE64, NATIVE_PE64 ? IMAGE_FILE_MACHINE_AMD64 : IMAGE_FILE_MACHINE_I386, TRUE, TRUE);
+    SET_OPT(SizeOfImage, 0x10000);
+    if (!GetTempFileNameW(TempDir, L"ncl", 0, Path) || !WriteImage(Path))
+    {
+        skip("SizeLimit: cannot write the image, error %lu\n", GetLastError());
+        return;
+    }
+    hFile = CreateFileW(Path, GENERIC_READ | GENERIC_EXECUTE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        skip("SizeLimit: cannot open %ls, error %lu\n", Path, GetLastError());
+        DeleteFileW(Path);
+        return;
+    }
+
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        Size.QuadPart = 0x10000;
+        hSection2 = NULL;
+        Status = NtCreateSection(&hSection2, SECTION_MAP_READ | SECTION_QUERY, NULL, &Size,
+                                 PAGE_READONLY, SEC_IMAGE, hFile);
+        /* Server 2008 R2 refuses a SizeOfImage above the sections; Windows 10 and ReactOS take it */
+        if (Pass == 0 && Status == STATUS_INVALID_IMAGE_FORMAT && !is_reactos())
+        {
+            skip("SizeLimit: this Windows refuses the image\n");
+            break;
+        }
+        ok(Status == STATUS_SUCCESS, "SizeLimit pass %lu: size of the image: 0x%08lx\n", Pass, Status);
+        if (NT_SUCCESS(Status))
+        {
+            if (!hSection)
+                hSection = hSection2;
+            else
+                NtClose(hSection2);
+        }
+
+        Size.QuadPart = 0x10001;
+        hSection2 = NULL;
+        Status = NtCreateSection(&hSection2, SECTION_MAP_READ | SECTION_QUERY, NULL, &Size,
+                                 PAGE_READONLY, SEC_IMAGE, hFile);
+        ok(Status == STATUS_SECTION_TOO_BIG, "SizeLimit pass %lu: one byte more: 0x%08lx\n", Pass, Status);
+        if (NT_SUCCESS(Status))
+            NtClose(hSection2);
+
+        /* Map it once, which must not change the limit for the next sections */
+        if (Pass == 0 && hSection)
+        {
+            Status = NtMapViewOfSection(hSection, NtCurrentProcess(), &Base, 0, 0, NULL, &ViewSize,
+                                        ViewShare, 0, PAGE_READONLY);
+            ok(NT_SUCCESS(Status), "SizeLimit: NtMapViewOfSection: 0x%08lx\n", Status);
+            if (NT_SUCCESS(Status))
+                NtUnmapViewOfSection(NtCurrentProcess(), Base);
+        }
+    }
+
+    if (hSection)
+        NtClose(hSection);
+    CloseHandle(hFile);
+    DeleteFileW(Path);
+}
+
 START_TEST(NtCreateSectionImage)
 {
     SYSTEM_INFO SystemInfo;
@@ -679,4 +756,5 @@ START_TEST(NtCreateSectionImage)
         Test_Layout(TRUE, IMAGE_FILE_MACHINE_AMD64);
     if (KernelIs64 && NATIVE_PE64)
         Test_Layout(FALSE, IMAGE_FILE_MACHINE_I386);
+    Test_SizeLimit();
 }
