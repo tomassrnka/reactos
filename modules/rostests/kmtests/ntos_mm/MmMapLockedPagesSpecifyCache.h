@@ -40,6 +40,12 @@ typedef struct _VIEW_BUFFER
     NTSTATUS Status;
 } VIEW_BUFFER, *PVIEW_BUFFER;
 
+typedef struct _PHYSICAL_BUFFER
+{
+    PVOID View[2];
+    NTSTATUS Status;
+} PHYSICAL_BUFFER, *PPHYSICAL_BUFFER;
+
 #define IOCTL_QUERY_BUFFER   1
 #define IOCTL_READ_BUFFER    2
 #define IOCTL_CLEAN          3
@@ -47,6 +53,8 @@ typedef struct _VIEW_BUFFER
 #define IOCTL_CHECK_EXITED   5
 #define IOCTL_MAP_VIEW       6
 #define IOCTL_UNMAP_VIEW     7
+#define IOCTL_MAP_PHYSICAL   8
+#define IOCTL_UNMAP_PHYSICAL 9
 
 #define EXIT_BUFFER_LENGTH (2 * PAGE_SIZE)
 
