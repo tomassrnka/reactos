@@ -6,6 +6,7 @@
  */
 
 #include "ws2_32.h"
+#include <iphlpapi.h>
 
 /* 5000 loopback pairs plus the listener: 10001 sockets held at once */
 #define SCALE_PAIRS 5000
@@ -235,6 +236,96 @@ TestPortExhaustion(void)
     HeapFree(GetProcessHeap(), 0, Held);
 }
 
+#define STRESS_THREADS 4
+#define STRESS_ROUNDS 1500
+
+static volatile LONG StressFailures;
+
+/* Bind and close sockets as fast as possible: every bind adds an address file
+   and its TDI entity, every close removes them */
+static
+DWORD
+WINAPI
+BindCloseThread(LPVOID Parameter)
+{
+    struct sockaddr_in Addr;
+    SOCKET Socket;
+    int i;
+
+    UNREFERENCED_PARAMETER(Parameter);
+    for (i = 0; i < STRESS_ROUNDS; i++)
+    {
+        Socket = socket(AF_INET, (i & 1) ? SOCK_DGRAM : SOCK_STREAM, 0);
+        if (Socket == INVALID_SOCKET)
+        {
+            InterlockedIncrement(&StressFailures);
+            continue;
+        }
+        ZeroMemory(&Addr, sizeof(Addr));
+        Addr.sin_family = AF_INET;
+        Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (bind(Socket, (struct sockaddr *)&Addr, sizeof(Addr)))
+            InterlockedIncrement(&StressFailures);
+        closesocket(Socket);
+    }
+    return 0;
+}
+
+/* Address files come and go on several threads while the TCP and UDP tables,
+   which enumerate the TDI entities, are read over and over */
+static
+void
+TestConcurrentEnumeration(void)
+{
+    HANDLE Threads[STRESS_THREADS];
+    PMIB_TCPTABLE TcpTable;
+    PMIB_UDPTABLE UdpTable;
+    DWORD Size, Error, Started = 0, i;
+    int Reads = 0, BadReads = 0;
+    BOOL Running = TRUE;
+
+    TcpTable = HeapAlloc(GetProcessHeap(), 0, 1 << 20);
+    UdpTable = HeapAlloc(GetProcessHeap(), 0, 1 << 20);
+    if (!TcpTable || !UdpTable)
+    {
+        skip("No memory for the tables\n");
+        goto Free;
+    }
+    StressFailures = 0;
+    for (i = 0; i < STRESS_THREADS; i++)
+    {
+        Threads[i] = CreateThread(NULL, 0, BindCloseThread, NULL, 0, NULL);
+        ok(Threads[i] != NULL, "CreateThread failed: %lu\n", GetLastError());
+        if (Threads[i])
+            Started++;
+    }
+    while (Running)
+    {
+        Size = 1 << 20;
+        Error = GetTcpTable(TcpTable, &Size, FALSE);
+        if (Error != NO_ERROR && Error != ERROR_INSUFFICIENT_BUFFER)
+            BadReads++;
+        Size = 1 << 20;
+        Error = GetUdpTable(UdpTable, &Size, FALSE);
+        if (Error != NO_ERROR && Error != ERROR_INSUFFICIENT_BUFFER)
+            BadReads++;
+        Reads++;
+        Running = WaitForMultipleObjects(Started, Threads, TRUE, 0) == WAIT_TIMEOUT;
+    }
+    for (i = 0; i < Started; i++)
+        CloseHandle(Threads[i]);
+    trace("Concurrent: %d table reads while %d threads bound and closed %d sockets each\n",
+          Reads, (int)Started, STRESS_ROUNDS);
+    ok(StressFailures == 0, "%ld socket or bind calls failed\n", StressFailures);
+    ok(BadReads == 0, "%d table reads failed\n", BadReads);
+
+Free:
+    if (TcpTable)
+        HeapFree(GetProcessHeap(), 0, TcpTable);
+    if (UdpTable)
+        HeapFree(GetProcessHeap(), 0, UdpTable);
+}
+
 START_TEST(socketscale)
 {
     WSADATA WsaData;
@@ -248,5 +339,6 @@ START_TEST(socketscale)
     TestPortExhaustion();
     /* The stack is still usable after running out */
     TestScale();
+    TestConcurrentEnumeration();
     WSACleanup();
 }
