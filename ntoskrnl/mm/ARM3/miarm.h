@@ -2434,6 +2434,17 @@ MiDeletePteDeferred(
     IN OUT PMI_DEFERRED_RELEASE Deferred OPTIONAL
 );
 
+KIRQL
+NTAPI
+MiReplaceSharedPte(
+    IN PMMPTE PointerPte,
+    IN PVOID VirtualAddress,
+    IN PEPROCESS CurrentProcess,
+    IN PMMPTE PrototypePte,
+    IN PFN_NUMBER NewPageFrameIndex,
+    IN KIRQL OldIrql
+);
+
 ULONG
 NTAPI
 MiMakeSystemAddressValid(

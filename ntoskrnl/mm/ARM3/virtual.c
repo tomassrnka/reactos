@@ -331,7 +331,12 @@ MiDeleteSystemPageableVm(IN PMMPTE PointerPte,
                 /* Destroy the PTE */
                 MI_ERASE_PTE(PointerPte);
 
-                /* Delete the page, it is freed after the flush */
+                /*
+                 * Delete the page, it is freed after the flush. The release does
+                 * not recheck the PTE: nothing else changes these PTEs meanwhile,
+                 * because system working set trimming is not implemented. A future
+                 * trimmer must not touch a range that is being deleted.
+                 */
                 MI_SET_PFN_DELETED(Pfn1);
                 MiDeferTbFlush(&Deferred, MiPteToAddress(PointerPte));
                 MiDeferShareRelease(&Deferred, Pfn1, FALSE);
@@ -495,17 +500,18 @@ MiDropVirtualLock(IN PMMPFN Pfn1)
 }
 
 /*
- * Returns TRUE when a valid translation was removed. Without a deferred list the
- * page is released at once and the caller must flush the TB before it releases
- * the PFN lock; with one, the flush and the last share reference go to the list.
+ * Returns TRUE when a valid translation was removed. Without KeepShare the page
+ * is released at once and the caller must flush the TB before it releases the
+ * PFN lock; with it, the page keeps its last share reference and is returned
+ * there (NULL if there is none to drop) for the caller to drop after the flush.
  */
+static
 BOOLEAN
-NTAPI
-MiDeletePteDeferred(IN PMMPTE PointerPte,
-                    IN PVOID VirtualAddress,
-                    IN PEPROCESS CurrentProcess,
-                    IN PMMPTE PrototypePte,
-                    IN OUT PMI_DEFERRED_RELEASE Deferred OPTIONAL)
+MiDeletePteCommon(IN PMMPTE PointerPte,
+                  IN PVOID VirtualAddress,
+                  IN PEPROCESS CurrentProcess,
+                  IN PMMPTE PrototypePte,
+                  OUT PMMPFN *KeepShare OPTIONAL)
 {
     PMMPFN Pfn1;
     MMPTE TempPte;
@@ -514,6 +520,7 @@ MiDeletePteDeferred(IN PMMPTE PointerPte,
 
     /* PFN lock must be held */
     MI_ASSERT_PFN_LOCK_HELD();
+    if (KeepShare) *KeepShare = NULL;
 
     /* WorkingSet must be exclusively locked */
     ASSERT(MM_ANY_WS_LOCK_HELD_EXCLUSIVE(PsGetCurrentThread()));
@@ -613,8 +620,8 @@ MiDeletePteDeferred(IN PMMPTE PointerPte,
             PointerPde->u.Hard.PageFrameNumber);
 
         /* Drop the share count, which may make the page reusable from the standby list */
-        if (Deferred)
-            MiDeferShareRelease(Deferred, Pfn1, FALSE);
+        if (KeepShare)
+            *KeepShare = Pfn1;
         else
             MiDecrementShareCount(Pfn1, PageFrameIndex);
 
@@ -662,8 +669,8 @@ MiDeletePteDeferred(IN PMMPTE PointerPte,
         /* Mark the PFN for deletion and dereference what should be the last ref */
         MI_SET_PFN_DELETED(Pfn1);
         MiDropVirtualLock(Pfn1);
-        if (Deferred)
-            MiDeferShareRelease(Deferred, Pfn1, FALSE);
+        if (KeepShare)
+            *KeepShare = Pfn1;
         else
             MiDecrementShareCount(Pfn1, PageFrameIndex);
 
@@ -671,9 +678,66 @@ MiDeletePteDeferred(IN PMMPTE PointerPte,
         //CurrentProcess->NumberOfPrivatePages--;
     }
 
-    if (Deferred)
-        MiDeferTbFlush(Deferred, VirtualAddress);
     return TRUE;
+}
+
+/* The flush and the last share reference go to the deferred list, if there is one */
+BOOLEAN
+NTAPI
+MiDeletePteDeferred(IN PMMPTE PointerPte,
+                    IN PVOID VirtualAddress,
+                    IN PEPROCESS CurrentProcess,
+                    IN PMMPTE PrototypePte,
+                    IN OUT PMI_DEFERRED_RELEASE Deferred OPTIONAL)
+{
+    PMMPFN Pfn1;
+
+    if (!Deferred)
+        return MiDeletePteCommon(PointerPte, VirtualAddress, CurrentProcess, PrototypePte, NULL);
+
+    if (!MiDeletePteCommon(PointerPte, VirtualAddress, CurrentProcess, PrototypePte, &Pfn1))
+        return FALSE;
+
+    if (Pfn1)
+        MiDeferShareRelease(Deferred, Pfn1, FALSE);
+    MiDeferTbFlush(Deferred, VirtualAddress);
+    return TRUE;
+}
+
+/*
+ * Copy-on-write: replace a valid PTE that maps a shared page with a fresh private
+ * page, waiting for the TB flush with the PFN lock released. The caller holds the
+ * working set lock, which keeps faults off the PTE meanwhile, and the PFN lock,
+ * which is held again on return. The new page is initialized before the lock is
+ * released, so it cannot be taken; the shared page keeps its share reference until
+ * no processor can reach it. No list, so this is cheap on the fault path's stack.
+ */
+KIRQL
+NTAPI
+MiReplaceSharedPte(IN PMMPTE PointerPte,
+                   IN PVOID VirtualAddress,
+                   IN PEPROCESS CurrentProcess,
+                   IN PMMPTE PrototypePte,
+                   IN PFN_NUMBER NewPageFrameIndex,
+                   IN KIRQL OldIrql)
+{
+    PMMPFN SharedPfn;
+    BOOLEAN Flush;
+
+    Flush = MiDeletePteCommon(PointerPte, VirtualAddress, CurrentProcess, PrototypePte, &SharedPfn);
+    ASSERT(Flush);
+    MiInitializePfn(NewPageFrameIndex, PointerPte, TRUE);
+
+    MiReleasePfnLock(OldIrql);
+    if (Flush)
+        KeFlushSingleTb(VirtualAddress, TRUE);
+    OldIrql = MiAcquirePfnLock();
+
+    /* The PTE is still empty and the new page still ours: nothing else can touch either */
+    ASSERT(PointerPte->u.Long == 0);
+    if (SharedPfn)
+        MiDecrementShareCount(SharedPfn, MiGetPfnEntryIndex(SharedPfn));
+    return OldIrql;
 }
 
 VOID

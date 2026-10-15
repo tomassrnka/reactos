@@ -1422,7 +1422,10 @@ MmFlushTbList(
     List->Entire = FALSE;
 }
 
-/* A freed page table: flush every TB entry and paging-structure cache on every processor */
+/*
+ * A freed page table: flush every TB entry and paging-structure cache on every
+ * processor. Low and High may then be stale; only MmFlushTbList clears Entire.
+ */
 FORCEINLINE
 VOID
 MmForceEntireTbFlush(
@@ -1503,7 +1506,9 @@ MiDeferShareRelease(
     _In_ PMMPFN Pfn1,
     _In_ BOOLEAN RosMmPage)
 {
-    ASSERT(Deferred->Count < Deferred->Capacity);
+    /* Callers check the room first: an overflow would corrupt the stack */
+    if (Deferred->Count >= Deferred->Capacity)
+        KeBugCheckEx(MEMORY_MANAGEMENT, 0x61950, (ULONG_PTR)Deferred, Deferred->Count, Deferred->Capacity);
     ASSERT(((ULONG_PTR)Pfn1 & 1) == 0);
     Deferred->Entries[Deferred->Count++] = (ULONG_PTR)Pfn1 | (RosMmPage ? 1 : 0);
 }
