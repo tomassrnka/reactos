@@ -60,6 +60,9 @@ extern MMSESSION MmSession;
 
 static LARGE_INTEGER TinyTime = {{-1L, -1L}};
 
+/* Serializes NtExtendSection's size decisions with its file growth; taken before any file-system lock */
+static ERESOURCE MmpExtendSectionLock;
+
 #ifndef NEWCC
 KEVENT MmWaitPageEvent;
 
@@ -2518,6 +2521,8 @@ MmInitSectionImplementation(VOID)
     ObCreateObjectType(&Name, &ObjectTypeInitializer, NULL, &MmSectionObjectType);
 
     MmCreatePhysicalMemorySection();
+
+    ExInitializeResourceLite(&MmpExtendSectionLock);
 
     return STATUS_SUCCESS;
 }
@@ -5968,6 +5973,32 @@ MmMakePagesDirty(
 }
 #endif
 
+/* Grows a ROS data section and its segment to NewSize; a smaller size changes nothing */
+static
+VOID
+MiGrowDataSection(
+    _In_ PSECTION Section,
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ PLARGE_INTEGER NewSize)
+{
+    if (NewSize->QuadPart <= Section->SizeOfSection.QuadPart)
+        return;
+
+    Section->SizeOfSection = *NewSize;
+
+    /* A SEC_RESERVE section keeps its segment, as before the file could grow */
+    if (!Section->u.Flags.Reserve)
+    {
+        MmLockSectionSegment(Segment);
+        if (Segment->RawLength.QuadPart < NewSize->QuadPart)
+        {
+            Segment->RawLength = *NewSize;
+            Segment->Length.QuadPart = PAGE_ROUND_UP_64(NewSize->QuadPart);
+        }
+        MmUnlockSectionSegment(Segment);
+    }
+}
+
 NTSTATUS
 NTAPI
 MmExtendSection(
@@ -5977,6 +6008,7 @@ MmExtendSection(
 {
     PSECTION Section = _Section;
     PMM_SECTION_SEGMENT Segment;
+    NTSTATUS Status;
 
     /* It makes no sense to extend an image mapping */
     if (Section->u.Flags.Image)
@@ -5991,58 +6023,64 @@ MmExtendSection(
 
     Segment = (PMM_SECTION_SEGMENT)Section->Segment;
 
+    /* The cache manager: the file system has already set the size, and the section only grows */
+    if (IgnoreFileSizeChecking)
+    {
+        MiGrowDataSection(Section, Segment, NewSize);
+        return STATUS_SUCCESS;
+    }
+
     /* NtExtendSection: the section takes any smaller size, and a larger one extends the file */
-    if (!IgnoreFileSizeChecking)
+    if (NewSize->QuadPart < 0)
+        return STATUS_SECTION_TOO_BIG;
+
+    /*
+     * One extension at a time, so that the file size checked here is still the file size when the
+     * section grows. No Mm lock is held across the file-system call, which re-enters CcSetFileSizes.
+     */
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&MmpExtendSectionLock, TRUE);
+
+    if (NewSize->QuadPart <= Section->SizeOfSection.QuadPart)
+    {
+        Section->SizeOfSection = *NewSize;
+        Status = STATUS_SUCCESS;
+    }
+    else
     {
         LARGE_INTEGER FileSize;
-        NTSTATUS Status;
-
-        if (NewSize->QuadPart < 0)
-            return STATUS_SECTION_TOO_BIG;
-
-        if (NewSize->QuadPart <= Section->SizeOfSection.QuadPart)
-        {
-            Section->SizeOfSection = *NewSize;
-            return STATUS_SUCCESS;
-        }
 
         Status = FsRtlGetFileSize(Segment->FileObject, &FileSize);
         if (!NT_SUCCESS(Status))
-            return Status;
-
-        if (NewSize->QuadPart > FileSize.QuadPart)
+        {
+            Status = STATUS_SECTION_NOT_EXTENDED;
+        }
+        else if (NewSize->QuadPart > FileSize.QuadPart)
         {
             /* Only a section that can write to the file extends it */
             if (!(Section->InitialPageProtection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
-                return STATUS_SECTION_NOT_EXTENDED;
-
-            Status = IoSetInformation(Segment->FileObject,
-                                      FileEndOfFileInformation,
-                                      sizeof(LARGE_INTEGER),
-                                      NewSize);
-            if (!NT_SUCCESS(Status))
-                return STATUS_SECTION_NOT_EXTENDED;
-        }
-    }
-
-    /* The cache manager's section only grows */
-    if (NewSize->QuadPart > Section->SizeOfSection.QuadPart)
-    {
-        Section->SizeOfSection = *NewSize;
-
-        if (!Section->u.Flags.Reserve)
-        {
-            MmLockSectionSegment(Segment);
-            if (Segment->RawLength.QuadPart < NewSize->QuadPart)
             {
-                Segment->RawLength = *NewSize;
-                Segment->Length.QuadPart = PAGE_ROUND_UP_64(NewSize->QuadPart);
+                Status = STATUS_SECTION_NOT_EXTENDED;
             }
-            MmUnlockSectionSegment(Segment);
+            else
+            {
+                Status = IoSetInformation(Segment->FileObject,
+                                          FileEndOfFileInformation,
+                                          sizeof(LARGE_INTEGER),
+                                          NewSize);
+                if (!NT_SUCCESS(Status))
+                    Status = STATUS_SECTION_NOT_EXTENDED;
+            }
         }
+
+        if (NT_SUCCESS(Status))
+            MiGrowDataSection(Section, Segment, NewSize);
     }
 
-    return STATUS_SUCCESS;
+    ExReleaseResourceLite(&MmpExtendSectionLock);
+    KeLeaveCriticalRegion();
+
+    return Status;
 }
 
 /* EOF */
