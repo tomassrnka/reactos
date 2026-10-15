@@ -231,8 +231,37 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtClose: return NtClose(H(0));
     case W64_NtContinue: return Wow64Continue(P(0), a[1]);
     case W64_NtQueryObject:
-        if (a[1] == ObjectBasicInformation)
+        if (a[1] == ObjectBasicInformation || a[1] == ObjectHandleFlagInformation)
             return NtQueryObject(H(0), a[1], P(2), a[3], P(4));
+        if (a[1] == ObjectNameInformation)
+        {
+            OBJECT_NAME_INFORMATION *Native;
+            WOW64_STRING *Guest = P(2);
+            ULONG Needed = 0, GuestNeeded, Extra = sizeof(UNICODE_STRING) - sizeof(WOW64_STRING);
+            if (a[3] > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
+            if (a[4]) PROBE(4);
+            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, a[3] + Extra);
+            if (!Native) return STATUS_NO_MEMORY;
+            Status = NtQueryObject(H(0), a[1], Native, a[3] + Extra, &Needed);
+            GuestNeeded = Needed >= sizeof(UNICODE_STRING) ? Needed - Extra : Needed;
+            if (a[4]) U(4) = GuestNeeded;
+            if (NT_SUCCESS(Status))
+            {
+                if (a[3] < sizeof(*Guest) ||
+                    Native->Name.MaximumLength > a[3] - sizeof(*Guest))
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                Guest->Length = Native->Name.Length;
+                Guest->MaximumLength = Native->Name.MaximumLength;
+                Guest->Buffer = Native->Name.Buffer ? PtrToUlong(Guest + 1) : 0;
+                if (Native->Name.Buffer)
+                    RtlCopyMemory(Guest + 1, Native->Name.Buffer, Native->Name.MaximumLength);
+            }
+            return Status;
+        }
+        return STATUS_NOT_SUPPORTED;
+    case W64_NtSetInformationObject:
+        if (a[1] == ObjectHandleFlagInformation)
+            return NtSetInformationObject(H(0), a[1], P(2), a[3]);
         return STATUS_NOT_SUPPORTED;
     case W64_NtRaiseException: return Wow64RaiseException(P(0), P(1), a[2]);
     case W64_NtTestAlert: return NtTestAlert();
@@ -368,6 +397,14 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtCreateDirectoryObject:
         PROBE(0);
         ATTR(2); Status = NtCreateDirectoryObject(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtCreateSymbolicLinkObject:
+    {
+        UNICODE_STRING Target;
+        PROBE(0);
+        ATTR(2);
+        Status = NtCreateSymbolicLinkObject(&Cleanup->Handle, a[1], OA(2), String32(&Target, P(3)));
+        RETURN_HANDLE();
+    }
     case W64_NtOpenSymbolicLinkObject:
         PROBE(0);
         ATTR(2); Status = NtOpenSymbolicLinkObject(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
@@ -376,6 +413,57 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtQuerySymbolicLinkObject(H(0), &Name, P(2));
         ((WOW64_STRING *)P(1))->Length = Name.Length;
         return Status;
+    case W64_NtQueryDirectoryObject:
+    {
+        typedef struct { WOW64_STRING Name, TypeName; } DIRECTORY32;
+        OBJECT_DIRECTORY_INFORMATION *From;
+        DIRECTORY32 *To = P(1);
+        ULONG Index, Bytes = 0, Count = 0, NativeLength, Required, i;
+        PUCHAR Strings;
+        const ULONG Extra = 2 * (sizeof(*From) - sizeof(*To));
+        PROBE(5);
+        if (a[6]) PROBE(6);
+        ProbeOutput(a[1], a[2]);
+        if (a[2] > MAXULONG - Extra) return STATUS_INVALID_PARAMETER;
+        Index = a[4] ? 0 : U(5);
+        NativeLength = a[2] + Extra;
+        From = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, NativeLength);
+        if (!From) return STATUS_NO_MEMORY;
+        Status = NtQueryDirectoryObject(H(0), From, NativeLength, a[3], a[4], &Index, &Bytes);
+        if (!NT_SUCCESS(Status))
+        {
+            if (a[6]) U(6) = Status == STATUS_BUFFER_TOO_SMALL && Bytes >= Extra ? Bytes - Extra :
+                              Bytes >= sizeof(*From) ? Bytes - (sizeof(*From) - sizeof(*To)) : Bytes;
+            return Status;
+        }
+        /* The kernel supplies an array terminated by an empty entry, with
+         * both counted strings behind it. The extra space above pays for
+         * widening one result and its terminator, even for a single query. */
+        while ((Count + 1) * sizeof(*From) <= Bytes && From[Count].Name.Buffer)
+            ++Count;
+        if ((Count + 1) * sizeof(*From) > Bytes) return STATUS_INFO_LENGTH_MISMATCH;
+        Required = Bytes - (Count + 1) * (sizeof(*From) - sizeof(*To));
+        if (a[6]) U(6) = Required;
+        if (Required > a[2]) return STATUS_BUFFER_TOO_SMALL;
+        Strings = (PUCHAR)(To + Count + 1);
+        for (i = 0; i < Count; ++i)
+        {
+            UNICODE_STRING *Source[2] = {&From[i].Name, &From[i].TypeName};
+            WOW64_STRING *Destination[2] = {&To[i].Name, &To[i].TypeName};
+            ULONG j;
+            for (j = 0; j < 2; ++j)
+            {
+                Destination[j]->Length = Source[j]->Length;
+                Destination[j]->MaximumLength = Source[j]->MaximumLength;
+                Destination[j]->Buffer = PtrToUlong(Strings);
+                RtlCopyMemory(Strings, Source[j]->Buffer, Source[j]->MaximumLength);
+                Strings += Source[j]->MaximumLength;
+            }
+        }
+        RtlZeroMemory(To + Count, sizeof(*To));
+        U(5) = Index;
+        return Status;
+    }
     case W64_NtOpenKey:
         PROBE(0);
         ATTR(2);
@@ -468,6 +556,29 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                           P(3), a[4], a[5], P(6));
     case W64_NtCancelTimer: return NtCancelTimer(H(0), P(1));
     case W64_NtQueryTimer: return NtQueryTimer(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtCreateIoCompletion:
+        PROBE(0);
+        ATTR(2); Status = NtCreateIoCompletion(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
+    case W64_NtOpenIoCompletion:
+        PROBE(0);
+        ATTR(2); Status = NtOpenIoCompletion(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtQueryIoCompletion:
+        return NtQueryIoCompletion(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtSetIoCompletion:
+        return NtSetIoCompletion(H(0), P(1), P(2), a[3], a[4]);
+    case W64_NtRemoveIoCompletion:
+    {
+        PVOID Key, Context;
+        PROBE(1); PROBE(2); ProbeOutput(a[3], sizeof(WOW64_IOSB));
+        Status = NtRemoveIoCompletion(H(0), &Key, &Context, &Io, P(4));
+        if (Status == STATUS_SUCCESS)
+        {
+            U(1) = PtrToUlong(Key);
+            U(2) = PtrToUlong(Context);
+            StoreIo(a[3], &Io);
+        }
+        return Status;
+    }
     case W64_NtCreateKeyedEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateKeyedEvent(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
@@ -487,18 +598,125 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtCreateFile(&Cleanup->Handle, a[1], OA(2), &Io, P(4), a[5], a[6], a[7], a[8], P(9), a[10]);
         if (!NT_SUCCESS(Status)) Cleanup->Handle = NULL;
         StoreIo(a[3], &Io); RETURN_HANDLE();
+    case W64_NtCreateNamedPipeFile:
+        PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
+        FILEATTR(2);
+        Status = NtCreateNamedPipeFile(&Cleanup->Handle, a[1], OA(2), &Io,
+                                       a[4], a[5], a[6], a[7], a[8], a[9],
+                                       a[10], a[11], a[12], P(13));
+        if (!NT_SUCCESS(Status)) Cleanup->Handle = NULL;
+        StoreIo(a[3], &Io); RETURN_HANDLE();
+    case W64_NtLockFile:
+        return NtLockFile(H(0), H(1),
+                         a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
+                         P(3), (PVOID)(0x8000000000000000ULL | a[4]),
+                         P(5), P(6), a[7], a[8], a[9]);
+    case W64_NtUnlockFile:
+        ProbeOutput(a[1], sizeof(WOW64_IOSB));
+        /* Native unlock waits for completion, including asynchronous handles. */
+        Status = NtUnlockFile(H(0), &Io, P(2), P(3), a[4]);
+        StoreIo(a[1], &Io);
+        return Status;
+    case W64_NtDeviceIoControlFile:
+        if (a[5] != IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH) return STATUS_NOT_SUPPORTED;
+        ProbeOutput(a[4], sizeof(WOW64_IOSB));
+        return NtDeviceIoControlFile(H(0), H(1),
+                    a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
+                    P(3), (PVOID)(0x8000000000000000ULL | a[4]),
+                    a[5], P(6), a[7], P(8), a[9]);
+    case W64_NtFsControlFile:
+        /* These pipe operations carry opaque bytes or fixed-width records.
+         * Keep the guest IOSB alive through pending listen/transceive requests. */
+        switch (a[5])
+        {
+        case FSCTL_PIPE_PEEK: case FSCTL_PIPE_LISTEN: case FSCTL_PIPE_DISCONNECT:
+        case FSCTL_PIPE_WAIT: case FSCTL_PIPE_TRANSCEIVE:
+            return NtFsControlFile(H(0), H(1),
+                       a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
+                       P(3), (PVOID)(0x8000000000000000ULL | a[4]),
+                       a[5], P(6), a[7], P(8), a[9]);
+        default: return STATUS_NOT_SUPPORTED;
+        }
     case W64_NtQueryAttributesFile:
         FILEATTR(0); return NtQueryAttributesFile(OA(0), P(1));
     case W64_NtQueryFullAttributesFile:
         FILEATTR(0); return NtQueryFullAttributesFile(OA(0), P(1));
     case W64_NtDeleteFile:
         FILEATTR(0); return NtDeleteFile(OA(0));
+    case W64_NtFlushBuffersFile:
+    {
+        FILE_MODE_INFORMATION Mode;
+        ProbeOutput(a[1], sizeof(WOW64_IOSB));
+        Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
+        if (!NT_SUCCESS(Status)) return Status;
+        if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
+            return STATUS_NOT_SUPPORTED;
+        Status = NtFlushBuffersFile(H(0), &Io);
+        StoreIo(a[1], &Io);
+        return Status;
+    }
     case W64_NtSetInformationFile:
         switch (a[4])
         {
+        case FileRenameInformation:
+        case FileLinkInformation:
+        {
+            WOW64_RENAME_INFORMATION *From = P(2);
+            FILE_RENAME_INFORMATION *To;
+            PVOID Redirected = NULL;
+            ULONG Bytes;
+            BOOLEAN Replace;
+            if (a[3] < FIELD_OFFSET(WOW64_RENAME_INFORMATION, Name))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            Bytes = From->Length;
+            if (Bytes > a[3] - FIELD_OFFSET(WOW64_RENAME_INFORMATION, Name) ||
+                Bytes > MAXUSHORT || (Bytes & 1))
+                return STATUS_INVALID_PARAMETER;
+            ProbeOutput(a[1], sizeof(WOW64_IOSB));
+            Replace = From->Replace;
+            Name.Buffer = From->Name;
+            Name.Length = Name.MaximumLength = Bytes;
+            InitializeObjectAttributes(&Attributes, &Name, 0, HANDLE32(From->Root), NULL);
+            _SEH2_TRY
+            {
+                Status = Wow64RedirectFile(&Attributes, &Name, &Redirected);
+                if (NT_SUCCESS(Status))
+                {
+                    Bytes = sizeof(*To) + Name.Length;
+                    To = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Bytes);
+                    if (!To) Status = STATUS_NO_MEMORY;
+                    else
+                    {
+                        To->ReplaceIfExists = Replace;
+                        To->RootDirectory = Attributes.RootDirectory;
+                        To->FileNameLength = Name.Length;
+                        RtlCopyMemory(To->FileName, Name.Buffer, Name.Length);
+                        Status = NtSetInformationFile(H(0), &Io, To, Bytes, a[4]);
+                        StoreIo(a[1], &Io);
+                    }
+                }
+            }
+            _SEH2_FINALLY
+            {
+                if (Redirected) RtlFreeHeap(RtlGetProcessHeap(), 0, Redirected);
+            }
+            _SEH2_END;
+            return Status;
+        }
+        case FileCompletionInformation:
+        {
+            FILE_COMPLETION_INFORMATION Completion;
+            if (a[3] != 2 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            ProbeOutput(a[1], sizeof(WOW64_IOSB));
+            Completion.Port = HANDLE32(((ULONG *)P(2))[0]);
+            Completion.Key = PTR32(((ULONG *)P(2))[1]);
+            Status = NtSetInformationFile(H(0), &Io, &Completion, sizeof(Completion), a[4]);
+            StoreIo(a[1], &Io);
+            return Status;
+        }
         case FileBasicInformation: case FileDispositionInformation:
         case FilePositionInformation: case FileEndOfFileInformation:
-        case FileAllocationInformation:
+        case FileAllocationInformation: case FilePipeInformation:
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtSetInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
@@ -511,7 +729,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case FileBasicInformation: case FileStandardInformation: case FilePositionInformation:
         case FileNameInformation: case FileModeInformation: case FileInternalInformation:
         case FileAlignmentInformation: case FileNetworkOpenInformation:
-        case FileAttributeTagInformation:
+        case FileAttributeTagInformation: case FileAllInformation:
+        case FilePipeLocalInformation:
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
@@ -550,19 +769,20 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtReadFile:
     case W64_NtWriteFile:
     {
-        FILE_MODE_INFORMATION Mode;
-        if (a[1] || a[2] || a[3]) return STATUS_NOT_SUPPORTED;
-        Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
-        if (!NT_SUCCESS(Status)) return Status;
-        if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
-            return STATUS_NOT_SUPPORTED;
+        PIO_APC_ROUTINE Routine = a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL;
+        PIO_STATUS_BLOCK Iosb = (PVOID)(0x8000000000000000ULL | a[4]);
         ProbeOutput(a[4], sizeof(WOW64_IOSB));
+        /* The kernel captures this explicit IOSB32 marker in the IRP. Its
+         * completion writes the guest block before signaling or queuing APCs,
+         * with no per-request user allocation to leak on thread termination. */
         if (Number == W64_NtReadFile)
-            Status = NtReadFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], P(7), P(8));
-        else
-            Status = NtWriteFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], P(7), P(8));
-        StoreIo(a[4], &Io); return Status;
+            return NtReadFile(H(0), H(1), Routine, P(3), Iosb, P(5), a[6], P(7), P(8));
+        return NtWriteFile(H(0), H(1), Routine, P(3), Iosb, P(5), a[6], P(7), P(8));
     }
+    case W64_NtCancelIoFile:
+        ProbeOutput(a[1], sizeof(WOW64_IOSB));
+        Status = NtCancelIoFile(H(0), &Io);
+        StoreIo(a[1], &Io); return Status;
     case W64_NtOpenProcess:
     case W64_NtOpenThread:
     {

@@ -63,6 +63,7 @@ static BOOLEAN Component(const UNICODE_STRING *Path, PCWSTR Text)
 NTSTATUS Wow64RedirectFile(OBJECT_ATTRIBUTES *Attributes, UNICODE_STRING *Name, PVOID *Buffer)
 {
     static const UNICODE_STRING SystemRoot = RTL_CONSTANT_STRING(L"\\SystemRoot");
+    static const UNICODE_STRING PipeRoot = RTL_CONSTANT_STRING(L"\\Device\\NamedPipe");
     static const PCWSTR Shared[] = {L"catroot", L"catroot2", L"driverstore", L"drivers\\etc", L"logfiles", L"spool"};
     WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
     UNICODE_STRING Path, Tail, RootName;
@@ -71,6 +72,7 @@ NTSTATUS Wow64RedirectFile(OBJECT_ATTRIBUTES *Attributes, UNICODE_STRING *Name, 
     NTSTATUS Status;
     PVOID RootBuffer = NULL;
     PWSTR Captured;
+    BOOLEAN PipeRelative;
 
     if (!Attributes->ObjectName) return STATUS_SUCCESS;
     Path = *Attributes->ObjectName;
@@ -84,6 +86,22 @@ NTSTATUS Wow64RedirectFile(OBJECT_ATTRIBUTES *Attributes, UNICODE_STRING *Name, 
         Status = ObjectName(Attributes->RootDirectory, &RootBuffer);
         if (!NT_SUCCESS(Status)) return Status;
         RootName = ((OBJECT_NAME_INFORMATION *)RootBuffer)->Name;
+        if (Path.Buffer[0] != L'\\' && Prefix(&RootName, &PipeRoot))
+        {
+            struct { ULONG Length; WCHAR Name[4]; } FileName;
+            IO_STATUS_BLOCK Io;
+            /* NPFS includes structure padding in the object-name query's
+             * returned byte count. Use FileNameLength to recognize its root;
+             * bytes following that counted name are not part of the path. */
+            Status = NtQueryInformationFile(Attributes->RootDirectory, &Io,
+                                            &FileName, sizeof(FileName), FileNameInformation);
+            if (NT_SUCCESS(Status) && FileName.Length == sizeof(WCHAR) &&
+                FileName.Name[0] == L'\\')
+                RootName = PipeRoot;
+        }
+        if (RootName.Length && RootName.Buffer[RootName.Length / sizeof(WCHAR) - 1] == L'\\')
+            RootName.Length -= sizeof(WCHAR);
+        PipeRelative = Path.Buffer[0] != L'\\' && RtlEqualUnicodeString(&RootName, &PipeRoot, TRUE);
         Length = RootName.Length + sizeof(WCHAR) + Path.Length;
         if (Length > MAXUSHORT - sizeof(WCHAR))
         {
@@ -105,6 +123,17 @@ NTSTATUS Wow64RedirectFile(OBJECT_ATTRIBUTES *Attributes, UNICODE_STRING *Name, 
         Path.Buffer = Captured;
         Path.Length = Length;
         Path.MaximumLength = Length + sizeof(WCHAR);
+        Captured[Length / sizeof(WCHAR)] = UNICODE_NULL;
+        if (PipeRelative)
+        {
+            /* NPFS's legacy relative-open path mistakes its root CCB for a
+             * DCB. The pipe root has a stable device name; issue the equivalent
+             * absolute open from the guest without changing native NPFS. */
+            *Name = Path;
+            Attributes->ObjectName = Name;
+            Attributes->RootDirectory = NULL;
+            return STATUS_SUCCESS;
+        }
     }
 
     if (Prefix(&Path, &DosRoot)) RootLength = DosRoot.Length;
