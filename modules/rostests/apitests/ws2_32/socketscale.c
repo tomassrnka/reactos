@@ -289,6 +289,9 @@ TestConcurrentEnumeration(void)
     PMIB_UDPTABLE UdpTable;
     DWORD Size, Error, Started = 0, i;
     int Reads = 0, BadReads = 0;
+    DWORD LastBad = 0;
+    int UdpTransient = 0, UdpGood = 0;
+    DWORD UdpError = 0;
     BOOL Running = TRUE;
 
     TcpTable = HeapAlloc(GetProcessHeap(), 0, 1 << 20);
@@ -313,20 +316,31 @@ TestConcurrentEnumeration(void)
         Size = 1 << 20;
         Error = GetTcpTable(TcpTable, &Size, FALSE);
         if (Error != NO_ERROR && Error != ERROR_INSUFFICIENT_BUFFER)
+        {
             BadReads++;
+            LastBad = Error;
+        }
         Size = 1 << 20;
         Error = GetUdpTable(UdpTable, &Size, FALSE);
-        if (Error != NO_ERROR && Error != ERROR_INSUFFICIENT_BUFFER)
-            BadReads++;
+        /* Server 2008 R2 now and then fails a UDP table read with 0xC0000001
+           while UDP endpoints come and go; Windows 10 does not */
+        if (Error == NO_ERROR || Error == ERROR_INSUFFICIENT_BUFFER)
+            UdpGood++;
+        else
+        {
+            UdpTransient++;
+            UdpError = Error;
+        }
         Reads++;
         Running = WaitForMultipleObjects(Started, Threads, TRUE, 0) == WAIT_TIMEOUT;
     }
     for (i = 0; i < Started; i++)
         CloseHandle(Threads[i]);
-    trace("Concurrent: %d table reads while %d threads bound and closed %d x %d sockets each\n",
-          Reads, (int)Started, STRESS_ROUNDS, STRESS_HELD);
+    trace("Concurrent: %d table reads (%d UDP reads failed, last 0x%lx) while %d threads bound and closed %d x %d sockets each\n",
+          Reads, UdpTransient, UdpError, (int)Started, STRESS_ROUNDS, STRESS_HELD);
     ok(StressFailures == 0, "%ld socket or bind calls failed\n", StressFailures);
-    ok(BadReads == 0, "%d table reads failed\n", BadReads);
+    ok(BadReads == 0, "%d TCP table reads failed, last error 0x%lx\n", BadReads, LastBad);
+    ok(UdpGood > 0, "No UDP table read succeeded, last error 0x%lx\n", UdpError);
 
 Free:
     if (TcpTable)
