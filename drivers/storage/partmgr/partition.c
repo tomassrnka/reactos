@@ -514,7 +514,20 @@ PartitionHandlePnp(
         }
         case IRP_MN_REMOVE_DEVICE:
         {
-            PartMgrReleaseInstanceId(partExt->LowerDevice->DeviceExtension, partExt, FALSE);
+            PFDO_EXTENSION fdoExtension = partExt->LowerDevice->DeviceExtension;
+            BOOLEAN attached;
+
+            // A partition that is still in the layout (and in PartitionList) stays: only its links
+            // and interfaces go; it is deleted when it leaves the layout or with the disk.
+            PartMgrAcquireLayoutLock(fdoExtension);
+            attached = partExt->Attached;
+            PartMgrReleaseLayoutLock(fdoExtension);
+            if (attached)
+            {
+                status = PartitionHandleRemove(partExt, FALSE);
+                break;
+            }
+            PartMgrReleaseInstanceId(fdoExtension, partExt, FALSE);
             status = PartitionHandleRemove(partExt, TRUE);
             break;
         }

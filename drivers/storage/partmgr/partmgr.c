@@ -1598,7 +1598,17 @@ FdoHandleRemoveDevice(
     Irp->IoStatus.Status = STATUS_SUCCESS;
     NTSTATUS status = IoCallDriver(FdoExtension->LowerDevice, Irp);
 
+    // the partitions still listed got their IRP_MN_REMOVE_DEVICE before the disk (those PnP knew)
+    // and stayed because they were in the layout: they go with the disk
     PSINGLE_LIST_ENTRY entry;
+    while ((entry = PopEntryList(&FdoExtension->PartitionList)) != NULL)
+    {
+        PPARTITION_EXTENSION partExt = CONTAINING_RECORD(entry, PARTITION_EXTENSION, ListEntry);
+
+        partExt->Attached = FALSE;
+        PartitionHandleRemove(partExt, TRUE);
+    }
+
     while ((entry = PopEntryList(&FdoExtension->InstanceIds)) != NULL)
     {
         ExFreePoolWithTag(CONTAINING_RECORD(entry, PARTITION_ID_RECORD, ListEntry), TAG_PARTMGR);
@@ -1618,21 +1628,25 @@ FdoHandleSurpriseRemoval(
 {
     PAGED_CODE();
 
-    // all enumerated child devices should receive IRP_MN_REMOVE_DEVICE
-    // removing only non-enumerated ones here
-    for (PSINGLE_LIST_ENTRY curEntry = FdoExtension->PartitionList.Next;
-         curEntry != NULL;
-         curEntry = curEntry->Next)
+    // all enumerated child devices receive IRP_MN_REMOVE_DEVICE (and stay listed until the disk's
+    // removal, FdoHandleRemoveDevice); only the ones PnP never saw are removed here
+    PartMgrAcquireLayoutLock(FdoExtension);
+    for (PSINGLE_LIST_ENTRY prevEntry = &FdoExtension->PartitionList; prevEntry->Next != NULL;)
     {
-        PPARTITION_EXTENSION partExt = CONTAINING_RECORD(curEntry,
+        PPARTITION_EXTENSION partExt = CONTAINING_RECORD(prevEntry->Next,
                                                          PARTITION_EXTENSION,
                                                          ListEntry);
 
         if (partExt->IsEnumerated)
         {
-            PartitionHandleRemove(partExt, TRUE);
+            prevEntry = prevEntry->Next;
+            continue;
         }
+        prevEntry->Next = partExt->ListEntry.Next;
+        partExt->Attached = FALSE;
+        PartitionHandleRemove(partExt, TRUE);
     }
+    PartMgrReleaseLayoutLock(FdoExtension);
 
     // Send the IRP down the stack
     IoSkipCurrentIrpStackLocation(Irp);
@@ -1857,7 +1871,9 @@ PartMgrReadWrite(
 
     if (!partExt->IsFDO)
     {
-        if (!partExt->IsEnumerated)
+        // a partition that left the layout reads and writes no more: its sectors may belong to
+        // another partition now
+        if (!partExt->IsEnumerated || !partExt->Attached)
         {
             Irp->IoStatus.Status = STATUS_DEVICE_DOES_NOT_EXIST;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
