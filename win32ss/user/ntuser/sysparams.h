@@ -92,9 +92,7 @@ typedef struct _SPIVALUES
     INT iDragHeight;
     INT iMouseTrails;
     INT iWheelScrollLines;
-#if (_WIN32_WINNT >= 0x0600)
     UINT uiWheelScrollChars;
-#endif
 
     /* Keyboard */
     FILTERKEYS filterkeys;
