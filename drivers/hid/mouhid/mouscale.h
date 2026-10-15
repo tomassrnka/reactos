@@ -8,9 +8,11 @@
 #pragma once
 
 //
-// Convert an absolute axis value into 0..VirtualSize by normalizing over the
-// logical range: (value - LogicalMin) * VirtualSize / (LogicalMax - LogicalMin),
-// in 64-bit arithmetic.
+// Map an absolute axis value onto 0..VirtualSize-1, the range win32k expects:
+// LogicalMin gives 0 and LogicalMax gives VirtualSize-1, with rounding, in
+// 64-bit arithmetic: (Position * (VirtualSize - 1) + Range / 2) / Range, where
+// Position = value - LogicalMin and Range = LogicalMax - LogicalMin. This is the
+// mapping of fix/abs-pointer-mapping (no +1 compensation).
 //
 // Signedness follows the HID spec: a negative LogicalMin makes the field
 // signed, so the raw value is sign-extended from BitSize bits (all-negative
@@ -33,7 +35,7 @@ MouHid_ScaleAbsolute(
     IN ULONG VirtualSize,
     OUT PLONG Scaled)
 {
-    LONGLONG Low, High, Value;
+    LONGLONG Low, High, Value, Range;
     ULONG Mask;
 
     if (ExtractStatus != HIDP_STATUS_SUCCESS)
@@ -60,7 +62,8 @@ MouHid_ScaleAbsolute(
         Value = (LONGLONG)(RawValue & Mask);
     }
 
-    if (High <= Low)
+    Range = High - Low;
+    if (Range <= 0 || VirtualSize == 0)
         return FALSE;
 
     if (Value < Low)
@@ -68,6 +71,6 @@ MouHid_ScaleAbsolute(
     if (Value > High)
         Value = High;
 
-    *Scaled = (LONG)(((Value - Low) * (LONGLONG)VirtualSize) / (High - Low));
+    *Scaled = (LONG)(((Value - Low) * (LONGLONG)(VirtualSize - 1) + Range / 2) / Range);
     return TRUE;
 }
