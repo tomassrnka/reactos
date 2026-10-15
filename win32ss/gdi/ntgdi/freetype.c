@@ -4991,6 +4991,62 @@ IntFaceWantsGrayAt(FT_Face Face)
     return (Flags & FT_GASP_DO_GRAY) != 0;
 }
 
+/* The final advance of a glyph, read from a hinted load alone: layout must not depend on a bitmap being built.
+   Simulated bold is included, as FreeType widens a strike by whole pixels and an outline by a fraction. */
+static FT_Error
+IntLoadGlyphAdvance(
+    IN PFONT_CACHE_ENTRY Cache,
+    OUT FT_Pos *pAdvanceX,
+    OUT FT_Pos *pAdvanceY)
+{
+    FT_Face Face = Cache->Hashed.Face;
+    FT_Error error;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    error = FT_Load_Glyph(Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
+    if (error)
+        return error;
+
+    if (Cache->Hashed.Aspect.Emu.Bold)
+        FT_GlyphSlot_Embolden(Face->glyph);
+
+    *pAdvanceX = Face->glyph->advance.x;
+    *pAdvanceY = Face->glyph->advance.y;
+    return FT_Err_Ok;
+}
+
+/* A glyph's advance for measuring: the cached bitmap's when it exists, else a load. Never builds a bitmap. */
+static FT_Error
+IntGetGlyphAdvance(
+    IN OUT PFONT_CACHE_ENTRY Cache,
+    OUT FT_Pos *pAdvanceX,
+    OUT FT_Pos *pAdvanceY)
+{
+    FT_BitmapGlyph realglyph;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    Cache->dwHash = IntGetHash(&Cache->Hashed, sizeof(Cache->Hashed) / sizeof(DWORD));
+
+    realglyph = IntFindGlyphCache(Cache);
+    if (realglyph)
+    {
+        *pAdvanceX = realglyph->root.advance.x >> 10;
+        *pAdvanceY = realglyph->root.advance.y >> 10;
+        return FT_Err_Ok;
+    }
+
+    return IntLoadGlyphAdvance(Cache, pAdvanceX, pAdvanceY);
+}
+
+/* A failed measurement sets the error the caller reads: memory for a pool failure, a general failure otherwise */
+static VOID
+IntSetAdvanceError(IN FT_Error error)
+{
+    EngSetLastError(error == FT_Err_Out_Of_Memory ? ERROR_NOT_ENOUGH_MEMORY : ERROR_GEN_FAILURE);
+}
+
 static FT_BitmapGlyph
 IntGetRealGlyph(
     IN OUT PFONT_CACHE_ENTRY Cache)
@@ -5025,20 +5081,7 @@ IntGetRealGlyph(
     {
         /* Layout must not depend on how the glyph is drawn: take the advance from the regular hinted load, which
            for a font with embedded strikes can differ from the outline's */
-        error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
-        if (!error)
-        {
-            /* The advance that counts is the final one, simulated bold included: FreeType widens a strike by whole
-               pixels and an outline by a fraction, so the simulation has to run on this load as well */
-            if (Cache->Hashed.Aspect.Emu.Bold)
-                FT_GlyphSlot_Embolden(Cache->Hashed.Face->glyph);
-            if (Cache->Hashed.Aspect.Emu.Italic)
-                FT_GlyphSlot_Oblique(Cache->Hashed.Face->glyph);
-
-            AdvanceX = Cache->Hashed.Face->glyph->advance.x;
-            AdvanceY = Cache->Hashed.Face->glyph->advance.y;
-            bKeepAdvance = TRUE;
-        }
+        bKeepAdvance = (IntLoadGlyphAdvance(Cache, &AdvanceX, &AdvanceY) == FT_Err_Ok);
 
         /* Embedded bitmaps are bilevel; smoothed text uses the outlines */
         if (RenderMode == FT_RENDER_MODE_LCD)
@@ -5098,14 +5141,15 @@ TextIntGetTextExtentPoint(
     _In_ FLONG fl)
 {
     PFONTGDI FontGDI;
-    FT_BitmapGlyph realglyph;
-    INT glyph_index, i, previous, nTenthsOfDegrees;
+    FT_Pos AdvanceX = 0, AdvanceY = 0;
+    FT_Error error;
+    INT glyph_index, i, iUnit, cUnits, previous, nTenthsOfDegrees;
     ULONGLONG TotalWidth64 = 0;
     LOGFONTW *plf;
     BOOL use_kerning, bVerticalWriting;
     LONG ascender, descender;
     FONT_CACHE_ENTRY Cache;
-    DWORD ch0, ch1;
+    DWORD ch0;
     FONTLINK_CHAIN Chain;
 
     FontGDI = ObjToGDI(TextObj->Font, FONT);
@@ -5146,27 +5190,29 @@ TextIntGetTextExtentPoint(
     use_kerning = FT_HAS_KERNING(Cache.Hashed.Face);
     previous = 0;
 
-    for (i = 0; i < Count; i++)
+    for (i = 0; i < Count; i += cUnits)
     {
-        ch0 = *String++;
-        if (IS_HIGH_SURROGATE(ch0))
+        /* A surrogate pair is one glyph; a lone surrogate stays a code unit of its own, as it does on Windows */
+        ch0 = String[i];
+        cUnits = 1;
+        if (IS_HIGH_SURROGATE(ch0) && i + 1 < Count && IS_LOW_SURROGATE(String[i + 1]) && !(fl & GTEF_INDICES))
         {
-            ++i;
-            if (i >= Count)
-                break;
-
-            ch1 = *String++;
-            if (IS_LOW_SURROGATE(ch1))
-                ch0 = Utf32FromSurrogatePair(ch0, ch1);
+            ch0 = Utf32FromSurrogatePair(ch0, String[i + 1]);
+            cUnits = 2;
         }
 
         glyph_index = FontLink_Chain_FindGlyph(&Chain, &Cache, &Cache.Hashed.Face, ch0,
                                                (fl & GTEF_INDICES));
         Cache.Hashed.GlyphIndex = glyph_index;
 
-        realglyph = IntGetRealGlyph(&Cache);
-        if (!realglyph)
-            break;
+        /* A glyph without an advance fails the call; a partial total would pass for the width */
+        error = IntGetGlyphAdvance(&Cache, &AdvanceX, &AdvanceY);
+        if (error != FT_Err_Ok)
+        {
+            IntUnLockFreeType();
+            IntSetAdvanceError(error);
+            return FALSE;
+        }
 
         /* Retrieve kerning distance */
         if (use_kerning && previous && glyph_index)
@@ -5176,15 +5222,17 @@ TextIntGetTextExtentPoint(
             TotalWidth64 += delta.x;
         }
 
-        TotalWidth64 += realglyph->root.advance.x >> 10;
+        TotalWidth64 += AdvanceX;
 
         if (((TotalWidth64 + 32) >> 6) <= MaxExtent && NULL != Fit)
         {
-            *Fit = i + 1;
+            *Fit = i + cUnits;
         }
+        /* Every code unit gets an entry: both halves of a pair carry the width after the glyph */
         if (NULL != Dx)
         {
-            Dx[i] = (TotalWidth64 + 32) >> 6;
+            for (iUnit = 0; iUnit < cUnits; iUnit++)
+                Dx[i + iUnit] = (TotalWidth64 + 32) >> 6;
         }
 
         previous = glyph_index;
@@ -7054,7 +7102,7 @@ IntGetTextDisposition(
 {
     LONGLONG X64 = 0, Y64 = 0;
     INT i, glyph_index;
-    FT_BitmapGlyph realglyph;
+    FT_Pos AdvanceX = 0, AdvanceY = 0;
     FT_Face face = Cache->Hashed.Face;
     BOOL use_kerning = FT_HAS_KERNING(face);
     ULONG previous = 0;
@@ -7081,9 +7129,16 @@ IntGetTextDisposition(
                                                (fuOptions & ETO_GLYPH_INDEX));
         Cache->Hashed.GlyphIndex = glyph_index;
 
-        realglyph = IntGetRealGlyph(Cache);
-        if (!realglyph)
-            return FALSE;
+        /* Only a width taken from the glyphs needs their advances */
+        if (NULL == Dx)
+        {
+            FT_Error error = IntGetGlyphAdvance(Cache, &AdvanceX, &AdvanceY);
+            if (error != FT_Err_Ok)
+            {
+                IntSetAdvanceError(error);
+                return FALSE;
+            }
+        }
 
         /* Retrieve kerning distance */
         if (use_kerning && previous && glyph_index)
@@ -7095,8 +7150,8 @@ IntGetTextDisposition(
 
         if (NULL == Dx)
         {
-            X64 += realglyph->root.advance.x >> 10;
-            Y64 -= realglyph->root.advance.y >> 10;
+            X64 += AdvanceX;
+            Y64 -= AdvanceY;
         }
         else if (fuOptions & ETO_PDY)
         {

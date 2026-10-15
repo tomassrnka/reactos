@@ -378,6 +378,8 @@ NtGdiGetTextExtentExW(
             EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
             return FALSE;
         }
+        /* The whole buffer is copied to the caller; no byte of it may be left from the pool */
+        RtlZeroMemory(Dx, Count * sizeof(INT));
     }
     else
     {
