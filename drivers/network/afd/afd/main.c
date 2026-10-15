@@ -1226,7 +1226,9 @@ CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_ACTIVE_
     {
         ASSERT(IrpSp->MajorFunction == IRP_MJ_DEVICE_CONTROL);
 
-        if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AFD_RECV)
+        /* AFD_RECV_INFO_UDP starts like AFD_RECV_INFO */
+        if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AFD_RECV ||
+            IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AFD_RECV_DATAGRAM)
         {
             RecvReq = GetLockedData(Irp, IrpSp);
             UnlockBuffers(RecvReq->BufferArray, RecvReq->BufferCount, CheckUnlockExtraBuffers(FCB, IrpSp));
