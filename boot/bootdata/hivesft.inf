@@ -731,7 +731,7 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Sy
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Emoji",0x00000000,"Noto Emoji"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Calibri",0x00000000,"Carlito"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Cambria",0x00000000,"Caladea"
-; East Asian face names (Windows and common legacy names) -> Noto Sans SC / Noto Sans KR
+; East Asian proportional face names (Windows and common legacy names) -> Noto Sans SC / Noto Sans KR
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Batang",0x00000000,"Noto Sans KR"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","DLCMingBold",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","DLCMingMedium",0x00000000,"Noto Sans SC"
@@ -758,6 +758,17 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","SimHei",0x0
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","SimSun",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Yu Gothic",0x00000000,"Noto Sans SC"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Yu Mincho",0x00000000,"Noto Sans SC"
+; East Asian fixed-pitch face names -> Courier New (fixed-pitch Latin; no fixed-pitch CJK font ships).
+; The CJK glyphs come from the Courier New SystemLink chain.
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS Gothic",0x00000000,"Courier New"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS Mincho",0x00000000,"Courier New"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","NSimSun",0x00000000,"Courier New"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","GulimChe",0x00000000,"Courier New"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","DotumChe",0x00000000,"Courier New"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","BatangChe",0x00000000,"Courier New"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","GungsuhChe",0x00000000,"Courier New"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MingLiU",0x00000000,"Courier New"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","MS Song",0x00000000,"Courier New"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontDPI","LogPixels",0x00010003,96
 
 ; FontLink
@@ -936,71 +947,6 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","Fixedsy
 	"NotoEmoji-Regular.ttf,Noto Emoji",\
 	"freesans.ttf,FreeSans"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","Fixedsys Excelsior 3.01-L2",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-
-; FontLink (fixed-pitch East Asian names, not substituted)
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","MS Gothic",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","MS Mincho",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","NSimSun",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","GulimChe",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","DotumChe",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","BatangChe",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","GungsuhChe",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","MingLiU",0x00010000,\
-	"cour.ttf,Courier New",\
-	"NotoSansSC-Regular.otf,Noto Sans SC",\
-	"NotoSansKR-Regular.otf,Noto Sans KR",\
-	"NotoSansSymbols2-Regular.ttf,Noto Sans Symbols 2",\
-	"NotoEmoji-Regular.ttf,Noto Emoji",\
-	"freesans.ttf,FreeSans"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontLink\SystemLink","MS Song",0x00010000,\
 	"cour.ttf,Courier New",\
 	"NotoSansSC-Regular.otf,Noto Sans SC",\
 	"NotoSansKR-Regular.otf,Noto Sans KR",\

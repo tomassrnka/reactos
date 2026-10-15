@@ -233,10 +233,11 @@ LpkDllInitialize(
 
 
 /*
- * TRUE if the selected font has no glyph for at least one character of the string.
- * Surrogate pairs are skipped: GetGlyphIndicesW sees UTF-16 units and would report both
- * halves of a supported supplementary character as missing. Zero-width format characters
- * are skipped too, no font needs to carry them.
+ * TRUE if the selected font may have no glyph for a character of the string.
+ * GetGlyphIndicesW sees UTF-16 units, so it cannot say whether the font has a supplementary
+ * character: a surrogate pair always counts as possibly missing, which sends the string down the
+ * character path where win32k font linking can supply the glyph. Zero-width format characters
+ * are skipped, no font needs to carry them.
  */
 static BOOL LPK_FontLacksChars(HDC hdc, LPCWSTR str, UINT count)
 {
@@ -257,10 +258,10 @@ static BOOL LPK_FontLacksChars(HDC hdc, LPCWSTR str, UINT count)
         {
             WCHAR ch = str[i];
 
-            if (ch >= 0xD800 && ch <= 0xDBFF && i + 1 < count && str[i + 1] >= 0xDC00 && str[i + 1] <= 0xDFFF)
+            if (ch >= 0xD800 && ch <= 0xDFFF)
             {
-                i++;
-                continue;
+                lacks = TRUE;
+                break;
             }
             if (ch < L' ' || (ch >= 0x200B && ch <= 0x200F) || (ch >= 0x202A && ch <= 0x202E) ||
                 (ch >= 0x2066 && ch <= 0x2069) || ch == 0xFEFF)
