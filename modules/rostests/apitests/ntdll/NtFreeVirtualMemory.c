@@ -691,8 +691,148 @@ static void Test_NtFreeVirtualMemory_ReleaseCost(void)
        "Releasing touched memory takes %.2f ms, decommitting it %.2f ms\n", BestRelease, BestDecommit);
 }
 
+/*
+ * A page decommitted on one processor must fault at once on another processor
+ * of the process, whether that processor kept running a thread of the process
+ * through the decommit (its TB may hold the page) or ran something else in
+ * between (it reloads the address space when it comes back).
+ */
+static PVOID DecommitPage;
+static volatile LONG DecommitPhase;
+static volatile LONG DecommitStale;
+static volatile LONG DecommitSleep;
+
+static DWORD WINAPI DecommitReader(PVOID Parameter)
+{
+    LONG Round, Rounds = PtrToLong(Parameter);
+
+    for (Round = 1; Round <= Rounds; Round++)
+    {
+        volatile UCHAR Value = 0;
+        LONG Phase;
+
+        /* The page is committed: read it until the decommit has returned (or sleep through it) */
+        while (DecommitPhase != 2 * Round - 1)
+            YieldProcessor();
+        _SEH2_TRY
+        {
+            if (DecommitSleep)
+            {
+                InterlockedExchange(&DecommitPhase, 2 * Round);
+                while (DecommitPhase != 2 * Round + 1)
+                    Sleep(1);
+                Value = *(volatile UCHAR *)DecommitPage;
+                InterlockedIncrement(&DecommitStale);
+            }
+            else
+            {
+                Value = *(volatile UCHAR *)DecommitPage;
+                InterlockedExchange(&DecommitPhase, 2 * Round);
+                do
+                {
+                    /* A read that follows the end of the decommit must fault; one during it may */
+                    Phase = DecommitPhase;
+                    Value = *(volatile UCHAR *)DecommitPage;
+                } while (Phase != 2 * Round + 1);
+                InterlockedIncrement(&DecommitStale);
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            if (_SEH2_GetExceptionCode() != STATUS_ACCESS_VIOLATION)
+                InterlockedIncrement(&DecommitStale);
+        }
+        _SEH2_END;
+        (void)Value;
+        /* Wait for the end of the decommit if the fault came during it */
+        while (DecommitPhase != 2 * Round + 1)
+            YieldProcessor();
+        InterlockedExchange(&DecommitPhase, 2 * Round + 2);
+    }
+    return 0;
+}
+
+static void Test_NtFreeVirtualMemory_DecommitOtherProcessor(BOOLEAN Sleeping)
+{
+    const LONG Rounds = 200;
+    SYSTEM_INFO SystemInfo;
+    DWORD_PTR OldMask;
+    HANDLE Thread;
+    PVOID Address;
+    SIZE_T Size;
+    NTSTATUS Status;
+    LONG Round, Failed = 0;
+
+    GetSystemInfo(&SystemInfo);
+    if (SystemInfo.dwNumberOfProcessors < 2)
+    {
+        skip("Needs more than one processor\n");
+        return;
+    }
+
+    DecommitPage = NULL;
+    Size = PAGE_SIZE;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &DecommitPage, 0, &Size, MEM_RESERVE, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    DecommitPhase = 0;
+    DecommitStale = 0;
+    DecommitSleep = Sleeping;
+    OldMask = SetThreadAffinityMask(GetCurrentThread(), 1);
+    Thread = CreateThread(NULL, 0, DecommitReader, LongToPtr(Rounds), CREATE_SUSPENDED, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (Thread)
+    {
+        SetThreadAffinityMask(Thread, 2);
+        ResumeThread(Thread);
+        for (Round = 1; Round <= Rounds; Round++)
+        {
+            Address = DecommitPage;
+            Size = PAGE_SIZE;
+            Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+            if (!NT_SUCCESS(Status))
+                break;
+            *(volatile UCHAR *)DecommitPage = (UCHAR)Round;
+            InterlockedExchange(&DecommitPhase, 2 * Round - 1);
+            while (DecommitPhase != 2 * Round)
+                YieldProcessor();
+
+            Address = DecommitPage;
+            Size = PAGE_SIZE;
+            Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_DECOMMIT);
+            if (!NT_SUCCESS(Status))
+                break;
+            InterlockedExchange(&DecommitPhase, 2 * Round + 1);
+            while (DecommitPhase != 2 * Round + 2)
+                YieldProcessor();
+        }
+        if (Round <= Rounds)
+        {
+            Failed = 1;
+            /* Let the reader finish */
+            DecommitPhase = 2 * Rounds + 2;
+        }
+        ok(!Failed, "Round %ld failed with 0x%08lx\n", Round, Status);
+        if (WaitForSingleObject(Thread, 30000) != WAIT_OBJECT_0)
+            TerminateThread(Thread, 1);
+        CloseHandle(Thread);
+        ok(DecommitStale == 0, "%s reader read a decommitted page %ld times in %ld rounds\n",
+           Sleeping ? "Sleeping" : "Running", DecommitStale, Rounds);
+    }
+    SetThreadAffinityMask(GetCurrentThread(), OldMask);
+
+    Address = DecommitPage;
+    Size = 0;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtFreeVirtualMemory)
 {
+    Test_NtFreeVirtualMemory_DecommitOtherProcessor(FALSE);
+    Test_NtFreeVirtualMemory_DecommitOtherProcessor(TRUE);
     Test_NtFreeVirtualMemory();
     Test_NtFreeVirtualMemory_Parameters();
     Test_NtFreeVirtualMemory_DecommitInaccessible();

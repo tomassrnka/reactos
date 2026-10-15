@@ -779,9 +779,12 @@ MiDeleteVirtualAddresses(
     /*
      * The PTEs are cleared under the PFN lock, the TB is flushed without it, and
      * the pages are released under it again. The working set lock, held by the
-     * caller throughout, keeps faults off the range in between.
+     * caller throughout, keeps faults off the range in between. User addresses
+     * are cached only by the processors running the current process.
      */
-    MiInitializeDeferredRelease(&Deferred, TRUE, ((EndingAddress - Va) >> PAGE_SHIFT) + 1);
+    MiInitializeDeferredRelease(&Deferred,
+                                Va > (ULONG_PTR)MM_HIGHEST_USER_ADDRESS,
+                                ((EndingAddress - Va) >> PAGE_SHIFT) + 1);
 
     /* Get the current process */
     CurrentProcess = PsGetCurrentProcess();
@@ -2872,7 +2875,8 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
     PMMPFN Pfn1, Pfn2;
     MM_TB_FLUSH_LIST FlushList;
 
-    MmInitializeTbFlushList(&FlushList, TRUE);
+    /* Decommitted user pages: only the processors running the process cache them */
+    MmInitializeTbFlushList(&FlushList, FALSE);
 
     //
     // Acquire the PFN lock and loop all the PTEs in the list
