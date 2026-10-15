@@ -67,6 +67,36 @@ test_Forwarder(void)
     ok(Wait == WaitRos, "kernelbase.dll WaitOnAddress %p is not the one of kernelbase_ros.dll %p\n", Wait, WaitRos);
     ok(GetProcAddress(g_Module, "QueryInterruptTime") == GetProcAddress(Ros, "QueryInterruptTime"),
        "QueryInterruptTime of kernelbase.dll is not the one of kernelbase_ros.dll\n");
+
+    /* Every export of kernelbase_ros.dll is forwarded by name, to the same code */
+    {
+        PBYTE Base = (PBYTE)Ros;
+        PIMAGE_NT_HEADERS Nt = (PIMAGE_NT_HEADERS)(Base + ((PIMAGE_DOS_HEADER)Base)->e_lfanew);
+        PIMAGE_DATA_DIRECTORY Dir = &Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        PIMAGE_EXPORT_DIRECTORY Exp = (PIMAGE_EXPORT_DIRECTORY)(Base + Dir->VirtualAddress);
+        PDWORD Names = (PDWORD)(Base + Exp->AddressOfNames);
+        DWORD i, Missing = 0, Different = 0;
+
+        for (i = 0; i < Exp->NumberOfNames; i++)
+        {
+            const char *Name = (const char *)(Base + Names[i]);
+            PVOID Forwarded = GetProcAddress(g_Module, Name);
+
+            if (Forwarded == NULL)
+            {
+                Missing++;
+                trace("kernelbase.dll does not export %s\n", Name);
+            }
+            else if (Forwarded != GetProcAddress(Ros, Name))
+            {
+                Different++;
+                trace("%s differs between kernelbase.dll and kernelbase_ros.dll\n", Name);
+            }
+        }
+        ok(Exp->NumberOfNames > 100, "kernelbase_ros.dll has only %lu named exports\n", Exp->NumberOfNames);
+        ok(Missing == 0, "%lu of %lu exports of kernelbase_ros.dll are missing in kernelbase.dll\n", Missing, Exp->NumberOfNames);
+        ok(Different == 0, "%lu exports of kernelbase.dll are not the ones of kernelbase_ros.dll\n", Different);
+    }
     FreeLibrary(Ros);
 }
 
@@ -160,6 +190,86 @@ test_Precise(FN_QueryTime Precise, const char *Name)
     }
 }
 
+static BOOL
+EnableTimePrivilege(void)
+{
+    HANDLE Token;
+    TOKEN_PRIVILEGES Privileges;
+    BOOL Ret;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &Token))
+        return FALSE;
+    Privileges.PrivilegeCount = 1;
+    Privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    Ret = LookupPrivilegeValueW(NULL, SE_SYSTEMTIME_NAME, &Privileges.Privileges[0].Luid) &&
+          AdjustTokenPrivileges(Token, FALSE, &Privileges, 0, NULL, NULL) && GetLastError() == ERROR_SUCCESS;
+    CloseHandle(Token);
+    return Ret;
+}
+
+static BOOL
+ShiftSystemTime(LONGLONG Delta100ns)
+{
+    FILETIME FileTime;
+    SYSTEMTIME SystemTime;
+    ULARGE_INTEGER Value;
+
+    GetSystemTimeAsFileTime(&FileTime);
+    Value.LowPart = FileTime.dwLowDateTime;
+    Value.HighPart = FileTime.dwHighDateTime;
+    Value.QuadPart += Delta100ns;
+    FileTime.dwLowDateTime = Value.LowPart;
+    FileTime.dwHighDateTime = Value.HighPart;
+    return FileTimeToSystemTime(&FileTime, &SystemTime) && SetSystemTime(&SystemTime);
+}
+
+/* The wall clock is changed between the calls: the interrupt time must neither go back nor jump */
+static void
+test_ClockAdjust(FN_QueryTime Precise, const char *Name)
+{
+    static const LONGLONG Deltas[] = { -50 * 1000 * MS, 50 * 1000 * MS, -500 * MS, 500 * MS };
+    ULONGLONG A, B, C, D;
+    int i;
+
+    if (Precise == NULL)
+    {
+        skip("%s is not exported\n", Name);
+        return;
+    }
+    if (!EnableTimePrivilege())
+    {
+        skip("no privilege to set the system time\n");
+        return;
+    }
+
+    for (i = 0; i < (int)_countof(Deltas); i++)
+    {
+        BOOL Set, Restored;
+
+        Precise(&A);
+        Set = ShiftSystemTime(Deltas[i]);
+        Precise(&B);
+        Sleep(30);
+        Precise(&C);
+        /* The clock kept running: undoing the shift gives the right time again */
+        Restored = ShiftSystemTime(-Deltas[i]);
+        Precise(&D);
+
+        if (!Set)
+        {
+            skip("cannot set the system time (error %lu)\n", GetLastError());
+            return;
+        }
+        ok(Restored, "cannot restore the system time\n");
+        ok(B >= A, "%s: went back by %I64d ms when the system time moved by %I64d ms\n", Name,
+           (LONGLONG)(A - B) / (LONGLONG)MS, Deltas[i] / (LONGLONG)MS);
+        ok(C >= B, "%s: went back by %I64d ms after the system time moved\n", Name, (LONGLONG)(B - C) / (LONGLONG)MS);
+        ok(D >= C, "%s: went back by %I64d ms when the system time was restored\n", Name, (LONGLONG)(C - D) / (LONGLONG)MS);
+        ok(D - A < 2000 * MS, "%s: moved by %I64u ms across a system time change of %I64d ms\n", Name,
+           (D - A) / MS, Deltas[i] / (LONGLONG)MS);
+    }
+}
+
 START_TEST(KernelBaseTime)
 {
     test_Load();
@@ -170,4 +280,7 @@ START_TEST(KernelBaseTime)
     test_Coarse();
     test_Precise(pQueryInterruptTimePrecise, "QueryInterruptTimePrecise");
     test_Precise(pQueryUnbiasedInterruptTimePrecise, "QueryUnbiasedInterruptTimePrecise");
+    test_ClockAdjust(pQueryInterruptTimePrecise, "QueryInterruptTimePrecise");
+    test_ClockAdjust(pQueryUnbiasedInterruptTimePrecise, "QueryUnbiasedInterruptTimePrecise");
+    test_ClockAdjust(pQueryInterruptTime, "QueryInterruptTime");
 }
