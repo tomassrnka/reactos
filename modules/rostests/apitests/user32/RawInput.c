@@ -1046,7 +1046,7 @@ static void test_buffer_alignment_and_protection(void)
     BYTE *bad = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     RAWINPUTDEVICELIST list[8];
     RAWINPUTDEVICE d[2];
-    BYTE tmp[256];
+    BYTE tmp[1024];
     UINT n, size, ret;
 
     ok(page && bad, "VirtualAlloc failed\n");
@@ -1320,6 +1320,89 @@ static int child_desk_main(const char *flavor, const char *evReady, const char *
     return g_deskCount > 200 ? 200 : g_deskCount;
 }
 
+
+struct deskfg_ctx
+{
+    HDESK desk;
+    DWORD flags;
+    HANDLE registered, stop;
+    BOOL success;
+};
+
+/* the registration is made by a thread on another desktop; the window with the focus is on the input desktop */
+static DWORD WINAPI DeskFgThread(LPVOID arg)
+{
+    struct deskfg_ctx *c = arg;
+    RAWINPUTDEVICE d[2];
+    HWND hwnd;
+    MSG msg;
+
+    if (!SetThreadDesktop(c->desk))
+    {
+        SetEvent(c->registered);
+        return 1;
+    }
+    hwnd = CreateWindowExW(0, L"RawInputTestDeskWnd", L"rawdesk", WS_POPUP | WS_VISIBLE, 600, 400, 100, 100,
+                           NULL, NULL, GetModuleHandleW(NULL), NULL);
+    d[0] = mkdev(1, 2, c->flags, hwnd);
+    d[1] = mkdev(1, 6, c->flags, hwnd);
+    c->success = hwnd && RegisterRawInputDevices(d, 2, sizeof(d[0]));
+    SetEvent(c->registered);
+    while (MsgWaitForMultipleObjects(1, &c->stop, FALSE, 20000, QS_ALLINPUT) == WAIT_OBJECT_0 + 1)
+    {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+            DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+static int child_deskfg_main(const char *flavor, const char *evReady, const char *evStop)
+{
+    HANDLE hr = OpenEventA(EVENT_ALL_ACCESS, FALSE, evReady), hs = OpenEventA(EVENT_ALL_ACCESS, FALSE, evStop);
+    struct deskfg_ctx c;
+    WNDCLASSW wc;
+    HWND fg;
+    HANDLE th;
+    MSG msg;
+
+    ZeroMemory(&c, sizeof(c));
+    c.flags = strstr(flavor, "fgex") ? RIDEV_EXINPUTSINK : strstr(flavor, "fgsink") ? RIDEV_INPUTSINK : 0;
+    c.registered = CreateEventW(NULL, TRUE, FALSE, NULL);
+    c.stop = hs;
+    c.desk = CreateDesktopW(L"RawInputTestFgDesktop", NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL);
+    if (!c.desk)
+        return 250;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = CountProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"RawInputTestDeskWnd";
+    RegisterClassW(&wc);
+    th = CreateThread(NULL, 0, DeskFgThread, &c, 0, NULL);
+    WaitForSingleObject(c.registered, 10000);
+    if (!c.success)
+        return 251;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"RawInputTestFgWnd";
+    RegisterClassW(&wc);
+    fg = CreateWindowExW(0, wc.lpszClassName, L"rawfg", WS_POPUP | WS_VISIBLE, 500, 100, 200, 200, NULL, NULL, wc.hInstance, NULL);
+    SetForegroundWindow(fg);
+    SetEvent(hr);
+    for (;;)
+    {
+        DWORD r;
+
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+            DispatchMessageW(&msg);
+        r = MsgWaitForMultipleObjects(1, &hs, FALSE, 20000, QS_ALLINPUT);
+        if (r == WAIT_OBJECT_0 || r == WAIT_TIMEOUT)
+            break;
+    }
+    WaitForSingleObject(th, 5000);
+    return g_deskCount > 200 ? 200 : g_deskCount;
+}
+
 static int run_desk_child(const char *flavor)
 {
     char n1[64], n2[64];
@@ -1336,6 +1419,8 @@ static int run_desk_child(const char *flavor)
         if (WaitForSingleObject(er, 10000) == WAIT_OBJECT_0)
         {
             pump(100);
+            if (strstr(flavor, "fg"))
+                click_at(600, 150);
             mouse_event(MOUSEEVENTF_MOVE, 5, 3, 0, 0);
             keybd_event('A', 0x1E, 0, 0);
             keybd_event('A', 0x1E, KEYEVENTF_KEYUP, 0);
@@ -1368,6 +1453,16 @@ static void test_other_desktop_sinks(void)
     ok(n == 0, "EXINPUTSINK on another desktop: %d packets\n", n);
     n = run_desk_child("desksinkother");
     ok(n == 0, "INPUTSINK on another desktop: %d packets\n", n);
+
+    /* A process with the focus on the input desktop keeps getting its input at a registered
+       window on another desktop (measured on Windows 7 and 10, also for INPUTSINK, where
+       ReactOS delivers nothing: recorded gap); only a background process is cut off */
+    n = run_desk_child("deskfg0");
+    ok(n >= 5, "foreground process, target on another desktop, flags 0: %d packets\n", n);
+    n = run_desk_child("deskfgex");
+    ok(n >= 5, "foreground process, target on another desktop, EXINPUTSINK: %d packets\n", n);
+    n = run_desk_child("deskfgsink");
+    trace("foreground process, target on another desktop, INPUTSINK: %d packets\n", n);
 }
 
 struct hook_ctx
@@ -1406,6 +1501,10 @@ static DWORD WINAPI HookThreadB(LPVOID arg)
 
                 c->result = GetRawInputBuffer((PRAWINPUT)buf, &size, sizeof(RAWINPUTHEADER));
             }
+            else if (c->op == 3)
+            {
+                c->attached = AttachThreadInput(GetCurrentThreadId(), c->tidMain, TRUE);
+            }
             else
             {
                 c->bits = HIWORD(GetQueueStatus(QS_RAWINPUT)) & QS_RAWINPUT;
@@ -1428,10 +1527,21 @@ static DWORD WINAPI HookThreadB(LPVOID arg)
 static struct hook_ctx *g_hookCtx;
 static int g_hookCalls;
 
+static BOOL g_hookNested;
+
 static LRESULT CALLBACK DetachHook(int code, WPARAM wParam, LPARAM lParam)
 {
     if (code >= 0 && !g_hookCalls++)
+    {
+        MSG msg;
+
+        /* a peek of its own inside the hook of the peek that walks the list, then the detach */
+        if (g_hookNested)
+            PeekMessageW(&msg, NULL, WM_INPUT, WM_INPUT, PM_NOREMOVE);
         AttachThreadInput(g_hookCtx->tidB, g_hookCtx->tidMain, FALSE);
+        if (g_hookNested)
+            return 1;
+    }
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
@@ -1520,6 +1630,39 @@ static void test_attached_threads_and_hooks(void)
     ok(!c.bits || !running_on_reactos(), "QS_RAWINPUT left on the detached thread: %x\n", c.bits);
     unreg_all();
 
+    /* the same with a peek of its own in the hook, which ends before the detach: the outer
+       walk goes on from the node it saved, and the hook consumes the key */
+    ask_b(&c, 3);
+    ok(c.attached, "AttachThreadInput failed\n");
+    SetForegroundWindow(g_hwndA);
+    SetFocus(g_hwndA);
+    ok(reg1(1, 2, RIDEV_INPUTSINK, c.hwnd), "register failed: %lu\n", GetLastError());
+    g_hookNested = TRUE;
+    g_hookCalls = 0;
+    hook = SetWindowsHookExW(WH_KEYBOARD, DetachHook, NULL, GetCurrentThreadId());
+    ok(hook != NULL, "SetWindowsHookEx failed: %lu\n", GetLastError());
+    log_reset();
+    /* the key is followed at once by the raw input of the thread that the hook detaches */
+    keybd_event('A', 0x1E, 0, 0);
+    for (i = 0; i < 3; i++)
+        mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
+    Sleep(100);
+    pump(300);
+    keybd_event('A', 0x1E, KEYEVENTF_KEYUP, 0);
+    pump(100);
+    trace("nested: hook calls %d, keys %d, WM_INPUT %d\n", g_hookCalls, count_msg(WM_KEYDOWN), count_msg(WM_INPUT));
+    ok(g_hookCalls > 0 || !running_on_reactos(), "the nested hook was not called\n");
+    /* the packets of the detached thread are gone: none may be handed out after the hook */
+    ok(count_msg(WM_INPUT) == 0 || !running_on_reactos(), "got %d WM_INPUT messages of the detached thread\n", count_msg(WM_INPUT));
+    if (hook)
+        UnhookWindowsHookEx(hook);
+    g_hookNested = FALSE;
+    pump(100);
+    ok(!(HIWORD(GetQueueStatus(QS_RAWINPUT)) & QS_RAWINPUT), "QS_RAWINPUT left on the reader\n");
+    ask_b(&c, 2);
+    ok(!c.bits || !running_on_reactos(), "QS_RAWINPUT left on the detached thread: %x\n", c.bits);
+    unreg_all();
+
     /* the queue works on after it */
     ok(reg1(1, 2, 0, g_hwndA), "register failed: %lu\n", GetLastError());
     log_reset();
@@ -1537,6 +1680,68 @@ static void test_attached_threads_and_hooks(void)
     CloseHandle(c.cmd);
     CloseHandle(c.ack);
     CloseHandle(c.stop);
+}
+
+#define ONEPARAM_ROUTINE_SETRAWINPUTSERIAL 0xfffe000f
+
+/* ReactOS only: puts the raw input handle counter near its wrap to see that a live handle is skipped */
+static void test_handle_serial_wrap(void)
+{
+    typedef ULONG_PTR (WINAPI *PCALL)(ULONG_PTR, DWORD);
+    HMODULE hwin32u;
+    PCALL pCall;
+    MSG msg;
+    RAWINPUT ri;
+    BYTE buf[256];
+    UINT size, ret;
+    HRAWINPUT h1, h3;
+
+    if (!running_on_reactos())
+        return;
+    hwin32u = LoadLibraryW(L"win32u.dll");
+    pCall = hwin32u ? (PCALL)GetProcAddress(hwin32u, "NtUserCallOneParam") : NULL;
+    if (!pCall)
+    {
+        skip("no win32u\n");
+        return;
+    }
+
+    ok(reg1(1, 2, 0, g_hwndA), "register failed: %lu\n", GetLastError());
+    pump(50);
+    pCall(0x3FFFFFF0, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL);
+    mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
+    ok(pCall(0x3FFFFFF0, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL) == 0x3FFFFFF1, "the serial hook is not there\n");
+    mouse_event(MOUSEEVENTF_MOVE, 2, 0, 0, 0);
+    Sleep(50);
+    ok(PeekMessageW(&msg, g_hwndA, WM_INPUT, WM_INPUT, PM_REMOVE), "no WM_INPUT\n");
+    h1 = (HRAWINPUT)msg.lParam;
+    size = sizeof(ri);
+    ret = GetRawInputData(h1, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == RAWMOUSE_TOTAL && ri.data.mouse.lLastX == 1, "first packet: ret %u x %ld\n", ret, ri.data.mouse.lLastX);
+    /* the second packet was given the serial of the first again unless it is skipped */
+    size = sizeof(buf);
+    ret = GetRawInputBuffer((PRAWINPUT)buf, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == 1 && ((PRAWINPUT)buf)->data.mouse.lLastX == 2, "second packet: ret %u x %ld\n", ret, ((PRAWINPUT)buf)->data.mouse.lLastX);
+    pump(100);
+
+    /* through the wrap past zero */
+    pCall(0x3FFFFFFE, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL);
+    mouse_event(MOUSEEVENTF_MOVE, 3, 0, 0, 0);
+    mouse_event(MOUSEEVENTF_MOVE, 4, 0, 0, 0);
+    mouse_event(MOUSEEVENTF_MOVE, 5, 0, 0, 0);
+    Sleep(50);
+    ok(PeekMessageW(&msg, g_hwndA, WM_INPUT, WM_INPUT, PM_REMOVE), "no WM_INPUT\n");
+    h3 = (HRAWINPUT)msg.lParam;
+    ok(h3 != NULL, "NULL handle\n");
+    size = sizeof(ri);
+    ret = GetRawInputData(h3, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == RAWMOUSE_TOTAL && ri.data.mouse.lLastX == 3, "packet before the wrap: ret %u x %ld\n", ret, ri.data.mouse.lLastX);
+    size = sizeof(buf);
+    ret = GetRawInputBuffer((PRAWINPUT)buf, &size, sizeof(RAWINPUTHEADER));
+    ok(ret == 2 && ((PRAWINPUT)buf)->data.mouse.lLastX == 4, "packets after the wrap: ret %u x %ld\n", ret, ((PRAWINPUT)buf)->data.mouse.lLastX);
+    pump(100);
+    pCall(0x100, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL);
+    unreg_all();
 }
 
 static int child_main(const char *evReady, const char *evStop, BOOL registers)
@@ -1939,7 +2144,7 @@ START_TEST(RawInput)
     }
     if (argc >= 5 && !strncmp(argv[2], "desk", 4))
     {
-        ExitProcess(child_desk_main(argv[2], argv[3], argv[4]));
+        ExitProcess(strstr(argv[2], "fg") ? child_deskfg_main(argv[2], argv[3], argv[4]) : child_desk_main(argv[2], argv[3], argv[4]));
         return;
     }
     if (argc >= 5 && !strcmp(argv[2], "reg"))
@@ -1988,6 +2193,7 @@ START_TEST(RawInput)
     test_altgr();
     test_attached_threads_and_hooks();
     click_at(150, 150);
+    test_handle_serial_wrap();
     test_background();
     test_other_desktop_sinks();
 
