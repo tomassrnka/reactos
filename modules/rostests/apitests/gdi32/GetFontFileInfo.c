@@ -275,6 +275,57 @@ static void TestMemoryFont(HDC hdc)
     ok(ret, "RemoveFontMemResourceEx failed, error %lu\n", GetLastError());
 }
 
+/* A realized font does not own the font it was realized from: removing the font must not leave the
+   device context with a dangling pointer, and the instance must not stay reachable after that */
+static void TestRemovedMemoryFont(HDC hdc)
+{
+    DWORD fonts = 0;
+    HANDLE res;
+    HFONT hf, old;
+    FRI fri, fri2;
+    BYTE buf[512];
+    SIZE_T needed = 0;
+    BOOL ret, ret2;
+    DWORD error;
+
+    res = AddFontMemResourceEx((void *)g_data, g_datasize, NULL, &fonts);
+    ok(res != NULL && fonts == 1, "AddFontMemResourceEx: %p, %lu fonts, error %lu\n", res, fonts, GetLastError());
+    if (!res)
+        return;
+
+    hf = SelectTestFont(hdc, -12, FW_NORMAL, FALSE, &old);
+    TestRealizationInfo(hdc, &fri);
+
+    ret = RemoveFontMemResourceEx(res);
+    ok(ret, "RemoveFontMemResourceEx failed, error %lu\n", GetLastError());
+
+    ZeroMemory(&fri2, sizeof(fri2));
+    fri2.size = sizeof(fri2);
+    SetLastError(0xdeadbeef);
+    ret = pGetFontRealizationInfo(hdc, &fri2);
+    error = GetLastError();
+    trace("realization info after the removal: %d, error %lu, instance %lu (before %lu), flags %lx\n",
+          ret, error, fri2.instance_id, fri.instance_id, fri2.flags);
+    if (!ret)
+        ok(error == ERROR_INVALID_HANDLE || error == ERROR_INVALID_PARAMETER, "got error %lu\n", error);
+
+    FillMemory(buf, sizeof(buf), 0xCC);
+    SetLastError(0xdeadbeef);
+    ret2 = pGetFontFileInfo(fri.instance_id, 0, buf, sizeof(buf), &needed);
+    trace("file info after the removal: %d, error %lu\n", ret2, GetLastError());
+    if (!ret2)
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "file info: got error %lu\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret2 = pGetFontFileData(fri.instance_id, 0, 0, buf, 16);
+    trace("file data after the removal: %d, error %lu\n", ret2, GetLastError());
+    if (!ret2)
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "file data: got error %lu\n", GetLastError());
+
+    SelectObject(hdc, old);
+    DeleteObject(hf);
+}
+
 static void TestPrivateFileFont(HDC hdc)
 {
     WCHAR path[MAX_PATH];
@@ -435,6 +486,7 @@ START_TEST(GetFontFileInfo)
 
     TestSystemFont(hdc);
     TestMemoryFont(hdc);
+    TestRemovedMemoryFont(hdc);
     TestPrivateFileFont(hdc);
 
     DeleteDC(hdc);
