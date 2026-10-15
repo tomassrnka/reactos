@@ -444,6 +444,42 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return IoCallDriver(Vcb->StorageDevice, Irp);
 }
 
+/*
+ * PnP requests for the storage device under a mounted volume come to the volume device: the I/O
+ * manager sends them there through the VPB.  They go on to the storage device, which must see them
+ * (a partition device deletes its links and interfaces at its removal).  A query for an orderly
+ * removal is refused here when the volume is in use or cannot be written back (NgQueryRemove), and
+ * then does not reach the device.  A removal is passed on after NgDismountForRemoval, which writes
+ * nothing unless the removal was asked for first: a surprise-removed device is cut off before the
+ * request goes down, so no write of this mount reaches it at any point.  Handled before the
+ * dismounted and medium checks: a dismounted or fenced volume device still passes them on.
+ */
+static NTSTATUS NgPnp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    UCHAR Minor = IoGetCurrentIrpStackLocation(Irp)->MinorFunction;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    FsRtlEnterFileSystem();
+    if (Minor == IRP_MN_QUERY_REMOVE_DEVICE)
+        Status = NgQueryRemove(Vcb);
+    else if (Minor == IRP_MN_CANCEL_REMOVE_DEVICE)
+        NgCancelRemove(Vcb);
+    else if (Minor == IRP_MN_SURPRISE_REMOVAL || Minor == IRP_MN_REMOVE_DEVICE)
+        NgDismountForRemoval(Vcb, Minor == IRP_MN_SURPRISE_REMOVAL);
+    FsRtlExitFileSystem();
+
+    if (!NT_SUCCESS(Status))
+    {
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return Status;
+    }
+    IoSkipCurrentIrpStackLocation(Irp);
+    return IoCallDriver(Vcb->StorageDevice, Irp);
+}
+
 /* IRP_MJ_CLEANUP on a dismounted volume (from NgCleanup, which gave up the volume lock): only the handle's own state, the core is gone. */
 NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
 {
@@ -594,6 +630,10 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ULONG_PTR Low;
     NTSTATUS Status;
     ULONGLONG T0 = __rdtsc();
+
+    /* Not a request of this file system: the storage device completes it (NgPnp). */
+    if (DeviceObject != NgGlobal.ControlDevice && Major == IRP_MJ_PNP)
+        return NgPnp(DeviceObject, Irp);
 
     Low = NgStackFill();
     FsRtlEnterFileSystem();

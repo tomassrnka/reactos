@@ -75,6 +75,26 @@ RawInitializeVcb(IN OUT PVCB Vcb,
     return Status;
 }
 
+/* Gives the real device our spare VPB, so that the device is not mounted any more: the next open mounts it again, while
+ * the open files of this volume keep the old VPB. Called with the VPB lock held. */
+static
+VOID
+RawSwapVpb(IN PVCB Vcb)
+{
+    if (Vcb->LocalVpb != NULL)
+    {
+        RtlZeroMemory(Vcb->LocalVpb, sizeof(VPB));
+        Vcb->LocalVpb->Type = IO_TYPE_VPB;
+        Vcb->LocalVpb->Size = sizeof(VPB);
+        Vcb->LocalVpb->RealDevice = Vcb->Vpb->RealDevice;
+        Vcb->LocalVpb->DeviceObject = NULL;
+        Vcb->LocalVpb->Flags = Vcb->Vpb->Flags & VPB_REMOVE_PENDING;
+        Vcb->Vpb->RealDevice->Vpb = Vcb->LocalVpb;
+        Vcb->LocalVpb = NULL;
+        Vcb->Vpb->Flags |= VPB_PERSISTENT;
+    }
+}
+
 BOOLEAN
 NTAPI
 RawCheckForDismount(IN PVCB Vcb,
@@ -96,18 +116,7 @@ RawCheckForDismount(IN PVCB Vcb,
     if (Vcb->Vpb->ReferenceCount != CreateOperation)
     {
         /* Copy the VPB to our local own to prepare later dismount */
-        if (Vcb->LocalVpb != NULL)
-        {
-            RtlZeroMemory(Vcb->LocalVpb, sizeof(VPB));
-            Vcb->LocalVpb->Type = IO_TYPE_VPB;
-            Vcb->LocalVpb->Size = sizeof(VPB);
-            Vcb->LocalVpb->RealDevice = Vcb->Vpb->RealDevice;
-            Vcb->LocalVpb->DeviceObject = NULL;
-            Vcb->LocalVpb->Flags = Vcb->Vpb->Flags & VPB_REMOVE_PENDING;
-            Vcb->Vpb->RealDevice->Vpb = Vcb->LocalVpb;
-            Vcb->LocalVpb = NULL;
-            Vcb->Vpb->Flags |= VPB_PERSISTENT;
-        }
+        RawSwapVpb(Vcb);
 
         /* Don't do anything */
         Delete = FALSE;
@@ -1078,6 +1087,36 @@ RawCleanup(IN PVCB Vcb,
     return STATUS_SUCCESS;
 }
 
+/* The I/O manager sends the PnP requests of the device under a mounted volume to the volume (through the VPB): they go on
+ * to the device, which must see its removal. At the removal the device is mounted no more; the open files keep this volume
+ * until they are closed. */
+static
+NTSTATUS
+RawPnp(IN PVCB Vcb,
+       IN PIRP Irp,
+       IN PIO_STACK_LOCATION IoStackLocation)
+{
+    KIRQL OldIrql;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (IoStackLocation->MinorFunction == IRP_MN_SURPRISE_REMOVAL ||
+        IoStackLocation->MinorFunction == IRP_MN_REMOVE_DEVICE)
+    {
+        Status = KeWaitForSingleObject(&Vcb->Mutex, Executive, KernelMode, FALSE, NULL);
+        ASSERT(NT_SUCCESS(Status));
+        IoAcquireVpbSpinLock(&OldIrql);
+        if (Vcb->Vpb->RealDevice->Vpb == Vcb->Vpb)
+            RawSwapVpb(Vcb);
+        IoReleaseVpbSpinLock(OldIrql);
+        KeReleaseMutex(&Vcb->Mutex, FALSE);
+    }
+
+    IoSkipCurrentIrpStackLocation(Irp);
+    return IoCallDriver(Vcb->TargetDeviceObject, Irp);
+}
+
 NTSTATUS
 NTAPI
 RawDispatch(IN PDEVICE_OBJECT DeviceObject,
@@ -1175,6 +1214,12 @@ RawDispatch(IN PDEVICE_OBJECT DeviceObject,
         case IRP_MJ_QUERY_VOLUME_INFORMATION:
 
             Status = RawQueryVolumeInformation(Vcb, Irp, IoStackLocation);
+            break;
+
+        /* PnP request for the device under the volume */
+        case IRP_MJ_PNP:
+
+            Status = RawPnp(Vcb, Irp, IoStackLocation);
             break;
 
         /* Unexpected request */
@@ -1297,6 +1342,7 @@ RawFsDriverEntry(IN PDRIVER_OBJECT DriverObject,
     DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] =
     DriverObject->MajorFunction[IRP_MJ_FLUSH_BUFFERS] =
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = RawDispatch;
+    DriverObject->MajorFunction[IRP_MJ_PNP] = RawDispatch;
 
     /* Shutdown and unload */
     DriverObject->MajorFunction[IRP_MJ_SHUTDOWN] = RawShutdown;
