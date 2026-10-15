@@ -586,6 +586,7 @@ struct dwrite_glyphbitmap
     DWRITE_MATRIX *m;
     float dx, dy; /* fractional part of the pen position, in pixels */
     BOOL lcd;     /* three coverage bytes per pixel, one per subpixel */
+    unsigned int mode; /* DWRITE_RENDERING_MODE1 of the run, decides whether an embedded strike may be used */
 };
 
 enum dwrite_outline_tags
