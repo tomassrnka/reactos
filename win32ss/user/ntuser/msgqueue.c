@@ -384,15 +384,9 @@ IntMsqSetWakeMask(DWORD WakeMask)
 
    IdlePing();
 
-   /* The idle hook has run. From here the thread waits for input and is not hung.
-      An alertable wait is left out: an APC runs while the mask would still be set. */
-   if (Win32Thread->pcti)
-   {
-      if (LOWORD(WakeMask) & QS_INPUT)
-         Win32Thread->pcti->timeLastRead = EngGetTickCount32();
-      if (!(dwFlags & MWMO_ALERTABLE))
-         Win32Thread->pcti->fsWakeMask = LOWORD(WakeMask);
-   }
+   /* The wait is done by the caller, out of reach of win32k: it gets no exemption (see co_MsqMsgWait) */
+   if (Win32Thread->pcti && (LOWORD(WakeMask) & QS_INPUT))
+      Win32Thread->pcti->timeLastRead = EngGetTickCount32();
 
    return MessageEventHandle;
 }
@@ -405,13 +399,136 @@ IntMsqClearWakeMask(VOID)
    Win32Thread = PsGetCurrentThreadWin32Thread();
    if (Win32Thread == NULL || Win32Thread->MessageQueue == NULL)
       return FALSE;
-   if (Win32Thread->pcti->fsWakeMask & QS_INPUT)
-      Win32Thread->pcti->timeLastRead = EngGetTickCount32();
-   Win32Thread->pcti->fsWakeMask = 0;
-
    IdlePong();
 
    return TRUE;
+}
+
+#define INFINITE 0xFFFFFFFF
+#define WAIT_FAILED ((DWORD)0xFFFFFFFF)
+
+/*
+ * MsgWaitForMultipleObjectsEx: the wait for input and objects, done in the kernel so that the
+ * "waiting for input" state of the thread (fsWakeMask, which exempts it from being hung) lasts
+ * exactly as long as the wait. Everything that can block or call back (allocation, handle
+ * references, the foreground-idle hook) comes first. Whatever ends the wait, the state is
+ * cleared and the read time refreshed before the thread returns to user mode or gets an APC.
+ */
+DWORD FASTCALL
+co_MsqMsgWait(PMSGWAITINFO pUserInfo)
+{
+    MSGWAITINFO Info;
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+    PVOID Objects[MSGWAIT_MAX_HANDLES + 1];
+    KWAIT_BLOCK StackBlocks[THREAD_WAIT_OBJECTS];
+    PKWAIT_BLOCK WaitBlocks = StackBlocks;
+    LARGE_INTEGER Timeout;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG i, Referenced = 0;
+    DWORD Result = WAIT_FAILED;
+    UINT WakeMask;
+
+    if (pti == NULL || pti->MessageQueue == NULL || pti->pcti == NULL)
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+
+    _SEH2_TRY
+    {
+        ProbeForRead(pUserInfo, sizeof(*pUserInfo), 1);
+        RtlCopyMemory(&Info, pUserInfo, sizeof(Info));
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        EngSetLastError(ERROR_NOACCESS);
+        _SEH2_YIELD(return WAIT_FAILED);
+    }
+    _SEH2_END;
+
+    if (Info.nCount > MSGWAIT_MAX_HANDLES)
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+    WakeMask = LOWORD(Info.dwWakeMask);
+
+    /* Everything that can fail or block comes before the wait state is registered */
+    if (Info.nCount + 1 > THREAD_WAIT_OBJECTS)
+    {
+        WaitBlocks = ExAllocatePoolWithTag(NonPagedPool, (Info.nCount + 1) * sizeof(KWAIT_BLOCK), USERTAG_MSGWAIT);
+        if (WaitBlocks == NULL)
+        {
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return WAIT_FAILED;
+        }
+    }
+
+    for (i = 0; i < Info.nCount; i++)
+    {
+        Status = ObReferenceObjectByHandle((HANDLE)(LONG_PTR)Info.Handles[i], SYNCHRONIZE, NULL,
+                                           UserMode, &Objects[i], NULL);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+        Referenced++;
+    }
+    Objects[Info.nCount] = pti->pEventQueueServer;
+
+    /* Messages already there: no wait, and no read */
+    if ((pti->pcti->fsChangeBits & WakeMask) ||
+        ((Info.dwFlags & MWMO_INPUTAVAILABLE) && (pti->pcti->fsWakeBits & WakeMask)))
+    {
+        if (!(Info.dwFlags & MWMO_WAITALL) || Info.nCount == 0)
+        {
+            Result = Info.nCount;
+            goto Cleanup;
+        }
+    }
+
+    IdlePing();
+
+    if (Info.dwMilliseconds != INFINITE)
+        Timeout.QuadPart = -(LONGLONG)Info.dwMilliseconds * 10000;
+
+    do
+    {
+        /* The wait starts here: the thread waits for input and is not hung */
+        if (WakeMask & QS_INPUT)
+            pti->pcti->timeLastRead = EngGetTickCount32();
+        pti->pcti->fsWakeMask = WakeMask;
+
+        UserLeaveCo();
+
+        Status = KeWaitForMultipleObjects(Info.nCount + 1,
+                                          Objects,
+                                          (Info.dwFlags & MWMO_WAITALL) ? WaitAll : WaitAny,
+                                          UserRequest,
+                                          UserMode,
+                                          (Info.dwFlags & MWMO_ALERTABLE) != 0,
+                                          Info.dwMilliseconds == INFINITE ? NULL : &Timeout,
+                                          WaitBlocks);
+
+        UserEnterCo();
+
+        /* The wait is over, whatever ended it. This happens before an APC is delivered */
+        if (pti->pcti->fsWakeMask & QS_INPUT)
+            pti->pcti->timeLastRead = EngGetTickCount32();
+        pti->pcti->fsWakeMask = 0;
+    }
+    while (Status == STATUS_ALERTED && (Info.dwFlags & MWMO_ALERTABLE));
+    IdlePong();
+
+    if (NT_SUCCESS(Status))
+        Result = (DWORD)Status;
+
+Cleanup:
+    if (!NT_SUCCESS(Status))
+        EngSetLastError(RtlNtStatusToDosError(Status));
+    while (Referenced--)
+        ObDereferenceObject(Objects[Referenced]);
+    if (WaitBlocks != StackBlocks)
+        ExFreePoolWithTag(WaitBlocks, USERTAG_MSGWAIT);
+    return Result;
 }
 
 /*

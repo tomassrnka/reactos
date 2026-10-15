@@ -3207,6 +3207,36 @@ RealMsgWaitForMultipleObjectsEx(
       }
    }
 
+   /* The wait is done by win32k, which owns the "waiting for input" state of the thread.
+      The handles of the console are not objects it can wait for. */
+   if (nCount <= MSGWAIT_MAX_HANDLES)
+   {
+      MSGWAITINFO Info;
+      DWORD i;
+
+      for (i = 0; i < nCount; i++)
+      {
+         if (((ULONG_PTR)pHandles[i] & 0x10000003) == 0x3)
+            break;
+      }
+
+      if (i == nCount)
+      {
+         Info.nCount = nCount;
+         Info.dwMilliseconds = dwMilliseconds;
+         Info.dwWakeMask = dwWakeMask;
+         Info.dwFlags = dwFlags;
+         for (i = 0; i < nCount; i++)
+            Info.Handles[i] = (ULONG64)(LONG_PTR)pHandles[i];
+
+         Result = NtUserxMsgWait(&Info);
+
+         // wine hack! MSDN: If dwMilliseconds is zero,,specified objects are not signaled; it always returns immediately.
+         if (!Result && !nCount && !dwMilliseconds) Result = WAIT_TIMEOUT;
+         return Result;
+      }
+   }
+
    MessageQueueHandle = NtUserxMsqSetWakeMask(MAKELONG(dwWakeMask, dwFlags));
    if (MessageQueueHandle == NULL)
    {

@@ -3606,6 +3606,19 @@ NtUserYieldTask(VOID);
 #define NOPARAM_ROUTINE_ISCONSOLEMODE             0xffff0001
 #define ONEPARAM_ROUTINE_ENABLEPROCWNDGHSTING     0xfffe000d
 #define ONEPARAM_ROUTINE_GETDESKTOPMAPPING        0xfffe000e
+#define ONEPARAM_ROUTINE_ROS_MSGWAIT              0xfffe0100
+
+/* Parameters of the wait for input and objects (MsgWaitForMultipleObjectsEx). The layout is
+   the same for every architecture, so that a 32-bit process can fill it. */
+#define MSGWAIT_MAX_HANDLES 63
+typedef struct _MSGWAITINFO
+{
+    ULONG nCount;
+    ULONG dwMilliseconds;
+    ULONG dwWakeMask;
+    ULONG dwFlags;
+    ULONG64 Handles[MSGWAIT_MAX_HANDLES];
+} MSGWAITINFO, *PMSGWAITINFO;
 #define TWOPARAM_ROUTINE_SETMENUBARHEIGHT         0xfffd0050
 #define TWOPARAM_ROUTINE_SETGUITHRDHANDLE         0xfffd0051
 #define HWNDLOCK_ROUTINE_SETFOREGROUNDWINDOWMOUSE 0xfffd0052

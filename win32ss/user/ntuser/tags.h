@@ -228,6 +228,7 @@
 #define USERTAG_WSEXCOMPINVALID          'CEsU'
 #define USERTAG_ERESOURCE                'resU'
 #define USERTAG_EVENT                    'vesU'
+#define USERTAG_MSGWAIT                  'wmsU'
 #define USERTAG_FORWARDTOUCHMESSAGE      'tfsU'
 #define USERTAG_GRANTEDHANDLES           'hgsU'
 #define USERTAG_GESTUREINFO              'igsU'
