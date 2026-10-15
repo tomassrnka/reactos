@@ -133,6 +133,32 @@ FindSystemTimer(PMSG pMsg)
   PLIST_ENTRY pLE;
   PTIMER pTmr = NULL;
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+  if (PsGetCurrentProcess()->Wow64Process)
+  {
+    /* MSG32 carries only the low half of the kernel timer routine. Resolve
+     * that token against this thread's system timer, never against a user
+     * timer or the last unrelated entry in the list. */
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+    PTIMER Found = NULL;
+    TimerEnterExclusive();
+    for (pLE = TimersListHead.Flink; pLE != &TimersListHead; pLE = pLE->Flink)
+    {
+      pTmr = CONTAINING_RECORD(pLE, TIMER, ptmrList);
+      if ((pTmr->flags & TMRF_SYSTEM) && pTmr->pti == pti &&
+          pTmr->nID == pMsg->wParam &&
+          (pTmr->pWnd ? UserHMGetHandle(pTmr->pWnd) : NULL) == pMsg->hwnd &&
+          PtrToUlong(pTmr->pfn) == (ULONG)pMsg->lParam)
+      {
+        Found = pTmr;
+        break;
+      }
+    }
+    TimerLeave();
+    return Found;
+  }
+#endif
+
   TimerEnterExclusive();
   pLE = TimersListHead.Flink;
   while (pLE != &TimersListHead)

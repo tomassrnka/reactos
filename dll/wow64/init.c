@@ -265,6 +265,7 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
     ANSI_STRING Name = RTL_CONSTANT_STRING("LdrInitializeWow64");
     NTSTATUS Status;
     WOW64_CONTEXT *GuestContext = NULL;
+    BOOLEAN CallbackReady = FALSE;
 
     /* Native loader initialization is serialized before this entry. A new
      * guest thread carries its captured context on its own native stack. */
@@ -305,6 +306,9 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
         Ordinals = (PVOID)((PUCHAR)Ntdll32 + Exports->AddressOfNameOrdinals);
         for (i = 0; i < Exports->NumberOfNames; ++i)
         {
+            if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserCallbackDispatcher") &&
+                Ordinals[i] < Exports->NumberOfFunctions)
+                CallbackReady = NT_SUCCESS(Wow64WinInitialize((PUCHAR)Ntdll32 + Functions[Ordinals[i]]));
             if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserApcDispatcher") &&
                 Ordinals[i] < Exports->NumberOfFunctions)
                 Wow64ApcDispatcher = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
@@ -316,7 +320,7 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
                 Entry = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
             }
         }
-        if (!Entry || !Wow64ExceptionDispatcher || !Wow64ApcDispatcher) { Status = STATUS_ENTRYPOINT_NOT_FOUND; goto Failed; }
+        if (!Entry || !Wow64ExceptionDispatcher || !Wow64ApcDispatcher || !CallbackReady) { Status = STATUS_ENTRYPOINT_NOT_FOUND; goto Failed; }
     }
     Status = Wow64CpuInitialize(Wow64SystemService, &Gate);
     if (!NT_SUCCESS(Status)) goto Failed;

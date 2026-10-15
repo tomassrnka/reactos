@@ -37,12 +37,12 @@ GetW32ThreadInfo(VOID)
 {
     PTHREADINFO ti;
 
-    ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+    ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
     if (ti == NULL)
     {
         /* create the THREADINFO structure */
         NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
-        ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+        ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
     }
 
     return ti;
@@ -145,13 +145,13 @@ WINAPI
 IsGUIThread(
     BOOL bConvert)
 {
-  PTHREADINFO ti = (PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo;
+  PTHREADINFO ti = (PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo();
   if (ti == NULL)
   {
     if(bConvert)
     {
       NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
-      if ((PTHREADINFO)NtCurrentTeb()->Win32ThreadInfo) return TRUE;
+      if ((PTHREADINFO)(ULONG_PTR)W32GetCurrentThreadInfo()) return TRUE;
       else
          SetLastError(ERROR_NOT_ENOUGH_MEMORY);
     }
