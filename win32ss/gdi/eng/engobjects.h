@@ -165,6 +165,7 @@ typedef struct _FONTGDI {
   LONG          Magic;
   LONG          lfHeight;
   LONG          lfWidth;
+  ULONG         InstanceId;
 } FONTGDI, *PFONTGDI;
 
 /* The initialized 'Magic' value in FONTGDI */
