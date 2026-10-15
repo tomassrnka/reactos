@@ -245,8 +245,8 @@ MmAccessFault(IN ULONG FaultCode,
     NTSTATUS Status;
     BOOLEAN IsArm3Fault = FALSE;
 
-    /* Before any lock: the fault may come from DISPATCH_LEVEL or above */
-    if (MmSpecialPoolEnabled && ((ULONG_PTR)Address >= (ULONG_PTR)MmSystemRangeStart))
+    /* Before any lock: the fault may come from DISPATCH_LEVEL or above. User mode keeps its access violation. */
+    if (MmSpecialPoolEnabled && (Mode == KernelMode) && ((ULONG_PTR)Address >= (ULONG_PTR)MmSystemRangeStart))
     {
         MmCheckSpecialPoolFault(FaultCode, Address, TrapInformation);
     }

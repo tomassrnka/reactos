@@ -54,17 +54,25 @@ PFN_COUNT MiSpecialPagesNonPagedMaximum;
 /* Set once special pool is ready; every hook outside the allocator tests it first */
 BOOLEAN MmSpecialPoolEnabled;
 
-/* The control vector fills these from Session Manager\Memory Management; types and lengths are checked before use */
-ULONG MmSpecialPoolTagType = REG_NONE;
-ULONG MmSpecialPoolTagLength = sizeof(ULONG);
+/*
+ * The control vector fills these from Session Manager\Memory Management. It cuts a value to the
+ * buffer and reports the copied length, so each DWORD lands in a two-ULONG buffer: a length other
+ * than four bytes, an oversized value included, is rejected before use.
+ */
+ULONG MiSpecialPoolTagRaw[2];
+ULONG MiSpecialPoolTagRawLength = sizeof(MiSpecialPoolTagRaw);
+ULONG MiSpecialPoolTagRawType = REG_NONE;
 
 /* Registry PoolTagOverruns: nonzero puts the data at the end of the page (guard page after it), zero at the start */
 ULONG MmSpecialPoolCatchOverruns = TRUE;
-ULONG MiSpecialPoolOverrunsType = REG_NONE;
-ULONG MiSpecialPoolOverrunsLength = sizeof(ULONG);
+ULONG MiSpecialPoolOverrunsRaw[2];
+ULONG MiSpecialPoolOverrunsRawLength = sizeof(MiSpecialPoolOverrunsRaw);
+ULONG MiSpecialPoolOverrunsRawType = REG_NONE;
 
 /* Registry SpecialPoolTags (REG_SZ or REG_MULTI_SZ): more tag patterns, see MiSpecialPoolParseTags.
-   One spare character: a value that fills the whole buffer may have been cut, and is rejected. */
+   One spare character: a value that fills the whole buffer may have been cut, and is rejected.
+   IRPs come from lookaside lists tagged Irps, Irpl, IrpS and IrpL: select those (or "Irp*") to see an
+   IRP freed and reused; "Irp " alone covers only the IRPs allocated outside the lists. */
 WCHAR MiSpecialPoolTagList[MI_SPECIAL_POOL_TAG_LIST_CHARS + 1];
 ULONG MiSpecialPoolTagListLength = sizeof(MiSpecialPoolTagList);
 ULONG MiSpecialPoolTagListType = REG_NONE;
@@ -156,18 +164,17 @@ MiSpecialPoolParseTags(VOID)
     if (MiSpecialPoolPatternsParsed) return;
     MiSpecialPoolPatternsParsed = TRUE;
 
-    if (!MiSpecialPoolDwordValid(L"PoolTagOverruns", MiSpecialPoolOverrunsType, MiSpecialPoolOverrunsLength))
+    MmSpecialPoolCatchOverruns = TRUE;
+    if (MiSpecialPoolDwordValid(L"PoolTagOverruns", MiSpecialPoolOverrunsRawType, MiSpecialPoolOverrunsRawLength))
     {
-        MmSpecialPoolCatchOverruns = TRUE;
+        MmSpecialPoolCatchOverruns = MiSpecialPoolOverrunsRaw[0];
     }
 
-    if (!MiSpecialPoolDwordValid(L"PoolTag", MmSpecialPoolTagType, MmSpecialPoolTagLength))
+    MmSpecialPoolTag = 0;
+    if (MiSpecialPoolDwordValid(L"PoolTag", MiSpecialPoolTagRawType, MiSpecialPoolTagRawLength))
     {
-        MmSpecialPoolTag = 0;
-    }
-    else if ((MmSpecialPoolTag != 0) && (MmSpecialPoolTag != -1))
-    {
-        MiSpecialPoolAddPattern(MmSpecialPoolTag);
+        MmSpecialPoolTag = MiSpecialPoolTagRaw[0];
+        if ((MmSpecialPoolTag != 0) && (MmSpecialPoolTag != -1)) MiSpecialPoolAddPattern(MmSpecialPoolTag);
     }
 
     if (MiSpecialPoolTagListLength == (ULONG)-1) return;

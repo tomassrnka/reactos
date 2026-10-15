@@ -1389,7 +1389,7 @@ KiTrap0EHandler(IN PKTRAP_FRAME TrapFrame)
     if (!(TrapFrame->EFlags & EFLAGS_INTERRUPT_MASK))
     {
         /* A special pool fault names itself even here */
-        if (MmSpecialPoolEnabled) MmCheckSpecialPoolFault(TrapFrame->ErrCode, (PVOID)Cr2, TrapFrame);
+        if (MmSpecialPoolEnabled && !KiUserTrap(TrapFrame)) MmCheckSpecialPoolFault(TrapFrame->ErrCode, (PVOID)Cr2, TrapFrame);
 
         /* This is completely illegal, bugcheck the system */
         KeBugCheckWithTf(IRQL_NOT_LESS_OR_EQUAL,
