@@ -1373,6 +1373,166 @@ NTSTATUS
 NTAPI
 MmGetExecuteOptions(IN PULONG ExecuteOptions);
 
+/*
+ * Pages whose translations were removed or changed, flushed together with one
+ * request to the processors that may cache them (one IPI round per batch).
+ * KeFlushRangeTb flushes the whole TB of the targets above its own threshold.
+ * A page that was unmapped must not be freed or reused before the list that
+ * holds it is flushed.
+ */
+typedef struct _MM_TB_FLUSH_LIST
+{
+    ULONG_PTR Low;
+    ULONG_PTR High;
+    ULONG Count;
+    BOOLEAN AllProcessors;
+    BOOLEAN Entire;
+} MM_TB_FLUSH_LIST, *PMM_TB_FLUSH_LIST;
+
+FORCEINLINE
+VOID
+MmInitializeTbFlushList(
+    _Out_ PMM_TB_FLUSH_LIST List,
+    _In_ BOOLEAN AllProcessors)
+{
+    List->Low = List->High = 0;
+    List->Count = 0;
+    List->AllProcessors = AllProcessors;
+    List->Entire = FALSE;
+}
+
+FORCEINLINE
+VOID
+MmAddToTbFlushList(
+    _Inout_ PMM_TB_FLUSH_LIST List,
+    _In_ PVOID Address)
+{
+    ULONG_PTR Page = (ULONG_PTR)PAGE_ALIGN(Address);
+
+    if (List->Count++ == 0)
+        List->Low = List->High = Page;
+    else if (Page < List->Low)
+        List->Low = Page;
+    else if (Page > List->High)
+        List->High = Page;
+}
+
+FORCEINLINE
+VOID
+MmFlushTbList(
+    _Inout_ PMM_TB_FLUSH_LIST List)
+{
+    ULONG_PTR Pages;
+
+    if (List->Count == 0)
+        return;
+
+    if (List->Entire)
+    {
+        KeFlushEntireTb(TRUE, TRUE);
+    }
+    else
+    {
+        Pages = ((List->High - List->Low) >> PAGE_SHIFT) + 1;
+        KeFlushRangeTb((PVOID)List->Low,
+                       (Pages > MAXULONG) ? MAXULONG : (ULONG)Pages,
+                       List->AllProcessors);
+    }
+    List->Count = 0;
+    List->Entire = FALSE;
+}
+
+/*
+ * A freed page table: flush every TB entry and paging-structure cache on every
+ * processor. Low and High may then be stale; only MmFlushTbList clears Entire.
+ */
+FORCEINLINE
+VOID
+MmForceEntireTbFlush(
+    _Inout_ PMM_TB_FLUSH_LIST List)
+{
+    List->Count++;
+    List->Entire = TRUE;
+}
+
+/*
+ * Pages unmapped under the PFN lock whose last mapping reference is dropped
+ * only after the TB flush that covers them, so the cross-processor flush wait
+ * does not happen with the PFN lock held. Until then the page keeps its share
+ * count (and with it its reference), so it stays off the free, zeroed, standby
+ * and modified lists and cannot be reused. An entry with the low bit set is a
+ * RosMm page, whose mapping count is released without ARM3 list handling.
+ */
+#define MI_DEFERRED_RELEASE_INLINE 32
+
+typedef struct _MI_DEFERRED_RELEASE
+{
+    MM_TB_FLUSH_LIST FlushList;
+    ULONG Count;
+    ULONG Capacity;
+    PULONG_PTR Entries;
+    ULONG_PTR Inline[MI_DEFERRED_RELEASE_INLINE];
+} MI_DEFERRED_RELEASE, *PMI_DEFERRED_RELEASE;
+
+/* Entries one user PDE deletion may add (the page table and the upper levels it empties) */
+#if (_MI_PAGING_LEVELS >= 3)
+#define MI_DEFERRED_PDE_ENTRIES (_MI_PAGING_LEVELS - 1)
+#else
+#define MI_DEFERRED_PDE_ENTRIES 1
+#endif
+
+VOID
+MiInitializeDeferredRelease(
+    _Out_ PMI_DEFERRED_RELEASE Deferred,
+    _In_ BOOLEAN AllProcessors,
+    _In_ PFN_NUMBER PageHint);
+
+VOID
+MiCleanupDeferredRelease(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred);
+
+/* Flush, then release the pages; the PFN lock must not be held */
+VOID
+MiCompleteDeferredRelease(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred);
+
+/* Same with the PFN lock held: it is dropped for the flush and held again on return */
+KIRQL
+MiCompleteDeferredReleaseLocked(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred,
+    _In_ KIRQL OldIrql);
+
+FORCEINLINE
+ULONG
+MiDeferredReleaseRoom(
+    _In_ PMI_DEFERRED_RELEASE Deferred)
+{
+    return Deferred->Capacity - Deferred->Count;
+}
+
+FORCEINLINE
+VOID
+MiDeferTbFlush(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred,
+    _In_ PVOID Address)
+{
+    MmAddToTbFlushList(&Deferred->FlushList, Address);
+}
+
+FORCEINLINE
+VOID
+MiDeferShareRelease(
+    _Inout_ PMI_DEFERRED_RELEASE Deferred,
+    _In_ PMMPFN Pfn1,
+    _In_ BOOLEAN RosMmPage)
+{
+    /* Callers check the room first: an overflow would corrupt the stack */
+    if (Deferred->Count >= Deferred->Capacity)
+        KeBugCheckEx(MEMORY_MANAGEMENT, 0x61950, (ULONG_PTR)Deferred, Deferred->Count, Deferred->Capacity);
+    ASSERT(((ULONG_PTR)Pfn1 & 1) == 0);
+    Deferred->Entries[Deferred->Count++] = (ULONG_PTR)Pfn1 | (RosMmPage ? 1 : 0);
+}
+
 _Success_(return)
 BOOLEAN
 MmDeleteVirtualMapping(
@@ -1380,6 +1540,32 @@ MmDeleteVirtualMapping(
     _In_ PVOID Address,
     _Out_opt_ BOOLEAN* WasDirty,
     _Out_opt_ PPFN_NUMBER Page
+);
+
+/*
+ * The flush, the page's mapping count and any page table it frees go to the
+ * deferred list, which needs room for 1 + MI_DEFERRED_PDE_ENTRIES entries. The
+ * caller completes the list before it frees the page.
+ */
+_Success_(return)
+BOOLEAN
+MmDeleteVirtualMappingDeferFlush(
+    _Inout_opt_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _Out_opt_ BOOLEAN* WasDirty,
+    _Out_opt_ PPFN_NUMBER Page,
+    _In_ BOOLEAN IsPhysical,
+    _Inout_ PMI_DEFERRED_RELEASE Deferred
+);
+
+/* The caller flushes FlushList before it returns or drops the address space lock */
+VOID
+NTAPI
+MmSetPageProtectDeferFlush(
+    struct _EPROCESS *Process,
+    PVOID Address,
+    ULONG flProtect,
+    PMM_TB_FLUSH_LIST FlushList
 );
 
 _Success_(return)

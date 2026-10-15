@@ -1945,16 +1945,11 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     }
 
     //
-    // Write the new PTE, making sure we are only changing the bits
+    // Write the new PTE, making sure we are only changing the bits. The caller
+    // flushes the TB for its whole range before it releases the working set.
     //
+    ASSERT(PreviousPte.u.Hard.Valid == 1);
     MI_UPDATE_VALID_PTE(PointerPte, TempPte);
-
-    //
-    // Flush the TLB
-    //
-    ASSERT(PreviousPte.u.Hard.Valid == 1);
-    KeFlushEntireTb(TRUE, TRUE);
-    ASSERT(PreviousPte.u.Hard.Valid == 1);
 
     //
     // Windows updates the relevant PFN1 information, we currently don't.
@@ -1990,9 +1985,13 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
     PMMPFN Pfn1, Pfn2;
     MMPTE PteContents;
     KIRQL OldIrql;
+    MI_DEFERRED_RELEASE Deferred;
     DPRINT("Removing mapped view at: 0x%p\n", BaseAddress);
 
     ASSERT(Ws == NULL);
+
+    /* A page leaves the view only after every processor has flushed its translation */
+    MiInitializeDeferredRelease(&Deferred, TRUE, NumberOfPtes);
 
     /* Get the PTE and loop each one */
     PointerPte = MiAddressToPte(BaseAddress);
@@ -2003,6 +2002,9 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
         PteContents = *PointerPte;
         if (PteContents.u.Hard.Valid == 1)
         {
+            if (MiDeferredReleaseRoom(&Deferred) == 0)
+                MiCompleteDeferredRelease(&Deferred);
+
             /* Get the PFN entry */
             Pfn1 = MiGetPfnEntry(PFN_FROM_PTE(&PteContents));
 
@@ -2012,10 +2014,6 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
             /* Lock the PFN database and make sure this isn't a mapped file */
             OldIrql = MiAcquirePfnLock();
             ASSERT(((Pfn1->u3.e1.PrototypePte) && (Pfn1->OriginalPte.u.Soft.Prototype)) == 0);
-
-            /* Mark the page as modified accordingly */
-            if (MI_IS_PAGE_DIRTY(&PteContents))
-                Pfn1->u3.e1.Modified = 1;
 
             /* Was the PDE invalid */
             if (PointerPde->u.Long == 0)
@@ -2033,11 +2031,20 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
 #endif
             }
 
-            /* Dereference the PDE and the PTE */
+            /* Clear the PTE first: from then on its dirty bit cannot change */
+            PteContents.u.Long = InterlockedExchangePte(PointerPte, 0);
+
+            /* Mark the page as modified accordingly */
+            if (MI_IS_PAGE_DIRTY(&PteContents))
+                Pfn1->u3.e1.Modified = 1;
+
+            /* Dereference the PDE. The page keeps its share count until the TB
+               flush, so it cannot be reused before then */
             Pfn2 = MiGetPfnEntry(PFN_FROM_PTE(PointerPde));
             MiDecrementShareCount(Pfn2, PFN_FROM_PTE(PointerPde));
             DBG_UNREFERENCED_LOCAL_VARIABLE(Pfn2);
-            MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
+            MiDeferTbFlush(&Deferred, MiPteToAddress(PointerPte));
+            MiDeferShareRelease(&Deferred, Pfn1, FALSE);
 
             /* Release the PFN lock */
             MiReleasePfnLock(OldIrql);
@@ -2066,8 +2073,9 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
         NumberOfPtes--;
     }
 
-    /* Flush the TLB */
-    KeFlushEntireTb(TRUE, TRUE);
+    /* Flush the TLB, then release the pages */
+    MiCompleteDeferredRelease(&Deferred);
+    MiCleanupDeferredRelease(&Deferred);
 
     /* Acquire the PFN lock */
     OldIrql = MiAcquirePfnLock();

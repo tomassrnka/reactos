@@ -2435,6 +2435,27 @@ MiDeletePte(
     IN PMMPTE PrototypePte
 );
 
+BOOLEAN
+NTAPI
+MiDeletePteDeferred(
+    IN PMMPTE PointerPte,
+    IN PVOID VirtualAddress,
+    IN PEPROCESS CurrentProcess,
+    IN PMMPTE PrototypePte,
+    IN OUT PMI_DEFERRED_RELEASE Deferred OPTIONAL
+);
+
+KIRQL
+NTAPI
+MiReplaceSharedPte(
+    IN PMMPTE PointerPte,
+    IN PVOID VirtualAddress,
+    IN PEPROCESS CurrentProcess,
+    IN PMMPTE PrototypePte,
+    IN PFN_NUMBER NewPageFrameIndex,
+    IN KIRQL OldIrql
+);
+
 ULONG
 NTAPI
 MiMakeSystemAddressValid(
@@ -2668,6 +2689,37 @@ MiDeletePde(
         if (MiDecrementPageTableReferences(PointerPde) == 0)
         {
             MiDeletePte(MiPdeToPxe(PointerPde), MiPdeToPpe(PointerPde), CurrentProcess, NULL);
+        }
+#endif
+    }
+#endif
+}
+
+/*
+ * MiDeletePde without the flush: the page tables it frees stay referenced until
+ * the deferred list is completed, which flushes every processor's TB and
+ * paging-structure caches first. The PFN lock must be held.
+ */
+FORCEINLINE
+VOID
+MiDeletePdeDeferred(
+    _In_ PMMPDE PointerPde,
+    _In_ PEPROCESS CurrentProcess,
+    _Inout_ PMI_DEFERRED_RELEASE Deferred)
+{
+    ASSERT(MiIsUserPde(PointerPde));
+    ASSERT(MiDeferredReleaseRoom(Deferred) >= MI_DEFERRED_PDE_ENTRIES);
+
+    MmForceEntireTbFlush(&Deferred->FlushList);
+    MiDeletePteDeferred((PMMPTE)PointerPde, MiPdeToPte(PointerPde), CurrentProcess, NULL, Deferred);
+#if _MI_PAGING_LEVELS >= 3
+    if (MiDecrementPageTableReferences(MiPdeToPte(PointerPde)) == 0)
+    {
+        MiDeletePteDeferred(MiPdeToPpe(PointerPde), PointerPde, CurrentProcess, NULL, Deferred);
+#if _MI_PAGING_LEVELS == 4
+        if (MiDecrementPageTableReferences(PointerPde) == 0)
+        {
+            MiDeletePteDeferred(MiPdeToPxe(PointerPde), MiPdeToPpe(PointerPde), CurrentProcess, NULL, Deferred);
         }
 #endif
     }

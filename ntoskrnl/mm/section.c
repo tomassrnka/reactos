@@ -1537,7 +1537,9 @@ MmAlterViewAttributes(PMMSUPPORT AddressSpace,
     BOOLEAN DoCOW = FALSE;
     ULONG i;
     PEPROCESS Process = MmGetAddressSpaceOwner(AddressSpace);
+    MM_TB_FLUSH_LIST FlushList;
 
+    MmInitializeTbFlushList(&FlushList, FALSE);
     MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, BaseAddress);
     ASSERT(MemoryArea != NULL);
     Segment = MemoryArea->SectionData.Segment;
@@ -1563,6 +1565,8 @@ MmAlterViewAttributes(PMMSUPPORT AddressSpace,
                 MmGetPageFileMapping(Process, Address, &SwapEntry);
                 if (SwapEntry != MM_WAIT_ENTRY)
                     break;
+                /* A copy-on-write fault may run while the locks are dropped */
+                MmFlushTbList(&FlushList);
                 MmUnlockSectionSegment(Segment);
                 MmUnlockAddressSpace(AddressSpace);
                 KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
@@ -1604,12 +1608,12 @@ MmAlterViewAttributes(PMMSUPPORT AddressSpace,
 
             if (MmIsPagePresent(Process, Address) || MmIsDisabledPage(Process, Address))
             {
-                MmSetPageProtect(Process, Address,
-                                 Protect);
+                MmSetPageProtectDeferFlush(Process, Address, Protect, &FlushList);
             }
         }
     }
 
+    MmFlushTbList(&FlushList);
     MmUnlockSectionSegment(Segment);
 }
 
