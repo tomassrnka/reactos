@@ -140,13 +140,22 @@ UserProcessMouseInput(PINPUT_DEVICE_INFO pDeviceInfo, PMOUSE_INPUT_DATA mid)
     /* Mouse wheel */
     if (mid->ButtonFlags & MOUSE_WHEEL)
     {
-        mi.mouseData = mid->ButtonData;
+        mi.mouseData = (DWORD)(LONG)(SHORT)mid->ButtonData;
         mi.dwFlags |= MOUSEEVENTF_WHEEL;
     }
 
     /* If something has changed, send input to user */
     if (mi.dwFlags)
         UserSendMouseInput(&mi, FALSE);
+
+    /* The horizontal wheel uses mouseData as well, so it is sent on its own */
+    if (mid->ButtonFlags & MOUSE_HWHEEL)
+    {
+        RtlZeroMemory(&mi, sizeof(mi));
+        mi.mouseData = (DWORD)(LONG)(SHORT)mid->ButtonData;
+        mi.dwFlags = MOUSEEVENTF_HWHEEL;
+        UserSendMouseInput(&mi, FALSE);
+    }
 }
 
 /*
@@ -180,6 +189,41 @@ IntFixMouseInputButtons(DWORD dwFlags)
 }
 
 /*
+ * UserStripMouseDataFlags
+ *
+ * The two wheels and the X buttons all use mouseData. A call that asks for more than one of them
+ * gets none of them (Windows ignores them and SendInput still counts the call); the other flags stay.
+ */
+DWORD FASTCALL
+UserStripMouseDataFlags(DWORD dwFlags)
+{
+    if (((dwFlags & MOUSEEVENTF_WHEEL) != 0) + ((dwFlags & MOUSEEVENTF_HWHEEL) != 0) +
+        ((dwFlags & (MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP)) != 0) > 1)
+    {
+        dwFlags &= ~(MOUSEEVENTF_WHEEL | MOUSEEVENTF_HWHEEL | MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP);
+    }
+
+    return dwFlags;
+}
+
+/*
+ * UserClampWheelDelta
+ *
+ * The distance of a wheel is a signed 16 bit value, whatever the caller put into mouseData.
+ */
+SHORT FASTCALL
+UserClampWheelDelta(DWORD mouseData)
+{
+    LONG lDelta = (LONG)mouseData;
+
+    if (lDelta > 32767)
+        return 32767;
+    if (lDelta < -32768)
+        return -32768;
+    return (SHORT)lDelta;
+}
+
+/*
  * UserSendMouseInput
  *
  * Process mouse input from input devices and SendInput API
@@ -196,12 +240,14 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
 
     pCurInfo = IntGetSysCursorInfo();
     ptCursor = gpsi->ptCursor;
-    dwFlags = IntFixMouseInputButtons(pmi->dwFlags);
 
     gppiInputProvider = ((PTHREADINFO)PsGetCurrentThreadWin32Thread())->ppi;
 
-    /* Both X buttons and the wheel use mouseData: such input is rejected below */
-    if (bInjected && !((pmi->dwFlags & (MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP)) && (pmi->dwFlags & MOUSEEVENTF_WHEEL)))
+    /* The wheels and the X buttons all use mouseData: a call that asks for more than one of them gets none */
+    dwFlags = IntFixMouseInputButtons(UserStripMouseDataFlags(pmi->dwFlags));
+
+    /* Raw input gets the same call, stripped and clamped the same way */
+    if (bInjected)
         UserRawInputSendMouse(pmi);
 
     if (pmi->dwFlags & MOUSEEVENTF_MOVE)
@@ -315,14 +361,6 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
     }
 
-    if((dwFlags & (MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP)) &&
-       (dwFlags & MOUSEEVENTF_WHEEL))
-    {
-        /* Fail because both types of events use the mouseData field */
-        WARN("Invalid flags!\n");
-        return FALSE;
-    }
-
     /* X-Button (4 or 5) */
     if (dwFlags & MOUSEEVENTF_XDOWN)
     {
@@ -363,12 +401,17 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         }
     }
 
-    /* Mouse wheel */
-    if (dwFlags & MOUSEEVENTF_WHEEL)
+    /* Mouse wheels: a call that moves nothing posts nothing */
+    if (dwFlags & (MOUSEEVENTF_WHEEL | MOUSEEVENTF_HWHEEL))
     {
-        Msg.message = WM_MOUSEWHEEL;
-        Msg.wParam = MAKEWPARAM(pCurInfo->ButtonsDown, pmi->mouseData);
-        co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        SHORT sDelta = UserClampWheelDelta(pmi->mouseData);
+
+        if (sDelta != 0)
+        {
+            Msg.message = (dwFlags & MOUSEEVENTF_WHEEL) ? WM_MOUSEWHEEL : WM_MOUSEHWHEEL;
+            Msg.wParam = MAKEWPARAM(pCurInfo->ButtonsDown, (WORD)sDelta);
+            co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        }
     }
 
     return TRUE;
