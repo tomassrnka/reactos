@@ -782,6 +782,45 @@ failure:
     return SPS_ERROR;
 }
 
+/* Delete the pointer bitmaps; the PDEV is going away */
+VOID
+NTAPI
+IntFreeMousePointer(
+    _Inout_ PPDEVOBJ ppdev)
+{
+    GDIPOINTER *pgp = &ppdev->Pointer;
+
+    if (pgp->psurfColor)
+    {
+        EngDeleteSurface(pgp->psurfColor->BaseObject.hHmgr);
+        SURFACE_ShareUnlockSurface(pgp->psurfColor);
+        pgp->psurfColor = NULL;
+    }
+
+    if (pgp->psurfMask)
+    {
+        EngDeleteSurface(pgp->psurfMask->BaseObject.hHmgr);
+        SURFACE_ShareUnlockSurface(pgp->psurfMask);
+        pgp->psurfMask = NULL;
+    }
+
+    if (pgp->psurfSave)
+    {
+        EngDeleteSurface(pgp->psurfSave->BaseObject.hHmgr);
+        SURFACE_ShareUnlockSurface(pgp->psurfSave);
+        pgp->psurfSave = NULL;
+    }
+
+    if (pgp->psurfTmp)
+    {
+        EngDeleteSurface(pgp->psurfTmp->BaseObject.hHmgr);
+        SURFACE_ShareUnlockSurface(pgp->psurfTmp);
+        pgp->psurfTmp = NULL;
+    }
+
+    pgp->Enabled = FALSE;
+}
+
 /*
  * @implemented
  */

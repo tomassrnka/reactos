@@ -501,40 +501,24 @@ DC_vUpdateDC(PDC pdc)
     pdc->pdcattr->ulDirty_ |= DIRTY_DEFAULT ;
 }
 
-/* Take the pointer out of the way of a blit on a direct DC. What the
- * destination draws is limited by its clip box; what the source reads is not.
- * With bCount only, the pointer stays and the caller removes it around the
- * part of the blit that reaches it. */
+/* Take the pointer out of the way of a blit on a direct DC. With bCount only,
+ * the pointer stays and the caller removes it around the part of the blit
+ * that reaches it. */
 static
 VOID
 DC_vMouseSafetyStart(
     PDC pdc,
     const RECT *prc,
-    BOOL bIsDest,
     BOOL bCount)
 {
-    RECTL rcHazard;
-
-    if (!prc)
-    {
-        prc = &pdc->erclClip;
-    }
-    else if (bIsDest)
-    {
-        rcHazard = *prc;
-        RECTL_vMakeWellOrdered(&rcHazard);
-        if (!RECTL_bIntersectRect(&rcHazard, &rcHazard, &pdc->erclClip))
-        {
-            bCount = TRUE;
-        }
-        prc = &rcHazard;
-    }
-
     if (bCount)
     {
         MouseSafetyOnDrawEnter(pdc->ppdev);
         return;
     }
+
+    if (!prc)
+        prc = &pdc->erclClip;
 
     MouseSafetyOnDrawStart(pdc->ppdev, prc->left, prc->top, prc->right, prc->bottom);
 }
@@ -621,10 +605,7 @@ DC_vPrepareDCsForBlitEx(
 
     if (pdcFirst->dctype == DCTYPE_DIRECT)
     {
-        DC_vMouseSafetyStart(pdcFirst,
-                             prcFirst,
-                             bFirstIsDest,
-                             bSplitDest && bFirstIsDest);
+        DC_vMouseSafetyStart(pdcFirst, prcFirst, bSplitDest && bFirstIsDest);
     }
 
 #if DBG
@@ -648,10 +629,7 @@ DC_vPrepareDCsForBlitEx(
 
     if (pdcSecond->dctype == DCTYPE_DIRECT)
     {
-        DC_vMouseSafetyStart(pdcSecond,
-                             prcSecond,
-                             !bFirstIsDest,
-                             bSplitDest && !bFirstIsDest);
+        DC_vMouseSafetyStart(pdcSecond, prcSecond, bSplitDest && !bFirstIsDest);
     }
 
 #if DBG
