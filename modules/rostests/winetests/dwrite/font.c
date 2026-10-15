@@ -7069,6 +7069,80 @@ static void test_gdi_compatible_advances_without_hdmx(void)
     ok(ref == 0, "factory not released, %lu\n", ref);
 }
 
+static void test_cleartype_texture_of_outline_font(void)
+{
+    static const unsigned int sizes[] = { 11, 13, 16 };
+    static const DWRITE_RENDERING_MODE modes[] = { DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_RENDERING_MODE_GDI_CLASSIC };
+    unsigned int s, m;
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    IDWriteFont *font;
+    UINT32 codepoint = 'm';
+    UINT16 glyph = 0;
+    HRESULT hr;
+    ULONG ref;
+
+    factory = create_factory();
+    font = get_tahoma_instance(factory, DWRITE_FONT_STYLE_NORMAL);
+    hr = IDWriteFont_CreateFontFace(font, &fontface);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IDWriteFont_Release(font);
+
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &codepoint, 1, &glyph);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    for (m = 0; m < ARRAY_SIZE(modes); ++m)
+    {
+        for (s = 0; s < ARRAY_SIZE(sizes); ++s)
+        {
+            DWRITE_MEASURING_MODE measuring = modes[m] == DWRITE_RENDERING_MODE_GDI_CLASSIC ?
+                    DWRITE_MEASURING_MODE_GDI_CLASSIC : DWRITE_MEASURING_MODE_NATURAL;
+            IDWriteGlyphRunAnalysis *analysis;
+            DWRITE_GLYPH_RUN run;
+            DWRITE_GLYPH_OFFSET offset = { 0 };
+            float advance = 0.0f;
+            unsigned int i, partial = 0;
+            BYTE *bitmap;
+            RECT bounds;
+
+            memset(&run, 0, sizeof(run));
+            run.fontFace = fontface;
+            run.fontEmSize = sizes[s];
+            run.glyphCount = 1;
+            run.glyphIndices = &glyph;
+            run.glyphAdvances = &advance;
+            run.glyphOffsets = &offset;
+
+            hr = IDWriteFactory_CreateGlyphRunAnalysis(factory, &run, 1.0f, NULL, modes[m], measuring, 0.0f, 0.0f, &analysis);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            if (FAILED(hr))
+                continue;
+
+            hr = IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            if (hr == S_OK && bounds.right > bounds.left && bounds.bottom > bounds.top)
+            {
+                unsigned int size = (bounds.right - bounds.left) * (bounds.bottom - bounds.top) * 3;
+
+                bitmap = calloc(1, size);
+                hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds, bitmap, size);
+                ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+                for (i = 0; i < size; ++i)
+                    if (bitmap[i] && bitmap[i] != 0xff)
+                        ++partial;
+                ok(partial > 0, "mode %u, %u px: texture has no partial coverage, an embedded bilevel strike was used.\n",
+                        modes[m], sizes[s]);
+                free(bitmap);
+            }
+            IDWriteGlyphRunAnalysis_Release(analysis);
+        }
+    }
+
+    IDWriteFontFace_Release(fontface);
+    ref = IDWriteFactory_Release(factory);
+    ok(ref == 0, "factory not released, %lu\n", ref);
+}
+
 static WORD get_gasp_flags(IDWriteFontFace *fontface, FLOAT emsize, FLOAT ppdip)
 {
     WORD num_recs, version;
@@ -10839,6 +10913,7 @@ START_TEST(font)
     test_bitmap_target_failure();
     test_glyphrunanalysis_huge_texture();
     test_gdi_compatible_advances_without_hdmx();
+    test_cleartype_texture_of_outline_font();
     test_GetFontFamily();
     test_GetFamilyNames();
     test_CreateFontFace();

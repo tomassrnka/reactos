@@ -557,15 +557,9 @@ static BOOL get_glyph_transform(unsigned int simulations, const MATRIX_2X2 *m, f
     return TRUE;
 }
 
-/* Whether the glyph shape (simulations, matrix) rules out an embedded strike. The sub-pixel offset is left out on
-   purpose: whether a glyph comes from a strike or from its outline must not change with a quarter pixel shift. */
-static BOOL glyph_shape_needs_outline(unsigned int simulations, const MATRIX_2X2 *m)
-{
-    FT_Matrix ftm;
-    FT_Vector delta;
-
-    return get_glyph_transform(simulations, m, 0.0f, 0.0f, &ftm, &delta);
-}
+/* Scalable faces are drawn from their outlines in every mode: DirectWrite does not use the embedded bitmap strikes of
+   a font with outlines, and a strike is bilevel and carries no sub-pixel detail, so using one next to outline glyphs
+   gave words of uneven weight. */
 
 static NTSTATUS get_glyph_bbox(void *args)
 {
@@ -585,7 +579,7 @@ static NTSTATUS get_glyph_bbox(void *args)
 
     needs_transform = FT_IS_SCALABLE(face) &&
             get_glyph_transform(params->simulations, &params->m, params->dx, params->dy, &m, &delta);
-    needs_outline = FT_IS_SCALABLE(face) && glyph_shape_needs_outline(params->simulations, &params->m);
+    needs_outline = FT_IS_SCALABLE(face);
 
     if (pFT_Load_Glyph(face, params->glyph, needs_outline ? FT_LOAD_NO_BITMAP : 0))
     {
@@ -855,7 +849,7 @@ static NTSTATUS get_glyph_bitmap(void *args)
 
     needs_transform = FT_IS_SCALABLE(face) &&
             get_glyph_transform(params->simulations, &params->m, params->dx, params->dy, &m, &delta);
-    needs_outline = FT_IS_SCALABLE(face) && glyph_shape_needs_outline(params->simulations, &params->m);
+    needs_outline = FT_IS_SCALABLE(face);
 
     if (!pFT_Load_Glyph(face, params->glyph, needs_outline ? FT_LOAD_NO_BITMAP : 0))
     {
