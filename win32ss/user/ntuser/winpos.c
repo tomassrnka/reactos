@@ -673,11 +673,32 @@ IntSetWindowPlacement(PWND Wnd, WINDOWPLACEMENT *wpl, UINT Flags)
    BOOL sAsync;
    UINT SWP_Flags;
 
+   if (!Wnd || Wnd == Wnd->head.rpdesk->pDeskInfo->spwnd) return FALSE;
+
+   /* The icon position and the normal rectangle of a top-level window come relative to the work area, as
+      IntGetWindowPlacement gives them: back to screen coordinates, the ones of InternalPos and of the window */
+   if (Wnd->spwndParent == Wnd->head.rpdesk->pDeskInfo->spwnd && !(Wnd->ExStyle & WS_EX_TOOLWINDOW))
+   {
+      PMONITOR pmonitor = UserMonitorFromRect(&wpl->rcNormalPosition, MONITOR_DEFAULTTOPRIMARY);
+
+      if (pmonitor)
+      {
+         LONG dx = pmonitor->rcWork.left - pmonitor->rcMonitor.left;
+         LONG dy = pmonitor->rcWork.top - pmonitor->rcMonitor.top;
+
+         if (Flags & PLACE_MIN)
+         {
+            wpl->ptMinPosition.x += dx;
+            wpl->ptMinPosition.y += dy;
+         }
+         if (Flags & PLACE_RECT)
+            RECTL_vOffsetRect(&wpl->rcNormalPosition, dx, dy);
+      }
+   }
+
    if ( Flags & PLACE_MIN) make_point_onscreen( &wpl->ptMinPosition );
    if ( Flags & PLACE_MAX) make_point_onscreen( &wpl->ptMaxPosition );
    if ( Flags & PLACE_RECT) make_rect_onscreen( &wpl->rcNormalPosition );
-
-   if (!Wnd || Wnd == Wnd->head.rpdesk->pDeskInfo->spwnd) return FALSE;
 
    if ( Flags & PLACE_MIN ) Wnd->InternalPos.IconPos = wpl->ptMinPosition;
    if ( Flags & PLACE_MAX ) Wnd->InternalPos.MaxPos = wpl->ptMaxPosition;
@@ -2569,6 +2590,17 @@ co_WinPosMinMaximize(PWND Wnd, UINT ShowFlag, RECT* NewPos)
    wpl.length = sizeof(wpl);
    IntGetWindowPlacement( Wnd, &wpl );
 
+   /* IntGetWindowPlacement gives the work area relative values of WINDOWPLACEMENT for a top-level window;
+      the rectangles below are screen coordinates */
+   wpl.rcNormalPosition = Wnd->InternalPos.NormalRect;
+   if (Wnd->InternalPos.flags & WPF_MININIT)
+   {
+      wpl.ptMinPosition.x = Wnd->InternalPos.IconPos.x;
+      wpl.ptMinPosition.y = Wnd->InternalPos.IconPos.y;
+   }
+   else
+      wpl.ptMinPosition.x = wpl.ptMinPosition.y = -1;
+
    if (co_HOOK_CallHooks(WH_CBT, HCBT_MINMAX, (WPARAM)UserHMGetHandle(Wnd), ShowFlag))
    {
       ERR("WinPosMinMaximize WH_CBT Call Hook return!\n");
@@ -2680,6 +2712,7 @@ co_WinPosMinMaximize(PWND Wnd, UINT ShowFlag, RECT* NewPos)
                   }
                   else
                   {
+                     SwpFlags |= SWP_STATECHANGED;
                      *NewPos = wpl.rcNormalPosition;
                      if (ShowFlag != SW_SHOWNORMAL && ShowFlag != SW_SHOWDEFAULT)
                      {
@@ -2743,7 +2776,8 @@ void IntForceMinimizeWindow(PWND pWnd)
 }
 
 /*
-   ShowWindow does not set SWP_FRAMECHANGED!!! Fix wine msg test_SetParent:WmSetParentSeq_2:23 wParam bits!
+   ShowWindow does not set SWP_FRAMECHANGED, except when the minimized, maximized or normal state changes.
+   Fix wine msg test_SetParent:WmSetParentSeq_2:23 wParam bits!
  */
 BOOLEAN FASTCALL
 co_WinPosShowWindow(PWND Wnd, INT Cmd)
@@ -2931,6 +2965,10 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
    {
       UserEndAppStarting(Wnd);
    }
+
+   /* A change between minimized, maximized and normal changes the frame: applications recalculate it on SWP_FRAMECHANGED */
+   if (Swp & SWP_STATECHANGED)
+      Swp |= SWP_FRAMECHANGED;
 
    ShowFlag = (Cmd != SW_HIDE);
 

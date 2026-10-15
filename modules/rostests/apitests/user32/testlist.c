@@ -81,6 +81,7 @@ extern void func_SetScrollRange(void);
 extern void func_SetWindowPlacement(void);
 extern void func_SetWindowPosOwned(void);
 extern void func_ShowWindow(void);
+extern void func_ShowWindowFrame(void);
 extern void func_SwitchDesktop(void);
 extern void func_SuspendResumeNotification(void);
 extern void func_SwitchToThisWindow(void);
@@ -178,6 +179,7 @@ const struct test winetest_testlist[] =
     { "SetWindowPlacement", func_SetWindowPlacement },
     { "SetWindowPosOwned", func_SetWindowPosOwned },
     { "ShowWindow", func_ShowWindow },
+    { "ShowWindowFrame", func_ShowWindowFrame },
     { "SwitchDesktop", func_SwitchDesktop },
     { "SuspendResumeNotification", func_SuspendResumeNotification },
     { "SwitchToThisWindow", func_SwitchToThisWindow },
