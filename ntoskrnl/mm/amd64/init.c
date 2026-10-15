@@ -607,6 +607,7 @@ MiAddDescriptorToDatabase(
         {
             /* Make an active PFN */
             Pfn->u3.e1.PageLocation = ActiveAndValid;
+            Pfn->u3.e1.CacheAttribute = MiCached;
 
             /* Advance one */
             Pfn++;

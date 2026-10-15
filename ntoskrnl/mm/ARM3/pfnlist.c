@@ -1001,8 +1001,9 @@ MiInitializePfn(IN PFN_NUMBER PageFrameIndex,
         ASSERT(!((Pfn1->OriginalPte.u.Soft.Prototype == 0) &&
                  (Pfn1->OriginalPte.u.Soft.Transition == 1)));
 
-        /* Memory committed uncached or write-combined stays so while the page lives */
-        if (Pfn1->OriginalPte.u.Soft.Prototype == 0)
+        /* A private page made present uncached or write-combined stays so while it lives.
+           Prototype PTEs live outside the page tables, and their pages are mapped cached */
+        if (MI_IS_PAGE_TABLE_ADDRESS(PointerPte) && (Pfn1->OriginalPte.u.Soft.Prototype == 0))
             Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(Pfn1->OriginalPte.u.Soft.Protection);
     }
 
