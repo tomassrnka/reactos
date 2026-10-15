@@ -250,7 +250,8 @@ DC_vSelectSurface(PDC pdc, PSURFACE psurfNew)
     PSURFACE psurfOld = pdc->dclevel.pSurface;
     if (psurfOld)
     {
-        psurfOld->hdc = NULL;
+        /* Only the DC that is marked as holding the bitmap clears the mark, not a saved state */
+        InterlockedCompareExchangePointer((PVOID*)&psurfOld->hdc, NULL, pdc->BaseObject.hHmgr);
         SURFACE_ShareUnlockSurface(psurfOld);
     }
     if (psurfNew)

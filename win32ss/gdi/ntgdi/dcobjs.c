@@ -454,7 +454,7 @@ NtGdiSelectBitmap(
     if (psurfOld)
     {
         /* Reset hdc of the old bitmap, it isn't selected anymore */
-        psurfOld->hdc = NULL;
+        InterlockedCompareExchangePointer((PVOID*)&psurfOld->hdc, NULL, pdc->BaseObject.hHmgr);
 
         /* Dereference the old bitmap */
         SURFACE_ShareUnlockSurface(psurfOld);

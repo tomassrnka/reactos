@@ -186,7 +186,17 @@ DC_vRestoreDC(
 
             /* Only memory DC's change their surface */
             if (pdc->dctype == DCTYPE_MEMORY)
+            {
                 DC_vSelectSurface(pdc, pdcSave->dclevel.pSurface);
+
+                /* The restored bitmap is held by this DC again, unless another DC holds it */
+                if (pdc->dclevel.pSurface)
+                {
+                    InterlockedCompareExchangePointer((PVOID*)&pdc->dclevel.pSurface->hdc,
+                                                      pdc->BaseObject.hHmgr,
+                                                      NULL);
+                }
+            }
 
             if (pdcSave->dclevel.hPath)
             {
