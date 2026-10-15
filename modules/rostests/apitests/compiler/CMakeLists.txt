@@ -7,6 +7,9 @@ endif()
 
 list(APPEND SOURCE
     floatconv.c
+    hresult.c
+    hresult_cpp.cpp
+    hresult_inline.c
     pseh.c
     pseh_cpp.cpp
     psehtest2.c
