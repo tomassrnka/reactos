@@ -594,6 +594,7 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
    switch (Msg->message)
    {
       case WM_MOUSEWHEEL:
+      case WM_MOUSEHWHEEL:
          MouseHookData.mouseData = MAKELONG(0, GET_WHEEL_DELTA_WPARAM(Msg->wParam));
          break;
       case WM_XBUTTONDOWN:
@@ -1477,7 +1478,7 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     UINT message;
     USHORT hittest;
     EVENTMSG event;
-    MOUSEHOOKSTRUCT hook;
+    MOUSEHOOKSTRUCTEX hook;
     BOOL eatMsg = FALSE;
 
     PWND pwndMsg, pwndDesktop;
@@ -1551,7 +1552,7 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     message = msg->message;
 
     /* Note: windows has no concept of a non-client wheel message */
-    if (message != WM_MOUSEWHEEL)
+    if (message != WM_MOUSEWHEEL && message != WM_MOUSEHWHEEL)
     {
         if (hittest != HTCLIENT)
         {
@@ -1676,17 +1677,29 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     event.paramH  = msg->pt.y;
     co_HOOK_CallHooks( WH_JOURNALRECORD, HC_ACTION, 0, (LPARAM)&event );
 
-    hook.pt           = msg->pt;
-    hook.hwnd         = msg->hwnd;
-    hook.wHitTestCode = hittest;
-    hook.dwExtraInfo  = ExtraInfo;
+    hook.MOUSEHOOKSTRUCT.pt           = msg->pt;
+    hook.MOUSEHOOKSTRUCT.hwnd         = msg->hwnd;
+    hook.MOUSEHOOKSTRUCT.wHitTestCode = hittest;
+    hook.MOUSEHOOKSTRUCT.dwExtraInfo  = ExtraInfo;
+    hook.mouseData    = 0;
+    if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL)
+    {
+        /* A wheel is not tied to a window part */
+        hook.MOUSEHOOKSTRUCT.wHitTestCode = 0;
+        hook.mouseData = MAKELONG(0, GET_WHEEL_DELTA_WPARAM(msg->wParam));
+    }
+    else if (message == WM_XBUTTONDOWN || message == WM_XBUTTONUP || message == WM_XBUTTONDBLCLK ||
+             message == WM_NCXBUTTONDOWN || message == WM_NCXBUTTONUP || message == WM_NCXBUTTONDBLCLK)
+    {
+        hook.mouseData = MAKELONG(0, GET_XBUTTON_WPARAM(msg->wParam));
+    }
     if (co_HOOK_CallHooks( WH_MOUSE, *RemoveMessages ? HC_ACTION : HC_NOREMOVE,
                         message, (LPARAM)&hook ))
     {
-        hook.pt           = msg->pt;
-        hook.hwnd         = msg->hwnd;
-        hook.wHitTestCode = hittest;
-        hook.dwExtraInfo  = ExtraInfo;
+        hook.MOUSEHOOKSTRUCT.pt           = msg->pt;
+        hook.MOUSEHOOKSTRUCT.hwnd         = msg->hwnd;
+        hook.MOUSEHOOKSTRUCT.wHitTestCode = hittest;
+        hook.MOUSEHOOKSTRUCT.dwExtraInfo  = ExtraInfo;
         co_HOOK_CallHooks( WH_CBT, HCBT_CLICKSKIPPED, message, (LPARAM)&hook );
 
         ERR("WH_MOUSE dropped mouse message!\n");
