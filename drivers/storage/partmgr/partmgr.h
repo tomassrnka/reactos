@@ -54,7 +54,7 @@ C_ASSERT(RTL_FIELD_SIZE(BASIC_VOLUME_UNIQUE_ID, Gpt) == 0x18);
 
 #define DMIO_ID_SIGNATURE   (*(ULONGLONG*)"DMIO:ID:")
 
-// a partition's PnP instance ID: "S" + disk GUID (36) + "S_O" + 16 + "_L" + 16 hex digits,
+// a partition's PnP instance ID: "S" + disk GUID (36) + "S_O" + 16 hex digits,
 // then "_V" + up to 10 digits when the same ID is in use on the disk, and the NUL
 #define PARTITION_INSTANCE_ID_CHARS 96
 
@@ -139,7 +139,7 @@ typedef struct _PARTITION_EXTENSION
     UNICODE_STRING DeviceName;
     PVPB CreatedVpb; // the VPB the device got at creation
     PPARTITION_ID_RECORD IdRecord; // the instance ID, from the first time PnP asked for it
-    WCHAR BaseId[PARTITION_INSTANCE_ID_CHARS]; // signature or disk GUID, offset and length at creation
+    WCHAR BaseId[PARTITION_INSTANCE_ID_CHARS]; // signature or disk GUID and offset at creation
 } PARTITION_EXTENSION, *PPARTITION_EXTENSION;
 
 CODE_SEG("PAGE")

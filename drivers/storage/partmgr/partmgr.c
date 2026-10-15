@@ -195,7 +195,9 @@ PartMgrIsDiskSuperFloppy(
 /**
  * @brief
  * Makes the base of the PnP instance ID of a new partition device: the disk's signature (MBR)
- * or GUID (GPT) and the partition's offset and length, as the new layout has them.
+ * or GUID (GPT) and the partition's starting offset, as the new layout has them.  Not the length:
+ * a resize keeps the partition (IOCTL_DISK_GROW_PARTITION keeps its device), so after a resize and
+ * a reboot it has the same ID and installed device key as before.
  **/
 static
 CODE_SEG("PAGE")
@@ -211,15 +213,14 @@ PartMgrMakeBaseId(
 
     if (Layout->PartitionStyle == PARTITION_STYLE_MBR)
     {
-        length = _snwprintf(BaseId, PARTITION_INSTANCE_ID_CHARS, L"S%08lx_O%I64x_L%I64x",
+        length = _snwprintf(BaseId, PARTITION_INSTANCE_ID_CHARS, L"S%08lx_O%I64x",
                             Layout->Mbr.Signature,
-                            PartitionEntry->StartingOffset.QuadPart,
-                            PartitionEntry->PartitionLength.QuadPart);
+                            PartitionEntry->StartingOffset.QuadPart);
     }
     else
     {
         length = _snwprintf(BaseId, PARTITION_INSTANCE_ID_CHARS,
-                            L"S%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02xS_O%I64x_L%I64x",
+                            L"S%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02xS_O%I64x",
                             Layout->Gpt.DiskId.Data1,
                             Layout->Gpt.DiskId.Data2,
                             Layout->Gpt.DiskId.Data3,
@@ -231,8 +232,7 @@ PartMgrMakeBaseId(
                             Layout->Gpt.DiskId.Data4[5],
                             Layout->Gpt.DiskId.Data4[6],
                             Layout->Gpt.DiskId.Data4[7],
-                            PartitionEntry->StartingOffset.QuadPart,
-                            PartitionEntry->PartitionLength.QuadPart);
+                            PartitionEntry->StartingOffset.QuadPart);
     }
     return (length < 0 || length >= PARTITION_INSTANCE_ID_CHARS) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
 }
