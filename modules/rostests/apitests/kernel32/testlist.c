@@ -19,6 +19,7 @@ extern void func_CreateFile2(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
 extern void func_CreateWaitableTimerEx(void);
+extern void func_ThreadImpersonationToken(void);
 extern void func_DebugTrapInterrupts(void);
 extern void func_DefaultActCtx(void);
 extern void func_DiscardVirtualMemory(void);
@@ -141,6 +142,7 @@ const struct test winetest_testlist[] =
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
+    { "ThreadImpersonationToken",    func_ThreadImpersonationToken },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DiscardVirtualMemory", func_DiscardVirtualMemory },
