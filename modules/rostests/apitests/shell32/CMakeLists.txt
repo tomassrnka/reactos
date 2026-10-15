@@ -70,6 +70,7 @@ list(APPEND SOURCE
     SHLimitInputEdit.cpp
     SHSetUnreadMailCountW.cpp
     StrRStr.cpp
+    TaskbarFullscreen.cpp
     menu.cpp
     shelltest.cpp)
 
