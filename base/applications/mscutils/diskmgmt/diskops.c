@@ -2001,7 +2001,6 @@ DmShrinkVolume(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid
 {
     PDL_LAYOUT Layout = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
     PDL_LAYOUT Planned = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DL_LAYOUT));
-    PDL_LAYOUT Fresh = HeapAlloc(GetProcessHeap(), 0, sizeof(DL_LAYOUT));
     HANDLE Lock = NULL;
     DM_SHRINK_INFO Info;
     PDL_ENTRY Entry;
@@ -2009,7 +2008,7 @@ DmShrinkVolume(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid
     DWORD Error, Returned;
     ULONGLONG NewLength;
 
-    if (Layout == NULL || Planned == NULL || Fresh == NULL)
+    if (Layout == NULL || Planned == NULL)
     {
         Error = ERROR_NOT_ENOUGH_MEMORY;
         goto Done;
@@ -2080,10 +2079,11 @@ DmShrinkVolume(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid
     CloseHandle(Handle);
     if (Error != ERROR_SUCCESS)
         goto Done;
-    /* The table is read again and the change is made on what the disk holds now, so that a change another program made to
-     * other partitions meanwhile is not written over; the disk and the volume must still be the ones that were confirmed (a
-     * disk with the same number, or a partition with the same offset and length, is not enough), and the write is refused
-     * when the table changes between this read and the write. */
+    /* The partition follows through IOCTL_DISK_GROW_PARTITION with a negative size, as Extend Volume grows it: the partition
+     * keeps its device, so the volume keeps its name and drive letter (a new table would make the volume anew, on Windows
+     * too), and only this partition's entry changes, so a change another program made to other partitions is not written
+     * over.  The disk and the volume must still be the ones that were confirmed (a disk with the same number, or a partition
+     * with the same offset and length, is not enough). */
     Error = DmVerifyDiskId(Disk, DiskIdentity);
     if (Error == ERROR_SUCCESS)
         Error = DmReadDiskLayout(Disk, Planned);
@@ -2097,14 +2097,25 @@ DmShrinkVolume(ULONG Disk, ULONGLONG Offset, ULONGLONG Length, PCWSTR VolumeGuid
         }
         else
         {
-            memcpy(Fresh, Planned, sizeof(DL_LAYOUT));
-            Error = DmFromLayout(DlResize(Planned, Offset, NewLength));
+            DISK_GROW_PARTITION Grow;
+            HANDLE Disk_ = DmOpenDiskHandle(Disk, GENERIC_READ | GENERIC_WRITE);
+
+            if (Disk_ == INVALID_HANDLE_VALUE)
+            {
+                Error = GetLastError();
+            }
+            else
+            {
+                ZeroMemory(&Grow, sizeof(Grow));
+                Grow.PartitionNumber = Now->Number;
+                Grow.BytesToGrow.QuadPart = -(LONGLONG)(Length - NewLength);
+                if (!DmIoctl(Disk_, IOCTL_DISK_GROW_PARTITION, &Grow, sizeof(Grow), NULL, 0, &Returned))
+                    Error = GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
+                CloseHandle(Disk_);
+            }
         }
     }
-    if (Error == ERROR_SUCCESS)
-        Error = DmWriteDiskLayout(Disk, Fresh, Planned);
-    /* a table that could not be put back is not "the volume works as before": that answer stays */
-    if (Error != ERROR_SUCCESS && Error != DM_ERR_RESTORE_FAILED)
+    if (Error != ERROR_SUCCESS)
         Error = DM_ERR_SHRINK_PARTIAL;      /* the file system is smaller and the partition is not */
 Done:
     DmUnlockDisk(Lock);
@@ -2112,7 +2123,5 @@ Done:
         HeapFree(GetProcessHeap(), 0, Layout);
     if (Planned)
         HeapFree(GetProcessHeap(), 0, Planned);
-    if (Fresh)
-        HeapFree(GetProcessHeap(), 0, Fresh);
     return Error;
 }
