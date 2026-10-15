@@ -15,6 +15,8 @@
 #define NDEBUG
 #include <debug.h>
 
+#define PROCESS_ALL_ACCESS_NT6 (STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|0xFFFF)
+
 /* INTERNAL FUNCTIONS *******************************************************/
 
 NTSTATUS
@@ -271,7 +273,7 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
 
     /* Create Kernel Process Object */
     Status = ZwCreateProcess(&ProcessInfo->ProcessHandle,
-                             PROCESS_ALL_ACCESS,
+                             PROCESS_ALL_ACCESS_NT6,
                              &ObjectAttributes,
                              ParentProcess,
                              InheritHandles,
