@@ -601,6 +601,45 @@ static BOOL shell_item_exists(IShellItem* shellitem)
     return result;
 }
 
+#ifdef __REACTOS__
+static BOOL spec_has_extension(LPCWSTR spec, LPCWSTR ext)
+{
+    SIZE_T len = lstrlenW(ext);
+
+    if(ext[0] != L'.' || !ext[1])
+        return FALSE;
+
+    while(*spec)
+    {
+        LPCWSTR end;
+
+        while(*spec == L' ')
+            spec++;
+        end = spec;
+        while(*end && *end != L';')
+            end++;
+        if((SIZE_T)(end - spec) == 3 && !StrCmpNW(spec, L"*.*", 3))
+            return TRUE;
+        if((SIZE_T)(end - spec) == len + 1 && spec[0] == L'*' && !StrCmpNIW(spec + 1, ext, len))
+            return TRUE;
+        spec = *end ? end + 1 : end;
+    }
+    return FALSE;
+}
+
+static BOOL is_registered_extension(LPCWSTR ext)
+{
+    HKEY hkey;
+
+    if(ext[0] != L'.' || !ext[1])
+        return FALSE;
+    if(RegOpenKeyExW(HKEY_CLASSES_ROOT, ext, 0, KEY_READ, &hkey))
+        return FALSE;
+    RegCloseKey(hkey);
+    return TRUE;
+}
+#endif
+
 static HRESULT on_default_action(FileDialogImpl *This)
 {
     IShellFolder *psf_parent, *psf_desktop;
@@ -675,12 +714,25 @@ static HRESULT on_default_action(FileDialogImpl *This)
 
             if(This->dlg_type == ITEMDLG_TYPE_SAVE)
             {
+#ifdef __REACTOS__
+                /* Windows changes the name only when a default extension is set, and keeps
+                 * an extension that is registered (measured on Windows 7 and 10) */
+                if(This->default_ext && newext)
+                {
+                    WCHAR *ext = PathFindExtensionW(canon_filename);
+                    if(lstrcmpiW(ext, newext) && !(This->current_filter && spec_has_extension(This->current_filter, ext)) &&
+                       !is_registered_extension(ext) &&
+                       lstrlenW(canon_filename) + lstrlenW(newext) < MAX_PATH)
+                        lstrcatW(canon_filename, newext);
+                }
+#else
                 if(newext)
                 {
                     WCHAR *ext = PathFindExtensionW(canon_filename);
                     if(lstrcmpiW(ext, newext))
                         lstrcatW(canon_filename, newext);
                 }
+#endif
             }
             else
             {
@@ -730,6 +782,20 @@ static HRESULT on_default_action(FileDialogImpl *This)
         hr = IExplorerBrowser_BrowseToObject(This->peb, (IUnknown*)psf_parent, SBSP_DEFBROWSER);
         if(FAILED(hr))
             ERR("Failed to browse to directory: %08lx\n", hr);
+#ifdef __REACTOS__
+        else
+        {
+            /* Like Windows and the classic dialog, empty the name box once it went into another folder */
+            LPITEMIDLIST pidl_target;
+
+            if(SUCCEEDED(SHGetIDListFromObject((IUnknown*)psf_parent, &pidl_target)))
+            {
+                if(!ILIsEqual(pidl_target, current_folder))
+                    SetDlgItemTextW(This->dlg_hwnd, IDC_FILENAME, L"");
+                ILFree(pidl_target);
+            }
+        }
+#endif
 
         IShellFolder_Release(psf_parent);
         break;
@@ -1482,7 +1548,20 @@ static void ctrl_container_reparent(FileDialogImpl *This, HWND parent)
         wndstyle |= WS_POPUP;
         SetWindowLongW(This->cctrls_hwnd, GWL_STYLE, wndstyle);
 
+#ifdef __REACTOS__
+        /* Making the container a top-level window activates it, which takes the activation from the
+         * owner that the dialog gave it back when it closed; Windows does not activate here */
+        {
+            HWND hwnd_active = GetActiveWindow();
+
+            SetParent(This->cctrls_hwnd, NULL);
+            if(hwnd_active && hwnd_active != This->cctrls_hwnd && IsWindow(hwnd_active) &&
+               GetActiveWindow() == This->cctrls_hwnd)
+                SetActiveWindow(hwnd_active);
+        }
+#else
         SetParent(This->cctrls_hwnd, NULL);
+#endif
     }
 }
 
