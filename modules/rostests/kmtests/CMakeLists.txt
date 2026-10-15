@@ -201,6 +201,7 @@ list(APPEND KMTEST_SOURCE
     ntos_ke/KeSystemCall32_user.c
     ntos_ke/KeTrapFrame/KeTrapFrame_user.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
+    ntos_mm/MmSpecialPool_user.c
     ntos_mm/NtCreateSection_user.c
     ntos_po/PoIrp_user.c
     tcpip/TcpIp_user.c

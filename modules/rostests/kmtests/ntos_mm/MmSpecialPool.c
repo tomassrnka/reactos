@@ -23,7 +23,10 @@
  * one of these instead of the configuration above:
  *   M1: PoolTag REG_BINARY 4B 6D 53 70 ("KmSp"), PoolTagOverruns REG_BINARY 00, SpecialPoolTags REG_SZ "ABCDEFGH Kmz*"
  *   M2: SpecialPoolTags REG_DWORD 0x2A (would read as "*", every tag), nothing else
- * Only "Kmz*" in M1 may select anything.
+ *   M3: PoolTag REG_DWORD of 8 bytes 2A 00 00 00 00 00 00 00 (its first four bytes read as "*"),
+ *       PoolTagOverruns REG_DWORD of 8 bytes, all zero (its first four bytes would select underruns)
+ * Only "Kmz*" in M1 may select anything. The user-mode test MmSpecialPoolUser (kmtest.exe) checks
+ * that the same addresses touched from user mode give an access violation and no bugcheck.
  */
 
 #define TAG_EXACT       'pSmK' /* "KmSp", PoolTag */
@@ -365,22 +368,25 @@ START_TEST(MmSpecialPoolMalformed)
         { 'HGFE', "last four characters of a long token" },
         { 'wZyX', "an unrelated tag (\"*\" from a REG_DWORD)" },
     };
-    ULONG DataSize, Type, i, Special;
+    ULONG DataSize, Type, i, Special, Raw[4];
     WCHAR List[64] = { 0 };
-    BOOLEAN ExpectKmz;
+    BOOLEAN ExpectKmz, M2, M3;
     PVOID Buffer;
 
     ExpectKmz = QueryMemoryManagementValue(L"SpecialPoolTags", List, sizeof(List) - sizeof(WCHAR), &DataSize, &Type) &&
                 (Type == REG_SZ) && (wcscmp(List, L"ABCDEFGH Kmz*") == 0);
-    if (!ExpectKmz && !(QueryMemoryManagementValue(L"SpecialPoolTags", List, sizeof(List), &DataSize, &Type) && Type == REG_DWORD))
+    M2 = QueryMemoryManagementValue(L"SpecialPoolTags", Raw, sizeof(Raw), &DataSize, &Type) && (Type == REG_DWORD);
+    M3 = QueryMemoryManagementValue(L"PoolTag", Raw, sizeof(Raw), &DataSize, &Type) &&
+         (Type == REG_DWORD) && (DataSize > sizeof(ULONG));
+    if (!ExpectKmz && !M2 && !M3)
     {
-        skip(FALSE, "Not booted with a malformed configuration (M1 or M2, see the file header)\n");
+        skip(FALSE, "Not booted with a malformed configuration (M1, M2 or M3, see the file header)\n");
         return;
     }
 
-    /* PoolTagOverruns of the wrong type must leave the default: data at the end of the page */
+    /* PoolTagOverruns of the wrong type or size must leave the default: data at the end of the page */
     CatchOverruns = TRUE;
-    trace("Configuration %s\n", ExpectKmz ? "M1" : "M2");
+    trace("Configuration %s\n", ExpectKmz ? "M1" : (M2 ? "M2" : "M3"));
 
     for (i = 0; i < RTL_NUMBER_OF(NotSelected); i++)
     {
