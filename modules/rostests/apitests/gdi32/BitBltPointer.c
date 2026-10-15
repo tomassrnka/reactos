@@ -183,6 +183,43 @@ DrawStretchShrink(HDC hdc)
 }
 
 static void
+DrawAlphaBlend(HDC hdc)
+{
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 128, 0};
+
+    AlphaBlend(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, WIDTH, HEIGHT, bf);
+}
+
+static void
+DrawAlphaBlendAround(HDC hdc)
+{
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 90, 0};
+
+    AlphaBlend(hdc, PTR_X - 12, PTR_Y - 9, 40, 50, ghdcSrc, 17, 5, 40, 50, bf);
+}
+
+static void
+DrawAlphaBlendScaled(HDC hdc)
+{
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 128, 0};
+
+    AlphaBlend(hdc, 20, 20, 120, 80, ghdcSrc, 0, 0, 60, 40, bf);
+}
+
+static void
+DrawTransparentBlt(HDC hdc)
+{
+    /* the colour of a source pixel, so that part of the source is skipped */
+    TransparentBlt(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, WIDTH, HEIGHT, GetPixel(ghdcSrc, WIDTH / 2, HEIGHT / 2));
+}
+
+static void
+DrawTransparentBltAround(HDC hdc)
+{
+    TransparentBlt(hdc, PTR_X - 12, PTR_Y - 9, 40, 50, ghdcSrc, 17, 5, 40, 50, GetPixel(ghdcSrc, 20, 10));
+}
+
+static void
 DrawClipTwoRects(HDC hdc)
 {
     /* A clip with a gap through the pointer, so the clip object has several rectangles */
@@ -374,6 +411,11 @@ START_TEST(BitBltPointer)
     Check("StretchBlt without scaling, SRCINVERT", DrawStretchSameSizeInvert);
     Check("StretchBlt to twice the size", DrawStretchDouble);
     Check("StretchBlt to a smaller size", DrawStretchShrink);
+    Check("AlphaBlend without scaling", DrawAlphaBlend);
+    Check("AlphaBlend around the pointer", DrawAlphaBlendAround);
+    Check("AlphaBlend with scaling", DrawAlphaBlendScaled);
+    Check("TransparentBlt without scaling", DrawTransparentBlt);
+    Check("TransparentBlt around the pointer", DrawTransparentBltAround);
     Check("BitBlt with a clip of two rectangles through the pointer", DrawClipTwoRects);
     Check("PatBlt with a clip that has a hole over the pointer", DrawClipHole);
     Check("Clip that changes between operations", DrawClipChanges);
