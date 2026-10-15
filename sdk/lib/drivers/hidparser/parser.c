@@ -10,10 +10,50 @@
 
 #include "parser.h"
 
+#include <ntintsafe.h>
+
 #define NDEBUG
 #include <debug.h>
 
 static UCHAR ItemSize[4] = { 0, 1, 2, 4 };
+
+//
+// Descriptor-level sanity limits. Report descriptors come from untrusted
+// hardware (or anything a VM presents as a HID device), so every quantity
+// built from descriptor fields is bounded before it drives an allocation,
+// an index or a recursion. These caps are far above any real device and
+// below the point where the derived arithmetic can wrap a ULONG.
+//
+// A HID field is at most 32 bits wide (USB HID 1.11 Report Size); a report
+// never approaches 64 KiB of fields. The collection and push caps bound the
+// parser's recursion and backing stacks so a malformed descriptor cannot
+// exhaust the kernel stack or pool.
+//
+#define HID_MAX_REPORT_SIZE_BITS    32
+#define HID_MAX_REPORT_COUNT        0x00010000
+#define HID_MAX_COLLECTION_DEPTH    256
+#define HID_MAX_GLOBAL_STACK_DEPTH  256
+#define HID_MAX_USAGE_STACK         0x00010000
+
+FORCEINLINE
+NTSTATUS
+HidParser_SizeAdd(
+    IN ULONG Augend,
+    IN ULONG Addend,
+    OUT PULONG Result)
+{
+    return RtlULongAdd(Augend, Addend, Result);
+}
+
+FORCEINLINE
+NTSTATUS
+HidParser_SizeMult(
+    IN ULONG Multiplicand,
+    IN ULONG Multiplier,
+    OUT PULONG Result)
+{
+    return RtlULongMult(Multiplicand, Multiplier, Result);
+}
 
 VOID
 HidParser_DeleteReport(
@@ -129,16 +169,21 @@ HidParser_AddCollection(
 {
     PHID_COLLECTION * NewAllocCollection;
     ULONG CollectionCount;
+    ULONG AllocSize;
 
     //
     // increment collection array
     //
-    CollectionCount = CurrentCollection->NodeCount + 1;
+    if (!NT_SUCCESS(HidParser_SizeAdd(CurrentCollection->NodeCount, 1, &CollectionCount)))
+        return HIDP_STATUS_INTERNAL_ERROR;
 
     //
-    // allocate new collection
+    // allocate new collection (overflow-checked)
     //
-    NewAllocCollection = (PHID_COLLECTION*)AllocFunction(sizeof(PHID_COLLECTION) * CollectionCount);
+    if (!NT_SUCCESS(HidParser_SizeMult(sizeof(PHID_COLLECTION), CollectionCount, &AllocSize)))
+        return HIDP_STATUS_INTERNAL_ERROR;
+
+    NewAllocCollection = (PHID_COLLECTION*)AllocFunction(AllocSize);
     if (!NewAllocCollection)
     {
         //
@@ -274,11 +319,19 @@ HidParser_AddReportToCollection(
     IN PHID_REPORT NewReport)
 {
     PHID_REPORT * NewReportArray;
+    ULONG ReportArrayCount;
+    ULONG AllocSize;
 
     //
-    // allocate new report array
+    // allocate new report array (overflow-checked)
     //
-    NewReportArray = (PHID_REPORT*)AllocFunction(sizeof(PHID_REPORT) * (CurrentCollection->ReportCount + 1));
+    if (!NT_SUCCESS(HidParser_SizeAdd(CurrentCollection->ReportCount, 1, &ReportArrayCount)))
+        return HIDP_STATUS_INTERNAL_ERROR;
+
+    if (!NT_SUCCESS(HidParser_SizeMult(sizeof(PHID_REPORT), ReportArrayCount, &AllocSize)))
+        return HIDP_STATUS_INTERNAL_ERROR;
+
+    NewReportArray = (PHID_REPORT*)AllocFunction(AllocSize);
     if (!NewReportArray)
     {
         //
@@ -373,9 +426,22 @@ HidParser_ReserveReportItems(
     OUT PHID_REPORT *OutReport)
 {
     PHID_REPORT NewReport;
-    ULONG OldSize, Size;
+    ULONG OldSize, Size, TotalSize, Needed;
 
-    if (Report->ItemCount + ReportCount <= Report->ItemAllocated)
+    //
+    // reject absurd report counts up front; everything below stays inside a
+    // ULONG once this holds, but the arithmetic is still checked explicitly.
+    //
+    if (ReportCount > HID_MAX_REPORT_COUNT)
+        return HIDP_STATUS_INTERNAL_ERROR;
+
+    //
+    // required item count after the grow (overflow-checked)
+    //
+    if (!NT_SUCCESS(HidParser_SizeAdd(Report->ItemCount, ReportCount, &Needed)))
+        return HIDP_STATUS_INTERNAL_ERROR;
+
+    if (Needed <= Report->ItemAllocated)
     {
         //
         // space is already allocated
@@ -385,15 +451,24 @@ HidParser_ReserveReportItems(
     }
 
     //
-    //calculate new size
+    // calculate new size (every term overflow-checked)
     //
-    OldSize = sizeof(HID_REPORT) + (Report->ItemCount) * sizeof(HID_REPORT_ITEM);
-    Size =  ReportCount * sizeof(HID_REPORT_ITEM);
+    if (!NT_SUCCESS(HidParser_SizeMult(Report->ItemCount, sizeof(HID_REPORT_ITEM), &OldSize)) ||
+        !NT_SUCCESS(HidParser_SizeAdd(OldSize, sizeof(HID_REPORT), &OldSize)))
+    {
+        return HIDP_STATUS_INTERNAL_ERROR;
+    }
+
+    if (!NT_SUCCESS(HidParser_SizeMult(ReportCount, sizeof(HID_REPORT_ITEM), &Size)))
+        return HIDP_STATUS_INTERNAL_ERROR;
+
+    if (!NT_SUCCESS(HidParser_SizeAdd(OldSize, Size, &TotalSize)))
+        return HIDP_STATUS_INTERNAL_ERROR;
 
     //
     // allocate memory
     //
-    NewReport = (PHID_REPORT)AllocFunction(Size + OldSize);
+    NewReport = (PHID_REPORT)AllocFunction(TotalSize);
     if (!NewReport)
     {
         //
@@ -557,7 +632,14 @@ HidParser_InitReportItem(
     //
     ReportItem->ByteOffset = (Report->ReportSize / 8);
     ReportItem->Shift = (Report->ReportSize % 8);
-    ReportItem->Mask = ~(0xFFFFFFFF << GlobalItemState->ReportSize);
+    //
+    // a field is at most 32 bits; shifting a 32-bit value by 32 or more is
+    // undefined, so a full-width (or over-width) field masks every bit.
+    //
+    if (GlobalItemState->ReportSize >= 32)
+        ReportItem->Mask = 0xFFFFFFFF;
+    else
+        ReportItem->Mask = ~(0xFFFFFFFF << GlobalItemState->ReportSize);
     ReportItem->BitCount = GlobalItemState->ReportSize;
     ReportItem->HasData = (ItemData->DataConstant == FALSE);
     ReportItem->Array = (ItemData->ArrayVariable == 0);
@@ -568,9 +650,11 @@ HidParser_InitReportItem(
     ReportItem->UsageMaximum = UsageMaximum;
 
     //
-    // increment report size
+    // increment report size (overflow-checked: the running total feeds byte
+    // offsets and the context size)
     //
-    Report->ReportSize += GlobalItemState->ReportSize;
+    if (!NT_SUCCESS(HidParser_SizeAdd(Report->ReportSize, GlobalItemState->ReportSize, &Report->ReportSize)))
+        return HIDP_STATUS_INTERNAL_ERROR;
 
     //
     // completed successfully
@@ -703,6 +787,70 @@ HidParser_AddMainItem(
     return HIDP_STATUS_SUCCESS;
 }
 
+//
+// Free a collection and everything it owns (its reports, its report array,
+// its child collections and their node array), then the collection itself.
+// Recursion is bounded by HID_MAX_COLLECTION_DEPTH, enforced while parsing.
+//
+static
+VOID
+HidParser_FreeCollectionTree(
+    IN PHID_COLLECTION Collection)
+{
+    ULONG Index;
+
+    if (Collection == NULL)
+        return;
+
+    for (Index = 0; Index < Collection->NodeCount; Index++)
+        HidParser_FreeCollectionTree(Collection->Nodes[Index]);
+
+    if (Collection->Nodes)
+        FreeFunction(Collection->Nodes);
+
+    for (Index = 0; Index < Collection->ReportCount; Index++)
+    {
+        if (Collection->Reports[Index])
+            FreeFunction(Collection->Reports[Index]);
+    }
+
+    if (Collection->Reports)
+        FreeFunction(Collection->Reports);
+
+    FreeFunction(Collection);
+}
+
+//
+// Tear down a parser context and everything reachable from it. Used on every
+// error path while parsing, and by HidParser_GetCollectionDescription once the
+// per-collection preparsed contexts have been built (the tree is a scratch
+// representation that was previously leaked).
+//
+VOID
+HidParser_FreeContext(
+    IN PHID_PARSER_CONTEXT ParserContext)
+{
+    PGLOBAL_ITEM_STATE LinkedGlobalItemState, NextLinkedGlobalItemState;
+
+    if (ParserContext == NULL)
+        return;
+
+    HidParser_FreeCollectionTree(ParserContext->RootCollection);
+
+    LinkedGlobalItemState = (PGLOBAL_ITEM_STATE)ParserContext->GlobalItemState.Next;
+    while (LinkedGlobalItemState != NULL)
+    {
+        NextLinkedGlobalItemState = (PGLOBAL_ITEM_STATE)LinkedGlobalItemState->Next;
+        FreeFunction(LinkedGlobalItemState);
+        LinkedGlobalItemState = NextLinkedGlobalItemState;
+    }
+
+    if (ParserContext->LocalItemState.UsageStack)
+        FreeFunction(ParserContext->LocalItemState.UsageStack);
+
+    FreeFunction(ParserContext);
+}
+
 NTSTATUS
 HidParser_ParseReportDescriptor(
     IN PUCHAR ReportDescriptor,
@@ -724,6 +872,9 @@ HidParser_ParseReportDescriptor(
     PHID_REPORT Report;
     PMAIN_ITEM_DATA MainItemData;
     PHID_PARSER_CONTEXT ParserContext;
+    ULONG CollectionDepth = 0;
+    ULONG GlobalStackDepth = 0;
+    SIZE_T Remaining;
 
     CurrentOffset = ReportDescriptor;
     ReportEnd = ReportDescriptor + ReportLength;
@@ -776,9 +927,11 @@ HidParser_ParseReportDescriptor(
     do
     {
         //
-        // get current item
+        // get current item; the loop condition guarantees at least the
+        // one-byte prefix is in range
         //
         CurrentItem = (PITEM_PREFIX)CurrentOffset;
+        Remaining = (SIZE_T)(ReportEnd - CurrentOffset);
 
         //
         // get item size
@@ -789,12 +942,33 @@ HidParser_ParseReportDescriptor(
         if (CurrentItem->Type == ITEM_TYPE_LONG)
         {
             //
+            // a long item carries a one-byte data size immediately after the
+            // prefix; it must be present before it can be read
+            //
+            if (Remaining < sizeof(ITEM_PREFIX) + 1)
+            {
+                Status = HIDP_STATUS_INTERNAL_ERROR;
+                goto ParseError;
+            }
+
+            //
             // increment item size with size of data item
             //
             CurrentLongItem = (PLONG_ITEM)CurrentItem;
             CurrentItemSize += CurrentLongItem->DataSize;
         }
-        else
+
+        //
+        // the whole item (prefix + value/payload bytes) must lie inside the
+        // descriptor; a truncated final item is rejected rather than read OOB
+        //
+        if (Remaining < (SIZE_T)sizeof(ITEM_PREFIX) + CurrentItemSize)
+        {
+            Status = HIDP_STATUS_INTERNAL_ERROR;
+            goto ParseError;
+        }
+
+        if (CurrentItem->Type != ITEM_TYPE_LONG)
         {
             //
             // get short item
@@ -867,34 +1041,60 @@ HidParser_ParseReportDescriptor(
                 if (CurrentItem->Tag == ITEM_TAG_MAIN_COLLECTION) {
 
                     //
+                    // bound nesting depth: the collection tree drives
+                    // recursion in the context builder, so a deeply nested
+                    // descriptor must not exhaust the kernel stack
+                    //
+                    if (CollectionDepth >= HID_MAX_COLLECTION_DEPTH)
+                    {
+                        Status = HIDP_STATUS_INTERNAL_ERROR;
+                        goto ParseError;
+                    }
+
+                    //
                     // allocate new collection
                     //
                     Status = HidParser_AllocateCollection(CurrentCollection, (UCHAR)Data, &ParserContext->LocalItemState, &NewCollection);
-                    ASSERT(Status == HIDP_STATUS_SUCCESS);
+                    if (Status != HIDP_STATUS_SUCCESS)
+                        goto ParseError;
 
                     //
                     // add new collection to current collection
                     //
                     Status = HidParser_AddCollection(CurrentCollection, NewCollection);
-                    ASSERT(Status == HIDP_STATUS_SUCCESS);
+                    if (Status != HIDP_STATUS_SUCCESS)
+                    {
+                        //
+                        // NewCollection is not yet linked into the tree, so
+                        // free it here before unwinding
+                        //
+                        HidParser_FreeCollectionTree(NewCollection);
+                        goto ParseError;
+                    }
 
                     //
                     // make new collection current
                     //
                     CurrentCollection = NewCollection;
+                    CollectionDepth++;
                 }
                 else if (CurrentItem->Tag == ITEM_TAG_MAIN_END_COLLECTION)
                 {
                     //
-                    // assert on ending the root collection
+                    // an End Collection without a matching Collection is
+                    // malformed; do not walk above the root
                     //
-                    ASSERT(CurrentCollection != ParserContext->RootCollection);
+                    if (CurrentCollection == ParserContext->RootCollection || CurrentCollection->Root == NULL)
+                    {
+                        Status = HIDP_STATUS_INTERNAL_ERROR;
+                        goto ParseError;
+                    }
 
                     //
                     // use parent of current collection
                     //
                     CurrentCollection = CurrentCollection->Root;
-                    ASSERT(CurrentCollection);
+                    CollectionDepth--;
                 }
                 else
                 {
@@ -915,7 +1115,6 @@ HidParser_ParseReportDescriptor(
 
                         default:
                             DebugFunction("[HIDPARSE] Unknown ReportType Tag %x Type %x Size %x CurrentItemSize %x\n", CurrentItem->Tag, CurrentItem->Type, CurrentItem->Size, CurrentItemSize);
-                            ASSERT(FALSE);
                             break;
                     }
 
@@ -923,10 +1122,20 @@ HidParser_ParseReportDescriptor(
                         break;
 
                     //
+                    // a main data item outside of any collection is malformed
+                    //
+                    if (CurrentCollection == ParserContext->RootCollection)
+                    {
+                        Status = HIDP_STATUS_INTERNAL_ERROR;
+                        goto ParseError;
+                    }
+
+                    //
                     // get report
                     //
                     Status = HidParser_GetReport(ParserContext, CurrentCollection, ReportType, ParserContext->GlobalItemState.ReportId, TRUE, &Report);
-                    ASSERT(Status == HIDP_STATUS_SUCCESS);
+                    if (Status != HIDP_STATUS_SUCCESS)
+                        goto ParseError;
 
                     // fill in a sensible default if the index isn't set
                     if (!ParserContext->LocalItemState.DesignatorIndexSet) {
@@ -946,7 +1155,8 @@ HidParser_ParseReportDescriptor(
                     // add states & data to the report
                     //
                     Status = HidParser_AddMainItem(ParserContext, Report, &ParserContext->GlobalItemState, &ParserContext->LocalItemState, MainItemData, CurrentCollection);
-                    ASSERT(Status == HIDP_STATUS_SUCCESS);
+                    if (Status != HIDP_STATUS_SUCCESS)
+                        goto ParseError;
                 }
 
                 //
@@ -1006,6 +1216,15 @@ HidParser_ParseReportDescriptor(
 
                     case ITEM_TAG_GLOBAL_REPORT_SIZE:
                         DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_SIZE %x\n", Data);
+                        //
+                        // a field is at most 32 bits wide; a larger value
+                        // cannot be represented and would break the field mask
+                        //
+                        if (Data > HID_MAX_REPORT_SIZE_BITS)
+                        {
+                            Status = HIDP_STATUS_INTERNAL_ERROR;
+                            goto ParseError;
+                        }
                         ParserContext->GlobalItemState.ReportSize = Data;
                         break;
 
@@ -1017,17 +1236,42 @@ HidParser_ParseReportDescriptor(
 
                     case ITEM_TAG_GLOBAL_REPORT_COUNT:
                         DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_COUNT %x\n", Data);
+                        //
+                        // bound the field count: this drives the per-report
+                        // item array allocation and the add loop
+                        //
+                        if (Data > HID_MAX_REPORT_COUNT)
+                        {
+                            Status = HIDP_STATUS_INTERNAL_ERROR;
+                            goto ParseError;
+                        }
                         ParserContext->GlobalItemState.ReportCount = Data;
                         break;
 
                     case ITEM_TAG_GLOBAL_PUSH:
                     {
                         DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_PUSH\n");
+
+                        //
+                        // bound the push stack: each Push allocates and links
+                        // a saved global state, so an unbounded run would
+                        // exhaust pool
+                        //
+                        if (GlobalStackDepth >= HID_MAX_GLOBAL_STACK_DEPTH)
+                        {
+                            Status = HIDP_STATUS_INTERNAL_ERROR;
+                            goto ParseError;
+                        }
+
                         //
                         // allocate global item state
                         //
                         LinkedGlobalItemState = (PGLOBAL_ITEM_STATE)AllocFunction(sizeof(GLOBAL_ITEM_STATE));
-                        ASSERT(LinkedGlobalItemState);
+                        if (LinkedGlobalItemState == NULL)
+                        {
+                            Status = HIDP_STATUS_INTERNAL_ERROR;
+                            goto ParseError;
+                        }
 
                         //
                         // copy global item state
@@ -1038,6 +1282,7 @@ HidParser_ParseReportDescriptor(
                         // store pushed item in link member
                         //
                         ParserContext->GlobalItemState.Next = (struct __GLOBAL_ITEM_STATE__*)LinkedGlobalItemState;
+                        GlobalStackDepth++;
                         break;
                     }
                     case ITEM_TAG_GLOBAL_POP:
@@ -1046,10 +1291,10 @@ HidParser_ParseReportDescriptor(
                         if (ParserContext->GlobalItemState.Next == NULL)
                         {
                             //
-                            // pop without push
+                            // pop without a matching push is malformed
                             //
-                            ASSERT(FALSE);
-                            break;
+                            Status = HIDP_STATUS_INTERNAL_ERROR;
+                            goto ParseError;
                         }
 
                         //
@@ -1066,14 +1311,14 @@ HidParser_ParseReportDescriptor(
                         // free item
                         //
                         FreeFunction(LinkedGlobalItemState);
+                        GlobalStackDepth--;
                         break;
                     }
 
                     default:
                         //
-                        // unknown  / unsupported tag
+                        // unknown / unsupported tag: ignore
                         //
-                        ASSERT(FALSE);
                         break;
                 }
 
@@ -1087,21 +1332,40 @@ HidParser_ParseReportDescriptor(
                     {
                         if (ParserContext->LocalItemState.UsageStackUsed >= ParserContext->LocalItemState.UsageStackAllocated)
                         {
+                            ULONG NewAllocated, NewStackBytes, OldStackBytes;
+
                             //
-                            // increment stack size
+                            // bound and grow the usage stack with checked
+                            // arithmetic; the old contents are preserved
                             //
-                            ParserContext->LocalItemState.UsageStackAllocated += 10;
+                            if (ParserContext->LocalItemState.UsageStackAllocated >= HID_MAX_USAGE_STACK)
+                            {
+                                Status = HIDP_STATUS_INTERNAL_ERROR;
+                                goto ParseError;
+                            }
+
+                            if (!NT_SUCCESS(HidParser_SizeAdd(ParserContext->LocalItemState.UsageStackAllocated, 10, &NewAllocated)) ||
+                                !NT_SUCCESS(HidParser_SizeMult(NewAllocated, sizeof(USAGE_VALUE), &NewStackBytes)) ||
+                                !NT_SUCCESS(HidParser_SizeMult(ParserContext->LocalItemState.UsageStackAllocated, sizeof(USAGE_VALUE), &OldStackBytes)))
+                            {
+                                Status = HIDP_STATUS_INTERNAL_ERROR;
+                                goto ParseError;
+                            }
 
                             //
                             // build new usage stack
                             //
-                            NewUsageStack = (PUSAGE_VALUE)AllocFunction(sizeof(USAGE_VALUE) * ParserContext->LocalItemState.UsageStackAllocated);
-                            ASSERT(NewUsageStack);
+                            NewUsageStack = (PUSAGE_VALUE)AllocFunction(NewStackBytes);
+                            if (NewUsageStack == NULL)
+                            {
+                                Status = HIDP_STATUS_INTERNAL_ERROR;
+                                goto ParseError;
+                            }
 
                             //
                             // copy old usage stack
                             //
-                            CopyFunction(NewUsageStack, ParserContext->LocalItemState.UsageStack, sizeof(USAGE_VALUE) * (ParserContext->LocalItemState.UsageStackAllocated - 10));
+                            CopyFunction(NewUsageStack, ParserContext->LocalItemState.UsageStack, OldStackBytes);
 
                             //
                             // free old usage stack
@@ -1112,6 +1376,7 @@ HidParser_ParseReportDescriptor(
                             // replace with new usage stack
                             //
                             ParserContext->LocalItemState.UsageStack = NewUsageStack;
+                            ParserContext->LocalItemState.UsageStackAllocated = NewAllocated;
                         }
 
                         //
@@ -1182,7 +1447,6 @@ HidParser_ParseReportDescriptor(
 
                     default:
                         DebugFunction("Unknown Local Item Tag %x\n", CurrentItem->Tag);
-                        ASSERT(FALSE);
                         break;
                 }
                 break;
@@ -1228,10 +1492,25 @@ HidParser_ParseReportDescriptor(
     }
 
     //
+    // the push chain is now empty; clear the head so a later teardown of the
+    // context does not walk freed states
+    //
+    ParserContext->GlobalItemState.Next = NULL;
+
+    //
     // free usage stack
     //
     FreeFunction(ParserContext->LocalItemState.UsageStack);
     ParserContext->LocalItemState.UsageStack = NULL;
+
+    //
+    // every opened collection must have been closed by an End Collection
+    //
+    if (CollectionDepth != 0 || CurrentCollection != ParserContext->RootCollection)
+    {
+        Status = HIDP_STATUS_INTERNAL_ERROR;
+        goto ParseErrorNoUsageStack;
+    }
 
     //
     // store result
@@ -1242,6 +1521,20 @@ HidParser_ParseReportDescriptor(
     // done
     //
     return HIDP_STATUS_SUCCESS;
+
+ParseError:
+    //
+    // free the usage stack here; the teardown frees everything else
+    //
+    FreeFunction(ParserContext->LocalItemState.UsageStack);
+    ParserContext->LocalItemState.UsageStack = NULL;
+
+ParseErrorNoUsageStack:
+    //
+    // tear down the whole scratch tree and the context, then report failure
+    //
+    HidParser_FreeContext(ParserContext);
+    return Status;
 }
 
 PHID_COLLECTION

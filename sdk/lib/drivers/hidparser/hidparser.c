@@ -10,6 +10,8 @@
 
 #include "parser.h"
 
+#include <ntintsafe.h>
+
 #define NDEBUG
 #include <debug.h>
 
@@ -24,6 +26,8 @@ HidParser_GetCollectionDescription(
     NTSTATUS ParserStatus;
     ULONG CollectionCount;
     ULONG Index;
+    ULONG AllocSize;
+    ULONG ContextSize;
     PVOID ParserContext;
 
     //
@@ -53,49 +57,76 @@ HidParser_GetCollectionDescription(
         //
         // no top level collections found
         //
-        ASSERT(FALSE);
+        HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
         return STATUS_NO_DATA_DETECTED;
     }
 
     //
-    // allocate collection
+    // allocate collection (overflow-checked)
     //
-    DeviceDescription->CollectionDesc = (PHIDP_COLLECTION_DESC)AllocFunction(sizeof(HIDP_COLLECTION_DESC) * CollectionCount);
+    if (!NT_SUCCESS(RtlULongMult(sizeof(HIDP_COLLECTION_DESC), CollectionCount, &AllocSize)))
+    {
+        HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DeviceDescription->CollectionDesc = (PHIDP_COLLECTION_DESC)AllocFunction(AllocSize);
     if (!DeviceDescription->CollectionDesc)
     {
         //
         // no memory
         //
+        HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     //
-    // allocate report description
+    // allocate report description (overflow-checked)
     //
-    DeviceDescription->ReportIDs = (PHIDP_REPORT_IDS)AllocFunction(sizeof(HIDP_REPORT_IDS) * CollectionCount);
+    if (!NT_SUCCESS(RtlULongMult(sizeof(HIDP_REPORT_IDS), CollectionCount, &AllocSize)))
+    {
+        FreeFunction(DeviceDescription->CollectionDesc);
+        DeviceDescription->CollectionDesc = NULL;
+        HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DeviceDescription->ReportIDs = (PHIDP_REPORT_IDS)AllocFunction(AllocSize);
     if (!DeviceDescription->ReportIDs)
     {
         //
         // no memory
         //
         FreeFunction(DeviceDescription->CollectionDesc);
+        DeviceDescription->CollectionDesc = NULL;
+        HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     for(Index = 0; Index < CollectionCount; Index++)
     {
         //
-        // set preparsed data length
+        // set preparsed data length; a zero size signals a size-arithmetic
+        // overflow in the context computation and is rejected
         //
-        DeviceDescription->CollectionDesc[Index].PreparsedDataLength = HidParser_GetContextSize(ParserContext, Index);
-        ParserStatus = HidParser_BuildContext(ParserContext, Index, DeviceDescription->CollectionDesc[Index].PreparsedDataLength, (PVOID*)&DeviceDescription->CollectionDesc[Index].PreparsedData);
+        ContextSize = HidParser_GetContextSize(ParserContext, Index);
+        if (ContextSize == 0)
+        {
+            DeviceDescription->CollectionDescLength = Index;
+            HidParser_FreeCollectionDescription(DeviceDescription);
+            HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
+            return HIDP_STATUS_INTERNAL_ERROR;
+        }
+        DeviceDescription->CollectionDesc[Index].PreparsedDataLength = ContextSize;
+        ParserStatus = HidParser_BuildContext(ParserContext, Index, ContextSize, (PVOID*)&DeviceDescription->CollectionDesc[Index].PreparsedData);
         if (ParserStatus != HIDP_STATUS_SUCCESS)
         {
             //
-            // no memory
+            // no memory; free everything built so far
             //
-            FreeFunction(DeviceDescription->CollectionDesc);
-            FreeFunction(DeviceDescription->ReportIDs);
+            DeviceDescription->CollectionDescLength = Index;
+            HidParser_FreeCollectionDescription(DeviceDescription);
+            HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
             return ParserStatus;
         }
 
@@ -125,9 +156,11 @@ HidParser_GetCollectionDescription(
         ParserStatus = HidParser_GetCollectionUsagePage((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, &DeviceDescription->CollectionDesc[Index].Usage, &DeviceDescription->CollectionDesc[Index].UsagePage);
         if (ParserStatus != HIDP_STATUS_SUCCESS)
         {
-            // collection not found
-            FreeFunction(DeviceDescription->CollectionDesc);
-            FreeFunction(DeviceDescription->ReportIDs);
+            // collection not found; the context for this index was built, so
+            // free it along with the ones before it
+            DeviceDescription->CollectionDescLength = Index + 1;
+            HidParser_FreeCollectionDescription(DeviceDescription);
+            HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
             return ParserStatus;
         }
 
@@ -155,6 +188,12 @@ HidParser_GetCollectionDescription(
     //
     DeviceDescription->CollectionDescLength = CollectionCount;
     DeviceDescription->ReportIDsLength = CollectionCount;
+
+    //
+    // the scratch parser tree is no longer needed; the per-collection
+    // preparsed contexts are self-contained copies
+    //
+    HidParser_FreeContext((PHID_PARSER_CONTEXT)ParserContext);
 
     //
     // done
