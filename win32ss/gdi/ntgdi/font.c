@@ -1362,12 +1362,12 @@ NtGdiGetFontRealizationInfo(
         return FALSE;
     }
 
+    /* The text object stays locked while the font is read, so the font cannot go away */
     pFontGdi = ObjToGDI(pTextObj->Font, FONT);
     LogFont = pTextObj->logfont.elfEnumLogfontEx.elfLogFont;
-    TEXTOBJ_UnlockText(pTextObj);
-
     RtlZeroMemory(&Fri, sizeof(Fri));
     ftGdiGetFontRealization(pFontGdi, &LogFont, &Fri);
+    TEXTOBJ_UnlockText(pTextObj);
     Fri.size = cbInfo;
 
     _SEH2_TRY
