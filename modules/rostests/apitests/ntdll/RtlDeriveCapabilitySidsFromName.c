@@ -31,6 +31,24 @@ static const struct
     { L"internetClient",             1, "55efaea5f957c2727688059fdad1e98fdb2167cafb715def284e7909a100fd2e" },
 };
 
+/* Name lengths around the SHA-256 padding (55 bytes of data fit one block) and block (64 bytes) boundaries; the name is
+ * the first N characters of "abcdefghijklmnopqrstuvwxyz0123456789" repeated. Expected hashes are Windows 10 22H2 output. */
+static const struct
+{
+    ULONG Length;
+    PCSTR Hash;
+} LengthCases[] =
+{
+    { 27, "54bbce1a67006e37ef858728f422a2d75830035f4951f069c338eda2dc2d3934" },
+    { 28, "d63416ba3653f7e0eed5ea33211e64c29f219728ae703928ae21bb1baeb73666" },
+    { 31, "d0ecd30128aaa678c3575614f69ee3730ab74ba6b745837a739e589f37979e00" },
+    { 32, "582ffe71cfdc8bbb0e9b7e046f84a0de080a9e49f0d17de09ebdd25f08679dd1" },
+    { 33, "1d6b184c509f695ea25340d2e840c3a2953c46928ec462bb3883b1da50c8c5de" },
+    { 63, "06c650dd20620dec87cdf038f2e5e92c274ada4ea45269f0b27bcfdc103650ba" },
+    { 64, "e9bc6122226a418a03f8d963a372d725a3c6876ad5ed43e84c0df638696fae0a" },
+    { 65, "1b02c23799c018832d988b1b48c7437c9f83892ca3ab0d1b741295c7010a6b16" },
+};
+
 static const PCWSTR WellKnownNames[] =
 {
     L"internetClient", L"internetClientServer", L"privateNetworkClientServer", L"picturesLibrary",
@@ -108,6 +126,29 @@ START_TEST(RtlDeriveCapabilitySidsFromName)
             ok(!memcmp(&Cap->SubAuthority[2], Hash, 32), "%ls: capability hash differs\n", Cases[i].Name);
         }
         CheckGroup(Cases[i].Name, Group, Hash);
+    }
+
+    /* Names whose UTF-16 length crosses the padding and block boundaries of the hash */
+    for (i = 0; i < RTL_NUMBER_OF(LengthCases); i++)
+    {
+        static const WCHAR Alphabet[] = L"abcdefghijklmnopqrstuvwxyz0123456789";
+        UNICODE_STRING Name;
+        UCHAR CapBuffer[SECURITY_MAX_SID_SIZE], GroupBuffer[SECURITY_MAX_SID_SIZE], Hash[32];
+        PISID Cap = (PISID)CapBuffer;
+        WCHAR Buffer[80];
+        ULONG j;
+        NTSTATUS Status;
+
+        for (j = 0; j < LengthCases[i].Length; j++)
+            Buffer[j] = Alphabet[j % 36];
+        Buffer[j] = UNICODE_NULL;
+        RtlInitUnicodeString(&Name, Buffer);
+        HexToBytes(LengthCases[i].Hash, Hash);
+        Status = pRtlDeriveCapabilitySidsFromName(&Name, GroupBuffer, CapBuffer);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok(Cap->SubAuthorityCount == 10, "%lu characters: %u sub-authorities\n", LengthCases[i].Length, Cap->SubAuthorityCount);
+        ok(!memcmp(&Cap->SubAuthority[2], Hash, 32), "%lu characters: capability hash differs\n", LengthCases[i].Length);
+        CheckGroup(Buffer, (PISID)GroupBuffer, Hash);
     }
 
     /* The twelve Windows 8 capabilities have fixed numbers, in any case */
