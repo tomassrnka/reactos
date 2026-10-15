@@ -60,6 +60,33 @@ extern MMSESSION MmSession;
 
 static LARGE_INTEGER TinyTime = {{-1L, -1L}};
 
+/* A demand page-in read can hit a transient backing-store failure: a disk that is
+   briefly slow, or that the storage stack reset and recovered under load. Windows
+   treats STATUS_IN_PAGE_ERROR as rare and retryable; the in-page path rides out a
+   retryable failure instead of letting it bugcheck the faulting thread
+   (STOP 0x7E / 0xC0000006 on kernel code). We do the same for section and image
+   page-ins: a small bounded number of retries with a short growing backoff, which
+   lets a transient slow or just-reset disk complete the read. */
+#define MI_MAX_INPAGE_RETRIES 3
+/* Backoff base in 100ns units; grows per attempt (30ms, 60ms, 90ms). */
+#define MI_INPAGE_RETRY_INTERVAL (30 * 10 * 1000)
+
+static
+BOOLEAN
+MiIsTransientInPageError(NTSTATUS Status)
+{
+    switch (Status)
+    {
+        case STATUS_IO_TIMEOUT:           /* SRB_STATUS_TIMEOUT / COMMAND_TIMEOUT */
+        case STATUS_IO_DEVICE_ERROR:      /* SRB_STATUS_BUS_RESET and generic device errors */
+        case STATUS_DEVICE_NOT_READY:
+        case STATUS_DEVICE_NOT_CONNECTED: /* SRB_STATUS_SELECTION_TIMEOUT during a reset */
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
 #ifndef NEWCC
 KEVENT MmWaitPageEvent;
 
@@ -1443,31 +1470,51 @@ MmMakeSegmentResident(
             }
 
             KEVENT Event;
-            KeInitializeEvent(&Event, NotificationEvent, FALSE);
-
-            /* Disable APCs */
             KIRQL OldIrql;
-            KeRaiseIrql(APC_LEVEL, &OldIrql);
-
             IO_STATUS_BLOCK Iosb;
-            Status = IoPageRead(FileObject, Mdl, &FileOffset, &Event, &Iosb);
-            if (Status == STATUS_PENDING)
-            {
-                KeWaitForSingleObject(&Event, WrPageIn, KernelMode, FALSE, NULL);
-                Status = Iosb.Status;
-            }
+            ULONG InPageAttempt = 0;
 
-            if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+            for (;;)
             {
-                MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
-            }
+                KeInitializeEvent(&Event, NotificationEvent, FALSE);
 
-            KeLowerIrql(OldIrql);
+                /* Disable APCs */
+                KeRaiseIrql(APC_LEVEL, &OldIrql);
 
-            if (Status == STATUS_END_OF_FILE)
-            {
-                DPRINT1("Got STATUS_END_OF_FILE at offset %I64d for file %wZ.\n", FileOffset.QuadPart, &FileObject->FileName);
-                Status = STATUS_SUCCESS;
+                Status = IoPageRead(FileObject, Mdl, &FileOffset, &Event, &Iosb);
+                if (Status == STATUS_PENDING)
+                {
+                    KeWaitForSingleObject(&Event, WrPageIn, KernelMode, FALSE, NULL);
+                    Status = Iosb.Status;
+                }
+
+                if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+                {
+                    MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+                }
+
+                KeLowerIrql(OldIrql);
+
+                if (Status == STATUS_END_OF_FILE)
+                {
+                    DPRINT1("Got STATUS_END_OF_FILE at offset %I64d for file %wZ.\n", FileOffset.QuadPart, &FileObject->FileName);
+                    Status = STATUS_SUCCESS;
+                }
+
+                /* Ride out a transient backing-store failure instead of bugchecking. */
+                if (!NT_SUCCESS(Status) &&
+                    MiIsTransientInPageError(Status) &&
+                    (InPageAttempt < MI_MAX_INPAGE_RETRIES))
+                {
+                    LARGE_INTEGER RetryDelay;
+                    InPageAttempt++;
+                    RetryDelay.QuadPart = -((LONGLONG)InPageAttempt * MI_INPAGE_RETRY_INTERVAL);
+                    DPRINT1("In-page read 0x%08lx, retry %lu for file %wZ.\n", Status, InPageAttempt, &FileObject->FileName);
+                    KeDelayExecutionThread(KernelMode, FALSE, &RetryDelay);
+                    continue;
+                }
+
+                break;
             }
 
             if (!NT_SUCCESS(Status))
