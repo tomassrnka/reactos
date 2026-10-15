@@ -217,20 +217,26 @@ GuiConsoleInputThread(PVOID Param)
             case PM_DESTROY_CONSOLE:
             {
                 PGUI_CONSOLE_DATA GuiData = (PGUI_CONSOLE_DATA)msg.lParam;
+#ifndef BUILD_WOW64_ENABLED
                 MSG TempMsg;
+#endif
 
                 /* Exit the full screen mode if it was already set */
                 // LeaveFullScreen(GuiData);
 
-                /*
-                 * Window creation is done using a PostMessage(), so it's possible
-                 * that the window that we want to destroy doesn't exist yet.
-                 * So first empty the message queue.
-                 */
+#ifdef BUILD_WOW64_ENABLED
+                /* Leave queued requests for this loop. DispatchMessage cannot
+                 * handle the PM_CREATE_CONSOLE/PM_DESTROY_CONSOLE thread
+                 * messages, and discarding one strands its waiting caller.
+                 * Creation has already completed before teardown is requested. */
+
+#else
+                /* Drain pending window messages before destroying the console. */
                 while (PeekMessageW(&TempMsg, NULL, 0, 0, PM_REMOVE))
                 {
                     DispatchMessageW(&TempMsg);
                 }
+#endif
 
                 if (GuiData->hWindow == NULL) continue;
 
