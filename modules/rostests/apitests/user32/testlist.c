@@ -84,6 +84,7 @@ extern void func_UnicodeToAnsiMessage(void);
 extern void func_UpdateLayeredWindow(void);
 extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
+extern void func_WinEventHook(void);
 extern void func_WmPrint(void);
 extern void func_WndProc(void);
 extern void func_wsprintfApi(void);
@@ -172,6 +173,7 @@ const struct test winetest_testlist[] =
     { "UpdateLayeredWindow", func_UpdateLayeredWindow },
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
     { "VirtualKey", func_VirtualKey },
+    { "WinEventHook", func_WinEventHook },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
     { "wsprintfApi", func_wsprintfApi },
