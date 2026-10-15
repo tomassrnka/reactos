@@ -8,6 +8,7 @@
 #include "precomp.h"
 #include <ndk/pstypes.h>
 #include <stdio.h>
+#include <pseh/pseh2.h>
 
 typedef ULONG (WINAPI *FN_TlsDynGetValue)(VOID);
 typedef VOID (WINAPI *FN_TlsDynSetValue)(ULONG);
@@ -15,6 +16,8 @@ typedef PCSTR (WINAPI *FN_TlsDynGetEvents)(VOID);
 typedef VOID (WINAPI *FN_TlsDynSetLog)(char *, LONG *);
 typedef ULONG (WINAPI *FN_TlsDynGetIndex)(VOID);
 typedef PVOID (WINAPI *FN_TlsDynGetTemplate)(VOID);
+typedef VOID (WINAPI *FN_TlsDynWatchFls)(DWORD);
+typedef PVOID (WINAPI *FN_TlsDynGetFlsAtDetach)(VOID);
 
 #define TEMPLATE_VALUE 0x5EEDF00D
 #define AFTER_UNLOAD_CODE 0x1234
@@ -256,6 +259,138 @@ Exit:
     HeapFree(GetProcessHeap(), 0, Data);
 }
 
+/*
+ * FLS callbacks of an exiting thread run while the thread still has its TLS:
+ * the C++ runtime destroys its thread_local objects from an FLS callback.
+ */
+#define FLS_DATA ((PVOID)(ULONG_PTR)0xF15DA7A)
+#define FLS_SLOT_COUNT 70
+#define FLS_IMPLICIT_VALUE 0xC0DE
+#define FLS_EXPLICIT_VALUE ((PVOID)(ULONG_PTR)0xE4B11C17)
+
+static char FlsLog[64];
+static LONG FlsLogCount;
+static DWORD FlsSlot[FLS_SLOT_COUNT];
+static DWORD FlsIndex;
+static ULONG FlsImplicit;
+static BOOL FlsImplicitFaulted;
+static PVOID FlsExplicit, FlsDataSeen, FlsOwnValue, FlsAtDetach;
+static LONG FlsCalls;
+
+static VOID FlsAddEvent(char Kind, DWORD Value)
+{
+    LONG i = InterlockedExchangeAdd(&FlsLogCount, 2);
+    if (i + 1 < (LONG)sizeof(FlsLog) - 1)
+    {
+        FlsLog[i] = Kind;
+        FlsLog[i + 1] = (char)('0' + Value);
+    }
+}
+
+static VOID NTAPI FlsCheckCallback(PVOID Data)
+{
+    FlsAddEvent('F', 0);
+    InterlockedIncrement(&FlsCalls);
+    FlsDataSeen = Data;
+    FlsOwnValue = FlsGetValue(FlsIndex);
+    _SEH2_TRY
+    {
+        FlsImplicit = pTlsDynGetValue();
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        FlsImplicitFaulted = TRUE;
+    }
+    _SEH2_END;
+    FlsExplicit = TlsGetValue(FlsSlot[FLS_SLOT_COUNT - 1]);
+}
+
+static DWORD WINAPI FlsCheckThread(LPVOID Parameter)
+{
+    pTlsDynSetValue(FLS_IMPLICIT_VALUE);
+    TlsSetValue(FlsSlot[FLS_SLOT_COUNT - 1], FLS_EXPLICIT_VALUE);
+    FlsSetValue(FlsIndex, FLS_DATA);
+    return 0;
+}
+
+static VOID TestFlsAtThreadExit(VOID)
+{
+    FN_TlsDynSetLog pSetLog;
+    FN_TlsDynWatchFls pWatchFls;
+    FN_TlsDynGetFlsAtDetach pGetFlsAtDetach;
+    HMODULE hDll;
+    HANDLE hThread;
+    ULONG i, Allocated = 0;
+    DWORD Wait;
+
+    hDll = LoadTlsDll();
+    if (!hDll)
+        return;
+    pSetLog = (FN_TlsDynSetLog)GetProcAddress(hDll, "TlsDynSetLog");
+    pWatchFls = (FN_TlsDynWatchFls)GetProcAddress(hDll, "TlsDynWatchFls");
+    pGetFlsAtDetach = (FN_TlsDynGetFlsAtDetach)GetProcAddress(hDll, "TlsDynGetFlsAtDetach");
+    if (!pSetLog || !pWatchFls || !pGetFlsAtDetach)
+    {
+        ok(0, "Exports missing\n");
+        goto Done;
+    }
+
+    /* The last slot is above the 64 that live in the TEB */
+    for (i = 0; i < FLS_SLOT_COUNT; i++)
+    {
+        FlsSlot[i] = TlsAlloc();
+        if (FlsSlot[i] == TLS_OUT_OF_INDEXES)
+            break;
+        Allocated++;
+    }
+    ok(Allocated == FLS_SLOT_COUNT, "Only %lu TLS slots were allocated\n", Allocated);
+    FlsIndex = FlsAlloc(FlsCheckCallback);
+    ok(FlsIndex != FLS_OUT_OF_INDEXES, "FlsAlloc failed: %lu\n", GetLastError());
+    if (Allocated != FLS_SLOT_COUNT || FlsIndex == FLS_OUT_OF_INDEXES)
+        goto Free;
+    ok(FlsSlot[FLS_SLOT_COUNT - 1] >= TLS_MINIMUM_AVAILABLE, "The slot %lu is in the TEB\n", FlsSlot[FLS_SLOT_COUNT - 1]);
+
+    FlsLogCount = 0;
+    ZeroMemory(FlsLog, sizeof(FlsLog));
+    pSetLog(FlsLog, &FlsLogCount);
+    pWatchFls(FlsIndex);
+    FlsCalls = 0;
+    FlsImplicitFaulted = FALSE;
+    FlsImplicit = 0;
+    FlsExplicit = FlsDataSeen = FlsOwnValue = (PVOID)(ULONG_PTR)1;
+
+    hThread = CreateThread(NULL, 0, FlsCheckThread, NULL, 0, NULL);
+    ok(hThread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (hThread)
+    {
+        Wait = WaitForSingleObject(hThread, 10000);
+        ok(Wait == WAIT_OBJECT_0, "The thread did not finish: %lu\n", Wait);
+        CloseHandle(hThread);
+    }
+
+    FlsAtDetach = pGetFlsAtDetach();
+    trace("FLS callback at thread exit: log '%s', calls %ld, implicit 0x%lx faulted %d, explicit %p, data %p, own value %p, at detach %p\n",
+          FlsLog, FlsCalls, FlsImplicit, FlsImplicitFaulted, FlsExplicit, FlsDataSeen, FlsOwnValue, FlsAtDetach);
+    ok(FlsCalls == 1, "FLS callback ran %ld times\n", FlsCalls);
+    ok(FlsDataSeen == FLS_DATA, "FLS data %p\n", FlsDataSeen);
+    ok(!FlsImplicitFaulted, "The FLS callback could not read the thread's implicit TLS\n");
+    ok(FlsImplicit == FLS_IMPLICIT_VALUE, "Implicit TLS in the FLS callback: 0x%lx\n", FlsImplicit);
+    ok(FlsExplicit == FLS_EXPLICIT_VALUE, "Explicit TLS slot above 64 in the FLS callback: %p\n", FlsExplicit);
+    ok(FlsOwnValue == FLS_DATA, "FlsGetValue in the FLS callback: %p\n", FlsOwnValue);
+    /* The callback comes before the DLL thread notifications: T3 is the TLS callback, M3 DllMain */
+    ok(!strcmp(FlsLog, "T2M2F0T3M3"), "Events at thread exit: '%s'\n", FlsLog);
+    /* The value is gone once its callback ran: DllMain finds the slot empty */
+    ok(FlsAtDetach == NULL, "FlsGetValue in DLL_THREAD_DETACH: %p\n", FlsAtDetach);
+
+Free:
+    for (i = 0; i < Allocated; i++)
+        TlsFree(FlsSlot[i]);
+    if (FlsIndex != FLS_OUT_OF_INDEXES)
+        FlsFree(FlsIndex);
+Done:
+    FreeLibrary(hDll);
+}
+
 START_TEST(DynamicTls)
 {
     FN_TlsDynGetEvents pTlsDynGetEvents;
@@ -340,6 +475,8 @@ START_TEST(DynamicTls)
     ok(WorkerGet() == 0x0E0E, "Thread started before the first load, after a reload and a set\n");
     ok(pTlsDynGetValue() == TEMPLATE_VALUE, "The other thread's set changed this thread's copy: 0x%lx\n", pTlsDynGetValue());
     ok(FreeLibrary(hDll), "FreeLibrary failed: %lu\n", GetLastError());
+
+    TestFlsAtThreadExit();
 
     /* Failures */
     TestProtectedTemplate(argv[0]);
