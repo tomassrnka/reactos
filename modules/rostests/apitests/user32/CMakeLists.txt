@@ -40,6 +40,7 @@ list(APPEND SOURCE
     IsWindowArranged.c
     KbdLayout.c
     keybd_event.c
+    MouseWheel.c
     LoadImage.c
     LoadImageGCC.c
     LoadImagePngIcon.c
