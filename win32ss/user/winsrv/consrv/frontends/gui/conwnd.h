@@ -21,6 +21,16 @@
 #define PM_CONSOLE_BEEP         (WM_APP + 4)
 #define PM_CONSOLE_SET_TITLE    (WM_APP + 5)
 
+/* GUI_CONSOLE_DATA.PendingWork */
+#define GUI_WORK_UPDATE         0x0001  /* Dirty cells, view or caret */
+#define GUI_WORK_RESIZE         0x0002  /* Rebuild the framebuffer and resize the window */
+#define GUI_WORK_TITLE          0x0004
+#define GUI_WORK_CURSOR         0x0008  /* Mouse cursor shape or visibility */
+#define GUI_WORK_BEEP           0x0010
+#define GUI_WORK_LEADER         0x0020  /* Console leader process changed */
+#define GUI_WORK_DISPLAY_MODE   0x0040  /* Switch to RequestedFullScreen */
+#define GUI_WORK_CLOSE_MENU     0x0080  /* Enable or gray the Close menu item */
+
 /* Flags for GetKeyState */
 #define KEY_TOGGLED 0x0001
 #define KEY_PRESSED 0x8000
@@ -53,6 +63,26 @@ typedef struct _GUI_CONSOLE_DATA
     BOOLEAN IsWindowActive;
 
     POINT OldCursor;
+
+    /*
+     * Work for the window thread (see "Locking" in guiterm.c). Writers and the
+     * frontend callbacks record it here and set hWakeEvent; they never call
+     * USER. The dirty state, ShowCaret and RequestedFullScreen are protected
+     * by the console lock; PendingWork is updated with interlocked operations.
+     */
+    SMALL_RECT DirtyRegion;     /* In screen buffer coordinates, valid if DirtyCells */
+    BOOLEAN DirtyCells;
+    BOOLEAN DirtyView;          /* The whole view needs repainting */
+    BOOLEAN ShowCaret;          /* Output moved the caret: show it, restart the blink */
+    BOOLEAN InitEventSet;       /* hGuiInitEvent was set (window thread only) */
+    LONG PendingWork;           /* GUI_WORK_* */
+    BOOL RequestedFullScreen;   /* For GUI_WORK_DISPLAY_MODE */
+    LONG DisplayModeRequest;    /* Number of the last display mode request */
+    LONG DisplayModeDone;       /* Number of the last one the window thread handled */
+    HANDLE hDisplayModeEvent;   /* Set when DisplayModeDone changes */
+    HANDLE hWakeEvent;          /* The input thread's wake event, set by PM_CREATE_CONSOLE */
+    LIST_ENTRY InputThreadLink; /* In the input thread's window list (that thread only) */
+    DWORD BlinkRestartTick;     /* When the blink timer was last (re)started (window thread only) */
 
     LONG_PTR WndStyle;
     LONG_PTR WndStyleEx;

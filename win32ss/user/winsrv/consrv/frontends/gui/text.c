@@ -36,7 +36,7 @@ PaletteRGBFromAttrib(PCONSRV_CONSOLE Console, WORD Attribute)
     return PALETTERGB(pe.peRed, pe.peGreen, pe.peBlue);
 }
 
-static VOID
+static HANDLE
 CopyBlock(PTEXTMODE_SCREEN_BUFFER Buffer,
           PSMALL_RECT Selection)
 {
@@ -58,7 +58,7 @@ CopyBlock(PTEXTMODE_SCREEN_BUFFER Buffer,
 
     /* Prevent against empty blocks */
     if ((Selection == NULL) || ConioIsRectEmpty(Selection))
-        return;
+        return NULL;
 
     selWidth  = ConioRectWidth(Selection);
     selHeight = ConioRectHeight(Selection);
@@ -84,13 +84,13 @@ CopyBlock(PTEXTMODE_SCREEN_BUFFER Buffer,
 
     /* Allocate some memory area to be given to the clipboard, so it will not be freed here */
     hData = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, size);
-    if (hData == NULL) return;
+    if (hData == NULL) return NULL;
 
     data = GlobalLock(hData);
     if (data == NULL)
     {
         GlobalFree(hData);
-        return;
+        return NULL;
     }
 
     DPRINT("Copying %dx%d selection\n", selWidth, selHeight);
@@ -139,14 +139,12 @@ CopyBlock(PTEXTMODE_SCREEN_BUFFER Buffer,
         }
     }
 
-    DPRINT("Setting data <%S> to clipboard\n", data);
+    DPRINT("Copied <%S>\n", data);
     GlobalUnlock(hData);
-
-    EmptyClipboard();
-    SetClipboardData(CF_UNICODETEXT, hData);
+    return hData;
 }
 
-static VOID
+static HANDLE
 CopyLines(PTEXTMODE_SCREEN_BUFFER Buffer,
           PCOORD Begin,
           PCOORD End)
@@ -161,9 +159,9 @@ CopyLines(PTEXTMODE_SCREEN_BUFFER Buffer,
            Begin->X, Begin->Y, End->X, End->Y);
 
     /* Prevent against empty blocks... */
-    if (Begin == NULL || End == NULL) return;
+    if (Begin == NULL || End == NULL) return NULL;
     /* ... or malformed blocks */
-    if (Begin->Y > End->Y || (Begin->Y == End->Y && Begin->X > End->X)) return;
+    if (Begin->Y > End->Y || (Begin->Y == End->Y && Begin->X > End->X)) return NULL;
 
     /* Compute the number of characters to copy */
     if (End->Y == Begin->Y) // top == bottom
@@ -186,13 +184,13 @@ CopyLines(PTEXTMODE_SCREEN_BUFFER Buffer,
 
     /* Allocate some memory area to be given to the clipboard, so it will not be freed here */
     hData = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, size);
-    if (hData == NULL) return;
+    if (hData == NULL) return NULL;
 
     data = GlobalLock(hData);
     if (data == NULL)
     {
         GlobalFree(hData);
-        return;
+        return NULL;
     }
 
     DPRINT("Copying %d characters\n", NumChars);
@@ -226,11 +224,9 @@ CopyLines(PTEXTMODE_SCREEN_BUFFER Buffer,
         }
     }
 
-    DPRINT("Setting data <%S> to clipboard\n", data);
+    DPRINT("Copied <%S>\n", data);
     GlobalUnlock(hData);
-
-    EmptyClipboard();
-    SetClipboardData(CF_UNICODETEXT, hData);
+    return hData;
 }
 
 
@@ -302,14 +298,14 @@ GetSelectionBeginEnd(PCOORD Begin, PCOORD End,
                      PCOORD SelectionAnchor,
                      PSMALL_RECT SmallRect);
 
-VOID
+/*
+ * The selected text as CF_UNICODETEXT data for the clipboard, or NULL.
+ * The console must be locked; the clipboard is not touched.
+ */
+HANDLE
 GuiCopyFromTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                           PGUI_CONSOLE_DATA GuiData)
 {
-    /*
-     * This function supposes that the system clipboard was opened.
-     */
-
     BOOL LineSelection = GuiData->LineSelection;
 
     DPRINT("Selection is (%d|%d) to (%d|%d) in %s mode\n",
@@ -321,7 +317,7 @@ GuiCopyFromTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
 
     if (!LineSelection)
     {
-        CopyBlock(Buffer, &GuiData->Selection.srSelection);
+        return CopyBlock(Buffer, &GuiData->Selection.srSelection);
     }
     else
     {
@@ -331,34 +327,10 @@ GuiCopyFromTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                              &GuiData->Selection.dwSelectionAnchor,
                              &GuiData->Selection.srSelection);
 
-        CopyLines(Buffer, &Begin, &End);
+        return CopyLines(Buffer, &Begin, &End);
     }
 }
 
-VOID
-GuiPasteToTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
-                         PGUI_CONSOLE_DATA GuiData)
-{
-    /*
-     * This function supposes that the system clipboard was opened.
-     */
-
-    PCONSRV_CONSOLE Console = (PCONSRV_CONSOLE)Buffer->Header.Console;
-
-    HANDLE hData;
-    LPWSTR pszText;
-
-    hData = GetClipboardData(CF_UNICODETEXT);
-    if (hData == NULL) return;
-
-    pszText = GlobalLock(hData);
-    if (pszText == NULL) return;
-
-    DPRINT("Got data <%S> from clipboard\n", pszText);
-    PasteText(Console, pszText, wcslen(pszText));
-
-    GlobalUnlock(hData);
-}
 
 static VOID
 GuiPaintCaret(
@@ -429,7 +401,8 @@ GuiPaintCaret(
     }
 }
 
-VOID
+/* Compose the framebuffer. The console must be locked. */
+BOOL
 GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                        PGUI_CONSOLE_DATA GuiData,
                        PRECT rcView,
@@ -449,10 +422,7 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
     ConioInitLongRect(rcFramebuffer, 0, 0, 0, 0);
 
     if (Buffer->Buffer == NULL)
-        return;
-
-    if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE))
-        return;
+        return FALSE;
 
     ConioInitLongRect(rcFramebuffer,
                       Buffer->ViewOrigin.Y * GuiData->CharHeight + rcView->top,
@@ -571,7 +541,7 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
     /* Draw the caret */
     GuiPaintCaret(Buffer, GuiData, TopLine, BottomLine, LeftColumn, RightColumn);
 
-    LeaveCriticalSection(&Console->Lock);
+    return TRUE;
 }
 
 /* EOF */
