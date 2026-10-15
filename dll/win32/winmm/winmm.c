@@ -169,21 +169,14 @@ BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD fdwReason, LPVOID fImpLoad)
 	}
 	break;
     case DLL_PROCESS_DETACH:
-        /* close all opened MCI drivers */
-        MCI_SendCommand(MCI_ALL_DEVICE_ID, MCI_CLOSE, MCI_WAIT, 0L);
+        /* Closing MCI devices and shutting the drivers down run driver code, wait for threads and unload DLLs, which
+           must not happen with the loader lock held; the process exit and FreeLibrary leave that to the system. */
+        if (fImpLoad)
+            break;
         MMDRV_Exit();
-        /* There's no guarantee the drivers haven't already been unloaded on
-         * process shutdown.
-         */
-        if (!fImpLoad)
-        {
-            /* now unload all remaining drivers... */
-            DRIVER_UnloadAll();
-            TIME_ReleaseResolution();
-        }
-
-	WINMM_DeleteIData();
-	break;
+        TIME_ReleaseResolution();
+        WINMM_DeleteIData();
+        break;
     }
     return TRUE;
 }
