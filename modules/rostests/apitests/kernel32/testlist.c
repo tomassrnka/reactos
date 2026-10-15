@@ -59,6 +59,7 @@ extern void func_HandleList(void);
 extern void func_HeapWalk(void);
 extern void func_IdleProcessor(void);
 extern void func_InitOnce(void);
+extern void func_KernelBaseTime(void);
 extern void func_interlck(void);
 extern void func_IsApiSetImplemented(void);
 extern void func_IsDBCSLeadByteEx(void);
@@ -181,6 +182,7 @@ const struct test winetest_testlist[] =
     { "HeapWalk",                    func_HeapWalk },
     { "IdleProcessor",               func_IdleProcessor },
     { "InitOnce",                    func_InitOnce },
+    { "KernelBaseTime",              func_KernelBaseTime },
     { "interlck",                    func_interlck },
     { "IsApiSetImplemented",         func_IsApiSetImplemented },
     { "IsDBCSLeadByteEx",            func_IsDBCSLeadByteEx },
