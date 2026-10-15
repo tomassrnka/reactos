@@ -564,8 +564,14 @@ ConDllInitialize(IN ULONG Reason,
         }
         else if (Reason == DLL_PROCESS_DETACH)
         {
-            /* ConsoleLock stays valid: a control thread may be waiting for it as the process exits */
+            /*
+             * ConsoleLock stays valid: a control thread may be waiting for it as the process exits.
+             * Clear the flag under the lock so an in-flight dispatcher either finishes its handler
+             * (we wait for the lock) or, if it has not yet entered, is refused when it rechecks.
+             */
+            RtlEnterCriticalSection(&ConsoleLock);
             ConsoleInitialized = FALSE;
+            RtlLeaveCriticalSection(&ConsoleLock);
         }
 
         return TRUE;

@@ -97,7 +97,7 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
     DPRINT1("Console Dispatcher Active: %lx %lx\n", CodeAndFlag, nCode);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
-    /* kernel32 has detached: the process is exiting */
+    /* Fast path; the authoritative admission check is made under ConsoleLock below */
     if (!ConsoleInitialized) ExitThread(0);
 
     switch(nCode)
@@ -121,6 +121,13 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
                     RtlEnterCriticalSection(&ConsoleLock);
+
+                    /* Admission is decided under the lock that detach clears the flag under */
+                    if (!ConsoleInitialized)
+                    {
+                        RtlLeaveCriticalSection(&ConsoleLock);
+                        ExitThread(0);
+                    }
 
                     if ((nCode != CTRL_C_EVENT) ||
                         (NtCurrentPeb()->ProcessParameters->ConsoleFlags != 1))
@@ -165,6 +172,13 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
     }
 
     RtlEnterCriticalSection(&ConsoleLock);
+
+    /* Admission is decided under the lock that detach clears the flag under */
+    if (!ConsoleInitialized)
+    {
+        RtlLeaveCriticalSection(&ConsoleLock);
+        ExitThread(0);
+    }
 
     nExitCode = 0;
     if ((nCode != CTRL_C_EVENT) || (NtCurrentPeb()->ProcessParameters->ConsoleFlags != 1))
