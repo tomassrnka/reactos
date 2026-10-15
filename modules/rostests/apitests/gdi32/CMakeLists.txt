@@ -48,6 +48,7 @@ list(APPEND SOURCE
     GetCurrentObject.c
     GetDIBColorTable.c
     GetDIBits.c
+    GetFontFileInfo.c
     GetFontResourceInfoW.c
     GetGlyphIndices.c
     GetGlyphOutline.c

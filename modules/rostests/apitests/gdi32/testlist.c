@@ -47,6 +47,7 @@ extern void func_GetClipRgn(void);
 extern void func_GetCurrentObject(void);
 extern void func_GetDIBColorTable(void);
 extern void func_GetDIBits(void);
+extern void func_GetFontFileInfo(void);
 extern void func_GetFontResourceInfoW(void);
 extern void func_GetGlyphIndices(void);
 extern void func_GetGlyphOutline(void);
@@ -131,6 +132,7 @@ const struct test winetest_testlist[] =
     { "GetCurrentObject", func_GetCurrentObject },
     { "GetDIBColorTable", func_GetDIBColorTable },
     { "GetDIBits", func_GetDIBits },
+    { "GetFontFileInfo", func_GetFontFileInfo },
     { "GetFontResourceInfoW", func_GetFontResourceInfoW },
     { "GetGlyphIndices", func_GetGlyphIndices },
     { "GetGlyphOutline", func_GetGlyphOutline },
