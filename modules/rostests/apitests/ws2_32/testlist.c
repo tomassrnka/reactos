@@ -8,6 +8,7 @@ extern void func_backlog(void);
 extern void func_backlog_listen(void);
 extern void func_backlog_open(void);
 extern void func_backlog_replace(void);
+extern void func_bigsend(void);
 extern void func_bind(void);
 extern void func_broadcast(void);
 extern void func_close(void);
@@ -48,6 +49,7 @@ const struct test winetest_testlist[] =
     { "backlog_listen", func_backlog_listen },
     { "backlog_open", func_backlog_open },
     { "backlog_replace", func_backlog_replace },
+    { "bigsend", func_bigsend },
     { "bind", func_bind },
     { "broadcast", func_broadcast },
     { "close", func_close },
