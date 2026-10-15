@@ -6,6 +6,7 @@ extern void func_AddFontMemResourceEx(void);
 extern void func_AddFontResource(void);
 extern void func_AddFontResourceEx(void);
 extern void func_BeginPath(void);
+extern void func_BitBltPointer(void);
 extern void func_CombineRgn(void);
 extern void func_CombineTransform(void);
 extern void func_CreateBitmap(void);
@@ -91,6 +92,7 @@ const struct test winetest_testlist[] =
     { "AddFontResource", func_AddFontResource },
     { "AddFontResourceEx", func_AddFontResourceEx },
     { "BeginPath", func_BeginPath },
+    { "BitBltPointer", func_BitBltPointer },
     { "CombineRgn", func_CombineRgn },
     { "CombineTransform", func_CombineTransform },
     { "CreateBitmap", func_CreateBitmap },
