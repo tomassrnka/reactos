@@ -69,6 +69,7 @@ list(APPEND SOURCE
     NtCreateKey.c
     NtCreateProfile.c
     NtCreateSectionImage.c
+    NtCreateSectionSize.c
     NtCreateThread.c
     NtDeleteKey.c
     NtDuplicateObject.c

@@ -233,6 +233,7 @@ typedef struct _MM_IMAGE_SECTION_OBJECT
     ULONG SegFlags;
 
     SECTION_IMAGE_INFORMATION ImageInformation;
+    ULONG SizeOfImage; /* from the optional header; ImageInformation.ImageFileSize changes at mapping */
     PVOID BasedAddress;
     ULONG NrSegments;
     PMM_SECTION_SEGMENT Segments;
