@@ -61,6 +61,7 @@ extern void func_NtCreateThread(void);
 extern void func_NtDeleteKey(void);
 extern void func_NtDuplicateObject(void);
 extern void func_NtDuplicateToken(void);
+extern void func_NtExtendSection(void);
 extern void func_NtFilterToken(void);
 extern void func_NtFreeVirtualMemory(void);
 extern void func_NtImpersonateAnonymousToken(void);
@@ -244,6 +245,7 @@ const struct test winetest_testlist[] =
     { "NtDeleteKey",                    func_NtDeleteKey },
     { "NtDuplicateObject",              func_NtDuplicateObject },
     { "NtDuplicateToken",               func_NtDuplicateToken },
+    { "NtExtendSection",                func_NtExtendSection },
     { "NtFilterToken",                  func_NtFilterToken },
     { "NtFreeVirtualMemory",            func_NtFreeVirtualMemory },
     { "NtImpersonateAnonymousToken",    func_NtImpersonateAnonymousToken },
