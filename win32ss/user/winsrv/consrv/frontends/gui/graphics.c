@@ -120,22 +120,17 @@ GuiPasteToGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
     UNIMPLEMENTED;
 }
 
-VOID
+/* Compose the framebuffer. The console must be locked. */
+BOOL
 GuiPaintGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
                        PGUI_CONSOLE_DATA GuiData,
                        PRECT rcView,
                        PRECT rcFramebuffer)
 {
-    PCONSRV_CONSOLE Console = (PCONSRV_CONSOLE)Buffer->Header.Console;
-    // ASSERT(Console == GuiData->Console);
-
     ConioInitLongRect(rcFramebuffer, 0, 0, 0, 0);
 
     if (Buffer->BitMap == NULL)
-        return;
-
-    if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE))
-        return;
+        return FALSE;
 
     ConioInitLongRect(rcFramebuffer,
                       Buffer->ViewOrigin.Y * 1 + rcView->top,
@@ -169,7 +164,7 @@ GuiPaintGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
     /* Release the mutex */
     NtReleaseMutant(Buffer->Mutex, NULL);
 
-    LeaveCriticalSection(&Console->Lock);
+    return TRUE;
 }
 
 /* EOF */

@@ -429,7 +429,8 @@ GuiPaintCaret(
     }
 }
 
-VOID
+/* Compose the framebuffer. The console must be locked. */
+BOOL
 GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                        PGUI_CONSOLE_DATA GuiData,
                        PRECT rcView,
@@ -449,10 +450,7 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
     ConioInitLongRect(rcFramebuffer, 0, 0, 0, 0);
 
     if (Buffer->Buffer == NULL)
-        return;
-
-    if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE))
-        return;
+        return FALSE;
 
     ConioInitLongRect(rcFramebuffer,
                       Buffer->ViewOrigin.Y * GuiData->CharHeight + rcView->top,
@@ -571,7 +569,7 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
     /* Draw the caret */
     GuiPaintCaret(Buffer, GuiData, TopLine, BottomLine, LeftColumn, RightColumn);
 
-    LeaveCriticalSection(&Console->Lock);
+    return TRUE;
 }
 
 /* EOF */
