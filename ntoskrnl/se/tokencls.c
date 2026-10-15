@@ -56,27 +56,21 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     /* TokenOrigin */
     IQS_SAME(TOKEN_ORIGIN, ULONG, ICIF_QUERY | ICIF_SET),
     /* TokenElevationType */
-    IQS_SAME(TOKEN_ELEVATION_TYPE, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
-    /* TokenLinkedToken (the length must match exactly; checked by the query) */
-    IQS_SAME(TOKEN_LINKED_TOKEN, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
-    /* TokenElevation (the length must match exactly; checked by the query) */
-    IQS_SAME(TOKEN_ELEVATION, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    IQS_NONE,
+    /* TokenLinkedToken */
+    IQS_NONE,
+    /* TokenElevation */
+    IQS_NONE,
     /* TokenHasRestrictions */
     IQS_NONE,
     /* TokenAccessInformation */
     IQS_NONE,
     /* TokenVirtualizationAllowed */
-    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    IQS_NONE,
     /* TokenVirtualizationEnabled */
-    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE | ICIF_SET),
+    IQS_NONE,
     /* TokenIntegrityLevel */
     IQS_SAME(TOKEN_MANDATORY_LABEL, ULONG, ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE),
-    /* TokenUIAccess */
-    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE | ICIF_SET),
-    /* TokenMandatoryPolicy */
-    IQS_NONE,
-    /* TokenLogonSid */
-    IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
 
 /* PUBLIC FUNCTIONS *****************************************************************/
@@ -448,57 +442,6 @@ SeQueryInformationToken(
     SepReleaseTokenLock(Token);
 
     return Status;
-}
-
-/*
- * TokenElevation without UAC, as measured on Windows 7 (Server 2008 R2) with
- * UAC off: a token is elevated when the administrators group is in it and not
- * for deny only, or when it holds one of the privileges below, enabled or not.
- * Other groups, the user (LocalSystem and the service accounts included), the
- * other privileges and the integrity level do not count. (Windows 10 also keeps
- * restricted copies of an administrator's logon token elevated.)
- */
-static const ULONG SepElevatingPrivileges[] =
-{
-    SE_CREATE_TOKEN_PRIVILEGE,
-    SE_TCB_PRIVILEGE,
-    SE_TAKE_OWNERSHIP_PRIVILEGE,
-    SE_LOAD_DRIVER_PRIVILEGE,
-    SE_BACKUP_PRIVILEGE,
-    SE_RESTORE_PRIVILEGE,
-    SE_DEBUG_PRIVILEGE,
-    SE_IMPERSONATE_PRIVILEGE,
-    SE_RELABEL_PRIVILEGE,
-};
-
-static
-ULONG
-SepIsTokenElevated(
-    _In_ PTOKEN Token)
-{
-    ULONG i, j;
-
-    for (i = 1; i < Token->UserAndGroupCount; i++)
-    {
-        if (!(Token->UserAndGroups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) &&
-            RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
-        {
-            return TRUE;
-        }
-    }
-
-    for (i = 0; i < Token->PrivilegeCount; i++)
-    {
-        if (Token->Privileges[i].Luid.HighPart != 0)
-            continue;
-        for (j = 0; j < RTL_NUMBER_OF(SepElevatingPrivileges); j++)
-        {
-            if (Token->Privileges[i].Luid.LowPart == SepElevatingPrivileges[j])
-                return TRUE;
-        }
-    }
-
-    return FALSE;
 }
 
 /* SYSTEM CALLS ***************************************************************/
@@ -1179,156 +1122,6 @@ NtQueryInformationToken(
                 break;
             }
 
-            /*
-             * NT 6 classes. There is no UAC: no token is split into a filtered
-             * and a full one, so every token has the default elevation type and
-             * no linked token. UI access and virtualization are token flags.
-             */
-            case TokenElevationType:
-            case TokenVirtualizationAllowed:
-            case TokenVirtualizationEnabled:
-            case TokenUIAccess:
-            {
-                ULONG Value;
-
-                DPRINT("NtQueryInformationToken(%d)\n", TokenInformationClass);
-                if (TokenInformationClass == TokenElevationType)
-                    Value = TokenElevationTypeDefault;
-                else if (TokenInformationClass == TokenVirtualizationAllowed)
-                    Value = !!(Token->TokenFlags & TOKEN_VIRTUALIZE_ALLOWED);
-                else if (TokenInformationClass == TokenVirtualizationEnabled)
-                    Value = !!(Token->TokenFlags & TOKEN_VIRTUALIZE_ENABLED);
-                else
-                    Value = !!(Token->TokenFlags & TOKEN_UIACCESS);
-                RequiredLength = sizeof(ULONG);
-
-                _SEH2_TRY
-                {
-                    if (TokenInformationLength >= RequiredLength)
-                        *(PULONG)TokenInformation = Value;
-                    else
-                        Status = STATUS_BUFFER_TOO_SMALL;
-
-                    *ReturnLength = RequiredLength;
-                }
-                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    Status = _SEH2_GetExceptionCode();
-                }
-                _SEH2_END;
-
-                break;
-            }
-
-            case TokenElevation:
-            {
-                ULONG IsElevated;
-
-                DPRINT("NtQueryInformationToken(TokenElevation)\n");
-                RequiredLength = sizeof(TOKEN_ELEVATION);
-                IsElevated = SepIsTokenElevated(Token);
-
-                _SEH2_TRY
-                {
-                    if (TokenInformationLength == RequiredLength)
-                        ((PTOKEN_ELEVATION)TokenInformation)->TokenIsElevated = IsElevated;
-                    else
-                        Status = STATUS_INFO_LENGTH_MISMATCH;
-
-                    *ReturnLength = RequiredLength;
-                }
-                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    Status = _SEH2_GetExceptionCode();
-                }
-                _SEH2_END;
-
-                break;
-            }
-
-            case TokenLinkedToken:
-            {
-                DPRINT("NtQueryInformationToken(TokenLinkedToken)\n");
-                RequiredLength = sizeof(TOKEN_LINKED_TOKEN);
-
-                /* Windows answers so for a token of the default elevation type */
-                Status = (TokenInformationLength == RequiredLength) ? STATUS_NO_SUCH_LOGON_SESSION
-                                                                    : STATUS_INFO_LENGTH_MISMATCH;
-                _SEH2_TRY
-                {
-                    *ReturnLength = RequiredLength;
-                }
-                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    Status = _SEH2_GetExceptionCode();
-                }
-                _SEH2_END;
-
-                break;
-            }
-
-            case TokenLogonSid:
-            {
-                PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
-                ULONG i, Count = 0, SidLength = 0;
-
-                DPRINT("NtQueryInformationToken(TokenLogonSid)\n");
-
-                /* The logon SID groups, in TokenGroups order */
-                for (i = 1; i < Token->UserAndGroupCount; i++)
-                {
-                    if ((Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
-                    {
-                        Count++;
-                        SidLength += RtlLengthSid(Token->UserAndGroups[i].Sid);
-                    }
-                }
-
-                if (Count == 0)
-                {
-                    Status = STATUS_NOT_FOUND;
-                    break;
-                }
-
-                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups[Count]) + SidLength;
-
-                _SEH2_TRY
-                {
-                    if (TokenInformationLength >= RequiredLength)
-                    {
-                        PUCHAR Sid = (PUCHAR)&tg->Groups[Count];
-                        ULONG Index = 0, Length;
-
-                        tg->GroupCount = Count;
-                        for (i = 1; i < Token->UserAndGroupCount; i++)
-                        {
-                            if ((Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID) != SE_GROUP_LOGON_ID)
-                                continue;
-
-                            Length = RtlLengthSid(Token->UserAndGroups[i].Sid);
-                            RtlCopyMemory(Sid, Token->UserAndGroups[i].Sid, Length);
-                            tg->Groups[Index].Sid = (PSID)Sid;
-                            tg->Groups[Index].Attributes = Token->UserAndGroups[i].Attributes;
-                            Sid += Length;
-                            Index++;
-                        }
-                    }
-                    else
-                    {
-                        Status = STATUS_BUFFER_TOO_SMALL;
-                    }
-
-                    *ReturnLength = RequiredLength;
-                }
-                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    Status = _SEH2_GetExceptionCode();
-                }
-                _SEH2_END;
-
-                break;
-            }
-
             default:
                 DPRINT1("NtQueryInformationToken(%d) invalid information class\n", TokenInformationClass);
                 Status = STATUS_INVALID_INFO_CLASS;
@@ -1759,57 +1552,6 @@ NtSetInformationToken(
                 /* Unlock the token */
                 SepReleaseTokenLock(Token);
 
-                break;
-            }
-
-            case TokenVirtualizationEnabled:
-            case TokenUIAccess:
-            {
-                ULONG Value, Flag;
-
-                _SEH2_TRY
-                {
-                    /* Buffer size was already verified, no need to check here again */
-                    Value = *(PULONG)TokenInformation;
-                }
-                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    Status = _SEH2_GetExceptionCode();
-                    _SEH2_YIELD(goto Cleanup);
-                }
-                _SEH2_END;
-
-                /* Windows: granting UI access needs SeTcbPrivilege, clearing it does not */
-                if (TokenInformationClass == TokenUIAccess)
-                {
-                    Flag = TOKEN_UIACCESS;
-                    if (Value && !SeSinglePrivilegeCheck(SeTcbPrivilege, PreviousMode))
-                    {
-                        Status = STATUS_PRIVILEGE_NOT_HELD;
-                        break;
-                    }
-                }
-                else
-                {
-                    Flag = TOKEN_VIRTUALIZE_ENABLED;
-                }
-
-                SepAcquireTokenLockExclusive(Token);
-
-                /* Windows: enabling virtualization succeeds but has no effect unless the token allows it */
-                if (Flag == TOKEN_VIRTUALIZE_ENABLED && !(Token->TokenFlags & TOKEN_VIRTUALIZE_ALLOWED))
-                    Value = 0;
-
-                if (!!(Token->TokenFlags & Flag) != !!Value)
-                {
-                    if (Value)
-                        Token->TokenFlags |= Flag;
-                    else
-                        Token->TokenFlags &= ~Flag;
-                    ExAllocateLocallyUniqueId(&Token->ModifiedId);
-                }
-
-                SepReleaseTokenLock(Token);
                 break;
             }
 

@@ -6,7 +6,6 @@
  */
 
 #include "precomp.h"
-#include <tlhelp32.h>
 
 static
 HANDLE
@@ -211,171 +210,6 @@ SetTokenSessionIdTests(
     ok_ntstatus(Status, STATUS_PRIVILEGE_NOT_HELD);
 }
 
-static
-ULONG
-QueryTokenUlong(
-    _In_ HANDLE Token,
-    _In_ TOKEN_INFORMATION_CLASS Class)
-{
-    ULONG Value = 0xdeadbeef, Length;
-    NTSTATUS Status;
-
-    Status = NtQueryInformationToken(Token, Class, &Value, sizeof(Value), &Length);
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    return Value;
-}
-
-/* An impersonation token of winlogon.exe (LocalSystem), which holds SeTcbPrivilege */
-static
-HANDLE
-OpenSystemImpersonationToken(VOID)
-{
-    PROCESSENTRY32W Entry;
-    HANDLE Snapshot, Process, Token, Impersonation = NULL;
-    BOOLEAN Old;
-    BOOL More;
-
-    RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &Old);
-    Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (Snapshot == INVALID_HANDLE_VALUE)
-        return NULL;
-    Entry.dwSize = sizeof(Entry);
-    for (More = Process32FirstW(Snapshot, &Entry); More && !Impersonation; More = Process32NextW(Snapshot, &Entry))
-    {
-        if (_wcsicmp(Entry.szExeFile, L"winlogon.exe"))
-            continue;
-        Process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, Entry.th32ProcessID);
-        if (!Process)
-            continue;
-        if (OpenProcessToken(Process, TOKEN_DUPLICATE | TOKEN_QUERY, &Token))
-        {
-            if (!DuplicateTokenEx(Token, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &Impersonation))
-                Impersonation = NULL;
-            CloseHandle(Token);
-        }
-        CloseHandle(Process);
-    }
-    CloseHandle(Snapshot);
-    return Impersonation;
-}
-
-/*
- * TokenVirtualizationEnabled and TokenUIAccess, as measured on Windows 7 and
- * 10: both need TOKEN_ADJUST_DEFAULT and a ULONG; enabling virtualization
- * succeeds but has no effect on a token that does not allow it; granting UI
- * access needs SeTcbPrivilege enabled in the caller, clearing it does not;
- * any nonzero value grants it.
- */
-static
-VOID
-SetTokenUIAccessAndVirtualizationTests(VOID)
-{
-    NTSTATUS Status;
-    HANDLE ProcessToken, Token, Weak, System;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    ULONG Value[2];
-    BOOLEAN Old, HaveTcb;
-
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &ProcessToken))
-    {
-        skip("OpenProcessToken failed with %lu\n", GetLastError());
-        return;
-    }
-    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
-    Status = NtDuplicateToken(ProcessToken, TOKEN_ALL_ACCESS, &ObjectAttributes, FALSE, TokenPrimary, &Token);
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    NtClose(ProcessToken);
-    if (!NT_SUCCESS(Status))
-        return;
-    Status = NtDuplicateObject(NtCurrentProcess(), Token, NtCurrentProcess(), &Weak, TOKEN_QUERY, 0, 0);
-    ok_ntstatus(Status, STATUS_SUCCESS);
-
-    ok(QueryTokenUlong(Token, TokenVirtualizationAllowed) == 0, "Virtualization allowed\n");
-    ok(QueryTokenUlong(Token, TokenVirtualizationEnabled) == 0, "Virtualization enabled\n");
-    ok(QueryTokenUlong(Token, TokenUIAccess) == 0, "UI access\n");
-
-    /* Virtualization */
-    Value[0] = 1;
-    Status = NtSetInformationToken(Token, TokenVirtualizationEnabled, Value, sizeof(ULONG));
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    ok(QueryTokenUlong(Token, TokenVirtualizationEnabled) == 0, "Virtualization enabled on a token that does not allow it\n");
-    Value[0] = 0;
-    Status = NtSetInformationToken(Token, TokenVirtualizationEnabled, Value, sizeof(ULONG));
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    Value[0] = 1;
-    Status = NtSetInformationToken(Token, TokenVirtualizationEnabled, Value, 2 * sizeof(ULONG));
-    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
-    Status = NtSetInformationToken(Token, TokenVirtualizationEnabled, Value, sizeof(ULONG) - 1);
-    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
-    Status = NtSetInformationToken(Weak, TokenVirtualizationEnabled, Value, sizeof(ULONG));
-    ok_ntstatus(Status, STATUS_ACCESS_DENIED);
-
-    /* UI access without SeTcbPrivilege enabled */
-    HaveTcb = (RtlAdjustPrivilege(SE_TCB_PRIVILEGE, FALSE, FALSE, &Old) == STATUS_SUCCESS);
-    Value[0] = 1;
-    Status = NtSetInformationToken(Token, TokenUIAccess, Value, sizeof(ULONG));
-    ok_ntstatus(Status, STATUS_PRIVILEGE_NOT_HELD);
-    ok(QueryTokenUlong(Token, TokenUIAccess) == 0, "UI access granted without the privilege\n");
-    Value[0] = 0;
-    Status = NtSetInformationToken(Token, TokenUIAccess, Value, sizeof(ULONG));
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    Value[0] = 1;
-    Status = NtSetInformationToken(Token, TokenUIAccess, Value, 2 * sizeof(ULONG));
-    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
-    Status = NtSetInformationToken(Weak, TokenUIAccess, Value, sizeof(ULONG));
-    ok_ntstatus(Status, STATUS_ACCESS_DENIED);
-
-    /* UI access with SeTcbPrivilege enabled: our own when we hold it, else LocalSystem's */
-    System = NULL;
-    if (HaveTcb)
-    {
-        Status = RtlAdjustPrivilege(SE_TCB_PRIVILEGE, TRUE, FALSE, &Old);
-        ok_ntstatus(Status, STATUS_SUCCESS);
-    }
-    else
-    {
-        System = OpenSystemImpersonationToken();
-        if (System && SetThreadToken(NULL, System))
-        {
-            Status = RtlAdjustPrivilege(SE_TCB_PRIVILEGE, TRUE, TRUE, &Old);
-            ok_ntstatus(Status, STATUS_SUCCESS);
-        }
-        else
-        {
-            skip("No token with SeTcbPrivilege (error %lu)\n", GetLastError());
-            if (System)
-                CloseHandle(System);
-            System = NULL;
-        }
-    }
-    if (HaveTcb || System)
-    {
-        Value[0] = 1;
-        Status = NtSetInformationToken(Token, TokenUIAccess, Value, sizeof(ULONG));
-        ok_ntstatus(Status, STATUS_SUCCESS);
-        ok(QueryTokenUlong(Token, TokenUIAccess) == 1, "UI access not granted\n");
-        Value[0] = 2;
-        Status = NtSetInformationToken(Token, TokenUIAccess, Value, sizeof(ULONG));
-        ok_ntstatus(Status, STATUS_SUCCESS);
-        ok(QueryTokenUlong(Token, TokenUIAccess) == 1, "UI access value not normalized\n");
-        Value[0] = 0;
-        Status = NtSetInformationToken(Token, TokenUIAccess, Value, sizeof(ULONG));
-        ok_ntstatus(Status, STATUS_SUCCESS);
-        ok(QueryTokenUlong(Token, TokenUIAccess) == 0, "UI access not cleared\n");
-
-        if (HaveTcb)
-            RtlAdjustPrivilege(SE_TCB_PRIVILEGE, FALSE, FALSE, &Old);
-        if (System)
-        {
-            RevertToSelf();
-            CloseHandle(System);
-        }
-    }
-
-    NtClose(Weak);
-    NtClose(Token);
-}
-
 START_TEST(NtSetInformationToken)
 {
     NTSTATUS Status;
@@ -408,7 +242,6 @@ START_TEST(NtSetInformationToken)
     /* Now perform tests for each class */
     SetTokenDefaultDaclTests(Token);
     SetTokenSessionIdTests(Token);
-    SetTokenUIAccessAndVirtualizationTests();
 
     CloseHandle(Token);
 }
