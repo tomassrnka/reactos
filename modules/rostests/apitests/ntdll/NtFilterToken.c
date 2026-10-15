@@ -7,6 +7,10 @@
 
 #include "precomp.h"
 
+#ifndef WRITE_RESTRICTED
+#define WRITE_RESTRICTED 0x8
+#endif
+
 static
 HANDLE
 GetTokenProcess(VOID)
@@ -24,6 +28,115 @@ GetTokenProcess(VOID)
     }
 
     return Token;
+}
+
+static ULONG RestrictedCount(HANDLE Token)
+{
+    BYTE Buffer[512];
+    ULONG Size;
+    NTSTATUS Status = NtQueryInformationToken(Token, TokenRestrictedSids, Buffer, sizeof(Buffer), &Size);
+    return NT_SUCCESS(Status) ? ((PTOKEN_GROUPS)Buffer)->GroupCount : ~0UL;
+}
+
+/* Parameter rules of NtFilterToken: flags, attributes, empty lists, restricted sources */
+static void TestFilterParameters(HANDLE Token)
+{
+    static SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    static const ULONG BadFlags[] = { 0x10, 0x20, 0x80000000 };
+    BYTE WorldBuffer[16], RestrictedBuffer[16];
+    PSID World = (PSID)WorldBuffer, RestrictedCode = (PSID)RestrictedBuffer;
+    TOKEN_GROUPS Groups, Empty;
+    HANDLE Filtered, Filtered2;
+    NTSTATUS Status;
+    ULONG i;
+
+    RtlInitializeSid(World, &WorldAuthority, 1);
+    *RtlSubAuthoritySid(World, 0) = SECURITY_WORLD_RID;
+    RtlInitializeSid(RestrictedCode, &NtAuthority, 1);
+    *RtlSubAuthoritySid(RestrictedCode, 0) = SECURITY_RESTRICTED_CODE_RID;
+
+    for (i = 0; i < ARRAYSIZE(BadFlags); i++)
+    {
+        Filtered = NULL;
+        Status = NtFilterToken(Token, BadFlags[i], NULL, NULL, NULL, &Filtered);
+        ok(Status == STATUS_SUCCESS, "Flags 0x%lx: status 0x%lx\n", BadFlags[i], Status);
+        if (NT_SUCCESS(Status))
+            NtClose(Filtered);
+    }
+
+    /* Attributes on restricting SIDs and on SIDs to disable */
+    Groups.GroupCount = 1;
+    Groups.Groups[0].Sid = RestrictedCode;
+    Groups.Groups[0].Attributes = SE_GROUP_ENABLED;
+    Filtered = NULL;
+    Status = NtFilterToken(Token, 0, NULL, NULL, &Groups, &Filtered);
+    ok_hex(Status, STATUS_INVALID_PARAMETER);
+    if (NT_SUCCESS(Status))
+        NtClose(Filtered);
+    Groups.Groups[0].Sid = World;
+    Filtered = NULL;
+    Status = NtFilterToken(Token, 0, &Groups, NULL, NULL, &Filtered);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        NtClose(Filtered);
+
+    /* An empty restricting list does not make the token restricted */
+    Empty.GroupCount = 0;
+    Filtered = NULL;
+    Status = NtFilterToken(Token, 0, &Empty, NULL, &Empty, &Filtered);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(RestrictedCount(Filtered) == 0, "Restricted SID count %lu\n", RestrictedCount(Filtered));
+        NtClose(Filtered);
+    }
+
+    /* WRITE_RESTRICTED without restricting SIDs */
+    Filtered = NULL;
+    Status = NtFilterToken(Token, WRITE_RESTRICTED, NULL, NULL, NULL, &Filtered);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(RestrictedCount(Filtered) == 0, "Restricted SID count %lu\n", RestrictedCount(Filtered));
+        NtClose(Filtered);
+    }
+
+    /* A restricted source token filtered again */
+    Groups.Groups[0].Sid = RestrictedCode;
+    Groups.Groups[0].Attributes = 0;
+    Filtered = NULL;
+    Status = NtFilterToken(Token, 0, NULL, NULL, &Groups, &Filtered);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(RestrictedCount(Filtered) == 1, "Restricted SID count %lu\n", RestrictedCount(Filtered));
+        Filtered2 = NULL;
+        Status = NtFilterToken(Filtered, 0, NULL, NULL, NULL, &Filtered2);
+        ok(Status == STATUS_INVALID_PARAMETER, "Restricted source, nothing to add: status 0x%lx\n", Status);
+        if (NT_SUCCESS(Status))
+            NtClose(Filtered2);
+        Filtered2 = NULL;
+        Status = NtFilterToken(Filtered, DISABLE_MAX_PRIVILEGE, NULL, NULL, NULL, &Filtered2);
+        ok(Status == STATUS_INVALID_PARAMETER, "Restricted source, disable_max_privilege: status 0x%lx\n", Status);
+        if (NT_SUCCESS(Status))
+            NtClose(Filtered2);
+        Filtered2 = NULL;
+        Status = NtFilterToken(Filtered, DISABLE_MAX_PRIVILEGE, NULL, NULL, &Groups, &Filtered2);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok(RestrictedCount(Filtered2) == 1, "Restricted SID count %lu\n", RestrictedCount(Filtered2));
+            NtClose(Filtered2);
+        }
+        Groups.Groups[0].Sid = World;
+        Filtered2 = NULL;
+        Status = NtFilterToken(Filtered, 0, NULL, NULL, &Groups, &Filtered2);
+        ok(Status == STATUS_INVALID_PARAMETER, "Restricted source, disjoint list: status 0x%lx\n", Status);
+        if (NT_SUCCESS(Status))
+            NtClose(Filtered2);
+        NtClose(Filtered);
+    }
 }
 
 START_TEST(NtFilterToken)
@@ -127,6 +240,8 @@ START_TEST(NtFilterToken)
     }
 
     trace("Number of privileges after token filtering (manually deleted privilege) -- %lu\n\n", TokenStats->PrivilegeCount);
+
+    TestFilterParameters(Token);
 
     /* We're done */
     RtlFreeHeap(RtlGetProcessHeap(), 0, TokenStats);
