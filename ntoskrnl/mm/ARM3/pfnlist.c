@@ -667,6 +667,9 @@ MiInsertPageInFreeList(IN PFN_NUMBER PageFrameIndex)
     Pfn1->u4.InPageError = 0;
     Pfn1->u4.AweAllocation = 0;
 
+    /* RAM is cached: a free page goes back to that, whatever its last owner mapped it as */
+    Pfn1->u3.e1.CacheAttribute = MiCached;
+
     /* Increment number of available pages */
     MiIncrementAvailablePages();
 
@@ -997,6 +1000,11 @@ MiInitializePfn(IN PFN_NUMBER PageFrameIndex,
         Pfn1->OriginalPte = *PointerPte;
         ASSERT(!((Pfn1->OriginalPte.u.Soft.Prototype == 0) &&
                  (Pfn1->OriginalPte.u.Soft.Transition == 1)));
+
+        /* A private page made present uncached or write-combined stays so while it lives.
+           Prototype PTEs live outside the page tables, and their pages are mapped cached */
+        if (MI_IS_PAGE_TABLE_ADDRESS(PointerPte) && (Pfn1->OriginalPte.u.Soft.Prototype == 0))
+            Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(Pfn1->OriginalPte.u.Soft.Protection);
     }
 
     /* Otherwise this is a fresh page -- set it up */

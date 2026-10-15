@@ -7,6 +7,8 @@
 
 #include <kmt_test.h>
 #include <ndk/exfuncs.h>
+#include <ndk/mmfuncs.h>
+#include <ndk/obfuncs.h>
 
 #include "MmMapLockedPagesSpecifyCache.h"
 
@@ -74,6 +76,218 @@
     Status = NtUnmapViewOfSection(NtCurrentProcess(),           \
                                   MappedBuffer);                \
     ok_eq_hex(Status, STATUS_NOT_MAPPED_VIEW);                  \
+}
+
+#define VIEW_LENGTH (16 * PAGE_SIZE)
+
+static
+ULONGLONG
+TimeViewReads(
+    _In_ volatile UCHAR *Base)
+{
+    LARGE_INTEGER Start, End;
+    ULONGLONG Best = (ULONGLONG)-1;
+    ULONG Run, Pass, Offset, Sum = 0;
+    static volatile ULONG Sink;
+
+    for (Run = 0; Run < 3; Run++)
+    {
+        QueryPerformanceCounter(&Start);
+        for (Pass = 0; Pass < 500; Pass++)
+            for (Offset = 0; Offset < VIEW_LENGTH; Offset += 64)
+                Sum += Base[Offset];
+        QueryPerformanceCounter(&End);
+        if ((ULONGLONG)(End.QuadPart - Start.QuadPart) < Best)
+            Best = End.QuadPart - Start.QuadPart;
+    }
+    Sink += Sum;
+    return Best;
+}
+
+static
+BOOLEAN
+IsSlow(
+    _In_ ULONGLONG Ticks,
+    _In_ ULONGLONG CachedTicks)
+{
+    return Ticks > CachedTicks * 10 + 1000;
+}
+
+/* A second user mapping of locked view pages must not give them another memory type */
+static
+void
+TestViewMappedTwice(
+    _In_ ULONG ViewProtection,
+    _In_ BOOLEAN Cached,
+    _In_ PCSTR Name)
+{
+    WCHAR Path[MAX_PATH], File[MAX_PATH];
+    HANDLE FileHandle, SectionHandle;
+    PVOID Control = NULL, Uncached = NULL, View = NULL;
+    SIZE_T Size, ViewSize = 0;
+    LARGE_INTEGER MaximumSize;
+    VIEW_BUFFER ViewBuffer;
+    DWORD Length;
+    ULONG Page;
+    ULONGLONG ControlTicks, UncachedTicks, ViewTicks, MappedTicks;
+    NTSTATUS Status;
+
+    Size = VIEW_LENGTH;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Control, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Size = VIEW_LENGTH;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Uncached, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE | PAGE_NOCACHE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!Control || !Uncached)
+        return;
+    for (Page = 0; Page < VIEW_LENGTH; Page += PAGE_SIZE)
+    {
+        ((volatile UCHAR *)Control)[Page] = 1;
+        ((volatile UCHAR *)Uncached)[Page] = 1;
+    }
+    ControlTicks = TimeViewReads(Control);
+    UncachedTicks = TimeViewReads(Uncached);
+
+    GetTempPathW(RTL_NUMBER_OF(Path), Path);
+    GetTempFileNameW(Path, L"kmt", 0, File);
+    FileHandle = CreateFileW(File, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    ok(FileHandle != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    if (FileHandle == INVALID_HANDLE_VALUE)
+        goto Cleanup;
+
+    MaximumSize.QuadPart = VIEW_LENGTH;
+    Status = NtCreateSection(&SectionHandle, SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_READWRITE, SEC_COMMIT, FileHandle);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtMapViewOfSection(SectionHandle, NtCurrentProcess(), &View, 0, 0, NULL, &ViewSize, ViewShare, 0, ViewProtection);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            for (Page = 0; Page < VIEW_LENGTH; Page += PAGE_SIZE)
+                ((volatile UCHAR *)View)[Page] = 1;
+            ViewTicks = TimeViewReads(View);
+
+            ViewBuffer.Address = View;
+            ViewBuffer.Length = VIEW_LENGTH;
+            ViewBuffer.Cached = Cached;
+            ViewBuffer.Mapped = NULL;
+            ViewBuffer.Status = STATUS_UNSUCCESSFUL;
+            Length = sizeof(ViewBuffer);
+            ok(KmtSendBufferToDriver(IOCTL_MAP_VIEW, &ViewBuffer, sizeof(ViewBuffer), &Length) == ERROR_SUCCESS, "\n");
+            ok_eq_hex(ViewBuffer.Status, STATUS_SUCCESS);
+            if (ViewBuffer.Mapped != NULL)
+            {
+                MappedTicks = TimeViewReads(ViewBuffer.Mapped);
+                trace("%s: cached %I64u, PAGE_NOCACHE %I64u, view %I64u, second mapping %I64u ticks\n",
+                      Name, ControlTicks, UncachedTicks, ViewTicks, MappedTicks);
+                if (IsSlow(UncachedTicks, ControlTicks))
+                    ok(IsSlow(MappedTicks, ControlTicks) == IsSlow(ViewTicks, ControlTicks),
+                       "%s: the view reads in %I64u ticks, its second mapping in %I64u (cached %I64u)\n",
+                       Name, ViewTicks, MappedTicks, ControlTicks);
+                else
+                    skip(FALSE, "PAGE_NOCACHE memory reads as fast as cached memory here\n");
+            }
+            Length = 0;
+            KmtSendBufferToDriver(IOCTL_UNMAP_VIEW, NULL, 0, &Length);
+            NtUnmapViewOfSection(NtCurrentProcess(), View);
+        }
+        NtClose(SectionHandle);
+    }
+    CloseHandle(FileHandle);
+
+Cleanup:
+    Size = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(), &Control, &Size, MEM_RELEASE);
+    Size = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(), &Uncached, &Size, MEM_RELEASE);
+}
+
+static
+ULONGLONG
+TimePageReads(
+    _In_ volatile UCHAR *Base)
+{
+    LARGE_INTEGER Start, End;
+    ULONGLONG Best = (ULONGLONG)-1;
+    ULONG Run, Pass, Offset, Sum = 0;
+    static volatile ULONG Sink;
+
+    for (Run = 0; Run < 3; Run++)
+    {
+        QueryPerformanceCounter(&Start);
+        for (Pass = 0; Pass < 2000; Pass++)
+            for (Offset = 0; Offset < PAGE_SIZE; Offset += 64)
+                Sum += Base[Offset];
+        QueryPerformanceCounter(&End);
+        if ((ULONGLONG)(End.QuadPart - Start.QuadPart) < Best)
+            Best = End.QuadPart - Start.QuadPart;
+    }
+    Sink += Sum;
+    return Best;
+}
+
+/* Two uncached \Device\PhysicalMemory views of a page with no cache type of its own stay uncached when one is reprotected */
+static
+void
+TestPhysicalViewsReprotected(void)
+{
+    PVOID Control = NULL, Uncached = NULL;
+    SIZE_T Size;
+    PHYSICAL_BUFFER Physical;
+    DWORD Length, Old;
+    ULONGLONG ControlTicks, UncachedTicks, Ticks[2];
+    ULONG i;
+    NTSTATUS Status;
+
+    Size = PAGE_SIZE;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Control, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Size = PAGE_SIZE;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Uncached, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE | PAGE_NOCACHE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!Control || !Uncached)
+        return;
+    *(volatile UCHAR *)Control = 1;
+    *(volatile UCHAR *)Uncached = 1;
+    ControlTicks = TimePageReads(Control);
+    UncachedTicks = TimePageReads(Uncached);
+
+    RtlZeroMemory(&Physical, sizeof(Physical));
+    Physical.Status = STATUS_UNSUCCESSFUL;
+    Length = sizeof(Physical);
+    ok(KmtSendBufferToDriver(IOCTL_MAP_PHYSICAL, &Physical, sizeof(Physical), &Length) == ERROR_SUCCESS, "\n");
+    ok_eq_hex(Physical.Status, STATUS_SUCCESS);
+    if (Physical.View[0] != NULL && Physical.View[1] != NULL)
+    {
+        /* Both views must be present, so the protection change rewrites a valid PTE */
+        for (i = 0; i < 2; i++)
+            Ticks[i] = TimePageReads(Physical.View[i]);
+        /* Windows probably refuses to reprotect a physical view (as ARM3 does); then nothing may change either */
+        if (!VirtualProtect(Physical.View[0], PAGE_SIZE, PAGE_READONLY | PAGE_NOCACHE, &Old))
+            trace("VirtualProtect on the physical view failed: %lu\n", GetLastError());
+        for (i = 0; i < 2; i++)
+            Ticks[i] = TimePageReads(Physical.View[i]);
+        trace("cached %I64u, PAGE_NOCACHE %I64u, reprotected view %I64u, other view %I64u ticks\n",
+              ControlTicks, UncachedTicks, Ticks[0], Ticks[1]);
+        if (IsSlow(UncachedTicks, ControlTicks))
+        {
+            ok(IsSlow(Ticks[0], ControlTicks), "the reprotected PAGE_NOCACHE view reads in %I64u ticks, cached memory in %I64u\n", Ticks[0], ControlTicks);
+            ok(IsSlow(Ticks[1], ControlTicks), "the other PAGE_NOCACHE view reads in %I64u ticks, cached memory in %I64u\n", Ticks[1], ControlTicks);
+        }
+        else
+        {
+            skip(FALSE, "PAGE_NOCACHE memory reads as fast as cached memory here\n");
+        }
+    }
+    Length = 0;
+    KmtSendBufferToDriver(IOCTL_UNMAP_PHYSICAL, NULL, 0, &Length);
+
+    Size = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(), &Control, &Size, MEM_RELEASE);
+    Size = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(), &Uncached, &Size, MEM_RELEASE);
 }
 
 START_TEST(MmMapLockedPagesSpecifyCache)
@@ -277,6 +491,10 @@ START_TEST(MmMapLockedPagesSpecifyCache)
 
     Length = 0;
     ok(KmtSendBufferToDriver(IOCTL_CLEAN, NULL, 0, &Length) == ERROR_SUCCESS, "\n");
+
+    TestViewMappedTwice(PAGE_READWRITE | PAGE_NOCACHE, FALSE, "PAGE_NOCACHE file view, MmNonCached");
+    TestViewMappedTwice(PAGE_READWRITE, TRUE, "file view, MmCached");
+    TestPhysicalViewsReprotected();
 
     KmtCloseDriver();
     KmtUnloadDriver();
