@@ -816,8 +816,6 @@ CcZeroData (
     LARGE_INTEGER WriteOffset;
     LONGLONG Length;
     PROS_VACB Vacb;
-    LARGE_INTEGER ValidDataLength;
-    KIRQL OldIrql;
     PROS_SHARED_CACHE_MAP SharedCacheMap = FileObject->SectionObjectPointer->SharedCacheMap;
 
     CCTRACE(CC_API_DEBUG, "FileObject=%p StartOffset=%I64u EndOffset=%I64u Wait=%d\n",
@@ -884,15 +882,6 @@ CcZeroData (
 
     ASSERT(EndOffset->QuadPart <= SharedCacheMap->SectionSize.QuadPart);
 
-    /*
-     * Cc and Mm take nothing past the cache map's valid data length from the file. Below it, a page that is not in
-     * memory is read and kept: the file system returns zeros past its own valid data length, and data it already
-     * wrote there (a lazily written view page) must not be wiped.
-     */
-    KeAcquireSpinLock(&SharedCacheMap->CacheMapLock, &OldIrql);
-    ValidDataLength = SharedCacheMap->ValidDataLength;
-    KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
-
     while(WriteOffset.QuadPart < EndOffset->QuadPart)
     {
         ULONG VacbOffset = WriteOffset.QuadPart % VACB_MAPPING_GRANULARITY;
@@ -911,7 +900,6 @@ CcZeroData (
             Status = MmZeroSegmentRange(FileObject->SectionObjectPointer,
                                         WriteOffset.QuadPart,
                                         WriteOffset.QuadPart + VacbLength,
-                                        ValidDataLength.QuadPart,
                                         Wait);
             if (Status == STATUS_CANT_WAIT)
                 _SEH2_YIELD(return FALSE);

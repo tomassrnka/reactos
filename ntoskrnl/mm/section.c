@@ -5448,8 +5448,9 @@ MiReadSegmentPage(
  *   caller passes Start = the boundary of valid data, so the whole page is gap. This is why a file system that
  *   does not zero-fill reads past its valid data length (vfatfs) cannot disclose stale blocks here;
  * - the one page that straddles Start (only the first) is read, so the bytes below Start (valid data) survive,
- *   and [max(Start, ValidDataLength), End) within it is zeroed. ValidDataLength guards the artificial case of a
- *   caller zeroing a range below its own valid data length; real callers pass Start == their valid data length.
+ *   and [Start, End) within it is zeroed. Start is the file system's true valid-data boundary, passed in; a
+ *   caller's cache-map valid data length may lie above Start (vfatfs advances it before the gap is zeroed), so
+ *   it must not raise the zero bound, or old disk bytes in [Start, that length) would survive on the read page.
  * Returns STATUS_CANT_WAIT if !Wait and a page would have to be brought in.
  */
 NTSTATUS
@@ -5458,7 +5459,6 @@ MmZeroSegmentRange(
     _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
     _In_ LONGLONG Start,
     _In_ LONGLONG End,
-    _In_ LONGLONG ValidDataLength,
     _In_ BOOLEAN Wait)
 {
     PEPROCESS Process = PsGetCurrentProcess();
@@ -5472,7 +5472,7 @@ MmZeroSegmentRange(
 
     for (Offset.QuadPart = PAGE_ROUND_DOWN_64(Start); Offset.QuadPart < End; Offset.QuadPart += PAGE_SIZE)
     {
-        LONGLONG ZeroStart = max(max(Offset.QuadPart, Start), ValidDataLength);
+        LONGLONG ZeroStart = max(Offset.QuadPart, Start);
         LONGLONG ZeroEnd = min(Offset.QuadPart + PAGE_SIZE, End);
         ULONG_PTR Entry;
         PFN_NUMBER Page;

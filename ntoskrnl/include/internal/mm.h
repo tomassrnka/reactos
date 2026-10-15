@@ -1608,7 +1608,6 @@ MmZeroSegmentRange(
     _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
     _In_ LONGLONG Start,
     _In_ LONGLONG End,
-    _In_ LONGLONG ValidDataLength,
     _In_ BOOLEAN Wait);
 
 BOOLEAN

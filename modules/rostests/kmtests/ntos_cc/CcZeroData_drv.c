@@ -257,6 +257,24 @@ Test_CcZeroData(PFILE_OBJECT FileObject)
     ok(!PageMarked(PagesRead, 0x70000) && !PageMarked(PagesRead, 0x71000), "vfatfs gap: pages were read from disk\n");
     Zeros = CountCached(FileObject, 0x70000, 0x2000, 0);
     ok_eq_ulong(Zeros, 0x2000);
+
+    /*
+     * 7. The vfatfs shape with an unaligned Start: the straddling page is read to keep the bytes below Start, but
+     * [Start, top of that page) is the gap and must be zeroed from Start, not from the advanced cache-map valid
+     * data length, or old disk bytes between Start and that length would survive. Only a file system that advances
+     * its valid data length before zeroing its own gap (vfatfs) produces this call shape; Windows file systems do
+     * not, and Windows keeps a range zeroed below its own valid data length, so this case runs on ReactOS only.
+     */
+    if (is_reactos())
+    {
+        Fcb->Header.ValidDataLength.QuadPart = 0x68000;
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+        ok_bool_true(ZeroData(FileObject, 0x40200, 0x42000), "CcZeroData");
+        Disk = CountCached(FileObject, 0x40000, 0x200, DISK_BYTE);
+        ok_eq_ulong(Disk, 0x200);
+        Zeros = CountCached(FileObject, 0x40200, 0x1e00, 0);
+        ok_eq_ulong(Zeros, 0x1e00);
+    }
 }
 
 static
