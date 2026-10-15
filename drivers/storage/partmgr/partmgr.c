@@ -192,6 +192,167 @@ PartMgrIsDiskSuperFloppy(
     return TRUE;
 }
 
+/**
+ * @brief
+ * Makes the base of the PnP instance ID of a new partition device: the disk's signature (MBR)
+ * or GUID (GPT) and the partition's offset and length, as the new layout has them.
+ **/
+static
+CODE_SEG("PAGE")
+NTSTATUS
+PartMgrMakeBaseId(
+    _In_ PDRIVE_LAYOUT_INFORMATION_EX Layout,
+    _In_ PPARTITION_INFORMATION_EX PartitionEntry,
+    _Out_writes_(PARTITION_INSTANCE_ID_CHARS) PWCH BaseId)
+{
+    int length;
+
+    PAGED_CODE();
+
+    if (Layout->PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        length = _snwprintf(BaseId, PARTITION_INSTANCE_ID_CHARS, L"S%08lx_O%I64x_L%I64x",
+                            Layout->Mbr.Signature,
+                            PartitionEntry->StartingOffset.QuadPart,
+                            PartitionEntry->PartitionLength.QuadPart);
+    }
+    else
+    {
+        length = _snwprintf(BaseId, PARTITION_INSTANCE_ID_CHARS,
+                            L"S%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02xS_O%I64x_L%I64x",
+                            Layout->Gpt.DiskId.Data1,
+                            Layout->Gpt.DiskId.Data2,
+                            Layout->Gpt.DiskId.Data3,
+                            Layout->Gpt.DiskId.Data4[0],
+                            Layout->Gpt.DiskId.Data4[1],
+                            Layout->Gpt.DiskId.Data4[2],
+                            Layout->Gpt.DiskId.Data4[3],
+                            Layout->Gpt.DiskId.Data4[4],
+                            Layout->Gpt.DiskId.Data4[5],
+                            Layout->Gpt.DiskId.Data4[6],
+                            Layout->Gpt.DiskId.Data4[7],
+                            PartitionEntry->StartingOffset.QuadPart,
+                            PartitionEntry->PartitionLength.QuadPart);
+    }
+    return (length < 0 || length >= PARTITION_INSTANCE_ID_CHARS) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+}
+
+/**
+ * @brief
+ * The PnP instance ID of a partition device, chosen the first time PnP asks for it and then the
+ * same for the life of the device (also when IOCTL_DISK_GROW_PARTITION changes its length). It is
+ * the base ID unless another device of this disk holds that ID, or a removed one left it behind
+ * and may still be in the PnP tree (PartMgrReleaseInstanceId): then the first free "_V<n>"
+ * suffix is added, as PnP stops the system on a duplicate instance (bugcheck 0xCA).
+ **/
+CODE_SEG("PAGE")
+NTSTATUS
+PartMgrQueryInstanceId(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PPARTITION_EXTENSION PartExt,
+    _Out_ PUNICODE_STRING InstanceId)
+{
+    WCHAR string[PARTITION_INSTANCE_ID_CHARS];
+    PPARTITION_ID_RECORD record;
+    NTSTATUS status = STATUS_SUCCESS;
+    int length;
+
+    PAGED_CODE();
+
+    PartMgrAcquireLayoutLock(FdoExtension);
+
+    record = PartExt->IdRecord;
+    if (!record)
+    {
+        UINT32 suffix = 0;
+        PSINGLE_LIST_ENTRY cur = FdoExtension->InstanceIds.Next;
+
+        // the records are few: start over after each suffix that is taken
+        while (cur != NULL)
+        {
+            PPARTITION_ID_RECORD rec = CONTAINING_RECORD(cur, PARTITION_ID_RECORD, ListEntry);
+
+            if (rec->Suffix == suffix && wcscmp(rec->BaseId, PartExt->BaseId) == 0)
+            {
+                suffix++;
+                cur = FdoExtension->InstanceIds.Next;
+                continue;
+            }
+            cur = cur->Next;
+        }
+
+        record = ExAllocatePoolZero(PagedPool, sizeof(*record), TAG_PARTMGR);
+        if (!record)
+        {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Exit;
+        }
+        record->Suffix = suffix;
+        RtlCopyMemory(record->BaseId, PartExt->BaseId, sizeof(record->BaseId));
+        PushEntryList(&FdoExtension->InstanceIds, &record->ListEntry);
+        PartExt->IdRecord = record;
+    }
+
+    if (record->Suffix == 0)
+        length = _snwprintf(string, RTL_NUMBER_OF(string), L"%ls", record->BaseId);
+    else
+        length = _snwprintf(string, RTL_NUMBER_OF(string), L"%ls_V%lu", record->BaseId, record->Suffix);
+    if (length < 0 || length >= (int)RTL_NUMBER_OF(string))
+        status = STATUS_BUFFER_OVERFLOW;
+    else if (!RtlCreateUnicodeString(InstanceId, string))
+        status = STATUS_INSUFFICIENT_RESOURCES;
+
+Exit:
+    PartMgrReleaseLayoutLock(FdoExtension);
+    return status;
+}
+
+/**
+ * @brief
+ * A partition device is deleted: its instance ID becomes free again, unless the device may
+ * still be in the PnP tree, which keeps a devnode until the last reference to the device is
+ * gone: when it is still open, or a file system was mounted on it (its VPB is mounted, or a
+ * dismount replaced it; a file system keeps references after its dismount). Such an ID is never
+ * handed out again on this disk.
+ **/
+CODE_SEG("PAGE")
+VOID
+PartMgrReleaseInstanceId(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PPARTITION_EXTENSION PartExt,
+    _In_ BOOLEAN LayoutLockHeld)
+{
+    PDEVICE_OBJECT device = PartExt->DeviceObject;
+    PPARTITION_ID_RECORD record;
+    BOOLEAN inUse;
+
+    PAGED_CODE();
+
+    inUse = device->ReferenceCount != 0 || device->Vpb != PartExt->CreatedVpb ||
+            (device->Vpb && (device->Vpb->Flags & VPB_MOUNTED || device->Vpb->ReferenceCount != 0));
+
+    if (!LayoutLockHeld)
+        PartMgrAcquireLayoutLock(FdoExtension);
+
+    record = PartExt->IdRecord;
+    PartExt->IdRecord = NULL;
+    if (record && !inUse)
+    {
+        for (PSINGLE_LIST_ENTRY prev = &FdoExtension->InstanceIds; prev->Next != NULL; prev = prev->Next)
+        {
+            if (prev->Next == &record->ListEntry)
+            {
+                prev->Next = record->ListEntry.Next;
+                ExFreePoolWithTag(record, TAG_PARTMGR);
+                break;
+            }
+        }
+    }
+
+    if (!LayoutLockHeld)
+        PartMgrReleaseLayoutLock(FdoExtension);
+}
+
 static
 CODE_SEG("PAGE")
 VOID
@@ -283,6 +444,7 @@ PartMgrUpdatePartitionDevices(
             // enumerated PDOs will receive IRP_MN_REMOVE_DEVICE
             if (!partExt->IsEnumerated)
             {
+                PartMgrReleaseInstanceId(FdoExtension, partExt, TRUE);
                 PartitionHandleRemove(partExt, TRUE);
             }
         }
@@ -332,6 +494,15 @@ PartMgrUpdatePartitionDevices(
             }
         }
 
+        WCHAR baseId[PARTITION_INSTANCE_ID_CHARS];
+        status = PartMgrMakeBaseId(NewLayout, partEntry, baseId);
+        if (!NT_SUCCESS(status))
+        {
+            ERR("No instance ID for the partition at %I64x: 0x%lx\n",
+                partEntry->StartingOffset.QuadPart, status);
+            continue;
+        }
+
         partEntry->PartitionNumber = partNumber;
 
         PDEVICE_OBJECT partitionDevice;
@@ -339,6 +510,7 @@ PartMgrUpdatePartitionDevices(
                                        partEntry,
                                        pdoNumber,
                                        NewLayout->PartitionStyle,
+                                       baseId,
                                        &partitionDevice);
         if (!NT_SUCCESS(status))
         {
@@ -1425,6 +1597,12 @@ FdoHandleRemoveDevice(
     IoSkipCurrentIrpStackLocation(Irp);
     Irp->IoStatus.Status = STATUS_SUCCESS;
     NTSTATUS status = IoCallDriver(FdoExtension->LowerDevice, Irp);
+
+    PSINGLE_LIST_ENTRY entry;
+    while ((entry = PopEntryList(&FdoExtension->InstanceIds)) != NULL)
+    {
+        ExFreePoolWithTag(CONTAINING_RECORD(entry, PARTITION_ID_RECORD, ListEntry), TAG_PARTMGR);
+    }
 
     IoDetachDevice(FdoExtension->LowerDevice);
     IoDeleteDevice(FdoExtension->DeviceObject);

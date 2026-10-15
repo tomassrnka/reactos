@@ -127,6 +127,16 @@ static BOOL SetLayout(PDRIVE_LAYOUT_INFORMATION_EX Layout, DWORD Size)
     return Ok;
 }
 
+/* Writes the table and returns at once, before the partition devices change. */
+static BOOL SetLayoutNow(PDRIVE_LAYOUT_INFORMATION_EX Layout, DWORD Size)
+{
+    DWORD Returned;
+    HANDLE Disk = OpenDisk(GENERIC_READ | GENERIC_WRITE);
+    BOOL Ok = DeviceIoControl(Disk, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, Layout, Size, NULL, 0, &Returned, NULL);
+    CloseHandle(Disk);
+    return Ok;
+}
+
 static BOOL CreateDiskStyle(PARTITION_STYLE Style)
 {
     CREATE_DISK Create;
@@ -354,6 +364,71 @@ static void TestGpt(void)
     CloseHandle(Disk);
 }
 
+/*
+ * A partition device keeps the instance ID it got when it appeared, also after it grew. A table
+ * written afterwards that gives the partition its first length again makes a new device, while
+ * the old one still exists (here an open handle keeps it, as a mounted file system does); the two
+ * must not have the same ID (a duplicate device instance stops ReactOS with bugcheck 0xCA). The
+ * same for a partition deleted and made again while the old device still exists.
+ */
+static void TestSetLayoutAfterGrow(void)
+{
+    BYTE Buffer[8192];
+    PDRIVE_LAYOUT_INFORMATION_EX Layout = (PVOID)Buffer;
+    DWORD Size = FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry[4]);
+    HANDLE Disk, Old;
+    ULONG Round;
+
+    ok(CreateDiskStyle(PARTITION_STYLE_MBR), "IOCTL_DISK_CREATE_DISK failed: %lu\n", GetLastError());
+    ZeroMemory(Buffer, sizeof(Buffer));
+    Layout->PartitionStyle = PARTITION_STYLE_MBR;
+    Layout->PartitionCount = 4;
+    Layout->Mbr.Signature = 0x0DCE0001;
+    MbrEntry(&Layout->PartitionEntry[0], 1 * MiB, 64 * MiB, PARTITION_IFS, 2048);
+    MbrEntry(&Layout->PartitionEntry[1], 0, 0, 0, 0);
+    MbrEntry(&Layout->PartitionEntry[2], 0, 0, 0, 0);
+    MbrEntry(&Layout->PartitionEntry[3], 0, 0, 0, 0);
+    if (!SetLayout(Layout, Size))
+    {
+        skip("IOCTL_DISK_SET_DRIVE_LAYOUT_EX failed: %lu\n", GetLastError());
+        return;
+    }
+    ok(DeviceLength(1) == 64 * MiB, "P1 device is %I64d bytes\n", DeviceLength(1));
+
+    for (Round = 0; Round < 2; Round++)
+    {
+        Disk = OpenDisk(GENERIC_READ | GENERIC_WRITE);
+        ok_int(Grow(Disk, 1, 16 * MiB, 0), ERROR_SUCCESS);
+        CloseHandle(Disk);
+        ok(DeviceLength(1) == 80 * MiB, "round %lu: P1 device is %I64d bytes after growing\n", Round, DeviceLength(1));
+
+        Old = OpenPartition(1, GENERIC_READ);
+        ok(Old != INVALID_HANDLE_VALUE, "round %lu: opening P1 failed: %lu\n", Round, GetLastError());
+        MbrEntry(&Layout->PartitionEntry[0], 1 * MiB, 64 * MiB, PARTITION_IFS, 2048);
+        ok(SetLayout(Layout, Size), "round %lu: IOCTL_DISK_SET_DRIVE_LAYOUT_EX failed: %lu\n", Round, GetLastError());
+        ok(LayoutLength(1) == 64 * MiB, "round %lu: P1 is %I64d bytes\n", Round, LayoutLength(1));
+        ok(DeviceLength(1) == 64 * MiB, "round %lu: P1 device is %I64d bytes after the table\n", Round, DeviceLength(1));
+        if (Old != INVALID_HANDLE_VALUE)
+            CloseHandle(Old);
+    }
+
+    /* deleted and made again while the old device is open, at once and then once more */
+    for (Round = 0; Round < 2; Round++)
+    {
+        Old = OpenPartition(1, GENERIC_READ);
+        ok(Old != INVALID_HANDLE_VALUE, "round %lu: opening P1 failed: %lu\n", Round, GetLastError());
+        MbrEntry(&Layout->PartitionEntry[0], 0, 0, 0, 0);
+        ok(SetLayout(Layout, Size), "round %lu: deleting P1 failed: %lu\n", Round, GetLastError());
+        MbrEntry(&Layout->PartitionEntry[0], 1 * MiB, 64 * MiB, PARTITION_IFS, 2048);
+        ok(SetLayoutNow(Layout, Size), "round %lu: making P1 again failed: %lu\n", Round, GetLastError());
+        Sleep(2000);
+        ok(LayoutLength(1) == 64 * MiB, "round %lu: P1 is %I64d bytes\n", Round, LayoutLength(1));
+        ok(DeviceLength(1) == 64 * MiB, "round %lu: P1 device is %I64d bytes after it was made again\n", Round, DeviceLength(1));
+        if (Old != INVALID_HANDLE_VALUE)
+            CloseHandle(Old);
+    }
+}
+
 START_TEST(GrowPartition)
 {
     CHAR Value[16];
@@ -388,4 +463,5 @@ START_TEST(GrowPartition)
     TestMbrPrimary();
     TestMbrLogical();
     TestGpt();
+    TestSetLayoutAfterGrow();
 }

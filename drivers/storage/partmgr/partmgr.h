@@ -54,6 +54,19 @@ C_ASSERT(RTL_FIELD_SIZE(BASIC_VOLUME_UNIQUE_ID, Gpt) == 0x18);
 
 #define DMIO_ID_SIGNATURE   (*(ULONGLONG*)"DMIO:ID:")
 
+// a partition's PnP instance ID: "S" + disk GUID (36) + "S_O" + 16 + "_L" + 16 hex digits,
+// then "_V" + up to 10 digits when the same ID is in use on the disk, and the NUL
+#define PARTITION_INSTANCE_ID_CHARS 96
+
+// an instance ID PnP knows on this disk: held by a partition device, or left behind by a removed one
+// that may still be in the PnP tree (it was open or had a file system when it was removed)
+typedef struct _PARTITION_ID_RECORD
+{
+    SINGLE_LIST_ENTRY ListEntry;
+    UINT32 Suffix;
+    WCHAR BaseId[PARTITION_INSTANCE_ID_CHARS];
+} PARTITION_ID_RECORD, *PPARTITION_ID_RECORD;
+
 typedef struct _FDO_EXTENSION
 {
     BOOLEAN IsFDO;
@@ -66,6 +79,7 @@ typedef struct _FDO_EXTENSION
     PDRIVE_LAYOUT_INFORMATION_EX LayoutCache;
 
     SINGLE_LIST_ENTRY PartitionList;
+    SINGLE_LIST_ENTRY InstanceIds; // PARTITION_ID_RECORDs
     UINT32 EnumeratedPartitionsTotal;
     BOOLEAN IsSuperFloppy;
 
@@ -123,6 +137,9 @@ typedef struct _PARTITION_EXTENSION
     UNICODE_STRING PartitionInterfaceName;
     UNICODE_STRING VolumeInterfaceName;
     UNICODE_STRING DeviceName;
+    PVPB CreatedVpb; // the VPB the device got at creation
+    PPARTITION_ID_RECORD IdRecord; // the instance ID, from the first time PnP asked for it
+    WCHAR BaseId[PARTITION_INSTANCE_ID_CHARS]; // signature or disk GUID, offset and length at creation
 } PARTITION_EXTENSION, *PPARTITION_EXTENSION;
 
 CODE_SEG("PAGE")
@@ -132,7 +149,22 @@ PartitionCreateDevice(
     _In_ PPARTITION_INFORMATION_EX PartitionEntry,
     _In_ UINT32 OnDiskNumber,
     _In_ PARTITION_STYLE PartitionStyle,
+    _In_reads_(PARTITION_INSTANCE_ID_CHARS) PCWCH BaseId,
     _Out_ PDEVICE_OBJECT *PDO);
+
+CODE_SEG("PAGE")
+NTSTATUS
+PartMgrQueryInstanceId(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PPARTITION_EXTENSION PartExt,
+    _Out_ PUNICODE_STRING InstanceId);
+
+CODE_SEG("PAGE")
+VOID
+PartMgrReleaseInstanceId(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PPARTITION_EXTENSION PartExt,
+    _In_ BOOLEAN LayoutLockHeld);
 
 CODE_SEG("PAGE")
 NTSTATUS
