@@ -1558,13 +1558,18 @@ MmDeleteVirtualMappingDeferFlush(
     _Inout_ PMI_DEFERRED_RELEASE Deferred
 );
 
-/* The caller flushes FlushList before it returns or drops the address space lock */
+/*
+ * The caller flushes FlushList before it returns or drops the address space lock; with a NULL
+ * FlushList the TB is flushed here. PhysicalView: a \Device\PhysicalMemory view, which keeps
+ * the requested cache bits instead of the PFN's type.
+ */
 VOID
 NTAPI
 MmSetPageProtectDeferFlush(
     struct _EPROCESS *Process,
     PVOID Address,
     ULONG flProtect,
+    BOOLEAN PhysicalView,
     PMM_TB_FLUSH_LIST FlushList
 );
 

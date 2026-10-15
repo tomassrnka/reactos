@@ -754,11 +754,14 @@ MmCreateVirtualMappingUnsafeEx(
         OldIrql = MiAcquirePfnLock();
         Pfn1 = &MmPfnDatabase[TempPte.u.Hard.PageFrameNumber];
 
-        /* The first mapping of a page decides its caching type, later ones follow it */
-        if (Pfn1->u2.ShareCount == 0)
-            Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(ProtectionMask);
-        else
-            MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
+        /* The first mapping of a RosMm page decides its caching type, later ones follow it */
+        if (MI_IS_ROS_PFN(Pfn1))
+        {
+            if (Pfn1->u2.ShareCount == 0)
+                Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(ProtectionMask);
+            else if (Pfn1->u3.e1.CacheAttribute != MiNotMapped)
+                MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
+        }
 
         Pfn1->u2.ShareCount++;
         Pfn1->u3.e1.PageLocation = ActiveAndValid;
@@ -898,9 +901,14 @@ MmGetPageProtect(PEPROCESS Process, PVOID Address)
     return(Protect);
 }
 
+/*
+ * PhysicalView: the PTE maps a page through a \Device\PhysicalMemory view, which never records its
+ * cache type in the PFN, so the requested cache bits are kept.
+ * FlushList: the caller flushes the TB for the list; NULL flushes it here.
+ */
 static
 VOID
-MmSetPageProtectEx(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLUSH_LIST FlushList)
+MiSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect, BOOLEAN PhysicalView, PMM_TB_FLUSH_LIST FlushList)
 {
     ULONG ProtectionMask;
     PMMPTE PointerPte;
@@ -933,9 +941,9 @@ MmSetPageProtectEx(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLU
     TempPte.u.Long |= MmProtectToPteMask[ProtectionMask];
     TempPte.u.Hard.Owner = 1;
 
-    /* A page keeps the caching type its PFN records, as in MiFlushTbAndCapture */
-    Pfn1 = MiGetPfnEntry(TempPte.u.Hard.PageFrameNumber);
-    if (Pfn1 != NULL)
+    /* A RosMm page keeps the caching type its PFN records, as in MiFlushTbAndCapture */
+    Pfn1 = PhysicalView ? NULL : MiGetPfnEntry(TempPte.u.Hard.PageFrameNumber);
+    if ((Pfn1 != NULL) && MI_IS_ROS_PFN(Pfn1) && (Pfn1->u3.e1.CacheAttribute != MiNotMapped))
         MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
 
     /* Only set valid bit if we have to */
@@ -970,14 +978,14 @@ VOID
 NTAPI
 MmSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect)
 {
-    MmSetPageProtectEx(Process, Address, flProtect, NULL);
+    MiSetPageProtect(Process, Address, flProtect, FALSE, NULL);
 }
 
 VOID
 NTAPI
-MmSetPageProtectDeferFlush(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLUSH_LIST FlushList)
+MmSetPageProtectDeferFlush(PEPROCESS Process, PVOID Address, ULONG flProtect, BOOLEAN PhysicalView, PMM_TB_FLUSH_LIST FlushList)
 {
-    MmSetPageProtectEx(Process, Address, flProtect, FlushList);
+    MiSetPageProtect(Process, Address, flProtect, PhysicalView, FlushList);
 }
 
 VOID

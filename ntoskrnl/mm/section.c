@@ -1608,7 +1608,9 @@ MmAlterViewAttributes(PMMSUPPORT AddressSpace,
 
             if (MmIsPagePresent(Process, Address) || MmIsDisabledPage(Process, Address))
             {
-                MmSetPageProtectDeferFlush(Process, Address, Protect, &FlushList);
+                MmSetPageProtectDeferFlush(Process, Address, Protect,
+                                           BooleanFlagOn(*Segment->Flags, MM_PHYSICALMEMORY_SEGMENT),
+                                           &FlushList);
             }
         }
     }
@@ -2112,7 +2114,8 @@ MiAccessFaultSectionView(PMMSUPPORT AddressSpace,
     if (!Cow)
     {
         /* Simply update page protection and we're done */
-        MmSetPageProtect(Process, Address, Region->Protect);
+        MmSetPageProtectDeferFlush(Process, Address, Region->Protect,
+                                   BooleanFlagOn(*Segment->Flags, MM_PHYSICALMEMORY_SEGMENT), NULL);
         return STATUS_SUCCESS;
     }
 
@@ -2158,7 +2161,8 @@ MiAccessFaultSectionView(PMMSUPPORT AddressSpace,
     {
         MmUnlockSectionSegment(Segment);
         /* This is a private page. We must only change the page protection. */
-        MmSetPageProtect(Process, PAddress, NewProtect);
+        MmSetPageProtectDeferFlush(Process, PAddress, NewProtect,
+                                   BooleanFlagOn(*Segment->Flags, MM_PHYSICALMEMORY_SEGMENT), NULL);
         goto UpdateRegion;
     }
 
