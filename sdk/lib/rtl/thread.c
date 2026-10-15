@@ -16,6 +16,8 @@
 #define NDEBUG
 #include <debug.h>
 
+#define THREAD_ALL_ACCESS_NT6 (STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|0xFFFF)
+
 /* PRIVATE FUNCTIONS *******************************************************/
 
 NTSTATUS
@@ -254,7 +256,7 @@ RtlCreateUserThread(IN HANDLE ProcessHandle,
                                NULL,
                                SecurityDescriptor);
     Status = ZwCreateThread(&Handle,
-                            THREAD_ALL_ACCESS,
+                            THREAD_ALL_ACCESS_NT6,
                             &ObjectAttributes,
                             ProcessHandle,
                             &ThreadCid,
