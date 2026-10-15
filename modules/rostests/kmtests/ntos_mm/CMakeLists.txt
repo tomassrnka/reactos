@@ -30,3 +30,17 @@ add_importlibs(mmmaplockedpagesspecifycache_drv ntoskrnl hal)
 target_compile_definitions(mmmaplockedpagesspecifycache_drv PRIVATE KMT_STANDALONE_DRIVER)
 #add_pch(mmmaplockedpagesspecifycache_drv ../include/kmt_test.h)
 add_rostests_file(TARGET mmmaplockedpagesspecifycache_drv)
+
+#
+# MmSpecialPool (user-mode accesses)
+#
+list(APPEND MMSPECIALPOOL_DRV_SOURCE
+    ../kmtest_drv/kmtest_standalone.c
+    MmSpecialPool_drv.c)
+
+add_library(mmspecialpool_drv MODULE ${MMSPECIALPOOL_DRV_SOURCE})
+set_module_type(mmspecialpool_drv kernelmodedriver)
+target_link_libraries(mmspecialpool_drv kmtest_printf ${PSEH_LIB})
+add_importlibs(mmspecialpool_drv ntoskrnl hal)
+target_compile_definitions(mmspecialpool_drv PRIVATE KMT_STANDALONE_DRIVER)
+add_rostests_file(TARGET mmspecialpool_drv)

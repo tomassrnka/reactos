@@ -634,6 +634,17 @@ extern PVOID MmSystemCacheEnd;
 extern MMSUPPORT MmSystemCacheWs;
 extern SIZE_T MmAllocatedNonPagedPool;
 extern ULONG MmSpecialPoolTag;
+extern ULONG MiSpecialPoolTagRaw[2];
+extern ULONG MiSpecialPoolTagRawLength;
+extern ULONG MiSpecialPoolTagRawType;
+extern ULONG MmSpecialPoolCatchOverruns;
+extern ULONG MiSpecialPoolOverrunsRaw[2];
+extern ULONG MiSpecialPoolOverrunsRawLength;
+extern ULONG MiSpecialPoolOverrunsRawType;
+#define MI_SPECIAL_POOL_TAG_LIST_CHARS 128
+extern WCHAR MiSpecialPoolTagList[MI_SPECIAL_POOL_TAG_LIST_CHARS + 1];
+extern ULONG MiSpecialPoolTagListLength;
+extern ULONG MiSpecialPoolTagListType;
 extern PVOID MmHyperSpaceEnd;
 extern PMMWSL MmSystemCacheWorkingSetList;
 extern SIZE_T MmMinimumNonPagedPoolSize;

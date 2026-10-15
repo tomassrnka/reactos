@@ -838,6 +838,25 @@ MmUseSpecialPool(
 
 BOOLEAN
 NTAPI
+MiSpecialPoolConfigured(VOID);
+
+extern BOOLEAN MmSpecialPoolEnabled;
+
+VOID
+NTAPI
+MmCheckSpecialPoolFault(
+    _In_ ULONG FaultCode,
+    _In_ PVOID Address,
+    _In_opt_ PVOID TrapInformation);
+
+BOOLEAN
+NTAPI
+MmSpecialPoolSelectsLookaside(
+    IN SIZE_T NumberOfBytes,
+    IN ULONG Tag);
+
+BOOLEAN
+NTAPI
 MmIsSpecialPoolAddress(
     IN PVOID P);
 
