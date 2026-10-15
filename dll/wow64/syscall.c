@@ -95,6 +95,22 @@ typedef struct
     WCHAR Name[1];
 } WOW64_RENAME_INFORMATION;
 
+typedef struct
+{
+    LARGE_INTEGER PerProcessUserTimeLimit, PerJobUserTimeLimit;
+    ULONG LimitFlags, MinimumWorkingSetSize, MaximumWorkingSetSize;
+    ULONG ActiveProcessLimit, Affinity, PriorityClass, SchedulingClass;
+} WOW64_JOB_BASIC_LIMIT;
+
+typedef struct
+{
+    WOW64_JOB_BASIC_LIMIT Basic;
+    IO_COUNTERS IoInfo;
+    ULONG ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+} WOW64_JOB_EXTENDED_LIMIT;
+C_ASSERT(sizeof(WOW64_JOB_BASIC_LIMIT) == 48);
+C_ASSERT(sizeof(WOW64_JOB_EXTENDED_LIMIT) == 112);
+
 static VOID ProbeOutput(ULONG Address, ULONG Size)
 {
     volatile UCHAR *Bytes = PTR32(Address);
@@ -479,6 +495,45 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtDeleteKey: return NtDeleteKey(H(0));
     case W64_NtDeleteValueKey: return NtDeleteValueKey(H(0), String32(&Name, P(1)));
     case W64_NtFlushKey: return NtFlushKey(H(0));
+    case W64_NtCreateJobObject:
+        PROBE(0); ATTR(2);
+        Status = NtCreateJobObject(&Cleanup->Handle, a[1], OA(2));
+        RETURN_HANDLE();
+    case W64_NtOpenJobObject:
+        PROBE(0); ATTR(2);
+        Status = NtOpenJobObject(&Cleanup->Handle, a[1], OA(2));
+        RETURN_HANDLE();
+    case W64_NtAssignProcessToJobObject: return NtAssignProcessToJobObject(H(0), H(1));
+    case W64_NtTerminateJobObject: return NtTerminateJobObject(H(0), a[1]);
+    case W64_NtSetInformationJobObject:
+        if (a[1] == JobObjectBasicLimitInformation || a[1] == JobObjectExtendedLimitInformation)
+        {
+            const WOW64_JOB_EXTENDED_LIMIT *From = P(2);
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION To = {0};
+            BOOLEAN Extended = a[1] == JobObjectExtendedLimitInformation;
+            if (a[3] != (Extended ? sizeof(*From) : sizeof(From->Basic)))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            To.BasicLimitInformation.PerProcessUserTimeLimit = From->Basic.PerProcessUserTimeLimit;
+            To.BasicLimitInformation.PerJobUserTimeLimit = From->Basic.PerJobUserTimeLimit;
+            To.BasicLimitInformation.LimitFlags = From->Basic.LimitFlags;
+            To.BasicLimitInformation.MinimumWorkingSetSize = From->Basic.MinimumWorkingSetSize;
+            To.BasicLimitInformation.MaximumWorkingSetSize = From->Basic.MaximumWorkingSetSize;
+            To.BasicLimitInformation.ActiveProcessLimit = From->Basic.ActiveProcessLimit;
+            To.BasicLimitInformation.Affinity = From->Basic.Affinity;
+            To.BasicLimitInformation.PriorityClass = From->Basic.PriorityClass;
+            To.BasicLimitInformation.SchedulingClass = From->Basic.SchedulingClass;
+            if (Extended)
+            {
+                To.IoInfo = From->IoInfo;
+                To.ProcessMemoryLimit = From->ProcessMemoryLimit;
+                To.JobMemoryLimit = From->JobMemoryLimit;
+                To.PeakProcessMemoryUsed = From->PeakProcessMemoryUsed;
+                To.PeakJobMemoryUsed = From->PeakJobMemoryUsed;
+            }
+            return NtSetInformationJobObject(H(0), a[1], &To,
+                       Extended ? sizeof(To) : sizeof(To.BasicLimitInformation));
+        }
+        return STATUS_NOT_SUPPORTED;
     case W64_NtCreateEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateEvent(&Cleanup->Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
