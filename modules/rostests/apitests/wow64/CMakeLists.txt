@@ -225,3 +225,7 @@ add_importlibs(wow64_job msvcrt kernel32)
 add_executable(wow64_directory EXCLUDE_FROM_ALL wow64_directory.c)
 set_module_type(wow64_directory win32cui)
 add_importlibs(wow64_directory msvcrt kernel32)
+
+add_executable(wow64_pipe_connect EXCLUDE_FROM_ALL pipe_connect.c)
+set_module_type(wow64_pipe_connect win32cui)
+add_importlibs(wow64_pipe_connect msvcrt kernel32)

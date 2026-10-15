@@ -696,21 +696,18 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                                       a[5], Input, InputLength, P(8), a[9]);
     }
     case W64_NtFsControlFile:
-    {
-        FILE_MODE_INFORMATION Mode;
-        /* PIPE_PEEK has a fixed-width header followed by bytes. Keep the
-         * temporary IOSB alive by accepting only synchronous file handles. */
-        if (a[1] || a[2] || a[3] || a[5] != FSCTL_PIPE_PEEK)
-            return STATUS_NOT_SUPPORTED;
-        ProbeOutput(a[4], sizeof(WOW64_IOSB));
-        Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
-        if (!NT_SUCCESS(Status)) return Status;
-        if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
-            return STATUS_NOT_SUPPORTED;
-        Status = NtFsControlFile(H(0), NULL, NULL, NULL, &Io, a[5], P(6), a[7], P(8), a[9]);
-        StoreIo(a[4], &Io);
-        return Status;
-    }
+        /* These pipe operations carry opaque bytes or fixed-width records.
+         * Keep the guest IOSB alive through pending listen/transceive requests. */
+        switch (a[5])
+        {
+        case FSCTL_PIPE_PEEK: case FSCTL_PIPE_LISTEN: case FSCTL_PIPE_DISCONNECT:
+        case FSCTL_PIPE_WAIT: case FSCTL_PIPE_TRANSCEIVE:
+            return NtFsControlFile(H(0), H(1),
+                       a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
+                       P(3), (PVOID)(0x8000000000000000ULL | a[4]),
+                       a[5], P(6), a[7], P(8), a[9]);
+        default: return STATUS_NOT_SUPPORTED;
+        }
     case W64_NtQueryAttributesFile:
         FILEATTR(0); return NtQueryAttributesFile(OA(0), P(1));
     case W64_NtQueryFullAttributesFile:
