@@ -747,7 +747,7 @@ SepDuplicateToken(
                  * this group.
                  */
                 if (RtlEqualSid(SeAliasAdminsSid,
-                                &AccessToken->UserAndGroups[GroupsIndex].Sid))
+                                AccessToken->UserAndGroups[GroupsIndex].Sid))
                 {
                     AccessToken->TokenFlags &= ~TOKEN_HAS_ADMIN_GROUP;
                 }
@@ -805,6 +805,37 @@ Quit:
     return Status;
 }
 
+static
+BOOLEAN
+SepSidInSidAndAttributes(
+    _In_reads_(Count) PSID_AND_ATTRIBUTES SidAndAttributes,
+    _In_ ULONG Count,
+    _In_ PSID Sid)
+{
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        if (RtlEqualSid(SidAndAttributes[Index].Sid, Sid))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* The privileges a LUA_TOKEN filter leaves in the token */
+static
+BOOLEAN
+SepIsLuaPrivilege(
+    _In_ PLUID Luid)
+{
+    return RtlEqualLuid(Luid, &SeChangeNotifyPrivilege) ||
+           RtlEqualLuid(Luid, &SeShutdownPrivilege) ||
+           RtlEqualLuid(Luid, &SeUndockPrivilege) ||
+           RtlEqualLuid(Luid, &SeIncreaseWorkingSetPrivilege) ||
+           RtlEqualLuid(Luid, &SeTimeZonePrivilege);
+}
+
 /**
  * @brief
  * Private helper function responsible for creating a restricted access
@@ -854,13 +885,11 @@ Quit:
  * code is returned otherwise.
  *
  * @remarks
- * The final outcome of privileges and/or SIDs filtering is not always
- * deterministic. That is, any privileges or SIDs that aren't present
- * in the access token are ignored and the function continues with the
- * next privilege or SID to find for filtering. For a fully deterministic
- * outcome the caller is responsible for querying the information details
- * of privileges and SIDs present in the token and then afterwards use
- * such obtained information to do any kind of filtering to the token.
+ * Privileges and SIDs that aren't present in the access token are ignored.
+ * Groups to be disabled become deny-only, integrity labels excepted. For a
+ * token that is already restricted, the new restricting SIDs are those of
+ * the list that the token has already; the list must name at least one of
+ * them, otherwise STATUS_INVALID_PARAMETER is returned.
  */
 static
 NTSTATUS
@@ -879,65 +908,77 @@ SepPerformTokenFiltering(
     NTSTATUS Status;
     PTOKEN AccessToken;
     PVOID EndMem;
+    PSID Sid;
     ULONG DynamicPartSize;
     ULONG RestrictedSidsLength;
     ULONG PrivilegesLength;
     ULONG PrimaryGroupIndex;
     ULONG RestrictedSidsInList;
-    ULONG RestrictedSidsInToken;
+    ULONG NewRestrictedCount;
+    ULONG SidLength;
     ULONG VariableLength, TotalSize;
     ULONG PrivsInToken, PrivsInList;
-    ULONG GroupsInToken, GroupsInList;
-    BOOLEAN WantPrivilegesDisabled;
-    BOOLEAN FoundPrivilege;
-    BOOLEAN FoundGroup;
+    ULONG GroupsInToken;
+    BOOLEAN DeletePrivilege;
+    BOOLEAN DisableGroup;
 
     PAGED_CODE();
+
+    if (SidsToBeDisabled == NULL)
+        RegularGroupsSidCount = 0;
+    if (PrivilegesToBeDeleted == NULL)
+        PrivilegesCount = 0;
+    if (RestrictedSidsIntoToken == NULL)
+        RestrictedSidsCount = 0;
 
     /* Ensure that the source token is valid, and lock it */
     ASSERT(Token);
     SepAcquireTokenLockShared(Token);
 
-    /* Assume the caller doesn't want privileges disabled */
-    WantPrivilegesDisabled = FALSE;
+    /*
+     * Count the restricting SIDs of the new token. A restricted source
+     * token keeps only those of its restricting SIDs that the caller
+     * names again, and it must keep at least one of them.
+     */
+    NewRestrictedCount = 0;
+    RestrictedSidsLength = 0;
+    for (RestrictedSidsInList = 0; RestrictedSidsInList < RestrictedSidsCount; RestrictedSidsInList++)
+    {
+        /* Restricting SIDs come without attributes */
+        if (RestrictedSidsIntoToken[RestrictedSidsInList].Attributes != 0)
+        {
+            DPRINT1("SepPerformTokenFiltering(): There mustn't be any attributes to restricted SIDs!\n");
+            SepReleaseTokenLock(Token);
+            return STATUS_INVALID_PARAMETER;
+        }
 
-    /* Assume we haven't found anything */
-    FoundPrivilege = FALSE;
-    FoundGroup = FALSE;
+        Sid = RestrictedSidsIntoToken[RestrictedSidsInList].Sid;
+        if (SeTokenIsRestricted(Token) &&
+            !SepSidInSidAndAttributes(Token->RestrictedSids, Token->RestrictedSidCount, Sid))
+        {
+            continue;
+        }
+
+        NewRestrictedCount++;
+        RestrictedSidsLength += sizeof(SID_AND_ATTRIBUTES) + RtlLengthSid(Sid);
+    }
+
+    if (SeTokenIsRestricted(Token) && NewRestrictedCount == 0)
+    {
+        DPRINT1("SepPerformTokenFiltering(): A restricted token must keep some of its restricted SIDs!\n");
+        SepReleaseTokenLock(Token);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     /*
-     * Take the size that we need for filtered token
-     * allocation based upon the existing access token
-     * we've been given.
+     * The filtered token holds the privileges and groups of the existing
+     * token and its own restricting SIDs. The existing token's variable
+     * part already covers its restricting SIDs, which the new list replaces;
+     * one pointer more aligns the new list.
      */
-    VariableLength = Token->VariableLength;
-
-    if (RestrictedSidsIntoToken != NULL)
-    {
-        /*
-         * If the caller provided a list of restricted SIDs
-         * to be added onto the filtered access token then
-         * we must compute the size which is the total space
-         * of the current token and the length of the restricted
-         * SIDs for the filtered token.
-         */
-        RestrictedSidsLength = RestrictedSidsCount * sizeof(SID_AND_ATTRIBUTES);
-        RestrictedSidsLength += RtlLengthSidAndAttributes(RestrictedSidsCount, RestrictedSidsIntoToken);
-        RestrictedSidsLength = ALIGN_UP_BY(RestrictedSidsLength, sizeof(PVOID));
-
-        /*
-         * The variable length of the token is not just
-         * the actual space length of the existing token
-         * but also the sum of the restricted SIDs length.
-         */
-        VariableLength += RestrictedSidsLength;
-        TotalSize = FIELD_OFFSET(TOKEN, VariablePart) + VariableLength + RestrictedSidsLength;
-    }
-    else
-    {
-        /* Otherwise the size is of the actual current token */
-        TotalSize = FIELD_OFFSET(TOKEN, VariablePart) + VariableLength;
-    }
+    RestrictedSidsLength = ALIGN_UP_BY(RestrictedSidsLength, sizeof(PVOID));
+    VariableLength = Token->VariableLength + RestrictedSidsLength + sizeof(PVOID);
+    TotalSize = FIELD_OFFSET(TOKEN, VariablePart) + VariableLength;
 
     /*
      * Compute how much size we need to allocate
@@ -1086,85 +1127,41 @@ SepPerformTokenFiltering(
         }
     }
 
-    /* Copy the restricted SIDs */
+    /*
+     * Copy the restricting SIDs into the token's own memory. They are
+     * enabled, enabled by default and mandatory, so that access checks
+     * use them.
+     */
     AccessToken->RestrictedSidCount = 0;
     AccessToken->RestrictedSids = NULL;
-    if (Token->RestrictedSids && (Token->RestrictedSidCount > 0))
+    AccessToken->TokenFlags &= ~TOKEN_IS_RESTRICTED;
+    if (NewRestrictedCount > 0)
     {
-        AccessToken->RestrictedSidCount = Token->RestrictedSidCount;
+        EndMem = (PVOID)ALIGN_UP_POINTER_BY(EndMem, sizeof(PVOID));
+        ASSERT((ULONG_PTR)EndMem + RestrictedSidsLength <= (ULONG_PTR)&AccessToken->VariablePart + AccessToken->VariableLength);
+
         AccessToken->RestrictedSids = EndMem;
-        EndMem = &AccessToken->RestrictedSids[AccessToken->RestrictedSidCount];
-        VariableLength -= ((ULONG_PTR)EndMem - (ULONG_PTR)AccessToken->RestrictedSids);
+        EndMem = &AccessToken->RestrictedSids[NewRestrictedCount];
 
-        Status = RtlCopySidAndAttributesArray(AccessToken->RestrictedSidCount,
-                                              Token->RestrictedSids,
-                                              VariableLength,
-                                              AccessToken->RestrictedSids,
-                                              EndMem,
-                                              &EndMem,
-                                              &VariableLength);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("SepPerformTokenFiltering(): Failed to copy the restricted SIDs into token (Status 0x%lx)\n", Status);
-            goto Quit;
-        }
-    }
-
-    /*
-     * Insert the restricted SIDs into the token on
-     * the request by the caller.
-     */
-    if (RestrictedSidsIntoToken != NULL)
-    {
         for (RestrictedSidsInList = 0; RestrictedSidsInList < RestrictedSidsCount; RestrictedSidsInList++)
         {
-            /* Did the caller assign attributes to the restricted SIDs? */
-            if (RestrictedSidsIntoToken[RestrictedSidsInList].Attributes != 0)
+            Sid = RestrictedSidsIntoToken[RestrictedSidsInList].Sid;
+            if (SeTokenIsRestricted(Token) &&
+                !SepSidInSidAndAttributes(Token->RestrictedSids, Token->RestrictedSidCount, Sid))
             {
-                /* There mustn't be any attributes, bail out */
-                DPRINT1("SepPerformTokenFiltering(): There mustn't be any attributes to restricted SIDs!\n");
-                Status = STATUS_INVALID_PARAMETER;
-                goto Quit;
+                continue;
             }
+
+            SidLength = RtlLengthSid(Sid);
+            RtlCopySid(SidLength, EndMem, Sid);
+            AccessToken->RestrictedSids[AccessToken->RestrictedSidCount].Sid = EndMem;
+            AccessToken->RestrictedSids[AccessToken->RestrictedSidCount].Attributes =
+                SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+            AccessToken->RestrictedSidCount++;
+            EndMem = (PVOID)((ULONG_PTR)EndMem + SidLength);
         }
 
-        /*
-         * Ensure that the token can hold the restricted SIDs
-         * (the variable length is calculated at the beginning
-         * of the routine call).
-         */
-        ASSERT(VariableLength >= RestrictedSidsLength);
-
-        /*
-         * Now let's begin inserting the restricted SIDs into the filtered
-         * access token from the list the caller gave us.
-         */
-        AccessToken->RestrictedSidCount = RestrictedSidsCount;
-        AccessToken->RestrictedSids = EndMem;
-        EndMem = (PVOID)((ULONG_PTR)EndMem + RestrictedSidsLength);
-        VariableLength -= RestrictedSidsLength;
-
-        RtlCopyMemory(AccessToken->RestrictedSids,
-                      RestrictedSidsIntoToken,
-                      AccessToken->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES));
-
-        /*
-         * As we've copied the restricted SIDs into
-         * the token, we must assign them the following
-         * combination of attributes SE_GROUP_ENABLED,
-         * SE_GROUP_ENABLED_BY_DEFAULT and SE_GROUP_MANDATORY.
-         * With such attributes we estabilish that restricting
-         * SIDs into the token are enabled for access checks.
-         */
-        for (RestrictedSidsInToken = 0; RestrictedSidsInToken < AccessToken->RestrictedSidCount; RestrictedSidsInToken++)
-        {
-            AccessToken->RestrictedSids[RestrictedSidsInToken].Attributes |= (SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY);
-        }
-
-        /*
-         * As we added restricted SIDs into the token, mark
-         * it as restricted.
-         */
+        ASSERT(AccessToken->RestrictedSidCount == NewRestrictedCount);
         AccessToken->TokenFlags |= TOKEN_IS_RESTRICTED;
     }
 
@@ -1218,177 +1215,83 @@ SepPerformTokenFiltering(
                       Token->DefaultDacl->AclSize);
     }
 
-    /*
-     * Now figure out what does the caller
-     * want with the privileges.
-     */
-    if (PrivilegeFlags & DISABLE_MAX_PRIVILEGE)
-    {
-        /*
-         * The caller wants them disabled, cache this request
-         * for later operations.
-         */
-        WantPrivilegesDisabled = TRUE;
-    }
-
     if (PrivilegeFlags & SANDBOX_INERT)
     {
         /* The caller wants an inert token, store the TOKEN_SANDBOX_INERT flag now */
         AccessToken->TokenFlags |= TOKEN_SANDBOX_INERT;
     }
 
-    /*
-     * Now it's time to filter the token's privileges.
-     * Loop all the privileges in the token.
-     */
-    for (PrivsInToken = 0; PrivsInToken < AccessToken->PrivilegeCount; PrivsInToken++)
+    if ((PrivilegeFlags & WRITE_RESTRICTED) && (NewRestrictedCount > 0))
     {
-        if (WantPrivilegesDisabled)
-        {
-            /*
-             * We got the acknowledgement that the caller wants
-             * to disable all the privileges so let's just do it.
-             * However, as per the general documentation is stated
-             * that only SE_CHANGE_NOTIFY_PRIVILEGE must be kept
-             * therefore in that case we must skip this privilege.
-             */
-            if (AccessToken->Privileges[PrivsInToken].Luid.LowPart == SE_CHANGE_NOTIFY_PRIVILEGE)
-            {
-                continue;
-            }
-            else
-            {
-                /*
-                 * The act of disabling privileges actually means
-                 * "deleting" them from the access token entirely.
-                 * First we must disable them so that we can update
-                 * token flags accordingly.
-                 */
-                AccessToken->Privileges[PrivsInToken].Attributes &= ~SE_PRIVILEGE_ENABLED;
-                SepUpdateSinglePrivilegeFlagToken(AccessToken, PrivsInToken);
-
-                /* Remove the privileges now */
-                SepRemovePrivilegeToken(AccessToken, PrivsInToken);
-                PrivsInToken--;
-            }
-        }
-        else
-        {
-            if (PrivilegesToBeDeleted != NULL)
-            {
-                /* Loop the privileges we've got to delete */
-                for (PrivsInList = 0; PrivsInList < PrivilegesCount; PrivsInList++)
-                {
-                    /* Does this privilege exist in the token? */
-                    if (RtlEqualLuid(&AccessToken->Privileges[PrivsInToken].Luid,
-                                     &PrivilegesToBeDeleted[PrivsInList].Luid))
-                    {
-                        /* Mark that we found it */
-                        FoundPrivilege = TRUE;
-                        break;
-                    }
-                }
-
-                /* Did we find the privilege? */
-                if (PrivsInList == PrivilegesCount)
-                {
-                    /* We didn't, continue with next one */
-                    continue;
-                }
-            }
-        }
-
-        /*
-         * If we have found the target privilege in the token
-         * based on the privileges list given by the caller
-         * then begin deleting it.
-         */
-        if (FoundPrivilege)
-        {
-            /* Disable the privilege and update the flags */
-            AccessToken->Privileges[PrivsInToken].Attributes &= ~SE_PRIVILEGE_ENABLED;
-            SepUpdateSinglePrivilegeFlagToken(AccessToken, PrivsInToken);
-
-            /* Delete the privilege */
-            SepRemovePrivilegeToken(AccessToken, PrivsInToken);
-
-            /*
-             * Adjust the index and reset the FoundPrivilege indicator
-             * so that we can continue with the next privilege to delete.
-             */
-            PrivsInToken--;
-            FoundPrivilege = FALSE;
-            continue;
-        }
+        /* SeTokenIsWriteRestricted reads this bit; TOKEN_WRITE_RESTRICTED is TOKEN_HAS_ADMIN_GROUP here */
+        AccessToken->TokenFlags |= SE_BACKUP_PRIVILEGES_CHECKED;
     }
 
     /*
-     * Loop the group SIDs that we want to disable as
-     * per on the request by the caller.
+     * Delete privileges. DISABLE_MAX_PRIVILEGE deletes all but
+     * SeChangeNotifyPrivilege and ignores the list; LUA_TOKEN keeps
+     * the privileges of a standard user; the list deletes what it names.
      */
-    if (SidsToBeDisabled != NULL)
+    PrivsInToken = 0;
+    while (PrivsInToken < AccessToken->PrivilegeCount)
     {
-        for (GroupsInToken = 0; GroupsInToken < AccessToken->UserAndGroupCount; GroupsInToken++)
+        PLUID Luid = &AccessToken->Privileges[PrivsInToken].Luid;
+
+        if (PrivilegeFlags & DISABLE_MAX_PRIVILEGE)
         {
-            for (GroupsInList = 0; GroupsInList < RegularGroupsSidCount; GroupsInList++)
+            DeletePrivilege = !RtlEqualLuid(Luid, &SeChangeNotifyPrivilege);
+        }
+        else
+        {
+            DeletePrivilege = (PrivilegeFlags & LUA_TOKEN) && !SepIsLuaPrivilege(Luid);
+            for (PrivsInList = 0; !DeletePrivilege && PrivsInList < PrivilegesCount; PrivsInList++)
             {
-                /* Does this group SID exist in the token? */
-                if (RtlEqualSid(&AccessToken->UserAndGroups[GroupsInToken].Sid,
-                                &SidsToBeDisabled[GroupsInList].Sid))
-                {
-                    /* Mark that we found it */
-                    FoundGroup = TRUE;
-                    break;
-                }
-            }
-
-            /* Did we find the group? */
-            if (GroupsInList == RegularGroupsSidCount)
-            {
-                /* We didn't, continue with next one */
-                continue;
-            }
-
-            /* If we have found the group, disable it */
-            if (FoundGroup)
-            {
-                /*
-                 * If the acess token belongs to the administrators
-                 * group and this is the target group, we must take
-                 * away TOKEN_HAS_ADMIN_GROUP flag from the token.
-                 */
-                if (RtlEqualSid(SeAliasAdminsSid,
-                                &AccessToken->UserAndGroups[GroupsInToken].Sid))
-                {
-                    AccessToken->TokenFlags &= ~TOKEN_HAS_ADMIN_GROUP;
-                }
-
-                /*
-                 * If the target group that we have found it is the
-                 * owner then from now on it no longer is but the user.
-                 * Therefore assign the default owner index as the user.
-                 */
-                if (AccessToken->DefaultOwnerIndex == GroupsInToken)
-                {
-                    AccessToken->DefaultOwnerIndex = 0;
-                }
-
-                /*
-                 * The principle of disabling a group SID is by
-                 * taking away SE_GROUP_ENABLED_BY_DEFAULT and
-                 * SE_GROUP_ENABLED attributes and assign
-                 * SE_GROUP_USE_FOR_DENY_ONLY. This renders
-                 * SID a "Deny only" SID.
-                 */
-                AccessToken->UserAndGroups[GroupsInToken].Attributes &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
-                AccessToken->UserAndGroups[GroupsInToken].Attributes |= SE_GROUP_USE_FOR_DENY_ONLY;
-
-                /* Adjust the index and continue with the next group */
-                GroupsInToken--;
-                FoundGroup = FALSE;
-                continue;
+                DeletePrivilege = RtlEqualLuid(Luid, &PrivilegesToBeDeleted[PrivsInList].Luid);
             }
         }
+
+        if (!DeletePrivilege)
+        {
+            PrivsInToken++;
+            continue;
+        }
+
+        /* Disable the privilege first so that the token flags follow, then delete it */
+        AccessToken->Privileges[PrivsInToken].Attributes &= ~SE_PRIVILEGE_ENABLED;
+        SepUpdateSinglePrivilegeFlagToken(AccessToken, PrivsInToken);
+        SepRemovePrivilegeToken(AccessToken, PrivsInToken);
+    }
+
+    /*
+     * Make groups deny-only: those the caller names, and for LUA_TOKEN
+     * the Administrators group. Integrity labels are never changed. A
+     * deny-only group matches only deny ACEs and keeps no attribute but
+     * the logon SID marker.
+     */
+    for (GroupsInToken = 0; GroupsInToken < AccessToken->UserAndGroupCount; GroupsInToken++)
+    {
+        Sid = AccessToken->UserAndGroups[GroupsInToken].Sid;
+        if (AccessToken->UserAndGroups[GroupsInToken].Attributes & SE_GROUP_INTEGRITY)
+            continue;
+
+        DisableGroup = SepSidInSidAndAttributes(SidsToBeDisabled, RegularGroupsSidCount, Sid) ||
+                       ((PrivilegeFlags & LUA_TOKEN) && RtlEqualSid(SeAliasAdminsSid, Sid));
+        if (!DisableGroup)
+            continue;
+
+        if (RtlEqualSid(SeAliasAdminsSid, Sid))
+        {
+            AccessToken->TokenFlags &= ~TOKEN_HAS_ADMIN_GROUP;
+        }
+
+        /* A deny-only group cannot own objects; the user becomes the default owner */
+        if (AccessToken->DefaultOwnerIndex == GroupsInToken)
+        {
+            AccessToken->DefaultOwnerIndex = 0;
+        }
+
+        AccessToken->UserAndGroups[GroupsInToken].Attributes =
+            (AccessToken->UserAndGroups[GroupsInToken].Attributes & SE_GROUP_LOGON_ID) | SE_GROUP_USE_FOR_DENY_ONLY;
     }
 
     /* We've finally filtered the token, return it to the caller */
@@ -1480,9 +1383,9 @@ SeFilterToken(
 
     /* Call the internal API */
     Status = SepPerformTokenFiltering(ExistingToken,
-                                      PrivilegesToDelete->Privileges,
-                                      SidsToDisable->Groups,
-                                      RestrictedSids->Groups,
+                                      PrivilegesToDelete ? PrivilegesToDelete->Privileges : NULL,
+                                      SidsToDisable ? SidsToDisable->Groups : NULL,
+                                      RestrictedSids ? RestrictedSids->Groups : NULL,
                                       PrivilegesCount,
                                       SidsCount,
                                       RestrictedSidsCount,

@@ -866,6 +866,113 @@ SepAnalyzeAcesFromDacl(
 
 /**
  * @brief
+ * Returns the access rights that the restricting SIDs of a token
+ * are checked for.
+ *
+ * @param[in] Token
+ * A restricted access token.
+ *
+ * @param[in] GenericMapping
+ * The generic mapping of the object type.
+ *
+ * @return
+ * Every right for a restricted token. For a write-restricted token the
+ * rights that write: the generic write rights of the object type and
+ * DELETE, WRITE_DAC and WRITE_OWNER.
+ */
+static
+ACCESS_MASK
+SepRestrictedAccessMask(
+    _In_ PACCESS_TOKEN Token,
+    _In_ PGENERIC_MAPPING GenericMapping)
+{
+    if (!SeTokenIsWriteRestricted(Token))
+        return ~(ACCESS_MASK)0;
+
+    return GenericMapping->GenericWrite | DELETE | WRITE_DAC | WRITE_OWNER;
+}
+
+/**
+ * @brief
+ * Runs the second, restricting-SID pass of a maximum access check and
+ * keeps only the rights that both passes granted.
+ *
+ * @param[in,out] AccessCheckRights
+ * On input the rights granted by the normal pass, on output the
+ * rights granted by both passes.
+ *
+ * @return
+ * STATUS_SUCCESS, or STATUS_INSUFFICIENT_RESOURCES.
+ */
+static
+NTSTATUS
+SepRestrictMaximumAccess(
+    _In_ PACL Dacl,
+    _In_ PACCESS_TOKEN Token,
+    _In_ PACCESS_TOKEN PrimaryAccessToken,
+    _In_opt_ PSID PrincipalSelfSid,
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _In_opt_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
+    _In_ ULONG ObjectTypeListLength,
+    _In_ BOOLEAN UseResultList,
+    _Inout_ PACCESS_CHECK_RIGHTS AccessCheckRights)
+{
+    ACCESS_CHECK_RIGHTS RestrictedRights = {0};
+    ACCESS_MASK Unrestricted;
+    PACCESS_MASK NormalRights = NULL;
+    ULONG Index;
+
+    PAGED_CODE();
+
+    Unrestricted = ~SepRestrictedAccessMask(Token, GenericMapping);
+
+    /* Keep what the normal pass granted to each object of the list */
+    if (ObjectTypeList && ObjectTypeListLength)
+    {
+        NormalRights = ExAllocatePoolWithTag(PagedPool,
+                                             ObjectTypeListLength * sizeof(ACCESS_MASK),
+                                             TAG_SE);
+        if (NormalRights == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        for (Index = 0; Index < ObjectTypeListLength; Index++)
+        {
+            NormalRights[Index] = ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights;
+            RtlZeroMemory(&ObjectTypeList[Index].ObjectAccessRights, sizeof(ACCESS_CHECK_RIGHTS));
+        }
+    }
+
+    SepAnalyzeAcesFromDacl(AccessCheckMaximum,
+                           0,
+                           Dacl,
+                           Token,
+                           PrimaryAccessToken,
+                           TRUE,
+                           PrincipalSelfSid,
+                           GenericMapping,
+                           ObjectTypeList,
+                           ObjectTypeListLength,
+                           UseResultList,
+                           &RestrictedRights);
+
+    AccessCheckRights->GrantedAccessRights &= (RestrictedRights.GrantedAccessRights | Unrestricted);
+
+    if (NormalRights != NULL)
+    {
+        for (Index = 0; Index < ObjectTypeListLength; Index++)
+        {
+            ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights =
+                NormalRights[Index] & (ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights | Unrestricted);
+        }
+
+        ExFreePoolWithTag(NormalRights, TAG_SE);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/**
+ * @brief
  * Private worker function that determines whether security access rights can be
  * givento the calling thread in order to access an object depending on the
  * security descriptor and other security context entities, such as an owner. This
@@ -956,6 +1063,7 @@ SepAccessCheckWorker(
     _Out_ PNTSTATUS AccessStatusList)
 {
     ACCESS_MASK RemainingAccess;
+    ACCESS_MASK RestrictedAccess;
     ACCESS_MASK WantedRights;
     ACCESS_MASK MaskDesired;
     ACCESS_MASK GrantedRights = 0;
@@ -1149,23 +1257,25 @@ SepAccessCheckWorker(
                                &AccessCheckRights);
 
         /*
-         * Perform further access checks if this token
-         * has restricted SIDs.
+         * A restricted token gets only the rights that the restricting
+         * SIDs are granted as well.
          */
         if (SeTokenIsRestricted(Token))
         {
-            SepAnalyzeAcesFromDacl(AccessCheckMaximum,
-                                   0,
-                                   Dacl,
-                                   Token,
-                                   PrimaryAccessToken,
-                                   TRUE,
-                                   PrincipalSelfSid,
-                                   GenericMapping,
-                                   ObjectTypeList,
-                                   ObjectTypeListLength,
-                                   UseResultList,
-                                   &AccessCheckRights);
+            Status = SepRestrictMaximumAccess(Dacl,
+                                              Token,
+                                              PrimaryAccessToken,
+                                              PrincipalSelfSid,
+                                              GenericMapping,
+                                              ObjectTypeList,
+                                              ObjectTypeListLength,
+                                              UseResultList,
+                                              &AccessCheckRights);
+            if (!NT_SUCCESS(Status))
+            {
+                PreviouslyGrantedAccess = 0;
+                goto ReturnCommonStatus;
+            }
         }
 
         /* The caller did not provide an object type list, check access only for that object */
@@ -1359,13 +1469,15 @@ SepAccessCheckWorker(
     }
 
     /*
-     * Perform further access checks if this token
-     * has restricted SIDs.
+     * Perform further access checks if this token has restricted SIDs.
+     * The restricting SIDs of a write-restricted token are checked only
+     * for the rights that write.
      */
-    if (SeTokenIsRestricted(Token))
+    RestrictedAccess = RemainingAccess & SepRestrictedAccessMask(Token, GenericMapping);
+    if (SeTokenIsRestricted(Token) && RestrictedAccess != 0)
     {
         SepAnalyzeAcesFromDacl(AccessCheckRegular,
-                               RemainingAccess,
+                               RestrictedAccess,
                                Dacl,
                                Token,
                                PrimaryAccessToken,

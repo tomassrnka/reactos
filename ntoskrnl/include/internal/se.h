@@ -82,6 +82,21 @@ typedef struct _TOKEN_AUDIT_POLICY_INFORMATION
 #define TOKEN_FILTER_METHOD    0xFUL
 
 //
+// NtFilterToken flags of NT 6.0, which the kernel honours too
+//
+#ifndef LUA_TOKEN
+#define LUA_TOKEN              0x4
+#endif
+#ifndef WRITE_RESTRICTED
+#define WRITE_RESTRICTED       0x8
+#endif
+
+BOOLEAN
+NTAPI
+SeTokenIsWriteRestricted(
+    _In_ PACCESS_TOKEN Token);
+
+//
 // Security descriptor internal helpers
 //
 FORCEINLINE
