@@ -20,6 +20,8 @@ START_TEST(CcCopyWrite)
     UNICODE_STRING VerySmallFile = RTL_CONSTANT_STRING(L"\\Device\\Kmtest-CcCopyWrite\\VerySmallFile");
     UNICODE_STRING NormalFile = RTL_CONSTANT_STRING(L"\\Device\\Kmtest-CcCopyWrite\\NormalFile");
     UNICODE_STRING BehaviourTestFile = RTL_CONSTANT_STRING(L"\\Device\\Kmtest-CcCopyWrite\\BehaviourTestFile");
+    UNICODE_STRING ClusterFile = RTL_CONSTANT_STRING(L"\\Device\\Kmtest-CcCopyWrite\\ClusterFile");
+    PVOID ClusterBuffer;
     DWORD Error;
 
     Error = KmtLoadAndOpenDriver(L"CcCopyWrite", FALSE);
@@ -101,6 +103,26 @@ START_TEST(CcCopyWrite)
     ok_eq_hex(Status, STATUS_SUCCESS);
 
     NtClose(Handle);
+
+    /* 16 pages written through the cache, then flushed: the driver counts the paging writes */
+    ClusterBuffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, 16 * 4096);
+    ok(ClusterBuffer != NULL, "Allocation failed\n");
+    if (ClusterBuffer)
+    {
+        InitializeObjectAttributes(&ObjectAttributes, &ClusterFile, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&Handle, FILE_ALL_ACCESS, &ObjectAttributes, &IoStatusBlock, 0, FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+
+        ByteOffset.QuadPart = 0;
+        Status = NtWriteFile(Handle, NULL, NULL, NULL, &IoStatusBlock, ClusterBuffer, 16 * 4096, &ByteOffset, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+
+        Status = NtFlushBuffersFile(Handle, &IoStatusBlock);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+
+        NtClose(Handle);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, ClusterBuffer);
+    }
 
     RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
     KmtCloseDriver();
