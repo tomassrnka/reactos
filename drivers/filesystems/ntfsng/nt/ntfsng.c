@@ -449,10 +449,10 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
  * manager sends them there through the VPB.  They go on to the storage device, which must see them
  * (a partition device deletes its links and interfaces at its removal).  A query for an orderly
  * removal is refused here when the volume is in use or cannot be written back (NgQueryRemove), and
- * then does not reach the device.  A removal first dismounts the volume (NgDismountForRemoval); it
- * still goes on to the device when that fails, as a removal cannot be refused, and the volume is
- * then fenced.  Handled before the dismounted and medium checks: a dismounted volume device still
- * passes them on.
+ * then does not reach the device.  A removal is passed on after NgDismountForRemoval, which writes
+ * nothing unless the removal was asked for first: a surprise-removed device is cut off before the
+ * request goes down, so no write of this mount reaches it at any point.  Handled before the
+ * dismounted and medium checks: a dismounted or fenced volume device still passes them on.
  */
 static NTSTATUS NgPnp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -466,7 +466,7 @@ static NTSTATUS NgPnp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     else if (Minor == IRP_MN_CANCEL_REMOVE_DEVICE)
         NgCancelRemove(Vcb);
     else if (Minor == IRP_MN_SURPRISE_REMOVAL || Minor == IRP_MN_REMOVE_DEVICE)
-        NgDismountForRemoval(Vcb);
+        NgDismountForRemoval(Vcb, Minor == IRP_MN_SURPRISE_REMOVAL);
     FsRtlExitFileSystem();
 
     if (!NT_SUCCESS(Status))

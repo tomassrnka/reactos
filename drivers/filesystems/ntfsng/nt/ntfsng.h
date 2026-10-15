@@ -291,7 +291,7 @@ VOID NgTunnelApply(PNG_VCB Vcb, ngc_node *Parent, ngc_node *Node, PUNICODE_STRIN
 
 /* fsctl.c */
 BOOLEAN NgEndLock(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup);
-NTSTATUS NgDismountForRemoval(PNG_VCB Vcb);
+NTSTATUS NgDismountForRemoval(PNG_VCB Vcb, BOOLEAN Surprise);
 NTSTATUS NgQueryRemove(PNG_VCB Vcb);
 VOID NgCancelRemove(PNG_VCB Vcb);
 

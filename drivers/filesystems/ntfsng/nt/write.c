@@ -316,7 +316,8 @@ BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status)
     if (!Vcb->RawWritten && !Vcb->ReadOnly)
         return FALSE;
     NgAcquireCore(Vcb);
-    Drop = Vcb->RawWritten;
+    /* also a volume cut off from its device: a refused page write would be retried forever */
+    Drop = Vcb->RawWritten || Vcb->WrongMedia;
     NgReleaseCore(Vcb);
     if (!Drop)
         return FALSE;

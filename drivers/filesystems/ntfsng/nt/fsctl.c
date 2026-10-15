@@ -716,39 +716,97 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
 }
 
 /*
- * The storage device under the volume is being removed (IRP_MN_SURPRISE_REMOVAL, or
- * IRP_MN_REMOVE_DEVICE without one before it), which cannot be refused: the volume is dismounted,
- * open handles or not, so that nothing of this mount reaches the device after it is gone and a
- * device that takes its place mounts afresh.  STATUS_LOST_WRITEBEHIND_DATA when changes could not
- * be written back first.  A volume that cannot be dismounted (a paging file, no memory) is fenced
- * instead: every request but a close fails from then on, as for a replaced medium.
+ * The mount is cut off from its storage device, which is gone or no longer holds this volume (a
+ * surprise removal, or a removal that was not asked for first): nothing more reaches the device
+ * (ngc_medium_gone), every request but a cleanup or close fails from now on (WrongMedia, as for a
+ * replaced medium; cleanups only release the handle's state), and the device gets a new VPB, so
+ * that a device that takes its place mounts afresh.  The core stays allocated: requests already
+ * past dispatch, which do not take the create gate, keep a valid core and fail in it.  TRUE when
+ * the core held changes that never reached the disk.
  */
-NTSTATUS NgDismountForRemoval(PNG_VCB Vcb)
+static BOOLEAN NgFenceRemoved(PNG_VCB Vcb)
+{
+    PVPB NewVpb = ExAllocatePoolWithTag(NonPagedPool, sizeof(VPB), NG_TAG_VPB);
+    BOOLEAN Lost = FALSE;
+    KIRQL Irql;
+
+    NgAcquireCore(Vcb);
+    Vcb->WrongMedia = TRUE;
+    Vcb->ReadOnly = TRUE;
+    if (Vcb->Core)
+    {
+        Lost = ngc_dirty(Vcb->Core) != 0;
+        ngc_medium_gone(Vcb->Core);
+    }
+    NgReleaseCore(Vcb);
+
+    if (NewVpb)
+    {
+        RtlZeroMemory(NewVpb, sizeof(VPB));
+        NewVpb->Type = IO_TYPE_VPB;
+        NewVpb->Size = sizeof(VPB);
+        IoAcquireVpbSpinLock(&Irql);
+        NewVpb->RealDevice = Vcb->Vpb->RealDevice;
+        NewVpb->Flags = Vcb->Vpb->Flags & VPB_REMOVE_PENDING;
+        if (Vcb->Vpb->RealDevice->Vpb == Vcb->Vpb)
+        {
+            Vcb->Vpb->RealDevice->Vpb = NewVpb;
+            NewVpb = NULL;
+        }
+        IoReleaseVpbSpinLock(Irql);
+        if (NewVpb)
+            ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
+    }
+    else
+    {
+        DPRINT1("ntfsng: volume %08lx: no memory for a new VPB: the removed device stays mounted (every request fails)\n",
+                Vcb->Vpb->SerialNumber);
+    }
+    return Lost;
+}
+
+/*
+ * IRP_MN_SURPRISE_REMOVAL (Surprise) or IRP_MN_REMOVE_DEVICE of the storage device under the
+ * volume; neither can be refused.  After a granted IRP_MN_QUERY_REMOVE_DEVICE (no handle, no mapped
+ * file, nothing cached left, no new open since) the device is still there and the volume is
+ * dismounted in full, its last changes written.  Otherwise the device may already be gone or hold
+ * something else (a partition table change makes the old partition device go while the new one at
+ * the same place is another device), so nothing is written: the mount is fenced (NgFenceRemoved).
+ * STATUS_LOST_WRITEBEHIND_DATA when changes did not reach the disk.
+ */
+NTSTATUS NgDismountForRemoval(PNG_VCB Vcb, BOOLEAN Surprise)
 {
     NTSTATUS Status = STATUS_SUCCESS;
-    BOOLEAN Dropped = FALSE;
+    BOOLEAN Orderly, Dropped = FALSE;
 
     ExAcquireResourceExclusiveLite(&Vcb->CreateGate, TRUE);
+    Orderly = !Surprise && Vcb->RemovePending;
     Vcb->RemovePending = FALSE;
-    if (!Vcb->Dismounted)
+    if (!Vcb->Dismounted && !Vcb->WrongMedia)
     {
-        Status = NgDismountMount(Vcb, TRUE, &Dropped);
-        if (!NT_SUCCESS(Status))
-            Vcb->WrongMedia = TRUE;
-        else if (Dropped)
-            Status = STATUS_LOST_WRITEBEHIND_DATA;
+        if (Orderly)
+        {
+            Status = NgDismountMount(Vcb, TRUE, &Dropped);
+            if (!NT_SUCCESS(Status))
+                Dropped = NgFenceRemoved(Vcb);
+        }
+        else
+        {
+            Dropped = NgFenceRemoved(Vcb);
+        }
+        Status = Dropped ? STATUS_LOST_WRITEBEHIND_DATA : STATUS_SUCCESS;
     }
     ExReleaseResourceLite(&Vcb->CreateGate);
-    if (!NT_SUCCESS(Status))
-        DPRINT1("ntfsng: volume %08lx: removal of its device: 0x%08lx%s\n", Vcb->Vpb->SerialNumber, Status,
-                Status == STATUS_LOST_WRITEBEHIND_DATA ? "" : " (not dismounted: every request fails from now on)");
+    DPRINT1("ntfsng: volume %08lx: its device is removed (%s)%s\n", Vcb->Vpb->SerialNumber,
+            Orderly ? "orderly" : "not asked first: nothing written",
+            Status == STATUS_LOST_WRITEBEHIND_DATA ? ": changes not written back are lost" : "");
     return Status;
 }
 
 /*
  * IRP_MN_QUERY_REMOVE_DEVICE: an orderly removal of the storage device is refused, as Windows file
- * systems refuse it, while the volume is in use (an open handle, a mapped file, a paging file, the
- * volume lock) or when what is cached cannot be written back; once granted, no new open is accepted
+ * systems refuse it, while the volume is in use (an open handle on a file or on the volume, a
+ * mapped file, a paging file, the volume lock) or when what is cached cannot be written back; once granted, no new open is accepted
  * until the removal or IRP_MN_CANCEL_REMOVE_DEVICE, so the removal finds nothing new to write.
  */
 NTSTATUS NgQueryRemove(PNG_VCB Vcb)
@@ -763,7 +821,15 @@ NTSTATUS NgQueryRemove(PNG_VCB Vcb)
         else if (Vcb->LockedBy)
             Status = STATUS_ACCESS_DENIED;
         else
-            Status = NgLockCheckSections(Vcb, NULL);
+        {
+            BOOLEAN VolumeOpen;
+
+            /* The volume FCB is not on FcbList: its handles (\\.\X:) are counted here, as FastFAT counts them. */
+            ExAcquireFastMutex(&Vcb->FcbListLock);
+            VolumeOpen = Vcb->VolumeFcb && Vcb->VolumeFcb->OpenHandles;
+            ExReleaseFastMutex(&Vcb->FcbListLock);
+            Status = VolumeOpen ? STATUS_ACCESS_DENIED : NgLockCheckSections(Vcb, NULL);
+        }
         Vcb->RemovePending = NT_SUCCESS(Status);
     }
     ExReleaseResourceLite(&Vcb->CreateGate);
