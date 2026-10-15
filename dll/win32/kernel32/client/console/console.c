@@ -97,7 +97,7 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
     DPRINT1("Console Dispatcher Active: %lx %lx\n", CodeAndFlag, nCode);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
-    /* Fast path; the authoritative admission check is made under ConsoleLock below */
+    /* Fast path; the admission gate is the re-read of this flag under ConsoleLock below */
     if (!ConsoleInitialized) ExitThread(0);
 
     switch(nCode)
@@ -122,7 +122,7 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
                 {
                     RtlEnterCriticalSection(&ConsoleLock);
 
-                    /* Admission is decided under the lock that detach clears the flag under */
+                    /* Admission gate: detach clears this flag lock-free; observing it cleared here refuses before any handler runs */
                     if (!ConsoleInitialized)
                     {
                         RtlLeaveCriticalSection(&ConsoleLock);
@@ -173,7 +173,7 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
 
     RtlEnterCriticalSection(&ConsoleLock);
 
-    /* Admission is decided under the lock that detach clears the flag under */
+    /* Admission gate: detach clears this flag lock-free; observing it cleared here refuses before any handler runs */
     if (!ConsoleInitialized)
     {
         RtlLeaveCriticalSection(&ConsoleLock);
