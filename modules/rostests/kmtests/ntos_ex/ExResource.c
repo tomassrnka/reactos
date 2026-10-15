@@ -404,7 +404,8 @@ TestResourceWithThreads(
     Status = StartThread(&ThreadDataShared2, NULL, FALSE, TRUE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     CheckResourceStatus(Res, FALSE, 0LU, 0LU, 0LU);
-    if (GetNTVersion() <= _WIN32_WINNT_WS03)
+    /* ReactOS reports NT 5.2 but keeps the NT 6 count of shared owners in ActiveEntries */
+    if (GetNTVersion() <= _WIN32_WINNT_WS03 && !is_reactos())
     {
         ok_eq_int(Res->ActiveCount, 2);
     }
@@ -450,7 +451,7 @@ TestResourceWithThreads(
     Status = StartThread(&ThreadDataSharedStarve, NULL, TRUE, TRUE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     CheckResourceStatus(Res, FALSE, 0LU, 1LU, 0LU);
-    if (GetNTVersion() <= _WIN32_WINNT_WS03)
+    if (GetNTVersion() <= _WIN32_WINNT_WS03 && !is_reactos())
     {
         ok_eq_int(Res->ActiveCount, 2);
     }
