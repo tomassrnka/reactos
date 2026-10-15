@@ -2412,10 +2412,45 @@ BasepIsValidIdealProcessor(
            IdealProcessor->Number < BaseStaticServerData->SysInfo.NumberOfProcessors;
 }
 
-/* The DWORD form of the mitigation policy defines DEP, DEP without ATL thunk emulation and
- * SEHOP (measured on Windows 7: CreateProcess refuses any other bit). The wider forms of
- * Windows 8 and later are not checked here. */
-#define BASEP_DWORD_MITIGATION_MASK 0x7
+/* The DWORD form of the mitigation policy defines DEP (0x1), DEP-ATL thunk emulation (0x2)
+ * and SEHOP (0x4); Windows 7 refuses any other bit when the process is created. The
+ * mitigations a child process really gets on ReactOS, by measurement: DEP on amd64 only
+ * (the processor enforces no-execute for every 64-bit process; the i386 kernel runs data
+ * pages as code), no ATL thunk emulation and no SEHOP anywhere. A request for anything
+ * else is refused like Windows refuses a mitigation it does not support, rather than
+ * starting a child that is less protected than the caller asked for. */
+#ifdef _WIN64
+#define BASEP_HONOURED_MITIGATIONS 0x1
+#else
+#define BASEP_HONOURED_MITIGATIONS 0x0
+#endif
+
+static
+NTSTATUS
+BasepCheckMitigationPolicy(
+    _In_ PPROC_THREAD_ATTRIBUTE_ENTRY Entry)
+{
+    ULONGLONG Policy[2] = {0, 0};
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    /* Read the whole declared width: the caller may give a bad pointer */
+    _SEH2_TRY
+    {
+        RtlCopyMemory(Policy, Entry->Value, Entry->Size);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if ((Policy[0] & ~(ULONGLONG)BASEP_HONOURED_MITIGATIONS) || Policy[1])
+        return STATUS_INVALID_PARAMETER;
+
+    return STATUS_SUCCESS;
+}
 
 static
 NTSTATUS
@@ -2434,27 +2469,10 @@ BasepReadProcThreadAttributes(
 
         if (Entry->Attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY)
         {
-            /* Mitigations are validated but not applied: ReactOS has no per-process
-             * mitigation state a child could be started with, so the process runs
-             * with the system defaults, as a Windows process does when the
-             * system policy overrides the request. */
-            if (Entry->Size == sizeof(DWORD))
-            {
-                DWORD Policy = 0;
+            NTSTATUS Status = BasepCheckMitigationPolicy(Entry);
 
-                _SEH2_TRY
-                {
-                    Policy = *(DWORD*)Entry->Value;
-                }
-                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    return STATUS_ACCESS_VIOLATION;
-                }
-                _SEH2_END;
-
-                if (Policy & ~BASEP_DWORD_MITIGATION_MASK)
-                    return STATUS_INVALID_PARAMETER;
-            }
+            if (!NT_SUCCESS(Status))
+                return Status;
             continue;
         }
 
