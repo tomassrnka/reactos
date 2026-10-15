@@ -171,6 +171,9 @@ static IO_COMPLETION_ROUTINE SendComplete;
 static VOID
 AfdStartSend(PAFD_FCB FCB)
 {
+    NTSTATUS Status;
+    UINT Completions;
+
     if (FCB->SendStarting)
     {
         FCB->SendRestart = TRUE;
@@ -183,13 +186,22 @@ AfdStartSend(PAFD_FCB FCB)
         FCB->SendRestart = FALSE;
         if (!FCB->SendIrp.InFlightRequest && FCB->Send.BytesUsed)
         {
-            TdiSend(&FCB->SendIrp.InFlightRequest,
-                    FCB->Connection.Object,
-                    0,
-                    FCB->Send.Window,
-                    FCB->Send.BytesUsed,
-                    SendComplete,
-                    FCB);
+            Completions = FCB->SendCompletions;
+            Status = TdiSend(&FCB->SendIrp.InFlightRequest,
+                             FCB->Connection.Object,
+                             0,
+                             FCB->Send.Window,
+                             FCB->Send.BytesUsed,
+                             SendComplete,
+                             FCB);
+
+            /* The request never reached the transport, so SendComplete will not run for it */
+            if (!NT_SUCCESS(Status) && Completions == FCB->SendCompletions)
+            {
+                FCB->SendIrp.InFlightRequest = NULL;
+                AfdFailSendQueue(FCB, Status);
+                RetryDisconnectCompletion(FCB);
+            }
         }
     } while (FCB->SendRestart);
     FCB->SendStarting = FALSE;
@@ -198,32 +210,40 @@ AfdStartSend(PAFD_FCB FCB)
 /*
  * Called by the cancel routine for a queued send request of a stream socket, before it removes
  * the request. Data already in the window cannot be taken back, since the transport may have part
- * of it: it stays in the stream and the request reports it as sent. Returns that byte count.
+ * of it: it stays in the stream. Returns the byte count the cancelled request reports: 0 when
+ * all its data was in the window, as Windows reports for a send it still delivers, and the bytes
+ * that were copied when only part of it was.
  */
 UINT
 AfdCancelStreamSend(PAFD_FCB FCB, PIRP Irp)
 {
     UINT InWindow = SEND_BYTES_IN_WINDOW(Irp);
     PLIST_ENTRY Previous = Irp->Tail.Overlay.ListEntry.Blink;
+    PAFD_SEND_INFO SendReq = GetLockedData(Irp, IoGetCurrentIrpStackLocation(Irp));
+    UINT i, SendLength = 0, Copied = (UINT)Irp->IoStatus.Information;
     PIRP PreviousIrp;
 
-    if (InWindow == 0)
-        return 0;
+    for (i = 0; i < SendReq->BufferCount; i++)
+        SendLength += SendReq->BufferArray[i].len;
 
-    /* The previous request's data comes just before it in the window */
-    if (Previous == &FCB->PendingIrpList[FUNCTION_SEND])
+    if (InWindow != 0)
     {
-        FCB->SendBytesUnowned += InWindow;
-    }
-    else
-    {
-        PreviousIrp = CONTAINING_RECORD(Previous, IRP, Tail.Overlay.ListEntry);
-        ASSERT(SEND_BYTES_IN_WINDOW(PreviousIrp) != 0);
-        SetSendBytesInWindow(PreviousIrp, SEND_BYTES_IN_WINDOW(PreviousIrp) + InWindow);
+        /* The previous request's data comes just before it in the window */
+        if (Previous == &FCB->PendingIrpList[FUNCTION_SEND])
+        {
+            FCB->SendBytesUnowned += InWindow;
+        }
+        else
+        {
+            PreviousIrp = CONTAINING_RECORD(Previous, IRP, Tail.Overlay.ListEntry);
+            ASSERT(SEND_BYTES_IN_WINDOW(PreviousIrp) != 0);
+            SetSendBytesInWindow(PreviousIrp, SEND_BYTES_IN_WINDOW(PreviousIrp) + InWindow);
+        }
+
+        SetSendBytesInWindow(Irp, 0);
     }
 
-    SetSendBytesInWindow(Irp, 0);
-    return (UINT)Irp->IoStatus.Information;
+    return (Copied < SendLength) ? Copied : 0;
 }
 
 static NTSTATUS NTAPI SendComplete
@@ -250,6 +270,8 @@ static NTSTATUS NTAPI SendComplete
     AFD_DbgPrint(MID_TRACE,("Called, status %x, %u bytes used\n",
                             Irp->IoStatus.Status,
                             Irp->IoStatus.Information));
+
+    FCB->SendCompletions++;
 
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
@@ -288,6 +310,9 @@ static NTSTATUS NTAPI SendComplete
                    FCB->Send.Window + Sent,
                    FCB->Send.BytesUsed - Sent );
     FCB->Send.BytesUsed -= Sent;
+
+    /* The transport has let go of the window, so a size asked for meanwhile can take effect */
+    AfdApplyWindowResize(&FCB->Send, FCB->Send.BytesUsed);
 
     /* They belong to cancelled requests first, then to the queued requests in order */
     Taken = MIN(Sent, FCB->SendBytesUnowned);

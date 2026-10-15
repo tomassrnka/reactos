@@ -151,6 +151,8 @@ typedef struct _AFD_IN_FLIGHT_REQUEST {
 typedef struct _AFD_DATA_WINDOW {
     PCHAR Window;
     UINT BytesUsed, Size, Content;
+    /* Size asked for while the transport held the window; 0 if none */
+    UINT NewSize;
 } AFD_DATA_WINDOW, *PAFD_DATA_WINDOW;
 
 typedef struct _AFD_STORED_DATAGRAM {
@@ -187,6 +189,8 @@ typedef struct _AFD_FCB {
     UINT SendBytesUnowned;
     /* AfdStartSend is running, and a nested call asked it to send again */
     BOOLEAN SendStarting, SendRestart;
+    /* Number of times SendComplete has run */
+    UINT SendCompletions;
     KMUTEX Mutex;
     KEVENT InFlightIdle;
     PKEVENT EventSelect;
@@ -391,5 +395,6 @@ NTSTATUS NTAPI
 AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			 PIO_STACK_LOCATION IrpSp);
 UINT AfdCancelStreamSend(PAFD_FCB FCB, PIRP Irp);
+NTSTATUS AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Used);
 
 #endif /* _AFD_H */

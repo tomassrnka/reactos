@@ -41,6 +41,9 @@ static VOID RefillSocketBuffer( PAFD_FCB FCB )
 
     AFD_DbgPrint(MID_TRACE,("Replenishing buffer\n"));
 
+    /* Nothing is in flight, so a size asked for meanwhile can take effect */
+    AfdApplyWindowResize(&FCB->Recv, FCB->Recv.Content);
+
     TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
                 FCB->Connection.Object,
                 TDI_RECEIVE_NORMAL,
@@ -388,6 +391,9 @@ RelaunchPacketReceive(PAFD_FCB FCB)
         }
         return;
     }
+
+    /* Nothing is in flight, so a size asked for meanwhile can take effect */
+    AfdApplyWindowResize(&FCB->Recv, 0);
 
     TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
                        FCB->AddressFile.Object,
