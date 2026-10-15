@@ -52,6 +52,7 @@ extern void func_MenuUI(void);
 extern void func_MessageStateAnalyzer(void);
 extern void func_MsgWaitForMultipleObjectsEx(void);
 extern void func_NCRButtonDown(void);
+extern void func_NcPaintClient(void);
 extern void func_NcPaintRgn(void);
 extern void func_NextDlgItem(void);
 extern void func_PrintWindow(void);
@@ -146,6 +147,7 @@ const struct test winetest_testlist[] =
     { "MessageStateAnalyzer", func_MessageStateAnalyzer },
     { "MsgWaitForMultipleObjectsEx", func_MsgWaitForMultipleObjectsEx },
     { "NCRButtonDown", func_NCRButtonDown },
+    { "NcPaintClient", func_NcPaintClient },
     { "NcPaintRgn", func_NcPaintRgn },
     { "NextDlgItem", func_NextDlgItem },
     { "PrintWindow", func_PrintWindow },

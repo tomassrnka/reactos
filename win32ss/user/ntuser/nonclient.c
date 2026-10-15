@@ -962,6 +962,37 @@ NC_DrawFrame( HDC hDC, RECT *CurrentRect, BOOL Active, DWORD Style, DWORD ExStyl
    }
 }
 
+/* The client area is not part of the frame, also where a program made it cover the caption or the border
+   (WM_NCCALCSIZE): drawing the frame must not paint over what the program shows there. Returns the state
+   to give to NC_RestoreClip, 0 when the clip region is unchanged */
+static
+INT NC_ClipOutClient(PWND pWnd, HDC hDC)
+{
+   RECT ClientRect = pWnd->rcClient;
+   LONG Width = pWnd->rcWindow.right - pWnd->rcWindow.left;
+   INT SavedDC;
+
+   /* The frame of an iconic window is the whole window */
+   if (pWnd->style & WS_MINIMIZE)
+      return 0;
+
+   RECTL_vOffsetRect(&ClientRect, -pWnd->rcWindow.left, -pWnd->rcWindow.top);
+   if (pWnd->ExStyle & WS_EX_LAYOUTRTL)
+   {
+      LONG Left = Width - ClientRect.right;
+
+      ClientRect.right = Width - ClientRect.left;
+      ClientRect.left = Left;
+   }
+   if (ClientRect.right <= ClientRect.left || ClientRect.bottom <= ClientRect.top)
+      return 0;
+
+   SavedDC = NtGdiSaveDC(hDC);
+   if (SavedDC)
+      NtGdiExcludeClipRect(hDC, ClientRect.left, ClientRect.top, ClientRect.right, ClientRect.bottom);
+   return SavedDC;
+}
+
 VOID UserDrawCaptionBar(
    PWND pWnd,
    HDC hDC,
@@ -972,6 +1003,7 @@ VOID UserDrawCaptionBar(
    HPEN PreviousPen;
    BOOL Gradient = FALSE;
    PCURICON_OBJECT pIcon = NULL;
+   INT SavedDC;
 
    if (!(Flags & DC_NOVISIBLE) && !IntIsWindowVisible(pWnd)) return;
 
@@ -985,6 +1017,8 @@ VOID UserDrawCaptionBar(
    CurrentRect.top = CurrentRect.left = 0;
    CurrentRect.right = WindowRect.right - WindowRect.left;
    CurrentRect.bottom = WindowRect.bottom - WindowRect.top;
+
+   SavedDC = NC_ClipOutClient(pWnd, hDC);
 
    /* Draw outer edge */
    if (UserHasWindowEdge(Style, ExStyle))
@@ -1089,6 +1123,9 @@ VOID UserDrawCaptionBar(
           DrawEdge(hDC, &CurrentRect, EDGE_SUNKEN, BF_RECT | BF_ADJUST);
       }
    }
+
+   if (SavedDC)
+      NtGdiRestoreDC(hDC, SavedDC);
 }
 
 // Note from Wine:
@@ -1110,6 +1147,7 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
    PWND Parent;
    RECT WindowRect, CurrentRect, TempRect;
    BOOL Active = FALSE;
+   INT SavedDC;
 
    /* DC_NOVISIBLE: print the frame of a hidden window too (WM_PRINT) */
    if ((Flags == -1 || !(Flags & DC_NOVISIBLE)) && !IntIsWindowVisible(pWnd))
@@ -1150,6 +1188,8 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
    CurrentRect.top = CurrentRect.left = 0;
    CurrentRect.right = WindowRect.right - WindowRect.left;
    CurrentRect.bottom = WindowRect.bottom - WindowRect.top;
+
+   SavedDC = NC_ClipOutClient(pWnd, hDC);
 
    /* Draw outer edge */
    if (UserHasWindowEdge(pWnd->style, pWnd->ExStyle))
@@ -1310,6 +1350,10 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
         }
      }
    }
+
+   if (SavedDC)
+      NtGdiRestoreDC(hDC, SavedDC);
+
    return 0; // For WM_NCPAINT message, return 0.
 }
 
