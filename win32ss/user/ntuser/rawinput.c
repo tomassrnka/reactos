@@ -794,7 +794,7 @@ UserRawInputSendMouse(
     MOUSEINPUT *pmi)
 {
     RAWMOUSE rm = {0};
-    DWORD dwFlags = pmi->dwFlags;
+    DWORD dwFlags = UserStripMouseDataFlags(pmi->dwFlags);
 
     if (!RawInputEnabled)
         return;
@@ -827,15 +827,16 @@ UserRawInputSendMouse(
         if (pmi->mouseData & XBUTTON1) rm.usButtonFlags |= RI_MOUSE_BUTTON_4_UP;
         if (pmi->mouseData & XBUTTON2) rm.usButtonFlags |= RI_MOUSE_BUTTON_5_UP;
     }
+    /* A wheel of distance zero still makes a raw record, the legacy message is not posted */
     if (dwFlags & MOUSEEVENTF_WHEEL)
     {
         rm.usButtonFlags |= RI_MOUSE_WHEEL;
-        rm.usButtonData = (USHORT)pmi->mouseData;
+        rm.usButtonData = (USHORT)UserClampWheelDelta(pmi->mouseData);
     }
     if (dwFlags & MOUSEEVENTF_HWHEEL)
     {
         rm.usButtonFlags |= RI_MOUSE_HWHEEL;
-        rm.usButtonData = (USHORT)pmi->mouseData;
+        rm.usButtonData = (USHORT)UserClampWheelDelta(pmi->mouseData);
     }
     rm.ulExtraInformation = (ULONG)pmi->dwExtraInfo;
 
