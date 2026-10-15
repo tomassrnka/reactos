@@ -305,6 +305,9 @@ typedef struct _PROCESSINFO
     struct _GDI_POOL* pPoolBrushAttr;
     struct _GDI_POOL* pPoolRgnAttr;
 
+    /* Tick count of the process creation, for the startup time of W32PF_APPSTARTING */
+    DWORD AppStartTick;
+
 #if DBG
     BYTE DbgChannelLevel[DbgChCount];
 #ifndef __cplusplus

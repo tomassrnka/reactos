@@ -1683,6 +1683,9 @@ NtUserSetActiveWindow(HWND hWnd)
       }
    }
 
+   if (Window)
+      UserEndAppStarting(Window);
+
    if (!Window ||
         Window->head.pti->MessageQueue == gptiCurrent->MessageQueue)
    {
@@ -1739,6 +1742,7 @@ NtUserSetFocus(HWND hWnd)
          goto Exit; // Return NULL
       }
 
+      UserEndAppStarting(Window);
       UserRefObjectCo(Window, &Ref);
       ret = co_UserSetFocus(Window);
       UserDerefObjectCo(Window);

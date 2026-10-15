@@ -384,6 +384,10 @@ IntMsqSetWakeMask(DWORD WakeMask)
 
    IdlePing();
 
+   /* The wait is done by the caller, out of reach of win32k: it gets no exemption (see co_MsqMsgWait) */
+   if (Win32Thread->pcti && (LOWORD(WakeMask) & QS_INPUT))
+      Win32Thread->pcti->timeLastRead = EngGetTickCount32();
+
    return MessageEventHandle;
 }
 
@@ -398,6 +402,83 @@ IntMsqClearWakeMask(VOID)
    IdlePong();
 
    return TRUE;
+}
+
+/*
+ * MsgWaitForMultipleObjectsEx: the wait for the caller's objects and the queue event. win32k does it so
+ * that the "waiting for input" state of the thread (fsWakeMask, which keeps it from counting as hung)
+ * lasts exactly as long as the wait: the foreground-idle hook runs before the state is set and before
+ * anything is acquired, and the state is cleared, with the read time refreshed, before the thread
+ * returns to user mode, so before an APC runs. The wait itself is NtWaitForMultipleObjects on the
+ * caller's handle array, so handles, objects and status codes are those of WaitForMultipleObjectsEx.
+ */
+NTSTATUS FASTCALL
+co_MsqMsgWait(PMSGWAITINFO pUserInfo)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+    ULONG Count, Flags;
+    UINT WakeMask;
+    BOOLEAN HasTimeout, WaitForInput;
+    NTSTATUS Status;
+
+    if (pti == NULL || pti->MessageQueue == NULL || pti->pcti == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    _SEH2_TRY
+    {
+        ProbeForWrite(pUserInfo, sizeof(*pUserInfo), sizeof(ULONG));
+        Count = pUserInfo->nCount;
+        WakeMask = LOWORD(pUserInfo->dwWakeMask);
+        Flags = pUserInfo->dwFlags;
+        HasTimeout = (pUserInfo->bTimeout != FALSE);
+        /* The queue event follows the caller's handles; a count that leaves no room fails in the wait */
+        if (Count < MSGWAIT_MAX_OBJECTS)
+            pUserInfo->Handles[Count] = pti->hEventQueueClient;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if ((pti->pcti->fsChangeBits & WakeMask) ||
+        ((Flags & MWMO_INPUTAVAILABLE) && (pti->pcti->fsWakeBits & WakeMask)))
+    {
+        /* Input is already there: the queue event takes part signalled and the thread does not wait for input */
+        KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
+        WaitForInput = FALSE;
+    }
+    else
+    {
+        /* Nothing is held here, so a hook that ends the thread leaves nothing behind */
+        IdlePing();
+        WaitForInput = TRUE;
+        if (WakeMask & QS_INPUT)
+            pti->pcti->timeLastRead = EngGetTickCount32();
+        pti->pcti->fsWakeMask = WakeMask;
+    }
+
+    UserLeaveCo();
+    do
+    {
+        Status = NtWaitForMultipleObjects(Count + 1,
+                                          (PHANDLE)pUserInfo->Handles,
+                                          (Flags & MWMO_WAITALL) ? WaitAll : WaitAny,
+                                          (Flags & MWMO_ALERTABLE) != 0,
+                                          HasTimeout ? &pUserInfo->Timeout : NULL);
+    }
+    while (Status == STATUS_ALERTED && (Flags & MWMO_ALERTABLE));
+    UserEnterCo();
+
+    if (WaitForInput)
+    {
+        if (pti->pcti->fsWakeMask & QS_INPUT)
+            pti->pcti->timeLastRead = EngGetTickCount32();
+        pti->pcti->fsWakeMask = 0;
+    }
+    IdlePong();
+
+    return Status;
 }
 
 /*
@@ -2147,6 +2228,9 @@ co_MsqWaitForNewMessages(PTHREADINFO pti, PWND WndFilter,
       IntCoalesceMouseMove(pti);
    }
 
+   /* The thread waits for input from here until it owns the lock again */
+   pti->pcti->fsWakeMask = GetWakeMask(MsgFilterMin, MsgFilterMax);
+
    UserLeaveCo();
 
    ZwYieldExecution(); // Let someone else run!
@@ -2157,6 +2241,10 @@ co_MsqWaitForNewMessages(PTHREADINFO pti, PWND WndFilter,
                                 FALSE,
                                 NULL );
    UserEnterCo();
+
+   if (pti->pcti->fsWakeMask & QS_INPUT)
+      pti->pcti->timeLastRead = EngGetTickCount32();
+   pti->pcti->fsWakeMask = 0;
    if ( ret == STATUS_USER_APC )
    {
       TRACE("MWFNW User APC\n");
@@ -2171,8 +2259,7 @@ MsqIsHung(PTHREADINFO pti, DWORD TimeOut)
     DWORD dwTimeStamp = EngGetTickCount32();
     if (dwTimeStamp - pti->pcti->timeLastRead > TimeOut &&
        !(pti->pcti->fsWakeMask & QS_INPUT) &&
-       !PsGetThreadFreezeCount(pti->pEThread) &&
-       !(pti->ppi->W32PF_flags & W32PF_APPSTARTING))
+       !PsGetThreadFreezeCount(pti->pEThread))
     {
         TRACE("\nMsqIsHung(pti %p, TimeOut %lu)\n"
             "pEThread %p, ThreadsProcess %p, ImageFileName '%s'\n"
@@ -2194,6 +2281,40 @@ MsqIsHung(PTHREADINFO pti, DWORD TimeOut)
     }
 
    return FALSE;
+}
+
+/*
+ * SMTO_ABORTIFHUNG and SMTO_NOTIMEOUTIFNOTHUNG give a starting process the first
+ * MSQ_APPSTARTING_TIMEOUT ms. After that its clock runs from the end of that
+ * time at the earliest, as MsqIsHung does from then on. IsHungAppWindow does not
+ * make this exception. Elapsed times are unsigned so that a tick count wrap is harmless.
+ */
+BOOL FASTCALL
+MsqIsHungForSend(PTHREADINFO pti, DWORD TimeOut)
+{
+    PPROCESSINFO ppi = pti->ppi;
+    DWORD dwNow = EngGetTickCount32();
+    DWORD dwSinceRead = dwNow - pti->pcti->timeLastRead;
+
+    if (ppi->W32PF_flags & W32PF_APPSTARTING)
+    {
+        DWORD dwAge = dwNow - ppi->AppStartTick;
+
+        if (dwAge < MSQ_APPSTARTING_TIMEOUT)
+            return FALSE;
+
+        /* Time since the end of the startup time, if that is shorter */
+        if (dwAge - MSQ_APPSTARTING_TIMEOUT < dwSinceRead)
+            dwSinceRead = dwAge - MSQ_APPSTARTING_TIMEOUT;
+
+        /* From here on the startup time makes no difference for any thread */
+        if (dwAge - MSQ_APPSTARTING_TIMEOUT > MSQ_HUNG)
+            ppi->W32PF_flags &= ~W32PF_APPSTARTING;
+    }
+
+    return (dwSinceRead > TimeOut) &&
+           !(pti->pcti->fsWakeMask & QS_INPUT) &&
+           !PsGetThreadFreezeCount(pti->pEThread);
 }
 
 BOOL FASTCALL

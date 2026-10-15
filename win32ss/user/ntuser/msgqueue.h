@@ -1,6 +1,8 @@
 #pragma once
 
 #define MSQ_HUNG        5000
+/* A process that has not shown a window is not judged for hung sends this long after its start */
+#define MSQ_APPSTARTING_TIMEOUT 30000
 #define MSQ_NORMAL      0
 #define MSQ_ISHOOK      1
 #define MSQ_INJECTMODULE 2
@@ -132,6 +134,8 @@ enum internal_event_message
 extern LIST_ENTRY usmList;
 
 BOOL FASTCALL MsqIsHung(PTHREADINFO pti, DWORD TimeOut);
+BOOL FASTCALL MsqIsHungForSend(PTHREADINFO pti, DWORD TimeOut);
+#define UserEndAppStarting(pWnd) ((pWnd)->head.pti->ppi->W32PF_flags &= ~W32PF_APPSTARTING)
 VOID CALLBACK HungAppSysTimerProc(HWND,UINT,UINT_PTR,DWORD);
 NTSTATUS FASTCALL co_MsqSendMessage(PTHREADINFO ptirec,
            HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam,
@@ -251,7 +255,9 @@ VOID APIENTRY MsqRemoveWindowMessagesFromQueue(PWND pWindow);
     (message >= WM_KEYFIRST && message <= WM_KEYLAST)
 
 HANDLE FASTCALL IntMsqSetWakeMask(DWORD WakeMask);
+UINT FASTCALL GetWakeMask(UINT first, UINT last);
 BOOL FASTCALL IntMsqClearWakeMask(VOID);
+NTSTATUS FASTCALL co_MsqMsgWait(PMSGWAITINFO pUserInfo);
 
 VOID FASTCALL IdlePing(VOID);
 VOID FASTCALL IdlePong(VOID);
