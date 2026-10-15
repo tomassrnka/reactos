@@ -38,6 +38,7 @@ WINE_DECLARE_DEBUG_CHANNEL(dwrite_file);
 #define MS_NAME_TAG DWRITE_MAKE_OPENTYPE_TAG('n','a','m','e')
 #define MS_VDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('V','D','M','X')
 #define MS_GASP_TAG DWRITE_MAKE_OPENTYPE_TAG('g','a','s','p')
+#define MS_HDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('h','d','m','x')
 #define MS_CPAL_TAG DWRITE_MAKE_OPENTYPE_TAG('C','P','A','L')
 #define MS_COLR_TAG DWRITE_MAKE_OPENTYPE_TAG('C','O','L','R')
 
@@ -126,6 +127,40 @@ static struct cache_entry * fontface_get_cache_entry(struct dwrite_fontface *fon
     return entry;
 }
 
+/* Whether the font has an hdmx record for this pixel size. */
+static BOOL fontface_has_hdmx_record(struct dwrite_fontface *fontface, float ppem)
+{
+    const BYTE *data;
+    unsigned int count, size, i;
+    SHORT records;
+
+    if (!(data = get_fontface_table(&fontface->IDWriteFontFace5_iface, MS_HDMX_TAG, &fontface->hdmx)))
+        return FALSE;
+    if (fontface->hdmx.size < 8)
+        return FALSE;
+
+    records = (SHORT)((data[2] << 8) | data[3]);
+    size = ((unsigned int)data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7];
+    count = records < 0 ? 0 : records;
+    if (!size || (UINT64)count * size + 8 > fontface->hdmx.size)
+        return FALSE;
+
+    if (ppem + 0.5f >= 256.0f)
+        return FALSE;
+
+    for (i = 0; i < count; ++i)
+        if (data[8 + (UINT64)i * size] == (BYTE)(unsigned int)(ppem + 0.5f))
+            return TRUE;
+
+    return FALSE;
+}
+
+/* For the GDI measuring modes DirectWrite takes the device advance from the hdmx table of the font; a font without
+   a record for the size gets its linear advance rounded to whole pixels, not the advance of its TrueType program.
+   The glyph shapes drawn here have no horizontal grid fitting, so the program's advances would not fit them. */
+static int fontface_get_linear_gdi_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
+        BOOL *has_contours);
+
 static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
         unsigned short mode, BOOL *has_contours)
 {
@@ -133,6 +168,9 @@ static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fo
     struct get_glyph_advance_params params;
     struct cache_entry *entry;
     unsigned int value;
+
+    if (mode != DWRITE_MEASURING_MODE_NATURAL && !fontface_has_hdmx_record(fontface, fontsize))
+        return fontface_get_linear_gdi_advance(fontface, fontsize, glyph, has_contours);
 
     if (!(entry = fontface_get_cache_entry(fontface, 0, &key)))
         return 0;
@@ -154,6 +192,18 @@ static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fo
 
     *has_contours = entry->has_contours;
     return entry->advance;
+}
+
+static int fontface_get_linear_gdi_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
+        BOOL *has_contours)
+{
+    unsigned int upem = fontface->metrics.designUnitsPerEm;
+    int design = fontface_get_glyph_advance(fontface, upem, glyph, DWRITE_MEASURING_MODE_NATURAL, has_contours);
+
+    if (!upem)
+        return 0;
+
+    return (int)floorf((float)design * fontsize / upem + 0.5f);
 }
 
 void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphbitmap *bitmap)
@@ -890,6 +940,8 @@ static ULONG WINAPI dwritefontface_Release(IDWriteFontFace5 *iface)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->vdmx.context);
         if (fontface->gasp.context)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->gasp.context);
+        if (fontface->hdmx.context)
+            IDWriteFontFace5_ReleaseFontTable(iface, fontface->hdmx.context);
         if (fontface->cpal.context)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->cpal.context);
         if (fontface->colr.context)
@@ -5517,6 +5569,7 @@ HRESULT create_fontface(const struct fontface_desc *desc, struct list *cached_li
     fontface->refcount = 1;
     fontface->type = desc->face_type;
     fontface->vdmx.exists = TRUE;
+    fontface->hdmx.exists = TRUE;
     fontface->gasp.exists = TRUE;
     fontface->cpal.exists = TRUE;
     fontface->colr.exists = TRUE;

@@ -35,6 +35,7 @@
 #define MS_CMAP_TAG DWRITE_MAKE_OPENTYPE_TAG('c','m','a','p')
 #define MS_VDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('V','D','M','X')
 #define MS_GASP_TAG DWRITE_MAKE_OPENTYPE_TAG('g','a','s','p')
+#define MS_HDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('h','d','m','x')
 #define MS_CPAL_TAG DWRITE_MAKE_OPENTYPE_TAG('C','P','A','L')
 #define MS_OS2_TAG  DWRITE_MAKE_OPENTYPE_TAG('O','S','/','2')
 #define MS_HEAD_TAG DWRITE_MAKE_OPENTYPE_TAG('h','e','a','d')
@@ -6971,6 +6972,103 @@ static void test_GetGdiCompatibleGlyphAdvances(void)
     ok(ref == 0, "factory not released, %lu\n", ref);
 }
 
+static void test_gdi_compatible_advances_without_hdmx(void)
+{
+    static const WCHAR *families[] = { L"Tahoma", L"Arial", L"Verdana" };
+    unsigned int family, size, ch, compared = 0;
+    IDWriteFactory *factory;
+    HRESULT hr;
+    ULONG ref;
+
+    factory = create_factory();
+
+    for (family = 0; family < ARRAY_SIZE(families); ++family)
+    {
+        IDWriteFontCollection *collection;
+        IDWriteFontFamily *fontfamily;
+        IDWriteFontFace *fontface;
+        IDWriteFont *font;
+        DWRITE_FONT_METRICS metrics;
+        const void *table;
+        void *context;
+        UINT32 index, tablesize;
+        BOOL exists;
+
+        hr = IDWriteFactory_GetSystemFontCollection(factory, &collection, FALSE);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IDWriteFontCollection_FindFamilyName(collection, families[family], &index, &exists);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        if (!exists)
+        {
+            IDWriteFontCollection_Release(collection);
+            continue;
+        }
+        hr = IDWriteFontCollection_GetFontFamily(collection, index, &fontfamily);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IDWriteFontFamily_GetFirstMatchingFont(fontfamily, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL, &font);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IDWriteFont_CreateFontFace(font, &fontface);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        IDWriteFont_Release(font);
+        IDWriteFontFamily_Release(fontfamily);
+        IDWriteFontCollection_Release(collection);
+
+        exists = FALSE;
+        hr = IDWriteFontFace_TryGetFontTable(fontface, MS_HDMX_TAG, &table, &tablesize, &context, &exists);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        if (exists)
+        {
+            /* The device metrics of the font decide, they are not rounded linear advances. */
+            IDWriteFontFace_ReleaseFontTable(fontface, context);
+            IDWriteFontFace_Release(fontface);
+            continue;
+        }
+
+        IDWriteFontFace_GetMetrics(fontface, &metrics);
+        for (size = 9; size <= 16; ++size)
+        {
+            unsigned int different = 0, count = 0;
+
+            for (ch = 'A'; ch <= 'z'; ++ch)
+            {
+                DWRITE_GLYPH_METRICS gdi, design;
+                UINT32 codepoint = ch;
+                UINT16 glyph = 0;
+                int expected, got;
+
+                hr = IDWriteFontFace_GetGlyphIndices(fontface, &codepoint, 1, &glyph);
+                ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+                if (!glyph)
+                    continue;
+
+                hr = IDWriteFontFace_GetDesignGlyphMetrics(fontface, &glyph, 1, &design, FALSE);
+                ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+                hr = IDWriteFontFace_GetGdiCompatibleGlyphMetrics(fontface, size, 1.0f, NULL, FALSE, &glyph, 1, &gdi, FALSE);
+                ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+                expected = (int)floorf(design.advanceWidth * size / (float)metrics.designUnitsPerEm + 0.5f);
+                got = (int)floorf(gdi.advanceWidth * size / (float)metrics.designUnitsPerEm + 0.5f);
+                if (expected != got)
+                    ++different;
+                ++count;
+            }
+
+            compared += count;
+            ok(different * 20 <= count, "%s, %u px: %u of %u advances are not the linear advance rounded to pixels.\n",
+                    wine_dbgstr_w(families[family]), size, different, count);
+        }
+
+        IDWriteFontFace_Release(fontface);
+    }
+
+    if (!compared)
+        skip("No installed font without an hdmx table.\n");
+
+    ref = IDWriteFactory_Release(factory);
+    ok(ref == 0, "factory not released, %lu\n", ref);
+}
+
 static WORD get_gasp_flags(IDWriteFontFace *fontface, FLOAT emsize, FLOAT ppdip)
 {
     WORD num_recs, version;
@@ -10740,6 +10838,7 @@ START_TEST(font)
     test_bitmap_target_rendering_params();
     test_bitmap_target_failure();
     test_glyphrunanalysis_huge_texture();
+    test_gdi_compatible_advances_without_hdmx();
     test_GetFontFamily();
     test_GetFamilyNames();
     test_CreateFontFace();

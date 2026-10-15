@@ -293,6 +293,7 @@ struct dwrite_fontface
 
     struct dwrite_fonttable vdmx;
     struct dwrite_fonttable gasp;
+    struct dwrite_fonttable hdmx;
     struct dwrite_fonttable cpal;
     struct dwrite_fonttable colr;
     struct dwrite_fonttable kern;
