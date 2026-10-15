@@ -328,6 +328,10 @@ static	DWORD	modLongData(MIDIMAPDATA* mom, LPMIDIHDR lpMidiHdr, DWORD_PTR dwPara
 
     if (MIDIMAP_IsBadData(mom))
 	return MMSYSERR_ERROR;
+    if (!(lpMidiHdr->dwFlags & MHDR_PREPARED))
+	return MIDIERR_UNPREPARED;
+    if (lpMidiHdr->dwFlags & MHDR_INQUEUE)
+	return MIDIERR_STILLPLAYING;
 
     mh = *lpMidiHdr;
     for (chn = 0; chn < 16; chn++)
