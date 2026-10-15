@@ -446,31 +446,36 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 /*
  * PnP requests for the storage device under a mounted volume come to the volume device: the I/O
- * manager sends them there through the VPB.  Each one goes on to the storage device, which must see
- * them (a partition device deletes its links and interfaces at its removal).  A removal of the
- * device first dismounts the volume (NgDismountForRemoval), so the mount writes nothing after it; a
- * query for an orderly removal first writes back what is cached.  Handled before the dismounted and
- * medium checks: a dismounted volume device still passes them on.
+ * manager sends them there through the VPB.  They go on to the storage device, which must see them
+ * (a partition device deletes its links and interfaces at its removal).  A query for an orderly
+ * removal is refused here when the volume is in use or cannot be written back (NgQueryRemove), and
+ * then does not reach the device.  A removal first dismounts the volume (NgDismountForRemoval); it
+ * still goes on to the device when that fails, as a removal cannot be refused, and the volume is
+ * then fenced.  Handled before the dismounted and medium checks: a dismounted volume device still
+ * passes them on.
  */
 static NTSTATUS NgPnp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
     UCHAR Minor = IoGetCurrentIrpStackLocation(Irp)->MinorFunction;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     FsRtlEnterFileSystem();
     if (Minor == IRP_MN_QUERY_REMOVE_DEVICE)
-    {
-        ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
-        if (!Vcb->Dismounted && !Vcb->RawWritten)
-            NgFlushVolume(Vcb);
-        ExReleaseResourceLite(&Vcb->CreateGate);
-    }
+        Status = NgQueryRemove(Vcb);
+    else if (Minor == IRP_MN_CANCEL_REMOVE_DEVICE)
+        NgCancelRemove(Vcb);
     else if (Minor == IRP_MN_SURPRISE_REMOVAL || Minor == IRP_MN_REMOVE_DEVICE)
-    {
         NgDismountForRemoval(Vcb);
-    }
     FsRtlExitFileSystem();
 
+    if (!NT_SUCCESS(Status))
+    {
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return Status;
+    }
     IoSkipCurrentIrpStackLocation(Irp);
     return IoCallDriver(Vcb->StorageDevice, Irp);
 }

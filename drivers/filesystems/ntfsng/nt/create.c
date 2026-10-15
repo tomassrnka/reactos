@@ -1499,6 +1499,8 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
     if (Vcb->Dismounted)
         Status = STATUS_VOLUME_DISMOUNTED;
+    else if (Vcb->RemovePending)
+        Status = STATUS_ACCESS_DENIED;
     else
         Status = NgCreateLocked(DeviceObject, Irp);
     ExReleaseResourceLite(&Vcb->CreateGate);

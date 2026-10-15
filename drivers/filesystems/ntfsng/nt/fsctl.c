@@ -547,7 +547,7 @@ static BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
  * storage device (Removal) a flush that fails does not keep the volume mounted: what did not reach
  * the disk is dropped, as the device goes away whatever this mount does.
  */
-static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal)
+static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal, PBOOLEAN Dropped)
 {
     PNG_FCB *List = NULL;
     ULONG Count = 0, Capacity, i;
@@ -592,6 +592,7 @@ static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal)
         DPRINT1("ntfsng: volume %08lx: the flush before the removal failed: uncommitted changes are dropped\n",
                 Vcb->Vpb->SerialNumber);
         Discard = TRUE;
+        *Dropped = TRUE;
     }
 
     /* Cached files lose their views; later paging I/O on them fails.  Every FCB is taken (the array is
@@ -664,6 +665,8 @@ static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal)
         DPRINT1("ntfsng: volume %08lx: the last sync before the dismount failed: nothing more is written, uncommitted changes are dropped\n",
                 Vcb->Vpb->SerialNumber);
         Discard = TRUE;
+        if (Dropped)
+            *Dropped = TRUE;
     }
     ngc_umount(Vcb->Core, Discard);
     Vcb->Core = NULL;
@@ -688,6 +691,7 @@ static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal)
     if (NewVpb)
         ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
     DPRINT1("ntfsng: volume %08lx dismounted%s\n", Vcb->Vpb->SerialNumber,
+            (Dropped && *Dropped) ? " (its storage device is removed; changes not written back are lost)" :
             Removal ? " (its storage device is removed)" :
             Vcb->RawWritten ? " (written directly by the lock holder: mounted state dropped)" : "");
     return STATUS_SUCCESS;
@@ -708,25 +712,71 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         return STATUS_INVALID_PARAMETER;
     if (Vcb->LockedBy != FileObject)
         return STATUS_ACCESS_DENIED;
-    return NgDismountMount(Vcb, FALSE);
+    return NgDismountMount(Vcb, FALSE, NULL);
 }
 
 /*
  * The storage device under the volume is being removed (IRP_MN_SURPRISE_REMOVAL, or
- * IRP_MN_REMOVE_DEVICE without one before it): the volume is dismounted, open handles or not, so that
- * nothing of this mount reaches the device after it is gone and a device that takes its place mounts
- * afresh.  A volume with a paging file stays mounted.
+ * IRP_MN_REMOVE_DEVICE without one before it), which cannot be refused: the volume is dismounted,
+ * open handles or not, so that nothing of this mount reaches the device after it is gone and a
+ * device that takes its place mounts afresh.  STATUS_LOST_WRITEBEHIND_DATA when changes could not
+ * be written back first.  A volume that cannot be dismounted (a paging file, no memory) is fenced
+ * instead: every request but a close fails from then on, as for a replaced medium.
  */
-VOID NgDismountForRemoval(PNG_VCB Vcb)
+NTSTATUS NgDismountForRemoval(PNG_VCB Vcb)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN Dropped = FALSE;
+
+    ExAcquireResourceExclusiveLite(&Vcb->CreateGate, TRUE);
+    Vcb->RemovePending = FALSE;
+    if (!Vcb->Dismounted)
+    {
+        Status = NgDismountMount(Vcb, TRUE, &Dropped);
+        if (!NT_SUCCESS(Status))
+            Vcb->WrongMedia = TRUE;
+        else if (Dropped)
+            Status = STATUS_LOST_WRITEBEHIND_DATA;
+    }
+    ExReleaseResourceLite(&Vcb->CreateGate);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("ntfsng: volume %08lx: removal of its device: 0x%08lx%s\n", Vcb->Vpb->SerialNumber, Status,
+                Status == STATUS_LOST_WRITEBEHIND_DATA ? "" : " (not dismounted: every request fails from now on)");
+    return Status;
+}
+
+/*
+ * IRP_MN_QUERY_REMOVE_DEVICE: an orderly removal of the storage device is refused, as Windows file
+ * systems refuse it, while the volume is in use (an open handle, a mapped file, a paging file, the
+ * volume lock) or when what is cached cannot be written back; once granted, no new open is accepted
+ * until the removal or IRP_MN_CANCEL_REMOVE_DEVICE, so the removal finds nothing new to write.
+ */
+NTSTATUS NgQueryRemove(PNG_VCB Vcb)
 {
     NTSTATUS Status = STATUS_SUCCESS;
 
     ExAcquireResourceExclusiveLite(&Vcb->CreateGate, TRUE);
     if (!Vcb->Dismounted)
-        Status = NgDismountMount(Vcb, TRUE);
+    {
+        if (!Vcb->RawWritten && !Vcb->ReadOnly && NgFlushVolume(Vcb))
+            Status = STATUS_UNEXPECTED_IO_ERROR;
+        else if (Vcb->LockedBy)
+            Status = STATUS_ACCESS_DENIED;
+        else
+            Status = NgLockCheckSections(Vcb, NULL);
+        Vcb->RemovePending = NT_SUCCESS(Status);
+    }
     ExReleaseResourceLite(&Vcb->CreateGate);
     if (!NT_SUCCESS(Status))
-        DPRINT1("ntfsng: volume %08lx: no dismount at the removal of its device: 0x%08lx\n", Vcb->Vpb->SerialNumber, Status);
+        DPRINT1("ntfsng: volume %08lx: removal of its device refused: 0x%08lx\n", Vcb->Vpb->SerialNumber, Status);
+    return Status;
+}
+
+VOID NgCancelRemove(PNG_VCB Vcb)
+{
+    ExAcquireResourceExclusiveLite(&Vcb->CreateGate, TRUE);
+    Vcb->RemovePending = FALSE;
+    ExReleaseResourceLite(&Vcb->CreateGate);
 }
 
 /*
