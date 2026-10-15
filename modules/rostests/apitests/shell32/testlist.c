@@ -75,6 +75,7 @@ extern void func_SHSimpleIDListFromPath(void);
 extern void func_SHRestricted(void);
 extern void func_SHSetUnreadMailCountW(void);
 extern void func_StrRStr(void);
+extern void func_TaskbarFullscreen(void);
 
 const struct test winetest_testlist[] =
 {
@@ -151,6 +152,7 @@ const struct test winetest_testlist[] =
     { "SHRestricted", func_SHRestricted },
     { "SHSetUnreadMailCountW", func_SHSetUnreadMailCountW },
     { "StrRStr", func_StrRStr },
+    { "TaskbarFullscreen", func_TaskbarFullscreen },
 
     { 0, 0 }
 };
