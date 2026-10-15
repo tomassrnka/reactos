@@ -22,9 +22,12 @@ static SIZE_T NonCachedLength;
 static PVOID ExitBuffer;
 static PMDL ExitMdl;
 static PEPROCESS ExitProcess;
+static PMDL ViewMdl;
+static PVOID ViewMapped;
 
 static BOOLEAN ExitProcessHasExited(VOID);
 static VOID FreeExitBuffer(_In_ BOOLEAN Locked);
+static VOID UnmapView(VOID);
 
 NTSTATUS
 TestEntry(
@@ -130,6 +133,21 @@ FreeExitBuffer(
         ObDereferenceObject(ExitProcess);
         ExitProcess = NULL;
     }
+}
+
+/* Undo IOCTL_MAP_VIEW; called in the context of the process that asked for it */
+static
+VOID
+UnmapView(VOID)
+{
+    if (ViewMdl == NULL)
+        return;
+    if (ViewMapped != NULL)
+        MmUnmapLockedPages(ViewMapped, ViewMdl);
+    MmUnlockPages(ViewMdl);
+    IoFreeMdl(ViewMdl);
+    ViewMdl = NULL;
+    ViewMapped = NULL;
 }
 
 static
@@ -379,6 +397,58 @@ TestMessageHandler(
             Exit->Buffer = User;
             break;
         }
+        case IOCTL_MAP_VIEW:
+        {
+            PVIEW_BUFFER View = Buffer;
+            MEMORY_CACHING_TYPE CacheType;
+
+            if (skip(Buffer && InLength >= sizeof(VIEW_BUFFER) && *OutLength >= sizeof(VIEW_BUFFER), "Cannot read/write from/to buffer!\n"))
+                break;
+            UnmapView();
+            *OutLength = sizeof(VIEW_BUFFER);
+            View->Mapped = NULL;
+            CacheType = View->Cached ? MmCached : MmNonCached;
+
+            /* Lock a user range and map the same pages into the process a second time */
+            ViewMdl = IoAllocateMdl(View->Address, View->Length, FALSE, FALSE, NULL);
+            if (ViewMdl == NULL)
+            {
+                View->Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            View->Status = STATUS_SUCCESS;
+            _SEH2_TRY
+            {
+                MmProbeAndLockPages(ViewMdl, UserMode, IoWriteAccess);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                View->Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            if (!NT_SUCCESS(View->Status))
+            {
+                IoFreeMdl(ViewMdl);
+                ViewMdl = NULL;
+                break;
+            }
+            _SEH2_TRY
+            {
+                ViewMapped = MmMapLockedPagesSpecifyCache(ViewMdl, UserMode, CacheType, NULL, FALSE, NormalPagePriority);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                View->Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            View->Mapped = ViewMapped;
+            break;
+        }
+        case IOCTL_UNMAP_VIEW:
+        {
+            UnmapView();
+            break;
+        }
         case IOCTL_CHECK_EXITED:
         {
             ULONG i;
@@ -434,6 +504,7 @@ TestIrpHandler(
     if (IoStack->MajorFunction == IRP_MJ_CLEANUP)
     {
         TestCleanEverything();
+        UnmapView();
         Status = STATUS_SUCCESS;
     }
 
