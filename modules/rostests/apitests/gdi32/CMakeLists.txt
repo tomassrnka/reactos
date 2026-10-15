@@ -70,6 +70,7 @@ list(APPEND SOURCE
     Rectangle.c
     RegionAllocFailure.c
     RealizePalette.c
+    SelectBitmapOwner.c
     SelectObject.c
     SetBoundsRect.c
     SetBrushOrgEx.c
