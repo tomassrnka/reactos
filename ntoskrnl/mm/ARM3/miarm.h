@@ -2107,20 +2107,68 @@ MI_SET_IO_TYPE(
     Pte->u.Hard.CacheDisable = (Type >> 1) & 1;
 }
 
-BOOLEAN
+FORCEINLINE
+MI_IO_TYPE
+MI_GET_IO_TYPE(
+    _In_ PMMPTE Pte)
+{
+    return (MI_IO_TYPE)(Pte->u.Hard.WriteThrough | (Pte->u.Hard.CacheDisable << 1));
+}
+
+/* Device pages whose PTEs were cleared, released together after one TB flush */
+typedef struct _MI_IO_RETIRE
+{
+    ULONG Count;
+    struct
+    {
+        PFN_NUMBER BasePage;
+        PFN_NUMBER PageCount;
+        MI_IO_TYPE Type;
+    } Run[16];
+} MI_IO_RETIRE, *PMI_IO_RETIRE;
+
+VOID
 NTAPI
 MiMapIoSpacePages(
-    _In_opt_ PMMPTE FirstPte,
+    _In_ PMMPTE FirstPte,
     _In_ PFN_NUMBER BasePage,
     _In_ PFN_NUMBER PageCount,
     _In_ MI_PFN_CACHE_ATTRIBUTE Attribute,
-    _In_ MMPTE TemplatePte,
-    _Out_ PMI_IO_TYPE Type
+    _In_ MMPTE TemplatePte
+);
+
+MI_IO_TYPE
+NTAPI
+MiClaimIoSpacePage(
+    _In_ PFN_NUMBER Page,
+    _In_ MI_PFN_CACHE_ATTRIBUTE Attribute
 );
 
 VOID
 NTAPI
-MiForgetIoSpaceMappings(
+MiReleaseIoSpacePages(
+    _In_ PFN_NUMBER BasePage,
+    _In_ PFN_NUMBER PageCount,
+    _In_ MI_IO_TYPE Type
+);
+
+BOOLEAN
+NTAPI
+MiRetireIoSpacePage(
+    _Inout_ PMI_IO_RETIRE Retire,
+    _In_ PFN_NUMBER Page,
+    _In_ MI_IO_TYPE Type
+);
+
+VOID
+NTAPI
+MiReleaseRetiredIoSpace(
+    _Inout_ PMI_IO_RETIRE Retire
+);
+
+VOID
+NTAPI
+MiRetireIoSpacePtes(
     _In_ PMMPTE FirstPte,
     _In_ PFN_NUMBER PteCount
 );

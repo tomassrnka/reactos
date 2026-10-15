@@ -296,6 +296,12 @@ MmDeleteVirtualMappingEx(
         /* System space is shared by every processor, a process only by those running it */
         KeFlushSingleTb(Address, Process == NULL);
 
+#ifdef MI_IO_SPACE_TRACKING
+        /* The translation is gone: the device page may take another type */
+        if (IsPhysical && OldPte.u.Hard.Valid && !MiGetPfnEntry(OldPte.u.Hard.PageFrameNumber))
+            MiReleaseIoSpacePages(OldPte.u.Hard.PageFrameNumber, 1, MI_GET_IO_TYPE(&OldPte));
+#endif
+
         if (OldPte.u.Long != 0)
         {
             /* It must have been present, or not a swap entry */
@@ -690,17 +696,10 @@ MmCreateVirtualMappingUnsafeEx(
 #ifdef MI_IO_SPACE_TRACKING
     if (IsPhysical && !MiGetPfnEntry(Page))
     {
-        MI_PFN_CACHE_ATTRIBUTE Attribute;
-        MI_IO_TYPE Type;
-
-        /* Device memory through \Device\PhysicalMemory: PAGE_NOCACHE and PAGE_WRITECOMBINE both encode UC- */
-        if (TempPte.u.Hard.CacheDisable)
-            Attribute = TempPte.u.Hard.WriteThrough ? MiNonCached : MiWriteCombined;
-        else
-            Attribute = MiCached;
-        if (MiMapIoSpacePages(NULL, Page, 1, Attribute, TempPte, &Type))
-            KeFlushEntireTb(TRUE, TRUE);
-        MI_SET_IO_TYPE(&TempPte, Type);
+        /* Device memory through \Device\PhysicalMemory. PAGE_NOCACHE and PAGE_WRITECOMBINE both
+           encode PCD, which is taken as uncached; a page already write-combined stays so */
+        MI_SET_IO_TYPE(&TempPte,
+                       MiClaimIoSpacePage(Page, TempPte.u.Hard.CacheDisable ? MiNonCached : MiCached));
     }
 #endif
 

@@ -26,10 +26,9 @@ ULONG MiCacheOverride[MiNotMapped + 1];
 /* INTERNAL FUNCTIONS *********************************************************/
 
 #ifdef MI_IO_SPACE_TRACKING
-/* Fills the system PTEs of an MDL mapping; runs of device pages get their type from MiMapIoSpacePages.
-   Returns TRUE if the caller must flush the TB of all processors */
+/* Fills the system PTEs of an MDL mapping; runs of device pages get their type from MiMapIoSpacePages */
 static
-BOOLEAN
+VOID
 MiMapMdlPtes(
     _In_ PMMPTE PointerPte,
     _In_ PPFN_NUMBER MdlPages,
@@ -37,8 +36,6 @@ MiMapMdlPtes(
     _In_ MI_PFN_CACHE_ATTRIBUTE CacheAttribute,
     _In_ MMPTE TempPte)
 {
-    BOOLEAN Flush = FALSE;
-    MI_IO_TYPE Type;
     PFN_NUMBER Run;
 
     while ((MdlPages < LastPage) && (*MdlPages != LIST_HEAD))
@@ -54,12 +51,10 @@ MiMapMdlPtes(
              (MdlPages + Run < LastPage) && (MdlPages[Run] != LIST_HEAD) &&
              (MdlPages[Run] == MdlPages[0] + Run) && !MiGetPfnEntry(MdlPages[Run]);
              Run++);
-        Flush |= MiMapIoSpacePages(PointerPte, MdlPages[0], Run, CacheAttribute, ValidKernelPte, &Type);
+        MiMapIoSpacePages(PointerPte, MdlPages[0], Run, CacheAttribute, ValidKernelPte);
         MdlPages += Run;
         PointerPte += Run;
     }
-
-    return Flush;
 }
 #endif
 
@@ -278,12 +273,8 @@ MiMapLockedPagesInUserSpace(
 #ifdef MI_IO_SPACE_TRACKING
         if (Pfn2 == NULL)
         {
-            MI_IO_TYPE Type;
-
-            /* Device memory: one memory type for all mappings of the page */
-            if (MiMapIoSpacePages(NULL, *MdlPages, 1, EffectiveCacheAttribute, TempPte, &Type))
-                KeFlushEntireTb(TRUE, TRUE);
-            MI_SET_IO_TYPE(&TempPte, Type);
+            /* Device memory: never a second memory type for the page */
+            MI_SET_IO_TYPE(&TempPte, MiClaimIoSpacePage(*MdlPages, EffectiveCacheAttribute));
         }
         else
 #endif
@@ -358,6 +349,9 @@ MiUnmapLockedPagesInUserSpace(
     ULONG NumberOfPages;
     PPFN_NUMBER MdlPages;
     PFN_NUMBER PageTablePage;
+#ifdef MI_IO_SPACE_TRACKING
+    MI_IO_RETIRE Retire;
+#endif
 
     DPRINT("MiUnmapLockedPagesInUserSpace(%p, %p)\n", BaseAddress, Mdl);
 
@@ -389,11 +383,25 @@ MiUnmapLockedPagesInUserSpace(
 
     PointerPte = MiAddressToPte(BaseAddress);
     OldIrql = MiAcquirePfnLock();
+#ifdef MI_IO_SPACE_TRACKING
+    Retire.Count = 0;
+#endif
     while (NumberOfPages != 0 &&
            *MdlPages != LIST_HEAD)
     {
         ASSERT(MiAddressToPte(PointerPte)->u.Hard.Valid == 1);
         ASSERT(PointerPte->u.Hard.Valid == 1);
+
+#ifdef MI_IO_SPACE_TRACKING
+        /* A device page is released only after its translation is gone from every TB */
+        if (!MiGetPfnEntry(PointerPte->u.Hard.PageFrameNumber) &&
+            !MiRetireIoSpacePage(&Retire, PointerPte->u.Hard.PageFrameNumber, MI_GET_IO_TYPE(PointerPte)))
+        {
+            KeFlushProcessTb();
+            MiReleaseRetiredIoSpace(&Retire);
+            MiRetireIoSpacePage(&Retire, PointerPte->u.Hard.PageFrameNumber, MI_GET_IO_TYPE(PointerPte));
+        }
+#endif
 
         /* Invalidate it */
         MI_ERASE_PTE(PointerPte);
@@ -417,6 +425,9 @@ MiUnmapLockedPagesInUserSpace(
     }
 
     KeFlushProcessTb();
+#ifdef MI_IO_SPACE_TRACKING
+    MiReleaseRetiredIoSpace(&Retire);
+#endif
     MiReleasePfnLock(OldIrql);
     MiUnlockProcessWorkingSetUnsafe(Process, Thread);
     MmUnlockAddressSpace(&Process->Vm);
@@ -828,8 +839,7 @@ MmMapLockedPagesSpecifyCache(IN PMDL Mdl,
         // Loop all PTEs
         //
 #ifdef MI_IO_SPACE_TRACKING
-        if (MiMapMdlPtes(PointerPte, MdlPages, LastPage, CacheAttribute, TempPte))
-            KeFlushEntireTb(TRUE, TRUE);
+        MiMapMdlPtes(PointerPte, MdlPages, LastPage, CacheAttribute, TempPte);
 #else
         do
         {
@@ -976,7 +986,8 @@ MmUnmapLockedPages(IN PVOID BaseAddress,
                            MDL_FREE_EXTRA_PTES);
 
 #ifdef MI_IO_SPACE_TRACKING
-        MiForgetIoSpaceMappings(PointerPte, PageCount);
+        /* Clear the device PTEs and flush before their pages may take another type */
+        MiRetireIoSpacePtes(PointerPte, PageCount);
 #endif
 
         //
@@ -1786,8 +1797,7 @@ MmMapLockedPagesWithReservedMapping(
 
     // Loop all PTEs
 #ifdef MI_IO_SPACE_TRACKING
-    if (MiMapMdlPtes(PointerPte, MdlPages, LastPage, CacheAttribute, TempPte))
-        KeFlushEntireTb(TRUE, TRUE);
+    MiMapMdlPtes(PointerPte, MdlPages, LastPage, CacheAttribute, TempPte);
 #else
     for (; (MdlPages < LastPage) && (*MdlPages != LIST_HEAD); ++MdlPages)
     {
@@ -1903,7 +1913,8 @@ MmUnmapReservedMapping(
     }
 
 #ifdef MI_IO_SPACE_TRACKING
-    MiForgetIoSpaceMappings(PointerPte, PageCount);
+    /* Clear the device PTEs and flush before their pages may take another type */
+    MiRetireIoSpacePtes(PointerPte, PageCount);
 #endif
 
     // Zero the PTEs
