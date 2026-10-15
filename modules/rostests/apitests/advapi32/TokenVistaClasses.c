@@ -191,13 +191,87 @@ static HANDLE DuplicateAtLevel(HANDLE Token, DWORD Rid)
     return Dup;
 }
 
+/* Privileges that make a token elevated without the administrators group (Windows 7 and 10) */
+static BOOL IsElevatingPrivilege(LUID Luid)
+{
+    /* SeCreateToken, SeTcb, SeTakeOwnership, SeLoadDriver, SeBackup, SeRestore, SeDebug, SeImpersonate, SeRelabel */
+    static const ULONG Elevating[] = { 2, 7, 9, 10, 17, 18, 20, 29, 32 };
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(Elevating); i++)
+    {
+        if (!Luid.HighPart && Luid.LowPart == Elevating[i])
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * Restricted copies that keep exactly one privilege (or none), with the
+ * administrators group enabled or for deny only: elevated when the group is
+ * enabled, or when the privilege is one of the elevating ones.
+ */
+static void CheckPrivilegeElevation(HANDLE Token, BOOL CheckDenyOnly)
+{
+    BYTE Buffer[4096];
+    PTOKEN_PRIVILEGES Privileges = (PTOKEN_PRIVILEGES)Buffer;
+    LUID_AND_ATTRIBUTES Delete[64];
+    SID_AND_ATTRIBUTES Admins;
+    HANDLE Derived;
+    DWORD Length, Count, Keep, i, k, Value;
+    int Deny;
+
+    if (!GetTokenInformation(Token, TokenPrivileges, Buffer, sizeof(Buffer), &Length) ||
+        Privileges->PrivilegeCount > ARRAYSIZE(Delete))
+    {
+        skip("TokenPrivileges failed with %lu\n", GetLastError());
+        return;
+    }
+    Count = Privileges->PrivilegeCount;
+    if (!AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &Admins.Sid))
+        return;
+    Admins.Attributes = 0;
+
+    for (Deny = 0; Deny < (CheckDenyOnly ? 2 : 1); Deny++)
+    {
+        /* Keep == Count: no privilege kept */
+        for (Keep = 0; Keep <= Count; Keep++)
+        {
+            for (i = 0, k = 0; i < Count; i++)
+            {
+                if (i == Keep)
+                    continue;
+                Delete[k].Luid = Privileges->Privileges[i].Luid;
+                Delete[k++].Attributes = 0;
+            }
+            Derived = NULL;
+            if (!CreateRestrictedToken(Token, 0, Deny, &Admins, k, Delete, 0, NULL, &Derived))
+            {
+                ok(FALSE, "CreateRestrictedToken failed with %lu\n", GetLastError());
+                continue;
+            }
+            Value = 0xdeadbeef;
+            ok(QueryDword(Derived, TokenElevation, &Value), "TokenElevation failed with %lu\n", GetLastError());
+            /* ReactOS: NtFilterToken does not apply SidsToDisable yet, so the group stays enabled */
+            todo_if(Deny && is_reactos() && !(Keep < Count && IsElevatingPrivilege(Privileges->Privileges[Keep].Luid)))
+            ok(Value == (!Deny || (Keep < Count && IsElevatingPrivilege(Privileges->Privileges[Keep].Luid))),
+               "Administrators %s, privilege %ld: elevated %lu\n", Deny ? "for deny only" : "enabled",
+               Keep < Count ? (long)Privileges->Privileges[Keep].Luid.LowPart : -1L, Value);
+            CloseHandle(Derived);
+        }
+    }
+    FreeSid(Admins.Sid);
+}
+
 /* The token of winlogon.exe, which runs as LocalSystem */
-static HANDLE OpenSystemToken(void)
+static HANDLE OpenSystemToken(DWORD Access)
 {
     PROCESSENTRY32W Entry;
     HANDLE Snapshot, Process, Token = NULL;
     BOOL More;
+    BOOLEAN Old;
 
+    RtlAdjustPrivilege(20 /* SeDebugPrivilege */, TRUE, FALSE, &Old);
     Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (Snapshot == INVALID_HANDLE_VALUE)
         return NULL;
@@ -209,7 +283,7 @@ static HANDLE OpenSystemToken(void)
         Process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, Entry.th32ProcessID);
         if (Process)
         {
-            if (!OpenProcessToken(Process, TOKEN_QUERY, &Token))
+            if (!OpenProcessToken(Process, Access, &Token))
                 Token = NULL;
             CloseHandle(Process);
         }
@@ -226,6 +300,7 @@ START_TEST(TokenVistaClasses)
     PSID_AND_ATTRIBUTES Logon;
     PSID Admins;
     DWORD Error, Elevated;
+    RTL_OSVERSIONINFOW Version;
     BOOL Admin;
 
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT, &Token))
@@ -252,6 +327,7 @@ START_TEST(TokenVistaClasses)
     }
 
     /* Restricted tokens: no privileges, the administrators group for deny only, the logon SID for deny only */
+    Derived = NULL;
     if (CreateRestrictedToken(Token, DISABLE_MAX_PRIVILEGE, 0, NULL, 0, NULL, 0, NULL, &Derived))
     {
         CheckElevation(Derived, "no privileges", Elevated);
@@ -266,6 +342,7 @@ START_TEST(TokenVistaClasses)
     {
         Disable.Sid = Admins;
         Disable.Attributes = 0;
+        Derived = NULL;
         ok(CreateRestrictedToken(Token, 0, 1, &Disable, 0, NULL, 0, NULL, &Derived), "CreateRestrictedToken failed with %lu\n", GetLastError());
         if (Derived)
         {
@@ -282,6 +359,7 @@ START_TEST(TokenVistaClasses)
     {
         Disable.Sid = Logon->Sid;
         Disable.Attributes = 0;
+        Derived = NULL;
         ok(CreateRestrictedToken(Token, 0, 1, &Disable, 0, NULL, 0, NULL, &Derived), "CreateRestrictedToken failed with %lu\n", GetLastError());
         if (Derived)
         {
@@ -291,6 +369,7 @@ START_TEST(TokenVistaClasses)
         }
 
         /* Restricting SIDs do not change the logon SID group */
+        Derived = NULL;
         ok(CreateRestrictedToken(Token, 0, 0, NULL, 0, NULL, 1, &Disable, &Derived), "CreateRestrictedToken failed with %lu\n", GetLastError());
         if (Derived)
         {
@@ -308,6 +387,7 @@ START_TEST(TokenVistaClasses)
         HeapFree(GetProcessHeap(), 0, Groups);
 
     /* An impersonation token answers like its primary token */
+    Derived = NULL;
     if (DuplicateToken(Token, SecurityIdentification, &Derived))
     {
         CheckElevation(Derived, "impersonation", Elevated);
@@ -333,8 +413,29 @@ START_TEST(TokenVistaClasses)
         skip("ImpersonateAnonymousToken failed with %lu\n", GetLastError());
     }
 
-    /* LocalSystem is elevated */
-    Thread = OpenSystemToken();
+    /*
+     * One privilege at a time, from our token and from LocalSystem's. Windows
+     * 10 keeps an administrator's restricted copies elevated even with the
+     * group for deny only and no elevating privilege (Server 2008 R2 does not,
+     * and LocalSystem's copies follow the rule on both); this is the NT 6.1
+     * behaviour, so those rows are checked up to NT 6.1 only.
+     */
+    Version.dwOSVersionInfoSize = sizeof(Version);
+    RtlGetVersion(&Version);
+    CheckPrivilegeElevation(Token, Version.dwMajorVersion < 6 || (Version.dwMajorVersion == 6 && Version.dwMinorVersion <= 1));
+
+    /* LocalSystem is elevated (ReactOS does not let administrators duplicate its token) */
+    Thread = OpenSystemToken(TOKEN_QUERY | TOKEN_DUPLICATE);
+    if (Thread)
+    {
+        CheckPrivilegeElevation(Thread, TRUE);
+        CloseHandle(Thread);
+    }
+    else
+    {
+        skip("Cannot duplicate the token of winlogon.exe (error %lu)\n", GetLastError());
+    }
+    Thread = OpenSystemToken(TOKEN_QUERY);
     if (Thread)
     {
         CheckElevation(Thread, "LocalSystem", 1);
