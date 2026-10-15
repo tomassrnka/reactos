@@ -66,6 +66,7 @@ list(APPEND SOURCE
     HeapWalk.c
     IdleProcessor.c
     InitOnce.c
+    KernelBaseTime.c
     interlck.c
     IsApiSetImplemented.c
     IsDBCSLeadByteEx.c

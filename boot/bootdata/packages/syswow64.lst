@@ -17,6 +17,10 @@ SysWOW64/ntdll_vista.dll
 @0x600 SysWOW64/msvcp140_1.dll
 @0x600 SysWOW64/concrt140.dll
 
+# kernelbase.dll forwards to kernelbase_ros.dll; the MSYS2 and Cygwin runtimes load it by that name.
+SysWOW64/kernelbase_ros.dll
+SysWOW64/kernelbase.dll
+
 # These DLLs use W32K_WIDE in the nested guest build, including their layout pins.
 # Window creation still needs the win32k syscall and callback translation.
 SysWOW64/user32.dll
