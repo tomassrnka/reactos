@@ -892,25 +892,35 @@ void LibTCPFreeSocket(PTCP_PCB pcb)
 }
 
 
-/* Called with the core lock held: does any PCB, one in TIME-WAIT included,
-   use this local port (host order)? */
+/* Local ports any PCB uses, TIME-WAIT included; rebuilt for each ephemeral
+   allocation and only touched with the core lock held */
+static ULONG LibTCPUsedPorts[65536 / 32];
+
+/* Called with the core lock held (and the port lock): is this port (host order) marked? */
 static
 BOOLEAN
 LibTCPLocalPortUsed(ULONG Port)
 {
+    return (LibTCPUsedPorts[(Port & 0xFFFF) / 32] & (1UL << (Port % 32))) != 0;
+}
+
+/* Called with the core lock held: one pass over the PCB lists marks every used
+   port, so that the search in the port bitmap only tests bits */
+static
+UINT
+LibTCPAllocateEphemeralPortLocked(VOID)
+{
     struct tcp_pcb *pcb;
     u8_t i;
 
+    RtlZeroMemory(LibTCPUsedPorts, sizeof(LibTCPUsedPorts));
     for (i = 0; i < NUM_TCP_PCB_LISTS; i++)
     {
         for (pcb = *tcp_pcb_lists[i]; pcb != NULL; pcb = pcb->next)
-        {
-            if (pcb->local_port == Port)
-                return TRUE;
-        }
+            LibTCPUsedPorts[pcb->local_port / 32] |= 1UL << (pcb->local_port % 32);
     }
 
-    return FALSE;
+    return TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
 }
 
 /* Every ephemeral TCP port comes from the port bitmap, which address files
@@ -922,7 +932,7 @@ LibTCPAllocateEphemeralPort(VOID)
     UINT Port;
 
     LOCK_TCPIP_CORE();
-    Port = TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
+    Port = LibTCPAllocateEphemeralPortLocked();
     UNLOCK_TCPIP_CORE();
 
     return Port;
@@ -950,7 +960,7 @@ LibTCPBindCallback(void *arg)
     if (!Port)
     {
         /* lwIP would pick a port the bitmap may have given to an address file */
-        Port = TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
+        Port = LibTCPAllocateEphemeralPortLocked();
         if (Port == (UINT)-1)
         {
             /* Every ephemeral port is taken: WSAENOBUFS, as on Windows */
