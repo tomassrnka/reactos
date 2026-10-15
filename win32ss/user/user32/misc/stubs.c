@@ -294,7 +294,7 @@ DefRawInputProc(
 {
   if (cbSizeHeader == sizeof(RAWINPUTHEADER))
      return S_OK;
-  return 1;
+  return -1;
 }
 
 /*
@@ -308,18 +308,10 @@ GetRawInputBuffer(
     _Inout_ PUINT pcbSize,
     _In_ UINT cbSizeHeader)
 {
-    PCLIENTTHREADINFO pcti = GetWin32ClientInfo()->pClientThreadInfo;
-
     if (!pcbSize || cbSizeHeader != sizeof(RAWINPUTHEADER))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return (UINT)-1;
-    }
-
-    if (!pcti || !(pcti->fsWakeBits & QS_RAWINPUT))
-    {
-        *pcbSize = 0;
-        return 0;
     }
 
     return NtUserGetRawInputBuffer(pData, pcbSize, cbSizeHeader);

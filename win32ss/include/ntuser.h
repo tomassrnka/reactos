@@ -3606,6 +3606,7 @@ NtUserYieldTask(VOID);
 #define NOPARAM_ROUTINE_ISCONSOLEMODE             0xffff0001
 #define ONEPARAM_ROUTINE_ENABLEPROCWNDGHSTING     0xfffe000d
 #define ONEPARAM_ROUTINE_GETDESKTOPMAPPING        0xfffe000e
+#define ONEPARAM_ROUTINE_SETRAWINPUTSERIAL        0xfffe000f /* checked builds only */
 #define ONEPARAM_ROUTINE_ROS_MSGWAIT              0xfffe0100
 
 /* Parameters of MsgWaitForMultipleObjectsEx. User32 fills the handles as WaitForMultipleObjectsEx would

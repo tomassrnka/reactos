@@ -210,6 +210,8 @@ UserProcessDestroy(PEPROCESS Process)
 
     IntFreeImeHotKeys();
 
+    UserRawInputProcessDestroy(ppiCurrent);
+
     if (gpwlCache)
     {
         ExFreePoolWithTag(gpwlCache, USERTAG_WINDOWLIST);
@@ -818,7 +820,12 @@ ExitThreadCallback(PETHREAD Thread)
     ppiCurrent = ptiCurrent->ppi;
     ASSERT(ppiCurrent);
 
+    /* Walks of a peek that called out and never came back (the thread ends inside a hook) */
+    MsqRundownHardwareWalks(ptiCurrent);
+
     IsRemoveAttachThread(ptiCurrent);
+
+    UserRawInputThreadCleanup(ptiCurrent);
 
     if (gpwlList)
     {

@@ -53,6 +53,7 @@ list(APPEND SOURCE
     NextDlgItem.c
     PrivateExtractIcons.c
     ProcessConnectTerminate.c
+    RawInput.c
     RealGetWindowClass.c
     RedrawWindow.c
     RegisterClassEx.c

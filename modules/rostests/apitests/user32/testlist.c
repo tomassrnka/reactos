@@ -55,6 +55,7 @@ extern void func_NextDlgItem(void);
 extern void func_PrintWindow(void);
 extern void func_PrivateExtractIcons(void);
 extern void func_ProcessConnectTerminate(void);
+extern void func_RawInput(void);
 extern void func_RealGetWindowClass(void);
 extern void func_RedrawWindow(void);
 extern void func_RegisterHotKey(void);
@@ -144,6 +145,7 @@ const struct test winetest_testlist[] =
     { "PrintWindow", func_PrintWindow },
     { "PrivateExtractIcons", func_PrivateExtractIcons },
     { "ProcessConnectTerminate", func_ProcessConnectTerminate },
+    { "RawInput", func_RawInput },
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedrawWindow", func_RedrawWindow },
     { "RegisterHotKey", func_RegisterHotKey },

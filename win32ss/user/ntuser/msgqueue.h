@@ -43,6 +43,22 @@ typedef struct _USER_SENT_MESSAGE
 #define SMF_RECEIVEDMESSAGE 0x00000010
 #define SMF_RECEIVERBUSY    0x00004000
 
+/*
+   A walk of a queue's hardware message list that calls out (hooks, sent messages) while it
+   holds a node. It lives on the walker's stack, is linked into the queue and into the thread,
+   and holds a reference on the queue. Every removal from the list moves pNext past the node
+   it removes and clears pCurrent if that is the node, so the walk never touches freed memory.
+   A thread that dies inside a callout abandons its walks; thread cleanup unlinks them.
+ */
+typedef struct _MSQ_HW_WALK
+{
+  LIST_ENTRY QueueLink;
+  struct _MSQ_HW_WALK *pPrevOfThread;
+  struct _USER_MESSAGE_QUEUE *MessageQueue;
+  PLIST_ENTRY pNext;
+  struct _USER_MESSAGE *pCurrent;
+} MSQ_HW_WALK, *PMSQ_HW_WALK;
+
 typedef struct _USER_MESSAGE_QUEUE
 {
   /* Reference counter, only access this variable with interlocked functions! */
@@ -62,6 +78,8 @@ typedef struct _USER_MESSAGE_QUEUE
   /* Outstanding raw input packets for the queue. */
   LIST_ENTRY RawInputListHead;
   ULONG cRawInput;
+  /* Walks of the hardware message list in progress (MSQ_HW_WALK), nested ones included */
+  LIST_ENTRY HwWalkListHead;
   /* Last click message for translating double clicks */
   MSG msgDblClk;
   /* Current capture window for this queue. */
@@ -166,6 +184,11 @@ BOOLEAN FASTCALL MsqInitializeMessageQueue(PTHREADINFO, PUSER_MESSAGE_QUEUE);
 PUSER_MESSAGE_QUEUE FASTCALL MsqCreateMessageQueue(PTHREADINFO);
 VOID FASTCALL MsqCleanupThreadMsgs(PTHREADINFO);
 VOID FASTCALL MsqDestroyMessageQueue(_In_ PTHREADINFO pti);
+VOID FASTCALL MsqPurgeRawInputOfThread(_In_ PTHREADINFO pti);
+VOID FASTCALL MsqRetireRawInputMessage(_In_ PUSER_MESSAGE_QUEUE MessageQueue, _In_ PUSER_MESSAGE Message);
+VOID FASTCALL MsqDestroyHardwareMessage(_In_ PUSER_MESSAGE_QUEUE MessageQueue, _In_ PUSER_MESSAGE Message);
+BOOL FASTCALL MsqHardwareMessageInPlay(_In_ PUSER_MESSAGE_QUEUE MessageQueue, _In_ PUSER_MESSAGE Message);
+VOID FASTCALL MsqRundownHardwareWalks(_In_ PTHREADINFO pti);
 CODE_SEG("INIT") NTSTATUS NTAPI MsqInitializeImpl(VOID);
 BOOLEAN FASTCALL co_MsqDispatchOneSentMessage(_In_ PTHREADINFO pti);
 NTSTATUS FASTCALL
