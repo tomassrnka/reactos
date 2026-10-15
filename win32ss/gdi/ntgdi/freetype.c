@@ -7107,23 +7107,23 @@ IntGetTextDisposition(
     BOOL use_kerning = FT_HAS_KERNING(face);
     ULONG previous = 0;
     FT_Vector delta, vec;
-    DWORD ch0, ch1;
+    DWORD ch0;
+    INT cUnits, iDx;
 
     ASSERT_FREETYPE_LOCK_HELD();
 
-    for (i = 0; i < Count; ++i)
+    for (i = 0; i < Count; i += cUnits)
     {
-        ch0 = *String++;
-        if (IS_HIGH_SURROGATE(ch0))
+        /* As in TextIntGetTextExtentPoint: a lone surrogate is a code unit of its own */
+        ch0 = String[i];
+        cUnits = 1;
+        if (IS_HIGH_SURROGATE(ch0) && i + 1 < Count && IS_LOW_SURROGATE(String[i + 1]) &&
+            !(fuOptions & ETO_GLYPH_INDEX))
         {
-            ++i;
-            if (i >= Count)
-                return TRUE;
-
-            ch1 = *String++;
-            if (IS_LOW_SURROGATE(ch1))
-                ch0 = Utf32FromSurrogatePair(ch0, ch1);
+            ch0 = Utf32FromSurrogatePair(ch0, String[i + 1]);
+            cUnits = 2;
         }
+        iDx = i + cUnits - 1;
 
         glyph_index = FontLink_Chain_FindGlyph(pChain, Cache, &face, ch0,
                                                (fuOptions & ETO_GLYPH_INDEX));
@@ -7140,8 +7140,8 @@ IntGetTextDisposition(
             }
         }
 
-        /* Retrieve kerning distance */
-        if (use_kerning && previous && glyph_index)
+        /* Retrieve kerning distance; rendering ignores it when the caller gives the advances */
+        if (use_kerning && previous && glyph_index && NULL == Dx)
         {
             FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
             X64 += delta.x;
@@ -7155,8 +7155,8 @@ IntGetTextDisposition(
         }
         else if (fuOptions & ETO_PDY)
         {
-            vec.x = (Dx[2 * i + 0] << 6);
-            vec.y = (Dx[2 * i + 1] << 6);
+            vec.x = (Dx[2 * iDx + 0] << 6);
+            vec.y = (Dx[2 * iDx + 1] << 6);
             if (!bNoTransform)
                 FT_Vector_Transform(&vec, &Cache->Hashed.matTransform);
             X64 += vec.x;
@@ -7164,7 +7164,7 @@ IntGetTextDisposition(
         }
         else
         {
-            vec.x = (Dx[i] << 6);
+            vec.x = (Dx[iDx] << 6);
             vec.y = 0;
             if (!bNoTransform)
                 FT_Vector_Transform(&vec, &Cache->Hashed.matTransform);
@@ -7202,7 +7202,7 @@ IntExtTextOutW(
     PDC_ATTR pdcattr;
     SURFOBJ *psoDest, *psoGlyph;
     SURFACE *psurf;
-    INT glyph_index, i;
+    INT glyph_index, i, cUnits, iDx;
     FT_Face face;
     FT_BitmapGlyph realglyph;
     LONGLONG X64, Y64, RealXStart64, RealYStart64, DeltaX64, DeltaY64;
@@ -7222,7 +7222,7 @@ IntExtTextOutW(
     FONT_CACHE_ENTRY Cache;
     FT_Matrix mat;
     BOOL bNoTransform;
-    DWORD ch0, ch1;
+    DWORD ch0;
     const DWORD del = 0x7f, nbsp = 0xa0; // DEL is ASCII DELETE and nbsp is a non-breaking space
     FONTLINK_CHAIN Chain;
     SIZE spaceWidth;
@@ -7459,19 +7459,18 @@ IntExtTextOutW(
     previous = 0;
     DoBreak = FALSE;
     bResult = TRUE; /* Assume success */
-    for (i = 0; i < Count; ++i)
+    for (i = 0; i < Count; i += cUnits)
     {
-        ch0 = *String++;
-        if (IS_HIGH_SURROGATE(ch0))
+        /* The same walk as the measuring and the width code: a lone surrogate is a code unit of its own */
+        ch0 = String[i];
+        cUnits = 1;
+        if (IS_HIGH_SURROGATE(ch0) && i + 1 < Count && IS_LOW_SURROGATE(String[i + 1]) &&
+            !(fuOptions & ETO_GLYPH_INDEX))
         {
-            ++i;
-            if (i >= Count)
-                break;
-
-            ch1 = *String++;
-            if (IS_LOW_SURROGATE(ch1))
-                ch0 = Utf32FromSurrogatePair(ch0, ch1);
+            ch0 = Utf32FromSurrogatePair(ch0, String[i + 1]);
+            cUnits = 2;
         }
+        iDx = i + cUnits - 1;
 
         glyph_index = FontLink_Chain_FindGlyph(&Chain, &Cache, &face, ch0,
                                                (fuOptions & ETO_GLYPH_INDEX));
@@ -7603,8 +7602,8 @@ IntExtTextOutW(
         }
         else if (fuOptions & ETO_PDY)
         {
-            vec.x = (Dx[2 * i + 0] << 6);
-            vec.y = (Dx[2 * i + 1] << 6);
+            vec.x = (Dx[2 * iDx + 0] << 6);
+            vec.y = (Dx[2 * iDx + 1] << 6);
             if (!bNoTransform)
                 FT_Vector_Transform(&vec, &Cache.Hashed.matTransform);
             X64 += vec.x;
@@ -7612,7 +7611,7 @@ IntExtTextOutW(
         }
         else
         {
-            vec.x = (Dx[i] << 6);
+            vec.x = (Dx[iDx] << 6);
             vec.y = 0;
             if (!bNoTransform)
                 FT_Vector_Transform(&vec, &Cache.Hashed.matTransform);
