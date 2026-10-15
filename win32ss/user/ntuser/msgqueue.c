@@ -384,15 +384,9 @@ IntMsqSetWakeMask(DWORD WakeMask)
 
    IdlePing();
 
-   /* The idle hook has run. From here the thread waits for input and is not hung.
-      An alertable wait is left out: an APC runs while the mask would still be set. */
-   if (Win32Thread->pcti)
-   {
-      if (LOWORD(WakeMask) & QS_INPUT)
-         Win32Thread->pcti->timeLastRead = EngGetTickCount32();
-      if (!(dwFlags & MWMO_ALERTABLE))
-         Win32Thread->pcti->fsWakeMask = LOWORD(WakeMask);
-   }
+   /* The wait is done by the caller, out of reach of win32k: it gets no exemption (see co_MsqMsgWait) */
+   if (Win32Thread->pcti && (LOWORD(WakeMask) & QS_INPUT))
+      Win32Thread->pcti->timeLastRead = EngGetTickCount32();
 
    return MessageEventHandle;
 }
@@ -405,13 +399,86 @@ IntMsqClearWakeMask(VOID)
    Win32Thread = PsGetCurrentThreadWin32Thread();
    if (Win32Thread == NULL || Win32Thread->MessageQueue == NULL)
       return FALSE;
-   if (Win32Thread->pcti->fsWakeMask & QS_INPUT)
-      Win32Thread->pcti->timeLastRead = EngGetTickCount32();
-   Win32Thread->pcti->fsWakeMask = 0;
-
    IdlePong();
 
    return TRUE;
+}
+
+/*
+ * MsgWaitForMultipleObjectsEx: the wait for the caller's objects and the queue event. win32k does it so
+ * that the "waiting for input" state of the thread (fsWakeMask, which keeps it from counting as hung)
+ * lasts exactly as long as the wait: the foreground-idle hook runs before the state is set and before
+ * anything is acquired, and the state is cleared, with the read time refreshed, before the thread
+ * returns to user mode, so before an APC runs. The wait itself is NtWaitForMultipleObjects on the
+ * caller's handle array, so handles, objects and status codes are those of WaitForMultipleObjectsEx.
+ */
+NTSTATUS FASTCALL
+co_MsqMsgWait(PMSGWAITINFO pUserInfo)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+    ULONG Count, Flags;
+    UINT WakeMask;
+    BOOLEAN HasTimeout, WaitForInput;
+    NTSTATUS Status;
+
+    if (pti == NULL || pti->MessageQueue == NULL || pti->pcti == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    _SEH2_TRY
+    {
+        ProbeForWrite(pUserInfo, sizeof(*pUserInfo), sizeof(ULONG));
+        Count = pUserInfo->nCount;
+        WakeMask = LOWORD(pUserInfo->dwWakeMask);
+        Flags = pUserInfo->dwFlags;
+        HasTimeout = (pUserInfo->bTimeout != FALSE);
+        /* The queue event follows the caller's handles; a count that leaves no room fails in the wait */
+        if (Count < MSGWAIT_MAX_OBJECTS)
+            pUserInfo->Handles[Count] = pti->hEventQueueClient;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if ((pti->pcti->fsChangeBits & WakeMask) ||
+        ((Flags & MWMO_INPUTAVAILABLE) && (pti->pcti->fsWakeBits & WakeMask)))
+    {
+        /* Input is already there: the queue event takes part signalled and the thread does not wait for input */
+        KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
+        WaitForInput = FALSE;
+    }
+    else
+    {
+        /* Nothing is held here, so a hook that ends the thread leaves nothing behind */
+        IdlePing();
+        WaitForInput = TRUE;
+        if (WakeMask & QS_INPUT)
+            pti->pcti->timeLastRead = EngGetTickCount32();
+        pti->pcti->fsWakeMask = WakeMask;
+    }
+
+    UserLeaveCo();
+    do
+    {
+        Status = NtWaitForMultipleObjects(Count + 1,
+                                          (PHANDLE)pUserInfo->Handles,
+                                          (Flags & MWMO_WAITALL) ? WaitAll : WaitAny,
+                                          (Flags & MWMO_ALERTABLE) != 0,
+                                          HasTimeout ? &pUserInfo->Timeout : NULL);
+    }
+    while (Status == STATUS_ALERTED && (Flags & MWMO_ALERTABLE));
+    UserEnterCo();
+
+    if (WaitForInput)
+    {
+        if (pti->pcti->fsWakeMask & QS_INPUT)
+            pti->pcti->timeLastRead = EngGetTickCount32();
+        pti->pcti->fsWakeMask = 0;
+    }
+    IdlePong();
+
+    return Status;
 }
 
 /*

@@ -257,6 +257,7 @@ VOID APIENTRY MsqRemoveWindowMessagesFromQueue(PWND pWindow);
 HANDLE FASTCALL IntMsqSetWakeMask(DWORD WakeMask);
 UINT FASTCALL GetWakeMask(UINT first, UINT last);
 BOOL FASTCALL IntMsqClearWakeMask(VOID);
+NTSTATUS FASTCALL co_MsqMsgWait(PMSGWAITINFO pUserInfo);
 
 VOID FASTCALL IdlePing(VOID);
 VOID FASTCALL IdlePong(VOID);

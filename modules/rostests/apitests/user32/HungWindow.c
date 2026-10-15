@@ -27,8 +27,13 @@ typedef enum
     V_NEVER_READS,
     V_IDLE_GETMESSAGE,
     V_IDLE_MSGWAIT,
-    V_STALL_REFRESH
+    V_STALL_REFRESH,
+    V_IDLE_MSGWAIT_ALERTABLE,
+    V_WAKE_STALL,
+    V_TIMEOUT_THEN_HEAP
 } VKIND;
+
+static HANDLE g_hHeap;
 
 typedef enum
 {
@@ -48,6 +53,8 @@ typedef struct
     HANDLE hRelease;
     HANDLE hThread;
     HANDLE hQuit;
+    HANDLE hWake;
+    BOOL Alertable;
     volatile DWORD LastRead;
     int Case;
     REFRESHAPI Api;
@@ -121,6 +128,29 @@ VictimThread(
         while (MsgWaitForMultipleObjects(1, &v->hRelease, FALSE, INFINITE, QS_ALLINPUT) != WAIT_OBJECT_0)
             PumpMessages();
         break;
+    case V_IDLE_MSGWAIT_ALERTABLE:
+        v->LastRead = GetTickCount();
+        SetEvent(v->hReady);
+        while (MsgWaitForMultipleObjectsEx(1, &v->hRelease, INFINITE, QS_ALLINPUT, MWMO_ALERTABLE) != WAIT_OBJECT_0)
+            PumpMessages();
+        break;
+    case V_WAKE_STALL:
+        /* An idle wait that ends by an object, with nothing read, then a stall */
+        SetEvent(v->hReady);
+        while (MsgWaitForMultipleObjectsEx(1, &v->hWake, INFINITE, QS_ALLINPUT,
+                                           v->Alertable ? MWMO_ALERTABLE : 0) != WAIT_OBJECT_0)
+            PumpMessages();
+        v->LastRead = GetTickCount();
+        WaitForSingleObject(v->hRelease, INFINITE);
+        break;
+    case V_TIMEOUT_THEN_HEAP:
+        /* An idle wait that ends by its timeout, then a block on a lock: not waiting for input */
+        SetEvent(v->hReady);
+        while (MsgWaitForMultipleObjectsEx(0, NULL, 1000, QS_ALLINPUT, 0) != WAIT_TIMEOUT)
+            PumpMessages();
+        v->LastRead = GetTickCount();
+        HeapFree(g_hHeap, 0, HeapAlloc(g_hHeap, 0, 16));
+        break;
     case V_STALL_REFRESH:
         v->LastRead = GetTickCount();
         SetEvent(v->hReady);
@@ -167,8 +197,10 @@ StartVictim(
     v->Kind = Kind;
     v->Case = Case;
     v->Api = Api;
+    v->Alertable = Api != 0;
     v->hReady = CreateEventW(NULL, TRUE, FALSE, NULL);
     v->hRelease = CreateEventW(NULL, TRUE, FALSE, NULL);
+    v->hWake = CreateEventW(NULL, TRUE, FALSE, NULL);
     v->hThread = CreateThread(NULL, 0, VictimThread, v, 0, &v->ThreadId);
     WaitForSingleObject(v->hReady, 10000);
     return v;
@@ -185,6 +217,7 @@ StopVictim(
     CloseHandle(v->hThread);
     CloseHandle(v->hReady);
     CloseHandle(v->hRelease);
+    CloseHandle(v->hWake);
     free(v);
 }
 
@@ -522,8 +555,10 @@ AlertableThread(
 }
 
 static
-void
-TestBlockedApc(void)
+DWORD
+WINAPI
+BlockedApcCase(
+    _In_ PVOID Parameter)
 {
     VICTIM *v;
     int Hung;
@@ -532,7 +567,7 @@ TestBlockedApc(void)
     if (!is_reactos() && GetNTVersion() < _WIN32_WINNT_WIN8)
     {
         skip("Windows 7 does not report a thread that blocks in an APC as hung\n");
-        return;
+        return 0;
     }
 
     v = calloc(1, sizeof(*v));
@@ -541,12 +576,18 @@ TestBlockedApc(void)
     v->hQuit = CreateEventW(NULL, TRUE, FALSE, NULL);
     v->hThread = CreateThread(NULL, 0, AlertableThread, v, 0, &v->ThreadId);
     WaitForSingleObject(v->hReady, 10000);
-    Sleep(500);
-    ok(!IsHungAppWindow(v->hWnd), "Hung while waiting\n");
+
+    /* Idle in an alertable wait for more than the hung time: responsive */
+    Sleep(6300);
+    ok(!IsHungAppWindow(v->hWnd), "Hung while waiting in an alertable wait for input\n");
+
+    /* The APC starts, blocks, and the clock starts at the APC */
     QueueUserAPC(BlockingApc, v->hThread, (ULONG_PTR)v);
-    Sleep(200);
+    while (!v->LastRead)
+        Sleep(5);
     Hung = WaitForHung(v, 10000);
-    ok(Hung >= 3000 && Hung <= HUNG_MAX, "A thread blocked in an APC is hung after %d ms\n", Hung);
+    ok(Hung >= HUNG_MIN && Hung <= HUNG_MAX, "A thread blocked in an APC is hung after %d ms\n", Hung);
+
     SetEvent(v->hRelease);
     SetEvent(v->hQuit);
     WaitForSingleObject(v->hThread, 10000);
@@ -555,10 +596,49 @@ TestBlockedApc(void)
     CloseHandle(v->hRelease);
     CloseHandle(v->hQuit);
     free(v);
+    return 0;
+}
+
+static
+DWORD
+WINAPI
+WakeStallCase(
+    _In_ PVOID Parameter)
+{
+    VICTIM *v = Parameter;
+    int Hung;
+
+    Sleep(6300);
+    ok(!IsHungAppWindow(v->hWnd), "Alertable %d: hung while idle for 6.3 s\n", v->Alertable);
+    SetEvent(v->hWake);
+    while (!v->LastRead)
+        Sleep(5);
+    /* The wake counts as a read; with no read after it the thread is hung 5 s later */
+    Hung = WaitForHung(v, 10000);
+    ok(Hung >= HUNG_MIN && Hung <= HUNG_MAX, "Alertable %d: hung %d ms after the wake\n", v->Alertable, Hung);
+    return 0;
+}
+
+static
+DWORD
+WINAPI
+HeapCase(
+    _In_ PVOID Parameter)
+{
+    VICTIM *v = Parameter;
+    int Hung;
+
+    while (!v->LastRead)
+        Sleep(5);
+    Hung = WaitForHung(v, 10000);
+    ok(Hung >= HUNG_MIN && Hung <= HUNG_MAX, "Blocked on a lock after a wait timed out: hung after %d ms\n", Hung);
+    return 0;
 }
 
 #define REFRESH_CASES 5
-#define CASE_COUNT (5 + REFRESH_CASES + 5)
+#define VICTIM_COUNT (5 + REFRESH_CASES + 4)
+#define CHILD_COUNT 5
+#define CASE_COUNT (VICTIM_COUNT + CHILD_COUNT + 1)
 
 static
 DWORD
@@ -690,14 +770,14 @@ ChildCase(
 
 START_TEST(HungWindow)
 {
-    VICTIM *Victims[5 + REFRESH_CASES];
+    VICTIM *Victims[VICTIM_COUNT];
     HANDLE Threads[CASE_COUNT];
     VICTIM *Shower;
-    static CHILDCASE Children[5] = { { "invisible", FALSE }, { "visible", TRUE },
-                                     { "noactivate-then-swp", TRUE }, { "showna-then-show", FALSE },
-                                     { "noactivate-then-plain-swp", TRUE } };
+    static CHILDCASE Children[CHILD_COUNT] = { { "invisible", FALSE }, { "visible", TRUE },
+                                               { "noactivate-then-swp", TRUE }, { "showna-then-show", FALSE },
+                                               { "noactivate-then-plain-swp", TRUE } };
     char **argv;
-    int argc, i;
+    int argc, i, n = 0;
 
     argc = winetest_get_mainargs(&argv);
     if (argc >= 5 && !strcmp(argv[2], "child"))
@@ -718,34 +798,46 @@ START_TEST(HungWindow)
     TestReceiverExits();
     TestReceiverDestroysWindow();
 
+    /* Held for the whole test: the victim that blocks on it must be hung 5 s after its last wait */
+    g_hHeap = HeapCreate(0, 0, 0);
+    HeapLock(g_hHeap);
+
     Victims[0] = StartVictim(V_IDLE_GETMESSAGE, 0, 0);
     Victims[1] = StartVictim(V_IDLE_MSGWAIT, 1, 0);
     Victims[2] = StartVictim(V_STALL, 2, 0);
     Victims[3] = StartVictim(V_STALL, 3, 0);
     Victims[4] = StartVictim(V_NEVER_READS, 4, 0);
     for (i = 0; i < REFRESH_CASES; i++)
-    {
         Victims[5 + i] = StartVictim(V_STALL_REFRESH, 5 + i, i);
-    }
+    Victims[10] = StartVictim(V_IDLE_MSGWAIT_ALERTABLE, 10, 0);
+    Victims[11] = StartVictim(V_WAKE_STALL, 11, 0);
+    Victims[12] = StartVictim(V_WAKE_STALL, 12, 1);
+    Victims[13] = StartVictim(V_TIMEOUT_THEN_HEAP, 13, 0);
 
-    Threads[0] = CreateThread(NULL, 0, IdleCase, Victims[0], 0, NULL);
-    Threads[1] = CreateThread(NULL, 0, IdleCase, Victims[1], 0, NULL);
-    Threads[2] = CreateThread(NULL, 0, StallCase, Victims[2], 0, NULL);
-    Threads[3] = CreateThread(NULL, 0, NoTimeoutIfNotHungCase, Victims[3], 0, NULL);
-    Threads[4] = CreateThread(NULL, 0, NeverReadsCase, Victims[4], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, IdleCase, Victims[0], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, IdleCase, Victims[1], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, StallCase, Victims[2], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, NoTimeoutIfNotHungCase, Victims[3], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, NeverReadsCase, Victims[4], 0, NULL);
     for (i = 0; i < REFRESH_CASES; i++)
-        Threads[5 + i] = CreateThread(NULL, 0, RefreshCase, Victims[5 + i], 0, NULL);
-    for (i = 0; i < 5; i++)
-        Threads[5 + REFRESH_CASES + i] = CreateThread(NULL, 0, ChildCase, &Children[i], 0, NULL);
+        Threads[n++] = CreateThread(NULL, 0, RefreshCase, Victims[5 + i], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, IdleCase, Victims[10], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, WakeStallCase, Victims[11], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, WakeStallCase, Victims[12], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, HeapCase, Victims[13], 0, NULL);
+    for (i = 0; i < CHILD_COUNT; i++)
+        Threads[n++] = CreateThread(NULL, 0, ChildCase, &Children[i], 0, NULL);
+    Threads[n++] = CreateThread(NULL, 0, BlockedApcCase, NULL, 0, NULL);
 
-    TestBlockedApc();
     TestOwnThread();
 
-    WaitForMultipleObjects(CASE_COUNT, Threads, TRUE, 60000);
-    for (i = 0; i < CASE_COUNT; i++)
+    WaitForMultipleObjects(n, Threads, TRUE, 60000);
+    for (i = 0; i < n; i++)
         CloseHandle(Threads[i]);
-    for (i = 0; i < 5 + REFRESH_CASES; i++)
+    HeapUnlock(g_hHeap);
+    for (i = 0; i < VICTIM_COUNT; i++)
         StopVictim(Victims[i]);
+    HeapDestroy(g_hHeap);
 
     PostThreadMessageW(Shower->ThreadId, WM_QUIT, 0, 0);
     WaitForSingleObject(Shower->hThread, 10000);
