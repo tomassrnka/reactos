@@ -2592,6 +2592,7 @@ co_WinPosMinMaximize(PWND Wnd, UINT ShowFlag, RECT* NewPos)
                   }
                   else
                   {
+                     SwpFlags |= SWP_STATECHANGED;
                      *NewPos = wpl.rcNormalPosition;
                      if (ShowFlag != SW_SHOWNORMAL && ShowFlag != SW_SHOWDEFAULT)
                      {
@@ -2655,7 +2656,8 @@ void IntForceMinimizeWindow(PWND pWnd)
 }
 
 /*
-   ShowWindow does not set SWP_FRAMECHANGED!!! Fix wine msg test_SetParent:WmSetParentSeq_2:23 wParam bits!
+   ShowWindow does not set SWP_FRAMECHANGED, except when the minimized, maximized or normal state changes.
+   Fix wine msg test_SetParent:WmSetParentSeq_2:23 wParam bits!
  */
 BOOLEAN FASTCALL
 co_WinPosShowWindow(PWND Wnd, INT Cmd)
@@ -2834,6 +2836,10 @@ co_WinPosShowWindow(PWND Wnd, INT Cmd)
          //ERR("co_WinPosShowWindow Exit Good 4\n");
          return FALSE;
    }
+
+   /* A change between minimized, maximized and normal changes the frame: applications recalculate it on SWP_FRAMECHANGED */
+   if (Swp & SWP_STATECHANGED)
+      Swp |= SWP_FRAMECHANGED;
 
    ShowFlag = (Cmd != SW_HIDE);
 
