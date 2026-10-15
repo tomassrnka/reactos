@@ -682,6 +682,7 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
 
    Msg->time = EngGetTickCount32();
 
+   RtlZeroMemory(&MouseHookData, sizeof(MouseHookData));
    MouseHookData.pt.x = LOWORD(Msg->lParam);
    MouseHookData.pt.y = HIWORD(Msg->lParam);
    switch (Msg->message)
@@ -1789,6 +1790,7 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     event.paramH  = msg->pt.y;
     co_HOOK_CallHooks( WH_JOURNALRECORD, HC_ACTION, 0, (LPARAM)&event );
 
+    RtlZeroMemory(&hook, sizeof(hook));
     hook.MOUSEHOOKSTRUCT.pt           = msg->pt;
     hook.MOUSEHOOKSTRUCT.hwnd         = msg->hwnd;
     hook.MOUSEHOOKSTRUCT.wHitTestCode = hittest;

@@ -293,7 +293,7 @@ co_IntCallLowLevelHook(PHOOK Hook,
        case WH_MOUSE:
           uTimeout = 200;
           Block = TRUE;
-          Size = sizeof(MOUSEHOOKSTRUCT);
+          Size = sizeof(MOUSEHOOKSTRUCTEX);
           break;
        case WH_KEYBOARD:
           uTimeout = 200;
@@ -304,7 +304,14 @@ co_IntCallLowLevelHook(PHOOK Hook,
     if (Size)
     {
        pHP->pHookStructs = ExAllocatePoolWithTag(NonPagedPool, Size, TAG_HOOK);
-       if (pHP->pHookStructs) RtlCopyMemory(pHP->pHookStructs, (PVOID)lParam, Size);
+       if (!pHP->pHookStructs)
+       {
+          ExFreePoolWithTag(pHP, TAG_HOOK);
+          return 0;
+       }
+       /* the buffer goes to user mode: padding included, nothing stale */
+       RtlZeroMemory(pHP->pHookStructs, Size);
+       RtlCopyMemory(pHP->pHookStructs, (PVOID)lParam, Size);
     }
 
     /* FIXME: Should get timeout from
@@ -547,8 +554,11 @@ co_UserCallNextHookEx(PHOOK Hook,
         (Hook->HookId == WH_CBT && Code == HCBT_CLICKSKIPPED))
     {
         MOUSEHOOKSTRUCTEX Mouse;
+
+        RtlZeroMemory(&Mouse, sizeof(Mouse));
         if (lParam)
         {
+            /* A hook procedure may pass the plain structure; mouseData stays zero then */
             _SEH2_TRY
             {
                 ProbeForRead((PVOID)lParam,
@@ -561,7 +571,21 @@ co_UserCallNextHookEx(PHOOK Hook,
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
-                BadChk = TRUE;
+                _SEH2_TRY
+                {
+                    ProbeForRead((PVOID)lParam,
+                                 sizeof(MOUSEHOOKSTRUCT),
+                                 1);
+
+                    RtlCopyMemory(&Mouse,
+                                  (PVOID)lParam,
+                                  sizeof(MOUSEHOOKSTRUCT));
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    BadChk = TRUE;
+                }
+                _SEH2_END;
             }
             _SEH2_END;
 
