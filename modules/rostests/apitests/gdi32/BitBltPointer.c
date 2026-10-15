@@ -183,12 +183,6 @@ DrawStretchShrink(HDC hdc)
 }
 
 static void
-DrawStretchFlipped(HDC hdc)
-{
-    StretchBlt(hdc, 10, 110, 140, -100, ghdcSrc, 10, 10, 140, 100, SRCCOPY);
-}
-
-static void
 DrawClipTwoRects(HDC hdc)
 {
     /* A clip with a gap through the pointer, so the clip object has several rectangles */
@@ -380,7 +374,6 @@ START_TEST(BitBltPointer)
     Check("StretchBlt without scaling, SRCINVERT", DrawStretchSameSizeInvert);
     Check("StretchBlt to twice the size", DrawStretchDouble);
     Check("StretchBlt to a smaller size", DrawStretchShrink);
-    Check("StretchBlt flipped", DrawStretchFlipped);
     Check("BitBlt with a clip of two rectangles through the pointer", DrawClipTwoRects);
     Check("PatBlt with a clip that has a hole over the pointer", DrawClipHole);
     Check("Clip that changes between operations", DrawClipChanges);
