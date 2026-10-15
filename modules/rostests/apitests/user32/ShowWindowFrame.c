@@ -216,6 +216,51 @@ static void test_work_area_offset(HINSTANCE hInst)
         ok(EqualRect(&before, &after), "maximize, minimize and restore twice: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
            after.left, after.top, after.right, after.bottom, before.left, before.top, before.right, before.bottom);
 
+        /* A WINDOWPLACEMENT round trip: what GetWindowPlacement gives goes back in */
+        {
+            WINDOWPLACEMENT wp, wp2;
+
+            wp.length = sizeof(wp);
+            ok(GetWindowPlacement(hwnd, &wp), "GetWindowPlacement failed: %lu\n", GetLastError());
+            ok(wp.showCmd == SW_SHOWNORMAL, "showCmd %u\n", wp.showCmd);
+
+            ShowWindow(hwnd, SW_MAXIMIZE);
+            SetWindowPlacement(hwnd, &wp);
+            GetWindowRect(hwnd, &after);
+            ok(EqualRect(&before, &after), "SetWindowPlacement of a maximized window: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
+               after.left, after.top, after.right, after.bottom, before.left, before.top, before.right, before.bottom);
+
+            ShowWindow(hwnd, SW_MINIMIZE);
+            wp2.length = sizeof(wp2);
+            GetWindowPlacement(hwnd, &wp2);
+            ok(EqualRect(&wp.rcNormalPosition, &wp2.rcNormalPosition),
+               "the normal position of the minimized window: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
+               wp2.rcNormalPosition.left, wp2.rcNormalPosition.top, wp2.rcNormalPosition.right, wp2.rcNormalPosition.bottom,
+               wp.rcNormalPosition.left, wp.rcNormalPosition.top, wp.rcNormalPosition.right, wp.rcNormalPosition.bottom);
+            wp2.showCmd = SW_SHOWNORMAL;
+            SetWindowPlacement(hwnd, &wp2);
+            GetWindowRect(hwnd, &after);
+            ok(EqualRect(&before, &after), "SetWindowPlacement of a minimized window: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
+               after.left, after.top, after.right, after.bottom, before.left, before.top, before.right, before.bottom);
+
+            /* A new normal position: the window moves by the same amount, and GetWindowPlacement returns what was set */
+            wp.rcNormalPosition.left += 10;
+            wp.rcNormalPosition.right += 10;
+            wp.rcNormalPosition.top += 10;
+            wp.rcNormalPosition.bottom += 10;
+            SetWindowPlacement(hwnd, &wp);
+            GetWindowRect(hwnd, &after);
+            ok(after.left == before.left + 10 && after.top == before.top + 10 && after.right - after.left == before.right - before.left,
+               "SetWindowPlacement with a moved rectangle: (%ld,%ld)-(%ld,%ld), expected the window 10 pixels right and down\n",
+               after.left, after.top, after.right, after.bottom);
+            wp2.length = sizeof(wp2);
+            GetWindowPlacement(hwnd, &wp2);
+            ok(EqualRect(&wp.rcNormalPosition, &wp2.rcNormalPosition),
+               "the normal position after SetWindowPlacement: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
+               wp2.rcNormalPosition.left, wp2.rcNormalPosition.top, wp2.rcNormalPosition.right, wp2.rcNormalPosition.bottom,
+               wp.rcNormalPosition.left, wp.rcNormalPosition.top, wp.rcNormalPosition.right, wp.rcNormalPosition.bottom);
+        }
+
         DestroyWindow(hwnd);
     }
     UnregisterClassA(wc.lpszClassName, hInst);
