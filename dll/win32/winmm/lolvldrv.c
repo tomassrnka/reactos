@@ -55,6 +55,11 @@ static WINE_LLTYPE	llTypes[MMDRV_MAX] = {
 };
 #undef A
 
+static CRITICAL_SECTION MMDRV_cs;
+static BOOL MMDRV_Loading;
+static volatile LONG MMDRV_Loaded;
+static void MMDRV_LoadDrivers(void);
+
 /**************************************************************************
  * 			MMDRV_GetNum				[internal]
  */
@@ -62,6 +67,7 @@ UINT	MMDRV_GetNum(UINT type)
 {
     TRACE("(%04x)\n", type);
     assert(type < MMDRV_MAX);
+    MMDRV_LoadDrivers();
     return llTypes[type].wMaxId;
 }
 
@@ -127,6 +133,8 @@ LPWINE_MLD	MMDRV_Alloc(UINT size, UINT type, LPHANDLE hndl, DWORD* dwFlags,
     UINT_PTR i;
     TRACE("(%d, %04x, %p, %p, %p, %p)\n",
           size, type, hndl, dwFlags, dwCallback, dwInstance);
+
+    MMDRV_LoadDrivers();
 
     mld = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
     if (!mld)	return NULL;
@@ -254,6 +262,7 @@ LPWINE_MLD	MMDRV_Get(HANDLE _hndl, UINT type, BOOL bCanBeID)
     TRACE("(%p, %04x, %c)\n", _hndl, type, bCanBeID ? 'Y' : 'N');
 
     assert(type < MMDRV_MAX);
+    MMDRV_LoadDrivers();
 
     if (hndl >= llTypes[type].wMaxId &&
 	hndl != (UINT16)-1 && hndl != (UINT)-1) {
@@ -362,6 +371,9 @@ static  BOOL	MMDRV_InitPerType(LPWINE_MM_DRIVER lpDrv, UINT type, UINT wMsg)
     DWORD			ret;
     UINT			count = 0;
     int				i, k;
+    UINT			newMax = llTypes[type].wMaxId;
+    int				newMapper = llTypes[type].nMapper;
+    LPWINE_MLD			newMlds;
     TRACE("(%p, %04x, %04x)\n", lpDrv, type, wMsg);
 
     part->nIDMin = part->nIDMax = 0;
@@ -392,45 +404,52 @@ static  BOOL	MMDRV_InitPerType(LPWINE_MM_DRIVER lpDrv, UINT type, UINT wMsg)
 		llTypes[type].typestr, llTypes[type].nMapper, lpDrv->drvname);
 	if (count > 1)
 	    ERR("Strange: mapper with %d > 1 devices\n", count);
-	llTypes[type].nMapper = MMDrvsHi;
+	newMapper = MMDrvsHi;
     } else {
 	if (count == 0)
 	    return FALSE;
 	part->nIDMin = llTypes[type].wMaxId;
-	llTypes[type].wMaxId += count;
-	part->nIDMax = llTypes[type].wMaxId;
+	newMax = llTypes[type].wMaxId + count;
+	part->nIDMax = newMax;
     }
     TRACE("Setting min=%d max=%d (ttop=%d) for (%s:%s)\n",
-	  part->nIDMin, part->nIDMax, llTypes[type].wMaxId,
+	  part->nIDMin, part->nIDMax, newMax,
 	  lpDrv->drvname, llTypes[type].typestr);
     /* realloc translation table */
     if (llTypes[type].lpMlds)
-        llTypes[type].lpMlds = (LPWINE_MLD)
-	HeapReAlloc(GetProcessHeap(), 0, llTypes[type].lpMlds - 1,
-		    sizeof(WINE_MLD) * (llTypes[type].wMaxId + 1)) + 1;
+        newMlds = HeapReAlloc(GetProcessHeap(), 0, llTypes[type].lpMlds - 1,
+			      sizeof(WINE_MLD) * (newMax + 1));
     else
-        llTypes[type].lpMlds = (LPWINE_MLD)
-	HeapAlloc(GetProcessHeap(), 0,
-		    sizeof(WINE_MLD) * (llTypes[type].wMaxId + 1)) + 1;
+        newMlds = HeapAlloc(GetProcessHeap(), 0, sizeof(WINE_MLD) * (newMax + 1));
+    if (!newMlds) {
+	part->nIDMin = part->nIDMax = 0;
+	return FALSE;
+    }
+    newMlds++;
 
     /* re-build the translation table */
-    if (llTypes[type].nMapper != -1) {
-	TRACE("%s:Trans[%d] -> %s\n", llTypes[type].typestr, -1, MMDrvs[llTypes[type].nMapper].drvname);
-	llTypes[type].lpMlds[-1].uDeviceID = (UINT16)-1;
-	llTypes[type].lpMlds[-1].type = type;
-	llTypes[type].lpMlds[-1].mmdIndex = llTypes[type].nMapper;
-	llTypes[type].lpMlds[-1].dwDriverInstance = 0;
+    if (newMapper != -1) {
+	TRACE("%s:Trans[%d] -> %s\n", llTypes[type].typestr, -1, MMDrvs[newMapper].drvname);
+	newMlds[-1].uDeviceID = (UINT16)-1;
+	newMlds[-1].type = type;
+	newMlds[-1].mmdIndex = newMapper;
+	newMlds[-1].dwDriverInstance = 0;
     }
     for (i = k = 0; i <= MMDrvsHi; i++) {
 	while (MMDrvs[i].parts[type].nIDMin <= k && k < MMDrvs[i].parts[type].nIDMax) {
 	    TRACE("%s:Trans[%d] -> %s\n", llTypes[type].typestr, k, MMDrvs[i].drvname);
-	    llTypes[type].lpMlds[k].uDeviceID = k;
-	    llTypes[type].lpMlds[k].type = type;
-	    llTypes[type].lpMlds[k].mmdIndex = i;
-	    llTypes[type].lpMlds[k].dwDriverInstance = 0;
+	    newMlds[k].uDeviceID = k;
+	    newMlds[k].type = type;
+	    newMlds[k].mmdIndex = i;
+	    newMlds[k].dwDriverInstance = 0;
 	    k++;
 	}
     }
+
+    /* the table is complete: only now do the lookups see the new devices */
+    llTypes[type].lpMlds = newMlds;
+    llTypes[type].nMapper = newMapper;
+    llTypes[type].wMaxId = newMax;
     return TRUE;
 }
 
@@ -525,9 +544,9 @@ BOOL	MMDRV_Install(LPCSTR drvRegName, LPCSTR drvFileName, BOOL bIsMapper)
 }
 
 /**************************************************************************
- * 				MMDRV_Init
+ * 				MMDRV_InitDrivers
  */
-BOOL	MMDRV_Init(void)
+static BOOL MMDRV_InitDrivers(void)
 {
 /* Redundant code, keeping this for reference only (for now) */
 #if 0
@@ -580,33 +599,40 @@ BOOL	MMDRV_Init(void)
 #endif
 }
 
-/******************************************************************
- *		ExitPerType
- *
- *
- */
-static  BOOL	MMDRV_ExitPerType(LPWINE_MM_DRIVER lpDrv, UINT type)
+/* The drivers are loaded on first use, as Windows does: loading them from DllMain made every
+   process that loads winmm load more DLLs under the loader lock. A driver that calls back into
+   winmm while it loads sees the drivers loaded so far. */
+static void MMDRV_LoadDrivers(void)
 {
-    WINE_MM_DRIVER_PART*	part = &lpDrv->parts[type];
-    DWORD			ret;
-    TRACE("(%p, %04x)\n", lpDrv, type);
+    if (MMDRV_Loaded)
+        return;
 
-    if (part->fnMessage32) {
-#if 0
-        ret = part->fnMessage32(0, DRVM_DISABLE, 0L, 0L, 0L);
-        TRACE("DRVM_DISABLE => %08lx\n", ret);
-#endif
-        ret = part->fnMessage32(0, DRVM_EXIT, 0L, 0L, 0L);
-        TRACE("DRVM_EXIT => %s\n", WINMM_ErrorToString(ret));
+    /* Known limit: a first caller that holds the loader lock (winmm used from a DllMain) while another first caller loads drivers can deadlock */
+    EnterCriticalSection(&MMDRV_cs);
+    if (!MMDRV_Loaded && !MMDRV_Loading)
+    {
+        MMDRV_Loading = TRUE;
+        MMDRV_InitDrivers();
+        MMDRV_Loading = FALSE;
+        InterlockedExchange(&MMDRV_Loaded, TRUE);
     }
+    LeaveCriticalSection(&MMDRV_cs);
+}
 
+/**************************************************************************
+ * 				MMDRV_Init
+ */
+BOOL	MMDRV_Init(void)
+{
+    InitializeCriticalSection(&MMDRV_cs);
     return TRUE;
 }
 
 /******************************************************************
  *		Exit
  *
- *
+ * Frees winmm's own tables only. The drivers get no DRVM_EXIT and are not unloaded: DllMain runs with the
+ * loader lock held, and driver code, threads and FreeLibrary must not be reached from it.
  */
 void    MMDRV_Exit(void)
 {
@@ -625,18 +651,6 @@ void    MMDRV_Exit(void)
         }
     }
 
-    /* unload driver, in reverse order of loading */
-    i = MMDrvsHi;
-    while (i-- > 0)
-    {
-        MMDRV_ExitPerType(&MMDrvs[i], MMDRV_AUX);
-        MMDRV_ExitPerType(&MMDrvs[i], MMDRV_MIXER);
-        MMDRV_ExitPerType(&MMDrvs[i], MMDRV_MIDIIN);
-        MMDRV_ExitPerType(&MMDrvs[i], MMDRV_MIDIOUT);
-        MMDRV_ExitPerType(&MMDrvs[i], MMDRV_WAVEIN);
-        MMDRV_ExitPerType(&MMDrvs[i], MMDRV_WAVEOUT);
-        CloseDriver(MMDrvs[i].hDriver, 0, 0);
-    }
     if (llTypes[MMDRV_AUX].lpMlds)
         HeapFree(GetProcessHeap(), 0, llTypes[MMDRV_AUX].lpMlds - 1);
     if (llTypes[MMDRV_MIXER].lpMlds)
@@ -649,4 +663,6 @@ void    MMDRV_Exit(void)
         HeapFree(GetProcessHeap(), 0, llTypes[MMDRV_WAVEIN].lpMlds - 1);
     if (llTypes[MMDRV_WAVEOUT].lpMlds)
         HeapFree(GetProcessHeap(), 0, llTypes[MMDRV_WAVEOUT].lpMlds - 1);
+
+    DeleteCriticalSection(&MMDRV_cs);
 }
