@@ -686,6 +686,12 @@ static void Test_SizeLimit(void)
         hSection2 = NULL;
         Status = NtCreateSection(&hSection2, SECTION_MAP_READ | SECTION_QUERY, NULL, &Size,
                                  PAGE_READONLY, SEC_IMAGE, hFile);
+        /* Server 2008 R2 refuses a SizeOfImage above the sections; Windows 10 and ReactOS take it */
+        if (Pass == 0 && Status == STATUS_INVALID_IMAGE_FORMAT && !is_reactos())
+        {
+            skip("SizeLimit: this Windows refuses the image\n");
+            break;
+        }
         ok(Status == STATUS_SUCCESS, "SizeLimit pass %lu: size of the image: 0x%08lx\n", Pass, Status);
         if (NT_SUCCESS(Status))
         {
