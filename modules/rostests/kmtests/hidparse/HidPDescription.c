@@ -158,16 +158,50 @@ static UCHAR TruncatedItemDescriptor[] = {
     0x27, 0xFF                    /* Logical Maximum (size 4) but only 1 byte */
 };
 
-/* Report Size 0xFF: the field mask shift (0xFFFFFFFF << size) was undefined
- * for size >= 32 and the bit arithmetic overflowed. */
-static UCHAR HugeReportSizeDescriptor[] = {
+/* Reserved long-item prefix 0xFD, descriptor ends before the long-item tag
+ * byte: the parser read the nonexistent third header byte. */
+static UCHAR ReservedLongItemDescriptor[] = {
     0x05, 0x01,                   /* Usage Page (Generic Desktop) */
     0x09, 0x06,                   /* Usage (Keyboard) */
     0xA1, 0x01,                   /* Collection (Application) */
-    0x75, 0xFF,                   /*   Report Size (255) */
-    0x95, 0x01,                   /*   Report Count (1) */
+    0xFD, 0x00                    /* reserved type-3 prefix + bDataSize, no tag */
+};
+
+/* 2000 report items in one collection: the full context size exceeds the
+ * USHORT PreparsedDataLength, which was silently truncated on export. */
+static UCHAR OversizeContextDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop) */
+    0x09, 0x06,                   /* Usage (Keyboard) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0x75, 0x01,                   /*   Report Size (1) */
+    0x96, 0xD0, 0x07,             /*   Report Count (2000) */
     0x09, 0x00,                   /*   Usage (0) */
     0x81, 0x02,                   /*   Input (Data,Var,Abs) */
+    0xC0                          /* End Collection */
+};
+
+/* A 64-bit vendor field (some real devices use these). It must parse: the
+ * parser keeps wide fields; only value extraction above 32 bits is refused. */
+static UCHAR WideFieldDescriptor[] = {
+    0x06, 0x00, 0xFF,             /* Usage Page (Vendor FF00) */
+    0x09, 0x01,                   /* Usage (1) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0x75, 0x40,                   /*   Report Size (64) */
+    0x95, 0x01,                   /*   Report Count (1) */
+    0x09, 0x02,                   /*   Usage (2) */
+    0x81, 0x02,                   /*   Input (Data,Var,Abs) */
+    0xC0                          /* End Collection */
+};
+
+/* A zero-width data field must not create a report item (it would otherwise
+ * produce a ByteOffset at the report end that the value APIs read past). The
+ * descriptor is still valid and must parse. */
+static UCHAR ZeroWidthFieldDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop) */
+    0x09, 0x02,                   /* Usage (Mouse) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0x75, 0x08, 0x95, 0x01, 0x09, 0x30, 0x81, 0x02, /* one 8-bit field */
+    0x75, 0x00, 0x95, 0x01, 0x09, 0x31, 0x81, 0x02, /* zero-width field */
     0xC0                          /* End Collection */
 };
 
@@ -194,8 +228,37 @@ TestMalformedDescriptor(
     ok(!NT_SUCCESS(Status), "%s: expected failure, got %lx\n", Name, Status);
 
     //
-    // if it unexpectedly succeeded, release whatever it built
+    // a clean failure leaves no stale pointers or lengths behind
     //
+    if (!NT_SUCCESS(Status))
+    {
+        ok(DeviceDescription.CollectionDesc == NULL, "%s: CollectionDesc not cleared\n", Name);
+        ok(DeviceDescription.CollectionDescLength == 0, "%s: CollectionDescLength not cleared\n", Name);
+        ok(DeviceDescription.ReportIDs == NULL, "%s: ReportIDs not cleared\n", Name);
+        ok(DeviceDescription.ReportIDsLength == 0, "%s: ReportIDsLength not cleared\n", Name);
+    }
+    else
+    {
+        //
+        // if it unexpectedly succeeded, release whatever it built
+        //
+        HidP_FreeCollectionDescription(&DeviceDescription);
+    }
+}
+
+static
+VOID
+TestAcceptedDescriptor(
+    IN PUCHAR Descriptor,
+    IN ULONG Length,
+    IN PCSTR Name)
+{
+    NTSTATUS Status;
+    HIDP_DEVICE_DESC DeviceDescription;
+
+    RtlFillMemory(&DeviceDescription, sizeof(DeviceDescription), 0x55);
+    Status = HidP_GetCollectionDescription(Descriptor, Length, NonPagedPool, &DeviceDescription);
+    ok(NT_SUCCESS(Status), "%s: expected success, got %lx\n", Name, Status);
     if (NT_SUCCESS(Status))
         HidP_FreeCollectionDescription(&DeviceDescription);
 }
@@ -380,9 +443,16 @@ TestGetCollectionDescription(VOID)
     //
     TestMalformedDescriptor(WrapReportCountDescriptor, sizeof(WrapReportCountDescriptor), "WrapReportCount");
     TestMalformedDescriptor(TruncatedItemDescriptor, sizeof(TruncatedItemDescriptor), "TruncatedItem");
-    TestMalformedDescriptor(HugeReportSizeDescriptor, sizeof(HugeReportSizeDescriptor), "HugeReportSize");
+    TestMalformedDescriptor(ReservedLongItemDescriptor, sizeof(ReservedLongItemDescriptor), "ReservedLongItem");
+    TestMalformedDescriptor(OversizeContextDescriptor, sizeof(OversizeContextDescriptor), "OversizeContext");
     TestDeepCollections();
     TestPushOverflow();
+
+    //
+    // these are valid and must still parse after the hardening
+    //
+    TestAcceptedDescriptor(WideFieldDescriptor, sizeof(WideFieldDescriptor), "WideField");
+    TestAcceptedDescriptor(ZeroWidthFieldDescriptor, sizeof(ZeroWidthFieldDescriptor), "ZeroWidthField");
 }
 
 NTSTATUS

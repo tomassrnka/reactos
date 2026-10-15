@@ -403,6 +403,13 @@ HidParser_GetUsagesWithReport(
             continue;
 
         //
+        // a zero-width field carries no bits; skip it (it would otherwise read
+        // one byte past the report)
+        //
+        if (ReportItem->BitCount == 0)
+            continue;
+
+        //
         // check usage page
         //
         CurrentUsagePage = (ReportItem->UsageMinimum >> 16);
@@ -417,10 +424,11 @@ HidParser_GetUsagesWithReport(
         }
 
         //
-        // check if the specified usage is activated
+        // the field's byte (after the prepended report-id byte) must lie inside
+        // the supplied report; otherwise skip rather than read out of bounds
         //
-        ASSERT(ReportItem->ByteOffset < ReportDescriptorLength);
-        ASSERT(ReportItem->BitCount <= 8);
+        if (ReportItem->ByteOffset + 1 >= ReportDescriptorLength)
+            continue;
 
         //
         // one extra shift for skipping the prepended report id
@@ -607,9 +615,18 @@ HidParser_GetUsageValueWithReport(
             continue;
 
         //
-        // check if the specified usage is activated
+        // a value wider than 32 bits cannot be returned through this API; the
+        // field is parsed and kept, but its value is not extracted here
         //
-        ASSERT(ReportItem->ByteOffset < ReportDescriptorLength);
+        if (ReportItem->BitCount > 32)
+            return HIDP_STATUS_VALUE_OUT_OF_RANGE;
+
+        //
+        // the field's first byte (after the prepended report-id byte) must be
+        // inside the supplied report
+        //
+        if (ReportItem->ByteOffset + 1 >= ReportDescriptorLength)
+            return HIDP_STATUS_INVALID_REPORT_LENGTH;
 
         //
         // one extra shift for skipping the prepended report id
@@ -703,9 +720,18 @@ HidParser_GetScaledUsageValueWithReport(
             continue;
 
         //
-        // check if the specified usage is activated
+        // a value wider than 32 bits cannot be returned through this API; the
+        // field is parsed and kept, but its value is not extracted here
         //
-        ASSERT(ReportItem->ByteOffset < ReportDescriptorLength);
+        if (ReportItem->BitCount > 32)
+            return HIDP_STATUS_VALUE_OUT_OF_RANGE;
+
+        //
+        // the field's first byte (after the prepended report-id byte) must be
+        // inside the supplied report
+        //
+        if (ReportItem->ByteOffset + 1 >= ReportDescriptorLength)
+            return HIDP_STATUS_INVALID_REPORT_LENGTH;
 
         //
         // one extra shift for skipping the prepended report id

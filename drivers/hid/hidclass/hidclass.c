@@ -357,6 +357,7 @@ HidClass_ReadCompleteIrp(
     KIRQL OldLevel;
     PUCHAR Address;
     ULONG Offset;
+    ULONG CopyLength, DestinationLength;
     PHIDP_COLLECTION_DESC CollectionDescription;
     PHIDP_REPORT_IDS ReportDescription;
     BOOLEAN IsEmpty;
@@ -404,19 +405,31 @@ HidClass_ReadCompleteIrp(
                                                                  IrpContext->FileOp->DeviceExtension->CollectionNumber);
             ASSERT(ReportDescription);
 
-            if (CollectionDescription && ReportDescription)
+            if (CollectionDescription && ReportDescription &&
+                CollectionDescription->InputLength >= ReportDescription->InputLength)
             {
                 //
                 // calculate offset
                 //
-                ASSERT(CollectionDescription->InputLength >= ReportDescription->InputLength);
                 Offset = CollectionDescription->InputLength - ReportDescription->InputLength;
             }
 
             //
-            // copy result
+            // the lengths come from the device's report descriptor: copy only
+            // when offset + length fits the caller's buffer (no wrap)
             //
-            RtlCopyMemory(&Address[Offset], IrpContext->InputReportBuffer, IrpContext->InputReportBufferLength);
+            CopyLength = min(IrpContext->InputReportBufferLength, (ULONG)Irp->IoStatus.Information);
+            DestinationLength = MmGetMdlByteCount(IrpContext->OriginalIrp->MdlAddress);
+            if (Offset <= DestinationLength && CopyLength <= DestinationLength - Offset)
+            {
+                RtlCopyMemory(&Address[Offset], IrpContext->InputReportBuffer, CopyLength);
+            }
+            else
+            {
+                DPRINT1("[HIDCLASS] Report does not fit the read buffer (offset %lu length %lu buffer %lu)\n", Offset, CopyLength, DestinationLength);
+                Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+                Irp->IoStatus.Information = 0;
+            }
         }
     }
 
