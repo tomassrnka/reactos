@@ -276,6 +276,9 @@ static NTSTATUS NTAPI SendComplete
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
 
+    /* The window can be replaced once the request is not in flight */
+    AfdReleaseIrpMdls(Irp);
+
     ASSERT(FCB->SendIrp.InFlightRequest == Irp);
     FCB->SendIrp.InFlightRequest = NULL;
     /* Request is not in flight any longer */
@@ -312,7 +315,7 @@ static NTSTATUS NTAPI SendComplete
     FCB->Send.BytesUsed -= Sent;
 
     /* The transport has let go of the window, so a size asked for meanwhile can take effect */
-    AfdApplyWindowResize(&FCB->Send, FCB->Send.BytesUsed);
+    AfdApplyWindowResize(&FCB->Send, 0, FCB->Send.BytesUsed);
 
     /* They belong to cancelled requests first, then to the queued requests in order */
     Taken = MIN(Sent, FCB->SendBytesUnowned);

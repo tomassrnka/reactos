@@ -18,6 +18,9 @@ static VOID RefillSocketBuffer( PAFD_FCB FCB )
     /* Now ensure that receive is still allowed */
     if (FCB->TdiReceiveClosed) return;
 
+    /* Nothing is in flight, so a size asked for meanwhile can take effect, also with a full window */
+    AfdApplyRecvResize(FCB);
+
     /* Check if the buffer is full */
     if (FCB->Recv.Content == FCB->Recv.Size)
     {
@@ -40,9 +43,6 @@ static VOID RefillSocketBuffer( PAFD_FCB FCB )
     }
 
     AFD_DbgPrint(MID_TRACE,("Replenishing buffer\n"));
-
-    /* Nothing is in flight, so a size asked for meanwhile can take effect */
-    AfdApplyWindowResize(&FCB->Recv, FCB->Recv.Content);
 
     TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
                 FCB->Connection.Object,
@@ -320,6 +320,9 @@ NTSTATUS NTAPI ReceiveComplete
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
 
+    /* The window can be replaced once the request is not in flight */
+    AfdReleaseIrpMdls(Irp);
+
     ASSERT(FCB->ReceiveIrp.InFlightRequest == Irp);
     FCB->ReceiveIrp.InFlightRequest = NULL;
 
@@ -367,11 +370,16 @@ RelaunchPacketReceive(PAFD_FCB FCB)
         FCB->RecvRelaunchQueued ||
         FCB->SharedData.State == SOCKET_STATE_CLOSED ||
         FCB->TdiReceiveClosed ||
-        !FCB->AddressFile.Object ||
-        FCB->Recv.Content >= FCB->Recv.Size)
+        !FCB->AddressFile.Object)
     {
         return;
     }
+
+    /* Nothing is in flight, so a size asked for meanwhile can take effect */
+    AfdApplyRecvResize(FCB);
+
+    if (FCB->Recv.Content >= FCB->Recv.Size)
+        return;
 
     /* The receive IRP belongs to the thread that builds it and is cancelled
      * when that thread exits, so an application thread hands the start over
@@ -391,9 +399,6 @@ RelaunchPacketReceive(PAFD_FCB FCB)
         }
         return;
     }
-
-    /* Nothing is in flight, so a size asked for meanwhile can take effect */
-    AfdApplyWindowResize(&FCB->Recv, 0);
 
     TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
                        FCB->AddressFile.Object,
@@ -685,6 +690,9 @@ PacketSocketRecvComplete(
 
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
+
+    /* The window can be replaced once the request is not in flight */
+    AfdReleaseIrpMdls(Irp);
 
     ASSERT(FCB->ReceiveIrp.InFlightRequest == Irp);
     FCB->ReceiveIrp.InFlightRequest = NULL;
