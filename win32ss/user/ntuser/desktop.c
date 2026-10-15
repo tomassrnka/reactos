@@ -3548,7 +3548,8 @@ IntSetThreadDesktop(IN HDESK hDesktop,
         }
         else
         {
-            RtlZeroMemory(pctiNew, sizeof(CLIENTTHREADINFO));
+            /* keep timeLastRead and the wake state set at thread init */
+            RtlCopyMemory(pctiNew, &pti->cti, sizeof(CLIENTTHREADINFO));
             pci->fsHooks = pti->fsHooks;
             pci->dwTIFlags = pti->TIF_flags;
         }

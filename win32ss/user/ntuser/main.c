@@ -182,6 +182,20 @@ UserProcessCreate(PEPROCESS Process)
     // FIXME: check if this process is allowed.
     ppiCurrent->W32PF_flags |= W32PF_ALLOWFOREGROUNDACTIVATE; // Starting application will get it toggled off.
 
+    /* The process is starting until it activates a window; its age counts from its creation */
+    {
+        LARGE_INTEGER Now;
+        LONGLONG Age;
+
+        KeQuerySystemTime(&Now);
+        Age = (Now.QuadPart - PsGetProcessCreateTimeQuadPart(Process)) / 10000;
+        if (Age < MSQ_APPSTARTING_TIMEOUT)
+        {
+            ppiCurrent->AppStartTick = EngGetTickCount32() - (DWORD)max(Age, 0);
+            ppiCurrent->W32PF_flags |= W32PF_APPSTARTING;
+        }
+    }
+
     return STATUS_SUCCESS;
 }
 

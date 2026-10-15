@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <wincon.h>
 
 #ifndef QS_RAWINPUT
 #define QS_RAWINPUT 0x0400
@@ -701,6 +702,239 @@ static void Test_AttachedIdle(void)
     }
 }
 
+/* The objects are waited for as WaitForMultipleObjectsEx waits for them */
+
+/* A change notification is a directory handle: its object is not itself a dispatcher object */
+static void Test_ChangeNotificationHandle(void)
+{
+    WCHAR dir[MAX_PATH], file[MAX_PATH];
+    HANDLE handles[2], hFile;
+    DWORD result;
+
+    GetTempPathW(MAX_PATH - 40, dir);
+    wsprintfW(dir + lstrlenW(dir), L"msgwait%lu", GetCurrentProcessId());
+    wsprintfW(file, L"%s\\new.txt", dir);
+    ok(CreateDirectoryW(dir, NULL), "CreateDirectory failed %lu\n", GetLastError());
+
+    handles[0] = CreateEventW(NULL, TRUE, FALSE, NULL);
+    handles[1] = FindFirstChangeNotificationW(dir, FALSE, FILE_NOTIFY_CHANGE_FILE_NAME);
+    ok(handles[1] != INVALID_HANDLE_VALUE, "FindFirstChangeNotification failed %lu\n", GetLastError());
+    if (handles[1] == INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(handles[0]);
+        RemoveDirectoryW(dir);
+        return;
+    }
+
+    EnsureQueue();
+    DrainQueue();
+    GetQueueStatus(QS_ALLINPUT);
+    result = MsgWaitForMultipleObjectsEx(2, handles, 100, QS_ALLINPUT, 0);
+    ok(result == WAIT_TIMEOUT, "change notification before a change: result %lu\n", result);
+
+    hFile = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
+    ok(hFile != INVALID_HANDLE_VALUE, "CreateFile failed %lu\n", GetLastError());
+    CloseHandle(hFile);
+    result = MsgWaitForMultipleObjectsEx(2, handles, 5000, QS_ALLINPUT, 0);
+    ok(result == WAIT_OBJECT_0 + 1, "change notification after a change: result %lu\n", result);
+
+    ok(FindCloseChangeNotification(handles[1]), "FindCloseChangeNotification failed %lu\n", GetLastError());
+    CloseHandle(handles[0]);
+    DeleteFileW(file);
+    RemoveDirectoryW(dir);
+}
+
+/* MWMO_WAITALL with one object twice, through one handle or two, fails and takes nothing */
+static void Test_WaitAllDuplicates(void)
+{
+    HANDLE hSem, hDup, handles[2];
+    DWORD result;
+    LONG previous = -1;
+
+    hSem = CreateSemaphoreW(NULL, 1, 2, NULL);
+    ok(hSem != NULL, "CreateSemaphore failed %lu\n", GetLastError());
+    ok(DuplicateHandle(GetCurrentProcess(), hSem, GetCurrentProcess(), &hDup, 0, FALSE, DUPLICATE_SAME_ACCESS),
+       "DuplicateHandle failed %lu\n", GetLastError());
+
+    EnsureQueue();
+    DrainQueue();
+    /* With input waiting, the queue event takes part signalled: a wait that took the semaphore twice would succeed */
+    PostThreadMessageW(GetCurrentThreadId(), WM_TEST, 0, 0);
+
+    handles[0] = hSem;
+    handles[1] = hDup;
+    SetLastError(0xdeadbeef);
+    result = MsgWaitForMultipleObjectsEx(2, handles, 0, QS_ALLINPUT, MWMO_WAITALL);
+    ok(result == WAIT_FAILED, "WAITALL, two handles to one semaphore: result %lu\n", result);
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "WAITALL, two handles to one semaphore: last error %lu\n", GetLastError());
+
+    handles[1] = hSem;
+    SetLastError(0xdeadbeef);
+    result = MsgWaitForMultipleObjectsEx(2, handles, 0, QS_ALLINPUT, MWMO_WAITALL | MWMO_INPUTAVAILABLE);
+    ok(result == WAIT_FAILED, "WAITALL, one handle twice: result %lu\n", result);
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "WAITALL, one handle twice: last error %lu\n", GetLastError());
+
+    ok(ReleaseSemaphore(hSem, 1, &previous), "ReleaseSemaphore failed %lu\n", GetLastError());
+    ok(previous == 1, "semaphore count after the failed waits: %ld\n", previous);
+
+    DrainQueue();
+    CloseHandle(hDup);
+    CloseHandle(hSem);
+}
+
+/* MWMO_WAITALL with input already in the queue: input that a wait accepts lets it complete again */
+static void Test_WaitAllExistingInput(void)
+{
+    HANDLE hEvent;
+    DWORD result;
+    MSG msg;
+
+    hEvent = CreateEventW(NULL, TRUE, TRUE, NULL);
+    ok(hEvent != NULL, "CreateEvent failed %lu\n", GetLastError());
+
+    EnsureQueue();
+    DrainQueue();
+    PostThreadMessageW(GetCurrentThreadId(), WM_TEST, 0, 0);
+
+    result = MsgWaitForMultipleObjectsEx(1, &hEvent, 0, QS_ALLINPUT, MWMO_WAITALL);
+    ok(result == WAIT_OBJECT_0, "WAITALL, new input and a set event: result %lu\n", result);
+    /* The message has not been read and the event is still set */
+    result = MsgWaitForMultipleObjectsEx(1, &hEvent, 200, QS_ALLINPUT, MWMO_WAITALL | MWMO_INPUTAVAILABLE);
+    ok(result == WAIT_OBJECT_0, "WAITALL|INPUTAVAILABLE, unread input and a set event: result %lu\n", result);
+    result = MsgWaitForMultipleObjectsEx(1, &hEvent, 200, QS_ALLINPUT, MWMO_WAITALL);
+    ok(result == WAIT_OBJECT_0, "WAITALL, input not yet seen by GetQueueStatus and a set event: result %lu\n", result);
+
+    /* Once the queue has been looked at, the input is no longer new */
+    GetQueueStatus(QS_ALLINPUT);
+    result = MsgWaitForMultipleObjectsEx(1, &hEvent, 200, QS_ALLINPUT, MWMO_WAITALL);
+    ok(result == WAIT_TIMEOUT, "WAITALL, input already seen and a set event: result %lu\n", result);
+    result = MsgWaitForMultipleObjectsEx(1, &hEvent, 200, QS_ALLINPUT, MWMO_WAITALL | MWMO_INPUTAVAILABLE);
+    ok(result == WAIT_OBJECT_0, "WAITALL|INPUTAVAILABLE, input already seen and a set event: result %lu\n", result);
+
+    ok(PeekMessageW(&msg, NULL, WM_TEST, WM_TEST, PM_REMOVE), "the posted message is gone\n");
+    CloseHandle(hEvent);
+}
+
+/* Console input is waited for through its wait handle, also when named by the standard handle constant */
+static void Test_ConsoleInputHandle(void)
+{
+    HANDLE handles[2];
+    DWORD mode, result;
+
+    handles[0] = GetStdHandle(STD_INPUT_HANDLE);
+    if (!GetConsoleMode(handles[0], &mode))
+    {
+        skip("standard input is not a console\n");
+        return;
+    }
+    handles[1] = CreateEventW(NULL, TRUE, TRUE, NULL);
+    EnsureQueue();
+    DrainQueue();
+    GetQueueStatus(QS_ALLINPUT);
+
+    result = MsgWaitForMultipleObjectsEx(2, handles, 0, QS_ALLINPUT, 0);
+    ok(result == WAIT_OBJECT_0 || result == WAIT_OBJECT_0 + 1, "console input handle: result %lu, error %lu\n",
+       result, GetLastError());
+    handles[0] = (HANDLE)(ULONG_PTR)STD_INPUT_HANDLE;
+    result = MsgWaitForMultipleObjectsEx(2, handles, 0, QS_ALLINPUT, 0);
+    ok(result == WAIT_OBJECT_0 || result == WAIT_OBJECT_0 + 1, "STD_INPUT_HANDLE: result %lu, error %lu\n",
+       result, GetLastError());
+    CloseHandle(handles[1]);
+}
+
+/* A thread that exits in the foreground-idle hook, which MsgWait calls before it waits, leaves no reference behind */
+#define IDLE_HOOK_EXIT_CODE 0x4D57
+
+static LRESULT CALLBACK IdleHookExit(int code, WPARAM wParam, LPARAM lParam)
+{
+    ExitThread(IDLE_HOOK_EXIT_CODE);
+}
+
+static DWORD WINAPI IdleHookExitThread(LPVOID arg)
+{
+    HANDLE handles[3];
+    HHOOK hook;
+    HWND hwnd;
+    MSG msg;
+    int i;
+
+    handles[0] = handles[1] = handles[2] = (HANDLE)arg;
+    hwnd = CreateWindowExW(0, g_ClassName, L"MsgWait idle hook", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                           0, 0, 100, 100, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    if (!hwnd)
+        return 1;
+    SetForegroundWindow(hwnd);
+    for (i = 0; i < 1000 && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE); i++)
+        DispatchMessageW(&msg);
+    if (GetForegroundWindow() != hwnd)
+    {
+        DestroyWindow(hwnd);
+        return 2;
+    }
+    hook = SetWindowsHookExW(WH_FOREGROUNDIDLE, IdleHookExit, NULL, GetCurrentThreadId());
+    if (!hook)
+    {
+        DestroyWindow(hwnd);
+        return 3;
+    }
+    GetQueueStatus(QS_ALLINPUT);
+    MsgWaitForMultipleObjectsEx(3, handles, 2000, QS_ALLINPUT, 0);
+    UnhookWindowsHookEx(hook);
+    DestroyWindow(hwnd);
+    return 4;
+}
+
+/* The object's pointer count from NtQueryObject (ObjectBasicInformation), or -1 */
+static LONG PointerCount(HANDLE handle)
+{
+    struct
+    {
+        ULONG Attributes;
+        ACCESS_MASK GrantedAccess;
+        ULONG HandleCount;
+        ULONG PointerCount;
+        ULONG Reserved[10];
+    } info;
+    LONG (NTAPI *pNtQueryObject)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+    pNtQueryObject = (void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryObject");
+    if (!pNtQueryObject || pNtQueryObject(handle, 0, &info, sizeof(info), NULL) < 0)
+        return -1;
+    return info.PointerCount;
+}
+
+static void Test_IdleHookExit(void)
+{
+    HANDLE hEvent, hThread;
+    DWORD code = 0;
+    LONG before, after;
+
+    hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(hEvent != NULL, "CreateEvent failed %lu\n", GetLastError());
+    before = PointerCount(hEvent);
+    hThread = CreateThread(NULL, 0, IdleHookExitThread, hEvent, 0, NULL);
+    ok(hThread != NULL, "CreateThread failed %lu\n", GetLastError());
+    if (!hThread)
+    {
+        CloseHandle(hEvent);
+        return;
+    }
+    ok(WaitForSingleObject(hThread, 10000) == WAIT_OBJECT_0, "idle hook thread did not end\n");
+    GetExitCodeThread(hThread, &code);
+    CloseHandle(hThread);
+    after = PointerCount(hEvent);
+    CloseHandle(hEvent);
+    if (code != IDLE_HOOK_EXIT_CODE)
+    {
+        skip("the foreground-idle hook did not run (thread result %lu)\n", code);
+        return;
+    }
+    ok(before != -1, "NtQueryObject failed\n");
+    /* The wait took no reference that the exit could leave behind (Windows 10 may drop one it held before) */
+    ok(after <= before, "pointer count of the waited event: %ld before, %ld after the thread exited in the hook\n",
+       before, after);
+}
+
 START_TEST(MsgWaitForMultipleObjectsEx)
 {
     WNDCLASSW wc = {0};
@@ -729,6 +963,11 @@ START_TEST(MsgWaitForMultipleObjectsEx)
     RunInThread(Test_ChildPaintDestroyed);
     RunInThread(Test_RawInputAndMouse);
     RunInThread(Test_AttachedIdle);
+    RunInThread(Test_WaitAllDuplicates);
+    RunInThread(Test_WaitAllExistingInput);
+    RunInThread(Test_ConsoleInputHandle);
+    Test_IdleHookExit();
+    RunInThread(Test_ChangeNotificationHandle);
 
     UnregisterClassW(g_ClassName, GetModuleHandleW(NULL));
 }
