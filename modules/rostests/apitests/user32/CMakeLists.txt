@@ -53,6 +53,7 @@ list(APPEND SOURCE
     MessageStateAnalyzer.c
     MsgWaitForMultipleObjectsEx.c
     NCRButtonDown.c
+    NcPaintClient.c
     NcPaintRgn.c
     NextDlgItem.c
     PrivateExtractIcons.c
