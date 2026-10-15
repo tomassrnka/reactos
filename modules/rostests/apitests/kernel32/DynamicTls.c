@@ -17,6 +17,7 @@ typedef VOID (WINAPI *FN_TlsDynSetLog)(char *, LONG *);
 typedef ULONG (WINAPI *FN_TlsDynGetIndex)(VOID);
 typedef PVOID (WINAPI *FN_TlsDynGetTemplate)(VOID);
 typedef VOID (WINAPI *FN_TlsDynWatchFls)(DWORD);
+typedef VOID (WINAPI *FN_TlsDynDumpAtProcessDetach)(HANDLE);
 typedef PVOID (WINAPI *FN_TlsDynGetFlsAtDetach)(VOID);
 
 #define TEMPLATE_VALUE 0x5EEDF00D
@@ -391,6 +392,168 @@ Done:
     FreeLibrary(hDll);
 }
 
+/*
+ * FLS callbacks at process exit: the exiting thread's callbacks run, with its
+ * TLS intact, before the DLL process notifications. The child prints the
+ * events it logged at its own process detach.
+ */
+#define EXIT_DATA ((PVOID)(ULONG_PTR)0xE817DA7A)
+
+static char ChildLog[64];
+static LONG ChildLogCount;
+static DWORD ChildSlot, ChildFlsIndex;
+static BOOL ChildRaise;
+static FN_TlsDynGetValue pChildGetValue;
+static FN_TlsDynSetValue pChildSetValue;
+
+static VOID ChildEvent(char Kind, DWORD Value)
+{
+    LONG i = InterlockedExchangeAdd(&ChildLogCount, 2);
+    if (i + 1 < (LONG)sizeof(ChildLog) - 1)
+    {
+        ChildLog[i] = Kind;
+        ChildLog[i + 1] = (char)('0' + Value);
+    }
+}
+
+static VOID NTAPI ChildFlsCallback(PVOID Data)
+{
+    ULONG Value = 0;
+    BOOL Faulted = FALSE;
+
+    ChildEvent('F', Data == EXIT_DATA);
+    _SEH2_TRY
+    {
+        Value = pChildGetValue();
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Faulted = TRUE;
+    }
+    _SEH2_END;
+    ChildEvent('I', !Faulted && Value == FLS_IMPLICIT_VALUE);
+    ChildEvent('E', TlsGetValue(ChildSlot) == FLS_EXPLICIT_VALUE);
+    if (ChildRaise)
+        RaiseException(0xE0001234, 0, 0, NULL);
+}
+
+static VOID ChildPrepareThread(VOID)
+{
+    pChildSetValue(FLS_IMPLICIT_VALUE);
+    TlsSetValue(ChildSlot, FLS_EXPLICIT_VALUE);
+    FlsSetValue(ChildFlsIndex, EXIT_DATA);
+}
+
+static DWORD WINAPI ChildExitingThread(LPVOID Parameter)
+{
+    ChildPrepareThread();
+    ExitProcess(5);
+    return 0;
+}
+
+static DWORD WINAPI ChildEndingThread(LPVOID Parameter)
+{
+    ChildPrepareThread();
+    return 0;
+}
+
+/* Mode: "main" (ExitProcess from the main thread), "other" (from another thread), "last" (ExitThread of the last thread) */
+static VOID FlsExitChild(PCSTR Mode)
+{
+    FN_TlsDynSetLog pSetLog;
+    FN_TlsDynDumpAtProcessDetach pDump;
+    HMODULE hDll;
+    ULONG i;
+
+    hDll = LoadLibraryW(L"kernel32_tlsdyn.dll");
+    if (!hDll)
+        ExitProcess(0xD1);
+    pSetLog = (FN_TlsDynSetLog)GetProcAddress(hDll, "TlsDynSetLog");
+    pDump = (FN_TlsDynDumpAtProcessDetach)GetProcAddress(hDll, "TlsDynDumpAtProcessDetach");
+    pChildGetValue = (FN_TlsDynGetValue)GetProcAddress(hDll, "TlsDynGetValue");
+    pChildSetValue = (FN_TlsDynSetValue)GetProcAddress(hDll, "TlsDynSetValue");
+    if (!pSetLog || !pDump || !pChildGetValue || !pChildSetValue)
+        ExitProcess(0xD2);
+    for (i = 0; i < FLS_SLOT_COUNT; i++)
+        ChildSlot = TlsAlloc();
+    ChildFlsIndex = FlsAlloc(ChildFlsCallback);
+    pSetLog(ChildLog, &ChildLogCount);
+    pDump(GetStdHandle(STD_OUTPUT_HANDLE));
+
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+    if (!strcmp(Mode, "raise-process"))
+        ChildRaise = TRUE;
+    if (!strcmp(Mode, "raise-thread"))
+    {
+        /* The callback of a thread that ends raises an exception; does the process live on? */
+        HANDLE hThread;
+        ChildRaise = TRUE;
+        hThread = CreateThread(NULL, 0, ChildEndingThread, NULL, 0, NULL);
+        WaitForSingleObject(hThread, 10000);
+        ChildEvent('A', 1);
+        ChildRaise = FALSE;
+        ExitProcess(7);
+    }
+    if (!strcmp(Mode, "other"))
+    {
+        HANDLE hThread = CreateThread(NULL, 0, ChildExitingThread, NULL, 0, NULL);
+        /* The main thread has a callback too; it must not run */
+        FlsSetValue(ChildFlsIndex, (PVOID)(ULONG_PTR)1);
+        WaitForSingleObject(hThread, 10000);
+        ExitProcess(0xD3);
+    }
+    ChildPrepareThread();
+    if (!strcmp(Mode, "last"))
+        ExitThread(6);
+    ExitProcess(3);
+}
+
+static VOID RunFlsExitChild(PCSTR Self, PCSTR Mode, PCSTR Expected, PCSTR Alternative, DWORD ExpectedCode)
+{
+    SECURITY_ATTRIBUTES Sa = { sizeof(Sa), NULL, TRUE };
+    STARTUPINFOA StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    char CommandLine[MAX_PATH + 32], Output[128] = "";
+    HANDLE hRead, hWrite;
+    DWORD Read = 0, Code = 0xDEAD;
+
+    if (!CreatePipe(&hRead, &hWrite, &Sa, 0))
+    {
+        skip("CreatePipe failed: %lu\n", GetLastError());
+        return;
+    }
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+    StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    StartupInfo.hStdOutput = hWrite;
+    StartupInfo.hStdError = hWrite;
+    StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    StringCchPrintfA(CommandLine, ARRAYSIZE(CommandLine), "\"%s\" DynamicTls flsexit %s", Self, Mode);
+    if (!CreateProcessA(NULL, CommandLine, NULL, NULL, TRUE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+    {
+        skip("CreateProcess failed: %lu\n", GetLastError());
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return;
+    }
+    CloseHandle(hWrite);
+    if (WaitForSingleObject(ProcessInfo.hProcess, 30000) != WAIT_OBJECT_0)
+    {
+        ok(0, "The %s child did not exit\n", Mode);
+        TerminateProcess(ProcessInfo.hProcess, 0xDEAD);
+        WaitForSingleObject(ProcessInfo.hProcess, 10000);
+    }
+    ReadFile(hRead, Output, sizeof(Output) - 1, &Read, NULL);
+    Output[Read] = 0;
+    GetExitCodeProcess(ProcessInfo.hProcess, &Code);
+    trace("FLS at process exit, %s: exit code %lu, events '%s'\n", Mode, Code, Output);
+    ok(!strcmp(Output, Expected) || (Alternative && !strcmp(Output, Alternative)),
+       "%s: events '%s', expected '%s'\n", Mode, Output, Expected);
+    ok(Code == ExpectedCode, "%s: exit code 0x%lx, expected 0x%lx\n", Mode, Code, ExpectedCode);
+    CloseHandle(hRead);
+    CloseHandle(ProcessInfo.hProcess);
+    CloseHandle(ProcessInfo.hThread);
+}
+
 START_TEST(DynamicTls)
 {
     FN_TlsDynGetEvents pTlsDynGetEvents;
@@ -410,6 +573,11 @@ START_TEST(DynamicTls)
     if (argc >= 3 && !strcmp(argv[2], "protected"))
     {
         ProtectedTemplateChild();
+        return;
+    }
+    if (argc >= 4 && !strcmp(argv[2], "flsexit"))
+    {
+        FlsExitChild(argv[3]);
         return;
     }
 
@@ -477,6 +645,13 @@ START_TEST(DynamicTls)
     ok(FreeLibrary(hDll), "FreeLibrary failed: %lu\n", GetLastError());
 
     TestFlsAtThreadExit();
+    /* F1I1E1: the callback ran with the thread's data and TLS, before the process detach T0M0. Windows 10 detaches the last thread first. */
+    RunFlsExitChild(argv[0], "main", "F1I1E1T0M0", NULL, 3);
+    RunFlsExitChild(argv[0], "other", "T2M2F1I1E1T0M0", NULL, 5);
+    RunFlsExitChild(argv[0], "last", "F1I1E1T0M0", "F1I1E1T3M3T0M0", 6);
+    /* An exception that a callback raises ends the process, at exit and in a thread that ends; nothing reaches the pipe */
+    RunFlsExitChild(argv[0], "raise-process", "", NULL, 0xE0001234);
+    RunFlsExitChild(argv[0], "raise-thread", "", NULL, 0xE0001234);
 
     /* Failures */
     TestProtectedTemplate(argv[0]);
