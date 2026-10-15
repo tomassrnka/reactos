@@ -50,6 +50,11 @@ typedef struct
     USHORT WheelUsagePage;
 
     //
+    // the device reports a horizontal wheel (AC Pan)
+    //
+    BOOLEAN HasPan;
+
+    //
     // buffer for the four usage lists below
     //
     PVOID UsageListBuffer;
@@ -132,6 +137,7 @@ typedef struct
 } MOUHID_DEVICE_EXTENSION, *PMOUHID_DEVICE_EXTENSION;
 
 #define WHEEL_DELTA 120
+#define MOUHID_USAGE_CONSUMER_AC_PAN ((USAGE)0x0238)
 #define VIRTUAL_SCREEN_SIZE_X (65536)
 #define VIRTUAL_SCREEN_SIZE_Y (65536)
 
