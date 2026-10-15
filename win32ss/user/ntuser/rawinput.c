@@ -567,7 +567,7 @@ UserCreateRawInput(
     if (cbData > sizeof(RawEntry->RawInput.data))
         return NULL;
 
-    if (pti->MessageQueue->cRawInput + pti->MessageQueue->cDeadRaw >= MAX_RAWINPUT_PER_QUEUE)
+    if (pti->MessageQueue->cRawInput >= MAX_RAWINPUT_PER_QUEUE)
     {
         DPRINT("Dropping raw input, queue %p is not being pumped\n", pti->MessageQueue);
         return NULL;
@@ -945,7 +945,7 @@ RawInputNextMessage(
         if (Message->Msg.message == WM_INPUT &&
             (Message->QS_Flags & QS_RAWINPUT) &&
             Message->pti == pti &&
-            Message != (PUSER_MESSAGE)MessageQueue->idSysPeek)
+            !MsqHardwareMessageInPlay(MessageQueue, Message))
             return Message;
     }
 

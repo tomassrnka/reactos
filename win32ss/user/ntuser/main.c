@@ -806,6 +806,9 @@ ExitThreadCallback(PETHREAD Thread)
     ppiCurrent = ptiCurrent->ppi;
     ASSERT(ppiCurrent);
 
+    /* Walks of a peek that called out and never came back (the thread ends inside a hook) */
+    MsqRundownHardwareWalks(ptiCurrent);
+
     IsRemoveAttachThread(ptiCurrent);
 
     UserRawInputThreadCleanup(ptiCurrent);

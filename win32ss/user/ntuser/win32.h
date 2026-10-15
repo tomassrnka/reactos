@@ -160,6 +160,8 @@ typedef struct _THREADINFO
     LIST_ENTRY WindowListHead;
     LIST_ENTRY W32CallbackListHead;
     SINGLE_LIST_ENTRY  ReferencesList;
+    /* Hardware message list walks of this thread, innermost first (msgqueue.c) */
+    struct _MSQ_HW_WALK *pHwWalks;
     ULONG cExclusiveLocks;
 #if DBG
     USHORT acExclusiveLockCount[GDIObjTypeTotal + 1];
