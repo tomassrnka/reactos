@@ -1145,6 +1145,38 @@ LdrShutdownThread(VOID)
     }
 #endif
 
+    /*
+     * The FLS callbacks run first, like on Windows: before the DLL thread
+     * notifications and while the TLS is still there (the C++ runtime
+     * destroys its thread_local objects from an FLS callback)
+     */
+    if (Teb->FlsData)
+    {
+        /* Mimic BaseRundownFls */
+        ULONG n, FlsHighIndex;
+        PRTL_FLS_DATA pFlsData;
+        PFLS_CALLBACK_FUNCTION lpCallback;
+
+        pFlsData = Teb->FlsData;
+
+        RtlAcquirePebLock();
+        FlsHighIndex = NtCurrentPeb()->FlsHighIndex;
+        RemoveEntryList(&pFlsData->ListEntry);
+        RtlReleasePebLock();
+
+        for (n = 1; n <= FlsHighIndex; ++n)
+        {
+            lpCallback = NtCurrentPeb()->FlsCallback[n];
+            if (lpCallback && pFlsData->Data[n])
+            {
+                lpCallback(pFlsData->Data[n]);
+
+                /* The callback saw its value; the DLL notifications after it must not */
+                pFlsData->Data[n] = NULL;
+            }
+        }
+    }
+
     /* Get the Ldr Lock */
     RtlEnterCriticalSection(&LdrpLoaderLock);
 
@@ -1257,31 +1289,10 @@ LdrShutdownThread(VOID)
         RtlFreeHeap(RtlGetProcessHeap(), 0, Teb->TlsExpansionSlots);
     }
 
-    /* Check for FLS Data */
+    /* Free the FLS data, its callbacks already ran */
     if (Teb->FlsData)
     {
-        /* Mimic BaseRundownFls */
-        ULONG n, FlsHighIndex;
-        PRTL_FLS_DATA pFlsData;
-        PFLS_CALLBACK_FUNCTION lpCallback;
-
-        pFlsData = Teb->FlsData;
-
-        RtlAcquirePebLock();
-        FlsHighIndex = NtCurrentPeb()->FlsHighIndex;
-        RemoveEntryList(&pFlsData->ListEntry);
-        RtlReleasePebLock();
-
-        for (n = 1; n <= FlsHighIndex; ++n)
-        {
-            lpCallback = NtCurrentPeb()->FlsCallback[n];
-            if (lpCallback && pFlsData->Data[n])
-            {
-                lpCallback(pFlsData->Data[n]);
-            }
-        }
-
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pFlsData);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Teb->FlsData);
         Teb->FlsData = NULL;
     }
 
