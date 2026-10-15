@@ -572,6 +572,76 @@ TestCachingAfterProtect(void)
     FreeRegion(Control);
 }
 
+/* A page that is present when its protection changes keeps the caching type it was made present with */
+static
+void
+TestCachingTypeKept(void)
+{
+    static const struct
+    {
+        ULONG Allocation;
+        ULONG Second;
+        ULONG Third;
+        PCSTR Name;
+    } Cases[] =
+    {
+        { PAGE_READWRITE, PAGE_READWRITE | PAGE_NOCACHE, 0, "RW to RW|NOCACHE" },
+        { PAGE_READWRITE, PAGE_READWRITE | PAGE_NOCACHE, PAGE_READWRITE, "RW to RW|NOCACHE to RW" },
+        { PAGE_READWRITE | PAGE_NOCACHE, PAGE_READWRITE, 0, "RW|NOCACHE to RW" },
+        { PAGE_READWRITE | PAGE_NOCACHE, PAGE_READONLY, 0, "RW|NOCACHE to RO" },
+    };
+    PVOID Control, Uncached, Base;
+    SIZE_T Size;
+    ULONG Old, i, Page;
+    ULONGLONG ControlReads, UncachedReads, Reads;
+    BOOLEAN HonoursNoCache, Cached;
+    NTSTATUS Status;
+
+    Control = AllocateCodeRegion(PAGE_READWRITE);
+    Uncached = AllocateCodeRegion(PAGE_READWRITE | PAGE_NOCACHE);
+    if (!Control || !Uncached)
+        return;
+    ControlReads = TimeReads(Control);
+    UncachedReads = TimeReads(Uncached);
+    /* Some virtual machines map guest RAM cached whatever the guest asks for */
+    HonoursNoCache = UncachedReads > ControlReads * 10 + 1000;
+    trace("cached region %I64u ticks, PAGE_NOCACHE region %I64u ticks\n", ControlReads, UncachedReads);
+
+    for (i = 0; i < RTL_NUMBER_OF(Cases); i++)
+    {
+        Base = NULL;
+        Size = CACHE_REGION_PAGES * PAGE_SIZE;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size, MEM_RESERVE | MEM_COMMIT, Cases[i].Allocation);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            continue;
+        for (Page = 0; Page < CACHE_REGION_PAGES; Page++)
+            ((volatile UCHAR *)Base)[Page * PAGE_SIZE] = 1;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Base, &Size, Cases[i].Second, &Old);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (Cases[i].Third)
+        {
+            Size = CACHE_REGION_PAGES * PAGE_SIZE;
+            Status = NtProtectVirtualMemory(NtCurrentProcess(), &Base, &Size, Cases[i].Third, &Old);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+        }
+
+        Reads = TimeReads(Base);
+        Cached = !(Cases[i].Allocation & PAGE_NOCACHE);
+        if (Cached)
+            ok(Reads < ControlReads * 10 + 1000, "%s: reading takes %I64u ticks, a cached region takes %I64u\n",
+               Cases[i].Name, Reads, ControlReads);
+        else if (HonoursNoCache)
+            ok(Reads > ControlReads * 10 + 1000, "%s: reading takes %I64u ticks, a cached region takes %I64u, a PAGE_NOCACHE one %I64u\n",
+               Cases[i].Name, Reads, ControlReads, UncachedReads);
+        FreeRegion(Base);
+    }
+    if (!HonoursNoCache)
+        skip("PAGE_NOCACHE memory reads as fast as cached memory here, uncached cases not checked\n");
+    FreeRegion(Uncached);
+    FreeRegion(Control);
+}
+
 START_TEST(NtProtectVirtualMemory)
 {
     TestReadWrite();
@@ -582,4 +652,5 @@ START_TEST(NtProtectVirtualMemory)
     TestProtectionAfterInaccessible();
     TestProtectionAfterGuard();
     TestCachingAfterProtect();
+    TestCachingTypeKept();
 }
