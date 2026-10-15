@@ -303,78 +303,17 @@ AfdCancelStreamSend(PAFD_FCB FCB, PIRP Irp)
     return (Copied < SendLength) ? Copied : 0;
 }
 
-static NTSTATUS NTAPI SendComplete
-( PDEVICE_OBJECT DeviceObject,
-  PIRP Irp,
-  PVOID Context ) {
-    NTSTATUS Status = Irp->IoStatus.Status;
-    PAFD_FCB FCB = (PAFD_FCB)Context;
+/*
+ * The transport took Sent bytes from the start of the window. They belong to cancelled requests
+ * first, then to the queued requests in order: a request whose bytes are all taken completes.
+ */
+static VOID
+AfdAssignTakenBytes(PAFD_FCB FCB, UINT Sent)
+{
     PLIST_ENTRY NextIrpEntry;
     PIRP NextIrp;
-    UINT Sent, Taken, InWindow;
+    UINT Taken, InWindow;
 
-    UNREFERENCED_PARAMETER(DeviceObject);
-
-    /*
-     * The Irp parameter passed in is the IRP of the stream between AFD and
-     * TDI driver. It's not very useful to us. We need the IRPs of the stream
-     * between usermode and AFD. Those are chained from
-     * FCB->PendingIrpList[FUNCTION_SEND] and you'll see them in the code
-     * below as "NextIrp" ('cause they are the next usermode IRP to be
-     * processed).
-     */
-
-    AFD_DbgPrint(MID_TRACE,("Called, status %x, %u bytes used\n",
-                            Irp->IoStatus.Status,
-                            Irp->IoStatus.Information));
-
-    FCB->SendCompletions++;
-
-    if( !SocketAcquireStateLock( FCB ) )
-        return STATUS_FILE_CLOSED;
-
-    /* The window can be replaced once the request is not in flight */
-    AfdReleaseIrpMdls(Irp);
-
-    ASSERT(FCB->SendIrp.InFlightRequest == Irp);
-    FCB->SendIrp.InFlightRequest = NULL;
-    /* Request is not in flight any longer */
-
-    if( FCB->SharedData.State == SOCKET_STATE_CLOSED ) {
-        /* Cleanup our IRP queue because the FCB is being destroyed */
-        AfdFailSendQueue(FCB, STATUS_FILE_CLOSED);
-
-        RetryDisconnectCompletion(FCB);
-
-        SocketStateUnlock( FCB );
-        return STATUS_FILE_CLOSED;
-    }
-
-    if( !NT_SUCCESS(Status) ) {
-        /* Complete all following send IRPs with error */
-        AfdFailSendQueue(FCB, Status);
-
-        RetryDisconnectCompletion(FCB);
-
-        SocketStateUnlock( FCB );
-
-        return STATUS_SUCCESS;
-    }
-
-    /* The transport took the first bytes of the window */
-    Sent = (UINT)Irp->IoStatus.Information;
-    ASSERT(Sent <= FCB->Send.BytesUsed);
-    Sent = MIN(Sent, FCB->Send.BytesUsed);
-
-    RtlMoveMemory( FCB->Send.Window,
-                   FCB->Send.Window + Sent,
-                   FCB->Send.BytesUsed - Sent );
-    FCB->Send.BytesUsed -= Sent;
-
-    /* The transport has let go of the window, so a size asked for meanwhile can take effect */
-    AfdApplyWindowResize(&FCB->Send, 0, FCB->Send.BytesUsed);
-
-    /* They belong to cancelled requests first, then to the queued requests in order */
     Taken = MIN(Sent, FCB->SendBytesUnowned);
     FCB->SendBytesUnowned -= Taken;
     Sent -= Taken;
@@ -416,6 +355,86 @@ static NTSTATUS NTAPI SendComplete
     }
 
     ASSERT(Sent == 0);
+}
+
+static NTSTATUS NTAPI SendComplete
+( PDEVICE_OBJECT DeviceObject,
+  PIRP Irp,
+  PVOID Context ) {
+    NTSTATUS Status = Irp->IoStatus.Status;
+    PAFD_FCB FCB = (PAFD_FCB)Context;
+    UINT Sent;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    /*
+     * The Irp parameter passed in is the IRP of the stream between AFD and
+     * TDI driver. It's not very useful to us. We need the IRPs of the stream
+     * between usermode and AFD. Those are chained from
+     * FCB->PendingIrpList[FUNCTION_SEND] and you'll see them in the code
+     * below as "NextIrp" ('cause they are the next usermode IRP to be
+     * processed).
+     */
+
+    AFD_DbgPrint(MID_TRACE,("Called, status %x, %u bytes used\n",
+                            Irp->IoStatus.Status,
+                            Irp->IoStatus.Information));
+
+    FCB->SendCompletions++;
+
+    if( !SocketAcquireStateLock( FCB ) )
+        return STATUS_FILE_CLOSED;
+
+    /* The window can be replaced once the request is not in flight */
+    AfdReleaseIrpMdls(Irp);
+
+    ASSERT(FCB->SendIrp.InFlightRequest == Irp);
+    FCB->SendIrp.InFlightRequest = NULL;
+    /* Request is not in flight any longer */
+
+    if( FCB->SharedData.State == SOCKET_STATE_CLOSED ) {
+        /* Cleanup our IRP queue because the FCB is being destroyed */
+        Sent = MIN((UINT)Irp->IoStatus.Information, FCB->Send.BytesUsed);
+        if (Sent)
+            AfdAssignTakenBytes(FCB, Sent);
+        AfdFailSendQueue(FCB, STATUS_FILE_CLOSED);
+
+        RetryDisconnectCompletion(FCB);
+
+        SocketStateUnlock( FCB );
+        return STATUS_FILE_CLOSED;
+    }
+
+    if( !NT_SUCCESS(Status) ) {
+        /* A provider may take part of the window and then fail; those bytes are in the stream */
+        Sent = MIN((UINT)Irp->IoStatus.Information, FCB->Send.BytesUsed);
+        if (Sent)
+            AfdAssignTakenBytes(FCB, Sent);
+
+        /* Complete all following send IRPs with error */
+        AfdFailSendQueue(FCB, Status);
+
+        RetryDisconnectCompletion(FCB);
+
+        SocketStateUnlock( FCB );
+
+        return STATUS_SUCCESS;
+    }
+
+    /* The transport took the first bytes of the window */
+    Sent = (UINT)Irp->IoStatus.Information;
+    ASSERT(Sent <= FCB->Send.BytesUsed);
+    Sent = MIN(Sent, FCB->Send.BytesUsed);
+
+    RtlMoveMemory( FCB->Send.Window,
+                   FCB->Send.Window + Sent,
+                   FCB->Send.BytesUsed - Sent );
+    FCB->Send.BytesUsed -= Sent;
+
+    /* The transport has let go of the window, so a size asked for meanwhile can take effect */
+    AfdApplyWindowResize(&FCB->Send, 0, FCB->Send.BytesUsed);
+
+    AfdAssignTakenBytes(FCB, Sent);
 
     AfdFillSendWindow(FCB);
 
