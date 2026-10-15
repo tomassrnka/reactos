@@ -43,7 +43,7 @@ co_IntCallEventProc(HWINEVENTHOOK hook,
                    DWORD dwEventThread,
                    DWORD dwmsEventTime,
                      WINEVENTPROC Proc,
-                               INT Mod,
+                               INT_PTR Mod,
                      ULONG_PTR offPfn);
 
 VOID FASTCALL
