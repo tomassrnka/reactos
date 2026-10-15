@@ -1132,6 +1132,12 @@ typedef enum _MANDATORY_LEVEL {
 $endif(_NTIFS_ || _WINNT_)
 $if(_NTIFS_)
 
+typedef enum _TOKEN_ELEVATION_TYPE {
+  TokenElevationTypeDefault = 1,
+  TokenElevationTypeFull,
+  TokenElevationTypeLimited,
+} TOKEN_ELEVATION_TYPE, *PTOKEN_ELEVATION_TYPE;
+
 typedef struct _SE_ACCESS_REPLY {
   $ULONG Size;
   $ULONG ResultListCount;

@@ -56,21 +56,27 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     /* TokenOrigin */
     IQS_SAME(TOKEN_ORIGIN, ULONG, ICIF_QUERY | ICIF_SET),
     /* TokenElevationType */
-    IQS_NONE,
-    /* TokenLinkedToken */
-    IQS_NONE,
-    /* TokenElevation */
-    IQS_NONE,
+    IQS_SAME(TOKEN_ELEVATION_TYPE, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenLinkedToken (the length must match exactly; checked by the query) */
+    IQS_SAME(TOKEN_LINKED_TOKEN, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenElevation (the length must match exactly; checked by the query) */
+    IQS_SAME(TOKEN_ELEVATION, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenHasRestrictions */
     IQS_NONE,
     /* TokenAccessInformation */
     IQS_NONE,
     /* TokenVirtualizationAllowed */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenVirtualizationEnabled */
-    IQS_NONE,
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenIntegrityLevel */
     IQS_SAME(TOKEN_MANDATORY_LABEL, ULONG, ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE),
+    /* TokenUIAccess */
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenMandatoryPolicy */
+    IQS_NONE,
+    /* TokenLogonSid */
+    IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
 
 /* PUBLIC FUNCTIONS *****************************************************************/
@@ -442,6 +448,38 @@ SeQueryInformationToken(
     SepReleaseTokenLock(Token);
 
     return Status;
+}
+
+/*
+ * TokenElevation without UAC. Measured on Windows 7 and 10 with UAC off: an
+ * administrator's token is elevated and stays so when it is duplicated, set to
+ * medium integrity or restricted (the administrators group for deny only, no
+ * privileges); the tokens of the three service accounts are elevated; the
+ * anonymous token is not. So the answer follows the user and the groups the
+ * token was made with, not their attributes and not the integrity level.
+ */
+static
+ULONG
+SepIsTokenElevated(
+    _In_ PTOKEN Token)
+{
+    PSID User = Token->UserAndGroups[0].Sid;
+    ULONG i;
+
+    if (RtlEqualSid(User, SeLocalSystemSid) ||
+        RtlEqualSid(User, SeLocalServiceSid) ||
+        RtlEqualSid(User, SeNetworkServiceSid))
+    {
+        return TRUE;
+    }
+
+    for (i = 1; i < Token->UserAndGroupCount; i++)
+    {
+        if (RtlEqualSid(Token->UserAndGroups[i].Sid, SeAliasAdminsSid))
+            return TRUE;
+    }
+
+    return FALSE;
 }
 
 /* SYSTEM CALLS ***************************************************************/
@@ -1105,6 +1143,150 @@ NtQueryInformationToken(
                         Label->Label.Sid = LabelSid;
                         Label->Label.Attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
                         SepInitializeMandatoryLabelSid(LabelSid, Token->IntegrityLevel);
+                    }
+                    else
+                    {
+                        Status = STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            /*
+             * NT 6 classes. There is no UAC: no token is split into a filtered
+             * and a full one, so every token has the default elevation type,
+             * no linked token, no UI access and no virtualization.
+             */
+            case TokenElevationType:
+            case TokenVirtualizationAllowed:
+            case TokenVirtualizationEnabled:
+            case TokenUIAccess:
+            {
+                ULONG Value = 0;
+
+                DPRINT("NtQueryInformationToken(%d)\n", TokenInformationClass);
+                if (TokenInformationClass == TokenElevationType)
+                    Value = TokenElevationTypeDefault;
+                RequiredLength = sizeof(ULONG);
+
+                _SEH2_TRY
+                {
+                    if (TokenInformationLength >= RequiredLength)
+                        *(PULONG)TokenInformation = Value;
+                    else
+                        Status = STATUS_BUFFER_TOO_SMALL;
+
+                    *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            case TokenElevation:
+            {
+                ULONG IsElevated;
+
+                DPRINT("NtQueryInformationToken(TokenElevation)\n");
+                RequiredLength = sizeof(TOKEN_ELEVATION);
+                IsElevated = SepIsTokenElevated(Token);
+
+                _SEH2_TRY
+                {
+                    if (TokenInformationLength == RequiredLength)
+                        ((PTOKEN_ELEVATION)TokenInformation)->TokenIsElevated = IsElevated;
+                    else
+                        Status = STATUS_INFO_LENGTH_MISMATCH;
+
+                    *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            case TokenLinkedToken:
+            {
+                DPRINT("NtQueryInformationToken(TokenLinkedToken)\n");
+                RequiredLength = sizeof(TOKEN_LINKED_TOKEN);
+
+                /* Windows answers so for a token of the default elevation type */
+                Status = (TokenInformationLength == RequiredLength) ? STATUS_NO_SUCH_LOGON_SESSION
+                                                                    : STATUS_INFO_LENGTH_MISMATCH;
+                _SEH2_TRY
+                {
+                    *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            case TokenLogonSid:
+            {
+                PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
+                ULONG i, Count = 0, SidLength = 0;
+
+                DPRINT("NtQueryInformationToken(TokenLogonSid)\n");
+
+                /* The logon SID groups, in TokenGroups order */
+                for (i = 1; i < Token->UserAndGroupCount; i++)
+                {
+                    if ((Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+                    {
+                        Count++;
+                        SidLength += RtlLengthSid(Token->UserAndGroups[i].Sid);
+                    }
+                }
+
+                if (Count == 0)
+                {
+                    Status = STATUS_NOT_FOUND;
+                    break;
+                }
+
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups[Count]) + SidLength;
+
+                _SEH2_TRY
+                {
+                    if (TokenInformationLength >= RequiredLength)
+                    {
+                        PUCHAR Sid = (PUCHAR)&tg->Groups[Count];
+                        ULONG Index = 0, Length;
+
+                        tg->GroupCount = Count;
+                        for (i = 1; i < Token->UserAndGroupCount; i++)
+                        {
+                            if ((Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID) != SE_GROUP_LOGON_ID)
+                                continue;
+
+                            Length = RtlLengthSid(Token->UserAndGroups[i].Sid);
+                            RtlCopyMemory(Sid, Token->UserAndGroups[i].Sid, Length);
+                            tg->Groups[Index].Sid = (PSID)Sid;
+                            tg->Groups[Index].Attributes = Token->UserAndGroups[i].Attributes;
+                            Sid += Length;
+                            Index++;
+                        }
                     }
                     else
                     {
