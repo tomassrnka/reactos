@@ -22,6 +22,7 @@ list(APPEND COMMON_SOURCE
     rtl/RtlException.c
     ../apitests/rtl/RtlIntSafe.c
     rtl/RtlMemory.c
+    rtl/RtlMemoryOps.c
     rtl/RtlRegistry.c
     rtl/RtlSplayTree.c
     rtl/RtlStack.c
