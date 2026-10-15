@@ -165,8 +165,7 @@ do { \
 
     _SEH2_TRY
     {
-        RtlZeroMemory(lpFindFileData, sizeof(*lpFindFileData));
-
+        /* Windows leaves the bytes after the names untouched, and programs rely on it */
         lpFindFileData->dwFileAttributes = DirInfo.FullDirInfo->FileAttributes;
 
         ULARGE_INTEGER_2_FILETIME(lpFindFileData->ftCreationTime, DirInfo.FullDirInfo->CreationTime);
