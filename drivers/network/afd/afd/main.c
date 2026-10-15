@@ -1390,7 +1390,7 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
         if (CurrentIrp == Irp)
         {
-            /* A stream send reports the data it left in the send window */
+            /* A stream send leaves the data it copied into the send window */
             if (Function == FUNCTION_SEND && !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
                 Information = AfdCancelStreamSend(FCB, Irp);
 

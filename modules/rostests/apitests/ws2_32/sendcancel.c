@@ -169,7 +169,7 @@ void
 CheckStream(SEND_RECORD *Records, int Count, const RECEIVER *Receiver, const char *Name)
 {
     SIZE_T Offset = 0;
-    int i, Cancelled = 0, Withdrawn = 0, Pending = 0, Delivered = 0;
+    int i, Cancelled = 0, Withdrawn = 0, Pending = 0, Delivered = 0, Counted = 0;
     DWORD j, Expected;
     BOOL Bad = FALSE;
 
@@ -181,6 +181,7 @@ CheckStream(SEND_RECORD *Records, int Count, const RECEIVER *Receiver, const cha
             ok(Records[i].Error == WSA_OPERATION_ABORTED, "%s: send %d failed with %lu\n", Name, i, Records[i].Error);
             Cancelled++;
             Withdrawn += (Records[i].Bytes == 0);
+            Counted += (Records[i].Bytes == Records[i].Length);
         }
         ok(Records[i].Bytes <= Records[i].Length, "%s: send %d reported %lu bytes for %lu\n",
            Name, i, Records[i].Bytes, Records[i].Length);
@@ -219,6 +220,8 @@ CheckStream(SEND_RECORD *Records, int Count, const RECEIVER *Receiver, const cha
             }
         }
     }
+    /* Windows reports 0 bytes for a cancelled send, also when its data still goes out */
+    ok(Counted == 0, "%s: %d of %d cancelled sends reported their whole length instead of 0\n", Name, Counted, Cancelled);
     if (!Bad)
     {
         ok(Offset == Receiver->Length, "%s: %lu bytes arrived after the expected %lu\n",
