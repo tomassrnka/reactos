@@ -9,10 +9,10 @@
 #include <mmsystem.h>
 #include <winreg.h>
 
-/* This test imports winmm, so winmm's DllMain has run before the test starts. Windows has not loaded
-   any of the registered wave, MIDI, mixer or auxiliary drivers at that point: a driver DLL loaded from
-   DllMain would be loaded under the loader lock, which can deadlock a process whose other threads need
-   that lock. */
+/* The test program loads winmm with a delay, and the test loads it first, so winmm's DllMain has run before the
+   checks. Windows has not loaded any of the registered wave, MIDI, mixer or auxiliary drivers at that point: a
+   driver DLL loaded from DllMain would be loaded under the loader lock, which can deadlock a process whose other
+   threads need that lock. */
 
 static ULONG CheckKey(PCSTR KeyName)
 {
@@ -50,6 +50,8 @@ static ULONG CheckKey(PCSTR KeyName)
 START_TEST(DriverLoad)
 {
     ULONG Count;
+
+    ok(LoadLibraryA("winmm.dll") != NULL, "LoadLibrary failed: %lu\n", GetLastError());
 
     Count = CheckKey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32");
     Count += CheckKey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Drivers");

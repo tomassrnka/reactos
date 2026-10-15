@@ -2,6 +2,7 @@
 #include <apitest.h>
 
 extern void func_DriverLoad(void);
+extern void func_LoadUnload(void);
 extern void func_MidiMapperLongMsg(void);
 extern void func_timeBeginPeriod(void);
 extern void func_timeGetTime(void);
@@ -9,6 +10,7 @@ extern void func_timeGetTime(void);
 const struct test winetest_testlist[] =
 {
     { "DriverLoad", func_DriverLoad },
+    { "LoadUnload", func_LoadUnload },
     { "MidiMapperLongMsg", func_MidiMapperLongMsg },
     { "timeBeginPeriod", func_timeBeginPeriod },
     { "timeGetTime", func_timeGetTime },
