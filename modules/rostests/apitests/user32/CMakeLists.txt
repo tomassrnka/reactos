@@ -23,6 +23,7 @@ list(APPEND SOURCE
     EmptyClipboard.c
     EnumDisplayDevices.c
     EnumDisplaySettings.c
+    FrameMetrics.c
     GetClassInfo.c
     GetDCEx.c
     GetIconInfo.c
