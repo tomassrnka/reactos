@@ -1228,6 +1228,15 @@ MmSetPageProtect(
     ULONG flProtect
 );
 
+VOID
+NTAPI
+MmSetPageProtectEx(
+    struct _EPROCESS* Process,
+    PVOID Address,
+    ULONG flProtect,
+    BOOLEAN PhysicalView
+);
+
 BOOLEAN
 NTAPI
 MmIsPagePresent(
