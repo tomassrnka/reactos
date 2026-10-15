@@ -323,6 +323,10 @@ NtUserCallOneParam(
             Result = (DWORD_PTR)IntMsqSetWakeMask(Param);
             break;
 
+        case ONEPARAM_ROUTINE_ROS_MSGWAIT:
+            Result = (DWORD_PTR)co_MsqMsgWait((PMSGWAITINFO)Param);
+            break;
+
         case ONEPARAM_ROUTINE_GETKEYBOARDTYPE:
             Result = UserGetKeyboardType(Param);
             break;
@@ -680,6 +684,7 @@ NtUserCallHwndLock(
 
         case HWNDLOCK_ROUTINE_SETFOREGROUNDWINDOW:
             TRACE("co_IntSetForegroundWindow 1 0x%p\n", hWnd);
+            UserEndAppStarting(Window);
             Ret = co_IntSetForegroundWindow(Window);
             TRACE("co_IntSetForegroundWindow 2 0x%p\n", hWnd);
             break;

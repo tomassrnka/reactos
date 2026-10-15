@@ -34,6 +34,7 @@ extern void func_GetUserObjectInformation(void);
 extern void func_GetWindowPlacement(void);
 extern void func_GW_ENABLEDPOPUP(void);
 extern void func_Handle32(void);
+extern void func_HungWindow(void);
 extern void func_InitializeLpkHooks(void);
 extern void func_IsDialogMessage(void);
 extern void func_IsServerSideWindow(void);
@@ -122,6 +123,7 @@ const struct test winetest_testlist[] =
     { "GetWindowPlacement", func_GetWindowPlacement },
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },
     { "Handle32", func_Handle32 },
+    { "HungWindow", func_HungWindow },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
     { "IsDialogMessage", func_IsDialogMessage },
     { "IsServerSideWindow", func_IsServerSideWindow },
