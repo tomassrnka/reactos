@@ -15,10 +15,16 @@
  * and process creation and attach look up a process and then lock its console.
  * A child that does not exit in time is stuck in a console server request.
  *
- * A second child sends bursts of alternating Ctrl+C and Ctrl+Break events to
- * its own console and checks that the handler is called once per event, with
- * no distinct event lost when the console server still holds earlier ones.
- * Handler threads run concurrently, so only the counts per type are checked.
+ * A second child sends bursts of Ctrl+C and Ctrl+Break events to its own
+ * console, including consecutive identical events, and checks that the handler
+ * is called once per event, with no distinct event lost or coalesced when the
+ * console server still holds earlier ones. Handler threads run concurrently,
+ * so only the counts per type are checked.
+ *
+ * A third child floods its console with Ctrl+C faster than the server can
+ * deliver them, so the bounded queue saturates: every request the server
+ * accepts (returns success for) must reach the handler, and a request refused
+ * at the cap must be reported as a failure, never as a silent success.
  */
 #define RACE_MS             15000
 #define SPAWNERS            2
@@ -27,6 +33,9 @@
 #define ORDER_BURSTS        200
 #define ORDER_WAIT_MS       10000
 #define ORDER_TIMEOUT_MS    120000
+#define FLOOD_EVENTS        2000
+#define FLOOD_WAIT_MS       90000
+#define FLOOD_TIMEOUT_MS    150000
 
 static WCHAR FileName[MAX_PATH];
 static volatile LONG Stop;
@@ -193,9 +202,10 @@ static
 VOID
 OrderChild(VOID)
 {
+    /* Consecutive identical events (C,C and Break,Break) must not be coalesced */
     static const DWORD Burst[] =
     {
-        CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_C_EVENT
+        CTRL_C_EVENT, CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_BREAK_EVENT, CTRL_C_EVENT
     };
     LONG WantC, WantBreak;
     DWORD Start;
@@ -222,6 +232,39 @@ OrderChild(VOID)
         if (HandledC != WantC || HandledBreak != WantBreak)
             ExitProcess(1000 + i);
     }
+    ExitProcess(0);
+}
+
+/* Child: flood the console with Ctrl+C so the server queue saturates */
+static
+VOID
+FloodChild(VOID)
+{
+    LONG Accepted = 0, Refused = 0;
+    DWORD Start;
+    ULONG i;
+
+    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+
+    for (i = 0; i < FLOOD_EVENTS; i++)
+    {
+        if (GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0))
+            Accepted++;
+        else
+            Refused++;
+    }
+
+    /* Every accepted event must be delivered to the handler */
+    Start = GetTickCount();
+    while (HandledC < Accepted && GetTickCount() - Start < FLOOD_WAIT_MS)
+        Sleep(1);
+
+    /* No accepted event lost (would be <), none invented (would be >) */
+    if (HandledC != Accepted)
+        ExitProcess(301);
+    /* Refusals are allowed, but a refusal must be reported, not counted as delivered */
+    if (Accepted + Refused != FLOOD_EVENTS)
+        ExitProcess(302);
     ExitProcess(0);
 }
 
@@ -271,7 +314,10 @@ START_TEST(ConsoleCtrlEventRace)
         RaceChild();
     if (argc >= 3 && !strcmp(argv[2], "order"))
         OrderChild();
+    if (argc >= 3 && !strcmp(argv[2], "flood"))
+        FloodChild();
 
     RunChild(L"race", CHILD_TIMEOUT_MS);
     RunChild(L"order", ORDER_TIMEOUT_MS);
+    RunChild(L"flood", FLOOD_TIMEOUT_MS);
 }
