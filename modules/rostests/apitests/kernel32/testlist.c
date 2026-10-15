@@ -11,8 +11,10 @@ extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
 extern void func_ApplicationRestart(void);
 extern void func_ConsoleBufferSwitch(void);
+extern void func_ConsoleCaret(void);
 extern void func_ConsoleCP(void);
 extern void func_ConsoleCreateRace(void);
+extern void func_ConsoleDisplayMode(void);
 extern void func_ConsoleWriteLatency(void);
 extern void func_CreateEventMutexEx(void);
 extern void func_CreateFile2(void);
@@ -128,8 +130,10 @@ const struct test winetest_testlist[] =
     { "CancelIoEx",                  func_CancelIoEx },
     { "ApplicationRestart",          func_ApplicationRestart },
     { "ConsoleBufferSwitch",         func_ConsoleBufferSwitch },
+    { "ConsoleCaret",                func_ConsoleCaret },
     { "ConsoleCP",                   func_ConsoleCP },
     { "ConsoleCreateRace",           func_ConsoleCreateRace },
+    { "ConsoleDisplayMode",          func_ConsoleDisplayMode },
     { "ConsoleWriteLatency",         func_ConsoleWriteLatency },
     { "CreateEventMutexEx",          func_CreateEventMutexEx },
     { "CreateFile2",                 func_CreateFile2 },

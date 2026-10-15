@@ -10,8 +10,10 @@ list(APPEND SOURCE
     CancelIoEx.c
     ApplicationRestart.c
     ConsoleBufferSwitch.c
+    ConsoleCaret.c
     ConsoleCP.c
     ConsoleCreateRace.c
+    ConsoleDisplayMode.c
     ConsoleWriteLatency.c
     CreateEventMutexEx.c
     CreateFile2.c
@@ -126,7 +128,7 @@ add_executable(kernel32_apitest
 
 target_link_libraries(kernel32_apitest wine ${PSEH_LIB})
 set_module_type(kernel32_apitest win32cui)
-add_delay_importlibs(kernel32_apitest advapi32 shlwapi user32)
+add_delay_importlibs(kernel32_apitest advapi32 shlwapi user32 gdi32)
 add_importlibs(kernel32_apitest netapi32 msvcrt kernel32 ntdll)
 add_dependencies(kernel32_apitest FormatMessage)
 add_pch(kernel32_apitest precomp.h "${PCH_SKIP_SOURCE}")

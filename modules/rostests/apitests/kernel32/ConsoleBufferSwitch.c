@@ -48,7 +48,7 @@ RunChild(VOID)
 
     hCon = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                        NULL, OPEN_EXISTING, 0, NULL);
-    hWriter = CreateThread(NULL, 0, WriterThread, hCon, 0, NULL);
+    hWriter = (hCon != INVALID_HANDLE_VALUE) ? CreateThread(NULL, 0, WriterThread, hCon, 0, NULL) : NULL;
 
     for (i = 0; i < ROUNDS; i++)
     {
@@ -77,7 +77,7 @@ RunChild(VOID)
     }
     CloseHandle(hCon);
 
-    StringCbPrintfA(Line, sizeof(Line), "rounds=%lu\n", Done);
+    StringCbPrintfA(Line, sizeof(Line), "rounds=%lu writer=%d\n", Done, hWriter != NULL);
     WriteFile(hOut, Line, (DWORD)strlen(Line), &Written, NULL);
 }
 
@@ -94,6 +94,7 @@ START_TEST(ConsoleBufferSwitch)
     CHAR Output[64];
     DWORD Wait, Count, Used = 0;
     ULONG Rounds = 0;
+    int Writer = 0;
     BOOL Success;
 
     argc = winetest_get_mainargs(&argv);
@@ -148,6 +149,7 @@ START_TEST(ConsoleBufferSwitch)
 
     if (Wait != WAIT_OBJECT_0)
         return;
-    ok(sscanf(Output, "rounds=%lu", &Rounds) == 1, "Unexpected child output '%s'\n", Output);
+    ok(sscanf(Output, "rounds=%lu writer=%d", &Rounds, &Writer) == 2, "Unexpected child output '%s'\n", Output);
+    ok(Writer, "The child could not start its writer thread\n");
     ok(Rounds == ROUNDS, "%lu of %d rounds switched the screen buffer\n", Rounds, ROUNDS);
 }

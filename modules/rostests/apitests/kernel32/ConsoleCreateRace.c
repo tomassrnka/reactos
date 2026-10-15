@@ -104,7 +104,7 @@ START_TEST(ConsoleCreateRace)
         CloseHandle(Threads[i]);
 
     trace("%ld children started, %ld not started\n", Started, NotStarted);
-    ok(Started > 0, "No child could be started\n");
+    ok(NotStarted == 0 && Started > THREADS, "%ld children started, %ld could not be started\n", Started, NotStarted);
     ok(Hung == 0, "%ld children did not exit within %d ms (their console was never created)\n",
        Hung, CHILD_TIMEOUT_MS);
 }
