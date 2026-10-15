@@ -18,6 +18,7 @@ list(APPEND SOURCE
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateWaitableTimerEx.c
+    ThreadImpersonationToken.c
     DebugTrapInterrupts.c
     DefaultActCtx.c
     DiscardVirtualMemory.c
