@@ -782,6 +782,116 @@ failure:
     return SPS_ERROR;
 }
 
+/* The pointer moves in one blit when the old and the new pointer rectangle fit in this */
+#define MOVE_CX 192
+#define MOVE_CY 192
+
+/*
+ * Move the pointer without ever taking it off the screen: copy the rectangle that holds the old and the new pointer
+ * into a bitmap, put the saved pixels back there, save the pixels under the new place, draw the pointer there and
+ * copy the bitmap to the screen in one blit. Only for a shown pointer that has its engine bitmaps and lies inside the
+ * screen before and after; FALSE means nothing was changed and the caller takes the two steps.
+ */
+static
+BOOL
+IntMoveMousePointer(
+    _Inout_ PDEVOBJ *ppdev,
+    _Inout_ SURFOBJ *pso,
+    _In_ LONG x,
+    _In_ LONG y)
+{
+    GDIPOINTER *pgp = &ppdev->Pointer;
+    RECTL rc0, rc1, rcU, rcBuf, rcS, rcDst, rcPtr;
+    POINTL pt0;
+    SURFOBJ *psoU;
+    LONG cx = pgp->Size.cx, cy = pgp->Size.cy;
+
+    if (!pgp->Enabled || !pgp->psurfSave || !pgp->psurfTmp || x == -1 || ppdev->ptlPointer.x == -1)
+        return FALSE;
+
+    rc0.left = ppdev->ptlPointer.x - pgp->HotSpot.x;
+    rc0.top = ppdev->ptlPointer.y - pgp->HotSpot.y;
+    rc0.right = rc0.left + cx;
+    rc0.bottom = rc0.top + cy;
+    rc1.left = x - pgp->HotSpot.x;
+    rc1.top = y - pgp->HotSpot.y;
+    rc1.right = rc1.left + cx;
+    rc1.bottom = rc1.top + cy;
+
+    rcU.left = min(rc0.left, rc1.left);
+    rcU.top = min(rc0.top, rc1.top);
+    rcU.right = max(rc0.right, rc1.right);
+    rcU.bottom = max(rc0.bottom, rc1.bottom);
+
+    if (rcU.left < 0 || rcU.top < 0 ||
+        rcU.right > pso->sizlBitmap.cx || rcU.bottom > pso->sizlBitmap.cy ||
+        rcU.right - rcU.left > MOVE_CX || rcU.bottom - rcU.top > MOVE_CY)
+        return FALSE;
+
+    if (!pgp->psurfMove)
+    {
+        SIZEL sizel = {MOVE_CX, MOVE_CY};
+        HBITMAP hbm = EngCreateBitmap(sizel,
+                                      WIDTH_BYTES_ALIGN32(MOVE_CX, BitsPerFormat(pso->iBitmapFormat)),
+                                      pso->iBitmapFormat,
+                                      BMF_TOPDOWN | BMF_NOZEROINIT,
+                                      NULL);
+        if (!hbm)
+            return FALSE;
+        pgp->psurfMove = SURFACE_ShareLockSurface(hbm);
+        if (!pgp->psurfMove)
+        {
+            EngDeleteSurface((HSURF)hbm);
+            return FALSE;
+        }
+    }
+    psoU = &pgp->psurfMove->SurfObj;
+
+    pt0.x = rcU.left;
+    pt0.y = rcU.top;
+    rcBuf.left = 0;
+    rcBuf.top = 0;
+    rcBuf.right = rcU.right - rcU.left;
+    rcBuf.bottom = rcU.bottom - rcU.top;
+
+    /* The screen part, with the old pointer on it */
+    rcDst = rcBuf;
+    IntEngBitBlt(psoU, pso, NULL, NULL, NULL, &rcDst, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+
+    /* Put the pixels under the old pointer back */
+    rcS.left = 0;
+    rcS.top = 0;
+    rcS.right = cx;
+    rcS.bottom = cy;
+    rcDst.left = rc0.left - rcU.left;
+    rcDst.top = rc0.top - rcU.top;
+    rcDst.right = rcDst.left + cx;
+    rcDst.bottom = rcDst.top + cy;
+    IntEngBitBlt(psoU, &pgp->psurfSave->SurfObj, NULL, NULL, NULL, &rcDst, (POINTL*)&rcS, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+
+    /* Save the pixels under the new place, then draw the pointer there */
+    rcDst.left = rc1.left - rcU.left;
+    rcDst.top = rc1.top - rcU.top;
+    rcDst.right = rcDst.left + cx;
+    rcDst.bottom = rcDst.top + cy;
+    pt0.x = rcDst.left;
+    pt0.y = rcDst.top;
+    rcPtr = rcS;
+    IntEngBitBlt(&pgp->psurfSave->SurfObj, psoU, NULL, NULL, NULL, &rcPtr, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+    rcPtr = rcS;
+    IntDrawMousePointer(ppdev, pgp, psoU, &rcDst, &rcPtr);
+
+    /* One blit to the screen */
+    pt0.x = 0;
+    pt0.y = 0;
+    rcDst = rcU;
+    IntEngBitBlt(pso, psoU, NULL, NULL, NULL, &rcDst, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+
+    ppdev->ptlPointer.x = x;
+    ppdev->ptlPointer.y = y;
+    return TRUE;
+}
+
 /* Delete the pointer bitmaps; the PDEV is going away */
 VOID
 NTAPI
@@ -818,6 +928,13 @@ IntFreeMousePointer(
         pgp->psurfTmp = NULL;
     }
 
+    if (pgp->psurfMove)
+    {
+        EngDeleteSurface(pgp->psurfMove->BaseObject.hHmgr);
+        SURFACE_ShareUnlockSurface(pgp->psurfMove);
+        pgp->psurfMove = NULL;
+    }
+
     pgp->Enabled = FALSE;
 }
 
@@ -842,14 +959,21 @@ EngMovePointer(
 
     pgp = &ppdev->Pointer;
 
-    IntHideMousePointer(ppdev, pso);
+    if (!IntMoveMousePointer(ppdev, pso, x, y))
+    {
+        IntHideMousePointer(ppdev, pso);
 
-    ppdev->ptlPointer.x = x;
-    ppdev->ptlPointer.y = y;
+        ppdev->ptlPointer.x = x;
+        ppdev->ptlPointer.y = y;
+
+        if (x != -1)
+        {
+            IntShowMousePointer(ppdev, pso);
+        }
+    }
 
     if (x != -1)
     {
-        IntShowMousePointer(ppdev, pso);
         if (prcl != NULL)
         {
             prcl->left = x - pgp->HotSpot.x;

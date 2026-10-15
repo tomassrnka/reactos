@@ -34,6 +34,7 @@ typedef struct _GDIPOINTER /* should stay private to ENG? No, part of PDEVOBJ ak
   SURFACE  *psurfMask;
   SURFACE  *psurfSave;
   SURFACE  *psurfTmp; /* pointer composed over the saved pixels, drawn to the screen in one blit */
+  SURFACE  *psurfMove; /* old and new pointer rectangle together, so that a move reaches the screen in one blit */
   FLONG    flags;
 
   /* Public pointer information */
