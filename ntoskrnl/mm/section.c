@@ -548,6 +548,7 @@ l_ReadHeaderFromFile:
         if(RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfImage))
         {
             ImageSectionObject->ImageInformation.ImageFileSize = piohOptHeader->SizeOfImage;
+            ImageSectionObject->SizeOfImage = piohOptHeader->SizeOfImage;
             nSizeOfImage = piohOptHeader->SizeOfImage;
         }
 
@@ -626,6 +627,7 @@ l_ReadHeaderFromFile:
                 DIE(("SizeOfImage exceeds the address space\n"));
 
             ImageSectionObject->ImageInformation.ImageFileSize = pioh64OptHeader->SizeOfImage;
+            ImageSectionObject->SizeOfImage = pioh64OptHeader->SizeOfImage;
             nSizeOfImage = pioh64OptHeader->SizeOfImage;
         }
 
@@ -2605,8 +2607,14 @@ MmCreateDataFileSection(PSECTION *SectionObject,
             }
         }
 
-        /* A negative size is a huge one */
-        if ((ULONGLONG)MaximumSize.QuadPart > (ULONGLONG)FileSize.QuadPart)
+        /* A negative size must never reach the file system as an end of file */
+        if (MaximumSize.QuadPart < 0)
+        {
+            ObDereferenceObject(Section);
+            return STATUS_SECTION_TOO_BIG;
+        }
+
+        if (MaximumSize.QuadPart > FileSize.QuadPart)
         {
             /* Only a section that can write to the file extends it */
             if (!(SectionPageProtection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
@@ -3561,12 +3569,12 @@ grab_image_section_object:
         Section->SizeOfSection.QuadPart = ImageSectionObject->ImageInformation.ImageFileSize;
     }
     else if (NT_SUCCESS(Status) &&
-             (ImageSectionObject->ImageInformation.ImageFileSize != 0) &&
+             (ImageSectionObject->SizeOfImage != 0) &&
              ((ULONGLONG)Section->SizeOfSection.QuadPart >
-              ROUND_TO_PAGES((ULONGLONG)ImageSectionObject->ImageInformation.ImageFileSize)))
+              (((ULONGLONG)ImageSectionObject->SizeOfImage + PAGE_SIZE - 1) & ~(ULONGLONG)(PAGE_SIZE - 1))))
     {
-        /* An image section is never larger than its image. ImageFileSize holds
-         * SizeOfImage; it is 0 when the optional header is too short to hold it */
+        /* An image section is never larger than its page-rounded SizeOfImage,
+         * which is 0 when the optional header is too short to hold it */
         ObDereferenceObject(Section);
         return STATUS_SECTION_TOO_BIG;
     }
