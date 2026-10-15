@@ -85,6 +85,7 @@ extern void func_PrefetchVirtualMemory(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
 extern void func_ProcessMitigationPolicy(void);
+extern void func_ProcThreadMitigation(void);
 extern void func_QueryCycleTime(void);
 extern void func_QueryUnbiasedInterruptTime(void);
 extern void func_ProcessToken(void);
@@ -206,6 +207,7 @@ const struct test winetest_testlist[] =
     { "PrefetchVirtualMemory",       func_PrefetchVirtualMemory },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
     { "ProcessMitigationPolicy",     func_ProcessMitigationPolicy },
+    { "ProcThreadMitigation",        func_ProcThreadMitigation },
     { "ProcessAffinity",             func_ProcessAffinity },
     { "QueryCycleTime",              func_QueryCycleTime },
     { "QueryUnbiasedInterruptTime",  func_QueryUnbiasedInterruptTime },

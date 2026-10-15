@@ -84,6 +84,7 @@ list(APPEND SOURCE
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
     ProcessMitigationPolicy.c
+    ProcThreadMitigation.c
     QueryCycleTime.c
     QueryUnbiasedInterruptTime.c
     ProcessToken.c
