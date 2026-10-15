@@ -425,6 +425,8 @@ class CTaskSwitchWnd :
 
     INT m_nRudeAppValidationCounter;
     HWND m_hwndRudeApp;     // The full-screen window the taskbar was last arranged for
+    HMONITOR m_hmonRudeApp; // Its monitor and rectangle then: it can move or resize and keep its handle
+    RECT m_rcRudeApp;
     BOOL m_bTrayLowered;    // The taskbar was sent to the bottom because of m_hwndRudeApp
 
     SIZE m_ButtonSize;
@@ -450,8 +452,10 @@ public:
         m_IsDestroying(FALSE),
         m_nRudeAppValidationCounter(0),
         m_hwndRudeApp(NULL),
+        m_hmonRudeApp(NULL),
         m_bTrayLowered(FALSE)
     {
+        ZeroMemory(&m_rcRudeApp, sizeof(m_rcRudeApp));
         ZeroMemory(&m_ButtonSize, sizeof(m_ButtonSize));
         m_uHardErrorMsg = RegisterWindowMessageW(L"HardError");
     }
@@ -2068,6 +2072,31 @@ public:
         return TRUE;
     }
 
+    void SaveRudeAppState(_In_opt_ HWND hwndRude)
+    {
+        m_hwndRudeApp = hwndRude;
+        m_hmonRudeApp = NULL;
+        ZeroMemory(&m_rcRudeApp, sizeof(m_rcRudeApp));
+        if (hwndRude)
+        {
+            m_hmonRudeApp = ::MonitorFromWindow(hwndRude, MONITOR_DEFAULTTONULL);
+            ::GetWindowRect(hwndRude, &m_rcRudeApp);
+        }
+    }
+
+    BOOL IsRudeAppChanged(_In_opt_ HWND hwndRude)
+    {
+        if (hwndRude != m_hwndRudeApp)
+            return TRUE;
+        if (!hwndRude)
+            return FALSE;
+
+        RECT rc = { 0 };
+        ::GetWindowRect(hwndRude, &rc);
+        return ::MonitorFromWindow(hwndRude, MONITOR_DEFAULTTONULL) != m_hmonRudeApp ||
+               !::EqualRect(&rc, &m_rcRudeApp);
+    }
+
     void HandleFullScreenApp(_In_opt_ HWND hwndRude)
     {
         // Notify ABN_FULLSCREENAPP for every monitor
@@ -2081,7 +2110,7 @@ public:
         Data.pTray = m_Tray;
         ::EnumDisplayMonitors(NULL, NULL, FullScreenEnumProc, (LPARAM)&Data);
 
-        m_hwndRudeApp = hwndRude;
+        SaveRudeAppState(hwndRude);
 
         UINT uFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
         HWND hwndTray = m_Tray->GetHWND();
@@ -2379,7 +2408,7 @@ public:
                 // Real activation of rude app might take some time after HSHELL_...ACTIVATED.
                 // Wait up to 5 seconds with validating the rude app at each second.
                 HWND hwndRude = FindRudeApp(NULL);
-                if (hwndRude != m_hwndRudeApp)
+                if (IsRudeAppChanged(hwndRude))
                     HandleFullScreenApp(hwndRude);
 
                 KillTimer(wParam);

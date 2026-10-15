@@ -174,6 +174,19 @@ START_TEST(TaskbarFullscreen)
         DestroyWindow(hwnd);
     }
 
+    /* The same window stops covering the screen without being activated or destroyed. Windows leaves the taskbar
+       down until a program tells the shell (MarkFullscreenWindow); ReactOS notices the new size by itself */
+    if (is_reactos())
+    {
+        hwnd = CreateFullscreenWindow(cxScreen, cyScreen);
+        if (hwnd)
+        {
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 100, 80, 640, 420, SWP_NOACTIVATE);
+            CheckTrayBack("resized", &rcWork);
+            DestroyWindow(hwnd);
+        }
+    }
+
     GetWindowRect(hwndTray, &rcWindow);
     ok(EqualRect(&rcWindow, &rcTray), "the taskbar moved to (%ld,%ld,%ld,%ld)\n",
        rcWindow.left, rcWindow.top, rcWindow.right, rcWindow.bottom);
