@@ -671,6 +671,19 @@ MmCreatePageFileMapping(PEPROCESS Process,
 }
 
 
+/* The cache bits of a PTE for a page whose PFN records how it is mapped */
+static
+VOID
+MiSetPteCaching(
+    _Inout_ PMMPTE Pte,
+    _In_ MI_PFN_CACHE_ATTRIBUTE CacheAttribute)
+{
+    Pte->u.Hard.CacheDisable = 0;
+    Pte->u.Hard.WriteThrough = 0;
+    if ((CacheAttribute == MiNonCached) || (CacheAttribute == MiWriteCombined))
+        Pte->u.Hard.CacheDisable = 1;
+}
+
 NTSTATUS
 NTAPI
 MmCreateVirtualMappingUnsafeEx(
@@ -733,14 +746,6 @@ MmCreateVirtualMappingUnsafeEx(
 
     MI_MAKE_HARDWARE_PTE(&TempPte, PointerPte, ProtectionMask, Page);
 
-    Pte = InterlockedExchangePte(PointerPte, TempPte.u.Long);
-    /* There should not have been anything valid here */
-    if (Pte != 0)
-    {
-        DPRINT1("Bad PTE %lx at %p for %p\n", Pte, PointerPte, Address);
-        KeBugCheck(MEMORY_MANAGEMENT);
-    }
-
     if (!IsPhysical)
     {
         PMMPFN Pfn1;
@@ -748,9 +753,27 @@ MmCreateVirtualMappingUnsafeEx(
 
         OldIrql = MiAcquirePfnLock();
         Pfn1 = &MmPfnDatabase[TempPte.u.Hard.PageFrameNumber];
+
+        /* The first mapping of a page decides its caching type, later ones follow it */
+        if (Pfn1->u2.ShareCount == 0)
+            Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(ProtectionMask);
+        else
+            MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
+
         Pfn1->u2.ShareCount++;
         Pfn1->u3.e1.PageLocation = ActiveAndValid;
         MiReleasePfnLock(OldIrql);
+
+        if (TempPte.u.Hard.CacheDisable)
+            MiFlushReleasedSystemPtesBeforeUncachedMapping();
+    }
+
+    Pte = InterlockedExchangePte(PointerPte, TempPte.u.Long);
+    /* There should not have been anything valid here */
+    if (Pte != 0)
+    {
+        DPRINT1("Bad PTE %lx at %p for %p\n", Pte, PointerPte, Address);
+        KeBugCheck(MEMORY_MANAGEMENT);
     }
 
     /* We don't need to flush the TLB here because it only caches valid translations
@@ -882,6 +905,7 @@ MmSetPageProtectEx(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLU
     ULONG ProtectionMask;
     PMMPTE PointerPte;
     MMPTE TempPte, OldPte;
+    PMMPFN Pfn1;
 
     DPRINT("MmSetPageProtect(Process %p  Address %p  flProtect %x)\n",
            Process, Address, flProtect);
@@ -908,6 +932,11 @@ MmSetPageProtectEx(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLU
     TempPte.u.Hard.PageFrameNumber = PointerPte->u.Hard.PageFrameNumber;
     TempPte.u.Long |= MmProtectToPteMask[ProtectionMask];
     TempPte.u.Hard.Owner = 1;
+
+    /* A page keeps the caching type its PFN records, as in MiFlushTbAndCapture */
+    Pfn1 = MiGetPfnEntry(TempPte.u.Hard.PageFrameNumber);
+    if (Pfn1 != NULL)
+        MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
 
     /* Only set valid bit if we have to */
     if ((ProtectionMask != MM_NOACCESS) && !FlagOn(ProtectionMask, MM_GUARDPAGE))
