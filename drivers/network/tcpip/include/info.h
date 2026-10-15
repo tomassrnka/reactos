@@ -159,7 +159,7 @@ TDI_STATUS SetConnectionInfo(TDIObjectID *ID,
                              UINT BufferSize);
 
 /* Insert and remove entities */
-VOID InsertTDIInterfaceEntity( PIP_INTERFACE Interface );
+NTSTATUS InsertTDIInterfaceEntity( PIP_INTERFACE Interface );
 
 VOID RemoveTDIInterfaceEntity( PIP_INTERFACE Interface );
 
