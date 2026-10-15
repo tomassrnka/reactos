@@ -673,11 +673,32 @@ IntSetWindowPlacement(PWND Wnd, WINDOWPLACEMENT *wpl, UINT Flags)
    BOOL sAsync;
    UINT SWP_Flags;
 
+   if (!Wnd || Wnd == Wnd->head.rpdesk->pDeskInfo->spwnd) return FALSE;
+
+   /* The icon position and the normal rectangle of a top-level window come relative to the work area, as
+      IntGetWindowPlacement gives them: back to screen coordinates, the ones of InternalPos and of the window */
+   if (Wnd->spwndParent == Wnd->head.rpdesk->pDeskInfo->spwnd && !(Wnd->ExStyle & WS_EX_TOOLWINDOW))
+   {
+      PMONITOR pmonitor = UserMonitorFromRect(&wpl->rcNormalPosition, MONITOR_DEFAULTTOPRIMARY);
+
+      if (pmonitor)
+      {
+         LONG dx = pmonitor->rcWork.left - pmonitor->rcMonitor.left;
+         LONG dy = pmonitor->rcWork.top - pmonitor->rcMonitor.top;
+
+         if (Flags & PLACE_MIN)
+         {
+            wpl->ptMinPosition.x += dx;
+            wpl->ptMinPosition.y += dy;
+         }
+         if (Flags & PLACE_RECT)
+            RECTL_vOffsetRect(&wpl->rcNormalPosition, dx, dy);
+      }
+   }
+
    if ( Flags & PLACE_MIN) make_point_onscreen( &wpl->ptMinPosition );
    if ( Flags & PLACE_MAX) make_point_onscreen( &wpl->ptMaxPosition );
    if ( Flags & PLACE_RECT) make_rect_onscreen( &wpl->rcNormalPosition );
-
-   if (!Wnd || Wnd == Wnd->head.rpdesk->pDeskInfo->spwnd) return FALSE;
 
    if ( Flags & PLACE_MIN ) Wnd->InternalPos.IconPos = wpl->ptMinPosition;
    if ( Flags & PLACE_MAX ) Wnd->InternalPos.MaxPos = wpl->ptMaxPosition;
