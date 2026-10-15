@@ -176,6 +176,13 @@ static void Test_ExtendWritable(PCWSTR Path)
     Status = Extend(hSection, 0, &Returned);
     ok(Status == STATUS_SUCCESS, "Extend to 0: 0x%08lx\n", Status);
     ok(QuerySize(hSection) == 0, "Size after extension to 0: 0x%I64x\n", QuerySize(hSection));
+    Base = NULL;
+    ViewSize = 0;
+    Status = NtMapViewOfSection(hSection, NtCurrentProcess(), &Base, 0, 0, NULL, &ViewSize,
+                                ViewShare, 0, PAGE_READONLY);
+    ok(Status == STATUS_INVALID_VIEW_SIZE, "View of the size-0 section: 0x%08lx\n", Status);
+    if (NT_SUCCESS(Status))
+        NtUnmapViewOfSection(NtCurrentProcess(), Base);
     Status = Extend(hSection, -1, &Returned);
     ok(Status == STATUS_SECTION_TOO_BIG, "Extend to -1: 0x%08lx\n", Status);
     ok(QuerySize(hSection) == 0, "Size after extension to -1: 0x%I64x\n", QuerySize(hSection));
@@ -313,6 +320,193 @@ static void Test_ExtendRefused(PCWSTR Path)
     }
 }
 
+/* A view that starts at the end of a 64 KB section has nothing left to map */
+static void Test_ViewAtEnd(PCWSTR Path)
+{
+    HANDLE hFile, hSection;
+    LARGE_INTEGER Offset;
+    NTSTATUS Status;
+    PVOID Base;
+    SIZE_T ViewSize;
+    ULONG Protect;
+
+    hFile = CreateDataFile(Path, 0x5A);
+    if (!hFile)
+    {
+        skip("Cannot create %ls: %lu\n", Path, GetLastError());
+        return;
+    }
+    Offset.QuadPart = 0x10000;
+    if (!SetFilePointerEx(hFile, Offset, NULL, FILE_BEGIN) || !SetEndOfFile(hFile))
+    {
+        skip("Cannot set the file size: %lu\n", GetLastError());
+        CloseHandle(hFile);
+        DeleteFileW(Path);
+        return;
+    }
+
+    for (Protect = PAGE_READONLY; Protect <= PAGE_READWRITE; Protect <<= 1)
+    {
+        hSection = NULL;
+        Status = NtCreateSection(&hSection, SECTION_ALL_ACCESS, NULL, NULL, Protect, SEC_COMMIT, hFile);
+        ok(Status == STATUS_SUCCESS, "NtCreateSection 0x%lx: 0x%08lx\n", Protect, Status);
+        if (!NT_SUCCESS(Status))
+            continue;
+        Base = NULL;
+        ViewSize = 0;
+        Offset.QuadPart = 0x10000;
+        Status = NtMapViewOfSection(hSection, NtCurrentProcess(), &Base, 0, 0, &Offset, &ViewSize,
+                                    ViewShare, 0, PAGE_READONLY);
+        ok(Status == STATUS_INVALID_VIEW_SIZE, "View at the end, protect 0x%lx: 0x%08lx\n", Protect, Status);
+        if (NT_SUCCESS(Status))
+            NtUnmapViewOfSection(NtCurrentProcess(), Base);
+        NtClose(hSection);
+    }
+
+    CloseHandle(hFile);
+    DeleteFileW(Path);
+}
+
+/* The section's file handle is closed before the section is extended */
+static void Test_ExtendClosedFile(PCWSTR Path)
+{
+    HANDLE hFile, hSection = NULL;
+    LONGLONG Returned;
+    NTSTATUS Status;
+    PVOID Base = NULL;
+    SIZE_T ViewSize = 0;
+
+    hFile = CreateDataFile(Path, 0x5A);
+    if (!hFile)
+    {
+        skip("Cannot create %ls: %lu\n", Path, GetLastError());
+        return;
+    }
+    Status = NtCreateSection(&hSection, SECTION_ALL_ACCESS, NULL, NULL, PAGE_READWRITE, SEC_COMMIT, hFile);
+    ok(Status == STATUS_SUCCESS, "NtCreateSection: 0x%08lx\n", Status);
+    CloseHandle(hFile);
+    if (!NT_SUCCESS(Status))
+    {
+        DeleteFileW(Path);
+        return;
+    }
+
+    Status = Extend(hSection, 0x2800, &Returned);
+    ok(Status == STATUS_SUCCESS, "Extend after closing the file: 0x%08lx\n", Status);
+    ok(QuerySize(hSection) == 0x2800, "Size after extension 0x%I64x\n", QuerySize(hSection));
+    Status = NtMapViewOfSection(hSection, NtCurrentProcess(), &Base, 0, 0, NULL, &ViewSize,
+                                ViewShare, 0, PAGE_READWRITE);
+    ok(Status == STATUS_SUCCESS, "NtMapViewOfSection: 0x%08lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        ok(WriteByte((PBYTE)Base + 0x27FF, 0xA7), "Write to the extended range faulted\n");
+        NtUnmapViewOfSection(NtCurrentProcess(), Base);
+    }
+
+    /* The file grew while the section was still open */
+    hFile = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(hFile != INVALID_HANDLE_VALUE, "Cannot reopen %ls: %lu\n", Path, GetLastError());
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        ok(GetSize(hFile) == 0x2800, "File size after extension 0x%I64x\n", GetSize(hFile));
+        ok(ReadFileByte(hFile, 0x27FF) == 0xA7, "File byte at 0x27FF: %d\n", ReadFileByte(hFile, 0x27FF));
+        CloseHandle(hFile);
+    }
+    NtClose(hSection);
+    DeleteFileW(Path);
+}
+
+/*
+ * Two threads extend and shrink the same section at once. The section never
+ * ends past the file, and every call succeeds.
+ */
+typedef struct
+{
+    HANDLE hSection;
+    HANDLE hFile;
+    ULONG Seed;
+    LONG Failures;
+    LONG Beyond;
+} EXTEND_THREAD;
+
+static DWORD WINAPI ExtendThread(PVOID Param)
+{
+    EXTEND_THREAD *Data = Param;
+    LONGLONG SectionSize, FileSize;
+    LARGE_INTEGER Size;
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = 0; i < 1500; i++)
+    {
+        Data->Seed = Data->Seed * 1103515245 + 12345;
+        Size.QuadPart = 0x1000 + ((Data->Seed >> 8) % 0x40000) + i * 0x10;
+        Status = NtExtendSection(Data->hSection, &Size);
+        if (Status != STATUS_SUCCESS)
+        {
+            if (InterlockedIncrement(&Data->Failures) <= 3)
+                trace("EXT concurrent extend to 0x%I64x: 0x%08lx\n", Size.QuadPart, Status);
+        }
+        SectionSize = QuerySize(Data->hSection);
+        FileSize = GetSize(Data->hFile);
+        if (SectionSize > FileSize)
+        {
+            if (InterlockedIncrement(&Data->Beyond) <= 3)
+                trace("EXT section 0x%I64x past the file 0x%I64x\n", SectionSize, FileSize);
+        }
+    }
+    return 0;
+}
+
+static void Test_ExtendConcurrent(PCWSTR Path)
+{
+    EXTEND_THREAD Data[2];
+    HANDLE hFile, hSection = NULL, hThreads[2];
+    NTSTATUS Status;
+    ULONG i;
+
+    hFile = CreateDataFile(Path, 0x5A);
+    if (!hFile)
+    {
+        skip("Cannot create %ls: %lu\n", Path, GetLastError());
+        return;
+    }
+    Status = NtCreateSection(&hSection, SECTION_ALL_ACCESS, NULL, NULL, PAGE_READWRITE, SEC_COMMIT, hFile);
+    ok(Status == STATUS_SUCCESS, "NtCreateSection: 0x%08lx\n", Status);
+    if (!NT_SUCCESS(Status))
+    {
+        CloseHandle(hFile);
+        DeleteFileW(Path);
+        return;
+    }
+
+    for (i = 0; i < 2; i++)
+    {
+        Data[i].hSection = hSection;
+        Data[i].hFile = hFile;
+        Data[i].Seed = 0x5EED + i * 7919;
+        Data[i].Failures = 0;
+        Data[i].Beyond = 0;
+        hThreads[i] = CreateThread(NULL, 0, ExtendThread, &Data[i], 0, NULL);
+        ok(hThreads[i] != NULL, "CreateThread failed: %lu\n", GetLastError());
+    }
+    for (i = 0; i < 2; i++)
+    {
+        if (!hThreads[i])
+            continue;
+        ok(WaitForSingleObject(hThreads[i], 120000) == WAIT_OBJECT_0, "Thread %lu did not finish\n", i);
+        CloseHandle(hThreads[i]);
+        ok(Data[i].Failures == 0, "Thread %lu: %ld extensions failed\n", i, Data[i].Failures);
+        ok(Data[i].Beyond == 0, "Thread %lu: the section ended past the file %ld times\n", i, Data[i].Beyond);
+    }
+    ok(QuerySize(hSection) <= GetSize(hFile), "Section 0x%I64x past the file 0x%I64x\n",
+       QuerySize(hSection), GetSize(hFile));
+
+    NtClose(hSection);
+    CloseHandle(hFile);
+    DeleteFileW(Path);
+}
+
 START_TEST(NtExtendSection)
 {
     WCHAR TempDir[MAX_PATH], Path[MAX_PATH];
@@ -326,4 +520,7 @@ START_TEST(NtExtendSection)
 
     Test_ExtendWritable(Path);
     Test_ExtendRefused(Path);
+    Test_ViewAtEnd(Path);
+    Test_ExtendClosedFile(Path);
+    Test_ExtendConcurrent(Path);
 }
