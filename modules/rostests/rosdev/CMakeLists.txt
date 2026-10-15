@@ -10,3 +10,8 @@ list(APPEND SOURCE
 add_executable(rosdev ${SOURCE})
 set_module_type(rosdev win32gui UNICODE)
 add_importlibs(rosdev ws2_32 advapi32 user32 gdi32 msvcrt kernel32)
+
+# A hung window for host/repro-force-reboot.sh; test VMs only, never installed either
+add_executable(rosdev_hungwin hungwin.c)
+set_module_type(rosdev_hungwin win32gui UNICODE)
+add_importlibs(rosdev_hungwin user32 msvcrt kernel32)
