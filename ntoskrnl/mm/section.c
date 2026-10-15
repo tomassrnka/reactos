@@ -6473,9 +6473,11 @@ NTSTATUS
 NTAPI
 MmExtendSection(
     _In_ PVOID _Section,
-    _Inout_ PLARGE_INTEGER NewSize)
+    _Inout_ PLARGE_INTEGER NewSize,
+    _In_ BOOLEAN IgnoreFileSizeChecking)
 {
     PSECTION Section = _Section;
+    PMM_SECTION_SEGMENT Segment;
 
     /* It makes no sense to extend an image mapping */
     if (Section->u.Flags.Image)
@@ -6488,10 +6490,45 @@ MmExtendSection(
     if (!MiIsRosSectionObject(Section))
         return STATUS_NOT_IMPLEMENTED;
 
-    /* We just extend the sizes. Shrinking is a no-op ? */
+    Segment = (PMM_SECTION_SEGMENT)Section->Segment;
+
+    /* NtExtendSection: the section takes any smaller size, and a larger one extends the file */
+    if (!IgnoreFileSizeChecking)
+    {
+        LARGE_INTEGER FileSize;
+        NTSTATUS Status;
+
+        if (NewSize->QuadPart < 0)
+            return STATUS_SECTION_TOO_BIG;
+
+        if (NewSize->QuadPart <= Section->SizeOfSection.QuadPart)
+        {
+            Section->SizeOfSection = *NewSize;
+            return STATUS_SUCCESS;
+        }
+
+        Status = FsRtlGetFileSize(Segment->FileObject, &FileSize);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        if (NewSize->QuadPart > FileSize.QuadPart)
+        {
+            /* Only a section that can write to the file extends it */
+            if (!(Section->InitialPageProtection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+                return STATUS_SECTION_NOT_EXTENDED;
+
+            Status = IoSetInformation(Segment->FileObject,
+                                      FileEndOfFileInformation,
+                                      sizeof(LARGE_INTEGER),
+                                      NewSize);
+            if (!NT_SUCCESS(Status))
+                return STATUS_SECTION_NOT_EXTENDED;
+        }
+    }
+
+    /* The cache manager's section only grows */
     if (NewSize->QuadPart > Section->SizeOfSection.QuadPart)
     {
-        PMM_SECTION_SEGMENT Segment = (PMM_SECTION_SEGMENT)Section->Segment;
         Section->SizeOfSection = *NewSize;
 
         if (!Section->u.Flags.Reserve)
