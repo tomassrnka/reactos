@@ -45,6 +45,7 @@ list(APPEND SOURCE
     keybd_event.c
     MouseHookTransport.c
     MouseWheel.c
+    KeyboardLLHook.c
     LoadImage.c
     LoadImageGCC.c
     LoadImagePngIcon.c

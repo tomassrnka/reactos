@@ -44,6 +44,7 @@ extern void func_KbdLayout(void);
 extern void func_keybd_event(void);
 extern void func_MouseHookTransport(void);
 extern void func_MouseWheel(void);
+extern void func_KeyboardLLHook(void);
 extern void func_LoadImage(void);
 extern void func_LoadImageGCC(void);
 extern void func_LoadImagePngIcon(void);
@@ -140,6 +141,7 @@ const struct test winetest_testlist[] =
     { "keybd_event", func_keybd_event },
     { "MouseHookTransport", func_MouseHookTransport },
     { "MouseWheel", func_MouseWheel },
+    { "KeyboardLLHook", func_KeyboardLLHook },
     { "LoadImage", func_LoadImage },
     { "LoadImageGCC", func_LoadImageGCC },
     { "LoadImagePngIcon", func_LoadImagePngIcon },
