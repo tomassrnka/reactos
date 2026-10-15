@@ -115,6 +115,9 @@ PDEVOBJ_vRelease(
     /* Check if references are left */
     if (ppdev->cPdevRefs == 0)
     {
+        /* The engine's own pointer bitmaps */
+        IntFreeMousePointer(ppdev);
+
         /* Do we have a surface? */
         if (ppdev->pSurface)
         {

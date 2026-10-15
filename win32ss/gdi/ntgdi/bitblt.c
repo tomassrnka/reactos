@@ -336,7 +336,8 @@ IntEngBitBltAvoidPointer(
     BOOL bRet = TRUE;
     ULONG i;
 
-    if (!MouseSafetyGetPointerHit(pdc->ppdev, prclDest, &pdc->erclClip, &rcHit))
+    /* The clip object is what IntEngBitBlt clips to, also when its last update failed */
+    if (!MouseSafetyGetPointerHit(pdc->ppdev, prclDest, &pdc->co.rclBounds, &rcHit))
     {
         return IntEngBitBlt(psoDest, psoSource, psoMask, (CLIPOBJ *)&pdc->co, pxlo,
                             prclDest, pptlSource, pptlMask, pbo, pptlBrush, rop4);
@@ -730,6 +731,7 @@ GreStretchBltMask(
     POINTL BrushOrigin;
     BOOL UsesSource;
     BOOL UsesMask;
+    BOOL bSplit;
     ROP4 rop4;
     BOOL Case0000, Case0101, Case1010, CaseExcept;
 
@@ -851,8 +853,16 @@ GreStretchBltMask(
     BrushOrigin.x = 0;
     BrushOrigin.y = 0;
 
+    /* A copy that does not scale or flip is a BitBlt to IntEngStretchBlt and is split around the
+     * pointer like one; a source on the screen can show the pointer, so only a memory source is split */
+    bSplit = (DCDest->dctype == DCTYPE_DIRECT) &&
+             (!UsesSource || DCSrc->dctype != DCTYPE_DIRECT) &&
+             (DestRect.right > DestRect.left) && (DestRect.bottom > DestRect.top) &&
+             (SourceRect.right - SourceRect.left == DestRect.right - DestRect.left) &&
+             (SourceRect.bottom - SourceRect.top == DestRect.bottom - DestRect.top);
+
     /* Only prepare Source and Dest, hdcMask represents a DIB */
-    DC_vPrepareDCsForBlit(DCDest, &DestRect, DCSrc, &SourceRect);
+    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
@@ -903,18 +913,37 @@ GreStretchBltMask(
           DestRect.left, DestRect.top, DestRect.right, DestRect.bottom);
 
     /* Perform the bitblt operation */
-    Status = IntEngStretchBlt(&BitmapDest->SurfObj,
-                              BitmapSrc ? &BitmapSrc->SurfObj : NULL,
-                              BitmapMask ? &BitmapMask->SurfObj : NULL,
-                              (CLIPOBJ *)&DCDest->co,
-                              XlateObj,
-                              &DCDest->dclevel.ca,
-                              &DestRect,
-                              &SourceRect,
-                              BitmapMask ? &MaskPoint : NULL,
-                              &DCDest->eboFill.BrushObject,
-                              &BrushOrigin,
-                              rop4);
+    if (bSplit)
+    {
+        POINTL ptlSource = {SourceRect.left, SourceRect.top};
+
+        Status = IntEngBitBltAvoidPointer(DCDest,
+                                          &BitmapDest->SurfObj,
+                                          BitmapSrc ? &BitmapSrc->SurfObj : NULL,
+                                          BitmapMask ? &BitmapMask->SurfObj : NULL,
+                                          XlateObj,
+                                          &DestRect,
+                                          UsesSource ? &ptlSource : NULL,
+                                          BitmapMask ? &MaskPoint : NULL,
+                                          &DCDest->eboFill.BrushObject,
+                                          &BrushOrigin,
+                                          rop4);
+    }
+    else
+    {
+        Status = IntEngStretchBlt(&BitmapDest->SurfObj,
+                                  BitmapSrc ? &BitmapSrc->SurfObj : NULL,
+                                  BitmapMask ? &BitmapMask->SurfObj : NULL,
+                                  (CLIPOBJ *)&DCDest->co,
+                                  XlateObj,
+                                  &DCDest->dclevel.ca,
+                                  &DestRect,
+                                  &SourceRect,
+                                  BitmapMask ? &MaskPoint : NULL,
+                                  &DCDest->eboFill.BrushObject,
+                                  &BrushOrigin,
+                                  rop4);
+    }
     if (UsesSource)
     {
         EXLATEOBJ_vCleanup(&exlo);
