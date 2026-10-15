@@ -151,6 +151,79 @@ static void CheckRestored(const char *step, HWND hwnd, const STATE *pNormal)
        state.ptClient.x, state.ptClient.y, pNormal->ptClient.x, pNormal->ptClient.y);
 }
 
+/* The restore rectangle of a window is in screen coordinates, WINDOWPLACEMENT gives it relative to the work area.
+   With a work area that does not start at the corner of the screen (a taskbar on the left or at the top) the
+   window must still come back where it was. */
+static void test_work_area_offset(HINSTANCE hInst)
+{
+    WNDCLASSA wc;
+    RECT orig, wa, got, before, after;
+    HWND hwnd;
+    BOOL set;
+
+    if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &orig, 0))
+    {
+        skip("SPI_GETWORKAREA failed\n");
+        return;
+    }
+    wa = orig;
+    wa.left += 100;
+    wa.top += 60;
+    set = SystemParametersInfoA(SPI_SETWORKAREA, 0, &wa, 0);
+    if (!set || !SystemParametersInfoA(SPI_GETWORKAREA, 0, &got, 0) || !EqualRect(&got, &wa))
+    {
+        skip("The work area cannot be moved (%ld,%ld)-(%ld,%ld)\n", got.left, got.top, got.right, got.bottom);
+        if (set)
+            SystemParametersInfoA(SPI_SETWORKAREA, 0, &orig, 0);
+        return;
+    }
+
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = hInst;
+    wc.lpszClassName = "ShowWindowFrameWorkArea";
+    RegisterClassA(&wc);
+    hwnd = CreateWindowA(wc.lpszClassName, "work area", WS_OVERLAPPEDWINDOW, 320, 220, 400, 260, NULL, NULL, hInst, NULL);
+    ok(hwnd != NULL, "CreateWindowA failed: %lu\n", GetLastError());
+    if (hwnd)
+    {
+        ShowWindow(hwnd, SW_SHOWNORMAL);
+        GetWindowRect(hwnd, &before);
+
+        ShowWindow(hwnd, SW_MINIMIZE);
+        ShowWindow(hwnd, SW_RESTORE);
+        GetWindowRect(hwnd, &after);
+        ok(EqualRect(&before, &after), "minimize and restore: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
+           after.left, after.top, after.right, after.bottom, before.left, before.top, before.right, before.bottom);
+
+        ShowWindow(hwnd, SW_MAXIMIZE);
+        ShowWindow(hwnd, SW_RESTORE);
+        GetWindowRect(hwnd, &after);
+        ok(EqualRect(&before, &after), "maximize and restore: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
+           after.left, after.top, after.right, after.bottom, before.left, before.top, before.right, before.bottom);
+
+        SendMessageA(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+        SendMessageA(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
+        GetWindowRect(hwnd, &after);
+        ok(EqualRect(&before, &after), "SC_MINIMIZE and SC_RESTORE: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
+           after.left, after.top, after.right, after.bottom, before.left, before.top, before.right, before.bottom);
+
+        ShowWindow(hwnd, SW_MAXIMIZE);
+        ShowWindow(hwnd, SW_MINIMIZE);
+        ShowWindow(hwnd, SW_RESTORE);
+        ShowWindow(hwnd, SW_RESTORE);
+        GetWindowRect(hwnd, &after);
+        ok(EqualRect(&before, &after), "maximize, minimize and restore twice: (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld)\n",
+           after.left, after.top, after.right, after.bottom, before.left, before.top, before.right, before.bottom);
+
+        DestroyWindow(hwnd);
+    }
+    UnregisterClassA(wc.lpszClassName, hInst);
+    SystemParametersInfoA(SPI_SETWORKAREA, 0, &orig, 0);
+    SystemParametersInfoA(SPI_GETWORKAREA, 0, &got, 0);
+    ok(EqualRect(&got, &orig), "the work area was not restored: (%ld,%ld)-(%ld,%ld)\n", got.left, got.top, got.right, got.bottom);
+}
+
 #define FRAME (SWP_FRAMECHANGED | SWP_STATECHANGED)
 #define STEP(call) do { s_cEvents = 0; call; } while (0)
 
@@ -242,4 +315,6 @@ START_TEST(ShowWindowFrame)
 
     DestroyWindow(hwnd);
     UnregisterClassA(wc.lpszClassName, hInst);
+
+    test_work_area_offset(hInst);
 }
