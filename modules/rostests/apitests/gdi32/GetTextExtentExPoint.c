@@ -197,8 +197,102 @@ static void Test_LargeHimetricHeight(void)
     ReleaseDC(NULL, hdcScreen);
 }
 
+#define DX_SENTINEL 0x5A5A5A5A
+
+typedef BOOL (WINAPI *PFN_EXTENT)(HDC, LPCWSTR, INT, INT, LPINT, LPINT, LPSIZE);
+
+/* Called through the exported entry point and, where gdi32 has it, through GetTextExtentExPointWPri, which goes to the
+   kernel without the language-pack layer that otherwise measures a surrogate per code unit.
+
+   Every code unit of the string gets an extent that includes the units before it; none is left as it was handed in,
+   which for the kernel's copy of the buffer would be whatever the pool held. Windows gives a surrogate its own
+   width per code unit and the width of the glyph a ReactOS pair has differs, so the values are only compared with
+   each other. */
+static void CheckDx(HDC hdc, PFN_EXTENT pfn, PCSTR pszName, PCWSTR psz, INT cch)
+{
+    INT dx[8], dx2[8], fit = -1, i;
+    SIZE size = { -1, -1 }, size2 = { -1, -1 };
+    BOOL ret, ret2;
+    HFONT hfontBig, hOldFont;
+    static const WCHAR wide[8] = { 'W', 'W', 'W', 'W', 'W', 'W', 'W', 'W' };
+
+    /* The kernel's buffer for this many extents is likely the one the call before has just freed: leave values in it
+       that no extent of the test font reaches */
+    hfontBig = CreateArial(-100);
+    hOldFont = SelectObject(hdc, hfontBig);
+    pfn(hdc, wide, cch, 100000, &fit, dx, &size);
+    SelectObject(hdc, hOldFont);
+    DeleteObject(hfontBig);
+    for (i = 0; i < cch; i++)
+        dx[i] = dx2[i] = DX_SENTINEL;
+    ret = pfn(hdc, psz, cch, 1000, &fit, dx, &size);
+    ret2 = pfn(hdc, psz, cch, 1000, NULL, dx2, &size2);
+
+    trace("DX %s: %d %d %d %d | %d %d %d %d cx %ld fit %d\n", pszName, dx[0], dx[1], cch>2?dx[2]:0, cch>3?dx[3]:0, dx2[0], dx2[1], cch>2?dx2[2]:0, cch>3?dx2[3]:0, size.cx, fit);
+    ok(ret && ret2, "%s: GetTextExtentExPointW failed\n", pszName);
+    ok(fit == cch, "%s: fit %d, expected %d\n", pszName, fit, cch);
+    ok(size.cx > 0 && size.cx == size2.cx, "%s: cx %ld and %ld\n", pszName, size.cx, size2.cx);
+    for (i = 0; i < cch; i++)
+    {
+        ok(dx[i] != DX_SENTINEL && dx[i] > 0 && dx[i] <= size.cx, "%s: dx[%d] is %d, cx %ld\n", pszName, i, dx[i], size.cx);
+        ok(i == 0 || dx[i] >= dx[i - 1], "%s: dx[%d] %d is below dx[%d] %d\n", pszName, i, dx[i], i - 1, dx[i - 1]);
+        ok(dx[i] == dx2[i], "%s: dx[%d] is %d, then %d\n", pszName, i, dx[i], dx2[i]);
+    }
+    ok(dx[cch - 1] == size.cx, "%s: last extent %d, cx %ld\n", pszName, dx[cch - 1], size.cx);
+}
+
+static void Test_SurrogateExtents(void)
+{
+    static const WCHAR pair[] = { 'A', 0xD83D, 0xDE00, 'B' };
+    static const WCHAR loneHigh[] = { 'A', 0xD83D };
+    static const WCHAR highThenChar[] = { 'A', 0xD83D, 'B' };
+    static const WCHAR loneLow[] = { 'A', 0xDE00, 'B' };
+    static const WCHAR plain[] = { 'A' };
+    HDC hdc = CreateCompatibleDC(NULL);
+    HFONT hfont = CreateArial(-20), hOld = SelectObject(hdc, hfont);
+    SIZE sizeHigh, sizeHighB, sizeA;
+    PFN_EXTENT pfnPri = (PFN_EXTENT)GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "GetTextExtentExPointWPri");
+    UINT i;
+    PFN_EXTENT pfns[2];
+    PCSTR names[2] = { "W", "WPri" };
+
+    pfns[0] = GetTextExtentExPointW;
+    pfns[1] = pfnPri;
+    for (i = 0; i < ARRAYSIZE(pfns); i++)
+    {
+        char name[64];
+
+        if (!pfns[i])
+        {
+            skip("%s is not exported\n", names[i]);
+            continue;
+        }
+        StringCchPrintfA(name, ARRAYSIZE(name), "%s pair", names[i]);
+        CheckDx(hdc, pfns[i], name, pair, ARRAYSIZE(pair));
+        StringCchPrintfA(name, ARRAYSIZE(name), "%s lone high surrogate last", names[i]);
+        CheckDx(hdc, pfns[i], name, loneHigh, ARRAYSIZE(loneHigh));
+        StringCchPrintfA(name, ARRAYSIZE(name), "%s high surrogate then character", names[i]);
+        CheckDx(hdc, pfns[i], name, highThenChar, ARRAYSIZE(highThenChar));
+        StringCchPrintfA(name, ARRAYSIZE(name), "%s lone low surrogate", names[i]);
+        CheckDx(hdc, pfns[i], name, loneLow, ARRAYSIZE(loneLow));
+    }
+
+    /* A high surrogate that no low one follows is measured on its own and swallows nothing after it */
+    GetTextExtentPoint32W(hdc, plain, 1, &sizeA);
+    GetTextExtentPoint32W(hdc, loneHigh, 2, &sizeHigh);
+    GetTextExtentPoint32W(hdc, highThenChar, 3, &sizeHighB);
+    ok(sizeHigh.cx > sizeA.cx, "lone high surrogate adds no width: %ld, A is %ld\n", sizeHigh.cx, sizeA.cx);
+    ok(sizeHighB.cx > sizeHigh.cx, "character after a high surrogate adds no width: cx %ld, without it %ld\n",
+       sizeHighB.cx, sizeHigh.cx);
+
+    SelectObject(hdc, hOld);
+    DeleteObject(hfont);
+    DeleteDC(hdc);
+}
+
 START_TEST(GetTextExtentExPoint)
 {
     Test_GetTextExtentExPoint();
+    Test_SurrogateExtents();
     Test_LargeHimetricHeight();
 }
