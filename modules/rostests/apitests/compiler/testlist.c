@@ -2,6 +2,9 @@
 #include <apitest.h>
 
 extern void func_floatconv(void);
+extern void func_hresult(void);
+extern void func_hresult_cpp(void);
+extern void func_hresult_inline(void);
 extern void func_ms_seh(void);
 extern void func_pseh(void);
 extern void func_pseh_cpp(void);
@@ -9,6 +12,9 @@ extern void func_pseh_cpp(void);
 const struct test winetest_testlist[] =
 {
     { "floatconv", func_floatconv },
+    { "hresult", func_hresult },
+    { "hresult_cpp", func_hresult_cpp },
+    { "hresult_inline", func_hresult_inline },
 #ifndef __VS_PROJECT__
 #if !(defined(__GNUC__) && defined(_M_AMD64))
     { "ms-seh", func_ms_seh },
