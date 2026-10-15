@@ -9,6 +9,7 @@
  */
 
 #include "kbdhid.h"
+#include "../hidclass/hidbounds.h"
 
 /* This structure starts with the same layout as KEYBOARD_INDICATOR_TRANSLATION */
 typedef struct _LOCAL_KEYBOARD_INDICATOR_TRANSLATION {
@@ -134,6 +135,15 @@ KbdHid_ReadCompletion(
 
         /* signal completion event */
         KeSetEvent(&DeviceExtension->ReadCompletionEvent, 0, 0);
+        return STATUS_MORE_PROCESSING_REQUIRED;
+    }
+
+    /* a failed or zero-byte completion carries no new report: do not decode
+       the previous report still in the buffer, just keep reading */
+    if (!HidClient_IsReportDecodable(Irp->IoStatus.Status, Irp->IoStatus.Information))
+    {
+        DPRINT("[KBDHID] no report (status %x, %Iu bytes), not decoded\n", Irp->IoStatus.Status, Irp->IoStatus.Information);
+        KbdHid_InitiateRead(DeviceExtension);
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
 

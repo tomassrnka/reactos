@@ -379,10 +379,10 @@ HidClass_ReadCompleteIrp(
     //
     // copy result
     //
-    if (Irp->IoStatus.Information)
+    if (Irp->IoStatus.Information && IrpContext->OriginalIrp->MdlAddress)
     {
         //
-        // get address
+        // get address (the MDL is checked first: a zero-length read has none)
         //
         Address = MmGetSystemAddressForMdlSafe(IrpContext->OriginalIrp->MdlAddress, NormalPagePriority);
         if (Address)
@@ -749,6 +749,17 @@ HidClass_Read(
         Irp->IoStatus.Status = STATUS_CANCELLED;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return STATUS_CANCELLED;
+    }
+
+    //
+    // a zero-length read (no MDL) cannot hold a report
+    //
+    if (!HidClass_IsReadRequestValid(IoStack->Parameters.Read.Length, Irp->MdlAddress))
+    {
+        Irp->IoStatus.Status = STATUS_INVALID_BUFFER_SIZE;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INVALID_BUFFER_SIZE;
     }
 
     //

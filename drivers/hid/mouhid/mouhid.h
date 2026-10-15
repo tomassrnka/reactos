@@ -129,6 +129,12 @@ typedef struct
     //
     HIDP_VALUE_CAPS ValueCapsY;
 
+    //
+    // last valid absolute coordinates (kept when a report's axis is invalid)
+    //
+    LONG LastAbsoluteX;
+    LONG LastAbsoluteY;
+
 } MOUHID_DEVICE_EXTENSION, *PMOUHID_DEVICE_EXTENSION;
 
 #define WHEEL_DELTA 120
