@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     DriverLoad.c
+    MidiMapperLongMsg.c
     timeBeginPeriod.c
     timeGetTime.c
     testlist.c)
