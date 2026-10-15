@@ -46,6 +46,7 @@ extern void func_LookupIconIdFromDirectoryEx(void);
 extern void func_MenuItemData(void);
 extern void func_MenuUI(void);
 extern void func_MessageStateAnalyzer(void);
+extern void func_MsgWaitForMultipleObjectsEx(void);
 extern void func_NCRButtonDown(void);
 extern void func_NcPaintRgn(void);
 extern void func_NextDlgItem(void);
@@ -131,6 +132,7 @@ const struct test winetest_testlist[] =
     { "MenuItemData", func_MenuItemData },
     { "MenuUI", func_MenuUI },
     { "MessageStateAnalyzer", func_MessageStateAnalyzer },
+    { "MsgWaitForMultipleObjectsEx", func_MsgWaitForMultipleObjectsEx },
     { "NCRButtonDown", func_NCRButtonDown },
     { "NcPaintRgn", func_NcPaintRgn },
     { "NextDlgItem", func_NextDlgItem },
