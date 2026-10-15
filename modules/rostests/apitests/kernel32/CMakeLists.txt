@@ -76,6 +76,7 @@ list(APPEND SOURCE
     lstrlen.c
     Mailslot.c
     MappedFileGrowth.c
+    MappedViewEvict.c
     MultiByteToWideChar.c
     Pipes.c
     PipeSqos.c
