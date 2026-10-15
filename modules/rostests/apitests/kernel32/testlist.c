@@ -34,6 +34,7 @@ extern void func_EnumUILanguages(void);
 extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
+extern void func_FindFirstFileEx(void);
 extern void func_FindStringOrdinal(void);
 extern void func_FLS(void);
 extern void func_ForcedRelocation(void);
@@ -41,6 +42,7 @@ extern void func_FormatMessage(void);
 extern void func_FormatMessageInsert(void);
 extern void func_GetBinaryType(void);
 extern void func_GetComputerNameEx(void);
+extern void func_GetCurrentThreadStackLimits(void);
 extern void func_GetCPInfo(void);
 extern void func_GetCurrentDirectory(void);
 extern void func_GetDriveType(void);
@@ -160,6 +162,7 @@ const struct test winetest_testlist[] =
     { "ExitThread",                  func_ExitThread },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
+    { "FindFirstFileEx",             func_FindFirstFileEx },
     { "FindStringOrdinal",           func_FindStringOrdinal },
     { "FLS",                         func_FLS },
     { "ForcedRelocation",            func_ForcedRelocation },
@@ -167,6 +170,7 @@ const struct test winetest_testlist[] =
     { "FormatMessageInsert",          func_FormatMessageInsert },
     { "GetBinaryType",               func_GetBinaryType },
     { "GetComputerNameEx",           func_GetComputerNameEx },
+    { "GetCurrentThreadStackLimits", func_GetCurrentThreadStackLimits },
     { "GetCPInfo",                   func_GetCPInfo },
     { "GetCurrentDirectory",         func_GetCurrentDirectory },
     { "GetDriveType",                func_GetDriveType },

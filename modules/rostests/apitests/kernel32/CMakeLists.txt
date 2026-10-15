@@ -33,6 +33,7 @@ list(APPEND SOURCE
     ExitThread.c
     FindActCtxSectionStringW.c
     FindFiles.c
+    FindFirstFileEx.c
     FindStringOrdinal.c
     FLS.c
     ForcedRelocation.c
@@ -40,6 +41,7 @@ list(APPEND SOURCE
     FormatMessageInsert.c
     GetBinaryType.c
     GetComputerNameEx.c
+    GetCurrentThreadStackLimits.c
     GetCPInfo.c
     GetCurrentDirectory.c
     GetDriveType.c
