@@ -23,6 +23,16 @@ DEBUG_CHANNEL(kernel32file);
 #define FIND_DATA_SIZE      0x4000
 #define FIND_DEVICE_HANDLE  ((HANDLE)0x1)
 
+/* Case sensitive, large fetch (a hint) and on-disk entries only (nothing to filter here); Windows 10 rejects every other bit */
+#ifndef FIND_FIRST_EX_LARGE_FETCH
+#define FIND_FIRST_EX_LARGE_FETCH 0x2
+#endif
+#ifndef FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY
+#define FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY 0x4
+#endif
+#define FIND_FIRST_EX_VALID_FLAGS \
+    (FIND_FIRST_EX_CASE_SENSITIVE | FIND_FIRST_EX_LARGE_FETCH | FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY)
+
 typedef enum _FIND_DATA_TYPE
 {
     FindFile   = 1,
@@ -583,7 +593,7 @@ FindFirstFileExA(IN LPCSTR lpFileName,
 
     if ((fInfoLevelId != FindExInfoStandard && fInfoLevelId != FindExInfoBasic) ||
         fSearchOp == FindExSearchLimitToDevices ||
-        dwAdditionalFlags & ~FIND_FIRST_EX_CASE_SENSITIVE /* only supported flag for now */)
+        dwAdditionalFlags & ~FIND_FIRST_EX_VALID_FLAGS)
     {
         SetLastError(fSearchOp == FindExSearchLimitToDevices
                                 ? ERROR_NOT_SUPPORTED
@@ -659,7 +669,7 @@ FindFirstFileExW(IN LPCWSTR lpFileName,
 
     if ((fInfoLevelId != FindExInfoStandard && fInfoLevelId != FindExInfoBasic) ||
         fSearchOp == FindExSearchLimitToDevices ||
-        dwAdditionalFlags & ~FIND_FIRST_EX_CASE_SENSITIVE /* only supported flag for now */)
+        dwAdditionalFlags & ~FIND_FIRST_EX_VALID_FLAGS)
     {
         SetLastError(fSearchOp == FindExSearchLimitToDevices
                                 ? ERROR_NOT_SUPPORTED
