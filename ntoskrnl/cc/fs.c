@@ -311,6 +311,7 @@ CcSetFileSizes (
     KIRQL OldIrql;
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     LARGE_INTEGER OldSectionSize;
+    LARGE_INTEGER OldFileSize;
 
     CCTRACE(CC_API_DEBUG, "FileObject=%p FileSizes=%p\n",
         FileObject, FileSizes);
@@ -334,10 +335,19 @@ CcSetFileSizes (
     /* Update the relevant fields */
     KeAcquireSpinLock(&SharedCacheMap->CacheMapLock, &OldIrql);
     OldSectionSize = SharedCacheMap->SectionSize;
+    OldFileSize = SharedCacheMap->FileSize;
     SharedCacheMap->SectionSize = FileSizes->AllocationSize;
     SharedCacheMap->FileSize = FileSizes->FileSize;
     SharedCacheMap->ValidDataLength = FileSizes->ValidDataLength;
     KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
+
+    /* Pages past a reduced file size can stay resident: clear them, so that a regrown file reads zero there */
+    if (FileSizes->FileSize.QuadPart < OldFileSize.QuadPart)
+    {
+        MmZeroResidentSegmentRange(FileObject->SectionObjectPointer,
+                                   FileSizes->FileSize.QuadPart,
+                                   OldFileSize.QuadPart);
+    }
 
     if (FileSizes->AllocationSize.QuadPart < OldSectionSize.QuadPart)
     {

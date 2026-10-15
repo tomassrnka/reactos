@@ -5328,6 +5328,54 @@ MiGetSegmentPageTableEnd(
     return End;
 }
 
+/* Zero [Start, End) in the pages of a file's data segment that are in memory; reads nothing in */
+VOID
+NTAPI
+MmZeroResidentSegmentRange(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End)
+{
+    PMM_SECTION_SEGMENT Segment;
+    PCACHE_SECTION_PAGE_TABLE PageTable;
+    PVOID RestartKey = NULL;
+
+    if (Start >= End)
+        return;
+
+    Segment = MiGrabDataSection(SectionObjectPointer);
+    if (!Segment)
+        return;
+
+    MmLockSectionSegment(Segment);
+
+    while ((PageTable = RtlEnumerateGenericTableWithoutSplaying(&Segment->PageTable, &RestartKey)))
+    {
+        ULONG i;
+
+        for (i = 0; i < _countof(PageTable->PageEntries); i++)
+        {
+            LONGLONG PageStart = PageTable->FileOffset.QuadPart + (LONGLONG)i * PAGE_SIZE;
+            LONGLONG ZeroStart = max(PageStart, Start);
+            LONGLONG ZeroEnd = min(PageStart + PAGE_SIZE, End);
+            ULONG_PTR Entry = PageTable->PageEntries[i];
+            PEPROCESS Process = PsGetCurrentProcess();
+            PUCHAR Address;
+            KIRQL Irql;
+
+            if ((ZeroStart >= ZeroEnd) || (Entry == 0) || IS_SWAP_FROM_SSE(Entry))
+                continue;
+
+            Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
+            RtlZeroMemory(Address + (ZeroStart - PageStart), (SIZE_T)(ZeroEnd - ZeroStart));
+            MiUnmapPageInHyperSpace(Process, Address, Irql);
+        }
+    }
+
+    MmUnlockSectionSegment(Segment);
+    MmDereferenceSegment(Segment);
+}
+
 /* Like CcPurgeCache but for the in-memory segment */
 BOOLEAN
 NTAPI
