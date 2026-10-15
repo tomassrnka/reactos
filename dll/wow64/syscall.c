@@ -242,6 +242,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtTerminateThread: return NtTerminateThread(H(0), a[1]);
     case W64_NtQueryDebugFilterState: return NtQueryDebugFilterState(a[0], a[1]);
     case W64_NtQueryPerformanceCounter: return NtQueryPerformanceCounter(P(0), P(1));
+    case W64_NtAllocateLocallyUniqueId: return NtAllocateLocallyUniqueId(P(0));
     case W64_NtQuerySystemTime: return NtQuerySystemTime(P(0));
     case W64_NtQueryDefaultLocale: return NtQueryDefaultLocale(a[0], P(1));
     case W64_NtQueryDefaultUILanguage: return NtQueryDefaultUILanguage(P(0));
@@ -579,6 +580,18 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         else Status = NtOpenProcess(&Cleanup->Handle, a[1], OA(2), ClientId);
         RETURN_HANDLE();
     }
+    case W64_NtAdjustPrivilegesToken:
+        return NtAdjustPrivilegesToken(H(0), a[1], P(2), a[3], P(4), P(5));
+    case W64_NtDuplicateToken:
+        PROBE(5); ATTR(2);
+        Status = NtDuplicateToken(H(0), a[1], OA(2), a[3], a[4], &Cleanup->Handle);
+        RETURN_HANDLE_AT(5);
+    case W64_NtAccessCheck:
+        return NtAccessCheck(Security32(&Descriptor, P(0)), H(1), a[2], P(3), P(4), P(5), P(6), P(7));
+    case W64_NtSetSecurityObject:
+        return NtSetSecurityObject(H(0), a[1], Security32(&Descriptor, P(2)));
+    case W64_NtQuerySecurityObject:
+        return NtQuerySecurityObject(H(0), a[1], P(2), a[3], P(4));
     case W64_NtOpenProcessToken:
         PROBE(2);
         Status = NtOpenProcessToken(H(0), a[1], &Cleanup->Handle);
@@ -596,19 +609,20 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtOpenThreadTokenEx(H(0), a[1], a[2], a[3], &Cleanup->Handle);
         RETURN_HANDLE_AT(4);
     case W64_NtQueryInformationToken:
-        if (a[1] == TokenUser)
+        if (a[1] == TokenUser || a[1] == TokenOwner || a[1] == TokenPrimaryGroup)
         {
             union { TOKEN_USER User; UCHAR Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } Info;
-            ULONG Bytes;
-            Status = NtQueryInformationToken(H(0), TokenUser, &Info, sizeof(Info), &Bytes);
+            ULONG Bytes, Prefix = a[1] == TokenUser ? 2 * sizeof(ULONG) : sizeof(ULONG);
+            PROBE(4);
+            Status = NtQueryInformationToken(H(0), a[1], &Info, sizeof(Info), &Bytes);
             if (!NT_SUCCESS(Status)) return Status;
             Bytes = RtlLengthSid(Info.User.User.Sid);
-            U(4) = 2 * sizeof(ULONG) + Bytes;
-            if (a[3] < 2 * sizeof(ULONG) + Bytes) return STATUS_BUFFER_TOO_SMALL;
-            ProbeOutput(a[2], 2 * sizeof(ULONG) + Bytes);
-            ((ULONG *)P(2))[0] = a[2] + 2 * sizeof(ULONG);
-            ((ULONG *)P(2))[1] = Info.User.User.Attributes;
-            RtlCopyMemory((ULONG *)P(2) + 2, Info.User.User.Sid, Bytes);
+            U(4) = Prefix + Bytes;
+            if (a[3] < Prefix + Bytes) return STATUS_BUFFER_TOO_SMALL;
+            ProbeOutput(a[2], Prefix + Bytes);
+            ((ULONG *)P(2))[0] = a[2] + Prefix;
+            if (a[1] == TokenUser) ((ULONG *)P(2))[1] = Info.User.User.Attributes;
+            RtlCopyMemory((BYTE *)P(2) + Prefix, Info.User.User.Sid, Bytes);
             return STATUS_SUCCESS;
         }
         switch (a[1])
@@ -619,6 +633,17 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtQueryInformationToken(H(0), a[1], P(2), a[3], P(4));
         default: return STATUS_NOT_SUPPORTED;
         }
+    case W64_NtSetInformationToken:
+        if (a[1] == TokenOwner || a[1] == TokenPrimaryGroup || a[1] == TokenDefaultDacl)
+        {
+            PVOID Pointer;
+            if (a[3] < sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Pointer = PTR32(U(2));
+            return NtSetInformationToken(H(0), a[1], &Pointer, sizeof(Pointer));
+        }
+        if (a[1] == TokenSessionId)
+            return NtSetInformationToken(H(0), a[1], P(2), a[3]);
+        return STATUS_NOT_SUPPORTED;
     case W64_NtQueryInformationProcess:
         if (a[1] == ProcessBasicInformation)
         {

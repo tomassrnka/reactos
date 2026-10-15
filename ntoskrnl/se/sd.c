@@ -724,6 +724,13 @@ SeQuerySecurityDescriptorInfo(
 
     PAGED_CODE();
 
+#ifdef BUILD_WOW64_ENABLED
+    /* Mandatory integrity labels are not stored by the security subsystem.
+     * Do not report a successful label query with an empty descriptor. */
+    if (*SecurityInformation & LABEL_SECURITY_INFORMATION)
+        return STATUS_NOT_SUPPORTED;
+#endif
+
     RelSD = (PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor;
 
     if (*ObjectsSecurityDescriptor == NULL)
