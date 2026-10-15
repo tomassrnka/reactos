@@ -42,6 +42,8 @@ static DWORD WINAPI SpawnerThread(LPVOID param)
             CloseHandle(h);
         Sleep(0);
     }
+
+    return 0;
 }
 
 static HINSTANCE g_instance;
