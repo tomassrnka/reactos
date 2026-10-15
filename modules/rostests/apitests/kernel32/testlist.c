@@ -33,6 +33,7 @@ extern void func_EnumUILanguages(void);
 extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
+extern void func_FindFirstFileEx(void);
 extern void func_FindStringOrdinal(void);
 extern void func_FLS(void);
 extern void func_ForcedRelocation(void);
@@ -155,6 +156,7 @@ const struct test winetest_testlist[] =
     { "ExitThread",                  func_ExitThread },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
+    { "FindFirstFileEx",             func_FindFirstFileEx },
     { "FindStringOrdinal",           func_FindStringOrdinal },
     { "FLS",                         func_FLS },
     { "ForcedRelocation",            func_ForcedRelocation },

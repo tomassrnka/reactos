@@ -32,6 +32,7 @@ list(APPEND SOURCE
     ExitThread.c
     FindActCtxSectionStringW.c
     FindFiles.c
+    FindFirstFileEx.c
     FindStringOrdinal.c
     FLS.c
     ForcedRelocation.c
