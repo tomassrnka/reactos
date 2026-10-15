@@ -112,6 +112,20 @@ VOID
 NTAPI
 KiInitializePAT(VOID)
 {
+    KAFFINITY Active = KeActiveProcessors;
+    ULONG i;
+
+    /* KeFeatureBits come from the boot processor: every active one must have a PAT */
+    for (i = 0; i < MAXIMUM_PROCESSORS; i++)
+    {
+        if ((Active & ((KAFFINITY)1 << i)) &&
+            (!KiProcessorBlock[i] || !(KiProcessorBlock[i]->FeatureBits & KF_PAT)))
+        {
+            DPRINT1("Processor %lu has no PAT, keeping the power-on layout\n", i);
+            return;
+        }
+    }
+
     /* Same layout as amd64. Entries 0, 2 and 3 keep their power-on types
        (WB, UC-, UC), so only PWT-without-PCD mappings change meaning, from
        write-through to write-combining; Mm creates those only for device
