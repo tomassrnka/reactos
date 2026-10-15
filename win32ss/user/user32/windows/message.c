@@ -9,6 +9,9 @@
  */
 
 #include <user32.h>
+#include <wincon.h>
+#include <wincon_undoc.h>
+#include <win/console.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(user32);
 
@@ -3181,9 +3184,11 @@ RealMsgWaitForMultipleObjectsEx(
    DWORD dwWakeMask,
    DWORD dwFlags)
 {
-   LPHANDLE RealHandles;
-   HANDLE MessageQueueHandle;
-   DWORD Result;
+   MSGWAITINFO Info;
+   RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME ActCtx;
+   HANDLE Handle;
+   NTSTATUS Status;
+   DWORD Result, i;
    PCLIENTINFO pci;
    PCLIENTTHREADINFO pcti;
 
@@ -3207,41 +3212,64 @@ RealMsgWaitForMultipleObjectsEx(
       }
    }
 
-   MessageQueueHandle = NtUserxMsqSetWakeMask(MAKELONG(dwWakeMask, dwFlags));
-   if (MessageQueueHandle == NULL)
+   /* Mirrors WaitForMultipleObjectsEx: standard handles are translated and console handles waited
+      on through the console input event; APCs run with the default activation context */
+   if (nCount < MSGWAIT_MAX_OBJECTS)
    {
-      SetLastError(0); /* ? */
-      return WAIT_FAILED;
+      PRTL_USER_PROCESS_PARAMETERS Ppb = NtCurrentPeb()->ProcessParameters;
+
+      for (i = 0; i < nCount; i++)
+      {
+         Handle = pHandles[i];
+         switch ((ULONG_PTR)Handle)
+         {
+            case STD_INPUT_HANDLE:  Handle = Ppb->StandardInput; break;
+            case STD_OUTPUT_HANDLE: Handle = Ppb->StandardOutput; break;
+            case STD_ERROR_HANDLE:  Handle = Ppb->StandardError; break;
+         }
+         if (IsConsoleHandle(Handle) && VerifyConsoleIoHandle(Handle))
+            Handle = GetConsoleInputWaitHandle();
+#ifdef W32K_WIDE_ACTIVE
+         Info.Handles[i].v64 = (ULONG64)(LONG64)(LONG_PTR)Handle;
+#else
+         Info.Handles[i] = Handle;
+#endif
+      }
    }
 
-   RealHandles = HeapAlloc(GetProcessHeap(), 0, (nCount + 1) * sizeof(HANDLE));
-   if (RealHandles == NULL)
+   Info.nCount = nCount;
+   Info.dwWakeMask = dwWakeMask;
+   Info.dwFlags = dwFlags;
+   Info.bTimeout = (dwMilliseconds != INFINITE);
+   Info.Timeout.QuadPart = dwMilliseconds * -10000LL;
+
+   if (dwFlags & MWMO_ALERTABLE)
    {
-      NtUserxMsqClearWakeMask();
-      SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-      return WAIT_FAILED;
+      RtlZeroMemory(&ActCtx, sizeof(ActCtx));
+      ActCtx.Size = sizeof(ActCtx);
+      ActCtx.Format = RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_FORMAT_WHISTLER;
+      RtlActivateActivationContextUnsafeFast(&ActCtx, NULL);
    }
 
-   RtlCopyMemory(RealHandles, pHandles, nCount * sizeof(HANDLE));
-   RealHandles[nCount] = MessageQueueHandle;
+   /* win32k waits, so that the thread counts as waiting for input exactly while it does */
+   Status = NtUserxMsgWait(&Info);
 
-   //FIXME("1 Chg 0x%x Wake 0x%x Mask 0x%x nCnt %d\n",pcti->fsChangeBits, pcti->fsWakeBits, dwWakeMask, nCount);
+   if (dwFlags & MWMO_ALERTABLE)
+      RtlDeactivateActivationContextUnsafeFast(&ActCtx);
 
-   Result = WaitForMultipleObjectsEx( nCount + 1,
-                                      RealHandles,
-                                      dwFlags & MWMO_WAITALL,
-                                      dwMilliseconds,
-                                      dwFlags & MWMO_ALERTABLE );
-
-   //FIXME("2 Chg 0x%x Wake 0x%x Mask 0x%x nCnt %d\n",pcti->fsChangeBits, pcti->fsWakeBits, dwWakeMask, nCount);
-
-   HeapFree(GetProcessHeap(), 0, RealHandles);
-   NtUserxMsqClearWakeMask();
+   if (NT_SUCCESS(Status))
+   {
+      Result = (DWORD)Status;
+   }
+   else
+   {
+      SetLastError(RtlNtStatusToDosError(Status));
+      Result = WAIT_FAILED;
+   }
 
    // wine hack! MSDN: If dwMilliseconds is zero,,specified objects are not signaled; it always returns immediately.
    if (!Result && !nCount && !dwMilliseconds) Result = WAIT_TIMEOUT;
 
-   //FIXME("Result 0X%x\n",Result);
    return Result;
 }
 

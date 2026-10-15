@@ -323,6 +323,10 @@ NtUserCallOneParam(
             Result = (DWORD_PTR)IntMsqSetWakeMask(Param);
             break;
 
+        case ONEPARAM_ROUTINE_ROS_MSGWAIT:
+            Result = (DWORD_PTR)co_MsqMsgWait((PMSGWAITINFO)Param);
+            break;
+
         case ONEPARAM_ROUTINE_GETKEYBOARDTYPE:
             Result = UserGetKeyboardType(Param);
             break;
