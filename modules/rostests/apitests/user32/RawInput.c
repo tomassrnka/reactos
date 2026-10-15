@@ -1439,30 +1439,45 @@ static int run_desk_child(const char *flavor)
     return (int)code;
 }
 
+/* the child reports a packet count (0..200); 250, 251 and 255 are its setup failures and must
+   never be mistaken for a passing count */
+static BOOL desk_setup_ok(int code, const char *what)
+{
+    ok(code != 250 && code != 251 && code != 255, "%s: child setup failed (exit %d)\n", what, code);
+    return code != 250 && code != 251 && code != 255;
+}
+
 static void test_other_desktop_sinks(void)
 {
     int n;
 
     /* a background process hears the input of its own desktop ... */
     n = run_desk_child("deskexcontrol");
-    ok(n == 4, "EXINPUTSINK on the input desktop: %d packets\n", n);
+    if (desk_setup_ok(n, "deskexcontrol"))
+        ok(n == 4, "EXINPUTSINK on the input desktop: %d packets\n", n);
     n = run_desk_child("desksinkcontrol");
-    ok(n == 4, "INPUTSINK on the input desktop: %d packets\n", n);
+    if (desk_setup_ok(n, "desksinkcontrol"))
+        ok(n == 4, "INPUTSINK on the input desktop: %d packets\n", n);
     /* ... and nothing of the keys typed on a desktop other than its own */
     n = run_desk_child("deskexother");
-    ok(n == 0, "EXINPUTSINK on another desktop: %d packets\n", n);
+    if (desk_setup_ok(n, "deskexother"))
+        ok(n == 0, "EXINPUTSINK on another desktop: %d packets\n", n);
     n = run_desk_child("desksinkother");
-    ok(n == 0, "INPUTSINK on another desktop: %d packets\n", n);
+    if (desk_setup_ok(n, "desksinkother"))
+        ok(n == 0, "INPUTSINK on another desktop: %d packets\n", n);
 
     /* A process with the focus on the input desktop keeps getting its input at a registered
        window on another desktop (measured on Windows 7 and 10, also for INPUTSINK, where
        ReactOS delivers nothing: recorded gap); only a background process is cut off */
     n = run_desk_child("deskfg0");
-    ok(n >= 5, "foreground process, target on another desktop, flags 0: %d packets\n", n);
+    if (desk_setup_ok(n, "deskfg0"))
+        ok(n >= 5 && n <= 200, "foreground process, target on another desktop, flags 0: %d packets\n", n);
     n = run_desk_child("deskfgex");
-    ok(n >= 5, "foreground process, target on another desktop, EXINPUTSINK: %d packets\n", n);
+    if (desk_setup_ok(n, "deskfgex"))
+        ok(n >= 5 && n <= 200, "foreground process, target on another desktop, EXINPUTSINK: %d packets\n", n);
     n = run_desk_child("deskfgsink");
-    trace("foreground process, target on another desktop, INPUTSINK: %d packets\n", n);
+    if (desk_setup_ok(n, "deskfgsink"))
+        trace("foreground process, target on another desktop, INPUTSINK: %d packets\n", n);
 }
 
 struct hook_ctx
@@ -1680,6 +1695,213 @@ static void test_attached_threads_and_hooks(void)
     CloseHandle(c.cmd);
     CloseHandle(c.ack);
     CloseHandle(c.stop);
+}
+
+/* --- Traversal safety: a hook removes or destroys nodes the outer walk still holds --- */
+
+/* What a worker thread does inside its own WH_KEYBOARD hook (set before the key is injected) */
+enum hook_op
+{
+    HOP_NONE = 0,
+    HOP_NESTED_REMOVE,    /* nested PeekMessage(WM_INPUT, PM_REMOVE): frees the outer walk's next node */
+    HOP_NESTED_GET,       /* nested GetMessage(WM_INPUT): same, through the blocking path */
+    HOP_ATTACH_AWAY,      /* attach the sole queue thread elsewhere: destroys the queue being walked */
+    HOP_EXIT              /* exit the thread inside the hook: abandons the walk */
+};
+
+struct worker_ctx
+{
+    HANDLE ready, go, stop;
+    DWORD tidMain;
+    HWND hwnd;
+    volatile LONG op;
+    LONG hookCalls, nestedGot, extra;
+    HHOOK hook;
+};
+
+static DWORD g_workerTls;
+
+static LRESULT CALLBACK WorkerHook(int code, WPARAM wParam, LPARAM lParam)
+{
+    struct worker_ctx *c = (struct worker_ctx *)TlsGetValue(g_workerTls);
+    MSG m;
+
+    if (c && code >= 0 && !c->hookCalls++)
+    {
+        switch (c->op)
+        {
+            case HOP_NESTED_REMOVE:
+                while (PeekMessageW(&m, NULL, WM_INPUT, WM_INPUT, PM_REMOVE))
+                    c->nestedGot++;
+                /* consume the key so the outer walk resumes through the node just freed */
+                return 1;
+            case HOP_NESTED_GET:
+                /* a WM_INPUT is already queued, so this returns at once rather than blocking */
+                if (PeekMessageW(&m, NULL, WM_INPUT, WM_INPUT, PM_NOREMOVE) && GetMessageW(&m, NULL, WM_INPUT, WM_INPUT))
+                    c->nestedGot++;
+                return 1;
+            case HOP_ATTACH_AWAY:
+                /* the worker owns this queue alone; joining the main queue destroys it mid-walk */
+                AttachThreadInput(GetCurrentThreadId(), c->tidMain, TRUE);
+                return 1;
+            case HOP_EXIT:
+                /* leave the hook, and the outer hardware-message walk, on the kernel stack for good */
+                ExitThread(0);
+                break;
+        }
+    }
+    return CallNextHookEx(NULL, code, wParam, lParam);
+}
+
+static DWORD WINAPI WorkerProc(LPVOID arg)
+{
+    struct worker_ctx *c = arg;
+    MSG msg;
+
+    TlsSetValue(g_workerTls, c);
+    c->hwnd = make_window(500, 300);
+    /* take the foreground so the injected keys reach this thread's own queue */
+    SetForegroundWindow(c->hwnd);
+    SetFocus(c->hwnd);
+    reg1(1, 6, 0, c->hwnd);          /* keyboard raw input: a key also makes a WM_INPUT */
+    reg1(1, 2, 0, c->hwnd);          /* mouse raw input: the node that follows the key */
+    c->hook = SetWindowsHookExW(WH_KEYBOARD, WorkerHook, NULL, GetCurrentThreadId());
+    SetEvent(c->ready);
+
+    /* do not pump until the driver has queued the whole key + mouse burst, so that when the key
+       is processed its following WM_INPUT node is already on the list */
+    WaitForSingleObject(c->go, 10000);
+
+    for (;;)
+    {
+        DWORD r;
+
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        r = MsgWaitForMultipleObjects(1, &c->stop, FALSE, 20000, QS_ALLINPUT);
+        if (r == WAIT_OBJECT_0 || r == WAIT_TIMEOUT)
+            break;
+    }
+    if (c->hook)
+        UnhookWindowsHookEx(c->hook);
+    unreg_all();
+    if (c->hwnd)
+        DestroyWindow(c->hwnd);
+    return 0;
+}
+
+/* Inject a key (its WM_INPUT and WM_KEYDOWN) and a mouse move (another WM_INPUT) so that while the
+   worker's hook runs for the key, the outer walk's saved next node is a raw-input node. */
+static void drive_worker_key(void)
+{
+    int i;
+
+    /* key down first (its WM_INPUT and WM_KEYDOWN), then several mouse WM_INPUT nodes behind it */
+    keybd_event('B', 0x30, 0, 0);
+    for (i = 0; i < 4; i++)
+        mouse_event(MOUSEEVENTF_MOVE, 1, 1, 0, 0);
+    keybd_event('B', 0x30, KEYEVENTF_KEYUP, 0);
+}
+
+static int run_worker_case(LONG op, BOOL expectExit)
+{
+    struct worker_ctx c;
+    HANDLE th;
+    DWORD code = 0;
+
+    {
+        char dbg[64];
+        sprintf(dbg, "RI2: op %ld start\n", op);
+        OutputDebugStringA(dbg);
+    }
+    ZeroMemory(&c, sizeof(c));
+    c.ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    c.go = CreateEventW(NULL, TRUE, FALSE, NULL);
+    c.stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    c.tidMain = GetCurrentThreadId();
+    c.op = op;
+    th = CreateThread(NULL, 0, WorkerProc, &c, 0, NULL);
+    if (WaitForSingleObject(c.ready, 5000) != WAIT_OBJECT_0)
+    {
+        SetEvent(c.go);
+        SetEvent(c.stop);
+        WaitForSingleObject(th, 5000);
+        CloseHandle(th);
+        CloseHandle(c.ready);
+        CloseHandle(c.go);
+        CloseHandle(c.stop);
+        skip("worker did not start\n");
+        return -1;
+    }
+    pump(100);
+
+    /* queue the whole burst, then let the worker drain it in one go */
+    drive_worker_key();
+    pump(50);
+    SetEvent(c.go);
+    pump(400);
+
+    ok(c.hookCalls > 0 || !running_on_reactos(), "op %ld: the worker hook never ran\n", op);
+
+    if (expectExit)
+    {
+        /* the worker vanished inside the hook; the thread object may linger a moment */
+        if (WaitForSingleObject(th, 5000) != WAIT_OBJECT_0)
+            ok(0, "op %ld: worker thread did not terminate\n", op);
+        GetExitCodeProcess(GetCurrentProcess(), &code); /* only to touch the handle; process still runs */
+    }
+    else
+    {
+        SetEvent(c.stop);
+        if (WaitForSingleObject(th, 5000) != WAIT_OBJECT_0)
+            TerminateThread(th, 0);
+    }
+    CloseHandle(th);
+    CloseHandle(c.ready);
+    CloseHandle(c.go);
+    CloseHandle(c.stop);
+
+    /* the desktop keeps working: foreground back to A, one raw packet still delivered */
+    SetForegroundWindow(g_hwndA);
+    SetFocus(g_hwndA);
+    pump(100);
+    ok(reg1(1, 2, 0, g_hwndA), "op %ld: register after the hook failed: %lu\n", op, GetLastError());
+    log_reset();
+    mouse_event(MOUSEEVENTF_MOVE, 3, 0, 0, 0);
+    pump(200);
+    ok(count_msg(WM_INPUT) >= 1 || !running_on_reactos(), "op %ld: no WM_INPUT after the hook (%d)\n", op, count_msg(WM_INPUT));
+    mouse_event(MOUSEEVENTF_MOVE, (DWORD)-3, 0, 0, 0);
+    pump(50);
+    unreg_all();
+    {
+        char dbg[96];
+        sprintf(dbg, "RI2: op %ld done hookCalls=%ld nestedGot=%ld\n", op, c.hookCalls, c.nestedGot);
+        OutputDebugStringA(dbg);
+    }
+    return (int)c.nestedGot;
+}
+
+/* r3 #2: a nested PM_REMOVE or GetMessage inside a hook frees the node the outer walk saved as next.
+   r3 #3: a thread that exits inside a hook strands its traversal.
+   r3 #4: attaching the sole queue thread away destroys a queue being traversed. */
+static void test_hook_traversal_safety(void)
+{
+    g_workerTls = TlsAlloc();
+
+    run_worker_case(HOP_NESTED_REMOVE, FALSE);
+    run_worker_case(HOP_NESTED_GET, FALSE);
+    run_worker_case(HOP_EXIT, TRUE);
+    /* A thread that attaches itself away inside its own hook destroys the queue its hardware
+       walk is on (this fix keeps the walk safe). On stock ReactOS the attach's own activation
+       then hits a pre-existing crash in the sent-message dispatch path, unrelated to raw input,
+       so the op runs only when RI2_ATTACH is set (used to demonstrate that separate bug). */
+    if (getenv("RI2_ATTACH"))
+        run_worker_case(HOP_ATTACH_AWAY, FALSE);
+
+    TlsFree(g_workerTls);
 }
 
 #define ONEPARAM_ROUTINE_SETRAWINPUTSERIAL 0xfffe000f
@@ -2201,6 +2423,8 @@ START_TEST(RawInput)
     test_alt_numpad();
     test_altgr();
     test_attached_threads_and_hooks();
+    click_at(150, 150);
+    test_hook_traversal_safety();
     click_at(150, 150);
     test_handle_serial_wrap();
     test_background();
