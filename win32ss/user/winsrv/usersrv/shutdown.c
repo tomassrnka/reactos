@@ -515,11 +515,12 @@ NotifyUserProcessForShutdown(PCSR_PROCESS CsrProcess,
         /* Get the current thread entry */
         Thread = CONTAINING_RECORD(NextEntry, CSR_THREAD, Link);
 
-        /* Move to the next entry */
-        NextEntry = NextEntry->Flink;
-
         /* If the thread is being terminated, just skip it */
-        if (Thread->Flags & CsrThreadTerminated) continue;
+        if (Thread->Flags & CsrThreadTerminated)
+        {
+            NextEntry = NextEntry->Flink;
+            continue;
+        }
 
         /* Reference the thread and temporarily unlock the process */
         CsrReferenceThread(Thread);
@@ -531,8 +532,14 @@ NotifyUserProcessForShutdown(PCSR_PROCESS CsrProcess,
             FoundWindows = TRUE;
         }
 
-        /* Lock the process again and dereference the thread */
+        /* Lock the process again */
         CsrLockProcessByClientId(CsrProcess->ClientId.UniqueProcess, &Process);
+
+        /*
+         * Other threads of the process come and go while it is unlocked, so the next
+         * entry is only known now: the referenced thread is still in the list.
+         */
+        NextEntry = Thread->Link.Flink;
         CsrDereferenceThread(Thread);
 
         // FIXME: Analyze Context.QueryResult !!
@@ -560,11 +567,12 @@ NotifyUserProcessForShutdown(PCSR_PROCESS CsrProcess,
         /* Get the current thread entry */
         Thread = CONTAINING_RECORD(NextEntry, CSR_THREAD, Link);
 
-        /* Move to the next entry */
-        NextEntry = NextEntry->Flink;
-
         /* If the thread is being terminated, just skip it */
-        if (Thread->Flags & CsrThreadTerminated) continue;
+        if (Thread->Flags & CsrThreadTerminated)
+        {
+            NextEntry = NextEntry->Flink;
+            continue;
+        }
 
         /* Reference the thread and temporarily unlock the process */
         CsrReferenceThread(Thread);
@@ -575,8 +583,9 @@ NotifyUserProcessForShutdown(PCSR_PROCESS CsrProcess,
                              (QUERY_RESULT_ABORT != QueryResult) ? MCS_ENDSESSION : 0,
                              &Context);
 
-        /* Lock the process again and dereference the thread */
+        /* Lock the process again; the next entry is only known now, see above */
         CsrLockProcessByClientId(CsrProcess->ClientId.UniqueProcess, &Process);
+        NextEntry = Thread->Link.Flink;
         CsrDereferenceThread(Thread);
     }
 
