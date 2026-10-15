@@ -17,6 +17,9 @@
  * still waiting for room has 0 there. Copied requests always come before waiting ones, so the
  * window holds the requests' data in queue order.
  *
+ * FCB->SendHeadTaken counts the bytes of the first request that the transport has taken. If the
+ * stream fails, that request reports them (they are in the stream) and the others report 0.
+ *
  * IoStatus.Information counts the bytes of a request copied so far. A request with blocking
  * semantics (DriverContext[2] set) copies all its data, a part at a time as room frees up, and
  * completes once the transport has taken all of it; the others complete with what fitted.
@@ -120,22 +123,29 @@ AfdCompleteSendIrp(PIRP Irp, NTSTATUS Status, ULONG_PTR Information)
     IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
 }
 
-/* Fail every queued send request and drop the data in the window */
+/*
+ * Fail every queued send request and drop the data in the window. The first request reports the
+ * bytes of it the transport took before the failure, so a caller can carry on after them instead
+ * of sending them again.
+ */
 static VOID
 AfdFailSendQueue(PAFD_FCB FCB, NTSTATUS Status)
 {
     PLIST_ENTRY NextIrpEntry;
     PIRP NextIrp;
+    ULONG_PTR Taken = FCB->SendHeadTaken;
 
     while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]))
     {
         NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
-        AfdCompleteSendIrp(NextIrp, Status, 0);
+        AfdCompleteSendIrp(NextIrp, Status, MIN(Taken, NextIrp->IoStatus.Information));
+        Taken = 0;
     }
 
     FCB->Send.BytesUsed = 0;
     FCB->SendBytesUnowned = 0;
+    FCB->SendHeadTaken = 0;
 }
 
 /* Copy waiting requests into the free part of the window, in queue order */
@@ -269,6 +279,10 @@ AfdCancelStreamSend(PAFD_FCB FCB, PIRP Irp)
     UINT SendLength = AfdSendLength(SendReq);
     PIRP PreviousIrp;
 
+    /* The next request becomes the first one, with nothing of it taken yet */
+    if (Previous == &FCB->PendingIrpList[FUNCTION_SEND])
+        FCB->SendHeadTaken = 0;
+
     if (InWindow != 0)
     {
         /* The previous request's data comes just before it in the window */
@@ -376,11 +390,13 @@ static NTSTATUS NTAPI SendComplete
         if (InWindow > Sent)
         {
             SetSendBytesInWindow(NextIrp, InWindow - Sent);
+            FCB->SendHeadTaken += Sent;
             Sent = 0;
             break;
         }
 
         Sent -= InWindow;
+        FCB->SendHeadTaken += InWindow;
 
         /* A blocking request with data still to copy stays at the head */
         if (AfdSendHasMoreToCopy(NextIrp))
@@ -390,6 +406,7 @@ static NTSTATUS NTAPI SendComplete
         }
 
         RemoveEntryList(NextIrpEntry);
+        FCB->SendHeadTaken = 0;
 
         ASSERT(NextIrp->IoStatus.Information != 0);
         AfdCompleteSendIrp(NextIrp, STATUS_SUCCESS, NextIrp->IoStatus.Information);

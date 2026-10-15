@@ -189,6 +189,8 @@ typedef struct _AFD_FCB {
     UINT SendBytesUnowned;
     /* AfdStartSend is running, and a nested call asked it to send again */
     BOOLEAN SendStarting, SendRestart;
+    /* Bytes of the first queued send request that the transport has taken */
+    UINT SendHeadTaken;
     /* Number of times SendComplete has run */
     UINT SendCompletions;
     KMUTEX Mutex;
