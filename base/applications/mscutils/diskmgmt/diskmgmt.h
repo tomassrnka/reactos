@@ -59,8 +59,9 @@ BOOL ShowDiskProperties(HWND hOwner, const DM_DISK *Disk);
 
 /* actions.c */
 BOOL ActionsEnabled(UINT Id, const DM_DISK *Disk, const DM_REGION *Region);
-VOID ActionsBuildMenu(HMENU hMenu, const DM_DISK *Disk, const DM_REGION *Region, BOOL WithProperties);
-BOOL ActionsRun(HWND hOwner, UINT Id, const DM_DISK *Disk, const DM_REGION *Region);
+BOOL ActionsReason(UINT Id, const DM_DISK *Disk, const DM_REGION *Region, PWSTR Buffer, int Count);
+VOID ActionsBuildMenu(HMENU hMenu, const DM_DISK *Disk, const DM_REGION *Region, BOOL Context);
+BOOL ActionsRun(HWND hOwner, UINT Id, const DM_DISK *Disk, const DM_REGION *Region, PDM_MODEL Model);
 
 /* diskmgmt.c */
 BOOL LoadStringBuffer(UINT Id, PWSTR Buffer, int Count);
