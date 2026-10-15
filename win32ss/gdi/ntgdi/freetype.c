@@ -6426,6 +6426,33 @@ IntFindFontByInstanceId(_In_ ULONG InstanceId)
     return FontGDI;
 }
 
+/* The caller holds the FreeType lock. Removing a font unlinks it under that lock before freeing it. */
+static BOOLEAN
+IntIsFontLinked(_In_ PFONTGDI FontGDI)
+{
+    PPROCESSINFO Win32Process = PsGetCurrentProcessWin32Process();
+    PLIST_ENTRY Entry;
+    BOOLEAN Found = FALSE;
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    for (Entry = g_FontListHead.Flink; Entry != &g_FontListHead && !Found; Entry = Entry->Flink)
+        Found = (CONTAINING_RECORD(Entry, FONT_ENTRY, ListEntry)->Font == FontGDI);
+
+    if (!Found && Win32Process)
+    {
+        IntLockProcessPrivateFonts(Win32Process);
+        for (Entry = Win32Process->PrivateFontListHead.Flink;
+             Entry != &Win32Process->PrivateFontListHead && !Found;
+             Entry = Entry->Flink)
+        {
+            Found = (CONTAINING_RECORD(Entry, FONT_ENTRY, ListEntry)->Font == FontGDI);
+        }
+        IntUnLockProcessPrivateFonts(Win32Process);
+    }
+    return Found;
+}
+
 static const WCHAR g_SystemRootPrefix[] = L"\\SystemRoot\\";
 static const WCHAR g_DosDevicePrefix[] = L"\\??\\";
 static const WCHAR g_DosDeviceUncPrefix[] = L"\\??\\UNC\\";
@@ -6669,7 +6696,7 @@ ftGdiGetFontFileData(
 }
 
 /* Tells how a font instance differs from the face it was made from, for NtGdiGetFontRealizationInfo */
-VOID
+BOOL
 FASTCALL
 ftGdiGetFontRealization(
     _In_ PFONTGDI FontGDI,
@@ -6677,6 +6704,15 @@ ftGdiGetFontRealization(
     _Out_ PFONT_REALIZATION_INFO Info)
 {
     REALIZATION_INFO ri;
+
+    /* A realized font keeps a bare pointer; a font that was removed since is gone, so check under the lock */
+    IntLockFreeType();
+    if (!FontGDI || !IntIsFontLinked(FontGDI))
+    {
+        IntUnLockFreeType();
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
 
     ftGdiRealizationInfo(FontGDI, &ri);
     Info->flags = ri.iTechnology;
@@ -6689,6 +6725,8 @@ ftGdiGetFontRealization(
         Info->simulations |= 0x1;
     if (LogFont->lfItalic && !FontGDI->OriginalItalic)
         Info->simulations |= 0x2;
+    IntUnLockFreeType();
+    return TRUE;
 }
 
 

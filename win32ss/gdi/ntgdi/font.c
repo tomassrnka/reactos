@@ -1324,6 +1324,7 @@ NtGdiGetFontRealizationInfo(
     FONT_REALIZATION_INFO Fri;
     DWORD cbInfo = 0;
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOL Ret;
 
     _SEH2_TRY
     {
@@ -1362,12 +1363,14 @@ NtGdiGetFontRealizationInfo(
         return FALSE;
     }
 
-    /* The text object stays locked while the font is read, so the font cannot go away */
+    /* The text object does not pin the font: the font is validated and read under the FreeType lock */
     pFontGdi = ObjToGDI(pTextObj->Font, FONT);
     LogFont = pTextObj->logfont.elfEnumLogfontEx.elfLogFont;
     RtlZeroMemory(&Fri, sizeof(Fri));
-    ftGdiGetFontRealization(pFontGdi, &LogFont, &Fri);
+    Ret = ftGdiGetFontRealization(pFontGdi, &LogFont, &Fri);
     TEXTOBJ_UnlockText(pTextObj);
+    if (!Ret)
+        return FALSE;
     Fri.size = cbInfo;
 
     _SEH2_TRY
