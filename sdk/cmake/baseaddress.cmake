@@ -432,3 +432,4 @@ set(baseaddress_evr                           0x6f5d0000) # manually added
 set(baseaddress_mfreadwrite                   0x6f560000) # manually added
 set(baseaddress_mf                            0x6f490000) # manually added
 set(baseaddress_mfplat                        0x6f3b0000) # manually added
+set(baseaddress_kernelbase                    0x6f3a0000) # manually added
