@@ -1035,6 +1035,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             if (NT_SUCCESS(Status) && !NativeSystemInformation)
                 ((SYSTEM_PROCESSOR_INFORMATION *)P(1))->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
             return Status;
+        case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
         default: return STATUS_NOT_SUPPORTED;
