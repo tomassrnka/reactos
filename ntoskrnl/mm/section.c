@@ -5328,6 +5328,15 @@ MmCreateSection (OUT PVOID  * Section,
                                           AllocationAttributes,
                                           FileObject,
                                           FileHandle != NULL);
+
+        /* Views of this section can modify data past the valid data length: file systems keep their lazy
+         * writer away from such pages (fastfat, rdbss) when the FCB header says so */
+        if (NT_SUCCESS(Status) && FileLock && FileObject->FsContext &&
+            (SectionPageProtection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+        {
+            PFSRTL_COMMON_FCB_HEADER FcbHeader = FileObject->FsContext;
+            FcbHeader->Flags |= FSRTL_FLAG_USER_MAPPED_FILE;
+        }
     }
 #else
     else
@@ -6333,8 +6342,15 @@ MmCheckDirtySegment(
 
         if (!NT_SUCCESS(Status))
         {
-            /* Damn, this failed. Consider this page as still dirty */
-            DPRINT1("MiWritePage FAILED: Status 0x%08x!\n", Status);
+            /* Damn, this failed. Consider this page as still dirty. A file system refuses a lazy write of a
+             * user-mapped page past its valid data length on purpose (STATUS_FILE_LOCK_CONFLICT); do not log
+             * that expected one, but keep logging every other failure and real range-lock conflicts. */
+            PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject ? Segment->FileObject->FsContext : NULL;
+            if (Status != STATUS_FILE_LOCK_CONFLICT || FcbHeader == NULL ||
+                !FlagOn(FcbHeader->Flags, FSRTL_FLAG_USER_MAPPED_FILE))
+            {
+                DPRINT1("MiWritePage FAILED: Status 0x%08x!\n", Status);
+            }
             DirtyAgain = TRUE;
         }
         else
