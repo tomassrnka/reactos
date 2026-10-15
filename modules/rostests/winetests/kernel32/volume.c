@@ -1709,8 +1709,7 @@ static void test_GetVolumeInformationByHandle(void)
     }
 #endif
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: GetVolumeInformationByHandleW is a STUB on ReactOS! */
+#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600 && !defined(BUILD_WOW64_ENABLED) && !defined(SYSWOW64_GUEST)
     if (is_reactos() || !pGetVolumeInformationByHandleW)
 #else
     if (!pGetVolumeInformationByHandleW)

@@ -5,6 +5,9 @@ add_subdirectory(tlsdyn)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    Wow64RemoteThread.c
+    Wow64ThreadApc.c
+    Wow64Threads.c
     Wow64Environment.c
     BindIoCompletionCallback.c
     CancelIoEx.c
@@ -181,3 +184,8 @@ set_module_type(handlelist_gui win32gui ENTRYPOINT WinMainCRTStartup)
 add_importlibs(handlelist_gui kernel32)
 add_dependencies(kernel32_apitest handlelist_gui)
 add_rostests_file(TARGET handlelist_gui)
+spec2def(wow64_thread.dll wow64_thread.spec ADD_IMPORTLIB)
+add_library(wow64_thread MODULE wow64_thread.c ${CMAKE_CURRENT_BINARY_DIR}/wow64_thread.def)
+set_module_type(wow64_thread win32dll ENTRYPOINT DllMain 12)
+add_importlibs(wow64_thread kernel32)
+add_rostests_file(TARGET wow64_thread)

@@ -50,3 +50,36 @@ variables, installed Program Files values and native environment-block creation.
 Native calls without registry selectors are explicit controls; native i386
 continues to ignore selectors. The additional guest-thread limitation means
 these tests do not claim concurrent guest redirection-isolation coverage.
+
+## Stream sockets
+
+Build the explicit `wow64_socket` target for i386. Its default mode uses public
+Winsock interfaces and can also run on Windows: loopback bind/listen/connect,
+accept, getsockname, scatter/gather send, receive, nonblocking mode, FIONREAD,
+two-socket select, pending receive capture/completion, shutdown and EOF.
+
+The `--bind-abi` and `--afd-abi` modes exercise ReactOS's private AFD/TCP
+contracts and must only run on ReactOS. They check TDI handle replies, query
+context alignment, IOSB/buffer canaries, pending poll readiness, timeout and
+cancellation. WoW64-only malformed requests cover short outputs, invalid
+descriptor pointers and allocation-size overflow. Compare the same PE32
+fixture on native i386 and WoW64; their counts differ for these private checks.
+
+The `--http` mode requires QEMU user networking and a host loopback HTTP server
+on port 18463. Serve a page containing `Local HTTP page loaded.` and wait for
+guest DHCP before launching it. The fixture requires an HTTP 200 response,
+the page marker and EOF. All modes print a summary, return nonzero on failure
+and have a 15-second watchdog. These tests do not cover the remaining datagram,
+event-select or extended accept/connect translations.
+
+## System root-store lifetime
+
+The explicit PE32 `wow64_root_store` target opens the local-machine Root store,
+enumerates certificates and their SHA-1 properties, closes it with outstanding
+reference checking, and repeats three times. Run the executable twice in
+separate processes to cover both initial import and a populated registry cache.
+It requires an image with installed system root certificates and a registered
+cryptographic provider. On a runtime staged into the older WoW64 test image,
+register the guest `rsaenh.dll` first, as for the installer tests, and use the
+WIN7SP1 compatibility layer. An empty store is a failed prerequisite, not a
+passing lifetime test. Use the same executable on native i386 and WoW64.
