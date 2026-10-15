@@ -908,7 +908,7 @@ MiBuildPfnDatabaseFromPages(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                 Pfn1->u2.ShareCount++;
                 Pfn1->u3.e2.ReferenceCount = 1;
                 Pfn1->u3.e1.PageLocation = ActiveAndValid;
-                Pfn1->u3.e1.CacheAttribute = MiNonCached;
+                Pfn1->u3.e1.CacheAttribute = MiCached;
 #if MI_TRACE_PFNS
                 Pfn1->PfnUsage = MI_USAGE_INIT_MEMORY;
                 MI_SET_PFN_PROCESS_NAME(Pfn1, "Initial PDE");
@@ -955,7 +955,7 @@ MiBuildPfnDatabaseFromPages(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                                 Pfn2->u2.ShareCount++;
                                 Pfn2->u3.e2.ReferenceCount = 1;
                                 Pfn2->u3.e1.PageLocation = ActiveAndValid;
-                                Pfn2->u3.e1.CacheAttribute = MiNonCached;
+                                Pfn2->u3.e1.CacheAttribute = MiCached;
 #if MI_TRACE_PFNS
                                 Pfn2->PfnUsage = MI_USAGE_INIT_MEMORY;
                                 MI_SET_PFN_PROCESS_NAME(Pfn2, "Initial PTE");
@@ -1000,7 +1000,7 @@ MiBuildPfnDatabaseZeroPage(VOID)
         Pfn1->u2.ShareCount++;
         Pfn1->u3.e2.ReferenceCount = 0xFFF0;
         Pfn1->u3.e1.PageLocation = ActiveAndValid;
-        Pfn1->u3.e1.CacheAttribute = MiNonCached;
+        Pfn1->u3.e1.CacheAttribute = MiCached;
     }
 }
 
@@ -1076,7 +1076,6 @@ MiBuildPfnDatabaseFromLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                     if (!Pfn1->u3.e2.ReferenceCount)
                     {
                         /* Add it to the free list */
-                        Pfn1->u3.e1.CacheAttribute = MiNonCached;
                         MiInsertPageInFreeList(PageFrameIndex);
                     }
 
@@ -1116,7 +1115,7 @@ MiBuildPfnDatabaseFromLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                         Pfn1->u2.ShareCount++;
                         Pfn1->u3.e2.ReferenceCount = 1;
                         Pfn1->u3.e1.PageLocation = ActiveAndValid;
-                        Pfn1->u3.e1.CacheAttribute = MiNonCached;
+                        Pfn1->u3.e1.CacheAttribute = MiCached;
 #if MI_TRACE_PFNS
                         Pfn1->PfnUsage = MI_USAGE_BOOT_DRIVER;
 #endif
