@@ -444,6 +444,37 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return IoCallDriver(Vcb->StorageDevice, Irp);
 }
 
+/*
+ * PnP requests for the storage device under a mounted volume come to the volume device: the I/O
+ * manager sends them there through the VPB.  Each one goes on to the storage device, which must see
+ * them (a partition device deletes its links and interfaces at its removal).  A removal of the
+ * device first dismounts the volume (NgDismountForRemoval), so the mount writes nothing after it; a
+ * query for an orderly removal first writes back what is cached.  Handled before the dismounted and
+ * medium checks: a dismounted volume device still passes them on.
+ */
+static NTSTATUS NgPnp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PNG_VCB Vcb = DeviceObject->DeviceExtension;
+    UCHAR Minor = IoGetCurrentIrpStackLocation(Irp)->MinorFunction;
+
+    FsRtlEnterFileSystem();
+    if (Minor == IRP_MN_QUERY_REMOVE_DEVICE)
+    {
+        ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
+        if (!Vcb->Dismounted && !Vcb->RawWritten)
+            NgFlushVolume(Vcb);
+        ExReleaseResourceLite(&Vcb->CreateGate);
+    }
+    else if (Minor == IRP_MN_SURPRISE_REMOVAL || Minor == IRP_MN_REMOVE_DEVICE)
+    {
+        NgDismountForRemoval(Vcb);
+    }
+    FsRtlExitFileSystem();
+
+    IoSkipCurrentIrpStackLocation(Irp);
+    return IoCallDriver(Vcb->StorageDevice, Irp);
+}
+
 /* IRP_MJ_CLEANUP on a dismounted volume (from NgCleanup, which gave up the volume lock): only the handle's own state, the core is gone. */
 NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
 {
@@ -594,6 +625,10 @@ static NTSTATUS NTAPI NgDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ULONG_PTR Low;
     NTSTATUS Status;
     ULONGLONG T0 = __rdtsc();
+
+    /* Not a request of this file system: the storage device completes it (NgPnp). */
+    if (DeviceObject != NgGlobal.ControlDevice && Major == IRP_MJ_PNP)
+        return NgPnp(DeviceObject, Irp);
 
     Low = NgStackFill();
     FsRtlEnterFileSystem();

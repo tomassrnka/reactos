@@ -539,18 +539,16 @@ static BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
 #define NG_TAG_VPB ' BPV'
 
 /*
- * FSCTL_DISMOUNT_VOLUME through the handle that holds the volume lock (a busy volume is not
- * dismounted by force), or the end of a lock after a direct write (NgEndLock).  The volume is
- * flushed unless the lock holder already wrote the disk directly, the core is unmounted, and the
- * storage device gets a new VPB, so the next open mounts the volume again; the file objects of this
- * mount, the dismounting handle among them, keep the old one.  That handle still reads and writes
- * the disk directly until it unlocks (or dismounted at the end of the lock, not at all); every other
- * request on this mount fails with STATUS_VOLUME_DISMOUNTED.  Not for a volume with a paging file.
+ * Dismounts the volume, with the create gate held exclusive.  The volume is flushed unless the lock
+ * holder already wrote the disk directly, the core is unmounted, and the storage device gets a new
+ * VPB, so the next open mounts the volume again; the file objects of this mount keep the old one and
+ * every request on them fails with STATUS_VOLUME_DISMOUNTED (the lock holder's direct reads and
+ * writes aside, NgDismountedRequest).  Not for a volume with a paging file.  For a removal of the
+ * storage device (Removal) a flush that fails does not keep the volume mounted: what did not reach
+ * the disk is dropped, as the device goes away whatever this mount does.
  */
-static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
+static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal)
 {
-    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
-    PNG_CCB Ccb = FileObject ? FileObject->FsContext2 : NULL;
     PNG_FCB *List = NULL;
     ULONG Count = 0, Capacity, i;
     PLIST_ENTRY Entry;
@@ -558,10 +556,6 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     PVPB NewVpb;
     KIRQL Irql;
 
-    if (!Fcb || !Fcb->IsVolume || !Ccb)
-        return STATUS_INVALID_PARAMETER;
-    if (Vcb->LockedBy != FileObject)
-        return STATUS_ACCESS_DENIED;
     NewVpb = ExAllocatePoolWithTag(NonPagedPool, sizeof(VPB), NG_TAG_VPB);
     if (!NewVpb)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -586,12 +580,18 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     ExReleaseFastMutex(&Vcb->FcbListLock);
 
     /* A volume that cannot be flushed (a write or cache flush fails, or no memory to list its streams)
-     * stays mounted (and locked), as NgLockVolume does. */
+     * stays mounted (and locked), as NgLockVolume does; a removal goes on without what was not written. */
     Discard = Vcb->RawWritten;
     if (!Discard && !Vcb->ReadOnly && NgFlushVolume(Vcb))
     {
-        ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
-        return STATUS_UNEXPECTED_IO_ERROR;
+        if (!Removal)
+        {
+            ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
+            return STATUS_UNEXPECTED_IO_ERROR;
+        }
+        DPRINT1("ntfsng: volume %08lx: the flush before the removal failed: uncommitted changes are dropped\n",
+                Vcb->Vpb->SerialNumber);
+        Discard = TRUE;
     }
 
     /* Cached files lose their views; later paging I/O on them fails.  Every FCB is taken (the array is
@@ -688,8 +688,45 @@ static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     if (NewVpb)
         ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
     DPRINT1("ntfsng: volume %08lx dismounted%s\n", Vcb->Vpb->SerialNumber,
+            Removal ? " (its storage device is removed)" :
             Vcb->RawWritten ? " (written directly by the lock holder: mounted state dropped)" : "");
     return STATUS_SUCCESS;
+}
+
+/*
+ * FSCTL_DISMOUNT_VOLUME through the handle that holds the volume lock (a busy volume is not
+ * dismounted by force), or the end of a lock after a direct write (NgEndLock).  That handle still
+ * reads and writes the disk directly until it unlocks (or dismounted at the end of the lock, not at
+ * all).
+ */
+static NTSTATUS NgDismountVolumeGated(PNG_VCB Vcb, PFILE_OBJECT FileObject)
+{
+    PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
+    PNG_CCB Ccb = FileObject ? FileObject->FsContext2 : NULL;
+
+    if (!Fcb || !Fcb->IsVolume || !Ccb)
+        return STATUS_INVALID_PARAMETER;
+    if (Vcb->LockedBy != FileObject)
+        return STATUS_ACCESS_DENIED;
+    return NgDismountMount(Vcb, FALSE);
+}
+
+/*
+ * The storage device under the volume is being removed (IRP_MN_SURPRISE_REMOVAL, or
+ * IRP_MN_REMOVE_DEVICE without one before it): the volume is dismounted, open handles or not, so that
+ * nothing of this mount reaches the device after it is gone and a device that takes its place mounts
+ * afresh.  A volume with a paging file stays mounted.
+ */
+VOID NgDismountForRemoval(PNG_VCB Vcb)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ExAcquireResourceExclusiveLite(&Vcb->CreateGate, TRUE);
+    if (!Vcb->Dismounted)
+        Status = NgDismountMount(Vcb, TRUE);
+    ExReleaseResourceLite(&Vcb->CreateGate);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("ntfsng: volume %08lx: no dismount at the removal of its device: 0x%08lx\n", Vcb->Vpb->SerialNumber, Status);
 }
 
 /*

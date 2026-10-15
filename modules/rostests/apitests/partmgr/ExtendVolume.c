@@ -161,17 +161,14 @@ static HANDLE WritePattern(PCSTR Leaf, LONGLONG Bytes)
     return File;
 }
 
-static BOOL VerifyPattern(PCSTR Leaf, LONGLONG Bytes)
+/* Reads the pattern of WritePattern back through File (opened without buffering) and closes it. */
+static BOOL VerifyPatternIn(HANDLE File, PCSTR What, LONGLONG Bytes)
 {
-    CHAR Name[32];
     PULONG Buffer = VirtualAlloc(NULL, (SIZE_T)MiB, MEM_COMMIT, PAGE_READWRITE);    /* sector-aligned, for uncached reads */
     LONGLONG Done;
     DWORD Count, i;
-    HANDLE File;
     BOOL Ok = TRUE;
 
-    sprintf(Name, "%c:\\%s", Letter, Leaf);
-    File = CreateFileA(Name, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
     Ok = File != INVALID_HANDLE_VALUE && Buffer && GetFileSize(File, NULL) == (DWORD)Bytes;
     for (Done = 0; Ok && Done < Bytes; Done += MiB)
     {
@@ -179,12 +176,21 @@ static BOOL VerifyPattern(PCSTR Leaf, LONGLONG Bytes)
         for (i = 0; Ok && i < MiB / sizeof(ULONG); i++)
             Ok = Buffer[i] == (0x5A000000 ^ (ULONG)(Done / sizeof(ULONG) + i));
     }
-    ok(Ok, "%s differs at %I64d (%lu)\n", Name, Done, GetLastError());
+    ok(Ok, "%s differs at %I64d (%lu)\n", What, Done, GetLastError());
     if (File != INVALID_HANDLE_VALUE)
         CloseHandle(File);
     if (Buffer)
         VirtualFree(Buffer, 0, MEM_RELEASE);
     return Ok;
+}
+
+static BOOL VerifyPattern(PCSTR Leaf, LONGLONG Bytes)
+{
+    CHAR Name[32];
+
+    sprintf(Name, "%c:\\%s", Letter, Leaf);
+    return VerifyPatternIn(CreateFileA(Name, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL),
+                           Name, Bytes);
 }
 
 /* Dismounts the volume through *Volume (locked first) and opens it again: the next access mounts what is on
@@ -362,6 +368,128 @@ static void TestNtfsShrink(HANDLE Volume, ULONG Disk, PPARTITION_INFORMATION_EX 
     ok_int(Shrink(Volume, ShrinkAbort, 0, 0), ERROR_SUCCESS);
     NtfsData(Volume, &Data);
     ok(Data.NumberSectors.QuadPart == Sectors, "NumberSectors %I64d, was %I64d\n", Data.NumberSectors.QuadPart, Sectors);
+}
+
+/* The GUID path (with its trailing backslash) of the volume whose one extent is Length bytes at Offset on disk Disk. */
+static BOOL FindVolumeAt(ULONG Disk, LONGLONG Offset, LONGLONG Length, PWCHAR Guid, DWORD Count)
+{
+    union { VOLUME_DISK_EXTENTS Extents; BYTE Raw[512]; } Buffer;
+    WCHAR Device[MAX_PATH];
+    DWORD Returned;
+    HANDLE Find, Handle;
+    BOOL Found = FALSE;
+    SIZE_T Len;
+
+    Find = FindFirstVolumeW(Guid, Count);
+    if (Find == INVALID_HANDLE_VALUE)
+        return FALSE;
+    do
+    {
+        wcscpy(Device, Guid);
+        Len = wcslen(Device);
+        if (Len && Device[Len - 1] == L'\\')
+            Device[Len - 1] = 0;
+        Handle = CreateFileW(Device, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (Handle == INVALID_HANDLE_VALUE)
+            continue;
+        ZeroMemory(&Buffer, sizeof(Buffer));
+        Found = DeviceIoControl(Handle, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, NULL, 0, &Buffer, sizeof(Buffer), &Returned, NULL) &&
+                Buffer.Extents.NumberOfDiskExtents == 1 && Buffer.Extents.Extents[0].DiskNumber == Disk &&
+                Buffer.Extents.Extents[0].StartingOffset.QuadPart == Offset &&
+                Buffer.Extents.Extents[0].ExtentLength.QuadPart == Length;
+        CloseHandle(Handle);
+    } while (!Found && FindNextVolumeW(Find, Guid, Count));
+    FindVolumeClose(Find);
+    return Found;
+}
+
+/*
+ * After a shrink the partition table is written again with the smaller partition while the volume
+ * is mounted.  Windows Server 2008 R2 then removes the volume and makes it anew, without the drive
+ * letter it had (it gets the next free one), unlike a shrink through IOCTL_DISK_GROW_PARTITION,
+ * which keeps the volume (TestNtfsShrink).  The new volume holds the shrunk file system with its
+ * files.  On ReactOS the file system on the old partition device gives it up at the removal, and
+ * the removal reaches the partition manager.
+ */
+static void TestNtfsShrinkTable(HANDLE *Volume, ULONG Disk, PPARTITION_INFORMATION_EX Part)
+{
+    BYTE Buffer[8192];
+    PDRIVE_LAYOUT_INFORMATION_EX Layout = (PVOID)Buffer;
+    NTFS_VOLUME_DATA_BUFFER Data;
+    LONGLONG Target = 0, Start = Part->StartingOffset.QuadPart;
+    WCHAR Guid[MAX_PATH], Path[MAX_PATH];
+    DWORD Returned, i;
+    HANDLE File, Handle;
+    BOOL Found = FALSE, Back = FALSE;
+
+    File = WritePattern("table.bin", 4 * MiB);
+    if (File != INVALID_HANDLE_VALUE)
+        CloseHandle(File);
+    if (!NtfsData(*Volume, &Data))
+    {
+        ok(FALSE, "FSCTL_GET_NTFS_VOLUME_DATA failed: %lu\n", GetLastError());
+        return;
+    }
+    Target = Data.NumberSectors.QuadPart + 1 - 8 * 2048;
+    ok_int(Shrink(*Volume, ShrinkPrepare, Target, 0), ERROR_SUCCESS);
+    if (Shrink(*Volume, ShrinkCommit, 0, 0) != ERROR_SUCCESS)
+    {
+        ok(FALSE, "ShrinkCommit failed: %lu\n", GetLastError());
+        Shrink(*Volume, ShrinkAbort, 0, 0);
+        return;
+    }
+    ok(FlushFileBuffers(*Volume), "Flushing the volume failed: %lu\n", GetLastError());
+    CloseHandle(*Volume);
+    *Volume = INVALID_HANDLE_VALUE;
+
+    Handle = OpenDisk(Disk, GENERIC_READ | GENERIC_WRITE);
+    if (!DeviceIoControl(Handle, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, NULL, 0, Layout, sizeof(Buffer), &Returned, NULL))
+    {
+        ok(FALSE, "IOCTL_DISK_GET_DRIVE_LAYOUT_EX failed: %lu\n", GetLastError());
+        CloseHandle(Handle);
+        return;
+    }
+    for (i = 0; i < Layout->PartitionCount; i++)
+    {
+        Layout->PartitionEntry[i].RewritePartition = FALSE;
+        if (Layout->PartitionEntry[i].StartingOffset.QuadPart == Start && Layout->PartitionEntry[i].PartitionLength.QuadPart)
+        {
+            Layout->PartitionEntry[i].PartitionLength.QuadPart = Target * 512;
+            Layout->PartitionEntry[i].RewritePartition = TRUE;
+            Found = TRUE;
+        }
+    }
+    ok(Found, "No layout entry at %I64d\n", Start);
+    ok(DeviceIoControl(Handle, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, Layout,
+                       FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry[Layout->PartitionCount]),
+                       NULL, 0, &Returned, NULL),
+       "IOCTL_DISK_SET_DRIVE_LAYOUT_EX failed: %lu\n", GetLastError());
+    DeviceIoControl(Handle, IOCTL_DISK_UPDATE_PROPERTIES, NULL, 0, NULL, 0, &Returned, NULL);
+    CloseHandle(Handle);
+
+    /* The new volume may take a moment to appear. */
+    for (i = 0; i < 60 && !Back; i++)
+    {
+        Back = FindVolumeAt(Disk, Start, Target * 512, Guid, MAX_PATH);
+        if (!Back)
+            Sleep(500);
+    }
+    ok(Back, "No volume with a %I64d-byte partition at %I64d\n", Target * 512, Start);
+    if (!Back)
+        return;
+    wcscpy(Path, Guid);
+    Path[wcslen(Path) - 1] = 0;
+    Handle = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "The new volume does not open: %lu\n", GetLastError());
+    if (Handle == INVALID_HANDLE_VALUE)
+        return;
+    ok(NtfsData(Handle, &Data), "No NTFS on the new volume: %lu\n", GetLastError());
+    ok(Data.NumberSectors.QuadPart == Target - 1, "NumberSectors %I64d, expected %I64d\n", Data.NumberSectors.QuadPart, Target - 1);
+    CloseHandle(Handle);
+    wcscat(Guid, L"table.bin");
+    ok(VerifyPatternIn(CreateFileW(Guid, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL),
+                       "table.bin on the new volume", 4 * MiB),
+       "The file did not survive the new table\n");
 }
 
 /*
@@ -604,7 +732,10 @@ START_TEST(ExtendVolume)
         else if (GetEnvironmentVariableA("PARTMGR_TEST_HUGE", Value, sizeof(Value)) && is_reactos())
             TestNtfsHuge(Volume, Number.DeviceNumber, &Part);
         else if (TestNtfs(Volume, Number.DeviceNumber, &Part))
+        {
             TestNtfsShrink(Volume, Number.DeviceNumber, &Part);
+            TestNtfsShrinkTable(&Volume, Number.DeviceNumber, &Part);
+        }
         else
             skip("NTFS volume did not grow: no shrink tests\n");
     }
