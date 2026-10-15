@@ -237,36 +237,43 @@ TestPortExhaustion(void)
 }
 
 #define STRESS_THREADS 4
-#define STRESS_ROUNDS 1500
+#define STRESS_ROUNDS 5
+#define STRESS_HELD 300
 
 static volatile LONG StressFailures;
 
-/* Bind and close sockets as fast as possible: every bind adds an address file
-   and its TDI entity, every close removes them */
+/* Bind STRESS_HELD sockets, then close them, STRESS_ROUNDS times: every bind
+   adds an address file and its TDI entity, every close removes them, and the
+   threads together hold enough to make the entity list grow when this runs
+   first after a boot */
 static
 DWORD
 WINAPI
 BindCloseThread(LPVOID Parameter)
 {
+    SOCKET Held[STRESS_HELD];
     struct sockaddr_in Addr;
-    SOCKET Socket;
-    int i;
+    int i, Round, Count;
 
     UNREFERENCED_PARAMETER(Parameter);
-    for (i = 0; i < STRESS_ROUNDS; i++)
+    for (Round = 0; Round < STRESS_ROUNDS; Round++)
     {
-        Socket = socket(AF_INET, (i & 1) ? SOCK_DGRAM : SOCK_STREAM, 0);
-        if (Socket == INVALID_SOCKET)
+        for (Count = 0; Count < STRESS_HELD; Count++)
         {
-            InterlockedIncrement(&StressFailures);
-            continue;
+            Held[Count] = socket(AF_INET, (Count & 1) ? SOCK_DGRAM : SOCK_STREAM, 0);
+            if (Held[Count] == INVALID_SOCKET)
+            {
+                InterlockedIncrement(&StressFailures);
+                break;
+            }
+            ZeroMemory(&Addr, sizeof(Addr));
+            Addr.sin_family = AF_INET;
+            Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            if (bind(Held[Count], (struct sockaddr *)&Addr, sizeof(Addr)))
+                InterlockedIncrement(&StressFailures);
         }
-        ZeroMemory(&Addr, sizeof(Addr));
-        Addr.sin_family = AF_INET;
-        Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        if (bind(Socket, (struct sockaddr *)&Addr, sizeof(Addr)))
-            InterlockedIncrement(&StressFailures);
-        closesocket(Socket);
+        for (i = 0; i < Count; i++)
+            closesocket(Held[i]);
     }
     return 0;
 }
@@ -294,11 +301,13 @@ TestConcurrentEnumeration(void)
     StressFailures = 0;
     for (i = 0; i < STRESS_THREADS; i++)
     {
-        Threads[i] = CreateThread(NULL, 0, BindCloseThread, NULL, 0, NULL);
-        ok(Threads[i] != NULL, "CreateThread failed: %lu\n", GetLastError());
-        if (Threads[i])
+        Threads[Started] = CreateThread(NULL, 0, BindCloseThread, NULL, 0, NULL);
+        ok(Threads[Started] != NULL, "CreateThread failed: %lu\n", GetLastError());
+        if (Threads[Started])
             Started++;
     }
+    if (!Started)
+        goto Free;
     while (Running)
     {
         Size = 1 << 20;
@@ -314,8 +323,8 @@ TestConcurrentEnumeration(void)
     }
     for (i = 0; i < Started; i++)
         CloseHandle(Threads[i]);
-    trace("Concurrent: %d table reads while %d threads bound and closed %d sockets each\n",
-          Reads, (int)Started, STRESS_ROUNDS);
+    trace("Concurrent: %d table reads while %d threads bound and closed %d x %d sockets each\n",
+          Reads, (int)Started, STRESS_ROUNDS, STRESS_HELD);
     ok(StressFailures == 0, "%ld socket or bind calls failed\n", StressFailures);
     ok(BadReads == 0, "%d table reads failed\n", BadReads);
 
@@ -335,10 +344,11 @@ START_TEST(socketscale)
         skip("WSAStartup failed\n");
         return;
     }
+    /* First, while the entity list may still be small */
+    TestConcurrentEnumeration();
     TestScale();
     TestPortExhaustion();
     /* The stack is still usable after running out */
     TestScale();
-    TestConcurrentEnumeration();
     WSACleanup();
 }
