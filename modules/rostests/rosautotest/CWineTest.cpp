@@ -18,7 +18,7 @@ static const DWORD ProcessActivityTimeout = 170000;
  * Constructs a CWineTest object.
  */
 CWineTest::CWineTest()
-    : m_hFind(NULL), m_ListBuffer(NULL)
+    : m_hFind(NULL), m_ListBuffer(NULL), m_SingleFile(false)
 {
     WCHAR wszDirectory[MAX_PATH];
 
@@ -102,8 +102,11 @@ CWineTest::GetNextFile()
         else
         {
             /* Check for 'special' tests (e.g. "kmtest") or full test name ("ntdll_winetest") */
-            if (Module.substr(Module.length() - 4, 4) == L"test")
+            if (Module.length() >= 4 && Module.substr(Module.length() - 4, 4) == L"test")
             {
+                /* A pattern ("*test", "kernel32_*test") can match several programs */
+                m_SingleFile = (Module.find_first_of(L"*?") == wstring::npos);
+
                 /* Search for files with the pattern "modulename.exe" */
                 FindPath += Configuration.GetModule();
                 FindPath += L".exe";
@@ -260,6 +263,40 @@ CWineTest::GetNextTest()
 }
 
 /**
+ * Builds the information for running m_CurrentTest of m_CurrentFile.
+ */
+CTestInfo*
+CWineTest::MakeTestInfo()
+{
+    auto_ptr<CTestInfo> TestInfo(new CTestInfo());
+    size_t UnderscorePosition;
+
+    /* Build the command line */
+    TestInfo->CommandLine = m_TestPath;
+    TestInfo->CommandLine += m_CurrentFile;
+    TestInfo->CommandLine += ' ';
+    TestInfo->CommandLine += AsciiToUnicode(m_CurrentTest);
+
+    /* Store the Module name */
+    UnderscorePosition = m_CurrentFile.find_last_of('_');
+
+    if(UnderscorePosition == m_CurrentFile.npos)
+    {
+        /* Use the entire name (without .exe extendion) */
+        UnderscorePosition = m_CurrentFile.find_first_of('.');
+        if(UnderscorePosition == m_CurrentFile.npos)
+            UnderscorePosition = m_CurrentFile.length();
+    }
+
+    TestInfo->Module = UnicodeToAscii(m_CurrentFile.substr(0, UnderscorePosition));
+
+    /* Store the test */
+    TestInfo->Test = m_CurrentTest;
+
+    return TestInfo.release();
+}
+
+/**
  * Interface to CTestList-derived classes for getting all information about the next test to be run.
  *
  * @return
@@ -280,6 +317,19 @@ CWineTest::GetNextTestInfo()
             continue;
         }
 
+        /* A test named for a module that names one test program runs without
+           asking the program's --list, which leaves out hidden tests such as
+           kmtest's "-" entries; the program reports a name it does not know */
+        if(!Configuration.GetTest().empty() && m_SingleFile)
+        {
+            CTestInfo* TestInfo;
+
+            m_CurrentTest = Configuration.GetTest();
+            TestInfo = MakeTestInfo();
+            m_CurrentFile.clear();
+            return TestInfo;
+        }
+
         try
         {
             while(GetNextTest())
@@ -288,34 +338,7 @@ CWineTest::GetNextTestInfo()
                 if(!Configuration.GetTest().empty() && Configuration.GetTest() != m_CurrentTest)
                     continue;
 
-                {
-                    auto_ptr<CTestInfo> TestInfo(new CTestInfo());
-                    size_t UnderscorePosition;
-
-                    /* Build the command line */
-                    TestInfo->CommandLine = m_TestPath;
-                    TestInfo->CommandLine += m_CurrentFile;
-                    TestInfo->CommandLine += ' ';
-                    TestInfo->CommandLine += AsciiToUnicode(m_CurrentTest);
-
-                    /* Store the Module name */
-                    UnderscorePosition = m_CurrentFile.find_last_of('_');
-
-                    if(UnderscorePosition == m_CurrentFile.npos)
-                    {
-                        /* Use the entire name (without .exe extendion) */
-                        UnderscorePosition = m_CurrentFile.find_first_of('.');
-                        if(UnderscorePosition == m_CurrentFile.npos)
-                            UnderscorePosition = m_CurrentFile.length();
-                    }
-
-                    TestInfo->Module = UnicodeToAscii(m_CurrentFile.substr(0, UnderscorePosition));
-
-                    /* Store the test */
-                    TestInfo->Test = m_CurrentTest;
-
-                    return TestInfo.release();
-                }
+                return MakeTestInfo();
             }
         }
         catch(CTestException& e)
