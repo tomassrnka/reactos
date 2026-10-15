@@ -40,6 +40,7 @@ STRINGTABLE
 / : < > |"
     IDS_PATHNOTEXISTING     "La ruta no existe"
     IDS_FILENOTEXISTING     "El archivo no existe"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "La selección contiene algún elemento que no es una carpeta"
 }
 

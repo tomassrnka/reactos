@@ -34,6 +34,7 @@ STRINGTABLE
 / : < > |"
     IDS_PATHNOTEXISTING     "Пътят не съществува"
     IDS_FILENOTEXISTING     "Файлът не съществува"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 

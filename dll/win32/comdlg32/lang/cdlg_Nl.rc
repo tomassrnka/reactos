@@ -34,6 +34,7 @@ Wilt u het vervangen?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Het pad bestaat niet"
     IDS_FILENOTEXISTING     "Kan het bestand niet vinden"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 

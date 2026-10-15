@@ -736,40 +736,72 @@ static BOOL COMDLG32_GetDisplayNameOf(LPCITEMIDLIST pidl, LPWSTR pwszPath) {
  * COMDLG32_GetCanonicalPath [internal]
  *
  * Helper function to get the canonical path.
+ * lpstrPathAndFile holds MAX_PATH characters; it is empty and the result is FALSE
+ * when the folder and the file do not fit.
  */
-void COMDLG32_GetCanonicalPath(PCIDLIST_ABSOLUTE pidlAbsCurrent,
-                               LPWSTR lpstrFile, LPWSTR lpstrPathAndFile)
+BOOL COMDLG32_GetCanonicalPath(PCIDLIST_ABSOLUTE pidlAbsCurrent,
+                               LPCWSTR lpstrFile, LPWSTR lpstrPathAndFile)
 {
   WCHAR lpstrTemp[MAX_PATH];
+  UINT cchFolder, cchFile = lstrlenW(lpstrFile);
+  BOOL bRelative = PathIsRelativeW(lpstrFile), bFolder = TRUE;
+
+  lpstrPathAndFile[0] = UNICODE_NULL;
 
   /* Get the current directory name */
   if (!COMDLG32_GetDisplayNameOf(pidlAbsCurrent, lpstrPathAndFile))
   {
     /* last fallback */
-    GetCurrentDirectoryW(MAX_PATH, lpstrPathAndFile);
+    cchFolder = GetCurrentDirectoryW(MAX_PATH, lpstrPathAndFile);
+    if (!cchFolder || cchFolder >= MAX_PATH)
+    {
+      lpstrPathAndFile[0] = UNICODE_NULL;
+      bFolder = FALSE;
+    }
   }
-  PathAddBackslashW(lpstrPathAndFile);
+  cchFolder = lstrlenW(lpstrPathAndFile);
 
-  TRACE("current directory=%s, file=%s\n", debugstr_w(lpstrPathAndFile), debugstr_w(lpstrFile));
-
-  /* if the user specified a fully qualified path use it */
-  if(PathIsRelativeW(lpstrFile))
+  /* if the user specified a fully qualified path use it; the folder only
+   * matters for a relative name and for the drive of a path without one */
+  if(bRelative)
   {
+    /* room for the backslash */
+    if (!bFolder || cchFolder + 1 >= MAX_PATH)
+      goto fail;
+    PathAddBackslashW(lpstrPathAndFile);
+    cchFolder = lstrlenW(lpstrPathAndFile);
+    if (cchFolder + cchFile >= MAX_PATH)
+      goto fail;
     lstrcatW(lpstrPathAndFile, lpstrFile);
   }
   else
   {
     /* does the path have a drive letter? */
-    if (PathGetDriveNumberW(lpstrFile) == -1)
+    if (PathGetDriveNumberW(lpstrFile) == -1 && cchFolder >= 2)
+    {
+      if (2 + cchFile >= MAX_PATH)
+        goto fail;
       lstrcpyW(lpstrPathAndFile+2, lpstrFile);
+    }
     else
+    {
+      if (cchFile >= MAX_PATH)
+        goto fail;
       lstrcpyW(lpstrPathAndFile, lpstrFile);
+    }
   }
+  TRACE("current directory=%s, file=%s\n", debugstr_w(lpstrPathAndFile), debugstr_w(lpstrFile));
 
   /* resolve "." and ".." */
-  PathCanonicalizeW(lpstrTemp, lpstrPathAndFile );
-  lstrcpyW(lpstrPathAndFile, lpstrTemp);
+  lpstrTemp[0] = UNICODE_NULL;
+  if (PathCanonicalizeW(lpstrTemp, lpstrPathAndFile))
+    lstrcpyW(lpstrPathAndFile, lpstrTemp);
   TRACE("canon=%s\n", debugstr_w(lpstrPathAndFile));
+  return TRUE;
+
+fail:
+  lpstrPathAndFile[0] = UNICODE_NULL;
+  return FALSE;
 }
 
 /***********************************************************************
@@ -1653,6 +1685,17 @@ static inline BOOL filename_is_edit( const FileOpenDlgInfos *info )
         (info->ofnInfos->Flags & (OFN_ENABLEHOOK | OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE));
 }
 
+#ifdef __REACTOS__
+static void FILEDLG95_SelectFileName(FileOpenDlgInfos *fodInfos)
+{
+  HWND hwndEdit = fodInfos->DlgInfos.hwndFileName;
+
+  if (!filename_is_edit(fodInfos))
+    hwndEdit = (HWND)SendMessageW(hwndEdit, CBEM_GETEDITCONTROL, 0, 0);
+  SendMessageW(hwndEdit, EM_SETSEL, 0, -1);
+}
+#endif
+
 /***********************************************************************
  *      FILEDLG95_InitControls
  *
@@ -2355,6 +2398,27 @@ BOOL FILEDLG95_OnOpenMultipleFiles(HWND hwnd, LPWSTR lpstrFileList, UINT nFileCo
 
   COMDLG32_GetDisplayNameOf( fodInfos->ShellInfos.pidlAbsCurrent, lpstrPathSpec );
 
+#ifdef __REACTOS__
+  /* every path must fit the buffers of the callees: the folder, a backslash and the name */
+  {
+    LPCWSTR lpstrName = lpstrFileList;
+    UINT cchFolder = lstrlenW(lpstrPathSpec);
+
+    for ( nCount = 0; nCount < nFileCount; nCount++ )
+    {
+      UINT cchName = lstrlenW(lpstrName);
+
+      if (cchFolder + 1 + cchName >= MAX_PATH)
+      {
+        FILEDLG95_OnPathTooLong(hwnd, lpstrFileList, nFileCount);
+        FILEDLG95_SelectFileName(fodInfos);
+        return FALSE;
+      }
+      lpstrName += cchName + 1;
+    }
+  }
+#endif
+
   if ( !(fodInfos->ofnInfos->Flags & OFN_NOVALIDATE) &&
       ( fodInfos->ofnInfos->Flags & OFN_FILEMUSTEXIST) &&
        ! ( fodInfos->DlgInfos.dwDlgProp & FODPROP_SAVEDLG ) )
@@ -2370,11 +2434,20 @@ BOOL FILEDLG95_OnOpenMultipleFiles(HWND hwnd, LPWSTR lpstrFileList, UINT nFileCo
       {
         WCHAR lpstrNotFound[100];
         WCHAR lpstrMsg[100];
+#ifdef __REACTOS__
+        LPWSTR tmp;
+#else
         WCHAR tmp[400];
+#endif
 
         LoadStringW(COMDLG32_hInstance, IDS_FILENOTFOUND, lpstrNotFound, 100);
         LoadStringW(COMDLG32_hInstance, IDS_VERIFYFILE, lpstrMsg, 100);
 
+#ifdef __REACTOS__
+        tmp = heap_alloc((lstrlenW(lpstrTemp) + lstrlenW(lpstrNotFound) + lstrlenW(lpstrMsg) + 3) * sizeof(WCHAR));
+        if (!tmp)
+          return FALSE;
+#endif
         lstrcpyW(tmp, lpstrTemp);
         lstrcatW(tmp, L"\n");
         lstrcatW(tmp, lpstrNotFound);
@@ -2382,6 +2455,9 @@ BOOL FILEDLG95_OnOpenMultipleFiles(HWND hwnd, LPWSTR lpstrFileList, UINT nFileCo
         lstrcatW(tmp, lpstrMsg);
 
         MessageBoxW(hwnd, tmp, fodInfos->title, MB_OK | MB_ICONEXCLAMATION);
+#ifdef __REACTOS__
+        heap_free(tmp);
+#endif
         return FALSE;
       }
 
@@ -2399,6 +2475,31 @@ BOOL FILEDLG95_OnOpenMultipleFiles(HWND hwnd, LPWSTR lpstrFileList, UINT nFileCo
        filenames have to be used! */
     FIXME("Components have to be separated by blanks\n");
   }
+#ifdef __REACTOS__
+  {
+    /* The buffer of an A function is counted in bytes of the code page */
+    LPVOID lpstrFileBuf = fodInfos->unicode ? (LPVOID)fodInfos->ofnInfos->lpstrFile : (LPVOID)((LPOPENFILENAMEA)fodInfos->ofnInfos)->lpstrFile;
+    DWORD cNeeded = nSizePath + sizeUsed;
+
+    if (!fodInfos->unicode)
+    {
+      int cbPath = WideCharToMultiByte(CP_ACP, 0, lpstrPathSpec, -1, NULL, 0, NULL, NULL);
+      int cbList = WideCharToMultiByte(CP_ACP, 0, lpstrFileList, sizeUsed, NULL, 0, NULL, NULL);
+
+      cNeeded = (cbPath > 0 && cbList > 0) ? cbPath + cbList : MAXDWORD / 2;
+    }
+    if (!lpstrFileBuf || cNeeded > fodInfos->ofnInfos->nMaxFile)
+    {
+      /* return needed size in first two bytes of lpstrFile, like the single file case */
+      if (lpstrFileBuf && fodInfos->ofnInfos->nMaxFile >= sizeof(WORD))
+        *(WORD *)lpstrFileBuf = (WORD)min(cNeeded, 0xFFFF);
+      FILEDLG95_Clean(hwnd);
+      EndDialog(hwnd, FALSE);
+      COMDLG32_SetCommDlgExtendedError(FNERR_BUFFERTOOSMALL);
+      return FALSE;
+    }
+  }
+#endif
   if(fodInfos->unicode)
   {
     LPOPENFILENAMEW ofn = fodInfos->ofnInfos;
@@ -2863,6 +2964,54 @@ void FILEDLG95_OnOpenMessage(HWND hwnd, int idCaption, int idText)
 }
 
 #ifdef __REACTOS__
+/* Shows the typed names, cut to a line each, then the sentence; lpstrNames is a list of nNames strings */
+void FILEDLG95_OnPathTooLong(HWND hwnd, LPCWSTR lpstrNames, UINT nNames)
+{
+  const UINT cchLine = 100, nMaxLines = 8;
+  WCHAR strTitle[128], strSentence[256];
+  UINT nShown = min(nNames, nMaxLines), i;
+  LPWSTR pszText, pch;
+
+  GetWindowTextW(hwnd, strTitle, ARRAY_SIZE(strTitle));
+  if (!LoadStringW(COMDLG32_hInstance, IDS_PATHTOOLONG, strSentence, ARRAY_SIZE(strSentence)))
+    return;
+  pszText = heap_alloc((nShown * (cchLine + 6) + 4 + lstrlenW(strSentence) + 1) * sizeof(WCHAR));
+  if (!pszText)
+    return;
+
+  pch = pszText;
+  for (i = 0; i < nShown; i++)
+  {
+    UINT cch = lstrlenW(lpstrNames), cchShown = min(cch, cchLine);
+
+    if (nNames > 1)
+      *pch++ = L'"';
+    memcpy(pch, lpstrNames, cchShown * sizeof(WCHAR));
+    pch += cchShown;
+    if (cch > cchLine)
+    {
+      *pch++ = L'.';
+      *pch++ = L'.';
+      *pch++ = L'.';
+    }
+    if (nNames > 1)
+      *pch++ = L'"';
+    *pch++ = L'\n';
+    lpstrNames += cch + 1;
+  }
+  if (nShown < nNames)
+  {
+    lstrcpyW(pch, L"...\n");
+    pch += 4;
+  }
+  lstrcpyW(pch, strSentence);
+
+  MessageBoxW(hwnd, pszText, strTitle, MB_OK | MB_ICONEXCLAMATION);
+  heap_free(pszText);
+}
+#endif
+
+#ifdef __REACTOS__
 /* The return value needs LocalFree */
 static LPWSTR FILEDLG95_GetFallbackExtension(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile,
                                              BOOL *pbFromFilter)
@@ -2906,8 +3055,9 @@ static LPWSTR FILEDLG95_GetFallbackExtension(FileOpenDlgInfos *fodInfos, LPWSTR 
     return the_ext;
 }
 
+/* lpstrPathAndFile holds MAX_PATH characters; *pbNoRoom is set when the extension does not fit */
 static BOOL
-FILEDLG95_AddDotExtIfNeeded(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile)
+FILEDLG95_AddDotExtIfNeeded(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile, BOOL *pbNoRoom)
 {
     BOOL ret = FALSE;
     LPWSTR ext = PathFindExtensionW(lpstrPathAndFile);
@@ -2920,8 +3070,14 @@ FILEDLG95_AddDotExtIfNeeded(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile)
     if (the_ext && *the_ext &&
         (*ext == UNICODE_NULL || (bFromFilter && lstrcmpiW(ext + 1, the_ext) != 0)))
     {
-        if (strlenW(lpstrPathAndFile) + 1 + strlenW(the_ext) + 1 <=
-            fodInfos->ofnInfos->nMaxFile)
+        SIZE_T cchNeeded = strlenW(lpstrPathAndFile) + 1 + strlenW(the_ext) + 1;
+
+        if (cchNeeded > MAX_PATH)
+        {
+            if (pbNoRoom)
+                *pbNoRoom = TRUE;
+        }
+        else
         {
             /* Make the extension lowercase */
             CharLowerW(the_ext);
@@ -3082,7 +3238,7 @@ int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
                 if( (flags & OFN_FILEMUSTEXIST) && !isSaveDlg )
                 {
 #ifdef __REACTOS__
-                    FILEDLG95_AddDotExtIfNeeded(fodInfos, lpstrPathAndFile);
+                    FILEDLG95_AddDotExtIfNeeded(fodInfos, lpstrPathAndFile, NULL);
                     if (!PathFileExistsW(lpstrPathAndFile))
                     {
                         FILEDLG95_OnOpenMessage(hwnd, 0, IDS_FILENOTEXISTING);
@@ -3156,7 +3312,18 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
   - the edit box contains ".." (or a path with ".." in it)
 */
 
+#ifdef __REACTOS__
+  if (!COMDLG32_GetCanonicalPath(fodInfos->ShellInfos.pidlAbsCurrent, lpstrFileList, lpstrPathAndFile))
+  {
+      FILEDLG95_OnPathTooLong(hwnd, lpstrFileList, 1);
+      heap_free(lpstrFileList);
+      FILEDLG95_SelectFileName(fodInfos);
+      ret = FALSE;
+      goto ret;
+  }
+#else
   COMDLG32_GetCanonicalPath(fodInfos->ShellInfos.pidlAbsCurrent, lpstrFileList, lpstrPathAndFile);
+#endif
   heap_free(lpstrFileList);
 
 /*
@@ -3258,7 +3425,10 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
     case ONOPEN_OPEN:   /* fill in the return struct and close the dialog */
       TRACE("ONOPEN_OPEN %s\n", debugstr_w(lpstrPathAndFile));
       {
-#ifndef __REACTOS__
+#ifdef __REACTOS__
+        BOOL bNoRoom = FALSE;
+        DWORD cchNeeded;
+#else
         WCHAR *ext = NULL;
 #endif
 
@@ -3271,7 +3441,14 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
         /* Attach the file extension with file name*/
 #ifdef __REACTOS__
         /* Add extension if necessary */
-        FILEDLG95_AddDotExtIfNeeded(fodInfos, lpstrPathAndFile);
+        FILEDLG95_AddDotExtIfNeeded(fodInfos, lpstrPathAndFile, &bNoRoom);
+        if (bNoRoom)
+        {
+          FILEDLG95_OnPathTooLong(hwnd, PathFindFileNameW(lpstrPathAndFile), 1);
+          FILEDLG95_SelectFileName(fodInfos);
+          ret = FALSE;
+          goto ret;
+        }
         /* update dialog data */
         SetWindowTextW(fodInfos->DlgInfos.hwndFileName, PathFindFileNameW(lpstrPathAndFile));
 #else /* __REACTOS__ */
@@ -3388,8 +3565,22 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
 
         /* Check that the size of the file does not exceed buffer size.
              (Allow for extra \0 if OFN_MULTISELECT is set.) */
+#ifdef __REACTOS__
+        /* The buffer of an A function is counted in bytes of the code page, the path in characters */
+        if(fodInfos->unicode)
+          cchNeeded = lstrlenW(lpstrPathAndFile) + 1;
+        else
+        {
+          int cbNeeded = WideCharToMultiByte(CP_ACP, 0, lpstrPathAndFile, -1, NULL, 0, NULL, NULL);
+          cchNeeded = cbNeeded > 0 ? cbNeeded : MAXDWORD / 2;
+        }
+        if (fodInfos->ofnInfos->Flags & OFN_ALLOWMULTISELECT)
+          cchNeeded++;
+        if(cchNeeded <= fodInfos->ofnInfos->nMaxFile)
+#else
         if(lstrlenW(lpstrPathAndFile) < fodInfos->ofnInfos->nMaxFile -
             ((fodInfos->ofnInfos->Flags & OFN_ALLOWMULTISELECT) ? 1 : 0))
+#endif
         {
 
           /* fill destination buffer */
@@ -3429,6 +3620,25 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
           else
           {
               LPSTR lpszTemp;
+#ifdef __REACTOS__
+              /* the path in the code page can be longer than MAX_PATH bytes */
+              LPSTR tempFileA = heap_alloc(cchNeeded + 1);
+
+              if (tempFileA && WideCharToMultiByte(CP_ACP, 0, lpstrPathAndFile, -1,
+                                                   tempFileA, cchNeeded + 1, NULL, NULL) > 0)
+              {
+                  lpszTemp = PathFindFileNameA(tempFileA);
+                  fodInfos->ofnInfos->nFileOffset = (lpszTemp - tempFileA);
+                  lpszTemp = PathFindExtensionA(tempFileA);
+                  fodInfos->ofnInfos->nFileExtension = (*lpszTemp) ? (lpszTemp - tempFileA) + 1 : 0;
+              }
+              else
+              {
+                  fodInfos->ofnInfos->nFileOffset = 0;
+                  fodInfos->ofnInfos->nFileExtension = 0;
+              }
+              heap_free(tempFileA);
+#else
               CHAR tempFileA[MAX_PATH];
 
               /* avoid using fodInfos->ofnInfos->lpstrFile since it can be NULL */
@@ -3442,6 +3652,7 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
               /* set extension offset */
               lpszTemp = PathFindExtensionA(tempFileA);
               fodInfos->ofnInfos->nFileExtension = (*lpszTemp) ? (lpszTemp - tempFileA) + 1 : 0;
+#endif
           }
 
 #ifdef __REACTOS__
@@ -3495,9 +3706,13 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
         {
           WORD size;
 
+#ifdef __REACTOS__
+          size = (WORD)min(cchNeeded, 0xFFFF);
+#else
           size = lstrlenW(lpstrPathAndFile) + 1;
           if (fodInfos->ofnInfos->Flags & OFN_ALLOWMULTISELECT)
              size += 1;
+#endif
           /* return needed size in first two bytes of lpstrFile */
           if(fodInfos->ofnInfos->lpstrFile)
               *(WORD *)fodInfos->ofnInfos->lpstrFile = size;

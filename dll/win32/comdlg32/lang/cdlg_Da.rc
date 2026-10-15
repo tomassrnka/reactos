@@ -34,6 +34,7 @@ Vil du erstatte den?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Stien eksisterer ikke."
     IDS_FILENOTEXISTING     "Filen eksisterer ikke."
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 

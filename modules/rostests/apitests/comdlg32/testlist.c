@@ -11,11 +11,13 @@
 extern void func_PrintDlg(void);
 extern void func_SaveDialogDefExt(void);
 extern void func_SaveDialogFolder(void);
+extern void func_SaveDialogLongName(void);
 
 const struct test winetest_testlist[] =
 {
     { "PrintDlg", func_PrintDlg },
     { "SaveDialogDefExt", func_SaveDialogDefExt },
     { "SaveDialogFolder", func_SaveDialogFolder },
+    { "SaveDialogLongName", func_SaveDialogLongName },
     { 0, 0 }
 };

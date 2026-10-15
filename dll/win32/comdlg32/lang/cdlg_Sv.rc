@@ -34,6 +34,7 @@ Vill du ersätta den?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Sökvägen finns inte"
     IDS_FILENOTEXISTING     "Filen finns inte"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 
