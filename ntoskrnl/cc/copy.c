@@ -880,14 +880,6 @@ CcZeroData (
         return TRUE;
     }
 
-    /* See if we should simply truncate the valid data length */
-    if ((StartOffset->QuadPart < SharedCacheMap->ValidDataLength.QuadPart) && (EndOffset->QuadPart >= SharedCacheMap->ValidDataLength.QuadPart))
-    {
-        DPRINT1("Truncating VDL.\n");
-        SharedCacheMap->ValidDataLength = *StartOffset;
-        return TRUE;
-    }
-
     ASSERT(EndOffset->QuadPart <= SharedCacheMap->SectionSize.QuadPart);
 
     while(WriteOffset.QuadPart < EndOffset->QuadPart)
@@ -904,12 +896,33 @@ CcZeroData (
 
         _SEH2_TRY
         {
-            if (!CcRosEnsureVacbResident(Vacb, Wait, FALSE, VacbOffset, VacbLength, FALSE))
+            ULONG Done;
+
+            /* Without waiting only resident pages can be handled, and those are kept as they are */
+            if (!Wait && !MmIsDataSectionResident(FileObject->SectionObjectPointer,
+                                                  Vacb->FileOffset.QuadPart + VacbOffset,
+                                                  VacbLength))
             {
                 return FALSE;
             }
 
-            RtlZeroMemory((PVOID)((ULONG_PTR)Vacb->BaseAddress + VacbOffset), VacbLength);
+            /* A resident page holds the file's data there, possibly written through a view past the valid data
+             * length: keep it, zero only pages brought in. The whole range is made dirty below either way */
+            for (Done = 0; Done < VacbLength; )
+            {
+                ULONG PageOffset = VacbOffset + Done;
+                ULONG Chunk = min(VacbLength - Done, PAGE_SIZE - (PageOffset % PAGE_SIZE));
+
+                if (!MmIsDataSectionResident(FileObject->SectionObjectPointer,
+                                             Vacb->FileOffset.QuadPart + PageOffset,
+                                             Chunk))
+                {
+                    CcRosEnsureVacbResident(Vacb, TRUE, FALSE, PageOffset, Chunk, FALSE);
+                    RtlZeroMemory((PVOID)((ULONG_PTR)Vacb->BaseAddress + PageOffset), Chunk);
+                }
+
+                Done += Chunk;
+            }
 
             WriteOffset.QuadPart += VacbLength;
             Length -= VacbLength;
