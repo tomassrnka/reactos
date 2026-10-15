@@ -653,6 +653,40 @@ static void test_mouse_delivery(void)
         ok(mouse_event_at(i)->usButtonFlags == RI_MOUSE_HWHEEL && mouse_event_at(i)->usButtonData == 0xff88,
            "flags %x data %x\n", mouse_event_at(i)->usButtonFlags, mouse_event_at(i)->usButtonData);
 
+    /* the distance is clamped to 16 bits, a distance of zero still makes a record (no legacy message),
+       and a call that asks for two uses of mouseData (the wheels, the X buttons) makes a record without them */
+    {
+        static const struct { DWORD flags; DWORD data; USHORT expectFlags; USHORT expectData; } wheels[] =
+        {
+            { MOUSEEVENTF_HWHEEL, 0x8000, RI_MOUSE_HWHEEL, 0x7fff },
+            { MOUSEEVENTF_HWHEEL, 0xFFFF8000, RI_MOUSE_HWHEEL, 0x8000 },
+            { MOUSEEVENTF_HWHEEL, 0x00010078, RI_MOUSE_HWHEEL, 0x7fff },
+            { MOUSEEVENTF_WHEEL, 0x8000, RI_MOUSE_WHEEL, 0x7fff },
+            { MOUSEEVENTF_WHEEL, 0x00010078, RI_MOUSE_WHEEL, 0x7fff },
+            { MOUSEEVENTF_WHEEL, 0, RI_MOUSE_WHEEL, 0 },
+            { MOUSEEVENTF_HWHEEL, 0, RI_MOUSE_HWHEEL, 0 },
+            { MOUSEEVENTF_WHEEL | MOUSEEVENTF_HWHEEL, 120, 0, 0 },
+            { MOUSEEVENTF_XDOWN | MOUSEEVENTF_WHEEL, 120, 0, 0 },
+            { MOUSEEVENTF_XDOWN | MOUSEEVENTF_HWHEEL, XBUTTON1, 0, 0 },
+        };
+        UINT t;
+
+        for (t = 0; t < ARRAYSIZE(wheels); t++)
+        {
+            log_reset();
+            mouse_event(wheels[t].flags, 0, 0, wheels[t].data, 0);
+            pump(100);
+            ok(count_msg(WM_INPUT) == 1, "wheel test %u: %d WM_INPUT messages\n", t, count_msg(WM_INPUT));
+            i = find_msg(WM_INPUT, 0);
+            if (i >= 0)
+                ok(mouse_event_at(i)->usButtonFlags == wheels[t].expectFlags && mouse_event_at(i)->usButtonData == wheels[t].expectData,
+                   "wheel test %u: flags %x data %x, expected %x and %x\n", t, mouse_event_at(i)->usButtonFlags,
+                   mouse_event_at(i)->usButtonData, wheels[t].expectFlags, wheels[t].expectData);
+            if (!wheels[t].data || wheels[t].expectFlags == 0)
+                ok(count_msg(WM_MOUSEWHEEL) == 0 && count_msg(0x020E) == 0, "wheel test %u: legacy wheel message\n", t);
+        }
+    }
+
     /* a move with a button is one packet, the legacy messages stay */
     log_reset();
     mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN, 2, 2, 0, 0);
