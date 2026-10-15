@@ -659,6 +659,56 @@ static BOOL msi_has_server2003_layer(void)
     return FALSE;
 }
 
+#ifdef __REACTOS__
+static const struct { const WCHAR *name; int user, common; } context_folders[] =
+{
+    { L"StartMenuFolder", CSIDL_STARTMENU, CSIDL_COMMON_STARTMENU },
+    { L"StartupFolder", CSIDL_STARTUP, CSIDL_COMMON_STARTUP },
+    { L"TemplateFolder", CSIDL_TEMPLATES, CSIDL_COMMON_TEMPLATES },
+    { L"DesktopFolder", CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY },
+    { L"ProgramMenuFolder", CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS },
+    { L"AdminToolsFolder", CSIDL_ADMINTOOLS, CSIDL_COMMON_ADMINTOOLS },
+};
+
+static void get_context_folder( int csidl, WCHAR *path )
+{
+    path[0] = 0;
+    SHGetFolderPathW( NULL, csidl, NULL, 0, path );
+    lstrcatW( path, L"\\" );
+}
+
+/* The folders that follow ALLUSERS. Windows picks them when the package is opened. When the command line of an
+   installation has changed ALLUSERS since, the ones that still hold the default of the old choice follow it;
+   a folder that a transform, the command line or the UI set to something else is left alone. */
+void msi_set_context_folders( MSIPACKAGE *package )
+{
+    BOOL common = msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 1;
+    WCHAR path[MAX_PATH], old[MAX_PATH], *cur;
+    unsigned int i;
+
+    if (package->folders_chosen && package->folders_common == common) return;
+
+    for (i = 0; i < ARRAY_SIZE(context_folders); i++)
+    {
+        if (package->folders_chosen)
+        {
+            get_context_folder( package->folders_common ? context_folders[i].common : context_folders[i].user, old );
+            cur = msi_dup_property( package->db, context_folders[i].name );
+            if (cur && wcsicmp( cur, old ))
+            {
+                free( cur );
+                continue;
+            }
+            free( cur );
+        }
+        get_context_folder( common ? context_folders[i].common : context_folders[i].user, path );
+        msi_set_property( package->db, context_folders[i].name, path, -1 );
+    }
+    package->folders_chosen = TRUE;
+    package->folders_common = common;
+}
+#endif
+
 static VOID set_installer_properties(MSIPACKAGE *package)
 {
     WCHAR *ptr;
@@ -695,30 +745,7 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     lstrcatW(pth, L"\\");
     msi_set_property( package->db, L"SendToFolder", pth, -1 );
 
-    SHGetFolderPathW(NULL, CSIDL_STARTMENU, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"StartMenuFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_STARTUP, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"StartupFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_TEMPLATES, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"TemplateFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_DESKTOP, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"DesktopFolder", pth, -1 );
-
-    /* FIXME: set to AllUsers profile path if ALLUSERS is set */
-    SHGetFolderPathW(NULL, CSIDL_PROGRAMS, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"ProgramMenuFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_ADMINTOOLS, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"AdminToolsFolder", pth, -1 );
+    msi_set_context_folders( package );
 
     SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, pth);
     lstrcatW(pth, L"\\");
@@ -1001,12 +1028,29 @@ static UINT load_admin_properties(MSIPACKAGE *package)
 
 void msi_adjust_privilege_properties( MSIPACKAGE *package )
 {
+#ifdef __REACTOS__
+    /* Measured on Windows: ALLUSERS 2 with MSIINSTALLPERUSER 1 empties ALLUSERS (a per-user installation), and
+       MSIINSTALLPERUSER only survives next to ALLUSERS 2 */
+    int allusers = msi_get_property_int( package->db, L"ALLUSERS", 0 );
+
+    if (allusers == 2 && msi_get_property_int( package->db, L"MSIINSTALLPERUSER", 0 ) == 1)
+    {
+        TRACE("ALLUSERS 2 with MSIINSTALLPERUSER, installing per user\n");
+        msi_set_property( package->db, L"ALLUSERS", L"", -1 );
+    }
+    else
+    {
+        if (allusers != 2) msi_set_property( package->db, L"MSIINSTALLPERUSER", L"", -1 );
+#endif
     /* FIXME: this should depend on the user's privileges */
     if (msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 2)
     {
         TRACE("resetting ALLUSERS property from 2 to 1\n");
         msi_set_property( package->db, L"ALLUSERS", L"1", -1 );
     }
+#ifdef __REACTOS__
+    }
+#endif
     msi_set_property( package->db, L"AdminUser", L"1", -1 );
     msi_set_property( package->db, L"Privileged", L"1", -1 );
     msi_set_property( package->db, L"MsiRunningElevated", L"1", -1 );
