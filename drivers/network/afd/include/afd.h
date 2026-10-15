@@ -183,6 +183,10 @@ typedef struct _AFD_FCB {
     AFD_IN_FLIGHT_REQUEST ConnectIrp, ListenIrp, ReceiveIrp, SendIrp, DisconnectIrp;
     PIRP AcceptIrp;
     AFD_DATA_WINDOW Send, Recv;
+    /* Bytes at the start of the send window whose request was cancelled */
+    UINT SendBytesUnowned;
+    /* AfdStartSend is running, and a nested call asked it to send again */
+    BOOLEAN SendStarting, SendRestart;
     KMUTEX Mutex;
     KEVENT InFlightIdle;
     PKEVENT EventSelect;
@@ -386,5 +390,6 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS NTAPI
 AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			 PIO_STACK_LOCATION IrpSp);
+UINT AfdCancelStreamSend(PAFD_FCB FCB, PIRP Irp);
 
 #endif /* _AFD_H */

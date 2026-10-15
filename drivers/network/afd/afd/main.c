@@ -1279,6 +1279,7 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
     PFILE_OBJECT FileObject = Irp->Tail.Overlay.OriginalFileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     ULONG Function, IoctlCode;
+    UINT Information = 0;
     PIRP CurrentIrp;
     PLIST_ENTRY CurrentEntry;
     PAFD_DEVICE_EXTENSION DeviceExt = DeviceObject->DeviceExtension;
@@ -1389,6 +1390,10 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
         if (CurrentIrp == Irp)
         {
+            /* A stream send reports the data it left in the send window */
+            if (Function == FUNCTION_SEND && !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+                Information = AfdCancelStreamSend(FCB, Irp);
+
             RemoveEntryList(CurrentEntry);
             CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
             if (Function == FUNCTION_PREACCEPT)
@@ -1412,7 +1417,7 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
                     Irp->Tail.Overlay.DriverContext[3] = NULL;
                 }
             }
-            UnlockAndMaybeComplete(FCB, STATUS_CANCELLED, Irp, 0);
+            UnlockAndMaybeComplete(FCB, STATUS_CANCELLED, Irp, Information);
             ObDereferenceObject(FileObject);
             return;
         }

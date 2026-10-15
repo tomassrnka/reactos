@@ -173,7 +173,13 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 if (FCB->SharedData.State == SOCKET_STATE_CONNECTED ||
                     FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
                 {
-                    if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF &&
+                    /* The transport may hold the window and queued requests count their bytes in it,
+                       so it is resized only while no data is in it */
+                    if (FCB->SendIrp.InFlightRequest || FCB->Send.BytesUsed)
+                    {
+                        Status = STATUS_SUCCESS;
+                    }
+                    else if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF &&
                         InfoReq->Information.Ulong != FCB->Send.Size)
                     {
                         NewBuffer = ExAllocatePoolWithTag(PagedPool,
