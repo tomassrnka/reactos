@@ -424,6 +424,8 @@ class CTaskSwitchWnd :
     BOOL m_IsDestroying;
 
     INT m_nRudeAppValidationCounter;
+    HWND m_hwndRudeApp;     // The full-screen window the taskbar was last arranged for
+    BOOL m_bTrayLowered;    // The taskbar was sent to the bottom because of m_hwndRudeApp
 
     SIZE m_ButtonSize;
 
@@ -446,7 +448,9 @@ public:
         m_ImageList(NULL),
         m_IsGroupingEnabled(FALSE),
         m_IsDestroying(FALSE),
-        m_nRudeAppValidationCounter(0)
+        m_nRudeAppValidationCounter(0),
+        m_hwndRudeApp(NULL),
+        m_bTrayLowered(FALSE)
     {
         ZeroMemory(&m_ButtonSize, sizeof(m_ButtonSize));
         m_uHardErrorMsg = RegisterWindowMessageW(L"HardError");
@@ -2077,17 +2081,27 @@ public:
         Data.pTray = m_Tray;
         ::EnumDisplayMonitors(NULL, NULL, FullScreenEnumProc, (LPARAM)&Data);
 
+        m_hwndRudeApp = hwndRude;
+
+        UINT uFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        HWND hwndTray = m_Tray->GetHWND();
         if (hwndRude)
         {
             // Make the taskbar bottom
-            UINT uFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-            HWND hwndTray = m_Tray->GetHWND();
+            m_bTrayLowered = TRUE;
             ::SetWindowPos(hwndTray, HWND_BOTTOM, 0, 0, 0, 0, uFlags);
 
             // Switch to the rude app if necessary
             DWORD exstyle = (DWORD)::GetWindowLongPtrW(hwndRude, GWL_EXSTYLE);
             if (!(exstyle & WS_EX_TOPMOST) && !SHELL_IsRudeWindowActive(hwndRude))
                 ::SwitchToThisWindow(hwndRude, TRUE);
+        }
+        else if (m_bTrayLowered)
+        {
+            // The full-screen app is gone: give the taskbar its place back
+            m_bTrayLowered = FALSE;
+            ::SetWindowPos(hwndTray, g_TaskbarSettings.sr.AlwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+                           0, 0, 0, 0, uFlags);
         }
     }
 
@@ -2365,11 +2379,13 @@ public:
                 // Real activation of rude app might take some time after HSHELL_...ACTIVATED.
                 // Wait up to 5 seconds with validating the rude app at each second.
                 HWND hwndRude = FindRudeApp(NULL);
-                HandleFullScreenApp(hwndRude);
+                if (hwndRude != m_hwndRudeApp)
+                    HandleFullScreenApp(hwndRude);
 
                 KillTimer(wParam);
                 ++m_nRudeAppValidationCounter;
-                if (m_nRudeAppValidationCounter < VALIDATE_RUDE_MAX_COUNT && !hwndRude)
+                // Nothing tells us when a full-screen app leaves full screen mode, so keep watching it
+                if (hwndRude || m_nRudeAppValidationCounter < VALIDATE_RUDE_MAX_COUNT)
                     SetTimer(wParam, VALIDATE_RUDE_INTERVAL, NULL);
                 break;
             }
