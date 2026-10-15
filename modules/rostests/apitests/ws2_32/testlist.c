@@ -28,6 +28,7 @@ extern void func_nostartup(void);
 extern void func_open_osfhandle(void);
 extern void func_recv(void);
 extern void func_send(void);
+extern void func_sotimeout(void);
 extern void func_udpbindretry(void);
 extern void func_udprecv(void);
 extern void func_timewait(void);
@@ -68,6 +69,7 @@ const struct test winetest_testlist[] =
     { "open_osfhandle", func_open_osfhandle },
     { "recv", func_recv },
     { "send", func_send },
+    { "sotimeout", func_sotimeout },
     { "udpbindretry", func_udpbindretry },
     { "udprecv", func_udprecv },
     { "timewait", func_timewait },

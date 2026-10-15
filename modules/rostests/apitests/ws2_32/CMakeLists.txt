@@ -25,6 +25,7 @@ list(APPEND SOURCE
     recv.c
     WSASendMsg.c
     send.c
+    sotimeout.c
     udpbindretry.c
     udprecv.c
     timewait.c
