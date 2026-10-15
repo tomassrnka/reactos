@@ -11,6 +11,9 @@ list(APPEND SOURCE
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
 
+# The item dialogs exist from 0x601 on; without them the test skips
+set_source_files_properties(itemdlg.c PROPERTIES COMPILE_DEFINITIONS USE_WIN_SKIP)
+
 add_executable(comdlg32_winetest
     ${SOURCE}
     ${PCH_SKIP_SOURCE}
