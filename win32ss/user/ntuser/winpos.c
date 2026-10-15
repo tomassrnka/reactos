@@ -2561,6 +2561,17 @@ co_WinPosMinMaximize(PWND Wnd, UINT ShowFlag, RECT* NewPos)
    wpl.length = sizeof(wpl);
    IntGetWindowPlacement( Wnd, &wpl );
 
+   /* IntGetWindowPlacement gives the work area relative values of WINDOWPLACEMENT for a top-level window;
+      the rectangles below are screen coordinates */
+   wpl.rcNormalPosition = Wnd->InternalPos.NormalRect;
+   if (Wnd->InternalPos.flags & WPF_MININIT)
+   {
+      wpl.ptMinPosition.x = Wnd->InternalPos.IconPos.x;
+      wpl.ptMinPosition.y = Wnd->InternalPos.IconPos.y;
+   }
+   else
+      wpl.ptMinPosition.x = wpl.ptMinPosition.y = -1;
+
    if (co_HOOK_CallHooks(WH_CBT, HCBT_MINMAX, (WPARAM)UserHMGetHandle(Wnd), ShowFlag))
    {
       ERR("WinPosMinMaximize WH_CBT Call Hook return!\n");
