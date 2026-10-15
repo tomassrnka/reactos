@@ -24,16 +24,41 @@ static UCHAR ItemSize[4] = { 0, 1, 2, 4 };
 // an index or a recursion. These caps are far above any real device and
 // below the point where the derived arithmetic can wrap a ULONG.
 //
-// A HID field is at most 32 bits wide (USB HID 1.11 Report Size); a report
-// never approaches 64 KiB of fields. The collection and push caps bound the
-// parser's recursion and backing stacks so a malformed descriptor cannot
-// exhaust the kernel stack or pool.
+// Fields wider than 32 bits are accepted (some vendor reports use them); only
+// value extraction of such a field through the HidP value APIs is refused. The
+// collection and push caps bound the parser's recursion and backing stacks so a
+// malformed descriptor cannot exhaust the kernel stack or pool.
 //
-#define HID_MAX_REPORT_SIZE_BITS    32
 #define HID_MAX_REPORT_COUNT        0x00010000
-#define HID_MAX_COLLECTION_DEPTH    256
 #define HID_MAX_GLOBAL_STACK_DEPTH  256
 #define HID_MAX_USAGE_STACK         0x00010000
+
+//
+// Cumulative report-item cap across the whole descriptor. Bounds the transient
+// nonpaged-pool the growing report buffers hold while parsing (each item is
+// sizeof(HID_REPORT_ITEM)), independent of the per-item HID_MAX_REPORT_COUNT.
+// Capped at USHORT max so the public USHORT capability counters (HIDP_CAPS
+// NumberXxxValueCaps/ButtonCaps/DataIndices and the ValueCaps match counter in
+// GetSpecificValueCaps) cannot wrap.
+//
+#define HID_MAX_TOTAL_REPORT_ITEMS  0x0000FFFF
+
+//
+// The collection tree is walked recursively (HidParser_FindReportInCollection,
+// HidParser_CalculateCollectionSize, HidParser_StoreCollection). Measured cost
+// is ~48 bytes of stack per level on i386 at -Os/-O2, so the whole tree must
+// stay well inside the ~12 KiB kernel stack together with the driver callers
+// above us. 64 levels (~3 KiB) is far deeper than any real device and leaves
+// ample headroom.
+//
+#define HID_MAX_COLLECTION_DEPTH    64
+
+//
+// Canonical long-item prefix byte (USB HID 1.11 6.2.2.3) and its fixed header
+// length: prefix + bDataSize + bLongItemTag.
+//
+#define HID_LONG_ITEM_PREFIX        0xFE
+#define HID_LONG_ITEM_HEADER        3
 
 FORCEINLINE
 NTSTATUS
@@ -739,6 +764,14 @@ HidParser_AddMainItem(
     BOOLEAN Found;
 
     //
+    // a zero-width field contributes no bits and no readable data; skip it so
+    // it creates no report item (a size-0 data item otherwise produces a
+    // ByteOffset at the report end that the value APIs would read past)
+    //
+    if (GlobalItemState->ReportSize == 0)
+        return HIDP_STATUS_SUCCESS;
+
+    //
     // first grow report item array
     //
     Status = HidParser_ReserveReportItems(Report, GlobalItemState->ReportCount, &NewReport);
@@ -757,6 +790,15 @@ HidParser_AddMainItem(
         //
         Found = HidParser_UpdateCollectionReport(ParserContext, Report, NewReport);
         ASSERT(Found);
+
+        //
+        // ReserveReportItems allocated a larger buffer and copied the old one
+        // across; the old report is now unreferenced and must be freed, or a
+        // growing report orphans a buffer per growth (nonpaged-pool exhaustion
+        // from a short descriptor)
+        //
+        if (Found)
+            FreeFunction(Report);
     }
 
     //
@@ -874,6 +916,7 @@ HidParser_ParseReportDescriptor(
     PHID_PARSER_CONTEXT ParserContext;
     ULONG CollectionDepth = 0;
     ULONG GlobalStackDepth = 0;
+    ULONG TotalReportItems = 0;
     SIZE_T Remaining;
 
     CurrentOffset = ReportDescriptor;
@@ -942,20 +985,24 @@ HidParser_ParseReportDescriptor(
         if (CurrentItem->Type == ITEM_TYPE_LONG)
         {
             //
-            // a long item carries a one-byte data size immediately after the
-            // prefix; it must be present before it can be read
+            // only the canonical long-item prefix (0xFE) is defined; any other
+            // reserved type-3 prefix (e.g. 0xFD) is malformed. A long item's
+            // header is three bytes: prefix + bDataSize + bLongItemTag, all of
+            // which must be present before any of them is read.
             //
-            if (Remaining < sizeof(ITEM_PREFIX) + 1)
+            if (*(PUCHAR)CurrentItem != HID_LONG_ITEM_PREFIX ||
+                Remaining < HID_LONG_ITEM_HEADER)
             {
                 Status = HIDP_STATUS_INTERNAL_ERROR;
                 goto ParseError;
             }
 
             //
-            // increment item size with size of data item
+            // item size (sans prefix) is bDataSize + bLongItemTag byte + the
+            // payload, so the whole item spans HID_LONG_ITEM_HEADER + DataSize
             //
             CurrentLongItem = (PLONG_ITEM)CurrentItem;
-            CurrentItemSize += CurrentLongItem->DataSize;
+            CurrentItemSize = (HID_LONG_ITEM_HEADER - sizeof(ITEM_PREFIX)) + CurrentLongItem->DataSize;
         }
 
         //
@@ -1131,6 +1178,16 @@ HidParser_ParseReportDescriptor(
                     }
 
                     //
+                    // bound cumulative report items across the descriptor
+                    //
+                    if (!NT_SUCCESS(HidParser_SizeAdd(TotalReportItems, ParserContext->GlobalItemState.ReportCount, &TotalReportItems)) ||
+                        TotalReportItems > HID_MAX_TOTAL_REPORT_ITEMS)
+                    {
+                        Status = HIDP_STATUS_INTERNAL_ERROR;
+                        goto ParseError;
+                    }
+
+                    //
                     // get report
                     //
                     Status = HidParser_GetReport(ParserContext, CurrentCollection, ReportType, ParserContext->GlobalItemState.ReportId, TRUE, &Report);
@@ -1217,14 +1274,13 @@ HidParser_ParseReportDescriptor(
                     case ITEM_TAG_GLOBAL_REPORT_SIZE:
                         DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_SIZE %x\n", Data);
                         //
-                        // a field is at most 32 bits wide; a larger value
-                        // cannot be represented and would break the field mask
+                        // a field may legitimately be wider than 32 bits (some
+                        // vendor reports use 64-bit fields), so the size is kept
+                        // as-is and bounded only by the checked bit/byte
+                        // arithmetic downstream. Extraction through the HidP
+                        // value APIs refuses fields wider than 32 bits; the
+                        // field mask is clamped for sizes >= 32.
                         //
-                        if (Data > HID_MAX_REPORT_SIZE_BITS)
-                        {
-                            Status = HIDP_STATUS_INTERNAL_ERROR;
-                            goto ParseError;
-                        }
                         ParserContext->GlobalItemState.ReportSize = Data;
                         break;
 
