@@ -28,6 +28,7 @@
 #include "wingdi.h"
 #include "winuser.h"
 #include "winnls.h"
+#include "winreg.h"
 
 #include "wine/test.h"
 
@@ -5637,6 +5638,21 @@ static WCHAR *prepend_at(WCHAR *family)
     return family;
 }
 
+/* An alias from FontSubstitutes enumerates under its own name but selects another font, whose name table carries
+ * the other family name. "MS Shell Dlg" does the same on Windows, so the name checks below hold for real fonts only. */
+static BOOL is_font_substitute(const char *name)
+{
+    HKEY key;
+    LONG res;
+
+    if (name[0] == '@') name++;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes", 0, KEY_QUERY_VALUE, &key))
+        return FALSE;
+    res = RegQueryValueExA(key, name, NULL, NULL, NULL, NULL);
+    RegCloseKey(key);
+    return res == ERROR_SUCCESS;
+}
+
 static void test_fullname2_helper(const char *Family)
 {
     char *FamilyName, *FaceName, *StyleName, *otmStr;
@@ -5668,6 +5684,11 @@ static void test_fullname2_helper(const char *Family)
     EnumFontFamiliesExA(hdc, &lf, enum_fullname_data_proc, (LPARAM)&efnd, 0);
     if (efnd.total == 0)
         skip("%s is not installed\n", lf.lfFaceName);
+    else if (is_font_substitute(Family))
+    {
+        skip("%s is a font substitute\n", lf.lfFaceName);
+        efnd.total = 0;
+    }
 
     for (i = 0; i < efnd.total; i++)
     {
