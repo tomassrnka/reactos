@@ -335,16 +335,26 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
                             PPFN_NUMBER AllocatedPage)
 {
     PFN_NUMBER Page;
-
-    /* Delay some requests for the Memory Manager to recover pages (CORE-17624).
-     * FIXME: This is suboptimal.
-     */
-    static INT i = 0;
+    static LONG Requests;
     static LARGE_INTEGER TinyTime = {{-1L, -1L}};
-    if (i++ >= 100)
+
+    if ((MiBalancerThreadHandle != NULL) &&
+        (PsGetCurrentThreadId() != MiBalancerThreadId.UniqueThread) &&
+        (KeGetCurrentIrql() < DISPATCH_LEVEL))
     {
-        KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
-        i = 0;
+        if (MmAvailablePages < MiMinimumAvailablePages)
+        {
+            /* Below the balancer's target: start it and give it a tick to recover pages */
+            MmRebalanceMemoryConsumers();
+            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+        }
+        else if ((CcTotalDirtyPages > CcDirtyPageThreshold / 4) &&
+                 ((InterlockedIncrement(&Requests) % 100) == 0))
+        {
+            /* Much dirty cache data: pace page requests, so that a writer cannot fill the
+               cache views with dirty data faster than the lazy writer cleans them (CORE-17624) */
+            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+        }
     }
 
     /*
