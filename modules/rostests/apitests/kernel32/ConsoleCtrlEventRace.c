@@ -6,6 +6,8 @@
  */
 
 #include "precomp.h"
+#include <wingdi.h>
+#include <winuser.h>
 
 /*
  * A child on a console of its own sends Ctrl+Break events to its console while
@@ -36,6 +38,8 @@
 #define FLOOD_EVENTS        2000
 #define FLOOD_WAIT_MS       90000
 #define FLOOD_TIMEOUT_MS    150000
+#define GUI_MS              8000
+#define GUI_TIMEOUT_MS      (GUI_MS + 60000)
 
 static WCHAR FileName[MAX_PATH];
 static volatile LONG Stop;
@@ -268,6 +272,75 @@ FloodChild(VOID)
     ExitProcess(0);
 }
 
+/*
+ * Thread that closes the active screen buffer over and over. Closing the active
+ * buffer takes the console lock and then the terminal lock, the opposite order
+ * of the window paint path, and deletes the buffer the paint path may be reading.
+ */
+static
+DWORD
+WINAPI
+BufferThread(
+    _In_ LPVOID Parameter)
+{
+    HANDLE Original = GetStdHandle(STD_OUTPUT_HANDLE);
+    static const WCHAR Line[] = L"buffer\r\n";
+    DWORD Written;
+
+    UNREFERENCED_PARAMETER(Parameter);
+
+    while (!Stop)
+    {
+        HANDLE Buffer = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
+                                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                  NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+        if (Buffer == INVALID_HANDLE_VALUE)
+        {
+            Sleep(1);
+            continue;
+        }
+        SetConsoleActiveScreenBuffer(Buffer);
+        WriteConsoleW(Buffer, Line, _countof(Line) - 1, &Written, NULL);
+        /* Restore a valid active buffer, then drop the one just shown */
+        SetConsoleActiveScreenBuffer(Original);
+        CloseHandle(Buffer);
+    }
+    return 0;
+}
+
+/* Child: churn screen-buffer close against window paints on a visible console */
+static
+VOID
+GuiChild(VOID)
+{
+    HANDLE Threads[2];
+    ULONG Count = 0;
+    HWND Window = GetConsoleWindow();
+    static const WCHAR Line[] = L"GuiChild output line driving the window to repaint\r\n";
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD Written, Start;
+
+    Threads[Count] = CreateThread(NULL, 0, BufferThread, NULL, 0, NULL);
+    if (Threads[Count]) Count++;
+    if (!Count)
+        ExitProcess(401);
+
+    /* Drive the window to paint while the buffer is being closed */
+    Start = GetTickCount();
+    while (GetTickCount() - Start < GUI_MS)
+    {
+        WriteConsoleW(Output, Line, _countof(Line) - 1, &Written, NULL);
+        if (Window)
+        {
+            InvalidateRect(Window, NULL, TRUE);
+            UpdateWindow(Window);
+        }
+    }
+    Stop = TRUE;
+    WaitForMultipleObjects(Count, Threads, TRUE, INFINITE);
+    ExitProcess(0);
+}
+
 static
 VOID
 RunChild(
@@ -316,8 +389,11 @@ START_TEST(ConsoleCtrlEventRace)
         OrderChild();
     if (argc >= 3 && !strcmp(argv[2], "flood"))
         FloodChild();
+    if (argc >= 3 && !strcmp(argv[2], "gui"))
+        GuiChild();
 
     RunChild(L"race", CHILD_TIMEOUT_MS);
     RunChild(L"order", ORDER_TIMEOUT_MS);
     RunChild(L"flood", FLOOD_TIMEOUT_MS);
+    RunChild(L"gui", GUI_TIMEOUT_MS);
 }
