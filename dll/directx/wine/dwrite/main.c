@@ -1100,6 +1100,7 @@ static HRESULT WINAPI dwritefactory_CreateMonitorRenderingParams(IDWriteFactory7
 {
     IDWriteRenderingParams3 *params3;
     static int fixme_once = 0;
+    UINT orientation;
     HRESULT hr;
 
     TRACE("%p, %p, %p.\n", iface, monitor, params);
@@ -1107,8 +1108,13 @@ static HRESULT WINAPI dwritefactory_CreateMonitorRenderingParams(IDWriteFactory7
     if (!fixme_once++)
         FIXME("(%p): monitor setting ignored\n", monitor);
 
-    /* FIXME: use actual per-monitor gamma factor */
-    hr = IDWriteFactory7_CreateCustomRenderingParams(iface, 2.0f, 0.0f, 1.0f, 0.0f, DWRITE_PIXEL_GEOMETRY_FLAT,
+    /* Windows 7 answers 1.8, 0.5 and 0.5 with an RGB stripe layout whatever the font smoothing setting is, and
+       applications such as Firefox take their default text rendering from them: a clear type level of 0 or a flat
+       geometry makes them fall back to grayscale text. FIXME: use actual per-monitor gamma factor */
+    if (!SystemParametersInfoW(SPI_GETFONTSMOOTHINGORIENTATION, 0, &orientation, 0))
+        orientation = FE_FONTSMOOTHINGORIENTATIONRGB;
+    hr = IDWriteFactory7_CreateCustomRenderingParams(iface, 1.8f, 0.5f, 1.0f, 0.5f,
+        orientation == FE_FONTSMOOTHINGORIENTATIONBGR ? DWRITE_PIXEL_GEOMETRY_BGR : DWRITE_PIXEL_GEOMETRY_RGB,
         DWRITE_RENDERING_MODE1_DEFAULT, DWRITE_GRID_FIT_MODE_DEFAULT, &params3);
     *params = (IDWriteRenderingParams*)params3;
     return hr;

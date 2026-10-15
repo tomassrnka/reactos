@@ -56,6 +56,7 @@ list(APPEND SOURCE
     GetPixel.c
     GetStockObject.c
     GetTextExtentExPoint.c
+    GetTextExtentQuality.c
     GetTextFace.c
     GetTextMetrics.c
     LPtoDP.c

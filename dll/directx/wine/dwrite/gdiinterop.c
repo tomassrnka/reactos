@@ -19,6 +19,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <math.h>
+
 #define COBJMACROS
 
 #include <stdarg.h>
@@ -301,18 +303,65 @@ static inline DWORD blend_pixel(BYTE r, BYTE g, BYTE b, DWORD text, BYTE alpha)
            blend_color(b, text,       alpha);
 }
 
-static void blit_8(struct dib_data *dib, const BYTE *src, const RECT *rect, DWORD text_pixel)
+/* How coverage becomes colour: the rendering parameters decide whether the three stripe samples stay separate
+   (clear type level, pixel geometry) and in which space they are blended (gamma). */
+struct blend_options
+{
+    float gamma;   /* 1.0 blends the stored values directly */
+    float level;   /* 0 collapses a clear type texture to grayscale, 1 keeps the stripes */
+    BOOL bgr;      /* left stripe is blue */
+    BOOL gray;     /* geometry is flat or level is 0 */
+};
+
+static void get_blend_options(IDWriteRenderingParams *params, struct blend_options *opts)
+{
+    DWRITE_PIXEL_GEOMETRY geometry = IDWriteRenderingParams_GetPixelGeometry(params);
+    float gamma = IDWriteRenderingParams_GetGamma(params);
+    float level = IDWriteRenderingParams_GetClearTypeLevel(params);
+
+    opts->gamma = (gamma > 0.0f && fabsf(gamma - 1.0f) > 0.001f) ? gamma : 1.0f;
+    opts->level = level < 0.0f ? 0.0f : (level > 1.0f ? 1.0f : level);
+    opts->bgr = geometry == DWRITE_PIXEL_GEOMETRY_BGR;
+    opts->gray = geometry == DWRITE_PIXEL_GEOMETRY_FLAT || opts->level == 0.0f;
+}
+
+static inline BYTE blend_channel(BYTE dst, BYTE src, BYTE alpha, float gamma)
+{
+    float d, s, a, v;
+
+    if (gamma == 1.0f)
+        return blend_color(dst, src, alpha);
+
+    a = alpha / 255.0f;
+    d = powf(dst / 255.0f, gamma);
+    s = powf(src / 255.0f, gamma);
+    v = powf(d * (1.0f - a) + s * a, 1.0f / gamma) * 255.0f + 0.5f;
+    return v < 0.0f ? 0 : (v > 255.0f ? 255 : (BYTE)v);
+}
+
+static inline DWORD blend_pixel_gamma(DWORD dst, DWORD text, const BYTE *alpha, float gamma)
+{
+    return blend_channel(dst >> 16, text >> 16, alpha[0], gamma) << 16 |
+           blend_channel(dst >> 8,  text >> 8,  alpha[1], gamma) << 8  |
+           blend_channel(dst,       text,       alpha[2], gamma);
+}
+
+static void blit_8(struct dib_data *dib, const BYTE *src, const RECT *rect, DWORD text_pixel, float gamma)
 {
     DWORD *dst_ptr = get_pixel_ptr_32(dib, rect->left, rect->top);
     int x, y, src_width = rect->right - rect->left;
 
     for (y = rect->top; y < rect->bottom; y++) {
         for (x = 0; x < src_width; x++) {
+            BYTE alpha3[3];
+
             if (!src[x]) continue;
             if (src[x] == DWRITE_ALPHA_MAX)
                 dst_ptr[x] = text_pixel;
-            else
-                dst_ptr[x] = blend_pixel(dst_ptr[x] >> 16, dst_ptr[x] >> 8, dst_ptr[x], text_pixel, src[x]);
+            else {
+                alpha3[0] = alpha3[1] = alpha3[2] = src[x];
+                dst_ptr[x] = blend_pixel_gamma(dst_ptr[x], text_pixel, alpha3, gamma);
+            }
         }
 
         src += src_width;
@@ -321,15 +370,43 @@ static void blit_8(struct dib_data *dib, const BYTE *src, const RECT *rect, DWOR
 }
 
 static void blit_subpixel_888(struct dib_data *dib, int dib_width, const BYTE *src,
-    const RECT *rect, DWORD text_pixel)
+    const RECT *rect, DWORD text_pixel, const struct blend_options *opts)
 {
     DWORD *dst_ptr = get_pixel_ptr_32(dib, rect->left, rect->top);
     int x, y, src_width = rect->right - rect->left;
 
     for (y = rect->top; y < rect->bottom; y++) {
         for (x = 0; x < src_width; x++) {
+            BYTE a[3];
+
             if (src[3*x] == 0 && src[3*x+1] == 0 && src[3*x+2] == 0) continue;
-            dst_ptr[x] = blend_subpixel(dst_ptr[x] >> 16, dst_ptr[x] >> 8, dst_ptr[x], text_pixel, &src[3*x]);
+
+            a[0] = src[3*x];
+            a[1] = src[3*x+1];
+            a[2] = src[3*x+2];
+
+            if (opts->gray) {
+                a[0] = a[1] = a[2] = (a[0] + a[1] + a[2] + 1) / 3;
+            }
+            else {
+                if (opts->bgr) {
+                    BYTE t = a[0];
+                    a[0] = a[2];
+                    a[2] = t;
+                }
+                if (opts->level < 1.0f) {
+                    float avg = (a[0] + a[1] + a[2]) / 3.0f;
+                    int i;
+
+                    for (i = 0; i < 3; i++)
+                        a[i] = (BYTE)(avg + (a[i] - avg) * opts->level + 0.5f);
+                }
+            }
+
+            if (a[0] == 0xff && a[1] == 0xff && a[2] == 0xff)
+                dst_ptr[x] = text_pixel;
+            else
+                dst_ptr[x] = blend_pixel_gamma(dst_ptr[x], text_pixel, a, opts->gamma);
         }
         dst_ptr += dib->stride / 4;
         src += src_width * 3;
@@ -459,12 +536,22 @@ static HRESULT WINAPI rendertarget_DrawGlyphRun(IDWriteBitmapRenderTarget1 *ifac
 
     if (IntersectRect(&target_rect, &target_rect, &bounds))
     {
-        UINT32 size = (target_rect.right - target_rect.left) * (target_rect.bottom - target_rect.top);
+        UINT64 size64 = (UINT64)(target_rect.right - target_rect.left) * (target_rect.bottom - target_rect.top) *
+                (texturetype == DWRITE_TEXTURE_CLEARTYPE_3x1 ? 3 : 1);
+        struct blend_options opts;
+        UINT32 size;
         BYTE *bitmap;
 
+        /* the target rectangle is clipped to the bitmap, so this only fails for a very large target */
+        if (size64 > DWRITE_MAX_BITMAP_BYTES)
+        {
+            IDWriteGlyphRunAnalysis_Release(analysis);
+            return E_OUTOFMEMORY;
+        }
+        size = size64;
+
+        get_blend_options(params, &opts);
         color = colorref_to_pixel_888(color);
-        if (texturetype == DWRITE_TEXTURE_CLEARTYPE_3x1)
-            size *= 3;
         if (!(bitmap = calloc(1, size)))
         {
             IDWriteGlyphRunAnalysis_Release(analysis);
@@ -475,14 +562,18 @@ static HRESULT WINAPI rendertarget_DrawGlyphRun(IDWriteBitmapRenderTarget1 *ifac
         if (hr == S_OK) {
             /* blit to target dib */
             if (texturetype == DWRITE_TEXTURE_ALIASED_1x1)
-                blit_8(&target->dib, bitmap, &target_rect, color);
+                blit_8(&target->dib, bitmap, &target_rect, color, opts.gamma);
             else
-                blit_subpixel_888(&target->dib, target->size.cx, bitmap, &target_rect, color);
+                blit_subpixel_888(&target->dib, target->size.cx, bitmap, &target_rect, color, &opts);
 
             if (bbox_ret) *bbox_ret = target_rect;
         }
+        else
+            WARN("CreateAlphaTexture() failed, 0x%08lx\n", hr);
 
         free(bitmap);
+        IDWriteGlyphRunAnalysis_Release(analysis);
+        return hr;
     }
     else if (bbox_ret)
     {

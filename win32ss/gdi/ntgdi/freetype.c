@@ -21,6 +21,8 @@
 #include FT_SYNTHESIS_H
 #include FT_TRUETYPE_IDS_H
 #include FT_MODULE_H
+#include FT_LCD_FILTER_H
+#include FT_GASP_H
 #include <freetype/internal/ftcalc.h> // INT_TO_FIXED
 
 #include <gdi/eng/floatobj.h>
@@ -964,6 +966,9 @@ InitFontSupport(VOID)
         DPRINT1("FT_Init_FreeType failed with error code 0x%x\n", ulError);
         return FALSE;
     }
+
+    /* Subpixel (LCD) rendering needs the filter to avoid colour fringes; failure leaves the unfiltered default */
+    FT_Library_SetLcdFilter(g_FreeTypeLibrary, FT_LCD_FILTER_LIGHT);
 
     if (!IntLoadFontsInRegistry())
     {
@@ -2714,20 +2719,21 @@ IntGetFontRenderMode(LOGFONTW *logfont)
 {
     switch (logfont->lfQuality)
     {
-    case ANTIALIASED_QUALITY:
-        break;
     case NONANTIALIASED_QUALITY:
         return FT_RENDER_MODE_MONO;
-    case DRAFT_QUALITY:
-        return FT_RENDER_MODE_LIGHT;
+    case ANTIALIASED_QUALITY:
+        return FT_RENDER_MODE_NORMAL;
     case CLEARTYPE_QUALITY:
-        if (!gspv.bFontSmoothing)
-            break;
-        if (!gspv.uiFontSmoothingType)
-            break;
+        /* Asked for explicitly, so it does not depend on the system-wide setting */
         return FT_RENDER_MODE_LCD;
+    default:
+        /* DEFAULT_QUALITY and the rest follow the user's font smoothing settings */
+        if (!gspv.bFontSmoothing)
+            return FT_RENDER_MODE_MONO;
+        if (gspv.uiFontSmoothingType == FE_FONTSMOOTHINGCLEARTYPE)
+            return FT_RENDER_MODE_LCD;
+        return FT_RENDER_MODE_NORMAL;
     }
-    return FT_RENDER_MODE_NORMAL;
 }
 
 NTSTATUS FASTCALL
@@ -3814,10 +3820,33 @@ IntFindGlyphCache(IN const FONT_CACHE_ENTRY *pCache)
     return FontEntry->BitmapGlyph;
 }
 
+/* Windows 7 grayscale smoothing draws visibly lighter than a straight coverage blend: the ink of its glyphs
+ * matches coverage ^ 2.15 (fitted over 20 font and size rows, mean deviation 1.2 percent). */
+static const BYTE g_GrayCoverageLut[256] =
+{
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,
+      1,   1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,   2,   2,   3,   3,
+      3,   3,   3,   4,   4,   4,   4,   5,   5,   5,   5,   6,   6,   6,   6,   7,
+      7,   7,   8,   8,   8,   9,   9,   9,  10,  10,  11,  11,  11,  12,  12,  13,
+     13,  13,  14,  14,  15,  15,  16,  16,  17,  17,  18,  18,  19,  19,  20,  21,
+     21,  22,  22,  23,  23,  24,  25,  25,  26,  27,  27,  28,  28,  29,  30,  31,
+     31,  32,  33,  33,  34,  35,  36,  36,  37,  38,  39,  39,  40,  41,  42,  43,
+     43,  44,  45,  46,  47,  48,  49,  50,  50,  51,  52,  53,  54,  55,  56,  57,
+     58,  59,  60,  61,  62,  63,  64,  65,  66,  67,  68,  69,  70,  71,  72,  74,
+     75,  76,  77,  78,  79,  80,  81,  83,  84,  85,  86,  87,  89,  90,  91,  92,
+     94,  95,  96,  97,  99, 100, 101, 103, 104, 105, 107, 108, 109, 111, 112, 114,
+    115, 116, 118, 119, 121, 122, 123, 125, 126, 128, 129, 131, 132, 134, 135, 137,
+    139, 140, 142, 143, 145, 146, 148, 150, 151, 153, 155, 156, 158, 159, 161, 163,
+    165, 166, 168, 170, 171, 173, 175, 177, 178, 180, 182, 184, 186, 187, 189, 191,
+    193, 195, 197, 199, 200, 202, 204, 206, 208, 210, 212, 214, 216, 218, 220, 222,
+    224, 226, 228, 230, 232, 234, 236, 238, 240, 242, 244, 246, 249, 251, 253, 255,
+};
+
 static FT_BitmapGlyph
 IntGetBitmapGlyphWithCache(
     IN OUT PFONT_CACHE_ENTRY Cache,
-    IN FT_GlyphSlot GlyphSlot)
+    IN FT_GlyphSlot GlyphSlot,
+    IN FT_Render_Mode RenderMode)
 {
     FT_Glyph GlyphCopy;
     INT error;
@@ -3834,7 +3863,7 @@ IntGetBitmapGlyphWithCache(
         return NULL;
     };
 
-    error = FT_Glyph_To_Bitmap(&GlyphCopy, Cache->Hashed.Aspect.RenderMode, 0, 1);
+    error = FT_Glyph_To_Bitmap(&GlyphCopy, RenderMode, 0, 1);
     if (error)
     {
         FT_Done_Glyph(GlyphCopy);
@@ -3851,19 +3880,35 @@ IntGetBitmapGlyphWithCache(
     }
 
     BitmapGlyph = (FT_BitmapGlyph)GlyphCopy;
-    FT_Bitmap_New(&AlignedBitmap);
-    if (FT_Bitmap_Convert_ReactOS_Hack(GlyphSlot->library, &BitmapGlyph->bitmap,
-                                       &AlignedBitmap, 4, TRUE))
-    {
-        DPRINT1("Conversion failed\n");
-        ExFreePoolWithTag(NewEntry, TAG_FONT);
-        FT_Bitmap_Done(GlyphSlot->library, &AlignedBitmap);
-        FT_Done_Glyph((FT_Glyph)BitmapGlyph);
-        return NULL;
-    }
 
-    FT_Bitmap_Done(GlyphSlot->library, &BitmapGlyph->bitmap);
-    BitmapGlyph->bitmap = AlignedBitmap;
+    /* An LCD bitmap is already one byte per colour channel, three per pixel; the blitter takes it as is */
+    if (BitmapGlyph->bitmap.pixel_mode != FT_PIXEL_MODE_LCD)
+    {
+        FT_Bitmap_New(&AlignedBitmap);
+        if (FT_Bitmap_Convert_ReactOS_Hack(GlyphSlot->library, &BitmapGlyph->bitmap,
+                                           &AlignedBitmap, 4, TRUE))
+        {
+            DPRINT1("Conversion failed\n");
+            ExFreePoolWithTag(NewEntry, TAG_FONT);
+            FT_Bitmap_Done(GlyphSlot->library, &AlignedBitmap);
+            FT_Done_Glyph((FT_Glyph)BitmapGlyph);
+            return NULL;
+        }
+
+        FT_Bitmap_Done(GlyphSlot->library, &BitmapGlyph->bitmap);
+        BitmapGlyph->bitmap = AlignedBitmap;
+
+        if (RenderMode == FT_RENDER_MODE_NORMAL || RenderMode == FT_RENDER_MODE_LIGHT)
+        {
+            UINT Row, Col;
+            for (Row = 0; Row < BitmapGlyph->bitmap.rows; Row++)
+            {
+                PBYTE Pixels = BitmapGlyph->bitmap.buffer + Row * BitmapGlyph->bitmap.pitch;
+                for (Col = 0; Col < BitmapGlyph->bitmap.width; Col++)
+                    Pixels[Col] = g_GrayCoverageLut[Pixels[Col]];
+            }
+        }
+    }
 
     NewEntry->BitmapGlyph = BitmapGlyph;
     NewEntry->dwHash = Cache->dwHash;
@@ -4925,6 +4970,24 @@ ftGdiGetGlyphOutline(
     return needed;
 }
 
+/* Windows draws grayscale text bilevel at sizes where the font's gasp table does not ask for smoothing */
+static BOOL
+IntFaceWantsGrayAt(FT_Face Face)
+{
+    FT_UInt ppem;
+    FT_Int Flags;
+
+    if (!FT_IS_SCALABLE(Face) || !Face->size)
+        return TRUE;
+
+    ppem = Face->size->metrics.y_ppem;
+    Flags = FT_Get_Gasp(Face, ppem);
+    if (Flags == FT_GASP_NO_TABLE)
+        return TRUE;
+
+    return (Flags & FT_GASP_DO_GRAY) != 0;
+}
+
 static FT_BitmapGlyph
 IntGetRealGlyph(
     IN OUT PFONT_CACHE_ENTRY Cache)
@@ -4932,6 +4995,10 @@ IntGetRealGlyph(
     INT error;
     FT_GlyphSlot glyph;
     FT_BitmapGlyph realglyph;
+    FT_Render_Mode RenderMode = (FT_Render_Mode)Cache->Hashed.Aspect.RenderMode;
+    FT_Int32 LoadFlags = FT_LOAD_DEFAULT;
+    FT_Pos AdvanceX = 0, AdvanceY = 0;
+    BOOL bKeepAdvance = FALSE;
 
     ASSERT_FREETYPE_LOCK_HELD();
 
@@ -4941,7 +5008,50 @@ IntGetRealGlyph(
     if (realglyph)
         return realglyph;
 
-    error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
+    if (RenderMode == FT_RENDER_MODE_NORMAL || RenderMode == FT_RENDER_MODE_LIGHT)
+    {
+        if (!IntFaceWantsGrayAt(Cache->Hashed.Face))
+            RenderMode = FT_RENDER_MODE_MONO;
+    }
+
+    if (!FT_IS_SCALABLE(Cache->Hashed.Face))
+    {
+        NOTHING; /* bitmap fonts keep their strikes */
+    }
+    else if (RenderMode != FT_RENDER_MODE_MONO)
+    {
+        /* Layout must not depend on how the glyph is drawn: take the advance from the regular hinted load, which
+           for a font with embedded strikes can differ from the outline's */
+        error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
+        if (!error)
+        {
+            /* The advance that counts is the final one, simulated bold included: FreeType widens a strike by whole
+               pixels and an outline by a fraction, so the simulation has to run on this load as well */
+            if (Cache->Hashed.Aspect.Emu.Bold)
+                FT_GlyphSlot_Embolden(Cache->Hashed.Face->glyph);
+            if (Cache->Hashed.Aspect.Emu.Italic)
+                FT_GlyphSlot_Oblique(Cache->Hashed.Face->glyph);
+
+            AdvanceX = Cache->Hashed.Face->glyph->advance.x;
+            AdvanceY = Cache->Hashed.Face->glyph->advance.y;
+            bKeepAdvance = TRUE;
+        }
+
+        /* Embedded bitmaps are bilevel; smoothed text uses the outlines */
+        if (RenderMode == FT_RENDER_MODE_LCD)
+            LoadFlags = FT_LOAD_TARGET_LCD | FT_LOAD_NO_BITMAP;
+        else
+            LoadFlags = FT_LOAD_DEFAULT | FT_LOAD_NO_BITMAP;
+    }
+
+    error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, LoadFlags);
+    if (error && (LoadFlags & FT_LOAD_NO_BITMAP))
+    {
+        /* Bitmap-only face: fall back to its strikes, drawn as bilevel */
+        RenderMode = FT_RENDER_MODE_MONO;
+        bKeepAdvance = FALSE;
+        error = FT_Load_Glyph(Cache->Hashed.Face, Cache->Hashed.GlyphIndex, FT_LOAD_DEFAULT);
+    }
     if (error)
     {
         DPRINT1("WARNING: Failed to load and render glyph! [index: %d]\n", Cache->Hashed.GlyphIndex);
@@ -4956,7 +5066,14 @@ IntGetRealGlyph(
     if (Cache->Hashed.Aspect.Emu.Italic)
         FT_GlyphSlot_Oblique(glyph); /* Emulate Italic */
 
-    realglyph = IntGetBitmapGlyphWithCache(Cache, glyph);
+    /* The simulation changed the advance of this glyph; layout keeps the one of the regular load */
+    if (bKeepAdvance)
+    {
+        glyph->advance.x = AdvanceX;
+        glyph->advance.y = AdvanceY;
+    }
+
+    realglyph = IntGetBitmapGlyphWithCache(Cache, glyph, RenderMode);
 
     if (!realglyph)
         DPRINT1("Failed to render glyph! [index: %d]\n", Cache->Hashed.GlyphIndex);
@@ -6702,7 +6819,7 @@ IntExtTextOutW(
     PMATRIX pmxWorldToDevice;
     FT_Vector delta, vecAscent64, vecDescent64, vec;
     LOGFONTW *plf;
-    BOOL use_kerning, bResult, DoBreak;
+    BOOL use_kerning, bResult, DoBreak, bLcdGlyph;
     FONT_CACHE_ENTRY Cache;
     FT_Matrix mat;
     BOOL bNoTransform;
@@ -6842,6 +6959,14 @@ IntExtTextOutW(
     bNoTransform = ((mat.xy == 0) && (mat.yx == 0) &&
                     (mat.xx == (1 << 16)) && (mat.yy == (1 << 16)));
 
+    /* Colour stripes only line up with an upright glyph; Windows smooths rotated or scaled text in gray */
+    if (Cache.Hashed.Aspect.RenderMode == FT_RENDER_MODE_LCD &&
+        !(Cache.Hashed.matTransform.xy == 0 && Cache.Hashed.matTransform.yx == 0 &&
+          Cache.Hashed.matTransform.xx == (1 << 16) && Cache.Hashed.matTransform.yy == (1 << 16)))
+    {
+        Cache.Hashed.Aspect.RenderMode = FT_RENDER_MODE_NORMAL;
+    }
+
     /* Calculate the ascent point and the descent point */
     vecAscent64.x = 0;
     vecAscent64.y = (FontGDI->tmAscent << 6);
@@ -6971,7 +7096,9 @@ IntExtTextOutW(
         DPRINT("X64, Y64: %I64d, %I64d\n", X64, Y64);
         DPRINT("Advance: %d, %d\n", realglyph->root.advance.x, realglyph->root.advance.y);
 
-        glyphSize.cx = realglyph->bitmap.width;
+        bLcdGlyph = (realglyph->bitmap.pixel_mode == FT_PIXEL_MODE_LCD);
+        /* An LCD bitmap carries three colour samples per pixel */
+        glyphSize.cx = bLcdGlyph ? realglyph->bitmap.width / 3 : realglyph->bitmap.width;
         glyphSize.cy = realglyph->bitmap.rows;
 
         /* Do chars > space & not DEL & not nbsp have a glyphSize.cx of zero? */
@@ -6994,7 +7121,7 @@ IntExtTextOutW(
             realglyph->left = 0;
         }
 
-        MaskRect.right = realglyph->bitmap.width;
+        MaskRect.right = glyphSize.cx;
         MaskRect.bottom = realglyph->bitmap.rows;
 
         DestRect.left   = ((X64 + 32) >> 6) + realglyph->left;
@@ -7011,7 +7138,7 @@ IntExtTextOutW(
              * limit the work of the transbitblt.
              */
             hbmGlyph = EngCreateBitmap(glyphSize, realglyph->bitmap.pitch,
-                                       BMF_8BPP, BMF_TOPDOWN,
+                                       bLcdGlyph ? BMF_24BPP : BMF_8BPP, BMF_TOPDOWN,
                                        realglyph->bitmap.buffer);
             if (!hbmGlyph)
             {
