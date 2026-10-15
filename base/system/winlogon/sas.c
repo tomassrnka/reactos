@@ -1032,7 +1032,9 @@ HandleLogoff(
     Status = RunLogoffShutdownThread(Session, psa,
                                      WLX_LOGGINGOFF(wlxAction)
                                         ? wlxAction
-                                        : WLX_SAS_ACTION_LOGOFF);
+                                        : (Session->ForceLogoff
+                                            ? WLX_SAS_ACTION_FORCE_LOGOFF
+                                            : WLX_SAS_ACTION_LOGOFF));
     if (!NT_SUCCESS(Status))
     {
         ERR("Failed to start the Logoff thread, Status 0x%08lx\n", Status);
@@ -1655,17 +1657,17 @@ SASWindowProc(
                     if (Action & EWX_POWEROFF)
                     {
                         wlxAction = WLX_SAS_ACTION_SHUTDOWN_POWER_OFF;
-                        Action &= ~(EWX_SHUTDOWN | EWX_POWEROFF);
+                        Action &= ~(EWX_SHUTDOWN | EWX_POWEROFF | EWX_FORCE);
                     }
                     else if (Action & EWX_REBOOT)
                     {
                         wlxAction = WLX_SAS_ACTION_SHUTDOWN_REBOOT;
-                        Action &= ~(EWX_SHUTDOWN | EWX_REBOOT);
+                        Action &= ~(EWX_SHUTDOWN | EWX_REBOOT | EWX_FORCE);
                     }
                     else if (Action & EWX_SHUTDOWN)
                     {
                         wlxAction = WLX_SAS_ACTION_SHUTDOWN;
-                        Action &= ~EWX_SHUTDOWN;
+                        Action &= ~(EWX_SHUTDOWN | EWX_FORCE);
                     }
                     else // EWX_LOGOFF
                     {
@@ -1698,8 +1700,18 @@ SASWindowProc(
                         break;
                     }
 #endif
+                    /*
+                     * A shutdown starts with a logoff of the user. When the caller asked
+                     * for EWX_FORCE that logoff must not wait for the applications to
+                     * answer WM_QUERYENDSESSION: one that does not answer would keep
+                     * the "End Now" dialog of the session manager open forever.
+                     */
+                    Session->ForceLogoff = !!(Flags & EWX_FORCE);
+
                     /* Now do the shutdown action proper */
                     DoGenericAction(Session, wlxAction);
+
+                    Session->ForceLogoff = FALSE;
                     return 1;
                 }
                 case LN_LOGOFF_CANCELED:
