@@ -2326,6 +2326,11 @@ BasepCheckProcThreadAttribute(
         case PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR:
             return (Size == sizeof(PROCESSOR_NUMBER)) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
 
+        case PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY:
+            /* A DWORD on Windows 7; Windows 8 adds a DWORD64 and Windows 10 two of them */
+            return (Size == sizeof(DWORD) || Size == sizeof(DWORD64) || Size == 2 * sizeof(DWORD64)) ?
+                   ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
         default:
             /* Refuse attributes that cannot be honoured. */
             return ERROR_NOT_SUPPORTED;
@@ -2407,6 +2412,11 @@ BasepIsValidIdealProcessor(
            IdealProcessor->Number < BaseStaticServerData->SysInfo.NumberOfProcessors;
 }
 
+/* The DWORD form of the mitigation policy defines DEP, DEP without ATL thunk emulation and
+ * SEHOP (measured on Windows 7: CreateProcess refuses any other bit). The wider forms of
+ * Windows 8 and later are not checked here. */
+#define BASEP_DWORD_MITIGATION_MASK 0x7
+
 static
 NTSTATUS
 BasepReadProcThreadAttributes(
@@ -2421,6 +2431,33 @@ BasepReadProcThreadAttributes(
     for (i = 0; i < AttributeList->LastAttribute; ++i)
     {
         PPROC_THREAD_ATTRIBUTE_ENTRY Entry = &AttributeList->Attributes[i];
+
+        if (Entry->Attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY)
+        {
+            /* Mitigations are validated but not applied: ReactOS has no per-process
+             * mitigation state a child could be started with, so the process runs
+             * with the system defaults, as a Windows process does when the
+             * system policy overrides the request. */
+            if (Entry->Size == sizeof(DWORD))
+            {
+                DWORD Policy = 0;
+
+                _SEH2_TRY
+                {
+                    Policy = *(DWORD*)Entry->Value;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                _SEH2_END;
+
+                if (Policy & ~BASEP_DWORD_MITIGATION_MASK)
+                    return STATUS_INVALID_PARAMETER;
+            }
+            continue;
+        }
+
         if (Entry->Attribute != PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
             return STATUS_NOT_SUPPORTED;
         if (*HandleList || !Entry->Size || Entry->Size % sizeof(HANDLE))
