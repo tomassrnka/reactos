@@ -5339,7 +5339,8 @@ MmZeroResidentSegmentRange(
 {
     PEPROCESS Process = PsGetCurrentProcess();
     PMM_SECTION_SEGMENT Segment;
-    LARGE_INTEGER Offset;
+    PCACHE_SECTION_PAGE_TABLE PageTable;
+    PVOID RestartKey;
 
     if (Start >= End)
         return;
@@ -5350,30 +5351,51 @@ MmZeroResidentSegmentRange(
 
     MmLockSectionSegment(Segment);
 
-    End = min(End, MiGetSegmentPageTableEnd(Segment));
-    for (Offset.QuadPart = PAGE_ROUND_DOWN_64(Start); Offset.QuadPart < End; Offset.QuadPart += PAGE_SIZE)
+    /*
+     * Walk the allocated page tables, not every offset: a sparse file cut to a small size would otherwise scan
+     * from Start to the highest page at 256-page steps under the lock. For each page table that overlaps the range,
+     * zero the resident pages its 256 entries hold.
+     */
+restart:
+    RestartKey = NULL;
+    while ((PageTable = RtlEnumerateGenericTableWithoutSplaying(&Segment->PageTable, &RestartKey)))
     {
-        LONGLONG ZeroStart = max(Offset.QuadPart, Start);
-        LONGLONG ZeroEnd = min(Offset.QuadPart + PAGE_SIZE, End);
-        ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
-        PUCHAR Address;
-        KIRQL Irql;
+        LONGLONG TableStart = PageTable->FileOffset.QuadPart;
+        LONGLONG TableEnd = TableStart + (LONGLONG)_countof(PageTable->PageEntries) * PAGE_SIZE;
+        LONGLONG PageOffset;
 
-        /* A read in flight would assign the old contents after us */
-        while (MM_IS_WAIT_PTE(Entry))
-        {
-            MmUnlockSectionSegment(Segment);
-            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
-            MmLockSectionSegment(Segment);
-            Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
-        }
-
-        if ((Entry == 0) || IS_SWAP_FROM_SSE(Entry))
+        if (TableEnd <= Start || TableStart >= End)
             continue;
 
-        Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
-        RtlZeroMemory(Address + (ZeroStart - Offset.QuadPart), (SIZE_T)(ZeroEnd - ZeroStart));
-        MiUnmapPageInHyperSpace(Process, Address, Irql);
+        for (PageOffset = max(TableStart, PAGE_ROUND_DOWN_64(Start)); PageOffset < min(TableEnd, End); PageOffset += PAGE_SIZE)
+        {
+            LONGLONG ZeroStart = max(PageOffset, Start);
+            LONGLONG ZeroEnd = min(PageOffset + PAGE_SIZE, End);
+            LARGE_INTEGER PageOff;
+            ULONG_PTR Entry;
+            PUCHAR Address;
+            KIRQL Irql;
+
+            PageOff.QuadPart = PageOffset;
+            Entry = MmGetPageEntrySectionSegment(Segment, &PageOff);
+
+            /* A read in flight would assign the old contents after us. Dropping the lock invalidates the
+             * enumeration, so restart it after the wait. */
+            if (MM_IS_WAIT_PTE(Entry))
+            {
+                MmUnlockSectionSegment(Segment);
+                KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                MmLockSectionSegment(Segment);
+                goto restart;
+            }
+
+            if ((Entry == 0) || IS_SWAP_FROM_SSE(Entry))
+                continue;
+
+            Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
+            RtlZeroMemory(Address + (ZeroStart - PageOffset), (SIZE_T)(ZeroEnd - ZeroStart));
+            MiUnmapPageInHyperSpace(Process, Address, Irql);
+        }
     }
 
     MmUnlockSectionSegment(Segment);
