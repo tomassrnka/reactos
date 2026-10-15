@@ -442,7 +442,8 @@ SystemProcessTestWorker(PVOID StartContext)
         Status = ZwAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Context->RegionSize, Context->AllocationType, Context->Protect);
 
         Context->Bases[Index] = Base;
-        if ((Index % 10) == 0)
+        /* The allocation that ends the loop failed and has no buffer */
+        if (NT_SUCCESS(Status) && (Index % 10) == 0)
         {
             if (Context->AllocationType == MEM_COMMIT)
             {
