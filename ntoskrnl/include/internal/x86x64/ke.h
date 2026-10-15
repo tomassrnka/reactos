@@ -32,6 +32,30 @@ extern "C" {
 
 extern ULONG64 KeFeatureBits;
 
+#ifdef CONFIG_SMP
+extern BOOLEAN KiKvmPvTlbFlush;
+
+VOID
+NTAPI
+KiKvmInitializePvTlbFlush(
+    _In_opt_ PCSTR LoadOptions);
+
+VOID
+NTAPI
+KiKvmInitializeProcessor(
+    _In_ PKPRCB Prcb);
+
+BOOLEAN
+FASTCALL
+KiKvmTryFlushTbOnEntry(
+    _In_ ULONG Processor);
+
+KAFFINITY
+FASTCALL
+KiKvmFlushPreemptedTb(
+    _In_ KAFFINITY TargetSet);
+#endif
+
 static const ULONG KxFlushIndividualProcessPagesMaximum = 33; // Based on Linux tlb_single_page_flush_ceiling
 static const ULONG KxFlushIndividualGlobalPagesMaximum = 100; // Just a guess
 

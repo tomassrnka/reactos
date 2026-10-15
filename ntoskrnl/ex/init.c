@@ -1629,6 +1629,11 @@ Phase1InitializationDiscard(IN PVOID Context)
         }
     }
 
+#if defined(CONFIG_SMP) && (defined(_M_IX86) || defined(_M_AMD64))
+    /* Before the other processors start, so they register too */
+    KiKvmInitializePvTlbFlush(CommandLine);
+#endif
+
     /* Start Application Processors */
     KeStartAllProcessors();
 

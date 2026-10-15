@@ -634,6 +634,10 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     KeRaiseIrql(HIGH_LEVEL, &DummyIrql);
     if (Number)
     {
+#ifdef CONFIG_SMP
+        KiKvmInitializeProcessor(Prcb);
+#endif
+
         /* Become a target of all requests right before taking interrupts. Flushes
            sent above SYNCH_LEVEL meanwhile were local only, so flush once more */
         InterlockedOr((PLONG)&KeActiveProcessors, Prcb->SetMember);

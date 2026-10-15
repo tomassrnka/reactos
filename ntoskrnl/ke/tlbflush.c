@@ -38,11 +38,11 @@ KeFlushSingleTb(
     KeMemoryBarrier();
     TargetSet = AllProcessors ?
         KiGetTbFlushProcessors() : KeGetCurrentProcess()->ActiveProcessors;
-    KiIpiSendRequest(TargetSet,
-                     KiFlushSingleTbIpiWorker,
-                     Address,
-                     NULL,
-                     NULL);
+    KiIpiSendTbFlushRequest(TargetSet,
+                            KiFlushSingleTbIpiWorker,
+                            Address,
+                            NULL,
+                            NULL);
 #else
     KxFlushSingleCurrentTb(Address);
 #endif
@@ -97,11 +97,11 @@ KeFlushRangeTb(
     KeMemoryBarrier();
     TargetSet = Global ?
         KiGetTbFlushProcessors() : KeGetCurrentProcess()->ActiveProcessors;
-    KiIpiSendRequest(TargetSet,
-                     KiFlushRangeTbIpiWorker,
-                     Address,
-                     ULongToPtr(NumberOfPages),
-                     NULL);
+    KiIpiSendTbFlushRequest(TargetSet,
+                            KiFlushRangeTbIpiWorker,
+                            Address,
+                            ULongToPtr(NumberOfPages),
+                            NULL);
 #else
     KxFlushRangeCurrentTb(Address, NumberOfPages);
 #endif
@@ -128,11 +128,11 @@ KeFlushProcessTb(VOID)
 #ifdef CONFIG_SMP
     /* A processor that joins the process after this point sees the new PTEs */
     KeMemoryBarrier();
-    KiIpiSendRequest(KeGetCurrentProcess()->ActiveProcessors,
-                     KiFlushProcessTbIpiWorker,
-                     NULL,
-                     NULL,
-                     NULL);
+    KiIpiSendTbFlushRequest(KeGetCurrentProcess()->ActiveProcessors,
+                            KiFlushProcessTbIpiWorker,
+                            NULL,
+                            NULL,
+                            NULL);
 #else
     KxFlushProcessCurrentTb();
 #endif
@@ -166,11 +166,11 @@ KeFlushEntireTb(
     KeMemoryBarrier();
     TargetSet = AllProcessors ?
         KiGetTbFlushProcessors() : KeGetCurrentProcess()->ActiveProcessors;
-    KiIpiSendRequest(TargetSet,
-                     KiFlushEntireTbIpiWorker,
-                     NULL,
-                     NULL,
-                     NULL);
+    KiIpiSendTbFlushRequest(TargetSet,
+                            KiFlushEntireTbIpiWorker,
+                            NULL,
+                            NULL,
+                            NULL);
 #else
     KxFlushEntireCurrentTb();
 #endif

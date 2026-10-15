@@ -49,6 +49,17 @@ extern KSPIN_LOCK KiReverseStallIpiLock;
     InterlockedAnd((PLONG)&(Prcb)->TargetSet, ~(LONG)(Set))
 #endif
 
+/* KVM can flush the TLB of a descheduled vCPU when it runs again, see x86x64/kvm.c */
+#if defined(CONFIG_SMP) && (defined(_M_IX86) || defined(_M_AMD64))
+#define KiIpiPvTlbFlushEnabled()        KiKvmPvTlbFlush
+#define KiIpiFlushPreemptedTb(Set)      KiKvmFlushPreemptedTb(Set)
+#define KiIpiTryFlushTbOnEntry(Number)  KiKvmTryFlushTbOnEntry(Number)
+#else
+#define KiIpiPvTlbFlushEnabled()        FALSE
+#define KiIpiFlushPreemptedTb(Set)      (Set)
+#define KiIpiTryFlushTbOnEntry(Number)  FALSE
+#endif
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 /*
@@ -86,7 +97,8 @@ static
 VOID
 KiIpiDeliverPacket(
     _In_ PKPRCB Prcb,
-    _In_ KAFFINITY TargetSet)
+    _In_ KAFFINITY TargetSet,
+    _In_ BOOLEAN PvTbFlush)
 {
     KAFFINITY Remaining = TargetSet;
     PKPRCB TargetPrcb;
@@ -115,6 +127,11 @@ KiIpiDeliverPacket(
             }
 
             KeRestoreInterrupts(Enable);
+
+            /* The slot of a descheduled vCPU stays taken until it runs again */
+            if (PvTbFlush && KiIpiTryFlushTbOnEntry(Processor))
+                break;
+
             YieldProcessor();
         }
     }
@@ -315,7 +332,7 @@ KeIpiGenericCall(IN PKIPI_BROADCAST_WORKER Function,
                            (PVOID)Function,
                            (PVOID)Argument,
                            (PVOID)&Barrier);
-        KiIpiDeliverPacket(Prcb, Affinity);
+        KiIpiDeliverPacket(Prcb, Affinity, FALSE);
 
         /* Spin until the other processors are ready */
         while (Barrier != 1)
@@ -353,14 +370,15 @@ KeIpiGenericCall(IN PKIPI_BROADCAST_WORKER Function,
     return Status;
 }
 
+static
 VOID
-NTAPI
-KiIpiSendRequest(
+KiIpiSendRequestToTargets(
     _In_ KAFFINITY TargetSet,
     _In_ PKIPI_WORKER WorkerRoutine,
     _In_ PVOID Parameter1,
     _In_ PVOID Parameter2,
-    _In_ PVOID Parameter3)
+    _In_ PVOID Parameter3,
+    _In_ BOOLEAN TbFlush)
 {
     KIRQL OldIrql, WorkerIrql;
 #ifdef CONFIG_SMP
@@ -403,10 +421,16 @@ KiIpiSendRequest(
         Remote = 0;
     else
         Remote = TargetSet & KiGetTbFlushProcessors() & ~Prcb->SetMember;
+
+    /* A descheduled vCPU can be flushed by the host when it runs again */
+    TbFlush = TbFlush && KiIpiPvTlbFlushEnabled();
+    if (Remote && TbFlush)
+        Remote = KiIpiFlushPreemptedTb(Remote);
+
     if (Remote)
     {
         KiIpiPublishPacket(Prcb, WorkerRoutine, Parameter1, Parameter2, Parameter3);
-        KiIpiDeliverPacket(Prcb, Remote);
+        KiIpiDeliverPacket(Prcb, Remote, TbFlush);
     }
 #endif
 
@@ -428,3 +452,31 @@ KiIpiSendRequest(
     KeLowerIrql(OldIrql);
 }
 
+VOID
+NTAPI
+KiIpiSendRequest(
+    _In_ KAFFINITY TargetSet,
+    _In_ PKIPI_WORKER WorkerRoutine,
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Parameter3)
+{
+    KiIpiSendRequestToTargets(TargetSet, WorkerRoutine, Parameter1, Parameter2, Parameter3, FALSE);
+}
+
+/*!
+ * \brief Like KiIpiSendRequest, for a worker that only flushes the TLB: a
+ *        target vCPU that the hypervisor has descheduled may instead be
+ *        flushed by the hypervisor before it runs again.
+ */
+VOID
+NTAPI
+KiIpiSendTbFlushRequest(
+    _In_ KAFFINITY TargetSet,
+    _In_ PKIPI_WORKER WorkerRoutine,
+    _In_ PVOID Parameter1,
+    _In_ PVOID Parameter2,
+    _In_ PVOID Parameter3)
+{
+    KiIpiSendRequestToTargets(TargetSet, WorkerRoutine, Parameter1, Parameter2, Parameter3, TRUE);
+}

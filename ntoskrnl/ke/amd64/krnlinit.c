@@ -202,6 +202,10 @@ KiSystemStartupBootStack(VOID)
     KfRaiseIrql(HIGH_LEVEL);
     if (Prcb->Number != 0)
     {
+#ifdef CONFIG_SMP
+        KiKvmInitializeProcessor(Prcb);
+#endif
+
         /* Become a target of all requests right before taking interrupts. Flushes
            sent above SYNCH_LEVEL meanwhile were local only, so flush once more */
         InterlockedOr64((PLONG64)&KeActiveProcessors, (LONG64)Prcb->SetMember);
