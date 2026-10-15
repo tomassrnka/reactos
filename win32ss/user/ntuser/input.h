@@ -143,6 +143,8 @@ BOOL FASTCALL UserFreeRawInput(PUSER_MESSAGE_QUEUE MessageQueue, HRAWINPUT hRawI
 VOID FASTCALL UserUpdatePrevRawInput(PTHREADINFO pti, CONST MSG *pMsg);
 VOID FASTCALL UserCleanupRawInput(PUSER_MESSAGE_QUEUE MessageQueue);
 VOID FASTCALL UserRawInputSendMouse(MOUSEINPUT *pmi);
+DWORD FASTCALL UserStripMouseDataFlags(DWORD dwFlags);
+SHORT FASTCALL UserClampWheelDelta(DWORD mouseData);
 VOID FASTCALL UserRawInputSendKeyboard(WORD wScan, WORD wVk, BOOL bUp, BOOL bExt, ULONG_PTR dwExtraInfo, UINT Message);
 
 /* IMM */

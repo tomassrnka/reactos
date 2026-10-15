@@ -267,8 +267,20 @@ VOID APIENTRY MsqRemoveWindowMessagesFromQueue(PWND pWindow);
    (message) == WM_NCRBUTTON##code || \
    (message) == WM_NCXBUTTON##code )
 
+/* The last mouse message is WM_MOUSEHWHEEL, whatever _WIN32_WINNT win32k is compiled for */
+#ifndef WM_MOUSEHWHEEL
+#define WM_MOUSEHWHEEL 0x020E
+#endif
+#ifndef MOUSEEVENTF_HWHEEL
+#define MOUSEEVENTF_HWHEEL 0x1000
+#endif
+#if (WM_MOUSELAST < WM_MOUSEHWHEEL)
+#undef WM_MOUSELAST
+#define WM_MOUSELAST WM_MOUSEHWHEEL
+#endif
+
 #define WM_NCMOUSEFIRST WM_NCMOUSEMOVE
-#define WM_NCMOUSELAST  (WM_NCMOUSEFIRST+(WM_MOUSELAST-WM_MOUSEFIRST))
+#define WM_NCMOUSELAST  (WM_NCMOUSEFIRST+(WM_XBUTTONDBLCLK-WM_MOUSEFIRST))
 
 #define IS_MOUSE_MESSAGE(message) \
     ((message >= WM_NCMOUSEFIRST && message <= WM_NCMOUSELAST) || \
