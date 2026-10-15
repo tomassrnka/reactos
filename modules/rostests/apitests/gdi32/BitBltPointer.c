@@ -147,6 +147,94 @@ DrawBitBltClipThrough(HDC hdc)
 }
 
 static void
+DrawCaptureBlt(HDC hdc)
+{
+    BitBlt(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, SRCCOPY | CAPTUREBLT);
+}
+
+static void
+DrawCaptureBltAround(HDC hdc)
+{
+    BitBlt(hdc, 50, 40, 60, 50, ghdcSrc, 9, 3, SRCCOPY | CAPTUREBLT);
+}
+
+static void
+DrawStretchSameSize(HDC hdc)
+{
+    StretchBlt(hdc, 20, 10, 120, 90, ghdcSrc, 20, 10, 120, 90, SRCCOPY);
+}
+
+static void
+DrawStretchSameSizeInvert(HDC hdc)
+{
+    StretchBlt(hdc, 30, 20, 100, 80, ghdcSrc, 4, 7, 100, 80, SRCINVERT);
+}
+
+static void
+DrawStretchDouble(HDC hdc)
+{
+    StretchBlt(hdc, 10, 10, 140, 100, ghdcSrc, 0, 0, 70, 50, SRCCOPY);
+}
+
+static void
+DrawStretchShrink(HDC hdc)
+{
+    StretchBlt(hdc, 30, 30, 90, 60, ghdcSrc, 0, 0, 160, 120, SRCCOPY);
+}
+
+static void
+DrawStretchFlipped(HDC hdc)
+{
+    StretchBlt(hdc, 10, 110, 140, -100, ghdcSrc, 10, 10, 140, 100, SRCCOPY);
+}
+
+static void
+DrawClipTwoRects(HDC hdc)
+{
+    /* A clip with a gap through the pointer, so the clip object has several rectangles */
+    HRGN hrgn = CreateRectRgn(0, 0, PTR_X + 10, HEIGHT);
+    HRGN hrgn2 = CreateRectRgn(PTR_X + 20, 0, WIDTH, HEIGHT);
+
+    CombineRgn(hrgn, hrgn, hrgn2, RGN_OR);
+    SelectClipRgn(hdc, hrgn);
+    BitBlt(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, SRCCOPY);
+    SelectClipRgn(hdc, NULL);
+    DeleteObject(hrgn);
+    DeleteObject(hrgn2);
+}
+
+static void
+DrawClipHole(HDC hdc)
+{
+    HRGN hrgn = CreateRectRgn(0, 0, WIDTH, HEIGHT);
+    HRGN hrgn2 = CreateRectRgn(PTR_X - 6, PTR_Y - 6, PTR_X + 10, PTR_Y + 30);
+
+    CombineRgn(hrgn, hrgn, hrgn2, RGN_DIFF);
+    SelectClipRgn(hdc, hrgn);
+    PatBlt(hdc, 0, 0, WIDTH, HEIGHT, DSTINVERT);
+    SelectClipRgn(hdc, NULL);
+    DeleteObject(hrgn);
+    DeleteObject(hrgn2);
+}
+
+static void
+DrawClipChanges(HDC hdc)
+{
+    /* One clip that holds the pointer, then one that does not, then none */
+    HRGN hrgn = CreateRectRgn(PTR_X - 20, PTR_Y - 20, PTR_X + 40, PTR_Y + 40);
+    HRGN hrgn2 = CreateRectRgn(0, 0, PTR_X - 20, HEIGHT);
+
+    SelectClipRgn(hdc, hrgn);
+    BitBlt(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, SRCCOPY);
+    SelectClipRgn(hdc, hrgn2);
+    PatBlt(hdc, 0, 0, WIDTH, HEIGHT, DSTINVERT);
+    SelectClipRgn(hdc, NULL);
+    BitBlt(hdc, PTR_X - 10, PTR_Y - 10, 30, 30, ghdcSrc, 40, 40, SRCINVERT);
+    DeleteObject(hrgn);
+    DeleteObject(hrgn2);
+}
+
+static void
 Check(const char *name, DRAWPROC proc)
 {
     ULONG *pulRef;
@@ -286,6 +374,16 @@ START_TEST(BitBltPointer)
     Check("MaskBlt", DrawMaskBlt);
     Check("BitBlt with a clip that misses the pointer", DrawBitBltClipLeft);
     Check("BitBlt with a clip through the pointer", DrawBitBltClipThrough);
+    Check("BitBlt with CAPTUREBLT", DrawCaptureBlt);
+    Check("BitBlt with CAPTUREBLT around the pointer", DrawCaptureBltAround);
+    Check("StretchBlt without scaling", DrawStretchSameSize);
+    Check("StretchBlt without scaling, SRCINVERT", DrawStretchSameSizeInvert);
+    Check("StretchBlt to twice the size", DrawStretchDouble);
+    Check("StretchBlt to a smaller size", DrawStretchShrink);
+    Check("StretchBlt flipped", DrawStretchFlipped);
+    Check("BitBlt with a clip of two rectangles through the pointer", DrawClipTwoRects);
+    Check("PatBlt with a clip that has a hole over the pointer", DrawClipHole);
+    Check("Clip that changes between operations", DrawClipChanges);
 
     DeleteDC(ghdcRead);
     DeleteObject(ghbmRead);
