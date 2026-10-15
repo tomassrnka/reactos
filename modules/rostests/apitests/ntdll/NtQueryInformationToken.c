@@ -871,6 +871,157 @@ QueryTokenOriginTests(
        Origin.OriginatingLogonSession.HighPart);
 }
 
+/*
+ * The NT 6 classes. On Windows 7 and 10 TokenElevation and TokenLinkedToken
+ * are fixed-size classes (a wrong length is STATUS_INFO_LENGTH_MISMATCH), the
+ * other ULONG classes give STATUS_BUFFER_TOO_SMALL; both report the size.
+ */
+static
+VOID
+QueryUlongClassTests(
+    _In_ HANDLE Token,
+    _In_ TOKEN_INFORMATION_CLASS Class,
+    _In_ BOOLEAN FixedSize,
+    _In_ ULONG ExpectedValue)
+{
+    NTSTATUS Status;
+    ULONG Buffer[4], Length;
+
+    Length = 0xdeadbeef;
+    Status = NtQueryInformationToken(Token, Class, NULL, 0, &Length);
+    ok(Status == (FixedSize ? STATUS_INFO_LENGTH_MISMATCH : STATUS_BUFFER_TOO_SMALL),
+       "Class %d: status 0x%lx\n", Class, Status);
+    ok(Length == sizeof(ULONG), "Class %d: length %lu\n", Class, Length);
+
+    Length = 0xdeadbeef;
+    Buffer[0] = 0xdeadbeef;
+    Status = NtQueryInformationToken(Token, Class, Buffer, sizeof(ULONG) - 1, &Length);
+    ok(Status == (FixedSize ? STATUS_INFO_LENGTH_MISMATCH : STATUS_BUFFER_TOO_SMALL),
+       "Class %d: status 0x%lx\n", Class, Status);
+    ok(Length == sizeof(ULONG), "Class %d: length %lu\n", Class, Length);
+    ok(Buffer[0] == 0xdeadbeef, "Class %d: buffer written 0x%lx\n", Class, Buffer[0]);
+
+    Length = 0xdeadbeef;
+    Buffer[0] = Buffer[1] = 0xdeadbeef;
+    Status = NtQueryInformationToken(Token, Class, Buffer, 2 * sizeof(ULONG), &Length);
+    ok(Status == (FixedSize ? STATUS_INFO_LENGTH_MISMATCH : STATUS_SUCCESS), "Class %d: status 0x%lx\n", Class, Status);
+    ok(Length == sizeof(ULONG), "Class %d: length %lu\n", Class, Length);
+    ok(Buffer[1] == 0xdeadbeef, "Class %d: second ULONG written 0x%lx\n", Class, Buffer[1]);
+
+    Length = 0xdeadbeef;
+    Buffer[0] = 0xdeadbeef;
+    Status = NtQueryInformationToken(Token, Class, Buffer, sizeof(ULONG), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok(Length == sizeof(ULONG), "Class %d: length %lu\n", Class, Length);
+    ok(Buffer[0] == ExpectedValue, "Class %d: value %lu, expected %lu\n", Class, Buffer[0], ExpectedValue);
+}
+
+static
+VOID
+QueryTokenVistaClassesTests(
+    _In_ HANDLE Token)
+{
+    NTSTATUS Status;
+    TOKEN_LINKED_TOKEN Linked[2];
+    PTOKEN_GROUPS Groups;
+    ULONG Length, i, Elevated;
+    HANDLE QueryToken;
+    BOOLEAN HaveLogonSid = FALSE;
+
+    /* The test runs as an administrator without UAC: a default elevation type, elevated */
+    Status = NtDuplicateToken(Token, TOKEN_QUERY, NULL, FALSE, TokenPrimary, &QueryToken);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = NtQueryInformationToken(QueryToken, TokenGroups, NULL, 0, &Length);
+    ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+    Groups = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    Elevated = 0;
+    if (Groups && NT_SUCCESS(NtQueryInformationToken(QueryToken, TokenGroups, Groups, Length, &Length)))
+    {
+        for (i = 0; i < Groups->GroupCount; i++)
+        {
+            PISID Sid = Groups->Groups[i].Sid;
+
+            if ((Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+                HaveLogonSid = TRUE;
+            if (Sid->SubAuthorityCount == 2 &&
+                Sid->SubAuthority[0] == SECURITY_BUILTIN_DOMAIN_RID &&
+                Sid->SubAuthority[1] == DOMAIN_ALIAS_RID_ADMINS &&
+                (Groups->Groups[i].Attributes & SE_GROUP_ENABLED))
+            {
+                Elevated = 1;
+            }
+        }
+    }
+    if (Groups)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Groups);
+
+    QueryUlongClassTests(QueryToken, TokenElevationType, FALSE, TokenElevationTypeDefault);
+    QueryUlongClassTests(QueryToken, TokenElevation, TRUE, Elevated);
+    QueryUlongClassTests(QueryToken, TokenVirtualizationAllowed, FALSE, 0);
+    QueryUlongClassTests(QueryToken, TokenVirtualizationEnabled, FALSE, 0);
+    QueryUlongClassTests(QueryToken, TokenUIAccess, FALSE, 0);
+
+    /* No linked token without UAC */
+    Length = 0xdeadbeef;
+    Status = NtQueryInformationToken(QueryToken, TokenLinkedToken, NULL, 0, &Length);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok(Length == sizeof(TOKEN_LINKED_TOKEN), "Length %lu\n", Length);
+    Length = 0xdeadbeef;
+    Status = NtQueryInformationToken(QueryToken, TokenLinkedToken, Linked, sizeof(Linked), &Length);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok(Length == sizeof(TOKEN_LINKED_TOKEN), "Length %lu\n", Length);
+    Length = 0xdeadbeef;
+    Linked[0].LinkedToken = (HANDLE)(ULONG_PTR)0xdeadbeef;
+    Status = NtQueryInformationToken(QueryToken, TokenLinkedToken, Linked, sizeof(Linked[0]), &Length);
+    ok_ntstatus(Status, STATUS_NO_SUCH_LOGON_SESSION);
+    ok(Linked[0].LinkedToken == (HANDLE)(ULONG_PTR)0xdeadbeef, "LinkedToken %p\n", Linked[0].LinkedToken);
+    ok(Length == sizeof(TOKEN_LINKED_TOKEN), "Length %lu\n", Length);
+
+    /* TokenLogonSid: TOKEN_GROUPS with the logon SID group of the token */
+    Length = 0xdeadbeef;
+    Status = NtQueryInformationToken(QueryToken, TokenLogonSid, NULL, 0, &Length);
+    if (HaveLogonSid)
+    {
+        ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+        ok(Length == sizeof(TOKEN_GROUPS) + RtlLengthRequiredSid(SECURITY_LOGON_IDS_RID_COUNT),
+           "Length %lu\n", Length);
+        Groups = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+        if (Groups)
+        {
+            ULONG Required = Length;
+
+            Status = NtQueryInformationToken(QueryToken, TokenLogonSid, Groups, Required - 1, &Length);
+            ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
+            ok(Length == Required, "Length %lu, expected %lu\n", Length, Required);
+
+            Status = NtQueryInformationToken(QueryToken, TokenLogonSid, Groups, Required, &Length);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            ok(Length == Required, "Length %lu, expected %lu\n", Length, Required);
+            if (NT_SUCCESS(Status))
+            {
+                PISID Sid = Groups->Groups[0].Sid;
+
+                ok(Groups->GroupCount == 1, "GroupCount %lu\n", Groups->GroupCount);
+                ok(Groups->Groups[0].Attributes == (SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_LOGON_ID),
+                   "Attributes 0x%lx\n", Groups->Groups[0].Attributes);
+                ok(Sid == (PSID)&Groups->Groups[1], "SID at %p, structure at %p\n", Sid, Groups);
+                ok(Sid->SubAuthorityCount == SECURITY_LOGON_IDS_RID_COUNT && Sid->SubAuthority[0] == SECURITY_LOGON_IDS_RID,
+                   "Not a logon SID\n");
+            }
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Groups);
+        }
+    }
+    else
+    {
+        skip("No logon SID in the process token\n");
+    }
+
+    NtClose(QueryToken);
+}
+
 START_TEST(NtQueryInformationToken)
 {
     NTSTATUS Status;
@@ -928,6 +1079,7 @@ START_TEST(NtQueryInformationToken)
     QueryTokenSessionIdTests(Token);
     QueryTokenIsSandboxInert(Token);
     QueryTokenOriginTests(Token);
+    QueryTokenVistaClassesTests(Token);
 
     NtClose(Token);
 }
