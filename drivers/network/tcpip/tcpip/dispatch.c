@@ -790,6 +790,9 @@ NTSTATUS DispTdiQueryInformation(
             Address->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
             Address->Address[0].Address[0].sin_port = AddrFile->Port;
             Address->Address[0].Address[0].in_addr = AddrFile->Address.Address.IPv4Address;
+            /* A connect from an unspecified address went out on one interface */
+            if (AddrIsUnspecified(&AddrFile->Address) && Endpoint->ConnectAddress)
+                Address->Address[0].Address[0].in_addr = Endpoint->ConnectAddress;
 			RtlZeroMemory(
 				&Address->Address[0].Address[0].sin_zero,
 				sizeof(Address->Address[0].Address[0].sin_zero));
