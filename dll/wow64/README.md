@@ -67,26 +67,99 @@ The mode-switch implementation is original ReactOS code. Wine's public
 `dlls/wow64cpu/cpu.c` was consulted as an architectural reference; no Wine
 implementation was copied into these DLLs.
 
+## Guest threads
+
+Thread creation captures the guest context and allocates a separate native
+translation stack. The native thread starts suspended with a startup marker;
+TEB32 and its guest stack bounds are installed before the creator can resume it.
+The native loader recognizes this marker and enters the existing i386 loader
+for TLS setup and DLL_THREAD_ATTACH. Guest ExitThread performs DLL_THREAD_DETACH
+and FLS cleanup, and kernel thread rundown releases both stacks. Stack guard
+faults update the TEB for the stack that faulted. Unmarked native helper threads
+retain native startup.
+
+Guest Get/SetThreadContext and the opt-in Wow64Get/SetThreadContext exports use
+an access-checked kernel APC. It selects the compatibility-mode trap context,
+saved translation state, or a suspended thread's captured startup context.
+The trap helpers capture and restore x87 state only for the current guest
+thread, without changing the creator's FPU when initializing a new thread.
+Guest NtCreateThreadEx accepts suspended creation and client-ID/TEB output
+attributes; other creation flags and attributes return STATUS_NOT_SUPPORTED.
+Creation retains an internal handle for setup and returns a handle with the
+requested access.
+
+Guest APC routines are encoded separately from native routine addresses. The
+native dispatcher builds an i386 APC frame and enters a nested CPU frame; its
+NtContinue resumes the interrupted native call before returning to the guest.
+Read/write I/O and supported device queries mark an IOSB32
+pointer explicitly, and the kernel records that layout in the IRP. Completion
+publishes the eight-byte status block before an event or APC becomes visible.
+Filesystem redirection state remains per thread, including across nested APCs.
+Completion-port thunks translate packet keys, contexts and IOSB32 results.
+Kernel returns restore the native GS base for WoW64 threads after compatibility
+code reloads a segment selector. The `wow64_segment_return` fixture exercises
+exception dispatch and subsequent services on the main and a secondary thread.
+
+The fixtures Wow64Threads, QueueUserAPC, Wow64ThreadApc and
+Wow64ThreadLifetime cover stress, TLS/FLS, loader notifications, redirection
+isolation, secondary SEH, asynchronous read/write completion, completion ports,
+fibers, integer/x87 context and thread lifetime. Wow64RemoteThread uses a native
+controller and two PE32 children to check cross-process creation and context
+changes. Wow64ThreadExitProcess emits a marker before exiting with live
+workers; its external runner must check both that marker and exit code zero.
+Use identical PE32 fixtures for native i386 and WoW64 comparisons.
+
 ## Current limits
 
-This is the phase-1 runtime, not general WoW64 compatibility:
+This remains an experimental runtime; the full Wine compatibility gate is
+separate from the focused fixtures:
 
-* Only initial-thread startup is supported. Thread creation, guest APCs,
-  guest SEH, win32k callbacks and GUI services need later work. Unhandled
-  compatibility-mode faults and explicit guest exception raises terminate
-  with the exception status. Native thunk captures use native SEH normally.
-* The guest stack is a fixed allocation. There is no stack growth, guest
-  context/debugger API, or CPU backend other than amd64/i386.
-* I/O with user APCs, event completion or asynchronous handles is rejected.
-  Pointer-bearing IOCTLs and most information classes are unimplemented.
+* GUI services and callbacks are translated by `wow64win`; its coverage tables
+  and README describe the implemented selectors and remaining limits.
+* The initial guest stack and native translation stacks use fixed allocations.
+  Secondary guest stacks can grow within the supplied reservation. Complete
+  debugger and floating-point context compatibility still needs validation.
+  The only CPU backend is amd64/i386.
+* Device control accepts the mount-manager DOS-volume-path query, TCP entity
+  queries and the AFD stream operations covered by `wow64_socket`. Accept
+  handles and send/receive WSABUF arrays are widened in user mode; AFD captures
+  them before returning pending. AFD owns native poll buffers through readiness,
+  timeout and cancellation, then packs the guest output before completing the
+  IOSB32. TDI handle replies and TCP query contexts use their guest layouts.
+  AFD also captures event-selection handles and packs network-event replies,
+  including event reset and rearming after a receive. Datagram-specific,
+  extended accept/connect and shared-context retrieval requests still need
+  translation. Other device controls and most information classes remain
+  unimplemented. Named-pipe listen/wait/transceive/peek/disconnect retain the
+  guest IOSB through pending completion; flushing accepts synchronous handles.
+* File locking uses the same retained guest IOSB contract, including event/APC
+  completion. Unlock waits for native completion before copying its IOSB.
+  The optional `wow64_file_lock --pending` conflict test exposes a shared
+  native debug assertion in FsRtlProcessFileLock; the ordinary fail-immediate
+  installer path is covered separately.
+* Job creation/opening, process assignment, termination, and basic/extended
+  limit setting capture guest handles and pointer-sized limits. Native job
+  semantics still apply; other job information classes require their own
+  translations. Current time-zone queries forward a fixed-width record.
 * CSR covers initial Base/console connection and the console operations
   implemented in `csr.c`. The Base static-data copy is a startup snapshot;
   live updates and INI mapping are not implemented. Console control falls
   back to termination; property and IME callbacks are unsupported.
-* DLL discovery selects `SysWOW64` and `KnownDlls32` for the i386 loader,
-  retaining application and other search directories in their original order.
-  General filesystem/registry redirection, environment rewriting, arbitrary
-  native/guest process creation, services and installers are not implemented.
+* DLL discovery selects `SysWOW64` and `KnownDlls32`, retaining application and
+  other search directories in their original order. GetSystemWow64Directory
+  reports the guest system directory to both bitnesses in enabled builds.
+  Filesystem/registry redirection and environment translation cover the phase-2 console subset.
+  Guest process creation resolves the executable in the guest and calls the
+  native creator with captured parent parameters. System32, SysWOW64, Sysnative
+  and the thread's redirection state select the executable architecture.
+  Extended startup attributes remain unsupported. The installer fixtures cover
+  additional file, token, COM and GUI paths; they are not complete API coverage.
+  Guest current-directory references own their path buffer and handle together,
+  retaining relative-path handles across directory changes. Explicit guest
+  version layers also cover RtlGetNtVersionNumbers, which MSYS consults after
+  RtlGetVersion; selecting a layer does not change the default system version.
+  Object-directory enumeration repacks counted names and type names with guest
+  pointers, including single-entry sizing, restart and continuation.
 * i386 ntdll must map at its preferred base. Guest image relocation remains
   subject to the existing i386 loader's restrictions.
 
