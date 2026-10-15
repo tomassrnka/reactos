@@ -4,6 +4,7 @@ include_directories(${REACTOS_SOURCE_DIR}/dll/win32/ieframe)
 list(APPEND SOURCE
     DownloadNames.c
     FileDownload.c
+    InternetShortcut.c
     MRUList.cpp
     WinList.cpp
     testlist.c
