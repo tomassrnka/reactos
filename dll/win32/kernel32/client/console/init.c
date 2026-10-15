@@ -565,13 +565,16 @@ ConDllInitialize(IN ULONG Reason,
         else if (Reason == DLL_PROCESS_DETACH)
         {
             /*
-             * Refuse further control dispatch. Do NOT take ConsoleLock: a handler may be
-             * running under it, and detach must never wait on arbitrary handler code. The
-             * dispatcher re-reads this flag under ConsoleLock before it runs any handler
-             * (RtlEnterCriticalSection is a full barrier and opaque to the compiler, so the
-             * read is fresh), so a dispatcher that acquires the lock after this store sees
-             * the cleared flag and starts no handler. ConsoleLock itself stays valid (it is
-             * never deleted) for any dispatcher already past the gate.
+             * This runs only at process shutdown: kernel32 is pinned at process init
+             * (LoadCount -1), so FreeLibrary never unloads it and this detach never runs
+             * while the process keeps going. ExitProcess has asked the kernel to end the
+             * other threads, but NtTerminateProcess(NULL) only queues termination APCs and
+             * does not wait, and thread creation is still allowed, so csrss may still inject
+             * a control-dispatcher thread here -- even before LdrpShutdownInProgress is set.
+             * Clear the flag without taking ConsoleLock -- detach must never wait on handler
+             * code. The dispatcher gates on RtlDllShutdownInProgress() and this flag, which
+             * narrows but does not close that injection window (see UF-33). ConsoleLock stays
+             * valid (it is never deleted).
              */
             ConsoleInitialized = FALSE;
         }
