@@ -171,6 +171,19 @@ SwitchFullScreen(PGUI_CONSOLE_DATA GuiData, BOOL FullScreen)
     }
 }
 
+/* SetConsoleDisplayMode, run by the window thread (GUI_WORK_DISPLAY_MODE) */
+VOID
+GuiConsoleSetFullScreen(PGUI_CONSOLE_DATA GuiData, BOOL FullScreen)
+{
+    PCONSRV_CONSOLE Console = GuiData->Console;
+
+    if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE)) return;
+
+    SwitchFullScreen(GuiData, FullScreen);
+
+    LeaveCriticalSection(&Console->Lock);
+}
+
 VOID
 GuiConsoleSwitchFullScreen(PGUI_CONSOLE_DATA GuiData)
 {
