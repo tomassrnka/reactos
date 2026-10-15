@@ -224,114 +224,118 @@ BasepConfigureAppCertDlls(IN PWSTR ValueName,
     return BasepSaveAppCertRegistryValue(Context, ValueName, ValueData);
 }
 
-NTSTATUS
-WINAPI
-BasepIsProcessAllowed(IN LPWSTR ApplicationName)
+static
+VOID
+BasepInitializeAppCert(VOID)
 {
     NTSTATUS Status, Status1;
     PWCHAR Buffer;
     UINT Length;
     HMODULE TrustLibrary;
-    PBASEP_APPCERT_ENTRY Entry;
-    ULONG CertFlag;
-    PLIST_ENTRY NextEntry;
     HANDLE KeyHandle;
     UNICODE_STRING CertKey = RTL_CONSTANT_STRING(L"\\Registry\\MACHINE\\System\\CurrentControlSet\\Control\\Session Manager\\AppCertDlls");
     OBJECT_ATTRIBUTES KeyAttributes = RTL_CONSTANT_OBJECT_ATTRIBUTES(&CertKey, OBJ_CASE_INSENSITIVE);
 
-    /* Try to initialize the certification subsystem */
-    while (!g_AppCertInitialized)
+    /* Defaults */
+    Status = STATUS_SUCCESS;
+    Buffer = NULL;
+
+    /* On embedded, there is a special DLL */
+    if (SharedUserData->SuiteMask & VER_SUITE_EMBEDDEDNT)
     {
-        /* Defaults */
-        Status = STATUS_SUCCESS;
-        Buffer = NULL;
-
-        /* Acquire the lock while initializing and see if we lost a race */
-        RtlEnterCriticalSection(&gcsAppCert);
-        if (g_AppCertInitialized) break;
-
-        /* On embedded, there is a special DLL */
-        if (SharedUserData->SuiteMask & VER_SUITE_EMBEDDEDNT)
+        /* Allocate a buffer for the name */
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(),
+                                 0,
+                                 MAX_PATH * sizeof(WCHAR) +
+                                 sizeof(UNICODE_NULL));
+        if (!Buffer)
         {
-            /* Allocate a buffer for the name */
-            Buffer = RtlAllocateHeap(RtlGetProcessHeap(),
-                                     0,
-                                     MAX_PATH * sizeof(WCHAR) +
-                                     sizeof(UNICODE_NULL));
-            if (!Buffer)
-            {
-                /* Fail if no memory */
-                Status = STATUS_NO_MEMORY;
-            }
-            else
-            {
-                /* Now get the system32 directory in our buffer, make sure it fits */
-                Length = GetSystemDirectoryW(Buffer, MAX_PATH - sizeof("EmbdTrst.DLL"));
-                if ((Length) && (Length <= MAX_PATH - sizeof("EmbdTrst.DLL")))
-                {
-                    /* Add a slash if needed, and add the embedded cert DLL name */
-                    if (Buffer[Length - 1] != '\\') Buffer[Length++] = '\\';
-                    RtlCopyMemory(&Buffer[Length],
-                                  L"EmbdTrst.DLL",
-                                  sizeof(L"EmbdTrst.DLL"));
-
-                    /* Try to load it */
-                    TrustLibrary = LoadLibraryW(Buffer);
-                    if (TrustLibrary)
-                    {
-                        /* And extract the special function out of it */
-                        fEmbeddedCertFunc = (PVOID)GetProcAddress(TrustLibrary,
-                                                                  "ImageOkToRunOnEmbeddedNT");
-                    }
-                }
-
-                /* If we didn't get this far, set a failure code */
-                if (!fEmbeddedCertFunc) Status = STATUS_UNSUCCESSFUL;
-            }
+            /* Fail if no memory */
+            Status = STATUS_NO_MEMORY;
         }
         else
         {
-            /* Other systems have a registry entry for this */
-            Status1 = NtOpenKey(&KeyHandle, KEY_READ, &KeyAttributes);
-            if (NT_SUCCESS(Status1))
+            /* Now get the system32 directory in our buffer, make sure it fits */
+            Length = GetSystemDirectoryW(Buffer, MAX_PATH - sizeof("EmbdTrst.DLL"));
+            if ((Length) && (Length <= MAX_PATH - sizeof("EmbdTrst.DLL")))
             {
-                /* Close it, we'll query it through Rtl */
-                NtClose(KeyHandle);
+                /* Add a slash if needed, and add the embedded cert DLL name */
+                if (Buffer[Length - 1] != '\\') Buffer[Length++] = '\\';
+                RtlCopyMemory(&Buffer[Length],
+                              L"EmbdTrst.DLL",
+                              sizeof(L"EmbdTrst.DLL"));
 
-                /* Do the query, which will call a special callback */
-                Status = RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
-                                                L"Session Manager",
-                                                BasepAppCertTable,
-                                                NULL,
-                                                NULL);
-                if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+                /* Try to load it */
+                TrustLibrary = LoadLibraryW(Buffer);
+                if (TrustLibrary)
                 {
-                    Status = STATUS_SUCCESS;
+                    /* And extract the special function out of it */
+                    fEmbeddedCertFunc = (PVOID)GetProcAddress(TrustLibrary,
+                                                              "ImageOkToRunOnEmbeddedNT");
                 }
             }
-        }
 
-        /* Free any buffer if we had one */
-        if (Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
-
-        /* Check for errors, or a missing embedded/custom certification DLL */
-        if (!NT_SUCCESS(Status) ||
-            (!(fEmbeddedCertFunc) && (IsListEmpty(&BasepAppCertDllsList))))
-        {
-            /* The subsystem is not active on this machine, so give up */
-            g_HaveAppCerts = FALSE;
-            g_AppCertStatus = Status;
+            /* If we didn't get this far, set a failure code */
+            if (!fEmbeddedCertFunc) Status = STATUS_UNSUCCESSFUL;
         }
-        else
-        {
-            /* We have certification DLLs active, remember this */
-            g_HaveAppCerts = TRUE;
-        }
-
-        /* We are done the initialization phase, release the lock */
-        g_AppCertInitialized = TRUE;
-        RtlLeaveCriticalSection(&gcsAppCert);
     }
+    else
+    {
+        /* Other systems have a registry entry for this */
+        Status1 = NtOpenKey(&KeyHandle, KEY_READ, &KeyAttributes);
+        if (NT_SUCCESS(Status1))
+        {
+            /* Close it, we'll query it through Rtl */
+            NtClose(KeyHandle);
+
+            /* Do the query, which will call a special callback */
+            Status = RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
+                                            L"Session Manager",
+                                            BasepAppCertTable,
+                                            NULL,
+                                            NULL);
+            if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            {
+                Status = STATUS_SUCCESS;
+            }
+        }
+    }
+
+    /* Free any buffer if we had one */
+    if (Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+
+    /* Check for errors, or a missing embedded/custom certification DLL */
+    if (!NT_SUCCESS(Status) ||
+        (!(fEmbeddedCertFunc) && (IsListEmpty(&BasepAppCertDllsList))))
+    {
+        /* The subsystem is not active on this machine, so give up */
+        g_HaveAppCerts = FALSE;
+        g_AppCertStatus = Status;
+    }
+    else
+    {
+        /* We have certification DLLs active, remember this */
+        g_HaveAppCerts = TRUE;
+    }
+}
+
+NTSTATUS
+WINAPI
+BasepIsProcessAllowed(IN LPWSTR ApplicationName)
+{
+    NTSTATUS Status;
+    PBASEP_APPCERT_ENTRY Entry;
+    ULONG CertFlag;
+    PLIST_ENTRY NextEntry;
+
+    /* The lock is taken on every call: it also orders the reads below after the initialization */
+    RtlEnterCriticalSection(&gcsAppCert);
+    if (!g_AppCertInitialized)
+    {
+        BasepInitializeAppCert();
+        g_AppCertInitialized = TRUE;
+    }
+    RtlLeaveCriticalSection(&gcsAppCert);
 
     /* If there's no certification DLLs present, return the failure code */
     if (!g_HaveAppCerts) return g_AppCertStatus;
