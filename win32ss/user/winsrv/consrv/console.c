@@ -1311,9 +1311,13 @@ ConSrvRemoveConsole(
  * CreateRemoteThread takes the CSR process lock (CsrCreateRemoteThread), and
  * CSR holds that lock while it calls us to lock a console (ConSrvNewProcess,
  * SrvAttachConsole), so it must never be called with a console locked.
- * An event already queued for the same process is not queued again, which
- * bounds the queue. CtrlEventLock is a leaf lock.
+ * An event is not queued when the newest queued event of its process is the
+ * same one; other events are all kept, in order. The queue is capped.
+ * Without the worker, requests fail: delivering from the caller would bring
+ * back the lock order inversion. CtrlEventLock is a leaf lock.
  */
+#define CONSRV_MAX_CTRL_EVENTS 1024
+
 typedef struct _CONSRV_CTRL_EVENT
 {
     LIST_ENTRY ListEntry;
@@ -1326,7 +1330,8 @@ typedef struct _CONSRV_CTRL_EVENT
 static RTL_CRITICAL_SECTION CtrlEventLock;
 static LIST_ENTRY CtrlEventQueue;
 static HANDLE CtrlEventWake;
-static BOOLEAN CtrlEventWorker;
+static ULONG CtrlEventCount;
+static NTSTATUS CtrlEventStatus = STATUS_UNSUCCESSFUL;
 
 static NTSTATUS
 ConSrvSendCtrlEvent(IN HANDLE ProcessHandle,
@@ -1392,6 +1397,7 @@ ConSrvCtrlEventThread(IN PVOID Parameter)
                 break;
             }
             Entry = RemoveHeadList(&CtrlEventQueue);
+            CtrlEventCount--;
             RtlLeaveCriticalSection(&CtrlEventLock);
 
             Event = CONTAINING_RECORD(Entry, CONSRV_CTRL_EVENT, ListEntry);
@@ -1418,6 +1424,7 @@ ConSrvInitCtrlEvents(VOID)
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("CONSRV: Cannot create the control event wake event, Status = 0x%08lx\n", Status);
+        CtrlEventStatus = Status;
         return;
     }
 
@@ -1425,13 +1432,15 @@ ConSrvInitCtrlEvents(VOID)
                                  ConSrvCtrlEventThread, NULL, &Thread, &ClientId);
     if (!NT_SUCCESS(Status))
     {
-        /* Control events are then delivered by the caller */
         DPRINT1("CONSRV: Cannot create the control event thread, Status = 0x%08lx\n", Status);
+        NtClose(CtrlEventWake);
+        CtrlEventWake = NULL;
+        CtrlEventStatus = Status;
         return;
     }
     CsrAddStaticServerThread(Thread, &ClientId, 0);
     NtResumeThread(Thread, NULL);
-    CtrlEventWorker = TRUE;
+    CtrlEventStatus = STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -1462,7 +1471,7 @@ ConSrvConsoleCtrlEvent(IN ULONG CtrlEvent,
     PLIST_ENTRY Entry;
 
     if (ProcessData->CtrlRoutine == NULL) return STATUS_SUCCESS;
-    if (!CtrlEventWorker) return ConSrvConsoleCtrlEventTimeout(CtrlEvent, ProcessData, 0);
+    if (!NT_SUCCESS(CtrlEventStatus)) return CtrlEventStatus;
 
     Event = ConsoleAllocHeap(0, sizeof(*Event));
     if (!Event) return STATUS_NO_MEMORY;
@@ -1485,24 +1494,31 @@ ConSrvConsoleCtrlEvent(IN ULONG CtrlEvent,
     Event->CtrlEvent = CtrlEvent;
 
     RtlEnterCriticalSection(&CtrlEventLock);
-    for (Entry = CtrlEventQueue.Flink; Entry != &CtrlEventQueue; Entry = Entry->Flink)
+
+    /* Newest queued event of this process */
+    for (Entry = CtrlEventQueue.Blink; Entry != &CtrlEventQueue; Entry = Entry->Blink)
     {
         Queued = CONTAINING_RECORD(Entry, CONSRV_CTRL_EVENT, ListEntry);
-        if (Queued->ProcessId == Event->ProcessId &&
-            Queued->CtrlRoutine == Event->CtrlRoutine &&
-            Queued->CtrlEvent == Event->CtrlEvent)
-        {
-            break;
-        }
+        if (Queued->ProcessId == Event->ProcessId) break;
     }
-    if (Entry != &CtrlEventQueue)
+    if (Entry != &CtrlEventQueue &&
+        Queued->CtrlRoutine == Event->CtrlRoutine &&
+        Queued->CtrlEvent == Event->CtrlEvent)
     {
         RtlLeaveCriticalSection(&CtrlEventLock);
         NtClose(Event->ProcessHandle);
         ConsoleFreeHeap(Event);
         return STATUS_SUCCESS;
     }
+    if (CtrlEventCount >= CONSRV_MAX_CTRL_EVENTS)
+    {
+        RtlLeaveCriticalSection(&CtrlEventLock);
+        NtClose(Event->ProcessHandle);
+        ConsoleFreeHeap(Event);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
     InsertTailList(&CtrlEventQueue, &Event->ListEntry);
+    CtrlEventCount++;
     RtlLeaveCriticalSection(&CtrlEventLock);
     NtSetEvent(CtrlEventWake, NULL);
 
