@@ -78,6 +78,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExUuid.c
     ntos_fsrtl/FsRtlDissect.c
     ntos_fsrtl/FsRtlExpression.c
+    ntos_fsrtl/FsRtlFileLock.c
     ntos_fsrtl/FsRtlLegal.c
     ntos_fsrtl/FsRtlMcb.c
     ntos_fsrtl/FsRtlPerStreamContext.c
