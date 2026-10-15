@@ -759,7 +759,7 @@ MmCreateVirtualMappingUnsafeEx(
         {
             if (Pfn1->u2.ShareCount == 0)
                 Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(ProtectionMask);
-            else if (Pfn1->u3.e1.CacheAttribute != MiNotMapped)
+            else if (Pfn1->u3.e1.CacheAttribute != MiNotMapped) /* defensive: RosMm pages start MiCached */
                 MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
         }
 
@@ -941,7 +941,8 @@ MiSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect, BOOLEAN Phys
     TempPte.u.Long |= MmProtectToPteMask[ProtectionMask];
     TempPte.u.Hard.Owner = 1;
 
-    /* A RosMm page keeps the caching type its PFN records, as in MiFlushTbAndCapture */
+    /* A RosMm page keeps the caching type its PFN records, as in MiFlushTbAndCapture.
+       RosMm pages start MiCached, so the MiNotMapped test is defensive */
     Pfn1 = PhysicalView ? NULL : MiGetPfnEntry(TempPte.u.Hard.PageFrameNumber);
     if ((Pfn1 != NULL) && MI_IS_ROS_PFN(Pfn1) && (Pfn1->u3.e1.CacheAttribute != MiNotMapped))
         MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
