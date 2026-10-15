@@ -12,17 +12,18 @@
 
 #include <debug.h>
 
-/* Make room for one more entity. The list holds one entity per address file,
-   so it grows with the number of sockets. Called and returns with the lock held */
+/* Make room for Needed more entities. The list holds one entity per address
+   file, so it grows with the number of sockets. Called and returns with the
+   lock held; the lock is dropped while it allocates */
 static
 BOOLEAN
-GrowEntityList(PKIRQL OldIrql)
+GrowEntityList(PKIRQL OldIrql, ULONG Needed)
 {
     TDIEntityInfo *NewList, *OldList = NULL;
     PUCHAR NewUsed, OldUsed = NULL;
     ULONG Max;
 
-    while (EntityCount == EntityMax)
+    while (EntityMax - EntityCount < Needed)
     {
         Max = EntityMax;
         TcpipReleaseSpinLock(&EntityListLock, *OldIrql);
@@ -67,41 +68,54 @@ GrowEntityList(PKIRQL OldIrql)
     return TRUE;
 }
 
-NTSTATUS AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
+/* Publish Count entities together: room for all of them is made first, so
+   either all appear in one hold of the lock or none does, and nothing fails
+   once a reader can see one of them */
+NTSTATUS AddEntities(const TDI_ENTITY_ADD *Entries, ULONG Count)
 {
     KIRQL OldIrql;
-    ULONG i, Instance;
+    ULONG i, j, Instance;
 
     TcpipAcquireSpinLock(&EntityListLock, &OldIrql);
 
-    if (!GrowEntityList(&OldIrql))
+    if (!GrowEntityList(&OldIrql, Count))
     {
         TcpipReleaseSpinLock(&EntityListLock, OldIrql);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* The lowest instance number this type does not use yet. Only
-       EntityCount entities exist, so it is at most EntityCount */
-    RtlZeroMemory(EntityInstanceUsed, EntityCount + 1);
-    for (i = 0; i < EntityCount; i++)
+    for (j = 0; j < Count; j++)
     {
-        if (EntityList[i].tei_entity == EntityType &&
-            EntityList[i].tei_instance <= EntityCount)
+        /* The lowest instance number this type does not use yet. Only
+           EntityCount entities exist, so it is at most EntityCount */
+        RtlZeroMemory(EntityInstanceUsed, EntityCount + 1);
+        for (i = 0; i < EntityCount; i++)
         {
-            EntityInstanceUsed[EntityList[i].tei_instance] = TRUE;
+            if (EntityList[i].tei_entity == Entries[j].EntityType &&
+                EntityList[i].tei_instance <= EntityCount)
+            {
+                EntityInstanceUsed[EntityList[i].tei_instance] = TRUE;
+            }
         }
-    }
-    for (Instance = 0; EntityInstanceUsed[Instance]; Instance++);
+        for (Instance = 0; EntityInstanceUsed[Instance]; Instance++);
 
-    EntityList[EntityCount].tei_entity = EntityType;
-    EntityList[EntityCount].tei_instance = Instance;
-    EntityList[EntityCount].context = Context;
-    EntityList[EntityCount].flags = Flags;
-    EntityCount++;
+        EntityList[EntityCount].tei_entity = Entries[j].EntityType;
+        EntityList[EntityCount].tei_instance = Instance;
+        EntityList[EntityCount].context = Entries[j].Context;
+        EntityList[EntityCount].flags = Entries[j].Flags;
+        EntityCount++;
+    }
 
     TcpipReleaseSpinLock(&EntityListLock, OldIrql);
 
     return STATUS_SUCCESS;
+}
+
+NTSTATUS AddEntity(ULONG EntityType, PVOID Context, ULONG Flags)
+{
+    TDI_ENTITY_ADD Entry = { EntityType, Context, Flags };
+
+    return AddEntities(&Entry, 1);
 }
 
 VOID RemoveEntityByContext(PVOID Context)

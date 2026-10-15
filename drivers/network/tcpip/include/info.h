@@ -163,6 +163,15 @@ NTSTATUS InsertTDIInterfaceEntity( PIP_INTERFACE Interface );
 
 VOID RemoveTDIInterfaceEntity( PIP_INTERFACE Interface );
 
+typedef struct _TDI_ENTITY_ADD {
+    ULONG EntityType;
+    PVOID Context;
+    ULONG Flags;
+} TDI_ENTITY_ADD;
+
+NTSTATUS AddEntities(const TDI_ENTITY_ADD *Entries,
+                     ULONG Count);
+
 NTSTATUS AddEntity(ULONG EntityType,
                    PVOID Context,
                    ULONG Flags);
