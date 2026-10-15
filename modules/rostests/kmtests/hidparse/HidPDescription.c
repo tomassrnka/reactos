@@ -128,6 +128,210 @@ static UCHAR PowerProEliteDescriptor[] = {
 };
 C_ASSERT(sizeof(PowerProEliteDescriptor) == 148);
 
+//
+// CVE-class regression inputs: untrusted report descriptors that drove
+// unchecked size arithmetic, out-of-bounds reads or unbounded recursion in the
+// parser. Each must fail cleanly (an error NTSTATUS, no pool corruption, no
+// bugcheck) rather than succeed or crash. Run under Driver Verifier / special
+// pool so the pre-fix out-of-bounds writes corrupt visibly.
+//
+
+/* Report Count 0x40000000: count * sizeof(HID_REPORT_ITEM) wrapped the
+ * allocation to a few dozen bytes, then the item loop wrote past it. */
+static UCHAR WrapReportCountDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop) */
+    0x09, 0x06,                   /* Usage (Keyboard) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0x75, 0x08,                   /*   Report Size (8) */
+    0x97, 0x00, 0x00, 0x00, 0x40, /*   Report Count (0x40000000) */
+    0x09, 0x00,                   /*   Usage (0) */
+    0x81, 0x02,                   /*   Input (Data,Var,Abs) */
+    0xC0                          /* End Collection */
+};
+
+/* A truncated final item claims four value bytes but only one is present;
+ * the parser read past the end of the descriptor buffer. */
+static UCHAR TruncatedItemDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop) */
+    0x09, 0x06,                   /* Usage (Keyboard) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0x27, 0xFF                    /* Logical Maximum (size 4) but only 1 byte */
+};
+
+/* Reserved long-item prefix 0xFD, descriptor ends before the long-item tag
+ * byte: the parser read the nonexistent third header byte. */
+static UCHAR ReservedLongItemDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop) */
+    0x09, 0x06,                   /* Usage (Keyboard) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0xFD, 0x00                    /* reserved type-3 prefix + bDataSize, no tag */
+};
+
+/* 2000 report items in one collection: the full context size exceeds the
+ * USHORT PreparsedDataLength, which was silently truncated on export. */
+static UCHAR OversizeContextDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop) */
+    0x09, 0x06,                   /* Usage (Keyboard) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0x75, 0x01,                   /*   Report Size (1) */
+    0x96, 0xD0, 0x07,             /*   Report Count (2000) */
+    0x09, 0x00,                   /*   Usage (0) */
+    0x81, 0x02,                   /*   Input (Data,Var,Abs) */
+    0xC0                          /* End Collection */
+};
+
+/* A 64-bit vendor field (some real devices use these). It must parse: the
+ * parser keeps wide fields; only value extraction above 32 bits is refused. */
+static UCHAR WideFieldDescriptor[] = {
+    0x06, 0x00, 0xFF,             /* Usage Page (Vendor FF00) */
+    0x09, 0x01,                   /* Usage (1) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0x75, 0x40,                   /*   Report Size (64) */
+    0x95, 0x01,                   /*   Report Count (1) */
+    0x09, 0x02,                   /*   Usage (2) */
+    0x81, 0x02,                   /*   Input (Data,Var,Abs) */
+    0xC0                          /* End Collection */
+};
+
+/* A zero-width data field must not create a report item (it would otherwise
+ * produce a ByteOffset at the report end that the value APIs read past). The
+ * descriptor is still valid and must parse. */
+static UCHAR ZeroWidthFieldDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop) */
+    0x09, 0x02,                   /* Usage (Mouse) */
+    0xA1, 0x01,                   /* Collection (Application) */
+    0x75, 0x08, 0x95, 0x01, 0x09, 0x30, 0x81, 0x02, /* one 8-bit field */
+    0x75, 0x00, 0x95, 0x01, 0x09, 0x31, 0x81, 0x02, /* zero-width field */
+    0xC0                          /* End Collection */
+};
+
+static
+VOID
+TestMalformedDescriptor(
+    IN PUCHAR Descriptor,
+    IN ULONG Length,
+    IN PCSTR Name)
+{
+    NTSTATUS Status;
+    HIDP_DEVICE_DESC DeviceDescription;
+
+    //
+    // poison the output so a failing call that forgets to clear it is caught
+    //
+    RtlFillMemory(&DeviceDescription, sizeof(DeviceDescription), 0x55);
+
+    //
+    // the only requirement is that this returns (no bugcheck / corruption)
+    // and reports failure for a malformed descriptor
+    //
+    Status = HidP_GetCollectionDescription(Descriptor, Length, NonPagedPool, &DeviceDescription);
+    ok(!NT_SUCCESS(Status), "%s: expected failure, got %lx\n", Name, Status);
+
+    //
+    // a clean failure leaves no stale pointers or lengths behind
+    //
+    if (!NT_SUCCESS(Status))
+    {
+        ok(DeviceDescription.CollectionDesc == NULL, "%s: CollectionDesc not cleared\n", Name);
+        ok(DeviceDescription.CollectionDescLength == 0, "%s: CollectionDescLength not cleared\n", Name);
+        ok(DeviceDescription.ReportIDs == NULL, "%s: ReportIDs not cleared\n", Name);
+        ok(DeviceDescription.ReportIDsLength == 0, "%s: ReportIDsLength not cleared\n", Name);
+    }
+    else
+    {
+        //
+        // if it unexpectedly succeeded, release whatever it built
+        //
+        HidP_FreeCollectionDescription(&DeviceDescription);
+    }
+}
+
+static
+VOID
+TestAcceptedDescriptor(
+    IN PUCHAR Descriptor,
+    IN ULONG Length,
+    IN PCSTR Name)
+{
+    NTSTATUS Status;
+    HIDP_DEVICE_DESC DeviceDescription;
+
+    RtlFillMemory(&DeviceDescription, sizeof(DeviceDescription), 0x55);
+    Status = HidP_GetCollectionDescription(Descriptor, Length, NonPagedPool, &DeviceDescription);
+    ok(NT_SUCCESS(Status), "%s: expected success, got %lx\n", Name, Status);
+    if (NT_SUCCESS(Status))
+        HidP_FreeCollectionDescription(&DeviceDescription);
+}
+
+static
+VOID
+TestDeepCollections(VOID)
+{
+    NTSTATUS Status;
+    HIDP_DEVICE_DESC DeviceDescription;
+    PUCHAR Descriptor;
+    ULONG Length, Index, Offset;
+    const ULONG Depth = 512; /* above the parser's nesting cap */
+
+    //
+    // 2 bytes of header + Depth open + Depth close collections
+    //
+    Length = 4 + Depth * 2 * 2;
+    Descriptor = ExAllocatePoolWithTag(NonPagedPool, Length, 'tseT');
+    if (skip(Descriptor != NULL, "out of memory\n"))
+        return;
+
+    Offset = 0;
+    Descriptor[Offset++] = 0x05; Descriptor[Offset++] = 0x01; /* Usage Page */
+    Descriptor[Offset++] = 0x09; Descriptor[Offset++] = 0x06; /* Usage */
+    for (Index = 0; Index < Depth; Index++)
+    {
+        Descriptor[Offset++] = 0xA1; Descriptor[Offset++] = 0x01; /* Collection(App) */
+    }
+    for (Index = 0; Index < Depth; Index++)
+    {
+        Descriptor[Offset++] = 0xC0; Descriptor[Offset++] = 0x00; /* End Collection */
+    }
+
+    RtlFillMemory(&DeviceDescription, sizeof(DeviceDescription), 0x55);
+    Status = HidP_GetCollectionDescription(Descriptor, Length, NonPagedPool, &DeviceDescription);
+    ok(!NT_SUCCESS(Status), "DeepCollections: expected failure, got %lx\n", Status);
+    if (NT_SUCCESS(Status))
+        HidP_FreeCollectionDescription(&DeviceDescription);
+
+    ExFreePoolWithTag(Descriptor, 'tseT');
+}
+
+static
+VOID
+TestPushOverflow(VOID)
+{
+    NTSTATUS Status;
+    HIDP_DEVICE_DESC DeviceDescription;
+    PUCHAR Descriptor;
+    ULONG Length, Index, Offset;
+    const ULONG Count = 512; /* above the parser's global push-stack cap */
+
+    Length = 4 + Count;
+    Descriptor = ExAllocatePoolWithTag(NonPagedPool, Length, 'tseT');
+    if (skip(Descriptor != NULL, "out of memory\n"))
+        return;
+
+    Offset = 0;
+    Descriptor[Offset++] = 0x05; Descriptor[Offset++] = 0x01; /* Usage Page */
+    Descriptor[Offset++] = 0x09; Descriptor[Offset++] = 0x06; /* Usage */
+    for (Index = 0; Index < Count; Index++)
+        Descriptor[Offset++] = 0xA4; /* Push (global, size 0) */
+
+    RtlFillMemory(&DeviceDescription, sizeof(DeviceDescription), 0x55);
+    Status = HidP_GetCollectionDescription(Descriptor, Length, NonPagedPool, &DeviceDescription);
+    ok(!NT_SUCCESS(Status), "PushOverflow: expected failure, got %lx\n", Status);
+    if (NT_SUCCESS(Status))
+        HidP_FreeCollectionDescription(&DeviceDescription);
+
+    ExFreePoolWithTag(Descriptor, 'tseT');
+}
+
 static
 VOID
 TestGetCollectionDescription(VOID)
@@ -233,6 +437,22 @@ TestGetCollectionDescription(VOID)
         }
         HidP_FreeCollectionDescription(&DeviceDescription);
     }
+
+    //
+    // malformed descriptors: must fail cleanly, never corrupt pool or bugcheck
+    //
+    TestMalformedDescriptor(WrapReportCountDescriptor, sizeof(WrapReportCountDescriptor), "WrapReportCount");
+    TestMalformedDescriptor(TruncatedItemDescriptor, sizeof(TruncatedItemDescriptor), "TruncatedItem");
+    TestMalformedDescriptor(ReservedLongItemDescriptor, sizeof(ReservedLongItemDescriptor), "ReservedLongItem");
+    TestMalformedDescriptor(OversizeContextDescriptor, sizeof(OversizeContextDescriptor), "OversizeContext");
+    TestDeepCollections();
+    TestPushOverflow();
+
+    //
+    // these are valid and must still parse after the hardening
+    //
+    TestAcceptedDescriptor(WideFieldDescriptor, sizeof(WideFieldDescriptor), "WideField");
+    TestAcceptedDescriptor(ZeroWidthFieldDescriptor, sizeof(ZeroWidthFieldDescriptor), "ZeroWidthField");
 }
 
 NTSTATUS
