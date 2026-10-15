@@ -161,7 +161,8 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
             break;
     }
 
-    ASSERT(ConsoleInitialized);
+    /* The process is exiting: kernel32 has detached and ConsoleLock is gone */
+    if (!ConsoleInitialized) ExitThread(0);
 
     RtlEnterCriticalSection(&ConsoleLock);
 
