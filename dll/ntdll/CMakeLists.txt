@@ -48,6 +48,7 @@ list(APPEND SOURCE
     ldr/ldrutils.c
     ldr/verifier.c
     rtl/apisetquery.c
+    rtl/capsid.c
     rtl/strcpy_s.c
     rtl/utf8.c)
 

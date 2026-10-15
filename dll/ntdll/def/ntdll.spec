@@ -759,6 +759,7 @@
 @ stdcall RtlDecodeSystemPointer(ptr)
 @ stdcall RtlDecompressBuffer(long ptr long ptr long ptr)
 @ stdcall RtlDecompressFragment(long ptr long ptr long long ptr ptr)
+@ stdcall RtlDeriveCapabilitySidsFromName(ptr ptr ptr)
 @ stdcall RtlDefaultNpAcl(ptr)
 @ stdcall RtlDelete(ptr)
 @ stdcall RtlDeleteAce(ptr long)
