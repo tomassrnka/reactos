@@ -66,6 +66,10 @@ SysWOW64/sensapi.dll
 SysWOW64/sfc.dll
 SysWOW64/sfc_os.dll
 SysWOW64/winmm.dll
+SysWOW64/avifil32.dll
+SysWOW64/msacm32.dll
+SysWOW64/msvfw32.dll
+SysWOW64/ucrtbase.dll
 SysWOW64/shlwapi.dll
 SysWOW64/userenv.dll
 SysWOW64/usp10.dll
@@ -89,6 +93,7 @@ SysWOW64/notepad.exe
 SysWOW64/regedit.exe
 SysWOW64/regsvr32.exe
 SysWOW64/cmd.exe
+SysWOW64/msiexec.exe
 
 # Both guest common-control activation contexts share the wide guest DLL.
 winsxs/x86_microsoft.windows.common-controls_6595b64144ccf1df_5.82.2600.2982_none_deadbeef/comctl32.dll
