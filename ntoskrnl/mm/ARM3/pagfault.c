@@ -753,6 +753,10 @@ MiResolveDemandZeroFault(IN PVOID Address,
         if (Process > HYDRA_PROCESS) Process->NumberOfPrivatePages++;
     }
 
+    /* A previous owner's write-back system PTE must be gone before the page is mapped another way */
+    if (MI_PFN_ELEMENT(PageFrameNumber)->u3.e1.CacheAttribute != MiCached)
+        MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
     /* Zero the page if need be */
     if (NeedZero) MiZeroPfn(PageFrameNumber);
 
@@ -1148,7 +1152,14 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
      * consumed guard page may have changed meanwhile
      */
     if (Pfn1->u3.e1.PrototypePte == 0)
+    {
         Pfn1->OriginalPte.u.Soft.Protection = PointerPte->u.Trans.Protection;
+
+        /* It also comes back with that protection's caching type, as on Server 2008 R2 */
+        Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(PointerPte->u.Trans.Protection);
+        if (Pfn1->u3.e1.CacheAttribute != MiCached)
+            MiFlushReleasedSystemPtesBeforeUncachedMapping();
+    }
     TempPte.u.Long = (PointerPte->u.Long & ~0xFFF) |
                      (MmProtectToPteMask[PointerPte->u.Trans.Protection]) |
                      MiDetermineUserGlobalPteMask(PointerPte);
@@ -1264,6 +1275,7 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
     {
         PFN_NUMBER PageFrameIndex, ProtoPageFrameIndex;
         ULONG Color;
+        MI_PFN_CACHE_ATTRIBUTE CacheAttribute;
 
         /* Resolve the proto fault as if it was a read operation */
         Status = MiResolveProtoPteFault(FALSE,
@@ -1306,6 +1318,12 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
             return STATUS_NO_MEMORY;
         }
 
+        /* Copy through a mapping of the type the private copy is mapped with */
+        Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
+        CacheAttribute = MiCacheAttributeFromProtection(Protection);
+        Pfn1->u3.e1.CacheAttribute = CacheAttribute;
+        if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
         /* Perform the copy */
         MiCopyPfn(PageFrameIndex, ProtoPageFrameIndex);
 
@@ -1314,6 +1332,7 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
            so this flushes the TB, with the PFN lock released for the wait */
         OldIrql = MiReplaceSharedPte(PointerPte, Address, Process, PointerProtoPte, PageFrameIndex, OldIrql);
         Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
+        Pfn1->u3.e1.CacheAttribute = CacheAttribute;
 
         /* Fix the protection */
         Protection &= ~MM_WRITECOPY;
@@ -2362,6 +2381,7 @@ UserFault:
             {
                 PFN_NUMBER PageFrameIndex, OldPageFrameIndex;
                 PMMPFN Pfn1;
+                MI_PFN_CACHE_ATTRIBUTE CacheAttribute;
 
                 LockIrql = MiAcquirePfnLock();
 
@@ -2380,6 +2400,11 @@ UserFault:
                 }
                 OldPageFrameIndex = PFN_FROM_PTE(&TempPte);
 
+                /* The private copy keeps the type of the mapping it replaces; copy through a mapping of it */
+                CacheAttribute = TempPte.u.Hard.CacheDisable ? MiNonCached : MiCached;
+                MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute = CacheAttribute;
+                if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
                 MiCopyPfn(PageFrameIndex, OldPageFrameIndex);
 
                 /* Dereference whatever this PTE is referencing */
@@ -2391,6 +2416,7 @@ UserFault:
                 /* And make a new shiny one with our page; the shared page goes only
                    after the TB flush, waited for with the PFN lock released */
                 LockIrql = MiReplaceSharedPte(PointerPte, Address, CurrentProcess, ProtoPte, PageFrameIndex, LockIrql);
+                MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute = CacheAttribute;
                 TempPte.u.Hard.PageFrameNumber = PageFrameIndex;
                 MI_MAKE_WRITE_PAGE(&TempPte);
                 TempPte.u.Hard.CopyOnWrite = 0;
@@ -2562,6 +2588,13 @@ UserFault:
                 /* Grab a page out of there. Later we should grab a colored zero page */
                 PageFrameIndex = MiRemoveAnyPage(Color);
 
+                /* Zero it through a mapping of the type it is about to be mapped with */
+                if (PageFrameIndex != 0)
+                {
+                    MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute =
+                        MiCacheAttributeFromProtection(PointerPte->u.Soft.Protection);
+                }
+
                 /* Release the lock since we need to do some zeroing */
                 MiReleasePfnLock(OldIrql);
 
@@ -2572,6 +2605,8 @@ UserFault:
                 }
 
                 /* Zero out the page, since it's for user-mode */
+                if (MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute != MiCached)
+                    MiFlushReleasedSystemPtesBeforeUncachedMapping();
                 MiZeroPfn(PageFrameIndex);
 
                 /* Grab the lock again so we can initialize the PFN entry */
@@ -2589,6 +2624,10 @@ UserFault:
 
             /* And we're done with the lock */
             MiReleasePfnLock(OldIrql);
+
+            /* A page from the zeroed list was zeroed write-back */
+            if (MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute != MiCached)
+                MiFlushReleasedSystemPtesBeforeUncachedMapping();
 
             /* Fault on user PDE, or fault on user PTE? */
             if (PointerPte <= MiHighestUserPte)
