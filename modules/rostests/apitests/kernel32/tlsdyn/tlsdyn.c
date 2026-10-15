@@ -95,8 +95,25 @@ VOID WINAPI TlsDynSetLog(char *HostLog, LONG *HostCount)
     Log = HostLog;
 }
 
+/* What FlsGetValue gives for FlsWatchIndex when a thread detaches */
+static DWORD FlsWatchIndex = FLS_OUT_OF_INDEXES;
+static PVOID FlsAtDetach = (PVOID)1;
+
+VOID WINAPI TlsDynWatchFls(DWORD Index)
+{
+    FlsWatchIndex = Index;
+    FlsAtDetach = (PVOID)1;
+}
+
+PVOID WINAPI TlsDynGetFlsAtDetach(VOID)
+{
+    return FlsAtDetach;
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     Record('M', fdwReason);
+    if (fdwReason == DLL_THREAD_DETACH && FlsWatchIndex != FLS_OUT_OF_INDEXES)
+        FlsAtDetach = FlsGetValue(FlsWatchIndex);
     return TRUE;
 }
