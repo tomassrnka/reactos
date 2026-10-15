@@ -5328,7 +5328,8 @@ MiGetSegmentPageTableEnd(
     return End;
 }
 
-/* Zero [Start, End) in the pages of a file's data segment that are in memory; reads nothing in */
+/* Zero [Start, End) in the pages of a file's data segment that are in memory; reads nothing in. End may lie past
+ * the segment's pages (MAXLONGLONG: to the end) */
 VOID
 NTAPI
 MmZeroResidentSegmentRange(
@@ -5336,9 +5337,9 @@ MmZeroResidentSegmentRange(
     _In_ LONGLONG Start,
     _In_ LONGLONG End)
 {
+    PEPROCESS Process = PsGetCurrentProcess();
     PMM_SECTION_SEGMENT Segment;
-    PCACHE_SECTION_PAGE_TABLE PageTable;
-    PVOID RestartKey = NULL;
+    LARGE_INTEGER Offset;
 
     if (Start >= End)
         return;
@@ -5349,27 +5350,30 @@ MmZeroResidentSegmentRange(
 
     MmLockSectionSegment(Segment);
 
-    while ((PageTable = RtlEnumerateGenericTableWithoutSplaying(&Segment->PageTable, &RestartKey)))
+    End = min(End, MiGetSegmentPageTableEnd(Segment));
+    for (Offset.QuadPart = PAGE_ROUND_DOWN_64(Start); Offset.QuadPart < End; Offset.QuadPart += PAGE_SIZE)
     {
-        ULONG i;
+        LONGLONG ZeroStart = max(Offset.QuadPart, Start);
+        LONGLONG ZeroEnd = min(Offset.QuadPart + PAGE_SIZE, End);
+        ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        PUCHAR Address;
+        KIRQL Irql;
 
-        for (i = 0; i < _countof(PageTable->PageEntries); i++)
+        /* A read in flight would assign the old contents after us */
+        while (MM_IS_WAIT_PTE(Entry))
         {
-            LONGLONG PageStart = PageTable->FileOffset.QuadPart + (LONGLONG)i * PAGE_SIZE;
-            LONGLONG ZeroStart = max(PageStart, Start);
-            LONGLONG ZeroEnd = min(PageStart + PAGE_SIZE, End);
-            ULONG_PTR Entry = PageTable->PageEntries[i];
-            PEPROCESS Process = PsGetCurrentProcess();
-            PUCHAR Address;
-            KIRQL Irql;
-
-            if ((ZeroStart >= ZeroEnd) || (Entry == 0) || IS_SWAP_FROM_SSE(Entry))
-                continue;
-
-            Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
-            RtlZeroMemory(Address + (ZeroStart - PageStart), (SIZE_T)(ZeroEnd - ZeroStart));
-            MiUnmapPageInHyperSpace(Process, Address, Irql);
+            MmUnlockSectionSegment(Segment);
+            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+            MmLockSectionSegment(Segment);
+            Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
         }
+
+        if ((Entry == 0) || IS_SWAP_FROM_SSE(Entry))
+            continue;
+
+        Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
+        RtlZeroMemory(Address + (ZeroStart - Offset.QuadPart), (SIZE_T)(ZeroEnd - ZeroStart));
+        MiUnmapPageInHyperSpace(Process, Address, Irql);
     }
 
     MmUnlockSectionSegment(Segment);
