@@ -18,6 +18,7 @@ extern void func_CreateEventMutexEx(void);
 extern void func_CreateFile2(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
+extern void func_CreateProcessRace(void);
 extern void func_CreateWaitableTimerEx(void);
 extern void func_DebugTrapInterrupts(void);
 extern void func_DefaultActCtx(void);
@@ -140,6 +141,7 @@ const struct test winetest_testlist[] =
     { "CreateFile2",                 func_CreateFile2 },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
+    { "CreateProcessRace",           func_CreateProcessRace },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
     { "DefaultActCtx",               func_DefaultActCtx },
