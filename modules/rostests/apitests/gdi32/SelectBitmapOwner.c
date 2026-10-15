@@ -64,14 +64,15 @@ static VOID
 Test_SaveRestore(VOID)
 {
     HDC hdc;
-    HBITMAP hbm1, hbm2;
+    HBITMAP hbm1, hbm2, hbm3;
     HGDIOBJ hOld;
 
     hdc = CreateCompatibleDC(NULL);
     hbm1 = CreateBitmap(8, 8, 1, 1, NULL);
     hbm2 = CreateBitmap(16, 16, 1, 1, NULL);
-    ok(hdc && hbm1 && hbm2, "Setup failed\n");
-    if (!hdc || !hbm1 || !hbm2)
+    hbm3 = CreateBitmap(24, 24, 1, 1, NULL);
+    ok(hdc && hbm1 && hbm2 && hbm3, "Setup failed\n");
+    if (!hdc || !hbm1 || !hbm2 || !hbm3)
         goto Exit;
 
     hOld = SelectObject(hdc, hbm1);
@@ -84,14 +85,50 @@ Test_SaveRestore(VOID)
     ok(SelectObject(hdc, hbm1) == hbm1, "The bitmap left the DC\n");
     ok(!CanSelect(hbm1), "After SaveDC and RestoreDC the bitmap went into a second DC\n");
 
-    /* A restore after a change puts the old bitmap back and frees the new one (Windows also keeps the saved one held, ReactOS does not) */
+    /* A bitmap that only a saved state holds is still held: no other DC takes it */
     ok(SaveDC(hdc) != 0, "SaveDC failed\n");
     ok(SelectObject(hdc, hbm2) == hbm1, "SelectObject did not return the first bitmap\n");
     ok(!CanSelect(hbm2), "The second bitmap is in the DC, yet it went into another one\n");
+    ok(!CanSelect(hbm1), "The saved bitmap went into another DC\n");
+    /* The DC takes the saved bitmap again while the state is still there */
+    ok(SelectObject(hdc, hbm1) == hbm2, "The DC did not take its saved bitmap back\n");
+    ok(CanSelect(hbm2), "The replaced second bitmap is still held\n");
+    ok(SelectObject(hdc, hbm2) == hbm1, "SelectObject did not return the first bitmap\n");
+
+    /* A restore puts the old bitmap back and frees the new one */
     ok(RestoreDC(hdc, -1), "RestoreDC failed\n");
     ok(SelectObject(hdc, hbm1) == hbm1, "The restore did not bring the first bitmap back\n");
     ok(!CanSelect(hbm1), "After the restore the first bitmap went into a second DC\n");
     ok(CanSelect(hbm2), "After the restore the second bitmap is still held\n");
+
+    /* Nested states: every bitmap of a state is held until that state is gone */
+    ok(SaveDC(hdc) == 1, "SaveDC failed\n");
+    ok(SelectObject(hdc, hbm2) == hbm1, "SelectObject did not return the first bitmap\n");
+    ok(SaveDC(hdc) == 2, "SaveDC failed\n");
+    ok(SelectObject(hdc, hbm3) == hbm2, "SelectObject did not return the second bitmap\n");
+    ok(!CanSelect(hbm1), "Nested: the bitmap of the first state went into another DC\n");
+    ok(!CanSelect(hbm2), "Nested: the bitmap of the second state went into another DC\n");
+    ok(!CanSelect(hbm3), "Nested: the bitmap in the DC went into another DC\n");
+    ok(RestoreDC(hdc, -1), "RestoreDC failed\n");
+    ok(SelectObject(hdc, hbm2) == hbm2, "The restore did not bring the second bitmap back\n");
+    ok(!CanSelect(hbm1), "Nested, one level back: the bitmap of the first state went into another DC\n");
+    ok(!CanSelect(hbm2), "Nested, one level back: the bitmap in the DC went into another DC\n");
+    ok(CanSelect(hbm3), "Nested, one level back: the third bitmap is still held\n");
+    ok(RestoreDC(hdc, 1), "RestoreDC failed\n");
+    ok(SelectObject(hdc, hbm1) == hbm1, "The restore did not bring the first bitmap back\n");
+    ok(!CanSelect(hbm1), "Back at the first level the bitmap went into a second DC\n");
+    ok(CanSelect(hbm2), "Back at the first level the second bitmap is still held\n");
+    ok(CanSelect(hbm3), "Back at the first level the third bitmap is still held\n");
+
+    /* Restoring past two states at once frees what the skipped state held */
+    ok(SaveDC(hdc) == 1, "SaveDC failed\n");
+    ok(SelectObject(hdc, hbm2) == hbm1, "SelectObject did not return the first bitmap\n");
+    ok(SaveDC(hdc) == 2, "SaveDC failed\n");
+    ok(SelectObject(hdc, hbm3) == hbm2, "SelectObject did not return the second bitmap\n");
+    ok(RestoreDC(hdc, 1), "RestoreDC failed\n");
+    ok(!CanSelect(hbm1), "Restore to level 1: the restored bitmap went into a second DC\n");
+    ok(CanSelect(hbm2), "Restore to level 1: the skipped state's bitmap is still held\n");
+    ok(CanSelect(hbm3), "Restore to level 1: the bitmap that was in the DC is still held\n");
 
     /* Deleting the DC with a state saved frees both bitmaps */
     ok(SaveDC(hdc) != 0, "SaveDC failed\n");
@@ -108,6 +145,8 @@ Exit:
         DeleteObject(hbm1);
     if (hbm2)
         DeleteObject(hbm2);
+    if (hbm3)
+        DeleteObject(hbm3);
 }
 
 START_TEST(SelectBitmapOwner)
