@@ -40,6 +40,7 @@ list(APPEND SOURCE
     FormatMessageInsert.c
     GetBinaryType.c
     GetComputerNameEx.c
+    GetCurrentThreadStackLimits.c
     GetCPInfo.c
     GetCurrentDirectory.c
     GetDriveType.c
