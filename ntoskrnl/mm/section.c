@@ -5421,11 +5421,14 @@ MiReadSegmentPage(
 /*
  * The work of CcZeroData on a cached file, decided page by page under the segment lock:
  * - a page in memory keeps its content (data written through the cache or a view, possibly past the valid data
- *   length, or what the file system returned for it);
- * - a page that is not in memory and starts below ValidDataLength (the cache map's) is read from the file and keeps
- *   what the file system returns, except the bytes of [Start, End) at or past ValidDataLength;
- * - a page past ValidDataLength is not read: it becomes a zero page.
- * Every page of the range is left dirty. Returns STATUS_CANT_WAIT if !Wait and a page would have to be brought in.
+ *   length, or what the file system returned for it) and is left dirty;
+ * - a page not in memory that lies wholly inside [Start, End) becomes a dirty zero page, read from nothing: the
+ *   caller passes Start = the boundary of valid data, so the whole page is gap. This is why a file system that
+ *   does not zero-fill reads past its valid data length (vfatfs) cannot disclose stale blocks here;
+ * - the one page that straddles Start (only the first) is read, so the bytes below Start (valid data) survive,
+ *   and [max(Start, ValidDataLength), End) within it is zeroed. ValidDataLength guards the artificial case of a
+ *   caller zeroing a range below its own valid data length; real callers pass Start == their valid data length.
+ * Returns STATUS_CANT_WAIT if !Wait and a page would have to be brought in.
  */
 NTSTATUS
 NTAPI
@@ -5456,6 +5459,13 @@ MmZeroSegmentRange(
         Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
         while (MM_IS_WAIT_PTE(Entry))
         {
+            /* A fast-I/O caller cannot block on a read in flight: let it take its own path */
+            if (!Wait)
+            {
+                MmUnlockSectionSegment(Segment);
+                Status = STATUS_CANT_WAIT;
+                goto done;
+            }
             MmUnlockSectionSegment(Segment);
             KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
             MmLockSectionSegment(Segment);
@@ -5483,9 +5493,9 @@ MmZeroSegmentRange(
         MmSetPageEntrySectionSegment(Segment, &Offset, MAKE_SWAP_SSE(MM_WAIT_ENTRY));
         MmUnlockSectionSegment(Segment);
 
-        /* The page comes zeroed */
+        /* The page comes zeroed. Read only the one page that straddles Start, to keep its bytes below Start */
         Status = MmRequestPageMemoryConsumer(MC_USER, TRUE, &Page);
-        if (NT_SUCCESS(Status) && (Offset.QuadPart < ValidDataLength))
+        if (NT_SUCCESS(Status) && (Offset.QuadPart < Start))
         {
             Status = MiReadSegmentPage(Segment, Offset.QuadPart, Page);
             if (NT_SUCCESS(Status) && (ZeroStart < ZeroEnd))
@@ -5509,6 +5519,7 @@ MmZeroSegmentRange(
             break;
     }
 
+done:
     MmDereferenceSegment(Segment);
     return Status;
 }

@@ -205,12 +205,11 @@ Test_CcZeroData(PFILE_OBJECT FileObject)
     RtlZeroMemory(PagesWrittenZero, sizeof(PagesWrittenZero));
     RtlZeroMemory(PagesWrittenData, sizeof(PagesWrittenData));
 
-    /* 1. Whole pages not in the cache, below the valid data length */
+    /* 1. Whole pages not in the cache, in the gap: zeroed, not read (as on Windows) */
     ok_bool_true(ZeroData(FileObject, 0x10000, 0x12000), "CcZeroData");
-    trace("not cached: page 0x10000 read from disk during CcZeroData: %d\n", PageMarked(PagesRead, 0x10000));
+    ok(!PageMarked(PagesRead, 0x10000) && !PageMarked(PagesRead, 0x11000), "gap pages were read from disk\n");
     Zeros = CountCached(FileObject, 0x10000, 0x2000, 0);
-    Disk = CountCached(FileObject, 0x10000, 0x2000, DISK_BYTE);
-    ok(Zeros == 0x2000 || Disk == 0x2000, "not cached: %lu zero and %lu disk bytes of 0x2000\n", Zeros, Disk);
+    ok_eq_ulong(Zeros, 0x2000);
 
     /* 2. Pages in the cache, as the disk returned them */
     Disk = CountCached(FileObject, 0x20000, 0x2000, DISK_BYTE);
@@ -244,6 +243,19 @@ Test_CcZeroData(PFILE_OBJECT FileObject)
     ok_bool_true(ZeroData(FileObject, 0x60000, 0x62000), "CcZeroData");
     ok(!PageMarked(PagesRead, 0x60000) && !PageMarked(PagesRead, 0x61000), "past VDL: pages were read from disk\n");
     Zeros = CountCached(FileObject, 0x60000, 0x2000, 0);
+    ok_eq_ulong(Zeros, 0x2000);
+
+    /*
+     * 6. The vfatfs shape: the file system advanced the cache map's valid data length over the whole gap before it
+     * called CcZeroData for that gap, and it does not zero-fill paging reads past its own valid data. A gap page
+     * that is not in the cache must still be zeroed, not read from the disk, or old blocks would surface.
+     */
+    Fcb->Header.ValidDataLength.QuadPart = 0x78000;
+    CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+    RtlZeroMemory(PagesRead, sizeof(PagesRead));
+    ok_bool_true(ZeroData(FileObject, 0x70000, 0x72000), "CcZeroData");
+    ok(!PageMarked(PagesRead, 0x70000) && !PageMarked(PagesRead, 0x71000), "vfatfs gap: pages were read from disk\n");
+    Zeros = CountCached(FileObject, 0x70000, 0x2000, 0);
     ok_eq_ulong(Zeros, 0x2000);
 }
 
