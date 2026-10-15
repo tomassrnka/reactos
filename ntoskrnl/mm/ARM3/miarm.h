@@ -457,6 +457,21 @@ typedef enum _MI_PFN_CACHE_ATTRIBUTE
     MiNotMapped
 } MI_PFN_CACHE_ATTRIBUTE, *PMI_PFN_CACHE_ATTRIBUTE;
 
+/* The caching type a protection mask asks for: MM_NOACCESS shares its bits with MM_WRITECOMBINE */
+FORCEINLINE
+MI_PFN_CACHE_ATTRIBUTE
+MiCacheAttributeFromProtection(
+    _In_ ULONG ProtectionMask)
+{
+    if (!(ProtectionMask & MM_PROTECT_ACCESS))
+        return MiCached;
+    if ((ProtectionMask & MM_PROTECT_SPECIAL) == MM_NOCACHE)
+        return MiNonCached;
+    if ((ProtectionMask & MM_PROTECT_SPECIAL) == MM_WRITECOMBINE)
+        return MiWriteCombined;
+    return MiCached;
+}
+
 typedef struct _PHYSICAL_MEMORY_RUN
 {
     PFN_NUMBER BasePage;

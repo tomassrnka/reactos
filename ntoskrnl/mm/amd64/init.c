@@ -433,7 +433,7 @@ MiSetupPfnForPageTable(
         Pfn->PteAddress = PointerPte;
         Pfn->OriginalPte = *PointerPte;
         Pfn->u3.e1.PageLocation = ActiveAndValid;
-        Pfn->u3.e1.CacheAttribute = MiNonCached;
+        Pfn->u3.e1.CacheAttribute = MiCached;
         Pfn->u3.e2.ReferenceCount = 1;
         Pfn->u4.PteFrame = PFN_FROM_PTE(MiAddressToPte(PointerPte));
     }
@@ -477,7 +477,7 @@ MiBuildPfnDatabaseFromPageTables(VOID)
     Pfn->u1.WsIndex = 0;
     Pfn->u2.ShareCount = 1;
     Pfn->PteAddress = NULL;
-    Pfn->u3.e1.CacheAttribute = MiNonCached;
+    Pfn->u3.e1.CacheAttribute = MiCached;
     Pfn->u3.e2.ReferenceCount = 1;
     Pfn->u4.PteFrame = 0;
 
@@ -567,7 +567,6 @@ MiAddDescriptorToDatabase(
         while (PageCount--)
         {
             /* Add it to the free list */
-            Pfn->u3.e1.CacheAttribute = MiNonCached; // FIXME: Windows ASSERTs MiChached, but why not MiNotMapped?
             MiInsertPageInFreeList(BasePage + PageCount);
 
             /* Go to the previous page */
@@ -584,7 +583,7 @@ MiAddDescriptorToDatabase(
             Pfn->u1.Flink = 0;
             Pfn->u2.ShareCount = 0;
             Pfn->u3.e1.PageLocation = 0;
-            Pfn->u3.e1.CacheAttribute = MiNonCached;
+            Pfn->u3.e1.CacheAttribute = MiCached;
             Pfn->u3.e1.Rom = 1;
             Pfn->u3.e1.PrototypePte = 1;
             Pfn->u3.e2.ReferenceCount = 0;
