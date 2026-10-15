@@ -293,10 +293,12 @@ NtUserCallOneParam(
             break;
         }
 
+#if DBG
         case ONEPARAM_ROUTINE_SETRAWINPUTSERIAL:
-            /* Test hook: puts the raw input handle counter near its wrap */
+            /* Test hook of checked builds only: puts the raw input handle counter near its wrap */
             Result = UserRawInputSetSerial((ULONG)Param);
             break;
+#endif
 
         case ONEPARAM_ROUTINE_ENABLEPROCWNDGHSTING:
         {

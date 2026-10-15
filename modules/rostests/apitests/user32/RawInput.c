@@ -1684,7 +1684,8 @@ static void test_attached_threads_and_hooks(void)
 
 #define ONEPARAM_ROUTINE_SETRAWINPUTSERIAL 0xfffe000f
 
-/* ReactOS only: puts the raw input handle counter near its wrap to see that a live handle is skipped */
+/* ReactOS checked builds only: puts the raw input handle counter near its wrap to see that a live
+   handle is skipped (release builds do not have the routine) */
 static void test_handle_serial_wrap(void)
 {
     typedef ULONG_PTR (WINAPI *PCALL)(ULONG_PTR, DWORD);
@@ -1706,11 +1707,19 @@ static void test_handle_serial_wrap(void)
         return;
     }
 
+    /* the routine hands back the previous value: two calls in a row see the first one's */
+    pCall(0x3FFFFFF0, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL);
+    if (pCall(0x3FFFFFF0, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL) != 0x3FFFFFF0)
+    {
+        skip("no raw input serial routine (release build)\n");
+        return;
+    }
+
     ok(reg1(1, 2, 0, g_hwndA), "register failed: %lu\n", GetLastError());
     pump(50);
     pCall(0x3FFFFFF0, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL);
     mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
-    ok(pCall(0x3FFFFFF0, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL) == 0x3FFFFFF1, "the serial hook is not there\n");
+    ok(pCall(0x3FFFFFF0, ONEPARAM_ROUTINE_SETRAWINPUTSERIAL) == 0x3FFFFFF1, "one packet should take one serial\n");
     mouse_event(MOUSEEVENTF_MOVE, 2, 0, 0, 0);
     Sleep(50);
     ok(PeekMessageW(&msg, g_hwndA, WM_INPUT, WM_INPUT, PM_REMOVE), "no WM_INPUT\n");

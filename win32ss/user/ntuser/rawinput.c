@@ -535,6 +535,7 @@ InitRawInputImpl(VOID)
     return STATUS_SUCCESS;
 }
 
+#if DBG
 ULONG
 FASTCALL
 UserRawInputSetSerial(
@@ -545,6 +546,7 @@ UserRawInputSetSerial(
     gRawInputSerial = Serial;
     return Old;
 }
+#endif
 
 HRAWINPUT
 FASTCALL
