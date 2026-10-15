@@ -201,8 +201,14 @@ EnableTimePrivilege(void)
         return FALSE;
     Privileges.PrivilegeCount = 1;
     Privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    Ret = LookupPrivilegeValueW(NULL, SE_SYSTEMTIME_NAME, &Privileges.Privileges[0].Luid) &&
-          AdjustTokenPrivileges(Token, FALSE, &Privileges, 0, NULL, NULL) && GetLastError() == ERROR_SUCCESS;
+    Ret = LookupPrivilegeValueW(NULL, L"SeSystemtimePrivilege", &Privileges.Privileges[0].Luid);
+    if (Ret)
+    {
+        SetLastError(ERROR_SUCCESS);
+        Ret = AdjustTokenPrivileges(Token, FALSE, &Privileges, 0, NULL, NULL) && GetLastError() == ERROR_SUCCESS;
+    }
+    if (!Ret)
+        trace("cannot enable the system time privilege, error %lu\n", GetLastError());
     CloseHandle(Token);
     return Ret;
 }
