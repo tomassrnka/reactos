@@ -15,6 +15,15 @@
 
 /* FUNCTIONS *****************************************************************/
 
+static
+VOID
+IntComposeMousePointer(
+    _Inout_ PDEVOBJ *ppdev,
+    _In_ GDIPOINTER *pgp,
+    _Inout_ SURFOBJ *psoDest,
+    _In_ RECTL *prclSurf,
+    _In_ RECTL *prclPointer);
+
 __drv_preferredFunction("(see documentation)", "Obsolete, always returns false. ")
 BOOL
 APIENTRY
@@ -91,6 +100,120 @@ MouseSafetyOnDrawStart(
     }
 
     return TRUE;
+}
+
+/*
+ * FUNCTION: Count a drawing operation that is about to start without removing
+ * the pointer. The caller either knows the operation cannot touch the pointer
+ * or removes it itself around the part that can; MouseSafetyOnDrawEnd pairs with it.
+ */
+_Requires_lock_held_(*ppdev->hsemDevLock)
+VOID
+NTAPI
+MouseSafetyOnDrawEnter(
+    _Inout_ PPDEVOBJ ppdev)
+{
+    ASSERT(ppdev != NULL);
+
+    if (ppdev->Pointer.Exclude.right == -1)
+    {
+        return;
+    }
+
+    ppdev->SafetyRemoveCount++;
+}
+
+/*
+ * FUNCTION: Tell whether drawing into prclDraw (clipped to prclClip) can
+ * reach the visible pointer, and return the part of the pointer rectangle
+ * that it can reach. FALSE when the pointer is hidden, removed by an outer
+ * operation, or out of reach.
+ */
+_Requires_lock_held_(*ppdev->hsemDevLock)
+BOOL
+NTAPI
+MouseSafetyGetPointerHit(
+    _In_ PPDEVOBJ ppdev,
+    _In_ const RECTL *prclDraw,
+    _In_ const RECTL *prclClip,
+    _Out_ RECTL *prclHit)
+{
+    GDIPOINTER *pgp = &ppdev->Pointer;
+    RECTL rcPtr;
+
+    if (pgp->Exclude.right == -1 || ppdev->SafetyRemoveLevel != 0)
+    {
+        return FALSE;
+    }
+
+    if (!(ppdev->flFlags & (PDEV_HARDWARE_POINTER | PDEV_SOFTWARE_POINTER)))
+    {
+        return FALSE;
+    }
+
+    rcPtr = pgp->Exclude;
+
+    return RECTL_bIntersectRect(prclHit, prclDraw, &rcPtr) &&
+           RECTL_bIntersectRect(prclHit, prclHit, prclClip);
+}
+
+/*
+ * FUNCTION: Let a drawing operation that reaches the visible software pointer
+ * draw into the bitmap that holds the pixels under it instead of the screen.
+ * MouseSafetyEndUnderDraw then puts the pointer over the changed pixels in one
+ * blit, so the pointer never leaves the screen. The origin is where the
+ * bitmap's top left pixel lies on the screen. FALSE: use MouseSafetyOnDrawStart.
+ */
+_Requires_lock_held_(*ppdev->hsemDevLock)
+BOOL
+NTAPI
+MouseSafetyBeginUnderDraw(
+    _In_ PPDEVOBJ ppdev,
+    _Out_ SURFOBJ **ppsoSave,
+    _Out_ POINTL *pptlOrigin)
+{
+    GDIPOINTER *pgp = &ppdev->Pointer;
+
+    /* Enabled and the bitmaps exist only while this engine code draws the pointer, also for a driver that
+     * hands the shape to EngSetPointerShape and so reads as having a hardware pointer */
+    if (!(ppdev->flFlags & (PDEV_HARDWARE_POINTER | PDEV_SOFTWARE_POINTER)) ||
+        !pgp->Enabled || !pgp->psurfSave || !pgp->psurfTmp ||
+        pgp->Exclude.right == -1 || ppdev->SafetyRemoveLevel != 0)
+    {
+        return FALSE;
+    }
+
+    *ppsoSave = &pgp->psurfSave->SurfObj;
+    pptlOrigin->x = ppdev->ptlPointer.x - pgp->HotSpot.x;
+    pptlOrigin->y = ppdev->ptlPointer.y - pgp->HotSpot.y;
+    return TRUE;
+}
+
+_Requires_lock_held_(*ppdev->hsemDevLock)
+VOID
+NTAPI
+MouseSafetyEndUnderDraw(
+    _Inout_ PPDEVOBJ ppdev)
+{
+    GDIPOINTER *pgp = &ppdev->Pointer;
+    SURFOBJ *psoDest = &ppdev->pSurface->SurfObj;
+    POINTL pt;
+    RECTL rclSurf, rclPointer;
+
+    pt.x = ppdev->ptlPointer.x - pgp->HotSpot.x;
+    pt.y = ppdev->ptlPointer.y - pgp->HotSpot.y;
+
+    rclSurf.left = max(pt.x, 0);
+    rclSurf.top = max(pt.y, 0);
+    rclSurf.right = min(pt.x + pgp->Size.cx, psoDest->sizlBitmap.cx);
+    rclSurf.bottom = min(pt.y + pgp->Size.cy, psoDest->sizlBitmap.cy);
+
+    rclPointer.left = rclSurf.left - pt.x;
+    rclPointer.top = rclSurf.top - pt.y;
+    rclPointer.right = min(pgp->Size.cx, psoDest->sizlBitmap.cx - pt.x);
+    rclPointer.bottom = min(pgp->Size.cy, psoDest->sizlBitmap.cy - pt.y);
+
+    IntComposeMousePointer(ppdev, pgp, psoDest, &rclSurf, &rclPointer);
 }
 
 /*
@@ -191,61 +314,19 @@ IntHideMousePointer(
                  ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
 }
 
+/* Draw the pointer into prclDest of psoDest, taking the pixels from prclPointer of the pointer bitmaps */
+static
 VOID
-NTAPI
-IntShowMousePointer(
+IntDrawMousePointer(
     _Inout_ PDEVOBJ *ppdev,
-    _Inout_ SURFOBJ *psoDest)
+    _In_ GDIPOINTER *pgp,
+    _Inout_ SURFOBJ *psoDest,
+    _In_ RECTL *prclDest,
+    _In_ RECTL *prclPointer)
 {
-    GDIPOINTER *pgp;
-    POINTL pt;
-    RECTL rclSurf, rclPointer;
+    RECTL rclSurf = *prclDest, rclPointer = *prclPointer;
 
-    ASSERT(ppdev);
-    ASSERT(psoDest);
-
-    pgp = &ppdev->Pointer;
-
-    if (pgp->Enabled)
-    {
-        return;
-    }
-
-    pgp->Enabled = TRUE;
-
-    /* Check if we have any mouse pointer */
-    if (!pgp->psurfSave) return;
-
-    /* Calculate pointer coordinates */
-    pt.x = ppdev->ptlPointer.x - pgp->HotSpot.x;
-    pt.y = ppdev->ptlPointer.y - pgp->HotSpot.y;
-
-    /* Calculate the rect on the surface */
-    rclSurf.left = max(pt.x, 0);
-    rclSurf.top = max(pt.y, 0);
-    rclSurf.right = min(pt.x + pgp->Size.cx, psoDest->sizlBitmap.cx);
-    rclSurf.bottom = min(pt.y + pgp->Size.cy, psoDest->sizlBitmap.cy);
-
-    /* Calculate the rect in the pointer bitmap */
-    rclPointer.left = rclSurf.left - pt.x;
-    rclPointer.top = rclSurf.top - pt.y;
-    rclPointer.right = min(pgp->Size.cx, psoDest->sizlBitmap.cx - pt.x);
-    rclPointer.bottom = min(pgp->Size.cy, psoDest->sizlBitmap.cy - pt.y);
-
-    /* Copy the pixels under the cursor to temporary surface. */
-    IntEngBitBlt(&pgp->psurfSave->SurfObj,
-                 psoDest,
-                 NULL,
-                 NULL,
-                 NULL,
-                 &rclPointer,
-                 (POINTL*)&rclSurf,
-                 NULL,
-                 NULL,
-                 NULL,
-                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
-
-    /* Blt the pointer on the screen. */
+    /* Blt the pointer on the surface. */
     if (pgp->psurfColor)
     {
         if(!(pgp->flags & SPS_ALPHA))
@@ -322,6 +403,111 @@ IntShowMousePointer(
     }
 }
 
+/* Put the pointer on the screen over the pixels in the save bitmap. Composed in a second
+ * bitmap and drawn in one blit, the screen never shows the AND pass alone as a black arrow. */
+static
+VOID
+IntComposeMousePointer(
+    _Inout_ PDEVOBJ *ppdev,
+    _In_ GDIPOINTER *pgp,
+    _Inout_ SURFOBJ *psoDest,
+    _In_ RECTL *prclSurf,
+    _In_ RECTL *prclPointer)
+{
+    RECTL rclTmp = *prclPointer;
+
+    if (!pgp->psurfTmp)
+    {
+        IntDrawMousePointer(ppdev, pgp, psoDest, prclSurf, prclPointer);
+        return;
+    }
+
+    IntEngBitBlt(&pgp->psurfTmp->SurfObj,
+                 &pgp->psurfSave->SurfObj,
+                 NULL,
+                 NULL,
+                 NULL,
+                 &rclTmp,
+                 (POINTL*)&rclTmp,
+                 NULL,
+                 NULL,
+                 NULL,
+                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+
+    IntDrawMousePointer(ppdev, pgp, &pgp->psurfTmp->SurfObj, &rclTmp, prclPointer);
+
+    rclTmp = *prclSurf;
+    IntEngBitBlt(psoDest,
+                 &pgp->psurfTmp->SurfObj,
+                 NULL,
+                 NULL,
+                 NULL,
+                 &rclTmp,
+                 (POINTL*)prclPointer,
+                 NULL,
+                 NULL,
+                 NULL,
+                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+}
+
+VOID
+NTAPI
+IntShowMousePointer(
+    _Inout_ PDEVOBJ *ppdev,
+    _Inout_ SURFOBJ *psoDest)
+{
+    GDIPOINTER *pgp;
+    POINTL pt;
+    RECTL rclSurf, rclPointer;
+
+    ASSERT(ppdev);
+    ASSERT(psoDest);
+
+    pgp = &ppdev->Pointer;
+
+    if (pgp->Enabled)
+    {
+        return;
+    }
+
+    pgp->Enabled = TRUE;
+
+    /* Check if we have any mouse pointer */
+    if (!pgp->psurfSave) return;
+
+    /* Calculate pointer coordinates */
+    pt.x = ppdev->ptlPointer.x - pgp->HotSpot.x;
+    pt.y = ppdev->ptlPointer.y - pgp->HotSpot.y;
+
+    /* Calculate the rect on the surface */
+    rclSurf.left = max(pt.x, 0);
+    rclSurf.top = max(pt.y, 0);
+    rclSurf.right = min(pt.x + pgp->Size.cx, psoDest->sizlBitmap.cx);
+    rclSurf.bottom = min(pt.y + pgp->Size.cy, psoDest->sizlBitmap.cy);
+
+    /* Calculate the rect in the pointer bitmap */
+    rclPointer.left = rclSurf.left - pt.x;
+    rclPointer.top = rclSurf.top - pt.y;
+    rclPointer.right = min(pgp->Size.cx, psoDest->sizlBitmap.cx - pt.x);
+    rclPointer.bottom = min(pgp->Size.cy, psoDest->sizlBitmap.cy - pt.y);
+
+    /* Copy the pixels under the cursor to temporary surface. */
+    IntEngBitBlt(&pgp->psurfSave->SurfObj,
+                 psoDest,
+                 NULL,
+                 NULL,
+                 NULL,
+                 &rclPointer,
+                 (POINTL*)&rclSurf,
+                 NULL,
+                 NULL,
+                 NULL,
+                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+
+    /* Draw the pointer over the saved pixels */
+    IntComposeMousePointer(ppdev, pgp, psoDest, &rclSurf, &rclPointer);
+}
+
 /*
  * @implemented
  */
@@ -342,8 +528,8 @@ EngSetPointerShape(
     PDEVOBJ *ppdev;
     GDIPOINTER *pgp;
     LONG lDelta = 0;
-    HBITMAP hbmSave = NULL, hbmColor = NULL, hbmMask = NULL;
-    PSURFACE psurfSave = NULL, psurfColor = NULL, psurfMask = NULL;
+    HBITMAP hbmSave = NULL, hbmTmp = NULL, hbmColor = NULL, hbmMask = NULL;
+    PSURFACE psurfSave = NULL, psurfTmp = NULL, psurfColor = NULL, psurfMask = NULL;
     RECTL rectl;
     SIZEL sizel = {0, 0};
 
@@ -388,6 +574,21 @@ EngSetPointerShape(
                                   NULL);
         psurfSave = SURFACE_ShareLockSurface(hbmSave);
         if (!psurfSave) goto failure;
+
+        /* A second one to compose the pointer in. Without it the pointer is drawn straight onto the screen. */
+        hbmTmp = EngCreateBitmap(sizel,
+                                 lDelta,
+                                 pso->iBitmapFormat,
+                                 BMF_TOPDOWN | BMF_NOZEROINIT,
+                                 NULL);
+        if (hbmTmp)
+        {
+            psurfTmp = SURFACE_ShareLockSurface(hbmTmp);
+            if (!psurfTmp)
+            {
+                EngDeleteSurface((HSURF)hbmTmp);
+            }
+        }
     }
 
     if (psoColor)
@@ -517,6 +718,14 @@ EngSetPointerShape(
         pgp->psurfSave = NULL;
     }
 
+    /* Free old compose bitmap */
+    if (pgp->psurfTmp)
+    {
+        EngDeleteSurface(pgp->psurfTmp->BaseObject.hHmgr);
+        SURFACE_ShareUnlockSurface(pgp->psurfTmp);
+        pgp->psurfTmp = NULL;
+    }
+
     /* See if we are being asked to hide the pointer. */
     if (psoMask == NULL && psoColor == NULL)
     {
@@ -528,6 +737,7 @@ EngSetPointerShape(
     pgp->psurfColor = psurfColor;
     pgp->psurfMask = psurfMask;
     pgp->psurfSave = psurfSave;
+    pgp->psurfTmp = psurfTmp;
     pgp->HotSpot.x = xHot;
     pgp->HotSpot.y = yHot;
     pgp->Size = sizel;
@@ -563,6 +773,11 @@ failure:
     if (psurfColor) SURFACE_ShareUnlockSurface(psurfColor);
     if (hbmSave) EngDeleteSurface((HSURF)hbmSave);
     if (psurfSave) SURFACE_ShareUnlockSurface(psurfSave);
+    if (psurfTmp)
+    {
+        EngDeleteSurface((HSURF)hbmTmp);
+        SURFACE_ShareUnlockSurface(psurfTmp);
+    }
 
     return SPS_ERROR;
 }
