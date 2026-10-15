@@ -221,3 +221,7 @@ add_importlibs(wow64_file_lock msvcrt kernel32)
 add_executable(wow64_job EXCLUDE_FROM_ALL job.c)
 set_module_type(wow64_job win32cui)
 add_importlibs(wow64_job msvcrt kernel32)
+
+add_executable(wow64_directory EXCLUDE_FROM_ALL wow64_directory.c)
+set_module_type(wow64_directory win32cui)
+add_importlibs(wow64_directory msvcrt kernel32)
