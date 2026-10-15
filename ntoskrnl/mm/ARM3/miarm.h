@@ -2085,6 +2085,47 @@ MiFlushReleasedSystemPtesBeforeUncachedMapping(
     VOID
 );
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+#define MI_IO_SPACE_TRACKING
+
+/* Memory type of a device memory mapping, as its PTE cache bits: bit 0 is PWT, bit 1 is PCD */
+typedef enum _MI_IO_TYPE
+{
+    MiIoWriteBack = 0,
+    MiIoWriteCombined = 1,      /* PAT entry 1 */
+    MiIoUncachedMinus = 2,
+    MiIoUncached = 3
+} MI_IO_TYPE, *PMI_IO_TYPE;
+
+FORCEINLINE
+VOID
+MI_SET_IO_TYPE(
+    _Inout_ PMMPTE Pte,
+    _In_ MI_IO_TYPE Type)
+{
+    Pte->u.Hard.WriteThrough = (Type & 1);
+    Pte->u.Hard.CacheDisable = (Type >> 1) & 1;
+}
+
+BOOLEAN
+NTAPI
+MiMapIoSpacePages(
+    _In_opt_ PMMPTE FirstPte,
+    _In_ PFN_NUMBER BasePage,
+    _In_ PFN_NUMBER PageCount,
+    _In_ MI_PFN_CACHE_ATTRIBUTE Attribute,
+    _In_ MMPTE TemplatePte,
+    _Out_ PMI_IO_TYPE Type
+);
+
+VOID
+NTAPI
+MiForgetIoSpaceMappings(
+    _In_ PMMPTE FirstPte,
+    _In_ PFN_NUMBER PteCount
+);
+#endif
+
 VOID
 NTAPI
 MiReleaseSystemPtes(

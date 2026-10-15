@@ -37,6 +37,236 @@ MI_PFN_CACHE_ATTRIBUTE MiPlatformCacheAttributes[2][MmMaximumCacheType] =
     {MiNonCached,MiCached,MiWriteCombined,MiCached,MiNonCached,MiWriteCombined},
 };
 
+#ifdef MI_IO_SPACE_TRACKING
+
+/*
+ * Device memory has no PFN entries to hold a cache attribute, so the live
+ * mappings of device pages are recorded here. Write-combining must never alias
+ * an uncached or cached mapping of the same page (Intel SDM, "Programming the
+ * PAT"): a write-combining request falls back to UC- while any other mapping of
+ * its pages is not write-combining, and any other request turns the
+ * write-combining kernel mappings of its pages into UC-. Kernel mappings are
+ * recorded until they are unmapped. User mappings cannot be changed afterwards,
+ * so they never use write-combining, and their record stays until reboot.
+ */
+typedef struct _MI_IO_RANGE
+{
+    LIST_ENTRY Links;
+    PFN_NUMBER BasePage;
+    PFN_NUMBER PageCount;
+    PMMPTE FirstPte;            /* NULL for a user mapping */
+    MI_IO_TYPE Type;
+} MI_IO_RANGE, *PMI_IO_RANGE;
+
+static LIST_ENTRY MiIoRangeList = { &MiIoRangeList, &MiIoRangeList };
+static KSPIN_LOCK MiIoRangeLock;
+/* A record could not be allocated: write-combining stays off from then on */
+static BOOLEAN MiIoRangeTrackingLost;
+
+static
+BOOLEAN
+MiIoRangeOverlaps(
+    _In_ PMI_IO_RANGE Range,
+    _In_ PFN_NUMBER BasePage,
+    _In_ PFN_NUMBER PageCount)
+{
+    return (BasePage < Range->BasePage + Range->PageCount) &&
+           (Range->BasePage < BasePage + PageCount);
+}
+
+/* Caller holds MiIoRangeLock and flushes the TB of all processors afterwards */
+static
+VOID
+MiDemoteIoRange(
+    _Inout_ PMI_IO_RANGE Range)
+{
+    PFN_NUMBER i;
+    MMPTE TempPte;
+
+    ASSERT((Range->Type == MiIoWriteCombined) && (Range->FirstPte != NULL));
+    for (i = 0; i < Range->PageCount; i++)
+    {
+        TempPte = Range->FirstPte[i];
+        MI_SET_IO_TYPE(&TempPte, MiIoUncachedMinus);
+        MI_UPDATE_VALID_PTE(&Range->FirstPte[i], TempPte);
+    }
+    Range->Type = MiIoUncachedMinus;
+}
+
+/*
+ * Picks the memory type for PageCount device pages from BasePage on and records
+ * the mapping. A kernel mapping passes its system PTEs in FirstPte; they are
+ * filled from TemplatePte under the lock, so a concurrent request sees either
+ * none of them or all of them with their final type. A user mapping passes NULL
+ * and applies the returned type itself. Returns TRUE if another mapping was
+ * changed to UC-: the caller flushes the TB of all processors before the new
+ * mapping can be used.
+ */
+BOOLEAN
+NTAPI
+MiMapIoSpacePages(
+    _In_opt_ PMMPTE FirstPte,
+    _In_ PFN_NUMBER BasePage,
+    _In_ PFN_NUMBER PageCount,
+    _In_ MI_PFN_CACHE_ATTRIBUTE Attribute,
+    _In_ MMPTE TemplatePte,
+    _Out_ PMI_IO_TYPE Type)
+{
+    PMI_IO_RANGE NewRange, Range;
+    PLIST_ENTRY Entry;
+    BOOLEAN Demoted = FALSE;
+    MI_IO_TYPE NewType;
+    MMPTE TempPte;
+    PFN_NUMBER i;
+    KIRQL OldIrql;
+
+    ASSERT(PageCount != 0);
+    if (Attribute == MiCached)
+        NewType = MiIoWriteBack;
+    else if (Attribute == MiNonCached)
+        NewType = MiIoUncached;
+    else if (FirstPte && MI_WRITE_COMBINED_PAT_AVAILABLE())
+        NewType = MiIoWriteCombined;
+    else
+        NewType = MiIoUncachedMinus;
+
+    NewRange = ExAllocatePoolWithTag(NonPagedPool, sizeof(*NewRange), 'RoiM');
+
+    KeAcquireSpinLock(&MiIoRangeLock, &OldIrql);
+
+    if (!NewRange && !MiIoRangeTrackingLost)
+    {
+        /* Later requests cannot see this mapping, so no page may stay write-combined */
+        MiIoRangeTrackingLost = TRUE;
+        for (Entry = MiIoRangeList.Flink; Entry != &MiIoRangeList; Entry = Entry->Flink)
+        {
+            Range = CONTAINING_RECORD(Entry, MI_IO_RANGE, Links);
+            if (Range->Type == MiIoWriteCombined)
+            {
+                MiDemoteIoRange(Range);
+                Demoted = TRUE;
+            }
+        }
+    }
+
+    if (MiIoRangeTrackingLost && (NewType == MiIoWriteCombined))
+        NewType = MiIoUncachedMinus;
+
+    if (NewType == MiIoWriteCombined)
+    {
+        for (Entry = MiIoRangeList.Flink; Entry != &MiIoRangeList; Entry = Entry->Flink)
+        {
+            Range = CONTAINING_RECORD(Entry, MI_IO_RANGE, Links);
+            if (MiIoRangeOverlaps(Range, BasePage, PageCount) && (Range->Type != MiIoWriteCombined))
+            {
+                NewType = MiIoUncachedMinus;
+                break;
+            }
+        }
+    }
+    else
+    {
+        for (Entry = MiIoRangeList.Flink; Entry != &MiIoRangeList; Entry = Entry->Flink)
+        {
+            Range = CONTAINING_RECORD(Entry, MI_IO_RANGE, Links);
+            if (MiIoRangeOverlaps(Range, BasePage, PageCount) && (Range->Type == MiIoWriteCombined))
+            {
+                MiDemoteIoRange(Range);
+                Demoted = TRUE;
+            }
+        }
+    }
+
+    if (FirstPte)
+    {
+        TempPte = TemplatePte;
+        MI_SET_IO_TYPE(&TempPte, NewType);
+        for (i = 0; i < PageCount; i++)
+        {
+            TempPte.u.Hard.PageFrameNumber = BasePage + i;
+            MI_WRITE_VALID_PTE(&FirstPte[i], TempPte);
+        }
+    }
+
+    if (NewRange && !MiIoRangeTrackingLost)
+    {
+        if (!FirstPte)
+        {
+            /* Merge a user mapping into a touching record of the same type */
+            for (Entry = MiIoRangeList.Flink; Entry != &MiIoRangeList; Entry = Entry->Flink)
+            {
+                Range = CONTAINING_RECORD(Entry, MI_IO_RANGE, Links);
+                if (!Range->FirstPte && (Range->Type == NewType) &&
+                    (BasePage <= Range->BasePage + Range->PageCount) &&
+                    (Range->BasePage <= BasePage + PageCount))
+                {
+                    PFN_NUMBER End = max(Range->BasePage + Range->PageCount, BasePage + PageCount);
+
+                    Range->BasePage = min(Range->BasePage, BasePage);
+                    Range->PageCount = End - Range->BasePage;
+                    break;
+                }
+            }
+            if (Entry != &MiIoRangeList)
+                goto Done;
+        }
+
+        NewRange->BasePage = BasePage;
+        NewRange->PageCount = PageCount;
+        NewRange->FirstPte = FirstPte;
+        NewRange->Type = NewType;
+        InsertTailList(&MiIoRangeList, &NewRange->Links);
+        NewRange = NULL;
+    }
+
+Done:
+    KeReleaseSpinLock(&MiIoRangeLock, OldIrql);
+    if (NewRange)
+        ExFreePoolWithTag(NewRange, 'RoiM');
+
+    *Type = NewType;
+    return Demoted;
+}
+
+/* Drops the records of the kernel mappings whose PTEs lie in the range; called before the PTEs are cleared */
+VOID
+NTAPI
+MiForgetIoSpaceMappings(
+    _In_ PMMPTE FirstPte,
+    _In_ PFN_NUMBER PteCount)
+{
+    LIST_ENTRY FreeList;
+    PLIST_ENTRY Entry, Next;
+    PMI_IO_RANGE Range;
+    KIRQL OldIrql;
+
+    /* Records of these PTEs were inserted by their owner, which is the caller */
+    if (IsListEmpty(&MiIoRangeList))
+        return;
+
+    InitializeListHead(&FreeList);
+    KeAcquireSpinLock(&MiIoRangeLock, &OldIrql);
+    for (Entry = MiIoRangeList.Flink; Entry != &MiIoRangeList; Entry = Next)
+    {
+        Next = Entry->Flink;
+        Range = CONTAINING_RECORD(Entry, MI_IO_RANGE, Links);
+        if ((Range->FirstPte >= FirstPte) && (Range->FirstPte < FirstPte + PteCount))
+        {
+            RemoveEntryList(Entry);
+            InsertTailList(&FreeList, Entry);
+        }
+    }
+    KeReleaseSpinLock(&MiIoRangeLock, OldIrql);
+
+    while (!IsListEmpty(&FreeList))
+    {
+        Entry = RemoveHeadList(&FreeList);
+        ExFreePoolWithTag(CONTAINING_RECORD(Entry, MI_IO_RANGE, Links), 'RoiM');
+    }
+}
+
+#endif /* MI_IO_SPACE_TRACKING */
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /*
@@ -57,6 +287,8 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
     PMMPFN Pfn1 = NULL;
     MI_PFN_CACHE_ATTRIBUTE CacheAttribute;
     BOOLEAN IsIoMapping;
+    PFN_COUNT i, Run;
+    BOOLEAN Flush = FALSE;
 
     //
     // Must be called with a non-zero count
@@ -143,26 +375,9 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
 
         case MiWriteCombined:
 
-#ifdef MI_PAGE_WRITE_COMBINED_PAT
-            /* Device memory only: RAM pages have no PFN cache type tracking that would keep other mappings consistent */
-            if (IsIoMapping && MI_WRITE_COMBINED_PAT_AVAILABLE())
-            {
-                PFN_COUNT i;
-
-                for (i = 1; i < PageCount; i++)
-                {
-                    if (MiGetPfnEntry(Pfn + i))
-                        break;
-                }
-                if (i == PageCount)
-                {
-                    MI_PAGE_WRITE_COMBINED_PAT(&TempPte);
-                    break;
-                }
-            }
-#endif
             //
             // Disable the cache and allow combined writing
+            // (device pages get their type from MiMapIoSpacePages)
             //
             MI_PAGE_DISABLE_CACHE(&TempPte);
             MI_PAGE_WRITE_COMBINED(&TempPte);
@@ -188,14 +403,30 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
     //
     // Do the mapping
     //
-    do
+    for (i = 0; i < PageCount; i += Run)
     {
-        //
-        // Write the PFN
-        //
-        TempPte.u.Hard.PageFrameNumber = Pfn++;
-        MI_WRITE_VALID_PTE(PointerPte++, TempPte);
-    } while (--PageCount);
+#ifdef MI_IO_SPACE_TRACKING
+        if (!MiGetPfnEntry(Pfn + i))
+        {
+            MI_IO_TYPE Type;
+
+            for (Run = 1; (i + Run < PageCount) && !MiGetPfnEntry(Pfn + i + Run); Run++);
+            Flush |= MiMapIoSpacePages(PointerPte + i,
+                                       Pfn + i,
+                                       Run,
+                                       MiPlatformCacheAttributes[TRUE][CacheType],
+                                       ValidKernelPte,
+                                       &Type);
+            continue;
+        }
+#endif
+        Run = 1;
+        TempPte.u.Hard.PageFrameNumber = Pfn + i;
+        MI_WRITE_VALID_PTE(PointerPte + i, TempPte);
+    }
+
+    /* Another mapping of the pages changed from write-combining to UC- */
+    if (Flush) KeFlushEntireTb(TRUE, TRUE);
 
     //
     // We're done!
@@ -230,6 +461,10 @@ MmUnmapIoSpace(IN PVOID BaseAddress,
     //
     PointerPte = MiAddressToPte(BaseAddress);
     Pfn = PFN_FROM_PTE(PointerPte);
+
+#ifdef MI_IO_SPACE_TRACKING
+    MiForgetIoSpaceMappings(PointerPte, PageCount);
+#endif
 
     //
     // Is this an I/O mapping?

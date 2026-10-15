@@ -24,6 +24,45 @@ SIZE_T MmSystemLockPagesCount;
 ULONG MiCacheOverride[MiNotMapped + 1];
 
 /* INTERNAL FUNCTIONS *********************************************************/
+
+#ifdef MI_IO_SPACE_TRACKING
+/* Fills the system PTEs of an MDL mapping; runs of device pages get their type from MiMapIoSpacePages.
+   Returns TRUE if the caller must flush the TB of all processors */
+static
+BOOLEAN
+MiMapMdlPtes(
+    _In_ PMMPTE PointerPte,
+    _In_ PPFN_NUMBER MdlPages,
+    _In_ PPFN_NUMBER LastPage,
+    _In_ MI_PFN_CACHE_ATTRIBUTE CacheAttribute,
+    _In_ MMPTE TempPte)
+{
+    BOOLEAN Flush = FALSE;
+    MI_IO_TYPE Type;
+    PFN_NUMBER Run;
+
+    while ((MdlPages < LastPage) && (*MdlPages != LIST_HEAD))
+    {
+        if (MiGetPfnEntry(*MdlPages))
+        {
+            TempPte.u.Hard.PageFrameNumber = *MdlPages++;
+            MI_WRITE_VALID_PTE(PointerPte++, TempPte);
+            continue;
+        }
+
+        for (Run = 1;
+             (MdlPages + Run < LastPage) && (MdlPages[Run] != LIST_HEAD) &&
+             (MdlPages[Run] == MdlPages[0] + Run) && !MiGetPfnEntry(MdlPages[Run]);
+             Run++);
+        Flush |= MiMapIoSpacePages(PointerPte, MdlPages[0], Run, CacheAttribute, ValidKernelPte, &Type);
+        MdlPages += Run;
+        PointerPte += Run;
+    }
+
+    return Flush;
+}
+#endif
+
 static
 PVOID
 NTAPI
@@ -236,6 +275,18 @@ MiMapLockedPagesInUserSpace(
         if (EffectiveCacheAttribute != MiCached)
             MiFlushReleasedSystemPtesBeforeUncachedMapping();
 
+#ifdef MI_IO_SPACE_TRACKING
+        if (Pfn2 == NULL)
+        {
+            MI_IO_TYPE Type;
+
+            /* Device memory: one memory type for all mappings of the page */
+            if (MiMapIoSpacePages(NULL, *MdlPages, 1, EffectiveCacheAttribute, TempPte, &Type))
+                KeFlushEntireTb(TRUE, TRUE);
+            MI_SET_IO_TYPE(&TempPte, Type);
+        }
+        else
+#endif
         /* Configure caching */
         switch (EffectiveCacheAttribute)
         {
@@ -776,6 +827,10 @@ MmMapLockedPagesSpecifyCache(IN PMDL Mdl,
         //
         // Loop all PTEs
         //
+#ifdef MI_IO_SPACE_TRACKING
+        if (MiMapMdlPtes(PointerPte, MdlPages, LastPage, CacheAttribute, TempPte))
+            KeFlushEntireTb(TRUE, TRUE);
+#else
         do
         {
             //
@@ -789,6 +844,7 @@ MmMapLockedPagesSpecifyCache(IN PMDL Mdl,
             TempPte.u.Hard.PageFrameNumber = *MdlPages;
             MI_WRITE_VALID_PTE(PointerPte++, TempPte);
         } while (++MdlPages < LastPage);
+#endif
 
         //
         // Mark it as mapped
@@ -918,6 +974,10 @@ MmUnmapLockedPages(IN PVOID BaseAddress,
         Mdl->MdlFlags &= ~(MDL_MAPPED_TO_SYSTEM_VA |
                            MDL_PARTIAL_HAS_BEEN_MAPPED |
                            MDL_FREE_EXTRA_PTES);
+
+#ifdef MI_IO_SPACE_TRACKING
+        MiForgetIoSpaceMappings(PointerPte, PageCount);
+#endif
 
         //
         // Release the system PTEs
@@ -1725,12 +1785,17 @@ MmMapLockedPagesWithReservedMapping(
     }
 
     // Loop all PTEs
+#ifdef MI_IO_SPACE_TRACKING
+    if (MiMapMdlPtes(PointerPte, MdlPages, LastPage, CacheAttribute, TempPte))
+        KeFlushEntireTb(TRUE, TRUE);
+#else
     for (; (MdlPages < LastPage) && (*MdlPages != LIST_HEAD); ++MdlPages)
     {
         // Write the PTE
         TempPte.u.Hard.PageFrameNumber = *MdlPages;
         MI_WRITE_VALID_PTE(PointerPte++, TempPte);
     }
+#endif
 
     // Mark it as mapped
     ASSERT((Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA) == 0);
@@ -1836,6 +1901,10 @@ MmUnmapReservedMapping(
         BaseAddress = (PVOID)((ULONG_PTR)BaseAddress -
                               (ExtraPageCount << PAGE_SHIFT));
     }
+
+#ifdef MI_IO_SPACE_TRACKING
+    MiForgetIoSpaceMappings(PointerPte, PageCount);
+#endif
 
     // Zero the PTEs
     RtlZeroMemory(PointerPte, PageCount * sizeof(MMPTE));

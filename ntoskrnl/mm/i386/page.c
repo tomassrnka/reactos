@@ -687,6 +687,23 @@ MmCreateVirtualMappingUnsafeEx(
 
     MI_MAKE_HARDWARE_PTE(&TempPte, PointerPte, ProtectionMask, Page);
 
+#ifdef MI_IO_SPACE_TRACKING
+    if (IsPhysical && !MiGetPfnEntry(Page))
+    {
+        MI_PFN_CACHE_ATTRIBUTE Attribute;
+        MI_IO_TYPE Type;
+
+        /* Device memory through \Device\PhysicalMemory: PAGE_NOCACHE and PAGE_WRITECOMBINE both encode UC- */
+        if (TempPte.u.Hard.CacheDisable)
+            Attribute = TempPte.u.Hard.WriteThrough ? MiNonCached : MiWriteCombined;
+        else
+            Attribute = MiCached;
+        if (MiMapIoSpacePages(NULL, Page, 1, Attribute, TempPte, &Type))
+            KeFlushEntireTb(TRUE, TRUE);
+        MI_SET_IO_TYPE(&TempPte, Type);
+    }
+#endif
+
     Pte = InterlockedExchangePte(PointerPte, TempPte.u.Long);
     /* There should not have been anything valid here */
     if (Pte != 0)
