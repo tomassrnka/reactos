@@ -15,6 +15,7 @@ extern void func_DestroyCursorIcon(void);
 extern void func_DM_REPOSITION(void);
 extern void func_DrawIconEx(void);
 extern void func_DrawText(void);
+extern void func_EditInk(void);
 extern void func_desktop(void);
 extern void func_EmptyClipboard(void);
 extern void func_EnumDisplaySettings(void);
@@ -97,6 +98,7 @@ const struct test winetest_testlist[] =
     { "DM_REPOSITION", func_DM_REPOSITION },
     { "DrawIconEx", func_DrawIconEx },
     { "DrawText", func_DrawText },
+    { "EditInk", func_EditInk },
     { "desktop", func_desktop },
     { "EmptyClipboard", func_EmptyClipboard },
     { "EnumDisplaySettings", func_EnumDisplaySettings },
