@@ -279,7 +279,7 @@ MmFreeMemoryArea(
 {
     ULONG_PTR Address;
     PVOID EndAddress;
-    MM_TB_FLUSH_LIST FlushList;
+    MI_DEFERRED_RELEASE Deferred;
     ULONG Pending;
     struct
     {
@@ -305,7 +305,8 @@ MmFreeMemoryArea(
             KeAttachProcess(&Process->Pcb);
         }
 
-        MmInitializeTbFlushList(&FlushList, Process == NULL);
+        /* The address space lock keeps faults off the view until the batch is flushed */
+        MiInitializeDeferredRelease(&Deferred, Process == NULL, 0);
         Pending = 0;
         EndAddress = MM_ROUND_UP(MA_GetEndingAddress(MemoryArea), PAGE_SIZE);
         for (Address = MA_GetStartingAddress(MemoryArea);
@@ -328,7 +329,7 @@ MmFreeMemoryArea(
             else
             {
                 DoFree = MmDeleteVirtualMappingDeferFlush(Process, (PVOID)Address, &Dirty, &Page,
-                                                          FreePage == NULL, &FlushList);
+                                                          FreePage == NULL, &Deferred);
             }
             if (DoFree && (FreePage != NULL))
             {
@@ -341,11 +342,13 @@ MmFreeMemoryArea(
 
             /* Freeing a page needs every processor's stale translation of it gone */
             if ((Pending == RTL_NUMBER_OF(PendingFree)) ||
+                (MiDeferredReleaseRoom(&Deferred) < 1 + MI_DEFERRED_PDE_ENTRIES) ||
                 (Address + PAGE_SIZE >= (ULONG_PTR)EndAddress))
             {
                 ULONG i;
 
-                MmFlushTbList(&FlushList);
+                /* Flush, then drop the mapping counts and free the page tables */
+                MiCompleteDeferredRelease(&Deferred);
                 for (i = 0; i < Pending; i++)
                 {
                     FreePage(FreePageContext, MemoryArea, PendingFree[i].Address,
@@ -355,6 +358,7 @@ MmFreeMemoryArea(
                 Pending = 0;
             }
         }
+        MiCleanupDeferredRelease(&Deferred);
 
         if (MemoryArea->VadNode.StartingVpn < (ULONG_PTR)MmSystemRangeStart >> PAGE_SHIFT)
         {

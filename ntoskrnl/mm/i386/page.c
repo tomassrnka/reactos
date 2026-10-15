@@ -241,7 +241,7 @@ MmDeleteVirtualMappingEx(
     _Out_opt_ BOOLEAN* WasDirty,
     _Out_opt_ PPFN_NUMBER Page,
     _In_ BOOLEAN IsPhysical,
-    _Inout_opt_ PMM_TB_FLUSH_LIST FlushList)
+    _Inout_opt_ PMI_DEFERRED_RELEASE Deferred)
 {
     PMMPTE PointerPte;
     MMPTE OldPte;
@@ -296,10 +296,11 @@ MmDeleteVirtualMappingEx(
         OldPte.u.Long = InterlockedExchangePte(PointerPte, 0);
 
         /* System space is shared by every processor, a process only by those running it */
-        if (FlushList != NULL)
+        if (Deferred != NULL)
         {
-            ASSERT(FlushList->AllProcessors == (Process == NULL));
-            MmAddToTbFlushList(FlushList, Address);
+            ASSERT(Deferred->FlushList.AllProcessors == (Process == NULL));
+            ASSERT(MiDeferredReleaseRoom(Deferred) >= 1 + MI_DEFERRED_PDE_ENTRIES);
+            MiDeferTbFlush(Deferred, Address);
         }
         else
         {
@@ -323,14 +324,20 @@ MmDeleteVirtualMappingEx(
 
     if (Process != NULL)
     {
+        BOOLEAN PdeDeleted = FALSE;
+
         /* Remove PDE reference, if needed */
         if (OldPte.u.Long != 0)
         {
             if (MiDecrementPageTableReferences(Address) == 0)
             {
                 KIRQL OldIrql = MiAcquirePfnLock();
-                MiDeletePde(MiAddressToPde(Address), Process);
+                if (Deferred != NULL)
+                    MiDeletePdeDeferred(MiAddressToPde(Address), Process, Deferred);
+                else
+                    MiDeletePde(MiAddressToPde(Address), Process);
                 MiReleasePfnLock(OldIrql);
+                PdeDeleted = TRUE;
             }
         }
 
@@ -339,16 +346,32 @@ MmDeleteVirtualMappingEx(
             PMMPFN Pfn1;
             KIRQL OldIrql;
 
-            OldIrql = MiAcquirePfnLock();
             Pfn1 = &MmPfnDatabase[OldPte.u.Hard.PageFrameNumber];
-            ASSERT(Pfn1->u3.e1.PageLocation == ActiveAndValid);
-            ASSERT(Pfn1->u2.ShareCount > 0);
-            if (--Pfn1->u2.ShareCount == 0)
+            if (Deferred != NULL)
             {
-                Pfn1->u3.e1.PageLocation = TransitionPage;
+                /* The mapping count drops once the deferred flush is done */
+                MiDeferShareRelease(Deferred, Pfn1, TRUE);
             }
-            MiReleasePfnLock(OldIrql);
+            else
+            {
+                OldIrql = MiAcquirePfnLock();
+                ASSERT(Pfn1->u3.e1.PageLocation == ActiveAndValid);
+                ASSERT(Pfn1->u2.ShareCount > 0);
+                if (--Pfn1->u2.ShareCount == 0)
+                {
+                    Pfn1->u3.e1.PageLocation = TransitionPage;
+                }
+                MiReleasePfnLock(OldIrql);
+            }
         }
+
+        /*
+         * An ARM3 fault elsewhere under this PDE needs only the working set lock
+         * and would build a new page table, while other processors may still walk
+         * the old one through their paging-structure caches: flush first.
+         */
+        if (PdeDeleted && (Deferred != NULL))
+            MiCompleteDeferredRelease(Deferred);
 
         MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
     }
@@ -386,9 +409,9 @@ MmDeleteVirtualMappingDeferFlush(
     _Out_opt_ BOOLEAN * WasDirty,
     _Out_opt_ PPFN_NUMBER Page,
     _In_ BOOLEAN IsPhysical,
-    _Inout_ PMM_TB_FLUSH_LIST FlushList)
+    _Inout_ PMI_DEFERRED_RELEASE Deferred)
 {
-    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, IsPhysical, FlushList);
+    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, IsPhysical, Deferred);
 }
 
 VOID

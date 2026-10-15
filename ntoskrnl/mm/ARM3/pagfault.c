@@ -1264,6 +1264,7 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
     {
         PFN_NUMBER PageFrameIndex, ProtoPageFrameIndex;
         ULONG Color;
+        MI_DEFERRED_RELEASE Deferred;
 
         /* Resolve the proto fault as if it was a read operation */
         Status = MiResolveProtoPteFault(FALSE,
@@ -1309,12 +1310,19 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
         /* Perform the copy */
         MiCopyPfn(PageFrameIndex, ProtoPageFrameIndex);
 
-        /* This will drop everything MiResolveProtoPteFault referenced */
-        MiDeletePte(PointerPte, Address, Process, PointerProtoPte);
+        /* This will drop everything MiResolveProtoPteFault referenced,
+           the shared page once the TB is flushed */
+        MiInitializeDeferredRelease(&Deferred, TRUE, 0);
+        MiDeletePteDeferred(PointerPte, Address, Process, PointerProtoPte, &Deferred);
 
         /* Because now we use this */
         Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
         MiInitializePfn(PageFrameIndex, PointerPte, TRUE);
+
+        /* No processor may still use the shared page when the private copy becomes
+           writable. The working set lock keeps other faults off the PTE meanwhile */
+        OldIrql = MiCompleteDeferredReleaseLocked(&Deferred, OldIrql);
+        MiCleanupDeferredRelease(&Deferred);
 
         /* Fix the protection */
         Protection &= ~MM_WRITECOPY;
@@ -2363,6 +2371,7 @@ UserFault:
             {
                 PFN_NUMBER PageFrameIndex, OldPageFrameIndex;
                 PMMPFN Pfn1;
+                MI_DEFERRED_RELEASE Deferred;
 
                 LockIrql = MiAcquirePfnLock();
 
@@ -2388,10 +2397,17 @@ UserFault:
                 ASSERT(Pfn1->u3.e1.PrototypePte == 1);
                 ASSERT(!MI_IS_PFN_DELETED(Pfn1));
                 ProtoPte = Pfn1->PteAddress;
-                MiDeletePte(PointerPte, Address, CurrentProcess, ProtoPte);
+                MiInitializeDeferredRelease(&Deferred, TRUE, 0);
+                MiDeletePteDeferred(PointerPte, Address, CurrentProcess, ProtoPte, &Deferred);
 
                 /* And make a new shiny one with our page */
                 MiInitializePfn(PageFrameIndex, PointerPte, TRUE);
+
+                /* No processor may still use the shared page when the private copy
+                   becomes writable. The working set lock keeps other faults off the
+                   PTE meanwhile, and the shared page is released after the flush */
+                LockIrql = MiCompleteDeferredReleaseLocked(&Deferred, LockIrql);
+                MiCleanupDeferredRelease(&Deferred);
                 TempPte.u.Hard.PageFrameNumber = PageFrameIndex;
                 MI_MAKE_WRITE_PAGE(&TempPte);
                 TempPte.u.Hard.CopyOnWrite = 0;
