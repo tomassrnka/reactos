@@ -67,6 +67,7 @@ list(APPEND SOURCE
     SetScrollInfo.c
     SetScrollRange.c
     SetWindowPlacement.c
+    SetWindowPosOwned.c
     ShowWindow.c
     SwitchDesktop.c
     SuspendResumeNotification.c
