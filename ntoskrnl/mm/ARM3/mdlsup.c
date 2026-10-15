@@ -224,10 +224,8 @@ MiMapLockedPagesInUserSpace(
                     }
                     break;
 
-                default:
-                    /* We don't support AWE magic (MiNotMapped) */
-                    DPRINT1("FIXME: MiNotMapped is not supported\n");
-                    ASSERT(FALSE);
+                case MiNotMapped:
+                    /* MmAllocatePagesForMdl pages have no type of their own: the caller's applies */
                     break;
             }
         }

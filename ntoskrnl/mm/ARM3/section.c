@@ -1907,7 +1907,6 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     // We don't support I/O mappings in this path yet
     //
     ASSERT(Pfn1 != NULL);
-    ASSERT(Pfn1->u3.e1.CacheAttribute != MiWriteCombined);
 
     //
     // Make sure new protection mask doesn't get in conflict and fix it if it does
@@ -1933,6 +1932,17 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
             RebuildPte = TRUE;
             ProtectionMask &= ~MM_NOACCESS;
             ProtectionMask |= MM_NOCACHE;
+        }
+    }
+    else if (Pfn1->u3.e1.CacheAttribute == MiWriteCombined)
+    {
+        //
+        // This is a write-combined PFN
+        //
+        if ((ProtectionMask & MM_PROTECT_SPECIAL) != MM_WRITECOMBINE)
+        {
+            RebuildPte = TRUE;
+            ProtectionMask |= MM_WRITECOMBINE;
         }
     }
 
