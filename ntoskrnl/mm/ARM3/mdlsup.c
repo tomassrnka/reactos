@@ -307,6 +307,7 @@ MiUnmapLockedPagesInUserSpace(
     ULONG NumberOfPages;
     PPFN_NUMBER MdlPages;
     PFN_NUMBER PageTablePage;
+    MI_DEFERRED_RELEASE Deferred;
 
     DPRINT("MiUnmapLockedPagesInUserSpace(%p, %p)\n", BaseAddress, Mdl);
 
@@ -336,6 +337,8 @@ MiUnmapLockedPagesInUserSpace(
     /* MiRemoveNode should have removed us if we were the hint */
     ASSERT(Process->VadRoot.NodeHint != Vad);
 
+    /* The pages belong to the MDL; freed page tables wait for the flush */
+    MiInitializeDeferredRelease(&Deferred, FALSE, 0);
     PointerPte = MiAddressToPte(BaseAddress);
     OldIrql = MiAcquirePfnLock();
     while (NumberOfPages != 0 &&
@@ -344,8 +347,12 @@ MiUnmapLockedPagesInUserSpace(
         ASSERT(MiAddressToPte(PointerPte)->u.Hard.Valid == 1);
         ASSERT(PointerPte->u.Hard.Valid == 1);
 
+        if (MiDeferredReleaseRoom(&Deferred) < MI_DEFERRED_PDE_ENTRIES)
+            OldIrql = MiCompleteDeferredReleaseLocked(&Deferred, OldIrql);
+
         /* Invalidate it */
         MI_ERASE_PTE(PointerPte);
+        MiDeferTbFlush(&Deferred, BaseAddress);
 
         /* We invalidated this PTE, so dereference the PDE */
         PointerPde = MiAddressToPde(BaseAddress);
@@ -355,7 +362,7 @@ MiUnmapLockedPagesInUserSpace(
         if (MiDecrementPageTableReferences(BaseAddress) == 0)
         {
             ASSERT(MiIsPteOnPdeBoundary(PointerPte + 1) || (NumberOfPages == 1));
-            MiDeletePde(PointerPde, Process);
+            MiDeletePdeDeferred(PointerPde, Process, &Deferred);
         }
 
         /* Next page */
@@ -365,8 +372,10 @@ MiUnmapLockedPagesInUserSpace(
         MdlPages++;
     }
 
-    KeFlushProcessTb();
+    /* Flush before the caller can unlock the pages and before faults can reach the range */
     MiReleasePfnLock(OldIrql);
+    MiCompleteDeferredRelease(&Deferred);
+    MiCleanupDeferredRelease(&Deferred);
     MiUnlockProcessWorkingSetUnsafe(Process, Thread);
     MmUnlockAddressSpace(&Process->Vm);
     ExFreePoolWithTag(Vad, 'ldaV');

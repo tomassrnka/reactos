@@ -1309,12 +1309,11 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
         /* Perform the copy */
         MiCopyPfn(PageFrameIndex, ProtoPageFrameIndex);
 
-        /* This will drop everything MiResolveProtoPteFault referenced */
-        MiDeletePte(PointerPte, Address, Process, PointerProtoPte);
-
-        /* Because now we use this */
+        /* Drop everything MiResolveProtoPteFault referenced and use the copy. No
+           processor may still use the shared page when the copy becomes writable,
+           so this flushes the TB, with the PFN lock released for the wait */
+        OldIrql = MiReplaceSharedPte(PointerPte, Address, Process, PointerProtoPte, PageFrameIndex, OldIrql);
         Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
-        MiInitializePfn(PageFrameIndex, PointerPte, TRUE);
 
         /* Fix the protection */
         Protection &= ~MM_WRITECOPY;
@@ -2388,10 +2387,10 @@ UserFault:
                 ASSERT(Pfn1->u3.e1.PrototypePte == 1);
                 ASSERT(!MI_IS_PFN_DELETED(Pfn1));
                 ProtoPte = Pfn1->PteAddress;
-                MiDeletePte(PointerPte, Address, CurrentProcess, ProtoPte);
 
-                /* And make a new shiny one with our page */
-                MiInitializePfn(PageFrameIndex, PointerPte, TRUE);
+                /* And make a new shiny one with our page; the shared page goes only
+                   after the TB flush, waited for with the PFN lock released */
+                LockIrql = MiReplaceSharedPte(PointerPte, Address, CurrentProcess, ProtoPte, PageFrameIndex, LockIrql);
                 TempPte.u.Hard.PageFrameNumber = PageFrameIndex;
                 MI_MAKE_WRITE_PAGE(&TempPte);
                 TempPte.u.Hard.CopyOnWrite = 0;
