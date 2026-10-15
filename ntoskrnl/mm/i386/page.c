@@ -671,6 +671,19 @@ MmCreatePageFileMapping(PEPROCESS Process,
 }
 
 
+/* The cache bits of a PTE for a page whose PFN records how it is mapped */
+static
+VOID
+MiSetPteCaching(
+    _Inout_ PMMPTE Pte,
+    _In_ MI_PFN_CACHE_ATTRIBUTE CacheAttribute)
+{
+    Pte->u.Hard.CacheDisable = 0;
+    Pte->u.Hard.WriteThrough = 0;
+    if ((CacheAttribute == MiNonCached) || (CacheAttribute == MiWriteCombined))
+        Pte->u.Hard.CacheDisable = 1;
+}
+
 NTSTATUS
 NTAPI
 MmCreateVirtualMappingUnsafeEx(
@@ -733,14 +746,6 @@ MmCreateVirtualMappingUnsafeEx(
 
     MI_MAKE_HARDWARE_PTE(&TempPte, PointerPte, ProtectionMask, Page);
 
-    Pte = InterlockedExchangePte(PointerPte, TempPte.u.Long);
-    /* There should not have been anything valid here */
-    if (Pte != 0)
-    {
-        DPRINT1("Bad PTE %lx at %p for %p\n", Pte, PointerPte, Address);
-        KeBugCheck(MEMORY_MANAGEMENT);
-    }
-
     if (!IsPhysical)
     {
         PMMPFN Pfn1;
@@ -748,9 +753,30 @@ MmCreateVirtualMappingUnsafeEx(
 
         OldIrql = MiAcquirePfnLock();
         Pfn1 = &MmPfnDatabase[TempPte.u.Hard.PageFrameNumber];
+
+        /* The first mapping of a RosMm page decides its caching type, later ones follow it */
+        if (MI_IS_ROS_PFN(Pfn1))
+        {
+            if (Pfn1->u2.ShareCount == 0)
+                Pfn1->u3.e1.CacheAttribute = MiCacheAttributeFromProtection(ProtectionMask);
+            else if (Pfn1->u3.e1.CacheAttribute != MiNotMapped) /* defensive: RosMm pages start MiCached */
+                MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
+        }
+
         Pfn1->u2.ShareCount++;
         Pfn1->u3.e1.PageLocation = ActiveAndValid;
         MiReleasePfnLock(OldIrql);
+
+        if (TempPte.u.Hard.CacheDisable)
+            MiFlushReleasedSystemPtesBeforeUncachedMapping();
+    }
+
+    Pte = InterlockedExchangePte(PointerPte, TempPte.u.Long);
+    /* There should not have been anything valid here */
+    if (Pte != 0)
+    {
+        DPRINT1("Bad PTE %lx at %p for %p\n", Pte, PointerPte, Address);
+        KeBugCheck(MEMORY_MANAGEMENT);
     }
 
     /* We don't need to flush the TLB here because it only caches valid translations
@@ -875,13 +901,19 @@ MmGetPageProtect(PEPROCESS Process, PVOID Address)
     return(Protect);
 }
 
+/*
+ * PhysicalView: the PTE maps a page through a \Device\PhysicalMemory view, which never records its
+ * cache type in the PFN, so the requested cache bits are kept.
+ * FlushList: the caller flushes the TB for the list; NULL flushes it here.
+ */
 static
 VOID
-MmSetPageProtectEx(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLUSH_LIST FlushList)
+MiSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect, BOOLEAN PhysicalView, PMM_TB_FLUSH_LIST FlushList)
 {
     ULONG ProtectionMask;
     PMMPTE PointerPte;
     MMPTE TempPte, OldPte;
+    PMMPFN Pfn1;
 
     DPRINT("MmSetPageProtect(Process %p  Address %p  flProtect %x)\n",
            Process, Address, flProtect);
@@ -908,6 +940,12 @@ MmSetPageProtectEx(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLU
     TempPte.u.Hard.PageFrameNumber = PointerPte->u.Hard.PageFrameNumber;
     TempPte.u.Long |= MmProtectToPteMask[ProtectionMask];
     TempPte.u.Hard.Owner = 1;
+
+    /* A RosMm page keeps the caching type its PFN records, as in MiFlushTbAndCapture.
+       RosMm pages start MiCached, so the MiNotMapped test is defensive */
+    Pfn1 = PhysicalView ? NULL : MiGetPfnEntry(TempPte.u.Hard.PageFrameNumber);
+    if ((Pfn1 != NULL) && MI_IS_ROS_PFN(Pfn1) && (Pfn1->u3.e1.CacheAttribute != MiNotMapped))
+        MiSetPteCaching(&TempPte, Pfn1->u3.e1.CacheAttribute);
 
     /* Only set valid bit if we have to */
     if ((ProtectionMask != MM_NOACCESS) && !FlagOn(ProtectionMask, MM_GUARDPAGE))
@@ -941,14 +979,14 @@ VOID
 NTAPI
 MmSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect)
 {
-    MmSetPageProtectEx(Process, Address, flProtect, NULL);
+    MiSetPageProtect(Process, Address, flProtect, FALSE, NULL);
 }
 
 VOID
 NTAPI
-MmSetPageProtectDeferFlush(PEPROCESS Process, PVOID Address, ULONG flProtect, PMM_TB_FLUSH_LIST FlushList)
+MmSetPageProtectDeferFlush(PEPROCESS Process, PVOID Address, ULONG flProtect, BOOLEAN PhysicalView, PMM_TB_FLUSH_LIST FlushList)
 {
-    MmSetPageProtectEx(Process, Address, flProtect, FlushList);
+    MiSetPageProtect(Process, Address, flProtect, PhysicalView, FlushList);
 }
 
 VOID
