@@ -320,9 +320,6 @@ NTSTATUS NTAPI ReceiveComplete
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
 
-    /* The window can be replaced once the request is not in flight */
-    AfdReleaseIrpMdls(Irp);
-
     ASSERT(FCB->ReceiveIrp.InFlightRequest == Irp);
     FCB->ReceiveIrp.InFlightRequest = NULL;
 
@@ -690,9 +687,6 @@ PacketSocketRecvComplete(
 
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
-
-    /* The window can be replaced once the request is not in flight */
-    AfdReleaseIrpMdls(Irp);
 
     ASSERT(FCB->ReceiveIrp.InFlightRequest == Irp);
     FCB->ReceiveIrp.InFlightRequest = NULL;
