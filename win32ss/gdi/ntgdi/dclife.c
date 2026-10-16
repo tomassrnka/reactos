@@ -506,44 +506,56 @@ DC_vUpdateDC(PDC pdc)
     pdc->pdcattr->ulDirty_ |= DIRTY_DEFAULT ;
 }
 
-/* The part of the surface a draw through pdc->co can reach. The engine ignores the bounds of a DC_TRIVIAL clip object
- * (an empty clip is DC_TRIVIAL with empty bounds, and the object may be a stale one after a failed update), so there
- * the whole surface counts. */
+/* The part of the surface a draw through pdc->co can reach, as the engine call of the given kind clips it. The bounds are
+ * what the clip object holds, also when its last update failed and it is an old one; an empty clip is DC_TRIVIAL with empty
+ * bounds. Calls that ignore the bounds of a DC_TRIVIAL clip draw everywhere then. */
 VOID
 FASTCALL
 DC_vGetClipLimit(
     PDC pdc,
+    CLIPLIMIT kind,
     RECTL *prcl)
 {
+    BOOL bWhole = FALSE;
+
+    *prcl = pdc->co.rclBounds;
+
     if (pdc->co.iDComplexity == DC_TRIVIAL)
+    {
+        if (kind == CLIPLIM_NOTRIVIAL)
+            bWhole = TRUE;
+        else if (kind == CLIPLIM_ALPHA && prcl->left < prcl->right && prcl->top < prcl->bottom)
+            bWhole = TRUE;
+    }
+
+    if (bWhole)
     {
         prcl->left = prcl->top = LONG_MIN;
         prcl->right = prcl->bottom = LONG_MAX;
-    }
-    else
-    {
-        *prcl = pdc->co.rclBounds;
     }
 }
 
 /* Take the pointer out of the way of a blit on a direct DC. With bCount only,
  * the pointer stays and the caller removes it around the part of the blit
- * that reaches it. With bClip the destination only reaches the clip limit. */
+ * that reaches it. With a clip kind the destination only reaches the clip limit. */
 static
 VOID
 DC_vMouseSafetyStart(
     PDC pdc,
     const RECT *prc,
     BOOL bCount,
-    BOOL bClip)
+    FLONG flClip)
 {
     RECTL rcHazard, rcLimit;
 
-    if (!bCount && bClip && prc)
+    if (!bCount && flClip && prc)
     {
         rcHazard = *prc;
         RECTL_vMakeWellOrdered(&rcHazard);
-        DC_vGetClipLimit(pdc, &rcLimit);
+        DC_vGetClipLimit(pdc,
+                         (flClip & DCPREP_CLIP_NOTRIVIAL) ? CLIPLIM_NOTRIVIAL :
+                         (flClip & DCPREP_CLIP_ALPHA) ? CLIPLIM_ALPHA : CLIPLIM_BITBLT,
+                         &rcLimit);
         if (RECTL_bIntersectRect(&rcHazard, &rcHazard, &rcLimit))
         {
             prc = &rcHazard;
@@ -582,7 +594,7 @@ DC_vPrepareDCsForBlit(
 
 /* fl: DCPREP_SPLIT_DEST, the caller draws the destination in pieces and removes the
  * pointer only around the piece under it (see IntEngBitBltAvoidPointer);
- * DCPREP_CLIP_DEST, the destination is drawn through the DC clip object. */
+ * DCPREP_CLIP_*, the destination is drawn through the DC clip object. */
 VOID
 FASTCALL
 DC_vPrepareDCsForBlitEx(
@@ -649,7 +661,7 @@ DC_vPrepareDCsForBlitEx(
 
     if (pdcFirst->dctype == DCTYPE_DIRECT)
     {
-        DC_vMouseSafetyStart(pdcFirst, prcFirst, (fl & DCPREP_SPLIT_DEST) && bFirstIsDest, (fl & DCPREP_CLIP_DEST) && bFirstIsDest);
+        DC_vMouseSafetyStart(pdcFirst, prcFirst, (fl & DCPREP_SPLIT_DEST) && bFirstIsDest, (fl & DCPREP_CLIP_MASK) && bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
 
 #if DBG
@@ -673,7 +685,7 @@ DC_vPrepareDCsForBlitEx(
 
     if (pdcSecond->dctype == DCTYPE_DIRECT)
     {
-        DC_vMouseSafetyStart(pdcSecond, prcSecond, (fl & DCPREP_SPLIT_DEST) && !bFirstIsDest, (fl & DCPREP_CLIP_DEST) && !bFirstIsDest);
+        DC_vMouseSafetyStart(pdcSecond, prcSecond, (fl & DCPREP_SPLIT_DEST) && !bFirstIsDest, (fl & DCPREP_CLIP_MASK) && !bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
 
 #if DBG

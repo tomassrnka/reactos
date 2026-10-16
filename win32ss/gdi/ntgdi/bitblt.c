@@ -9,6 +9,21 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(GdiBlt);
 
+/* The whole source rectangle lies inside the bitmap of the source DC: the engine rejects the whole call otherwise, which pieces would not */
+static
+BOOL
+IntSourceInSurface(
+    PDC pdcSrc,
+    const RECTL *prclSrc)
+{
+    SURFACE *psurf = pdcSrc->dclevel.pSurface;
+
+    return psurf != NULL &&
+           prclSrc->left >= 0 && prclSrc->top >= 0 &&
+           prclSrc->right <= psurf->SurfObj.sizlBitmap.cx &&
+           prclSrc->bottom <= psurf->SurfObj.sizlBitmap.cy;
+}
+
 /*
  * Draw a rectangle on a direct DC in pieces, so that the pointer is removed
  * only while the piece under it is drawn and the rest of the rectangle never
@@ -32,6 +47,7 @@ IntDrawAroundPointer(
     PDC pdc,
     SURFOBJ *psoScreen,
     RECTL *prclDest,
+    CLIPLIMIT kind,
     PFN_DRAWPIECE pfnPiece,
     PVOID pvCtx)
 {
@@ -43,7 +59,7 @@ IntDrawAroundPointer(
     ULONG i;
 
     /* The clip object is what the engine clips to, also when its last update failed */
-    DC_vGetClipLimit(pdc, &rcLimit);
+    DC_vGetClipLimit(pdc, kind, &rcLimit);
     if (!MouseSafetyGetPointerHit(pdc->ppdev, prclDest, &rcLimit, &rcHit))
     {
         return pfnPiece(pvCtx, psoScreen, (CLIPOBJ *)&pdc->co, prclDest, &ptlZero, &ptlZero);
@@ -165,7 +181,7 @@ IntEngBitBltAvoidPointer(
 {
     BITBLTPIECE piece = {psoSource, psoMask, pxlo, pptlSource, pptlMask, pbo, pptlBrush, rop4};
 
-    return IntDrawAroundPointer(pdc, psoDest, prclDest, IntBitBltPiece, &piece);
+    return IntDrawAroundPointer(pdc, psoDest, prclDest, CLIPLIM_BITBLT, IntBitBltPiece, &piece);
 }
 
 typedef struct _BLENDPIECE
@@ -306,11 +322,12 @@ NtGdiAlphaBlend(
     bSplit = (DCDest->dctype == DCTYPE_DIRECT) && (DCSrc->dctype != DCTYPE_DIRECT) &&
              (DestRect.right > DestRect.left) && (DestRect.bottom > DestRect.top) &&
              (SourceRect.right - SourceRect.left == DestRect.right - DestRect.left) &&
-             (SourceRect.bottom - SourceRect.top == DestRect.bottom - DestRect.top);
+             (SourceRect.bottom - SourceRect.top == DestRect.bottom - DestRect.top) &&
+             IntSourceInSurface(DCSrc, &SourceRect);
 
     /* Prepare DCs for blit */
     TRACE("Preparing DCs for blit\n");
-    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_DEST);
+    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_ALPHA);
 
     /* Determine surfaces to be used in the bitblt */
     BitmapDest = DCDest->dclevel.pSurface;
@@ -336,7 +353,7 @@ NtGdiAlphaBlend(
     {
         BLENDPIECE piece = {&BitmapSrc->SurfObj, &exlo.xlo, SourceRect, &BlendObj, 0, FALSE};
 
-        bResult = IntDrawAroundPointer(DCDest, &BitmapDest->SurfObj, &DestRect, IntBlendPiece, &piece);
+        bResult = IntDrawAroundPointer(DCDest, &BitmapDest->SurfObj, &DestRect, CLIPLIM_ALPHA, IntBlendPiece, &piece);
     }
     else
     {
@@ -490,10 +507,11 @@ NtGdiTransparentBlt(
     bSplit = (DCDest->dctype == DCTYPE_DIRECT) && (DCSrc->dctype != DCTYPE_DIRECT) &&
              (rcDest.right > rcDest.left) && (rcDest.bottom > rcDest.top) &&
              (rcSrc.right - rcSrc.left == rcDest.right - rcDest.left) &&
-             (rcSrc.bottom - rcSrc.top == rcDest.bottom - rcDest.top);
+             (rcSrc.bottom - rcSrc.top == rcDest.bottom - rcDest.top) &&
+             IntSourceInSurface(DCSrc, &rcSrc);
 
     /* Prepare for blit */
-    DC_vPrepareDCsForBlitEx(DCDest, &rcDest, DCSrc, &rcSrc, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_DEST);
+    DC_vPrepareDCsForBlitEx(DCDest, &rcDest, DCSrc, &rcSrc, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL);
 
     BitmapDest = DCDest->dclevel.pSurface;
     if (!BitmapDest)
@@ -518,7 +536,7 @@ NtGdiTransparentBlt(
     {
         BLENDPIECE piece = {&BitmapSrc->SurfObj, &exlo.xlo, rcSrc, NULL, TransparentColor, TRUE};
 
-        Ret = IntDrawAroundPointer(DCDest, &BitmapDest->SurfObj, &rcDest, IntBlendPiece, &piece);
+        Ret = IntDrawAroundPointer(DCDest, &BitmapDest->SurfObj, &rcDest, CLIPLIM_NOTRIVIAL, IntBlendPiece, &piece);
     }
     else
     {
@@ -696,7 +714,7 @@ NtGdiMaskBlt(
 
     /* Prepare blit; a source on the screen can show the pointer, so only a memory source is split */
     bSplit = (DCDest->dctype == DCTYPE_DIRECT) && (!UsesSource || DCSrc->dctype != DCTYPE_DIRECT);
-    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_DEST);
+    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_BITBLT);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
@@ -833,7 +851,7 @@ GreStretchBltMask(
     PDC_ATTR pdcattr;
     SURFACE *BitmapDest, *BitmapSrc = NULL;
     SURFACE *BitmapMask = NULL;
-    RECTL DestRect;
+    RECTL DestRect, rcHazard;
     RECTL SourceRect;
     POINTL MaskPoint;
     BOOL Status = FALSE;
@@ -972,8 +990,12 @@ GreStretchBltMask(
              (SourceRect.right - SourceRect.left == DestRect.right - DestRect.left) &&
              (SourceRect.bottom - SourceRect.top == DestRect.bottom - DestRect.top);
 
-    /* Only prepare Source and Dest, hdcMask represents a DIB */
-    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_DEST);
+    /* Only prepare Source and Dest, hdcMask represents a DIB. IntEngStretchBlt moves the destination of a flipped
+     * stretch by a pixel (stretchblt.c), so the hazard of the unsplit call is the destination one pixel wider. */
+    rcHazard = DestRect;
+    RECTL_vMakeWellOrdered(&rcHazard);
+    RECTL_vInflateRect(&rcHazard, 1, 1);
+    DC_vPrepareDCsForBlitEx(DCDest, bSplit ? &DestRect : &rcHazard, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
