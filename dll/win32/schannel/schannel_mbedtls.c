@@ -467,8 +467,6 @@ SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
         if (!s->cert_checked && s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT &&
             s->ssl.state > MBEDTLS_SSL_SERVER_CERTIFICATE)
         {
-            s->cert_checked = TRUE;
-
             /* Windows answers a rejected server with the status alone, no alert record */
             if (!s->manual_validation)
             {
@@ -477,6 +475,9 @@ SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
                 if (status != SEC_E_OK)
                     return status;
             }
+
+            /* Mark checked only after the chain validates, so a retried handshake re-validates instead of completing against an unvalidated server */
+            s->cert_checked = TRUE;
         }
 
         err = mbedtls_ssl_handshake_step(&s->ssl);
