@@ -1175,7 +1175,9 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
       }
       else
       {
-         Active = (gpqForeground == pWnd->head.pti->MessageQueue);
+         /* Of the top-level windows of the foreground queue only the active one has the active frame */
+         Active = (gpqForeground == pWnd->head.pti->MessageQueue &&
+                   (gpqForeground->spwndActive == pWnd || (Style & WS_CHILD)));
       }
       Flags = DC_NC; // Redraw everything!
    }

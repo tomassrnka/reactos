@@ -48,6 +48,7 @@ list(APPEND SOURCE
     MessageStateAnalyzer.c
     MsgWaitForMultipleObjectsEx.c
     NCRButtonDown.c
+    NcPaintActive.c
     NcPaintClient.c
     NcPaintRgn.c
     NextDlgItem.c
