@@ -581,10 +581,14 @@ IntShowMousePointer(
     }
 
     /* Bitmaps of another format are not drawn on this screen. A mode switch from a thread that does not own the window under
-     * the pointer sets no new shape, so the pointer is made again here from the bitmaps it was given; the set shows it. */
+     * the pointer sets no new shape, so the pointer is made again here from the bitmaps it was given; the set shows it.
+     * Only with the user lock: destroying a cursor, which changes the owner of its bitmaps and deletes them, takes it too,
+     * so the bitmaps cannot go while they are held. A show that a draw without it starts leaves the pointer off, and the
+     * next mouse move, which has the lock, makes it. */
     if (IntPointerSync(ppdev, psoDest) == PTR_NONE)
     {
-        IntRebuildMousePointer(ppdev, psoDest);
+        if (UserIsEnteredExclusive())
+            IntRebuildMousePointer(ppdev, psoDest);
         return;
     }
 
@@ -1315,9 +1319,10 @@ IntSetPointerShapeFromSurfaces(
  * unusable. When the switching thread owns the window under the pointer the shape is set again anyway; when it does not,
  * no one does, and the pointer would stay off. The bitmaps the last shape was made from are still the cursor's, so the
  * shape is made again from them, once per mode: a set that fails (a colour bitmap that has the old format) fails the same
- * way for every caller and is not repeated at each move. The device lock is held. Destroying a cursor is not serialized
- * by it, so both bitmaps are locked once and stay locked until the set is done: a cursor destroyed meanwhile only has its
- * bitmaps freed when the lock is released, and one destroyed before is seen here and ends the attempt.
+ * way for every caller and is not repeated at each move. The device lock and the user lock are held: destroying a cursor
+ * takes the user lock, so the bitmaps are neither destroyed nor changed in owner while they are locked here (a deleted
+ * object that is still locked is freed by the last unlock, which asserts that the owner is the unlocking process), and a
+ * cursor destroyed before is seen at the lock and ends the attempt.
  */
 static
 BOOL
