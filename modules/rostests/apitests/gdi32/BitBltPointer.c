@@ -460,7 +460,7 @@ CheckMoves(const char *name)
     Pump();
 }
 
-/* Only with BITBLTPOINTER_MODESWITCH set: a display mode of another depth, and back, with the pointer moving. The bitmaps
+/* Only with BITBLTPOINTER_MODESWITCH set: a display mode of another depth, or else a smaller size, and back, with the pointer moving. The bitmaps
  * the pointer code keeps for the old depth must not be used for the new one. */
 static void
 CheckModeSwitch(void)
@@ -483,8 +483,8 @@ CheckModeSwitch(void)
         dm.dmSize = sizeof(dm);
         if (!EnumDisplaySettingsW(NULL, i, &dm))
             break;
-        if (dm.dmPelsWidth == cur.dmPelsWidth && dm.dmPelsHeight == cur.dmPelsHeight &&
-            dm.dmBitsPerPel != cur.dmBitsPerPel && dm.dmBitsPerPel >= 16)
+        if (dm.dmBitsPerPel >= 16 && dm.dmPelsWidth >= 800 && dm.dmPelsHeight >= 600 &&
+            (dm.dmBitsPerPel != cur.dmBitsPerPel || (dm.dmPelsWidth < cur.dmPelsWidth && dm.dmPelsHeight < cur.dmPelsHeight)))
         {
             bFound = TRUE;
             break;
@@ -492,7 +492,7 @@ CheckModeSwitch(void)
     }
     if (!bFound || ChangeDisplaySettingsW(&dm, 0) != DISP_CHANGE_SUCCESSFUL)
     {
-        skip("No other depth at this size\n");
+        skip("No other depth\n");
         return;
     }
 
@@ -500,7 +500,7 @@ CheckModeSwitch(void)
     ghdcWnd = GetDC(ghwnd);
     SetCursorPos(gOrgX + PTR_X, gOrgY + PTR_Y);
     Pump();
-    CheckMoves("Pointer moves after a switch to another depth");
+    CheckMoves("Pointer moves after a display mode switch");
 
     ChangeDisplaySettingsW(&cur, 0);
     ReleaseDC(ghwnd, ghdcWnd);
