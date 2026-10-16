@@ -970,9 +970,20 @@ static void test_StretchBlt_NegativeHeight(void)
         ok(StretchBlt(hdcDst, 0, 120, 160, -120, hdcSrc, 0, 0, 160, 120, SRCCOPY),
            "UF-30: 32bpp negative-height StretchBlt failed\n");
         GdiFlush();
-        ok((pulDst[119 * 160] & 0xFFFFFF) < 60 && (pulDst[60 * 160] & 0xFF000000) == 0xFF000000,
-           "UF-30: 32bpp vertical flip did not reverse rows: bottom=%08lx mid=%08lx\n",
-           (unsigned long)pulDst[119 * 160], (unsigned long)pulDst[60 * 160]);
+        /* Each source row carries its own index, so a correct vertical flip maps dest row r to
+         * source row 119 - r. Check interior rows on both sides of the midline by full value (alpha
+         * included): a non-flip, an off-by-one or a degenerate fill that writes one source row into
+         * every dest row all fail. The negative-height destination rectangle rounds its top edge the
+         * same way unpatched GDI does, so the row-0 edge is outside the check: the crash fix does not
+         * change which rows the blit covers, only that the covered rows no longer fault the kernel. */
+        ok(pulDst[30 * 160]  == (0xFF000000 | 89) &&
+           pulDst[59 * 160]  == (0xFF000000 | 60) &&
+           pulDst[60 * 160]  == (0xFF000000 | 59) &&
+           pulDst[90 * 160]  == (0xFF000000 | 29),
+           "UF-30: 32bpp vertical flip did not reverse interior rows: "
+           "r30=%08lx r59=%08lx r60=%08lx r90=%08lx (want FF000059 FF00003C FF00003B FF00001D)\n",
+           (unsigned long)pulDst[30 * 160], (unsigned long)pulDst[59 * 160],
+           (unsigned long)pulDst[60 * 160], (unsigned long)pulDst[90 * 160]);
 
         SelectObject(hdcDst, hbmDstOld);
         DeleteObject(hbmDst);
