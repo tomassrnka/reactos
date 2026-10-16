@@ -880,14 +880,6 @@ CcZeroData (
         return TRUE;
     }
 
-    /* See if we should simply truncate the valid data length */
-    if ((StartOffset->QuadPart < SharedCacheMap->ValidDataLength.QuadPart) && (EndOffset->QuadPart >= SharedCacheMap->ValidDataLength.QuadPart))
-    {
-        DPRINT1("Truncating VDL.\n");
-        SharedCacheMap->ValidDataLength = *StartOffset;
-        return TRUE;
-    }
-
     ASSERT(EndOffset->QuadPart <= SharedCacheMap->SectionSize.QuadPart);
 
     while(WriteOffset.QuadPart < EndOffset->QuadPart)
@@ -904,22 +896,18 @@ CcZeroData (
 
         _SEH2_TRY
         {
-            if (!CcRosEnsureVacbResident(Vacb, Wait, FALSE, VacbOffset, VacbLength, FALSE))
-            {
-                return FALSE;
-            }
-
-            RtlZeroMemory((PVOID)((ULONG_PTR)Vacb->BaseAddress + VacbOffset), VacbLength);
+            /* Pages in memory keep what they hold; see MmZeroSegmentRange */
+            Status = MmZeroSegmentRange(FileObject->SectionObjectPointer,
+                                        WriteOffset.QuadPart,
+                                        WriteOffset.QuadPart + VacbLength,
+                                        Wait);
+            if (Status == STATUS_CANT_WAIT)
+                _SEH2_YIELD(return FALSE);
+            if (!NT_SUCCESS(Status))
+                ExRaiseStatus(Status);
 
             WriteOffset.QuadPart += VacbLength;
             Length -= VacbLength;
-
-            /* Tell Mm */
-            Status = MmMakeSegmentDirty(FileObject->SectionObjectPointer,
-                                        Vacb->FileOffset.QuadPart + VacbOffset,
-                                        VacbLength);
-            if (!NT_SUCCESS(Status))
-                ExRaiseStatus(Status);
         }
         _SEH2_FINALLY
         {
