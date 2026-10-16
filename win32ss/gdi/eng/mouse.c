@@ -1258,12 +1258,14 @@ IntEngSetPointerShape(
     return ulResult;
 }
 
-/* Set the shape from the two bitmaps (handles) a cursor holds, and keep the handles to make the pointer again after a mode switch */
+/* Set the shape from the two bitmaps a cursor holds, locked by the caller, and keep their handles to make the pointer again after a mode switch */
 static
 ULONG
-IntSetPointerShapeFromBitmaps(
+IntSetPointerShapeFromSurfaces(
     _Inout_ PDEVOBJ *ppdev,
     _In_ PSURFACE psurf,
+    _In_opt_ PSURFACE psurfMask,
+    _In_opt_ PSURFACE psurfColor,
     _In_opt_ HBITMAP hbmMask,
     _In_opt_ HBITMAP hbmColor,
     _In_ LONG xHot,
@@ -1272,35 +1274,14 @@ IntSetPointerShapeFromBitmaps(
     _In_ LONG y,
     _In_ FLONG fl)
 {
-    PSURFACE psurfMask, psurfColor;
     EXLATEOBJ exlo;
     ULONG ulResult;
 
-    /* Lock the mask bitmap */
-    if (hbmMask)
+    if (psurfColor)
     {
-        psurfMask = SURFACE_ShareLockSurface(hbmMask);
+        /* Create an XLATEOBJ, no mono support */
+        EXLATEOBJ_vInitialize(&exlo, psurfColor->ppal, psurf->ppal, 0, 0, 0);
     }
-    else
-    {
-        //ASSERT(fl & SPS_ALPHA);
-        psurfMask = NULL;
-    }
-
-    /* Check for color bitmap */
-    if (hbmColor)
-    {
-        /* We have one, lock it */
-        psurfColor = SURFACE_ShareLockSurface(hbmColor);
-
-        if (psurfColor)
-        {
-            /* Create an XLATEOBJ, no mono support */
-            EXLATEOBJ_vInitialize(&exlo, psurfColor->ppal, psurf->ppal, 0, 0, 0);
-        }
-    }
-    else
-        psurfColor = NULL;
 
     /* We must have a valid surface in case of alpha bitmap */
     ASSERT(((fl & SPS_ALPHA) && psurfColor) || !(fl & SPS_ALPHA));
@@ -1323,15 +1304,8 @@ IntSetPointerShapeFromBitmaps(
         ppdev->Pointer.hbmSrcColor = hbmColor;
     }
 
-    /* Cleanup */
     if (psurfColor)
-    {
         EXLATEOBJ_vCleanup(&exlo);
-        SURFACE_ShareUnlockSurface(psurfColor);
-    }
-
-    if (psurfMask)
-        SURFACE_ShareUnlockSurface(psurfMask);
 
     return ulResult;
 }
@@ -1341,7 +1315,9 @@ IntSetPointerShapeFromBitmaps(
  * unusable. When the switching thread owns the window under the pointer the shape is set again anyway; when it does not,
  * no one does, and the pointer would stay off. The bitmaps the last shape was made from are still the cursor's, so the
  * shape is made again from them, once per mode: a set that fails (a colour bitmap that has the old format) fails the same
- * way for every caller and is not repeated at each move. The device lock is held.
+ * way for every caller and is not repeated at each move. The device lock is held. Destroying a cursor is not serialized
+ * by it, so both bitmaps are locked once and stay locked until the set is done: a cursor destroyed meanwhile only has its
+ * bitmaps freed when the lock is released, and one destroyed before is seen here and ends the attempt.
  */
 static
 BOOL
@@ -1351,9 +1327,10 @@ IntRebuildMousePointer(
 {
     GDIPOINTER *pgp = &ppdev->Pointer;
     HBITMAP hbmMask = pgp->hbmSrcMask, hbmColor = pgp->hbmSrcColor;
-    PSURFACE psurf, psurfTest;
+    PSURFACE psurf, psurfMask = NULL, psurfColor = NULL;
     LONG xHot = pgp->HotSpot.x, yHot = pgp->HotSpot.y;
     FLONG fl = pgp->flags;
+    BOOL bRet = FALSE;
 
     psurf = ppdev->pSurface;
     if (pgp->ulRebuildGen == ppdev->ulModeGen + 1 || (!hbmMask && !hbmColor) || !psurf || &psurf->SurfObj != pso)
@@ -1361,25 +1338,26 @@ IntRebuildMousePointer(
 
     pgp->ulRebuildGen = ppdev->ulModeGen + 1;
 
-    /* A cursor that is gone takes its bitmaps along */
-    if (hbmMask)
-    {
-        psurfTest = SURFACE_ShareLockSurface(hbmMask);
-        if (!psurfTest)
-            return FALSE;
-        SURFACE_ShareUnlockSurface(psurfTest);
-    }
+    if (hbmMask && !(psurfMask = SURFACE_ShareLockSurface(hbmMask)))
+        goto done;
 
-    if (hbmColor)
-    {
-        psurfTest = SURFACE_ShareLockSurface(hbmColor);
-        if (!psurfTest)
-            return FALSE;
-        SURFACE_ShareUnlockSurface(psurfTest);
-    }
+    if (hbmColor && !(psurfColor = SURFACE_ShareLockSurface(hbmColor)))
+        goto done;
 
-    return IntSetPointerShapeFromBitmaps(ppdev, psurf, hbmMask, hbmColor, xHot, yHot,
-                                         ppdev->ptlPointer.x, ppdev->ptlPointer.y, fl) != SPS_ERROR;
+    if ((fl & SPS_ALPHA) && !psurfColor)
+        goto done;
+
+    bRet = IntSetPointerShapeFromSurfaces(ppdev, psurf, psurfMask, psurfColor, hbmMask, hbmColor, xHot, yHot,
+                                          ppdev->ptlPointer.x, ppdev->ptlPointer.y, fl) != SPS_ERROR;
+
+done:
+    if (psurfColor)
+        SURFACE_ShareUnlockSurface(psurfColor);
+
+    if (psurfMask)
+        SURFACE_ShareUnlockSurface(psurfMask);
+
+    return bRet;
 }
 
 ULONG
@@ -1395,7 +1373,7 @@ GreSetPointerShape(
     _In_ FLONG fl)
 {
     PDC pdc;
-    PSURFACE psurf;
+    PSURFACE psurf, psurfMask, psurfColor;
     ULONG ulResult = 0;
 
     pdc = DC_LockDc(hdc);
@@ -1417,7 +1395,20 @@ GreSetPointerShape(
         return 0;
     }
 
-    ulResult = IntSetPointerShapeFromBitmaps(pdc->ppdev, psurf, hbmMask, hbmColor, xHot, yHot, x, y, fl);
+    /* Lock the mask bitmap */
+    psurfMask = hbmMask ? SURFACE_ShareLockSurface(hbmMask) : NULL;
+
+    /* Check for color bitmap */
+    psurfColor = hbmColor ? SURFACE_ShareLockSurface(hbmColor) : NULL;
+
+    ulResult = IntSetPointerShapeFromSurfaces(pdc->ppdev, psurf, psurfMask, psurfColor, hbmMask, hbmColor, xHot, yHot, x, y, fl);
+
+    /* Cleanup */
+    if (psurfColor)
+        SURFACE_ShareUnlockSurface(psurfColor);
+
+    if (psurfMask)
+        SURFACE_ShareUnlockSurface(psurfMask);
 
     EngReleaseSemaphore(pdc->ppdev->hsemDevLock);
 
