@@ -804,6 +804,8 @@ ExitThreadCallback(PETHREAD Thread)
     ppiCurrent = ptiCurrent->ppi;
     ASSERT(ppiCurrent);
 
+    MsqWithdrawSentMessagesOf(ptiCurrent);
+
     IsRemoveAttachThread(ptiCurrent);
 
     if (gpwlList)

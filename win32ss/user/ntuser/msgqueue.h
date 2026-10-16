@@ -204,6 +204,7 @@ co_MsqSendMessageAsync(PTHREADINFO ptiReceiver,
                        BOOL HasPackedLParam,
                        INT HookMessage);
 
+VOID FASTCALL MsqWithdrawSentMessagesOf(_In_ PTHREADINFO ptiSender);
 VOID FASTCALL IntCoalesceMouseMove(PTHREADINFO);
 LRESULT FASTCALL IntDispatchMessage(MSG* Msg);
 BOOL FASTCALL IntTranslateKbdMessage(LPMSG lpMsg, UINT flags);
