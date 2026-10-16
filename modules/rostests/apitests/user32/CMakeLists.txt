@@ -4,6 +4,7 @@ add_subdirectory(wevhook)
 
 list(APPEND SOURCE
     AttachThreadInput.c
+    AttachThreadInputQueue.c
     AutoRotation.c
     ../include/msgtrace.c
     CharFuncs.c
