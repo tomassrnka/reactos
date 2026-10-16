@@ -217,7 +217,10 @@ Ext2ZeroData (
     _SEH2_TRY {
         rc = CcZeroData(FileObject, Start, End, Ext2CanIWait());
     } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
+        /* CcZeroData raised (e.g. out of memory): the gap was NOT zeroed. Report the failure so the caller
+         * does not advance the valid data length over stale blocks -- keeping the old TRUE would disclose them. */
         DbgBreak();
+        rc = FALSE;
     } _SEH2_END;
 
     return rc;
