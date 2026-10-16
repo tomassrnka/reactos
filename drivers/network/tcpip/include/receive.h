@@ -34,6 +34,8 @@ typedef struct IPDATAGRAM_REASSEMBLY {
     LIST_ENTRY ListEntry;        /* Entry on list */
     KSPIN_LOCK Lock;             /* Protecting spin lock */
     UINT DataSize;               /* Size of datagram data area */
+    UINT Terminal;               /* Last octet index, fixed by the first last fragment */
+    BOOLEAN TerminalSet;         /* Whether a last fragment has fixed Terminal */
     IP_ADDRESS SrcAddr;          /* Source address */
     IP_ADDRESS DstAddr;          /* Destination address */
     UCHAR Protocol;              /* Internet Protocol number */

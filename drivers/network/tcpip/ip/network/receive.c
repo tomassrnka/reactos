@@ -329,6 +329,7 @@ VOID ProcessFragment(
   PIP_FRAGMENT Fragment;
   BOOLEAN Success;
   BOOLEAN Found;
+  BOOLEAN Covered;
 
   /* FIXME: Assume IPv4 */
 
@@ -406,6 +407,18 @@ VOID ProcessFragment(
      payload extent minus one. The payload is guaranteed non-empty above, so
      this does not underflow. */
   FragLast      = FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize) - 1;
+
+  /* The first last fragment (MF=0) fixes the datagram terminal, the index of its
+     final octet. Once fixed, drop any fragment that would extend past it and any
+     second last fragment that disagrees, so a contradictory MF=0 cannot shrink
+     the datagram and leave the octets above the new end uninitialized. */
+  if (IPDR->TerminalSet &&
+      (FragLast > IPDR->Terminal ||
+       (!MoreFragments && FragLast != IPDR->Terminal)))
+  {
+    TcpipReleaseSpinLock(&IPDR->Lock, OldIrql);
+    return;
+  }
 
   /* Walk every hole the fragment overlaps and split each one (RFC 815). After
      overlapping fragments a single fragment can span more than one hole;
@@ -502,9 +515,13 @@ VOID ProcessFragment(
     /* Disassociate the NDIS packet so it isn't freed upon return from IPReceive() */
     IPPacket->NdisPacket = NULL;
 
-    /* If this is the last fragment, compute and save the datagram data size */
+    /* If this is the last fragment, fix the datagram terminal and data size */
     if (!MoreFragments)
+    {
       IPDR->DataSize = FragFirst + Fragment->Size;
+      IPDR->Terminal = FragLast;
+      IPDR->TerminalSet = TRUE;
+    }
 
     /* Put the fragment in the list */
     InsertTailList(&IPDR->FragmentListHead, &Fragment->ListEntry);
@@ -512,7 +529,20 @@ VOID ProcessFragment(
 
   TI_DbgPrint(DEBUG_IP, ("Done searching for hole descriptor.\n"));
 
-  if (IsListEmpty(&IPDR->HoleListHead)) {
+  /* The datagram is complete only when a last fragment has fixed the terminal
+     and every octet up to it is covered. IsListEmpty alone is unsafe: a last
+     fragment discards the hole suffix above its end, which can empty the list
+     while a gap remains below the terminal. */
+  Covered = IPDR->TerminalSet;
+  for (CurrentEntry = IPDR->HoleListHead.Flink;
+       Covered && CurrentEntry != &IPDR->HoleListHead;
+       CurrentEntry = CurrentEntry->Flink) {
+    Hole = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_HOLE, ListEntry);
+    if (Hole->First <= IPDR->Terminal)
+      Covered = FALSE;
+  }
+
+  if (Covered) {
     /* Hole list is empty which means a complete datagram can be assembled.
        Assemble the datagram and pass it to an upper layer protocol */
 
