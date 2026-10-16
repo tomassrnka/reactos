@@ -990,6 +990,38 @@ static void test_StretchBlt_NegativeHeight(void)
         DeleteDC(hdcDst);
     }
 
+    /* UF-30 crash-regression guard (survival check, not a pixel check). The bug is an out-of-bounds
+     * kernel walk, so a regression bugchecks the kernel and fails the whole golden-VM run before it
+     * reaches the end: that hard failure is the guard. A both-axis flip (negative width and height)
+     * from a much wider 32bpp source into a narrow 32bpp destination drives DIB_32BPP_BitBltSrcCopy
+     * down its bLeftToRight && bTopToBottom path, where it aliases the destination pointers and, on
+     * the unpatched kernel, steps them by the source stride (8192) instead of the destination stride
+     * (640), walking off the destination surface. The fixed kernel steps by the destination stride
+     * and the blit completes, so StretchBlt returns TRUE here. */
+    {
+        HDC hdcNarrow = CreateCompatibleDC(hdcWnd);
+        HDC hdcWide = CreateCompatibleDC(hdcWnd);
+        BITMAPINFO bmiNarrow = {{sizeof(BITMAPINFOHEADER), 160, -120, 1, 32, BI_RGB}};
+        BITMAPINFO bmiWide = {{sizeof(BITMAPINFOHEADER), 2048, -240, 1, 32, BI_RGB}};
+        ULONG *pulNarrow = NULL, *pulWide = NULL;
+        HBITMAP hbmNarrow = CreateDIBSection(hdcWnd, &bmiNarrow, DIB_RGB_COLORS, (PVOID*)&pulNarrow, NULL, 0);
+        HBITMAP hbmWide = CreateDIBSection(hdcWnd, &bmiWide, DIB_RGB_COLORS, (PVOID*)&pulWide, NULL, 0);
+        HBITMAP hbmNarrowOld = SelectObject(hdcNarrow, hbmNarrow);
+        HBITMAP hbmWideOld = SelectObject(hdcWide, hbmWide);
+
+        memset(pulWide, 0x7F, 2048 * 240 * sizeof(ULONG));
+
+        ok(StretchBlt(hdcNarrow, 160, 120, -160, -120, hdcWide, 0, 0, 160, 120, SRCCOPY),
+           "UF-30: both-axis different-stride flip must survive and succeed on the fixed kernel\n");
+
+        SelectObject(hdcWide, hbmWideOld);
+        SelectObject(hdcNarrow, hbmNarrowOld);
+        DeleteObject(hbmWide);
+        DeleteObject(hbmNarrow);
+        DeleteDC(hdcWide);
+        DeleteDC(hdcNarrow);
+    }
+
     SelectObject(hdcSrc, hbmOld);
     DeleteObject(hbmSrc);
     DeleteDC(hdcSrc);
