@@ -60,6 +60,7 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
   PDWORD   Source32, Dest32;
   DWORD    Index;
   LONG     DestWidth, DestHeight;
+  LONG     lSourceBitsStepDelta;
   BOOLEAN  bTopToBottom, bLeftToRight;
   BOOLEAN  blDeltaSrcNeg, blDeltaDestNeg;
   BOOLEAN  blDeltaAdjustDone = FALSE;
@@ -103,6 +104,16 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
 
   DestWidth = BltInfo->DestRect.right - BltInfo->DestRect.left;
   DestHeight = BltInfo->DestRect.bottom - BltInfo->DestRect.top;
+
+  /* Defense in depth alongside the fix below (UF-30): the per-format copy loops trust DestRect
+   * and SourcePoint completely once past this point, with no further surface-size check: refuse a
+   * span that does not fit either bitmap instead of reading or writing past it. */
+  if (BltInfo->DestRect.right  > BltInfo->DestSurface->sizlBitmap.cx ||
+      BltInfo->DestRect.bottom > BltInfo->DestSurface->sizlBitmap.cy ||
+      BltInfo->SourcePoint.x < 0 || BltInfo->SourcePoint.y < 0 ||
+      BltInfo->SourcePoint.x + DestWidth  > BltInfo->SourceSurface->sizlBitmap.cx ||
+      BltInfo->SourcePoint.y + DestHeight > BltInfo->SourceSurface->sizlBitmap.cy)
+    return FALSE;
 
   DestBits = (PBYTE)BltInfo->DestSurface->pvScan0
     + (BltInfo->DestRect.top * BltInfo->DestSurface->lDelta)
@@ -658,6 +669,16 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
             SourceBitsT = DestBitsT;
           }
 
+          /* UF-30: by this point SourceBitsT/SourceBitsB may alias DestBitsT/DestBitsB instead of
+           * pointing into the source surface (TopToBottomDone, blDeltaAdjustDone, and the
+           * same-surface overlap adjustment above all reuse the destination's own pointers as the
+           * new source). Step them by the destination's lDelta in that case: stepping an alias of
+           * the destination by the source surface's lDelta walks it off the destination surface
+           * whenever the two lDeltas differ (e.g. a window DC over a screen surface, bottom-up,
+           * paired with a top-down DIB section source), which is how this bugchecked. */
+          lSourceBitsStepDelta = (SourceBitsT == DestBitsT) ? BltInfo->DestSurface->lDelta
+                                                             : BltInfo->SourceSurface->lDelta;
+
           /* Vertical Flip code starts here */
           for (j = 0; j < DestHeight / 2 ; j++)
           {
@@ -671,8 +692,8 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
             RtlMoveMemory(DestBitsT, store, 4 * DestWidth);
 
             /* Index top rows down and bottom rows up */
-            SourceBitsT += BltInfo->SourceSurface->lDelta;
-            SourceBitsB -= BltInfo->SourceSurface->lDelta;
+            SourceBitsT += lSourceBitsStepDelta;
+            SourceBitsB -= lSourceBitsStepDelta;
 
             DestBitsT += BltInfo->DestSurface->lDelta;
             DestBitsB -= BltInfo->DestSurface->lDelta;
