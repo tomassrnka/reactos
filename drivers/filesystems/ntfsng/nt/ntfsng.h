@@ -80,6 +80,8 @@ typedef struct _NG_VCB
     struct _NG_FCB *VolumeFcb;
     struct ngc_volinfo Info;
     ULONG SectorSize;
+    ULONG ClusterSize;              /* immutable cluster size, cached at mount; the paging path reads this,
+                                       never the refreshable Info whose ngc_volinfo() zeroes it mid-update */
     BOOLEAN ReadOnly;               /* mounted read-only: policy, registry or request */
     BOOLEAN WritesLost;             /* a resize failed half way: changes made before it never reach the disk,
                                        so a flush fails (ReadOnly is set too) */

@@ -320,7 +320,10 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (!Err && NoFlush)
         WhyRo = "the storage stack cannot flush the disk's write cache";
     if (!Err)
+    {
         ngc_volinfo(Vcb->Core, &Vcb->Info);
+        Vcb->ClusterSize = Vcb->Info.cluster_size;   /* immutable for a mounted volume */
+    }
     NgReleaseCore(Vcb);
     if (Err)
     {
