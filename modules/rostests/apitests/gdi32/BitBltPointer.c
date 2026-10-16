@@ -117,6 +117,31 @@ DrawPatBltInvert(HDC hdc)
     PatBlt(hdc, 30, 20, 100, 80, DSTINVERT);
 }
 
+/* The transform swaps the corners of the rectangle: left > right (and top > bottom) when it reaches the pointer code */
+static void
+DrawPatBltMirrored(HDC hdc)
+{
+    XFORM xf = {-1.0f, 0.0f, 0.0f, 1.0f, (FLOAT)WIDTH, 0.0f};
+    int oldMode = SetGraphicsMode(hdc, GM_ADVANCED);
+
+    SetWorldTransform(hdc, &xf);
+    PatBlt(hdc, 20, 10, 120, 90, DSTINVERT);
+    ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
+    SetGraphicsMode(hdc, oldMode);
+}
+
+static void
+DrawPatBltMirroredBoth(HDC hdc)
+{
+    XFORM xf = {-1.0f, 0.0f, 0.0f, -1.0f, (FLOAT)WIDTH, (FLOAT)HEIGHT};
+    int oldMode = SetGraphicsMode(hdc, GM_ADVANCED);
+
+    SetWorldTransform(hdc, &xf);
+    PatBlt(hdc, 30, 20, 100, 80, DSTINVERT);
+    ModifyWorldTransform(hdc, NULL, MWT_IDENTITY);
+    SetGraphicsMode(hdc, oldMode);
+}
+
 static void
 DrawMaskBlt(HDC hdc)
 {
@@ -657,6 +682,8 @@ START_TEST(BitBltPointer)
     Check("BitBlt SRCINVERT", DrawBitBltInvert);
     Check("PatBlt PATCOPY with a hatch brush and brush origin", DrawPatBltHatch);
     Check("PatBlt DSTINVERT", DrawPatBltInvert);
+    Check("PatBlt DSTINVERT under a mirroring transform", DrawPatBltMirrored);
+    Check("PatBlt DSTINVERT under a transform that mirrors both axes", DrawPatBltMirroredBoth);
     Check("MaskBlt", DrawMaskBlt);
     Check("BitBlt with a clip that misses the pointer", DrawBitBltClipLeft);
     Check("BitBlt with a clip through the pointer", DrawBitBltClipThrough);
