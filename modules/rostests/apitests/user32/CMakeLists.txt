@@ -59,6 +59,7 @@ list(APPEND SOURCE
     ScrollBarWndExtra.c
     ScrollDC.c
     ScrollWindowEx.c
+    SendMessageSenderDied.c
     SendMessageTimeout.c
     SetActiveWindow.c
     SetCoalescableTimer.c

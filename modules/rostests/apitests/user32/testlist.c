@@ -61,6 +61,7 @@ extern void func_ScrollBarRedraw(void);
 extern void func_ScrollBarWndExtra(void);
 extern void func_ScrollDC(void);
 extern void func_ScrollWindowEx(void);
+extern void func_SendMessageSenderDied(void);
 extern void func_SendMessageTimeout(void);
 extern void func_SetActiveWindow(void);
 extern void func_SetCoalescableTimer(void);
@@ -148,6 +149,7 @@ const struct test winetest_testlist[] =
     { "ScrollBarWndExtra", func_ScrollBarWndExtra },
     { "ScrollDC", func_ScrollDC },
     { "ScrollWindowEx", func_ScrollWindowEx },
+    { "SendMessageSenderDied", func_SendMessageSenderDied },
     { "SendMessageTimeout", func_SendMessageTimeout },
     { "SetActiveWindow", func_SetActiveWindow },
     { "SetCoalescableTimer", func_SetCoalescableTimer },

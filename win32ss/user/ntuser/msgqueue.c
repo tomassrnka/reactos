@@ -1059,6 +1059,29 @@ co_MsqSendMessageAsync(PTHREADINFO ptiReceiver,
     return TRUE;
 }
 
+/* Take a sent message back from its receiver when the sender no longer waits for it */
+static VOID
+MsqWithdrawSentMessage(
+    _In_ PTHREADINFO ptirec,
+    _In_ PUSER_SENT_MESSAGE Message)
+{
+   PLIST_ENTRY Entry;
+
+   for (Entry = ptirec->SentMessagesListHead.Flink;
+        Entry != &ptirec->SentMessagesListHead;
+        Entry = Entry->Flink)
+   {
+      if (CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry) == Message)
+      {
+         Message->pkCompletionEvent = NULL;
+         RemoveEntryList(&Message->ListEntry);
+         ClearMsgBitsMask(ptirec, Message->QS_Flags);
+         InsertTailList(&usmList, &Message->ListEntry);
+         break;
+      }
+   }
+}
+
 NTSTATUS FASTCALL
 co_MsqSendMessage(PTHREADINFO ptirec,
                   HWND Wnd,
@@ -1074,7 +1097,6 @@ co_MsqSendMessage(PTHREADINFO ptirec,
    PUSER_SENT_MESSAGE SaveMsg, Message;
    NTSTATUS WaitStatus;
    LARGE_INTEGER Timeout;
-   PLIST_ENTRY Entry;
    PWND pWnd;
    BOOLEAN SwapStateEnabled;
    LRESULT Result = 0;   //// Result could be trashed. ////
@@ -1201,21 +1223,9 @@ co_MsqSendMessage(PTHREADINFO ptirec,
 
       if (WaitStatus == STATUS_TIMEOUT)
       {
-         /* Look up if the message has not yet dispatched, if so
-            make sure it can't pass a result and it must not set the completion event anymore */
-         Entry = ptirec->SentMessagesListHead.Flink;
-         while (Entry != &ptirec->SentMessagesListHead)
-         {
-            if (CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry) == Message)
-            {
-               Message->pkCompletionEvent = NULL;
-               RemoveEntryList(&Message->ListEntry);
-               ClearMsgBitsMask(ptirec, Message->QS_Flags);
-               InsertTailList(&usmList, &Message->ListEntry);
-               break;
-            }
-            Entry = Entry->Flink;
-         }
+         /* If the message has not yet dispatched, make sure it can't pass a result
+            and it must not set the completion event anymore */
+         MsqWithdrawSentMessage(ptirec, Message);
 
          ERR("MsqSendMessage (blocked) timed out 1 Status %lx\n", WaitStatus);
       }
@@ -1254,21 +1264,9 @@ co_MsqSendMessage(PTHREADINFO ptirec,
 
          if (WaitStatus == STATUS_TIMEOUT)
          {
-            /* Look up if the message has not yet been dispatched, if so
-               make sure it can't pass a result and it must not set the completion event anymore */
-            Entry = ptirec->SentMessagesListHead.Flink;
-            while (Entry != &ptirec->SentMessagesListHead)
-            {
-               if (CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry) == Message)
-               {
-                  Message->pkCompletionEvent = NULL;
-                  RemoveEntryList(&Message->ListEntry);
-                  ClearMsgBitsMask(ptirec, Message->QS_Flags);
-                  InsertTailList(&usmList, &Message->ListEntry);
-                  break;
-               }
-               Entry = Entry->Flink;
-            }
+            /* If the message has not yet been dispatched, make sure it can't pass a result
+               and it must not set the completion event anymore */
+            MsqWithdrawSentMessage(ptirec, Message);
 
             WARN("MsqSendMessage timed out 2 Status %lx\n", WaitStatus);
             break;
@@ -1300,7 +1298,9 @@ co_MsqSendMessage(PTHREADINFO ptirec,
      // The current thread is dying!
      TRACE("User APC\n");
 
-     // The Message will be on the Trouble list until Thread cleanup.
+     // The Message will be on the Trouble list until Thread cleanup. An undispatched
+     // message must leave the receiver's list: its lParam can point into this thread's stack.
+     MsqWithdrawSentMessage(ptirec, Message);
      Message->flags |= SMF_SENDERDIED;
 
      co_IntDeliverUserAPC();
