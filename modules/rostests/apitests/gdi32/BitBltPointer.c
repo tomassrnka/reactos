@@ -220,6 +220,59 @@ DrawTransparentBltAround(HDC hdc)
 }
 
 static void
+DrawAlphaBlendSourceOutside(HDC hdc)
+{
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 128, 0};
+
+    /* the source rectangle runs out of the source bitmap: the engine rejects the call, nothing may be drawn */
+    AlphaBlend(hdc, PTR_X - 12, PTR_Y - 9, 40, 50, ghdcSrc, WIDTH - 25, HEIGHT - 20, 40, 50, bf);
+}
+
+static void
+DrawTransparentBltSourceOutside(HDC hdc)
+{
+    TransparentBlt(hdc, PTR_X - 12, PTR_Y - 9, 40, 50, ghdcSrc, WIDTH - 25, HEIGHT - 20, 40, 50, RGB(1, 2, 3));
+}
+
+static int gShift, gDelta, gKind;
+
+static void
+DrawStretchShift(HDC hdc)
+{
+    /* One scaled stretch with a negative width through a clip one pixel wide: the clip column lies next to or inside the
+     * pointer and the destination ends at it or near it. The engine moves the destination of such a stretch by a pixel,
+     * so for some of them it writes the column although the destination as given does not contain it. Each one is
+     * checked alone: a later call that hides the pointer would repair what an earlier one left wrong. */
+    int c = PTR_X + gShift;
+    HRGN hrgn = CreateRectRgn(c, PTR_Y, c + 1, PTR_Y + 24);
+
+    SelectClipRgn(hdc, hrgn);
+    switch (gKind)
+    {
+        case 0: StretchBlt(hdc, c + gDelta, PTR_Y + 2, -8, 20, ghdcSrc, 3, 2, 5, 10, SRCCOPY); break;
+        case 1: StretchBlt(hdc, c + gDelta, PTR_Y + 4, -8, 20, ghdcSrc, 9, 2, -5, 10, SRCCOPY); break;
+        case 2: StretchBlt(hdc, c + gDelta, PTR_Y + 6, 8, 20, ghdcSrc, 9, 2, -5, 10, SRCCOPY); break;
+    }
+    SelectClipRgn(hdc, NULL);
+    DeleteObject(hrgn);
+}
+
+static void
+DrawEmptyClip(HDC hdc)
+{
+    HRGN hrgn = CreateRectRgn(0, 0, 0, 0);
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 128, 0};
+
+    SelectClipRgn(hdc, hrgn);
+    BitBlt(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, SRCCOPY);
+    AlphaBlend(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, WIDTH, HEIGHT, bf);
+    TransparentBlt(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, WIDTH, HEIGHT, RGB(1, 2, 3));
+    StretchBlt(hdc, 0, 0, WIDTH, HEIGHT, ghdcSrc, 0, 0, WIDTH / 2, HEIGHT / 2, SRCCOPY);
+    SelectClipRgn(hdc, NULL);
+    DeleteObject(hrgn);
+}
+
+static void
 DrawClipTwoRects(HDC hdc)
 {
     /* A clip with a gap through the pointer, so the clip object has several rectangles */
@@ -407,6 +460,56 @@ CheckMoves(const char *name)
     Pump();
 }
 
+/* Only with BITBLTPOINTER_MODESWITCH set: a display mode of another depth, and back, with the pointer moving. The bitmaps
+ * the pointer code keeps for the old depth must not be used for the new one. */
+static void
+CheckModeSwitch(void)
+{
+    DEVMODEW cur, dm;
+    DWORD i;
+    BOOL bFound = FALSE;
+
+    if (!GetEnvironmentVariableA("BITBLTPOINTER_MODESWITCH", NULL, 0))
+        return;
+
+    ZeroMemory(&cur, sizeof(cur));
+    cur.dmSize = sizeof(cur);
+    if (!EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &cur))
+        return;
+
+    for (i = 0; ; i++)
+    {
+        ZeroMemory(&dm, sizeof(dm));
+        dm.dmSize = sizeof(dm);
+        if (!EnumDisplaySettingsW(NULL, i, &dm))
+            break;
+        if (dm.dmPelsWidth == cur.dmPelsWidth && dm.dmPelsHeight == cur.dmPelsHeight &&
+            dm.dmBitsPerPel != cur.dmBitsPerPel && dm.dmBitsPerPel >= 16)
+        {
+            bFound = TRUE;
+            break;
+        }
+    }
+    if (!bFound || ChangeDisplaySettingsW(&dm, 0) != DISP_CHANGE_SUCCESSFUL)
+    {
+        skip("No other depth at this size\n");
+        return;
+    }
+
+    ReleaseDC(ghwnd, ghdcWnd);
+    ghdcWnd = GetDC(ghwnd);
+    SetCursorPos(gOrgX + PTR_X, gOrgY + PTR_Y);
+    Pump();
+    CheckMoves("Pointer moves after a switch to another depth");
+
+    ChangeDisplaySettingsW(&cur, 0);
+    ReleaseDC(ghwnd, ghdcWnd);
+    ghdcWnd = GetDC(ghwnd);
+    SetCursorPos(gOrgX + PTR_X, gOrgY + PTR_Y);
+    Pump();
+    CheckMoves("Pointer moves after the switch back");
+}
+
 static BOOL
 Setup(void)
 {
@@ -496,11 +599,19 @@ START_TEST(BitBltPointer)
     Check("AlphaBlend with scaling", DrawAlphaBlendScaled);
     Check("TransparentBlt without scaling", DrawTransparentBlt);
     Check("TransparentBlt around the pointer", DrawTransparentBltAround);
+    Check("AlphaBlend with a source outside the source bitmap", DrawAlphaBlendSourceOutside);
+    Check("TransparentBlt with a source outside the source bitmap", DrawTransparentBltSourceOutside);
+    for (gShift = -1; gShift <= 2; gShift++)
+        for (gDelta = -2; gDelta <= 2; gDelta++)
+            for (gKind = 0; gKind < 3; gKind++)
+                Check("StretchBlt with a negative width and a thin clip at the pointer", DrawStretchShift);
+    Check("Every call with an empty clip", DrawEmptyClip);
     Check("BitBlt with a clip of two rectangles through the pointer", DrawClipTwoRects);
     Check("PatBlt with a clip that has a hole over the pointer", DrawClipHole);
     Check("Clip that changes between operations", DrawClipChanges);
 
     CheckMoves("Pointer moves leave the window as drawn");
+    CheckModeSwitch();
 
     DeleteDC(ghdcRead);
     DeleteObject(ghbmRead);
