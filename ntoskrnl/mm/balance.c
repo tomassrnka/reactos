@@ -100,6 +100,9 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
     /* UF-22: snapshot once; the compare and the subtract below must see the same value, or a
      * concurrent rise above the minimum underflows the unsigned subtraction into a giant target. */
     ULONG Available = MmAvailablePages;
+    /* UF-22: same hazard on the consumer counter; a concurrent page release between the test and the
+     * subtract would drop PagesUsed below the target and underflow it into a giant target. */
+    ULONG PagesUsed = MiMemoryConsumers[Consumer].PagesUsed;
 
     /* Make sure we can trim this consumer */
     if (!MiMemoryConsumers[Consumer].Trim)
@@ -113,10 +116,10 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
         /* Global page limit exceeded */
         Target = (ULONG)max(Target, MiMinimumAvailablePages - Available);
     }
-    else if (MiMemoryConsumers[Consumer].PagesUsed > MiMemoryConsumers[Consumer].PagesTarget)
+    else if (PagesUsed > MiMemoryConsumers[Consumer].PagesTarget)
     {
         /* Consumer page limit exceeded */
-        Target = max(Target, MiMemoryConsumers[Consumer].PagesUsed - MiMemoryConsumers[Consumer].PagesTarget);
+        Target = max(Target, PagesUsed - MiMemoryConsumers[Consumer].PagesTarget);
     }
 
     if (Target)
