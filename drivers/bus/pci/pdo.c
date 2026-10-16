@@ -340,24 +340,34 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
      * memory/I/O decode around the probe, as the PCI spec and Windows do. Endpoints
      * (header type 0) only: a PCI-to-PCI bridge must keep decode on, it forwards to
      * live devices behind it. Only act when decode is on. */
-    if (PCI_CONFIGURATION_TYPE(&DeviceExtension->PciDevice->PciConfig) == PCI_DEVICE_TYPE &&
-        PdoReadPciCommand(DeviceExtension, &SavedCommand) &&
-        (SavedCommand & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)))
+    if (PCI_CONFIGURATION_TYPE(&DeviceExtension->PciDevice->PciConfig) == PCI_DEVICE_TYPE)
     {
         USHORT Check;
 
-        /* Clear decode, then read COMMAND back and confirm it took: a successful
-         * config-write count does not prove the bits landed, and sizing with decode
-         * still on is exactly the host abort we are preventing. */
-        if (!PdoWritePciCommand(DeviceExtension,
-                                SavedCommand & ~(PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)) ||
-            !PdoReadPciCommand(DeviceExtension, &Check) ||
-            (Check & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)))
+        /* Endpoint: size with decode off. A COMMAND we cannot read means we cannot
+         * guarantee decode is off for the probe, so refuse to size (fail closed)
+         * rather than drive a live all-ones base. */
+        if (!PdoReadPciCommand(DeviceExtension, &SavedCommand))
         {
-            DPRINT1("Failed to disable BAR decode before sizing; skipping BAR\n");
+            DPRINT1("Cannot read COMMAND; refusing to size BAR\n");
             return FALSE;
         }
-        DecodeDisabled = TRUE;
+
+        if (SavedCommand & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE))
+        {
+            /* Clear decode, then read COMMAND back and confirm it took: a successful
+             * config-write count does not prove the bits landed, and sizing with
+             * decode still on is exactly the host abort we are preventing. */
+            if (!PdoWritePciCommand(DeviceExtension,
+                                    SavedCommand & ~(PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)) ||
+                !PdoReadPciCommand(DeviceExtension, &Check) ||
+                (Check & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)))
+            {
+                DPRINT1("Failed to disable BAR decode before sizing; refusing to size BAR\n");
+                return FALSE;
+            }
+            DecodeDisabled = TRUE;
+        }
     }
 
     /* On a sizing failure below, PdoReadPciBar restores the BAR and we return with
@@ -802,7 +812,12 @@ PdoQueryResourceRequirements(
                                    &Flags,
                                    &Bar,
                                    NULL))
-                break;
+            {
+                /* Count and fill must agree on the descriptor count; fail the whole
+                 * query rather than size a truncated list. */
+                Irp->IoStatus.Information = 0;
+                return STATUS_UNSUCCESSFUL;
+            }
 
             if (Length != 0)
                 ResCount += 2;
@@ -826,7 +841,12 @@ PdoQueryResourceRequirements(
                                    &Flags,
                                    &Bar,
                                    NULL))
-                break;
+            {
+                /* Count and fill must agree on the descriptor count; fail the whole
+                 * query rather than size a truncated list. */
+                Irp->IoStatus.Information = 0;
+                return STATUS_UNSUCCESSFUL;
+            }
 
             if (Length != 0)
                 ResCount += 2;
@@ -891,7 +911,11 @@ PdoQueryResourceRequirements(
                                    &MaximumAddress))
             {
                 DPRINT1("PdoGetRangeLength() failed\n");
-                break;
+                /* Diverged from the count pass: free and fail, never emit a
+                 * partially-filled list. */
+                ExFreePoolWithTag(ResourceList, TAG_PCI);
+                Irp->IoStatus.Information = 0;
+                return STATUS_UNSUCCESSFUL;
             }
 
             if (Length == 0)
@@ -1008,7 +1032,11 @@ PdoQueryResourceRequirements(
                                    &MaximumAddress))
             {
                 DPRINT1("PdoGetRangeLength() failed\n");
-                break;
+                /* Diverged from the count pass: free and fail, never emit a
+                 * partially-filled list. */
+                ExFreePoolWithTag(ResourceList, TAG_PCI);
+                Irp->IoStatus.Information = 0;
+                return STATUS_UNSUCCESSFUL;
             }
 
             if (Length == 0)
@@ -1156,7 +1184,10 @@ PdoQueryResources(
                                    &Flags,
                                    &Bar,
                                    NULL))
-                break;
+            {
+                Irp->IoStatus.Information = 0;
+                return STATUS_UNSUCCESSFUL;
+            }
 
             if (Length)
                 ResCount++;
@@ -1179,7 +1210,10 @@ PdoQueryResources(
                                    &Flags,
                                    &Bar,
                                    NULL))
-                break;
+            {
+                Irp->IoStatus.Information = 0;
+                return STATUS_UNSUCCESSFUL;
+            }
 
             if (Length != 0)
                 ResCount++;
@@ -1236,7 +1270,13 @@ PdoQueryResources(
                                    &Flags,
                                    &Bar,
                                    NULL))
-                break;
+            {
+                /* Diverged from the count pass: free and fail, never emit a
+                 * partially-filled list. */
+                ExFreePoolWithTag(ResourceList, TAG_PCI);
+                Irp->IoStatus.Information = 0;
+                return STATUS_UNSUCCESSFUL;
+            }
 
             if (Length == 0)
             {
@@ -1301,7 +1341,13 @@ PdoQueryResources(
                                    &Flags,
                                    &Bar,
                                    NULL))
-                break;
+            {
+                /* Diverged from the count pass: free and fail, never emit a
+                 * partially-filled list. */
+                ExFreePoolWithTag(ResourceList, TAG_PCI);
+                Irp->IoStatus.Information = 0;
+                return STATUS_UNSUCCESSFUL;
+            }
 
             if (Length == 0)
             {
