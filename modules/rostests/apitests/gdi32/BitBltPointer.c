@@ -239,12 +239,17 @@ static int gShift, gDelta, gKind;
 static void
 DrawStretchShift(HDC hdc)
 {
-    /* One scaled stretch with a negative width through a clip one pixel wide: the clip column lies next to or inside the
-     * pointer and the destination ends at it or near it. The engine moves the destination of such a stretch by a pixel,
-     * so for some of them it writes the column although the destination as given does not contain it. Each one is
-     * checked alone: a later call that hides the pointer would repair what an earlier one left wrong. */
-    int c = PTR_X + gShift;
-    HRGN hrgn = CreateRectRgn(c, PTR_Y, c + 1, PTR_Y + 24);
+    /* One scaled stretch with a flip through a clip one pixel wide (kinds 0 to 2) or high (kinds 3 and 4): the clip line lies
+     * next to or inside the pointer and the destination ends at it or near it. The engine moves the destination of such a
+     * stretch by a pixel, so for some of them it writes the line although the destination as given does not contain it.
+     * Each one is checked alone: a later call that hides the pointer would repair what an earlier one left wrong. */
+    int c = PTR_X + gShift, cy = PTR_Y + gShift;
+    HRGN hrgn;
+
+    if (gKind < 3)
+        hrgn = CreateRectRgn(c, PTR_Y, c + 1, PTR_Y + 24);
+    else
+        hrgn = CreateRectRgn(PTR_X, cy, PTR_X + 24, cy + 1);
 
     SelectClipRgn(hdc, hrgn);
     switch (gKind)
@@ -252,6 +257,8 @@ DrawStretchShift(HDC hdc)
         case 0: StretchBlt(hdc, c + gDelta, PTR_Y + 2, -8, 20, ghdcSrc, 3, 2, 5, 10, SRCCOPY); break;
         case 1: StretchBlt(hdc, c + gDelta, PTR_Y + 4, -8, 20, ghdcSrc, 9, 2, -5, 10, SRCCOPY); break;
         case 2: StretchBlt(hdc, c + gDelta, PTR_Y + 6, 8, 20, ghdcSrc, 9, 2, -5, 10, SRCCOPY); break;
+        case 3: StretchBlt(hdc, PTR_X + 2, cy + gDelta, 10, -8, ghdcSrc, 3, 14, 5, -4, SRCCOPY); break;
+        case 4: StretchBlt(hdc, PTR_X + 14, cy + gDelta, -10, -8, ghdcSrc, 9, 14, -5, -4, SRCCOPY); break;
     }
     SelectClipRgn(hdc, NULL);
     DeleteObject(hrgn);
@@ -510,6 +517,71 @@ CheckModeSwitch(void)
     CheckMoves("Pointer moves after the switch back");
 }
 
+/* A scaled stretch whose destination runs from x = 0 to the end of the coordinate range, with the pointer at the top left of the
+ * screen and a clip that is the column x = 0: the engine moves the destination of a flipped stretch by a pixel, which at the end
+ * of the range wraps, and the hazard of the call must not wrap with it. The screen DC is used (its origin is 0) and compared
+ * with a copy of the same screen part that gets the same calls in memory. */
+static void
+CheckRangeEnd(const char *name)
+{
+    HDC hdcScr = GetDC(NULL), hdcCopy = CreateCompatibleDC(hdcScr);
+    HBITMAP hbm = CreateCompatibleBitmap(hdcScr, 64, 64);
+    HDC hdcRead = CreateCompatibleDC(hdcScr), hdcRefRead = CreateCompatibleDC(hdcScr);
+    HGDIOBJ hOld = SelectObject(hdcCopy, hbm), hOldRead, hOldRef;
+    HRGN hrgn = CreateRectRgn(0, 0, 1, 40);
+    ULONG *pulA, *pulB;
+    HBITMAP hbmA = CreateBits32(hdcScr, &pulA), hbmB = CreateBits32(hdcScr, &pulB);
+    int i, x, y, bad = 0;
+    static const struct { int x, w, sx, sw; } calls[] =
+    {
+        {0x7fffffff, -0x7fffffff, 9, -5},
+        {0x7fffffff, -0x7fffffff, 3, 5},
+        {0, 0x7fffffff, 3, 5},
+        {-0x7fffffff, 0x7fffffff, 3, 5},
+    };
+
+    SetCursorPos(0, 0);
+    Pump();
+    hOldRead = SelectObject(hdcRead, hbmA);
+    hOldRef = SelectObject(hdcRefRead, hbmB);
+
+    for (i = 0; i < sizeof(calls) / sizeof(calls[0]); i++)
+    {
+        /* what the screen part shows now, taken with the pointer off it */
+        BitBlt(hdcCopy, 0, 0, 64, 64, hdcScr, 0, 0, SRCCOPY);
+        SelectClipRgn(hdcScr, hrgn);
+        SelectClipRgn(hdcCopy, hrgn);
+        StretchBlt(hdcScr, calls[i].x, 4, calls[i].w, 20, ghdcSrc, calls[i].sx, 2, calls[i].sw, 10, SRCCOPY);
+        StretchBlt(hdcCopy, calls[i].x, 4, calls[i].w, 20, ghdcSrc, calls[i].sx, 2, calls[i].sw, 10, SRCCOPY);
+        SelectClipRgn(hdcScr, NULL);
+        SelectClipRgn(hdcCopy, NULL);
+
+        BitBlt(hdcRead, 0, 0, 64, 64, hdcScr, 0, 0, SRCCOPY);
+        BitBlt(hdcRefRead, 0, 0, 64, 64, hdcCopy, 0, 0, SRCCOPY);
+        GdiFlush();
+        bad = 0;
+        for (y = 0; y < 64; y++)
+            for (x = 0; x < 64; x++)
+                if ((pulA[y * WIDTH + x] & 0xFFFFFF) != (pulB[y * WIDTH + x] & 0xFFFFFF))
+                    bad++;
+        ok(bad == 0, "%s %d: %d pixels differ\n", name, i, bad);
+    }
+
+    SelectObject(hdcRead, hOldRead);
+    SelectObject(hdcRefRead, hOldRef);
+    SelectObject(hdcCopy, hOld);
+    DeleteObject(hbm);
+    DeleteObject(hbmA);
+    DeleteObject(hbmB);
+    DeleteObject(hrgn);
+    DeleteDC(hdcRead);
+    DeleteDC(hdcRefRead);
+    DeleteDC(hdcCopy);
+    ReleaseDC(NULL, hdcScr);
+    SetCursorPos(gOrgX + PTR_X, gOrgY + PTR_Y);
+    Pump();
+}
+
 static BOOL
 Setup(void)
 {
@@ -603,7 +675,7 @@ START_TEST(BitBltPointer)
     Check("TransparentBlt with a source outside the source bitmap", DrawTransparentBltSourceOutside);
     for (gShift = -1; gShift <= 2; gShift++)
         for (gDelta = -2; gDelta <= 2; gDelta++)
-            for (gKind = 0; gKind < 3; gKind++)
+            for (gKind = 0; gKind < 5; gKind++)
                 Check("StretchBlt with a negative width and a thin clip at the pointer", DrawStretchShift);
     Check("Every call with an empty clip", DrawEmptyClip);
     Check("BitBlt with a clip of two rectangles through the pointer", DrawClipTwoRects);
@@ -611,6 +683,7 @@ START_TEST(BitBltPointer)
     Check("Clip that changes between operations", DrawClipChanges);
 
     CheckMoves("Pointer moves leave the window as drawn");
+    CheckRangeEnd("Stretch to the end of the coordinate range, pointer at the top left");
     CheckModeSwitch();
 
     DeleteDC(ghdcRead);
