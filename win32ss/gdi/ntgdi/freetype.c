@@ -5096,10 +5096,10 @@ TextIntGetTextExtentPoint(
 {
     PFONTGDI FontGDI;
     FT_BitmapGlyph realglyph;
-    INT glyph_index, i, previous, nTenthsOfDegrees;
+    INT glyph_index, i, nTenthsOfDegrees;
     ULONGLONG TotalWidth64 = 0;
     LOGFONTW *plf;
-    BOOL use_kerning, bVerticalWriting;
+    BOOL bVerticalWriting;
     LONG ascender, descender;
     FONT_CACHE_ENTRY Cache;
     DWORD ch0, ch1;
@@ -5140,9 +5140,6 @@ TextIntGetTextExtentPoint(
 
     FontLink_Chain_Init(&Chain, TextObj, Cache.Hashed.Face);
 
-    use_kerning = FT_HAS_KERNING(Cache.Hashed.Face);
-    previous = 0;
-
     for (i = 0; i < Count; i++)
     {
         ch0 = *String++;
@@ -5165,14 +5162,6 @@ TextIntGetTextExtentPoint(
         if (!realglyph)
             break;
 
-        /* Retrieve kerning distance */
-        if (use_kerning && previous && glyph_index)
-        {
-            FT_Vector delta;
-            FT_Get_Kerning(Cache.Hashed.Face, previous, glyph_index, 0, &delta);
-            TotalWidth64 += delta.x;
-        }
-
         TotalWidth64 += realglyph->root.advance.x >> 10;
 
         if (((TotalWidth64 + 32) >> 6) <= MaxExtent && NULL != Fit)
@@ -5183,8 +5172,6 @@ TextIntGetTextExtentPoint(
         {
             Dx[i] = (TotalWidth64 + 32) >> 6;
         }
-
-        previous = glyph_index;
     }
     ASSERT(FontGDI->Magic == FONTGDI_MAGIC);
     ascender = FontGDI->tmAscent; /* Units above baseline */
@@ -6712,9 +6699,7 @@ IntGetTextDisposition(
     INT i, glyph_index;
     FT_BitmapGlyph realglyph;
     FT_Face face = Cache->Hashed.Face;
-    BOOL use_kerning = FT_HAS_KERNING(face);
-    ULONG previous = 0;
-    FT_Vector delta, vec;
+    FT_Vector vec;
     DWORD ch0, ch1;
 
     ASSERT_FREETYPE_LOCK_HELD();
@@ -6741,14 +6726,6 @@ IntGetTextDisposition(
         if (!realglyph)
             return FALSE;
 
-        /* Retrieve kerning distance */
-        if (use_kerning && previous && glyph_index)
-        {
-            FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
-            X64 += delta.x;
-            Y64 -= delta.y;
-        }
-
         if (NULL == Dx)
         {
             X64 += realglyph->root.advance.x >> 10;
@@ -6772,8 +6749,6 @@ IntGetTextDisposition(
             X64 += vec.x;
             Y64 -= vec.y;
         }
-
-        previous = glyph_index;
     }
 
     *pX64 = X64;
@@ -6807,7 +6782,6 @@ IntExtTextOutW(
     FT_Face face;
     FT_BitmapGlyph realglyph;
     LONGLONG X64, Y64, RealXStart64, RealYStart64, DeltaX64, DeltaY64;
-    ULONG previous;
     RECTL DestRect, MaskRect;
     HBITMAP hbmGlyph;
     SIZEL glyphSize;
@@ -6817,9 +6791,9 @@ IntExtTextOutW(
     EXLATEOBJ exloRGB2Dst, exloDst2RGB;
     POINT Start;
     PMATRIX pmxWorldToDevice;
-    FT_Vector delta, vecAscent64, vecDescent64, vec;
+    FT_Vector vecAscent64, vecDescent64, vec;
     LOGFONTW *plf;
-    BOOL use_kerning, bResult, DoBreak, bLcdGlyph;
+    BOOL bResult, DoBreak, bLcdGlyph;
     FONT_CACHE_ENTRY Cache;
     FT_Matrix mat;
     BOOL bNoTransform;
@@ -6993,8 +6967,6 @@ IntExtTextOutW(
     }
 #undef VALIGN_MASK
 
-    use_kerning = FT_HAS_KERNING(face);
-
     /* Calculate the text width if necessary */
     if ((fuOptions & ETO_OPAQUE) || (pdcattr->flTextAlign & (TA_CENTER | TA_RIGHT)))
     {
@@ -7057,7 +7029,6 @@ IntExtTextOutW(
      */
     X64 = RealXStart64;
     Y64 = RealYStart64;
-    previous = 0;
     DoBreak = FALSE;
     bResult = TRUE; /* Assume success */
     for (i = 0; i < Count; ++i)
@@ -7083,14 +7054,6 @@ IntExtTextOutW(
         {
             bResult = FALSE;
             break;
-        }
-
-        /* retrieve kerning distance and move pen position */
-        if (use_kerning && previous && glyph_index && NULL == Dx)
-        {
-            FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
-            X64 += delta.x;
-            Y64 -= delta.y;
         }
 
         DPRINT("X64, Y64: %I64d, %I64d\n", X64, Y64);
@@ -7222,8 +7185,6 @@ IntExtTextOutW(
         }
 
         DPRINT("New X64, New Y64: %I64d, %I64d\n", X64, Y64);
-
-        previous = glyph_index;
     }
     /* Don't update position if String == NULL. Fixes CORE-19721. */
     if ((pdcattr->flTextAlign & TA_UPDATECP) && String)
