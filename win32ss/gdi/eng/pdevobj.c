@@ -657,6 +657,9 @@ PDEVOBJ_bDynamicModeChange(
         DWORD StateFlags;
     } temp;
 
+    /* The pointer's saved pixels and bitmaps belong to the framebuffer that goes now */
+    ppdev->ulModeGen++;
+
     /* Exchange driver functions */
     temp.pfn = ppdev->pfn;
     ppdev->pfn = ppdev2->pfn;
