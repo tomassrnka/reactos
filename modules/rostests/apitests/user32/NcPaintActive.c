@@ -3,6 +3,7 @@
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
  * PURPOSE:     Of the top-level windows of a thread that has the foreground, only the active one has the
  *              active frame: the default WM_NCPAINT draws the sizing border of the others as inactive.
+ *              A window flashed active by FlashWindowEx keeps the active frame while it is not the active window.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -70,6 +71,31 @@ CheckFrames(HWND hActive, HWND hOther, HDC hScreen, const char *What)
     ok(Found == FOUND_INACTIVE, "%s: the inactive window shows border colours %u, expected %u\n", What, Found, FOUND_INACTIVE);
 }
 
+/* FlashWindowEx draws a window active without making it the active window: its active phase sends
+ * WM_NCACTIVATE(TRUE), which sets WNDS_ACTIVEFRAME on a window that is not the foreground queue active one.
+ * The default WM_NCPAINT must keep that window active, not repaint it inactive until the next flash tick. */
+static void
+CheckFlashKeepsActiveFrame(HWND hActive, HWND hFlash, HDC hScreen)
+{
+    UINT Found;
+
+    /* Enter the active flash phase on the inactive window; the active window must not change */
+    SendMessageW(hFlash, WM_NCACTIVATE, TRUE, 0);
+    ok(GetActiveWindow() == hActive, "flashing changed the active window to %p\n", GetActiveWindow());
+
+    SendMessageW(hFlash, WM_NCPAINT, 1, 0);
+    SendMessageW(hActive, WM_NCPAINT, 1, 0);
+
+    Found = FindBorderColors(hFlash, hScreen);
+    ok(Found == FOUND_ACTIVE, "flashing inactive window shows border colours %u, expected %u\n", Found, FOUND_ACTIVE);
+    Found = FindBorderColors(hActive, hScreen);
+    ok(Found == FOUND_ACTIVE, "active window during flash shows border colours %u, expected %u\n", Found, FOUND_ACTIVE);
+
+    /* Leave the flash phase: the window is drawn inactive again */
+    SendMessageW(hFlash, WM_NCACTIVATE, FALSE, 0);
+    SendMessageW(hFlash, WM_NCPAINT, 1, 0);
+}
+
 START_TEST(NcPaintActive)
 {
     static const INT Elements[] = { COLOR_ACTIVEBORDER, COLOR_INACTIVEBORDER };
@@ -120,6 +146,9 @@ START_TEST(NcPaintActive)
     else
     {
         CheckFrames(hFirst, hSecond, hScreen, "first window active");
+
+        /* A window flashed active (FlashWindowEx) keeps the active frame though it is not the active window */
+        CheckFlashKeepsActiveFrame(hFirst, hSecond, hScreen);
 
         SetActiveWindow(hSecond);
         Pump(200);

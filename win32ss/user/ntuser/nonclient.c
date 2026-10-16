@@ -1175,9 +1175,11 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
       }
       else
       {
-         /* Of the top-level windows of the foreground queue only the active one has the active frame */
-         Active = (gpqForeground == pWnd->head.pti->MessageQueue &&
-                   (gpqForeground->spwndActive == pWnd || (Style & WS_CHILD)));
+         /* The active window of the foreground queue draws the active frame; so does a window
+            flashed active by FlashWindowEx, which sets WNDS_ACTIVEFRAME without activating it */
+         Active = ((gpqForeground == pWnd->head.pti->MessageQueue &&
+                    (gpqForeground->spwndActive == pWnd || (Style & WS_CHILD))) ||
+                   (pWnd->state & WNDS_ACTIVEFRAME));
       }
       Flags = DC_NC; // Redraw everything!
    }
