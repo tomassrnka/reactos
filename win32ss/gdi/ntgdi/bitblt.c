@@ -9,6 +9,56 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(GdiBlt);
 
+/*
+ * The part of the screen a scaled IntEngStretchBlt can write: IntEngStretchBlt moves the destination of some flipped
+ * stretches by a pixel (left one pixel for the cases 0010 and 0111, right for 0000 and 0101, down for 0000 and 1010, named
+ * by the signs of the destination and source sizes as in stretchblt.c), so the destination is made wider on those edges only.
+ * At the end of the coordinate range the engine's pixel wraps, see below.
+ */
+static
+VOID
+IntStretchHazard(
+    const RECTL *prclDest,
+    const RECTL *prclSrc,
+    RECTL *prclHazard)
+{
+    /* the sizes wrap the way they do in the engine, in 32 bits */
+    LONG cxD = (LONG)((ULONG)prclDest->right - (ULONG)prclDest->left), cyD = (LONG)((ULONG)prclDest->bottom - (ULONG)prclDest->top);
+    LONG cxS = (LONG)((ULONG)prclSrc->right - (ULONG)prclSrc->left), cyS = (LONG)((ULONG)prclSrc->bottom - (ULONG)prclSrc->top);
+    BOOL c0000 = (cxD < 0 && cyD < 0 && cxS < 0 && cyS < 0);
+    BOOL c0010 = (cxD < 0 && cyD < 0 && cxS > 0 && cyS < 0);
+    BOOL c0101 = (cxD < 0 && cyD > 0 && cxS < 0 && cyS > 0);
+    BOOL c0111 = (cxD < 0 && cyD > 0 && cxS > 0 && cyS > 0);
+    BOOL c1010 = (cxD > 0 && cyD < 0 && cxS > 0 && cyS < 0);
+
+    *prclHazard = *prclDest;
+    RECTL_vMakeWellOrdered(prclHazard);
+
+    /* An edge at the end of the range wraps in the engine, which turns the destination into one that can lie anywhere on
+     * that axis, so then the whole axis is the hazard */
+    if (c0010 || c0111)
+    {
+        if (prclHazard->left == LONG_MIN)
+            prclHazard->left = LONG_MIN, prclHazard->right = LONG_MAX;
+        else
+            prclHazard->left--;
+    }
+    if (c0000 || c0101)
+    {
+        if (prclHazard->right == LONG_MAX)
+            prclHazard->left = LONG_MIN, prclHazard->right = LONG_MAX;
+        else
+            prclHazard->right++;
+    }
+    if (c0000 || c1010)
+    {
+        if (prclHazard->bottom == LONG_MAX)
+            prclHazard->top = LONG_MIN, prclHazard->bottom = LONG_MAX;
+        else
+            prclHazard->bottom++;
+    }
+}
+
 /* The whole source rectangle lies inside the bitmap of the source DC: the engine rejects the whole call otherwise, which pieces would not */
 static
 BOOL
@@ -991,10 +1041,8 @@ GreStretchBltMask(
              (SourceRect.bottom - SourceRect.top == DestRect.bottom - DestRect.top);
 
     /* Only prepare Source and Dest, hdcMask represents a DIB. IntEngStretchBlt moves the destination of a flipped
-     * stretch by a pixel (stretchblt.c), so the hazard of the unsplit call is the destination one pixel wider. */
-    rcHazard = DestRect;
-    RECTL_vMakeWellOrdered(&rcHazard);
-    RECTL_vInflateRect(&rcHazard, 1, 1);
+     * stretch by a pixel (stretchblt.c), so the hazard of the unsplit call is the destination wider by that pixel. */
+    IntStretchHazard(&DestRect, &SourceRect, &rcHazard);
     DC_vPrepareDCsForBlitEx(DCDest, bSplit ? &DestRect : &rcHazard, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))

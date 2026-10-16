@@ -260,6 +260,63 @@ MouseSafetyOnDrawEnd(
 
 /* SOFTWARE MOUSE POINTER IMPLEMENTATION **************************************/
 
+/* The pointer bitmaps are in the format of the screen they were made for. After a display mode that changed the format the
+ * caller of the mode switch sets the shape again (UserSetCursor) and that makes new bitmaps; until then the old ones must
+ * neither be copied onto the new framebuffer nor drawn there. */
+static
+BOOL
+IntPointerFormatOk(
+    _In_ GDIPOINTER *pgp,
+    _In_ SURFOBJ *pso)
+{
+    return (!pgp->psurfSave || pgp->psurfSave->SurfObj.iBitmapFormat == pso->iBitmapFormat) &&
+           (!pgp->psurfTmp || pgp->psurfTmp->SurfObj.iBitmapFormat == pso->iBitmapFormat) &&
+           (!pgp->psurfMask || pgp->psurfMask->SurfObj.iBitmapFormat == pso->iBitmapFormat) &&
+           (!pgp->psurfColor || pgp->psurfColor->SurfObj.iBitmapFormat == pso->iBitmapFormat || (pgp->flags & SPS_ALPHA));
+}
+
+/*
+ * Copy a finished image to the screen. A blit that returns FALSE may still have written part of it; the copy has the same
+ * result every time, so it is repeated whole, then row by row, which puts every row that can be written there. TRUE if the
+ * whole image is on the screen.
+ */
+static
+BOOL
+IntCopyToScreen(
+    _Inout_ SURFOBJ *psoScreen,
+    _In_ SURFOBJ *psoSrc,
+    _In_ const RECTL *prclDest,
+    _In_ const POINTL *pptlSrc)
+{
+    RECTL rcl;
+    POINTL ptl;
+    LONG y;
+    BOOL bRet = TRUE;
+    ULONG i;
+
+    for (i = 0; i < 2; i++)
+    {
+        rcl = *prclDest;
+        ptl = *pptlSrc;
+        if (IntEngBitBlt(psoScreen, psoSrc, NULL, NULL, NULL, &rcl, &ptl, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
+            return TRUE;
+    }
+
+    for (y = prclDest->top; y < prclDest->bottom; y++)
+    {
+        rcl.left = prclDest->left;
+        rcl.right = prclDest->right;
+        rcl.top = y;
+        rcl.bottom = y + 1;
+        ptl.x = pptlSrc->x;
+        ptl.y = pptlSrc->y + (y - prclDest->top);
+        if (!IntEngBitBlt(psoScreen, psoSrc, NULL, NULL, NULL, &rcl, &ptl, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
+            bRet = FALSE;
+    }
+
+    return bRet;
+}
+
 VOID
 NTAPI
 IntHideMousePointer(
@@ -289,6 +346,12 @@ IntHideMousePointer(
         return;
     }
 
+    /* Pixels saved from a screen of another format must not go to this one */
+    if (!IntPointerFormatOk(pgp, psoDest))
+    {
+        return;
+    }
+
     /* Calculate cursor coordinates */
     pt.x = ppdev->ptlPointer.x - pgp->HotSpot.x;
     pt.y = ppdev->ptlPointer.y - pgp->HotSpot.y;
@@ -301,17 +364,7 @@ IntHideMousePointer(
     ptlSave.x = rclDest.left - pt.x;
     ptlSave.y = rclDest.top - pt.y;
 
-    IntEngBitBlt(psoDest,
-                 &pgp->psurfSave->SurfObj,
-                 NULL,
-                 NULL,
-                 NULL,
-                 &rclDest,
-                 &ptlSave,
-                 &ptlSave,
-                 NULL,
-                 NULL,
-                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+    IntCopyToScreen(psoDest, &pgp->psurfSave->SurfObj, &rclDest, &ptlSave);
 }
 
 /* Draw the pointer into prclDest of psoDest, taking the pixels from prclPointer of the pointer bitmaps; FALSE if a part failed */
@@ -419,7 +472,7 @@ IntComposeMousePointer(
 {
     RECTL rclTmp = *prclPointer;
 
-    /* Without a usable compose bitmap, or if composing in it fails, the pointer is drawn straight onto the screen */
+    /* Compose in the compose bitmap (memory: nothing reaches the screen if this fails) */
     if (pgp->psurfTmp &&
         pgp->psurfTmp->SurfObj.iBitmapFormat == psoDest->iBitmapFormat &&
         IntEngBitBlt(&pgp->psurfTmp->SurfObj,
@@ -435,23 +488,13 @@ IntComposeMousePointer(
                      ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)) &&
         IntDrawMousePointer(ppdev, pgp, &pgp->psurfTmp->SurfObj, &rclTmp, prclPointer))
     {
-        rclTmp = *prclSurf;
-        if (IntEngBitBlt(psoDest,
-                         &pgp->psurfTmp->SurfObj,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &rclTmp,
-                         (POINTL*)prclPointer,
-                         NULL,
-                         NULL,
-                         NULL,
-                         ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
-        {
-            return;
-        }
+        /* The finished image is the one source of truth now: a copy that fails is repeated, never replaced by drawing
+         * the pointer again over what the failed copy may have written */
+        IntCopyToScreen(psoDest, &pgp->psurfTmp->SurfObj, prclSurf, (POINTL*)prclPointer);
+        return;
     }
 
+    /* No usable compose bitmap: the pointer is drawn straight onto the screen, over the saved pixels' place */
     IntDrawMousePointer(ppdev, pgp, psoDest, prclSurf, prclPointer);
 }
 
@@ -471,6 +514,12 @@ IntShowMousePointer(
     pgp = &ppdev->Pointer;
 
     if (pgp->Enabled)
+    {
+        return;
+    }
+
+    /* Bitmaps of another format are not drawn on this screen; the shape call that follows a mode switch makes new ones */
+    if (!IntPointerFormatOk(pgp, psoDest))
     {
         return;
     }
@@ -817,8 +866,7 @@ IntMoveMousePointer(
         return FALSE;
 
     /* A mode switch can leave bitmaps of another format or size behind */
-    if (pgp->psurfSave->SurfObj.iBitmapFormat != pso->iBitmapFormat ||
-        pgp->psurfTmp->SurfObj.iBitmapFormat != pso->iBitmapFormat ||
+    if (!IntPointerFormatOk(pgp, pso) ||
         pgp->psurfSave->SurfObj.sizlBitmap.cx < cx || pgp->psurfSave->SurfObj.sizlBitmap.cy < cy ||
         pgp->psurfTmp->SurfObj.sizlBitmap.cx < cx || pgp->psurfTmp->SurfObj.sizlBitmap.cy < cy)
         return FALSE;
@@ -922,12 +970,13 @@ IntMoveMousePointer(
             return FALSE;
     }
 
-    /* One blit to the screen */
+    /* One blit to the screen. From here on the screen may have changed whatever the result: the move buffer holds the whole
+     * finished image of the rectangle, so a copy that fails is repeated from it (whole, then row by row) and the new place is
+     * committed; going back to the two steps would read a half written screen as the background. */
     pt0.x = 0;
     pt0.y = 0;
     rcDst = rcU;
-    if (!IntEngBitBlt(pso, psoU, NULL, NULL, NULL, &rcDst, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
-        return FALSE;
+    IntCopyToScreen(pso, psoU, &rcDst, &pt0);
 
     /* The compose bitmap now holds the pixels under the pointer: it becomes the save bitmap and the old one the scratch one */
     psurfTmp = pgp->psurfTmp;
