@@ -348,6 +348,14 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
 
   UDPHeader = (PUDP_HEADER)IPPacket->Data;
 
+  /* The datagram must be large enough to hold a UDP header before any UDP field
+     is read; a shorter reassembled datagram would make the reads below run past
+     the allocation (remote out-of-bounds read). */
+  if (IPPacket->TotalSize < IPPacket->HeaderSize + sizeof(UDP_HEADER)) {
+    TI_DbgPrint(MIN_TRACE, ("Truncated UDP datagram received.\n"));
+    return;
+  }
+
   /* Sanity checks. Validate the declared UDP length against the reassembled
      datagram BEFORE checksumming: the checksum covers UDPHeader->Length octets
      from the UDP header, so an oversized length would read past the datagram

@@ -335,15 +335,19 @@ VOID ProcessFragment(
 
   /* Fragment offset in octets from the 13-bit field; <<3 fits in 16 bits */
   FragFirst = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_FRAGOFS_MASK) << 3;
+  MoreFragments = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_MF_MASK) > 0;
 
-  /* Drop a malformed or oversized fragment before taking any reassembly state:
-     its data must fit wholly within the 65535-octet maximum IP datagram, else
-     ReassembleDatagram() sizes the buffer from one fragment and copies another
-     past it (remote heap overflow). Fail closed. */
-  if (IPPacket->TotalSize < IPPacket->HeaderSize ||
-      (ULONG)FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize) > 0xFFFF)
+  /* Drop a malformed or oversized fragment before taking any reassembly state.
+     The payload must be non-empty and fit wholly within the 65535-octet maximum
+     IP datagram (else ReassembleDatagram() sizes the buffer from one fragment
+     and copies another past it), and a non-last fragment must be an 8-octet
+     multiple (RFC 791) so later fragments align and no partially-covered octet
+     can leak. Fail closed. */
+  if (IPPacket->TotalSize <= IPPacket->HeaderSize ||
+      (ULONG)FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize) > 0xFFFF ||
+      (MoreFragments && ((IPPacket->TotalSize - IPPacket->HeaderSize) & 7) != 0))
   {
-    TI_DbgPrint(MIN_TRACE, ("Dropping malformed or oversized IP fragment.\n"));
+    TI_DbgPrint(MIN_TRACE, ("Dropping malformed, oversized or misaligned IP fragment.\n"));
     return;
   }
 
@@ -371,7 +375,7 @@ VOID ProcessFragment(
     /* Create a descriptor spanning from zero to infinity.
        Actually, we use a value slightly greater than the
        maximum number of octets an IP datagram can contain */
-    Hole = CreateHoleDescriptor(0, 65536);
+    Hole = CreateHoleDescriptor(0, 65535);
     if (!Hole) {
       /* We don't have the resources to process this packet, discard it */
       ExFreeToNPagedLookasideList(&IPDRList, IPDR);
@@ -397,11 +401,10 @@ VOID ProcessFragment(
 	&ReassemblyListLock);
   }
 
-  /* Payload extent, not total length: adding the whole packet length (incl.
-     header) over-reports the fragment and can falsely fill the hole list,
-     delivering bytes that never arrived. */
-  FragLast      = FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize);
-  MoreFragments = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_MF_MASK) > 0;
+  /* Inclusive last octet (the RFC 815 hole algorithm is inclusive): the
+     payload extent minus one. The payload is guaranteed non-empty above, so
+     this does not underflow. */
+  FragLast      = FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize) - 1;
 
   CurrentEntry = IPDR->HoleListHead.Flink;
   for (;;) {
@@ -624,7 +627,7 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
 {
     UCHAR FirstByte;
     ULONG BytesCopied;
-    UINT PacketLength;
+    UINT AvailableBytes;
 
     TI_DbgPrint(DEBUG_IP, ("Received IPv4 datagram.\n"));
 
@@ -683,16 +686,22 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
         return;
     }
 
+    /* Bytes the link actually delivered from this position. The caller sets
+       TotalSize from the real transferred count (legacy receive) or the NDIS
+       packet length (packet-mode and loopback); querying the NDIS packet here
+       instead would return the (possibly larger) allocated buffer length and
+       let a short legacy transfer pass, copying its uninitialized tail. */
+    AvailableBytes = IPPacket->TotalSize;
+
     IPPacket->TotalSize = WN2H(((PIPv4_HEADER)IPPacket->Header)->TotalLength);
 
     /* The IP total length must cover the header and must not claim more than
        the link actually delivered, or reassembly would advertise and copy
        bytes the frame never carried (uninitialized-heap disclosure). */
-    NdisQueryPacket(IPPacket->NdisPacket, NULL, NULL, NULL, &PacketLength);
     if (IPPacket->TotalSize < IPPacket->HeaderSize ||
-        IPPacket->Position > PacketLength ||
-        IPPacket->TotalSize > PacketLength - IPPacket->Position) {
-        TI_DbgPrint(MIN_TRACE, ("IP total length (%d) exceeds frame length; discarding.\n",
+        IPPacket->Position > AvailableBytes ||
+        IPPacket->TotalSize > AvailableBytes - IPPacket->Position) {
+        TI_DbgPrint(MIN_TRACE, ("IP total length (%d) exceeds delivered length; discarding.\n",
                                 IPPacket->TotalSize));
         /* Discard packet */
         return;
