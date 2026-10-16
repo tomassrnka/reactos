@@ -314,9 +314,9 @@ IntHideMousePointer(
                  ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
 }
 
-/* Draw the pointer into prclDest of psoDest, taking the pixels from prclPointer of the pointer bitmaps */
+/* Draw the pointer into prclDest of psoDest, taking the pixels from prclPointer of the pointer bitmaps; FALSE if a part failed */
 static
-VOID
+BOOL
 IntDrawMousePointer(
     _Inout_ PDEVOBJ *ppdev,
     _In_ GDIPOINTER *pgp,
@@ -325,13 +325,14 @@ IntDrawMousePointer(
     _In_ RECTL *prclPointer)
 {
     RECTL rclSurf = *prclDest, rclPointer = *prclPointer;
+    BOOL bRet = TRUE;
 
     /* Blt the pointer on the surface. */
     if (pgp->psurfColor)
     {
         if(!(pgp->flags & SPS_ALPHA))
         {
-            IntEngBitBlt(psoDest,
+            bRet = bRet && !!IntEngBitBlt(psoDest,
                          &pgp->psurfMask->SurfObj,
                          NULL,
                          NULL,
@@ -343,7 +344,7 @@ IntDrawMousePointer(
                          NULL,
                          ROP4_SRCAND);
 
-            IntEngBitBlt(psoDest,
+            bRet = bRet && !!IntEngBitBlt(psoDest,
                          &pgp->psurfColor->SurfObj,
                          NULL,
                          NULL,
@@ -363,7 +364,7 @@ IntDrawMousePointer(
                 &gpalRGB,
                 ppdev->ppalSurf,
                 0, 0, 0);
-            IntEngAlphaBlend(psoDest,
+            bRet = bRet && !!IntEngAlphaBlend(psoDest,
                              &pgp->psurfColor->SurfObj,
                              NULL,
                              &exlo.xlo,
@@ -375,7 +376,7 @@ IntDrawMousePointer(
     }
     else
     {
-        IntEngBitBlt(psoDest,
+        bRet = bRet && !!IntEngBitBlt(psoDest,
                      &pgp->psurfMask->SurfObj,
                      NULL,
                      NULL,
@@ -389,7 +390,7 @@ IntDrawMousePointer(
 
         rclPointer.top += pgp->Size.cy;
 
-        IntEngBitBlt(psoDest,
+        bRet = bRet && !!IntEngBitBlt(psoDest,
                      &pgp->psurfMask->SurfObj,
                      NULL,
                      NULL,
@@ -401,6 +402,8 @@ IntDrawMousePointer(
                      NULL,
                      ROP4_FROM_INDEX(R3_OPINDEX_SRCINVERT));
     }
+
+    return bRet;
 }
 
 /* Put the pointer on the screen over the pixels in the save bitmap. Composed in a second
@@ -416,38 +419,40 @@ IntComposeMousePointer(
 {
     RECTL rclTmp = *prclPointer;
 
-    if (!pgp->psurfTmp)
+    /* Without a usable compose bitmap, or if composing in it fails, the pointer is drawn straight onto the screen */
+    if (pgp->psurfTmp &&
+        pgp->psurfTmp->SurfObj.iBitmapFormat == psoDest->iBitmapFormat &&
+        IntEngBitBlt(&pgp->psurfTmp->SurfObj,
+                     &pgp->psurfSave->SurfObj,
+                     NULL,
+                     NULL,
+                     NULL,
+                     &rclTmp,
+                     (POINTL*)&rclTmp,
+                     NULL,
+                     NULL,
+                     NULL,
+                     ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)) &&
+        IntDrawMousePointer(ppdev, pgp, &pgp->psurfTmp->SurfObj, &rclTmp, prclPointer))
     {
-        IntDrawMousePointer(ppdev, pgp, psoDest, prclSurf, prclPointer);
-        return;
+        rclTmp = *prclSurf;
+        if (IntEngBitBlt(psoDest,
+                         &pgp->psurfTmp->SurfObj,
+                         NULL,
+                         NULL,
+                         NULL,
+                         &rclTmp,
+                         (POINTL*)prclPointer,
+                         NULL,
+                         NULL,
+                         NULL,
+                         ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
+        {
+            return;
+        }
     }
 
-    IntEngBitBlt(&pgp->psurfTmp->SurfObj,
-                 &pgp->psurfSave->SurfObj,
-                 NULL,
-                 NULL,
-                 NULL,
-                 &rclTmp,
-                 (POINTL*)&rclTmp,
-                 NULL,
-                 NULL,
-                 NULL,
-                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
-
-    IntDrawMousePointer(ppdev, pgp, &pgp->psurfTmp->SurfObj, &rclTmp, prclPointer);
-
-    rclTmp = *prclSurf;
-    IntEngBitBlt(psoDest,
-                 &pgp->psurfTmp->SurfObj,
-                 NULL,
-                 NULL,
-                 NULL,
-                 &rclTmp,
-                 (POINTL*)prclPointer,
-                 NULL,
-                 NULL,
-                 NULL,
-                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+    IntDrawMousePointer(ppdev, pgp, psoDest, prclSurf, prclPointer);
 }
 
 VOID
@@ -787,10 +792,11 @@ failure:
 #define MOVE_CY 192
 
 /*
- * Move the pointer without ever taking it off the screen: copy the rectangle that holds the old and the new pointer
- * into a bitmap, put the saved pixels back there, save the pixels under the new place, draw the pointer there and
- * copy the bitmap to the screen in one blit. Only for a shown pointer that has its engine bitmaps and lies inside the
- * screen before and after; FALSE means nothing was changed and the caller takes the two steps.
+ * Move the pointer without ever taking it off the screen: copy the rectangle that holds the old and the new place
+ * into a bitmap, put the saved pixels back there, keep the pixels under the new place, draw the pointer there and
+ * copy the bitmap to the screen in one blit. Only for a shown pointer that has its engine bitmaps in the format of
+ * the screen and lies inside the screen before and after. FALSE means the pointer state is as it was (a step that
+ * failed leaves only the move bitmap and the compose bitmap changed) and the caller takes the two steps.
  */
 static
 BOOL
@@ -801,12 +807,20 @@ IntMoveMousePointer(
     _In_ LONG y)
 {
     GDIPOINTER *pgp = &ppdev->Pointer;
-    RECTL rc0, rc1, rcU, rcBuf, rcS, rcDst, rcPtr;
+    RECTL rc0, rc1, rcU, rcBuf, rcS, rcDst;
     POINTL pt0;
-    SURFOBJ *psoU;
+    SURFOBJ *psoU, *psoNew;
+    SURFACE *psurfTmp;
     LONG cx = pgp->Size.cx, cy = pgp->Size.cy;
 
     if (!pgp->Enabled || !pgp->psurfSave || !pgp->psurfTmp || x == -1 || ppdev->ptlPointer.x == -1)
+        return FALSE;
+
+    /* A mode switch can leave bitmaps of another format or size behind */
+    if (pgp->psurfSave->SurfObj.iBitmapFormat != pso->iBitmapFormat ||
+        pgp->psurfTmp->SurfObj.iBitmapFormat != pso->iBitmapFormat ||
+        pgp->psurfSave->SurfObj.sizlBitmap.cx < cx || pgp->psurfSave->SurfObj.sizlBitmap.cy < cy ||
+        pgp->psurfTmp->SurfObj.sizlBitmap.cx < cx || pgp->psurfTmp->SurfObj.sizlBitmap.cy < cy)
         return FALSE;
 
     rc0.left = ppdev->ptlPointer.x - pgp->HotSpot.x;
@@ -828,6 +842,14 @@ IntMoveMousePointer(
         rcU.right - rcU.left > MOVE_CX || rcU.bottom - rcU.top > MOVE_CY)
         return FALSE;
 
+    /* The move bitmap has the format of the screen, also after a mode switch */
+    if (pgp->psurfMove && pgp->psurfMove->SurfObj.iBitmapFormat != pso->iBitmapFormat)
+    {
+        EngDeleteSurface(pgp->psurfMove->BaseObject.hHmgr);
+        SURFACE_ShareUnlockSurface(pgp->psurfMove);
+        pgp->psurfMove = NULL;
+    }
+
     if (!pgp->psurfMove)
     {
         SIZEL sizel = {MOVE_CX, MOVE_CY};
@@ -846,46 +868,71 @@ IntMoveMousePointer(
         }
     }
     psoU = &pgp->psurfMove->SurfObj;
+    psoNew = &pgp->psurfTmp->SurfObj;
 
-    pt0.x = rcU.left;
-    pt0.y = rcU.top;
     rcBuf.left = 0;
     rcBuf.top = 0;
     rcBuf.right = rcU.right - rcU.left;
     rcBuf.bottom = rcU.bottom - rcU.top;
-
-    /* The screen part, with the old pointer on it */
-    rcDst = rcBuf;
-    IntEngBitBlt(psoU, pso, NULL, NULL, NULL, &rcDst, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
-
-    /* Put the pixels under the old pointer back */
     rcS.left = 0;
     rcS.top = 0;
     rcS.right = cx;
     rcS.bottom = cy;
+
+    /* The screen part, with the old pointer on it; the buffer holds nothing until this has worked */
+    pt0.x = rcU.left;
+    pt0.y = rcU.top;
+    rcDst = rcBuf;
+    if (!IntEngBitBlt(psoU, pso, NULL, NULL, NULL, &rcDst, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
+        return FALSE;
+
+    /* Put the pixels under the old pointer back */
     rcDst.left = rc0.left - rcU.left;
     rcDst.top = rc0.top - rcU.top;
     rcDst.right = rcDst.left + cx;
     rcDst.bottom = rcDst.top + cy;
-    IntEngBitBlt(psoU, &pgp->psurfSave->SurfObj, NULL, NULL, NULL, &rcDst, (POINTL*)&rcS, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+    pt0.x = 0;
+    pt0.y = 0;
+    if (!IntEngBitBlt(psoU, &pgp->psurfSave->SurfObj, NULL, NULL, NULL, &rcDst, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
+        return FALSE;
 
-    /* Save the pixels under the new place, then draw the pointer there */
+    /* Keep the pixels under the new place in the compose bitmap; they become the saved ones below */
     rcDst.left = rc1.left - rcU.left;
     rcDst.top = rc1.top - rcU.top;
     rcDst.right = rcDst.left + cx;
     rcDst.bottom = rcDst.top + cy;
     pt0.x = rcDst.left;
     pt0.y = rcDst.top;
-    rcPtr = rcS;
-    IntEngBitBlt(&pgp->psurfSave->SurfObj, psoU, NULL, NULL, NULL, &rcPtr, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
-    rcPtr = rcS;
-    IntDrawMousePointer(ppdev, pgp, psoU, &rcDst, &rcPtr);
+    rcS.left = 0;
+    rcS.top = 0;
+    rcS.right = cx;
+    rcS.bottom = cy;
+    {
+        RECTL rcTmp = rcS;
+
+        if (!IntEngBitBlt(psoNew, psoU, NULL, NULL, NULL, &rcTmp, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
+            return FALSE;
+    }
+
+    /* Draw the pointer there */
+    {
+        RECTL rcPtr = rcS;
+
+        if (!IntDrawMousePointer(ppdev, pgp, psoU, &rcDst, &rcPtr))
+            return FALSE;
+    }
 
     /* One blit to the screen */
     pt0.x = 0;
     pt0.y = 0;
     rcDst = rcU;
-    IntEngBitBlt(pso, psoU, NULL, NULL, NULL, &rcDst, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+    if (!IntEngBitBlt(pso, psoU, NULL, NULL, NULL, &rcDst, &pt0, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
+        return FALSE;
+
+    /* The compose bitmap now holds the pixels under the pointer: it becomes the save bitmap and the old one the scratch one */
+    psurfTmp = pgp->psurfTmp;
+    pgp->psurfTmp = pgp->psurfSave;
+    pgp->psurfSave = psurfTmp;
 
     ppdev->ptlPointer.x = x;
     ppdev->ptlPointer.y = y;
