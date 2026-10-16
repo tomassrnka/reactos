@@ -1142,7 +1142,10 @@ static SECURITY_STATUS SEC_ENTRY schan_EncryptMessage(PCtxtHandle context_handle
         status = SEC_E_INTERNAL_ERROR;
 
     b = &transport.out;
-    b->desc->pBuffers[b->current_buffer_idx].cbBuffer = b->offset;
+    /* No output buffer is selected when the send made no progress (e.g. a fail-closed
+       or zero-progress send), so skip the length write to avoid a pBuffers[-1] OOB write */
+    if (b->current_buffer_idx != -1)
+        b->desc->pBuffers[b->current_buffer_idx].cbBuffer = b->offset;
     HeapFree(GetProcessHeap(), 0, data);
 
     TRACE("Returning %#x.\n", status);
