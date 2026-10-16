@@ -213,6 +213,7 @@ ReassembleDatagram(
   PLIST_ENTRY CurrentEntry;
   PIP_FRAGMENT Fragment;
   PCHAR Data;
+  ULONG BytesCopied;
 
   PAGED_CODE();
 
@@ -258,11 +259,21 @@ ReassembleDatagram(
       return FALSE;
     }
 
-    /* Copy fragment data into datagram buffer */
-    CopyPacketToBuffer(Data + Fragment->Offset,
-                       Fragment->Packet,
-                       Fragment->PacketOffset,
-                       Fragment->Size);
+    /* Copy fragment data into datagram buffer, honoring the actual byte
+       count: a short physical frame copies fewer bytes than the fragment
+       claims and would leave the gap uninitialized. Fail closed rather than
+       deliver uninitialized heap. */
+    BytesCopied = CopyPacketToBuffer(Data + Fragment->Offset,
+                                     Fragment->Packet,
+                                     Fragment->PacketOffset,
+                                     Fragment->Size);
+    if (BytesCopied != Fragment->Size)
+    {
+      TI_DbgPrint(MIN_TRACE, ("Short fragment copy (%u of %u octets); dropping.\n",
+                              BytesCopied, Fragment->Size));
+      (*IPPacket->Free)(IPPacket);
+      return FALSE;
+    }
 
     CurrentEntry = CurrentEntry->Flink;
   }
@@ -386,7 +397,10 @@ VOID ProcessFragment(
 	&ReassemblyListLock);
   }
 
-  FragLast      = FragFirst + WN2H(IPv4Header->TotalLength);
+  /* Payload extent, not total length: adding the whole packet length (incl.
+     header) over-reports the fragment and can falsely fill the hole list,
+     delivering bytes that never arrived. */
+  FragLast      = FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize);
   MoreFragments = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_MF_MASK) > 0;
 
   CurrentEntry = IPDR->HoleListHead.Flink;
@@ -610,6 +624,7 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
 {
     UCHAR FirstByte;
     ULONG BytesCopied;
+    UINT PacketLength;
 
     TI_DbgPrint(DEBUG_IP, ("Received IPv4 datagram.\n"));
 
@@ -628,7 +643,8 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
     IPPacket->HeaderSize = (FirstByte & 0x0F) << 2;
     TI_DbgPrint(DEBUG_IP, ("IPPacket->HeaderSize = %d\n", IPPacket->HeaderSize));
 
-    if (IPPacket->HeaderSize > IPv4_MAX_HEADER_SIZE) {
+    if (IPPacket->HeaderSize < sizeof(IPv4_HEADER) ||
+        IPPacket->HeaderSize > IPv4_MAX_HEADER_SIZE) {
         TI_DbgPrint(MIN_TRACE, ("Datagram received with incorrect header size (%d).\n",
 	      IPPacket->HeaderSize));
         /* Discard packet */
@@ -668,6 +684,19 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
     }
 
     IPPacket->TotalSize = WN2H(((PIPv4_HEADER)IPPacket->Header)->TotalLength);
+
+    /* The IP total length must cover the header and must not claim more than
+       the link actually delivered, or reassembly would advertise and copy
+       bytes the frame never carried (uninitialized-heap disclosure). */
+    NdisQueryPacket(IPPacket->NdisPacket, NULL, NULL, NULL, &PacketLength);
+    if (IPPacket->TotalSize < IPPacket->HeaderSize ||
+        IPPacket->Position > PacketLength ||
+        IPPacket->TotalSize > PacketLength - IPPacket->Position) {
+        TI_DbgPrint(MIN_TRACE, ("IP total length (%d) exceeds frame length; discarding.\n",
+                                IPPacket->TotalSize));
+        /* Discard packet */
+        return;
+    }
 
     AddrInitIPv4(&IPPacket->SrcAddr, ((PIPv4_HEADER)IPPacket->Header)->SrcAddr);
     AddrInitIPv4(&IPPacket->DstAddr, ((PIPv4_HEADER)IPPacket->Header)->DstAddr);
