@@ -35,6 +35,7 @@ typedef struct _GDIPOINTER /* should stay private to ENG? No, part of PDEVOBJ ak
   SURFACE  *psurfSave;
   SURFACE  *psurfTmp; /* pointer composed over the saved pixels, drawn to the screen in one blit */
   SURFACE  *psurfMove; /* old and new pointer rectangle together, so that a move reaches the screen in one blit */
+  ULONG    ulModeGen;  /* the PDEV's mode generation the bitmaps above were made in */
   FLONG    flags;
 
   /* Public pointer information */
@@ -142,6 +143,7 @@ typedef struct _PDEVOBJ
     };
 
     /* ros specific */
+    ULONG         ulModeGen;    /* counts display mode switches */
     GDIPOINTER    Pointer;
     /* Stuff to keep track of software cursors; win32k gdi part */
     UINT SafetyRemoveLevel; /* at what level was the cursor removed?

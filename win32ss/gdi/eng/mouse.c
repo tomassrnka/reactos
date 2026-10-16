@@ -15,6 +15,16 @@
 
 /* FUNCTIONS *****************************************************************/
 
+#define PTR_NONE     0 /* the bitmaps cannot be used on this screen until the shape is set again */
+#define PTR_CURRENT  1 /* the bitmaps and the saved pixels are those of this framebuffer */
+#define PTR_RESET    2 /* a mode switch happened since: the pointer is not on this framebuffer, the bitmaps can be used again */
+
+static
+ULONG
+IntPointerSync(
+    _Inout_ PDEVOBJ *ppdev,
+    _In_ SURFOBJ *pso);
+
 static
 VOID
 IntComposeMousePointer(
@@ -183,6 +193,12 @@ MouseSafetyBeginUnderDraw(
         return FALSE;
     }
 
+    /* A mode switch since the pixels were saved: this is not their framebuffer */
+    if (IntPointerSync(ppdev, &ppdev->pSurface->SurfObj) != PTR_CURRENT)
+    {
+        return FALSE;
+    }
+
     *ppsoSave = &pgp->psurfSave->SurfObj;
     pptlOrigin->x = ppdev->ptlPointer.x - pgp->HotSpot.x;
     pptlOrigin->y = ppdev->ptlPointer.y - pgp->HotSpot.y;
@@ -276,6 +292,42 @@ IntPointerFormatOk(
 }
 
 /*
+ * Every use of the saved pixels and the compose bitmap goes through here. A mode switch gives the PDEV a new framebuffer,
+ * and the caller of the switch does not always take the pointer off and set the shape again (UserSetCursor(NULL) leaves
+ * the pointer alone when the switching thread's queue does not own the window under it, and UserRefreshDisplay does not
+ * call it at all), so the saved pixels and bitmaps are tagged with the PDEV's mode generation. After a switch they hold
+ * pixels of the old framebuffer and must not be copied onto the new one: the pointer is then treated as not shown, and
+ * if the bitmaps still have the format of the screen they are used for the next show, which saves the pixels of the new
+ * framebuffer.
+ */
+static
+ULONG
+IntPointerSync(
+    _Inout_ PDEVOBJ *ppdev,
+    _In_ SURFOBJ *pso)
+{
+    GDIPOINTER *pgp = &ppdev->Pointer;
+
+    if (!pgp->psurfSave)
+        return PTR_CURRENT;
+
+    if (!IntPointerFormatOk(pgp, pso))
+    {
+        pgp->Enabled = FALSE;
+        return PTR_NONE;
+    }
+
+    if (pgp->ulModeGen != ppdev->ulModeGen)
+    {
+        pgp->Enabled = FALSE;
+        pgp->ulModeGen = ppdev->ulModeGen;
+        return PTR_RESET;
+    }
+
+    return PTR_CURRENT;
+}
+
+/*
  * Copy a finished image to the screen. A blit that returns FALSE may still have written part of it; the copy has the same
  * result every time, so it is repeated whole, then row by row, which puts every row that can be written there. TRUE if the
  * whole image is on the screen.
@@ -346,8 +398,8 @@ IntHideMousePointer(
         return;
     }
 
-    /* Pixels saved from a screen of another format must not go to this one */
-    if (!IntPointerFormatOk(pgp, psoDest))
+    /* Pixels saved from the framebuffer of an earlier mode must not go to this one */
+    if (IntPointerSync(ppdev, psoDest) != PTR_CURRENT)
     {
         return;
     }
@@ -364,6 +416,8 @@ IntHideMousePointer(
     ptlSave.x = rclDest.left - pt.x;
     ptlSave.y = rclDest.top - pt.y;
 
+    /* The pointer is not shown from here on whether every row could be put back or not; a row that could not be written is
+     * the framebuffer's problem and is drawn over by the next paint of the window */
     IntCopyToScreen(psoDest, &pgp->psurfSave->SurfObj, &rclDest, &ptlSave);
 }
 
@@ -489,7 +543,9 @@ IntComposeMousePointer(
         IntDrawMousePointer(ppdev, pgp, &pgp->psurfTmp->SurfObj, &rclTmp, prclPointer))
     {
         /* The finished image is the one source of truth now: a copy that fails is repeated, never replaced by drawing
-         * the pointer again over what the failed copy may have written */
+         * the pointer again over what the failed copy may have written. Rows that still can not be written stay as
+         * they were; the pointer counts as shown, so the next hide puts the saved pixels back over the whole rectangle
+         * and removes whatever part of the pointer is there. */
         IntCopyToScreen(psoDest, &pgp->psurfTmp->SurfObj, prclSurf, (POINTL*)prclPointer);
         return;
     }
@@ -519,7 +575,7 @@ IntShowMousePointer(
     }
 
     /* Bitmaps of another format are not drawn on this screen; the shape call that follows a mode switch makes new ones */
-    if (!IntPointerFormatOk(pgp, psoDest))
+    if (IntPointerSync(ppdev, psoDest) == PTR_NONE)
     {
         return;
     }
@@ -792,6 +848,7 @@ EngSetPointerShape(
     pgp->psurfMask = psurfMask;
     pgp->psurfSave = psurfSave;
     pgp->psurfTmp = psurfTmp;
+    pgp->ulModeGen = ppdev->ulModeGen;
     pgp->HotSpot.x = xHot;
     pgp->HotSpot.y = yHot;
     pgp->Size = sizel;
@@ -866,7 +923,7 @@ IntMoveMousePointer(
         return FALSE;
 
     /* A mode switch can leave bitmaps of another format or size behind */
-    if (!IntPointerFormatOk(pgp, pso) ||
+    if (IntPointerSync(ppdev, pso) != PTR_CURRENT ||
         pgp->psurfSave->SurfObj.sizlBitmap.cx < cx || pgp->psurfSave->SurfObj.sizlBitmap.cy < cy ||
         pgp->psurfTmp->SurfObj.sizlBitmap.cx < cx || pgp->psurfTmp->SurfObj.sizlBitmap.cy < cy)
         return FALSE;
@@ -970,13 +1027,34 @@ IntMoveMousePointer(
             return FALSE;
     }
 
-    /* One blit to the screen. From here on the screen may have changed whatever the result: the move buffer holds the whole
-     * finished image of the rectangle, so a copy that fails is repeated from it (whole, then row by row) and the new place is
-     * committed; going back to the two steps would read a half written screen as the background. */
+    /* One blit to the screen. IntCopyToScreen repeats a failed copy whole and then row by row from the move buffer, which holds
+     * the whole finished image of the rectangle. Only a complete copy commits the new place. If rows can not be written, the
+     * rectangle is made good from what is known to be right (the saved pixels under the old place, the pixels kept under the
+     * new place), the pointer is left as not shown, and the caller's two steps show it at the new place. A driver that fails
+     * partway through a blit even for these copies leaves part of the old or new pointer on the screen: the next hide, move or
+     * repaint of that rectangle removes it, nothing at this layer can do more. */
     pt0.x = 0;
     pt0.y = 0;
     rcDst = rcU;
-    IntCopyToScreen(pso, psoU, &rcDst, &pt0);
+    if (!IntCopyToScreen(pso, psoU, &rcDst, &pt0))
+    {
+        POINTL ptlOrigin = {0, 0};
+
+        rcDst.left = rc0.left;
+        rcDst.top = rc0.top;
+        rcDst.right = rc0.right;
+        rcDst.bottom = rc0.bottom;
+        IntCopyToScreen(pso, &pgp->psurfSave->SurfObj, &rcDst, &ptlOrigin);
+
+        rcDst.left = rc1.left;
+        rcDst.top = rc1.top;
+        rcDst.right = rc1.right;
+        rcDst.bottom = rc1.bottom;
+        IntCopyToScreen(pso, psoNew, &rcDst, &ptlOrigin);
+
+        pgp->Enabled = FALSE;
+        return FALSE;
+    }
 
     /* The compose bitmap now holds the pixels under the pointer: it becomes the save bitmap and the old one the scratch one */
     psurfTmp = pgp->psurfTmp;
