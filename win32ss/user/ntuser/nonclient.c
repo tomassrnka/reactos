@@ -1140,6 +1140,16 @@ VOID UserDrawCaptionBar(
  * - Drawing of WS_BORDER after scrollbars
  * - Correct drawing of size-box
  */
+/* A window flashed active by FlashWindowEx carries a FlashWState property whose FLASHW_ACTIVE
+   phase bit is the authoritative flashing-to-active signal, distinct from the queue-active
+   WNDS_ACTIVEFRAME that IntSendNCPaint also sets for a background-queue-active window. */
+static BOOL FASTCALL
+IntWndIsFlashingActive(PWND pWnd)
+{
+   DWORD_PTR FlashState = (DWORD_PTR)UserGetProp(pWnd, AtomFlashWndState, TRUE);
+   return FlashState != 0 && (FlashState & FLASHW_ACTIVE) != 0;
+}
+
 LRESULT
 NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
 {
@@ -1175,7 +1185,13 @@ NC_DoNCPaint(PWND pWnd, HDC hDC, INT Flags)
       }
       else
       {
-         Active = (gpqForeground == pWnd->head.pti->MessageQueue);
+         /* The active window of the foreground queue draws the active frame. A window flashed
+            active by FlashWindowEx also does while its flash state reports the active phase;
+            WNDS_ACTIVEFRAME alone is too broad, as IntSendNCPaint sets it for any queue-active
+            window, including one activated on a background queue. */
+         Active = ((gpqForeground == pWnd->head.pti->MessageQueue &&
+                    (gpqForeground->spwndActive == pWnd || (Style & WS_CHILD))) ||
+                   (IntWndIsFlashingActive(pWnd) && (pWnd->state & WNDS_ACTIVEFRAME)));
       }
       Flags = DC_NC; // Redraw everything!
    }
