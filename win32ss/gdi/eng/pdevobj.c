@@ -948,6 +948,7 @@ PDEVOBJ_lChangeDisplaySettings(
                 {
                     if (pmdev->dev[j].ppdev->pGraphicsDevice == pmdevOld->dev[i].ppdev->pGraphicsDevice)
                     {
+                        /* The pointer reads ulModeGen under hsemDevLock, which the callers of this path do not hold; none reaches it today */
                         if (PDEVOBJ_bDynamicModeChange(pmdevOld->dev[i].ppdev, pmdev->dev[j].ppdev))
                         {
                             PPDEVOBJ tmp = pmdevOld->dev[i].ppdev;

@@ -1241,6 +1241,9 @@ IntPatBlt(
        IntUpdateBoundsRect(pdc, &DestRect);
     }
 
+    /* A mirroring transform swaps the corners; the pointer hit test needs them in order */
+    RECTL_vMakeWellOrdered(&DestRect);
+
 #ifdef _USE_DIBLIB_
     BrushOrigin.x = pbrush->ptOrigin.x + pdc->ptlDCOrig.x + XLeft;
     BrushOrigin.y = pbrush->ptOrigin.y + pdc->ptlDCOrig.y + YLeft;
