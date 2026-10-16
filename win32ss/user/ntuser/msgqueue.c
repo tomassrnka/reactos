@@ -1154,7 +1154,18 @@ co_MsqSendMessageAsync(PTHREADINFO ptiReceiver,
     return TRUE;
 }
 
-/* Take a sent message back from its receiver when the sender no longer waits for it */
+/* Take a queued sent message back from its receiver: nobody may dispatch it or complete it */
+static VOID
+MsqUnqueueSentMessage(
+    _In_ PTHREADINFO ptirec,
+    _In_ PUSER_SENT_MESSAGE Message)
+{
+   Message->pkCompletionEvent = NULL;
+   RemoveEntryList(&Message->ListEntry);
+   ClearMsgBitsMask(ptirec, Message->QS_Flags);
+   InsertTailList(&usmList, &Message->ListEntry);
+}
+
 static VOID
 MsqWithdrawSentMessage(
     _In_ PTHREADINFO ptirec,
@@ -1168,11 +1179,40 @@ MsqWithdrawSentMessage(
    {
       if (CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry) == Message)
       {
-         Message->pkCompletionEvent = NULL;
-         RemoveEntryList(&Message->ListEntry);
-         ClearMsgBitsMask(ptirec, Message->QS_Flags);
-         InsertTailList(&usmList, &Message->ListEntry);
+         MsqUnqueueSentMessage(ptirec, Message);
          break;
+      }
+   }
+}
+
+/* A terminated thread can leave its message queued on a receiver without ever returning to
+   co_MsqSendMessage, for instance when the termination lands inside a window procedure it
+   called while it waited. The message's lParam can point into the dead thread's stack. */
+VOID FASTCALL
+MsqWithdrawSentMessagesOf(
+    _In_ PTHREADINFO ptiSender)
+{
+   PPROCESSINFO ppi;
+   PTHREADINFO pti;
+   PLIST_ENTRY Entry, Next;
+   PUSER_SENT_MESSAGE Message;
+
+   for (ppi = gppiList; ppi; ppi = ppi->ppiNext)
+   {
+      for (pti = ppi->ptiList; pti; pti = pti->ptiSibling)
+      {
+         for (Entry = pti->SentMessagesListHead.Flink;
+              Entry != &pti->SentMessagesListHead;
+              Entry = Next)
+         {
+            Next = Entry->Flink;
+            Message = CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry);
+            if (Message->ptiSender == ptiSender)
+            {
+               MsqUnqueueSentMessage(pti, Message);
+               Message->flags |= SMF_SENDERDIED;
+            }
+         }
       }
    }
 }
