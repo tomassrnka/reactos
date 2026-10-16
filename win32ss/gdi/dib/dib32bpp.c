@@ -111,8 +111,10 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
   if (BltInfo->DestRect.right  > BltInfo->DestSurface->sizlBitmap.cx ||
       BltInfo->DestRect.bottom > BltInfo->DestSurface->sizlBitmap.cy ||
       BltInfo->SourcePoint.x < 0 || BltInfo->SourcePoint.y < 0 ||
-      BltInfo->SourcePoint.x + DestWidth  > BltInfo->SourceSurface->sizlBitmap.cx ||
-      BltInfo->SourcePoint.y + DestHeight > BltInfo->SourceSurface->sizlBitmap.cy)
+      BltInfo->SourcePoint.x > BltInfo->SourceSurface->sizlBitmap.cx ||
+      BltInfo->SourcePoint.y > BltInfo->SourceSurface->sizlBitmap.cy ||
+      DestWidth  > BltInfo->SourceSurface->sizlBitmap.cx - BltInfo->SourcePoint.x ||
+      DestHeight > BltInfo->SourceSurface->sizlBitmap.cy - BltInfo->SourcePoint.y)
     return FALSE;
 
   DestBits = (PBYTE)BltInfo->DestSurface->pvScan0
@@ -138,8 +140,8 @@ DIB_32BPP_BitBltSrcCopy(PBLTINFO BltInfo)
 
     if (bTopToBottom)
     {
-      /* This sets sy to the bottom line */
-      sy += BltInfo->SourceSurface->lDelta * (DestHeight - 1);
+      /* This sets sy to the bottom line (sy is a pixel row; DIB_1BPP_GetPixel scales by lDelta) */
+      sy += (DestHeight - 1);
     }
 
     for (j=BltInfo->DestRect.top; j<BltInfo->DestRect.bottom; j++)

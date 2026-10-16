@@ -937,11 +937,47 @@ static void test_StretchBlt_NegativeHeight(void)
      * flipped stretch below needs in place to reach the bugchecking path. */
     BitBlt(hdcWnd, 0, 0, 160, 120, hdcSrc, 0, 0, SRCCOPY);
 
-    /* UF-30 reproducer, verbatim from the bug report */
-    StretchBlt(hdcWnd, 10, 110, 140, -100, hdcSrc, 10, 10, 140, 100, SRCCOPY);
+    /* UF-30 reproducer, verbatim from the bug report. If the kernel bugchecks we never return;
+     * surviving with a successful blit is the screen-path regression test. */
+    ok(StretchBlt(hdcWnd, 10, 110, 140, -100, hdcSrc, 10, 10, 140, 100, SRCCOPY),
+       "UF-30: screen-path StretchBlt with a negative destination height failed\n");
 
-    /* If we got here, the kernel did not bugcheck. That is the regression test. */
-    ok(1, "UF-30: StretchBlt with a negative destination height did not bugcheck the kernel\n");
+    /* P3 (round 2): surviving the screen blit cannot see silent flip corruption. Drive the fixed
+     * 32bpp vertical-flip copy into a real 32bpp destination DIB and read the pixels back. */
+    {
+        HDC hdcDst = CreateCompatibleDC(hdcWnd);
+        BITMAPINFO bmiDst = {{sizeof(BITMAPINFOHEADER), 160, -120, 1, 32, BI_RGB}};
+        ULONG *pulDst = NULL;
+        HBITMAP hbmDst = CreateDIBSection(hdcWnd, &bmiDst, DIB_RGB_COLORS, (PVOID*)&pulDst, NULL, 0);
+        HBITMAP hbmDstOld = SelectObject(hdcDst, hbmDst);
+
+        /* Tag every source pixel with its row so a vertical flip is visible in the pixels. */
+        for (y = 0; y < 120; y++)
+            for (x = 0; x < 160; x++)
+                pulSrc[y * 160 + x] = 0xFF000000 | (ULONG)y;
+
+        /* A same-size, unflipped 32bpp DIB -> 32bpp DIB copy must be byte-exact. */
+        memset(pulDst, 0, 160 * 120 * sizeof(ULONG));
+        ok(BitBlt(hdcDst, 0, 0, 160, 120, hdcSrc, 0, 0, SRCCOPY), "UF-30: 32bpp BitBlt failed\n");
+        GdiFlush();
+        ok(pulDst[0] == 0xFF000000 && pulDst[119 * 160] == (0xFF000000 | 119),
+           "UF-30: 32bpp straight copy wrong: top=%08lx bottom=%08lx\n",
+           (unsigned long)pulDst[0], (unsigned long)pulDst[119 * 160]);
+
+        /* A negative-height StretchBlt flips vertically through the fixed DIB_32BPP path; the row
+         * ordering must reverse (top dest row holds a high source row, bottom a low one). */
+        memset(pulDst, 0, 160 * 120 * sizeof(ULONG));
+        ok(StretchBlt(hdcDst, 0, 120, 160, -120, hdcSrc, 0, 0, 160, 120, SRCCOPY),
+           "UF-30: 32bpp negative-height StretchBlt failed\n");
+        GdiFlush();
+        ok((pulDst[119 * 160] & 0xFFFFFF) < 60 && (pulDst[60 * 160] & 0xFF000000) == 0xFF000000,
+           "UF-30: 32bpp vertical flip did not reverse rows: bottom=%08lx mid=%08lx\n",
+           (unsigned long)pulDst[119 * 160], (unsigned long)pulDst[60 * 160]);
+
+        SelectObject(hdcDst, hbmDstOld);
+        DeleteObject(hbmDst);
+        DeleteDC(hdcDst);
+    }
 
     SelectObject(hdcSrc, hbmOld);
     DeleteObject(hbmSrc);

@@ -153,6 +153,7 @@ DIB_16BPP_BitBltSrcCopy(PBLTINFO BltInfo)
   PBYTE    SourceBits, DestBits, SourceLine, DestLine;
   PBYTE    SourceBits_4BPP, SourceLine_4BPP;
   PWORD    Source32, Dest32;
+  LONG     lSourceStepDelta;
   DWORD    Index, StartLeft, EndRight;
   BOOLEAN  bTopToBottom, bLeftToRight;
 
@@ -544,6 +545,12 @@ DIB_16BPP_BitBltSrcCopy(PBLTINFO BltInfo)
             SourceBits = DestBits;
           }
 
+          /* UF-30: when the bLeftToRight flip already ran, SourceBits now aliases DestBits and
+           * points into the destination surface; step it by the destination stride, not the
+           * source stride, or a both-axis flip between differently-pitched DIBs reads past the dest. */
+          lSourceStepDelta = (SourceBits == DestBits) ? BltInfo->DestSurface->lDelta / 2
+                                                      : BltInfo->SourceSurface->lDelta / 2;
+
           for (j = BltInfo->DestRect.right - 1; BltInfo->DestRect.left <= j ; j--)
           {
             /* Set Dest32 to bottom pixel */
@@ -557,7 +564,7 @@ DIB_16BPP_BitBltSrcCopy(PBLTINFO BltInfo)
             for (i = BltInfo->DestRect.top; i <= BltInfo->DestRect.bottom - 1; i++)
             {
               store[Index] = XLATEOBJ_iXlate(BltInfo->XlateSourceToDest, *Source32);
-              Source32 += BltInfo->SourceSurface->lDelta / 2;
+              Source32 += lSourceStepDelta;
               Index++;
             }
 

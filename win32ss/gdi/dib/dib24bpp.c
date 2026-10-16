@@ -401,8 +401,13 @@ DIB_24BPP_BitBltSrcCopy(PBLTINFO BltInfo)
             for (i = BltInfo->DestRect.left; i < BltInfo->DestRect.right; i++)
             {
 
-              /* This sets sy to the bottom line */
-              sy = BltInfo->SourcePoint.y + (BltInfo->DestRect.bottom - BltInfo->DestRect.top - 1);
+              /* UF-30: reading back from the destination (TopToBottomDone) must reset to the
+               * destination bottom row; a source-origin row with a different src/dest origin
+               * reads beyond the destination surface. */
+              if (TopToBottomDone)
+                sy = BltInfo->DestRect.top + (BltInfo->DestRect.bottom - BltInfo->DestRect.top - 1);
+              else
+                sy = BltInfo->SourcePoint.y + (BltInfo->DestRect.bottom - BltInfo->DestRect.top - 1);
               Index = 0;
 
               /* Read bottom to top and store */
