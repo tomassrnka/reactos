@@ -16,8 +16,11 @@ list(APPEND SOURCE
     ConsoleBufferSwitch.c
     ConsoleCaret.c
     ConsoleCreateRace.c
+    ConsoleCtrlEventRace.c
     ConsoleDisplayMode.c
     ConsoleWriteLatency.c
+    CopyFile2.c
+    CopyFile2Identity.c
     CreateEventMutexEx.c
     CreateFile2.c
     CreateRemoteThreadEx.c

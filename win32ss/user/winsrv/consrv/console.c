@@ -343,6 +343,9 @@ ConSrvReleaseConsole(IN PCONSRV_CONSOLE Console,
 
 /* CONSOLE INITIALIZATION FUNCTIONS *******************************************/
 
+static VOID
+ConSrvInitCtrlEvents(VOID);
+
 VOID NTAPI
 ConSrvInitConsoleSupport(VOID)
 {
@@ -353,6 +356,8 @@ ConSrvInitConsoleSupport(VOID)
     ConsoleList = NULL;
     // InitializeListHead(&ConDrvConsoleList);
     RtlInitializeResource(&ListLock);
+
+    ConSrvInitCtrlEvents();
 
     /* Should call LoadKeyboardLayout */
 }
@@ -1287,7 +1292,8 @@ ConSrvRemoveConsole(
              * and then send the last close notification.
              */
             Console->NotifyLastClose = FALSE;
-            ConSrvConsoleCtrlEvent(CTRL_LAST_CLOSE_EVENT, Console->NotifiedLastCloseProcess);
+            if (!NT_SUCCESS(ConSrvConsoleCtrlEvent(CTRL_LAST_CLOSE_EVENT, Console->NotifiedLastCloseProcess)))
+                DPRINT1("CONSRV: Last-close notification could not be queued for delivery\n");
 
             /* Only now, reset the pointer */
             Console->NotifiedLastCloseProcess = NULL;
@@ -1307,19 +1313,40 @@ ConSrvRemoveConsole(
 
 /* CONSOLE PROCESS MANAGEMENT FUNCTIONS ***************************************/
 
-NTSTATUS
-ConSrvConsoleCtrlEventTimeout(IN ULONG CtrlEvent,
-                              IN PCONSOLE_PROCESS_DATA ProcessData,
-                              IN ULONG Timeout)
+/*
+ * Control events are queued and delivered by one worker thread, in order.
+ * CreateRemoteThread takes the CSR process lock (CsrCreateRemoteThread), and
+ * CSR holds that lock while it calls us to lock a console (ConSrvNewProcess,
+ * SrvAttachConsole), so it must never be called with a console locked.
+ * An event is not queued when the newest queued event of its process is the
+ * same one; other events are all kept, in order. The queue is capped.
+ * Without the worker, requests fail: delivering from the caller would bring
+ * back the lock order inversion. CtrlEventLock is a leaf lock.
+ */
+#define CONSRV_MAX_CTRL_EVENTS 1024
+
+typedef struct _CONSRV_CTRL_EVENT
+{
+    LIST_ENTRY ListEntry;
+    HANDLE ProcessHandle;
+    HANDLE ProcessId;
+    LPTHREAD_START_ROUTINE CtrlRoutine;
+    ULONG CtrlEvent;
+} CONSRV_CTRL_EVENT, *PCONSRV_CTRL_EVENT;
+
+static RTL_CRITICAL_SECTION CtrlEventLock;
+static LIST_ENTRY CtrlEventQueue;
+static HANDLE CtrlEventWake;
+static ULONG CtrlEventCount;
+static NTSTATUS CtrlEventStatus = STATUS_UNSUCCESSFUL;
+
+static NTSTATUS
+ConSrvSendCtrlEvent(IN HANDLE ProcessHandle,
+                    IN LPTHREAD_START_ROUTINE CtrlRoutine,
+                    IN ULONG CtrlEvent,
+                    IN ULONG Timeout)
 {
     NTSTATUS Status = STATUS_SUCCESS;
-
-    DPRINT("ConSrvConsoleCtrlEventTimeout Parent ProcessId = %x\n", ProcessData->Process->ClientId.UniqueProcess);
-
-    /*
-     * Be sure we effectively have a control routine. It resides in kernel32.dll (client).
-     */
-    if (ProcessData->CtrlRoutine == NULL) return Status;
 
     _SEH2_TRY
     {
@@ -1327,8 +1354,8 @@ ConSrvConsoleCtrlEventTimeout(IN ULONG CtrlEvent,
 
         _SEH2_TRY
         {
-            Thread = CreateRemoteThread(ProcessData->Process->ProcessHandle, NULL, 0,
-                                        ProcessData->CtrlRoutine,
+            Thread = CreateRemoteThread(ProcessHandle, NULL, 0,
+                                        CtrlRoutine,
                                         UlongToPtr(CtrlEvent), 0, NULL);
             if (NULL == Thread)
             {
@@ -1337,8 +1364,6 @@ ConSrvConsoleCtrlEventTimeout(IN ULONG CtrlEvent,
             }
             else
             {
-                DPRINT("ProcessData->CtrlRoutine remote thread creation succeeded, ProcessId = %x, Process = 0x%p\n",
-                       ProcessData->Process->ClientId.UniqueProcess, ProcessData->Process);
                 WaitForSingleObject(Thread, Timeout);
             }
         }
@@ -1351,18 +1376,163 @@ ConSrvConsoleCtrlEventTimeout(IN ULONG CtrlEvent,
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
-        DPRINT1("ConSrvConsoleCtrlEventTimeout - Caught an exception, Status = 0x%08lx\n", Status);
+        DPRINT1("ConSrvSendCtrlEvent - Caught an exception, Status = 0x%08lx\n", Status);
     }
     _SEH2_END;
 
     return Status;
 }
 
+static ULONG NTAPI
+ConSrvCtrlEventThread(IN PVOID Parameter)
+{
+    PLIST_ENTRY Entry;
+    PCONSRV_CTRL_EVENT Event;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Parameter);
+
+    for (;;)
+    {
+        NtWaitForSingleObject(CtrlEventWake, FALSE, NULL);
+
+        for (;;)
+        {
+            RtlEnterCriticalSection(&CtrlEventLock);
+            if (IsListEmpty(&CtrlEventQueue))
+            {
+                RtlLeaveCriticalSection(&CtrlEventLock);
+                break;
+            }
+            Entry = RemoveHeadList(&CtrlEventQueue);
+            CtrlEventCount--;
+            RtlLeaveCriticalSection(&CtrlEventLock);
+
+            Event = CONTAINING_RECORD(Entry, CONSRV_CTRL_EVENT, ListEntry);
+            Status = ConSrvSendCtrlEvent(Event->ProcessHandle, Event->CtrlRoutine, Event->CtrlEvent, 0);
+            /* Delivery is asynchronous; a failed handler-thread creation cannot be returned to the caller, so record it */
+            if (!NT_SUCCESS(Status))
+                DPRINT1("CONSRV: Control event %lu delivery failed, Status = 0x%08lx\n", Event->CtrlEvent, Status);
+            NtClose(Event->ProcessHandle);
+            ConsoleFreeHeap(Event);
+        }
+    }
+
+    return 0;
+}
+
+static VOID
+ConSrvInitCtrlEvents(VOID)
+{
+    NTSTATUS Status;
+    HANDLE Thread;
+    CLIENT_ID ClientId;
+
+    Status = RtlInitializeCriticalSection(&CtrlEventLock);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CONSRV: Cannot initialize the control event lock, Status = 0x%08lx\n", Status);
+        CtrlEventStatus = Status;
+        return;
+    }
+    InitializeListHead(&CtrlEventQueue);
+
+    Status = NtCreateEvent(&CtrlEventWake, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CONSRV: Cannot create the control event wake event, Status = 0x%08lx\n", Status);
+        CtrlEventStatus = Status;
+        return;
+    }
+
+    Status = RtlCreateUserThread(NtCurrentProcess(), NULL, TRUE, 0, 0, 0,
+                                 ConSrvCtrlEventThread, NULL, &Thread, &ClientId);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CONSRV: Cannot create the control event thread, Status = 0x%08lx\n", Status);
+        NtClose(CtrlEventWake);
+        CtrlEventWake = NULL;
+        CtrlEventStatus = Status;
+        return;
+    }
+    CsrAddStaticServerThread(Thread, &ClientId, 0);
+
+    /* Only report ready once the worker is actually running */
+    Status = NtResumeThread(Thread, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CONSRV: Cannot resume the control event thread, Status = 0x%08lx\n", Status);
+        CtrlEventStatus = Status;
+        return;
+    }
+    CtrlEventStatus = STATUS_SUCCESS;
+}
+
+NTSTATUS
+ConSrvConsoleCtrlEventTimeout(IN ULONG CtrlEvent,
+                              IN PCONSOLE_PROCESS_DATA ProcessData,
+                              IN ULONG Timeout)
+{
+    DPRINT("ConSrvConsoleCtrlEventTimeout Parent ProcessId = %x\n", ProcessData->Process->ClientId.UniqueProcess);
+
+    /*
+     * Be sure we effectively have a control routine. It resides in kernel32.dll (client).
+     */
+    if (ProcessData->CtrlRoutine == NULL) return STATUS_SUCCESS;
+
+    return ConSrvSendCtrlEvent(ProcessData->Process->ProcessHandle,
+                               ProcessData->CtrlRoutine,
+                               CtrlEvent,
+                               Timeout);
+}
+
+/* Called with the console locked: queue the event, do not wait for it */
 NTSTATUS
 ConSrvConsoleCtrlEvent(IN ULONG CtrlEvent,
                        IN PCONSOLE_PROCESS_DATA ProcessData)
 {
-    return ConSrvConsoleCtrlEventTimeout(CtrlEvent, ProcessData, 0);
+    NTSTATUS Status;
+    PCONSRV_CTRL_EVENT Event;
+
+    if (ProcessData->CtrlRoutine == NULL) return STATUS_SUCCESS;
+    if (!NT_SUCCESS(CtrlEventStatus)) return CtrlEventStatus;
+
+    Event = ConsoleAllocHeap(0, sizeof(*Event));
+    if (!Event) return STATUS_NO_MEMORY;
+
+    /* Our own handle: the CSR process can go away before the event is delivered */
+    Status = NtDuplicateObject(NtCurrentProcess(),
+                               ProcessData->Process->ProcessHandle,
+                               NtCurrentProcess(),
+                               &Event->ProcessHandle,
+                               0, 0, DUPLICATE_SAME_ACCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Cannot duplicate the process handle, Status = 0x%08lx\n", Status);
+        ConsoleFreeHeap(Event);
+        return Status;
+    }
+    /* Our handle keeps the process, so its id cannot be reused while the event is queued */
+    Event->ProcessId = ProcessData->Process->ClientId.UniqueProcess;
+    Event->CtrlRoutine = ProcessData->CtrlRoutine;
+    Event->CtrlEvent = CtrlEvent;
+
+    RtlEnterCriticalSection(&CtrlEventLock);
+
+    /* Every event is distinct and must reach the handler: do not coalesce (Windows delivers each) */
+    if (CtrlEventCount >= CONSRV_MAX_CTRL_EVENTS)
+    {
+        RtlLeaveCriticalSection(&CtrlEventLock);
+        NtClose(Event->ProcessHandle);
+        ConsoleFreeHeap(Event);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    InsertTailList(&CtrlEventQueue, &Event->ListEntry);
+    CtrlEventCount++;
+    RtlLeaveCriticalSection(&CtrlEventLock);
+    NtSetEvent(CtrlEventWake, NULL);
+
+    return STATUS_SUCCESS;
 }
 
 PCONSOLE_PROCESS_DATA NTAPI
@@ -1435,7 +1605,9 @@ ConSrvConsoleProcessCtrlEvent(IN PCONSRV_CONSOLE Console,
          */
         if (ProcessGroupId == 0 || current->Process->ProcessGroupId == ProcessGroupId)
         {
-            Status = ConSrvConsoleCtrlEvent(CtrlEvent, current);
+            NTSTATUS EventStatus = ConSrvConsoleCtrlEvent(CtrlEvent, current);
+            /* A failed recipient must not be masked by a later success */
+            if (!NT_SUCCESS(EventStatus)) Status = EventStatus;
         }
     }
 
