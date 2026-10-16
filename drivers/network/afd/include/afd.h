@@ -148,13 +148,21 @@ typedef struct _AFD_IN_FLIGHT_REQUEST {
     PTDI_CONNECTION_INFORMATION ConnectionReturnInfo;
 } AFD_IN_FLIGHT_REQUEST, *PAFD_IN_FLIGHT_REQUEST;
 
+/* Replaced windows wait this many replacements before they are freed */
+#define AFD_RETIRED_WINDOWS 4
+
 typedef struct _AFD_DATA_WINDOW {
     PCHAR Window;
     UINT BytesUsed, Size, Content;
-    /* Replacement window (NewSize bytes) allocated when a new size was asked for, put in place once
-       the transport no longer holds the window; NULL if none */
-    PCHAR NewWindow;
+    /* Bytes allocated at Window when that is more than Size after a shrink; 0 means Size */
+    UINT AllocSize;
+    /* A new size asked for while the transport held the window; 0 if none. NewWindow is its
+       allocation when it does not fit in the current one, so that a failure shows at once */
     UINT NewSize;
+    PCHAR NewWindow;
+    /* Windows that were replaced; see AfdRetireWindow */
+    PCHAR Retired[AFD_RETIRED_WINDOWS];
+    UINT RetiredNext;
 } AFD_DATA_WINDOW, *PAFD_DATA_WINDOW;
 
 typedef struct _AFD_STORED_DATAGRAM {
@@ -402,6 +410,6 @@ UINT AfdCancelStreamSend(PAFD_FCB FCB, PIRP Irp);
 NTSTATUS AfdRequestWindowResize(PAFD_DATA_WINDOW Data, UINT Size);
 BOOLEAN AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Offset, UINT Used);
 VOID AfdApplyRecvResize(PAFD_FCB FCB);
-VOID AfdReleaseIrpMdls(PIRP Irp);
+VOID AfdFreeWindow(PAFD_DATA_WINDOW Data);
 
 #endif /* _AFD_H */

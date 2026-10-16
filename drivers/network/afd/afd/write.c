@@ -385,9 +385,6 @@ static NTSTATUS NTAPI SendComplete
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;
 
-    /* The window can be replaced once the request is not in flight */
-    AfdReleaseIrpMdls(Irp);
-
     ASSERT(FCB->SendIrp.InFlightRequest == Irp);
     FCB->SendIrp.InFlightRequest = NULL;
     /* Request is not in flight any longer */

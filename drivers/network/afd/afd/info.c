@@ -32,11 +32,11 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     _SEH2_TRY {
         switch( InfoReq->InformationClass ) {
         case AFD_INFO_RECEIVE_WINDOW_SIZE:
-            InfoReq->Information.Ulong = FCB->Recv.NewWindow ? FCB->Recv.NewSize : FCB->Recv.Size;
+            InfoReq->Information.Ulong = FCB->Recv.NewSize ? FCB->Recv.NewSize : FCB->Recv.Size;
             break;
 
         case AFD_INFO_SEND_WINDOW_SIZE:
-            InfoReq->Information.Ulong = FCB->Send.NewWindow ? FCB->Send.NewSize : FCB->Send.Size;
+            InfoReq->Information.Ulong = FCB->Send.NewSize ? FCB->Send.NewSize : FCB->Send.Size;
             AFD_DbgPrint(MID_TRACE,("Send window size %u\n", FCB->Send.Size));
             break;
 
@@ -99,30 +99,67 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 }
 
 /*
- * A new window size is asked for: the replacement window is allocated now, so that running out of
- * memory fails the request, and put in place by AfdApplyWindowResize once the transport does not
- * hold the window. Asking for the current size cancels a request that waits.
+ * The transport reads and writes a window through an MDL that the I/O manager unlocks only after
+ * the completion routine has returned, so a replaced window is not freed at once, and not by the
+ * routine that replaced it: it waits among the last AFD_RETIRED_WINDOWS replaced ones (the oldest
+ * is freed when a newer one needs its place) and is freed with the socket.
+ */
+static VOID
+AfdRetireWindow(PAFD_DATA_WINDOW Data, PCHAR Window)
+{
+    PCHAR *Slot = &Data->Retired[Data->RetiredNext++ % AFD_RETIRED_WINDOWS];
+
+    if (*Slot)
+        ExFreePoolWithTag(*Slot, TAG_AFD_DATA_BUFFER);
+    *Slot = Window;
+}
+
+VOID
+AfdFreeWindow(PAFD_DATA_WINDOW Data)
+{
+    UINT i;
+
+    if (Data->Window)
+        ExFreePoolWithTag(Data->Window, TAG_AFD_DATA_BUFFER);
+    if (Data->NewWindow)
+        ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
+    for (i = 0; i < AFD_RETIRED_WINDOWS; i++)
+    {
+        if (Data->Retired[i])
+            ExFreePoolWithTag(Data->Retired[i], TAG_AFD_DATA_BUFFER);
+    }
+}
+
+/*
+ * A new window size is asked for. A size that fits in the memory the window already has only
+ * changes Size once the transport lets go of the window; a bigger one gets its allocation now, so
+ * that running out of memory fails the request. Asking for the current size cancels a request
+ * that waits.
  */
 NTSTATUS
 AfdRequestWindowResize(PAFD_DATA_WINDOW Data, UINT Size)
 {
-    PCHAR NewWindow;
+    UINT Allocated = Data->Window ? (Data->AllocSize ? Data->AllocSize : Data->Size) : 0;
+    PCHAR NewWindow = NULL;
 
-    if (Size == Data->Size)
+    if (Size == Data->Size || (Data->NewSize == Size && (Size <= Allocated || Data->NewWindow)))
     {
-        if (Data->NewWindow)
-            ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
-        Data->NewWindow = NULL;
-        Data->NewSize = 0;
+        if (Size == Data->Size)
+        {
+            if (Data->NewWindow)
+                ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
+            Data->NewWindow = NULL;
+            Data->NewSize = 0;
+        }
         return STATUS_SUCCESS;
     }
 
-    if (Data->NewWindow && Data->NewSize == Size)
-        return STATUS_SUCCESS;
-
-    NewWindow = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_DATA_BUFFER);
-    if (!NewWindow)
-        return STATUS_NO_MEMORY;
+    if (Data->Window && Size > Allocated)
+    {
+        NewWindow = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_DATA_BUFFER);
+        if (!NewWindow)
+            return STATUS_NO_MEMORY;
+    }
 
     if (Data->NewWindow)
         ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
@@ -133,36 +170,44 @@ AfdRequestWindowResize(PAFD_DATA_WINDOW Data, UINT Size)
 }
 
 /*
- * Puts the replacement window in place, keeping the Used bytes that start at Offset in the old
- * one. The transport must not hold the old window, and no completed request may still have an
- * MDL on it (see AfdReleaseIrpMdls). A window too small for the data keeps the request until the
- * data has gone. Returns TRUE if the window was replaced.
+ * Makes the size asked for the size of the window, with the Used bytes that start at Offset in
+ * the old window at its start. The transport must not hold the window. A window too small for
+ * the data keeps the request until the data has gone. Returns TRUE if the size changed.
  */
 BOOLEAN
 AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Offset, UINT Used)
 {
-    PCHAR OldWindow;
-
-    if (!Data->NewWindow || Used > Data->NewSize)
+    if (!Data->NewSize || Used > Data->NewSize)
         return FALSE;
 
-    if (Used)
-        RtlCopyMemory(Data->NewWindow, Data->Window + Offset, Used);
+    if (Data->Window)
+    {
+        if (!Data->AllocSize)
+            Data->AllocSize = Data->Size;
 
-    OldWindow = Data->Window;
-    Data->Window = Data->NewWindow;
+        if (Data->NewWindow)
+        {
+            if (Used)
+                RtlCopyMemory(Data->NewWindow, Data->Window + Offset, Used);
+            AfdRetireWindow(Data, Data->Window);
+            Data->Window = Data->NewWindow;
+            Data->AllocSize = Data->NewSize;
+            Data->NewWindow = NULL;
+        }
+        else if (Offset && Used)
+        {
+            RtlMoveMemory(Data->Window, Data->Window + Offset, Used);
+        }
+    }
+
     Data->Size = Data->NewSize;
-    Data->NewWindow = NULL;
     Data->NewSize = 0;
-
-    if (OldWindow)
-        ExFreePoolWithTag(OldWindow, TAG_AFD_DATA_BUFFER);
 
     return TRUE;
 }
 
 /*
- * A stream socket keeps the unread data, at the start of the new window; a datagram socket copies
+ * A stream socket keeps the unread data, at the start of the window; a datagram socket copies
  * each datagram out of the window at once and has nothing to keep.
  */
 VOID
@@ -170,7 +215,7 @@ AfdApplyRecvResize(PAFD_FCB FCB)
 {
     UINT Offset = 0, Used = 0;
 
-    if (!FCB->Recv.NewWindow)
+    if (!FCB->Recv.NewSize)
         return;
 
     if (!(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
@@ -183,26 +228,6 @@ AfdApplyRecvResize(PAFD_FCB FCB)
     {
         FCB->Recv.Content = Used;
         FCB->Recv.BytesUsed = 0;
-    }
-}
-
-/*
- * The I/O manager unlocks and frees the MDL of a completed IRP after the completion routine has
- * returned, so a window that the routine freed could still be locked by it. The routines of the
- * requests that use a window call this first, with the lock held: nobody who finds the request no
- * longer in flight can see a leftover MDL on the window.
- */
-VOID
-AfdReleaseIrpMdls(PIRP Irp)
-{
-    PMDL Mdl;
-
-    while ((Mdl = Irp->MdlAddress) != NULL)
-    {
-        Irp->MdlAddress = Mdl->Next;
-        if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
-            MmUnlockPages(Mdl);
-        IoFreeMdl(Mdl);
     }
 }
 
