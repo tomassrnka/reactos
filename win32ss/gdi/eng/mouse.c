@@ -15,7 +15,7 @@
 
 /* FUNCTIONS *****************************************************************/
 
-#define PTR_NONE     0 /* the bitmaps cannot be used on this screen until the shape is set again */
+#define PTR_NONE     0 /* the bitmaps cannot be used on this screen; the show makes the pointer again from the bitmaps it was given */
 #define PTR_CURRENT  1 /* the bitmaps and the saved pixels are those of this framebuffer */
 #define PTR_RESET    2 /* a mode switch happened since: the pointer is not on this framebuffer, the bitmaps can be used again */
 
@@ -33,6 +33,12 @@ IntComposeMousePointer(
     _Inout_ SURFOBJ *psoDest,
     _In_ RECTL *prclSurf,
     _In_ RECTL *prclPointer);
+
+static
+BOOL
+IntRebuildMousePointer(
+    _Inout_ PDEVOBJ *ppdev,
+    _In_ SURFOBJ *pso);
 
 __drv_preferredFunction("(see documentation)", "Obsolete, always returns false. ")
 BOOL
@@ -328,13 +334,13 @@ IntPointerSync(
 }
 
 /*
- * Copy a finished image to the screen. A blit that returns FALSE may still have written part of it; the copy has the same
- * result every time, so it is repeated whole, then row by row, which puts every row that can be written there. TRUE if the
- * whole image is on the screen.
+ * Copy a finished image to the screen, or the pixels of the screen to a bitmap. A blit that returns FALSE may still have
+ * written part of it; the copy has the same result every time, so it is repeated whole, then row by row, which puts every
+ * row that can be written there. TRUE if the whole image arrived.
  */
 static
 BOOL
-IntCopyToScreen(
+IntCopyBitmap(
     _Inout_ SURFOBJ *psoScreen,
     _In_ SURFOBJ *psoSrc,
     _In_ const RECTL *prclDest,
@@ -418,7 +424,7 @@ IntHideMousePointer(
 
     /* The pointer is not shown from here on whether every row could be put back or not; a row that could not be written is
      * the framebuffer's problem and is drawn over by the next paint of the window */
-    IntCopyToScreen(psoDest, &pgp->psurfSave->SurfObj, &rclDest, &ptlSave);
+    IntCopyBitmap(psoDest, &pgp->psurfSave->SurfObj, &rclDest, &ptlSave);
 }
 
 /* Draw the pointer into prclDest of psoDest, taking the pixels from prclPointer of the pointer bitmaps; FALSE if a part failed */
@@ -546,7 +552,7 @@ IntComposeMousePointer(
          * the pointer again over what the failed copy may have written. Rows that still can not be written stay as
          * they were; the pointer counts as shown, so the next hide puts the saved pixels back over the whole rectangle
          * and removes whatever part of the pointer is there. */
-        IntCopyToScreen(psoDest, &pgp->psurfTmp->SurfObj, prclSurf, (POINTL*)prclPointer);
+        IntCopyBitmap(psoDest, &pgp->psurfTmp->SurfObj, prclSurf, (POINTL*)prclPointer);
         return;
     }
 
@@ -574,9 +580,11 @@ IntShowMousePointer(
         return;
     }
 
-    /* Bitmaps of another format are not drawn on this screen; the shape call that follows a mode switch makes new ones */
+    /* Bitmaps of another format are not drawn on this screen. A mode switch from a thread that does not own the window under
+     * the pointer sets no new shape, so the pointer is made again here from the bitmaps it was given; the set shows it. */
     if (IntPointerSync(ppdev, psoDest) == PTR_NONE)
     {
+        IntRebuildMousePointer(ppdev, psoDest);
         return;
     }
 
@@ -601,18 +609,13 @@ IntShowMousePointer(
     rclPointer.right = min(pgp->Size.cx, psoDest->sizlBitmap.cx - pt.x);
     rclPointer.bottom = min(pgp->Size.cy, psoDest->sizlBitmap.cy - pt.y);
 
-    /* Copy the pixels under the cursor to temporary surface. */
-    IntEngBitBlt(&pgp->psurfSave->SurfObj,
-                 psoDest,
-                 NULL,
-                 NULL,
-                 NULL,
-                 &rclPointer,
-                 (POINTL*)&rclSurf,
-                 NULL,
-                 NULL,
-                 NULL,
-                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+    /* Copy the pixels under the cursor to temporary surface. Without all of them the saved pixels are not a background:
+     * the pointer stays off (nothing is put back over the screen later) and the next move tries again. */
+    if (!IntCopyBitmap(&pgp->psurfSave->SurfObj, psoDest, &rclPointer, (POINTL*)&rclSurf))
+    {
+        pgp->Enabled = FALSE;
+        return;
+    }
 
     /* Draw the pointer over the saved pixels */
     IntComposeMousePointer(ppdev, pgp, psoDest, &rclSurf, &rclPointer);
@@ -836,6 +839,11 @@ EngSetPointerShape(
         pgp->psurfTmp = NULL;
     }
 
+    /* The source bitmaps belong to the shape that is gone; GreSetPointerShape records the new ones after this returns */
+    pgp->hbmSrcMask = NULL;
+    pgp->hbmSrcColor = NULL;
+    pgp->ulRebuildGen = 0;
+
     /* See if we are being asked to hide the pointer. */
     if (psoMask == NULL && psoColor == NULL)
     {
@@ -1027,7 +1035,7 @@ IntMoveMousePointer(
             return FALSE;
     }
 
-    /* One blit to the screen. IntCopyToScreen repeats a failed copy whole and then row by row from the move buffer, which holds
+    /* One blit to the screen. IntCopyBitmap repeats a failed copy whole and then row by row from the move buffer, which holds
      * the whole finished image of the rectangle. Only a complete copy commits the new place. If rows can not be written, the
      * rectangle is made good from what is known to be right (the saved pixels under the old place, the pixels kept under the
      * new place), the pointer is left as not shown, and the caller's two steps show it at the new place. A driver that fails
@@ -1036,7 +1044,7 @@ IntMoveMousePointer(
     pt0.x = 0;
     pt0.y = 0;
     rcDst = rcU;
-    if (!IntCopyToScreen(pso, psoU, &rcDst, &pt0))
+    if (!IntCopyBitmap(pso, psoU, &rcDst, &pt0))
     {
         POINTL ptlOrigin = {0, 0};
 
@@ -1044,13 +1052,13 @@ IntMoveMousePointer(
         rcDst.top = rc0.top;
         rcDst.right = rc0.right;
         rcDst.bottom = rc0.bottom;
-        IntCopyToScreen(pso, &pgp->psurfSave->SurfObj, &rcDst, &ptlOrigin);
+        IntCopyBitmap(pso, &pgp->psurfSave->SurfObj, &rcDst, &ptlOrigin);
 
         rcDst.left = rc1.left;
         rcDst.top = rc1.top;
         rcDst.right = rc1.right;
         rcDst.bottom = rc1.bottom;
-        IntCopyToScreen(pso, psoNew, &rcDst, &ptlOrigin);
+        IntCopyBitmap(pso, psoNew, &rcDst, &ptlOrigin);
 
         pgp->Enabled = FALSE;
         return FALSE;
@@ -1250,10 +1258,12 @@ IntEngSetPointerShape(
     return ulResult;
 }
 
+/* Set the shape from the two bitmaps (handles) a cursor holds, and keep the handles to make the pointer again after a mode switch */
+static
 ULONG
-NTAPI
-GreSetPointerShape(
-    _In_ HDC hdc,
+IntSetPointerShapeFromBitmaps(
+    _Inout_ PDEVOBJ *ppdev,
+    _In_ PSURFACE psurf,
     _In_opt_ HBITMAP hbmMask,
     _In_opt_ HBITMAP hbmColor,
     _In_ LONG xHot,
@@ -1262,29 +1272,9 @@ GreSetPointerShape(
     _In_ LONG y,
     _In_ FLONG fl)
 {
-    PDC pdc;
-    PSURFACE psurf, psurfMask, psurfColor;
+    PSURFACE psurfMask, psurfColor;
     EXLATEOBJ exlo;
-    ULONG ulResult = 0;
-
-    pdc = DC_LockDc(hdc);
-    if (!pdc)
-    {
-        DPRINT1("Failed to lock the DC.\n");
-        return 0;
-    }
-
-    ASSERT(pdc->dctype == DCTYPE_DIRECT);
-    EngAcquireSemaphore(pdc->ppdev->hsemDevLock);
-    /* We're not sure DC surface is the good one */
-    psurf = pdc->ppdev->pSurface;
-    if (!psurf)
-    {
-        DPRINT1("DC has no surface.\n");
-        EngReleaseSemaphore(pdc->ppdev->hsemDevLock);
-        DC_UnlockDc(pdc);
-        return 0;
-    }
+    ULONG ulResult;
 
     /* Lock the mask bitmap */
     if (hbmMask)
@@ -1324,8 +1314,14 @@ GreSetPointerShape(
                                      yHot,
                                      x,
                                      y,
-                                     &pdc->ppdev->Pointer.Exclude,
+                                     &ppdev->Pointer.Exclude,
                                      fl | SPS_CHANGE);
+
+    if (ulResult != SPS_ERROR)
+    {
+        ppdev->Pointer.hbmSrcMask = hbmMask;
+        ppdev->Pointer.hbmSrcColor = hbmColor;
+    }
 
     /* Cleanup */
     if (psurfColor)
@@ -1336,6 +1332,92 @@ GreSetPointerShape(
 
     if (psurfMask)
         SURFACE_ShareUnlockSurface(psurfMask);
+
+    return ulResult;
+}
+
+/*
+ * The bitmaps of the pointer are in the format of the screen of their time, and a mode switch to another format leaves them
+ * unusable. When the switching thread owns the window under the pointer the shape is set again anyway; when it does not,
+ * no one does, and the pointer would stay off. The bitmaps the last shape was made from are still the cursor's, so the
+ * shape is made again from them, once per mode: a set that fails (a colour bitmap that has the old format) fails the same
+ * way for every caller and is not repeated at each move. The device lock is held.
+ */
+static
+BOOL
+IntRebuildMousePointer(
+    _Inout_ PDEVOBJ *ppdev,
+    _In_ SURFOBJ *pso)
+{
+    GDIPOINTER *pgp = &ppdev->Pointer;
+    HBITMAP hbmMask = pgp->hbmSrcMask, hbmColor = pgp->hbmSrcColor;
+    PSURFACE psurf, psurfTest;
+    LONG xHot = pgp->HotSpot.x, yHot = pgp->HotSpot.y;
+    FLONG fl = pgp->flags;
+
+    psurf = ppdev->pSurface;
+    if (pgp->ulRebuildGen == ppdev->ulModeGen + 1 || (!hbmMask && !hbmColor) || !psurf || &psurf->SurfObj != pso)
+        return FALSE;
+
+    pgp->ulRebuildGen = ppdev->ulModeGen + 1;
+
+    /* A cursor that is gone takes its bitmaps along */
+    if (hbmMask)
+    {
+        psurfTest = SURFACE_ShareLockSurface(hbmMask);
+        if (!psurfTest)
+            return FALSE;
+        SURFACE_ShareUnlockSurface(psurfTest);
+    }
+
+    if (hbmColor)
+    {
+        psurfTest = SURFACE_ShareLockSurface(hbmColor);
+        if (!psurfTest)
+            return FALSE;
+        SURFACE_ShareUnlockSurface(psurfTest);
+    }
+
+    return IntSetPointerShapeFromBitmaps(ppdev, psurf, hbmMask, hbmColor, xHot, yHot,
+                                         ppdev->ptlPointer.x, ppdev->ptlPointer.y, fl) != SPS_ERROR;
+}
+
+ULONG
+NTAPI
+GreSetPointerShape(
+    _In_ HDC hdc,
+    _In_opt_ HBITMAP hbmMask,
+    _In_opt_ HBITMAP hbmColor,
+    _In_ LONG xHot,
+    _In_ LONG yHot,
+    _In_ LONG x,
+    _In_ LONG y,
+    _In_ FLONG fl)
+{
+    PDC pdc;
+    PSURFACE psurf;
+    ULONG ulResult = 0;
+
+    pdc = DC_LockDc(hdc);
+    if (!pdc)
+    {
+        DPRINT1("Failed to lock the DC.\n");
+        return 0;
+    }
+
+    ASSERT(pdc->dctype == DCTYPE_DIRECT);
+    EngAcquireSemaphore(pdc->ppdev->hsemDevLock);
+    /* We're not sure DC surface is the good one */
+    psurf = pdc->ppdev->pSurface;
+    if (!psurf)
+    {
+        DPRINT1("DC has no surface.\n");
+        EngReleaseSemaphore(pdc->ppdev->hsemDevLock);
+        DC_UnlockDc(pdc);
+        return 0;
+    }
+
+    ulResult = IntSetPointerShapeFromBitmaps(pdc->ppdev, psurf, hbmMask, hbmColor, xHot, yHot, x, y, fl);
 
     EngReleaseSemaphore(pdc->ppdev->hsemDevLock);
 
