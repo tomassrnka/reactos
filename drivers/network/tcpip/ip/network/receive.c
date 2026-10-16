@@ -328,6 +328,7 @@ VOID ProcessFragment(
   IP_PACKET Datagram;
   PIP_FRAGMENT Fragment;
   BOOLEAN Success;
+  BOOLEAN Found;
 
   /* FIXME: Assume IPv4 */
 
@@ -406,27 +407,28 @@ VOID ProcessFragment(
      this does not underflow. */
   FragLast      = FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize) - 1;
 
+  /* Walk every hole the fragment overlaps and split each one (RFC 815). After
+     overlapping fragments a single fragment can span more than one hole;
+     handling only the first would leave the rest and stall the datagram. */
+  Found = FALSE;
   CurrentEntry = IPDR->HoleListHead.Flink;
-  for (;;) {
-    if (CurrentEntry == &IPDR->HoleListHead)
-        break;
-
+  while (CurrentEntry != &IPDR->HoleListHead) {
     Hole = CONTAINING_RECORD(CurrentEntry, IPDATAGRAM_HOLE, ListEntry);
+    /* Advance before the current hole may be unlinked below */
+    CurrentEntry = CurrentEntry->Flink;
 
     TI_DbgPrint(DEBUG_IP, ("Comparing Fragment (%d,%d) to Hole (%d,%d).\n",
       FragFirst, FragLast, Hole->First, Hole->Last));
 
     if ((FragFirst > Hole->Last) || (FragLast < Hole->First)) {
       TI_DbgPrint(MID_TRACE, ("No overlap.\n"));
-      /* The fragment does not overlap with the hole, try next
-         descriptor in the list */
-
-      CurrentEntry = CurrentEntry->Flink;
+      /* The fragment does not overlap with this hole, try the next */
       continue;
     }
 
-    /* The fragment overlap with the hole, unlink the descriptor */
-    RemoveEntryList(CurrentEntry);
+    /* The fragment overlaps the hole, unlink the descriptor */
+    Found = TRUE;
+    RemoveEntryList(&Hole->ListEntry);
 
     if (FragFirst > Hole->First) {
       NewHole = CreateHoleDescriptor(Hole->First, FragFirst - 1);
@@ -455,7 +457,11 @@ VOID ProcessFragment(
     }
 
     ExFreeToNPagedLookasideList(&IPHoleList, Hole);
+  }
 
+  /* Only queue the fragment if it filled part of a hole; a fully duplicate or
+     already-covered fragment overlaps no hole and is dropped. */
+  if (Found) {
     /* If this is the first fragment, save the IP header */
     if (FragFirst == 0) {
         IPDR->IPv4Header = ExAllocatePoolWithTag(NonPagedPool,
@@ -502,7 +508,6 @@ VOID ProcessFragment(
 
     /* Put the fragment in the list */
     InsertTailList(&IPDR->FragmentListHead, &Fragment->ListEntry);
-    break;
   }
 
   TI_DbgPrint(DEBUG_IP, ("Done searching for hole descriptor.\n"));

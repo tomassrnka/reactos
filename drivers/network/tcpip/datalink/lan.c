@@ -654,6 +654,8 @@ NDIS_STATUS NTAPI ProtocolReceive(
                               LookaheadBuffer,
                               LookaheadBufferSize,
                               Adapter->MacOptions);
+        /* The whole packet was copied from the lookahead buffer */
+        BytesTransferred = PacketSize;
     }
     else
     {
@@ -663,11 +665,13 @@ NDIS_STATUS NTAPI ProtocolReceive(
     }
     TI_DbgPrint(DEBUG_DATALINK, ("Calling complete\n"));
 
+    /* Complete with the count actually transferred, not the requested size, so a
+       short synchronous transfer does not advertise an uninitialized tail. */
     if (NdisStatus != NDIS_STATUS_PENDING)
 	ProtocolTransferDataComplete(BindingContext,
 				     NdisPacket,
 				     NdisStatus,
-				     PacketSize);
+				     BytesTransferred);
 
     TI_DbgPrint(DEBUG_DATALINK, ("leaving\n"));
 
