@@ -424,6 +424,7 @@ SharedFace_Create(FT_Face Face, PSHARED_MEM Memory)
     {
         Ptr->Face = Face;
         Ptr->RefCount = 1;
+        Ptr->bCreatorRef = TRUE;
         Ptr->Memory = Memory;
         SharedFaceCache_Init(&Ptr->EnglishUS);
         SharedFaceCache_Init(&Ptr->UserLanguage);
@@ -573,6 +574,28 @@ static __inline VOID FASTCALL
 CleanupFontEntry(PFONT_ENTRY FontEntry)
 {
     CleanupFontEntryEx(FontEntry, FontEntry->Font);
+}
+
+/* Process-exit cleanup of a private font entry: in addition to the entry
+ * reference, drop the reference SharedFace_Create() took (once per face, tracked
+ * by bCreatorRef). Only safe at the owning process single-threaded exit, where
+ * nothing can still be rendering that private font, so it does not change the
+ * face lifetime during active use. */
+static VOID FASTCALL
+CleanupFontEntryAtProcessExit(PFONT_ENTRY FontEntry)
+{
+    PSHARED_FACE SharedFace = FontEntry->Font->SharedFace;
+    BOOL DropCreatorRef;
+
+    IntLockFreeType();
+    DropCreatorRef = SharedFace->bCreatorRef;
+    SharedFace->bCreatorRef = FALSE;
+    IntUnLockFreeType();
+
+    CleanupFontEntry(FontEntry);
+
+    if (DropCreatorRef)
+        SharedFace_Release(SharedFace, TRUE);
 }
 
 static __inline void FTVectorToPOINTFX(FT_Vector *vec, POINTFX *pt)
@@ -1925,7 +1948,7 @@ IntGdiLoadFontByIndexFromMemory(PGDI_LOAD_FONT pLoadFont, FT_Long FontIndex)
     FT_Face Face;
     FT_Long iFace, num_faces;
     PSHARED_FACE SharedFace;
-    INT FaceCount = 0;
+    INT FaceCount = 0, FacesLoaded;
 
     IntLockFreeType();
 
@@ -1988,7 +2011,15 @@ IntGdiLoadFontByIndexFromMemory(PGDI_LOAD_FONT pLoadFont, FT_Long FontIndex)
         FontIndex = 0;
     }
 
-    FaceCount += IntGdiLoadFontsFromMemory(pLoadFont, SharedFace, FontIndex, -1);
+    FacesLoaded = IntGdiLoadFontsFromMemory(pLoadFont, SharedFace, FontIndex, -1);
+    FaceCount += FacesLoaded;
+
+    /* If no entry adopted this face it is orphaned (no list entry for process-exit
+     * cleanup to find), so release the creator reference now to free the face and
+     * its buffer/view. This is a failure path only; nothing can be using it. */
+    if (FacesLoaded == 0)
+        SharedFace_Release(SharedFace, TRUE);
+
     return FaceCount;
 }
 
@@ -2576,7 +2607,7 @@ IntGdiAddFontMemResource(PVOID Buffer, DWORD dwSize, PDWORD pNumAdded)
 }
 
 VOID FASTCALL
-IntGdiCleanupMemEntry(PFONT_ENTRY_MEM Head)
+IntGdiCleanupMemEntry(PFONT_ENTRY_MEM Head, BOOL AtProcessExit)
 {
     PLIST_ENTRY Entry;
     PFONT_ENTRY_MEM FontEntry;
@@ -2586,11 +2617,17 @@ IntGdiCleanupMemEntry(PFONT_ENTRY_MEM Head)
         Entry = RemoveHeadList(&Head->ListEntry);
         FontEntry = CONTAINING_RECORD(Entry, FONT_ENTRY_MEM, ListEntry);
 
-        CleanupFontEntry(FontEntry->Entry);
+        if (AtProcessExit)
+            CleanupFontEntryAtProcessExit(FontEntry->Entry);
+        else
+            CleanupFontEntry(FontEntry->Entry);
         ExFreePoolWithTag(FontEntry, TAG_FONT);
     }
 
-    CleanupFontEntry(Head->Entry);
+    if (AtProcessExit)
+        CleanupFontEntryAtProcessExit(Head->Entry);
+    else
+        CleanupFontEntry(Head->Entry);
     ExFreePoolWithTag(Head, TAG_FONT);
 }
 
@@ -2639,7 +2676,7 @@ IntGdiRemoveFontMemResource(HANDLE hMMFont)
 
     if (EntryCollection)
     {
-        IntGdiCleanupMemEntry(EntryCollection->Entry);
+        IntGdiCleanupMemEntry(EntryCollection->Entry, FALSE);
         ExFreePoolWithTag(EntryCollection, TAG_FONT);
         return TRUE;
     }
@@ -2672,7 +2709,7 @@ IntGdiCleanupPrivateFontsForProcess(VOID)
 
         if (EntryCollection)
         {
-            IntGdiCleanupMemEntry(EntryCollection->Entry);
+            IntGdiCleanupMemEntry(EntryCollection->Entry, TRUE);
             ExFreePoolWithTag(EntryCollection, TAG_FONT);
         }
         else
@@ -2690,7 +2727,7 @@ IntGdiCleanupPrivateFontsForProcess(VOID)
 
             if (Entry)
             {
-                CleanupFontEntry(CONTAINING_RECORD(Entry, FONT_ENTRY, ListEntry));
+                CleanupFontEntryAtProcessExit(CONTAINING_RECORD(Entry, FONT_ENTRY, ListEntry));
             }
         }
 

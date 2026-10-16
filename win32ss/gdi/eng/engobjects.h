@@ -131,6 +131,7 @@ typedef struct _SHARED_FACE_CACHE {
 typedef struct _SHARED_FACE {
   FT_Face       Face;
   LONG          RefCount;
+  BOOL          bCreatorRef; //< The extra reference taken by SharedFace_Create()
   PSHARED_MEM   Memory;
   SHARED_FACE_CACHE EnglishUS;
   SHARED_FACE_CACHE UserLanguage;
