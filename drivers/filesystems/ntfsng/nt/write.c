@@ -265,6 +265,31 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
+        /*
+         * The grow's zeroing faulted (e.g. out of memory): a failed SetFileSize must not leave the end of file
+         * changed. Shrink the core and the FCB sizes back to the old size and pull the cache's file size back
+         * with them. A shrink frees rather than allocates, so it is unlikely to fault again; if it does, the
+         * sizes are left as the degraded fallback.
+         */
+        if (NewSize > OldSize)
+        {
+            int RbErr;
+            ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
+            NgAcquireCore(Vcb);
+            RbErr = NgEnsureNode(Fcb);
+            if (!RbErr)
+                RbErr = ngc_set_size(Vcb->Core, Fcb->Node, (unsigned long long)OldSize);
+            if (Fcb->Node)
+                NgSizesFromCore(Fcb);
+            if (!RbErr)
+                NgAfterChange(Vcb);
+            NgReleaseCore(Vcb);
+            ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+            if (RbErr)
+                DPRINT1("ntfsng: size rollback of %I64x to %I64d failed %d\n", Fcb->MftNo, OldSize, RbErr);
+            if (FileObject && Fcb->SectionObjectPointers.SharedCacheMap)
+                CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+        }
     }
     _SEH2_END;
     if (NT_SUCCESS(Status))
