@@ -246,6 +246,18 @@ ReassembleDatagram(
   while (CurrentEntry != &IPDR->FragmentListHead) {
     Fragment = CONTAINING_RECORD(CurrentEntry, IP_FRAGMENT, ListEntry);
 
+    /* Never copy past the datagram buffer. It is sized from IPDR->DataSize
+       (the last fragment end); a fragment ending beyond it (a later fragment
+       shrank the total, or fragments overlap past the end) would overrun the
+       heap block. Fail closed. */
+    if (Fragment->Offset > IPDR->DataSize ||
+        Fragment->Size > IPDR->DataSize - Fragment->Offset)
+    {
+      TI_DbgPrint(MIN_TRACE, ("Fragment exceeds datagram size; dropping.\n"));
+      (*IPPacket->Free)(IPPacket);
+      return FALSE;
+    }
+
     /* Copy fragment data into datagram buffer */
     CopyPacketToBuffer(Data + Fragment->Offset,
                        Fragment->Packet,
@@ -298,8 +310,8 @@ VOID ProcessFragment(
   PIPDATAGRAM_REASSEMBLY IPDR;
   PLIST_ENTRY CurrentEntry;
   PIPDATAGRAM_HOLE Hole, NewHole;
-  USHORT FragFirst;
-  USHORT FragLast;
+  ULONG FragFirst;
+  ULONG FragLast;
   BOOLEAN MoreFragments;
   PIPv4_HEADER IPv4Header;
   IP_PACKET Datagram;
@@ -309,6 +321,20 @@ VOID ProcessFragment(
   /* FIXME: Assume IPv4 */
 
   IPv4Header = (PIPv4_HEADER)IPPacket->Header;
+
+  /* Fragment offset in octets from the 13-bit field; <<3 fits in 16 bits */
+  FragFirst = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_FRAGOFS_MASK) << 3;
+
+  /* Drop a malformed or oversized fragment before taking any reassembly state:
+     its data must fit wholly within the 65535-octet maximum IP datagram, else
+     ReassembleDatagram() sizes the buffer from one fragment and copies another
+     past it (remote heap overflow). Fail closed. */
+  if (IPPacket->TotalSize < IPPacket->HeaderSize ||
+      (ULONG)FragFirst + (IPPacket->TotalSize - IPPacket->HeaderSize) > 0xFFFF)
+  {
+    TI_DbgPrint(MIN_TRACE, ("Dropping malformed or oversized IP fragment.\n"));
+    return;
+  }
 
   /* Check if we already have an reassembly structure for this datagram */
   IPDR = GetReassemblyInfo(IPPacket, &OldIrql);
@@ -360,7 +386,6 @@ VOID ProcessFragment(
 	&ReassemblyListLock);
   }
 
-  FragFirst     = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_FRAGOFS_MASK) << 3;
   FragLast      = FragFirst + WN2H(IPv4Header->TotalLength);
   MoreFragments = (WN2H(IPv4Header->FlagsFragOfs) & IPv4_MF_MASK) > 0;
 
