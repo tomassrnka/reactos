@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_AttachThreadInput(void);
+extern void func_AttachThreadInputQueue(void);
 extern void func_AutoRotation(void);
 extern void func_CharFuncs(void);
 extern void func_CloseWindow(void);
@@ -91,6 +92,7 @@ extern void func_wsprintfApi(void);
 const struct test winetest_testlist[] =
 {
     { "AttachThreadInput", func_AttachThreadInput },
+    { "AttachThreadInputQueue", func_AttachThreadInputQueue },
     { "AutoRotation", func_AutoRotation },
     { "CharFuncs", func_CharFuncs },
     { "CloseWindow", func_CloseWindow },
