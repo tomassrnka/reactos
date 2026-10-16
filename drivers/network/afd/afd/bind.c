@@ -62,14 +62,7 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
 
         if (NT_SUCCESS(Status) && FCB->Recv.Content < FCB->Recv.Size)
         {
-            Status = TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
-                                        FCB->AddressFile.Object,
-                                        0,
-                                        FCB->Recv.Window,
-                                        FCB->Recv.Size,
-                                        FCB->AddressFrom,
-                                        PacketSocketRecvComplete,
-                                        FCB);
+            Status = AfdPostReceive(FCB, TRUE, FCB->Recv.Size);
 
             /* We don't want to wait for this read to complete. */
             if( Status == STATUS_PENDING ) Status = STATUS_SUCCESS;

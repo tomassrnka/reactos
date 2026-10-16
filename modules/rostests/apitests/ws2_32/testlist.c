@@ -29,6 +29,7 @@ extern void func_nonblocking(void);
 extern void func_nostartup(void);
 extern void func_open_osfhandle(void);
 extern void func_rcvbuf(void);
+extern void func_rcvbufbusy(void);
 extern void func_recv(void);
 extern void func_send(void);
 extern void func_sendcancel(void);
@@ -73,6 +74,7 @@ const struct test winetest_testlist[] =
     { "nostartup", func_nostartup },
     { "open_osfhandle", func_open_osfhandle },
     { "rcvbuf", func_rcvbuf },
+    { "rcvbufbusy", func_rcvbufbusy },
     { "recv", func_recv },
     { "send", func_send },
     { "sendcancel", func_sendcancel },

@@ -212,14 +212,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
          * a resize of the receive window cannot change the window between the two reads
          */
         SocketAcquireStateLock(FCB2);
-        Status = TdiReceive(
-            &FCB2->ReceiveIrp.InFlightRequest,
-            FCB2->Connection.Object,
-            TDI_RECEIVE_NORMAL,
-            FCB2->Recv.Window,
-            FCB2->Recv.Size,
-            ReceiveComplete,
-            FCB2);
+        Status = AfdPostReceive(FCB2, FALSE, FCB2->Recv.Size);
         SocketStateUnlock(FCB2);
 
         if (Status == STATUS_PENDING)

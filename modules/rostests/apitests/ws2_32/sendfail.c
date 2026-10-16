@@ -446,6 +446,60 @@ TestFailedSend(void)
     closesocket(Client);
 }
 
+/* The receive buffer size is changed again and again from a second thread while a stream arrives */
+static
+void
+TestReceiveBufferBusy(void)
+{
+    static const int Sizes[] = { 1024, 6000, 2000, 8192, 4000, 5000, 1500, 3000 };
+    STREAM Stream;
+    HANDLE Sender, Receiver;
+    BOOL *Seen;
+    DWORD Sets = 0, Mismatches = 0, Failures = 0;
+    int Size = 0;
+    unsigned Arrived;
+
+    if (!OpenPair(&Stream.Client, &Stream.Server))
+    {
+        ok(0, "connection setup failed: %d\n", WSAGetLastError());
+        return;
+    }
+    Stream.Chunks = 16000;
+    Stream.Length = 0;
+    Stream.Done = 0;
+    Stream.SendError = Stream.ReceiveError = 0;
+    Stream.Data = HeapAlloc(GetProcessHeap(), 0, Stream.Chunks * CHUNK);
+    Seen = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Stream.Chunks * sizeof(BOOL));
+    Receiver = CreateThread(NULL, 0, StreamReceiver, &Stream, 0, NULL);
+    Sender = CreateThread(NULL, 0, ChunkSender, &Stream, 0, NULL);
+
+    while (!Stream.Done || WaitForSingleObject(Receiver, 0) != WAIT_OBJECT_0)
+    {
+        Size = Sizes[Sets % (sizeof(Sizes) / sizeof(Sizes[0]))];
+        if (setsockopt(Stream.Server, SOL_SOCKET, SO_RCVBUF, (char *)&Size, sizeof(Size)) != 0)
+            Failures++;
+        else if (GetBuffer(Stream.Server, SO_RCVBUF) != Size)
+            Mismatches++;
+        Sets++;
+        Sleep(0);
+    }
+    ok(WaitForSingleObject(Sender, 30000) == WAIT_OBJECT_0, "the sender did not finish\n");
+    trace("%lu size changes during %u chunks\n", Sets, Stream.Chunks);
+    ok(Failures == 0, "setsockopt failed %lu times\n", Failures);
+    ok(Mismatches == 0, "SO_RCVBUF did not read back the size just set %lu of %lu times\n", Mismatches, Sets);
+    ok(Stream.SendError == 0, "a send failed: %d\n", Stream.SendError);
+    ok(Stream.ReceiveError == 0, "a receive failed: %d\n", Stream.ReceiveError);
+    Arrived = CheckChunks(Stream.Data, Stream.Length, Seen, Stream.Chunks, "receive buffer, busy");
+    ok(Arrived == Stream.Chunks, "%u of %u chunks arrived\n", Arrived, Stream.Chunks);
+
+    CloseHandle(Sender);
+    CloseHandle(Receiver);
+    HeapFree(GetProcessHeap(), 0, Stream.Data);
+    HeapFree(GetProcessHeap(), 0, Seen);
+    closesocket(Stream.Client);
+    closesocket(Stream.Server);
+}
+
 static
 void
 Start(WSADATA *WsaData)
@@ -459,6 +513,15 @@ START_TEST(sndbuf)
 
     Start(&WsaData);
     TestSendBuffer();
+    WSACleanup();
+}
+
+START_TEST(rcvbufbusy)
+{
+    WSADATA WsaData;
+
+    Start(&WsaData);
+    TestReceiveBufferBusy();
     WSACleanup();
 }
 

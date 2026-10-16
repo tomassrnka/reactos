@@ -10,6 +10,51 @@
 
 #include "afd.h"
 
+/*
+ * Posts a receive into a wire buffer. The completion routine takes the buffer, and gives it back
+ * after copying the data out. Called with the lock held.
+ */
+NTSTATUS
+AfdPostReceive(PAFD_FCB FCB, BOOLEAN Datagram, UINT Length)
+{
+    PAFD_WIRE_BUFFER Wire;
+    NTSTATUS Status;
+
+    Length = MIN(Length, AFD_WIRE_MAX);
+    Wire = AfdAcquireWire(Length);
+    if (!Wire)
+        return STATUS_NO_MEMORY;
+
+    FCB->Recv.Wire = Wire;
+    if (Datagram)
+    {
+        Status = TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
+                                    FCB->AddressFile.Object,
+                                    0,
+                                    Wire->Data,
+                                    Length,
+                                    FCB->AddressFrom,
+                                    PacketSocketRecvComplete,
+                                    FCB);
+    }
+    else
+    {
+        Status = TdiReceive(&FCB->ReceiveIrp.InFlightRequest,
+                            FCB->Connection.Object,
+                            TDI_RECEIVE_NORMAL,
+                            Wire->Data,
+                            Length,
+                            ReceiveComplete,
+                            FCB);
+    }
+
+    /* A request that failed before the transport had it gets no completion; the buffer is still ours */
+    if (!NT_SUCCESS(Status) && (Wire = AfdTakeWire(&FCB->Recv)) != NULL)
+        AfdReleaseWire(Wire);
+
+    return Status;
+}
+
 static VOID RefillSocketBuffer( PAFD_FCB FCB )
 {
     /* Make sure nothing's in flight first */
@@ -44,16 +89,10 @@ static VOID RefillSocketBuffer( PAFD_FCB FCB )
 
     AFD_DbgPrint(MID_TRACE,("Replenishing buffer\n"));
 
-    TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
-                FCB->Connection.Object,
-                TDI_RECEIVE_NORMAL,
-                FCB->Recv.Window + FCB->Recv.Content,
-                FCB->Recv.Size - FCB->Recv.Content,
-                ReceiveComplete,
-                FCB );
+    AfdPostReceive(FCB, FALSE, FCB->Recv.Size - FCB->Recv.Content);
 }
 
-static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Information )
+static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Information, PAFD_WIRE_BUFFER Wire )
 {
     FCB->LastReceiveStatus = Status;
 
@@ -65,8 +104,14 @@ static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Info
     /* Receive successful */
     else if (Status == STATUS_SUCCESS)
     {
+        /* The window cannot change while a receive is in flight, so the data fits */
+        ASSERT(Wire && Information <= (ULONG_PTR)FCB->Recv.Size - FCB->Recv.Content);
+        if (Wire && Information)
+        {
+            Information = MIN(Information, (ULONG_PTR)FCB->Recv.Size - FCB->Recv.Content);
+            RtlCopyMemory(FCB->Recv.Window + FCB->Recv.Content, Wire->Data, Information);
+        }
         FCB->Recv.Content += Information;
-        ASSERT(FCB->Recv.Content <= FCB->Recv.Size);
 
         /* Check for graceful closure */
         if (Information == 0)
@@ -312,13 +357,17 @@ NTSTATUS NTAPI ReceiveComplete
     PIRP NextIrp;
     PAFD_RECV_INFO RecvReq;
     PIO_STACK_LOCATION NextIrpSp;
+    PAFD_WIRE_BUFFER Wire = AfdTakeWire(&FCB->Recv);
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
     AFD_DbgPrint(MID_TRACE,("Called\n"));
 
     if( !SocketAcquireStateLock( FCB ) )
+    {
+        if (Wire) AfdReleaseWire(Wire);
         return STATUS_FILE_CLOSED;
+    }
 
     ASSERT(FCB->ReceiveIrp.InFlightRequest == Irp);
     FCB->ReceiveIrp.InFlightRequest = NULL;
@@ -337,15 +386,18 @@ NTSTATUS NTAPI ReceiveComplete
             AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
+        if (Wire) AfdReleaseWire(Wire);
         SocketStateUnlock( FCB );
         return STATUS_FILE_CLOSED;
     } else if( FCB->SharedData.State == SOCKET_STATE_LISTENING ) {
         AFD_DbgPrint(MIN_TRACE,("!!! LISTENER GOT A RECEIVE COMPLETE !!!\n"));
+        if (Wire) AfdReleaseWire(Wire);
         SocketStateUnlock( FCB );
         return STATUS_INVALID_PARAMETER;
     }
 
-    HandleReceiveComplete( FCB, Irp->IoStatus.Status, Irp->IoStatus.Information );
+    HandleReceiveComplete( FCB, Irp->IoStatus.Status, Irp->IoStatus.Information, Wire );
+    if (Wire) AfdReleaseWire(Wire);
 
     ReceiveActivity( FCB, NULL );
 
@@ -397,14 +449,7 @@ RelaunchPacketReceive(PAFD_FCB FCB)
         return;
     }
 
-    TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
-                       FCB->AddressFile.Object,
-                       0,
-                       FCB->Recv.Window,
-                       FCB->Recv.Size,
-                       FCB->AddressFrom,
-                       PacketSocketRecvComplete,
-                       FCB);
+    AfdPostReceive(FCB, TRUE, FCB->Recv.Size);
 }
 
 static
@@ -666,11 +711,12 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return Status;
 }
 
-NTSTATUS NTAPI
-PacketSocketRecvComplete(
+static NTSTATUS
+PacketSocketRecvCompleteLocked(
         PDEVICE_OBJECT DeviceObject,
         PIRP Irp,
-        PVOID Context ) {
+        PVOID Context,
+        PAFD_WIRE_BUFFER Wire ) {
     NTSTATUS Status = STATUS_SUCCESS;
     PAFD_FCB FCB = Context;
     PIRP NextIrp;
@@ -744,9 +790,9 @@ PacketSocketRecvComplete(
                                          DGSize,
                                          TAG_AFD_STORED_DATAGRAM);
 
-    if( DatagramRecv ) {
+    if( DatagramRecv && Wire ) {
         DatagramRecv->Len = Irp->IoStatus.Information;
-        RtlCopyMemory( DatagramRecv->Buffer, FCB->Recv.Window,
+        RtlCopyMemory( DatagramRecv->Buffer, Wire->Data,
                        DatagramRecv->Len );
         AFD_DbgPrint(MID_TRACE,("Received (A %p)\n",
                                 FCB->AddressFrom->RemoteAddress));
@@ -826,6 +872,22 @@ PacketSocketRecvComplete(
     SocketStateUnlock( FCB );
 
     return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI
+PacketSocketRecvComplete(
+        PDEVICE_OBJECT DeviceObject,
+        PIRP Irp,
+        PVOID Context ) {
+    PAFD_FCB FCB = Context;
+    PAFD_WIRE_BUFFER Wire = AfdTakeWire(&FCB->Recv);
+    NTSTATUS Status;
+
+    Status = PacketSocketRecvCompleteLocked(DeviceObject, Irp, Context, Wire);
+    if (Wire)
+        AfdReleaseWire(Wire);
+
+    return Status;
 }
 
 NTSTATUS NTAPI
