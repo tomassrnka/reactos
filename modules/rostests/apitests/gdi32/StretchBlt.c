@@ -850,10 +850,113 @@ static void test_StretchBlt_TopDownOptions(BOOL SrcTopDown, BOOL DstTopDown)
     DeleteDC(hdcScreen);
 }
 
+static LRESULT CALLBACK
+UF30_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    PAINTSTRUCT ps;
+    if (msg == WM_PAINT) { BeginPaint(hwnd, &ps); EndPaint(hwnd, &ps); return 0; }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void UF30_Pump(void)
+{
+    MSG msg;
+    DWORD end = GetTickCount() + 60;
+    do
+    {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    } while ((LONG)(GetTickCount() - end) < 0);
+}
+
+static void test_StretchBlt_NegativeHeight(void)
+{
+    /* UF-30: a user-mode StretchBlt with a NEGATIVE destination height, the source and
+     * destination rectangles the same size (no scaling), used to bugcheck the kernel
+     * (PAGE_FAULT_IN_NONPAGED_AREA, memcpy <- DIB_32BPP_BitBltSrcCopy <- IntEngBitBlt <-
+     * IntEngStretchBlt). Reproduced on a real, visible top-level window with the mouse
+     * pointer over the blit area, matching how it was first found (scursor round 2);
+     * see modules/rostests/apitests/gdi32/BitBltPointer.c's removed DrawStretchFlipped. */
+    WNDCLASSW wc = {0};
+    HWND hwnd;
+    HDC hdcWnd, hdcSrc, hdcScreen;
+    HBITMAP hbmSrc, hbmOld;
+    BITMAPINFO bmi = {{sizeof(BITMAPINFOHEADER), 160, -120, 1, 32, BI_RGB}};
+    ULONG *pulSrc;
+    int x, y;
+
+    hdcScreen = GetDC(NULL);
+    if (GetDeviceCaps(hdcScreen, BITSPIXEL) < 24)
+    {
+        ReleaseDC(NULL, hdcScreen);
+        skip("UF-30: needs at least 24 bits per pixel\n");
+        return;
+    }
+    ReleaseDC(NULL, hdcScreen);
+
+    wc.lpfnWndProc = UF30_WndProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    wc.lpszClassName = L"UF30StretchBltNegHeightTest";
+    RegisterClassW(&wc);
+
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, L"UF30StretchBltNegHeightTest", L"UF-30",
+                           WS_POPUP | WS_VISIBLE, 120, 120, 160, 120, NULL, NULL, wc.hInstance, NULL);
+    if (!hwnd)
+    {
+        skip("UF-30: could not create a window\n");
+        return;
+    }
+    UF30_Pump();
+
+    /* Put the mouse pointer over the blit area, as in the original reproducer, and let the
+     * cursor subsystem actually register the move before drawing under it. */
+    SetCursorPos(120 + 80, 120 + 60);
+    UF30_Pump();
+    {
+        CURSORINFO ci = {sizeof(ci)};
+        GetCursorInfo(&ci);
+        ok((ci.flags & CURSOR_SHOWING) != 0, "UF-30: cursor is not showing (flags=%lx)\n", (unsigned long)ci.flags);
+    }
+
+    hdcWnd = GetDC(hwnd);
+    hdcSrc = CreateCompatibleDC(hdcWnd);
+    hbmSrc = CreateDIBSection(hdcWnd, &bmi, DIB_RGB_COLORS, (PVOID*)&pulSrc, NULL, 0);
+    hbmOld = SelectObject(hdcSrc, hbmSrc);
+
+    for (y = 0; y < 120; y++)
+        for (x = 0; x < 160; x++)
+            pulSrc[y * 160 + x] = 0xFF000000 | (y << 8) | x;
+
+    /* A plain blit over the pointer first: this is what lazily allocates win32k's mouse-pointer
+     * save/compose bitmaps (MouseSafetyOnDrawStart / IntShowMousePointer), which is what the
+     * flipped stretch below needs in place to reach the bugchecking path. */
+    BitBlt(hdcWnd, 0, 0, 160, 120, hdcSrc, 0, 0, SRCCOPY);
+
+    /* UF-30 reproducer, verbatim from the bug report */
+    StretchBlt(hdcWnd, 10, 110, 140, -100, hdcSrc, 10, 10, 140, 100, SRCCOPY);
+
+    /* If we got here, the kernel did not bugcheck. That is the regression test. */
+    ok(1, "UF-30: StretchBlt with a negative destination height did not bugcheck the kernel\n");
+
+    SelectObject(hdcSrc, hbmOld);
+    DeleteObject(hbmSrc);
+    DeleteDC(hdcSrc);
+    ReleaseDC(hwnd, hdcWnd);
+    DestroyWindow(hwnd);
+}
+
 START_TEST(StretchBlt)
 {
     trace("\n\n## Start of generalized StretchBlt tests.\n\n");
     test_StretchBlt();
+
+    trace("\n\n## Start of UF-30 negative destination height test.\n\n");
+    test_StretchBlt_NegativeHeight();
 
     trace("\n\n## Start of source top-down and destination top-down tests.\n\n");
     test_StretchBlt_TopDownOptions(TRUE, TRUE);
