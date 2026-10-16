@@ -498,7 +498,7 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_IN_FLIGHT_REQUEST InFlightRequest[IN_FLIGHT_REQUESTS];
     PAFD_TDI_OBJECT_QELT Qelt;
     PLIST_ENTRY QeltEntry;
-
+    PAFD_WIRE_BUFFER Wire;
 
     AFD_DbgPrint(MID_TRACE,("AfdClose(DeviceObject %p Irp %p)\n",
                             DeviceObject, Irp));
@@ -572,12 +572,24 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (FCB->Context)
         ExFreePoolWithTag(FCB->Context, TAG_AFD_SOCKET_CONTEXT);
 
-    AfdFreeWindow(&FCB->Recv);
+    /* Every request has completed and given its wire buffer back; this only guards a request that never ran */
+    if ((Wire = AfdTakeWire(&FCB->Recv)) != NULL)
+        AfdReleaseWire(Wire);
+    if ((Wire = AfdTakeWire(&FCB->Send)) != NULL)
+        AfdReleaseWire(Wire);
+
+    if (FCB->Recv.Window)
+        ExFreePoolWithTag(FCB->Recv.Window, TAG_AFD_DATA_BUFFER);
+    if (FCB->Recv.NewWindow)
+        ExFreePoolWithTag(FCB->Recv.NewWindow, TAG_AFD_DATA_BUFFER);
 
     if (FCB->RecvRelaunchWorkItem)
         IoFreeWorkItem(FCB->RecvRelaunchWorkItem);
 
-    AfdFreeWindow(&FCB->Send);
+    if (FCB->Send.Window)
+        ExFreePoolWithTag(FCB->Send.Window, TAG_AFD_DATA_BUFFER);
+    if (FCB->Send.NewWindow)
+        ExFreePoolWithTag(FCB->Send.NewWindow, TAG_AFD_DATA_BUFFER);
 
     if (FCB->AddressFrom)
         ExFreePoolWithTag(FCB->AddressFrom, TAG_AFD_TDI_CONNECTION_INFORMATION);
@@ -1470,6 +1482,8 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     {
         return Status;
     }
+
+    AfdInitWires();
 
     DeviceExt = DeviceObject->DeviceExtension;
     KeInitializeSpinLock( &DeviceExt->Lock );

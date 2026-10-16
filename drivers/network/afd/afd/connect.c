@@ -302,13 +302,7 @@ MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive) {
 
     if (Receive)
     {
-        Status = TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
-                            FCB->Connection.Object,
-                            TDI_RECEIVE_NORMAL,
-                            FCB->Recv.Window,
-                            FCB->Recv.Size,
-                            ReceiveComplete,
-                            FCB );
+        Status = AfdPostReceive(FCB, FALSE, FCB->Recv.Size);
 
         if( Status == STATUS_PENDING ) Status = STATUS_SUCCESS;
     }

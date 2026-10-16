@@ -148,21 +148,29 @@ typedef struct _AFD_IN_FLIGHT_REQUEST {
     PTDI_CONNECTION_INFORMATION ConnectionReturnInfo;
 } AFD_IN_FLIGHT_REQUEST, *PAFD_IN_FLIGHT_REQUEST;
 
-/* Replaced windows wait this many replacements before they are freed */
-#define AFD_RETIRED_WINDOWS 4
+/*
+ * The transport reads and writes a wire buffer, never a window: the I/O manager unlocks the MDL of a
+ * completed request after the completion routine has returned, so memory that a request has
+ * referenced is never freed. Wire buffers are recycled and stay allocated.
+ */
+typedef struct _AFD_WIRE_BUFFER {
+    LIST_ENTRY Link;
+    UINT Class;
+    PCHAR Data;
+} AFD_WIRE_BUFFER, *PAFD_WIRE_BUFFER;
+
+/* Largest transfer one request makes; a larger one takes several */
+#define AFD_WIRE_MAX 0x10000
 
 typedef struct _AFD_DATA_WINDOW {
+    /* The wire buffer of the request in flight, taken by whoever finishes with the request */
+    PAFD_WIRE_BUFFER Wire;
     PCHAR Window;
     UINT BytesUsed, Size, Content;
-    /* Bytes allocated at Window when that is more than Size after a shrink; 0 means Size */
-    UINT AllocSize;
-    /* A new size asked for while the transport held the window; 0 if none. NewWindow is its
-       allocation when it does not fit in the current one, so that a failure shows at once */
-    UINT NewSize;
+    /* Replacement window (NewSize bytes) allocated when a new size was asked for, put in place once
+       the transport no longer holds the window; NULL if none */
     PCHAR NewWindow;
-    /* Windows that were replaced; see AfdRetireWindow */
-    PCHAR Retired[AFD_RETIRED_WINDOWS];
-    UINT RetiredNext;
+    UINT NewSize;
 } AFD_DATA_WINDOW, *PAFD_DATA_WINDOW;
 
 typedef struct _AFD_STORED_DATAGRAM {
@@ -408,6 +416,10 @@ UINT AfdCancelStreamSend(PAFD_FCB FCB, PIRP Irp);
 NTSTATUS AfdRequestWindowResize(PAFD_DATA_WINDOW Data, UINT Size);
 BOOLEAN AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Offset, UINT Used);
 VOID AfdApplyRecvResize(PAFD_FCB FCB);
-VOID AfdFreeWindow(PAFD_DATA_WINDOW Data);
+VOID AfdInitWires(VOID);
+PAFD_WIRE_BUFFER AfdAcquireWire(UINT Length);
+VOID AfdReleaseWire(PAFD_WIRE_BUFFER Wire);
+PAFD_WIRE_BUFFER AfdTakeWire(PAFD_DATA_WINDOW Data);
+NTSTATUS AfdPostReceive(PAFD_FCB FCB, BOOLEAN Datagram, UINT Length);
 
 #endif /* _AFD_H */

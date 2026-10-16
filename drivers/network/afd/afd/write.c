@@ -172,7 +172,8 @@ static VOID
 AfdStartSend(PAFD_FCB FCB)
 {
     NTSTATUS Status;
-    UINT Completions;
+    UINT Completions, Length;
+    PAFD_WIRE_BUFFER Wire;
 
     if (FCB->SendStarting)
     {
@@ -186,18 +187,32 @@ AfdStartSend(PAFD_FCB FCB)
         FCB->SendRestart = FALSE;
         if (!FCB->SendIrp.InFlightRequest && FCB->Send.BytesUsed)
         {
+            Length = MIN(FCB->Send.BytesUsed, AFD_WIRE_MAX);
+            Wire = AfdAcquireWire(Length);
+            if (!Wire)
+            {
+                AfdFailSendQueue(FCB, STATUS_INSUFFICIENT_RESOURCES);
+                RetryDisconnectCompletion(FCB);
+                continue;
+            }
+
+            RtlCopyMemory(Wire->Data, FCB->Send.Window, Length);
+            FCB->Send.Wire = Wire;
+
             Completions = FCB->SendCompletions;
             Status = TdiSend(&FCB->SendIrp.InFlightRequest,
                              FCB->Connection.Object,
                              0,
-                             FCB->Send.Window,
-                             FCB->Send.BytesUsed,
+                             Wire->Data,
+                             Length,
                              SendComplete,
                              FCB);
 
             /* The request never reached the transport, so SendComplete will not run for it */
             if (!NT_SUCCESS(Status) && Completions == FCB->SendCompletions)
             {
+                if ((Wire = AfdTakeWire(&FCB->Send)) != NULL)
+                    AfdReleaseWire(Wire);
                 FCB->SendIrp.InFlightRequest = NULL;
                 AfdFailSendQueue(FCB, Status);
                 RetryDisconnectCompletion(FCB);
@@ -255,6 +270,7 @@ static NTSTATUS NTAPI SendComplete
     PLIST_ENTRY NextIrpEntry;
     PIRP NextIrp;
     UINT Sent, Taken, InWindow;
+    PAFD_WIRE_BUFFER Wire;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -272,6 +288,10 @@ static NTSTATUS NTAPI SendComplete
                             Irp->IoStatus.Information));
 
     FCB->SendCompletions++;
+
+    /* The I/O manager unlocks this buffer after the routine returns, so it is recycled and never freed */
+    if ((Wire = AfdTakeWire(&FCB->Send)) != NULL)
+        AfdReleaseWire(Wire);
 
     if( !SocketAcquireStateLock( FCB ) )
         return STATUS_FILE_CLOSED;

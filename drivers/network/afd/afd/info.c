@@ -32,11 +32,11 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     _SEH2_TRY {
         switch( InfoReq->InformationClass ) {
         case AFD_INFO_RECEIVE_WINDOW_SIZE:
-            InfoReq->Information.Ulong = FCB->Recv.NewSize ? FCB->Recv.NewSize : FCB->Recv.Size;
+            InfoReq->Information.Ulong = FCB->Recv.NewWindow ? FCB->Recv.NewSize : FCB->Recv.Size;
             break;
 
         case AFD_INFO_SEND_WINDOW_SIZE:
-            InfoReq->Information.Ulong = FCB->Send.NewSize ? FCB->Send.NewSize : FCB->Send.Size;
+            InfoReq->Information.Ulong = FCB->Send.NewWindow ? FCB->Send.NewSize : FCB->Send.Size;
             AFD_DbgPrint(MID_TRACE,("Send window size %u\n", FCB->Send.Size));
             break;
 
@@ -99,67 +99,30 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 }
 
 /*
- * The transport reads and writes a window through an MDL that the I/O manager unlocks only after
- * the completion routine has returned, so a replaced window is not freed at once, and not by the
- * routine that replaced it: it waits among the last AFD_RETIRED_WINDOWS replaced ones (the oldest
- * is freed when a newer one needs its place) and is freed with the socket.
- */
-static VOID
-AfdRetireWindow(PAFD_DATA_WINDOW Data, PCHAR Window)
-{
-    PCHAR *Slot = &Data->Retired[Data->RetiredNext++ % AFD_RETIRED_WINDOWS];
-
-    if (*Slot)
-        ExFreePoolWithTag(*Slot, TAG_AFD_DATA_BUFFER);
-    *Slot = Window;
-}
-
-VOID
-AfdFreeWindow(PAFD_DATA_WINDOW Data)
-{
-    UINT i;
-
-    if (Data->Window)
-        ExFreePoolWithTag(Data->Window, TAG_AFD_DATA_BUFFER);
-    if (Data->NewWindow)
-        ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
-    for (i = 0; i < AFD_RETIRED_WINDOWS; i++)
-    {
-        if (Data->Retired[i])
-            ExFreePoolWithTag(Data->Retired[i], TAG_AFD_DATA_BUFFER);
-    }
-}
-
-/*
- * A new window size is asked for. A size that fits in the memory the window already has only
- * changes Size once the transport lets go of the window; a bigger one gets its allocation now, so
- * that running out of memory fails the request. Asking for the current size cancels a request
- * that waits.
+ * A new window size is asked for: the replacement window is allocated now, so that running out of
+ * memory fails the request, and put in place by AfdApplyWindowResize once the transport does not
+ * hold the window. Asking for the current size cancels a request that waits.
  */
 NTSTATUS
 AfdRequestWindowResize(PAFD_DATA_WINDOW Data, UINT Size)
 {
-    UINT Allocated = Data->Window ? (Data->AllocSize ? Data->AllocSize : Data->Size) : 0;
-    PCHAR NewWindow = NULL;
+    PCHAR NewWindow;
 
-    if (Size == Data->Size || (Data->NewSize == Size && (Size <= Allocated || Data->NewWindow)))
+    if (Size == Data->Size)
     {
-        if (Size == Data->Size)
-        {
-            if (Data->NewWindow)
-                ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
-            Data->NewWindow = NULL;
-            Data->NewSize = 0;
-        }
+        if (Data->NewWindow)
+            ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
+        Data->NewWindow = NULL;
+        Data->NewSize = 0;
         return STATUS_SUCCESS;
     }
 
-    if (Data->Window && Size > Allocated)
-    {
-        NewWindow = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_DATA_BUFFER);
-        if (!NewWindow)
-            return STATUS_NO_MEMORY;
-    }
+    if (Data->NewWindow && Data->NewSize == Size)
+        return STATUS_SUCCESS;
+
+    NewWindow = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_DATA_BUFFER);
+    if (!NewWindow)
+        return STATUS_NO_MEMORY;
 
     if (Data->NewWindow)
         ExFreePoolWithTag(Data->NewWindow, TAG_AFD_DATA_BUFFER);
@@ -170,44 +133,37 @@ AfdRequestWindowResize(PAFD_DATA_WINDOW Data, UINT Size)
 }
 
 /*
- * Makes the size asked for the size of the window, with the Used bytes that start at Offset in
- * the old window at its start. The transport must not hold the window. A window too small for
- * the data keeps the request until the data has gone. Returns TRUE if the size changed.
+ * Puts the replacement window in place, keeping the Used bytes that start at Offset in the old
+ * one. No request references a window, only a wire buffer, so freeing the old one is safe; the callers
+ * still wait for the transport to be idle, because the size of a request in flight was set from the
+ * old size. A window too small for the data keeps the request until the data has gone. Returns TRUE
+ * if the window was replaced.
  */
 BOOLEAN
 AfdApplyWindowResize(PAFD_DATA_WINDOW Data, UINT Offset, UINT Used)
 {
-    if (!Data->NewSize || Used > Data->NewSize)
+    PCHAR OldWindow;
+
+    if (!Data->NewWindow || Used > Data->NewSize)
         return FALSE;
 
-    if (Data->Window)
-    {
-        if (!Data->AllocSize)
-            Data->AllocSize = Data->Size;
+    if (Used)
+        RtlCopyMemory(Data->NewWindow, Data->Window + Offset, Used);
 
-        if (Data->NewWindow)
-        {
-            if (Used)
-                RtlCopyMemory(Data->NewWindow, Data->Window + Offset, Used);
-            AfdRetireWindow(Data, Data->Window);
-            Data->Window = Data->NewWindow;
-            Data->AllocSize = Data->NewSize;
-            Data->NewWindow = NULL;
-        }
-        else if (Offset && Used)
-        {
-            RtlMoveMemory(Data->Window, Data->Window + Offset, Used);
-        }
-    }
-
+    OldWindow = Data->Window;
+    Data->Window = Data->NewWindow;
     Data->Size = Data->NewSize;
+    Data->NewWindow = NULL;
     Data->NewSize = 0;
+
+    if (OldWindow)
+        ExFreePoolWithTag(OldWindow, TAG_AFD_DATA_BUFFER);
 
     return TRUE;
 }
 
 /*
- * A stream socket keeps the unread data, at the start of the window; a datagram socket copies
+ * A stream socket keeps the unread data, at the start of the new window; a datagram socket copies
  * each datagram out of the window at once and has nothing to keep.
  */
 VOID
@@ -215,7 +171,7 @@ AfdApplyRecvResize(PAFD_FCB FCB)
 {
     UINT Offset = 0, Used = 0;
 
-    if (!FCB->Recv.NewSize)
+    if (!FCB->Recv.NewWindow)
         return;
 
     if (!(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
@@ -229,6 +185,74 @@ AfdApplyRecvResize(PAFD_FCB FCB)
         FCB->Recv.Content = Used;
         FCB->Recv.BytesUsed = 0;
     }
+}
+
+#define AFD_WIRE_SHIFT 10
+#define AFD_WIRE_CLASSES 7
+
+static KSPIN_LOCK AfdWireLock;
+static LIST_ENTRY AfdWireFree[AFD_WIRE_CLASSES];
+
+VOID
+AfdInitWires(VOID)
+{
+    UINT i;
+
+    KeInitializeSpinLock(&AfdWireLock);
+    for (i = 0; i < AFD_WIRE_CLASSES; i++)
+        InitializeListHead(&AfdWireFree[i]);
+}
+
+/* A wire buffer of at least Length bytes, which is at most AFD_WIRE_MAX */
+PAFD_WIRE_BUFFER
+AfdAcquireWire(UINT Length)
+{
+    PAFD_WIRE_BUFFER Wire;
+    PLIST_ENTRY Entry = NULL;
+    KIRQL OldIrql;
+    UINT Class = 0;
+
+    ASSERT(Length <= AFD_WIRE_MAX);
+    while (((UINT)1 << (AFD_WIRE_SHIFT + Class)) < Length)
+        Class++;
+
+    KeAcquireSpinLock(&AfdWireLock, &OldIrql);
+    if (!IsListEmpty(&AfdWireFree[Class]))
+        Entry = RemoveHeadList(&AfdWireFree[Class]);
+    KeReleaseSpinLock(&AfdWireLock, OldIrql);
+
+    if (Entry)
+        return CONTAINING_RECORD(Entry, AFD_WIRE_BUFFER, Link);
+
+    Wire = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Wire), TAG_AFD_DATA_BUFFER);
+    if (!Wire)
+        return NULL;
+
+    Wire->Class = Class;
+    Wire->Data = ExAllocatePoolWithTag(PagedPool, (SIZE_T)1 << (AFD_WIRE_SHIFT + Class), TAG_AFD_DATA_BUFFER);
+    if (!Wire->Data)
+    {
+        ExFreePoolWithTag(Wire, TAG_AFD_DATA_BUFFER);
+        return NULL;
+    }
+
+    return Wire;
+}
+
+VOID
+AfdReleaseWire(PAFD_WIRE_BUFFER Wire)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&AfdWireLock, &OldIrql);
+    InsertHeadList(&AfdWireFree[Wire->Class], &Wire->Link);
+    KeReleaseSpinLock(&AfdWireLock, OldIrql);
+}
+
+PAFD_WIRE_BUFFER
+AfdTakeWire(PAFD_DATA_WINDOW Data)
+{
+    return InterlockedExchangePointer((PVOID *)&Data->Wire, NULL);
 }
 
 NTSTATUS NTAPI
