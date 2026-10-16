@@ -194,6 +194,28 @@ PdoQueryCapabilities(
     return STATUS_SUCCESS;
 }
 
+/* Read the 16-bit PCI COMMAND register. Returns FALSE on a short transfer. */
+static BOOLEAN
+PdoReadPciCommand(PPDO_DEVICE_EXTENSION DeviceExtension, PUSHORT Command)
+{
+    return HalGetBusDataByOffset(PCIConfiguration,
+                                 DeviceExtension->PciDevice->BusNumber,
+                                 DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                                 Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command),
+                                 sizeof(*Command)) == sizeof(*Command);
+}
+
+/* Write the 16-bit PCI COMMAND register. Returns FALSE on a short transfer. */
+static BOOLEAN
+PdoWritePciCommand(PPDO_DEVICE_EXTENSION DeviceExtension, USHORT Command)
+{
+    return HalSetBusDataByOffset(PCIConfiguration,
+                                 DeviceExtension->PciDevice->BusNumber,
+                                 DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                                 &Command, FIELD_OFFSET(PCI_COMMON_CONFIG, Command),
+                                 sizeof(Command)) == sizeof(Command);
+}
+
 static BOOLEAN
 PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
               ULONG Offset,
@@ -227,6 +249,13 @@ PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
     if (Size != sizeof(ULONG))
     {
         DPRINT1("Wrong size %lu\n", Size);
+        /* The sentinel write may have partially landed; put the BAR back. */
+        HalSetBusDataByOffset(PCIConfiguration,
+                              DeviceExtension->PciDevice->BusNumber,
+                              DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                              OriginalValue,
+                              Offset,
+                              sizeof(ULONG));
         return FALSE;
     }
 
@@ -240,6 +269,14 @@ PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
     if (Size != sizeof(ULONG))
     {
         DPRINT1("Wrong size %lu\n", Size);
+        /* Never leave the BAR at the all-ones sentinel: device start re-enables
+         * decode from the cached COMMAND and would make that base live. */
+        HalSetBusDataByOffset(PCIConfiguration,
+                              DeviceExtension->PciDevice->BusNumber,
+                              DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
+                              OriginalValue,
+                              Offset,
+                              sizeof(ULONG));
         return FALSE;
     }
 
@@ -284,6 +321,8 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
     } NewValue;
     ULONG Offset;
     ULONGLONG Size;
+    USHORT SavedCommand = 0, Command;
+    BOOLEAN DecodeDisabled = FALSE;
 
     /* Compute the offset of this BAR in PCI config space */
     Offset = 0x10 + Bar * 4;
@@ -295,6 +334,34 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
     OriginalValue.Bar = 0ULL;
     NewValue.Bar = 0ULL;
 
+    /* The all-ones size probe transiently drives the BAR base to 0xFFFFFFFF..; with
+     * decode left enabled, a 64-bit BAR high-dword probe aliases an address above RAM
+     * and faults the host aperture mapping (a QEMU/KVM abort on any 64-bit BAR). Clear
+     * memory/I/O decode around the probe, as the PCI spec and Windows do. Endpoints
+     * (header type 0) only: a PCI-to-PCI bridge must keep decode on, it forwards to
+     * live devices behind it. Only act when decode is on. */
+    if (PCI_CONFIGURATION_TYPE(&DeviceExtension->PciDevice->PciConfig) == PCI_DEVICE_TYPE &&
+        PdoReadPciCommand(DeviceExtension, &SavedCommand) &&
+        (SavedCommand & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)))
+    {
+        USHORT Check;
+
+        /* Clear decode, then read COMMAND back and confirm it took: a successful
+         * config-write count does not prove the bits landed, and sizing with decode
+         * still on is exactly the host abort we are preventing. */
+        if (!PdoWritePciCommand(DeviceExtension,
+                                SavedCommand & ~(PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)) ||
+            !PdoReadPciCommand(DeviceExtension, &Check) ||
+            (Check & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE)))
+        {
+            DPRINT1("Failed to disable BAR decode before sizing; skipping BAR\n");
+            return FALSE;
+        }
+        DecodeDisabled = TRUE;
+    }
+
+    /* On a sizing failure below, PdoReadPciBar restores the BAR and we return with
+     * decode still off; it is reasserted from the cached COMMAND at device start. */
     /* Read the first BAR */
     if (!PdoReadPciBar(DeviceExtension, Offset,
                        &OriginalValue.Bars.Bar0,
@@ -344,6 +411,20 @@ PdoGetRangeLength(PPDO_DEVICE_EXTENSION DeviceExtension,
         if (MaximumAddress != NULL)
         {
             *MaximumAddress = 0x00000000FFFFFFFFULL;
+        }
+    }
+
+    /* Restore decode: OR back only the enables we cleared, preserving any other
+     * COMMAND bits a concurrent writer may have changed. */
+    if (DecodeDisabled)
+    {
+        if (!PdoReadPciCommand(DeviceExtension, &Command) ||
+            !PdoWritePciCommand(DeviceExtension,
+                                Command | (SavedCommand & (PCI_ENABLE_MEMORY_SPACE | PCI_ENABLE_IO_SPACE))))
+        {
+            /* Decode is reasserted from cached COMMAND at device start, but this
+             * must not pass silently. */
+            DPRINT1("Failed to restore BAR decode after sizing\n");
         }
     }
 
