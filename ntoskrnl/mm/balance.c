@@ -97,6 +97,9 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
     ULONG Target = InitialTarget;
     ULONG NrFreedPages = 0;
     NTSTATUS Status;
+    /* UF-22: snapshot once; the compare and the subtract below must see the same value, or a
+     * concurrent rise above the minimum underflows the unsigned subtraction into a giant target. */
+    ULONG Available = MmAvailablePages;
 
     /* Make sure we can trim this consumer */
     if (!MiMemoryConsumers[Consumer].Trim)
@@ -105,10 +108,10 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
         return InitialTarget;
     }
 
-    if (MmAvailablePages < MiMinimumAvailablePages)
+    if (Available < MiMinimumAvailablePages)
     {
         /* Global page limit exceeded */
-        Target = (ULONG)max(Target, MiMinimumAvailablePages - MmAvailablePages);
+        Target = (ULONG)max(Target, MiMinimumAvailablePages - Available);
     }
     else if (MiMemoryConsumers[Consumer].PagesUsed > MiMemoryConsumers[Consumer].PagesTarget)
     {
@@ -119,7 +122,7 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
     if (Target)
     {
         /* Now swap the pages out */
-        Status = MiMemoryConsumers[Consumer].Trim(Target, MmAvailablePages < MiMinimumAvailablePages, &NrFreedPages);
+        Status = MiMemoryConsumers[Consumer].Trim(Target, Available < MiMinimumAvailablePages, &NrFreedPages);
 
         DPRINT("Trimming consumer %lu: Freed %lu pages with a target of %lu pages\n", Consumer, NrFreedPages, Target);
 
@@ -424,7 +427,12 @@ MiBalancerThread(PVOID Unused)
                 }
 
                 /* Trim cache */
-                Target = max(InitialTarget, abs(MiMinimumAvailablePages - MmAvailablePages));
+                /* UF-22: snapshot MmAvailablePages once, then trim the cache only for the shortfall
+                 * below the minimum. abs() of the unsigned difference evicted the whole clean cache
+                 * every timer pass when memory was plentiful; reading MmAvailablePages twice (compare
+                 * then subtract) could also race a concurrent change and underflow into a giant target. */
+                ULONG Avail = MmAvailablePages;
+                Target = max(InitialTarget, Avail < MiMinimumAvailablePages ? MiMinimumAvailablePages - Avail : 0);
                 if (Target)
                 {
                     CcRosTrimCache(Target, &NrFreedPages);
