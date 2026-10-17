@@ -77,6 +77,12 @@ LoadStringA(
     HGLOBAL hMem;
     HRSRC hRsrc;
 
+    if (!lpBuffer)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
     hRsrc = FindResourceW(hInstance, STRING_BLOCK_NAME(uID), RESOURCE_TYPE_STRING);
     if (hRsrc && (hMem = LoadResource(hInstance, hRsrc)))
     {
