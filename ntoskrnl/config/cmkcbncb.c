@@ -1014,7 +1014,13 @@ CmpConstructName(IN PCM_KEY_CONTROL_BLOCK Kcb)
         if (Compressed)
             CmpCopyCompressedName(TargetBuffer + 1, ComponentLength, CurrentName, SourceLength);
         else
-            RtlCopyMemory(TargetBuffer + 1, CurrentName, ComponentLength);
+        {
+            /* Never read past the source, whatever the cached length says */
+            ULONG CopyLength = min(ComponentLength, SourceLength);
+
+            RtlCopyMemory(TargetBuffer + 1, CurrentName, CopyLength);
+            RtlZeroMemory((PUCHAR)(TargetBuffer + 1) + CopyLength, ComponentLength - CopyLength);
+        }
 
         /* Release the cell, if needed */
         if (KeyNode) HvReleaseCell(MyKcb->KeyHive, MyKcb->KeyCell);
