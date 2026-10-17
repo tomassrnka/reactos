@@ -98,6 +98,7 @@ static LONG profile_reg_create_open(HKEY hkey, const WCHAR *subkey, REGSAM acces
     memcpy(path, subkey, len);
 
     handle = NULL;
+    status = STATUS_SUCCESS;
     for (p = path; *p; p = next)
     {
         HANDLE created;
@@ -1504,8 +1505,9 @@ static void delete_key_values( HKEY key )
 
     while ((entry = enum_key( key, 0 )))
     {
-        RegDeleteValueW( key, entry );
+        LONG res = RegDeleteValueW( key, entry );
         HeapFree( GetProcessHeap(), 0, entry );
+        if (res) break;
     }
 }
 
