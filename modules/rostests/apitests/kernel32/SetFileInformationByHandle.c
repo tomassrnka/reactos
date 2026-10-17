@@ -293,12 +293,13 @@ static void Test_DispositionAndEndOfFile(void)
     Ret = pSetFileInformationByHandle(INVALID_HANDLE_VALUE, TestFileStandardInfo, &Disposition, sizeof(Disposition));
     ok(!Ret && GetLastError() == ERROR_INVALID_PARAMETER, "Got %d, error %lu\n", Ret, GetLastError());
 
-    /* the I/O priority hint is advisory: a valid one succeeds, a closed handle still fails */
+    /* the I/O priority hint is advisory: a valid one succeeds, a closed handle or an event still fails */
     File = OpenTestFile(L"g.txt", CREATE_ALWAYS);
     ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed: %lu\n", GetLastError());
     if (File != INVALID_HANDLE_VALUE)
     {
         DWORD PriorityHint = 2;
+        HANDLE Event = CreateEventW(NULL, TRUE, FALSE, NULL);
 
         Ret = pSetFileInformationByHandle(File, TestFileIoPriorityHintInfo, &PriorityHint, sizeof(PriorityHint));
         ok(Ret, "FileIoPriorityHintInfo failed: %lu\n", GetLastError());
@@ -307,8 +308,13 @@ static void Test_DispositionAndEndOfFile(void)
         SetLastError(0xdeadbeef);
         Ret = pSetFileInformationByHandle(File, TestFileIoPriorityHintInfo, &PriorityHint, sizeof(PriorityHint));
         ok(!Ret && GetLastError() == ERROR_INVALID_HANDLE, "Got %d, error %lu\n", Ret, GetLastError());
+
+        SetLastError(0xdeadbeef);
+        Ret = pSetFileInformationByHandle(Event, TestFileIoPriorityHintInfo, &PriorityHint, sizeof(PriorityHint));
+        ok(!Ret, "Event: got %d, error %lu\n", Ret, GetLastError());
+        if (Event)
+            CloseHandle(Event);
     }
-    DeleteFileW(L"g.txt");
 }
 
 START_TEST(SetFileInformationByHandle)

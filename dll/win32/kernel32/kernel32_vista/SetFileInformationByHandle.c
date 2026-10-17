@@ -146,12 +146,14 @@ SetFileInformationByHandle(
     Status = NtSetInformationFile(hFile, &IoStatusBlock, lpFileInformation, dwBufferSize, NtClass);
     if (Status == STATUS_INVALID_INFO_CLASS && FileInformationClass == FileIoPriorityHintInfo)
     {
-        DWORD HandleFlags;
+        FILE_FS_DEVICE_INFORMATION DeviceInfo;
 
-        /* The I/O manager checks the class before the handle */
-        if (!GetHandleInformation(hFile, &HandleFlags))
-            return FALSE;
-        Status = STATUS_SUCCESS;
+        /* The I/O manager checks the class before the handle: have it check for a file handle */
+        Status = NtQueryVolumeInformationFile(hFile,
+                                              &IoStatusBlock,
+                                              &DeviceInfo,
+                                              sizeof(DeviceInfo),
+                                              FileFsDeviceInformation);
     }
 
 Done:
