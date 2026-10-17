@@ -1106,6 +1106,23 @@ ContainsRegexMeta(const PATTERN *p)
     return FALSE;
 }
 
+/* A slash, letters, and then the end or a colon and a value: "/I", "/IS", "/C:text" but not "/logs/a.txt" */
+static BOOL
+LooksLikeSwitch(PCWSTR a)
+{
+    PCWSTR s = a + 1;
+
+    if (a[0] != L'/')
+        return FALSE;
+    if (!wcscmp(s, L"?"))
+        return TRUE;
+    if (!iswalpha(*s))
+        return FALSE;
+    while (iswalpha(*s))
+        s++;
+    return *s == UNICODE_NULL || *s == L':';
+}
+
 int wmain(int argc, WCHAR *argv[])
 {
     PCWSTR StringsFile = NULL, FilesFile = NULL;
@@ -1132,8 +1149,8 @@ int wmain(int argc, WCHAR *argv[])
     {
         PCWSTR a = argv[i];
 
-        /* Switches are only recognized before the first other argument */
-        if (PlainCount == 0 && (a[0] == L'/' || (a[0] == L'-' && a[1])))
+        /* After the first other argument only a slash switch counts, so a rooted path stays a file name */
+        if (PlainCount == 0 ? (a[0] == L'/' || (a[0] == L'-' && a[1])) : LooksLikeSwitch(a))
         {
             PCWSTR s = a + 1;
 
