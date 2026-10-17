@@ -69,6 +69,19 @@ _EqualStrings(PCWSTR pwszA, PCWSTR pwszB)
     return (wcscmp(pwszA, pwszB) == 0);
 }
 
+// Frees a job that is in no list and has no files yet, with whatever fields were filled in so far.
+static void
+_FreeUnlistedJob(PLOCAL_JOB pJob)
+{
+    DllFreeSplMem(pJob->pDevMode);
+    DllFreeSplStr(pJob->pwszDatatype);
+    DllFreeSplStr(pJob->pwszDocumentName);
+    DllFreeSplStr(pJob->pwszMachineName);
+    DllFreeSplStr(pJob->pwszNotifyName);
+    DllFreeSplStr(pJob->pwszUserName);
+    DllFreeSplMem(pJob);
+}
+
 static BOOL
 _GetNextJobID(PDWORD dwJobID)
 {
@@ -352,14 +365,6 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     {
         LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_PRINTER_DELETED;
-
-        // The job is in no list and has no files yet: free only its own memory (FreeJob would remove a job with the same ID).
-        DllFreeSplMem(pJob->pDevMode);
-        DllFreeSplStr(pJob->pwszDatatype);
-        DllFreeSplStr(pJob->pwszDocumentName);
-        DllFreeSplStr(pJob->pwszMachineName);
-        DllFreeSplStr(pJob->pwszNotifyName);
-        DllFreeSplStr(pJob->pwszUserName);
         goto Cleanup;
     }
 
@@ -395,8 +400,9 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     pJob = NULL;
 
 Cleanup:
+    // The job is in no list and has no files yet: free only its own memory (FreeJob would remove a job with the same ID).
     if (pJob)
-        DllFreeSplMem(pJob);
+        _FreeUnlistedJob(pJob);
 
     if (pwszMachineName)
         RpcStringFreeW(&pwszMachineName);
@@ -1010,6 +1016,14 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
         goto Cleanup;
     }
 
+    // Refuse a command that cannot be carried out before any change is applied.
+    if (Command && Command != JOB_CONTROL_SENT_TO_PRINTER)
+    {
+        ERR("Unimplemented SetJob Command: %lu!\n", Command);
+        dwErrorCode = ERROR_NOT_SUPPORTED;
+        goto Cleanup;
+    }
+
     // Set new job information if a valid level was given.
     if (Level == 1)
         dwErrorCode = _LocalSetJobLevel1(pPrinterHandle, pJob, (PJOB_INFO_1W)pJobInfo);
@@ -1029,26 +1043,18 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
     }
 
     // Perform an additional command if desired.
-    if (Command)
+    if (Command == JOB_CONTROL_SENT_TO_PRINTER)
     {
-        if (Command == JOB_CONTROL_SENT_TO_PRINTER)
-        {
-            // This indicates the end of the Print Job.
+        // This indicates the end of the Print Job.
 
-            // Cancel the Job at the Print Processor.
-            if (pJob->hPrintProcessor)
-                pJob->pPrintProcessor->pfnControlPrintProcessor(pJob->hPrintProcessor, JOB_CONTROL_CANCEL);
+        // Cancel the Job at the Print Processor.
+        if (pJob->hPrintProcessor)
+            pJob->pPrintProcessor->pfnControlPrintProcessor(pJob->hPrintProcessor, JOB_CONTROL_CANCEL);
 
-            FreeJob(pJob);
+        FreeJob(pJob);
 
-            // TODO: All open handles associated with the job need to be invalidated.
-            // This certainly needs handle tracking...
-        }
-        else
-        {
-            ERR("Unimplemented SetJob Command: %lu!\n", Command);
-            dwErrorCode = ERROR_NOT_SUPPORTED;
-        }
+        // TODO: All open handles associated with the job need to be invalidated.
+        // This certainly needs handle tracking...
     }
 
 Cleanup:
