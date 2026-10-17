@@ -689,6 +689,11 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
     if (Append)
         Offset.QuadPart = Fcb->Header.FileSize.QuadPart;
+    if (Offset.QuadPart > MAXLONGLONG - (LONGLONG)Length)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto out_unlock;
+    }
     End = Offset.QuadPart + Length;
     OldSize = Fcb->Header.FileSize.QuadPart;
     if (End > Fcb->Header.FileSize.QuadPart)
@@ -875,8 +880,8 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PLIST_ENTRY Entry;
-    PNG_VCB Vcbs[16];
-    ULONG Count = 0, i;
+    PNG_VCB Local[16], *Vcbs = Local, *Heap = NULL;
+    ULONG Count = 0, Cap = RTL_NUMBER_OF(Local), Live = 0, Skipped = 0, i;
     unsigned long Writes, Syncs, Dirties;
     unsigned long long Bytes;
     UNREFERENCED_PARAMETER(DeviceObject);
@@ -885,14 +890,35 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     /* A VCB is never freed after its mount, so the pointers stay valid outside the list lock; a
      * dismount is waited for (create gate) and its volume skipped. */
     ExAcquireFastMutex(&NgGlobal.VcbListLock);
-    for (Entry = NgGlobal.VcbList.Flink; Entry != &NgGlobal.VcbList && Count < RTL_NUMBER_OF(Vcbs); Entry = Entry->Flink)
+    for (Entry = NgGlobal.VcbList.Flink; Entry != &NgGlobal.VcbList; Entry = Entry->Flink)
+        if (!CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks)->WrongMedia)
+            Live++;
+    ExReleaseFastMutex(&NgGlobal.VcbListLock);
+    if (Live > Cap)
+    {
+        /* Room for a volume that mounts between the count and the snapshot. */
+        Heap = ExAllocatePoolWithTag(PagedPool, (Live + 8) * sizeof(PNG_VCB), TAG_NTFSNG);
+        if (Heap)
+        {
+            Vcbs = Heap;
+            Cap = Live + 8;
+        }
+    }
+    ExAcquireFastMutex(&NgGlobal.VcbListLock);
+    for (Entry = NgGlobal.VcbList.Flink; Entry != &NgGlobal.VcbList; Entry = Entry->Flink)
     {
         /* Volumes whose medium went away stay listed: they must not take the slots of live ones. */
         PNG_VCB V = CONTAINING_RECORD(Entry, NG_VCB, GlobalLinks);
-        if (!V->WrongMedia)
+        if (V->WrongMedia)
+            continue;
+        if (Count < Cap)
             Vcbs[Count++] = V;
+        else
+            Skipped++;
     }
     ExReleaseFastMutex(&NgGlobal.VcbListLock);
+    if (Skipped)
+        DPRINT1("ntfsng: shutdown: %lu volumes not flushed (no room for them)\n", Skipped);
     for (i = 0; i < Count; i++)
     {
         PNG_VCB Vcb = Vcbs[i];
@@ -918,6 +944,8 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgPrintLockStats(Vcb);
         ExReleaseResourceLite(&Vcb->CreateGate);
     }
+    if (Heap)
+        ExFreePoolWithTag(Heap, TAG_NTFSNG);
     ngc_write_stats(&Writes, &Bytes, &Syncs, &Dirties);
     DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs, %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",
             Writes, Bytes, Syncs, Dirties, NgGlobal.MaxStackUsed, NgGlobal.MaxStackMajor, NgGlobal.MaxStackAtIo);

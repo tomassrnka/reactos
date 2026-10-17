@@ -2828,7 +2828,6 @@ end4:
                     if (!NT_SUCCESS(Status)) {
                         ERR("write_data_phys returned %08lx\n", Status);
                         log_device_error(Vcb, c->devices[i], BTRFS_DEV_STAT_WRITE_ERRS);
-                        goto end3;
                     }
                 }
             }
@@ -2838,7 +2837,6 @@ end4:
             break;
     } while (stripe < stripe_end);
 
-end3:
     chunk_unlock_range(Vcb, c, run_start, run_end - run_start);
 
 end2:
@@ -2871,6 +2869,13 @@ static NTSTATUS scrub_chunk_raid56(device_extension* Vcb, chunk* c, uint64_t* of
     bool b;
     uint64_t full_stripe_len, stripe, stripe_start = 0, stripe_end = 0, total_data = 0;
     ULONG num_extents = 0, num_parity_stripes = c->chunk_item->type & BTRFS_BLOCK_GROUP_RAID6 ? 2 : 1;
+
+    // stripe_len comes from the disk: the run below reads 1 MB at a time in whole stripes
+    if (c->chunk_item->stripe_len < Vcb->superblock.sectorsize || c->chunk_item->stripe_len > 1048576 ||
+        (c->chunk_item->stripe_len & (Vcb->superblock.sectorsize - 1)) || c->chunk_item->num_stripes <= num_parity_stripes) {
+        ERR("chunk %I64x has an unusable stripe_len %I64x or stripe count %u\n", c->offset, c->chunk_item->stripe_len, c->chunk_item->num_stripes);
+        return STATUS_INTERNAL_ERROR;
+    }
 
     full_stripe_len = (c->chunk_item->num_stripes - num_parity_stripes) * c->chunk_item->stripe_len;
     stripe = (*offset - c->offset) / full_stripe_len;

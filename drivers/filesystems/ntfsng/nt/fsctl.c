@@ -325,6 +325,8 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Err)
     {
         DPRINT1("ntfsng: fs/ntfs refused the volume (%d), leaving it to other file systems\n", Err);
+        FsRtlNotifyUninitializeSync(&Vcb->NotifySync);
+        FsRtlDeleteTunnelCache(&Vcb->Tunnel);
         ExDeleteResourceLite(&Vcb->CoreLock);
         ExDeleteResourceLite(&Vcb->CreateGate);
         IoDeleteDevice(Vdo);
@@ -1021,7 +1023,7 @@ static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, 
         Status = STATUS_IO_REPARSE_DATA_INVALID;
     else if (Err)
         Status = NgErrnoToStatus(Err);
-    if (Code != FSCTL_GET_REPARSE_POINT)
+    if (Code != FSCTL_GET_REPARSE_POINT && Fcb->Node)
     {
         /* Also after a failure: a failed replace may have removed the old reparse point. */
         ngc_stat(Fcb->Node, &Fcb->Stat);

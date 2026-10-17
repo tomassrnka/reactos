@@ -1083,7 +1083,9 @@ static void drive_letter_callback2(pdo_device_extension* pdode, PDEVICE_OBJECT m
             volume_child* vc = CONTAINING_RECORD(le, volume_child, list_entry);
 
             if (RtlCompareMemory(&vc->uuid, &dlr->uuid, BTRFS_UUID_SIZE) == BTRFS_UUID_SIZE) {
-                vc->had_drive_letter = NT_SUCCESS(dlr->Status);
+                // a repeated handoff finds the letter already gone and must not forget it was there
+                if (NT_SUCCESS(dlr->Status))
+                    vc->had_drive_letter = true;
                 break;
             }
 

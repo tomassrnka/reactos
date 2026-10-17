@@ -725,8 +725,16 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 
     /* Absolute path from the volume root, built from the related open if any. */
-    Full.MaximumLength = Name->Length + sizeof(WCHAR) * 2 +
-                         (RelatedCcb ? RelatedCcb->Path.Length : 0);
+    {
+        ULONG FullMax = (ULONG)Name->Length + sizeof(WCHAR) * 2 + (RelatedCcb ? RelatedCcb->Path.Length : 0);
+        if (FullMax > MAXUSHORT)
+        {
+            if (ById.Buffer)
+                ExFreePoolWithTag(ById.Buffer, TAG_NTFSNG);
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+        Full.MaximumLength = (USHORT)FullMax;
+    }
     Full.Buffer = ExAllocatePoolWithTag(PagedPool, Full.MaximumLength, TAG_NTFSNG);
     Real = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
     if (!Full.Buffer || !Real)
@@ -753,7 +761,11 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             RtlAppendUnicodeToString(&Full, L"\\");
         RelatedChars = Full.Length / sizeof(WCHAR);
     }
-    RtlAppendUnicodeStringToString(&Full, Name);
+    if (!NT_SUCCESS(RtlAppendUnicodeStringToString(&Full, Name)))
+    {
+        Status = STATUS_OBJECT_NAME_INVALID;
+        goto out;
+    }
     if (Full.Length == 0 || Full.Buffer[0] != L'\\')
     {
         Status = STATUS_OBJECT_NAME_INVALID;
