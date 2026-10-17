@@ -219,7 +219,9 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
     KEVENT Event;
     PIRP Irp;
     NTSTATUS Status;
+#if DBG
     ULONGLONG T0 = __rdtsc();
+#endif
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     Offset.QuadPart = (LONGLONG)off;
@@ -253,9 +255,11 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
         Irp->MdlAddress = NULL;
     }
     IoFreeIrp(Irp);
+#if DBG
     ngos_prof(Major == IRP_MJ_READ ? NGP_DEV_READ : Major == IRP_MJ_WRITE ? NGP_DEV_WRITE : NGP_DEV_FLUSH, T0,
               Major == IRP_MJ_FLUSH_BUFFERS ? 0 : len);
     NgStackSample();
+#endif
     if (!NT_SUCCESS(Status))
     {
         /*

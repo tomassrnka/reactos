@@ -1017,8 +1017,8 @@ static NTSTATUS NgShrinkVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
         return Status;
     if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(*Info) || !Info)
         return STATUS_INVALID_PARAMETER;
-    if (Info->ShrinkRequestType == ShrinkCommit)
 #if DBG
+    if (Info->ShrinkRequestType == ShrinkCommit)
         NgArmResizeFault();
 #endif
     NgAcquireCore(Vcb);
@@ -1289,6 +1289,9 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         {
             /* Diagnostic: a snapshot of the CoreLock statistics (benchmark tools diff two). */
             ULONG Out = Stack->Parameters.FileSystemControl.OutputBufferLength;
+            /* A volume handle with manage-volume (administrator) authority only. */
+            if (!Fcb || !Fcb->IsVolume || !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+                return STATUS_ACCESS_DENIED;
             if (!Irp->AssociatedIrp.SystemBuffer || Out < sizeof(NG_LOCK_STATS))
                 return STATUS_BUFFER_TOO_SMALL;
             NgAcquireCore(Vcb);
@@ -1303,6 +1306,9 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         {
             /* Diagnostic: a snapshot of the time per stage (benchmark tools diff two). */
             ULONG Out = Stack->Parameters.FileSystemControl.OutputBufferLength;
+            /* A volume handle with manage-volume (administrator) authority only. */
+            if (!Fcb || !Fcb->IsVolume || !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+                return STATUS_ACCESS_DENIED;
             if (!Irp->AssociatedIrp.SystemBuffer || Out < sizeof(NG_PROFILE))
                 return STATUS_BUFFER_TOO_SMALL;
             NgProfile.Version = 1;

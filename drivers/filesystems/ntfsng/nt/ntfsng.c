@@ -203,6 +203,7 @@ static VOID NgStackScan(ULONG_PTR Low, UCHAR Major)
 #endif
 }
 
+#if DBG
 VOID NgStackSample(VOID)
 {
     ULONG_PTR Low, High, Here = (ULONG_PTR)&Low;
@@ -213,6 +214,7 @@ VOID NgStackSample(VOID)
         DPRINT1("ntfsng: stack: core at device read %lu bytes deep\n", NgGlobal.MaxStackAtIo);
     }
 }
+#endif
 
 PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
 {
