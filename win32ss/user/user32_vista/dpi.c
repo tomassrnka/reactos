@@ -635,19 +635,25 @@ typedef struct _DPI_WINDOW
 } DPI_WINDOW;
 
 static DPI_WINDOW *g_DpiWindows[DPI_WINDOW_BUCKETS];
-static LONG g_DpiWindowsLock;
+static CRITICAL_SECTION g_DpiWindowsLock;
+static CRITICAL_SECTION_DEBUG g_DpiWindowsLockDebug =
+{
+    0, 0, &g_DpiWindowsLock,
+    { &g_DpiWindowsLockDebug.ProcessLocksList, &g_DpiWindowsLockDebug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": g_DpiWindowsLock") }
+};
+static CRITICAL_SECTION g_DpiWindowsLock = { &g_DpiWindowsLockDebug, -1, 0, 0, 0, 0 };
 
 static VOID
 DpiWindowsLock(VOID)
 {
-    while (InterlockedExchange(&g_DpiWindowsLock, 1))
-        SwitchToThread();
+    EnterCriticalSection(&g_DpiWindowsLock);
 }
 
 static VOID
 DpiWindowsUnlock(VOID)
 {
-    InterlockedExchange(&g_DpiWindowsLock, 0);
+    LeaveCriticalSection(&g_DpiWindowsLock);
 }
 
 static BOOL GetWindowContextValue(HWND hWnd, PULONG Context, PBOOL Created);
