@@ -58,6 +58,10 @@ LoadStringW(
         return *p;
     }
 
+    /* A negative size would wrap the unsigned copy length; match Windows and Wine by copying nothing */
+    if (nBufferMax < 0)
+        return 0;
+
     i = min(nBufferMax - 1, *p);
     memcpy(lpBuffer, p + 1, i * sizeof(WCHAR));
     lpBuffer[i] = 0;
@@ -98,6 +102,10 @@ LoadStringA(
         lpBuffer[0] = 0;
         return 0;
     }
+
+    /* A negative size would wrap the unsigned byte count; match Windows by copying nothing */
+    if (nBufferMax < 0)
+        return 0;
 
     if (p)
         RtlUnicodeToMultiByteN(lpBuffer, nBufferMax - 1, &Length, p + 1, *p * sizeof(WCHAR));

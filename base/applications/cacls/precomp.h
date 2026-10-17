@@ -8,5 +8,6 @@
 #include <sddl.h>
 
 #include <conutils.h>
+#include <strsafe.h>
 
 #include "resource.h"

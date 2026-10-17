@@ -372,7 +372,8 @@ GetPathOfFile(LPTSTR FilePath, LPCTSTR pszFiles)
     LPTSTR pch;
     DWORD attrs;
 
-    _tcsncpy(FilePath, pszFiles, MAX_PATH);
+    /* _tcsncpy leaves the buffer unterminated when the path fills it; bound and terminate */
+    StringCchCopy(FilePath, MAX_PATH, pszFiles);
     pch = _tcsrchr(FilePath, _T('\\'));
     if (pch != NULL)
     {
