@@ -811,7 +811,13 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     /* The system reports 5.2 and provides the Windows 7 platform: packages see Windows 7, unless a Windows Server 2003
        compatibility layer (the only version layers that also say 5.2) was chosen */
     if (verval == 502 && OSVersion.dwBuildNumber == 3790 && !msi_has_server2003_layer())
+    {
+        /* build and service pack of the Windows 7 SP1 platform, so that they agree with VersionNT */
         verval = 601;
+        OSVersion.dwBuildNumber = 7601;
+        OSVersion.wServicePackMajor = 1;
+        OSVersion.wServicePackMinor = 0;
+    }
     if (verval > 603)
     {
         verval = 603;

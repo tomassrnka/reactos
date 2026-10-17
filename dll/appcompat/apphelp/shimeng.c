@@ -510,16 +510,15 @@ static VOID SeiBuildShimRefArray(HSDB hsdb, SDBQUERYRESULT* pQuery, PARRAY pShim
             while (ShimRef != TAGID_NULL)
             {
                 TAGREF trShimRef;
-                BOOL Skip = FALSE;
+                BOOL IsLie = SeiIsVersionLie(pdb, ShimRef);
 
-                if (SeiIsVersionLie(pdb, ShimRef))
+                /* A lie that cannot be resolved must not keep the next one from applying */
+                if (!(IsLie && HaveVersionLie) && SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
                 {
-                    Skip = HaveVersionLie;
-                    HaveVersionLie = TRUE;
-                }
-
-                if (!Skip && SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
                     SeiAddShim(trShimRef, pShimRef);
+                    if (IsLie)
+                        HaveVersionLie = TRUE;
+                }
 
                 ShimRef = SdbFindNextTag(pdb, tag, ShimRef);
             }
@@ -560,16 +559,15 @@ static VOID SeiBuildShimRefArray(HSDB hsdb, SDBQUERYRESULT* pQuery, PARRAY pShim
             while (ShimRef != TAGID_NULL)
             {
                 TAGREF trShimRef;
-                BOOL Skip = FALSE;
+                BOOL IsLie = SeiIsVersionLie(pdb, ShimRef);
 
-                if (SeiIsVersionLie(pdb, ShimRef))
+                /* A lie that cannot be resolved must not keep the next one from applying */
+                if (!(IsLie && HaveVersionLie) && SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
                 {
-                    Skip = HaveVersionLie;
-                    HaveVersionLie = TRUE;
-                }
-
-                if (!Skip && SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
                     SeiAddShim(trShimRef, pShimRef);
+                    if (IsLie)
+                        HaveVersionLie = TRUE;
+                }
 
                 ShimRef = SdbFindNextTag(pdb, tag, ShimRef);
             }
