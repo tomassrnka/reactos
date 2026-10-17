@@ -145,7 +145,14 @@ SetFileInformationByHandle(
 
     Status = NtSetInformationFile(hFile, &IoStatusBlock, lpFileInformation, dwBufferSize, NtClass);
     if (Status == STATUS_INVALID_INFO_CLASS && FileInformationClass == FileIoPriorityHintInfo)
+    {
+        DWORD HandleFlags;
+
+        /* The I/O manager checks the class before the handle */
+        if (!GetHandleInformation(hFile, &HandleFlags))
+            return FALSE;
         Status = STATUS_SUCCESS;
+    }
 
 Done:
     if (!NT_SUCCESS(Status))
