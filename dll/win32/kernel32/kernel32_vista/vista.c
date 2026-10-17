@@ -898,7 +898,8 @@ FormatUILanguages(
     ULONG i, Written = 0, Needed = 1;
     PWSTR Out;
 
-    if (*pcchLanguagesBuffer && !pwszLanguagesBuffer)
+    if (!pulNumLanguages || !pcchLanguagesBuffer ||
+        (*pcchLanguagesBuffer && !pwszLanguagesBuffer))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -1008,7 +1009,10 @@ GetThreadPreferredUILanguages(
     UI_LANGUAGE_LIST List;
 
     List.Count = 0;
-    if ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME))
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_MERGE_SYSTEM_FALLBACK |
+                     MUI_MERGE_USER_FALLBACK | MUI_THREAD_LANGUAGES |
+                     MUI_CONSOLE_FILTER | MUI_COMPLEX_SCRIPT_FILTER)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
