@@ -75,6 +75,7 @@ static BOOL OutIsConsole;
 static WORD DefaultAttributes;
 static BOOL ShowNames = FALSE;
 static BOOL AnyMatch = FALSE;
+static BOOL HadError = FALSE;
 static UCHAR UpperTable[256];
 static UCHAR LowerTable[256];
 static USHORT Collation[256];
@@ -746,6 +747,14 @@ SearchHandle(HANDLE hFile, PCWSTR Name)
     return Result;
 }
 
+/* Reports a file that cannot be opened or read; the exit code then tells it from "no match" */
+static VOID
+CannotOpen(PCWSTR Name)
+{
+    HadError = TRUE;
+    Message(IDS_CANNOT_OPEN, Name);
+}
+
 /* Opens and searches one file; returns FALSE if it cannot be opened or read */
 static BOOL
 SearchFile(PCWSTR Path, PCWSTR DisplayName)
@@ -822,7 +831,7 @@ SearchMask(PCWSTR Base, PCWSTR Dir, PCWSTR Mask)
                 Shown = JoinPath(Dir, Data.cFileName);
                 Path = JoinPath(Base, Shown);
                 if (!SearchFile(Path, Shown))
-                    Message(IDS_CANNOT_OPEN, Shown);
+                    CannotOpen(Shown);
                 HeapFree(GetProcessHeap(), 0, Path);
                 HeapFree(GetProcessHeap(), 0, Shown);
                 continue;
@@ -874,7 +883,7 @@ SearchMask(PCWSTR Base, PCWSTR Dir, PCWSTR Mask)
                     Shown = JoinPath(Dir, Data.cFileName);
                     Path = JoinPath(Base, Shown);
                     if (!SearchFile(Path, Shown))
-                        Message(IDS_CANNOT_OPEN, Shown);
+                        CannotOpen(Shown);
                     HeapFree(GetProcessHeap(), 0, Path);
                     HeapFree(GetProcessHeap(), 0, Shown);
                     free(Matches[k]);
@@ -911,7 +920,7 @@ SearchSpec(PCWSTR Base, PCWSTR Spec)
              ((Attributes & FILE_ATTRIBUTE_OFFLINE) && !Opt.Offline)))
             ;
         else if (!SearchFile(Path, Spec))
-            Message(IDS_CANNOT_OPEN, Spec);
+            CannotOpen(Spec);
         HeapFree(GetProcessHeap(), 0, Path);
         return;
     }
@@ -939,7 +948,7 @@ SearchSpec(PCWSTR Base, PCWSTR Spec)
 
     /* With /S a file argument that matches nothing is not an error */
     if (!SearchMask(Base, Dir, Mask) && !Opt.SubDirs)
-        Message(IDS_CANNOT_OPEN, Spec);
+        CannotOpen(Spec);
 
     HeapFree(GetProcessHeap(), 0, Dir);
 }
@@ -1303,7 +1312,7 @@ int wmain(int argc, WCHAR *argv[])
             Message(IDS_CANNOT_READ_INPUT);
             return Finish(2);
         }
-        return Finish(AnyMatch ? 0 : 1);
+        return Finish(AnyMatch ? 0 : (HadError ? 2 : 1));
     }
 
     ShowNames = (Files->Next != NULL) || Opt.SubDirs || HasWildcards(Files->Name) || FileListCount;
@@ -1325,7 +1334,7 @@ int wmain(int argc, WCHAR *argv[])
             SearchSpec(L"", n->Name);
     }
 
-    return Finish(AnyMatch ? 0 : 1);
+    return Finish(AnyMatch ? 0 : (HadError ? 2 : 1));
 }
 
 /* EOF */
