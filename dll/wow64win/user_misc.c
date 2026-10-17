@@ -42,19 +42,20 @@ static NTSTATUS BuildPropList(ULONG *a)
     DWORD Needed = 0, Items = 0, Capacity, i;
     NTSTATUS Status;
 
-    if (a[3]) ProbeOutput(a[3], sizeof(ULONG));
     if (!a[1])
     {
         Status = NtUserBuildPropList(H(0), NULL, 0, &Needed);
         if (NT_SUCCESS(Status) && a[3])
+        {
+            ProbeOutput(a[3], sizeof(ULONG));
             *(ULONG *)P(3) = Needed / sizeof(PROPLISTITEM) * sizeof(PROPLIST32);
+        }
         return Status;
     }
     /* The native service validates the window before the size. */
     Status = NtUserBuildPropList(H(0), NULL, 0, &Needed);
     if (!NT_SUCCESS(Status)) return Status;
     if (!a[2] || a[2] % sizeof(PROPLIST32)) return STATUS_INVALID_PARAMETER;
-    ProbeOutput(a[1], a[2]);
     Capacity = min(a[2] / sizeof(PROPLIST32), Needed / sizeof(PROPLISTITEM));
     if (!Capacity) Capacity = 1;
     List = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Capacity * sizeof(*List));
@@ -65,13 +66,14 @@ static NTSTATUS BuildPropList(ULONG *a)
         if (NT_SUCCESS(Status))
         {
             Items = min(Items, Capacity);
+            ProbeOutput(a[1], Items * sizeof(PROPLIST32));
             for (i = 0; i < Items; ++i)
             {
                 Out[i].Atom = List[i].Atom;
                 Out[i].Reserved = 0;
                 Out[i].Data = HandleToUlong(List[i].Data);
             }
-            if (a[3]) *(ULONG *)P(3) = Items;
+            if (a[3]) { ProbeOutput(a[3], sizeof(ULONG)); *(ULONG *)P(3) = Items; }
         }
     }
     _SEH2_FINALLY { RtlFreeHeap(RtlGetProcessHeap(), 0, List); }
@@ -90,22 +92,43 @@ static NTSTATUS ConsoleControl(ULONG *a)
         DESKTOP_CONSOLE_THREAD Info = {0};
         ULONG *Guest = P(1);
         NTSTATUS Status;
+        BOOLEAN Readable = FALSE;
         if (a[2] != 2 * sizeof(ULONG)) return NtUserConsoleControl(a[0], NULL, 0);
-        if (!a[1]) return NtUserConsoleControl(a[0], NULL, sizeof(Info));
-        ProbeOutput(a[1], a[2]);
-        Info.DesktopHandle = H32(Guest[0]);
-        Info.ThreadId = Guest[1] == MAXULONG ? (ULONG_PTR)INVALID_HANDLE_VALUE : Guest[1];
+        if (a[1])
+        {
+            _SEH2_TRY
+            {
+                ProbeOutput(a[1], a[2]);
+                Info.DesktopHandle = H32(Guest[0]);
+                Info.ThreadId = Guest[1] == MAXULONG ? (ULONG_PTR)INVALID_HANDLE_VALUE : Guest[1];
+                Readable = TRUE;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { }
+            _SEH2_END;
+        }
+        /* An unreadable payload goes native as NULL so the access check still decides first. */
+        if (!Readable) return NtUserConsoleControl(a[0], NULL, sizeof(Info));
         Status = NtUserConsoleControl(a[0], &Info, sizeof(Info));
         if (NT_SUCCESS(Status)) Guest[1] = (ULONG)Info.ThreadId;
         return Status;
     }
     case ConsoleMakePalettePublic:
     {
-        HPALETTE Palette;
+        HPALETTE Palette = NULL;
+        BOOLEAN Readable = FALSE;
         if (a[2] != sizeof(ULONG)) return NtUserConsoleControl(a[0], NULL, 0);
-        if (!a[1]) return NtUserConsoleControl(a[0], NULL, sizeof(Palette));
-        ProbeInput(a[1], sizeof(ULONG));
-        Palette = P32(*(ULONG *)P(1));
+        if (a[1])
+        {
+            _SEH2_TRY
+            {
+                ProbeInput(a[1], sizeof(ULONG));
+                Palette = P32(*(ULONG *)P(1));
+                Readable = TRUE;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { }
+            _SEH2_END;
+        }
+        if (!Readable) return NtUserConsoleControl(a[0], NULL, sizeof(Palette));
         return NtUserConsoleControl(a[0], &Palette, sizeof(Palette));
     }
     default:
@@ -118,10 +141,21 @@ static NTSTATUS SetInformationThread(ULONG *a)
 {
     if (a[1] == UserThreadCsrApiPort)
     {
-        HANDLE Port;
-        if (a[3] != sizeof(ULONG) || !a[2]) return NtUserSetInformationThread(H(0), a[1], NULL, 0);
-        ProbeInput(a[2], sizeof(ULONG));
-        Port = H32(*(ULONG *)P(2));
+        HANDLE Port = NULL;
+        BOOLEAN Readable = FALSE;
+        if (a[3] != sizeof(ULONG)) return NtUserSetInformationThread(H(0), a[1], NULL, 0);
+        if (a[2])
+        {
+            _SEH2_TRY
+            {
+                ProbeInput(a[2], sizeof(ULONG));
+                Port = H32(*(ULONG *)P(2));
+                Readable = TRUE;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { }
+            _SEH2_END;
+        }
+        if (!Readable) return NtUserSetInformationThread(H(0), a[1], NULL, sizeof(Port));
         return NtUserSetInformationThread(H(0), a[1], &Port, sizeof(Port));
     }
     /* Shutdown flags and status are 4-byte values; other classes ignore the buffer. */
@@ -163,9 +197,8 @@ ULONG_PTR Wow64WinUserMiscService(ULONG Number, ULONG *a)
         BOOL Ret;
         _SEH2_TRY
         {
-            ProbeOutput(a[0], sizeof(MSG32));
             Ret = NtUserRealInternalGetMessage(&Msg, H(1), a[2], a[3], a[4], a[5]);
-            if (Ret && Ret != -1) MsgNativeTo32(P(0), &Msg);
+            if (Ret && Ret != -1) { ProbeOutput(a[0], sizeof(MSG32)); MsgNativeTo32(P(0), &Msg); }
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -178,14 +211,21 @@ ULONG_PTR Wow64WinUserMiscService(ULONG Number, ULONG *a)
     case W64_NtUserSetCursorContents:
     {
         ICONINFO Info = {0};
+        BOOLEAN Readable = FALSE;
         if (a[1])
         {
             const ICONINFO32 *Guest = P(1);
-            ProbeInput(a[1], sizeof(*Guest));
-            Info.fIcon = Guest->fIcon; Info.xHotspot = Guest->xHotspot; Info.yHotspot = Guest->yHotspot;
-            Info.hbmMask = P32(Guest->hbmMask); Info.hbmColor = P32(Guest->hbmColor);
+            _SEH2_TRY
+            {
+                ProbeInput(a[1], sizeof(*Guest));
+                Info.fIcon = Guest->fIcon; Info.xHotspot = Guest->xHotspot; Info.yHotspot = Guest->yHotspot;
+                Info.hbmMask = P32(Guest->hbmMask); Info.hbmColor = P32(Guest->hbmColor);
+                Readable = TRUE;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { }
+            _SEH2_END;
         }
-        return NtUserSetCursorContents(H(0), a[1] ? &Info : NULL);
+        return NtUserSetCursorContents(H(0), Readable ? &Info : NULL);
     }
     case W64_NtUserSetInformationThread: return SetInformationThread(a);
     case W64_NtUserSetWindowWord:
