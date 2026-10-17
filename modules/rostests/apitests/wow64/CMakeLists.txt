@@ -6,7 +6,7 @@ function(add_wow64_apitest library)
     set(sources)
     set(testlist "#define STANDALONE\n#include <apitest.h>\n")
     foreach(test ${ARGN})
-        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock)$")
+        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock|Wow64Thread(Lifetime|ExitProcess))$")
             list(APPEND sources ../${library}/${test}.c)
         endif()
         string(APPEND testlist "extern void func_${test}(void);\n")
@@ -26,6 +26,8 @@ function(add_wow64_apitest library)
 endfunction()
 
 add_wow64_apitest(kernel32
+    Wow64RemoteThread
+    Wow64ThreadApc Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock)
 add_wow64_apitest(ntdll
@@ -50,6 +52,28 @@ elseif(ARCH STREQUAL "amd64")
 endif()
 
 add_subdirectory(sharedviews)
+# Explicit, uninstalled unit fixture for wide guest readers. It compiles the
+# production accessors and selected DLL sources, and uses the test-only native
+# bridge until guest GUI syscall/callback dispatch is available.
+if(ARCH STREQUAL "i386" AND NOT MSVC)
+    add_asm_files(gueststate_asm i386/ClientPfn.S i386/GuestState.S)
+    add_executable(wow64_guest_state EXCLUDE_FROM_ALL
+        GuestState.c GuestStateUser.c GuestStateGdi.c GuestStateImm.c
+        gueststate_testlist.c ${gueststate_asm})
+    target_compile_definitions(wow64_guest_state PRIVATE W32K_WIDE)
+    target_compile_options(wow64_guest_state PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(wow64_guest_state PRIVATE -Wl,--gc-sections)
+    target_include_directories(wow64_guest_state PRIVATE
+        ${REACTOS_SOURCE_DIR}/win32ss/include
+        ${REACTOS_SOURCE_DIR}/win32ss/user/user32/include
+        ${REACTOS_SOURCE_DIR}/win32ss/gdi/gdi32/include
+        ${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys
+        ${REACTOS_SOURCE_DIR}/sdk/include/wine)
+    target_link_libraries(wow64_guest_state wine ${PSEH_LIB})
+    set_module_type(wow64_guest_state win32cui)
+    add_importlibs(wow64_guest_state msvcrt kernel32 ntdll)
+    add_dependencies(wow64_guest_state wow64_syscall_tables)
+endif()
 
 # The native syscall bridge is deliberately test-only, and uses GNU .code64
 # in a PE32 fixture until wow64win provides the guest GUI entry points.
@@ -65,3 +89,151 @@ if(ARCH STREQUAL "amd64" OR (ARCH STREQUAL "i386" AND NOT MSVC))
     add_dependencies(win32k_wow64_apitest wow64_syscall_tables)
     add_rostests_file(TARGET win32k_wow64_apitest)
 endif()
+
+# Explicit GUI integration fixture; default image contents stay unchanged.
+add_executable(wow64_process_create EXCLUDE_FROM_ALL process_create.c)
+set_module_type(wow64_process_create win32cui UNICODE)
+add_importlibs(wow64_process_create msvcrt kernel32 ntdll)
+
+add_executable(wow64_installer_driver EXCLUDE_FROM_ALL installer_driver.c)
+set_module_type(wow64_installer_driver win32cui UNICODE)
+add_importlibs(wow64_installer_driver user32 msvcrt kernel32 ntdll)
+
+add_executable(wow64_installer_services EXCLUDE_FROM_ALL installer_services.c)
+set_module_type(wow64_installer_services win32cui UNICODE)
+add_importlibs(wow64_installer_services advapi32 msvcrt kernel32)
+
+add_executable(wow64_socket EXCLUDE_FROM_ALL socket.c)
+set_module_type(wow64_socket win32cui)
+add_importlibs(wow64_socket ws2_32 msvcrt kernel32)
+
+add_executable(wow64_root_store EXCLUDE_FROM_ALL root_store.c)
+set_module_type(wow64_root_store win32cui)
+add_importlibs(wow64_root_store crypt32 msvcrt kernel32)
+
+add_executable(wow64_message_hook EXCLUDE_FROM_ALL message_hook.c)
+set_module_type(wow64_message_hook win32cui)
+add_importlibs(wow64_message_hook user32 msvcrt kernel32)
+
+add_executable(wow64_notify EXCLUDE_FROM_ALL notify.c)
+set_module_type(wow64_notify win32cui)
+add_importlibs(wow64_notify user32 msvcrt kernel32)
+
+add_executable(wow64_relative_pipe EXCLUDE_FROM_ALL relative_pipe.c)
+set_module_type(wow64_relative_pipe win32cui)
+add_importlibs(wow64_relative_pipe msvcrt kernel32)
+
+add_executable(wow64_stack_recreate EXCLUDE_FROM_ALL stack_recreate.c)
+set_module_type(wow64_stack_recreate win32cui)
+add_importlibs(wow64_stack_recreate msvcrt kernel32)
+
+add_executable(wow64_console_create EXCLUDE_FROM_ALL console_create.c)
+set_module_type(wow64_console_create win32cui)
+add_importlibs(wow64_console_create msvcrt kernel32)
+
+add_executable(wow64_registration EXCLUDE_FROM_ALL registration.c)
+set_module_type(wow64_registration win32cui UNICODE)
+add_importlibs(wow64_registration msvcrt kernel32)
+
+spec2def(wow64_registration_dll.dll registration_dll.spec)
+add_library(wow64_registration_dll MODULE EXCLUDE_FROM_ALL registration_dll.c
+    ${CMAKE_CURRENT_BINARY_DIR}/wow64_registration_dll.def)
+set_module_type(wow64_registration_dll win32dll UNICODE)
+add_importlibs(wow64_registration_dll msvcrt kernel32)
+
+add_executable(wow64_installer_gui EXCLUDE_FROM_ALL installer_gui.c)
+set_module_type(wow64_installer_gui win32cui)
+add_importlibs(wow64_installer_gui imm32 gdi32 user32 msvcrt kernel32)
+
+add_executable(wow64_system_timer EXCLUDE_FROM_ALL system_timer.c)
+set_module_type(wow64_system_timer win32cui)
+add_importlibs(wow64_system_timer user32 gdi32 msvcrt kernel32)
+
+if(ARCH STREQUAL "i386")
+    add_asm_files(segment_return_asm i386/SegmentReturn.S)
+    add_executable(wow64_segment_return EXCLUDE_FROM_ALL segment_return.c ${segment_return_asm})
+    set_module_type(wow64_segment_return win32cui)
+    add_importlibs(wow64_segment_return msvcrt kernel32)
+
+    foreach(aware 0 1)
+        set(memory_target wow64_installer_memory${aware})
+        add_executable(${memory_target} EXCLUDE_FROM_ALL installer_memory.c)
+        target_compile_definitions(${memory_target} PRIVATE EXPECT_LARGE_ADDRESS=${aware})
+        set_module_type(${memory_target} win32cui)
+        add_importlibs(${memory_target} msvcrt kernel32)
+        if(MSVC)
+            if(aware)
+                target_link_options(${memory_target} PRIVATE /LARGEADDRESSAWARE)
+            else()
+                target_link_options(${memory_target} PRIVATE /LARGEADDRESSAWARE:NO)
+            endif()
+        elseif(aware)
+            target_link_options(${memory_target} PRIVATE -Wl,--large-address-aware)
+        else()
+            target_link_options(${memory_target} PRIVATE -Wl,--disable-large-address-aware)
+        endif()
+    endforeach()
+endif()
+
+add_executable(wow64_gui_apps EXCLUDE_FROM_ALL gui_apps.c)
+set_module_type(wow64_gui_apps win32cui)
+add_importlibs(wow64_gui_apps user32 msvcrt kernel32)
+
+add_executable(wow64_gui_controls EXCLUDE_FROM_ALL gui_controls.c)
+set_module_type(wow64_gui_controls win32cui)
+add_importlibs(wow64_gui_controls comdlg32 comctl32 user32 gdi32 msvcrt kernel32 ntdll)
+
+add_executable(wow64_callback_unwind EXCLUDE_FROM_ALL callback_unwind.c)
+target_link_libraries(wow64_callback_unwind ${PSEH_LIB})
+set_module_type(wow64_callback_unwind win32cui)
+add_importlibs(wow64_callback_unwind user32 msvcrt kernel32)
+
+add_executable(wow64_first_window EXCLUDE_FROM_ALL first_window.c)
+set_module_type(wow64_first_window win32cui)
+add_importlibs(wow64_first_window user32 gdi32 msvcrt kernel32)
+
+if(ARCH STREQUAL "i386")
+    add_asm_files(wow64_win32k_stubs win32k_stubs.S)
+    if(NOT MSVC)
+        add_asm_files(wow64_callback_boundary_asm i386/CallbackBoundary.S)
+        add_executable(wow64_callback_boundary EXCLUDE_FROM_ALL callback_boundary.c ${wow64_callback_boundary_asm} ${wow64_win32k_stubs})
+        target_include_directories(wow64_callback_boundary PRIVATE ${REACTOS_SOURCE_DIR}/win32ss ${REACTOS_SOURCE_DIR}/win32ss/include)
+        set_module_type(wow64_callback_boundary win32cui)
+        add_importlibs(wow64_callback_boundary user32 msvcrt kernel32 ntdll)
+    endif()
+    add_executable(wow64_win32k_abi EXCLUDE_FROM_ALL win32k_abi.c ${wow64_win32k_stubs})
+    target_include_directories(wow64_win32k_abi PRIVATE ${REACTOS_SOURCE_DIR}/win32ss ${REACTOS_SOURCE_DIR}/win32ss/include)
+    set_module_type(wow64_win32k_abi win32cui)
+    add_importlibs(wow64_win32k_abi user32 gdi32 msvcrt kernel32 ntdll)
+endif()
+
+# Guest-only loader change; keep the fixture out of default native images.
+add_executable(wow64_loadfrom EXCLUDE_FROM_ALL loadfrom.c loadfrom_testlist.c)
+target_include_directories(wow64_loadfrom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ntdll)
+set_module_type(wow64_loadfrom win32cui)
+target_link_libraries(wow64_loadfrom wine ${PSEH_LIB})
+add_importlibs(wow64_loadfrom ntdll msvcrt kernel32)
+
+add_executable(wow64_file_lock EXCLUDE_FROM_ALL file_lock.c)
+set_module_type(wow64_file_lock win32cui)
+add_importlibs(wow64_file_lock msvcrt kernel32)
+
+add_executable(wow64_job EXCLUDE_FROM_ALL job.c)
+set_module_type(wow64_job win32cui)
+add_importlibs(wow64_job msvcrt kernel32)
+
+add_executable(wow64_directory EXCLUDE_FROM_ALL wow64_directory.c)
+set_module_type(wow64_directory win32cui)
+add_importlibs(wow64_directory msvcrt kernel32)
+
+add_executable(wow64_pipe_connect EXCLUDE_FROM_ALL pipe_connect.c)
+set_module_type(wow64_pipe_connect win32cui)
+add_importlibs(wow64_pipe_connect msvcrt kernel32)
+
+add_executable(wow64_time_zone EXCLUDE_FROM_ALL time_zone.c)
+set_module_type(wow64_time_zone win32cui)
+add_importlibs(wow64_time_zone msvcrt kernel32)
+
+add_executable(wow64_socket_event EXCLUDE_FROM_ALL socket_event.c)
+set_module_type(wow64_socket_event win32cui)
+add_importlibs(wow64_socket_event ws2_32 msvcrt kernel32 ntdll)

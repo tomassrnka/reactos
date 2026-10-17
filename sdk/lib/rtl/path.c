@@ -1882,7 +1882,15 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
     {
         /* Allocate new current directory struct saving previous one */
         OldCurDir = RtlpCurDirRef;
+#ifdef SYSWOW64_GUEST
+        /* Keep the guest path and handle in one reference-counted allocation.
+         * MSYS's published cwd fallback uses the original NT FAST_CWD layout
+         * to replace the handle associated with the PEB's path buffer. */
+        RtlpCurDirRef = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY,
+                                      FIELD_OFFSET(RTLP_CURDIR_REF, Buffer) + CurDir->DosPath.MaximumLength);
+#else
         RtlpCurDirRef = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(RTLP_CURDIR_REF));
+#endif
         if (!RtlpCurDirRef)
         {
             RtlpCurDirRef = OldCurDir;
@@ -1893,6 +1901,10 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
 
         /* Set reference to 1 (us) */
         RtlpCurDirRef->RefCount = 1;
+#ifdef SYSWOW64_GUEST
+        RtlInitEmptyUnicodeString(&RtlpCurDirRef->DosPath, RtlpCurDirRef->Buffer,
+                                  CurDir->DosPath.MaximumLength);
+#endif
     }
 
     /* Save new data */
@@ -1901,8 +1913,15 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
     CurDirHandle = NULL;
 
     /* Copy full path */
+#ifdef SYSWOW64_GUEST
+    RtlpCurDirRef->DismountCount = SharedUserData->DismountCount;
+    CurDir->DosPath = RtlpCurDirRef->DosPath;
+#endif
     RtlCopyMemory(CurDir->DosPath.Buffer, FullPath.Buffer, FullPath.Length + sizeof(WCHAR));
     CurDir->DosPath.Length = FullPath.Length;
+#ifdef SYSWOW64_GUEST
+    RtlpCurDirRef->DosPath.Length = FullPath.Length;
+#endif
 
     Status = STATUS_SUCCESS;
 

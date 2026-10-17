@@ -644,7 +644,7 @@ PolyPatBlt(
     if (nCount && pdcattr && !(pdcattr->ulDirty_ & DC_DIBSECTION))
     {
         PGDIBSPPATBLT pgO;
-        PTEB pTeb = NtCurrentTeb();
+        PW32TEB pTeb = W32GetCurrentTeb();
 
         pgO = GdiAllocBatchCommand(hdc, GdiBCPolyPatBlt);
         if (pgO)

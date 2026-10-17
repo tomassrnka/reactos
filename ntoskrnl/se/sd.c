@@ -724,6 +724,11 @@ SeQuerySecurityDescriptorInfo(
 
     PAGED_CODE();
 
+    /* Mandatory integrity labels are not stored by the security subsystem.
+     * Do not report a successful label query with an empty descriptor. */
+    if (*SecurityInformation & LABEL_SECURITY_INFORMATION)
+        return STATUS_NOT_SUPPORTED;
+
     RelSD = (PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor;
 
     if (*ObjectsSecurityDescriptor == NULL)

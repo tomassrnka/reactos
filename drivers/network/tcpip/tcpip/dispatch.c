@@ -1332,6 +1332,18 @@ NTSTATUS DispTdiSetInformation(
 }
 
 
+/* The context is opaque, but its alignment differs in the 32-bit request. */
+static ULONG
+DispQueryContextOffset(PIRP Irp)
+{
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (IoIs32bitProcess(Irp))
+        return FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX32, Context);
+#endif
+    UNREFERENCED_PARAMETER(Irp);
+    return FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX, Context);
+}
+
 VOID DispTdiQueryInformationExComplete(
     PVOID Context,
     ULONG Status,
@@ -1350,7 +1362,7 @@ VOID DispTdiQueryInformationExComplete(
     if (NT_SUCCESS(Status)) {
         CopyBufferToBufferChain(
             QueryContext->InputMdl,
-            FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX, Context),
+            DispQueryContextOffset(QueryContext->Irp),
             (PCHAR)&QueryContext->QueryInfo.Context,
             CONTEXT_SIZE);
     }
@@ -1388,6 +1400,8 @@ NTSTATUS DispTdiQueryInformationEx(
     TDI_REQUEST Request;
     UINT Size;
     UINT InputBufferLength;
+    ULONG ContextOffset = DispQueryContextOffset(Irp);
+    ULONG RequestSize = ContextOffset + CONTEXT_SIZE;
     UINT OutputBufferLength;
     BOOLEAN InputMdlLocked  = FALSE;
     BOOLEAN OutputMdlLocked = FALSE;
@@ -1421,7 +1435,7 @@ NTSTATUS DispTdiQueryInformationEx(
     OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
 
     /* Validate parameters */
-    if ((InputBufferLength == sizeof(TCP_REQUEST_QUERY_INFORMATION_EX)) &&
+    if ((InputBufferLength == RequestSize) &&
         (OutputBufferLength != 0)) {
 
         InputBuffer = (PTCP_REQUEST_QUERY_INFORMATION_EX)
@@ -1432,7 +1446,7 @@ NTSTATUS DispTdiQueryInformationEx(
         if (QueryContext) {
 	    _SEH2_TRY {
                 InputMdl = IoAllocateMdl(InputBuffer,
-                    sizeof(TCP_REQUEST_QUERY_INFORMATION_EX),
+                    RequestSize,
                     FALSE, TRUE, NULL);
 
                 OutputMdl = IoAllocateMdl(OutputBuffer,
@@ -1450,8 +1464,9 @@ NTSTATUS DispTdiQueryInformationEx(
 
                     OutputMdlLocked = TRUE;
 
-                    RtlCopyMemory(&QueryContext->QueryInfo,
-                        InputBuffer, sizeof(TCP_REQUEST_QUERY_INFORMATION_EX));
+                    RtlCopyMemory(&QueryContext->QueryInfo.ID, InputBuffer, sizeof(TDIObjectID));
+                    RtlCopyMemory(QueryContext->QueryInfo.Context,
+                                  (PUCHAR)InputBuffer + ContextOffset, CONTEXT_SIZE);
                 } else
                     Status = STATUS_INSUFFICIENT_RESOURCES;
             } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
@@ -1495,7 +1510,7 @@ NTSTATUS DispTdiQueryInformationEx(
         } else
             Status = STATUS_INSUFFICIENT_RESOURCES;
     } else if( InputBufferLength ==
-	       sizeof(TCP_REQUEST_QUERY_INFORMATION_EX) ) {
+	       RequestSize ) {
 	/* Handle the case where the user is probing the buffer for length */
 	TI_DbgPrint(MAX_TRACE, ("InputBufferLength %d OutputBufferLength %d\n",
 				InputBufferLength, OutputBufferLength));
@@ -1509,7 +1524,7 @@ NTSTATUS DispTdiQueryInformationEx(
 
 	_SEH2_TRY {
 	    InputMdl = IoAllocateMdl(InputBuffer,
-				     sizeof(TCP_REQUEST_QUERY_INFORMATION_EX),
+				     RequestSize,
 				     FALSE, TRUE, NULL);
 
 	    MmProbeAndLockPages(InputMdl, Irp->RequestorMode,
@@ -1528,8 +1543,9 @@ NTSTATUS DispTdiQueryInformationEx(
 	    return Status;
 	}
 
-	RtlCopyMemory(&QueryContext->QueryInfo,
-		      InputBuffer, sizeof(TCP_REQUEST_QUERY_INFORMATION_EX));
+	RtlCopyMemory(&QueryContext->QueryInfo.ID, InputBuffer, sizeof(TDIObjectID));
+        RtlCopyMemory(QueryContext->QueryInfo.Context,
+                      (PUCHAR)InputBuffer + ContextOffset, CONTEXT_SIZE);
 
 	QueryContext->Irp       = Irp;
 	QueryContext->InputMdl  = InputMdl;

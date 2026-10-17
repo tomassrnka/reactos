@@ -693,7 +693,7 @@
 @ stdcall GetVersionExA(ptr)
 @ stdcall GetVersionExW(ptr)
 @ stdcall GetVolumeInformationA(str ptr long ptr ptr ptr ptr long)
-@ stub -version=0x600+ GetVolumeInformationByHandleW
+@ stdcall -version=0x600+ GetVolumeInformationByHandleW(ptr ptr long ptr ptr ptr ptr long)
 @ stdcall GetVolumeInformationW(wstr ptr long ptr ptr ptr ptr long)
 @ stdcall GetVolumeNameForVolumeMountPointA(str ptr long)
 @ stdcall GetVolumeNameForVolumeMountPointW(wstr ptr long)
@@ -964,6 +964,7 @@
 @ stdcall QueryMemoryResourceNotification(ptr ptr)
 @ stdcall QueryPerformanceCounter(ptr)
 @ stdcall QueryPerformanceFrequency(ptr)
+@ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
 @ stub -version=0x600+ QueryProcessAffinityUpdateMode
 @ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
 @ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
@@ -1022,6 +1023,7 @@
 @ stdcall RequestDeviceWakeup(long)
 @ stdcall RequestWakeupLatency(long)
 @ stdcall ResetEvent(long)
+@ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall ResetWriteWatch(ptr long)
 @ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall RestoreLastError(long) ntdll.RtlRestoreLastWin32Error
@@ -1291,9 +1293,11 @@
 @ stdcall -version=0x600+ WerGetFlags(ptr ptr)
 @ stub -version=0x600+ WerRegisterFile
 @ stub -version=0x600+ WerRegisterMemoryBlock
+@ stdcall -version=0x601+ WerRegisterRuntimeExceptionModule(wstr ptr)
 @ stdcall -version=0x600+ WerSetFlags(long)
 @ stub -version=0x600+ WerUnregisterFile
 @ stub -version=0x600+ WerUnregisterMemoryBlock
+@ stdcall -version=0x601+ WerUnregisterRuntimeExceptionModule(wstr ptr)
 @ stub -version=0x600+ WerpCleanupMessageMapping
 @ stub -version=0x600+ WerpInitiateRemoteRecovery
 @ stub -version=0x600+ WerpNotifyLoadStringResource

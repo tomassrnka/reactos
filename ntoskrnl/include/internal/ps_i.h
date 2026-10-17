@@ -1,3 +1,7 @@
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+#include <reactos/wow64.h>
+#endif
+
 /*
  * PROJECT:     ReactOS Kernel
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
@@ -585,7 +589,11 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     /* ThreadCSwitchPmu */
     IQS_NONE,
     /* ThreadWow64Context */
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+    IQS_SAME(WOW64_CONTEXT, ULONG, ICIF_QUERY | ICIF_SET),
+#else
     IQS_NONE,
+#endif
     /* ThreadGroupInformation */
     IQS_NONE,
     /* ThreadUmsInformation */

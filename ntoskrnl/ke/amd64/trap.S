@@ -1056,6 +1056,11 @@ GLOBAL_LABEL KiSystemServiceExit
     call KiInitiateUserApc
 
 NoUserApcPending:
+#ifdef BUILD_WOW64_ENABLED
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax], rax
+    call KiRestoreWow64Gs
+    mov rax, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax]
+#endif
     /* Disable interrupts for return */
     cli
 

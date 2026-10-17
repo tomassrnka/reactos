@@ -542,7 +542,15 @@ IntGetClsWndProc(PWND pWnd, PCLS Class, BOOL Ansi)
     {  // Always scan through the list due to wine class "deftest".
         for ( i = FNID_FIRST; i <= FNID_SWITCH; i++)
         {
+#ifdef W32K_WIDE_ACTIVE
+            /* A foreign native class (including the desktop) retains the
+             * native server mapping. Compare the complete shared pointer;
+             * its low half must not alias a guest procedure. */
+            if (Class->lpfnWndProc_K64 == (ULONG_PTR)GETPFNSERVER(i) ||
+                Class->lpfnWndProc_K64 == gpsi->aStoCidPfn[i - FNID_FIRST].v64)
+#else
             if (GETPFNSERVER(i) == Class->lpfnWndProc)
+#endif
             {
                 if (Ansi)
                     Ret = (ULONG_PTR)GETPFNCLIENTA(i);
@@ -598,7 +606,12 @@ IntGetWndProc(PWND pWnd, BOOL Ansi)
     {
         for ( i = FNID_FIRST; i <= FNID_SWITCH; i++)
         {
+#ifdef W32K_WIDE_ACTIVE
+            if (pWnd->lpfnWndProc_K64 == (ULONG_PTR)GETPFNSERVER(i) ||
+                pWnd->lpfnWndProc_K64 == gpsi->aStoCidPfn[i - FNID_FIRST].v64)
+#else
             if (GETPFNSERVER(i) == pWnd->lpfnWndProc)
+#endif
             {
                 if (Ansi)
                     Ret = GETPFNCLIENTA(i);
