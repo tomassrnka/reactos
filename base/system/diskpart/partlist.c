@@ -3199,6 +3199,25 @@ SelectVolumeOfNewPartition(
 }
 
 
+/* Reads the volume list once; the volumes listed before keep their numbers. */
+VOID
+ReloadVolumeList(VOID)
+{
+    VOLUME_NUMBERS Numbers;
+
+    if (!SaveVolumeNumbers(&Numbers))
+    {
+        FreeVolumeNumbers(&Numbers);
+        DestroyVolumeList();
+        CreateVolumeList();
+        return;
+    }
+
+    RefreshVolumeList(&Numbers);
+    FreeVolumeNumbers(&Numbers);
+}
+
+
 VOID
 RemoveVolume(
     _In_ PVOLENTRY VolumeEntry)

@@ -361,13 +361,15 @@ GetFocusPartition(VOID)
 
 /*
  * Reads the disks and volumes again after a partition changed size, and gives
- * the focus back to the same disk, partition and (if it had it) volume.
+ * the focus back to the same disk, partition and volume. A partition that had
+ * no volume before gets none from a resize, so only a partition that had one
+ * waits for its volume to come back.
  */
 VOID
 RefreshAfterResize(
     _In_ ULONG ulDiskNumber,
     _In_ ULONGLONG ullStartSector,
-    _In_ BOOL bVolumeFocus)
+    _In_ BOOL bHadVolume)
 {
     PLIST_ENTRY Entry, PartListEntry;
     PDISKENTRY DiskEntry;
@@ -407,17 +409,20 @@ RefreshAfterResize(
     }
 
     CurrentPartition = Found;
-    if (Found != NULL)
+    if (Found != NULL && bHadVolume)
     {
         /* The partition's volume gets the focus with it, as SELECT PARTITION gives it. */
         SelectVolumeOfNewPartition(Found);
+    }
+    else if (Found != NULL)
+    {
+        ReloadVolumeList();
     }
     else
     {
         DestroyVolumeList();
         CreateVolumeList();
     }
-    UNREFERENCED_PARAMETER(bVolumeFocus);
 }
 
 /* The unpartitioned space right after the partition, in its MBR container or after the container. */
@@ -758,7 +763,7 @@ extend_main(
         NtClose(hVolume);
         hVolume = NULL;
     }
-    RefreshAfterResize(ulDiskNumber, ullStartSector, bVolumeFocus);
+    RefreshAfterResize(ulDiskNumber, ullStartSector, VolumeEntry != NULL);
 
 done:
     if (hVolume != NULL)
