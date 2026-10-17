@@ -767,7 +767,8 @@ Cleanup:
 }
 
 // Moves a job to its position for a new priority. PrinterDeletionSection must be held.
-// If the job cannot be inserted again, it goes back to the old priority, so that it never drops out of its printer's queue.
+// If the job cannot be inserted again, it goes back to the old priority. The skiplist frees the node on deletion, so this
+// second insert needs memory too: when it fails as well, the job stays out of the queue and the error is returned.
 static DWORD
 _SetJobPriority(PLOCAL_JOB pJob, DWORD dwPriority)
 {
