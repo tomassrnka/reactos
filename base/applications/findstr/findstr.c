@@ -625,6 +625,9 @@ SearchLines(PSEARCH_INPUT Input, const UCHAR *Data, SIZE_T Size, BOOL Final)
                 WriteBytes(":", 1);
             }
             WriteBytes(Data + Start, Next - Start);
+            /* The last line of a file may have no line end; keep the next name off its line */
+            if (!Lf)
+                WriteBytes("\r\n", 2);
         }
         Input->Offset += Next - Start;
         Start = Next;
