@@ -1561,6 +1561,30 @@ SeAssignSecurityEx(
         Token = SubjectContext->PrimaryToken;
     }
 
+    /* A caller may not assign a mandatory label above its own integrity level
+     * at object creation without SeRelabelPrivilege (MS "Windows Integrity
+     * Mechanism Design": an explicit label is capped at the creator's level). */
+    if (ExplicitDescriptor != NULL && (ExplicitDescriptor->Control & SE_SACL_PRESENT))
+    {
+        KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+        BOOLEAN HasLabel;
+        ULONG LabelRid;
+
+        Status = SepGetDescriptorLabel(ExplicitDescriptor, &HasLabel, &LabelRid, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            SeUnlockSubjectContext(SubjectContext);
+            return Status;
+        }
+        if (HasLabel && PreviousMode != KernelMode &&
+            LabelRid > Token->IntegrityLevel &&
+            !SeSinglePrivilegeCheck(SeRelabelPrivilege, PreviousMode))
+        {
+            SeUnlockSubjectContext(SubjectContext);
+            return STATUS_INVALID_LABEL;
+        }
+    }
+
     /* Inherit the Owner SID */
     if (ExplicitDescriptor != NULL)
     {

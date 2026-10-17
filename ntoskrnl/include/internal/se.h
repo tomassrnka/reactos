@@ -418,6 +418,7 @@ NTSTATUS
 NTAPI
 SeCheckLabelChange(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_opt_ PSECURITY_DESCRIPTOR ObjectSecurityDescriptor,
     _In_ KPROCESSOR_MODE AccessMode);
 
 NTSTATUS

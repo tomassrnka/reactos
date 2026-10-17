@@ -1792,20 +1792,23 @@ SepGetDescriptorLabel(
 
 /*
  * A caller may set a mandatory label up to its own level; above that it
- * needs SeRelabelPrivilege, as on NT 6. Checked for every label in a
- * descriptor that is about to be set with LABEL_SECURITY_INFORMATION (the
- * highest one decides).
+ * needs SeRelabelPrivilege, as on NT 6. The object's current label counts
+ * too: relabeling an object already above the caller's level needs the same
+ * privilege, since the no-write-up policy would otherwise deny the write.
+ * Checked for every label in the new and the existing descriptor
+ * (the highest one decides).
  */
 NTSTATUS
 NTAPI
 SeCheckLabelChange(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_opt_ PSECURITY_DESCRIPTOR ObjectSecurityDescriptor,
     _In_ KPROCESSOR_MODE AccessMode)
 {
     SECURITY_SUBJECT_CONTEXT SubjectContext;
     PTOKEN CallerToken;
-    ULONG Rid, CallerLevel;
-    BOOLEAN HasLabel;
+    ULONG Rid, ExistingRid = 0, CallerLevel;
+    BOOLEAN HasLabel, HasExistingLabel = FALSE;
     NTSTATUS Status;
 
     PAGED_CODE();
@@ -1814,6 +1817,19 @@ SeCheckLabelChange(
     if (!NT_SUCCESS(Status) || !HasLabel || AccessMode == KernelMode)
         return Status;
 
+    if (ObjectSecurityDescriptor != NULL)
+    {
+        Status = SepGetDescriptorLabel(ObjectSecurityDescriptor, &HasExistingLabel, &ExistingRid, NULL);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (!HasExistingLabel)
+        {
+            /* An object with no explicit label is implicitly medium integrity */
+            ExistingRid = SECURITY_MANDATORY_MEDIUM_RID;
+            HasExistingLabel = TRUE;
+        }
+    }
+
     SeCaptureSubjectContext(&SubjectContext);
     CallerToken = SeQuerySubjectContextToken(&SubjectContext);
     SepAcquireTokenLockShared(CallerToken);
@@ -1821,7 +1837,8 @@ SeCheckLabelChange(
     SepReleaseTokenLock(CallerToken);
     SeReleaseSubjectContext(&SubjectContext);
 
-    if (Rid > CallerLevel && !SeSinglePrivilegeCheck(SeRelabelPrivilege, AccessMode))
+    if ((Rid > CallerLevel || (HasExistingLabel && ExistingRid > CallerLevel)) &&
+        !SeSinglePrivilegeCheck(SeRelabelPrivilege, AccessMode))
         return STATUS_INVALID_LABEL;
     return STATUS_SUCCESS;
 }

@@ -973,10 +973,21 @@ NtSetSecurityObject(IN HANDLE Handle,
         }
         else
         {
-            /* A mandatory label above the caller's own level needs SeRelabelPrivilege */
+            /* A mandatory label above the caller's own level, or relabeling an
+             * object already above it, needs SeRelabelPrivilege */
             Status = STATUS_SUCCESS;
             if (SecurityInformation & LABEL_SECURITY_INFORMATION)
-                Status = SeCheckLabelChange(CapturedDescriptor, PreviousMode);
+            {
+                PSECURITY_DESCRIPTOR OldDescriptor = NULL;
+                BOOLEAN OldAllocated;
+
+                Status = ObGetObjectSecurity(Object, &OldDescriptor, &OldAllocated);
+                if (NT_SUCCESS(Status))
+                {
+                    Status = SeCheckLabelChange(CapturedDescriptor, OldDescriptor, PreviousMode);
+                    ObReleaseObjectSecurity(OldDescriptor, OldAllocated);
+                }
+            }
 
             /* Set security */
             if (NT_SUCCESS(Status))
