@@ -442,15 +442,16 @@ static BOOL SeiIsVersionLie(PDB pdb, TAGID tiShimRef)
     return Length > 10 && !_wcsicmp(Name + Length - 10, L"VersionLie");
 }
 
-static VOID SeiAddShim(TAGREF trShimRef, PARRAY pShimRef)
+static BOOL SeiAddShim(TAGREF trShimRef, PARRAY pShimRef)
 {
     TAGREF* Data;
 
     Data = ARRAY_Append(pShimRef, TAGREF);
     if (!Data)
-        return;
+        return FALSE;
 
     *Data = trShimRef;
+    return TRUE;
 }
 
 static VOID SeiAddFlag(PDB pdb, TAGID tiFlagRef, PFLAGINFO pFlagInfo)
@@ -515,8 +516,7 @@ static VOID SeiBuildShimRefArray(HSDB hsdb, SDBQUERYRESULT* pQuery, PARRAY pShim
                 /* A lie that cannot be resolved must not keep the next one from applying */
                 if (!(IsLie && HaveVersionLie) && SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
                 {
-                    SeiAddShim(trShimRef, pShimRef);
-                    if (IsLie)
+                    if (SeiAddShim(trShimRef, pShimRef) && IsLie)
                         HaveVersionLie = TRUE;
                 }
 
@@ -564,8 +564,7 @@ static VOID SeiBuildShimRefArray(HSDB hsdb, SDBQUERYRESULT* pQuery, PARRAY pShim
                 /* A lie that cannot be resolved must not keep the next one from applying */
                 if (!(IsLie && HaveVersionLie) && SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
                 {
-                    SeiAddShim(trShimRef, pShimRef);
-                    if (IsLie)
+                    if (SeiAddShim(trShimRef, pShimRef) && IsLie)
                         HaveVersionLie = TRUE;
                 }
 

@@ -449,7 +449,9 @@ CNetConnectionManager::Next(
         return S_FALSE;
 
     hr = CNetConnection_CreateInstance(m_pCurrent, IID_PPV_ARG(INetConnection, rgelt));
-    m_pCurrent = m_pCurrent->Next;
+    /* a failed item stays current, so that a retry does not skip it */
+    if (SUCCEEDED(hr))
+        m_pCurrent = m_pCurrent->Next;
 
     return hr;
 }
