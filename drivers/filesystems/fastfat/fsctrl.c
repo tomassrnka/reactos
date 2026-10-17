@@ -4287,7 +4287,7 @@ Routine Description:
         Bits = Vcb->AllocationSupport.FatIndexBitSize;
         OldClusters = Vcb->AllocationSupport.NumberOfClusters;
         NewClusters = FatNumberOfClusters( &NewBpb );
-        Describable = ((FatBytesPerFat( &Vcb->Bpb ) * 8) / Bits) - 2;
+        Describable = (ULONG)(((ULONGLONG)FatBytesPerFat( &Vcb->Bpb ) * 8) / Bits) - 2;
         //
         //  As the formatter: no cluster number reaches the reserved values (0xFF0, 0xFFF0, 0x0FFFFFF0).
         //

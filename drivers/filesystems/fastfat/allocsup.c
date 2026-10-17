@@ -412,10 +412,10 @@ Arguments:
     //  Turns out this was not a good assumption.  We have to do this always now.
     //
 
-    ClustersDescribableByFat = ( ((FatIsFat32(Vcb)? Vcb->Bpb.LargeSectorsPerFat :
-                                                    Vcb->Bpb.SectorsPerFat) *
-                                  Vcb->Bpb.BytesPerSector * 8)
-                                 / FatIndexBitSize(&Vcb->Bpb) ) - 2;
+    ClustersDescribableByFat = (ULONG)(( ((ULONGLONG)(FatIsFat32(Vcb)? Vcb->Bpb.LargeSectorsPerFat :
+                                                                        Vcb->Bpb.SectorsPerFat) *
+                                          Vcb->Bpb.BytesPerSector * 8)
+                                         / FatIndexBitSize(&Vcb->Bpb) )) - 2;
 
     if (Vcb->AllocationSupport.NumberOfClusters > ClustersDescribableByFat) {
 
