@@ -762,6 +762,20 @@ static int ntfs_ib_read(struct ntfs_index_context *icx, s64 vcn, struct index_bl
 		return -EIO;
 	}
 
+	/* Validate the update-sequence array fits the block before mst fixup walks it. */
+	{
+		u16 usa_ofs = le16_to_cpu(dst->usa_ofs);
+		u16 usa_count = le16_to_cpu(dst->usa_count);
+
+		if ((usa_ofs & 1) || !usa_count ||
+		    usa_count != icx->block_size / NTFS_BLOCK_SIZE + 1 ||
+		    (u32)usa_ofs + (u32)usa_count * 2 > icx->block_size) {
+			ntfs_error(icx->idx_ni->vol->sb,
+				"Corrupt index block update sequence array");
+			return -EIO;
+		}
+	}
+
 	post_read_mst_fixup((struct ntfs_record *)((u8 *)dst), icx->block_size);
 	if (ntfs_index_block_inconsistent(icx->idx_ni->vol, dst,
 					  icx->block_size, vcn, icx->cr,

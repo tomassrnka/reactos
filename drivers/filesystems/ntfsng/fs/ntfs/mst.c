@@ -35,9 +35,9 @@ int post_read_mst_fixup(struct ntfs_record *b, const u32 size)
 	usa_ofs = le16_to_cpu(b->usa_ofs);
 	/* Decrement usa_count to get number of fixups. */
 	usa_count = le16_to_cpu(b->usa_count) - 1;
-	/* Size and alignment checks. */
+	/* Size/alignment checks; the +1 counts the USN word so the whole USA stays in bounds. */
 	if (size & (NTFS_BLOCK_SIZE - 1) || usa_ofs & 1	||
-	    usa_ofs + (usa_count * 2) > size ||
+	    usa_ofs + (usa_count + 1) * 2 > size ||
 	    (size >> NTFS_BLOCK_SIZE_BITS) != usa_count)
 		return 0;
 	/* Position of usn in update sequence array. */
@@ -126,9 +126,9 @@ int pre_write_mst_fixup(struct ntfs_record *b, const u32 size)
 	usa_ofs = le16_to_cpu(b->usa_ofs);
 	/* Decrement usa_count to get number of fixups. */
 	usa_count = le16_to_cpu(b->usa_count) - 1;
-	/* Size and alignment checks. */
+	/* Size/alignment checks; the +1 counts the USN word so the whole USA stays in bounds. */
 	if (size & (NTFS_BLOCK_SIZE - 1) || usa_ofs & 1	||
-	    usa_ofs + (usa_count * 2) > size ||
+	    usa_ofs + (usa_count + 1) * 2 > size ||
 	    (size >> NTFS_BLOCK_SIZE_BITS) != usa_count)
 		return -EINVAL;
 	/* Position of usn in update sequence array. */
