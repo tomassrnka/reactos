@@ -142,6 +142,10 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
         Ccb->ManageVolume = Mode == KernelMode ||
                             (As && (As->PreviouslyGrantedAccess & (SPECIFIC_RIGHTS_ALL ^ FILE_TRAVERSE))) ||
                             SeSinglePrivilegeCheck(SeExports->SeManageVolumePrivilege, Mode);
+        /* Volume resize (shrink/extend) mutates the volume: require actual write access (not mere read/execute), or the privilege. */
+        Ccb->ManageVolumeMutate = Mode == KernelMode ||
+                            (As && (As->PreviouslyGrantedAccess & FILE_WRITE_DATA)) ||
+                            SeSinglePrivilegeCheck(SeExports->SeManageVolumePrivilege, Mode);
     }
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = Ccb;

@@ -1094,7 +1094,7 @@ static NTSTATUS NgResizeAllowed(PNG_VCB Vcb, PNG_FCB Fcb, PFILE_OBJECT FileObjec
 {
     if (!Fcb || !Fcb->IsVolume)
         return STATUS_INVALID_PARAMETER;
-    if (!((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+    if (!((PNG_CCB)FileObject->FsContext2)->ManageVolumeMutate)
         return STATUS_ACCESS_DENIED;
     if (Vcb->ReadOnly || Vcb->Damaged)
         return STATUS_MEDIA_WRITE_PROTECTED;

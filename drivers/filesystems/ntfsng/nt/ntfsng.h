@@ -202,6 +202,7 @@ typedef struct _NG_CCB
     LONG QueryBusy;                 /* a directory query of this handle is running (dirctl.c) */
     ACCESS_MASK Granted;            /* access of the handle, generic rights mapped */
     BOOLEAN ManageVolume;           /* a volume open that may lock, unlock and dismount the volume */
+    BOOLEAN ManageVolumeMutate;     /* a volume open that may resize (shrink/extend) the volume: needs write access or the privilege */
     BOOLEAN CleanedUp;              /* a volume handle's cleanup ran (set under FcbListLock) */
     PVOID RetiredPaths;             /* earlier Path buffers of a renamed directory (change notify keeps them) */
 } NG_CCB, *PNG_CCB;
