@@ -669,6 +669,9 @@ NTSTATUS alloc_chunk(device_extension* Vcb, uint64_t flags, chunk** pc, bool ful
     if (flags & BTRFS_BLOCK_GROUP_RAID5 || flags & BTRFS_BLOCK_GROUP_RAID6)
         set_incompat_flag(Vcb, BTRFS_FEATURE_INCOMPAT_RAID56);
 
+    if (flags & BTRFS_BLOCK_GROUP_RAID1C3 || flags & BTRFS_BLOCK_GROUP_RAID1C4)
+        set_incompat_flag(Vcb, BTRFS_FEATURE_INCOMPAT_RAID1C34);
+
 end:
     if (stripes)
         ExFreePool(stripes);
