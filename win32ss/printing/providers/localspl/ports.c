@@ -451,10 +451,22 @@ LocalDeletePort(PWSTR pName, HWND hWnd, PWSTR pPortName)
         res = ((LPMONITOREX)pPrintMonitor->pMonitor)->Monitor.pfnDeletePort(pName, hWnd, pPortName);
     }
 
-    RemoveEntryList(&pPrintPort->Entry);
+    // The monitor still owns the port if its delete failed; do not free it.
+    if (res)
+    {
+        // Refuse while the printing thread holds PrintingSection (a job is active); taking it
+        // here guarantees that thread is not mid-write on the port we are about to free.
+        if (!TryEnterCriticalSection(&pPrintPort->PrintingSection))
+        {
+            SetLastError(ERROR_BUSY);
+            return FALSE;
+        }
 
-    DeleteCriticalSection(&pPrintPort->PrintingSection);
-    DllFreeSplMem(pPrintPort);
+        RemoveEntryList(&pPrintPort->Entry);
+        LeaveCriticalSection(&pPrintPort->PrintingSection);
+        DeleteCriticalSection(&pPrintPort->PrintingSection);
+        DllFreeSplMem(pPrintPort);
+    }
 
     return res;
 }
