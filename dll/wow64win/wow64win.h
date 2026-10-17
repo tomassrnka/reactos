@@ -76,6 +76,11 @@ VOID WindowPosNativeTo32(WINDOWPOS32 *To, const WINDOWPOS *From);
 ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a);
+ULONG_PTR Wow64WinGdiExtraService(ULONG Number, ULONG *a);
+ULONG_PTR Wow64WinUserInputService(ULONG Number, ULONG *a);
+ULONG_PTR Wow64WinUserImeService(ULONG Number, ULONG *a);
+ULONG_PTR Wow64WinUserDisplayService(ULONG Number, ULONG *a);
+ULONG_PTR Wow64WinUserMiscService(ULONG Number, ULONG *a);
 NTSTATUS NTAPI Wow64WinInitialize(PVOID Dispatcher);
 NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Status);
 
