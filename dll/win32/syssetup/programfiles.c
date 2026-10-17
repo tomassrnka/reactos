@@ -16,12 +16,15 @@ InitializeWow64ProgramFiles(PCWSTR Program, PCWSTR Common)
     LONG Error;
     SIZE_T Length = wcslen(Program);
 
-    if (Length + 6 >= ARRAYSIZE(Program32) || wcslen(Common) + 6 >= ARRAYSIZE(Common32))
+    if (Length + 6 + ARRAYSIZE(L"\\Common Files") >= ARRAYSIZE(Program32) || wcslen(Common) + 6 >= ARRAYSIZE(Common32))
         return FALSE;
     wcscpy(Program32, Program);
     wcscat(Program32, L" (x86)");
     wcscpy(Common32, Program32);
-    wcscat(Common32, Common + Length);
+    if (wcslen(Common) >= Length && !_wcsnicmp(Common, Program, Length))
+        wcscat(Common32, Common + Length);
+    else
+        wcscat(Common32, L"\\Common Files");
     Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
                           0, KEY_SET_VALUE, &Key);
     if (Error) return FALSE;
