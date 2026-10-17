@@ -337,6 +337,8 @@ BasepCheckTimeZonePrivilege(VOID)
     return (NT_SUCCESS(Status) && !Held) ? STATUS_PRIVILEGE_NOT_HELD : STATUS_SUCCESS;
 }
 
+static BOOL TIME_QueryStoredKeyName(_Out_writes_(BufferLength) PWSTR Buffer, _In_ ULONG BufferLength);
+
 /*
  * @implemented
  */
@@ -345,7 +347,8 @@ WINAPI
 SetTimeZoneInformation(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation)
 {
     RTL_TIME_ZONE_INFORMATION TimeZoneInformation, OldTimeZoneInformation;
-    BOOLEAN HaveOldZone;
+    WCHAR OldKeyName[ARRAYSIZE(((PDYNAMIC_TIME_ZONE_INFORMATION)0)->TimeZoneKeyName)];
+    BOOLEAN HaveOldZone, HaveOldKeyName;
     NTSTATUS Status;
 
     DPRINT("SetTimeZoneInformation()\n");
@@ -389,6 +392,7 @@ SetTimeZoneInformation(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation)
     /* Values missing from the registry stay zero */
     RtlZeroMemory(&OldTimeZoneInformation, sizeof(OldTimeZoneInformation));
     HaveOldZone = NT_SUCCESS(RtlQueryTimeZoneInformation(&OldTimeZoneInformation));
+    HaveOldKeyName = TIME_QueryStoredKeyName(OldKeyName, ARRAYSIZE(OldKeyName));
 
     Status = RtlSetTimeZoneInformation(&TimeZoneInformation);
     if (!NT_SUCCESS(Status))
@@ -405,7 +409,19 @@ SetTimeZoneInformation(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation)
     {
         DPRINT1("NtSetSystemInformation() failed (Status %lx)\n", Status);
         if (HaveOldZone)
+        {
+            /* The rollback empties the key name, as every set does: put the old one back */
             RtlSetTimeZoneInformation(&OldTimeZoneInformation);
+            if (HaveOldKeyName)
+            {
+                RtlWriteRegistryValue(RTL_REGISTRY_CONTROL,
+                                      L"TimeZoneInformation",
+                                      L"TimeZoneKeyName",
+                                      REG_SZ,
+                                      OldKeyName,
+                                      (wcslen(OldKeyName) + 1) * sizeof(WCHAR));
+            }
+        }
         BaseSetLastNTError(Status);
         return FALSE;
     }
@@ -535,6 +551,27 @@ TIME_QueryStringValue(
     RtlCopyMemory(Buffer, Info.Partial.Data, DataLength);
     Buffer[DataLength / sizeof(WCHAR)] = UNICODE_NULL;
     return TRUE;
+}
+
+/* Reads the TimeZoneKeyName value of the active time zone; FALSE if there is none */
+static
+BOOL
+TIME_QueryStoredKeyName(
+    _Out_writes_(BufferLength) PWSTR Buffer,
+    _In_ ULONG BufferLength)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\TimeZoneInformation");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    BOOL Found;
+    HANDLE Key;
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
+        return FALSE;
+
+    Found = TIME_QueryStringValue(Key, L"TimeZoneKeyName", Buffer, BufferLength);
+    NtClose(Key);
+    return Found;
 }
 
 /* Reads a REG_DWORD value; FALSE if absent or not a four-byte REG_DWORD */

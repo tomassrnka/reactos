@@ -5555,18 +5555,10 @@ static void test_SetFileInformationByHandle(void)
 
     hintinfo.PriorityHint = IoPriorityHintNormal;
     ret = pSetFileInformationByHandle(file, FileIoPriorityHintInfo, &hintinfo, sizeof(hintinfo));
-#ifdef __REACTOS__
-    /* The I/O manager does not support FileIoPriorityHintInformation yet */
-    todo_if(is_reactos())
-#endif
     ok(ret, "setting FileIoPriorityHintInfo got %d, error %ld\n", ret, GetLastError());
 
     hintinfo.PriorityHint = IoPriorityHintVeryLow;
     ret = pSetFileInformationByHandle(file, FileIoPriorityHintInfo, &hintinfo, sizeof(hintinfo));
-#ifdef __REACTOS__
-    /* The I/O manager does not support FileIoPriorityHintInformation yet */
-    todo_if(is_reactos())
-#endif
     ok(ret, "setting FileIoPriorityHintInfo got %d, error %ld\n", ret, GetLastError());
 
     SetLastError(0xdeadbeef);

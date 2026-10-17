@@ -95,10 +95,17 @@ LoadStringA(
      * A size of zero is -1 for a string that has characters (measured on Windows 10); a string that is
      * empty or not there is zero, and the buffer gets its terminator all the same.
      */
+    if (!nBufferMax && p && *p)
+        return -1;
+
+    if (!lpBuffer)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
     if (!nBufferMax)
     {
-        if (p && *p)
-            return -1;
         lpBuffer[0] = 0;
         return 0;
     }

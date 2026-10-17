@@ -1504,8 +1504,9 @@ static void delete_key_values( HKEY key )
 
     while ((entry = enum_key( key, 0 )))
     {
-        RegDeleteValueW( key, entry );
+        LONG res = RegDeleteValueW( key, entry );
         HeapFree( GetProcessHeap(), 0, entry );
+        if (res) break;
     }
 }
 

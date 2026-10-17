@@ -120,8 +120,7 @@ SetFileInformationByHandle(
             break;
 
         case FileIoPriorityHintInfo:
-            /* Validated here; the I/O manager does not support this class yet,
-             * so a valid hint still fails with ERROR_INVALID_PARAMETER */
+            /* The hint is advisory: a valid one succeeds when the I/O manager has no such class */
             if (dwBufferSize < sizeof(FILE_IO_PRIORITY_HINT_INFO))
             {
                 SetLastError(ERROR_BAD_LENGTH);
@@ -145,6 +144,17 @@ SetFileInformationByHandle(
     }
 
     Status = NtSetInformationFile(hFile, &IoStatusBlock, lpFileInformation, dwBufferSize, NtClass);
+    if (Status == STATUS_INVALID_INFO_CLASS && FileInformationClass == FileIoPriorityHintInfo)
+    {
+        FILE_FS_DEVICE_INFORMATION DeviceInfo;
+
+        /* The I/O manager checks the class before the handle: have it check for a file handle */
+        Status = NtQueryVolumeInformationFile(hFile,
+                                              &IoStatusBlock,
+                                              &DeviceInfo,
+                                              sizeof(DeviceInfo),
+                                              FileFsDeviceInformation);
+    }
 
 Done:
     if (!NT_SUCCESS(Status))

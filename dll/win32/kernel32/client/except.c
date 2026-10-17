@@ -1177,6 +1177,8 @@ RaiseFailFastException(
     if (pExceptionRecord)
     {
         ExceptionRecord = *pExceptionRecord;
+        if (ExceptionRecord.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS)
+            ExceptionRecord.NumberParameters = EXCEPTION_MAXIMUM_PARAMETERS;
         if (dwFlags & FAIL_FAST_GENERATE_EXCEPTION_ADDRESS)
             ExceptionRecord.ExceptionAddress = _ReturnAddress();
     }
@@ -1202,8 +1204,6 @@ RaiseFailFastException(
     {
         /* Reported like an unhandled exception; no filter runs, as on Windows.
            The record comes from the caller, and the reporter copies its parameters */
-        if (ExceptionRecord.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS)
-            ExceptionRecord.NumberParameters = EXCEPTION_MAXIMUM_PARAMETERS;
         if (!pContextRecord)
         {
             RtlZeroMemory(&Context, sizeof(Context));

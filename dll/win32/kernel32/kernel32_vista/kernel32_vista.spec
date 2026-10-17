@@ -94,5 +94,5 @@
 @ stdcall WaitForThreadpoolWaitCallbacks(ptr long) ntdll_vista.TpWaitForWait
 @ stdcall WaitForThreadpoolWorkCallbacks(ptr long) ntdll_vista.TpWaitForWork
 
-@ stdcall WerGetFlags(ptr ptr)
-@ stdcall WerSetFlags(long)
+@ stdcall -version=0x400-0x5ff WerGetFlags(ptr ptr)
+@ stdcall -version=0x400-0x5ff WerSetFlags(long)
