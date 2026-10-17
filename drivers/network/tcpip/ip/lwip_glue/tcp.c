@@ -79,17 +79,22 @@ LibTCPEmptyQueue(PCONNECTION_ENDPOINT Connection)
     DereferenceObject(Connection);
 }
 
-void LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
+err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
 {
     PQUEUE_ENTRY qp;
 
     qp = (PQUEUE_ENTRY)ExAllocateFromNPagedLookasideList(&QueueEntryLookasideList);
+    if (!qp)
+        return ERR_MEM;
+
     qp->p = p;
     qp->Offset = 0;
 
     LockObject(Connection);
     InsertTailList(&Connection->PacketQueue, &qp->ListEntry);
     UnlockObject(Connection);
+
+    return ERR_OK;
 }
 
 PQUEUE_ENTRY LibTCPDequeuePacket(PCONNECTION_ENDPOINT Connection)
@@ -238,7 +243,10 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
         /* A reader may consume and free the segment as soon as it is queued */
         u16_t Length = p->tot_len;
 
-        LibTCPEnqueuePacket(Connection, p);
+        /* On lookaside exhaustion let lwIP keep the pbuf and retry later
+         * instead of dereferencing a NULL queue entry */
+        if (LibTCPEnqueuePacket(Connection, p) != ERR_OK)
+            return ERR_MEM;
 
         tcp_recved(pcb, Length);
 
@@ -1303,8 +1311,20 @@ LibTCPShutdownCallback(void *arg)
         /* We received both RX and TX requests, which seems to mean closing connection from TDI.
          * So call tcp_close, otherwise we risk to be put in TCP_WAIT_* states, which makes further
          * attempts to close the socket to fail in this state.
+         *
+         * tcp_close frees the PCB on success, so detach the socket context and the
+         * callback argument before the call (mirroring LibTCPCloseCallback) and restore
+         * them if the close fails and the PCB survives. Clearing SocketContext also stops
+         * the epilogue below from touching the freed PCB.
          */
+        msg->Input.Shutdown.Connection->SocketContext = NULL;
+        tcp_arg(pcb, NULL);
         msg->Output.Shutdown.Error = tcp_close(pcb);
+        if (msg->Output.Shutdown.Error)
+        {
+            msg->Input.Shutdown.Connection->SocketContext = pcb;
+            tcp_arg(pcb, msg->Input.Shutdown.Connection);
+        }
     }
     else {
         /* This case shouldn't happen */
@@ -1325,9 +1345,16 @@ LibTCPShutdownCallback(void *arg)
         if (msg->Input.Shutdown.Connection->ReceiveShutdown &&
             msg->Input.Shutdown.Connection->SendShutdown)
         {
-            /* The PCB is not ours anymore */
-            msg->Input.Shutdown.Connection->SocketContext = NULL;
-            tcp_arg(pcb, NULL);
+            /* The PCB is not ours anymore. If the tcp_close path above already
+             * detached and freed it, SocketContext is NULL and the PCB must not
+             * be touched; only detach here when it is still alive (the
+             * tcp_shutdown path).
+             */
+            if (msg->Input.Shutdown.Connection->SocketContext)
+            {
+                msg->Input.Shutdown.Connection->SocketContext = NULL;
+                tcp_arg(pcb, NULL);
+            }
             TCPFinEventHandler(msg->Input.Shutdown.Connection, ERR_CLSD);
         }
     }

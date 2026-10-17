@@ -233,10 +233,15 @@ PADDRESS_FILE AddrFindShared(
 
         /* See if this address matches the search criteria */
         if ((Current->Port == Port) &&
-            (Current->Protocol == Protocol))
+            (Current->Protocol == Protocol) &&
+            /* Skip an address file whose last sharer has gone: FileCloseAddress
+             * has decided to tear it down and is about to drop its reference, so
+             * reviving it here would race that into a use-after-free. The count
+             * is read under AddressFileListLock, the same lock the close path
+             * takes around the decrement, so the zero transition is atomic. */
+            (Current->Sharers != 0))
         {
             /* Increase the sharer count */
-            ASSERT(Current->Sharers != 0);
             InterlockedIncrement(&Current->Sharers);
             break;
         }
@@ -642,12 +647,21 @@ NTSTATUS FileCloseAddress(
 {
   PADDRESS_FILE AddrFile = Request->Handle.AddressHandle;
   PCONNECTION_ENDPOINT Listener;
+  KIRQL OldIrql;
+  BOOLEAN LastSharer;
 
   if (!Request->Handle.AddressHandle) return STATUS_INVALID_PARAMETER;
 
   LockObject(AddrFile);
 
-  if (InterlockedDecrement(&AddrFile->Sharers) != 0)
+  /* Decrement the sharer count under AddressFileListLock so the transition to
+   * zero is atomic against AddrFindShared, which must not revive an address
+   * file whose last sharer has gone. */
+  TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+  LastSharer = (InterlockedDecrement(&AddrFile->Sharers) == 0);
+  TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+
+  if (!LastSharer)
   {
       /* Still other guys have open handles to this, so keep it around */
       UnlockObject(AddrFile);
