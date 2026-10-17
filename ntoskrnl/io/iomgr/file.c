@@ -4266,7 +4266,8 @@ IopCancelApcNormalRoutine(IN PVOID NormalContext,
                             CancelApc->IoRequestToCancel);
     KeLowerIrql(OldIrql);
 
-    ObDereferenceObject(CancelApc->FileObject);
+    /* Defer: the last deref must not run IopDeleteFile inside this cancel APC */
+    ObDereferenceObjectDeferDelete(CancelApc->FileObject);
     ExFreePoolWithTag(CancelApc, TAG_IO);
 }
 
