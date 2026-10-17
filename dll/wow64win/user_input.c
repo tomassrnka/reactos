@@ -42,12 +42,44 @@ static VOID Free(PVOID Block) { if (Block) RtlFreeHeap(RtlGetProcessHeap(), 0, B
 /* The guest owns the low 4 GiB; a range may not run into native-only addresses. */
 static BOOLEAN GuestRange(ULONG Address, ULONGLONG Length) { return Length <= 0x100000000ULL - Address; }
 
-static VOID Touch(ULONG Address, ULONG Length)
+/* Mirrors ProbeForWrite: the range must lie in the guest space and every page must be writable. */
+static NTSTATUS Touch(ULONG Address, ULONGLONG Length)
 {
-    ULONG Off;
-    if (!Length) return;
-    for (Off = 0; Off < Length; Off += 0x1000) *(volatile BYTE *)P32(Address + Off) = *(volatile BYTE *)P32(Address + Off);
-    *(volatile BYTE *)P32(Address + Length - 1) = *(volatile BYTE *)P32(Address + Length - 1);
+    ULONGLONG Off;
+    NTSTATUS Status = STATUS_SUCCESS;
+    if (!Length) return STATUS_SUCCESS;
+    if (!GuestRange(Address, Length)) return STATUS_ACCESS_VIOLATION;
+    _SEH2_TRY
+    {
+        for (Off = 0; Off < Length; Off += 0x1000)
+            *(volatile BYTE *)P32(Address + Off) = *(volatile BYTE *)P32(Address + Off);
+        *(volatile BYTE *)P32(Address + Length - 1) = *(volatile BYTE *)P32(Address + Length - 1);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
+    _SEH2_END;
+    return Status;
+}
+
+static NTSTATUS GuestRead32(ULONG Address, ULONG *Value)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    if (Address & 3) return STATUS_DATATYPE_MISALIGNMENT;
+    if (!GuestRange(Address, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    _SEH2_TRY { *Value = *(volatile ULONG *)P32(Address); }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
+    _SEH2_END;
+    return Status;
+}
+
+static NTSTATUS GuestWrite32(ULONG Address, ULONG Value)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    if (Address & 3) return STATUS_DATATYPE_MISALIGNMENT;
+    if (!GuestRange(Address, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    _SEH2_TRY { *(volatile ULONG *)P32(Address) = Value; }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
+    _SEH2_END;
+    return Status;
 }
 
 /* Device handles are kernel pointers; the guest sees stable 32-bit tokens, oldest evicted first. */
@@ -191,37 +223,33 @@ static ULONG_PTR RawBuffer32(ULONG *a)
     UINT Local = 0;
     ULONG_PTR Result;
     DWORD Ret;
-    NTSTATUS Fault = STATUS_SUCCESS;
+    NTSTATUS Status;
     BYTE *Buf;
     BOOLEAN Ok = TRUE;
 
     if (a[2] != sizeof(RAWINPUTHEADER32) || !a[1]) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
-    _SEH2_TRY { Capacity = *(volatile ULONG *)P(1); }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
-    _SEH2_END;
-    if (Fault) { SetNtError(Fault); return FAIL32; }
+    Status = GuestRead32(a[1], &Capacity);
+    if (Status) { SetNtError(Status); return FAIL32; }
 
     if (!a[0])
     {
+        /* Native leaves the size alone when the thread has no queue. */
+        Local = 0xFFFFFFFF;
         Ret = NtUserGetRawInputBuffer(NULL, &Local, sizeof(RAWINPUTHEADER));
         if (Ret == (DWORD)-1) return FAIL32;
-        _SEH2_TRY { *(volatile ULONG *)P(1) = Local >= sizeof(RAWINPUTHEADER) ? Local - (ULONG)HEADER_DELTA : 0; }
-        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
-        _SEH2_END;
-        if (Fault) { SetNtError(Fault); return FAIL32; }
+        if (Local == 0xFFFFFFFF) return Ret;
+        Status = GuestWrite32(a[1], Local >= sizeof(RAWINPUTHEADER) ? Local - (ULONG)HEADER_DELTA : 0);
+        if (Status) { SetNtError(Status); return FAIL32; }
         return Ret;
     }
 
     if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
-    Limit = min(Capacity, RAWBUFFER_MAX);
-    if (!GuestRange(a[0], Limit)) { SetNtError(STATUS_ACCESS_VIOLATION); return FAIL32; }
-    /* The native call retires queued messages, so the destination must be writable before it runs. */
-    _SEH2_TRY { Touch(a[0], Limit); }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
-    _SEH2_END;
-    if (Fault) { SetNtError(Fault); return FAIL32; }
+    /* The native call retires queued messages, so the whole destination must be writable before it runs. */
+    Status = Touch(a[0], Capacity);
+    if (Status) { SetNtError(Status); return FAIL32; }
 
     /* Eight spare native bytes let the first record fit exactly when its guest form does. */
+    Limit = min(Capacity, RAWBUFFER_MAX);
     Initial = Limit + (ULONG)HEADER_DELTA;
     Buf = Alloc(Initial);
     if (!Buf) { RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY); return FAIL32; }
@@ -245,26 +273,27 @@ static ULONG_PTR RawBuffer32(ULONG *a)
         Count = Ret;
     }
 
+    Status = STATUS_SUCCESS;
     _SEH2_TRY
     {
         if (Count && !RawRecordsOut(Buf, Initial, Count, a[0], Limit)) Ok = FALSE;
-        if ((Ret == (DWORD)-1 && Local != 0) || (Ret != (DWORD)-1 && Local != Initial))
-            *(volatile ULONG *)P(1) = Local >= sizeof(RAWINPUTHEADER) ? Local - (ULONG)HEADER_DELTA : 0;
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
     _SEH2_END;
     Free(Buf);
-    if (Fault) { SetNtError(Fault); return FAIL32; }
+    if (!Status && ((Ret == (DWORD)-1 && Local != 0) || (Ret != (DWORD)-1 && Local != Initial)))
+        Status = GuestWrite32(a[1], Local >= sizeof(RAWINPUTHEADER) ? Local - (ULONG)HEADER_DELTA : 0);
+    if (Status) { SetNtError(Status); return FAIL32; }
     if (!Ok) { RtlSetLastWin32Error(ERROR_INVALID_DATA); return FAIL32; }
     return Result;
 }
 
 static ULONG_PTR RawData32(ULONG *a)
 {
-    ULONG NativeSize = 0, Guest = 0, Size32;
+    ULONG NativeSize, Guest = 0, Size32;
     UINT Local = 0;
     DWORD Ret;
-    NTSTATUS Fault = STATUS_SUCCESS;
+    NTSTATUS Status;
     BYTE *Buf;
     HANDLE Raw = G(0);
     RAWINPUTHEADER Header;
@@ -279,17 +308,13 @@ static ULONG_PTR RawData32(ULONG *a)
     if (NativeSize < sizeof(RAWINPUTHEADER)) { RtlSetLastWin32Error(ERROR_INVALID_DATA); return FAIL32; }
     Size32 = NativeSize - (ULONG)HEADER_DELTA;
 
-    _SEH2_TRY
-    {
-        Guest = *(volatile ULONG *)P(3);
-        if (!a[2]) *(volatile ULONG *)P(3) = Size32;
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
-    _SEH2_END;
-    if (Fault) { SetNtError(Fault); return FAIL32; }
+    Status = GuestRead32(a[3], &Guest);
+    if (!Status && !a[2]) Status = GuestWrite32(a[3], Size32);
+    if (Status) { SetNtError(Status); return FAIL32; }
     if (!a[2]) return 0;
     if (Guest < Size32) { RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER); return FAIL32; }
-    if (!GuestRange(a[2], Size32)) { SetNtError(STATUS_ACCESS_VIOLATION); return FAIL32; }
+    Status = Touch(a[2], Size32);
+    if (Status) { SetNtError(Status); return FAIL32; }
 
     Buf = Alloc(NativeSize);
     if (!Buf) { RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY); return FAIL32; }
@@ -306,27 +331,25 @@ static ULONG_PTR RawData32(ULONG *a)
         if (a[1] == RID_INPUT)
             RtlCopyMemory((BYTE *)P(2) + sizeof(Header32), Buf + sizeof(Header), NativeSize - sizeof(Header));
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
     _SEH2_END;
     Free(Buf);
-    if (Fault) { SetNtError(Fault); return FAIL32; }
+    if (Status) { SetNtError(Status); return FAIL32; }
     return Size32;
 }
 
 static ULONG_PTR RawDeviceList32(ULONG *a)
 {
-    ULONG Try, Guest = 0, Count, i;
+    ULONG Try, Guest = 0, Count, Grown = 0, i;
     UINT Local;
     DWORD Ret;
-    NTSTATUS Fault = STATUS_SUCCESS;
+    NTSTATUS Status;
     RAWINPUTDEVICELIST *Native;
 
     if (a[2] != sizeof(RAWINPUTDEVICELIST32)) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
     if (!a[0]) return NtUserGetRawInputDeviceList(NULL, P(1), sizeof(RAWINPUTDEVICELIST));
-    _SEH2_TRY { Guest = *(volatile ULONG *)P(1); }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
-    _SEH2_END;
-    if (Fault) { SetNtError(Fault); return FAIL32; }
+    Status = GuestRead32(a[1], &Guest);
+    if (Status) { SetNtError(Status); return FAIL32; }
 
     for (Try = 0; Try < RETRIES; ++Try)
     {
@@ -336,14 +359,13 @@ static ULONG_PTR RawDeviceList32(ULONG *a)
         Count = Local;
         if (Guest < Count)
         {
-            _SEH2_TRY { *(volatile ULONG *)P(1) = Count; }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
-            _SEH2_END;
-            if (Fault) SetNtError(Fault); else RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
+            Status = GuestWrite32(a[1], Count);
+            if (Status) SetNtError(Status); else RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
             return FAIL32;
         }
         if (!Count) return 0;
-        if (!GuestRange(a[0], (ULONGLONG)Count * sizeof(RAWINPUTDEVICELIST32))) { SetNtError(STATUS_ACCESS_VIOLATION); return FAIL32; }
+        Status = Touch(a[0], (ULONGLONG)Count * sizeof(RAWINPUTDEVICELIST32));
+        if (Status) { SetNtError(Status); return FAIL32; }
         Native = Alloc((ULONGLONG)Count * sizeof(*Native));
         if (!Native) { RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY); return FAIL32; }
         Local = Count;
@@ -361,41 +383,60 @@ static ULONG_PTR RawDeviceList32(ULONG *a)
                     RtlCopyMemory(&Out[i], &Item, sizeof(Item));
                 }
             }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
             _SEH2_END;
             Free(Native);
-            if (Fault) { SetNtError(Fault); return FAIL32; }
+            if (Status) { SetNtError(Status); return FAIL32; }
             return Ret;
         }
         Free(Native);
         if (Local <= Count) return FAIL32;
+        Grown = Local;
     }
-    RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
+    Status = GuestWrite32(a[1], Grown);
+    if (Status) SetNtError(Status); else RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
     return FAIL32;
 }
 
 static ULONG_PTR RawDeviceInfo32(ULONG *a)
 {
-    /* RID_DEVICE_INFO and the name and preparsed buffers have one layout on both targets. */
-    return NtUserGetRawInputDeviceInfo(DeviceFromToken(a[0]), a[1], P(2), P(3));
+    ULONG Size = 0;
+    UINT Local;
+    DWORD Ret;
+    NTSTATUS Status;
+
+    /* RID_DEVICE_INFO and the name and preparsed buffers share one layout. The size is read once and the
+     * native service gets a private copy, so the range bound below holds for what it writes. */
+    Status = GuestRead32(a[3], &Size);
+    if (Status) { SetNtError(Status); return FAIL32; }
+    if (a[2] && !GuestRange(a[2], a[1] == RIDI_DEVICENAME ? (ULONGLONG)Size * sizeof(WCHAR) : Size))
+    { SetNtError(STATUS_ACCESS_VIOLATION); return FAIL32; }
+    Local = Size;
+    Ret = NtUserGetRawInputDeviceInfo(DeviceFromToken(a[0]), a[1], P(2), &Local);
+    if (Local != Size || (!a[2] && Ret != (DWORD)-1))
+    {
+        Status = GuestWrite32(a[3], Local);
+        if (Status) { SetNtError(Status); return FAIL32; }
+    }
+    return Ret;
 }
 
 static ULONG_PTR RawRegistered32(ULONG *a)
 {
-    ULONG Try, Guest = 0, Count, i;
+    ULONG Try, Guest = 0, Count, Grown = 0, i;
     UINT Local;
     DWORD Ret;
-    NTSTATUS Fault = STATUS_SUCCESS;
+    NTSTATUS Status;
     RAWINPUTDEVICE *Native;
 
     if (a[2] != sizeof(RAWINPUTDEVICE32)) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
     if (!a[0]) return NtUserGetRegisteredRawInputDevices(NULL, P(1), sizeof(RAWINPUTDEVICE));
-    _SEH2_TRY { Guest = *(volatile ULONG *)P(1); }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
-    _SEH2_END;
-    if (Fault) { SetNtError(Fault); return FAIL32; }
+    Status = GuestRead32(a[1], &Guest);
+    if (Status) { SetNtError(Status); return FAIL32; }
     if (!Guest) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
-    if (!GuestRange(a[0], (ULONGLONG)Guest * sizeof(RAWINPUTDEVICE32))) { RtlSetLastWin32Error(ERROR_NOACCESS); return FAIL32; }
+    /* Native probes the declared capacity before comparing it with the registered count. */
+    Status = Touch(a[0], (ULONGLONG)Guest * sizeof(RAWINPUTDEVICE32));
+    if (Status) { SetNtError(Status); return FAIL32; }
 
     for (Try = 0; Try < RETRIES; ++Try)
     {
@@ -405,10 +446,8 @@ static ULONG_PTR RawRegistered32(ULONG *a)
         Count = Local;
         if (Guest < Count)
         {
-            _SEH2_TRY { *(volatile ULONG *)P(1) = Count; }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
-            _SEH2_END;
-            if (Fault) SetNtError(Fault); else RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
+            Status = GuestWrite32(a[1], Count);
+            if (Status) SetNtError(Status); else RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
             return FAIL32;
         }
         if (!Count) return 0;
@@ -429,23 +468,25 @@ static ULONG_PTR RawRegistered32(ULONG *a)
                     RtlCopyMemory(&Out[i], &Item, sizeof(Item));
                 }
             }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
             _SEH2_END;
             Free(Native);
-            if (Fault) { SetNtError(Fault); return FAIL32; }
+            if (Status) { SetNtError(Status); return FAIL32; }
             return Ret;
         }
         Free(Native);
         if (Local <= Count) return FAIL32;
+        Grown = Local;
     }
-    RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
+    Status = GuestWrite32(a[1], Grown);
+    if (Status) SetNtError(Status); else RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
     return FAIL32;
 }
 
 static ULONG_PTR RawRegister32(ULONG *a)
 {
     ULONG i;
-    NTSTATUS Fault = STATUS_SUCCESS;
+    NTSTATUS Status = STATUS_SUCCESS;
     RAWINPUTDEVICE *Native;
     BOOL Ret;
 
@@ -465,9 +506,9 @@ static ULONG_PTR RawRegister32(ULONG *a)
             Native[i].dwFlags = Item.dwFlags; Native[i].hwndTarget = H32(Item.hwndTarget);
         }
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
     _SEH2_END;
-    if (Fault) { Free(Native); SetNtError(Fault); return FALSE; }
+    if (Status) { Free(Native); SetNtError(Status); return FALSE; }
     Ret = NtUserRegisterRawInputDevices(Native, a[1], sizeof(RAWINPUTDEVICE));
     Free(Native);
     return Ret;
@@ -480,7 +521,7 @@ static ULONG_PTR MouseMove32(ULONG *a)
     const MOUSEMOVEPOINT32 *GuestIn = P(1), *GuestOut = P(2);
     INT n = (INT)a[3], i;
     DWORD Ret;
-    NTSTATUS Fault = STATUS_SUCCESS;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     if (a[0] != sizeof(MOUSEMOVEPOINT32) || n < 0 || n > MOUSEMOVE_MAX) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
     if (!a[1] || (!a[2] && n)) { RtlSetLastWin32Error(ERROR_NOACCESS); return FAIL32; }
@@ -494,9 +535,15 @@ static ULONG_PTR MouseMove32(ULONG *a)
         RtlCopyMemory(&Item, GuestIn, sizeof(Item));
         In.x = Item.x; In.y = Item.y; In.time = Item.time; In.dwExtraInfo = Item.dwExtraInfo;
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
     _SEH2_END;
-    if (Fault) { SetNtError(Fault); return FAIL32; }
+    if (Status) { SetNtError(Status); return FAIL32; }
+    /* Native probes one element for write in display-point mode and writes none. */
+    if (n && a[4] == GMMP_USE_DISPLAY_POINTS)
+    {
+        Status = Touch(a[2], sizeof(MOUSEMOVEPOINT32));
+        if (Status) { SetNtError(Status); return FAIL32; }
+    }
     /* The destination may be unreadable; then the untouched entries start as zero and are never copied back. */
     _SEH2_TRY
     {
@@ -522,15 +569,38 @@ static ULONG_PTR MouseMove32(ULONG *a)
                 RtlCopyMemory((PVOID)&GuestOut[i], &Item, sizeof(Item));
             }
         }
-        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Fault = _SEH2_GetExceptionCode(); }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
         _SEH2_END;
-        if (Fault) { SetNtError(Fault); return FAIL32; }
+        if (Status) { SetNtError(Status); return FAIL32; }
     }
     return Ret;
 }
 
-ULONG_PTR Wow64WinUserInputService(ULONG Number, ULONG *a)
+static ULONG ArgumentCount(ULONG Number)
 {
+    switch (Number)
+    {
+    case W64_NtUserSendInput: case W64_NtUserGetRawInputBuffer: case W64_NtUserGetRawInputDeviceList:
+    case W64_NtUserGetRegisteredRawInputDevices: case W64_NtUserRegisterRawInputDevices:
+        return 3;
+    case W64_NtUserGetRawInputDeviceInfo: return 4;
+    case W64_NtUserGetRawInputData: case W64_NtUserGetMouseMovePointsEx: return 5;
+    default: return 0;
+    }
+}
+
+ULONG_PTR Wow64WinUserInputService(ULONG Number, ULONG *Guest)
+{
+    ULONG a[5], Count = ArgumentCount(Number), i;
+
+    if (!Count) return Wow64WinUserImeService(Number, Guest);
+    if ((ULONGLONG)(ULONG_PTR)Guest + Count * sizeof(ULONG) > 0x100000000ULL)
+    {
+        SetNtError(STATUS_ACCESS_VIOLATION);
+        return Number == W64_NtUserSendInput || Number == W64_NtUserRegisterRawInputDevices ? 0 : FAIL32;
+    }
+    /* Another guest thread can rewrite the argument words while a service runs. */
+    for (i = 0; i < Count; ++i) a[i] = ((const volatile ULONG *)Guest)[i];
     switch (Number)
     {
     case W64_NtUserSendInput: return SendInput32(a);
@@ -540,8 +610,6 @@ ULONG_PTR Wow64WinUserInputService(ULONG Number, ULONG *a)
     case W64_NtUserGetRawInputDeviceList: return RawDeviceList32(a);
     case W64_NtUserGetRegisteredRawInputDevices: return RawRegistered32(a);
     case W64_NtUserRegisterRawInputDevices: return RawRegister32(a);
-    case W64_NtUserGetMouseMovePointsEx: return MouseMove32(a);
-    default:
-        return Wow64WinUserImeService(Number, a);
+    default: return MouseMove32(a);
     }
 }
