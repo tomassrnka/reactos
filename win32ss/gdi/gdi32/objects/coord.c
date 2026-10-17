@@ -500,7 +500,7 @@ SetViewportExtEx(
     if ((pdcattr->iMapMode == MM_ISOTROPIC) ||
         (pdcattr->iMapMode == MM_ANISOTROPIC))
     {
-        if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+        if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
         {
             if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
             {
@@ -556,7 +556,7 @@ SetWindowOrgEx(
     if ((pdcattr->ptlWindowOrg.x == X) && (pdcattr->ptlWindowOrg.y == Y))
         return TRUE;
 
-    if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+    if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
     {
         if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
         {
@@ -627,7 +627,7 @@ SetWindowExtEx(
         if ((!nXExtent) || (!nYExtent))
             return FALSE;
 
-        if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+        if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
         {
             if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
             {
@@ -670,7 +670,7 @@ SetViewportOrgEx(
         return FALSE;
     }
     //// HACK : XP+ doesn't do this. See CORE-16656 & CORE-16644.
-    if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+    if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
     {
         if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
         {
@@ -881,7 +881,7 @@ OffsetViewportOrgEx(
 
     if ( nXOffset || nYOffset != nXOffset )
     {
-        if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+        if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
         {
             if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
             {
@@ -935,7 +935,7 @@ OffsetWindowOrgEx(
 
     if ( nXOffset || nYOffset != nXOffset )
     {
-        if (NtCurrentTeb()->GdiTebBatch.HDC == hdc)
+        if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hdc))
         {
             if (pdcattr->ulDirty_ & DC_MODE_DIRTY)
             {

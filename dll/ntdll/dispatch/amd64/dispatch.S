@@ -22,6 +22,11 @@ EXTERN RtlRaiseStatus:PROC
 PUBLIC Wow64PrepareForException
 Wow64PrepareForException:
     .quad 0
+#ifdef BUILD_WOW64_ENABLED
+PUBLIC Wow64PrepareForApc
+Wow64PrepareForApc:
+    .quad 0
+#endif
 
 .code
 
@@ -72,7 +77,21 @@ PUBLIC KiUserApcDispatcher
     mov rdx, [rsp + CONTEXT_P2Home] /* SystemArgument1 */
     mov r8, [rsp + CONTEXT_P3Home]  /* SystemArgument2 */
     lea r9, [rsp]                   /* Context */
+#ifdef BUILD_WOW64_ENABLED
+    mov rax, [rsp + CONTEXT_P4Home]
+    test rax, rax
+    jns NativeApc
+    mov rax, qword ptr Wow64PrepareForApc[rip]
+    test rax, rax
+    jz NativeApc
+    call rax
+    jmp ApcReturn
+NativeApc:
+#endif
     call qword ptr [rsp + CONTEXT_P4Home] /* NormalRoutine */
+#ifdef BUILD_WOW64_ENABLED
+ApcReturn:
+#endif
 
     /* NtContinue(Context, TRUE); */
     lea rcx, [rsp]

@@ -2773,7 +2773,22 @@ NtReadFile(IN HANDLE FileHandle,
     IO_STATUS_BLOCK KernelIosb;
     BOOLEAN Success;
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Wow64Iosb = FALSE;
+#endif
+
     PAGED_CODE();
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Bit 63 marks an explicit eight-byte IOSB supplied by wow64.dll. The
+     * marker is stripped before probing; malformed/native pointers retain
+     * the ordinary native ABI and fail its normal probe. */
+    if (PreviousMode == UserMode && PsGetCurrentProcess()->Wow64Process &&
+        ((ULONG64)IoStatusBlock >> 32) == 0x80000000)
+    {
+        Wow64Iosb = TRUE;
+        IoStatusBlock = (PVOID)(ULONG_PTR)(ULONG)(ULONG_PTR)IoStatusBlock;
+    }
+#endif
     CapturedByteOffset.QuadPart = 0;
     IOTRACE(IO_API_DEBUG, "FileHandle: %p\n", FileHandle);
 
@@ -2795,7 +2810,11 @@ NtReadFile(IN HANDLE FileHandle,
         _SEH2_TRY
         {
             /* Probe the status block */
-            ProbeForWriteIoStatusBlock(IoStatusBlock);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            if (Wow64Iosb) ProbeForWrite(IoStatusBlock, sizeof(IO_STATUS_BLOCK32), sizeof(ULONG));
+            else
+#endif
+                ProbeForWriteIoStatusBlock(IoStatusBlock);
 
             /* Probe the read buffer */
             ProbeForWrite(Buffer, Length, 1);
@@ -2923,7 +2942,11 @@ NtReadFile(IN HANDLE FileHandle,
         }
 
         /* If the file is cached, try fast I/O */
-        if (FileObject->PrivateCacheMap)
+        if (FileObject->PrivateCacheMap
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            && !(Wow64Iosb && ApcRoutine)
+#endif
+           )
         {
             /* Perform fast read */
             FastIoDispatch = DeviceObject->DriverObject->FastIoDispatch;
@@ -2953,7 +2976,16 @@ NtReadFile(IN HANDLE FileHandle,
                 _SEH2_TRY
                 {
                     /* Write it back to the caller */
-                    *IoStatusBlock = KernelIosb;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                    if (Wow64Iosb)
+                    {
+                        ((PIO_STATUS_BLOCK32)IoStatusBlock)->Information = (ULONG)KernelIosb.Information;
+                        KeMemoryBarrier();
+                        ((PIO_STATUS_BLOCK32)IoStatusBlock)->Status = KernelIosb.Status;
+                    }
+                    else
+#endif
+                        *IoStatusBlock = KernelIosb;
                 }
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
@@ -3089,6 +3121,9 @@ NtReadFile(IN HANDLE FileHandle,
     /* Now set the deferred read flags */
     Irp->Flags |= (IRP_READ_OPERATION | IRP_DEFER_IO_COMPLETION);
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Wow64Iosb) Irp->Flags |= IRP_WOW64_IO_STATUS;
+#endif
     if (FileObject->Flags & FO_NO_INTERMEDIATE_BUFFERING) Irp->Flags |= IRP_NOCACHE;
 
     /* Perform the call */
@@ -3862,7 +3897,22 @@ NtWriteFile(IN HANDLE FileHandle,
     BOOLEAN Success;
     BOOLEAN AppendOnly = FALSE;
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    BOOLEAN Wow64Iosb = FALSE;
+#endif
+
     PAGED_CODE();
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Bit 63 marks an explicit eight-byte IOSB supplied by wow64.dll. The
+     * marker is stripped before probing; malformed/native pointers retain
+     * the ordinary native ABI and fail its normal probe. */
+    if (PreviousMode == UserMode && PsGetCurrentProcess()->Wow64Process &&
+        ((ULONG64)IoStatusBlock >> 32) == 0x80000000)
+    {
+        Wow64Iosb = TRUE;
+        IoStatusBlock = (PVOID)(ULONG_PTR)(ULONG)(ULONG_PTR)IoStatusBlock;
+    }
+#endif
     CapturedByteOffset.QuadPart = 0;
     IOTRACE(IO_API_DEBUG, "FileHandle: %p\n", FileHandle);
 
@@ -3882,7 +3932,11 @@ NtWriteFile(IN HANDLE FileHandle,
         _SEH2_TRY
         {
             /* Probe the status block */
-            ProbeForWriteIoStatusBlock(IoStatusBlock);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            if (Wow64Iosb) ProbeForWrite(IoStatusBlock, sizeof(IO_STATUS_BLOCK32), sizeof(ULONG));
+            else
+#endif
+                ProbeForWriteIoStatusBlock(IoStatusBlock);
 
             /* Probe the read buffer */
             ProbeForRead(Buffer, Length, 1);
@@ -4028,7 +4082,11 @@ NtWriteFile(IN HANDLE FileHandle,
         }
 
         /* If the file is cached, try fast I/O */
-        if (FileObject->PrivateCacheMap)
+        if (FileObject->PrivateCacheMap
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+            && !(Wow64Iosb && ApcRoutine)
+#endif
+           )
         {
             /* Perform fast write */
             FastIoDispatch = DeviceObject->DriverObject->FastIoDispatch;
@@ -4056,7 +4114,16 @@ NtWriteFile(IN HANDLE FileHandle,
                 _SEH2_TRY
                 {
                     /* Write it back to the caller */
-                    *IoStatusBlock = KernelIosb;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                    if (Wow64Iosb)
+                    {
+                        ((PIO_STATUS_BLOCK32)IoStatusBlock)->Information = (ULONG)KernelIosb.Information;
+                        KeMemoryBarrier();
+                        ((PIO_STATUS_BLOCK32)IoStatusBlock)->Status = KernelIosb.Status;
+                    }
+                    else
+#endif
+                        *IoStatusBlock = KernelIosb;
                 }
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
@@ -4193,6 +4260,9 @@ NtWriteFile(IN HANDLE FileHandle,
     /* Now set the deferred read flags */
     Irp->Flags |= (IRP_WRITE_OPERATION | IRP_DEFER_IO_COMPLETION);
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Wow64Iosb) Irp->Flags |= IRP_WOW64_IO_STATUS;
+#endif
     if (FileObject->Flags & FO_NO_INTERMEDIATE_BUFFERING) Irp->Flags |= IRP_NOCACHE;
 
     /* Perform the call */

@@ -189,6 +189,25 @@ static NTSTATUS Call(ULONG *a)
         Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(Message.Data.VerifyHandleRequest));
         Data[0] = Message.Data.VerifyHandleRequest.IsValid;
         return Status;
+    case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepCreateThread):
+    {
+        BASE_API_MESSAGE BaseMessage = {0};
+        if (a[3] != 3 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        BaseMessage.Data.CreateThreadRequest.ThreadHandle = HANDLE32(Data[0]);
+        BaseMessage.Data.CreateThreadRequest.ClientId.UniqueProcess = HANDLE32(Data[1]);
+        BaseMessage.Data.CreateThreadRequest.ClientId.UniqueThread = HANDLE32(Data[2]);
+        return CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api,
+                                  sizeof(BASE_CREATE_THREAD));
+    }
+    case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepGetTempFile):
+    {
+        BASE_API_MESSAGE BaseMessage = {0};
+        if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api,
+                                     sizeof(BASE_GET_TEMP_FILE));
+        Data[0] = BaseMessage.Data.GetTempFileRequest.UniqueID;
+        return Status;
+    }
     case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepExitProcess):
     {
         BASE_API_MESSAGE BaseMessage = {0};

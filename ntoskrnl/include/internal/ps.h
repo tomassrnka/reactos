@@ -598,3 +598,7 @@ extern ULONG_PTR PsNtosImageBase;
 // Inlined Functions
 //
 #include "ps_x.h"
+
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+NTSTATUS NTAPI PspWow64ContextThread(HANDLE, PVOID, ULONG, BOOLEAN, KPROCESSOR_MODE);
+#endif

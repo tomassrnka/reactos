@@ -1,0 +1,21 @@
+id	name	implementation	detail
+0	WINDOWPROC	partial	CREATE/NCCREATE; WINDOWPOS; NCCALCSIZE; flat payloads including WM_SETTINGCHANGE; scalar messages; nested unwind
+1	SENDASYNCPROC	translated	five scalar/pointer slots; callback return has no output
+2	LOADSYSMENUTEMPLATE	translated	32-bit LRESULT widened to native HMENU
+3	LOADDEFAULTCURSORS	translated	BOOL input; HCURSOR result widened
+4	HOOKPROC	unsupported	hook-dependent payloads and unwind require translation
+5	EVENTPROC	unsupported	registration is not supported
+6	LOADMENU	translated	module and resource/name input; HMENU result
+7	CLIENTTHREADSTARTUP	translated	no payload or output
+8	CLIENTLOADLIBRARY	translated	relative UNICODE_STRING offsets; BOOL result in native-size storage
+9	GETCHARSETINFO	translated	fixed-width input/output; validated length and captured result
+10	COPYIMAGE	translated	image type chooses GDI or USER result extension
+11	SETWNDICONS	translated	seven guest handles packed to 28 bytes; 56-byte native result
+12	DELIVERUSERAPC	translated	no-payload APC-wakeup callback used by GUI message waits
+13	DDEPOST	unsupported	message and DDE payload conversion required
+14	DDEGET	unsupported	message and DDE payload conversion required
+15	SETOBM	translated	fixed-width array; validated length and captured result
+16	LPK	translated	44-byte guest header; relative UTF-16 string; fixed-width rectangle; BOOL output
+17	UMPD	unsupported	printer driver payload and opaque kernel pointers
+18	IMMPROCESSKEY	unsupported	IME support remains outside first-window coverage
+19	IMMLOADLAYOUT	unsupported	IMEINFOEX result conversion required

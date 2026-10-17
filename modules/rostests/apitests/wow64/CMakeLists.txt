@@ -6,7 +6,7 @@ function(add_wow64_apitest library)
     set(sources)
     set(testlist "#define STANDALONE\n#include <apitest.h>\n")
     foreach(test ${ARGN})
-        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock)$")
+        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock|Wow64Thread(Lifetime|ExitProcess))$")
             list(APPEND sources ../${library}/${test}.c)
         endif()
         string(APPEND testlist "extern void func_${test}(void);\n")
@@ -26,6 +26,8 @@ function(add_wow64_apitest library)
 endfunction()
 
 add_wow64_apitest(kernel32
+    Wow64RemoteThread
+    Wow64ThreadApc Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock)
 add_wow64_apitest(ntdll
@@ -50,6 +52,28 @@ elseif(ARCH STREQUAL "amd64")
 endif()
 
 add_subdirectory(sharedviews)
+# Explicit, uninstalled unit fixture for wide guest readers. It compiles the
+# production accessors and selected DLL sources, and uses the test-only native
+# bridge until guest GUI syscall/callback dispatch is available.
+if(ARCH STREQUAL "i386" AND NOT MSVC)
+    add_asm_files(gueststate_asm i386/ClientPfn.S i386/GuestState.S)
+    add_executable(wow64_guest_state EXCLUDE_FROM_ALL
+        GuestState.c GuestStateUser.c GuestStateGdi.c GuestStateImm.c
+        gueststate_testlist.c ${gueststate_asm})
+    target_compile_definitions(wow64_guest_state PRIVATE W32K_WIDE)
+    target_compile_options(wow64_guest_state PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(wow64_guest_state PRIVATE -Wl,--gc-sections)
+    target_include_directories(wow64_guest_state PRIVATE
+        ${REACTOS_SOURCE_DIR}/win32ss/include
+        ${REACTOS_SOURCE_DIR}/win32ss/user/user32/include
+        ${REACTOS_SOURCE_DIR}/win32ss/gdi/gdi32/include
+        ${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys
+        ${REACTOS_SOURCE_DIR}/sdk/include/wine)
+    target_link_libraries(wow64_guest_state wine ${PSEH_LIB})
+    set_module_type(wow64_guest_state win32cui)
+    add_importlibs(wow64_guest_state msvcrt kernel32 ntdll)
+    add_dependencies(wow64_guest_state wow64_syscall_tables)
+endif()
 
 # The native syscall bridge is deliberately test-only, and uses GNU .code64
 # in a PE32 fixture until wow64win provides the guest GUI entry points.
@@ -64,4 +88,37 @@ if(ARCH STREQUAL "amd64" OR (ARCH STREQUAL "i386" AND NOT MSVC))
     add_importlibs(win32k_wow64_apitest msvcrt kernel32 ntdll)
     add_dependencies(win32k_wow64_apitest wow64_syscall_tables)
     add_rostests_file(TARGET win32k_wow64_apitest)
+endif()
+
+# Explicit GUI integration fixture; default image contents stay unchanged.
+add_executable(wow64_gui_apps EXCLUDE_FROM_ALL gui_apps.c)
+set_module_type(wow64_gui_apps win32cui)
+add_importlibs(wow64_gui_apps user32 msvcrt kernel32)
+
+add_executable(wow64_gui_controls EXCLUDE_FROM_ALL gui_controls.c)
+set_module_type(wow64_gui_controls win32cui)
+add_importlibs(wow64_gui_controls comdlg32 comctl32 user32 gdi32 msvcrt kernel32 ntdll)
+
+add_executable(wow64_callback_unwind EXCLUDE_FROM_ALL callback_unwind.c)
+target_link_libraries(wow64_callback_unwind ${PSEH_LIB})
+set_module_type(wow64_callback_unwind win32cui)
+add_importlibs(wow64_callback_unwind user32 msvcrt kernel32)
+
+add_executable(wow64_first_window EXCLUDE_FROM_ALL first_window.c)
+set_module_type(wow64_first_window win32cui)
+add_importlibs(wow64_first_window user32 gdi32 msvcrt kernel32)
+
+if(ARCH STREQUAL "i386")
+    add_asm_files(wow64_win32k_stubs win32k_stubs.S)
+    if(NOT MSVC)
+        add_asm_files(wow64_callback_boundary_asm i386/CallbackBoundary.S)
+        add_executable(wow64_callback_boundary EXCLUDE_FROM_ALL callback_boundary.c ${wow64_callback_boundary_asm} ${wow64_win32k_stubs})
+        target_include_directories(wow64_callback_boundary PRIVATE ${REACTOS_SOURCE_DIR}/win32ss ${REACTOS_SOURCE_DIR}/win32ss/include)
+        set_module_type(wow64_callback_boundary win32cui)
+        add_importlibs(wow64_callback_boundary user32 msvcrt kernel32 ntdll)
+    endif()
+    add_executable(wow64_win32k_abi EXCLUDE_FROM_ALL win32k_abi.c ${wow64_win32k_stubs})
+    target_include_directories(wow64_win32k_abi PRIVATE ${REACTOS_SOURCE_DIR}/win32ss ${REACTOS_SOURCE_DIR}/win32ss/include)
+    set_module_type(wow64_win32k_abi win32cui)
+    add_importlibs(wow64_win32k_abi user32 gdi32 msvcrt kernel32 ntdll)
 endif()

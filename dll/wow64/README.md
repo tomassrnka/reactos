@@ -67,26 +67,68 @@ The mode-switch implementation is original ReactOS code. Wine's public
 `dlls/wow64cpu/cpu.c` was consulted as an architectural reference; no Wine
 implementation was copied into these DLLs.
 
+## Guest threads
+
+Thread creation captures the guest context and allocates a separate native
+translation stack. The native thread starts suspended with a startup marker;
+TEB32 and its guest stack bounds are installed before the creator can resume it.
+The native loader recognizes this marker and enters the existing i386 loader
+for TLS setup and DLL_THREAD_ATTACH. Guest ExitThread performs DLL_THREAD_DETACH
+and FLS cleanup, and kernel thread rundown releases both stacks. Stack guard
+faults update the TEB for the stack that faulted. Unmarked native helper threads
+retain native startup.
+
+Guest Get/SetThreadContext and the opt-in Wow64Get/SetThreadContext exports use
+an access-checked kernel APC. It selects the compatibility-mode trap context,
+saved translation state, or a suspended thread's captured startup context.
+The trap helpers capture and restore x87 state only for the current guest
+thread, without changing the creator's FPU when initializing a new thread.
+Guest NtCreateThreadEx accepts suspended creation and client-ID/TEB output
+attributes; other creation flags and attributes return STATUS_NOT_SUPPORTED.
+Creation retains an internal handle for setup and returns a handle with the
+requested access.
+
+Guest APC routines are encoded separately from native routine addresses. The
+native dispatcher builds an i386 APC frame and enters a nested CPU frame; its
+NtContinue resumes the interrupted native call before returning to the guest.
+Read/write I/O marks an IOSB32 pointer explicitly, and the kernel records that
+layout in the IRP. Completion publishes the eight-byte status block before an
+event or APC becomes visible. Filesystem redirection state remains per thread,
+including across nested APCs.
+Completion-port thunks translate packet keys, contexts and IOSB32 results.
+
+The fixtures Wow64Threads, QueueUserAPC, Wow64ThreadApc and
+Wow64ThreadLifetime cover stress, TLS/FLS, loader notifications, redirection
+isolation, secondary SEH, asynchronous read/write completion, completion ports,
+fibers, integer/x87 context and thread lifetime. Wow64RemoteThread uses a native
+controller and two PE32 children to check cross-process creation and context
+changes. Wow64ThreadExitProcess emits a marker before exiting with live
+workers; its external runner must check both that marker and exit code zero.
+Use identical PE32 fixtures for native i386 and WoW64 comparisons.
+
 ## Current limits
 
-This is the phase-1 runtime, not general WoW64 compatibility:
+This remains an experimental runtime; the full Wine compatibility gate is
+separate from the focused fixtures:
 
-* Only initial-thread startup is supported. Thread creation, guest APCs,
-  guest SEH, win32k callbacks and GUI services need later work. Unhandled
-  compatibility-mode faults and explicit guest exception raises terminate
-  with the exception status. Native thunk captures use native SEH normally.
-* The guest stack is a fixed allocation. There is no stack growth, guest
-  context/debugger API, or CPU backend other than amd64/i386.
-* I/O with user APCs, event completion or asynchronous handles is rejected.
-  Pointer-bearing IOCTLs and most information classes are unimplemented.
+* win32k callbacks and GUI services are not implemented. The complete ntdll
+  exception winetest imports user32 and exercises GUI callbacks.
+* The initial guest stack and native translation stacks use fixed allocations.
+  Secondary guest stacks can grow within the supplied reservation. Complete
+  debugger and floating-point context compatibility still needs validation.
+  The only CPU backend is amd64/i386.
+* Pointer-bearing IOCTLs and most information classes are unimplemented.
+  Asynchronous I/O support here covers NtReadFile/NtWriteFile; other I/O APIs
+  retain their existing restrictions.
 * CSR covers initial Base/console connection and the console operations
   implemented in `csr.c`. The Base static-data copy is a startup snapshot;
   live updates and INI mapping are not implemented. Console control falls
   back to termination; property and IME callbacks are unsupported.
-* DLL discovery selects `SysWOW64` and `KnownDlls32` for the i386 loader,
-  retaining application and other search directories in their original order.
-  General filesystem/registry redirection, environment rewriting, arbitrary
-  native/guest process creation, services and installers are not implemented.
+* DLL discovery selects `SysWOW64` and `KnownDlls32`, retaining application and
+  other search directories in their original order. Filesystem/registry
+  redirection and environment translation cover the phase-2 console subset.
+  Arbitrary guest-initiated process creation, services and installers remain
+  outside that subset.
 * i386 ntdll must map at its preferred base. Guest image relocation remains
   subject to the existing i386 loader's restrictions.
 

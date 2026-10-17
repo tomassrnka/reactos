@@ -8,6 +8,12 @@
 
 #include "ntdddisk.h"
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+/* Captured only by the explicit WoW64 read/write entry ABI. Never inferred
+ * from an IOSB's contents or an arbitrary native user pointer. */
+#define IRP_WOW64_IO_STATUS 0x80000000
+#endif
+
 //
 // Define this if you want debugging support
 //

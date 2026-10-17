@@ -3461,13 +3461,16 @@ LdrpInit(PCONTEXT Context,
         UNICODE_STRING Name = RTL_CONSTANT_STRING(L"wow64.dll");
         ANSI_STRING Entry = RTL_CONSTANT_STRING("Wow64LdrpInitialize");
         PVOID Module, Procedure;
-        extern PVOID Wow64PrepareForException;
+        extern PVOID Wow64PrepareForException, Wow64PrepareForApc;
+        ANSI_STRING ApcEntry = RTL_CONSTANT_STRING("Wow64PrepareForApc");
         ANSI_STRING ExceptionEntry = RTL_CONSTANT_STRING("Wow64PrepareForException");
         LoaderStatus = LdrLoadDll(NULL, NULL, &Name, &Module);
         if (NT_SUCCESS(LoaderStatus))
             LoaderStatus = LdrGetProcedureAddress(Module, &Entry, 0, &Procedure);
         if (NT_SUCCESS(LoaderStatus))
             LoaderStatus = LdrGetProcedureAddress(Module, &ExceptionEntry, 0, &Wow64PrepareForException);
+        if (NT_SUCCESS(LoaderStatus))
+            LoaderStatus = LdrGetProcedureAddress(Module, &ApcEntry, 0, &Wow64PrepareForApc);
         if (NT_SUCCESS(LoaderStatus))
             ((VOID (NTAPI *)(PCONTEXT))Procedure)(Context);
     }
@@ -3489,12 +3492,14 @@ LdrpInit(PCONTEXT Context,
 
 #if defined(_M_IX86) && defined(SYSWOW64_GUEST)
 /* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32. */
-VOID NTAPI LdrInitializeWow64(PVOID NtdllBase)
+VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
 {
     PIMAGE_NT_HEADERS Header;
     CONTEXT Context;
-    RtlCaptureContext(&Context);
+    if (StartContext) Context = *StartContext;
+    else RtlCaptureContext(&Context);
     LdrpInit(&Context, NtdllBase, NULL);
+    if (StartContext) NtContinue(&Context, TRUE);
     Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
     ((VOID (NTAPI *)(VOID))((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
                             Header->OptionalHeader.AddressOfEntryPoint))();
