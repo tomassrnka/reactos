@@ -62,7 +62,22 @@ static NTSTATUS SatisfyAccept(PAFD_DEVICE_EXTENSION DeviceExt,
 static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
     PAFD_RECEIVED_ACCEPT_DATA ListenReceive =
         (PAFD_RECEIVED_ACCEPT_DATA)Irp->AssociatedIrp.SystemBuffer;
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( Irp );
     PTA_IP_ADDRESS IPAddr;
+    /* METHOD_BUFFERED: the system buffer must hold both the address we copy and the
+     * length we report back, else the I/O manager overruns the user buffer. */
+    ULONG CopyLen = TaLengthOfTransportAddress( Qelt->ConnInfo->RemoteAddress );
+    ULONG RequiredSize = FIELD_OFFSET(AFD_RECEIVED_ACCEPT_DATA, Address) +
+                         (CopyLen > sizeof(TA_IP_ADDRESS) ? CopyLen : sizeof(TA_IP_ADDRESS));
+
+    if( IrpSp->Parameters.DeviceIoControl.OutputBufferLength < RequiredSize ) {
+        if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+        Irp->IoStatus.Information = 0;
+        Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+        AfdClearCancelRoutine( Irp );
+        IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
+        return STATUS_BUFFER_TOO_SMALL;
+    }
 
     ListenReceive->SequenceNumber = Qelt->Seq;
 
@@ -767,12 +782,18 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             Status = ObReferenceObjectByHandle
                 ( AcceptData->ListenHandle,
                   FILE_ALL_ACCESS,
-                  NULL,
+                  *IoFileObjectType,
                   KernelMode,
                   (PVOID *)&NewFileObject,
                   NULL );
 
             if( !NT_SUCCESS(Status) ) return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
+
+            /* Target must be an AFD socket, else FsContext is not an AFD_FCB */
+            if( NewFileObject->DeviceObject != DeviceObject ) {
+                ObDereferenceObject( NewFileObject );
+                return UnlockAndMaybeComplete( FCB, STATUS_INVALID_HANDLE, Irp, 0 );
+            }
 
             RemoveEntryList( PendingConn );
 
@@ -853,12 +874,23 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     /* Validate that accepting socket is valid, and has not been bound or connected */
     Status = ObReferenceObjectByHandle(
-        AcceptRequest->AcceptHandle, FILE_ALL_ACCESS, NULL, KernelMode, (PVOID *)&NewFileObject, NULL);
+        AcceptRequest->AcceptHandle, FILE_ALL_ACCESS, *IoFileObjectType, KernelMode, (PVOID *)&NewFileObject, NULL);
     if (!NT_SUCCESS(Status))
     {
         IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
         Irp->Tail.Overlay.DriverContext[3] = NULL;
         return UnlockAndMaybeComplete(Fcb, Status, Irp, 0);
+    }
+
+    /* Target must be an AFD socket, else FsContext is not an AFD_FCB */
+    if (NewFileObject->DeviceObject != DeviceObject)
+    {
+        ObDereferenceObject(NewFileObject);
+        /* The output pages were probed and locked above; unlock before freeing the MDL */
+        MmUnlockPages((PMDL)Irp->Tail.Overlay.DriverContext[3]);
+        IoFreeMdl((PMDL)Irp->Tail.Overlay.DriverContext[3]);
+        Irp->Tail.Overlay.DriverContext[3] = NULL;
+        return UnlockAndMaybeComplete(Fcb, STATUS_INVALID_HANDLE, Irp, 0);
     }
 
     PAFD_FCB Fcb2 = NewFileObject->FsContext;
