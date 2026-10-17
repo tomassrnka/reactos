@@ -2359,7 +2359,7 @@ UpdateProcThreadAttribute(
     PPROC_THREAD_ATTRIBUTE_ENTRY Entry;
     DWORD Error, Bit;
 
-    if (dwFlags != 0 || lpPreviousValue || lpReturnSize)
+    if (dwFlags != 0 || lpPreviousValue || lpReturnSize || !lpValue)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -2500,6 +2500,10 @@ BasepReadThreadAttributes(
     DWORD i;
 
     *IdealProcessor = NULL;
+
+    if (AttributeList->LastAttribute > AttributeList->AttributeCount ||
+        AttributeList->AttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
+        return STATUS_INVALID_PARAMETER;
 
     for (i = 0; i < AttributeList->LastAttribute; i++)
     {
