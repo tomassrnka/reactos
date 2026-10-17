@@ -901,6 +901,7 @@ static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, 
     return Status;
 }
 
+#if DBG
 /* Test only: the "ResizeFault" DWORD of the service key arms a failure inside the next resize. */
 static VOID NgArmResizeFault(VOID)
 {
@@ -909,6 +910,7 @@ static VOID NgArmResizeFault(VOID)
     if (ngc_resize_fault)
         DPRINT1("ntfsng: ResizeFault %d armed\n", ngc_resize_fault);
 }
+#endif
 
 /* Errors of the resize requests: a size the volume cannot take is an invalid parameter there. */
 static NTSTATUS NgResizeStatus(int Err)
@@ -972,7 +974,9 @@ static NTSTATUS NgExtendVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
     Status = NgDeviceIoctl(Vcb->StorageDevice, IOCTL_DISK_GET_LENGTH_INFO, &Length, sizeof(Length));
     if (!NT_SUCCESS(Status))
         return Status;
+#if DBG
     NgArmResizeFault();
+#endif
     NgAcquireCore(Vcb);
     if (!Vcb->Core || Vcb->RawWritten)
         Err = -NGC_EROFS;
@@ -1014,7 +1018,9 @@ static NTSTATUS NgShrinkVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
     if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(*Info) || !Info)
         return STATUS_INVALID_PARAMETER;
     if (Info->ShrinkRequestType == ShrinkCommit)
+#if DBG
         NgArmResizeFault();
+#endif
     NgAcquireCore(Vcb);
     if (!Vcb->Core || Vcb->RawWritten)
     {
@@ -1278,6 +1284,7 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FSCTL_OPLOCK_BREAK_NOTIFY:
         case FSCTL_OPLOCK_BREAK_ACK_NO_2:
             return STATUS_INVALID_OPLOCK_PROTOCOL;
+#if DBG
         case FSCTL_NG_LOCK_STATS:
         {
             /* Diagnostic: a snapshot of the CoreLock statistics (benchmark tools diff two). */
@@ -1304,6 +1311,7 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Irp->IoStatus.Information = sizeof(NG_PROFILE);
             return STATUS_SUCCESS;
         }
+#endif
         case FSCTL_GET_REPARSE_POINT:
         case FSCTL_SET_REPARSE_POINT:
         case FSCTL_DELETE_REPARSE_POINT:

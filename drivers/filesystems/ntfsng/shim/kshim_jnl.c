@@ -42,7 +42,9 @@ struct kshim_jnl {
 };
 
 static u32 kj_crc_table[256];
+#if DBG
 unsigned long kshim_jnl_fault;
+#endif
 
 u32 kj_crc32(u32 crc, const void *p, size_t n)
 {

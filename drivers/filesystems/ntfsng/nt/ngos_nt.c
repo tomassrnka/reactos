@@ -16,15 +16,23 @@ NG_PROFILE NgProfile;
 
 unsigned long long ngos_ticks(void)
 {
+#if DBG
     return __rdtsc();
+#else
+    return 0;
+#endif
 }
 
 void ngos_prof(int id, unsigned long long since, unsigned long long bytes)
 {
+#if DBG
     NG_PROF_STAT *S = &NgProfile.Stage[id];
     S->Count++;
     S->Ticks += __rdtsc() - since;
     S->Bytes += bytes;
+#else
+    (void)id; (void)since; (void)bytes;
+#endif
 }
 
 void *ngos_alloc(size_t n)
