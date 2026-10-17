@@ -662,7 +662,11 @@ AddShare(
         Flags.shi1005_flags = pOptions->dwCache;
         Status = NetShareSetInfo(pOptions->pszServer, pOptions->pszName, 1005, (LPBYTE)&Flags, NULL);
         if (Status != NERR_Success)
+        {
+            /* Without the caching setting the share is not what was asked for, and a retry would find its name taken */
+            NetShareDel(pOptions->pszServer, pOptions->pszName, 0);
             return ShareError(Status);
+        }
     }
 
     PrintMessageStringV(4656, pOptions->pszName);
