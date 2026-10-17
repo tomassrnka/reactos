@@ -13,7 +13,8 @@ enum
     TestFileStandardInfo = 1,
     TestFileRenameInfo = 3,
     TestFileDispositionInfo = 4,
-    TestFileEndOfFileInfo = 6
+    TestFileEndOfFileInfo = 6,
+    TestFileIoPriorityHintInfo = 12
 };
 
 typedef struct
@@ -291,6 +292,23 @@ static void Test_DispositionAndEndOfFile(void)
     SetLastError(0xdeadbeef);
     Ret = pSetFileInformationByHandle(INVALID_HANDLE_VALUE, TestFileStandardInfo, &Disposition, sizeof(Disposition));
     ok(!Ret && GetLastError() == ERROR_INVALID_PARAMETER, "Got %d, error %lu\n", Ret, GetLastError());
+
+    /* the I/O priority hint is advisory: a valid one succeeds, a closed handle still fails */
+    File = OpenTestFile(L"g.txt", CREATE_ALWAYS);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed: %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        DWORD PriorityHint = 2;
+
+        Ret = pSetFileInformationByHandle(File, TestFileIoPriorityHintInfo, &PriorityHint, sizeof(PriorityHint));
+        ok(Ret, "FileIoPriorityHintInfo failed: %lu\n", GetLastError());
+        CloseHandle(File);
+
+        SetLastError(0xdeadbeef);
+        Ret = pSetFileInformationByHandle(File, TestFileIoPriorityHintInfo, &PriorityHint, sizeof(PriorityHint));
+        ok(!Ret && GetLastError() == ERROR_INVALID_HANDLE, "Got %d, error %lu\n", Ret, GetLastError());
+    }
+    DeleteFileW(L"g.txt");
 }
 
 START_TEST(SetFileInformationByHandle)
