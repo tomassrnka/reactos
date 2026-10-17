@@ -566,6 +566,13 @@ extend_main(
         }
     }
 
+    /* The file system takes the whole partition, so a size says something that cannot be done */
+    if (bFileSystemOnly && ullSize != 0)
+    {
+        ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+        return EXIT_SUCCESS;
+    }
+
     bVolumeFocus = (GetFocusVolume() != NULL);
     PartEntry = GetFocusPartition();
     if (PartEntry == NULL || !PartEntry->IsPartitioned)
