@@ -93,15 +93,16 @@ static RTL_GENERIC_COMPARE_RESULTS NTAPI LockCompare
 #if 0
     DPRINT("Starting to compare element %x to element %x\n", PtrA, PtrB);
 #endif
-    /* Match if we overlap */
-    if (((A->Exclusive.FileLock.StartingByte.QuadPart <
-          B->Exclusive.FileLock.EndingByte.QuadPart) &&
-         (A->Exclusive.FileLock.StartingByte.QuadPart >=
-          B->Exclusive.FileLock.StartingByte.QuadPart)) ||
-        ((B->Exclusive.FileLock.StartingByte.QuadPart <
-          A->Exclusive.FileLock.EndingByte.QuadPart) &&
-         (B->Exclusive.FileLock.StartingByte.QuadPart >=
-          A->Exclusive.FileLock.StartingByte.QuadPart)))
+    /* Match if we overlap. Byte offsets are unsigned: a whole-file lock ends at the
+       unsigned 64-bit maximum, which a signed compare reads as negative and misses. */
+    if ((((ULONGLONG)A->Exclusive.FileLock.StartingByte.QuadPart <
+          (ULONGLONG)B->Exclusive.FileLock.EndingByte.QuadPart) &&
+         ((ULONGLONG)A->Exclusive.FileLock.StartingByte.QuadPart >=
+          (ULONGLONG)B->Exclusive.FileLock.StartingByte.QuadPart)) ||
+        (((ULONGLONG)B->Exclusive.FileLock.StartingByte.QuadPart <
+          (ULONGLONG)A->Exclusive.FileLock.EndingByte.QuadPart) &&
+         ((ULONGLONG)B->Exclusive.FileLock.StartingByte.QuadPart >=
+          (ULONGLONG)A->Exclusive.FileLock.StartingByte.QuadPart)))
         return GenericEqual;
     /* Otherwise, key on the starting byte */
     Result =
@@ -390,7 +391,7 @@ FsRtlpInitLockElement(OUT PCOMBINED_LOCK_ELEMENT Element,
     Element->Exclusive.FileLock.FileObject = FileObject;
     Element->Exclusive.FileLock.StartingByte.QuadPart = Start;
     Element->Exclusive.FileLock.Length.QuadPart = Length;
-    Element->Exclusive.FileLock.EndingByte.QuadPart = Start + Length;
+    Element->Exclusive.FileLock.EndingByte.QuadPart = (LONGLONG)((ULONGLONG)Start + (ULONGLONG)Length);
     Element->Exclusive.FileLock.ProcessId = Process;
     Element->Exclusive.FileLock.Key = Key;
     Element->Exclusive.FileLock.ExclusiveLock = ExclusiveLock;
@@ -442,21 +443,22 @@ FsRtlpExpandLockElement
 (PCOMBINED_LOCK_ELEMENT ToExpand,
  PCOMBINED_LOCK_ELEMENT Conflict)
 {
-    if (ToExpand->Exclusive.FileLock.StartingByte.QuadPart >
-        Conflict->Exclusive.FileLock.StartingByte.QuadPart)
+    /* Unsigned min/max: a whole-file end is the unsigned maximum, not a negative. */
+    if ((ULONGLONG)ToExpand->Exclusive.FileLock.StartingByte.QuadPart >
+        (ULONGLONG)Conflict->Exclusive.FileLock.StartingByte.QuadPart)
     {
         ToExpand->Exclusive.FileLock.StartingByte =
             Conflict->Exclusive.FileLock.StartingByte;
     }
-    if (ToExpand->Exclusive.FileLock.EndingByte.QuadPart <
-        Conflict->Exclusive.FileLock.EndingByte.QuadPart)
+    if ((ULONGLONG)ToExpand->Exclusive.FileLock.EndingByte.QuadPart <
+        (ULONGLONG)Conflict->Exclusive.FileLock.EndingByte.QuadPart)
     {
         ToExpand->Exclusive.FileLock.EndingByte =
             Conflict->Exclusive.FileLock.EndingByte;
     }
     ToExpand->Exclusive.FileLock.Length.QuadPart =
-        ToExpand->Exclusive.FileLock.EndingByte.QuadPart -
-        ToExpand->Exclusive.FileLock.StartingByte.QuadPart;
+        (LONGLONG)((ULONGLONG)ToExpand->Exclusive.FileLock.EndingByte.QuadPart -
+                   (ULONGLONG)ToExpand->Exclusive.FileLock.StartingByte.QuadPart);
 }
 
 /* This function expands the conflicting range Conflict by removing and reinserting it,
@@ -928,7 +930,7 @@ FsRtlPrivateLock(IN PFILE_LOCK FileLock,
            ExclusiveLock);
 
     UnsignedStart.QuadPart = FileOffset->QuadPart;
-    UnsignedEnd.QuadPart = FileOffset->QuadPart + Length->QuadPart;
+    UnsignedEnd.QuadPart = (ULONGLONG)FileOffset->QuadPart + (ULONGLONG)Length->QuadPart;
 
     if (UnsignedEnd.QuadPart < UnsignedStart.QuadPart)
     {
