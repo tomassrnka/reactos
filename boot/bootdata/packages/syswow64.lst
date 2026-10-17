@@ -35,14 +35,12 @@ SysWOW64/comdlg32.dll
 SysWOW64/coml2.dll
 SysWOW64/crypt32.dll
 SysWOW64/gdiplus.dll
-SysWOW64/kernelbase_ros.dll
 SysWOW64/lpk.dll
 SysWOW64/mbedtls.dll
 SysWOW64/mlang.dll
 SysWOW64/mpr.dll
 SysWOW64/msimg32.dll
 SysWOW64/normaliz.dll
-SysWOW64/ntdll_vista.dll
 SysWOW64/ole32.dll
 SysWOW64/oleaut32.dll
 SysWOW64/rpcrt4.dll
