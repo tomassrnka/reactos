@@ -42,6 +42,20 @@ enum {
 #undef SVC_
 };
 
+/* The guest's win32k syscall numbers come from the SysWOW64 win32u, generated
+ * from this same w32ksvc32.h; the name-based dispatch above is correct only
+ * while the W64_ enum reproduces that numbering. These assertions pin the shared
+ * syscall base and the size of the checked-build-only block, so a reordered
+ * header, a changed base, or a DBG skew against the win32k that assigned the
+ * numbers fails this build instead of silently misrouting the trailing
+ * syscalls (everything after the checked-build block). */
+C_ASSERT(W64_NtGdiAbortDoc == 0x1000); /* win32ss/napi.h MIN_SYSCALL_NUMBER */
+#if DBG
+C_ASSERT(W64_NtGdiMakeObjectXferable == W64_NtGdiDrawStream + 6);
+#else
+C_ASSERT(W64_NtGdiMakeObjectXferable == W64_NtGdiDrawStream + 1);
+#endif
+
 typedef struct { ULONG Length, MaximumLength, Buffer; } LARGE_STRING32;
 typedef struct { ULONG hwnd, message, wParam, lParam, time; POINT pt; } MSG32;
 typedef struct { ULONG hdc; BOOL fErase; RECT rcPaint; BOOL fRestore, fIncUpdate; BYTE rgbReserved[32]; } PAINT32;
