@@ -39,6 +39,7 @@ class CLanStatus:
 {
     public:
         CLanStatus();
+        ~CLanStatus();
 
         // IOleCommandTarget
         STDMETHOD(QueryStatus)(const GUID *pguidCmdGroup, ULONG cCmds, OLECMD *prgCmds, OLECMDTEXT *pCmdText) override;

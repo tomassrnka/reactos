@@ -752,7 +752,12 @@ static void query_http_info(nsChannelBSC *This, IWinInetHttpInfo *wininet_info)
     if(!len)
         return;
 
+#ifdef __REACTOS__
+    /* a failed second call leaves the buffer as it is: zero it, with room for the terminator */
+    buf = heap_alloc_zero(len + 1);
+#else
     buf = heap_alloc(len);
+#endif
     if(!buf)
         return;
 
@@ -1660,7 +1665,11 @@ static void handle_extern_mime_navigation(nsChannelBSC *This)
             V_VT(&uriv) = VT_BSTR;
             IUri_GetDisplayUri(uri, &V_BSTR(&uriv));
 
+#ifdef __REACTOS__
+            hres = IWebBrowserPriv_NavigateWithBindCtx(webbrowser_priv_old, &uriv, &flags, NULL, &post_var, &headers_var, bind_ctx, NULL);
+#else
             hres = IWebBrowserPriv_NavigateWithBindCtx(webbrowser_priv_old, &uriv, &flags, NULL, NULL, NULL, bind_ctx, NULL);
+#endif
 
             SysFreeString(V_BSTR(&uriv));
             IWebBrowserPriv_Release(webbrowser_priv_old);

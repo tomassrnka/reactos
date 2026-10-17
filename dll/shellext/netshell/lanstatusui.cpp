@@ -40,6 +40,11 @@ CLanStatus::CLanStatus() :
 {
 }
 
+CLanStatus::~CLanStatus()
+{
+    StopRetryTimer();
+}
+
 VOID
 UpdateLanStatusUiDlg(
     HWND hwndDlg,
@@ -1294,7 +1299,10 @@ CLanStatus::RetryTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
         KillTimer(NULL, idEvent);
         return;
     }
-    pThis->InitializeNetTaskbarNotifications();
+
+    /* a failed enumeration returns before UpdateRetryTimer, so count it here */
+    if (FAILED(pThis->InitializeNetTaskbarNotifications()) && ++pThis->m_RetryCount >= NETRETRYMAX)
+        pThis->StopRetryTimer();
 }
 
 void
