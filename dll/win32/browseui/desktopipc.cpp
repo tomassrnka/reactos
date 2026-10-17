@@ -374,7 +374,12 @@ static HRESULT ExplorerMessageLoop(IEThreadParamBlock * parameters)
 #endif
     hResult = CShellBrowser_CreateInstance(IID_PPV_ARG(IShellBrowser, &psb));
     if (FAILED_UNEXPECTEDLY(hResult))
+    {
+        ILFree(pidlSelect);
+        if (parameters->pExplorerInstance)
+            parameters->pExplorerInstance->Release();
         return hResult;
+    }
 
     if (parameters->dwFlags & SH_EXPLORER_CMDLINE_FLAG_EMBED)
     {
@@ -410,7 +415,11 @@ static HRESULT ExplorerMessageLoop(IEThreadParamBlock * parameters)
     CComPtr<IBrowserService2> browser;
     hResult = psb->QueryInterface(IID_PPV_ARG(IBrowserService2, &browser));
     if (FAILED_UNEXPECTEDLY(hResult))
+    {
+        if (parameters->pExplorerInstance)
+            parameters->pExplorerInstance->Release();
         return hResult;
+    }
 
     psb.Release();
 

@@ -18,6 +18,9 @@ WINAPI
 CNetConnection::Initialize(PINetConnectionItem pItem)
 {
     m_Props = pItem->Props;
+    /* the strings still belong to the manager: this object owns only its own copies */
+    m_Props.pszwName = NULL;
+    m_Props.pszwDeviceName = NULL;
     m_dwAdapterIndex = pItem->dwAdapterIndex;
 
     if (pItem->Props.pszwName)
