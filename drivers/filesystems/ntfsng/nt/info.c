@@ -116,6 +116,9 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Fcb->IsVolume)
         return STATUS_INVALID_PARAMETER;
     NgFillStat(Fcb);
+    /* Zero the reply buffer so uninitialized pool padding never reaches user mode. */
+    if (Buffer)
+        RtlZeroMemory(Buffer, Length);
 
 #define NEED(t) do { if (Length < sizeof(t)) return STATUS_BUFFER_TOO_SMALL; Used = sizeof(t); } while (0)
     switch (Stack->Parameters.QueryFile.FileInformationClass)
@@ -872,6 +875,9 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     if (DeviceObject == NgGlobal.ControlDevice)
         return STATUS_INVALID_DEVICE_REQUEST;
+    /* Zero the reply buffer so uninitialized pool padding never reaches user mode. */
+    if (Buffer)
+        RtlZeroMemory(Buffer, Length);
     if (!Vcb->ReadOnly)
     {
         NgAcquireCore(Vcb);
