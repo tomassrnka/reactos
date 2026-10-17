@@ -13,7 +13,9 @@
 #include <debug.h>
 
 /* FUNCTIONS *****************************************************************/
-#ifdef BUILD_WOW64_ENABLED
+/* Always compiled on amd64 and exported from ntoskrnl so the shared trap-exit
+ * macro can reach one definition from both ntoskrnl and the HAL. It is a no-op
+ * outside a WoW64 process, where Wow64Process is always NULL. */
 VOID NTAPI KiRestoreWow64Gs(VOID)
 {
     PKTHREAD Thread = KeGetCurrentThread();
@@ -24,7 +26,6 @@ VOID NTAPI KiRestoreWow64Gs(VOID)
         __readmsr(MSR_GS_SWAP) != (ULONG64)Thread->Teb)
         __writemsr(MSR_GS_SWAP, (ULONG64)Thread->Teb);
 }
-#endif
 
 VOID
 NTAPI
