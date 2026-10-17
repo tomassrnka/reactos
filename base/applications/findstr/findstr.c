@@ -805,6 +805,12 @@ SkipFile(const WIN32_FIND_DATAW *Data)
     return FALSE;
 }
 
+static int __cdecl
+CompareNamePointers(const void *A, const void *B)
+{
+    return wcscmp(*(PWSTR const *)A, *(PWSTR const *)B);
+}
+
 /* Searches the files that match Mask in one directory. Base is the directory used to open the
  * files (/D:), Dir the directory part shown in the output. With /S, subdirectories are searched
  * where they appear in the directory listing. Returns TRUE if any file matched the mask. */
@@ -813,7 +819,8 @@ SearchMask(PCWSTR Base, PCWSTR Dir, PCWSTR Mask)
 {
     WIN32_FIND_DATAW Data;
     HANDLE hFind;
-    PWSTR Spec, Shown, Path, *Matches = NULL;
+    PWSTR Spec, Shown, Path, Key, *Matches = NULL, *Found;
+    PBOOLEAN Searched = NULL;
     SIZE_T Count = 0, Capacity = 0, k;
     BOOL Any = FALSE;
 
@@ -851,13 +858,26 @@ SearchMask(PCWSTR Base, PCWSTR Dir, PCWSTR Mask)
                 }
                 Matches = New;
             }
-            Matches[Count++] = _wcsdup(Data.cFileName);
+            Matches[Count] = _wcsdup(Data.cFileName);
+            if (!Matches[Count])
+            {
+                Message(IDS_OUT_OF_MEMORY);
+                ExitProcess(Finish(2));
+            }
+            Count++;
         } while (FindNextFileW(hFind, &Data));
         FindClose(hFind);
     }
 
     if (!Opt.SubDirs)
         return Any;
+
+    /* Sorted, so that each entry of the walk below finds its name by bisection */
+    if (Count)
+    {
+        qsort(Matches, Count, sizeof(PWSTR), CompareNamePointers);
+        Searched = Alloc(Count * sizeof(BOOLEAN));
+    }
 
     /* Walk the directory in its own order: files that matched the mask, and subdirectories */
     Shown = JoinPath(Dir, L"*");
@@ -879,20 +899,17 @@ SearchMask(PCWSTR Base, PCWSTR Dir, PCWSTR Mask)
                 HeapFree(GetProcessHeap(), 0, Shown);
                 continue;
             }
-            for (k = 0; k < Count; k++)
+            Key = Data.cFileName;
+            Found = Count ? bsearch(&Key, Matches, Count, sizeof(PWSTR), CompareNamePointers) : NULL;
+            if (Found && !Searched[Found - Matches])
             {
-                if (Matches[k] && !wcscmp(Matches[k], Data.cFileName))
-                {
-                    Shown = JoinPath(Dir, Data.cFileName);
-                    Path = JoinPath(Base, Shown);
-                    if (!SearchFile(Path, Shown))
-                        CannotOpen(Shown);
-                    HeapFree(GetProcessHeap(), 0, Path);
-                    HeapFree(GetProcessHeap(), 0, Shown);
-                    free(Matches[k]);
-                    Matches[k] = NULL;
-                    break;
-                }
+                Searched[Found - Matches] = TRUE;
+                Shown = JoinPath(Dir, Data.cFileName);
+                Path = JoinPath(Base, Shown);
+                if (!SearchFile(Path, Shown))
+                    CannotOpen(Shown);
+                HeapFree(GetProcessHeap(), 0, Path);
+                HeapFree(GetProcessHeap(), 0, Shown);
             }
         } while (FindNextFileW(hFind, &Data));
         FindClose(hFind);
@@ -902,6 +919,8 @@ SearchMask(PCWSTR Base, PCWSTR Dir, PCWSTR Mask)
         free(Matches[k]);
     if (Matches)
         HeapFree(GetProcessHeap(), 0, Matches);
+    if (Searched)
+        HeapFree(GetProcessHeap(), 0, Searched);
     return Any;
 }
 
