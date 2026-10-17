@@ -10,6 +10,10 @@
 
 #include "afd.h"
 
+/* Upper bound on the LockBuffers pool block: well above any legitimate WSABUF
+ * scatter/gather while keeping the size math clear of a 32-bit wrap. */
+#define AFD_MAX_WSA_BUFFER_SIZE (16 * 1024 * 1024)
+
 PVOID GetLockedData(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
     ASSERT(Irp->MdlAddress);
@@ -209,10 +213,18 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
     UINT i;
     /* Copy the buffer array so we don't lose it */
     UINT Lock = LockAddress ? 2 : 0;
-    UINT Size = (sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) * (Count + Lock);
-    PAFD_WSABUF NewBuf = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_WSA_BUFFER);
+    /* Count is user-supplied: size the block in 64-bit and cap it so a large Count
+     * cannot wrap the 32-bit product and undersize the pool block we then fill. */
+    ULONGLONG Size64 = (ULONGLONG)(sizeof(AFD_WSABUF) + sizeof(AFD_MAPBUF)) *
+                       ((ULONGLONG)Count + Lock);
+    SIZE_T Size = (SIZE_T)Size64;
+    PAFD_WSABUF NewBuf;
     BOOLEAN LockFailed = FALSE;
     PAFD_MAPBUF MapBuf;
+
+    if( Size64 > AFD_MAX_WSA_BUFFER_SIZE )
+        return NULL;
+    NewBuf = ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_WSA_BUFFER);
 
     AFD_DbgPrint(MID_TRACE,("Called(%p)\n", NewBuf));
 
