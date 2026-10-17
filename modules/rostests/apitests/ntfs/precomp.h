@@ -32,7 +32,6 @@ BOOLEAN NtInit(PCSTR TestName);
 /* "<root>\<test>\Name" in Out (MAX_PATH characters). */
 VOID NtPath(PWSTR Out, PCWSTR Name);
 PCWSTR NtTestDir(VOID);
-BOOLEAN NtIsAdmin(VOID);
 BOOLEAN NtHaveUser(VOID);
 VOID NtBeginUser(VOID);
 VOID NtEndUser(VOID);

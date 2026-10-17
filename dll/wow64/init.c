@@ -258,7 +258,9 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
     ((ULONG *)(ULONG_PTR)State.Esp)[1] = PtrToUlong(Ntdll32);
     State.Eip = PtrToUlong(Entry);
     State.EFlags = 0x202;
+#if DBG
     DbgPrint("WoW64: entering i386 ntdll at %lx, PEB32 %p TEB32 %p\n", State.Eip, Peb32, Teb32);
+#endif
     Wow64CpuRun(&State);
 Failed:
     DbgPrint("WoW64: initialization failed: %08lx\n", Status);

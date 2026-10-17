@@ -1365,18 +1365,6 @@ long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned i
 	return len;
 }
 
-void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads)
-{
-	*pages = kshim_pc_pages;
-	*inodes = kshim_inodes_live;
-	*reads = kshim_counter_reads;
-}
-
-void ngc_trim(ngc_node *n)
-{
-	kshim_mapping_shrink(((struct inode *)n)->i_mapping);
-}
-
 void ngc_debug_dump(void)
 {
 	printk("shim: %lu cache pages, %lu live inodes, %lu device reads\n",

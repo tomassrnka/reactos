@@ -88,10 +88,10 @@ NtGdiDdDDICreateDCFromMemory(D3DKMT_CREATEDCFROMMEMORY *desc)
     if (BufferSize > MAXLONG)
         return STATUS_INVALID_PARAMETER;
 
-    /* The surface bits stay in the caller's memory: it must be user memory */
+    /* The surface bits stay in the caller's memory and GDI draws into it: it must be writable user memory */
     _SEH2_TRY
     {
-        ProbeForRead(Desc.pMemory, (SIZE_T)BufferSize, 1);
+        ProbeForWrite(Desc.pMemory, (SIZE_T)BufferSize, 1);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {

@@ -110,9 +110,6 @@ int ngc_streams(ngc_node *n, ngc_stream_t fn, void *ctx);
 /* Reads [off, off+len) through the private page cache; bytes past EOF are zero.  Returns bytes copied or <0. */
 long ngc_read(ngc_node *n, unsigned long long off, unsigned int len, void *buf, int drop_cache);
 long ngc_read_direct(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, void *buf);
-void ngc_stats(unsigned long *pages, unsigned long *inodes, unsigned long *reads);
-/* Drops the clean, unreferenced shim page-cache pages of a node. */
-void ngc_trim(ngc_node *n);
 /* Write side (all under the caller's volume lock). */
 /* ntfsng mounts no device of this size or more: its page index is 32 bits (2^32 pages of 4 KiB). */
 #define NGC_MAX_DEVICE_BYTES (1ULL << 44)

@@ -560,7 +560,9 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
             NtFreeVirtualMemory(Cleanup.Process, &Cleanup.Base, &Size, MEM_RELEASE);
         }
     }
+#if DBG
     if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState)
         DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
+#endif
     return Status;
 }

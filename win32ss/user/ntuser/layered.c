@@ -166,8 +166,13 @@ IntUpdateLayeredWindowI( PWND pWnd,
       PREGION VisBefore = VIS_ComputeVisibleRegion(pWnd, FALSE, FALSE, ClipSiblings);
       BOOL PointerWasIn = IntPtInWindow(pWnd, gpsi->ptCursor.x, gpsi->ptCursor.y);
 
-      Moved = TRUE;
-      co_WinPosSetWindowPosEx(pWnd, 0, Window.left, Window.top, Window.right - Window.left, Window.bottom - Window.top, flags, TRUE);
+      /* It fails only for a window that no longer exists: nothing is drawn onto it */
+      Moved = co_WinPosSetWindowPosEx(pWnd, 0, Window.left, Window.top, Window.right - Window.left, Window.bottom - Window.top, flags, TRUE);
+      if (!Moved)
+      {
+         if (VisBefore) REGION_Delete(VisBefore);
+         goto Exit;
+      }
       PointerCrossed = (PointerWasIn != IntPtInWindow(pWnd, gpsi->ptCursor.x, gpsi->ptCursor.y));
 
       /* Repaint what the window really uncovered (window region included): parent and siblings */
@@ -267,6 +272,7 @@ IntUpdateLayeredWindowI( PWND pWnd,
 
    if (Moved)
       co_WinPosNoMessagesNotify(pWnd, PointerCrossed);
+Exit:
    UserDerefObjectCo(pWnd);
    return ret;
 }
