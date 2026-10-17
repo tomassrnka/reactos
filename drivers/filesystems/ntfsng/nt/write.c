@@ -623,8 +623,6 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Offset.QuadPart < 0 && !Append)
         return STATUS_INVALID_PARAMETER;
-    if (!Append && Offset.QuadPart > MAXLONGLONG - (LONGLONG)Length)
-        return STATUS_INVALID_PARAMETER;
     /* A handle with FILE_APPEND_DATA but not FILE_WRITE_DATA writes at the end of the file. */
     if (FileObject->FsContext2 && ((PNG_CCB)FileObject->FsContext2)->AppendOnly)
         Append = TRUE;
@@ -691,6 +689,11 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
     if (Append)
         Offset.QuadPart = Fcb->Header.FileSize.QuadPart;
+    if (Offset.QuadPart > MAXLONGLONG - (LONGLONG)Length)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto out_unlock;
+    }
     End = Offset.QuadPart + Length;
     OldSize = Fcb->Header.FileSize.QuadPart;
     if (End > Fcb->Header.FileSize.QuadPart)
