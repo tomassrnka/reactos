@@ -112,7 +112,7 @@ static int ntfs_ib_write(struct ntfs_index_context *icx, struct index_block *ib)
 			(u8 *)ib, icx->sync_write);
 
 	/* Perform data restoration before returning */
-	post_write_mst_fixup((struct ntfs_record *)ib);
+	post_write_mst_fixup((struct ntfs_record *)ib, icx->block_size);
 
 	if (ret != icx->block_size) {
 		ntfs_debug("Failed to write index block %lld, inode %llu",
@@ -767,7 +767,7 @@ static int ntfs_ib_read(struct ntfs_index_context *icx, s64 vcn, struct index_bl
 		u16 usa_ofs = le16_to_cpu(dst->usa_ofs);
 		u16 usa_count = le16_to_cpu(dst->usa_count);
 
-		if ((usa_ofs & 1) || !usa_count ||
+		if ((usa_ofs & 1) || usa_ofs < sizeof(struct ntfs_record) || !usa_count ||
 		    usa_count != icx->block_size / NTFS_BLOCK_SIZE + 1 ||
 		    (u32)usa_ofs + (u32)usa_count * 2 > icx->block_size) {
 			ntfs_error(icx->idx_ni->vol->sb,
