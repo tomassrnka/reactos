@@ -986,22 +986,24 @@ MiniScheduleWorker(
     /* One queued worker is enough, it looks at the whole queue when it starts */
     KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
     Scheduled = Adapter->WorkerScheduled;
-    Adapter->WorkerScheduled = TRUE;
     KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
     if (Scheduled)
         return;
 
+    /* The flag is set only once the work item exists: a caller that sees it set relies on a queued worker */
     IoWorkItem = IoAllocateWorkItem(Adapter->NdisMiniportBlock.DeviceObject);
-    if (IoWorkItem)
-    {
-        IoQueueWorkItem(IoWorkItem, MiniportWorker, DelayedWorkQueue, IoWorkItem);
-    }
+    if (!IoWorkItem)
+        return;
+
+    KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
+    Scheduled = Adapter->WorkerScheduled;
+    Adapter->WorkerScheduled = TRUE;
+    KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
+
+    if (Scheduled)
+        IoFreeWorkItem(IoWorkItem);
     else
-    {
-        KeAcquireSpinLock(&Adapter->NdisMiniportBlock.Lock, &OldIrql);
-        Adapter->WorkerScheduled = FALSE;
-        KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
-    }
+        IoQueueWorkItem(IoWorkItem, MiniportWorker, DelayedWorkQueue, IoWorkItem);
 }
 
 /* Sends a packet that waited in the queue to a serialized miniport, which the caller runs */
