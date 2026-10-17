@@ -1922,7 +1922,10 @@ WSPAccept(
                               Socket->SharedData->CreateFlags,
                               lpErrno);
     if (AcceptSocket == INVALID_SOCKET)
+    {
+        NtClose(SockEvent);
         return INVALID_SOCKET;
+    }
 
     /* Set up the Accept Structure */
     AcceptData.ListenHandle = (HANDLE)AcceptSocket;
