@@ -59,15 +59,38 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
     WOW64_CPU_STATE Cpu = *Previous;
     WOW64_CONTEXT Context;
     WOW64_APC_FRAME Apc;
+    TEB32 *Teb32 = WOW64_TEB32(NtCurrentTeb());
 
     if (Native->SegCs == 0x23) Wow64NativeToContext(&Context, Native);
     else Wow64CpuToContext(&Context, Previous);
+    /* Carve the APC frame from the guest ESP. Validate ESP against the guest
+     * stack in 32-bit arithmetic before forming the pointer (ProbeForWrite is
+     * kernel-only here), so a tiny or wild ESP cannot wrap the subtraction or
+     * the range test; the 15-byte margin covers the 16-byte frame alignment.
+     * The write then runs under SEH as a second line of defence. A bad ESP
+     * terminates this process cleanly instead of writing an unchecked pointer. */
+    if (Context.Esp > Teb32->NtTib.StackBase ||
+        Context.Esp < Teb32->NtTib.StackLimit ||
+        Context.Esp - Teb32->NtTib.StackLimit < sizeof(*Guest) + 15)
+    {
+        NtTerminateProcess(NtCurrentProcess(), STATUS_STACK_OVERFLOW);
+        return;
+    }
     Guest = (PVOID)(ULONG_PTR)((Context.Esp - sizeof(*Guest)) & ~15);
-    Guest->Routine = (ULONG)(-(LONG64)Native->P4Home >> 2);
-    Guest->Arg1 = PtrToUlong(Arg1);
-    Guest->Arg2 = PtrToUlong(Arg2);
-    Guest->Arg3 = PtrToUlong(Arg3);
-    Guest->Context = Context;
+    _SEH2_TRY
+    {
+        Guest->Routine = (ULONG)(-(LONG64)Native->P4Home >> 2);
+        Guest->Arg1 = PtrToUlong(Arg1);
+        Guest->Arg2 = PtrToUlong(Arg2);
+        Guest->Arg3 = PtrToUlong(Arg3);
+        Guest->Context = Context;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        NtTerminateProcess(NtCurrentProcess(), _SEH2_GetExceptionCode());
+        _SEH2_YIELD(return);
+    }
+    _SEH2_END;
     Apc.Previous = Previous;
     Apc.Native = Native;
     Apc.Guest = &Guest->Context;
