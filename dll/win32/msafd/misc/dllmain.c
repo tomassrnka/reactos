@@ -1611,7 +1611,7 @@ WSPAccept(
     struct timeval              Timeout;
     PVOID                       PendingData = NULL;
     ULONG                       PendingDataLength = 0;
-    PVOID                       CalleeDataBuffer;
+    PVOID                       CalleeDataBuffer = NULL;
     WSABUF                      CallerData, CalleeID, CallerID, CalleeData;
     PSOCKADDR                   RemoteAddress =  NULL;
     GROUP                       GroupID = 0;
@@ -1744,6 +1744,7 @@ WSPAccept(
                 PendingData = HeapAlloc(GlobalHeap, 0, PendingDataLength);
                 if (!PendingData)
                 {
+                    NtClose(SockEvent);
                     return MsafdReturnInvalidSocket(STATUS_INSUFFICIENT_RESOURCES, lpErrno);
                 }
 
@@ -1771,6 +1772,7 @@ WSPAccept(
 
                 if (!NT_SUCCESS(Status))
                 {
+                    HeapFree(GlobalHeap, 0, PendingData);
                     NtClose( SockEvent );
                     return MsafdReturnInvalidSocket(Status, lpErrno);
                 }
@@ -1789,6 +1791,9 @@ WSPAccept(
         RemoteAddress = HeapAlloc(GlobalHeap, 0, sizeof(*RemoteAddress));
         if (!RemoteAddress)
         {
+            if (PendingData)
+                HeapFree(GlobalHeap, 0, PendingData);
+            NtClose(SockEvent);
             return MsafdReturnInvalidSocket(STATUS_INSUFFICIENT_RESOURCES, lpErrno);
         }
 
@@ -1811,6 +1816,10 @@ WSPAccept(
             /* Allocate Buffer for Callee Data */
             CalleeDataBuffer = HeapAlloc(GlobalHeap, 0, 4096);
             if (!CalleeDataBuffer) {
+                HeapFree(GlobalHeap, 0, RemoteAddress);
+                if (PendingData)
+                    HeapFree(GlobalHeap, 0, PendingData);
+                NtClose(SockEvent);
                 return MsafdReturnInvalidSocket(STATUS_INSUFFICIENT_RESOURCES, lpErrno);
             }
             CalleeData.buf = CalleeDataBuffer;
@@ -1832,6 +1841,16 @@ WSPAccept(
                                    CalleeData.buf == NULL ? NULL : &CalleeData,
                                    &GroupID,
                                    dwCallbackData);
+
+        /* The condition function was the only user of these buffers */
+        HeapFree(GlobalHeap, 0, RemoteAddress);
+        RemoteAddress = NULL;
+        if (PendingData)
+            HeapFree(GlobalHeap, 0, PendingData);
+        PendingData = NULL;
+        if (CalleeDataBuffer)
+            HeapFree(GlobalHeap, 0, CalleeDataBuffer);
+        CalleeDataBuffer = NULL;
 
         if (((CallBack == CF_ACCEPT) && GroupID) != 0)
         {
