@@ -1825,7 +1825,8 @@ AccRewriteSetNamedRights(LPWSTR pObjectName,
                     if (!SetSecurityDescriptorGroup(&InheritedSd, pSdGroup, FALSE))
                         Ret = GetLastError();
                 }
-                if (Ret == ERROR_SUCCESS && (SecurityInfo & SACL_SECURITY_INFORMATION))
+                /* the mandatory label lives in the SACL; LABEL info must propagate it too, or the label is dropped */
+                if (Ret == ERROR_SUCCESS && (SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)))
                 {
                     RtlGetSaclSecurityDescriptor(pSecurityDescriptor, &Present, &pSdSacl, &Defaulted);
                     if (!SetSecurityDescriptorSacl(&InheritedSd, Present, pSdSacl, FALSE))

@@ -354,15 +354,23 @@ PrintSpecialAccess:
     return Ret;
 }
 
-/* Add a backslash at the end of a path string if necessary */
-static VOID
-AddBackslash(LPTSTR FilePath)
+/* Add a backslash at the end of a path string if necessary.
+ * Returns FALSE without writing when the backslash would not fit. */
+static BOOL
+AddBackslash(LPTSTR FilePath, SIZE_T cchBuffer)
 {
     /* Find the last backslash. If there is none, or if it doesn't
      * terminate the string, then append a backslash. */
     LPTSTR pch = _tcsrchr(FilePath, _T('\\'));
     if (!pch || *(pch+1))
-        _tcscat(FilePath, _T("\\"));
+    {
+        SIZE_T Length = _tcslen(FilePath);
+        if (Length + 2 > cchBuffer) /* no room for the backslash and the NUL */
+            return FALSE;
+        FilePath[Length] = _T('\\');
+        FilePath[Length + 1] = _T('\0');
+    }
+    return TRUE;
 }
 
 static BOOL
@@ -370,16 +378,23 @@ GetPathOfFile(LPTSTR FilePath, LPCTSTR pszFiles)
 {
     TCHAR FullPath[MAX_PATH];
     LPTSTR pch;
-    DWORD attrs;
+    DWORD attrs, Length;
 
-    _tcsncpy(FilePath, pszFiles, MAX_PATH);
+    /* _tcsncpy leaves the buffer unterminated when the path fills it; bound, terminate and reject truncation */
+    if (FAILED(StringCchCopy(FilePath, MAX_PATH, pszFiles)))
+    {
+        PrintError(ERROR_FILENAME_EXCED_RANGE);
+        return FALSE;
+    }
     pch = _tcsrchr(FilePath, _T('\\'));
     if (pch != NULL)
     {
         *pch = 0;
-        if (!GetFullPathName(FilePath, MAX_PATH, FullPath, NULL))
+        /* reject failure (0) and an over-long required length (>= MAX_PATH) before copying */
+        Length = GetFullPathName(FilePath, MAX_PATH, FullPath, NULL);
+        if (Length == 0 || Length >= MAX_PATH)
         {
-            PrintError(GetLastError());
+            PrintError(Length == 0 ? GetLastError() : ERROR_FILENAME_EXCED_RANGE);
             return FALSE;
         }
         _tcsncpy(FilePath, FullPath, MAX_PATH);
@@ -392,9 +407,21 @@ GetPathOfFile(LPTSTR FilePath, LPCTSTR pszFiles)
         }
     }
     else
-        GetCurrentDirectory(MAX_PATH, FilePath);
+    {
+        /* same bounds: a failure or an over-long directory leaves FilePath unusable */
+        Length = GetCurrentDirectory(MAX_PATH, FilePath);
+        if (Length == 0 || Length >= MAX_PATH)
+        {
+            PrintError(Length == 0 ? GetLastError() : ERROR_FILENAME_EXCED_RANGE);
+            return FALSE;
+        }
+    }
 
-    AddBackslash(FilePath);
+    if (!AddBackslash(FilePath, MAX_PATH))
+    {
+        PrintError(ERROR_FILENAME_EXCED_RANGE);
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -433,9 +460,8 @@ VolumeHasAcls(LPCTSTR pszFiles)
             }
             if (Slashes < 2)
             {
-                if (_tcslen(Root) + 2 > MAX_PATH)
+                if (!AddBackslash(Root, MAX_PATH))
                     return TRUE;
-                AddBackslash(Root);
             }
         }
         else

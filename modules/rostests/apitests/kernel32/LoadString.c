@@ -121,6 +121,23 @@ START_TEST(LoadString)
 
     TestStrings(Self);
 
+    /* a negative size is invalid: ReactOS copies nothing and returns zero, leaving a real buffer untouched */
+    if (is_reactos())
+    {
+        WCHAR WideNeg[16];
+        char NarrowNeg[16];
+
+        memset(WideNeg, 0x55, sizeof(WideNeg));
+        SetLastError(PENDING_ERROR);
+        ok_dec(pLoadStringW(Self, 1, WideNeg, -1), 0);
+        ok_hex(WideNeg[0], 0x5555);
+
+        memset(NarrowNeg, 0x55, sizeof(NarrowNeg));
+        SetLastError(PENDING_ERROR);
+        ok_dec(pLoadStringA(Self, 1, NarrowNeg, -1), 0);
+        ok_hex((UCHAR)NarrowNeg[0], 0x55);
+    }
+
     /* no buffer: nothing, and the invalid parameter error (measured on kernelbase of Windows Server 2008 R2 and Windows 10) */
     SetLastError(PENDING_ERROR);
     ok_dec(pLoadStringW(Self, 1, NULL, 0), 0);
