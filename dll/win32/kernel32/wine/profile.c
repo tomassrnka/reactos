@@ -98,7 +98,6 @@ static LONG profile_reg_create_open(HKEY hkey, const WCHAR *subkey, REGSAM acces
     memcpy(path, subkey, len);
 
     handle = NULL;
-    status = STATUS_SUCCESS;
     for (p = path; *p; p = next)
     {
         HANDLE created;
