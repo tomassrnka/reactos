@@ -4068,6 +4068,8 @@ MiRosUnmapViewOfSection(
             {
                 /* Another thread is unmapping this image */
                 MemoryArea->DeleteInProgress = FALSE;
+                /* Balance the reference taken above; every other exit path derefs */
+                MmDereferenceSegment(Segment);
                 return STATUS_NOT_MAPPED_VIEW;
             }
         }
