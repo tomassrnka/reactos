@@ -146,8 +146,6 @@ ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a)
         return NtGdiStartDoc(G(0), &Info, P(2), a[3]);
     }
     default:
-        DbgPrint("WoW64win: unsupported service %lx\n", Number);
-        RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
-        return Wow64WinFailure(Number, STATUS_NOT_IMPLEMENTED);
+        return Wow64WinGdiExtraService(Number, a);
     }
 }
