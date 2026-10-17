@@ -58,7 +58,7 @@ LoadStringW(
         return *p;
     }
 
-    /* A negative size would wrap the unsigned copy length; match Windows and Wine by copying nothing */
+    /* A negative size would wrap the unsigned copy length; ReactOS deliberately copies nothing (Wine has no such guard) */
     if (nBufferMax < 0)
         return 0;
 
@@ -103,7 +103,7 @@ LoadStringA(
         return 0;
     }
 
-    /* A negative size would wrap the unsigned byte count; match Windows by copying nothing */
+    /* A negative size would wrap the unsigned byte count; ReactOS deliberately copies nothing (Wine has no such guard) */
     if (nBufferMax < 0)
         return 0;
 
