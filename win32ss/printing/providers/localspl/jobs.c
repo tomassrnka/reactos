@@ -308,6 +308,13 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     // Get the user name for the Job.
     cchUserName = UNLEN + 1;
     pJob->pwszUserName = DllAllocSplMem(cchUserName * sizeof(WCHAR));
+    if (!pJob->pwszUserName)
+    {
+        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        ERR("DllAllocSplMem failed!\n");
+        goto Cleanup;
+    }
+
     if (!GetUserNameW(pJob->pwszUserName, &cchUserName))
     {
         dwErrorCode = GetLastError();
@@ -342,6 +349,13 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
 
     cchMachineName = wcslen(pwszMachineName);
     pJob->pwszMachineName = DllAllocSplMem((cchMachineName + cchDoubleBackslash + 1) * sizeof(WCHAR));
+    if (!pJob->pwszMachineName)
+    {
+        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        ERR("DllAllocSplMem failed!\n");
+        goto Cleanup;
+    }
+
     CopyMemory(pJob->pwszMachineName, wszDoubleBackslash, cchDoubleBackslash * sizeof(WCHAR));
     CopyMemory(&pJob->pwszMachineName[cchDoubleBackslash], pwszMachineName, (cchMachineName + 1) * sizeof(WCHAR));
 
@@ -352,14 +366,6 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     {
         LeaveCriticalSection(&PrinterDeletionSection);
         dwErrorCode = ERROR_PRINTER_DELETED;
-
-        // The job is in no list and has no files yet: free only its own memory (FreeJob would remove a job with the same ID).
-        DllFreeSplMem(pJob->pDevMode);
-        DllFreeSplStr(pJob->pwszDatatype);
-        DllFreeSplStr(pJob->pwszDocumentName);
-        DllFreeSplStr(pJob->pwszMachineName);
-        DllFreeSplStr(pJob->pwszNotifyName);
-        DllFreeSplStr(pJob->pwszUserName);
         goto Cleanup;
     }
 
@@ -395,8 +401,17 @@ CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle)
     pJob = NULL;
 
 Cleanup:
+    // A job that is still ours is in no list and has no files yet: free only its own memory (FreeJob would remove a job with the same ID).
     if (pJob)
+    {
+        DllFreeSplMem(pJob->pDevMode);
+        DllFreeSplStr(pJob->pwszDatatype);
+        DllFreeSplStr(pJob->pwszDocumentName);
+        DllFreeSplStr(pJob->pwszMachineName);
+        DllFreeSplStr(pJob->pwszNotifyName);
+        DllFreeSplStr(pJob->pwszUserName);
         DllFreeSplMem(pJob);
+    }
 
     if (pwszMachineName)
         RpcStringFreeW(&pwszMachineName);
