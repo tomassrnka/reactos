@@ -478,7 +478,9 @@ PrintDaclsOfFiles(LPCTSTR pszFiles)
     }
     do
     {
-        if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        /* A directory has an ACL like a file; a wildcard also lists the dot entries, which are not named items */
+        if ((FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && _tcspbrk(pszFiles, _T("*?")) &&
+            (_tcscmp(FindData.cFileName, _T(".")) == 0 || _tcscmp(FindData.cFileName, _T("..")) == 0))
             continue;
 
         if (!PrintFileDacl(FilePath, FindData.cFileName))
