@@ -79,17 +79,22 @@ LibTCPEmptyQueue(PCONNECTION_ENDPOINT Connection)
     DereferenceObject(Connection);
 }
 
-void LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
+err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
 {
     PQUEUE_ENTRY qp;
 
     qp = (PQUEUE_ENTRY)ExAllocateFromNPagedLookasideList(&QueueEntryLookasideList);
+    if (!qp)
+        return ERR_MEM;
+
     qp->p = p;
     qp->Offset = 0;
 
     LockObject(Connection);
     InsertTailList(&Connection->PacketQueue, &qp->ListEntry);
     UnlockObject(Connection);
+
+    return ERR_OK;
 }
 
 PQUEUE_ENTRY LibTCPDequeuePacket(PCONNECTION_ENDPOINT Connection)
@@ -238,7 +243,10 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
         /* A reader may consume and free the segment as soon as it is queued */
         u16_t Length = p->tot_len;
 
-        LibTCPEnqueuePacket(Connection, p);
+        /* On lookaside exhaustion let lwIP keep the pbuf and retry later
+         * instead of dereferencing a NULL queue entry */
+        if (LibTCPEnqueuePacket(Connection, p) != ERR_OK)
+            return ERR_MEM;
 
         tcp_recved(pcb, Length);
 
