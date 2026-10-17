@@ -363,6 +363,13 @@ DispEchoRequest(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    SendContext->FinishWorker = IoAllocateWorkItem(DeviceObject);
+    if (!SendContext->FinishWorker)
+    {
+        ExFreePoolWithTag(SendContext, OUT_DATA_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     RtlZeroMemory(&SendContext->TdiRequest, sizeof(SendContext->TdiRequest));
     SendContext->TdiRequest.RequestContext = Irp;
 
@@ -388,6 +395,7 @@ DispEchoRequest(
     {
         TI_DbgPrint(DEBUG_ICMP, ("Failed to open address file status: 0x%x\n", Status));
 
+        IoFreeWorkItem(SendContext->FinishWorker);
         ExFreePoolWithTag(SendContext, OUT_DATA_TAG);
 
         return Status;
@@ -402,7 +410,6 @@ DispEchoRequest(
     SendContext->CurrentReply = Irp->AssociatedIrp.SystemBuffer;
     SendContext->RemainingSize = OutputBufferLength;
     SendContext->nReplies = 0;
-    SendContext->FinishWorker = IoAllocateWorkItem(DeviceObject);
     KeInitializeEvent(&SendContext->InitializationFinishedEvent, NotificationEvent, FALSE);
     KeInitializeEvent(&SendContext->DatagramProcessedEvent, NotificationEvent, TRUE);
 
@@ -421,6 +428,10 @@ DispEchoRequest(
 
     if (!Buffer)
     {
+        NTSTATUS _Status = FileCloseAddress(&SendContext->TdiRequest);
+        ASSERT(NT_SUCCESS(_Status));
+
+        IoFreeWorkItem(SendContext->FinishWorker);
         ExFreePoolWithTag(SendContext, OUT_DATA_TAG);
 
         return STATUS_INSUFFICIENT_RESOURCES;
