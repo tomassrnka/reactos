@@ -295,6 +295,10 @@ GetConnectionsOfType(
         if (dwError != NO_ERROR && dwError != ERROR_MORE_DATA)
             break;
 
+        /* More data without an entry or a larger size to ask for would repeat the same call forever */
+        if (dwError == ERROR_MORE_DATA && (dwCount == 0 || dwCount == (DWORD)-1))
+            break;
+
         for (i = 0; i < dwCount; i++)
         {
             PWSTR pszLocal, pszRemote;

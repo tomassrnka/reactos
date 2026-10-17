@@ -465,7 +465,7 @@ VOID
 RefreshAfterResize(
     _In_ ULONG ulDiskNumber,
     _In_ ULONGLONG ullStartSector,
-    _In_ BOOL bVolumeFocus);
+    _In_ BOOL bHadVolume);
 
 /* filesystem.c */
 EXIT_CODE
@@ -743,6 +743,9 @@ GetFocusVolume(VOID);
 VOID
 SelectVolumeOfNewPartition(
     _In_ PPARTENTRY PartEntry);
+
+VOID
+ReloadVolumeList(VOID);
 
 VOID
 RemoveVolume(

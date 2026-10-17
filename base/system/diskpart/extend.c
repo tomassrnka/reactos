@@ -217,7 +217,7 @@ GetFatExtendKind(
     LARGE_INTEGER Offset;
     ULONG ulBytesPerSector, ulReserved, ulFats, ulRootSectors, ulFatSectors, ulSpc;
     ULONG ulBits, ulOldClusters, ulOldSectors, ulFirstData, ulMaxClusters, ulGrowth;
-    ULONGLONG ullNewClusters, ullFatMax;
+    ULONGLONG ullNewClusters, ullFatMax, ullFirstData;
     FAT_EXTEND_KIND Kind = FatExtendUnknown;
     NTSTATUS Status;
 
@@ -241,9 +241,11 @@ GetFatExtendKind(
     ulRootSectors = ulBytesPerSector ? (*(PUSHORT)&Boot[0x11] * 32 + ulBytesPerSector - 1) / ulBytesPerSector : 0;
     ulFatSectors = *(PUSHORT)&Boot[0x16] ? *(PUSHORT)&Boot[0x16] : *(PULONG)&Boot[0x24];
     ulOldSectors = *(PUSHORT)&Boot[0x13] ? *(PUSHORT)&Boot[0x13] : *(PULONG)&Boot[0x20];
-    ulFirstData = ulReserved + ulFats * ulFatSectors + ulRootSectors;
-    if (ulBytesPerSector != ulSectorSize || !ulSpc || !ulFats || !ulFatSectors || ulOldSectors <= ulFirstData)
+    /* The sum can exceed 32 bits in a damaged boot sector: wrapped, it would pass the size check below */
+    ullFirstData = (ULONGLONG)ulReserved + (ULONGLONG)ulFats * ulFatSectors + ulRootSectors;
+    if (ulBytesPerSector != ulSectorSize || !ulSpc || !ulFats || !ulFatSectors || ulOldSectors <= ullFirstData)
         goto done;
+    ulFirstData = (ULONG)ullFirstData;
 
     /* The cluster counts the formatter writes: no cluster number reaches a reserved value. */
     ulOldClusters = (ulOldSectors - ulFirstData) / ulSpc;
@@ -359,13 +361,15 @@ GetFocusPartition(VOID)
 
 /*
  * Reads the disks and volumes again after a partition changed size, and gives
- * the focus back to the same disk, partition and (if it had it) volume.
+ * the focus back to the same disk, partition and volume. A partition that had
+ * no volume before gets none from a resize, so only a partition that had one
+ * waits for its volume to come back.
  */
 VOID
 RefreshAfterResize(
     _In_ ULONG ulDiskNumber,
     _In_ ULONGLONG ullStartSector,
-    _In_ BOOL bVolumeFocus)
+    _In_ BOOL bHadVolume)
 {
     PLIST_ENTRY Entry, PartListEntry;
     PDISKENTRY DiskEntry;
@@ -405,17 +409,20 @@ RefreshAfterResize(
     }
 
     CurrentPartition = Found;
-    if (Found != NULL)
+    if (Found != NULL && bHadVolume)
     {
         /* The partition's volume gets the focus with it, as SELECT PARTITION gives it. */
         SelectVolumeOfNewPartition(Found);
+    }
+    else if (Found != NULL)
+    {
+        ReloadVolumeList();
     }
     else
     {
         DestroyVolumeList();
         CreateVolumeList();
     }
-    UNREFERENCED_PARAMETER(bVolumeFocus);
 }
 
 /* The unpartitioned space right after the partition, in its MBR container or after the container. */
@@ -562,6 +569,13 @@ extend_main(
             ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
             return EXIT_SUCCESS;
         }
+    }
+
+    /* The file system takes the whole partition, so a size says something that cannot be done */
+    if (bFileSystemOnly && ullSize != 0)
+    {
+        ConResPuts(StdErr, IDS_ERROR_INVALID_ARGS);
+        return EXIT_SUCCESS;
     }
 
     bVolumeFocus = (GetFocusVolume() != NULL);
@@ -749,7 +763,7 @@ extend_main(
         NtClose(hVolume);
         hVolume = NULL;
     }
-    RefreshAfterResize(ulDiskNumber, ullStartSector, bVolumeFocus);
+    RefreshAfterResize(ulDiskNumber, ullStartSector, VolumeEntry != NULL);
 
 done:
     if (hVolume != NULL)

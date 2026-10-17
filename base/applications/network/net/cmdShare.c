@@ -8,6 +8,7 @@
 #include "net.h"
 
 #include <aclapi.h>
+#include <sddl.h>
 
 #ifndef _SHARE_INFO_1005_DEFINED
 #define _SHARE_INFO_1005_DEFINED
@@ -485,7 +486,16 @@ PrintPermissions(
             continue;
 
         if (!LookupAccountSidW(pszServer, (PSID)&pAce->SidStart, szName, &cchName, szDomain, &cchDomain, &Use))
-            continue;
+        {
+            /* An account that no longer exists is shown by its SID */
+            PWSTR pszSid = NULL;
+
+            if (!ConvertSidToStringSidW((PSID)&pAce->SidStart, &pszSid))
+                continue;
+            StringCchCopyW(szName, ARRAYSIZE(szName), pszSid);
+            szDomain[0] = UNICODE_NULL;
+            LocalFree(pszSid);
+        }
 
         switch (pAce->Mask)
         {
@@ -512,10 +522,10 @@ PrintPermissions(
             PrintPadding(L' ', nPaddedLength);
         bFirst = FALSE;
 
-        if (szDomain[0] != UNICODE_NULL)
-            ConPrintf(StdOut, L"%s\\%s, %s\n", szDomain, szName, pszRight);
-        else
-            ConPrintf(StdOut, L"%s, %s\n", szName, pszRight);
+        /* A mask that is none of the three named rights prints the account alone */
+        ConPrintf(StdOut, L"%s%s%s%s%s\n",
+                  szDomain, szDomain[0] ? L"\\" : L"", szName,
+                  pszRight[0] ? L", " : L"", pszRight);
     }
 
     NetApiBufferFree(pInfo);
@@ -662,7 +672,11 @@ AddShare(
         Flags.shi1005_flags = pOptions->dwCache;
         Status = NetShareSetInfo(pOptions->pszServer, pOptions->pszName, 1005, (LPBYTE)&Flags, NULL);
         if (Status != NERR_Success)
+        {
+            /* Without the caching setting the share is not what was asked for, and a retry would find its name taken */
+            NetShareDel(pOptions->pszServer, pOptions->pszName, 0);
             return ShareError(Status);
+        }
     }
 
     PrintMessageStringV(4656, pOptions->pszName);

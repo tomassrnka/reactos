@@ -263,11 +263,10 @@ ParseDaysOfMonth(
     for (;;)
     {
         ulValue = wcstoul(startPtr, &endPtr, 10);
-        if (ulValue == 0)
+        if (ulValue == 0 || ulValue > 31)
             return FALSE;
 
-        if (ulValue > 0 && ulValue <= 31)
-            *pulDaysOfMonth |= (1 << (ulValue - 1));
+        *pulDaysOfMonth |= (1 << (ulValue - 1));
 
         if (endPtr != NULL && *endPtr == UNICODE_NULL)
             return TRUE;
