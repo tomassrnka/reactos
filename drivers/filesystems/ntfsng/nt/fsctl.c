@@ -855,7 +855,7 @@ static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
     PNG_CCB Ccb = FileObject ? FileObject->FsContext2 : NULL;
     NTSTATUS Status;
-    if (!Fcb || !Fcb->IsVolume || !Ccb || !Ccb->ManageVolume)
+    if (!Fcb || !Fcb->IsVolume || !Ccb || !Ccb->ManageVolumeMutate)
         return STATUS_INVALID_PARAMETER;
     if (Vcb->LockedBy != FileObject)
         return STATUS_ACCESS_DENIED;
@@ -1416,12 +1416,14 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Irp->IoStatus.Information = sizeof(ULONG);
             return STATUS_SUCCESS;
         }
+        /* Lock/unlock/dismount mutate the mounted volume: as on Windows they need write access or
+         * SeManageVolumePrivilege (ManageVolumeMutate, shared with resize), not a bare read-only open. */
         case FSCTL_LOCK_VOLUME:
-            if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+            if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolumeMutate)
                 return STATUS_INVALID_PARAMETER;
             return NgLockVolume(Vcb, FileObject);
         case FSCTL_UNLOCK_VOLUME:
-            if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+            if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolumeMutate)
                 return STATUS_INVALID_PARAMETER;
             if (!Fcb || !Fcb->IsVolume || !NgEndLock(Vcb, FileObject, FALSE))
                 return STATUS_NOT_LOCKED;
@@ -1487,7 +1489,8 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 return STATUS_INVALID_PARAMETER;
             return NgGetNtfsVolumeData(Vcb, Irp, Stack);
         case FSCTL_GET_VOLUME_BITMAP:
-            /* As FastFAT: a volume handle that may manage the volume. */
+            /* A defragmentation read: as on Windows any access to a volume handle suffices (read-only
+             * is fine); the volume device ACL, not this FSCTL, is what keeps non-admins out. */
             if (!Fcb || !Fcb->IsVolume || !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
                 return STATUS_INVALID_PARAMETER;
             return NgGetVolumeBitmap(Vcb, Irp, Stack);
