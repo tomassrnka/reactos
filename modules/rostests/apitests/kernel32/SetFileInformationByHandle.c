@@ -309,11 +309,14 @@ static void Test_DispositionAndEndOfFile(void)
         Ret = pSetFileInformationByHandle(File, TestFileIoPriorityHintInfo, &PriorityHint, sizeof(PriorityHint));
         ok(!Ret && GetLastError() == ERROR_INVALID_HANDLE, "Got %d, error %lu\n", Ret, GetLastError());
 
-        SetLastError(0xdeadbeef);
-        Ret = pSetFileInformationByHandle(Event, TestFileIoPriorityHintInfo, &PriorityHint, sizeof(PriorityHint));
-        ok(!Ret, "Event: got %d, error %lu\n", Ret, GetLastError());
+        ok(Event != NULL, "CreateEventW failed: %lu\n", GetLastError());
         if (Event)
+        {
+            SetLastError(0xdeadbeef);
+            Ret = pSetFileInformationByHandle(Event, TestFileIoPriorityHintInfo, &PriorityHint, sizeof(PriorityHint));
+            ok(!Ret, "Event: got %d, error %lu\n", Ret, GetLastError());
             CloseHandle(Event);
+        }
     }
 }
 
