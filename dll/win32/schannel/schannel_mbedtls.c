@@ -467,8 +467,6 @@ SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
         if (!s->cert_checked && s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT &&
             s->ssl.state > MBEDTLS_SSL_SERVER_CERTIFICATE)
         {
-            s->cert_checked = TRUE;
-
             /* Windows answers a rejected server with the status alone, no alert record */
             if (!s->manual_validation)
             {
@@ -477,6 +475,9 @@ SECURITY_STATUS schan_imp_handshake(schan_imp_session session)
                 if (status != SEC_E_OK)
                     return status;
             }
+
+            /* Mark checked only after the chain validates, so a retried handshake re-validates instead of completing against an unvalidated server */
+            s->cert_checked = TRUE;
         }
 
         err = mbedtls_ssl_handshake_step(&s->ssl);
@@ -823,6 +824,12 @@ SECURITY_STATUS schan_imp_send(schan_imp_session session, const void *buffer,
     MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
     int ret;
 
+    /* Fail-closed: a client context whose server certificate was never validated must not be
+       advanced to a completed handshake through the data path; mbedtls_ssl_write would otherwise
+       finish the handshake without re-entering schan_validate_server_chain */
+    if (s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT && !s->manual_validation && !s->cert_checked)
+        return SEC_E_CONTEXT_EXPIRED;
+
     ret = mbedtls_ssl_write(&s->ssl, (unsigned char *)buffer, *length);
 
     TRACE("MBEDTLS schan_imp_send: (%p, %p, %p/%lu)\n", s, buffer, length, *length);
@@ -862,6 +869,12 @@ SECURITY_STATUS schan_imp_recv(schan_imp_session session, void *buffer,
 {
     PMBEDTLS_SESSION s = (PMBEDTLS_SESSION)session;
     int ret;
+
+    /* Fail-closed: a client context whose server certificate was never validated must not be
+       advanced to a completed handshake through the data path; mbedtls_ssl_read would otherwise
+       finish the handshake without re-entering schan_validate_server_chain */
+    if (s->conf.endpoint == MBEDTLS_SSL_IS_CLIENT && !s->manual_validation && !s->cert_checked)
+        return SEC_E_CONTEXT_EXPIRED;
 
     TRACE("MBEDTLS schan_imp_recv: (%p, %p, %p/%lu)\n", s, buffer, length, *length);
 
