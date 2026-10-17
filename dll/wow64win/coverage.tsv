@@ -42,8 +42,8 @@ NtUserCreateLocalMemHandle	B	generated	typed arguments; handle policy; measured 
 NtUserCreateWindowEx	C+S	manual	see user.c, userextra.c and gdi.c
 NtUserCreateWindowStation	C	unsupported	requires private structure or selector translation
 NtUserCtxDisplayIOCtl	A	generated	typed arguments; handle policy; measured layouts
-NtUserDbgWin32HeapFail	A	generated	typed arguments; handle policy; measured layouts
-NtUserDbgWin32HeapStat	A	generated	typed arguments; handle policy; measured layouts
+NtUserDbgWin32HeapFail	A	unsupported	no i386 service entry
+NtUserDbgWin32HeapStat	A	unsupported	no i386 service entry
 NtUserDdeGetQualityOfService	B	generated	typed arguments; handle policy; measured layouts
 NtUserDdeInitialize	A	generated	typed arguments; handle policy; measured layouts
 NtUserDdeSetQualityOfService	B	generated	typed arguments; handle policy; measured layouts
