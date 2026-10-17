@@ -302,8 +302,10 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			v->jv = NULL;
 		} else {
 			/* Test only: a mount that had to recover does not inject the fault again. */
+#if DBG
 			if (v->jv->replayed || v->jv->torn)
 				kshim_jnl_fault = 0;
+#endif
 		}
 	} else if (jerr0 == -EIO || jerr0 == -ENOMEM) {
 		jrec = NGJ_UNREAD;
@@ -1651,10 +1653,12 @@ int ngc_raw_write(ngc_vol *v, unsigned long long off, const void *buf, unsigned 
 	return err;
 }
 
+#if DBG
 void ngc_set_journal_fault(unsigned long commit_no)
 {
 	kshim_jnl_fault = commit_no;
 }
+#endif
 
 static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len)
 {
@@ -2112,7 +2116,9 @@ int ngc_set_label(ngc_vol *v, const unsigned short *label, unsigned int len)
 
 /* ------------------------------------------------------------- volume size */
 
+#if DBG
 int ngc_resize_fault;
+#endif
 
 /* $Bitmap bytes for @nr clusters: whole 8-byte units, as format writes it. */
 static s64 ngc_bmp_bytes(s64 nr)

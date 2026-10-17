@@ -83,7 +83,11 @@ int kshim_jnl_ro_page(struct block_device *b, u64 blk, u8 mask, const u8 *data);
 unsigned long kshim_jnl_pending(struct block_device *b);
 void kshim_jnl_report(struct block_device *b);
 /* Test only: nonzero stops the machine half way through writing that commit in place. */
+#if DBG
 extern unsigned long kshim_jnl_fault;
+#else
+#define kshim_jnl_fault 0UL   /* fault injection compiled out of release */
+#endif
 /* Test only, for this volume: the in-place pass of its next commit fails half way, as a failing device
  * would (KJ_FAULT_APPLY), or no overlay page can be allocated until the resize ends (KJ_FAULT_CAPTURE). */
 enum { KJ_FAULT_APPLY = 1, KJ_FAULT_CAPTURE = 2 };

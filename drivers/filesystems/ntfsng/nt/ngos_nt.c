@@ -16,15 +16,23 @@ NG_PROFILE NgProfile;
 
 unsigned long long ngos_ticks(void)
 {
+#if DBG
     return __rdtsc();
+#else
+    return 0;
+#endif
 }
 
 void ngos_prof(int id, unsigned long long since, unsigned long long bytes)
 {
+#if DBG
     NG_PROF_STAT *S = &NgProfile.Stage[id];
     S->Count++;
     S->Ticks += __rdtsc() - since;
     S->Bytes += bytes;
+#else
+    (void)id; (void)since; (void)bytes;
+#endif
 }
 
 void *ngos_alloc(size_t n)
@@ -211,7 +219,9 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
     KEVENT Event;
     PIRP Irp;
     NTSTATUS Status;
+#if DBG
     ULONGLONG T0 = __rdtsc();
+#endif
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     Offset.QuadPart = (LONGLONG)off;
@@ -245,9 +255,11 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
         Irp->MdlAddress = NULL;
     }
     IoFreeIrp(Irp);
+#if DBG
     ngos_prof(Major == IRP_MJ_READ ? NGP_DEV_READ : Major == IRP_MJ_WRITE ? NGP_DEV_WRITE : NGP_DEV_FLUSH, T0,
               Major == IRP_MJ_FLUSH_BUFFERS ? 0 : len);
     NgStackSample();
+#endif
     if (!NT_SUCCESS(Status))
     {
         /*

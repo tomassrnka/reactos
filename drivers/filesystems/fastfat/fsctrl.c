@@ -4060,6 +4060,7 @@ Routine Description:
 //  Local Support Routine
 //
 
+#if DBG
 static
 BOOLEAN
 FatExtendFaultBegin (
@@ -4126,6 +4127,7 @@ FatExtendFaultEnd (
     FatMarkFatDirty( Vcb, Vbo, Length );
     InterlockedIncrement( &Vcb->DirtyFatWriteFailures );
 }
+#endif
 
 
 //
@@ -4181,9 +4183,11 @@ Routine Description:
     UCHAR Saved[6];
     BOOLEAN BackupWritten = FALSE;
     LARGE_INTEGER Offset;
+#if DBG
     BOOLEAN Hidden;
     VBO HiddenVbo;
     ULONG HiddenLength;
+#endif
 
     PAGED_CODE();
 
@@ -4370,14 +4374,18 @@ Routine Description:
         //  package down below forgets which FAT sectors are dirty, and those would never be written.
         //
 
+#if DBG
         Hidden = FatExtendFaultBegin( Vcb, &HiddenVbo, &HiddenLength );
+#endif
 
         Status = FatFlushFat( IrpContext, Vcb );
 
+#if DBG
         if (Hidden) {
 
             FatExtendFaultEnd( Vcb, HiddenVbo, HiddenLength );
         }
+#endif
 
         //
         //  A volume file write that was under way during the flush and failed marks its sectors

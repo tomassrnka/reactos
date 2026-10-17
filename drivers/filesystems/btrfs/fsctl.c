@@ -4785,7 +4785,7 @@ end:
     return Status;
 }
 
-#ifdef __REACTOS__
+#if defined(__REACTOS__) && DBG
 extern UNICODE_STRING registry_path;
 
 /* Test only: the "ResizeFault" DWORD of the service key makes the first allocation of the next grow
@@ -5009,9 +5009,11 @@ static NTSTATUS resize_device(device_extension* Vcb, void* data, ULONG len, PIRP
                 goto end;
             }
 
+#if defined(__REACTOS__) && DBG
             if (resize_fault_armed())
                 Status = STATUS_INSUFFICIENT_RESOURCES;
             else
+#endif
                 Status = space_list_add2(&dev->space, NULL, old_size, delta, NULL, NULL);
             if (!NT_SUCCESS(Status)) {
                 ERR("space_list_add2 returned %08lx\n", Status);
