@@ -42,8 +42,11 @@ NtUserTrackMouseEvent NtUserTranslateAccelerator
 NtUserSetCursorIconData
 NtGdiCreateDIBSection NtGdiDoPalette NtGdiExtCreatePen NtGdiExtGetObjectW
 NtGdiPolyPolyDraw NtGdiStartDoc'''.split())
-services = set('Nt'+n for n in re.findall(r'SVC_\((\w+),',
-                          (ROOT/'win32ss/w32ksvc32.h').read_text()))
+_svc32 = (ROOT/'win32ss/w32ksvc32.h').read_text()
+# DBG-gated services exist only in checked builds; the W64_ enum omits them in
+# Release, so they must not reach generated.inc/failure.inc. (one line constraint)
+_svc32 = re.sub(r'#if\s+DBG\b.*?#endif', '', _svc32, flags=re.S)
+services = set('Nt'+n for n in re.findall(r'SVC_\((\w+),', _svc32))
 # Reviewed fixed-width structures absent from the measured catalogue. Each
 # has only fixed-width fields (SID ends in a DWORD array). Scalar arrays have
 # the same representation on both targets. Unknown names are rejected.
