@@ -95,6 +95,7 @@ extern void func_lstrcpynW(void);
 extern void func_lstrlen(void);
 extern void func_MailslotRead(void);
 extern void func_MappedFileGrowth(void);
+extern void func_MappedViewEvict(void);
 extern void func_MultiByteToWideChar(void);
 extern void func_PerformanceCounter(void);
 extern void func_Pipes(void);
@@ -239,6 +240,7 @@ const struct test winetest_testlist[] =
     { "lstrlen",                     func_lstrlen },
     { "MailslotRead",                func_MailslotRead },
     { "MappedFileGrowth",            func_MappedFileGrowth },
+    { "MappedViewEvict",            func_MappedViewEvict },
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
     { "PerformanceCounter",          func_PerformanceCounter },
     { "Pipes",                       func_Pipes },
