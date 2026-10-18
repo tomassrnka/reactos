@@ -2293,9 +2293,30 @@ co_WinPosSetWindowPosEx(
                             TRACE("SWP_FRAMECHANGED win %p hRgn %p\n",pwnd, DcRgn);
                             if (DcRgnObj)
                             {
+                                BOOL Erase = TRUE;
                                 IntGdiCombineRgn(DcRgnObj, VisBefore, NULL, RGN_COPY);
+                                /* A frame that changed in place leaves a client area of
+                                 * the same position and size with its bits, as on Windows.
+                                 * Erasing it here creates no WM_PAINT: the update region
+                                 * made for the erase is dropped again, so the client
+                                 * stayed blank until something else invalidated it
+                                 * (32-bit Total Commander's Lister after DrawMenuBar).
+                                 * A child redirects the repaint to its parent's frame,
+                                 * which its client rectangle must not clip. */
+                                if (pwnd == Window &&
+                                    RtlEqualMemory(&OldClientRect, &Window->rcClient, sizeof(RECTL)))
+                                {
+                                    PREGION ClientRgn = IntSysCreateRectpRgnIndirect(&Window->rcClient);
+                                    if (ClientRgn)
+                                    {
+                                        IntGdiCombineRgn(DcRgnObj, DcRgnObj, ClientRgn, RGN_DIFF);
+                                        REGION_Delete(ClientRgn);
+                                    }
+                                    else Erase = FALSE; /* Paint the frame alone, as above */
+                                }
                                 REGION_UnlockRgn(DcRgnObj);
-                                ForceNCPaintErase(pwnd, DcRgn, DcRgnObj);
+                                if (Erase) ForceNCPaintErase(pwnd, DcRgn, DcRgnObj);
+                                else IntSendNCPaint(pwnd, HRGN_WINDOW);
                             }
                             else
                             {
