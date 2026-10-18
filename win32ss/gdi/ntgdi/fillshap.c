@@ -1244,6 +1244,10 @@ NtGdiExtFloodFill(
         if (!IntEngLeave(&EnterLeave))
             Ret = FALSE;
     }
+    else
+    {
+        Ret = FALSE;
+    }
 
     DC_vFinishBlit(dc, NULL);
 
