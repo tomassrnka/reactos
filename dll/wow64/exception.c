@@ -65,6 +65,20 @@ static ULONG GuestStackFloor(const TEB32 *Teb32)
     return Floor;
 }
 
+/* Touches the guest stack pages from the committed limit down to Low in
+ * order, so that each one is the guard page when it is reached and the
+ * stack grows page by page instead of being skipped. Raises (under the
+ * caller's SEH) when the stack cannot grow any further. A macro, not a call:
+ * the frame may lie in pages that are not committed yet. */
+#define WOW64_GROW_GUEST_STACK(Teb32, Low) do { \
+    ULONG_PTR Page_ = (ULONG_PTR)(Teb32)->NtTib.StackLimit; \
+    while (Page_ > ((ULONG_PTR)(Low) & ~((ULONG_PTR)PAGE_SIZE - 1))) \
+    { \
+        Page_ -= PAGE_SIZE; \
+        (void)*(volatile UCHAR *)Page_; \
+    } \
+} while (0)
+
 /* The native dispatcher supplies its complete interrupted context in R9.
  * Negative routine values encode a guest address; normal native APCs retain
  * the ordinary ntdll dispatch path. */
@@ -107,6 +121,7 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
     Guest = (PVOID)(ULONG_PTR)((Context.Esp - sizeof(*Guest)) & ~15);
     _SEH2_TRY
     {
+        WOW64_GROW_GUEST_STACK(Teb32, Guest);
         Guest->Routine = (ULONG)(-(LONG64)Native->P4Home >> 2);
         Guest->Arg1 = PtrToUlong(Arg1);
         Guest->Arg2 = PtrToUlong(Arg2);
@@ -140,13 +155,28 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     ULONG i;
     NTSTATUS Status;
     TEB32 *Teb32 = NULL;
+    volatile BOOLEAN Grown;
 
     if (Context->SegCs != 0x23) return;
     Teb32 = WOW64_TEB32(NtCurrentTeb());
     if (!Wow64ExceptionDispatcher ||
         (ULONG_PTR)&Frame < GuestStackFloor(Teb32) ||
+        (ULONG_PTR)&Native < GuestStackFloor(Teb32) ||
         (ULONG_PTR)(&Frame + 1) > Teb32->NtTib.StackBase)
         goto Failed;
+    /* These locals lie below the kernel's frame on the guest stack: grow the
+     * stack over them before they are written */
+    Grown = TRUE;
+    _SEH2_TRY
+    {
+        WOW64_GROW_GUEST_STACK(Teb32, min((ULONG_PTR)&Native, (ULONG_PTR)&Frame));
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Grown = FALSE;
+    }
+    _SEH2_END;
+    if (!Grown) goto Failed;
 
     /* The kernel's amd64 frame already lives on the guest stack. A local
      * frame is below it and cannot overwrite the source context or record.
