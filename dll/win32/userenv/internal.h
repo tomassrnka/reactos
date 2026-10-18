@@ -39,6 +39,16 @@ CreateDirectoryPath(LPCWSTR lpPathName,
 BOOL
 RemoveDirectoryPath(LPCWSTR lpPathName);
 
+VOID
+CreateLegacyProfileJunctions(
+    _In_ PCWSTR pszProfilePath);
+
+VOID
+CreateLegacyProgramDataJunctions(
+    _In_ PCWSTR pszProgramDataPath,
+    _In_ PCWSTR pszPublicPath,
+    _In_ PCWSTR pszProfilesPath);
+
 /* misc.c */
 
 extern SID_IDENTIFIER_AUTHORITY LocalSystemAuthority;

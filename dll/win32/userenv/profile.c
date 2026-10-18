@@ -685,6 +685,8 @@ CopySystemProfile(
         goto done;
     }
 
+    CreateLegacyProfileJunctions(szProfilePath);
+
     bResult = TRUE;
 
 done:
@@ -1007,6 +1009,8 @@ CreateUserProfileExW(
         DPRINT1("Error: %lu\n", GetLastError());
         return FALSE;
     }
+
+    CreateLegacyProfileJunctions(szUserProfilePath);
 
     /* Add profile to profile list */
     if (!ConvertSidToStringSidW(pSid,
