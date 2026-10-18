@@ -1318,11 +1318,12 @@ IntSetPointerShapeFromSurfaces(
  * The bitmaps of the pointer are in the format of the screen of their time, and a mode switch to another format leaves them
  * unusable. When the switching thread owns the window under the pointer the shape is set again anyway; when it does not,
  * no one does, and the pointer would stay off. The bitmaps the last shape was made from are still the cursor's, so the
- * shape is made again from them, once per mode: a set that fails (a colour bitmap that has the old format) fails the same
- * way for every caller and is not repeated at each move. The device lock and the user lock are held: destroying a cursor
- * takes the user lock, so the bitmaps are neither destroyed nor changed in owner while they are locked here (a deleted
- * object that is still locked is freed by the last unlock, which asserts that the owner is the unlocking process), and a
- * cursor destroyed before is seen at the lock and ends the attempt.
+ * shape is made again from them. A set that cannot work (a colour bitmap that has the old format, a bitmap that is gone)
+ * fails the same way for every caller and is not repeated in this mode; one that fails for want of memory is tried again
+ * at the next show. The device lock and the user lock are held: destroying a cursor takes the user lock, so the bitmaps are
+ * neither destroyed nor changed in owner while they are locked here (a deleted object that is still locked is freed by the
+ * last unlock, which asserts that the owner is the unlocking process), and a cursor destroyed before is seen at the lock
+ * and ends the attempt.
  */
 static
 BOOL
@@ -1335,13 +1336,11 @@ IntRebuildMousePointer(
     PSURFACE psurf, psurfMask = NULL, psurfColor = NULL;
     LONG xHot = pgp->HotSpot.x, yHot = pgp->HotSpot.y;
     FLONG fl = pgp->flags;
-    BOOL bRet = FALSE;
+    BOOL bRet = FALSE, bFinal = TRUE;
 
     psurf = ppdev->pSurface;
     if (pgp->ulRebuildGen == ppdev->ulModeGen + 1 || (!hbmMask && !hbmColor) || !psurf || &psurf->SurfObj != pso)
         return FALSE;
-
-    pgp->ulRebuildGen = ppdev->ulModeGen + 1;
 
     if (hbmMask && !(psurfMask = SURFACE_ShareLockSurface(hbmMask)))
         goto done;
@@ -1355,12 +1354,20 @@ IntRebuildMousePointer(
     bRet = IntSetPointerShapeFromSurfaces(ppdev, psurf, psurfMask, psurfColor, hbmMask, hbmColor, xHot, yHot,
                                           ppdev->ptlPointer.x, ppdev->ptlPointer.y, fl) != SPS_ERROR;
 
+    /* EngSetPointerShape refuses a colour bitmap of another format every time; its other failures are allocations */
+    if (!bRet && !(psurfColor && !(fl & SPS_ALPHA) && psurfColor->SurfObj.iBitmapFormat != pso->iBitmapFormat))
+        bFinal = FALSE;
+
 done:
     if (psurfColor)
         SURFACE_ShareUnlockSurface(psurfColor);
 
     if (psurfMask)
         SURFACE_ShareUnlockSurface(psurfMask);
+
+    /* A successful set started over (ulRebuildGen 0); a failure that can pass leaves the next show to try again */
+    if (!bRet && bFinal)
+        pgp->ulRebuildGen = ppdev->ulModeGen + 1;
 
     return bRet;
 }
