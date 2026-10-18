@@ -149,8 +149,8 @@
 155 stdcall ILFree(ptr)
 156 stdcall -noname ILGlobalFree(ptr)
 157 stdcall ILCreateFromPath(ptr) ILCreateFromPathAW
-158 stdcall -noname PathGetExtension(wstr long long) SHPathGetExtensionW
-159 stdcall -noname PathIsDirectory(wstr) PathIsDirectoryW
+158 stdcall -noname PathGetExtension(wstr long long) PathGetExtensionAW
+159 stdcall -noname PathIsDirectory(wstr) PathIsDirectoryAW
 160 stdcall -noname SHNetConnectionDialog(ptr wstr long)
 161 stdcall SHRunControlPanel(wstr ptr)
 162 stdcall SHSimpleIDListFromPath(ptr) SHSimpleIDListFromPathAW # FIXME
@@ -584,7 +584,7 @@
 @ stdcall -version=0x600+ SHQueryUserNotificationState(ptr) # Vista:405
 @ stdcall -version=0x600+ SHRemoveLocalizedName(wstr) # Vista:406
 @ stdcall -version=0x600+ SHSetDefaultProperties(ptr ptr long ptr) # Vista:407
-@ stdcall -version=0x600+ SHSetKnownFolderPath(ptr long ptr wstr) # Vista:408
+@ stub -version=0x600+ SHSetKnownFolderPath # Vista:408
 @ stdcall SHSetLocalizedName(wstr wstr long) # 2k3:335, Vista:409
 @ stdcall -version=0x600+ SHSetTemporaryPropertyForItem(ptr ptr ptr) # Vista:410
 @ stdcall SHSetUnreadMailCountW (wstr long wstr) # 2k3:336, Vista:411
@@ -656,7 +656,7 @@
 ; Win7+ - These ordinals are higher than any of the ones in win vista
 @ stdcall -version=0x601+ SHAssocEnumHandlersForProtocolByApplication(wstr ptr ptr)
 @ stdcall -version=0x601+ Shell_NotifyIconGetRect(ptr ptr)
-@ stdcall -version=0x601+ SHGetKnownFolderItem(ptr long ptr ptr ptr)
+@ stdcall -version=0x601+ SHGetKnownFolderItem(ptr ptr ptr ptr ptr)
 @ stdcall -version=0x601+ SHGetItemFromObject(ptr long ptr)
 @ stdcall -version=0x600+ SHGetItemFromDataObject(ptr long ptr ptr)
 

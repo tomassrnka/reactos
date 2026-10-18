@@ -560,8 +560,8 @@ SHCreateItemInKnownFolder(
     _In_ REFIID riid,
     _Out_ void **ppv)
 {
-    CComHeapPtr<ITEMIDLIST> pidlFolder, pidlChild, pidlItem;
-    CComPtr<IShellFolder> psf;
+    CComPtr<IShellItem> parent;
+    CComHeapPtr<ITEMIDLIST> pidl;
     HRESULT hr;
 
     TRACE("(%s,%lx,%s,%s,%p)\n", debugstr_guid(&kfid), dwFlags, debugstr_w(pszFileName),
@@ -571,27 +571,20 @@ SHCreateItemInKnownFolder(
         return E_POINTER;
     *ppv = NULL;
 
-    /* Windows gives E_FAIL for any folder it cannot resolve: an unknown id, invalid flags, a missing folder */
-    hr = SHGetKnownFolderIDList(kfid, dwFlags, NULL, &pidlFolder);
-    if (FAILED(hr))
-        return E_FAIL;
+    hr = SHGetKnownFolderIDList(kfid, dwFlags, NULL, &pidl);
+    if (hr != S_OK)
+        return hr;
 
-    if (!pszFileName)
-        return SHCreateItemFromIDList(pidlFolder, riid, ppv);
-    if (!*pszFileName)
-        return E_INVALIDARG;
-
-    hr = SHBindToObject(NULL, pidlFolder, NULL, IID_PPV_ARG(IShellFolder, &psf));
+    hr = SHCreateItemFromIDList(pidl, IID_PPV_ARG(IShellItem, &parent));
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
-    hr = psf->ParseDisplayName(NULL, NULL, const_cast<LPWSTR>(pszFileName), NULL, &pidlChild, NULL);
-    if (FAILED(hr))
-        return hr;
 
-    pidlItem.Attach(ILCombine(pidlFolder, pidlChild));
-    if (!pidlItem)
-        return E_OUTOFMEMORY;
-    return SHCreateItemFromIDList(pidlItem, riid, ppv);
+    if (pszFileName)
+        hr = SHCreateItemFromRelativeName(parent, pszFileName, NULL, riid, ppv);
+    else
+        hr = parent->QueryInterface(riid, ppv);
+
+    return hr;
 }
 
 /***********************************************************************
