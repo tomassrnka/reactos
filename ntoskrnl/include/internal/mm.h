@@ -209,6 +209,7 @@ typedef struct _MM_SECTION_SEGMENT
     PULONG Flags;
     BOOLEAN WriteCopy;
 	BOOLEAN Locked;
+    BOOLEAN Extending;      /* data segments: NtExtendSection is setting the end of file (segment lock) */
 
 	struct
 	{
@@ -1862,7 +1863,8 @@ NTSTATUS
 NTAPI
 MmExtendSection(
     _In_ PVOID Section,
-    _Inout_ PLARGE_INTEGER NewSize);
+    _Inout_ PLARGE_INTEGER NewSize,
+    _In_ BOOLEAN IgnoreFileSizeChecking);
 
 /* sptab.c *******************************************************************/
 

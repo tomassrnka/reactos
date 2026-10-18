@@ -3667,7 +3667,7 @@ NtExtendSection(IN HANDLE SectionHandle,
                                        NULL);
     if (!NT_SUCCESS(Status)) return Status;
 
-    Status = MmExtendSection(Section, &SafeNewMaximumSize);
+    Status = MmExtendSection(Section, &SafeNewMaximumSize, FALSE);
 
     /* Dereference the section */
     ObDereferenceObject(Section);
@@ -3687,7 +3687,7 @@ NtExtendSection(IN HANDLE SectionHandle,
     }
 
     /* Return the status */
-    return STATUS_NOT_IMPLEMENTED;
+    return Status;
 }
 
 /* EOF */
