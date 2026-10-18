@@ -39,7 +39,12 @@ static VOID DisplayStringFault(BOOL Wow64)
     Length = (USHORT)(wcslen(Device.DeviceName) * sizeof(WCHAR));
     Page = VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     CHECK(Page != NULL);
-    if (!Page || !Length) return;
+    CHECK(Length != 0);
+    if (!Page || !Length)
+    {
+        if (Page) VirtualFree(Page, 0, MEM_RELEASE);
+        return;
+    }
     *(USHORT *)(Page + 0) = Length;
     *(USHORT *)(Page + 2) = Length;
     *(ULONG *)(Page + 4) = (ULONG)(ULONG_PTR)Device.DeviceName;
@@ -47,6 +52,8 @@ static VOID DisplayStringFault(BOOL Wow64)
     *(ULONG *)(Page + 12) = 0;
     RtlZeroMemory(&Mode, sizeof(Mode)); Mode.dmSize = sizeof(Mode);
     CHECK(NtUserEnumDisplaySettings((PUNICODE_STRING)Page, ENUM_CURRENT_SETTINGS, &Mode, 0) == STATUS_SUCCESS);
+    /* Parity only: the guest cannot map memory at 4 GiB, so this cannot tell
+     * the range check from an ordinary fault; it checks the failure kind. */
     RtlZeroMemory(&Mode, sizeof(Mode)); Mode.dmSize = sizeof(Mode);
     CHECK(NtUserEnumDisplaySettings((PUNICODE_STRING)(ULONG_PTR)0xfffffffc, ENUM_CURRENT_SETTINGS, &Mode, 0) ==
           STATUS_INVALID_PARAMETER_1);
