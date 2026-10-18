@@ -198,7 +198,10 @@ ULONG_PTR Wow64WinUserMiscService(ULONG Number, ULONG *a)
         _SEH2_TRY
         {
             Ret = NtUserRealInternalGetMessage(&Msg, H(1), a[2], a[3], a[4], a[5]);
-            if (Ret && Ret != -1) { ProbeOutput(a[0], sizeof(MSG32)); MsgNativeTo32(P(0), &Msg); }
+            /* bGMSG selects GetMessage semantics, where FALSE with WM_QUIT is a retrieved message. The
+             * in-tree service is a stub that returns FALSE and writes nothing, which the zeroed MSG tells. */
+            if ((Ret && Ret != -1) || (!Ret && a[5] && Msg.message == WM_QUIT))
+            { ProbeOutput(a[0], sizeof(MSG32)); MsgNativeTo32(P(0), &Msg); }
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
