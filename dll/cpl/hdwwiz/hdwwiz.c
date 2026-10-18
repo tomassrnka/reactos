@@ -240,15 +240,16 @@ CountDevices(HDEVINFO hDevInfo, PDWORD pdwPending)
 }
 
 /* Re-enumerating a node does not re-enumerate its started children: ask every started node */
-static VOID
+static BOOL
 ReenumerateChildren(DEVINST devParent, ULONG ulDepth)
 {
     DEVINST devChild;
     ULONG ulStatus, ulProblem;
     CONFIGRET cr;
+    BOOL bResult = TRUE;
 
     if (ulDepth > 64)
-        return;
+        return FALSE;
 
     for (cr = CM_Get_Child(&devChild, devParent, 0);
          cr == CR_SUCCESS;
@@ -257,10 +258,14 @@ ReenumerateChildren(DEVINST devParent, ULONG ulDepth)
         if (CM_Get_DevNode_Status(&ulStatus, &ulProblem, devChild, 0) == CR_SUCCESS &&
             (ulStatus & DN_STARTED))
         {
-            CM_Reenumerate_DevNode(devChild, 0);
-            ReenumerateChildren(devChild, ulDepth + 1);
+            if (CM_Reenumerate_DevNode(devChild, 0) != CR_SUCCESS)
+                bResult = FALSE;
+            if (!ReenumerateChildren(devChild, ulDepth + 1))
+                bResult = FALSE;
         }
     }
+
+    return bResult;
 }
 
 static HDEVINFO
@@ -283,7 +288,7 @@ SearchThread(LPVOID lpParameter)
     WCHAR szId[MAX_DEVICE_ID_LEN];
     DEVINST devRoot;
     DWORD Index, dwCount, dwPending, dwLastCount = (DWORD)-1, dwLastPending = 0, dwTries, dwStable = 0;
-    BOOL bSettled = FALSE;
+    BOOL bSettled = FALSE, bScanned;
 
     HeapFree(hProcessHeap, 0, pData);
 
@@ -296,13 +301,16 @@ SearchThread(LPVOID lpParameter)
         CM_Locate_DevNodeW(&devRoot, NULL, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS &&
         CM_Reenumerate_DevNode(devRoot, CM_REENUMERATE_SYNCHRONOUS) == CR_SUCCESS)
     {
-        ReenumerateChildren(devRoot, 0);
+        bScanned = ReenumerateChildren(devRoot, 0);
 
         /* Devices found by the rescan appear asynchronously, and the children of a new
            controller only after its driver is installed: wait until the number of present
            devices and of those still waiting for a driver stays the same for a while.
-           A search that never settles is reported as failed, not as complete. */
-        for (dwTries = 0; dwTries < 24; dwTries++)
+           A device that waits for a driver can stay so for good (there is none), so with
+           such devices the count has to stay the same for longer.
+           A search that never settles, or that could not rescan every started device, is
+           reported as failed, not as complete. */
+        for (dwTries = 0; dwTries < 40; dwTries++)
         {
             Sleep(250);
             if (hAfter != INVALID_HANDLE_VALUE)
@@ -317,14 +325,14 @@ SearchThread(LPVOID lpParameter)
                 dwStable = 0;
             dwLastCount = dwCount;
             dwLastPending = dwPending;
-            if (dwStable >= 3)
+            if (dwStable >= (dwPending ? 12 : 3))
             {
                 bSettled = TRUE;
                 break;
             }
         }
 
-        if (hAfter != INVALID_HANDLE_VALUE && !bSettled)
+        if (hAfter != INVALID_HANDLE_VALUE && (!bSettled || !bScanned))
         {
             SetupDiDestroyDeviceInfoList(hAfter);
             hAfter = INVALID_HANDLE_VALUE;
