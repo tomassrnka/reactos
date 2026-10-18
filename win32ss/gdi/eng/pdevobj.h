@@ -39,6 +39,8 @@ typedef struct _GDIPOINTER /* should stay private to ENG? No, part of PDEVOBJ ak
   HBITMAP  hbmSrcMask;  /* the bitmaps GreSetPointerShape was given, to make the pointer again after a mode switch */
   HBITMAP  hbmSrcColor;
   ULONG    ulRebuildGen; /* ulModeGen + 1 of the mode in which making the pointer again was given up, 0 if never */
+  ULONG    ulRetryGen;   /* ulModeGen + 1 of the mode in which making it again last failed for want of memory, 0 if not */
+  ULONGLONG ulRetryTick; /* EngGetTickCount of that failure */
   FLONG    flags;
 
   /* Public pointer information */
