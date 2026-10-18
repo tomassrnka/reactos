@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    AbortPrinter.c
     ClosePrinter.c
     DeletePrinter.c
     EnumPrinters.c
