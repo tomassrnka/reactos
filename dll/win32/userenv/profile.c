@@ -1191,20 +1191,20 @@ DeleteProfileW(
         return FALSE;
     }
 
-    if (lpProfilePath != NULL)
+    dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+                            0,
+                            KEY_QUERY_VALUE,
+                            &hProfilesKey);
+    if (dwError != ERROR_SUCCESS)
     {
-        dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                                L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
-                                0,
-                                KEY_QUERY_VALUE,
-                                &hProfilesKey);
-        if (dwError != ERROR_SUCCESS)
-        {
-            DPRINT1("Error: %lu\n", dwError);
-            goto done;
-        }
+        DPRINT1("Error: %lu\n", dwError);
+        goto done;
+    }
 
-        dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+    if (lpProfilePath == NULL)
+    {
+        dwError = RegOpenKeyExW(hProfilesKey,
                                 lpSidString,
                                 0,
                                 KEY_QUERY_VALUE,
@@ -1216,7 +1216,7 @@ DeleteProfileW(
         }
 
         /* Get the profile image path */
-        dwLength = sizeof(szRawProfilePath);
+        dwLength = sizeof(szRawProfilePath) - sizeof(WCHAR);
         dwError = RegQueryValueExW(hProfileKey,
                                    L"ProfileImagePath",
                                    NULL,
@@ -1229,18 +1229,33 @@ DeleteProfileW(
              goto done;
         }
 
-        if (!ExpandEnvironmentStringsW(szRawProfilePath,
-                                       szProfilePath,
-                                       ARRAYSIZE(szProfilePath)))
+        if (dwType != REG_SZ && dwType != REG_EXPAND_SZ)
         {
-            dwError = GetLastError();
+            dwError = ERROR_INVALID_DATA;
+            goto done;
+        }
+        szRawProfilePath[dwLength / sizeof(WCHAR)] = UNICODE_NULL;
+
+        dwLength = ExpandEnvironmentStringsW(szRawProfilePath,
+                                             szProfilePath,
+                                             ARRAYSIZE(szProfilePath));
+        if (dwLength == 0 || dwLength > ARRAYSIZE(szProfilePath))
+        {
+            dwError = dwLength ? ERROR_BUFFER_OVERFLOW : GetLastError();
             DPRINT1("Failled to expand the raw profile path (Error %lu)\n", dwError);
             goto done;
         }
+
+        RegCloseKey(hProfileKey);
+        hProfileKey = NULL;
     }
     else
     {
-        StringCchCopyW(szProfilePath, ARRAYSIZE(szProfilePath), lpProfilePath);
+        if (FAILED(StringCchCopyW(szProfilePath, ARRAYSIZE(szProfilePath), lpProfilePath)))
+        {
+            dwError = ERROR_INVALID_PARAMETER;
+            goto done;
+        }
     }
 
     DPRINT("ProfilePath: %S\n", szProfilePath);
@@ -1248,6 +1263,14 @@ DeleteProfileW(
     if (!RemoveDirectoryPath(szProfilePath))
     {
         dwError = GetLastError();
+        DPRINT1("Error: %lu\n", dwError);
+        goto done;
+    }
+
+    /* Remove the profile list entry of the user */
+    dwError = RegDeleteKeyW(hProfilesKey, lpSidString);
+    if (dwError != ERROR_SUCCESS && dwError != ERROR_FILE_NOT_FOUND)
+    {
         DPRINT1("Error: %lu\n", dwError);
         goto done;
     }
@@ -1260,6 +1283,9 @@ done:
 
     if (hProfilesKey != NULL)
         RegCloseKey(hProfilesKey);
+
+    if (!bRet)
+        SetLastError(dwError);
 
     return bRet;
 }
