@@ -1177,7 +1177,7 @@ DeleteProfileW(
     _In_opt_ LPCWSTR lpProfilePath,
     _In_opt_ LPCWSTR lpComputerName)
 {
-    HKEY hProfilesKey = NULL, hProfileKey = NULL;
+    HKEY hProfilesKey = NULL, hProfileKey = NULL, hUserKey;
     WCHAR szRawProfilePath[MAX_PATH], szProfilePath[MAX_PATH];
     DWORD dwLength, dwType;
     DWORD dwError = ERROR_SUCCESS;
@@ -1199,6 +1199,22 @@ DeleteProfileW(
     if (dwError != ERROR_SUCCESS)
     {
         DPRINT1("Error: %lu\n", dwError);
+        goto done;
+    }
+
+    /* Never delete the profile of a user who is logged on, not even in part */
+    dwError = RegOpenKeyExW(HKEY_USERS,
+                            lpSidString,
+                            0,
+                            KEY_QUERY_VALUE,
+                            &hUserKey);
+    if (dwError == ERROR_SUCCESS)
+        RegCloseKey(hUserKey);
+    if (dwError != ERROR_FILE_NOT_FOUND)
+    {
+        DPRINT1("The profile of %S is in use (Error %lu)\n", lpSidString, dwError);
+        if (dwError == ERROR_SUCCESS || dwError == ERROR_ACCESS_DENIED)
+            dwError = ERROR_INVALID_PARAMETER;
         goto done;
     }
 
