@@ -9,6 +9,7 @@
 #include <apitest.h>
 
 extern void func_NtfsAccess(void);
+extern void func_NtfsAllInformation(void);
 extern void func_NtfsBackup(void);
 extern void func_NtfsCreate(void);
 extern void func_NtfsDelete(void);
@@ -29,6 +30,7 @@ extern void func_NtfsVolumeLock(void);
 const struct test winetest_testlist[] =
 {
     { "NtfsAccess", func_NtfsAccess },
+    { "NtfsAllInformation", func_NtfsAllInformation },
     { "NtfsBackup", func_NtfsBackup },
     { "NtfsCreate", func_NtfsCreate },
     { "NtfsDelete", func_NtfsDelete },
