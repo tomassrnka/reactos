@@ -2327,22 +2327,29 @@ co_WinPosSetWindowPosEx(
                             {
                                 BOOL Erase = TRUE;
                                 IntGdiCombineRgn(DcRgnObj, VisBefore, NULL, RGN_COPY);
+                                /* VisBefore is window-relative (offset above), but the
+                                 * update region, the DC clip region and the WM_NCPAINT
+                                 * region are in screen coordinates. The window did not
+                                 * move, so its rectangle is the one VisBefore was taken
+                                 * from. */
+                                REGION_bOffsetRgn(DcRgnObj, Window->rcWindow.left, Window->rcWindow.top);
                                 /* A frame that changed in place leaves a client area of
                                  * the same position and size with its bits, as on Windows.
                                  * Erasing it here creates no WM_PAINT: the update region
                                  * made for the erase is dropped again, so the client
                                  * stayed blank until something else invalidated it
-                                 * (32-bit Total Commander's Lister after DrawMenuBar).
-                                 * A child redirects the repaint to its parent's frame,
-                                 * which its client rectangle must not clip. */
-                                if (pwnd == Window &&
-                                    RtlEqualMemory(&OldClientRect, &Window->rcClient, sizeof(RECTL)))
+                                 * (32-bit Total Commander's Lister after DrawMenuBar). */
+                                if (pwnd != Window)
                                 {
-                                    /* VisBefore is window-relative (offset above) */
-                                    RECTL Client = Window->rcClient;
-                                    PREGION ClientRgn;
-                                    RECTL_vOffsetRect(&Client, -Window->rcWindow.left, -Window->rcWindow.top);
-                                    ClientRgn = IntSysCreateRectpRgnIndirect(&Client);
+                                    /* A child redirects the repaint to its parent's frame.
+                                     * Its own visible region lies in the parent's client
+                                     * area, so it says nothing about that frame: paint the
+                                     * whole frame, as above, and erase nothing. */
+                                    Erase = FALSE;
+                                }
+                                else if (RtlEqualMemory(&OldClientRect, &Window->rcClient, sizeof(RECTL)))
+                                {
+                                    PREGION ClientRgn = IntSysCreateRectpRgnIndirect(&Window->rcClient);
                                     if (ClientRgn)
                                     {
                                         if (IntGdiCombineRgn(DcRgnObj, DcRgnObj, ClientRgn, RGN_DIFF) == ERROR)
