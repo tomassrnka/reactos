@@ -85,6 +85,7 @@ typedef struct _PROFILEPARAMS
     HKEY hRootKey;
     LPCWSTR pszShellFoldersKey;
     LPCWSTR pszUserShellFoldersKey;
+    BOOL bCommon;
 } PROFILEPARAMS, *PPROFILEPARAMS;
 
 
@@ -97,7 +98,8 @@ StandardProfiles[] =
         UserShellFolders,
         HKEY_USERS,
         L".Default\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
-        L".Default\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
+        L".Default\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
+        FALSE
     },
     {
         L"Public", L"Public",
@@ -105,7 +107,8 @@ StandardProfiles[] =
         CommonShellFolders,
         HKEY_LOCAL_MACHINE,
         L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
+        TRUE
     },
 };
 
@@ -360,6 +363,12 @@ CreateStandardProfile(
     }
 
     RegCloseKey(hKey);
+
+    /* Create the junctions from the NT 5 paths (NTFS only) */
+    if (pProfileParams->bCommon)
+        CreateLegacyProgramDataJunctions(pszProgramDataPath, szProfilePath, pszProfilesPath);
+    else
+        CreateLegacyProfileJunctions(szProfilePath);
 
     return TRUE;
 }
