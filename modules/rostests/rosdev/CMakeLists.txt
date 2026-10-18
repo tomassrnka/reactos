@@ -20,3 +20,8 @@ add_importlibs(rosdev_hungwin user32 msvcrt kernel32)
 add_executable(ptrblink ptrblink.c)
 set_module_type(ptrblink win32gui)
 add_importlibs(ptrblink msimg32 user32 gdi32 msvcrt kernel32)
+
+# ptrmode: a display mode switch under a pointer that does not move (host/ptrmode-test); not placed on any ISO either
+add_executable(ptrmode ptrmode.c)
+set_module_type(ptrmode win32gui UNICODE)
+add_importlibs(ptrmode shlwapi user32 gdi32 msvcrt kernel32)

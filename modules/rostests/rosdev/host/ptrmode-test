@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""ptrmode-test: is the mouse pointer on the screen after a display mode switch, when it does not move?
+
+Guest side: ptrmode.exe (modules/rostests/rosdev/ptrmode.c) parks the pointer over its window, switches the display mode
+(another size at the same depth, or with 'depth' another depth) from a thread that does not own that window, draws
+nothing near the pointer and shows a blue bar at the top of its window. Host side (this script): waits for the blue bar
+through QEMU screendumps (QMP), counts the white pixels of the arrow at the pointer's place without moving it, then
+moves the pointer away and counts again: the white pixels must have been the pointer's. A read of the screen inside the
+guest cannot do this: every GDI read takes the pointer off the screen first. Needs an absolute pointing device in the
+guest (QEMU usb-tablet) for the move.
+
+  host:  ptrmode-test --qmp vm/qmp.sock [--timeout 900] [--save last.ppm]
+
+Exit status 0 when the pointer is there, 1 when it is not, 2 when the guest found no such mode (red window) or the blue
+bar never came. Python 3 standard library only.
+"""
+import argparse, json, os, socket, sys, time
+
+WND_X, WND_Y = 100, 100
+PTR_X, PTR_Y = 400, 350
+AWAY_X, AWAY_Y = 250, 250
+
+
+class Qmp:
+    def __init__(self, path):
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(path)
+        self.f = s.makefile("rw")
+        self.f.readline()
+        self.cmd("qmp_capabilities")
+
+    def cmd(self, name, **args):
+        self.f.write(json.dumps({"execute": name, "arguments": args}) + "\n")
+        self.f.flush()
+        while True:
+            r = json.loads(self.f.readline())
+            if "return" in r or "error" in r:
+                return r
+
+    def shot(self, path):
+        self.cmd("screendump", filename=path, format="ppm")
+
+    def move(self, x, y, w, h):
+        self.cmd("input-send-event", events=[
+            {"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / w)}},
+            {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / h)}}])
+
+
+def grab(q, path):
+    q.shot(path)
+    with open(path, "rb") as f:
+        data = f.read()
+    parts = data.split(b"\n", 3)
+    w, h = map(int, parts[1].split())
+    return w, h, parts[3]
+
+
+def px(img, x, y):
+    w, h, raw = img
+    if x >= w or y >= h:
+        return (0, 0, 0)
+    o = (y * w + x) * 3
+    return raw[o], raw[o + 1], raw[o + 2]
+
+
+# The screen may be 16 bits deep, so colours are matched loosely
+RED = lambda p: p[0] > 150 and p[1] < 60 and p[2] < 60
+BLUE = lambda p: p[0] < 60 and p[1] < 60 and p[2] > 150
+WHITE = lambda p: min(p) > 230
+
+
+def count(img, x0, y0, cx, cy, step, match):
+    return sum(1 for y in range(y0, y0 + cy, step) for x in range(x0, x0 + cx, step) if match(px(img, x, y)))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--qmp", required=True)
+    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--save", help="write the screendump taken before the move here (PPM)")
+    args = ap.parse_args()
+
+    q = Qmp(args.qmp)
+    tmp = "/dev/shm/ptrmode-%d.ppm" % os.getpid()
+    t0 = time.time()
+    try:
+        while True:
+            img = grab(q, tmp)
+            if count(img, WND_X + 20, WND_Y + 120, 400, 300, 10, RED) > 600:
+                print("RESULT: SKIP, the guest found no such display mode")
+                return 2
+            if count(img, WND_X + 20, WND_Y + 5, 500, 30, 5, BLUE) > 300:
+                break
+            if time.time() - t0 > args.timeout:
+                print("RESULT: TIMEOUT, no blue bar after %d s" % args.timeout)
+                return 2
+            time.sleep(2)
+        time.sleep(3)
+        img = grab(q, tmp)
+        if args.save:
+            with open(args.save, "wb") as f:
+                f.write(b"P6\n%d %d\n255\n" % (img[0], img[1]) + img[2])
+        w, h = img[0], img[1]
+        q.move(AWAY_X, AWAY_Y, w, h)
+        time.sleep(2)
+        moved = grab(q, tmp)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+    before = count(img, PTR_X, PTR_Y, 16, 24, 1, WHITE)
+    after = count(moved, PTR_X, PTR_Y, 16, 24, 1, WHITE)
+    away = count(moved, AWAY_X, AWAY_Y, 16, 24, 1, WHITE)
+    print("screen %dx%d; white pixels at the pointer: %d before the move, %d after it; at the new place: %d"
+          % (w, h, before, after, away))
+    if before < 20 or before - after < 15:
+        print("RESULT: FAIL, the pointer is not on the screen after the mode switch until it moves")
+        return 1
+    print("RESULT: PASS, the pointer is on the screen after the mode switch without a move")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
