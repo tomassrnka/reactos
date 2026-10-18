@@ -28,6 +28,7 @@ list(APPEND SOURCE
     sotimeout.c
     socketscale.c
     udpbindretry.c
+    udpcancel.c
     udprecv.c
     timewait.c
     WSAAsync.c

@@ -31,6 +31,7 @@ extern void func_send(void);
 extern void func_sotimeout(void);
 extern void func_socketscale(void);
 extern void func_udpbindretry(void);
+extern void func_udpcancel(void);
 extern void func_udprecv(void);
 extern void func_timewait(void);
 extern void func_WSAAsync(void);
@@ -73,6 +74,7 @@ const struct test winetest_testlist[] =
     { "sotimeout", func_sotimeout },
     { "socketscale", func_socketscale },
     { "udpbindretry", func_udpbindretry },
+    { "udpcancel", func_udpcancel },
     { "udprecv", func_udprecv },
     { "timewait", func_timewait },
     { "WSAAsync", func_WSAAsync },
