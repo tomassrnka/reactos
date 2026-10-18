@@ -78,12 +78,15 @@ PUBLIC KiUserApcDispatcher
     mov r8, [rsp + CONTEXT_P3Home]  /* SystemArgument2 */
     lea r9, [rsp]                   /* Context */
 #ifdef BUILD_WOW64_ENABLED
-    mov rax, [rsp + CONTEXT_P4Home]
-    test rax, rax
+    mov r10, [rsp + CONTEXT_P4Home]
+    test r10, r10
     jns NativeApc
     mov rax, qword ptr Wow64PrepareForApc[rip]
     test rax, rax
     jz NativeApc
+    /* P1Home-P4Home of the context are the callee's home space, which it may
+     * overwrite on entry: keep the encoded guest routine in P5Home for it */
+    mov [rsp + CONTEXT_P5Home], r10
     call rax
     jmp ApcReturn
 NativeApc:
