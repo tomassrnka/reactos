@@ -140,7 +140,7 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
 
     PRTL_PROCESS_MODULE_INFORMATION ModulePtr = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
-    ULONG UsedSize = sizeof(ULONG);
+    ULONG UsedSize = FIELD_OFFSET(RTL_PROCESS_MODULES, Modules);
     ULONG ModuleCount = 0;
     ANSI_STRING AnsiString;
     PCHAR p;
@@ -210,7 +210,7 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
         WCHAR  Buffer[256 * sizeof(WCHAR)];
 
         /* The list is read from a process that can damage it: bound the walk */
-        if (++ModuleCount > 0x4000)
+        if (++ModuleCount > 0x2000)
             return STATUS_UNSUCCESSFUL;
 
         /* read the current module */
@@ -248,8 +248,11 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
 
         DPRINT("  Module %wZ\n", &Unicode);
 
-        if (UsedSize > Size)
+        if (Modules != NULL &&
+            FIELD_OFFSET(RTL_PROCESS_MODULES, Modules) +
+            ((SIZE_T)Modules->NumberOfModules + 1) * sizeof(RTL_PROCESS_MODULE_INFORMATION) > Size)
         {
+            /* The list has grown since it was sized: do not write past the buffer */
             Status = STATUS_INFO_LENGTH_MISMATCH;
         }
         else if (Modules != NULL)
@@ -290,8 +293,8 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
 
     DPRINT("RtlpQueryRemoteProcessModules End\n");
 
-    /* success */
-    return (STATUS_SUCCESS);
+    /* A list that outgrew the buffer is reported, the sizing pass has no buffer */
+    return (Modules != NULL) ? Status : STATUS_SUCCESS;
 }
 
 
@@ -930,6 +933,8 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
                 if (!Mp)
                 {
                     DPRINT1("RtlQueryProcessDebugInformation: Unable to commit %u\n", ReturnSize);
+                    NtClose(hProcess);
+                    return STATUS_NO_MEMORY;
                 }
 
                 Status = RtlpQueryRemoteProcessModules(hProcess,
