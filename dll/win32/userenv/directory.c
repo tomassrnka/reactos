@@ -241,8 +241,11 @@ RecursiveRemoveDir(LPCWSTR lpPath)
     HANDLE hFind;
     BOOL bResult;
 
-    wcscpy(szPath, lpPath);
-    wcscat(szPath, L"\\*.*");
+    if (FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\*.*", lpPath)))
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return FALSE;
+    }
     DPRINT("Search path: '%S'\n", szPath);
 
     hFind = FindFirstFileW(szPath,
@@ -256,9 +259,13 @@ RecursiveRemoveDir(LPCWSTR lpPath)
         if (wcscmp(FindData.cFileName, L".") &&
             wcscmp(FindData.cFileName, L".."))
         {
-            wcscpy(szPath, lpPath);
-            wcscat(szPath, L"\\");
-            wcscat(szPath, FindData.cFileName);
+            if (FAILED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\%s",
+                                        lpPath, FindData.cFileName)))
+            {
+                SetLastError(ERROR_FILENAME_EXCED_RANGE);
+                bResult = FALSE;
+                break;
+            }
             DPRINT("File name: '%S'\n", szPath);
 
             if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
