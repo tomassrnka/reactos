@@ -1405,6 +1405,11 @@ typedef struct _RTLP_CURDIR_REF
 {
     LONG RefCount;
     HANDLE Handle;
+#ifdef SYSWOW64_GUEST
+    ULONG DismountCount;
+    UNICODE_STRING DosPath;
+    WCHAR Buffer[1];
+#endif
 } RTLP_CURDIR_REF, *PRTLP_CURDIR_REF;
 
 typedef struct _RTL_RELATIVE_NAME_U

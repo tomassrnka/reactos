@@ -595,6 +595,21 @@ ConDllInitialize(IN ULONG Reason,
     if (!NT_SUCCESS(Status)) return FALSE;
     ConsoleInitialized = TRUE;
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    {
+        ULONG_PTR Guest = 0;
+        NtQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information,
+                                  &Guest, sizeof(Guest), NULL);
+        if (Guest)
+        {
+            /* The guest already owns the console connection and its control
+             * dispatcher. Native helper DLLs still need local handler state. */
+            InitializeCtrlHandling();
+            return TRUE;
+        }
+    }
+#endif
+
     /* Show by default the console window when applicable */
     ConnectInfo.IsWindowVisible = TRUE;
     /* If this is a console app, a console will be created/opened */

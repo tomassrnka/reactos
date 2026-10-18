@@ -973,14 +973,18 @@ typedef enum _APPCOMPAT_USERFLAGS_HIGHPART
 #define EXPLICIT_32BIT
 #include "peb_teb.h"
 #undef EXPLICIT_32BIT
+#endif
 
+#if defined(_WIN64) || defined(W32K_WIDE)
 //
 // Explicit 64 bit PEB/TEB
 //
 #define EXPLICIT_64BIT
 #include "peb_teb.h"
 #undef EXPLICIT_64BIT
+#endif
 
+#ifdef _WIN64
 //
 // WOW64 Macros
 //

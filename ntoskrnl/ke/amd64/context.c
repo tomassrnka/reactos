@@ -13,6 +13,19 @@
 #include <debug.h>
 
 /* FUNCTIONS *****************************************************************/
+/* Always compiled on amd64 and exported from ntoskrnl so the shared trap-exit
+ * macro can reach one definition from both ntoskrnl and the HAL. It is a no-op
+ * outside a WoW64 process, where Wow64Process is always NULL. */
+VOID NTAPI KiRestoreWow64Gs(VOID)
+{
+    PKTHREAD Thread = KeGetCurrentThread();
+    /* A compatibility-mode segment reload can clear the base installed by
+     * the scheduler. Native dispatchers and the WoW64 transition use GS to
+     * reach the native TEB, including returns without a context switch. */
+    if (PsGetCurrentProcess()->Wow64Process && Thread->Teb &&
+        __readmsr(MSR_GS_SWAP) != (ULONG64)Thread->Teb)
+        __writemsr(MSR_GS_SWAP, (ULONG64)Thread->Teb);
+}
 
 VOID
 NTAPI
@@ -58,6 +71,26 @@ KeContextToTrapFrame(IN PCONTEXT Context,
     /* Handle floating point registers */
     if (ContextFlags & CONTEXT_FLOATING_POINT)
     {
+#ifdef BUILD_WOW64_ENABLED
+        /* The trap/exception frames hold SSE registers, but not the legacy
+         * x87 state used by compatibility-mode code. Context operations run
+         * in the target thread; never change the creator's FPU when building
+         * a different thread's initial trap frame. */
+        if (((ContextFlags & CONTEXT_CONTROL) ? Context->SegCs : TrapFrame->SegCs) ==
+                (KGDT64_R3_CMCODE | RPL_MASK) &&
+            KeGetCurrentThread() && TrapFrame == KeGetTrapFrame(KeGetCurrentThread()))
+        {
+            DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 Floating;
+            _ReadWriteBarrier();
+            _fxsave(&Floating);
+            _ReadWriteBarrier();
+            RtlCopyMemory(&Floating, &Context->FltSave,
+                          FIELD_OFFSET(XMM_SAVE_AREA32, XmmRegisters));
+            Floating.MxCsr &= 0xffbf;
+            _ReadWriteBarrier();
+            _fxrstor(&Floating);
+        }
+#endif
         TrapFrame->MxCsr = Context->MxCsr;
         TrapFrame->Xmm0 = Context->Xmm0;
         TrapFrame->Xmm1 = Context->Xmm1;
@@ -209,6 +242,18 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
     /* Handle floating point registers */
     if (ContextFlags & CONTEXT_FLOATING_POINT)
     {
+#ifdef BUILD_WOW64_ENABLED
+        if (TrapFrame->SegCs == (KGDT64_R3_CMCODE | RPL_MASK) &&
+            KeGetCurrentThread() && TrapFrame == KeGetTrapFrame(KeGetCurrentThread()))
+        {
+            DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 Floating;
+            _ReadWriteBarrier();
+            _fxsave(&Floating);
+            _ReadWriteBarrier();
+            RtlCopyMemory(&Context->FltSave, &Floating,
+                          FIELD_OFFSET(XMM_SAVE_AREA32, XmmRegisters));
+        }
+#endif
         Context->MxCsr = TrapFrame->MxCsr;
         Context->Xmm0 = TrapFrame->Xmm0;
         Context->Xmm1 = TrapFrame->Xmm1;

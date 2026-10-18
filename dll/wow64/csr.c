@@ -8,6 +8,7 @@
 #include <win/base.h>
 #include <win/basemsg.h>
 #include <win/conmsg.h>
+#include <win/winmsg.h>
 #include "csr32.h"
 
 static NTSTATUS CopyBaseData(VOID)
@@ -30,16 +31,10 @@ static NTSTATUS CopyBaseData(VOID)
     if (!NT_SUCCESS(Status)) return Status; } while (0)
     STR(WindowsDirectory); STR(NamedObjectDirectory);
     STR(WindowsSys32x86Directory);
-    /* GetSystemDirectory in the guest names the installed i386 DLLs. */
-    {
-        WCHAR Buffer[MAX_PATH];
-        UNICODE_STRING Directory;
-        RtlInitEmptyUnicodeString(&Directory, Buffer, sizeof(Buffer));
-        RtlAppendUnicodeStringToString(&Directory, &From->WindowsDirectory);
-        RtlAppendUnicodeToString(&Directory, L"\\SysWOW64");
-        Status = Wow64CopyString(&To->WindowsSystemDirectory, &Directory);
-        if (!NT_SUCCESS(Status)) return Status;
-    }
+    /* This API returns the logical System32 path. Filesystem redirection
+     * selects SysWOW64; disabling it must let installers start native helpers
+     * using the very same path returned by GetSystemDirectory. */
+    STR(WindowsSystemDirectory);
 #undef STR
 #define COPY(Field) To->Field = From->Field
     COPY(WindowsMajorVersion); COPY(WindowsMinorVersion); COPY(BuildNumber);
@@ -54,7 +49,7 @@ static NTSTATUS CopyBaseData(VOID)
 #undef COPY
     RtlCopyMemory(To->CSDVersion, From->CSDVersion, sizeof(To->CSDVersion));
     To->SysInfo.MinimumUserModeAddress = 0x10000;
-    To->SysInfo.MaximumUserModeAddress = 0x7ffeffff;
+    To->SysInfo.MaximumUserModeAddress = Wow64HighestUserAddress;
     To->SysInfo.ActiveProcessorsAffinityMask = (ULONG)From->SysInfo.ActiveProcessorsAffinityMask;
     Table[BASESRV_SERVERDLL_INDEX] = PtrToUlong(To);
     ProtectBase = To; Size = sizeof(*To);
@@ -146,6 +141,17 @@ static NTSTATUS Call(ULONG *a)
 
     switch (Api)
     {
+    case CSR_CREATE_API_NUMBER(USERSRV_SERVERDLL_INDEX, UserpGetThreadConsoleDesktop):
+    {
+        USER_API_MESSAGE UserMessage = {0};
+        if (a[3] != 2 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        UserMessage.Data.GetThreadConsoleDesktopRequest.ThreadId = Data[0];
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&UserMessage, NULL, Api,
+                                    sizeof(USER_GET_THREAD_CONSOLE_DESKTOP));
+        if (NT_SUCCESS(Status))
+            Data[1] = HandleToUlong(UserMessage.Data.GetThreadConsoleDesktopRequest.ConsoleDesktop);
+        return Status;
+    }
     case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepWriteConsole):
     {
         WOW64_CONSOLE_WRITE *From = (PVOID)Data;
@@ -189,6 +195,25 @@ static NTSTATUS Call(ULONG *a)
         Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(Message.Data.VerifyHandleRequest));
         Data[0] = Message.Data.VerifyHandleRequest.IsValid;
         return Status;
+    case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepCreateThread):
+    {
+        BASE_API_MESSAGE BaseMessage = {0};
+        if (a[3] != 3 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        BaseMessage.Data.CreateThreadRequest.ThreadHandle = HANDLE32(Data[0]);
+        BaseMessage.Data.CreateThreadRequest.ClientId.UniqueProcess = HANDLE32(Data[1]);
+        BaseMessage.Data.CreateThreadRequest.ClientId.UniqueThread = HANDLE32(Data[2]);
+        return CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api,
+                                  sizeof(BASE_CREATE_THREAD));
+    }
+    case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepGetTempFile):
+    {
+        BASE_API_MESSAGE BaseMessage = {0};
+        if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api,
+                                     sizeof(BASE_GET_TEMP_FILE));
+        Data[0] = BaseMessage.Data.GetTempFileRequest.UniqueID;
+        return Status;
+    }
     case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepExitProcess):
     {
         BASE_API_MESSAGE BaseMessage = {0};

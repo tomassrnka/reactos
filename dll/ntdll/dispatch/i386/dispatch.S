@@ -42,6 +42,14 @@ _RtlpWow64EnableFsRedirectionEx@8:
     call dword ptr fs:[HEX(c0)]
     ret 8
 
+#ifdef SYSWOW64_GUEST
+PUBLIC _RtlWow64CreateProcess@4
+_RtlWow64CreateProcess@4:
+    mov eax, HEX(10003)
+    call dword ptr fs:[HEX(c0)]
+    ret 4
+#endif
+
 PUBLIC _LdrInitializeThunk@16
 _LdrInitializeThunk@16:
 

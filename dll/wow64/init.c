@@ -1,5 +1,32 @@
 /* ReactOS WoW64 startup. SPDX-License-Identifier: GPL-2.0-or-later */
 #include "wow64p.h"
+#include <reactos/compat_undoc.h>
+
+ULONG Wow64HighestUserAddress;
+
+ULONG_PTR Wow64ZeroBits(ULONG ZeroBits)
+{
+    if (!ZeroBits) return Wow64HighestUserAddress;
+    if (ZeroBits < 32)
+        return max(ZeroBits, Wow64HighestUserAddress < 0x80000000 ? 1 : 0);
+    return min(ZeroBits, Wow64HighestUserAddress);
+}
+
+static NTSTATUS InitializeAddressLimit(VOID)
+{
+    PIMAGE_NT_HEADERS Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+    PVOID Boundary;
+    SIZE_T Size = 0x10000;
+    if (!Header) return STATUS_INVALID_IMAGE_FORMAT;
+    Wow64HighestUserAddress = (Header->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ?
+                             0xfffeffff : 0x7ffeffff;
+    /* ZeroBits masks round to their highest set bit. Reserve the final 64 KiB
+     * so a top-down guest allocation cannot end at 2/4 GiB and wrap pointer
+     * arithmetic. This also preserves the documented maximum user address. */
+    Boundary = (PVOID)((ULONG_PTR)Wow64HighestUserAddress + 1);
+    return NtAllocateVirtualMemory(NtCurrentProcess(), &Boundary, 0, &Size,
+                                   MEM_RESERVE, PAGE_NOACCESS);
+}
 
 NTSTATUS Wow64Allocate(SIZE_T Size, PVOID *Base)
 {
@@ -149,6 +176,21 @@ static NTSTATUS InitializePeb(PEB32 *To)
 #define COPY_NLS(Field) To->Field = PtrToUlong((PUCHAR)Nls + ((PUCHAR)From->Field - (PUCHAR)Info.BaseAddress))
     COPY_NLS(AnsiCodePageData); COPY_NLS(OemCodePageData); COPY_NLS(UnicodeCaseTableData);
 #undef COPY_NLS
+    if (From->pShimData)
+    {
+        ReactOS_ShimData *Native = From->pShimData, *Guest;
+        /* The query and version fields are fixed-width. Only amd64 appends
+         * an aligned pointer to its private MSYS helper; the guest loader
+         * owns its own helper and must not receive that native pointer. */
+        const ULONG GuestSize = FIELD_OFFSET(ReactOS_ShimData, dwRosProcessCompatVersion) + sizeof(DWORD);
+        if (Native->dwMagic != REACTOS_SHIMDATA_MAGIC || Native->dwSize != sizeof(*Native))
+            return STATUS_INVALID_PARAMETER;
+        Status = Wow64Allocate(GuestSize, (PVOID *)&Guest);
+        if (!NT_SUCCESS(Status)) return Status;
+        RtlCopyMemory(Guest, Native, GuestSize);
+        Guest->dwSize = GuestSize;
+        To->pShimData = PtrToUlong(Guest);
+    }
     return InitializeParameters(To);
 }
 
@@ -191,7 +233,28 @@ static NTSTATUS MapNtdll(PVOID *Base)
     return Status;
 }
 
-DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
+static PVOID Wow64Ntdll32, Wow64Loader32, Wow64Gate;
+
+VOID Wow64InitializeTeb(TEB32 *Teb32, const TEB *Teb, PTEB RemoteTeb, const INITIAL_TEB *Stack)
+{
+    RtlZeroMemory(Teb32, sizeof(*Teb32));
+    Teb32->NtTib.ExceptionList = MAXULONG;
+    Teb32->NtTib.Version = 30 << 8;
+    Teb32->NtTib.Self = PtrToUlong(WOW64_TEB32(RemoteTeb));
+    Teb32->NtTib.StackBase = PtrToUlong(Stack->StackBase);
+    Teb32->NtTib.StackLimit = PtrToUlong(Stack->StackLimit);
+    Teb32->DeallocationStack = PtrToUlong(Stack->AllocatedStackBase);
+    Teb32->ProcessEnvironmentBlock = PtrToUlong(WOW64_PEB32(Teb->ProcessEnvironmentBlock));
+    Teb32->ClientId.UniqueProcess = HandleToUlong(Teb->ClientId.UniqueProcess);
+    Teb32->ClientId.UniqueThread = HandleToUlong(Teb->ClientId.UniqueThread);
+    Teb32->RealClientId = Teb32->ClientId;
+    Teb32->CurrentLocale = Teb->CurrentLocale;
+    Teb32->WOW32Reserved = PtrToUlong(Wow64Gate);
+    Teb32->StaticUnicodeString.Buffer = PtrToUlong(WOW64_TEB32(RemoteTeb)->StaticUnicodeBuffer);
+    Teb32->StaticUnicodeString.MaximumLength = sizeof(Teb32->StaticUnicodeBuffer);
+}
+
+VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
 {
     PPEB Peb = NtCurrentPeb();
     PTEB Teb = NtCurrentTeb();
@@ -201,10 +264,28 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
     PVOID Ntdll32, Stack, Entry, Gate;
     ANSI_STRING Name = RTL_CONSTANT_STRING("LdrInitializeWow64");
     NTSTATUS Status;
-    UNREFERENCED_PARAMETER(Context);
+    WOW64_CONTEXT *GuestContext = NULL;
+    BOOLEAN CallbackReady = FALSE;
 
-    /* Thread creation and APC delivery need their own context conversion. */
-    if (Peb32->Ldr) { Status = STATUS_NOT_SUPPORTED; goto Failed; }
+    /* Native loader initialization is serialized before this entry. A new
+     * guest thread carries its captured context on its own native stack. */
+    if (Wow64Loader32)
+    {
+        if (Context->Rdx != WOW64_THREAD_START_MARKER) return;
+        GuestContext = (WOW64_CONTEXT *)(ULONG_PTR)Context->Rcx;
+        if (!GuestContext) { Status = STATUS_INVALID_PARAMETER; goto Failed; }
+        Ntdll32 = Wow64Ntdll32;
+        Entry = Wow64Loader32;
+        Gate = Wow64Gate;
+        goto ThreadReady;
+    }
+    Status = InitializeAddressLimit();
+    if (!NT_SUCCESS(Status)) goto Failed;
+    /* Establish the guest stack before variable-size startup data. A child
+     * may replace its bootstrap stack with the parent's stack reservation;
+     * RuntimeData must not take that range merely because it is nonempty. */
+    Status = Wow64Allocate(1024 * 1024, &Stack);
+    if (!NT_SUCCESS(Status)) goto Failed;
     Status = Wow64InitializeRedirection();
     if (!NT_SUCCESS(Status)) goto Failed;
     Status = InitializePeb(Peb32);
@@ -225,6 +306,12 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
         Ordinals = (PVOID)((PUCHAR)Ntdll32 + Exports->AddressOfNameOrdinals);
         for (i = 0; i < Exports->NumberOfNames; ++i)
         {
+            if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserCallbackDispatcher") &&
+                Ordinals[i] < Exports->NumberOfFunctions)
+                CallbackReady = NT_SUCCESS(Wow64WinInitialize((PUCHAR)Ntdll32 + Functions[Ordinals[i]]));
+            if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserApcDispatcher") &&
+                Ordinals[i] < Exports->NumberOfFunctions)
+                Wow64ApcDispatcher = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
             if (!strcmp((PCHAR)Ntdll32 + Names[i], "KiUserExceptionDispatcher") &&
                 Ordinals[i] < Exports->NumberOfFunctions)
                 Wow64ExceptionDispatcher = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
@@ -233,14 +320,16 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
                 Entry = (PUCHAR)Ntdll32 + Functions[Ordinals[i]];
             }
         }
-        if (!Entry || !Wow64ExceptionDispatcher) { Status = STATUS_ENTRYPOINT_NOT_FOUND; goto Failed; }
+        if (!Entry || !Wow64ExceptionDispatcher || !Wow64ApcDispatcher || !CallbackReady) { Status = STATUS_ENTRYPOINT_NOT_FOUND; goto Failed; }
     }
     Status = Wow64CpuInitialize(Wow64SystemService, &Gate);
     if (!NT_SUCCESS(Status)) goto Failed;
-    Status = Wow64Allocate(1024 * 1024, &Stack);
-    if (!NT_SUCCESS(Status)) goto Failed;
+    Wow64Ntdll32 = Ntdll32;
+    Wow64Loader32 = Entry;
+    Wow64Gate = Gate;
     RtlZeroMemory(Teb32, sizeof(*Teb32));
     Teb32->NtTib.ExceptionList = MAXULONG;
+    Teb32->NtTib.Version = 30 << 8;
     Teb32->NtTib.Self = PtrToUlong(Teb32);
     Teb32->NtTib.StackBase = PtrToUlong((PUCHAR)Stack + 1024 * 1024);
     Teb32->NtTib.StackLimit = PtrToUlong(Stack);
@@ -253,13 +342,27 @@ DECLSPEC_NORETURN VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context)
     Teb32->WOW32Reserved = PtrToUlong(Gate);
     Teb32->StaticUnicodeString.Buffer = PtrToUlong(Teb32->StaticUnicodeBuffer);
     Teb32->StaticUnicodeString.MaximumLength = sizeof(Teb32->StaticUnicodeBuffer);
-    State.Esp = Teb32->NtTib.StackBase - 8;
+ThreadReady:
+    /* Preserve the parent's pre-resume activation-context setup in TEB32. */
+    Teb32->WOW32Reserved = PtrToUlong(Gate);
+    if (GuestContext)
+    {
+        State.Esp = (GuestContext->Esp - sizeof(*GuestContext)) & ~15;
+        RtlCopyMemory(PTR32(State.Esp), GuestContext, sizeof(*GuestContext));
+        GuestContext = PTR32(State.Esp);
+    }
+    else State.Esp = Teb32->NtTib.StackBase;
+    State.Esp -= 12;
     ((ULONG *)(ULONG_PTR)State.Esp)[0] = 0;
     ((ULONG *)(ULONG_PTR)State.Esp)[1] = PtrToUlong(Ntdll32);
+    ((ULONG *)(ULONG_PTR)State.Esp)[2] = PtrToUlong(GuestContext);
+    *(USHORT *)(State.ExtendedRegisters) = 0x27f;
+    *(ULONG *)(State.ExtendedRegisters + 24) = 0x1f80;
     State.Eip = PtrToUlong(Entry);
     State.EFlags = 0x202;
 #if DBG
-    DbgPrint("WoW64: entering i386 ntdll at %lx, PEB32 %p TEB32 %p\n", State.Eip, Peb32, Teb32);
+    if (!GuestContext)
+        DbgPrint("WoW64: entering i386 ntdll at %lx, PEB32 %p TEB32 %p\n", State.Eip, Peb32, Teb32);
 #endif
     Wow64CpuRun(&State);
 Failed:

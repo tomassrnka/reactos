@@ -12,8 +12,13 @@
 
 DWORD RegisterDefaultClasses = FALSE;
 
+#ifdef W32K_WIDE_ACTIVE
+PFNCLIENT pfnClientA;
+PFNCLIENT pfnClientW;
+#else
 static PFNCLIENT pfnClientA;
 static PFNCLIENT pfnClientW;
+#endif
 static PFNCLIENTWORKER pfnClientWorker;
 
 

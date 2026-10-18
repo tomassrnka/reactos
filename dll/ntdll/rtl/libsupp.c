@@ -1719,3 +1719,15 @@ RtlGetTickCount(VOID)
 }
 
 /* EOF */
+
+#ifdef BUILD_WOW64_ENABLED
+NTSTATUS NTAPI RtlWow64GetThreadContext(HANDLE Thread, PWOW64_CONTEXT Context)
+{
+    return NtQueryInformationThread(Thread, ThreadWow64Context, Context, sizeof(*Context), NULL);
+}
+
+NTSTATUS NTAPI RtlWow64SetThreadContext(HANDLE Thread, PWOW64_CONTEXT Context)
+{
+    return NtSetInformationThread(Thread, ThreadWow64Context, (PVOID)Context, sizeof(*Context));
+}
+#endif

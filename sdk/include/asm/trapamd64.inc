@@ -250,6 +250,15 @@ MACRO(ExitTrap, Flags)
     ASSERT_TRAP_FRAME_INTS_ENABLED rbp
     ASSERT_IRQL_PASSIVE
 
+#if defined(BUILD_WOW64_ENABLED)
+    /* Reached from both ntoskrnl and the HAL trap-exit on the WoW64-thread user
+     * return. KiRestoreWow64Gs is exported from ntoskrnl so the HAL links to the
+     * same definition; it runs before the volatile registers are restored, so
+     * its clobbers are harmless, and it only rewrites KERNEL_GS_BASE for a
+     * WoW64 process, leaving native-thread GS untouched. */
+    EXTERN KiRestoreWow64Gs:PROC
+    call KiRestoreWow64Gs
+#endif
     cli
 
     /* Swap gs to user mode */
@@ -307,4 +316,3 @@ MACRO(TRAP_ENTRY, Trap, Flags)
         ExitTrap Flags
     ENDFUNC
 ENDM
-

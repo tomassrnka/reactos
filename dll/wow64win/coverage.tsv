@@ -1,0 +1,744 @@
+name	class	implementation	detail
+NtUserActivateKeyboardLayout	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserAlterWindowStyle	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserAssociateInputContext	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserAttachThreadInput	A	generated	typed arguments; handle policy; measured layouts
+NtUserBeginPaint	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserBitBltSysBmp	A	generated	typed arguments; handle policy; measured layouts
+NtUserBlockInput	A	generated	typed arguments; handle policy; measured layouts
+NtUserBuildHimcList	C	unsupported	requires private structure or selector translation
+NtUserBuildHwndList	C	manual	see user.c, userextra.c and gdi.c
+NtUserBuildNameList	B	generated	typed arguments; handle policy; measured layouts
+NtUserBuildPropList	C	unsupported	requires private structure or selector translation
+NtUserCalcMenuBar	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserCallHwnd	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallHwndLock	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallHwndOpt	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallHwndParam	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallHwndParamLock	D	manual	see user.c, userextra.c and gdi.c
+NtUserCallMsgFilter	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallNextHookEx	A+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallNoParam	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallOneParam	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallTwoParam	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserChangeClipboardChain	A	generated	typed arguments; handle policy; measured layouts
+NtUserChangeDisplaySettings	C+S	unsupported	requires private structure or selector translation
+NtUserCheckImeHotKey	A	generated	typed arguments; handle policy; measured layouts
+NtUserCheckMenuItem	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserChildWindowFromPointEx	A	generated	typed arguments; handle policy; measured layouts
+NtUserClipCursor	B	generated	typed arguments; handle policy; measured layouts
+NtUserCloseClipboard	A	generated	typed arguments; handle policy; measured layouts
+NtUserCloseDesktop	A	generated	typed arguments; handle policy; measured layouts
+NtUserCloseWindowStation	A	generated	typed arguments; handle policy; measured layouts
+NtUserConsoleControl	D	unsupported	requires private structure or selector translation
+NtUserConvertMemHandle	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserCopyAcceleratorTable	B	generated	typed arguments; handle policy; measured layouts
+NtUserCountClipboardFormats	A	generated	typed arguments; handle policy; measured layouts
+NtUserCreateAcceleratorTable	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserCreateCaret	A	generated	typed arguments; handle policy; measured layouts
+NtUserCreateDesktop	C+S	unsupported	requires private structure or selector translation
+NtUserCreateInputContext	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserCreateLocalMemHandle	B	generated	typed arguments; handle policy; measured layouts
+NtUserCreateWindowEx	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserCreateWindowStation	C	unsupported	requires private structure or selector translation
+NtUserCtxDisplayIOCtl	A	generated	typed arguments; handle policy; measured layouts
+NtUserDbgWin32HeapFail	A	generated	typed arguments; handle policy; measured layouts
+NtUserDbgWin32HeapStat	A	generated	typed arguments; handle policy; measured layouts
+NtUserDdeGetQualityOfService	B	generated	typed arguments; handle policy; measured layouts
+NtUserDdeInitialize	A	generated	typed arguments; handle policy; measured layouts
+NtUserDdeSetQualityOfService	B	generated	typed arguments; handle policy; measured layouts
+NtUserDeferWindowPos	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserDefSetText	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserDeleteMenu	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserDestroyAcceleratorTable	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserDestroyCursor	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserDestroyInputContext	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserDestroyMenu	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserDestroyWindow	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserDisableThreadIme	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserDispatchMessage	C	manual	see user.c, userextra.c and gdi.c
+NtUserDragDetect	C	manual	see user.c, userextra.c and gdi.c
+NtUserDragObject	A	generated	typed arguments; handle policy; measured layouts
+NtUserDrawAnimatedRects	B	generated	typed arguments; handle policy; measured layouts
+NtUserDrawCaption	B	generated	typed arguments; handle policy; measured layouts
+NtUserDrawCaptionTemp	C	unsupported	requires private structure or selector translation
+NtUserDrawIconEx	A	generated	typed arguments; handle policy; measured layouts
+NtUserDrawMenuBarTemp	B	generated	typed arguments; handle policy; measured layouts
+NtUserEmptyClipboard	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserEnableMenuItem	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserEnableScrollBar	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserEndDeferWindowPosEx	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserEndMenu	A	generated	typed arguments; handle policy; measured layouts
+NtUserEndPaint	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserEnumDisplayDevices	C	unsupported	requires private structure or selector translation
+NtUserEnumDisplayMonitors	C	manual	see user.c, userextra.c and gdi.c
+NtUserEnumDisplaySettings	C	unsupported	requires private structure or selector translation
+NtUserEvent	A	generated	typed arguments; handle policy; measured layouts
+NtUserExcludeUpdateRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserFillWindow	A	generated	typed arguments; handle policy; measured layouts
+NtUserFindExistingCursorIcon	C	manual	see user.c, userextra.c and gdi.c
+NtUserFindWindowEx	C	manual	see user.c, userextra.c and gdi.c
+NtUserFlashWindowEx	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetAltTabInfo	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetAncestor	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetAppImeLevel	A	unsupported	aggregate/slot mismatch
+NtUserGetAsyncKeyState	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetAtomName	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetCaretBlinkTime	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetCaretPos	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetClassInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetClassName	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetClipboardData	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetClipboardFormatName	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetClipboardOwner	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetClipboardSequenceNumber	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetClipboardViewer	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetClipCursor	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetComboBoxInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetControlBrush	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetControlColor	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetCPD	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetCursorFrameInfo	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetCursorInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetDC	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetDCEx	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetDoubleClickTime	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetForegroundWindow	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetGuiResources	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetGUIThreadInfo	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetIconInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetIconSize	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetImeHotKey	C	unsupported	requires private structure or selector translation
+NtUserGetImeInfoEx	C	unsupported	requires private structure or selector translation
+NtUserGetInternalWindowPos	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetKeyboardLayoutList	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetKeyboardLayoutName	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetKeyboardState	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetKeyNameText	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetKeyState	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetLayeredWindowAttributes	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetListBoxInfo	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetMenuBarInfo	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetMenuIndex	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetMenuItemRect	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetMessage	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetMonitorInfo	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetMouseMovePointsEx	C	unsupported	requires private structure or selector translation
+NtUserGetObjectInformation	D	manual	see user.c, userextra.c and gdi.c
+NtUserGetOpenClipboardWindow	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetPriorityClipboardFormat	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetProcessWindowStation	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetRawInputBuffer	C	unsupported	requires private structure or selector translation
+NtUserGetRawInputData	D	unsupported	requires private structure or selector translation
+NtUserGetRawInputDeviceInfo	D	unsupported	requires private structure or selector translation
+NtUserGetRawInputDeviceList	C	unsupported	requires private structure or selector translation
+NtUserGetRegisteredRawInputDevices	C	unsupported	requires private structure or selector translation
+NtUserGetScrollBarInfo	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetSystemMenu	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetThreadDesktop	A	generated	typed arguments; handle policy; measured layouts
+NtUserGetThreadState	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetTitleBarInfo	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetUpdateRect	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetUpdateRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetWindowDC	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserGetWindowPlacement	B	generated	typed arguments; handle policy; measured layouts
+NtUserGetWOWClass	C+S	unsupported	requires private structure or selector translation
+NtUserHardErrorControl	A	generated	typed arguments; handle policy; measured layouts
+NtUserHideCaret	A	generated	typed arguments; handle policy; measured layouts
+NtUserHiliteMenuItem	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserImpersonateDdeClientWindow	A	generated	typed arguments; handle policy; measured layouts
+NtUserInitialize	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserInitializeClientPfnArrays	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserInitTask	A	generated	typed arguments; handle policy; measured layouts
+NtUserInternalGetWindowText	B	generated	typed arguments; handle policy; measured layouts
+NtUserInvalidateRect	B	generated	typed arguments; handle policy; measured layouts
+NtUserInvalidateRgn	A	generated	typed arguments; handle policy; measured layouts
+NtUserIsClipboardFormatAvailable	A	generated	typed arguments; handle policy; measured layouts
+NtUserKillTimer	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserLoadKeyboardLayoutEx	C+S	unsupported	requires private structure or selector translation
+NtUserLockWindowStation	A	generated	typed arguments; handle policy; measured layouts
+NtUserLockWindowUpdate	A	generated	typed arguments; handle policy; measured layouts
+NtUserLockWorkStation	A	generated	typed arguments; handle policy; measured layouts
+NtUserMNDragLeave	A	generated	typed arguments; handle policy; measured layouts
+NtUserMNDragOver	A	generated	typed arguments; handle policy; measured layouts
+NtUserMapVirtualKeyEx	A	generated	typed arguments; handle policy; measured layouts
+NtUserMenuItemFromPoint	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserMessageCall	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserMinMaximize	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserModifyUserStartupInfoFlags	A	generated	typed arguments; handle policy; measured layouts
+NtUserMonitorFromPoint	C	manual	see user.c, userextra.c and gdi.c
+NtUserMonitorFromRect	B	generated	typed arguments; handle policy; measured layouts
+NtUserMonitorFromWindow	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserMoveWindow	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserNotifyIMEStatus	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserNotifyProcessCreate	A	generated	typed arguments; handle policy; measured layouts
+NtUserNotifyWinEvent	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserOpenClipboard	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserOpenDesktop	C	unsupported	requires private structure or selector translation
+NtUserOpenInputDesktop	A	generated	typed arguments; handle policy; measured layouts
+NtUserOpenWindowStation	C	unsupported	requires private structure or selector translation
+NtUserPaintDesktop	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserPaintMenuBar	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserPeekMessage	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserPostMessage	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserPostThreadMessage	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserPrintWindow	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserProcessConnect	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserQueryInformationThread	D	unsupported	requires private structure or selector translation
+NtUserQueryInputContext	D+s	manual	see user.c, userextra.c and gdi.c
+NtUserQuerySendMessage	A	generated	typed arguments; handle policy; measured layouts
+NtUserQueryWindow	D+s	manual	see user.c, userextra.c and gdi.c
+NtUserRealChildWindowFromPoint	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserRealInternalGetMessage	C	unsupported	requires private structure or selector translation
+NtUserRealWaitMessageEx	A	generated	typed arguments; handle policy; measured layouts
+NtUserRedrawWindow	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserRegisterClassExWOW	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserRegisterHotKey	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserRegisterRawInputDevices	C	unsupported	requires private structure or selector translation
+NtUserRegisterTasklist	A	generated	typed arguments; handle policy; measured layouts
+NtUserRegisterUserApiHook	C+S	unsupported	requires private structure or selector translation
+NtUserRegisterWindowMessage	C	manual	see user.c, userextra.c and gdi.c
+NtUserRemoteConnect	A	generated	typed arguments; handle policy; measured layouts
+NtUserRemoteRedrawRectangle	A	generated	typed arguments; handle policy; measured layouts
+NtUserRemoteRedrawScreen	A	generated	typed arguments; handle policy; measured layouts
+NtUserRemoteStopScreenUpdates	A	generated	typed arguments; handle policy; measured layouts
+NtUserRemoveMenu	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserRemoveProp	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserResolveDesktop	C	unsupported	requires private structure or selector translation
+NtUserResolveDesktopForWOW	A	generated	typed arguments; handle policy; measured layouts
+NtUserSBGetParms	B+s	generated	typed arguments; handle policy; measured layouts
+NtUserScrollDC	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserScrollWindowEx	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserSelectPalette	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSendInput	C	unsupported	requires private structure or selector translation
+NtUserSetActiveWindow	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetAppImeLevel	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetCapture	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserSetClassLong	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserSetClassLongPtr	D+S	unsupported	no i386 service entry
+NtUserSetClassWord	A	generated	typed arguments; handle policy; measured layouts
+NtUserSetClipboardData	B+S	manual	see user.c, userextra.c and gdi.c
+NtUserSetClipboardViewer	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserSetConsoleReserveKeys	A	generated	typed arguments; handle policy; measured layouts
+NtUserSetCursor	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserSetCursorContents	C	unsupported	requires private structure or selector translation
+NtUserSetCursorIconData	C+s	manual	see user.c, userextra.c and gdi.c
+NtUserSetDbgTag	A	unsupported	no i386 service entry
+NtUserSetDbgTagCount	A	unsupported	no i386 service entry
+NtUserSetFocus	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetImeHotKey	A	generated	typed arguments; handle policy; measured layouts
+NtUserSetImeInfoEx	C	unsupported	requires private structure or selector translation
+NtUserSetImeOwnerWindow	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetInformationProcess	A	generated	typed arguments; handle policy; measured layouts
+NtUserSetInformationThread	D+S	unsupported	requires private structure or selector translation
+NtUserSetInternalWindowPos	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetKeyboardState	B	generated	typed arguments; handle policy; measured layouts
+NtUserSetLayeredWindowAttributes	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetLogonNotifyWindow	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserSetMenu	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetMenuContextHelpId	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetMenuDefaultItem	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetMenuFlagRtoL	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetObjectInformation	D	unsupported	requires private structure or selector translation
+NtUserSetParent	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetProcessWindowStation	A	generated	typed arguments; handle policy; measured layouts
+NtUserSetProp	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetRipFlags	A	unsupported	no i386 service entry
+NtUserSetScrollBarInfo	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetScrollInfo	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetShellWindowEx	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetSysColors	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetSystemCursor	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserSetSystemMenu	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetSystemTimer	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserSetThreadDesktop	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetThreadLayoutHandles	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetThreadState	A	generated	typed arguments; handle policy; measured layouts
+NtUserSetTimer	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserSetWinEventHook	C+S	unsupported	requires private structure or selector translation
+NtUserSetWindowFNID	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetWindowLong	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserSetWindowLongPtr	D+S	unsupported	no i386 service entry
+NtUserSetWindowPlacement	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetWindowPos	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetWindowRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSetWindowStationUser	B	generated	typed arguments; handle policy; measured layouts
+NtUserSetWindowWord	D+S	unsupported	requires private structure or selector translation
+NtUserSetWindowsHookAW	A+S	unsupported	HOOKPROC callback translation not implemented
+NtUserSetWindowsHookEx	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserShowCaret	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserShowScrollBar	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserShowWindow	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserShowWindowAsync	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSoundSentry	A	generated	typed arguments; handle policy; measured layouts
+NtUserSwitchDesktop	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserSystemParametersInfo	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserTestForInteractiveUser	A	generated	typed arguments; handle policy; measured layouts
+NtUserThunkedMenuInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserThunkedMenuItemInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserToUnicodeEx	B	generated	typed arguments; handle policy; measured layouts
+NtUserTrackMouseEvent	C+s	manual	see user.c, userextra.c and gdi.c
+NtUserTrackPopupMenuEx	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserTranslateAccelerator	C+s	manual	see user.c, userextra.c and gdi.c
+NtUserTranslateMessage	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserUnhookWinEvent	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserUnhookWindowsHookEx	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserUnloadKeyboardLayout	A	generated	typed arguments; handle policy; measured layouts
+NtUserUnlockWindowStation	A	generated	typed arguments; handle policy; measured layouts
+NtUserUnregisterClass	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserUnregisterHotKey	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserUnregisterUserApiHook	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserUpdateInputContext	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserUpdateInstance	A	generated	typed arguments; handle policy; measured layouts
+NtUserUpdateLayeredWindow	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserUpdatePerUserSystemParameters	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserUserHandleGrantAccess	A	generated	typed arguments; handle policy; measured layouts
+NtUserValidateHandleSecure	A+s	generated	typed arguments; handle policy; measured layouts
+NtUserValidateRect	B+S	generated	typed arguments; handle policy; measured layouts
+NtUserValidateTimerCallback	A	generated	typed arguments; handle policy; measured layouts
+NtUserVkKeyScanEx	A	generated	typed arguments; handle policy; measured layouts
+NtUserWaitForInputIdle	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserWaitForMsgAndEvent	A	generated	typed arguments; handle policy; measured layouts
+NtUserWaitMessage	A+S	generated	typed arguments; handle policy; measured layouts
+NtUserWin32PoolAllocationStats	A	generated	typed arguments; handle policy; measured layouts
+NtUserWindowFromPoint	A+s	manual	see user.c, userextra.c and gdi.c
+NtUserYieldTask	A	generated	typed arguments; handle policy; measured layouts
+NtGdiAbortDoc	A	generated	typed arguments; handle policy; measured layouts
+NtGdiAbortPath	A	generated	typed arguments; handle policy; measured layouts
+NtGdiAddFontResourceW	B	generated	typed arguments; handle policy; measured layouts
+NtGdiAddRemoteFontToDC	B	generated	typed arguments; handle policy; measured layouts
+NtGdiAddFontMemResourceEx	B	generated	typed arguments; handle policy; measured layouts
+NtGdiRemoveMergeFont	B	generated	typed arguments; handle policy; measured layouts
+NtGdiAddRemoteMMInstanceToDC	B	generated	typed arguments; handle policy; measured layouts
+NtGdiAlphaBlend	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiAngleArc	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiAnyLinkedFonts	A	generated	typed arguments; handle policy; measured layouts
+NtGdiFontIsLinked	A	generated	typed arguments; handle policy; measured layouts
+NtGdiArcInternal	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiBeginPath	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiBitBlt	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCancelDC	A	generated	typed arguments; handle policy; measured layouts
+NtGdiCheckBitmapBits	B	generated	typed arguments; handle policy; measured layouts
+NtGdiCloseFigure	A	generated	typed arguments; handle policy; measured layouts
+NtGdiClearBitmapAttributes	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiClearBrushAttributes	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiColorCorrectPalette	B	generated	typed arguments; handle policy; measured layouts
+NtGdiCombineRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCombineTransform	B	generated	typed arguments; handle policy; measured layouts
+NtGdiComputeXformCoefficients	A	generated	typed arguments; handle policy; measured layouts
+NtGdiConsoleTextOut	C	unsupported	requires private structure or selector translation
+NtGdiConvertMetafileRect	B	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateBitmap	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateClientObj	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateColorSpace	C+S	unsupported	requires private structure or selector translation
+NtGdiCreateColorTransform	C	unsupported	requires private structure or selector translation
+NtGdiCreateCompatibleBitmap	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateCompatibleDC	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateDIBBrush	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateDIBitmapInternal	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateDIBSection	C+S	manual	see user.c, userextra.c and gdi.c
+NtGdiCreateEllipticRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateHalftonePalette	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateHatchBrushInternal	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateMetafileDC	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreatePaletteInternal	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreatePatternBrushInternal	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreatePen	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateRectRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateRoundRectRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateServerMetaFile	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiCreateSolidBrush	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiD3dContextCreate	C	unsupported	requires private structure or selector translation
+NtGdiD3dContextDestroy	C	unsupported	requires private structure or selector translation
+NtGdiD3dContextDestroyAll	B	generated	typed arguments; handle policy; measured layouts
+NtGdiD3dValidateTextureStageState	C	unsupported	requires private structure or selector translation
+NtGdiD3dDrawPrimitives2	C	unsupported	requires private structure or selector translation
+NtGdiDdGetDriverState	C	unsupported	requires private structure or selector translation
+NtGdiDdAddAttachedSurface	C	unsupported	requires private structure or selector translation
+NtGdiDdAlphaBlt	C	unsupported	requires private structure or selector translation
+NtGdiDdAttachSurface	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdBeginMoCompFrame	C	unsupported	requires private structure or selector translation
+NtGdiDdBlt	C	unsupported	requires private structure or selector translation
+NtGdiDdCanCreateSurface	C	unsupported	requires private structure or selector translation
+NtGdiDdCanCreateD3DBuffer	C	unsupported	requires private structure or selector translation
+NtGdiDdColorControl	C	unsupported	requires private structure or selector translation
+NtGdiDdCreateDirectDrawObject	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdCreateSurface	C	unsupported	requires private structure or selector translation
+NtGdiDdCreateD3DBuffer	C	unsupported	requires private structure or selector translation
+NtGdiDdCreateMoComp	C	unsupported	requires private structure or selector translation
+NtGdiDdCreateSurfaceObject	C	unsupported	requires private structure or selector translation
+NtGdiDdDeleteDirectDrawObject	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDeleteSurfaceObject	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDestroyMoComp	C	unsupported	requires private structure or selector translation
+NtGdiDdDestroySurface	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDestroyD3DBuffer	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdEndMoCompFrame	C	unsupported	requires private structure or selector translation
+NtGdiDdFlip	C	unsupported	requires private structure or selector translation
+NtGdiDdFlipToGDISurface	C	unsupported	requires private structure or selector translation
+NtGdiDdGetAvailDriverMemory	C	unsupported	requires private structure or selector translation
+NtGdiDdGetBltStatus	C	unsupported	requires private structure or selector translation
+NtGdiDdGetDC	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdGetDriverInfo	C	unsupported	requires private structure or selector translation
+NtGdiDdGetDxHandle	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdGetFlipStatus	C	unsupported	requires private structure or selector translation
+NtGdiDdGetInternalMoCompInfo	C	unsupported	requires private structure or selector translation
+NtGdiDdGetMoCompBuffInfo	C	unsupported	requires private structure or selector translation
+NtGdiDdGetMoCompGuids	C	unsupported	requires private structure or selector translation
+NtGdiDdGetMoCompFormats	C	unsupported	requires private structure or selector translation
+NtGdiDdGetScanLine	C	unsupported	requires private structure or selector translation
+NtGdiDdLock	C	unsupported	requires private structure or selector translation
+NtGdiDdLockD3D	C	unsupported	requires private structure or selector translation
+NtGdiDdQueryDirectDrawObject	C	unsupported	requires private structure or selector translation
+NtGdiDdQueryMoCompStatus	C	unsupported	requires private structure or selector translation
+NtGdiDdReenableDirectDrawObject	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdReleaseDC	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdRenderMoComp	C	unsupported	requires private structure or selector translation
+NtGdiDdResetVisrgn	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdSetColorKey	C	unsupported	requires private structure or selector translation
+NtGdiDdSetExclusiveMode	C	unsupported	requires private structure or selector translation
+NtGdiDdSetGammaRamp	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdCreateSurfaceEx	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdSetOverlayPosition	C	unsupported	requires private structure or selector translation
+NtGdiDdUnattachSurface	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdUnlock	C	unsupported	requires private structure or selector translation
+NtGdiDdUnlockD3D	C	unsupported	requires private structure or selector translation
+NtGdiDdUpdateOverlay	C	unsupported	requires private structure or selector translation
+NtGdiDdWaitForVerticalBlank	C	unsupported	requires private structure or selector translation
+NtGdiDvpCanCreateVideoPort	C	unsupported	requires private structure or selector translation
+NtGdiDvpColorControl	C	unsupported	requires private structure or selector translation
+NtGdiDvpCreateVideoPort	C	unsupported	requires private structure or selector translation
+NtGdiDvpDestroyVideoPort	C	unsupported	requires private structure or selector translation
+NtGdiDvpFlipVideoPort	C	unsupported	requires private structure or selector translation
+NtGdiDvpGetVideoPortBandwidth	C	unsupported	requires private structure or selector translation
+NtGdiDvpGetVideoPortField	C	unsupported	requires private structure or selector translation
+NtGdiDvpGetVideoPortFlipStatus	C	unsupported	requires private structure or selector translation
+NtGdiDvpGetVideoPortInputFormats	C	unsupported	requires private structure or selector translation
+NtGdiDvpGetVideoPortLine	C	unsupported	requires private structure or selector translation
+NtGdiDvpGetVideoPortOutputFormats	C	unsupported	requires private structure or selector translation
+NtGdiDvpGetVideoPortConnectInfo	C	unsupported	requires private structure or selector translation
+NtGdiDvpGetVideoSignalStatus	C	unsupported	requires private structure or selector translation
+NtGdiDvpUpdateVideoPort	C	unsupported	requires private structure or selector translation
+NtGdiDvpWaitForVideoPortSync	C	unsupported	requires private structure or selector translation
+NtGdiDvpAcquireNotification	C	unsupported	requires private structure or selector translation
+NtGdiDvpReleaseNotification	A	unsupported	opaque video-port/event handle semantics
+NtGdiDxgGenericThunk	D	unsupported	requires private structure or selector translation
+NtGdiDeleteClientObj	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiDeleteColorSpace	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiDeleteColorTransform	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDeleteObjectApp	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiDescribePixelFormat	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetPerBandInfo	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDoBanding	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDoPalette	D+S	manual	see user.c, userextra.c and gdi.c
+NtGdiDrawEscape	D	unsupported	requires private structure or selector translation
+NtGdiEllipse	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiEnableEudc	A	generated	typed arguments; handle policy; measured layouts
+NtGdiEndDoc	A	generated	typed arguments; handle policy; measured layouts
+NtGdiEndPage	A	generated	typed arguments; handle policy; measured layouts
+NtGdiEndPath	A	generated	typed arguments; handle policy; measured layouts
+NtGdiEnumFontChunk	B	generated	typed arguments; handle policy; measured layouts
+NtGdiEnumFontClose	A	generated	typed arguments; handle policy; measured layouts
+NtGdiEnumFontOpen	B	generated	typed arguments; handle policy; measured layouts
+NtGdiEnumObjects	D	unsupported	requires private structure or selector translation
+NtGdiEqualRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiEudcLoadUnloadLink	B	generated	typed arguments; handle policy; measured layouts
+NtGdiExcludeClipRect	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiExtCreatePen	D+S	manual	see user.c, userextra.c and gdi.c
+NtGdiExtCreateRegion	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiExtEscape	D	unsupported	requires private structure or selector translation
+NtGdiExtFloodFill	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiExtGetObjectW	D	manual	see user.c, userextra.c and gdi.c
+NtGdiExtSelectClipRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiExtTextOutW	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiFillPath	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiFillRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiFlattenPath	A	generated	typed arguments; handle policy; measured layouts
+NtGdiFlush	A	generated	typed arguments; handle policy; measured layouts
+NtGdiForceUFIMapping	B	generated	typed arguments; handle policy; measured layouts
+NtGdiFrameRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiFullscreenControl	D	unsupported	requires private structure or selector translation
+NtGdiGetAndSetDCDword	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetAppClipBox	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetBitmapBits	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetBitmapDimension	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetBoundsRect	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetCharABCWidthsW	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetCharacterPlacementW	C	unsupported	requires private structure or selector translation
+NtGdiGetCharSet	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetCharWidthW	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetCharWidthInfo	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetColorAdjustment	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetColorSpaceforBitmap	A	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDCDword	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDCforBitmap	A	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDCObject	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDCPoint	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDeviceCaps	A	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDeviceGammaRamp	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDeviceCapsAll	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDIBitsInternal	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetETM	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetEudcTimeStampEx	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetFontData	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetFontResourceInfoInternalW	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetGlyphIndicesW	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetGlyphIndicesWInternal	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetGlyphOutline	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetKerningPairs	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetLinkedUFIs	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetMiterLimit	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetMonitorID	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetNearestColor	A	generated	typed arguments; handle policy; measured layouts
+NtGdiGetNearestPaletteIndex	A	generated	typed arguments; handle policy; measured layouts
+NtGdiGetObjectBitmapHandle	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetOutlineTextMetricsInternalW	C+S	manual	see user.c, userextra.c and gdi.c
+NtGdiGetPath	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetPixel	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetRandomRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetRasterizerCaps	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetRealizationInfo	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetRegionData	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetRgnBox	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetServerMetaFileBits	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetSpoolMessage	A	generated	typed arguments; handle policy; measured layouts
+NtGdiGetStats	D	unsupported	requires private structure or selector translation
+NtGdiGetStockObject	A	generated	typed arguments; handle policy; measured layouts
+NtGdiGetStringBitmapW	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetSystemPaletteUse	A	generated	typed arguments; handle policy; measured layouts
+NtGdiGetTextCharsetInfo	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetTextExtent	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetTextExtentExW	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetTextFaceW	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetTextMetricsW	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetTransform	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetUFI	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetEmbUFI	C	unsupported	requires private structure or selector translation
+NtGdiGetUFIPathname	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetEmbedFonts	A	generated	typed arguments; handle policy; measured layouts
+NtGdiChangeGhostFont	C	unsupported	requires private structure or selector translation
+NtGdiAddEmbFontToDC	C	unsupported	requires private structure or selector translation
+NtGdiGetFontUnicodeRanges	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetWidthTable	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGradientFill	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiHfontCreate	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiIcmBrushInfo	B	generated	typed arguments; handle policy; measured layouts
+NtGdiInit	A	generated	typed arguments; handle policy; measured layouts
+NtGdiInitSpool	A	generated	typed arguments; handle policy; measured layouts
+NtGdiIntersectClipRect	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiInvertRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiLineTo	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiMakeFontDir	B	generated	typed arguments; handle policy; measured layouts
+NtGdiMakeInfoDC	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiMaskBlt	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiModifyWorldTransform	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiMonoBitmap	A	generated	typed arguments; handle policy; measured layouts
+NtGdiMoveTo	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiOffsetClipRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiOffsetRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiOpenDCW	C+S	manual	see user.c, userextra.c and gdi.c
+NtGdiPatBlt	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiPolyPatBlt	C+S	unsupported	requires private structure or selector translation
+NtGdiPathToRegion	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiPlgBlt	B	generated	typed arguments; handle policy; measured layouts
+NtGdiPolyDraw	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiPolyPolyDraw	D+S	manual	see user.c, userextra.c and gdi.c
+NtGdiPolyTextOutW	C	unsupported	requires private structure or selector translation
+NtGdiPtInRegion	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiPtVisible	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiQueryFonts	B	generated	typed arguments; handle policy; measured layouts
+NtGdiQueryFontAssocInfo	A	generated	typed arguments; handle policy; measured layouts
+NtGdiRectangle	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiRectInRegion	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiRectVisible	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiRemoveFontResourceW	B	generated	typed arguments; handle policy; measured layouts
+NtGdiRemoveFontMemResourceEx	A	generated	typed arguments; handle policy; measured layouts
+NtGdiResetDC	C	unsupported	requires private structure or selector translation
+NtGdiResizePalette	A	generated	typed arguments; handle policy; measured layouts
+NtGdiRestoreDC	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiRoundRect	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSaveDC	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiScaleViewportExtEx	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiScaleWindowExtEx	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSelectBitmap	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSelectBrush	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSelectClipPath	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSelectFont	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSelectPen	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetBitmapAttributes	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetBitmapBits	B	generated	typed arguments; handle policy; measured layouts
+NtGdiSetBitmapDimension	B	generated	typed arguments; handle policy; measured layouts
+NtGdiSetBoundsRect	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetBrushAttributes	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetBrushOrg	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetColorAdjustment	B	generated	typed arguments; handle policy; measured layouts
+NtGdiSetColorSpace	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetDeviceGammaRamp	B	generated	typed arguments; handle policy; measured layouts
+NtGdiSetDIBitsToDeviceInternal	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetFontEnumeration	A	generated	typed arguments; handle policy; measured layouts
+NtGdiSetFontXform	A	generated	typed arguments; handle policy; measured layouts
+NtGdiSetIcmMode	A	generated	typed arguments; handle policy; measured layouts
+NtGdiSetLinkedUFIs	B	generated	typed arguments; handle policy; measured layouts
+NtGdiSetMagicColors	B	generated	typed arguments; handle policy; measured layouts
+NtGdiSetMetaRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetMiterLimit	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetDeviceWidth	A	generated	typed arguments; handle policy; measured layouts
+NtGdiMirrorWindowOrg	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetLayout	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetPixel	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetPixelFormat	A	generated	typed arguments; handle policy; measured layouts
+NtGdiSetRectRgn	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetSystemPaletteUse	A	generated	typed arguments; handle policy; measured layouts
+NtGdiSetTextJustification	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetupPublicCFONT	A	generated	typed arguments; handle policy; measured layouts
+NtGdiSetVirtualResolution	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetSizeDevice	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiStartDoc	C	manual	see user.c, userextra.c and gdi.c
+NtGdiStartPage	A	generated	typed arguments; handle policy; measured layouts
+NtGdiStretchBlt	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiStretchDIBitsInternal	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiStrokeAndFillPath	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiStrokePath	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSwapBuffers	A	generated	typed arguments; handle policy; measured layouts
+NtGdiTransformPoints	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiTransparentBlt	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiUnloadPrinterDriver	B	generated	typed arguments; handle policy; measured layouts
+NtGdiUnmapMemFont	B	generated	typed arguments; handle policy; measured layouts
+NtGdiUnrealizeObject	A	generated	typed arguments; handle policy; measured layouts
+NtGdiUpdateColors	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiWidenPath	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiEngAssociateSurface	C	unsupported	requires private structure or selector translation
+NtGdiEngCreateBitmap	C	unsupported	requires private structure or selector translation
+NtGdiEngCreateDeviceSurface	C	unsupported	requires private structure or selector translation
+NtGdiEngCreateDeviceBitmap	C	unsupported	requires private structure or selector translation
+NtGdiEngCreatePalette	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiEngComputeGlyphSet	C	unsupported	requires private structure or selector translation
+NtGdiEngCopyBits	C	unsupported	requires private structure or selector translation
+NtGdiEngDeletePalette	A+S	generated	typed arguments; handle policy; measured layouts
+NtGdiEngDeleteSurface	A	unsupported	kernel surface pointer cannot round-trip
+NtGdiEngEraseSurface	C	unsupported	requires private structure or selector translation
+NtGdiEngUnlockSurface	C	unsupported	requires private structure or selector translation
+NtGdiEngLockSurface	C	unsupported	requires private structure or selector translation
+NtGdiEngBitBlt	C	unsupported	requires private structure or selector translation
+NtGdiEngStretchBlt	C	unsupported	requires private structure or selector translation
+NtGdiEngPlgBlt	C	unsupported	requires private structure or selector translation
+NtGdiEngMarkBandingSurface	A	unsupported	kernel surface pointer cannot round-trip
+NtGdiEngStrokePath	C	unsupported	requires private structure or selector translation
+NtGdiEngFillPath	C	unsupported	requires private structure or selector translation
+NtGdiEngStrokeAndFillPath	C	unsupported	requires private structure or selector translation
+NtGdiEngPaint	C	unsupported	requires private structure or selector translation
+NtGdiEngLineTo	C	unsupported	requires private structure or selector translation
+NtGdiEngAlphaBlend	C	unsupported	requires private structure or selector translation
+NtGdiEngGradientFill	C	unsupported	requires private structure or selector translation
+NtGdiEngTransparentBlt	C	unsupported	requires private structure or selector translation
+NtGdiEngTextOut	C	unsupported	requires private structure or selector translation
+NtGdiEngStretchBltROP	C	unsupported	requires private structure or selector translation
+NtGdiXLATEOBJ_cGetPalette	C	unsupported	requires private structure or selector translation
+NtGdiXLATEOBJ_iXlate	C	unsupported	requires private structure or selector translation
+NtGdiXLATEOBJ_hGetColorTransform	C	unsupported	requires private structure or selector translation
+NtGdiCLIPOBJ_bEnum	C	unsupported	requires private structure or selector translation
+NtGdiCLIPOBJ_cEnumStart	C	unsupported	requires private structure or selector translation
+NtGdiCLIPOBJ_ppoGetPath	C	unsupported	requires private structure or selector translation
+NtGdiEngDeletePath	C	unsupported	requires private structure or selector translation
+NtGdiEngCreateClip	C	unsupported	requires private structure or selector translation
+NtGdiEngDeleteClip	C	unsupported	requires private structure or selector translation
+NtGdiBRUSHOBJ_ulGetBrushColor	C	unsupported	requires private structure or selector translation
+NtGdiBRUSHOBJ_pvAllocRbrush	C	unsupported	requires private structure or selector translation
+NtGdiBRUSHOBJ_pvGetRbrush	C	unsupported	requires private structure or selector translation
+NtGdiBRUSHOBJ_hGetColorTransform	C	unsupported	requires private structure or selector translation
+NtGdiXFORMOBJ_bApplyXform	C	unsupported	requires private structure or selector translation
+NtGdiXFORMOBJ_iGetXform	C	unsupported	requires private structure or selector translation
+NtGdiFONTOBJ_vGetInfo	C	unsupported	requires private structure or selector translation
+NtGdiFONTOBJ_pxoGetXform	C	unsupported	requires private structure or selector translation
+NtGdiFONTOBJ_cGetGlyphs	C	unsupported	requires private structure or selector translation
+NtGdiFONTOBJ_pifi	C	unsupported	requires private structure or selector translation
+NtGdiFONTOBJ_pfdg	C	unsupported	requires private structure or selector translation
+NtGdiFONTOBJ_pQueryGlyphAttrs	C	unsupported	requires private structure or selector translation
+NtGdiFONTOBJ_pvTrueTypeFontFile	C	unsupported	requires private structure or selector translation
+NtGdiFONTOBJ_cGetAllGlyphHandles	C	unsupported	requires private structure or selector translation
+NtGdiSTROBJ_bEnum	C	unsupported	requires private structure or selector translation
+NtGdiSTROBJ_bEnumPositionsOnly	C	unsupported	requires private structure or selector translation
+NtGdiSTROBJ_bGetAdvanceWidths	C	unsupported	requires private structure or selector translation
+NtGdiSTROBJ_vEnumStart	C	unsupported	requires private structure or selector translation
+NtGdiSTROBJ_dwGetCodePage	C	unsupported	requires private structure or selector translation
+NtGdiPATHOBJ_vGetBounds	C	unsupported	requires private structure or selector translation
+NtGdiPATHOBJ_bEnum	C	unsupported	requires private structure or selector translation
+NtGdiPATHOBJ_vEnumStart	C	unsupported	requires private structure or selector translation
+NtGdiPATHOBJ_vEnumStartClipLines	C	unsupported	requires private structure or selector translation
+NtGdiPATHOBJ_bEnumClipLines	C	unsupported	requires private structure or selector translation
+NtGdiGetDhpdev	C	unsupported	requires private structure or selector translation
+NtGdiEngCheckAbort	C	unsupported	requires private structure or selector translation
+NtGdiHT_Get8BPPFormatPalette	B	generated	typed arguments; handle policy; measured layouts
+NtGdiHT_Get8BPPMaskPalette	B	generated	typed arguments; handle policy; measured layouts
+NtGdiUpdateTransform	A	generated	typed arguments; handle policy; measured layouts
+NtGdiSetPUMPDOBJ	C	unsupported	requires private structure or selector translation
+NtGdiBRUSHOBJ_DeleteRbrush	C	unsupported	requires private structure or selector translation
+NtGdiUMPDEngFreeUserMem	C	unsupported	requires private structure or selector translation
+NtGdiDrawStream	B	generated	typed arguments; handle policy; measured layouts
+NtGdiMakeObjectXferable	A	generated	typed arguments; handle policy; measured layouts
+NtDxEngGetRedirectionBitmap	A	generated	typed arguments; handle policy; measured layouts
+NtGdiSetViewportOrgEx	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiSetWindowOrgEx	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiGetFontFamilyInfo	B	generated	typed arguments; handle policy; measured layouts
+NtGdiOffsetViewportOrgEx	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiOffsetWindowOrgEx	B+S	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDICreateDCFromMemory	C+S	unsupported	requires private structure or selector translation
+NtGdiDdDDIDestroyDCFromMemory	C+S	unsupported	requires private structure or selector translation
+NtGdiDdDDICheckExclusiveOwnership	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDICreateAllocation	C	unsupported	requires private structure or selector translation
+NtGdiDdDDICheckMonitorPowerState	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDICheckOcclusion	C	unsupported	requires private structure or selector translation
+NtGdiDdDDICloseAdapter	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDICreateContext	C	unsupported	requires private structure or selector translation
+NtGdiDdDDICreateDevice	C	unsupported	requires private structure or selector translation
+NtGdiDdDDICreateOverlay	C	unsupported	requires private structure or selector translation
+NtGdiDdDDICreateSynchronizationObject	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIWaitForVerticalBlankEvent	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIWaitForIdle	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIUpdateOverlay	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIUnlock	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIDestroyAllocation	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIDestroyContext	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIDestroyDevice	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIDestroyOverlay	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIDestroySynchronizationObject	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIEscape	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIFlipOverlay	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIGetContextSchedulingPriority	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIGetDeviceState	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIGetDisplayModeList	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIGetMultisampleMethodList	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIGetPresentHistory	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIGetProcessSchedulingPriorityClass	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIGetRuntimeData	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIGetScanLine	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIGetSharedPrimaryHandle	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIInvalidateActiveVidPn	C	unsupported	requires private structure or selector translation
+NtGdiDdDDILock	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIOpenAdapterFromDeviceName	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIOpenAdapterFromGdiDisplayName	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIOpenAdapterFromHdc	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIOpenResource	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIPollDisplayChildren	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIPresent	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIQueryAdapterInfo	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIQueryAllocationResidency	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIQueryResourceInfo	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIQueryStatistics	C	unsupported	requires private structure or selector translation
+NtGdiDdDDIReleaseProcessVidPnSourceOwners	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIRender	C	unsupported	requires private structure or selector translation
+NtGdiDdDDISetAllocationPriority	C	unsupported	requires private structure or selector translation
+NtGdiDdDDISetContextSchedulingPriority	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDISetDisplayMode	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDISetDisplayPrivateDriverFormat	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDISetGammaRamp	C	unsupported	requires private structure or selector translation
+NtGdiDdDDISetProcessSchedulingPriorityClass	A	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDISetQueuedLimit	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDISetVidPnSourceOwner	C	unsupported	requires private structure or selector translation
+NtGdiDdDDISharedPrimaryLockNotification	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDISharedPrimaryUnLockNotification	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDISignalSynchronizationObject	B	generated	typed arguments; handle policy; measured layouts
+NtGdiDdDDIWaitForSynchronizationObject	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetFontFileData	B	generated	typed arguments; handle policy; measured layouts
+NtGdiGetFontFileInfo	C	unsupported	requires private structure or selector translation
+NtGdiGetFontRealizationInfo	B	generated	typed arguments; handle policy; measured layouts
+NtGdiMakeObjectUnXferable	A	unsupported	no i386 service entry

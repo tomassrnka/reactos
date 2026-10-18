@@ -21,6 +21,9 @@ PUBLIC Wow64CpuDispatch
     /* The low-address gate enters with the i386 stub's return on ESP.
      * No caller argument is read until we are on the native stack. */
     mov r11, gs:[TeTlsSlots + 8]
+    mov [r11 + 44], ecx
+    mov [r11 + 48], edx
+    fxsave [r11 + 64]
     mov [r11 + 8], esp
     mov rsp, [r11]
     mov [r11 + 24], ebx
@@ -62,6 +65,9 @@ Wow64CpuReturn:
     mov eax, HEX(2b)
     mov ds, ax
     mov es, ax
+    fxrstor [r11 + 64]
+    mov ecx, [r11 + 44]
+    mov edx, [r11 + 48]
     mov eax, [r11 + 20]
     add rsp, 32
     iretq
