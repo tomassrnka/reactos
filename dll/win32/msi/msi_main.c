@@ -48,6 +48,9 @@ DWORD                    gUIFilterRecord  = 0;
 LPVOID                   gUIContext       = NULL;
 LPVOID                   gUIContextRecord = NULL;
 WCHAR                   *gszLogFile       = NULL;
+#ifdef __REACTOS__
+DWORD                    gdwLogMode       = 0;
+#endif
 HINSTANCE msi_hInstance;
 
 

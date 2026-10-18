@@ -1005,6 +1005,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 						break;
 				}
 			}
+#ifdef __REACTOS__
+			/* Without a mode letter Windows logs "iwearmo" */
+			if (!LogMode)
+				LogMode = INSTALLLOGMODE_INFO | INSTALLLOGMODE_WARNING | INSTALLLOGMODE_ERROR |
+				          INSTALLLOGMODE_ACTIONSTART | INSTALLLOGMODE_ACTIONDATA |
+				          INSTALLLOGMODE_FATALEXIT | INSTALLLOGMODE_OUTOFDISKSPACE;
+#endif
 			i++;
 			if(i >= argc)
 				ShowUsage(1);
