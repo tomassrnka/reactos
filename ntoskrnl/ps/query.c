@@ -1454,6 +1454,10 @@ PspSetThreadTls32(
     ULONG OldLength, NewLength, Old = 0, i;
     ULONG_PTR NewTlsData;
 
+    /* A 32-bit vector, its length word before it included, stays below 4 GiB */
+#define TLS32_IN_GUEST(v, n) ((ULONG_PTR)(v) >= sizeof(ULONG) && \
+                              (ULONG64)(ULONG_PTR)(v) + (ULONG64)(n) * sizeof(ULONG) <= 0x100000000ULL)
+
     if (!Teb)
         return FALSE;
     Guest = PS_GET_TEB32_FROM_TEB(Teb);
@@ -1465,7 +1469,7 @@ PspSetThreadTls32(
     /* The thread's vector and its length, as user memory */
     ProbeForWrite(Vector - 1, sizeof(ULONG), sizeof(ULONG));
     OldLength = Vector[-1];
-    if (OldLength >= MAXLONG / sizeof(ULONG))
+    if (OldLength >= MAXLONG / sizeof(ULONG) || !TLS32_IN_GUEST(Vector, OldLength))
         ExRaiseStatus(STATUS_INVALID_PARAMETER);
     ProbeForWrite(Vector, OldLength * sizeof(ULONG), sizeof(ULONG));
 
@@ -1483,7 +1487,8 @@ PspSetThreadTls32(
         NewVector = (PULONG)NewTlsData;
         ProbeForWrite(NewVector - 1, sizeof(ULONG), sizeof(ULONG));
         NewLength = NewVector[-1];
-        if (NewLength <= Header->TlsIndex || NewLength >= MAXLONG / sizeof(ULONG))
+        if (NewLength <= Header->TlsIndex || NewLength >= MAXLONG / sizeof(ULONG) ||
+            !TLS32_IN_GUEST(NewVector, NewLength))
             ExRaiseStatus(STATUS_INVALID_PARAMETER);
         ProbeForWrite(NewVector, NewLength * sizeof(ULONG), sizeof(ULONG));
 
@@ -1513,6 +1518,7 @@ PspSetThreadTls32(
         Entry->Flags = THREAD_TLS_INFORMATION_ASSIGNED;
     }
     return TRUE;
+#undef TLS32_IN_GUEST
 }
 #endif
 
