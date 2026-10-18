@@ -1166,7 +1166,8 @@ MsqUnqueueSentMessage(
    InsertTailList(&usmList, &Message->ListEntry);
 }
 
-static VOID
+/* Returns TRUE when the message was still queued: then nothing but the trouble list holds it */
+static BOOLEAN
 MsqWithdrawSentMessage(
     _In_ PTHREADINFO ptirec,
     _In_ PUSER_SENT_MESSAGE Message)
@@ -1180,9 +1181,10 @@ MsqWithdrawSentMessage(
       if (CONTAINING_RECORD(Entry, USER_SENT_MESSAGE, ListEntry) == Message)
       {
          MsqUnqueueSentMessage(ptirec, Message);
-         break;
+         return TRUE;
       }
    }
+   return FALSE;
 }
 
 /* A terminated thread can leave its message queued on a receiver without ever returning to
@@ -1360,7 +1362,12 @@ co_MsqSendMessage(PTHREADINFO ptirec,
       {
          /* If the message has not yet dispatched, make sure it can't pass a result
             and it must not set the completion event anymore */
-         MsqWithdrawSentMessage(ptirec, Message);
+         if (MsqWithdrawSentMessage(ptirec, Message))
+         {
+            /* Nobody can reach it any more: do not leave it to the receiver's cleanup */
+            FreeUserMessage(Message);
+            Message = NULL;
+         }
 
          ERR("MsqSendMessage (blocked) timed out 1 Status %lx\n", WaitStatus);
       }
@@ -1401,7 +1408,11 @@ co_MsqSendMessage(PTHREADINFO ptirec,
          {
             /* If the message has not yet been dispatched, make sure it can't pass a result
                and it must not set the completion event anymore */
-            MsqWithdrawSentMessage(ptirec, Message);
+            if (MsqWithdrawSentMessage(ptirec, Message))
+            {
+               FreeUserMessage(Message);
+               Message = NULL;
+            }
 
             WARN("MsqSendMessage timed out 2 Status %lx\n", WaitStatus);
             break;
@@ -1445,19 +1456,23 @@ co_MsqSendMessage(PTHREADINFO ptirec,
    // Force this thread to wake up for the next go around.
    KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
 
-   Result = Message->lResult;
-
-   // Determine whether this message is being processed or not.
-   if ((Message->flags & (SMF_RECEIVERBUSY|SMF_RECEIVEDMESSAGE)) != SMF_RECEIVEDMESSAGE)
+   // A message withdrawn on timeout is already freed.
+   if (Message)
    {
-      Message->flags |= SMF_RECEIVERFREE;
-   }
+      Result = Message->lResult;
 
-   if (!(Message->flags & SMF_RECEIVERFREE))
-   {
-      TRACE("Sender Freeing Message %p ptirec %p bit %d list empty %d\n",Message,ptirec,!!(ptirec->pcti->fsChangeBits & QS_SENDMESSAGE),IsListEmpty(&ptirec->SentMessagesListHead));
-      // Make it to this point, the message was received.
-      FreeUserMessage(Message);
+      // Determine whether this message is being processed or not.
+      if ((Message->flags & (SMF_RECEIVERBUSY|SMF_RECEIVEDMESSAGE)) != SMF_RECEIVEDMESSAGE)
+      {
+         Message->flags |= SMF_RECEIVERFREE;
+      }
+
+      if (!(Message->flags & SMF_RECEIVERFREE))
+      {
+         TRACE("Sender Freeing Message %p ptirec %p bit %d list empty %d\n",Message,ptirec,!!(ptirec->pcti->fsChangeBits & QS_SENDMESSAGE),IsListEmpty(&ptirec->SentMessagesListHead));
+         // Make it to this point, the message was received.
+         FreeUserMessage(Message);
+      }
    }
 
    pti->pusmSent = SaveMsg;
@@ -2613,6 +2628,14 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
             }
 
             /* free the message */
+            FreeUserMessage(CurrentSentMessage);
+         }
+         else if ( pti == CurrentSentMessage->ptiSender &&
+                   !(CurrentSentMessage->flags & SMF_RECEIVEDMESSAGE) )
+         {
+            /* Withdrawn before the receiver took it (timeout or sender death): it is on no
+               receiver's list, so only this list still knows it. Do not leave it to the
+               receiver's own cleanup, a long-lived receiver would collect them. */
             FreeUserMessage(CurrentSentMessage);
          }
          else if ( pti == CurrentSentMessage->ptiSender ||
