@@ -860,8 +860,10 @@ static NTSTATUS NgDismountVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     PNG_FCB Fcb = FileObject ? FileObject->FsContext : NULL;
     PNG_CCB Ccb = FileObject ? FileObject->FsContext2 : NULL;
     NTSTATUS Status;
-    if (!Fcb || !Fcb->IsVolume || !Ccb || !Ccb->ManageVolume)
+    if (!Fcb || !Fcb->IsVolume || !Ccb)
         return STATUS_INVALID_PARAMETER;
+    if (!Ccb->ManageVolume)
+        return STATUS_ACCESS_DENIED;
     if (Vcb->LockedBy != FileObject)
         return STATUS_ACCESS_DENIED;
     FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
@@ -1421,13 +1423,15 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             Irp->IoStatus.Information = sizeof(ULONG);
             return STATUS_SUCCESS;
         }
+        /* Lock, unlock, dismount and the bitmap need a volume handle that may manage the volume
+         * (create.c); as on Windows, other volume handles get STATUS_ACCESS_DENIED. */
         case FSCTL_LOCK_VOLUME:
             if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_ACCESS_DENIED;
             return NgLockVolume(Vcb, FileObject);
         case FSCTL_UNLOCK_VOLUME:
             if (Fcb && Fcb->IsVolume && !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_ACCESS_DENIED;
             if (!Fcb || !Fcb->IsVolume || !NgEndLock(Vcb, FileObject, FALSE))
                 return STATUS_NOT_LOCKED;
             return STATUS_SUCCESS;
@@ -1492,9 +1496,10 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 return STATUS_INVALID_PARAMETER;
             return NgGetNtfsVolumeData(Vcb, Irp, Stack);
         case FSCTL_GET_VOLUME_BITMAP:
-            /* As FastFAT: a volume handle that may manage the volume. */
-            if (!Fcb || !Fcb->IsVolume || !((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+            if (!Fcb || !Fcb->IsVolume)
                 return STATUS_INVALID_PARAMETER;
+            if (!((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+                return STATUS_ACCESS_DENIED;
             return NgGetVolumeBitmap(Vcb, Irp, Stack);
         default:
             return STATUS_INVALID_DEVICE_REQUEST;

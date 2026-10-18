@@ -26,6 +26,7 @@ extern void func_NtfsTraverse(void);
 extern void func_NtfsVolumeLabel(void);
 extern void func_NtfsVolumeLabelReboot(void);
 extern void func_NtfsVolumeLock(void);
+extern void func_NtfsVolumeOpen(void);
 
 const struct test winetest_testlist[] =
 {
@@ -47,5 +48,6 @@ const struct test winetest_testlist[] =
     { "NtfsVolumeLabel", func_NtfsVolumeLabel },
     { "NtfsVolumeLabelReboot", func_NtfsVolumeLabelReboot },
     { "NtfsVolumeLock", func_NtfsVolumeLock },
+    { "NtfsVolumeOpen", func_NtfsVolumeOpen },
     { 0, 0 }
 };
