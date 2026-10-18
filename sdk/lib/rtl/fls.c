@@ -22,11 +22,12 @@
 /* The FLS lock. We don't use it yet since kernel32 uses the PEB lock and we need to synchronize with this for now */
 //RTL_SRWLOCK RtlpFlsLock = RTL_SRWLOCK_INIT;
 
-typedef struct _FLS_CALLBACK_INFO
-{
-    PFLS_CALLBACK_FUNCTION Callback;
-    PVOID Unknown;
-} FLS_CALLBACK_INFO, *PFLS_CALLBACK_INFO;
+/*
+ * PEB::FlsCallback keeps one callback pointer per index, as on NT 5.2 (the
+ * version ReactOS reports). NT 6 keeps a callback and a reserved pointer per
+ * index; kernel32 (FlsAlloc of every DLL version, BaseRundownFls), ntdll
+ * (LdrShutdownThread) and this file share the NT 5.2 layout.
+ */
 
 static
 VOID
@@ -56,7 +57,7 @@ RtlpAllocateFlsCallbackArray(VOID)
     /* Allocate a new callback array */
     newCallbacks = RtlAllocateHeap(RtlGetProcessHeap(),
                                    HEAP_ZERO_MEMORY,
-                                   RTL_FLS_MAXIMUM_AVAILABLE * sizeof(FLS_CALLBACK_INFO));
+                                   RTL_FLS_MAXIMUM_AVAILABLE * sizeof(PVOID));
     if (newCallbacks == NULL)
     {
         return STATUS_NO_MEMORY;
@@ -154,9 +155,10 @@ RtlFlsAllocEx(
         return STATUS_NO_MEMORY;
     }
 
-    /* Set the callback */
-    PFLS_CALLBACK_INFO callbacks = (PFLS_CALLBACK_INFO)peb->FlsCallback;
-    callbacks[index].Callback = Callback;
+    /* Set the callback; a slot freed by a FlsFree whose callback raised still
+       holds this thread's old value (NT 5.2 FlsAlloc clears it too) */
+    peb->FlsCallback[index] = Callback;
+    ((PRTL_FLS_DATA)teb->FlsData)->Data[index] = NULL;
 
     /* Update high index */
     peb->FlsHighIndex = max(peb->FlsHighIndex, index);
@@ -202,8 +204,7 @@ RtlFlsFree(
     }
 
     /* Check if there is a callback */
-    PFLS_CALLBACK_INFO callbackArray = (PFLS_CALLBACK_INFO)peb->FlsCallback;
-    PFLS_CALLBACK_FUNCTION callbackFunction = callbackArray[FlsIndex].Callback;
+    PFLS_CALLBACK_FUNCTION callbackFunction = (PFLS_CALLBACK_FUNCTION)peb->FlsCallback[FlsIndex];
 
     /* Clear the FLS index bit */
     RtlClearBit(peb->FlsBitmap, FlsIndex);
@@ -211,7 +212,8 @@ RtlFlsFree(
     /* Protect with SEH to guard against a broken callback.
        Note: Vista doesn't do that and will leak the FLS lock!
        Windows 10 protects the lock and still manages to clear the values as well.
-       We replicate Windows 10 behavior. */
+       NT 5.2 (kernel32 FlsFree) releases the lock and leaves the callback and the
+       values that were not reached yet; we replicate NT 5.2 behavior. */
     _SEH2_VOLATILE PLIST_ENTRY listEntry;
     _SEH2_TRY
     {
@@ -236,27 +238,10 @@ RtlFlsFree(
         }
 
         /* Clear the callback */
-        callbackArray[FlsIndex].Callback = NULL;
+        peb->FlsCallback[FlsIndex] = NULL;
     }
     _SEH2_FINALLY
     {
-        /* Check if we got an exception */
-        if (_SEH2_AbnormalTermination())
-        {
-            /* We need to finish clearing the values */
-            for (/* the current entry */;
-                 listEntry != &peb->FlsListHead;
-                 listEntry = listEntry->Flink)
-            {
-                /* Get the thread FLS data structure and clear the value */
-                PRTL_FLS_DATA flsData = CONTAINING_RECORD(listEntry, RTL_FLS_DATA, ListEntry);
-                flsData->Data[FlsIndex] = NULL;
-            }
-
-            /* Clear the callback */
-            callbackArray[FlsIndex].Callback = NULL;
-        }
-
         RtlpReleaseFlsLock();
     }
     _SEH2_END;
