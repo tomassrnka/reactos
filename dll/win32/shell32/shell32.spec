@@ -584,7 +584,7 @@
 @ stdcall -version=0x600+ SHQueryUserNotificationState(ptr) # Vista:405
 @ stdcall -version=0x600+ SHRemoveLocalizedName(wstr) # Vista:406
 @ stdcall -version=0x600+ SHSetDefaultProperties(ptr ptr long ptr) # Vista:407
-@ stub -version=0x600+ SHSetKnownFolderPath # Vista:408
+@ stdcall -version=0x600+ SHSetKnownFolderPath(ptr long ptr wstr) # Vista:408
 @ stdcall SHSetLocalizedName(wstr wstr long) # 2k3:335, Vista:409
 @ stdcall -version=0x600+ SHSetTemporaryPropertyForItem(ptr ptr ptr) # Vista:410
 @ stdcall SHSetUnreadMailCountW (wstr long wstr) # 2k3:336, Vista:411

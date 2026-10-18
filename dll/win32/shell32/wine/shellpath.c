@@ -2852,7 +2852,11 @@ static const CSIDL_DATA CSIDL_Data[] =
     },
     { /* 0x6f */
         .id         = &FOLDERID_UserProgramFilesCommon,
+#ifdef __REACTOS__
+        .type       = CSIDL_Type_User,
+#else
         .type       = CSIDL_Type_Disallowed, /* FIXME */
+#endif
         .category   = KF_CATEGORY_PERUSER,
         .name       = L"UserProgramFilesCommon",
         .parent     = &FOLDERID_UserProgramFiles,
@@ -4000,6 +4004,11 @@ HRESULT WINAPI SHGetFolderPathAndSubDirW(
         hr = E_FAIL;
         goto end;
     }
+#ifdef __REACTOS__
+    /* As on Windows: the folder gets the attributes of its definition (Downloads is read-only) */
+    if (!ret && !pszSubPath && CSIDL_Data[folder].attributes)
+        SetFileAttributesW(szBuildPath, GetFileAttributesW(szBuildPath) | CSIDL_Data[folder].attributes);
+#endif
 
     TRACE("Created missing system directory %s\n", debugstr_w(szBuildPath));
 end:
@@ -4598,17 +4607,43 @@ HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE t
 
     TRACE("%s, 0x%08lx, %p, %p\n", debugstr_guid(rfid), flags, token, ret_path);
 
+#ifdef __REACTOS__
+    if (!ret_path)
+        return E_INVALIDARG;
+#endif
     *ret_path = NULL;
+
+#ifdef __REACTOS__
+    /* As on Windows: the flags are checked before the id; KF_FLAG_ALIAS_ONLY is invalid here,
+     * the flags of later versions (KF_FLAG_NO_APPCONTAINER_REDIRECTION and others) are ignored,
+     * and KF_FLAG_CREATE creates the folder also with KF_FLAG_DONT_VERIFY */
+    if ((flags & KF_FLAG_ALIAS_ONLY) ||
+        (flags & (KF_FLAG_DEFAULT_PATH | KF_FLAG_NOT_PARENT_RELATIVE)) == KF_FLAG_NOT_PARENT_RELATIVE)
+        return E_INVALIDARG;
+    flags &= KF_FLAG_CREATE|KF_FLAG_SIMPLE_IDLIST|KF_FLAG_DONT_UNEXPAND|
+             KF_FLAG_DONT_VERIFY|KF_FLAG_NO_ALIAS|KF_FLAG_INIT|KF_FLAG_DEFAULT_PATH|KF_FLAG_NOT_PARENT_RELATIVE;
+    if (flags & KF_FLAG_CREATE)
+        flags &= ~KF_FLAG_DONT_VERIFY;
+#endif
 
     if (folder < 0)
         return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
 
+#ifdef __REACTOS__
+    /* As on Windows: a virtual folder (Computer, Control Panel, Printers, Network...) has no path;
+     * the path of the table (a parsing name below the system folder for some) is not given out */
+    if (CSIDL_Data[folder].category == KF_CATEGORY_VIRTUAL)
+        return E_FAIL;
+#endif
+
+#ifndef __REACTOS__
     if (flags & ~(KF_FLAG_CREATE|KF_FLAG_SIMPLE_IDLIST|KF_FLAG_DONT_UNEXPAND|
         KF_FLAG_DONT_VERIFY|KF_FLAG_NO_ALIAS|KF_FLAG_INIT|KF_FLAG_DEFAULT_PATH|KF_FLAG_NOT_PARENT_RELATIVE))
     {
         FIXME("flags 0x%08lx not supported\n", flags);
         return E_INVALIDARG;
     }
+#endif
 
     if ((flags & (KF_FLAG_DEFAULT_PATH | KF_FLAG_NOT_PARENT_RELATIVE)) == KF_FLAG_NOT_PARENT_RELATIVE)
     {
@@ -4626,11 +4661,22 @@ HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE t
     shgfp_flags = flags & KF_FLAG_DEFAULT_PATH ? SHGFP_TYPE_DEFAULT : SHGFP_TYPE_CURRENT;
 
     hr = SHGetFolderPathAndSubDirW( 0, folder, token, shgfp_flags, NULL, pathW );
+#ifdef __REACTOS__
+    /* A missing folder is not found, as for SHGetFolderPathW */
+    if (hr == HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND ))
+        hr = HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+#endif
     if (FAILED( hr ))
     {
         TRACE("Failed to get folder path, %#lx.\n", hr);
         return hr;
     }
+#ifdef __REACTOS__
+    /* As on Windows: a folder that does not exist on this system (S_FALSE, such as the
+     * 64-bit program folders for 32-bit code) is not found, it gives no empty path */
+    if (hr != S_OK || !pathW[0])
+        return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+#endif
 
     TRACE("Final path is %s, %#lx\n", debugstr_w(pathW), hr);
 
@@ -5665,14 +5711,27 @@ HRESULT WINAPI SHGetKnownFolderIDList(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE
     if (!pidl)
         return E_INVALIDARG;
 
+#ifndef __REACTOS__
     if (flags)
         FIXME("unsupported flags: 0x%08lx\n", flags);
 
     if (token)
         FIXME("user token is not used.\n");
+#endif
 
     *pidl = NULL;
+#ifdef __REACTOS__
+    /* As on Windows: the flags that SHGetKnownFolderPath rejects are invalid for every folder */
+    if ((flags & KF_FLAG_ALIAS_ONLY) ||
+        (flags & (KF_FLAG_DEFAULT_PATH | KF_FLAG_NOT_PARENT_RELATIVE)) == KF_FLAG_NOT_PARENT_RELATIVE)
+        return E_INVALIDARG;
+#endif
+#ifdef __REACTOS__
+    /* As on Windows: with KF_FLAG_NO_ALIAS the desktop and the documents are their file system folders */
+    if (IsEqualIID(rfid, &FOLDERID_Desktop) && !(flags & KF_FLAG_NO_ALIAS))
+#else
     if (IsEqualIID(rfid, &FOLDERID_Desktop))
+#endif
         *pidl = _ILCreateDesktop();
     else if (IsEqualIID(rfid, &FOLDERID_RecycleBinFolder))
         *pidl = _ILCreateBitBucket();
@@ -5684,7 +5743,11 @@ HRESULT WINAPI SHGetKnownFolderIDList(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE
         *pidl = _ILCreateControlPanel();
     else if (IsEqualIID(rfid, &FOLDERID_NetworkFolder))
         *pidl = _ILCreateNetwork();
+#ifdef __REACTOS__
+    else if (IsEqualIID(rfid, &FOLDERID_Documents) && !(flags & KF_FLAG_NO_ALIAS))
+#else
     else if (IsEqualIID(rfid, &FOLDERID_Documents))
+#endif
         *pidl = _ILCreateMyDocuments();
     else
     {
@@ -5696,7 +5759,22 @@ HRESULT WINAPI SHGetKnownFolderIDList(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE
         if (FAILED(hr))
             return hr;
 
+#ifdef __REACTOS__
+        /* As on Windows: a simple ID list is built without touching the folder; a missing folder is not found */
+        if (flags & KF_FLAG_SIMPLE_IDLIST)
+        {
+            *pidl = SHELL32_CreateSimpleIDListFromPath(pathW, FILE_ATTRIBUTE_DIRECTORY);
+            hr = *pidl ? S_OK : E_FAIL;
+        }
+        else
+        {
+            hr = SHILCreateFromPathW(pathW, pidl, &attributes);
+            if (FAILED(hr) && !PathFileExistsW(pathW))
+                hr = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        }
+#else
         hr = SHILCreateFromPathW(pathW, pidl, &attributes);
+#endif
         CoTaskMemFree(pathW);
         return hr;
     }
@@ -5712,6 +5790,10 @@ HRESULT WINAPI SHGetKnownFolderItem(REFKNOWNFOLDERID rfid, KNOWN_FOLDER_FLAG fla
 
     TRACE("%s, 0x%08x, %p, %s, %p\n", debugstr_guid(rfid), flags, hToken, debugstr_guid(riid), ppv);
 
+#ifdef __REACTOS__
+    if (!ppv)
+        return E_POINTER;
+#endif
     hr = SHGetKnownFolderIDList(rfid, flags, hToken, &pidl);
     if (FAILED(hr))
     {
@@ -5773,3 +5855,21 @@ HRESULT SHELL_RegisterShellFolders(void)
         register_system_knownfolders();
     return hr;
 }
+
+#ifdef __REACTOS__
+/*************************************************************************
+ * SHSetKnownFolderPath           [SHELL32.@]
+ */
+HRESULT WINAPI SHSetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE token, PCWSTR path)
+{
+    int folder = csidl_from_id(rfid);
+
+    TRACE("%s, 0x%08lx, %p, %s\n", debugstr_guid(rfid), flags, token, debugstr_w(path));
+
+    if (folder < 0)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    /* Folder redirection is not implemented: SHSetFolderPathW fails */
+    return SHSetFolderPathW(folder, token, 0, path);
+}
+#endif
