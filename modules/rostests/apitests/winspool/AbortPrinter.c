@@ -16,7 +16,7 @@
 
 static const char TestData[] = "ReactOS AbortPrinter test\r\n";
 
-/* TRUE if the job exists, FALSE if the spooler does not know it; any other failure is reported */
+/* TRUE if the job exists, FALSE if the spooler does not know it; any other failure is reported and counts as existing */
 static BOOL
 JobExists(HANDLE hPrinter, DWORD dwJobId)
 {
@@ -27,8 +27,10 @@ JobExists(HANDLE hPrinter, DWORD dwJobId)
         return TRUE;
     if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
         return TRUE;
-    ok(GetLastError() == ERROR_INVALID_PARAMETER, "GetJobW(%lu) failed with error %lu\n", dwJobId, GetLastError());
-    return FALSE;
+    if (GetLastError() == ERROR_INVALID_PARAMETER)
+        return FALSE;
+    ok(FALSE, "GetJobW(%lu) failed with error %lu\n", dwJobId, GetLastError());
+    return TRUE;
 }
 
 /* The spooler may finish deleting an aborted job asynchronously */
@@ -276,28 +278,29 @@ TestDeletedByOtherHandle(PWSTR pwszPrinter)
     ClosePrinter(hPrinter);
 }
 
-/* A direct printer has no spool file: StartDocPrinter and AddJob are refused */
-static BOOL
+/* A direct printer has no spool file: StartDocPrinter and AddJob are refused.
+   1 for a direct printer, 0 for a spooled one, -1 if it cannot be determined. */
+static int
 IsDirectPrinter(PWSTR pwszPrinter)
 {
-    BOOL bDirect = FALSE;
+    int iDirect = -1;
     DWORD cbNeeded = 0;
     HANDLE hPrinter;
     PPRINTER_INFO_2W pInfo2;
 
     if (!OpenPrinterW(pwszPrinter, &hPrinter, NULL))
-        return FALSE;
+        return -1;
 
     GetPrinterW(hPrinter, 2, NULL, 0, &cbNeeded);
     pInfo2 = cbNeeded ? HeapAlloc(GetProcessHeap(), 0, cbNeeded) : NULL;
     if (pInfo2)
     {
         if (GetPrinterW(hPrinter, 2, (PBYTE)pInfo2, cbNeeded, &cbNeeded))
-            bDirect = !!(pInfo2->Attributes & PRINTER_ATTRIBUTE_DIRECT);
+            iDirect = (pInfo2->Attributes & PRINTER_ATTRIBUTE_DIRECT) ? 1 : 0;
         HeapFree(GetProcessHeap(), 0, pInfo2);
     }
     ClosePrinter(hPrinter);
-    return bDirect;
+    return iDirect;
 }
 
 START_TEST(AbortPrinter)
@@ -320,10 +323,16 @@ START_TEST(AbortPrinter)
     }
     trace("Aborting documents of '%S'\n", wszPrinter);
 
-    if (IsDirectPrinter(wszPrinter))
+    switch (IsDirectPrinter(wszPrinter))
     {
-        skip("'%S' is a direct printer\n", wszPrinter);
-        return;
+        case 0:
+            break;
+        case 1:
+            skip("'%S' is a direct printer\n", wszPrinter);
+            return;
+        default:
+            ok(FALSE, "Cannot tell whether '%S' is a direct printer\n", wszPrinter);
+            return;
     }
 
     TestNoDocument(wszPrinter);
