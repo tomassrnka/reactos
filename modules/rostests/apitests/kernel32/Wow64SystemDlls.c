@@ -1,8 +1,15 @@
 /* System DLLs that 32-bit programs import statically must exist in the
  * process's own system directory (SysWOW64 under WoW64). SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "precomp.h"
+#define COBJMACROS
+#include <objbase.h>
+#include <dwrite.h>
 
 typedef BOOL (WINAPI *PROCESSPRNG)(PBYTE, SIZE_T);
+typedef HRESULT (WINAPI *DWRITECREATEFACTORY)(DWRITE_FACTORY_TYPE, REFIID, IUnknown **);
+
+/* IID_IDWriteFactory, b859ee5a-d838-4b5b-a2e8-1adc7d93db48 */
+static const GUID FactoryIid = { 0xb859ee5a, 0xd838, 0x4b5b, { 0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48 } };
 
 static HMODULE LoadSystemDll(PCWSTR Name)
 {
@@ -43,6 +50,15 @@ START_TEST(Wow64SystemDlls)
 
     IsWow64Process(GetCurrentProcess(), &Wow64);
     trace("wow64=%d\n", Wow64);
+#ifdef _M_IX86
+    {
+        /* The PE32 build on a 64-bit system must be the WoW64 run this test is for */
+        SYSTEM_INFO Info;
+        GetNativeSystemInfo(&Info);
+        if (Info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
+            ok(Wow64, "A PE32 process on amd64 is not under WoW64\n");
+    }
+#endif
 
     /* Rust's standard library (Firefox, among others) imports ProcessPrng from it */
     Module = LoadSystemDll(L"bcryptprimitives.dll");
@@ -63,8 +79,29 @@ START_TEST(Wow64SystemDlls)
     Module = LoadSystemDll(L"dwrite.dll");
     if (Module)
     {
-        ok(GetProcAddress(Module, "DWriteCreateFactory") != NULL,
-           "DWriteCreateFactory missing: %lu\n", GetLastError());
+        DWRITECREATEFACTORY CreateFactory = (DWRITECREATEFACTORY)GetProcAddress(Module, "DWriteCreateFactory");
+        IDWriteFactory *Factory = NULL;
+        IDWriteFontCollection *Fonts = NULL;
+        HRESULT hr;
+
+        ok(CreateFactory != NULL, "DWriteCreateFactory missing: %lu\n", GetLastError());
+        if (CreateFactory)
+        {
+            /* A factory and the installed fonts, which font resources are created from */
+            hr = CreateFactory(DWRITE_FACTORY_TYPE_ISOLATED, &FactoryIid, (IUnknown **)&Factory);
+            ok(hr == S_OK && Factory, "DWriteCreateFactory: 0x%08lx\n", hr);
+            if (Factory)
+            {
+                hr = IDWriteFactory_GetSystemFontCollection(Factory, &Fonts, FALSE);
+                ok(hr == S_OK && Fonts, "GetSystemFontCollection: 0x%08lx\n", hr);
+                if (Fonts)
+                {
+                    ok(IDWriteFontCollection_GetFontFamilyCount(Fonts) > 0, "No font families\n");
+                    IDWriteFontCollection_Release(Fonts);
+                }
+                IDWriteFactory_Release(Factory);
+            }
+        }
         FreeLibrary(Module);
     }
 
