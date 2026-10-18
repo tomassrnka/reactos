@@ -149,6 +149,10 @@ add_executable(wow64_system_timer EXCLUDE_FROM_ALL system_timer.c)
 set_module_type(wow64_system_timer win32cui)
 add_importlibs(wow64_system_timer user32 gdi32 msvcrt kernel32)
 
+add_executable(wow64_mouse_points EXCLUDE_FROM_ALL mouse_points.c)
+set_module_type(wow64_mouse_points win32cui)
+add_importlibs(wow64_mouse_points user32 msvcrt kernel32)
+
 if(ARCH STREQUAL "i386")
     add_asm_files(segment_return_asm i386/SegmentReturn.S)
     add_executable(wow64_segment_return EXCLUDE_FROM_ALL segment_return.c ${segment_return_asm})
