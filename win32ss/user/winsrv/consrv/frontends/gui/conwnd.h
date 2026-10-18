@@ -82,6 +82,10 @@ typedef struct _GUI_CONSOLE_DATA
     HANDLE hWakeEvent;          /* The input thread's wake event, set by PM_CREATE_CONSOLE */
     LIST_ENTRY InputThreadLink; /* In the input thread's window list (that thread only) */
     DWORD BlinkRestartTick;     /* When the blink timer was last (re)started (window thread only) */
+    DWORD PaintCost;            /* Milliseconds the last paint took (window thread only) */
+    DWORD PaintEndTick;         /* When it ended (window thread only) */
+    DWORD DeferredSince;        /* When the pending repaint was first deferred, if WorkDeferred (window thread only) */
+    BOOLEAN WorkDeferred;
 
     LONG_PTR WndStyle;
     LONG_PTR WndStyleEx;

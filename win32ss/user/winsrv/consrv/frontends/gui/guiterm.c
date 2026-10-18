@@ -100,11 +100,20 @@ GuiConsoleMoveWindow(PGUI_CONSOLE_DATA GuiData)
  * top-level window with a 100 ms timeout each.
  */
 
-/* Record work for the window thread and wake it. Never calls USER. */
+/* Work that GuiProcessAllWork may defer: it repaints the whole view */
+#define GUI_WORK_DEFERRABLE (GUI_WORK_UPDATE | GUI_WORK_RESIZE)
+
+/*
+ * Record work for the window thread and wake it. Never calls USER.
+ * Other work wakes the thread even if a repaint is pending, because a
+ * pending repaint may be deferred (see GuiProcessAllWork).
+ */
 VOID
 GuiRequestWork(PGUI_CONSOLE_DATA GuiData, LONG Work)
 {
-    if (InterlockedOr(&GuiData->PendingWork, Work) == 0 && GuiData->hWakeEvent)
+    LONG Old = InterlockedOr(&GuiData->PendingWork, Work);
+
+    if ((Old == 0 || (Work & ~Old & ~GUI_WORK_DEFERRABLE)) && GuiData->hWakeEvent)
         NtSetEvent(GuiData->hWakeEvent, NULL);
 }
 
@@ -190,17 +199,78 @@ InvalidateCell(PGUI_CONSOLE_DATA GuiData,
 VOID
 CreateSysMenu(HWND hWnd);
 
-/* Run the recorded work of every console window of this thread */
-static VOID
-GuiProcessAllWork(PLIST_ENTRY WindowList)
+/*
+ * Run the recorded work of every console window of this thread.
+ *
+ * While output streams, every pass repaints the whole view, and copying the
+ * framebuffer to the screen can take tens of milliseconds (about 20 ms per
+ * repaint on i386 in QEMU). Run back to back, the repaints took most of the
+ * processor, and on one processor the programs writing to the console, and
+ * the server threads that serve them, advanced slowly. When a window has
+ * only a repaint of the whole view pending (output scrolled or moved the
+ * view, or the buffer was switched or resized) and its last paint ended less
+ * than three times that paint's duration ago, its work therefore waits:
+ * painting then takes at most about a quarter of the time. The work waits at
+ * most GUI_PAINT_MAX_DEFER ms from when it was first deferred. Repaints of a
+ * few cells (typing, the caret) and any other work (title, display mode,
+ * ...) run at once. Writers are not affected: they only record the work.
+ *
+ * DirtyView is read without the console lock, as a hint: a stale value only
+ * runs a pass early or defers it within the same bound.
+ *
+ * Returns TRUE and the time at which to run again in *Deadline when a
+ * window's work was deferred; its PendingWork stays set, so the writers do
+ * not set the wake event for another repaint.
+ */
+#define GUI_PAINT_MAX_DEFER 100
+
+static BOOLEAN
+GuiProcessAllWork(PLIST_ENTRY WindowList, PDWORD Deadline)
 {
     PLIST_ENTRY Entry;
+    BOOLEAN Deferred = FALSE;
+    DWORD Now = GetTickCount();
 
     for (Entry = WindowList->Flink; Entry != WindowList; Entry = Entry->Flink)
     {
         PGUI_CONSOLE_DATA GuiData = CONTAINING_RECORD(Entry, GUI_CONSOLE_DATA, InputThreadLink);
-        if (GuiData->PendingWork) GuiProcessWork(GuiData, FALSE);
+        LONG Work = GuiData->PendingWork;
+        DWORD Rest = min(3 * GuiData->PaintCost, GUI_PAINT_MAX_DEFER);
+
+        if (!Work)
+        {
+            GuiData->WorkDeferred = FALSE;
+            continue;
+        }
+
+        if (!(Work & ~GUI_WORK_DEFERRABLE) &&
+            ((Work & GUI_WORK_RESIZE) || GuiData->DirtyView) &&
+            (Now - GuiData->PaintEndTick) < Rest)
+        {
+            DWORD Due = GuiData->PaintEndTick + Rest;
+
+            if (!GuiData->WorkDeferred)
+            {
+                GuiData->WorkDeferred = TRUE;
+                GuiData->DeferredSince = Now;
+            }
+            if ((LONG)(Due - (GuiData->DeferredSince + GUI_PAINT_MAX_DEFER)) > 0)
+                Due = GuiData->DeferredSince + GUI_PAINT_MAX_DEFER;
+
+            if ((LONG)(Now - Due) < 0)
+            {
+                if (!Deferred || (LONG)(Due - *Deadline) < 0)
+                    *Deadline = Due;
+                Deferred = TRUE;
+                continue;
+            }
+        }
+
+        GuiData->WorkDeferred = FALSE;
+        GuiProcessWork(GuiData, FALSE);
     }
+
+    return Deferred;
 }
 
 static ULONG NTAPI
@@ -214,6 +284,8 @@ GuiConsoleInputThread(PVOID Param)
     HANDLE hThread = NULL;
     HANDLE hWakeEvent = NULL;
     LIST_ENTRY WindowList;
+    BOOLEAN Deferred = FALSE;
+    DWORD Deadline = 0;
 
     LONG WindowCount = 0;
     MSG msg;
@@ -257,21 +329,31 @@ GuiConsoleInputThread(PVOID Param)
     {
         if (!PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
         {
-            /* Wait for a message or for work recorded by a writer */
-            if (MsgWaitForMultipleObjectsEx(hWakeEvent ? 1 : 0, &hWakeEvent, INFINITE,
-                                            QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_OBJECT_0 &&
-                hWakeEvent)
+            DWORD Timeout = INFINITE, Result;
+
+            /* Deferred work runs at its deadline (see GuiProcessAllWork) */
+            if (Deferred)
             {
-                GuiProcessAllWork(&WindowList);
+                LONG Left = (LONG)(Deadline - GetTickCount());
+                Timeout = (Left > 0) ? (DWORD)Left : 0;
             }
+
+            /* Wait for a message or for work recorded by a writer */
+            Result = MsgWaitForMultipleObjectsEx(hWakeEvent ? 1 : 0, &hWakeEvent, Timeout,
+                                                 QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            if ((Result == WAIT_OBJECT_0 && hWakeEvent) || Result == WAIT_TIMEOUT)
+                Deferred = GuiProcessAllWork(&WindowList, &Deadline);
             continue;
         }
 
         if (msg.message == WM_QUIT) break;
 
         /* Do not let a stream of messages delay the output */
-        if (hWakeEvent && WaitForSingleObject(hWakeEvent, 0) == WAIT_OBJECT_0)
-            GuiProcessAllWork(&WindowList);
+        if ((hWakeEvent && WaitForSingleObject(hWakeEvent, 0) == WAIT_OBJECT_0) ||
+            (Deferred && (LONG)(GetTickCount() - Deadline) >= 0))
+        {
+            Deferred = GuiProcessAllWork(&WindowList, &Deadline);
+        }
 
         switch (msg.message)
         {

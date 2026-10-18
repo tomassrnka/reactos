@@ -1099,10 +1099,12 @@ OnPaint(PGUI_CONSOLE_DATA GuiData)
     RECT rcPaint;
     HRGN rgnSel = NULL;
     BOOL Composed = FALSE;
+    DWORD Start;
 
     /* Do nothing if the window is hidden */
     if (!GuiData->IsWindowVisible) return;
 
+    Start = GetTickCount();
     BeginPaint(GuiData->hWindow, &ps);
     if (ps.hdc != NULL &&
         ps.rcPaint.left < ps.rcPaint.right &&
@@ -1160,6 +1162,10 @@ OnPaint(PGUI_CONSOLE_DATA GuiData)
         // TODO: Move cursor display here!
     }
     EndPaint(GuiData->hWindow, &ps);
+
+    /* For the repaint rate limit (see GuiProcessAllWork in guiterm.c) */
+    GuiData->PaintEndTick = GetTickCount();
+    GuiData->PaintCost = GuiData->PaintEndTick - Start;
 }
 
 static VOID
