@@ -42,8 +42,8 @@ NtUserCreateLocalMemHandle	B	generated	typed arguments; handle policy; measured 
 NtUserCreateWindowEx	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserCreateWindowStation	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserCtxDisplayIOCtl	A	generated	typed arguments; handle policy; measured layouts
-NtUserDbgWin32HeapFail	A	unsupported	no i386 service entry
-NtUserDbgWin32HeapStat	A	unsupported	no i386 service entry
+NtUserDbgWin32HeapFail	A	generated	typed arguments; handle policy; measured layouts; checked (DBG) builds only
+NtUserDbgWin32HeapStat	A	generated	typed arguments; handle policy; measured layouts; checked (DBG) builds only
 NtUserDdeGetQualityOfService	B	generated	typed arguments; handle policy; measured layouts
 NtUserDdeInitialize	A	generated	typed arguments; handle policy; measured layouts
 NtUserDdeSetQualityOfService	B	generated	typed arguments; handle policy; measured layouts
@@ -223,8 +223,8 @@ NtUserSetConsoleReserveKeys	A	generated	typed arguments; handle policy; measured
 NtUserSetCursor	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserSetCursorContents	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetCursorIconData	C+s	manual	see user.c, userextra.c, gdi.c and the bucket files
-NtUserSetDbgTag	A	unsupported	no i386 service entry
-NtUserSetDbgTagCount	A	unsupported	no i386 service entry
+NtUserSetDbgTag	A	unsupported	checked-build-only i386 service; catalogue has no i386 argument count
+NtUserSetDbgTagCount	A	unsupported	checked-build-only i386 service; catalogue has no i386 argument count
 NtUserSetFocus	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetImeHotKey	A	generated	typed arguments; handle policy; measured layouts
 NtUserSetImeInfoEx	C	manual	see user.c, userextra.c, gdi.c and the bucket files
@@ -243,7 +243,7 @@ NtUserSetObjectInformation	B	generated	typed arguments; handle policy; measured 
 NtUserSetParent	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetProcessWindowStation	A	generated	typed arguments; handle policy; measured layouts
 NtUserSetProp	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserSetRipFlags	A	unsupported	no i386 service entry
+NtUserSetRipFlags	A	unsupported	checked-build-only i386 service; catalogue has no i386 argument count
 NtUserSetScrollBarInfo	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetScrollInfo	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetShellWindowEx	A+S	generated	typed arguments; handle policy; measured layouts
