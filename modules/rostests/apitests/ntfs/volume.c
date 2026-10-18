@@ -893,13 +893,15 @@ START_TEST(NtfsVolumeAttributes)
 /*
  * FSCTL_GET_NTFS_VOLUME_DATA: the base block, then whole fields of NTFS_EXTENDED_VOLUME_DATA as far
  * as they fit, ByteCount saying how many bytes of it.  Measured on Server 2008 R2 (8-byte extended
- * block) and Windows 10 (32 bytes: physical sector size, LFS version and trim limits follow).
+ * block) and Windows 10 (32 bytes: physical sector size, LFS version and trim limits follow; no
+ * extended block at all for 100 bytes).  ntfsng follows Server 2008 R2.
  */
 START_TEST(NtfsVolumeData)
 {
     struct { NTFS_VOLUME_DATA_BUFFER Data; NTFS_EXTENDED_VOLUME_DATA Extended; UCHAR Rest[160]; } Buffer;
     ULONG_PTR Information;
     NTSTATUS Status;
+    USHORT Major;
 
     if (!LabelInit("NtfsVolumeData"))
         return;
@@ -913,12 +915,21 @@ START_TEST(NtfsVolumeData)
     ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER), "Base block: %Iu bytes\n", Information);
     ok(Buffer.Extended.ByteCount == 0xcccccccc, "Written past the buffer: 0x%08lx\n", Buffer.Extended.ByteCount);
     ok(Buffer.Data.BytesPerSector >= 512 && Buffer.Data.BytesPerCluster >= Buffer.Data.BytesPerSector &&
-       Buffer.Data.BytesPerFileRecordSegment >= 1024 &&
+       Buffer.Data.BytesPerFileRecordSegment &&
        Buffer.Data.ClustersPerFileRecordSegment == Buffer.Data.BytesPerFileRecordSegment / Buffer.Data.BytesPerCluster,
        "Geometry %lu %lu %lu %lu\n", Buffer.Data.BytesPerSector, Buffer.Data.BytesPerCluster,
        Buffer.Data.BytesPerFileRecordSegment, Buffer.Data.ClustersPerFileRecordSegment);
     ok(Buffer.Data.FreeClusters.QuadPart <= Buffer.Data.TotalClusters.QuadPart, "Free %I64d of %I64d clusters\n",
        Buffer.Data.FreeClusters.QuadPart, Buffer.Data.TotalClusters.QuadPart);
+
+    /* Room for ByteCount only: Server 2008 R2 returns it (as ntfsng does), Windows 10 only the base block. */
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER) + 4, &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "ByteCount only: 0x%08lx\n", Status);
+    ok((Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + 4 && Buffer.Extended.ByteCount == 4) ||
+       (!is_reactos() && Information == sizeof(NTFS_VOLUME_DATA_BUFFER) && Buffer.Extended.ByteCount == 0xcccccccc),
+       "ByteCount only: %Iu bytes, ByteCount 0x%08lx\n", Information, Buffer.Extended.ByteCount);
+    ok(Buffer.Extended.MajorVersion == 0xcccc, "ByteCount only: MajorVersion written: 0x%04x\n", Buffer.Extended.MajorVersion);
 
     /* Room for ByteCount and MajorVersion, not MinorVersion. */
     memset(&Buffer, 0xcc, sizeof(Buffer));
@@ -926,7 +937,8 @@ START_TEST(NtfsVolumeData)
     ok(Status == STATUS_SUCCESS, "Partial extended block: 0x%08lx\n", Status);
     ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + 6, "Partial extended block: %Iu bytes\n", Information);
     ok(Buffer.Extended.ByteCount == 6, "Partial ByteCount %lu\n", Buffer.Extended.ByteCount);
-    ok(Buffer.Extended.MajorVersion == 3, "Partial MajorVersion %u\n", Buffer.Extended.MajorVersion);
+    Major = Buffer.Extended.MajorVersion;
+    ok(Major >= 1 && Major <= 3, "Partial MajorVersion %u\n", Major);
     ok(Buffer.Extended.MinorVersion == 0xcccc, "Partial MinorVersion written: 0x%04x\n", Buffer.Extended.MinorVersion);
 
     memset(&Buffer, 0xcc, sizeof(Buffer));
@@ -934,7 +946,7 @@ START_TEST(NtfsVolumeData)
     ok(Status == STATUS_SUCCESS, "Extended block: 0x%08lx\n", Status);
     ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA), "Extended block: %Iu bytes\n", Information);
     ok(Buffer.Extended.ByteCount == sizeof(NTFS_EXTENDED_VOLUME_DATA), "ByteCount %lu\n", Buffer.Extended.ByteCount);
-    ok(Buffer.Extended.MajorVersion == 3 && Buffer.Extended.MinorVersion <= 1, "Version %u.%u\n",
+    ok(Buffer.Extended.MajorVersion == Major && Buffer.Extended.MinorVersion <= 2, "Version %u.%u\n",
        Buffer.Extended.MajorVersion, Buffer.Extended.MinorVersion);
 
     /* A large buffer: the whole extended block, ByteCount matching the returned length. */

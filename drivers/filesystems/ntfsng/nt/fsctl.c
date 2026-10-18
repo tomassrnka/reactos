@@ -1262,13 +1262,14 @@ static NTSTATUS NgShrinkVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
 static NTSTATUS NgGetNtfsVolumeData(PNG_VCB Vcb, PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     PNTFS_VOLUME_DATA_BUFFER Out = Irp->AssociatedIrp.SystemBuffer;
-    PNTFS_EXTENDED_VOLUME_DATA Ext = (PNTFS_EXTENDED_VOLUME_DATA)(Out + 1);
+    PNTFS_EXTENDED_VOLUME_DATA Ext;
     ULONG Room, ExtLength;
     struct ngc_ntfsdata d;
 
     if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(*Out) || !Out)
         return STATUS_BUFFER_TOO_SMALL;
     Room = Stack->Parameters.FileSystemControl.OutputBufferLength - sizeof(*Out);
+    Ext = (PNTFS_EXTENDED_VOLUME_DATA)(Out + 1);
     NgAcquireCore(Vcb);
     if (!Vcb->Core)
     {
