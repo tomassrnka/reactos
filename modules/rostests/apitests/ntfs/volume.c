@@ -776,3 +776,245 @@ START_TEST(NtfsVolumeLock)
     ok(RestoreLabel(Original, OriginalBytes), "The label of %ls was not restored\n", LabelRoot);
     NtCleanup();
 }
+
+/*
+ * Who may manage a volume through a volume handle (read its allocation bitmap, lock and dismount it).
+ * As NTFS on Windows (Server 2008 R2 and Windows 10, black-box): the opener whose token the volume
+ * device's ACL grants both read and write data access, or who holds SeManageVolumePrivilege enabled,
+ * whatever the handle was opened for; anybody else gets STATUS_ACCESS_DENIED, however the handle was
+ * opened.  The default ACL of a volume device lets a non-administrator open the volume for traverse,
+ * read attributes and read control only; such a handle still queries the volume (NTFS volume data, the
+ * dirty flag) but reads no sectors and manages nothing.
+ */
+/* Whether the volume device's ACL grants Token (a primary or impersonation token) all of Access. */
+static BOOLEAN AclGrants(HANDLE Token, ACCESS_MASK Access)
+{
+    static GENERIC_MAPPING Mapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+    BYTE Sd[4096], PrivBuffer[256];
+    DWORD PrivLength = sizeof(PrivBuffer), Granted = 0;
+    BOOL Status = FALSE;
+    ULONG Length;
+    HANDLE Volume, Imp;
+
+    MapGenericMask(&Access, &Mapping);
+    if (!NT_SUCCESS(OpenVolume(READ_CONTROL, &Volume)))
+        return FALSE;
+    if (NT_SUCCESS(NtQuerySecurityObject(Volume, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                                 DACL_SECURITY_INFORMATION, Sd, sizeof(Sd), &Length)) &&
+        DuplicateToken(Token, SecurityImpersonation, &Imp))
+    {
+        if (!AccessCheck(Sd, Imp, Access, &Mapping, (PPRIVILEGE_SET)PrivBuffer, &PrivLength, &Granted, &Status))
+            Status = FALSE;
+        CloseHandle(Imp);
+    }
+    NtClose(Volume);
+    return Status != FALSE;
+}
+
+static NTSTATUS GetBitmap(HANDLE Handle)
+{
+    IO_STATUS_BLOCK Iosb;
+    LONGLONG Start = 0;
+    ULONGLONG Out[8];
+    NTSTATUS Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_VOLUME_BITMAP, &Start, sizeof(Start), Out, sizeof(Out));
+    /* A small buffer: a volume of more than 384 clusters does not fit. */
+    return Status == STATUS_BUFFER_OVERFLOW ? STATUS_SUCCESS : Status;
+}
+
+/* The volume operations through a handle opened with Access: open, sector read, queries, bitmap, lock. */
+static VOID CheckVolumeHandle(int Line, PCSTR Who, ACCESS_MASK Access, BOOLEAN Manage, BOOLEAN Lockable)
+{
+    IO_STATUS_BLOCK Iosb;
+    NTFS_VOLUME_DATA_BUFFER Data;
+    ULONG Dirty;
+    HANDLE Handle;
+    NTSTATUS Status;
+    PVOID Sector = VirtualAlloc(NULL, 4096, MEM_COMMIT, PAGE_READWRITE);
+
+    Status = OpenVolume(Access, &Handle);
+    ok_(__FILE__, Line)(Status == STATUS_SUCCESS, "%s, access 0x%lx: volume open 0x%08lx\n", Who, Access, Status);
+    if (!NT_SUCCESS(Status))
+    {
+        VirtualFree(Sector, 0, MEM_RELEASE);
+        return;
+    }
+    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &Data, sizeof(Data));
+    ok_(__FILE__, Line)(Status == STATUS_SUCCESS, "%s, access 0x%lx: FSCTL_GET_NTFS_VOLUME_DATA 0x%08lx\n", Who, Access, Status);
+    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_IS_VOLUME_DIRTY, NULL, 0, &Dirty, sizeof(Dirty));
+    ok_(__FILE__, Line)(Status == STATUS_SUCCESS, "%s, access 0x%lx: FSCTL_IS_VOLUME_DIRTY 0x%08lx\n", Who, Access, Status);
+    if (Sector)
+    {
+        Status = VolumeIo(Handle, FALSE, 0, Sector, 4096);
+        ok_(__FILE__, Line)(Status == ((Access & (FILE_READ_DATA | GENERIC_READ)) ? STATUS_SUCCESS : STATUS_ACCESS_DENIED),
+                            "%s, access 0x%lx: sector read 0x%08lx\n", Who, Access, Status);
+    }
+    Status = GetBitmap(Handle);
+    ok_(__FILE__, Line)(Status == (Manage ? STATUS_SUCCESS : STATUS_ACCESS_DENIED),
+                        "%s, access 0x%lx: FSCTL_GET_VOLUME_BITMAP 0x%08lx\n", Who, Access, Status);
+    if (!Manage || Lockable)
+    {
+        /* Refused before it can fail for a volume in use, so the system volume tests the refusal too. */
+        ULONG Try;
+        /* Something else may have the volume open for a moment (an indexer, a virus scanner on Windows). */
+        for (Try = 0; (Status = VolumeFsctl(Handle, FSCTL_LOCK_VOLUME)) == STATUS_ACCESS_DENIED && Manage && Try < 20; Try++)
+            Sleep(250);
+        ok_(__FILE__, Line)(Status == (Manage ? STATUS_SUCCESS : STATUS_ACCESS_DENIED),
+                            "%s, access 0x%lx: FSCTL_LOCK_VOLUME 0x%08lx\n", Who, Access, Status);
+        if (NT_SUCCESS(Status))
+            ok_(__FILE__, Line)(VolumeFsctl(Handle, FSCTL_UNLOCK_VOLUME) == STATUS_SUCCESS, "%s: unlock failed\n", Who);
+        else if (!Manage)
+        {
+            Status = VolumeFsctl(Handle, FSCTL_DISMOUNT_VOLUME);
+            ok_(__FILE__, Line)(Status == STATUS_ACCESS_DENIED, "%s, access 0x%lx: FSCTL_DISMOUNT_VOLUME 0x%08lx\n", Who, Access, Status);
+        }
+    }
+    NtClose(Handle);
+    VirtualFree(Sector, 0, MEM_RELEASE);
+}
+
+static BOOLEAN HasPrivilege(HANDLE Token, PCWSTR Name)
+{
+    UCHAR Buffer[1024];
+    PTOKEN_PRIVILEGES Privileges = (PTOKEN_PRIVILEGES)Buffer;
+    DWORD Len, i;
+    LUID Luid;
+
+    if (!LookupPrivilegeValueW(NULL, Name, &Luid) ||
+        !GetTokenInformation(Token, TokenPrivileges, Buffer, sizeof(Buffer), &Len))
+        return FALSE;
+    for (i = 0; i < Privileges->PrivilegeCount; i++)
+        if (Privileges->Privileges[i].Luid.LowPart == Luid.LowPart && Privileges->Privileges[i].Luid.HighPart == Luid.HighPart)
+            return TRUE;
+    return FALSE;
+}
+
+START_TEST(NtfsVolumeOpen)
+{
+    static const ACCESS_MASK UserAccess[] = { FILE_EXECUTE, FILE_EXECUTE | FILE_READ_ATTRIBUTES, GENERIC_EXECUTE };
+    static const ACCESS_MASK AdminAccess[] = { FILE_EXECUTE, FILE_EXECUTE | FILE_READ_ATTRIBUTES, GENERIC_READ, GENERIC_READ | GENERIC_WRITE };
+    static const ACCESS_MASK DataAccess[] = { GENERIC_READ, FILE_READ_DATA, FILE_WRITE_DATA };
+    BOOLEAN Lockable = FALSE, UserManage, PreHeld = FALSE;
+    HANDLE Handle, Token = NULL, Logon;
+    NTSTATUS Status;
+    ULONG i;
+
+    if (!LabelInit("NtfsVolumeOpen"))
+        return;
+
+    /* A volume that can be locked at all (not the system volume) also has the granted locks checked. */
+    if (NT_SUCCESS(OpenVolume(FILE_READ_DATA | FILE_WRITE_DATA, &Handle)))
+    {
+        for (i = 0; i < 20 && (Status = VolumeFsctl(Handle, FSCTL_LOCK_VOLUME)) == STATUS_ACCESS_DENIED; i++)
+            Sleep(500);
+        if (NT_SUCCESS(Status))
+        {
+            Lockable = TRUE;
+            VolumeFsctl(Handle, FSCTL_UNLOCK_VOLUME);
+        }
+        NtClose(Handle);
+    }
+    {
+        UCHAR Buffer[256];
+        DWORD Len;
+        LPSTR Sid = NULL;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token))
+        {
+            if (GetTokenInformation(Token, TokenUser, Buffer, sizeof(Buffer), &Len))
+                ConvertSidToStringSidA(((PTOKEN_USER)Buffer)->User.Sid, &Sid);
+            CloseHandle(Token);
+            Token = NULL;
+        }
+        trace("Volume %ls, %slockable, running as %s\n", VolumePath, Lockable ? "" : "not ", Sid ? Sid : "?");
+        if (Sid)
+            LocalFree(Sid);
+    }
+
+    /* An administrator manages the volume through any volume handle, a traverse-only one too. */
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &Token) ||
+        !AclGrants(Token, FILE_READ_DATA | FILE_WRITE_DATA))
+        skip("The ACL of %ls does not grant this administrator read and write data access\n", VolumePath);
+    else
+    {
+        for (i = 0; i < RTL_NUMBER_OF(AdminAccess); i++)
+            CheckVolumeHandle(__LINE__, "Administrator", AdminAccess[i], TRUE, Lockable);
+    }
+    if (Token)
+        CloseHandle(Token);
+    Token = NULL;
+
+    if (!NtHaveUser())
+    {
+        NtCleanup();
+        return;
+    }
+    /* The default device ACL (ReactOS's always) gives a non-administrator no data access to the volume. */
+    ok(!is_reactos() || (!AclGrants(UserToken, FILE_READ_DATA) && !AclGrants(UserToken, FILE_WRITE_DATA)),
+       "The ACL of %ls grants the test user data access\n", VolumePath);
+    /* Read or write data access alone is not enough to manage the volume; both are. */
+    UserManage = AclGrants(UserToken, FILE_READ_DATA | FILE_WRITE_DATA);
+    for (i = 0; i < RTL_NUMBER_OF(DataAccess); i++)
+    {
+        BOOLEAN Expect = AclGrants(UserToken, DataAccess[i]);
+        NtBeginUser();
+        Status = OpenVolume(DataAccess[i], &Handle);
+        NtEndUser();
+        ok(Status == (Expect ? STATUS_SUCCESS : STATUS_ACCESS_DENIED), "Non-administrator, access 0x%lx: volume open 0x%08lx\n",
+           DataAccess[i], Status);
+        if (NT_SUCCESS(Status))
+        {
+            NtClose(Handle);
+            NtBeginUser();
+            CheckVolumeHandle(__LINE__, "Non-administrator", DataAccess[i], UserManage, Lockable);
+            NtEndUser();
+        }
+    }
+    for (i = 0; i < RTL_NUMBER_OF(UserAccess); i++)
+    {
+        if (!AclGrants(UserToken, UserAccess[i]))
+            continue;
+        NtBeginUser();
+        CheckVolumeHandle(__LINE__, "Non-administrator", UserAccess[i], UserManage, Lockable);
+        NtEndUser();
+    }
+
+    /* The non-administrator who holds SeManageVolumePrivilege manages the volume once it enables it. */
+    Logon = NtLogonUser();
+    Token = NULL;
+    if (Logon && DuplicateTokenEx(Logon, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenImpersonation, &Token))
+        PreHeld = HasPrivilege(Token, L"SeManageVolumePrivilege");
+    if (Token)
+        CloseHandle(Token);
+    if (Logon)
+        CloseHandle(Logon);
+    Token = Logon = NULL;
+    if (UserManage || !AclGrants(UserToken, FILE_EXECUTE | FILE_READ_ATTRIBUTES))
+        skip("The ACL of %ls decides for the test user without the privilege\n", VolumePath);
+    else if (!PreHeld && !NtUserRight(L"SeManageVolumePrivilege", TRUE))
+        skip("Cannot grant SeManageVolumePrivilege to the test user\n");
+    else
+    {
+        Logon = NtLogonUser();
+        if (!Logon || !DuplicateTokenEx(Logon, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenImpersonation, &Token))
+            ok(FALSE, "No logon of the test user with the privilege\n");
+        else if (!HasPrivilege(Token, L"SeManageVolumePrivilege"))
+            skip("A new logon of the test user has no SeManageVolumePrivilege\n");
+        else
+        {
+            ok(SetThreadToken(NULL, Token), "SetThreadToken failed %lu\n", GetLastError());
+            CheckVolumeHandle(__LINE__, "Privilege held, not enabled", FILE_EXECUTE | FILE_READ_ATTRIBUTES, FALSE, Lockable);
+            RevertToSelf();
+            ok(NtSetPrivilege(Token, L"SeManageVolumePrivilege", TRUE), "Enabling SeManageVolumePrivilege failed\n");
+            ok(SetThreadToken(NULL, Token), "SetThreadToken failed %lu\n", GetLastError());
+            CheckVolumeHandle(__LINE__, "Privilege enabled", FILE_EXECUTE | FILE_READ_ATTRIBUTES, TRUE, Lockable);
+            RevertToSelf();
+        }
+        if (Token)
+            CloseHandle(Token);
+        if (Logon)
+            CloseHandle(Logon);
+        /* Taken back at once: only a grant this test made. */
+        if (!PreHeld && !NtUserRight(L"SeManageVolumePrivilege", FALSE))
+            trace("SeManageVolumePrivilege of the test user was not taken back\n");
+    }
+    NtCleanup();
+}
