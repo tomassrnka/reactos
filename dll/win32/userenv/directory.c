@@ -26,6 +26,9 @@
 
 #include "precomp.h"
 
+#include <ndk/iofuncs.h>
+#include <ndk/obfuncs.h>
+
 #define NDEBUG
 #include <debug.h>
 
@@ -232,102 +235,252 @@ CreateDirectoryPath(LPCWSTR lpPathName,
 }
 
 
+/*
+ * Remove a directory tree without ever following a reparse point. Every entry
+ * is opened relative to the handle of its parent directory, without following
+ * reparse points, and what happens to it is decided on the attributes of that
+ * same handle: a real directory is emptied through it, and every entry is
+ * deleted through its handle. Nothing is reopened by name, so an entry that
+ * is replaced by a junction while the tree is removed cannot redirect the
+ * removal into the target of the junction.
+ */
+#define REMOVE_TREE_MAX_DEPTH 512
+
 static
-BOOL
-RecursiveRemoveDir(LPCWSTR lpPath)
+NTSTATUS
+OpenTreeEntry(
+    _Out_ PHANDLE phEntry,
+    _In_opt_ HANDLE hParent,
+    _In_ PUNICODE_STRING Name,
+    _Out_ PBOOLEAN pbCanList)
 {
-    WCHAR szPath[MAX_PATH];
-    WIN32_FIND_DATAW FindData;
-    HANDLE hFind;
-    BOOL bResult;
-
-    wcscpy(szPath, lpPath);
-    wcscat(szPath, L"\\*.*");
-    DPRINT("Search path: '%S'\n", szPath);
-
-    hFind = FindFirstFileW(szPath,
-                           &FindData);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return FALSE;
-
-    bResult = TRUE;
-    while (TRUE)
+    static const ACCESS_MASK DesiredAccess[] =
     {
-        if (wcscmp(FindData.cFileName, L".") &&
-            wcscmp(FindData.cFileName, L".."))
+        DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | FILE_WRITE_ATTRIBUTES,
+        DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
+        DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+        DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+    };
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+    ULONG i;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               Name,
+                               OBJ_CASE_INSENSITIVE,
+                               hParent,
+                               NULL);
+
+    /*
+     * Listing is needed only to empty a real directory and writing the attributes
+     * only to clear the read-only one: a junction may deny listing, an ACL either.
+     */
+    for (i = 0; i < ARRAYSIZE(DesiredAccess); i++)
+    {
+        Status = NtOpenFile(phEntry,
+                            DesiredAccess[i],
+                            &ObjectAttributes,
+                            &IoStatusBlock,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT |
+                            FILE_SYNCHRONOUS_IO_NONALERT);
+        if (Status != STATUS_ACCESS_DENIED)
+            break;
+    }
+    *pbCanList = NT_SUCCESS(Status) && (DesiredAccess[i] & FILE_LIST_DIRECTORY);
+
+    return Status;
+}
+
+static
+NTSTATUS
+DeleteTreeEntry(
+    _In_ HANDLE hEntry,
+    _In_ BOOLEAN bCanList,
+    _In_ ULONG ulDepth);
+
+static
+NTSTATUS
+DeleteTreeContents(
+    _In_ HANDLE hDirectory,
+    _In_ ULONG ulDepth)
+{
+    const ULONG BufferSize = 16 * 1024;
+    PFILE_DIRECTORY_INFORMATION pBuffer, pInfo;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING Name;
+    HANDLE hEntry;
+    BOOLEAN bCanList, bRestart = TRUE, bDeleted;
+    NTSTATUS Status;
+
+    if (ulDepth > REMOVE_TREE_MAX_DEPTH)
+        return STATUS_NAME_TOO_LONG;
+
+    pBuffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, BufferSize);
+    if (pBuffer == NULL)
+        return STATUS_NO_MEMORY;
+
+    for (;;)
+    {
+        Status = NtQueryDirectoryFile(hDirectory,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      &IoStatusBlock,
+                                      pBuffer,
+                                      BufferSize,
+                                      FileDirectoryInformation,
+                                      FALSE,
+                                      NULL,
+                                      bRestart);
+        if (Status == STATUS_NO_MORE_FILES)
         {
-            wcscpy(szPath, lpPath);
-            wcscat(szPath, L"\\");
-            wcscat(szPath, FindData.cFileName);
-            DPRINT("File name: '%S'\n", szPath);
-
-            if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            {
-                DPRINT("Delete directory: '%S'\n", szPath);
-
-                if (!RecursiveRemoveDir(szPath))
-                {
-                    bResult = FALSE;
-                    break;
-                }
-
-                if (FindData.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
-                {
-                    SetFileAttributesW(szPath,
-                                       FindData.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY);
-                }
-
-                if (!RemoveDirectoryW(szPath))
-                {
-                    bResult = FALSE;
-                    break;
-                }
-            }
-            else
-            {
-                DPRINT("Delete file: '%S'\n", szPath);
-
-                if (FindData.dwFileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM))
-                {
-                    SetFileAttributesW(szPath,
-                                       FILE_ATTRIBUTE_NORMAL);
-                }
-
-                if (!DeleteFileW(szPath))
-                {
-                    bResult = FALSE;
-                    break;
-                }
-            }
-        }
-
-        if (!FindNextFileW(hFind, &FindData))
-        {
-            if (GetLastError() != ERROR_NO_MORE_FILES)
-            {
-                DPRINT1("Error: %lu\n", GetLastError());
-                bResult = FALSE;
-                break;
-            }
-
+            Status = STATUS_SUCCESS;
             break;
         }
+        if (!NT_SUCCESS(Status))
+            break;
+
+        /*
+         * Deleting entries can move the ones still to come before the position of
+         * the enumeration, so start again after a batch that deleted something.
+         * An entry already pending deletion is skipped, so this ends.
+         */
+        bDeleted = FALSE;
+        for (pInfo = pBuffer; ; pInfo = (PVOID)((ULONG_PTR)pInfo + pInfo->NextEntryOffset))
+        {
+            Name.Buffer = pInfo->FileName;
+            Name.Length = Name.MaximumLength = (USHORT)pInfo->FileNameLength;
+
+            if (!(Name.Length == sizeof(WCHAR) && Name.Buffer[0] == L'.') &&
+                !(Name.Length == 2 * sizeof(WCHAR) && Name.Buffer[0] == L'.' && Name.Buffer[1] == L'.'))
+            {
+                DPRINT("Delete: '%wZ'\n", &Name);
+
+                Status = OpenTreeEntry(&hEntry, hDirectory, &Name, &bCanList);
+                if (NT_SUCCESS(Status))
+                {
+                    Status = DeleteTreeEntry(hEntry, bCanList, ulDepth + 1);
+                    NtClose(hEntry);
+                    bDeleted = bDeleted || NT_SUCCESS(Status);
+                }
+                else if (Status == STATUS_DELETE_PENDING)
+                {
+                    Status = STATUS_SUCCESS;
+                }
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("Cannot delete '%wZ': 0x%lx\n", &Name, Status);
+                    goto done;
+                }
+            }
+
+            if (pInfo->NextEntryOffset == 0)
+                break;
+        }
+
+        bRestart = bDeleted;
     }
 
-    FindClose(hFind);
+done:
+    RtlFreeHeap(RtlGetProcessHeap(), 0, pBuffer);
+    return Status;
+}
 
-    return bResult;
+static
+NTSTATUS
+DeleteTreeEntry(
+    _In_ HANDLE hEntry,
+    _In_ BOOLEAN bCanList,
+    _In_ ULONG ulDepth)
+{
+    FILE_BASIC_INFORMATION BasicInfo;
+    FILE_DISPOSITION_INFORMATION Disposition;
+    IO_STATUS_BLOCK IoStatusBlock;
+    ULONG ulAttributes;
+    NTSTATUS Status;
+
+    /* The attributes of this very handle (FAT has no FileAttributeTagInformation) */
+    Status = NtQueryInformationFile(hEntry,
+                                    &IoStatusBlock,
+                                    &BasicInfo,
+                                    sizeof(BasicInfo),
+                                    FileBasicInformation);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    ulAttributes = BasicInfo.FileAttributes;
+
+    /* The tree to remove must be a directory (or a junction) */
+    if (ulDepth == 0 && !(ulAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        return STATUS_NOT_A_DIRECTORY;
+
+    /* Empty a real directory; a junction is removed itself, never the files it points to */
+    if ((ulAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+        !(ulAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+    {
+        if (!bCanList)
+            return STATUS_ACCESS_DENIED;
+
+        Status = DeleteTreeContents(hEntry, ulDepth);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    if (ulAttributes & FILE_ATTRIBUTE_READONLY)
+    {
+        ulAttributes &= ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT);
+        RtlZeroMemory(&BasicInfo, sizeof(BasicInfo));
+        BasicInfo.FileAttributes = ulAttributes ? ulAttributes : FILE_ATTRIBUTE_NORMAL;
+        Status = NtSetInformationFile(hEntry,
+                                      &IoStatusBlock,
+                                      &BasicInfo,
+                                      sizeof(BasicInfo),
+                                      FileBasicInformation);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    Disposition.DeleteFile = TRUE;
+    return NtSetInformationFile(hEntry,
+                                &IoStatusBlock,
+                                &Disposition,
+                                sizeof(Disposition),
+                                FileDispositionInformation);
 }
 
 
 BOOL
 RemoveDirectoryPath(LPCWSTR lpPathName)
 {
-    if (!RecursiveRemoveDir(lpPathName))
-        return FALSE;
+    UNICODE_STRING NtPathName;
+    HANDLE hDirectory;
+    BOOLEAN bCanList;
+    NTSTATUS Status;
 
     DPRINT("Delete directory: '%S'\n", lpPathName);
-    return RemoveDirectoryW(lpPathName);
+
+    if (!RtlDosPathNameToNtPathName_U(lpPathName, &NtPathName, NULL, NULL))
+    {
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return FALSE;
+    }
+
+    Status = OpenTreeEntry(&hDirectory, NULL, &NtPathName, &bCanList);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, NtPathName.Buffer);
+    if (NT_SUCCESS(Status))
+    {
+        Status = DeleteTreeEntry(hDirectory, bCanList, 0);
+        NtClose(hDirectory);
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 /* EOF */
