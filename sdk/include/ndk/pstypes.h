@@ -1007,6 +1007,10 @@ typedef enum _APPCOMPAT_USERFLAGS_HIGHPART
 
 #define THREAD_TLS_INFORMATION_ASSIGNED 0x2
 
+// Flags: change the 32-bit TLS vectors (TEB32) of a WoW64 process, whose
+// entries and lengths are ULONGs; only the WoW64 layer sets it
+#define PROCESS_TLS_WOW64           0x80000000
+
 typedef struct _THREAD_TLS_INFORMATION
 {
     ULONG Flags;        // Out: THREAD_TLS_INFORMATION_ASSIGNED when the entry was used
@@ -1017,7 +1021,7 @@ typedef struct _THREAD_TLS_INFORMATION
 
 typedef struct _PROCESS_TLS_INFORMATION
 {
-    ULONG Flags;            // Must be 0
+    ULONG Flags;            // 0, or PROCESS_TLS_WOW64
     ULONG OperationType;    // PROCESS_TLS_REPLACE_*
     ULONG ThreadDataCount;  // In: entries in ThreadData; out: entries used, or needed with STATUS_INFO_LENGTH_MISMATCH
     ULONG TlsIndex;
