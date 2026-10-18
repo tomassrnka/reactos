@@ -1372,6 +1372,31 @@ done:
     return bRet;
 }
 
+/*
+ * After a display mode switch, from the thread that switched, with the user lock. A thread that does not own the window
+ * under the pointer sets no shape again, and a show from a draw without the user lock does not make the pointer again, so
+ * a pointer that does not move would stay off. It is made again here from the bitmaps of its last shape.
+ */
+VOID
+NTAPI
+GreRemakePointerAfterModeSwitch(
+    _Inout_ PPDEVOBJ ppdev)
+{
+    SURFOBJ *pso;
+
+    if (!UserIsEnteredExclusive())
+        return;
+
+    EngAcquireSemaphore(ppdev->hsemDevLock);
+    if (ppdev->pSurface)
+    {
+        pso = &ppdev->pSurface->SurfObj;
+        if (IntPointerSync(ppdev, pso) == PTR_NONE)
+            IntRebuildMousePointer(ppdev, pso);
+    }
+    EngReleaseSemaphore(ppdev->hsemDevLock);
+}
+
 ULONG
 NTAPI
 GreSetPointerShape(

@@ -50,6 +50,11 @@ NTAPI
 IntFreeMousePointer(
     _Inout_ PPDEVOBJ ppdev);
 
+VOID
+NTAPI
+GreRemakePointerAfterModeSwitch(
+    _Inout_ PPDEVOBJ ppdev);
+
 ULONG
 NTAPI
 IntEngSetPointerShape(

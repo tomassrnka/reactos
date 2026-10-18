@@ -196,6 +196,10 @@ UserRefreshDisplay(IN PPDEVOBJ ppdev)
     ulResult = PDEVOBJ_bSwitchMode(ppdev, ppdev->pdmwDev);
     ASSERT(ulResult);
 
+    /* Make the pointer again for the new framebuffer; this needs the user lock, which this caller may not hold */
+    if (ulResult)
+        GreRemakePointerAfterModeSwitch(ppdev);
+
     /* Restore mouse pointer, no hooks called */
     // pvOldCursor = UserSetCursor(pvOldCursor, TRUE);
     // ASSERT(pvOldCursor == NULL);
@@ -849,6 +853,10 @@ UserChangeDisplaySettings(
         /* Restore mouse pointer, no hooks called */
         pvOldCursor = UserSetCursor(pvOldCursor, TRUE);
         ASSERT(pvOldCursor == NULL);
+
+        /* A queue that does not own the window under the pointer set no shape; make the pointer again for the new mode */
+        if (ulResult)
+            GreRemakePointerAfterModeSwitch(ppdev);
 
         /* Check for success or failure */
         if (!ulResult)
