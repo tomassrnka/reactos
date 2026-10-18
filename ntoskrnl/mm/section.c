@@ -4845,8 +4845,15 @@ MmCanFileBeTruncated(
     }
 
     MmLockSectionSegment(Segment);
-    if ((Segment->SectionCount == 0) ||
-        ((Segment->SectionCount == 1) && (SectionObjectPointer->SharedCacheMap != NULL)))
+    if (Segment->Extending && (NewFileSize != NULL) &&
+        (NewFileSize->QuadPart < ((PFSRTL_COMMON_FCB_HEADER)Segment->FileObject->FsContext)->FileSize.QuadPart))
+    {
+        /* NtExtendSection is between its file size check and the growth of the section: the file must
+           not shrink, neither by the extension's own end of file after a write grew the file further */
+        Ret = FALSE;
+    }
+    else if ((Segment->SectionCount == 0) ||
+             ((Segment->SectionCount == 1) && (SectionObjectPointer->SharedCacheMap != NULL)))
     {
         if (Segment->UserMapCount == 0)
         {
@@ -6558,6 +6565,16 @@ MmExtendSection(
     {
         LARGE_INTEGER FileSize;
 
+        /*
+         * The global lock serializes extenders only: a write through another handle can grow the file
+         * past NewSize before the file system takes the new end of file, and another handle can shrink
+         * it before the section grows. A file system asks MmCanFileBeTruncated before it shrinks a file,
+         * which refuses any size below the current one while the segment is extending.
+         */
+        MmLockSectionSegment(Segment);
+        Segment->Extending = TRUE;
+        MmUnlockSectionSegment(Segment);
+
         Status = FsRtlGetFileSize(Segment->FileObject, &FileSize);
         if (!NT_SUCCESS(Status))
         {
@@ -6576,6 +6593,14 @@ MmExtendSection(
                                           FileEndOfFileInformation,
                                           sizeof(LARGE_INTEGER),
                                           NewSize);
+
+                /* Refused as a shrink: another writer grew the file to NewSize or more meanwhile */
+                if (!NT_SUCCESS(Status) &&
+                    NT_SUCCESS(FsRtlGetFileSize(Segment->FileObject, &FileSize)) &&
+                    FileSize.QuadPart >= NewSize->QuadPart)
+                {
+                    Status = STATUS_SUCCESS;
+                }
                 if (!NT_SUCCESS(Status))
                     Status = STATUS_SECTION_NOT_EXTENDED;
             }
@@ -6583,6 +6608,10 @@ MmExtendSection(
 
         if (NT_SUCCESS(Status))
             MiGrowDataSection(Section, Segment, NewSize);
+
+        MmLockSectionSegment(Segment);
+        Segment->Extending = FALSE;
+        MmUnlockSectionSegment(Segment);
     }
 
     ExReleaseResourceLite(&MmpExtendSectionLock);
