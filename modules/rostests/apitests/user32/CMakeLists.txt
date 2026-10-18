@@ -82,6 +82,7 @@ list(APPEND SOURCE
     SetWindowPlacement.c
     SetWindowPosOwned.c
     ShowWindow.c
+    ShowWindowFrame.c
     SwitchDesktop.c
     SuspendResumeNotification.c
     SwitchToThisWindow.c
