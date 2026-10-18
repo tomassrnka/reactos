@@ -41,6 +41,7 @@ typedef struct _GDIPOINTER /* should stay private to ENG? No, part of PDEVOBJ ak
   ULONG    ulRebuildGen; /* ulModeGen + 1 of the mode in which making the pointer again was given up, 0 if never */
   ULONG    ulRetryGen;   /* ulModeGen + 1 of the mode in which making it again last failed for want of memory, 0 if not */
   ULONGLONG ulRetryTick; /* EngGetTickCount of that failure */
+  BOOL     bShowAfterSwitch; /* the pointer was shown when the last mode switch began; GreRemakePointerAfterModeSwitch shows it */
   FLONG    flags;
 
   /* Public pointer information */

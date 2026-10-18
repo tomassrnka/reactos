@@ -740,12 +740,8 @@ EngSetPointerShape(
         }
         else
         {
-            /* Color bitmap must have the same format as the dest surface */
-            if (psoColor->iBitmapFormat != pso->iBitmapFormat)
-            {
-                DPRINT1("Screen surface and cursor color bitmap format don't match!.\n");
-                goto failure;
-            }
+            /* The copy below converts a colour bitmap of another format (a cursor made before a switch to another
+               depth) with the XLATEOBJ from its palette to the screen's */
 
             /* Create a bitmap to copy the color bitmap to */
             hbmColor = EngCreateBitmap(psoColor->sizlBitmap,
@@ -848,6 +844,7 @@ EngSetPointerShape(
     pgp->hbmSrcColor = NULL;
     pgp->ulRebuildGen = 0;
     pgp->ulRetryGen = 0;
+    pgp->bShowAfterSwitch = FALSE;
 
     /* See if we are being asked to hide the pointer. */
     if (psoMask == NULL && psoColor == NULL)
@@ -1322,12 +1319,12 @@ IntSetPointerShapeFromSurfaces(
  * The bitmaps of the pointer are in the format of the screen of their time, and a mode switch to another format leaves them
  * unusable. When the switching thread owns the window under the pointer the shape is set again anyway; when it does not,
  * no one does, and the pointer would stay off. The bitmaps the last shape was made from are still the cursor's, so the
- * shape is made again from them. A set that cannot work (a colour bitmap that has the old format, a bitmap that is gone)
- * fails the same way for every caller and is not repeated in this mode; one that fails for want of memory is tried again
- * at a show at least PTR_REBUILD_RETRY_MS later. The device lock and the user lock are held: destroying a cursor takes the
- * user lock, so the bitmaps are neither destroyed nor changed in owner while they are locked here (a deleted object that is
- * still locked is freed by the last unlock, which asserts that the owner is the unlocking process), and a cursor destroyed
- * before is seen at the lock and ends the attempt.
+ * shape is made again from them; a colour bitmap of the old format is converted. A set that cannot work (a bitmap that is
+ * gone, an alpha shape without its colour bitmap) fails the same way for every caller and is not repeated in this mode;
+ * one that fails for want of memory is tried again at a show at least PTR_REBUILD_RETRY_MS later. The device lock and the
+ * user lock are held: destroying a cursor takes the user lock, so the bitmaps are neither destroyed nor changed in owner
+ * while they are locked here (a deleted object that is still locked is freed by the last unlock, which asserts that the
+ * owner is the unlocking process), and a cursor destroyed before is seen at the lock and ends the attempt.
  */
 static
 BOOL
@@ -1362,8 +1359,8 @@ IntRebuildMousePointer(
     bRet = IntSetPointerShapeFromSurfaces(ppdev, psurf, psurfMask, psurfColor, hbmMask, hbmColor, xHot, yHot,
                                           ppdev->ptlPointer.x, ppdev->ptlPointer.y, fl) != SPS_ERROR;
 
-    /* EngSetPointerShape refuses a colour bitmap of another format every time; its other failures are allocations */
-    if (!bRet && !(psurfColor && !(fl & SPS_ALPHA) && psurfColor->SurfObj.iBitmapFormat != pso->iBitmapFormat))
+    /* EngSetPointerShape converts a colour bitmap of another format; its failures are allocations */
+    if (!bRet)
         bFinal = FALSE;
 
 done:
@@ -1388,26 +1385,40 @@ done:
 }
 
 /*
- * After a display mode switch, from the thread that switched, with the user lock. A thread that does not own the window
- * under the pointer sets no shape again, and a show from a draw without the user lock does not make the pointer again, so
- * a pointer that does not move would stay off. It is made again here from the bitmaps of its last shape.
+ * After a display mode switch, from the thread that switched. A thread that does not own the window under the pointer
+ * sets no shape again, and nothing else shows a pointer that does not move until a draw goes across it, so the pointer
+ * that was on the screen when the switch began (bShowAfterSwitch, set by PDEVOBJ_bDynamicModeChange) is shown on the new
+ * framebuffer here: after a switch that keeps the format from its bitmaps (a new size), after one to another format made
+ * again from the bitmaps of its last shape, which needs the user lock (see IntRebuildMousePointer).
  */
 VOID
 NTAPI
 GreRemakePointerAfterModeSwitch(
     _Inout_ PPDEVOBJ ppdev)
 {
+    GDIPOINTER *pgp = &ppdev->Pointer;
     SURFOBJ *pso;
 
-    if (!UserIsEnteredExclusive())
-        return;
-
     EngAcquireSemaphore(ppdev->hsemDevLock);
-    if (ppdev->pSurface)
+    /* Not for a pointer that a draw has off now or that was moved off the screen (-1) since */
+    if (ppdev->pSurface && pgp->bShowAfterSwitch && ppdev->SafetyRemoveLevel == 0 && pgp->Exclude.right != -1)
     {
         pso = &ppdev->pSurface->SurfObj;
-        if (IntPointerSync(ppdev, pso) == PTR_NONE)
-            IntRebuildMousePointer(ppdev, pso);
+        pgp->bShowAfterSwitch = FALSE;
+
+        /* A draw of another thread may have synced the pointer since the switch, without showing it */
+        switch (IntPointerSync(ppdev, pso))
+        {
+            case PTR_RESET:
+            case PTR_CURRENT:
+                if (ppdev->flFlags & PDEV_SOFTWARE_POINTER)
+                    IntShowMousePointer(ppdev, pso);
+                break;
+            case PTR_NONE:
+                if (UserIsEnteredExclusive())
+                    IntRebuildMousePointer(ppdev, pso);
+                break;
+        }
     }
     EngReleaseSemaphore(ppdev->hsemDevLock);
 }

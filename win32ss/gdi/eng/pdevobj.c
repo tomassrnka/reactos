@@ -659,6 +659,7 @@ PDEVOBJ_bDynamicModeChange(
 
     /* The pointer's saved pixels and bitmaps belong to the framebuffer that goes now */
     ppdev->ulModeGen++;
+    ppdev->Pointer.bShowAfterSwitch = ppdev->Pointer.Enabled;
 
     /* Exchange driver functions */
     temp.pfn = ppdev->pfn;
