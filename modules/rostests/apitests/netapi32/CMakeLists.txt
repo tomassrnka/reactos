@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     DsRoleGetPrimaryDomainInformation.c
     NetGetAadJoinInformation.c
+    NetServerGetInfo.c
     NetShare.c
     testlist.c)
 
