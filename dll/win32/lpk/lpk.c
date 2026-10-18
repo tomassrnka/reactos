@@ -511,9 +511,11 @@ LpkGetCharacterPlacement(
     SIZE size;
     UINT nSet, i, nCapacity;
     INT cGlyphs = 0;
-    BOOL bReorder;
+    BOOL bReorder, bShaped, bUseShaped;
     LPCWSTR pszShown;
     GCP_RESULTSW results;
+    WORD *pCharGlyphs;
+    INT cxShaped = 0;
 
     UNREFERENCED_PARAMETER(dwUnused);
 
@@ -533,55 +535,73 @@ LpkGetCharacterPlacement(
     /* The string in the order it is shown, when BIDI_Reorder wrote it */
     pszShown = (bReorder && lpResults->lpOutString) ? lpResults->lpOutString : lpString;
 
-    /* Without shaped glyphs (Latin text, or shaping failed) there is one glyph per character, as on Windows;
-     * shaped glyphs are cut to the room the caller has */
-    if (lpGlyphs && cGlyphs > 0)
-        lpResults->nGlyphs = min((UINT)cGlyphs, nCapacity);
-    else
-        lpResults->nGlyphs = nSet;
+    /* Did shaping change the glyphs (count, forms or order) against those of the characters as shown? Latin text, and
+     * text that could not be shaped, keeps one glyph per character */
+    pCharGlyphs = HeapAlloc(GetProcessHeap(), 0, max(nSet, 1) * sizeof(WORD));
+    if (!pCharGlyphs)
+    {
+        HeapFree(GetProcessHeap(), 0, lpGlyphs);
+        return 0;
+    }
+    if (GetGlyphIndicesW(hdc, pszShown, nSet, pCharGlyphs, 0) == GDI_ERROR)
+        ZeroMemory(pCharGlyphs, max(nSet, 1) * sizeof(WORD));
+    bShaped = lpGlyphs && cGlyphs > 0 &&
+              ((UINT)cGlyphs != nSet || memcmp(lpGlyphs, pCharGlyphs, nSet * sizeof(WORD)) != 0);
+    bUseShaped = bShaped && (dwFlags & GCP_GLYPHSHAPE);
+
+    /* As on Windows, shaped glyphs that do not fit in the caller's room fail the call, with GCP_GLYPHSHAPE or not */
+    if (bShaped && (UINT)cGlyphs > nCapacity)
+    {
+        HeapFree(GetProcessHeap(), 0, pCharGlyphs);
+        HeapFree(GetProcessHeap(), 0, lpGlyphs);
+        return 0;
+    }
+
+    lpResults->nGlyphs = bUseShaped ? (UINT)cGlyphs : nSet;
 
     if (lpResults->lpGlyphs)
     {
-        if (lpGlyphs && cGlyphs > 0)
-            RtlCopyMemory(lpResults->lpGlyphs, lpGlyphs, lpResults->nGlyphs * sizeof(*lpGlyphs));
+        if (bUseShaped)
+            RtlCopyMemory(lpResults->lpGlyphs, lpGlyphs, cGlyphs * sizeof(*lpGlyphs));
         else
-            GetGlyphIndicesW(hdc, pszShown, nSet, lpResults->lpGlyphs, 0);
+            RtlCopyMemory(lpResults->lpGlyphs, pCharGlyphs, nSet * sizeof(*pCharGlyphs));
     }
 
-    if (lpResults->lpDx)
+    if (bUseShaped)
     {
         int c;
 
-        /* If glyph shaping was requested */
-        if (dwFlags & GCP_GLYPHSHAPE)
+        /* Shaped glyphs are placed by their own advances; the width is their sum, so the two agree */
+        for (i = 0; i < (UINT)cGlyphs; i++)
         {
-            if (lpResults->lpGlyphs)
-            {
-                for (i = 0; i < lpResults->nGlyphs; i++)
-                {
-                    if (GetCharWidthI(hdc, 0, 1, (WORD *)&lpResults->lpGlyphs[i], &c))
-                        lpResults->lpDx[i] = c;
-                }
-            }
+            c = 0;
+            GetCharWidthI(hdc, 0, 1, &lpGlyphs[i], &c);
+            if (lpResults->lpDx)
+                lpResults->lpDx[i] = c;
+            cxShaped += c;
         }
+    }
+    else if (lpResults->lpDx)
+    {
+        int c;
 
-        else
+        /* The widths of the characters in the order they are shown, with the pair kerning between neighbours, also
+         * with GCP_GLYPHSHAPE (Windows: Arial "AV" 83 and 93 with either) */
+        ZeroMemory(&results, sizeof(results));
+        results.lStructSize = sizeof(results);
+        results.lpDx = lpResults->lpDx;
+        results.nGlyphs = nSet;
+        if (!GetCharacterPlacementW(hdc, pszShown, nSet, 0, &results, dwFlags & ~GCP_REORDER))
         {
-            /* The widths of the characters in the order they are shown, with the pair kerning between neighbours */
-            ZeroMemory(&results, sizeof(results));
-            results.lStructSize = sizeof(results);
-            results.lpDx = lpResults->lpDx;
-            results.nGlyphs = nSet;
-            if (!GetCharacterPlacementW(hdc, pszShown, nSet, 0, &results, dwFlags & ~GCP_REORDER))
+            for (i = 0; i < nSet; i++)
             {
-                for (i = 0; i < nSet; i++)
-                {
-                    if (GetCharWidth32W(hdc, pszShown[i], pszShown[i], &c))
-                        lpResults->lpDx[i] = c;
-                }
+                if (GetCharWidth32W(hdc, pszShown[i], pszShown[i], &c))
+                    lpResults->lpDx[i] = c;
             }
         }
     }
+
+    HeapFree(GetProcessHeap(), 0, pCharGlyphs);
 
     if (lpResults->lpCaretPos)
     {
@@ -598,7 +618,7 @@ LpkGetCharacterPlacement(
             }
             ScriptStringFree(&ssa);
         }
-        else
+        else if (nSet)
         {
             lpResults->lpCaretPos[0] = 0;
             for (i = 1; i < nSet; i++)
@@ -609,13 +629,23 @@ LpkGetCharacterPlacement(
         }
     }
 
-    /* The width has the pair kerning, as without GCP_REORDER, between the neighbours on the screen when the whole
-     * string was reordered */
-    ZeroMemory(&results, sizeof(results));
-    results.lStructSize = sizeof(results);
-    results.nGlyphs = uCount;
-    ret = GetCharacterPlacementW(hdc, nSet == (UINT)uCount ? pszShown : lpString, uCount, nMaxExtent, &results,
-                                 dwFlags & ~GCP_REORDER);
+    if (bUseShaped)
+    {
+        /* The sum of the widths of the shaped glyphs */
+        if (!GetTextExtentPoint32W(hdc, lpString, uCount, &size))
+            size.cy = 0;
+        ret = MAKELONG(cxShaped, size.cy);
+    }
+    else
+    {
+        /* The width has the pair kerning, as without GCP_REORDER, between the neighbours on the screen when the whole
+         * string was reordered */
+        ZeroMemory(&results, sizeof(results));
+        results.lStructSize = sizeof(results);
+        results.nGlyphs = uCount;
+        ret = GetCharacterPlacementW(hdc, nSet == (UINT)uCount ? pszShown : lpString, uCount, nMaxExtent, &results,
+                                     dwFlags & ~GCP_REORDER);
+    }
 
     HeapFree(GetProcessHeap(), 0, lpGlyphs);
 

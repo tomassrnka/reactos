@@ -47,8 +47,9 @@ static void TestDraw(HDC hdc, PCWSTR pszFace, INT nHeight, PCWSTR pszPair, DWORD
  * the caret positions add the widths up, and the returned width is their sum. Without results it is the plain extent. */
 static void TestPlacement(HDC hdc, PCWSTR pszFace, INT nHeight, PCWSTR psz, BOOL bKerned)
 {
-    /* With GCP_REORDER only the widths are checked: ReactOS has the caret positions from Uniscribe there */
-    static const DWORD s_flags[] = { 0, GCP_USEKERNING, GCP_REORDER };
+    /* With GCP_REORDER only the widths are checked: ReactOS has the caret positions from Uniscribe there. Windows kerns
+     * Latin text with GCP_GLYPHSHAPE too. */
+    static const DWORD s_flags[] = { 0, GCP_USEKERNING, GCP_REORDER, GCP_REORDER | GCP_GLYPHSHAPE };
     INT cch = lstrlenW(psz), cxPlain = Extent(hdc, psz, cch), cxLast = Extent(hdc, psz + cch - 1, 1);
     INT aDx[16], aCaret[16], i, cxSum;
     WCHAR szOut[16];
@@ -100,6 +101,74 @@ static void TestPlacement(HDC hdc, PCWSTR pszFace, INT nHeight, PCWSTR psz, BOOL
         ok(GetCharacterPlacementW(hdc, psz, cch, 0, &results, s_flags[iflag]) == ret,
            "%ls %d \"%ls\" %lu: GCP without arrays differs\n", pszFace, nHeight, psz, s_flags[iflag]);
     }
+}
+
+/* Windows shapes Thai sara am into two glyphs: with room for them GCP_GLYPHSHAPE gives three glyphs for two characters
+ * and widths that add up to the returned width, and the call fails without the room (Windows 10 and Server 2008 R2) */
+static void TestShapedRoom(HDC hdc)
+{
+    static const WCHAR s_szThai[] = { 0x0E01, 0x0E33, 0 };
+    LOGFONTW lf = { 0 };
+    WCHAR szFace[LF_FACESIZE] = L"", szOut[16], aGlyphs[16];
+    INT aDx[16], i, cxSum;
+    GCP_RESULTSW results;
+    HFONT hfont, hOld;
+    DWORD ret;
+
+    lf.lfHeight = -24;
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfOutPrecision = OUT_TT_ONLY_PRECIS;
+    StringCchCopyW(lf.lfFaceName, ARRAYSIZE(lf.lfFaceName), L"Tahoma");
+    hfont = CreateFontIndirectW(&lf);
+    hOld = SelectObject(hdc, hfont);
+    GetTextFaceW(hdc, ARRAYSIZE(szFace), szFace);
+    if (lstrcmpiW(szFace, L"Tahoma") != 0)
+    {
+        skip("Tahoma is not installed\n");
+        goto done;
+    }
+
+    memset(&results, 0, sizeof(results));
+    results.lStructSize = sizeof(results);
+    results.lpOutString = szOut;
+    results.lpDx = aDx;
+    results.lpGlyphs = aGlyphs;
+    results.nGlyphs = ARRAYSIZE(aGlyphs);
+    for (i = 0; i < ARRAYSIZE(aDx); i++)
+        aDx[i] = -7;
+    ret = GetCharacterPlacementW(hdc, s_szThai, 2, 0, &results, GCP_REORDER | GCP_GLYPHSHAPE);
+    ok(ret != 0, "Thai: GCP failed\n");
+    ok(results.nGlyphs == 2 || results.nGlyphs == 3, "Thai: nGlyphs %u\n", results.nGlyphs);
+    for (i = 0, cxSum = 0; i < (INT)results.nGlyphs && i < ARRAYSIZE(aDx); i++)
+        cxSum += aDx[i];
+    ok(LOWORD(ret) == cxSum, "Thai: GCP width %u, its widths add up to %d\n", LOWORD(ret), cxSum);
+
+    /* Windows has 3; a shaper that keeps sara am whole has 2, and then the room cannot be checked */
+    if (results.nGlyphs <= 2)
+    {
+        skip("Thai: sara am is not shaped into two glyphs\n");
+    }
+    else
+    {
+        DWORD iflag, s_flags[] = { GCP_REORDER | GCP_GLYPHSHAPE, GCP_REORDER };
+
+        for (iflag = 0; iflag < ARRAYSIZE(s_flags); iflag++)
+        {
+            memset(&results, 0, sizeof(results));
+            results.lStructSize = sizeof(results);
+            results.lpOutString = szOut;
+            results.lpDx = aDx;
+            results.lpGlyphs = aGlyphs;
+            results.nGlyphs = 2;
+            ret = GetCharacterPlacementW(hdc, s_szThai, 2, 0, &results, s_flags[iflag]);
+            ok(ret == 0, "Thai %lu: GCP with room for 2 glyphs returned %lu\n", s_flags[iflag], ret);
+        }
+    }
+
+done:
+    SelectObject(hdc, hOld);
+    DeleteObject(hfont);
 }
 
 static void TestFont(HDC hdc, DWORD *pvBits, DWORD *pdwRef, PCWSTR pszFace, INT nHeight)
@@ -186,6 +255,7 @@ START_TEST(GetTextExtentKerning)
     for (iFace = 0; iFace < ARRAYSIZE(g_faces); iFace++)
         for (iHeight = 0; iHeight < ARRAYSIZE(g_heights); iHeight++)
             TestFont(hdc, pvBits, pdwRef, g_faces[iFace], g_heights[iHeight]);
+    TestShapedRoom(hdc);
 
     SelectObject(hdc, hbmOld);
 done:

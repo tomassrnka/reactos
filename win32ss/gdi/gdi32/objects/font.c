@@ -537,7 +537,8 @@ GetCharacterPlacementA(
     }
     if(lpResults->lpOutString)
     {
-        resultsW.lpOutString = HeapAlloc(GetProcessHeap(), 0, sizeof(WCHAR)*uCountW);
+        /* Zeroed: fewer characters than uCountW may be written (nGlyphs, a failure) */
+        resultsW.lpOutString = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WCHAR)*uCountW);
         if (resultsW.lpOutString == NULL)
         {
             HeapFree(GetProcessHeap(), 0, lpStringW);
@@ -599,18 +600,25 @@ GetCharacterPlacementW(
     if (dwFlags&(~GCP_REORDER)) DPRINT("flags 0x%08lx ignored\n", dwFlags);
     if (lpResults->lpClass) DPRINT("classes not implemented\n");
 
+    if (uCount <= 0)
+    {
+        lpResults->nGlyphs = 0;
+        return 0;
+    }
+
+    /* LPK gets the caller's nGlyphs, the room for shaped glyphs, which can be more than the characters */
+    if (dwFlags & GCP_REORDER)
+    {
+        if (LoadLPK(LPK_GCP))
+            return LpkGetCharacterPlacement(hdc, lpString, uCount, nMaxExtent, lpResults, dwFlags, 0);
+    }
+
     nSet = (UINT)uCount;
     if (nSet > lpResults->nGlyphs)
         nSet = lpResults->nGlyphs;
 
     /* return number of initialized fields */
     lpResults->nGlyphs = nSet;
-
-    if (dwFlags & GCP_REORDER)
-    {
-        if (LoadLPK(LPK_GCP))
-            return LpkGetCharacterPlacement(hdc, lpString, uCount, nMaxExtent, lpResults, dwFlags, 0);
-    }
 
     /* Treat the case where no special handling was requested in a fastpath way */
     /* copy will do if the GCP_REORDER flag is not set */
