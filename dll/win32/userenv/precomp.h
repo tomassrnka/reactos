@@ -16,7 +16,6 @@
 #include <ndk/rtlfuncs.h>
 #include <userenv.h>
 #include <strsafe.h>
-#include <pathcch.h>
 
 #include "internal.h"
 

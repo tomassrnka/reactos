@@ -1118,7 +1118,7 @@ static INT_PTR CALLBACK AboutDlgProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
                 SendDlgItemMessageW(hWnd, IDC_ABOUT_ICON, STM_SETICON, (WPARAM)info->hIcon, 0);
 
                 GetWindowTextW(hWnd, szAppTitleTemplate, ARRAY_SIZE(szAppTitleTemplate));
-                _swprintf(szAppTitle, szAppTitleTemplate, info->szApp);
+                swprintf(szAppTitle, szAppTitleTemplate, info->szApp);
                 SetWindowTextW(hWnd, szAppTitle);
 
                 SetDlgItemTextW(hWnd, IDC_ABOUT_APPNAME, info->szApp);
@@ -1193,13 +1193,13 @@ static INT_PTR CALLBACK AboutDlgProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM
                             uDecimals = (UCHAR)((UINT)(dTotalPhys * 100) - uIntegral * 100);
 
                             // Display the RAM size with 2 decimals
-                            _swprintf(szBuf, L"%u%s%02u %s", uIntegral, szDecimalSeparator, uDecimals, szUnits);
+                            swprintf(szBuf, L"%u%s%02u %s", uIntegral, szDecimalSeparator, uDecimals, szUnits);
                         }
                     }
                     else
                     {
                         // We're dealing with MBs, don't show any decimals
-                        _swprintf(szBuf, L"%u MB", (UINT)MemStat.ullTotalPhys / 1024 / 1024);
+                        swprintf(szBuf, L"%u MB", (UINT)MemStat.ullTotalPhys / 1024 / 1024);
                     }
 
                     SetDlgItemTextW(hWnd, IDC_ABOUT_PHYSMEM, szBuf);
