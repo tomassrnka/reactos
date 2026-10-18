@@ -141,6 +141,7 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
     PRTL_PROCESS_MODULE_INFORMATION ModulePtr = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG UsedSize = sizeof(ULONG);
+    ULONG ModuleCount = 0;
     ANSI_STRING AnsiString;
     PCHAR p;
 
@@ -208,6 +209,10 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
         UNICODE_STRING Unicode;
         WCHAR  Buffer[256 * sizeof(WCHAR)];
 
+        /* The list is read from a process that can damage it: bound the walk */
+        if (++ModuleCount > 0x4000)
+            return STATUS_UNSUCCESSFUL;
+
         /* read the current module */
         Status = NtReadVirtualMemory(ProcessHandle,
                                      CONTAINING_RECORD(pleCurEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks),
@@ -222,9 +227,10 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
             return Status;
         }
 
-        /* Import module name from remote Process user space. */
-        Unicode.Length = lmModule.FullDllName.Length;
-        Unicode.MaximumLength = lmModule.FullDllName.MaximumLength;
+        /* Import module name from remote Process user space. The process
+           controls the length, so it must not exceed the buffer. */
+        Unicode.Length = min(lmModule.FullDllName.Length, sizeof(Buffer)) & ~(USHORT)1;
+        Unicode.MaximumLength = sizeof(Buffer);
         Unicode.Buffer = Buffer;
 
         Status = NtReadVirtualMemory(ProcessHandle,
