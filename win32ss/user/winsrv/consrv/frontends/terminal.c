@@ -512,6 +512,7 @@ ConioWriteConsole(PFRONTEND FrontEnd,
     PCHAR_INFO Ptr;
     SMALL_RECT UpdateRect;
     SHORT CursorStartX, CursorStartY;
+    COORD OldCursor;
     UINT ScrolledLines;
     BOOLEAN bFullwidth;
     BOOLEAN bCJK = Console->IsCJK;
@@ -520,6 +521,7 @@ ConioWriteConsole(PFRONTEND FrontEnd,
     if (Length == 0)
         return STATUS_SUCCESS;
 
+    OldCursor = Buff->CursorPosition;
     CursorStartX = Buff->CursorPosition.X;
     CursorStartY = Buff->CursorPosition.Y;
     UpdateRect.Left = Buff->ScreenBufferSize.X;
@@ -834,6 +836,19 @@ ConioWriteConsole(PFRONTEND FrontEnd,
                                     ScrolledLines,
                                     Buffer,
                                     Length);
+    }
+    else if ((Buff->CursorPosition.X != OldCursor.X || Buff->CursorPosition.Y != OldCursor.Y) &&
+             (PCONSOLE_SCREEN_BUFFER)Buff == Console->ActiveBuffer)
+    {
+        /*
+         * Nothing was drawn, but the cursor moved (a backspace onto the
+         * leading half of a full-width character): show it at its new
+         * position and bring it into the view, as SetConsoleCursorPosition does.
+         */
+        FrontEnd->Vtbl->SetScreenInfo(FrontEnd,
+                                      (PCONSOLE_SCREEN_BUFFER)Buff,
+                                      OldCursor.X,
+                                      OldCursor.Y);
     }
 
     return STATUS_SUCCESS;
