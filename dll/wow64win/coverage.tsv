@@ -3,26 +3,26 @@ NtUserActivateKeyboardLayout	A+S	generated	typed arguments; handle policy; measu
 NtUserAlterWindowStyle	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserAssociateInputContext	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserAttachThreadInput	A	generated	typed arguments; handle policy; measured layouts
-NtUserBeginPaint	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserBeginPaint	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserBitBltSysBmp	A	generated	typed arguments; handle policy; measured layouts
 NtUserBlockInput	A	generated	typed arguments; handle policy; measured layouts
-NtUserBuildHimcList	C	unsupported	requires private structure or selector translation
-NtUserBuildHwndList	C	manual	see user.c, userextra.c and gdi.c
+NtUserBuildHimcList	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserBuildHwndList	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserBuildNameList	B	generated	typed arguments; handle policy; measured layouts
-NtUserBuildPropList	C	unsupported	requires private structure or selector translation
+NtUserBuildPropList	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserCalcMenuBar	B+S	generated	typed arguments; handle policy; measured layouts
-NtUserCallHwnd	D+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallHwndLock	D+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallHwndOpt	D+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallHwndParam	D+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallHwndParamLock	D	manual	see user.c, userextra.c and gdi.c
-NtUserCallMsgFilter	C+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallNextHookEx	A+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallNoParam	D+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallOneParam	D+S	manual	see user.c, userextra.c and gdi.c
-NtUserCallTwoParam	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserCallHwnd	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallHwndLock	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallHwndOpt	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallHwndParam	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallHwndParamLock	D	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallMsgFilter	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallNextHookEx	A+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallNoParam	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallOneParam	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCallTwoParam	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserChangeClipboardChain	A	generated	typed arguments; handle policy; measured layouts
-NtUserChangeDisplaySettings	C+S	unsupported	requires private structure or selector translation
+NtUserChangeDisplaySettings	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserCheckImeHotKey	A	generated	typed arguments; handle policy; measured layouts
 NtUserCheckMenuItem	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserChildWindowFromPointEx	A	generated	typed arguments; handle policy; measured layouts
@@ -30,17 +30,17 @@ NtUserClipCursor	B	generated	typed arguments; handle policy; measured layouts
 NtUserCloseClipboard	A	generated	typed arguments; handle policy; measured layouts
 NtUserCloseDesktop	A	generated	typed arguments; handle policy; measured layouts
 NtUserCloseWindowStation	A	generated	typed arguments; handle policy; measured layouts
-NtUserConsoleControl	D	unsupported	requires private structure or selector translation
+NtUserConsoleControl	D	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserConvertMemHandle	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserCopyAcceleratorTable	B	generated	typed arguments; handle policy; measured layouts
 NtUserCountClipboardFormats	A	generated	typed arguments; handle policy; measured layouts
 NtUserCreateAcceleratorTable	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserCreateCaret	A	generated	typed arguments; handle policy; measured layouts
-NtUserCreateDesktop	C+S	unsupported	requires private structure or selector translation
+NtUserCreateDesktop	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserCreateInputContext	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserCreateLocalMemHandle	B	generated	typed arguments; handle policy; measured layouts
-NtUserCreateWindowEx	C+S	manual	see user.c, userextra.c and gdi.c
-NtUserCreateWindowStation	C	unsupported	requires private structure or selector translation
+NtUserCreateWindowEx	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserCreateWindowStation	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserCtxDisplayIOCtl	A	generated	typed arguments; handle policy; measured layouts
 NtUserDbgWin32HeapFail	A	unsupported	no i386 service entry
 NtUserDbgWin32HeapStat	A	unsupported	no i386 service entry
@@ -48,7 +48,7 @@ NtUserDdeGetQualityOfService	B	generated	typed arguments; handle policy; measure
 NtUserDdeInitialize	A	generated	typed arguments; handle policy; measured layouts
 NtUserDdeSetQualityOfService	B	generated	typed arguments; handle policy; measured layouts
 NtUserDeferWindowPos	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserDefSetText	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserDefSetText	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserDeleteMenu	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserDestroyAcceleratorTable	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserDestroyCursor	A+S	generated	typed arguments; handle policy; measured layouts
@@ -56,12 +56,12 @@ NtUserDestroyInputContext	A+S	generated	typed arguments; handle policy; measured
 NtUserDestroyMenu	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserDestroyWindow	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserDisableThreadIme	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserDispatchMessage	C	manual	see user.c, userextra.c and gdi.c
-NtUserDragDetect	C	manual	see user.c, userextra.c and gdi.c
+NtUserDispatchMessage	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserDragDetect	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserDragObject	A	generated	typed arguments; handle policy; measured layouts
 NtUserDrawAnimatedRects	B	generated	typed arguments; handle policy; measured layouts
 NtUserDrawCaption	B	generated	typed arguments; handle policy; measured layouts
-NtUserDrawCaptionTemp	C	unsupported	requires private structure or selector translation
+NtUserDrawCaptionTemp	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserDrawIconEx	A	generated	typed arguments; handle policy; measured layouts
 NtUserDrawMenuBarTemp	B	generated	typed arguments; handle policy; measured layouts
 NtUserEmptyClipboard	A+S	generated	typed arguments; handle policy; measured layouts
@@ -69,93 +69,93 @@ NtUserEnableMenuItem	A+S	generated	typed arguments; handle policy; measured layo
 NtUserEnableScrollBar	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserEndDeferWindowPosEx	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserEndMenu	A	generated	typed arguments; handle policy; measured layouts
-NtUserEndPaint	C+S	manual	see user.c, userextra.c and gdi.c
-NtUserEnumDisplayDevices	C	unsupported	requires private structure or selector translation
-NtUserEnumDisplayMonitors	C	manual	see user.c, userextra.c and gdi.c
-NtUserEnumDisplaySettings	C	unsupported	requires private structure or selector translation
+NtUserEndPaint	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserEnumDisplayDevices	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserEnumDisplayMonitors	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserEnumDisplaySettings	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserEvent	A	generated	typed arguments; handle policy; measured layouts
 NtUserExcludeUpdateRgn	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserFillWindow	A	generated	typed arguments; handle policy; measured layouts
-NtUserFindExistingCursorIcon	C	manual	see user.c, userextra.c and gdi.c
-NtUserFindWindowEx	C	manual	see user.c, userextra.c and gdi.c
-NtUserFlashWindowEx	C	manual	see user.c, userextra.c and gdi.c
+NtUserFindExistingCursorIcon	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserFindWindowEx	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserFlashWindowEx	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetAltTabInfo	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetAncestor	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetAppImeLevel	A	unsupported	aggregate/slot mismatch
 NtUserGetAsyncKeyState	A	generated	typed arguments; handle policy; measured layouts
-NtUserGetAtomName	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetAtomName	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetCaretBlinkTime	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserGetCaretPos	B	generated	typed arguments; handle policy; measured layouts
-NtUserGetClassInfo	C+S	manual	see user.c, userextra.c and gdi.c
-NtUserGetClassName	C	manual	see user.c, userextra.c and gdi.c
-NtUserGetClipboardData	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetClassInfo	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetClassName	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetClipboardData	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetClipboardFormatName	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetClipboardOwner	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetClipboardSequenceNumber	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetClipboardViewer	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetClipCursor	B	generated	typed arguments; handle policy; measured layouts
-NtUserGetComboBoxInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetComboBoxInfo	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetControlBrush	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetControlColor	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetCPD	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserGetCursorFrameInfo	B	generated	typed arguments; handle policy; measured layouts
-NtUserGetCursorInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetCursorInfo	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetDC	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserGetDCEx	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserGetDoubleClickTime	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetForegroundWindow	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetGuiResources	A	generated	typed arguments; handle policy; measured layouts
-NtUserGetGUIThreadInfo	C	manual	see user.c, userextra.c and gdi.c
-NtUserGetIconInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetGUIThreadInfo	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetIconInfo	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetIconSize	B	generated	typed arguments; handle policy; measured layouts
-NtUserGetImeHotKey	C	unsupported	requires private structure or selector translation
-NtUserGetImeInfoEx	C	unsupported	requires private structure or selector translation
+NtUserGetImeHotKey	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetImeInfoEx	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetInternalWindowPos	B	generated	typed arguments; handle policy; measured layouts
-NtUserGetKeyboardLayoutList	C	manual	see user.c, userextra.c and gdi.c
-NtUserGetKeyboardLayoutName	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetKeyboardLayoutList	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetKeyboardLayoutName	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetKeyboardState	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetKeyNameText	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetKeyState	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetLayeredWindowAttributes	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetListBoxInfo	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserGetMenuBarInfo	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetMenuBarInfo	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetMenuIndex	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetMenuItemRect	B	generated	typed arguments; handle policy; measured layouts
-NtUserGetMessage	C	manual	see user.c, userextra.c and gdi.c
+NtUserGetMessage	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetMonitorInfo	B	generated	typed arguments; handle policy; measured layouts
-NtUserGetMouseMovePointsEx	C	unsupported	requires private structure or selector translation
-NtUserGetObjectInformation	D	manual	see user.c, userextra.c and gdi.c
+NtUserGetMouseMovePointsEx	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetObjectInformation	D	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetOpenClipboardWindow	A	generated	typed arguments; handle policy; measured layouts
 NtUserGetPriorityClipboardFormat	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetProcessWindowStation	A	generated	typed arguments; handle policy; measured layouts
-NtUserGetRawInputBuffer	C	unsupported	requires private structure or selector translation
-NtUserGetRawInputData	D	unsupported	requires private structure or selector translation
-NtUserGetRawInputDeviceInfo	D	unsupported	requires private structure or selector translation
-NtUserGetRawInputDeviceList	C	unsupported	requires private structure or selector translation
-NtUserGetRegisteredRawInputDevices	C	unsupported	requires private structure or selector translation
+NtUserGetRawInputBuffer	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetRawInputData	D	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetRawInputDeviceInfo	D	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetRawInputDeviceList	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserGetRegisteredRawInputDevices	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetScrollBarInfo	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetSystemMenu	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserGetThreadDesktop	A	generated	typed arguments; handle policy; measured layouts
-NtUserGetThreadState	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserGetThreadState	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserGetTitleBarInfo	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetUpdateRect	B	generated	typed arguments; handle policy; measured layouts
 NtUserGetUpdateRgn	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserGetWindowDC	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserGetWindowPlacement	B	generated	typed arguments; handle policy; measured layouts
-NtUserGetWOWClass	C+S	unsupported	requires private structure or selector translation
+NtUserGetWOWClass	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserHardErrorControl	A	generated	typed arguments; handle policy; measured layouts
 NtUserHideCaret	A	generated	typed arguments; handle policy; measured layouts
 NtUserHiliteMenuItem	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserImpersonateDdeClientWindow	A	generated	typed arguments; handle policy; measured layouts
 NtUserInitialize	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserInitializeClientPfnArrays	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserInitializeClientPfnArrays	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserInitTask	A	generated	typed arguments; handle policy; measured layouts
 NtUserInternalGetWindowText	B	generated	typed arguments; handle policy; measured layouts
 NtUserInvalidateRect	B	generated	typed arguments; handle policy; measured layouts
 NtUserInvalidateRgn	A	generated	typed arguments; handle policy; measured layouts
 NtUserIsClipboardFormatAvailable	A	generated	typed arguments; handle policy; measured layouts
 NtUserKillTimer	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserLoadKeyboardLayoutEx	C+S	unsupported	requires private structure or selector translation
+NtUserLoadKeyboardLayoutEx	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserLockWindowStation	A	generated	typed arguments; handle policy; measured layouts
 NtUserLockWindowUpdate	A	generated	typed arguments; handle policy; measured layouts
 NtUserLockWorkStation	A	generated	typed arguments; handle policy; measured layouts
@@ -163,10 +163,10 @@ NtUserMNDragLeave	A	generated	typed arguments; handle policy; measured layouts
 NtUserMNDragOver	A	generated	typed arguments; handle policy; measured layouts
 NtUserMapVirtualKeyEx	A	generated	typed arguments; handle policy; measured layouts
 NtUserMenuItemFromPoint	A+s	generated	typed arguments; handle policy; measured layouts
-NtUserMessageCall	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserMessageCall	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserMinMaximize	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserModifyUserStartupInfoFlags	A	generated	typed arguments; handle policy; measured layouts
-NtUserMonitorFromPoint	C	manual	see user.c, userextra.c and gdi.c
+NtUserMonitorFromPoint	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserMonitorFromRect	B	generated	typed arguments; handle policy; measured layouts
 NtUserMonitorFromWindow	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserMoveWindow	A+S	generated	typed arguments; handle policy; measured layouts
@@ -174,63 +174,63 @@ NtUserNotifyIMEStatus	A+s	generated	typed arguments; handle policy; measured lay
 NtUserNotifyProcessCreate	A	generated	typed arguments; handle policy; measured layouts
 NtUserNotifyWinEvent	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserOpenClipboard	A+s	generated	typed arguments; handle policy; measured layouts
-NtUserOpenDesktop	C	unsupported	requires private structure or selector translation
+NtUserOpenDesktop	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserOpenInputDesktop	A	generated	typed arguments; handle policy; measured layouts
-NtUserOpenWindowStation	C	unsupported	requires private structure or selector translation
+NtUserOpenWindowStation	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserPaintDesktop	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserPaintMenuBar	A+s	generated	typed arguments; handle policy; measured layouts
-NtUserPeekMessage	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserPeekMessage	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserPostMessage	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserPostThreadMessage	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserPrintWindow	A+s	generated	typed arguments; handle policy; measured layouts
-NtUserProcessConnect	C+S	manual	see user.c, userextra.c and gdi.c
-NtUserQueryInformationThread	D	unsupported	requires private structure or selector translation
-NtUserQueryInputContext	B+s	manual	see user.c, userextra.c and gdi.c
+NtUserProcessConnect	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserQueryInformationThread	D	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserQueryInputContext	B+s	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserQuerySendMessage	A	generated	typed arguments; handle policy; measured layouts
-NtUserQueryWindow	D+s	manual	see user.c, userextra.c and gdi.c
+NtUserQueryWindow	D+s	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserRealChildWindowFromPoint	A+s	generated	typed arguments; handle policy; measured layouts
-NtUserRealInternalGetMessage	C	unsupported	requires private structure or selector translation
+NtUserRealInternalGetMessage	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserRealWaitMessageEx	A	generated	typed arguments; handle policy; measured layouts
 NtUserRedrawWindow	B+S	generated	typed arguments; handle policy; measured layouts
-NtUserRegisterClassExWOW	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserRegisterClassExWOW	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserRegisterHotKey	A+s	generated	typed arguments; handle policy; measured layouts
-NtUserRegisterRawInputDevices	C	unsupported	requires private structure or selector translation
+NtUserRegisterRawInputDevices	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserRegisterTasklist	A	generated	typed arguments; handle policy; measured layouts
 NtUserRegisterUserApiHook	C+S	unsupported	requires private structure or selector translation
-NtUserRegisterWindowMessage	C	manual	see user.c, userextra.c and gdi.c
+NtUserRegisterWindowMessage	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserRemoteConnect	A	generated	typed arguments; handle policy; measured layouts
 NtUserRemoteRedrawRectangle	A	generated	typed arguments; handle policy; measured layouts
 NtUserRemoteRedrawScreen	A	generated	typed arguments; handle policy; measured layouts
 NtUserRemoteStopScreenUpdates	A	generated	typed arguments; handle policy; measured layouts
 NtUserRemoveMenu	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserRemoveProp	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserResolveDesktop	C	unsupported	requires private structure or selector translation
+NtUserResolveDesktop	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserResolveDesktopForWOW	A	generated	typed arguments; handle policy; measured layouts
 NtUserSBGetParms	B+s	generated	typed arguments; handle policy; measured layouts
 NtUserScrollDC	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserScrollWindowEx	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserSelectPalette	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserSendInput	C	unsupported	requires private structure or selector translation
+NtUserSendInput	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetActiveWindow	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetAppImeLevel	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetCapture	A+s	generated	typed arguments; handle policy; measured layouts
-NtUserSetClassLong	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserSetClassLong	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetClassLongPtr	D+S	unsupported	no i386 service entry
 NtUserSetClassWord	A	generated	typed arguments; handle policy; measured layouts
-NtUserSetClipboardData	B+S	manual	see user.c, userextra.c and gdi.c
+NtUserSetClipboardData	B+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetClipboardViewer	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserSetConsoleReserveKeys	A	generated	typed arguments; handle policy; measured layouts
 NtUserSetCursor	A+s	generated	typed arguments; handle policy; measured layouts
-NtUserSetCursorContents	C	unsupported	requires private structure or selector translation
-NtUserSetCursorIconData	C+s	manual	see user.c, userextra.c and gdi.c
+NtUserSetCursorContents	C	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserSetCursorIconData	C+s	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetDbgTag	A	unsupported	no i386 service entry
 NtUserSetDbgTagCount	A	unsupported	no i386 service entry
 NtUserSetFocus	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetImeHotKey	A	generated	typed arguments; handle policy; measured layouts
-NtUserSetImeInfoEx	C	unsupported	requires private structure or selector translation
+NtUserSetImeInfoEx	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetImeOwnerWindow	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetInformationProcess	A	generated	typed arguments; handle policy; measured layouts
-NtUserSetInformationThread	D+S	unsupported	requires private structure or selector translation
+NtUserSetInformationThread	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetInternalWindowPos	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetKeyboardState	B	generated	typed arguments; handle policy; measured layouts
 NtUserSetLayeredWindowAttributes	A+S	generated	typed arguments; handle policy; measured layouts
@@ -257,38 +257,38 @@ NtUserSetThreadState	A	generated	typed arguments; handle policy; measured layout
 NtUserSetTimer	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserSetWinEventHook	C+S	unsupported	requires private structure or selector translation
 NtUserSetWindowFNID	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserSetWindowLong	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserSetWindowLong	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetWindowLongPtr	D+S	unsupported	no i386 service entry
 NtUserSetWindowPlacement	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetWindowPos	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetWindowRgn	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetWindowStationUser	B	generated	typed arguments; handle policy; measured layouts
-NtUserSetWindowWord	D+S	unsupported	requires private structure or selector translation
+NtUserSetWindowWord	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserSetWindowsHookAW	A+S	unsupported	HOOKPROC callback translation not implemented
-NtUserSetWindowsHookEx	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserSetWindowsHookEx	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserShowCaret	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserShowScrollBar	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserShowWindow	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserShowWindowAsync	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSoundSentry	A	generated	typed arguments; handle policy; measured layouts
 NtUserSwitchDesktop	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserSystemParametersInfo	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserSystemParametersInfo	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserTestForInteractiveUser	A	generated	typed arguments; handle policy; measured layouts
-NtUserThunkedMenuInfo	C+S	manual	see user.c, userextra.c and gdi.c
-NtUserThunkedMenuItemInfo	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserThunkedMenuInfo	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserThunkedMenuItemInfo	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserToUnicodeEx	B	generated	typed arguments; handle policy; measured layouts
-NtUserTrackMouseEvent	C+s	manual	see user.c, userextra.c and gdi.c
+NtUserTrackMouseEvent	C+s	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserTrackPopupMenuEx	B+S	generated	typed arguments; handle policy; measured layouts
-NtUserTranslateAccelerator	C+s	manual	see user.c, userextra.c and gdi.c
-NtUserTranslateMessage	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserTranslateAccelerator	C+s	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtUserTranslateMessage	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserUnhookWinEvent	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserUnhookWindowsHookEx	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserUnloadKeyboardLayout	A	generated	typed arguments; handle policy; measured layouts
 NtUserUnlockWindowStation	A	generated	typed arguments; handle policy; measured layouts
-NtUserUnregisterClass	C+S	manual	see user.c, userextra.c and gdi.c
+NtUserUnregisterClass	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserUnregisterHotKey	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserUnregisterUserApiHook	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserUpdateInputContext	D+S	manual	see user.c, userextra.c and gdi.c
+NtUserUpdateInputContext	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserUpdateInstance	A	generated	typed arguments; handle policy; measured layouts
 NtUserUpdateLayeredWindow	B+S	generated	typed arguments; handle policy; measured layouts
 NtUserUpdatePerUserSystemParameters	A+S	generated	typed arguments; handle policy; measured layouts
@@ -301,7 +301,7 @@ NtUserWaitForInputIdle	A+S	generated	typed arguments; handle policy; measured la
 NtUserWaitForMsgAndEvent	A	generated	typed arguments; handle policy; measured layouts
 NtUserWaitMessage	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserWin32PoolAllocationStats	A	generated	typed arguments; handle policy; measured layouts
-NtUserWindowFromPoint	A+s	manual	see user.c, userextra.c and gdi.c
+NtUserWindowFromPoint	A+s	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtUserYieldTask	A	generated	typed arguments; handle policy; measured layouts
 NtGdiAbortDoc	A	generated	typed arguments; handle policy; measured layouts
 NtGdiAbortPath	A	generated	typed arguments; handle policy; measured layouts
@@ -326,17 +326,17 @@ NtGdiColorCorrectPalette	B	generated	typed arguments; handle policy; measured la
 NtGdiCombineRgn	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCombineTransform	B	generated	typed arguments; handle policy; measured layouts
 NtGdiComputeXformCoefficients	A	generated	typed arguments; handle policy; measured layouts
-NtGdiConsoleTextOut	C	unsupported	requires private structure or selector translation
+NtGdiConsoleTextOut	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiConvertMetafileRect	B	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateBitmap	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateClientObj	A+S	generated	typed arguments; handle policy; measured layouts
-NtGdiCreateColorSpace	C+S	unsupported	requires private structure or selector translation
+NtGdiCreateColorSpace	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiCreateColorTransform	B	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateCompatibleBitmap	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateCompatibleDC	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateDIBBrush	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateDIBitmapInternal	B+S	generated	typed arguments; handle policy; measured layouts
-NtGdiCreateDIBSection	C+S	manual	see user.c, userextra.c and gdi.c
+NtGdiCreateDIBSection	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiCreateEllipticRgn	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateHalftonePalette	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateHatchBrushInternal	A+S	generated	typed arguments; handle policy; measured layouts
@@ -421,7 +421,7 @@ NtGdiDvpUpdateVideoPort	C	unsupported	requires private structure or selector tra
 NtGdiDvpWaitForVideoPortSync	C	unsupported	requires private structure or selector translation
 NtGdiDvpAcquireNotification	C	unsupported	requires private structure or selector translation
 NtGdiDvpReleaseNotification	A	unsupported	opaque video-port/event handle semantics
-NtGdiDxgGenericThunk	D	unsupported	requires private structure or selector translation
+NtGdiDxgGenericThunk	D	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDeleteClientObj	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiDeleteColorSpace	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiDeleteColorTransform	A	generated	typed arguments; handle policy; measured layouts
@@ -429,7 +429,7 @@ NtGdiDeleteObjectApp	A+S	generated	typed arguments; handle policy; measured layo
 NtGdiDescribePixelFormat	B	generated	typed arguments; handle policy; measured layouts
 NtGdiGetPerBandInfo	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDoBanding	B	generated	typed arguments; handle policy; measured layouts
-NtGdiDoPalette	D+S	manual	see user.c, userextra.c and gdi.c
+NtGdiDoPalette	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiDrawEscape	B	generated	typed arguments; handle policy; measured layouts
 NtGdiEllipse	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiEnableEudc	A	generated	typed arguments; handle policy; measured layouts
@@ -439,15 +439,15 @@ NtGdiEndPath	A	generated	typed arguments; handle policy; measured layouts
 NtGdiEnumFontChunk	B	generated	typed arguments; handle policy; measured layouts
 NtGdiEnumFontClose	A	generated	typed arguments; handle policy; measured layouts
 NtGdiEnumFontOpen	B	generated	typed arguments; handle policy; measured layouts
-NtGdiEnumObjects	D	unsupported	requires private structure or selector translation
+NtGdiEnumObjects	D	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiEqualRgn	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiEudcLoadUnloadLink	B	generated	typed arguments; handle policy; measured layouts
 NtGdiExcludeClipRect	A+S	generated	typed arguments; handle policy; measured layouts
-NtGdiExtCreatePen	D+S	manual	see user.c, userextra.c and gdi.c
+NtGdiExtCreatePen	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiExtCreateRegion	B+S	generated	typed arguments; handle policy; measured layouts
-NtGdiExtEscape	D	unsupported	requires private structure or selector translation
+NtGdiExtEscape	D	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiExtFloodFill	A+S	generated	typed arguments; handle policy; measured layouts
-NtGdiExtGetObjectW	D	manual	see user.c, userextra.c and gdi.c
+NtGdiExtGetObjectW	D	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiExtSelectClipRgn	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiExtTextOutW	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiFillPath	A+S	generated	typed arguments; handle policy; measured layouts
@@ -463,7 +463,7 @@ NtGdiGetBitmapBits	B	generated	typed arguments; handle policy; measured layouts
 NtGdiGetBitmapDimension	B	generated	typed arguments; handle policy; measured layouts
 NtGdiGetBoundsRect	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiGetCharABCWidthsW	B+S	generated	typed arguments; handle policy; measured layouts
-NtGdiGetCharacterPlacementW	C	unsupported	requires private structure or selector translation
+NtGdiGetCharacterPlacementW	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiGetCharSet	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiGetCharWidthW	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiGetCharWidthInfo	B	generated	typed arguments; handle policy; measured layouts
@@ -491,7 +491,7 @@ NtGdiGetMonitorID	B	generated	typed arguments; handle policy; measured layouts
 NtGdiGetNearestColor	A	generated	typed arguments; handle policy; measured layouts
 NtGdiGetNearestPaletteIndex	A	generated	typed arguments; handle policy; measured layouts
 NtGdiGetObjectBitmapHandle	B	generated	typed arguments; handle policy; measured layouts
-NtGdiGetOutlineTextMetricsInternalW	C+S	manual	see user.c, userextra.c and gdi.c
+NtGdiGetOutlineTextMetricsInternalW	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiGetPath	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiGetPixel	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiGetRandomRgn	A+S	generated	typed arguments; handle policy; measured layouts
@@ -535,14 +535,14 @@ NtGdiMonoBitmap	A	generated	typed arguments; handle policy; measured layouts
 NtGdiMoveTo	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiOffsetClipRgn	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiOffsetRgn	A+S	generated	typed arguments; handle policy; measured layouts
-NtGdiOpenDCW	C+S	manual	see user.c, userextra.c and gdi.c
+NtGdiOpenDCW	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiPatBlt	A+S	generated	typed arguments; handle policy; measured layouts
-NtGdiPolyPatBlt	C+S	unsupported	requires private structure or selector translation
+NtGdiPolyPatBlt	C+S	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiPathToRegion	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiPlgBlt	B	generated	typed arguments; handle policy; measured layouts
 NtGdiPolyDraw	B+S	generated	typed arguments; handle policy; measured layouts
-NtGdiPolyPolyDraw	D+S	manual	see user.c, userextra.c and gdi.c
-NtGdiPolyTextOutW	C	unsupported	requires private structure or selector translation
+NtGdiPolyPolyDraw	D+S	manual	see user.c, userextra.c, gdi.c and the bucket files
+NtGdiPolyTextOutW	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiPtInRegion	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiPtVisible	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiQueryFonts	B	generated	typed arguments; handle policy; measured layouts
@@ -592,7 +592,7 @@ NtGdiSetTextJustification	A+S	generated	typed arguments; handle policy; measured
 NtGdiSetupPublicCFONT	A	generated	typed arguments; handle policy; measured layouts
 NtGdiSetVirtualResolution	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiSetSizeDevice	A+S	generated	typed arguments; handle policy; measured layouts
-NtGdiStartDoc	C	manual	see user.c, userextra.c and gdi.c
+NtGdiStartDoc	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiStartPage	A	generated	typed arguments; handle policy; measured layouts
 NtGdiStretchBlt	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiStretchDIBitsInternal	B+S	generated	typed arguments; handle policy; measured layouts
@@ -739,6 +739,6 @@ NtGdiDdDDISharedPrimaryUnLockNotification	B	generated	typed arguments; handle po
 NtGdiDdDDISignalSynchronizationObject	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDdDDIWaitForSynchronizationObject	B	generated	typed arguments; handle policy; measured layouts
 NtGdiGetFontFileData	B	generated	typed arguments; handle policy; measured layouts
-NtGdiGetFontFileInfo	C	unsupported	requires private structure or selector translation
+NtGdiGetFontFileInfo	C	manual	see user.c, userextra.c, gdi.c and the bucket files
 NtGdiGetFontRealizationInfo	B	generated	typed arguments; handle policy; measured layouts
 NtGdiMakeObjectUnXferable	A	unsupported	no i386 service entry

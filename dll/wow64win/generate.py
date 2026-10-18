@@ -44,6 +44,19 @@ NtUserSetWindowsHookEx NtUserCallNextHookEx
 NtUserEnumDisplayMonitors
 NtGdiCreateDIBSection NtGdiDoPalette NtGdiExtCreatePen NtGdiExtGetObjectW
 NtGdiPolyPolyDraw NtGdiStartDoc NtGdiGetOutlineTextMetricsInternalW'''.split())
+# Hand-coded in the per-bucket files (gdi_extra.c, user_input.c, user_ime.c, user_display.c, user_misc.c),
+# reached through the dispatcher's default: chain after generated.inc; listed so a catalogue reclassification
+# cannot emit a typed pass-through that shadows them.
+manual |= set('''NtGdiConsoleTextOut NtGdiCreateColorSpace NtGdiDxgGenericThunk NtGdiEnumObjects NtGdiExtEscape
+NtGdiGetCharacterPlacementW NtGdiGetFontFileInfo NtGdiPolyPatBlt NtGdiPolyTextOutW
+NtUserBuildHimcList NtUserBuildPropList NtUserChangeDisplaySettings NtUserConsoleControl
+NtUserCreateDesktop NtUserCreateWindowStation NtUserDrawCaptionTemp NtUserEnumDisplayDevices
+NtUserEnumDisplaySettings NtUserGetImeHotKey NtUserGetImeInfoEx NtUserGetMouseMovePointsEx
+NtUserGetRawInputBuffer NtUserGetRawInputData NtUserGetRawInputDeviceInfo
+NtUserGetRawInputDeviceList NtUserGetRegisteredRawInputDevices NtUserGetWOWClass
+NtUserLoadKeyboardLayoutEx NtUserOpenDesktop NtUserOpenWindowStation NtUserQueryInformationThread
+NtUserRealInternalGetMessage NtUserRegisterRawInputDevices NtUserResolveDesktop NtUserSendInput
+NtUserSetCursorContents NtUserSetImeInfoEx NtUserSetInformationThread NtUserSetWindowWord'''.split())
 _svc32 = (ROOT/'win32ss/w32ksvc32.h').read_text()
 # DBG-gated services exist only in checked builds; the W64_ enum omits them in
 # Release, so they must not reach generated.inc/failure.inc. (one line constraint)
@@ -72,7 +85,7 @@ for row in rows:
         failure.append(f'case W64_{name}: return (ULONG_PTR)(LONG_PTR)Status;')
     if name not in services or row['i386_args'] == '-': reason = 'no i386 service entry'
     elif name in manual:
-        coverage.append(f'{name}\t{cls}\tmanual\tsee user.c, userextra.c and gdi.c')
+        coverage.append(f'{name}\t{cls}\tmanual\tsee user.c, userextra.c, gdi.c and the bucket files')
         continue
     elif name in deferred: reason = deferred[name]
     elif cls[0] not in 'AB': reason = 'requires private structure or selector translation'
