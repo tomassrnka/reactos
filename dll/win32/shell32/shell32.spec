@@ -149,8 +149,8 @@
 155 stdcall ILFree(ptr)
 156 stdcall -noname ILGlobalFree(ptr)
 157 stdcall ILCreateFromPath(ptr) ILCreateFromPathAW
-158 stdcall -noname PathGetExtension(wstr long long) SHPathGetExtensionW
-159 stdcall -noname PathIsDirectory(wstr) PathIsDirectoryW
+158 stdcall -noname PathGetExtension(wstr long long) PathGetExtensionAW
+159 stdcall -noname PathIsDirectory(wstr) PathIsDirectoryAW
 160 stdcall -noname SHNetConnectionDialog(ptr wstr long)
 161 stdcall SHRunControlPanel(wstr ptr)
 162 stdcall SHSimpleIDListFromPath(ptr) SHSimpleIDListFromPathAW # FIXME
@@ -656,7 +656,7 @@
 ; Win7+ - These ordinals are higher than any of the ones in win vista
 @ stdcall -version=0x601+ SHAssocEnumHandlersForProtocolByApplication(wstr ptr ptr)
 @ stdcall -version=0x601+ Shell_NotifyIconGetRect(ptr ptr)
-@ stdcall -version=0x601+ SHGetKnownFolderItem(ptr long ptr ptr ptr)
+@ stdcall -version=0x601+ SHGetKnownFolderItem(ptr ptr ptr ptr ptr)
 @ stdcall -version=0x601+ SHGetItemFromObject(ptr long ptr)
 @ stdcall -version=0x600+ SHGetItemFromDataObject(ptr long ptr ptr)
 

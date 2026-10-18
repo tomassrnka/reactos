@@ -124,12 +124,9 @@ GetDefExpectedPath(SIZE_T i, HANDLE hToken, PWSTR pszPath, BOOL bCheck = TRUE)
             csidl = s_DefFolders[i].csidlX64;
             break;
         case BASE_PUBLIC:
-            /* %PUBLIC% on NT 6; ReactOS keeps the NT 5 layout, where the All Users profile is the public folder */
-            if (!GetEnvironmentVariableW(L"PUBLIC", szBuf, _countof(szBuf)) &&
-                !GetEnvironmentVariableW(L"ALLUSERSPROFILE", szBuf, _countof(szBuf)))
-            {
+            /* %PUBLIC%: the Users\Public folder */
+            if (!GetEnvironmentVariableW(L"PUBLIC", szBuf, _countof(szBuf)))
                 szBuf[0] = UNICODE_NULL;
-            }
             if (bCheck)
                 ok(szBuf[0] != UNICODE_NULL, "no public folder in the environment\n");
             StringCchCopyW(pszPath, MAX_PATH, szBuf);
@@ -157,16 +154,41 @@ GetExistence(PCWSTR pszPath)
     return HRESULT_FROM_WIN32(GetLastError());
 }
 
+/* Where ReactOS (upstream's Wine-11.16 code) gives another result than Windows, the Windows result is a todo
+ * and the ReactOS one is checked as such, so that a change of either shows */
+#define ok_hr_ros(hr, hrWindows, hrReactOS) \
+    do { \
+        HRESULT hr_ = (hr), hrWin_ = (hrWindows), hrRos_ = (hrReactOS); \
+        if (is_reactos() && hrRos_ != hrWin_) \
+        { \
+            ok(hr_ == hrRos_, "hr 0x%lx, expected 0x%lx on ReactOS\n", hr_, hrRos_); \
+            todo_if(TRUE) ok(hr_ == hrWin_, "hr 0x%lx, expected 0x%lx as on Windows\n", hr_, hrWin_); \
+        } \
+        else \
+        { \
+            ok(hr_ == hrWin_, "hr 0x%lx, expected 0x%lx\n", hr_, hrWin_); \
+        } \
+    } while (0)
+
+/* ReactOS gives ERROR_FILE_NOT_FOUND also for a folder whose parent is missing, as its SHGetFolderPathW does */
+#define ROS_NOT_FOUND(hr) ((hr) == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND) ? HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) : (hr))
+
+/* bTodoPath: ReactOS resolves this path otherwise (redirection values: only the variables at the start
+ * are expanded; a default path is relative to the parent's default path, not to its current one) */
 static void
-ExpectPath(const KNOWNFOLDERID *id, DWORD dwFlags, HANDLE hToken, HRESULT hrExpected, PCWSTR pszExpected)
+ExpectPath(const KNOWNFOLDERID *id, DWORD dwFlags, HANDLE hToken, HRESULT hrExpected, PCWSTR pszExpected,
+           BOOL bTodoPath = FALSE)
 {
     PWSTR pszPath = (PWSTR)(ULONG_PTR)0xdeadbeef;
     HRESULT hr;
 
     hr = pSHGetKnownFolderPath(*id, dwFlags, hToken, &pszPath);
-    ok(hr == hrExpected, "flags 0x%lx: hr 0x%lx, expected 0x%lx\n", dwFlags, hr, hrExpected);
+    winetest_push_context("flags 0x%lx", dwFlags);
+    ok_hr_ros(hr, hrExpected, ROS_NOT_FOUND(hrExpected));
+    winetest_pop_context();
     if (hr == S_OK)
     {
+        todo_if(bTodoPath && is_reactos())
         ok(pszPath && !lstrcmpiW(pszPath, pszExpected), "flags 0x%lx: path %s, expected %s\n",
            dwFlags, wine_dbgstr_w(pszPath), wine_dbgstr_w(pszExpected));
         CoTaskMemFree(pszPath);
@@ -291,13 +313,13 @@ TestDefFolder(SIZE_T i)
     szBuf[0] = L'#';
     szBuf[1] = UNICODE_NULL;
     hr = pSHGetFolderPathEx(*id, 0, NULL, szBuf, _countof(szBuf));
-    ok_hex(hr, hrExist);
+    ok_hr_ros(hr, hrExist, ROS_NOT_FOUND(hrExist));
     if (hr == S_OK)
         ok(!lstrcmpiW(szBuf, szExpected), "path %s, expected %s\n", wine_dbgstr_w(szBuf), wine_dbgstr_w(szExpected));
 
     pidl = (PIDLIST_ABSOLUTE)(ULONG_PTR)0xdeadbeef;
     hr = pSHGetKnownFolderIDList(*id, KF_FLAG_DEFAULT, NULL, &pidl);
-    ok_hex(hr, hrExist);
+    ok_hr_ros(hr, hrExist, ROS_NOT_FOUND(hrExist));
     if (hr == S_OK)
         CheckIDListPath(pidl, szExpected);
     else
@@ -314,7 +336,7 @@ TestDefFolder(SIZE_T i)
 
     pItem = (IShellItem *)(ULONG_PTR)0xdeadbeef;
     hr = pSHGetKnownFolderItem(*id, KF_FLAG_DEFAULT, NULL, IID_IShellItem, (void **)&pItem);
-    ok_hex(hr, hrExist);
+    ok_hr_ros(hr, hrExist, ROS_NOT_FOUND(hrExist));
     if (hr == S_OK && pItem)
     {
         pszName = NULL;
@@ -472,7 +494,7 @@ ChildRedirect1(PCWSTR pszRedirected)
 
     pItem = (IShellItem *)(ULONG_PTR)0xdeadbeef;
     hr = pSHCreateItemInKnownFolder(FOLDERID_Downloads, KF_FLAG_DEFAULT, NULL, IID_IShellItem, (void **)&pItem);
-    ok_hex(hr, E_FAIL);
+    ok_hr_ros(hr, E_FAIL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); /* ReactOS gives the error of the folder */
     ok(pItem == NULL, "item %p, expected NULL\n", pItem);
     ok(GetFileAttributesW(pszRedirected) == INVALID_FILE_ATTRIBUTES, "created without KF_FLAG_CREATE\n");
 
@@ -551,11 +573,11 @@ ChildPrograms1(void)
 
     pItem = (IShellItem *)(ULONG_PTR)0xdeadbeef;
     hr = pSHCreateItemInKnownFolder(FOLDERID_UserProgramFiles, KF_FLAG_DEFAULT, NULL, IID_IShellItem, (void **)&pItem);
-    ok_hex(hr, E_FAIL);
+    ok_hr_ros(hr, E_FAIL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); /* ReactOS gives the error of the folder */
     ok(pItem == NULL, "item %p, expected NULL\n", pItem);
     pItem = (IShellItem *)(ULONG_PTR)0xdeadbeef;
     hr = pSHCreateItemInKnownFolder(FOLDERID_UserProgramFiles, KF_FLAG_DEFAULT, L"x.txt", IID_IShellItem, (void **)&pItem);
-    ok_hex(hr, E_FAIL);
+    ok_hr_ros(hr, E_FAIL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); /* ReactOS gives the error of the folder */
     ok(pItem == NULL, "item %p, expected NULL\n", pItem);
     ok(GetFileAttributesW(szPrograms) == INVALID_FILE_ATTRIBUTES, "created without KF_FLAG_CREATE\n");
 
@@ -606,9 +628,9 @@ RunChildStep(PCSTR pszStep)
     else if (!strcmp(pszStep, "redirect2"))
         ChildRedirect2(szRedirected);
     else if (!strcmp(pszStep, "redirect3"))
-        ExpectPath(&FOLDERID_Downloads, KF_FLAG_DONT_VERIFY, NULL, S_OK, szRedirected);
+        ExpectPath(&FOLDERID_Downloads, KF_FLAG_DONT_VERIFY, NULL, S_OK, szRedirected, TRUE);
     else if (!strcmp(pszStep, "default1"))
-        ExpectPath(&FOLDERID_Downloads, KF_FLAG_DONT_VERIFY, (HANDLE)-1, S_OK, szRedirected);
+        ExpectPath(&FOLDERID_Downloads, KF_FLAG_DONT_VERIFY, (HANDLE)-1, S_OK, szRedirected, TRUE);
     else if (!strcmp(pszStep, "parent"))
         ChildParentRedirected(szRedirected);
     else if (!strcmp(pszStep, "programs1"))
@@ -722,8 +744,8 @@ ChildParentRedirected(PCWSTR pszRedirectedParent)
     ok_hex(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_DONT_VERIFY, NULL, SHGFP_TYPE_DEFAULT, szDefault), S_OK);
     PathAppendW(szDefault, L"Programs");
 
-    ExpectPath(&FOLDERID_UserProgramFiles, KF_FLAG_DONT_VERIFY, NULL, S_OK, szCurrent);
-    ExpectPath(&FOLDERID_UserProgramFiles, KF_FLAG_DEFAULT_PATH | KF_FLAG_DONT_VERIFY, NULL, S_OK, szCurrent);
+    ExpectPath(&FOLDERID_UserProgramFiles, KF_FLAG_DONT_VERIFY, NULL, S_OK, szCurrent, TRUE);
+    ExpectPath(&FOLDERID_UserProgramFiles, KF_FLAG_DEFAULT_PATH | KF_FLAG_DONT_VERIFY, NULL, S_OK, szCurrent, TRUE);
     ExpectPath(&FOLDERID_UserProgramFiles, KF_FLAG_DEFAULT_PATH | KF_FLAG_NOT_PARENT_RELATIVE | KF_FLAG_DONT_VERIFY, NULL,
                S_OK, szDefault);
 }
@@ -781,18 +803,18 @@ TestCreateItem(void)
 
     pItem = (IShellItem *)(ULONG_PTR)0xdeadbeef;
     hr = pSHCreateItemInKnownFolder(s_UnknownId, KF_FLAG_DEFAULT, NULL, IID_IShellItem, (void **)&pItem);
-    ok_hex(hr, E_FAIL);
+    ok_hr_ros(hr, E_FAIL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); /* ReactOS gives the error of the folder */
     ok(pItem == NULL, "item %p, expected NULL\n", pItem);
 
     pItem = (IShellItem *)(ULONG_PTR)0xdeadbeef;
     hr = pSHCreateItemInKnownFolder(s_UnknownId, KF_FLAG_DEFAULT, L"x.txt", IID_IShellItem, (void **)&pItem);
-    ok_hex(hr, E_FAIL);
+    ok_hr_ros(hr, E_FAIL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)); /* ReactOS gives the error of the folder */
     ok(pItem == NULL, "item %p, expected NULL\n", pItem);
 
     /* Invalid flags fail like a folder that cannot be resolved */
     pItem = (IShellItem *)(ULONG_PTR)0xdeadbeef;
     hr = pSHCreateItemInKnownFolder(FOLDERID_Documents, KF_FLAG_NOT_PARENT_RELATIVE, NULL, IID_IShellItem, (void **)&pItem);
-    ok_hex(hr, E_FAIL);
+    ok_hr_ros(hr, E_FAIL, E_INVALIDARG); /* ReactOS gives the error of the flags */
     ok(pItem == NULL, "item %p, expected NULL\n", pItem);
 
     ok_hex(SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, szRef), S_OK);
@@ -1125,6 +1147,33 @@ TestFlags(void)
     ILFree(pidl);
 }
 
+/* The folders of the default profile, which setup creates and every new profile copies */
+static void
+TestDefaultProfileFolders(void)
+{
+    WCHAR szPictures[MAX_PATH], szMusic[MAX_PATH];
+    PWSTR pszPath;
+    DWORD dwAttributes;
+    HRESULT hr;
+
+    /* My Pictures and My Music are two folders */
+    ok_hex(SHGetFolderPathW(NULL, CSIDL_MYPICTURES | CSIDL_FLAG_DONT_VERIFY, (HANDLE)-1, SHGFP_TYPE_CURRENT, szPictures), S_OK);
+    ok_hex(SHGetFolderPathW(NULL, CSIDL_MYMUSIC | CSIDL_FLAG_DONT_VERIFY, (HANDLE)-1, SHGFP_TYPE_CURRENT, szMusic), S_OK);
+    ok(lstrcmpiW(szPictures, szMusic) != 0, "My Pictures is the music folder %s\n", wine_dbgstr_w(szMusic));
+
+    /* Downloads is read-only */
+    pszPath = NULL;
+    hr = pSHGetKnownFolderPath(FOLDERID_Downloads, KF_FLAG_DEFAULT, (HANDLE)-1, &pszPath);
+    ok_hex(hr, S_OK);
+    if (hr == S_OK)
+    {
+        dwAttributes = GetFileAttributesW(pszPath);
+        ok(dwAttributes != INVALID_FILE_ATTRIBUTES && (dwAttributes & FILE_ATTRIBUTE_READONLY),
+           "%s: attributes 0x%lx\n", wine_dbgstr_w(pszPath), dwAttributes);
+    }
+    CoTaskMemFree(pszPath);
+}
+
 START_TEST(SHGetKnownFolderPath)
 {
     HMODULE hShell32 = GetModuleHandleW(L"shell32.dll");
@@ -1176,6 +1225,7 @@ START_TEST(SHGetKnownFolderPath)
         winetest_pop_context();
     }
 
+    TestDefaultProfileFolders();
     TestUnknown();
     TestFlags();
     TestCreateItem();
