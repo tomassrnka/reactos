@@ -1254,13 +1254,21 @@ static NTSTATUS NgShrinkVolume(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, PIO_STACK_LOC
     return Status;
 }
 
+/*
+ * FSCTL_GET_NTFS_VOLUME_DATA: NTFS_VOLUME_DATA_BUFFER, then as much of NTFS_EXTENDED_VOLUME_DATA
+ * (ByteCount, MajorVersion, MinorVersion) as whole fields fit, ByteCount saying how much; Windows
+ * Server 2008 R2 does the same (96, 100, 102 or 104 bytes).
+ */
 static NTSTATUS NgGetNtfsVolumeData(PNG_VCB Vcb, PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     PNTFS_VOLUME_DATA_BUFFER Out = Irp->AssociatedIrp.SystemBuffer;
+    PNTFS_EXTENDED_VOLUME_DATA Ext = (PNTFS_EXTENDED_VOLUME_DATA)(Out + 1);
+    ULONG Room, ExtLength;
     struct ngc_ntfsdata d;
 
     if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(*Out) || !Out)
         return STATUS_BUFFER_TOO_SMALL;
+    Room = Stack->Parameters.FileSystemControl.OutputBufferLength - sizeof(*Out);
     NgAcquireCore(Vcb);
     if (!Vcb->Core)
     {
@@ -1283,7 +1291,16 @@ static NTSTATUS NgGetNtfsVolumeData(PNG_VCB Vcb, PIRP Irp, PIO_STACK_LOCATION St
     Out->Mft2StartLcn.QuadPart = (LONGLONG)d.mft2_lcn;
     Out->MftZoneStart.QuadPart = (LONGLONG)d.mft_zone_start;
     Out->MftZoneEnd.QuadPart = (LONGLONG)d.mft_zone_end;
-    Irp->IoStatus.Information = sizeof(*Out);
+    ExtLength = Room >= sizeof(*Ext) ? sizeof(*Ext) :
+                Room >= FIELD_OFFSET(NTFS_EXTENDED_VOLUME_DATA, MinorVersion) ? FIELD_OFFSET(NTFS_EXTENDED_VOLUME_DATA, MinorVersion) :
+                Room >= FIELD_OFFSET(NTFS_EXTENDED_VOLUME_DATA, MajorVersion) ? FIELD_OFFSET(NTFS_EXTENDED_VOLUME_DATA, MajorVersion) : 0;
+    if (ExtLength)
+        Ext->ByteCount = ExtLength;
+    if (ExtLength > FIELD_OFFSET(NTFS_EXTENDED_VOLUME_DATA, MajorVersion))
+        Ext->MajorVersion = d.major;
+    if (ExtLength > FIELD_OFFSET(NTFS_EXTENDED_VOLUME_DATA, MinorVersion))
+        Ext->MinorVersion = d.minor;
+    Irp->IoStatus.Information = sizeof(*Out) + ExtLength;
     return STATUS_SUCCESS;
 }
 
