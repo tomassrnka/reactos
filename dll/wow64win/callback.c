@@ -457,14 +457,22 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
          * syscall. Move that continuation to the surviving simulation frame;
          * the next guest syscall uses its original native stack. Each nested
          * callback is popped separately as i386 RtlUnwind walks the SEH chain.
-         * Leave ExceptionList alone: RtlUnwind owns its removal here. */
+         * Leave ExceptionList alone: RtlUnwind owns its removal here.
+         * The nested frame is inside this service, so its guard is clear,
+         * and Wow64SystemService closes the transition only on that stale
+         * frame. Close it before the copy, so the frame the guest resumes on
+         * keeps the guard and no context request sees a partial copy. */
+        InterlockedExchange(&Cpu->InTransition, 1);
         *Previous = *Cpu;
         Previous->NativeStack = NativeStack;
         Previous->ApcFrame = ApcFrame;
         Previous->CallbackFrame = CallbackFrame;
         NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU] = Previous;
         NtCurrentTeb()->LastErrorValue = WOW64_TEB32(NtCurrentTeb())->LastErrorValue;
-        return NtCallbackReturn(NULL, 0, Status);
+        /* Likewise the service result belongs to the surviving frame. */
+        Status = NtCallbackReturn(NULL, 0, Status);
+        if (!Previous->ContextEaxChanged) Previous->Eax = Status;
+        return Status;
     }
     _SEH2_TRY
     {
