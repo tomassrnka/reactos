@@ -140,6 +140,7 @@ list(APPEND SOURCE
     WideCharToMultiByte.c
     Wow64Process.c
     Wow64Run.c
+    Wow64SystemDlls.c
     WriteFile.c
     SetFileInformationByHandle.c
 )
