@@ -45,6 +45,10 @@ typedef struct _PDEV
    ULONG BlueMask;
    BYTE PaletteShift;
    PVOID ScreenPtr;
+   ULONG BytesPerPixel;
+   HSURF hShadow;         /* System memory copy of the screen GDI draws on */
+   SURFOBJ *psoShadow;
+   BOOL bScreenEnabled;   /* Drawing reaches the frame buffer (DrvAssertMode) */
    HPALETTE DefaultPalette;
    PALETTEENTRY *PaletteEntries;
 
@@ -151,6 +155,18 @@ DrvMovePointer(
    IN LONG x,
    IN LONG y,
    IN RECTL *prcl);
+
+VOID
+FbUpdateWholeScreen(
+   PPDEV ppdev);
+
+BOOL
+FbRegisterScreen(
+   PPDEV ppdev);
+
+VOID
+FbUnregisterScreen(
+   PPDEV ppdev);
 
 BOOL
 IntInitScreenInfo(
