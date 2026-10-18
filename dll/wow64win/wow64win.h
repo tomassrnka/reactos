@@ -71,6 +71,12 @@ typedef struct { ULONG hwnd, hwndInsertAfter; INT x, y, cx, cy; UINT flags; } WI
 typedef struct { RECT rgrc[3]; ULONG lppos; } NCCALCSIZE32;
 typedef struct { ULONG Proc; BOOL IsAnsiProc; ULONG Wnd, Msg, wParam, lParam; INT lParamBufferSize; LONG Result; } WINDOWPROC32;
 typedef struct { ULONG dwData, cbData, lpData; } COPYDATA32;
+typedef struct { UINT CtlType, CtlID, itemID, itemWidth, itemHeight; ULONG itemData; } MEASUREITEM32;
+typedef struct
+{
+    UINT CtlType, CtlID, itemID, itemAction, itemState;
+    ULONG hwndItem, hDC; RECT rcItem; ULONG itemData;
+} DRAWITEM32;
 C_ASSERT(sizeof(STRING32) == 8);
 C_ASSERT(sizeof(MSG32) == 28);
 C_ASSERT(sizeof(PAINT32) == 64);
@@ -80,6 +86,8 @@ C_ASSERT(sizeof(WINDOWPOS32) == 28);
 C_ASSERT(sizeof(NCCALCSIZE32) == 52);
 C_ASSERT(sizeof(WINDOWPROC32) == 32);
 C_ASSERT(sizeof(COPYDATA32) == 12);
+C_ASSERT(sizeof(MEASUREITEM32) == 24);
+C_ASSERT(sizeof(DRAWITEM32) == 48);
 C_ASSERT(sizeof(USERCONNECT) == 576);
 C_ASSERT(sizeof(WINDOWPROC_CALLBACK_ARGUMENTS) == 64);
 

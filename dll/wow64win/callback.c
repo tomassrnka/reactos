@@ -70,6 +70,10 @@ static LONG PayloadSize(UINT Msg, WPARAM Wparam, LONG Size)
     case WM_STYLECHANGING: case WM_STYLECHANGED: case WM_SIZING: case WM_MOVING:
     case WM_ERASEBKGND: case WM_PAINT: case WM_NCPAINT:
         return Size;
+    case WM_MEASUREITEM:
+        return Size == sizeof(MEASUREITEMSTRUCT) ? sizeof(MEASUREITEM32) : -2;
+    case WM_DRAWITEM:
+        return Size == sizeof(DRAWITEMSTRUCT) ? sizeof(DRAWITEM32) : -2;
     case WM_COPYDATA:
         /* The record is followed by its cbData bytes */
         return Size >= sizeof(COPYDATASTRUCT) ? Size - sizeof(COPYDATASTRUCT) + sizeof(COPYDATA32) : -2;
@@ -100,6 +104,28 @@ static VOID PackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, ULO
     }
     case WM_WINDOWPOSCHANGING: case WM_WINDOWPOSCHANGED:
         WindowPosNativeTo32(To, From); break;
+    case WM_MEASUREITEM:
+    {
+        /* win32k's menu code measures owner-drawn items this way; the item
+         * data of a guest's menu item is a guest value. */
+        const MEASUREITEMSTRUCT *Native = From;
+        MEASUREITEM32 *Guest = To;
+        Guest->CtlType = Native->CtlType; Guest->CtlID = Native->CtlID; Guest->itemID = Native->itemID;
+        Guest->itemWidth = Native->itemWidth; Guest->itemHeight = Native->itemHeight;
+        Guest->itemData = (ULONG)Native->itemData;
+        break;
+    }
+    case WM_DRAWITEM:
+    {
+        /* hwndItem is the HMENU for ODT_MENU */
+        const DRAWITEMSTRUCT *Native = From;
+        DRAWITEM32 *Guest = To;
+        Guest->CtlType = Native->CtlType; Guest->CtlID = Native->CtlID; Guest->itemID = Native->itemID;
+        Guest->itemAction = Native->itemAction; Guest->itemState = Native->itemState;
+        Guest->hwndItem = HandleToUlong(Native->hwndItem); Guest->hDC = HandleToUlong(Native->hDC);
+        Guest->rcItem = Native->rcItem; Guest->itemData = (ULONG)Native->itemData;
+        break;
+    }
     case WM_COPYDATA:
     {
         const COPYDATASTRUCT *Native = From;
@@ -150,6 +176,18 @@ static VOID UnpackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, U
         }
         else RtlCopyMemory(To, From, sizeof(RECT));
         break;
+    case WM_MEASUREITEM:
+    {
+        /* The whole record is the reply, as win32k copies it back. A
+         * native itemData keeps its high bits unless the guest changed it. */
+        MEASUREITEMSTRUCT *Native = To;
+        const MEASUREITEM32 *Guest = From;
+        Native->CtlType = Guest->CtlType; Native->CtlID = Guest->CtlID; Native->itemID = Guest->itemID;
+        Native->itemWidth = Guest->itemWidth;
+        Native->itemHeight = Guest->itemHeight;
+        if (Guest->itemData != (ULONG)Native->itemData) Native->itemData = Guest->itemData;
+        break;
+    }
     case WM_GETMINMAXINFO: case WM_GETTEXT: case WM_STYLECHANGING: case WM_SIZING: case WM_MOVING:
         RtlCopyMemory(To, From, Size); break;
     }

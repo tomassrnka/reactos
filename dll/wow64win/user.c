@@ -102,7 +102,11 @@ static ULONG_PTR MessageCall(ULONG *a)
     LRESULT Result = 0;
     BOOL Ret;
     LPARAM Param = S(3);
-    union { CREATESTRUCTW Create; WINDOWPOS Pos; struct { NCCALCSIZE_PARAMS Params; WINDOWPOS Pos; } Nc; } Buffer;
+    union
+    {
+        CREATESTRUCTW Create; WINDOWPOS Pos; struct { NCCALCSIZE_PARAMS Params; WINDOWPOS Pos; } Nc;
+        MEASUREITEMSTRUCT Measure; DRAWITEMSTRUCT Draw;
+    } Buffer;
     DOSENDMESSAGE Timeout;
     CALL_BACK_INFO Callback;
     ULONG_PTR ResultInfo = a[4] ? (ULONG_PTR)&Result : 0;
@@ -120,10 +124,6 @@ static ULONG_PTR MessageCall(ULONG *a)
             return FALSE;
         }
         Param = (LPARAM)P(3);
-    }
-    else if (a[1] == WM_COPYDATA)
-    {
-        /* Translated below, once the call itself is valid */
     }
     else switch (a[1])
     {
@@ -167,6 +167,27 @@ static ULONG_PTR MessageCall(ULONG *a)
         }
         else Param = (LPARAM)P(3);
         break;
+    case WM_MEASUREITEM:
+    {
+        const MEASUREITEM32 *From = P(3);
+        RtlZeroMemory(&Buffer.Measure, sizeof(Buffer.Measure));
+        Buffer.Measure.CtlType = From->CtlType; Buffer.Measure.CtlID = From->CtlID;
+        Buffer.Measure.itemID = From->itemID; Buffer.Measure.itemWidth = From->itemWidth;
+        Buffer.Measure.itemHeight = From->itemHeight; Buffer.Measure.itemData = From->itemData;
+        Param = (LPARAM)&Buffer.Measure; break;
+    }
+    case WM_DRAWITEM:
+    {
+        /* hwndItem is the HMENU for ODT_MENU */
+        const DRAWITEM32 *From = P(3);
+        RtlZeroMemory(&Buffer.Draw, sizeof(Buffer.Draw));
+        Buffer.Draw.CtlType = From->CtlType; Buffer.Draw.CtlID = From->CtlID;
+        Buffer.Draw.itemID = From->itemID; Buffer.Draw.itemAction = From->itemAction;
+        Buffer.Draw.itemState = From->itemState; Buffer.Draw.hwndItem = H32(From->hwndItem);
+        Buffer.Draw.hDC = (HDC)(ULONG_PTR)From->hDC; Buffer.Draw.rcItem = From->rcItem;
+        Buffer.Draw.itemData = From->itemData;
+        Param = (LPARAM)&Buffer.Draw; break;
+    }
     case WM_COPYDATA:
     {
         /* user32 packed the record and its data into one guest block. The
@@ -221,6 +242,14 @@ static ULONG_PTR MessageCall(ULONG *a)
     if (a[3]) switch (a[1])
     {
     case WM_WINDOWPOSCHANGING: WindowPosNativeTo32(P(3), &Buffer.Pos); break;
+    case WM_MEASUREITEM:
+    {
+        MEASUREITEM32 *To = P(3);
+        To->CtlType = Buffer.Measure.CtlType; To->CtlID = Buffer.Measure.CtlID;
+        To->itemID = Buffer.Measure.itemID; To->itemWidth = Buffer.Measure.itemWidth;
+        To->itemHeight = Buffer.Measure.itemHeight; To->itemData = (ULONG)Buffer.Measure.itemData;
+        break;
+    }
     case WM_NCCALCSIZE:
         if (a[2])
         {
