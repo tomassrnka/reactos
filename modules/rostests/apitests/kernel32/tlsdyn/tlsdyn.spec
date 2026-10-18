@@ -7,3 +7,5 @@
 @ stdcall TlsDynWatchFls(long)
 @ stdcall TlsDynGetFlsAtDetach()
 @ stdcall TlsDynDumpAtProcessDetach(ptr)
+@ stdcall TlsDynSetFlsAtDetach(long ptr)
+@ stdcall TlsDynGetFlsSetResult(ptr)

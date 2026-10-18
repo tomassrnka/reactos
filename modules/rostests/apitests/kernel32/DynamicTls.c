@@ -19,6 +19,8 @@ typedef PVOID (WINAPI *FN_TlsDynGetTemplate)(VOID);
 typedef VOID (WINAPI *FN_TlsDynWatchFls)(DWORD);
 typedef VOID (WINAPI *FN_TlsDynDumpAtProcessDetach)(HANDLE);
 typedef PVOID (WINAPI *FN_TlsDynGetFlsAtDetach)(VOID);
+typedef VOID (WINAPI *FN_TlsDynSetFlsAtDetach)(DWORD, PVOID);
+typedef BOOL (WINAPI *FN_TlsDynGetFlsSetResult)(BOOL *);
 
 #define TEMPLATE_VALUE 0x5EEDF00D
 #define AFTER_UNLOAD_CODE 0x1234
@@ -393,6 +395,112 @@ Done:
 }
 
 /*
+ * A DLL_THREAD_DETACH that calls FlsSetValue on a thread without FLS data
+ * links a new block into the PEB list; the thread exit must take it out
+ * again before freeing it, or a later FlsFree walks freed memory.
+ */
+#define DETACH_FLS_DATA ((PVOID)(ULONG_PTR)0xDE7AC4ED)
+
+static LONG DetachFlsCalls;
+
+static VOID NTAPI DetachFlsCallback(PVOID Data)
+{
+    InterlockedIncrement(&DetachFlsCalls);
+}
+
+static BOOL NoFlsAtStart;
+
+static DWORD WINAPI NoFlsThread(LPVOID Parameter)
+{
+    NoFlsAtStart = (NtCurrentTeb()->FlsData == NULL);
+    return 0;
+}
+
+/* The FLS blocks linked in the PEB, -1 when the list does not lead back to its head */
+static LONG CountFlsBlocks(VOID)
+{
+    PLIST_ENTRY Head = &NtCurrentPeb()->FlsListHead, Entry;
+    LONG Count = 0;
+
+    _SEH2_TRY
+    {
+        for (Entry = Head->Flink; Entry && Entry != Head; Entry = Entry->Flink)
+        {
+            if (++Count > 1024)
+                break;
+        }
+        if (!Entry && Count)
+            Count = -1;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Count = -1;
+    }
+    _SEH2_END;
+    return Count > 1024 ? -1 : Count;
+}
+
+static VOID TestFlsSetAtThreadDetach(VOID)
+{
+    FN_TlsDynSetFlsAtDetach pSetFlsAtDetach;
+    FN_TlsDynGetFlsSetResult pGetFlsSetResult;
+    HMODULE hDll;
+    HANDLE hThread;
+    DWORD Index, Wait;
+    LONG Before, After;
+    BOOL SetResult, HadNoData = FALSE;
+
+    hDll = LoadTlsDll();
+    if (!hDll)
+        return;
+    pSetFlsAtDetach = (FN_TlsDynSetFlsAtDetach)GetProcAddress(hDll, "TlsDynSetFlsAtDetach");
+    pGetFlsSetResult = (FN_TlsDynGetFlsSetResult)GetProcAddress(hDll, "TlsDynGetFlsSetResult");
+    Index = FlsAlloc(DetachFlsCallback);
+    ok(pSetFlsAtDetach && pGetFlsSetResult, "Exports missing\n");
+    ok(Index != FLS_OUT_OF_INDEXES, "FlsAlloc failed: %lu\n", GetLastError());
+    if (!pSetFlsAtDetach || !pGetFlsSetResult || Index == FLS_OUT_OF_INDEXES)
+        goto Done;
+
+    Before = CountFlsBlocks();
+    ok(Before >= 0, "The FLS list is broken before the test: %ld\n", Before);
+    DetachFlsCalls = 0;
+    NoFlsAtStart = FALSE;
+    pSetFlsAtDetach(Index, DETACH_FLS_DATA);
+    hThread = CreateThread(NULL, 0, NoFlsThread, NULL, 0, NULL);
+    ok(hThread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (hThread)
+    {
+        Wait = WaitForSingleObject(hThread, 10000);
+        ok(Wait == WAIT_OBJECT_0, "The thread did not finish: %lu\n", Wait);
+        CloseHandle(hThread);
+    }
+    SetResult = pGetFlsSetResult(&HadNoData);
+    pSetFlsAtDetach(FLS_OUT_OF_INDEXES, NULL);
+
+    After = CountFlsBlocks();
+    trace("FLS set at thread detach: no FLS at start %d, at detach %d, set %d, blocks %ld -> %ld, callback calls %ld\n",
+          NoFlsAtStart, HadNoData, SetResult, Before, After, DetachFlsCalls);
+    if (!NoFlsAtStart)
+    {
+        skip("The thread had FLS data when it started\n");
+    }
+    else
+    {
+        /* The detach made the thread's first FLS block */
+        ok(HadNoData, "The thread had FLS data at its DLL_THREAD_DETACH\n");
+        ok(SetResult, "FlsSetValue failed in DLL_THREAD_DETACH\n");
+    }
+    /* The exited thread's block is gone from the list */
+    ok(After == Before, "FLS blocks linked: %ld before the thread, %ld after it exited\n", Before, After);
+
+    /* FlsFree clears the index in every linked block: not with a freed one in the list */
+    if (After == Before)
+        FlsFree(Index);
+Done:
+    FreeLibrary(hDll);
+}
+
+/*
  * FLS callbacks at process exit: the exiting thread's callbacks run, with its
  * TLS intact, before the DLL process notifications. The child prints the
  * events it logged at its own process detach.
@@ -645,6 +753,7 @@ START_TEST(DynamicTls)
     ok(FreeLibrary(hDll), "FreeLibrary failed: %lu\n", GetLastError());
 
     TestFlsAtThreadExit();
+    TestFlsSetAtThreadDetach();
     /* F1I1E1: the callback ran with the thread's data and TLS, before the process detach T0M0. Windows 10 detaches the last thread first. */
     RunFlsExitChild(argv[0], "main", "F1I1E1T0M0", NULL, 3);
     RunFlsExitChild(argv[0], "other", "T2M2F1I1E1T0M0", NULL, 5);
