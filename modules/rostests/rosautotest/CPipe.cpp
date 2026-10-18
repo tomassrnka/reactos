@@ -22,24 +22,48 @@ CPipe::CPipe()
     SecurityAttributes.bInheritHandle = TRUE;
     SecurityAttributes.lpSecurityDescriptor = NULL;
 
-    // Construct a unique pipe name.
-    WCHAR wszPipeName[MAX_PATH];
-    InterlockedIncrement(&m_lPipeCount);
-    _swprintf(wszPipeName, L"\\\\.\\pipe\\TestmanPipe%ld", m_lPipeCount);
-
     // Create a named pipe with the default settings, but overlapped (asynchronous) operations.
     // Latter feature is why we can't simply use CreatePipe.
     const DWORD dwDefaultBufferSize = 4096;
     const DWORD dwDefaultTimeoutMilliseconds = 120000;
+    const DWORD dwMaxNameAttempts = 64;
 
-    m_hReadPipe = CreateNamedPipeW(wszPipeName,
-        PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        1,
-        dwDefaultBufferSize,
-        dwDefaultBufferSize,
-        dwDefaultTimeoutMilliseconds,
-        &SecurityAttributes);
+    // Construct a unique pipe name.
+    // The handles are inherited by the test process and by any process it starts, so a test that leaves a
+    // child running keeps the pipe instance alive after rosautotest has exited. The next rosautotest would
+    // then get ERROR_PIPE_BUSY for the same name (one instance only) and could not run any test. Make the
+    // name unique to this process and its start (process ids are reused), create only a new pipe, never
+    // another instance of an existing one, and move on to the next name while one is taken.
+    WCHAR wszPipeName[MAX_PATH];
+    const DWORD dwProcessId = GetCurrentProcessId();
+    const DWORD dwStartTicks = GetTickCount();
+    DWORD dwAttempt = 0;
+
+    for (;;)
+    {
+        LONG lPipeNumber = InterlockedIncrement(&m_lPipeCount);
+        _swprintf(wszPipeName, L"\\\\.\\pipe\\TestmanPipe%lu_%lu_%ld", dwProcessId, dwStartTicks, lPipeNumber);
+
+        m_hReadPipe = CreateNamedPipeW(wszPipeName,
+            PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1,
+            dwDefaultBufferSize,
+            dwDefaultBufferSize,
+            dwDefaultTimeoutMilliseconds,
+            &SecurityAttributes);
+        if (m_hReadPipe != INVALID_HANDLE_VALUE)
+            break;
+
+        // An existing pipe of that name: ERROR_PIPE_BUSY when it has no free instance, else ERROR_ACCESS_DENIED
+        DWORD dwError = GetLastError();
+        if ((dwError != ERROR_PIPE_BUSY && dwError != ERROR_ACCESS_DENIED) ||
+            ++dwAttempt >= dwMaxNameAttempts)
+        {
+            break;
+        }
+    }
+
     if (m_hReadPipe == INVALID_HANDLE_VALUE)
     {
         FATAL("CreateNamedPipe failed\n");
