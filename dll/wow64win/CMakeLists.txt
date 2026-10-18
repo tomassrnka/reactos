@@ -1,7 +1,7 @@
 include_directories(${REACTOS_SOURCE_DIR}/win32ss ${REACTOS_SOURCE_DIR}/win32ss/include)
 spec2def(wow64win.dll wow64win.spec ADD_IMPORTLIB)
 add_asm_files(wow64win_asm syscalls.S)
-add_library(wow64win MODULE syscall.c user.c userextra.c gdi.c callback.c ${wow64win_asm} ${CMAKE_CURRENT_BINARY_DIR}/wow64win.def)
+add_library(wow64win MODULE syscall.c user.c userextra.c gdi.c gdi_extra.c user_input.c user_ime.c user_display.c user_misc.c callback.c ${wow64win_asm} ${CMAKE_CURRENT_BINARY_DIR}/wow64win.def)
 set_module_type(wow64win win32dll ENTRYPOINT 0)
 target_link_libraries(wow64win libcntpr ${PSEH_LIB})
 add_importlibs(wow64win wow64cpu ntdll)
