@@ -243,8 +243,22 @@ STDMETHODIMP CFontExt::GetDetailsOf(PCUITEMID_CHILD pidl, UINT iColumn, SHELLDET
 
 STDMETHODIMP CFontExt::MapColumnToSCID(UINT iColumn, SHCOLUMNID *pscid)
 {
-    //ERR("%s() UNIMPLEMENTED\n", __FUNCTION__);
-    return E_NOTIMPL;
+    if (!pscid)
+        return E_POINTER;
+
+    DWORD pid;
+    switch (iColumn)
+    {
+        case FONTEXT_COL_NAME:     pid = PID_STG_NAME; break;
+        case FONTEXT_COL_SIZE:     pid = PID_STG_SIZE; break;
+        case FONTEXT_COL_MODIFIED: pid = PID_STG_WRITETIME; break;
+        case FONTEXT_COL_ATTR:     pid = PID_STG_ATTRIBUTES; break;
+        default:
+            return E_INVALIDARG;
+    }
+    pscid->fmtid = FMTID_Storage;
+    pscid->pid = pid;
+    return S_OK;
 }
 
 // *** IShellFolder2 methods ***
