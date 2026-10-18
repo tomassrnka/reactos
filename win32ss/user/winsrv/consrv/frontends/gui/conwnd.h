@@ -62,8 +62,6 @@ typedef struct _GUI_CONSOLE_DATA
     BOOLEAN IsWindowVisible;
     BOOLEAN IsWindowActive;
 
-    POINT OldCursor;
-
     /*
      * Work for the window thread (see "Locking" in guiterm.c). Writers and the
      * frontend callbacks record it here and set hWakeEvent; they never call
@@ -74,6 +72,7 @@ typedef struct _GUI_CONSOLE_DATA
     BOOLEAN DirtyCells;
     BOOLEAN DirtyView;          /* The whole view needs repainting */
     BOOLEAN ShowCaret;          /* Output moved the caret: show it, restart the blink */
+    BOOLEAN ViewMoved;          /* The view followed the cursor: move the scroll bars */
     BOOLEAN InitEventSet;       /* hGuiInitEvent was set (window thread only) */
     LONG PendingWork;           /* GUI_WORK_* */
     BOOL RequestedFullScreen;   /* For GUI_WORK_DISPLAY_MODE */
@@ -83,6 +82,10 @@ typedef struct _GUI_CONSOLE_DATA
     HANDLE hWakeEvent;          /* The input thread's wake event, set by PM_CREATE_CONSOLE */
     LIST_ENTRY InputThreadLink; /* In the input thread's window list (that thread only) */
     DWORD BlinkRestartTick;     /* When the blink timer was last (re)started (window thread only) */
+    DWORD PaintCost;            /* Milliseconds the last paint took (window thread only) */
+    DWORD PaintEndTick;         /* When it ended (window thread only) */
+    DWORD DeferredSince;        /* When the pending repaint was first deferred, if WorkDeferred (window thread only) */
+    BOOLEAN WorkDeferred;
 
     LONG_PTR WndStyle;
     LONG_PTR WndStyleEx;

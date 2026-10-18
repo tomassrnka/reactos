@@ -1099,10 +1099,12 @@ OnPaint(PGUI_CONSOLE_DATA GuiData)
     RECT rcPaint;
     HRGN rgnSel = NULL;
     BOOL Composed = FALSE;
+    DWORD Start;
 
     /* Do nothing if the window is hidden */
     if (!GuiData->IsWindowVisible) return;
 
+    Start = GetTickCount();
     BeginPaint(GuiData->hWindow, &ps);
     if (ps.hdc != NULL &&
         ps.rcPaint.left < ps.rcPaint.right &&
@@ -1160,6 +1162,10 @@ OnPaint(PGUI_CONSOLE_DATA GuiData)
         // TODO: Move cursor display here!
     }
     EndPaint(GuiData->hWindow, &ps);
+
+    /* For the repaint rate limit (see GuiProcessAllWork in guiterm.c) */
+    GuiData->PaintEndTick = GetTickCount();
+    GuiData->PaintCost = GuiData->PaintEndTick - Start;
 }
 
 static VOID
@@ -1438,54 +1444,15 @@ GuiProcessWork(PGUI_CONSOLE_DATA GuiData, BOOLEAN BlinkTick)
             }
             if (InvalidateCaret) SmallRectToRect(GuiData, &CaretRect, &CursorCell);
 
-            /* Bring the cursor into view if it left it; a direction scrolls only if it has a scroll bar */
-            if ((GuiData->OldCursor.x != Buff->CursorPosition.X) ||
-                (GuiData->OldCursor.y != Buff->CursorPosition.Y))
+            /* The writers moved the view to the cursor (GuiShowCursorInView): follow with the scroll bars */
+            if (GuiData->ViewMoved)
             {
-                INT OldScrollX = -1, OldScrollY = -1;
-
-                if (Buff->ScreenBufferSize.X > Buff->ViewSize.X)
-                {
-                    OldScrollX = NewScrollX = Buff->ViewOrigin.X;
-                    if ((Buff->CursorPosition.X < Buff->ViewOrigin.X) ||
-                        (Buff->CursorPosition.X >= (Buff->ViewOrigin.X + Buff->ViewSize.X)))
-                    {
-                        if (Buff->CursorPosition.X >= Buff->ViewSize.X)
-                            NewScrollX = Buff->CursorPosition.X - Buff->ViewSize.X + 1;
-                        else
-                            NewScrollX = 0;
-                    }
-                }
-                if (Buff->ScreenBufferSize.Y > Buff->ViewSize.Y)
-                {
-                    OldScrollY = NewScrollY = Buff->ViewOrigin.Y;
-                    if ((Buff->CursorPosition.Y < Buff->ViewOrigin.Y) ||
-                        (Buff->CursorPosition.Y >= (Buff->ViewOrigin.Y + Buff->ViewSize.Y)))
-                    {
-                        if (Buff->CursorPosition.Y >= Buff->ViewSize.Y)
-                            NewScrollY = Buff->CursorPosition.Y - Buff->ViewSize.Y + 1;
-                        else
-                            NewScrollY = 0;
-                    }
-                }
-
-                if ((OldScrollX != NewScrollX) || (OldScrollY != NewScrollY))
-                {
-                    if (NewScrollX >= 0) Buff->ViewOrigin.X = NewScrollX;
-                    if (NewScrollY >= 0) Buff->ViewOrigin.Y = NewScrollY;
-                    /* Repaint the view from the buffer: no pixel copy, no synchronous paint */
-                    InvalidateAll = TRUE;
-                    GuiData->OldCursor.x = Buff->CursorPosition.X;
-                    GuiData->OldCursor.y = Buff->CursorPosition.Y;
-                }
-                else
-                {
-                    NewScrollX = NewScrollY = -1;
-                }
+                if (Buff->ScreenBufferSize.X > Buff->ViewSize.X) NewScrollX = Buff->ViewOrigin.X;
+                if (Buff->ScreenBufferSize.Y > Buff->ViewSize.Y) NewScrollY = Buff->ViewOrigin.Y;
             }
         }
     }
-    GuiData->DirtyView = GuiData->DirtyCells = GuiData->ShowCaret = FALSE;
+    GuiData->DirtyView = GuiData->DirtyCells = GuiData->ShowCaret = GuiData->ViewMoved = FALSE;
 
     if (Work & GUI_WORK_TITLE)
     {
