@@ -986,8 +986,13 @@ NTSTATUS NgQueryVolumeInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             ULONG Fixed = FIELD_OFFSET(FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName), Copy;
             if (Length < Fixed)
                 return STATUS_BUFFER_TOO_SMALL;
+            /* What the driver implements of what Windows NTFS reports: no case-sensitive lookup,
+             * compression, sparse files, quotas, object IDs, EAs, encryption or USN journal. */
             A->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
-                                      FILE_NAMED_STREAMS | (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
+                                      FILE_PERSISTENT_ACLS | FILE_SUPPORTS_REPARSE_POINTS |
+                                      FILE_NAMED_STREAMS | FILE_SUPPORTS_HARD_LINKS |
+                                      FILE_SUPPORTS_OPEN_BY_FILE_ID |
+                                      (Vcb->ReadOnly ? FILE_READ_ONLY_VOLUME : 0);
             A->MaximumComponentNameLength = 255;
             /* On a short buffer the length reports what was copied (as FAT and the apitest expect). */
             Copy = min(sizeof(Name) - sizeof(WCHAR), Length - Fixed);

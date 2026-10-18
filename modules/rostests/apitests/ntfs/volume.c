@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     NTFS: setting and reading the volume label
+ * PURPOSE:     NTFS: the volume label, the volume lock and the file system attributes
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -774,5 +774,64 @@ START_TEST(NtfsVolumeLock)
         NtClose(Lock);
     ok(GetLabel(Got) && !wcscmp(Got, Before), "Label after the refused sets is \"%ls\", expected \"%ls\"\n", Got, Before);
     ok(RestoreLabel(Original, OriginalBytes), "The label of %ls was not restored\n", LabelRoot);
+    NtCleanup();
+}
+
+/*
+ * The file system attributes FileFsAttributeInformation reports for the test directory's volume.
+ * Each flag checked here is reported by Windows 10 and Server 2008 R2 NTFS and backed by a
+ * feature the other NTFS tests exercise (junctions, ACLs, hard links, open by file ID).
+ */
+START_TEST(NtfsVolumeAttributes)
+{
+    static const struct { ULONG Flag; PCSTR Name; } Expected[] =
+    {
+        { FILE_CASE_PRESERVED_NAMES, "FILE_CASE_PRESERVED_NAMES" },
+        { FILE_UNICODE_ON_DISK, "FILE_UNICODE_ON_DISK" },
+        { FILE_PERSISTENT_ACLS, "FILE_PERSISTENT_ACLS" },
+        { FILE_SUPPORTS_REPARSE_POINTS, "FILE_SUPPORTS_REPARSE_POINTS" },
+        { FILE_NAMED_STREAMS, "FILE_NAMED_STREAMS" },
+        { FILE_SUPPORTS_HARD_LINKS, "FILE_SUPPORTS_HARD_LINKS" },
+        { FILE_SUPPORTS_OPEN_BY_FILE_ID, "FILE_SUPPORTS_OPEN_BY_FILE_ID" },
+    };
+    ULONGLONG Buffer[(sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + MAX_PATH * sizeof(WCHAR)) / sizeof(ULONGLONG)];
+    PFILE_FS_ATTRIBUTE_INFORMATION Info = (PFILE_FS_ATTRIBUTE_INFORMATION)Buffer;
+    WCHAR FsName[MAX_PATH];
+    IO_STATUS_BLOCK Iosb;
+    HANDLE Handle;
+    NTSTATUS Status;
+    DWORD Flags = 0, MaxComponent = 0;
+    ULONG i;
+
+    if (!LabelInit("NtfsVolumeAttributes"))
+        return;
+    Status = NtOpen(NtTestDir(), FILE_READ_ATTRIBUTES | SYNCHRONIZE, SHARE_RW | FILE_SHARE_DELETE, FILE_OPEN,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, &Handle);
+    ok(Status == STATUS_SUCCESS, "Opening %ls: 0x%08lx\n", NtTestDir(), Status);
+    if (!NT_SUCCESS(Status))
+        return;
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Status = NtQueryVolumeInformationFile(Handle, &Iosb, Info, sizeof(Buffer), FileFsAttributeInformation);
+    NtClose(Handle);
+    ok(Status == STATUS_SUCCESS, "FileFsAttributeInformation: 0x%08lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        return;
+    trace("%ls: FileSystemAttributes 0x%08lx\n", LabelRoot, Info->FileSystemAttributes);
+    ok(Info->FileSystemNameLength == 8 && !memcmp(Info->FileSystemName, L"NTFS", 8),
+       "File system name \"%.*ls\"\n", (int)(Info->FileSystemNameLength / sizeof(WCHAR)), Info->FileSystemName);
+    ok(Info->MaximumComponentNameLength == 255, "MaximumComponentNameLength %lu\n", Info->MaximumComponentNameLength);
+    for (i = 0; i < RTL_NUMBER_OF(Expected); i++)
+        ok(Info->FileSystemAttributes & Expected[i].Flag, "%s (0x%08lx) not reported: 0x%08lx\n",
+           Expected[i].Name, Expected[i].Flag, Info->FileSystemAttributes);
+    ok(!(Info->FileSystemAttributes & FILE_READ_ONLY_VOLUME), "Writable volume reported read-only: 0x%08lx\n",
+       Info->FileSystemAttributes);
+
+    /* GetVolumeInformationW passes the same flags through. */
+    ok(GetVolumeInformationW(LabelRoot, NULL, 0, NULL, &MaxComponent, &Flags, FsName, RTL_NUMBER_OF(FsName)),
+       "GetVolumeInformationW failed %lu\n", GetLastError());
+    ok(Flags == Info->FileSystemAttributes, "GetVolumeInformationW flags 0x%08lx, native 0x%08lx\n",
+       Flags, Info->FileSystemAttributes);
+    ok(MaxComponent == 255, "GetVolumeInformationW component length %lu\n", MaxComponent);
+    ok(!wcscmp(FsName, L"NTFS"), "GetVolumeInformationW file system \"%ls\"\n", FsName);
     NtCleanup();
 }
