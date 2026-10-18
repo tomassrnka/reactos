@@ -228,8 +228,11 @@ CountDevices(HDEVINFO hDevInfo, PDWORD pdwPending)
         if (IsDevicePresent(&DevInfoData))
         {
             dwCount++;
+            /* ReactOS leaves a new device that waits for its driver without a problem
+               code until the installation ends, Windows marks it "not configured" */
             if (CM_Get_DevNode_Status(&ulStatus, &ulProblem, DevInfoData.DevInst, 0) == CR_SUCCESS &&
-                (ulStatus & DN_HAS_PROBLEM) && ulProblem == CM_PROB_NOT_CONFIGURED)
+                ((ulStatus & DN_HAS_PROBLEM) ? ulProblem == CM_PROB_NOT_CONFIGURED
+                                             : !(ulStatus & DN_STARTED)))
             {
                 (*pdwPending)++;
             }
