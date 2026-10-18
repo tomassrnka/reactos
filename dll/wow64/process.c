@@ -26,9 +26,9 @@ typedef struct
     PROC_THREAD_ATTRIBUTE_ENTRY32 Attributes[ANYSIZE_ARRAY];
 } PROC_THREAD_ATTRIBUTE_LIST32;
 
-/* More attributes or handles than the guest kernel32 can have put in a list are refused */
+/* More attributes than the guest kernel32 can have put in a list are refused;
+ * handle lists have the native limit */
 #define WOW64_MAX_ATTRIBUTES 32
-#define WOW64_MAX_LIST_HANDLES 0x10000
 
 typedef BOOL (WINAPI *INITIALIZE_ATTRIBUTES)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD, PSIZE_T);
 typedef BOOL (WINAPI *UPDATE_ATTRIBUTE)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD_PTR, PVOID, SIZE_T, PVOID, PSIZE_T);
@@ -68,9 +68,17 @@ static VOID CaptureString(UNICODE_STRING *To, const WOW64_STRING *From)
     To->Buffer = PTR32(From->Buffer);
 }
 
+/* Size bytes at a guest address lie below the guest's highest address */
+static BOOLEAN GuestRange(ULONG Address, ULONG64 Size)
+{
+    return Address && (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
+}
+
 /* A native copy of the guest's attribute list. The guest kernel32 accepted it
- * (handle list, ideal processor, mitigation policy); handle values widen,
- * other values are read in place. *Handles gets the widened handle array. */
+ * (handle list, ideal processor, mitigation policy). Every guest range is
+ * checked and read once: handle values widen into *Handles, the small values
+ * (no pointers) are copied into storage after the native list, which is one
+ * allocation (*List). */
 static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_ATTRIBUTE_LIST *List, HANDLE **Handles)
 {
     PROC_THREAD_ATTRIBUTE_LIST32 *From = PTR32(Address);
@@ -79,7 +87,8 @@ static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_
     INITIALIZE_ATTRIBUTES Initialize;
     UPDATE_ATTRIBUTE Update;
     PROC_THREAD_ATTRIBUTE_ENTRY32 Entry;
-    SIZE_T Size = 0;
+    ULONGLONG (*Values)[2];
+    SIZE_T Size = 0, ListSize;
     ULONG Count, i, j;
     NTSTATUS Status;
 
@@ -89,32 +98,41 @@ static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_
     Status = LdrGetProcedureAddress(Module, &InitializeName, 0, (PVOID *)&Initialize);
     if (NT_SUCCESS(Status)) Status = LdrGetProcedureAddress(Module, &UpdateName, 0, (PVOID *)&Update);
     if (!NT_SUCCESS(Status)) return Status;
+    if (!GuestRange(Address, FIELD_OFFSET(PROC_THREAD_ATTRIBUTE_LIST32, Attributes))) return STATUS_INVALID_PARAMETER;
     Count = From->LastAttribute;
-    if (Count > From->AttributeCount || Count > WOW64_MAX_ATTRIBUTES) return STATUS_INVALID_PARAMETER;
+    if (Count > From->AttributeCount || Count > WOW64_MAX_ATTRIBUTES ||
+        !GuestRange(Address, FIELD_OFFSET(PROC_THREAD_ATTRIBUTE_LIST32, Attributes[Count])))
+        return STATUS_INVALID_PARAMETER;
     Initialize(NULL, Count, 0, &Size);
-    *List = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+    ListSize = ALIGN_UP_BY(Size, sizeof(ULONGLONG));
+    *List = RtlAllocateHeap(RtlGetProcessHeap(), 0, ListSize + Count * sizeof(*Values));
     if (!*List) return STATUS_NO_MEMORY;
+    Values = (PVOID)((PUCHAR)*List + ListSize);
     if (!Initialize(*List, Count, 0, &Size)) return STATUS_INVALID_PARAMETER;
     for (i = 0; i < Count; ++i)
     {
         Entry = From->Attributes[i];
         if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
         {
-            const ULONG *Values = PTR32(Entry.Value);
+            const ULONG *Guest = PTR32(Entry.Value);
             ULONG Number = Entry.Size / sizeof(ULONG);
-            if (*Handles || !Number || Entry.Size % sizeof(ULONG) || Number > WOW64_MAX_LIST_HANDLES)
+            if (*Handles || !Number || Entry.Size % sizeof(ULONG) || Number > ROS_PS_MAX_HANDLE_COUNT ||
+                !GuestRange(Entry.Value, Entry.Size))
                 return STATUS_INVALID_PARAMETER;
-            *Handles = RtlAllocateHeap(RtlGetProcessHeap(), 0, Number * sizeof(HANDLE));
+            *Handles = RtlAllocateHeap(RtlGetProcessHeap(), 0, (SIZE_T)Number * sizeof(HANDLE));
             if (!*Handles) return STATUS_NO_MEMORY;
-            for (j = 0; j < Number; ++j) (*Handles)[j] = HANDLE32(Values[j]);
-            if (!Update(*List, 0, Entry.Attribute, *Handles, Number * sizeof(HANDLE), NULL, NULL))
+            for (j = 0; j < Number; ++j) (*Handles)[j] = HANDLE32(Guest[j]);
+            if (!Update(*List, 0, Entry.Attribute, *Handles, (SIZE_T)Number * sizeof(HANDLE), NULL, NULL))
                 return STATUS_INVALID_PARAMETER;
         }
         else if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR ||
                  Entry.Attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY)
         {
-            /* PROCESSOR_NUMBER and the DWORD/DWORD64 policies have no pointers */
-            if (!Update(*List, 0, Entry.Attribute, PTR32(Entry.Value), Entry.Size, NULL, NULL))
+            /* PROCESSOR_NUMBER and the DWORD/DWORD64 policies: no pointers, at most 16 bytes */
+            if (!Entry.Size || Entry.Size > sizeof(Values[i]) || !GuestRange(Entry.Value, Entry.Size))
+                return STATUS_INVALID_PARAMETER;
+            RtlCopyMemory(Values[i], PTR32(Entry.Value), Entry.Size);
+            if (!Update(*List, 0, Entry.Attribute, Values[i], Entry.Size, NULL, NULL))
                 return STATUS_INVALID_PARAMETER;
         }
         else return STATUS_NOT_SUPPORTED;
