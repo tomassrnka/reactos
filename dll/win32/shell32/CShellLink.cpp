@@ -2562,7 +2562,66 @@ HRESULT STDMETHODCALLTYPE CShellLink::QueryContextMenu(HMENU hMenu, UINT indexMe
     if (!InsertMenuItemW(hMenu, indexMenu++, TRUE, &mii))
         return E_FAIL;
 
+    /* Offer the target's runas verb, as its own menu does */
+    if (idCmdFirst + IDCMD_RUNAS <= idCmdLast && TargetHasRunAs(uFlags, TRUE))
+    {
+        CStringW strRunAs(MAKEINTRESOURCEW(IDS_RUNAS_VERB));
+
+        mii.fMask = MIIM_TYPE | MIIM_ID | MIIM_STATE;
+        mii.dwTypeData = strRunAs.GetBuffer();
+        mii.cch = wcslen(mii.dwTypeData);
+        mii.wID = idCmdFirst + IDCMD_RUNAS;
+        mii.fState = MFS_ENABLED;
+        mii.fType = MFT_STRING;
+        if (!InsertMenuItemW(hMenu, indexMenu++, TRUE, &mii))
+            return E_FAIL;
+        id = IDCMD_RUNAS + 1;
+    }
+
     return MAKE_HRESULT(SEVERITY_SUCCESS, 0, id);
+}
+
+BOOL CShellLink::TargetHasRunAs(UINT uFlags, BOOL bForMenu)
+{
+    WCHAR szPath[MAX_PATH];
+    LPCWSTR pszPath = m_sPath;
+
+    if ((!pszPath || !*pszPath) && m_pPidl && SHGetPathFromIDListW(m_pPidl, szPath))
+        pszPath = szPath;
+    if (!pszPath || !*pszPath || (m_Header.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        return FALSE;
+
+    LPCWSTR pszExt = PathFindExtensionW(pszPath);
+    if (!*pszExt)
+        return FALSE;
+
+    DWORD cch = 0;
+    if (FAILED(AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_COMMAND, pszExt, L"runas", NULL, &cch)))
+        return FALSE;
+
+    /* Hide the verb where the target's own menu hides it; a menu entry needs a verb key that can be inspected */
+    HKEY hkClass, hkVerb;
+    BOOL bHidden = FALSE, bInspected = FALSE;
+    if (SUCCEEDED(AssocQueryKeyW(ASSOCF_NONE, ASSOCKEY_SHELLEXECCLASS, pszExt, L"runas", &hkClass)))
+    {
+        if (RegOpenKeyExW(hkClass, L"shell\\runas", 0, KEY_QUERY_VALUE, &hkVerb) == ERROR_SUCCESS)
+        {
+            bInspected = TRUE;
+            /* ProgrammaticAccessOnly hides the verb from menus, not from an explicit invoke */
+            bHidden = (bForMenu && RegValueExists(hkVerb, L"ProgrammaticAccessOnly")) ||
+                      (!(uFlags & CMF_DISABLEDVERBS) && RegValueExists(hkVerb, L"LegacyDisable")) ||
+                      (!(uFlags & CMF_EXTENDEDVERBS) && RegValueExists(hkVerb, L"Extended"));
+            if (!bHidden && bForMenu)
+            {
+                DWORD dwRest = RegGetDword(hkVerb, NULL, L"SuppressionPolicy", 0);
+                if (dwRest)
+                    bHidden = SHRestricted((RESTRICTIONS)dwRest);
+            }
+            RegCloseKey(hkVerb);
+        }
+        RegCloseKey(hkClass);
+    }
+    return !bHidden && (bInspected || !bForMenu);
 }
 
 HRESULT CShellLink::DoOpenFileLocation()
@@ -2601,7 +2660,27 @@ HRESULT STDMETHODCALLTYPE CShellLink::InvokeCommand(LPCMINVOKECOMMANDINFO lpici)
         return hr;
     }
 
-    UINT idCmd = LOWORD(lpici->lpVerb);
+    /* Of the string verbs, only runas is known; a Unicode verb takes precedence */
+    LPCMINVOKECOMMANDINFOEX iciex = (LPCMINVOKECOMMANDINFOEX)lpici;
+    UINT idCmd;
+    BOOL bStringVerb = TRUE, bRunAs = FALSE;
+    if (IsUnicode(*lpici) && !IS_INTRESOURCE(iciex->lpVerbW))
+        bRunAs = !_wcsicmp(iciex->lpVerbW, L"runas");
+    else if (!IS_INTRESOURCE(lpici->lpVerb))
+        bRunAs = !lstrcmpiA(lpici->lpVerb, "runas");
+    else
+        bStringVerb = FALSE;
+
+    if (bStringVerb)
+    {
+        if (!bRunAs || !TargetHasRunAs(CMF_EXTENDEDVERBS | CMF_DISABLEDVERBS, FALSE))
+            return E_NOTIMPL;
+        idCmd = IDCMD_RUNAS;
+    }
+    else
+    {
+        idCmd = LOWORD(lpici->lpVerb);
+    }
     TRACE("idCmd: %d\n", idCmd);
 
     switch (idCmd)
@@ -2610,12 +2689,14 @@ HRESULT STDMETHODCALLTYPE CShellLink::InvokeCommand(LPCMINVOKECOMMANDINFO lpici)
         return DoOpen(lpici);
     case IDCMD_OPENFILELOCATION:
         return DoOpenFileLocation();
+    case IDCMD_RUNAS:
+        return DoOpen(lpici, L"runas");
     default:
         return E_NOTIMPL;
     }
 }
 
-HRESULT CShellLink::DoOpen(LPCMINVOKECOMMANDINFO lpici)
+HRESULT CShellLink::DoOpen(LPCMINVOKECOMMANDINFO lpici, LPCWSTR pszVerb)
 {
     LPCMINVOKECOMMANDINFOEX iciex = (LPCMINVOKECOMMANDINFOEX)lpici;
     const BOOL unicode = IsUnicode(*lpici);
@@ -2662,6 +2743,7 @@ HRESULT CShellLink::DoOpen(LPCMINVOKECOMMANDINFO lpici)
                 sei.lpDirectory = dir;
         }
     }
+    sei.lpVerb = pszVerb;
     sei.lpParameters = args;
     sei.lpClass = m_sLinkPath;
     sei.nShow = m_Header.nShowCommand;
@@ -2690,6 +2772,11 @@ HRESULT CShellLink::DoOpen(LPCMINVOKECOMMANDINFO lpici)
 
 HRESULT STDMETHODCALLTYPE CShellLink::GetCommandString(UINT_PTR idCmd, UINT uType, UINT* pwReserved, LPSTR pszName, UINT cchMax)
 {
+    if (idCmd == IDCMD_RUNAS && uType == GCS_VERBW)
+        return StringCchCopyW((LPWSTR)pszName, cchMax, L"runas");
+    if (idCmd == IDCMD_RUNAS && uType == GCS_VERBA)
+        return StringCchCopyA(pszName, cchMax, "runas");
+
     FIXME("%p %lu %u %p %p %u\n", this, idCmd, uType, pwReserved, pszName, cchMax);
     return E_NOTIMPL;
 }
