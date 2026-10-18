@@ -850,10 +850,192 @@ static void test_StretchBlt_TopDownOptions(BOOL SrcTopDown, BOOL DstTopDown)
     DeleteDC(hdcScreen);
 }
 
+static LRESULT CALLBACK
+UF30_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    PAINTSTRUCT ps;
+    if (msg == WM_PAINT) { BeginPaint(hwnd, &ps); EndPaint(hwnd, &ps); return 0; }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void UF30_Pump(void)
+{
+    MSG msg;
+    DWORD end = GetTickCount() + 60;
+    do
+    {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(5);
+    } while ((LONG)(GetTickCount() - end) < 0);
+}
+
+static void test_StretchBlt_NegativeHeight(void)
+{
+    /* UF-30: a user-mode StretchBlt with a NEGATIVE destination height, the source and
+     * destination rectangles the same size (no scaling), used to bugcheck the kernel
+     * (PAGE_FAULT_IN_NONPAGED_AREA, memcpy <- DIB_32BPP_BitBltSrcCopy <- IntEngBitBlt <-
+     * IntEngStretchBlt). Reproduced on a real, visible top-level window with the mouse
+     * pointer over the blit area, matching how it was first found (scursor round 2);
+     * see modules/rostests/apitests/gdi32/BitBltPointer.c's removed DrawStretchFlipped. */
+    WNDCLASSW wc = {0};
+    HWND hwnd;
+    HDC hdcWnd, hdcSrc, hdcScreen;
+    HBITMAP hbmSrc, hbmOld;
+    BITMAPINFO bmi = {{sizeof(BITMAPINFOHEADER), 160, -120, 1, 32, BI_RGB}};
+    ULONG *pulSrc;
+    int x, y;
+
+    hdcScreen = GetDC(NULL);
+    if (GetDeviceCaps(hdcScreen, BITSPIXEL) < 24)
+    {
+        ReleaseDC(NULL, hdcScreen);
+        skip("UF-30: needs at least 24 bits per pixel\n");
+        return;
+    }
+    ReleaseDC(NULL, hdcScreen);
+
+    wc.lpfnWndProc = UF30_WndProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    wc.lpszClassName = L"UF30StretchBltNegHeightTest";
+    RegisterClassW(&wc);
+
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, L"UF30StretchBltNegHeightTest", L"UF-30",
+                           WS_POPUP | WS_VISIBLE, 120, 120, 160, 120, NULL, NULL, wc.hInstance, NULL);
+    if (!hwnd)
+    {
+        skip("UF-30: could not create a window\n");
+        return;
+    }
+    UF30_Pump();
+
+    /* Put the mouse pointer over the blit area, as in the original reproducer, and let the
+     * cursor subsystem actually register the move before drawing under it. */
+    SetCursorPos(120 + 80, 120 + 60);
+    UF30_Pump();
+    {
+        CURSORINFO ci = {sizeof(ci)};
+        GetCursorInfo(&ci);
+        ok((ci.flags & CURSOR_SHOWING) != 0, "UF-30: cursor is not showing (flags=%lx)\n", (unsigned long)ci.flags);
+    }
+
+    hdcWnd = GetDC(hwnd);
+    hdcSrc = CreateCompatibleDC(hdcWnd);
+    hbmSrc = CreateDIBSection(hdcWnd, &bmi, DIB_RGB_COLORS, (PVOID*)&pulSrc, NULL, 0);
+    hbmOld = SelectObject(hdcSrc, hbmSrc);
+
+    for (y = 0; y < 120; y++)
+        for (x = 0; x < 160; x++)
+            pulSrc[y * 160 + x] = 0xFF000000 | (y << 8) | x;
+
+    /* A plain blit over the pointer first: this is what lazily allocates win32k's mouse-pointer
+     * save/compose bitmaps (MouseSafetyOnDrawStart / IntShowMousePointer), which is what the
+     * flipped stretch below needs in place to reach the bugchecking path. */
+    BitBlt(hdcWnd, 0, 0, 160, 120, hdcSrc, 0, 0, SRCCOPY);
+
+    /* UF-30 reproducer, verbatim from the bug report. If the kernel bugchecks we never return;
+     * surviving with a successful blit is the screen-path regression test. */
+    ok(StretchBlt(hdcWnd, 10, 110, 140, -100, hdcSrc, 10, 10, 140, 100, SRCCOPY),
+       "UF-30: screen-path StretchBlt with a negative destination height failed\n");
+
+    /* P3 (round 2): surviving the screen blit cannot see silent flip corruption. Drive the fixed
+     * 32bpp vertical-flip copy into a real 32bpp destination DIB and read the pixels back. */
+    {
+        HDC hdcDst = CreateCompatibleDC(hdcWnd);
+        BITMAPINFO bmiDst = {{sizeof(BITMAPINFOHEADER), 160, -120, 1, 32, BI_RGB}};
+        ULONG *pulDst = NULL;
+        HBITMAP hbmDst = CreateDIBSection(hdcWnd, &bmiDst, DIB_RGB_COLORS, (PVOID*)&pulDst, NULL, 0);
+        HBITMAP hbmDstOld = SelectObject(hdcDst, hbmDst);
+
+        /* Tag every source pixel with its row so a vertical flip is visible in the pixels. */
+        for (y = 0; y < 120; y++)
+            for (x = 0; x < 160; x++)
+                pulSrc[y * 160 + x] = 0xFF000000 | (ULONG)y;
+
+        /* A same-size, unflipped 32bpp DIB -> 32bpp DIB copy must be byte-exact. */
+        memset(pulDst, 0, 160 * 120 * sizeof(ULONG));
+        ok(BitBlt(hdcDst, 0, 0, 160, 120, hdcSrc, 0, 0, SRCCOPY), "UF-30: 32bpp BitBlt failed\n");
+        GdiFlush();
+        ok(pulDst[0] == 0xFF000000 && pulDst[119 * 160] == (0xFF000000 | 119),
+           "UF-30: 32bpp straight copy wrong: top=%08lx bottom=%08lx\n",
+           (unsigned long)pulDst[0], (unsigned long)pulDst[119 * 160]);
+
+        /* A negative-height StretchBlt flips vertically through the fixed DIB_32BPP path; the row
+         * ordering must reverse (top dest row holds a high source row, bottom a low one). */
+        memset(pulDst, 0, 160 * 120 * sizeof(ULONG));
+        ok(StretchBlt(hdcDst, 0, 120, 160, -120, hdcSrc, 0, 0, 160, 120, SRCCOPY),
+           "UF-30: 32bpp negative-height StretchBlt failed\n");
+        GdiFlush();
+        /* Each source row carries its own index, so a correct vertical flip maps dest row r to
+         * source row 119 - r. Check interior rows on both sides of the midline by full value (alpha
+         * included): a non-flip, an off-by-one or a degenerate fill that writes one source row into
+         * every dest row all fail. The negative-height destination rectangle rounds its top edge the
+         * same way unpatched GDI does, so the row-0 edge is outside the check: the crash fix does not
+         * change which rows the blit covers, only that the covered rows no longer fault the kernel. */
+        ok(pulDst[30 * 160]  == (0xFF000000 | 89) &&
+           pulDst[59 * 160]  == (0xFF000000 | 60) &&
+           pulDst[60 * 160]  == (0xFF000000 | 59) &&
+           pulDst[90 * 160]  == (0xFF000000 | 29),
+           "UF-30: 32bpp vertical flip did not reverse interior rows: "
+           "r30=%08lx r59=%08lx r60=%08lx r90=%08lx (want FF000059 FF00003C FF00003B FF00001D)\n",
+           (unsigned long)pulDst[30 * 160], (unsigned long)pulDst[59 * 160],
+           (unsigned long)pulDst[60 * 160], (unsigned long)pulDst[90 * 160]);
+
+        SelectObject(hdcDst, hbmDstOld);
+        DeleteObject(hbmDst);
+        DeleteDC(hdcDst);
+    }
+
+    /* UF-30 crash-regression guard (survival check, not a pixel check). The bug is an out-of-bounds
+     * kernel walk, so a regression bugchecks the kernel and fails the whole golden-VM run before it
+     * reaches the end: that hard failure is the guard. A both-axis flip (negative width and height)
+     * from a much wider 32bpp source into a narrow 32bpp destination drives DIB_32BPP_BitBltSrcCopy
+     * down its bLeftToRight && bTopToBottom path, where it aliases the destination pointers and, on
+     * the unpatched kernel, steps them by the source stride (8192) instead of the destination stride
+     * (640), walking off the destination surface. The fixed kernel steps by the destination stride
+     * and the blit completes, so StretchBlt returns TRUE here. */
+    {
+        HDC hdcNarrow = CreateCompatibleDC(hdcWnd);
+        HDC hdcWide = CreateCompatibleDC(hdcWnd);
+        BITMAPINFO bmiNarrow = {{sizeof(BITMAPINFOHEADER), 160, -120, 1, 32, BI_RGB}};
+        BITMAPINFO bmiWide = {{sizeof(BITMAPINFOHEADER), 2048, -240, 1, 32, BI_RGB}};
+        ULONG *pulNarrow = NULL, *pulWide = NULL;
+        HBITMAP hbmNarrow = CreateDIBSection(hdcWnd, &bmiNarrow, DIB_RGB_COLORS, (PVOID*)&pulNarrow, NULL, 0);
+        HBITMAP hbmWide = CreateDIBSection(hdcWnd, &bmiWide, DIB_RGB_COLORS, (PVOID*)&pulWide, NULL, 0);
+        HBITMAP hbmNarrowOld = SelectObject(hdcNarrow, hbmNarrow);
+        HBITMAP hbmWideOld = SelectObject(hdcWide, hbmWide);
+
+        memset(pulWide, 0x7F, 2048 * 240 * sizeof(ULONG));
+
+        ok(StretchBlt(hdcNarrow, 160, 120, -160, -120, hdcWide, 0, 0, 160, 120, SRCCOPY),
+           "UF-30: both-axis different-stride flip must survive and succeed on the fixed kernel\n");
+
+        SelectObject(hdcWide, hbmWideOld);
+        SelectObject(hdcNarrow, hbmNarrowOld);
+        DeleteObject(hbmWide);
+        DeleteObject(hbmNarrow);
+        DeleteDC(hdcWide);
+        DeleteDC(hdcNarrow);
+    }
+
+    SelectObject(hdcSrc, hbmOld);
+    DeleteObject(hbmSrc);
+    DeleteDC(hdcSrc);
+    ReleaseDC(hwnd, hdcWnd);
+    DestroyWindow(hwnd);
+}
+
 START_TEST(StretchBlt)
 {
     trace("\n\n## Start of generalized StretchBlt tests.\n\n");
     test_StretchBlt();
+
+    trace("\n\n## Start of UF-30 negative destination height test.\n\n");
+    test_StretchBlt_NegativeHeight();
 
     trace("\n\n## Start of source top-down and destination top-down tests.\n\n");
     test_StretchBlt_TopDownOptions(TRUE, TRUE);
