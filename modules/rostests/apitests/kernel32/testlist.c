@@ -25,6 +25,7 @@ extern void func_ConsoleCaret(void);
 extern void func_ConsoleCreateRace(void);
 extern void func_ConsoleCtrlEventRace(void);
 extern void func_ConsoleDisplayMode(void);
+extern void func_ConsoleViewFollow(void);
 extern void func_ConsoleWriteLatency(void);
 extern void func_CopyFile2(void);
 extern void func_CopyFile2Identity(void);
@@ -171,6 +172,7 @@ const struct test winetest_testlist[] =
     { "ConsoleCreateRace",           func_ConsoleCreateRace },
     { "ConsoleCtrlEventRace",        func_ConsoleCtrlEventRace },
     { "ConsoleDisplayMode",          func_ConsoleDisplayMode },
+    { "ConsoleViewFollow",           func_ConsoleViewFollow },
     { "ConsoleWriteLatency",         func_ConsoleWriteLatency },
     { "CopyFile2",                   func_CopyFile2 },
     { "CopyFile2Identity",           func_CopyFile2Identity },

@@ -1029,6 +1029,14 @@ GuiSetActiveScreenBuffer(IN OUT PFRONTEND This)
     /* Realize the (logical) palette */
     RealizePalette(GuiData->hMemDC);
 
+    /*
+     * Output and cursor moves in a buffer that was not active did not move
+     * its view (only the active buffer's view follows its cursor): bring its
+     * cursor into the view now that it is shown.
+     */
+    if (GetType(ActiveBuffer) == TEXTMODE_BUFFER)
+        GuiShowCursorInView(GuiData, ActiveBuffer);
+
     /* Show the whole new buffer, not only what changes next */
     GuiData->DirtyView = TRUE;
     GuiRequestWork(GuiData, GUI_WORK_RESIZE | GUI_WORK_UPDATE);
