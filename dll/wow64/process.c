@@ -13,6 +13,26 @@ typedef struct
     ULONG ReservedData, Input, Output, Error;
 } STARTUPINFO32;
 
+/* The guest kernel32's attribute list (proc.c): a header, then one entry per
+ * attribute pointing at the caller's value. */
+typedef struct
+{
+    ULONG Attribute, Size, Value;
+} PROC_THREAD_ATTRIBUTE_ENTRY32;
+
+typedef struct
+{
+    ULONG PresentFlags, AttributeCount, LastAttribute, SpareUlong0, ExtendedFlagsAttribute;
+    PROC_THREAD_ATTRIBUTE_ENTRY32 Attributes[ANYSIZE_ARRAY];
+} PROC_THREAD_ATTRIBUTE_LIST32;
+
+/* More attributes or handles than the guest kernel32 can have put in a list are refused */
+#define WOW64_MAX_ATTRIBUTES 32
+#define WOW64_MAX_LIST_HANDLES 0x10000
+
+typedef BOOL (WINAPI *INITIALIZE_ATTRIBUTES)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD, PSIZE_T);
+typedef BOOL (WINAPI *UPDATE_ATTRIBUTE)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD_PTR, PVOID, SIZE_T, PVOID, PSIZE_T);
+
 typedef BOOL (WINAPI *CREATE_PROCESS)(HANDLE, PCWSTR, PWSTR,
     SECURITY_ATTRIBUTES *, SECURITY_ATTRIBUTES *, BOOL, DWORD, PVOID, PCWSTR,
     STARTUPINFOW *, PROCESS_INFORMATION *, PHANDLE);
@@ -48,6 +68,60 @@ static VOID CaptureString(UNICODE_STRING *To, const WOW64_STRING *From)
     To->Buffer = PTR32(From->Buffer);
 }
 
+/* A native copy of the guest's attribute list. The guest kernel32 accepted it
+ * (handle list, ideal processor, mitigation policy); handle values widen,
+ * other values are read in place. *Handles gets the widened handle array. */
+static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_ATTRIBUTE_LIST *List, HANDLE **Handles)
+{
+    PROC_THREAD_ATTRIBUTE_LIST32 *From = PTR32(Address);
+    ANSI_STRING InitializeName = RTL_CONSTANT_STRING("InitializeProcThreadAttributeList");
+    ANSI_STRING UpdateName = RTL_CONSTANT_STRING("UpdateProcThreadAttribute");
+    INITIALIZE_ATTRIBUTES Initialize;
+    UPDATE_ATTRIBUTE Update;
+    PROC_THREAD_ATTRIBUTE_ENTRY32 Entry;
+    SIZE_T Size = 0;
+    ULONG Count, i, j;
+    NTSTATUS Status;
+
+    *List = NULL;
+    *Handles = NULL;
+    if (!From) return STATUS_SUCCESS;
+    Status = LdrGetProcedureAddress(Module, &InitializeName, 0, (PVOID *)&Initialize);
+    if (NT_SUCCESS(Status)) Status = LdrGetProcedureAddress(Module, &UpdateName, 0, (PVOID *)&Update);
+    if (!NT_SUCCESS(Status)) return Status;
+    Count = From->LastAttribute;
+    if (Count > From->AttributeCount || Count > WOW64_MAX_ATTRIBUTES) return STATUS_INVALID_PARAMETER;
+    Initialize(NULL, Count, 0, &Size);
+    *List = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+    if (!*List) return STATUS_NO_MEMORY;
+    if (!Initialize(*List, Count, 0, &Size)) return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < Count; ++i)
+    {
+        Entry = From->Attributes[i];
+        if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+        {
+            const ULONG *Values = PTR32(Entry.Value);
+            ULONG Number = Entry.Size / sizeof(ULONG);
+            if (*Handles || !Number || Entry.Size % sizeof(ULONG) || Number > WOW64_MAX_LIST_HANDLES)
+                return STATUS_INVALID_PARAMETER;
+            *Handles = RtlAllocateHeap(RtlGetProcessHeap(), 0, Number * sizeof(HANDLE));
+            if (!*Handles) return STATUS_NO_MEMORY;
+            for (j = 0; j < Number; ++j) (*Handles)[j] = HANDLE32(Values[j]);
+            if (!Update(*List, 0, Entry.Attribute, *Handles, Number * sizeof(HANDLE), NULL, NULL))
+                return STATUS_INVALID_PARAMETER;
+        }
+        else if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR ||
+                 Entry.Attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY)
+        {
+            /* PROCESSOR_NUMBER and the DWORD/DWORD64 policies have no pointers */
+            if (!Update(*List, 0, Entry.Attribute, PTR32(Entry.Value), Entry.Size, NULL, NULL))
+                return STATUS_INVALID_PARAMETER;
+        }
+        else return STATUS_NOT_SUPPORTED;
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS Wow64CreateProcess(PVOID Buffer)
 {
     WOW64_CREATE_PROCESS *Out = Buffer, Request = *Out;
@@ -56,7 +130,9 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer)
     WOW64_PARAMETERS *From = PTR32(Request.ParentParameters);
     RTL_USER_PROCESS_PARAMETERS Parent = *NtCurrentPeb()->ProcessParameters;
     STARTUPINFO32 In;
-    STARTUPINFOW Startup = {sizeof(Startup)};
+    STARTUPINFOEXW Startup = {{sizeof(Startup.StartupInfo)}};
+    LPPROC_THREAD_ATTRIBUTE_LIST AttributeList = NULL;
+    HANDLE *ListHandles = NULL;
     SECURITY_ATTRIBUTES ProcessSecurity, ThreadSecurity, *Ps, *Ts;
     SECURITY_DESCRIPTOR ProcessSd, ThreadSd;
     PROCESS_INFORMATION Info = {0};
@@ -80,19 +156,17 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer)
         for (i = 0; i < 4; ++i) ((volatile ULONG *)Result)[i] = 0;
         Out->Error = 0;
         if (Request.NewToken) *(volatile ULONG *)PTR32(Request.NewToken) = 0;
-        if (Request.CreationFlags & EXTENDED_STARTUPINFO_PRESENT)
-            _SEH2_YIELD(return STATUS_NOT_SUPPORTED);
         In = *(STARTUPINFO32 *)PTR32(Request.StartupInfo);
-        Startup.lpReserved = PTR32(In.Reserved);
-        Startup.lpDesktop = PTR32(In.Desktop);
-        Startup.lpTitle = PTR32(In.Title);
-        RtlCopyMemory(&Startup.dwX, &In.X, 8 * sizeof(ULONG));
-        Startup.wShowWindow = In.ShowWindow;
-        Startup.cbReserved2 = In.ReservedSize;
-        Startup.lpReserved2 = PTR32(In.ReservedData);
-        Startup.hStdInput = HANDLE32(In.Input);
-        Startup.hStdOutput = HANDLE32(In.Output);
-        Startup.hStdError = HANDLE32(In.Error);
+        Startup.StartupInfo.lpReserved = PTR32(In.Reserved);
+        Startup.StartupInfo.lpDesktop = PTR32(In.Desktop);
+        Startup.StartupInfo.lpTitle = PTR32(In.Title);
+        RtlCopyMemory(&Startup.StartupInfo.dwX, &In.X, 8 * sizeof(ULONG));
+        Startup.StartupInfo.wShowWindow = In.ShowWindow;
+        Startup.StartupInfo.cbReserved2 = In.ReservedSize;
+        Startup.StartupInfo.lpReserved2 = PTR32(In.ReservedData);
+        Startup.StartupInfo.hStdInput = HANDLE32(In.Input);
+        Startup.StartupInfo.hStdOutput = HANDLE32(In.Output);
+        Startup.StartupInfo.hStdError = HANDLE32(In.Error);
         Ps = CaptureSecurity(Request.ProcessAttributes, &ProcessSecurity, &ProcessSd);
         Ts = CaptureSecurity(Request.ThreadAttributes, &ThreadSecurity, &ThreadSd);
 
@@ -152,13 +226,20 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer)
         if (!NT_SUCCESS(Status)) _SEH2_LEAVE;
         Status = LdrGetProcedureAddress(Module, &Export, 0, (PVOID *)&Create);
         if (!NT_SUCCESS(Status)) _SEH2_LEAVE;
+        if (Request.CreationFlags & EXTENDED_STARTUPINFO_PRESENT)
+        {
+            Startup.StartupInfo.cb = sizeof(Startup);
+            Status = CaptureAttributeList(Module, Request.AttributeList, &AttributeList, &ListHandles);
+            if (!NT_SUCCESS(Status)) _SEH2_LEAVE;
+            Startup.lpAttributeList = AttributeList;
+        }
 
         Cpu->ProcessParameters = &Parent;
         if (!Create(HANDLE32(Request.Token), Application, PTR32(Request.CommandLine), Ps, Ts,
                     Request.InheritHandles, Request.CreationFlags | CREATE_SUSPENDED,
                     Request.Environment ? PTR32(Request.Environment) : Parent.Environment,
                     Request.CurrentDirectory ? PTR32(Request.CurrentDirectory) : Parent.CurrentDirectory.DosPath.Buffer,
-                    &Startup, &Info, Request.NewToken ? &NewToken : NULL))
+                    &Startup.StartupInfo, &Info, Request.NewToken ? &NewToken : NULL))
         {
             Out->Error = NtCurrentTeb()->LastErrorValue;
             if (!Out->Error) Out->Error = ERROR_GEN_FAILURE;
@@ -186,6 +267,8 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer)
     }
     if (Info.hThread) NtClose(Info.hThread);
     if (NewToken) NtClose(NewToken);
+    if (AttributeList) RtlFreeHeap(RtlGetProcessHeap(), 0, AttributeList);
+    if (ListHandles) RtlFreeHeap(RtlGetProcessHeap(), 0, ListHandles);
     if (Application) RtlFreeHeap(RtlGetProcessHeap(), 0, Application);
     if (Redirected) RtlFreeHeap(RtlGetProcessHeap(), 0, Redirected);
     RtlFreeUnicodeString(&Path);
