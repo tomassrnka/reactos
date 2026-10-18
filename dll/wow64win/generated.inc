@@ -23,10 +23,6 @@ case W64_NtUserCreateCaret: return (ULONG_PTR)NtUserCreateCaret((HWND)((LONG_PTR
 case W64_NtUserCreateInputContext: return (ULONG_PTR)NtUserCreateInputContext((ULONG_PTR)(a[0]));
 case W64_NtUserCreateLocalMemHandle: return (ULONG_PTR)NtUserCreateLocalMemHandle((HANDLE)((LONG_PTR)(LONG)a[0]), (PVOID)((ULONG_PTR)a[1]), (DWORD)(a[2]), (DWORD *)((ULONG_PTR)a[3]));
 case W64_NtUserCtxDisplayIOCtl: return (ULONG_PTR)NtUserCtxDisplayIOCtl((DWORD)(a[0]), (DWORD)(a[1]), (DWORD)(a[2]));
-#if DBG
-case W64_NtUserDbgWin32HeapFail: return (ULONG_PTR)NtUserDbgWin32HeapFail((DWORD)(a[0]), (DWORD)(a[1]));
-case W64_NtUserDbgWin32HeapStat: return (ULONG_PTR)NtUserDbgWin32HeapStat((DWORD)(a[0]), (DWORD)(a[1]));
-#endif
 case W64_NtUserDdeGetQualityOfService: return (ULONG_PTR)NtUserDdeGetQualityOfService((HWND)((LONG_PTR)(LONG)a[0]), (HWND)((LONG_PTR)(LONG)a[1]), (PSECURITY_QUALITY_OF_SERVICE)((ULONG_PTR)a[2]));
 case W64_NtUserDdeInitialize: return (ULONG_PTR)NtUserDdeInitialize((DWORD)(a[0]), (DWORD)(a[1]), (DWORD)(a[2]), (DWORD)(a[3]), (DWORD)(a[4]));
 case W64_NtUserDdeSetQualityOfService: return (ULONG_PTR)NtUserDdeSetQualityOfService((HWND)((LONG_PTR)(LONG)a[0]), (PSECURITY_QUALITY_OF_SERVICE)((ULONG_PTR)a[1]), (PSECURITY_QUALITY_OF_SERVICE)((ULONG_PTR)a[2]));
@@ -160,6 +156,7 @@ case W64_NtUserSetMenu: return (ULONG_PTR)NtUserSetMenu((HWND)((LONG_PTR)(LONG)a
 case W64_NtUserSetMenuContextHelpId: return (ULONG_PTR)NtUserSetMenuContextHelpId((HMENU)((LONG_PTR)(LONG)a[0]), (DWORD)(a[1]));
 case W64_NtUserSetMenuDefaultItem: return (ULONG_PTR)NtUserSetMenuDefaultItem((HMENU)((LONG_PTR)(LONG)a[0]), (UINT)(a[1]), (UINT)(a[2]));
 case W64_NtUserSetMenuFlagRtoL: return (ULONG_PTR)NtUserSetMenuFlagRtoL((HMENU)((LONG_PTR)(LONG)a[0]));
+case W64_NtUserSetObjectInformation: return (ULONG_PTR)NtUserSetObjectInformation((HANDLE)((LONG_PTR)(LONG)a[0]), (DWORD)(a[1]), (PVOID)((ULONG_PTR)a[2]), (DWORD)(a[3]));
 case W64_NtUserSetParent: return (ULONG_PTR)NtUserSetParent((HWND)((LONG_PTR)(LONG)a[0]), (HWND)((LONG_PTR)(LONG)a[1]));
 case W64_NtUserSetProcessWindowStation: return (ULONG_PTR)NtUserSetProcessWindowStation((HWINSTA)((LONG_PTR)(LONG)a[0]));
 case W64_NtUserSetProp: return (ULONG_PTR)NtUserSetProp((HWND)((LONG_PTR)(LONG)a[0]), (ATOM)(a[1]), (HANDLE)((ULONG_PTR)a[2]));
@@ -233,6 +230,7 @@ case W64_NtGdiComputeXformCoefficients: return (ULONG_PTR)NtGdiComputeXformCoeff
 case W64_NtGdiConvertMetafileRect: return (ULONG_PTR)NtGdiConvertMetafileRect((HDC)((ULONG_PTR)a[0]), (PRECTL)((ULONG_PTR)a[1]));
 case W64_NtGdiCreateBitmap: return (ULONG_PTR)NtGdiCreateBitmap((INT)((LONG)a[0]), (INT)((LONG)a[1]), (UINT)(a[2]), (UINT)(a[3]), (LPBYTE)((ULONG_PTR)a[4]));
 case W64_NtGdiCreateClientObj: return (ULONG_PTR)NtGdiCreateClientObj((ULONG)(a[0]));
+case W64_NtGdiCreateColorTransform: return (ULONG_PTR)NtGdiCreateColorTransform((HDC)((ULONG_PTR)a[0]), (LPLOGCOLORSPACEW)((ULONG_PTR)a[1]), (PVOID)((ULONG_PTR)a[2]), (ULONG)(a[3]), (PVOID)((ULONG_PTR)a[4]), (ULONG)(a[5]), (PVOID)((ULONG_PTR)a[6]), (ULONG)(a[7]));
 case W64_NtGdiCreateCompatibleBitmap: return (ULONG_PTR)NtGdiCreateCompatibleBitmap((HDC)((ULONG_PTR)a[0]), (INT)((LONG)a[1]), (INT)((LONG)a[2]));
 case W64_NtGdiCreateCompatibleDC: return (ULONG_PTR)NtGdiCreateCompatibleDC((HDC)((ULONG_PTR)a[0]));
 case W64_NtGdiCreateDIBBrush: return (ULONG_PTR)NtGdiCreateDIBBrush((PVOID)((ULONG_PTR)a[0]), (FLONG)(a[1]), (UINT)(a[2]), (BOOL)((LONG)a[3]), (BOOL)((LONG)a[4]), (PVOID)((ULONG_PTR)a[5]));
@@ -270,6 +268,7 @@ case W64_NtGdiDeleteObjectApp: return (ULONG_PTR)NtGdiDeleteObjectApp((HANDLE)((
 case W64_NtGdiDescribePixelFormat: return (ULONG_PTR)NtGdiDescribePixelFormat((HDC)((ULONG_PTR)a[0]), (INT)((LONG)a[1]), (UINT)(a[2]), (PPIXELFORMATDESCRIPTOR)((ULONG_PTR)a[3]));
 case W64_NtGdiGetPerBandInfo: return (ULONG_PTR)NtGdiGetPerBandInfo((HDC)((ULONG_PTR)a[0]), (PERBANDINFO *)((ULONG_PTR)a[1]));
 case W64_NtGdiDoBanding: return (ULONG_PTR)NtGdiDoBanding((HDC)((ULONG_PTR)a[0]), (BOOL)((LONG)a[1]), (POINTL *)((ULONG_PTR)a[2]), (PSIZE)((ULONG_PTR)a[3]));
+case W64_NtGdiDrawEscape: return (ULONG_PTR)NtGdiDrawEscape((HDC)((ULONG_PTR)a[0]), (INT)((LONG)a[1]), (INT)((LONG)a[2]), (LPSTR)((ULONG_PTR)a[3]));
 case W64_NtGdiEllipse: return (ULONG_PTR)NtGdiEllipse((HDC)((ULONG_PTR)a[0]), (INT)((LONG)a[1]), (INT)((LONG)a[2]), (INT)((LONG)a[3]), (INT)((LONG)a[4]));
 case W64_NtGdiEnableEudc: return (ULONG_PTR)NtGdiEnableEudc((BOOL)((LONG)a[0]));
 case W64_NtGdiEndDoc: return (ULONG_PTR)NtGdiEndDoc((HDC)((ULONG_PTR)a[0]));

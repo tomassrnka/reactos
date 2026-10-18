@@ -143,9 +143,6 @@ ULONG_PTR Wow64WinUserImeService(ULONG Number, ULONG *a)
         /* An unreadable ID goes down as NULL so the kernel validates Flags before it faults on the ID. */
         return HandleToUlong(NtUserLoadKeyboardLayoutEx(H(0), a[1], P(2), H(3), Valid ? &Id : NULL, a[5], a[6]));
     }
-    case W64_NtUserUpdateInputContext:
-        /* UIC_IMEWINDOW carries an HWND (sign-extended); UIC_CLIENTIMCDATA carries a client address. */
-        return NtUserUpdateInputContext(H(0), a[1], a[1] == UIC_IMEWINDOW ? (DWORD_PTR)(LONG_PTR)(LONG)a[2] : (DWORD_PTR)a[2]);
     default:
         return Wow64WinUserDisplayService(Number, a);
     }
