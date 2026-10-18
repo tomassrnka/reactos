@@ -221,6 +221,17 @@ ReassembleDatagram(
   TI_DbgPrint(DEBUG_IP, ("IPDR->HeaderSize = %d\n", IPDR->HeaderSize));
   TI_DbgPrint(DEBUG_IP, ("IPDR->DataSize = %d\n", IPDR->DataSize));
 
+  /* The admission check bounds the payload alone to 65535 octets; with the
+     header the datagram can exceed the maximum IP datagram size. The upper
+     layers take 16-bit lengths (lwIP's pbuf_alloc() would truncate 65536 to
+     0), so drop such a datagram, as Windows does. */
+  if (IPDR->HeaderSize + IPDR->DataSize > 0xFFFF)
+  {
+    TI_DbgPrint(MIN_TRACE, ("Reassembled datagram exceeds 65535 octets; dropping.\n"));
+    (*IPPacket->Free)(IPPacket);
+    return FALSE;
+  }
+
   IPPacket->TotalSize  = IPDR->HeaderSize + IPDR->DataSize;
   IPPacket->HeaderSize = IPDR->HeaderSize;
 
