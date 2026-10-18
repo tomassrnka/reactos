@@ -1972,14 +1972,9 @@ static int uia_runtime_id_compare(const void *key, const struct rb_entry *entry)
     return uia_compare_safearrays(prov_entry->runtime_id, (SAFEARRAY *)key, UIAutomationType_IntArray);
 }
 
-void uia_provider_thread_remove_node(HUIANODE node)
+/* Caller holds provider_thread_cs. */
+static void uia_provider_thread_unlink_node(struct uia_node *node_data)
 {
-    struct uia_node *node_data = impl_from_IWineUiaNode((IWineUiaNode *)node);
-
-    TRACE("Removing node %p\n", node);
-
-    EnterCriticalSection(&provider_thread_cs);
-
     list_remove(&node_data->prov_thread_list_entry);
     list_init(&node_data->prov_thread_list_entry);
     if (!list_empty(&node_data->node_map_list_entry))
@@ -1994,12 +1989,59 @@ void uia_provider_thread_remove_node(HUIANODE node)
         }
         node_data->map = NULL;
     }
+}
 
+void uia_provider_thread_remove_node(HUIANODE node)
+{
+    struct uia_node *node_data = impl_from_IWineUiaNode((IWineUiaNode *)node);
+
+    TRACE("Removing node %p\n", node);
+
+    EnterCriticalSection(&provider_thread_cs);
+    uia_provider_thread_unlink_node(node_data);
     LeaveCriticalSection(&provider_thread_cs);
+}
+
+/*
+ * A node whose last reference is gone is being destroyed by uia_node_Release, which releases its providers before
+ * it unlinks the node under provider_thread_cs. Such a node can still be in the lists and must not be pinned.
+ */
+static BOOL uia_node_add_ref_unless_zero(struct uia_node *node_data)
+{
+    LONG ref, old;
+
+    for (ref = node_data->ref; ref; ref = old)
+    {
+        old = InterlockedCompareExchange(&node_data->ref, ref + 1, ref);
+        if (old == ref)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * The nodes were pinned, unlinked and disconnected under provider_thread_cs, and are on a private list through
+ * prov_thread_list_entry. Releasing a provider calls into the application, which can come back here, so this runs
+ * without the lock and touches no shared list.
+ */
+static void uia_provider_thread_disconnect_nodes(struct list *nodes)
+{
+    struct list *cursor;
+
+    while ((cursor = list_head(nodes)))
+    {
+        struct uia_node *node_data = LIST_ENTRY(cursor, struct uia_node, prov_thread_list_entry);
+
+        list_remove(cursor);
+        list_init(cursor);
+        uia_node_release_detached_provider(node_data);
+        IWineUiaNode_Release(&node_data->IWineUiaNode_iface);
+    }
 }
 
 static void uia_provider_thread_disconnect_node(SAFEARRAY *sa)
 {
+    struct list pinned = LIST_INIT(pinned);
     struct rb_entry *rb_entry;
 
     EnterCriticalSection(&provider_thread_cs);
@@ -2020,22 +2062,30 @@ static void uia_provider_thread_disconnect_node(SAFEARRAY *sa)
         {
             node_data = LIST_ENTRY(cursor, struct uia_node, node_map_list_entry);
 
+            if (!uia_node_add_ref_unless_zero(node_data))
+                continue;
+
             list_remove(cursor);
-            list_remove(&node_data->prov_thread_list_entry);
-            list_init(&node_data->prov_thread_list_entry);
             list_init(&node_data->node_map_list_entry);
             node_data->map = NULL;
-
-            IWineUiaNode_disconnect(&node_data->IWineUiaNode_iface);
+            list_remove(&node_data->prov_thread_list_entry);
+            uia_node_detach_provider(node_data);
+            list_add_tail(&pinned, &node_data->prov_thread_list_entry);
         }
 
-        rb_remove(&provider_thread.node_map, &prov_map->entry);
-        SafeArrayDestroy(prov_map->runtime_id);
-        free(prov_map);
+        /* A node that is being destroyed removes the map itself. */
+        if (list_empty(&prov_map->nodes_list))
+        {
+            rb_remove(&provider_thread.node_map, &prov_map->entry);
+            SafeArrayDestroy(prov_map->runtime_id);
+            free(prov_map);
+        }
     }
 
 exit:
     LeaveCriticalSection(&provider_thread_cs);
+
+    uia_provider_thread_disconnect_nodes(&pinned);
 }
 
 static HRESULT uia_provider_thread_add_node(HUIANODE node, SAFEARRAY *rt_id)
@@ -2314,6 +2364,42 @@ HRESULT WINAPI UiaDisconnectProvider(IRawElementProviderSimple *elprov)
     uia_provider_thread_disconnect_node(sa);
 
     SafeArrayDestroy(sa);
+
+    return S_OK;
+}
+
+/*
+ * Wine (11.19) only has a stub here. Windows 10 returns S_OK, also when no provider was ever created. The nodes that
+ * clients are connected to are disconnected as UiaDisconnectProvider does it.
+ */
+HRESULT WINAPI UiaDisconnectAllProviders(void)
+{
+    struct list pinned = LIST_INIT(pinned);
+    struct list *cursor, *cursor2;
+
+    TRACE("()\n");
+
+    EnterCriticalSection(&provider_thread_cs);
+
+    /* Provider thread hasn't been started, no nodes to disconnect. */
+    if (provider_thread.ref)
+    {
+        LIST_FOR_EACH_SAFE(cursor, cursor2, &provider_thread.nodes_list)
+        {
+            struct uia_node *node_data = LIST_ENTRY(cursor, struct uia_node, prov_thread_list_entry);
+
+            if (!uia_node_add_ref_unless_zero(node_data))
+                continue;
+
+            uia_provider_thread_unlink_node(node_data);
+            uia_node_detach_provider(node_data);
+            list_add_tail(&pinned, &node_data->prov_thread_list_entry);
+        }
+    }
+
+    LeaveCriticalSection(&provider_thread_cs);
+
+    uia_provider_thread_disconnect_nodes(&pinned);
 
     return S_OK;
 }

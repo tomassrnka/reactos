@@ -529,10 +529,43 @@ static HRESULT WINAPI uia_node_get_prop_val(IWineUiaNode *iface, const GUID *pro
     return hr;
 }
 
+/*
+ * A disconnection is done in two steps so that the provider thread code can do the first one under its lock and the
+ * second one without it: releasing the provider calls into the application, which can ask for this node, or
+ * disconnect other nodes, and has to see this node as disconnected by then.
+ */
+void uia_node_detach_provider(struct uia_node *node)
+{
+    int prov_type;
+
+    /* Nested nodes can only have one provider. */
+    prov_type = get_node_provider_type_at_idx(node, 0);
+    node->detached_prov = node->prov[prov_type];
+    node->detached_git_cookie = node->git_cookie[prov_type];
+    node->prov[prov_type] = NULL;
+    node->git_cookie[prov_type] = 0;
+
+    node->disconnected = TRUE;
+    node->prov_count = 0;
+}
+
+void uia_node_release_detached_provider(struct uia_node *node)
+{
+    IWineUiaProvider *prov = node->detached_prov;
+    DWORD git_cookie = node->detached_git_cookie;
+
+    node->detached_prov = NULL;
+    node->detached_git_cookie = 0;
+
+    if (git_cookie && FAILED(unregister_interface_in_git(git_cookie)))
+        WARN("Failed to get revoke provider interface from GIT\n");
+
+    IWineUiaProvider_Release(prov);
+}
+
 static HRESULT WINAPI uia_node_disconnect(IWineUiaNode *iface)
 {
     struct uia_node *node = impl_from_IWineUiaNode(iface);
-    int prov_type;
 
     TRACE("%p\n", node);
 
@@ -542,20 +575,8 @@ static HRESULT WINAPI uia_node_disconnect(IWineUiaNode *iface)
         return E_FAIL;
     }
 
-    /* Nested nodes can only have one provider. */
-    prov_type = get_node_provider_type_at_idx(node, 0);
-    if (node->git_cookie[prov_type])
-    {
-        if (FAILED(unregister_interface_in_git(node->git_cookie[prov_type])))
-            WARN("Failed to get revoke provider interface from GIT\n");
-        node->git_cookie[prov_type] = 0;
-    }
-
-    IWineUiaProvider_Release(node->prov[prov_type]);
-    node->prov[prov_type] = NULL;
-
-    node->disconnected = TRUE;
-    node->prov_count = 0;
+    uia_node_detach_provider(node);
+    uia_node_release_detached_provider(node);
 
     return S_OK;
 }
