@@ -67,9 +67,9 @@ static ULONG GuestStackFloor(const TEB32 *Teb32)
 
 /* Touches the guest stack pages from the committed limit down to Low in
  * order, so that each one is the guard page when it is reached and the
- * stack grows page by page instead of being skipped. Raises (under the
- * caller's SEH) when the stack cannot grow any further. A macro, not a call:
- * the frame may lie in pages that are not committed yet. */
+ * stack grows page by page instead of being skipped. When the stack cannot
+ * grow any further the touch raises. A macro, not a call: the frame may lie
+ * in pages that are not committed yet. */
 #define WOW64_GROW_GUEST_STACK(Teb32, Low) do { \
     ULONG_PTR Page_ = (ULONG_PTR)(Teb32)->NtTib.StackLimit; \
     while (Page_ > ((ULONG_PTR)(Low) & ~((ULONG_PTR)PAGE_SIZE - 1))) \
@@ -143,7 +143,10 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
     Wow64CpuRun(&Cpu);
 }
 
-VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
+/* Stack the worker below needs under its caller: its CONTEXT, the guest frame and its calls, with room */
+#define WOW64_DISPATCH_RESERVE 0x2000
+
+static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, PCONTEXT Context, TEB32 *Teb32)
 {
     struct
     {
@@ -154,29 +157,12 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     CONTEXT Native;
     ULONG i;
     NTSTATUS Status;
-    TEB32 *Teb32 = NULL;
-    volatile BOOLEAN Grown;
 
-    if (Context->SegCs != 0x23) return;
-    Teb32 = WOW64_TEB32(NtCurrentTeb());
     if (!Wow64ExceptionDispatcher ||
         (ULONG_PTR)&Frame < GuestStackFloor(Teb32) ||
         (ULONG_PTR)&Native < GuestStackFloor(Teb32) ||
         (ULONG_PTR)(&Frame + 1) > Teb32->NtTib.StackBase)
         goto Failed;
-    /* These locals lie below the kernel's frame on the guest stack: grow the
-     * stack over them before they are written */
-    Grown = TRUE;
-    _SEH2_TRY
-    {
-        WOW64_GROW_GUEST_STACK(Teb32, min((ULONG_PTR)&Native, (ULONG_PTR)&Frame));
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        Grown = FALSE;
-    }
-    _SEH2_END;
-    if (!Grown) goto Failed;
 
     /* The kernel's amd64 frame already lives on the guest stack. A local
      * frame is below it and cannot overwrite the source context or record.
@@ -202,8 +188,34 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     DbgPrint("WoW64: exception dispatch failed: %08lx\n", Status);
 Failed:
     DbgPrint("WoW64: cannot dispatch guest exception %08lx (frame %p, guest stack %08lx-%08lx)\n",
-             Record->ExceptionCode, &Frame, Teb32 ? Teb32->NtTib.StackLimit : 0, Teb32 ? Teb32->NtTib.StackBase : 0);
+             Record->ExceptionCode, &Frame, Teb32->NtTib.StackLimit, Teb32->NtTib.StackBase);
     NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
+}
+
+VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
+{
+    TEB32 *Teb32;
+    ULONG_PTR Low;
+
+    if (Context->SegCs != 0x23) return;
+    Teb32 = WOW64_TEB32(NtCurrentTeb());
+    /* The worker's locals lie below the kernel's frame on the guest stack, in
+     * pages that may not be committed yet. Grow the stack over them here,
+     * before anything below this small frame has been written. */
+#ifdef __GNUC__
+    Low = (ULONG_PTR)__builtin_frame_address(0);
+#else
+    Low = (ULONG_PTR)_AddressOfReturnAddress();
+#endif
+    Low -= WOW64_DISPATCH_RESERVE;
+    if (Low < GuestStackFloor(Teb32) || Low >= Teb32->NtTib.StackBase)
+    {
+        DbgPrint("WoW64: no guest stack left to dispatch exception %08lx\n", Record->ExceptionCode);
+        NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
+        return;
+    }
+    WOW64_GROW_GUEST_STACK(Teb32, Low);
+    DispatchGuestException(Record, Context, Teb32);
 }
 
 NTSTATUS Wow64RaiseException(const EXCEPTION_RECORD32 *Record, const WOW64_CONTEXT *Context,
