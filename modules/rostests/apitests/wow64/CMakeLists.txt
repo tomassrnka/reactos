@@ -119,6 +119,10 @@ add_executable(wow64_notify EXCLUDE_FROM_ALL notify.c)
 set_module_type(wow64_notify win32cui)
 add_importlibs(wow64_notify user32 msvcrt kernel32)
 
+add_executable(wow64_thread_tls EXCLUDE_FROM_ALL thread_tls.c)
+set_module_type(wow64_thread_tls win32cui)
+add_importlibs(wow64_thread_tls msvcrt kernel32)
+
 add_executable(wow64_relative_pipe EXCLUDE_FROM_ALL relative_pipe.c)
 set_module_type(wow64_relative_pipe win32cui)
 add_importlibs(wow64_relative_pipe msvcrt kernel32)

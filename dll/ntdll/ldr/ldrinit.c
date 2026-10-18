@@ -3180,7 +3180,13 @@ LdrpInitializeProcess(IN PCONTEXT Context,
 
     /* Initialize TLS */
 #ifdef BUILD_WOW64_ENABLED
-    if (IsWow64) Status = STATUS_SUCCESS;
+    if (IsWow64)
+    {
+        /* The i386 loader owns the PE32 image's TLS. The native list stays
+         * empty, but every later thread walks it and gets an (empty) vector */
+        InitializeListHead(&LdrpTlsList);
+        Status = LdrpAllocateTls();
+    }
     else
 #endif
     Status = LdrpInitializeTls();
