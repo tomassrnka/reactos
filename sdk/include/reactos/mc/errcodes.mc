@@ -18,6 +18,7 @@ SeverityNames=(Success=0x0:STATUS_SEVERITY_SUCCESS
 FacilityNames=(System=0x0:FACILITY_SYSTEM
                ITF=0x4:FACILITY_ITF
                WIN32=0x7:FACILITY_GENERAL
+               Trust=0xB:FACILITY_TRUST
               )
 
 LanguageNames=(English=0x409:MSG00409
@@ -42976,7 +42977,27 @@ Language=Japanese
 指定されたチャネルパスが、複数のチャネルのインスタンスを選択する。この操作では、1 つのチャネルのみが選択される必要があります。1つのインスタンスのみを選択するために、チャネルパスを version / publicKeyToken にスコープする必要があるかもしれません。
 .
 
-MessageId=0x0001
+MessageId=0x0100
+Severity=Warning
+Facility=Trust
+SymbolicName=TRUST_E_NOSIGNATURE
+Language=English
+No Signature found in file
+.
+Language=Russian
+No Signature found in file
+.
+Language=Polish
+No Signature found in file
+.
+Language=Romanian
+No Signature found in file
+.
+Language=Japanese
+No Signature found in file
+.
+
+MessageId=0x4001
 Severity=Warning
 Facility=System
 SymbolicName=E_NOTIMPL

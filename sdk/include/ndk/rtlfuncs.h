@@ -22,6 +22,7 @@ Author:
 //
 // Dependencies
 //
+#include <stdarg.h>
 #include <umtypes.h>
 #include <ntnls.h>
 #include <rtltypes.h>
@@ -3963,6 +3964,21 @@ RtlFindMessage(
     _In_ ULONG Language,
     _In_ ULONG MessageId,
     _Out_ PMESSAGE_RESOURCE_ENTRY *MessageResourceEntry
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlFormatMessage(
+    _In_ PWSTR Message,
+    _In_ ULONG MaxWidth,
+    _In_ BOOLEAN IgnoreInserts,
+    _In_ BOOLEAN ArgumentsAreAnsi,
+    _In_ BOOLEAN ArgumentsAreAnArray,
+    _In_ va_list *Arguments,
+    _Out_writes_bytes_(BufferSize) PWSTR Buffer,
+    _In_ ULONG BufferSize,
+    _Out_opt_ PULONG ReturnLength
 );
 
 NTSYSAPI
