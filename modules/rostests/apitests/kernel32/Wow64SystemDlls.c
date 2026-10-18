@@ -59,6 +59,15 @@ START_TEST(Wow64SystemDlls)
         FreeLibrary(Module);
     }
 
+    /* Firefox creates its font resources through DirectWrite */
+    Module = LoadSystemDll(L"dwrite.dll");
+    if (Module)
+    {
+        ok(GetProcAddress(Module, "DWriteCreateFactory") != NULL,
+           "DWriteCreateFactory missing: %lu\n", GetLastError());
+        FreeLibrary(Module);
+    }
+
     Module = LoadSystemDll(L"ncrypt.dll");
     if (Module)
     {
