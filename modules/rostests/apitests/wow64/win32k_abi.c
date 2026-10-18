@@ -90,6 +90,30 @@ int main(void)
     for(i=0;i<4;++i) CHECK(Message.Guard[i]==0xa5a5a5a5);
     CHECK(NtUserRealInternalGetMessage(NULL,NULL,0,0,PM_NOREMOVE,TRUE)==FALSE);
     CHECK(NtUserRealInternalGetMessage(NULL,NULL,0,0,PM_NOREMOVE,FALSE)==FALSE);
+    {
+        /* Keyboards and mice carry no preparsed data; the translator passes the empty answer through. */
+        RAWINPUTDEVICELIST Devices[16];
+        UINT Count=ARRAYSIZE(Devices),Size,Got,j;
+        UINT Tested=0;
+        BYTE Blob[8];
+        Got=GetRawInputDeviceList(Devices,&Count,sizeof(Devices[0]));
+        CHECK(Got!=(UINT)-1);
+        for(j=0;Got!=(UINT)-1 && j<Got;++j)
+        {
+            if (Devices[j].dwType==RIM_TYPEHID) continue;
+            ++Tested;
+            Size=0x1234;
+            CHECK(GetRawInputDeviceInfoW(Devices[j].hDevice,RIDI_PREPARSEDDATA,NULL,&Size)==0 && Size==0);
+            Size=sizeof(Blob); RtlFillMemory(Blob,sizeof(Blob),0xa5);
+            CHECK(GetRawInputDeviceInfoW(Devices[j].hDevice,RIDI_PREPARSEDDATA,Blob,&Size)==0);
+            CHECK(Size==sizeof(Blob) && Blob[0]==0xa5);
+            /* Nothing is copied, so native never probes the buffer either. */
+            Size=0;
+            CHECK(GetRawInputDeviceInfoW(Devices[j].hDevice,RIDI_PREPARSEDDATA,(PVOID)1,&Size)==0);
+        }
+        /* The VM always has a keyboard and a mouse. */
+        CHECK(Tested>0);
+    }
     CHECK(NtUserMessageCall(Window,WM_APP,0,0,(ULONG_PTR)&Result,FNID_SENDMESSAGE,FALSE));
     CHECK(Result==-123);
     CHECK(GetLastError()==0x1234);
