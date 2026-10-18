@@ -8,6 +8,7 @@
 
 #include <stdlib.h>
 #include <errno.h>
+#include <wctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
@@ -140,7 +141,11 @@ static char *read_console(size_t *size)
         }
         got = fread(data + used, 1, allocated - used, stdin);
         if (got == 0)
+        {
+            if (ferror(stdin))
+                fail_crt(L"SORT", errno);
             break;
+        }
         used += got;
     }
 
@@ -164,7 +169,15 @@ static int compare_lines(const void *a, const void *b)
 
     if (ordinal)
     {
-        result = _wcsnicmp(ka, kb, min(la, lb));
+        /* Ordinal, without case, and a NUL is a character like any other */
+        int i, n = min(la, lb);
+
+        result = 0;
+        for (i = 0; i < n && result == 0; i++)
+        {
+            WCHAR ca = towlower(ka[i]), cb = towlower(kb[i]);
+            result = (ca > cb) - (ca < cb);
+        }
         if (result == 0)
             result = (la > lb) - (la < lb);
     }
@@ -320,9 +333,19 @@ int wmain(int argc, WCHAR **argv)
         if (handle == INVALID_HANDLE_VALUE)
             fail_system(output, GetLastError());
         n = _open_osfhandle((intptr_t)handle, 0);
-        out = (n == -1) ? NULL : _fdopen(n, "wb");
+        if (n == -1)
+        {
+            CloseHandle(handle);
+            fail_crt(output, errno);
+        }
+        out = _fdopen(n, "wb");
         if (out == NULL)
-            fail("SORT: Insufficient memory");
+        {
+            int error = errno;
+
+            _close(n);
+            fail_crt(output, error);
+        }
     }
     else
     {
