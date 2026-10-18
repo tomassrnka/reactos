@@ -10598,6 +10598,13 @@ static void test_completion_port(void)
 
     Sleep(100);
 
+    io_info.Flags = 0;
+    status = pNtQueryInformationFile((HANDLE)dest, &io, &io_info, sizeof(io_info), FileIoCompletionNotificationInformation);
+    ok(status == STATUS_SUCCESS || broken(status == STATUS_INVALID_INFO_CLASS) /* XP */,
+       "expected STATUS_SUCCESS, got %08x\n", status);
+    if (status == STATUS_SUCCESS)
+        ok((io_info.Flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) != 0, "got %08x\n", io_info.Flags);
+
     closesocket(dest);
     dest = INVALID_SOCKET;
 
@@ -10613,13 +10620,6 @@ static void test_completion_port(void)
     ok(num_bytes == 1, "Number of bytes transferred is %u\n", num_bytes);
     ok(olp == &ov, "Overlapped structure is at %p\n", olp);
     ok(olp && (olp->Internal == (ULONG)STATUS_SUCCESS), "Internal status is %lx\n", olp ? olp->Internal : 0);
-
-    io_info.Flags = 0;
-    status = pNtQueryInformationFile((HANDLE)dest, &io, &io_info, sizeof(io_info), FileIoCompletionNotificationInformation);
-    ok(status == STATUS_SUCCESS || broken(status == STATUS_INVALID_INFO_CLASS) /* XP */,
-       "expected STATUS_SUCCESS, got %08x\n", status);
-    if (status == STATUS_SUCCESS)
-        ok((io_info.Flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) != 0, "got %08x\n", io_info.Flags);
 
     SetLastError(0xdeadbeef);
     key = 0xdeadbeef;
