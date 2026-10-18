@@ -152,6 +152,25 @@ IsDevicePresent(PSP_DEVINFO_DATA pDevInfoData)
     return CM_Get_DevNode_Status(&ulStatus, &ulProblem, pDevInfoData->DevInst, 0) == CR_SUCCESS;
 }
 
+/* A device that is not in the device tree, as opposed to a query that failed */
+static BOOL
+IsNoSuchDevNode(CONFIGRET cr)
+{
+    return cr == CR_NO_SUCH_DEVNODE || cr == CR_INVALID_DEVNODE;
+}
+
+/* Present or absent; FALSE if that cannot be told, the search is then incomplete */
+static BOOL
+GetDevicePresence(PSP_DEVINFO_DATA pDevInfoData, PBOOL pbPresent)
+{
+    ULONG ulStatus, ulProblem;
+    CONFIGRET cr;
+
+    cr = CM_Get_DevNode_Status(&ulStatus, &ulProblem, pDevInfoData->DevInst, 0);
+    *pbPresent = (cr == CR_SUCCESS);
+    return cr == CR_SUCCESS || IsNoSuchDevNode(cr);
+}
+
 /* Instance IDs of the devices present before the search, as one multi-string */
 static LPWSTR
 GetPresentDeviceIds(VOID)
@@ -162,6 +181,7 @@ GetPresentDeviceIds(VOID)
     LPWSTR pszIds, pszNew;
     SIZE_T cchUsed = 0, cchMax = 4096, cchId;
     DWORD Index;
+    BOOL bPresent, bComplete = TRUE;
 
     hDevInfo = SetupDiGetClassDevsW(NULL, NULL, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
     if (hDevInfo == INVALID_HANDLE_VALUE)
@@ -171,11 +191,15 @@ GetPresentDeviceIds(VOID)
     DevInfoData.cbSize = sizeof(DevInfoData);
     for (Index = 0; pszIds && SetupDiEnumDeviceInfo(hDevInfo, Index, &DevInfoData); Index++)
     {
-        if (!IsDevicePresent(&DevInfoData) ||
-            !GetDeviceInstanceId(hDevInfo, &DevInfoData, szId, ARRAYSIZE(szId)))
+        /* A device missing from this list would be reported as found: an incomplete list fails the search */
+        if (!GetDevicePresence(&DevInfoData, &bPresent) ||
+            (bPresent && !GetDeviceInstanceId(hDevInfo, &DevInfoData, szId, ARRAYSIZE(szId))))
         {
-            continue;
+            bComplete = FALSE;
+            break;
         }
+        if (!bPresent)
+            continue;
 
         cchId = wcslen(szId) + 1;
         if (cchUsed + cchId + 1 > cchMax)
@@ -192,6 +216,11 @@ GetPresentDeviceIds(VOID)
         }
         CopyMemory(pszIds + cchUsed, szId, cchId * sizeof(WCHAR));
         cchUsed += cchId;
+    }
+    if (pszIds && (!bComplete || GetLastError() != ERROR_NO_MORE_ITEMS))
+    {
+        HeapFree(hProcessHeap, 0, pszIds);
+        pszIds = NULL;
     }
     if (pszIds)
         pszIds[cchUsed] = UNICODE_NULL;
@@ -246,21 +275,29 @@ CountDevices(HDEVINFO hDevInfo, PDWORD pdwPending)
 static BOOL
 ReenumerateChildren(DEVINST devParent, ULONG ulDepth)
 {
-    DEVINST devChild;
+    DEVINST devChild, devLast = devParent;
     ULONG ulStatus, ulProblem;
-    CONFIGRET cr;
-    BOOL bResult = TRUE;
+    CONFIGRET cr, crStatus;
+    BOOL bResult = TRUE, bLastAnswered = TRUE;
 
     if (ulDepth > 64)
         return FALSE;
 
     for (cr = CM_Get_Child(&devChild, devParent, 0);
          cr == CR_SUCCESS;
-         cr = CM_Get_Sibling(&devChild, devChild, 0))
+         cr = CM_Get_Sibling(&devChild, devLast, 0))
     {
-        if (CM_Get_DevNode_Status(&ulStatus, &ulProblem, devChild, 0) != CR_SUCCESS)
+        /* The end of the list overwrites devChild */
+        devLast = devChild;
+        crStatus = CM_Get_DevNode_Status(&ulStatus, &ulProblem, devChild, 0);
+        bLastAnswered = (crStatus == CR_SUCCESS);
+        if (!bLastAnswered)
         {
-            bResult = FALSE;
+            /* A node that went away, or that the device tree cannot name (ReactOS can list
+               a child without an instance ID), has nothing to rescan: only a failed query
+               makes the walk incomplete */
+            if (!IsNoSuchDevNode(crStatus))
+                bResult = FALSE;
             continue;
         }
 
@@ -273,9 +310,16 @@ ReenumerateChildren(DEVINST devParent, ULONG ulDepth)
         }
     }
 
-    /* The end of the list is "no such devnode": anything else is a failed walk */
-    if (cr != CR_NO_SUCH_DEVNODE)
+    /* The end of the list is "no such devnode", anything else is a failed walk.
+       A node that went away during the walk gives the same answer, and its siblings
+       were not walked: a node that answered must still be there. After a node that
+       never answered, its siblings cannot be reached at all. */
+    if (!IsNoSuchDevNode(cr) ||
+        (cr == CR_INVALID_DEVNODE && bLastAnswered) ||
+        (bLastAnswered && CM_Get_DevNode_Status(&ulStatus, &ulProblem, devLast, 0) != CR_SUCCESS))
+    {
         bResult = FALSE;
+    }
 
     return bResult;
 }
@@ -358,13 +402,18 @@ SearchThread(LPVOID lpParameter)
             for (Index = 0; SetupDiEnumDeviceInfo(hAfter, Index, &DevInfoData); Index++)
             {
                 LPWSTR pszName;
+                BOOL bPresent;
 
-                if (!IsDevicePresent(&DevInfoData) ||
-                    !GetDeviceInstanceId(hAfter, &DevInfoData, szId, ARRAYSIZE(szId)) ||
-                    IsIdInList(pszBefore, szId))
+                /* A device that cannot be checked could be a new one: do not claim a complete result */
+                if (!GetDevicePresence(&DevInfoData, &bPresent) ||
+                    (bPresent && !GetDeviceInstanceId(hAfter, &DevInfoData, szId, ARRAYSIZE(szId))))
                 {
-                    continue;
+                    pResult->bSearched = FALSE;
+                    break;
                 }
+
+                if (!bPresent || IsIdInList(pszBefore, szId))
+                    continue;
 
                 if (pResult->szName)
                     pszName = (LPWSTR)HeapReAlloc(hProcessHeap, HEAP_ZERO_MEMORY, pResult->szName,
@@ -388,6 +437,8 @@ SearchThread(LPVOID lpParameter)
                 }
                 pszName[MAX_STR_SIZE - 1] = UNICODE_NULL;
             }
+            if (pResult->bSearched && GetLastError() != ERROR_NO_MORE_ITEMS)
+                pResult->bSearched = FALSE;
             SetupDiDestroyDeviceInfoList(hAfter);
         }
     }
