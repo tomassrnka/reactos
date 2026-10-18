@@ -522,6 +522,147 @@ static void Test_ExtendConcurrent(PCWSTR Path)
     DeleteFileW(Path);
 }
 
+/*
+ * NtExtendSection while another handle appends to the file without caching:
+ * the extension reads the file size, and a write that grows the file past
+ * the new size before the extension sets the end of file must keep its data.
+ */
+#define APPEND_BLOCK 0x1000
+#define APPEND_COUNT 1500
+
+typedef struct _APPEND_THREAD
+{
+    HANDLE hFile;
+    PBYTE Buffer;
+    volatile LONG Next;
+    volatile LONG Done;
+    LONG WriteFailures;
+} APPEND_THREAD;
+
+static DWORD WINAPI AppendThread(PVOID Param)
+{
+    APPEND_THREAD *Data = Param;
+    OVERLAPPED Overlapped;
+    DWORD Written;
+    ULONG i;
+
+    for (i = 1; i < APPEND_COUNT; i++)
+    {
+        memset(Data->Buffer, (BYTE)i, APPEND_BLOCK);
+        ZeroMemory(&Overlapped, sizeof(Overlapped));
+        Overlapped.Offset = i * APPEND_BLOCK;
+        /* The file ends here now: the main thread extends to the middle of this block meanwhile */
+        InterlockedExchange(&Data->Next, i * APPEND_BLOCK);
+        if (!WriteFile(Data->hFile, Data->Buffer, APPEND_BLOCK, &Written, &Overlapped) || Written != APPEND_BLOCK)
+        {
+            if (InterlockedIncrement(&Data->WriteFailures) <= 3)
+                trace("EXT append at 0x%lx: %lu\n", Overlapped.Offset, GetLastError());
+        }
+    }
+    InterlockedExchange(&Data->Done, 1);
+    return 0;
+}
+
+static void Test_ExtendWhileAppending(PCWSTR Path)
+{
+    APPEND_THREAD Data;
+    HANDLE hFile, hRaw, hSection = NULL, hThread;
+    OVERLAPPED Overlapped;
+    LARGE_INTEGER Size;
+    LONGLONG FileSize;
+    NTSTATUS Status;
+    LONG Extends = 0, Failures = 0, Lost = 0, Next, Last = 0;
+    DWORD Done;
+    ULONG i;
+
+    Data.Buffer = VirtualAlloc(NULL, APPEND_BLOCK, MEM_COMMIT, PAGE_READWRITE);
+    hRaw = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                       CREATE_ALWAYS, FILE_FLAG_NO_BUFFERING, NULL);
+    if (!Data.Buffer || hRaw == INVALID_HANDLE_VALUE)
+    {
+        skip("Cannot create %ls without caching: %lu\n", Path, GetLastError());
+        if (hRaw != INVALID_HANDLE_VALUE)
+            CloseHandle(hRaw);
+        if (Data.Buffer)
+            VirtualFree(Data.Buffer, 0, MEM_RELEASE);
+        return;
+    }
+    memset(Data.Buffer, 0, APPEND_BLOCK);
+    ok(WriteFile(hRaw, Data.Buffer, APPEND_BLOCK, &Done, NULL) && Done == APPEND_BLOCK,
+       "First block: %lu\n", GetLastError());
+
+    hFile = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(hFile != INVALID_HANDLE_VALUE, "Cannot reopen %ls: %lu\n", Path, GetLastError());
+    if (hFile == INVALID_HANDLE_VALUE)
+        goto Close;
+    Status = NtCreateSection(&hSection, SECTION_ALL_ACCESS, NULL, NULL, PAGE_READWRITE, SEC_COMMIT, hFile);
+    ok(Status == STATUS_SUCCESS, "NtCreateSection: 0x%08lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        goto Close;
+
+    Data.hFile = hRaw;
+    Data.Next = 0;
+    Data.Done = 0;
+    Data.WriteFailures = 0;
+    hThread = CreateThread(NULL, 0, AppendThread, &Data, 0, NULL);
+    ok(hThread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (!hThread)
+        goto Close;
+
+    /*
+     * For every append, extend to the middle of the block it writes: the extension reads the end of
+     * the file before the append or after it, and only one that reads it before has to grow the file
+     */
+    while (!Data.Done)
+    {
+        Next = Data.Next;
+        if (Next == Last)
+        {
+            YieldProcessor();
+            continue;
+        }
+        Last = Next;
+        Size.QuadPart = Next + APPEND_BLOCK / 2;
+        Status = NtExtendSection(hSection, &Size);
+        Extends++;
+        if (Status != STATUS_SUCCESS && ++Failures <= 3)
+            trace("EXT extend to 0x%I64x while appending: 0x%08lx\n", Size.QuadPart, Status);
+    }
+    ok(WaitForSingleObject(hThread, 120000) == WAIT_OBJECT_0, "The append thread did not finish\n");
+    CloseHandle(hThread);
+
+    FileSize = GetSize(hRaw);
+    trace("EXT %ld extensions while appending, %ld failed; file 0x%I64x\n", Extends, Failures, FileSize);
+    ok(Data.WriteFailures == 0, "%ld appends failed\n", Data.WriteFailures);
+    ok(Failures == 0, "%ld of %ld extensions failed while the file grew\n", Failures, Extends);
+    ok(Extends >= APPEND_COUNT / 4, "Only %ld extensions ran during the %u appends\n", Extends, APPEND_COUNT);
+    ok(FileSize >= (LONGLONG)APPEND_COUNT * APPEND_BLOCK, "File size 0x%I64x\n", FileSize);
+
+    /* Every appended block is still whole: an extension did not cut it short */
+    for (i = 1; i < APPEND_COUNT; i++)
+    {
+        ZeroMemory(&Overlapped, sizeof(Overlapped));
+        Overlapped.Offset = i * APPEND_BLOCK;
+        if (!ReadFile(hRaw, Data.Buffer, APPEND_BLOCK, &Done, &Overlapped) || Done != APPEND_BLOCK ||
+            Data.Buffer[0] != (BYTE)i || Data.Buffer[APPEND_BLOCK - 1] != (BYTE)i)
+        {
+            if (++Lost <= 3)
+                trace("EXT block %lu: read %lu, bytes 0x%02x 0x%02x\n", i, Done, Data.Buffer[0], Data.Buffer[APPEND_BLOCK - 1]);
+        }
+    }
+    ok(Lost == 0, "%ld appended blocks lost data\n", Lost);
+
+Close:
+    if (hSection)
+        NtClose(hSection);
+    if (hFile != INVALID_HANDLE_VALUE)
+        CloseHandle(hFile);
+    CloseHandle(hRaw);
+    VirtualFree(Data.Buffer, 0, MEM_RELEASE);
+    DeleteFileW(Path);
+}
+
 START_TEST(NtExtendSection)
 {
     WCHAR TempDir[MAX_PATH], Path[MAX_PATH];
@@ -538,4 +679,5 @@ START_TEST(NtExtendSection)
     Test_ViewAtEnd(Path);
     Test_ExtendClosedFile(Path);
     Test_ExtendConcurrent(Path);
+    Test_ExtendWhileAppending(Path);
 }
