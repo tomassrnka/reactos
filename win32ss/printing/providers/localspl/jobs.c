@@ -1096,7 +1096,13 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
     {
         // A job that is still being spooled belongs to the handle spooling it.
         // It is discarded when its document ends, as on Windows: by ScheduleJob, EndDocPrinter or ClosePrinter.
-        pJob->dwStatus |= JOB_STATUS_DELETING;
+        // Its document may have ended meanwhile: decide together with EndJobSpooling.
+        EnterCriticalSection(&PrinterDeletionSection);
+        if (pJob->dwStatus & JOB_STATUS_SPOOLING)
+            pJob->dwStatus |= JOB_STATUS_DELETING;
+        else
+            dwErrorCode = ERROR_NOT_SUPPORTED;
+        LeaveCriticalSection(&PrinterDeletionSection);
     }
 
 Cleanup:
@@ -1267,6 +1273,17 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
         goto Cleanup;
     }
 
+    // A deletion that came in meanwhile still wins.
+    if (!EndJobSpooling(pJob))
+    {
+        DeleteFileW(wszFullPath);
+        FreeJob(pJob);
+        pPrinterHandle->bStartedDoc = FALSE;
+        pPrinterHandle->pJob = NULL;
+        dwErrorCode = ERROR_SUCCESS;
+        goto Cleanup;
+    }
+
     // ScheduleJob has done its job. The rest happens inside the printing thread.
     dwErrorCode = StartJobPrinting(pJob);
 
@@ -1281,6 +1298,29 @@ LocalScheduleJob(HANDLE hPrinter, DWORD dwJobID)
 Cleanup:
     SetLastError(dwErrorCode);
     return (dwErrorCode == ERROR_SUCCESS);
+}
+
+/**
+ * @name EndJobSpooling
+ *
+ * Ends spooling of a job whose SPL file is complete, unless the job was deleted while it was spooled.
+ * A SetJob deleting the job either comes first, or is refused because the job is no longer spooled.
+ *
+ * @return
+ * TRUE if the job can be printed, FALSE if it was deleted and has to be discarded.
+ */
+BOOL
+EndJobSpooling(PLOCAL_JOB pJob)
+{
+    BOOL bPrint;
+
+    EnterCriticalSection(&PrinterDeletionSection);
+    bPrint = !(pJob->dwStatus & JOB_STATUS_DELETING);
+    if (bPrint)
+        pJob->dwStatus &= ~JOB_STATUS_SPOOLING;
+    LeaveCriticalSection(&PrinterDeletionSection);
+
+    return bPrint;
 }
 
 /**

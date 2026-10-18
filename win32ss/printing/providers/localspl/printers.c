@@ -2079,7 +2079,7 @@ LocalEndDocPrinter(HANDLE hPrinter)
     if (pPrinterHandle->hSPLWriteFile != INVALID_HANDLE_VALUE)
     {
         // A job deleted while it was spooled is discarded instead of printed.
-        BOOL bDeleted = !!(pPrinterHandle->pJob->dwStatus & JOB_STATUS_DELETING);
+        BOOL bDeleted = !EndJobSpooling(pPrinterHandle->pJob);
 
         CloseHandle(pPrinterHandle->hSPLWriteFile);
         pPrinterHandle->hSPLWriteFile = INVALID_HANDLE_VALUE;

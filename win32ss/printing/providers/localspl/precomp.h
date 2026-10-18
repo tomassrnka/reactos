@@ -262,6 +262,7 @@ BOOL WINAPI LocalSetForm(HANDLE hPrinter, PWSTR pFormName, DWORD Level, PBYTE pF
 // jobs.c
 extern SKIPLIST GlobalJobList;
 DWORD WINAPI CreateJob(PLOCAL_PRINTER_HANDLE pPrinterHandle);
+BOOL EndJobSpooling(PLOCAL_JOB pJob);
 DWORD StartJobPrinting(PLOCAL_JOB pJob);
 void FreeJob(PLOCAL_JOB pJob);
 DWORD GetJobFilePath(PCWSTR pwszExtension, DWORD dwJobID, PWSTR pwszOutput);
