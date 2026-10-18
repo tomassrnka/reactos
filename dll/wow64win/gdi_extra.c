@@ -4,14 +4,12 @@
 
 typedef struct { LONG x, y; ULONG n, lpstr; UINT uiFlags; RECT rcl; ULONG pdx; } POLYTEXT32;
 typedef struct { DWORD lStructSize; ULONG lpOutString, lpOrder, lpDx, lpCaretPos, lpClass, lpGlyphs; UINT nGlyphs, nMaxFit; } GCP32;
-typedef struct { BYTE Head[200]; ULONG FamilyName, FaceName, StyleName, FullName; } OTM32;
 typedef struct { LONG nXLeft, nYLeft, nWidth, nHeight; ULONG hBrush; } POLYPATBLT32;
 C_ASSERT(sizeof(POLYTEXT32) == 40 && sizeof(POLYTEXTW) == 56);
 C_ASSERT(sizeof(GCP32) == 36 && sizeof(GCP_RESULTSW) == 64);
-C_ASSERT(sizeof(OTM32) == 216 && sizeof(OUTLINETEXTMETRICW) == 232);
-C_ASSERT(offsetof(OUTLINETEXTMETRICW, otmpFamilyName) == sizeof(((OTM32 *)0)->Head));
 C_ASSERT(sizeof(POLYPATBLT32) == 20 && sizeof(POLYPATBLT) == 24);
 C_ASSERT(sizeof(LOGBRUSH32) == 12 && sizeof(LOGBRUSH) == 16);
+C_ASSERT(sizeof(POLYTEXT32) % sizeof(ULONG) == 0 && sizeof(GCP32) % sizeof(ULONG) == 0);
 
 /* A guest pointer plus a length must stay below 4 GiB, or native memory above it becomes reachable. */
 static BOOL GuestRange(ULONG Ptr, ULONGLONG Length)
@@ -34,6 +32,15 @@ static VOID GuestTouch(ULONG Ptr, ULONGLONG Length)
     if (!Length) return;
     for (Offset = 0; Offset < Length; Offset += 0x1000) (VOID)Bytes[Offset];
     (VOID)Bytes[Length - 1];
+}
+
+/* Copies a guest structure once, through volatile reads, so a racing guest thread cannot change a field
+ * between its validation and its use and the compiler cannot reload it from guest memory. */
+static VOID GuestSnapshot(PVOID Local, const VOID *Guest, SIZE_T Size)
+{
+    SIZE_T i;
+
+    for (i = 0; i < Size / sizeof(ULONG); ++i) ((ULONG *)Local)[i] = ((const volatile ULONG *)Guest)[i];
 }
 
 static ULONG_PTR PolyText(ULONG *a, BOOL Console)
@@ -59,13 +66,15 @@ static ULONG_PTR PolyText(ULONG *a, BOOL Console)
     {
         for (i = 0; i < Count; ++i)
         {
-            ULONG n = Guest[i].n, Flags = Guest[i].uiFlags, Pdx = Guest[i].pdx;
-            if (!GuestRange(Guest[i].lpstr, (ULONGLONG)n * sizeof(WCHAR)) ||
-                !GuestRange(Pdx, (ULONGLONG)n * ((Flags & ETO_PDY) ? 8 : 4)))
+            POLYTEXT32 Item;
+
+            GuestSnapshot(&Item, &Guest[i], sizeof(Item));
+            if (!GuestRange(Item.lpstr, (ULONGLONG)Item.n * sizeof(WCHAR)) ||
+                !GuestRange(Item.pdx, (ULONGLONG)Item.n * ((Item.uiFlags & ETO_PDY) ? 8 : 4)))
                 break;
-            Native[i].x = Guest[i].x; Native[i].y = Guest[i].y; Native[i].n = n;
-            Native[i].lpstr = P32(Guest[i].lpstr); Native[i].uiFlags = Flags;
-            Native[i].rcl = Guest[i].rcl; Native[i].pdx = P32(Pdx);
+            Native[i].x = Item.x; Native[i].y = Item.y; Native[i].n = Item.n;
+            Native[i].lpstr = P32(Item.lpstr); Native[i].uiFlags = Item.uiFlags;
+            Native[i].rcl = Item.rcl; Native[i].pdx = P32(Item.pdx);
         }
         if (i < Count) Ret = Fault();
         else if (Console) Ret = NtGdiConsoleTextOut(G(0), Native, Count, P(3));
@@ -113,7 +122,7 @@ static ULONG_PTR PolyPat(ULONG *a)
 
 static ULONG_PTR CharPlacement(ULONG *a)
 {
-    GCP32 *Guest = P(4);
+    GCP32 *Guest = P(4), Local;
     GCP_RESULTSW Native = {0};
     ULONGLONG Count = a[2];
     ULONG_PTR Ret;
@@ -122,15 +131,16 @@ static ULONG_PTR CharPlacement(ULONG *a)
     if (!GuestRange(a[1], Count * sizeof(WCHAR))) return Fault();
     if (!a[4]) return NtGdiGetCharacterPlacementW(G(0), P(1), a[2], (INT)a[3], NULL, a[5]);
     if (!GuestRange(a[4], sizeof(*Guest))) return Fault();
-    if (!GuestRange(Guest->lpOutString, Count * sizeof(WCHAR)) || !GuestRange(Guest->lpOrder, Count * sizeof(UINT)) ||
-        !GuestRange(Guest->lpDx, Count * sizeof(INT)) || !GuestRange(Guest->lpCaretPos, Count * sizeof(INT)) ||
-        !GuestRange(Guest->lpClass, Count) || !GuestRange(Guest->lpGlyphs, (ULONGLONG)Guest->nGlyphs * sizeof(WCHAR)))
+    GuestSnapshot(&Local, Guest, sizeof(Local));
+    if (!GuestRange(Local.lpOutString, Count * sizeof(WCHAR)) || !GuestRange(Local.lpOrder, Count * sizeof(UINT)) ||
+        !GuestRange(Local.lpDx, Count * sizeof(INT)) || !GuestRange(Local.lpCaretPos, Count * sizeof(INT)) ||
+        !GuestRange(Local.lpClass, Count) || !GuestRange(Local.lpGlyphs, (ULONGLONG)Local.nGlyphs * sizeof(WCHAR)))
         return Fault();
-    Native.lStructSize = Guest->lStructSize == sizeof(*Guest) ? sizeof(Native) : Guest->lStructSize;
-    Native.lpOutString = P32(Guest->lpOutString); Native.lpOrder = P32(Guest->lpOrder);
-    Native.lpDx = P32(Guest->lpDx); Native.lpCaretPos = P32(Guest->lpCaretPos);
-    Native.lpClass = P32(Guest->lpClass); Native.lpGlyphs = P32(Guest->lpGlyphs);
-    Native.nGlyphs = Guest->nGlyphs; Native.nMaxFit = Guest->nMaxFit;
+    Native.lStructSize = Local.lStructSize == sizeof(Local) ? sizeof(Native) : Local.lStructSize;
+    Native.lpOutString = P32(Local.lpOutString); Native.lpOrder = P32(Local.lpOrder);
+    Native.lpDx = P32(Local.lpDx); Native.lpCaretPos = P32(Local.lpCaretPos);
+    Native.lpClass = P32(Local.lpClass); Native.lpGlyphs = P32(Local.lpGlyphs);
+    Native.nGlyphs = Local.nGlyphs; Native.nMaxFit = Local.nMaxFit;
     Ret = NtGdiGetCharacterPlacementW(G(0), P(1), a[2], (INT)a[3], &Native, a[5]);
     Guest->nGlyphs = Native.nGlyphs; Guest->nMaxFit = Native.nMaxFit;
     return Ret;
@@ -154,7 +164,15 @@ static ULONG_PTR EnumGdiObjects(ULONG *a)
     if (!Native) { RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY); return 0; }
     _SEH2_TRY
     {
-        /* The kernel's return unit for a filled buffer is unverified; it is passed through unscaled. */
+        /* The service writes up to cjBuf bytes and only the sizing call's result is a defined count;
+         * gdi32 tests the filling call's result for zero only. The in-tree service is still a stub.
+         * Seeding the native buffer from the guest makes every entry the kernel leaves alone round-trip
+         * unchanged, so only what it filled reaches the guest, whatever unit it returns. */
+        for (i = 0; i < Count; ++i)
+        {
+            Native[i].lbStyle = Guest[i].lbStyle; Native[i].lbColor = Guest[i].lbColor;
+            Native[i].lbHatch = Guest[i].lbHatch;
+        }
         Ret = NtGdiEnumObjects(G(0), OBJ_BRUSH, Count * sizeof(*Native), Native);
         if (Ret)
         {
