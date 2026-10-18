@@ -210,6 +210,45 @@ IsNtfs(PCWSTR pszPath)
 
 static WCHAR szSentinel[MAX_PATH], szSentinelFile[MAX_PATH], szRoot[MAX_PATH], szProfiles[MAX_PATH];
 
+static BOOL
+EnablePrivilege(PCWSTR pszName, BOOL bEnable)
+{
+    TOKEN_PRIVILEGES Privileges;
+    HANDLE hToken;
+    BOOL bResult;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken))
+        return FALSE;
+    Privileges.PrivilegeCount = 1;
+    Privileges.Privileges[0].Attributes = bEnable ? SE_PRIVILEGE_ENABLED : 0;
+    bResult = LookupPrivilegeValueW(NULL, pszName, &Privileges.Privileges[0].Luid) &&
+              AdjustTokenPrivileges(hToken, FALSE, &Privileges, 0, NULL, NULL) &&
+              GetLastError() == ERROR_SUCCESS;
+    CloseHandle(hToken);
+    return bResult;
+}
+
+/* Like the legacy profile junctions: Everyone may not list it */
+static BOOL
+DenyListing(PCWSTR pszLink)
+{
+    PSECURITY_DESCRIPTOR pSd;
+    HANDLE hLink;
+    BOOL bResult;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(D;;0x1;;;WD)(A;;FA;;;WD)",
+                                                              SDDL_REVISION_1, &pSd, NULL))
+        return FALSE;
+    hLink = CreateFileW(pszLink, WRITE_DAC | READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    bResult = hLink != INVALID_HANDLE_VALUE &&
+              SetKernelObjectSecurity(hLink, DACL_SECURITY_INFORMATION, pSd);
+    if (hLink != INVALID_HANDLE_VALUE)
+        CloseHandle(hLink);
+    LocalFree(pSd);
+    return bResult;
+}
+
 /* Make a profile either with the profile code or (bManual) by hand */
 static BOOL
 MakeProfile(PSID pSid, PCWSTR pszSid, PCWSTR pszUser, BOOL bManual, PWSTR pszProfile)
@@ -227,7 +266,9 @@ static VOID
 TestDeleteProfile(PSID pSid, PCWSTR pszSid, PCWSTR pszUser, BOOL bManual)
 {
     WCHAR szProfile[MAX_PATH], szPath[MAX_PATH];
+    HANDLE hLink;
     DWORD dwError;
+    ULONG i;
     BOOL bResult, bJunction;
 
     /* Delete with the path from the registry; a junction inside points to the sentinel */
@@ -241,12 +282,34 @@ TestDeleteProfile(PSID pSid, PCWSTR pszSid, PCWSTR pszUser, BOOL bManual)
     ok(CreateDirectoryW(szPath, NULL), "Cannot create %S: %lu\n", szPath, GetLastError());
     StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\Sub\\file.txt", szProfile);
     ok(CreateTestFile(szPath), "Cannot create %S: %lu\n", szPath, GetLastError());
+    /* More entries than one directory query returns */
+    StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\Many", szProfile);
+    ok(CreateDirectoryW(szPath, NULL), "Cannot create %S: %lu\n", szPath, GetLastError());
+    for (i = 0; i < 400; i++)
+    {
+        StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\Many\\file-number-%04lu.txt", szProfile, i);
+        if (!CreateTestFile(szPath))
+            break;
+    }
+    ok(i == 400, "Cannot create %S: %lu\n", szPath, GetLastError());
+
     StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\Link", szProfile);
     bJunction = CreateJunction(szPath, szSentinel);
     if (IsNtfs(szProfile))
         ok(bJunction, "Cannot create the junction %S: %lu\n", szPath, GetLastError());
     else if (!bJunction)
         skip("No junctions on this file system, no reparse point test\n");
+    StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\Legacy", szProfile);
+    if (bJunction)
+    {
+        ok(CreateJunction(szPath, szSentinel), "Cannot create the junction %S: %lu\n", szPath, GetLastError());
+        ok(DenyListing(szPath), "Cannot deny listing %S: %lu\n", szPath, GetLastError());
+        hLink = CreateFileW(szPath, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        ok(hLink == INVALID_HANDLE_VALUE, "Listing %S is not denied\n", szPath);
+        if (hLink != INVALID_HANDLE_VALUE)
+            CloseHandle(hLink);
+    }
 
     bResult = CallDeleteProfile(pszSid, NULL, &dwError);
     ok(bResult, "DeleteProfileW(%S, NULL) failed: %lu\n", pszSid, dwError);
@@ -274,11 +337,61 @@ TestDeleteProfile(PSID pSid, PCWSTR pszSid, PCWSTR pszUser, BOOL bManual)
     ok(dwError == ERROR_FILE_NOT_FOUND, "Wrong error %lu\n", dwError);
 }
 
+/* A profile whose hive is loaded (its user is logged on) is not deleted, not even in part */
+static VOID
+TestProfileInUse(PCWSTR pszSid, PCWSTR pszProfile, BOOL bLoad)
+{
+    WCHAR szPath[MAX_PATH], szMarker[MAX_PATH];
+    DWORD dwError;
+    LONG lError;
+    BOOL bResult;
+
+    if (bLoad)
+    {
+        ok(EnablePrivilege(L"SeRestorePrivilege", TRUE) && EnablePrivilege(L"SeBackupPrivilege", TRUE),
+           "Cannot enable the privileges to load a hive\n");
+        StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\NTUSER.DAT", pszProfile);
+        lError = RegLoadKeyW(HKEY_USERS, pszSid, szPath);
+        ok(lError == ERROR_SUCCESS, "RegLoadKeyW(%S) failed: %ld\n", szPath, lError);
+        if (lError != ERROR_SUCCESS)
+        {
+            EnablePrivilege(L"SeRestorePrivilege", FALSE);
+            EnablePrivilege(L"SeBackupPrivilege", FALSE);
+            return;
+        }
+    }
+
+    /* Sorts before everything else in the profile */
+    StringCchPrintfW(szMarker, ARRAYSIZE(szMarker), L"%s\\0marker.txt", pszProfile);
+    ok(CreateTestFile(szMarker), "Cannot create %S: %lu\n", szMarker, GetLastError());
+
+    bResult = CallDeleteProfile(pszSid, NULL, &dwError);
+    ok(!bResult, "DeleteProfileW of a loaded profile succeeded\n");
+    /* Windows Server 2008 R2 fails with ERROR_INVALID_PARAMETER, Windows 10 with ERROR_SHARING_VIOLATION */
+    ok(dwError == ERROR_INVALID_PARAMETER || dwError == ERROR_SHARING_VIOLATION,
+       "Wrong error %lu\n", dwError);
+    ok(Exists(pszProfile), "Profile %S was deleted\n", pszProfile);
+    ok(Exists(szMarker), "File %S of a loaded profile was deleted\n", szMarker);
+    ok(ProfileKeyExists(pszSid), "Profile list entry %S was deleted\n", pszSid);
+    DeleteFileW(szMarker);
+
+    if (bLoad)
+    {
+        lError = RegUnLoadKeyW(HKEY_USERS, pszSid);
+        ok(lError == ERROR_SUCCESS, "RegUnLoadKeyW(%S) failed: %ld\n", pszSid, lError);
+        /* Without them the deletion must cope with the junction that denies listing */
+        EnablePrivilege(L"SeRestorePrivilege", FALSE);
+        EnablePrivilege(L"SeBackupPrivilege", FALSE);
+    }
+}
+
 static VOID
 CleanupProfile(PCWSTR pszSid)
 {
     /* Best effort after a failure: do not leave our profile behind */
-    if (ProfileKeyExists(pszSid))
+    if (HiveLoaded(pszSid))
+        trace("The hive of %S is loaded, its profile is left behind\n", pszSid);
+    else if (ProfileKeyExists(pszSid))
     {
         _SEH2_TRY
         {
@@ -297,7 +410,7 @@ START_TEST(DeleteProfile)
     USER_INFO_1 UserInfo = {0};
     BYTE SidBuffer[SECURITY_MAX_SID_SIZE];
     PSID pSid = (PSID)SidBuffer;
-    WCHAR szUser[21], szManualUser[22], szPassword[32], szDomain[MAX_PATH], szManualSid[MAX_PATH];
+    WCHAR szUser[21], szManualUser[22], szPassword[32], szRealProfile[MAX_PATH], szDomain[MAX_PATH], szManualSid[MAX_PATH];
     DWORD cbSid = sizeof(SidBuffer), cchDomain = ARRAYSIZE(szDomain), cchProfiles;
     SID_NAME_USE Use;
     PWSTR pszSid = NULL;
@@ -365,6 +478,11 @@ START_TEST(DeleteProfile)
     bHive = HiveLoaded(pszSid);
     /* CreateUserProfileExW() cannot unload the new hive: RegUnLoadKeyW() fails with ERROR_ACCESS_DENIED */
     todo_ros ok(!bHive, "The hive of %S is still loaded\n", pszSid);
+    if (GetProfilePath(pszSid, szRealProfile, ARRAYSIZE(szRealProfile)))
+        TestProfileInUse(pszSid, szRealProfile, !bHive);
+    else
+        ok(FALSE, "No profile path for %S\n", pszSid);
+    bHive = HiveLoaded(pszSid);
     if (!bHive)
     {
         CleanupProfile(pszSid);
