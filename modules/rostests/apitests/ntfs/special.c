@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     NTFS: system files, the paging file, sharing, file IDs, hard links, directory renames
+ * PURPOSE:     NTFS: system files, the paging file, sharing, file IDs, hard links, directory renames, FileAllInformation
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -297,5 +297,119 @@ START_TEST(NtfsDirRename)
     for (i = 0; i < RTL_NUMBER_OF(Handles); i++)
         if (Handles[i] != INVALID_HANDLE_VALUE)
             CloseHandle(Handles[i]);
+    NtCleanup();
+}
+
+/* FILE_ALIGNMENT_INFORMATION and FILE_ALL_INFORMATION (not in the user-mode NDK). */
+typedef struct _NT_ALIGNMENT_INFORMATION
+{
+    ULONG AlignmentRequirement;
+} NT_ALIGNMENT_INFORMATION;
+
+typedef struct _NT_ALL_INFORMATION
+{
+    FILE_BASIC_INFORMATION BasicInformation;
+    FILE_STANDARD_INFORMATION StandardInformation;
+    FILE_INTERNAL_INFORMATION InternalInformation;
+    FILE_EA_INFORMATION EaInformation;
+    FILE_ACCESS_INFORMATION AccessInformation;
+    FILE_POSITION_INFORMATION PositionInformation;
+    FILE_MODE_INFORMATION ModeInformation;
+    NT_ALIGNMENT_INFORMATION AlignmentInformation;
+    FILE_NAME_INFORMATION NameInformation;
+} NT_ALL_INFORMATION;
+
+/* Each part of FileAllInformation agrees with its own class, the parts the I/O manager fills in included. */
+static VOID CheckAllInformation(HANDLE Handle, PCSTR What)
+{
+    ULONGLONG Buffer[(sizeof(NT_ALL_INFORMATION) + MAX_PATH * sizeof(WCHAR)) / sizeof(ULONGLONG) + 1];
+    NT_ALL_INFORMATION *All = (NT_ALL_INFORMATION *)Buffer;
+    FILE_ACCESS_INFORMATION Access;
+    FILE_MODE_INFORMATION Mode;
+    NT_ALIGNMENT_INFORMATION Alignment;
+    FILE_BASIC_INFORMATION Basic;
+    FILE_STANDARD_INFORMATION Standard;
+    FILE_INTERNAL_INFORMATION Internal;
+    FILE_POSITION_INFORMATION Position;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
+    static const struct { FILE_INFORMATION_CLASS Class; ULONG Size; } Classes[] =
+    {
+        { FileAccessInformation, sizeof(FILE_ACCESS_INFORMATION) },
+        { FileModeInformation, sizeof(FILE_MODE_INFORMATION) },
+        { FileAlignmentInformation, sizeof(NT_ALIGNMENT_INFORMATION) },
+        { FileBasicInformation, sizeof(FILE_BASIC_INFORMATION) },
+        { FileStandardInformation, sizeof(FILE_STANDARD_INFORMATION) },
+        { FileInternalInformation, sizeof(FILE_INTERNAL_INFORMATION) },
+        { FilePositionInformation, sizeof(FILE_POSITION_INFORMATION) },
+    };
+    PVOID Out[RTL_NUMBER_OF(Classes)];
+    ULONG i;
+
+    Out[0] = &Access; Out[1] = &Mode; Out[2] = &Alignment; Out[3] = &Basic;
+    Out[4] = &Standard; Out[5] = &Internal; Out[6] = &Position;
+    for (i = 0; i < RTL_NUMBER_OF(Classes); i++)
+    {
+        Status = NtQueryInformationFile(Handle, &Iosb, Out[i], Classes[i].Size, Classes[i].Class);
+        ok(Status == STATUS_SUCCESS, "%s: class %d: 0x%08lx\n", What, Classes[i].Class, Status);
+        if (!NT_SUCCESS(Status))
+            return;
+    }
+    ok(Access.AccessFlags != 0, "%s: no access flags\n", What);
+
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    Status = NtQueryInformationFile(Handle, &Iosb, All, sizeof(Buffer), FileAllInformation);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    ok(Iosb.Information == FIELD_OFFSET(NT_ALL_INFORMATION, NameInformation.FileName) +
+                           All->NameInformation.FileNameLength,
+       "%s: Information %Iu for a name of %lu bytes\n", What, Iosb.Information, All->NameInformation.FileNameLength);
+    ok(All->AccessInformation.AccessFlags == Access.AccessFlags, "%s: AccessFlags 0x%lx, FileAccessInformation 0x%lx\n",
+       What, All->AccessInformation.AccessFlags, Access.AccessFlags);
+    ok(All->ModeInformation.Mode == Mode.Mode, "%s: Mode 0x%lx, FileModeInformation 0x%lx\n",
+       What, All->ModeInformation.Mode, Mode.Mode);
+    ok(All->AlignmentInformation.AlignmentRequirement == Alignment.AlignmentRequirement,
+       "%s: AlignmentRequirement 0x%lx, FileAlignmentInformation 0x%lx\n",
+       What, All->AlignmentInformation.AlignmentRequirement, Alignment.AlignmentRequirement);
+    ok(All->BasicInformation.FileAttributes == Basic.FileAttributes, "%s: attributes 0x%lx, 0x%lx\n",
+       What, All->BasicInformation.FileAttributes, Basic.FileAttributes);
+    ok(All->StandardInformation.EndOfFile.QuadPart == Standard.EndOfFile.QuadPart, "%s: EndOfFile %I64d, %I64d\n",
+       What, All->StandardInformation.EndOfFile.QuadPart, Standard.EndOfFile.QuadPart);
+    ok(All->StandardInformation.Directory == Standard.Directory, "%s: Directory %u, %u\n",
+       What, All->StandardInformation.Directory, Standard.Directory);
+    ok(All->InternalInformation.IndexNumber.QuadPart == Internal.IndexNumber.QuadPart, "%s: IndexNumber %I64x, %I64x\n",
+       What, All->InternalInformation.IndexNumber.QuadPart, Internal.IndexNumber.QuadPart);
+    ok(All->PositionInformation.CurrentByteOffset.QuadPart == Position.CurrentByteOffset.QuadPart,
+       "%s: CurrentByteOffset %I64d, %I64d\n",
+       What, All->PositionInformation.CurrentByteOffset.QuadPart, Position.CurrentByteOffset.QuadPart);
+}
+
+START_TEST(NtfsAllInformation)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE H;
+    NTSTATUS Status;
+
+    if (!NtInit("NtfsAllInformation"))
+        return;
+    NtPath(Path, L"all.txt");
+    ok_hex(NtMakeFile(Path, NULL, 0, FALSE, "0123456789"), STATUS_SUCCESS);
+    Status = NtOpen(Path, FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, SHARE_ALL, FILE_OPEN,
+                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_SEQUENTIAL_ONLY, NULL, &H);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        CheckAllInformation(H, "file");
+        NtClose(H);
+    }
+    Status = NtOpen(NtTestDir(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, SHARE_ALL, FILE_OPEN,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_ALERT, NULL, &H);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        CheckAllInformation(H, "directory");
+        NtClose(H);
+    }
     NtCleanup();
 }
