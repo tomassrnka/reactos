@@ -16,6 +16,18 @@
 
 USBPORT_REGISTRATION_PACKET RegPacket;
 
+/* The static interrupt QHs form a binary tree whose 32 ms leaves are
+   IntQH[31..62]; a QH of an N ms level is the parent of the 32/N leaves
+   that follow each other in that range. Frame i enters the tree at the leaf
+   given by the bit-reversed i (frame 0 through the static TD first), so the
+   leaves below one QH are spread over the frame list and a QH of the N ms
+   level is visited every N frames. */
+static const UCHAR Balance[ENDPOINT_INTERRUPT_32ms] =
+{
+    0, 16, 8, 24, 4, 20, 12, 28, 2, 18, 10, 26, 6, 22, 14, 30,
+    1, 17, 9, 25, 5, 21, 13, 29, 3, 19, 11, 27, 7, 23, 15, 31
+};
+
 VOID
 NTAPI
 UhciDumpHcdQH(PUHCI_HCD_QH QH)
@@ -103,7 +115,7 @@ UhciCleanupFrameListEntry(IN PUHCI_EXTENSION UhciExtension,
     else
     {
         HeadIdx = (INTERRUPT_ENDPOINTs - ENDPOINT_INTERRUPT_32ms) +
-                  (Index & (ENDPOINT_INTERRUPT_32ms - 1));
+                  Balance[Index & (ENDPOINT_INTERRUPT_32ms - 1)];
 
         PhysicalAddress = UhciExtension->IntQH[HeadIdx]->PhysicalAddress;
 
@@ -606,7 +618,7 @@ UhciInitializeSchedule(IN PUHCI_EXTENSION UhciExtension,
     for (Idx = 0; Idx < UHCI_FRAME_LIST_MAX_ENTRIES; Idx++)
     {
         HeadIdx = (INTERRUPT_ENDPOINTs - ENDPOINT_INTERRUPT_32ms) +
-                  (Idx & (ENDPOINT_INTERRUPT_32ms - 1));
+                  Balance[Idx & (ENDPOINT_INTERRUPT_32ms - 1)];
 
         PhysicalAddress = UhciExtension->IntQH[HeadIdx]->PhysicalAddress;
         PhysicalAddress |= UHCI_FRAME_LIST_POINTER_QH;
