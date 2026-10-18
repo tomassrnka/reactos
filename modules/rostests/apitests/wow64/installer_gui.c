@@ -105,7 +105,7 @@ static DWORD WINAPI GuardHotKeyThread(PVOID Unused)
     /* Without a wide margin the call frames could reach the guard page before the service probes it. */
     if (Here - Limit < 0x8000 || !VirtualQuery(Guard, &Info, sizeof(Info)) || !(Info.Protect & PAGE_GUARD))
     {
-        printf("SKIP guard hotkey: limit=%p here=%p\n", Limit, Here);
+        printf("FAIL guard hotkey prerequisite: limit=%p here=%p\n", Limit, Here);
         return 2;
     }
     Ret = ImmGetHotKey(GUARD_HOTKEY, &Out[0], &Out[1], (LPHKL)&Out[2]);
@@ -119,15 +119,15 @@ static DWORD WINAPI GuardHotKeyThread(PVOID Unused)
 
 static void TestGuardHotKey(void)
 {
-    UINT Modifiers = 0, Key = 0;
-    HKL Layout = (HKL)1;
+    UINT Modifiers = 0, Key = 0, OldModifiers = 0, OldKey = 0;
+    HKL Layout = (HKL)1, OldLayout = NULL;
     HANDLE Thread;
     DWORD Code = 1;
-    if (!ImmSetHotKey(GUARD_HOTKEY, GUARD_MODIFIERS, VK_F24, NULL))
-    {
-        printf("SKIP guard hotkey: ImmSetHotKey error=%lu\n", GetLastError());
-        return;
-    }
+    /* The ID may already be bound in this profile; put that binding back afterwards. */
+    BOOL Had = ImmGetHotKey(GUARD_HOTKEY, &OldModifiers, &OldKey, &OldLayout);
+    BOOL Set = ImmSetHotKey(GUARD_HOTKEY, GUARD_MODIFIERS, VK_F24, NULL);
+    CHECK(Set);
+    if (!Set) return;
     CHECK(ImmGetHotKey(GUARD_HOTKEY, &Modifiers, &Key, &Layout));
     CHECK(Modifiers == GUARD_MODIFIERS && Key == VK_F24 && Layout == NULL);
     /* A committed size well above the margin keeps the guard page away from the call frames. */
@@ -136,10 +136,12 @@ static void TestGuardHotKey(void)
     if (Thread)
     {
         CHECK(WaitForSingleObject(Thread, 10000) == WAIT_OBJECT_0);
-        CHECK(GetExitCodeThread(Thread, &Code) && Code != 1);
+        /* An unusable stack layout is a failed prerequisite, not a pass. */
+        CHECK(GetExitCodeThread(Thread, &Code) && Code == 0);
         CloseHandle(Thread);
     }
-    CHECK(ImmSetHotKey(GUARD_HOTKEY, 0, 0, NULL));
+    if (Had && OldKey) CHECK(ImmSetHotKey(GUARD_HOTKEY, OldModifiers, OldKey, OldLayout));
+    else CHECK(ImmSetHotKey(GUARD_HOTKEY, 0, 0, NULL));
 }
 
 int main(void)

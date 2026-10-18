@@ -71,8 +71,8 @@ static VOID ImeInfoExOut(IMEINFOEX32 *To, const IMEINFOEX *From)
 static ULONG_PTR BuildHimcList(ULONG *a)
 {
     HIMC *List = NULL; ULONG Native = min(a[1], HIMC_LIST_MAX), Real = 0, i; NTSTATUS Status = STATUS_UNSUCCESSFUL;
-    /* Native probes both outputs before writing either; failure leaves them untouched. */
-    if (!GuestWritable(a[3], sizeof(ULONG)) || !GuestWritable(a[2], (ULONG64)a[1] * sizeof(ULONG)))
+    /* Native probes the list, then the count, before writing either; failure leaves them untouched. */
+    if (!GuestWritable(a[2], (ULONG64)a[1] * sizeof(ULONG)) || !GuestWritable(a[3], sizeof(ULONG)))
         return STATUS_UNSUCCESSFUL;
     if (Native)
     {
