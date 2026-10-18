@@ -75,9 +75,9 @@ GuiConsoleMoveWindow(PGUI_CONSOLE_DATA GuiData)
  * another thread while it holds the console lock, except as listed below.
  *
  * - Writers and the frontend callbacks run with the console locked, on any
- *   thread. They only record what the window needs in GuiData and wake the
- *   console input thread through its wake event, a kernel event
- *   (GuiRequestWork).
+ *   thread. They only record what the window needs in GuiData (and move the
+ *   view to the cursor, GuiShowCursorInView) and wake the console input
+ *   thread through its wake event, a kernel event (GuiRequestWork).
  * - The console input thread owns the console windows of its desktop and
  *   their timers. It copies the recorded work and the buffer geometry under
  *   the console lock, releases it, and then calls USER (GuiProcessWork).
@@ -128,6 +128,49 @@ DrawRegion(PGUI_CONSOLE_DATA GuiData,
         Dirty->Bottom = max(Dirty->Bottom, Region->Bottom);
     }
     GuiRequestWork(GuiData, GUI_WORK_UPDATE);
+}
+
+/*
+ * Bring the cursor into the view after output or SetConsoleCursorPosition
+ * moved it out, as the console does when it moves the cursor. The view
+ * origin is part of the screen buffer state that GetConsoleScreenBufferInfo
+ * reports, so it moves here, under the console lock, together with the
+ * cursor, also when the window is hidden; the window thread only moves the
+ * scroll bars and repaints. A direction scrolls only if it has a scroll bar.
+ * The console must be locked.
+ */
+static VOID
+GuiShowCursorInView(PGUI_CONSOLE_DATA GuiData, PCONSOLE_SCREEN_BUFFER Buff)
+{
+    COORD Origin = Buff->ViewOrigin;
+
+    if ((Buff->ScreenBufferSize.X > Buff->ViewSize.X) &&
+        ((Buff->CursorPosition.X < Origin.X) ||
+         (Buff->CursorPosition.X >= Origin.X + Buff->ViewSize.X)))
+    {
+        if (Buff->CursorPosition.X >= Buff->ViewSize.X)
+            Origin.X = Buff->CursorPosition.X - Buff->ViewSize.X + 1;
+        else
+            Origin.X = 0;
+    }
+    if ((Buff->ScreenBufferSize.Y > Buff->ViewSize.Y) &&
+        ((Buff->CursorPosition.Y < Origin.Y) ||
+         (Buff->CursorPosition.Y >= Origin.Y + Buff->ViewSize.Y)))
+    {
+        if (Buff->CursorPosition.Y >= Buff->ViewSize.Y)
+            Origin.Y = Buff->CursorPosition.Y - Buff->ViewSize.Y + 1;
+        else
+            Origin.Y = 0;
+    }
+
+    if ((Origin.X != Buff->ViewOrigin.X) || (Origin.Y != Buff->ViewOrigin.Y))
+    {
+        Buff->ViewOrigin = Origin;
+        if (!GuiData->IsWindowVisible) return;
+        GuiData->DirtyView = TRUE;
+        GuiData->ViewMoved = TRUE;
+        GuiRequestWork(GuiData, GUI_WORK_UPDATE);
+    }
 }
 
 static VOID
@@ -777,11 +820,14 @@ GuiWriteStream(IN OUT PFRONTEND This,
 
     if (NULL == GuiData || NULL == GuiData->hWindow) return;
 
-    /* Do nothing if the window is hidden */
-    if (!GuiData->IsWindowVisible) return;
-
     Buff = GuiData->ActiveBuffer;
-    if (GetType(Buff) != TEXTMODE_BUFFER) return;
+    if (Buff == NULL || GetType(Buff) != TEXTMODE_BUFFER) return;
+
+    /* The view follows the cursor even if the window is hidden */
+    GuiShowCursorInView(GuiData, Buff);
+
+    /* Nothing more to do if the window is hidden */
+    if (!GuiData->IsWindowVisible) return;
 
     /* Repaint the view instead of copying its pixels in the writer's thread */
     if (0 != ScrolledLines)
@@ -844,7 +890,11 @@ GuiSetScreenInfo(IN OUT PFRONTEND This,
 {
     PGUI_CONSOLE_DATA GuiData = This->Context;
 
-    /* Do nothing if the window is hidden */
+    /* The view follows the cursor even if the window is hidden */
+    if (GuiData->ActiveBuffer == Buff && GetType(Buff) == TEXTMODE_BUFFER)
+        GuiShowCursorInView(GuiData, Buff);
+
+    /* Nothing more to do if the window is hidden */
     if (!GuiData->IsWindowVisible) return TRUE;
 
     if (GuiData->ActiveBuffer == Buff)

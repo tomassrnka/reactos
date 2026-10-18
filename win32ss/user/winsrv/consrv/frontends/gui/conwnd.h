@@ -62,8 +62,6 @@ typedef struct _GUI_CONSOLE_DATA
     BOOLEAN IsWindowVisible;
     BOOLEAN IsWindowActive;
 
-    POINT OldCursor;
-
     /*
      * Work for the window thread (see "Locking" in guiterm.c). Writers and the
      * frontend callbacks record it here and set hWakeEvent; they never call
@@ -74,6 +72,7 @@ typedef struct _GUI_CONSOLE_DATA
     BOOLEAN DirtyCells;
     BOOLEAN DirtyView;          /* The whole view needs repainting */
     BOOLEAN ShowCaret;          /* Output moved the caret: show it, restart the blink */
+    BOOLEAN ViewMoved;          /* The view followed the cursor: move the scroll bars */
     BOOLEAN InitEventSet;       /* hGuiInitEvent was set (window thread only) */
     LONG PendingWork;           /* GUI_WORK_* */
     BOOL RequestedFullScreen;   /* For GUI_WORK_DISPLAY_MODE */
