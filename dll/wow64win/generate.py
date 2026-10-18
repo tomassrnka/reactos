@@ -159,7 +159,8 @@ for row in rows:
 # win32k with a guest layout. WM_USER and above belong to the target class or
 # application; catalogue control protocols must not block another class's
 # scalar message with the same number.
-converted = {'WM_CREATE','WM_NCCREATE','WM_NCCALCSIZE','WM_WINDOWPOSCHANGING','WM_WINDOWPOSCHANGED'}
+converted = {'WM_CREATE','WM_NCCREATE','WM_NCCALCSIZE','WM_WINDOWPOSCHANGING','WM_WINDOWPOSCHANGED',
+             'WM_MEASUREITEM','WM_DRAWITEM','WM_COPYDATA'}
 blocked = {}
 for row in csv.DictReader((HERE/'catalog/messages.tsv').open(),delimiter='\t'):
     if row['class'] in ('C','D') and row['message'] not in converted:

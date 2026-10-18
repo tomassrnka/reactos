@@ -111,9 +111,17 @@ add_executable(wow64_root_store EXCLUDE_FROM_ALL root_store.c)
 set_module_type(wow64_root_store win32cui)
 add_importlibs(wow64_root_store crypt32 msvcrt kernel32)
 
+add_executable(wow64_ownerdraw EXCLUDE_FROM_ALL ownerdraw.c)
+set_module_type(wow64_ownerdraw win32cui)
+add_importlibs(wow64_ownerdraw user32 gdi32 msvcrt kernel32)
+
 add_executable(wow64_message_hook EXCLUDE_FROM_ALL message_hook.c)
 set_module_type(wow64_message_hook win32cui)
 add_importlibs(wow64_message_hook user32 msvcrt kernel32)
+
+add_executable(wow64_copydata EXCLUDE_FROM_ALL copydata.c)
+set_module_type(wow64_copydata win32cui)
+add_importlibs(wow64_copydata user32 msvcrt kernel32)
 
 add_executable(wow64_notify EXCLUDE_FROM_ALL notify.c)
 set_module_type(wow64_notify win32cui)
