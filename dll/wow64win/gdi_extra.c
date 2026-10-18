@@ -136,53 +136,6 @@ static ULONG_PTR CharPlacement(ULONG *a)
     return Ret;
 }
 
-static ULONG_PTR OutlineMetrics(ULONG *a)
-{
-    const ULONG Delta = sizeof(OUTLINETEXTMETRICW) - sizeof(OTM32);
-    ULONG NativeSize, Ret, GuestSize;
-    BYTE *Buffer;
-    OTM32 *Out;
-    ULONG_PTR Result = 0;
-
-    if (a[3] && !GuestRange(a[3], sizeof(TMDIFF))) return Fault();
-    NativeSize = NtGdiGetOutlineTextMetricsInternalW(G(0), 0, NULL, P(3));
-    if (!NativeSize) return 0;
-    if (NativeSize < sizeof(OUTLINETEXTMETRICW)) { RtlSetLastWin32Error(ERROR_INVALID_DATA); return 0; }
-    GuestSize = NativeSize - Delta;
-    if (!a[2]) return GuestSize;
-    if (a[1] < GuestSize) { RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER); return 0; }
-    if (!GuestRange(a[2], GuestSize)) return Fault();
-    Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, NativeSize);
-    if (!Buffer) { RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY); return 0; }
-    _SEH2_TRY
-    {
-        Ret = NtGdiGetOutlineTextMetricsInternalW(G(0), NativeSize, (POUTLINETEXTMETRICW)Buffer, P(3));
-        if (Ret >= sizeof(OUTLINETEXTMETRICW) && Ret <= NativeSize && Ret - Delta <= a[1])
-        {
-            OUTLINETEXTMETRICW *Native = (OUTLINETEXTMETRICW *)Buffer;
-            /* The name members are byte offsets from the structure start, so they shift with the header. */
-            ULONG Names[4] = { (ULONG)(ULONG_PTR)Native->otmpFamilyName, (ULONG)(ULONG_PTR)Native->otmpFaceName,
-                               (ULONG)(ULONG_PTR)Native->otmpStyleName, (ULONG)(ULONG_PTR)Native->otmpFullName };
-            RtlMoveMemory(Buffer + sizeof(OTM32), Buffer + sizeof(OUTLINETEXTMETRICW), Ret - sizeof(OUTLINETEXTMETRICW));
-            Out = (OTM32 *)Buffer;
-            Out->FamilyName = Names[0] - Delta; Out->FaceName = Names[1] - Delta;
-            Out->StyleName = Names[2] - Delta; Out->FullName = Names[3] - Delta;
-            *(ULONG *)Buffer = Ret - Delta;
-            RtlCopyMemory(P(2), Buffer, Ret - Delta);
-            Result = Ret - Delta;
-        }
-        else if (Ret)
-        {
-            RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
-        }
-    }
-    _SEH2_FINALLY
-    {
-        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
-    }
-    _SEH2_END;
-    return Result;
-}
 
 static ULONG_PTR EnumGdiObjects(ULONG *a)
 {
@@ -261,7 +214,6 @@ ULONG_PTR Wow64WinGdiExtraService(ULONG Number, ULONG *a)
     case W64_NtGdiPolyTextOutW: return PolyText(a, FALSE);
     case W64_NtGdiPolyPatBlt: return PolyPat(a);
     case W64_NtGdiGetCharacterPlacementW: return CharPlacement(a);
-    case W64_NtGdiGetOutlineTextMetricsInternalW: return OutlineMetrics(a);
     case W64_NtGdiEnumObjects: return EnumGdiObjects(a);
     case W64_NtGdiGetFontFileInfo: return FontFileInfo(a);
     /* dxg.sys never reads the untyped buffers; the native path always answers DDHAL_DRIVER_NOTHANDLED. */

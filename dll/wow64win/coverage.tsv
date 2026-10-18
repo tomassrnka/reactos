@@ -185,7 +185,7 @@ NtUserPostThreadMessage	A+S	generated	typed arguments; handle policy; measured l
 NtUserPrintWindow	A+s	generated	typed arguments; handle policy; measured layouts
 NtUserProcessConnect	C+S	manual	see user.c, userextra.c and gdi.c
 NtUserQueryInformationThread	D	unsupported	requires private structure or selector translation
-NtUserQueryInputContext	D+s	manual	see user.c, userextra.c and gdi.c
+NtUserQueryInputContext	B+s	manual	see user.c, userextra.c and gdi.c
 NtUserQuerySendMessage	A	generated	typed arguments; handle policy; measured layouts
 NtUserQueryWindow	D+s	manual	see user.c, userextra.c and gdi.c
 NtUserRealChildWindowFromPoint	A+s	generated	typed arguments; handle policy; measured layouts
@@ -239,7 +239,7 @@ NtUserSetMenu	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetMenuContextHelpId	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetMenuDefaultItem	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetMenuFlagRtoL	A+S	generated	typed arguments; handle policy; measured layouts
-NtUserSetObjectInformation	D	unsupported	requires private structure or selector translation
+NtUserSetObjectInformation	B	generated	typed arguments; handle policy; measured layouts
 NtUserSetParent	A+S	generated	typed arguments; handle policy; measured layouts
 NtUserSetProcessWindowStation	A	generated	typed arguments; handle policy; measured layouts
 NtUserSetProp	A+S	generated	typed arguments; handle policy; measured layouts
@@ -331,7 +331,7 @@ NtGdiConvertMetafileRect	B	generated	typed arguments; handle policy; measured la
 NtGdiCreateBitmap	B+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateClientObj	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateColorSpace	C+S	unsupported	requires private structure or selector translation
-NtGdiCreateColorTransform	C	unsupported	requires private structure or selector translation
+NtGdiCreateColorTransform	B	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateCompatibleBitmap	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateCompatibleDC	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiCreateDIBBrush	B+S	generated	typed arguments; handle policy; measured layouts
@@ -430,7 +430,7 @@ NtGdiDescribePixelFormat	B	generated	typed arguments; handle policy; measured la
 NtGdiGetPerBandInfo	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDoBanding	B	generated	typed arguments; handle policy; measured layouts
 NtGdiDoPalette	D+S	manual	see user.c, userextra.c and gdi.c
-NtGdiDrawEscape	D	unsupported	requires private structure or selector translation
+NtGdiDrawEscape	B	generated	typed arguments; handle policy; measured layouts
 NtGdiEllipse	A+S	generated	typed arguments; handle policy; measured layouts
 NtGdiEnableEudc	A	generated	typed arguments; handle policy; measured layouts
 NtGdiEndDoc	A	generated	typed arguments; handle policy; measured layouts

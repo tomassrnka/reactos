@@ -137,43 +137,6 @@ static BOOL WinStaAttributesWritable(ULONG Address, BOOL Open)
     return Ok;
 }
 
-/* The query call keeps the native early exits; arrays are staged natively
- * only when the native service would copy them, handles before rectangles. */
-static ULONG_PTR EnumMonitors(ULONG *a)
-{
-    ULONG Count = a[4], i;
-    HMONITOR *Handles;
-    RECT *Rects;
-    INT Ret = NtUserEnumDisplayMonitors(G(0), P(1), NULL, NULL, 0);
-    if (Ret <= 0 || !Count || (!a[2] && !a[3])) return (ULONG_PTR)(LONG)Ret;
-    Handles = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)Count * (sizeof(HMONITOR) + sizeof(RECT)));
-    if (!Handles)
-    {
-        RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY);
-        return (ULONG_PTR)-1;
-    }
-    Rects = (RECT *)(Handles + Count);
-    Ret = NtUserEnumDisplayMonitors(G(0), P(1), a[2] ? Handles : NULL, a[3] ? Rects : NULL, Count);
-    if (Ret > 0)
-    {
-        _SEH2_TRY
-        {
-            ULONG *Guest = P(2);
-            if (a[2])
-                for (i = 0; i < Count; ++i) Guest[i] = (ULONG)(ULONG_PTR)Handles[i];
-            if (a[3])
-                RtlCopyMemory(P(3), Rects, (SIZE_T)Count * sizeof(RECT));
-        }
-        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-        {
-            RtlSetLastWin32Error(RtlNtStatusToDosError(_SEH2_GetExceptionCode()));
-            Ret = -1;
-        }
-        _SEH2_END;
-    }
-    RtlFreeHeap(RtlGetProcessHeap(), 0, Handles);
-    return (ULONG_PTR)(LONG)Ret;
-}
 
 static ULONG_PTR ResolveDesktop(ULONG *a)
 {
@@ -237,7 +200,6 @@ ULONG_PTR Wow64WinUserDisplayService(ULONG Number, ULONG *a)
         UNICODE_STRING Device;
         return (ULONG_PTR)(LONG)NtUserEnumDisplaySettings(StringIn(&Device, a[0]), a[1], P(2), a[3]);
     }
-    case W64_NtUserEnumDisplayMonitors: return EnumMonitors(a);
     case W64_NtUserCreateDesktop:
     {
         NATIVE_ATTRIBUTES Attributes; UNICODE_STRING Device;
