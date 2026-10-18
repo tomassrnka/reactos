@@ -1405,15 +1405,15 @@ EndDocPrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
-    if (pHandle->hSPLFile != INVALID_HANDLE_VALUE || pHandle->bAbortSpooled)
+    // The document was aborted, but its job could not be discarded: try again instead of printing it.
+    if (pHandle->bAbortSpooled)
+        return AbortPrinter(hPrinter);
+
+    if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
     {
         // Close the spool file handle first: the spooler prints the file, or deletes it with a deleted job.
-        // After a failed abort the file is already closed and the job is still spooled.
-        if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
-        {
-            CloseHandle(pHandle->hSPLFile);
-            pHandle->hSPLFile = INVALID_HANDLE_VALUE;
-        }
+        CloseHandle(pHandle->hSPLFile);
+        pHandle->hSPLFile = INVALID_HANDLE_VALUE;
 
         // For spooled jobs, the document is finished by calling _RpcScheduleJob.
         RpcTryExcept
@@ -1443,7 +1443,6 @@ EndDocPrinter(HANDLE hPrinter)
     }
 
     // A new document can now be started again.
-    pHandle->bAbortSpooled = FALSE;
     pHandle->bTrayIcon = pHandle->bJob = pHandle->bStartedDoc = FALSE;
 
 Cleanup:
@@ -4036,6 +4035,13 @@ WritePrinter(HANDLE hPrinter, PVOID pBuf, DWORD cbBuf, PDWORD pcWritten)
     if (!pHandle->bStartedDoc)
     {
         dwErrorCode = ERROR_SPL_NO_STARTDOC;
+        goto Cleanup;
+    }
+
+    // An aborted document takes no more data, even if its job could not be discarded yet.
+    if (pHandle->bAbortSpooled)
+    {
+        dwErrorCode = ERROR_PRINT_CANCELLED;
         goto Cleanup;
     }
 
