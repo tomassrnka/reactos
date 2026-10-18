@@ -127,6 +127,10 @@ add_executable(wow64_relative_pipe EXCLUDE_FROM_ALL relative_pipe.c)
 set_module_type(wow64_relative_pipe win32cui)
 add_importlibs(wow64_relative_pipe msvcrt kernel32)
 
+add_executable(wow64_unhandled EXCLUDE_FROM_ALL unhandled.c)
+set_module_type(wow64_unhandled win32cui)
+add_importlibs(wow64_unhandled msvcrt kernel32)
+
 add_executable(wow64_stack_recreate EXCLUDE_FROM_ALL stack_recreate.c)
 set_module_type(wow64_stack_recreate win32cui)
 add_importlibs(wow64_stack_recreate msvcrt kernel32)
