@@ -230,6 +230,10 @@ add_executable(wow64_pipe_connect EXCLUDE_FROM_ALL pipe_connect.c)
 set_module_type(wow64_pipe_connect win32cui)
 add_importlibs(wow64_pipe_connect msvcrt kernel32)
 
+add_executable(wow64_attach_fs EXCLUDE_FROM_ALL attach_fs.c)
+set_module_type(wow64_attach_fs win32cui)
+add_importlibs(wow64_attach_fs msvcrt kernel32)
+
 add_executable(wow64_time_zone EXCLUDE_FROM_ALL time_zone.c)
 set_module_type(wow64_time_zone win32cui)
 add_importlibs(wow64_time_zone msvcrt kernel32)
