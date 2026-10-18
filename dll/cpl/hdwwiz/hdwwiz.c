@@ -255,8 +255,13 @@ ReenumerateChildren(DEVINST devParent, ULONG ulDepth)
          cr == CR_SUCCESS;
          cr = CM_Get_Sibling(&devChild, devChild, 0))
     {
-        if (CM_Get_DevNode_Status(&ulStatus, &ulProblem, devChild, 0) == CR_SUCCESS &&
-            (ulStatus & DN_STARTED))
+        if (CM_Get_DevNode_Status(&ulStatus, &ulProblem, devChild, 0) != CR_SUCCESS)
+        {
+            bResult = FALSE;
+            continue;
+        }
+
+        if (ulStatus & DN_STARTED)
         {
             if (CM_Reenumerate_DevNode(devChild, 0) != CR_SUCCESS)
                 bResult = FALSE;
@@ -264,6 +269,10 @@ ReenumerateChildren(DEVINST devParent, ULONG ulDepth)
                 bResult = FALSE;
         }
     }
+
+    /* The end of the list is "no such devnode": anything else is a failed walk */
+    if (cr != CR_NO_SUCH_DEVNODE)
+        bResult = FALSE;
 
     return bResult;
 }
