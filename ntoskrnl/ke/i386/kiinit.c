@@ -336,8 +336,9 @@ KiInitializePcr(IN ULONG ProcessorNumber,
     Pcr->TssCopy = Tss;
     Pcr->PrcbData.DpcStack = DpcStack;
 
-    /* Setup the processor set */
+    /* Setup the processor set. Each processor is the master of its own set */
     Pcr->PrcbData.MultiThreadProcessorSet = Pcr->PrcbData.SetMember;
+    Pcr->PrcbData.MultiThreadSetMaster = Pcr->Prcb;
 }
 
 static
