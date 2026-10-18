@@ -19,6 +19,7 @@ extern void func_NtfsHardLink(void);
 extern void func_NtfsInherit(void);
 extern void func_NtfsOpenById(void);
 extern void func_NtfsPagingFile(void);
+extern void func_NtfsRelativeOpen(void);
 extern void func_NtfsRename(void);
 extern void func_NtfsSharing(void);
 extern void func_NtfsSystemFiles(void);
@@ -40,6 +41,7 @@ const struct test winetest_testlist[] =
     { "NtfsInherit", func_NtfsInherit },
     { "NtfsOpenById", func_NtfsOpenById },
     { "NtfsPagingFile", func_NtfsPagingFile },
+    { "NtfsRelativeOpen", func_NtfsRelativeOpen },
     { "NtfsRename", func_NtfsRename },
     { "NtfsSharing", func_NtfsSharing },
     { "NtfsSystemFiles", func_NtfsSystemFiles },
