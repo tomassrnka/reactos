@@ -11,6 +11,7 @@ list(APPEND SOURCE
     IsValidDevmode.c
     OpenPrinter.c
     PrintToFile.c
+    ScheduleJob.c
     StartDocPrinter.c
     testlist.c)
 
