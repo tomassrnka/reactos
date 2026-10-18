@@ -53,6 +53,18 @@ NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
     return NtContinue(&Native, TestAlert);
 }
 
+/* The lowest guest stack address a dispatch frame may use. The committed
+ * limit (StackLimit) only moves down when the guard page below it is touched,
+ * which a frame carved below ESP does on its own: the frame may extend into
+ * the rest of the reservation, except its last page. */
+static ULONG GuestStackFloor(const TEB32 *Teb32)
+{
+    ULONG Floor = Teb32->NtTib.StackLimit;
+    if (Teb32->DeallocationStack && Teb32->DeallocationStack <= MAXULONG - PAGE_SIZE)
+        Floor = min(Floor, Teb32->DeallocationStack + PAGE_SIZE);
+    return Floor;
+}
+
 /* The native dispatcher supplies its complete interrupted context in R9.
  * Negative routine values encode a guest address; normal native APCs retain
  * the ordinary ntdll dispatch path. */
@@ -86,8 +98,8 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
      * The write then runs under SEH as a second line of defence. A bad ESP
      * terminates this process cleanly instead of writing an unchecked pointer. */
     if (Context.Esp > Teb32->NtTib.StackBase ||
-        Context.Esp < Teb32->NtTib.StackLimit ||
-        Context.Esp - Teb32->NtTib.StackLimit < sizeof(*Guest) + 15)
+        Context.Esp < GuestStackFloor(Teb32) ||
+        Context.Esp - GuestStackFloor(Teb32) < sizeof(*Guest) + 15)
     {
         NtTerminateProcess(NtCurrentProcess(), STATUS_STACK_OVERFLOW);
         return;
@@ -127,12 +139,12 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     CONTEXT Native;
     ULONG i;
     NTSTATUS Status;
-    TEB32 *Teb32;
+    TEB32 *Teb32 = NULL;
 
     if (Context->SegCs != 0x23) return;
     Teb32 = WOW64_TEB32(NtCurrentTeb());
     if (!Wow64ExceptionDispatcher ||
-        (ULONG_PTR)&Frame < Teb32->NtTib.StackLimit ||
+        (ULONG_PTR)&Frame < GuestStackFloor(Teb32) ||
         (ULONG_PTR)(&Frame + 1) > Teb32->NtTib.StackBase)
         goto Failed;
 
@@ -159,6 +171,8 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     Status = NtContinue(&Native, FALSE);
     DbgPrint("WoW64: exception dispatch failed: %08lx\n", Status);
 Failed:
+    DbgPrint("WoW64: cannot dispatch guest exception %08lx (frame %p, guest stack %08lx-%08lx)\n",
+             Record->ExceptionCode, &Frame, Teb32 ? Teb32->NtTib.StackLimit : 0, Teb32 ? Teb32->NtTib.StackBase : 0);
     NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
 }
 
