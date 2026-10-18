@@ -777,6 +777,25 @@ START_TEST(NtfsVolumeLock)
     NtCleanup();
 }
 
+/* The major NTFS version of the test directory's volume (the extended FSCTL_GET_NTFS_VOLUME_DATA output), 3 if unknown. */
+static UCHAR NtVolumeMajor(VOID)
+{
+    struct { NTFS_VOLUME_DATA_BUFFER Data; NTFS_EXTENDED_VOLUME_DATA Extended; } Buffer;
+    IO_STATUS_BLOCK Iosb;
+    HANDLE Handle;
+    NTSTATUS Status;
+    UCHAR Major = 3;
+
+    if (!NT_SUCCESS(OpenVolume(FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Handle)))
+        return Major;
+    RtlZeroMemory(&Buffer, sizeof(Buffer));
+    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &Buffer, sizeof(Buffer));
+    if (NT_SUCCESS(Status) && Iosb.Information >= sizeof(Buffer) && Buffer.Extended.MajorVersion)
+        Major = (UCHAR)Buffer.Extended.MajorVersion;
+    NtClose(Handle);
+    return Major;
+}
+
 /*
  * The file system attributes FileFsAttributeInformation reports for the test directory's volume.
  * Each flag checked here is reported by Windows 10 and Server 2008 R2 NTFS (0x03e706ff and
@@ -824,6 +843,13 @@ START_TEST(NtfsVolumeAttributes)
         ok(Info->MaximumComponentNameLength == 255, "MaximumComponentNameLength %lu\n", Info->MaximumComponentNameLength);
         for (i = 0; i < RTL_NUMBER_OF(Expected); i++)
         {
+            /* An NTFS 1.x/2.x volume has no $Extend\$Reparse, hence no reparse points. */
+            if (Expected[i].Flag == FILE_SUPPORTS_REPARSE_POINTS && NtVolumeMajor() < 3)
+            {
+                ok(!(Info->FileSystemAttributes & FILE_SUPPORTS_REPARSE_POINTS) || !is_reactos(),
+                   "Reparse points reported on an NTFS %u volume: 0x%08lx\n", NtVolumeMajor(), Info->FileSystemAttributes);
+                continue;
+            }
             ok(Info->FileSystemAttributes & Expected[i].Flag, "%s (0x%08lx) not reported: 0x%08lx\n",
                Expected[i].Name, Expected[i].Flag, Info->FileSystemAttributes);
             All |= Expected[i].Flag;
@@ -831,7 +857,7 @@ START_TEST(NtfsVolumeAttributes)
         ok(!(Info->FileSystemAttributes & FILE_READ_ONLY_VOLUME), "Writable volume reported read-only: 0x%08lx\n",
            Info->FileSystemAttributes);
         if (is_reactos())
-            ok(Info->FileSystemAttributes == All, "Unexpected flags reported: 0x%08lx\n", Info->FileSystemAttributes & ~All);
+            ok(!(Info->FileSystemAttributes & ~All), "Unexpected flags reported: 0x%08lx\n", Info->FileSystemAttributes & ~All);
 
         /* GetVolumeInformationW passes the same flags through. */
         if (GetVolumeInformationW(LabelRoot, NULL, 0, NULL, &MaxComponent, &Flags, FsName, RTL_NUMBER_OF(FsName)))
