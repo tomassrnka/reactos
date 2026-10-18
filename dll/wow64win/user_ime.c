@@ -24,22 +24,22 @@ static BOOL GuestRange(ULONG Address, ULONG64 Size)
     return Address && (ULONG64)Address + Size <= 0x100000000ULL;
 }
 
+/* Mirrors ProbeForWrite: touching each page lets a stack guard page grow the stack instead of failing. */
 static BOOL GuestWritable(ULONG Address, ULONG64 Size)
 {
-    ULONG64 Current = Address, End = (ULONG64)Address + Size;
-    MEMORY_BASIC_INFORMATION Info;
+    ULONG64 Off;
+    BOOL Ok = TRUE;
     if (!Size) return TRUE;
     if (!GuestRange(Address, Size)) return FALSE;
-    while (Current < End)
+    _SEH2_TRY
     {
-        if (!NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), (PVOID)(ULONG_PTR)Current, MemoryBasicInformation, &Info, sizeof(Info), NULL)))
-            return FALSE;
-        if (Info.State != MEM_COMMIT || (Info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
-            !(Info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
-            return FALSE;
-        Current = (ULONG64)(ULONG_PTR)Info.BaseAddress + Info.RegionSize;
+        for (Off = 0; Off < Size; Off += 0x1000)
+            *(volatile BYTE *)P32(Address + Off) = *(volatile BYTE *)P32(Address + Off);
+        *(volatile BYTE *)P32(Address + Size - 1) = *(volatile BYTE *)P32(Address + Size - 1);
     }
-    return TRUE;
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Ok = FALSE; }
+    _SEH2_END;
+    return Ok;
 }
 
 static VOID ImeInfoExIn(IMEINFOEX *To, const IMEINFOEX32 *From)
