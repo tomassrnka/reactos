@@ -779,8 +779,10 @@ START_TEST(NtfsVolumeLock)
 
 /*
  * The file system attributes FileFsAttributeInformation reports for the test directory's volume.
- * Each flag checked here is reported by Windows 10 and Server 2008 R2 NTFS and backed by a
- * feature the other NTFS tests exercise (junctions, ACLs, hard links, open by file ID).
+ * Each flag checked here is reported by Windows 10 and Server 2008 R2 NTFS (0x03e706ff and
+ * 0x03e700ff on their system volumes) and backed by a feature the other NTFS tests exercise
+ * (junctions, hard links, open by file ID).  On ReactOS the set is exact: a flag for a feature
+ * the driver does not implement must not be reported.
  */
 START_TEST(NtfsVolumeAttributes)
 {
@@ -788,7 +790,6 @@ START_TEST(NtfsVolumeAttributes)
     {
         { FILE_CASE_PRESERVED_NAMES, "FILE_CASE_PRESERVED_NAMES" },
         { FILE_UNICODE_ON_DISK, "FILE_UNICODE_ON_DISK" },
-        { FILE_PERSISTENT_ACLS, "FILE_PERSISTENT_ACLS" },
         { FILE_SUPPORTS_REPARSE_POINTS, "FILE_SUPPORTS_REPARSE_POINTS" },
         { FILE_NAMED_STREAMS, "FILE_NAMED_STREAMS" },
         { FILE_SUPPORTS_HARD_LINKS, "FILE_SUPPORTS_HARD_LINKS" },
@@ -801,37 +802,49 @@ START_TEST(NtfsVolumeAttributes)
     HANDLE Handle;
     NTSTATUS Status;
     DWORD Flags = 0, MaxComponent = 0;
-    ULONG i;
+    ULONG i, All = 0;
 
     if (!LabelInit("NtfsVolumeAttributes"))
         return;
     Status = NtOpen(NtTestDir(), FILE_READ_ATTRIBUTES | SYNCHRONIZE, SHARE_RW | FILE_SHARE_DELETE, FILE_OPEN,
                     FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, &Handle);
     ok(Status == STATUS_SUCCESS, "Opening %ls: 0x%08lx\n", NtTestDir(), Status);
-    if (!NT_SUCCESS(Status))
-        return;
-    RtlZeroMemory(Buffer, sizeof(Buffer));
-    Status = NtQueryVolumeInformationFile(Handle, &Iosb, Info, sizeof(Buffer), FileFsAttributeInformation);
-    NtClose(Handle);
-    ok(Status == STATUS_SUCCESS, "FileFsAttributeInformation: 0x%08lx\n", Status);
-    if (!NT_SUCCESS(Status))
-        return;
-    trace("%ls: FileSystemAttributes 0x%08lx\n", LabelRoot, Info->FileSystemAttributes);
-    ok(Info->FileSystemNameLength == 8 && !memcmp(Info->FileSystemName, L"NTFS", 8),
-       "File system name \"%.*ls\"\n", (int)(Info->FileSystemNameLength / sizeof(WCHAR)), Info->FileSystemName);
-    ok(Info->MaximumComponentNameLength == 255, "MaximumComponentNameLength %lu\n", Info->MaximumComponentNameLength);
-    for (i = 0; i < RTL_NUMBER_OF(Expected); i++)
-        ok(Info->FileSystemAttributes & Expected[i].Flag, "%s (0x%08lx) not reported: 0x%08lx\n",
-           Expected[i].Name, Expected[i].Flag, Info->FileSystemAttributes);
-    ok(!(Info->FileSystemAttributes & FILE_READ_ONLY_VOLUME), "Writable volume reported read-only: 0x%08lx\n",
-       Info->FileSystemAttributes);
+    if (NT_SUCCESS(Status))
+    {
+        RtlZeroMemory(Buffer, sizeof(Buffer));
+        Status = NtQueryVolumeInformationFile(Handle, &Iosb, Info, sizeof(Buffer), FileFsAttributeInformation);
+        NtClose(Handle);
+        ok(Status == STATUS_SUCCESS, "FileFsAttributeInformation: 0x%08lx\n", Status);
+    }
+    if (NT_SUCCESS(Status))
+    {
+        trace("%ls: FileSystemAttributes 0x%08lx\n", LabelRoot, Info->FileSystemAttributes);
+        ok(Info->FileSystemNameLength == 8 && !memcmp(Info->FileSystemName, L"NTFS", 8),
+           "File system name \"%.*ls\"\n", (int)(Info->FileSystemNameLength / sizeof(WCHAR)), Info->FileSystemName);
+        ok(Info->MaximumComponentNameLength == 255, "MaximumComponentNameLength %lu\n", Info->MaximumComponentNameLength);
+        for (i = 0; i < RTL_NUMBER_OF(Expected); i++)
+        {
+            ok(Info->FileSystemAttributes & Expected[i].Flag, "%s (0x%08lx) not reported: 0x%08lx\n",
+               Expected[i].Name, Expected[i].Flag, Info->FileSystemAttributes);
+            All |= Expected[i].Flag;
+        }
+        ok(!(Info->FileSystemAttributes & FILE_READ_ONLY_VOLUME), "Writable volume reported read-only: 0x%08lx\n",
+           Info->FileSystemAttributes);
+        if (is_reactos())
+            ok(Info->FileSystemAttributes == All, "Unexpected flags reported: 0x%08lx\n", Info->FileSystemAttributes & ~All);
 
-    /* GetVolumeInformationW passes the same flags through. */
-    ok(GetVolumeInformationW(LabelRoot, NULL, 0, NULL, &MaxComponent, &Flags, FsName, RTL_NUMBER_OF(FsName)),
-       "GetVolumeInformationW failed %lu\n", GetLastError());
-    ok(Flags == Info->FileSystemAttributes, "GetVolumeInformationW flags 0x%08lx, native 0x%08lx\n",
-       Flags, Info->FileSystemAttributes);
-    ok(MaxComponent == 255, "GetVolumeInformationW component length %lu\n", MaxComponent);
-    ok(!wcscmp(FsName, L"NTFS"), "GetVolumeInformationW file system \"%ls\"\n", FsName);
+        /* GetVolumeInformationW passes the same flags through. */
+        if (GetVolumeInformationW(LabelRoot, NULL, 0, NULL, &MaxComponent, &Flags, FsName, RTL_NUMBER_OF(FsName)))
+        {
+            ok(Flags == Info->FileSystemAttributes, "GetVolumeInformationW flags 0x%08lx, native 0x%08lx\n",
+               Flags, Info->FileSystemAttributes);
+            ok(MaxComponent == 255, "GetVolumeInformationW component length %lu\n", MaxComponent);
+            ok(!wcscmp(FsName, L"NTFS"), "GetVolumeInformationW file system \"%ls\"\n", FsName);
+        }
+        else
+        {
+            ok(FALSE, "GetVolumeInformationW failed %lu\n", GetLastError());
+        }
+    }
     NtCleanup();
 }
