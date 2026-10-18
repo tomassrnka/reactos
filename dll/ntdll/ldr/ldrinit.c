@@ -1308,6 +1308,12 @@ LdrShutdownThread(VOID)
     /* Free the FLS data, its callbacks already ran */
     if (Teb->FlsData)
     {
+        /* A DLL notification may have called FlsSetValue after the rundown: on a thread that had no
+           FLS data yet that links a new block, which FlsFree must not find once it is freed */
+        RtlAcquirePebLock();
+        RemoveEntryList(&((PRTL_FLS_DATA)Teb->FlsData)->ListEntry);
+        RtlReleasePebLock();
+
         RtlFreeHeap(RtlGetProcessHeap(), 0, Teb->FlsData);
         Teb->FlsData = NULL;
     }
