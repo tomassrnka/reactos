@@ -8,6 +8,7 @@ typedef struct _FONT_ENTRY
     UNICODE_STRING FaceName;
     UNICODE_STRING StyleName;
     BYTE NotEnum;
+    ULONG LoadId; //< The AddFontResource call that loaded it; one removal undoes one load
 } FONT_ENTRY, *PFONT_ENTRY;
 
 typedef struct _FONT_ENTRY_MEM
@@ -90,5 +91,6 @@ typedef struct GDI_LOAD_FONT
     BOOL                IsTrueType;
     BYTE                CharSet;
     PFONT_ENTRY_MEM     PrivateEntry;
+    ULONG               LoadId;
 } GDI_LOAD_FONT, *PGDI_LOAD_FONT;
 

@@ -72,6 +72,7 @@ extern void func_Rectangle(void);
 extern void func_RegionAllocFailClip(void);
 extern void func_RegionAllocFailVis(void);
 extern void func_RealizePalette(void);
+extern void func_RemoveFontResourceEx(void);
 extern void func_SelectBitmapOwner(void);
 extern void func_SelectObject(void);
 extern void func_SetBoundsRect(void);
@@ -160,6 +161,7 @@ const struct test winetest_testlist[] =
     { "RegionAllocFailClip", func_RegionAllocFailClip },
     { "RegionAllocFailVis", func_RegionAllocFailVis },
     { "RealizePalette", func_RealizePalette },
+    { "RemoveFontResourceEx", func_RemoveFontResourceEx },
     { "SelectBitmapOwner", func_SelectBitmapOwner },
     { "SelectObject", func_SelectObject },
     { "SetBoundsRect", func_SetBoundsRect },

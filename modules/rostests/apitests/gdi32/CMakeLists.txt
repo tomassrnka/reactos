@@ -72,6 +72,7 @@ list(APPEND SOURCE
     Rectangle.c
     RegionAllocFailure.c
     RealizePalette.c
+    RemoveFontResourceEx.c
     SelectBitmapOwner.c
     SelectObject.c
     SetBoundsRect.c
