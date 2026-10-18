@@ -22,6 +22,7 @@ extern void func_IsValidDevmodeA(void);
 extern void func_IsValidDevmodeW(void);
 extern void func_OpenPrinter(void);
 extern void func_PrintToFile(void);
+extern void func_ScheduleJob(void);
 extern void func_StartDocPrinter(void);
 
 const struct test winetest_testlist[] =
@@ -40,6 +41,7 @@ const struct test winetest_testlist[] =
     { "IsValidDevmodeW", func_IsValidDevmodeW },
     { "OpenPrinter", func_OpenPrinter },
     { "PrintToFile", func_PrintToFile },
+    { "ScheduleJob", func_ScheduleJob },
     { "StartDocPrinter", func_StartDocPrinter },
 
     { 0, 0 }
