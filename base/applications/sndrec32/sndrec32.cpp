@@ -43,7 +43,6 @@ HBITMAP butbmps_dis[5];
 WNDPROC buttons_std_proc;
 
 BOOL butdisabled[5];
-BOOL can_record = TRUE;
 BOOL stopped_flag;
 BOOL isnew;
 BOOL display_dur;
@@ -502,17 +501,12 @@ WndProc(HWND hWnd,
                         (LPARAM)MAKELONG(slider_min, slider_max));
 
             UpdateWindow(slider);
-            /* Without a recording device Record stays disabled */
-            can_record = (waveInGetNumDevs() > 0);
-            if (can_record)
-            {
-                enable_but(BUTREC_ID);
-            }
-            else
-            {
-                disable_but(BUTREC_ID);
+            enable_but(BUTREC_ID);
+
+            /* Say once that there is nothing to record from. Record stays
+               available: pressing it checks for a device again */
+            if (waveInGetNumDevs() == 0)
                 PostMessage(hWnd, WM_APP_NODEVICE, 0, 0);
-            }
             EnableWindow(slider, FALSE);
             break;
 
@@ -522,9 +516,12 @@ WndProc(HWND hWnd,
             break;
 
         case WM_APP_PLAYDONE:
-            /* Playback ended; a notice that arrives after a new Play is stale */
-            if (AUD_OUT->current_status() == snd::WAVEOUT_PLAYING ||
-                AUD_OUT->current_status() == snd::WAVEOUT_FLUSHING)
+            /* Playback ended; a notice that arrives after a new Play or
+               after recording started is stale */
+            if (s_recording ||
+                AUD_OUT->current_status() == snd::WAVEOUT_PLAYING ||
+                AUD_OUT->current_status() == snd::WAVEOUT_FLUSHING ||
+                AUD_OUT->current_status() == snd::WAVEOUT_PAUSED)
                 break;
 
             stopped_flag = TRUE;
@@ -741,6 +738,16 @@ WndProc(HWND hWnd,
                     break;
 
                 case BUTREC_ID:
+                    /* Check again on every press, a device may have arrived.
+                       Without one the input object is not opened at all, so
+                       a later press can still open it */
+                    if (waveInGetNumDevs() == 0)
+                    {
+                        LoadString(hInst, IDS_ERR_NODEVICE, str_tmp, MAX_LOADSTRING);
+                        MessageBox(hWnd, str_tmp, szTitle, MB_OK);
+                        break;
+                    }
+
                     if (win_first == false)
                     {
                         AUD_IN->open();
@@ -753,10 +760,8 @@ WndProc(HWND hWnd,
 
                     if (!AUD_IN->start_recording())
                     {
-                        /* One message for the whole failure; the device stays unusable */
+                        /* One message for the whole failure; Record stays available */
                         s_recording = FALSE;
-                        can_record = FALSE;
-                        disable_but(BUTREC_ID);
                         LoadString(hInst, IDS_ERR_RECORD, str_tmp, MAX_LOADSTRING);
                         MessageBox(hWnd, str_tmp, szTitle, MB_OK | MB_ICONERROR);
                         break;
@@ -945,9 +950,6 @@ void l_buffer_resized(unsigned int new_size)
 
 VOID enable_but(DWORD id)
 {
-    if (id == BUTREC_ID && !can_record)
-        return;
-
     butdisabled[id] = FALSE;
     SendMessage(buttons[id], BM_SETIMAGE, (WPARAM)IMAGE_BITMAP, (LPARAM)butbmps[id]);
 }
