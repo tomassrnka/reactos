@@ -113,10 +113,15 @@ C_ASSERT(sizeof(WOW64_JOB_EXTENDED_LIMIT) == 112);
 
 /* The 32-bit loader's PROCESS_TLS_INFORMATION (16-byte entries) as a native
  * request with PROCESS_TLS_WOW64, so the kernel changes the TEB32 vectors of
- * the threads. The request is read once; results go back per entry. */
+ * the threads. The request is checked as writable guest memory and read once;
+ * results go back per entry. The loader holds its lock and owns the request,
+ * so only the process unmapping it meanwhile can still lose the results (as
+ * for the native caller, see PspSetProcessTlsInformation). */
 typedef struct { ULONG Flags, NewTlsData, OldTlsData, ThreadId; } WOW64_THREAD_TLS_INFORMATION;
 C_ASSERT(sizeof(WOW64_THREAD_TLS_INFORMATION) == 16);
 C_ASSERT(FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData) == 16);
+
+static VOID ProbeOutput(ULONG Address, ULONG Size);
 
 static NTSTATUS SetProcessTls32(HANDLE Process, ULONG Address, ULONG Length, WOW64_CLEANUP *Cleanup)
 {
@@ -127,6 +132,7 @@ static NTSTATUS SetProcessTls32(HANDLE Process, ULONG Address, ULONG Length, WOW
     NTSTATUS Status;
 
     if (Length < FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData)) return STATUS_INFO_LENGTH_MISMATCH;
+    if ((ULONG64)Address + Length > (ULONG64)Wow64HighestUserAddress + 1) return STATUS_INVALID_PARAMETER;
     Flags = Guest->Flags;
     Count = Guest->ThreadDataCount;
     /* Only this layer asks for the 32-bit vectors */
@@ -134,6 +140,9 @@ static NTSTATUS SetProcessTls32(HANDLE Process, ULONG Address, ULONG Length, WOW
     if (Count > (Length - FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData)) / sizeof(*Entries) ||
         Count > (MAXULONG - FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData)) / sizeof(THREAD_TLS_INFORMATION))
         return STATUS_INVALID_PARAMETER;
+    /* The whole guest request must be guest memory and writable before any
+     * thread's TLS changes: the results are written back afterwards */
+    ProbeOutput(Address, FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData) + Count * sizeof(*Entries));
     Size = FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData) + (SIZE_T)Count * sizeof(THREAD_TLS_INFORMATION);
     Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size);
     if (!Native) return STATUS_NO_MEMORY;
