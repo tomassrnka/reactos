@@ -118,7 +118,26 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     NgFillStat(Fcb);
     /* Zero the reply buffer so uninitialized pool padding never reaches user mode. */
     if (Buffer)
-        RtlZeroMemory(Buffer, Length);
+    {
+        if (Stack->Parameters.QueryFile.FileInformationClass == FileAllInformation &&
+            Length >= FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation))
+        {
+            /* The I/O manager fills in the access, mode and alignment parts of
+               FileAllInformation before calling us (as for fastfat); keep them. */
+            PFILE_ALL_INFORMATION A = Buffer;
+            FILE_ACCESS_INFORMATION Access = A->AccessInformation;
+            FILE_MODE_INFORMATION Mode = A->ModeInformation;
+            FILE_ALIGNMENT_INFORMATION Alignment = A->AlignmentInformation;
+            RtlZeroMemory(Buffer, Length);
+            A->AccessInformation = Access;
+            A->ModeInformation = Mode;
+            A->AlignmentInformation = Alignment;
+        }
+        else
+        {
+            RtlZeroMemory(Buffer, Length);
+        }
+    }
 
 #define NEED(t) do { if (Length < sizeof(t)) return STATUS_BUFFER_TOO_SMALL; Used = sizeof(t); } while (0)
     switch (Stack->Parameters.QueryFile.FileInformationClass)
@@ -224,7 +243,6 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             A->InternalInformation.IndexNumber.QuadPart = Fcb->Stat.mft_ref;
             A->EaInformation.EaSize = 0;
             A->PositionInformation.CurrentByteOffset = FileObject->CurrentByteOffset;
-            A->AlignmentInformation.AlignmentRequirement = DeviceObject->AlignmentRequirement;
             Status = NgName(Ccb, &A->NameInformation, Length - FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation), &NameUsed);
             Used = FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation) + NameUsed;
             break;
