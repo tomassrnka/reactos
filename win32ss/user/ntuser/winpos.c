@@ -677,9 +677,20 @@ IntSetWindowPlacement(PWND Wnd, WINDOWPLACEMENT *wpl, UINT Flags)
 
    /* The icon position and the normal rectangle of a top-level window come relative to the work area, as
       IntGetWindowPlacement gives them: back to screen coordinates, the ones of InternalPos and of the window */
-   if (Wnd->spwndParent == Wnd->head.rpdesk->pDeskInfo->spwnd && !(Wnd->ExStyle & WS_EX_TOOLWINDOW))
+   if ((Flags & (PLACE_MIN | PLACE_RECT)) &&
+       Wnd->spwndParent == Wnd->head.rpdesk->pDeskInfo->spwnd && !(Wnd->ExStyle & WS_EX_TOOLWINDOW))
    {
-      PMONITOR pmonitor = UserMonitorFromRect(&wpl->rcNormalPosition, MONITOR_DEFAULTTOPRIMARY);
+      PMONITOR pmonitor;
+
+      /* The monitor of the normal rectangle, brought up to date as IntGetWindowPlacement does before it picks one */
+      WinPosInitInternalPos(Wnd, &Wnd->rcWindow);
+      pmonitor = UserMonitorFromRect(&Wnd->InternalPos.NormalRect, MONITOR_DEFAULTTOPRIMARY);
+
+      /* rcNormalPosition is only valid with PLACE_RECT (NtUserSetInternalWindowPos may pass the icon position
+         alone). It is relative to the work area of the monitor IntGetWindowPlacement took the offset from: the
+         window's own one when it fits, which a placement that GetWindowPlacement gave back always does */
+      if (Flags & PLACE_RECT)
+         pmonitor = UserMonitorFromWorkAreaRect(&wpl->rcNormalPosition, pmonitor);
 
       if (pmonitor)
       {
