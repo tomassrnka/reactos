@@ -140,12 +140,10 @@ static char *read_console(size_t *size)
             data = xrealloc(data, allocated);
         }
         got = fread(data + used, 1, allocated - used, stdin);
+        if (ferror(stdin))
+            fail_crt(L"SORT", errno);
         if (got == 0)
-        {
-            if (ferror(stdin))
-                fail_crt(L"SORT", errno);
             break;
-        }
         used += got;
     }
 
