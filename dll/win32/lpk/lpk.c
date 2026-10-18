@@ -509,8 +509,11 @@ LpkGetCharacterPlacement(
     SCRIPT_STRING_ANALYSIS ssa;
     LPWORD lpGlyphs = NULL;
     SIZE size;
-    UINT nSet, i;
-    INT cGlyphs;
+    UINT nSet, i, nCapacity;
+    INT cGlyphs = 0;
+    BOOL bReorder;
+    LPCWSTR pszShown;
+    GCP_RESULTSW results;
 
     UNREFERENCED_PARAMETER(dwUnused);
 
@@ -518,21 +521,31 @@ LpkGetCharacterPlacement(
     if (!(dwFlags & GCP_REORDER))
        return GetCharacterPlacementW(hdc, lpString, uCount, nMaxExtent, lpResults, dwFlags);
 
+    nCapacity = lpResults->nGlyphs;
     nSet = (UINT)uCount;
-    if (nSet > lpResults->nGlyphs)
-        nSet = lpResults->nGlyphs;
+    if (nSet > nCapacity)
+        nSet = nCapacity;
 
-    BIDI_Reorder(hdc, lpString, uCount, dwFlags, WINE_GCPW_FORCE_LTR, lpResults->lpOutString,
-                 nSet, lpResults->lpOrder, &lpGlyphs, &cGlyphs);
+    /* Only the characters that fit are reordered: lpOutString and lpOrder have room for nSet */
+    bReorder = BIDI_Reorder(hdc, lpString, nSet, dwFlags, WINE_GCPW_FORCE_LTR, lpResults->lpOutString,
+                            nSet, lpResults->lpOrder, &lpGlyphs, &cGlyphs);
 
-    lpResults->nGlyphs = (UINT)cGlyphs;
+    /* The string in the order it is shown, when BIDI_Reorder wrote it */
+    pszShown = (bReorder && lpResults->lpOutString) ? lpResults->lpOutString : lpString;
+
+    /* Without shaped glyphs (Latin text, or shaping failed) there is one glyph per character, as on Windows;
+     * shaped glyphs are cut to the room the caller has */
+    if (lpGlyphs && cGlyphs > 0)
+        lpResults->nGlyphs = min((UINT)cGlyphs, nCapacity);
+    else
+        lpResults->nGlyphs = nSet;
 
     if (lpResults->lpGlyphs)
     {
-        if (lpGlyphs)
-            StringCchCopyW(lpResults->lpGlyphs, cGlyphs, lpGlyphs);
-        else if (lpResults->lpOutString)
-            GetGlyphIndicesW(hdc, lpResults->lpOutString, nSet, lpResults->lpGlyphs, 0);
+        if (lpGlyphs && cGlyphs > 0)
+            RtlCopyMemory(lpResults->lpGlyphs, lpGlyphs, lpResults->nGlyphs * sizeof(*lpGlyphs));
+        else
+            GetGlyphIndicesW(hdc, pszShown, nSet, lpResults->lpGlyphs, 0);
     }
 
     if (lpResults->lpDx)
@@ -554,10 +567,18 @@ LpkGetCharacterPlacement(
 
         else
         {
-            for (i = 0; i < nSet; i++)
+            /* The widths of the characters in the order they are shown, with the pair kerning between neighbours */
+            ZeroMemory(&results, sizeof(results));
+            results.lStructSize = sizeof(results);
+            results.lpDx = lpResults->lpDx;
+            results.nGlyphs = nSet;
+            if (!GetCharacterPlacementW(hdc, pszShown, nSet, 0, &results, dwFlags & ~GCP_REORDER))
             {
-                if (GetCharWidth32W(hdc, lpResults->lpOutString[i], lpResults->lpOutString[i], &c))
-                    lpResults->lpDx[i] = c;
+                for (i = 0; i < nSet; i++)
+                {
+                    if (GetCharWidth32W(hdc, pszShown[i], pszShown[i], &c))
+                        lpResults->lpDx[i] = c;
+                }
             }
         }
     }
@@ -588,8 +609,13 @@ LpkGetCharacterPlacement(
         }
     }
 
-    if (GetTextExtentPoint32W(hdc, lpString, uCount, &size))
-        ret = MAKELONG(size.cx, size.cy);
+    /* The width has the pair kerning, as without GCP_REORDER, between the neighbours on the screen when the whole
+     * string was reordered */
+    ZeroMemory(&results, sizeof(results));
+    results.lStructSize = sizeof(results);
+    results.nGlyphs = uCount;
+    ret = GetCharacterPlacementW(hdc, nSet == (UINT)uCount ? pszShown : lpString, uCount, nMaxExtent, &results,
+                                 dwFlags & ~GCP_REORDER);
 
     HeapFree(GetProcessHeap(), 0, lpGlyphs);
 

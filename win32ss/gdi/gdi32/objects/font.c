@@ -563,6 +563,11 @@ GetCharacterPlacementA(
 }
 
 
+static INT GcpClampInt(LONGLONG ll)
+{
+    return (INT)max(min(ll, (LONGLONG)MAXLONG), -(LONGLONG)MAXLONG - 1);
+}
+
 /*
  * @implemented
  */
@@ -580,7 +585,16 @@ GetCharacterPlacementW(
     DWORD ret=0;
     SIZE size;
     UINT i, nSet;
+    INT *pStart, *pKernedEnd, nEnd;
     DPRINT("GetCharacterPlacementW\n");
+
+    /* Without results Windows answers with the plain extent, which has no kerning */
+    if (!lpResults)
+    {
+        if (GetTextExtentPoint32W(hdc, lpString, uCount, &size))
+            ret = MAKELONG(size.cx, size.cy);
+        return ret;
+    }
 
     if (dwFlags&(~GCP_REORDER)) DPRINT("flags 0x%08lx ignored\n", dwFlags);
     if (lpResults->lpClass) DPRINT("classes not implemented\n");
@@ -609,32 +623,57 @@ GetCharacterPlacementW(
             lpResults->lpOrder[i] = i;
     }
 
+    if (uCount <= 0 || (UINT)uCount > MAXLONG / (2 * sizeof(*pStart)))
+        return 0;
+
+    /* Windows applies the pair kerning of the font here, with or without GCP_USEKERNING, although a plain text extent
+     * does not have it. The kerning of a pair goes to the width of its first character: a character starts where the
+     * kerned position after it, less its own advance, puts it. */
+    pStart = HeapAlloc(GetProcessHeap(), 0, 2 * uCount * sizeof(*pStart));
+    if (!pStart)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    pKernedEnd = pStart + uCount;
+    if (!NtGdiGetTextExtentExW(hdc, (LPWSTR)lpString, uCount, 0, NULL, (PULONG)pStart, &size, 0) ||
+        !NtGdiGetTextExtentExW(hdc, (LPWSTR)lpString, uCount, 0, NULL, (PULONG)pKernedEnd, &size, GTEF_KERNPAIRS))
+    {
+        HeapFree(GetProcessHeap(), 0, pStart);
+        return 0;
+    }
+
+    /* pStart has the plain position after each character; make it the kerned start. The positions are INTs, their
+     * differences are taken in 64 bits and kept in the INT range. */
+    for (i = 0, nEnd = 0; i < (UINT)uCount; i++)
+    {
+        LONGLONG llAdvance = (LONGLONG)pStart[i] - nEnd;
+        nEnd = pStart[i];
+        pStart[i] = GcpClampInt((LONGLONG)pKernedEnd[i] - llAdvance);
+    }
+
     /* FIXME: Will use the placement chars */
     if (lpResults->lpDx)
     {
-        int c;
         for (i = 0; i < nSet; i++)
         {
-            if (GetCharWidth32W(hdc, lpString[i], lpString[i], &c))
-                lpResults->lpDx[i]= c;
+            INT nNext = (i + 1 < (UINT)uCount) ? pStart[i + 1] : pKernedEnd[i];
+            lpResults->lpDx[i] = GcpClampInt((LONGLONG)nNext - pStart[i]);
         }
     }
 
     if (lpResults->lpCaretPos && !(dwFlags & GCP_REORDER))
     {
-        int pos = 0;
-
-        lpResults->lpCaretPos[0] = 0;
-        for (i = 1; i < nSet; i++)
-            if (GetTextExtentPoint32W(hdc, &(lpString[i - 1]), 1, &size))
-                lpResults->lpCaretPos[i] = (pos += size.cx);
+        for (i = 0; i < nSet; i++)
+            lpResults->lpCaretPos[i] = pStart[i];
     }
+
+    HeapFree(GetProcessHeap(), 0, pStart);
 
     if (lpResults->lpGlyphs)
         NtGdiGetGlyphIndicesW(hdc, lpString, nSet, lpResults->lpGlyphs, 0);
 
-    if (GetTextExtentPoint32W(hdc, lpString, uCount, &size))
-        ret = MAKELONG(size.cx, size.cy);
+    ret = MAKELONG(size.cx, size.cy);
 
     return ret;
 }

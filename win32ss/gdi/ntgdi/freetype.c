@@ -5144,6 +5144,8 @@ TextIntGetTextExtentPoint(
     FT_Pos AdvanceX = 0, AdvanceY = 0;
     FT_Error error;
     INT glyph_index, i, iUnit, cUnits, nTenthsOfDegrees;
+    FT_UInt previous = 0;
+    FT_Face PreviousFace = NULL;
     ULONGLONG TotalWidth64 = 0;
     LOGFONTW *plf;
     BOOL bVerticalWriting;
@@ -5210,6 +5212,23 @@ TextIntGetTextExtentPoint(
             IntSetAdvanceError(error);
             return FALSE;
         }
+
+        /* Only GetCharacterPlacement kerns, and only between two glyphs of the same face */
+        if ((fl & GTEF_KERNPAIRS) && previous && glyph_index && PreviousFace == Cache.Hashed.Face &&
+            FT_HAS_KERNING(Cache.Hashed.Face))
+        {
+            FT_Vector delta;
+            if (FT_Get_Kerning(Cache.Hashed.Face, previous, glyph_index, FT_KERNING_DEFAULT, &delta) == FT_Err_Ok)
+            {
+                /* The total is unsigned: a kerning that would go back past the start stops there */
+                if (delta.x < 0 && (ULONGLONG)-delta.x > TotalWidth64)
+                    TotalWidth64 = 0;
+                else
+                    TotalWidth64 += delta.x;
+            }
+        }
+        previous = glyph_index;
+        PreviousFace = Cache.Hashed.Face;
 
         TotalWidth64 += AdvanceX;
 
