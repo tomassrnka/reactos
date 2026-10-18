@@ -166,19 +166,27 @@ AbortPrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
-    if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
+    if (pHandle->hSPLFile != INVALID_HANDLE_VALUE || pHandle->bAbortSpooled)
     {
         // A spooled document was started with AddJob: delete its job, and end the document so that the spooler discards it.
-        CloseHandle(pHandle->hSPLFile);
-        pHandle->hSPLFile = INVALID_HANDLE_VALUE;
+        if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(pHandle->hSPLFile);
+            pHandle->hSPLFile = INVALID_HANDLE_VALUE;
+        }
 
         if (SetJobW(hPrinter, pHandle->dwJobID, 0, NULL, JOB_CONTROL_DELETE) && ScheduleJob(hPrinter, pHandle->dwJobID))
+        {
             dwErrorCode = ERROR_SUCCESS;
+            pHandle->bAbortSpooled = FALSE;
+            pHandle->bTrayIcon = pHandle->bJob = pHandle->bStartedDoc = FALSE;
+        }
         else
+        {
+            // The spooler still has the job: the document stays started, so that AbortPrinter or EndDocPrinter can try again.
             dwErrorCode = GetLastError();
-
-        // The document ends here either way; if the spooler kept the job, ClosePrinter discards it.
-        pHandle->bTrayIcon = pHandle->bJob = pHandle->bStartedDoc = FALSE;
+            pHandle->bAbortSpooled = TRUE;
+        }
         goto Cleanup;
     }
 
@@ -1397,11 +1405,15 @@ EndDocPrinter(HANDLE hPrinter)
         goto Cleanup;
     }
 
-    if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
+    if (pHandle->hSPLFile != INVALID_HANDLE_VALUE || pHandle->bAbortSpooled)
     {
         // Close the spool file handle first: the spooler prints the file, or deletes it with a deleted job.
-        CloseHandle(pHandle->hSPLFile);
-        pHandle->hSPLFile = INVALID_HANDLE_VALUE;
+        // After a failed abort the file is already closed and the job is still spooled.
+        if (pHandle->hSPLFile != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(pHandle->hSPLFile);
+            pHandle->hSPLFile = INVALID_HANDLE_VALUE;
+        }
 
         // For spooled jobs, the document is finished by calling _RpcScheduleJob.
         RpcTryExcept
@@ -1431,6 +1443,7 @@ EndDocPrinter(HANDLE hPrinter)
     }
 
     // A new document can now be started again.
+    pHandle->bAbortSpooled = FALSE;
     pHandle->bTrayIcon = pHandle->bJob = pHandle->bStartedDoc = FALSE;
 
 Cleanup:
