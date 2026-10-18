@@ -15,3 +15,13 @@ add_importlibs(rosdev ws2_32 advapi32 user32 gdi32 msvcrt kernel32)
 add_executable(rosdev_hungwin hungwin.c)
 set_module_type(rosdev_hungwin win32gui UNICODE)
 add_importlibs(rosdev_hungwin user32 msvcrt kernel32)
+
+# ptrblink: GUI load for the mouse pointer blink test (host/ptrblink-test); not placed on any ISO either
+add_executable(ptrblink ptrblink.c)
+set_module_type(ptrblink win32gui)
+add_importlibs(ptrblink msimg32 user32 gdi32 msvcrt kernel32)
+
+# ptrmode: a display mode switch under a pointer that does not move (host/ptrmode-test); not placed on any ISO either
+add_executable(ptrmode ptrmode.c)
+set_module_type(ptrmode win32gui UNICODE)
+add_importlibs(ptrmode shlwapi user32 gdi32 msvcrt kernel32)
