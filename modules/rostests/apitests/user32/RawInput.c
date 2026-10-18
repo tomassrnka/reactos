@@ -1092,6 +1092,12 @@ static void test_buffer_alignment_and_protection(void)
     pump(50);
     mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
     Sleep(50);
+    /* an empty destination is not probed, so its alignment does not matter */
+    size = 0;
+    SetLastError(0xdeadbeef);
+    ret = GetRawInputBuffer((PRAWINPUT)(page + 1), &size, sizeof(RAWINPUTHEADER));
+    ok(ret == (UINT)-1 && GetLastError() == ERROR_INSUFFICIENT_BUFFER && size == RAWMOUSE_TOTAL,
+       "offset 1, size 0: ret %u error %lu size %u\n", ret, GetLastError(), size);
     size = 1024;
     SetLastError(0xdeadbeef);
     ret = GetRawInputBuffer((PRAWINPUT)(page + 1), &size, sizeof(RAWINPUTHEADER));
@@ -1107,10 +1113,25 @@ static void test_buffer_alignment_and_protection(void)
     pump(100);
     unreg_all();
 
-    /* output buffers and size pointers in protected memory fail cleanly */
+    /* the device arrays are DWORD aligned too */
     d[0] = mkdev(1, 2, 0, g_hwndA);
     d[1] = mkdev(1, 6, 0, g_hwndA);
+    memcpy(page + 1, d, sizeof(d));
+    SetLastError(0xdeadbeef);
+    ok(!RegisterRawInputDevices((PRAWINPUTDEVICE)(page + 1), 2, sizeof(d[0])), "misaligned array registered\n");
+    ok(GetLastError() == ERROR_NOACCESS, "misaligned array: error %lu\n", GetLastError());
+    ok(registered_count() == 0, "misaligned array registered %u devices\n", registered_count());
     ok(RegisterRawInputDevices(d, 2, sizeof(d[0])), "register failed: %lu\n", GetLastError());
+    n = 2;
+    SetLastError(0xdeadbeef);
+    ret = GetRegisteredRawInputDevices((PRAWINPUTDEVICE)(page + 1), &n, sizeof(RAWINPUTDEVICE));
+    ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "GetRegistered offset 1: ret %u error %lu\n", ret, GetLastError());
+    n = 8;
+    SetLastError(0xdeadbeef);
+    ret = GetRawInputDeviceList((PRAWINPUTDEVICELIST)(page + 1), &n, sizeof(RAWINPUTDEVICELIST));
+    ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "DeviceList offset 1: ret %u error %lu\n", ret, GetLastError());
+
+    /* output buffers and size pointers in protected memory fail cleanly */
     n = 2;
     TRYCALL("GetRegistered out buffer", GetRegisteredRawInputDevices((PRAWINPUTDEVICE)bad, &n, sizeof(RAWINPUTDEVICE)), (UINT)-1);
     TRYCALL("GetRegistered count pointer", GetRegisteredRawInputDevices(NULL, (PUINT)bad, sizeof(RAWINPUTDEVICE)), (UINT)-1);
@@ -2358,6 +2379,13 @@ static void test_handle_edges(void)
         size = sizeof(tmp);
         ret = GetRawInputData(h, RID_INPUT, tmp, NULL, sizeof(RAWINPUTHEADER));
         ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "NULL size: ret %u error %lu\n", ret, GetLastError());
+        /* a NULL size pointer is reported before the command is looked at */
+        SetLastError(0xdeadbeef);
+        ret = GetRawInputData(h, 0x12345, tmp, NULL, sizeof(RAWINPUTHEADER));
+        ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "bad command, NULL size: ret %u error %lu\n", ret, GetLastError());
+        SetLastError(0xdeadbeef);
+        ret = GetRawInputData(h, 0x12345, NULL, NULL, sizeof(RAWINPUTHEADER));
+        ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "bad command, no buffers: ret %u error %lu\n", ret, GetLastError());
         if (!g_wow64) /* WOW64 takes a header-sized buffer of 8 bytes */
         {
             SetLastError(0xdeadbeef);

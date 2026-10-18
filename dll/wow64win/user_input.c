@@ -85,10 +85,14 @@ static NTSTATUS GuestWrite32(ULONG Address, ULONG Value)
 /* Device handles are kernel pointers; the guest sees stable 32-bit tokens, oldest evicted first. */
 static struct { HANDLE Native; ULONG Token; } DeviceTokens[DEVICE_TOKENS];
 static ULONG DeviceNext, DeviceSerial;
-static volatile LONG DeviceLock;
+/* A critical section rather than SRW: the SRW exports need DLL_EXPORT_VERSION 0x600, which a WoW64 build does not
+ * require. Statically initialized like LdrpDllNotificationLock, so no setup path has to run first. */
+static RTL_CRITICAL_SECTION DeviceLock;
+static RTL_CRITICAL_SECTION_DEBUG DeviceLockDebug = { .CriticalSection = &DeviceLock };
+static RTL_CRITICAL_SECTION DeviceLock = { &DeviceLockDebug, -1, 0, 0, 0, 0 };
 
-static VOID DeviceLockEnter(VOID) { while (InterlockedCompareExchange(&DeviceLock, 1, 0)) NtYieldExecution(); }
-static VOID DeviceLockLeave(VOID) { InterlockedExchange(&DeviceLock, 0); }
+static VOID DeviceLockEnter(VOID) { RtlEnterCriticalSection(&DeviceLock); }
+static VOID DeviceLockLeave(VOID) { RtlLeaveCriticalSection(&DeviceLock); }
 
 static ULONG DeviceToken(HANDLE Native)
 {
@@ -243,7 +247,8 @@ static ULONG_PTR RawBuffer32(ULONG *a)
         return Ret;
     }
 
-    if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
+    /* Like ProbeForWrite, an empty destination is not checked for alignment. */
+    if (Capacity && (a[0] & 3)) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
     /* The native call retires queued messages, so the whole destination must be writable before it runs. */
     Status = Touch(a[0], Capacity);
     if (Status) { SetNtError(Status); return FAIL32; }
@@ -300,10 +305,11 @@ static ULONG_PTR RawData32(ULONG *a)
     RAWINPUTHEADER32 Header32;
 
     if (a[4] != sizeof(RAWINPUTHEADER32)) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
+    /* Native rejects a bad handle, then a NULL size pointer, and only then looks at the command. */
+    if (!a[3]) return NtUserGetRawInputData(Raw, a[1], NULL, NULL, sizeof(RAWINPUTHEADER));
     /* A NULL-buffer query validates the handle and command, and yields the native size. */
     Ret = NtUserGetRawInputData(Raw, a[1], NULL, &Local, sizeof(RAWINPUTHEADER));
     if (Ret == (DWORD)-1) return FAIL32;
-    if (!a[3]) { RtlSetLastWin32Error(ERROR_NOACCESS); return FAIL32; }
     NativeSize = Local;
     if (NativeSize < sizeof(RAWINPUTHEADER)) { RtlSetLastWin32Error(ERROR_INVALID_DATA); return FAIL32; }
     Size32 = NativeSize - (ULONG)HEADER_DELTA;
@@ -364,6 +370,7 @@ static ULONG_PTR RawDeviceList32(ULONG *a)
             return FAIL32;
         }
         if (!Count) return 0;
+        if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
         Status = Touch(a[0], (ULONGLONG)Count * sizeof(RAWINPUTDEVICELIST32));
         if (Status) { SetNtError(Status); return FAIL32; }
         Native = Alloc((ULONGLONG)Count * sizeof(*Native));
@@ -435,6 +442,7 @@ static ULONG_PTR RawRegistered32(ULONG *a)
     if (Status) { SetNtError(Status); return FAIL32; }
     if (!Guest) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
     /* Native probes the declared capacity before comparing it with the registered count. */
+    if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
     Status = Touch(a[0], (ULONGLONG)Guest * sizeof(RAWINPUTDEVICE32));
     if (Status) { SetNtError(Status); return FAIL32; }
 
@@ -492,6 +500,7 @@ static ULONG_PTR RawRegister32(ULONG *a)
 
     if (!a[0] || !a[1] || a[2] != sizeof(RAWINPUTDEVICE32) || a[1] > REGISTER_MAX)
     { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FALSE; }
     if (!GuestRange(a[0], (ULONGLONG)a[1] * sizeof(RAWINPUTDEVICE32))) { SetNtError(STATUS_ACCESS_VIOLATION); return FALSE; }
     Native = Alloc((ULONGLONG)a[1] * sizeof(*Native));
     if (!Native) { RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
