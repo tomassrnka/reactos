@@ -649,6 +649,7 @@ EngSetPointerShape(
     PSURFACE psurfSave = NULL, psurfTmp = NULL, psurfColor = NULL, psurfMask = NULL;
     RECTL rectl;
     SIZEL sizel = {0, 0};
+    BOOL bNoXlate;
 
     ASSERT(pso);
 
@@ -656,6 +657,7 @@ EngSetPointerShape(
     pgp = &ppdev->Pointer;
 
     /* Handle the case where we have no XLATEOBJ */
+    bNoXlate = (pxlo == NULL);
     if (pxlo == NULL)
         pxlo = &gexloTrivial.xlo;
 
@@ -741,7 +743,12 @@ EngSetPointerShape(
         else
         {
             /* The copy below converts a colour bitmap of another format (a cursor made before a switch to another
-               depth) with the XLATEOBJ from its palette to the screen's */
+               depth) with the XLATEOBJ from its palette to the screen's; without one it cannot */
+            if (psoColor->iBitmapFormat != pso->iBitmapFormat && bNoXlate)
+            {
+                DPRINT1("Screen surface and cursor color bitmap format don't match, and no translation\n");
+                goto failure;
+            }
 
             /* Create a bitmap to copy the color bitmap to */
             hbmColor = EngCreateBitmap(psoColor->sizlBitmap,
@@ -1411,8 +1418,8 @@ GreRemakePointerAfterModeSwitch(
         {
             case PTR_RESET:
             case PTR_CURRENT:
-                if (ppdev->flFlags & PDEV_SOFTWARE_POINTER)
-                    IntShowMousePointer(ppdev, pso);
+                /* Enabled was set, so this code drew it (also for a driver that hands it to EngSetPointerShape) */
+                IntShowMousePointer(ppdev, pso);
                 break;
             case PTR_NONE:
                 if (UserIsEnteredExclusive())
