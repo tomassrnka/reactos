@@ -141,7 +141,6 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
     PRTL_PROCESS_MODULE_INFORMATION ModulePtr = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG UsedSize = FIELD_OFFSET(RTL_PROCESS_MODULES, Modules);
-    ULONG ModuleCount = 0;
     ANSI_STRING AnsiString;
     PCHAR p;
 
@@ -161,9 +160,13 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
         return Status;
     }
 
-    if (Modules == NULL || Size == 0)
+    if (Modules == NULL)
     {
         Status = STATUS_INFO_LENGTH_MISMATCH;
+    }
+    else if (Size < FIELD_OFFSET(RTL_PROCESS_MODULES, Modules))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
     }
     else
     {
@@ -209,10 +212,6 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
         UNICODE_STRING Unicode;
         WCHAR  Buffer[256 * sizeof(WCHAR)];
 
-        /* The list is read from a process that can damage it: bound the walk */
-        if (++ModuleCount > 0x2000)
-            return STATUS_UNSUCCESSFUL;
-
         /* read the current module */
         Status = NtReadVirtualMemory(ProcessHandle,
                                      CONTAINING_RECORD(pleCurEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks),
@@ -254,6 +253,7 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
         {
             /* The list has grown since it was sized: do not write past the buffer */
             Status = STATUS_INFO_LENGTH_MISMATCH;
+            break;
         }
         else if (Modules != NULL)
         {
@@ -283,6 +283,12 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
             Modules->NumberOfModules++;
         }
         UsedSize += sizeof(RTL_PROCESS_MODULE_INFORMATION);
+
+        /* The list is read from a process that can damage it, even make it
+           a cycle. When sizing, Size is the room the caller has: a list that
+           does not fit there cannot be returned, so stop the walk. */
+        if (Modules == NULL && UsedSize > Size)
+            return STATUS_NO_MEMORY;
 
         /* address of the next module in the list */
         pleCurEntry = lmModule.InLoadOrderLinks.Flink;
@@ -924,10 +930,16 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
                 PRTL_PROCESS_MODULES Mp;
                 ULONG ReturnSize = 0;
 
+                /* Size the list, at most to the room left in the buffer */
                 Status = RtlpQueryRemoteProcessModules(hProcess,
                                                        NULL,
-                                                       0,
+                                                       (ULONG)min(Buf->ViewSize - Buf->OffsetFree, MAXLONG),
                                                        &ReturnSize);
+                if (!NT_SUCCESS(Status))
+                {
+                    NtClose(hProcess);
+                    return Status;
+                }
 
                 Mp = RtlpDebugBufferCommit(Buf, ReturnSize);
                 if (!Mp)
