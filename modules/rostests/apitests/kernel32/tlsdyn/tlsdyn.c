@@ -95,8 +95,65 @@ VOID WINAPI TlsDynSetLog(char *HostLog, LONG *HostCount)
     Log = HostLog;
 }
 
+/* What FlsGetValue gives for FlsWatchIndex when a thread detaches */
+static DWORD FlsWatchIndex = FLS_OUT_OF_INDEXES;
+static PVOID FlsAtDetach = (PVOID)1;
+
+VOID WINAPI TlsDynWatchFls(DWORD Index)
+{
+    FlsWatchIndex = Index;
+    FlsAtDetach = (PVOID)1;
+}
+
+PVOID WINAPI TlsDynGetFlsAtDetach(VOID)
+{
+    return FlsAtDetach;
+}
+
+/* A value that DLL_THREAD_DETACH stores with FlsSetValue, the first FLS of a thread that had none */
+static DWORD FlsSetIndex = FLS_OUT_OF_INDEXES;
+static PVOID FlsSetData;
+static BOOL FlsSetHadNoData, FlsSetResult;
+
+VOID WINAPI TlsDynSetFlsAtDetach(DWORD Index, PVOID Data)
+{
+    FlsSetHadNoData = FlsSetResult = FALSE;
+    FlsSetData = Data;
+    FlsSetIndex = Index;
+}
+
+/* Whether the last detach found the thread without FLS data, and what its FlsSetValue returned */
+BOOL WINAPI TlsDynGetFlsSetResult(BOOL *HadNoData)
+{
+    *HadNoData = FlsSetHadNoData;
+    return FlsSetResult;
+}
+
+/* The events so far go to this handle at the process detach, the last thing a program that exits can still do */
+static HANDLE DumpHandle;
+
+VOID WINAPI TlsDynDumpAtProcessDetach(HANDLE Handle)
+{
+    DumpHandle = Handle;
+}
+
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     Record('M', fdwReason);
+    if (fdwReason == DLL_PROCESS_DETACH && DumpHandle)
+    {
+        DWORD Written;
+        LONG Count = *LogCount;
+        if (Count > EVENTS_SIZE - 1)
+            Count = EVENTS_SIZE - 1;
+        WriteFile(DumpHandle, Log, Count, &Written, NULL);
+    }
+    if (fdwReason == DLL_THREAD_DETACH && FlsWatchIndex != FLS_OUT_OF_INDEXES)
+        FlsAtDetach = FlsGetValue(FlsWatchIndex);
+    if (fdwReason == DLL_THREAD_DETACH && FlsSetIndex != FLS_OUT_OF_INDEXES)
+    {
+        FlsSetHadNoData = (NtCurrentTeb()->FlsData == NULL);
+        FlsSetResult = FlsSetValue(FlsSetIndex, FlsSetData);
+    }
     return TRUE;
 }
