@@ -161,6 +161,10 @@ add_executable(wow64_installer_gui EXCLUDE_FROM_ALL installer_gui.c)
 set_module_type(wow64_installer_gui win32cui)
 add_importlibs(wow64_installer_gui imm32 gdi32 user32 msvcrt kernel32)
 
+add_executable(wow64_framechanged EXCLUDE_FROM_ALL framechanged.c)
+set_module_type(wow64_framechanged win32cui)
+add_importlibs(wow64_framechanged user32 gdi32 msvcrt kernel32)
+
 add_executable(wow64_system_timer EXCLUDE_FROM_ALL system_timer.c)
 set_module_type(wow64_system_timer win32cui)
 add_importlibs(wow64_system_timer user32 gdi32 msvcrt kernel32)
