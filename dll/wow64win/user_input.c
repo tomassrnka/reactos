@@ -416,6 +416,28 @@ static ULONG_PTR RawDeviceInfo32(ULONG *a)
      * native service gets a private copy, so the range bound below holds for what it writes. */
     Status = GuestRead32(a[3], &Size);
     if (Status) { SetNtError(Status); return FAIL32; }
+    if (a[1] == RIDI_PREPARSEDDATA)
+    {
+        /* The blob is the hidparser collection context (sdk/lib/drivers/hidparser/context.c): every
+         * HID_COLLECTION in it embeds three pointers ahead of its offset array (parser.h), so a 32-bit
+         * hid.dll would misread the native layout. The guest buffer never reaches the service; size
+         * queries, short buffers and probes keep the native order, and a copy of data is refused. */
+        Local = 0;
+        if (NtUserGetRawInputDeviceInfo(DeviceFromToken(a[0]), a[1], NULL, &Local) == (DWORD)-1) return FAIL32;
+        if (!a[2] || Size < Local)
+        {
+            Status = GuestWrite32(a[3], Local);
+            if (Status) { SetNtError(Status); return FAIL32; }
+            if (!a[2]) return 0;
+            RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
+            return FAIL32;
+        }
+        if (!Local) return 0;
+        Status = (a[2] & 3) ? STATUS_DATATYPE_MISALIGNMENT : Touch(a[2], Local);
+        if (Status) { SetNtError(Status); return FAIL32; }
+        RtlSetLastWin32Error(ERROR_NOT_SUPPORTED);
+        return FAIL32;
+    }
     if (a[2] && !GuestRange(a[2], a[1] == RIDI_DEVICENAME ? (ULONGLONG)Size * sizeof(WCHAR) : Size))
     { SetNtError(STATUS_ACCESS_VIOLATION); return FAIL32; }
     Local = Size;
