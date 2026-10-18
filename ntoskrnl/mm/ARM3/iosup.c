@@ -130,21 +130,22 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
             //
             // Disable the cache
             //
-            MI_PAGE_DISABLE_CACHE(&TempPte);
-            MI_PAGE_WRITE_THROUGH(&TempPte);
+            MI_MAKE_PTE_NON_CACHED(&TempPte);
             break;
 
         case MiCached:
 
             //
-            // Leave defaults
+            // Enable caching
             //
+            MI_MAKE_PTE_CACHED(&TempPte);
             break;
 
         case MiWriteCombined:
 
-#ifdef MI_PAGE_WRITE_COMBINED_PAT
-            /* Device memory only: RAM pages have no PFN cache type tracking that would keep other mappings consistent */
+            /* Device memory only: RAM pages have no PFN cache type tracking
+               that would keep their other (cached) mappings consistent, so a
+               write-combined mapping of RAM stays uncached */
             if (IsIoMapping)
             {
                 PFN_COUNT i;
@@ -156,16 +157,14 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
                 }
                 if (i == PageCount)
                 {
-                    MI_PAGE_WRITE_COMBINED_PAT(&TempPte);
+                    //
+                    // Enable write combining
+                    //
+                    MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
                     break;
                 }
             }
-#endif
-            //
-            // Disable the cache and allow combined writing
-            //
-            MI_PAGE_DISABLE_CACHE(&TempPte);
-            MI_PAGE_WRITE_COMBINED(&TempPte);
+            MI_MAKE_PTE_NON_CACHED(&TempPte);
             break;
 
         default:

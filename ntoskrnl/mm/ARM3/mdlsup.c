@@ -238,14 +238,13 @@ MiMapLockedPagesInUserSpace(
         switch (EffectiveCacheAttribute)
         {
             case MiNonCached:
-                MI_PAGE_DISABLE_CACHE(&TempPte);
-                MI_PAGE_WRITE_THROUGH(&TempPte);
+                MI_MAKE_PTE_NON_CACHED(&TempPte);
                 break;
             case MiCached:
+                MI_MAKE_PTE_CACHED(&TempPte);
                 break;
             case MiWriteCombined:
-                MI_PAGE_DISABLE_CACHE(&TempPte);
-                MI_PAGE_WRITE_COMBINED(&TempPte);
+                MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
                 break;
             default:
                 ASSERT(FALSE);
@@ -377,6 +376,26 @@ MiUnmapLockedPagesInUserSpace(
     MiUnlockProcessWorkingSetUnsafe(Process, Thread);
     MmUnlockAddressSpace(&Process->Vm);
     ExFreePoolWithTag(Vad, 'ldaV');
+}
+
+/* Whether a write-combined kernel mapping of these pages adds no memory type alias */
+static
+BOOLEAN
+MiMdlPagesAllowWriteCombine(
+    _In_ PPFN_NUMBER MdlPages,
+    _In_ PPFN_NUMBER LastPage)
+{
+    PMMPFN Pfn;
+
+    for (; (MdlPages < LastPage) && (*MdlPages != LIST_HEAD); MdlPages++)
+    {
+        Pfn = MiGetPfnEntry(*MdlPages);
+        if ((Pfn != NULL) && (Pfn->u3.e1.CacheAttribute != MiWriteCombined))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
@@ -760,17 +779,18 @@ MmMapLockedPagesSpecifyCache(IN PMDL Mdl,
                 //
                 // Disable caching
                 //
-                MI_PAGE_DISABLE_CACHE(&TempPte);
-                MI_PAGE_WRITE_THROUGH(&TempPte);
+                MI_MAKE_PTE_NON_CACHED(&TempPte);
                 break;
 
             case MiWriteCombined:
 
                 //
-                // Enable write combining
+                // Enable write combining, unless a page is cached elsewhere
                 //
-                MI_PAGE_DISABLE_CACHE(&TempPte);
-                MI_PAGE_WRITE_COMBINED(&TempPte);
+                if (MiMdlPagesAllowWriteCombine(MdlPages, LastPage))
+                    MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+                else
+                    MI_MAKE_PTE_NON_CACHED(&TempPte);
                 break;
 
             default:
@@ -1712,18 +1732,22 @@ MmMapLockedPagesWithReservedMapping(
 
     // Get the template
     TempPte = ValidKernelPte;
+
+    /* The pages must not still be cached as write-back elsewhere */
+    if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
     switch (CacheAttribute)
     {
         case MiNonCached:
             // Disable caching
-            MI_PAGE_DISABLE_CACHE(&TempPte);
-            MI_PAGE_WRITE_THROUGH(&TempPte);
+            MI_MAKE_PTE_NON_CACHED(&TempPte);
             break;
 
         case MiWriteCombined:
-            // Enable write combining
-            MI_PAGE_DISABLE_CACHE(&TempPte);
-            MI_PAGE_WRITE_COMBINED(&TempPte);
+            // Enable write combining, unless a page is cached elsewhere
+            if (MiMdlPagesAllowWriteCombine(MdlPages, LastPage))
+                MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+            else
+                MI_MAKE_PTE_NON_CACHED(&TempPte);
             break;
 
         default:

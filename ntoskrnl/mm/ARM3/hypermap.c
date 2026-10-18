@@ -189,8 +189,8 @@ MiMapPagesInZeroSpace(IN PMMPFN Pfn1,
     if (!MiZeroFlushLine)
 #endif
     {
-        MI_PAGE_DISABLE_CACHE(&TempPte);
-        MI_PAGE_WRITE_THROUGH(&TempPte);
+        /* Disable caching */
+        MI_MAKE_PTE_NON_CACHED(&TempPte);
     }
 
     /* Make sure the list isn't empty and loop it */
@@ -254,8 +254,7 @@ MiUnmapPagesInZeroSpace(IN PVOID VirtualAddress,
         for (i = 0; i < NumberOfPages; i++)
         {
             TempPte = PointerPte[i];
-            MI_PAGE_DISABLE_CACHE(&TempPte);
-            MI_PAGE_WRITE_THROUGH(&TempPte);
+            MI_MAKE_PTE_NON_CACHED(&TempPte);
             MI_UPDATE_VALID_PTE(&PointerPte[i], TempPte);
         }
         KxFlushRangeCurrentTb(VirtualAddress, (ULONG)NumberOfPages);

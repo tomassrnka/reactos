@@ -58,7 +58,7 @@ MmProtectToPteMask[32] =
     PTE_EXECUTE_READWRITE   | PTE_ENABLE_CACHE,
     PTE_EXECUTE_WRITECOPY   | PTE_ENABLE_CACHE,
     //
-    // These OR in the MM_NOACCESS flag, which seems to enable WriteCombining?
+    // These OR in the MM_WRITECOMBINE flag
     //
     0,
     PTE_READONLY            | PTE_WRITECOMBINED_CACHE,
@@ -678,10 +678,13 @@ MiSetPteCaching(
     _Inout_ PMMPTE Pte,
     _In_ MI_PFN_CACHE_ATTRIBUTE CacheAttribute)
 {
-    Pte->u.Hard.CacheDisable = 0;
-    Pte->u.Hard.WriteThrough = 0;
-    if ((CacheAttribute == MiNonCached) || (CacheAttribute == MiWriteCombined))
-        Pte->u.Hard.CacheDisable = 1;
+    /* The encoding of the ARM3 mappings of the same page (MI_MAKE_PTE_*) */
+    if (CacheAttribute == MiNonCached)
+        MI_MAKE_PTE_NON_CACHED(Pte);
+    else if (CacheAttribute == MiWriteCombined)
+        MI_MAKE_PTE_WRITE_COMBINE(Pte);
+    else
+        MI_MAKE_PTE_CACHED(Pte);
 }
 
 NTSTATUS

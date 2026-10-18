@@ -302,4 +302,6 @@
     SVC_(RemoveIoCompletionEx, 6)
     SVC_(CancelIoFileEx, 3)
     SVC_(CreateProcessWithAttributes, 10)
+    SVC_(GetNextProcess, 5)
+    SVC_(GetNextThread, 6)
 #endif

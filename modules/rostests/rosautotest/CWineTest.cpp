@@ -102,7 +102,7 @@ CWineTest::GetNextFile()
         else
         {
             /* Check for 'special' tests (e.g. "kmtest") or full test name ("ntdll_winetest") */
-            if (Module.length() >= 4 && Module.substr(Module.length() - 4, 4) == L"test")
+            if (Module.length() >= 4 && Module.compare(Module.length() - 4, 4, L"test") == 0)
             {
                 /* A pattern ("*test", "kernel32_*test") can match several programs */
                 m_SingleFile = (Module.find_first_of(L"*?") == wstring::npos);

@@ -337,6 +337,7 @@ IntVideoPortMapMemory(
    ULONG AddressSpace;
    PVOID MappedAddress;
    PLIST_ENTRY Entry;
+   MEMORY_CACHING_TYPE CacheType;
 
    INFO_(VIDEOPRT, "- IoAddress: %lx\n", IoAddress.u.LowPart);
    INFO_(VIDEOPRT, "- NumberOfUchars: %lx\n", NumberOfUchars);
@@ -361,6 +362,9 @@ IntVideoPortMapMemory(
       ProcessHandle = NtCurrentProcess();
    }
 
+   CacheType = (InIoSpace & VIDEO_MEMORY_SPACE_P6CACHE) ?
+               MmWriteCombined : MmNonCached;
+
    if ((InIoSpace & VIDEO_MEMORY_SPACE_USER_MODE) == 0 &&
        !IsListEmpty(&DeviceExtension->AddressMappingListHead))
    {
@@ -372,7 +376,8 @@ IntVideoPortMapMemory(
             VIDEO_PORT_ADDRESS_MAPPING,
             List);
          if (IoAddress.QuadPart == AddressMapping->IoAddress.QuadPart &&
-             NumberOfUchars <= AddressMapping->NumberOfUchars)
+             NumberOfUchars <= AddressMapping->NumberOfUchars &&
+             CacheType == AddressMapping->CacheType)
          {
             {
                AddressMapping->MappingCount++;
@@ -415,17 +420,7 @@ IntVideoPortMapMemory(
    {
       NTSTATUS NtStatus;
       ULONG Protect;
-#ifdef _M_AMD64
-      /* User PAGE_WRITECOMBINE is UC- on amd64 while kernel P6CACHE mappings are WC: refuse the alias */
-      if (InIoSpace & VIDEO_MEMORY_SPACE_P6CACHE)
-      {
-         WARN_(VIDEOPRT, "Write-combined user mappings are not supported\n");
-         if (Status)
-            *Status = ERROR_INVALID_PARAMETER;
-         return NULL;
-      }
-#endif
-      if (InIoSpace & VIDEO_MEMORY_SPACE_P6CACHE)
+      if (CacheType == MmWriteCombined)
           Protect = PAGE_READWRITE | PAGE_WRITECOMBINE;
       else
           Protect = PAGE_READWRITE | PAGE_NOCACHE;
@@ -449,7 +444,7 @@ IntVideoPortMapMemory(
       MappedAddress = MmMapIoSpace(
          TranslatedAddress,
          NumberOfUchars,
-         (InIoSpace & VIDEO_MEMORY_SPACE_P6CACHE) ? MmWriteCombined : MmNonCached);
+         CacheType);
    }
 
    if (MappedAddress != NULL)
@@ -473,6 +468,7 @@ IntVideoPortMapMemory(
          AddressMapping->IoAddress = IoAddress;
          AddressMapping->SystemIoBusNumber = DeviceExtension->SystemIoBusNumber;
          AddressMapping->MappedAddress = MappedAddress;
+         AddressMapping->CacheType = CacheType;
          AddressMapping->MappingCount = 1;
          InsertHeadList(
             &DeviceExtension->AddressMappingListHead,

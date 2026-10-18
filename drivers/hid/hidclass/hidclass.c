@@ -458,7 +458,7 @@ HidClass_ReadCompleteIrp(
     //
     // remove from pending list
     //
-    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+    RemoveEntryList(&IrpContext->PendingLink);
 
     //
     // is list empty
@@ -791,7 +791,7 @@ HidClass_Read(
     //
     // insert irp into pending list
     //
-    InsertTailList(&Context->ReadPendingIrpListHead, &NewIrp->Tail.Overlay.ListEntry);
+    InsertTailList(&Context->ReadPendingIrpListHead, &NewIrpContext->PendingLink);
 
     //
     // set completion routine

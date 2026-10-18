@@ -201,6 +201,10 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/timerobj.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/tlbflush.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/wait.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/kse.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/ksedb.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/driverscope.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/kse/ignorepooltag.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/lpc/close.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/lpc/complete.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/lpc/connect.c
@@ -331,6 +335,7 @@ if(ARCH STREQUAL "i386")
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/traphdlr.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/usercall.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/i386/v86vdm.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cacheinfo.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cpuinfo.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/freeze.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/i386/page.c
@@ -367,6 +372,7 @@ elseif(ARCH STREQUAL "amd64")
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/traphandler.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/usercall.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/amd64/xstate.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cacheinfo.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/cpuinfo.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/x86x64/freeze.c)
 elseif(ARCH STREQUAL "arm")

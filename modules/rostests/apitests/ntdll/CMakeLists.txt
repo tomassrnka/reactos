@@ -135,6 +135,7 @@ list(APPEND SOURCE
     RtlFailFast.c
     RtlFirstFreeAce.c
     RtlFindMessage.c
+    RtlFls.c
     RtlGenerate8dot3Name.c
     RtlGenericTable.c
     RtlGetFullPathName_U.c

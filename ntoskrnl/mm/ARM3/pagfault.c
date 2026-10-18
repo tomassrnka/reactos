@@ -545,14 +545,12 @@ MiZeroPfn(IN PFN_NUMBER PageFrameNumber)
     if (Pfn1->u3.e1.CacheAttribute == MiWriteCombined)
     {
         /* Write combining, no caching */
-        MI_PAGE_DISABLE_CACHE(&TempPte);
-        MI_PAGE_WRITE_COMBINED(&TempPte);
+        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
     }
     else if (Pfn1->u3.e1.CacheAttribute == MiNonCached)
     {
-        /* Write through, no caching */
-        MI_PAGE_DISABLE_CACHE(&TempPte);
-        MI_PAGE_WRITE_THROUGH(&TempPte);
+        /* Disable caching */
+        MI_MAKE_PTE_NON_CACHED(&TempPte);
     }
 
     /* Make the system PTE valid with our PFN */
@@ -596,14 +594,12 @@ MiCopyPfn(
     if (DestPfn->u3.e1.CacheAttribute == MiWriteCombined)
     {
         /* Write combining, no caching */
-        MI_PAGE_DISABLE_CACHE(&TempPte);
-        MI_PAGE_WRITE_COMBINED(&TempPte);
+        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
     }
     else if (DestPfn->u3.e1.CacheAttribute == MiNonCached)
     {
-        /* Write through, no caching */
-        MI_PAGE_DISABLE_CACHE(&TempPte);
-        MI_PAGE_WRITE_THROUGH(&TempPte);
+        /* Disable caching */
+        MI_MAKE_PTE_NON_CACHED(&TempPte);
     }
 
     /* Make the system PTE valid with our PFN */
@@ -616,7 +612,11 @@ MiCopyPfn(
     /* Setup caching */
     if (SrcPfn->u3.e1.CacheAttribute == MiNonCached)
     {
-        MI_PAGE_DISABLE_CACHE(&TempPte);
+        MI_MAKE_PTE_NON_CACHED(&TempPte);
+    }
+    else if (SrcPfn->u3.e1.CacheAttribute == MiWriteCombined)
+    {
+        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
     }
 
     /* Make the system PTE valid with our PFN */
@@ -900,14 +900,12 @@ MiCompleteProtoPteFault(IN BOOLEAN StoreInstruction,
     if (Pfn1->u3.e1.CacheAttribute == MiWriteCombined)
     {
         /* Write combining, no caching */
-        MI_PAGE_DISABLE_CACHE(&TempPte);
-        MI_PAGE_WRITE_COMBINED(&TempPte);
+        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
     }
     else if (Pfn1->u3.e1.CacheAttribute == MiNonCached)
     {
-        /* Write through, no caching */
-        MI_PAGE_DISABLE_CACHE(&TempPte);
-        MI_PAGE_WRITE_THROUGH(&TempPte);
+        /* Disable caching */
+        MI_MAKE_PTE_NON_CACHED(&TempPte);
     }
 
     /* Check if this is a kernel or user address */
@@ -2410,7 +2408,14 @@ UserFault:
                 OldPageFrameIndex = PFN_FROM_PTE(&TempPte);
 
                 /* The private copy keeps the type of the mapping it replaces; copy through a mapping of it */
-                CacheAttribute = TempPte.u.Hard.CacheDisable ? MiNonCached : MiCached;
+                if (TempPte.u.Hard.CacheDisable)
+                    CacheAttribute = MiNonCached;
+#if defined(_M_IX86) || defined(_M_AMD64)
+                else if (TempPte.u.Hard.WriteThrough && (KeFeatureBits & KF_PAT))
+                    CacheAttribute = MiWriteCombined; /* PAT1 (MI_MAKE_PTE_WRITE_COMBINE); without the PAT it is WT */
+#endif
+                else
+                    CacheAttribute = MiCached;
                 MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute = CacheAttribute;
                 if (CacheAttribute != MiCached) MiFlushReleasedSystemPtesBeforeUncachedMapping();
 
