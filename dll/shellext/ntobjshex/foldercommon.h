@@ -56,6 +56,8 @@ public:
     END_COM_MAP()
 };
 
+HRESULT ShowObjectProperties(IShellFolder *psf, HWND hwndOwner, IDataObject *pdtobj);
+
 template<class TSelf, typename TItemId, class TExtractIcon>
 class CCommonFolder :
     public CComObjectRootEx<CComMultiThreadModelNoCS>,
@@ -394,6 +396,10 @@ public:
             *rgfInOut = ConvertAttributes(info, rgfInOut);
         }
 
+        // The property page shows one object
+        if (cidl > 1)
+            *rgfInOut &= ~SFGAO_HASPROPSHEET;
+
         return S_OK;
     }
 
@@ -423,6 +429,7 @@ public:
             LPCITEMIDLIST child;
 
             UINT nkeys = 0;
+            BOOL bUnresolvedLink = FALSE;
             if (cidl == 1 && IsSymLink(apidl[0]))
             {
                 const TItemId * info;
@@ -431,26 +438,31 @@ public:
                     return hr;
 
                 LPITEMIDLIST target;
-                hr = ResolveSymLink(info, &target);
-                if (FAILED(hr))
-                    return hr;
-
                 CComPtr<IShellFolder> psfTarget;
-                hr = ::SHBindToParent(target, IID_PPV_ARG(IShellFolder, &psfTarget), &child);
-                if (FAILED(hr))
+                hr = ResolveSymLink(info, &target);
+                if (SUCCEEDED(hr))
                 {
-                    ILFree(target);
-                    return hr;
+                    hr = ::SHBindToParent(target, IID_PPV_ARG(IShellFolder, &psfTarget), &child);
+                    if (FAILED(hr))
+                        ILFree(target);
                 }
 
-                parent = ILClone(target);
-                ILRemoveLastID(parent);
-                psfParent = psfTarget;
+                if (SUCCEEDED(hr))
+                {
+                    parent = ILClone(target);
+                    ILRemoveLastID(parent);
+                    psfParent = psfTarget;
 
-                apidl = &child;
+                    apidl = &child;
+                }
+                else
+                {
+                    // A link that cannot be followed keeps a menu of its own (Properties), without Open
+                    bUnresolvedLink = TRUE;
+                }
             }
 
-            if (cidl == 1 && IsFolder(apidl[0]))
+            if (cidl == 1 && !bUnresolvedLink && IsFolder(apidl[0]))
             {
                 res = RegOpenKeyExW(HKEY_CLASSES_ROOT, L"Folder", 0, KEY_READ, &keys[0]);
                 if (!NT_SUCCESS(res))
@@ -691,7 +703,7 @@ protected:
     virtual HRESULT GetInfoFromPidl(LPCITEMIDLIST pcidl, const TItemId ** pentry) PURE;
 
 public:
-    static HRESULT CALLBACK DefCtxMenuCallback(IShellFolder * /*psf*/, HWND /*hwnd*/, IDataObject * /*pdtobj*/, UINT uMsg, WPARAM /*wParam*/, LPARAM /*lParam*/)
+    static HRESULT CALLBACK DefCtxMenuCallback(IShellFolder *psf, HWND hwnd, IDataObject *pdtobj, UINT uMsg, WPARAM wParam, LPARAM /*lParam*/)
     {
         switch (uMsg)
         {
@@ -700,6 +712,10 @@ public:
 
             case DFM_INVOKECOMMAND:
             case DFM_INVOKECOMMANDEX:
+                if ((UINT)wParam == DFM_CMD_PROPERTIES)
+                    return ShowObjectProperties(psf, hwnd, pdtobj);
+                return S_FALSE;
+
             case DFM_GETDEFSTATICID: // Required for Windows 7 to pick a default
                 return S_FALSE;
         }
