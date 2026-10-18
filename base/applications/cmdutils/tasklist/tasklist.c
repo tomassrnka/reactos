@@ -863,9 +863,14 @@ ParseNumber(PCWSTR String, ULONGLONG *Number)
         return FALSE;
     for (; *String; String++)
     {
-        if (*String < L'0' || *String > L'9' || Value > (_UI64_MAX - 9) / 10)
+        UINT Digit = *String - L'0';
+
+        if (*String < L'0' || *String > L'9' ||
+            Value > _UI64_MAX / 10 || (Value == _UI64_MAX / 10 && Digit > _UI64_MAX % 10))
+        {
             return FALSE;
-        Value = Value * 10 + (*String - L'0');
+        }
+        Value = Value * 10 + Digit;
     }
     *Number = Value;
     return TRUE;
