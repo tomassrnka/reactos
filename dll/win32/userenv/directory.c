@@ -265,7 +265,9 @@ RecursiveRemoveDir(LPCWSTR lpPath)
             {
                 DPRINT("Delete directory: '%S'\n", szPath);
 
-                if (!RecursiveRemoveDir(szPath))
+                /* Remove a junction itself, never the files it points to */
+                if (!(FindData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                    !RecursiveRemoveDir(szPath))
                 {
                     bResult = FALSE;
                     break;
@@ -323,6 +325,13 @@ RecursiveRemoveDir(LPCWSTR lpPath)
 BOOL
 RemoveDirectoryPath(LPCWSTR lpPathName)
 {
+    DWORD dwAttributes = GetFileAttributesW(lpPathName);
+
+    /* A junction is removed itself, never the files it points to */
+    if (dwAttributes != INVALID_FILE_ATTRIBUTES &&
+        (dwAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        return RemoveDirectoryW(lpPathName);
+
     if (!RecursiveRemoveDir(lpPathName))
         return FALSE;
 
