@@ -70,6 +70,9 @@ static LONG PayloadSize(UINT Msg, WPARAM Wparam, LONG Size)
     case WM_STYLECHANGING: case WM_STYLECHANGED: case WM_SIZING: case WM_MOVING:
     case WM_ERASEBKGND: case WM_PAINT: case WM_NCPAINT:
         return Size;
+    case WM_COPYDATA:
+        /* The record is followed by its cbData bytes */
+        return Size >= sizeof(COPYDATASTRUCT) ? Size - sizeof(COPYDATASTRUCT) + sizeof(COPYDATA32) : -2;
     default: return -2;
     }
 }
@@ -97,6 +100,20 @@ static VOID PackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, ULO
     }
     case WM_WINDOWPOSCHANGING: case WM_WINDOWPOSCHANGED:
         WindowPosNativeTo32(To, From); break;
+    case WM_COPYDATA:
+    {
+        const COPYDATASTRUCT *Native = From;
+        COPYDATA32 *Guest = To;
+        ULONG Tail = Size - sizeof(*Native);
+        /* Read-only for the receiver: nothing is copied back. A sender's
+         * pointer-sized dwData keeps its low 32 bits. */
+        if (Native->cbData != Tail) RtlRaiseStatus(STATUS_INVALID_PARAMETER);
+        Guest->dwData = (ULONG)Native->dwData;
+        Guest->cbData = Tail;
+        Guest->lpData = PtrToUlong(Guest + 1);
+        RtlCopyMemory(Guest + 1, Native + 1, Tail);
+        break;
+    }
     case WM_NCCALCSIZE:
         if (Wparam)
         {

@@ -115,6 +115,10 @@ add_executable(wow64_message_hook EXCLUDE_FROM_ALL message_hook.c)
 set_module_type(wow64_message_hook win32cui)
 add_importlibs(wow64_message_hook user32 msvcrt kernel32)
 
+add_executable(wow64_copydata EXCLUDE_FROM_ALL copydata.c)
+set_module_type(wow64_copydata win32cui)
+add_importlibs(wow64_copydata user32 msvcrt kernel32)
+
 add_executable(wow64_notify EXCLUDE_FROM_ALL notify.c)
 set_module_type(wow64_notify win32cui)
 add_importlibs(wow64_notify user32 msvcrt kernel32)

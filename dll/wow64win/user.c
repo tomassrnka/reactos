@@ -106,6 +106,7 @@ static ULONG_PTR MessageCall(ULONG *a)
     DOSENDMESSAGE Timeout;
     CALL_BACK_INFO Callback;
     ULONG_PTR ResultInfo = a[4] ? (ULONG_PTR)&Result : 0;
+    COPYDATASTRUCT *Copy = NULL;
     /* WM_NOTIFY is an application-defined record beginning with NMHDR.
      * The kernel does not inspect or capture it. On the same guest thread,
      * keep that guest record intact through both hooks and the window proc.
@@ -119,6 +120,10 @@ static ULONG_PTR MessageCall(ULONG *a)
             return FALSE;
         }
         Param = (LPARAM)P(3);
+    }
+    else if (a[1] == WM_COPYDATA)
+    {
+        /* Translated below, once the call itself is valid */
     }
     else switch (a[1])
     {
@@ -162,6 +167,46 @@ static ULONG_PTR MessageCall(ULONG *a)
         }
         else Param = (LPARAM)P(3);
         break;
+    case WM_COPYDATA:
+    {
+        /* user32 packed the record and its data into one guest block. The
+         * kernel copies sizeof(COPYDATASTRUCT) + cbData bytes from lParam,
+         * ignoring lpData, so take the data from behind the guest record and
+         * put it right behind the native one. */
+        const COPYDATA32 *From = P(3);
+        ULONG Bytes = From->cbData;
+        if (Bytes > MAXLONG - sizeof(COPYDATASTRUCT))
+        {
+            RtlSetLastWin32Error(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        Copy = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(*Copy) + Bytes);
+        if (!Copy)
+        {
+            RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        _SEH2_TRY
+        {
+            Copy->dwData = From->dwData;
+            Copy->cbData = Bytes;
+            Copy->lpData = Copy + 1;
+            RtlCopyMemory(Copy + 1, From + 1, Bytes);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Copy);
+            Copy = NULL;
+        }
+        _SEH2_END;
+        if (!Copy)
+        {
+            RtlSetLastWin32Error(ERROR_NOACCESS);
+            return FALSE;
+        }
+        Param = (LPARAM)Copy;
+        break;
+    }
     case WM_SETTEXT: case WM_GETTEXT: case WM_SETTINGCHANGE: case WM_GETMINMAXINFO: case WM_STYLECHANGING:
     case WM_STYLECHANGED: case WM_SIZING: case WM_MOVING:
     case EM_GETRECT: case EM_SETRECT: case EM_SETRECTNP: case EM_REPLACESEL: case EM_GETLINE:
@@ -172,6 +217,7 @@ static ULONG_PTR MessageCall(ULONG *a)
         Param = (LPARAM)P(3); break;
     }
     Ret = NtUserMessageCall(H(0), a[1], a[2], Param, ResultInfo, a[5], a[6]);
+    if (Copy) RtlFreeHeap(RtlGetProcessHeap(), 0, Copy);
     if (a[3]) switch (a[1])
     {
     case WM_WINDOWPOSCHANGING: WindowPosNativeTo32(P(3), &Buffer.Pos); break;
