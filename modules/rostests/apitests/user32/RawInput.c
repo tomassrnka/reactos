@@ -1126,10 +1126,16 @@ static void test_buffer_alignment_and_protection(void)
     SetLastError(0xdeadbeef);
     ret = GetRegisteredRawInputDevices((PRAWINPUTDEVICE)(page + 1), &n, sizeof(RAWINPUTDEVICE));
     ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "GetRegistered offset 1: ret %u error %lu\n", ret, GetLastError());
-    n = 8;
-    SetLastError(0xdeadbeef);
-    ret = GetRawInputDeviceList((PRAWINPUTDEVICELIST)(page + 1), &n, sizeof(RAWINPUTDEVICELIST));
-    ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "DeviceList offset 1: ret %u error %lu\n", ret, GetLastError());
+    /* the count check comes first, so give exactly the capacity the devices need */
+    n = 0;
+    GetRawInputDeviceList(NULL, &n, sizeof(RAWINPUTDEVICELIST));
+    ok(n != 0, "no raw input devices\n");
+    if (n != 0)
+    {
+        SetLastError(0xdeadbeef);
+        ret = GetRawInputDeviceList((PRAWINPUTDEVICELIST)(page + 1), &n, sizeof(RAWINPUTDEVICELIST));
+        ok(ret == (UINT)-1 && GetLastError() == ERROR_NOACCESS, "DeviceList offset 1: ret %u error %lu\n", ret, GetLastError());
+    }
 
     /* output buffers and size pointers in protected memory fail cleanly */
     n = 2;
