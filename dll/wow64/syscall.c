@@ -269,6 +269,54 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtSetInformationObject(H(0), a[1], P(2), a[3]);
         return STATUS_NOT_SUPPORTED;
     case W64_NtRaiseException: return Wow64RaiseException(P(0), P(1), a[2]);
+    case W64_NtRaiseHardError:
+    {
+        /* kernel32 reports an unhandled exception this way when no crash
+         * reporter runs. Widen the ULONG_PTR array; string parameters are
+         * UNICODE_STRING pointers. The service must still reject a bad
+         * record in its own order (count, response options, response
+         * pointer, then the parameters), with the status i386 returns:
+         * a misaligned guest pointer is passed on as it is, and one that
+         * cannot be read is replaced by the reserved, inaccessible page
+         * above the guest address limit (never by the guest record read
+         * at the native width). */
+        ULONG_PTR Parameters[MAXIMUM_HARDERROR_PARAMETERS];
+        UNICODE_STRING Strings[MAXIMUM_HARDERROR_PARAMETERS];
+        ULONG_PTR Inaccessible = (ULONG_PTR)Wow64HighestUserAddress + 1;
+        const ULONG *From = P(3);
+        PVOID Native = P(3);
+        ULONG i;
+        if (a[1] > MAXIMUM_HARDERROR_PARAMETERS) return STATUS_INVALID_PARAMETER_2;
+        if (From && !(a[3] & (sizeof(ULONG) - 1)))
+        {
+            _SEH2_TRY
+            {
+                for (i = 0; i < a[1]; ++i)
+                {
+                    Parameters[i] = From[i];
+                    if (!(a[2] & (1 << i)) || !Parameters[i] || (Parameters[i] & (sizeof(ULONG) - 1)))
+                        continue;
+                    _SEH2_TRY
+                    {
+                        String32(&Strings[i], PTR32(Parameters[i]));
+                        Parameters[i] = (ULONG_PTR)&Strings[i];
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        Parameters[i] = Inaccessible;
+                    }
+                    _SEH2_END;
+                }
+                Native = Parameters;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Native = (PVOID)Inaccessible;
+            }
+            _SEH2_END;
+        }
+        return NtRaiseHardError(a[0], a[1], a[2], Native, a[4], P(5));
+    }
     case W64_NtTestAlert: return NtTestAlert();
     case W64_NtYieldExecution: return NtYieldExecution();
     case W64_NtIsProcessInJob: return NtIsProcessInJob(H(0), H(1));
