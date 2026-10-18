@@ -5180,10 +5180,12 @@ TextIntGetTextExtentPoint(
     PFONTGDI FontGDI;
     FT_Pos AdvanceX = 0, AdvanceY = 0;
     FT_Error error;
-    INT glyph_index, i, iUnit, cUnits, previous, nTenthsOfDegrees;
+    INT glyph_index, i, iUnit, cUnits, nTenthsOfDegrees;
+    FT_UInt previous = 0;
+    FT_Face PreviousFace = NULL;
     ULONGLONG TotalWidth64 = 0;
     LOGFONTW *plf;
-    BOOL use_kerning, bVerticalWriting;
+    BOOL bVerticalWriting;
     LONG ascender, descender;
     FONT_CACHE_ENTRY Cache;
     DWORD ch0;
@@ -5224,9 +5226,6 @@ TextIntGetTextExtentPoint(
 
     FontLink_Chain_Init(&Chain, TextObj, Cache.Hashed.Face);
 
-    use_kerning = FT_HAS_KERNING(Cache.Hashed.Face);
-    previous = 0;
-
     for (i = 0; i < Count; i += cUnits)
     {
         /* A surrogate pair is one glyph; a lone surrogate stays a code unit of its own, as it does on Windows */
@@ -5251,13 +5250,22 @@ TextIntGetTextExtentPoint(
             return FALSE;
         }
 
-        /* Retrieve kerning distance */
-        if (use_kerning && previous && glyph_index)
+        /* Only GetCharacterPlacement kerns, and only between two glyphs of the same face */
+        if ((fl & GTEF_KERNPAIRS) && previous && glyph_index && PreviousFace == Cache.Hashed.Face &&
+            FT_HAS_KERNING(Cache.Hashed.Face))
         {
             FT_Vector delta;
-            FT_Get_Kerning(Cache.Hashed.Face, previous, glyph_index, 0, &delta);
-            TotalWidth64 += delta.x;
+            if (FT_Get_Kerning(Cache.Hashed.Face, previous, glyph_index, FT_KERNING_DEFAULT, &delta) == FT_Err_Ok)
+            {
+                /* The total is unsigned: a kerning that would go back past the start stops there */
+                if (delta.x < 0 && (ULONGLONG)-delta.x > TotalWidth64)
+                    TotalWidth64 = 0;
+                else
+                    TotalWidth64 += delta.x;
+            }
         }
+        previous = glyph_index;
+        PreviousFace = Cache.Hashed.Face;
 
         TotalWidth64 += AdvanceX;
 
@@ -5271,8 +5279,6 @@ TextIntGetTextExtentPoint(
             for (iUnit = 0; iUnit < cUnits; iUnit++)
                 Dx[i + iUnit] = (TotalWidth64 + 32) >> 6;
         }
-
-        previous = glyph_index;
     }
     ASSERT(FontGDI->Magic == FONTGDI_MAGIC);
     ascender = FontGDI->tmAscent; /* Units above baseline */
@@ -7141,9 +7147,7 @@ IntGetTextDisposition(
     INT i, glyph_index;
     FT_Pos AdvanceX = 0, AdvanceY = 0;
     FT_Face face = Cache->Hashed.Face;
-    BOOL use_kerning = FT_HAS_KERNING(face);
-    ULONG previous = 0;
-    FT_Vector delta, vec;
+    FT_Vector vec;
     DWORD ch0;
     INT cUnits, iDx;
 
@@ -7177,14 +7181,6 @@ IntGetTextDisposition(
             }
         }
 
-        /* Retrieve kerning distance; rendering ignores it when the caller gives the advances */
-        if (use_kerning && previous && glyph_index && NULL == Dx)
-        {
-            FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
-            X64 += delta.x;
-            Y64 -= delta.y;
-        }
-
         if (NULL == Dx)
         {
             X64 += AdvanceX;
@@ -7208,8 +7204,6 @@ IntGetTextDisposition(
             X64 += vec.x;
             Y64 -= vec.y;
         }
-
-        previous = glyph_index;
     }
 
     *pX64 = X64;
@@ -7243,7 +7237,6 @@ IntExtTextOutW(
     FT_Face face;
     FT_BitmapGlyph realglyph;
     LONGLONG X64, Y64, RealXStart64, RealYStart64, DeltaX64, DeltaY64;
-    ULONG previous;
     RECTL DestRect, MaskRect;
     HBITMAP hbmGlyph;
     SIZEL glyphSize;
@@ -7253,9 +7246,9 @@ IntExtTextOutW(
     EXLATEOBJ exloRGB2Dst, exloDst2RGB;
     POINT Start;
     PMATRIX pmxWorldToDevice;
-    FT_Vector delta, vecAscent64, vecDescent64, vec;
+    FT_Vector vecAscent64, vecDescent64, vec;
     LOGFONTW *plf;
-    BOOL use_kerning, bResult, DoBreak, bLcdGlyph;
+    BOOL bResult, DoBreak, bLcdGlyph;
     FONT_CACHE_ENTRY Cache;
     FT_Matrix mat;
     BOOL bNoTransform;
@@ -7429,8 +7422,6 @@ IntExtTextOutW(
     }
 #undef VALIGN_MASK
 
-    use_kerning = FT_HAS_KERNING(face);
-
     /* Calculate the text width if necessary */
     if ((fuOptions & ETO_OPAQUE) || (pdcattr->flTextAlign & (TA_CENTER | TA_RIGHT)))
     {
@@ -7493,7 +7484,6 @@ IntExtTextOutW(
      */
     X64 = RealXStart64;
     Y64 = RealYStart64;
-    previous = 0;
     DoBreak = FALSE;
     bResult = TRUE; /* Assume success */
     for (i = 0; i < Count; i += cUnits)
@@ -7518,14 +7508,6 @@ IntExtTextOutW(
         {
             bResult = FALSE;
             break;
-        }
-
-        /* retrieve kerning distance and move pen position */
-        if (use_kerning && previous && glyph_index && NULL == Dx)
-        {
-            FT_Get_Kerning(face, previous, glyph_index, 0, &delta);
-            X64 += delta.x;
-            Y64 -= delta.y;
         }
 
         DPRINT("X64, Y64: %I64d, %I64d\n", X64, Y64);
@@ -7657,8 +7639,6 @@ IntExtTextOutW(
         }
 
         DPRINT("New X64, New Y64: %I64d, %I64d\n", X64, Y64);
-
-        previous = glyph_index;
     }
     /* Don't update position if String == NULL. Fixes CORE-19721. */
     if ((pdcattr->flTextAlign & TA_UPDATECP) && String)

@@ -502,7 +502,9 @@ static void Test_DrawKerning(void)
     BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER), DRAW_WIDTH, -DRAW_HEIGHT, 1, 32, BI_RGB } };
     DWORD *pixels = NULL;
     HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (PVOID*)&pixels, NULL, 0), hbmOld;
-    SIZE sizeAV, sizeA, sizeV;
+    SIZE sizeA, sizeV;
+    GCP_RESULTSW gcp;
+    INT cxKerned;
     DRAWN drawn;
     UINT i;
     static const UINT options[2] = { 0, ETO_IGNORELANGUAGE };
@@ -520,11 +522,16 @@ static void Test_DrawKerning(void)
     SetTextColor(hdc, RGB(0, 0, 0));
     SetBkColor(hdc, RGB(255, 0, 0));
     SetBkMode(hdc, OPAQUE);
-    GetTextExtentPoint32W(hdc, av, 2, &sizeAV);
+    /* A plain extent has no kerning; GetCharacterPlacementW has the kerning of the pair */
+    memset(&gcp, 0, sizeof(gcp));
+    gcp.lStructSize = sizeof(gcp);
+    gcp.nGlyphs = 2;
+    cxKerned = LOWORD(GetCharacterPlacementW(hdc, av, 2, 0, &gcp, 0));
     GetTextExtentPoint32W(hdc, av, 1, &sizeA);
     GetTextExtentPoint32W(hdc, av + 1, 1, &sizeV);
-    trace("kerning: A %ld, V %ld, AV %ld\n", sizeA.cx, sizeV.cx, sizeAV.cx);
-    if (sizeAV.cx >= sizeA.cx + sizeV.cx - 4)
+    trace("kerning: A %ld, V %ld, AV placed %d\n", sizeA.cx, sizeV.cx, cxKerned);
+    ok(cxKerned > 0, "GetCharacterPlacementW failed\n");
+    if (cxKerned <= 0 || cxKerned >= sizeA.cx + sizeV.cx - 4)
         skip("the font does not kern A and V\n");
     else
     {
