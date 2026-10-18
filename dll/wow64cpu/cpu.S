@@ -10,6 +10,7 @@ PUBLIC Wow64CpuRun
     .allocstack 88
     .endprolog
     mov [rcx], rsp
+    mov dword ptr [rcx + 52], 1
     mov gs:[TeTlsSlots + 8], rcx
     mov r11, rcx
     jmp Wow64CpuReturn
@@ -23,6 +24,7 @@ PUBLIC Wow64CpuDispatch
     mov r11, gs:[TeTlsSlots + 8]
     mov [r11 + 44], ecx
     mov [r11 + 48], edx
+    mov [r11 + 20], eax
     fxsave [r11 + 64]
     mov [r11 + 8], esp
     mov rsp, [r11]
@@ -43,7 +45,6 @@ PUBLIC Wow64CpuDispatch
     add edx, 8
     call qword ptr Wow64Service[rip]
     mov r11, gs:[TeTlsSlots + 8]
-    mov [r11 + 20], eax
 Wow64CpuReturn:
     /* IRET in ring 3 switches only user selectors and restores the 32-bit
      * stack. Kernel transitions occur inside the native ntdll calls. */

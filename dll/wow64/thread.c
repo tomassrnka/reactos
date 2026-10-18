@@ -30,7 +30,8 @@ NTSTATUS Wow64CreateThread(HANDLE *Handle, ACCESS_MASK Access,
     TEB32 Teb32;
     ULONG_PTR Peb32;
     SIZE_T Size = 1024 * 1024, Zero = 0;
-    PVOID ContextAddress;
+    PVOID ContextAddress, Guard;
+    ULONG OldProtect;
     HANDLE Thread = NULL;
     NTSTATUS Status;
 
@@ -54,10 +55,26 @@ NTSTATUS Wow64CreateThread(HANDLE *Handle, ACCESS_MASK Access,
     /* Every guest thread needs a separate native stack for the loader and
      * argument translators. Keep the startup context in that allocation. */
     Status = NtAllocateVirtualMemory(Process, &Stack.AllocatedStackBase, 0,
-                                     &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                                     &Size, MEM_RESERVE, PAGE_READWRITE);
     if (!NT_SUCCESS(Status)) return Status;
     Stack.StackBase = (PUCHAR)Stack.AllocatedStackBase + Size;
-    Stack.StackLimit = Stack.AllocatedStackBase;
+    /* Leave room for growth without charging a megabyte of commit per thread.
+     * The ordinary native stack-fault path advances this guard page. */
+    Size = 64 * 1024;
+    Guard = (PUCHAR)Stack.StackBase - Size;
+    Stack.StackLimit = (PUCHAR)Guard + PAGE_SIZE;
+    Status = NtAllocateVirtualMemory(Process, &Guard, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+    if (NT_SUCCESS(Status))
+    {
+        Size = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(Process, &Guard, &Size,
+                                         PAGE_READWRITE | PAGE_GUARD, &OldProtect);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        NtFreeVirtualMemory(Process, &Stack.AllocatedStackBase, &Zero, MEM_RELEASE);
+        return Status;
+    }
     ContextAddress = (PUCHAR)Stack.StackBase - ((sizeof(Captured) + 15) & ~15);
     Native.ContextFlags = CONTEXT_FULL;
     Native.Rsp = (ULONG_PTR)ContextAddress;
