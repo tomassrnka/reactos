@@ -9,12 +9,45 @@
 static const WCHAR g_class[] = L"SenderDiedClass";
 static HANDLE g_inCallback, g_stuckReady, g_never;
 static HWND g_hwndStuck;
+static LONG g_deadMoves, g_liveMoves;
+
+/* the dead senders move to (20,20), the live one to (40,40) */
+static LRESULT CALLBACK ReceiverProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_WINDOWPOSCHANGING)
+    {
+        const WINDOWPOS *wp = (const WINDOWPOS *)lParam;
+
+        if (wp->x == 20)
+            g_deadMoves++;
+        else if (wp->x == 40)
+            g_liveMoves++;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static BOOL send_pending(void)
+{
+    return (LOWORD(GetQueueStatus(QS_SENDMESSAGE)) & QS_SENDMESSAGE) != 0;
+}
 
 static DWORD WINAPI MoveWindowProc(LPVOID arg)
 {
     /* the move sends WM_WINDOWPOSCHANGING with a pointer into this thread's kernel stack */
     SetWindowPos((HWND)arg, NULL, 20, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     return 0;
+}
+
+static DWORD WINAPI LiveMoveProc(LPVOID arg)
+{
+    return SetWindowPos((HWND)arg, NULL, 40, 40, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static void kill_thread(HANDLE th, const char *what)
+{
+    ok(TerminateThread(th, 0), "TerminateThread (%s) failed: %lu\n", what, GetLastError());
+    ok(WaitForSingleObject(th, 5000) == WAIT_OBJECT_0, "the %s did not exit\n", what);
+    CloseHandle(th);
 }
 
 static LRESULT CALLBACK StuckProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -66,12 +99,14 @@ static void test_terminated_in_send(HWND hwnd)
         /* this thread does not pump, so the sender stays blocked until it is terminated */
         ret = WaitForSingleObject(th, 300);
         ok(ret == WAIT_TIMEOUT, "the cross-thread move completed without the receiver pumping: %lu\n", ret);
-        TerminateThread(th, 0);
-        WaitForSingleObject(th, 5000);
-        CloseHandle(th);
+        ok(send_pending(), "the move is not queued on this thread\n");
+        kill_thread(th, "blocked sender");
         Sleep(100);
 
+        /* the dead sender's message must be gone: its lParam pointed into the dead stack.
+           Other threads may send to this one meanwhile, so count the move, not the queue bit */
         pump_all();
+        ok(g_deadMoves == 0, "a dead sender's move was dispatched %ld times\n", g_deadMoves);
     }
 }
 
@@ -91,24 +126,23 @@ static void test_terminated_in_callback(HWND hwnd)
 
     /* by now the sender waits for this thread to take its move */
     Sleep(300);
+    ok(send_pending(), "the move is not queued on this thread\n");
     thPoke = CreateThread(NULL, 0, PokeProc, g_hwndStuck, 0, NULL);
     ok(thPoke != NULL, "CreateThread failed: %lu\n", GetLastError());
     if (!thPoke)
     {
-        TerminateThread(thSender, 0);
-        CloseHandle(thSender);
+        kill_thread(thSender, "sender");
         goto done;
     }
     ok(WaitForSingleObject(g_inCallback, 5000) == WAIT_OBJECT_0, "the sender never entered its window procedure\n");
 
-    TerminateThread(thSender, 0);
-    WaitForSingleObject(thSender, 5000);
-    CloseHandle(thSender);
+    kill_thread(thSender, "sender in a window procedure");
     ok(WaitForSingleObject(thPoke, 5000) == WAIT_OBJECT_0, "the sender to the dead thread did not return\n");
     CloseHandle(thPoke);
     Sleep(100);
 
     pump_all();
+    ok(g_deadMoves == 0, "a dead sender's move was dispatched %ld times\n", g_deadMoves);
 
 done:
     CloseHandle(g_inCallback);
@@ -121,11 +155,12 @@ START_TEST(SendMessageSenderDied)
     WNDCLASSW wc;
     HWND hwnd;
     HANDLE th;
+    DWORD code = 0;
     RECT rc;
     int i;
 
     ZeroMemory(&wc, sizeof(wc));
-    wc.lpfnWndProc = DefWindowProcW;
+    wc.lpfnWndProc = ReceiverProc;
     wc.hInstance = GetModuleHandleW(NULL);
     wc.lpszClassName = g_class;
     RegisterClassW(&wc);
@@ -142,10 +177,8 @@ START_TEST(SendMessageSenderDied)
     test_terminated_in_send(hwnd);
     test_terminated_in_callback(hwnd);
 
-    ok(GetWindowRect(hwnd, &rc), "GetWindowRect failed: %lu\n", GetLastError());
-
     /* the receiver still takes messages from a sender that lives */
-    th = CreateThread(NULL, 0, MoveWindowProc, hwnd, 0, NULL);
+    th = CreateThread(NULL, 0, LiveMoveProc, hwnd, 0, NULL);
     ok(th != NULL, "CreateThread failed: %lu\n", GetLastError());
     if (th)
     {
@@ -156,8 +189,12 @@ START_TEST(SendMessageSenderDied)
             pump_all();
         }
         ok(WaitForSingleObject(th, 0) == WAIT_OBJECT_0, "the move from a live thread did not complete\n");
+        ok(GetExitCodeThread(th, &code) && code, "SetWindowPos from a live thread failed (%lu)\n", code);
         CloseHandle(th);
     }
+    ok(GetWindowRect(hwnd, &rc), "GetWindowRect failed: %lu\n", GetLastError());
+    ok(rc.left == 40 && rc.top == 40, "the live move did not land: (%ld,%ld)\n", rc.left, rc.top);
+    ok(g_liveMoves >= 1, "the live move was not dispatched\n");
 
     DestroyWindow(hwnd);
     UnregisterClassW(g_class, wc.hInstance);

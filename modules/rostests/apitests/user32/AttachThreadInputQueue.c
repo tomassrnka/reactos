@@ -144,7 +144,12 @@ static void run_queue_case(int mode)
 
 cleanup:
     if (WaitForSingleObject(th, 5000) != WAIT_OBJECT_0)
+    {
+        /* c lives on this stack: the worker must be gone before it goes */
+        ok(0, "worker did not exit\n");
         TerminateThread(th, 0);
+        WaitForSingleObject(th, INFINITE);
+    }
     CloseHandle(th);
     CloseHandle(c.ready);
     CloseHandle(c.done);
