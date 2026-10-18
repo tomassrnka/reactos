@@ -777,31 +777,43 @@ START_TEST(NtfsVolumeLock)
     NtCleanup();
 }
 
-/* The major NTFS version of the test directory's volume (the extended FSCTL_GET_NTFS_VOLUME_DATA output), 3 if unknown. */
-static UCHAR NtVolumeMajor(VOID)
+/* FSCTL_GET_NTFS_VOLUME_DATA on a volume handle; Windows refuses it on a handle without FILE_READ_DATA. */
+static NTSTATUS NtVolumeData(ULONG Length, PVOID Buffer, ULONG_PTR *Information)
 {
-    struct { NTFS_VOLUME_DATA_BUFFER Data; NTFS_EXTENDED_VOLUME_DATA Extended; } Buffer;
     IO_STATUS_BLOCK Iosb;
     HANDLE Handle;
     NTSTATUS Status;
-    UCHAR Major = 3;
 
-    if (!NT_SUCCESS(OpenVolume(FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Handle)))
-        return Major;
-    RtlZeroMemory(&Buffer, sizeof(Buffer));
-    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &Buffer, sizeof(Buffer));
-    if (NT_SUCCESS(Status) && Iosb.Information >= sizeof(Buffer) && Buffer.Extended.MajorVersion)
-        Major = (UCHAR)Buffer.Extended.MajorVersion;
+    *Information = 0;
+    Status = OpenVolume(FILE_READ_DATA, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Iosb.Information = 0;
+    Status = NtFsControlFile(Handle, NULL, NULL, NULL, &Iosb, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, Buffer, Length);
+    *Information = Iosb.Information;
     NtClose(Handle);
-    return Major;
+    return Status;
+}
+
+/* The major NTFS version of the test directory's volume (the extended FSCTL_GET_NTFS_VOLUME_DATA output), 0 if unknown. */
+static UCHAR NtVolumeMajor(VOID)
+{
+    struct { NTFS_VOLUME_DATA_BUFFER Data; NTFS_EXTENDED_VOLUME_DATA Extended; } Buffer;
+    ULONG_PTR Information;
+
+    RtlZeroMemory(&Buffer, sizeof(Buffer));
+    if (!NT_SUCCESS(NtVolumeData(sizeof(Buffer), &Buffer, &Information)) || Information < sizeof(Buffer))
+        return 0;
+    return (UCHAR)Buffer.Extended.MajorVersion;
 }
 
 /*
  * The file system attributes FileFsAttributeInformation reports for the test directory's volume.
  * Each flag checked here is reported by Windows 10 and Server 2008 R2 NTFS (0x03e706ff and
- * 0x03e700ff on their system volumes) and backed by a feature the other NTFS tests exercise
- * (junctions, hard links, open by file ID).  On ReactOS the set is exact: a flag for a feature
- * the driver does not implement must not be reported.
+ * 0x03e700ff on their system volumes) and implemented by ntfsng: FSCTL_SET/GET/DELETE_REPARSE_POINT
+ * and junction traversal (exercised by kernel32_apitest VolumeMountPoint and userenv_apitest, not
+ * here), hard links (NtfsHardLink) and open by file ID (NtfsOpenById).  On ReactOS the set is
+ * exact: a flag for a feature the driver does not implement must not be reported.
  */
 START_TEST(NtfsVolumeAttributes)
 {
@@ -822,9 +834,12 @@ START_TEST(NtfsVolumeAttributes)
     NTSTATUS Status;
     DWORD Flags = 0, MaxComponent = 0;
     ULONG i, All = 0;
+    UCHAR Major;
 
     if (!LabelInit("NtfsVolumeAttributes"))
         return;
+    Major = NtVolumeMajor();
+    ok(Major != 0, "No NTFS version from FSCTL_GET_NTFS_VOLUME_DATA\n");
     Status = NtOpen(NtTestDir(), FILE_READ_ATTRIBUTES | SYNCHRONIZE, SHARE_RW | FILE_SHARE_DELETE, FILE_OPEN,
                     FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, &Handle);
     ok(Status == STATUS_SUCCESS, "Opening %ls: 0x%08lx\n", NtTestDir(), Status);
@@ -844,10 +859,10 @@ START_TEST(NtfsVolumeAttributes)
         for (i = 0; i < RTL_NUMBER_OF(Expected); i++)
         {
             /* An NTFS 1.x/2.x volume has no $Extend\$Reparse, hence no reparse points. */
-            if (Expected[i].Flag == FILE_SUPPORTS_REPARSE_POINTS && NtVolumeMajor() < 3)
+            if (Expected[i].Flag == FILE_SUPPORTS_REPARSE_POINTS && Major && Major < 3)
             {
                 ok(!(Info->FileSystemAttributes & FILE_SUPPORTS_REPARSE_POINTS) || !is_reactos(),
-                   "Reparse points reported on an NTFS %u volume: 0x%08lx\n", NtVolumeMajor(), Info->FileSystemAttributes);
+                   "Reparse points reported on an NTFS %u volume: 0x%08lx\n", Major, Info->FileSystemAttributes);
                 continue;
             }
             ok(Info->FileSystemAttributes & Expected[i].Flag, "%s (0x%08lx) not reported: 0x%08lx\n",
@@ -872,5 +887,65 @@ START_TEST(NtfsVolumeAttributes)
             ok(FALSE, "GetVolumeInformationW failed %lu\n", GetLastError());
         }
     }
+    NtCleanup();
+}
+
+/*
+ * FSCTL_GET_NTFS_VOLUME_DATA: the base block, then whole fields of NTFS_EXTENDED_VOLUME_DATA as far
+ * as they fit, ByteCount saying how many bytes of it.  Measured on Server 2008 R2 (8-byte extended
+ * block) and Windows 10 (32 bytes: physical sector size, LFS version and trim limits follow).
+ */
+START_TEST(NtfsVolumeData)
+{
+    struct { NTFS_VOLUME_DATA_BUFFER Data; NTFS_EXTENDED_VOLUME_DATA Extended; UCHAR Rest[160]; } Buffer;
+    ULONG_PTR Information;
+    NTSTATUS Status;
+
+    if (!LabelInit("NtfsVolumeData"))
+        return;
+
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER) - 1, &Buffer, &Information);
+    ok(Status == STATUS_BUFFER_TOO_SMALL, "Short buffer: 0x%08lx\n", Status);
+
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER), &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "Base block: 0x%08lx\n", Status);
+    ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER), "Base block: %Iu bytes\n", Information);
+    ok(Buffer.Extended.ByteCount == 0xcccccccc, "Written past the buffer: 0x%08lx\n", Buffer.Extended.ByteCount);
+    ok(Buffer.Data.BytesPerSector >= 512 && Buffer.Data.BytesPerCluster >= Buffer.Data.BytesPerSector &&
+       Buffer.Data.BytesPerFileRecordSegment >= 1024 &&
+       Buffer.Data.ClustersPerFileRecordSegment == Buffer.Data.BytesPerFileRecordSegment / Buffer.Data.BytesPerCluster,
+       "Geometry %lu %lu %lu %lu\n", Buffer.Data.BytesPerSector, Buffer.Data.BytesPerCluster,
+       Buffer.Data.BytesPerFileRecordSegment, Buffer.Data.ClustersPerFileRecordSegment);
+    ok(Buffer.Data.FreeClusters.QuadPart <= Buffer.Data.TotalClusters.QuadPart, "Free %I64d of %I64d clusters\n",
+       Buffer.Data.FreeClusters.QuadPart, Buffer.Data.TotalClusters.QuadPart);
+
+    /* Room for ByteCount and MajorVersion, not MinorVersion. */
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER) + 7, &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "Partial extended block: 0x%08lx\n", Status);
+    ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + 6, "Partial extended block: %Iu bytes\n", Information);
+    ok(Buffer.Extended.ByteCount == 6, "Partial ByteCount %lu\n", Buffer.Extended.ByteCount);
+    ok(Buffer.Extended.MajorVersion == 3, "Partial MajorVersion %u\n", Buffer.Extended.MajorVersion);
+    ok(Buffer.Extended.MinorVersion == 0xcccc, "Partial MinorVersion written: 0x%04x\n", Buffer.Extended.MinorVersion);
+
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA), &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "Extended block: 0x%08lx\n", Status);
+    ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA), "Extended block: %Iu bytes\n", Information);
+    ok(Buffer.Extended.ByteCount == sizeof(NTFS_EXTENDED_VOLUME_DATA), "ByteCount %lu\n", Buffer.Extended.ByteCount);
+    ok(Buffer.Extended.MajorVersion == 3 && Buffer.Extended.MinorVersion <= 1, "Version %u.%u\n",
+       Buffer.Extended.MajorVersion, Buffer.Extended.MinorVersion);
+
+    /* A large buffer: the whole extended block, ByteCount matching the returned length. */
+    memset(&Buffer, 0xcc, sizeof(Buffer));
+    Status = NtVolumeData(sizeof(Buffer), &Buffer, &Information);
+    ok(Status == STATUS_SUCCESS, "Large buffer: 0x%08lx\n", Status);
+    ok(Information >= sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA) && Information < sizeof(Buffer),
+       "Large buffer: %Iu bytes\n", Information);
+    ok(Buffer.Extended.ByteCount == Information - sizeof(NTFS_VOLUME_DATA_BUFFER), "ByteCount %lu for %Iu bytes\n",
+       Buffer.Extended.ByteCount, Information);
+    if (is_reactos())
+        ok(Information == sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(NTFS_EXTENDED_VOLUME_DATA), "Large buffer: %Iu bytes\n", Information);
     NtCleanup();
 }
