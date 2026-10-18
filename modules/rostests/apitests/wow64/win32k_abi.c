@@ -24,6 +24,42 @@ static LRESULT CALLBACK Proc(HWND Window,UINT Msg,WPARAM Wparam,LPARAM Lparam)
     }
     return DefWindowProcW(Window,Msg,Wparam,Lparam);
 }
+/* A guest structure the translator faults on once (here a guard page) must
+ * fail like an inaccessible argument. Bytes 8-15 hold a native UNICODE_STRING
+ * Buffer naming the real device, so forwarding the 32-bit layout would make
+ * the native service succeed instead. */
+static VOID DisplayStringFault(BOOL Wow64)
+{
+    DISPLAY_DEVICEW Device = {sizeof(Device)};
+    DEVMODEW Mode;
+    BYTE *Page;
+    DWORD Old;
+    USHORT Length;
+    CHECK(EnumDisplayDevicesW(NULL, 0, &Device, 0));
+    Length = (USHORT)(wcslen(Device.DeviceName) * sizeof(WCHAR));
+    Page = VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    CHECK(Page != NULL);
+    if (!Page || !Length) return;
+    *(USHORT *)(Page + 0) = Length;
+    *(USHORT *)(Page + 2) = Length;
+    *(ULONG *)(Page + 4) = (ULONG)(ULONG_PTR)Device.DeviceName;
+    *(ULONG *)(Page + 8) = (ULONG)(ULONG_PTR)Device.DeviceName;
+    *(ULONG *)(Page + 12) = 0;
+    RtlZeroMemory(&Mode, sizeof(Mode)); Mode.dmSize = sizeof(Mode);
+    CHECK(NtUserEnumDisplaySettings((PUNICODE_STRING)Page, ENUM_CURRENT_SETTINGS, &Mode, 0) == STATUS_SUCCESS);
+    RtlZeroMemory(&Mode, sizeof(Mode)); Mode.dmSize = sizeof(Mode);
+    CHECK(NtUserEnumDisplaySettings((PUNICODE_STRING)(ULONG_PTR)0xfffffffc, ENUM_CURRENT_SETTINGS, &Mode, 0) ==
+          STATUS_INVALID_PARAMETER_1);
+    if (Wow64)
+    {
+        CHECK(VirtualProtect(Page, 0x1000, PAGE_READWRITE | PAGE_GUARD, &Old));
+        RtlZeroMemory(&Mode, sizeof(Mode)); Mode.dmSize = sizeof(Mode);
+        CHECK(NtUserEnumDisplaySettings((PUNICODE_STRING)Page, ENUM_CURRENT_SETTINGS, &Mode, 0) ==
+              STATUS_INVALID_PARAMETER_1);
+    }
+    CHECK(VirtualFree(Page, 0, MEM_RELEASE));
+}
+
 int main(void)
 {
     struct { MSG Msg; ULONG Guard[4]; } Message;
@@ -92,6 +128,7 @@ int main(void)
     CHECK(SetWindowTextW(Window,L"translated title"));
     CHECK(DestroyWindow(Window));
     CHECK(UnregisterClassW(Class.lpszClassName,Class.hInstance));
+    DisplayStringFault(Wow64);
     printf("RESULT win32k ABI failures=%u\n",Failures);
     return Failures ? 1 : 0;
 }
