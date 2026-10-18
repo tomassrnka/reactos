@@ -4,6 +4,7 @@ add_subdirectory(wevhook)
 
 list(APPEND SOURCE
     AttachThreadInput.c
+    AttachThreadInputQueue.c
     AutoRotation.c
     ../include/msgtrace.c
     CharFuncs.c
@@ -70,6 +71,7 @@ list(APPEND SOURCE
     ScrollBarWndExtra.c
     ScrollDC.c
     ScrollWindowEx.c
+    SendMessageSenderDied.c
     SendMessageTimeout.c
     SetActiveWindow.c
     SetCoalescableTimer.c

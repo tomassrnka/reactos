@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_AttachThreadInput(void);
+extern void func_AttachThreadInputQueue(void);
 extern void func_AutoRotation(void);
 extern void func_CharFuncs(void);
 extern void func_CloseWindow(void);
@@ -70,6 +71,7 @@ extern void func_ScrollBarRedraw(void);
 extern void func_ScrollBarWndExtra(void);
 extern void func_ScrollDC(void);
 extern void func_ScrollWindowEx(void);
+extern void func_SendMessageSenderDied(void);
 extern void func_SendMessageTimeout(void);
 extern void func_SetActiveWindow(void);
 extern void func_SetCoalescableTimer(void);
@@ -102,6 +104,7 @@ extern void func_wsprintfApi(void);
 const struct test winetest_testlist[] =
 {
     { "AttachThreadInput", func_AttachThreadInput },
+    { "AttachThreadInputQueue", func_AttachThreadInputQueue },
     { "AutoRotation", func_AutoRotation },
     { "CharFuncs", func_CharFuncs },
     { "CloseWindow", func_CloseWindow },
@@ -169,6 +172,7 @@ const struct test winetest_testlist[] =
     { "ScrollBarWndExtra", func_ScrollBarWndExtra },
     { "ScrollDC", func_ScrollDC },
     { "ScrollWindowEx", func_ScrollWindowEx },
+    { "SendMessageSenderDied", func_SendMessageSenderDied },
     { "SendMessageTimeout", func_SendMessageTimeout },
     { "SetActiveWindow", func_SetActiveWindow },
     { "SetCoalescableTimer", func_SetCoalescableTimer },

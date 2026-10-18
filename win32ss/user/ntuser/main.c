@@ -823,6 +823,8 @@ ExitThreadCallback(PETHREAD Thread)
     /* Walks of a peek that called out and never came back (the thread ends inside a hook) */
     MsqRundownHardwareWalks(ptiCurrent);
 
+    MsqWithdrawSentMessagesOf(ptiCurrent);
+
     IsRemoveAttachThread(ptiCurrent);
 
     UserRawInputThreadCleanup(ptiCurrent);
