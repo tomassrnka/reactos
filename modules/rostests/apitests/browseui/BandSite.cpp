@@ -211,6 +211,113 @@ static void TestRefusedStream(HWND hwnd, const char *what, IStream *stream)
     ok(CountBands(bs.site) == 0, "%s: %u bands were added\n", what, CountBands(bs.site));
 }
 
+/* A class that reads a stream but is not a band: it counts the calls of its Load */
+static const CLSID CLSID_TestNotABand = { 0x560d244d, 0x02d9, 0x4798, { 0x80, 0xac, 0xe8, 0x1b, 0xb7, 0x7f, 0xd6, 0x62 } };
+static LONG g_NotABandLoads;
+
+class CTestNotABand : public IPersistStream
+{
+    LONG m_cRef = 1;
+
+public:
+    virtual ~CTestNotABand() { }
+
+    STDMETHODIMP QueryInterface(REFIID riid, void **ppv) override
+    {
+        if (riid == IID_IUnknown || riid == IID_IPersist || riid == IID_IPersistStream)
+        {
+            *ppv = static_cast<IPersistStream *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = NULL;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_cRef); }
+    STDMETHODIMP_(ULONG) Release() override
+    {
+        ULONG ref = InterlockedDecrement(&m_cRef);
+        if (!ref)
+            delete this;
+        return ref;
+    }
+    STDMETHODIMP GetClassID(CLSID *pclsid) override { *pclsid = CLSID_TestNotABand; return S_OK; }
+    STDMETHODIMP IsDirty() override { return S_FALSE; }
+    STDMETHODIMP Load(IStream *) override { InterlockedIncrement(&g_NotABandLoads); return S_OK; }
+    STDMETHODIMP Save(IStream *, BOOL) override { return E_NOTIMPL; }
+    STDMETHODIMP GetSizeMax(ULARGE_INTEGER *) override { return E_NOTIMPL; }
+};
+
+/* A static object: the count starts at one for the variable and never deletes it */
+class CTestNotABandFactory : public IClassFactory
+{
+    LONG m_cRef = 1;
+
+public:
+    LONG Refs() const { return m_cRef; }
+
+    STDMETHODIMP QueryInterface(REFIID riid, void **ppv) override
+    {
+        if (riid == IID_IUnknown || riid == IID_IClassFactory)
+        {
+            *ppv = static_cast<IClassFactory *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = NULL;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_cRef); }
+    STDMETHODIMP_(ULONG) Release() override { return InterlockedDecrement(&m_cRef); }
+    STDMETHODIMP CreateInstance(IUnknown *pOuter, REFIID riid, void **ppv) override
+    {
+        *ppv = NULL;
+        if (pOuter)
+            return CLASS_E_NOAGGREGATION;
+        CTestNotABand *obj = new CTestNotABand();
+        HRESULT hr = obj->QueryInterface(riid, ppv);
+        obj->Release();
+        return hr;
+    }
+    STDMETHODIMP LockServer(BOOL) override { return S_OK; }
+};
+
+static CTestNotABandFactory g_NotABandFactory;
+
+/* An entry of a class that is not a band: the class must not be asked to read the stream */
+static void TestNotABand(HWND hwnd)
+{
+    DWORD cookie;
+    HRESULT hr = CoRegisterClassObject(CLSID_TestNotABand, &g_NotABandFactory, CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, &cookie);
+    ok_hex(hr, S_OK);
+    if (FAILED(hr))
+        return;
+
+    /* The class can be made, so a refusal below is the band site's own */
+    CComPtr<IPersistStream> probe;
+    hr = CoCreateInstance(CLSID_TestNotABand, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IPersistStream, &probe));
+    ok_hex(hr, S_OK);
+    probe.Release();
+
+    BYTE stream[sizeof(TEST_HEADER) + sizeof(TEST_ENTRY) + 16];
+    TEST_HEADER *header = (TEST_HEADER *)stream;
+    TEST_ENTRY *entry = (TEST_ENTRY *)(stream + sizeof(TEST_HEADER));
+    ZeroMemory(stream, sizeof(stream));
+    header->magic = 0x53425242;
+    header->version = 1;
+    header->count = 1;
+    entry->length = sizeof(TEST_ENTRY) - sizeof(DWORD) + 16;
+    entry->clsid = CLSID_TestNotABand;
+
+    g_NotABandLoads = 0;
+    TestRefusedStream(hwnd, "a class that is not a band", MakeStream(stream, sizeof(stream)));
+    ok(g_NotABandLoads == 0, "the class that is not a band was asked to read the stream %ld times\n", g_NotABandLoads);
+
+    hr = CoRevokeClassObject(cookie);
+    ok_hex(hr, S_OK);
+    ok(g_NotABandFactory.Refs() == 1, "the factory has %ld references after its registration was revoked\n", g_NotABandFactory.Refs());
+}
+
 /* The rebar refuses the first insertion, as it does when it is out of memory */
 static LONG g_RefuseInsertions;
 static WNDPROC g_RebarProc;
@@ -326,6 +433,10 @@ START_TEST(BandSite)
     pidlTemp.Attach(ILCreateFromPathW(szDirs[1]));
     pidlSystem.Attach(ILCreateFromPathW(szDirs[2]));
     ok(pidlWindows && pidlTemp && pidlSystem, "ILCreateFromPath failed\n");
+
+    /* first: the tests after it can end the process on a band site without the fix */
+    if (IsReactOS())
+        TestNotABand(hwnd);
 
     BandSite one;
     if (pidlWindows && pidlTemp && pidlSystem && CreateBandSite(hwnd, one))
