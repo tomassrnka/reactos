@@ -58,10 +58,15 @@ NtUserLoadKeyboardLayoutEx NtUserOpenDesktop NtUserOpenWindowStation NtUserQuery
 NtUserRealInternalGetMessage NtUserRegisterRawInputDevices NtUserResolveDesktop NtUserSendInput
 NtUserSetCursorContents NtUserSetImeInfoEx NtUserSetInformationThread NtUserSetWindowWord'''.split())
 _svc32 = (ROOT/'win32ss/w32ksvc32.h').read_text()
-# DBG-gated services exist only in checked builds; the W64_ enum omits them in
-# Release, so they must not reach generated.inc/failure.inc. (one line constraint)
-_svc32 = re.sub(r'#if\s+DBG\b.*?#endif', '', _svc32, flags=re.S)
 services = set('Nt'+n for n in re.findall(r'SVC_\((\w+),', _svc32))
+# w32ksvc32.h declares the checked-build-only services under #if DBG, and the
+# W64_ enum (wow64win.h) is built from that same header, so their cases are
+# emitted under the same guard: present in DBG builds, absent in Release.
+dbg_services = set()
+for block in re.findall(r'^#if\s+DBG\b(.*?)^#endif', _svc32, flags=re.S | re.M):
+    dbg_services |= set('Nt'+n for n in re.findall(r'SVC_\((\w+),', block))
+def guarded(name, line):
+    return f'#if DBG\n{line}\n#endif' if name in dbg_services else line
 # Reviewed fixed-width structures absent from the measured catalogue. Each
 # has only fixed-width fields (SID ends in a DWORD array). Scalar arrays have
 # the same representation on both targets. Unknown names are rejected.
@@ -82,8 +87,10 @@ for row in rows:
     name, cls = row['name'], row['class']
     reason = ''
     if row['i386_args'] != '-' and name in services and row['args'].startswith('NTSTATUS '):
-        failure.append(f'case W64_{name}: return (ULONG_PTR)(LONG_PTR)Status;')
-    if name not in services or row['i386_args'] == '-': reason = 'no i386 service entry'
+        failure.append(guarded(name, f'case W64_{name}: return (ULONG_PTR)(LONG_PTR)Status;'))
+    if name in dbg_services and row['i386_args'] == '-':
+        reason = 'checked-build-only i386 service; catalogue has no i386 argument count'
+    elif name not in services or row['i386_args'] == '-': reason = 'no i386 service entry'
     elif name in manual:
         coverage.append(f'{name}\t{cls}\tmanual\tsee user.c, userextra.c, gdi.c and the bucket files')
         continue
@@ -141,8 +148,9 @@ for row in rows:
     else:
         ret = proto.split(name,1)[0].replace('NTAPI','').strip()
         call = f'{name}({", ".join(args)})'
-        code.append(f'case W64_{name}: ' + (f'{call}; return 0;' if ret == 'VOID' else f'return (ULONG_PTR){call};'))
-        coverage.append(f'{name}\t{cls}\tgenerated\ttyped arguments; handle policy; measured layouts')
+        code.append(guarded(name, f'case W64_{name}: ' + (f'{call}; return 0;' if ret == 'VOID' else f'return (ULONG_PTR){call};')))
+        coverage.append(f'{name}\t{cls}\tgenerated\ttyped arguments; handle policy; measured layouts'
+                        + ('; checked (DBG) builds only' if name in dbg_services else ''))
         # Header declarations remain authoritative; compiler checks each typed call.
 (HERE/'generated.inc').write_text('\n'.join(code)+'\n')
 (HERE/'coverage.tsv').write_text('\n'.join(coverage)+'\n')
@@ -151,7 +159,8 @@ for row in rows:
 # win32k with a guest layout. WM_USER and above belong to the target class or
 # application; catalogue control protocols must not block another class's
 # scalar message with the same number.
-converted = {'WM_CREATE','WM_NCCREATE','WM_NCCALCSIZE','WM_WINDOWPOSCHANGING','WM_WINDOWPOSCHANGED'}
+converted = {'WM_CREATE','WM_NCCREATE','WM_NCCALCSIZE','WM_WINDOWPOSCHANGING','WM_WINDOWPOSCHANGED',
+             'WM_MEASUREITEM','WM_DRAWITEM','WM_COPYDATA'}
 blocked = {}
 for row in csv.DictReader((HERE/'catalog/messages.tsv').open(),delimiter='\t'):
     if row['class'] in ('C','D') and row['message'] not in converted:

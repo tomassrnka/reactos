@@ -111,17 +111,33 @@ add_executable(wow64_root_store EXCLUDE_FROM_ALL root_store.c)
 set_module_type(wow64_root_store win32cui)
 add_importlibs(wow64_root_store crypt32 msvcrt kernel32)
 
+add_executable(wow64_ownerdraw EXCLUDE_FROM_ALL ownerdraw.c)
+set_module_type(wow64_ownerdraw win32cui)
+add_importlibs(wow64_ownerdraw user32 gdi32 msvcrt kernel32)
+
 add_executable(wow64_message_hook EXCLUDE_FROM_ALL message_hook.c)
 set_module_type(wow64_message_hook win32cui)
 add_importlibs(wow64_message_hook user32 msvcrt kernel32)
+
+add_executable(wow64_copydata EXCLUDE_FROM_ALL copydata.c)
+set_module_type(wow64_copydata win32cui)
+add_importlibs(wow64_copydata user32 msvcrt kernel32)
 
 add_executable(wow64_notify EXCLUDE_FROM_ALL notify.c)
 set_module_type(wow64_notify win32cui)
 add_importlibs(wow64_notify user32 msvcrt kernel32)
 
+add_executable(wow64_thread_tls EXCLUDE_FROM_ALL thread_tls.c)
+set_module_type(wow64_thread_tls win32cui)
+add_importlibs(wow64_thread_tls msvcrt kernel32)
+
 add_executable(wow64_relative_pipe EXCLUDE_FROM_ALL relative_pipe.c)
 set_module_type(wow64_relative_pipe win32cui)
 add_importlibs(wow64_relative_pipe msvcrt kernel32)
+
+add_executable(wow64_unhandled EXCLUDE_FROM_ALL unhandled.c)
+set_module_type(wow64_unhandled win32cui)
+add_importlibs(wow64_unhandled msvcrt kernel32)
 
 add_executable(wow64_stack_recreate EXCLUDE_FROM_ALL stack_recreate.c)
 set_module_type(wow64_stack_recreate win32cui)
@@ -145,9 +161,17 @@ add_executable(wow64_installer_gui EXCLUDE_FROM_ALL installer_gui.c)
 set_module_type(wow64_installer_gui win32cui)
 add_importlibs(wow64_installer_gui imm32 gdi32 user32 msvcrt kernel32)
 
+add_executable(wow64_framechanged EXCLUDE_FROM_ALL framechanged.c)
+set_module_type(wow64_framechanged win32cui)
+add_importlibs(wow64_framechanged user32 gdi32 msvcrt kernel32)
+
 add_executable(wow64_system_timer EXCLUDE_FROM_ALL system_timer.c)
 set_module_type(wow64_system_timer win32cui)
 add_importlibs(wow64_system_timer user32 gdi32 msvcrt kernel32)
+
+add_executable(wow64_mouse_points EXCLUDE_FROM_ALL mouse_points.c)
+set_module_type(wow64_mouse_points win32cui)
+add_importlibs(wow64_mouse_points user32 msvcrt kernel32)
 
 if(ARCH STREQUAL "i386")
     add_asm_files(segment_return_asm i386/SegmentReturn.S)
@@ -229,6 +253,10 @@ add_importlibs(wow64_directory msvcrt kernel32)
 add_executable(wow64_pipe_connect EXCLUDE_FROM_ALL pipe_connect.c)
 set_module_type(wow64_pipe_connect win32cui)
 add_importlibs(wow64_pipe_connect msvcrt kernel32)
+
+add_executable(wow64_attach_fs EXCLUDE_FROM_ALL attach_fs.c)
+set_module_type(wow64_attach_fs win32cui)
+add_importlibs(wow64_attach_fs msvcrt kernel32)
 
 add_executable(wow64_time_zone EXCLUDE_FROM_ALL time_zone.c)
 set_module_type(wow64_time_zone win32cui)

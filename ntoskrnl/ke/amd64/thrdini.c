@@ -280,7 +280,9 @@ KiSwapContextResume(
        __writemsr(MSR_GS_SWAP, (ULONG64)NewThread->Teb);
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-       PEPROCESS ENewProcess = (PEPROCESS)NewThread->ApcState.Process;
+       /* The thread's own process: a thread attached to another process,
+        * as in NtReadVirtualMemory, still returns to its own TEB32 */
+       PEPROCESS ENewProcess = (PEPROCESS)NewThread->Process;
 
        if (ENewProcess->Wow64Process != NULL)
        {

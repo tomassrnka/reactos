@@ -23,6 +23,12 @@ case W64_NtUserCreateCaret: return (ULONG_PTR)NtUserCreateCaret((HWND)((LONG_PTR
 case W64_NtUserCreateInputContext: return (ULONG_PTR)NtUserCreateInputContext((ULONG_PTR)(a[0]));
 case W64_NtUserCreateLocalMemHandle: return (ULONG_PTR)NtUserCreateLocalMemHandle((HANDLE)((LONG_PTR)(LONG)a[0]), (PVOID)((ULONG_PTR)a[1]), (DWORD)(a[2]), (DWORD *)((ULONG_PTR)a[3]));
 case W64_NtUserCtxDisplayIOCtl: return (ULONG_PTR)NtUserCtxDisplayIOCtl((DWORD)(a[0]), (DWORD)(a[1]), (DWORD)(a[2]));
+#if DBG
+case W64_NtUserDbgWin32HeapFail: return (ULONG_PTR)NtUserDbgWin32HeapFail((DWORD)(a[0]), (DWORD)(a[1]));
+#endif
+#if DBG
+case W64_NtUserDbgWin32HeapStat: return (ULONG_PTR)NtUserDbgWin32HeapStat((DWORD)(a[0]), (DWORD)(a[1]));
+#endif
 case W64_NtUserDdeGetQualityOfService: return (ULONG_PTR)NtUserDdeGetQualityOfService((HWND)((LONG_PTR)(LONG)a[0]), (HWND)((LONG_PTR)(LONG)a[1]), (PSECURITY_QUALITY_OF_SERVICE)((ULONG_PTR)a[2]));
 case W64_NtUserDdeInitialize: return (ULONG_PTR)NtUserDdeInitialize((DWORD)(a[0]), (DWORD)(a[1]), (DWORD)(a[2]), (DWORD)(a[3]), (DWORD)(a[4]));
 case W64_NtUserDdeSetQualityOfService: return (ULONG_PTR)NtUserDdeSetQualityOfService((HWND)((LONG_PTR)(LONG)a[0]), (PSECURITY_QUALITY_OF_SERVICE)((ULONG_PTR)a[1]), (PSECURITY_QUALITY_OF_SERVICE)((ULONG_PTR)a[2]));

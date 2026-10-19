@@ -87,6 +87,63 @@ static void TestHooks(void)
     CHECK(UnregisterClassW(Class.lpszClassName, Class.hInstance));
 }
 
+BOOL WINAPI ImmGetHotKey(DWORD Id, LPUINT Modifiers, LPUINT Key, LPHKL Layout);
+BOOL WINAPI ImmSetHotKey(DWORD Id, UINT Modifiers, UINT Key, HKL Layout);
+
+#define GUARD_HOTKEY (IME_HOTKEY_PRIVATE_FIRST + 0x1d)
+#define GUARD_MODIFIERS (MOD_LEFT | MOD_ALT | MOD_CONTROL | MOD_SHIFT)
+
+/* Out-params on a not-yet-touched stack guard page must grow the stack, as the kernel probe does. */
+static DWORD WINAPI GuardHotKeyThread(PVOID Unused)
+{
+    MEMORY_BASIC_INFORMATION Info;
+    BYTE *Limit = ((NT_TIB *)NtCurrentTeb())->StackLimit, *Guard = Limit - 0x1000, *Here = (BYTE *)&Info;
+    UINT *Out = (UINT *)(Guard + 0x800), Modifiers, Key;
+    HKL Layout;
+    BOOL Ret;
+    (void)Unused;
+    /* Without a wide margin the call frames could reach the guard page before the service probes it. */
+    if (Here - Limit < 0x8000 || !VirtualQuery(Guard, &Info, sizeof(Info)) || !(Info.Protect & PAGE_GUARD))
+    {
+        printf("FAIL guard hotkey prerequisite: limit=%p here=%p\n", Limit, Here);
+        return 2;
+    }
+    Ret = ImmGetHotKey(GUARD_HOTKEY, &Out[0], &Out[1], (LPHKL)&Out[2]);
+    Modifiers = Out[0]; Key = Out[1]; Layout = *(HKL *)&Out[2];
+    CHECK(Ret);
+    CHECK(Modifiers == GUARD_MODIFIERS && Key == VK_F24 && Layout == NULL);
+    CHECK(VirtualQuery(Guard, &Info, sizeof(Info)) && !(Info.Protect & PAGE_GUARD));
+    CHECK(((NT_TIB *)NtCurrentTeb())->StackLimit <= (PVOID)Guard);
+    return 0;
+}
+
+static void TestGuardHotKey(void)
+{
+    UINT Modifiers = 0, Key = 0, OldModifiers = 0, OldKey = 0;
+    HKL Layout = (HKL)1, OldLayout = NULL;
+    HANDLE Thread;
+    DWORD Code = 1;
+    /* The ID may already be bound in this profile; put that binding back afterwards. */
+    BOOL Had = ImmGetHotKey(GUARD_HOTKEY, &OldModifiers, &OldKey, &OldLayout);
+    BOOL Set = ImmSetHotKey(GUARD_HOTKEY, GUARD_MODIFIERS, VK_F24, NULL);
+    CHECK(Set);
+    if (!Set) return;
+    CHECK(ImmGetHotKey(GUARD_HOTKEY, &Modifiers, &Key, &Layout));
+    CHECK(Modifiers == GUARD_MODIFIERS && Key == VK_F24 && Layout == NULL);
+    /* A committed size well above the margin keeps the guard page away from the call frames. */
+    Thread = CreateThread(NULL, 0x40000, GuardHotKeyThread, NULL, 0, NULL);
+    CHECK(Thread != NULL);
+    if (Thread)
+    {
+        CHECK(WaitForSingleObject(Thread, 10000) == WAIT_OBJECT_0);
+        /* An unusable stack layout is a failed prerequisite, not a pass. */
+        CHECK(GetExitCodeThread(Thread, &Code) && Code == 0);
+        CloseHandle(Thread);
+    }
+    if (Had && OldKey) CHECK(ImmSetHotKey(GUARD_HOTKEY, OldModifiers, OldKey, OldLayout));
+    else CHECK(ImmSetHotKey(GUARD_HOTKEY, 0, 0, NULL));
+}
+
 int main(void)
 {
     HDC Dc = CreateCompatibleDC(NULL);
@@ -155,6 +212,7 @@ int main(void)
         DestroyWindow(Window);
     }
     TestHooks();
+    TestGuardHotKey();
     CHECK(EnumDisplayMonitors(NULL, NULL, MonitorProc, (LPARAM)(LONG)0x87654321));
     CHECK(MonitorCount > 0);
     printf("INSTALLER GUI checks=%u failures=%u\n", Checks, Failures);

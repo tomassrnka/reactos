@@ -1,11 +1,8 @@
 /* Generated from message catalogue. */
 case 0x0028: /* WM_NEXTDLGCTL */
-case 0x002b: /* WM_DRAWITEM */
-case 0x002c: /* WM_MEASUREITEM */
 case 0x002d: /* WM_DELETEITEM */
 case 0x0039: /* WM_COMPAREITEM */
 case 0x0049: /* WM_COPYGLOBALDATA */
-case 0x004a: /* WM_COPYDATA */
 case 0x004e: /* WM_NOTIFY */
 case 0x0053: /* WM_HELP */
 case 0x0087: /* WM_GETDLGCODE */

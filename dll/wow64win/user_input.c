@@ -85,10 +85,14 @@ static NTSTATUS GuestWrite32(ULONG Address, ULONG Value)
 /* Device handles are kernel pointers; the guest sees stable 32-bit tokens, oldest evicted first. */
 static struct { HANDLE Native; ULONG Token; } DeviceTokens[DEVICE_TOKENS];
 static ULONG DeviceNext, DeviceSerial;
-static volatile LONG DeviceLock;
+/* A critical section rather than SRW: the SRW exports need DLL_EXPORT_VERSION 0x600, which a WoW64 build does not
+ * require. Statically initialized like LdrpDllNotificationLock, so no setup path has to run first. */
+static RTL_CRITICAL_SECTION DeviceLock;
+static RTL_CRITICAL_SECTION_DEBUG DeviceLockDebug = { .CriticalSection = &DeviceLock };
+static RTL_CRITICAL_SECTION DeviceLock = { &DeviceLockDebug, -1, 0, 0, 0, 0 };
 
-static VOID DeviceLockEnter(VOID) { while (InterlockedCompareExchange(&DeviceLock, 1, 0)) NtYieldExecution(); }
-static VOID DeviceLockLeave(VOID) { InterlockedExchange(&DeviceLock, 0); }
+static VOID DeviceLockEnter(VOID) { RtlEnterCriticalSection(&DeviceLock); }
+static VOID DeviceLockLeave(VOID) { RtlLeaveCriticalSection(&DeviceLock); }
 
 static ULONG DeviceToken(HANDLE Native)
 {
@@ -243,7 +247,8 @@ static ULONG_PTR RawBuffer32(ULONG *a)
         return Ret;
     }
 
-    if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
+    /* Like ProbeForWrite, an empty destination is not checked for alignment. */
+    if (Capacity && (a[0] & 3)) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
     /* The native call retires queued messages, so the whole destination must be writable before it runs. */
     Status = Touch(a[0], Capacity);
     if (Status) { SetNtError(Status); return FAIL32; }
@@ -300,10 +305,11 @@ static ULONG_PTR RawData32(ULONG *a)
     RAWINPUTHEADER32 Header32;
 
     if (a[4] != sizeof(RAWINPUTHEADER32)) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
+    /* Native rejects a bad handle, then a NULL size pointer, and only then looks at the command. */
+    if (!a[3]) return NtUserGetRawInputData(Raw, a[1], NULL, NULL, sizeof(RAWINPUTHEADER));
     /* A NULL-buffer query validates the handle and command, and yields the native size. */
     Ret = NtUserGetRawInputData(Raw, a[1], NULL, &Local, sizeof(RAWINPUTHEADER));
     if (Ret == (DWORD)-1) return FAIL32;
-    if (!a[3]) { RtlSetLastWin32Error(ERROR_NOACCESS); return FAIL32; }
     NativeSize = Local;
     if (NativeSize < sizeof(RAWINPUTHEADER)) { RtlSetLastWin32Error(ERROR_INVALID_DATA); return FAIL32; }
     Size32 = NativeSize - (ULONG)HEADER_DELTA;
@@ -364,6 +370,7 @@ static ULONG_PTR RawDeviceList32(ULONG *a)
             return FAIL32;
         }
         if (!Count) return 0;
+        if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
         Status = Touch(a[0], (ULONGLONG)Count * sizeof(RAWINPUTDEVICELIST32));
         if (Status) { SetNtError(Status); return FAIL32; }
         Native = Alloc((ULONGLONG)Count * sizeof(*Native));
@@ -409,6 +416,28 @@ static ULONG_PTR RawDeviceInfo32(ULONG *a)
      * native service gets a private copy, so the range bound below holds for what it writes. */
     Status = GuestRead32(a[3], &Size);
     if (Status) { SetNtError(Status); return FAIL32; }
+    if (a[1] == RIDI_PREPARSEDDATA)
+    {
+        /* The blob is the hidparser collection context (sdk/lib/drivers/hidparser/context.c): every
+         * HID_COLLECTION in it embeds three pointers ahead of its offset array (parser.h), so a 32-bit
+         * hid.dll would misread the native layout. The guest buffer never reaches the service; size
+         * queries, short buffers and probes keep the native order, and a copy of data is refused. */
+        Local = 0;
+        if (NtUserGetRawInputDeviceInfo(DeviceFromToken(a[0]), a[1], NULL, &Local) == (DWORD)-1) return FAIL32;
+        if (!a[2] || Size < Local)
+        {
+            Status = GuestWrite32(a[3], Local);
+            if (Status) { SetNtError(Status); return FAIL32; }
+            if (!a[2]) return 0;
+            RtlSetLastWin32Error(ERROR_INSUFFICIENT_BUFFER);
+            return FAIL32;
+        }
+        if (!Local) return 0;
+        Status = (a[2] & 3) ? STATUS_DATATYPE_MISALIGNMENT : Touch(a[2], Local);
+        if (Status) { SetNtError(Status); return FAIL32; }
+        RtlSetLastWin32Error(ERROR_NOT_SUPPORTED);
+        return FAIL32;
+    }
     if (a[2] && !GuestRange(a[2], a[1] == RIDI_DEVICENAME ? (ULONGLONG)Size * sizeof(WCHAR) : Size))
     { SetNtError(STATUS_ACCESS_VIOLATION); return FAIL32; }
     Local = Size;
@@ -435,6 +464,7 @@ static ULONG_PTR RawRegistered32(ULONG *a)
     if (Status) { SetNtError(Status); return FAIL32; }
     if (!Guest) { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FAIL32; }
     /* Native probes the declared capacity before comparing it with the registered count. */
+    if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FAIL32; }
     Status = Touch(a[0], (ULONGLONG)Guest * sizeof(RAWINPUTDEVICE32));
     if (Status) { SetNtError(Status); return FAIL32; }
 
@@ -492,6 +522,7 @@ static ULONG_PTR RawRegister32(ULONG *a)
 
     if (!a[0] || !a[1] || a[2] != sizeof(RAWINPUTDEVICE32) || a[1] > REGISTER_MAX)
     { RtlSetLastWin32Error(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (a[0] & 3) { SetNtError(STATUS_DATATYPE_MISALIGNMENT); return FALSE; }
     if (!GuestRange(a[0], (ULONGLONG)a[1] * sizeof(RAWINPUTDEVICE32))) { SetNtError(STATUS_ACCESS_VIOLATION); return FALSE; }
     Native = Alloc((ULONGLONG)a[1] * sizeof(*Native));
     if (!Native) { RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
@@ -516,7 +547,10 @@ static ULONG_PTR RawRegister32(ULONG *a)
 
 static ULONG_PTR MouseMove32(ULONG *a)
 {
-    MOUSEMOVEPOINT In, Out[MOUSEMOVE_MAX], Pre[MOUSEMOVE_MAX];
+    /* Outside every screen and high-resolution coordinate range: a history point equals it only if a
+     * caller injects this exact relative move, time and extra info, and then just that point is not copied. */
+    static const MOUSEMOVEPOINT Unfilled = { MINLONG, MINLONG, MAXULONG, MAXULONG_PTR };
+    MOUSEMOVEPOINT In, Out[MOUSEMOVE_MAX];
     MOUSEMOVEPOINT32 Item;
     const MOUSEMOVEPOINT32 *GuestIn = P(1), *GuestOut = P(2);
     INT n = (INT)a[3], i;
@@ -528,7 +562,6 @@ static ULONG_PTR MouseMove32(ULONG *a)
     if (!GuestRange(a[1], sizeof(MOUSEMOVEPOINT32)) || (n && !GuestRange(a[2], (ULONGLONG)n * sizeof(MOUSEMOVEPOINT32))))
     { SetNtError(STATUS_ACCESS_VIOLATION); return FAIL32; }
 
-    RtlZeroMemory(Pre, sizeof(Pre));
     RtlZeroMemory(&In, sizeof(In));
     _SEH2_TRY
     {
@@ -544,18 +577,9 @@ static ULONG_PTR MouseMove32(ULONG *a)
         Status = Touch(a[2], sizeof(MOUSEMOVEPOINT32));
         if (Status) { SetNtError(Status); return FAIL32; }
     }
-    /* The destination may be unreadable; then the untouched entries start as zero and are never copied back. */
-    _SEH2_TRY
-    {
-        for (i = 0; i < n; ++i)
-        {
-            RtlCopyMemory(&Item, &GuestOut[i], sizeof(Item));
-            Pre[i].x = Item.x; Pre[i].y = Item.y; Pre[i].time = Item.time; Pre[i].dwExtraInfo = Item.dwExtraInfo;
-        }
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { RtlZeroMemory(Pre, sizeof(Pre)); }
-    _SEH2_END;
-    RtlCopyMemory(Out, Pre, sizeof(Out));
+    /* Native writes only the points it fills, and this kernel fills none. Copy back exactly the entries the
+     * kernel changed, an all-zero point included; the guest buffer is never read, as native never reads it. */
+    for (i = 0; i < n; ++i) RtlCopyMemory(&Out[i], &Unfilled, sizeof(Unfilled));
 
     Ret = NtUserGetMouseMovePointsEx(sizeof(MOUSEMOVEPOINT), &In, n ? Out : NULL, n, a[4]);
     if ((INT)Ret > 0 && n)
@@ -564,7 +588,7 @@ static ULONG_PTR MouseMove32(ULONG *a)
         {
             for (i = 0; i < min((INT)Ret, n); ++i)
             {
-                if (RtlCompareMemory(&Out[i], &Pre[i], sizeof(Out[i])) == sizeof(Out[i])) continue;
+                if (RtlCompareMemory(&Out[i], &Unfilled, sizeof(Out[i])) == sizeof(Out[i])) continue;
                 Item.x = Out[i].x; Item.y = Out[i].y; Item.time = Out[i].time; Item.dwExtraInfo = (ULONG)Out[i].dwExtraInfo;
                 RtlCopyMemory((PVOID)&GuestOut[i], &Item, sizeof(Item));
             }

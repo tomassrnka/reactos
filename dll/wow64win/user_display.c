@@ -11,22 +11,37 @@ C_ASSERT(sizeof(SECURITY_DESCRIPTOR) == 40);
 C_ASSERT(sizeof(DEVMODEW) == 220);
 C_ASSERT(sizeof(DISPLAY_DEVICEW) == 840);
 
-/* A guest pointer that cannot be read is passed on unconverted so the native
- * service reports the fault with its own status and last error. */
+/* The guest owns the low 4 GiB; a range may not run into native-only addresses. */
+static BOOLEAN GuestRange(ULONG Address, ULONGLONG Length) { return Length <= 0x100000000ULL - Address; }
+
+static VOID GuestProbe(ULONG Address, ULONGLONG Length)
+{
+    if (!GuestRange(Address, Length)) RtlRaiseStatus(STATUS_ACCESS_VIOLATION);
+}
+
+/* A guest structure that cannot be read must not reach the native service in
+ * its 32-bit layout. It is replaced by an address in the never-mapped 64 KiB
+ * at the native user probe address, which fails every probe and access there,
+ * so the service fails exactly as for an inaccessible argument of its own.
+ * The low bits are kept so that misalignment is still reported first. */
+#define GUEST_UNREADABLE(Address) ((PVOID)(ULONG_PTR)(0x000007FFFFFF0000ULL | ((Address) & 3)))
+
 static PUNICODE_STRING StringIn(UNICODE_STRING *To, ULONG Address)
 {
     PUNICODE_STRING Result = To;
     if (!Address) return NULL;
     _SEH2_TRY
     {
-        const STRING32 *From = P32(Address);
-        To->Length = From->Length;
-        To->MaximumLength = From->MaximumLength;
-        To->Buffer = P32(From->Buffer);
+        STRING32 From;
+        GuestProbe(Address, sizeof(From));
+        From = *(const volatile STRING32 *)P32(Address);
+        To->Length = From.Length;
+        To->MaximumLength = From.MaximumLength;
+        To->Buffer = P32(From.Buffer);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        Result = P32(Address);
+        Result = GUEST_UNREADABLE(Address);
     }
     _SEH2_END;
     return Result;
@@ -38,25 +53,27 @@ static PVOID SecurityDescriptorIn(SECURITY_DESCRIPTOR *To, ULONG Address)
     if (!Address) return NULL;
     _SEH2_TRY
     {
-        const SECURITY_DESCRIPTOR32 *From = P32(Address);
-        if (From->Control & SE_SELF_RELATIVE)
+        SECURITY_DESCRIPTOR32 From;
+        GuestProbe(Address, sizeof(From));
+        From = *(const volatile SECURITY_DESCRIPTOR32 *)P32(Address);
+        if (From.Control & SE_SELF_RELATIVE)
         {
             Result = P32(Address);
         }
         else
         {
-            To->Revision = From->Revision;
-            To->Sbz1 = From->Sbz1;
-            To->Control = From->Control;
-            To->Owner = P32(From->Owner);
-            To->Group = P32(From->Group);
-            To->Sacl = P32(From->Sacl);
-            To->Dacl = P32(From->Dacl);
+            To->Revision = From.Revision;
+            To->Sbz1 = From.Sbz1;
+            To->Control = From.Control;
+            To->Owner = P32(From.Owner);
+            To->Group = P32(From.Group);
+            To->Sacl = P32(From.Sacl);
+            To->Dacl = P32(From.Dacl);
         }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        Result = P32(Address);
+        Result = GUEST_UNREADABLE(Address);
     }
     _SEH2_END;
     return Result;
@@ -67,6 +84,7 @@ static VOID GuestAttributes(OBJECT_ATTRIBUTES32 *To, ULONG Address)
     const volatile BYTE *From = P32(Address);
     ULONG i;
     if (Address & (sizeof(ULONG) - 1)) RtlRaiseStatus(STATUS_DATATYPE_MISALIGNMENT);
+    GuestProbe(Address, sizeof(*To));
     for (i = 0; i < sizeof(*To); ++i) ((BYTE *)To)[i] = From[i];
 }
 
@@ -93,7 +111,7 @@ static POBJECT_ATTRIBUTES AttributesIn(NATIVE_ATTRIBUTES *To, ULONG Address)
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        Result = P32(Address);
+        Result = GUEST_UNREADABLE(Address);
     }
     _SEH2_END;
     return Result;
@@ -109,18 +127,25 @@ static BOOL WinStaAttributesWritable(ULONG Address, BOOL Open)
     {
         volatile BYTE *Bytes = P32(Address);
         OBJECT_ATTRIBUTES32 Guest;
-        const STRING32 *Name;
+        STRING32 Name;
         const WCHAR *Buffer;
         BOOL Build = FALSE;
+        /* Raises before any access unless all 24 bytes are guest memory. */
         GuestAttributes(&Guest, Address);
         if (Guest.Length == sizeof(OBJECT_ATTRIBUTES32))
         {
-            Name = Guest.ObjectName ? P32(Guest.ObjectName) : NULL;
-            Buffer = Name ? P32(Name->Buffer) : NULL;
-            Build = !Name || !Buffer || !Name->Length || !Buffer[0];
-            if (!Build && Open)
-                Build = Name->Length == sizeof(L"Service-0x00000000-00000000$") - sizeof(WCHAR) &&
-                        !_wcsnicmp(Buffer, L"Service-0x00000000-00000000$", Name->Length / sizeof(WCHAR));
+            Build = !Guest.ObjectName;
+            if (!Build)
+            {
+                GuestProbe(Guest.ObjectName, sizeof(Name));
+                Name = *(const volatile STRING32 *)P32(Guest.ObjectName);
+                Buffer = P32(Name.Buffer);
+                if (Buffer && Name.Length) GuestProbe(Name.Buffer, max(Name.Length, sizeof(WCHAR)));
+                Build = !Buffer || !Name.Length || !Buffer[0];
+                if (!Build && Open)
+                    Build = Name.Length == sizeof(L"Service-0x00000000-00000000$") - sizeof(WCHAR) &&
+                            !_wcsnicmp(Buffer, L"Service-0x00000000-00000000$", Name.Length / sizeof(WCHAR));
+            }
         }
         if (Build)
         {
@@ -151,6 +176,7 @@ static ULONG_PTR ResolveDesktop(ULONG *a)
         _SEH2_TRY
         {
             volatile ULONG *Out = P(3);
+            GuestProbe(a[3], sizeof(ULONG));
             *Out = *Out;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
