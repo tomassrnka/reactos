@@ -416,4 +416,77 @@ MapUserPhysicalPagesScatter(IN PVOID *VirtualAddresses,
     return TRUE;
 }
 
+/*
+ * @implemented
+ *
+ * Windows brings the pages of the ranges into memory ahead of use, and does nothing else: the call checks its
+ * parameters and has no result besides that. The kernel here has no call for it, so the parameters are checked
+ * the way Windows 10 checks them and the pages are left to the memory manager.
+ */
+BOOL
+WINAPI
+PrefetchVirtualMemory(
+    _In_ HANDLE hProcess,
+    _In_ ULONG_PTR NumberOfEntries,
+    _In_reads_(NumberOfEntries) PWIN32_MEMORY_RANGE_ENTRY VirtualAddresses,
+    _In_ ULONG Flags)
+{
+    ULONG_PTR HighestAddress = (ULONG_PTR)BaseStaticServerData->SysInfo.MaximumUserModeAddress;
+    ULONG_PTR Index, Start, End;
+    SIZE_T Size;
+    BOOLEAN Invalid = FALSE;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    /* The order of the checks is the one of Windows 10: the number of entries, the handle, the array, the flags, the ranges */
+    if (NumberOfEntries == 0)
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Status = BasepCheckHandleType(hProcess, L"Process", PROCESS_VM_OPERATION);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if (VirtualAddresses == NULL)
+    {
+        BaseSetLastNTError(STATUS_ACCESS_VIOLATION);
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        /* The whole array is read, an unreadable entry beyond a bad one still is an access violation */
+        for (Index = 0; Index < NumberOfEntries; Index++)
+        {
+            Start = (ULONG_PTR)VirtualAddresses[Index].VirtualAddress;
+            Size = VirtualAddresses[Index].NumberOfBytes;
+            End = Start + Size;
+
+            /* No empty range, no range that wraps around or ends above the memory that a process can use */
+            if (Size == 0 || End < Start || End - 1 > HighestAddress)
+                Invalid = TRUE;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    _SEH2_END;
+
+    if (NT_SUCCESS(Status) && (Flags != 0 || Invalid))
+        Status = STATUS_INVALID_PARAMETER;
+
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 /* EOF */

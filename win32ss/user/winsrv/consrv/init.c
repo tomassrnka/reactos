@@ -371,7 +371,7 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
      * handles table: this can happen if it is a GUI application having called
      * AllocConsole), then try to inherit handles from the parent process.
      */
-    if (TargetProcess->Flags & CsrProcessIsConsoleApp /* && SourceProcessData->ConsoleHandle != NULL */)
+    if (TargetProcess->Flags & CsrProcessIsConsoleApp)
     {
         PCONSOLE_PROCESS_DATA SourceProcessData = ConsoleGetPerProcessData(SourceProcess);
         PCONSRV_CONSOLE SourceConsole;
@@ -391,8 +391,14 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
             /* Unlock the parent's console */
             LeaveCriticalSection(&SourceConsole->Lock);
         }
+        else if (TargetProcess->HandleListPresent && TargetProcess->InheritHandleCount)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
     }
 
+    if (TargetProcess->HandleListPresent)
+        TargetProcess->InheritStatus = Status;
     return Status;
 }
 

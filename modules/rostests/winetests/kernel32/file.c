@@ -5517,12 +5517,7 @@ static void test_SetFileInformationByHandle(void)
     HANDLE file;
     BOOL ret;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: SetFileInformationByHandle is a STUB on ReactOS. */
-    if (is_reactos() || !pSetFileInformationByHandle)
-#else
     if (!pSetFileInformationByHandle)
-#endif
     {
         win_skip("SetFileInformationByHandle is not supported\n");
         return;
@@ -5633,12 +5628,7 @@ static void test_SetFileRenameInfo(void)
     DWORD size;
     BOOL ret;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: SetFileInformationByHandle is a STUB on ReactOS. */
-    if (is_reactos() || !pSetFileInformationByHandle)
-#else
     if (!pSetFileInformationByHandle)
-#endif
     {
         win_skip("SetFileInformationByHandle is not supported\n");
         return;
@@ -5659,7 +5649,12 @@ static void test_SetFileRenameInfo(void)
     file = CreateFileW(tempFileFrom, GENERIC_READ | GENERIC_WRITE | DELETE, 0, 0, OPEN_EXISTING, 0, 0);
     ok(file != INVALID_HANDLE_VALUE, "failed to create temp file, error %lu.\n", GetLastError());
 
+#ifdef __REACTOS__
+    /* The name is MAX_PATH characters, not bytes */
+    size = sizeof(FILE_RENAME_INFORMATION) + MAX_PATH * sizeof(WCHAR);
+#else
     size = sizeof(FILE_RENAME_INFORMATION) + MAX_PATH;
+#endif
     fri = HeapAlloc(GetProcessHeap(), 0, size);
 
     fri->ReplaceIfExists = FALSE;

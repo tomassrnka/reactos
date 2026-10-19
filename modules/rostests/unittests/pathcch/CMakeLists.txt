@@ -32,4 +32,4 @@ set_module_type(pathcch_dyn2_unittest win32cui)
 add_dependencies(pathcch_dyn2_unittest psdk)
 target_link_libraries(pathcch_dyn2_unittest pathcch)
 add_importlibs(pathcch_dyn2_unittest msvcrt kernel32 ntdll)
-## add_rostests_file(TARGET pathcch_dyn2_unittest) ## TODO: Requires api-ms-win-core-path-l1-1-0.dll
+add_rostests_file(TARGET pathcch_dyn2_unittest)

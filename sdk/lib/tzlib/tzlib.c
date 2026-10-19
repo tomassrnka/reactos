@@ -137,6 +137,60 @@ GetTimeZoneListIndex(
     return FALSE;
 }
 
+/* A value longer than the buffer is cut to fit instead of dropped */
+static VOID
+QueryStringValue(
+    IN HKEY hKey,
+    IN PCWSTR ValueName,
+    OUT PWCHAR Buffer,
+    IN OUT PULONG BufferSize)
+{
+    LONG lError;
+    DWORD dwValueSize = *BufferSize;
+    PWCHAR Data = Buffer;
+    ULONG Length;
+    ULONG i;
+
+    lError = RegQueryValueExW(hKey,
+                              ValueName,
+                              NULL,
+                              NULL,
+                              (LPBYTE)Data,
+                              &dwValueSize);
+    if (lError == ERROR_MORE_DATA)
+    {
+        Data = HeapAlloc(GetProcessHeap(), 0, dwValueSize);
+        if (Data == NULL)
+        {
+            *Buffer = UNICODE_NULL;
+            return;
+        }
+
+        lError = RegQueryValueExW(hKey,
+                                  ValueName,
+                                  NULL,
+                                  NULL,
+                                  (LPBYTE)Data,
+                                  &dwValueSize);
+    }
+
+    if (lError == ERROR_SUCCESS)
+    {
+        Length = min(dwValueSize / sizeof(WCHAR), *BufferSize / sizeof(WCHAR) - 1);
+        for (i = 0; i < Length && Data[i] != UNICODE_NULL; i++)
+            Buffer[i] = Data[i];
+        Buffer[i] = UNICODE_NULL;
+        *BufferSize = (i + 1) * sizeof(WCHAR);
+    }
+    else
+    {
+        *Buffer = UNICODE_NULL;
+    }
+
+    if (Data != Buffer)
+        HeapFree(GetProcessHeap(), 0, Data);
+}
+
 LONG
 QueryTimeZoneData(
     IN HKEY hZoneKey,
@@ -176,41 +230,14 @@ QueryTimeZoneData(
     if (lError != ERROR_SUCCESS)
         return lError;
 
-    if (Description && DescriptionSize && *DescriptionSize > 0)
-    {
-        lError = RegQueryValueExW(hZoneKey,
-                                  L"Display",
-                                  NULL,
-                                  NULL,
-                                  (LPBYTE)Description,
-                                  DescriptionSize);
-        if (lError != ERROR_SUCCESS)
-            *Description = 0;
-    }
+    if (Description && DescriptionSize && *DescriptionSize >= sizeof(WCHAR))
+        QueryStringValue(hZoneKey, L"Display", Description, DescriptionSize);
 
-    if (StandardName && StandardNameSize && *StandardNameSize > 0)
-    {
-        lError = RegQueryValueExW(hZoneKey,
-                                  L"Std",
-                                  NULL,
-                                  NULL,
-                                  (LPBYTE)StandardName,
-                                  StandardNameSize);
-        if (lError != ERROR_SUCCESS)
-            *StandardName = 0;
-    }
+    if (StandardName && StandardNameSize && *StandardNameSize >= sizeof(WCHAR))
+        QueryStringValue(hZoneKey, L"Std", StandardName, StandardNameSize);
 
-    if (DaylightName && DaylightNameSize && *DaylightNameSize > 0)
-    {
-        lError = RegQueryValueExW(hZoneKey,
-                                  L"Dlt",
-                                  NULL,
-                                  NULL,
-                                  (LPBYTE)DaylightName,
-                                  DaylightNameSize);
-        if (lError != ERROR_SUCCESS)
-            *DaylightName = 0;
-    }
+    if (DaylightName && DaylightNameSize && *DaylightNameSize >= sizeof(WCHAR))
+        QueryStringValue(hZoneKey, L"Dlt", DaylightName, DaylightNameSize);
 
     return ERROR_SUCCESS;
 }
@@ -268,7 +295,7 @@ EnumerateTimeZoneList(
         }
 
         /* Call the user-provided callback */
-        lError = Callback(hZoneKey, Context);
+        lError = Callback(hZoneKey, szKeyName, Context);
         // lError = QueryTimeZoneData(hZoneKey, Context);
 
         RegCloseKey(hZoneKey);
@@ -351,6 +378,91 @@ SetAutoDaylight(
         /* Auto-Daylight enabled: just delete the value */
         RegDeleteValueW(hKey, L"DisableAutoDaylightTimeSet");
     }
+
+    RegCloseKey(hKey);
+}
+
+/*
+ * The name of the zone's key under "Time Zones", stored as REG_SZ
+ * "TimeZoneKeyName" like Vista+ does. It identifies the zone, whatever
+ * its names and rules; RtlSetTimeZoneInformation empties it.
+ */
+BOOL
+GetTimeZoneKeyName(
+    OUT PWCHAR KeyName,
+    IN ULONG KeyNameLength)
+{
+    LONG lError;
+    HKEY hKey;
+    DWORD dwType;
+    DWORD dwValueSize;
+    ULONG Length;
+    ULONG i;
+
+    if (KeyNameLength == 0)
+        return FALSE;
+    *KeyName = UNICODE_NULL;
+
+    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                           L"SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation",
+                           0,
+                           KEY_QUERY_VALUE,
+                           &hKey);
+    if (lError != ERROR_SUCCESS)
+        return FALSE;
+
+    dwValueSize = KeyNameLength * sizeof(WCHAR);
+    lError = RegQueryValueExW(hKey,
+                              L"TimeZoneKeyName",
+                              NULL,
+                              &dwType,
+                              (LPBYTE)KeyName,
+                              &dwValueSize);
+
+    RegCloseKey(hKey);
+
+    if ((lError != ERROR_SUCCESS) || (dwType != REG_SZ))
+    {
+        *KeyName = UNICODE_NULL;
+        return FALSE;
+    }
+
+    /* The data need not be terminated and may go on after the terminator */
+    Length = dwValueSize / sizeof(WCHAR);
+    i = 0;
+    while (i < Length && KeyName[i] != UNICODE_NULL)
+        i++;
+    if (i == KeyNameLength)
+    {
+        *KeyName = UNICODE_NULL;
+        return FALSE;
+    }
+    KeyName[i] = UNICODE_NULL;
+
+    return (*KeyName != UNICODE_NULL);
+}
+
+VOID
+SetTimeZoneKeyName(
+    IN PCWSTR KeyName)
+{
+    LONG lError;
+    HKEY hKey;
+
+    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                           L"SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation",
+                           0,
+                           KEY_SET_VALUE,
+                           &hKey);
+    if (lError != ERROR_SUCCESS)
+        return;
+
+    RegSetValueExW(hKey,
+                   L"TimeZoneKeyName",
+                   0,
+                   REG_SZ,
+                   (LPBYTE)KeyName,
+                   (lstrlenW(KeyName) + 1) * sizeof(WCHAR));
 
     RegCloseKey(hKey);
 }

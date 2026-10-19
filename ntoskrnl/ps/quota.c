@@ -220,6 +220,7 @@ PspChargeProcessQuotaSpecifiedPool(
             /* It is, return the appropriate status code */
             DPRINT1("PspChargeProcessQuotaSpecifiedPool(): Quota amount exceeds the limit on page file quota (limit -- %lu || amount -- %lu)\n",
                     QuotaBlock->QuotaEntry[QuotaType].Limit, Amount);
+            KeReleaseSpinLock(&PspQuotaLock, OldIrql);
             return STATUS_PAGEFILE_QUOTA_EXCEEDED;
         }
 
@@ -270,6 +271,7 @@ PspChargeProcessQuotaSpecifiedPool(
         {
             DPRINT1("PspChargeProcessQuotaSpecifiedPool(): Quota amount exceeds the limit (limit -- %lu || amount -- %lu)\n",
                     QuotaBlock->QuotaEntry[QuotaType].Limit, Amount);
+            KeReleaseSpinLock(&PspQuotaLock, OldIrql);
             return STATUS_QUOTA_EXCEEDED;
         }
     }

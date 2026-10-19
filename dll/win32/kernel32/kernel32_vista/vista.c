@@ -582,17 +582,241 @@ OpenFileById(IN HANDLE hFile,
 
 /* FUNCTIONS *****************************************************************/
 
+#define MUI_SIGNATURE 0xfecdfecd
+struct mui_resource
+{
+    DWORD signature;
+    DWORD size;
+    DWORD version;
+    DWORD path_type;
+    DWORD file_type;
+    DWORD system_attributes;
+    DWORD fallback_location;
+    BYTE service_checksum[16];
+    BYTE checksum[16];
+    DWORD unk1[2];
+    DWORD mui_path_off;
+    DWORD mui_path_size;
+    DWORD unk2[2];
+    DWORD ln_type_name_off;
+    DWORD ln_type_name_size;
+    DWORD ln_type_id_off;
+    DWORD ln_type_id_size;
+    DWORD mui_type_name_off;
+    DWORD mui_type_name_size;
+    DWORD mui_type_id_off;
+    DWORD mui_type_id_size;
+    DWORD lang_off;
+    DWORD lang_size;
+    DWORD fallback_lang_off;
+    DWORD fallback_lang_size;
+};
+
+
+static BOOL validate_mui_resource(struct mui_resource *mui, DWORD size)
+{
+    if (size >= sizeof(DWORD) && mui->signature != MUI_SIGNATURE)
+    {
+        SetLastError(ERROR_MUI_INVALID_RC_CONFIG);
+        return FALSE;
+    }
+
+    if (size < FIELD_OFFSET(struct mui_resource, version))
+    {
+        SetLastError(ERROR_BAD_EXE_FORMAT);
+        return FALSE;
+    }
+
+    size = min( size, mui->size );
+    if (size < sizeof(*mui) ||
+        mui->ln_type_name_off >= size || mui->ln_type_name_size > size - mui->ln_type_name_off ||
+        mui->ln_type_id_off >= size || mui->ln_type_id_size > size - mui->ln_type_id_off ||
+        mui->mui_type_name_off >= size || mui->mui_type_name_size > size - mui->mui_type_name_off ||
+        mui->mui_type_id_off >= size || mui->mui_type_id_size > size - mui->mui_type_id_off ||
+        mui->lang_off >= size || mui->lang_size > size - mui->lang_off ||
+        mui->fallback_lang_off >= size || mui->fallback_lang_size > size - mui->fallback_lang_off)
+    {
+        SetLastError(ERROR_BAD_EXE_FORMAT);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+
+/* Ported from Wine 11.19 (dlls/kernelbase/locale.c) */
 BOOL
 WINAPI
 GetFileMUIInfo(
-    DWORD dwFlags,
-    PCWSTR pcwszFilePath,
-    PFILEMUIINFO pFileMUIInfo,
-    DWORD *pcbFileMUIInfo)
+    DWORD flags,
+    PCWSTR path,
+    PFILEMUIINFO info,
+    DWORD *size)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pcwszFilePath, pFileMUIInfo, pcbFileMUIInfo);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    DWORD off, mui_size, type = MUI_FILETYPE_NOT_LANGUAGE_NEUTRAL;
+    ULONGLONG need;
+    struct mui_resource *mui = NULL;
+    HMODULE hmod;
+    HRSRC hrsrc;
+
+    if (!path || !size || (*size && !info) ||
+            (info && (*size < sizeof(*info) || info->dwSize != *size ||
+                      info->dwVersion != MUI_FILEINFO_VERSION)))
+    {
+        if (size) *size = 0;
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    if (!flags) flags = MUI_QUERY_TYPE | MUI_QUERY_CHECKSUM;
+
+    hmod = LoadLibraryExW( path, NULL, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE );
+    if (!hmod) return FALSE;
+
+    hrsrc = FindResourceW( hmod, (LPCWSTR)(ULONG_PTR)1, L"MUI" );
+    if (hrsrc)
+    {
+        mui = LockResource( LoadResource(hmod, hrsrc) );
+        if (mui) mui_size = SizeofResource( hmod, hrsrc );
+        if (!mui || !validate_mui_resource( mui, mui_size ))
+        {
+            FreeLibrary( hmod );
+            return FALSE;
+        }
+        if (mui->file_type & (MUI_FILETYPE_LANGUAGE_NEUTRAL_MAIN >> 1))
+            type = MUI_FILETYPE_LANGUAGE_NEUTRAL_MAIN;
+        else if (mui->file_type & (MUI_FILETYPE_LANGUAGE_NEUTRAL_MUI >> 1))
+            type = MUI_FILETYPE_LANGUAGE_NEUTRAL_MUI;
+    }
+    if (type == MUI_FILETYPE_NOT_LANGUAGE_NEUTRAL)
+    {
+        FreeLibrary( hmod );
+
+        if (!info)
+        {
+            *size = sizeof(*info);
+            return TRUE;
+        }
+        if (info->dwSize < sizeof(*info))
+        {
+            SetLastError( ERROR_INSUFFICIENT_BUFFER );
+            return FALSE;
+        }
+
+        memset( info, 0, sizeof(*info) );
+        info->dwSize = *size;
+        info->dwVersion = MUI_FILEINFO_VERSION;
+        if (flags & MUI_QUERY_TYPE) info->dwFileType = type;
+        return TRUE;
+    }
+
+    need = offsetof(FILEMUIINFO, abBuffer);
+    if (flags & MUI_QUERY_LANGUAGE_NAME)
+    {
+        need += type == MUI_FILETYPE_LANGUAGE_NEUTRAL_MAIN ?
+            mui->fallback_lang_size : mui->lang_size;
+    }
+    if (flags & MUI_QUERY_RESOURCE_TYPES)
+    {
+        /* the language-specific file reports the types it carries in the ln_type fields */
+        need += mui->ln_type_name_size;
+        need += mui->ln_type_id_size;
+        if (type == MUI_FILETYPE_LANGUAGE_NEUTRAL_MAIN)
+        {
+            need += mui->mui_type_name_size;
+            need += mui->mui_type_id_size;
+        }
+    }
+    if (need > MAXDWORD)
+    {
+        FreeLibrary( hmod );
+        SetLastError( ERROR_BAD_EXE_FORMAT );
+        return FALSE;
+    }
+    off = need;
+    if (off < sizeof(*info)) off = sizeof(*info);
+
+    if (!info || info->dwSize < off)
+    {
+        FreeLibrary( hmod );
+        *size = off;
+        SetLastError( ERROR_INSUFFICIENT_BUFFER );
+        return FALSE;
+    }
+
+    off = 0;
+    memset( info, 0, sizeof(*info) );
+    info->dwSize = *size;
+    info->dwVersion = MUI_FILEINFO_VERSION;
+    if (flags & MUI_QUERY_TYPE) info->dwFileType = type;
+    if (flags & MUI_QUERY_CHECKSUM)
+    {
+        memcpy( info->pChecksum, mui->checksum, sizeof(info->pChecksum) );
+        memcpy( info->pServiceChecksum, mui->service_checksum, sizeof(info->pServiceChecksum) );
+    }
+    if (flags & MUI_QUERY_LANGUAGE_NAME)
+    {
+        if (type == MUI_FILETYPE_LANGUAGE_NEUTRAL_MAIN && mui->fallback_lang_off)
+        {
+            info->dwLanguageNameOffset = offsetof(FILEMUIINFO, abBuffer);
+            memcpy(info->abBuffer, ((BYTE *)mui) + mui->fallback_lang_off,
+                    mui->fallback_lang_size);
+            off += mui->fallback_lang_size;
+        }
+        if (type == MUI_FILETYPE_LANGUAGE_NEUTRAL_MUI && mui->lang_off)
+        {
+            info->dwLanguageNameOffset = offsetof(FILEMUIINFO, abBuffer);
+            memcpy(info->abBuffer, ((BYTE *)mui) + mui->lang_off, mui->lang_size);
+            off += mui->lang_size;
+        }
+    }
+    if (flags & MUI_QUERY_RESOURCE_TYPES && type & MUI_FILETYPE_LANGUAGE_NEUTRAL_MAIN)
+    {
+        if (mui->ln_type_id_size && mui->ln_type_id_off)
+        {
+            info->dwTypeIDMainSize = mui->ln_type_id_size / sizeof(DWORD);
+            info->dwTypeIDMainOffset = offsetof(FILEMUIINFO, abBuffer[off]);
+            memcpy(info->abBuffer + off, ((BYTE *)mui) + mui->ln_type_id_off, mui->ln_type_id_size);
+            off += mui->ln_type_id_size;
+        }
+        if (mui->ln_type_name_off)
+        {
+            info->dwTypeNameMainOffset = offsetof(FILEMUIINFO, abBuffer[off]);
+            memcpy(info->abBuffer + off, ((BYTE *)mui) + mui->ln_type_name_off, mui->ln_type_name_size);
+            off += mui->ln_type_name_size;
+        }
+        if (mui->mui_type_id_size && mui->mui_type_id_off)
+        {
+            info->dwTypeIDMUISize = mui->mui_type_id_size / sizeof(DWORD);
+            info->dwTypeIDMUIOffset = offsetof(FILEMUIINFO, abBuffer[off]);
+            memcpy(info->abBuffer + off, ((BYTE *)mui) + mui->mui_type_id_off, mui->mui_type_id_size);
+            off += mui->mui_type_id_size;
+        }
+        if (mui->mui_type_name_off)
+        {
+            info->dwTypeNameMUIOffset = offsetof(FILEMUIINFO, abBuffer[off]);
+            memcpy(info->abBuffer + off, ((BYTE *)mui) + mui->mui_type_name_off, mui->mui_type_name_size);
+            off += mui->mui_type_name_size;
+        }
+    }
+    else if(flags & MUI_QUERY_RESOURCE_TYPES)
+    {
+        if (mui->ln_type_id_size && mui->ln_type_id_off)
+        {
+            info->dwTypeIDMUISize = mui->ln_type_id_size / sizeof(DWORD);
+            info->dwTypeIDMUIOffset = offsetof(FILEMUIINFO, abBuffer[off]);
+            memcpy(info->abBuffer + off, ((BYTE *)mui) + mui->ln_type_id_off, mui->ln_type_id_size);
+            off += mui->ln_type_id_size;
+        }
+        if (mui->ln_type_name_off)
+        {
+            info->dwTypeNameMUIOffset = offsetof(FILEMUIINFO, abBuffer[off]);
+            memcpy(info->abBuffer + off, ((BYTE *)mui) + mui->ln_type_name_off, mui->ln_type_name_size);
+            off += mui->ln_type_name_size;
+        }
+    }
+
+    FreeLibrary( hmod );
+    return TRUE;
 }
 
 /*
@@ -632,9 +856,188 @@ GetProcessPreferredUILanguages(
 }
 #endif
 
+#define MAX_UI_LANGUAGES 8
+
+/* Distinct UI languages in order of preference: the identifier (0 for a parent
+ * without one) and the locale name (empty for a language without a name) */
+typedef struct _UI_LANGUAGE_LIST
+{
+    ULONG Count;
+    LANGID Ids[MAX_UI_LANGUAGES];
+    BOOLEAN IsParent[MAX_UI_LANGUAGES];
+    WCHAR Names[MAX_UI_LANGUAGES][LOCALE_NAME_MAX_LENGTH];
+} UI_LANGUAGE_LIST, *PUI_LANGUAGE_LIST;
+
+static
+VOID
+AddUILanguageEntry(
+    _Inout_ PUI_LANGUAGE_LIST List,
+    _In_ LANGID Id,
+    _In_ PCWSTR Name,
+    _In_ BOOLEAN IsParent)
+{
+    ULONG i;
+
+    if (List->Count >= MAX_UI_LANGUAGES)
+        return;
+
+    for (i = 0; i < List->Count; i++)
+    {
+        if ((Id && List->Ids[i] == Id) ||
+            (Name[0] && _wcsicmp(List->Names[i], Name) == 0))
+        {
+            return;
+        }
+    }
+
+    List->Ids[List->Count] = Id;
+    List->IsParent[List->Count] = IsParent;
+    lstrcpynW(List->Names[List->Count], Name, LOCALE_NAME_MAX_LENGTH);
+    List->Count++;
+}
+
+/* Adds a language and, if asked, its chain of parent languages: the parent its
+ * locale data names, then each name without its last part (zh-TW, zh-Hant, zh) */
+static
+VOID
+AddUILanguage(
+    _Inout_ PUI_LANGUAGE_LIST List,
+    _In_ LANGID Language,
+    _In_ BOOLEAN WithParents)
+{
+    WCHAR Name[LOCALE_NAME_MAX_LENGTH], Parent[LOCALE_NAME_MAX_LENGTH];
+    LCID Lcid = MAKELCID(Language, SORT_DEFAULT);
+    PWSTR Dash;
+    ULONG Depth;
+
+    if (Language == 0)
+        return;
+
+    /* Locales missing from the RTL table still have a name in their NLS data */
+    if (LCIDToLocaleName(Lcid, Name, _countof(Name), LOCALE_ALLOW_NEUTRAL_NAMES) <= 1 &&
+        GetLocaleInfoW(Lcid, LOCALE_SNAME, Name, _countof(Name)) <= 1)
+    {
+        Name[0] = UNICODE_NULL;
+    }
+
+    AddUILanguageEntry(List, Language, Name, FALSE);
+    if (!WithParents || !Name[0])
+        return;
+
+    if (GetLocaleInfoW(Lcid, LOCALE_SPARENT, Parent, _countof(Parent)) <= 1 ||
+        _wcsicmp(Parent, Name) == 0)
+    {
+        lstrcpynW(Parent, Name, _countof(Parent));
+        Dash = wcsrchr(Parent, L'-');
+        if (!Dash)
+            return;
+        *Dash = UNICODE_NULL;
+    }
+
+    for (Depth = 0; Depth < 3 && Parent[0]; Depth++)
+    {
+        LCID ParentLcid = LocaleNameToLCID(Parent, LOCALE_ALLOW_NEUTRAL_NAMES);
+
+        AddUILanguageEntry(List, ParentLcid ? LANGIDFROMLCID(ParentLcid) : 0, Parent, TRUE);
+
+        Dash = wcsrchr(Parent, L'-');
+        if (!Dash)
+            break;
+        *Dash = UNICODE_NULL;
+    }
+}
+
+/* Writes a language list as a double null-terminated multi-string of
+ * hexadecimal language identifiers or of locale names */
+static
+BOOL
+FormatUILanguages(
+    _In_ PUI_LANGUAGE_LIST List,
+    _In_ DWORD dwFlags,
+    _Out_ PULONG pulNumLanguages,
+    _Out_writes_opt_(*pcchLanguagesBuffer) PZZWSTR pwszLanguagesBuffer,
+    _Inout_ PULONG pcchLanguagesBuffer)
+{
+    WCHAR Ids[MAX_UI_LANGUAGES][5];
+    PCWSTR Strings[MAX_UI_LANGUAGES];
+    ULONG Lengths[MAX_UI_LANGUAGES];
+    ULONG i, Written = 0, Needed = 1;
+    PWSTR Out;
+
+    if (!pulNumLanguages || !pcchLanguagesBuffer ||
+        (*pcchLanguagesBuffer && !pwszLanguagesBuffer))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    for (i = 0; i < List->Count; i++)
+    {
+        if (dwFlags & MUI_LANGUAGE_ID)
+        {
+            static const WCHAR Hex[] = L"0123456789ABCDEF";
+            LANGID Id = List->Ids[i];
+
+            /* A parent without an identifier is only an extra fallback */
+            if (!Id)
+                continue;
+
+            Ids[Written][0] = Hex[(Id >> 12) & 0xF];
+            Ids[Written][1] = Hex[(Id >> 8) & 0xF];
+            Ids[Written][2] = Hex[(Id >> 4) & 0xF];
+            Ids[Written][3] = Hex[Id & 0xF];
+            Ids[Written][4] = UNICODE_NULL;
+            Strings[Written] = Ids[Written];
+            Lengths[Written] = 4;
+        }
+        else
+        {
+            if (!List->Names[i][0])
+            {
+                if (List->IsParent[i])
+                    continue;
+                SetLastError(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            }
+            Strings[Written] = List->Names[i];
+            Lengths[Written] = (ULONG)wcslen(List->Names[i]);
+        }
+        Needed += Lengths[Written] + 1;
+        Written++;
+    }
+
+    /* An empty list is still a terminated multi-string */
+    if (Written == 0)
+        Needed = 2;
+
+    if (pwszLanguagesBuffer)
+    {
+        if (*pcchLanguagesBuffer < Needed)
+        {
+            *pcchLanguagesBuffer = Needed;
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+
+        Out = pwszLanguagesBuffer;
+        for (i = 0; i < Written; i++)
+        {
+            RtlCopyMemory(Out, Strings[i], (Lengths[i] + 1) * sizeof(WCHAR));
+            Out += Lengths[i] + 1;
+        }
+        *Out = UNICODE_NULL;
+        if (Written == 0)
+            Out[1] = UNICODE_NULL;
+    }
+
+    *pulNumLanguages = Written;
+    *pcchLanguagesBuffer = Needed;
+    return TRUE;
+}
+
 /*
-* @unimplemented
-*/
+ * @implemented
+ */
 BOOL
 WINAPI
 GetSystemPreferredUILanguages(
@@ -643,13 +1046,23 @@ GetSystemPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UI_LANGUAGE_LIST List;
+
+    List.Count = 0;
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_MACHINE_LANGUAGE_SETTINGS)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    AddUILanguage(&List, GetSystemDefaultUILanguage(), FALSE);
+    return FormatUILanguages(&List, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -659,9 +1072,48 @@ GetThreadPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UI_LANGUAGE_LIST List;
+
+    List.Count = 0;
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_MERGE_SYSTEM_FALLBACK |
+                     MUI_MERGE_USER_FALLBACK | MUI_THREAD_LANGUAGES |
+                     MUI_CONSOLE_FILTER | MUI_COMPLEX_SCRIPT_FILTER)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* No thread or process preferred languages can be set yet, so the list
+     * is the user language followed by the system language as fallbacks,
+     * the fallbacks with their parent languages */
+    switch (dwFlags & (MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK | MUI_THREAD_LANGUAGES))
+    {
+        case 0:
+        case MUI_MERGE_USER_FALLBACK:
+            AddUILanguage(&List, GetUserDefaultUILanguage(), FALSE);
+            AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
+            break;
+
+        case MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK:
+            AddUILanguage(&List, GetUserDefaultUILanguage(), TRUE);
+            AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
+            break;
+
+        case MUI_MERGE_SYSTEM_FALLBACK:
+            AddUILanguage(&List, GetSystemDefaultUILanguage(), TRUE);
+            break;
+
+        case MUI_THREAD_LANGUAGES:
+            break;
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+    }
+
+    return FormatUILanguages(&List, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
@@ -695,7 +1147,7 @@ GetUILanguageInfo(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -705,9 +1157,19 @@ GetUserPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    UI_LANGUAGE_LIST List;
+
+    List.Count = 0;
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    AddUILanguage(&List, GetUserDefaultUILanguage(), FALSE);
+    return FormatUILanguages(&List, dwFlags, pulNumLanguages,
+                             pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*

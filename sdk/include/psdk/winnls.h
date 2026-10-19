@@ -1281,6 +1281,16 @@ LCMapStringEx(
 
 LCID WINAPI LocaleNameToLCID(_In_ LPCWSTR, _In_ DWORD);
 
+#if (WINVER >= _WIN32_WINNT_WIN7)
+WINBASEAPI
+int
+WINAPI
+ResolveLocaleName(
+    _In_opt_ LPCWSTR lpNameToResolve,
+    _Out_writes_opt_(cchLocaleName) LPWSTR lpLocaleName,
+    _In_ int cchLocaleName);
+#endif
+
 WINBASEAPI INT WINAPI CompareStringOrdinal(const WCHAR *,INT,const WCHAR *,INT,BOOL);
 
 #endif /* (WINVER >= 0x0600) */

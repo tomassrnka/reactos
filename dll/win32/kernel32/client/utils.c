@@ -31,6 +31,41 @@ PRTL_COUNT_STRINGA Basep8BitStringToUnicodeSize = BasepAnsiStringToUnicodeSize;
 
 /* FUNCTIONS ******************************************************************/
 
+NTSTATUS
+WINAPI
+BasepCheckHandleType(
+    IN HANDLE Handle,
+    IN PCWSTR TypeName,
+    IN ACCESS_MASK DesiredAccess)
+{
+    union
+    {
+        OBJECT_TYPE_INFORMATION Information;
+        UCHAR Buffer[sizeof(OBJECT_TYPE_INFORMATION) + 128];
+    } Type;
+    OBJECT_BASIC_INFORMATION Basic;
+    UNICODE_STRING Expected;
+    NTSTATUS Status;
+
+    /* The kernel answers an invalid handle, and a handle of another type, with the errors that Windows gives */
+    Status = NtQueryObject(Handle, ObjectTypeInformation, &Type, sizeof(Type), NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlInitUnicodeString(&Expected, TypeName);
+    if (!RtlEqualUnicodeString(&Type.Information.TypeName, &Expected, TRUE))
+        return STATUS_OBJECT_TYPE_MISMATCH;
+
+    Status = NtQueryObject(Handle, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if ((Basic.GrantedAccess & DesiredAccess) == 0)
+        return STATUS_ACCESS_DENIED;
+
+    return STATUS_SUCCESS;
+}
+
 ULONG
 NTAPI
 BasepUnicodeStringToOemSize(IN PUNICODE_STRING String)
@@ -402,6 +437,13 @@ BaseCreateStack(
     Headers = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
     if (!Headers) return STATUS_INVALID_IMAGE_FORMAT;
 
+    /* The sizes are SIZE_T; keep the rounding below from wrapping */
+    if ((StackCommit > MAXULONG_PTR - 2 * 1024 * 1024) ||
+        (StackReserve > MAXULONG_PTR - 2 * 1024 * 1024))
+    {
+        return STATUS_NO_MEMORY;
+    }
+
     if (StackReserve == 0)
         StackReserve = Headers->OptionalHeader.SizeOfStackReserve;
 
@@ -413,12 +455,12 @@ BaseCreateStack(
     else if (StackCommit >= StackReserve)
     {
         /* Grow the reserve beyond the commit, up to 1MB alignment */
-        StackReserve = ROUND_UP(StackCommit, 1024 * 1024);
+        StackReserve = ALIGN_UP_BY(StackCommit, 1024 * 1024);
     }
 
     /* Align everything to Page Size */
-    StackCommit = ROUND_UP(StackCommit, PageSize);
-    StackReserve = ROUND_UP(StackReserve, AllocationGranularity);
+    StackCommit = ALIGN_UP_BY(StackCommit, PageSize);
+    StackReserve = ALIGN_UP_BY(StackReserve, AllocationGranularity);
 
     MinimumStackCommit = NtCurrentPeb()->MinimumStackCommit;
     if ((MinimumStackCommit != 0) && (StackCommit < MinimumStackCommit))
@@ -430,12 +472,12 @@ BaseCreateStack(
     if (StackCommit >= StackReserve)
     {
         /* Grow the reserve beyond the commit, up to 1MB alignment */
-        StackReserve = ROUND_UP(StackCommit, 1024 * 1024);
+        StackReserve = ALIGN_UP_BY(StackCommit, 1024 * 1024);
     }
 
     /* Align everything to Page Size */
-    StackCommit = ROUND_UP(StackCommit, PageSize);
-    StackReserve = ROUND_UP(StackReserve, AllocationGranularity);
+    StackCommit = ALIGN_UP_BY(StackCommit, PageSize);
+    StackReserve = ALIGN_UP_BY(StackReserve, AllocationGranularity);
 
     /* Reserve memory for the stack */
     Stack = 0;

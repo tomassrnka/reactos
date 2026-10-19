@@ -262,6 +262,43 @@ GetLogicalProcessorInformation(OUT PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Buffer,
  */
 BOOL
 WINAPI
+QueryIdleProcessorCycleTime(
+    _Inout_ PULONG BufferLength,
+    _Out_writes_bytes_opt_(*BufferLength) PULONG64 ProcessorIdleCycleTime)
+{
+    NTSTATUS Status;
+
+    /* Without a buffer, return the size it needs */
+    if (!ProcessorIdleCycleTime)
+    {
+        Status = NtQuerySystemInformation(SystemProcessorIdleCycleTimeInformation,
+                                          NULL,
+                                          0,
+                                          BufferLength);
+        if (Status == STATUS_BUFFER_TOO_SMALL)
+            Status = STATUS_SUCCESS;
+    }
+    else
+    {
+        Status = NtQuerySystemInformation(SystemProcessorIdleCycleTimeInformation,
+                                          ProcessorIdleCycleTime,
+                                          *BufferLength,
+                                          BufferLength);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 GetNumaHighestNodeNumber(OUT PULONG HighestNodeNumber)
 {
     NTSTATUS Status;
@@ -288,6 +325,191 @@ GetNumaHighestNodeNumber(OUT PULONG HighestNodeNumber)
     /* First member of the struct is the highest node number */
     *HighestNodeNumber = PartialInfo[0];
     return TRUE;
+}
+
+static
+ULONG
+BasepLogicalProcessorInformationExSize(
+    _In_ LOGICAL_PROCESSOR_RELATIONSHIP Relationship)
+{
+    switch (Relationship)
+    {
+        case RelationProcessorCore:
+        case RelationProcessorPackage:
+            return FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Processor.GroupMask[1]);
+
+        case RelationNumaNode:
+            return FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, NumaNode) +
+                   sizeof(NUMA_NODE_RELATIONSHIP);
+
+        case RelationCache:
+            return FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Cache) +
+                   sizeof(CACHE_RELATIONSHIP);
+
+        case RelationGroup:
+            return FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Group.GroupInfo[1]);
+
+        default:
+            return 0;
+    }
+}
+
+/*
+ * @implemented
+ *
+ * Built from the information of GetLogicalProcessorInformation, in its
+ * order, with all processors in group 0, followed by the group entry.
+ */
+BOOL
+WINAPI
+GetLogicalProcessorInformationEx(
+    _In_ LOGICAL_PROCESSOR_RELATIONSHIP RelationshipType,
+    _Out_writes_bytes_to_opt_(*ReturnedLength, *ReturnedLength) PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX Buffer,
+    _Inout_ PDWORD ReturnedLength)
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Info = NULL;
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX Entry;
+    SYSTEM_BASIC_INFORMATION BasicInfo;
+    ULONG InfoLength, Count, Index, Required, Size;
+    NTSTATUS Status;
+    PUCHAR Output;
+    BOOL Result = FALSE;
+
+    if (!ReturnedLength)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* Relationships this version does not know have no entries */
+    if ((RelationshipType > RelationGroup) && (RelationshipType != RelationAll))
+    {
+        *ReturnedLength = 0;
+        return TRUE;
+    }
+
+    Status = NtQuerySystemInformation(SystemBasicInformation,
+                                      &BasicInfo,
+                                      sizeof(BasicInfo),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    /* Get the information without group details */
+    InfoLength = 0;
+    Status = NtQuerySystemInformation(SystemLogicalProcessorInformation,
+                                      NULL,
+                                      0,
+                                      &InfoLength);
+    while ((Status == STATUS_INFO_LENGTH_MISMATCH) || (Status == STATUS_BUFFER_TOO_SMALL))
+    {
+        if (Info)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Info);
+        Info = RtlAllocateHeap(RtlGetProcessHeap(), 0, InfoLength);
+        if (!Info)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        Status = NtQuerySystemInformation(SystemLogicalProcessorInformation,
+                                          Info,
+                                          InfoLength,
+                                          &InfoLength);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        goto Cleanup;
+    }
+    Count = InfoLength / sizeof(*Info);
+
+    /* Compute the size of the result */
+    Required = 0;
+    for (Index = 0; Index < Count; Index++)
+    {
+        if ((RelationshipType == RelationAll) || (Info[Index].Relationship == RelationshipType))
+            Required += BasepLogicalProcessorInformationExSize(Info[Index].Relationship);
+    }
+    if ((RelationshipType == RelationAll) || (RelationshipType == RelationGroup))
+        Required += BasepLogicalProcessorInformationExSize(RelationGroup);
+
+    if ((*ReturnedLength < Required) || (!Buffer && Required))
+    {
+        *ReturnedLength = Required;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        goto Cleanup;
+    }
+
+    /* Fill it */
+    Output = (PUCHAR)Buffer;
+    for (Index = 0; Index < Count; Index++)
+    {
+        if ((RelationshipType != RelationAll) && (Info[Index].Relationship != RelationshipType))
+            continue;
+
+        Size = BasepLogicalProcessorInformationExSize(Info[Index].Relationship);
+        if (!Size)
+            continue;
+
+        Entry = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)Output;
+        RtlZeroMemory(Entry, Size);
+        Entry->Relationship = Info[Index].Relationship;
+        Entry->Size = Size;
+        switch (Info[Index].Relationship)
+        {
+            case RelationProcessorCore:
+            case RelationProcessorPackage:
+                if (Info[Index].Relationship == RelationProcessorCore)
+                    Entry->Processor.Flags = Info[Index].ProcessorCore.Flags;
+                Entry->Processor.GroupCount = 1;
+                Entry->Processor.GroupMask[0].Mask = Info[Index].ProcessorMask;
+                break;
+
+            case RelationNumaNode:
+                Entry->NumaNode.NodeNumber = Info[Index].NumaNode.NodeNumber;
+                Entry->NumaNode.GroupMask.Mask = Info[Index].ProcessorMask;
+                break;
+
+            case RelationCache:
+                Entry->Cache.Level = Info[Index].Cache.Level;
+                Entry->Cache.Associativity = Info[Index].Cache.Associativity;
+                Entry->Cache.LineSize = Info[Index].Cache.LineSize;
+                Entry->Cache.CacheSize = Info[Index].Cache.Size;
+                Entry->Cache.Type = Info[Index].Cache.Type;
+                Entry->Cache.GroupMask.Mask = Info[Index].ProcessorMask;
+                break;
+
+            default:
+                break;
+        }
+        Output += Size;
+    }
+
+    if ((RelationshipType == RelationAll) || (RelationshipType == RelationGroup))
+    {
+        Size = BasepLogicalProcessorInformationExSize(RelationGroup);
+        Entry = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)Output;
+        RtlZeroMemory(Entry, Size);
+        Entry->Relationship = RelationGroup;
+        Entry->Size = Size;
+        Entry->Group.MaximumGroupCount = 1;
+        Entry->Group.ActiveGroupCount = 1;
+        Entry->Group.GroupInfo[0].MaximumProcessorCount = BasicInfo.NumberOfProcessors;
+        Entry->Group.GroupInfo[0].ActiveProcessorCount = BasicInfo.NumberOfProcessors;
+        Entry->Group.GroupInfo[0].ActiveProcessorMask = BasicInfo.ActiveProcessorsAffinityMask;
+        Output += Size;
+    }
+
+    *ReturnedLength = Required;
+    Result = TRUE;
+
+Cleanup:
+    if (Info)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Info);
+    return Result;
 }
 
 /*
@@ -595,14 +817,3 @@ SetSystemFileCacheSize(IN SIZE_T MinimumFileCacheSize,
     return FALSE;
 }
 
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-GetCurrentPackageId(UINT32 *BufferLength,
-                    BYTE *Buffer)
-{
-    STUB;
-    return APPMODEL_ERROR_NO_PACKAGE;
-}

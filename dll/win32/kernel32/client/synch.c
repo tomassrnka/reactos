@@ -412,6 +412,28 @@ SetWaitableTimer(IN HANDLE hTimer,
  */
 BOOL
 WINAPI
+SetWaitableTimerEx(IN HANDLE hTimer,
+                   IN const LARGE_INTEGER *pDueTime,
+                   IN LONG lPeriod,
+                   IN PTIMERAPCROUTINE pfnCompletionRoutine OPTIONAL,
+                   IN OPTIONAL LPVOID lpArgToCompletionRoutine,
+                   IN PREASON_CONTEXT WakeContext OPTIONAL,
+                   IN ULONG TolerableDelay)
+{
+    /* Timer coalescing and wake contexts are not supported, so they are ignored */
+    return SetWaitableTimer(hTimer,
+                            pDueTime,
+                            lPeriod,
+                            pfnCompletionRoutine,
+                            lpArgToCompletionRoutine,
+                            FALSE);
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 CancelWaitableTimer(IN HANDLE hTimer)
 {
     NTSTATUS Status;
@@ -560,6 +582,69 @@ CreateMutexW(IN LPSECURITY_ATTRIBUTES lpMutexAttributes  OPTIONAL,
                                bInitialOwner);
 }
 
+#ifndef CREATE_MUTEX_INITIAL_OWNER
+#define CREATE_MUTEX_INITIAL_OWNER 0x00000001
+#endif
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+DECLSPEC_HOTPATCH
+CreateMutexExW(IN LPSECURITY_ATTRIBUTES lpMutexAttributes OPTIONAL,
+               IN LPCWSTR lpName OPTIONAL,
+               IN DWORD dwFlags,
+               IN DWORD dwDesiredAccess)
+{
+    if (dwFlags & ~CREATE_MUTEX_INITIAL_OWNER)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    CreateNtObjectFromWin32Api(Mutex, Mutant, dwDesiredAccess,
+                               lpMutexAttributes,
+                               lpName,
+                               (dwFlags & CREATE_MUTEX_INITIAL_OWNER) != 0);
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+DECLSPEC_HOTPATCH
+CreateMutexExA(IN LPSECURITY_ATTRIBUTES lpMutexAttributes OPTIONAL,
+               IN LPCSTR lpName OPTIONAL,
+               IN DWORD dwFlags,
+               IN DWORD dwDesiredAccess)
+{
+    ANSI_STRING AnsiName;
+    UNICODE_STRING UnicodeName;
+    NTSTATUS Status;
+    HANDLE Handle;
+
+    if (!lpName)
+    {
+        return CreateMutexExW(lpMutexAttributes, NULL, dwFlags, dwDesiredAccess);
+    }
+
+    /* Windows accepts names longer than MAX_PATH here: convert into an allocated buffer */
+    Status = RtlInitAnsiStringEx(&AnsiName, lpName);
+    if (NT_SUCCESS(Status))
+        Status = RtlAnsiStringToUnicodeString(&UnicodeName, &AnsiName, TRUE);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return NULL;
+    }
+
+    Handle = CreateMutexExW(lpMutexAttributes, UnicodeName.Buffer, dwFlags, dwDesiredAccess);
+    RtlFreeUnicodeString(&UnicodeName);
+    return Handle;
+}
+
 /*
  * @implemented
  */
@@ -622,6 +707,74 @@ CreateEventW(IN LPSECURITY_ATTRIBUTES lpEventAttributes  OPTIONAL,
                                lpName,
                                bManualReset ? NotificationEvent : SynchronizationEvent,
                                bInitialState);
+}
+
+#ifndef CREATE_EVENT_MANUAL_RESET
+#define CREATE_EVENT_MANUAL_RESET 0x00000001
+#endif
+#ifndef CREATE_EVENT_INITIAL_SET
+#define CREATE_EVENT_INITIAL_SET 0x00000002
+#endif
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+DECLSPEC_HOTPATCH
+CreateEventExW(IN LPSECURITY_ATTRIBUTES lpEventAttributes OPTIONAL,
+               IN LPCWSTR lpName OPTIONAL,
+               IN DWORD dwFlags,
+               IN DWORD dwDesiredAccess)
+{
+    if (dwFlags & ~(CREATE_EVENT_MANUAL_RESET | CREATE_EVENT_INITIAL_SET))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    CreateNtObjectFromWin32Api(Event, Event, dwDesiredAccess,
+                               lpEventAttributes,
+                               lpName,
+                               (dwFlags & CREATE_EVENT_MANUAL_RESET) ?
+                               NotificationEvent : SynchronizationEvent,
+                               (dwFlags & CREATE_EVENT_INITIAL_SET) != 0);
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+DECLSPEC_HOTPATCH
+CreateEventExA(IN LPSECURITY_ATTRIBUTES lpEventAttributes OPTIONAL,
+               IN LPCSTR lpName OPTIONAL,
+               IN DWORD dwFlags,
+               IN DWORD dwDesiredAccess)
+{
+    ANSI_STRING AnsiName;
+    UNICODE_STRING UnicodeName;
+    NTSTATUS Status;
+    HANDLE Handle;
+
+    if (!lpName)
+    {
+        return CreateEventExW(lpEventAttributes, NULL, dwFlags, dwDesiredAccess);
+    }
+
+    /* Windows accepts names longer than MAX_PATH here: convert into an allocated buffer */
+    Status = RtlInitAnsiStringEx(&AnsiName, lpName);
+    if (NT_SUCCESS(Status))
+        Status = RtlAnsiStringToUnicodeString(&UnicodeName, &AnsiName, TRUE);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return NULL;
+    }
+
+    Handle = CreateEventExW(lpEventAttributes, UnicodeName.Buffer, dwFlags, dwDesiredAccess);
+    RtlFreeUnicodeString(&UnicodeName);
+    return Handle;
 }
 
 /*

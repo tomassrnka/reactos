@@ -424,6 +424,23 @@ NtCreateProcessEx(
     _In_ BOOLEAN InJob
 );
 
+/* ReactOS-private extension; existing NtCreateProcess[Ex] callers are unchanged. */
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateProcessWithAttributes(
+    _Out_ PHANDLE ProcessHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ HANDLE ParentProcess,
+    _In_ ULONG Flags,
+    _In_opt_ HANDLE SectionHandle,
+    _In_opt_ HANDLE DebugPort,
+    _In_opt_ HANDLE ExceptionPort,
+    _In_ BOOLEAN InJob,
+    _In_ PROS_PS_ATTRIBUTE_LIST AttributeList
+);
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI

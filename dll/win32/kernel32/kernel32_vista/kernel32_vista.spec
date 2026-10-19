@@ -59,6 +59,7 @@
 @ stdcall RegisterApplicationRecoveryCallback(ptr ptr long long)
 @ stdcall RegisterApplicationRestart(wstr long)
 @ stdcall SetFileBandwidthReservation(ptr long long long ptr ptr)
+@ stdcall SetFileInformationByHandle(ptr long ptr long)
 @ stdcall SetThreadPreferredUILanguages(long wstr ptr)
 @ stdcall CompareStringOrdinal(ptr long ptr long long)
 
@@ -77,7 +78,7 @@
 @ stdcall FreeLibraryWhenCallbackReturns(ptr ptr) ntdll_vista.TpCallbackUnloadDllOnCompletion
 @ stdcall GetNamedPipeClientProcessId(ptr ptr)
 @ stdcall GetProductInfo(long long long long ptr) ntdll_vista.RtlGetProductInfo
-@ stdcall GetSystemTimePreciseAsFileTime(ptr) kernel32.GetSystemTimeAsFileTime
+@ stdcall GetSystemTimePreciseAsFileTime(ptr) kernel32.GetSystemTimePreciseAsFileTime
 @ stdcall GetThreadDescription(ptr ptr) # Win 10
 @ stdcall SetThreadDescription(ptr wstr) # Win 10
 @ stdcall SetThreadpoolThreadMaximum(ptr long) ntdll_vista.TpSetPoolMaxThreads
@@ -91,5 +92,5 @@
 @ stdcall WaitForThreadpoolWaitCallbacks(ptr long) ntdll_vista.TpWaitForWait
 @ stdcall WaitForThreadpoolWorkCallbacks(ptr long) ntdll_vista.TpWaitForWork
 
-@ stdcall WerGetFlags(ptr ptr)
-@ stdcall WerSetFlags(long)
+@ stdcall -version=0x400-0x5ff WerGetFlags(ptr ptr)
+@ stdcall -version=0x400-0x5ff WerSetFlags(long)

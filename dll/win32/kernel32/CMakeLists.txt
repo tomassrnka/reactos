@@ -17,6 +17,7 @@ list(APPEND SOURCE
     client/actctx.c
     client/appcache.c
     client/atom.c
+    client/appmodel.c
     client/atomansi.c
     client/compname.c
     client/debugger.c
@@ -30,6 +31,7 @@ list(APPEND SOURCE
     client/heapmem.c
     client/job.c
     client/loader.c
+    client/mitigation.c
     client/path.c
     client/pathansi.c
     client/perfcnt.c
@@ -59,6 +61,7 @@ list(APPEND SOURCE
     client/file/backup.c
     client/file/cnotify.c
     client/file/copy.c
+    client/file/copy2.c
     client/file/copyansi.c
     client/file/create.c
     client/file/delete.c

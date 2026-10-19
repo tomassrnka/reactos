@@ -77,3 +77,56 @@ GetVolumeNameForVolumeMountPointA(IN LPCSTR lpszVolumeMountPoint,
 }
 
 /* EOF */
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetVolumeMountPointA(IN LPCSTR lpszVolumeMountPoint,
+                     IN LPCSTR lpszVolumeName)
+{
+    BOOL Ret = FALSE;
+    UNICODE_STRING MountPointU, VolumeNameU;
+
+    if (lpszVolumeMountPoint == NULL || lpszVolumeName == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* the conversion follows SetFileApisToOEM, as in the other file functions */
+    if (!Basep8BitStringToDynamicUnicodeString(&MountPointU, lpszVolumeMountPoint))
+        return FALSE;
+    if (Basep8BitStringToDynamicUnicodeString(&VolumeNameU, lpszVolumeName))
+    {
+        Ret = SetVolumeMountPointW(MountPointU.Buffer, VolumeNameU.Buffer);
+        RtlFreeUnicodeString(&VolumeNameU);
+    }
+    RtlFreeUnicodeString(&MountPointU);
+    return Ret;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+DeleteVolumeMountPointA(IN LPCSTR lpszVolumeMountPoint)
+{
+    BOOL Ret;
+    UNICODE_STRING MountPointU;
+
+    /* the ANSI form names the missing path an invalid name, the wide form an invalid parameter */
+    if (lpszVolumeMountPoint == NULL)
+    {
+        SetLastError(ERROR_INVALID_NAME);
+        return FALSE;
+    }
+
+    if (!Basep8BitStringToDynamicUnicodeString(&MountPointU, lpszVolumeMountPoint))
+        return FALSE;
+    Ret = DeleteVolumeMountPointW(MountPointU.Buffer);
+    RtlFreeUnicodeString(&MountPointU);
+    return Ret;
+}

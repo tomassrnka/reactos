@@ -6,7 +6,12 @@ extern void func_ActCtxWithXmlNamespaces(void);
 extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
 extern void func_ConsoleCP(void);
+extern void func_CopyFile2(void);
+extern void func_CopyFile2Identity(void);
+extern void func_CreateEventMutexEx(void);
+extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateProcess(void);
+extern void func_CreateProcessRace(void);
 extern void func_CreateWaitableTimerEx(void);
 extern void func_ThreadImpersonationToken(void);
 extern void func_DebugTrapInterrupts(void);
@@ -15,13 +20,18 @@ extern void func_DeleteTimerQueueEx(void);
 extern void func_DeviceIoControl(void);
 extern void func_dosdev(void);
 extern void func_DynamicTls(void);
+extern void func_DynamicTimeZone(void);
+extern void func_GetTimeZoneInformationForYear(void);
 extern void func_EnumSystemCodePages(void);
+extern void func_EnumUILanguages(void);
 extern void func_ExitThread(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
 extern void func_FLS(void);
 extern void func_ForcedRelocation(void);
 extern void func_FormatMessage(void);
+extern void func_FormatMessageInsert(void);
+extern void func_GetBinaryType(void);
 extern void func_GetComputerNameEx(void);
 extern void func_GetCPInfo(void);
 extern void func_GetCurrentDirectory(void);
@@ -30,9 +40,11 @@ extern void func_GetEnvironmentVariable(void);
 extern void func_GetFileType(void);
 extern void func_GetFinalPathNameByHandle(void);
 extern void func_GetLocaleInfo(void);
+extern void func_GetLogicalProcessorInformationEx(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetVolumeInformation(void);
+extern void func_HandleList(void);
 extern void func_IdleProcessor(void);
 extern void func_InitOnce(void);
 extern void func_KernelBaseTime(void);
@@ -41,6 +53,7 @@ extern void func_IsDBCSLeadByteEx(void);
 extern void func_JapaneseCalendar(void);
 extern void func_JobObject(void);
 extern void func_LCMapString(void);
+extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LoadLibraryMachine(void);
 extern void func_LocaleNameToLCID(void);
@@ -52,10 +65,13 @@ extern void func_MappedFileGrowth(void);
 extern void func_MultiByteToWideChar(void);
 extern void func_PerformanceCounter(void);
 extern void func_Pipes(void);
+extern void func_PipeSqos(void);
 extern void func_PrivMoveFileIdentityW(void);
+extern void func_QueryCycleTime(void);
 extern void func_QueueUserAPC(void);
 extern void func_RaiseFailFastException(void);
 extern void func_RegisterWait(void);
+extern void func_ResolveLocaleName(void);
 extern void func_SetComputerNameExW(void);
 extern void func_SetConsoleWindowInfo(void);
 extern void func_SetCurrentDirectory(void);
@@ -68,9 +84,12 @@ extern void func_TerminateProcess(void);
 extern void func_ThreadContextNpx(void);
 extern void func_ThreadContextObjects(void);
 extern void func_TunnelCache(void);
+extern void func_VolumeMountPoint(void);
+extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
 extern void func_WerFlags(void);
 extern void func_WideCharToMultiByte(void);
+extern void func_SetFileInformationByHandle(void);
 
 const struct test winetest_testlist[] =
 {
@@ -78,7 +97,12 @@ const struct test winetest_testlist[] =
     { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
     { "CancelIoEx",                  func_CancelIoEx },
     { "ConsoleCP",                   func_ConsoleCP },
+    { "CopyFile2",                   func_CopyFile2 },
+    { "CopyFile2Identity",           func_CopyFile2Identity },
+    { "CreateEventMutexEx",          func_CreateEventMutexEx },
+    { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateProcess",               func_CreateProcess },
+    { "CreateProcessRace",           func_CreateProcessRace },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
     { "ThreadImpersonationToken",    func_ThreadImpersonationToken },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
@@ -87,13 +111,18 @@ const struct test winetest_testlist[] =
     { "DeviceIoControl",             func_DeviceIoControl },
     { "dosdev",                      func_dosdev },
     { "DynamicTls",                  func_DynamicTls },
+    { "DynamicTimeZone",             func_DynamicTimeZone },
+    { "GetTimeZoneInformationForYear", func_GetTimeZoneInformationForYear },
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
+    { "EnumUILanguages",             func_EnumUILanguages },
     { "ExitThread",                  func_ExitThread },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
     { "FLS",                         func_FLS },
     { "ForcedRelocation",            func_ForcedRelocation },
     { "FormatMessage",               func_FormatMessage },
+    { "FormatMessageInsert",          func_FormatMessageInsert },
+    { "GetBinaryType",               func_GetBinaryType },
     { "GetComputerNameEx",           func_GetComputerNameEx },
     { "GetCPInfo",                   func_GetCPInfo },
     { "GetCurrentDirectory",         func_GetCurrentDirectory },
@@ -102,9 +131,11 @@ const struct test winetest_testlist[] =
     { "GetFileType",                 func_GetFileType },
     { "GetFinalPathNameByHandle",    func_GetFinalPathNameByHandle },
     { "GetLocaleInfo",               func_GetLocaleInfo },
+    { "GetLogicalProcessorInformationEx", func_GetLogicalProcessorInformationEx },
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
     { "GetVolumeInformation",        func_GetVolumeInformation },
+    { "HandleList",                  func_HandleList },
     { "IdleProcessor",               func_IdleProcessor },
     { "InitOnce",                    func_InitOnce },
     { "KernelBaseTime",              func_KernelBaseTime },
@@ -113,6 +144,7 @@ const struct test winetest_testlist[] =
     { "JapaneseCalendar",            func_JapaneseCalendar },
     { "JobObject",                   func_JobObject },
     { "LCMapString",                 func_LCMapString },
+    { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
@@ -124,10 +156,13 @@ const struct test winetest_testlist[] =
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
     { "PerformanceCounter",          func_PerformanceCounter },
     { "Pipes",                       func_Pipes },
+    { "PipeSqos",                    func_PipeSqos },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
+    { "QueryCycleTime",              func_QueryCycleTime },
     { "QueueUserAPC",                func_QueueUserAPC },
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "RegisterWait",                func_RegisterWait },
+    { "ResolveLocaleName",           func_ResolveLocaleName },
     { "SetComputerNameExW",          func_SetComputerNameExW },
     { "SetConsoleWindowInfo",        func_SetConsoleWindowInfo },
     { "SetCurrentDirectory",         func_SetCurrentDirectory },
@@ -140,8 +175,11 @@ const struct test winetest_testlist[] =
     { "ThreadContextNpx",            func_ThreadContextNpx },
     { "ThreadContextObjects",        func_ThreadContextObjects },
     { "TunnelCache",                 func_TunnelCache },
+    { "VolumeMountPoint",            func_VolumeMountPoint },
+    { "TzSetPrivilege",              func_TzSetPrivilege },
     { "UEFIFirmware",                func_UEFIFirmware },
     { "WerFlags",                    func_WerFlags },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
+    { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
     { 0, 0 }
 };

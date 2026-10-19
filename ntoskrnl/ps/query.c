@@ -1137,6 +1137,50 @@ NtQueryInformationProcess(
             _SEH2_END;
             break;
 
+        case ProcessCycleTime:
+        {
+            PPROCESS_CYCLE_TIME_INFORMATION CycleTimeInfo = ProcessInformation;
+            ULONG64 CycleTime, CycleTimeStamp;
+
+            if (ProcessInformationLength != sizeof(PROCESS_CYCLE_TIME_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            /* Set the return length */
+            Length = sizeof(PROCESS_CYCLE_TIME_INFORMATION);
+
+            /* Reference the process */
+            // FIXME: Use PROCESS_QUERY_LIMITED_INFORMATION when implemented
+            Status = ObReferenceObjectByHandle(ProcessHandle,
+                                               PROCESS_QUERY_INFORMATION,
+                                               PsProcessType,
+                                               PreviousMode,
+                                               (PVOID*)&Process,
+                                               NULL);
+            if (!NT_SUCCESS(Status)) break;
+
+            CycleTime = KeQueryTotalCycleTimeProcess(&Process->Pcb, &CycleTimeStamp);
+
+            /* Dereference the process */
+            ObDereferenceObject(Process);
+
+            /* Protect writes with SEH */
+            _SEH2_TRY
+            {
+                CycleTimeInfo->AccumulatedCycles = CycleTime;
+                CycleTimeInfo->CurrentCycleCount = CycleTimeStamp;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                /* Get exception code */
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            break;
+        }
+
         case ProcessDebugObjectHandle:
         {
             HANDLE DebugPort = NULL;
@@ -3343,6 +3387,51 @@ NtQueryInformationThread(
 
             /* Dereference the thread */
             ObDereferenceObject(Thread);
+            break;
+        }
+
+        case ThreadCycleTime:
+        {
+            PTHREAD_CYCLE_TIME_INFORMATION CycleTimeInfo = ThreadInformation;
+            ULONG64 CycleTime, CycleTimeStamp;
+
+            /* Set the return length */
+            Length = sizeof(THREAD_CYCLE_TIME_INFORMATION);
+
+            if (ThreadInformationLength != Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            /* Reference the thread */
+            // FIXME: Use THREAD_QUERY_LIMITED_INFORMATION when implemented
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               Access,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            CycleTime = KeQueryTotalCycleTimeThread(&Thread->Tcb, &CycleTimeStamp);
+
+            /* Dereference the thread */
+            ObDereferenceObject(Thread);
+
+            /* Protect writes with SEH */
+            _SEH2_TRY
+            {
+                CycleTimeInfo->AccumulatedCycles = CycleTime;
+                CycleTimeInfo->CurrentCycleCount = CycleTimeStamp;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                /* Get exception code */
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
             break;
         }
 
