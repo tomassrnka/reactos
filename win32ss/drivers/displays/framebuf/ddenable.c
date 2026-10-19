@@ -204,6 +204,12 @@ DrvGetDirectDrawInfo(
 		pHalInfo->ddCaps.dwVidMemTotal = (ppdev->MemHeight - ppdev->ScreenHeight) * ppdev->ScreenDelta;
 
         /* fill in some basic info that we need */
+        /* FIXME: GDI draws on a system memory shadow of the screen and only
+         * copies it to the frame buffer (shadow.c), so DirectDraw must not get
+         * the raw frame buffer as its primary: what it writes there would be
+         * overwritten by the next GDI update and GDI would read stale pixels.
+         * This file is not built today (see CMakeLists.txt); before enabling
+         * it, give DirectDraw the shadow or synchronise it on lock/unlock. */
         pHalInfo->vmiData.pvPrimary                 = ppdev->ScreenPtr;
         pHalInfo->vmiData.dwDisplayWidth            = ppdev->ScreenWidth;
         pHalInfo->vmiData.dwDisplayHeight           = ppdev->ScreenHeight;

@@ -23,8 +23,9 @@
 /*
  * DrvEnableSurface
  *
- * Create engine bitmap around frame buffer and set the video mode requested
- * when PDEV was initialized.
+ * Set the video mode requested when PDEV was initialized, map the frame
+ * buffer and create the screen surface. GDI draws on a copy of the screen
+ * in system memory, see shadow.c.
  *
  * Status
  *    @implemented
@@ -53,25 +54,9 @@ DrvEnableSurface(
       return NULL;
    }
 
-   /*
-    * Map the framebuffer into our memory.
-    */
-
-   VideoMemory.RequestedVirtualAddress = NULL;
-   if (EngDeviceIoControl(ppdev->hDriver, IOCTL_VIDEO_MAP_VIDEO_MEMORY,
-                          &VideoMemory, sizeof(VIDEO_MEMORY),
-                          &VideoMemoryInfo, sizeof(VIDEO_MEMORY_INFORMATION),
-                          &ulTemp))
-   {
-      return NULL;
-   }
-
-   ppdev->ScreenPtr = VideoMemoryInfo.FrameBufferBase;
-
    switch (ppdev->BitsPerPixel)
    {
       case 8:
-         IntSetPalette(dhpdev, ppdev->PaletteEntries, 0, 256);
          BitmapType = BMF_8BPP;
          break;
 
@@ -91,32 +76,101 @@ DrvEnableSurface(
          return NULL;
    }
 
+   /*
+    * Map the framebuffer into our memory.
+    */
+
+   VideoMemory.RequestedVirtualAddress = NULL;
+   if (EngDeviceIoControl(ppdev->hDriver, IOCTL_VIDEO_MAP_VIDEO_MEMORY,
+                          &VideoMemory, sizeof(VIDEO_MEMORY),
+                          &VideoMemoryInfo, sizeof(VIDEO_MEMORY_INFORMATION),
+                          &ulTemp))
+   {
+      return NULL;
+   }
+
+   ppdev->ScreenPtr = VideoMemoryInfo.FrameBufferBase;
+   ppdev->BytesPerPixel = ppdev->BitsPerPixel / 8;
+
+   if (BitmapType == BMF_8BPP)
+   {
+      IntSetPalette(dhpdev, ppdev->PaletteEntries, 0, 256);
+   }
+
    ppdev->iDitherFormat = BitmapType;
 
    ScreenSize.cx = ppdev->ScreenWidth;
    ScreenSize.cy = ppdev->ScreenHeight;
 
-   hSurface = (HSURF)EngCreateBitmap(ScreenSize, ppdev->ScreenDelta, BitmapType,
-                                     (ppdev->ScreenDelta > 0) ? BMF_TOPDOWN : 0,
-                                     ppdev->ScreenPtr);
-   if (hSurface == NULL)
+   /*
+    * Create the copy of the screen GDI draws on, cleared to black.
+    */
+
+   ppdev->hShadow = (HSURF)EngCreateBitmap(ScreenSize, 0, BitmapType,
+                                           BMF_TOPDOWN, NULL);
+   if (ppdev->hShadow == NULL)
    {
-      return NULL;
+      goto Failure;
+   }
+
+   ppdev->psoShadow = EngLockSurface(ppdev->hShadow);
+   if (ppdev->psoShadow == NULL)
+   {
+      goto Failure;
    }
 
    /*
-    * Associate the surface with our device.
+    * Create the screen surface and associate it with our device.
     */
 
-   if (!EngAssociateSurface(hSurface, ppdev->hDevEng, 0))
+   hSurface = EngCreateDeviceSurface((DHSURF)ppdev, ScreenSize, BitmapType);
+   if (hSurface == NULL)
+   {
+      goto Failure;
+   }
+
+   if (!EngAssociateSurface(hSurface, ppdev->hDevEng,
+                            HOOK_BITBLT | HOOK_COPYBITS | HOOK_LINETO |
+                            HOOK_ALPHABLEND | HOOK_TRANSPARENTBLT |
+                            HOOK_GRADIENTFILL))
    {
       EngDeleteSurface(hSurface);
-      return NULL;
+      goto Failure;
+   }
+
+   if (!FbRegisterScreen(ppdev))
+   {
+      EngDeleteSurface(hSurface);
+      goto Failure;
    }
 
    ppdev->hSurfEng = hSurface;
 
+   /* Start from a black screen, like the shadow */
+   ppdev->bScreenEnabled = TRUE;
+   FbUpdateWholeScreen(ppdev);
+
    return hSurface;
+
+Failure:
+   if (ppdev->psoShadow != NULL)
+   {
+      EngUnlockSurface(ppdev->psoShadow);
+      ppdev->psoShadow = NULL;
+   }
+
+   if (ppdev->hShadow != NULL)
+   {
+      EngDeleteSurface(ppdev->hShadow);
+      ppdev->hShadow = NULL;
+   }
+
+   VideoMemory.RequestedVirtualAddress = ppdev->ScreenPtr;
+   EngDeviceIoControl(ppdev->hDriver, IOCTL_VIDEO_UNMAP_VIDEO_MEMORY,
+                      &VideoMemory, sizeof(VIDEO_MEMORY), NULL, 0, &ulTemp);
+   ppdev->ScreenPtr = NULL;
+
+   return NULL;
 }
 
 /*
@@ -137,6 +191,7 @@ DrvDisableSurface(
    VIDEO_MEMORY VideoMemory;
    PPDEV ppdev = (PPDEV)dhpdev;
 
+   FbUnregisterScreen(ppdev);
    EngDeleteSurface(ppdev->hSurfEng);
    ppdev->hSurfEng = NULL;
 
@@ -145,6 +200,11 @@ DrvDisableSurface(
    DrvSetPointerShape(NULL, NULL, NULL, NULL, 0, 0, 0, 0, NULL, 0);
 #endif
 
+   EngUnlockSurface(ppdev->psoShadow);
+   ppdev->psoShadow = NULL;
+   EngDeleteSurface(ppdev->hShadow);
+   ppdev->hShadow = NULL;
+
    /*
     * Unmap the framebuffer.
     */
@@ -152,6 +212,7 @@ DrvDisableSurface(
    VideoMemory.RequestedVirtualAddress = ((PPDEV)dhpdev)->ScreenPtr;
    EngDeviceIoControl(((PPDEV)dhpdev)->hDriver, IOCTL_VIDEO_UNMAP_VIDEO_MEMORY,
                       &VideoMemory, sizeof(VIDEO_MEMORY), NULL, 0, &ulTemp);
+   ppdev->ScreenPtr = NULL;
 }
 
 /*
@@ -189,6 +250,14 @@ DrvAssertMode(
 	     IntSetPalette(dhpdev, ppdev->PaletteEntries, 0, 256);
       }
 
+      /* The mode set may have cleared the frame buffer, and drawing done
+       * while the display was disabled only reached the shadow */
+      ppdev->bScreenEnabled = TRUE;
+      if (ppdev->psoShadow != NULL)
+      {
+         FbUpdateWholeScreen(ppdev);
+      }
+
       return TRUE;
    }
    else
@@ -196,7 +265,15 @@ DrvAssertMode(
       /*
        * Call the miniport driver to reset the device to a known state.
        */
-      return !EngDeviceIoControl(ppdev->hDriver, IOCTL_VIDEO_RESET_DEVICE,
-                                 NULL, 0, NULL, 0, &ulTemp);
+      ppdev->bScreenEnabled = FALSE;
+      if (EngDeviceIoControl(ppdev->hDriver, IOCTL_VIDEO_RESET_DEVICE,
+                             NULL, 0, NULL, 0, &ulTemp))
+      {
+         /* The mode is still set */
+         ppdev->bScreenEnabled = TRUE;
+         return FALSE;
+      }
+
+      return TRUE;
    }
 }

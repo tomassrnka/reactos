@@ -1174,6 +1174,9 @@ NtGdiExtFloodFill(
     POINTL     Pt;
     ULONG      ConvColor;
     PREGION    prgn;
+    INTENG_ENTER_LEAVE EnterLeave;
+    POINTL     Translate;
+    SURFOBJ    *psoOutput;
 
     dc = DC_LockDc(hDC);
     if (!dc)
@@ -1229,7 +1232,22 @@ NtGdiExtFloodFill(
      * Version a (most likely slow): call DrvPatBlt for every pixel
      * Version b: create a flood mask and let MaskBlt blit a masked brush */
     ConvColor = XLATEOBJ_iXlate(&exlo.xlo, Color);
-    Ret = DIB_XXBPP_FloodFillSolid(&psurf->SurfObj, &dc->eboFill.BrushObject, &DestRect, &Pt, ConvColor, FillType);
+
+    /* A device managed surface has no bits: fill a copy of the area, which
+     * IntEngEnter gets and IntEngLeave puts back through DrvCopyBits */
+    if (IntEngEnter(&EnterLeave, &psurf->SurfObj, &DestRect, FALSE, &Translate, &psoOutput))
+    {
+        RECTL_vOffsetRect(&DestRect, Translate.x, Translate.y);
+        Pt.x += Translate.x;
+        Pt.y += Translate.y;
+        Ret = DIB_XXBPP_FloodFillSolid(psoOutput, &dc->eboFill.BrushObject, &DestRect, &Pt, ConvColor, FillType);
+        if (!IntEngLeave(&EnterLeave))
+            Ret = FALSE;
+    }
+    else
+    {
+        Ret = FALSE;
+    }
 
     DC_vFinishBlit(dc, NULL);
 

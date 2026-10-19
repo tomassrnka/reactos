@@ -195,6 +195,21 @@ IntEngUpdateClipRegion(
                 EngFreeMem(Clip->Rects);
             Clip->Rects = NewRects;
         }
+        else
+        {
+            /* Do not keep the old clip, it can be larger than the new one
+             * (after a mode change): clip everything away */
+            ERR("Failed to allocate the clip rectangles\n");
+            Clip->iDirection = CD_ANY;
+            Clip->iDComplexity = DC_RECT;
+            Clip->iFComplexity = FC_RECT;
+            Clip->iMode = TC_RECTANGLES;
+            RECTL_vSetEmptyRect(&Clip->rclBounds);
+            Clip->RectCount = 1;
+            if (Clip->Rects != &Clip->rclBounds)
+                EngFreeMem(Clip->Rects);
+            Clip->Rects = &Clip->rclBounds;
+        }
     }
     else
     {

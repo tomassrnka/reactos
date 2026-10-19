@@ -187,7 +187,12 @@ EngCopyBits(
 
                     do
                     {
-                        RECTL_bIntersectRect(&BltInfo.DestRect, prcl, DestRect);
+                        /* A clip rectangle outside the target has nothing to copy */
+                        if (!RECTL_bIntersectRect(&BltInfo.DestRect, prcl, DestRect))
+                        {
+                            prcl++;
+                            continue;
+                        }
 
                         BltInfo.SourcePoint.x = SourcePoint->x + BltInfo.DestRect.left - DestRect->left;
                         BltInfo.SourcePoint.y = SourcePoint->y + BltInfo.DestRect.top - DestRect->top;

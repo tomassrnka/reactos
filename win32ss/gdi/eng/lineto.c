@@ -500,6 +500,7 @@ EngLineTo(
         Clip = pcoPriv = EngCreateClip();
         if (!Clip)
         {
+            IntEngLeave(&EnterLeave);
             return FALSE;
         }
         IntEngUpdateClipRegion((XCLIPOBJ*)Clip, 0, 0, RectBounds);
@@ -517,7 +518,12 @@ EngLineTo(
 
     if (0 == deltax && 0 == deltay)
     {
-        return TRUE;
+        /* Nothing to draw, but give back the copy IntEngEnter made */
+        if (pcoPriv)
+        {
+            EngDeleteClip(pcoPriv);
+        }
+        return IntEngLeave(&EnterLeave);
     }
 
     if (deltax < 0)

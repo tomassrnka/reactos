@@ -62,6 +62,7 @@ list(APPEND SOURCE
     GetTextExtentQuality.c
     GetTextFace.c
     GetTextMetrics.c
+    GradientFill.c
     LPtoDP.c
     MaskBlt.c
     NtGdiAddFontResource.c
