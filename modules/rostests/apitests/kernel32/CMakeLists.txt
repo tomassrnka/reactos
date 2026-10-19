@@ -4,8 +4,10 @@ add_subdirectory(redirptest)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    CancelIoEx.c
     ConsoleCP.c
     CreateProcess.c
+    CreateWaitableTimerEx.c
     DefaultActCtx.c
     DeviceIoControl.c
     dosdev.c
@@ -22,6 +24,7 @@ list(APPEND SOURCE
     GetFinalPathNameByHandle.c
     GetLocaleInfo.c
     GetModuleFileName.c
+    GetQueuedCompletionStatusEx.c
     GetVolumeInformation.c
     InitOnce.c
     interlck.c
@@ -38,6 +41,7 @@ list(APPEND SOURCE
     Pipes.c
     PrivMoveFileIdentityW.c
     QueueUserAPC.c
+    RaiseFailFastException.c
     ReadFile.c
     SetComputerNameExW.c
     SetConsoleWindowInfo.c
@@ -48,6 +52,7 @@ list(APPEND SOURCE
     TerminateProcess.c
     TunnelCache.c
     UEFIFirmware.c
+    WerFlags.c
     WideCharToMultiByte.c
     WriteFile.c
 )

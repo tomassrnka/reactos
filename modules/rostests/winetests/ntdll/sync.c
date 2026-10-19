@@ -26,7 +26,7 @@
 #include "winternl.h"
 #include "wine/test.h"
 
-#if defined (__REACTOS__) && (DLL_EXPORT_VERSION < 0x601)
+#if defined (__REACTOS__) && (DLL_EXPORT_VERSION < 0x600)
 static
 NTSTATUS
 WINAPI
@@ -952,7 +952,7 @@ static DWORD WINAPI test_completion_port_scheduling_thread(void *param)
     else
         ok( err == ERROR_ABANDONED_WAIT_0, "got error %#lx.\n", err );
 
-#if !defined (__REACTOS__) || (DLL_EXPORT_VERSION >= 0x601)
+#if !defined (__REACTOS__) || (DLL_EXPORT_VERSION >= 0x600)
     /* Port is being closed. */
     ret = WaitForSingleObject( p->ready, INFINITE );
     ok( ret == WAIT_OBJECT_0, "got %#lx.\n", ret );

@@ -44,18 +44,32 @@ IopUnlockFileObject(IN PFILE_OBJECT FileObject)
     ObDereferenceObject(FileObject);
 }
 
+/*
+ * Only the thread itself changes its IRP list, and it does so under this lock
+ * so that NtCancelIoFileEx can look for requests of other threads.
+ */
+FORCEINLINE
+PKSPIN_LOCK
+IopGetThreadIrpListLock(IN PETHREAD Thread)
+{
+    return &IopThreadIrpListLocks[((ULONG_PTR)Thread >> 6) % IOP_THREAD_IRP_LIST_LOCKS];
+}
+
 FORCEINLINE
 VOID
 IopQueueIrpToThread(IN PIRP Irp)
 {
     PETHREAD Thread = Irp->Tail.Overlay.Thread;
+    KIRQL OldIrql;
 
     /* Disable special kernel APCs so we can't race with IopCompleteRequest.
      * IRP's thread must be the current thread */
     KeEnterGuardedRegionThread(&Thread->Tcb);
 
     /* Insert it into the list */
+    KeAcquireSpinLock(IopGetThreadIrpListLock(Thread), &OldIrql);
     InsertHeadList(&Thread->IrpList, &Irp->ThreadListEntry);
+    KeReleaseSpinLock(IopGetThreadIrpListLock(Thread), OldIrql);
 
     /* Leave the guarded region */
     KeLeaveGuardedRegionThread(&Thread->Tcb);
@@ -65,6 +79,9 @@ FORCEINLINE
 VOID
 IopUnQueueIrpFromThread(IN PIRP Irp)
 {
+    PKSPIN_LOCK Lock;
+    KIRQL OldIrql;
+
     /* Special kernel APCs must be disabled so we can't race with
      * IopCompleteRequest (or because we are called from there) */
     ASSERT(KeAreAllApcsDisabled());
@@ -72,8 +89,12 @@ IopUnQueueIrpFromThread(IN PIRP Irp)
     /* Remove it from the list and reset it */
     if (IsListEmpty(&Irp->ThreadListEntry))
         return;
+    /* The completion APC overlays Tail.Overlay.Thread; the owner is the caller */
+    Lock = IopGetThreadIrpListLock(PsGetCurrentThread());
+    KeAcquireSpinLock(Lock, &OldIrql);
     RemoveEntryList(&Irp->ThreadListEntry);
     InitializeListHead(&Irp->ThreadListEntry);
+    KeReleaseSpinLock(Lock, OldIrql);
 }
 
 static
