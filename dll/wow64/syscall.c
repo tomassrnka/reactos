@@ -1207,25 +1207,26 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
              * captures the SID from guest memory */
             TOKEN_MANDATORY_LABEL Label;
             UCHAR Sid[SECURITY_MAX_SID_SIZE];
-            ULONG Guest, SidBytes;
-            if (a[3] < 2 * sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
-            if (!GuestSpan(a[2], 2 * sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
-            Guest = U(2);
-            Label.Label.Attributes = ((ULONG *)P(2))[1];
+            ULONG Header[2], Buffer = a[2], Length = a[3], SidBytes;
+            UCHAR Count;
+            /* The arguments live on the guest stack and the label in guest memory: read once */
+            if (Length < sizeof(Header)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestSpan(Buffer, sizeof(Header))) return STATUS_ACCESS_VIOLATION;
+            RtlCopyMemory(Header, PTR32(Buffer), sizeof(Header));
+            Label.Label.Attributes = Header[1];
             Label.Label.Sid = NULL;
-            if (Guest)
+            if (Header[0])
             {
-                /* Capture the SID once, from guest memory only */
-                if (!GuestSpan(Guest, FIELD_OFFSET(SID, SubAuthority))) return STATUS_ACCESS_VIOLATION;
-                SidBytes = FIELD_OFFSET(SID, SubAuthority) +
-                           ((SID *)PTR32(Guest))->SubAuthorityCount * sizeof(ULONG);
-                if (SidBytes > sizeof(Sid)) return STATUS_INVALID_SID;
-                if (!GuestSpan(Guest, SidBytes)) return STATUS_ACCESS_VIOLATION;
-                RtlCopyMemory(Sid, PTR32(Guest), SidBytes);
-                ((SID *)Sid)->SubAuthorityCount = (UCHAR)((SidBytes - FIELD_OFFSET(SID, SubAuthority)) / sizeof(ULONG));
+                if (!GuestSpan(Header[0], FIELD_OFFSET(SID, SubAuthority))) return STATUS_ACCESS_VIOLATION;
+                Count = ((SID *)PTR32(Header[0]))->SubAuthorityCount;
+                if (Count > SID_MAX_SUB_AUTHORITIES) return STATUS_INVALID_PARAMETER;
+                SidBytes = FIELD_OFFSET(SID, SubAuthority) + Count * sizeof(ULONG);
+                if (!GuestSpan(Header[0], SidBytes)) return STATUS_ACCESS_VIOLATION;
+                RtlCopyMemory(Sid, PTR32(Header[0]), SidBytes);
+                ((SID *)Sid)->SubAuthorityCount = Count;
                 Label.Label.Sid = Sid;
             }
-            return NtSetInformationToken(H(0), a[1], &Label, sizeof(Label));
+            return NtSetInformationToken(H(0), TokenIntegrityLevel, &Label, sizeof(Label));
         }
         return STATUS_NOT_SUPPORTED;
     case W64_NtQueryInformationProcess:
