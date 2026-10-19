@@ -143,17 +143,22 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
     Wow64CpuRun(&Cpu);
 }
 
-/* Stack the worker below needs under its caller: its CONTEXT, the guest frame and its calls, with room */
-#define WOW64_DISPATCH_RESERVE 0x2000
+/* The guest exception frame: the i386 dispatcher takes two pointers at ESP */
+typedef struct
+{
+    ULONG RecordPointer, ContextPointer;
+    EXCEPTION_RECORD32 Record;
+    WOW64_CONTEXT Context;
+} WOW64_EXCEPTION_FRAME;
+
+/* Stack the worker needs below its caller: the guest frame and the native
+ * CONTEXT it builds, plus its saved registers and the frames of the calls it
+ * makes on the way to NtContinue (Wow64NativeToContext, the copy, NtContinue) */
+#define WOW64_DISPATCH_RESERVE (sizeof(WOW64_EXCEPTION_FRAME) + sizeof(CONTEXT) + 0x200)
 
 static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, PCONTEXT Context, TEB32 *Teb32)
 {
-    struct
-    {
-        ULONG RecordPointer, ContextPointer;
-        EXCEPTION_RECORD32 Record;
-        WOW64_CONTEXT Context;
-    } Frame;
+    WOW64_EXCEPTION_FRAME Frame;
     CONTEXT Native;
     ULONG i;
     NTSTATUS Status;
@@ -208,13 +213,31 @@ VOID NTAPI Wow64PrepareForException(PEXCEPTION_RECORD Record, PCONTEXT Context)
     Low = (ULONG_PTR)_AddressOfReturnAddress();
 #endif
     Low -= WOW64_DISPATCH_RESERVE;
+    /* Once the stack is committed down to its floor (a stack overflow was just
+     * raised) nothing is left to grow: the worker checks its own frame. */
+    if (Low < GuestStackFloor(Teb32) && Teb32->NtTib.StackLimit <= GuestStackFloor(Teb32))
+        Low = GuestStackFloor(Teb32);
     if (Low < GuestStackFloor(Teb32) || Low >= Teb32->NtTib.StackBase)
     {
         DbgPrint("WoW64: no guest stack left to dispatch exception %08lx\n", Record->ExceptionCode);
         NtTerminateProcess(NtCurrentProcess(), Record->ExceptionCode);
         return;
     }
-    WOW64_GROW_GUEST_STACK(Teb32, Low);
+    _SEH2_TRY
+    {
+        WOW64_GROW_GUEST_STACK(Teb32, Low);
+    }
+    _SEH2_EXCEPT(_SEH2_GetExceptionCode() == STATUS_STACK_OVERFLOW ?
+                 EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+    {
+        /* The growth reached the last guard page: the stack is committed down
+         * to its floor now. The guest gets the overflow, as on i386, where the
+         * exception frame itself overflows the stack. */
+        Record->ExceptionCode = STATUS_STACK_OVERFLOW;
+        Record->ExceptionFlags = 0;
+        Record->NumberParameters = 0;
+    }
+    _SEH2_END;
     DispatchGuestException(Record, Context, Teb32);
 }
 
