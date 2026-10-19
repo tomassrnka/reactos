@@ -8,6 +8,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_AbortPrinter(void);
 extern void func_ClosePrinter(void);
 extern void func_DeletePrinter(void);
 extern void func_EnumPrinters(void);
@@ -27,6 +28,7 @@ extern void func_StartDocPrinter(void);
 
 const struct test winetest_testlist[] =
 {
+    { "AbortPrinter", func_AbortPrinter },
     { "ClosePrinter", func_ClosePrinter },
     { "DeletePrinter", func_DeletePrinter },
     { "EnumPrinters", func_EnumPrinters },
