@@ -140,7 +140,7 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
 
     PRTL_PROCESS_MODULE_INFORMATION ModulePtr = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
-    ULONG UsedSize = sizeof(ULONG);
+    ULONG UsedSize = FIELD_OFFSET(RTL_PROCESS_MODULES, Modules);
     ANSI_STRING AnsiString;
     PCHAR p;
 
@@ -160,9 +160,13 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
         return Status;
     }
 
-    if (Modules == NULL || Size == 0)
+    if (Modules == NULL)
     {
         Status = STATUS_INFO_LENGTH_MISMATCH;
+    }
+    else if (Size < FIELD_OFFSET(RTL_PROCESS_MODULES, Modules))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
     }
     else
     {
@@ -222,9 +226,10 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
             return Status;
         }
 
-        /* Import module name from remote Process user space. */
-        Unicode.Length = lmModule.FullDllName.Length;
-        Unicode.MaximumLength = lmModule.FullDllName.MaximumLength;
+        /* Import module name from remote Process user space. The process
+           controls the length, so it must not exceed the buffer. */
+        Unicode.Length = min(lmModule.FullDllName.Length, sizeof(Buffer)) & ~(USHORT)1;
+        Unicode.MaximumLength = sizeof(Buffer);
         Unicode.Buffer = Buffer;
 
         Status = NtReadVirtualMemory(ProcessHandle,
@@ -242,9 +247,13 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
 
         DPRINT("  Module %wZ\n", &Unicode);
 
-        if (UsedSize > Size)
+        if (Modules != NULL &&
+            FIELD_OFFSET(RTL_PROCESS_MODULES, Modules) +
+            ((SIZE_T)Modules->NumberOfModules + 1) * sizeof(RTL_PROCESS_MODULE_INFORMATION) > Size)
         {
+            /* The list has grown since it was sized: do not write past the buffer */
             Status = STATUS_INFO_LENGTH_MISMATCH;
+            break;
         }
         else if (Modules != NULL)
         {
@@ -275,6 +284,12 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
         }
         UsedSize += sizeof(RTL_PROCESS_MODULE_INFORMATION);
 
+        /* The list is read from a process that can damage it, even make it
+           a cycle. When sizing, Size is the room the caller has: a list that
+           does not fit there cannot be returned, so stop the walk. */
+        if (Modules == NULL && UsedSize > Size)
+            return STATUS_NO_MEMORY;
+
         /* address of the next module in the list */
         pleCurEntry = lmModule.InLoadOrderLinks.Flink;
     }
@@ -284,8 +299,8 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
 
     DPRINT("RtlpQueryRemoteProcessModules End\n");
 
-    /* success */
-    return (STATUS_SUCCESS);
+    /* A list that outgrew the buffer is reported, the sizing pass has no buffer */
+    return (Modules != NULL) ? Status : STATUS_SUCCESS;
 }
 
 
@@ -915,15 +930,23 @@ RtlQueryProcessDebugInformation(IN ULONG ProcessId,
                 PRTL_PROCESS_MODULES Mp;
                 ULONG ReturnSize = 0;
 
+                /* Size the list, at most to the room left in the buffer */
                 Status = RtlpQueryRemoteProcessModules(hProcess,
                                                        NULL,
-                                                       0,
+                                                       (ULONG)min(Buf->ViewSize - Buf->OffsetFree, MAXLONG),
                                                        &ReturnSize);
+                if (!NT_SUCCESS(Status))
+                {
+                    NtClose(hProcess);
+                    return Status;
+                }
 
                 Mp = RtlpDebugBufferCommit(Buf, ReturnSize);
                 if (!Mp)
                 {
                     DPRINT1("RtlQueryProcessDebugInformation: Unable to commit %u\n", ReturnSize);
+                    NtClose(hProcess);
+                    return STATUS_NO_MEMORY;
                 }
 
                 Status = RtlpQueryRemoteProcessModules(hProcess,
