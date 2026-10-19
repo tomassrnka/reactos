@@ -123,6 +123,12 @@ C_ASSERT(FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData) == 16);
 
 static VOID ProbeOutput(ULONG Address, ULONG Size);
 
+/* Size bytes at a guest address lie below the guest's highest address */
+static BOOLEAN GuestRange32(ULONG Address, ULONG64 Size)
+{
+    return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
+}
+
 static NTSTATUS SetProcessTls32(HANDLE Process, ULONG Address, ULONG Length, WOW64_CLEANUP *Cleanup)
 {
     PROCESS_TLS_INFORMATION *Guest = PTR32(Address), *Native;
@@ -655,6 +661,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case JobObjectBasicUIRestrictions:            /* one DWORD */
         case JobObjectBasicAccountingInformation:     /* LARGE_INTEGERs and ULONGs */
         case JobObjectBasicAndIoAccountingInformation:
+            if (!GuestRange32(a[2], a[3]) || (a[4] && !GuestRange32(a[4], sizeof(ULONG))))
+                return STATUS_ACCESS_VIOLATION;
             return NtQueryInformationJobObject(H(0), a[1], P(2), a[3], P(4));
         case JobObjectBasicLimitInformation:
         case JobObjectExtendedLimitInformation:
@@ -664,6 +672,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             BOOLEAN Extended = a[1] == JobObjectExtendedLimitInformation;
             ULONG Size = Extended ? sizeof(*To) : sizeof(To->Basic);
             if (a[3] != Size) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestRange32(a[2], Size) || (a[4] && !GuestRange32(a[4], sizeof(ULONG))))
+                return STATUS_ACCESS_VIOLATION;
             if (a[4]) PROBE(4);
             Status = NtQueryInformationJobObject(H(0), a[1], &From,
                          Extended ? sizeof(From) : sizeof(From.BasicLimitInformation), NULL);
