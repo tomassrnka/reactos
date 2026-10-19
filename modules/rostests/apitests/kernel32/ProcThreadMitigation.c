@@ -38,11 +38,23 @@ static WCHAR Image[MAX_PATH];
 static BOOL IsReactOS, IsWin8, IsWin10_1703;
 static HANDLE Inheritable;
 
+/* DEP holds for a child wherever the processor enforces no-execute: on an amd64 kernel for a
+ * 64-bit process, and for a 32-bit one under WOW64, and nowhere on an i386 kernel. */
+static DWORD HonouredMitigations;
+
+static DWORD DetectHonouredMitigations(void)
+{
 #ifdef _WIN64
-#define HONOURED_MITIGATIONS 0x1
+    return 0x1;
 #else
-#define HONOURED_MITIGATIONS 0x0
+    /* A 32-bit process honours DEP exactly when it runs on an amd64 kernel (under WOW64).
+     * Read the kernel's own architecture from the shared data at offset 0x2c
+     * (KUSER_SHARED_DATA.ImageNumberLow) - the same signal the kernel32 validation uses,
+     * so the test and the code can never disagree. */
+    USHORT KernelMachine = *(volatile USHORT *)(ULONG_PTR)(KUSER_SHARED_DATA_UMPTR + 0x2C);
+    return (KernelMachine == IMAGE_FILE_MACHINE_AMD64) ? 0x1 : 0x0;
 #endif
+}
 
 /* Returns the error of the failing step, or ERROR_SUCCESS when the child ran and exited with 0.
  * With WithHandleList the same list also holds a handle-list entry (the inheritable event). */
@@ -105,7 +117,7 @@ static DWORD RunWithPolicy(const void *Value, SIZE_T Size, BOOL WithHandleList, 
 static DWORD DwordError(DWORD Value)
 {
     if (IsReactOS)
-        return (Value & ~HONOURED_MITIGATIONS) ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
+        return (Value & ~HonouredMitigations) ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
     return (Value & ~7UL) ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
 }
 
@@ -176,6 +188,7 @@ START_TEST(ProcThreadMitigation)
     /* GetVersionEx tells a program without a manifest that it runs on Windows 8 */
     RtlGetVersion(&Version);
     IsReactOS = is_reactos();
+    HonouredMitigations = DetectHonouredMitigations();
     IsWin8 = Version.dwMajorVersion > 6 || (Version.dwMajorVersion == 6 && Version.dwMinorVersion >= 2);
     IsWin10_1703 = Version.dwMajorVersion > 10 || (Version.dwMajorVersion == 10 && Version.dwBuildNumber >= 15063);
     GetModuleFileNameW(NULL, Image, _countof(Image));
@@ -210,7 +223,7 @@ START_TEST(ProcThreadMitigation)
     if (IsReactOS)
     {
         /* The wide forms are read in full; any bit but an honoured one is refused */
-        ExpectWide(8, HONOURED_MITIGATIONS, 0, ERROR_SUCCESS);
+        ExpectWide(8, HonouredMitigations, 0, ERROR_SUCCESS);
         ExpectWide(8, 0x100, 0, ERROR_INVALID_PARAMETER);
         ExpectWide(8, 0x8000000000000000ULL, 0, ERROR_INVALID_PARAMETER);
         ExpectWide(16, 0, 0, ERROR_SUCCESS);

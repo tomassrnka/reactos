@@ -2453,16 +2453,27 @@ BasepIsValidIdealProcessor(
 
 /* The DWORD form of the mitigation policy defines DEP (0x1), DEP-ATL thunk emulation (0x2)
  * and SEHOP (0x4); Windows 7 refuses any other bit when the process is created. The
- * mitigations a child process really gets on ReactOS, by measurement: DEP on amd64 only
- * (the processor enforces no-execute for every 64-bit process; the i386 kernel runs data
- * pages as code), no ATL thunk emulation and no SEHOP anywhere. A request for anything
- * else is refused like Windows refuses a mitigation it does not support, rather than
- * starting a child that is less protected than the caller asked for. */
+ * mitigations a child process really gets on ReactOS, by measurement: DEP wherever the
+ * processor enforces no-execute, no ATL thunk emulation and no SEHOP anywhere. DEP holds
+ * for every process on an amd64 kernel - a 64-bit child, and a 32-bit child under WOW64
+ * alike, because the processor enforces no-execute for both; an i386 kernel runs data
+ * pages as code, so it holds for nothing there. A request for anything else is refused
+ * like Windows refuses a mitigation it does not support, rather than starting a child
+ * that is less protected than the caller asked for. */
+static
+ULONGLONG
+BasepHonouredMitigations(VOID)
+{
 #ifdef _WIN64
-#define BASEP_HONOURED_MITIGATIONS 0x1
+    return 0x1;
 #else
-#define BASEP_HONOURED_MITIGATIONS 0x0
+    /* A 32-bit guest under WOW64 runs on an amd64 kernel, where the child gets
+     * processor-enforced DEP just as a native child does, so it honours DEP like the
+     * native path; a real i386 kernel honours none. SharedUserData->ImageNumberLow is
+     * the kernel's own architecture (see RtlWow64GetProcessMachines). */
+    return (SharedUserData->ImageNumberLow == IMAGE_FILE_MACHINE_AMD64) ? 0x1 : 0x0;
 #endif
+}
 
 static
 NTSTATUS
@@ -2485,7 +2496,7 @@ BasepCheckMitigationPolicy(
     if (!NT_SUCCESS(Status))
         return Status;
 
-    if ((Policy[0] & ~(ULONGLONG)BASEP_HONOURED_MITIGATIONS) || Policy[1])
+    if ((Policy[0] & ~BasepHonouredMitigations()) || Policy[1])
         return STATUS_INVALID_PARAMETER;
 
     return STATUS_SUCCESS;
