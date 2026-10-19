@@ -153,6 +153,7 @@ extern void func_RtlpApplyLengthFunction(void);
 extern void func_RtlpEnsureBufferSize(void);
 extern void func_RtlQueryEnvironmentVariable(void);
 extern void func_RtlQueryEnvironmentVariable_U(void);
+extern void func_RtlQueryProcessDebugModules(void);
 extern void func_RtlQueryRegistryValues(void);
 extern void func_RtlDeriveCapabilitySidsFromName(void);
 extern void func_RtlQueryPerformanceCounter(void);
@@ -343,6 +344,7 @@ const struct test winetest_testlist[] =
     { "RtlpEnsureBufferSize",           func_RtlpEnsureBufferSize },
     { "RtlQueryEnvironmentVariable",    func_RtlQueryEnvironmentVariable },
     { "RtlQueryEnvironmentVariable_U",  func_RtlQueryEnvironmentVariable_U },
+    { "RtlQueryProcessDebugModules",    func_RtlQueryProcessDebugModules },
     { "RtlQueryRegistryValues",         func_RtlQueryRegistryValues },
     { "RtlDeriveCapabilitySidsFromName", func_RtlDeriveCapabilitySidsFromName },
     { "RtlQueryPerformanceCounter",     func_RtlQueryPerformanceCounter },
