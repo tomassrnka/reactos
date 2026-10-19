@@ -480,10 +480,25 @@ DrvGradientFill(
     if (psoShadowDst == NULL || nVertex == 0)
         return FALSE;
 
-    /* Everything drawn is within the bounds of the vertices: a rectangle up
-     * to its right and bottom edges, a triangle moved by the dither origin
-     * (the DC origin) and with a pixel more on each side for the rounding of
-     * its edges */
+    if (ulMode == GRADIENT_FILL_TRIANGLE)
+    {
+        /* A triangle is drawn only within its extents (and the clip): keep
+         * those on the screen */
+        rcl.left = max(min(prclExtents->left, prclExtents->right), 0);
+        rcl.top = max(min(prclExtents->top, prclExtents->bottom), 0);
+        rcl.right = min(max(prclExtents->left, prclExtents->right), (LONG)psoShadowDst->sizlBitmap.cx);
+        rcl.bottom = min(max(prclExtents->top, prclExtents->bottom), (LONG)psoShadowDst->sizlBitmap.cy);
+        if (rcl.left >= rcl.right || rcl.top >= rcl.bottom)
+            return TRUE;
+
+        bRet = EngGradientFill(psoShadowDst, pco, pxlo, pVertex, nVertex,
+                               pMesh, nMesh, &rcl, pptlDitherOrg, ulMode);
+        FbUpdateScreen(psoDest, &rcl, pco);
+        return bRet;
+    }
+
+    /* A rectangle is drawn within its vertices, which are in screen
+     * coordinates, up to their right and bottom edges */
     left = right = pVertex[0].x;
     top = bottom = pVertex[0].y;
     for (i = 1; i < nVertex; i++)
@@ -493,28 +508,15 @@ DrvGradientFill(
         right = max(right, pVertex[i].x);
         bottom = max(bottom, pVertex[i].y);
     }
-    if (ulMode == GRADIENT_FILL_TRIANGLE)
-    {
-        if (pptlDitherOrg != NULL)
-        {
-            left += pptlDitherOrg->x;
-            right += pptlDitherOrg->x;
-            top += pptlDitherOrg->y;
-            bottom += pptlDitherOrg->y;
-        }
-        left--;
-        top--;
-        right += 2;
-        bottom += 2;
-    }
     FbBoundsRect(&rcl, left, top, right, bottom);
 
-    /* IntEngGradientFill does not retry another way, and EngGradientFill on
-     * a device surface does not work for triangles (it gets a copy of an
-     * empty rectangle): not drawn. Only a DC whose clip still reaches past
-     * the screen after a mode change gets here. */
+    /* Otherwise let the engine draw it on the screen surface, through
+     * DrvCopyBits (IntEngGradientFill does not retry another way) */
     if (!FbInScreen(psoDest, pco, &rcl))
-        return FALSE;
+    {
+        return EngGradientFill(psoDest, pco, pxlo, pVertex, nVertex,
+                               pMesh, nMesh, prclExtents, pptlDitherOrg, ulMode);
+    }
 
     bRet = EngGradientFill(psoShadowDst, pco, pxlo, pVertex, nVertex,
                            pMesh, nMesh, prclExtents, pptlDitherOrg, ulMode);
