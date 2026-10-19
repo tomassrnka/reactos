@@ -223,3 +223,75 @@ START_TEST(StackOverflowThread)
     ok(Exit == 0x50f, "Thread exit code 0x%lx\n", Exit);
     CloseHandle(Thread);
 }
+
+/* Deep use of the first thread's stack that does not overflow it: 900 KiB in
+ * frames below a page each, so the stack grows one guard page at a time.
+ * The test runs in its own process, so this is the first thread's stack. */
+static ULONG_PTR DeepTarget;
+static ULONG_PTR DeepLowest;
+
+static
+ULONG
+deep_recursive(ULONG Depth)
+{
+    volatile CHAR Buffer[0xe00];
+    ULONG Sum;
+
+    Buffer[0] = (CHAR)Depth;
+    Buffer[sizeof(Buffer) - 1] = (CHAR)Depth;
+    DeepLowest = (ULONG_PTR)&Buffer[0];
+    if ((ULONG_PTR)&Buffer[0] > DeepTarget)
+        Sum = deep_recursive(Depth + 1);
+    else
+        Sum = Depth;
+    return Sum + Buffer[0] - Buffer[sizeof(Buffer) - 1];
+}
+
+START_TEST(StackDeepRecursion)
+{
+    ULONG_PTR Base = (ULONG_PTR)NtCurrentTeb()->NtTib.StackBase;
+    ULONG_PTR Reserve = (ULONG_PTR)NtCurrentTeb()->DeallocationStack;
+    MEMORY_BASIC_INFORMATION Info;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG Depth = 0;
+
+    trace("Stack %p-%p, limit %p\n", (PVOID)Reserve, (PVOID)Base, NtCurrentTeb()->NtTib.StackLimit);
+    /* The stack is not committed in full: a guard page is below the limit */
+    ok((ULONG_PTR)NtCurrentTeb()->NtTib.StackLimit > Reserve + 2 * PAGE_SIZE, "Stack limit %p, reserve %p\n",
+       NtCurrentTeb()->NtTib.StackLimit, (PVOID)Reserve);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), (PUCHAR)NtCurrentTeb()->NtTib.StackLimit - PAGE_SIZE,
+                                  MemoryBasicInformation, &Info, sizeof(Info), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_long(Info.State, MEM_COMMIT);
+    ok_long(Info.Protect, PAGE_READWRITE | PAGE_GUARD);
+    /* 900 KiB, or all but 64 KiB of a smaller stack */
+    if (Base - Reserve < 128 * 1024)
+    {
+        skip("The stack reserve is 0x%Ix\n", Base - Reserve);
+        return;
+    }
+    DeepTarget = Base - min(900 * 1024, Base - Reserve - 64 * 1024);
+    Status = STATUS_SUCCESS;
+    _SEH2_TRY
+    {
+        Depth = deep_recursive(0);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok(Depth > (Base - DeepTarget) / 0x1000, "Depth %lu\n", Depth);
+    ok(DeepLowest <= DeepTarget, "Lowest frame %p, target %p\n", (PVOID)DeepLowest, (PVOID)DeepTarget);
+    /* The stack grew to the deepest frame and still has a guard page below */
+    ok((ULONG_PTR)NtCurrentTeb()->NtTib.StackLimit <= DeepLowest, "Stack limit %p, lowest frame %p\n",
+       NtCurrentTeb()->NtTib.StackLimit, (PVOID)DeepLowest);
+    ok((ULONG_PTR)NtCurrentTeb()->NtTib.StackLimit > Reserve + 2 * PAGE_SIZE, "Stack limit %p, reserve %p\n",
+       NtCurrentTeb()->NtTib.StackLimit, (PVOID)Reserve);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), (PUCHAR)NtCurrentTeb()->NtTib.StackLimit - PAGE_SIZE,
+                                  MemoryBasicInformation, &Info, sizeof(Info), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_long(Info.State, MEM_COMMIT);
+    ok_long(Info.Protect, PAGE_READWRITE | PAGE_GUARD);
+}

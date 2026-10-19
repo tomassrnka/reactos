@@ -178,6 +178,7 @@ extern void func_RtlVirtualUnwind(void);
 extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
 extern void func_SectionFaultCost(void);
+extern void func_StackDeepRecursion(void);
 extern void func_StackOverflow(void);
 extern void func_StackOverflowThread(void);
 extern void func_SystemCallStubs(void);
@@ -361,6 +362,7 @@ const struct test winetest_testlist[] =
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
     { "SectionFaultCost",               func_SectionFaultCost },
+    { "StackDeepRecursion",             func_StackDeepRecursion },
     { "StackOverflow",                  func_StackOverflow },
     { "StackOverflowThread",            func_StackOverflowThread },
     { "SystemCallStubs",                func_SystemCallStubs },
