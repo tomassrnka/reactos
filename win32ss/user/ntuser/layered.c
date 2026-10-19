@@ -103,9 +103,11 @@ IntUpdateLayeredWindowI( PWND pWnd,
 {
    PWND Parent;
    RECT Window, Client;
+   BOOL Moved = FALSE, PointerCrossed = FALSE;
    SIZE Offset;
    BOOL ret = FALSE;
-   DWORD flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW;
+   DWORD flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_DEFERERASE;
+   USER_REFERENCE_ENTRY Ref;
 
    Window = pWnd->rcWindow;
    Client = pWnd->rcClient;
@@ -123,7 +125,8 @@ IntUpdateLayeredWindowI( PWND pWnd,
       Offset.cy = info->pptDst->y - Window.top;
       RECTL_vOffsetRect( &Client, Offset.cx, Offset.cy );
       RECTL_vOffsetRect( &Window, Offset.cx, Offset.cy );
-      flags &= ~SWP_NOMOVE;
+      if (Offset.cx || Offset.cy)
+         flags &= ~SWP_NOMOVE;
    }
    if (info->psize)
    {
@@ -145,7 +148,41 @@ IntUpdateLayeredWindowI( PWND pWnd,
       Client.bottom += Offset.cy;
       Window.right  += Offset.cx;
       Window.bottom += Offset.cy;
-      flags &= ~SWP_NOSIZE;
+      if (Offset.cx || Offset.cy)
+         flags &= ~SWP_NOSIZE;
+   }
+
+   /*
+    * The geometry and the content change as one unit, with no callback into
+    * user mode in between: UpdateLayeredWindow calls no window procedure (the
+    * caller is often a renderer thread that the window's own thread waits
+    * for), and a hook run halfway could destroy the window or interleave
+    * another update. The notifications follow at the end.
+    */
+   UserRefObjectCo(pWnd, &Ref);
+   if ((flags & (SWP_NOMOVE | SWP_NOSIZE)) != (SWP_NOMOVE | SWP_NOSIZE))
+   {
+      BOOL ClipSiblings = (pWnd->style & WS_CLIPSIBLINGS) ? TRUE : FALSE;
+      PREGION VisBefore = VIS_ComputeVisibleRegion(pWnd, FALSE, FALSE, ClipSiblings);
+      BOOL PointerWasIn = IntPtInWindow(pWnd, gpsi->ptCursor.x, gpsi->ptCursor.y);
+
+      Moved = TRUE;
+      co_WinPosSetWindowPosEx(pWnd, 0, Window.left, Window.top, Window.right - Window.left, Window.bottom - Window.top, flags, TRUE);
+      PointerCrossed = (PointerWasIn != IntPtInWindow(pWnd, gpsi->ptCursor.x, gpsi->ptCursor.y));
+
+      /* Repaint what the window really uncovered (window region included): parent and siblings */
+      if (VisBefore)
+      {
+         PREGION VisAfter = VIS_ComputeVisibleRegion(pWnd, FALSE, FALSE, ClipSiblings);
+         INT Type = VisAfter ? IntGdiCombineRgn(VisBefore, VisBefore, VisAfter, RGN_DIFF) : REGION_Complexity(VisBefore);
+         if (Type != ERROR && Type != NULLREGION)
+         {
+            REGION_bOffsetRgn(VisBefore, -pWnd->rcWindow.left, -pWnd->rcWindow.top);
+            co_VIS_WindowLayoutChanged(pWnd, VisBefore);
+         }
+         if (VisAfter) REGION_Delete(VisAfter);
+         REGION_Delete(VisBefore);
+      }
    }
 
    if (info->hdcSrc)
@@ -228,7 +265,9 @@ IntUpdateLayeredWindowI( PWND pWnd,
    else
       ret = TRUE;
 
-   co_WinPosSetWindowPos(pWnd, 0, Window.left, Window.top, Window.right - Window.left, Window.bottom - Window.top, flags);
+   if (Moved)
+      co_WinPosNoMessagesNotify(pWnd, PointerCrossed);
+   UserDerefObjectCo(pWnd);
    return ret;
 }
 

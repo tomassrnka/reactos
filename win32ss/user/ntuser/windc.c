@@ -193,7 +193,7 @@ DceUpdateVisRgn(DCE *Dce, PWND Window, ULONG Flags)
 {
    PREGION RgnVisible = NULL;
    ULONG DcxFlags;
-   PWND DesktopWindow;
+   PWND DesktopWindow = NULL;
 
    if (Flags & DCX_PARENTCLIP)
    {
@@ -259,9 +259,16 @@ noparent:
    else if ((Flags & DCX_EXCLUDERGN) && Dce->hrgnClip != NULL)
    {
        PREGION RgnClip = REGION_LockRgn(Dce->hrgnClip);
-       IntGdiCombineRgn(RgnVisible, RgnVisible, RgnClip, RGN_DIFF);
-       REGION_UnlockRgn(RgnClip);
+       if (RgnClip)
+       {
+           IntGdiCombineRgn(RgnVisible, RgnVisible, RgnClip, RGN_DIFF);
+           REGION_UnlockRgn(RgnClip);
+       }
    }
+
+   /* A failed allocation must not select the whole surface: select the empty default region */
+   if (!RgnVisible && (Window || DesktopWindow))
+      RgnVisible = prgnDefault;
 
    Dce->DCXFlags &= ~DCX_DCEDIRTY;
    GdiSelectVisRgn(Dce->hDC, RgnVisible);

@@ -24,8 +24,13 @@
 typedef struct _USER_RAWINPUT
 {
     LIST_ENTRY ListEntry;
+    HRAWINPUT Handle;
     RAWINPUT RawInput;
 } USER_RAWINPUT, *PUSER_RAWINPUT;
+
+/* Handles are serial numbers, not addresses: a freed packet's memory is reused at once,
+   and an old handle must not read the packet that took its place */
+static ULONG gRawInputSerial;
 
 C_ASSERT(FIELD_OFFSET(RAWINPUT, data) == sizeof(RAWINPUTHEADER));
 C_ASSERT(sizeof(RAWINPUTHEADER) + sizeof(RAWMOUSE) <= sizeof(RAWINPUT));
@@ -34,8 +39,43 @@ C_ASSERT(sizeof(RAWINPUTHEADER) + sizeof(RAWKEYBOARD) <= sizeof(RAWINPUT));
 #define MAX_RAWINPUT_PER_QUEUE 256
 
 static PAGED_LOOKASIDE_LIST gRawInputLookasideList;
-PRAWINPUTDEVICE global_pRawInputDevices = NULL;
 BOOLEAN RawInputEnabled = FALSE;
+
+#ifndef WM_INPUT_DEVICE_CHANGE
+#define WM_INPUT_DEVICE_CHANGE 0x00FE
+#endif
+
+#ifndef MOUSEEVENTF_MOVE_NOCOALESCE
+#define MOUSEEVENTF_MOVE_NOCOALESCE 0x2000
+#endif
+
+#ifndef MOUSE_MOVE_NOCOALESCE
+#define MOUSE_MOVE_NOCOALESCE 0x08
+#endif
+
+#ifndef MOUSEEVENTF_HWHEEL
+#define MOUSEEVENTF_HWHEEL 0x1000
+#endif
+
+#ifndef RI_MOUSE_HWHEEL
+#define RI_MOUSE_HWHEEL 0x0800
+#endif
+
+#define RIDEV_CLASS_MASK (RIDEV_EXCLUDE | RIDEV_PAGEONLY)
+
+/* Registrations of one process, kept sorted by usage page and usage; owned
+   by the process and protected by the USER lock */
+typedef struct _RAWINPUT_REG
+{
+    RAWINPUTDEVICE Device;
+    PTHREADINFO ptiTarget; /* thread of the target window when it was registered */
+} RAWINPUT_REG;
+
+struct _RAWINPUT_REGTABLE
+{
+    UINT cRegs;
+    RAWINPUT_REG aRegs[ANYSIZE_ARRAY];
+};
 
 DWORD
 APIENTRY
@@ -189,83 +229,260 @@ cleanup:
 }
 
 
+
 static
-INT
-RawInputDeviceIndexFromType(
+DWORD
+RawInputUsageFromType(
     DWORD dwType)
 {
     switch (dwType)
     {
         case RIM_TYPEMOUSE:
-            return 0;
+            return HID_USAGE_GENERIC_MOUSE;
 
         case RIM_TYPEKEYBOARD:
-            return 1;
+            return HID_USAGE_GENERIC_KEYBOARD;
 
         default:
-            return -1;
+            return 0;
     }
 }
 
 static
-PRAWINPUTDEVICE
-RawInputRegistrationFromType(
+BOOL
+RawRegIsPageEntry(
+    const RAWINPUTDEVICE *Reg)
+{
+    return (Reg->dwFlags & RIDEV_CLASS_MASK) == RIDEV_PAGEONLY;
+}
+
+/* Registration that applies to a top level collection, NULL if none or excluded */
+static
+const RAWINPUTDEVICE *
+RawRegLookup(
+    PRAWINPUT_REGTABLE Table,
+    USHORT usUsagePage,
+    USHORT usUsage)
+{
+    const RAWINPUTDEVICE *PageReg = NULL;
+    UINT i;
+
+    if (!Table)
+        return NULL;
+
+    for (i = 0; i < Table->cRegs; i++)
+    {
+        const RAWINPUTDEVICE *Reg = &Table->aRegs[i].Device;
+
+        if (Reg->usUsagePage != usUsagePage)
+            continue;
+
+        if (RawRegIsPageEntry(Reg))
+        {
+            PageReg = Reg;
+        }
+        else if (Reg->usUsage == usUsage)
+        {
+            if ((Reg->dwFlags & RIDEV_CLASS_MASK) == RIDEV_EXCLUDE)
+                return NULL;
+            return Reg;
+        }
+    }
+
+    return PageReg;
+}
+
+static
+const RAWINPUTDEVICE *
+RawRegLookupType(
+    PRAWINPUT_REGTABLE Table,
     DWORD dwType)
 {
-    INT Index = RawInputDeviceIndexFromType(dwType);
+    DWORD Usage = RawInputUsageFromType(dwType);
 
-    if (!global_pRawInputDevices || Index < 0)
+    if (!Usage)
         return NULL;
 
-    if (global_pRawInputDevices[Index].usUsagePage != HID_USAGE_PAGE_GENERIC)
-        return NULL;
-
-    if ((dwType == RIM_TYPEMOUSE && global_pRawInputDevices[Index].usUsage != HID_USAGE_GENERIC_MOUSE) ||
-        (dwType == RIM_TYPEKEYBOARD && global_pRawInputDevices[Index].usUsage != HID_USAGE_GENERIC_KEYBOARD))
-        return NULL;
-
-    return &global_pRawInputDevices[Index];
+    return RawRegLookup(Table, HID_USAGE_PAGE_GENERIC, (USHORT)Usage);
 }
 
 static
 VOID
-RawInputWarnUnimplementedFlags(
-    const RAWINPUTDEVICE *Device)
+RawInputUpdateEnabled(VOID)
 {
-    BOOL IsMouse = (Device->usUsagePage == HID_USAGE_PAGE_GENERIC &&
-                    Device->usUsage == HID_USAGE_GENERIC_MOUSE);
-    BOOL IsKeyboard = (Device->usUsagePage == HID_USAGE_PAGE_GENERIC &&
-                       Device->usUsage == HID_USAGE_GENERIC_KEYBOARD);
-    DWORD PageFlags = Device->dwFlags & (RIDEV_PAGEONLY | RIDEV_EXCLUDE);
+    PPROCESSINFO ppi;
+    BOOLEAN Enabled = FALSE;
 
-    if ((PageFlags == RIDEV_NOLEGACY) && (IsMouse || IsKeyboard))
+    for (ppi = gppiList; ppi && !Enabled; ppi = ppi->ppiNext)
     {
-        DPRINT1("RIDEV_NOLEGACY for raw %s is accepted but not implemented yet.\n",
-                IsMouse ? "mouse" : "keyboard");
+        Enabled = RawRegLookupType(ppi->pRawInputRegs, RIM_TYPEMOUSE) ||
+                  RawRegLookupType(ppi->pRawInputRegs, RIM_TYPEKEYBOARD);
+    }
+
+    RawInputEnabled = Enabled;
+}
+
+static
+INT
+RawRegCompare(
+    const RAWINPUTDEVICE *a,
+    const RAWINPUTDEVICE *b)
+{
+    if (a->usUsagePage != b->usUsagePage)
+        return a->usUsagePage < b->usUsagePage ? -1 : 1;
+    if (a->usUsage != b->usUsage)
+        return a->usUsage < b->usUsage ? -1 : 1;
+    return 0;
+}
+
+static
+PRAWINPUT_REGTABLE
+RawRegAlloc(
+    UINT cRegs)
+{
+    PRAWINPUT_REGTABLE Table;
+
+    Table = ExAllocatePoolWithTag(PagedPool,
+                                  FIELD_OFFSET(RAWINPUT_REGTABLE, aRegs[cRegs ? cRegs : 1]),
+                                  'iwar');
+    if (Table)
+    {
+        Table->cRegs = cRegs;
+        if (cRegs)
+            RtlZeroMemory(Table->aRegs, cRegs * sizeof(Table->aRegs[0]));
+    }
+    return Table;
+}
+
+/* Sets (or with Remove clears) one registration. Adding copies the table first so a
+   failed allocation leaves the old table untouched; removing works in place. */
+static
+BOOL
+RawRegApply(
+    PPROCESSINFO ppi,
+    const RAWINPUTDEVICE *Device,
+    PTHREADINFO ptiTarget,
+    BOOL Remove)
+{
+    PRAWINPUT_REGTABLE Old = ppi->pRawInputRegs, New;
+    RAWINPUTDEVICE Entry = *Device;
+    UINT i, Pos, cOld = Old ? Old->cRegs : 0;
+    BOOL Found = FALSE;
+
+    /* Windows keeps neither the notification nor the 0x800 bit, and the extended sink wins */
+    Entry.dwFlags &= ~(RIDEV_DEVNOTIFY | 0x800);
+    if (Entry.dwFlags & RIDEV_EXINPUTSINK)
+        Entry.dwFlags &= ~RIDEV_INPUTSINK;
+
+    for (Pos = 0; Pos < cOld; Pos++)
+    {
+        INT Cmp = RawRegCompare(&Old->aRegs[Pos].Device, &Entry);
+
+        if (Cmp == 0)
+        {
+            Found = TRUE;
+            break;
+        }
+        if (Cmp > 0)
+            break;
+    }
+
+    if (Remove)
+    {
+        if (!Found)
+            return TRUE;
+
+        if (cOld == 1)
+        {
+            ppi->pRawInputRegs = NULL;
+            ExFreePoolWithTag(Old, 'iwar');
+            return TRUE;
+        }
+
+        /* Removal never allocates: it cannot fail, so a thread exit or a REMOVE always
+           drops the registration (and a NOLEGACY with it) */
+        for (i = Pos + 1; i < cOld; i++)
+            Old->aRegs[i - 1] = Old->aRegs[i];
+        Old->cRegs--;
+        return TRUE;
+    }
+    else if (Found)
+    {
+        Old->aRegs[Pos].Device = Entry;
+        Old->aRegs[Pos].ptiTarget = ptiTarget;
+        return TRUE;
     }
     else
     {
-        if (Device->dwFlags & RIDEV_PAGEONLY)
-            DPRINT1("RIDEV_PAGEONLY is accepted but not implemented yet.\n");
-
-        if (Device->dwFlags & RIDEV_EXCLUDE)
-            DPRINT1("RIDEV_EXCLUDE is accepted but not implemented yet.\n");
+        New = RawRegAlloc(cOld + 1);
+        if (!New)
+            return FALSE;
+        for (i = 0; i < Pos; i++)
+            New->aRegs[i] = Old->aRegs[i];
+        New->aRegs[Pos].Device = Entry;
+        New->aRegs[Pos].ptiTarget = ptiTarget;
+        for (i = Pos; i < cOld; i++)
+            New->aRegs[i + 1] = Old->aRegs[i];
     }
 
-    if (IsMouse && (Device->dwFlags & RIDEV_CAPTUREMOUSE))
-        DPRINT1("RIDEV_CAPTUREMOUSE for raw mouse is accepted but not implemented yet.\n");
+    ppi->pRawInputRegs = New;
+    if (Old)
+        ExFreePoolWithTag(Old, 'iwar');
+    return TRUE;
+}
 
-    if (IsKeyboard && (Device->dwFlags & RIDEV_NOHOTKEYS))
-        DPRINT1("RIDEV_NOHOTKEYS for raw keyboard is accepted but not implemented yet.\n");
+VOID
+FASTCALL
+UserRawInputProcessDestroy(
+    PPROCESSINFO ppi)
+{
+    if (ppi->pRawInputRegs)
+    {
+        ExFreePoolWithTag(ppi->pRawInputRegs, 'iwar');
+        ppi->pRawInputRegs = NULL;
+    }
+    RawInputUpdateEnabled();
+}
 
-    if (IsKeyboard && (Device->dwFlags & RIDEV_APPKEYS))
-        DPRINT1("RIDEV_APPKEYS for raw keyboard is accepted but not implemented yet.\n");
+/* Windows drops the registrations aimed at the windows of a thread when the thread exits */
+VOID
+FASTCALL
+UserRawInputThreadCleanup(
+    PTHREADINFO pti)
+{
+    PPROCESSINFO ppi = pti->ppi;
+    PRAWINPUT_REGTABLE Table = ppi->pRawInputRegs;
+    UINT i = 0;
 
-    if (Device->dwFlags & RIDEV_EXINPUTSINK)
-        DPRINT1("RIDEV_EXINPUTSINK is only partially implemented.\n");
+    while (Table && i < Table->cRegs)
+    {
+        if (Table->aRegs[i].ptiTarget == pti)
+        {
+            RAWINPUTDEVICE Entry = Table->aRegs[i].Device;
 
-    if (Device->dwFlags & RIDEV_DEVNOTIFY)
-        DPRINT1("RIDEV_DEVNOTIFY is accepted but not implemented yet.\n");
+            RawRegApply(ppi, &Entry, NULL, TRUE);
+            Table = ppi->pRawInputRegs;
+            continue;
+        }
+        i++;
+    }
+
+    RawInputUpdateEnabled();
+}
+
+BOOL
+FASTCALL
+UserRawInputNoLegacy(
+    PPROCESSINFO ppi,
+    DWORD dwType)
+{
+    const RAWINPUTDEVICE *Reg;
+
+    if (!RawInputEnabled || !ppi)
+        return FALSE;
+
+    Reg = RawRegLookupType(ppi->pRawInputRegs, dwType);
+    return Reg && (Reg->dwFlags & RIDEV_CLASS_MASK) == RIDEV_NOLEGACY;
 }
 
 static
@@ -284,7 +501,7 @@ RawInputEntryFromHandle(
          Entry = Entry->Flink)
     {
         PUSER_RAWINPUT RawEntry = CONTAINING_RECORD(Entry, USER_RAWINPUT, ListEntry);
-        if ((HRAWINPUT)&RawEntry->RawInput == hRawInput)
+        if (RawEntry->Handle == hRawInput)
             return RawEntry;
     }
 
@@ -317,6 +534,19 @@ InitRawInputImpl(VOID)
                                    256);
     return STATUS_SUCCESS;
 }
+
+#if DBG
+ULONG
+FASTCALL
+UserRawInputSetSerial(
+    ULONG Serial)
+{
+    ULONG Old = gRawInputSerial;
+
+    gRawInputSerial = Serial;
+    return Old;
+}
+#endif
 
 HRAWINPUT
 FASTCALL
@@ -354,9 +584,19 @@ UserCreateRawInput(
     RawEntry->RawInput.header.wParam = wParam;
     RtlCopyMemory(&RawEntry->RawInput.data, pData, cbData);
 
+    /* The serial space wraps: a handle that is still live in the queue is skipped */
+    do
+    {
+        do
+        {
+            ++gRawInputSerial;
+        } while ((gRawInputSerial & 0x3FFFFFFF) == 0);
+        RawEntry->Handle = (HRAWINPUT)(ULONG_PTR)(((gRawInputSerial & 0x3FFFFFFF) << 2) | 1);
+    } while (RawInputEntryFromHandle(pti->MessageQueue, RawEntry->Handle));
+
     InsertTailList(&pti->MessageQueue->RawInputListHead, &RawEntry->ListEntry);
     pti->MessageQueue->cRawInput++;
-    return (HRAWINPUT)&RawEntry->RawInput;
+    return RawEntry->Handle;
 }
 
 BOOL
@@ -408,75 +648,225 @@ UserCleanupRawInput(
     }
 }
 
+/* Process that owns the focus (else the active) window of the foreground queue; the
+   thread recorded in the queue at its creation is not the owner once threads attach */
+static
+PPROCESSINFO
+RawInputFocusProcess(
+    PUSER_MESSAGE_QUEUE pFocusQueue)
+{
+    PWND pWnd;
+
+    if (!pFocusQueue)
+        return NULL;
+
+    pWnd = pFocusQueue->spwndFocus ? pFocusQueue->spwndFocus : pFocusQueue->spwndActive;
+    if (pWnd && pWnd->head.pti)
+        return pWnd->head.pti->ppi;
+
+    return pFocusQueue->ptiKeyboard ? pFocusQueue->ptiKeyboard->ppi : NULL;
+}
+
+/* NOLEGACY for the keys that the focus queue posts on its own (Alt+Numpad characters) */
 BOOL
 FASTCALL
-UserGetRawInputTarget(
-    DWORD dwType,
-    PTHREADINFO *ppti,
-    HWND *phwndTarget,
-    WPARAM *pwParam)
+UserRawInputQueueNoLegacy(
+    PUSER_MESSAGE_QUEUE pFocusQueue,
+    DWORD dwType)
 {
-    PRAWINPUTDEVICE Registration;
-    PUSER_MESSAGE_QUEUE pFocusQueue;
-    PWND pWnd = NULL;
-    PTHREADINFO pti;
+    return UserRawInputNoLegacy(RawInputFocusProcess(pFocusQueue), dwType);
+}
 
-    Registration = RawInputRegistrationFromType(dwType);
-    if (!Registration)
-        return FALSE;
+/* Window that receives the raw input of one process, NULL if it gets none now */
+static
+PWND
+RawInputFindTarget(
+    PPROCESSINFO ppi,
+    const RAWINPUTDEVICE *Reg,
+    PUSER_MESSAGE_QUEUE pFocusQueue)
+{
+    PWND pWnd;
 
-    pFocusQueue = IntGetFocusMessageQueue();
-    if (!pFocusQueue)
-        return FALSE;
-
-    if (Registration->hwndTarget)
+    if (Reg->hwndTarget)
     {
-        pWnd = UserGetWindowObject(Registration->hwndTarget);
-        if (!pWnd)
-            return FALSE;
+        pWnd = UserGetWindowObject(Reg->hwndTarget);
     }
     else
     {
+        if (!pFocusQueue)
+            return NULL;
         pWnd = pFocusQueue->spwndFocus;
         if (!pWnd)
             pWnd = pFocusQueue->spwndActive;
+    }
+
+    if (!pWnd || !pWnd->head.pti || pWnd->head.pti->ppi != ppi)
+        return NULL;
+
+    return pWnd;
+}
+
+VOID
+FASTCALL
+UserRawInputDeliver(
+    DWORD dwType,
+    HANDLE hDevice,
+    CONST VOID *pData,
+    UINT cbData)
+{
+    PUSER_MESSAGE_QUEUE pFocusQueue;
+    PPROCESSINFO ppi, ppiFocus = NULL;
+
+    if (!RawInputEnabled)
+        return;
+
+    pFocusQueue = IntGetFocusMessageQueue();
+    ppiFocus = RawInputFocusProcess(pFocusQueue);
+
+    for (ppi = gppiList; ppi; ppi = ppi->ppiNext)
+    {
+        const RAWINPUTDEVICE *Reg;
+        PTHREADINFO pti;
+        PWND pWnd;
+        WPARAM wParam;
+        HRAWINPUT hRawInput;
+        MSG Msg = {0};
+
+        if ((ppi->W32PF_flags & W32PF_TERMINATED) || !ppi->pRawInputRegs)
+            continue;
+
+        Reg = RawRegLookupType(ppi->pRawInputRegs, dwType);
+        if (!Reg)
+            continue;
+
+        pWnd = RawInputFindTarget(ppi, Reg, pFocusQueue);
         if (!pWnd)
-            return FALSE;
+            continue;
+
+        pti = pWnd->head.pti;
+        if (Reg->dwFlags & RIDEV_INPUTSINK)
+        {
+            /* Sinks only reach windows of the input desktop */
+            if (!pti->rpdesk || !IntIsActiveDesktop(pti->rpdesk))
+                continue;
+            wParam = (ppi == ppiFocus) ? RIM_INPUT : RIM_INPUTSINK;
+        }
+        else if (ppi == ppiFocus)
+        {
+            /* The foreground process gets it at the registered window, whatever thread owns that */
+            wParam = RIM_INPUT;
+        }
+        else if (Reg->dwFlags & RIDEV_EXINPUTSINK)
+        {
+            /* Sinks of any kind only reach windows of the input desktop: nothing may
+               listen to the keys typed on another one (the secure desktop) */
+            if (!pti->rpdesk || !IntIsActiveDesktop(pti->rpdesk))
+                continue;
+            /* Background delivery only while the foreground process gets none */
+            if (ppiFocus && RawRegLookupType(ppiFocus->pRawInputRegs, dwType))
+                continue;
+            wParam = RIM_INPUTSINK;
+        }
+        else
+        {
+            continue;
+        }
+
+        hRawInput = UserCreateRawInput(pti, dwType, hDevice, wParam, pData, cbData);
+        if (!hRawInput)
+            continue;
+
+        Msg.hwnd = UserHMGetHandle(pWnd);
+        Msg.message = WM_INPUT;
+        Msg.wParam = wParam;
+        Msg.lParam = (LPARAM)hRawInput;
+        Msg.time = EngGetTickCount32();
+        Msg.pt = gpsi->ptCursor;
+
+        if (!MsqPostMessage(pti, &Msg, TRUE, QS_RAWINPUT, 0, 0))
+            UserFreeRawInput(pti->MessageQueue, hRawInput);
     }
+}
 
-    pti = pWnd->head.pti;
-    if (!pti)
-        return FALSE;
+VOID
+FASTCALL
+UserRawInputSendMouse(
+    MOUSEINPUT *pmi)
+{
+    RAWMOUSE rm = {0};
+    DWORD dwFlags = UserStripMouseDataFlags(pmi->dwFlags);
 
-    if (pFocusQueue->ptiKeyboard && pti->rpdesk != pFocusQueue->ptiKeyboard->rpdesk)
-        return FALSE;
+    if (!RawInputEnabled)
+        return;
 
-    if (Registration->dwFlags & RIDEV_INPUTSINK)
+    if (dwFlags & MOUSEEVENTF_MOVE)
     {
-        *pwParam = (pti->MessageQueue == pFocusQueue) ? RIM_INPUT : RIM_INPUTSINK;
-        *phwndTarget = UserHMGetHandle(pWnd);
-        *ppti = pti;
-        return TRUE;
+        if (dwFlags & MOUSEEVENTF_ABSOLUTE)
+            rm.usFlags |= MOUSE_MOVE_ABSOLUTE;
+        if (dwFlags & MOUSEEVENTF_VIRTUALDESK)
+            rm.usFlags |= MOUSE_VIRTUAL_DESKTOP;
+        if (dwFlags & MOUSEEVENTF_MOVE_NOCOALESCE)
+            rm.usFlags |= MOUSE_MOVE_NOCOALESCE;
+        rm.lLastX = pmi->dx;
+        rm.lLastY = pmi->dy;
     }
 
-    if (Registration->dwFlags & RIDEV_EXINPUTSINK)
+    if (dwFlags & MOUSEEVENTF_LEFTDOWN)   rm.usButtonFlags |= RI_MOUSE_LEFT_BUTTON_DOWN;
+    if (dwFlags & MOUSEEVENTF_LEFTUP)     rm.usButtonFlags |= RI_MOUSE_LEFT_BUTTON_UP;
+    if (dwFlags & MOUSEEVENTF_RIGHTDOWN)  rm.usButtonFlags |= RI_MOUSE_RIGHT_BUTTON_DOWN;
+    if (dwFlags & MOUSEEVENTF_RIGHTUP)    rm.usButtonFlags |= RI_MOUSE_RIGHT_BUTTON_UP;
+    if (dwFlags & MOUSEEVENTF_MIDDLEDOWN) rm.usButtonFlags |= RI_MOUSE_MIDDLE_BUTTON_DOWN;
+    if (dwFlags & MOUSEEVENTF_MIDDLEUP)   rm.usButtonFlags |= RI_MOUSE_MIDDLE_BUTTON_UP;
+    if (dwFlags & MOUSEEVENTF_XDOWN)
     {
-        if (pti->MessageQueue != pFocusQueue)
-            return FALSE; /* FIXME: Needs per-process arbitration like Windows */
-
-        *pwParam = RIM_INPUT;
-        *phwndTarget = UserHMGetHandle(pWnd);
-        *ppti = pti;
-        return TRUE;
+        if (pmi->mouseData & XBUTTON1) rm.usButtonFlags |= RI_MOUSE_BUTTON_4_DOWN;
+        if (pmi->mouseData & XBUTTON2) rm.usButtonFlags |= RI_MOUSE_BUTTON_5_DOWN;
     }
+    if (dwFlags & MOUSEEVENTF_XUP)
+    {
+        if (pmi->mouseData & XBUTTON1) rm.usButtonFlags |= RI_MOUSE_BUTTON_4_UP;
+        if (pmi->mouseData & XBUTTON2) rm.usButtonFlags |= RI_MOUSE_BUTTON_5_UP;
+    }
+    /* A wheel of distance zero still makes a raw record, the legacy message is not posted */
+    if (dwFlags & MOUSEEVENTF_WHEEL)
+    {
+        rm.usButtonFlags |= RI_MOUSE_WHEEL;
+        rm.usButtonData = (USHORT)UserClampWheelDelta(pmi->mouseData);
+    }
+    if (dwFlags & MOUSEEVENTF_HWHEEL)
+    {
+        rm.usButtonFlags |= RI_MOUSE_HWHEEL;
+        rm.usButtonData = (USHORT)UserClampWheelDelta(pmi->mouseData);
+    }
+    rm.ulExtraInformation = (ULONG)pmi->dwExtraInfo;
 
-    if (pti->MessageQueue != pFocusQueue)
-        return FALSE;
+    UserRawInputDeliver(RIM_TYPEMOUSE, NULL, &rm, sizeof(rm));
+}
 
-    *pwParam = RIM_INPUT;
-    *phwndTarget = UserHMGetHandle(pWnd);
-    *ppti = pti;
-    return TRUE;
+VOID
+FASTCALL
+UserRawInputSendKeyboard(
+    WORD wScan,
+    WORD wVk,
+    BOOL bUp,
+    BOOL bExt,
+    ULONG_PTR dwExtraInfo,
+    UINT Message)
+{
+    RAWKEYBOARD kb = {0};
+
+    if (!RawInputEnabled)
+        return;
+
+    kb.MakeCode = wScan & 0x7F;
+    kb.Flags = bUp ? RI_KEY_BREAK : RI_KEY_MAKE;
+    if (bExt)
+        kb.Flags |= RI_KEY_E0;
+    kb.VKey = wVk & 0xFF;
+    kb.Message = Message;
+    kb.ExtraInformation = (ULONG)dwExtraInfo;
+
+    UserRawInputDeliver(RIM_TYPEKEYBOARD, NULL, &kb, sizeof(kb));
 }
 
 static
@@ -485,16 +875,10 @@ RawInputCopyData(
     PRAWINPUT RawInput,
     UINT uiCommand,
     LPVOID pData,
-    PUINT pcbSize,
-    UINT cbSizeHeader)
+    PUINT pcbSize)
 {
-    UINT OutputDataSize;
-
-    if (cbSizeHeader != sizeof(RAWINPUTHEADER) || !pcbSize)
-    {
-        EngSetLastError(ERROR_INVALID_PARAMETER);
-        return ~0u;
-    }
+    UINT OutputDataSize, cbSize;
+    DWORD Ret = ~0u;
 
     switch (uiCommand)
     {
@@ -511,29 +895,64 @@ RawInputCopyData(
             return ~0u;
     }
 
-    if (!pData)
+    _SEH2_TRY
     {
-        *pcbSize = OutputDataSize;
-        EngSetLastError(ERROR_SUCCESS);
-        return 0;
-    }
+        ProbeForRead(pcbSize, sizeof(*pcbSize), sizeof(UINT));
+        cbSize = *pcbSize;
 
-    if (*pcbSize < OutputDataSize)
+        if (!pData)
+        {
+            ProbeForWrite(pcbSize, sizeof(*pcbSize), sizeof(UINT));
+            *pcbSize = OutputDataSize;
+            Ret = 0;
+        }
+        else if (cbSize < OutputDataSize)
+        {
+            /* Windows leaves the size alone here; only a NULL buffer asks for it */
+            EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
+        }
+        else
+        {
+            ProbeForWrite(pData, OutputDataSize, 1);
+            RtlCopyMemory(pData, RawInput, OutputDataSize);
+            Ret = OutputDataSize;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        *pcbSize = OutputDataSize;
-        EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
-        return ~0u;
+        SetLastNtError(_SEH2_GetExceptionCode());
+        Ret = ~0u;
     }
+    _SEH2_END;
 
-    if (uiCommand == RID_HEADER)
-        RtlCopyMemory(pData, &RawInput->header, OutputDataSize);
-    else
-        RtlCopyMemory(pData, RawInput, OutputDataSize);
-
-    return OutputDataSize;
+    return Ret;
 }
 
-/* This file is pretty deeply inspired by how wine seems to do it, but wine can't be DIRECTLY used. */
+/* The WM_INPUT messages of one thread sit in the hardware list of its queue
+   (shared by attached threads); the wake bit is charged to the owning thread */
+static
+PUSER_MESSAGE
+RawInputNextMessage(
+    PTHREADINFO pti,
+    PLIST_ENTRY *pEntry)
+{
+    PUSER_MESSAGE_QUEUE MessageQueue = pti->MessageQueue;
+
+    while (*pEntry != &MessageQueue->HardwareMessagesListHead)
+    {
+        PUSER_MESSAGE Message = CONTAINING_RECORD(*pEntry, USER_MESSAGE, ListEntry);
+
+        *pEntry = (*pEntry)->Flink;
+        if (Message->Msg.message == WM_INPUT &&
+            (Message->QS_Flags & QS_RAWINPUT) &&
+            Message->pti == pti &&
+            !MsqHardwareMessageInPlay(MessageQueue, Message))
+            return Message;
+    }
+
+    return NULL;
+}
+
 DWORD
 APIENTRY
 NtUserGetRawInputBuffer(
@@ -544,8 +963,10 @@ NtUserGetRawInputBuffer(
     PTHREADINFO pti;
     PUSER_MESSAGE_QUEUE MessageQueue;
     PUSER_RAWINPUT RawEntry;
-    PLIST_ENTRY Entry, NextEntry;
-    UINT BufferSize, UsedSize = 0, Count = 0;
+    PUSER_MESSAGE Message;
+    PLIST_ENTRY Entry;
+    UINT BufferSize = 0, UsedSize = 0, Count = 0;
+    DWORD Ret = ~0u;
 
     if (cbSizeHeader != sizeof(RAWINPUTHEADER) || !pcbSize)
     {
@@ -553,73 +974,97 @@ NtUserGetRawInputBuffer(
         return ~0u;
     }
 
+    UserEnterExclusive();
+
     pti = PsGetCurrentThreadWin32Thread();
     MessageQueue = pti ? pti->MessageQueue : NULL;
-    if (!MessageQueue)
-    {
-        *pcbSize = 0;
-        return 0;
-    }
 
-    Entry = MessageQueue->HardwareMessagesListHead.Flink;
-    if (!pData)
+    _SEH2_TRY
     {
-        while (Entry != &MessageQueue->HardwareMessagesListHead)
+        ProbeForRead(pcbSize, sizeof(*pcbSize), sizeof(UINT));
+        BufferSize = *pcbSize;
+        if (pData)
         {
-            PUSER_MESSAGE Message = CONTAINING_RECORD(Entry, USER_MESSAGE, ListEntry);
-            if (Message->Msg.message == WM_INPUT)
-            {
-                RawEntry = RawInputEntryFromHandle(MessageQueue, (HRAWINPUT)Message->Msg.lParam);
-                *pcbSize = RawEntry ? RawEntry->RawInput.header.dwSize : 0;
-                EngSetLastError(ERROR_SUCCESS);
-                return 0;
-            }
-            Entry = Entry->Flink;
+            /* Windows takes DWORD alignment in every ABI (measured natively and under WOW64) */
+            ULONG Alignment = sizeof(DWORD);
+            ProbeForWrite(pData, BufferSize, Alignment);
         }
 
-        *pcbSize = 0;
-        return 0;
-    }
-
-    BufferSize = *pcbSize;
-    while (Entry != &MessageQueue->HardwareMessagesListHead)
-    {
-        PUSER_MESSAGE Message;
-        UINT RawSize;
-
-        NextEntry = Entry->Flink;
-        Message = CONTAINING_RECORD(Entry, USER_MESSAGE, ListEntry);
-        Entry = NextEntry;
-
-        if (Message->Msg.message != WM_INPUT)
-            continue;
-
-        RawEntry = RawInputEntryFromHandle(MessageQueue, (HRAWINPUT)Message->Msg.lParam);
-        if (!RawEntry)
-            continue;
-
-        RawSize = RawEntry->RawInput.header.dwSize;
-        if (UsedSize + RawSize > BufferSize)
+        if (!MessageQueue)
         {
-            if (Count == 0)
+            Ret = 0;
+            _SEH2_LEAVE;
+        }
+
+        Entry = MessageQueue->HardwareMessagesListHead.Flink;
+        if (!pData)
+        {
+            ProbeForWrite(pcbSize, sizeof(*pcbSize), sizeof(UINT));
+            Message = RawInputNextMessage(pti, &Entry);
+            RawEntry = Message ? RawInputEntryFromHandle(MessageQueue, (HRAWINPUT)Message->Msg.lParam) : NULL;
+            *pcbSize = RawEntry ? RawEntry->RawInput.header.dwSize : 0;
+            Ret = 0;
+            _SEH2_LEAVE;
+        }
+
+        while ((Message = RawInputNextMessage(pti, &Entry)) != NULL)
+        {
+            UINT RawSize;
+
+            RawEntry = RawInputEntryFromHandle(MessageQueue, (HRAWINPUT)Message->Msg.lParam);
+            if (!RawEntry)
+                continue;
+
+            RawSize = RawEntry->RawInput.header.dwSize;
+            if (RawSize > BufferSize - UsedSize)
             {
+                if (Count == 0)
+                {
+                    ProbeForWrite(pcbSize, sizeof(*pcbSize), sizeof(UINT));
+                    *pcbSize = RawSize;
+                    EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
+                    _SEH2_LEAVE;
+                }
+                break;
+            }
+
+            RtlCopyMemory((PBYTE)pData + UsedSize, &RawEntry->RawInput, RawSize);
+            UsedSize += RawSize;
+            Count++;
+
+            /* The bit was counted at enqueue time for Message->pti */
+            pti->timeLast = Message->Msg.time;
+            MsqRetireRawInputMessage(MessageQueue, Message);
+
+            /* Windows wants one spare byte: an exact fit still consumes and copies
+               the entry but reports a too small buffer */
+            if (Count == 1 && UsedSize == BufferSize)
+            {
+                ProbeForWrite(pcbSize, sizeof(*pcbSize), sizeof(UINT));
                 *pcbSize = RawSize;
                 EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
-                return ~0u;
+                _SEH2_LEAVE;
             }
-            break;
         }
 
-        RtlCopyMemory((PBYTE)pData + UsedSize, &RawEntry->RawInput, RawSize);
-        UsedSize += RawSize;
-        Count++;
+        Ret = Count;
 
-        ClearMsgBitsMask(pti, Message->QS_Flags);
-        MsqDestroyMessage(Message);
-        RawInputFreeEntry(MessageQueue, RawEntry);
+        /* An empty queue reports size 0 to a process that has registered */
+        if (Count == 0 && pti->ppi->pRawInputRegs)
+        {
+            ProbeForWrite(pcbSize, sizeof(*pcbSize), sizeof(UINT));
+            *pcbSize = 0;
+        }
     }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastNtError(_SEH2_GetExceptionCode());
+        Ret = ~0u;
+    }
+    _SEH2_END;
 
-    return Count;
+    UserLeave();
+    return Ret;
 }
 
 DWORD
@@ -692,10 +1137,10 @@ NtUserGetRawInputData(
     UINT cbSizeHeader)
 {
     PTHREADINFO pti;
-    PUSER_MESSAGE_QUEUE MessageQueue;
     PUSER_RAWINPUT RawEntry;
+    DWORD Ret;
 
-    if (cbSizeHeader != sizeof(RAWINPUTHEADER) || !pcbSize)
+    if (cbSizeHeader != sizeof(RAWINPUTHEADER))
     {
         EngSetLastError(ERROR_INVALID_PARAMETER);
         return ~0u;
@@ -707,18 +1152,28 @@ NtUserGetRawInputData(
         return ~0u;
     }
 
+    UserEnterShared();
+
     pti = PsGetCurrentThreadWin32Thread();
-    MessageQueue = pti ? pti->MessageQueue : NULL;
-    RawEntry = RawInputEntryFromHandle(MessageQueue, hRawInput);
+    RawEntry = RawInputEntryFromHandle(pti ? pti->MessageQueue : NULL, hRawInput);
     if (!RawEntry)
     {
         EngSetLastError(ERROR_INVALID_HANDLE);
-        return ~0u;
+        Ret = ~0u;
+    }
+    else if (!pcbSize)
+    {
+        EngSetLastError(ERROR_NOACCESS);
+        Ret = ~0u;
+    }
+    else
+    {
+        Ret = RawInputCopyData(&RawEntry->RawInput, uiCommand, pData, pcbSize);
     }
 
-    return RawInputCopyData(&RawEntry->RawInput, uiCommand, pData, pcbSize, cbSizeHeader);
+    UserLeave();
+    return Ret;
 }
-
 
 DWORD
 APIENTRY
@@ -727,11 +1182,11 @@ NtUserGetRegisteredRawInputDevices(
     _Inout_ PUINT puiNumDevices,
     _In_ UINT cbSize)
 {
-    RAWINPUTDEVICE Registrations[2];
-    PRAWINPUTDEVICE Registration;
-    UINT cDevices = 0, uiNumDevices, Ret = (UINT)-1;
+    PTHREADINFO pti;
+    PRAWINPUT_REGTABLE Table;
+    UINT i, cDevices, uiNumDevices, Ret = (UINT)-1;
 
-    if (cbSize != sizeof(*pRawInputDevices))
+    if (cbSize != sizeof(RAWINPUTDEVICE))
     {
         EngSetLastError(ERROR_INVALID_PARAMETER);
         return Ret;
@@ -739,14 +1194,9 @@ NtUserGetRegisteredRawInputDevices(
 
     UserEnterShared();
 
-    /* Snapshot the registrations, ordered by usage like Windows does */
-    Registration = RawInputRegistrationFromType(RIM_TYPEMOUSE);
-    if (Registration)
-        Registrations[cDevices++] = *Registration;
-
-    Registration = RawInputRegistrationFromType(RIM_TYPEKEYBOARD);
-    if (Registration)
-        Registrations[cDevices++] = *Registration;
+    pti = PsGetCurrentThreadWin32Thread();
+    Table = pti ? pti->ppi->pRawInputRegs : NULL;
+    cDevices = Table ? Table->cRegs : 0;
 
     _SEH2_TRY
     {
@@ -782,7 +1232,8 @@ NtUserGetRegisteredRawInputDevices(
             _SEH2_LEAVE;
         }
 
-        RtlCopyMemory(pRawInputDevices, Registrations, cDevices * sizeof(*pRawInputDevices));
+        for (i = 0; i < cDevices; i++)
+            pRawInputDevices[i] = Table->aRegs[i].Device;
         Ret = cDevices;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -795,6 +1246,87 @@ NtUserGetRegisteredRawInputDevices(
     return Ret;
 }
 
+/* Flags Windows accepts (0x800 is accepted and ignored) */
+#define RIDEV_VALID_MASK (RIDEV_REMOVE | RIDEV_NOLEGACY | RIDEV_INPUTSINK | RIDEV_CAPTUREMOUSE | \
+                          RIDEV_APPKEYS | 0x800 | RIDEV_EXINPUTSINK | RIDEV_DEVNOTIFY)
+
+/* Validates one registration the way Windows does; FALSE with the last error set */
+static
+BOOL
+RawInputCheckDevice(
+    PPROCESSINFO ppi,
+    const RAWINPUTDEVICE *Device)
+{
+    DWORD dwFlags = Device->dwFlags;
+    DWORD dwClass = dwFlags & RIDEV_CLASS_MASK;
+    BOOL bMouseOrKeyboard = Device->usUsagePage == HID_USAGE_PAGE_GENERIC &&
+                            (Device->usUsage == HID_USAGE_GENERIC_MOUSE ||
+                             Device->usUsage == HID_USAGE_GENERIC_KEYBOARD);
+
+    if (dwFlags & ~RIDEV_VALID_MASK)
+        goto invalid_flags;
+
+    if ((dwFlags & RIDEV_REMOVE) && dwClass == RIDEV_NOLEGACY)
+        goto invalid_flags;
+
+    if (!Device->usUsagePage)
+        goto invalid;
+
+    switch (dwClass)
+    {
+        case RIDEV_PAGEONLY:
+            if (Device->usUsage)
+                goto invalid;
+            break;
+
+        case RIDEV_NOLEGACY:
+            if (!bMouseOrKeyboard)
+                goto invalid;
+            break;
+
+        default: /* plain and exclude */
+            if (!Device->usUsage)
+                goto invalid;
+            break;
+    }
+
+    if (dwFlags & RIDEV_REMOVE)
+    {
+        if (Device->hwndTarget)
+            goto invalid;
+        return TRUE;
+    }
+
+    if ((dwFlags & (RIDEV_INPUTSINK | RIDEV_EXINPUTSINK)) && !Device->hwndTarget)
+        goto invalid;
+
+    /* The mouse capture and application key bits only mean something with NOLEGACY,
+       except that the keyboard takes the first one on its own */
+    if ((dwFlags & RIDEV_CAPTUREMOUSE) && dwClass != RIDEV_NOLEGACY &&
+        Device->usUsage != HID_USAGE_GENERIC_KEYBOARD)
+        goto invalid_flags;
+    if ((dwFlags & RIDEV_APPKEYS) && dwClass != RIDEV_NOLEGACY)
+        goto invalid_flags;
+
+    if (Device->hwndTarget)
+    {
+        PWND pWnd = UserGetWindowObject(Device->hwndTarget);
+
+        if (!pWnd || !pWnd->head.pti || pWnd->head.pti->ppi != ppi)
+            goto invalid;
+    }
+
+    return TRUE;
+
+invalid_flags:
+    EngSetLastError(ERROR_INVALID_FLAGS);
+    return FALSE;
+
+invalid:
+    EngSetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+}
+
 BOOL
 APIENTRY
 NtUserRegisterRawInputDevices(
@@ -802,7 +1334,10 @@ NtUserRegisterRawInputDevices(
     IN UINT uiNumDevices,
     IN UINT cbSize)
 {
+    PTHREADINFO pti;
+    PRAWINPUTDEVICE Devices = NULL;
     UINT i;
+    BOOL Ret = FALSE, bNotify = FALSE;
 
     if (!pRawInputDevices || !uiNumDevices || cbSize != sizeof(RAWINPUTDEVICE))
     {
@@ -810,58 +1345,95 @@ NtUserRegisterRawInputDevices(
         return FALSE;
     }
 
-    if (!global_pRawInputDevices)
+    if (uiNumDevices > 4096)
     {
-        global_pRawInputDevices = EngAllocMem(NonPagedPool,
-                                              2 * sizeof(RAWINPUTDEVICE),
-                                              'iwar');
-        if (!global_pRawInputDevices)
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Devices = ExAllocatePoolWithTag(PagedPool, uiNumDevices * sizeof(*Devices), 'iwar');
+    if (!Devices)
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        ProbeForRead(pRawInputDevices, uiNumDevices * sizeof(*Devices), sizeof(PVOID));
+        RtlCopyMemory(Devices, pRawInputDevices, uiNumDevices * sizeof(*Devices));
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastNtError(_SEH2_GetExceptionCode());
+        ExFreePoolWithTag(Devices, 'iwar');
+        return FALSE;
+    }
+    _SEH2_END;
+
+    for (i = 0; i < uiNumDevices; i++)
+    {
+        if ((Devices[i].dwFlags & (RIDEV_DEVNOTIFY | RIDEV_REMOVE)) == RIDEV_DEVNOTIFY && Devices[i].hwndTarget)
+            bNotify = TRUE;
+    }
+
+    /* Same order as NtUserGetRawInputDeviceList: device list first, then the USER lock */
+    if (bNotify)
+        AcquireDeviceInfoListMutex();
+    UserEnterExclusive();
+
+    pti = PsGetCurrentThreadWin32Thread();
+    if (!pti)
+        goto cleanup;
+
+    for (i = 0; i < uiNumDevices; i++)
+    {
+        if (!RawInputCheckDevice(pti->ppi, &Devices[i]))
+            goto cleanup;
+    }
+
+    for (i = 0; i < uiNumDevices; i++)
+    {
+        const RAWINPUTDEVICE *Device = &Devices[i];
+
+        PWND pWnd = Device->hwndTarget ? UserGetWindowObject(Device->hwndTarget) : NULL;
+
+        if (!RawRegApply(pti->ppi, Device, pWnd ? pWnd->head.pti : NULL, !!(Device->dwFlags & RIDEV_REMOVE)))
         {
             EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            return FALSE;
+            RawInputUpdateEnabled();
+            goto cleanup;
         }
-
-        RtlZeroMemory(global_pRawInputDevices, 2 * sizeof(RAWINPUTDEVICE));
     }
 
-    for (i = 0; i < uiNumDevices; ++i)
+    RawInputUpdateEnabled();
+
+    /* A registration with device notification gets the devices that already exist */
+    for (i = 0; bNotify && i < uiNumDevices; i++)
     {
-        INT Index;
-        const RAWINPUTDEVICE *Device = &pRawInputDevices[i];
+        const RAWINPUTDEVICE *Device = &Devices[i];
+        PINPUT_DEVICE_INFO DeviceInfo;
 
-        if ((Device->dwFlags & RIDEV_INPUTSINK) && !Device->hwndTarget)
-        {
-            EngSetLastError(ERROR_INVALID_PARAMETER);
-            return FALSE;
-        }
-
-        if ((Device->dwFlags & RIDEV_REMOVE) && Device->hwndTarget)
-        {
-            EngSetLastError(ERROR_INVALID_PARAMETER);
-            return FALSE;
-        }
-
-        RawInputWarnUnimplementedFlags(Device);
-
-        if (Device->usUsagePage != HID_USAGE_PAGE_GENERIC)
+        if ((Device->dwFlags & (RIDEV_DEVNOTIFY | RIDEV_REMOVE)) != RIDEV_DEVNOTIFY || !Device->hwndTarget)
             continue;
 
-        if (Device->usUsage == HID_USAGE_GENERIC_MOUSE)
-            Index = 0;
-        else if (Device->usUsage == HID_USAGE_GENERIC_KEYBOARD)
-            Index = 1;
-        else
-            continue;
+        for (DeviceInfo = gpInputDeviceInfo; DeviceInfo; DeviceInfo = DeviceInfo->pNextDeviceInfo)
+        {
+            if (RawRegLookupType(pti->ppi->pRawInputRegs, DeviceInfo->DeviceType) == NULL ||
+                Device->usUsagePage != HID_USAGE_PAGE_GENERIC ||
+                (Device->usUsage != RawInputUsageFromType(DeviceInfo->DeviceType) && !(Device->dwFlags & RIDEV_PAGEONLY)))
+                continue;
 
-        if (Device->dwFlags & RIDEV_REMOVE)
-            RtlZeroMemory(&global_pRawInputDevices[Index], sizeof(RAWINPUTDEVICE));
-        else
-            global_pRawInputDevices[Index] = *Device;
+            UserPostMessage(Device->hwndTarget, WM_INPUT_DEVICE_CHANGE, GIDC_ARRIVAL, (LPARAM)DeviceInfo);
+        }
     }
 
-    RawInputEnabled =
-        (global_pRawInputDevices[0].usUsage != 0) ||
-        (global_pRawInputDevices[1].usUsage != 0);
+    Ret = TRUE;
 
-    return TRUE;
+cleanup:
+    UserLeave();
+    if (bNotify)
+        ReleaseDeviceInfoListMutex();
+    ExFreePoolWithTag(Devices, 'iwar');
+    return Ret;
 }

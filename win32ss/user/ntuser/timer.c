@@ -76,6 +76,10 @@ RemoveTimer(PTIMER pTmr)
   BOOL Ret = FALSE;
   if (pTmr)
   {
+     /* A timer removed while ready still holds a QS_TIMER count on its thread */
+     if ((pTmr->flags & TMRF_READY) && pTmr->pti && pTmr->pti->pcti)
+        ClearMsgBitsMask(pTmr->pti, QS_TIMER);
+
      /* Set the flag, it will be removed when ready */
      RemoveEntryList(&pTmr->ptmrList);
      if ((pTmr->pWnd == NULL) && (!(pTmr->flags & TMRF_SYSTEM))) // System timers are reusable.

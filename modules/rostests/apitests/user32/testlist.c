@@ -19,6 +19,8 @@ extern void func_DrawText(void);
 extern void func_desktop(void);
 extern void func_EmptyClipboard(void);
 extern void func_EnumDisplaySettings(void);
+extern void func_FrameChangedClient(void);
+extern void func_FrameMetrics(void);
 extern void func_GetClassInfo(void);
 extern void func_GetDCEx(void);
 extern void func_GetIconInfo(void);
@@ -31,17 +33,30 @@ extern void func_GetUserObjectInformation(void);
 extern void func_GetWindowPlacement(void);
 extern void func_GW_ENABLEDPOPUP(void);
 extern void func_InitializeLpkHooks(void);
+extern void func_IsDialogMessage(void);
 extern void func_IsServerSideWindow(void);
 extern void func_KbdLayout(void);
 extern void func_keybd_event(void);
+extern void func_MouseHookTransport(void);
+extern void func_MouseWheel(void);
+extern void func_KeyboardLLHook(void);
 extern void func_LoadImage(void);
 extern void func_LoadImageGCC(void);
+extern void func_LoadImagePngIcon(void);
 extern void func_LookupIconIdFromDirectoryEx(void);
+extern void func_MenuItemData(void);
 extern void func_MenuUI(void);
 extern void func_MessageStateAnalyzer(void);
+extern void func_MsgWaitForMultipleObjectsEx(void);
+extern void func_NCRButtonDown(void);
+extern void func_NcPaintActive(void);
+extern void func_NcPaintClient(void);
 extern void func_NcPaintRgn(void);
 extern void func_NextDlgItem(void);
+extern void func_PrintWindow(void);
 extern void func_PrivateExtractIcons(void);
+extern void func_ProcessConnectTerminate(void);
+extern void func_RawInput(void);
 extern void func_RealGetWindowClass(void);
 extern void func_RedrawWindow(void);
 extern void func_RegisterHotKey(void);
@@ -60,13 +75,19 @@ extern void func_SetScrollInfo(void);
 extern void func_SetScrollRange(void);
 extern void func_SetWindowPlacement(void);
 extern void func_ShowWindow(void);
+extern void func_ShowWindowFrame(void);
+extern void func_SwitchDesktop(void);
 extern void func_SwitchToThisWindow(void);
 extern void func_SystemParametersInfo(void);
 extern void func_SystemMenu(void);
 extern void func_TrackMouseEvent(void);
 extern void func_TrackPopupMenuEx(void);
+extern void func_UnicodeToAnsiMessage(void);
+extern void func_UpdateLayeredWindow(void);
 extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
+extern void func_WinEventHook(void);
+extern void func_WmPrint(void);
 extern void func_WndProc(void);
 extern void func_wsprintfApi(void);
 
@@ -89,6 +110,8 @@ const struct test winetest_testlist[] =
     { "desktop", func_desktop },
     { "EmptyClipboard", func_EmptyClipboard },
     { "EnumDisplaySettings", func_EnumDisplaySettings },
+    { "FrameChangedClient", func_FrameChangedClient },
+    { "FrameMetrics", func_FrameMetrics },
     { "GetClassInfo", func_GetClassInfo },
     { "GetDCEx", func_GetDCEx },
     { "GetIconInfo", func_GetIconInfo },
@@ -101,17 +124,30 @@ const struct test winetest_testlist[] =
     { "GetWindowPlacement", func_GetWindowPlacement },
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
+    { "IsDialogMessage", func_IsDialogMessage },
     { "IsServerSideWindow", func_IsServerSideWindow },
     { "KbdLayout", func_KbdLayout },
     { "keybd_event", func_keybd_event },
+    { "MouseHookTransport", func_MouseHookTransport },
+    { "MouseWheel", func_MouseWheel },
+    { "KeyboardLLHook", func_KeyboardLLHook },
     { "LoadImage", func_LoadImage },
     { "LoadImageGCC", func_LoadImageGCC },
+    { "LoadImagePngIcon", func_LoadImagePngIcon },
     { "LookupIconIdFromDirectoryEx", func_LookupIconIdFromDirectoryEx },
+    { "MenuItemData", func_MenuItemData },
     { "MenuUI", func_MenuUI },
     { "MessageStateAnalyzer", func_MessageStateAnalyzer },
+    { "MsgWaitForMultipleObjectsEx", func_MsgWaitForMultipleObjectsEx },
+    { "NCRButtonDown", func_NCRButtonDown },
+    { "NcPaintActive", func_NcPaintActive },
+    { "NcPaintClient", func_NcPaintClient },
     { "NcPaintRgn", func_NcPaintRgn },
     { "NextDlgItem", func_NextDlgItem },
+    { "PrintWindow", func_PrintWindow },
     { "PrivateExtractIcons", func_PrivateExtractIcons },
+    { "ProcessConnectTerminate", func_ProcessConnectTerminate },
+    { "RawInput", func_RawInput },
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedrawWindow", func_RedrawWindow },
     { "RegisterHotKey", func_RegisterHotKey },
@@ -130,13 +166,19 @@ const struct test winetest_testlist[] =
     { "SetScrollRange", func_SetScrollRange },
     { "SetWindowPlacement", func_SetWindowPlacement },
     { "ShowWindow", func_ShowWindow },
+    { "ShowWindowFrame", func_ShowWindowFrame },
+    { "SwitchDesktop", func_SwitchDesktop },
     { "SwitchToThisWindow", func_SwitchToThisWindow },
     { "SystemMenu", func_SystemMenu },
     { "SystemParametersInfo", func_SystemParametersInfo },
     { "TrackMouseEvent", func_TrackMouseEvent },
     { "TrackPopupMenuEx", func_TrackPopupMenuEx },
+    { "UnicodeToAnsiMessage", func_UnicodeToAnsiMessage },
+    { "UpdateLayeredWindow", func_UpdateLayeredWindow },
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
     { "VirtualKey", func_VirtualKey },
+    { "WinEventHook", func_WinEventHook },
+    { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
     { "wsprintfApi", func_wsprintfApi },
     { 0, 0 }

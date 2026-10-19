@@ -61,6 +61,8 @@ LRESULT FASTCALL co_WinPosGetNonClientSize(PWND Window, RECTL* WindowRect, RECTL
 UINT FASTCALL co_WinPosGetMinMaxInfo(PWND Window, POINT* MaxSize, POINT* MaxPos, POINT* MinTrack, POINT* MaxTrack);
 UINT FASTCALL co_WinPosMinMaximize(PWND WindowObject, UINT ShowFlag, RECTL* NewPos);
 BOOLEAN FASTCALL co_WinPosSetWindowPos(PWND Wnd, HWND WndInsertAfter, INT x, INT y, INT cx, INT cy, UINT flags);
+BOOLEAN FASTCALL co_WinPosSetWindowPosEx(PWND Wnd, HWND WndInsertAfter, INT x, INT y, INT cx, INT cy, UINT flags, BOOL NoMessages);
+VOID FASTCALL co_WinPosNoMessagesNotify(PWND Window, BOOL PointerCrossed);
 BOOLEAN FASTCALL co_WinPosShowWindow(PWND Window, INT Cmd);
 void FASTCALL co_WinPosSendSizeMove(PWND Window);
 PWND APIENTRY co_WinPosWindowFromPoint(IN PWND ScopeWin, IN POINT *WinPoint, IN OUT USHORT* HitTest, IN BOOL Ignore);

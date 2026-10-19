@@ -34,65 +34,18 @@ UserGetMouseButtonsState(VOID)
 VOID NTAPI
 UserRawInputMouseProcess(PINPUT_DEVICE_INFO pDeviceInfo, PMOUSE_INPUT_DATA mid)
 {
-    PTHREADINFO pti;
-    HWND hwndTarget;
-    WPARAM wParam;
-    HRAWINPUT hRawInput;
     RAWMOUSE rm = {0};
-    MSG Msg = {0};
 
-    if (!UserGetRawInputTarget(RIM_TYPEMOUSE, &pti, &hwndTarget, &wParam))
-        return;
+    /* MOUSE_MOVE_* and the button flags use the same values as the raw input ones */
+    rm.usFlags = mid->Flags & (MOUSE_MOVE_ABSOLUTE | MOUSE_VIRTUAL_DESKTOP);
+    rm.usButtonFlags = mid->ButtonFlags;
+    rm.usButtonData = mid->ButtonData;
+    rm.ulRawButtons = mid->RawButtons;
+    rm.lLastX = mid->LastX;
+    rm.lLastY = mid->LastY;
+    rm.ulExtraInformation = mid->ExtraInformation;
 
-    if (mid->LastX != 0 || mid->LastY != 0)
-    {
-        rm.usFlags |= MOUSE_MOVE_RELATIVE;
-    }
-
-    /* Flags for absolute move */
-    if (mid->Flags & MOUSE_MOVE_ABSOLUTE)
-        rm.usFlags |= MOUSE_MOVE_ABSOLUTE;
-    if (mid->Flags & MOUSE_VIRTUAL_DESKTOP)
-        rm.usFlags |= MOUSE_VIRTUAL_DESKTOP;
-
-    /* Left button */
-    if (mid->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN)
-        rm.usButtonFlags |= RI_MOUSE_LEFT_BUTTON_DOWN;
-    if (mid->ButtonFlags & MOUSE_LEFT_BUTTON_UP)
-        rm.usButtonFlags |= RI_MOUSE_LEFT_BUTTON_UP;
-
-    /* Middle button */
-    if (mid->ButtonFlags & MOUSE_MIDDLE_BUTTON_DOWN)
-        rm.usButtonFlags |= RI_MOUSE_MIDDLE_BUTTON_DOWN;
-    if (mid->ButtonFlags & MOUSE_MIDDLE_BUTTON_UP)
-        rm.usButtonFlags |= RI_MOUSE_MIDDLE_BUTTON_UP;
-
-    /* Right button */
-    if (mid->ButtonFlags & MOUSE_RIGHT_BUTTON_DOWN)
-        rm.usButtonFlags |= RI_MOUSE_RIGHT_BUTTON_DOWN;
-    if (mid->ButtonFlags & MOUSE_RIGHT_BUTTON_UP)
-        rm.usButtonFlags |= RI_MOUSE_RIGHT_BUTTON_UP;
-    rm.lLastX   = mid->LastX;
-    rm.lLastY   = mid->LastY;
-
-    hRawInput = UserCreateRawInput(pti,
-                                   RIM_TYPEMOUSE,
-                                   (HANDLE)pDeviceInfo,
-                                   wParam,
-                                   &rm,
-                                   sizeof(rm));
-    if (!hRawInput)
-        return;
-
-    Msg.hwnd = hwndTarget;
-    Msg.message = WM_INPUT;
-    Msg.wParam = wParam;
-    Msg.lParam = (LPARAM)hRawInput;
-    Msg.time = EngGetTickCount32();
-    Msg.pt = gpsi->ptCursor;
-
-    if (!MsqPostMessage(pti, &Msg, TRUE, QS_RAWINPUT, 0, 0))
-        UserFreeRawInput(pti->MessageQueue, hRawInput);
+    UserRawInputDeliver(RIM_TYPEMOUSE, (HANDLE)pDeviceInfo, &rm, sizeof(rm));
 }
 
 /*
@@ -187,13 +140,22 @@ UserProcessMouseInput(PINPUT_DEVICE_INFO pDeviceInfo, PMOUSE_INPUT_DATA mid)
     /* Mouse wheel */
     if (mid->ButtonFlags & MOUSE_WHEEL)
     {
-        mi.mouseData = mid->ButtonData;
+        mi.mouseData = (DWORD)(LONG)(SHORT)mid->ButtonData;
         mi.dwFlags |= MOUSEEVENTF_WHEEL;
     }
 
     /* If something has changed, send input to user */
     if (mi.dwFlags)
         UserSendMouseInput(&mi, FALSE);
+
+    /* The horizontal wheel uses mouseData as well, so it is sent on its own */
+    if (mid->ButtonFlags & MOUSE_HWHEEL)
+    {
+        RtlZeroMemory(&mi, sizeof(mi));
+        mi.mouseData = (DWORD)(LONG)(SHORT)mid->ButtonData;
+        mi.dwFlags = MOUSEEVENTF_HWHEEL;
+        UserSendMouseInput(&mi, FALSE);
+    }
 }
 
 /*
@@ -227,6 +189,41 @@ IntFixMouseInputButtons(DWORD dwFlags)
 }
 
 /*
+ * UserStripMouseDataFlags
+ *
+ * The two wheels and the X buttons all use mouseData. A call that asks for more than one of them
+ * gets none of them (Windows ignores them and SendInput still counts the call); the other flags stay.
+ */
+DWORD FASTCALL
+UserStripMouseDataFlags(DWORD dwFlags)
+{
+    if (((dwFlags & MOUSEEVENTF_WHEEL) != 0) + ((dwFlags & MOUSEEVENTF_HWHEEL) != 0) +
+        ((dwFlags & (MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP)) != 0) > 1)
+    {
+        dwFlags &= ~(MOUSEEVENTF_WHEEL | MOUSEEVENTF_HWHEEL | MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP);
+    }
+
+    return dwFlags;
+}
+
+/*
+ * UserClampWheelDelta
+ *
+ * The distance of a wheel is a signed 16 bit value, whatever the caller put into mouseData.
+ */
+SHORT FASTCALL
+UserClampWheelDelta(DWORD mouseData)
+{
+    LONG lDelta = (LONG)mouseData;
+
+    if (lDelta > 32767)
+        return 32767;
+    if (lDelta < -32768)
+        return -32768;
+    return (SHORT)lDelta;
+}
+
+/*
  * UserSendMouseInput
  *
  * Process mouse input from input devices and SendInput API
@@ -243,9 +240,15 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
 
     pCurInfo = IntGetSysCursorInfo();
     ptCursor = gpsi->ptCursor;
-    dwFlags = IntFixMouseInputButtons(pmi->dwFlags);
 
     gppiInputProvider = ((PTHREADINFO)PsGetCurrentThreadWin32Thread())->ppi;
+
+    /* The wheels and the X buttons all use mouseData: a call that asks for more than one of them gets none */
+    dwFlags = IntFixMouseInputButtons(UserStripMouseDataFlags(pmi->dwFlags));
+
+    /* Raw input gets the same call, stripped and clamped the same way */
+    if (bInjected)
+        UserRawInputSendMouse(pmi);
 
     if (pmi->dwFlags & MOUSEEVENTF_MOVE)
     {
@@ -358,14 +361,6 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
     }
 
-    if((dwFlags & (MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP)) &&
-       (dwFlags & MOUSEEVENTF_WHEEL))
-    {
-        /* Fail because both types of events use the mouseData field */
-        WARN("Invalid flags!\n");
-        return FALSE;
-    }
-
     /* X-Button (4 or 5) */
     if (dwFlags & MOUSEEVENTF_XDOWN)
     {
@@ -406,12 +401,17 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         }
     }
 
-    /* Mouse wheel */
-    if (dwFlags & MOUSEEVENTF_WHEEL)
+    /* Mouse wheels: a call that moves nothing posts nothing */
+    if (dwFlags & (MOUSEEVENTF_WHEEL | MOUSEEVENTF_HWHEEL))
     {
-        Msg.message = WM_MOUSEWHEEL;
-        Msg.wParam = MAKEWPARAM(pCurInfo->ButtonsDown, pmi->mouseData);
-        co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        SHORT sDelta = UserClampWheelDelta(pmi->mouseData);
+
+        if (sDelta != 0)
+        {
+            Msg.message = (dwFlags & MOUSEEVENTF_WHEEL) ? WM_MOUSEWHEEL : WM_MOUSEHWHEEL;
+            Msg.wParam = MAKEWPARAM(pCurInfo->ButtonsDown, (WORD)sDelta);
+            co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        }
     }
 
     return TRUE;

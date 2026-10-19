@@ -706,6 +706,7 @@ co_CallLowLevelKeyboardHook(WORD wVk, WORD wScanCode, DWORD dwFlags, BOOL bInjec
     KBDLLHOOKSTRUCT KbdHookData;
     UINT uMsg;
 
+    RtlZeroMemory(&KbdHookData, sizeof(KbdHookData));
     KbdHookData.vkCode = wVk;
     KbdHookData.scanCode = wScanCode;
     KbdHookData.flags = 0;
@@ -1086,7 +1087,8 @@ IntHandleAltNumpad(
                 msgChar.time = dwTime;
                 msgChar.pt = gpsi->ptCursor;
 
-                MsqPostMessage(pFocusQueue->ptiKeyboard, &msgChar, FALSE, QS_KEY, 0, 0);
+                if (!UserRawInputQueueNoLegacy(pFocusQueue, RIM_TYPEKEYBOARD))
+                    MsqPostMessage(pFocusQueue->ptiKeyboard, &msgChar, FALSE, QS_KEY, 0, 0);
             }
         }
 
@@ -1324,7 +1326,8 @@ ProcessKeyEvent(WORD wVk, WORD wScanCode, DWORD dwFlags, BOOL bInjected, DWORD d
         /* Post a keyboard message */
         TRACE("Posting keyboard msg %u wParam 0x%x lParam 0x%x\n", Msg.message, Msg.wParam, Msg.lParam);
         if (!Wnd) {ERR("Window is NULL\n");}
-        MsqPostMessage(pti, &Msg, TRUE, QS_KEY, 0, dwExtraInfo);
+        if (!UserRawInputNoLegacy(pti->ppi, RIM_TYPEKEYBOARD))
+            MsqPostMessage(pti, &Msg, TRUE, QS_KEY, 0, dwExtraInfo);
     }
     return TRUE;
 }
@@ -1401,6 +1404,19 @@ UserSendKeyboardInput(KEYBDINPUT *pKbdInput, BOOL bInjected)
         ProcessKeyEvent(VK_LCONTROL, 0, pKbdInput->dwFlags & KEYEVENTF_KEYUP, bInjected, dwTime, 0);
     }
 
+    /* Injected keys have no device packet; raw input sees them here (not as unicode packets) */
+    if (bInjected && RawInputEnabled && wVk != VK_PACKET)
+    {
+        BOOL bUp = !!(pKbdInput->dwFlags & KEYEVENTF_KEYUP);
+        /* Alt held (AltGr too) makes SYS messages; the key of Alt itself is SYS on the way
+           down and plain on the way up (measured) */
+        WORD wRawVk = IntSimplifyVk(wVk & 0xFF); /* left and right keys are one key in raw input */
+        BOOL bSys = (wRawVk == VK_MENU) ? !bUp : IS_KEY_DOWN(gafAsyncKeyState, VK_MENU);
+
+        UserRawInputSendKeyboard(wScanCode, wRawVk, bUp, bExt, pKbdInput->dwExtraInfo,
+                                 bUp ? (bSys ? WM_SYSKEYUP : WM_KEYUP) : (bSys ? WM_SYSKEYDOWN : WM_KEYDOWN));
+    }
+
     /* Finally process this key */
     return ProcessKeyEvent(wVk, wScanCode, pKbdInput->dwFlags, bInjected, dwTime, pKbdInput->dwExtraInfo);
 }
@@ -1412,57 +1428,20 @@ UserRawInputProcessKeyboardInput(
     PKEYBOARD_INPUT_DATA pKbdInputData,
     WORD wScanCode, WORD wVk)
 {
-    PTHREADINFO pti;
-    HWND hwndTarget;
-    WPARAM wParam;
-    HRAWINPUT hRawInput;
     RAWKEYBOARD kb = {0};
-    MSG Msg = {0};
     BOOL bIsDown = (pKbdInputData->Flags & KEY_BREAK) ? FALSE : TRUE;
 
-    if (!UserGetRawInputTarget(RIM_TYPEKEYBOARD, &pti, &hwndTarget, &wParam))
-        return;
-
     kb.MakeCode = wScanCode & 0x7F;
-
-    if (bIsDown)
-        kb.Flags = RI_KEY_MAKE;
-    else
-        kb.Flags = RI_KEY_BREAK;
-    kb.VKey = wVk & 0xFF; // Note: wVk is simplified by msg queue
-
-    if (bIsDown)
-        kb.Message = WM_KEYDOWN;
-    else
-        kb.Message = WM_KEYUP;
+    kb.Flags = bIsDown ? RI_KEY_MAKE : RI_KEY_BREAK;
+    kb.VKey = IntSimplifyVk(wVk & 0xFF) & 0xFF;
+    kb.Message = bIsDown ? WM_KEYDOWN : WM_KEYUP;
     if (pKbdInputData->Flags & KEY_E1)
-    {
         kb.Flags |= RI_KEY_E1;
-    }
     if (pKbdInputData->Flags & KEY_E0)
-    {
         kb.Flags |= RI_KEY_E0;
-    }
-
     kb.ExtraInformation = pKbdInputData->ExtraInformation;
-    hRawInput = UserCreateRawInput(pti,
-                                   RIM_TYPEKEYBOARD,
-                                   (HANDLE)pDeviceInfo,
-                                   wParam,
-                                   &kb,
-                                   sizeof(kb));
-    if (!hRawInput)
-        return;
 
-    Msg.hwnd = hwndTarget;
-    Msg.message = WM_INPUT;
-    Msg.wParam = wParam;
-    Msg.lParam = (LPARAM)hRawInput;
-    Msg.time = EngGetTickCount32();
-    Msg.pt = gpsi->ptCursor;
-
-    if (!MsqPostMessage(pti, &Msg, TRUE, QS_RAWINPUT, 0, 0))
-        UserFreeRawInput(pti->MessageQueue, hRawInput);
+    UserRawInputDeliver(RIM_TYPEKEYBOARD, (HANDLE)pDeviceInfo, &kb, sizeof(kb));
 }
 
 /*

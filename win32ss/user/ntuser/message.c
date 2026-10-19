@@ -116,6 +116,10 @@ static const unsigned int message_pointer_flags[] =
     SET(WM_ASKCBFORMATNAME)
 };
 
+#ifndef SMTO_ERRORONEXIT
+#define SMTO_ERRORONEXIT 0x20
+#endif
+
 /* check whether a given message type includes pointers */
 static inline int is_pointer_message( UINT message, WPARAM wparam )
 {
@@ -854,7 +858,11 @@ static LRESULT handle_internal_message( PWND pWnd, UINT msg, WPARAM wparam, LPAR
              return co_UserFreeWindow(pWnd, PsGetCurrentProcessWin32Process(), PsGetCurrentThreadWin32Thread(), TRUE);
           else
              co_UserDestroyWindow(pWnd);
+          break;
        }
+       case WM_ASYNC_PRINTWINDOW:
+          /* Sent by PrintWindow; wParam is the request id */
+          return IntHandlePrintWindowRequest(pWnd, (ULONG)wparam);
     }
     return 0;
 }
@@ -1023,11 +1031,16 @@ co_IntPeekMessage( PMSG Msg,
     BOOL RemoveMessages;
     UINT ProcessMask;
     BOOL Hit = FALSE;
+    BOOL ReadsInput;
 
     pti = PsGetCurrentThreadWin32Thread();
 
     RemoveMessages = RemoveMsg & PM_REMOVE;
     ProcessMask = HIWORD(RemoveMsg);
+
+    /* A filter that leaves out the keyboard or the mouse does not count as reading the queue */
+    ReadsInput = (GetWakeMask(MsgFilterMin, MsgFilterMax) & (ProcessMask ? ProcessMask : QS_ALLINPUT) &
+                  (QS_KEY | QS_MOUSE)) == (QS_KEY | QS_MOUSE);
 
  /* Hint, "If wMsgFilterMin and wMsgFilterMax are both zero, PeekMessage returns
     all available messages (that is, no range filtering is performed)".        */
@@ -1038,7 +1051,8 @@ co_IntPeekMessage( PMSG Msg,
     do
     {
         /* Update the last message-queue access time */
-        pti->pcti->timeLastRead = EngGetTickCount32();
+        if (ReadsInput)
+            pti->pcti->timeLastRead = EngGetTickCount32();
 
         // Post mouse moves while looping through peek messages.
         if (pti->MessageQueue->QF_flags & QF_MOUSEMOVED)
@@ -1172,7 +1186,8 @@ co_IntPeekMessage( PMSG Msg,
 
 GotMessage:
     /* Update the last message-queue access time */
-    pti->pcti->timeLastRead = EngGetTickCount32();
+    if (ReadsInput)
+        pti->pcti->timeLastRead = EngGetTickCount32();
     if (RemoveMessages)
         UserUpdatePrevRawInput(pti, Msg);
     return TRUE;
@@ -1650,7 +1665,7 @@ co_IntSendMessageTimeoutSingle( HWND hWnd,
         goto Cleanup; // Return FALSE
     }
 
-    if ((uFlags & SMTO_ABORTIFHUNG) && MsqIsHung(ptiSendTo, 4 * MSQ_HUNG))
+    if ((uFlags & SMTO_ABORTIFHUNG) && MsqIsHungForSend(ptiSendTo, MSQ_HUNG))
     {
         // FIXME: Set window hung and add to a list.
         /* FIXME: Set a LastError? */
@@ -1672,7 +1687,15 @@ co_IntSendMessageTimeoutSingle( HWND hWnd,
     }
     while ((Status == STATUS_TIMEOUT) &&
            (uFlags & SMTO_NOTIMEOUTIFNOTHUNG) &&
-           !MsqIsHung(ptiSendTo, MSQ_HUNG)); // FIXME: Set window hung and add to a list.
+           !MsqIsHungForSend(ptiSendTo, MSQ_HUNG)); // FIXME: Set window hung and add to a list.
+
+    if ((uFlags & SMTO_ERRORONEXIT) &&
+        Status == ((uFlags & SMTO_BLOCK) ? STATUS_WAIT_1 : STATUS_WAIT_2))
+    {
+        /* The receiving thread exited during the call */
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        goto Cleanup; // Return FALSE
+    }
 
     if (Status == STATUS_TIMEOUT)
     {

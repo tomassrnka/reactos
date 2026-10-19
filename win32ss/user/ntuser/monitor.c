@@ -485,6 +485,41 @@ UserMonitorFromRect(
     return UserGetMonitorObject(hMonitor);
 }
 
+static BOOL
+IntIsWorkAreaRectOfMonitor(
+    PRECTL pRect,
+    PMONITOR pMonitor)
+{
+    RECTL Rect = *pRect;
+
+    RECTL_vOffsetRect(&Rect,
+                      pMonitor->rcWork.left - pMonitor->rcMonitor.left,
+                      pMonitor->rcWork.top - pMonitor->rcMonitor.top);
+    return UserMonitorFromRect(&Rect, MONITOR_DEFAULTTOPRIMARY) == pMonitor;
+}
+
+/* The monitor that a rectangle relative to the work area of its monitor (as in WINDOWPLACEMENT) belongs to:
+   the one that the rectangle back in screen coordinates falls on, as MONITOR_DEFAULTTOPRIMARY picks it.
+   More than one can fit near a monitor edge: pPreferred (the window's own monitor) first */
+PMONITOR NTAPI
+UserMonitorFromWorkAreaRect(
+    PRECTL pRect,
+    PMONITOR pPreferred)
+{
+    PMONITOR pMonitor;
+
+    if (pPreferred && IntIsWorkAreaRectOfMonitor(pRect, pPreferred))
+        return pPreferred;
+
+    for (pMonitor = gMonitorList; pMonitor != NULL; pMonitor = pMonitor->pMonitorNext)
+    {
+        if (IntIsWorkAreaRectOfMonitor(pRect, pMonitor))
+            return pMonitor;
+    }
+
+    return UserMonitorFromRect(pRect, MONITOR_DEFAULTTOPRIMARY);
+}
+
 PMONITOR
 FASTCALL
 UserMonitorFromPoint(

@@ -101,6 +101,11 @@ NtGdiExtEscape(
       return -1;
    }
 
+#if DBG
+   if (Escape == GDI_DBG_ESCAPE_FAIL_REGION_ALLOC)
+      return REGION_iDbgArmAllocFailure(UnsafeInData, InSize);
+#endif
+
    if (hDC == NULL)
    {
       if (pDriver)

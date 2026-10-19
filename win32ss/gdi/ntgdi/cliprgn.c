@@ -79,8 +79,19 @@ GdiSelectVisRgn(
 
     dc->fs |= DC_DIRTY_RAO;
 
-    ASSERT(dc->prgnVis != NULL);
     ASSERT(prgn != NULL);
+
+    /* The shared default region must not be overwritten */
+    if (!dc->prgnVis || dc->prgnVis == prgnDefault)
+    {
+        PREGION prgnVis = IntSysCreateRectpRgn(0, 0, 0, 0);
+        if (!prgnVis)
+        {
+            DC_UnlockDc(dc);
+            return;
+        }
+        dc->prgnVis = prgnVis;
+    }
 
     REGION_bCopy(dc->prgnVis, prgn);
     REGION_bOffsetRgn(dc->prgnVis, -dc->ptlDCOrig.x, -dc->ptlDCOrig.y);
@@ -105,6 +116,11 @@ IntSelectClipRgn(
     if (fnMode != RGN_COPY && (fnMode != RGN_AND || !prgn || prgnOrigClip))
     {
         prgnNClip = IntSysCreateRectpRgn(0, 0, 0, 0);
+        if (!prgnNClip)
+        {
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return ERROR;
+        }
 
         // Have Original Clip Region.
         if (prgnOrigClip)
@@ -157,6 +173,12 @@ IntSelectClipRgn(
             REGION_GetRgnBox(dc->prgnVis, &rcl);
 
             prgnClip = IntSysCreateRectpRgnIndirect(&rcl);
+            if (!prgnClip)
+            {
+                REGION_Delete(prgnNClip);
+                EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return ERROR;
+            }
 
             Ret = IntGdiCombineRgn(prgnNClip, prgnClip, prgn, fnMode);
 
@@ -200,7 +222,14 @@ IntSelectClipRgn(
     else // NULL original Clip, just copy caller region to new.
     {
        prgnNClip = IntSysCreateRectpRgn(0, 0, 0, 0);
-       REGION_bCopy(prgnNClip, prgn);
+       if (!prgnNClip || !REGION_bCopy(prgnNClip, prgn))
+       {
+           REGION_Delete(prgnNClip);
+           EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+           return ERROR;
+       }
+       if (prgnOrigClip)
+           REGION_Delete(prgnOrigClip);
        Ret = REGION_Complexity(prgnNClip);
        dc->dclevel.prgnClip = prgnNClip;
        IntGdiReleaseRaoRgn(dc);
@@ -259,6 +288,11 @@ IntGdiExtSelectClipRect(
         }
 
         prgn = IntSysCreateRectpRgnIndirect(prcl);
+        if (!prgn)
+        {
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return ERROR;
+        }
 
         Ret = IntSelectClipRgn( dc, prgn, fnMode);
 

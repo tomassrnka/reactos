@@ -397,6 +397,27 @@ MouHid_ReadCompletion(
     /* dispatch mouse action */
     MouHid_DispatchInputData(DeviceExtension, &MouseInputData);
 
+    /* detect tilt wheel change; one input record carries one wheel distance, so it goes on its own */
+    if (DeviceExtension->HasPan)
+    {
+        UsageValue = 0;
+        Status = HidP_GetScaledUsageValue(HidP_Input,
+                                          HID_USAGE_PAGE_CONSUMER,
+                                          HIDP_LINK_COLLECTION_UNSPECIFIED,
+                                          MOUHID_USAGE_CONSUMER_AC_PAN,
+                                          &UsageValue,
+                                          DeviceExtension->PreparsedData,
+                                          DeviceExtension->Report,
+                                          DeviceExtension->ReportLength);
+        if (Status == HIDP_STATUS_SUCCESS && UsageValue != 0)
+        {
+            RtlZeroMemory(&MouseInputData, sizeof(MOUSE_INPUT_DATA));
+            MouseInputData.ButtonFlags = MOUSE_HWHEEL;
+            MouseInputData.ButtonData = (USHORT)(UsageValue * WHEEL_DELTA);
+            MouHid_DispatchInputData(DeviceExtension, &MouseInputData);
+        }
+    }
+
     /* re-init read */
     MouHid_InitiateRead(DeviceExtension);
 
@@ -960,6 +981,21 @@ MouHid_StartDevice(
     /* until a valid absolute report arrives, sit at the centre, not an edge */
     DeviceExtension->LastAbsoluteX = VIRTUAL_SCREEN_SIZE_X / 2;
     DeviceExtension->LastAbsoluteY = VIRTUAL_SCREEN_SIZE_Y / 2;
+
+    /* a tilt wheel reports the horizontal distance as AC Pan of the consumer page */
+    ValueCapsLength = 1;
+    Status = HidP_GetSpecificValueCaps(HidP_Input,
+                                       HID_USAGE_PAGE_CONSUMER,
+                                       HIDP_LINK_COLLECTION_UNSPECIFIED,
+                                       MOUHID_USAGE_CONSUMER_AC_PAN,
+                                       &ValueCaps,
+                                       &ValueCapsLength,
+                                       PreparsedData);
+    if (Status == HIDP_STATUS_SUCCESS && ValueCapsLength == 1)
+    {
+        DeviceExtension->HasPan = TRUE;
+        DPRINT("[MOUHID] tilt wheel support detected\n");
+    }
 
     /* check if mice is absolute */
     if (DeviceExtension->ValueCapsY.IsAbsolute &&

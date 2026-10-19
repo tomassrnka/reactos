@@ -1,6 +1,8 @@
 #pragma once
 
 #define MSQ_HUNG        5000
+/* A process that has not shown a window is not judged for hung sends this long after its start */
+#define MSQ_APPSTARTING_TIMEOUT 30000
 #define MSQ_NORMAL      0
 #define MSQ_ISHOOK      1
 #define MSQ_INJECTMODULE 2
@@ -41,6 +43,22 @@ typedef struct _USER_SENT_MESSAGE
 #define SMF_RECEIVEDMESSAGE 0x00000010
 #define SMF_RECEIVERBUSY    0x00004000
 
+/*
+   A walk of a queue's hardware message list that calls out (hooks, sent messages) while it
+   holds a node. It lives on the walker's stack, is linked into the queue and into the thread,
+   and holds a reference on the queue. Every removal from the list moves pNext past the node
+   it removes and clears pCurrent if that is the node, so the walk never touches freed memory.
+   A thread that dies inside a callout abandons its walks; thread cleanup unlinks them.
+ */
+typedef struct _MSQ_HW_WALK
+{
+  LIST_ENTRY QueueLink;
+  struct _MSQ_HW_WALK *pPrevOfThread;
+  struct _USER_MESSAGE_QUEUE *MessageQueue;
+  PLIST_ENTRY pNext;
+  struct _USER_MESSAGE *pCurrent;
+} MSQ_HW_WALK, *PMSQ_HW_WALK;
+
 typedef struct _USER_MESSAGE_QUEUE
 {
   /* Reference counter, only access this variable with interlocked functions! */
@@ -60,6 +78,8 @@ typedef struct _USER_MESSAGE_QUEUE
   /* Outstanding raw input packets for the queue. */
   LIST_ENTRY RawInputListHead;
   ULONG cRawInput;
+  /* Walks of the hardware message list in progress (MSQ_HW_WALK), nested ones included */
+  LIST_ENTRY HwWalkListHead;
   /* Last click message for translating double clicks */
   MSG msgDblClk;
   /* Current capture window for this queue. */
@@ -120,7 +140,8 @@ enum internal_event_message
     WM_ASYNC_SHOWWINDOW = 0x80000000,
     WM_ASYNC_SETWINDOWPOS,
     WM_ASYNC_SETACTIVEWINDOW,
-    WM_ASYNC_DESTROYWINDOW
+    WM_ASYNC_DESTROYWINDOW,
+    WM_ASYNC_PRINTWINDOW
 };
 
 #define POSTEVENT_DAW 4
@@ -131,6 +152,8 @@ enum internal_event_message
 extern LIST_ENTRY usmList;
 
 BOOL FASTCALL MsqIsHung(PTHREADINFO pti, DWORD TimeOut);
+BOOL FASTCALL MsqIsHungForSend(PTHREADINFO pti, DWORD TimeOut);
+#define UserEndAppStarting(pWnd) ((pWnd)->head.pti->ppi->W32PF_flags &= ~W32PF_APPSTARTING)
 VOID CALLBACK HungAppSysTimerProc(HWND,UINT,UINT_PTR,DWORD);
 NTSTATUS FASTCALL co_MsqSendMessage(PTHREADINFO ptirec,
            HWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam,
@@ -161,6 +184,11 @@ BOOLEAN FASTCALL MsqInitializeMessageQueue(PTHREADINFO, PUSER_MESSAGE_QUEUE);
 PUSER_MESSAGE_QUEUE FASTCALL MsqCreateMessageQueue(PTHREADINFO);
 VOID FASTCALL MsqCleanupThreadMsgs(PTHREADINFO);
 VOID FASTCALL MsqDestroyMessageQueue(_In_ PTHREADINFO pti);
+VOID FASTCALL MsqPurgeRawInputOfThread(_In_ PTHREADINFO pti);
+VOID FASTCALL MsqRetireRawInputMessage(_In_ PUSER_MESSAGE_QUEUE MessageQueue, _In_ PUSER_MESSAGE Message);
+VOID FASTCALL MsqDestroyHardwareMessage(_In_ PUSER_MESSAGE_QUEUE MessageQueue, _In_ PUSER_MESSAGE Message);
+BOOL FASTCALL MsqHardwareMessageInPlay(_In_ PUSER_MESSAGE_QUEUE MessageQueue, _In_ PUSER_MESSAGE Message);
+VOID FASTCALL MsqRundownHardwareWalks(_In_ PTHREADINFO pti);
 CODE_SEG("INIT") NTSTATUS NTAPI MsqInitializeImpl(VOID);
 BOOLEAN FASTCALL co_MsqDispatchOneSentMessage(_In_ PTHREADINFO pti);
 NTSTATUS FASTCALL
@@ -203,6 +231,7 @@ co_MsqSendMessageAsync(PTHREADINFO ptiReceiver,
                        BOOL HasPackedLParam,
                        INT HookMessage);
 
+VOID FASTCALL MsqWithdrawSentMessagesOf(_In_ PTHREADINFO ptiSender);
 VOID FASTCALL IntCoalesceMouseMove(PTHREADINFO);
 LRESULT FASTCALL IntDispatchMessage(MSG* Msg);
 BOOL FASTCALL IntTranslateKbdMessage(LPMSG lpMsg, UINT flags);
@@ -239,8 +268,20 @@ VOID APIENTRY MsqRemoveWindowMessagesFromQueue(PWND pWindow);
    (message) == WM_NCRBUTTON##code || \
    (message) == WM_NCXBUTTON##code )
 
+/* The last mouse message is WM_MOUSEHWHEEL, whatever _WIN32_WINNT win32k is compiled for */
+#ifndef WM_MOUSEHWHEEL
+#define WM_MOUSEHWHEEL 0x020E
+#endif
+#ifndef MOUSEEVENTF_HWHEEL
+#define MOUSEEVENTF_HWHEEL 0x1000
+#endif
+#if (WM_MOUSELAST < WM_MOUSEHWHEEL)
+#undef WM_MOUSELAST
+#define WM_MOUSELAST WM_MOUSEHWHEEL
+#endif
+
 #define WM_NCMOUSEFIRST WM_NCMOUSEMOVE
-#define WM_NCMOUSELAST  (WM_NCMOUSEFIRST+(WM_MOUSELAST-WM_MOUSEFIRST))
+#define WM_NCMOUSELAST  (WM_NCMOUSEFIRST+(WM_XBUTTONDBLCLK-WM_MOUSEFIRST))
 
 #define IS_MOUSE_MESSAGE(message) \
     ((message >= WM_NCMOUSEFIRST && message <= WM_NCMOUSELAST) || \
@@ -250,7 +291,9 @@ VOID APIENTRY MsqRemoveWindowMessagesFromQueue(PWND pWindow);
     (message >= WM_KEYFIRST && message <= WM_KEYLAST)
 
 HANDLE FASTCALL IntMsqSetWakeMask(DWORD WakeMask);
+UINT FASTCALL GetWakeMask(UINT first, UINT last);
 BOOL FASTCALL IntMsqClearWakeMask(VOID);
+NTSTATUS FASTCALL co_MsqMsgWait(PMSGWAITINFO pUserInfo);
 
 VOID FASTCALL IdlePing(VOID);
 VOID FASTCALL IdlePong(VOID);

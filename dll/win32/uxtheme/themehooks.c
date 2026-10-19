@@ -58,6 +58,14 @@ void ThemeDestroyWndData(HWND hWnd)
         g_user32ApiHook.SetWindowRgn(hWnd, 0, TRUE);
     }
 
+    /* Claim the context: the hook cleanup can run in another thread of the
+       process while the window's own thread handles WM_NCDESTROY */
+    pwndData = (PWND_DATA)RemovePropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
+    if(pwndData == NULL)
+    {
+        return;
+    }
+
     if (pwndData->hTabBackgroundBrush != NULL)
     {
         CloseThemeData(GetWindowTheme(hWnd));
@@ -81,8 +89,6 @@ void ThemeDestroyWndData(HWND hWnd)
     }
 
     HeapFree(GetProcessHeap(), 0, pwndData);
-
-    SetPropW( hWnd, (LPCWSTR)MAKEINTATOM(atWndContext), NULL);
 }
 
 HTHEME GetNCCaptionTheme(HWND hWnd, DWORD style)

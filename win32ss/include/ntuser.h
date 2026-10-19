@@ -3606,6 +3606,22 @@ NtUserYieldTask(VOID);
 #define NOPARAM_ROUTINE_ISCONSOLEMODE             0xffff0001
 #define ONEPARAM_ROUTINE_ENABLEPROCWNDGHSTING     0xfffe000d
 #define ONEPARAM_ROUTINE_GETDESKTOPMAPPING        0xfffe000e
+#define ONEPARAM_ROUTINE_SETRAWINPUTSERIAL        0xfffe000f /* checked builds only */
+#define ONEPARAM_ROUTINE_ROS_MSGWAIT              0xfffe0100
+
+/* Parameters of MsgWaitForMultipleObjectsEx. User32 fills the handles as WaitForMultipleObjectsEx would
+   pass them and win32k adds its queue event after them, so the array holds at most nCount + 1 handles.
+   The handles keep their native width (amd64 width in the WoW64 guest build). */
+#define MSGWAIT_MAX_OBJECTS 64
+typedef struct _MSGWAITINFO
+{
+    ULONG nCount;
+    ULONG dwWakeMask;
+    ULONG dwFlags;
+    ULONG bTimeout;
+    LARGE_INTEGER Timeout;
+    KARRAY(HANDLE, Handles, MSGWAIT_MAX_OBJECTS);
+} MSGWAITINFO, *PMSGWAITINFO;
 #define TWOPARAM_ROUTINE_SETMENUBARHEIGHT         0xfffd0050
 #define TWOPARAM_ROUTINE_SETGUITHRDHANDLE         0xfffd0051
 #define HWNDLOCK_ROUTINE_SETFOREGROUNDWINDOWMOUSE 0xfffd0052
