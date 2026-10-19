@@ -314,6 +314,7 @@ DECLARE_INTERFACE_(ITrayBandSite, IUnknown)
     STDMETHOD_(HRESULT, Lock) (THIS_ BOOL bLock) PURE;
     STDMETHOD_(HRESULT, IsQuickLaunchShown) (THIS) PURE;
     STDMETHOD_(HRESULT, ShowQuickLaunch) (THIS_ BOOL bShow) PURE;
+    STDMETHOD_(HRESULT, Save) (THIS) PURE;
 };
 #undef INTERFACE
 
@@ -332,6 +333,7 @@ DECLARE_INTERFACE_(ITrayBandSite, IUnknown)
 #define ITrayBandSite_Lock(p,a)                         (p)->lpVtbl->Lock(p,a)
 #define ITrayBandSite_IsQuickLaunchShown(p)             (p)->lpVtbl->IsQuickLaunchShown(p)
 #define ITrayBandSite_ShowQuickLaunch(p,a)              (p)->lpVtbl->ShowQuickLaunch(p,a)
+#define ITrayBandSite_Save(p)                           (p)->lpVtbl->Save(p)
 #endif
 
 HRESULT CTrayBandSite_CreateInstance(IN ITrayWindow *tray, IN IDeskBand* pTaskBand, OUT ITrayBandSite** pBandSite);
