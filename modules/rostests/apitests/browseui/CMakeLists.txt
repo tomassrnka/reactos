@@ -4,6 +4,7 @@ include_directories(
 
 list(APPEND SOURCE
     ACListISF.cpp
+    BandSite.cpp
     IACLCustomMRU.cpp
     IACLHistory.cpp
     IAutoComplete.cpp
