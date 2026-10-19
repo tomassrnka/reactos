@@ -5,6 +5,11 @@
  */
 
 #include "precomp.h"
+
+/* amd64 only: there KiDispatchExceptionToUser copies the whole record to the
+ * user stack. i386 copies only NumberParameters parameters, so the unused
+ * slots seen by a handler are other user stack, not the kernel local. */
+#ifdef _M_AMD64
 #include <string.h>
 
 /*
@@ -116,3 +121,12 @@ START_TEST(RaiseExceptionLeak)
         TestCount(Counts[i]);
     RemoveVectoredExceptionHandler(Handler);
 }
+
+#else /* _M_AMD64 */
+
+START_TEST(RaiseExceptionLeak)
+{
+    skip("The whole-record copy to the user stack is amd64 only\n");
+}
+
+#endif /* _M_AMD64 */
