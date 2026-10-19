@@ -461,6 +461,38 @@ gethostname(OUT char FAR * name,
 
 /*
  * @implemented
+ *
+ * After GetHostNameW of Wine's ws2_32 (dlls/ws2_32/protocol.c), Copyright 1993 Simon Kissane and others, LGPL-2.1+.
+ */
+INT
+WSAAPI
+GetHostNameW(OUT PWSTR name,
+             IN INT namelen)
+{
+    CHAR Host[256];
+
+    if (!name)
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    if (gethostname(Host, sizeof(Host)) != ERROR_SUCCESS)
+        return SOCKET_ERROR;
+
+    /* The converted name and its terminator must fit */
+    if (MultiByteToWideChar(CP_ACP, 0, Host, -1, NULL, 0) > namelen)
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    MultiByteToWideChar(CP_ACP, 0, Host, -1, name, namelen);
+    return ERROR_SUCCESS;
+}
+
+/*
+ * @implemented
  */
 PSERVENT
 WSAAPI

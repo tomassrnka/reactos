@@ -178,6 +178,7 @@ User32CreateWindowEx(DWORD dwExStyle,
     LPCWSTR lpLibFileName = NULL;
     HANDLE pCtx = NULL;
     DWORD dwFlagsVer;
+    PVOID DpiCreation;
 
 #if 0
     DbgPrint("[window] User32CreateWindowEx style %d, exstyle %d, parent %d\n", dwStyle, dwExStyle, hWndParent);
@@ -288,6 +289,8 @@ User32CreateWindowEx(DWORD dwExStyle,
         plstrClassVersion = &lstrClassVersion;
     }
 
+    DpiCreation = DpiBeginWindow(hWndParent, dwStyle);
+
     for (;;)
     {
         Handle = NtUserCreateWindowEx(dwExStyle,
@@ -329,6 +332,8 @@ User32CreateWindowEx(DWORD dwExStyle,
 #if 0
     DbgPrint("[window] NtUserCreateWindowEx() == %d\n", Handle);
 #endif
+
+    DpiEndWindow(Handle, DpiCreation);
 
 cleanup:
     if (!Unicode)
@@ -1533,6 +1538,26 @@ IsServerSideWindow(
     return Wnd && (Wnd->state & WNDS_SERVERSIDEWINDOWPROC);
 }
 
+
+/*
+ * @implemented
+ *
+ * A window is arranged when it is snapped to a side of the screen. A handle that is no window is an invalid
+ * parameter here, not an invalid window handle (measured on Windows 10).
+ */
+BOOL WINAPI
+IsWindowArranged(HWND hWnd)
+{
+    PWND Wnd = ValidateHwndNoErr(hWnd);
+
+    if (Wnd == NULL || (Wnd->state & WNDS_DESTROYED))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return (Wnd->ExStyle2 & (WS_EX2_VERTICALLYMAXIMIZEDLEFT | WS_EX2_VERTICALLYMAXIMIZEDRIGHT)) != 0;
+}
 
 /*
  * @implemented

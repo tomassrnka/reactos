@@ -2411,3 +2411,135 @@ EXTERN_C BOOL WINAPI LinkWindow_UnregisterClass(_In_ DWORD dwUnused)
     /* Do nothing. This is correct. */
     return TRUE;
 }
+
+/*************************************************************************
+ *              SHGetPathFromIDListEx (SHELL32.@)
+ *
+ * https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetpathfromidlistex
+ */
+EXTERN_C BOOL WINAPI
+SHGetPathFromIDListEx(
+    _In_ PCIDLIST_ABSOLUTE pidl,
+    _Out_writes_(cchPath) PWSTR pszPath,
+    _In_ DWORD cchPath,
+    _In_ GPFIDL_FLAGS uOpts)
+{
+    CComHeapPtr<WCHAR> pszLong;
+    DWORD cchLong, cchShort;
+
+    TRACE("(%p, %p, %lu, 0x%x)\n", pidl, pszPath, cchPath, uOpts);
+
+    if (!pszPath || !cchPath)
+        return FALSE;
+    *pszPath = UNICODE_NULL;
+    if (!pidl)
+        return FALSE;
+
+    /* One character more than the caller's buffer tells a path that does not fit from one that does */
+    cchLong = min(max(cchPath, MAX_PATH), 32767) + 1;
+    if (!pszLong.Allocate(cchLong))
+        return FALSE;
+    if (FAILED(SHGetPathCchFromIDListW(pidl, pszLong, cchLong)) || !*pszLong)
+        return FALSE;
+
+    /* GPFIDL_UNCPRINTER: printers have no file-system path here, nothing to do */
+    if (uOpts & GPFIDL_ALTNAME)
+    {
+        cchShort = GetShortPathNameW(pszLong, pszPath, cchPath);
+        if (cchShort && cchShort < cchPath)
+            return TRUE;
+        *pszPath = UNICODE_NULL;
+        if (cchShort)
+            return FALSE;
+    }
+
+    if ((DWORD)lstrlenW(pszLong) >= cchPath)
+        return FALSE;
+    StringCchCopyW(pszPath, cchPath, pszLong);
+    return TRUE;
+}
+
+/*************************************************************************
+ *              ILLoadFromStreamEx (SHELL32.846)
+ *
+ * https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-illoadfromstreamex
+ */
+EXTERN_C HRESULT WINAPI
+ILLoadFromStreamEx(
+    _In_ IStream *pstm,
+    _Out_ PIDLIST_RELATIVE *ppidl)
+{
+    CComHeapPtr<ITEMIDLIST> pidl;
+    WORD cbList, cbItem;
+    ULONG cbRead, ib;
+    HRESULT hr;
+
+    TRACE("(%p, %p)\n", pstm, ppidl);
+
+    if (!ppidl)
+        return E_POINTER;
+    *ppidl = NULL;
+    if (!pstm)
+        return E_INVALIDARG;
+
+    /* The list size as written by ILSaveToStream, then the list with its terminator */
+    hr = pstm->Read(&cbList, sizeof(cbList), &cbRead);
+    if (FAILED(hr))
+        return hr;
+    if (cbRead != sizeof(cbList) || cbList < sizeof(WORD))
+        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+
+    if (!pidl.AllocateBytes(cbList))
+        return E_OUTOFMEMORY;
+    hr = pstm->Read(pidl.m_pData, cbList, &cbRead);
+    if (FAILED(hr))
+        return hr;
+    if (cbRead != cbList)
+        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+
+    for (ib = 0; ; ib += cbItem)
+    {
+        if (ib + sizeof(WORD) > cbList)
+            return E_FAIL;
+        cbItem = *(WORD *)((BYTE *)pidl.m_pData + ib);
+        if (!cbItem)
+            break;
+        if (cbItem < sizeof(WORD))
+            return E_FAIL;
+    }
+
+    *ppidl = pidl.Detach();
+    return S_OK;
+}
+
+/*************************************************************************
+ *              SHGetLocalizedName (SHELL32.@)
+ *
+ * Unimplemented: ReactOS folders carry no localized-name entries.
+ */
+EXTERN_C HRESULT WINAPI
+SHGetLocalizedName(
+    _In_ PCWSTR pszPath,
+    _Out_writes_(cch) PWSTR pszResModule,
+    _In_ UINT cch,
+    _Out_ int *pidsRes)
+{
+    FIXME("(%s, %p, %u, %p) stub\n", debugstr_w(pszPath), pszResModule, cch, pidsRes);
+    if (pszResModule && cch)
+        *pszResModule = UNICODE_NULL;
+    if (pidsRes)
+        *pidsRes = 0;
+    return E_NOTIMPL;
+}
+
+/*************************************************************************
+ *              SHRemoveLocalizedName (SHELL32.@)
+ *
+ * Unimplemented
+ */
+EXTERN_C HRESULT WINAPI
+SHRemoveLocalizedName(_In_ PCWSTR pszPath)
+{
+    FIXME("(%s) stub\n", debugstr_w(pszPath));
+    return E_NOTIMPL;
+}

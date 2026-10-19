@@ -9,6 +9,7 @@
 #include <windef.h>
 #include <winbase.h>
 #include <string.h>
+#include <wchar.h>
 
 /*
  * Every contract below is hosted in kernelbase.dll, sechost.dll or a similar module on Windows, and its functions
@@ -299,6 +300,38 @@ static const CONTRACT_DATA g_Data[] =
         "SHAnsiToAnsi\0SHAnsiToUnicode\0SHUnicodeToAnsi\0SHUnicodeToUnicode\0"
     },
     {
+        "shcore.dll",
+        "api-ms-win-shcore-obsolete-l1-1-0.dll\0",
+        "CommandLineToArgvW\0SHStrDupA\0SHStrDupW\0"
+    },
+    {
+        "shcore.dll",
+        "api-ms-win-shcore-stream-winrt-l1-1-0.dll\0",
+        "CreateRandomAccessStreamOnFile\0CreateRandomAccessStreamOverStream\0CreateStreamOverRandomAccessStream\0"
+    },
+    {
+        "shcore.dll",
+        "api-ms-win-shcore-sysinfo-l1-1-0.dll\0",
+        "GetCurrentProcessExplicitAppUserModelID\0IsOS\0SetCurrentProcessExplicitAppUserModelID\0"
+    },
+    {
+        "shcore.dll",
+        "api-ms-win-shcore-scaling-l1-1-0.dll\0api-ms-win-shcore-scaling-l1-1-1.dll\0api-ms-win-shcore-scaling-l1-1-2.dll\0",
+        "GetDpiForMonitor\0GetProcessDpiAwareness\0GetScaleFactorForDevice\0GetScaleFactorForMonitor\0"
+        "RegisterScaleChangeEvent\0RegisterScaleChangeNotifications\0RevokeScaleChangeNotifications\0"
+        "SetProcessDpiAwareness\0UnregisterScaleChangeEvent\0"
+    },
+    {
+        "user32.dll",
+        "api-ms-win-rtcore-ntuser-dpi-l1-1-0.dll\0ext-ms-win-rtcore-ntuser-dpi-l1-1-0.dll\0"
+        "ext-ms-win-rtcore-ntuser-dpi-l1-2-2.dll\0",
+        "AdjustWindowRectExForDpi\0AreDpiAwarenessContextsEqual\0EnableNonClientDpiScaling\0"
+        "GetAwarenessFromDpiAwarenessContext\0GetDpiForSystem\0GetDpiForWindow\0GetSystemMetricsForDpi\0"
+        "GetThreadDpiAwarenessContext\0GetWindowDpiAwarenessContext\0IsProcessDPIAware\0"
+        "IsValidDpiAwarenessContext\0SetProcessDpiAwarenessContext\0SetThreadDpiAwarenessContext\0"
+        "SystemParametersInfoForDpi\0"
+    },
+    {
         "shell32.dll",
         "api-ms-win-shell-namespace-l1-1-0.dll\0",
         "SHCreateItemFromParsingName\0SHGetIDListFromObject\0"
@@ -361,12 +394,121 @@ test_contract(const CONTRACT_DATA *Data)
     FreeLibrary(Home);
 }
 
+/*
+ * Windows 10 hosts every contract of the shcore family in shcore.dll (measured with LoadLibrary and GetModuleFileName on
+ * Windows 10 22H2, x64 and WOW64). The contracts below have functions in ReactOS shcore, so they go there too. The
+ * families path and taskpool are not listed. Path: shcore has no named export for its functions (PathBuildRootA/W and
+ * PathIsNetworkPathA/W are ordinal stubs there; shlwapi has them by name). Taskpool: no ReactOS module implements it.
+ */
+static const char *const g_ShcoreHosted[] =
+{
+    "api-ms-win-shcore-comhelpers-l1-1-0.dll",
+    "api-ms-win-shcore-obsolete-l1-1-0.dll",
+    "api-ms-win-shcore-scaling-l1-1-0.dll",
+    "api-ms-win-shcore-scaling-l1-1-1.dll",
+    "api-ms-win-shcore-scaling-l1-1-2.dll",
+    "api-ms-win-shcore-stream-winrt-l1-1-0.dll",
+    "api-ms-win-shcore-sysinfo-l1-1-0.dll",
+    "api-ms-win-shcore-thread-l1-1-0.dll",
+};
+
+static BOOL
+is_windows_10_or_later(void)
+{
+    typedef LONG (WINAPI *FN_RtlGetVersion)(OSVERSIONINFOW *);
+    FN_RtlGetVersion pRtlGetVersion = (FN_RtlGetVersion)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlGetVersion");
+    OSVERSIONINFOW Info = { sizeof(Info) };
+
+    return pRtlGetVersion && pRtlGetVersion(&Info) == 0 && Info.dwMajorVersion >= 10;
+}
+
+static void
+test_shcore_hosts(void)
+{
+    size_t n;
+    HMODULE Shcore = LoadLibraryA("shcore.dll");
+
+    if (!Shcore)
+    {
+        skip("shcore.dll is not present\n");
+        return;
+    }
+
+    for (n = 0; n < RTL_NUMBER_OF(g_ShcoreHosted); ++n)
+    {
+        HMODULE Api = LoadLibraryA(g_ShcoreHosted[n]);
+
+        if (!Api)
+        {
+            if (is_reactos())
+                ok(0, "%s did not load: %lu\n", g_ShcoreHosted[n], GetLastError());
+            else
+                skip("%s is not present\n", g_ShcoreHosted[n]);
+            continue;
+        }
+
+        if (is_reactos() || is_windows_10_or_later())
+            ok(Api == Shcore, "%s is hosted in %p, not in shcore.dll (%p)\n", g_ShcoreHosted[n], (void *)Api, (void *)Shcore);
+        else
+            skip("%s: host not measured on this Windows\n", g_ShcoreHosted[n]);
+        FreeLibrary(Api);
+    }
+    FreeLibrary(Shcore);
+}
+
+/* shell32 answered this through the sysinfo contract with a made-up name; a failure is the honest answer without one */
+static void
+test_sysinfo_name(void)
+{
+    typedef HRESULT (WINAPI *FN_GetName)(PWSTR *);
+    typedef void (WINAPI *FN_CoTaskMemFree)(void *);
+    HMODULE Api = LoadLibraryA("api-ms-win-shcore-sysinfo-l1-1-0.dll");
+    HMODULE Ole32 = LoadLibraryA("ole32.dll");
+    FN_GetName pGetName = NULL;
+    FN_CoTaskMemFree pCoTaskMemFree = NULL;
+    PWSTR Name = NULL;
+    HRESULT hr;
+
+    if (Api)
+        pGetName = (FN_GetName)GetProcAddress(Api, "GetCurrentProcessExplicitAppUserModelID");
+    if (Ole32)
+        pCoTaskMemFree = (FN_CoTaskMemFree)GetProcAddress(Ole32, "CoTaskMemFree");
+
+    if (!Api || !pCoTaskMemFree)
+    {
+        skip("api-ms-win-shcore-sysinfo-l1-1-0.dll or ole32.dll is not usable\n");
+    }
+    else if (!pGetName)
+    {
+        ok(!is_reactos(), "GetCurrentProcessExplicitAppUserModelID is missing\n");
+    }
+    else
+    {
+        hr = pGetName(&Name);
+        if (SUCCEEDED(hr))
+        {
+            ok(Name != NULL, "hr %08lx but no name\n", hr);
+            ok(!Name || wcscmp(Name, L"ROS FixMe") != 0, "A made-up name came back: %ls\n", Name);
+            if (Name)
+                pCoTaskMemFree(Name);
+        }
+    }
+
+    if (Ole32)
+        FreeLibrary(Ole32);
+    if (Api)
+        FreeLibrary(Api);
+}
+
 START_TEST(contracts)
 {
     size_t n;
 
     for (n = 0; n < RTL_NUMBER_OF(g_Data); ++n)
         test_contract(&g_Data[n]);
+
+    test_shcore_hosts();
+    test_sysinfo_name();
 
     trace("Checked %u functions\n", g_Checked);
 }

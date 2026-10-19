@@ -2,6 +2,7 @@
 add_subdirectory(load_notifications)
 add_subdirectory(empty_dll)
 add_subdirectory(crtkeydtor)
+add_subdirectory(apiset_win10)
 
 include_directories($<TARGET_FILE_DIR:load_notifications>)
 include_directories($<TARGET_FILE_DIR:empty_dll>)
@@ -40,6 +41,7 @@ add_dependencies(ntdll_crt_test_lib psdk)
 list(APPEND SOURCE
     DllLoadNotification.c
     EmptyPxe.c
+    ApiSetQueryApiSetPresence.c
     LdrEnumResources.c
     LdrFindResource_U.c
     LdrLoadDll.c
@@ -148,6 +150,7 @@ list(APPEND SOURCE
     RtlImageDirectoryEntryToData.c
     RtlImageRvaToVa.c
     RtlInitializeContext.c
+    RtlInitializeSidEx.c
     RtlIsNameInExpression.c
     RtlIsNameLegalDOS8Dot3.c
     RtlLocale.c
@@ -160,6 +163,7 @@ list(APPEND SOURCE
     RtlQueryEnvironmentVariable.c
     RtlQueryEnvironmentVariable_U.c
     RtlQueryRegistryValues.c
+    RtlDeriveCapabilitySidsFromName.c
     RtlQueryPerformanceCounter.c
     RtlQueryTimeZoneInfo.c
     RtlSetTimeZoneInformation.c
@@ -173,8 +177,10 @@ list(APPEND SOURCE
     RtlUnicodeStringToAnsiString.c
     RtlUnicodeStringToCountedOemString.c
     RtlUnicodeToOemN.c
+    RtlUTF8.c
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
+    strcpy_s.c
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c

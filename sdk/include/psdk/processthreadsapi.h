@@ -155,6 +155,13 @@ GetCurrentThreadEffectiveToken(
     return (HANDLE)(LONG_PTR)-6;
 }
 
+WINBASEAPI
+VOID
+WINAPI
+GetCurrentThreadStackLimits(
+    _Out_ PULONG_PTR LowLimit,
+    _Out_ PULONG_PTR HighLimit);
+
 #endif // (_WIN32_WINNT >= 0x602) || defined(__REACTOS__)
 
 typedef enum _PROCESS_INFORMATION_CLASS

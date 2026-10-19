@@ -701,6 +701,336 @@ BOOL WINAPI Shell_GetImageLists(HIMAGELIST * lpBigList, HIMAGELIST * lpSmallList
 
     return TRUE;
 }
+
+/*************************************************************************
+ * SHGetStockIconInfo            [SHELL32.@]
+ *
+ * https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shgetstockiconinfo
+ */
+
+#define STOCK_SHELL32 0
+#define STOCK_USER32  1
+
+/* Ids up to 48 are the classic shell icon indexes; ReactOS has no imageres.dll */
+static const struct
+{
+    BYTE Module;
+    WORD ResId;
+} s_StockIcons[] =
+{
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* SIID_DOCNOASSOC */
+    { STOCK_SHELL32, IDI_SHELL_RICH_TEXT }, /* SIID_DOCASSOC */
+    { STOCK_SHELL32, IDI_SHELL_EXE }, /* SIID_APPLICATION */
+    { STOCK_SHELL32, IDI_SHELL_FOLDER }, /* SIID_FOLDER */
+    { STOCK_SHELL32, IDI_SHELL_FOLDER_OPEN }, /* SIID_FOLDEROPEN */
+    { STOCK_SHELL32, IDI_SHELL_5_12_FLOPPY }, /* SIID_DRIVE525 */
+    { STOCK_SHELL32, IDI_SHELL_3_14_FLOPPY }, /* SIID_DRIVE35 */
+    { STOCK_SHELL32, IDI_SHELL_REMOVEABLE }, /* SIID_DRIVERREMOVE */
+    { STOCK_SHELL32, IDI_SHELL_DRIVE }, /* SIID_DRIVERFIXED */
+    { STOCK_SHELL32, IDI_SHELL_NETDRIVE }, /* SIID_DRIVERNET */
+    { STOCK_SHELL32, IDI_SHELL_NETDRIVE_OFF }, /* SIID_DRIVERNETDISABLE */
+    { STOCK_SHELL32, IDI_SHELL_CDROM }, /* SIID_DRIVERCD */
+    { STOCK_SHELL32, IDI_SHELL_RAMDISK }, /* SIID_DRIVERRAM */
+    { STOCK_SHELL32, IDI_SHELL_ENTIRE_NETWORK }, /* SIID_WORLD */
+    { STOCK_SHELL32, IDI_SHELL_NETWORK }, /* 14 */
+    { STOCK_SHELL32, IDI_SHELL_MY_COMPUTER }, /* SIID_SERVER */
+    { STOCK_SHELL32, IDI_SHELL_PRINTER }, /* SIID_PRINTER */
+    { STOCK_SHELL32, IDI_SHELL_MY_NETWORK_PLACES }, /* SIID_MYNETWORK */
+    { STOCK_SHELL32, IDI_SHELL_COMPUTERS_NEAR_ME }, /* 18 */
+    { STOCK_SHELL32, IDI_SHELL_PROGRAMS_FOLDER }, /* 19 */
+    { STOCK_SHELL32, IDI_SHELL_RECENT_DOCUMENTS }, /* 20 */
+    { STOCK_SHELL32, IDI_SHELL_CONTROL_PANEL }, /* 21 */
+    { STOCK_SHELL32, IDI_SHELL_SEARCH }, /* SIID_FIND */
+    { STOCK_SHELL32, IDI_SHELL_HELP }, /* SIID_HELP */
+    { STOCK_SHELL32, IDI_SHELL_RUN }, /* 24 */
+    { STOCK_SHELL32, IDI_SHELL_SLEEP }, /* 25 */
+    { STOCK_SHELL32, IDI_SHELL_HARDWARE_REMOVE }, /* 26 */
+    { STOCK_SHELL32, IDI_SHELL_SHUTDOWN }, /* 27 */
+    { STOCK_SHELL32, IDI_SHELL_SHARE }, /* SIID_SHARE */
+    { STOCK_SHELL32, IDI_SHELL_SHORTCUT }, /* SIID_LINK */
+    { STOCK_SHELL32, IDI_SHELL_FOLDER_WAIT }, /* SIID_SLOWFILE */
+    { STOCK_SHELL32, IDI_SHELL_EMPTY_RECYCLE_BIN }, /* SIID_RECYCLER */
+    { STOCK_SHELL32, IDI_SHELL_FULL_RECYCLE_BIN }, /* SIID_RECYCLERFULL */
+    { STOCK_SHELL32, IDI_SHELL_DIALUP_FOLDER }, /* 33 */
+    { STOCK_SHELL32, IDI_SHELL_DESKTOP }, /* 34 */
+    { STOCK_SHELL32, IDI_SHELL_CONTROL_PANEL2 }, /* 35 */
+    { STOCK_SHELL32, IDI_SHELL_PROGRAMS_FOLDER2 }, /* 36 */
+    { STOCK_SHELL32, IDI_SHELL_PRINTERS_FOLDER }, /* 37 */
+    { STOCK_SHELL32, IDI_SHELL_FONTS_FOLDER }, /* 38 */
+    { STOCK_SHELL32, IDI_SHELL_TSKBAR_STARTMENU }, /* 39 */
+    { STOCK_SHELL32, IDI_SHELL_CD_MUSIC }, /* SIID_MEDIACDAUDIO */
+    { STOCK_SHELL32, IDI_SHELL_TREE }, /* 41 */
+    { STOCK_SHELL32, IDI_SHELL_COMPUTER_FOLDER }, /* 42 */
+    { STOCK_SHELL32, IDI_SHELL_FAVORITES }, /* 43 */
+    { STOCK_SHELL32, IDI_SHELL_LOGOFF }, /* 44 */
+    { STOCK_SHELL32, IDI_SHELL_EXPLORER }, /* 45 */
+    { STOCK_SHELL32, IDI_SHELL_UPDATE }, /* 46 */
+    { STOCK_SHELL32, IDI_SHELL_LOCKED }, /* SIID_LOCK */
+    { STOCK_SHELL32, IDI_SHELL_DISCONN }, /* 48 */
+    { STOCK_SHELL32, IDI_SHELL_MULTIPLE_FILES }, /* SIID_AUTOLIST */
+    { STOCK_SHELL32, IDI_SHELL_NET_PRINTER }, /* SIID_PRINTERNET */
+    { STOCK_SHELL32, IDI_SHELL_NETWORK_FOLDER }, /* SIID_SERVERSHARE */
+    { STOCK_SHELL32, IDI_SHELL_FAX }, /* SIID_PRINTERFAX */
+    { STOCK_SHELL32, IDI_SHELL_NET_FAX }, /* SIID_PRINTERFAXNET */
+    { STOCK_SHELL32, IDI_SHELL_FILE_PRINTER }, /* SIID_PRINTERFILE */
+    { STOCK_SHELL32, IDI_SHELL_MULTIPLE_FILES }, /* SIID_STACK */
+    { STOCK_SHELL32, IDI_SHELL_CD }, /* SIID_MEDIASVCD */
+    { STOCK_SHELL32, IDI_SHELL_FOLDER }, /* SIID_STUFFEDFOLDER */
+    { STOCK_SHELL32, IDI_SHELL_NO_DRIVE }, /* SIID_DRIVEUNKNOWN */
+    { STOCK_SHELL32, IDI_SHELL_DVD_DRIVE }, /* SIID_DRIVEDVD */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM }, /* SIID_MEDIADVD */
+    { STOCK_SHELL32, IDI_SHELL_DVD_RAM }, /* SIID_MEDIADVDRAM */
+    { STOCK_SHELL32, IDI_SHELL_DVDRW_ROM }, /* SIID_MEDIADVDRW */
+    { STOCK_SHELL32, IDI_SHELL_DVDR_ROM }, /* SIID_MEDIADVDR */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM1 }, /* SIID_MEDIADVDROM */
+    { STOCK_SHELL32, IDI_SHELL_CD_MUSIC2 }, /* SIID_MEDIACDAUDIOPLUS */
+    { STOCK_SHELL32, IDI_SHELL_CDRW }, /* SIID_MEDIACDRW */
+    { STOCK_SHELL32, IDI_SHELL_CDR }, /* SIID_MEDIACDR */
+    { STOCK_SHELL32, IDI_SHELL_CD_EDIT }, /* SIID_MEDIACDBURN */
+    { STOCK_SHELL32, IDI_SHELL_CD }, /* SIID_MEDIABLANKCD */
+    { STOCK_SHELL32, IDI_SHELL_CD_ROM }, /* SIID_MEDIACDROM */
+    { STOCK_SHELL32, IDI_SHELL_MUSIC_FILE }, /* SIID_AUDIOFILES */
+    { STOCK_SHELL32, IDI_SHELL_PICTURE_FILE }, /* SIID_IMAGEFILES */
+    { STOCK_SHELL32, IDI_SHELL_MOVIE_FILE }, /* SIID_VIDEOFILES */
+    { STOCK_SHELL32, IDI_SHELL_MULTIMEDIA_FILE }, /* SIID_MIXEDFILES */
+    { STOCK_SHELL32, IDI_SHELL_FOLDER }, /* SIID_FOLDERBACK */
+    { STOCK_SHELL32, IDI_SHELL_FOLDER_OPEN }, /* SIID_FOLDERFRONT */
+    { STOCK_SHELL32, IDI_SHELL_SECURITY }, /* SIID_SHIELD */
+    { STOCK_USER32, 101 }, /* SIID_WARNING */
+    { STOCK_USER32, 104 }, /* SIID_INFO */
+    { STOCK_USER32, 103 }, /* SIID_ERROR */
+    { STOCK_SHELL32, IDI_SHELL_SECURITY }, /* SIID_KEY */
+    { STOCK_SHELL32, IDI_SHELL_ADD_REM_PROGRAMS }, /* SIID_SOFTWARE */
+    { STOCK_SHELL32, IDI_SHELL_RENAME }, /* SIID_RENAME */
+    { STOCK_SHELL32, IDI_SHELL_DELETE1 }, /* SIID_DELETE */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM }, /* SIID_MEDIAAUDIODVD */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM }, /* SIID_MEDIAMOVIEDVD */
+    { STOCK_SHELL32, IDI_SHELL_CD_MUSIC2 }, /* SIID_MEDIAENHANCEDCD */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM }, /* SIID_MEDIAENHANCEDDVD */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM }, /* SIID_MEDIAHDDVD */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM }, /* SIID_MEDIABLUERAY */
+    { STOCK_SHELL32, IDI_SHELL_CD }, /* SIID_MEDIAVCD */
+    { STOCK_SHELL32, IDI_SHELL_DVDR_ROM }, /* SIID_MEDIADVDPLUSR */
+    { STOCK_SHELL32, IDI_SHELL_DVDRW_ROM }, /* SIID_MEDIADVDPLUSRW */
+    { STOCK_SHELL32, IDI_SHELL_MY_COMPUTER }, /* SIID_DESKTOPPC */
+    { STOCK_SHELL32, IDI_SHELL_MY_COMPUTER }, /* SIID_MOBILEPC */
+    { STOCK_SHELL32, IDI_SHELL_USERS }, /* SIID_USERS */
+    { STOCK_SHELL32, IDI_SHELL_SMART_MEDIA }, /* SIID_MEDIASMARTMEDIA */
+    { STOCK_SHELL32, IDI_SHELL_COMPACT_FLASH }, /* SIID_MEDIACOMPACTFLASH */
+    { STOCK_SHELL32, IDI_SHELL_PHONE }, /* SIID_DEVICECELLPHONE */
+    { STOCK_SHELL32, IDI_SHELL_CAMERA }, /* SIID_DEVICECAMERA */
+    { STOCK_SHELL32, IDI_SHELL_CAMCORDER }, /* SIID_DEVICEVIDEOCAMERA */
+    { STOCK_SHELL32, IDI_SHELL_MP3_PLAYER }, /* SIID_DEVICEAUDIOPLAYER */
+    { STOCK_SHELL32, IDI_SHELL_NETWORK_CONNECTIONS }, /* SIID_NETWORKCONNECT */
+    { STOCK_SHELL32, IDI_SHELL_WEB_BROWSER }, /* SIID_INTERNET */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* SIID_ZIPFILE */
+    { STOCK_SHELL32, IDI_SHELL_SYSTEM_GEAR }, /* SIID_SETTINGS */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 107 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 108 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 109 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 110 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 111 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 112 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 113 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 114 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 115 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 116 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 117 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 118 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 119 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 120 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 121 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 122 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 123 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 124 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 125 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 126 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 127 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 128 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 129 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 130 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 131 */
+    { STOCK_SHELL32, IDI_SHELL_DVD_DRIVE }, /* SIID_DRIVEHDDVD */
+    { STOCK_SHELL32, IDI_SHELL_DVD_DRIVE }, /* SIID_DRIVEBD */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM }, /* SIID_MEDIAHDDVDROM */
+    { STOCK_SHELL32, IDI_SHELL_DVDR_ROM }, /* SIID_MEDIAHDDVDR */
+    { STOCK_SHELL32, IDI_SHELL_DVD_RAM }, /* SIID_MEDIAHDDVDRAM */
+    { STOCK_SHELL32, IDI_SHELL_DVD_ROM }, /* SIID_MEDIABDROM */
+    { STOCK_SHELL32, IDI_SHELL_DVDR_ROM }, /* SIID_MEDIABDR */
+    { STOCK_SHELL32, IDI_SHELL_DVDRW_ROM }, /* SIID_MEDIABDRE */
+    { STOCK_SHELL32, IDI_SHELL_DRIVE }, /* SIID_CLUSTEREDDRIVE */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 141 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 142 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 143 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 144 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 145 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 146 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 147 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 148 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 149 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 150 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 151 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 152 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 153 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 154 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 155 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 156 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 157 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 158 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 159 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 160 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 161 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 162 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 163 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 164 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 165 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 166 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 167 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 168 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 169 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 170 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 171 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 172 */
+    { STOCK_SHELL32, IDI_SHELL_STOCK_DOCUMENT }, /* 173 */
+};
+
+/* The ids of Windows 7, the export level of ReactOS (Windows 10 accepts ids up to 180) */
+#define STOCK_ICON_COUNT 174
+C_ASSERT(_countof(s_StockIcons) == STOCK_ICON_COUNT);
+
+#define SHGSI_VALID_FLAGS (SHGSI_ICON | SHGSI_SYSICONINDEX | SHGSI_LINKOVERLAY | SHGSI_SELECTED | \
+                           SHGSI_SMALLICON | SHGSI_SHELLICONSIZE)
+
+/* CopyImage does not resize an icon that was not loaded from a resource */
+static HICON SIC_StretchIcon(HICON hIcon, INT cx, INT cy)
+{
+    ICONINFO ii, iiNew = { TRUE };
+    BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER) } };
+    HICON hResult = NULL;
+    HDC hdcSrc, hdcDst;
+    PVOID pvBits;
+    BITMAP bm;
+
+    if (!GetIconInfo(hIcon, &ii))
+        return NULL;
+    hdcSrc = CreateCompatibleDC(NULL);
+    hdcDst = CreateCompatibleDC(NULL);
+    if (ii.hbmColor && hdcSrc && hdcDst && GetObjectW(ii.hbmColor, sizeof(bm), &bm))
+    {
+        bmi.bmiHeader.biWidth = cx;
+        bmi.bmiHeader.biHeight = cy;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        iiNew.hbmColor = CreateDIBSection(hdcDst, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
+        iiNew.hbmMask = CreateBitmap(cx, cy, 1, 1, NULL);
+        if (iiNew.hbmColor && iiNew.hbmMask)
+        {
+            /* Pixel copies keep the alpha channel */
+            HGDIOBJ hOldSrc = SelectObject(hdcSrc, ii.hbmColor);
+            HGDIOBJ hOldDst = SelectObject(hdcDst, iiNew.hbmColor);
+            SetStretchBltMode(hdcDst, COLORONCOLOR);
+            StretchBlt(hdcDst, 0, 0, cx, cy, hdcSrc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+            SelectObject(hdcSrc, ii.hbmMask);
+            SelectObject(hdcDst, iiNew.hbmMask);
+            StretchBlt(hdcDst, 0, 0, cx, cy, hdcSrc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+            SelectObject(hdcSrc, hOldSrc);
+            SelectObject(hdcDst, hOldDst);
+            hResult = CreateIconIndirect(&iiNew);
+        }
+        if (iiNew.hbmColor)
+            DeleteObject(iiNew.hbmColor);
+        if (iiNew.hbmMask)
+            DeleteObject(iiNew.hbmMask);
+    }
+    if (hdcSrc)
+        DeleteDC(hdcSrc);
+    if (hdcDst)
+        DeleteDC(hdcDst);
+    if (ii.hbmColor)
+        DeleteObject(ii.hbmColor);
+    DeleteObject(ii.hbmMask);
+    return hResult;
+}
+
+EXTERN_C HRESULT WINAPI
+SHGetStockIconInfo(SHSTOCKICONID siid, UINT uFlags, SHSTOCKICONINFO *psii)
+{
+    HIMAGELIST hBigList, hSmallList, hList;
+    HICON hIcon;
+    INT iIndex, cx, cy, cxList, cyList;
+
+    TRACE("(%d, 0x%x, %p)\n", siid, uFlags, psii);
+
+    if (!psii || psii->cbSize != sizeof(*psii))
+        return E_INVALIDARG;
+
+    psii->hIcon = NULL;
+    psii->iSysImageIndex = -1;
+    psii->iIcon = -1;
+    psii->szPath[0] = UNICODE_NULL;
+
+    if ((UINT)siid >= STOCK_ICON_COUNT || (uFlags & ~SHGSI_VALID_FLAGS))
+        return E_INVALIDARG;
+
+    if (!GetSystemDirectoryW(psii->szPath, _countof(psii->szPath)) ||
+        !PathAppendW(psii->szPath, (s_StockIcons[siid].Module == STOCK_USER32) ? L"user32.dll" : L"shell32.dll"))
+    {
+        goto Fail;
+    }
+    psii->iIcon = -(INT)s_StockIcons[siid].ResId;
+
+    if (!(uFlags & (SHGSI_ICON | SHGSI_SYSICONINDEX)))
+        return S_OK;
+
+    /* The overlay is part of the icon only, not of the system image index */
+    iIndex = SIC_GetIconIndex(psii->szPath, psii->iIcon, 0);
+    if (iIndex == INVALID_INDEX)
+        goto Fail;
+    if (uFlags & SHGSI_SYSICONINDEX)
+        psii->iSysImageIndex = iIndex;
+
+    if (uFlags & SHGSI_ICON)
+    {
+        if (uFlags & SHGSI_LINKOVERLAY)
+        {
+            iIndex = SIC_GetIconIndex(psii->szPath, psii->iIcon, GIL_FORSHORTCUT);
+            if (iIndex == INVALID_INDEX)
+                goto Fail;
+        }
+
+        Shell_GetImageLists(&hBigList, &hSmallList);
+        hList = (uFlags & SHGSI_SMALLICON) ? hSmallList : hBigList;
+        psii->hIcon = ImageList_GetIcon(hList, iIndex, (uFlags & SHGSI_SELECTED) ? ILD_SELECTED : ILD_NORMAL);
+        if (!psii->hIcon)
+            goto Fail;
+
+        /* The image lists have the shell icon size; without SHGSI_SHELLICONSIZE the system metrics apply */
+        if (!(uFlags & SHGSI_SHELLICONSIZE))
+        {
+            cx = GetSystemMetrics((uFlags & SHGSI_SMALLICON) ? SM_CXSMICON : SM_CXICON);
+            cy = GetSystemMetrics((uFlags & SHGSI_SMALLICON) ? SM_CYSMICON : SM_CYICON);
+            if (ImageList_GetIconSize(hList, &cxList, &cyList) && (cxList != cx || cyList != cy))
+            {
+                hIcon = SIC_StretchIcon(psii->hIcon, cx, cy);
+                DestroyIcon(psii->hIcon);
+                psii->hIcon = hIcon;
+                if (!hIcon)
+                    goto Fail;
+            }
+        }
+    }
+
+    return S_OK;
+
+Fail:
+    psii->hIcon = NULL;
+    psii->iSysImageIndex = -1;
+    psii->iIcon = -1;
+    psii->szPath[0] = UNICODE_NULL;
+    return E_FAIL;
+}
+
 /*************************************************************************
  * PidlToSicIndex            [INTERNAL]
  *
@@ -1080,46 +1410,4 @@ EXTERN_C INT WINAPI SHGetIconOverlayIndexW(LPCWSTR pszIconPath, INT iIconIndex)
   FIXME("%s, %d\n", debugstr_w(pszIconPath), iIconIndex);
 
   return -1;
-}
-
-/****************************************************************************
- * SHGetStockIconInfo [SHELL32.@]
- *
- * Receive information for builtin icons
- *
- * PARAMS
- *  id      [I]  selected icon-id to get information for
- *  flags   [I]  selects the information to receive
- *  sii     [IO] SHSTOCKICONINFO structure to fill
- *
- * RETURNS
- *  Success: S_OK
- *  Failure: A HRESULT failure code
- *
- */
-EXTERN_C HRESULT WINAPI SHGetStockIconInfo(SHSTOCKICONID id, UINT flags, SHSTOCKICONINFO *sii)
-{
-    FIXME("(%d, 0x%x, %p) semi-stub\n", id, flags, sii);
-    if ((id < 0) || (id >= SIID_MAX_ICONS) || !sii || (sii->cbSize != sizeof(SHSTOCKICONINFO))) {
-        return E_INVALIDARG;
-    }
-
-    GetSystemDirectoryW(sii->szPath, MAX_PATH);
-
-    /* no icons defined: use default */
-    sii->iIcon = -IDI_SHELL_FILE;
-    lstrcatW(sii->szPath, L"\\shell32.dll");
-
-    const UINT implementedflags = SHGSI_ICON;
-    if (flags & ~implementedflags)
-        FIXME("flags 0x%x not implemented\n", flags);
-
-    sii->hIcon = NULL;
-    if (flags & SHGSI_ICON)
-        sii->hIcon = LoadIconW(GetModuleHandleW(sii->szPath), MAKEINTRESOURCEW(sii->iIcon));
-    sii->iSysImageIndex = -1;
-
-    TRACE("%3d: returning %s (%d)\n", id, debugstr_w(sii->szPath), sii->iIcon);
-
-    return S_OK;
 }

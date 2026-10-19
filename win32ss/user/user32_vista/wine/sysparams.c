@@ -264,16 +264,6 @@ LONG WINAPI DisplayConfigSetDeviceInfo( DISPLAYCONFIG_DEVICE_INFO_HEADER *packet
     return 1;
 }
 
-/**********************************************************************
- *              GetDisplayAutoRotationPreferences (USER32.@)
- */
-BOOL WINAPI GetDisplayAutoRotationPreferences( ORIENTATION_PREFERENCE *orientation )
-{
-    FIXME("(%p): stub\n", orientation);
-    *orientation = ORIENTATION_PREFERENCE_NONE;
-    return TRUE;
-}
-
 /***********************************************************************
  *              SetDisplayConfig (USER32.@)
  */
@@ -286,11 +276,3 @@ LONG WINAPI SetDisplayConfig(UINT32 path_info_count, DISPLAYCONFIG_PATH_INFO *pa
     return ERROR_SUCCESS;
 }
 
-/**********************************************************************
- *              SetDisplayAutoRotationPreferences (USER32.@)
- */
-BOOL WINAPI SetDisplayAutoRotationPreferences( ORIENTATION_PREFERENCE orientation )
-{
-    FIXME("(%d): stub\n", orientation);
-    return TRUE;
-}

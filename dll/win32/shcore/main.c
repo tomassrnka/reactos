@@ -37,6 +37,13 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(shcore);
 
+#ifdef __REACTOS__
+UINT WINAPI GetDpiForSystem(void);
+BOOL WINAPI GetProcessDpiAwarenessInternal(HANDLE process, DPI_AWARENESS *awareness);
+BOOL WINAPI SetProcessDpiAwarenessInternal(DPI_AWARENESS awareness);
+BOOL WINAPI GetDpiForMonitorInternal(HMONITOR monitor, UINT type, UINT *x, UINT *y);
+#endif
+
 static DWORD shcore_tls;
 static IUnknown *process_ref;
 
@@ -78,8 +85,111 @@ HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x
     if (GetDpiForMonitorInternal( monitor, type, x, y )) return S_OK;
     return HRESULT_FROM_WIN32( GetLastError() );
 }
+#else
+/* The awareness and the DPI are kept by user32 (one DPI for the whole system, no scaling for a process) */
+HRESULT WINAPI GetProcessDpiAwareness(HANDLE process, PROCESS_DPI_AWARENESS *value)
+{
+    DPI_AWARENESS awareness;
+    DWORD pid;
+
+    TRACE("(%p, %p)\n", process, value);
+
+    if (!value)
+        return E_INVALIDARG;
+
+    if (process)
+    {
+        pid = GetProcessId(process);
+        if (!pid)
+        {
+            *value = (PROCESS_DPI_AWARENESS)-1;
+            return (GetLastError() == ERROR_ACCESS_DENIED) ? E_ACCESSDENIED : E_INVALIDARG;
+        }
+        /* The state of another process is not known here */
+        if (pid != GetCurrentProcessId())
+        {
+            *value = PROCESS_DPI_UNAWARE;
+            return E_NOTIMPL;
+        }
+    }
+
+    if (!GetProcessDpiAwarenessInternal(NULL, &awareness))
+        return HRESULT_FROM_WIN32(GetLastError());
+    *value = (PROCESS_DPI_AWARENESS)awareness;
+    return S_OK;
+}
+
+HRESULT WINAPI SetProcessDpiAwareness(PROCESS_DPI_AWARENESS value)
+{
+    TRACE("(%d)\n", value);
+
+    if ((UINT)value > PROCESS_PER_MONITOR_DPI_AWARE)
+        return E_INVALIDARG;
+    if (SetProcessDpiAwarenessInternal((DPI_AWARENESS)value))
+        return S_OK;
+    return HRESULT_FROM_WIN32(GetLastError());
+}
+
+HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x, UINT *y)
+{
+    TRACE("(%p, %d, %p, %p)\n", monitor, type, x, y);
+
+    if (GetDpiForMonitorInternal(monitor, type, x, y))
+        return S_OK;
+    return HRESULT_FROM_WIN32(GetLastError());
+}
+
+UINT WINAPI GetDpiForShellUIComponent(int component)
+{
+    TRACE("(%d)\n", component);
+
+    return GetDpiForSystem();
+}
 #endif /* __REACTOS__ */
 
+#ifdef __REACTOS__
+static UINT ScaleDistance(UINT a, UINT b)
+{
+    return a > b ? a - b : b - a;
+}
+
+/* The scale factors that Windows offers; the one that is nearest to the DPI of the system is reported */
+static DEVICE_SCALE_FACTOR ScaleFactorFromDpi(UINT dpi)
+{
+    static const DEVICE_SCALE_FACTOR factors[] =
+    {
+        SCALE_100_PERCENT, SCALE_120_PERCENT, SCALE_125_PERCENT, SCALE_140_PERCENT, SCALE_150_PERCENT,
+        SCALE_160_PERCENT, SCALE_175_PERCENT, SCALE_180_PERCENT, SCALE_200_PERCENT, SCALE_225_PERCENT,
+        SCALE_250_PERCENT, SCALE_300_PERCENT, SCALE_350_PERCENT, SCALE_400_PERCENT, SCALE_450_PERCENT,
+        SCALE_500_PERCENT
+    };
+    UINT percent = MulDiv(dpi, 100, 96), i, best = 0;
+
+    for (i = 1; i < ARRAYSIZE(factors); i++)
+    {
+        if (ScaleDistance(factors[i], percent) < ScaleDistance(factors[best], percent))
+            best = i;
+    }
+    return factors[best];
+}
+
+HRESULT WINAPI GetScaleFactorForMonitor(HMONITOR monitor, DEVICE_SCALE_FACTOR *scale)
+{
+    TRACE("(%p %p)\n", monitor, scale);
+
+    if (!scale)
+        return E_INVALIDARG;
+    *scale = ScaleFactorFromDpi(GetDpiForSystem());
+    return S_OK;
+}
+
+DEVICE_SCALE_FACTOR WINAPI GetScaleFactorForDevice(DISPLAY_DEVICE_TYPE device_type)
+{
+    TRACE("(%d)\n", device_type);
+
+    return ScaleFactorFromDpi(GetDpiForSystem());
+}
+#else
 HRESULT WINAPI GetScaleFactorForMonitor(HMONITOR monitor, DEVICE_SCALE_FACTOR *scale)
 {
     FIXME("(%p %p): stub\n", monitor, scale);
@@ -94,6 +204,8 @@ DEVICE_SCALE_FACTOR WINAPI GetScaleFactorForDevice(DISPLAY_DEVICE_TYPE device_ty
 
     return SCALE_100_PERCENT;
 }
+
+#endif
 
 HRESULT WINAPI _IStream_Read(IStream *stream, void *dest, ULONG size)
 {
@@ -146,6 +258,69 @@ HRESULT WINAPI _IStream_Write(IStream *stream, const void *src, ULONG size)
 
     return hr;
 }
+
+#ifdef __REACTOS__
+HRESULT WINAPI IStream_Copy(IStream *src, IStream *dest, ULONG size)
+{
+    ULARGE_INTEGER len, read, written;
+    HRESULT hr;
+
+    TRACE("(%p, %p, %lu)\n", src, dest, size);
+
+    len.QuadPart = size;
+    hr = IStream_CopyTo(src, dest, len, &read, &written);
+    if (SUCCEEDED(hr) && written.QuadPart != size)
+        hr = E_FAIL;
+    return hr;
+}
+
+HRESULT WINAPI IStream_ReadStr(IStream *stream, WCHAR **str)
+{
+    USHORT len;
+    HRESULT hr;
+
+    TRACE("(%p, %p)\n", stream, str);
+
+    *str = NULL;
+
+    /* The character count without the terminator, then the characters */
+    hr = _IStream_Read(stream, &len, sizeof(len));
+    if (FAILED(hr))
+        return hr;
+
+    *str = CoTaskMemAlloc((len + 1) * sizeof(WCHAR));
+    if (!*str)
+        return E_OUTOFMEMORY;
+
+    hr = _IStream_Read(stream, *str, len * sizeof(WCHAR));
+    if (FAILED(hr))
+    {
+        CoTaskMemFree(*str);
+        *str = NULL;
+        return hr;
+    }
+    (*str)[len] = 0;
+    return S_OK;
+}
+
+HRESULT WINAPI IStream_WriteStr(IStream *stream, const WCHAR *str)
+{
+    SIZE_T cch = lstrlenW(str);
+    USHORT len;
+    HRESULT hr;
+
+    TRACE("(%p, %s)\n", stream, debugstr_w(str));
+
+    if (cch > 0xFFFF)
+        return E_INVALIDARG;
+    len = (USHORT)cch;
+
+    hr = _IStream_Write(stream, &len, sizeof(len));
+    if (SUCCEEDED(hr))
+        hr = _IStream_Write(stream, str, len * sizeof(WCHAR));
+    return hr;
+}
+#endif /* __REACTOS__ */
 
 void WINAPI IUnknown_AtomicRelease(IUnknown **obj)
 {
@@ -1628,15 +1803,50 @@ static DWORD WINAPI shcore_thread_wrapper(void *data)
     return retval;
 }
 
+#ifdef __REACTOS__
+static BOOL shcore_create_thread(LPTHREAD_START_ROUTINE thread_proc, void *data, DWORD flags,
+                                 LPTHREAD_START_ROUTINE callback, HANDLE *handle);
+
 /*************************************************************************
  *      SHCreateThread        [SHCORE.@]
  */
 BOOL WINAPI SHCreateThread(LPTHREAD_START_ROUTINE thread_proc, void *data, DWORD flags, LPTHREAD_START_ROUTINE callback)
 {
+    TRACE("%p, %p, %#lx, %p.\n", thread_proc, data, flags, callback);
+
+    return shcore_create_thread(thread_proc, data, flags, callback, NULL);
+}
+
+/*************************************************************************
+ *      SHCreateThreadWithHandle        [SHCORE.@]
+ */
+BOOL WINAPI SHCreateThreadWithHandle(LPTHREAD_START_ROUTINE thread_proc, void *data, DWORD flags,
+                                     LPTHREAD_START_ROUTINE callback, HANDLE *handle)
+{
+    TRACE("%p, %p, %#lx, %p, %p.\n", thread_proc, data, flags, callback, handle);
+
+    /* Windows 10 refuses a NULL handle pointer */
+    if (!handle)
+        return FALSE;
+    *handle = NULL;
+    return shcore_create_thread(thread_proc, data, flags, callback, handle);
+}
+
+static BOOL shcore_create_thread(LPTHREAD_START_ROUTINE thread_proc, void *data, DWORD flags,
+                                 LPTHREAD_START_ROUTINE callback, HANDLE *handle)
+#else
+/*************************************************************************
+ *      SHCreateThread        [SHCORE.@]
+ */
+BOOL WINAPI SHCreateThread(LPTHREAD_START_ROUTINE thread_proc, void *data, DWORD flags, LPTHREAD_START_ROUTINE callback)
+#endif
+{
     struct thread_data thread_data;
     BOOL called = FALSE;
 
+#ifndef __REACTOS__
     TRACE("%p, %p, %#lx, %p.\n", thread_proc, data, flags, callback);
+#endif
 
     thread_data.thread_proc = thread_proc;
     thread_data.callback = callback;
@@ -1665,6 +1875,11 @@ BOOL WINAPI SHCreateThread(LPTHREAD_START_ROUTINE thread_proc, void *data, DWORD
         {
             /* Wait for the thread to signal us to continue */
             WaitForSingleObject(thread_data.hEvent, INFINITE);
+#ifdef __REACTOS__
+            if (handle)
+                *handle = hThread;
+            else
+#endif
             CloseHandle(hThread);
             called = TRUE;
         }
@@ -1673,7 +1888,12 @@ BOOL WINAPI SHCreateThread(LPTHREAD_START_ROUTINE thread_proc, void *data, DWORD
 
     if (!called)
     {
+#ifdef __REACTOS__
+        /* The synchronous fallback has no thread handle to return, so SHCreateThreadWithHandle fails instead */
+        if (!thread_data.callback && flags & CTF_INSIST && !handle)
+#else
         if (!thread_data.callback && flags & CTF_INSIST)
+#endif
         {
             /* Couldn't call, call synchronously */
             thread_data.thread_proc(data);
@@ -2577,6 +2797,47 @@ FEATURE_ENABLED_STATE WINAPI GetFeatureEnabledState(UINT32 feature, FEATURE_CHAN
 }
 
 /*************************************************************************
+ * GetFeatureVariant        [SHCORE.@]
+ *
+ * No feature is staged here: every feature has its default state and no variant (Windows 10 answers so for a
+ * feature that no configuration names).
+ */
+FEATURE_ENABLED_STATE WINAPI GetFeatureVariant(UINT32 feature, FEATURE_CHANGE_TIME change_time, UINT32 *payload_id,
+                                               BOOL *has_notification)
+{
+    TRACE("(%u, %u, %p, %p)\n", feature, change_time, payload_id, has_notification);
+    *payload_id = 0;
+    *has_notification = FALSE;
+    return FEATURE_ENABLED_STATE_DEFAULT;
+}
+
+/*************************************************************************
+ * RecordFeatureUsage        [SHCORE.@]
+ */
+void WINAPI RecordFeatureUsage(UINT32 feature, UINT32 kind, UINT32 addend, const char *origin_name)
+{
+    TRACE("(%u, %u, %u, %s)\n", feature, kind, addend, debugstr_a(origin_name));
+}
+
+/*************************************************************************
+ * RecordFeatureError        [SHCORE.@]
+ *
+ * The error record is not looked at: telemetry is not kept.
+ */
+void WINAPI RecordFeatureError(UINT32 feature, const void *error)
+{
+    TRACE("(%u, %p)\n", feature, error);
+}
+
+/*************************************************************************
+ * UnsubscribeFeatureStateChangeNotification        [SHCORE.@]
+ */
+void WINAPI UnsubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRIPTION subscription)
+{
+    TRACE("(%p)\n", subscription);
+}
+
+/*************************************************************************
  * RegisterScaleChangeEvent        [SHCORE.@]
  */
 HRESULT WINAPI RegisterScaleChangeEvent(HANDLE handle, DWORD_PTR *cookie)
@@ -2605,3 +2866,97 @@ HRESULT WINAPI CreateRandomAccessStreamOverStream(IStream *stream, BSOS_OPTIONS 
     FIXME("(%p, %d, %s, %p) stub\n", stream, options, debugstr_guid(riid), ppv);
     return E_NOTIMPL;
 }
+
+#ifdef __REACTOS__
+/*************************************************************************
+ * RevokeScaleChangeNotifications        [SHCORE.@]
+ */
+HRESULT WINAPI RevokeScaleChangeNotifications(DISPLAY_DEVICE_TYPE display_device, DWORD cookie)
+{
+    TRACE("(%d, %#lx)\n", display_device, cookie);
+
+    /* RegisterScaleChangeNotifications registers nothing, so no cookie is known */
+    return E_INVALIDARG;
+}
+
+/*************************************************************************
+ * UnregisterScaleChangeEvent        [SHCORE.@]
+ */
+HRESULT WINAPI UnregisterScaleChangeEvent(DWORD_PTR cookie)
+{
+    TRACE("(%p)\n", (void *)cookie);
+
+    /* RegisterScaleChangeEvent registers nothing, so no cookie is known */
+    return E_INVALIDARG;
+}
+
+/*************************************************************************
+ * SHRegGetValueFromHKCUHKLM        [SHCORE.@]
+ */
+LSTATUS WINAPI SHRegGetValueFromHKCUHKLM(const WCHAR *key, const WCHAR *value, SRRF flags, DWORD *type,
+                                         void *data, DWORD *data_len)
+{
+    DWORD len = data_len ? *data_len : 0;
+    LSTATUS status;
+
+    TRACE("(%s, %s, %#x, %p, %p, %p)\n", debugstr_w(key), debugstr_w(value), flags, type, data, data_len);
+
+    status = RegGetValueW(HKEY_CURRENT_USER, key, value, flags, type, data, data_len);
+    if (status != ERROR_FILE_NOT_FOUND)
+        return status;
+
+    if (data_len)
+        *data_len = len;
+    return RegGetValueW(HKEY_LOCAL_MACHINE, key, value, flags, type, data, data_len);
+}
+
+/*************************************************************************
+ * CreateRandomAccessStreamOnFile        [SHCORE.@]
+ */
+HRESULT WINAPI CreateRandomAccessStreamOnFile(const WCHAR *path, DWORD access, REFIID riid, void **ppv)
+{
+    FIXME("(%s, %lu, %s, %p) stub\n", debugstr_w(path), access, debugstr_guid(riid), ppv);
+
+    if (ppv)
+        *ppv = NULL;
+    return E_NOTIMPL;
+}
+
+/*************************************************************************
+ * CreateStreamOverRandomAccessStream        [SHCORE.@]
+ */
+HRESULT WINAPI CreateStreamOverRandomAccessStream(IUnknown *stream, REFIID riid, void **ppv)
+{
+    FIXME("(%p, %s, %p) stub\n", stream, debugstr_guid(riid), ppv);
+
+    if (ppv)
+        *ppv = NULL;
+    return E_NOTIMPL;
+}
+
+/*************************************************************************
+ * DllGetActivationFactory        [SHCORE.@]
+ */
+HRESULT WINAPI DllGetActivationFactory(void *class_id, IUnknown **factory)
+{
+    TRACE("(%p, %p)\n", class_id, factory);
+
+    /* shcore provides no Windows Runtime classes here */
+    if (factory)
+        *factory = NULL;
+    return CLASS_E_CLASSNOTAVAILABLE;
+}
+
+/*************************************************************************
+ * DllGetClassObject        [SHCORE.@]
+ */
+HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **ppv)
+{
+    TRACE("(%s, %s, %p)\n", debugstr_guid(clsid), debugstr_guid(riid), ppv);
+
+    /* shcore provides no COM classes here */
+    if (ppv)
+        *ppv = NULL;
+    return CLASS_E_CLASSNOTAVAILABLE;
+}
+#endif /* __REACTOS__ */

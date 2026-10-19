@@ -820,3 +820,250 @@ SHQueryUserNotificationState(QUERY_USER_NOTIFICATION_STATE *pquns)
     *pquns = QUNS_ACCEPTS_NOTIFICATIONS;
     return S_OK;
 }
+
+/*
+ * NT 6 exports that used to be raising stubs (EXCEPTION_WINE_STUB killed every caller).
+ * They are not implemented: each one fails with the documented error and clears its outputs.
+ */
+
+/*
+ * Unimplemented
+ */
+EXTERN_C VOID
+WINAPI
+PrepareDiscForBurnRunDllW(HWND hwnd, HINSTANCE hInstance, LPWSTR pszCmdLine, INT nCmdShow)
+{
+    FIXME("PrepareDiscForBurnRunDllW(%p, %p, %s, %d) stub\n", hwnd, hInstance, debugstr_w(pszCmdLine), nCmdShow);
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+AssocCreateForClasses(const VOID *rgClasses, ULONG cClasses, REFIID riid, PVOID *ppv)
+{
+    FIXME("AssocCreateForClasses(%p, %lu, %s, %p) stub\n", rgClasses, cClasses, debugstr_guid(&riid), ppv);
+    if (ppv)
+        *ppv = NULL;
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+AssocGetDetailsOfPropKey(IShellFolder *psf, PCUITEMID_CHILD pidl, const PROPERTYKEY *pkey,
+                         VARIANT *pv, BOOL *pfFoundPropKey)
+{
+    FIXME("AssocGetDetailsOfPropKey(%p, %p, %p, %p, %p) stub\n", psf, pidl, pkey, pv, pfFoundPropKey);
+    if (pv)
+        VariantInit(pv);
+    if (pfFoundPropKey)
+        *pfFoundPropKey = FALSE;
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C BOOL
+WINAPI
+InitNetworkAddressControl(VOID)
+{
+    FIXME("InitNetworkAddressControl() stub\n");
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHAddDefaultPropertiesByExt(PCWSTR pszExt, IPropertyStore *pPropStore)
+{
+    FIXME("SHAddDefaultPropertiesByExt(%s, %p) stub\n", debugstr_w(pszExt), pPropStore);
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHAssocEnumHandlers(PCWSTR pszExtra, ASSOC_FILTER afFilter, IEnumAssocHandlers **ppEnumHandler)
+{
+    FIXME("SHAssocEnumHandlers(%s, 0x%x, %p) stub\n", debugstr_w(pszExtra), afFilter, ppEnumHandler);
+    if (ppEnumHandler)
+        *ppEnumHandler = NULL;
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHAssocEnumHandlersForProtocolByApplication(PCWSTR protocol, REFIID riid, PVOID *enumHandlers)
+{
+    FIXME("SHAssocEnumHandlersForProtocolByApplication(%s, %s, %p) stub\n",
+          debugstr_w(protocol), debugstr_guid(&riid), enumHandlers);
+    if (enumHandlers)
+        *enumHandlers = NULL;
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C VOID
+WINAPI
+SHChangeNotifyRegisterThread(INT status)
+{
+    FIXME("SHChangeNotifyRegisterThread(%d) stub\n", status);
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHCreateAssociationRegistration(REFIID riid, PVOID *ppv)
+{
+    FIXME("SHCreateAssociationRegistration(%s, %p) stub\n", debugstr_guid(&riid), ppv);
+    if (ppv)
+        *ppv = NULL;
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHCreateDefaultPropertiesOp(IShellItem *psi, IFileOperation **ppFileOp)
+{
+    FIXME("SHCreateDefaultPropertiesOp(%p, %p) stub\n", psi, ppFileOp);
+    if (ppFileOp)
+        *ppFileOp = NULL;
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C VOID
+WINAPI
+SHCreateLocalServerRunDll(HWND hwnd, HINSTANCE hInstance, LPSTR pszCmdLine, INT nCmdShow)
+{
+    FIXME("SHCreateLocalServerRunDll(%p, %p, %s, %d) stub\n", hwnd, hInstance, debugstr_a(pszCmdLine), nCmdShow);
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHEnableServiceObject(REFCLSID rclsid, BOOL fEnable)
+{
+    FIXME("SHEnableServiceObject(%s, %d) stub\n", debugstr_guid(&rclsid), fEnable);
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHGetDriveMedia(PCWSTR pszDrive, DWORD *pdwMediaContent)
+{
+    FIXME("SHGetDriveMedia(%s, %p) stub\n", debugstr_w(pszDrive), pdwMediaContent);
+    if (pdwMediaContent)
+        *pdwMediaContent = 0;
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHGetTemporaryPropertyForItem(IShellItem *psi, REFPROPERTYKEY propkey, PROPVARIANT *ppropvar)
+{
+    FIXME("SHGetTemporaryPropertyForItem(%p, %p, %p) stub\n", psi, &propkey, ppropvar);
+    if (ppropvar)
+        PropVariantInit(ppropvar);
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHSetTemporaryPropertyForItem(IShellItem *psi, REFPROPERTYKEY propkey, REFPROPVARIANT propvar)
+{
+    FIXME("SHSetTemporaryPropertyForItem(%p, %p, %p) stub\n", psi, &propkey, &propvar);
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+SHSetDefaultProperties(HWND hwnd, IShellItem *psi, DWORD dwFileOpFlags, IFileOperationProgressSink *pfops)
+{
+    FIXME("SHSetDefaultProperties(%p, %p, 0x%lx, %p) stub\n", hwnd, psi, dwFileOpFlags, pfops);
+    return E_NOTIMPL;
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C VOID
+WINAPI
+WaitForExplorerRestartW(HWND hwnd, HINSTANCE hInstance, LPWSTR pszCmdLine, INT nCmdShow)
+{
+    FIXME("WaitForExplorerRestartW(%p, %p, %s, %d) stub\n", hwnd, hInstance, debugstr_w(pszCmdLine), nCmdShow);
+}
+
+/*
+ * Unimplemented
+ */
+EXTERN_C HRESULT
+WINAPI
+StgMakeUniqueName(IStorage *pstgParent, PCWSTR pszFileSpec, DWORD grfMode, REFIID riid, PVOID *ppv)
+{
+    FIXME("StgMakeUniqueName(%p, %s, 0x%lx, %s, %p) stub\n", pstgParent, debugstr_w(pszFileSpec), grfMode,
+          debugstr_guid(&riid), ppv);
+    if (ppv)
+        *ppv = NULL;
+    return E_NOTIMPL;
+}
+
+typedef struct _NOTIFYICONIDENTIFIER_
+{
+    DWORD cbSize;
+    HWND hWnd;
+    UINT uID;
+    GUID guidItem;
+} NOTIFYICONIDENTIFIER_;
+
+/*
+ * Unimplemented: the tray does not report icon positions, so no icon is ever found
+ */
+EXTERN_C HRESULT
+WINAPI
+Shell_NotifyIconGetRect(const NOTIFYICONIDENTIFIER_ *identifier, RECT *iconLocation)
+{
+    FIXME("Shell_NotifyIconGetRect(%p, %p) stub\n", identifier, iconLocation);
+    if (!identifier || !iconLocation)
+        return E_POINTER;
+    SetRectEmpty(iconLocation);
+    if (identifier->cbSize != sizeof(*identifier))
+        return E_INVALIDARG;
+    return E_FAIL;
+}

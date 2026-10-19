@@ -50,3 +50,34 @@ ProcessTrace(IN PTRACEHANDLE HandleArray,
     return ERROR_NOACCESS;
 }
 
+
+/*
+ * ReactOS has no event tracing sessions. Windows 7 and Windows 10 (measured) refuse a null handle or provider
+ * and a control code past capture-state with ERROR_INVALID_PARAMETER and report a session that does not exist
+ * with ERROR_WMI_INSTANCE_NOT_FOUND; here no session exists, so every other request ends that way.
+ */
+ULONG
+WINAPI
+EnableTraceEx2(
+    IN TRACEHANDLE TraceHandle,
+    IN LPCGUID ProviderId,
+    IN ULONG ControlCode,
+    IN UCHAR Level,
+    IN ULONGLONG MatchAnyKeyword,
+    IN ULONGLONG MatchAllKeyword,
+    IN ULONG Timeout,
+    IN PENABLE_TRACE_PARAMETERS EnableParameters OPTIONAL)
+{
+    ULONG Status;
+
+    TRACE("(%I64x, %p, %lu, %u)\n", TraceHandle, ProviderId, ControlCode, Level);
+
+    if (!TraceHandle || !ProviderId || ControlCode > EVENT_CONTROL_CODE_CAPTURE_STATE)
+        Status = ERROR_INVALID_PARAMETER;
+    else
+        Status = ERROR_WMI_INSTANCE_NOT_FOUND;
+
+    /* Windows sets the last error as well (measured) */
+    SetLastError(Status);
+    return Status;
+}

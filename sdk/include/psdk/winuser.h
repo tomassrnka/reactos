@@ -5088,6 +5088,20 @@ BOOL WINAPI GetMonitorInfoW(_In_ HMONITOR, _Inout_ LPMONITORINFO);
 #if (_WIN32_WINNT >= 0x0605) /* Windows 10 pre-Threshold */
 UINT WINAPI GetDpiForSystem(VOID);
 UINT WINAPI GetDpiForWindow(_In_ HWND hwnd);
+int WINAPI GetSystemMetricsForDpi(_In_ int nIndex, _In_ UINT dpi);
+BOOL WINAPI SystemParametersInfoForDpi(_In_ UINT uiAction, _In_ UINT uiParam, _Pre_maybenull_ _Post_valid_ PVOID pvParam, _In_ UINT fWinIni, _In_ UINT dpi);
+BOOL WINAPI AdjustWindowRectExForDpi(_Inout_ LPRECT lpRect, _In_ DWORD dwStyle, _In_ BOOL bMenu, _In_ DWORD dwExStyle, _In_ UINT dpi);
+BOOL WINAPI SetProcessDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT value);
+DPI_AWARENESS_CONTEXT WINAPI GetThreadDpiAwarenessContext(VOID);
+DPI_AWARENESS_CONTEXT WINAPI SetThreadDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT dpiContext);
+DPI_AWARENESS_CONTEXT WINAPI GetWindowDpiAwarenessContext(_In_ HWND hwnd);
+DPI_AWARENESS WINAPI GetAwarenessFromDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT value);
+UINT WINAPI GetDpiFromDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT value);
+BOOL WINAPI AreDpiAwarenessContextsEqual(_In_ DPI_AWARENESS_CONTEXT dpiContextA, _In_ DPI_AWARENESS_CONTEXT dpiContextB);
+BOOL WINAPI IsValidDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT value);
+BOOL WINAPI EnableNonClientDpiScaling(_In_ HWND hwnd);
+BOOL WINAPI LogicalToPhysicalPointForPerMonitorDPI(_In_opt_ HWND hWnd, _Inout_ LPPOINT lpPoint);
+BOOL WINAPI PhysicalToLogicalPointForPerMonitorDPI(_In_opt_ HWND hWnd, _Inout_ LPPOINT lpPoint);
 #endif /* _WIN32_WINNT >= 0x0605 */
 
 UINT
@@ -5153,6 +5167,9 @@ BOOL WINAPI IsMenu(_In_ HMENU);
 BOOL WINAPI IsRectEmpty(_In_ LPCRECT);
 BOOL WINAPI IsWindow(_In_opt_ HWND);
 BOOL WINAPI IsWindowEnabled(_In_ HWND);
+#if (_WIN32_WINNT >= 0x0601)
+BOOL WINAPI IsWindowArranged(_In_ HWND);
+#endif
 BOOL WINAPI IsWindowUnicode(_In_ HWND);
 BOOL WINAPI IsWindowVisible(_In_ HWND);
 #if (_WIN32_WINNT >= 0x0501)
@@ -5479,6 +5496,9 @@ BOOL WINAPI SetSystemCursor(_In_ HCURSOR, _In_ DWORD);
 BOOL WINAPI SetSystemMenu(HWND,HMENU);
 BOOL WINAPI SetThreadDesktop(_In_ HDESK);
 UINT_PTR WINAPI SetTimer(_In_opt_ HWND, _In_ UINT_PTR, _In_ UINT, _In_opt_ TIMERPROC);
+#if (_WIN32_WINNT >= 0x0601)
+UINT_PTR WINAPI SetCoalescableTimer(_In_opt_ HWND, _In_ UINT_PTR, _In_ UINT, _In_opt_ TIMERPROC, _In_ ULONG);
+#endif
 UINT_PTR WINAPI SetSystemTimer(HWND,UINT_PTR,UINT,TIMERPROC);
 
 BOOL

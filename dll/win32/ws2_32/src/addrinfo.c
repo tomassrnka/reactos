@@ -1083,3 +1083,17 @@ Quickie:
     SetLastError(ErrorCode);
     return ErrorCode;
 }
+
+/*
+ * @implemented
+ *
+ * GetAddrInfoExA and GetAddrInfoExW are stubs and start no asynchronous lookup, so no handle names a pending
+ * one. Windows 10 (measured) returns WSA_INVALID_HANDLE for it without touching the last error.
+ */
+INT
+WSAAPI
+GetAddrInfoExCancel(IN LPHANDLE lpHandle)
+{
+    UNREFERENCED_PARAMETER(lpHandle);
+    return WSA_INVALID_HANDLE;
+}

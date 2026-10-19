@@ -3345,10 +3345,7 @@ static BOOL _write_bitmap(HBITMAP hBitmap, IStream *pstm)
           bmih->biWidth, bmih->biHeight,
           bmih->biPlanes, bmih->biBitCount);
 
-    if(FAILED(IStream_Write(pstm, data, totalSize, NULL)))
-	goto failed;
-
-    result = TRUE;
+    result = SUCCEEDED(IStream_Write(pstm, data, totalSize, NULL));
 
 failed:
     heap_free(data);
@@ -3356,6 +3353,34 @@ failed:
     return result;
 }
 
+
+/*************************************************************************
+ * ImageList_WriteEx [COMCTL32.@]
+ *
+ * Writes an image list to a stream. The flags are accepted and not used: the
+ * stream has the format of ImageList_Write for every flag (Windows writes a
+ * newer format for ILP_NORMAL).
+ *
+ * PARAMS
+ *     himl  [I] handle to image list
+ *     flags [I] ILP_NORMAL or ILP_DOWNLEVEL
+ *     pstm  [O] Pointer to a stream.
+ *
+ * RETURNS
+ *     Success: S_OK
+ *     Failure: E_POINTER for no list, E_INVALIDARG for no stream, E_FAIL
+ */
+HRESULT WINAPI ImageList_WriteEx(HIMAGELIST himl, DWORD flags, IStream *pstm)
+{
+    FIXME("%p %#lx %p: semi-stub\n", himl, flags, pstm);
+
+    if (!himl)
+        return E_POINTER;
+    if (!pstm)
+        return E_INVALIDARG;
+
+    return ImageList_Write(himl, pstm) ? S_OK : E_FAIL;
+}
 
 /*************************************************************************
  * ImageList_Write [COMCTL32.@]

@@ -1,12 +1,15 @@
 
 list(APPEND SOURCE
+    abortiveclose.c
     accept.c
+    backlog.c
     bind.c
     broadcast.c
     close.c
     closerace.c
     connectex.c
     getaddrinfo.c
+    GetHostNameW.c
     gethostname.c
     getnameinfo.c
     getpeername.c
@@ -24,6 +27,7 @@ list(APPEND SOURCE
     WSASendMsg.c
     send.c
     sotimeout.c
+    socketscale.c
     udpbindretry.c
     udpcancel.c
     udprecv.c

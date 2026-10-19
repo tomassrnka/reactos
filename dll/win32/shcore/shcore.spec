@@ -1,27 +1,27 @@
 1 stub -noname SHCreateReadOnlySharedMemoryStream
 @ stdcall CommandLineToArgvW(wstr ptr)
-@ stub CreateRandomAccessStreamOnFile
+@ stdcall CreateRandomAccessStreamOnFile(wstr long ptr ptr)
 @ stdcall CreateRandomAccessStreamOverStream(ptr long ptr ptr)
-@ stub CreateStreamOverRandomAccessStream
+@ stdcall CreateStreamOverRandomAccessStream(ptr ptr ptr)
 @ stdcall -private DllCanUnloadNow()
-@ stub DllGetActivationFactory
-@ stub -private DllGetClassObject
+@ stdcall DllGetActivationFactory(ptr ptr)
+@ stdcall -private DllGetClassObject(ptr ptr ptr)
 @ stdcall GetCurrentProcessExplicitAppUserModelID(ptr)
-@ stdcall -stub GetDpiForMonitor(long long ptr ptr)
-@ stub GetDpiForShellUIComponent
+@ stdcall GetDpiForMonitor(long long ptr ptr)
+@ stdcall GetDpiForShellUIComponent(long)
 @ stdcall GetFeatureEnabledState(long long)
-# @ stub GetFeatureVariant
-@ stdcall -stub GetProcessDpiAwareness(long ptr)
+@ stdcall -version=0x601+ GetFeatureVariant(long long ptr ptr)
+@ stdcall GetProcessDpiAwareness(long ptr)
 @ stdcall GetProcessReference(ptr)
 @ stdcall GetScaleFactorForDevice(long)
 @ stdcall GetScaleFactorForMonitor(long ptr)
-@ stub IStream_Copy
+@ stdcall IStream_Copy(ptr ptr long)
 @ stdcall IStream_Read(ptr ptr long) _IStream_Read
-@ stub IStream_ReadStr
+@ stdcall IStream_ReadStr(ptr ptr)
 @ stdcall IStream_Reset(ptr)
 @ stdcall IStream_Size(ptr ptr)
 @ stdcall IStream_Write(ptr ptr long) _IStream_Write
-@ stub IStream_WriteStr
+@ stdcall IStream_WriteStr(ptr wstr)
 @ stdcall IUnknown_AtomicRelease(ptr)
 @ stdcall IUnknown_GetSite(ptr ptr ptr)
 @ stdcall IUnknown_QueryService(ptr ptr ptr ptr)
@@ -30,11 +30,11 @@
 @ stdcall IsOS(long)
 # @ stub IsProcessInIsolatedContainer
 # @ stub IsProcessInWDAGContainer
-# @ stub RecordFeatureError
-# @ stub RecordFeatureUsage
+@ stdcall -version=0x601+ RecordFeatureError(long ptr)
+@ stdcall -version=0x601+ RecordFeatureUsage(long long long str)
 @ stdcall RegisterScaleChangeEvent(ptr ptr)
 @ stdcall RegisterScaleChangeNotifications(long ptr long ptr)
-@ stub RevokeScaleChangeNotifications
+@ stdcall RevokeScaleChangeNotifications(long long)
 @ stdcall SHAnsiToAnsi(str ptr long)
 @ stdcall SHAnsiToUnicode(str ptr long)
 @ stdcall SHCopyKeyA(long str long long)
@@ -45,7 +45,7 @@
 @ stdcall SHCreateStreamOnFileW(wstr long ptr)
 @ stdcall SHCreateThread(ptr ptr long ptr)
 @ stdcall SHCreateThreadRef(ptr ptr)
-@ stub SHCreateThreadWithHandle
+@ stdcall SHCreateThreadWithHandle(ptr ptr long ptr ptr)
 @ stdcall SHDeleteEmptyKeyA(long str)
 @ stdcall SHDeleteEmptyKeyW(long wstr)
 @ stdcall SHDeleteKeyA(long str)
@@ -90,11 +90,11 @@
 @ stdcall SHUnicodeToAnsi(wstr ptr ptr)
 @ stdcall SHUnicodeToUnicode(wstr ptr long)
 @ stdcall SetCurrentProcessExplicitAppUserModelID(wstr)
-@ stdcall -stub SetProcessDpiAwareness(long)
+@ stdcall SetProcessDpiAwareness(long)
 @ stdcall SetProcessReference(ptr)
 @ stdcall SubscribeFeatureStateChangeNotification(ptr ptr ptr)
-@ stub UnregisterScaleChangeEvent
-# @ stub UnsubscribeFeatureStateChangeNotification
+@ stdcall UnregisterScaleChangeEvent(long)
+@ stdcall -version=0x601+ UnsubscribeFeatureStateChangeNotification(ptr)
 
 100 stub -noname SHManagedCreateStreamOnFile
 101 stub -noname SHManagedCreateFile
@@ -113,7 +113,7 @@
 117 stub -noname CreateRandomAccessStreamOnPlaceholderFile
 120 stub -noname SHRegGetCLSIDKey
 121 stub -noname SHRegSetValue
-122 stub SHRegGetValueFromHKCUHKLM
+122 stdcall SHRegGetValueFromHKCUHKLM(wstr wstr long ptr ptr ptr)
 123 stub -noname SHRegGetBoolValueFromHKCUHKLM
 124 stub -noname SHGetValueGoodBootA
 125 stub -noname SHGetValueGoodBootW
