@@ -191,6 +191,7 @@ list(APPEND SOURCE
     RtlWaitOnAddress.c
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
+    BadSegmentFault.c
     StackOverflow.c
     SystemCallStubs.c
     SystemDllTls.c
@@ -212,6 +213,7 @@ elseif(ARCH STREQUAL "amd64")
         amd64/NtContinue.S
         amd64/Wow64Continue.S
         amd64/NtCreateThread.S
+        amd64/BadSegmentFault.S
     )
 endif()
 
