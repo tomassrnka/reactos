@@ -3184,9 +3184,10 @@ RealMsgWaitForMultipleObjectsEx(
    DWORD dwWakeMask,
    DWORD dwFlags)
 {
-   /* In the WoW64 guest build the handles are 64 bits wide and the kernel reads them (and the timeout) at that
-      alignment. A 32-bit caller keeps the stack only 4-byte aligned and the compiler assumes 8, so the structure
-      is aligned here; otherwise the wait fails with STATUS_DATATYPE_MISALIGNMENT and message loops spin. */
+   /* In the WoW64 guest build the handles are 64 bits wide and the kernel reads them at that alignment (the
+      timeout is not alignment-checked). A 32-bit caller keeps the stack only 4-byte aligned and the compiler
+      assumes 8, so the structure is aligned here; otherwise the wait fails with STATUS_DATATYPE_MISALIGNMENT
+      and message loops spin. */
    UCHAR InfoBuffer[sizeof(MSGWAITINFO) + TYPE_ALIGNMENT(MSGWAITINFO) - 1];
    PMSGWAITINFO Info = ALIGN_UP_POINTER_BY(InfoBuffer, TYPE_ALIGNMENT(MSGWAITINFO));
    RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME ActCtx;
