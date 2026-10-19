@@ -296,6 +296,126 @@ static NTSTATUS SectionName32(HANDLE Process, ULONG Address, ULONG Buffer, ULONG
     return STATUS_SUCCESS;
 }
 
+/* NtQueryInformationProcess classes with a different or alignment-sensitive 32-bit form. Each
+ * native result goes through a native temporary and is stored with the semantics measured on
+ * Windows Server 2008 R2 and Windows 10 WoW64: exact lengths (VM_COUNTERS or VM_COUNTERS_EX for
+ * the memory counters, only the 36-byte query form for the device map); the I/O counters must
+ * be 4-byte aligned, the others need no alignment; the memory counters are ULONGs; the image
+ * name has an 8-byte header and MaximumLength = Length + 2, and a short buffer fails with
+ * STATUS_INFO_LENGTH_MISMATCH and the required length. The output and return length are probed
+ * before the native query; the return length is stored last on success, except for the image
+ * name, where it comes before the name (and is also stored for a short buffer). */
+typedef struct
+{
+    ULONG PeakVirtualSize, VirtualSize, PageFaultCount, PeakWorkingSetSize, WorkingSetSize;
+    ULONG QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage, QuotaPeakNonPagedPoolUsage, QuotaNonPagedPoolUsage;
+    ULONG PagefileUsage, PeakPagefileUsage, PrivateUsage;
+} WOW64_VM_COUNTERS_EX;
+C_ASSERT(sizeof(WOW64_VM_COUNTERS_EX) == 48);
+C_ASSERT(sizeof(IO_COUNTERS) == 48 && sizeof(KERNEL_USER_TIMES) == 32);
+C_ASSERT(RTL_FIELD_SIZE(PROCESS_DEVICEMAP_INFORMATION, Query) == 36);
+
+static ULONG Narrow(SIZE_T Value)
+{
+    return Value > MAXULONG ? MAXULONG : (ULONG)Value;
+}
+
+static NTSTATUS QueryProcess32(HANDLE Process, ULONG Class, ULONG Buffer, ULONG Length,
+                               ULONG ReturnLength, WOW64_CLEANUP *Cleanup)
+{
+    union
+    {
+        IO_COUNTERS Io;
+        KERNEL_USER_TIMES Times;
+        VM_COUNTERS_EX Vm;
+        PROCESS_DEVICEMAP_INFORMATION DeviceMap;
+    } Native;
+    ULONG Size;
+    NTSTATUS Status;
+
+    if (ReturnLength)
+    {
+        if (!GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+        ProbeOutput(ReturnLength, sizeof(ULONG));
+    }
+    switch (Class)
+    {
+    case ProcessIoCounters: Size = sizeof(Native.Io); break;
+    case ProcessTimes: Size = sizeof(Native.Times); break;
+    case ProcessVmCounters:
+        Size = Length == FIELD_OFFSET(WOW64_VM_COUNTERS_EX, PrivateUsage) ? Length : sizeof(WOW64_VM_COUNTERS_EX);
+        break;
+    case ProcessDeviceMap: Size = RTL_FIELD_SIZE(PROCESS_DEVICEMAP_INFORMATION, Query); break;
+    case ProcessImageFileName:
+    {
+        /* The native MaximumLength is a USHORT: the scratch buffer holds any name */
+        const ULONG NativeLength = sizeof(UNICODE_STRING) + MAXUSHORT;
+        UNICODE_STRING *Name;
+        WOW64_STRING UNALIGNED *Guest = PTR32(Buffer);
+        ULONG Needed;
+        Name = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeLength);
+        if (!Name) return STATUS_NO_MEMORY;
+        Status = NtQueryInformationProcess(Process, Class, Name, NativeLength, NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        if (Name->Length > MAXUSHORT - sizeof(WCHAR)) return STATUS_NAME_TOO_LONG;
+        Needed = sizeof(WOW64_STRING) + Name->Length + sizeof(WCHAR);
+        if (Length < Needed)
+        {
+            if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = Needed;
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+        /* Writable before anything is stored, so a fault leaves no partial header */
+        if (!Buffer || !GuestSpan(Buffer, Needed)) return STATUS_ACCESS_VIOLATION;
+        ProbeOutput(Buffer, Needed);
+        /* Windows WoW64 stores the return length before the name (a return length inside
+         * the buffer is overwritten by the name) */
+        if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = Needed;
+        Guest->Length = Name->Length;
+        Guest->MaximumLength = Name->Length + sizeof(WCHAR);
+        Guest->Buffer = Buffer + sizeof(WOW64_STRING);
+        RtlCopyMemory((PUCHAR)Guest + sizeof(WOW64_STRING), Name->Buffer, Name->Length);
+        *(WCHAR UNALIGNED *)((PUCHAR)Guest + Needed - sizeof(WCHAR)) = UNICODE_NULL;
+        return STATUS_SUCCESS;
+    }
+    default: return STATUS_INVALID_INFO_CLASS;
+    }
+    if (Length != Size) return STATUS_INFO_LENGTH_MISMATCH;
+    if (Class == ProcessIoCounters && (Buffer & (sizeof(ULONG) - 1))) return STATUS_DATATYPE_MISALIGNMENT;
+    if (!Buffer || !GuestSpan(Buffer, Size)) return STATUS_ACCESS_VIOLATION;
+    ProbeOutput(Buffer, Size);
+    switch (Class)
+    {
+    case ProcessVmCounters:
+    {
+        WOW64_VM_COUNTERS_EX Guest;
+        Status = NtQueryInformationProcess(Process, Class, &Native.Vm, sizeof(Native.Vm), NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        Guest.PeakVirtualSize = Narrow(Native.Vm.PeakVirtualSize);
+        Guest.VirtualSize = Narrow(Native.Vm.VirtualSize);
+        Guest.PageFaultCount = Native.Vm.PageFaultCount;
+        Guest.PeakWorkingSetSize = Narrow(Native.Vm.PeakWorkingSetSize);
+        Guest.WorkingSetSize = Narrow(Native.Vm.WorkingSetSize);
+        Guest.QuotaPeakPagedPoolUsage = Narrow(Native.Vm.QuotaPeakPagedPoolUsage);
+        Guest.QuotaPagedPoolUsage = Narrow(Native.Vm.QuotaPagedPoolUsage);
+        Guest.QuotaPeakNonPagedPoolUsage = Narrow(Native.Vm.QuotaPeakNonPagedPoolUsage);
+        Guest.QuotaNonPagedPoolUsage = Narrow(Native.Vm.QuotaNonPagedPoolUsage);
+        Guest.PagefileUsage = Narrow(Native.Vm.PagefileUsage);
+        Guest.PeakPagefileUsage = Narrow(Native.Vm.PeakPagefileUsage);
+        Guest.PrivateUsage = Narrow(Native.Vm.PrivateUsage);
+        RtlCopyMemory(PTR32(Buffer), &Guest, Size);
+        break;
+    }
+    default:
+        /* The same layout for both sizes */
+        Status = NtQueryInformationProcess(Process, Class, &Native, Size, NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        RtlCopyMemory(PTR32(Buffer), &Native, Size);
+        break;
+    }
+    if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = Size;
+    return STATUS_SUCCESS;
+}
+
 /* TOKEN_GROUPS classes: the 32-bit layout has 4-byte SID pointers, so query the
  * native form into a scratch buffer and rebuild it in the guest buffer. Measured on
  * Windows WOW64: the token is checked before the buffer, the buffer need not be
@@ -1488,6 +1608,9 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
         case ProcessSessionInformation: case ProcessBreakOnTermination: case ProcessCookie:
             return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
+        case ProcessIoCounters: case ProcessTimes: case ProcessVmCounters: case ProcessDeviceMap:
+        case ProcessImageFileName:
+            return QueryProcess32(H(0), a[1], a[2], a[3], a[4], Cleanup);
         default: UNSUPPORTED(CLASS, a[1]);
         }
     case W64_NtSetInformationProcess:
