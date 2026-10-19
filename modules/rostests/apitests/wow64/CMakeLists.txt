@@ -165,6 +165,10 @@ add_executable(wow64_framechanged EXCLUDE_FROM_ALL framechanged.c)
 set_module_type(wow64_framechanged win32cui)
 add_importlibs(wow64_framechanged user32 gdi32 msvcrt kernel32)
 
+add_executable(wow64_dc_cover EXCLUDE_FROM_ALL dc_cover.c)
+set_module_type(wow64_dc_cover win32cui)
+add_importlibs(wow64_dc_cover user32 gdi32 msvcrt kernel32)
+
 add_executable(wow64_system_timer EXCLUDE_FROM_ALL system_timer.c)
 set_module_type(wow64_system_timer win32cui)
 add_importlibs(wow64_system_timer user32 gdi32 msvcrt kernel32)
