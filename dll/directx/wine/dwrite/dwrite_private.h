@@ -293,6 +293,7 @@ struct dwrite_fontface
 
     struct dwrite_fonttable vdmx;
     struct dwrite_fonttable gasp;
+    struct dwrite_fonttable hdmx;
     struct dwrite_fonttable cpal;
     struct dwrite_fonttable colr;
     struct dwrite_fonttable kern;
@@ -570,6 +571,10 @@ struct bidi_char
 
 extern HRESULT bidi_computelevels(struct bidi_char *chars, unsigned int count, UINT8 baselevel);
 
+/* Largest glyph, run or texture bitmap this module builds; a font size in the tens of thousands would otherwise ask
+   for gigabytes and overflow the 32 bit sizes used to describe them. */
+#define DWRITE_MAX_BITMAP_BYTES (256u << 20)
+
 struct dwrite_glyphbitmap
 {
     DWORD simulations;
@@ -579,6 +584,9 @@ struct dwrite_glyphbitmap
     RECT bbox;
     BYTE *buf;
     DWRITE_MATRIX *m;
+    float dx, dy; /* fractional part of the pen position, in pixels */
+    BOOL lcd;     /* three coverage bytes per pixel, one per subpixel */
+    unsigned int mode; /* DWRITE_RENDERING_MODE1 of the run, decides whether an embedded strike may be used */
 };
 
 enum dwrite_outline_tags

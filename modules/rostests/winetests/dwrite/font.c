@@ -532,7 +532,7 @@ static IDWriteFont *get_tahoma_instance(IDWriteFactory *factory, DWRITE_FONT_STY
     return font;
 }
 
-static WCHAR *create_testfontfile(const WCHAR *filename)
+static WCHAR *create_resource_fontfile(const WCHAR *filename, int resource_id)
 {
     static WCHAR pathW[MAX_PATH];
     DWORD written;
@@ -547,7 +547,7 @@ static WCHAR *create_testfontfile(const WCHAR *filename)
     ok(file != INVALID_HANDLE_VALUE, "file creation failed, at %s, error %ld\n", wine_dbgstr_w(pathW),
         GetLastError());
 
-    res = FindResourceA(GetModuleHandleA(NULL), (LPCSTR)MAKEINTRESOURCE(1), (LPCSTR)RT_RCDATA);
+    res = FindResourceA(GetModuleHandleA(NULL), (LPCSTR)MAKEINTRESOURCE(resource_id), (LPCSTR)RT_RCDATA);
     ok( res != 0, "couldn't find resource\n" );
     ptr = LockResource( LoadResource( GetModuleHandleA(NULL), res ));
     WriteFile( file, ptr, SizeofResource( GetModuleHandleA(NULL), res ), &written, NULL );
@@ -555,6 +555,11 @@ static WCHAR *create_testfontfile(const WCHAR *filename)
     CloseHandle( file );
 
     return pathW;
+}
+
+static WCHAR *create_testfontfile(const WCHAR *filename)
+{
+    return create_resource_fontfile(filename, 1);
 }
 
 #define DELETE_FONTFILE(filename) _delete_testfontfile(filename, __LINE__)
@@ -1203,6 +1208,245 @@ static void test_CreateFontFromLOGFONT(void)
     ok(ref == 0, "interop is not released, %lu\n", ref);
     ref = IDWriteFactory_Release(factory);
     ok(ref == 0, "factory is not released, %lu\n", ref);
+}
+
+static BOOL draw_params_run(IDWriteBitmapRenderTarget *target, IDWriteFontFace *fontface, UINT16 glyph,
+        float level, DWRITE_PIXEL_GEOMETRY geometry, DWORD *pixels, int width, int height)
+{
+    IDWriteFactory *factory;
+    IDWriteRenderingParams *params;
+    DWRITE_GLYPH_RUN run;
+    FLOAT advance = 0.0f;
+    DIBSECTION ds;
+    HRESULT hr;
+    HBITMAP hbm;
+    RECT box;
+    HDC hdc;
+
+    factory = create_factory();
+    hr = IDWriteFactory_CreateCustomRenderingParams(factory, 1.0f, 0.0f, level, geometry,
+            DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, &params);
+    ok(hr == S_OK, "Failed to create rendering params, hr %#lx.\n", hr);
+
+    hdc = IDWriteBitmapRenderTarget_GetMemoryDC(target);
+    PatBlt(hdc, 0, 0, width, height, WHITENESS);
+
+    memset(&run, 0, sizeof(run));
+    run.fontFace = fontface;
+    run.fontEmSize = 30.0f;
+    run.glyphCount = 1;
+    run.glyphIndices = &glyph;
+    run.glyphAdvances = &advance;
+
+    /* A fractional origin: stripes only differ from grayscale where an edge falls inside a pixel. */
+    hr = IDWriteBitmapRenderTarget_DrawGlyphRun(target, 4.33f, 36.0f, DWRITE_MEASURING_MODE_NATURAL, &run, params,
+            RGB(0, 0, 0), &box);
+    ok(hr == S_OK, "Failed to draw a run, hr %#lx.\n", hr);
+
+    hbm = GetCurrentObject(hdc, OBJ_BITMAP);
+    GetObjectW(hbm, sizeof(ds), &ds);
+    memcpy(pixels, ds.dsBm.bmBits, width * height * sizeof(*pixels));
+
+    IDWriteRenderingParams_Release(params);
+    IDWriteFactory_Release(factory);
+    return hr == S_OK;
+}
+
+static void test_bitmap_target_rendering_params(void)
+{
+    enum { W = 64, H = 48 };
+    static DWORD rgb[W * H], bgr[W * H], flat[W * H], level0[W * H], half[W * H];
+    IDWriteBitmapRenderTarget *target;
+    IDWriteGdiInterop *interop;
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    unsigned int i, colored = 0, drawn = 0, differs = 0;
+    UINT32 ch = 'H';
+    UINT16 glyph = 0;
+    HRESULT hr;
+    ULONG ref;
+
+    factory = create_factory();
+    hr = IDWriteFactory_GetGdiInterop(factory, &interop);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteGdiInterop_CreateBitmapRenderTarget(interop, NULL, W, H, &target);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    fontface = create_fontface(factory);
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &ch, 1, &glyph);
+    ok(hr == S_OK && glyph, "Unexpected hr %#lx, glyph %u.\n", hr, glyph);
+
+    if (!draw_params_run(target, fontface, glyph, 1.0f, DWRITE_PIXEL_GEOMETRY_RGB, rgb, W, H) ||
+        !draw_params_run(target, fontface, glyph, 1.0f, DWRITE_PIXEL_GEOMETRY_BGR, bgr, W, H) ||
+        !draw_params_run(target, fontface, glyph, 1.0f, DWRITE_PIXEL_GEOMETRY_FLAT, flat, W, H) ||
+        !draw_params_run(target, fontface, glyph, 0.0f, DWRITE_PIXEL_GEOMETRY_RGB, level0, W, H) ||
+        !draw_params_run(target, fontface, glyph, 0.5f, DWRITE_PIXEL_GEOMETRY_RGB, half, W, H))
+        goto done;
+
+    for (i = 0; i < W * H; i++)
+    {
+        DWORD p = rgb[i] & 0xffffff;
+
+        if (p != 0xffffff) drawn++;
+        if (((p >> 16) & 0xff) != (p & 0xff)) colored++;
+
+        /* flat geometry and level 0 give gray pixels */
+        ok(((flat[i] >> 16) & 0xff) == (flat[i] & 0xff) && ((flat[i] >> 8) & 0xff) == (flat[i] & 0xff),
+                "pixel %u: flat geometry gave %08lx.\n", i, flat[i]);
+        ok(((level0[i] >> 16) & 0xff) == (level0[i] & 0xff) && ((level0[i] >> 8) & 0xff) == (level0[i] & 0xff),
+                "pixel %u: level 0 gave %08lx.\n", i, level0[i]);
+
+        /* black text on white: the BGR image is the RGB image with red and blue exchanged */
+        ok((bgr[i] & 0xff00) == (rgb[i] & 0xff00) && ((bgr[i] >> 16) & 0xff) == (rgb[i] & 0xff) &&
+                (bgr[i] & 0xff) == ((rgb[i] >> 16) & 0xff),
+                "pixel %u: BGR gave %08lx, RGB gave %08lx.\n", i, bgr[i], rgb[i]);
+
+        /* half level sits between grayscale and the full stripes */
+        if ((half[i] & 0xffffff) != (rgb[i] & 0xffffff))
+            differs++;
+    }
+    ok(drawn > 0, "Nothing was drawn.\n");
+    ok(colored > 0, "Clear type level 1 with an RGB geometry produced no coloured pixel.\n");
+    ok(differs > 0 || !colored, "Clear type level 0.5 equals level 1.\n");
+
+done:
+    IDWriteFontFace_Release(fontface);
+    ref = IDWriteBitmapRenderTarget_Release(target);
+    ok(ref == 0, "render target not released, %lu\n", ref);
+    ref = IDWriteGdiInterop_Release(interop);
+    ok(ref == 0, "interop not released, %lu\n", ref);
+    ref = IDWriteFactory_Release(factory);
+    ok(ref == 0, "factory not released, %lu\n", ref);
+}
+
+static void test_bitmap_target_failure(void)
+{
+    enum { W = 32, H = 32 };
+    IDWriteBitmapRenderTarget *target;
+    IDWriteRenderingParams *params;
+    IDWriteGdiInterop *interop;
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    DWRITE_GLYPH_RUN run;
+    UINT16 glyphs[2];
+    FLOAT advances[2] = { 20000000.0f, 0.0f };
+    UINT32 ch = 'H';
+    DIBSECTION ds;
+    unsigned int i, drawn = 0;
+    HRESULT hr;
+    HBITMAP hbm;
+    RECT box;
+    HDC hdc;
+
+    factory = create_factory();
+    hr = IDWriteFactory_GetGdiInterop(factory, &interop);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteGdiInterop_CreateBitmapRenderTarget(interop, NULL, W, H, &target);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteFactory_CreateRenderingParams(factory, &params);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    fontface = create_fontface(factory);
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &ch, 1, &glyphs[0]);
+    ok(hr == S_OK && glyphs[0], "Unexpected hr %#lx.\n", hr);
+    glyphs[1] = glyphs[0];
+
+    hdc = IDWriteBitmapRenderTarget_GetMemoryDC(target);
+    PatBlt(hdc, 0, 0, W, H, WHITENESS);
+
+    /* A run whose second glyph is twenty million pixels away: the run's texture is too large to build. Drawing
+       must either succeed with the first glyph on the target or say that it ran out of memory, not return
+       success and draw nothing. */
+    memset(&run, 0, sizeof(run));
+    run.fontFace = fontface;
+    run.fontEmSize = 20.0f;
+    run.glyphCount = 2;
+    run.glyphIndices = glyphs;
+    run.glyphAdvances = advances;
+
+    SetRectEmpty(&box);
+    hr = IDWriteBitmapRenderTarget_DrawGlyphRun(target, 2.0f, 24.0f, DWRITE_MEASURING_MODE_NATURAL, &run, params,
+            RGB(0, 0, 0), &box);
+    ok(hr == S_OK || hr == E_OUTOFMEMORY, "Unexpected hr %#lx.\n", hr);
+
+    hbm = GetCurrentObject(hdc, OBJ_BITMAP);
+    GetObjectW(hbm, sizeof(ds), &ds);
+    for (i = 0; i < W * H; i++)
+        if ((((DWORD *)ds.dsBm.bmBits)[i] & 0xffffff) != 0xffffff)
+            drawn++;
+    if (hr == S_OK)
+        ok(drawn > 0, "Drawing the run succeeded but nothing was drawn.\n");
+    else
+        ok(drawn == 0, "Drawing the run failed with %#lx but %u pixels changed.\n", hr, drawn);
+
+    IDWriteRenderingParams_Release(params);
+    IDWriteFontFace_Release(fontface);
+    IDWriteBitmapRenderTarget_Release(target);
+    IDWriteGdiInterop_Release(interop);
+    IDWriteFactory_Release(factory);
+}
+
+static void test_glyphrunanalysis_huge_texture(void)
+{
+    static const float sizes[] = { 20.0f, 45000.0f, 300000.0f };
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    UINT32 ch = 'H';
+    UINT16 glyph = 0;
+    unsigned int i;
+    HRESULT hr;
+    ULONG ref;
+
+    factory = create_factory();
+    fontface = create_fontface(factory);
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &ch, 1, &glyph);
+    ok(hr == S_OK && glyph, "Unexpected hr %#lx, glyph %u.\n", hr, glyph);
+
+    for (i = 0; i < ARRAY_SIZE(sizes); i++)
+    {
+        IDWriteGlyphRunAnalysis *analysis;
+        DWRITE_GLYPH_RUN run;
+        FLOAT advance = 0.0f;
+        BYTE buffer[16] = { 0 };
+        RECT bounds, huge = { 0, 0, 65536, 65536 };
+
+        memset(&run, 0, sizeof(run));
+        run.fontFace = fontface;
+        run.fontEmSize = sizes[i];
+        run.glyphCount = 1;
+        run.glyphIndices = &glyph;
+        run.glyphAdvances = &advance;
+
+        hr = IDWriteFactory_CreateGlyphRunAnalysis(factory, &run, 1.0f, NULL, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+                DWRITE_MEASURING_MODE_NATURAL, 0.0f, 0.0f, &analysis);
+        ok(hr == S_OK, "Size %.0f: unexpected hr %#lx.\n", sizes[i], hr);
+        if (FAILED(hr))
+            continue;
+
+        /* A texture can be asked for with a size that overflows 32 bits once it is multiplied by three: the buffer
+           must be refused, not written into. */
+        hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &huge, buffer,
+                sizeof(buffer));
+        ok(FAILED(hr), "Size %.0f: a 65536x65536 texture in %u bytes gave hr %#lx.\n", sizes[i], (unsigned int)sizeof(buffer), hr);
+
+        /* The run's own bounds are fine to ask for, however large the glyph is. */
+        SetRectEmpty(&bounds);
+        hr = IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds);
+        ok(hr == S_OK, "Size %.0f: unexpected hr %#lx.\n", sizes[i], hr);
+        if (hr == S_OK && !IsRectEmpty(&bounds))
+        {
+            hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds, buffer,
+                    sizeof(buffer));
+            ok(FAILED(hr), "Size %.0f: a texture of %s in %u bytes gave hr %#lx.\n", sizes[i],
+                    wine_dbgstr_rect(&bounds), (unsigned int)sizeof(buffer), hr);
+        }
+
+        IDWriteGlyphRunAnalysis_Release(analysis);
+    }
+
+    IDWriteFontFace_Release(fontface);
+    ref = IDWriteFactory_Release(factory);
+    ok(ref == 0, "factory not released, %lu\n", ref);
 }
 
 static void test_CreateBitmapRenderTarget(void)
@@ -6732,6 +6976,383 @@ static void test_GetGdiCompatibleGlyphAdvances(void)
     ok(ref == 0, "factory not released, %lu\n", ref);
 }
 
+/* Advances of ros_fixture.ttf in whole pixels for the characters 0x20 to 0x7e, sizes 8 to 24 px, measured with
+ * GetGdiCompatibleGlyphMetrics on Windows 7 (Server 2008 R2). Not measured on Windows 10. */
+static const unsigned char fixture_classic_advances[17][95] =
+{
+    { /* 8 px */
+         3,  3,  3,  6,  4,  8,  5,  2,  3,  3,  4,  6,  2,  3,  2,  3,  4,  4,  4,
+         4,  4,  4,  4,  4,  4,  4,  3,  3,  6,  6,  6,  4,  7,  5,  5,  5,  5,  4,
+         4,  5,  5,  3,  3,  5,  4,  6,  5,  6,  4,  6,  5,  4,  5,  5,  5,  7,  5,
+         5,  4,  3,  3,  3,  6,  4,  4,  4,  4,  4,  4,  4,  3,  4,  4,  2,  3,  4,
+         2,  7,  4,  4,  4,  4,  3,  4,  3,  4,  4,  6,  4,  4,  4,  4,  3,  4,  6 },
+    { /* 9 px */
+         3,  3,  4,  7,  5,  9,  6,  2,  3,  3,  5,  7,  3,  3,  3,  3,  5,  5,  5,
+         5,  5,  5,  5,  5,  5,  5,  3,  3,  7,  7,  7,  4,  8,  5,  5,  5,  6,  5,
+         5,  6,  6,  3,  4,  5,  4,  7,  6,  6,  5,  6,  6,  5,  5,  6,  5,  8,  5,
+         5,  5,  3,  3,  3,  7,  5,  5,  5,  5,  4,  5,  5,  3,  5,  5,  2,  3,  4,
+         2,  8,  5,  5,  5,  5,  3,  4,  3,  5,  4,  7,  4,  4,  4,  4,  3,  4,  7 },
+    { /* 10 px */
+         3,  3,  4,  7,  5, 10,  7,  2,  4,  4,  5,  7,  3,  4,  3,  4,  5,  5,  5,
+         5,  5,  5,  5,  5,  5,  5,  4,  4,  7,  7,  7,  5,  9,  6,  6,  6,  7,  6,
+         5,  7,  7,  4,  4,  6,  5,  8,  7,  7,  6,  7,  6,  6,  6,  7,  6,  9,  6,
+         6,  6,  4,  4,  4,  7,  5,  5,  5,  6,  5,  6,  5,  3,  6,  6,  2,  3,  5,
+         2,  8,  6,  5,  6,  6,  4,  4,  3,  6,  5,  7,  5,  5,  4,  5,  4,  5,  7 },
+    { /* 11 px */
+         3,  4,  4,  8,  6, 11,  7,  2,  4,  4,  6,  8,  3,  4,  3,  4,  6,  6,  6,
+         6,  6,  6,  6,  6,  6,  6,  4,  4,  8,  8,  8,  5, 10,  7,  6,  7,  7,  6,
+         6,  7,  7,  4,  5,  6,  5,  8,  7,  8,  6,  8,  7,  6,  6,  7,  7, 10,  6,
+         6,  6,  4,  4,  4,  8,  6,  6,  6,  6,  5,  6,  6,  4,  6,  6,  3,  4,  5,
+         3,  9,  6,  6,  6,  6,  4,  5,  4,  6,  5,  8,  5,  5,  5,  5,  4,  5,  8 },
+    { /* 12 px */
+         4,  4,  5,  9,  7, 12,  8,  3,  5,  5,  7,  9,  4,  4,  4,  5,  7,  7,  7,
+         7,  7,  7,  7,  7,  7,  7,  4,  4,  9,  9,  9,  6, 11,  7,  7,  7,  8,  7,
+         6,  8,  8,  4,  5,  7,  6,  9,  8,  9,  7,  9,  7,  7,  7,  8,  7, 11,  7,
+         7,  7,  5,  5,  5,  9,  7,  7,  6,  7,  6,  7,  6,  4,  7,  7,  3,  4,  6,
+         3, 10,  7,  7,  7,  7,  4,  5,  4,  7,  6,  9,  6,  6,  5,  6,  5,  6,  9 },
+    { /* 13 px */
+         4,  4,  5,  9,  7, 13,  9,  3,  5,  5,  7,  9,  4,  5,  4,  5,  7,  7,  7,
+         7,  7,  7,  7,  7,  7,  7,  5,  5,  9,  9,  9,  6, 12,  8,  8,  8,  9,  7,
+         7,  9,  9,  5,  5,  8,  6, 10,  9,  9,  7,  9,  8,  7,  8,  9,  8, 12,  8,
+         7,  7,  5,  5,  5,  9,  7,  7,  7,  7,  6,  7,  7,  4,  7,  7,  3,  4,  6,
+         3, 11,  7,  7,  7,  7,  5,  6,  4,  7,  6, 10,  6,  6,  6,  6,  5,  6,  9 },
+    { /* 14 px */
+         4,  5,  6, 10,  8, 14,  9,  3,  5,  5,  8, 10,  4,  5,  4,  5,  8,  8,  8,
+         8,  8,  8,  8,  8,  8,  8,  5,  5, 10, 10, 10,  7, 13,  8,  8,  8, 10,  8,
+         7,  9,  9,  5,  6,  8,  7, 11,  9, 10,  8, 10,  9,  8,  8,  9,  8, 13,  8,
+         8,  8,  5,  5,  5, 10,  8,  8,  7,  8,  6,  8,  7,  4,  8,  8,  3,  5,  7,
+         3, 12,  8,  8,  8,  8,  5,  6,  5,  8,  7, 10,  7,  7,  6,  7,  5,  7, 10 },
+    { /* 15 px */
+         5,  5,  6, 11,  8, 15, 10,  3,  6,  6,  8, 11,  5,  5,  5,  6,  8,  8,  8,
+         8,  8,  8,  8,  8,  8,  8,  5,  5, 11, 11, 11,  7, 14,  9,  9,  9, 10,  8,
+         8, 10, 10,  6,  6,  9,  7, 12, 10, 11,  8, 11,  9,  8,  9, 10,  9, 14,  9,
+         9,  8,  6,  6,  6, 11,  8,  8,  8,  8,  7,  8,  8,  5,  8,  8,  3,  5,  7,
+         3, 13,  8,  8,  8,  8,  5,  7,  5,  8,  7, 11,  7,  7,  7,  7,  6,  7, 11 },
+    { /* 16 px */
+         5,  5,  6, 12,  9, 16, 11,  3,  6,  6,  9, 12,  5,  6,  5,  6,  9,  9,  9,
+         9,  9,  9,  9,  9,  9,  9,  6,  6, 12, 12, 12,  8, 15, 10,  9, 10, 11,  9,
+         8, 11, 11,  6,  7,  9,  8, 12, 11, 11,  9, 11, 10,  9,  9, 11, 10, 14,  9,
+         9,  9,  6,  6,  6, 12,  9,  9,  8,  9,  7,  9,  8,  5,  9,  9,  4,  5,  8,
+         4, 13,  9,  9,  9,  9,  6,  7,  5,  9,  8, 12,  8,  8,  7,  8,  6,  8, 12 },
+    { /* 17 px */
+         5,  6,  7, 12,  9, 17, 11,  4,  7,  7,  9, 12,  5,  6,  5,  6,  9,  9,  9,
+         9,  9,  9,  9,  9,  9,  9,  6,  6, 12, 12, 12,  8, 15, 10, 10, 10, 12, 10,
+         9, 11, 11,  6,  7, 10,  8, 13, 11, 12,  9, 12, 11,  9, 10, 11, 10, 15, 10,
+        10, 10,  7,  6,  7, 12,  9,  9,  9,  9,  8,  9,  9,  5,  9,  9,  4,  6,  8,
+         4, 14,  9,  9,  9,  9,  6,  8,  6,  9,  8, 13,  8,  8,  8,  8,  6,  8, 12 },
+    { /* 18 px */
+         6,  6,  7, 13, 10, 18, 12,  4,  7,  7, 10, 13,  5,  7,  5,  7, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10,  6,  6, 13, 13, 13,  9, 16, 11, 11, 11, 12, 10,
+         9, 12, 12,  7,  8, 11,  9, 14, 12, 13, 10, 13, 11, 10, 11, 12, 11, 16, 10,
+        10, 10,  7,  7,  7, 13, 10, 10,  9, 10,  8, 10,  9,  6, 10, 10,  4,  6,  9,
+         4, 15, 10, 10, 10, 10,  6,  8,  6, 10,  9, 13,  9,  9,  8,  9,  7,  9, 13 },
+    { /* 19 px */
+         6,  6,  8, 14, 10, 19, 13,  4,  7,  7, 10, 14,  6,  7,  6,  7, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10,  7,  7, 14, 14, 14,  9, 17, 11, 11, 11, 13, 11,
+        10, 13, 13,  7,  8, 11,  9, 15, 13, 13, 10, 13, 12, 11, 11, 12, 11, 17, 11,
+        11, 11,  7,  7,  7, 14, 10, 10, 10, 11,  9, 11, 10,  6, 11, 11,  4,  6,  9,
+         4, 16, 11, 10, 11, 11,  7,  8,  6, 11,  9, 14,  9,  9,  8,  9,  7,  9, 14 },
+    { /* 20 px */
+         6,  7,  8, 15, 11, 20, 13,  4,  8,  8, 11, 15,  6,  7,  6,  8, 11, 11, 11,
+        11, 11, 11, 11, 11, 11, 11,  7,  7, 15, 15, 15,  9, 18, 12, 12, 12, 14, 11,
+        10, 13, 14,  7,  8, 12, 10, 15, 13, 14, 11, 14, 12, 11, 12, 13, 12, 18, 12,
+        12, 11,  8,  8,  8, 15, 11, 11, 11, 11,  9, 11, 11,  6, 11, 11,  5,  7, 10,
+         5, 17, 11, 11, 11, 11,  7,  9,  7, 11, 10, 15, 10, 10,  9, 10,  8, 10, 15 },
+    { /* 21 px */
+         7,  7,  8, 15, 11, 21, 14,  4,  8,  8, 11, 15,  6,  8,  6,  8, 11, 11, 11,
+        11, 11, 11, 11, 11, 11, 11,  7,  7, 15, 15, 15, 10, 19, 13, 12, 13, 14, 12,
+        11, 14, 14,  8,  9, 12, 10, 16, 14, 15, 12, 15, 13, 12, 12, 14, 13, 19, 12,
+        12, 12,  8,  8,  8, 15, 11, 11, 11, 12, 10, 12, 11,  7, 12, 12,  5,  7, 10,
+         5, 18, 12, 11, 12, 12,  8,  9,  7, 12, 10, 16, 10, 10,  9, 10,  8, 10, 15 },
+    { /* 22 px */
+         7,  7,  9, 16, 12, 22, 15,  5,  8,  8, 12, 16,  7,  8,  7,  8, 12, 12, 12,
+        12, 12, 12, 12, 12, 12, 12,  8,  8, 16, 16, 16, 10, 20, 13, 13, 13, 15, 12,
+        11, 15, 15,  8,  9, 13, 11, 17, 15, 16, 12, 16, 14, 12, 13, 14, 13, 20, 13,
+        13, 12,  8,  8,  8, 16, 12, 12, 12, 12, 10, 12, 12,  7, 12, 12,  5,  7, 11,
+         5, 18, 12, 12, 12, 12,  8, 10,  7, 12, 11, 16, 11, 11, 10, 11,  8, 11, 16 },
+    { /* 23 px */
+         7,  8,  9, 17, 13, 22, 16,  5,  9,  9, 13, 17,  7,  8,  7,  9, 13, 13, 13,
+        13, 13, 13, 13, 13, 13, 13,  8,  8, 17, 17, 17, 11, 21, 14, 14, 14, 16, 13,
+        12, 15, 16,  9, 10, 14, 11, 18, 15, 16, 13, 16, 14, 13, 13, 15, 14, 21, 13,
+        13, 13,  9,  9,  9, 17, 13, 13, 12, 13, 11, 13, 12,  7, 13, 13,  5,  8, 11,
+         5, 19, 13, 12, 13, 13,  8, 10,  8, 13, 11, 17, 11, 11, 10, 11,  9, 11, 17 },
+    { /* 24 px */
+         7,  8, 10, 17, 13, 23, 16,  5,  9,  9, 13, 17,  7,  9,  7,  9, 13, 13, 13,
+        13, 13, 13, 13, 13, 13, 13,  9,  9, 17, 17, 17, 11, 22, 14, 14, 14, 16, 13,
+        13, 16, 16,  9, 10, 14, 12, 19, 16, 17, 13, 17, 15, 13, 14, 16, 14, 22, 14,
+        14, 13,  9,  9,  9, 17, 13, 13, 13, 13, 11, 13, 13,  8, 13, 13,  6,  8, 12,
+         6, 20, 13, 13, 13, 13,  9, 11,  8, 13, 12, 18, 12, 12, 11, 12,  9, 12, 17 },
+};
+
+static const unsigned char fixture_natural_advances[17][95] =
+{
+    { /* 8 px */
+         3,  3,  3,  6,  4,  8,  5,  2,  3,  3,  4,  6,  2,  3,  2,  3,  4,  4,  4,
+         4,  4,  4,  4,  4,  4,  4,  3,  3,  6,  6,  6,  4,  7,  5,  5,  5,  5,  5,
+         4,  5,  5,  3,  3,  5,  4,  6,  5,  6,  4,  6,  5,  4,  5,  5,  5,  7,  5,
+         5,  5,  3,  3,  3,  6,  4,  4,  4,  4,  4,  4,  4,  3,  4,  5,  2,  3,  4,
+         2,  7,  5,  4,  4,  4,  3,  4,  3,  5,  4,  6,  4,  4,  4,  4,  3,  4,  6 },
+    { /* 9 px */
+         3,  3,  4,  7,  5,  9,  6,  2,  3,  3,  5,  7,  3,  3,  3,  3,  5,  5,  5,
+         5,  5,  5,  5,  5,  5,  5,  3,  3,  7,  7,  7,  4,  8,  5,  5,  5,  6,  5,
+         5,  6,  6,  3,  4,  5,  5,  7,  6,  6,  5,  6,  6,  5,  5,  6,  5,  8,  5,
+         5,  5,  3,  3,  3,  7,  5,  5,  5,  5,  4,  5,  5,  3,  5,  5,  2,  3,  5,
+         2,  8,  5,  5,  5,  5,  3,  4,  3,  5,  5,  7,  4,  5,  4,  4,  3,  4,  7 },
+    { /* 10 px */
+         3,  3,  4,  7,  5, 10,  7,  2,  4,  4,  5,  7,  3,  4,  3,  4,  5,  5,  5,
+         5,  5,  5,  5,  5,  5,  5,  4,  4,  7,  7,  7,  5,  9,  6,  6,  6,  7,  6,
+         5,  7,  7,  4,  4,  6,  5,  8,  7,  7,  6,  7,  6,  6,  6,  7,  6,  9,  6,
+         6,  6,  4,  4,  4,  7,  5,  5,  5,  6,  5,  6,  5,  3,  6,  6,  2,  3,  5,
+         2,  8,  6,  5,  6,  6,  4,  4,  3,  6,  5,  7,  5,  5,  4,  5,  4,  5,  7 },
+    { /* 11 px */
+         3,  4,  4,  8,  6, 11,  7,  2,  4,  4,  6,  8,  3,  4,  3,  4,  6,  6,  6,
+         6,  6,  6,  6,  6,  6,  6,  4,  4,  8,  8,  8,  5, 10,  7,  7,  7,  7,  6,
+         6,  7,  7,  4,  5,  7,  6,  9,  7,  8,  6,  8,  7,  6,  6,  7,  7, 10,  6,
+         6,  6,  4,  4,  4,  8,  6,  6,  6,  6,  5,  6,  6,  4,  6,  6,  3,  4,  6,
+         3,  9,  6,  6,  6,  6,  4,  5,  4,  6,  6,  8,  5,  6,  5,  5,  4,  5,  8 },
+    { /* 12 px */
+         4,  4,  5,  9,  7, 12,  8,  3,  5,  5,  7,  9,  4,  4,  4,  5,  7,  7,  7,
+         7,  7,  7,  7,  7,  7,  7,  4,  4,  9,  9,  9,  6, 11,  7,  7,  7,  8,  7,
+         6,  8,  8,  5,  5,  7,  6,  9,  8,  9,  7,  9,  7,  7,  7,  8,  7, 11,  7,
+         7,  7,  5,  5,  5,  9,  7,  7,  6,  7,  6,  7,  6,  4,  7,  7,  3,  4,  6,
+         3, 10,  7,  7,  7,  7,  4,  5,  4,  7,  6,  9,  6,  6,  5,  6,  5,  6,  9 },
+    { /* 13 px */
+         4,  4,  5, 10,  7, 13,  9,  3,  5,  5,  7, 10,  4,  5,  4,  5,  7,  7,  7,
+         7,  7,  7,  7,  7,  7,  7,  5,  5, 10, 10, 10,  6, 12,  8,  8,  8,  9,  7,
+         7,  9,  9,  5,  5,  8,  7, 10,  9,  9,  7,  9,  8,  7,  8,  9,  8, 12,  8,
+         8,  7,  5,  5,  5, 10,  7,  7,  7,  7,  6,  7,  7,  4,  7,  7,  3,  4,  7,
+         3, 11,  7,  7,  7,  7,  5,  6,  4,  7,  7, 10,  6,  7,  6,  6,  5,  6, 10 },
+    { /* 14 px */
+         4,  5,  6, 10,  8, 14,  9,  3,  5,  5,  8, 10,  4,  5,  4,  5,  8,  8,  8,
+         8,  8,  8,  8,  8,  8,  8,  5,  5, 10, 10, 10,  7, 13,  8,  8,  8, 10,  8,
+         7,  9,  9,  5,  6,  8,  7, 11,  9, 10,  8, 10,  9,  8,  8,  9,  8, 13,  8,
+         8,  8,  5,  5,  5, 10,  8,  8,  7,  8,  6,  8,  7,  4,  8,  8,  3,  5,  7,
+         3, 12,  8,  8,  8,  8,  5,  6,  5,  8,  7, 10,  7,  7,  6,  7,  5,  7, 10 },
+    { /* 15 px */
+         5,  5,  6, 11,  8, 15, 10,  3,  6,  6,  8, 11,  5,  5,  5,  6,  8,  8,  8,
+         8,  8,  8,  8,  8,  8,  8,  5,  5, 11, 11, 11,  7, 14,  9,  9,  9, 10,  8,
+         8, 10, 10,  6,  6,  9,  8, 12, 10, 11,  8, 11,  9,  8,  9, 10,  9, 14,  9,
+         9,  8,  6,  6,  6, 11,  8,  8,  8,  8,  7,  8,  8,  5,  8,  8,  3,  5,  8,
+         3, 13,  8,  8,  8,  8,  5,  7,  5,  8,  8, 11,  7,  8,  7,  7,  6,  7, 11 },
+    { /* 16 px */
+         5,  5,  6, 12,  9, 16, 11,  3,  6,  6,  9, 12,  5,  6,  5,  6,  9,  9,  9,
+         9,  9,  9,  9,  9,  9,  9,  6,  6, 12, 12, 12,  8, 15, 10,  9, 10, 11,  9,
+         8, 11, 11,  6,  7,  9,  8, 12, 11, 11,  9, 11, 10,  9,  9, 11, 10, 14,  9,
+         9,  9,  6,  6,  6, 12,  9,  9,  8,  9,  7,  9,  8,  5,  9,  9,  4,  5,  8,
+         4, 13,  9,  9,  9,  9,  6,  7,  5,  9,  8, 12,  8,  8,  7,  8,  6,  8, 12 },
+    { /* 17 px */
+         5,  6,  7, 12,  9, 17, 11,  4,  7,  7,  9, 12,  5,  6,  5,  7,  9,  9,  9,
+         9,  9,  9,  9,  9,  9,  9,  6,  6, 12, 12, 12,  8, 15, 10, 10, 10, 12, 10,
+         9, 11, 12,  6,  7, 10,  9, 13, 11, 12,  9, 12, 11, 10, 10, 11, 10, 15, 10,
+        10, 10,  7,  7,  7, 12,  9,  9,  9,  9,  8,  9,  9,  5,  9, 10,  4,  6,  9,
+         4, 14, 10,  9,  9,  9,  6,  8,  6, 10,  9, 13,  8,  9,  8,  8,  7,  8, 12 },
+    { /* 18 px */
+         6,  6,  7, 13, 10, 18, 12,  4,  7,  7, 10, 13,  5,  7,  5,  7, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10,  6,  6, 13, 13, 13,  9, 16, 11, 11, 11, 12, 10,
+         9, 12, 12,  7,  8, 11,  9, 14, 12, 13, 10, 13, 11, 10, 11, 12, 11, 16, 10,
+        10, 10,  7,  7,  7, 13, 10, 10,  9, 10,  8, 10, 10,  6, 10, 10,  4,  6,  9,
+         4, 15, 10, 10, 10, 10,  7,  8,  6, 10,  9, 13,  9,  9,  8,  9,  7,  9, 13 },
+    { /* 19 px */
+         6,  6,  8, 14, 10, 19, 13,  4,  7,  7, 10, 14,  6,  7,  6,  7, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10,  7,  7, 14, 14, 14,  9, 17, 11, 11, 11, 13, 11,
+        10, 13, 13,  7,  8, 11, 10, 15, 13, 13, 11, 13, 12, 11, 11, 12, 11, 17, 11,
+        11, 11,  7,  7,  7, 14, 10, 10, 10, 11,  9, 11, 10,  6, 11, 11,  4,  6, 10,
+         4, 16, 11, 10, 11, 11,  7,  9,  6, 11, 10, 14,  9, 10,  8,  9,  7,  9, 14 },
+    { /* 20 px */
+         6,  7,  8, 15, 11, 20, 14,  4,  8,  8, 11, 15,  6,  7,  6,  8, 11, 11, 11,
+        11, 11, 11, 11, 11, 11, 11,  7,  7, 15, 15, 15, 10, 18, 12, 12, 12, 14, 11,
+        10, 13, 14,  8,  8, 12, 10, 15, 13, 14, 11, 14, 12, 11, 12, 13, 12, 18, 12,
+        12, 11,  8,  8,  8, 15, 11, 11, 11, 11,  9, 11, 11,  6, 11, 11,  5,  7, 10,
+         5, 17, 11, 11, 11, 11,  7,  9,  7, 11, 10, 15, 10, 10,  9, 10,  8, 10, 15 },
+    { /* 21 px */
+         7,  7,  8, 15, 12, 21, 14,  4,  8,  8, 12, 15,  6,  8,  6,  8, 12, 12, 12,
+        12, 12, 12, 12, 12, 12, 12,  7,  7, 15, 15, 15, 10, 19, 13, 12, 13, 14, 12,
+        11, 14, 14,  8,  9, 12, 10, 16, 14, 15, 12, 15, 13, 12, 12, 14, 13, 19, 12,
+        12, 12,  8,  8,  8, 15, 12, 12, 11, 12, 10, 12, 11,  7, 12, 12,  5,  7, 10,
+         5, 18, 12, 11, 12, 12,  8,  9,  7, 12, 10, 16, 10, 10,  9, 10,  8, 10, 15 },
+    { /* 22 px */
+         7,  7,  9, 16, 12, 22, 15,  5,  8,  8, 12, 16,  7,  8,  7,  8, 12, 12, 12,
+        12, 12, 12, 12, 12, 12, 12,  8,  8, 16, 16, 16, 10, 20, 13, 13, 13, 15, 12,
+        12, 15, 15,  8,  9, 13, 11, 17, 15, 16, 12, 16, 14, 12, 13, 14, 13, 20, 13,
+        13, 12,  8,  8,  8, 16, 12, 12, 12, 12, 10, 12, 12,  7, 12, 12,  5,  7, 11,
+         5, 19, 12, 12, 12, 12,  8, 10,  7, 12, 11, 16, 11, 11, 10, 11,  8, 11, 16 },
+    { /* 23 px */
+         7,  8,  9, 17, 13, 23, 16,  5,  9,  9, 13, 17,  7,  8,  7,  9, 13, 13, 13,
+        13, 13, 13, 13, 13, 13, 13,  8,  8, 17, 17, 17, 11, 21, 14, 14, 14, 16, 13,
+        12, 15, 16,  9, 10, 14, 11, 18, 15, 16, 13, 16, 14, 13, 13, 15, 14, 21, 13,
+        13, 13,  9,  9,  9, 17, 13, 13, 12, 13, 11, 13, 12,  7, 13, 13,  5,  8, 11,
+         5, 19, 13, 13, 13, 13,  8, 10,  8, 13, 11, 17, 11, 11, 10, 11,  9, 11, 17 },
+    { /* 24 px */
+         8,  8, 10, 18, 13, 23, 16,  5,  9,  9, 13, 18,  7,  9,  7,  9, 13, 13, 13,
+        13, 13, 13, 13, 13, 13, 13,  9,  9, 18, 18, 18, 11, 22, 14, 14, 14, 16, 14,
+        13, 16, 16,  9, 10, 14, 12, 19, 16, 17, 13, 17, 15, 13, 14, 16, 14, 22, 14,
+        14, 13,  9,  9,  9, 18, 13, 13, 13, 13, 11, 13, 13,  8, 13, 13,  6,  8, 12,
+         6, 20, 13, 13, 13, 13,  9, 11,  8, 13, 12, 18, 12, 12, 11, 12,  9, 12, 18 },
+};
+
+static IDWriteFontFace *create_fixture_fontface(IDWriteFactory *factory, WCHAR **path)
+{
+    static const WCHAR fixture_fontfile[] = L"ros_fixture.ttf";
+    IDWriteFontFace *fontface = NULL;
+    IDWriteFontFile *file = NULL;
+    HRESULT hr;
+
+    *path = create_resource_fontfile(fixture_fontfile, 2);
+
+    hr = IDWriteFactory_CreateFontFileReference(factory, *path, NULL, &file);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = IDWriteFactory_CreateFontFace(factory, DWRITE_FONT_FACE_TYPE_TRUETYPE, 1, &file, 0,
+                DWRITE_FONT_SIMULATIONS_NONE, &fontface);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        IDWriteFontFile_Release(file);
+    }
+
+    return fontface;
+}
+
+static void test_fixture_gdi_compatible_advances(void)
+{
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    DWRITE_FONT_METRICS metrics;
+    UINT32 codepoints[95];
+    UINT16 glyphs[95];
+    unsigned int size, i;
+    WCHAR *path;
+    HRESULT hr;
+    ULONG ref;
+
+    factory = create_factory();
+    if (!(fontface = create_fixture_fontface(factory, &path)))
+    {
+        ref = IDWriteFactory_Release(factory);
+        ok(ref == 0, "factory not released, %lu\n", ref);
+        DELETE_FONTFILE(path);
+        return;
+    }
+
+    IDWriteFontFace_GetMetrics(fontface, &metrics);
+    ok(metrics.designUnitsPerEm == 2048, "Unexpected design units %u.\n", metrics.designUnitsPerEm);
+
+    for (i = 0; i < ARRAY_SIZE(codepoints); ++i)
+        codepoints[i] = 0x20 + i;
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, codepoints, ARRAY_SIZE(codepoints), glyphs);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    for (size = 8; size <= 24; ++size)
+    {
+        DWRITE_GLYPH_METRICS classic[95], natural[95];
+
+        hr = IDWriteFontFace_GetGdiCompatibleGlyphMetrics(fontface, size, 1.0f, NULL, FALSE, glyphs,
+                ARRAY_SIZE(glyphs), classic, FALSE);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IDWriteFontFace_GetGdiCompatibleGlyphMetrics(fontface, size, 1.0f, NULL, TRUE, glyphs,
+                ARRAY_SIZE(glyphs), natural, FALSE);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        for (i = 0; i < ARRAY_SIZE(glyphs); ++i)
+        {
+            int got_classic = floorf(classic[i].advanceWidth * size / (float)metrics.designUnitsPerEm + 0.5f);
+            int got_natural = floorf(natural[i].advanceWidth * size / (float)metrics.designUnitsPerEm + 0.5f);
+
+            ok(got_classic == fixture_classic_advances[size - 8][i], "%u px, U+%04X: classic advance %d, expected %u.\n",
+                    size, codepoints[i], got_classic, fixture_classic_advances[size - 8][i]);
+            ok(got_natural == fixture_natural_advances[size - 8][i], "%u px, U+%04X: natural advance %d, expected %u.\n",
+                    size, codepoints[i], got_natural, fixture_natural_advances[size - 8][i]);
+        }
+    }
+
+    IDWriteFontFace_Release(fontface);
+    ref = IDWriteFactory_Release(factory);
+    ok(ref == 0, "factory not released, %lu\n", ref);
+    DELETE_FONTFILE(path);
+}
+
+static void test_fixture_textures_use_outlines(void)
+{
+    static const unsigned int sizes[] = { 11, 13, 16 };
+    static const DWRITE_RENDERING_MODE modes[] = { DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_RENDERING_MODE_GDI_CLASSIC };
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    UINT32 codepoint = 'm';
+    unsigned int s, m;
+    UINT16 glyph = 0;
+    WCHAR *path;
+    HRESULT hr;
+    ULONG ref;
+
+    factory = create_factory();
+    if (!(fontface = create_fixture_fontface(factory, &path)))
+    {
+        ref = IDWriteFactory_Release(factory);
+        ok(ref == 0, "factory not released, %lu\n", ref);
+        DELETE_FONTFILE(path);
+        return;
+    }
+
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &codepoint, 1, &glyph);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* The font is a Latin font with embedded strikes for 8 to 16 px; Windows 7 draws such a face from its outlines
+       in every mode, so the texture has partial coverage. The strikes are bilevel. */
+    for (m = 0; m < ARRAY_SIZE(modes); ++m)
+    {
+        for (s = 0; s < ARRAY_SIZE(sizes); ++s)
+        {
+            DWRITE_MEASURING_MODE measuring = modes[m] == DWRITE_RENDERING_MODE_GDI_CLASSIC ?
+                    DWRITE_MEASURING_MODE_GDI_CLASSIC : DWRITE_MEASURING_MODE_NATURAL;
+            IDWriteGlyphRunAnalysis *analysis;
+            DWRITE_GLYPH_RUN run;
+            DWRITE_GLYPH_OFFSET offset = { 0 };
+            float advance = 0.0f;
+            unsigned int i, partial = 0;
+            RECT bounds;
+
+            memset(&run, 0, sizeof(run));
+            run.fontFace = fontface;
+            run.fontEmSize = sizes[s];
+            run.glyphCount = 1;
+            run.glyphIndices = &glyph;
+            run.glyphAdvances = &advance;
+            run.glyphOffsets = &offset;
+
+            hr = IDWriteFactory_CreateGlyphRunAnalysis(factory, &run, 1.0f, NULL, modes[m], measuring, 0.0f, 0.0f,
+                    &analysis);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            if (FAILED(hr))
+                continue;
+
+            hr = IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            ok(bounds.right > bounds.left && bounds.bottom > bounds.top, "mode %u, %u px: empty bounds.\n",
+                    modes[m], sizes[s]);
+            if (hr == S_OK && bounds.right > bounds.left && bounds.bottom > bounds.top)
+            {
+                unsigned int bytes = (bounds.right - bounds.left) * (bounds.bottom - bounds.top) * 3;
+                BYTE *bitmap = calloc(1, bytes);
+
+                hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, DWRITE_TEXTURE_CLEARTYPE_3x1, &bounds,
+                        bitmap, bytes);
+                ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+                for (i = 0; i < bytes; ++i)
+                    if (bitmap[i] && bitmap[i] != 0xff)
+                        ++partial;
+                ok(partial > 0, "mode %u, %u px: texture has no partial coverage, a bilevel strike was used.\n",
+                        modes[m], sizes[s]);
+                free(bitmap);
+            }
+            IDWriteGlyphRunAnalysis_Release(analysis);
+        }
+    }
+
+    IDWriteFontFace_Release(fontface);
+    ref = IDWriteFactory_Release(factory);
+    ok(ref == 0, "factory not released, %lu\n", ref);
+    DELETE_FONTFILE(path);
+}
+
 static WORD get_gasp_flags(IDWriteFontFace *fontface, FLOAT emsize, FLOAT ppdip)
 {
     WORD num_recs, version;
@@ -10498,6 +11119,11 @@ START_TEST(font)
     test_object_lifetime();
     test_CreateFontFromLOGFONT();
     test_CreateBitmapRenderTarget();
+    test_bitmap_target_rendering_params();
+    test_bitmap_target_failure();
+    test_glyphrunanalysis_huge_texture();
+    test_fixture_gdi_compatible_advances();
+    test_fixture_textures_use_outlines();
     test_GetFontFamily();
     test_GetFamilyNames();
     test_CreateFontFace();

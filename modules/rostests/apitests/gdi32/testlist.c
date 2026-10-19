@@ -6,6 +6,7 @@ extern void func_AddFontMemResourceEx(void);
 extern void func_AddFontResource(void);
 extern void func_AddFontResourceEx(void);
 extern void func_BeginPath(void);
+extern void func_BitBltPointer(void);
 extern void func_CombineRgn(void);
 extern void func_CombineTransform(void);
 extern void func_CreateBitmap(void);
@@ -18,6 +19,7 @@ extern void func_CreateFontIndirect(void);
 extern void func_CreateIconIndirect(void);
 extern void func_CreatePen(void);
 extern void func_CreateRectRgn(void);
+extern void func_D3DKMTCreateDCFromMemory(void);
 extern void func_DPtoLP(void);
 extern void func_EngAcquireSemaphore(void);
 extern void func_EngCreateSemaphore(void);
@@ -34,6 +36,7 @@ extern void func_GdiConvertFont(void);
 extern void func_GdiConvertPalette(void);
 extern void func_GdiConvertRegion(void);
 extern void func_GdiDeleteLocalDC(void);
+extern void func_GdiDrawStream(void);
 extern void func_GdiGetCharDimensions(void);
 extern void func_GdiGetLocalBrush(void);
 extern void func_GdiGetLocalDC(void);
@@ -45,6 +48,7 @@ extern void func_GetClipRgn(void);
 extern void func_GetCurrentObject(void);
 extern void func_GetDIBColorTable(void);
 extern void func_GetDIBits(void);
+extern void func_GetFontFileInfo(void);
 extern void func_GetFontResourceInfoW(void);
 extern void func_GetGlyphIndices(void);
 extern void func_GetGlyphOutline(void);
@@ -53,6 +57,8 @@ extern void func_GetPixel(void);
 extern void func_GetRandomRgn(void);
 extern void func_GetStockObject(void);
 extern void func_GetTextExtentExPoint(void);
+extern void func_GetTextExtentKerning(void);
+extern void func_GetTextExtentQuality(void);
 extern void func_GetTextFace(void);
 extern void func_GetTextMetrics(void);
 extern void func_LPtoDP(void);
@@ -62,10 +68,13 @@ extern void func_OffsetClipRgn(void);
 extern void func_OffsetRgn(void);
 extern void func_PaintRgn(void);
 extern void func_PatBlt(void);
+extern void func_PolyPatBlt(void);
 extern void func_Rectangle(void);
 extern void func_RegionAllocFailClip(void);
 extern void func_RegionAllocFailVis(void);
 extern void func_RealizePalette(void);
+extern void func_RemoveFontResourceEx(void);
+extern void func_SelectBitmapOwner(void);
 extern void func_SelectObject(void);
 extern void func_SetBoundsRect(void);
 extern void func_SetBrushOrgEx(void);
@@ -87,6 +96,7 @@ const struct test winetest_testlist[] =
     { "AddFontResource", func_AddFontResource },
     { "AddFontResourceEx", func_AddFontResourceEx },
     { "BeginPath", func_BeginPath },
+    { "BitBltPointer", func_BitBltPointer },
     { "CombineRgn", func_CombineRgn },
     { "CombineTransform", func_CombineTransform },
     { "CreateBitmap", func_CreateBitmap },
@@ -99,6 +109,7 @@ const struct test winetest_testlist[] =
     { "CreateIconIndirect", func_CreateIconIndirect },
     { "CreatePen", func_CreatePen },
     { "CreateRectRgn", func_CreateRectRgn },
+    { "D3DKMTCreateDCFromMemory", func_D3DKMTCreateDCFromMemory },
     { "DPtoLP", func_DPtoLP },
     { "EngAcquireSemaphore", func_EngAcquireSemaphore },
     { "EngCreateSemaphore", func_EngCreateSemaphore },
@@ -115,6 +126,7 @@ const struct test winetest_testlist[] =
     { "GdiConvertPalette", func_GdiConvertPalette },
     { "GdiConvertRegion", func_GdiConvertRegion },
     { "GdiDeleteLocalDC", func_GdiDeleteLocalDC },
+    { "GdiDrawStream", func_GdiDrawStream },
     { "GdiGetCharDimensions", func_GdiGetCharDimensions },
     { "GdiGetLocalBrush", func_GdiGetLocalBrush },
     { "GdiGetLocalDC", func_GdiGetLocalDC },
@@ -126,6 +138,7 @@ const struct test winetest_testlist[] =
     { "GetCurrentObject", func_GetCurrentObject },
     { "GetDIBColorTable", func_GetDIBColorTable },
     { "GetDIBits", func_GetDIBits },
+    { "GetFontFileInfo", func_GetFontFileInfo },
     { "GetFontResourceInfoW", func_GetFontResourceInfoW },
     { "GetGlyphIndices", func_GetGlyphIndices },
     { "GetGlyphOutline", func_GetGlyphOutline },
@@ -134,6 +147,8 @@ const struct test winetest_testlist[] =
     { "GetRandomRgn", func_GetRandomRgn },
     { "GetStockObject", func_GetStockObject },
     { "GetTextExtentExPoint", func_GetTextExtentExPoint },
+    { "GetTextExtentKerning", func_GetTextExtentKerning },
+    { "GetTextExtentQuality", func_GetTextExtentQuality },
     { "GetTextMetrics", func_GetTextMetrics },
     { "GetTextFace", func_GetTextFace },
     { "LPtoDP", func_LPtoDP },
@@ -143,10 +158,13 @@ const struct test winetest_testlist[] =
     { "OffsetRgn", func_OffsetRgn },
     { "PaintRgn", func_PaintRgn },
     { "PatBlt", func_PatBlt },
+    { "PolyPatBlt", func_PolyPatBlt },
     { "Rectangle", func_Rectangle },
     { "RegionAllocFailClip", func_RegionAllocFailClip },
     { "RegionAllocFailVis", func_RegionAllocFailVis },
     { "RealizePalette", func_RealizePalette },
+    { "RemoveFontResourceEx", func_RemoveFontResourceEx },
+    { "SelectBitmapOwner", func_SelectBitmapOwner },
     { "SelectObject", func_SelectObject },
     { "SetBoundsRect", func_SetBoundsRect },
     { "SetBrushOrgEx", func_SetBrushOrgEx },

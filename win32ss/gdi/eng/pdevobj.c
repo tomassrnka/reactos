@@ -115,6 +115,9 @@ PDEVOBJ_vRelease(
     /* Check if references are left */
     if (ppdev->cPdevRefs == 0)
     {
+        /* The engine's own pointer bitmaps */
+        IntFreeMousePointer(ppdev);
+
         /* Do we have a surface? */
         if (ppdev->pSurface)
         {
@@ -654,6 +657,10 @@ PDEVOBJ_bDynamicModeChange(
         DWORD StateFlags;
     } temp;
 
+    /* The pointer's saved pixels and bitmaps belong to the framebuffer that goes now */
+    ppdev->ulModeGen++;
+    ppdev->Pointer.bShowAfterSwitch = ppdev->Pointer.Enabled;
+
     /* Exchange driver functions */
     temp.pfn = ppdev->pfn;
     ppdev->pfn = ppdev2->pfn;
@@ -942,6 +949,7 @@ PDEVOBJ_lChangeDisplaySettings(
                 {
                     if (pmdev->dev[j].ppdev->pGraphicsDevice == pmdevOld->dev[i].ppdev->pGraphicsDevice)
                     {
+                        /* The pointer reads ulModeGen under hsemDevLock, which the callers of this path do not hold; none reaches it today */
                         if (PDEVOBJ_bDynamicModeChange(pmdevOld->dev[i].ppdev, pmdev->dev[j].ppdev))
                         {
                             PPDEVOBJ tmp = pmdevOld->dev[i].ppdev;

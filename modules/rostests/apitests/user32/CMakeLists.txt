@@ -16,8 +16,10 @@ list(APPEND SOURCE
     DM_REPOSITION.c
     DrawIconEx.c
     DrawText.c
+    EditInk.c
     desktop.c
     EmptyClipboard.c
+    EnumDisplayDevices.c
     EnumDisplaySettings.c
     FrameChangedClient.c
     FrameMetrics.c

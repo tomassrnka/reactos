@@ -6,6 +6,7 @@ list(APPEND SOURCE
     AddFontResource.c
     AddFontResourceEx.c
     BeginPath.c
+    BitBltPointer.c
     CombineRgn.c
     CombineTransform.c
     CreateBitmap.c
@@ -19,6 +20,7 @@ list(APPEND SOURCE
     CreateIconIndirect.c
     CreatePen.c
     CreateRectRgn.c
+    D3DKMTCreateDCFromMemory.c
     DPtoLP.c
     EngAcquireSemaphore.c
     EngCreateSemaphore.c
@@ -35,6 +37,7 @@ list(APPEND SOURCE
     GdiConvertPalette.c
     GdiConvertRegion.c
     GdiDeleteLocalDC.c
+    GdiDrawStream.c
     GdiGetCharDimensions.c
     GdiGetLocalBrush.c
     GdiGetLocalDC.c
@@ -46,6 +49,7 @@ list(APPEND SOURCE
     GetCurrentObject.c
     GetDIBColorTable.c
     GetDIBits.c
+    GetFontFileInfo.c
     GetFontResourceInfoW.c
     GetGlyphIndices.c
     GetGlyphOutline.c
@@ -54,6 +58,8 @@ list(APPEND SOURCE
     GetPixel.c
     GetStockObject.c
     GetTextExtentExPoint.c
+    GetTextExtentKerning.c
+    GetTextExtentQuality.c
     GetTextFace.c
     GetTextMetrics.c
     LPtoDP.c
@@ -63,9 +69,12 @@ list(APPEND SOURCE
     OffsetRgn.c
     PaintRgn.c
     PatBlt.c
+    PolyPatBlt.c
     Rectangle.c
     RegionAllocFailure.c
     RealizePalette.c
+    RemoveFontResourceEx.c
+    SelectBitmapOwner.c
     SelectObject.c
     SetBoundsRect.c
     SetBrushOrgEx.c
@@ -91,6 +100,6 @@ add_executable(gdi32_apitest
 
 target_link_libraries(gdi32_apitest ${PSEH_LIB} gditools win32ksys)
 set_module_type(gdi32_apitest win32cui)
-add_importlibs(gdi32_apitest gdi32 user32 msvcrt kernel32 ntdll)
+add_importlibs(gdi32_apitest gdi32 user32 msimg32 msvcrt kernel32 ntdll)
 add_pch(gdi32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET gdi32_apitest)

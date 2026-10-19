@@ -22,6 +22,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <limits.h>
 
 #define COBJMACROS
 
@@ -37,6 +38,7 @@ WINE_DECLARE_DEBUG_CHANNEL(dwrite_file);
 #define MS_NAME_TAG DWRITE_MAKE_OPENTYPE_TAG('n','a','m','e')
 #define MS_VDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('V','D','M','X')
 #define MS_GASP_TAG DWRITE_MAKE_OPENTYPE_TAG('g','a','s','p')
+#define MS_HDMX_TAG DWRITE_MAKE_OPENTYPE_TAG('h','d','m','x')
 #define MS_CPAL_TAG DWRITE_MAKE_OPENTYPE_TAG('C','P','A','L')
 #define MS_COLR_TAG DWRITE_MAKE_OPENTYPE_TAG('C','O','L','R')
 
@@ -125,6 +127,26 @@ static struct cache_entry * fontface_get_cache_entry(struct dwrite_fontface *fon
     return entry;
 }
 
+/* A font with an hdmx table keeps the advances of the hinted load, which come from that table for the sizes it lists.
+   Windows 7 gives the same advance as GDI for the Tahoma, Arial and Verdana it ships, all of which have the table.
+   What Windows does for a size the table does not list is not measured. */
+static BOOL fontface_has_hdmx(struct dwrite_fontface *fontface)
+{
+    return get_fontface_table(&fontface->IDWriteFontFace5_iface, MS_HDMX_TAG, &fontface->hdmx) != NULL;
+}
+
+/* The advance of a font without an hdmx table in the GDI measuring modes, in whole pixels. Windows 7 (Server 2008 R2)
+   was measured with a font that has a TrueType program and one that has not, with strikes and without, and with
+   Courier New, Lucida Console, MS Gothic, MS Mincho and MingLiU (1615 glyph and size pairs each, sizes 8 to 24): the
+   advance does not depend on the program. It is the design advance scaled to 26.6 fixed point and rounded to the nearest
+   1/64 pixel, plus a bias of 32 (GDI classic, a cutoff at 32/64: plain rounding) or of 34 (GDI natural, a cutoff at
+   30/64), then divided by 64. The 26.6 step is why an advance of 8.496 px (the O of the test font at 12 px) comes out as 9.
+   Not reproduced: Calibri in GDI classic (49 pairs one pixel wider on Windows), Batang and Gulim (programs that move
+   the advance), and Cambria in GDI natural (one pair, n at 8 px: the test font gives 5 for the same design advance
+   and size, Cambria gives 4, so no rule on advance and size alone fits both). */
+static int fontface_get_linear_gdi_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
+        DWRITE_MEASURING_MODE mode, BOOL *has_contours);
+
 static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
         unsigned short mode, BOOL *has_contours)
 {
@@ -132,6 +154,9 @@ static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fo
     struct get_glyph_advance_params params;
     struct cache_entry *entry;
     unsigned int value;
+
+    if (mode != DWRITE_MEASURING_MODE_NATURAL && !fontface_has_hdmx(fontface))
+        return fontface_get_linear_gdi_advance(fontface, fontsize, glyph, mode, has_contours);
 
     if (!(entry = fontface_get_cache_entry(fontface, 0, &key)))
         return 0;
@@ -155,9 +180,34 @@ static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fo
     return entry->advance;
 }
 
+static int fontface_get_linear_gdi_advance(struct dwrite_fontface *fontface, float fontsize, unsigned short glyph,
+        DWRITE_MEASURING_MODE mode, BOOL *has_contours)
+{
+    unsigned int upem = fontface->metrics.designUnitsPerEm;
+    int design = fontface_get_glyph_advance(fontface, upem, glyph, DWRITE_MEASURING_MODE_NATURAL, has_contours);
+    int fixed;
+
+    if (!upem)
+        return 0;
+
+    fixed = (int)floor((double)design * fontsize * 64.0 / upem + 0.5);
+    return (fixed + (mode == DWRITE_MEASURING_MODE_GDI_NATURAL ? 34 : 32)) >> 6;
+}
+
+/* Strike-capable modes give different glyphs than the outline modes for some faces, so their cache entries differ. */
+static unsigned short glyph_cache_mode(BOOL lcd, unsigned int rendering_mode)
+{
+    unsigned short mode = lcd ? 0x100 : DWRITE_MEASURING_MODE_NATURAL;
+
+    if (rendering_mode == DWRITE_RENDERING_MODE1_ALIASED || rendering_mode == DWRITE_RENDERING_MODE1_GDI_CLASSIC)
+        mode += 0x200 + rendering_mode;
+
+    return mode;
+}
+
 void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphbitmap *bitmap)
 {
-    struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph, .mode = DWRITE_MEASURING_MODE_NATURAL };
+    struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph, .mode = glyph_cache_mode(FALSE, bitmap->mode) };
     struct dwrite_fontface *fontface = unsafe_impl_from_IDWriteFontFace(iface);
     struct get_glyph_bbox_params params;
     struct cache_entry *entry;
@@ -165,12 +215,15 @@ void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphb
     params.object = fontface->get_font_object(fontface);
     params.simulations = bitmap->simulations;
     params.glyph = bitmap->glyph;
+    params.mode = bitmap->mode;
     params.emsize = bitmap->emsize;
+    params.dx = bitmap->dx;
+    params.dy = bitmap->dy;
     matrix_2x2_from_dwrite_matrix(&params.m, bitmap->m ? bitmap->m : &identity);
 
     EnterCriticalSection(&fontface->cs);
-    /* For now bypass cache for transformed cases. */
-    if (bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m)))
+    /* For now bypass cache for transformed and subpixel-shifted cases. */
+    if ((bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m))) || bitmap->dx != 0.0f || bitmap->dy != 0.0f)
     {
         params.bbox = &bitmap->bbox;
         UNIX_CALL(get_glyph_bbox, &params);
@@ -188,23 +241,46 @@ void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphb
     LeaveCriticalSection(&fontface->cs);
 }
 
-static unsigned int get_glyph_bitmap_pitch(DWRITE_RENDERING_MODE1 rendering_mode, INT width)
+static size_t get_glyph_bitmap_pitch(DWRITE_RENDERING_MODE1 rendering_mode, INT width)
 {
-    return rendering_mode == DWRITE_RENDERING_MODE1_ALIASED ? ((width + 31) >> 5) << 2 : (width + 3) / 4 * 4;
+    return rendering_mode == DWRITE_RENDERING_MODE1_ALIASED ? (((size_t)width + 31) >> 5) << 2 : ((size_t)width + 3) / 4 * 4;
+}
+
+/* Bytes needed for a glyph bitmap of width x height pixels (three bytes per pixel when lcd); FALSE when the size is
+   negative or beyond DWRITE_MAX_BITMAP_BYTES. */
+static BOOL get_glyph_bitmap_bytes(DWRITE_RENDERING_MODE1 rendering_mode, INT width, INT height, BOOL lcd,
+        size_t *pitch, size_t *size)
+{
+    UINT64 row, total;
+
+    if (width < 0 || height < 0 || width > (INT_MAX - 64) / 3)
+        return FALSE;
+
+    row = get_glyph_bitmap_pitch(rendering_mode, width * (lcd ? 3 : 1));
+    total = row * (UINT64)height;
+    if (total > DWRITE_MAX_BITMAP_BYTES)
+        return FALSE;
+
+    if (pitch) *pitch = row;
+    *size = total;
+    return TRUE;
 }
 
 static HRESULT dwrite_fontface_get_glyph_bitmap(struct dwrite_fontface *fontface, DWRITE_RENDERING_MODE1 rendering_mode,
         unsigned int *is_1bpp, struct dwrite_glyphbitmap *bitmap)
 {
-    struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph, .mode = DWRITE_MEASURING_MODE_NATURAL };
+    struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph,
+            .mode = glyph_cache_mode(bitmap->lcd, rendering_mode) };
     struct get_glyph_bitmap_params params;
     const RECT *bbox = &bitmap->bbox;
-    unsigned int bitmap_size, _1bpp;
+    unsigned int _1bpp;
     struct cache_entry *entry;
+    size_t bitmap_size;
     HRESULT hr = S_OK;
 
-    bitmap_size = get_glyph_bitmap_pitch(rendering_mode, bbox->right - bbox->left) *
-            (bbox->bottom - bbox->top);
+    if (!get_glyph_bitmap_bytes(rendering_mode, bbox->right - bbox->left, bbox->bottom - bbox->top, bitmap->lcd,
+            NULL, &bitmap_size))
+        return E_INVALIDARG;
 
     params.object = fontface->get_font_object(fontface);
     params.simulations = fontface->simulations;
@@ -215,11 +291,14 @@ static HRESULT dwrite_fontface_get_glyph_bitmap(struct dwrite_fontface *fontface
     params.pitch = bitmap->pitch;
     params.bitmap = bitmap->buf;
     params.is_1bpp = is_1bpp;
+    params.dx = bitmap->dx;
+    params.dy = bitmap->dy;
+    params.lcd = bitmap->lcd;
     matrix_2x2_from_dwrite_matrix(&params.m, bitmap->m ? bitmap->m : &identity);
 
     EnterCriticalSection(&fontface->cs);
-    /* For now bypass cache for transformed cases. */
-    if (bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m)))
+    /* For now bypass cache for transformed and subpixel-shifted cases. */
+    if ((bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m))) || bitmap->dx != 0.0f || bitmap->dy != 0.0f)
     {
         UNIX_CALL(get_glyph_bitmap, &params);
     }
@@ -399,7 +478,7 @@ struct dwrite_glyphrunanalysis
     UINT8 flags;
     RECT bounds;
     BYTE *bitmap;
-    UINT32 max_glyph_bitmap_size;
+    size_t max_glyph_bitmap_size;
 };
 
 struct dwrite_colorglyphenum
@@ -861,6 +940,8 @@ static ULONG WINAPI dwritefontface_Release(IDWriteFontFace5 *iface)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->vdmx.context);
         if (fontface->gasp.context)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->gasp.context);
+        if (fontface->hdmx.context)
+            IDWriteFontFace5_ReleaseFontTable(iface, fontface->hdmx.context);
         if (fontface->cpal.context)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->cpal.context);
         if (fontface->colr.context)
@@ -5488,6 +5569,7 @@ HRESULT create_fontface(const struct fontface_desc *desc, struct list *cached_li
     fontface->refcount = 1;
     fontface->type = desc->face_type;
     fontface->vdmx.exists = TRUE;
+    fontface->hdmx.exists = TRUE;
     fontface->gasp.exists = TRUE;
     fontface->cpal.exists = TRUE;
     fontface->colr.exists = TRUE;
@@ -6080,6 +6162,45 @@ static ULONG WINAPI glyphrunanalysis_Release(IDWriteGlyphRunAnalysis *iface)
     return refcount;
 }
 
+/* Bytes of a texture covering bounds; FALSE when it is empty-negative or beyond DWRITE_MAX_BITMAP_BYTES. */
+static BOOL glyphrunanalysis_texture_bytes(DWRITE_TEXTURE_TYPE type, const RECT *bounds, size_t *size)
+{
+    INT64 w = (INT64)bounds->right - bounds->left, h = (INT64)bounds->bottom - bounds->top;
+    UINT64 total;
+
+    if (w < 0 || h < 0)
+        return FALSE;
+    if (w == 0 || h == 0)
+    {
+        *size = 0;
+        return TRUE;
+    }
+    if (w > DWRITE_MAX_BITMAP_BYTES || h > DWRITE_MAX_BITMAP_BYTES)
+        return FALSE;
+
+    total = (UINT64)w * h * (type == DWRITE_TEXTURE_CLEARTYPE_3x1 ? 3 : 1);
+    if (total > DWRITE_MAX_BITMAP_BYTES)
+        return FALSE;
+
+    *size = total;
+    return TRUE;
+}
+
+static BOOL glyphrunanalysis_is_lcd(const struct dwrite_glyphrunanalysis *analysis)
+{
+    return analysis->texture_type == DWRITE_TEXTURE_CLEARTYPE_3x1 &&
+            analysis->rendering_mode != DWRITE_RENDERING_MODE1_ALIASED;
+}
+
+/* Whole pixels go to the bitmap offset; what is left over shifts the outline before it is rendered. */
+static void glyphrunanalysis_split_origin(const D2D_POINT_2F *origin, int *x, int *y, struct dwrite_glyphbitmap *bitmap)
+{
+    *x = (int)floorf(origin->x);
+    *y = (int)floorf(origin->y);
+    bitmap->dx = origin->x - *x;
+    bitmap->dy = origin->y - *y;
+}
+
 static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *analysis, RECT *bounds)
 {
     struct dwrite_glyphbitmap glyph_bitmap;
@@ -6099,19 +6220,29 @@ static void glyphrunanalysis_get_texturebounds(struct dwrite_glyphrunanalysis *a
     if (analysis->flags & RUNANALYSIS_USE_TRANSFORM)
         glyph_bitmap.m = &analysis->m;
 
+    glyph_bitmap.lcd = glyphrunanalysis_is_lcd(analysis);
+    glyph_bitmap.mode = analysis->rendering_mode;
+
     for (i = 0; i < analysis->run.glyphCount; i++) {
         RECT *bbox = &glyph_bitmap.bbox;
-        UINT32 bitmap_size;
+        size_t bitmap_size;
+        int ox, oy;
 
+        glyphrunanalysis_split_origin(&analysis->origins[i], &ox, &oy, &glyph_bitmap);
         glyph_bitmap.glyph = analysis->run.glyphIndices[i];
         dwrite_fontface_get_glyph_bbox(analysis->run.fontFace, &glyph_bitmap);
+        /* the colour filter reaches one pixel past the outline on each side */
+        if (glyph_bitmap.lcd && !IsRectEmpty(bbox))
+            InflateRect(bbox, 1, 0);
 
-        bitmap_size = get_glyph_bitmap_pitch(analysis->rendering_mode, bbox->right - bbox->left) *
-            (bbox->bottom - bbox->top);
+        /* a glyph too large to render is left out of the run, here and when it is drawn */
+        if (!get_glyph_bitmap_bytes(analysis->rendering_mode, bbox->right - bbox->left, bbox->bottom - bbox->top,
+                glyph_bitmap.lcd, NULL, &bitmap_size))
+            continue;
         if (bitmap_size > analysis->max_glyph_bitmap_size)
             analysis->max_glyph_bitmap_size = bitmap_size;
 
-        OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
+        OffsetRect(bbox, ox, oy);
         UnionRect(&analysis->bounds, &analysis->bounds, bbox);
     }
 
@@ -6144,10 +6275,10 @@ static HRESULT WINAPI glyphrunanalysis_GetAlphaTextureBounds(IDWriteGlyphRunAnal
 static inline BYTE *get_pixel_ptr(BYTE *ptr, DWRITE_TEXTURE_TYPE type, const RECT *runbounds, const RECT *bounds)
 {
     if (type == DWRITE_TEXTURE_CLEARTYPE_3x1)
-        return ptr + (runbounds->top - bounds->top) * (bounds->right - bounds->left) * 3 +
+        return ptr + (ptrdiff_t)(runbounds->top - bounds->top) * (bounds->right - bounds->left) * 3 +
             (runbounds->left - bounds->left) * 3;
     else
-        return ptr + (runbounds->top - bounds->top) * (bounds->right - bounds->left) +
+        return ptr + (ptrdiff_t)(runbounds->top - bounds->top) * (bounds->right - bounds->left) +
             runbounds->left - bounds->left;
 }
 
@@ -6157,12 +6288,13 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
     struct dwrite_fontface *fontface = unsafe_impl_from_IDWriteFontFace(analysis->run.fontFace);
     struct dwrite_glyphbitmap glyph_bitmap;
     D2D_POINT_2F origin;
-    UINT32 i, size;
+    UINT32 i;
+    size_t size;
     RECT *bbox;
 
-    size = (analysis->bounds.right - analysis->bounds.left)*(analysis->bounds.bottom - analysis->bounds.top);
-    if (analysis->texture_type == DWRITE_TEXTURE_CLEARTYPE_3x1)
-        size *= 3;
+    if (!glyphrunanalysis_texture_bytes(analysis->texture_type, &analysis->bounds, &size))
+        return E_OUTOFMEMORY;
+
     if (!(analysis->bitmap = calloc(1, size)))
     {
         WARN("Failed to allocate run bitmap, %s, type %s.\n", wine_dbgstr_rect(&analysis->bounds),
@@ -6177,28 +6309,37 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
     glyph_bitmap.emsize = analysis->run.fontEmSize;
     if (analysis->flags & RUNANALYSIS_USE_TRANSFORM)
         glyph_bitmap.m = &analysis->m;
-    if (!(glyph_bitmap.buf = malloc(analysis->max_glyph_bitmap_size)))
+    if (!(glyph_bitmap.buf = malloc(analysis->max_glyph_bitmap_size ? analysis->max_glyph_bitmap_size : 1)))
         return E_OUTOFMEMORY;
 
     bbox = &glyph_bitmap.bbox;
+    glyph_bitmap.lcd = glyphrunanalysis_is_lcd(analysis);
+    glyph_bitmap.mode = analysis->rendering_mode;
 
     for (i = 0; i < analysis->run.glyphCount; ++i)
     {
         BYTE *src = glyph_bitmap.buf, *dst;
-        int x, y, width, height;
+        int x, y, width, height, ox, oy;
+        size_t pitch, glyph_size;
         unsigned int is_1bpp;
 
+        glyphrunanalysis_split_origin(&analysis->origins[i], &ox, &oy, &glyph_bitmap);
         glyph_bitmap.glyph = analysis->run.glyphIndices[i];
         dwrite_fontface_get_glyph_bbox(analysis->run.fontFace, &glyph_bitmap);
 
         if (IsRectEmpty(bbox))
             continue;
 
+        if (glyph_bitmap.lcd)
+            InflateRect(bbox, 1, 0);
+
         width = bbox->right - bbox->left;
         height = bbox->bottom - bbox->top;
 
-        glyph_bitmap.pitch = get_glyph_bitmap_pitch(analysis->rendering_mode, width);
-        memset(src, 0, height * glyph_bitmap.pitch);
+        if (!get_glyph_bitmap_bytes(analysis->rendering_mode, width, height, glyph_bitmap.lcd, &pitch, &glyph_size))
+            continue;
+        glyph_bitmap.pitch = pitch;
+        memset(src, 0, glyph_size);
 
         if (FAILED(dwrite_fontface_get_glyph_bitmap(fontface, analysis->rendering_mode, &is_1bpp, &glyph_bitmap)))
         {
@@ -6206,7 +6347,7 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
             continue;
         }
 
-        OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
+        OffsetRect(bbox, ox, oy);
 
         /* blit to analysis bitmap */
         dst = get_pixel_ptr(analysis->bitmap, analysis->texture_type, bbox, &analysis->bounds);
@@ -6230,6 +6371,14 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
                     src += glyph_bitmap.pitch;
                     dst += analysis->bounds.right - analysis->bounds.left;
                 }
+            }
+        }
+        else if (glyph_bitmap.lcd) {
+            for (y = 0; y < height; y++) {
+                for (x = 0; x < width * 3; x++)
+                    dst[x] |= src[x];
+                src += glyph_bitmap.pitch;
+                dst += (analysis->bounds.right - analysis->bounds.left) * 3;
             }
         }
         else {
@@ -6272,7 +6421,7 @@ static HRESULT WINAPI glyphrunanalysis_CreateAlphaTexture(IDWriteGlyphRunAnalysi
     RECT const *bounds, BYTE *bitmap, UINT32 size)
 {
     struct dwrite_glyphrunanalysis *analysis = impl_from_IDWriteGlyphRunAnalysis(iface);
-    UINT32 required;
+    size_t required;
     RECT runbounds;
 
     TRACE("%p, %d, %s, %p, %u.\n", iface, type, wine_dbgstr_rect(bounds), bitmap, size);
@@ -6281,9 +6430,8 @@ static HRESULT WINAPI glyphrunanalysis_CreateAlphaTexture(IDWriteGlyphRunAnalysi
         return E_INVALIDARG;
 
     /* make sure buffer is large enough for requested texture type */
-    required = (bounds->right - bounds->left) * (bounds->bottom - bounds->top);
-    if (analysis->texture_type == DWRITE_TEXTURE_CLEARTYPE_3x1)
-        required *= 3;
+    if (!glyphrunanalysis_texture_bytes(analysis->texture_type, bounds, &required))
+        return E_INVALIDARG;
 
     if (size < required)
         return E_NOT_SUFFICIENT_BUFFER;

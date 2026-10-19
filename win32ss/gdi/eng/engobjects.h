@@ -131,6 +131,7 @@ typedef struct _SHARED_FACE_CACHE {
 typedef struct _SHARED_FACE {
   FT_Face       Face;
   LONG          RefCount;
+  BOOL          bCreatorRef; //< The reference SharedFace_Create() took, dropped once when the font is removed
   PSHARED_MEM   Memory;
   SHARED_FACE_CACHE EnglishUS;
   SHARED_FACE_CACHE UserLanguage;
@@ -143,6 +144,7 @@ typedef struct _FONTGDI {
 
   DHPDEV        dhpdev;
   PSHARED_FACE  SharedFace;
+  LONG          RefCount; //< The font entry plus each TEXTOBJ realized to it (FreeType lock)
 
   LONG          lMaxNegA;
   LONG          lMaxNegC;
@@ -165,6 +167,7 @@ typedef struct _FONTGDI {
   LONG          Magic;
   LONG          lfHeight;
   LONG          lfWidth;
+  ULONG         InstanceId;
 } FONTGDI, *PFONTGDI;
 
 /* The initialized 'Magic' value in FONTGDI */
