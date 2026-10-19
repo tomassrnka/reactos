@@ -170,6 +170,116 @@ static void TestLogonSid(HANDLE hToken, const char *What)
     HeapFree(GetProcessHeap(), 0, Groups);
 }
 
+/* The SID of a group in TokenGroups, or NULL */
+static PSID_AND_ATTRIBUTES FindGroup(PTOKEN_GROUPS Groups, PSID Sid)
+{
+    DWORD i;
+
+    for (i = 0; i < Groups->GroupCount; i++)
+    {
+        if (EqualSid(Groups->Groups[i].Sid, Sid))
+            return &Groups->Groups[i];
+    }
+    return NULL;
+}
+
+/* SidsToDisable of NtFilterToken: the group stays, as deny-only, and the logon SID is kept */
+static void TestDisabledSid(HANDLE hToken, PSID Everyone)
+{
+    SID_AND_ATTRIBUTES Disable;
+    PTOKEN_GROUPS Before, After;
+    PSID_AND_ATTRIBUTES Group;
+    HANDLE hDisabled;
+    DWORD Count;
+    BOOL bEnabled;
+
+    Before = QueryGroups(hToken, TokenGroups, NULL);
+    if (!Before)
+        return;
+    Group = FindGroup(Before, Everyone);
+    ok(Group != NULL, "Everyone is not in the token\n");
+    bEnabled = Group && (Group->Attributes & SE_GROUP_ENABLED);
+    HeapFree(GetProcessHeap(), 0, Before);
+    if (!bEnabled)
+    {
+        skip("Everyone is not enabled in the token\n");
+        return;
+    }
+
+    Disable.Sid = Everyone;
+    Disable.Attributes = 0;
+    if (!CreateRestrictedToken(hToken, 0, 1, &Disable, 0, NULL, 0, NULL, &hDisabled))
+    {
+        ok(0, "CreateRestrictedToken with a disabled SID failed: %lu\n", GetLastError());
+        return;
+    }
+    After = QueryGroups(hDisabled, TokenGroups, NULL);
+    if (After)
+    {
+        Group = FindGroup(After, Everyone);
+        ok(Group != NULL, "Everyone is gone from the filtered token\n");
+        if (Group)
+        {
+            /* Windows keeps the group as deny-only; ReactOS ignores SidsToDisable */
+            todo_ros
+                ok(Group->Attributes & SE_GROUP_USE_FOR_DENY_ONLY, "Everyone is not deny-only: 0x%lx\n", Group->Attributes);
+            todo_ros
+                ok(!(Group->Attributes & SE_GROUP_ENABLED), "Everyone is still enabled: 0x%lx\n", Group->Attributes);
+        }
+        ok(FindLogonGroup(After, &Count) != NULL, "The filtered token lost the logon SID\n");
+        HeapFree(GetProcessHeap(), 0, After);
+    }
+    TestLogonSid(hDisabled, "disabled SIDs");
+    CloseHandle(hDisabled);
+}
+
+/* A SID above the highest address the caller may use is refused by NtFilterToken, as an access violation,
+ * for the disabled and for the restricting SIDs */
+static void TestFilterBadSid(HANDLE hToken)
+{
+    TOKEN_GROUPS Bad;
+    HANDLE hNew = NULL;
+    NTSTATUS Status;
+
+    Bad.GroupCount = 1;
+    Bad.Groups[0].Sid = (PSID)(ULONG_PTR)-16;
+    Bad.Groups[0].Attributes = 0;
+
+    Status = NtFilterToken(hToken, 0, &Bad, NULL, NULL, &hNew);
+    ok(Status == STATUS_ACCESS_VIOLATION, "Disabled SID out of range: status 0x%lx\n", Status);
+    if (NT_SUCCESS(Status))
+        CloseHandle(hNew);
+
+    hNew = NULL;
+    Status = NtFilterToken(hToken, 0, NULL, NULL, &Bad, &hNew);
+    ok(Status == STATUS_ACCESS_VIOLATION, "Restricting SID out of range: status 0x%lx\n", Status);
+    if (NT_SUCCESS(Status))
+        CloseHandle(hNew);
+}
+
+/* An unrestricted token has no restricting SIDs: an empty TOKEN_GROUPS: 4 bytes in the 32-bit layout (also under WoW64), 8 in the 64-bit one */
+static void TestNoRestrictedSids(HANDLE hToken)
+{
+    PTOKEN_GROUPS Restricted;
+    DWORD Length = 0, bIsRestricted = 0;
+
+    /* TokenIsRestricted (40) is Vista and later; where it is unknown the token is taken as unrestricted */
+    if (GetTokenInformation(hToken, (TOKEN_INFORMATION_CLASS)40, &bIsRestricted, sizeof(bIsRestricted), &Length) &&
+        bIsRestricted)
+    {
+        skip("The process token is restricted\n");
+        return;
+    }
+    Restricted = QueryGroups(hToken, TokenRestrictedSids, &Length);
+    ok(Restricted != NULL, "No TokenRestrictedSids on an unrestricted token\n");
+    if (Restricted)
+    {
+        ok(Restricted->GroupCount == 0, "%lu restricting SIDs\n", Restricted->GroupCount);
+        ok(Length == FIELD_OFFSET(TOKEN_GROUPS, Groups), "Empty TOKEN_GROUPS length %lu\n", Length);
+        HeapFree(GetProcessHeap(), 0, Restricted);
+    }
+}
+
 START_TEST(TokenLogonSid)
 {
     HANDLE hToken, hNoQuery, hRestricted, hAnonymous = NULL;
@@ -258,6 +368,10 @@ START_TEST(TokenLogonSid)
     {
         skip("ImpersonateAnonymousToken failed: %lu\n", GetLastError());
     }
+
+    TestNoRestrictedSids(hToken);
+    TestDisabledSid(hToken, EveryoneBuffer);
+    TestFilterBadSid(hToken);
 
     CloseHandle(hToken);
 }
