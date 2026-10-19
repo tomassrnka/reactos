@@ -226,12 +226,15 @@ typedef struct _TCP_SEGMENT {
   ULONG BytesDelivered;       /* Number of bytes already delivered to the client */
 } TCP_SEGMENT, *PTCP_SEGMENT;
 
+#include <chew.h>
+
 typedef struct _TDI_BUCKET {
     LIST_ENTRY Entry;
     struct _CONNECTION_ENDPOINT *AssociatedEndpoint;
     TDI_REQUEST Request;
     NTSTATUS Status;
     ULONG Information;
+    CHEW_RESERVED_ITEM ReservedItem;   /* Completion when no Chew work item can be allocated */
 } TDI_BUCKET, *PTDI_BUCKET;
 
 /* Transport connection context structure A.K.A. Transmission Control Block
@@ -245,6 +248,7 @@ typedef struct _CONNECTION_ENDPOINT {
     ERESOURCE Resource;         /* The lock protecting this structure */
     PVOID ClientContext;        /* Pointer to client context information */
     PADDRESS_FILE AddressFile;  /* Associated address file object (NULL if none) */
+    IPv4_RAW_ADDRESS ConnectAddress; /* Local address of the connect, if the address file has none */
 
     /* Requests */
     LIST_ENTRY ConnectRequest; /* Queued connect requests */

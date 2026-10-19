@@ -98,11 +98,9 @@ typedef struct IPADDR_ENTRY {
 					   * for ancillary data on packet
 					   * requests. */
 
-/* XXX This is a hack we should clean up later
- * We do this in order to get some storage for the locked handle table
- * Maybe I'll use some tail item in the irp instead */
-#define AFD_HANDLES(x) ((PAFD_HANDLE)(x)->Exclusive)
-#define SET_AFD_HANDLES(x,y) (((x)->Exclusive) = (ULONG_PTR)(y))
+/* The referenced handle table of a select request; the caller's buffer is copied back to it */
+#define AFD_HANDLES(Irp) ((PAFD_HANDLE)(Irp)->Tail.Overlay.DriverContext[2])
+#define SET_AFD_HANDLES(Irp,y) ((Irp)->Tail.Overlay.DriverContext[2] = (y))
 
 typedef struct _AFD_MAPBUF {
     PVOID BufferAddress;
@@ -160,6 +158,9 @@ typedef struct _AFD_STORED_DATAGRAM {
     CHAR Buffer[1];
 } AFD_STORED_DATAGRAM, *PAFD_STORED_DATAGRAM;
 
+/* Largest listen backlog, also used for SOMAXCONN, as on Windows */
+#define AFD_MAX_BACKLOG 200
+
 typedef struct _AFD_FCB {
     SOCK_SHARED_INFO SharedData;
     BOOLEAN Locked, Critical, NonBlocking, OobInline, TdiReceiveClosed, SendClosed;
@@ -169,6 +170,7 @@ typedef struct _AFD_FCB {
     PFILE_OBJECT FileObject;
     PAFD_DEVICE_EXTENSION DeviceExt;
     BOOLEAN DelayedAccept;
+    ULONG Backlog;
     UINT ConnSeq;
     USHORT DisconnectFlags;
     BOOLEAN DisconnectPending;
@@ -180,6 +182,7 @@ typedef struct _AFD_FCB {
     PIRP AcceptIrp;
     AFD_DATA_WINDOW Send, Recv;
     KMUTEX Mutex;
+    KEVENT InFlightIdle;
     PKEVENT EventSelect;
     DWORD EventSelectTriggers;
     DWORD EventSelectDisabled;
@@ -214,6 +217,8 @@ typedef struct _AFD_FCB {
     PIO_WORKITEM AcceptWorkItem;
     KEVENT AcceptWorkIdle;
     BOOLEAN AcceptWorkQueued;
+    PIO_WORKITEM RecvRelaunchWorkItem;
+    BOOLEAN RecvRelaunchQueued;
 } AFD_FCB, *PAFD_FCB;
 
 /* bind.c */
@@ -227,6 +232,7 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 NTSTATUS MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive);
 NTSTATUS WarmSocketForConnection( PAFD_FCB FCB );
+VOID AfdCloseConnectionEndpoint( PAFD_FCB FCB );
 NTSTATUS NTAPI
 AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                        PIO_STACK_LOCATION IrpSp);
@@ -298,6 +304,14 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 VOID FreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt);
 
+#if (NTDDI_VERSION < NTDDI_VISTA)
+NTKERNELAPI
+VOID
+NTAPI
+ObDereferenceObjectDeferDelete(
+    _In_ PVOID Object);
+#endif
+
 /* lock.c */
 
 PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
@@ -310,9 +324,12 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
 ( PAFD_FCB FCB, NTSTATUS Status, PIRP Irp,
   UINT Information );
 VOID SocketStateUnlock( PAFD_FCB FCB );
+BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB );
 VOID AfdClearCancelRoutine( PIRP Irp );
 NTSTATUS LostSocket( PIRP Irp );
-PAFD_HANDLE LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
+NTSTATUS LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount,
+                      PDEVICE_OBJECT DeviceObject, KPROCESSOR_MODE AccessMode,
+                      PAFD_HANDLE *LockedHandles );
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode );
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );

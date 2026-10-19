@@ -80,7 +80,12 @@ static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Info
     /* Receive failed with no data (unexpected closure) */
     else
     {
-        /* Previously received data remains intact */
+        /* A reset discards the data not read yet, as on Windows; other failures keep it */
+        if (Status == STATUS_CONNECTION_RESET)
+        {
+            FCB->Recv.Content = 0;
+            FCB->Recv.BytesUsed = 0;
+        }
         FCB->TdiReceiveClosed = TRUE;
     }
 }
@@ -160,6 +165,12 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
 
     AFD_DbgPrint(MID_TRACE,("FCB %p Receive data waiting %u\n",
                             FCB, FCB->Recv.Content));
+
+    /* An AcceptEx that received initial data leaves no receive in flight. Only for
+     * completions: a receive completed inline would complete a request queued by
+     * the caller behind its back */
+    if (Irp == NULL && FCB->SharedData.State == SOCKET_STATE_CONNECTED)
+        RefillSocketBuffer(FCB);
 
     if( CantReadMore( FCB ) ) {
         /* Success here means that we got an EOF.  Complete a pending read
@@ -270,7 +281,10 @@ AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
     ASSERT(FCB->ReceiveIrp.InFlightRequest == Irp);
     ASSERT(FCB->AcceptIrp != NULL);
     FCB->ReceiveIrp.InFlightRequest = NULL;
-    FCB->SharedData.State = SOCKET_STATE_CONNECTED;
+
+    /* On a closed socket the AcceptEx request still completes with the receive's result */
+    if (FCB->SharedData.State != SOCKET_STATE_CLOSED)
+        FCB->SharedData.State = SOCKET_STATE_CONNECTED;
 
     /* Complete the AcceptEx IRP as the data has been received */
     MmUnlockPages((PMDL)FCB->AcceptIrp->Tail.Overlay.DriverContext[3]);
@@ -284,7 +298,8 @@ AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
     FCB->AcceptIrp = NULL;
 
     /* Continue receive activity */
-    ReceiveActivity(FCB, NULL);
+    if (FCB->SharedData.State != SOCKET_STATE_CLOSED)
+        ReceiveActivity(FCB, NULL);
 
     SocketStateUnlock(FCB);
     return STATUS_SUCCESS;
@@ -341,6 +356,76 @@ NTSTATUS NTAPI ReceiveComplete
     return STATUS_SUCCESS;
 }
 
+static IO_WORKITEM_ROUTINE RelaunchPacketReceiveWorker;
+
+/* Called with the socket state lock held */
+static VOID
+RelaunchPacketReceive(PAFD_FCB FCB)
+{
+    /* Nothing to do while a receive is in flight or about to be started, the
+     * socket is closing or shut down for receiving, or the stored datagrams
+     * still fill the receive window */
+    if (FCB->ReceiveIrp.InFlightRequest ||
+        FCB->RecvRelaunchQueued ||
+        FCB->SharedData.State == SOCKET_STATE_CLOSED ||
+        FCB->TdiReceiveClosed ||
+        !FCB->AddressFile.Object ||
+        FCB->Recv.Content >= FCB->Recv.Size)
+    {
+        return;
+    }
+
+    /* The receive IRP belongs to the thread that builds it and is cancelled
+     * when that thread exits, so an application thread hands the start over
+     * to a system worker thread. The work item is allocated at bind, so this
+     * cannot fail */
+    if (!PsIsSystemThread(PsGetCurrentThread()))
+    {
+        if (FCB->RecvRelaunchWorkItem)
+        {
+            FCB->RecvRelaunchQueued = TRUE;
+            /* Keeps the FCB until the worker has run */
+            ObReferenceObject(FCB->FileObject);
+            IoQueueWorkItem(FCB->RecvRelaunchWorkItem,
+                            RelaunchPacketReceiveWorker,
+                            DelayedWorkQueue,
+                            FCB);
+        }
+        return;
+    }
+
+    TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
+                       FCB->AddressFile.Object,
+                       0,
+                       FCB->Recv.Window,
+                       FCB->Recv.Size,
+                       FCB->AddressFrom,
+                       PacketSocketRecvComplete,
+                       FCB);
+}
+
+static
+VOID
+NTAPI
+RelaunchPacketReceiveWorker(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_opt_ PVOID Context)
+{
+    PAFD_FCB FCB = Context;
+    PFILE_OBJECT FileObject = FCB->FileObject;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    if (SocketAcquireStateLock(FCB))
+    {
+        FCB->RecvRelaunchQueued = FALSE;
+        RelaunchPacketReceive(FCB);
+        SocketStateUnlock(FCB);
+    }
+
+    ObDereferenceObject(FileObject);
+}
+
 static NTSTATUS NTAPI
 SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
                          PAFD_STORED_DATAGRAM DatagramRecv,
@@ -349,7 +434,8 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( Irp );
     PAFD_RECV_INFO RecvReq =
     GetLockedData(Irp, IrpSp);
-    UINT BytesToCopy = 0, BytesAvailable = DatagramRecv->Len, AddrLen = 0;
+    UINT BytesToCopy, BytesCopied = 0, BytesAvailable = DatagramRecv->Len;
+    UINT AddrLen, i;
     PAFD_MAPBUF Map;
     BOOLEAN ExtraBuffers = CheckUnlockExtraBuffers(FCB, IrpSp);
 
@@ -357,65 +443,64 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
                         RecvReq->BufferCount +
                         (ExtraBuffers ? EXTRA_LOCK_BUFFERS : 0));
 
-    BytesToCopy = MIN( RecvReq->BufferArray[0].len, BytesAvailable );
+    /* LockBuffers puts the address and its length after the data buffers */
+    if( ExtraBuffers &&
+        Map[RecvReq->BufferCount].Mdl &&
+        Map[RecvReq->BufferCount + 1].Mdl ) {
+        PAFD_MAPBUF AddrMap = &Map[RecvReq->BufferCount];
+        PAFD_MAPBUF AddrLenMap = &Map[RecvReq->BufferCount + 1];
 
-    AFD_DbgPrint(MID_TRACE,("BytesToCopy: %u len %u\n", BytesToCopy,
-                            RecvReq->BufferArray[0].len));
-
-    if( Map[0].Mdl ) {
-        /* Copy the address */
-        if( ExtraBuffers && Map[1].Mdl && Map[2].Mdl ) {
-            AFD_DbgPrint(MID_TRACE,("Checking TAAddressCount\n"));
-
-            if( DatagramRecv->Address->TAAddressCount != 1 ) {
-                AFD_DbgPrint
-                (MIN_TRACE,
-                 ("Wierd address count %d\n",
-                  DatagramRecv->Address->TAAddressCount));
-            }
-
-            AFD_DbgPrint(MID_TRACE,("Computing addr len\n"));
-
-            AddrLen = MIN(DatagramRecv->Address->Address->AddressLength +
-                          sizeof(USHORT),
-                          RecvReq->BufferArray[1].len);
-
-            AFD_DbgPrint(MID_TRACE,("Copying %u bytes of address\n", AddrLen));
-
-            Map[1].BufferAddress = MmMapLockedPages( Map[1].Mdl, KernelMode );
-
-            AFD_DbgPrint(MID_TRACE,("Done mapping, copying address\n"));
-
-            RtlCopyMemory( Map[1].BufferAddress,
-                          &DatagramRecv->Address->Address->AddressType,
-                          AddrLen );
-
-            MmUnmapLockedPages( Map[1].BufferAddress, Map[1].Mdl );
-
-            AFD_DbgPrint(MID_TRACE,("Copying address len\n"));
-
-            Map[2].BufferAddress = MmMapLockedPages( Map[2].Mdl, KernelMode );
-            *((PINT)Map[2].BufferAddress) = AddrLen;
-            MmUnmapLockedPages( Map[2].BufferAddress, Map[2].Mdl );
+        if( DatagramRecv->Address->TAAddressCount != 1 ) {
+            AFD_DbgPrint
+            (MIN_TRACE,
+             ("Wierd address count %d\n",
+              DatagramRecv->Address->TAAddressCount));
         }
 
-        AFD_DbgPrint(MID_TRACE,("Mapping data buffer pages\n"));
+        AddrLen = MIN(DatagramRecv->Address->Address->AddressLength +
+                      sizeof(USHORT),
+                      RecvReq->BufferArray[RecvReq->BufferCount].len);
 
-        Map[0].BufferAddress = MmMapLockedPages( Map[0].Mdl, KernelMode );
+        AFD_DbgPrint(MID_TRACE,("Copying %u bytes of address\n", AddrLen));
 
-        AFD_DbgPrint(MID_TRACE,("Buffer %d: %p:%u\n",
-                                0,
-                                Map[0].BufferAddress,
+        AddrMap->BufferAddress = MmMapLockedPages( AddrMap->Mdl, KernelMode );
+
+        RtlCopyMemory( AddrMap->BufferAddress,
+                      &DatagramRecv->Address->Address->AddressType,
+                      AddrLen );
+
+        MmUnmapLockedPages( AddrMap->BufferAddress, AddrMap->Mdl );
+
+        AddrLenMap->BufferAddress = MmMapLockedPages( AddrLenMap->Mdl, KernelMode );
+        *((PINT)AddrLenMap->BufferAddress) = AddrLen;
+        MmUnmapLockedPages( AddrLenMap->BufferAddress, AddrLenMap->Mdl );
+    }
+
+    /* Scatter the datagram over the data buffers in order */
+    for( i = 0; i < RecvReq->BufferCount && BytesCopied < BytesAvailable; i++ ) {
+        if( !Map[i].Mdl )
+            continue;
+
+        BytesToCopy = MIN( RecvReq->BufferArray[i].len,
+                           BytesAvailable - BytesCopied );
+
+        Map[i].BufferAddress = MmMapLockedPages( Map[i].Mdl, KernelMode );
+
+        AFD_DbgPrint(MID_TRACE,("Buffer %u: %p:%u\n",
+                                i,
+                                Map[i].BufferAddress,
                                 BytesToCopy));
 
-        RtlCopyMemory( Map[0].BufferAddress,
-                      DatagramRecv->Buffer,
+        RtlCopyMemory( Map[i].BufferAddress,
+                      DatagramRecv->Buffer + BytesCopied,
                       BytesToCopy );
 
-        MmUnmapLockedPages( Map[0].BufferAddress, Map[0].Mdl );
+        MmUnmapLockedPages( Map[i].BufferAddress, Map[i].Mdl );
 
-        *TotalBytesCopied = BytesToCopy;
+        BytesCopied += BytesToCopy;
     }
+
+    *TotalBytesCopied = BytesCopied;
 
     if (*TotalBytesCopied == DatagramRecv->Len)
     {
@@ -435,6 +520,10 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
         FCB->Recv.Content -= DatagramRecv->Len;
         ExFreePoolWithTag(DatagramRecv->Address, TAG_AFD_TRANSPORT_ADDRESS);
         ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
+
+        /* The receive stops while the stored datagrams fill the window;
+         * restart it now that there is room again */
+        RelaunchPacketReceive(FCB);
     }
 
     AFD_DbgPrint(MID_TRACE,("Done\n"));
@@ -628,6 +717,16 @@ PacketSocketRecvComplete(
 
     if (Irp->IoStatus.Status != STATUS_SUCCESS)
     {
+        /* A datagram larger than the receive window arrives truncated with
+         * STATUS_BUFFER_OVERFLOW: drop it and keep receiving. A cancel that
+         * is not from a close or a shutdown comes from the exit of the thread
+         * that owned the receive: start a new one */
+        if (Irp->IoStatus.Status == STATUS_BUFFER_OVERFLOW ||
+            Irp->IoStatus.Status == STATUS_CANCELLED)
+        {
+            RelaunchPacketReceive(FCB);
+        }
+
         SocketStateUnlock(FCB);
         return Irp->IoStatus.Status;
     }
@@ -661,6 +760,9 @@ PacketSocketRecvComplete(
         {
             ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
         }
+
+        /* The datagram is lost, but later ones can still be received */
+        RelaunchPacketReceive(FCB);
 
         SocketStateUnlock( FCB );
         return Status;
@@ -715,18 +817,8 @@ PacketSocketRecvComplete(
     } else
         FCB->PollState &= ~AFD_EVENT_RECEIVE;
 
-    if( NT_SUCCESS(Irp->IoStatus.Status) && FCB->Recv.Content < FCB->Recv.Size ) {
-        /* Now relaunch the datagram request */
-        Status = TdiReceiveDatagram
-            ( &FCB->ReceiveIrp.InFlightRequest,
-              FCB->AddressFile.Object,
-              0,
-              FCB->Recv.Window,
-              FCB->Recv.Size,
-              FCB->AddressFrom,
-              PacketSocketRecvComplete,
-              FCB );
-    }
+    /* Now relaunch the datagram request */
+    RelaunchPacketReceive(FCB);
 
     SocketStateUnlock( FCB );
 

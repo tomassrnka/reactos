@@ -94,6 +94,21 @@ AcceptProc(
     return 0;
 }
 
+START_TEST(TcpIpListenCancel)
+{
+    DWORD Error;
+
+    Error = LoadTcpIpTestDriver();
+    ok_eq_int(Error, 0);
+    if (Error)
+        return;
+
+    Error = KmtSendToDriver(IOCTL_TEST_LISTEN_CANCEL);
+    ok_eq_ulong(Error, ERROR_SUCCESS);
+
+    UnloadTcpIpTestDriver();
+}
+
 START_TEST(TcpIpConnect)
 {
     HANDLE AcceptThread;

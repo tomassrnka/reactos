@@ -255,14 +255,17 @@ TDI_STATUS InfoTdiSetArptableMIB(PIP_INTERFACE IF, PVOID Buffer, UINT BufferSize
         return TDI_INVALID_PARAMETER;
 }
 
-VOID InsertTDIInterfaceEntity( PIP_INTERFACE Interface ) {
-    AddEntity(IF_ENTITY, Interface, IF_MIB);
+/* All three entities appear together or not at all: a query can never see
+   an interface whose creation is then undone */
+NTSTATUS InsertTDIInterfaceEntity( PIP_INTERFACE Interface ) {
+    TDI_ENTITY_ADD Entries[3] = {
+        { IF_ENTITY, Interface, IF_MIB },
+        { AT_ENTITY, Interface, (Interface != Loopback) ? AT_ARP : AT_NULL },
+        /* FIXME: This is probably wrong */
+        { CL_NL_ENTITY, Interface, CL_NL_IP },
+    };
 
-    AddEntity(AT_ENTITY, Interface,
-              (Interface != Loopback) ? AT_ARP : AT_NULL);
-
-    /* FIXME: This is probably wrong */
-    AddEntity(CL_NL_ENTITY, Interface, CL_NL_IP);
+    return AddEntities(Entries, ARRAYSIZE(Entries));
 }
 
 VOID RemoveTDIInterfaceEntity( PIP_INTERFACE Interface ) {

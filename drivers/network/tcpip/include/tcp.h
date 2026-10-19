@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <ports.h>
+
 typedef VOID
 (*PTCP_COMPLETION_ROUTINE)( PVOID Context, NTSTATUS Status, ULONG Count );
 
@@ -101,7 +103,8 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
                                PTDI_REQUEST_KERNEL Request);
 NTSTATUS TCPListen( PCONNECTION_ENDPOINT Connection, UINT Backlog );
 BOOLEAN TCPAbortListenForSocket( PCONNECTION_ENDPOINT Listener,
-			         PCONNECTION_ENDPOINT Connection );
+			         PCONNECTION_ENDPOINT Connection,
+			         PIRP Irp );
 NTSTATUS TCPAccept
 ( PTDI_REQUEST Request,
   PCONNECTION_ENDPOINT Listener,
@@ -169,7 +172,13 @@ NTSTATUS TCPClose( PCONNECTION_ENDPOINT Connection );
 
 NTSTATUS TCPTranslateError( const INT8 err );
 
+/* The dynamic port range of Windows Vista and later (IANA) */
+#define TCP_EPHEMERAL_FIRST 49152
+#define TCP_EPHEMERAL_LAST  65535
+
 UINT TCPAllocatePort( const UINT HintPort );
+
+UINT TCPAllocateEphemeralPort( PPORT_IN_USE_ROUTINE InUse );
 
 VOID TCPFreePort( const UINT Port );
 

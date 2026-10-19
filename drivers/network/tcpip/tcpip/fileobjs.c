@@ -25,6 +25,27 @@ KSPIN_LOCK AddressFileListLock;
 LIST_ENTRY ConnectionEndpointListHead;
 KSPIN_LOCK ConnectionEndpointListLock;
 
+/* Reference an address file found through the global list unless its last
+ * reference has already gone, which means AddrFileFree is about to unlink and
+ * free it. Returns whether the reference was taken. The caller holds
+ * AddressFileListLock, which keeps the entry in memory until it is unlinked. */
+static BOOLEAN ReferenceAddressFileIfLive(
+    PADDRESS_FILE AddrFile)
+{
+    LONG OldRefCount;
+
+    do
+    {
+        OldRefCount = *((volatile LONG *)&AddrFile->RefCount);
+        if (OldRefCount == 0)
+            return FALSE;
+    } while (InterlockedCompareExchange(&AddrFile->RefCount,
+                                        OldRefCount + 1,
+                                        OldRefCount) != OldRefCount);
+
+    return TRUE;
+}
+
 /*
  * FUNCTION: Searches through address file entries to find the first match
  * ARGUMENTS:
@@ -42,6 +63,7 @@ PADDRESS_FILE AddrSearchFirst(
     PAF_SEARCH SearchContext)
 {
     KIRQL OldIrql;
+    PLIST_ENTRY Entry;
 
     SearchContext->Address  = Address;
     SearchContext->Port     = Port;
@@ -49,10 +71,17 @@ PADDRESS_FILE AddrSearchFirst(
 
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
 
-    SearchContext->Next = AddressFileListHead.Flink;
+    /* Hold a reference on the first entry that is still alive, so the walk in
+     * AddrSearchNext has a stable starting point */
+    for (Entry = AddressFileListHead.Flink;
+         Entry != &AddressFileListHead;
+         Entry = Entry->Flink)
+    {
+        if (ReferenceAddressFileIfLive(CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry)))
+            break;
+    }
 
-    if (!IsListEmpty(&AddressFileListHead))
-        ReferenceObject(CONTAINING_RECORD(SearchContext->Next, ADDRESS_FILE, ListEntry));
+    SearchContext->Next = Entry;
 
     TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 
@@ -204,10 +233,15 @@ PADDRESS_FILE AddrFindShared(
 
         /* See if this address matches the search criteria */
         if ((Current->Port == Port) &&
-            (Current->Protocol == Protocol))
+            (Current->Protocol == Protocol) &&
+            /* Skip an address file whose last sharer has gone: FileCloseAddress
+             * has decided to tear it down and is about to drop its reference, so
+             * reviving it here would race that into a use-after-free. The count
+             * is read under AddressFileListLock, the same lock the close path
+             * takes around the decrement, so the zero transition is atomic. */
+            (Current->Sharers != 0))
         {
             /* Increase the sharer count */
-            ASSERT(Current->Sharers != 0);
             InterlockedIncrement(&Current->Sharers);
             break;
         }
@@ -267,7 +301,10 @@ PADDRESS_FILE AddrSearchNext(
         /* See if this address matches the search criteria */
         if ((Current->Port    == SearchContext->Port) &&
             (Current->Protocol == SearchContext->Protocol) &&
-            (AddrReceiveMatch(IPAddress, SearchContext->Address))) {
+            (AddrReceiveMatch(IPAddress, SearchContext->Address)) &&
+            /* Skip an address file that is already being freed; referenced before
+             * StartingAddrFile is dereferenced, because it may be the same one */
+            ReferenceAddressFileIfLive(Current)) {
             /* We've found a match */
             Found = TRUE;
             break;
@@ -277,17 +314,15 @@ PADDRESS_FILE AddrSearchNext(
 
     if (Found)
     {
-        SearchContext->Next = CurrentEntry->Flink;
-
-        if (SearchContext->Next != &AddressFileListHead)
+        /* Hold a reference on the next live entry to prevent the link from
+         * disappearing behind our back */
+        for (SearchContext->Next = CurrentEntry->Flink;
+             SearchContext->Next != &AddressFileListHead;
+             SearchContext->Next = SearchContext->Next->Flink)
         {
-            /* Reference the next address file to prevent the link from disappearing behind our back */
-            ReferenceObject(CONTAINING_RECORD(SearchContext->Next, ADDRESS_FILE, ListEntry));
+            if (ReferenceAddressFileIfLive(CONTAINING_RECORD(SearchContext->Next, ADDRESS_FILE, ListEntry)))
+                break;
         }
-
-        /* Reference the returned address file before dereferencing the starting
-         * address file because it may be that Current == StartingAddrFile */
-        ReferenceObject(Current);
     }
     else
         Current = NULL;
@@ -405,6 +440,8 @@ NTSTATUS FileOpenAddress(
 {
   PADDRESS_FILE AddrFile;
   UINT AllocatedPort;
+  ULONG EntityType, EntityFlags;
+  NTSTATUS Status;
 
   TI_DbgPrint(MID_TRACE, ("Called (Proto %d).\n", Protocol));
 
@@ -491,11 +528,11 @@ NTSTATUS FileOpenAddress(
           /* The client is trying to bind to a local address so allocate a port now too */
           AllocatedPort = TCPAllocatePort(0);
 
-          /* Check for bind success */
+          /* Every ephemeral port is taken: WSAENOBUFS, as on Windows */
           if (AllocatedPort == (UINT)-1)
           {
               ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
-              return STATUS_ADDRESS_ALREADY_EXISTS;
+              return STATUS_INSUFFICIENT_RESOURCES;
           }
           AddrFile->Port = AllocatedPort;
       }
@@ -505,7 +542,8 @@ NTSTATUS FileOpenAddress(
           AddrFile->Port = 0;
       }
 
-      AddEntity(CO_TL_ENTITY, AddrFile, CO_TL_TCP);
+      EntityType = CO_TL_ENTITY;
+      EntityFlags = CO_TL_TCP;
 
       AddrFile->Send = NULL; /* TCPSendData */
       break;
@@ -527,7 +565,8 @@ NTSTATUS FileOpenAddress(
                              AddrFile->Port,
                              Address->Address[0].Address[0].sin_port));
 
-      AddEntity(CL_TL_ENTITY, AddrFile, CL_TL_UDP);
+      EntityType = CL_TL_ENTITY;
+      EntityFlags = CL_TL_UDP;
 
       AddrFile->Send = UDPSendDatagram;
       break;
@@ -537,7 +576,8 @@ NTSTATUS FileOpenAddress(
     AddrFile->Send = ICMPSendDatagram;
 
     /* FIXME: Verify this */
-    AddEntity(ER_ENTITY, AddrFile, ER_ICMP);
+    EntityType = ER_ENTITY;
+    EntityFlags = ER_ICMP;
     break;
 
   default:
@@ -546,7 +586,8 @@ NTSTATUS FileOpenAddress(
     AddrFile->Send = RawIPSendDatagram;
 
     /* FIXME: Verify this */
-    AddEntity(CL_TL_ENTITY, AddrFile, 0);
+    EntityType = CL_TL_ENTITY;
+    EntityFlags = 0;
     break;
   }
 
@@ -565,6 +606,19 @@ NTSTATUS FileOpenAddress(
 
   /* Initialize spin lock that protects the address file object */
   ExInitializeResourceLite(&AddrFile->Resource);
+
+  /* Running out of memory here fails the open cleanly (WSAENOBUFS) */
+  Status = AddEntity(EntityType, AddrFile, EntityFlags);
+  if (!NT_SUCCESS(Status))
+  {
+      if (Protocol == IPPROTO_TCP && AddrFile->Port)
+          TCPFreePort(AddrFile->Port);
+      else if (Protocol == IPPROTO_UDP)
+          UDPFreePort(AddrFile->Port);
+      ExDeleteResourceLite(&AddrFile->Resource);
+      ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+      return Status;
+  }
 
   /* Return address file object */
   Request->Handle.AddressHandle = AddrFile;
@@ -593,12 +647,21 @@ NTSTATUS FileCloseAddress(
 {
   PADDRESS_FILE AddrFile = Request->Handle.AddressHandle;
   PCONNECTION_ENDPOINT Listener;
+  KIRQL OldIrql;
+  BOOLEAN LastSharer;
 
   if (!Request->Handle.AddressHandle) return STATUS_INVALID_PARAMETER;
 
   LockObject(AddrFile);
 
-  if (InterlockedDecrement(&AddrFile->Sharers) != 0)
+  /* Decrement the sharer count under AddressFileListLock so the transition to
+   * zero is atomic against AddrFindShared, which must not revive an address
+   * file whose last sharer has gone. */
+  TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+  LastSharer = (InterlockedDecrement(&AddrFile->Sharers) == 0);
+  TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+
+  if (!LastSharer)
   {
       /* Still other guys have open handles to this, so keep it around */
       UnlockObject(AddrFile);

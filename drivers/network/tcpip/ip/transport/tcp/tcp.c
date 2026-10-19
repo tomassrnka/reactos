@@ -251,12 +251,14 @@ NTSTATUS TCPShutdown(VOID)
     if (!TCPInitialized)
         return STATUS_SUCCESS;
 
-    ExDeleteNPagedLookasideList(&TdiBucketLookasideList);
-
     LibIPShutdown();
 
     /* Deregister this protocol with IP layer */
     IPRegisterProtocol(IPPROTO_TCP, NULL);
+
+    /* A completion still running returns its bucket to the lookaside list */
+    ChewWaitIdle();
+    ExDeleteNPagedLookasideList(&TdiBucketLookasideList);
 
     TCPInitialized = FALSE;
 
@@ -282,7 +284,7 @@ NTSTATUS TCPTranslateError(const err_t err)
         case ERR_USE: Status = STATUS_ADDRESS_ALREADY_EXISTS; break; //-8
         case ERR_ISCONN: Status = STATUS_UNSUCCESSFUL; break; //-9 (FIXME)
         case ERR_ABRT: Status = STATUS_LOCAL_DISCONNECT; break; //-10
-        case ERR_RST: Status = STATUS_REMOTE_DISCONNECT; break; //-11
+        case ERR_RST: Status = STATUS_CONNECTION_RESET; break; //-11
         case ERR_CLSD: Status = STATUS_FILE_CLOSED; break; //-12
         case ERR_CONN: Status = STATUS_INVALID_CONNECTION; break; //-13
         case ERR_ARG: Status = STATUS_INVALID_PARAMETER; break; //-14
@@ -310,7 +312,7 @@ NTSTATUS TCPConnect
     ip_addr_t bindaddr, connaddr;
     IP_ADDRESS RemoteAddress;
     USHORT RemotePort;
-    TA_IP_ADDRESS LocalAddress;
+    u16_t BoundPort;
     PTDI_BUCKET Bucket;
     PNEIGHBOR_CACHE_ENTRY NCE;
 
@@ -358,7 +360,8 @@ NTSTATUS TCPConnect
 
     Status = TCPTranslateError(LibTCPBind(Connection,
                                           &bindaddr,
-                                          Connection->AddressFile->Port));
+                                          Connection->AddressFile->Port,
+                                          &BoundPort));
 
     if (!NT_SUCCESS(Status))
     {
@@ -366,31 +369,15 @@ NTSTATUS TCPConnect
         return Status;
     }
 
-    /* Copy bind address into connection */
-    Connection->AddressFile->Address.Address.IPv4Address = bindaddr.addr;
+    /* The address file keeps its unspecified address: after a failed or
+       cancelled connect the socket is bound to it again, and a listen on it
+       must not be limited to the interface this connect chose */
+    Connection->ConnectAddress = bindaddr.addr;
     /* Check if we had an unspecified port */
     if (!Connection->AddressFile->Port)
     {
-        UINT AllocatedPort;
-
-        /* We did, so we need to copy back the port */
-        Status = TCPGetSockAddress(Connection, (PTRANSPORT_ADDRESS)&LocalAddress, FALSE);
-        if (!NT_SUCCESS(Status))
-        {
-            UnlockObject(Connection);
-            return Status;
-        }
-
-        /* Allocate the port in the port bitmap */
-        AllocatedPort = TCPAllocatePort(LocalAddress.Address[0].Address[0].sin_port);
-        /* This should never fail unless all ports are in use */
-        if (AllocatedPort == (UINT) -1)
-        {
-            DbgPrint("ERR: No more ports available.\n");
-            UnlockObject(Connection);
-            return STATUS_TOO_MANY_ADDRESSES;
-        }
-        Connection->AddressFile->Port = AllocatedPort;
+        /* LibTCPBind reserved an ephemeral port in the port bitmap */
+        Connection->AddressFile->Port = BoundPort;
     }
 
     connaddr.addr = RemoteAddress.Address.IPv4Address;
@@ -506,7 +493,11 @@ NTSTATUS TCPDisconnect
             FlushShutdownQueue(Connection, STATUS_FILE_CLOSED);
             ReferenceObject(Connection);
             UnlockObject(Connection);
-            Status = TCPTranslateError(LibTCPShutdown(Connection, 1, 1));
+            /* An abortive disconnect resets the connection */
+            if (Flags & TDI_DISCONNECT_ABORT)
+                Status = TCPTranslateError(LibTCPAbort(Connection));
+            else
+                Status = TCPTranslateError(LibTCPShutdown(Connection, 1, 1));
             DereferenceObject(Connection);
         }
         else
@@ -661,7 +652,13 @@ UINT TCPAllocatePort(const UINT HintPort)
         }
     }
     else
-        return AllocatePortFromRange( &TCPPorts, 1024, 5000 );
+        return LibTCPAllocateEphemeralPort();
+}
+
+/* A free port of the dynamic range that InUse does not report as taken */
+UINT TCPAllocateEphemeralPort(PPORT_IN_USE_ROUTINE InUse)
+{
+    return AllocatePortFromRangeUnless(&TCPPorts, TCP_EPHEMERAL_FIRST, TCP_EPHEMERAL_LAST, InUse);
 }
 
 VOID TCPFreePort(const UINT Port)
@@ -735,6 +732,9 @@ BOOLEAN TCPRemoveIRP( PCONNECTION_ENDPOINT Endpoint, PIRP Irp )
                 RemoveEntryList( &Bucket->Entry );
                 ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
                 Found = TRUE;
+                /* The connect was abandoned: the socket reports the address file's address again */
+                if (ListHead[i] == &Endpoint->ConnectRequest && IsListEmpty(&Endpoint->ConnectRequest))
+                    Endpoint->ConnectAddress = 0;
                 break;
             }
         }
@@ -753,10 +753,15 @@ TCPSetNoDelay(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPSetNoDelay(Connection->SocketContext, Set);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -768,10 +773,15 @@ TCPSetKeepAlive(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPSetKeepAlive(Connection->SocketContext, Value);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -784,10 +794,15 @@ TCPSetKeepAliveValues(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTcpSetKeepAliveValues(Connection->SocketContext, KeepAliveTime, KeepAliveInterval);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 
@@ -799,10 +814,15 @@ TCPGetSocketStatus(
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
+    LockObject(Connection);
     if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
         return STATUS_UNSUCCESSFUL;
+    }
 
     LibTCPGetSocketStatus(Connection->SocketContext, State);
+    UnlockObject(Connection);
     return STATUS_SUCCESS;
 }
 

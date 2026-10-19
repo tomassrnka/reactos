@@ -348,7 +348,28 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
 
   UDPHeader = (PUDP_HEADER)IPPacket->Data;
 
-  /* Calculate and validate UDP checksum */
+  /* The datagram must be large enough to hold a UDP header before any UDP field
+     is read; a shorter reassembled datagram would make the reads below run past
+     the allocation (remote out-of-bounds read). */
+  if (IPPacket->TotalSize < IPPacket->HeaderSize + sizeof(UDP_HEADER)) {
+    TI_DbgPrint(MIN_TRACE, ("Truncated UDP datagram received.\n"));
+    return;
+  }
+
+  /* Sanity checks. Validate the declared UDP length against the reassembled
+     datagram BEFORE checksumming: the checksum covers UDPHeader->Length octets
+     from the UDP header, so an oversized length would read past the datagram
+     buffer (remote out-of-bounds read). */
+  i = WH2N(UDPHeader->Length);
+  if ((i < sizeof(UDP_HEADER)) || (i > IPPacket->TotalSize - IPPacket->HeaderSize)) {
+    /* Incorrect or damaged packet received, discard it */
+    TI_DbgPrint(MIN_TRACE, ("Incorrect or damaged UDP packet received.\n"));
+    return;
+  }
+
+  DataSize = i - sizeof(UDP_HEADER);
+
+  /* Calculate and validate UDP checksum (bounded by the validated length) */
   i = UDPv4ChecksumCalculate(IPv4Header,
                              (PUCHAR)UDPHeader,
                              WH2N(UDPHeader->Length));
@@ -357,16 +378,6 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
       TI_DbgPrint(MIN_TRACE, ("Bad checksum on packet received.\n"));
       return;
   }
-
-  /* Sanity checks */
-  i = WH2N(UDPHeader->Length);
-  if ((i < sizeof(UDP_HEADER)) || (i > IPPacket->TotalSize - IPPacket->Position)) {
-    /* Incorrect or damaged packet received, discard it */
-    TI_DbgPrint(MIN_TRACE, ("Incorrect or damaged UDP packet received.\n"));
-    return;
-  }
-
-  DataSize = i - sizeof(UDP_HEADER);
 
   /* Go to UDP data area */
   IPPacket->Data = (PVOID)((ULONG_PTR)IPPacket->Data + sizeof(UDP_HEADER));
@@ -455,7 +466,7 @@ UINT UDPAllocatePort( UINT HintPort ) {
         else return (UINT)-1;
     } else return AllocatePortFromRange
                ( &UDPPorts, UDP_STARTING_PORT,
-                 UDP_STARTING_PORT + UDP_DYNAMIC_PORTS );
+                 UDP_STARTING_PORT + UDP_DYNAMIC_PORTS - 1 );
 }
 
 VOID UDPFreePort( UINT Port ) {

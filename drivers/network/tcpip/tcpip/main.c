@@ -27,6 +27,7 @@ KSPIN_LOCK EntityListLock;
 TDIEntityInfo *EntityList        = NULL;
 ULONG EntityCount                = 0;
 ULONG EntityMax                  = 0;
+PUCHAR EntityInstanceUsed        = NULL;
 UDP_STATISTICS UDPStats;
 
 /* Network timers */
@@ -829,6 +830,9 @@ VOID NTAPI TiUnload(
     if (EntityList)
         ExFreePoolWithTag(EntityList, TDI_ENTITY_TAG);
 
+    if (EntityInstanceUsed)
+        ExFreePoolWithTag(EntityInstanceUsed, TDI_ENTITY_TAG);
+
     TI_DbgPrint(MAX_TRACE, ("[TCPIP, TiUnload] Leaving.\n"));
 }
 
@@ -874,7 +878,12 @@ DriverEntry(
         return Status;
     }
 
-    ChewInit( IPDeviceObject );
+    Status = ChewInit( IPDeviceObject );
+    if (!NT_SUCCESS(Status)) {
+        TI_DbgPrint(MIN_TRACE, ("Failed to initialize the work queue. Status (0x%X).\n", Status));
+        TiUnload(DriverObject);
+        return Status;
+    }
 
     /* Create RawIP device object */
     Status = IoCreateDevice(DriverObject, 0, &strRawDeviceName,
@@ -905,17 +914,21 @@ DriverEntry(
 
     /* Setup network layer and transport layer entities */
     KeInitializeSpinLock(&EntityListLock);
+    /* AddEntity grows both as needed */
     EntityList = ExAllocatePoolWithTag(NonPagedPool,
-                                       sizeof(TDIEntityID) * MAX_TDI_ENTITIES,
+                                       sizeof(TDIEntityInfo) * TDI_ENTITIES_INITIAL,
                                        TDI_ENTITY_TAG );
-    if (!EntityList) {
+    EntityInstanceUsed = ExAllocatePoolWithTag(NonPagedPool,
+                                               TDI_ENTITIES_INITIAL + 1,
+                                               TDI_ENTITY_TAG );
+    if (!EntityList || !EntityInstanceUsed) {
         TI_DbgPrint(MIN_TRACE, ("Insufficient resources.\n"));
         TiUnload(DriverObject);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     EntityCount = 0;
-    EntityMax   = MAX_TDI_ENTITIES;
+    EntityMax   = TDI_ENTITIES_INITIAL;
 
     /* Allocate NDIS packet descriptors */
     NdisAllocatePacketPoolEx(&NdisStatus, &GlobalPacketPool, 500, 1500, sizeof(PACKET_CONTEXT));
