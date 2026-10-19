@@ -78,6 +78,17 @@ void PrintStackBacktrace(FILE* output, DumpData& data, ThreadData& thread)
 
     /* FIXME: dump x bytes at PC here + disasm it! */
 
+    /* The walk below changes the context */
+#if defined(_M_IX86)
+    ULONG_PTR stackPointer = thread.Context.Esp;
+#elif defined(_M_AMD64)
+    ULONG_PTR stackPointer = thread.Context.Rsp;
+#elif defined(_M_ARM) || defined(_M_ARM64)
+    ULONG_PTR stackPointer = thread.Context.Sp;
+#else
+#error Unknown architecture
+#endif
+
     xfprintf(output, NEWLINE "*----> Stack Back Trace <----*" NEWLINE NEWLINE);
     bool first = true;
     while (StackWalk64(MachineType, data.ProcessHandle, thread.Handle, &StackFrame, &thread.Context,
@@ -124,15 +135,6 @@ void PrintStackBacktrace(FILE* output, DumpData& data, ThreadData& thread)
 
     UCHAR stackData[0x10 * 10];
     SIZE_T sizeRead;
-#if defined(_M_IX86)
-    ULONG_PTR stackPointer = thread.Context.Esp;
-#elif defined(_M_AMD64)
-    ULONG_PTR stackPointer = thread.Context.Rsp;
-#elif defined(_M_ARM) || defined(_M_ARM64)
-    ULONG_PTR stackPointer = thread.Context.Sp;
-#else
-#error Unknown architecture
-#endif
     if (!ReadProcessMemory(data.ProcessHandle, (PVOID)stackPointer, stackData, sizeof(stackData), &sizeRead))
         return;
 

@@ -7,6 +7,7 @@ add_message_headers(ANSI FormatMessage.mc)
 list(APPEND SOURCE
     BindIoCompletionCallback.c
     CancelIoEx.c
+    ApplicationRestart.c
     ConsoleCP.c
     CopyFile2.c
     CopyFile2Identity.c
@@ -58,6 +59,8 @@ list(APPEND SOURCE
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
     LoadLibraryMachine.c
+    LocalDumps.c
+    CrashDialog.c
     LocaleNameToLCID.c
     LocalTimeZone.c
     lstrcpynW.c
@@ -92,6 +95,7 @@ list(APPEND SOURCE
     TzSetPrivilege.c
     UEFIFirmware.c
     WerFlags.c
+    WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
     WriteFile.c
     SetFileInformationByHandle.c
@@ -107,7 +111,7 @@ add_executable(kernel32_apitest
 
 target_link_libraries(kernel32_apitest wine ${PSEH_LIB})
 set_module_type(kernel32_apitest win32cui)
-add_delay_importlibs(kernel32_apitest advapi32 shlwapi)
+add_delay_importlibs(kernel32_apitest advapi32 shlwapi user32)
 add_importlibs(kernel32_apitest netapi32 msvcrt kernel32 ntdll)
 add_dependencies(kernel32_apitest FormatMessage)
 set_source_files_properties(CopyFile2Identity.c PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/copy2_embedded")

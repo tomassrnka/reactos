@@ -20,7 +20,17 @@ ModuleData::ModuleData(void* addr)
 void ModuleData::Update(HANDLE hProcess)
 {
     MODULEINFO mi = {0};
-    GetModuleInformation(hProcess, (HMODULE)BaseAddress, &mi, sizeof(mi));
+    /* NULL stands for the main module, the first one listed */
+    if (!BaseAddress)
+    {
+        HMODULE MainModule;
+        DWORD Needed;
+        if (EnumProcessModules(hProcess, &MainModule, sizeof(MainModule), &Needed) && Needed)
+            BaseAddress = MainModule;
+    }
+    /* A module may be gone already; then it is listed without a size */
+    if (!GetModuleInformation(hProcess, (HMODULE)BaseAddress, &mi, sizeof(mi)))
+        return;
     assert(BaseAddress == mi.lpBaseOfDll);
     Size = mi.SizeOfImage;
 
@@ -32,12 +42,17 @@ void ModuleData::Update(HANDLE hProcess)
 
 ThreadData::ThreadData(HANDLE handle)
     : Handle(handle)
+    , HaveContext(false)
 {
     memset(&Context, 0, sizeof(Context));
 }
 
 void ThreadData::Update()
 {
+    /* Keep a context that was given, such as the one of the fault */
+    if (HaveContext)
+        return;
+
     Context.ContextFlags = CONTEXT_INTEGER | CONTEXT_CONTROL | CONTEXT_DEBUG_REGISTERS;
     GetThreadContext(Handle, &Context);
 }

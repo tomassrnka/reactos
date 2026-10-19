@@ -278,6 +278,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
 
     for (int n = 0; n < argc; ++n)
     {
+        if (!wcscmp(argv[n], L"-u"))
+            return WerReportMain(argc, argv);
+    }
+
+    for (int n = 0; n < argc; ++n)
+    {
         WCHAR* arg = argv[n];
 
         if (!wcscmp(arg, L"-i"))
