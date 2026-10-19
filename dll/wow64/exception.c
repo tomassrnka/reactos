@@ -154,7 +154,7 @@ typedef struct
 /* Stack the worker needs below its caller: the guest frame and the native
  * CONTEXT it builds, plus its saved registers and the frames of the calls it
  * makes on the way to NtContinue (Wow64NativeToContext, the copy, NtContinue) */
-#define WOW64_DISPATCH_RESERVE (sizeof(WOW64_EXCEPTION_FRAME) + sizeof(CONTEXT) + 0x100)
+#define WOW64_DISPATCH_RESERVE (sizeof(WOW64_EXCEPTION_FRAME) + sizeof(CONTEXT) + 0x200)
 
 static DECLSPEC_NOINLINE VOID DispatchGuestException(PEXCEPTION_RECORD Record, PCONTEXT Context, TEB32 *Teb32)
 {
