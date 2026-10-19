@@ -262,6 +262,55 @@ MakeProfile(PSID pSid, PCWSTR pszSid, PCWSTR pszUser, BOOL bManual, PWSTR pszPro
            GetProfilePath(pszSid, pszProfile, MAX_PATH);
 }
 
+/* Files and directories with the attributes that make a plain delete fail or that a walker may skip */
+static VOID
+CreateAttributeEntries(PCWSTR pszProfile)
+{
+    static const struct
+    {
+        PCWSTR pszName;
+        DWORD dwAttributes;
+    } Files[] =
+    {
+        { L"readonly.txt", FILE_ATTRIBUTE_READONLY },
+        { L"hidden.txt", FILE_ATTRIBUTE_HIDDEN },
+        { L"system.txt", FILE_ATTRIBUTE_SYSTEM },
+        { L"all.txt", FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM },
+    };
+    WCHAR szPath[MAX_PATH], szFile[MAX_PATH];
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(Files); i++)
+    {
+        StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\%s", pszProfile, Files[i].pszName);
+        ok(CreateTestFile(szPath), "Cannot create %S: %lu\n", szPath, GetLastError());
+        ok(SetFileAttributesW(szPath, Files[i].dwAttributes),
+           "Cannot set the attributes of %S: %lu\n", szPath, GetLastError());
+    }
+
+    /* Directories with such attributes, some holding files with such attributes */
+    StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\RoDir", pszProfile);
+    ok(CreateDirectoryW(szPath, NULL), "Cannot create %S: %lu\n", szPath, GetLastError());
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%s\\inner.txt", szPath);
+    ok(CreateTestFile(szFile), "Cannot create %S: %lu\n", szFile, GetLastError());
+    ok(SetFileAttributesW(szFile, FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM),
+       "Cannot set the attributes of %S: %lu\n", szFile, GetLastError());
+    ok(SetFileAttributesW(szPath, FILE_ATTRIBUTE_READONLY), "Cannot set the attributes of %S: %lu\n", szPath, GetLastError());
+
+    StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\HiddenDir", pszProfile);
+    ok(CreateDirectoryW(szPath, NULL), "Cannot create %S: %lu\n", szPath, GetLastError());
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%s\\inner.txt", szPath);
+    ok(CreateTestFile(szFile), "Cannot create %S: %lu\n", szFile, GetLastError());
+    ok(SetFileAttributesW(szPath, FILE_ATTRIBUTE_HIDDEN), "Cannot set the attributes of %S: %lu\n", szPath, GetLastError());
+
+    StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\SysDir", pszProfile);
+    ok(CreateDirectoryW(szPath, NULL), "Cannot create %S: %lu\n", szPath, GetLastError());
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%s\\inner.txt", szPath);
+    ok(CreateTestFile(szFile), "Cannot create %S: %lu\n", szFile, GetLastError());
+    ok(SetFileAttributesW(szPath, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN),
+       "Cannot set the attributes of %S: %lu\n", szPath, GetLastError());
+}
+
 static VOID
 TestDeleteProfile(PSID pSid, PCWSTR pszSid, PCWSTR pszUser, BOOL bManual)
 {
@@ -292,6 +341,7 @@ TestDeleteProfile(PSID pSid, PCWSTR pszSid, PCWSTR pszUser, BOOL bManual)
             break;
     }
     ok(i == 400, "Cannot create %S: %lu\n", szPath, GetLastError());
+    CreateAttributeEntries(szProfile);
 
     StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\Link", szProfile);
     bJunction = CreateJunction(szPath, szSentinel);
@@ -326,6 +376,7 @@ TestDeleteProfile(PSID pSid, PCWSTR pszSid, PCWSTR pszUser, BOOL bManual)
     }
     StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\file.txt", szProfile);
     ok(CreateTestFile(szPath), "Cannot create %S: %lu\n", szPath, GetLastError());
+    CreateAttributeEntries(szProfile);
     bResult = CallDeleteProfile(pszSid, szProfile, &dwError);
     ok(bResult, "DeleteProfileW(%S, %S) failed: %lu\n", pszSid, szProfile, dwError);
     ok(!Exists(szProfile), "Profile %S still exists\n", szProfile);
