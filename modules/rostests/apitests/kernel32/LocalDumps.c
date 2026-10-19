@@ -433,7 +433,7 @@ static VOID CheckDump(PCWSTR Path, const EXPECTED_DUMP *Expected, int Line)
         BOOL ControlOnly = FALSE;
 
 #if defined(_M_IX86)
-        /* An OrielOS kernel32 built with MSVC does not know the caller's EBP and registers */
+        /* A kernel32 built with MSVC does not know the caller's EBP and registers */
         ControlOnly = IsReactOS && !Expected->SuppliedContext &&
                       (Context->ContextFlags & CONTEXT_FULL) == CONTEXT_CONTROL && !Context->Ebp;
 #endif
@@ -485,7 +485,7 @@ Close:
     CloseHandle(hFile);
 }
 
-/* OrielOS also writes a text report next to the dump */
+/* This build also writes a text report next to the dump */
 static VOID CheckReport(PCWSTR Path, const EXPECTED_DUMP *Expected, int Line)
 {
     CHAR Buffer[4096], Text[64];
@@ -642,7 +642,7 @@ static VOID CheckApplicationError(DWORD After, HANDLE hProcess, DWORD ProcessId,
     ok_(__FILE__, Line)(GetProcessTimes(hProcess, &Creation, &Exit, &Kernel, &User), "GetProcessTimes failed\n");
     StringCchPrintfW(StartTime, _countof(StartTime), L"%08lx%08lx", Creation.dwHighDateTime, Creation.dwLowDateTime);
 
-    /* Allow Windows a moment; OrielOS logs before the process ends */
+    /* Allow Windows a moment; this build logs before the process ends */
     for (Try = 0; Try < (Logged ? 20 : 4) && !Found; Try++)
     {
         Found = CheckApplicationErrorRecord(After, ProcessId, StartTime, Code, FaultInProgram, Line);
