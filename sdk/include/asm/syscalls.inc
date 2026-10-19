@@ -60,13 +60,12 @@ MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
     FPO 0, 0, 0, 0, 0, FRAME_FPO
     mov eax, SyscallId
 #ifdef SYSWOW64_GUEST
-    mov edx, fs:[HEX(c0)]
-    test edx, edx
-    jnz syscall_gate_&Name
-    mov edx, KUSER_SHARED_SYSCALL
-    mov edx, [edx]
-syscall_gate_&Name:
-    call edx
+    /* The WOW64 layout of NT 5.2 x64, which system-call hooks (the Chromium sandbox
+     * among them) expect: mov eax, id; xor ecx, ecx; lea edx, [esp + 4];
+     * call dword ptr fs:[0C0h]; ret n. The gate is TEB.WOW32Reserved. */
+    .byte HEX(33), HEX(0C9) /* xor ecx, ecx in this encoding */
+    lea edx, [esp + 4]
+    call dword ptr fs:[HEX(c0)]
 #else
     mov edx, KUSER_SHARED_SYSCALL
     call dword ptr [edx]
