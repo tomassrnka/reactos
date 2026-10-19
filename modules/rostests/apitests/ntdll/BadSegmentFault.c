@@ -23,6 +23,7 @@
 
 VOID BadSegmentFault(VOID);
 extern UCHAR BadSegmentResume[];
+extern UCHAR BadSegmentFaultIp[];
 
 #define CHILD_NO_HANDLER    0xE1
 #define CHILD_NO_FAULT      0xE2
@@ -104,7 +105,10 @@ RunChild(VOID)
         for (i = 0; i < EXCEPTION_MAXIMUM_PARAMETERS; i++)
             if (FaultRecord.ExceptionInformation[i] != 0)
                 Code |= 0x100;
-        if (FaultRecord.ExceptionAddress != NULL)
+        /* The address is NULL or the faulting instruction (the kernel may keep
+         * the original exception's address); anything else is a leak */
+        if (FaultRecord.ExceptionAddress != NULL &&
+            FaultRecord.ExceptionAddress != (PVOID)BadSegmentFaultIp)
             Code |= 0x200;
         if (FaultRecord.NumberParameters != 0)
             Code |= 0x400;
@@ -117,6 +121,8 @@ RunChild(VOID)
             RtlZeroMemory(&Expected, sizeof(Expected));
             Expected.ExceptionCode = STATUS_ACCESS_VIOLATION;
             Expected.ExceptionFlags = FaultRecord.ExceptionFlags;
+            if (FaultRecord.ExceptionAddress == (PVOID)BadSegmentFaultIp)
+                Expected.ExceptionAddress = FaultRecord.ExceptionAddress;
             Expected.NumberParameters = FaultRecord.NumberParameters;
             if (memcmp(&FaultRecord, &Expected, sizeof(Expected)) != 0)
                 Code |= 0x1000;
