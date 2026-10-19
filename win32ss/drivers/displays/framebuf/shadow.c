@@ -218,6 +218,61 @@ FbUpdateWholeScreen(
     FbCopyRect(ppdev, &rcl);
 }
 
+/* A rectangle from bounds computed without overflow, clamped to LONG */
+static
+VOID
+FbBoundsRect(
+    _Out_ RECTL *prcl,
+    _In_ LONGLONG left,
+    _In_ LONGLONG top,
+    _In_ LONGLONG right,
+    _In_ LONGLONG bottom)
+{
+    /* MINLONG is an unsigned constant */
+    const LONGLONG llMax = MAXLONG, llMin = -llMax - 1;
+
+    prcl->left = (LONG)max(min(left, llMax), llMin);
+    prcl->top = (LONG)max(min(top, llMax), llMin);
+    prcl->right = (LONG)max(min(right, llMax), llMin);
+    prcl->bottom = (LONG)max(min(bottom, llMax), llMin);
+}
+
+/*
+ * AlphaBlend, TransparentBlt, GradientFill and LineTo only clip to the clip
+ * object, which can reach past the screen: after a mode change to a smaller
+ * mode a DC keeps the visible region of the old one until USER sets the new
+ * one. The engine must not draw past the shadow, that is outside its pool
+ * block, so these are only drawn on it when what they can touch is on the
+ * screen: the clip, or else the area of the operation (prcl, any orientation).
+ */
+static
+BOOL
+FbInScreen(
+    _In_ SURFOBJ *pso,
+    _In_opt_ CLIPOBJ *pco,
+    _In_ const RECTL *prcl)
+{
+    PPDEV ppdev;
+
+    /* A bitmap is not the screen */
+    if (!FbIsScreen(pso))
+        return TRUE;
+
+    ppdev = (PPDEV)pso->dhsurf;
+
+    if (pco != NULL && pco->iDComplexity != DC_TRIVIAL &&
+        pco->rclBounds.left >= 0 && pco->rclBounds.top >= 0 &&
+        pco->rclBounds.right <= (LONG)ppdev->ScreenWidth &&
+        pco->rclBounds.bottom <= (LONG)ppdev->ScreenHeight)
+    {
+        return TRUE;
+    }
+
+    return min(prcl->left, prcl->right) >= 0 && min(prcl->top, prcl->bottom) >= 0 &&
+           max(prcl->left, prcl->right) <= (LONG)ppdev->ScreenWidth &&
+           max(prcl->top, prcl->bottom) <= (LONG)ppdev->ScreenHeight;
+}
+
 BOOL APIENTRY
 DrvBitBlt(
     _Inout_ SURFOBJ *psoTrg,
@@ -293,15 +348,16 @@ DrvLineTo(
     if (psoShadowDst == NULL)
         return FALSE;
 
+    /* Both end points included, whichever way the line is drawn */
+    FbBoundsRect(&rcl, min(x1, x2), min(y1, y2),
+                 (LONGLONG)max(x1, x2) + 1, (LONGLONG)max(y1, y2) + 1);
+
+    /* Otherwise IntEngLineTo draws it through DrvCopyBits */
+    if (!FbInScreen(pso, pco, &rcl))
+        return FALSE;
+
     bRet = EngLineTo(psoShadowDst, pco, pbo, x1, y1, x2, y2, prclBounds, mix);
-    {
-        /* Both end points included, whichever way the line is drawn */
-        rcl.left = min(x1, x2);
-        rcl.top = min(y1, y2);
-        rcl.right = max(x1, x2) + 1;
-        rcl.bottom = max(y1, y2) + 1;
-        FbUpdateScreen(pso, &rcl, pco);
-    }
+    FbUpdateScreen(pso, &rcl, pco);
 
     return bRet;
 }
@@ -325,6 +381,10 @@ DrvAlphaBlend(
     if (psoShadowDst == NULL || (psoSrc != NULL && psoShadowSrc == NULL))
         return FALSE;
 
+    /* Otherwise IntEngAlphaBlend blends it through DrvCopyBits */
+    if (!FbInScreen(psoDest, pco, prclDest))
+        return FALSE;
+
     bRet = EngAlphaBlend(psoShadowDst, psoShadowSrc, pco, pxlo,
                          prclDest, prclSrc, pBlendObj);
     FbUpdateScreen(psoDest, prclDest, pco);
@@ -344,6 +404,7 @@ DrvTransparentBlt(
     _In_ ULONG ulReserved)
 {
     SURFOBJ *psoShadowDst, *psoShadowSrc = NULL;
+    RECTL rclDst, rclSrc;
     BOOL bRet;
 
     psoShadowDst = FbShadow(psoDst);
@@ -352,9 +413,46 @@ DrvTransparentBlt(
     if (psoShadowDst == NULL || (psoSrc != NULL && psoShadowSrc == NULL))
         return FALSE;
 
+    if (prclDst->left > prclDst->right || prclDst->top > prclDst->bottom ||
+        prclSrc->left >= prclSrc->right || prclSrc->top >= prclSrc->bottom)
+    {
+        return FALSE;
+    }
+
+    /* Unlike EngAlphaBlend, EngTransparentBlt does not check its source.
+     * Keep the part of a screen source that is on the screen and the part of
+     * the target it is stretched to: the engine would otherwise read past
+     * the shadow, or through DrvCopyBits a copy of which only that part was
+     * filled in. */
+    rclDst = *prclDst;
+    rclSrc = *prclSrc;
+    if (psoShadowSrc != psoSrc)
+    {
+        LONG cxSrc = prclSrc->right - prclSrc->left, cySrc = prclSrc->bottom - prclSrc->top;
+        LONG cxDst = prclDst->right - prclDst->left, cyDst = prclDst->bottom - prclDst->top;
+
+        rclSrc.left = max(rclSrc.left, 0);
+        rclSrc.top = max(rclSrc.top, 0);
+        rclSrc.right = min(rclSrc.right, psoSrc->sizlBitmap.cx);
+        rclSrc.bottom = min(rclSrc.bottom, psoSrc->sizlBitmap.cy);
+        if (rclSrc.left >= rclSrc.right || rclSrc.top >= rclSrc.bottom)
+            return TRUE;
+
+        rclDst.left = prclDst->left + (LONG)((LONGLONG)(rclSrc.left - prclSrc->left) * cxDst / cxSrc);
+        rclDst.top = prclDst->top + (LONG)((LONGLONG)(rclSrc.top - prclSrc->top) * cyDst / cySrc);
+        rclDst.right = prclDst->right - (LONG)((LONGLONG)(prclSrc->right - rclSrc.right) * cxDst / cxSrc);
+        rclDst.bottom = prclDst->bottom - (LONG)((LONGLONG)(prclSrc->bottom - rclSrc.bottom) * cyDst / cySrc);
+        if (rclDst.left >= rclDst.right || rclDst.top >= rclDst.bottom)
+            return TRUE;
+    }
+
+    /* Otherwise IntEngTransparentBlt draws it through DrvCopyBits */
+    if (!FbInScreen(psoDst, pco, &rclDst))
+        return FALSE;
+
     bRet = EngTransparentBlt(psoShadowDst, psoShadowSrc, pco, pxlo,
-                             prclDst, prclSrc, iTransColor, ulReserved);
-    FbUpdateScreen(psoDst, prclDst, pco);
+                             &rclDst, &rclSrc, iTransColor, ulReserved);
+    FbUpdateScreen(psoDst, &rclDst, pco);
 
     return bRet;
 }
@@ -373,44 +471,54 @@ DrvGradientFill(
     _In_ ULONG ulMode)
 {
     SURFOBJ *psoShadowDst;
+    LONGLONG left, top, right, bottom;
     RECTL rcl;
     ULONG i;
     BOOL bRet;
 
     psoShadowDst = FbShadow(psoDest);
-    if (psoShadowDst == NULL)
+    if (psoShadowDst == NULL || nVertex == 0)
+        return FALSE;
+
+    /* Everything drawn is within the bounds of the vertices: a rectangle up
+     * to its right and bottom edges, a triangle moved by the dither origin
+     * (the DC origin) and with a pixel more on each side for the rounding of
+     * its edges */
+    left = right = pVertex[0].x;
+    top = bottom = pVertex[0].y;
+    for (i = 1; i < nVertex; i++)
+    {
+        left = min(left, pVertex[i].x);
+        top = min(top, pVertex[i].y);
+        right = max(right, pVertex[i].x);
+        bottom = max(bottom, pVertex[i].y);
+    }
+    if (ulMode == GRADIENT_FILL_TRIANGLE)
+    {
+        if (pptlDitherOrg != NULL)
+        {
+            left += pptlDitherOrg->x;
+            right += pptlDitherOrg->x;
+            top += pptlDitherOrg->y;
+            bottom += pptlDitherOrg->y;
+        }
+        left--;
+        top--;
+        right += 2;
+        bottom += 2;
+    }
+    FbBoundsRect(&rcl, left, top, right, bottom);
+
+    /* IntEngGradientFill does not retry another way, and EngGradientFill on
+     * a device surface does not work for triangles (it gets a copy of an
+     * empty rectangle): not drawn. Only a DC whose clip still reaches past
+     * the screen after a mode change gets here. */
+    if (!FbInScreen(psoDest, pco, &rcl))
         return FALSE;
 
     bRet = EngGradientFill(psoShadowDst, pco, pxlo, pVertex, nVertex,
                            pMesh, nMesh, prclExtents, pptlDitherOrg, ulMode);
-
-    /* Everything drawn is within the bounds of the vertices, which for
-     * triangles EngGradientFill moves by the dither origin (the DC origin);
-     * a pixel more on each side covers the rounding of the edges */
-    if (nVertex != 0)
-    {
-        rcl.left = rcl.right = pVertex[0].x;
-        rcl.top = rcl.bottom = pVertex[0].y;
-        for (i = 1; i < nVertex; i++)
-        {
-            rcl.left = min(rcl.left, pVertex[i].x);
-            rcl.top = min(rcl.top, pVertex[i].y);
-            rcl.right = max(rcl.right, pVertex[i].x);
-            rcl.bottom = max(rcl.bottom, pVertex[i].y);
-        }
-        if (ulMode == GRADIENT_FILL_TRIANGLE && pptlDitherOrg != NULL)
-        {
-            rcl.left += pptlDitherOrg->x;
-            rcl.right += pptlDitherOrg->x;
-            rcl.top += pptlDitherOrg->y;
-            rcl.bottom += pptlDitherOrg->y;
-        }
-        rcl.left--;
-        rcl.top--;
-        rcl.right += 2;
-        rcl.bottom += 2;
-        FbUpdateScreen(psoDest, &rcl, pco);
-    }
+    FbUpdateScreen(psoDest, &rcl, pco);
 
     return bRet;
 }
