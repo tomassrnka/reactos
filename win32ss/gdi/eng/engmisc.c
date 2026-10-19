@@ -53,9 +53,15 @@ IntEngEnter(PINTENG_ENTER_LEAVE EnterLeave,
     BitmapSize.cx = DestRect->right - DestRect->left;
     BitmapSize.cy = DestRect->bottom - DestRect->top;
     Width = WIDTH_BYTES_ALIGN32(BitmapSize.cx, BitsPerFormat(psoDest->iBitmapFormat));
+    /* Only the part on the surface is copied in: clear the rest, so that
+     * neither a source nor the copy back gets pool contents */
     EnterLeave->OutputBitmap = EngCreateBitmap(BitmapSize, Width,
                                                psoDest->iBitmapFormat,
-                                               BMF_TOPDOWN | BMF_NOZEROINIT, NULL);
+                                               (DestRect->left < 0 || DestRect->top < 0 ||
+                                                DestRect->right > psoDest->sizlBitmap.cx ||
+                                                DestRect->bottom > psoDest->sizlBitmap.cy) ?
+                                                   BMF_TOPDOWN : BMF_TOPDOWN | BMF_NOZEROINIT,
+                                               NULL);
 
     if (!EnterLeave->OutputBitmap)
       {
