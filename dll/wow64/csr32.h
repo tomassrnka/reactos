@@ -114,3 +114,21 @@ typedef struct
     BOOLEAN UsingStaticBuffer, Unicode;
     CHAR Reserved2[6];
 } WOW64_CONSOLE_WRITE;
+
+/* Console and base server requests without capture buffers */
+typedef struct
+{
+    ULONG ConsoleHandle, OutputHandle;
+    COORD ScreenBufferSize, CursorPosition, ViewOrigin;
+    WORD Attributes;
+    COORD ViewSize, MaximumViewSize;
+} WOW64_CONSOLE_SCREEN_BUFFER_INFO;
+C_ASSERT(sizeof(WOW64_CONSOLE_SCREEN_BUFFER_INFO) == 32);
+C_ASSERT(FIELD_OFFSET(WOW64_CONSOLE_SCREEN_BUFFER_INFO, ViewSize) == 22); /* COORD is 2-byte aligned */
+
+typedef struct { ULONG ConsoleHandle; UINT CodePage; BOOL OutputCP; } WOW64_CONSOLE_GET_CP;
+typedef struct { ULONG ConsoleHandle; UINT CodePage; BOOL OutputCP; ULONG EventHandle; } WOW64_CONSOLE_SET_CP;
+typedef struct { ULONG ConsoleHandle; LANGID LangId; } WOW64_CONSOLE_LANGID;
+C_ASSERT(sizeof(WOW64_CONSOLE_GET_CP) == 12 && sizeof(WOW64_CONSOLE_SET_CP) == 16);
+C_ASSERT(sizeof(WOW64_CONSOLE_LANGID) == 8);
+C_ASSERT(sizeof(BASE_GETSET_PROCESS_SHUTDOWN_PARAMS) == 8);

@@ -208,6 +208,16 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
     CONSOLE_API_MESSAGE Message = {0};
     NTSTATUS Status;
 
+    /* The message and its request data (a[3] bytes) must lie in the guest's range: replies
+     * are written there. A fault inside the range is caught by the caller's SEH. */
+    if ((ULONG64)a[0] + 40 + a[3] > (ULONG64)Wow64HighestUserAddress + 1) return STATUS_ACCESS_VIOLATION;
+    /* The guest library stores the status in the header after the call: the whole message must
+     * be writable before a request changes server state */
+    {
+        volatile UCHAR *Bytes = PTR32(a[0]);
+        ULONG i;
+        for (i = 0; i < 40 + a[3]; ++i) Bytes[i] = Bytes[i];
+    }
     switch (Api)
     {
     case CSR_CREATE_API_NUMBER(USERSRV_SERVERDLL_INDEX, UserpGetThreadConsoleDesktop):
@@ -257,6 +267,54 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(Message.Data.ConsoleModeRequest));
         Data[2] = Message.Data.ConsoleModeRequest.Mode;
         return Status;
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepGetScreenBufferInfo):
+    {
+        WOW64_CONSOLE_SCREEN_BUFFER_INFO *Guest = (PVOID)Data;
+        CONSOLE_GETSCREENBUFFERINFO *Info = &Message.Data.ScreenBufferInfoRequest;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Info->ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        Info->OutputHandle = HANDLE32(Guest->OutputHandle);
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(*Info));
+        if (NT_SUCCESS(Status))
+        {
+            Guest->ScreenBufferSize = Info->ScreenBufferSize;
+            Guest->CursorPosition = Info->CursorPosition;
+            Guest->ViewOrigin = Info->ViewOrigin;
+            Guest->Attributes = Info->Attributes;
+            Guest->ViewSize = Info->ViewSize;
+            Guest->MaximumViewSize = Info->MaximumViewSize;
+        }
+        return Status;
+    }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepGetCP):
+    {
+        WOW64_CONSOLE_GET_CP *Guest = (PVOID)Data;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Message.Data.GetConsoleCPRequest.ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        Message.Data.GetConsoleCPRequest.OutputCP = Guest->OutputCP;
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(Message.Data.GetConsoleCPRequest));
+        if (NT_SUCCESS(Status)) Guest->CodePage = Message.Data.GetConsoleCPRequest.CodePage;
+        return Status;
+    }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepSetCP):
+    {
+        WOW64_CONSOLE_SET_CP *Guest = (PVOID)Data;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Message.Data.SetConsoleCPRequest.ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        Message.Data.SetConsoleCPRequest.CodePage = Guest->CodePage;
+        Message.Data.SetConsoleCPRequest.OutputCP = Guest->OutputCP;
+        Message.Data.SetConsoleCPRequest.EventHandle = HANDLE32(Guest->EventHandle);
+        return CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(Message.Data.SetConsoleCPRequest));
+    }
+    case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepGetLangId):
+    {
+        WOW64_CONSOLE_LANGID *Guest = (PVOID)Data;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        Message.Data.LangIdRequest.ConsoleHandle = HANDLE32(Guest->ConsoleHandle);
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, NULL, Api, sizeof(Message.Data.LangIdRequest));
+        if (NT_SUCCESS(Status)) Guest->LangId = Message.Data.LangIdRequest.LangId;
+        return Status;
+    }
     case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepVerifyIoHandle):
         if (a[3] != 12) return STATUS_INFO_LENGTH_MISMATCH;
         Message.Data.VerifyHandleRequest.ConsoleHandle = HANDLE32(Data[1]);
@@ -281,6 +339,19 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         Status = CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api,
                                      sizeof(BASE_GET_TEMP_FILE));
         Data[0] = BaseMessage.Data.GetTempFileRequest.UniqueID;
+        return Status;
+    }
+    case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepSetProcessShutdownParam):
+    case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepGetProcessShutdownParam):
+    {
+        /* Two ULONGs, the same for both sizes */
+        BASE_API_MESSAGE BaseMessage = {0};
+        BASE_GETSET_PROCESS_SHUTDOWN_PARAMS *Guest = (PVOID)Data;
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        BaseMessage.Data.ShutdownParametersRequest = *Guest;
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&BaseMessage, NULL, Api, sizeof(*Guest));
+        if (NT_SUCCESS(Status) && Api == CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepGetProcessShutdownParam))
+            *Guest = BaseMessage.Data.ShutdownParametersRequest;
         return Status;
     }
     case CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepExitProcess):
