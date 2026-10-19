@@ -1423,16 +1423,16 @@ GetWindowThreadProcessId(HWND hWnd,
                          LPDWORD lpdwProcessId)
 {
     DWORD Ret = 0;
-    PTHREADINFO ti;
+    KPTRTYPE(PTHREADINFO) ti;
     PWND pWnd = ValidateHwnd(hWnd);
 
     if (!pWnd) return Ret;
 
-    ti = pWnd->head.pti;
+    ti = KPTR(pWnd->head.pti);
 
     if (ti)
     {
-        if (ti == GetW32ThreadInfo())
+        if (KPTR_EQ(ti, GetW32ThreadInfoK()))
         { // We are current.
           //FIXME("Current!\n");
             if (lpdwProcessId)

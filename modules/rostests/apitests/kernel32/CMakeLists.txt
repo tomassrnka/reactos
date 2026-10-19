@@ -5,9 +5,15 @@ add_subdirectory(tlsdyn)
 add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
+    Wow64ReviewThreads.c
+    Wow64RemoteThread.c
+    Wow64ThreadApc.c
+    Wow64Threads.c
+    Wow64Environment.c
     BindIoCompletionCallback.c
     CancelIoEx.c
     ApplicationRestart.c
+    AppModel.c
     ConsoleCP.c
     CopyFile2.c
     CopyFile2Identity.c
@@ -21,6 +27,7 @@ list(APPEND SOURCE
     CopyFile2.c
     CopyFile2Identity.c
     CreateEventMutexEx.c
+    CreateFile2.c
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateProcessRace.c
@@ -28,6 +35,7 @@ list(APPEND SOURCE
     ThreadImpersonationToken.c
     DebugTrapInterrupts.c
     DefaultActCtx.c
+    DiscardVirtualMemory.c
     DeleteTimerQueueEx.c
     DeviceIoControl.c
     dosdev.c
@@ -39,24 +47,32 @@ list(APPEND SOURCE
     ExitThread.c
     FindActCtxSectionStringW.c
     FindFiles.c
+    FindFirstFileEx.c
+    FindStringOrdinal.c
     FLS.c
     ForcedRelocation.c
     FormatMessage.c
     FormatMessageInsert.c
     GetBinaryType.c
     GetComputerNameEx.c
+    GetCurrentThreadStackLimits.c
     GetCPInfo.c
     GetCurrentDirectory.c
     GetDriveType.c
     GetEnvironmentVariable.c
     GetFileType.c
     GetFinalPathNameByHandle.c
+    GetUserDefaultGeoName.c
     GetLocaleInfo.c
     GetLogicalProcessorInformationEx.c
     GetModuleFileName.c
+    GetNumaProcessorNodeEx.c
+    GetOverlappedResultEx.c
     GetQueuedCompletionStatusEx.c
+    GetSystemTimePrecise.c
     GetVolumeInformation.c
     HandleList.c
+    HeapWalk.c
     IdleProcessor.c
     InitOnce.c
     KernelBaseTime.c
@@ -66,6 +82,7 @@ list(APPEND SOURCE
     JapaneseCalendar.c
     JobObject.c
     LCMapString.c
+    LoadString.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
     LoadLibraryMachine.c
@@ -77,12 +94,22 @@ list(APPEND SOURCE
     lstrlen.c
     Mailslot.c
     MappedFileGrowth.c
+    MappedViewEvict.c
     MultiByteToWideChar.c
     PerformanceCounter.c
     Pipes.c
     PipeSqos.c
+    PreferredUILanguages.c
+    PowerRequest.c
+    PrefetchVirtualMemory.c
     PrivMoveFileIdentityW.c
+    ProcessAffinity.c
+    ProcessMitigationPolicy.c
+    ProcThreadMitigation.c
     QueryCycleTime.c
+    QueryUnbiasedInterruptTime.c
+    ProcessToken.c
+    ProcessorGroups.c
     QueueUserAPC.c
     RaiseFailFastException.c
     ReadFile.c
@@ -95,18 +122,24 @@ list(APPEND SOURCE
     SetThreadStackGuarantee.c
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
+    SetWaitableTimerEx.c
     SystemFirmware.c
     Toolhelp32.c
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c
+    ThreadInformation.c
     TunnelCache.c
     VolumeMountPoint.c
     TzSetPrivilege.c
     UEFIFirmware.c
+    UnmapViewOfFileEx.c
+    WaitOnAddress.c
     WerFlags.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
+    Wow64Process.c
+    Wow64Run.c
     WriteFile.c
     SetFileInformationByHandle.c
 )
@@ -128,6 +161,32 @@ set_source_files_properties(CopyFile2Identity.c PROPERTIES INCLUDE_DIRECTORIES "
 add_pch(kernel32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET kernel32_apitest)
 
+add_executable(wow64_native wow64_native.c)
+set_module_type(wow64_native win32cui ENTRYPOINT mainCRTStartup)
+add_importlibs(wow64_native kernel32)
+add_rostests_file(TARGET wow64_native)
+
+if(ARCH STREQUAL "i386")
+    add_executable(wow64_hello wow64_hello.c)
+    set_module_type(wow64_hello win32cui ENTRYPOINT mainCRTStartup)
+    add_importlibs(wow64_hello kernel32 ntdll)
+    add_rostests_file(TARGET wow64_hello)
+
+    add_executable(wow64_errors wow64_errors.c)
+    set_module_type(wow64_errors win32cui ENTRYPOINT mainCRTStartup)
+    add_importlibs(wow64_errors kernel32 ntdll)
+    add_rostests_file(TARGET wow64_errors)
+
+    spec2def(wow64_local.dll wow64_local.spec ADD_IMPORTLIB)
+    add_library(wow64_local MODULE wow64_local.c ${CMAKE_CURRENT_BINARY_DIR}/wow64_local.def)
+    set_module_type(wow64_local win32dll ENTRYPOINT 0)
+    add_rostests_file(TARGET wow64_local)
+    add_executable(wow64_localhello wow64_localhello.c)
+    set_module_type(wow64_localhello win32cui ENTRYPOINT mainCRTStartup)
+    add_importlibs(wow64_localhello wow64_local kernel32)
+    add_rostests_file(TARGET wow64_localhello)
+endif()
+
 list(APPEND MANIFEST_FILES
     classtest.manifest
     classtest2.manifest
@@ -145,3 +204,8 @@ set_module_type(handlelist_gui win32gui ENTRYPOINT WinMainCRTStartup)
 add_importlibs(handlelist_gui kernel32)
 add_dependencies(kernel32_apitest handlelist_gui)
 add_rostests_file(TARGET handlelist_gui)
+spec2def(wow64_thread.dll wow64_thread.spec ADD_IMPORTLIB)
+add_library(wow64_thread MODULE wow64_thread.c ${CMAKE_CURRENT_BINARY_DIR}/wow64_thread.def)
+set_module_type(wow64_thread win32dll ENTRYPOINT DllMain 12)
+add_importlibs(wow64_thread kernel32)
+add_rostests_file(TARGET wow64_thread)

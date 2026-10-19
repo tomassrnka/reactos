@@ -22,6 +22,46 @@ extern "C" {
 /* Everyone loves 64K */
 #define _64K (64 * _1KB)
 
+/*
+ * ZeroBits is a count in the 32-bit address space for values 1..21.
+ * On a 64-bit kernel, values >= 32 describe the leading zeroes of a mask;
+ * holes below its highest set bit do not restrict an automatically chosen VA.
+ * Keep masks out of shift counts (including the value 32 itself).
+ */
+FORCEINLINE
+BOOLEAN
+MiZeroBitsToHighestAddress(
+    _In_ ULONG_PTR ZeroBits,
+    _Out_ PULONG_PTR HighestAddress)
+{
+    ULONG_PTR Limit;
+
+    if (ZeroBits == 0)
+        Limit = MAXULONG_PTR;
+    else if (ZeroBits < 32)
+    {
+        if (ZeroBits > 21)
+            return FALSE;
+        Limit = MAXULONG >> ZeroBits;
+    }
+    else
+    {
+#ifdef _WIN64
+        Limit = ZeroBits;
+        Limit |= Limit >> 1;
+        Limit |= Limit >> 2;
+        Limit |= Limit >> 4;
+        Limit |= Limit >> 8;
+        Limit |= Limit >> 16;
+        Limit |= Limit >> 32;
+#else
+        return FALSE;
+#endif
+    }
+    *HighestAddress = min(Limit, (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS);
+    return TRUE;
+}
+
 /* Size of a page table */
 #define PT_SIZE  (PTE_PER_PAGE * sizeof(MMPTE))
 

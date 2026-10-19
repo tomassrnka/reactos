@@ -36,7 +36,7 @@
 #define W32PF_APIHOOKUNLOADING       (0x80000000)
 #define W32PF_JOBRESTRICTED          (0x40000000)
 
-#define QSIDCOUNTS 7
+#define QSIDCOUNTS 8
 
 typedef enum _QS_ROS_TYPES
 {
@@ -47,6 +47,7 @@ typedef enum _QS_ROS_TYPES
     QSRosSendMessage,
     QSRosHotKey,
     QSRosEvent,
+    QSRosRawInput,
 } QS_ROS_TYPES, *PQS_ROS_TYPES;
 
 extern BOOL ClientPfnInit;
@@ -159,6 +160,8 @@ typedef struct _THREADINFO
     LIST_ENTRY WindowListHead;
     LIST_ENTRY W32CallbackListHead;
     SINGLE_LIST_ENTRY  ReferencesList;
+    /* Hardware message list walks of this thread, innermost first (msgqueue.c) */
+    struct _MSQ_HW_WALK *pHwWalks;
     ULONG cExclusiveLocks;
 #if DBG
     USHORT acExclusiveLockCount[GDIObjTypeTotal + 1];
@@ -289,6 +292,11 @@ typedef struct _PROCESSINFO
     DWORD dwRegisteredClasses;
 
     /* ReactOS */
+    struct _RAWINPUT_REGTABLE *pRawInputRegs;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    /* Published once under the USER lock; lives until PROCESSINFO is freed. */
+    struct _CLIENTPFN *pClientPfn;
+#endif
     FAST_MUTEX PrivateFontListLock;
     LIST_ENTRY PrivateFontListHead;
     LIST_ENTRY PrivateMemFontListHead;
@@ -330,3 +338,28 @@ lstrlenW(
 }
 
 #define strlenW lstrlenW
+
+/* Client procedure addresses belong to a process, even for system classes.
+ * Default builds expand to the original session-wide table accesses. */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+#ifndef __cplusplus
+typedef struct _CLIENTPFN
+{
+    PFNCLIENT ClientA;
+    PFNCLIENT ClientW;
+    PFNCLIENTWORKER ClientWorker;
+    HINSTANCE hModule;
+} CLIENTPFN, *PCLIENTPFN;
+#endif
+
+WNDPROC IntGetClientProc(PPROCESSINFO ppi, INT fnid, BOOL Ansi);
+HINSTANCE IntGetClientModule(PPROCESSINFO ppi);
+#define IntGetClientProcA(ppi, fnid) IntGetClientProc(ppi, fnid, TRUE)
+#define IntGetClientProcW(ppi, fnid) IntGetClientProc(ppi, fnid, FALSE)
+WNDPROC IntGetClientProcServer(PPROCESSINFO ppi, INT fnid);
+#else
+#define IntGetClientProcA(ppi, fnid) GETPFNCLIENTA(fnid)
+#define IntGetClientProcW(ppi, fnid) GETPFNCLIENTW(fnid)
+#define IntGetClientProcServer(ppi, fnid) GETPFNSERVER(fnid)
+#define IntGetClientModule(ppi) hModClient
+#endif

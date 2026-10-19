@@ -2490,7 +2490,7 @@ SetMapperFlags(
         return GDI_ERROR;
     }
 
-    if (NtCurrentTeb()->GdiTebBatch.HDC == hDC)
+    if (W32GetCurrentTeb()->GdiTebBatch.HDC == W32GdiHandle(hDC))
     {
         if (Dc_Attr->ulDirty_ & DC_FONTTEXT_DIRTY)
         {

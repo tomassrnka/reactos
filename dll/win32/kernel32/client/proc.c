@@ -11,11 +11,41 @@
 /* INCLUDES ****************************************************************/
 
 #include <k32.h>
+#ifdef SYSWOW64_GUEST
+#include <reactos/wow64process.h>
+#endif
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+#include <reactos/wow64.h>
+
+/* A native creator serving a guest must inherit the guest's current handles
+ * and flags. Keep the captured parent state on this call's stack; never
+ * replace the process-wide native PEB or environment. */
+static PPEB
+BasepProcessCreationPeb(PPEB Captured)
+{
+    PPEB Peb = NtCurrentPeb();
+    ULONG_PTR Guest = 0;
+    WOW64_CPU_STATE *Cpu;
+    if (NT_SUCCESS(NtQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information,
+                                              &Guest, sizeof(Guest), NULL)) && Guest)
+    {
+        Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
+        if (Cpu && Cpu->ProcessParameters)
+        {
+            *Captured = *Peb;
+            Captured->ProcessParameters = Cpu->ProcessParameters;
+            return Captured;
+        }
+    }
+    return Peb;
+}
+#endif
 
 #define NDEBUG
 #include <debug.h>
 
 #define THREAD_ALL_ACCESS_NT6 (STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|0xFFFF)
+#define PROCESS_ALL_ACCESS_NT6 (STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|0xFFFF)
 
 /* GLOBALS *******************************************************************/
 
@@ -540,6 +570,11 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     SIZE_T Size;
     BOOLEAN HavePebLock = FALSE, Result;
     PPEB Peb = NtCurrentPeb();
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    PEB CapturedPeb;
+    Peb = BasepProcessCreationPeb(&CapturedPeb);
+#endif
 
     /* Get the full path name */
     Size = GetFullPathNameW(ApplicationPathName,
@@ -2650,6 +2685,12 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     UNICODE_STRING VdmString, VdmUnicodeEnv;
     BOOLEAN IsWowApp;
     PBASE_CHECK_VDM CheckVdmMsg;
+#ifdef SYSWOW64_GUEST
+    DWORD OriginalCreationFlags = dwCreationFlags;
+#endif
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    PEB CapturedPeb;
+#endif
 
     /* Read the attribute list of an extended startup info before anything
      * is allocated, so that a refused list needs no cleanup */
@@ -2774,6 +2815,9 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     /* Finally, set our TEB and PEB */
     Teb = NtCurrentTeb();
     Peb = NtCurrentPeb();
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    Peb = BasepProcessCreationPeb(&CapturedPeb);
+#endif
 
     /* This combination is illegal (see MSDN) */
     if ((dwCreationFlags & (DETACHED_PROCESS | CREATE_NEW_CONSOLE)) ==
@@ -3261,6 +3305,79 @@ StartScan:
         /* Use the one from the current process */
         StartupInfo.lpDesktop = Peb->ProcessParameters->DesktopInfo.Buffer;
     }
+
+#ifdef SYSWOW64_GUEST
+    {
+        WOW64_CREATE_PROCESS Request = {0};
+        UNICODE_STRING Application;
+        RTL_USER_PROCESS_PARAMETERS ParentParameters;
+        UNICODE_STRING ParentDirectory = {0}, ParentDesktop = {0};
+        PWSTR ParentEnvironment = NULL;
+        /* Lookup and NT file opening above use the calling thread's WoW64
+         * redirection state. Pass the absolute DOS name across the boundary;
+         * the translator applies the same rule before native creation. */
+        RtlInitUnicodeString(&Application, SxsWin32ExePath.Buffer);
+        if (QuotesNeeded || CmdLineIsAppName)
+        {
+            SIZE_T Prefix = CmdLineIsAppName ? wcslen(lpCommandLine) :
+                                             (SIZE_T)(NullBuffer - lpCommandLine);
+            SIZE_T Count = wcslen(lpCommandLine);
+            QuotedCmdLine = RtlAllocateHeap(RtlGetProcessHeap(), 0, (Count + 3) * sizeof(WCHAR));
+            if (!QuotedCmdLine)
+            {
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                Result = FALSE;
+                goto Quickie;
+            }
+            QuotedCmdLine[0] = L'"';
+            RtlCopyMemory(QuotedCmdLine + 1, lpCommandLine, Prefix * sizeof(WCHAR));
+            QuotedCmdLine[Prefix + 1] = L'"';
+            wcscpy(QuotedCmdLine + Prefix + 2, lpCommandLine + Prefix);
+            lpCommandLine = QuotedCmdLine;
+        }
+        Request.Token = HandleToUlong(hUserToken);
+        Request.Application = PtrToUlong(Application.Buffer);
+        Request.CommandLine = PtrToUlong(lpCommandLine);
+        Request.ProcessAttributes = PtrToUlong(lpProcessAttributes);
+        Request.ThreadAttributes = PtrToUlong(lpThreadAttributes);
+        Request.InheritHandles = bInheritHandles;
+        Request.CreationFlags = OriginalCreationFlags | CREATE_UNICODE_ENVIRONMENT;
+        Request.Environment = PtrToUlong(lpEnvironment);
+        Request.CurrentDirectory = PtrToUlong(lpCurrentDirectory);
+        Request.StartupInfo = PtrToUlong(&StartupInfo);
+        Request.ProcessInformation = PtrToUlong(lpProcessInformation);
+        Request.NewToken = PtrToUlong(hNewToken);
+        /* Native ntdll has a different PEB lock. Snapshot the mutable guest
+         * strings/environment while holding the guest lock, then release it
+         * before entering the native loader/creator. */
+        RtlAcquirePebLock();
+        ParentParameters = *Peb->ProcessParameters;
+        Status = RtlDuplicateUnicodeString(RTL_DUPLICATE_UNICODE_STRING_NULL_TERMINATE,
+                                          &ParentParameters.CurrentDirectory.DosPath, &ParentDirectory);
+        if (NT_SUCCESS(Status))
+            Status = RtlDuplicateUnicodeString(RTL_DUPLICATE_UNICODE_STRING_NULL_TERMINATE,
+                                              &ParentParameters.DesktopInfo, &ParentDesktop);
+        if (NT_SUCCESS(Status) && !lpEnvironment)
+            Status = RtlCreateEnvironment(TRUE, &ParentEnvironment);
+        RtlReleasePebLock();
+        if (NT_SUCCESS(Status))
+        {
+            ParentParameters.CurrentDirectory.DosPath = ParentDirectory;
+            ParentParameters.DesktopInfo = ParentDesktop;
+            if (!lpEnvironment) ParentParameters.Environment = ParentEnvironment;
+            if (!lpStartupInfo->lpDesktop) StartupInfo.lpDesktop = ParentDesktop.Buffer;
+            Request.ParentParameters = PtrToUlong(&ParentParameters);
+            Status = RtlWow64CreateProcess(&Request);
+        }
+        if (ParentEnvironment) RtlDestroyEnvironment(ParentEnvironment);
+        RtlFreeUnicodeString(&ParentDesktop);
+        RtlFreeUnicodeString(&ParentDirectory);
+        Result = NT_SUCCESS(Status) && !Request.Error;
+        if (!NT_SUCCESS(Status)) BaseSetLastNTError(Status);
+        else if (Request.Error) SetLastError(Request.Error);
+        goto Quickie;
+    }
+#endif
 
     /* Create a section for this file */
     Status = NtCreateSection(&SectionHandle,
@@ -3976,8 +4093,12 @@ StartScan:
     }
 
     /* Make sure the image was compiled for this processor */
-    if ((ImageInformation.Machine < SharedUserData->ImageNumberLow) ||
-        (ImageInformation.Machine > SharedUserData->ImageNumberHigh))
+    if (((ImageInformation.Machine < SharedUserData->ImageNumberLow) ||
+         (ImageInformation.Machine > SharedUserData->ImageNumberHigh))
+#ifdef BUILD_WOW64_ENABLED
+        && (ImageInformation.Machine != IMAGE_FILE_MACHINE_I386)
+#endif
+        )
     {
 #ifdef _WIN64
         /* There is no WoW64: a 32-bit or foreign image is simply not runnable here */
@@ -4288,7 +4409,7 @@ StartScan:
 
     if (KernelHandleList)
     {
-        Status = NtCreateProcessWithAttributes(&ProcessHandle, PROCESS_ALL_ACCESS,
+        Status = NtCreateProcessWithAttributes(&ProcessHandle, PROCESS_ALL_ACCESS_NT6,
                                                ObjectAttributes, NtCurrentProcess(),
                                                Flags, SectionHandle, DebugHandle,
                                                NULL, InJob, &NativeAttributes);
@@ -4297,7 +4418,7 @@ StartScan:
     {
         /* Preserve the legacy native creation path without a handle list. */
         Status = NtCreateProcessEx(&ProcessHandle,
-                               PROCESS_ALL_ACCESS,
+                               PROCESS_ALL_ACCESS_NT6,
                                ObjectAttributes,
                                NtCurrentProcess(),
                                Flags,
@@ -4665,8 +4786,22 @@ StartScan:
     /* Write the remote PEB address and clear it locally, we no longer use it */
     CreateProcessMsg->PebAddressNative = RemotePeb;
 #ifdef _WIN64
-    DPRINT("TODO: WOW64 is not supported yet\n");
     CreateProcessMsg->PebAddressWow64 = 0;
+#ifdef BUILD_WOW64_ENABLED
+    if (ImageInformation.Machine == IMAGE_FILE_MACHINE_I386)
+    {
+        ULONG_PTR Peb32 = 0;
+        Status = NtQueryInformationProcess(ProcessHandle, ProcessWow64Information,
+                                           &Peb32, sizeof(Peb32), NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            Result = FALSE;
+            goto Quickie;
+        }
+        CreateProcessMsg->PebAddressWow64 = (ULONG)Peb32;
+    }
+#endif
 #else
     CreateProcessMsg->PebAddressWow64 = (ULONG)RemotePeb;
 #endif

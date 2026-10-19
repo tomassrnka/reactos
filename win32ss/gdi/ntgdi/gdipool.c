@@ -67,7 +67,7 @@ GdiPoolAllocateSection(PGDI_POOL pPool)
     pvBaseAddress = NULL;
     status = ZwAllocateVirtualMemory(NtCurrentProcess(),
                                      &pvBaseAddress,
-                                     0,
+                                     Win32kUserViewZeroBits(PsGetCurrentProcess()),
                                      &cjSize,
                                      MEM_RESERVE,
                                      PAGE_READWRITE);

@@ -1,0 +1,8 @@
+spec2def(wow64cpu.dll wow64cpu.spec ADD_IMPORTLIB)
+add_asm_files(wow64cpu_asm cpu.S)
+add_library(wow64cpu MODULE cpu.c ${wow64cpu_asm} ${CMAKE_CURRENT_BINARY_DIR}/wow64cpu.def)
+set_module_type(wow64cpu win32dll ENTRYPOINT 0)
+target_link_libraries(wow64cpu libcntpr)
+add_importlibs(wow64cpu ntdll)
+add_dependencies(wow64cpu asm)
+add_cd_file(TARGET wow64cpu DESTINATION reactos/system32 FOR all)

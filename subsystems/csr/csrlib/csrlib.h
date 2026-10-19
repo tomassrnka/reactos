@@ -24,6 +24,11 @@
 extern HANDLE CsrApiPort;
 extern HANDLE CsrPortHeap;
 
+#ifdef _M_IX86
+NTSTATUS NTAPI CsrWow64Call(ULONG Operation, PULONG Arguments);
+#define CsrIsWow64() (NtCurrentTeb()->WOW32Reserved != NULL)
+#endif
+
 #endif /* _CSRLIB_H_ */
 
 /* EOF */

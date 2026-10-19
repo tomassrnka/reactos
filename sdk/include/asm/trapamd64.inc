@@ -52,6 +52,37 @@ ENDM
 
 APIC_EOI = HEX(0FFFFFFFFFFFE00B0)
 APIC_ESR = HEX(0FFFFFFFFFFFE0280)
+X2APIC_MSR_EOI = HEX(80B)
+
+/* The BOOLEAN that tells whether the local APIC is in x2APIC mode */
+#ifndef APIC_X2APIC_MODE
+#define APIC_X2APIC_MODE KiX2ApicMode
+#endif
+EXTERN APIC_X2APIC_MODE:BYTE
+
+/*
+ * SendApicEoi - End the interrupt at the local APIC, preserving all registers
+ */
+MACRO(SendApicEoi)
+    LOCAL x2apic_eoi, eoi_done
+
+    cmp byte ptr [rip+APIC_X2APIC_MODE], 0
+    jne x2apic_eoi
+    mov dword ptr [APIC_EOI], 0
+    jmp eoi_done
+x2apic_eoi:
+    push rax
+    push rcx
+    push rdx
+    mov ecx, X2APIC_MSR_EOI
+    xor eax, eax
+    xor edx, edx
+    wrmsr
+    pop rdx
+    pop rcx
+    pop rax
+eoi_done:
+ENDM
 
 TF_SEGMENTS             = HEX(08)
 TF_DEBUG                = HEX(10)
@@ -219,6 +250,15 @@ MACRO(ExitTrap, Flags)
     ASSERT_TRAP_FRAME_INTS_ENABLED rbp
     ASSERT_IRQL_PASSIVE
 
+#if defined(BUILD_WOW64_ENABLED)
+    /* Reached from both ntoskrnl and the HAL trap-exit on the WoW64-thread user
+     * return. KiRestoreWow64Gs is exported from ntoskrnl so the HAL links to the
+     * same definition; it runs before the volatile registers are restored, so
+     * its clobbers are harmless, and it only rewrites KERNEL_GS_BASE for a
+     * WoW64 process, leaving native-thread GS untouched. */
+    EXTERN KiRestoreWow64Gs:PROC
+    call KiRestoreWow64Gs
+#endif
     cli
 
     /* Swap gs to user mode */
@@ -253,8 +293,7 @@ kernel_mode_return:
     add rsp, KTRAP_FRAME_Rip
 
     if (Flags AND TF_SEND_EOI)
-        /* Write 0 to the local APIC EOI register */
-        mov dword ptr [APIC_EOI], 0
+        SendApicEoi
     endif
 
     /* Return from the trap */
@@ -277,4 +316,3 @@ MACRO(TRAP_ENTRY, Trap, Flags)
         ExitTrap Flags
     ENDFUNC
 ENDM
-

@@ -41,7 +41,7 @@ GetSysColorBrush(int nIndex)
 {
   if(nIndex >= 0 && nIndex < NUM_SYSCOLORS)
   {
-    return gpsi->ahbrSystem[nIndex];
+    return KA(gpsi->ahbrSystem[nIndex]);
   }
 
   return NULL;

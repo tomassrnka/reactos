@@ -1864,6 +1864,336 @@ CmpBuildHashStackAndLookupCache(
     return Status;
 }
 
+#ifdef BUILD_WOW64_ENABLED
+/* Reparse inside the configuration manager, after object-name capture. Both
+ * native KEY_WOW64_32KEY callers and the user-mode WoW64 translator use this
+ * path, with the original access state and security checks left in place. */
+static BOOLEAN
+CmpWow64Prefix(PCUNICODE_STRING Name, PCUNICODE_STRING Prefix)
+{
+    return RtlPrefixUnicodeString(Prefix, Name, TRUE) &&
+           (Name->Length == Prefix->Length || Name->Buffer[Prefix->Length / sizeof(WCHAR)] == L'\\');
+}
+
+#include <wow64reg.h>
+
+static const PCWSTR CmpWow64RedirectedClasses[] = {
+    L"\\CLSID", L"\\DirectShow", L"\\Interface", L"\\Media Type", L"\\MediaFoundation"
+};
+
+static BOOLEAN
+CmpWow64Path(PCUNICODE_STRING Name, PCWSTR Path)
+{
+    UNICODE_STRING Prefix;
+    RtlInitUnicodeString(&Prefix, Path);
+    return CmpWow64Prefix(Name, &Prefix);
+}
+
+/* Return the insertion point in bytes, or zero for a shared/physical path. */
+static ULONG
+CmpWow64KeyOffset(PCUNICODE_STRING Name, PULONG Cut)
+{
+    static const UNICODE_STRING Software = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE");
+    static const UNICODE_STRING Users = RTL_CONSTANT_STRING(L"\\REGISTRY\\USER\\");
+    UNICODE_STRING Tail, Component;
+    ULONG Offset, i;
+    BOOLEAN Machine = CmpWow64Prefix(Name, &Software);
+
+    if (Machine)
+    {
+        Offset = Software.Length;
+    }
+    else if (RtlPrefixUnicodeString(&Users, Name, TRUE))
+    {
+        /* HKCU's Classes tree and a separately mounted <SID>_Classes hive
+         * have the same subviews. Other per-user software remains shared. */
+        Offset = Users.Length;
+        while (Offset < Name->Length && Name->Buffer[Offset / sizeof(WCHAR)] != L'\\')
+            Offset += sizeof(WCHAR);
+        Component.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Users.Length);
+        Component.Length = Component.MaximumLength = Offset - Users.Length;
+        if (Component.Length >= 8 * sizeof(WCHAR))
+        {
+            UNICODE_STRING Suffix = RTL_CONSTANT_STRING(L"_Classes");
+            Component.Buffer += Component.Length / sizeof(WCHAR) - 8;
+            Component.Length = Component.MaximumLength = 8 * sizeof(WCHAR);
+            if (RtlEqualUnicodeString(&Component, &Suffix, TRUE)) goto Classes;
+        }
+        Tail.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Offset);
+        Tail.Length = Tail.MaximumLength = Name->Length - Offset;
+        if (!CmpWow64Path(&Tail, L"\\Software\\Classes")) return 0;
+        Offset += sizeof(L"\\Software\\Classes") - sizeof(WCHAR);
+        goto Classes;
+    }
+    else return 0;
+
+    Tail.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Offset);
+    Tail.Length = Tail.MaximumLength = Name->Length - Offset;
+    /* A root handle already in the physical 32-bit tree stays there even
+     * when the caller requests KEY_WOW64_64KEY. Never strip its node. */
+    if (CmpWow64Path(&Tail, L"\\Wow6432Node")) return 0;
+    if (CmpWow64Path(&Tail, L"\\Classes"))
+    {
+        Offset += sizeof(L"\\Classes") - sizeof(WCHAR);
+        goto Classes;
+    }
+    for (i = 0; i < RTL_NUMBER_OF(Wow64SharedSoftware); ++i)
+        if (CmpWow64Path(&Tail, Wow64SharedSoftware[i])) return 0;
+    return Offset;
+
+Classes:
+    Tail.Buffer = (PWSTR)((PUCHAR)Name->Buffer + Offset);
+    Tail.Length = Tail.MaximumLength = Name->Length - Offset;
+    if (CmpWow64Path(&Tail, L"\\Wow6432Node"))
+    {
+        ULONG NodeLength = sizeof(L"\\Wow6432Node") - sizeof(WCHAR);
+        Tail.Buffer += NodeLength / sizeof(WCHAR);
+        Tail.Length = Tail.MaximumLength = Tail.Length - NodeLength;
+        /* The container itself and redirected children stay physical. Only
+         * shared children are aliases, and only in the 32-bit Classes view. */
+        if (!Tail.Length || CmpWow64Path(&Tail, L"\\Wow6432Node")) return 0;
+        for (i = 0; i < RTL_NUMBER_OF(CmpWow64RedirectedClasses); ++i)
+            if (CmpWow64Path(&Tail, CmpWow64RedirectedClasses[i])) return 0;
+        *Cut = NodeLength;
+        return Offset;
+    }
+    for (i = 0; i < RTL_NUMBER_OF(CmpWow64RedirectedClasses); ++i)
+        if (CmpWow64Path(&Tail, CmpWow64RedirectedClasses[i])) return Offset;
+    return 0;
+}
+
+/* Compare only the policy prefix, without reconstructing the whole ancestry.
+ * Native relative names outside these aliases have no counted absolute-name
+ * limit, even if an ordinary application component is called Wow6432Node. */
+static BOOLEAN
+CmpWow64MatchComponents(PCM_KEY_CONTROL_BLOCK Kcb, ULONG Depth,
+                       PCUNICODE_STRING Remaining, PULONG Index,
+                       PULONG Position, PCWSTR Prefix)
+{
+    UNICODE_STRING Expected, Actual;
+    PCM_KEY_CONTROL_BLOCK Ancestor;
+    ULONG Start, Level;
+
+    while (*Prefix)
+    {
+        while (*Prefix == L'\\') ++Prefix;
+        if (!*Prefix) break;
+        Expected.Buffer = (PWSTR)Prefix;
+        while (*Prefix && *Prefix != L'\\') ++Prefix;
+        Expected.Length = Expected.MaximumLength = (Prefix - Expected.Buffer) * sizeof(WCHAR);
+        if (*Index < Depth)
+        {
+            Ancestor = Kcb;
+            for (Level = Depth - *Index - 1; Level; --Level) Ancestor = Ancestor->ParentKcb;
+            if (Ancestor->NameBlock->Compressed)
+            {
+                if (CmpCompareCompressedName(&Expected, Ancestor->NameBlock->Name,
+                                             Ancestor->NameBlock->NameLength)) return FALSE;
+            }
+            else
+            {
+                Actual.Buffer = Ancestor->NameBlock->Name;
+                Actual.Length = Actual.MaximumLength = Ancestor->NameBlock->NameLength;
+                if (!RtlEqualUnicodeString(&Actual, &Expected, TRUE)) return FALSE;
+            }
+            ++*Index;
+        }
+        else
+        {
+            while (*Position < Remaining->Length / sizeof(WCHAR) && Remaining->Buffer[*Position] == L'\\')
+                ++*Position;
+            Start = *Position;
+            while (*Position < Remaining->Length / sizeof(WCHAR) && Remaining->Buffer[*Position] != L'\\')
+                ++*Position;
+            Actual.Buffer = Remaining->Buffer + Start;
+            Actual.Length = Actual.MaximumLength = (*Position - Start) * sizeof(WCHAR);
+            if (!RtlEqualUnicodeString(&Actual, &Expected, TRUE)) return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOLEAN
+CmpWow64HasPhysicalAlias(PCM_KEY_CONTROL_BLOCK Kcb, PCUNICODE_STRING Remaining)
+{
+    PCM_KEY_CONTROL_BLOCK Ancestor;
+    ULONG Depth = 0, Index = 0, Position = 0, i, NextIndex, NextPosition;
+    for (Ancestor = Kcb; Ancestor; Ancestor = Ancestor->ParentKcb) ++Depth;
+    if (!CmpWow64MatchComponents(Kcb, Depth, Remaining, &Index, &Position,
+                                L"\\REGISTRY\\MACHINE\\SOFTWARE\\Wow6432Node")) return FALSE;
+    NextIndex = Index;
+    NextPosition = Position;
+    if (CmpWow64MatchComponents(Kcb, Depth, Remaining, &NextIndex, &NextPosition, L"\\Classes")) return TRUE;
+    for (i = 0; i < RTL_NUMBER_OF(Wow64SharedSoftware); ++i)
+    {
+        NextIndex = Index;
+        NextPosition = Position;
+        if (CmpWow64MatchComponents(Kcb, Depth, Remaining, &NextIndex, &NextPosition,
+                                   Wow64SharedSoftware[i])) return TRUE;
+    }
+    return FALSE;
+}
+
+static NTSTATUS
+CmpRedirectWow64Key(PCM_KEY_BODY Root, PUNICODE_STRING CompleteName,
+                    PCUNICODE_STRING RemainingName, PCM_PARSE_CONTEXT Context)
+{
+    static const UNICODE_STRING Software = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE\\SOFTWARE");
+    static const WCHAR Node[] = L"\\Wow6432Node";
+    PCM_KEY_CONTROL_BLOCK Kcb = Root->KeyControlBlock;
+    PUNICODE_STRING RootName;
+    UNICODE_STRING Full, Tail;
+    PWSTR NewName;
+    ULONG Length, Separator, Offset, Cut = 0, Insert = sizeof(Node) - sizeof(WCHAR), i;
+
+    if (!Context || Context->Wow64Reparsed)
+        return STATUS_SUCCESS;
+    CmpLockRegistry();
+    CmpAcquireKcbLockShared(Kcb);
+    if (Kcb->Delete)
+    {
+        CmpReleaseKcbLock(Kcb);
+        CmpUnlockRegistry();
+        return STATUS_KEY_DELETED;
+    }
+    if (!Context->Wow64Flags && !CmpWow64HasPhysicalAlias(Kcb, RemainingName))
+    {
+        CmpReleaseKcbLock(Kcb);
+        CmpUnlockRegistry();
+        return STATUS_SUCCESS;
+    }
+    RootName = CmpConstructName(Kcb);
+    CmpReleaseKcbLock(Kcb);
+    CmpUnlockRegistry();
+    if (!RootName) return STATUS_INSUFFICIENT_RESOURCES;
+    Separator = RemainingName->Length && RemainingName->Buffer[0] != L'\\' ? sizeof(WCHAR) : 0;
+    Length = RootName->Length + Separator + RemainingName->Length;
+    if (Length > MAXUSHORT - sizeof(Node))
+    {
+        ExFreePoolWithTag(RootName, TAG_CM);
+        return STATUS_NAME_TOO_LONG;
+    }
+    Full.Buffer = ExAllocatePoolWithTag(PagedPool, Length + sizeof(Node), TAG_CM);
+    if (!Full.Buffer)
+    {
+        ExFreePoolWithTag(RootName, TAG_CM);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    Full.Length = Length;
+    Full.MaximumLength = Length + sizeof(Node);
+    RtlCopyMemory(Full.Buffer, RootName->Buffer, RootName->Length);
+    if (Separator) Full.Buffer[RootName->Length / sizeof(WCHAR)] = L'\\';
+    RtlCopyMemory((PUCHAR)Full.Buffer + RootName->Length + Separator,
+                  RemainingName->Buffer, RemainingName->Length);
+    ExFreePoolWithTag(RootName, TAG_CM);
+    /* The ordinary name parser accepts repeated separators. Classify the
+     * same components so an alternate spelling cannot choose another view. */
+    for (i = 0, Length = 0; i < Full.Length / sizeof(WCHAR); ++i)
+    {
+        if (Full.Buffer[i] == L'\\' && Length && Full.Buffer[Length - 1] == L'\\')
+            continue;
+        Full.Buffer[Length++] = Full.Buffer[i];
+    }
+    Full.Length = Length * sizeof(WCHAR);
+    Offset = 0;
+    if (CmpWow64Path(&Full, L"\\REGISTRY\\MACHINE\\SOFTWARE\\Wow6432Node"))
+    {
+        /* Windows exposes shared subtrees through the physical Software view
+         * as well. Only those aliases leave a physical root; an ordinary
+         * 32-bit application key remains anchored regardless of selector. */
+        Tail.Buffer = (PWSTR)((PUCHAR)Full.Buffer + Software.Length + Insert);
+        Tail.Length = Tail.MaximumLength = Full.Length - Software.Length - Insert;
+        if (CmpWow64Path(&Tail, L"\\Classes"))
+        {
+            /* Software32\Classes aliases the Classes tree. A 32-bit view
+             * applies the shared/redirected Classes matrix there; an explicit
+             * native view exposes its physical 32-bit container. */
+            RtlMoveMemory((PUCHAR)Full.Buffer + Software.Length,
+                          Tail.Buffer, Tail.Length);
+            Full.Length -= Insert;
+            if (Context->Wow64Flags & KEY_WOW64_32KEY)
+            {
+                Offset = CmpWow64KeyOffset(&Full, &Cut);
+                if (!Offset) { Offset = Software.Length; Insert = 0; }
+            }
+            else Offset = Software.Length + sizeof(L"\\Classes") - sizeof(WCHAR);
+        }
+        else for (i = 0; i < RTL_NUMBER_OF(Wow64SharedSoftware); ++i)
+        {
+            if (CmpWow64Path(&Tail, Wow64SharedSoftware[i]))
+            {
+                Offset = Software.Length;
+                Cut = Insert;
+                Insert = 0;
+                break;
+            }
+        }
+    }
+    else if (Context->Wow64Flags & KEY_WOW64_32KEY)
+        Offset = CmpWow64KeyOffset(&Full, &Cut);
+    if (Cut) Insert = 0;
+    if (!Offset)
+    {
+        ExFreePoolWithTag(Full.Buffer, TAG_CM);
+        return STATUS_SUCCESS;
+    }
+    Length = Full.Length - Cut + Insert;
+    NewName = ExAllocatePoolWithTag(PagedPool, Length + sizeof(WCHAR), TAG_CM);
+    if (!NewName)
+    {
+        ExFreePoolWithTag(Full.Buffer, TAG_CM);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(NewName, Full.Buffer, Offset);
+    RtlCopyMemory((PUCHAR)NewName + Offset, Node, Insert);
+    RtlCopyMemory((PUCHAR)NewName + Offset + Insert, (PUCHAR)Full.Buffer + Offset + Cut, Full.Length - Offset - Cut);
+    NewName[Length / sizeof(WCHAR)] = UNICODE_NULL;
+    ExFreePoolWithTag(Full.Buffer, TAG_CM);
+
+    /* New per-user Classes trees need their physical view container. Create
+     * only that container, under the caller's token and ordinary ACL checks;
+     * an open never creates registry objects. The requested key itself still
+     * goes through the original access state on the reparse. */
+    if (Context->CreateOperation && Insert)
+    {
+        UNICODE_STRING Container;
+        OBJECT_ATTRIBUTES Attributes;
+        HANDLE Handle;
+        NTSTATUS Status;
+        Container.Buffer = NewName;
+        Container.Length = Container.MaximumLength = Offset + Insert;
+        InitializeObjectAttributes(&Attributes, &Container,
+            OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_FORCE_ACCESS_CHECK, NULL, NULL);
+        Status = ZwOpenKey(&Handle, KEY_QUERY_VALUE, &Attributes);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        {
+            /* The container follows its parent, not the requested child's
+             * lifetime. Let the normal create path check the actual parent,
+             * including hive boundaries, before trying a volatile container. */
+            Status = ZwCreateKey(&Handle, KEY_CREATE_SUB_KEY, &Attributes, 0, NULL,
+                                 REG_OPTION_NON_VOLATILE, NULL);
+            if (Status == STATUS_CHILD_MUST_BE_VOLATILE)
+                Status = ZwCreateKey(&Handle, KEY_CREATE_SUB_KEY, &Attributes, 0, NULL,
+                                     REG_OPTION_VOLATILE, NULL);
+        }
+        if (NT_SUCCESS(Status)) ZwClose(Handle);
+        else if (Status != STATUS_ACCESS_DENIED)
+        {
+            ExFreePoolWithTag(NewName, TAG_CM);
+            return Status;
+        }
+        /* An inaccessible existing container adds no rights requirement:
+         * the reparse below still checks the requested object's access. */
+    }
+    ExFreePool(CompleteName->Buffer);
+    CompleteName->Buffer = NewName;
+    CompleteName->Length = Length;
+    CompleteName->MaximumLength = Length + sizeof(WCHAR);
+    Context->Wow64Reparsed = TRUE;
+    return STATUS_REPARSE;
+}
+#endif
+
 NTSTATUS
 NTAPI
 CmpParseKey(IN PVOID ParseObject,
@@ -1904,6 +2234,12 @@ CmpParseKey(IN PVOID ParseObject,
 
     /* Fail if this isn't a key object */
     if (ObjectType != CmpKeyObjectType) return STATUS_OBJECT_TYPE_MISMATCH;
+
+#ifdef BUILD_WOW64_ENABLED
+    *Object = NULL;
+    Status = CmpRedirectWow64Key(ParseObject, CompleteName, RemainingName, Context);
+    if (Status != STATUS_SUCCESS) return Status;
+#endif
 
     /* Copy the remaining name */
     Current = *RemainingName;

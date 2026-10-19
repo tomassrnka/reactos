@@ -312,11 +312,18 @@ AddSectionToCopyQueueCab(
      */
     do
     {
-        /* Get source file name and target directory id */
-        if (!INF_GetData(&FilesContext, &SourceFileName, &TargetDirId))
+        /* Read the fields separately: INF_GetData rejects entries with an
+         * optional target file name (more than one value). */
+        if (!INF_GetDataField(&FilesContext, 0, &SourceFileName))
         {
             /* FIXME: Handle error! */
-            DPRINT1("INF_GetData() failed\n");
+            DPRINT1("Failed to get cabinet source file name\n");
+            break;
+        }
+        if (!INF_GetDataField(&FilesContext, 1, &TargetDirId))
+        {
+            INF_FreeData(SourceFileName);
+            DPRINT1("Failed to get cabinet target directory id\n");
             break;
         }
 

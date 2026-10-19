@@ -3,6 +3,8 @@
 #include <apitest.h>
 
 extern void func_AttachThreadInput(void);
+extern void func_AttachThreadInputQueue(void);
+extern void func_AutoRotation(void);
 extern void func_CharFuncs(void);
 extern void func_CloseWindow(void);
 extern void func_CopyImage(void);
@@ -34,9 +36,12 @@ extern void func_GetSystemMetrics(void);
 extern void func_GetUserObjectInformation(void);
 extern void func_GetWindowPlacement(void);
 extern void func_GW_ENABLEDPOPUP(void);
+extern void func_Handle32(void);
+extern void func_HungWindow(void);
 extern void func_InitializeLpkHooks(void);
 extern void func_IsDialogMessage(void);
 extern void func_IsServerSideWindow(void);
+extern void func_IsWindowArranged(void);
 extern void func_KbdLayout(void);
 extern void func_keybd_event(void);
 extern void func_MouseHookTransport(void);
@@ -67,8 +72,10 @@ extern void func_ScrollBarRedraw(void);
 extern void func_ScrollBarWndExtra(void);
 extern void func_ScrollDC(void);
 extern void func_ScrollWindowEx(void);
+extern void func_SendMessageSenderDied(void);
 extern void func_SendMessageTimeout(void);
 extern void func_SetActiveWindow(void);
+extern void func_SetCoalescableTimer(void);
 extern void func_SetCursorPos(void);
 extern void func_SetFocus(void);
 extern void func_SetParent(void);
@@ -80,6 +87,7 @@ extern void func_SetWindowPosOwned(void);
 extern void func_ShowWindow(void);
 extern void func_ShowWindowFrame(void);
 extern void func_SwitchDesktop(void);
+extern void func_SuspendResumeNotification(void);
 extern void func_SwitchToThisWindow(void);
 extern void func_SystemParametersInfo(void);
 extern void func_SystemMenu(void);
@@ -97,6 +105,8 @@ extern void func_wsprintfApi(void);
 const struct test winetest_testlist[] =
 {
     { "AttachThreadInput", func_AttachThreadInput },
+    { "AttachThreadInputQueue", func_AttachThreadInputQueue },
+    { "AutoRotation", func_AutoRotation },
     { "CharFuncs", func_CharFuncs },
     { "CloseWindow", func_CloseWindow },
     { "CopyImage", func_CopyImage },
@@ -128,9 +138,12 @@ const struct test winetest_testlist[] =
     { "GetUserObjectInformation", func_GetUserObjectInformation },
     { "GetWindowPlacement", func_GetWindowPlacement },
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },
+    { "Handle32", func_Handle32 },
+    { "HungWindow", func_HungWindow },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
     { "IsDialogMessage", func_IsDialogMessage },
     { "IsServerSideWindow", func_IsServerSideWindow },
+    { "IsWindowArranged", func_IsWindowArranged },
     { "KbdLayout", func_KbdLayout },
     { "keybd_event", func_keybd_event },
     { "MouseHookTransport", func_MouseHookTransport },
@@ -161,8 +174,10 @@ const struct test winetest_testlist[] =
     { "ScrollBarWndExtra", func_ScrollBarWndExtra },
     { "ScrollDC", func_ScrollDC },
     { "ScrollWindowEx", func_ScrollWindowEx },
+    { "SendMessageSenderDied", func_SendMessageSenderDied },
     { "SendMessageTimeout", func_SendMessageTimeout },
     { "SetActiveWindow", func_SetActiveWindow },
+    { "SetCoalescableTimer", func_SetCoalescableTimer },
     { "SetCursorPos", func_SetCursorPos },
     { "SetFocus", func_SetFocus },
     { "SetParent", func_SetParent },
@@ -174,6 +189,7 @@ const struct test winetest_testlist[] =
     { "ShowWindow", func_ShowWindow },
     { "ShowWindowFrame", func_ShowWindowFrame },
     { "SwitchDesktop", func_SwitchDesktop },
+    { "SuspendResumeNotification", func_SuspendResumeNotification },
     { "SwitchToThisWindow", func_SwitchToThisWindow },
     { "SystemMenu", func_SystemMenu },
     { "SystemParametersInfo", func_SystemParametersInfo },

@@ -213,6 +213,9 @@
 @ stdcall EncryptFileA(str)
 @ stdcall EncryptFileW(wstr)
 @ stub EncryptedFileKeyInfo
+@ stdcall -version=0x600+ EventRegister(ptr ptr ptr ptr) ntdll.EtwEventRegister
+@ stdcall -version=0x600+ EventUnregister(int64) ntdll.EtwEventUnregister
+@ stdcall -version=0x600+ EventWrite(int64 ptr long ptr) ntdll.EtwEventWrite
 @ stdcall EncryptionDisable(wstr long)
 @ stdcall EnumDependentServicesA(long long ptr long ptr ptr)
 @ stdcall EnumDependentServicesW(long long ptr long ptr ptr)

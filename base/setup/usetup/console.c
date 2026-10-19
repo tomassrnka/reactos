@@ -732,7 +732,7 @@ SetConsoleOutputCP(
         return FALSE;
     }
 
-    CabStatus = CabinetExtractFile(CabinetContext, &Search);
+    CabStatus = CabinetExtractFile(CabinetContext, &Search, NULL);
     CabinetClose(CabinetContext);
     if (CabStatus != CAB_STATUS_SUCCESS)
     {

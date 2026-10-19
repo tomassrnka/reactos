@@ -15,11 +15,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(imm);
 
 HANDLE ghImmHeap = NULL;
 
-PTHREADINFO FASTCALL Imm32CurrentPti(VOID)
+KPTRTYPE(PTHREADINFO) FASTCALL Imm32CurrentPti(VOID)
 {
-    if (NtCurrentTeb()->Win32ThreadInfo == NULL)
+    if (KPTR_NULL(KTEB_PTI()))
         NtUserGetThreadState(THREADSTATE_GETTHREADINFO);
-    return NtCurrentTeb()->Win32ThreadInfo;
+    return KTEB_PTI();
 }
 
 BOOL Imm32IsCrossThreadAccess(HIMC hIMC)
@@ -257,7 +257,7 @@ BOOL Imm32CheckImcProcess(PIMC pIMC)
     if (IS_NULL_UNEXPECTEDLY(pIMC))
         return FALSE;
 
-    if (pIMC->head.pti == Imm32CurrentPti())
+    if (KPTR_EQ(KPTR(pIMC->head.pti), Imm32CurrentPti()))
         return TRUE;
 
     hIMC = pIMC->head.h;

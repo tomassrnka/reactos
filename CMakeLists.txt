@@ -75,6 +75,10 @@ add_definitions(
     -D__REACTOS__
 )
 
+if(BUILD_WOW64_ENABLED)
+    add_compile_definitions(BUILD_WOW64_ENABLED)
+endif()
+
 # There doesn't seem to be a standard for __FILE__ being relative or absolute, so detect it at runtime.
 file(RELATIVE_PATH _PATH_PREFIX ${REACTOS_BINARY_DIR} ${REACTOS_SOURCE_DIR})
 if (NOT MSVC AND ((CMAKE_C_COMPILER_ID STREQUAL "GNU") AND (CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL "8.0.0")
@@ -169,6 +173,15 @@ else()
     # Add host tools target
     include(sdk/cmake/host-tools.cmake)
     setup_host_tools()
+
+    # The i386 user-mode files for SysWOW64 (nested build), or the recording
+    # side of it when this is that nested build
+    include(sdk/cmake/syswow64.cmake)
+    if(SYSWOW64_GUEST)
+        syswow64_guest_begin()
+    elseif(SYSWOW64)
+        setup_syswow64()
+    endif()
 
     # We don't need CMake importlib handling.
     unset(CMAKE_IMPORT_LIBRARY_SUFFIX)
@@ -380,6 +393,10 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
 
     # Create {bootcd, bootcdregtest, livecd}.lst
     create_iso_lists()
+
+    if(SYSWOW64_GUEST)
+        syswow64_guest_end()
+    endif()
 
     file(MAKE_DIRECTORY ${REACTOS_BINARY_DIR}/sdk/include/reactos)
 

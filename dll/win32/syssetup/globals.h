@@ -120,3 +120,5 @@ VOID
 GetSetupInfPath(PWSTR szPath, UINT cchMax);
 
 /* EOF */
+
+BOOL InitializeProgramFilesDir(VOID);

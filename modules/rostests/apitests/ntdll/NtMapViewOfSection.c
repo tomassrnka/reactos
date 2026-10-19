@@ -25,6 +25,9 @@ Test_PageFileSection(void)
     PVOID BaseAddress, BaseAddress2;
     SIZE_T ViewSize;
     ULONG OldProtect;
+    BOOL Wow64 = FALSE;
+
+    IsWow64Process(GetCurrentProcess(), &Wow64);
 
     /* Create a page file backed section with SEC_COMMIT */
     MaximumSize.QuadPart = 0x20000;
@@ -101,11 +104,16 @@ Test_PageFileSection(void)
                                 ViewShare,
                                 0,
                                 PAGE_READWRITE);
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    ok(((ULONG_PTR)BaseAddress & 0x0000FFFF) == 0, "BaseAddress not 64k aligned: %p\n", BaseAddress);
-    ok(((ULONG_PTR)BaseAddress & (ULONG_PTR)0xFFFFFFFFFFC00000ULL) == 0, "Upper bits are not all zero: %p\n", BaseAddress);
-    Status = NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
-    ok_ntstatus(Status, STATUS_SUCCESS);
+    /* The process may already occupy the complete sub-4 MB address range. */
+    ok(Status == STATUS_SUCCESS || Status == STATUS_NO_MEMORY,
+       "Unexpected mapping status %08lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        ok(((ULONG_PTR)BaseAddress & 0x0000FFFF) == 0, "BaseAddress not 64k aligned: %p\n", BaseAddress);
+        ok(((ULONG_PTR)BaseAddress & (ULONG_PTR)0xFFFFFFFFFFC00000ULL) == 0, "Upper bits are not all zero: %p\n", BaseAddress);
+        Status = NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
 
     /* Try to map 1 page, with free base address and zero bits incompatible with 64k granularity.
      * Note: On 64 bit Windows, ZeroBits != 0 means that the upper (32 + ZeroBits) bits must be zero.
@@ -174,17 +182,21 @@ Test_PageFileSection(void)
                                 ViewShare,
                                 0,
                                 PAGE_READWRITE);
-    if (GetNTVersion() >= _WIN32_WINNT_VISTA)
+    if (sizeof(void *) == 8 || Wow64)
     {
         ok_ntstatus(Status, STATUS_SUCCESS);
         ok(((ULONG_PTR)BaseAddress & 0x0000FFFF) == 0, "BaseAddress not 64k aligned: %p\n", BaseAddress);
         ok(((ULONG_PTR)BaseAddress & (ULONG_PTR)0xFFFFFFFFF0000000ULL) == 0, "Upper bits are not all zero: %p\n", BaseAddress);
+        if (NT_SUCCESS(Status)) NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
     }
     else
     {
         ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
         if (!NT_SUCCESS(Status))
+        {
+            NtClose(SectionHandle);
             return;
+        }
     }
 
     /* Map 2 pages, without MEM_COMMIT */

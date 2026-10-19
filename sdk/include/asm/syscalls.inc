@@ -59,8 +59,18 @@ MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
     StackBytes = 4 * ArgCount
     FPO 0, 0, 0, 0, 0, FRAME_FPO
     mov eax, SyscallId
+#ifdef SYSWOW64_GUEST
+    mov edx, fs:[HEX(c0)]
+    test edx, edx
+    jnz syscall_gate_&Name
+    mov edx, KUSER_SHARED_SYSCALL
+    mov edx, [edx]
+syscall_gate_&Name:
+    call edx
+#else
     mov edx, KUSER_SHARED_SYSCALL
     call dword ptr [edx]
+#endif
     ret StackBytes
 ENDM
 MACRO(STUBCODE_K, Name, SyscallId, ArgCount)

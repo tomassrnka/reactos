@@ -254,7 +254,11 @@ NtCreateKey(OUT PHANDLE KeyHandle,
             ObjectAttributes->ObjectName, ObjectAttributes->RootDirectory,
             DesiredAccess, CreateOptions);
 
-    /* Ignore the WOW64 flag, it's not valid in the kernel */
+#ifdef BUILD_WOW64_ENABLED
+    ParseContext.Wow64Flags = DesiredAccess & KEY_WOW64_RES;
+    if (ParseContext.Wow64Flags == KEY_WOW64_RES) return STATUS_INVALID_PARAMETER;
+#endif
+    /* View selectors are not access rights. Native i386 ignores them. */
     DesiredAccess &= ~KEY_WOW64_RES;
 
     /* Check for user-mode caller */
@@ -344,7 +348,11 @@ NtOpenKey(OUT PHANDLE KeyHandle,
     DPRINT("NtOpenKey(Path: %wZ, Root %x, Access: %x)\n",
             ObjectAttributes->ObjectName, ObjectAttributes->RootDirectory, DesiredAccess);
 
-    /* Ignore the WOW64 flag, it's not valid in the kernel */
+#ifdef BUILD_WOW64_ENABLED
+    ParseContext.Wow64Flags = DesiredAccess & KEY_WOW64_RES;
+    if (ParseContext.Wow64Flags == KEY_WOW64_RES) return STATUS_INVALID_PARAMETER;
+#endif
+    /* View selectors are not access rights. Native i386 ignores them. */
     DesiredAccess &= ~KEY_WOW64_RES;
 
     /* Check for user-mode caller */

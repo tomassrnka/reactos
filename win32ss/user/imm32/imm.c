@@ -59,7 +59,7 @@ ImmRegisterClient(
     _Inout_ PSHAREDINFO ptr,
     _In_ HINSTANCE hMod)
 {
-    gSharedInfo = *ptr;
+    KASSIGN(gSharedInfo, *ptr);
     gpsi = gSharedInfo.psi;
     return ImmInitializeGlobals(hMod);
 }
@@ -677,7 +677,7 @@ Imm32DestroyInputContext(HIMC hIMC, HKL hKL, BOOL bKeep)
     if (IS_NULL_UNEXPECTEDLY(pIMC))
         return FALSE;
 
-    if (pIMC->head.pti != Imm32CurrentPti())
+    if (!KPTR_EQ(KPTR(pIMC->head.pti), Imm32CurrentPti()))
     {
         ERR("Thread mismatch\n");
         return FALSE;
@@ -1369,7 +1369,7 @@ ImmDllInitialize(
             break;
 
         case DLL_THREAD_DETACH:
-            if (!IS_IMM_MODE() || NtCurrentTeb()->Win32ThreadInfo == NULL)
+            if (!IS_IMM_MODE() || !W32GetCurrentThreadInfo())
                 return TRUE;
 
             hKL = GetKeyboardLayout(0);

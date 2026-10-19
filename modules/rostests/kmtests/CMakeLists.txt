@@ -11,6 +11,7 @@ add_subdirectory(kernel32)
 add_subdirectory(ntos_cc)
 add_subdirectory(ntos_cm)
 add_subdirectory(ntos_io)
+add_subdirectory(ntos_ke/KeTrapFrame)
 add_subdirectory(ntos_mm)
 add_subdirectory(ntos_po)
 add_subdirectory(tcpip)
@@ -110,7 +111,9 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeProcessor.c
     ntos_ke/KeQpc.c
     ntos_ke/KeSpinLock.c
+    ntos_ke/KeSystemCall32.c
     ntos_ke/KeTimer.c
+    ntos_mm/MmMapViewAligned.c
     ntos_mm/MmMdl.c
     ntos_mm/MmReservedMapping.c
     ntos_mm/MmSection.c
@@ -188,6 +191,7 @@ list(APPEND KMTEST_SOURCE
     kernel32/FindFile_user.c
     ntos_cc/CcCopyRead_user.c
     ntos_cc/CcCopyWrite_user.c
+    ntos_cc/CcZeroData_user.c
     ntos_cc/CcLazyWriteDelete_user.c
     ntos_cc/CcMapData_user.c
     ntos_cc/CcPinMappedData_user.c
@@ -198,6 +202,8 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoDeviceObject_user.c
     ntos_io/IoReadWrite_user.c
     ntos_kd/NtSystemDebugControl.c
+    ntos_ke/KeSystemCall32_user.c
+    ntos_ke/KeTrapFrame/KeTrapFrame_user.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/MmSpecialPool_user.c
     ntos_mm/NtCreateSection_user.c
@@ -206,6 +212,16 @@ list(APPEND KMTEST_SOURCE
     ${COMMON_SOURCE}
 
     kmtest/kmtest.rc)
+
+if(ARCH STREQUAL "i386")
+    add_asm_files(kmtest_trap_asm ntos_ke/KeTrapFrame/KeTrapFrame_i386.S)
+    list(APPEND KMTEST_SOURCE ${kmtest_trap_asm})
+endif()
+
+if(ARCH STREQUAL "amd64")
+    add_asm_files(kmtest_cstar_asm ntos_ke/KeSystemCall32_amd64.S)
+    list(APPEND KMTEST_SOURCE ${kmtest_cstar_asm})
+endif()
 
 add_executable(kmtest ${KMTEST_SOURCE})
 set_module_type(kmtest win32cui)
@@ -221,6 +237,7 @@ add_rostests_file(TARGET kmtest)
 add_custom_target(kmtest_drivers)
 add_dependencies(kmtest_drivers
     kmtest_drv
+    ketrapframe_drv
     example_drv
     hidp_drv
     iocreatefile_drv
@@ -233,6 +250,7 @@ add_dependencies(kmtest_drivers
     poirp_drv
     tcpip_drv
     cccopyread_drv
+    cczerodata_drv
     cmflush_drv
     ccmapdata_drv)
 

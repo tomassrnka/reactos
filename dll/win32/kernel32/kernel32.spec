@@ -55,7 +55,7 @@
 @ stdcall -stub -version=0x600+ CallbackMayRunLong(ptr)
 @ stdcall CancelDeviceWakeupRequest(long)
 @ stdcall CancelIo(long)
-@ stdcall -stub -version=0x600+ CancelIoEx(ptr ptr)
+@ stdcall -version=0x600+ CancelIoEx(ptr ptr)
 @ stdcall -stub -version=0x600+ CancelSynchronousIo(ptr)
 @ stdcall -version=0x600+ CancelThreadpoolIo(ptr) ntdll.TpCancelAsyncIoOperation
 @ stdcall CancelTimerQueueTimer(long long)
@@ -71,6 +71,7 @@
 @ stdcall ClearCommError(long ptr ptr)
 @ stdcall CloseConsoleHandle(long)
 @ stdcall CloseHandle(long)
+@ stdcall ClosePackageInfo(ptr)
 @ stdcall -stub -version=0x600+ ClosePrivateNamespace(ptr long)
 @ stdcall CloseProfileUserMapping()
 @ stdcall -version=0x600+ CloseThreadpool(ptr) ntdll.TpReleasePool
@@ -183,8 +184,8 @@
 @ stdcall CreateTimerQueueTimer(ptr long ptr ptr long long long)
 @ stdcall CreateToolhelp32Snapshot(long long)
 @ stdcall CreateWaitableTimerA(ptr long str)
-@ stub -version=0x600+ CreateWaitableTimerExA
-@ stub -version=0x600+ CreateWaitableTimerExW
+@ stdcall -version=0x600+ CreateWaitableTimerExA(ptr str long long)
+@ stdcall -version=0x600+ CreateWaitableTimerExW(ptr wstr long long)
 @ stdcall CreateWaitableTimerW(ptr long wstr)
 ;@ stdcall -arch=x86_64 CtrlRoutine()
 @ stdcall DeactivateActCtx(long ptr)
@@ -321,6 +322,7 @@
 @ stdcall FindNextVolumeMountPointA(long str long)
 @ stdcall FindNextVolumeMountPointW(long wstr long)
 @ stdcall FindNextVolumeW(long ptr long)
+@ stdcall FindPackagesByPackageFamily(wstr long ptr ptr ptr ptr ptr)
 @ stdcall FindResourceA(long str str)
 @ stdcall FindResourceExA(long str str long)
 @ stdcall FindResourceExW(long wstr wstr long)
@@ -339,6 +341,7 @@
 @ stdcall FlushViewOfFile(ptr long)
 @ stdcall FoldStringA(long str long ptr long)
 @ stdcall FoldStringW(long wstr long ptr long)
+@ stdcall FormatApplicationUserModelId(wstr wstr ptr ptr)
 @ stdcall FormatMessageA(long ptr long long ptr long ptr)
 @ stdcall FormatMessageW(long ptr long long ptr long ptr)
 @ stdcall FreeConsole()
@@ -355,6 +358,8 @@
 @ stdcall -version=0x601+ GetActiveProcessorGroupCount()
 @ stdcall -version=0x600+ GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr)
 @ stdcall -version=0x600+ GetApplicationRestartSettings(ptr ptr ptr ptr)
+@ stdcall GetApplicationUserModelId(long ptr ptr)
+@ stdcall GetApplicationUserModelIdFromToken(long ptr ptr)
 @ stdcall GetAtomNameA(long ptr long)
 @ stdcall GetAtomNameW(long ptr long)
 @ stdcall GetBinaryType(str ptr) GetBinaryTypeA
@@ -435,11 +440,16 @@
 @ stdcall -version=0x600+ GetCurrencyFormatEx(wstr long wstr ptr wstr long)
 @ stdcall GetCurrencyFormatW(long long wstr ptr wstr long)
 @ stdcall GetCurrentActCtx(ptr)
+@ stdcall GetCurrentApplicationUserModelId(ptr ptr)
 @ stdcall GetCurrentConsoleFont(long long ptr)
 @ stdcall -version=0x600+ GetCurrentConsoleFontEx(ptr long ptr)
 @ stdcall GetCurrentDirectoryA(long ptr)
 @ stdcall GetCurrentDirectoryW(long ptr)
-@ stdcall -version=0x602+ GetCurrentPackageId(ptr ptr)
+@ stdcall GetCurrentPackageFamilyName(ptr ptr)
+@ stdcall GetCurrentPackageFullName(ptr ptr)
+@ stdcall GetCurrentPackageId(ptr ptr)
+@ stdcall GetCurrentPackageInfo(long ptr ptr ptr)
+@ stdcall GetCurrentPackagePath(ptr ptr)
 @ stdcall -norelay GetCurrentProcess()
 @ stdcall -norelay GetCurrentProcessId()
 @ stdcall GetCurrentProcessorNumber() ntdll.RtlGetCurrentProcessorNumber
@@ -464,7 +474,7 @@
 @ stdcall GetDriveTypeW(wstr)
 @ stub -version=0x600+ GetDurationFormat
 @ stub -version=0x600+ GetDurationFormatEx
-@ stdcall -stub -version=0x600+ GetDynamicTimeZoneInformation(ptr)
+@ stdcall -version=0x600+ GetDynamicTimeZoneInformation(ptr)
 @ stdcall GetEnvironmentStrings()
 @ stdcall GetEnvironmentStringsA() GetEnvironmentStrings
 @ stdcall GetEnvironmentStringsW()
@@ -513,6 +523,15 @@
 @ stdcall GetLocaleInfoA(long long ptr long)
 @ stdcall -version=0x600+ GetLocaleInfoEx(wstr long ptr long)
 @ stdcall GetLocaleInfoW(long long ptr long)
+@ stdcall GetPackageFamilyName(long ptr ptr)
+@ stdcall GetPackageFamilyNameFromToken(long ptr ptr)
+@ stdcall GetPackageFullName(long ptr ptr)
+@ stdcall GetPackageFullNameFromToken(long ptr ptr)
+@ stdcall GetPackageId(long ptr ptr)
+@ stdcall GetPackageInfo(ptr long ptr ptr ptr)
+@ stdcall GetPackagePath(ptr long ptr ptr)
+@ stdcall GetPackagePathByFullName(wstr ptr ptr)
+@ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr)
 @ stdcall -version=0x600+ IsValidLocaleName(wstr)
 @ stdcall GetLogicalDriveStringsA(long ptr)
 @ stdcall GetLogicalDriveStringsW(long ptr)
@@ -583,6 +602,7 @@
 @ stdcall -norelay GetProcessHeap()
 @ stdcall GetProcessHeaps(long ptr)
 @ stdcall GetProcessId(long)
+@ stdcall GetProcessMitigationPolicy(long long ptr long)
 @ stdcall GetProcessIdOfThread(ptr)
 @ stdcall GetProcessIoCounters(long ptr)
 @ stdcall -version=0x601+ GetProcessPreferredUILanguages(long ptr ptr ptr)
@@ -600,7 +620,7 @@
 @ stdcall GetProfileStringA(str str str ptr long)
 @ stdcall GetProfileStringW(wstr wstr wstr ptr long)
 @ stdcall GetQueuedCompletionStatus(long ptr ptr ptr long)
-@ stdcall -stub -version=0x600+ GetQueuedCompletionStatusEx(ptr ptr long ptr long long)
+@ stdcall -version=0x600+ GetQueuedCompletionStatusEx(ptr ptr long ptr long long)
 @ stdcall GetShortPathNameA(str ptr long)
 @ stdcall GetShortPathNameW(wstr ptr long)
 @ stdcall GetStartupInfoA(ptr)
@@ -627,7 +647,7 @@
 @ stdcall GetSystemTime(ptr)
 @ stdcall GetSystemTimeAdjustment(ptr ptr ptr)
 @ stdcall GetSystemTimeAsFileTime(ptr)
-@ stdcall -version=0x602+ GetSystemTimePreciseAsFileTime(ptr)
+@ stdcall GetSystemTimePreciseAsFileTime(ptr)
 @ stdcall GetSystemTimes(ptr ptr ptr)
 @ stdcall GetSystemWindowsDirectoryA(ptr long)
 @ stdcall GetSystemWindowsDirectoryW(ptr long)
@@ -641,6 +661,7 @@
 @ stdcall GetTempPathA(long ptr)
 @ stdcall GetTempPathW(long ptr)
 @ stdcall GetThreadContext(long ptr)
+@ stdcall GetThreadInformation(long long ptr long)
 @ stdcall -version=0x600+ GetThreadErrorMode()
 @ stdcall -version=0x601+ GetThreadGroupAffinity(ptr ptr)
 @ stdcall GetThreadIOPendingFlag(long ptr)
@@ -672,7 +693,7 @@
 @ stdcall GetVersionExA(ptr)
 @ stdcall GetVersionExW(ptr)
 @ stdcall GetVolumeInformationA(str ptr long ptr ptr ptr ptr long)
-@ stub -version=0x600+ GetVolumeInformationByHandleW
+@ stdcall -version=0x600+ GetVolumeInformationByHandleW(ptr ptr long ptr ptr ptr ptr long)
 @ stdcall GetVolumeInformationW(wstr ptr long ptr ptr ptr ptr long)
 @ stdcall GetVolumeNameForVolumeMountPointA(str ptr long)
 @ stdcall GetVolumeNameForVolumeMountPointW(wstr ptr long)
@@ -893,6 +914,7 @@
 @ stdcall OpenJobObjectW(long long wstr)
 @ stdcall OpenMutexA(long long str)
 @ stdcall OpenMutexW(long long wstr)
+@ stdcall OpenPackageInfoByFullName(wstr long ptr)
 @ stub -version=0x600+ OpenPrivateNamespaceA
 @ stub -version=0x600+ OpenPrivateNamespaceW
 @ stdcall OpenProcess(long long long)
@@ -906,6 +928,12 @@
 @ stdcall OpenWaitableTimerW(long long wstr)
 @ stdcall OutputDebugStringA(str)
 @ stdcall OutputDebugStringW(wstr)
+@ stdcall PackageFamilyNameFromFullName(wstr ptr ptr)
+@ stdcall PackageFamilyNameFromId(ptr ptr ptr)
+@ stdcall PackageFullNameFromId(ptr ptr ptr)
+@ stdcall PackageIdFromFullName(wstr long ptr ptr)
+@ stdcall PackageNameAndPublisherIdFromFamilyName(wstr ptr ptr ptr ptr)
+@ stdcall ParseApplicationUserModelId(wstr ptr ptr ptr ptr)
 @ stdcall PeekConsoleInputA(ptr ptr long ptr)
 @ stdcall PeekConsoleInputW(ptr ptr long ptr)
 @ stdcall PeekNamedPipe(long ptr long ptr ptr ptr)
@@ -921,6 +949,7 @@
 @ stdcall Process32Next(ptr ptr)
 @ stdcall Process32NextW(ptr ptr)
 @ stdcall ProcessIdToSessionId(long ptr)
+@ stdcall PrefetchVirtualMemory(long long ptr long)
 @ stdcall PulseEvent(long)
 @ stdcall PurgeComm(long long)
 @ stub -version=0x600+ QueryActCtxSettingsW
@@ -935,13 +964,15 @@
 @ stdcall QueryMemoryResourceNotification(ptr ptr)
 @ stdcall QueryPerformanceCounter(ptr)
 @ stdcall QueryPerformanceFrequency(ptr)
+@ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
 @ stub -version=0x600+ QueryProcessAffinityUpdateMode
 @ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
 @ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
+@ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
 @ stdcall QueueUserAPC(ptr long long)
 @ stdcall QueueUserWorkItem(ptr ptr long)
 @ stdcall -norelay RaiseException(long long long ptr)
-@ stdcall -stub -version=0x603+ RaiseFailFastException(ptr ptr long)
+@ stdcall -version=0x601+ RaiseFailFastException(ptr ptr long)
 @ stdcall ReOpenFile(ptr long long long)
 @ stdcall ReadConsoleA(long ptr long ptr ptr)
 @ stdcall ReadConsoleInputA(long ptr long ptr)
@@ -992,6 +1023,7 @@
 @ stdcall RequestDeviceWakeup(long)
 @ stdcall RequestWakeupLatency(long)
 @ stdcall ResetEvent(long)
+@ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall ResetWriteWatch(ptr long)
 @ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall RestoreLastError(long) ntdll.RtlRestoreLastWin32Error
@@ -1121,6 +1153,7 @@
 @ stdcall SetProcessDEPPolicy(long)
 @ stdcall -version=0x601+ SetProcessPreferredUILanguages(long ptr ptr)
 @ stdcall SetProcessPriorityBoost(long long)
+@ stdcall SetProcessMitigationPolicy(long ptr long)
 @ stdcall SetProcessShutdownParameters(long long)
 @ stdcall SetProcessWorkingSetSize(long long long)
 @ stdcall SetProcessWorkingSetSizeEx(long long long long)
@@ -1141,6 +1174,7 @@
 @ stdcall SetThreadExecutionState(long)
 @ stdcall -version=0x601+ SetThreadGroupAffinity(ptr ptr ptr)
 @ stdcall SetThreadIdealProcessor(long long)
+@ stdcall SetThreadInformation(long long ptr long)
 @ stdcall SetThreadLocale(long)
 @ stdcall -version=0x600+ SetThreadPreferredUILanguages(long wstr ptr)
 @ stdcall SetThreadPriority(long long)
@@ -1216,6 +1250,11 @@
 @ stdcall VDMOperationStarted(long)
 @ stdcall -version=0x500-0x502 ValidateLCType(long long ptr ptr)
 @ stdcall -version=0x500-0x502 ValidateLocale(long)
+@ stdcall VerifyApplicationUserModelId(wstr)
+@ stdcall VerifyPackageFamilyName(wstr)
+@ stdcall VerifyPackageFullName(wstr)
+@ stdcall VerifyPackageId(ptr)
+@ stdcall VerifyPackageRelativeApplicationId(wstr)
 @ stdcall VerLanguageNameA(long str long)
 @ stdcall VerLanguageNameW(long wstr long)
 @ stdcall -ret64 VerSetConditionMask(long long long long) ntdll.VerSetConditionMask
@@ -1251,12 +1290,14 @@
 @ stdcall WaitNamedPipeW(wstr long)
 @ stdcall -version=0x600+ WakeAllConditionVariable(ptr) ntdll.RtlWakeAllConditionVariable
 @ stdcall -version=0x600+ WakeConditionVariable(ptr) ntdll.RtlWakeConditionVariable
-@ stub -version=0x600+ WerGetFlags
+@ stdcall -version=0x600+ WerGetFlags(ptr ptr)
 @ stub -version=0x600+ WerRegisterFile
 @ stub -version=0x600+ WerRegisterMemoryBlock
-@ stub -version=0x600+ WerSetFlags
+@ stdcall -version=0x601+ WerRegisterRuntimeExceptionModule(wstr ptr)
+@ stdcall -version=0x600+ WerSetFlags(long)
 @ stub -version=0x600+ WerUnregisterFile
 @ stub -version=0x600+ WerUnregisterMemoryBlock
+@ stdcall -version=0x601+ WerUnregisterRuntimeExceptionModule(wstr ptr)
 @ stub -version=0x600+ WerpCleanupMessageMapping
 @ stub -version=0x600+ WerpInitiateRemoteRecovery
 @ stub -version=0x600+ WerpNotifyLoadStringResource

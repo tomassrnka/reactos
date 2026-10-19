@@ -4,6 +4,8 @@ add_subdirectory(wevhook)
 
 list(APPEND SOURCE
     AttachThreadInput.c
+    AttachThreadInputQueue.c
+    AutoRotation.c
     ../include/msgtrace.c
     CharFuncs.c
     CloseWindow.c
@@ -14,6 +16,7 @@ list(APPEND SOURCE
     DeferWindowPos.c
     DestroyCursorIcon.c
     DM_REPOSITION.c
+    DpiFunctions.c
     DrawIconEx.c
     DrawText.c
     EditInk.c
@@ -34,9 +37,12 @@ list(APPEND SOURCE
     GetUserObjectInformation.c
     GetWindowPlacement.c
     GW_ENABLEDPOPUP.c
+    Handle32.c
+    HungWindow.c
     InitializeLpkHooks.c
     IsDialogMessage.c
     IsServerSideWindow.c
+    IsWindowArranged.c
     KbdLayout.c
     keybd_event.c
     MouseHookTransport.c
@@ -66,8 +72,10 @@ list(APPEND SOURCE
     ScrollBarWndExtra.c
     ScrollDC.c
     ScrollWindowEx.c
+    SendMessageSenderDied.c
     SendMessageTimeout.c
     SetActiveWindow.c
+    SetCoalescableTimer.c
     SetCursorPos.c
     SetFocus.c
     SetParent.c
@@ -79,6 +87,7 @@ list(APPEND SOURCE
     ShowWindow.c
     ShowWindowFrame.c
     SwitchDesktop.c
+    SuspendResumeNotification.c
     SwitchToThisWindow.c
     SystemMenu.c
     SystemParametersInfo.c
@@ -121,6 +130,12 @@ set_module_type(user32_apitest_connect win32cui UNICODE)
 add_importlibs(user32_apitest_connect msvcrt kernel32)
 add_rostests_file(TARGET user32_apitest_connect)
 add_dependencies(user32_apitest user32_apitest_connect)
+
+add_executable(user32_apitest_dpi user32_apitest_dpi.c)
+set_module_type(user32_apitest_dpi win32cui)
+add_importlibs(user32_apitest_dpi gdi32 user32 msvcrt kernel32)
+add_rostests_file(TARGET user32_apitest_dpi)
+add_dependencies(user32_apitest user32_apitest_dpi)
 
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest1.manifest")
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest2.manifest")

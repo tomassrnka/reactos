@@ -1205,7 +1205,7 @@ GreGetObjectOwner(HGDIOBJ hobj)
     /* Check if the handle is valid */
     if (ulIndex >= GDI_HANDLE_COUNT ||
         gpentHmgr[ulIndex].Objt == GDIObjType_DEF_TYPE ||
-        ((ULONG_PTR)hobj >> 16) != gpentHmgr[ulIndex].FullUnique)
+        GDI_HANDLE_GET_UNIQUE(hobj) != gpentHmgr[ulIndex].FullUnique)
     {
         DPRINT1("GreGetObjectOwner: invalid handle 0x%p.\n", hobj);
         return GDI_OBJ_HMGR_RESTRICTED;
@@ -1570,7 +1570,7 @@ GDI_MapHandleTable(PEPROCESS pProcess)
     Status = MmMapViewOfSection(gpvGdiHdlTblSection,
                                 pProcess,
                                 &pvMappedView,
-                                0,
+                                Win32kUserViewZeroBits(pProcess),
                                 0,
                                 &liOffset,
                                 &cjViewSize,

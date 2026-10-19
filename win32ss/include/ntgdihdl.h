@@ -10,7 +10,7 @@
 
 #ifndef _NTGDIHDL_
 #define _NTGDIHDL_
-
+#include "w32kwide.h"
 #include <winddi.h>
 
 /* DEFINES *******************************************************************/
@@ -202,7 +202,7 @@
 
 typedef struct _GDI_TABLE_ENTRY
 {
-    PVOID KernelData; /* Points to the kernel mode structure */
+    KFIELD(PVOID, KernelData); /* Points to the kernel mode structure */
     DWORD ProcessId;  /* process id that created the object, 0 for stock objects */
     union{            /* temp union structure. */
     LONG  Type;       /* the first 16 bit is the object type including the stock obj flag, the last 16 bits is just the object type */
@@ -211,7 +211,7 @@ typedef struct _GDI_TABLE_ENTRY
     UCHAR  ObjectType; /* objt */
     UCHAR  Flags;      /* Flags */
     };};
-    PVOID UserData;   /* pUser Points to the user mode structure, usually NULL though */
+    KFIELD(PVOID, UserData);   /* pUser Points to the user mode structure, usually NULL though */
 } GDI_TABLE_ENTRY, *PGDI_TABLE_ENTRY;
 
 typedef struct _ENTRY
@@ -246,7 +246,7 @@ typedef struct __GDI_SHARED_HANDLE_TABLE /* Must match win32k/include/gdiobj.h *
     GDI_TABLE_ENTRY Entries[GDI_HANDLE_COUNT]; /* Handle table. */
     DEVCAPS         DevCaps;                   /* Shared device capabilities. */
     FLONG           flDeviceUniq;              /* Device settings uniqueness. */
-    PVOID           pvLangPack;                /* Lanuage Pack. */
+    KFIELD(PVOID, pvLangPack);                /* Lanuage Pack. */
     CFONT           cfPublic[GDI_CFONT_MAX];   /* Public Fonts. */
     DWORD           dwCFCount;
 } GDI_SHARED_HANDLE_TABLE, *PGDI_SHARED_HANDLE_TABLE;
@@ -290,10 +290,10 @@ typedef struct _LDC
  */
 typedef struct _DC_ATTR
 {
-    PVOID pvLDC;
+    KFIELD(PVOID, pvLDC);
     ULONG ulDirty_;
-    HANDLE hbrush;
-    HANDLE hpen;
+    KFIELD(HANDLE, hbrush);
+    KFIELD(HANDLE, hpen);
     COLORREF crBackgroundClr;
     ULONG ulBackgroundClr;
     COLORREF crForegroundClr;
@@ -315,26 +315,26 @@ typedef struct _DC_ATTR
     LONG lStretchBltMode;
     FLONG flFontMapper;
     LONG lIcmMode;
-    HANDLE hcmXform;
-    HCOLORSPACE hColorSpace;
+    KFIELD(HANDLE, hcmXform);
+    KFIELD(HCOLORSPACE, hColorSpace);
     FLONG flIcmFlags;
     INT IcmBrushColor;
     INT IcmPenColor;
-    PVOID pvLIcm;
+    KFIELD(PVOID, pvLIcm);
     FLONG flTextAlign;
     LONG lTextAlign;
     LONG lTextExtra;
     LONG lRelAbs;
     LONG lBreakExtra;
     LONG cBreak;
-    HANDLE hlfntNew;
+    KFIELD(HANDLE, hlfntNew);
     MATRIX mxWorldToDevice;
     MATRIX mxDeviceToWorld;
     MATRIX mxWorldToPage;
-    FLOATOBJ efM11PtoD;
-    FLOATOBJ efM22PtoD;
-    FLOATOBJ efDxPtoD;
-    FLOATOBJ efDyPtoD;
+    KFLOATOBJ efM11PtoD;
+    KFLOATOBJ efM22PtoD;
+    KFLOATOBJ efDxPtoD;
+    KFLOATOBJ efDyPtoD;
     INT iMapMode;
     DWORD dwLayout;
     LONG lWindowOrgx;
@@ -359,8 +359,19 @@ typedef struct _BRUSH_ATTR /* Used with pen too. */
 typedef struct _FONT_ATTR
 {
     BOOL    bSlowWidths;
-    PCFONT  pCharWidthData;
+    KFIELD(PCFONT, pCharWidthData);
 } FONT_ATTR, *PFONT_ATTR;
 
+
+/* Typed GDI handles are zero-extended. Untyped message integers can carry
+ * other upper bits. Keep the native definitions and declaration lines intact. */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+#define GDI_HANDLE_GET_UNIQUE(h) ((USHORT)((ULONG_PTR)(h) >> 16))
+#undef GDI_HANDLE_GET_REUSECNT
+#define GDI_HANDLE_GET_REUSECNT(h) \
+    ((((ULONG_PTR)(h)) & GDI_HANDLE_REUSE_MASK) >> GDI_HANDLE_REUSECNT_SHIFT)
+#else
+#define GDI_HANDLE_GET_UNIQUE(h) ((ULONG_PTR)(h) >> 16)
+#endif
 
 #endif

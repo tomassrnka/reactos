@@ -30,6 +30,9 @@ list(APPEND SOURCE
     SetFileInformationByHandle.c
     UserDefaultGeoName.c
     restart.c
+    QueryUnbiasedInterruptTime.c
+    PowerRequest.c
+    ResolveLocaleName.c
     sync.c
     ThreadDescription.c
     UnmapViewOfFileEx.c

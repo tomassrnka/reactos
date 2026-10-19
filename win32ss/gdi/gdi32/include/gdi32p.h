@@ -403,18 +403,27 @@ int FASTCALL DocumentEventEx(PVOID,HANDLE,HDC,int,ULONG,PVOID,ULONG,PVOID);
 BOOL FASTCALL EndPagePrinterEx(PVOID,HANDLE);
 BOOL FASTCALL LoadTheSpoolerDrv(VOID);
 
+#include <w32kteb.h>
+
+#ifdef W32K_WIDE_ACTIVE
+/* cSpins is a native ULONG_PTR at index 1, not the legacy ULONG overlay. */
+#define GdiResetUserPollCount() (W32GetCurrentTeb()->Win32ClientInfo[1] = 0)
+#else
+#define GdiResetUserPollCount() (((PW32CLIENTINFO)NtCurrentTeb()->Win32ClientInfo)->cSpins = 0)
+#endif
+
 FORCEINLINE
 PVOID
 GdiAllocBatchCommand(
     HDC hdc,
     USHORT Cmd)
 {
-    PTEB pTeb;
+    PW32TEB pTeb;
     USHORT cjSize;
     PGDIBATCHHDR pHdr;
 
     /* Get a pointer to the TEB */
-    pTeb = NtCurrentTeb();
+    pTeb = W32GetCurrentTeb();
 
     /* Check if we have a valid environment */
     if (!pTeb || !pTeb->Win32ThreadInfo) return NULL;
@@ -438,10 +447,10 @@ GdiAllocBatchCommand(
     if (hdc)
     {
         /* If the batch DC is NULL, we set this one as the new one */
-        if (!pTeb->GdiTebBatch.HDC) pTeb->GdiTebBatch.HDC = hdc;
+        if (!pTeb->GdiTebBatch.HDC) pTeb->GdiTebBatch.HDC = W32GdiHandle(hdc);
 
         /* If not, check if the batch DC equal to our DC */
-        else if (pTeb->GdiTebBatch.HDC != hdc) return NULL;
+        else if (pTeb->GdiTebBatch.HDC != W32GdiHandle(hdc)) return NULL;
     }
 
     /* Check if the buffer is full */
@@ -455,7 +464,7 @@ GdiAllocBatchCommand(
         // If Flushed, lose the hDC for this batch job! See CORE-15839.
         if (hdc)
         {
-            if (!pTeb->GdiTebBatch.HDC) pTeb->GdiTebBatch.HDC = hdc;
+            if (!pTeb->GdiTebBatch.HDC) pTeb->GdiTebBatch.HDC = W32GdiHandle(hdc);
         }
     }
 
@@ -512,7 +521,7 @@ GdiGetRgnAttr(HRGN hrgn)
     return prgnattr;
 }
 
-#ifdef _M_IX86
+#if defined(_M_IX86) && !defined(W32K_WIDE)
 FLOATL FASTCALL EFtoF(EFLOAT_S * efp);
 #define FOtoF(pfo) EFtoF((EFLOAT_S*)pfo)
 #else
@@ -929,5 +938,23 @@ return EMFDC_ArcChordPie( dc_attr, left, top, right, bottom, xstart, ystart, xen
 }
 
 BOOL WINAPI EMFDC_GdiComment( HDC hdc, UINT bytes, const BYTE *buffer );
+
+/* PolyPatBlt copies the caller's 20-byte records into batch records of the 64-bit layout win32k reads (24 bytes) */
+#ifdef W32K_WIDE_ACTIVE
+static __inline VOID
+KCopyPolyPatBlt(KPATRECT *pDest, const POLYPATBLT *pSrc, DWORD nCount)
+{
+    DWORD i;
+
+    for (i = 0; i < nCount; i++)
+    {
+        RtlCopyMemory(&pDest[i].r, &pSrc[i], sizeof(RECT));
+        KSET(&pDest[i], hBrush, pSrc[i].hBrush);
+    }
+}
+#define KCOPY_POLYPATBLT(d, s, n) KCopyPolyPatBlt(d, s, n)
+#else
+#define KCOPY_POLYPATBLT(d, s, n) RtlCopyMemory((d), (s), (n) * sizeof(PATRECT))
+#endif
 
 /* EOF */

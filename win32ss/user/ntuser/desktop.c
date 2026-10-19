@@ -2575,7 +2575,7 @@ IntCreateDesktop(
     Cs.cx = UserGetSystemMetrics(SM_CXVIRTUALSCREEN),
     Cs.cy = UserGetSystemMetrics(SM_CYVIRTUALSCREEN),
     Cs.style = WS_POPUP|WS_CLIPCHILDREN;
-    Cs.hInstance = hModClient; // hModuleWin; // Server side winproc!
+    Cs.hInstance = IntGetClientModule(gptiDesktopThread->ppi); // hModuleWin; // Server side winproc!
     Cs.lpszName = (LPCWSTR) &WindowName;
     Cs.lpszClass = (LPCWSTR) &ClassName;
 
@@ -2607,7 +2607,7 @@ IntCreateDesktop(
     RtlZeroMemory(&Cs, sizeof(Cs));
     Cs.cx = Cs.cy = 100;
     Cs.style = WS_POPUP|WS_CLIPCHILDREN;
-    Cs.hInstance = hModClient; // hModuleWin; // Server side winproc!
+    Cs.hInstance = IntGetClientModule(gptiDesktopThread->ppi); // hModuleWin; // Server side winproc!
     Cs.lpszName = (LPCWSTR)&WindowName;
     Cs.lpszClass = (LPCWSTR)&ClassName;
     pWnd = IntCreateWindow(&Cs, &WindowName, pcls, NULL, NULL, NULL, pdesk, WINVER);
@@ -3362,7 +3362,7 @@ IntMapDesktopView(IN PDESKTOP pdesk)
     Status = MmMapViewOfSection(pdesk->hsectionDesktop,
                                 PsGetCurrentProcess(),
                                 &UserBase,
-                                0,
+                                Win32kUserViewZeroBits(PsGetCurrentProcess()),
                                 0,
                                 &Offset,
                                 &ViewSize,

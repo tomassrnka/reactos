@@ -20,6 +20,8 @@
 ULONG MmProcessColorSeed = 0x12345678;
 ULONG MmMaximumDeadKernelStacks = 5;
 SLIST_HEADER MmDeadStackSListHead;
+/* The thread whose new kernel stacks may use the kernel reserve (it starts the paging file growth thread) */
+PKTHREAD MiKernelTierStackCreator;
 ULONG MmRotatingUniprocessorNumber = 0;
 
 /* PRIVATE FUNCTIONS **********************************************************/
@@ -37,6 +39,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     LARGE_INTEGER CurrentTime;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     BOOLEAN IsWow64;
+    PWOW64_PROCESS Wow64Process = NULL;
 #endif
     BOOLEAN IsPeb;
 
@@ -76,13 +79,14 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    IsWow64 = FALSE;
+    IsWow64 = (Process->Wow64Process != NULL);
 
     if (Process->SectionBaseAddress != NULL)
     {
         PIMAGE_NT_HEADERS NtHeader = RtlImageNtHeader(Process->SectionBaseAddress);
 
-        if (NtHeader != NULL && NtHeader->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
+        if (NtHeader != NULL && NtHeader->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 &&
+            NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
         {
             IsWow64 = TRUE;
         }
@@ -135,6 +139,40 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 #endif
     }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (IsPeb && IsWow64)
+    {
+        ASSERT(Process->Wow64Process == NULL);
+        Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(*Wow64Process));
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(Vad, 'ldaV');
+            goto FailPath;
+        }
+
+        Wow64Process = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Wow64Process), TAG_PS_WOW64);
+        if (!Wow64Process)
+        {
+            PsReturnProcessNonPagedPoolQuota(Process, sizeof(*Wow64Process));
+            ExFreePoolWithTag(Vad, 'ldaV');
+            Status = STATUS_NO_MEMORY;
+            goto FailPath;
+        }
+        RtlZeroMemory(Wow64Process, sizeof(*Wow64Process));
+    }
+#endif
+
+    /* Size may now include the explicit 32-bit structure. */
+    Vad->u.VadFlags.CommitCharge = BYTES_TO_PAGES(Size);
+
+    /* The structure is committed memory: charge it before the VAD is published */
+    if (!MiChargeCommit(BYTES_TO_PAGES(Size), MiCommitUser))
+    {
+        ExFreePoolWithTag(Vad, 'ldaV');
+        Status = STATUS_COMMITMENT_LIMIT;
+        goto FailPath;
+    }
+
     *BaseAddress = 0;
     Status = MiInsertVadEx((PMMVAD)Vad,
                            BaseAddress,
@@ -144,15 +182,17 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
                            MEM_TOP_DOWN);
     if (!NT_SUCCESS(Status))
     {
+        MiReturnCommit(BYTES_TO_PAGES(Size));
         ExFreePoolWithTag(Vad, 'ldaV');
         Status = STATUS_NO_MEMORY;
         goto FailPath;
     }
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    if (IsPeb && IsWow64)
+    if (Wow64Process)
     {
-        Process->Wow64Process = UlongToPtr(1);
+        Wow64Process->Peb = PS_GET_PEB32_FROM_PEB(*BaseAddress);
+        Process->Wow64Process = Wow64Process;
     }
 #endif
 
@@ -160,6 +200,13 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     return STATUS_SUCCESS;
 
 FailPath:
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Wow64Process)
+    {
+        ExFreePoolWithTag(Wow64Process, TAG_PS_WOW64);
+        PsReturnProcessNonPagedPoolQuota(Process, sizeof(*Wow64Process));
+    }
+#endif
     PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
 
     return Status;
@@ -224,6 +271,9 @@ MmDeleteTeb(IN PEPROCESS Process,
         /* Release the working set */
         MiUnlockProcessWorkingSetUnsafe(Process, Thread);
 
+        /* Give back what the TEB was charged */
+        MiReturnProcessCommit(Process, Vad->u.VadFlags.CommitCharge);
+
         /* Remove the VAD */
         ExFreePool(Vad);
 
@@ -245,7 +295,7 @@ MmDeleteKernelStack(IN PVOID StackBase,
 {
     PMMPTE PointerPte;
     PFN_NUMBER PageFrameNumber, PageTableFrameNumber;
-    PFN_COUNT StackPages;
+    PFN_COUNT StackPages, FreedPages;
     PMMPFN Pfn1, Pfn2;
     ULONG i;
     KIRQL OldIrql;
@@ -275,6 +325,7 @@ MmDeleteKernelStack(IN PVOID StackBase,
     //
     StackPages = BYTES_TO_PAGES(GuiStack ?
                                 MmLargeStackSize : KERNEL_STACK_SIZE);
+    FreedPages = 0;
 
     /* Acquire the PFN lock */
     OldIrql = MiAcquirePfnLock();
@@ -305,6 +356,7 @@ MmDeleteKernelStack(IN PVOID StackBase,
 
             /* And now delete the actual stack page */
             MiDecrementShareCount(Pfn1, PageFrameNumber);
+            FreedPages++;
         }
 
         //
@@ -320,6 +372,9 @@ MmDeleteKernelStack(IN PVOID StackBase,
 
     /* Release the PFN lock */
     MiReleasePfnLock(OldIrql);
+
+    /* The stack pages that existed were charged when they were created */
+    MiReturnCommit(FreedPages);
 
     //
     // Release the PTEs
@@ -376,10 +431,25 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     }
 
     //
+    // A new stack is committed memory (a stack taken from the dead stack
+    // list above kept its charge)
+    //
+    if (!MiChargeCommit(StackPages,
+                        (MiKernelTierStackCreator == KeGetCurrentThread()) ?
+                        MiCommitKernel : MiCommitUser))
+    {
+        return NULL;
+    }
+
+    //
     // Reserve stack pages, plus a guard page
     //
     StackPte = MiReserveSystemPtes(StackPtes + 1, SystemPteSpace);
-    if (!StackPte) return NULL;
+    if (!StackPte)
+    {
+        MiReturnCommit(StackPages);
+        return NULL;
+    }
 
     //
     // Get the stack address
@@ -410,6 +480,7 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     {
         MiReleasePfnLock(OldIrql);
         MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
+        MiReturnCommit(StackPages);
         return NULL;
     }
 
@@ -458,6 +529,7 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     KIRQL OldIrql;
     MMPTE TempPte, InvalidPte;
     PFN_NUMBER PageFrameIndex;
+    PFN_COUNT NewPages;
 
     //
     // Make sure the stack did not overflow
@@ -494,6 +566,10 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     // Calculate the number of new pages
     //
     LimitPte--;
+    NewPages = (LimitPte >= NewLimitPte) ? (PFN_COUNT)(LimitPte - NewLimitPte + 1) : 0;
+
+    /* The new pages are committed memory; growth may use the kernel reserve */
+    if (!MiChargeCommit(NewPages, MiCommitKernel)) return STATUS_NO_MEMORY;
 
     /* Setup the temporary invalid PTE */
     MI_MAKE_SOFTWARE_PTE(&InvalidPte, MM_NOACCESS);
@@ -504,11 +580,10 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the growth instead of using page 0 when no page is free */
-    if ((LimitPte >= NewLimitPte) &&
-        (MiGetFreeOrZeroedPageCount() <
-         (PFN_NUMBER)(LimitPte - NewLimitPte + 1)))
+    if (MiGetFreeOrZeroedPageCount() < NewPages)
     {
         MiReleasePfnLock(OldIrql);
+        MiReturnCommit(NewPages);
         return STATUS_NO_MEMORY;
     }
 
@@ -1324,6 +1399,27 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     return TRUE;
 }
 
+static
+VOID
+MiCheckProcessCommitReturned(
+    _Inout_ PEPROCESS Process)
+{
+    SIZE_T Residue = Process->CommitCharge;
+
+    /*
+     * Every charge of the process belongs to a VAD or a memory area and is
+     * returned when that goes. Anything left is an accounting defect with no
+     * memory behind it: report it, and give it back so that one defect does
+     * not make the system-wide charge grow with every process.
+     */
+    if (Residue != 0)
+    {
+        DPRINT1("MM: process %p (%.16s) still charged %Iu pages after address space cleanup\n",
+                Process, Process->ImageFileName, Residue);
+        MiReturnProcessCommit(Process, Residue);
+    }
+}
+
 VOID
 NTAPI
 MmCleanProcessAddressSpace(IN PEPROCESS Process)
@@ -1340,6 +1436,7 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
     {
         DPRINT1("Incomplete address space for Process %p. Might leak resources.\n",
                 Process);
+        MiCheckProcessCommitReturned(Process);
         return;
     }
 
@@ -1395,6 +1492,9 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
 
             /* Release the working set */
             MiUnlockProcessWorkingSetUnsafe(Process, Thread);
+
+            /* Give back what the VAD was charged */
+            MiReturnProcessCommit(Process, Vad->u.VadFlags.CommitCharge);
         }
 
         /* Free the VAD memory */
@@ -1414,6 +1514,9 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
 
     /* Release the working set */
     MiUnlockProcessWorkingSetUnsafe(Process, Thread);
+
+    /* Nothing of the address space is charged any more */
+    MiCheckProcessCommitReturned(Process);
 
     /* Release the address space */
     MmUnlockAddressSpace(&Process->Vm);

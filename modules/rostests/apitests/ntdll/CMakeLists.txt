@@ -39,6 +39,9 @@ target_link_libraries(ntdll_crt_test_lib ${PSEH_LIB})
 add_dependencies(ntdll_crt_test_lib psdk)
 
 list(APPEND SOURCE
+    ZeroBits.c
+    CommitCharge.c
+    CreatorAccess.c
     DllLoadNotification.c
     EmptyPxe.c
     ApiSetQueryApiSetPresence.c
@@ -61,6 +64,7 @@ list(APPEND SOURCE
     NtCompareTokens.c
     NtConnectPortTerminate.c
     NtContinue.c
+    Wow64Continue.c
     NtCreateDirectoryObject.c
     NtCreateFile.c
     NtCreateKey.c
@@ -83,6 +87,7 @@ list(APPEND SOURCE
     NtNotifyChangeDirectoryFile.c
     NtNotifyChangeMultipleKeys.c
     NtOpenKey.c
+    NtOpenProcess.c
     NtOpenProcessToken.c
     NtOpenThreadToken.c
     NtProtectVirtualMemory.c
@@ -131,6 +136,7 @@ list(APPEND SOURCE
     RtlDosSearchPath_Ustr.c
     RtlFailFast.c
     RtlFirstFreeAce.c
+    RtlFindMessage.c
     RtlFls.c
     RtlGenerate8dot3Name.c
     RtlGenericTable.c
@@ -180,7 +186,9 @@ list(APPEND SOURCE
     RtlUTF8.c
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
+    SectionFaultCost.c
     strcpy_s.c
+    RtlWaitOnAddress.c
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c
@@ -195,12 +203,14 @@ if(ARCH STREQUAL "i386")
     add_asm_files(ntdll_apitest_asm
         ../crt/i386/setjmp_helper.s
         i386/NtContinue.S
+        i386/Wow64Continue.S
         i386/NtCreateThread.S
     )
 elseif(ARCH STREQUAL "amd64")
     add_asm_files(ntdll_apitest_asm
         ../crt/amd64/setjmp_helper.s
         amd64/NtContinue.S
+        amd64/Wow64Continue.S
         amd64/NtCreateThread.S
     )
 endif()

@@ -74,7 +74,7 @@ const struct builtin_class_descr COMBO_builtin_class =
 #else
     WINPROC_COMBO,        /* proc */
 #endif
-    sizeof(HEADCOMBO *),  /* extra */
+    sizeof(KCOPYOF(HEADCOMBO *)),  /* extra */
     IDC_ARROW,            /* cursor */
     0                     /* brush */
 };
@@ -138,7 +138,7 @@ static LRESULT COMBO_NCCreate(HWND hwnd, LONG style)
 
     if (COMBO_Init() && (lphc = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(HEADCOMBO))) )
     {
-        lphc->self = hwnd;
+        KSETSX(lphc, self, hwnd);
         SetWindowLongPtrW( hwnd, 0, (LONG_PTR)lphc );
 
 #ifdef __REACTOS__
@@ -458,7 +458,7 @@ static LRESULT COMBO_Create( HWND hwnd, LPHEADCOMBO lphc, HWND hwndParent, LONG 
   if( !CB_GETTYPE(lphc) ) lphc->dwStyle |= CBS_SIMPLE;
   if( CB_GETTYPE(lphc) != CBS_DROPDOWNLIST ) lphc->wState |= CBF_EDIT;
 
-  lphc->owner = hwndParent;
+  KSETSX(lphc, owner, hwndParent);
 
   /*
    * The item height and dropped width are not set when the control
@@ -541,21 +541,21 @@ static LRESULT COMBO_Create( HWND hwnd, LPHEADCOMBO lphc, HWND hwndParent, LONG 
       }
 
       if (unicode)
-          lphc->hWndLBox = CreateWindowExW(lbeExStyle, clbName, NULL, lbeStyle,
+          KSETSX(lphc, hWndLBox, CreateWindowExW(lbeExStyle, clbName, NULL, lbeStyle,
                                            lphc->droppedRect.left,
                                            lphc->droppedRect.top,
                                            lphc->droppedRect.right - lphc->droppedRect.left,
                                            lphc->droppedRect.bottom - lphc->droppedRect.top,
                                            hwnd, (HMENU)ID_CB_LISTBOX,
-                                           (HINSTANCE)GetWindowLongPtrW( hwnd, GWLP_HINSTANCE ), lphc );
+                                           (HINSTANCE)GetWindowLongPtrW( hwnd, GWLP_HINSTANCE ), lphc ));
       else
-          lphc->hWndLBox = CreateWindowExA(lbeExStyle, "ComboLBox", NULL, lbeStyle,
+          KSETSX(lphc, hWndLBox, CreateWindowExA(lbeExStyle, "ComboLBox", NULL, lbeStyle,
                                            lphc->droppedRect.left,
                                            lphc->droppedRect.top,
                                            lphc->droppedRect.right - lphc->droppedRect.left,
                                            lphc->droppedRect.bottom - lphc->droppedRect.top,
                                            hwnd, (HMENU)ID_CB_LISTBOX,
-                                           (HINSTANCE)GetWindowLongPtrW( hwnd, GWLP_HINSTANCE ), lphc );
+                                           (HINSTANCE)GetWindowLongPtrW( hwnd, GWLP_HINSTANCE ), lphc ));
 
       if( lphc->hWndLBox )
       {
@@ -576,19 +576,19 @@ static LRESULT COMBO_Create( HWND hwnd, LPHEADCOMBO lphc, HWND hwndParent, LONG 
               if (!IsWindowEnabled(hwnd)) lbeStyle |= WS_DISABLED;
 
               if (unicode)
-                  lphc->hWndEdit = CreateWindowExW(0, editName, NULL, lbeStyle,
+                  KSETSX(lphc, hWndEdit, CreateWindowExW(0, editName, NULL, lbeStyle,
                                                    lphc->textRect.left, lphc->textRect.top,
                                                    lphc->textRect.right - lphc->textRect.left,
                                                    lphc->textRect.bottom - lphc->textRect.top,
                                                    hwnd, (HMENU)ID_CB_EDIT,
-                                                   (HINSTANCE)GetWindowLongPtrW( hwnd, GWLP_HINSTANCE ), NULL );
+                                                   (HINSTANCE)GetWindowLongPtrW( hwnd, GWLP_HINSTANCE ), NULL ));
               else
-                  lphc->hWndEdit = CreateWindowExA(0, "Edit", NULL, lbeStyle,
+                  KSETSX(lphc, hWndEdit, CreateWindowExA(0, "Edit", NULL, lbeStyle,
                                                    lphc->textRect.left, lphc->textRect.top,
                                                    lphc->textRect.right - lphc->textRect.left,
                                                    lphc->textRect.bottom - lphc->textRect.top,
                                                    hwnd, (HMENU)ID_CB_EDIT,
-                                                   (HINSTANCE)GetWindowLongPtrW( hwnd, GWLP_HINSTANCE ), NULL );
+                                                   (HINSTANCE)GetWindowLongPtrW( hwnd, GWLP_HINSTANCE ), NULL ));
 
 	      if( !lphc->hWndEdit )
 		bEdit = FALSE;
@@ -1576,7 +1576,7 @@ static void COMBO_Font( LPHEADCOMBO lphc, HFONT hFont, BOOL bRedraw )
   /*
    * Set the font
    */
-  lphc->hFont = hFont;
+  KSET(lphc, hFont, hFont);
 
   /*
    * Propagate to owned windows.
@@ -2316,3 +2316,11 @@ BOOL WINAPI GetComboBoxInfo(
     return SendMessageW(hwndCombo, CB_GETCOMBOBOXINFO, 0, (LPARAM)pcbi);
 #endif
 }
+
+/* NtUserGetComboBoxInfo reads these through win32k's own copy of this structure, which has the amd64 layout */
+#if defined(_WIN64) || defined(W32K_WIDE_ACTIVE)
+C_ASSERT(offsetof(HEADCOMBO, self) == 0 && offsetof(HEADCOMBO, owner) == 8 &&
+         offsetof(HEADCOMBO, hWndEdit) == 24 && offsetof(HEADCOMBO, hWndLBox) == 32 &&
+         offsetof(HEADCOMBO, wState) == 40 && offsetof(HEADCOMBO, textRect) == 56 &&
+         offsetof(HEADCOMBO, buttonRect) == 72);
+#endif

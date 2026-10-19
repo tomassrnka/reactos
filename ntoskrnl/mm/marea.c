@@ -187,24 +187,28 @@ MmInsertMemoryArea(
 }
 
 PVOID NTAPI
-MmFindGap(
+MmFindGapInRange(
     PMMSUPPORT AddressSpace,
     ULONG_PTR Length,
     ULONG_PTR Granularity,
-    BOOLEAN TopDown)
+    BOOLEAN TopDown,
+    ULONG_PTR HighestAddress)
 {
     PEPROCESS Process;
     PMM_AVL_TABLE VadRoot;
     TABLE_SEARCH_RESULT Result;
     PMMADDRESS_NODE Parent;
-    ULONG_PTR StartingAddress, HighestAddress;
+    ULONG_PTR StartingAddress = 0;
 
     Process = MmGetAddressSpaceOwner(AddressSpace);
     VadRoot = Process ? &Process->VadRoot : &MiRosKernelVadRoot;
+    if (!Length || Length - 1 > HighestAddress ||
+        (Process && (HighestAddress < (ULONG_PTR)MM_LOWEST_USER_ADDRESS ||
+                     Length - 1 > HighestAddress - (ULONG_PTR)MM_LOWEST_USER_ADDRESS)))
+        return NULL;
     if (TopDown)
     {
         /* Find an address top-down */
-        HighestAddress = Process ? (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS : (LONG_PTR)-1;
         Result = MiFindEmptyAddressRangeDownTree(Length,
                                                  HighestAddress,
                                                  Granularity,
@@ -221,12 +225,24 @@ MmFindGap(
                                                &StartingAddress);
     }
 
-    if (Result == TableFoundNode)
+    if (Result == TableFoundNode || StartingAddress > HighestAddress - (Length - 1))
     {
         return NULL;
     }
 
     return (PVOID)StartingAddress;
+}
+
+PVOID NTAPI
+MmFindGap(
+    PMMSUPPORT AddressSpace,
+    ULONG_PTR Length,
+    ULONG_PTR Granularity,
+    BOOLEAN TopDown)
+{
+    ULONG_PTR HighestAddress = MmGetAddressSpaceOwner(AddressSpace) ?
+                              (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS : MAXULONG_PTR;
+    return MmFindGapInRange(AddressSpace, Length, Granularity, TopDown, HighestAddress);
 }
 
 VOID

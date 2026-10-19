@@ -248,25 +248,11 @@ IopWriteAsyncUserIosb(PIRP Irp)
         _SEH2_TRY
         {
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-            PIO_STATUS_BLOCK32 Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
-
-            /*
-             * If this is a 32-bit process, and UserIosb falls within the
-             * 32-bit address space, assume UserIosb->Pointer is a 32-bit IOSB
-             * that has to be filled.
-             */
-            if (Irp->RequestorMode == UserMode &&
-                /*
-                 * This is an APC - we're running in the correct thread context,
-                 * and Irp->Tail is trashed. Don't bother with getting the thread
-                 * from the IRP then. The process mode still should be checked.
-                 */
-                IoIs32bitProcess(NULL) &&
-                Iosb32 != NULL && (ULONG_PTR)Iosb32 <= MAXULONG)
+            if (Irp->Flags & IRP_WOW64_IO_STATUS)
             {
-                InterlockedExchangePointer(&Irp->UserIosb->Pointer, NULL);
-
-                Iosb32->Information = Irp->IoStatus.Information;
+                PIO_STATUS_BLOCK32 Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb;
+                Iosb32->Information = (ULONG)Irp->IoStatus.Information;
+                KeMemoryBarrier();
                 Iosb32->Status = Irp->IoStatus.Status;
             }
             else
@@ -2070,13 +2056,6 @@ IoIs32bitProcess(
     }
 
     pProcess = CONTAINING_RECORD(pThread->Tcb.Process, EPROCESS, Pcb);
-
-    /* FIXME: A two-part hack: delay setting Process->Wow64Process, so 64-bit
-       NTDLL can use IO to init stuff. */
-    if (pProcess->Wow64Process == UlongToPtr(1))
-    {
-        return FALSE;
-    }
 
     return pProcess->Wow64Process != NULL;
 }

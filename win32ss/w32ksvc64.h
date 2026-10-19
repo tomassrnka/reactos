@@ -3,6 +3,9 @@
     // Funcs order should match Windows 2003 Service Pack 2 x64 Free
     // Note: these MUST be indented for the ARM assembler!
     //
+    // ARG_COUNT is the number of amd64 argument slots. A structure of 1, 2, 4 or 8 bytes
+    // passed by value (POINT, SIZEL) takes one slot, where i386 needs one per 4 bytes.
+    //
     SVC_(UserGetThreadState, 1)	//	 0x1000
     SVC_(UserPeekMessage, 5)	//	 0x1001
     SVC_(UserCallOneParam, 2)	//	 0x1002
@@ -405,10 +408,10 @@
     SVC_(GdiEngCheckAbort, 1)	//	 0x118f
     SVC_(GdiEngComputeGlyphSet, 3)	//	 0x1190
     SVC_(GdiEngCopyBits, 6)	//	 0x1191
-    SVC_(GdiEngCreateBitmap, 6)	//	 0x1192
+    SVC_(GdiEngCreateBitmap, 5)	//	 0x1192
     SVC_(GdiEngCreateClip, 0)	//	 0x1193
-    SVC_(GdiEngCreateDeviceBitmap, 4)	//	 0x1194
-    SVC_(GdiEngCreateDeviceSurface, 4)	//	 0x1195
+    SVC_(GdiEngCreateDeviceBitmap, 3)	//	 0x1194
+    SVC_(GdiEngCreateDeviceSurface, 3)	//	 0x1195
     SVC_(GdiEngCreatePalette, 6)	//	 0x1196
     SVC_(GdiEngDeleteClip, 1)	//	 0x1197
     SVC_(GdiEngDeletePalette, 1)	//	 0x1198
@@ -487,7 +490,7 @@
     SVC_(GdiInitSpool, 0)	//	 0x11e1
     SVC_(GdiMakeFontDir, 5)	//	 0x11e2
     SVC_(GdiMakeInfoDC, 2)	//	 0x11e3
-    SVC_(GdiMakeObjectUnXferable, 0)	//	 0x11e4
+    SVC_(GdiMakeObjectUnXferable, 1)	//	 0x11e4
     SVC_(GdiMakeObjectXferable, 2)	//	 0x11e5
     SVC_(GdiMirrorWindowOrg, 1)	//	 0x11e6
     SVC_(GdiMonoBitmap, 1)	//	 0x11e7
@@ -568,7 +571,7 @@
     SVC_(UserDdeSetQualityOfService, 3)	//	 0x1232
     SVC_(UserDestroyInputContext, 1)	//	 0x1233
     SVC_(UserDisableThreadIme, 1)	//	 0x1234
-    SVC_(UserDragDetect, 3)	//	 0x1235
+    SVC_(UserDragDetect, 2)	//	 0x1235
     SVC_(UserDragObject, 5)	//	 0x1236
     SVC_(UserDrawAnimatedRects, 4)	//	 0x1237
     SVC_(UserDrawCaption, 4)	//	 0x1238
@@ -681,7 +684,7 @@
     SVC_(UserDbgWin32HeapFail, 2)	//
     SVC_(UserDbgWin32HeapStat, 2)	//
     SVC_(UserGetMonitorInfo, 2)	//
-    SVC_(UserMonitorFromPoint, 3)	//
+    SVC_(UserMonitorFromPoint, 2)	//
     SVC_(UserMonitorFromRect, 2)	//
     SVC_(UserMonitorFromWindow, 2)	//
     SVC_(UserSetDbgTag, 2)	//
