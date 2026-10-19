@@ -79,7 +79,8 @@ static BOOLEAN GuestRange(ULONG Address, ULONG64 Size)
  * checked and read once: handle values widen into *Handles, the small values
  * (no pointers) are copied into storage after the native list, which is one
  * allocation (*List). */
-static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_ATTRIBUTE_LIST *List, HANDLE **Handles)
+static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_ATTRIBUTE_LIST *List, HANDLE **Handles,
+                                     BOOLEAN *Reported)
 {
     PROC_THREAD_ATTRIBUTE_LIST32 *From = PTR32(Address);
     ANSI_STRING InitializeName = RTL_CONSTANT_STRING("InitializeProcThreadAttributeList");
@@ -135,12 +136,13 @@ static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_
             if (!Update(*List, 0, Entry.Attribute, Values[i], Entry.Size, NULL, NULL))
                 return STATUS_INVALID_PARAMETER;
         }
-        else return STATUS_NOT_SUPPORTED;
+        else return Wow64Unsupported(WOW64_SERVICE_CREATE_PROCESS, WOW64_UNSUPPORTED_ATTRIBUTE, Entry.Attribute,
+                                     Reported);
     }
     return STATUS_SUCCESS;
 }
 
-NTSTATUS Wow64CreateProcess(PVOID Buffer)
+NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
 {
     WOW64_CREATE_PROCESS *Out = Buffer, Request = *Out;
     WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
@@ -247,7 +249,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer)
         if (Request.CreationFlags & EXTENDED_STARTUPINFO_PRESENT)
         {
             Startup.StartupInfo.cb = sizeof(Startup);
-            Status = CaptureAttributeList(Module, Request.AttributeList, &AttributeList, &ListHandles);
+            Status = CaptureAttributeList(Module, Request.AttributeList, &AttributeList, &ListHandles, Reported);
             if (!NT_SUCCESS(Status)) _SEH2_LEAVE;
             Startup.lpAttributeList = AttributeList;
         }

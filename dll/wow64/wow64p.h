@@ -36,12 +36,34 @@ typedef struct
 } WOW64_PARAMETERS;
 
 NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments);
+
+/* Requests this layer does not translate. Wow64Unsupported prints one debug line
+ * per process for each (service, kind, value), sets *Reported so that
+ * Wow64SystemService does not print its generic failure line for the call, and
+ * returns the status the guest has always received: STATUS_INVALID_SYSTEM_SERVICE
+ * for a service without a translation, STATUS_NOT_SUPPORTED otherwise. */
+enum
+{
+    WOW64_UNSUPPORTED_SERVICE,   /* no translation; value: the information class, if any */
+    WOW64_UNSUPPORTED_CLASS,     /* information class */
+    WOW64_UNSUPPORTED_IOCTL,     /* device I/O control code */
+    WOW64_UNSUPPORTED_FSCTL,     /* file system control code */
+    WOW64_UNSUPPORTED_MODE,      /* 1: asynchronous request, 2: handle not opened for synchronous I/O */
+    WOW64_UNSUPPORTED_ATTRIBUTE, /* process/thread attribute */
+    WOW64_UNSUPPORTED_CSR_API,   /* (server << 16) | API number */
+    WOW64_UNSUPPORTED_CSR_SERVER,/* server DLL index of a connection */
+    WOW64_UNSUPPORTED_OPERATION  /* private CSR operation number */
+};
+#define WOW64_SERVICE_CSR 0x10000
+#define WOW64_SERVICE_CREATE_PROCESS 0x10003
+BOOLEAN Wow64FirstReport(ULONG Service, ULONG Kind, ULONG Value);
+NTSTATUS Wow64Unsupported(ULONG Service, ULONG Kind, ULONG Value, BOOLEAN *Reported);
 NTSTATUS Wow64Allocate(SIZE_T Size, PVOID *Base);
 extern ULONG Wow64HighestUserAddress;
 ULONG_PTR Wow64ZeroBits(ULONG ZeroBits);
 
 NTSTATUS Wow64CopyString(WOW64_STRING *To, const UNICODE_STRING *From);
-NTSTATUS Wow64CsrDispatch(ULONG Operation, ULONG *Arguments);
+NTSTATUS Wow64CsrDispatch(ULONG Operation, ULONG *Arguments, BOOLEAN *Reported);
 extern PVOID Wow64ExceptionDispatcher;
 NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert);
 NTSTATUS Wow64InitializeRedirection(VOID);
@@ -56,7 +78,7 @@ typedef struct
 } WOW64_SYSTEM_BASIC_INFORMATION;
 
 NTSTATUS Wow64CreateEnvironment(PVOID *Environment);
-NTSTATUS Wow64CreateProcess(PVOID Request);
+NTSTATUS Wow64CreateProcess(PVOID Request, BOOLEAN *Reported);
 
 VOID Wow64InitializeTeb(TEB32 *, const TEB *, PTEB, const INITIAL_TEB *);
 VOID Wow64AbortThread(HANDLE, HANDLE, NTSTATUS);

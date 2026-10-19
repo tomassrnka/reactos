@@ -20,6 +20,65 @@ static const char *ServiceNames[] =
 #undef WOW64_SYSCALL
 };
 
+static const char *ServiceName(ULONG Service)
+{
+    if (Service < RTL_NUMBER_OF(ServiceNames)) return ServiceNames[Service];
+    if (Service == WOW64_SERVICE_CSR) return "CsrClientCallServer";
+    if (Service == WOW64_SERVICE_CREATE_PROCESS) return "CreateProcess";
+    return "unknown";
+}
+
+/* Keys of the reported requests, never 0. When the table is full, further new
+ * items are summarized by a single line instead of being printed on every call. */
+static volatile LONG64 ReportedKeys[512];
+static volatile LONG ReportedFull;
+
+BOOLEAN Wow64FirstReport(ULONG Service, ULONG Kind, ULONG Value)
+{
+    LONG64 Key;
+    ULONG i;
+    /* A guest can pass any service number: one bucket for those outside the known
+     * ranges, keyed by the number itself */
+    if (Service >= RTL_NUMBER_OF(ServiceNames) && Service != WOW64_SERVICE_CSR &&
+        Service != WOW64_SERVICE_CREATE_PROCESS)
+    {
+        Value = Service;
+        Service = 0xfffff;
+    }
+    Key = (LONG64)(0x8000000000000000ULL | ((ULONG64)Service << 36) | ((ULONG64)(Kind & 0xf) << 32) | Value);
+    for (i = 0; i < RTL_NUMBER_OF(ReportedKeys); ++i)
+    {
+        LONG64 Old = ReportedKeys[i];
+        if (!Old) Old = InterlockedCompareExchange64(&ReportedKeys[i], Key, 0);
+        if (!Old) return TRUE;
+        if (Old == Key) return FALSE;
+    }
+    if (!InterlockedExchange(&ReportedFull, 1))
+        DbgPrint("WoW64: more than %lu unsupported items, no further ones are reported, pid %lx\n",
+                 (ULONG)RTL_NUMBER_OF(ReportedKeys), HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
+    return FALSE;
+}
+
+NTSTATUS Wow64Unsupported(ULONG Service, ULONG Kind, ULONG Value, BOOLEAN *Reported)
+{
+    static const char *Kinds[] = {"class", "class", "ioctl", "fsctl", "mode", "attribute", "api", "server", "operation"};
+    *Reported = TRUE;
+    if (Wow64FirstReport(Service, Kind, Value))
+    {
+        if (Kind == WOW64_UNSUPPORTED_SERVICE)
+            DbgPrint("WoW64: unsupported service %lx (%s) class %lu, pid %lx\n", Service,
+                     ServiceName(Service), Value, HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
+        else
+            DbgPrint(Kind == WOW64_UNSUPPORTED_CLASS || Kind == WOW64_UNSUPPORTED_CSR_SERVER ||
+                     Kind == WOW64_UNSUPPORTED_OPERATION ? "WoW64: unsupported %s (%lx) %s %lu, pid %lx\n" :
+                     "WoW64: unsupported %s (%lx) %s 0x%08lx, pid %lx\n", ServiceName(Service), Service,
+                     Kind < RTL_NUMBER_OF(Kinds) ? Kinds[Kind] : "value", Value,
+                     HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess));
+    }
+    return Kind == WOW64_UNSUPPORTED_SERVICE || Kind == WOW64_UNSUPPORTED_OPERATION ?
+           STATUS_INVALID_SYSTEM_SERVICE : STATUS_NOT_SUPPORTED;
+}
+
 static UNICODE_STRING *String32(UNICODE_STRING *To, const WOW64_STRING *From)
 {
     if (!From) return NULL;
@@ -86,6 +145,7 @@ typedef struct
     PVOID Buffer;
     HANDLE Thread;
     HANDLE ThreadProcess;
+    BOOLEAN Reported; /* an unsupported request, already reported once */
 } WOW64_CLEANUP;
 
 typedef struct
@@ -318,8 +378,9 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     if (NT_SUCCESS(Status)) U(i) = HandleToUlong(Cleanup->Handle); \
     Cleanup->Handle = NULL; return Status; } while (0)
 #define RETURN_HANDLE() RETURN_HANDLE_AT(0)
-    if (Number == 0x10000) return Wow64CsrDispatch(a[0], P(1));
-    if (Number == 0x10003) return Wow64CreateProcess(P(0));
+#define UNSUPPORTED(Kind, Value) return Wow64Unsupported(Number, WOW64_UNSUPPORTED_##Kind, Value, &Cleanup->Reported)
+    if (Number == WOW64_SERVICE_CSR) return Wow64CsrDispatch(a[0], P(1), &Cleanup->Reported);
+    if (Number == WOW64_SERVICE_CREATE_PROCESS) return Wow64CreateProcess(P(0), &Cleanup->Reported);
     if (Number == 0x10002)
     {
         WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
@@ -382,7 +443,12 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtResumeThread: return NtResumeThread(H(0), P(1));
     case W64_NtAlertThread: return NtAlertThread(H(0));
     case W64_NtAlertResumeThread: return NtAlertResumeThread(H(0), P(1));
-    case W64_NtQueryInformationThread: return Wow64QueryThread(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtQueryInformationThread:
+        /* The native service does not fail with STATUS_NOT_SUPPORTED for the classes
+         * Wow64QueryThread forwards, so this status means an untranslated class */
+        Status = Wow64QueryThread(H(0), a[1], P(2), a[3], P(4));
+        if (Status == STATUS_NOT_SUPPORTED) UNSUPPORTED(CLASS, a[1]);
+        return Status;
     case W64_NtAreMappedFilesTheSame: return NtAreMappedFilesTheSame(P(0), P(1));
     case W64_NtReadVirtualMemory:
     case W64_NtWriteVirtualMemory:
@@ -436,11 +502,11 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return Status;
         }
-        return STATUS_NOT_SUPPORTED;
+        UNSUPPORTED(CLASS, a[1]);
     case W64_NtSetInformationObject:
         if (a[1] == ObjectHandleFlagInformation)
             return NtSetInformationObject(H(0), a[1], P(2), a[3]);
-        return STATUS_NOT_SUPPORTED;
+        UNSUPPORTED(CLASS, a[1]);
     case W64_NtRaiseException: return Wow64RaiseException(P(0), P(1), a[2]);
     case W64_NtRaiseHardError:
     {
@@ -545,7 +611,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     {
         MEMORY_BASIC_INFORMATION Info;
         struct { ULONG Base, AllocationBase, AllocationProtect, Size, State, Protect, Type; } *Info32 = P(3);
-        if (a[2] != MemoryBasicInformation) return STATUS_NOT_SUPPORTED;
+        if (a[2] != MemoryBasicInformation) UNSUPPORTED(CLASS, a[2]);
         if (a[4] < sizeof(*Info32)) return STATUS_INFO_LENGTH_MISMATCH;
         Status = NtQueryVirtualMemory(H(0), P(1), a[2], &Info, sizeof(Info), NULL);
         if (NT_SUCCESS(Status))
@@ -613,7 +679,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return Status;
         }
-        return STATUS_NOT_SUPPORTED;
+        UNSUPPORTED(CLASS, a[1]);
     case W64_NtOpenSection:
         PROBE(0);
         ATTR(2); Status = NtOpenSection(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
@@ -754,7 +820,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtSetInformationJobObject(H(0), a[1], &To,
                        Extended ? sizeof(To) : sizeof(To.BasicLimitInformation));
         }
-        return STATUS_NOT_SUPPORTED;
+        UNSUPPORTED(CLASS, a[1]);
     case W64_NtCreateEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateEvent(&Cleanup->Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
@@ -912,7 +978,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             break;
         }
         default:
-            return STATUS_NOT_SUPPORTED;
+            UNSUPPORTED(IOCTL, a[5]);
         }
         ProbeOutput(a[4], sizeof(WOW64_IOSB));
         return NtDeviceIoControlFile(H(0), H(1), Routine, P(3), Iosb,
@@ -929,7 +995,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
                        a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
                        P(3), (PVOID)(0x8000000000000000ULL | a[4]),
                        a[5], P(6), a[7], P(8), a[9]);
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(FSCTL, a[5]);
         }
     case W64_NtQueryAttributesFile:
         FILEATTR(0); return NtQueryAttributesFile(OA(0), P(1));
@@ -944,7 +1010,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
         if (!NT_SUCCESS(Status)) return Status;
         if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
-            return STATUS_NOT_SUPPORTED;
+            UNSUPPORTED(MODE, 2);
         Status = NtFlushBuffersFile(H(0), &Io);
         StoreIo(a[1], &Io);
         return Status;
@@ -1014,7 +1080,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtSetInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[4]);
         }
     case W64_NtQueryInformationFile:
         /* Only fixed-width layouts used by the loader and console startup. */
@@ -1028,16 +1094,16 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[4]);
         }
     case W64_NtQueryDirectoryFile:
     {
         FILE_MODE_INFORMATION Mode;
-        if (a[1] || a[2] || a[3]) return STATUS_NOT_SUPPORTED;
+        if (a[1] || a[2] || a[3]) UNSUPPORTED(MODE, 1);
         Status = NtQueryInformationFile(H(0), &Io, &Mode, sizeof(Mode), FileModeInformation);
         if (!NT_SUCCESS(Status)) return Status;
         if (!(Mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
-            return STATUS_NOT_SUPPORTED;
+            UNSUPPORTED(MODE, 2);
         switch (a[7])
         {
         case FileDirectoryInformation: case FileFullDirectoryInformation:
@@ -1047,7 +1113,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             Status = NtQueryDirectoryFile(H(0), NULL, NULL, NULL, &Io, P(5), a[6], a[7],
                                            a[8], String32(&Name, P(9)), a[10]);
             StoreIo(a[4], &Io); return Status;
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[7]);
         }
     }
     case W64_NtQueryVolumeInformationFile:
@@ -1058,7 +1124,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             ProbeOutput(a[1], sizeof(WOW64_IOSB));
             Status = NtQueryVolumeInformationFile(H(0), &Io, P(2), a[3], a[4]);
             StoreIo(a[1], &Io); return Status;
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[4]);
         }
     case W64_NtReadFile:
     case W64_NtWriteFile:
@@ -1151,7 +1217,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtQueryInformationToken(H(0), a[1], P(2), a[3], P(4));
         case TokenGroups: case TokenRestrictedSids: case TokenLogonSid:
             return TokenGroups32(H(0), a[1], a[2], a[3], a[4], Cleanup);
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[1]);
         }
     case W64_NtSetInformationToken:
         if (a[1] == TokenOwner || a[1] == TokenPrimaryGroup || a[1] == TokenDefaultDacl)
@@ -1163,7 +1229,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         }
         if (a[1] == TokenSessionId)
             return NtSetInformationToken(H(0), a[1], P(2), a[3]);
-        return STATUS_NOT_SUPPORTED;
+        UNSUPPORTED(CLASS, a[1]);
     case W64_NtQueryInformationProcess:
         if (a[1] == ProcessBasicInformation)
         {
@@ -1198,7 +1264,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
         case ProcessSessionInformation: case ProcessBreakOnTermination: case ProcessCookie:
             return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[1]);
         }
     case W64_NtSetInformationProcess:
         if (a[1] == ProcessTlsInformation) return SetProcessTls32(H(0), a[2], a[3], Cleanup);
@@ -1213,7 +1279,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
             return NtSetInformationProcess(H(0), a[1], P(2), a[3]);
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[1]);
         }
     case W64_NtSetInformationThread:
         switch (a[1])
@@ -1246,7 +1312,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case ThreadHideFromDebugger: case ThreadPriority: case ThreadBasePriority:
         case ThreadBreakOnTermination:
             return NtSetInformationThread(H(0), a[1], P(2), a[3]);
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[1]);
         }
     case W64_NtQuerySystemInformation:
         if (a[0] == SystemBasicInformation)
@@ -1276,13 +1342,19 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
-        default: return STATUS_NOT_SUPPORTED;
+        default: UNSUPPORTED(CLASS, a[0]);
         }
     default:
-        Length = RTL_NUMBER_OF(ServiceNames);
-        DbgPrint("WoW64: unsupported service %lx (%s)\n", Number,
-                 Number < Length ? ServiceNames[Number] : "unknown");
-        return STATUS_INVALID_SYSTEM_SERVICE;
+        /* Name the information class of the class-based services as well */
+        switch (Number)
+        {
+        case W64_NtPowerInformation: case W64_NtSetSystemInformation: Length = a[0]; break;
+        case W64_NtQueryInformationJobObject: case W64_NtQueryInformationPort:
+        case W64_NtSetInformationKey: case W64_NtSetInformationDebugObject: Length = a[1]; break;
+        case W64_NtSetVolumeInformationFile: Length = a[4]; break;
+        default: Length = 0; break;
+        }
+        UNSUPPORTED(SERVICE, Length);
     }
 }
 
@@ -1328,7 +1400,7 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
         }
     }
 #if DBG
-    if (!NT_SUCCESS(Status) && Number != W64_NtQueryDebugFilterState &&
+    if (!NT_SUCCESS(Status) && !Cleanup.Reported && Number != W64_NtQueryDebugFilterState &&
         !(Number >= 0x1000 && Number < 0x2000))
         DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
 #endif
