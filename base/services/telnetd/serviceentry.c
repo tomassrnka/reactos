@@ -23,6 +23,8 @@
 #include <wine/debug.h>
 
 int kickoff_telnetd(void);
+void reset_telnetd(void);
+void stop_telnetd(void);
 
 WINE_DEFAULT_DEBUG_CHANNEL(telnetd);
 
@@ -30,6 +32,8 @@ static WCHAR telnetdW[] = {'t','e','l','n','e','t','d',0};
 
 static SERVICE_STATUS_HANDLE service_handle;
 static HANDLE stop_event;
+/* Set by the first stop of a run; the dispatcher calls the handler one control at a time */
+static volatile LONG stop_requested;
 
 static DWORD WINAPI service_handler( DWORD ctrl, DWORD event_type, LPVOID event_data, LPVOID context )
 {
@@ -42,15 +46,22 @@ static DWORD WINAPI service_handler( DWORD ctrl, DWORD event_type, LPVOID event_
     status.dwCheckPoint              = 0;
     status.dwWaitHint                = 0;
 
+    /* A control the service controller approved before the stop can still arrive
+     * while serv_main() closes the event and reports SERVICE_STOPPED */
+    if (stop_requested)
+        return NO_ERROR;
+
     switch(ctrl)
     {
     case SERVICE_CONTROL_STOP:
     case SERVICE_CONTROL_SHUTDOWN:
         WINE_TRACE( "shutting down\n" );
+        stop_requested = 1;
         status.dwCurrentState     = SERVICE_STOP_PENDING;
         status.dwControlsAccepted = 0;
         SetServiceStatus( service_handle, &status );
         SetEvent( stop_event );
+        stop_telnetd();
         return NO_ERROR;
     default:
         WINE_FIXME( "got service ctrl %x\n", ctrl );
@@ -67,10 +78,18 @@ static void WINAPI serv_main(DWORD argc, LPWSTR *argv)
     WINE_TRACE( "starting service\n" );
 
     stop_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    reset_telnetd();
+    /* Cleared last: a stop of the previous run that arrives before this is still
+     * ignored, one that arrives after it stops this run */
+    stop_requested = 0;
 
     service_handle = RegisterServiceCtrlHandlerExW( telnetdW, service_handler, NULL );
     if (!service_handle)
+    {
+        CloseHandle( stop_event );
+        stop_event = NULL;
         return;
+    }
 
     status.dwServiceType             = SERVICE_WIN32;
     status.dwCurrentState            = SERVICE_RUNNING;
@@ -85,6 +104,9 @@ static void WINAPI serv_main(DWORD argc, LPWSTR *argv)
     kickoff_telnetd();
 
     WaitForSingleObject( stop_event, INFINITE );
+    /* The process can be given a new start, which creates a new event */
+    CloseHandle( stop_event );
+    stop_event = NULL;
 
     status.dwCurrentState     = SERVICE_STOPPED;
     status.dwControlsAccepted = 0;

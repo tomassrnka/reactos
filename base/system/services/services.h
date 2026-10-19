@@ -49,6 +49,7 @@ typedef struct _SERVICE_IMAGE
     LPWSTR pszImagePath;
     LPWSTR pszAccountName;
     DWORD dwImageRunCount;
+    BOOL bSharedProcess;
 
     HANDLE hControlPipe;
     HANDLE hProcess;

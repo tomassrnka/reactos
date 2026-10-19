@@ -54,9 +54,6 @@ RpcServerThread(LPVOID lpParameter)
 
     DPRINT("RpcServerThread() called\n");
 
-    InitializeListHead(&NotificationListHead);
-    RtlInitializeResource(&NotificationListLock);
-
 #if 0
     /* 2k/XP/2k3-compatible protocol sequence/endpoint */
     Status = RpcServerUseProtseqEpW(L"ncacn_np",
@@ -4031,6 +4028,7 @@ PNP_IsDockStationPresent(
     DWORD dwType;
     DWORD dwValue;
     DWORD dwSize;
+    LONG lError;
     CONFIGRET ret = CR_SUCCESS;
 
     UNREFERENCED_PARAMETER(hBinding);
@@ -4040,20 +4038,30 @@ PNP_IsDockStationPresent(
 
     *Present = FALSE;
 
-    if (RegOpenKeyExW(HKEY_CURRENT_CONFIG,
-                      L"CurrentDockInfo",
-                      0,
-                      KEY_READ,
-                      &hKey) != ERROR_SUCCESS)
+    /* No docking information means no dock: success and FALSE, as on Windows */
+    lError = RegOpenKeyExW(HKEY_CURRENT_CONFIG,
+                           L"CurrentDockInfo",
+                           0,
+                           KEY_READ,
+                           &hKey);
+    if (lError == ERROR_FILE_NOT_FOUND)
+        return CR_SUCCESS;
+    if (lError != ERROR_SUCCESS)
         return CR_REGISTRY_ERROR;
 
     dwSize = sizeof(DWORD);
-    if (RegQueryValueExW(hKey,
-                         L"DockingState",
-                         NULL,
-                         &dwType,
-                         (LPBYTE)&dwValue,
-                         &dwSize) != ERROR_SUCCESS)
+    lError = RegQueryValueExW(hKey,
+                              L"DockingState",
+                              NULL,
+                              &dwType,
+                              (LPBYTE)&dwValue,
+                              &dwSize);
+    if (lError == ERROR_FILE_NOT_FOUND)
+    {
+        RegCloseKey(hKey);
+        return CR_SUCCESS;
+    }
+    if (lError != ERROR_SUCCESS)
         ret = CR_REGISTRY_ERROR;
 
     RegCloseKey(hKey);

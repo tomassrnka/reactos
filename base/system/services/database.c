@@ -162,7 +162,8 @@ ScmGetServiceImageByImagePath(LPWSTR lpImagePath)
         CurrentImage = CONTAINING_RECORD(ImageEntry,
                                          SERVICE_IMAGE,
                                          ImageListEntry);
-        if (_wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
+        if (CurrentImage->bSharedProcess &&
+            _wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
         {
             DPRINT("Found image: '%S'\n", CurrentImage->pszImagePath);
             return CurrentImage;
@@ -496,7 +497,9 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
     DPRINT("ImagePath: '%wZ'\n", &ImagePath);
     DPRINT("ObjectName: '%wZ'\n", &ObjectName);
 
-    pServiceImage = ScmGetServiceImageByImagePath(ImagePath.Buffer);
+    /* An own-process service always gets a process of its own */
+    if (pService->Status.dwServiceType & SERVICE_WIN32_SHARE_PROCESS)
+        pServiceImage = ScmGetServiceImageByImagePath(ImagePath.Buffer);
     if (pServiceImage == NULL)
     {
         dwRecordSize = sizeof(SERVICE_IMAGE) +
@@ -514,6 +517,7 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
         }
 
         pServiceImage->dwImageRunCount = 1;
+        pServiceImage->bSharedProcess = (pService->Status.dwServiceType & SERVICE_WIN32_SHARE_PROCESS) != 0;
         pServiceImage->hControlPipe = INVALID_HANDLE_VALUE;
         pServiceImage->hProcess = INVALID_HANDLE_VALUE;
 
@@ -587,8 +591,6 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
     }
     else
     {
-//        if ((lpService->Status.dwServiceType & SERVICE_WIN32_SHARE_PROCESS) == 0)
-
         /* Fail if services in an image use different accounts */
         if (!ScmIsSameServiceAccount(pServiceImage->pszAccountName, ObjectName.Buffer))
         {
@@ -1976,23 +1978,35 @@ ScmLoadService(PSERVICE Service,
     DPRINT("ScmLoadService() called\n");
     DPRINT("Start Service %p (%S)\n", Service, Service->lpServiceName);
 
-    if (Service->Status.dwCurrentState != SERVICE_STOPPED)
-    {
-        DPRINT("Service %S is already running\n", Service->lpServiceName);
-        return ERROR_SERVICE_ALREADY_RUNNING;
-    }
-
     DPRINT("Service->Type: %lu\n", Service->Status.dwServiceType);
 
     if (Service->Status.dwServiceType & SERVICE_DRIVER)
     {
+        if (Service->Status.dwCurrentState != SERVICE_STOPPED)
+        {
+            DPRINT("Service %S is already running\n", Service->lpServiceName);
+            return ERROR_SERVICE_ALREADY_RUNNING;
+        }
+
         /* Start the driver */
         dwError = ScmStartDriver(Service);
     }
     else // if (Service->Status.dwServiceType & (SERVICE_WIN32 | SERVICE_INTERACTIVE_PROCESS))
     {
-        /* Start user-mode service */
+        /*
+         * Start user-mode service. The state check and the attachment of the
+         * image are done under the database lock: the stop of the previous
+         * run clears the image and sets the state under that lock.
+         */
+        ScmLockDatabaseExclusive();
+        if (Service->Status.dwCurrentState != SERVICE_STOPPED)
+        {
+            ScmUnlockDatabase();
+            DPRINT("Service %S is already running\n", Service->lpServiceName);
+            return ERROR_SERVICE_ALREADY_RUNNING;
+        }
         dwError = ScmCreateOrReferenceServiceImage(Service);
+        ScmUnlockDatabase();
         if (dwError == ERROR_SUCCESS)
         {
             dwError = ScmStartUserModeService(Service, argc, argv);
@@ -2004,12 +2018,16 @@ ScmLoadService(PSERVICE Service,
             }
             else
             {
-                Service->lpImage->dwImageRunCount--;
-                if (Service->lpImage->dwImageRunCount == 0)
+                /* A stop of the service has released the image already */
+                ScmLockDatabaseExclusive();
+                if (Service->lpImage != NULL)
                 {
-                    ScmRemoveServiceImage(Service->lpImage);
+                    Service->lpImage->dwImageRunCount--;
+                    if (Service->lpImage->dwImageRunCount == 0)
+                        ScmRemoveServiceImage(Service->lpImage);
                     Service->lpImage = NULL;
                 }
+                ScmUnlockDatabase();
             }
         }
     }

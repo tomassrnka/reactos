@@ -15,6 +15,7 @@ extern void func_Hash(void);
 extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
+extern void func_LogonUser(void);
 extern void func_QueryServiceConfig2(void);
 extern void func_RegConcurrentWrite(void);
 extern void func_RegCreateKeyEx(void);
@@ -36,6 +37,7 @@ extern void func_SaferIdentifyLevel(void);
 extern void func_TokenIntegrity(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceEnv(void);
+extern void func_ServiceFailureActions(void);
 extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
 extern void func_SetNamedSecurityInfoInherit(void);
@@ -56,6 +58,7 @@ const struct test winetest_testlist[] =
     { "HKEY_CLASSES_ROOT", func_HKEY_CLASSES_ROOT },
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
+    { "LogonUser", func_LogonUser },
     { "QueryServiceConfig2", func_QueryServiceConfig2 },
     { "RegConcurrentWrite", func_RegConcurrentWrite },
     { "RegCreateKeyEx", func_RegCreateKeyEx },
@@ -77,6 +80,7 @@ const struct test winetest_testlist[] =
     { "TokenIntegrity", func_TokenIntegrity },
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceEnv", func_ServiceEnv },
+    { "ServiceFailureActions", func_ServiceFailureActions },
     { "ServiceNetwork", func_ServiceNetwork },
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
