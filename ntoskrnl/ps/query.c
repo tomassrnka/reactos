@@ -1447,16 +1447,17 @@ PspSetThreadTls32(
     _In_ PPROCESS_TLS_INFORMATION Header,
     _Inout_opt_ PTHREAD_TLS_INFORMATION Entry,
     _In_ ULONG Pass,
-    _In_ HANDLE ThreadId)
+    _In_ HANDLE ThreadId,
+    _In_ ULONG64 GuestLimit)
 {
     PTEB32 Guest;
     PULONG Vector, NewVector;
     ULONG OldLength, NewLength, Old = 0, i;
     ULONG_PTR NewTlsData;
 
-    /* A 32-bit vector, its length word before it included, stays below 4 GiB */
+    /* A 32-bit vector, its length word before it included, stays in the guest's address space */
 #define TLS32_IN_GUEST(v, n) ((ULONG_PTR)(v) >= sizeof(ULONG) && \
-                              (ULONG64)(ULONG_PTR)(v) + (ULONG64)(n) * sizeof(ULONG) <= 0x100000000ULL)
+                              (ULONG64)(ULONG_PTR)(v) + (ULONG64)(n) * sizeof(ULONG) <= GuestLimit)
 
     if (!Teb)
         return FALSE;
@@ -1557,6 +1558,10 @@ PspSetProcessTlsInformation(
     ULONG_PTR OldLength, NewLength;
     ULONG Pass, Count, i;
     BOOLEAN Wow64 = FALSE, Counted;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    SECTION_IMAGE_INFORMATION ImageInformation;
+    ULONG64 GuestLimit = 0;
+#endif
     NTSTATUS Status = STATUS_SUCCESS;
 
     if (Process != PsGetCurrentProcess())
@@ -1584,6 +1589,11 @@ PspSetProcessTlsInformation(
             return STATUS_INVALID_PARAMETER;
         Header.Flags &= ~PROCESS_TLS_WOW64;
         Wow64 = TRUE;
+        /* The guest's address space ends at 2 GiB, or near 4 GiB for a large-address-aware
+           image (as the WoW64 layer reserves it: MM_HIGHEST_USER_ADDRESS_WOW64 or 0xFFFEFFFF) */
+        MmGetImageInformation(&ImageInformation);
+        GuestLimit = (ImageInformation.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ?
+                     0xFFFF0000ULL : (ULONG64)MM_HIGHEST_USER_ADDRESS_WOW64 + 1;
     }
 #endif
     if (Header.Flags ||
@@ -1616,7 +1626,7 @@ PspSetProcessTlsInformation(
                 {
                     Counted = PspSetThreadTls32(Teb, &Header,
                                                 (Count < Header.ThreadDataCount) ? &ThreadData[Count] : NULL,
-                                                Pass, Thread->Cid.UniqueThread);
+                                                Pass, Thread->Cid.UniqueThread, GuestLimit);
                 }
                 else
 #endif
