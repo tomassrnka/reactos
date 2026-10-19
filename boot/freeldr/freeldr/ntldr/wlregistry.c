@@ -82,11 +82,19 @@ WinLdrLoadSystemHive(
         ArcClose(FileId);
         return FALSE;
     }
+    /* The page count below must not overflow */
     HiveFileSize = FileInfo.EndingAddress.LowPart;
+    if (FileInfo.EndingAddress.HighPart != 0 || HiveFileSize > MAXULONG - MM_PAGE_MASK || HiveFileSize < HBLOCK_SIZE)
+    {
+        ERR("'%s' is too short or too large to be a hive\n", FullHiveName);
+        *Reason = CorruptHive;
+        ArcClose(FileId);
+        return FALSE;
+    }
 
     /* Round up the size to page boundary and alloc memory */
     HiveDataPhysical = MmAllocateMemoryWithType(
-        MM_SIZE_TO_PAGES(HiveFileSize + MM_PAGE_SIZE - 1) << MM_PAGE_SHIFT,
+        MM_SIZE_TO_PAGES(HiveFileSize) << MM_PAGE_SHIFT,
         LoaderRegistryData);
 
     if (HiveDataPhysical == NULL)
@@ -114,6 +122,15 @@ WinLdrLoadSystemHive(
         return FALSE;
     }
 
+    /* A hive read in part must not reach the hive check or the log recovery */
+    if (BytesRead != HiveFileSize)
+    {
+        ERR("Short read of '%s': 0x%lx of 0x%lx bytes\n", FullHiveName, BytesRead, HiveFileSize);
+        *Reason = CorruptHive;
+        ArcClose(FileId);
+        return FALSE;
+    }
+
     // FIXME: HACK: Get the boot filesystem driver name now...
     BootFileSystem = FsGetServiceName(FileId);
 
@@ -129,7 +146,7 @@ WinLdrInitSystemHive(
 {
     CHAR SearchPath[1024];
     PVOID ChunkBase;
-    PCSTR HiveName;
+    PCSTR HiveName, PrimaryHiveName;
     BOOLEAN Success;
     BAD_HIVE_REASON Reason;
 
@@ -146,6 +163,7 @@ WinLdrInitSystemHive(
         HiveName = "SYSTEM";
     }
 
+    PrimaryHiveName = HiveName;
     TRACE("WinLdrInitSystemHive: loading hive %s%s\n", SearchPath, HiveName);
     Success = WinLdrLoadSystemHive(LoaderBlock, SearchPath, HiveName, &Reason);
     if (!Success)
@@ -171,7 +189,10 @@ WinLdrInitSystemHive(
          * have made this possible are the following:
          *
          * 1. The primary hive is corrupt beyond repair (such as when
-         *    core FS structures are total toast);
+         *    core FS structures are total toast). A clean primary hive
+         *    (its base block passes the header check, sequence numbers
+         *    equal) that fails its check is never repaired with the LOG,
+         *    which is older than the hive;
          *
          * 2. Repairing the hive could with a LOG could not recover it
          *    to the fullest. This is the case when the hive and LOG have
@@ -179,7 +200,9 @@ WinLdrInitSystemHive(
          *    data in the LOG was not marked as dirty that could be copied
          *    into the primary hive;
          *
-         * 3. LOG is bad (e.g. corrupt dirty vector);
+         * 3. LOG is bad (e.g. corrupt dirty vector), or it is not the
+         *    log of the interrupted write of the hive (its time stamp
+         *    differs or its sequence number is older);
          *
          * 4. LOG does not physically exist on the backing storage.
          *
@@ -195,7 +218,9 @@ LoadAlternateHive:
         Success = WinLdrLoadSystemHive(LoaderBlock, SearchPath, HiveName, &Reason);
         if (!Success)
         {
-            UiMessageBox("Could not load %s hive!", HiveName);
+            UiMessageBox("Could not load %s hive!\n"
+                         "The %s hive could not be used, and %s is\n"
+                         "missing, incomplete or unreadable.", HiveName, PrimaryHiveName, HiveName);
             return FALSE;
         }
 
@@ -203,7 +228,8 @@ LoadAlternateHive:
         Success = RegImportBinaryHive(VaToPa(LoaderBlock->RegistryBase), LoaderBlock->RegistryLength, SearchPath, TRUE);
         if (!Success)
         {
-            UiMessageBox("Importing binary hive failed!");
+            UiMessageBox("Importing binary hive failed!\n"
+                         "The %s hive could not be used, and %s is corrupt.", PrimaryHiveName, HiveName);
             return FALSE;
         }
 

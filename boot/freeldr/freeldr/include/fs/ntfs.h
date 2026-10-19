@@ -74,6 +74,8 @@
 #define NTFS_FILE_ATTR_DIRECTORY    0x10000000
 
 #define NTFS_MFT_MASK 0x0000FFFFFFFFFFFFULL
+#define NTFS_FILE_RECORD_IN_USE 0x0001
+#define NTFS_FILE_RECORD_MAGIC 0x454C4946 // "FILE"
 
 #include <pshpack1.h>
 typedef struct
@@ -235,8 +237,9 @@ typedef struct
 } NTFS_INDEX_ENTRY, *PNTFS_INDEX_ENTRY;
 #include <poppack.h>
 
-typedef struct
+typedef struct _NTFS_ATTR_CONTEXT
 {
+    struct _NTFS_ATTR_CONTEXT *NextExtent;  // Next extent (higher VCNs) of a non-resident attribute
     PUCHAR            CacheRun;
     ULONGLONG            CacheRunOffset;
     LONGLONG            CacheRunStartLCN;
