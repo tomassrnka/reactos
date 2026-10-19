@@ -391,8 +391,84 @@ test_SandboxPolicies(void)
     CloseHandle(hJob);
 }
 
+/* A completion port associated with a job reports a process that is assigned to it,
+ * its exit and the end of the last process, with the key given at association. */
+static
+VOID
+test_CompletionPort(VOID)
+{
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT Port;
+    STARTUPINFOW Startup = { sizeof(Startup) };
+    PROCESS_INFORMATION Child = { 0 };
+    WCHAR Command[MAX_PATH + 32];
+    HANDLE hJob, hPort;
+    DWORD Message, i;
+    ULONG_PTR Key;
+    LPOVERLAPPED Overlapped;
+    BOOL SeenNew = FALSE, SeenExit = FALSE, SeenZero = FALSE;
+
+    hJob = CreateJobObjectW(NULL, NULL);
+    hPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+    ok(hJob != NULL && hPort != NULL, "CreateJobObject/CreateIoCompletionPort failed: %lu\n", GetLastError());
+    if (!hJob || !hPort)
+        goto Cleanup;
+
+    Port.CompletionKey = (PVOID)(ULONG_PTR)0x1234;
+    Port.CompletionPort = hPort;
+    ok(SetInformationJobObject(hJob, JobObjectAssociateCompletionPortInformation, &Port, sizeof(Port)),
+       "Associating the port failed: %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ok(!SetInformationJobObject(hJob, JobObjectAssociateCompletionPortInformation, &Port, sizeof(Port) - 1),
+       "A short association succeeded\n");
+    ok(GetLastError() == ERROR_BAD_LENGTH, "Error %lu\n", GetLastError());
+
+    GetSystemDirectoryW(Command, MAX_PATH);
+    StringCchCatW(Command, RTL_NUMBER_OF(Command), L"\\cmd.exe /c exit 3");
+    if (!CreateProcessW(NULL, Command, NULL, NULL, FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL, NULL, &Startup, &Child))
+    {
+        skip("CreateProcess failed: %lu\n", GetLastError());
+        goto Cleanup;
+    }
+    ok(AssignProcessToJobObject(hJob, Child.hProcess), "AssignProcessToJobObject failed: %lu\n", GetLastError());
+    ResumeThread(Child.hThread);
+    WaitForSingleObject(Child.hProcess, 30000);
+
+    for (i = 0; i < 8 && !SeenZero; i++)
+    {
+        if (!GetQueuedCompletionStatus(hPort, &Message, &Key, &Overlapped, 5000))
+            break;
+        ok(Key == 0x1234, "Message %lu with key 0x%Ix\n", Message, Key);
+        if (Message == JOB_OBJECT_MSG_NEW_PROCESS)
+        {
+            SeenNew = TRUE;
+            ok((ULONG_PTR)Overlapped == Child.dwProcessId, "New process %Iu, child %lu\n", (ULONG_PTR)Overlapped, Child.dwProcessId);
+        }
+        else if (Message == JOB_OBJECT_MSG_EXIT_PROCESS || Message == JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS)
+        {
+            SeenExit = TRUE;
+            ok((ULONG_PTR)Overlapped == Child.dwProcessId, "Exited process %Iu, child %lu\n", (ULONG_PTR)Overlapped, Child.dwProcessId);
+        }
+        else if (Message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO)
+        {
+            SeenZero = TRUE;
+        }
+    }
+    ok(SeenNew, "No JOB_OBJECT_MSG_NEW_PROCESS\n");
+    ok(SeenExit, "No exit message\n");
+    ok(SeenZero, "No JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO\n");
+    CloseHandle(Child.hThread);
+    CloseHandle(Child.hProcess);
+
+Cleanup:
+    if (hJob)
+        CloseHandle(hJob);
+    if (hPort)
+        CloseHandle(hPort);
+}
+
 START_TEST(JobObject)
 {
+    test_CompletionPort();
     test_RoundTrip();
     test_InvalidParameters();
     test_Access();
