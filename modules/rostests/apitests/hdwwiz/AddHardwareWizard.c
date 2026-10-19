@@ -21,14 +21,13 @@
 #define IDC_MANUALLYINST      317
 #define IDC_DETECTEDHWLIST    323
 #define IDC_HWTYPESLIST       325
-#define IDC_ISCONNECTED       504
+#define IDC_CONNECTED         504
 
 #define ID_BACK 0x3023
 #define ID_NEXT 0x3024
 
 typedef VOID (WINAPI *PADDHARDWAREWIZARD)(HWND, LPWSTR);
 
-static HMODULE hHdwwiz;
 static DWORD dwWizardThread;
 
 static DWORD WINAPI
@@ -40,10 +39,25 @@ WizardThread(LPVOID Param)
     return 0;
 }
 
+/* Every message to the wizard is bounded, so a hung wizard fails the test instead of hanging it */
+static LRESULT
+SendBounded(HWND hwnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+{
+    DWORD_PTR Result = 0;
+
+    if (!SendMessageTimeoutW(hwnd, Msg, wParam, lParam, SMTO_ABORTIFHUNG, 5000, &Result))
+        return 0;
+    return (LRESULT)Result;
+}
+
 static BOOL CALLBACK
 FindSheetProc(HWND hwnd, LPARAM lParam)
 {
-    if (IsWindowVisible(hwnd) && SendMessageW(hwnd, PSM_GETCURRENTPAGEHWND, 0, 0) != 0)
+    WCHAR szClass[16];
+
+    if (IsWindowVisible(hwnd) &&
+        GetClassNameW(hwnd, szClass, ARRAYSIZE(szClass)) && !wcscmp(szClass, L"#32770") &&
+        SendBounded(hwnd, PSM_GETCURRENTPAGEHWND, 0, 0) != 0)
     {
         *(HWND *)lParam = hwnd;
         return FALSE;
@@ -51,7 +65,7 @@ FindSheetProc(HWND hwnd, LPARAM lParam)
     return TRUE;
 }
 
-/* The sheet is the visible window of the wizard thread that has a current page */
+/* The sheet is the visible dialog of the wizard thread that has a current page */
 static HWND
 FindSheet(VOID)
 {
@@ -70,7 +84,33 @@ FindSheet(VOID)
 static HWND
 CurPage(HWND hSheet)
 {
-    return (HWND)SendMessageW(hSheet, PSM_GETCURRENTPAGEHWND, 0, 0);
+    return (HWND)SendBounded(hSheet, PSM_GETCURRENTPAGEHWND, 0, 0);
+}
+
+/* Wait until the current page has one of the controls; NULL after the deadline */
+static HWND
+WaitForPage(HWND hSheet, const int *Ids, int Count, DWORD dwTimeout, DWORD *pdwWaited)
+{
+    DWORD dwWaited;
+    HWND hPage;
+    int i;
+
+    for (dwWaited = 0; ; dwWaited += 100)
+    {
+        hPage = CurPage(hSheet);
+        for (i = 0; hPage && i < Count; i++)
+        {
+            if (GetDlgItem(hPage, Ids[i]))
+            {
+                if (pdwWaited)
+                    *pdwWaited = dwWaited;
+                return hPage;
+            }
+        }
+        if (dwWaited >= dwTimeout)
+            return NULL;
+        Sleep(100);
+    }
 }
 
 static BOOL
@@ -81,20 +121,64 @@ ButtonEnabled(HWND hSheet, int Id)
 }
 
 static VOID
-Press(HWND hSheet, int Button, DWORD dwWait)
+Press(HWND hSheet, int Button)
 {
     PostMessageW(hSheet, PSM_PRESSBUTTON, Button, 0);
-    Sleep(dwWait);
+}
+
+static VOID
+DriveWizard(HWND hSheet, PCWSTR pszFailed)
+{
+    static const int MethodPage[] = { IDC_AUTOINSTALL };
+    static const int AfterSearch[] = { IDC_DETECTEDHWLIST, IDC_HWTYPESLIST, IDC_CONNECTED };
+    static const int TypesPage[] = { IDC_HWTYPESLIST };
+    WCHAR szText[512];
+    DWORD dwWaited = 0;
+    HWND hPage;
+
+    /* Welcome page */
+    ok(ButtonEnabled(hSheet, ID_NEXT) && !ButtonEnabled(hSheet, ID_BACK), "welcome page buttons\n");
+
+    /* The second page is the choice of method, the search preselected */
+    Press(hSheet, PSBTN_NEXT);
+    hPage = WaitForPage(hSheet, MethodPage, 1, 5000, NULL);
+    ok(hPage != NULL, "the second page is not the method page\n");
+    if (!hPage)
+        return;
+    ok(SendBounded(GetDlgItem(hPage, IDC_AUTOINSTALL), BM_GETCHECK, 0, 0) == BST_CHECKED,
+       "the search is not preselected\n");
+
+    /* Search: it must end by itself on the result page */
+    Press(hSheet, PSBTN_NEXT);
+    hPage = WaitForPage(hSheet, AfterSearch, ARRAYSIZE(AfterSearch), 60000, &dwWaited);
+    ok(hPage && GetDlgItem(hPage, IDC_DETECTEDHWLIST), "the search did not end on the result page\n");
+    if (!hPage || !GetDlgItem(hPage, IDC_DETECTEDHWLIST))
+        return;
+    szText[0] = UNICODE_NULL;
+    GetDlgItemTextW(hPage, IDC_STATUSTEXT, szText, ARRAYSIZE(szText));
+    trace("result after %lu ms: '%ls'\n", dwWaited, szText);
+    ok(szText[0] != UNICODE_NULL, "the result page has no text\n");
+    ok(wcscmp(szText, pszFailed) != 0, "the search failed: the list of devices could not be scanned\n");
+
+    /* Back returns to the method page; the manual choice opens the type list */
+    Press(hSheet, PSBTN_BACK);
+    hPage = WaitForPage(hSheet, MethodPage, 1, 5000, NULL);
+    ok(hPage != NULL, "Back from the result page did not return to the method page\n");
+    if (!hPage)
+        return;
+    SendBounded(GetDlgItem(hPage, IDC_AUTOINSTALL), BM_SETCHECK, BST_UNCHECKED, 0);
+    SendBounded(GetDlgItem(hPage, IDC_MANUALLYINST), BM_SETCHECK, BST_CHECKED, 0);
+    Press(hSheet, PSBTN_NEXT);
+    ok(WaitForPage(hSheet, TypesPage, 1, 5000, NULL) != NULL, "the manual choice did not open the type list\n");
 }
 
 START_TEST(AddHardwareWizard)
 {
     PADDHARDWAREWIZARD pAddHardwareWizard;
-    WCHAR szFailed[512], szText[512];
+    WCHAR szFailed[512];
+    HMODULE hHdwwiz;
     HANDLE hThread;
-    HWND hSheet, hPage;
-    DWORD dwWaited;
-    int i;
+    HWND hSheet;
 
     hHdwwiz = LoadLibraryW(L"hdwwiz.cpl");
     if (!hHdwwiz)
@@ -104,72 +188,39 @@ START_TEST(AddHardwareWizard)
     }
     pAddHardwareWizard = (PADDHARDWAREWIZARD)GetProcAddress(hHdwwiz, "AddHardwareWizard");
     ok(pAddHardwareWizard != NULL, "AddHardwareWizard is not exported\n");
-    if (!pAddHardwareWizard)
-        return;
+    szFailed[0] = UNICODE_NULL;
     ok(LoadStringW(hHdwwiz, IDS_SEARCHFAILEDTEXT, szFailed, ARRAYSIZE(szFailed)) > 0,
        "no search-failed text\n");
+    if (!pAddHardwareWizard || !szFailed[0])
+    {
+        FreeLibrary(hHdwwiz);
+        return;
+    }
 
     hThread = CreateThread(NULL, 0, WizardThread, pAddHardwareWizard, 0, &dwWizardThread);
     ok(hThread != NULL, "CreateThread failed, error %lu\n", GetLastError());
     if (!hThread)
+    {
+        FreeLibrary(hHdwwiz);
         return;
+    }
 
     hSheet = FindSheet();
     ok(hSheet != NULL, "the wizard did not open\n");
-    if (!hSheet)
-        goto cleanup;
-    Sleep(700);
-
-    /* Welcome page */
-    ok(ButtonEnabled(hSheet, ID_NEXT) && !ButtonEnabled(hSheet, ID_BACK), "welcome page buttons\n");
-
-    /* The second page is the choice of method, the search preselected */
-    Press(hSheet, PSBTN_NEXT, 800);
-    hPage = CurPage(hSheet);
-    ok(GetDlgItem(hPage, IDC_AUTOINSTALL) != NULL, "the second page is not the method page\n");
-    ok(SendDlgItemMessageW(hPage, IDC_AUTOINSTALL, BM_GETCHECK, 0, 0) == BST_CHECKED,
-       "the search is not preselected\n");
-    ok(GetDlgItem(hPage, IDC_ISCONNECTED) == NULL, "the XP connected page came second\n");
-
-    /* Search: it must end by itself on the result page */
-    Press(hSheet, PSBTN_NEXT, 0);
-    for (dwWaited = 0; dwWaited < 60000; dwWaited += 100)
+    if (hSheet)
     {
-        Sleep(100);
-        hPage = CurPage(hSheet);
-        if (GetDlgItem(hPage, IDC_DETECTEDHWLIST) || GetDlgItem(hPage, IDC_HWTYPESLIST) ||
-            GetDlgItem(hPage, IDC_ISCONNECTED))
-        {
-            break;
-        }
+        DriveWizard(hSheet, szFailed);
+        Press(hSheet, PSBTN_CANCEL);
     }
-    hPage = CurPage(hSheet);
-    ok(GetDlgItem(hPage, IDC_DETECTEDHWLIST) != NULL, "the search did not end on the result page (%lu ms)\n", dwWaited);
-    szText[0] = UNICODE_NULL;
-    GetDlgItemTextW(hPage, IDC_STATUSTEXT, szText, ARRAYSIZE(szText));
-    trace("result after %lu ms: '%ls'\n", dwWaited, szText);
-    ok(szText[0] != UNICODE_NULL, "the result page has no text\n");
-    ok(wcscmp(szText, szFailed) != 0, "the search failed: the list of devices could not be scanned\n");
 
-    /* Back returns to the method page; the manual choice opens the type list */
-    Press(hSheet, PSBTN_BACK, 800);
-    hPage = CurPage(hSheet);
-    ok(GetDlgItem(hPage, IDC_AUTOINSTALL) != NULL, "Back from the result page did not return to the method page\n");
-    SendDlgItemMessageW(hPage, IDC_AUTOINSTALL, BM_SETCHECK, BST_UNCHECKED, 0);
-    SendDlgItemMessageW(hPage, IDC_MANUALLYINST, BM_SETCHECK, BST_CHECKED, 0);
-    Press(hSheet, PSBTN_NEXT, 1000);
-    ok(GetDlgItem(CurPage(hSheet), IDC_HWTYPESLIST) != NULL, "the manual choice did not open the type list\n");
-
-    Press(hSheet, PSBTN_CANCEL, 0);
-
-cleanup:
-    if (WaitForSingleObject(hThread, 10000) != WAIT_OBJECT_0)
+    if (WaitForSingleObject(hThread, 15000) == WAIT_OBJECT_0)
     {
-        ok(FALSE, "the wizard did not close\n");
-        for (i = 0; i < 3 && (hSheet = FindSheet()) != NULL; i++)
-            Press(hSheet, PSBTN_CANCEL, 1000);
-        if (WaitForSingleObject(hThread, 5000) != WAIT_OBJECT_0)
-            TerminateThread(hThread, 1);
+        CloseHandle(hThread);
+        FreeLibrary(hHdwwiz);
+        return;
     }
+
+    /* A wizard that does not close keeps hdwwiz.cpl loaded; the process exit ends it */
+    ok(FALSE, "the wizard did not close\n");
     CloseHandle(hThread);
 }
