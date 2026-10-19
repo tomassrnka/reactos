@@ -192,6 +192,7 @@ list(APPEND SOURCE
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     StackOverflow.c
+    StackOverflowDispatch.c
     SystemCallStubs.c
     SystemDllTls.c
     SystemInfo.c
@@ -205,6 +206,7 @@ if(ARCH STREQUAL "i386")
         i386/NtContinue.S
         i386/Wow64Continue.S
         i386/NtCreateThread.S
+        i386/StackOverflowDispatch.S
     )
 elseif(ARCH STREQUAL "amd64")
     add_asm_files(ntdll_apitest_asm
@@ -212,6 +214,7 @@ elseif(ARCH STREQUAL "amd64")
         amd64/NtContinue.S
         amd64/Wow64Continue.S
         amd64/NtCreateThread.S
+        amd64/StackOverflowDispatch.S
     )
 endif()
 

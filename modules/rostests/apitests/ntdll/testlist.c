@@ -186,6 +186,7 @@ extern void func_strcpy_s(void);
 extern void func_SystemDllTls(void);
 extern void func_TimerResolution(void);
 extern void func_UserModeException(void);
+extern void func_StackOverflowDispatch(void);
 
 const struct test winetest_testlist[] =
 {
@@ -370,6 +371,7 @@ const struct test winetest_testlist[] =
     { "SystemDllTls",                   func_SystemDllTls },
     { "TimerResolution",                func_TimerResolution },
     { "UserModeException",              func_UserModeException },
+    { "StackOverflowDispatch",          func_StackOverflowDispatch },
 #ifdef _M_IX86
     { "RtlUnwind",                      func_RtlUnwind },
 #endif
