@@ -10,6 +10,8 @@ extern void func_globalmemorystatus(void);
 extern void func_ignorefreelib(void);
 extern void func_ignoreloadlib(void);
 extern void func_layer_hooks(void);
+extern void func_versionconflict(void);
+extern void func_sysmain(void);
 extern void func_versionlie(void);
 
 const struct test winetest_testlist[] =
@@ -21,6 +23,8 @@ const struct test winetest_testlist[] =
     { "ignorefreelib", func_ignorefreelib },
     { "ignoreloadlib", func_ignoreloadlib },
     { "layer_hooks", func_layer_hooks },
+    { "versionconflict", func_versionconflict },
+    { "sysmain", func_sysmain },
     { "versionlie", func_versionlie },
     { 0, 0 }
 };

@@ -76,6 +76,14 @@ struct ShimRef
     bool KShim = false;
 };
 
+struct LayerRef
+{
+    bool fromXml(XMLHandle dbNode);
+    bool toSdb(Database& db);
+
+    std::string Name;
+};
+
 struct FlagRef
 {
     bool fromXml(XMLHandle dbNode);
@@ -153,11 +161,13 @@ struct MatchingFile
     std::string ProductVersion;
     std::string FileVersion;
     std::string BinFileVersion;
+    std::string BinProductVersion;
     DWORD LinkDate = 0;
     std::string VerLanguage;
     std::string FileDescription;
     std::string OriginalFilename;
     std::string UptoBinFileVersion;
+    std::string UptoBinProductVersion;
     DWORD LinkerVersion = 0;
 };
 
@@ -174,6 +184,7 @@ struct Exe
     std::list<MatchingFile> MatchingFiles;
     std::list<ShimRef> ShimRefs;
     std::list<FlagRef> FlagRefs;
+    std::list<LayerRef> LayerRefs;
     PlatformType Platform = PLATFORM_ANY;
     bool KDriver = false;
 };

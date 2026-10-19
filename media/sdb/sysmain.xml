@@ -410,6 +410,12 @@
             <SHIM_REF NAME="GlobalMemoryStatus2GB" />
             <!-- TODO: Add more fixes! -->
         </LAYER>
+        <!-- ReactOS specific. The Windows 7 SP1 version answer alone, without the memory cap of WIN7SP1, as a default for programs
+             that need it (Firefox). It is a layer so that a layer the user or the environment chooses (Compatibility tab,
+             __COMPAT_LAYER) comes first and wins: only the first version lie of a program is kept. -->
+        <LAYER NAME="WIN7VERSIONDEFAULT">
+            <SHIM_REF NAME="Win7SP1VersionLie" />
+        </LAYER>
         <LAYER NAME="WIN8RTM">
             <SHIM_REF NAME="Win8RTMVersionLie" />
             <DATA NAME="SHIMVERSIONNT" DATA_DWORD="602" />
@@ -502,6 +508,102 @@
                 <MODULE_TYPE>0x3</MODULE_TYPE>
             </MATCHING_FILE>
             <SHIM_REF NAME="MsysDecoy" />
+        </EXE>
+
+        <!--
+            Programs that refuse to run on the Windows version the system reports (NT 5.2). Each one gets the
+            lowest layer that was measured to pass its check, or the minimum the project documents when the
+            program cannot be run here for other reasons (marked "documented").
+        -->
+
+        <!-- Node.js 16 to 21 exits with 216 below Windows 8 (measured with 16.20.2: WIN7RTM is not enough, WIN8RTM starts it) -->
+        <EXE NAME="node.exe" APP_NAME="Node.js 16 to 21" VENDOR="Node.js">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Node.js</COMPANY_NAME>
+                <PRODUCT_NAME>Node.js</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>node.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>16.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>21.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN8RTM" />
+        </EXE>
+
+        <!-- Python 3.9 to 3.12 installers (a Burn bundle; the name carries the version): "Windows Server 2012 or later is required"
+             (measured with 3.9.13 and 3.11.9: WIN7RTM still refuses, WIN8RTM passes) -->
+        <EXE NAME="*" APP_NAME="Python 3.9 to 3.12 installer" VENDOR="Python Software Foundation">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Python Software Foundation</COMPANY_NAME>
+                <INTERNAL_NAME>setup</INTERNAL_NAME>
+                <BIN_FILE_VERSION>3.9.0.0</BIN_FILE_VERSION>
+                <UPTO_BIN_FILE_VERSION>3.12.65535.65535</UPTO_BIN_FILE_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN8RTM" />
+        </EXE>
+
+        <!-- python.exe and pythonw.exe 3.9 to 3.12, the lowest Windows these versions support (documented; the interpreter does not run here yet) -->
+        <EXE NAME="python.exe" APP_NAME="Python 3.9 to 3.12" VENDOR="Python Software Foundation">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Python Software Foundation</COMPANY_NAME>
+                <PRODUCT_NAME>Python</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>python.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>3.9.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>3.12.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN8RTM" />
+        </EXE>
+        <EXE NAME="pythonw.exe" APP_NAME="Python 3.9 to 3.12 (windowed)" VENDOR="Python Software Foundation">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Python Software Foundation</COMPANY_NAME>
+                <PRODUCT_NAME>Python</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>pythonw.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>3.9.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>3.12.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN8RTM" />
+        </EXE>
+
+        <!-- Firefox 4 and later: on a system that does not report Windows 7 or later (NT 6.1 SP1 or build 7600) Firefox rejects
+             DirectWrite ("IsNotWin7PreRTM"), falls back to GDI fonts, and draws all text as grayscale bitmap blobs instead of
+             through WebRender with ClearType. Only the version answer is changed, through the layer that has the Windows 7 SP1
+             version lie and nothing else (WIN7SP1 also caps the reported memory, which would change Firefox's cache and process
+             decisions). It is a default: a layer chosen by the user or the environment wins. Measured with Firefox 115.43 ESR (amd64). -->
+        <EXE NAME="firefox.exe" APP_NAME="Firefox" VENDOR="Mozilla">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Mozilla Corporation</COMPANY_NAME>
+                <PRODUCT_NAME>Firefox</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>firefox.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>4.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN7VERSIONDEFAULT" />
+        </EXE>
+
+        <!-- LibreOffice 24.8 and later need Windows 10 (documented; the installer is an MSI, see the layers on msiexec.exe) -->
+        <EXE NAME="soffice.exe" APP_NAME="LibreOffice 24.8 and later" VENDOR="The Document Foundation">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>The Document Foundation</COMPANY_NAME>
+                <PRODUCT_NAME>LibreOffice</PRODUCT_NAME>
+                <ORIGINAL_FILENAME>soffice.exe</ORIGINAL_FILENAME>
+                <BIN_PRODUCT_VERSION>24.8.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN10RTM" />
+        </EXE>
+
+        <!-- No rule for Qt 6 programs: the database matches the attributes of the program file and of named files next to it,
+             not what it imports, so a rule keyed on Qt6Core.dll would also change unrelated programs in that directory.
+             Qt 6 programs choose the Windows 10 layer themselves. -->
+
+        <!-- Sysinternals DebugView 5.x (the GUI and the console program, 32 and 64 bit) stops at start with "requires Windows 10
+             version 1809 (build 17763)" below that. WIN10RTM reports 10.0 build 18362, which is above the limit (measured with 5.02) -->
+        <EXE NAME="*" APP_NAME="Sysinternals DebugView 5 and later" VENDOR="Sysinternals">
+            <MATCHING_FILE NAME="*">
+                <COMPANY_NAME>Sysinternals</COMPANY_NAME>
+                <PRODUCT_NAME>Sysinternals Debugview</PRODUCT_NAME>
+                <BIN_PRODUCT_VERSION>5.0.0.0</BIN_PRODUCT_VERSION>
+                <UPTO_BIN_PRODUCT_VERSION>65535.65535.65535.65535</UPTO_BIN_PRODUCT_VERSION>
+            </MATCHING_FILE>
+            <LAYER NAME="WIN10RTM" />
         </EXE>
 
         <!-- ReactOS shim used to test the shim engine -->

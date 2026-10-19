@@ -425,6 +425,23 @@ static QWORD SeiGetQWORD(PDB pdb, TAGID tag, TAG type)
     return SdbReadQWORDTag(pdb, tagEntry, 0);
 }
 
+/*
+ * A version lie answers every call about the version, and the first shim of a function wins: two of them
+ * together give a mixture (the version of the first for GetVersionEx, that of the second for the calls
+ * only it hooks). Only the first one stays; the other shims of a layer are not touched.
+ */
+static BOOL SeiIsVersionLie(PDB pdb, TAGID tiShimRef)
+{
+    LPCWSTR Name = SeiGetStringPtr(pdb, tiShimRef, TAG_NAME);
+    SIZE_T Length;
+
+    if (!Name)
+        return FALSE;
+
+    Length = wcslen(Name);
+    return Length > 10 && !_wcsicmp(Name + Length - 10, L"VersionLie");
+}
+
 static VOID SeiAddShim(TAGREF trShimRef, PARRAY pShimRef)
 {
     TAGREF* Data;
@@ -474,6 +491,7 @@ static VOID SeiSetLayerEnvVar(LPCWSTR wszLayer)
 static VOID SeiBuildShimRefArray(HSDB hsdb, SDBQUERYRESULT* pQuery, PARRAY pShimRef, PFLAGINFO pFlagInfo)
 {
     WCHAR wszLayerEnvVar[MAX_LAYER_LENGTH] = { 0 };
+    BOOL HaveVersionLie = FALSE;
     DWORD n;
 
     for (n = 0; n < pQuery->dwExeCount; ++n)
@@ -492,7 +510,15 @@ static VOID SeiBuildShimRefArray(HSDB hsdb, SDBQUERYRESULT* pQuery, PARRAY pShim
             while (ShimRef != TAGID_NULL)
             {
                 TAGREF trShimRef;
-                if (SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
+                BOOL Skip = FALSE;
+
+                if (SeiIsVersionLie(pdb, ShimRef))
+                {
+                    Skip = HaveVersionLie;
+                    HaveVersionLie = TRUE;
+                }
+
+                if (!Skip && SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
                     SeiAddShim(trShimRef, pShimRef);
 
                 ShimRef = SdbFindNextTag(pdb, tag, ShimRef);
@@ -534,7 +560,15 @@ static VOID SeiBuildShimRefArray(HSDB hsdb, SDBQUERYRESULT* pQuery, PARRAY pShim
             while (ShimRef != TAGID_NULL)
             {
                 TAGREF trShimRef;
-                if (SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
+                BOOL Skip = FALSE;
+
+                if (SeiIsVersionLie(pdb, ShimRef))
+                {
+                    Skip = HaveVersionLie;
+                    HaveVersionLie = TRUE;
+                }
+
+                if (!Skip && SdbTagIDToTagRef(hsdb, pdb, ShimRef, &trShimRef))
                     SeiAddShim(trShimRef, pShimRef);
 
                 ShimRef = SdbFindNextTag(pdb, tag, ShimRef);
