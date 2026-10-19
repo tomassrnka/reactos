@@ -230,25 +230,37 @@ CcPurgeCacheSection (
         Vacb = CONTAINING_RECORD(ListEntry, ROS_VACB, CacheMapVacbListEntry);
         ListEntry = ListEntry->Flink;
 
-        /* Skip VACBs outside the range, or only partially in range */
-        if (Vacb->FileOffset.QuadPart < StartOffset)
-        {
-            continue;
-        }
-        ViewEnd = min(Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY,
-                      SharedCacheMap->SectionSize.QuadPart);
-        if (ViewEnd >= EndOffset)
+        /* The list is sorted by file offset: stop at the first VACB past the range */
+        if (Vacb->FileOffset.QuadPart >= EndOffset)
         {
             break;
         }
 
-        /* Still in use, it cannot be purged, fail
-         * Allow one ref: VACB is supposed to be always 1-referenced
-         */
-        Refs = CcRosVacbGetRefCount(Vacb);
-        if ((Refs > 1 && !Vacb->Dirty) ||
-            (Refs > 2 && Vacb->Dirty))
+        /* Skip VACBs that end before the range starts */
+        if (Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY <= StartOffset)
         {
+            continue;
+        }
+
+        Refs = CcRosVacbGetRefCount(Vacb);
+        ViewEnd = min(Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY,
+                      SharedCacheMap->SectionSize.QuadPart);
+        if (Vacb->FileOffset.QuadPart < StartOffset || ViewEnd > EndOffset)
+        {
+            /* Only partly in range: release it only when clean and idle, as
+             * its dirty data outside the range would leave the lazy writer's
+             * list. Otherwise MmPurgeSegment checks the pages it maps */
+            if (Vacb->Dirty || Refs > 1)
+            {
+                continue;
+            }
+        }
+        else if ((Refs > 1 && !Vacb->Dirty) ||
+                 (Refs > 2 && Vacb->Dirty))
+        {
+            /* Still in use, it cannot be purged, fail
+             * Allow one ref: VACB is supposed to be always 1-referenced
+             */
             Success = FALSE;
             break;
         }
@@ -299,6 +311,7 @@ CcSetFileSizes (
     KIRQL OldIrql;
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     LARGE_INTEGER OldSectionSize;
+    LARGE_INTEGER OldFileSize;
 
     CCTRACE(CC_API_DEBUG, "FileObject=%p FileSizes=%p\n",
         FileObject, FileSizes);
@@ -322,10 +335,20 @@ CcSetFileSizes (
     /* Update the relevant fields */
     KeAcquireSpinLock(&SharedCacheMap->CacheMapLock, &OldIrql);
     OldSectionSize = SharedCacheMap->SectionSize;
+    OldFileSize = SharedCacheMap->FileSize;
     SharedCacheMap->SectionSize = FileSizes->AllocationSize;
     SharedCacheMap->FileSize = FileSizes->FileSize;
     SharedCacheMap->ValidDataLength = FileSizes->ValidDataLength;
     KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
+
+    /* Pages past a reduced file size can stay resident: clear them, so that a regrown file reads zero there.
+     * To the segment's end: a view may have written past the old size in its last page */
+    if (FileSizes->FileSize.QuadPart < OldFileSize.QuadPart)
+    {
+        MmZeroResidentSegmentRange(FileObject->SectionObjectPointer,
+                                   FileSizes->FileSize.QuadPart,
+                                   MAXLONGLONG);
+    }
 
     if (FileSizes->AllocationSize.QuadPart < OldSectionSize.QuadPart)
     {
@@ -384,6 +407,8 @@ CcUninitializeCacheMap (
             SharedCacheMap->FileSize = *TruncateSize;
         }
         KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
+        /* The purge keeps pages it cannot drop; they must not show the old bytes if the file grows again */
+        MmZeroResidentSegmentRange(FileObject->SectionObjectPointer, TruncateSize->QuadPart, MAXLONGLONG);
         CcPurgeCacheSection(FileObject->SectionObjectPointer,
                             TruncateSize,
                             0,

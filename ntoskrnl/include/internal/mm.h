@@ -1798,6 +1798,21 @@ MmPurgeSegment(
     _In_opt_ PLARGE_INTEGER Offset,
     _In_ ULONG Length);
 
+VOID
+NTAPI
+MmZeroResidentSegmentRange(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End);
+
+NTSTATUS
+NTAPI
+MmZeroSegmentRange(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End,
+    _In_ BOOLEAN Wait);
+
 BOOLEAN
 NTAPI
 MmCheckDirtySegment(

@@ -40,6 +40,7 @@ list(APPEND SOURCE
     lstrcpynW.c
     lstrlen.c
     Mailslot.c
+    MappedFileGrowth.c
     MultiByteToWideChar.c
     Pipes.c
     PrivMoveFileIdentityW.c
