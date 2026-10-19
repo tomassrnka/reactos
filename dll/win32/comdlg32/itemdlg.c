@@ -557,6 +557,17 @@ static void fill_filename_from_selection(FileDialogImpl *This)
     return;
 }
 
+#ifdef __REACTOS__
+/* path holds MAX_PATH characters */
+static BOOL append_ext(LPWSTR path, LPCWSTR ext)
+{
+    if (lstrlenW(path) + lstrlenW(ext) >= MAX_PATH)
+        return FALSE;
+    lstrcatW(path, ext);
+    return TRUE;
+}
+#endif
+
 static LPWSTR get_first_ext_from_spec(LPWSTR buf, LPCWSTR spec)
 {
     WCHAR *endpos, *ext;
@@ -649,6 +660,9 @@ static HRESULT on_default_action(FileDialogImpl *This)
     UINT file_count = 0, len, i;
     int open_action;
     HRESULT hr, ret = E_FAIL;
+#ifdef __REACTOS__
+    BOOL too_long = FALSE;
+#endif
 
     len = get_file_name(This, &tmp_files);
     if(len)
@@ -669,7 +683,11 @@ static HRESULT on_default_action(FileDialogImpl *This)
 
     TRACE("Acting on %d file(s).\n", file_count);
 
+#ifdef __REACTOS__
+    pidla = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(LPITEMIDLIST) * file_count);
+#else
     pidla = HeapAlloc(GetProcessHeap(), 0, sizeof(LPITEMIDLIST) * file_count);
+#endif
     open_action = ONOPEN_OPEN;
     fn_iter = files;
 
@@ -678,7 +696,15 @@ static HRESULT on_default_action(FileDialogImpl *This)
         WCHAR canon_filename[MAX_PATH];
         psf_parent = NULL;
 
+#ifdef __REACTOS__
+        if (!COMDLG32_GetCanonicalPath(current_folder, fn_iter, canon_filename))
+        {
+            too_long = TRUE;
+            break;
+        }
+#else
         COMDLG32_GetCanonicalPath(current_folder, fn_iter, canon_filename);
+#endif
 
         if( (This->options & FOS_NOVALIDATE) &&
             !(This->options & FOS_FILEMUSTEXIST) )
@@ -707,8 +733,13 @@ static HRESULT on_default_action(FileDialogImpl *This)
 
             if(!newext && This->default_ext)
             {
+#ifdef __REACTOS__
+                extbuf[0] = L'.';
+                lstrcpynW(extbuf + 1, This->default_ext, MAX_PATH - 1);
+#else
                 lstrcpyW(extbuf, L".");
                 lstrcatW(extbuf, This->default_ext);
+#endif
                 newext = extbuf;
             }
 
@@ -730,7 +761,19 @@ static HRESULT on_default_action(FileDialogImpl *This)
                 {
                     WCHAR *ext = PathFindExtensionW(canon_filename);
                     if(lstrcmpiW(ext, newext))
+#ifdef __REACTOS__
+                    {
+                        if (!append_ext(canon_filename, newext))
+                        {
+                            too_long = TRUE;
+                            if (psf_parent)
+                                IShellFolder_Release(psf_parent);
+                            break;
+                        }
+                    }
+#else
                         lstrcatW(canon_filename, newext);
+#endif
                 }
 #endif
             }
@@ -741,7 +784,11 @@ static HRESULT on_default_action(FileDialogImpl *This)
                 {
                     if(newext)
                     {
+#ifdef __REACTOS__
+                        append_ext(canon_filename, newext);
+#else
                         lstrcatW(canon_filename, newext);
+#endif
 
                         if(!PathFileExistsW(canon_filename))
                         {
@@ -768,6 +815,14 @@ static HRESULT on_default_action(FileDialogImpl *This)
         fn_iter += (WCHAR)lstrlenW(fn_iter) + 1;
     }
 
+
+#ifdef __REACTOS__
+    if (too_long)
+    {
+        FILEDLG95_OnPathTooLong(This->dlg_hwnd, files, file_count);
+        goto cleanup;
+    }
+#endif
 
     if((This->options & FOS_PICKFOLDERS) && open_action == ONOPEN_BROWSE)
         open_action = ONOPEN_OPEN; /* FIXME: Multiple folders? */
@@ -865,6 +920,9 @@ static HRESULT on_default_action(FileDialogImpl *This)
         break;
     }
 
+#ifdef __REACTOS__
+cleanup:
+#endif
     /* Clean up */
     HeapFree(GetProcessHeap(), 0, files);
     ILFree(current_folder);
@@ -2387,7 +2445,12 @@ static LRESULT on_command_filetype(FileDialogImpl *This, WPARAM wparam, LPARAM l
             WCHAR buf[MAX_PATH], extbuf[MAX_PATH], *ext;
 
             ext = get_first_ext_from_spec(extbuf, This->filterspecs[This->filetypeindex].pszSpec);
+#ifdef __REACTOS__
+            /* a name that does not fit stays as typed */
+            if(ext && lstrlenW(filename) + lstrlenW(ext) < MAX_PATH)
+#else
             if(ext)
+#endif
             {
                 lstrcpyW(buf, filename);
 

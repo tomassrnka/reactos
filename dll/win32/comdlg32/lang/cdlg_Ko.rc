@@ -34,6 +34,7 @@ STRINGTABLE
 / : < > |"
     IDS_PATHNOTEXISTING     "경로가 존재하지 않습니다."
     IDS_FILENOTEXISTING     "파일이 존재하지 않습니다"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 

@@ -34,6 +34,7 @@ STRINGTABLE
 / : < > |"
     IDS_PATHNOTEXISTING     "Путь не существует"
     IDS_FILENOTEXISTING     "Файл не существует"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "Выбор содержит объект не являющийся папкой"
 }
 

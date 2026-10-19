@@ -34,6 +34,7 @@ STRINGTABLE
 / : < > |"
     IDS_PATHNOTEXISTING     "パスが見つかりません"
     IDS_FILENOTEXISTING     "ファイルが見つかりません"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "フォルダ以外のオブジェクトを選択しています"
 }
 

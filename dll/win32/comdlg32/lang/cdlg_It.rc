@@ -34,6 +34,7 @@ Sovrascriverlo?"
 / : < > |"
     IDS_PATHNOTEXISTING     "Il percorso specificato non esiste"
     IDS_FILENOTEXISTING     "Il file non esiste"
+    IDS_PATHTOOLONG         "The path is too long.\nTry a shorter name."
     IDS_INVALID_FOLDERNAME  "The selection contains a non-folder object"
 }
 

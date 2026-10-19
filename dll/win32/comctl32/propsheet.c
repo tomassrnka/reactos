@@ -1567,8 +1567,10 @@ static BOOL PROPSHEET_ShowPage(HWND hwndDlg, int index, PropSheetInfo * psInfo)
 
   if (psInfo->ppshheader.dwFlags & INTRNL_ANY_WIZARD)
   {
-     PROPSHEET_SetTitleW(hwndDlg, psInfo->ppshheader.dwFlags,
-                         psInfo->proppage[index].pszText);
+     /* A page without a title leaves the current caption alone */
+     if (IS_INTRESOURCE(psInfo->proppage[index].pszText) || *psInfo->proppage[index].pszText)
+        PROPSHEET_SetTitleW(hwndDlg, psInfo->ppshheader.dwFlags,
+                            psInfo->proppage[index].pszText);
 #ifndef __REACTOS__
 
      control = GetNextDlgTabItem(psInfo->proppage[index].hwndPage, NULL, FALSE);
