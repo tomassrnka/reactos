@@ -16,6 +16,7 @@ static PNG_CCB NgAllocateCcb(PCUNICODE_STRING Path)
     if (!Ccb)
         return NULL;
     RtlZeroMemory(Ccb, sizeof(*Ccb));
+    InitializeListHead(&Ccb->FcbLinks);
     Ccb->Path.Buffer = ExAllocatePoolWithTag(PagedPool, Path->Length + sizeof(WCHAR), TAG_NTFSNG);
     if (!Ccb->Path.Buffer)
     {
@@ -42,6 +43,8 @@ static VOID NgFreeCcb(PNG_CCB Ccb)
         ExFreePoolWithTag(Ccb->Pattern.Buffer, TAG_NTFSNG);
     if (Ccb->Path.Buffer)
         ExFreePoolWithTag(Ccb->Path.Buffer, TAG_NTFSNG);
+    if (Ccb->NotifyPath.Buffer)
+        ExFreePoolWithTag(Ccb->NotifyPath.Buffer, TAG_NTFSNG);
     ExFreePoolWithTag(Ccb, TAG_NTFSNG);
 }
 
@@ -428,6 +431,24 @@ VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action)
                                 NULL, NULL, Filter, Action, NULL);
 }
 
+/* NgNotify with the name of Ccb's handle, taken under FcbListLock (a rename through another handle may change it). */
+VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, ULONG Filter, ULONG Action)
+{
+    UNICODE_STRING Copy;
+    if (!Vcb->NotifySync)
+        return;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    Copy.Length = Copy.MaximumLength = Ccb->Path.Length;
+    Copy.Buffer = Copy.Length ? ExAllocatePoolWithTag(PagedPool, Copy.Length, TAG_NTFSNG) : NULL;
+    if (Copy.Buffer)
+        RtlCopyMemory(Copy.Buffer, Ccb->Path.Buffer, Copy.Length);
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (!Copy.Buffer)
+        return;
+    NgNotify(Vcb, &Copy, Filter, Action);
+    ExFreePoolWithTag(Copy.Buffer, TAG_NTFSNG);
+}
+
 #define NG_SETTABLE_ATTRS (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | \
                            FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE | \
                            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
@@ -682,6 +703,32 @@ static NTSTATUS NgCheckTraverse(PNG_VCB Vcb, PACCESS_STATE As, ngc_node *Dir)
     return Status;
 }
 
+/*
+ * A relative open walks from the related handle's own file, found by its MFT record, as NTFS does
+ * from the related SCB: never by the related handle's name, which a rename through another handle
+ * may have moved away and a junction then taken over.  Caller holds CoreLock.
+ */
+static NTSTATUS NgRelatedNode(PNG_VCB Vcb, PNG_FCB Fcb, ngc_node **Out)
+{
+    struct ngc_stat St;
+    *Out = NULL;
+    if (Fcb->IsRoot)
+    {
+        *Out = ngc_root(Vcb->Core);
+        return STATUS_SUCCESS;
+    }
+    if (Fcb->Deleted || !Fcb->HasNode || ngc_iget(Vcb->Core, Fcb->MftNo, Out))
+        return STATUS_FILE_DELETED;
+    ngc_stat(*Out, &St);
+    if ((St.mft_ref >> 48) != (Fcb->Stat.mft_ref >> 48))
+    {
+        ngc_put(*Out);
+        *Out = NULL;
+        return STATUS_FILE_DELETED;
+    }
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -713,6 +760,8 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     BOOLEAN Check = NgCreateChecksAccess(Irp, Stack), Traverse;
     PSECURITY_DESCRIPTOR ParentSd = NULL;
     ULONG RelatedChars = 0;
+    ULONGLONG RelatedParent = 0;
+    USHORT RelatedNameLength = 0;
     NTSTATUS Status;
     USHORT i, FullLength;
     int Err;
@@ -760,42 +809,61 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         return NgOpenVolume(Vcb, FileObject, Stack, Check);
     }
 
-    /* Absolute path from the volume root, built from the related open if any. */
-    {
-        ULONG FullMax = (ULONG)Name->Length + sizeof(WCHAR) * 2 + (RelatedCcb ? RelatedCcb->Path.Length : 0);
-        if (FullMax > MAXUSHORT)
-        {
-            if (ById.Buffer)
-                ExFreePoolWithTag(ById.Buffer, TAG_NTFSNG);
-            return STATUS_OBJECT_NAME_INVALID;
-        }
-        Full.MaximumLength = (USHORT)FullMax;
-    }
-    Full.Buffer = ExAllocatePoolWithTag(PagedPool, Full.MaximumLength, TAG_NTFSNG);
     Real = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
-    if (!Full.Buffer || !Real)
+    if (!Real)
     {
-        if (Full.Buffer)
-            ExFreePoolWithTag(Full.Buffer, TAG_NTFSNG);
-        if (Real)
-            ExFreePoolWithTag(Real, TAG_NTFSNG);
         if (ById.Buffer)
             ExFreePoolWithTag(ById.Buffer, TAG_NTFSNG);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    Full.Length = 0;
-    if (RelatedCcb && !RelatedFcb->IsVolume)
+    /* A name below a stream handle: there is no such directory (the name used to be walked through
+     * "file:stream" as a component). */
+    if (RelatedCcb && !RelatedFcb->IsVolume && Name->Length && (Name->Buffer[0] == L'\\' || RelatedFcb->Stream.Length))
     {
-        if (Name->Length && Name->Buffer[0] == L'\\')
+        ExFreePoolWithTag(Real, TAG_NTFSNG);
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    /* The path from the volume root, built from the related open's current name if any: the new
+     * handle's name.  The related name is copied under FcbListLock (a rename may change it). */
+    if (RelatedCcb)
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+    {
+        ULONG FullMax = (ULONG)Name->Length + sizeof(WCHAR) * 2 + (RelatedCcb ? RelatedCcb->Path.Length : 0);
+        Full.Buffer = NULL;
+        Status = STATUS_OBJECT_NAME_INVALID;
+        if (FullMax <= MAXUSHORT)
         {
-            Status = STATUS_OBJECT_NAME_INVALID;
-            goto out;
+            Full.MaximumLength = (USHORT)FullMax;
+            Full.Buffer = ExAllocatePoolWithTag(PagedPool, Full.MaximumLength, TAG_NTFSNG);
+            Status = Full.Buffer ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
         }
-        RtlCopyUnicodeString(&Full, &RelatedCcb->Path);
-        if (Name->Length &&
-            (Full.Length == 0 || Full.Buffer[Full.Length / sizeof(WCHAR) - 1] != L'\\'))
-            RtlAppendUnicodeToString(&Full, L"\\");
-        RelatedChars = Full.Length / sizeof(WCHAR);
+    }
+    if (NT_SUCCESS(Status))
+    {
+        Full.Length = 0;
+        if (RelatedCcb && !RelatedFcb->IsVolume)
+        {
+            RtlCopyUnicodeString(&Full, &RelatedCcb->Path);
+            if (Name->Length &&
+                (Full.Length == 0 || Full.Buffer[Full.Length / sizeof(WCHAR) - 1] != L'\\'))
+                RtlAppendUnicodeToString(&Full, L"\\");
+            RelatedChars = Full.Length / sizeof(WCHAR);
+            /* An empty name opens the related file itself, by the name its handle has. */
+            RelatedParent = RelatedCcb->ParentMftNo;
+            RelatedNameLength = RelatedCcb->NameLength;
+            RtlCopyMemory(Real, RelatedCcb->Name, RelatedNameLength * sizeof(WCHAR));
+        }
+    }
+    if (RelatedCcb)
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (!NT_SUCCESS(Status))
+    {
+        if (Full.Buffer)
+            ExFreePoolWithTag(Full.Buffer, TAG_NTFSNG);
+        ExFreePoolWithTag(Real, TAG_NTFSNG);
+        if (ById.Buffer)
+            ExFreePoolWithTag(ById.Buffer, TAG_NTFSNG);
+        return Status;
     }
     if (!NT_SUCCESS(RtlAppendUnicodeStringToString(&Full, Name)))
     {
@@ -831,13 +899,41 @@ walk:
         NgAcquireCore(Vcb);
     else
         NgAcquireCoreShared(Vcb, &Hold);
-    Node = ngc_root(Vcb->Core);
-    Rest.Buffer = Full.Buffer + 1;
-    Rest.Length = Rest.MaximumLength = Full.Length - sizeof(WCHAR);
     RtlInitEmptyUnicodeString(&Stream, NULL, 0);
     RtlInitEmptyUnicodeString(&Comp, NULL, 0);
     Status = STATUS_SUCCESS;
-    while (Rest.Length)
+    if (RelatedChars)
+    {
+        /* Only the components of the name are looked up (and junctions among them followed). */
+        Status = NgRelatedNode(Vcb, RelatedFcb, &Node);
+        Rest.Buffer = Full.Buffer + RelatedChars;
+        Rest.Length = Rest.MaximumLength =
+            Full.Length > RelatedChars * sizeof(WCHAR) ? (USHORT)(Full.Length - RelatedChars * sizeof(WCHAR)) : 0;
+        if (NT_SUCCESS(Status) && !Rest.Length && !RelatedFcb->IsRoot)
+        {
+            /* The related file itself (or its stream), by its handle's name in its directory. */
+            if (OpenTarget)
+                Status = STATUS_OBJECT_NAME_INVALID;
+            else if (RelatedNameLength && ngc_iget(Vcb->Core, RelatedParent, &Parent))
+                Status = STATUS_OBJECT_PATH_NOT_FOUND;
+            else
+            {
+                Stream = RelatedFcb->Stream;
+                Comp.Buffer = Real;
+                Comp.Length = Comp.MaximumLength = RelatedNameLength * sizeof(WCHAR);
+                RealLen = RelatedNameLength;
+                if (!(Options & FILE_OPEN_REPARSE_POINT) && Disposition != FILE_CREATE)
+                    Status = NgMountPointReparse(Vcb, Node, Irp, FileObject, 0);
+            }
+        }
+    }
+    else
+    {
+        Node = ngc_root(Vcb->Core);
+        Rest.Buffer = Full.Buffer + 1;
+        Rest.Length = Rest.MaximumLength = Full.Length - sizeof(WCHAR);
+    }
+    while (NT_SUCCESS(Status) && Status != STATUS_REPARSE && Rest.Length)
     {
         BOOLEAN LastComp;
         for (i = 0; i < Rest.Length / sizeof(WCHAR) && Rest.Buffer[i] != L'\\'; i++)
@@ -1380,6 +1476,8 @@ walked:
     {
         Fcb->OpenHandles++;
         Shared = TRUE;
+        /* From here a rename through another handle of the file updates this one's name too. */
+        InsertTailList(&Fcb->CcbList, &Ccb->FcbLinks);
     }
     Fcb->Opening--;
     Opening = FALSE;
@@ -1464,6 +1562,7 @@ out:
         ExAcquireFastMutex(&Vcb->FcbListLock);
         IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
         Fcb->OpenHandles--;
+        RemoveEntryList(&Ccb->FcbLinks);
         if (SetPaging && Fcb->OpenHandles == 0)
         {
             Fcb->IsPagingFile = FALSE;   /* this open promoted it, then failed, and holds the only ref */
@@ -1543,7 +1642,8 @@ static int NgCountNamedStream(void *Ctx, const unsigned short *Name, unsigned in
 /*
  * IRP_MJ_CREATE.  A create holds CreateGate shared from before its volume checks to its end, and
  * FSCTL_LOCK_VOLUME takes it exclusive to decide the lock, so a lock (and the dismount it allows)
- * never comes while a create runs; one that starts later sees the lock, or the dismount.
+ * never comes while a create runs; one that starts later sees the lock, or the dismount.  A rename
+ * takes it exclusive too: no create builds a handle's name from a name that is being renamed.
  */
 NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -1770,7 +1870,16 @@ NTSTATUS NgClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if (Ccb)
+    {
+        /* A volume open's CCB is in no list. */
+        if (Fcb && !IsListEmpty(&Ccb->FcbLinks))
+        {
+            ExAcquireFastMutex(&Fcb->Vcb->FcbListLock);
+            RemoveEntryList(&Ccb->FcbLinks);
+            ExReleaseFastMutex(&Fcb->Vcb->FcbListLock);
+        }
         NgFreeCcb(Ccb);
+    }
     if (Fcb)
         NgDereferenceFcb(Fcb);
     FileObject->FsContext = NULL;

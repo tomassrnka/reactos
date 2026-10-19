@@ -230,6 +230,7 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
     ExInitializeResourceLite(&Fcb->PagingIoResource);
     FsRtlInitializeFileLock(&Fcb->FileLock, NULL, NULL);
     KeInitializeSpinLock(&Fcb->RunLock);
+    InitializeListHead(&Fcb->CcbList);
     Fcb->Header.IsFastIoPossible = FastIoIsQuestionable;
     Fcb->Vcb = Vcb;
     Fcb->RefCount = 1;

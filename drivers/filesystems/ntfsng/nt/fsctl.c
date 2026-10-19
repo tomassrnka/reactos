@@ -1057,7 +1057,7 @@ static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, 
     if (Data)
         ngc_free(Data);
     if (Code != FSCTL_GET_REPARSE_POINT && NT_SUCCESS(Status) && Ccb)
-        NgNotify(Vcb, &Ccb->Path, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
+        NgNotifyCcb(Vcb, Ccb, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
     return Status;
 }
 
