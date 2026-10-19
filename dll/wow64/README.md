@@ -33,8 +33,10 @@ pointer-sized optional-header fields as native fields. It then loads
 maps i386 ntdll, and enters its loader on a separate low-address stack.
 The ordinary i386 loader loads kernel32 and the executable's imports.
 
-The i386 syscall stubs check `TEB.WOW32Reserved`. A zero value retains the
-native i386 shared-page dispatcher. A WoW64 thread uses a read/execute gate
+The i386 (guest) syscall stubs have the NT 5.2 x64 WOW64 layout
+(`mov eax, id; xor ecx, ecx; lea edx, [esp + 4]; call dword ptr fs:[0C0h]; ret n`)
+and call the gate in `TEB.WOW32Reserved`, which wow64.dll sets before any guest code runs.
+A WoW64 thread uses a read/execute gate
 which makes a far jump into 64-bit user mode, then jumps to `wow64cpu.dll`.
 The native TEB reserves TLS slot 1 for the CPU state. Each call switches to
 the thread's native user stack, marshals arguments in `wow64.dll`, calls
