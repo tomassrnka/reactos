@@ -7,6 +7,7 @@ extern void func_CancelIoEx(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateProcess(void);
 extern void func_CreateWaitableTimerEx(void);
+extern void func_DebugTrapInterrupts(void);
 extern void func_DefaultActCtx(void);
 extern void func_DeviceIoControl(void);
 extern void func_dosdev(void);
@@ -27,6 +28,7 @@ extern void func_GetLocaleInfo(void);
 extern void func_GetModuleFileName(void);
 extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetVolumeInformation(void);
+extern void func_IdleProcessor(void);
 extern void func_InitOnce(void);
 extern void func_interlck(void);
 extern void func_IsDBCSLeadByteEx(void);
@@ -67,6 +69,7 @@ const struct test winetest_testlist[] =
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateProcess",               func_CreateProcess },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
+    { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DeviceIoControl",             func_DeviceIoControl },
     { "dosdev",                      func_dosdev },
@@ -87,6 +90,7 @@ const struct test winetest_testlist[] =
     { "GetModuleFileName",           func_GetModuleFileName },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
     { "GetVolumeInformation",        func_GetVolumeInformation },
+    { "IdleProcessor",               func_IdleProcessor },
     { "InitOnce",                    func_InitOnce },
     { "interlck",                    func_interlck },
     { "IsDBCSLeadByteEx",            func_IsDBCSLeadByteEx },

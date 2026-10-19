@@ -1861,10 +1861,16 @@ KdpTimeSlipWork(IN PVOID Context)
     KIRQL OldIrql;
     LARGE_INTEGER DueTime;
 
-    /* Update the System time from the CMOS */
-    ExAcquireTimeRefreshLock(FALSE);
-    ExUpdateSystemTimeFromCmos(FALSE, 0);
-    ExReleaseTimeRefreshLock();
+    /* Update the System time from the CMOS; if a timer-resolution change holds the lock, retry on the next DPC */
+    if (ExAcquireTimeRefreshLock(FALSE))
+    {
+        ExUpdateSystemTimeFromCmos(FALSE, 0);
+        ExReleaseTimeRefreshLock();
+    }
+    else
+    {
+        InterlockedIncrement(&KdpTimeSlipPending);
+    }
 
     /* Check if we have a registered Time Slip Event and signal it */
     KeAcquireSpinLock(&KdpTimeSlipEventLock, &OldIrql);

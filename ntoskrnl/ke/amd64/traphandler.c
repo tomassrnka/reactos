@@ -21,6 +21,30 @@ NTSTATUS
 KiConvertToGuiThread(
     VOID);
 
+/*
+ * Tells whether the vector of an unexpected interrupt is in service at the
+ * local APIC. Only an interrupt the APIC delivered is; a software INT, a
+ * processor exception and a spurious interrupt set no in-service bit, and an
+ * EOI for them would end another interrupt that is in service.
+ */
+BOOLEAN
+NTAPI
+KiIsUnexpectedInterruptInService(
+    _In_ PKTRAP_FRAME TrapFrame)
+{
+    /* The stub pushed the vector minus 128, see UnexpectedVectorStub */
+    ULONG Vector = (UCHAR)(TrapFrame->ErrorCode + 128);
+    ULONG InService;
+
+    /* Each in-service register holds 32 vectors */
+    if (KiX2ApicMode)
+        InService = (ULONG)__readmsr(X2APIC_MSR_ISR + Vector / 32);
+    else
+        InService = *((volatile ULONG*)(APIC_ISR_REGISTER + (Vector / 32) * 0x10));
+
+    return (InService >> (Vector % 32)) & 1;
+}
+
 _Requires_lock_not_held_(Prcb->PrcbLock)
 VOID
 NTAPI
@@ -123,8 +147,33 @@ KiNmiInterruptHandler(
         goto Exit;
     }
 
-    /* Handle the NMI */
-    KiHandleNmi();
+    /* Call the registered NMI handlers and see if one of them handled it */
+    if (!KiHandleNmi())
+    {
+        static LONG ReportOwner;
+        KIRQL OldIrql;
+
+        /* None did, let the HAL handle it at HIGH_LEVEL, as on x86 */
+        KeRaiseIrql(HIGH_LEVEL, &OldIrql);
+
+        /* An NMI can reach all processors at once. One of them reports it,
+           the others stay here and still answer the freeze requests that
+           the kernel debugger sends, since no further NMI reaches them. */
+        if (InterlockedCompareExchange(&ReportOwner, 1, 0) == 0)
+        {
+            HalHandleNMI(NULL);
+        }
+        else
+        {
+            while (TRUE)
+            {
+                KiProcessorFreezeHandler(TrapFrame, ExceptionFrame);
+                YieldProcessor();
+            }
+        }
+
+        KeLowerIrql(OldIrql);
+    }
 
 Exit:
     /* Check if we need to swap GS back */
@@ -135,7 +184,7 @@ Exit:
     }
 }
 
-#define MAX_SYSCALL_PARAMS 16
+#define MAX_SYSCALL_PARAMS (MAX_SYSCALL_PARAM_SIZE / sizeof(ULONG64))
 
 NTSTATUS
 NtSyscallFailure(void)
@@ -244,6 +293,7 @@ KiSystemCallHandler(
     {
         switch (Count)
         {
+            case 17: KernelParams[16] = UserParams[16];
             case 16: KernelParams[15] = UserParams[15];
             case 15: KernelParams[14] = UserParams[14];
             case 14: KernelParams[13] = UserParams[13];
@@ -264,8 +314,10 @@ KiSystemCallHandler(
                 break;
 
             default:
+                /* No in-tree service takes more than 17 arguments */
                 ASSERT(FALSE);
-                break;
+                TrapFrame->Rax = STATUS_INVALID_SYSTEM_SERVICE;
+                _SEH2_YIELD(return (PVOID)NtSyscallFailure);
         }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)

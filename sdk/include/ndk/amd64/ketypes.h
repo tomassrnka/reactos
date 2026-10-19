@@ -373,8 +373,9 @@ typedef enum
 #define NMI_STACK_SIZE 0x2000
 #define ISR_STACK_SIZE 0x6000
 
-/* Number of bytes reserved for syscall parameters */
-#define MAX_SYSCALL_PARAM_SIZE (16 * 8)
+/* Number of bytes reserved for syscall parameters: 17 parameters (the
+   largest service takes 17), rounded up to keep the stack 16-byte aligned */
+#define MAX_SYSCALL_PARAM_SIZE (18 * 8)
 
 //
 // Synchronization-level IRQL

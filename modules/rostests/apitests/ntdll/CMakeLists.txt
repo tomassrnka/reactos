@@ -47,6 +47,7 @@ list(APPEND SOURCE
     NtAccessCheck.c
     NtAccessCheckByType.c
     NtAccessCheckByTypeResultList.c
+    NtAccessCheckByTypeResultListAndAuditAlarmByHandle.c
     NtAdjustGroupsToken.c
     NtAdjustPrivilegesToken.c
     NtAllocateVirtualMemory.c
@@ -67,6 +68,7 @@ list(APPEND SOURCE
     NtFreeVirtualMemory.c
     NtGetCurrentProcessorNumberEx.c
     NtImpersonateAnonymousToken.c
+    NtKeyedEvent.c
     NtLoadUnloadKey.c
     NtMapViewOfSection.c
     NtMutant.c
@@ -96,6 +98,7 @@ list(APPEND SOURCE
     NtSetInformationProcess.c
     NtSetInformationThread.c
     NtSetInformationToken.c
+    NtSetLdtEntries.c
     NtSetValueKey.c
     NtSetVolumeInformationFile.c
     NtStartProfile.c
@@ -115,6 +118,7 @@ list(APPEND SOURCE
     RtlDosPathNameToNtPathName_U.c
     RtlDosSearchPath_U.c
     RtlDosSearchPath_Ustr.c
+    RtlFailFast.c
     RtlFirstFreeAce.c
     RtlFls.c
     RtlGenerate8dot3Name.c

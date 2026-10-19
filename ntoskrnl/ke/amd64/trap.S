@@ -18,6 +18,7 @@ EXTERN KiSystemFatalException:PROC
 EXTERN KiNpxNotAvailableFaultHandler:PROC
 EXTERN KiGeneralProtectionFaultHandler:PROC
 EXTERN KiXmmExceptionHandler:PROC
+EXTERN KiRaiseSecurityCheckFailureKernel:PROC
 EXTERN KiDeliverApc:PROC
 EXTERN KiDpcInterruptHandler:PROC
 EXTERN KiIpiServiceRoutine:PROC
@@ -27,17 +28,24 @@ EXTERN MmDeleteKernelStack:PROC
 EXTERN KdSetOwedBreakpoints:PROC
 EXTERN KeAcquireSpinLockAtDpcLevel:PROC
 EXTERN KeReleaseSpinLockFromDpcLevel:PROC
+EXTERN KiIsUnexpectedInterruptInService:PROC
 
 
 /* Helper Macros *************************************************************/
 
-MACRO(DispatchException, Status, Number, P1, P2, P3)
+MACRO(DispatchExceptionEx, Status, Flags, FirstChance, Number, P1, P2, P3)
     mov eax, Status
+    mov r8d, Flags
     mov edx, Number
     mov r9, P1
     mov r10, P2
     mov r11, P3
+    mov ecx, FirstChance
     call InternalDispatchException
+ENDM
+
+MACRO(DispatchException, Status, Number, P1, P2, P3)
+    DispatchExceptionEx Status, 0, 1, Number, P1, P2, P3
 ENDM
 
 MACRO(Fatal, BugcheckCode)
@@ -45,6 +53,15 @@ MACRO(Fatal, BugcheckCode)
     mov ecx, BugcheckCode
     mov rdx, rbp
     call KiSystemFatalException
+ENDM
+
+/* Enable interrupts if the interrupted code ran with interrupts enabled */
+MACRO(EnableInterruptsIfEnabledBefore)
+    LOCAL InterruptsStayDisabled
+    test dword ptr [rbp + KTRAP_FRAME_EFlags], EFLAGS_IF_MASK
+    jz InterruptsStayDisabled
+    sti
+InterruptsStayDisabled:
 ENDM
 
 
@@ -84,7 +101,8 @@ KiInterruptDispatchTemplate:
     call qword ptr KiInterruptDispatchTemplate[rip - KINTERRUPT_DispatchCode + KINTERRUPT_DispatchAddress]
 
 
-// rbp = TrapFrame, eax = ExceptionCode, edx = NumParams, r9,r10,r11 = params
+// rbp = TrapFrame, eax = ExceptionCode, r8d = ExceptionFlags, edx = NumParams, r9,r10,r11 = params,
+// cl = FirstChance
 FUNC InternalDispatchException
 
     /* Allocate stack space for EXCEPTION_RECORD and KEXCEPTION_FRAME */
@@ -92,12 +110,31 @@ FUNC InternalDispatchException
     .allocstack (EXCEPTION_RECORD_LENGTH + KEXCEPTION_FRAME_LENGTH)
     .endprolog
 
+    /* Save FirstChance before rcx is reused */
+    mov byte ptr [rsp + KEXCEPTION_FRAME_P5], cl
+
     /* Set up EXCEPTION_RECORD */
     lea rcx, [rsp + KEXCEPTION_FRAME_LENGTH]
     mov [rcx + EXCEPTION_RECORD_ExceptionCode], eax
+    mov [rcx + EXCEPTION_RECORD_ExceptionFlags], r8d
     xor rax, rax
-    mov [rcx + EXCEPTION_RECORD_ExceptionFlags], eax
     mov [rcx + EXCEPTION_RECORD_ExceptionRecord], rax
+
+    /* Zero the padding and the unused parameters, the record goes to user mode debuggers */
+    mov dword ptr [rcx + EXCEPTION_RECORD_NumberParameters + 4], eax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(18)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(20)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(28)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(30)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(38)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(40)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(48)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(50)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(58)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(60)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(68)], rax
+    mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(70)], rax
+
     mov rax, [rbp + KTRAP_FRAME_Rip]
     mov [rcx + EXCEPTION_RECORD_ExceptionAddress], rax
     mov [rcx + EXCEPTION_RECORD_NumberParameters], edx
@@ -132,7 +169,6 @@ FUNC InternalDispatchException
     mov rdx, rsp                                // ExceptionFrame
     mov r8, rbp                                 // TrapFrame
     mov r9b, [r8 + KTRAP_FRAME_PreviousMode]    // PreviousMode
-    mov byte ptr [rsp + KEXCEPTION_FRAME_P5], 1 // FirstChance
     call KiDispatchException
 
     /* Restore registers */
@@ -163,8 +199,8 @@ FUNC KiDivideErrorFault
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
-    /* Enable interrupts */
-    sti
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Dispatch the exception */
     DispatchException STATUS_INTEGER_DIVIDE_BY_ZERO, 0, 0, 0, 0
@@ -250,8 +286,8 @@ FUNC KiOverflowTrap
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
-    /* Enable interrupts */
-    sti
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Dispatch the exception */
     DispatchException STATUS_INTEGER_OVERFLOW, 3, 0, 0, 0
@@ -290,8 +326,8 @@ FUNC KiInvalidOpcodeFault
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
-    /* Enable interrupts */
-    sti
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Check if the frame was from kernelmode */
     test word ptr [rbp + KTRAP_FRAME_SegCs], 3
@@ -314,6 +350,9 @@ PUBLIC KiNpxNotAvailableFault
 FUNC KiNpxNotAvailableFault
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
+
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
 
     /* Call the C handler */
     mov rcx, rbp
@@ -414,6 +453,9 @@ FUNC KiGeneralProtectionFault
     /* We have an error code */
     EnterTrap (TF_HAS_ERROR_CODE OR TF_SAVE_ALL)
 
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
+
     /* Call the C handler */
     mov rcx, rbp
     call KiGeneralProtectionFaultHandler
@@ -499,6 +541,8 @@ InPageException:
     mov r11d, eax // Param3 = Status
     mov eax, STATUS_IN_PAGE_ERROR // ExceptionCode
     mov edx, 3    // ParamCount
+    xor r8d, r8d  // ExceptionFlags
+    mov ecx, 1    // FirstChance
     call InternalDispatchException
     jmp PageFaultReturn
 
@@ -509,6 +553,8 @@ AccessViolation:
 SpecialCode:
     /* Setup a normal page fault exception */
     mov edx, 2   // ParamCount
+    xor r8d, r8d // ExceptionFlags
+    mov ecx, 1   // FirstChance
     call InternalDispatchException
 
 PageFaultReturn:
@@ -561,6 +607,9 @@ FUNC KiXmmException
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
+
     /* Call the C handler */
     mov rcx, rbp
     call KiXmmExceptionHandler
@@ -590,11 +639,49 @@ FUNC KiRaiseAssertion
     /* Decrement RIP to point to the INT2C instruction (2 bytes, not 1 like INT3) */
     sub qword ptr [rbp + KTRAP_FRAME_Rip], 2
 
+    /* Check if the frame was from kernelmode */
+    test word ptr [rbp + KTRAP_FRAME_SegCs], 3
+    jz KiRaiseAssertionKMode
+
+    /* Enable interrupts for user-mode */
+    sti
+
+KiRaiseAssertionKMode:
     /* Dispatch the exception */
     DispatchException STATUS_ASSERTION_FAILURE, 0, 0, 0, 0
 
     /* Return */
     ExitTrap TF_SAVE_ALL
+ENDFUNC
+
+
+PUBLIC KiRaiseSecurityCheckFailure
+FUNC KiRaiseSecurityCheckFailure
+    /* No error code */
+    EnterTrap TF_SAVE_ALL
+
+    /* Decrement RIP to point to the INT29 instruction (2 bytes, not 1 like INT3) */
+    sub qword ptr [rbp + KTRAP_FRAME_Rip], 2
+
+    /* Check if the frame was from kernelmode */
+    test word ptr [rbp + KTRAP_FRAME_SegCs], 3
+    jz KiRaiseSecurityCheckFailureKMode
+
+    /* Enable interrupts for user-mode */
+    sti
+
+    /* Dispatch a non-continuable second chance exception, so no handler of the
+       process runs; the fast fail code is in rcx */
+    DispatchExceptionEx STATUS_STACK_BUFFER_OVERRUN, EXCEPTION_NONCONTINUABLE, 0, 1, [rbp+KTRAP_FRAME_Rcx], 0, 0
+
+    /* Return */
+    ExitTrap TF_SAVE_ALL
+
+KiRaiseSecurityCheckFailureKMode:
+    /* Bugcheck the system, this does not return */
+    mov rcx, rbp
+    call KiRaiseSecurityCheckFailureKernel
+    jmp $
 ENDFUNC
 
 
@@ -606,6 +693,14 @@ FUNC KiDebugServiceTrap
     /* Increase Rip to skip the int3 */
     inc qword ptr [rbp + KTRAP_FRAME_Rip]
 
+    /* Check if the frame was from kernelmode */
+    test word ptr [rbp + KTRAP_FRAME_SegCs], 3
+    jz KiDebugServiceTrapKMode
+
+    /* Enable interrupts for user-mode */
+    sti
+
+KiDebugServiceTrapKMode:
     /* Dispatch the exception (Params = service, buffer, legth) */
     DispatchException STATUS_BREAKPOINT, 3, [rbp+KTRAP_FRAME_Rax], [rbp+KTRAP_FRAME_Rcx], [rbp+KTRAP_FRAME_Rdx]
 
@@ -738,8 +833,17 @@ FUNC KiUnexpectedInterrupt
     call KeBugCheckWithTf
     jmp $
 #endif
-    /* Return; a device interrupt without a handler is in service until the EOI */
-    ExitTrap (TF_SAVE_ALL or TF_SEND_EOI)
+    /* A device interrupt without a handler is in service until the EOI, but a
+       software INT or an exception is not, and its EOI would end another one */
+    mov rcx, rbp
+    call KiIsUnexpectedInterruptInService
+    test al, al
+    jz KiUnexpectedInterruptReturn
+    SendApicEoi
+
+KiUnexpectedInterruptReturn:
+    /* Return */
+    ExitTrap TF_SAVE_ALL
 ENDFUNC
 
 PUBLIC KiInterruptDispatch
