@@ -1339,6 +1339,20 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             if (NT_SUCCESS(Status) && !NativeSystemInformation)
                 ((SYSTEM_PROCESSOR_INFORMATION *)P(1))->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
             return Status;
+        case SystemRangeStartInformation:
+            /* The end of the guest's user range, as on Windows WoW64 (measured on Server 2008 R2
+             * and Windows 10: 0x7fff0000 for an image that is not large address aware) */
+            if (NativeSystemInformation) UNSUPPORTED(CLASS, a[0]);
+            /* Windows WoW64 checks the length before the buffers. Both buffers must lie in the
+             * guest's range and be writable before anything is stored. */
+            if (a[2] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            if (!GuestSpan(a[1], sizeof(ULONG)) || (a[3] && !GuestSpan(a[3], sizeof(ULONG))))
+                return STATUS_ACCESS_VIOLATION;
+            PROBE(1);
+            if (a[3]) PROBE(3);
+            U(1) = Wow64HighestUserAddress + 1;
+            if (a[3]) U(3) = sizeof(ULONG);
+            return STATUS_SUCCESS;
         case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
