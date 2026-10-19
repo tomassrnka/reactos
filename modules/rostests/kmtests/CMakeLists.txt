@@ -56,6 +56,7 @@ list(APPEND KMTEST_DRV_SOURCE
     npfs/NpfsReadWrite.c
     npfs/NpfsVolumeInfo.c
     novp_fsrtl/FsRtlRemoveDotsFromPath.c
+    ntos_cc/CcPurgeCacheSection.c
     ntos_cm/CmSecurity.c
     ntos_ex/ExCallback.c
     ntos_ex/ExDoubleList.c
@@ -94,6 +95,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeIrql.c
     ntos_ke/KeMutex.c
     ntos_ke/KeProcessor.c
+    ntos_ke/KeQpc.c
     ntos_ke/KeSpinLock.c
     ntos_ke/KeTimer.c
     ntos_mm/MmMdl.c
