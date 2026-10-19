@@ -169,6 +169,10 @@ add_executable(wow64_system_timer EXCLUDE_FROM_ALL system_timer.c)
 set_module_type(wow64_system_timer win32cui)
 add_importlibs(wow64_system_timer user32 gdi32 msvcrt kernel32)
 
+add_executable(wow64_idle_loop EXCLUDE_FROM_ALL idle_loop.c)
+set_module_type(wow64_idle_loop win32cui)
+add_importlibs(wow64_idle_loop user32 msvcrt kernel32)
+
 add_executable(wow64_mouse_points EXCLUDE_FROM_ALL mouse_points.c)
 set_module_type(wow64_mouse_points win32cui)
 add_importlibs(wow64_mouse_points user32 msvcrt kernel32)
