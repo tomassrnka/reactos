@@ -877,6 +877,19 @@ CmpUnlockHiveFlusher(
     IN PCMHIVE Hive
 );
 
+BOOLEAN
+NTAPI
+CmpAcquireHiveCellLock(
+    _In_ PHHIVE Hive
+);
+
+VOID
+NTAPI
+CmpReleaseHiveCellLock(
+    _In_ PHHIVE Hive,
+    _In_ BOOLEAN Acquired
+);
+
 //
 // Delay Functions
 //
