@@ -169,6 +169,11 @@ typedef struct
     ULONG ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
 } WOW64_JOB_EXTENDED_LIMIT;
 C_ASSERT(sizeof(WOW64_JOB_BASIC_LIMIT) == 48);
+/* NtPowerInformation records passed through unchanged */
+C_ASSERT(sizeof(SYSTEM_BATTERY_STATE) == 32);
+C_ASSERT(sizeof(SYSTEM_POWER_CAPABILITIES) == 76);
+C_ASSERT(sizeof(PROCESSOR_POWER_INFORMATION) == 24);
+C_ASSERT(sizeof(EXECUTION_STATE) == 4);
 C_ASSERT(sizeof(WOW64_JOB_EXTENDED_LIMIT) == 112);
 
 /* The 32-bit loader's PROCESS_TLS_INFORMATION (16-byte entries) as a native
@@ -1533,6 +1538,19 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtSetInformationThread(H(0), a[1], P(2), a[3]);
         default: UNSUPPORTED(CLASS, a[1]);
         }
+    case W64_NtPowerInformation:
+        switch (a[0])
+        {
+        case SystemBatteryState: case SystemPowerCapabilities:
+        case ProcessorInformation: case SystemExecutionState:
+            /* Fixed-size records of ULONG, BOOLEAN and enumeration fields, the same for
+             * both sizes; the native service checks lengths and probes the buffers. They
+             * must lie in the guest's range, which the native probe cannot tell. */
+            if ((a[1] && !GuestSpan(a[1], a[2])) || (a[3] && !GuestSpan(a[3], a[4])))
+                return STATUS_ACCESS_VIOLATION;
+            return NtPowerInformation(a[0], P(1), a[2], P(3), a[4]);
+        default: UNSUPPORTED(CLASS, a[0]);
+        }
     case W64_NtQuerySystemInformation:
         if (a[0] == SystemBasicInformation)
         {
@@ -1581,7 +1599,7 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         /* Name the information class of the class-based services as well */
         switch (Number)
         {
-        case W64_NtPowerInformation: case W64_NtSetSystemInformation: Length = a[0]; break;
+        case W64_NtSetSystemInformation: Length = a[0]; break;
         case W64_NtQueryInformationJobObject: case W64_NtQueryInformationPort:
         case W64_NtSetInformationKey: case W64_NtSetInformationDebugObject: Length = a[1]; break;
         case W64_NtSetVolumeInformationFile: Length = a[4]; break;
