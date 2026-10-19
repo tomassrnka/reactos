@@ -77,6 +77,72 @@ static DWORD register_iexplore(BOOL doregister)
     return FAILED(hres);
 }
 
+#ifdef __REACTOS__
+/* Without Wine Gecko every page stays blank and nothing says why */
+static BOOL is_gecko_installed(void)
+{
+    WCHAR path[MAX_PATH];
+    DWORD size = sizeof(path) - sizeof(WCHAR), type, attr;
+    HKEY hkey;
+    LONG res;
+
+    /* The version must match GECKO_VERSION in mshtml */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\MSHTML\\2.40", 0, KEY_QUERY_VALUE, &hkey) != ERROR_SUCCESS)
+        return FALSE;
+    res = RegQueryValueExW(hkey, L"GeckoPath", NULL, &type, (BYTE *)path, &size);
+    RegCloseKey(hkey);
+    if (res != ERROR_SUCCESS || type != REG_SZ)
+        return FALSE;
+    path[size / sizeof(WCHAR)] = 0;
+
+    attr = GetFileAttributesW(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* The leading switches, parsed as IEWinMain does */
+static BOOL is_com_activation(const WCHAR *cmdline)
+{
+    while (*cmdline)
+    {
+        int length = 0;
+
+        while (*cmdline == ' ' || *cmdline == '\t') cmdline++;
+        if (*cmdline != '-') break;
+        while (cmdline[length] && cmdline[length] != ' ' && cmdline[length] != '\t') length++;
+
+        if ((length == 10 && !strncmpiW(cmdline, L"-embedding", 10)) ||
+            (length == 13 && !strncmpiW(cmdline, L"-startmanager", 13)))
+            return TRUE;
+        cmdline += length;
+    }
+    return FALSE;
+}
+
+static void install_gecko(void)
+{
+    static const WCHAR rundllW[] = L"\\rundll32.exe";
+    WCHAR app[MAX_PATH], cmdline[MAX_PATH + 64];
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    UINT len;
+
+    len = GetSystemDirectoryW(app, MAX_PATH - sizeof(rundllW) / sizeof(WCHAR));
+    if (!len || len >= MAX_PATH - sizeof(rundllW) / sizeof(WCHAR))
+        return;
+    lstrcpyW(app + len, rundllW);
+    wsprintfW(cmdline, L"\"%s\" shell32.dll,Control_RunDLL appwiz.cpl,,install_gecko", app);
+
+    /* appwiz explains what is missing and offers the download; control.exe would not
+     * wait for it, rundll32 returns when the dialog closes */
+    if (CreateProcessW(app, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        CloseHandle(pi.hThread);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+    }
+}
+#endif
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE prev, WCHAR *cmdline, int show)
 {
     static const WCHAR regserverW[] = {'r','e','g','s','e','r','v','e','r',0};
@@ -88,6 +154,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE prev, WCHAR *cmdline, int sho
         if(!strcmpiW(cmdline+1, unregserverW))
             return register_iexplore(FALSE);
     }
+
+#ifdef __REACTOS__
+    /* Not for COM activation, which has no user waiting for a window */
+    if (!is_com_activation(cmdline) && !is_gecko_installed())
+        install_gecko();
+#endif
 
     return IEWinMain(cmdline, show);
 }

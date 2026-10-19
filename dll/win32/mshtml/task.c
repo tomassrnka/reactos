@@ -55,7 +55,18 @@ HRESULT push_task(task_t *task, task_proc_t proc, task_proc_t destr, LONG magic)
 
     list_add_tail(&thread_data->task_list, &task->entry);
 
+#ifdef __REACTOS__
+    if(!PostMessageW(thread_data->thread_hwnd, WM_PROCESSTASK, 0, 0)) {
+        DWORD err = GetLastError();
+
+        /* nothing would run the task: the caller gets the error and the task is gone, as for a failed allocation */
+        list_remove(&task->entry);
+        task->destr(task);
+        return err ? HRESULT_FROM_WIN32(err) : E_FAIL;
+    }
+#else
     PostMessageW(thread_data->thread_hwnd, WM_PROCESSTASK, 0, 0);
+#endif
     return S_OK;
 }
 
