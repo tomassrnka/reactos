@@ -868,6 +868,8 @@ _LocalSetJobLevel1(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
     }
 
     // Check if the status flags have changed.
+    // The status is also changed by SetJob deleting the job and by EndJobSpooling: change it under their lock.
+    EnterCriticalSection(&PrinterDeletionSection);
     if (pJob->dwStatus != pJobInfo->Status)
     {
         // Only add status flags that make sense.
@@ -883,6 +885,7 @@ _LocalSetJobLevel1(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
         if (pJobInfo->Status & JOB_STATUS_PAPEROUT)
             pJob->dwStatus |= JOB_STATUS_PAPEROUT;
     }
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     dwErrorCode = ERROR_SUCCESS;
 
@@ -1000,6 +1003,8 @@ _LocalSetJobLevel2(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
     }
 
     // Check if the status flags have changed.
+    // The status is also changed by SetJob deleting the job and by EndJobSpooling: change it under their lock.
+    EnterCriticalSection(&PrinterDeletionSection);
     if (pJob->dwStatus != pJobInfo->Status)
     {
         // Only add status flags that make sense.
@@ -1015,6 +1020,7 @@ _LocalSetJobLevel2(PLOCAL_PRINTER_HANDLE pPrinterHandle, PLOCAL_JOB pJob, PJOB_I
         if (pJobInfo->Status & JOB_STATUS_PAPEROUT)
             pJob->dwStatus |= JOB_STATUS_PAPEROUT;
     }
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     dwErrorCode = ERROR_SUCCESS;
 
@@ -1097,8 +1103,11 @@ LocalSetJob(HANDLE hPrinter, DWORD JobId, DWORD Level, PBYTE pJobInfo, DWORD Com
         // A job that is still being spooled belongs to the handle spooling it.
         // It is discarded when its document ends, as on Windows: by ScheduleJob, EndDocPrinter or ClosePrinter.
         // Its document may have ended meanwhile: decide together with EndJobSpooling.
+        // The job may also have been freed since it was looked up: FreeJob removes it from the list under this lock.
         EnterCriticalSection(&PrinterDeletionSection);
-        if (pJob->dwStatus & JOB_STATUS_SPOOLING)
+        if (LookupElementSkiplist(&GlobalJobList, &JobId, NULL) != pJob)
+            dwErrorCode = ERROR_INVALID_PARAMETER;
+        else if (pJob->dwStatus & JOB_STATUS_SPOOLING)
             pJob->dwStatus |= JOB_STATUS_DELETING;
         else
             dwErrorCode = ERROR_NOT_SUPPORTED;
@@ -1336,7 +1345,9 @@ StartJobPrinting(PLOCAL_JOB pJob)
     WCHAR wszFullPath[MAX_PATH];
 
     // Spooling is finished at this point.
+    EnterCriticalSection(&PrinterDeletionSection);
     pJob->dwStatus &= ~JOB_STATUS_SPOOLING;
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     // Write the job data into the shadow file.
     // A shadow file cannot hold an output file, so such a job is not resumed after a restart.
