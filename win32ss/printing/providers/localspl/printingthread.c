@@ -102,8 +102,10 @@ PrintingThreadProc(PLOCAL_JOB pJob)
     CopyMemory(&pwszPrinterAndJob[cchPrinterName], wszJobAppendix, cchJobAppendix * sizeof(WCHAR));
     _ultow(OpenData.JobId, &pwszPrinterAndJob[cchPrinterName + cchJobAppendix], 10);
 
-    // Printing starts here.
+    // Printing starts here. SetJob changes the status under the same lock.
+    EnterCriticalSection(&PrinterDeletionSection);
     pJob->dwStatus |= JOB_STATUS_PRINTING;
+    LeaveCriticalSection(&PrinterDeletionSection);
 
     // Print the document.
     // Note that pJob is freed after this function, so we may not access it anymore.
