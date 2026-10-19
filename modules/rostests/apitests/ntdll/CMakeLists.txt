@@ -168,6 +168,7 @@ list(APPEND SOURCE
     RtlpEnsureBufferSize.c
     RtlQueryEnvironmentVariable.c
     RtlQueryEnvironmentVariable_U.c
+    RtlQueryProcessDebugModules.c
     RtlQueryRegistryValues.c
     RtlDeriveCapabilitySidsFromName.c
     RtlQueryPerformanceCounter.c

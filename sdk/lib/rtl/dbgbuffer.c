@@ -122,6 +122,151 @@ RtlDestroyQueryDebugBuffer(_In_ PRTL_DEBUG_INFORMATION Buf)
     return Status;
 }
 
+#ifdef _WIN64
+/* The fixed head of a 32-bit LDR_DATA_TABLE_ENTRY, as a WOW64 target keeps it in its 32-bit
+   address space. The three LIST_ENTRY32 come first, then the base and size, the names (a
+   32-bit UNICODE_STRING is a length, a maximum and a 32-bit pointer) and the flags. */
+#include <pshpack4.h>
+typedef struct _RTLP_LDR_ENTRY32
+{
+    ULONG  InLoadOrderFlink;        /* +0x00 */
+    ULONG  Reserved0[5];            /* the rest of the three LIST_ENTRY32, +0x04..0x17 */
+    ULONG  DllBase;                 /* +0x18 */
+    ULONG  EntryPoint;              /* +0x1c */
+    ULONG  SizeOfImage;             /* +0x20 */
+    USHORT FullDllNameLength;       /* +0x24 */
+    USHORT FullDllNameMaximum;      /* +0x26 */
+    ULONG  FullDllNameBuffer;       /* +0x28 */
+    ULONG  BaseDllName[2];          /* +0x2c..0x33 */
+    ULONG  Flags;                   /* +0x34 */
+    USHORT LoadCount;               /* +0x38 */
+    USHORT TlsIndex;                /* +0x3a */
+} RTLP_LDR_ENTRY32;
+#include <poppack.h>
+
+C_ASSERT(FIELD_OFFSET(RTLP_LDR_ENTRY32, DllBase) == 0x18);
+C_ASSERT(FIELD_OFFSET(RTLP_LDR_ENTRY32, SizeOfImage) == 0x20);
+C_ASSERT(FIELD_OFFSET(RTLP_LDR_ENTRY32, FullDllNameLength) == 0x24);
+C_ASSERT(FIELD_OFFSET(RTLP_LDR_ENTRY32, FullDllNameBuffer) == 0x28);
+C_ASSERT(FIELD_OFFSET(RTLP_LDR_ENTRY32, Flags) == 0x34);
+C_ASSERT(FIELD_OFFSET(RTLP_LDR_ENTRY32, LoadCount) == 0x38);
+
+/*
+ * Appends the 32-bit loader module list of a WOW64 target to the list a 64-bit caller is
+ * building. The 32-bit PEB holds the loader data pointer at offset 0x0c, the 32-bit
+ * PEB_LDR_DATA holds the load-order list at 0x0c, and an entry is an RTLP_LDR_ENTRY32. The
+ * running count, used size and write cursor are those of the native walk, so the two lists
+ * are sized and filled by the same rules.
+ */
+static NTSTATUS
+RtlpQueryRemoteProcessModules32(HANDLE ProcessHandle,
+                               ULONG_PTR Peb32,
+                               PRTL_PROCESS_MODULES Modules,
+                               ULONG Size,
+                               PULONG UsedSize,
+                               PRTL_PROCESS_MODULE_INFORMATION *ModulePtrOut)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG LoaderData32 = 0, Head, Entry;
+    PRTL_PROCESS_MODULE_INFORMATION ModulePtr = *ModulePtrOut;
+
+    /* The 32-bit loader list is additive: when it cannot be read - the WOW64 loader has
+       not published it yet (the pointer is still NULL), or the target is damaged or racing -
+       keep the modules the native walk already collected rather than failing the whole query.
+       Only a buffer that is too small for the extra modules is reported to the caller.
+       The list lives in the target's 32-bit address space, so its pointers are 32-bit. */
+    if (!NT_SUCCESS(NtReadVirtualMemory(ProcessHandle, (PVOID)(Peb32 + 0x0c),
+                                        &LoaderData32, sizeof(LoaderData32), NULL)) ||
+        LoaderData32 == 0)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    /* InLoadOrderModuleList at PEB_LDR_DATA32 + 0x0c; read its first Flink */
+    Head = LoaderData32 + 0x0c;
+    if (!NT_SUCCESS(NtReadVirtualMemory(ProcessHandle, (PVOID)(ULONG_PTR)Head, &Entry, sizeof(Entry), NULL)))
+    {
+        return STATUS_SUCCESS;
+    }
+
+    while (Entry != Head)
+    {
+        RTLP_LDR_ENTRY32 Module32;
+
+        /* read the current 32-bit module entry; a failed read ends the (best-effort) walk */
+        if (!NT_SUCCESS(NtReadVirtualMemory(ProcessHandle, (PVOID)(ULONG_PTR)Entry, &Module32, sizeof(Module32), NULL)))
+            break;
+
+        if (Modules != NULL &&
+            FIELD_OFFSET(RTL_PROCESS_MODULES, Modules) +
+            ((SIZE_T)Modules->NumberOfModules + 1) * sizeof(RTL_PROCESS_MODULE_INFORMATION) > Size)
+        {
+            /* The list has grown since it was sized: do not write past the buffer */
+            Status = STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        }
+        else if (Modules != NULL)
+        {
+            UNICODE_STRING Unicode;
+            ANSI_STRING AnsiString;
+            WCHAR Buffer[256];
+            PCHAR p;
+
+            /* Import the module name from the target. The target controls the length,
+               so it is clamped to leave room for the ANSI string and its terminator. */
+            Unicode.Length = min(Module32.FullDllNameLength,
+                                 (USHORT)((sizeof(ModulePtr->FullPathName) - 1) * sizeof(WCHAR))) & ~(USHORT)1;
+            Unicode.MaximumLength = sizeof(Buffer);
+            Unicode.Buffer = Buffer;
+            if (Unicode.Length != 0 &&
+                !NT_SUCCESS(NtReadVirtualMemory(ProcessHandle,
+                                                (PVOID)(ULONG_PTR)Module32.FullDllNameBuffer,
+                                                Unicode.Buffer,
+                                                Unicode.Length,
+                                                NULL)))
+            {
+                /* the name could not be read: stop before committing this entry */
+                break;
+            }
+
+            ModulePtr->Section        = 0;
+            ModulePtr->MappedBase     = NULL;
+            ModulePtr->ImageBase      = (PVOID)(ULONG_PTR)Module32.DllBase;
+            ModulePtr->ImageSize      = Module32.SizeOfImage;
+            ModulePtr->Flags          = Module32.Flags;
+            ModulePtr->LoadOrderIndex = 0;
+            ModulePtr->InitOrderIndex = 0;
+            ModulePtr->LoadCount      = Module32.LoadCount;
+
+            AnsiString.Length        = 0;
+            AnsiString.MaximumLength = sizeof(ModulePtr->FullPathName);
+            AnsiString.Buffer        = ModulePtr->FullPathName;
+            RtlUnicodeStringToAnsiString(&AnsiString, &Unicode, FALSE);
+
+            p = strrchr(ModulePtr->FullPathName, '\\');
+            if (p != NULL)
+                ModulePtr->OffsetToFileName = (USHORT)(p - ModulePtr->FullPathName + 1);
+            else
+                ModulePtr->OffsetToFileName = 0;
+
+            ModulePtr++;
+            Modules->NumberOfModules++;
+        }
+        *UsedSize += sizeof(RTL_PROCESS_MODULE_INFORMATION);
+
+        /* When sizing, a list that does not fit the caller's room cannot be returned */
+        if (Modules == NULL && *UsedSize > Size)
+            return STATUS_NO_MEMORY;
+
+        /* address of the next module in the list */
+        Entry = Module32.InLoadOrderFlink;
+    }
+
+    *ModulePtrOut = ModulePtr;
+    return Status;
+}
+#endif /* _WIN64 */
+
 /*
  *  Based on lib/epsapi/enum/modules.c by KJK::Hyperion.
  */
@@ -293,6 +438,35 @@ RtlpQueryRemoteProcessModules(HANDLE ProcessHandle,
         /* address of the next module in the list */
         pleCurEntry = lmModule.InLoadOrderLinks.Flink;
     }
+
+#ifdef _WIN64
+    /* A WOW64 target keeps a second, 32-bit loader module list in its 32-bit PEB. The walk
+       above reads the 64-bit PEB, which for such a process holds only the native ntdll and
+       the wow64 support DLLs, not the 32-bit modules the program actually loaded. A 64-bit
+       caller appends the 32-bit list too, so toolhelp and tasklist report a 32-bit process'
+       modules the way Windows does. */
+    if (NT_SUCCESS(Status))
+    {
+        ULONG_PTR Peb32 = 0;
+
+        if (NT_SUCCESS(NtQueryInformationProcess(ProcessHandle,
+                                                 ProcessWow64Information,
+                                                 &Peb32,
+                                                 sizeof(Peb32),
+                                                 NULL)) &&
+            Peb32 != 0)
+        {
+            Status = RtlpQueryRemoteProcessModules32(ProcessHandle, Peb32, Modules, Size,
+                                                     &UsedSize, &ModulePtr);
+            if (!NT_SUCCESS(Status))
+            {
+                if (ReturnedSize != 0)
+                    *ReturnedSize = UsedSize;
+                return Status;
+            }
+        }
+    }
+#endif /* _WIN64 */
 
     if (ReturnedSize != 0)
         *ReturnedSize = UsedSize;
