@@ -77,6 +77,17 @@ static void Test_SolidTriangleAboveTarget(void)
         ok(GetPixel(hdc, 20, 10) == RGB(0, 0, 255), "Pixel (20,10) is 0x%06lx\n", GetPixel(hdc, 20, 10));
         ok(GetPixel(hdc, 1, 1) == 0, "Pixel (1,1) is 0x%06lx\n", GetPixel(hdc, 1, 1));
 
+        /* A triangle reaching past the left edge: the rows of it left of the
+         * bitmap must not be filled (the line functions of 24 and 32 bpp on
+         * x86 took such an empty line for one of 4 billion pixels) */
+        FillVertex(&vert[0], -50, 0, RGB(255, 0, 0));
+        FillVertex(&vert[1], -50, 60, RGB(255, 0, 0));
+        FillVertex(&vert[2], 40, 30, RGB(255, 0, 0));
+        ret = GradientFill(hdc, vert, 3, &tri, 1, GRADIENT_FILL_TRIANGLE);
+        ok(ret, "GradientFill failed\n");
+        GdiFlush();
+        ok(GetPixel(hdc, 20, 30) == RGB(255, 0, 0), "Pixel (20,30) is 0x%06lx\n", GetPixel(hdc, 20, 30));
+
         /* ...and nothing in front of it */
         for (i = 0, cBad = 0; i < GUARD; i++)
         {
@@ -112,14 +123,51 @@ static void Test_SolidTriangleAboveScreen(void)
     FillVertex(&vert[2], 4, 8, RGB(0, 0, 255));
     ret = GradientFill(hdc, vert, 3, &tri, 1, GRADIENT_FILL_TRIANGLE);
     ok(ret, "GradientFill failed\n");
+    FillVertex(&vert[0], -50, 0, RGB(255, 0, 0));
+    FillVertex(&vert[1], -50, 60, RGB(255, 0, 0));
+    FillVertex(&vert[2], 40, 30, RGB(255, 0, 0));
+    ret = GradientFill(hdc, vert, 3, &tri, 1, GRADIENT_FILL_TRIANGLE);
+    ok(ret, "GradientFill failed\n");
     GdiFlush();
 
     ReleaseDC(NULL, hdc);
     RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
+/* A huge rectangle on a hidden window, or on a window off the screen, draws
+ * nothing, and must not need memory for its size either */
+static void Test_HugeRect(DWORD dwStyle, int x, int y)
+{
+    HWND hwnd;
+    HDC hdc;
+    TRIVERTEX vert[2];
+    GRADIENT_RECT gr = {0, 1};
+    DWORD dwStart;
+    BOOL ret;
+
+    hwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP | dwStyle, x, y, 200, 200, NULL, NULL, NULL, NULL);
+    ok(hwnd != NULL, "CreateWindowEx failed, error %lu\n", GetLastError());
+    if (!hwnd)
+        return;
+    hdc = GetDC(hwnd);
+
+    FillVertex(&vert[0], 0, 0, RGB(255, 0, 0));
+    FillVertex(&vert[1], 30000, 30000, RGB(0, 0, 255));
+    dwStart = GetTickCount();
+    ret = GradientFill(hdc, vert, 2, &gr, 1, GRADIENT_FILL_RECT_H);
+    ok(ret, "0x%lx: GradientFill failed, error %lu\n", dwStyle, GetLastError());
+    ret = GradientFill(hdc, vert, 2, &gr, 1, GRADIENT_FILL_RECT_V);
+    ok(ret, "0x%lx: GradientFill failed, error %lu\n", dwStyle, GetLastError());
+    ok(GetTickCount() - dwStart < 2000, "0x%lx: GradientFill took %lu ms\n", dwStyle, GetTickCount() - dwStart);
+
+    ReleaseDC(hwnd, hdc);
+    DestroyWindow(hwnd);
+}
+
 START_TEST(GradientFill)
 {
+    Test_HugeRect(0, 0, 0);
+    Test_HugeRect(WS_VISIBLE, -40000, -40000);
     Test_SolidTriangleAboveTarget();
     Test_SolidTriangleAboveScreen();
 }
