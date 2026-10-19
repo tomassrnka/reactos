@@ -250,6 +250,15 @@ static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
     return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
 
+/* The handle refers to the calling process */
+static BOOLEAN IsCurrentProcess(HANDLE Process)
+{
+    PROCESS_BASIC_INFORMATION Info;
+    if (Process == NtCurrentProcess()) return TRUE;
+    return NT_SUCCESS(NtQueryInformationProcess(Process, ProcessBasicInformation, &Info, sizeof(Info), NULL)) &&
+           Info.UniqueProcessId == (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess;
+}
+
 /* MemorySectionName: the guest's counted-string header is 8 bytes. Query the native form into a
  * scratch buffer that holds any name, then apply the guest's buffer size as Windows WoW64 does
  * (measured on Server 2008 R2 and Windows 10): an address above the guest's range is invalid; a
@@ -277,6 +286,8 @@ static NTSTATUS SectionName32(HANDLE Process, ULONG Address, ULONG Buffer, ULONG
     if (!Native) return STATUS_NO_MEMORY;
     Status = NtQueryVirtualMemory(Process, PTR32(Address), MemorySectionName, Native, NativeLength, &Bytes);
     if (!NT_SUCCESS(Status)) return Status;
+    /* The guest MaximumLength (Length + 2) must fit a USHORT */
+    if (Native->SectionFileName.Length > MAXUSHORT - sizeof(WCHAR)) return STATUS_NAME_TOO_LONG;
     Needed = sizeof(WOW64_STRING) + Native->SectionFileName.Length + sizeof(WCHAR);
     if (Length < Needed)
     {
@@ -315,6 +326,9 @@ C_ASSERT(sizeof(WOW64_VM_COUNTERS_EX) == 48);
 C_ASSERT(sizeof(IO_COUNTERS) == 48 && sizeof(KERNEL_USER_TIMES) == 32);
 C_ASSERT(RTL_FIELD_SIZE(PROCESS_DEVICEMAP_INFORMATION, Query) == 36);
 
+/* A counter above 4 GiB reads 0xffffffff, as on Windows WoW64 (measured on Server 2008 R2 and
+ * Windows 10 for a 64-bit process with 12-16 GiB virtual, 5 GiB working set and 6 GiB commit:
+ * every such counter came back as 0xffffffff with STATUS_SUCCESS) */
 static ULONG Narrow(SIZE_T Value)
 {
     return Value > MAXULONG ? MAXULONG : (ULONG)Value;
@@ -823,7 +837,23 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
     {
         MEMORY_BASIC_INFORMATION Info;
         struct { ULONG Base, AllocationBase, AllocationProtect, Size, State, Protect, Type; } *Info32 = P(3);
-        if (a[2] == MemorySectionName) return SectionName32(H(0), a[1], a[3], a[4], a[5], Cleanup);
+        if (a[2] == MemorySectionName)
+        {
+            /* The kernel resolves the name in the caller's address space whatever the handle
+             * (MmGetFileNameForAddress), so another process would get the caller's mapping */
+            HANDLE Process = NtCurrentProcess();
+            /* A private duplicate (same access), so the guest cannot swap the handle
+             * between the check and the query; Wow64SystemService closes it */
+            if (H(0) != NtCurrentProcess())
+            {
+                Status = NtDuplicateObject(NtCurrentProcess(), H(0), NtCurrentProcess(), &Cleanup->Handle,
+                                           0, 0, DUPLICATE_SAME_ACCESS);
+                if (!NT_SUCCESS(Status)) return Status;
+                Process = Cleanup->Handle;
+            }
+            if (!IsCurrentProcess(Process)) UNSUPPORTED(MODE, 3);
+            return SectionName32(Process, a[1], a[3], a[4], a[5], Cleanup);
+        }
         if (a[2] != MemoryBasicInformation) UNSUPPORTED(CLASS, a[2]);
         if (a[4] < sizeof(*Info32)) return STATUS_INFO_LENGTH_MISMATCH;
         Status = NtQueryVirtualMemory(H(0), P(1), a[2], &Info, sizeof(Info), NULL);
