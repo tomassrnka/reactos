@@ -176,6 +176,7 @@ LPSTR           MCI_strdupWtoA(LPCWSTR str);
 const char*     WINMM_ErrorToString(MMRESULT error);
 
 void		TIME_MMTimeStop(void);
+void		TIME_ReleaseResolution(void);
 
 MMRESULT WINMM_CheckCallback(DWORD_PTR dwCallback, DWORD fdwOpen, BOOL mixer) DECLSPEC_HIDDEN;
 

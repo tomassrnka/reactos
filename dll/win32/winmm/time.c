@@ -21,6 +21,7 @@
  */
 
 #include "winemm.h"
+#include <winternl.h>
 
 #ifdef HAVE_SYS_TIME_H
 # include <sys/time.h>
@@ -47,23 +48,14 @@ static    LPWINE_TIMERENTRY 	TIME_TimersList;
 static    HANDLE                TIME_hKillEvent;
 static    HANDLE                TIME_hWakeEvent;
 static    BOOL                  TIME_TimeToDie = TRUE;
-static    LARGE_INTEGER         TIME_qpcFreq;
+/* Counts per millisecond while a period of 5 ms or less is requested, else 0; timeBeginPeriod, timeEndPeriod and
+   timeGetTime race, so it is only read and written with interlocked 64-bit operations */
+static    volatile LONGLONG     TIME_qpcFreq;
 
 /*
  * Some observations on the behavior of winmm on Windows.
- * First, the call to timeBeginPeriod(xx) can never be used
- * to raise the timer resolution, only lower it.
  *
- * Second, a brief survey of a variety of Win 2k and Win X
- * machines showed that a 'standard' (aka default) timer
- * resolution was 1 ms (Win9x is documented as being 1).  However, one
- * machine had a standard timer resolution of 10 ms.
- *
- * Further, if we set our default resolution to 1,
- * the implementation of timeGetTime becomes GetTickCount(),
- * and we can optimize the code to reduce overhead.
- *
- * Additionally, a survey of Event behaviors shows that
+ * A survey of Event behaviors shows that
  * if we request a Periodic event every 50 ms, then Windows
  * makes sure to trigger that event 20 times in the next
  * second.  If delays prevent that from happening on exact
@@ -76,7 +68,13 @@ static    LARGE_INTEGER         TIME_qpcFreq;
  *   Jeremy White, October 2004
  */
 #define MMSYSTIME_MININTERVAL (1)
-#define MMSYSTIME_MAXINTERVAL (65535)
+#define MMSYSTIME_MAXINTERVAL (1000000)
+
+/* Periods of 1 to 15 ms are counted; a longer one is no finer than the default resolution, so nothing holds it */
+#define TIME_MAXHELDPERIOD    (15)
+
+static    UINT                  TIME_PeriodCount[TIME_MAXHELDPERIOD + 1];  /* WINMM_cs */
+static    UINT                  TIME_HeldPeriod;  /* period of this process's kernel request, 0 for none; WINMM_cs */
 
 
 static	void	TIME_TriggerCallBack(LPWINE_TIMERENTRY lpTimer)
@@ -148,7 +146,8 @@ static    LPWINE_TIMERENTRY		lpTimers;
     for (ptimer = &TIME_TimersList; *ptimer != NULL; ) {
         timer = *ptimer;
         next_ptimer = &timer->lpNext;
-        if (cur_time >= timer->dwTriggerTime)
+        /* a signed difference keeps working when the tick count wraps with a long delay pending */
+        if ((LONG)(cur_time - timer->dwTriggerTime) >= 0)
         {
             if (timer->lpFunc) {
                 if (idx == nSizeLpTimers) {
@@ -183,7 +182,7 @@ static    LPWINE_TIMERENTRY		lpTimers;
             {
                 /* Compute when this event needs this function
                     to be called again */
-                if (timer->dwTriggerTime <= cur_time)
+                if ((LONG)(timer->dwTriggerTime - cur_time) <= 0)
                     delta_time = 0;
                 else
                     delta_time = timer->dwTriggerTime - cur_time;
@@ -417,27 +416,89 @@ MMRESULT WINAPI timeGetDevCaps(LPTIMECAPS lpCaps, UINT wSize)
     return TIMERR_NOERROR;
 }
 
+/* The kernel does not coarsen a request by a later one, so a request that gets coarser is released first; WINMM_cs held */
+static void TIME_UpdateResolution(void)
+{
+    UINT finest = 0, i;
+    ULONG current;
+
+    for (i = 1; i <= TIME_MAXHELDPERIOD; i++)
+    {
+        if (TIME_PeriodCount[i])
+        {
+            finest = i;
+            break;
+        }
+    }
+
+    if (finest != TIME_HeldPeriod)
+    {
+        if (TIME_HeldPeriod != 0 && (finest == 0 || finest > TIME_HeldPeriod))
+        {
+            NtSetTimerResolution(0, FALSE, &current);
+            TIME_HeldPeriod = 0;
+        }
+        if (finest != 0 && NtSetTimerResolution(finest * 10000, TRUE, &current) >= 0)
+            TIME_HeldPeriod = finest;
+    }
+
+    /*  High resolution timer requested, use QPC */
+    if (finest != 0 && finest <= 5)
+    {
+        LARGE_INTEGER qpcFreq;
+
+        if (InterlockedCompareExchange64(&TIME_qpcFreq, 0, 0) == 0 && QueryPerformanceFrequency(&qpcFreq))
+            InterlockedExchange64(&TIME_qpcFreq, qpcFreq.QuadPart / 1000);
+    }
+    else
+    {
+        /*  High resolution timer no longer requested, stop using QPC */
+        InterlockedExchange64(&TIME_qpcFreq, 0);
+    }
+}
+
+/**************************************************************************
+ * 				TIME_ReleaseResolution	[internal]
+ */
+void TIME_ReleaseResolution(void)
+{
+    ULONG current;
+
+    EnterCriticalSection(&WINMM_cs);
+    memset(TIME_PeriodCount, 0, sizeof(TIME_PeriodCount));
+    if (TIME_HeldPeriod != 0)
+    {
+        NtSetTimerResolution(0, FALSE, &current);
+        TIME_HeldPeriod = 0;
+    }
+    InterlockedExchange64(&TIME_qpcFreq, 0);
+    LeaveCriticalSection(&WINMM_cs);
+}
+
 /**************************************************************************
  * 				timeBeginPeriod		[WINMM.@]
  */
 MMRESULT WINAPI timeBeginPeriod(UINT wPeriod)
 {
-    if (wPeriod < MMSYSTIME_MININTERVAL || wPeriod > MMSYSTIME_MAXINTERVAL)
+    TRACE("(%u)\n", wPeriod);
+
+    if (wPeriod < MMSYSTIME_MININTERVAL)
         return TIMERR_NOCANDO;
 
-    /*  High resolution timer requested, use QPC */
-    if (wPeriod <= 5 && TIME_qpcFreq.QuadPart == 0)
-    {
-        if (QueryPerformanceFrequency(&TIME_qpcFreq))
-            TIME_qpcFreq.QuadPart /= 1000;
-    }
+    if (wPeriod > TIME_MAXHELDPERIOD)
+        return TIMERR_NOERROR;
 
-    if (wPeriod > MMSYSTIME_MININTERVAL)
+    EnterCriticalSection(&WINMM_cs);
+    if (TIME_PeriodCount[wPeriod] == ~0U)
     {
-        WARN("Stub; we set our timer resolution at minimum\n");
+        LeaveCriticalSection(&WINMM_cs);
+        return TIMERR_NOCANDO;
     }
+    TIME_PeriodCount[wPeriod]++;
+    TIME_UpdateResolution();
+    LeaveCriticalSection(&WINMM_cs);
 
-    return 0;
+    return TIMERR_NOERROR;
 }
 
 /**************************************************************************
@@ -445,18 +506,29 @@ MMRESULT WINAPI timeBeginPeriod(UINT wPeriod)
  */
 MMRESULT WINAPI timeEndPeriod(UINT wPeriod)
 {
-    if (wPeriod < MMSYSTIME_MININTERVAL || wPeriod > MMSYSTIME_MAXINTERVAL)
+    MMRESULT ret = TIMERR_NOERROR;
+
+    TRACE("(%u)\n", wPeriod);
+
+    if (wPeriod < MMSYSTIME_MININTERVAL)
         return TIMERR_NOCANDO;
 
-    /*  High resolution timer no longer requested, stop using QPC */
-    if (wPeriod <= 5 && TIME_qpcFreq.QuadPart != 0)
-        TIME_qpcFreq.QuadPart = 0;
+    if (wPeriod > TIME_MAXHELDPERIOD)
+        return TIMERR_NOERROR;
 
-    if (wPeriod > MMSYSTIME_MININTERVAL)
+    EnterCriticalSection(&WINMM_cs);
+    if (TIME_PeriodCount[wPeriod] == 0)
     {
-        WARN("Stub; we set our timer resolution at minimum\n");
+        ret = TIMERR_NOCANDO;
     }
-    return 0;
+    else
+    {
+        TIME_PeriodCount[wPeriod]--;
+        TIME_UpdateResolution();
+    }
+    LeaveCriticalSection(&WINMM_cs);
+
+    return ret;
 }
 
 /**************************************************************************
@@ -466,6 +538,7 @@ MMRESULT WINAPI timeEndPeriod(UINT wPeriod)
 DWORD WINAPI timeGetTime(void)
 {
     LARGE_INTEGER perfCount;
+    LONGLONG qpcFreq;
 #if defined(COMMENTOUTPRIORTODELETING)
     DWORD       count;
 
@@ -476,10 +549,11 @@ DWORD WINAPI timeGetTime(void)
     if (pFnRestoreThunkLock) pFnRestoreThunkLock(count);
 #endif
     /* Use QPC if a high-resolution timer was requested (<= 5ms) */
-    if (TIME_qpcFreq.QuadPart != 0)
+    qpcFreq = InterlockedCompareExchange64(&TIME_qpcFreq, 0, 0);
+    if (qpcFreq != 0)
     {
         QueryPerformanceCounter(&perfCount);
-        return (DWORD)(perfCount.QuadPart / TIME_qpcFreq.QuadPart);
+        return (DWORD)(perfCount.QuadPart / qpcFreq);
     }
     /* Otherwise continue using GetTickCount */
     return GetTickCount();
