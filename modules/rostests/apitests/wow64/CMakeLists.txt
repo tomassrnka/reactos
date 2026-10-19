@@ -30,7 +30,7 @@ add_wow64_apitest(kernel32
     Wow64ThreadApc Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64SystemDlls DynamicTls HandleList)
-add_wow64_apitest(ntdll
+add_wow64_apitest(ntdll StackOverflowDispatch
     Wow64Continue NtOpenKey NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion)
 add_wow64_apitest(advapi32
@@ -44,10 +44,10 @@ if(ARCH STREQUAL "i386")
     set_module_type(wow64_gui_load win32cui)
     add_importlibs(wow64_gui_load msvcrt kernel32)
 
-    add_asm_files(wow64_continue_asm ../ntdll/i386/Wow64Continue.S)
+    add_asm_files(wow64_continue_asm ../ntdll/i386/Wow64Continue.S ../ntdll/i386/StackOverflowDispatch.S)
     target_sources(ntdll_wow64_apitest PRIVATE ${wow64_continue_asm})
 elseif(ARCH STREQUAL "amd64")
-    add_asm_files(wow64_continue_asm ../ntdll/amd64/Wow64Continue.S)
+    add_asm_files(wow64_continue_asm ../ntdll/amd64/Wow64Continue.S ../ntdll/amd64/StackOverflowDispatch.S)
     target_sources(ntdll_wow64_apitest PRIVATE ${wow64_continue_asm})
 endif()
 

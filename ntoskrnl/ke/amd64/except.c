@@ -100,7 +100,9 @@ KiDispatchExceptionToUser(
     IN PCONTEXT Context,
     IN PEXCEPTION_RECORD ExceptionRecord)
 {
-    EXCEPTION_RECORD LocalExceptRecord;
+    EXCEPTION_RECORD LocalExceptRecord, FaultRecord;
+    PEXCEPTION_RECORD volatile UserRecord = ExceptionRecord;
+    volatile BOOLEAN Retried = FALSE;
     ULONG64 UserRsp;
     PKUSER_EXCEPTION_STACK UserStack;
 
@@ -110,8 +112,10 @@ KiDispatchExceptionToUser(
         /* Raise an access violation instead */
         LocalExceptRecord.ExceptionCode = STATUS_ACCESS_VIOLATION;
         LocalExceptRecord.ExceptionFlags = 0;
+        LocalExceptRecord.ExceptionRecord = NULL;
+        LocalExceptRecord.ExceptionAddress = ExceptionRecord->ExceptionAddress;
         LocalExceptRecord.NumberParameters = 0;
-        ExceptionRecord = &LocalExceptRecord;
+        UserRecord = &LocalExceptRecord;
     }
 
     /* Get new stack pointer and align it to 16 bytes */
@@ -124,6 +128,7 @@ KiDispatchExceptionToUser(
     _enable();
 
     /* Set up the user-stack */
+DispatchToUser:
     _SEH2_TRY
     {
         /* Probe the user stack frame and zero it out */
@@ -132,7 +137,7 @@ KiDispatchExceptionToUser(
 
         /* Copy Context and ExceptionFrame */
         UserStack->Context = *Context;
-        UserStack->ExceptionRecord = *ExceptionRecord;
+        UserStack->ExceptionRecord = *UserRecord;
 
         /* Setup the machine frame */
         UserStack->MachineFrame.Rip = Context->Rip;
@@ -141,15 +146,28 @@ KiDispatchExceptionToUser(
         UserStack->MachineFrame.Rsp = Context->Rsp;
         UserStack->MachineFrame.SegSs = Context->SegSs;
     }
-    _SEH2_EXCEPT((LocalExceptRecord = *_SEH2_GetExceptionInformation()->ExceptionRecord),
+    _SEH2_EXCEPT((FaultRecord = *_SEH2_GetExceptionInformation()->ExceptionRecord),
                  EXCEPTION_EXECUTE_HANDLER)
     {
-        // FIXME: handle stack overflow
+        /* Check if we got a stack overflow and raise that instead. The
+           overflow committed the rest of the stack, so one retry is enough. */
+        if (((NTSTATUS)FaultRecord.ExceptionCode == STATUS_STACK_OVERFLOW) && !Retried)
+        {
+            /* Keep the address of the original exception. The caller's
+               record is replaced, so a second chance sees the overflow too. */
+            FaultRecord.ExceptionAddress = ExceptionRecord->ExceptionAddress;
+            *ExceptionRecord = FaultRecord;
+            UserRecord = ExceptionRecord;
+            Retried = TRUE;
+
+            /* Do the exception again */
+            _SEH2_YIELD(goto DispatchToUser);
+        }
 
         /* Nothing we can do here. Keep interrupts enabled, the caller goes
            on to the second-chance path, which can wait and terminate the
            process. */
-        return FALSE;
+        _SEH2_YIELD(return FALSE);
     }
     _SEH2_END;
 
