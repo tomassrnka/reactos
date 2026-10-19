@@ -123,7 +123,7 @@ typedef struct _AFD_ACTIVE_POLL {
     KTIMER Timer;
     PKEVENT EventObject;
     BOOLEAN Exclusive;
-} AFD_ACTIVE_POLL, *PAFD_ACTIVE_POLL;
+} AFD_ACTIVE_POLL, *PAFD_ACTIVE_POLL; /* Irp is NULL once completed while its timeout DPC runs */
 
 typedef struct _IRP_LIST {
     LIST_ENTRY ListEntry;
@@ -206,6 +206,14 @@ typedef struct _AFD_FCB {
     LIST_ENTRY PendingIrpList[MAX_FUNCTIONS];
     LIST_ENTRY DatagramList;
     LIST_ENTRY PendingConnections;
+    PIO_WORKITEM RelistenWorkItem;
+    KEVENT RelistenIdle;
+    BOOLEAN Relistening;
+    BOOLEAN ListenConnectionReady;
+    NTSTATUS ListenStatus;
+    PIO_WORKITEM AcceptWorkItem;
+    KEVENT AcceptWorkIdle;
+    BOOLEAN AcceptWorkQueued;
 } AFD_FCB, *PAFD_FCB;
 
 /* bind.c */
@@ -278,6 +286,7 @@ AfdGetPeerName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS AfdWaitForListen( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			   PIO_STACK_LOCATION IrpSp );
 
+VOID FreeListenConnectionInfo(PAFD_FCB FCB);
 NTSTATUS AfdListenSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			 PIO_STACK_LOCATION IrpSp);
 
@@ -286,6 +295,8 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		    PIO_STACK_LOCATION IrpSp );
+
+VOID FreeQueuedConnection(PAFD_TDI_OBJECT_QELT Qelt);
 
 /* lock.c */
 
@@ -299,6 +310,7 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
 ( PAFD_FCB FCB, NTSTATUS Status, PIRP Irp,
   UINT Information );
 VOID SocketStateUnlock( PAFD_FCB FCB );
+VOID AfdClearCancelRoutine( PIRP Irp );
 NTSTATUS LostSocket( PIRP Irp );
 PAFD_HANDLE LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );

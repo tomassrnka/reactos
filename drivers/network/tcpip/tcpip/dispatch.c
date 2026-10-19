@@ -729,21 +729,31 @@ NTSTATUS DispTdiQueryInformation(
           case TDI_CONNECTION_FILE:
             Endpoint =
 				(PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
-            if (Endpoint == NULL || Endpoint->AddressFile == NULL)
+            if (Endpoint == NULL)
             {
                 TI_DbgPrint(MIN_TRACE, ("FIXME: No connection endpoint file object.\n"));
-                ASSERT(Endpoint != NULL && Endpoint->AddressFile != NULL);
+                ASSERT(Endpoint != NULL);
                 return STATUS_INVALID_PARAMETER;
+            }
+
+            /* A concurrent close can disassociate the connection from its address */
+            LockObject(Endpoint);
+            AddrFile = Endpoint->AddressFile;
+            if (AddrFile == NULL)
+            {
+                UnlockObject(Endpoint);
+                return STATUS_INVALID_CONNECTION;
             }
 
             Address->TAAddressCount = 1;
             Address->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
             Address->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
-            Address->Address[0].Address[0].sin_port = Endpoint->AddressFile->Port;
-            Address->Address[0].Address[0].in_addr = Endpoint->AddressFile->Address.Address.IPv4Address;
+            Address->Address[0].Address[0].sin_port = AddrFile->Port;
+            Address->Address[0].Address[0].in_addr = AddrFile->Address.Address.IPv4Address;
 			RtlZeroMemory(
 				&Address->Address[0].Address[0].sin_zero,
 				sizeof(Address->Address[0].Address[0].sin_zero));
+            UnlockObject(Endpoint);
             return STATUS_SUCCESS;
 
           default:

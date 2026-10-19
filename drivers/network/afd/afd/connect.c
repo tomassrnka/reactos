@@ -351,7 +351,7 @@ StreamSocketConnectSendComplete(
         NextIrp->IoStatus.Information = Irp->IoStatus.Information;
         if (NextIrp->MdlAddress)
             UnlockRequest(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
-        (void)IoSetCancelRoutine(NextIrp, NULL);
+        AfdClearCancelRoutine(NextIrp);
         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
     }
 
@@ -400,7 +400,7 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
                NextIrp->IoStatus.Information = 0;
                if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-               (void)IoSetCancelRoutine(NextIrp, NULL);
+               AfdClearCancelRoutine(NextIrp);
                IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
         while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]))
@@ -411,7 +411,7 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                NextIrp->IoStatus.Information = Irp->IoStatus.Information;
                if (NextIrp->MdlAddress)
                    UnlockRequest(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
-               (void)IoSetCancelRoutine(NextIrp, NULL);
+               AfdClearCancelRoutine(NextIrp);
                IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
         }
         SocketStateUnlock( FCB );
@@ -434,7 +434,7 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         NextIrp->IoStatus.Status = Status;
         NextIrp->IoStatus.Information = NT_SUCCESS(Status) ? ((ULONG_PTR)FCB->Connection.Handle) : 0;
         if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-        (void)IoSetCancelRoutine(NextIrp, NULL);
+        AfdClearCancelRoutine(NextIrp);
         IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
     }
 
@@ -506,7 +506,7 @@ end:
         NextIrp->IoStatus.Information = 0;
         if (NextIrp->MdlAddress)
             UnlockRequest(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
-        (void)IoSetCancelRoutine(NextIrp, NULL);
+        AfdClearCancelRoutine(NextIrp);
         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
     }
     SocketStateUnlock( FCB );
