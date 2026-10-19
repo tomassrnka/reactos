@@ -173,6 +173,124 @@ static VOID ProbeOutput(ULONG Address, ULONG Size)
     for (i = 0; i < Size; ++i) Bytes[i] = Bytes[i];
 }
 
+/* Size bytes at a guest address lie below the guest's highest address */
+static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
+{
+    return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
+}
+
+/* TOKEN_GROUPS classes: the 32-bit layout has 4-byte SID pointers, so query the
+ * native form into a scratch buffer and rebuild it in the guest buffer. Measured on
+ * Windows WOW64: the token is checked before the buffer, the buffer need not be
+ * aligned, and the length is stored before the data. */
+static NTSTATUS TokenGroups32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG Buffer,
+                              ULONG Length, ULONG ReturnLength, WOW64_CLEANUP *Cleanup)
+{
+    PTOKEN_GROUPS Native;
+    ULONG Bytes = 0, Needed, SidBytes = 0, Offset, Sid, i;
+    UCHAR *Guest;
+    NTSTATUS Status;
+
+    if (!ReturnLength || !GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    Status = NtQueryInformationToken(Token, Class, NULL, 0, &Bytes);
+    if (Status != STATUS_BUFFER_TOO_SMALL) return Status;
+    if (Bytes < sizeof(TOKEN_GROUPS)) Bytes = sizeof(TOKEN_GROUPS);
+    Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
+    if (!Native) return STATUS_NO_MEMORY;
+    Status = NtQueryInformationToken(Token, Class, Native, Bytes, &Bytes);
+    if (!NT_SUCCESS(Status)) return Status;
+    /* Bounded by the native result, which is far below 4 GiB */
+    for (i = 0; i < Native->GroupCount; ++i)
+        SidBytes += RtlLengthSid(Native->Groups[i].Sid);
+    Needed = sizeof(ULONG) + Native->GroupCount * 2 * sizeof(ULONG) + SidBytes;
+    *(ULONG *)PTR32(ReturnLength) = Needed;
+    if (Length < Needed) return STATUS_BUFFER_TOO_SMALL;
+    if (!Buffer || !GuestSpan(Buffer, Needed)) return STATUS_ACCESS_VIOLATION;
+    /* Unaligned stores: the guest buffer may be misaligned */
+    Guest = PTR32(Buffer);
+    *(ULONG UNALIGNED *)Guest = Native->GroupCount;
+    Offset = sizeof(ULONG) + Native->GroupCount * 2 * sizeof(ULONG);
+    for (i = 0; i < Native->GroupCount; ++i)
+    {
+        Sid = RtlLengthSid(Native->Groups[i].Sid);
+        *(ULONG UNALIGNED *)(Guest + 4 + 8 * i) = Buffer + Offset;
+        *(ULONG UNALIGNED *)(Guest + 8 + 8 * i) = Native->Groups[i].Attributes;
+        RtlCopyMemory(Guest + Offset, Native->Groups[i].Sid, Sid);
+        Offset += Sid;
+    }
+    return STATUS_SUCCESS;
+}
+
+/* A 32-bit TOKEN_GROUPS argument in the native layout. The SIDs stay in guest memory,
+ * where the kernel captures them as caller data; Count was read and range-checked once. */
+static PTOKEN_GROUPS GroupsFrom32(ULONG Guest, ULONG Count, PUCHAR *Next)
+{
+    ULONG *Source = PTR32(Guest), i;
+    PTOKEN_GROUPS Groups;
+
+    if (!Guest) return NULL;
+    Groups = (PTOKEN_GROUPS)*Next;
+    Groups->GroupCount = Count;
+    for (i = 0; i < Count; ++i)
+    {
+        ULONG Sid = Source[1 + 2 * i];
+        /* The SID must lie in the guest range too. The kernel reads it again; a count raised
+         * meanwhile reaches at most 60 bytes further, into the reserved page past the limit. */
+        if (Sid && (!GuestSpan(Sid, FIELD_OFFSET(SID, SubAuthority)) ||
+                    !GuestSpan(Sid, FIELD_OFFSET(SID, SubAuthority) +
+                               (ULONG64)((SID *)PTR32(Sid))->SubAuthorityCount * sizeof(ULONG))))
+            return (PTOKEN_GROUPS)-1;
+        Groups->Groups[i].Sid = PTR32(Sid);
+        Groups->Groups[i].Attributes = Source[2 + 2 * i];
+    }
+    *Next += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)Count * sizeof(SID_AND_ATTRIBUTES);
+    return Groups;
+}
+
+/* The element count of a guest group or privilege array, after checking that the
+ * whole array lies in the guest's range */
+static NTSTATUS GuestArrayCount(ULONG Address, ULONG ElementSize, PULONG Count)
+{
+    *Count = 0;
+    if (!Address) return STATUS_SUCCESS;
+    if (!GuestSpan(Address, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    *Count = *(ULONG *)PTR32(Address);
+    if (!GuestSpan(Address, sizeof(ULONG) + (ULONG64)*Count * ElementSize)) return STATUS_ACCESS_VIOLATION;
+    return STATUS_SUCCESS;
+}
+
+/* NtFilterToken: SidsToDisable and RestrictedSids hold SID pointers; TOKEN_PRIVILEGES
+ * has the same layout for both sizes and goes through as is. */
+static NTSTATUS FilterToken32(ULONG *a, WOW64_CLEANUP *Cleanup)
+{
+    ULONG DisableCount, RestrictCount, PrivilegeCount;
+    SIZE_T Bytes = 1;
+    PUCHAR Next;
+    PTOKEN_GROUPS Disable, Restrict;
+    NTSTATUS Status;
+
+    if (!a[5] || !GuestSpan(a[5], sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    ProbeOutput(a[5], sizeof(ULONG));
+    Status = GuestArrayCount(a[2], 2 * sizeof(ULONG), &DisableCount);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = GuestArrayCount(a[3], sizeof(LUID_AND_ATTRIBUTES), &PrivilegeCount);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = GuestArrayCount(a[4], 2 * sizeof(ULONG), &RestrictCount);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (a[2]) Bytes += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)DisableCount * sizeof(SID_AND_ATTRIBUTES);
+    if (a[4]) Bytes += FIELD_OFFSET(TOKEN_GROUPS, Groups) + (SIZE_T)RestrictCount * sizeof(SID_AND_ATTRIBUTES);
+    Next = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
+    if (!Next) return STATUS_NO_MEMORY;
+    Disable = GroupsFrom32(a[2], DisableCount, &Next);
+    if (Disable == (PTOKEN_GROUPS)-1) return STATUS_ACCESS_VIOLATION;
+    Restrict = GroupsFrom32(a[4], RestrictCount, &Next);
+    if (Restrict == (PTOKEN_GROUPS)-1) return STATUS_ACCESS_VIOLATION;
+    Status = NtFilterToken(HANDLE32(a[0]), a[1], Disable, PTR32(a[3]), Restrict, &Cleanup->Handle);
+    if (NT_SUCCESS(Status)) *(ULONG *)PTR32(a[5]) = HandleToUlong(Cleanup->Handle);
+    Cleanup->Handle = NULL;
+    return Status;
+}
+
 static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
 {
     NTSTATUS Status;
@@ -1004,6 +1122,10 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(4);
         Status = NtOpenThreadTokenEx(H(0), a[1], a[2], a[3], &Cleanup->Handle);
         RETURN_HANDLE_AT(4);
+    case W64_NtFilterToken:
+        return FilterToken32(a, Cleanup);
+    case W64_NtImpersonateAnonymousToken:
+        return NtImpersonateAnonymousToken(H(0));
     case W64_NtQueryInformationToken:
         if (a[1] == TokenUser || a[1] == TokenOwner || a[1] == TokenPrimaryGroup)
         {
@@ -1027,6 +1149,8 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
         case TokenPrivileges: case TokenSessionId: case TokenElevationType:
         case TokenElevation: case TokenIsAppContainer:
             return NtQueryInformationToken(H(0), a[1], P(2), a[3], P(4));
+        case TokenGroups: case TokenRestrictedSids: case TokenLogonSid:
+            return TokenGroups32(H(0), a[1], a[2], a[3], a[4], Cleanup);
         default: return STATUS_NOT_SUPPORTED;
         }
     case W64_NtSetInformationToken:
@@ -1110,6 +1234,14 @@ static NTSTATUS Dispatch(ULONG Number, ULONG *a, WOW64_CLEANUP *Cleanup)
             if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
             Value = U(2);
             return NtSetInformationThread(H(0), a[1], &Value, sizeof(Value));
+        }
+        case ThreadImpersonationToken:
+        {
+            /* SetThreadToken and RevertToSelf: a token handle, or NULL */
+            HANDLE Token;
+            if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+            Token = HANDLE32(U(2));
+            return NtSetInformationThread(H(0), a[1], &Token, sizeof(Token));
         }
         case ThreadHideFromDebugger: case ThreadPriority: case ThreadBasePriority:
         case ThreadBreakOnTermination:

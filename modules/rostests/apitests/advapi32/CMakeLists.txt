@@ -34,6 +34,7 @@ list(APPEND SOURCE
     RtlEncryptMemory.c
     SaferIdentifyLevel.c
     TokenIntegrity.c
+    TokenLogonSid.c
     ServiceArgs.c
     ServiceEnv.c
     ServiceFailureActions.c

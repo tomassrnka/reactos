@@ -71,6 +71,12 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     IQS_NONE,
     /* TokenIntegrityLevel */
     IQS_SAME(TOKEN_MANDATORY_LABEL, ULONG, ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE),
+    /* TokenUIAccess */
+    IQS_NONE,
+    /* TokenMandatoryPolicy */
+    IQS_NONE,
+    /* TokenLogonSid */
+    IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
 
 /* PUBLIC FUNCTIONS *****************************************************************/
@@ -166,10 +172,10 @@ SeQueryInformationToken(
             PSID Sid;
 
             DPRINT("SeQueryInformationToken(TokenGroups)\n");
-            RequiredLength = sizeof(tg->GroupCount) +
+            RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                 RtlLengthSidAndAttributes(Token->UserAndGroupCount - 1, &Token->UserAndGroups[1]);
 
-            SidLen = RequiredLength - sizeof(tg->GroupCount) -
+            SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                 ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES));
 
             /* Allocate the output buffer */
@@ -180,7 +186,7 @@ SeQueryInformationToken(
                 break;
             }
 
-            Sid = (PSID)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+            Sid = (PSID)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                          ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES)));
 
             tg->GroupCount = Token->UserAndGroupCount - 1;
@@ -578,16 +584,16 @@ NtQueryInformationToken(
                 PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
 
                 DPRINT("NtQueryInformationToken(TokenGroups)\n");
-                RequiredLength = sizeof(tg->GroupCount) +
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                     RtlLengthSidAndAttributes(Token->UserAndGroupCount - 1, &Token->UserAndGroups[1]);
 
                 _SEH2_TRY
                 {
                     if (TokenInformationLength >= RequiredLength)
                     {
-                        ULONG SidLen = RequiredLength - sizeof(tg->GroupCount) -
+                        ULONG SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                             ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES));
-                        PSID Sid = (PSID_AND_ATTRIBUTES)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+                        PSID Sid = (PSID_AND_ATTRIBUTES)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                                                          ((Token->UserAndGroupCount - 1) * sizeof(SID_AND_ATTRIBUTES)));
 
                         tg->GroupCount = Token->UserAndGroupCount - 1;
@@ -1004,16 +1010,16 @@ NtQueryInformationToken(
                 PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
 
                 DPRINT("NtQueryInformationToken(TokenRestrictedSids)\n");
-                RequiredLength = sizeof(tg->GroupCount) +
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                 RtlLengthSidAndAttributes(Token->RestrictedSidCount, Token->RestrictedSids);
 
                 _SEH2_TRY
                 {
                     if (TokenInformationLength >= RequiredLength)
                     {
-                        ULONG SidLen = RequiredLength - sizeof(tg->GroupCount) -
+                        ULONG SidLen = RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) -
                             (Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES));
-                        PSID Sid = (PSID)((ULONG_PTR)tg + sizeof(tg->GroupCount) +
+                        PSID Sid = (PSID)((ULONG_PTR)tg + FIELD_OFFSET(TOKEN_GROUPS, Groups) +
                                           (Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES)));
 
                         tg->GroupCount = Token->RestrictedSidCount;
@@ -1112,6 +1118,61 @@ NtQueryInformationToken(
                     }
 
                     *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            case TokenLogonSid:
+            {
+                PTOKEN_GROUPS tg = (PTOKEN_GROUPS)TokenInformation;
+                PSID_AND_ATTRIBUTES LogonGroup = NULL;
+                ULONG i;
+
+                DPRINT("NtQueryInformationToken(TokenLogonSid)\n");
+
+                /* The first group marked as the logon SID; a token without one has nothing to report */
+                for (i = 1; i < Token->UserAndGroupCount; i++)
+                {
+                    if ((Token->UserAndGroups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+                    {
+                        LogonGroup = &Token->UserAndGroups[i];
+                        break;
+                    }
+                }
+
+                if (!LogonGroup)
+                {
+                    Status = STATUS_NOT_FOUND;
+                    break;
+                }
+
+                RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups[1]) + RtlLengthSid(LogonGroup->Sid);
+
+                _SEH2_TRY
+                {
+                    /* Windows stores the length first; a result sharing its storage wins */
+                    *ReturnLength = RequiredLength;
+                    if (TokenInformationLength >= RequiredLength)
+                    {
+                        tg->GroupCount = 1;
+                        Status = RtlCopySidAndAttributesArray(1,
+                                                              LogonGroup,
+                                                              RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups[1]),
+                                                              &tg->Groups[0],
+                                                              (PSID)&tg->Groups[1],
+                                                              &Unused.PSid,
+                                                              &Unused.Ulong);
+                    }
+                    else
+                    {
+                        Status = STATUS_BUFFER_TOO_SMALL;
+                    }
                 }
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
