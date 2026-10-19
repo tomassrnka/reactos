@@ -641,9 +641,11 @@ NetIDPage_OnInitDialog(
         LoadStringW(hDllInstance, 1021, szBuffer, ARRAYSIZE(szBuffer));
         SetDlgItemText(hwndDlg, IDC_MESSAGETEXT, szBuffer);
 
-        EnableWindow(GetDlgItem(hwndDlg, IDC_NETWORK_ID), FALSE);
         EnableWindow(GetDlgItem(hwndDlg, IDC_NETWORK_PROPERTY), FALSE);
     }
+
+    /* There is no Network Identification Wizard yet */
+    EnableWindow(GetDlgItem(hwndDlg, IDC_NETWORK_ID), FALSE);
 }
 
 static

@@ -772,6 +772,118 @@ static void test_SetupQueryDrivesInDiskSpaceListA(void)
        "Expected SetupDestroyDiskSpaceList to succeed\n");
 }
 
+/* Partial results and lengths: Wine's dlls/setupapi/tests/diskspace.c (LGPL) */
+static void test_query_drives_partial(void)
+{
+    char buffer[20], cwd[MAX_PATH];
+    WCHAR bufferW[20];
+    HDSKSPC handle;
+    DWORD len;
+    BOOL ret;
+
+    handle = SetupCreateDiskSpaceListW(NULL, 0, 0);
+    ok(!!handle, "got error %u\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret = SetupQueryDrivesInDiskSpaceListA(handle, NULL, 0, NULL);
+    ok(ret == TRUE, "got %d\n", ret);
+    ok(!GetLastError(), "got error %u\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    len = 0xdeadbeef;
+    ret = SetupQueryDrivesInDiskSpaceListA(handle, NULL, 0, &len);
+    ok(ret == TRUE, "got %d\n", ret);
+    ok(!GetLastError(), "got error %u\n", GetLastError());
+    ok(len == 1, "got len %u\n", len);
+
+    SetLastError(0xdeadbeef);
+    len = 0xdeadbeef;
+    ret = SetupQueryDrivesInDiskSpaceListA(handle, buffer, 0, &len);
+    ok(!ret, "got %d\n", ret);
+    ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got error %u\n", GetLastError());
+    ok(len == 1, "got len %u\n", len);
+
+    SetLastError(0xdeadbeef);
+    len = 0xdeadbeef;
+    memset(buffer, 0xcc, sizeof(buffer));
+    ret = SetupQueryDrivesInDiskSpaceListA(handle, buffer, 1, &len);
+    ok(ret == TRUE, "got %d\n", ret);
+    ok(!GetLastError(), "got error %u\n", GetLastError());
+    ok(len == 1, "got len %u\n", len);
+    ok(!buffer[0], "got %d\n", buffer[0]);
+
+    ret = SetupAddToDiskSpaceListA(handle, "P:/file1", 123, FILEOP_DELETE, 0, 0);
+    ok(ret, "got error %u\n", GetLastError());
+
+    ret = SetupAddToDiskSpaceListA(handle, "P:/file2", 123, FILEOP_DELETE, 0, 0);
+    ok(ret, "got error %u\n", GetLastError());
+
+    ret = SetupAddToDiskSpaceListA(handle, "H:file3", 123, FILEOP_DELETE, 0, 0);
+    ok(ret, "got error %u\n", GetLastError());
+
+    ret = SetupAddToDiskSpaceListA(handle, "R:/file4", 123, FILEOP_DELETE, 0, 0);
+    ok(ret, "got error %u\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    len = 0xdeadbeef;
+    memset(buffer, 0xcc, sizeof(buffer));
+    ret = SetupQueryDrivesInDiskSpaceListA(handle, buffer, 4, &len);
+    ok(!ret, "got %d\n", ret);
+    ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got error %u\n", GetLastError());
+    ok(len == 7, "got len %u\n", len);
+    ok(!memcmp(buffer, "h:\0\xcc", 4), "got a different buffer\n");
+
+    SetLastError(0xdeadbeef);
+    len = 0xdeadbeef;
+    memset(bufferW, 0xcc, sizeof(bufferW));
+    ret = SetupQueryDrivesInDiskSpaceListW(handle, bufferW, 4, &len);
+    ok(!ret, "got %d\n", ret);
+    ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got error %u\n", GetLastError());
+    ok(len == 7, "got len %u\n", len);
+    ok(!memcmp(bufferW, L"h:\0\xcccc", 4 * sizeof(WCHAR)), "got a different buffer\n");
+
+    SetLastError(0xdeadbeef);
+    len = 0xdeadbeef;
+    memset(buffer, 0xcc, sizeof(buffer));
+    ret = SetupQueryDrivesInDiskSpaceListA(handle, buffer, 8, &len);
+    ok(!ret, "got %d\n", ret);
+    ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got error %u\n", GetLastError());
+    ok(len == 10, "got len %u\n", len);
+    ok(!memcmp(buffer, "h:\0p:\0\xcc\xcc", 8), "got a different buffer\n");
+
+    SetLastError(0xdeadbeef);
+    len = 0xdeadbeef;
+    memset(buffer, 0xcc, sizeof(buffer));
+    ret = SetupQueryDrivesInDiskSpaceListA(handle, buffer, sizeof(buffer), &len);
+    ok(ret == TRUE, "got %d\n", ret);
+    ok(!GetLastError(), "got error %u\n", GetLastError());
+    ok(len == 10, "got len %u\n", len);
+    ok(!memcmp(buffer, "h:\0p:\0r:\0", 10), "got a different buffer\n");
+
+    ret = SetupDestroyDiskSpaceList(handle);
+    ok(ret, "got error %u\n", GetLastError());
+
+    handle = SetupCreateDiskSpaceListW(NULL, 0, 0);
+    ok(!!handle, "got error %u\n", GetLastError());
+
+    ret = SetupAddToDiskSpaceListA(handle, "file5", 123, FILEOP_DELETE, 0, 0);
+    ok(ret, "got error %u\n", GetLastError());
+
+    GetCurrentDirectoryA(sizeof(cwd), cwd);
+    cwd[0] = tolower(cwd[0]);
+    cwd[2] = cwd[3] = 0;
+
+    SetLastError(0xdeadbeef);
+    memset(buffer, 0xcc, sizeof(buffer));
+    ret = SetupQueryDrivesInDiskSpaceListA(handle, buffer, sizeof(buffer), NULL);
+    ok(ret == TRUE, "got %d\n", ret);
+    ok(!GetLastError(), "got error %u\n", GetLastError());
+    ok(!memcmp(buffer, cwd, 4), "expected %s, got %s\n", cwd, buffer);
+
+    ret = SetupDestroyDiskSpaceList(handle);
+    ok(ret, "got error %u\n", GetLastError());
+}
+
 struct device_usage
 {
     const char *dev;
@@ -1128,6 +1240,7 @@ START_TEST(diskspace)
     test_SetupQuerySpaceRequiredOnDriveW();
     test_SetupAddToDiskSpaceListA();
     test_SetupQueryDrivesInDiskSpaceListA();
+    test_query_drives_partial();
     test_SetupAddSectionToDiskSpaceListA();
     test_SetupAddInstallSectionToDiskSpaceListA();
 }

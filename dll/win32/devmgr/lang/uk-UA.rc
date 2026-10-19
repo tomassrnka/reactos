@@ -21,6 +21,8 @@ BEGIN
     IDS_DEVCODE2 " (Код %2!u!)"
     IDS_ENABLEDEVICE "Цей пристрій використовується (увімкнений)"
     IDS_DISABLEDEVICE "Цей пристрій не використовується (вимкнений)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Невідомий пристрій"
     IDS_NODRIVERLOADED "Для цього пристрою не встановлені драйвери."
     IDS_DEVONPARENT "на %1"

@@ -13,6 +13,8 @@ BEGIN
     IDS_DEVCODE2 " (コード %2!u!)"
     IDS_ENABLEDEVICE "このデバイスを使う (有効)"
     IDS_DISABLEDEVICE "このデバイスを使わない (無効)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "未知のデバイス"
     IDS_NODRIVERLOADED "このデバイスに対するドライバはインストールされていません。"
     IDS_DEVONPARENT "on %1"

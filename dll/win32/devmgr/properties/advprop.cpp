@@ -2106,6 +2106,66 @@ GetSelectedUsageAction(IN HWND hComboBox)
 }
 
 
+static VOID
+ShowDeviceUsageError(IN HWND hwndDlg,
+                     IN BOOL bEnable,
+                     IN DWORD dwError)
+{
+    WCHAR szFormat[256], szError[256], szTitle[256];
+    LPWSTR pszMessage = NULL;
+    DWORD_PTR Args[1] = { (DWORD_PTR)szError };
+
+    if (!LoadStringW(hDllInstance,
+                     bEnable ? IDS_ENABLEDEVICE_FAILED : IDS_DISABLEDEVICE_FAILED,
+                     szFormat,
+                     _countof(szFormat)))
+    {
+        return;
+    }
+
+    if (!FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                        NULL,
+                        dwError,
+                        0,
+                        szError,
+                        _countof(szError),
+                        NULL))
+    {
+        StringCchPrintfW(szError, _countof(szError), L"0x%08lx", dwError);
+    }
+
+    if (FormatMessageW(FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ARGUMENT_ARRAY | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+                       szFormat,
+                       0,
+                       0,
+                       (LPWSTR)&pszMessage,
+                       0,
+                       (va_list*)Args))
+    {
+        GetWindowTextW(GetParent(hwndDlg), szTitle, _countof(szTitle));
+        MessageBoxW(hwndDlg, pszMessage, szTitle, MB_OK | MB_ICONERROR);
+        LocalFree(pszMessage);
+    }
+}
+
+
+static VOID
+SelectDevUsageAction(IN HWND hComboBox,
+                     IN UINT Action)
+{
+    INT i, Count = (INT)SendMessage(hComboBox, CB_GETCOUNT, 0, 0);
+
+    for (i = 0; i < Count; i++)
+    {
+        if ((UINT)SendMessage(hComboBox, CB_GETITEMDATA, (WPARAM)i, 0) == Action)
+        {
+            SendMessage(hComboBox, CB_SETCURSEL, (WPARAM)i, 0);
+            break;
+        }
+    }
+}
+
+
 static BOOL
 ApplyGeneralSettings(IN HWND hwndDlg,
                      IN PDEVADVPROP_INFO dap)
@@ -2116,50 +2176,53 @@ ApplyGeneralSettings(IN HWND hwndDlg,
     {
         UINT SelectedUsageAction;
         BOOL NeedReboot = FALSE;
+        BOOL bEnable;
+        HWND hDevUsage = GetDlgItem(hwndDlg, IDC_DEVUSAGE);
 
-        SelectedUsageAction = GetSelectedUsageAction(GetDlgItem(hwndDlg,
-                                                                IDC_DEVUSAGE));
-        switch (SelectedUsageAction)
+        SelectedUsageAction = GetSelectedUsageAction(hDevUsage);
+        bEnable = (SelectedUsageAction == IDS_ENABLEDEVICE);
+
+        if ((SelectedUsageAction == IDS_ENABLEDEVICE || SelectedUsageAction == IDS_DISABLEDEVICE) &&
+            bEnable != dap->DeviceStarted)
         {
-            case IDS_ENABLEDEVICE:
-                if (!dap->DeviceStarted)
-                {
-                    Ret = EnableDevice(dap->DeviceInfoSet,
-                                       &dap->DeviceInfoData,
-                                       TRUE,
-                                       0,
-                                       &NeedReboot);
-                }
-                break;
-
-            case IDS_DISABLEDEVICE:
-                if (dap->DeviceStarted)
-                {
-                    Ret = EnableDevice(dap->DeviceInfoSet,
-                                       &dap->DeviceInfoData,
-                                       FALSE,
-                                       0,
-                                       &NeedReboot);
-                }
-                break;
-
-            default:
-                break;
-        }
-
-        if (Ret)
-        {
-            if (NeedReboot)
+            Ret = EnableDevice(dap->DeviceInfoSet,
+                               &dap->DeviceInfoData,
+                               bEnable,
+                               0,
+                               &NeedReboot);
+            if (Ret)
             {
-                /* make PropertySheet() return PSM_REBOOTSYSTEM */
-                PropSheet_RebootSystem(hwndDlg);
+                if (NeedReboot)
+                {
+                    /* make PropertySheet() return PSM_REBOOTSYSTEM */
+                    PropSheet_RebootSystem(hwndDlg);
+                }
+            }
+            else
+            {
+                DWORD dwError = GetLastError();
+                BOOL bStarted;
+
+                /* Judge by the state the device is in now: a partial failure may still have done the job */
+                if (IsDeviceStarted(dap->DeviceInfoData.DevInst, dap->hMachine, &bStarted))
+                    dap->DeviceStarted = bStarted;
+
+                if (dap->DeviceStarted == bEnable)
+                {
+                    Ret = TRUE;
+                }
+                else
+                {
+                    ERR("Failed to %s the device, error %lu\n", bEnable ? "enable" : "disable", dwError);
+                    ShowDeviceUsageError(hwndDlg, bEnable, dwError);
+                    SelectDevUsageAction(hDevUsage,
+                                         dap->DeviceStarted ? IDS_ENABLEDEVICE : IDS_DISABLEDEVICE);
+                }
             }
         }
         else
         {
-            /* FIXME - display an error message */
-            FIXME("Failed to enable/disable device! LastError: %d\n",
-                  GetLastError());
+            Ret = TRUE;
         }
     }
     else
@@ -2183,7 +2246,7 @@ UpdateDevInfo(IN HWND hwndDlg,
     ULONG Status, ProblemNumber;
     SP_DEVINSTALL_PARAMS_W InstallParams;
     UINT TroubleShootStrId = IDS_TROUBLESHOOTDEV;
-    BOOL bFlag, bDevActionAvailable = TRUE;
+    BOOL bFlag, bDevActionAvailable = TRUE, bProbBtnFocus;
     BOOL bDrvInstalled = FALSE;
     DWORD iPage;
     HDEVINFO DeviceInfoSet = NULL;
@@ -2416,110 +2479,22 @@ GetParentNode:
                                   dap->hMachine);
     if (cr == CR_SUCCESS && (Status & DN_HAS_PROBLEM))
     {
-        switch (ProblemNumber)
-        {
-            case CM_PROB_DEVLOADER_FAILED:
-            {
-                /* FIXME - only if it's not a root bus devloader,
-                           disable the button otherwise */
-                TroubleShootStrId = IDS_UPDATEDRV;
-                break;
-            }
+        DEVPROBLEM_ACTION Action;
 
-            case CM_PROB_OUT_OF_MEMORY:
-            case CM_PROB_ENTRY_IS_WRONG_TYPE:
-            case CM_PROB_LACKED_ARBITRATOR:
-            case CM_PROB_FAILED_START:
-            case CM_PROB_LIAR:
-            case CM_PROB_UNKNOWN_RESOURCE:
-            {
-                TroubleShootStrId = IDS_UPDATEDRV;
-                break;
-            }
-
-            case CM_PROB_BOOT_CONFIG_CONFLICT:
-            case CM_PROB_NORMAL_CONFLICT:
-            case CM_PROB_REENUMERATION:
-            {
-                /* FIXME - Troubleshoot conflict */
-                break;
-            }
-
-            case CM_PROB_FAILED_FILTER:
-            case CM_PROB_REINSTALL:
-            case CM_PROB_FAILED_INSTALL:
-            {
-                TroubleShootStrId = IDS_REINSTALLDRV;
-                break;
-            }
-
-            case CM_PROB_DEVLOADER_NOT_FOUND:
-            {
-                /* FIXME - 4 cases:
-                   1) if it's a missing system devloader:
-                      - disable the button (Reinstall Driver)
-                   2) if it's not a system devloader but still missing:
-                      - Reinstall Driver
-                   3) if it's not a system devloader but the file can be found:
-                      - Update Driver
-                   4) if it's a missing or empty software key
-                      - Update Driver
-                 */
-                break;
-            }
-
-            case CM_PROB_INVALID_DATA:
-            case CM_PROB_PARTIAL_LOG_CONF:
-            case CM_PROB_NO_VALID_LOG_CONF:
-            case CM_PROB_HARDWARE_DISABLED:
-            case CM_PROB_CANT_SHARE_IRQ:
-            case CM_PROB_TRANSLATION_FAILED:
-            case CM_PROB_SYSTEM_SHUTDOWN:
-            case CM_PROB_PHANTOM:
-                bDevActionAvailable = FALSE;
-                break;
-
-            case CM_PROB_NOT_VERIFIED:
-            case CM_PROB_DEVICE_NOT_THERE:
-                /* FIXME - search hardware */
-                break;
-
-            case CM_PROB_NEED_RESTART:
-            case CM_PROB_WILL_BE_REMOVED:
-            case CM_PROB_MOVED:
-            case CM_PROB_TOO_EARLY:
-            case CM_PROB_DISABLED_SERVICE:
-                TroubleShootStrId = IDS_REBOOT;
-                break;
-
-            case CM_PROB_REGISTRY:
-                /* FIXME - check registry? */
-                break;
-
-            case CM_PROB_DISABLED:
-                /* if device was disabled by the user: */
-                TroubleShootStrId = IDS_ENABLEDEV;
-                /* FIXME - otherwise disable button because the device was
-                           disabled by the system*/
-                break;
-
-            case CM_PROB_DEVLOADER_NOT_READY:
-                /* FIXME - if it's a graphics adapter:
-                           - if it's a a secondary adapter and the main adapter
-                             couldn't be found
-                             - disable  button
-                           - else
-                             - Properties
-                         - else
-                           - Update driver
-                 */
-                break;
-
-            case CM_PROB_FAILED_ADD:
-                TroubleShootStrId = IDS_PROPERTIES;
-                break;
-        }
+        TroubleShootStrId = GetDeviceProblemAction(ProblemNumber, &Action);
+        /* the actions work on the local machine only */
+        bDevActionAvailable = (Action != DevProblemNoAction && dap->hMachine == NULL);
+        ShowWindow(hDevProbBtn, SW_SHOW);
     }
+    else
+    {
+        /* As on Windows, a device without a problem has no problem button */
+        bDevActionAvailable = FALSE;
+    }
+
+    bProbBtnFocus = (GetFocus() == hDevProbBtn);
+    if (!(cr == CR_SUCCESS && (Status & DN_HAS_PROBLEM)))
+        ShowWindow(hDevProbBtn, SW_HIDE);
 
     if (LoadString(hDllInstance,
                    TroubleShootStrId,
@@ -2559,6 +2534,15 @@ GetParentNode:
                  dap->CanDisable && dap->IsAdmin);
     EnableWindow(hDevUsage,
                  dap->CanDisable && dap->IsAdmin);
+
+    /* the problem button had the focus and is now hidden or disabled: give it to a control that stays */
+    if (bProbBtnFocus && !(IsWindowVisible(hDevProbBtn) && IsWindowEnabled(hDevProbBtn)))
+    {
+        SendMessage(hPropSheetDlg,
+                    WM_NEXTDLGCTL,
+                    (WPARAM)GetDlgItem(hPropSheetDlg, IDOK),
+                    TRUE);
+    }
 
     /* clear the combobox */
     SendMessage(hDevUsage,
@@ -2826,13 +2810,18 @@ AdvPropGeneralDlgProc(IN HWND hwndDlg,
 
                     case IDC_DEVPROBLEM:
                     {
-                        if (dap->IsAdmin)
-                        {
-                            /* display the device problem wizard */
+                        /* the driver wizard reports success also when it was cancelled, so a pending
+                           Device usage change is kept rather than refreshed away */
+                        if (dap->IsAdmin &&
                             ShowDeviceProblemWizard(hwndDlg,
                                                     dap->DeviceInfoSet,
                                                     &dap->DeviceInfoData,
-                                                    dap->hMachine);
+                                                    dap->hMachine) &&
+                            !dap->DeviceUsageChanged)
+                        {
+                            UpdateDevInfo(hwndDlg,
+                                          dap,
+                                          TRUE);
                         }
                         break;
                     }
@@ -2846,9 +2835,11 @@ AdvPropGeneralDlgProc(IN HWND hwndDlg,
                 switch (hdr->code)
                 {
                     case PSN_APPLY:
-                        ApplyGeneralSettings(hwndDlg,
-                                             dap);
-                        break;
+                        /* On a failure keep the sheet open: it shows the device's real state again */
+                        SetWindowLongPtr(hwndDlg,
+                                         DWLP_MSGRESULT,
+                                         ApplyGeneralSettings(hwndDlg, dap) ? PSNRET_NOERROR : PSNRET_INVALID_NOCHANGEPAGE);
+                        return TRUE;
                 }
                 break;
             }

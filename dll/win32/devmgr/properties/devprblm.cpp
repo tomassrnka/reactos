@@ -30,6 +30,103 @@
 #include "resource.h"
 
 
+/* The label of the General page's problem button and what the button does; NoAction disables it */
+UINT
+GetDeviceProblemAction(IN ULONG ProblemNumber,
+                       OUT DEVPROBLEM_ACTION *Action)
+{
+    *Action = DevProblemNoAction;
+
+    switch (ProblemNumber)
+    {
+        case CM_PROB_DEVLOADER_FAILED:
+            /* FIXME - only if it's not a root bus devloader */
+        case CM_PROB_OUT_OF_MEMORY:
+        case CM_PROB_ENTRY_IS_WRONG_TYPE:
+        case CM_PROB_LACKED_ARBITRATOR:
+        case CM_PROB_FAILED_START:
+        case CM_PROB_LIAR:
+        case CM_PROB_UNKNOWN_RESOURCE:
+        case CM_PROB_FAILED_INSTALL:
+            *Action = DevProblemInstallDriver;
+            return IDS_UPDATEDRV;
+
+        case CM_PROB_FAILED_FILTER:
+        case CM_PROB_REINSTALL:
+            *Action = DevProblemInstallDriver;
+            return IDS_REINSTALLDRV;
+
+        case CM_PROB_BOOT_CONFIG_CONFLICT:
+        case CM_PROB_NORMAL_CONFLICT:
+        case CM_PROB_REENUMERATION:
+            /* FIXME - display the conflict wizard */
+            return IDS_TROUBLESHOOTDEV;
+
+        case CM_PROB_DEVLOADER_NOT_FOUND:
+            /* FIXME - 4 cases:
+               1) if it's a missing system devloader:
+                  - fail
+               2) if it's not a system devloader but still missing:
+                  - display the driver reinstallation wizard
+               3) if it's not a system devloader but the file can be found:
+                  - display the update driver wizard
+               4) if it's a missing or empty software key
+                  - display the update driver wizard
+             */
+            return IDS_TROUBLESHOOTDEV;
+
+        case CM_PROB_INVALID_DATA:
+        case CM_PROB_PARTIAL_LOG_CONF:
+        case CM_PROB_NO_VALID_LOG_CONF:
+        case CM_PROB_HARDWARE_DISABLED:
+        case CM_PROB_CANT_SHARE_IRQ:
+        case CM_PROB_TRANSLATION_FAILED:
+        case CM_PROB_SYSTEM_SHUTDOWN:
+        case CM_PROB_PHANTOM:
+            return IDS_TROUBLESHOOTDEV;
+
+        case CM_PROB_NOT_VERIFIED:
+        case CM_PROB_DEVICE_NOT_THERE:
+            /* FIXME - display search hardware wizard */
+            return IDS_TROUBLESHOOTDEV;
+
+        case CM_PROB_NEED_RESTART:
+        case CM_PROB_WILL_BE_REMOVED:
+        case CM_PROB_MOVED:
+        case CM_PROB_TOO_EARLY:
+        case CM_PROB_DISABLED_SERVICE:
+            *Action = DevProblemRestart;
+            return IDS_REBOOT;
+
+        case CM_PROB_DISABLED:
+            /* FIXME - only if the device was disabled by the user */
+            *Action = DevProblemEnableDevice;
+            return IDS_ENABLEDEV;
+
+        case CM_PROB_DEVLOADER_NOT_READY:
+            /* FIXME - if it's a graphics adapter:
+                       - if it's a a secondary adapter and the main adapter
+                         couldn't be found
+                         - do nothing or default action
+                       - else
+                         - display the Properties
+                     - else
+                       - Update driver
+             */
+            return IDS_TROUBLESHOOTDEV;
+
+        case CM_PROB_FAILED_ADD:
+            /* FIXME - display the properties of the sub-device */
+            return IDS_PROPERTIES;
+
+        case CM_PROB_REGISTRY:
+        default:
+            /* FIXME - troubleshoot the device */
+            return IDS_TROUBLESHOOTDEV;
+    }
+}
+
+
 BOOL
 ShowDeviceProblemWizard(IN HWND hWndParent  OPTIONAL,
                         IN HDEVINFO hDevInfo,
@@ -39,7 +136,9 @@ ShowDeviceProblemWizard(IN HWND hWndParent  OPTIONAL,
     WCHAR szDeviceInstanceId[256];
     CONFIGRET cr;
     ULONG Status, ProblemNumber;
+    DEVPROBLEM_ACTION Action;
     DWORD dwReboot;
+    BOOL bNeedReboot = FALSE;
     BOOL Ret = FALSE;
 
     /* Get the device instance id */
@@ -55,135 +154,33 @@ ShowDeviceProblemWizard(IN HWND hWndParent  OPTIONAL,
                                   DevInfoData->DevInst,
                                   0,
                                   hMachine);
-    if (cr == CR_SUCCESS && (Status & DN_HAS_PROBLEM))
+    if (cr != CR_SUCCESS || !(Status & DN_HAS_PROBLEM))
+        return FALSE;
+
+    GetDeviceProblemAction(ProblemNumber, &Action);
+    if (hMachine != NULL)
+        Action = DevProblemNoAction;
+
+    switch (Action)
     {
-        switch (ProblemNumber)
-        {
-            case CM_PROB_DEVLOADER_FAILED:
-            {
-                /* FIXME - only if it's not a root bus devloader */
-                /* FIXME - display the update driver wizard */
-                break;
-            }
+        case DevProblemInstallDriver:
+            Ret = InstallDevInst(hWndParent, szDeviceInstanceId, TRUE, &dwReboot);
+            break;
 
-            case CM_PROB_OUT_OF_MEMORY:
-            case CM_PROB_ENTRY_IS_WRONG_TYPE:
-            case CM_PROB_LACKED_ARBITRATOR:
-            case CM_PROB_FAILED_START:
-            case CM_PROB_LIAR:
-            case CM_PROB_UNKNOWN_RESOURCE:
-            {
-                /* FIXME - display the update driver wizard */
-                InstallDevInst(hWndParent, szDeviceInstanceId, TRUE, &dwReboot);
-                break;
-            }
+        case DevProblemEnableDevice:
+            Ret = EnableDevice(hDevInfo, DevInfoData, TRUE, 0, &bNeedReboot);
+            if (Ret && bNeedReboot)
+                RestartDialog(hWndParent, NULL, EWX_REBOOT);
+            break;
 
-            case CM_PROB_BOOT_CONFIG_CONFLICT:
-            case CM_PROB_NORMAL_CONFLICT:
-            case CM_PROB_REENUMERATION:
-            {
-                /* FIXME - display the conflict wizard */
-                break;
-            }
+        case DevProblemRestart:
+            RestartDialog(hWndParent, NULL, EWX_REBOOT);
+            break;
 
-            case CM_PROB_FAILED_FILTER:
-            case CM_PROB_REINSTALL:
-            case CM_PROB_FAILED_INSTALL:
-            {
-                /* FIXME - display the driver (re)installation wizard */
-                InstallDevInst(hWndParent, szDeviceInstanceId, TRUE, &dwReboot);
-                break;
-            }
-
-            case CM_PROB_DEVLOADER_NOT_FOUND:
-            {
-                /* FIXME - 4 cases:
-                   1) if it's a missing system devloader:
-                      - fail
-                   2) if it's not a system devloader but still missing:
-                      - display the driver reinstallation wizard
-                   3) if it's not a system devloader but the file can be found:
-                      - display the update driver wizard
-                   4) if it's a missing or empty software key
-                      - display the update driver wizard
-                 */
-                break;
-            }
-
-            case CM_PROB_INVALID_DATA:
-            case CM_PROB_PARTIAL_LOG_CONF:
-            case CM_PROB_NO_VALID_LOG_CONF:
-            case CM_PROB_HARDWARE_DISABLED:
-            case CM_PROB_CANT_SHARE_IRQ:
-            case CM_PROB_TRANSLATION_FAILED:
-            case CM_PROB_SYSTEM_SHUTDOWN:
-            case CM_PROB_PHANTOM:
-                /* FIXME - do nothing */
-                break;
-
-            case CM_PROB_NOT_VERIFIED:
-            case CM_PROB_DEVICE_NOT_THERE:
-                /* FIXME - display search hardware wizard */
-                break;
-
-            case CM_PROB_NEED_RESTART:
-            case CM_PROB_WILL_BE_REMOVED:
-            case CM_PROB_MOVED:
-            case CM_PROB_TOO_EARLY:
-            case CM_PROB_DISABLED_SERVICE:
-                /* FIXME - reboot computer */
-                break;
-
-            case CM_PROB_REGISTRY:
-                /* FIXME - check registry */
-                break;
-
-            case CM_PROB_DISABLED:
-            {
-                /* FIXME - if device was disabled by user display the "Enable Device" wizard,
-                           otherwise Troubleshoot because the device was disabled by the system */
-                break;
-            }
-
-            case CM_PROB_DEVLOADER_NOT_READY:
-            {
-                /* FIXME - if it's a graphics adapter:
-                           - if it's a a secondary adapter and the main adapter
-                             couldn't be found
-                             - do nothing or default action
-                           - else
-                             - display the Properties
-                         - else
-                           - Update driver
-                 */
-                break;
-            }
-
-            case CM_PROB_FAILED_ADD:
-            {
-                /* FIXME - display the properties of the sub-device */
-                break;
-            }
-
-            case CM_PROB_NO_SOFTCONFIG:
-            case CM_PROB_IRQ_TRANSLATION_FAILED:
-            case CM_PROB_FAILED_DRIVER_ENTRY:
-            case CM_PROB_DRIVER_FAILED_PRIOR_UNLOAD:
-            case CM_PROB_DRIVER_FAILED_LOAD:
-            case CM_PROB_DRIVER_SERVICE_KEY_INVALID:
-            case CM_PROB_LEGACY_SERVICE_NO_DEVICES:
-            case CM_PROB_DUPLICATE_DEVICE:
-            case CM_PROB_FAILED_POST_START:
-            case CM_PROB_HALTED:
-            case CM_PROB_HELD_FOR_EJECT:
-            case CM_PROB_DRIVER_BLOCKED:
-            case CM_PROB_REGISTRY_TOO_LARGE:
-            default:
-            {
-                /* FIXME - troubleshoot the device */
-                break;
-            }
-        }
+        case DevProblemNoAction:
+        default:
+            SetLastError(ERROR_NOT_SUPPORTED);
+            break;
     }
 
     return Ret;
@@ -285,7 +282,7 @@ DeviceProblemWizardW(IN HWND hWndParent  OPTIONAL,
     SP_DEVINFO_DATA DevInfoData;
     HINSTANCE hComCtl32;
     CONFIGRET cr;
-    HMACHINE hMachine;
+    HMACHINE hMachine = NULL;
     BOOL Ret = FALSE;
 
     if (lpDeviceID == NULL)
@@ -304,8 +301,10 @@ DeviceProblemWizardW(IN HWND hWndParent  OPTIONAL,
                                                  NULL);
         if (hDevInfo != INVALID_HANDLE_VALUE)
         {
-            cr = CM_Connect_Machine(lpMachineName,
-                                    &hMachine);
+            /* as in the property sheet, the local machine is a NULL handle */
+            cr = CR_SUCCESS;
+            if (lpMachineName != NULL && lpMachineName[0] != UNICODE_NULL)
+                cr = CM_Connect_Machine(lpMachineName, &hMachine);
             if (cr == CR_SUCCESS)
             {
                 DevInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
@@ -321,7 +320,8 @@ DeviceProblemWizardW(IN HWND hWndParent  OPTIONAL,
                                                   hMachine);
                 }
 
-                CM_Disconnect_Machine(hMachine);
+                if (hMachine != NULL)
+                    CM_Disconnect_Machine(hMachine);
             }
 
             SetupDiDestroyDeviceInfoList(hDevInfo);

@@ -22,6 +22,8 @@ BEGIN
     IDS_DEVCODE2 " (Cod %2!u!)"
     IDS_ENABLEDEVICE "Folosește acest dispozitiv (activare)"
     IDS_DISABLEDEVICE "Nu folosi acest dispozitiv (dezactivare)"
+    IDS_DISABLEDEVICE_FAILED "The device could not be disabled.\n\n%1"
+    IDS_ENABLEDEVICE_FAILED "The device could not be enabled.\n\n%1"
     IDS_UNKNOWNDEVICE "Dispozitiv necunoscut"
     IDS_NODRIVERLOADED "Pentru acest dispozitiv nu sunt instalate drivere."
     IDS_DEVONPARENT "pe %1"
