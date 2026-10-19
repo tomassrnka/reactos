@@ -10,18 +10,40 @@
 #define SID_COUNT 4
 #define ROUNDS 1000
 
-/* Allocate and free pool of the sizes involved, with names of varying length */
-static void Churn(ULONG Round)
+/* Reuse the pool the kernel used to capture the restricting SIDs: filter again with other
+ * SIDs of the same lengths and count, so a freed capture block is refilled with different SIDs.
+ * Named events vary the other allocations. */
+static void Churn(HANDLE hSource, ULONG Round)
 {
+    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    BYTE Sids[SID_COUNT][SECURITY_MAX_SID_SIZE];
+    SID_AND_ATTRIBUTES Other[SID_COUNT];
     WCHAR Name[96];
-    HANDLE Events[8];
+    HANDLE Events[8], hOther;
     ULONG i;
+
+    /* Same sub-authority counts as the expected SIDs (1, 2, 1, 5), different values */
+    static const BYTE Counts[SID_COUNT] = {1, 2, 1, 5};
+    for (i = 0; i < SID_COUNT; i++)
+    {
+        ULONG j;
+        InitializeSid(Sids[i], &NtAuthority, Counts[i]);
+        for (j = 0; j < Counts[i]; j++)
+            *GetSidSubAuthority(Sids[i], j) = 0x5a000000 | (Round << 8) | (i << 4) | j;
+        Other[i].Sid = Sids[i];
+        Other[i].Attributes = 0;
+    }
+    if (CreateRestrictedToken(hSource, 0, 0, NULL, 0, NULL, SID_COUNT, Other, &hOther))
+        CloseHandle(hOther);
+    else
+        ok(0, "Round %lu: churn CreateRestrictedToken failed: %lu\n", Round, GetLastError());
 
     for (i = 0; i < 8; i++)
     {
         StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"RestrictedSidsCopy-%lu-%lu-%.*s",
                          Round, i, (int)((Round + i) % 48), L"................................................");
         Events[i] = CreateEventW(NULL, FALSE, FALSE, Name);
+        ok(Events[i] != NULL, "Round %lu: CreateEventW failed: %lu\n", Round, GetLastError());
     }
     for (i = 0; i < 8; i++)
     {
@@ -108,7 +130,7 @@ START_TEST(RestrictedSidsCopy)
 
     for (Round = 0; Round < ROUNDS && Failures < 5; Round++)
     {
-        Churn(Round);
+        Churn(hProcessToken, Round);
         if (!CheckRestrictedSids(hRestricted, Expected, Round))
             Failures++;
         if (!DuplicateTokenEx(hRestricted, TOKEN_QUERY | TOKEN_DUPLICATE, NULL, SecurityImpersonation,
