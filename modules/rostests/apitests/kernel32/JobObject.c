@@ -462,8 +462,50 @@ Cleanup:
         CloseHandle(hPort);
 }
 
+/* The limits a job was given come back from a query, in the caller's layout */
+static
+VOID
+test_LimitQuery(VOID)
+{
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION Set = { { { 0 } } }, Got;
+    JOBOBJECT_BASIC_LIMIT_INFORMATION Basic;
+    HANDLE hJob = CreateJobObjectW(NULL, NULL);
+    DWORD Length = 0;
+
+    ok(hJob != NULL, "CreateJobObject failed: %lu\n", GetLastError());
+    if (!hJob)
+        return;
+    Set.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+                                           JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    Set.BasicLimitInformation.ActiveProcessLimit = 1;
+    Set.ProcessMemoryLimit = 0x10000000;
+    ok(SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &Set, sizeof(Set)),
+       "SetInformationJobObject failed: %lu\n", GetLastError());
+    memset(&Got, 0xcc, sizeof(Got));
+    ok(QueryInformationJobObject(hJob, JobObjectExtendedLimitInformation, &Got, sizeof(Got), &Length),
+       "QueryInformationJobObject failed: %lu\n", GetLastError());
+    ok(Length == sizeof(Got), "Length %lu\n", Length);
+    ok(Got.BasicLimitInformation.LimitFlags == Set.BasicLimitInformation.LimitFlags, "Flags 0x%lx\n",
+       Got.BasicLimitInformation.LimitFlags);
+    ok(Got.BasicLimitInformation.ActiveProcessLimit == 1, "Active process limit %lu\n",
+       Got.BasicLimitInformation.ActiveProcessLimit);
+    ok(Got.ProcessMemoryLimit == 0x10000000, "Process memory limit 0x%Ix\n", Got.ProcessMemoryLimit);
+    memset(&Basic, 0xcc, sizeof(Basic));
+    Length = 0;
+    ok(QueryInformationJobObject(hJob, JobObjectBasicLimitInformation, &Basic, sizeof(Basic), &Length),
+       "QueryInformationJobObject(basic) failed: %lu\n", GetLastError());
+    ok(Length == sizeof(Basic), "Length %lu\n", Length);
+    ok(Basic.LimitFlags == Set.BasicLimitInformation.LimitFlags, "Basic flags 0x%lx\n", Basic.LimitFlags);
+    SetLastError(0xdeadbeef);
+    ok(!QueryInformationJobObject(hJob, JobObjectExtendedLimitInformation, &Got, sizeof(Got) - 1, &Length),
+       "A short query succeeded\n");
+    ok(GetLastError() == ERROR_BAD_LENGTH, "Error %lu\n", GetLastError());
+    CloseHandle(hJob);
+}
+
 START_TEST(JobObject)
 {
+    test_LimitQuery();
     test_CompletionPort();
     test_RoundTrip();
     test_InvalidParameters();
