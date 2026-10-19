@@ -502,7 +502,36 @@ WndProc(HWND hWnd,
 
             UpdateWindow(slider);
             enable_but(BUTREC_ID);
+
+            /* Say once that there is nothing to record from. Record stays
+               available: pressing it checks for a device again */
+            if (waveInGetNumDevs() == 0)
+                PostMessage(hWnd, WM_APP_NODEVICE, 0, 0);
             EnableWindow(slider, FALSE);
+            break;
+
+        case WM_APP_NODEVICE:
+            LoadString(hInst, IDS_ERR_NODEVICE, str_tmp, MAX_LOADSTRING);
+            MessageBox(hWnd, str_tmp, szTitle, MB_OK);
+            break;
+
+        case WM_APP_PLAYDONE:
+            /* Playback ended; a notice that arrives after a new Play or
+               after recording started is stale */
+            if (s_recording ||
+                AUD_OUT->current_status() == snd::WAVEOUT_PLAYING ||
+                AUD_OUT->current_status() == snd::WAVEOUT_FLUSHING ||
+                AUD_OUT->current_status() == snd::WAVEOUT_PAUSED)
+                break;
+
+            stopped_flag = TRUE;
+
+            enable_but(BUTSTART_ID);
+            enable_but(BUTEND_ID);
+            enable_but(BUTREC_ID);
+            enable_but(BUTPLAY_ID);
+
+            InvalidateRect(wave_win, 0, TRUE);
             break;
 
         /* Implements slider logic */
@@ -709,6 +738,16 @@ WndProc(HWND hWnd,
                     break;
 
                 case BUTREC_ID:
+                    /* Check again on every press, a device may have arrived.
+                       Without one the input object is not opened at all, so
+                       a later press can still open it */
+                    if (waveInGetNumDevs() == 0)
+                    {
+                        LoadString(hInst, IDS_ERR_NODEVICE, str_tmp, MAX_LOADSTRING);
+                        MessageBox(hWnd, str_tmp, szTitle, MB_OK);
+                        break;
+                    }
+
                     if (win_first == false)
                     {
                         AUD_IN->open();
@@ -719,7 +758,14 @@ WndProc(HWND hWnd,
 
                     samples_max = AUD_BUF->total_samples();
 
-                    AUD_IN->start_recording();
+                    if (!AUD_IN->start_recording())
+                    {
+                        /* One message for the whole failure; Record stays available */
+                        s_recording = FALSE;
+                        LoadString(hInst, IDS_ERR_RECORD, str_tmp, MAX_LOADSTRING);
+                        MessageBox(hWnd, str_tmp, szTitle, MB_OK | MB_ICONERROR);
+                        break;
+                    }
 
                     enable_but(BUTSTOP_ID);
 
@@ -889,14 +935,8 @@ WndProc(HWND hWnd,
 
 void l_play_finished(void)
 {
-    stopped_flag = true;
-
-    enable_but(BUTSTART_ID);
-    enable_but(BUTEND_ID);
-    enable_but(BUTREC_ID);
-    enable_but(BUTPLAY_ID);
-
-    InvalidateRect(wave_win, 0, TRUE);
+    /* Called on the playback thread: the buttons are updated on the UI thread */
+    PostMessage(main_win, WM_APP_PLAYDONE, 0, 0);
 }
 
 void l_audio_arrival(unsigned int samples_arrival)
