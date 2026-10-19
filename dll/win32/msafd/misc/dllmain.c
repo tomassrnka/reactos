@@ -212,8 +212,8 @@ WSPSocket(int AddressFamily,
         Socket->SharedData->ProviderFlags = lpProtocolInfo->dwProviderFlags;
         Socket->SharedData->UseSAN = FALSE;
         Socket->SharedData->NonBlocking = FALSE; /* Sockets start blocking */
-        Socket->SharedData->RecvTimeout = INFINITE;
-        Socket->SharedData->SendTimeout = INFINITE;
+        Socket->SharedData->RecvTimeout = 0;
+        Socket->SharedData->SendTimeout = 0;
         Socket->SharedData->OobInline = FALSE;
 
         /* Ask alex about this */
@@ -542,6 +542,7 @@ TranslateNtStatusError(NTSTATUS Status)
           return WSAEWOULDBLOCK;
 
        case STATUS_TIMEOUT:
+       case STATUS_IO_TIMEOUT:
           return WSAETIMEDOUT;
 
        case STATUS_SUCCESS:
@@ -629,6 +630,61 @@ MsafdWaitForAlert(
         if (Result != WAIT_IO_COMPLETION)
             break;
     }
+}
+
+/*
+ * A blocking request waits for Timeout milliseconds (0 and INFINITE: without limit). On expiry the
+ * request is cancelled and waited for, so the status block is not used after this returns.
+ */
+VOID
+MsafdWaitForRequest(
+    _In_ HANDLE hSocket,
+    _In_ HANDLE hEvent,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ ULONG Timeout)
+{
+#if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
+    IO_STATUS_BLOCK CancelStatusBlock;
+    DWORD Start, Elapsed, Result;
+
+    if (Timeout == 0 || Timeout == INFINITE)
+    {
+        MsafdWaitForAlert(hEvent);
+        return;
+    }
+
+    Start = GetTickCount();
+    for (;;)
+    {
+        Elapsed = GetTickCount() - Start;
+        if (Elapsed >= Timeout)
+        {
+            Result = WAIT_TIMEOUT;
+            break;
+        }
+
+        Result = WaitForSingleObjectEx(hEvent, Timeout - Elapsed, TRUE);
+        if (Result != WAIT_IO_COMPLETION)
+            break;
+    }
+
+    if (Result == WAIT_OBJECT_0)
+        return;
+
+    /* Only this request is cancelled: it is the status block that names it */
+    NtCancelIoFileEx(hSocket, IoStatusBlock, &CancelStatusBlock);
+
+    /* The request that completed before the cancellation keeps its own status */
+    MsafdWaitForAlert(hEvent);
+    if (IoStatusBlock->Status == STATUS_CANCELLED)
+        IoStatusBlock->Status = STATUS_IO_TIMEOUT;
+#else
+    /* Below 0x600 ntdll has no per-request cancel, and NtCancelIoFile would cancel the thread's other requests too */
+    UNREFERENCED_PARAMETER(hSocket);
+    UNREFERENCED_PARAMETER(IoStatusBlock);
+    UNREFERENCED_PARAMETER(Timeout);
+    MsafdWaitForAlert(hEvent);
+#endif
 }
 
 /*
@@ -1452,6 +1508,87 @@ GetCurrentTimeInSeconds(VOID)
     return (DWORD)((Time.ll - u1970.ll) / 10000000ULL);
 }
 
+/*
+ * A nonblocking connect leaves the user-mode socket state to MsafdConnectAPC,
+ * which runs only in an alertable wait of the connecting thread, while select
+ * and WSAEventSelect report the finished connection without one. Where the
+ * state matters before the APC ran, ask AFD. Only the connected state is taken
+ * over, quietly: no asynchronous select event is re-armed and the helper is
+ * not notified, the APC still does both. Returns a Winsock error code,
+ * NO_ERROR also when the socket is simply not connected.
+ */
+static
+INT
+MsafdAdoptConnectedState(
+    _In_ PSOCKET_INFORMATION Socket)
+{
+    IO_STATUS_BLOCK IOSB;
+    SOCK_SHARED_INFO SharedData;
+    AFD_TDI_HANDLE_DATA HandleData;
+    ULONG Flags = AFD_CONNECTION_HANDLE;
+    HANDLE SockEvent;
+    NTSTATUS Status;
+
+    /* Every connected socket passed through the bound state in this process */
+    if (Socket->SharedData->State != SocketBound)
+        return NO_ERROR;
+
+    Status = NtCreateEvent(&SockEvent,
+                           EVENT_ALL_ACCESS,
+                           NULL,
+                           SynchronizationEvent,
+                           FALSE);
+    if (!NT_SUCCESS(Status))
+        return TranslateNtStatusError(Status);
+
+    Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                   SockEvent,
+                                   NULL,
+                                   NULL,
+                                   &IOSB,
+                                   IOCTL_AFD_GET_CONTEXT,
+                                   NULL,
+                                   0,
+                                   &SharedData,
+                                   sizeof(SharedData));
+    if (Status == STATUS_PENDING)
+    {
+        MsafdWaitForAlert(SockEvent);
+        Status = IOSB.Status;
+    }
+
+    /* AFD and the shared enumeration agree on the connected value only */
+    if (NT_SUCCESS(Status) && SharedData.State == SocketConnected)
+    {
+        Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                       SockEvent,
+                                       NULL,
+                                       NULL,
+                                       &IOSB,
+                                       IOCTL_AFD_GET_TDI_HANDLES,
+                                       &Flags,
+                                       sizeof(Flags),
+                                       &HandleData,
+                                       sizeof(HandleData));
+        if (Status == STATUS_PENDING)
+        {
+            MsafdWaitForAlert(SockEvent);
+            Status = IOSB.Status;
+        }
+
+        if (NT_SUCCESS(Status))
+        {
+            Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
+            Socket->SharedData->State = SocketConnected;
+        }
+    }
+
+    NtClose(SockEvent);
+
+    return NT_SUCCESS(Status) ? NO_ERROR : TranslateNtStatusError(Status);
+}
+
 _Must_inspect_result_
 SOCKET
 WSPAPI
@@ -1489,12 +1626,12 @@ WSPAccept(
     if (!Socket)
     {
        if (lpErrno) *lpErrno = WSAENOTSOCK;
-       return SOCKET_ERROR;
+       return INVALID_SOCKET;
     }
     if (!Socket->SharedData->Listening)
     {
        if (lpErrno) *lpErrno = WSAEINVAL;
-       return SOCKET_ERROR;
+       return INVALID_SOCKET;
     }
     if ((SocketAddress && !SocketAddressLength) ||
         (SocketAddressLength && !SocketAddress) ||
@@ -1512,7 +1649,7 @@ WSPAccept(
 
     if( !NT_SUCCESS(Status) )
     {
-        return SOCKET_ERROR;
+        return MsafdReturnInvalidSocket(Status, lpErrno);
     }
 
     /* Dynamic Structure...ugh */
@@ -1529,14 +1666,14 @@ WSPAccept(
         if (WSPSelect(0, &ReadSet, NULL, NULL, &Timeout, lpErrno) == SOCKET_ERROR)
         {
             NtClose(SockEvent);
-            return SOCKET_ERROR;
+            return INVALID_SOCKET;
         }
 
         if (ReadSet.fd_array[0] != Socket->Handle)
         {
             NtClose(SockEvent);
             if (lpErrno) *lpErrno = WSAEWOULDBLOCK;
-            return SOCKET_ERROR;
+            return INVALID_SOCKET;
         }
     }
 
@@ -1562,7 +1699,7 @@ WSPAccept(
     if (!NT_SUCCESS(Status))
     {
         NtClose( SockEvent );
-        return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+        return MsafdReturnInvalidSocket(Status, lpErrno);
     }
 
     if (lpfnCondition != NULL)
@@ -1595,7 +1732,7 @@ WSPAccept(
             if (!NT_SUCCESS(Status))
             {
                 NtClose( SockEvent );
-                return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                return MsafdReturnInvalidSocket(Status, lpErrno);
             }
 
             /* How much data to allocate */
@@ -1607,7 +1744,7 @@ WSPAccept(
                 PendingData = HeapAlloc(GlobalHeap, 0, PendingDataLength);
                 if (!PendingData)
                 {
-                    return MsafdReturnWithErrno( STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL );
+                    return MsafdReturnInvalidSocket(STATUS_INSUFFICIENT_RESOURCES, lpErrno);
                 }
 
                 /* We want the data now */
@@ -1635,7 +1772,7 @@ WSPAccept(
                 if (!NT_SUCCESS(Status))
                 {
                     NtClose( SockEvent );
-                    return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                    return MsafdReturnInvalidSocket(Status, lpErrno);
                 }
             }
         }
@@ -1652,7 +1789,7 @@ WSPAccept(
         RemoteAddress = HeapAlloc(GlobalHeap, 0, sizeof(*RemoteAddress));
         if (!RemoteAddress)
         {
-            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
+            return MsafdReturnInvalidSocket(STATUS_INSUFFICIENT_RESOURCES, lpErrno);
         }
 
         /* Set up Address in SOCKADDR Format */
@@ -1674,7 +1811,7 @@ WSPAccept(
             /* Allocate Buffer for Callee Data */
             CalleeDataBuffer = HeapAlloc(GlobalHeap, 0, 4096);
             if (!CalleeDataBuffer) {
-                return MsafdReturnWithErrno( STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL );
+                return MsafdReturnInvalidSocket(STATUS_INSUFFICIENT_RESOURCES, lpErrno);
             }
             CalleeData.buf = CalleeDataBuffer;
             CalleeData.len = 4096;
@@ -1741,18 +1878,18 @@ WSPAccept(
 
             if (!NT_SUCCESS(Status))
             {
-                return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                return MsafdReturnInvalidSocket(Status, lpErrno);
             }
 
             if (CallBack == CF_REJECT )
             {
                 if (lpErrno) *lpErrno = WSAECONNREFUSED;
-                return SOCKET_ERROR;
+                return INVALID_SOCKET;
             }
             else
             {
                 if (lpErrno) *lpErrno = WSAECONNREFUSED;
-                return SOCKET_ERROR;
+                return INVALID_SOCKET;
             }
         }
     }
@@ -1766,7 +1903,7 @@ WSPAccept(
                               Socket->SharedData->CreateFlags,
                               lpErrno);
     if (AcceptSocket == INVALID_SOCKET)
-        return SOCKET_ERROR;
+        return INVALID_SOCKET;
 
     /* Set up the Accept Structure */
     AcceptData.ListenHandle = (HANDLE)AcceptSocket;
@@ -1796,7 +1933,7 @@ WSPAccept(
     {
         NtClose(SockEvent);
         WSPCloseSocket( AcceptSocket, lpErrno );
-        return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+        return MsafdReturnInvalidSocket(Status, lpErrno);
     }
 
     AcceptSocketInfo = GetSocketStructure(AcceptSocket);
@@ -1804,12 +1941,14 @@ WSPAccept(
     {
         NtClose(SockEvent);
         WSPCloseSocket( AcceptSocket, lpErrno );
-        return MsafdReturnWithErrno( STATUS_PROTOCOL_NOT_SUPPORTED, lpErrno, 0, NULL );
+        return MsafdReturnInvalidSocket(STATUS_PROTOCOL_NOT_SUPPORTED, lpErrno);
     }
 
     AcceptSocketInfo->SharedData->State = SocketConnected;
     AcceptSocketInfo->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     AcceptSocketInfo->SharedData->NonBlocking = Socket->SharedData->NonBlocking;
+    AcceptSocketInfo->SharedData->RecvTimeout = Socket->SharedData->RecvTimeout;
+    AcceptSocketInfo->SharedData->SendTimeout = Socket->SharedData->SendTimeout;
 
     /* Return Address in SOCKADDR FORMAT */
     if( SocketAddress )
@@ -1839,7 +1978,7 @@ WSPAccept(
         if (Status)
         {
             if (lpErrno) *lpErrno = Status;
-            return SOCKET_ERROR;
+            return INVALID_SOCKET;
         }
     }
 
@@ -1988,9 +2127,11 @@ MsafdConnectAPC(
     Socket->SharedData->SocketLastError = TranslateNtStatusError(IoStatusBlock->Status);
     if (IoStatusBlock->Status == STATUS_SUCCESS)
     {
+        /* WSPGetPeerName may have recorded the connection already */
+        if (Socket->SharedData->State != SocketConnected)
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
         Socket->SharedData->State = SocketConnected;
         Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
-        Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     }
 
     /* Re-enable Async Event */
@@ -2204,6 +2345,12 @@ WSPConnect(SOCKET Handle,
                                    connectionInfoSize,
                                    NULL,
                                    0);
+
+    /* A connect that AFD took up supersedes a ConnectEx that failed or was
+     * cancelled, which nothing else reports; a rejected one changes nothing */
+    if (NT_SUCCESS(Status))
+        Socket->ConnectExPending = FALSE;
+
     if (Socket->SharedData->NonBlocking)
     {
         if (Status == STATUS_PENDING)
@@ -2395,6 +2542,10 @@ WSPConnectEx(
                                    dwSendDataLength);
 
     SetLastError(TranslateNtStatusError(Status));
+
+    /* Only SO_UPDATE_CONNECT_CONTEXT re-arms the asynchronous events */
+    if (NT_SUCCESS(Status))
+        Socket->ConnectExPending = TRUE;
 
     return Status == STATUS_SUCCESS;
 }
@@ -2601,6 +2752,17 @@ WSPGetPeerName(IN SOCKET s,
     {
         if (lpErrno) *lpErrno = WSAENOTSOCK;
         return SOCKET_ERROR;
+    }
+
+    if (Socket->SharedData->State != SocketConnected)
+    {
+        INT AdoptError = MsafdAdoptConnectedState(Socket);
+
+        if (AdoptError != NO_ERROR)
+        {
+            if (lpErrno) *lpErrno = AdoptError;
+            return SOCKET_ERROR;
+        }
     }
 
     if (Socket->SharedData->State != SocketConnected)
@@ -2884,6 +3046,32 @@ WSPIoctl(IN  SOCKET Handle,
             Errno = NO_ERROR;
             Ret = NO_ERROR;
             break;
+        case SIO_UDP_CONNRESET:
+        case SIO_UDP_NETRESET:
+            /* These control whether a datagram socket reports a prior ICMP
+             * port- or network-unreachable as a receive error. Our transport
+             * never reports it, so the state they request is already in effect;
+             * accept the request on datagram sockets (Windows fails it with
+             * WSAEINVAL on other socket types) so applications such as the Go
+             * runtime, which disables connection reset on every UDP socket, can
+             * create datagram sockets. */
+            /* A rejected request fails at once; the overlapped tail would report success */
+            if (Socket->SharedData->SocketType != SOCK_DGRAM)
+            {
+                Errno = WSAEINVAL;
+                NeedsCompletion = FALSE;
+                break;
+            }
+            if (IS_INTRESOURCE(lpvInBuffer) || cbInBuffer < sizeof(BOOL))
+            {
+                Errno = WSAEFAULT;
+                NeedsCompletion = FALSE;
+                break;
+            }
+            cbRet = 0;
+            Errno = NO_ERROR;
+            Ret = NO_ERROR;
+            break;
         default:
             Errno = Socket->HelperData->WSHIoctl(Socket->HelperContext,
                                                  Handle,
@@ -3119,6 +3307,7 @@ MsafdUpdateConnectionContext(
     SOCK_SHARED_INFO SharedData;
     AFD_TDI_HANDLE_DATA HandleData;
     HANDLE SockEvent;
+    BOOLEAN WasConnected;
     PSOCKET_INFORMATION Socket = GetSocketStructure(Handle);
 
     if (!Socket)
@@ -3127,7 +3316,10 @@ MsafdUpdateConnectionContext(
         return SOCKET_ERROR;
     }
 
-    if (Socket->SharedData->State == SocketConnected)
+    /* A connected socket needs nothing, unless ConnectEx connected it and
+     * WSPGetPeerName recorded that before this option re-armed the events */
+    WasConnected = (Socket->SharedData->State == SocketConnected);
+    if (WasConnected && !Socket->ConnectExPending)
     {
         return NO_ERROR;
     }
@@ -3186,13 +3378,16 @@ MsafdUpdateConnectionContext(
         goto Quit;
 
     Socket->SharedData->State = SharedData.State;
+    Socket->ConnectExPending = FALSE;
 
     if (SharedData.State == SocketConnected)
     {
         /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
         Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
         Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
-        Socket->SharedData->ConnectTime = SharedData.ConnectTime;
+        /* AFD keeps no connect time; WSPGetPeerName may have recorded it */
+        if (!WasConnected)
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
 
         /* Re-enable Async Event */
         SockReenableAsyncSelectEvent(Socket, FD_WRITE);

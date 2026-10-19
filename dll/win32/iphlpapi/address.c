@@ -326,6 +326,15 @@ CountPrefixBits(
     return BitCount;
 }
 
+/* The layout Windows 7 returns; the headers of this tree stop before FirstDnsSuffix. */
+typedef struct _IP_ADAPTER_ADDRESSES_W7
+{
+    IP_ADAPTER_ADDRESSES_LH Lh;
+    PVOID FirstDnsSuffix;
+} IP_ADAPTER_ADDRESSES_W7;
+
+C_ASSERT(FIELD_OFFSET(IP_ADAPTER_ADDRESSES_LH, FirstPrefix) == FIELD_OFFSET(IP_ADAPTER_ADDRESSES, FirstPrefix));
+
 DWORD
 WINAPI
 DECLSPEC_HOTPATCH
@@ -342,7 +351,7 @@ GetAdaptersAddresses(
     ULONG InterfacesCount;
     ULONG AdaptersCount = 0;
     ULONG i;
-    ULONG TotalSize = 0, RemainingSize;
+    ULONG TotalSize = 0, RemainingSize, BufferSize;
     BYTE* Ptr = (BYTE*)pAdapterAddresses;
     DWORD MIN_SIZE = 15 * 1024;
     PIP_ADAPTER_ADDRESSES PreviousAA = NULL;
@@ -381,7 +390,7 @@ GetAdaptersAddresses(
             break;
     }
 
-    RemainingSize = *pOutBufLen;
+    BufferSize = RemainingSize = *pOutBufLen;
     if (Ptr)
         ZeroMemory(Ptr, RemainingSize);
 
@@ -419,12 +428,8 @@ GetAdaptersAddresses(
             /* Remember we got one */
             AdaptersCount++;
 
-            /* Set the pointer to this instance in the previous one*/
-            if(PreviousAA)
-                PreviousAA->Next = CurrentAA;
-
             /* Of course we need some space for the base structure. */
-            CurrentAASize = sizeof(IP_ADAPTER_ADDRESSES);
+            CurrentAASize = sizeof(IP_ADAPTER_ADDRESSES_W7);
 
             /* Get the entry */
             Status = GetInterfaceEntry(TcpFile, InterfacesList[i], Entry);
@@ -590,8 +595,13 @@ GetAdaptersAddresses(
             /* Fill in the data */
             if ((CurrentAA) && (RemainingSize >= CurrentAASize))
             {
-                CurrentAA->Length = sizeof(IP_ADAPTER_ADDRESSES);
+                /* Only an adapter that was written is linked in */
+                if (PreviousAA)
+                    PreviousAA->Next = CurrentAA;
+
+                CurrentAA->Length = sizeof(IP_ADAPTER_ADDRESSES_W7);
                 CurrentAA->IfIndex = Entry->if_index;
+                ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->Luid.Value = makeInterfaceLuid(Entry->if_index, Entry->if_type);
                 CopyMemory(CurrentAA->PhysicalAddress, Entry->if_physaddr, Entry->if_physaddrlen);
                 CurrentAA->PhysicalAddressLength = Entry->if_physaddrlen;
                 QueryFlags(&Entry->if_descr[0], Entry->if_descrlen, &CurrentAA->Flags);
@@ -603,7 +613,7 @@ GetAdaptersAddresses(
                     CurrentAA->OperStatus = IfOperStatusDown;
 
                 /* Next items */
-                Ptr = (BYTE*)(CurrentAA + 1);
+                Ptr = (BYTE*)CurrentAA + sizeof(IP_ADAPTER_ADDRESSES_W7);
 
                 /* Now fill in the name */
                 CopyMemory(Ptr, &Entry->if_descr[0], Entry->if_descrlen);
@@ -897,18 +907,15 @@ GetAdaptersAddresses(
                     CurrentAA = pAdapterAddresses;
                     while (CurrentAA)
                     {
-                        if (CurrentAA->IfIndex == AddrEntries[j].iae_index)
+                        if (CurrentAA->Length && CurrentAA->IfIndex == AddrEntries[j].iae_index)
                             break;
 
                         CurrentAA = CurrentAA->Next;
                     }
 
+                    /* An adapter that did not fit is not there to link the address to, but the address still needs room */
                     if (!CurrentAA)
-                    {
                         ERR("Got address for interface %u but no adapter was found for it.\n", AddrEntries[j].iae_index);
-                        /* Go to the next address */
-                        continue;
-                    }
                 }
 
                 TRACE("address is 0x%08x, mask is 0x%08x\n", AddrEntries[j].iae_addr, AddrEntries[j].iae_mask);
@@ -918,7 +925,7 @@ GetAdaptersAddresses(
                 {
                     ULONG Size = sizeof(IP_ADAPTER_UNICAST_ADDRESS) + sizeof(SOCKADDR);
 
-                    if (Ptr && (RemainingSize >= Size))
+                    if (CurrentAA && Ptr && (RemainingSize >= Size))
                     {
                         PIP_ADAPTER_UNICAST_ADDRESS UnicastAddress = (PIP_ADAPTER_UNICAST_ADDRESS)Ptr;
 
@@ -954,7 +961,7 @@ GetAdaptersAddresses(
                 {
                     ULONG Size = sizeof(IP_ADAPTER_PREFIX) + sizeof(SOCKADDR);
 
-                    if (Ptr && (RemainingSize >= Size))
+                    if (CurrentAA && Ptr && (RemainingSize >= Size))
                     {
                         PIP_ADAPTER_PREFIX Prefix = (PIP_ADAPTER_PREFIX)Ptr;
 
@@ -991,6 +998,8 @@ Success:
     HeapFree(GetProcessHeap(), 0, InterfacesList);
     NtClose(TcpFile);
     *pOutBufLen = TotalSize;
+    if (TotalSize > BufferSize)
+        return ERROR_BUFFER_OVERFLOW;
     TRACE("TotalSize: %x\n", *pOutBufLen);
     return ERROR_SUCCESS;
 

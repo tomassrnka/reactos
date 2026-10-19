@@ -2760,6 +2760,212 @@ DWORD WINAPI NotifyRouteChange(PHANDLE Handle, LPOVERLAPPED overlapped)
   return ERROR_NOT_SUPPORTED;
 }
 
+
+/******************************************************************
+ *    The Vista IP Helper table functions (IPHLPAPI.@)
+ *
+ * NOTES
+ *  This IP helper cannot build the NETIO tables yet. Failing with
+ *  ERROR_NOT_SUPPORTED, and an empty table pointer, lets callers (Java's
+ *  NetworkInterface, for one) take their error path. The earlier generated
+ *  stubs returned NO_ERROR and left the output pointer alone, so callers read
+ *  an uninitialised table.
+ *  The checks of the arguments follow Windows: a missing output pointer of the
+ *  family tables, an unknown address family or table level, and an empty
+ *  interface row give ERROR_INVALID_PARAMETER. Windows faults on a missing
+ *  output pointer of GetIfTable2 and GetIfTable2Ex, these fail instead.
+ */
+static BOOL is_valid_family(USHORT Family)
+{
+  return Family == AF_UNSPEC || Family == AF_INET || Family == AF_INET6;
+}
+
+static DWORD no_table(USHORT Family, PVOID *Table)
+{
+  if (!Table || !is_valid_family(Family))
+    return ERROR_INVALID_PARAMETER;
+
+  *Table = NULL;
+  return ERROR_NOT_SUPPORTED;
+}
+
+DWORD WINAPI GetIfTable2(PVOID *Table)
+{
+  FIXME("(%p): not supported\n", Table);
+  if (!Table)
+    return ERROR_INVALID_PARAMETER;
+
+  *Table = NULL;
+  return ERROR_NOT_SUPPORTED;
+}
+
+DWORD WINAPI GetIfTable2Ex(ULONG Level, PVOID *Table)
+{
+  FIXME("(%lu, %p): not supported\n", Level, Table);
+  if (!Table || Level > 2)
+    return ERROR_INVALID_PARAMETER;
+
+  *Table = NULL;
+  return ERROR_NOT_SUPPORTED;
+}
+
+/* A MIB_IF_ROW2 starts with the interface luid (8 bytes), the interface index follows */
+static BOOL if_row2_is_empty(const ULONG *Row)
+{
+  return !Row[0] && !Row[1] && !Row[2];
+}
+
+DWORD WINAPI GetIfEntry2(PVOID Row)
+{
+  FIXME("(%p): not supported\n", Row);
+  if (!Row || if_row2_is_empty(Row))
+    return ERROR_INVALID_PARAMETER;
+
+  return ERROR_NOT_SUPPORTED;
+}
+
+DWORD WINAPI GetIfEntry2Ex(ULONG Level, PVOID Row)
+{
+  FIXME("(%lu, %p): not supported\n", Level, Row);
+  if (!Row || Level > 2 || if_row2_is_empty(Row))
+    return ERROR_INVALID_PARAMETER;
+
+  return ERROR_NOT_SUPPORTED;
+}
+
+DWORD WINAPI GetUnicastIpAddressTable(USHORT Family, PVOID *Table)
+{
+  FIXME("(%u, %p): not supported\n", Family, Table);
+  return no_table(Family, Table);
+}
+
+/* A MIB_UNICASTIPADDRESS_ROW starts with a SOCKADDR_INET, its first member is the address family */
+DWORD WINAPI GetUnicastIpAddressEntry(PVOID Row)
+{
+  FIXME("(%p): not supported\n", Row);
+  if (!Row || !is_valid_family(*(const USHORT *)Row) || *(const USHORT *)Row == AF_UNSPEC)
+    return ERROR_INVALID_PARAMETER;
+
+  return ERROR_NOT_SUPPORTED;
+}
+
+DWORD WINAPI GetIpNetTable2(USHORT Family, PVOID *Table)
+{
+  FIXME("(%u, %p): not supported\n", Family, Table);
+  return no_table(Family, Table);
+}
+
+DWORD WINAPI GetIpForwardTable2(USHORT Family, PVOID *Table)
+{
+  FIXME("(%u, %p): not supported\n", Family, Table);
+  return no_table(Family, Table);
+}
+
+/* No table is ever handed out, so there is nothing to free. */
+VOID WINAPI FreeMibTable(PVOID Memory)
+{
+  TRACE("(%p)\n", Memory);
+}
+
+DWORD WINAPI ConvertLengthToIpv4Mask(ULONG MaskLength, PULONG Mask)
+{
+  /* Windows faults on a NULL mask, this fails instead */
+  if (!Mask)
+    return ERROR_INVALID_PARAMETER;
+
+  /* an out of range length also sets the mask to INADDR_NONE */
+  if (MaskLength > 32)
+  {
+    *Mask = INADDR_NONE;
+    return ERROR_INVALID_PARAMETER;
+  }
+
+  /* the mask is in network byte order */
+  *Mask = MaskLength ? htonl(0xffffffffUL << (32 - MaskLength)) : 0;
+  return NO_ERROR;
+}
+
+/******************************************************************
+ *    NotifyIpInterfaceChange (IPHLPAPI.@)
+ *
+ * Register a callback for changes of the IP interfaces.
+ *
+ * NOTES
+ *  The IP helper here cannot see interface changes (NotifyAddrChange does
+ *  not either), so the registration fails with ERROR_NOT_SUPPORTED instead
+ *  of returning a handle whose callback never runs.
+ */
+DWORD WINAPI NotifyIpInterfaceChange(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
+                                     BOOLEAN InitialNotification, HANDLE *NotificationHandle)
+{
+  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !Callback || !NotificationHandle)
+    return ERROR_INVALID_PARAMETER;
+
+  FIXME("(Family %u, Callback %p, Context %p, Initial %d): interface changes are not reported\n",
+        Family, Callback, CallerContext, InitialNotification);
+  return ERROR_NOT_SUPPORTED;
+}
+
+
+/******************************************************************
+ *    NotifyRouteChange2 (IPHLPAPI.@)
+ *
+ * Register a callback for changes of the IP routing table.
+ *
+ * NOTES
+ *  See NotifyIpInterfaceChange: route changes cannot be seen here, so the
+ *  registration fails with ERROR_NOT_SUPPORTED.
+ */
+DWORD WINAPI NotifyRouteChange2(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
+                                BOOLEAN InitialNotification, HANDLE *NotificationHandle)
+{
+  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !Callback || !NotificationHandle)
+    return ERROR_INVALID_PARAMETER;
+
+  FIXME("(Family %u, Callback %p, Context %p, Initial %d): route changes are not reported\n",
+        Family, Callback, CallerContext, InitialNotification);
+  return ERROR_NOT_SUPPORTED;
+}
+
+
+/******************************************************************
+ *    NotifyUnicastIpAddressChange (IPHLPAPI.@)
+ *
+ * Register a callback for changes of the unicast IP addresses.
+ *
+ * NOTES
+ *  See NotifyIpInterfaceChange: address changes cannot be seen here, so the
+ *  registration fails with ERROR_NOT_SUPPORTED.
+ */
+DWORD WINAPI NotifyUnicastIpAddressChange(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
+                                          BOOLEAN InitialNotification, HANDLE *NotificationHandle)
+{
+  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !Callback || !NotificationHandle)
+    return ERROR_INVALID_PARAMETER;
+
+  FIXME("(Family %u, Callback %p, Context %p, Initial %d): address changes are not reported\n",
+        Family, Callback, CallerContext, InitialNotification);
+  return ERROR_NOT_SUPPORTED;
+}
+
+
+/******************************************************************
+ *    CancelMibChangeNotify2 (IPHLPAPI.@)
+ *
+ * Deregister a change notification.
+ *
+ * NOTES
+ *  No notification can be registered (see NotifyIpInterfaceChange), so no
+ *  handle is valid.
+ */
+DWORD WINAPI CancelMibChangeNotify2(HANDLE NotificationHandle)
+{
+  if (!NotificationHandle)
+    return ERROR_INVALID_PARAMETER;
+
+  return ERROR_INVALID_HANDLE;
+}
+
 /******************************************************************
  *    SendARP (IPHLPAPI.@)
  *
@@ -3207,15 +3413,6 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetAdaptersAddresses(ULONG Family,ULONG Flags,PVO
  * @unimplemented
  */
 BOOL WINAPI CancelIPChangeNotify(LPOVERLAPPED notifyOverlapped)
-{
-    FIXME(":stub\n");
-    return 0L;
-}
-
-/*
- * @unimplemented
- */
-DWORD WINAPI GetBestInterfaceEx(struct sockaddr *pDestAddr,PDWORD pdwBestIfIndex)
 {
     FIXME(":stub\n");
     return 0L;

@@ -205,6 +205,8 @@ Parameters:\n\n\
     IDS_INTERFACEMETRIC  "    Interface Metric:                     %1!s!\n"
     IDS_STATICNAMESERVER "    Statically configured DNS Servers:    %1!s!\n"
     IDS_DHCPNAMESERVER   "    DNS servers configured through DHCP:  %1!s!\n"
+    IDS_NOSTATICNAMESERVER "    Statically configured DNS Servers:    None\n"
+    IDS_NODHCPNAMESERVER "    DNS servers configured through DHCP:  None\n"
     IDS_EMPTYLINE        "                                          %1!s!\n"
 
     IDS_DUMP_NEWLINE     "\n"

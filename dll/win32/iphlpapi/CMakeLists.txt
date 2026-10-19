@@ -15,10 +15,12 @@ list(APPEND SOURCE
     ipstats_reactos.c
     iphlpapi_reactos.c
     iphlpapi_main.c
+    luid.c
     media.c
     registry.c
     resinfo_reactos.c
     route_reactos.c
+    route2.c
     iphlpapi_private.h
     ${CMAKE_CURRENT_BINARY_DIR}/iphlpapi_stubs.c)
 

@@ -119,116 +119,123 @@ ComputeStringSize(IN LPSTR String,
                           strlen(String) + sizeof(CHAR);
 }
 
+static
+SIZE_T
+QuerySetSizeAdd(IN SIZE_T Size,
+                IN SIZE_T Bytes,
+                IN SIZE_T Align)
+{
+    /* Same rounding as WsBufferAllocate, which builds the set */
+    return ((Size + Align - 1) & ~(Align - 1)) + Bytes;
+}
+
 SIZE_T
 WSAAPI
 ComputeQuerySetSize(IN LPWSAQUERYSETA AnsiSet,
                     IN BOOLEAN IsUnicode)
 {
+    /* Account for every part in the order and alignment the copy routines use */
     SIZE_T Size = sizeof(WSAQUERYSETA);
-    //LPWSAQUERYSETW UnicodeSet = (LPWSAQUERYSETW)AnsiSet;
     DWORD i;
 
     /* Check for instance name */
     if (AnsiSet->lpszServiceInstanceName)
     {
-        /* Add its size */
-        Size += ComputeStringSize(AnsiSet->lpszServiceInstanceName, IsUnicode);
+        Size = QuerySetSizeAdd(Size,
+                               ComputeStringSize(AnsiSet->lpszServiceInstanceName, IsUnicode),
+                               sizeof(CHAR));
     }
 
     /* Check for Service Class ID */
     if (AnsiSet->lpServiceClassId)
     {
-        /* Align the current size and add GUID size */
-        Size = (Size + 3) & ~3;
-        Size += sizeof(GUID);
+        Size = QuerySetSizeAdd(Size, sizeof(GUID), sizeof(PVOID));
     }
 
     /* Check for version data */
     if (AnsiSet->lpVersion)
     {
-        /* Align the current size and add GUID size */
-        Size = (Size + 3) & ~3;
-        Size += sizeof(WSAVERSION);
+        Size = QuerySetSizeAdd(Size, sizeof(WSAVERSION), sizeof(PVOID));
     }
 
     /* Check for comment */
     if (AnsiSet->lpszComment)
     {
-        /* Align the current size and add string size */
-        Size = (Size + 1) & ~1;
-        Size += ComputeStringSize(AnsiSet->lpszComment, IsUnicode);
+        Size = QuerySetSizeAdd(Size,
+                               ComputeStringSize(AnsiSet->lpszComment, IsUnicode),
+                               sizeof(CHAR));
     }
 
     /* Check for Provider ID */
     if (AnsiSet->lpNSProviderId)
     {
-        /* Align the current size and add GUID size */
-        Size = (Size + 3) & ~3;
-        Size += sizeof(GUID);
+        Size = QuerySetSizeAdd(Size, sizeof(GUID), sizeof(PVOID));
     }
 
     /* Check for context */
     if (AnsiSet->lpszContext)
     {
-        /* Align the current size and add string size */
-        Size = (Size + 1) & ~1;
-        Size += ComputeStringSize(AnsiSet->lpszContext, IsUnicode);
+        Size = QuerySetSizeAdd(Size,
+                               ComputeStringSize(AnsiSet->lpszContext, IsUnicode),
+                               sizeof(CHAR));
     }
 
     /* Check for query string */
     if (AnsiSet->lpszQueryString)
     {
-        /* Align the current size and add string size */
-        Size = (Size + 1) & ~1;
-        Size += ComputeStringSize(AnsiSet->lpszQueryString, IsUnicode);
+        Size = QuerySetSizeAdd(Size,
+                               ComputeStringSize(AnsiSet->lpszQueryString, IsUnicode),
+                               sizeof(CHAR));
     }
 
     /* Check for AF Protocol data */
-    if (AnsiSet->lpafpProtocols)
+    if ((AnsiSet->lpafpProtocols) && (AnsiSet->dwNumberOfProtocols))
     {
-        /* Align the current size and add AFP size */
-        Size = (Size + 3) & ~3;
-        Size += sizeof(AFPROTOCOLS) * AnsiSet->dwNumberOfProtocols;
+        Size = QuerySetSizeAdd(Size,
+                               sizeof(AFPROTOCOLS) * AnsiSet->dwNumberOfProtocols,
+                               sizeof(PVOID));
     }
 
     /* Check for CSADDR buffer */
-    if (AnsiSet->lpcsaBuffer)
+    if ((AnsiSet->lpcsaBuffer) && (AnsiSet->dwNumberOfCsAddrs))
     {
-        /* Align the current size */
-        Size = (Size + 3) & ~3;
+        /* The array comes first, then the addresses it points to */
+        Size = QuerySetSizeAdd(Size,
+                               sizeof(CSADDR_INFO) * AnsiSet->dwNumberOfCsAddrs,
+                               sizeof(PVOID));
 
-        /* Loop all the addresses in the array */
         for (i = 0; i < AnsiSet->dwNumberOfCsAddrs; i++)
         {
             /* Check for local sockaddr */
-            if (AnsiSet->lpcsaBuffer[i].LocalAddr.lpSockaddr)
+            if ((AnsiSet->lpcsaBuffer[i].LocalAddr.lpSockaddr) &&
+                (AnsiSet->lpcsaBuffer[i].LocalAddr.iSockaddrLength))
             {
-                /* Align the current size and add the sockaddr's length */
-                Size = (Size + 3) & ~3;
-                Size += AnsiSet->lpcsaBuffer[i].LocalAddr.iSockaddrLength;
-            }
-            /* Check for remote sockaddr */
-            if (AnsiSet->lpcsaBuffer[i].RemoteAddr.lpSockaddr)
-            {
-                /* Align the current size and add the sockaddr's length */
-                Size = (Size + 3) & ~3;
-                Size += AnsiSet->lpcsaBuffer[i].RemoteAddr.iSockaddrLength;
+                Size = QuerySetSizeAdd(Size,
+                                       AnsiSet->lpcsaBuffer[i].LocalAddr.iSockaddrLength,
+                                       sizeof(PVOID));
             }
 
-            /* Add the sockaddr size itself */
-            Size += sizeof(CSADDR_INFO);
+            /* Check for remote sockaddr */
+            if ((AnsiSet->lpcsaBuffer[i].RemoteAddr.lpSockaddr) &&
+                (AnsiSet->lpcsaBuffer[i].RemoteAddr.iSockaddrLength))
+            {
+                Size = QuerySetSizeAdd(Size,
+                                       AnsiSet->lpcsaBuffer[i].RemoteAddr.iSockaddrLength,
+                                       sizeof(PVOID));
+            }
         }
     }
 
     /* Check for blob data */
     if (AnsiSet->lpBlob)
     {
-        /* Align the current size and add blob size */
-        Size = (Size + 3) & ~3;
-        Size += sizeof(BLOB);
+        Size = QuerySetSizeAdd(Size, sizeof(BLOB), sizeof(PVOID));
 
-        /* Also add the actual blob data size, if it exists */
-        if (AnsiSet->lpBlob) Size += AnsiSet->lpBlob->cbSize;
+        /* Also add the actual blob data, if it exists */
+        if ((AnsiSet->lpBlob->pBlobData) && (AnsiSet->lpBlob->cbSize))
+        {
+            Size = QuerySetSizeAdd(Size, AnsiSet->lpBlob->cbSize, sizeof(PVOID));
+        }
     }
 
     /* Return the total size */
