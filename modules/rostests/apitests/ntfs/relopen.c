@@ -59,7 +59,15 @@ static NTSTATUS RenameHandle(HANDLE Handle, PCWSTR To)
 }
 
 /* Makes the new empty directory Path a junction to the directory Target (a Win32 path). */
+static NTSTATUS MakeJunctionDisposition(PCWSTR Path, PCWSTR Target, ULONG Disposition);
+
 static NTSTATUS MakeJunction(PCWSTR Path, PCWSTR Target)
+{
+    return MakeJunctionDisposition(Path, Target, FILE_CREATE);
+}
+
+/* Makes Path (a new directory for FILE_CREATE, an existing empty one for FILE_OPEN) a junction to Target. */
+static NTSTATUS MakeJunctionDisposition(PCWSTR Path, PCWSTR Target, ULONG Disposition)
 {
     ULONGLONG Buffer[(REPARSE_DATA_BUFFER_HEADER_SIZE + 8 + 4 * MAX_PATH * sizeof(WCHAR)) / sizeof(ULONGLONG)];
     PREPARSE_DATA_BUFFER Rp = (PREPARSE_DATA_BUFFER)Buffer;
@@ -69,7 +77,7 @@ static NTSTATUS MakeJunction(PCWSTR Path, PCWSTR Target)
     HANDLE H;
     NTSTATUS Status;
 
-    Status = NtOpen(Path, FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA | SYNCHRONIZE, SHARE_ALL, FILE_CREATE,
+    Status = NtOpen(Path, FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA | SYNCHRONIZE, SHARE_ALL, Disposition,
                     FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, NULL, &H);
     if (!NT_SUCCESS(Status))
         return Status;
@@ -399,5 +407,108 @@ START_TEST(NtfsRelativeOpen)
     }
     NtRemove(D);
     NtRemove(E);
+    NtCleanup();
+}
+
+/*
+ * A junction whose own DACL denies Everyone the listing (as the legacy profile junctions do), opened
+ * itself with FILE_OPEN_REPARSE_POINT, then reopened relative to that handle with an empty name and
+ * without FILE_OPEN_REPARSE_POINT. Windows never follows the junction there: Windows 10 refuses the
+ * listing by the junction's DACL (STATUS_ACCESS_DENIED), Server 2008 R2 and both of them for any other
+ * access fail the reparse (STATUS_IO_REPARSE_DATA_INVALID). ntfsng follows it like a path open, so it
+ * must at least check the junction's DACL like one: the listing must not reach the target.
+ */
+START_TEST(NtfsRelativeOpenJunctionAcl)
+{
+    WCHAR J[MAX_PATH], T[MAX_PATH], Path[MAX_PATH];
+    NT_ACE Aces[3];
+    HANDLE Hj = NULL, Hx = NULL;
+    ULONGLONG IdJ = 0, IdT = 0;
+    NTSTATUS Status;
+
+    if (!NtInit("NtfsRelativeOpenJunctionAcl"))
+        return;
+    NtPath(J, L"j");
+    NtPath(T, L"t");
+    ok_hex(NtMakeDir(T, NULL, 0, FALSE), STATUS_SUCCESS);
+    NtPath(Path, L"t\\inside.txt");
+    ok_hex(NtMakeFile(Path, NULL, 0, FALSE, "target"), STATUS_SUCCESS);
+    ok_hex(NtOpen(T, FILE_READ_ATTRIBUTES, SHARE_ALL, FILE_OPEN, FILE_DIRECTORY_FILE, NULL, &Hx), STATUS_SUCCESS);
+    if (Hx)
+    {
+        IdT = NtFileId(Hx);
+        NtClose(Hx);
+        Hx = NULL;
+    }
+
+    /* j: Everyone is denied the listing, administrators and SYSTEM get the rest; then j becomes a junction to t. */
+    Aces[0].Sid = SidEveryone; Aces[0].Mask = FILE_LIST_DIRECTORY; Aces[0].Flags = 0; Aces[0].Deny = TRUE;
+    Aces[1].Sid = SidAdmins; Aces[1].Mask = FILE_ALL_ACCESS; Aces[1].Flags = 0; Aces[1].Deny = FALSE;
+    Aces[2].Sid = SidSystem; Aces[2].Mask = FILE_ALL_ACCESS; Aces[2].Flags = 0; Aces[2].Deny = FALSE;
+    ok_hex(NtMakeDir(J, Aces, 3, TRUE), STATUS_SUCCESS);
+    Status = MakeJunctionDisposition(J, T, FILE_OPEN);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        NtCleanup();
+        return;
+    }
+
+    /* The path open of j for listing is refused by the DACL of j. */
+    Status = NtOpen(J, FILE_LIST_DIRECTORY | SYNCHRONIZE, SHARE_ALL, FILE_OPEN,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, &Hx);
+    ok_hex(Status, STATUS_ACCESS_DENIED);
+    if (Hx)
+    {
+        ok(NtFileId(Hx) != IdT, "The listing open of j reached t\n");
+        NtClose(Hx);
+        Hx = NULL;
+    }
+
+    /* j itself, not followed. */
+    Status = NtOpen(J, FILE_READ_ATTRIBUTES | SYNCHRONIZE, SHARE_ALL, FILE_OPEN,
+                    FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, NULL, &Hj);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!Hj)
+    {
+        NtCleanup();
+        return;
+    }
+    IdJ = NtFileId(Hj);
+    ok(IdJ != IdT, "The FILE_OPEN_REPARSE_POINT open of j followed it\n");
+
+    /* The empty-name reopen for listing: refused, t is not reached. */
+    Status = RelOpen(Hj, L"", FILE_LIST_DIRECTORY, FILE_OPEN, FILE_DIRECTORY_FILE, &Hx);
+    ok(Status == STATUS_ACCESS_DENIED || Status == STATUS_IO_REPARSE_DATA_INVALID,
+       "The empty-name reopen of j for listing: 0x%08lx\n", Status);
+    if (Hx)
+    {
+        ok(NtFileId(Hx) != IdT, "The empty-name reopen of j for listing reached t\n");
+        NtClose(Hx);
+        Hx = NULL;
+    }
+
+    /* The same reopen for an access that j grants: Windows fails the reparse; ntfsng follows j to t. */
+    Status = RelOpen(Hj, L"", FILE_READ_ATTRIBUTES, FILE_OPEN, FILE_DIRECTORY_FILE, &Hx);
+    ok(Status == STATUS_IO_REPARSE_DATA_INVALID || (is_reactos() && Status == STATUS_SUCCESS),
+       "The empty-name reopen of j for attributes: 0x%08lx\n", Status);
+    if (Hx)
+    {
+        ok(NtFileId(Hx) == IdT, "The empty-name reopen of j opened %I64x, not t %I64x\n", NtFileId(Hx), IdT);
+        NtClose(Hx);
+        Hx = NULL;
+    }
+
+    /* With FILE_OPEN_REPARSE_POINT the reopen is j itself. */
+    Status = RelOpen(Hj, L"", FILE_READ_ATTRIBUTES, FILE_OPEN, FILE_OPEN_REPARSE_POINT, &Hx);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (Hx)
+    {
+        ok(NtFileId(Hx) == IdJ, "The FILE_OPEN_REPARSE_POINT reopen of j opened %I64x, not j %I64x\n", NtFileId(Hx), IdJ);
+        NtClose(Hx);
+        Hx = NULL;
+    }
+
+    NtClose(Hj);
     NtCleanup();
 }
