@@ -39,6 +39,63 @@ NTSTATUS Wow64Allocate(SIZE_T Size, PVOID *Base)
                                    &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 }
 
+/* The first guest thread gets the stack a native i386 process gets for its
+ * first thread (kernel32 CreateProcess and BaseCreateStack): the image's
+ * reserve, at least 256 KiB, with the image's commit at the top and a guard
+ * page below it, so the stack grows on demand and an overflow is raised as
+ * STATUS_STACK_OVERFLOW. Later threads get the same layout from the guest's
+ * own kernel32. */
+static NTSTATUS CreateGuestStack(INITIAL_TEB *Stack)
+{
+    SECTION_IMAGE_INFORMATION Image;
+    SIZE_T Reserve, Commit, Size = 0;
+    PVOID Base = NULL, Limit;
+    BOOLEAN Guard = FALSE;
+    ULONG OldProtect;
+    NTSTATUS Status;
+
+    RtlZeroMemory(Stack, sizeof(*Stack));
+    Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessImageInformation,
+                                       &Image, sizeof(Image), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    /* PE32 sizes are 32-bit, so the rounding below cannot wrap */
+    Reserve = max(256 * 1024, (ULONG)Image.MaximumStackSize);
+    Commit = ROUND_TO_PAGES((ULONG)Image.CommittedStackSize);
+    if (Commit < NtCurrentPeb()->MinimumStackCommit)
+        Commit = ROUND_TO_PAGES(NtCurrentPeb()->MinimumStackCommit);
+    Reserve = ALIGN_UP_BY(Reserve, 64 * 1024);
+    if (Commit >= Reserve) Reserve = ALIGN_UP_BY(Commit, 1024 * 1024);
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, Wow64ZeroBits(0),
+                                     &Reserve, MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(Status)) return Status;
+    Limit = (PUCHAR)Base + Reserve - Commit;
+    if (Reserve >= Commit + PAGE_SIZE)
+    {
+        Limit = (PUCHAR)Limit - PAGE_SIZE;
+        Commit += PAGE_SIZE;
+        Guard = TRUE;
+    }
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Limit, 0, &Commit,
+                                     MEM_COMMIT, PAGE_READWRITE);
+    if (NT_SUCCESS(Status) && Guard)
+    {
+        PVOID Page = Limit;
+        SIZE_T PageSize = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Page, &PageSize,
+                                        PAGE_READWRITE | PAGE_GUARD, &OldProtect);
+        Limit = (PUCHAR)Limit + PAGE_SIZE;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
+        return Status;
+    }
+    Stack->AllocatedStackBase = Base;
+    Stack->StackBase = (PUCHAR)Base + Reserve;
+    Stack->StackLimit = Limit;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS Wow64CopyString(WOW64_STRING *To, const UNICODE_STRING *From)
 {
     PVOID Buffer;
@@ -268,7 +325,8 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     PEB32 *Peb32 = WOW64_PEB32(Peb);
     TEB32 *Teb32 = WOW64_TEB32(Teb);
     WOW64_CPU_STATE State = {0};
-    PVOID Ntdll32, Stack, Entry, Gate;
+    PVOID Ntdll32, Entry, Gate;
+    INITIAL_TEB Stack;
     ANSI_STRING Name = RTL_CONSTANT_STRING("LdrInitializeWow64");
     NTSTATUS Status;
     WOW64_CONTEXT *GuestContext = NULL;
@@ -294,7 +352,7 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     /* Establish the guest stack before variable-size startup data. A child
      * may replace its bootstrap stack with the parent's stack reservation;
      * RuntimeData must not take that range merely because it is nonempty. */
-    Status = Wow64Allocate(1024 * 1024, &Stack);
+    Status = CreateGuestStack(&Stack);
     if (!NT_SUCCESS(Status)) goto Failed;
     Status = Wow64InitializeRedirection();
     if (!NT_SUCCESS(Status)) goto Failed;
@@ -341,9 +399,9 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     Teb32->NtTib.ExceptionList = MAXULONG;
     Teb32->NtTib.Version = 30 << 8;
     Teb32->NtTib.Self = PtrToUlong(Teb32);
-    Teb32->NtTib.StackBase = PtrToUlong((PUCHAR)Stack + 1024 * 1024);
-    Teb32->NtTib.StackLimit = PtrToUlong(Stack);
-    Teb32->DeallocationStack = PtrToUlong(Stack);
+    Teb32->NtTib.StackBase = PtrToUlong(Stack.StackBase);
+    Teb32->NtTib.StackLimit = PtrToUlong(Stack.StackLimit);
+    Teb32->DeallocationStack = PtrToUlong(Stack.AllocatedStackBase);
     Teb32->ProcessEnvironmentBlock = PtrToUlong(Peb32);
     Teb32->ClientId.UniqueProcess = HandleToUlong(Teb->ClientId.UniqueProcess);
     Teb32->ClientId.UniqueThread = HandleToUlong(Teb->ClientId.UniqueThread);

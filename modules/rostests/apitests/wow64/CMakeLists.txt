@@ -6,7 +6,7 @@ function(add_wow64_apitest library)
     set(sources)
     set(testlist "#define STANDALONE\n#include <apitest.h>\n")
     foreach(test ${ARGN})
-        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock|Wow64Thread(Lifetime|ExitProcess)|StackOverflowThread)$")
+        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock|Wow64Thread(Lifetime|ExitProcess)|StackOverflowThread|StackDeepRecursion)$")
             list(APPEND sources ../${library}/${test}.c)
         endif()
         string(APPEND testlist "extern void func_${test}(void);\n")
@@ -32,7 +32,7 @@ add_wow64_apitest(kernel32
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64SystemDlls DynamicTls HandleList)
 add_wow64_apitest(ntdll
     Wow64Continue NtOpenKey NtQueryKey NtQueryValueKey
-    RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread)
+    RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion)
 add_wow64_apitest(advapi32
     RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases)
 
