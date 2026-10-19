@@ -187,6 +187,34 @@ DceDeleteClipRgn(DCE* Dce)
    IntGdiSetHookFlags(Dce->hDC, DCHF_INVALIDATEVISRGN);
 }
 
+/* The region that clips a DC, to make its visible region. The DC of a paint in progress
+ * holds the update region of its window, which belongs to the process that paints, and
+ * REGION_LockRgn cannot reach it from the process of a window that moved. Such a region is
+ * read as it is in the kernel: its attributes are in the other process, and are not touched.
+ * The update region is not changed by the application. */
+static PREGION
+DceLockClipRgn(HRGN hrgn, PBOOL pbForeign)
+{
+   PREGION prgn = REGION_LockRgn(hrgn);
+
+   *pbForeign = FALSE;
+   if (prgn == NULL)
+   {
+      prgn = (PREGION)GDIOBJ_LockObjectEx(hrgn, GDIObjType_RGN_TYPE, GDIOBJFLAG_IGNOREPID);
+      *pbForeign = (prgn != NULL);
+   }
+   return prgn;
+}
+
+static VOID
+DceUnlockClipRgn(PREGION prgn, BOOL bForeign)
+{
+   if (bForeign)
+      GDIOBJ_vUnlockObject(&prgn->BaseObject);
+   else
+      REGION_UnlockRgn(prgn);
+}
+
 VOID
 FASTCALL
 DceUpdateVisRgn(DCE *Dce, PWND Window, ULONG Flags)
@@ -238,14 +266,15 @@ noparent:
    if (Flags & DCX_INTERSECTRGN)
    {
       PREGION RgnClip = NULL;
+      BOOL bForeign = FALSE;
 
       if (Dce->hrgnClip != NULL)
-          RgnClip = REGION_LockRgn(Dce->hrgnClip);
+          RgnClip = DceLockClipRgn(Dce->hrgnClip, &bForeign);
 
       if (RgnClip)
       {
          IntGdiCombineRgn(RgnVisible, RgnVisible, RgnClip, RGN_AND);
-         REGION_UnlockRgn(RgnClip);
+         DceUnlockClipRgn(RgnClip, bForeign);
       }
       else
       {
@@ -258,11 +287,12 @@ noparent:
    }
    else if ((Flags & DCX_EXCLUDERGN) && Dce->hrgnClip != NULL)
    {
-       PREGION RgnClip = REGION_LockRgn(Dce->hrgnClip);
+       BOOL bForeign;
+       PREGION RgnClip = DceLockClipRgn(Dce->hrgnClip, &bForeign);
        if (RgnClip)
        {
            IntGdiCombineRgn(RgnVisible, RgnVisible, RgnClip, RGN_DIFF);
-           REGION_UnlockRgn(RgnClip);
+           DceUnlockClipRgn(RgnClip, bForeign);
        }
    }
 
@@ -857,8 +887,11 @@ DceResetActiveDCEs(PWND Window)
             }
          }
 
-         if (!GreIsHandleValid(pDCE->hDC) ||
-             (dc = DC_LockDc(pDCE->hDC)) == NULL)
+         /* A DC that another process is using right now is owned by that process.
+          * Its visible region must follow this window as well, or the process paints
+          * over the window that moved over it. DC_LockDcAnyOwner also tells a handle
+          * that is gone, which GreIsHandleValid would not for a foreign DC. */
+         if ((dc = DC_LockDcAnyOwner(pDCE->hDC)) == NULL)
          {
             continue;
          }

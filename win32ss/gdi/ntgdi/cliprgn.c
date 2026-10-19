@@ -62,7 +62,9 @@ GdiSelectVisRgn(
 {
     DC *dc;
 
-    if (!(dc = DC_LockDc(hdc)))
+    /* The window manager updates the visible region of every DC it handed out,
+     * also one that another process is using right now */
+    if (!(dc = DC_LockDcAnyOwner(hdc)))
     {
         EngSetLastError(ERROR_INVALID_HANDLE);
         return;
