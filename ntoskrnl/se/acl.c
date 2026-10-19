@@ -557,8 +557,14 @@ SepShouldPropagateAce(
  * @param[in,out] AclLength
  * The length of the ACL that we propagate.
  *
- * @param[in] AclSource
- * The source instance of a valid ACL.
+ * @param[in] ExplicitAcl
+ * If specified, a valid ACL whose ACEs are copied with their
+ * inheritance flags unchanged.
+ *
+ * @param[in] ParentAcl
+ * If specified, a valid ACL of the parent object whose inheritable
+ * ACEs are inherited after the explicit ones. At least one of
+ * ExplicitAcl and ParentAcl must be specified.
  *
  * @param[in] Owner
  * A SID that represents the main user that identifies the ACL.
@@ -566,8 +572,9 @@ SepShouldPropagateAce(
  * @param[in] Group
  * A SID that represents a group that identifies the ACL.
  *
- * @param[in] IsInherited
- * If set to TRUE, that means the ACL is directly inherited.
+ * @param[in] AutoInherit
+ * If set to TRUE, the inherited ACEs are marked with INHERITED_ACE
+ * and explicit ACEs marked with INHERITED_ACE are dropped.
  *
  * @param[in] IsDirectoryObject
  * If set to TRUE, that means the ACL is directly inherited because
@@ -587,13 +594,19 @@ NTSTATUS
 SepPropagateAcl(
     _Out_writes_bytes_opt_(AclLength) PACL AclDest,
     _Inout_ PULONG AclLength,
-    _In_reads_bytes_(AclSource->AclSize) PACL AclSource,
+    _In_opt_ PACL ExplicitAcl,
+    _In_opt_ PACL ParentAcl,
     _In_ PSID Owner,
     _In_ PSID Group,
-    _In_ BOOLEAN IsInherited,
+    _In_ BOOLEAN AutoInherit,
     _In_ BOOLEAN IsDirectoryObject,
     _In_ PGENERIC_MAPPING GenericMapping)
 {
+    PACL AclSource = ExplicitAcl ? ExplicitAcl : ParentAcl;
+    BOOLEAN IsInherited = FALSE;
+    ULONG ExplicitCount = ExplicitAcl ? ExplicitAcl->AceCount : 0;
+    ULONG TotalCount = ExplicitCount + (ParentAcl ? ParentAcl->AceCount : 0);
+    UCHAR InheritedFlag;
     ACCESS_MASK Mask;
     PACCESS_ALLOWED_ACE AceSource;
     PACCESS_ALLOWED_ACE AceDest;
@@ -607,7 +620,9 @@ SepPropagateAcl(
     PSID Sid;
     BOOLEAN WriteTwoAces;
 
-    ASSERT(RtlValidAcl(AclSource));
+    ASSERT(AclSource != NULL);
+    ASSERT(!ExplicitAcl || RtlValidAcl(ExplicitAcl));
+    ASSERT(!ParentAcl || RtlValidAcl(ParentAcl));
     ASSERT(AclSource->AclSize % sizeof(ULONG) == 0);
     ASSERT(AclSource->Sbz1 == 0);
     ASSERT(AclSource->Sbz2 == 0);
@@ -618,17 +633,37 @@ SepPropagateAcl(
         RtlCopyMemory(AclDest,
                       AclSource,
                       sizeof(ACL));
+        if (ExplicitAcl && ParentAcl)
+            AclDest->AclRevision = max(ExplicitAcl->AclRevision, ParentAcl->AclRevision);
     }
     Written += sizeof(ACL);
 
     CurrentDest = (PUCHAR)(AclDest + 1);
     CurrentSource = (PUCHAR)(AclSource + 1);
-    for (i = 0; i < AclSource->AceCount; i++)
+    for (i = 0; i < TotalCount; i++)
     {
+        if (i == ExplicitCount)
+        {
+            /* The inherited ACEs follow the explicit ones */
+            CurrentSource = (PUCHAR)(ParentAcl + 1);
+            IsInherited = TRUE;
+        }
+
         ASSERT((ULONG_PTR)CurrentDest % sizeof(ULONG) == 0);
         ASSERT((ULONG_PTR)CurrentSource % sizeof(ULONG) == 0);
         AceDest = (PACCESS_ALLOWED_ACE)CurrentDest;
         AceSource = (PACCESS_ALLOWED_ACE)CurrentSource;
+
+        if ((AutoInherit && !IsInherited && (AceSource->Header.AceFlags & INHERITED_ACE)) ||
+            !SepShouldPropagateAce(AceSource->Header.AceFlags,
+                                   &AceFlags,
+                                   IsInherited,
+                                   IsDirectoryObject))
+        {
+            CurrentSource += AceSource->Header.AceSize;
+            continue;
+        }
+        InheritedFlag = (AutoInherit && IsInherited) ? INHERITED_ACE : 0;
 
         if (AceSource->Header.AceType > ACCESS_MAX_MS_V2_ACE_TYPE)
         {
@@ -638,6 +673,7 @@ SepPropagateAcl(
             if (*AclLength >= Written + AceSize)
             {
                 RtlCopyMemory(AceDest, AceSource, AceSize);
+                AceDest->Header.AceFlags = AceFlags | InheritedFlag;
             }
             CurrentDest += AceSize;
             CurrentSource += AceSize;
@@ -654,14 +690,6 @@ SepPropagateAcl(
 
         ASSERT(AceSource->Header.AceSize % sizeof(ULONG) == 0);
         ASSERT(AceSource->Header.AceSize >= sizeof(*AceSource));
-        if (!SepShouldPropagateAce(AceSource->Header.AceFlags,
-                                   &AceFlags,
-                                   IsInherited,
-                                   IsDirectoryObject))
-        {
-            CurrentSource += AceSource->Header.AceSize;
-            continue;
-        }
 
         /* FIXME: filter out duplicate ACEs */
         AceSize = AceSource->Header.AceSize;
@@ -703,8 +731,8 @@ SepPropagateAcl(
             if (*AclLength >= Written + AceSize)
             {
                 AceDest->Header.AceType = AceSource->Header.AceType;
-                AceDest->Header.AceFlags = WriteTwoAces ? AceFlags & ~VALID_INHERIT_FLAGS
-                                                        : AceFlags;
+                AceDest->Header.AceFlags = (WriteTwoAces ? AceFlags & ~VALID_INHERIT_FLAGS
+                                                         : AceFlags) | InheritedFlag;
                 AceDest->Header.AceSize = AceSize;
                 AceDest->Mask = Mask;
                 RtlCopySid(AceSize - FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart),
@@ -765,9 +793,8 @@ SepPropagateAcl(
  * select it as is.
  *
  * @param[in] ParentAcl
- * If specified, the parent ACL will be used to determine the exact ACL
- * length to check  if the ACL in question is not empty. If the list
- * is not empty then the function will select such ACL to the caller.
+ * If specified, the ACL of the parent object. If the ACL inherited from
+ * it is not empty, it is returned in InheritedAcl.
  *
  * @param[in] DefaultAcl
  * If specified, the default ACL will be the selected one for the caller.
@@ -785,9 +812,18 @@ SepPropagateAcl(
  * The returned boolean value, indicating if the ACL that we want to select
  * does actually exist.
  *
- * @param[out] IsInherited
- * The returned boolean value, indicating if the ACL we want to select it
- * is actually inherited or not.
+ * @param[out] InheritedAcl
+ * The returned parent ACL whose inheritable ACEs the new ACL inherits,
+ * or NULL if it inherits none. These ACEs follow the ACEs of the
+ * returned ACL.
+ *
+ * @param[in] ExplicitProtected
+ * If set to TRUE, the explicit ACL is protected from inheritance.
+ *
+ * @param[in] AutoInherit
+ * If set to TRUE, a non-default explicit ACL also inherits the
+ * inheritable ACEs of the parent ACL, and inherited ACEs are marked
+ * with INHERITED_ACE.
  *
  * @param[in] IsDirectoryObject
  * If set to TRUE, the object inherits this ACL.
@@ -797,8 +833,9 @@ SepPropagateAcl(
  * ACEs of an ACL that we want to select it.
  *
  * @return
- * Returns the selected access control list (ACL) to the caller,
- * NULL otherwise.
+ * Returns the selected non-inherited access control list (ACL): the
+ * explicit or the default ACL. NULL is returned if the new ACL only
+ * inherits from the parent ACL or if no ACL is selected.
  */
 PACL
 SepSelectAcl(
@@ -811,7 +848,9 @@ SepSelectAcl(
     _In_ PSID Owner,
     _In_ PSID Group,
     _Out_ PBOOLEAN AclPresent,
-    _Out_ PBOOLEAN IsInherited,
+    _Out_ PACL *InheritedAcl,
+    _In_ BOOLEAN ExplicitProtected,
+    _In_ BOOLEAN AutoInherit,
     _In_ BOOLEAN IsDirectoryObject,
     _In_ PGENERIC_MAPPING GenericMapping)
 {
@@ -819,29 +858,37 @@ SepSelectAcl(
     NTSTATUS Status;
 
     *AclPresent = TRUE;
+    *InheritedAcl = NULL;
     if (ExplicitPresent && !ExplicitDefaulted)
     {
         Acl = ExplicitAcl;
+
+        /* Auto-inheritance appends the parent's inheritable ACEs */
+        if (Acl && AutoInherit && !ExplicitProtected)
+            *InheritedAcl = ParentAcl;
     }
     else
     {
         if (ParentAcl)
         {
-            *IsInherited = TRUE;
             *AclLength = 0;
             Status = SepPropagateAcl(NULL,
                                      AclLength,
+                                     NULL,
                                      ParentAcl,
                                      Owner,
                                      Group,
-                                     *IsInherited,
+                                     AutoInherit,
                                      IsDirectoryObject,
                                      GenericMapping);
             ASSERT(Status == STATUS_BUFFER_TOO_SMALL);
 
             /* Use the parent ACL only if it's not empty */
             if (*AclLength != sizeof(ACL))
-                return ParentAcl;
+            {
+                *InheritedAcl = ParentAcl;
+                return NULL;
+            }
         }
 
         if (ExplicitPresent)
@@ -859,7 +906,6 @@ SepSelectAcl(
         }
     }
 
-    *IsInherited = FALSE;
     *AclLength = 0;
     if (Acl)
     {
@@ -867,9 +913,10 @@ SepSelectAcl(
         Status = SepPropagateAcl(NULL,
                                  AclLength,
                                  Acl,
+                                 *InheritedAcl,
                                  Owner,
                                  Group,
-                                 *IsInherited,
+                                 AutoInherit,
                                  IsDirectoryObject,
                                  GenericMapping);
         ASSERT(Status == STATUS_BUFFER_TOO_SMALL);

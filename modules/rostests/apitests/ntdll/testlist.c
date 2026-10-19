@@ -25,6 +25,7 @@ extern void func_wcstoul(void);
 extern void func_wcstombs(void);
 
 extern void func_CommitCharge(void);
+extern void func_CreatorAccess(void);
 extern void func_DllLoadNotification(void);
 extern void func_EmptyPxeFree(void);
 extern void func_EmptyPxeProtect(void);
@@ -32,6 +33,7 @@ extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
 extern void func_LdrLoadDll(void);
 extern void func_load_notifications(void);
+extern void func_LpcCallbackRequest(void);
 extern void func_NtAcceptConnectPort(void);
 extern void func_NtAccessCheck(void);
 extern void func_NtAccessCheckByType(void);
@@ -42,7 +44,9 @@ extern void func_NtAdjustPrivilegesToken(void);
 extern void func_NtAllocateVirtualMemory(void);
 extern void func_NtApphelpCacheControl(void);
 extern void func_NtCompareTokens(void);
+extern void func_NtConnectPortTerminate(void);
 extern void func_NtContinue(void);
+extern void func_NtCreateDirectoryObject(void);
 extern void func_NtCreateFile(void);
 extern void func_NtCreateKey(void);
 extern void func_NtCreateProfile(void);
@@ -63,6 +67,7 @@ extern void func_NtMutant(void);
 extern void func_NtNotifyChangeDirectoryFile(void);
 extern void func_NtNotifyChangeMultipleKeys(void);
 extern void func_NtOpenKey(void);
+extern void func_NtOpenProcess(void);
 extern void func_NtOpenProcessToken(void);
 extern void func_NtOpenThreadToken(void);
 extern void func_NtProtectVirtualMemory(void);
@@ -181,6 +186,7 @@ const struct test winetest_testlist[] =
     { "wcstombs", func_wcstombs },
 
     { "CommitCharge",                   func_CommitCharge },
+    { "CreatorAccess",                  func_CreatorAccess },
     { "DllLoadNotification",            func_DllLoadNotification },
     { "EmptyPxeFree",                   func_EmptyPxeFree },
     { "EmptyPxeProtect",                func_EmptyPxeProtect },
@@ -188,6 +194,7 @@ const struct test winetest_testlist[] =
     { "LdrFindResource_U",              func_LdrFindResource_U },
     { "LdrLoadDll",                     func_LdrLoadDll },
     { "load_notifications",             func_load_notifications },
+    { "LpcCallbackRequest",             func_LpcCallbackRequest },
     { "NtAcceptConnectPort",            func_NtAcceptConnectPort },
     { "NtAccessCheck",                  func_NtAccessCheck },
     { "NtAccessCheckByType",            func_NtAccessCheckByType },
@@ -198,7 +205,9 @@ const struct test winetest_testlist[] =
     { "NtAllocateVirtualMemory",        func_NtAllocateVirtualMemory },
     { "NtApphelpCacheControl",          func_NtApphelpCacheControl },
     { "NtCompareTokens",                func_NtCompareTokens },
+    { "NtConnectPortTerminate",         func_NtConnectPortTerminate },
     { "NtContinue",                     func_NtContinue },
+    { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },
     { "NtCreateFile",                   func_NtCreateFile },
     { "NtCreateKey",                    func_NtCreateKey },
     { "NtCreateProfile",                func_NtCreateProfile },
@@ -219,6 +228,7 @@ const struct test winetest_testlist[] =
     { "NtNotifyChangeDirectoryFile",    func_NtNotifyChangeDirectoryFile },
     { "NtNotifyChangeMultipleKeys",     func_NtNotifyChangeMultipleKeys },
     { "NtOpenKey",                      func_NtOpenKey },
+    { "NtOpenProcess",                  func_NtOpenProcess },
     { "NtOpenProcessToken",             func_NtOpenProcessToken },
     { "NtOpenThreadToken",              func_NtOpenThreadToken },
     { "NtProtectVirtualMemory",         func_NtProtectVirtualMemory },

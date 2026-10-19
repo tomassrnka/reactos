@@ -7,6 +7,7 @@ extern void func_CancelIoEx(void);
 extern void func_ConsoleCP(void);
 extern void func_CreateProcess(void);
 extern void func_CreateWaitableTimerEx(void);
+extern void func_ThreadImpersonationToken(void);
 extern void func_DebugTrapInterrupts(void);
 extern void func_DefaultActCtx(void);
 extern void func_DeviceIoControl(void);
@@ -23,6 +24,7 @@ extern void func_GetCPInfo(void);
 extern void func_GetCurrentDirectory(void);
 extern void func_GetDriveType(void);
 extern void func_GetEnvironmentVariable(void);
+extern void func_GetFileType(void);
 extern void func_GetFinalPathNameByHandle(void);
 extern void func_GetLocaleInfo(void);
 extern void func_GetModuleFileName(void);
@@ -38,6 +40,7 @@ extern void func_LCMapString(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LoadLibraryMachine(void);
 extern void func_LocaleNameToLCID(void);
+extern void func_LocalTimeZone(void);
 extern void func_lstrcpynW(void);
 extern void func_lstrlen(void);
 extern void func_MailslotRead(void);
@@ -69,6 +72,7 @@ const struct test winetest_testlist[] =
     { "ConsoleCP",                   func_ConsoleCP },
     { "CreateProcess",               func_CreateProcess },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
+    { "ThreadImpersonationToken",    func_ThreadImpersonationToken },
     { "DebugTrapInterrupts",         func_DebugTrapInterrupts },
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DeviceIoControl",             func_DeviceIoControl },
@@ -85,6 +89,7 @@ const struct test winetest_testlist[] =
     { "GetCurrentDirectory",         func_GetCurrentDirectory },
     { "GetDriveType",                func_GetDriveType },
     { "GetEnvironmentVariable",      func_GetEnvironmentVariable },
+    { "GetFileType",                 func_GetFileType },
     { "GetFinalPathNameByHandle",    func_GetFinalPathNameByHandle },
     { "GetLocaleInfo",               func_GetLocaleInfo },
     { "GetModuleFileName",           func_GetModuleFileName },
@@ -100,6 +105,7 @@ const struct test winetest_testlist[] =
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
+    { "LocalTimeZone",               func_LocalTimeZone },
     { "lstrcpynW",                   func_lstrcpynW },
     { "lstrlen",                     func_lstrlen },
     { "MailslotRead",                func_MailslotRead },

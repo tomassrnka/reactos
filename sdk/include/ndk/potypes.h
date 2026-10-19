@@ -42,6 +42,19 @@ typedef struct _SYSTEM_POWER_INFORMATION
 #endif
 
 //
+// Power request objects (NtPowerInformation PowerRequestCreate and PowerRequestAction)
+//
+#define POWER_REQUEST_MODIFY_STATE 0x0001
+#define POWER_REQUEST_ALL_ACCESS   (STANDARD_RIGHTS_REQUIRED | POWER_REQUEST_MODIFY_STATE)
+
+typedef struct _POWER_REQUEST_ACTION
+{
+    HANDLE PowerRequestHandle;
+    POWER_REQUEST_TYPE RequestType;
+    BOOLEAN SetAction;
+} POWER_REQUEST_ACTION, *PPOWER_REQUEST_ACTION;
+
+//
 // Docking states
 //
 typedef enum _SYSTEM_DOCK_STATE

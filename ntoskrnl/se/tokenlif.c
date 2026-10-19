@@ -359,6 +359,9 @@ SepCreateToken(
         goto Quit;
     }
 
+    /* The level the token runs at; the token object is labelled with it when it gets its descriptor */
+    AccessToken->IntegrityLevel = SepComputeIntegrityLevel(AccessToken);
+
     /*
      * Now allocate the token's dynamic information area
      * and set the data. The dynamic part consists of two
@@ -551,6 +554,9 @@ SepDuplicateToken(
     AccessToken->ModifiedId = Token->ModifiedId;
 
     AccessToken->TokenFlags = Token->TokenFlags & ~TOKEN_SESSION_NOT_REFERENCED;
+
+    /* A duplicate runs at the same level; its object gets the default label of that level */
+    AccessToken->IntegrityLevel = Token->IntegrityLevel;
 
     /* Reference the logon session */
     Status = SepRmReferenceLogonSession(&AccessToken->AuthenticationId);
@@ -992,6 +998,9 @@ SepPerformTokenFiltering(
     /* Copy the mutable fields */
     AccessToken->SessionId = Token->SessionId;
     AccessToken->TokenFlags = Token->TokenFlags & ~TOKEN_SESSION_NOT_REFERENCED;
+
+    /* A filtered token runs at the same level; its object gets the default label of that level */
+    AccessToken->IntegrityLevel = Token->IntegrityLevel;
 
     /* Reference the logon session */
     Status = SepRmReferenceLogonSession(&AccessToken->AuthenticationId);

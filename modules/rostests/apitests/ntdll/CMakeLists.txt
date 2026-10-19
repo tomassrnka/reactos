@@ -43,6 +43,7 @@ list(APPEND SOURCE
     LdrLoadDll.c
     load_notifications.c
     locale.c
+    LpcCallbackRequest.c
     NtAcceptConnectPort.c
     NtAccessCheck.c
     NtAccessCheckByType.c
@@ -53,7 +54,9 @@ list(APPEND SOURCE
     NtAllocateVirtualMemory.c
     NtApphelpCacheControl.c
     NtCompareTokens.c
+    NtConnectPortTerminate.c
     NtContinue.c
+    NtCreateDirectoryObject.c
     NtCreateFile.c
     NtCreateKey.c
     NtCreateProfile.c

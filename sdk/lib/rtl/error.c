@@ -32,7 +32,7 @@ struct error_table
     const DWORD *table;
 };
 
-static const struct error_table error_table[20];
+static const struct error_table error_table[21];
 
 /**************************************************************************
  *           RtlNtStatusToDosErrorNoTeb (NTDLL.@)
@@ -1275,6 +1275,11 @@ static const DWORD table_c0000202[396] =
    SEC_E_SMARTCARD_CERT_EXPIRED            /* c000038d (STATUS_SMARTCARD_CERT_EXPIRED) */
 };
 
+static const DWORD table_c0000446[1] =
+{
+   ERROR_INVALID_LABEL,                    /* c0000446 (STATUS_INVALID_LABEL) */
+};
+
 static const DWORD table_c0020001[99] =
 {
    RPC_S_INVALID_STRING_BINDING,           /* c0020001 (RPC_NT_INVALID_STRING_BINDING) */
@@ -1549,6 +1554,7 @@ static const struct error_table error_table[] =
     { 0x80130001, 0x80130006, table_80130001 },
     { 0xc0000001, 0xc000019c, table_c0000001 },
     { 0xc0000202, 0xc000038e, table_c0000202 },
+    { 0xc0000446, 0xc0000447, table_c0000446 },
     { 0xc0020001, 0xc0020064, table_c0020001 },
     { 0xc0030001, 0xc003000d, table_c0030001 },
     { 0xc0030059, 0xc0030062, table_c0030059 },

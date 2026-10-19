@@ -19,6 +19,8 @@ NTAPI
 LpcExitThread(IN PETHREAD Thread)
 {
     PLPCP_MESSAGE Message;
+    PLPCP_CONNECTION_MESSAGE ConnectMessage;
+    PVOID SectionToMap = NULL;
     ASSERT(Thread == PsGetCurrentThread());
 
     /* Acquire the lock */
@@ -35,16 +37,34 @@ LpcExitThread(IN PETHREAD Thread)
     Thread->LpcExitThreadCalled = TRUE;
     Thread->LpcReplyMessageId = 0;
 
-    /* Check if there's a reply message */
+    /*
+     * Check if there's a message nobody will collect: a connection request,
+     * or a connection reply that NtAcceptConnectPort attached after our
+     * connect wait was aborted. Nobody can reach it once it is detached.
+     */
     Message = LpcpGetMessageFromThread(Thread);
+    Thread->LpcReplyMessage = NULL;
     if (Message)
     {
-        /* FIXME: TODO */
-        ASSERT(FALSE);
+        /* A connection request not yet accepted still holds the section */
+        if (Message->Request.u2.s2.Type == LPC_CONNECTION_REQUEST)
+        {
+            ConnectMessage = (PLPCP_CONNECTION_MESSAGE)(Message + 1);
+            SectionToMap = ConnectMessage->SectionToMap;
+            ConnectMessage->SectionToMap = NULL;
+        }
+
+        /* Unlink and free it; this releases its other references and the lock */
+        LpcpFreeToPortZone(Message, LPCP_LOCK_HELD | LPCP_LOCK_RELEASE);
+    }
+    else
+    {
+        /* Release the lock */
+        KeReleaseGuardedMutex(&LpcpLock);
     }
 
-    /* Release the lock */
-    KeReleaseGuardedMutex(&LpcpLock);
+    /* Release the section the server never mapped */
+    if (SectionToMap) ObDereferenceObject(SectionToMap);
 }
 
 VOID
@@ -163,11 +183,17 @@ LpcpDestroyPortQueue(IN PLPCP_PORT_OBJECT Port,
         RemoveEntryList(&Thread->LpcReplyChain);
         InitializeListHead(&Thread->LpcReplyChain);
 
+        /* No reply may match the request any more, even while the lock is dropped below */
+        Thread->LpcReplyMessageId = 0;
+
         /* Check if someone is waiting */
         if (!KeReadStateSemaphore(&Thread->LpcReplySemaphore))
         {
-            /* Get the message */
+            /* Get the message and wake the thread before the lock can be dropped */
             Message = LpcpGetMessageFromThread(Thread);
+            if (Message) Thread->LpcReplyMessage = NULL;
+            KeReleaseSemaphore(&Thread->LpcReplySemaphore, 0, 1, FALSE);
+
             if (Message)
             {
                 /* Check if it's a connection request */
@@ -184,17 +210,10 @@ LpcpDestroyPortQueue(IN PLPCP_PORT_OBJECT Port,
                     }
                 }
 
-                /* Clear the reply message */
-                Thread->LpcReplyMessage = NULL;
-
                 /* And remove the message from the port zone */
                 LpcpFreeToPortZone(Message, LPCP_LOCK_HELD);
                 NextEntry = Port->LpcReplyChainHead.Flink;
             }
-
-            /* Release the semaphore and reset message id count */
-            Thread->LpcReplyMessageId = 0;
-            KeReleaseSemaphore(&Thread->LpcReplySemaphore, 0, 1, FALSE);
         }
     }
 

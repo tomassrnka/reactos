@@ -54,13 +54,22 @@ GetToken(VOID)
     return DuplicatedToken;
 }
 
+/*
+ * Runs one NtAccessCheck with MAXIMUM_ALLOWED against a valid impersonation
+ * token and a descriptor that grants everyone full access. The caller
+ * supplies the generic mapping and, optionally, the privilege set length
+ * pointer. Returns FALSE when the setup failed and was skipped.
+ */
 static
-VOID
-AccessCheckEmptyMappingTest(VOID)
+BOOLEAN
+RunAccessCheck(
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _In_opt_ PULONG PrivilegeSetLengthPointer,
+    _Out_ PNTSTATUS CallStatus,
+    _Out_ PNTSTATUS AccessStatus,
+    _Out_ PACCESS_MASK GrantedAccess)
 {
     NTSTATUS Status;
-    NTSTATUS AccessStatus;
-    ACCESS_MASK GrantedAccess;
     PPRIVILEGE_SET PrivilegeSet = NULL;
     ULONG PrivilegeSetLength;
     HANDLE Token = NULL;
@@ -68,8 +77,12 @@ AccessCheckEmptyMappingTest(VOID)
     ULONG DaclSize;
     SECURITY_DESCRIPTOR Sd;
     PSID WorldSid = NULL;
+    BOOLEAN SetupOk = FALSE;
     static SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
-    static GENERIC_MAPPING EmptyMapping = {0, 0, 0, 0};
+
+    *CallStatus = STATUS_UNSUCCESSFUL;
+    *AccessStatus = STATUS_UNSUCCESSFUL;
+    *GrantedAccess = 0;
 
     /* Allocate all the stuff we need */
     PrivilegeSetLength = FIELD_OFFSET(PRIVILEGE_SET, Privilege[16]);
@@ -77,7 +90,7 @@ AccessCheckEmptyMappingTest(VOID)
     if (PrivilegeSet == NULL)
     {
         skip("Failed to allocate PrivilegeSet, skipping tests\n");
-        return;
+        return FALSE;
     }
 
     Status = RtlAllocateAndInitializeSid(&WorldAuthority,
@@ -147,18 +160,16 @@ AccessCheckEmptyMappingTest(VOID)
     RtlSetOwnerSecurityDescriptor(&Sd, WorldSid, FALSE);
     RtlSetDaclSecurityDescriptor(&Sd, TRUE, Dacl, FALSE);
 
-    /* Do an access check with empty mapping */
-    Status = NtAccessCheck(&Sd,
-                           Token,
-                           MAXIMUM_ALLOWED,
-                           &EmptyMapping,
-                           PrivilegeSet,
-                           &PrivilegeSetLength,
-                           &GrantedAccess,
-                           &AccessStatus);
-    ok_hex(Status, STATUS_SUCCESS);
-    ok(AccessStatus == STATUS_SUCCESS, "Expected a success status but got 0x%08lx\n", AccessStatus);
-    trace("GrantedAccess == 0x%08lx\n", GrantedAccess);
+    /* Do the access check with the caller-supplied mapping */
+    *CallStatus = NtAccessCheck(&Sd,
+                                Token,
+                                MAXIMUM_ALLOWED,
+                                GenericMapping,
+                                PrivilegeSet,
+                                PrivilegeSetLengthPointer ? PrivilegeSetLengthPointer : &PrivilegeSetLength,
+                                GrantedAccess,
+                                AccessStatus);
+    SetupOk = TRUE;
 
 Quit:
     if (Dacl)
@@ -180,9 +191,131 @@ Quit:
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, PrivilegeSet);
     }
+
+    return SetupOk;
+}
+
+static
+VOID
+AccessCheckEmptyMappingTest(VOID)
+{
+    NTSTATUS Status;
+    NTSTATUS AccessStatus;
+    ACCESS_MASK GrantedAccess;
+    static GENERIC_MAPPING EmptyMapping = {0, 0, 0, 0};
+
+    if (!RunAccessCheck(&EmptyMapping, NULL, &Status, &AccessStatus, &GrantedAccess))
+        return;
+
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(AccessStatus == STATUS_SUCCESS, "Expected a success status but got 0x%08lx\n", AccessStatus);
+    trace("GrantedAccess == 0x%08lx\n", GrantedAccess);
+}
+
+/*
+ * ProbeForRead does not touch the page, so a mapping on a no-access page
+ * passes the probe; the kernel must capture it under SEH and fail the call.
+ */
+static
+VOID
+AccessCheckNoAccessMappingTest(VOID)
+{
+    NTSTATUS Status;
+    NTSTATUS CallStatus;
+    NTSTATUS AccessStatus;
+    ACCESS_MASK GrantedAccess;
+    PVOID BaseAddress = NULL;
+    SIZE_T RegionSize = sizeof(GENERIC_MAPPING);
+
+    /* Reserve and commit one page with no access at all */
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(),
+                                     &BaseAddress,
+                                     0,
+                                     &RegionSize,
+                                     MEM_COMMIT | MEM_RESERVE,
+                                     PAGE_NOACCESS);
+    if (!NT_SUCCESS(Status) || BaseAddress == NULL)
+    {
+        skip("Failed to allocate a no-access page (Status 0x%08lx)\n", Status);
+        return;
+    }
+
+    if (!RunAccessCheck((PGENERIC_MAPPING)BaseAddress, NULL, &CallStatus, &AccessStatus, &GrantedAccess))
+        goto Quit;
+
+    ok_hex(CallStatus, STATUS_ACCESS_VIOLATION);
+
+Quit:
+    RegionSize = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(),
+                        &BaseAddress,
+                        &RegionSize,
+                        MEM_RELEASE);
+}
+
+/*
+ * A zero privilege set length makes the kernel store the required length.
+ * The length is only probed for read, so a read-only page must fail the
+ * call instead of faulting the kernel.
+ */
+static
+VOID
+AccessCheckReadOnlyLengthTest(VOID)
+{
+    NTSTATUS Status;
+    NTSTATUS CallStatus;
+    NTSTATUS AccessStatus;
+    ACCESS_MASK GrantedAccess;
+    PVOID BaseAddress = NULL;
+    PVOID ProtectAddress;
+    SIZE_T RegionSize = PAGE_SIZE;
+    ULONG OldProtect;
+    static GENERIC_MAPPING Mapping = {STANDARD_RIGHTS_READ, STANDARD_RIGHTS_WRITE,
+                                      STANDARD_RIGHTS_EXECUTE, STANDARD_RIGHTS_ALL};
+
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(),
+                                     &BaseAddress,
+                                     0,
+                                     &RegionSize,
+                                     MEM_COMMIT | MEM_RESERVE,
+                                     PAGE_READWRITE);
+    if (!NT_SUCCESS(Status) || BaseAddress == NULL)
+    {
+        skip("Failed to allocate a page (Status 0x%08lx)\n", Status);
+        return;
+    }
+
+    *(PULONG)BaseAddress = 0;
+    ProtectAddress = BaseAddress;
+    RegionSize = PAGE_SIZE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(),
+                                    &ProtectAddress,
+                                    &RegionSize,
+                                    PAGE_READONLY,
+                                    &OldProtect);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to make the page read-only (Status 0x%08lx)\n", Status);
+        goto Quit;
+    }
+
+    if (!RunAccessCheck(&Mapping, (PULONG)BaseAddress, &CallStatus, &AccessStatus, &GrantedAccess))
+        goto Quit;
+
+    ok_hex(CallStatus, STATUS_ACCESS_VIOLATION);
+    ok(*(PULONG)BaseAddress == 0, "The read-only length was changed to %lu\n", *(PULONG)BaseAddress);
+
+Quit:
+    RegionSize = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(),
+                        &BaseAddress,
+                        &RegionSize,
+                        MEM_RELEASE);
 }
 
 START_TEST(NtAccessCheck)
 {
     AccessCheckEmptyMappingTest();
+    AccessCheckReadOnlyLengthTest();
+    AccessCheckNoAccessMappingTest();
 }

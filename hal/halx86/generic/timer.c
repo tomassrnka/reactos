@@ -235,19 +235,20 @@ ULONG
 NTAPI
 HalSetTimeIncrement(IN ULONG Increment)
 {
-    /* Round increment to ms */
-    Increment /= 10000;
+    ULONG Rate;
 
-    /* Normalize between our minimum (1 ms) and maximum (variable) setting */
-    if (Increment > HalpLargestClockMS) Increment = HalpLargestClockMS;
-    if (Increment <= 0) Increment = 1;
+    /* Use the largest rate (1 ms minimum) whose increment does not exceed the request */
+    for (Rate = 1; Rate < HalpLargestClockMS; Rate++)
+    {
+        if (HalpRolloverTable[Rate].Increment > Increment) break;
+    }
 
     /* Set the rate and tell HAL we want to change it */
-    HalpNextMSRate = Increment;
+    HalpNextMSRate = Rate;
     HalpClockSetMSRate = TRUE;
 
     /* Return the increment */
-    return HalpRolloverTable[Increment - 1].Increment;
+    return HalpRolloverTable[Rate - 1].Increment;
 }
 
 LARGE_INTEGER

@@ -350,6 +350,71 @@ DetermineACLSize(
     return Size;
 }
 
+/* Protection and inheritance state of an ACL, which goes with it when it is kept or replaced */
+#define SEP_DACL_INHERIT_BITS (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED)
+#define SEP_SACL_INHERIT_BITS (SE_SACL_PROTECTED | SE_SACL_AUTO_INHERITED)
+
+/*
+ * Mandatory labels live in the SACL as SYSTEM_MANDATORY_LABEL_ACE entries.
+ * As on NT 6, LABEL_SECURITY_INFORMATION shows and changes those entries
+ * only, and SACL_SECURITY_INFORMATION the other (audit) entries only; both
+ * together the whole SACL.
+ */
+
+/* Bytes and number of the label ACEs (Labels) or of the other ACEs of a stored ACL */
+static
+ULONG
+SepAceBytes(
+    _In_ PACL Acl,
+    _In_ BOOLEAN Labels,
+    _Out_ PULONG Count)
+{
+    PUCHAR End = (PUCHAR)Acl + Acl->AclSize;
+    PACE_HEADER Ace = (PACE_HEADER)(Acl + 1);
+    ULONG Bytes = 0, i;
+
+    *Count = 0;
+    for (i = 0; i < Acl->AceCount; i++)
+    {
+        if ((PUCHAR)(Ace + 1) > End || Ace->AceSize < sizeof(ACE_HEADER) || (PUCHAR)Ace + Ace->AceSize > End)
+            break;
+        if ((Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) == Labels)
+        {
+            Bytes += Ace->AceSize;
+            (*Count)++;
+        }
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+    return Bytes;
+}
+
+/* Appends the label ACEs (Labels) or the other ACEs of Source to Dest, which has room for them */
+static
+VOID
+SepAppendAces(
+    _Inout_ PACL Dest,
+    _Inout_ PULONG Used,
+    _In_ PACL Source,
+    _In_ BOOLEAN Labels)
+{
+    PUCHAR End = (PUCHAR)Source + Source->AclSize;
+    PACE_HEADER Ace = (PACE_HEADER)(Source + 1);
+    ULONG i;
+
+    for (i = 0; i < Source->AceCount; i++)
+    {
+        if ((PUCHAR)(Ace + 1) > End || Ace->AceSize < sizeof(ACE_HEADER) || (PUCHAR)Ace + Ace->AceSize > End)
+            break;
+        if ((Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) == Labels)
+        {
+            RtlCopyMemory((PUCHAR)Dest + *Used, Ace, Ace->AceSize);
+            *Used += Ace->AceSize;
+            Dest->AceCount++;
+        }
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+}
+
 /**
  * @brief
  * Captures a security descriptor.
@@ -455,6 +520,16 @@ SeCaptureSecurityDescriptor(
         DescriptorCopy.Dacl = SepGetDaclFromDescriptor(OriginalDescriptor);
         DescriptorSize = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
 
+        /*
+         * The helpers read the caller's control bits again, which may have
+         * changed: an ACL counts only if the bits captured above say it is
+         * present, so that sizing and copying below agree.
+         */
+        if (!(DescriptorCopy.Control & SE_SACL_PRESENT))
+            DescriptorCopy.Sacl = NULL;
+        if (!(DescriptorCopy.Control & SE_DACL_PRESENT))
+            DescriptorCopy.Dacl = NULL;
+
         /* Determine owner and group sizes */
         OwnerSize = DetermineSIDSize(DescriptorCopy.Owner, &OwnerSAC, CurrentMode);
         DescriptorSize += ROUND_UP(OwnerSize, sizeof(ULONG));
@@ -466,6 +541,8 @@ SeCaptureSecurityDescriptor(
         {
             /* Get the size and probe if user mode */
             SaclSize = DetermineACLSize(DescriptorCopy.Sacl, CurrentMode);
+            if (DescriptorCopy.Sacl && SaclSize < sizeof(ACL))
+                _SEH2_YIELD(return STATUS_INVALID_ACL);
             DescriptorSize += ROUND_UP(SaclSize, sizeof(ULONG));
         }
 
@@ -473,6 +550,8 @@ SeCaptureSecurityDescriptor(
         {
             /* Get the size and probe if user mode */
             DaclSize = DetermineACLSize(DescriptorCopy.Dacl, CurrentMode);
+            if (DescriptorCopy.Dacl && DaclSize < sizeof(ACL))
+                _SEH2_YIELD(return STATUS_INVALID_ACL);
             DescriptorSize += ROUND_UP(DaclSize, sizeof(ULONG));
         }
     }
@@ -514,6 +593,12 @@ SeCaptureSecurityDescriptor(
             RtlCopyMemory((PUCHAR)NewDescriptor + Offset,
                           DescriptorCopy.Owner,
                           OwnerSize);
+            /* The caller may have changed it since it was sized: check the copy against the size taken */
+            if (!RtlValidSid((PSID)((PUCHAR)NewDescriptor + Offset)) ||
+                RtlLengthSid((PSID)((PUCHAR)NewDescriptor + Offset)) != OwnerSize)
+            {
+                RtlRaiseStatus(STATUS_INVALID_SID);
+            }
             Offset += ROUND_UP(OwnerSize, sizeof(ULONG));
         }
 
@@ -524,6 +609,12 @@ SeCaptureSecurityDescriptor(
             RtlCopyMemory((PUCHAR)NewDescriptor + Offset,
                           DescriptorCopy.Group,
                           GroupSize);
+            /* The caller may have changed it since it was sized: check the copy against the size taken */
+            if (!RtlValidSid((PSID)((PUCHAR)NewDescriptor + Offset)) ||
+                RtlLengthSid((PSID)((PUCHAR)NewDescriptor + Offset)) != GroupSize)
+            {
+                RtlRaiseStatus(STATUS_INVALID_SID);
+            }
             Offset += ROUND_UP(GroupSize, sizeof(ULONG));
         }
 
@@ -534,6 +625,12 @@ SeCaptureSecurityDescriptor(
             RtlCopyMemory((PUCHAR)NewDescriptor + Offset,
                           DescriptorCopy.Sacl,
                           SaclSize);
+            /* The caller may have changed it since it was sized: check the copy against the size taken */
+            if (((PACL)((PUCHAR)NewDescriptor + Offset))->AclSize != SaclSize ||
+                !RtlValidAcl((PACL)((PUCHAR)NewDescriptor + Offset)))
+            {
+                RtlRaiseStatus(STATUS_INVALID_ACL);
+            }
             Offset += ROUND_UP(SaclSize, sizeof(ULONG));
         }
 
@@ -544,6 +641,12 @@ SeCaptureSecurityDescriptor(
             RtlCopyMemory((PUCHAR)NewDescriptor + Offset,
                           DescriptorCopy.Dacl,
                           DaclSize);
+            /* The caller may have changed it since it was sized: check the copy against the size taken */
+            if (((PACL)((PUCHAR)NewDescriptor + Offset))->AclSize != DaclSize ||
+                !RtlValidAcl((PACL)((PUCHAR)NewDescriptor + Offset)))
+            {
+                RtlRaiseStatus(STATUS_INVALID_ACL);
+            }
             Offset += ROUND_UP(DaclSize, sizeof(ULONG));
         }
 
@@ -608,10 +711,13 @@ SeQuerySecurityDescriptorInfo(
     PSID Group = NULL;
     PACL Dacl = NULL;
     PACL Sacl = NULL;
+    PACL LabelSource = NULL;
     ULONG OwnerLength = 0;
     ULONG GroupLength = 0;
     ULONG DaclLength = 0;
     ULONG SaclLength = 0;
+    ULONG LabelCount = 0, LabelAclSize = 0;
+    BOOLEAN LabelsOnly = FALSE;
     SECURITY_DESCRIPTOR_CONTROL Control = 0;
     ULONG_PTR Current;
     ULONG SdLength;
@@ -667,10 +773,11 @@ SeQuerySecurityDescriptorInfo(
             DaclLength = ROUND_UP((ULONG)Dacl->AclSize, 4);
         }
 
-        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT | SEP_DACL_INHERIT_BITS));
     }
 
     if ((*SecurityInformation & SACL_SECURITY_INFORMATION) &&
+        (*SecurityInformation & LABEL_SECURITY_INFORMATION) &&
         (ObjectSd->Control & SE_SACL_PRESENT))
     {
         Sacl = SepGetSaclFromDescriptor(ObjectSd);
@@ -679,7 +786,26 @@ SeQuerySecurityDescriptorInfo(
             SaclLength = ROUND_UP(Sacl->AclSize, 4);
         }
 
-        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
+    }
+    else if ((*SecurityInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
+             (ObjectSd->Control & SE_SACL_PRESENT))
+    {
+        /*
+         * The label ACEs only, or the other ACEs only, of a present SACL:
+         * possibly none, which is an empty ACL (as after the last label was
+         * removed), not an absent one.
+         */
+        LabelsOnly = (*SecurityInformation & LABEL_SECURITY_INFORMATION) != 0;
+        LabelSource = SepGetSaclFromDescriptor(ObjectSd);
+        if (LabelSource != NULL)
+        {
+            /* The ACL's own size, and the DWORD-rounded room it takes in the descriptor */
+            LabelAclSize = sizeof(ACL) + SepAceBytes(LabelSource, LabelsOnly, &LabelCount);
+            ASSERT(LabelAclSize <= LabelSource->AclSize);
+            SaclLength = ROUND_UP(LabelAclSize, 4);
+        }
+        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
     }
 
     SdLength = OwnerLength + GroupLength + DaclLength +
@@ -724,7 +850,19 @@ SeQuerySecurityDescriptorInfo(
         Current += DaclLength;
     }
 
-    if (SaclLength != 0)
+    if (SaclLength != 0 && LabelSource != NULL)
+    {
+        PACL LabelAcl = (PACL)Current;
+        ULONG Used = sizeof(ACL);
+
+        RtlZeroMemory(LabelAcl, SaclLength);
+        LabelAcl->AclRevision = LabelSource->AclRevision;
+        LabelAcl->AclSize = (USHORT)LabelAclSize;
+        SepAppendAces(LabelAcl, &Used, LabelSource, LabelsOnly);
+        RelSD->Sacl = (ULONG)(Current - (ULONG_PTR)SecurityDescriptor);
+        Current += SaclLength;
+    }
+    else if (SaclLength != 0)
     {
         RtlCopyMemory((PVOID)Current,
                       Sacl,
@@ -885,13 +1023,17 @@ SeSetSecurityDescriptorInfoEx(
     PSID Group;
     PACL Dacl;
     PACL Sacl;
+    PACL OldSacl, NewLabels, MergedSacl = NULL;
     ULONG OwnerLength;
     ULONG GroupLength;
     ULONG DaclLength;
     ULONG SaclLength;
+    ULONG KeepBytes = 0, KeepCount = 0, LabelBytes = 0, LabelCount = 0, Used;
+    BOOLEAN HasLabel;
     SECURITY_DESCRIPTOR_CONTROL Control = 0;
     ULONG Current;
     SECURITY_INFORMATION SecurityInformation;
+    NTSTATUS Status;
 
     PAGED_CODE();
 
@@ -937,27 +1079,102 @@ SeSetSecurityDescriptorInfoEx(
     if (SecurityInformation & DACL_SECURITY_INFORMATION)
     {
         Dacl = SepGetDaclFromDescriptor(SecurityDescriptor);
-        Control |= (SecurityDescriptor->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (SecurityDescriptor->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT | SEP_DACL_INHERIT_BITS));
     }
     else
     {
         Dacl = SepGetDaclFromDescriptor(ObjectSd);
-        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT | SEP_DACL_INHERIT_BITS));
     }
     DaclLength = Dacl ? ROUND_UP((ULONG)Dacl->AclSize, 4) : 0;
 
     /* Get SACL and SACL size */
-    if (SecurityInformation & SACL_SECURITY_INFORMATION)
+    if (SecurityInformation & LABEL_SECURITY_INFORMATION)
+    {
+        /* Only well-formed labels */
+        Status = SepGetDescriptorLabel(SecurityDescriptor, &HasLabel, NULL, NULL);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    if ((SecurityInformation & SACL_SECURITY_INFORMATION) &&
+        (SecurityInformation & LABEL_SECURITY_INFORMATION))
     {
         Sacl = SepGetSaclFromDescriptor(SecurityDescriptor);
-        Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
+    }
+    else if (!(SecurityInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)))
+    {
+        Sacl = SepGetSaclFromDescriptor(ObjectSd);
+        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
     }
     else
     {
-        Sacl = SepGetSaclFromDescriptor(ObjectSd);
-        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        /*
+         * One kind of entry is replaced by the new descriptor's (labels for
+         * LABEL_SECURITY_INFORMATION, the others for SACL_SECURITY_INFORMATION);
+         * the object's entries of the other kind stay.
+         */
+        BOOLEAN TakeLabels = (SecurityInformation & LABEL_SECURITY_INFORMATION) != 0;
+
+        OldSacl = (ObjectSd->Control & SE_SACL_PRESENT) ? SepGetSaclFromDescriptor(ObjectSd) : NULL;
+        NewLabels = (SecurityDescriptor->Control & SE_SACL_PRESENT) ? SepGetSaclFromDescriptor(SecurityDescriptor) : NULL;
+        if (OldSacl)
+            KeepBytes = SepAceBytes(OldSacl, !TakeLabels, &KeepCount);
+        if (NewLabels)
+            LabelBytes = SepAceBytes(NewLabels, TakeLabels, &LabelCount);
+
+        Sacl = NULL;
+        /* A label change keeps the SACL's protection and inheritance state; an audit change sets it */
+        if (TakeLabels)
+            Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
+        else
+            Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
+
+        if (OldSacl || LabelCount || (!TakeLabels && NewLabels))
+        {
+            SaclLength = ROUND_UP(sizeof(ACL) + KeepBytes + LabelBytes, 4);
+            if (SaclLength > MAXUSHORT)
+                return STATUS_INVALID_ACL;
+
+            MergedSacl = ExAllocatePoolWithTag(PagedPool, SaclLength, TAG_ACL);
+            if (MergedSacl == NULL)
+                return STATUS_INSUFFICIENT_RESOURCES;
+            RtlZeroMemory(MergedSacl, SaclLength);
+            MergedSacl->AclRevision = max(OldSacl ? OldSacl->AclRevision : ACL_REVISION,
+                                          NewLabels ? NewLabels->AclRevision : ACL_REVISION);
+            MergedSacl->AclSize = (USHORT)SaclLength;
+            Used = sizeof(ACL);
+            if (OldSacl)
+                SepAppendAces(MergedSacl, &Used, OldSacl, !TakeLabels);
+            if (NewLabels)
+                SepAppendAces(MergedSacl, &Used, NewLabels, TakeLabels);
+
+            Sacl = MergedSacl;
+            Control |= SE_SACL_PRESENT;
+        }
     }
     SaclLength = Sacl ? ROUND_UP((ULONG)Sacl->AclSize, 4) : 0;
+
+    /*
+     * Explicit protection requests count only with the ACL they qualify:
+     * setting that ACL is what the caller was checked for (WRITE_DAC,
+     * ACCESS_SYSTEM_SECURITY).
+     */
+    if (SecurityInformation & DACL_SECURITY_INFORMATION)
+    {
+        if (SecurityInformation & PROTECTED_DACL_SECURITY_INFORMATION)
+            Control |= SE_DACL_PROTECTED;
+        else if (SecurityInformation & UNPROTECTED_DACL_SECURITY_INFORMATION)
+            Control &= ~SE_DACL_PROTECTED;
+    }
+    if (SecurityInformation & SACL_SECURITY_INFORMATION)
+    {
+        if (SecurityInformation & PROTECTED_SACL_SECURITY_INFORMATION)
+            Control |= SE_SACL_PROTECTED;
+        else if (SecurityInformation & UNPROTECTED_SACL_SECURITY_INFORMATION)
+            Control &= ~SE_SACL_PROTECTED;
+    }
 
     NewSd = ExAllocatePoolWithTag(PoolType,
                                   sizeof(SECURITY_DESCRIPTOR_RELATIVE) +
@@ -966,6 +1183,8 @@ SeSetSecurityDescriptorInfoEx(
                                   TAG_SD);
     if (NewSd == NULL)
     {
+        if (MergedSacl)
+            ExFreePoolWithTag(MergedSacl, TAG_ACL);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -1000,6 +1219,9 @@ SeSetSecurityDescriptorInfoEx(
         NewSd->Sacl = Current;
         Current += SaclLength;
     }
+
+    if (MergedSacl)
+        ExFreePoolWithTag(MergedSacl, TAG_ACL);
 
     NewSd->Control |= Control;
     *ObjectsSecurityDescriptor = NewSd;
@@ -1308,14 +1530,16 @@ SeAssignSecurityEx(
     PACL ParentAcl;
     PACL Dacl = NULL;
     PACL Sacl = NULL;
-    BOOLEAN DaclIsInherited;
-    BOOLEAN SaclIsInherited;
+    PACL DaclInherited;
+    PACL SaclInherited;
+    BOOLEAN ExplicitProtected;
+    BOOLEAN DaclAutoInherit = BooleanFlagOn(AutoInheritFlags, SEF_DACL_AUTO_INHERIT);
+    BOOLEAN SaclAutoInherit = BooleanFlagOn(AutoInheritFlags, SEF_SACL_AUTO_INHERIT);
     BOOLEAN DaclPresent;
     BOOLEAN SaclPresent;
     NTSTATUS Status;
 
     DBG_UNREFERENCED_PARAMETER(ObjectType);
-    DBG_UNREFERENCED_PARAMETER(AutoInheritFlags);
     UNREFERENCED_PARAMETER(PoolType);
 
     PAGED_CODE();
@@ -1414,6 +1638,7 @@ SeAssignSecurityEx(
     ExplicitAcl = NULL;
     ExplicitPresent = FALSE;
     ExplicitDefaulted = FALSE;
+    ExplicitProtected = FALSE;
     if (ExplicitDescriptor != NULL &&
         (ExplicitDescriptor->Control & SE_DACL_PRESENT))
     {
@@ -1421,6 +1646,8 @@ SeAssignSecurityEx(
         ExplicitPresent = TRUE;
         if (ExplicitDescriptor->Control & SE_DACL_DEFAULTED)
             ExplicitDefaulted = TRUE;
+        else if (ExplicitDescriptor->Control & SE_DACL_PROTECTED)
+            ExplicitProtected = TRUE;
     }
     ParentAcl = NULL;
     if (ParentDescriptor != NULL &&
@@ -1437,11 +1664,17 @@ SeAssignSecurityEx(
                         Owner,
                         Group,
                         &DaclPresent,
-                        &DaclIsInherited,
+                        &DaclInherited,
+                        ExplicitProtected,
+                        DaclAutoInherit,
                         IsDirectoryObject,
                         GenericMapping);
     if (DaclPresent)
         Control |= SE_DACL_PRESENT;
+    if (ExplicitProtected)
+        Control |= SE_DACL_PROTECTED;
+    if (DaclAutoInherit)
+        Control |= SE_DACL_AUTO_INHERITED;
     ASSERT(DaclLength % sizeof(ULONG) == 0);
 
     /* Inherit the SACL */
@@ -1449,6 +1682,7 @@ SeAssignSecurityEx(
     ExplicitAcl = NULL;
     ExplicitPresent = FALSE;
     ExplicitDefaulted = FALSE;
+    ExplicitProtected = FALSE;
     if (ExplicitDescriptor != NULL &&
         (ExplicitDescriptor->Control & SE_SACL_PRESENT))
     {
@@ -1456,6 +1690,8 @@ SeAssignSecurityEx(
         ExplicitPresent = TRUE;
         if (ExplicitDescriptor->Control & SE_SACL_DEFAULTED)
             ExplicitDefaulted = TRUE;
+        else if (ExplicitDescriptor->Control & SE_SACL_PROTECTED)
+            ExplicitProtected = TRUE;
     }
     ParentAcl = NULL;
     if (ParentDescriptor != NULL &&
@@ -1472,12 +1708,25 @@ SeAssignSecurityEx(
                         Owner,
                         Group,
                         &SaclPresent,
-                        &SaclIsInherited,
+                        &SaclInherited,
+                        ExplicitProtected,
+                        SaclAutoInherit,
                         IsDirectoryObject,
                         GenericMapping);
     if (SaclPresent)
         Control |= SE_SACL_PRESENT;
+    if (ExplicitProtected)
+        Control |= SE_SACL_PROTECTED;
+    if (SaclAutoInherit)
+        Control |= SE_SACL_AUTO_INHERITED;
     ASSERT(SaclLength % sizeof(ULONG) == 0);
+
+    /* A merged ACL can exceed what AclSize can describe */
+    if (DaclLength > MAXUSHORT || SaclLength > MAXUSHORT)
+    {
+        SeUnlockSubjectContext(SubjectContext);
+        return STATUS_BAD_INHERITANCE_ACL;
+    }
 
     /* Allocate and initialize the new security descriptor */
     Length = sizeof(SECURITY_DESCRIPTOR_RELATIVE) +
@@ -1510,9 +1759,10 @@ SeAssignSecurityEx(
         Status = SepPropagateAcl((PACL)((PUCHAR)Descriptor + Current),
                                  &SaclLength,
                                  Sacl,
+                                 SaclInherited,
                                  Owner,
                                  Group,
-                                 SaclIsInherited,
+                                 SaclAutoInherit,
                                  IsDirectoryObject,
                                  GenericMapping);
         ASSERT(Status == STATUS_SUCCESS);
@@ -1525,9 +1775,10 @@ SeAssignSecurityEx(
         Status = SepPropagateAcl((PACL)((PUCHAR)Descriptor + Current),
                                  &DaclLength,
                                  Dacl,
+                                 DaclInherited,
                                  Owner,
                                  Group,
-                                 DaclIsInherited,
+                                 DaclAutoInherit,
                                  IsDirectoryObject,
                                  GenericMapping);
         ASSERT(Status == STATUS_SUCCESS);

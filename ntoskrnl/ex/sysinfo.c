@@ -827,7 +827,7 @@ QSI_DEF(SystemPerformanceInformation)
 QSI_DEF(SystemTimeOfDayInformation)
 {
     SYSTEM_TIMEOFDAY_INFORMATION Sti;
-    LARGE_INTEGER CurrentTime;
+    LARGE_INTEGER CurrentTime, LocalTime;
 
     /* Set amount of written information to 0 */
     *ReqSize = 0;
@@ -847,7 +847,9 @@ QSI_DEF(SystemTimeOfDayInformation)
     /* Fill local time structure */
     Sti.BootTime= KeBootTime;
     Sti.CurrentTime = CurrentTime;
-    Sti.TimeZoneBias.QuadPart = ExpTimeZoneBias.QuadPart;
+    /* One read of the bias, so that it cannot tear */
+    ExSystemTimeToLocalTime(&CurrentTime, &LocalTime);
+    Sti.TimeZoneBias.QuadPart = CurrentTime.QuadPart - LocalTime.QuadPart;
     Sti.TimeZoneId = ExpTimeZoneId;
     Sti.Reserved = 0;
 
@@ -905,6 +907,7 @@ ExpQuerySystemProcessInformation(
     _SEH2_VOLATILE PUNICODE_STRING ProcessImageName = NULL;
     PWCHAR szSrc;
     BOOLEAN Overflow = FALSE;
+    SIZE_T CommitCharge;
 
     _SEH2_TRY
     {
@@ -1055,9 +1058,11 @@ ExpQuerySystemProcessInformation(
                 SpiCurrent->QuotaPagedPoolUsage = Process->QuotaUsage[PsPagedPool];
                 SpiCurrent->QuotaPeakNonPagedPoolUsage = Process->QuotaPeak[PsNonPagedPool];
                 SpiCurrent->QuotaNonPagedPoolUsage = Process->QuotaUsage[PsNonPagedPool];
-                SpiCurrent->PagefileUsage = Process->QuotaUsage[PsPageFile];
-                SpiCurrent->PeakPagefileUsage = Process->QuotaPeak[PsPageFile];
-                SpiCurrent->PrivatePageCount = Process->CommitCharge;
+                /* The private commit charge, in bytes despite the field names */
+                CommitCharge = Process->CommitCharge;
+                SpiCurrent->PagefileUsage = CommitCharge << PAGE_SHIFT;
+                SpiCurrent->PeakPagefileUsage = Process->CommitChargePeak << PAGE_SHIFT;
+                SpiCurrent->PrivatePageCount = CommitCharge << PAGE_SHIFT;
 
                 /* Now do the threads */
                 ThreadInfo = (PSYSTEM_THREAD_INFORMATION)(SpiCurrent + 1);
@@ -2098,6 +2103,8 @@ QSI_DEF(SystemLegacyDriverInformation)
 /* Class 44 - Current Time Zone Information */
 QSI_DEF(SystemCurrentTimeZoneInformation)
 {
+    RTL_TIME_ZONE_INFORMATION TimeZoneInformation;
+
     *ReqSize = sizeof(RTL_TIME_ZONE_INFORMATION);
 
     if (sizeof(RTL_TIME_ZONE_INFORMATION) != Size)
@@ -2106,8 +2113,9 @@ QSI_DEF(SystemCurrentTimeZoneInformation)
     }
 
     /* Copy the time zone information struct */
+    ExpQueryTimeZoneInformation(&TimeZoneInformation);
     memcpy(Buffer,
-           &ExpTimeZoneInfo,
+           &TimeZoneInformation,
            sizeof(RTL_TIME_ZONE_INFORMATION));
 
     return STATUS_SUCCESS;

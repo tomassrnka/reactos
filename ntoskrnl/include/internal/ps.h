@@ -310,6 +310,16 @@ PspDeleteProcess(
 
 NTSTATUS
 NTAPI
+PspProcessOpen(
+    _In_ OB_OPEN_REASON Reason,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _In_opt_ PEPROCESS Process,
+    _In_ PVOID ObjectBody,
+    _Inout_ PACCESS_MASK GrantedAccess,
+    _In_ ULONG HandleCount);
+
+NTSTATUS
+NTAPI
 PspThreadOpen(
     _In_ OB_OPEN_REASON Reason,
     _In_ KPROCESSOR_MODE AccessMode,

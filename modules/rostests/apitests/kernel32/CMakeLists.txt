@@ -8,6 +8,7 @@ list(APPEND SOURCE
     ConsoleCP.c
     CreateProcess.c
     CreateWaitableTimerEx.c
+    ThreadImpersonationToken.c
     DebugTrapInterrupts.c
     DefaultActCtx.c
     DeviceIoControl.c
@@ -24,6 +25,7 @@ list(APPEND SOURCE
     GetCurrentDirectory.c
     GetDriveType.c
     GetEnvironmentVariable.c
+    GetFileType.c
     GetFinalPathNameByHandle.c
     GetLocaleInfo.c
     GetModuleFileName.c
@@ -39,6 +41,7 @@ list(APPEND SOURCE
     LoadLibraryExW.c
     LoadLibraryMachine.c
     LocaleNameToLCID.c
+    LocalTimeZone.c
     lstrcpynW.c
     lstrlen.c
     Mailslot.c

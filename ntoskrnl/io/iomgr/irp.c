@@ -382,9 +382,10 @@ IopCompleteRequest(IN PKAPC Apc,
          !IsIrpSynchronous(Irp, FileObject)))
     {
         /* Get any information we need from the FO before we kill it */
-        if ((FileObject) && (FileObject->CompletionContext))
+        if ((FileObject) && (FileObject->CompletionContext) &&
+            ((Irp->PendingReturned) || !(FileObject->Flags & FO_SKIP_COMPLETION_PORT)))
         {
-            /* Save Completion Data */
+            /* Save Completion Data (none for a success without pending if the handle asked so) */
             Port = FileObject->CompletionContext->Port;
             Key = FileObject->CompletionContext->Key;
         }
@@ -434,8 +435,9 @@ IopCompleteRequest(IN PKAPC Apc,
         }
         else if (FileObject)
         {
-            /* Signal the file object and set the status */
-            KeSetEvent(&FileObject->Event, 0, FALSE);
+            /* Signal the file object unless the handle asked not to, and set the status */
+            if (!(FileObject->Flags & FO_SKIP_SET_EVENT))
+                KeSetEvent(&FileObject->Event, 0, FALSE);
             FileObject->FinalStatus = Irp->IoStatus.Status;
 
             /*

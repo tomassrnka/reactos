@@ -9,6 +9,7 @@ list(APPEND SOURCE
     getservbyname.c
     getservbyport.c
     helpers.c
+    iocpskip.c
     ioctlsocket.c
     listen.c
     nonblocking.c

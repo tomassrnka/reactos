@@ -475,6 +475,10 @@ PoInitSystem(IN ULONG BootPhase)
     /* Initialize support for shutdown waits and work-items */
     PopInitShutdownList();
 
+    /* Initialize power request objects */
+    if (!PopInitializePowerRequests())
+        return FALSE;
+
     return TRUE;
 }
 
@@ -1029,6 +1033,43 @@ NtPowerInformation(IN POWER_INFORMATION_LEVEL PowerInformationLevel,
 
             break;
         }
+
+        case SystemExecutionState:
+        {
+            EXECUTION_STATE State;
+
+            if (InputBuffer != NULL)
+                return STATUS_INVALID_PARAMETER;
+            if (OutputBufferLength < sizeof(EXECUTION_STATE))
+                return STATUS_BUFFER_TOO_SMALL;
+
+            /* Threads cannot ask for more than ES_USER_PRESENT here, so the power requests make up the state */
+            State = PopQueryPowerRequestState();
+
+            _SEH2_TRY
+            {
+                *(PEXECUTION_STATE)OutputBuffer = State;
+                Status = STATUS_SUCCESS;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            break;
+        }
+
+        case PowerRequestCreate:
+            /* The reason context is not kept: nothing lists the requests */
+            Status = PopCreatePowerRequest(OutputBuffer, OutputBufferLength, PreviousMode);
+            break;
+
+        case PowerRequestAction:
+            if (OutputBuffer != NULL || OutputBufferLength != 0)
+                return STATUS_INVALID_PARAMETER;
+            Status = PopPowerRequestAction(InputBuffer, InputBufferLength, PreviousMode);
+            break;
 
         default:
             Status = STATUS_NOT_IMPLEMENTED;

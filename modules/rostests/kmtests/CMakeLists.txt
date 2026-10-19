@@ -70,6 +70,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExSequencedList.c
     ntos_ex/ExSingleList.c
     ntos_ex/ExTimer.c
+    ntos_ex/ExTimerResolution.c
     ntos_ex/ExUuid.c
     ntos_fsrtl/FsRtlDissect.c
     ntos_fsrtl/FsRtlExpression.c
@@ -86,6 +87,8 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoInterrupt.c
     ntos_io/IoIrp.c
     ntos_io/IoMdl.c
+    ntos_io/IoNonFileName.c
+    ntos_io/IoPnpEventQueue.c
     ntos_io/IoVolume.c
     ntos_kd/KdSystemDebugControl.c
     ntos_ke/KeApc.c
@@ -120,6 +123,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ob/ObWait.c
     ntos_ps/PsNotify.c
     ntos_ps/PsQuota.c
+    ntos_se/SeAutoInherit.c
     ntos_se/SeHelpers.c
     ntos_se/SeInheritance.c
     ntos_se/SeLogonSession.c

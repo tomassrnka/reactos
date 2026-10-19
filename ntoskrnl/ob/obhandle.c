@@ -1235,6 +1235,8 @@ ObpIncrementUnnamedHandleCount(IN PVOID Object,
             /* FIXME: This should never happen for now */
             DPRINT1("Unhandled case\n");
             ASSERT(FALSE);
+            /* DB add failed; balance the handle count we took (lock still held) */
+            InterlockedDecrementSizeT(&ObjectHeader->HandleCount);
             goto Quickie;
         }
     }
@@ -1263,6 +1265,58 @@ ObpIncrementUnnamedHandleCount(IN PVOID Object,
             /* FIXME: This should never happen for now */
             DPRINT1("Unhandled case\n");
             ASSERT(FALSE);
+            /* Open failed after we took the count and dropped the lock; undo both
+               the handle count and, for tracked types, the database entry we added,
+               with no close callback since the object never finished opening */
+            ObpAcquireObjectLock(ObjectHeader);
+            InterlockedDecrementSizeT(&ObjectHeader->HandleCount);
+            if (ObjectType->TypeInfo.MaintainHandleCount)
+            {
+                POBJECT_HEADER_HANDLE_INFO HandleInfo;
+                POBJECT_HANDLE_COUNT_ENTRY HandleEntry = NULL;
+                POBJECT_HANDLE_COUNT_DATABASE HandleDatabase;
+                ULONG Entries;
+
+                HandleInfo = OBJECT_HEADER_TO_HANDLE_INFO(ObjectHeader);
+                if (ObjectHeader->Flags & OB_FLAG_SINGLE_PROCESS)
+                {
+                    ASSERT(HandleInfo->SingleEntry.Process == Process);
+                    ASSERT(HandleInfo->SingleEntry.HandleCount > 0);
+                    HandleInfo->SingleEntry.HandleCount--;
+                    HandleEntry = &HandleInfo->SingleEntry;
+                }
+                else
+                {
+                    HandleDatabase = HandleInfo->HandleCountDatabase;
+                    if (HandleDatabase)
+                    {
+                        Entries = HandleDatabase->CountEntries;
+                        HandleEntry = &HandleDatabase->HandleCountEntries[0];
+                        while (Entries)
+                        {
+                            if ((HandleEntry->HandleCount) &&
+                                (HandleEntry->Process == Process))
+                            {
+                                HandleEntry->HandleCount--;
+                                break;
+                            }
+
+                            HandleEntry++;
+                            Entries--;
+                        }
+
+                        /* Not found: nothing to clear */
+                        if (!Entries) HandleEntry = NULL;
+                    }
+                }
+
+                /* Clear a now-empty entry, as ObpDecrementHandleCount does */
+                if ((HandleEntry) && !(HandleEntry->HandleCount))
+                {
+                    HandleEntry->Process = NULL;
+                }
+            }
+            ObpReleaseObjectLock(ObjectHeader);
             goto Quickie;
         }
     }

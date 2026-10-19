@@ -432,7 +432,8 @@ SeQuerySecurityAccessMask(
     *DesiredAccess = 0;
 
     if (SecurityInformation & (OWNER_SECURITY_INFORMATION |
-                               GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION))
+                               GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                               LABEL_SECURITY_INFORMATION))
     {
         *DesiredAccess |= READ_CONTROL;
     }
@@ -464,7 +465,8 @@ SeSetSecurityAccessMask(
 {
     *DesiredAccess = 0;
 
-    if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
+    if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                               LABEL_SECURITY_INFORMATION))
     {
         *DesiredAccess |= WRITE_OWNER;
     }
